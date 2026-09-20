@@ -11,7 +11,7 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{ensure, Context, Result};
+use anyhow::{bail, ensure, Context, Result};
 use colm_core::{CalendarTime, StandardLctSoilOutput};
 use colm_hist::history::{HistoryBuffers, HistoryDimensions, HistorySite};
 use colm_hist::schedule::{
@@ -120,9 +120,116 @@ pub fn declare_lct_variables(buffer: &mut HistoryBuffers) -> Result<()> {
     buffer.declare(&names)
 }
 
+/// history 的写出目标。
+///
+/// 两个实现：[`HistoryBuffers`]（直接落到第 `record` 条记录）与
+/// [`HistoryAccumulator`]（每步累加）。**为什么要有第二个**：上游写出的每一条记录都是
+/// **区间平均**，不是写出时刻的瞬时值 —— `MOD_Hist.F90:227` 每步
+/// `accumulate_fluxes`，到写出的那一步在 `write_history_variable_2d` 里
+/// `acc_vec = acc_vec / nac`，写完再 `CALL FLUSH_acc_fluxes ()`（`:4746`）清零。
+pub trait HistorySink {
+    fn scalar(&mut self, name: &str, record: usize, value: f64) -> Result<()>;
+    fn layer(&mut self, name: &str, record: usize, values: &[f64]) -> Result<()>;
+}
+
+impl HistorySink for HistoryBuffers {
+    fn scalar(&mut self, name: &str, record: usize, value: f64) -> Result<()> {
+        self.set_patch_scalar(name, record, value)
+            .with_context(|| format!("cannot write {name} into the history buffers"))
+    }
+
+    fn layer(&mut self, name: &str, record: usize, values: &[f64]) -> Result<()> {
+        self.set_layered(name, record, values)
+            .with_context(|| format!("cannot write {name} into the history buffers"))
+    }
+}
+
+/// 一个输出区间里逐变量的和与步数（上游的 `a_*` 与 `nac`）。
+#[derive(Debug, Default)]
+struct HistoryAccumulator {
+    sums: std::collections::BTreeMap<String, Accumulated>,
+    steps: usize,
+}
+
+#[derive(Debug)]
+enum Accumulated {
+    Scalar(f64),
+    Column(Vec<f64>),
+}
+
+impl HistoryAccumulator {
+    /// 除以累加步数写进第 `record` 条。标量/列由**累加时**的形态决定，
+    /// 不在这里猜 —— 猜错会把一根土柱按标量写出去。
+    fn write_means(&self, buffer: &mut HistoryBuffers, record: usize) -> Result<()> {
+        ensure!(
+            self.steps > 0,
+            "the history accumulator reached a write step without accumulating anything"
+        );
+        let scale = 1.0 / self.steps as f64;
+        for (name, accumulated) in &self.sums {
+            match accumulated {
+                Accumulated::Scalar(sum) => {
+                    buffer
+                        .set_patch_scalar(name, record, sum * scale)
+                        .with_context(|| format!("cannot write {name} into the history buffers"))?;
+                }
+                Accumulated::Column(sum) => {
+                    let mean = sum.iter().map(|value| value * scale).collect::<Vec<_>>();
+                    buffer
+                        .set_layered(name, record, &mean)
+                        .with_context(|| format!("cannot write {name} into the history buffers"))?;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+impl HistorySink for HistoryAccumulator {
+    fn scalar(&mut self, name: &str, _record: usize, value: f64) -> Result<()> {
+        ensure!(
+            value.is_finite(),
+            "the history value for {name} is not finite"
+        );
+        match self
+            .sums
+            .entry(name.to_owned())
+            .or_insert(Accumulated::Scalar(0.0))
+        {
+            Accumulated::Scalar(sum) => *sum += value,
+            Accumulated::Column(_) => bail!("{name} was accumulated as a column, now as a scalar"),
+        }
+        Ok(())
+    }
+
+    fn layer(&mut self, name: &str, _record: usize, values: &[f64]) -> Result<()> {
+        ensure!(
+            values.iter().all(|value| value.is_finite()),
+            "the history value for {name} is not finite"
+        );
+        let entry = self
+            .sums
+            .entry(name.to_owned())
+            .or_insert_with(|| Accumulated::Column(vec![0.0; values.len()]));
+        match entry {
+            Accumulated::Column(sum) => {
+                ensure!(
+                    sum.len() == values.len(),
+                    "{name} changed width between steps"
+                );
+                for (sum, value) in sum.iter_mut().zip(values) {
+                    *sum += value;
+                }
+            }
+            Accumulated::Scalar(_) => bail!("{name} was accumulated as a scalar, now as a column"),
+        }
+        Ok(())
+    }
+}
+
 /// 把一步的地表诊断写进第 `record` 条记录。
 pub fn set_lct_surface_diagnostics(
-    buffer: &mut HistoryBuffers,
+    sink: &mut impl HistorySink,
     record: usize,
     leaf: &colm_core::LeafTemperatureOutput,
 ) -> Result<()> {
@@ -145,9 +252,7 @@ pub fn set_lct_surface_diagnostics(
             value.is_finite(),
             "the history value for {name} is not finite"
         );
-        buffer
-            .set_patch_scalar(name, record, value)
-            .with_context(|| format!("cannot write {name} into the history buffers"))?;
+        sink.scalar(name, record, value)?;
     }
     Ok(())
 }
@@ -156,7 +261,7 @@ pub fn set_lct_surface_diagnostics(
 ///
 /// 两支共用：积雪分支传整个输出，`leaf`/`shortwave`/总通量都在里面。
 pub fn set_lct_energy_fluxes(
-    buffer: &mut HistoryBuffers,
+    sink: &mut impl HistorySink,
     record: usize,
     output: &StandardLctSoilOutput,
 ) -> Result<()> {
@@ -176,9 +281,7 @@ pub fn set_lct_energy_fluxes(
             value.is_finite(),
             "the history value for {name} is not finite"
         );
-        buffer
-            .set_patch_scalar(name, record, value)
-            .with_context(|| format!("cannot write {name} into the history buffers"))?;
+        sink.scalar(name, record, value)?;
     }
     Ok(())
 }
@@ -206,7 +309,7 @@ pub fn set_lct_energy_fluxes(
 /// 平衡状态下 `tinc` 很小，所以它接近 1 而不是 0.96/0.97 —— 实测黄金 history 里
 /// 均值 1.0000 正是如此。
 pub fn set_lct_surface_budget(
-    buffer: &mut HistoryBuffers,
+    sink: &mut impl HistorySink,
     record: usize,
     output: &StandardLctSoilOutput,
     vaporization_heat_j_kg: f64,
@@ -281,9 +384,7 @@ pub fn set_lct_surface_budget(
             value.is_finite(),
             "the history value for {name} is not finite"
         );
-        buffer
-            .set_patch_scalar(name, record, value)
-            .with_context(|| format!("cannot write {name} into the history buffers"))?;
+        sink.scalar(name, record, value)?;
     }
     Ok(())
 }
@@ -292,7 +393,7 @@ pub fn set_lct_surface_budget(
 ///
 /// 两支共用：积雪分支把它 `WATER_2014` 输出里的 `soil` 那一半传进来。
 pub fn set_lct_fluxes(
-    buffer: &mut HistoryBuffers,
+    sink: &mut impl HistorySink,
     record: usize,
     water: &colm_core::Water2014SoilOutput,
 ) -> Result<()> {
@@ -308,23 +409,21 @@ pub fn set_lct_fluxes(
             value.is_finite(),
             "the history value for {name} is not finite"
         );
-        buffer
-            .set_patch_scalar(name, record, value)
-            .with_context(|| format!("cannot write {name} into the history buffers"))?;
+        sink.scalar(name, record, value)?;
     }
     Ok(())
 }
 
 /// 无雪分支：把一步的状态写进第 `record` 条记录。
 pub fn set_lct_state(
-    buffer: &mut HistoryBuffers,
+    sink: &mut impl HistorySink,
     record: usize,
     template: &StandardLctRestartTemplate,
     state: &StandardLctSoilState,
     ground_temperature_k: f64,
 ) -> Result<()> {
     set_columns(
-        buffer,
+        sink,
         record,
         template,
         // 无雪分支下雪段整段为零：history 的 `soilsnow` 恒有五个雪槽。
@@ -355,14 +454,14 @@ pub fn set_lct_state(
 
 /// 积雪分支：把一步的状态写进第 `record` 条记录。
 pub fn set_lct_snow_state(
-    buffer: &mut HistoryBuffers,
+    sink: &mut impl HistorySink,
     record: usize,
     template: &StandardLctRestartTemplate,
     state: &StandardLctSnowSoilState,
     ground_temperature_k: f64,
 ) -> Result<()> {
     set_columns(
-        buffer,
+        sink,
         record,
         template,
         &[
@@ -408,7 +507,7 @@ struct Scalars {
 
 /// 把雪段与土段拼成 history 的 `soilsnow` 顺序（雪在前），再逐变量写进去。
 fn set_columns(
-    buffer: &mut HistoryBuffers,
+    sink: &mut impl HistorySink,
     record: usize,
     template: &StandardLctRestartTemplate,
     snow: &[Vec<f64>; 3],
@@ -417,12 +516,9 @@ fn set_columns(
 ) -> Result<()> {
     let slots = template.snow_slots();
     let layers = template.soil_layers();
-    let width = buffer.dimensions().soilsnow();
-    ensure!(
-        slots + layers == width,
-        "the history file's soilsnow is {width}, the template has {slots} snow slots and \
-         {layers} soil layers"
-    );
+    // 形状校验交给两个 sink：`HistoryBuffers::set_layered` 会拿声明过的层数比，
+    // `HistoryAccumulator` 会拒绝同一步之间宽度变化。这里不重复取宽度 ——
+    // 累加器根本没有"缓冲区宽度"这个概念。
     let column = |index: usize| -> Result<Vec<f64>> {
         ensure!(
             snow[index].len() == slots && soil[index].len() == layers,
@@ -433,9 +529,7 @@ fn set_columns(
         Ok(values)
     };
     for (name, index) in [("t_soisno", 0usize), ("wliq_soisno", 1), ("wice_soisno", 2)] {
-        buffer
-            .set_layered(name, record, &column(index)?)
-            .with_context(|| format!("cannot write {name} into the history buffers"))?;
+        sink.layer(name, record, &column(index)?)?;
     }
     for (name, value) in [
         ("t_grnd", scalars.ground_temperature_k),
@@ -453,9 +547,7 @@ fn set_columns(
             value.is_finite(),
             "the history value for {name} is not finite"
         );
-        buffer
-            .set_patch_scalar(name, record, value)
-            .with_context(|| format!("cannot write {name} into the history buffers"))?;
+        sink.scalar(name, record, value)?;
     }
     Ok(())
 }
@@ -474,6 +566,8 @@ pub struct HistorySession {
     directory: PathBuf,
     stem: String,
     open: Option<(String, HistoryBuffers)>,
+    /// 当前输出区间的累加器（上游的 `a_*` 与 `nac`）。
+    accumulator: HistoryAccumulator,
 }
 
 impl HistorySession {
@@ -500,6 +594,7 @@ impl HistorySession {
             directory: directory.as_ref().to_path_buf(),
             stem: stem.into(),
             open: None,
+            accumulator: HistoryAccumulator::default(),
         })
     }
 
@@ -517,18 +612,18 @@ impl HistorySession {
         output: &StandardLctSoilOutput,
     ) -> Result<Option<PathBuf>> {
         let ground = output.energy.ground.temperature_k[0];
-        self.push(end, |buffer, record| {
-            set_lct_state(buffer, record, template, state, ground)?;
-            set_lct_fluxes(buffer, record, &output.water)?;
-            set_lct_energy_fluxes(buffer, record, output)?;
+        self.push(end, |accumulator| {
+            set_lct_state(accumulator, 0, template, state, ground)?;
+            set_lct_fluxes(accumulator, 0, &output.water)?;
+            set_lct_energy_fluxes(accumulator, 0, output)?;
             set_lct_surface_budget(
-                buffer,
-                record,
+                accumulator,
+                0,
                 output,
                 template.physics.vaporization_heat_j_kg,
                 template.soil_layers(),
             )?;
-            set_lct_surface_diagnostics(buffer, record, &output.energy.leaf)
+            set_lct_surface_diagnostics(accumulator, 0, &output.energy.leaf)
         })
     }
 
@@ -541,17 +636,17 @@ impl HistorySession {
         output: &colm_core::StandardLctSnowSoilOutput,
     ) -> Result<Option<PathBuf>> {
         let ground = output.energy.ground.temperature_k[0];
-        self.push(end, |buffer, record| {
-            set_lct_snow_state(buffer, record, template, state, ground)?;
-            set_lct_fluxes(buffer, record, &output.water.soil)?;
+        self.push(end, |accumulator| {
+            set_lct_snow_state(accumulator, 0, template, state, ground)?;
+            set_lct_fluxes(accumulator, 0, &output.water.soil)?;
             let as_soil = StandardLctSoilOutput {
                 energy: output.energy.clone(),
                 water: output.water.soil.clone(),
             };
-            set_lct_energy_fluxes(buffer, record, &as_soil)?;
+            set_lct_energy_fluxes(accumulator, 0, &as_soil)?;
             set_lct_surface_budget(
-                buffer,
-                record,
+                accumulator,
+                0,
                 &as_soil,
                 template.physics.vaporization_heat_j_kg,
                 template.soil_layers(),
@@ -560,7 +655,7 @@ impl HistorySession {
             // 却从来没有被填过，写出来的 `f_taux`/`f_tauy`/`f_z0m`/`f_zol` … 一直是
             // NetCDF 的填充值。实测 CN-Cng 的积雪分支 history 里这三个是 NaN，
             // 而 Fortran 有值 —— "声明了但没人写"不会报错，只会静默留下一列空洞。
-            set_lct_surface_diagnostics(buffer, record, &output.energy.leaf)
+            set_lct_surface_diagnostics(accumulator, 0, &output.energy.leaf)
         })
     }
 
@@ -574,11 +669,24 @@ impl HistorySession {
         Ok(written)
     }
 
+    /// 收下一步：**先累加**，到调度命中的那一步再写区间平均并清零。
+    ///
+    /// 顺序与上游一致：`MOD_Hist.F90:227` 每步 `accumulate_fluxes`（写出的那一步也算），
+    /// 写出时 `acc_vec = acc_vec / nac`，写完后 `CALL FLUSH_acc_fluxes ()`（`:4746`）。
     fn push(
         &mut self,
         end: CalendarTime,
-        fill: impl FnOnce(&mut HistoryBuffers, usize) -> Result<()>,
+        accumulate: impl FnOnce(&mut HistoryAccumulator) -> Result<()>,
     ) -> Result<Option<PathBuf>> {
+        // 1. 每步累加。失败也要把累加器放回去，否则下一次调用从零开始，
+        //    会静默丢掉这一段。
+        let mut accumulator = std::mem::take(&mut self.accumulator);
+        accumulator.steps += 1;
+        let filled = accumulate(&mut accumulator);
+        self.accumulator = accumulator;
+        filled?;
+
+        // 2. 没到期就到此为止。
         let Some(record) = self.records.get(self.cursor).cloned() else {
             // 记录写完之后的步不再产生输出 —— 这在"运行比窗口长"时是正常的收尾。
             return Ok(None);
@@ -593,7 +701,9 @@ impl HistorySession {
             );
             return Ok(None);
         }
-        // 换分组就先把上一个落了。
+
+        // 3. 到期：取平均、写记录、把累加器清零（`mem::take` 就是清零）。
+        let means = std::mem::take(&mut self.accumulator);
         let mut written = None;
         if self.open.as_ref().map(|(suffix, _)| suffix) != Some(&record.suffix) {
             written = self.finish()?.pop();
@@ -616,7 +726,7 @@ impl HistorySession {
                 )
             })?,
         )?;
-        fill(buffer, record.record)?;
+        means.write_means(buffer, record.record)?;
         self.cursor += 1;
         Ok(written)
     }

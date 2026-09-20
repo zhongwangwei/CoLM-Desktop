@@ -426,7 +426,8 @@ fn the_snow_branch_session_fills_the_surface_diagnostics() {
     )
     .unwrap();
     let mut written = Vec::new();
-    let mut last = None;
+    let mut steps = Vec::new();
+    let mut grounds = Vec::new();
     for half in 1..=2 {
         let end = colm_core::CalendarTime {
             year: 2008,
@@ -442,24 +443,68 @@ fn the_snow_branch_session_fills_the_surface_diagnostics() {
         {
             written.push(path);
         }
-        last = Some(output);
+        grounds.push(output.energy.ground.temperature_k[0]);
+        steps.push(output.energy.leaf);
     }
     written.extend(session.finish().unwrap());
     assert_eq!(written.len(), 1);
-    let last = last.unwrap();
 
     let file = netcdf::open(&written[0]).unwrap();
-    // 逐名对着**最后一步**的叶温输出比：没填的变量会读成 `MISSING` 一类的填充值，
-    // 只断言"有限"是抓不住的（填充值本身也是有限数）。
+    // 逐名对着两步的**算术平均**比。两个性质一起钉住：
+    //   * 没填的变量会读成 `MISSING` 一类的填充值（只断言"有限"抓不住，填充值也是有限数）；
+    //   * history 记的是区间平均而不是瞬时值（`MOD_Hist.F90:227` 每步累加，
+    //     `write_history_variable_2d` 里除以 `nac`）—— 拿最后一步的瞬时值比会差出来。
+    let mean = |values: [f64; 2]| 0.5 * (values[0] + values[1]);
+    // 判据与文档里那条闭合算式同源：两步末的 `t_grnd` 是 273.1600 与 271.6308，
+    // Fortran history 的 `f_t_grnd` 正是 272.3954。这里用夹具自己的两步复核同一条规则。
+    let ground = file
+        .variable("f_t_grnd")
+        .unwrap()
+        .get_values::<f64, _>(..)
+        .unwrap();
+    assert_eq!(ground, vec![mean([grounds[0], grounds[1]])]);
     for (name, expected) in [
-        ("taux", last.energy.leaf.eastward_stress_kg_m_s2),
-        ("tauy", last.energy.leaf.northward_stress_kg_m_s2),
-        ("tref", last.energy.leaf.air_temperature_2m_k),
-        ("qref", last.energy.leaf.air_specific_humidity_2m),
-        ("z0m", last.energy.leaf.momentum_roughness_m),
-        ("zol", last.energy.leaf.zol),
-        ("rib", last.energy.leaf.bulk_richardson),
-        ("ustar", last.energy.leaf.friction_velocity_m_s),
+        (
+            "taux",
+            mean([
+                steps[0].eastward_stress_kg_m_s2,
+                steps[1].eastward_stress_kg_m_s2,
+            ]),
+        ),
+        (
+            "tauy",
+            mean([
+                steps[0].northward_stress_kg_m_s2,
+                steps[1].northward_stress_kg_m_s2,
+            ]),
+        ),
+        (
+            "tref",
+            mean([steps[0].air_temperature_2m_k, steps[1].air_temperature_2m_k]),
+        ),
+        (
+            "qref",
+            mean([
+                steps[0].air_specific_humidity_2m,
+                steps[1].air_specific_humidity_2m,
+            ]),
+        ),
+        (
+            "z0m",
+            mean([steps[0].momentum_roughness_m, steps[1].momentum_roughness_m]),
+        ),
+        ("zol", mean([steps[0].zol, steps[1].zol])),
+        (
+            "rib",
+            mean([steps[0].bulk_richardson, steps[1].bulk_richardson]),
+        ),
+        (
+            "ustar",
+            mean([
+                steps[0].friction_velocity_m_s,
+                steps[1].friction_velocity_m_s,
+            ]),
+        ),
     ] {
         let values = file
             .variable(&format!("f_{name}"))
