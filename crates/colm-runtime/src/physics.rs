@@ -43,9 +43,21 @@ const ROOT_FRACTION_SCHEME: RootFractionScheme = RootFractionScheme::SchenkJacks
 /// `LULC_IGBP` / `LULC_USGS`。`MOD_Namelist.F90:163` 明说 `DEF_USE_USGS`/`DEF_USE_IGBP`
 /// 只是那个选择的只读镜像 —— 从 namelist 读它会在默认算例上拿到两个 `.false.`，
 /// 然后只能靠猜挑一个。
+/// `forc_hgt_u/t/q` 三个参考高度。它们有**三级**来源，所以不在本函数里解析。
+///
+/// 见 [`PointRuntimeConfig::wind_height_m`]：文件优先、其次 forcing namelist、
+/// 最后 schema 声明默认值。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ObservationHeights {
+    pub wind_m: f64,
+    pub temperature_m: f64,
+    pub humidity_m: f64,
+}
+
 pub fn land_physics_parameters(
     document: &Document,
     land_cover_scheme: LandCoverScheme,
+    heights: ObservationHeights,
 ) -> Result<LandPhysicsParameters> {
     let timestep_seconds = real(document, "DEF_simulation_time%timestep")?;
     if timestep_seconds <= 0.0 {
@@ -114,9 +126,14 @@ pub fn land_physics_parameters(
         crank_nicolson_factor: real(document, "DEF_TUNING_CNFAC")?,
         soil_roughness_m: real(document, "DEF_TUNING_ZLND")?,
         snow_roughness_m: real(document, "DEF_TUNING_ZSNO")?,
-        wind_height_m: real(document, "DEF_forcing%HEIGHT_V")?,
-        temperature_height_m: real(document, "DEF_forcing%HEIGHT_T")?,
-        humidity_height_m: real(document, "DEF_forcing%HEIGHT_Q")?,
+        // 观测高度**不在这里解析**：它挂在 `nl_forcing_type` 上（在 forcing namelist 里），
+        // 而且 POINT 下文件里的 `reference_height_*` 会覆盖它
+        // （`MOD_Forcing.F90:297-311`）。三级优先级由 `PointRuntimeConfig` 负责，
+        // 调用方把结果经 [`ObservationHeights`] 传进来 —— 在这里读 case 文档只会拿到
+        // schema 的 100/50/50，实测那会让 `zol` 差几十倍。
+        wind_height_m: heights.wind_m,
+        temperature_height_m: heights.temperature_m,
+        humidity_height_m: heights.humidity_m,
         vaporization_heat_j_kg: VAPORIZATION_HEAT_J_KG,
         sprinkler_irrigation_kg_m2_s: 0.0,
         runoff_scheme,

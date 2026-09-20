@@ -44,7 +44,10 @@ pub use high_res::{
     HighResolutionWaterOptics,
 };
 pub use met::summarize;
-pub use point::{load_point_forcing, PointForcingFrame, PointForcingSeries};
+pub use point::{
+    load_point_forcing, observation_heights, ObservationHeights, PointForcingFrame,
+    PointForcingSeries,
+};
 pub use render::{render, ForcingSpec};
 pub use slots::{resolve, resolve_with, Resolved, SLOTS};
 pub use snicar::{read_snicar_aging, read_snicar_optics};

@@ -4,6 +4,14 @@ use std::path::PathBuf;
 use colm_namelist::parse;
 
 /// 一个只有 namelist 组头的算例：每一项都落在 schema 的声明默认值上。
+/// 测试用的观测高度。真实算例里这三个数有三级来源（见 `PointRuntimeConfig`），
+/// 但映射本身只把它们照抄进参数表，所以测试用一个固定值即可。
+const HEIGHTS: ObservationHeights = ObservationHeights {
+    wind_m: 6.0,
+    temperature_m: 6.0,
+    humidity_m: 6.0,
+};
+
 fn empty_case() -> Document {
     parse("&nl_colm\n/\n").expect("an empty nl_colm group parses")
 }
@@ -29,7 +37,7 @@ fn golden_case(name: &str) -> Document {
 /// 而那时候只有这条会响。
 #[test]
 fn an_empty_case_maps_every_declared_default() {
-    let physics = land_physics_parameters(&empty_case(), LandCoverScheme::Igbp).unwrap();
+    let physics = land_physics_parameters(&empty_case(), LandCoverScheme::Igbp, HEIGHTS).unwrap();
     assert_eq!(physics.hydraulic_model, HydraulicModel::VanGenuchten);
     assert_eq!(physics.land_cover_scheme, LandCoverScheme::Igbp);
     assert_eq!(physics.timestep_seconds, 1800.0);
@@ -52,9 +60,12 @@ fn an_empty_case_maps_every_declared_default() {
     // 默认 3 是 Simple VIC（不是 XinAnJiang）。
     assert_eq!(physics.runoff_scheme, StandardLctRunoffScheme::SimpleVic);
     assert_eq!(physics.topmodel_decay_tuning, 2.0);
-    assert_eq!(physics.wind_height_m, 100.0);
-    assert_eq!(physics.temperature_height_m, 50.0);
-    assert_eq!(physics.humidity_height_m, 50.0);
+    // 观测高度来自传进来的 `ObservationHeights`（真实算例里由三级优先级解出），
+    // 不是本函数从 case 文档里读的 —— case 文档里根本没有 `DEF_forcing%HEIGHT_*`，
+    // 照读只会拿到 schema 的 100/50/50，实测那会让 `zol` 差几十倍。
+    assert_eq!(physics.wind_height_m, HEIGHTS.wind_m);
+    assert_eq!(physics.temperature_height_m, HEIGHTS.temperature_m);
+    assert_eq!(physics.humidity_height_m, HEIGHTS.humidity_m);
     assert_eq!(physics.soil_roughness_m, 0.01);
     assert_eq!(physics.snow_roughness_m, 0.0024);
     assert_eq!(physics.maximum_dew_mm, 0.1);
@@ -83,7 +94,7 @@ fn an_empty_case_maps_every_declared_default() {
 #[test]
 fn the_effective_vsf_switch_follows_the_soil_model() {
     // 默认：van Genuchten + 声明默认 true。
-    let physics = land_physics_parameters(&empty_case(), LandCoverScheme::Igbp).unwrap();
+    let physics = land_physics_parameters(&empty_case(), LandCoverScheme::Igbp, HEIGHTS).unwrap();
     assert_eq!(physics.hydraulic_model, HydraulicModel::VanGenuchten);
     assert!(physics.variably_saturated_flow);
 
@@ -91,6 +102,7 @@ fn the_effective_vsf_switch_follows_the_soil_model() {
     let physics = land_physics_parameters(
         &case_with("DEF_USE_Campbell_SOIL_MODEL = .true."),
         LandCoverScheme::Igbp,
+        HEIGHTS,
     )
     .unwrap();
     assert!(physics.variably_saturated_flow);
@@ -99,6 +111,7 @@ fn the_effective_vsf_switch_follows_the_soil_model() {
     let physics = land_physics_parameters(
         &case_with("DEF_USE_Campbell_SOIL_MODEL = .true.\nDEF_USE_VariablySaturatedFlow = .false."),
         LandCoverScheme::Igbp,
+        HEIGHTS,
     )
     .unwrap();
     assert_eq!(physics.hydraulic_model, HydraulicModel::Campbell);
@@ -108,6 +121,7 @@ fn the_effective_vsf_switch_follows_the_soil_model() {
     let physics = land_physics_parameters(
         &case_with("DEF_USE_VariablySaturatedFlow = .false."),
         LandCoverScheme::Igbp,
+        HEIGHTS,
     )
     .unwrap();
     assert!(physics.variably_saturated_flow);
@@ -125,6 +139,7 @@ fn runoff_scheme_numbers_follow_the_upstream_dispatch() {
         let physics = land_physics_parameters(
             &case_with(&format!("DEF_Runoff_SCHEME = {number}")),
             LandCoverScheme::Igbp,
+            HEIGHTS,
         )
         .unwrap();
         assert_eq!(
@@ -138,8 +153,12 @@ fn runoff_scheme_numbers_follow_the_upstream_dispatch() {
 /// 所以这里必须报错 —— 挑一个相邻方案会让算例跑完却给出别的产流。
 #[test]
 fn the_unported_vic_runoff_scheme_is_refused() {
-    let error = land_physics_parameters(&case_with("DEF_Runoff_SCHEME = 1"), LandCoverScheme::Igbp)
-        .expect_err("the VIC runoff scheme is not ported");
+    let error = land_physics_parameters(
+        &case_with("DEF_Runoff_SCHEME = 1"),
+        LandCoverScheme::Igbp,
+        HEIGHTS,
+    )
+    .expect_err("the VIC runoff scheme is not ported");
     let message = error.to_string();
     assert!(message.contains("VIC"), "{message}");
     assert!(message.contains("not ported"), "{message}");
@@ -150,6 +169,7 @@ fn irrigation_is_refused_rather_than_run_dry() {
     let error = land_physics_parameters(
         &case_with("DEF_USE_IRRIGATION = .true."),
         LandCoverScheme::Igbp,
+        HEIGHTS,
     )
     .expect_err("the sprinkler schedule is not ported");
     assert!(error.to_string().contains("DEF_USE_IRRIGATION"));
@@ -159,7 +179,8 @@ fn irrigation_is_refused_rather_than_run_dry() {
 /// 这条把映射接到**仓库里那份真实算例**上，而不是只有构造出来的输入。
 #[test]
 fn the_checked_in_golden_case_selects_simple_vic() {
-    let physics = land_physics_parameters(&golden_case("CN-Cng"), LandCoverScheme::Igbp).unwrap();
+    let physics =
+        land_physics_parameters(&golden_case("CN-Cng"), LandCoverScheme::Igbp, HEIGHTS).unwrap();
     assert_eq!(physics.runoff_scheme, StandardLctRunoffScheme::SimpleVic);
     assert_eq!(physics.land_cover_scheme, LandCoverScheme::Igbp);
     assert_eq!(physics.timestep_seconds, 1800.0);
@@ -182,6 +203,7 @@ fn canopy_settings_can_be_overridden_from_the_case() {
              DEF_TUNING_CAPR = 0.4",
         ),
         LandCoverScheme::Usgs,
+        HEIGHTS,
     )
     .unwrap();
     assert_eq!(physics.hydraulic_model, HydraulicModel::Campbell);
@@ -205,6 +227,7 @@ fn both_stomata_switches_on_fall_back_to_ball_berry() {
     let physics = land_physics_parameters(
         &case_with("DEF_USE_MEDLYNST = .true.\nDEF_USE_WUEST = .true."),
         LandCoverScheme::Igbp,
+        HEIGHTS,
     )
     .expect("upstream resolves this conflict instead of failing");
     assert!(!physics.stomata.use_medlyn);
@@ -218,6 +241,7 @@ fn a_misspelled_height_mode_is_refused() {
     let error = land_physics_parameters(
         &case_with("DEF_forcing%HEIGHT_mode = 'absolut'"),
         LandCoverScheme::Igbp,
+        HEIGHTS,
     )
     .expect_err("a misspelled mode must not fall through");
     assert!(error.to_string().contains("absolut"));
@@ -226,18 +250,22 @@ fn a_misspelled_height_mode_is_refused() {
 #[test]
 fn unknown_and_out_of_range_fields_are_refused() {
     // 拼错的字段名没有声明默认值可退，必须报错而不是猜。
-    assert!(
-        land_physics_parameters(&case_with("DEF_Runoff_SCHEME = 9"), LandCoverScheme::Igbp)
-            .is_err()
-    );
+    assert!(land_physics_parameters(
+        &case_with("DEF_Runoff_SCHEME = 9"),
+        LandCoverScheme::Igbp,
+        HEIGHTS
+    )
+    .is_err());
     assert!(land_physics_parameters(
         &case_with("DEF_THERMAL_CONDUCTIVITY_SCHEME = 9"),
-        LandCoverScheme::Igbp
+        LandCoverScheme::Igbp,
+        HEIGHTS
     )
     .is_err());
     assert!(land_physics_parameters(
         &case_with("DEF_precip_phase_discrimination_scheme = 'IV'"),
-        LandCoverScheme::Igbp
+        LandCoverScheme::Igbp,
+        HEIGHTS
     )
     .is_err());
 }

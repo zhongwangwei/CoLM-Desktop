@@ -44,6 +44,16 @@ pub struct PointRuntimeConfig {
     pub longitude_degrees: f64,
     pub latitude_degrees: f64,
     pub forcing_file: PathBuf,
+    /// `forc_hgt_u/t/q`：风、温、湿的参考高度。
+    ///
+    /// 优先级与上游一致（`MOD_Forcing.F90:297-311`）：**强迫文件里的
+    /// `reference_height_v/t/q` 优先**，文件里没有才用 `DEF_forcing%HEIGHT_*`
+    /// （`nl_forcing_type`，在 **forcing** namelist 里，不是 case namelist）。
+    /// 实测 CN-Cng 的文件写着 6/6/6，而 schema 默认是 100/50/50 ——
+    /// 用错一套会让 `zol` 差几十倍。
+    pub wind_height_m: f64,
+    pub temperature_height_m: f64,
+    pub humidity_height_m: f64,
 }
 
 /// One fully prepared POINT forcing record for a `CoLM.F90` loop pass.
@@ -557,6 +567,10 @@ pub fn read_point_runtime_config(case_namelist: impl AsRef<Path>) -> Result<Poin
     );
     let forcing_directory = required_string(&forcing, "DEF_dir_forcing")?;
     let forcing_name = required_string(&forcing, "DEF_forcing%fprefix(1)")?;
+    // `MOD_UserSpecifiedForcing` concatenates these strings directly.
+    let forcing_file = PathBuf::from(format!("{forcing_directory}{forcing_name}"));
+    let (wind_height_m, temperature_height_m, humidity_height_m) =
+        observation_heights(&forcing, &forcing_file)?;
     let start = simulation_date(&case, "start")?;
     // `spinup_year = 0` 在上游就是"不预热"的写法：`CoLM.F90:315` 判的是
     // `is_spinup = ststamp < ptstamp`，年份 0 永远早于真实起报时刻。
@@ -592,9 +606,55 @@ pub fn read_point_runtime_config(case_namelist: impl AsRef<Path>) -> Result<Poin
         greenwich: required_bool(&case, "DEF_simulation_time%greenwich")?,
         longitude_degrees: required_real(&case, "SITE_lon_location")?,
         latitude_degrees: required_real(&case, "SITE_lat_location")?,
-        // `MOD_UserSpecifiedForcing` concatenates these strings directly.
-        forcing_file: PathBuf::from(format!("{forcing_directory}{forcing_name}")),
+        forcing_file,
+        wind_height_m,
+        temperature_height_m,
+        humidity_height_m,
     })
+}
+
+/// 观测高度：文件里的优先，其次 forcing namelist，最后 schema 声明默认值。
+///
+/// 三步都与上游一致，见 [`PointRuntimeConfig::wind_height_m`] 的说明。
+fn observation_heights(forcing: &Document, forcing_file: &Path) -> Result<(f64, f64, f64)> {
+    let namelist = |field: &str| -> Result<f64> {
+        match forcing.get(field) {
+            Some(Value::Real { text }) => text
+                .replace(['d', 'D'], "e")
+                .trim_end_matches("_r8")
+                .parse()
+                .with_context(|| format!("{field} is not a readable real")),
+            Some(Value::Int(value)) => Ok(*value as f64),
+            Some(other) => bail!("{field} must be a real, got {other:?}"),
+            None => match colm_schema::find(field).map(|field| &field.default) {
+                Some(colm_schema::Default::Real(text)) => text
+                    .replace(['d', 'D'], "e")
+                    .trim_end_matches("_r8")
+                    .parse()
+                    .with_context(|| format!("the declared default for {field} is unreadable")),
+                _ => bail!("{field} is missing and has no declared real default"),
+            },
+        }
+    };
+    // 文件**不存在**时回落到 namelist：上游总是有那个文件，但本仓库的配置解析在
+    // 真实算例之外（测试、界面预览）也要能用。文件存在却读不出来仍然是错误 ——
+    // 那说明路径或格式有问题，静默回落会变成"用了另一套观测高度"。
+    let file = if forcing_file.is_file() {
+        colm_forcing::observation_heights(forcing_file).with_context(|| {
+            format!(
+                "cannot read the observation heights from {}",
+                forcing_file.display()
+            )
+        })?
+    } else {
+        colm_forcing::ObservationHeights::default()
+    };
+    Ok((
+        file.wind_m.unwrap_or(namelist("DEF_forcing%HEIGHT_V")?),
+        file.temperature_m
+            .unwrap_or(namelist("DEF_forcing%HEIGHT_T")?),
+        file.humidity_m.unwrap_or(namelist("DEF_forcing%HEIGHT_Q")?),
+    ))
 }
 
 fn restart_frequency(document: &Document) -> Result<RestartFrequency> {

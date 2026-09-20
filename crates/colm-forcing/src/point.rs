@@ -447,6 +447,64 @@ fn values(file: &netcdf::File, path: &Path, name: &str, steps: usize) -> Result<
     Ok(output)
 }
 
+/// POINT 强迫场里的三个观测高度（`forc_hgt_u/t/q` 的来源）。
+///
+/// 上游在 POINT 下**用文件里的标量覆盖 namelist**（`MOD_Forcing.F90:297-311`）：
+///
+/// ```fortran
+/// IF (trim(DEF_forcing%dataset) == 'POINT') THEN
+///    IF (ncio_var_exist(filename,'reference_height_v')) CALL ncio_read_serial(filename, 'reference_height_v', Height_V)
+///    ...
+/// ```
+///
+/// 所以"文件里有没有"决定用哪一套，而 `DEF_forcing%HEIGHT_*` 只是兜底。
+/// 实测 CN-Cng 的强迫文件写着 6/6/6，而 schema 声明的默认值是 100/50/50 ——
+/// 差 16.7 倍的参考高度会让 `zol` 差出几十倍（见 `docs/implementation-verification.md`）。
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct ObservationHeights {
+    pub wind_m: Option<f64>,
+    pub temperature_m: Option<f64>,
+    pub humidity_m: Option<f64>,
+}
+
+/// 只读强迫文件里的三个观测高度；缺哪个就是 `None`。
+///
+/// 单独开一次文件是有意的：调用方（算例配置）要在**打开整条序列之前**就知道这三个数，
+/// 而 `load_point_forcing` 会把整条序列读进内存。
+pub fn observation_heights(path: impl AsRef<Path>) -> Result<ObservationHeights> {
+    let path = path.as_ref();
+    let file = netcdf::open(path).with_context(|| format!("cannot open {}", path.display()))?;
+    let scalar = |name: &str| -> Result<Option<f64>> {
+        let Some(variable) = file.variable(name) else {
+            return Ok(None);
+        };
+        let dims = variable.dimensions();
+        ensure!(
+            dims.iter().all(|dimension| dimension.len() == 1),
+            "{name} in {} is not a scalar, it is {dims:?}",
+            path.display()
+        );
+        let values: Vec<f64> = variable
+            .get_values(netcdf::Extents::All)
+            .with_context(|| format!("cannot read {name} from {}", path.display()))?;
+        let value = values
+            .into_iter()
+            .next()
+            .with_context(|| format!("{name} in {} is empty", path.display()))?;
+        ensure!(
+            value.is_finite() && value > 0.0,
+            "{name} in {} must be a positive finite height, got {value}",
+            path.display()
+        );
+        Ok(Some(value))
+    };
+    Ok(ObservationHeights {
+        wind_m: scalar("reference_height_v")?,
+        temperature_m: scalar("reference_height_t")?,
+        humidity_m: scalar("reference_height_q")?,
+    })
+}
+
 fn units(file: &netcdf::File, name: &str) -> Result<String> {
     let variable = file
         .variable(name)

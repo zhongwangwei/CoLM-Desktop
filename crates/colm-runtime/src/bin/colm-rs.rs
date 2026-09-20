@@ -68,7 +68,17 @@ fn run() -> Result<()> {
 
     let config = read_point_runtime_config(&case_nml)?;
     let document = read_document(&case_nml)?;
-    let physics = land_physics_parameters(&document, arguments.land_cover)?;
+    let physics = land_physics_parameters(
+        &document,
+        arguments.land_cover,
+        // 三级优先级已在 `read_point_runtime_config` 里解出来（文件 > forcing namelist
+        // > schema 默认）。实测 CN-Cng 是 6/6/6，而 schema 默认是 100/50/50。
+        colm_runtime::physics::ObservationHeights {
+            wind_m: config.wind_height_m,
+            temperature_m: config.temperature_height_m,
+            humidity_m: config.humidity_height_m,
+        },
+    )?;
     // 本仓库没有实现的分支：**一次列全**，并且默认拒绝。
     //
     // 每一项在上游都是默认打开的，所以"只写了几行"的算例几乎必然会撞上其中一条。

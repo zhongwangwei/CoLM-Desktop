@@ -2559,3 +2559,81 @@ DEF_USE_VariablySaturatedFlow = .false.
 DEF_USE_PLANTHYDRAULICS       = .false.
 DEF_VEG_SNOW                  = .false.
 ```
+
+## 找到并修掉了一层**差了 16.7 倍**的参考高度 —— 地表层整条链随之对齐（2026 年，实测）
+
+上一节的最早信号是"一步之后 `rib` 差 20 倍、`zol` 差 38 倍、`ustar` 差 0.69 倍，而
+`t_grnd`/`z0m`/`wa`/`zwt` 完全相同"。既然输入相同、公式相同，差别只能在**某个输入**里。
+顺着 `zol = z_ref·κ·g·t*/(u*²·θ)` 看：它对 `z_ref` 是**线性**的。
+
+`z_ref` 来自 `physics.wind_height_m`，而 `physics.rs` 是从 **case** 文档读
+`DEF_forcing%HEIGHT_V` 的 —— 可这三个字段挂在 `nl_forcing_type` 上，住在
+**forcing namelist** 里。case 文档没有它们，于是落到 schema 声明默认值：
+
+| | 风 | 温 | 湿 |
+|---|---|---|---|
+| schema 默认（Rust 实际用的） | **100.0** | **50.0** | **50.0** |
+| forcing.nml 写的 | 6.0 | 6.0 | 6.0 |
+| **强迫文件里的 `reference_height_*`** | **6.0** | **6.0** | **6.0** |
+
+而且上游在 POINT 下**用文件里的值覆盖 namelist**（`MOD_Forcing.F90:297-311`）：
+
+```fortran
+IF (trim(DEF_forcing%dataset) == 'POINT') THEN
+   filename = trim(dir_forcing)//trim(fprefix(1))
+   IF (ncio_var_exist(filename,'reference_height_v')) CALL ncio_read_serial (filename, 'reference_height_v', Height_V)
+   IF (ncio_var_exist(filename,'reference_height_t')) CALL ncio_read_serial (filename, 'reference_height_t', Height_T)
+   IF (ncio_var_exist(filename,'reference_height_q')) CALL ncio_read_serial (filename, 'reference_height_q', Height_Q)
+```
+
+**16.7 倍的风高度**，`zol` 就应该差十几倍 —— 实测 38 倍，量级完全吻合（残下的因子来自
+`t*`/`u*` 本身也被这个错带着偏了）。
+
+### 修法：三级优先级收到一处
+
+`colm-forcing` 新增 `observation_heights(path)`（只读那三个标量，不加载整条序列），
+`PointRuntimeConfig` 新增 `wind_height_m`/`temperature_height_m`/`humidity_height_m`
+并由 `read_point_runtime_config` 按上游的优先级解出来：**文件 > forcing namelist >
+schema 默认**。文件*不存在*时回落到 namelist（本仓库的配置解析在真实算例之外也要能用），
+文件存在却读不出来仍然报错 —— 那说明路径或格式有问题，静默回落等于换了另一套观测高度。
+
+`physics::land_physics_parameters` 因此**不再自己读**这三个数，改成收一个
+`ObservationHeights`。在 case 文档里读它们本来就是错的。
+
+### 一步之后：全部分支对齐（VEG_SNOW 两边都关）的对照
+
+| 量 | Fortran | Rust | 相对差 |
+|---|---|---|---|
+| `zol` | −0.277312 | −0.277166 | **5.3e-4** |
+| `rib` | −0.072224 | −0.072187 | **5.2e-4** |
+| `ustar` | 0.685832 | 0.685726 | **1.6e-4** |
+| `fm` | 3.343616 | 3.343784 | 5.0e-5 |
+| `fh` / `fq` | 2.911694 | 2.911968 | 9.4e-5 |
+| `tref` | 258.836923 | 258.777110 | 2.3e-4 |
+| `qref` | 0.001208 | 0.001206 | 1.3e-3 |
+| `tstar` | −1.398413 | −1.397395 | 7.3e-4 |
+| `tleaf` | 265.884965 | 265.712367 | 6.5e-4 |
+| `t_grnd` | 273.160000 | 273.160004 | **1.3e-8** |
+| `wa` | 4806.007773 | 4806.007773 | **1.6e-11** |
+| `zwt` | 4.399434 | 4.399434 | **9.6e-11** |
+| `wliq_soisno` / `wice_soisno` | — | — | max\|Δ\| **0.025 / 0.024** |
+
+**修之前** `zol` 是 −10.539、`rib` 是 −1.409、`ustar` 是 0.475。地表层整条链（`zol`/`rib`/
+`ustar`/`fm`/`fh`/`fq`/`tref`/`qref`/`tstar`/`tleaf`）从"差几十倍"变成**1e-3 以内**，
+`wa`/`zwt`/`t_grnd` 到 1e-8 以下。相变分配也随之修好：`wice[0]` 从 1.84（Fortran 3.08）
+变成 3.10。
+
+### 全窗口暴露出的下一个**结构性**缺口：土柱不会造雪
+
+修好之后重跑全对齐的 528 步，Fortran 在窗口里**真的积起了雪**：
+
+```
+scv = 0.047188   snowdp = 0.000455   fsno = 0.017568   sag = 0.001243
+```
+
+而 Rust 全是 0 —— 因为 `standard_lct_soil_step` 是**无雪**分支，它不会造雪，也没有
+"中途出现积雪就切到积雪分支"的开关。这一步之后 `t_grnd` 仍差 +2.45 K（255.58 / 258.03），
+其中一部分可以归给缺掉的雪（雪既反照又隔热）。
+
+**下一轮的目标因此是结构性的**：让 `standard_lct_soil_step` 在 `scv > 0` 时切到积雪分支，
+或者把两支合成一个每步判定的入口（上游 `CoLMMAIN` 就是这么做的）。
