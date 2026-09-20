@@ -94,6 +94,19 @@ pub const LCT_SURFACE_VARIABLES: [&str; 13] = [
 /// 它不是默认产出量。
 pub const LCT_FLUX_VARIABLES: [&str; 6] = ["qinfl", "rnof", "rsub", "rsur", "qcharge", "frcsat"];
 
+/// 本层能填的**宽带反照率**，一项。
+///
+/// `alb` 是黄金文件里**唯一的四维**变量，维度 `(time, patch, rtyp, band)`。
+/// 盘上每个 patch 的四项按 `rtyp*2 + band` 排（`rtyp` 0=direct/1=diffuse，
+/// `band` 0=visible/1=NIR），即 `[dir_vis, dir_nir, dif_vis, dif_nir]`；
+/// 内核的 `ColdStartRadiation::albedo` 是 `[band][rtyp]`，所以取
+/// `albedo[0][0], albedo[1][0], albedo[0][1], albedo[1][1]`。
+///
+/// 值不用另算：`prepare_surface_optics` 每步都把 `albedo` 写进
+/// `state.energy.radiation`（`assembly.rs:1359` 那次 `&mut state.energy.radiation`），
+/// 续跑写回用的也是同一份。
+pub const LCT_ALBEDO_VARIABLES: [&str; 1] = ["alb"];
+
 /// 本层能填的**派生土壤**量，一项。
 ///
 /// `h2osoi` 是体积含水率，上游 `CoLMMAIN.F90:2253`：
@@ -237,6 +250,7 @@ pub fn declare_lct_variables(buffer: &mut HistoryBuffers) -> Result<()> {
     names.extend_from_slice(&LCT_RADIATION_VARIABLES);
     names.extend_from_slice(&LCT_CANOPY_VARIABLES);
     names.extend_from_slice(&LCT_DERIVED_SOIL_VARIABLES);
+    names.extend_from_slice(&LCT_ALBEDO_VARIABLES);
     names.extend_from_slice(&DECLARED_ONLY);
     buffer.declare(&names)
 }
@@ -406,6 +420,11 @@ pub struct HistoryReferenceState {
     pub downward_shortwave_w_m2: f64,
     /// `forc_frl`：`f_xy_frl` 照抄它。
     pub downward_longwave_w_m2: f64,
+    /// 步末的太阳天顶角余弦（`CoLMMAIN` 那一份），即上游的 `coszen`。
+    ///
+    /// `MOD_Vars_1DAccFluxes` 的 `filter_dt(:) = coszen(:) > 0` 用的是它，
+    /// 而 `f_alb` 是**只累加白天步**的（见 [`set_lct_albedo`]）。
+    pub surface_cosine_zenith: f64,
     /// `forc_prc`：对流降水。
     pub convective_precipitation_kg_m2_s: f64,
     /// `forc_prl`：层状降水。
@@ -414,7 +433,7 @@ pub struct HistoryReferenceState {
 
 impl HistoryReferenceState {
     /// 取本步的 `forc_*`。
-    pub fn from_forcing(forcing: &colm_core::RuntimeForcing) -> Self {
+    pub fn from_forcing(forcing: &colm_core::RuntimeForcing, surface_cosine_zenith: f64) -> Self {
         Self {
             wind_speed_eastward_m_s: forcing.eastward_wind_m_s,
             wind_speed_northward_m_s: forcing.northward_wind_m_s,
@@ -429,6 +448,7 @@ impl HistoryReferenceState {
             downward_longwave_w_m2: forcing.downward_longwave_w_m2,
             convective_precipitation_kg_m2_s: forcing.convective_precipitation_kg_m2_s,
             large_scale_precipitation_kg_m2_s: forcing.large_scale_precipitation_kg_m2_s,
+            surface_cosine_zenith,
         }
     }
 }
@@ -674,6 +694,40 @@ pub fn set_lct_stomatal_diagnostics(
         sink.scalar(name, record, value)?;
     }
     sink.layer("rootr", record, &energy.root_uptake.layer_fraction)?;
+    Ok(())
+}
+
+/// 把一步的宽带反照率写进第 `record` 条记录。
+///
+/// 排列顺序见 [`LCT_ALBEDO_VARIABLES`]：**盘上是 `rtyp` 快于 `band`**，
+/// 与内核的 `[band][rtyp]` 相反，所以这里是一次显式的换序而不是直接展开。
+/// **只累加白天步。** 上游那一处与其它变量不同：
+/// `CALL acc3d (alb, a_alb, filter_dt)`（`MOD_Vars_1DAccFluxes.F90:2152`），
+/// 而 `filter_dt = coszen > 0`、除数又是 `nac_dt`（白天步数，`:2044`），
+/// 写出时还用 `filter_dt`/`nac_dt` 而不是 `filter`/`nac`（`MOD_Hist.F90:769-772`）。
+/// 三者合起来的效果是：**夜间步既不入和也不入计数，整条记录都是夜间的就留填充值**
+/// —— 正是本层累加器对 `MISSING` 的处理，所以这里把夜间步写成 `MISSING` 就够了，
+/// 不需要再加一条"白天过滤器"的通路。
+///
+/// 反例（不分昼夜地平均）会安静地偏高：夜间 `alb = 1`（`MOD_Albedo.F90:217`
+/// 先把 `alb` 置 1，`:295` 在天黑时直接 `RETURN`），把它平均进去实测偏高
+/// 0.025，而且夜间记录会写出一个上游没有的数。
+pub fn set_lct_albedo(
+    sink: &mut impl HistorySink,
+    record: usize,
+    state: &colm_core::StandardLctEnergyState,
+    surface_cosine_zenith: f64,
+) -> Result<()> {
+    if surface_cosine_zenith <= 0.0 {
+        return sink.layer("alb", record, &[colm_core::MISSING; 4]);
+    }
+    let albedo = &state.radiation.albedo;
+    let values = [albedo[0][0], albedo[1][0], albedo[0][1], albedo[1][1]];
+    ensure!(
+        values.iter().all(|value| value.is_finite()),
+        "the history value for alb is not finite"
+    );
+    sink.layer("alb", record, &values)?;
     Ok(())
 }
 
@@ -1060,6 +1114,12 @@ impl HistorySession {
                 template.soil_layer_thickness_m(),
                 &state.water,
             )?;
+            set_lct_albedo(
+                accumulator,
+                0,
+                &state.energy,
+                reference.surface_cosine_zenith,
+            )?;
             set_lct_forcing_mirrors(accumulator, 0, reference)
         })
     }
@@ -1108,6 +1168,12 @@ impl HistorySession {
                 0,
                 template.soil_layer_thickness_m(),
                 &state.soil_water,
+            )?;
+            set_lct_albedo(
+                accumulator,
+                0,
+                &state.energy,
+                reference.surface_cosine_zenith,
             )?;
             set_lct_forcing_mirrors(accumulator, 0, reference)
         })

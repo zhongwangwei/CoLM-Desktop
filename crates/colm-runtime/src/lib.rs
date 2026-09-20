@@ -345,7 +345,10 @@ impl PointRuntime {
                 template,
                 next,
                 &output,
-                crate::history::HistoryReferenceState::from_forcing(&step.forcing),
+                crate::history::HistoryReferenceState::from_forcing(
+                    &step.forcing,
+                    step.surface_cosine_zenith,
+                ),
             )? {
                 files.push(path);
             }
@@ -396,7 +399,10 @@ impl PointRuntime {
                 template,
                 next,
                 &output,
-                crate::history::HistoryReferenceState::from_forcing(&step.forcing),
+                crate::history::HistoryReferenceState::from_forcing(
+                    &step.forcing,
+                    step.surface_cosine_zenith,
+                ),
             )? {
                 files.push(path);
             }

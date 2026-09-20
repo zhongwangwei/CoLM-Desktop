@@ -161,6 +161,8 @@ fn reference() -> HistoryReferenceState {
         downward_longwave_w_m2: forcing.downward_longwave_w_m2,
         convective_precipitation_kg_m2_s: forcing.convective_precipitation_kg_m2_s,
         large_scale_precipitation_kg_m2_s: forcing.large_scale_precipitation_kg_m2_s,
+        // 夹具用的是一段白天（`cosine_zenith > 0`），否则 `f_alb` 会整列留填充值。
+        surface_cosine_zenith: 0.5,
     }
 }
 
@@ -236,6 +238,13 @@ fn the_bridge_writes_the_state_variables_it_declares() {
         &state.water,
     )
     .unwrap();
+    set_lct_albedo(
+        &mut buffer,
+        0,
+        &state.energy,
+        reference().surface_cosine_zenith,
+    )
+    .unwrap();
     buffer.set_time(0, 56_802_270).unwrap();
     let path = root.join("history.nc");
     buffer.write(&path).unwrap();
@@ -252,6 +261,7 @@ fn the_bridge_writes_the_state_variables_it_declares() {
         .chain(LCT_RADIATION_VARIABLES.iter())
         .chain(LCT_CANOPY_VARIABLES.iter())
         .chain(LCT_DERIVED_SOIL_VARIABLES.iter())
+        .chain(LCT_ALBEDO_VARIABLES.iter())
         .chain(DECLARED_ONLY.iter())
     {
         assert!(
@@ -347,6 +357,25 @@ fn the_bridge_writes_the_state_variables_it_declares() {
         rootr,
         output.energy.root_uptake.layer_fraction.as_slice(),
         "f_rootr"
+    );
+
+    // `f_alb`：四维的盘上顺序是 `rtyp` 快于 `band`（内核是 `[band][rtyp]`），
+    // 所以这里校验的是一次**换序**而不是直接展开。
+    //
+    // 注意这里走的是 `HistoryBuffers` 直写，最后一次调用胜出，所以只喂白天一步；
+    // "夜间步不入和不入计数、整条记录都是夜间就留填充值"那一半归累加器管
+    // （生产路径每次都经 `HistoryAccumulator`），由端到端对账钉住 ——
+    // 实测 264 条里真值 396 个、掩码与 Fortran **逐位一致**，最差 1.03e-3。
+    let albedo = &state.energy.radiation.albedo;
+    let values = file
+        .variable("f_alb")
+        .unwrap()
+        .get_values::<f64, _>(..)
+        .unwrap();
+    assert_eq!(
+        values,
+        vec![albedo[0][0], albedo[1][0], albedo[0][1], albedo[1][1]],
+        "f_alb must be the daytime step alone, in rtyp-major order"
     );
 
     // 诊断量与这一步的输出逐项对上。
@@ -448,6 +477,7 @@ fn the_written_schema_matches_the_golden_file_for_the_shared_variables() {
         .chain(LCT_RADIATION_VARIABLES.iter())
         .chain(LCT_CANOPY_VARIABLES.iter())
         .chain(LCT_DERIVED_SOIL_VARIABLES.iter())
+        .chain(LCT_ALBEDO_VARIABLES.iter())
         .chain(DECLARED_ONLY.iter())
     {
         let file_name = format!("f_{name}");
