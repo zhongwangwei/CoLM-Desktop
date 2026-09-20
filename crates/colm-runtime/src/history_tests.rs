@@ -254,6 +254,7 @@ fn the_bridge_writes_the_state_variables_it_declares() {
     )
     .unwrap();
     set_lct_canopy_water(&mut buffer, 0, &state.energy, &output.energy).unwrap();
+    set_lct_soil_resistance(&mut buffer, 0, &output.energy).unwrap();
     buffer.set_time(0, 56_802_270).unwrap();
     let path = root.join("history.nc");
     buffer.write(&path).unwrap();
@@ -273,6 +274,7 @@ fn the_bridge_writes_the_state_variables_it_declares() {
         .chain(LCT_ALBEDO_VARIABLES.iter())
         .chain(LCT_WATER_STORAGE_VARIABLES.iter())
         .chain(LCT_CANOPY_WATER_VARIABLES.iter())
+        .chain(LCT_SOIL_RESISTANCE_VARIABLES.iter())
         .chain(DECLARED_ONLY.iter())
     {
         assert!(
@@ -491,6 +493,7 @@ fn the_written_schema_matches_the_golden_file_for_the_shared_variables() {
         .chain(LCT_ALBEDO_VARIABLES.iter())
         .chain(LCT_WATER_STORAGE_VARIABLES.iter())
         .chain(LCT_CANOPY_WATER_VARIABLES.iter())
+        .chain(LCT_SOIL_RESISTANCE_VARIABLES.iter())
         .chain(DECLARED_ONLY.iter())
     {
         let file_name = format!("f_{name}");

@@ -115,6 +115,21 @@ pub const LCT_FLUX_VARIABLES: [&str; 6] = ["qinfl", "rnof", "rsub", "rsur", "qch
 /// 要钉住的东西。
 pub const LCT_WATER_STORAGE_VARIABLES: [&str; 4] = ["wa_inst", "wdsrf_inst", "wat_inst", "wat"];
 
+/// 本层能填的**土壤表面阻力**，一项。
+///
+/// 上游 `rss` 由 `MOD_SoilSurfaceResistance` 按 `DEF_RSS_SCHEME` 分档算出，
+/// 本仓库对应 `StandardLctEnergyOutput::soil_surface_resistance_s_m`。
+/// 本算例（Campbell 土壤）用的是**方案 1**（`rss = dsl/dg`）。
+///
+/// **注意方案 0 那条例外：** `MOD_Namelist.F90:1948-1950` 在
+/// `DEF_USE_Campbell_SOIL_MODEL` 为假时把 `DEF_RSS_SCHEME` **强制置 0**
+/// （"Soil resistance is automaticlly turned off for VG soil + USGS|IGBP scheme"）。
+/// 本仓库目前只从算例/默认读这个字段，不复制那条强制规则 ——
+/// 所以在 VG 土壤算例上两边会分叉（上游 0、本仓库仍按文档里的档位算）。
+/// 这里先按 Campbell 算例（强制规则不触发）对齐，例外本身记在
+/// `docs/implementation-verification.md`。
+pub const LCT_SOIL_RESISTANCE_VARIABLES: [&str; 1] = ["rss"];
+
 /// 本层能填的**冠层截留**量，三项。
 ///
 /// * `ldew`：冠层持水深（mm），就是 [`colm_core::CanopyWater::total_mm`]；
@@ -267,9 +282,8 @@ pub const NOT_IN_GOLDEN: [&str; 1] = ["qcharge"];
 /// 黄金算例里有、但本层还填不出来的量（按用途分组，便于下一步挑）。
 ///
 /// 这份清单不参与写出，只是把"缺口"写死在代码里：改它就得同时改注释。
-pub const UNFILLED: [&str; 4] = [
+pub const UNFILLED: [&str; 3] = [
     "`green`：上游由 `MOD_LAIEmpirical.F90:132-135` 从 `fveg = vegc(ivt)` 得出，而 `vegc` 是该模块内的硬编码表（IGBP 那支 17 项：15=Snow/Ice、17=Water 为 0，其余 1），本仓库还没搬；本算例地类 10 恒为 1，但\"恒为 1\"不是实现依据",
-    "`rss`：普通 `acc1d` + `filter`/`nac`，规则已明确；卡在方案 4 下上游写的是电导标志而不是阻力，条件映射待核对",
     "`xerr`/`zerr`/`xy_rain`/`xy_snow`：四项都是普通 `acc1d` + `filter`/`nac`，值也在（水平衡残差、能量平衡残差、雨雪拆分），只差接线与各自残差的定义核对",
     "`us10m`/`vs10m`/`fm10m`/`ustar2`（另一支 `Shaofeng, 2023` 廓线 routine）、`t_lake`/`lake_icefrac`/`lake_deficit`（湖泊分支）、`wetwat`/`wetwat_inst`/`wetzwt`（湿地分支）：整支 routine 或分支尚未驱动",
 ];
@@ -288,6 +302,7 @@ pub fn declare_lct_variables(buffer: &mut HistoryBuffers) -> Result<()> {
     names.extend_from_slice(&LCT_ALBEDO_VARIABLES);
     names.extend_from_slice(&LCT_WATER_STORAGE_VARIABLES);
     names.extend_from_slice(&LCT_CANOPY_WATER_VARIABLES);
+    names.extend_from_slice(&LCT_SOIL_RESISTANCE_VARIABLES);
     names.extend_from_slice(&DECLARED_ONLY);
     buffer.declare(&names)
 }
@@ -738,6 +753,20 @@ pub fn set_lct_stomatal_diagnostics(
         sink.scalar(name, record, value)?;
     }
     sink.layer("rootr", record, &energy.root_uptake.layer_fraction)?;
+    Ok(())
+}
+
+/// 把一步的土壤表面阻力写进第 `record` 条记录。
+///
+/// 取值见 [`LCT_SOIL_RESISTANCE_VARIABLES`]，直接取内核输出，不做换算。
+pub fn set_lct_soil_resistance(
+    sink: &mut impl HistorySink,
+    record: usize,
+    energy: &colm_core::StandardLctEnergyOutput,
+) -> Result<()> {
+    let value = energy.soil_surface_resistance_s_m;
+    ensure!(value.is_finite(), "the history value for rss is not finite");
+    sink.scalar("rss", record, value)?;
     Ok(())
 }
 
@@ -1234,6 +1263,7 @@ impl HistorySession {
                 0.0,
             )?;
             set_lct_canopy_water(accumulator, 0, &state.energy, &output.energy)?;
+            set_lct_soil_resistance(accumulator, 0, &output.energy)?;
             set_lct_albedo(
                 accumulator,
                 0,
@@ -1297,6 +1327,7 @@ impl HistorySession {
                 state.snow.water_equivalent_kg_m2,
             )?;
             set_lct_canopy_water(accumulator, 0, &state.energy, &output.energy)?;
+            set_lct_soil_resistance(accumulator, 0, &output.energy)?;
             set_lct_albedo(
                 accumulator,
                 0,

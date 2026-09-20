@@ -4291,3 +4291,49 @@ us10m / vs10m / fm10m / ustar2            出自另一支 Shaofeng 2023 廓线 r
 到此黄金文件的变量缺口从 25 降到 **16**（本轮共补 9 个），
 `UNFILLED` 按"卡在哪"重写成 4 组 —— 上一轮那条把 `alb` 写成"缺四维写出通路"的
 **判断本身是错的**（根本不需要新通路），留错的清单比留空的更坏。
+
+## `f_rss` 接上了，但值差到 2 倍：公式已逐行核对，嫌疑在输入（2026 年，实测）
+
+`rss`（土壤表面阻力）此前记着"方案 4 下上游写的是电导标志而不是阻力，条件映射待核对"。
+这轮查清了：**方案 4 不是本算例的档位** —— `DEF_RSS_SCHEME` 默认 1，
+而"方案 4 写电导"那条只在 `DEF_RSS_SCHEME == 4` 时成立。所以映射本身没有歧义，
+接线做了（`energy.soil_surface_resistance_s_m` → `f_rss`，普通 `acc1d` + `filter`/`nac`）。
+
+### 顺带发现两条上游的档位规则，本仓库都没有
+
+1. **`MOD_Namelist.F90:1948-1950`**：`DEF_USE_Campbell_SOIL_MODEL` 为假时把
+   `DEF_RSS_SCHEME` **强制置 0**，并打印
+   "Soil resistance is automaticlly turned off for VG soil + USGS|IGBP scheme"。
+   本仓库只从算例/默认读这个字段，**不复制这条强制规则** ——
+   Campbell 算例（对齐算例）不触发，但 VG 土壤算例上两边会分叉。
+2. **`MOD_SoilSurfaceResistance.F90:297-311` 的雪盖混合**：
+   `rss = rss/(1-fsno+fsno*rss)`（方案 ≠ 4）与 `(1-fsno)*rss+fsno`（方案 4）。
+   这条本仓库**是有的**，逐行核对过（`soil_surface_resistance.rs:158-171`）。
+
+### 值差 2 倍，但公式不是原因
+
+对齐算例实测：
+
+```
+f_rss  F[0.01466507,0.03394720]  R[0.02844947,0.03406494]
+最差 i=0：F 0.0146650692  R 0.0284494652（1.94 倍）；高端几乎重合
+```
+
+比值**不恒定**（低端 1.94、高端 1.0），所以不是某个常数因子。
+把 scheme 1 的每一行对着 Fortran 核过 —— `vol_liq`、`eff_porosity`（含 `.max(0.01)`）、
+`aird = porsl*(psi0/-1e7)^(1/bsw)`、`smp_node`、`hk`、`tao = eps²*(eps/porsl)^(3/max(3,bsw))`、
+`dg = d0*tao`、`dsl`（含 `.clamp(0,0.2)`）、雪盖混合、`min(1e6,·)` —— **全部一致**。
+
+所以嫌疑落在**输入**上，而这里有个容易骗人的细节：该窗口表层又湿又冻，
+`0.8*eff_porosity - vol_liq` 是**两个 ~0.3 的量相减**。
+取 i=0 的实测值：`vol_liq = 6.0458/(1000*0.017513) = 0.3452`，
+`eff_porosity ≈ porsl - 0.2693`，于是 `0.8*eff_porosity ≈ 0.145 < vol_liq`
+→ **`dsl` 的分子落到 `max(1e-6, ·)` 底上**。这时 `rss` 只由
+`dz*1e-6/(0.8*porsl - aird)/dg` 决定，而 `porsl`/`aird`/`bsw` 是静态土壤参数、
+`dg` 由它们与 `t_soisno(1)` 定。
+
+**结论与下一步：** 这不是"公式写错"能修的那类差，也不该在这一层再猜。
+要判定就把 `porsl`、`aird`、`bsw`、`dg`、`0.8*eff_porosity-vol_liq`
+这五个量在同一个步上两边打出来 —— 变量只有五个，而且都在 `SoilSurfaceResistance`
+的入口即可拿到。**在那之前 `f_rss` 的差不算已归因**；它落在 tier2 之外（新增一条 78），
+与 `scv`/`gssun` 同属"近抵消量"，但这次连是哪一侧的输入不同都还没证据。
