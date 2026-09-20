@@ -74,9 +74,9 @@ pub mod static_state {
 pub mod soil_surface_resistance {
     pub use colm_core::soil_surface_resistance::*;
 }
+pub mod restart_read;
 pub mod surface_data;
 pub mod time_restart;
-pub mod time_restart_read;
 pub mod time_state {
     pub use colm_core::time_state::*;
 }
@@ -175,6 +175,7 @@ pub use restart::{
     RestartPatchFields, RestartTuning, SimpleTerrainFields, SoilAlbedo, TerrainFields,
     TerrainRadiation, TopmodelFields,
 };
+pub use restart_read::RestartFile;
 pub use runtime::{
     read_single_point_cn_state, read_single_point_snow_depth, read_single_point_soil_profile,
     read_single_point_water_table, RuntimeCnState, RuntimeCnVegetationCarbon, RuntimeSoilProfile,
@@ -223,7 +224,6 @@ pub use time_restart::{
     SnowSoilRestartFields, TimeHyperspectralFields, TimeLakeFields, TimePatchFields,
     TimeRadiationFields, TimeRestartDimensions, TimeRestartFile, TimeRestartInput,
 };
-pub use time_restart_read::TimeRestart;
 pub use time_state::{
     derive_initial_soil_hydraulics, derive_pft_snow_cover, derive_snow_cover, initialize_cold_soil,
     initialize_profile_soil, initialize_snow_layers, interpolate_profile, resolve_cold_start_soil,

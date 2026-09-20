@@ -650,7 +650,7 @@ fn time_restart_round_trips_through_the_reader() {
     let path = root.join("restart.nc");
     write_time_restart_block(&path, input()).unwrap();
 
-    let restart = crate::time_restart_read::TimeRestart::open(&path).unwrap();
+    let restart = crate::restart_read::RestartFile::open(&path).unwrap();
     let file = netcdf::open(&path).unwrap();
     let mut checked = 0;
     for variable in file.variables() {
@@ -675,7 +675,12 @@ fn time_restart_round_trips_through_the_reader() {
                 );
             }
             netcdf::types::NcVariableType::Int(netcdf::types::IntType::I32) => {
-                let expected: Vec<i32> = variable.get_values(..).unwrap();
+                let expected: Vec<i64> = variable
+                    .get_values::<i32, _>(..)
+                    .unwrap()
+                    .into_iter()
+                    .map(i64::from)
+                    .collect();
                 assert_eq!(
                     restart.integers(&name).unwrap(),
                     expected.as_slice(),
@@ -712,6 +717,9 @@ fn time_restart_round_trips_through_the_reader() {
         restart.layer_column("z_sno", 1, 2).unwrap(),
         vec![10.0, 20.0]
     );
-    assert_eq!(restart.integers("n_irrig_steps_left").unwrap(), &[10, 20]);
+    assert_eq!(
+        restart.integers("n_irrig_steps_left").unwrap(),
+        &[10_i64, 20]
+    );
     std::fs::remove_dir_all(root).unwrap();
 }

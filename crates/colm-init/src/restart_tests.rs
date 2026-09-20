@@ -646,3 +646,111 @@ fn temp_dir(label: &str) -> PathBuf {
     let _ = std::fs::remove_dir_all(&path);
     path
 }
+
+/// 任何整数类型的变量都按 `i64` 读出来，供读取器对账用。
+fn integers_as_i64(variable: &netcdf::Variable<'_>) -> Vec<i64> {
+    use netcdf::types::{IntType, NcVariableType};
+    let widen = |values: Vec<i64>| values;
+    match variable.vartype() {
+        NcVariableType::Int(IntType::I8) => widen(
+            variable
+                .get_values::<i8, _>(..)
+                .unwrap()
+                .into_iter()
+                .map(i64::from)
+                .collect(),
+        ),
+        NcVariableType::Int(IntType::I16) => widen(
+            variable
+                .get_values::<i16, _>(..)
+                .unwrap()
+                .into_iter()
+                .map(i64::from)
+                .collect(),
+        ),
+        NcVariableType::Int(IntType::I32) => widen(
+            variable
+                .get_values::<i32, _>(..)
+                .unwrap()
+                .into_iter()
+                .map(i64::from)
+                .collect(),
+        ),
+        NcVariableType::Int(IntType::I64) => variable.get_values::<i64, _>(..).unwrap(),
+        other => panic!("restart integer variable has unexpected type {other:?}"),
+    }
+}
+
+/// 读取器对常数态 restart 的往返：**两个文件都读**，逐变量与文件本身对账，
+/// 再抽查加宽后的整数（`patchmask` 是 i8）与盘上 `(patch, soil)` 的层列。
+#[test]
+fn constant_restart_round_trips_through_the_reader() {
+    let soil = soil_state();
+    let lake = derive_lake_layers(&[20.0, 30.0], 10).unwrap();
+    let canopy = canopy();
+    let root = temp_dir("read-round-trip");
+    let files = write_constant_restart(
+        &root,
+        "CN-Cng",
+        2005,
+        "w180_s90",
+        input(&soil, &lake, &canopy),
+    )
+    .unwrap();
+
+    for path in [&files.block, &files.constants] {
+        let restart = crate::restart_read::RestartFile::open(path).unwrap();
+        let file = netcdf::open(path).unwrap();
+        let mut checked = 0;
+        for variable in file.variables() {
+            let name = variable.name();
+            let dims: Vec<String> = variable
+                .dimensions()
+                .iter()
+                .map(|dimension| dimension.name())
+                .collect();
+            assert_eq!(
+                restart.variable_dimensions(&name).unwrap(),
+                dims.as_slice(),
+                "{name}: dimensions"
+            );
+            match variable.vartype() {
+                netcdf::types::NcVariableType::Float(netcdf::types::FloatType::F64) => {
+                    let expected: Vec<f64> = variable.get_values(..).unwrap();
+                    assert_eq!(
+                        restart.floats(&name).unwrap(),
+                        expected.as_slice(),
+                        "{name}: values"
+                    );
+                }
+                netcdf::types::NcVariableType::Int(_) => {
+                    let expected = integers_as_i64(&variable);
+                    assert_eq!(
+                        restart.integers(&name).unwrap(),
+                        expected.as_slice(),
+                        "{name}: values"
+                    );
+                }
+                other => panic!("{name} has unexpected type {other:?}"),
+            }
+            checked += 1;
+        }
+        assert!(
+            checked >= 10,
+            "only {checked} variables compared in {}",
+            path.display()
+        );
+    }
+
+    let block = crate::restart_read::RestartFile::open(&files.block).unwrap();
+    assert_eq!(block.dimension("soil").unwrap(), 10);
+    // i8 的 patchmask 读出来是 i64。
+    assert_eq!(block.integers("patchmask").unwrap(), &[1, 0]);
+    // 盘上是 (patch, soil)：第 1 个 patch 的 10 层就是 patch_major 的第 10..20 项。
+    let on_disk = patch_major(soil.field(SoilField::VfQuartz), 10, 2);
+    assert_eq!(
+        block.layer_column("vf_quartz", 1, 10).unwrap(),
+        on_disk[10..20].to_vec()
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}

@@ -180,10 +180,10 @@ them. Checked against the current tree:
   `mkinidata-rs` only, so the third stage is still the Fortran `colm.x`.
 - The absent middle layer is the assembly from written restart/surface state into the
   `StandardLct*Input` templates. `colm-init` reads initialization datasets
-  (`runtime.rs`), and `colm_init::TimeRestart` now reads a written *time* restart back
-  — every variable with its on-disk axis order, verified by writing the full synthetic
-  fixture and comparing the reader against the file variable by variable. What is
-  still missing is the *constant* restart reader and the mapping from either restart
+  (`runtime.rs`), and `colm_init::RestartFile` now reads both written restart families
+  back — every variable with its on-disk axis order, verified by writing the full
+  synthetic fixtures (time and constant) and comparing the reader against each file
+  variable by variable. What is still missing is the mapping from those typed buffers
   into a driver template, which is also why the runtime's LCT drivers have no
   cross-crate test.
 
