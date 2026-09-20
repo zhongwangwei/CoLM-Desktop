@@ -179,6 +179,11 @@ pub struct LeafTemperatureOutput {
     pub air_temperature_2m_k: f64,
     pub air_specific_humidity_2m: f64,
     pub canopy_stomatal_resistance_s_m: f64,
+    /// 本步地面蒸发用的潜热（`MOD_Thermal.F90:539-540` 的 `htvp`）。
+    ///
+    /// 随输入原样带出来，好让 history 的 `lfevpa`/`fgrnd` 与物理用的是**同一个**
+    /// `htvp` —— 自己再判一次表层冰水比就会有两份判据。
+    pub ground_latent_heat_j_kg: f64,
     pub sunlit_stomatal_conductance_mol_m2_s: f64,
     pub shaded_stomatal_conductance_mol_m2_s: f64,
     pub assimilation_mol_m2_s: f64,
@@ -905,6 +910,7 @@ pub fn leaf_temperature(
     .min(5.0);
     transpiration = transpiration.max(0.0);
     Ok(LeafTemperatureOutput {
+        ground_latent_heat_j_kg: input.ground_latent_heat_j_kg,
         wet_snow_fraction,
         eastward_stress_kg_m_s2: -input.air_density_kg_m3 * input.eastward_wind_m_s / last.ram,
         northward_stress_kg_m_s2: -input.air_density_kg_m3 * input.northward_wind_m_s / last.ram,

@@ -1223,7 +1223,13 @@ impl StandardLctRestartTemplate {
                     evaporation_soil_kg_m2_s: 0.0,
                     evaporation_snow_kg_m2_s: 0.0,
                     ground_flux_temperature_derivative_w_m2_k: 0.0,
-                    vaporization_heat_j_kg: physics.vaporization_heat_j_kg,
+                    // `MOD_Thermal.F90:539-540` 的 `htvp`：无雪时 `lb = 1` 就是最上一层土，
+                    // 只有它"零液态水 + 有冰"时地面蒸发才是升华。
+                    vaporization_heat_j_kg: colm_core::ground_latent_heat_j_kg(
+                        physics.vaporization_heat_j_kg,
+                        self.water.liquid_water_kg_m2[0],
+                        self.water.ice_water_kg_m2[0],
+                    ),
                     // `MOD_Thermal.F90:485-486` 的 `emg`：雪有水量或 patch 是湖就抬到 0.97。
                     // 无雪分支里 `scv` 恒为 0，所以这里必然给 0.96；积雪分支的内核会用
                     // **本步**的 `scv` 再覆盖一次（融完之后要退回 0.96）。
@@ -1396,6 +1402,14 @@ impl StandardLctRestartTemplate {
                 },
                 ground_flux: colm_core::GroundFluxInput {
                     snow_cover_fraction: self.snow.ground_snow_fraction,
+                    // 有雪时上游的 `lb = 1-nzsno` 是**最上一层雪**，打包列的下标 0
+                    // （列自雪顶向下排到土壤底，见 `snow_soil` 的装配）。所以积雪分支要
+                    // 用雪列而不是 `input()` 里那份土壤表的判据重新定一次 `htvp`。
+                    vaporization_heat_j_kg: colm_core::ground_latent_heat_j_kg(
+                        self.physics.vaporization_heat_j_kg,
+                        self.snow_soil.liquid_water_kg_m2[0],
+                        self.snow_soil.ice_water_kg_m2[0],
+                    ),
                     ..self.input(binding).energy.ground_flux
                 },
                 ..self.input(binding).energy

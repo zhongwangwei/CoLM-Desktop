@@ -208,6 +208,17 @@ fn the_bridge_writes_the_state_variables_it_declares() {
     set_lct_energy_fluxes(&mut buffer, 0, &output).unwrap();
     set_lct_surface_diagnostics(&mut buffer, 0, &output.energy, reference(), &physics()).unwrap();
     set_lct_stomatal_diagnostics(&mut buffer, 0, &output.energy).unwrap();
+    // 地表收支也在这里填一次：原先这个用例没调它，于是 `lfevpa`/`fgrnd`/`rnet`/`olrg`/
+    // `emis`/`trad`/`sabvsun`/`sabvsha` 八项虽然声明了却一直是填充值 ——
+    // 正是"声明了但没人写"那类静默空洞。
+    set_lct_surface_budget(
+        &mut buffer,
+        0,
+        &output,
+        physics().vaporization_heat_j_kg,
+        template.soil_layers(),
+    )
+    .unwrap();
     buffer.set_time(0, 56_802_270).unwrap();
     let path = root.join("history.nc");
     buffer.write(&path).unwrap();
@@ -252,6 +263,20 @@ fn the_bridge_writes_the_state_variables_it_declares() {
             .get_values::<f64, _>(..)
             .unwrap()[0]
     };
+    // `lfevpa` 必须用**内核那一份** `htvp` 拼出来，与 `fevpl`/`fevpg` 自洽。
+    // 上游写的是 `lfevpa = hvap*fevpl + htvp*fevpg`（`MOD_Thermal.F90:1333`），
+    // 而 `htvp` 由表层是否纯冰定（`:539-540`）。自己写死 `hvap + hfus` 会让
+    // 同一份文件里的 `f_lfevpa` 与 `f_fevpl`/`f_fevpg` 互相矛盾 ——
+    // 实测 CN-Cng 冬季窗口因此差到 34 W/m²。
+    let leaf_output = &output.energy.leaf;
+    let latent = value("lfevpa");
+    let expected = physics().vaporization_heat_j_kg * leaf_output.leaf_evaporation_kg_m2_s
+        + leaf_output.ground_latent_heat_j_kg * output.energy.corrected_ground_evaporation_kg_m2_s;
+    assert!(
+        (latent - expected).abs() <= 1.0e-9 * expected.abs().max(1.0),
+        "f_lfevpa must use the kernel's htvp: got {latent}, expected {expected}"
+    );
+
     // 容差只用来吃掉浮点结合律：内核算的是 `total = leaf + corrected`，
     // 反过来减回去不一定逐位相等。
     for (total, parts) in [

@@ -3746,3 +3746,66 @@ f_gssha        97/264    最差 8.950e-3 vs 1.421e-2
 所以这五项**留在 tier2、留在失败清单上是对的** —— 按 `oracle/tolerances.toml`
 开头那条"层级不倒挂"的不变式，确定性代数量不该因为"实测对不上"就被降级，
 否则表就失去意义了。它们现在是**已知的、有解释的残余**，不是待修的 bug。
+
+## `htvp` 是条件量：地面蒸发不总是升华（2026 年，实测）
+
+`f_lfevpa` 在上一轮修完"用了初步值"之后还差 34 W/m²（Rust 219 对 Fortran 185），
+现在查清了，是**第二个**独立缺陷：潜热本身取错了。
+
+上游 `MOD_Thermal.F90:539-540`：
+
+```fortran
+! latent heat, assumed that the sublimation occurred only as wliq_soisno=0
+htvp = hvap
+IF (wliq_soisno(lb)<=0. .and. wice_soisno(lb)>0.) htvp = hsub
+```
+
+`lb = 1-nzsno` 就是**表层**：有雪时是最上一层雪，无雪时是最上一层土。只有它
+"零液态水 + 有冰"时地面蒸发才是升华，潜热才抬到 `hsub = hvap + hfus`；
+其余情况一律是汽化潜热。本仓库此前把 `sublimation_heat = hvap + hfus` **写死**，
+于是**所有**液态地表的地面蒸发都按升华计价。
+
+| | `f_lfevpa` max‖Δ‖ | `f_fgrnd` max‖Δ‖ |
+|---|---|---|
+| 写死 `hvap+hfus` | 34.12 | 32.23 |
+| 按表层判据 | **3.14** | **2.68** |
+
+`f_rnet` 完全不动（0.4261 → 0.4261）：`htvp*fevpg` 在
+`rnet = fsena + lfevpa + fgrnd` 里出现两次、符号相反，正好抵消 —— 这条恒等式
+反过来成了这次改动的独立校验。
+
+**修正落在内核，不只是诊断。** 潜热经
+`GroundFluxInput::vaporization_heat_j_kg` 进 `LeafTemperature`（叶温求解里的地面潜热项）
+与 `thermal_water` 的感热订正项，上游这两处用的都是同一个 `htvp`
+（`:640` 传给 `GroundFluxes`、`:1256` 的 `fseng = fseng + htvp*egidif`）。
+两处装配点都按表层判据取值：
+
+* 无雪分支：`self.water.{liquid,ice}_water_kg_m2[0]`（打包列下标 0 = 表层）；
+* 积雪分支：`self.snow_soil.{liquid,ice}_water_kg_m2[0]` —— `snow_soil` 是
+  `snow.temperature_k[SNOW_SLOTS-nzsno..]` 接上土列，注释写明"自雪顶一直排到土壤底"，
+  所以下标 0 也是最上一层雪。
+
+`ground_latent_heat_j_kg` 做成 `colm-core` 的纯函数并单测四种组合
+（纯冰 / 有液态水 / 全干 / 负噪声液态水）。**"完全干"那一支是必须钉的**：
+`wice > 0` 不成立时仍是汽化，写成 `wice >= 0` 会把它算成升华。
+
+### 这次的内核改动在已验证窗口里是逐位无操作
+
+冬季对齐窗口 264 条记录里，表层 `wliq<=0 .and. wice>0` **命中 0 次**
+（表层一直有液态水），所以 `htvp` 全程等于 `hvap`。前后两次 Rust 运行的
+**状态与通量变量逐位相同**，只有 `f_lfevpa`/`f_fgrnd` 两个诊断量变了、
+`f_rnet` 差 5.7e-14（舍入）。**这不是"改了没用"，而是这类判据的正常形态**：
+它在无雪算例上不触发，只有积雪/冻土窗口才考验它 —— 而本仓库目前
+**没有**这样的黄金窗口（`CN-Cng` 冬季地表始终有液态水，`CN-Cng-wet` 是 7 月）。
+要真正验到那一支，得再加一个高纬有稳定雪盖的站点窗口；在那之前，
+四组合单测是唯一的守卫。
+
+### 剩下那 3 W/m²
+
+`f_lfevpa` 仍差 3.14（对 184.65 是 1.7%）。**上游自己就自相矛盾到同一量级**：
+它的 `f_lfevpa` 是 184.65，而拿它自己的 `f_fevpl`/`f_fevpg` 两列按
+`hvap*fevpl + htvp*fevpg`（此窗口 `htvp = hvap`）反算是 189.63 —— 差 4.98，
+比本仓库的 3.14 还大。两个差异同源：**逐产物平均**与**先平均再相乘**不是一回事，
+`fevpl` 在一小时里跨昼夜变号时两种口径必然分叉。所以这不是某一侧算错，
+而是"区间平均的 `lfevpa` 该按哪种口径折算"在上游本身就没有一致答案；
+本仓库按 `hvap*fevpl + htvp*fevpg` 逐产物累加，是有定义的那一种。

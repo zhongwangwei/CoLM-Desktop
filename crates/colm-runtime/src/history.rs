@@ -454,9 +454,18 @@ pub fn set_lct_surface_budget(
         (upward_longwave + emissivity * blackbody_change) / (upward_longwave + blackbody_change);
     let radiative_temperature_k = (outgoing_longwave / STEFAN_BOLTZMANN_W_M2_K4).powf(0.25);
 
-    let sublimation_heat = vaporization_heat_j_kg + colm_core::LATENT_HEAT_FUSION_J_KG;
+    // 上游的 `htvp`（`MOD_Thermal.F90:539-540`）由内核按**表层是否纯冰**定好，
+    // 随步输出带出来；这里照抄，不再自己判一次。写成无条件的 `hvap + hfus`
+    // 会把所有液态地表的地面蒸发按升华计价 —— 实测冬季窗口 `f_lfevpa` 差 34 W/m²。
+    let sublimation_heat = energy.leaf.ground_latent_heat_j_kg;
     let leaf_evaporation = energy.leaf.leaf_evaporation_kg_m2_s;
-    let ground_evaporation = energy.leaf.ground_evaporation_kg_m2_s;
+    // **必须取订正后的地面蒸发**，与 `set_lct_energy_fluxes` 写进 `f_fevpg` 的那一列同源。
+    // `leaf.ground_evaporation_kg_m2_s` 是叶温求解**之前**的初步值，两者在 CN-Cng
+    // 首条记录上差 2.5 倍（9.3e-5 对 2.3e-4）。用初步值会让
+    // `lfevpa = hvap*fevpl + htvp*fevpg` 与同一份文件里的 `f_fevpl`/`f_fevpg`
+    // 自相矛盾 —— 实测 Rust 的 `f_lfevpa` 峰值 615 W/m² 而 `hvap*(f_fevpl+f_fevpg)`
+    // 只有 187 W/m²；改用订正后立刻落到 196 W/m²（Fortran 184.65）。
+    let ground_evaporation = energy.corrected_ground_evaporation_kg_m2_s;
     let latent_heat =
         vaporization_heat_j_kg * leaf_evaporation + sublimation_heat * ground_evaporation;
 

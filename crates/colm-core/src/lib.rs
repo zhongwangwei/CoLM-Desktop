@@ -179,8 +179,8 @@ pub use pc_radiation::{
     PcCanopyRadiation, PcPftInput, PcPftRadiation,
 };
 pub use phase_change::{
-    phase_change, urban_phase_change, PhaseChangeInput, PhaseChangeState, UrbanPhaseChangeInput,
-    UrbanPhaseChangeState, LATENT_HEAT_FUSION_J_KG,
+    ground_latent_heat_j_kg, phase_change, urban_phase_change, PhaseChangeInput, PhaseChangeState,
+    UrbanPhaseChangeInput, UrbanPhaseChangeState, LATENT_HEAT_FUSION_J_KG,
 };
 pub use photosynthesis::{
     photosynthesis_parameters, stomata, update_photosynthesis, LeafBiochemistry,

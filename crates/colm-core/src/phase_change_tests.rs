@@ -163,3 +163,28 @@ fn snicar_absorption_melts_an_internal_snow_layer() {
     assert_eq!(state.phase_flag, [0, 1, 0]);
     assert!((state.thaw_mass_kg_m2[1] - 50.0 * 3600.0 / LATENT_HEAT_FUSION_J_KG).abs() < 1.0e-12);
 }
+
+/// `MOD_Thermal.F90:539-540` 的 `htvp`：只有表层"零液态水 + 有冰"时才用升华潜热。
+///
+/// 四种组合都要钉住，尤其是"有液态水"与"完全干"这两种 —— 写成无条件的
+/// `hvap + hfus` 时它们会一起错，而在无雪算例上只有它们会出现，于是错误
+/// 永远不会被黄金回归发现（实测冬季窗口正是如此）。
+#[test]
+fn ground_latent_heat_follows_the_surface_layer_ice_test() {
+    let hvap = 2.501e6;
+    // 纯冰：升华。
+    assert_eq!(
+        ground_latent_heat_j_kg(hvap, 0.0, 4.3),
+        hvap + LATENT_HEAT_FUSION_J_KG
+    );
+    // 有液态水：不论有多少冰，都是汽化。
+    assert_eq!(ground_latent_heat_j_kg(hvap, 6.0, 4.3), hvap);
+    assert_eq!(ground_latent_heat_j_kg(hvap, 1.0e-12, 4.3), hvap);
+    // 完全干（无冰无液态水）：边界 `wice > 0` 不成立，仍是汽化。
+    assert_eq!(ground_latent_heat_j_kg(hvap, 0.0, 0.0), hvap);
+    // 负的液态水（数值噪声）按"零液态水"处理，与上游的 `<= 0.` 一致。
+    assert_eq!(
+        ground_latent_heat_j_kg(hvap, -1.0e-18, 2.0),
+        hvap + LATENT_HEAT_FUSION_J_KG
+    );
+}

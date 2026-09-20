@@ -13,6 +13,33 @@ use crate::{soil_vliq_from_psi, SoilHydraulicModel, FREEZING_K};
 /// 公开是因为地表能量收支里的 `htvp = hvap + hfus`（升华潜热）要用它，
 /// 而 `lfevpa` 正是 `hvap*fevpl + htvp*fevpg`。
 pub const LATENT_HEAT_FUSION_J_KG: f64 = 0.3336e6;
+
+/// `MOD_Thermal.F90:539-540` 的 `htvp`：地面那一项的潜热。
+///
+/// ```fortran
+/// htvp = hvap
+/// IF (wliq_soisno(lb)<=0. .and. wice_soisno(lb)>0.) htvp = hsub
+/// ```
+///
+/// **只有表层**（`lb = 1-nzsno`，在本仓库的打包列里恒为下标 0：列是自雪顶向下
+/// 排到土壤底，见本模块开头）处于"零液态水 + 有冰"时，地面蒸发才是升华，
+/// 潜热才抬到 `hsub = hvap + hfus`。其余情况一律是汽化潜热。
+///
+/// 写成无条件 `hvap + hfus` 会让**所有**液态地表的地面蒸发都按升华计价，
+/// 实测 CN-Cng 冬季窗口的 `f_lfevpa` 因此从 187 抬到 219 W/m²（Fortran 184.7），
+/// `f_fgrnd` 差出 32 W/m²。而那一窗口表层**从没有**出现过纯冰
+/// （264 条记录里 `wliq<=0 .and. wice>0` 命中 0 次），所以上游全程用的就是 `hvap`。
+pub fn ground_latent_heat_j_kg(
+    vaporization_heat_j_kg: f64,
+    surface_liquid_water_kg_m2: f64,
+    surface_ice_water_kg_m2: f64,
+) -> f64 {
+    if surface_liquid_water_kg_m2 <= 0.0 && surface_ice_water_kg_m2 > 0.0 {
+        vaporization_heat_j_kg + LATENT_HEAT_FUSION_J_KG
+    } else {
+        vaporization_heat_j_kg
+    }
+}
 const GRAVITY_M_S2: f64 = 9.80616;
 
 /// Inputs to one `meltf` phase-change update.
