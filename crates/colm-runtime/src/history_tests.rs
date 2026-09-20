@@ -157,6 +157,26 @@ fn reference() -> HistoryReferenceState {
     }
 }
 
+/// `lat`/`lon` 是 tier0 的坐标，必须与上游的 **f32** 量化值逐位相同。
+///
+/// 上游把站点经纬度存成 `real(r4)`（`mksrfdata` 会因此报
+/// "Latitude mismatch: 44.593299865722656 in data file and 44.593299999999999 in
+/// namelist"）。直接写 namelist 里的 f64 会让 `golden-compare` 把这两个坐标
+/// 报成超差 —— 实测正是如此。
+#[test]
+fn the_history_site_coordinates_carry_the_source_f32_quantization() {
+    assert_eq!(
+        crate::site_coordinate_degrees(44.5933),
+        44.593_299_865_722_656
+    );
+    assert_eq!(
+        crate::site_coordinate_degrees(123.5092),
+        123.509_201_049_804_69
+    );
+    // 已经是 f32 的值原样返回，不引入第二次舍入。
+    assert_eq!(crate::site_coordinate_degrees(23.0), 23.0);
+}
+
 #[test]
 fn the_bridge_writes_the_state_variables_it_declares() {
     let root = temp_dir("write");

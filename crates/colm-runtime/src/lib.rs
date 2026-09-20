@@ -89,6 +89,17 @@ pub struct PointDownscalingTemplate<'a> {
     pub config: ForcingDownscalingConfig,
 }
 
+/// history 里的 `lat`/`lon` 取**单精度**的站点坐标。
+///
+/// 上游把站点经纬度存成 `real(r4)`（`mksrfdata` 会为此报
+/// "Latitude mismatch: 44.593299865722656 in data file and 44.593299999999999 in
+/// namelist"），写进 history 的 `lat`/`lon` 因此是 f32 量化过的值。
+/// 这两个量是 tier0 的**坐标**、按逐位比，所以本仓库也必须量化 ——
+/// 直接写 namelist 里的 f64 会在 `golden-compare` 里报成两个变量超差。
+fn site_coordinate_degrees(value: f64) -> f64 {
+    f64::from(value as f32)
+}
+
 impl PointRuntimeConfig {
     /// 按本算例的窗口、频率与分组开一个 history 会话。
     ///
@@ -117,8 +128,8 @@ impl PointRuntimeConfig {
         crate::history::HistorySession::new(
             crate::history::point_dimensions(),
             colm_hist::history::HistorySite {
-                latitude_degrees: self.latitude_degrees,
-                longitude_degrees: self.longitude_degrees,
+                latitude_degrees: site_coordinate_degrees(self.latitude_degrees),
+                longitude_degrees: site_coordinate_degrees(self.longitude_degrees),
             },
             colm_hist::schedule::SimulationWindow {
                 start_year,
