@@ -243,10 +243,16 @@ result back, but no written restart has been handed to the Fortran `colm` yet �
 interoperability check remains, and diagnostics such as `coszen` and `fwet_snow` are still
 not written back.
 
-Beyond that: a driver for the PFT/PC/urban/BGC branches, the history writer wired to
-per-step field values, a Rust `colm` executable that consumes
-`PointRuntime::run_restart_standard_lct` (nothing outside `colm-runtime` does yet), and the
-third-stage cutover itself.
+History output is now driven too: `HistorySession` fills one record per scheduled write time
+and flushes a file when the grouping changes, so a run produces `<case>_hist_<suffix>.nc`
+files whose record labels match the golden file's first three values bit for bit. What it
+still declares is nineteen variables — the LCT state and the `WATER_2014` diagnostics; the
+energy-side diagnostics, the layered canopy amounts and the lake/BGC variables remain
+unfilled, and the session is not yet wired into a driver method.
+
+Beyond that: a driver for the PFT/PC/urban/BGC branches, a Rust `colm` executable that
+consumes `PointRuntime::run_restart_standard_lct` (nothing outside `colm-runtime` does yet),
+and the third-stage cutover itself.
 
 One prerequisite is now in place: the history gate table carries each variable's full
 schema — name, `long_name`, `units` and the layer dimensions in file order — extracted

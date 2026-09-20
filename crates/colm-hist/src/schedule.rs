@@ -111,12 +111,27 @@ pub struct HistoryGroup {
     pub labels_minutes: Vec<i64>,
 }
 
-/// 把窗口按频率与分组展开成若干个文件的记录表。
-pub fn schedule(
+/// 一条要写的记录：落在哪个文件、是该文件的第几条、写入时刻与标签。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScheduledRecord {
+    /// 文件后缀（`DEF_HIST_groupby` 决定），同后缀的记在同一个文件里。
+    pub suffix: String,
+    /// 在该文件内的记录序号，从 0 起。
+    pub record: usize,
+    /// **写入时刻**的 tick（`tick_seconds` 的秒数），即这一步的结束时刻。
+    ///
+    /// 运行时按它对齐：某一步的结束 tick 等于这里，就写这一条。
+    pub write_at_tick: i64,
+    /// 该记录的 `time` 变量取值（minutes since 1900，写入时刻截断后减固定位移）。
+    pub label_minutes: i64,
+}
+
+/// 把窗口按频率与分组展开成逐条记录 —— **唯一的实现**，`schedule` 由它派生。
+pub fn schedule_records(
     window: SimulationWindow,
     frequency: HistoryFrequency,
     grouping: HistoryGrouping,
-) -> Result<Vec<HistoryGroup>> {
+) -> Result<Vec<ScheduledRecord>> {
     ensure!(
         window.timestep_seconds > 0,
         "history scheduling needs a positive timestep"
@@ -137,7 +152,7 @@ pub fn schedule(
     let step = i64::from(window.timestep_seconds);
     let shift = frequency.label_shift_minutes();
 
-    let mut groups: Vec<HistoryGroup> = Vec::new();
+    let mut records: Vec<ScheduledRecord> = Vec::new();
     let mut cursor = start;
     while cursor < end {
         let next = (cursor + step).min(end);
@@ -151,15 +166,39 @@ pub fn schedule(
             let suffix = grouping.file_suffix(year, julian_day);
             // 标签是写入时刻的分钟数（截断）再减去固定位移。
             let label = next / 60 - shift;
-            match groups.last_mut() {
-                Some(group) if group.suffix == suffix => group.labels_minutes.push(label),
-                _ => groups.push(HistoryGroup {
-                    suffix,
-                    labels_minutes: vec![label],
-                }),
-            }
+            let record = match records.last() {
+                Some(previous) if previous.suffix == suffix => previous.record + 1,
+                _ => 0,
+            };
+            records.push(ScheduledRecord {
+                suffix,
+                record,
+                write_at_tick: next,
+                label_minutes: label,
+            });
         }
         cursor = next;
+    }
+    Ok(records)
+}
+
+/// 把窗口按频率与分组展开成若干个文件的记录表。
+pub fn schedule(
+    window: SimulationWindow,
+    frequency: HistoryFrequency,
+    grouping: HistoryGrouping,
+) -> Result<Vec<HistoryGroup>> {
+    let mut groups: Vec<HistoryGroup> = Vec::new();
+    for record in schedule_records(window, frequency, grouping)? {
+        match groups.last_mut() {
+            Some(group) if group.suffix == record.suffix => {
+                group.labels_minutes.push(record.label_minutes);
+            }
+            _ => groups.push(HistoryGroup {
+                suffix: record.suffix,
+                labels_minutes: vec![record.label_minutes],
+            }),
+        }
     }
     Ok(groups)
 }
@@ -178,7 +217,11 @@ fn period_ends(next: i64, frequency: HistoryFrequency) -> bool {
     }
 }
 
-fn tick_seconds(year: i32, julian_day: i32, seconds: i32) -> Result<i64> {
+/// 一个模型时刻的 tick（秒），与调度、标签同一基准。
+///
+/// 运行时要按它对齐"哪一步该写记录" —— 把写入判据抄一遍就等于埋一个会漂的副本，
+/// 所以这个基准是公开的。
+pub fn tick_seconds(year: i32, julian_day: i32, seconds: i32) -> Result<i64> {
     ensure!(
         (1..=366).contains(&julian_day) && (0..=86_400).contains(&seconds),
         "calendar time {year}-{julian_day} {seconds}s is out of range"

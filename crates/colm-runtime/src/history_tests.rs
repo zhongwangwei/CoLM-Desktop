@@ -14,6 +14,7 @@ use colm_core::{
     SurfaceLayerScheme, ThermalConductivityScheme,
 };
 use colm_hist::history::{HistoryDimensions, HistorySite};
+use colm_hist::schedule::{HistoryFrequency, HistoryGrouping, SimulationWindow};
 use colm_init::fixtures::{SyntheticRestart, SyntheticSnow};
 use std::path::PathBuf;
 
@@ -334,5 +335,86 @@ fn the_snow_branch_fills_the_snow_span() {
         .get_values::<f64, _>(..)
         .unwrap();
     assert_eq!(scv, vec![state.snow.water_equivalent_kg_m2]);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// 会话把一次真实多步运行写成按调度分组的文件。
+///
+/// 窗口取 CN-Cng 黄金算例的同一段（2008-01-01 00:00 → 01-11 24:00、1800 s 步长、
+/// HOURLY + MONTH），所以调度的记录数必须与黄金文件的 264 条一致 —— 那正是
+/// `colm_hist::schedule` 已经对着黄金文件验证过的性质，这里验证它真的驱动了写出。
+#[test]
+fn the_session_writes_one_record_per_scheduled_hour() {
+    let root = temp_dir("session");
+    let fixture = SyntheticRestart::write(root.join("restart")).unwrap();
+    let template = assemble_standard_lct_template(
+        &RestartStateFiles {
+            constant: fixture.constant.block.clone(),
+            time: fixture.time.block.clone(),
+        },
+        1,
+        physics(),
+    )
+    .unwrap();
+    let mut state = template.state();
+    // 只跑前三个小时（六个 1800 s 步），但用完整窗口开调度。
+    let window = SimulationWindow {
+        start_year: 2008,
+        start_julian_day: 1,
+        start_seconds: 0,
+        end_year: 2008,
+        end_julian_day: 11,
+        end_seconds: 86_400,
+        timestep_seconds: 1800,
+    };
+    let mut session = HistorySession::new(
+        dimensions(),
+        site(),
+        window,
+        HistoryFrequency::Hourly,
+        HistoryGrouping::Month,
+        root.join("out"),
+        "CN-Cng",
+    )
+    .unwrap();
+    assert_eq!(session.remaining(), 264);
+
+    let mut written = Vec::new();
+    for hour in 1..=3 {
+        for half in 1..=2 {
+            // 每一步的结束时刻：第 `hour` 小时的第 `half` 个半步。
+            let end = colm_core::CalendarTime {
+                year: 2008,
+                julian_day: 1,
+                seconds: (hour - 1) * 3600 + half * 1800,
+            };
+            let output = colm_core::standard_lct_soil_step(template.input(&binding()), &mut state)
+                .expect("one step");
+            if let Some(path) = session.push_lct(end, &template, &state, &output).unwrap() {
+                written.push(path);
+            }
+        }
+    }
+    // 三小时过去，写了三条记录，还剩 261 条；文件在换分组时才落盘，所以此时还没写。
+    assert_eq!(session.remaining(), 261);
+    assert!(written.is_empty());
+    written.extend(session.finish().unwrap());
+    assert_eq!(written.len(), 1);
+
+    let file = netcdf::open(&written[0]).unwrap();
+    let times = file
+        .variable("time")
+        .unwrap()
+        .get_values::<i32, _>(..)
+        .unwrap();
+    // 记录数：调度为整段窗口算的是 264 条，而缓冲区是按整段开的 —— 未填的槽位保持 0。
+    assert_eq!(times.len(), 264);
+    // 前三条的标签是 00:30、01:30、02:30 的 minutes since 1900（黄金文件的头三个值）。
+    assert_eq!(times[0], 56_802_270);
+    assert_eq!(times[1], 56_802_330);
+    assert_eq!(times[2], 56_802_390);
+    assert_eq!(times[3], 0);
+    // 变量也写出来了，且带着标签。
+    assert!(file.variable("f_t_soisno").is_some());
     std::fs::remove_dir_all(root).unwrap();
 }

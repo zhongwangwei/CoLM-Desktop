@@ -9,8 +9,14 @@
 //! "这个内核产不出"。补齐它们要么需要更多内核输出，要么需要先核对上游对每个诊断量的
 //! 定义（例如 `h2osoi` 是液态还是液+固态），不是把名字填上就算数。
 
+use std::path::{Path, PathBuf};
+
 use anyhow::{ensure, Context, Result};
-use colm_hist::history::HistoryBuffers;
+use colm_core::{CalendarTime, StandardLctSoilOutput};
+use colm_hist::history::{HistoryBuffers, HistoryDimensions, HistorySite};
+use colm_hist::schedule::{
+    schedule_records, HistoryFrequency, HistoryGrouping, ScheduledRecord, SimulationWindow,
+};
 
 use crate::assembly::StandardLctRestartTemplate;
 use colm_core::{StandardLctSnowSoilState, StandardLctSoilState};
@@ -226,6 +232,170 @@ fn set_columns(
             .with_context(|| format!("cannot write {name} into the history buffers"))?;
     }
     Ok(())
+}
+
+/// 一次运行的 history 写出会话：按调度把每步的值填进记录，分组结束时落盘。
+///
+/// 对齐方式是**写入 tick**：`schedule_records` 给出每条记录的写入时刻（那一步的结束
+/// tick），会话在某一步的结束 tick 命中时写下一条。判据与标签都取自 `colm-hist`，
+/// 这里不重算 —— 重算就是埋一个会与上游漂开的副本。
+#[derive(Debug)]
+pub struct HistorySession {
+    dimensions: HistoryDimensions,
+    site: HistorySite,
+    records: Vec<ScheduledRecord>,
+    cursor: usize,
+    directory: PathBuf,
+    stem: String,
+    open: Option<(String, HistoryBuffers)>,
+}
+
+impl HistorySession {
+    /// 开一个会话。文件名按上游约定拼成 `<stem>_hist_<后缀>.nc`。
+    pub fn new(
+        dimensions: HistoryDimensions,
+        site: HistorySite,
+        window: SimulationWindow,
+        frequency: HistoryFrequency,
+        grouping: HistoryGrouping,
+        directory: impl AsRef<Path>,
+        stem: impl Into<String>,
+    ) -> Result<Self> {
+        let records = schedule_records(window, frequency, grouping)?;
+        ensure!(
+            !records.is_empty(),
+            "the history schedule produced no records; check DEF_HIST_FREQ against the window"
+        );
+        Ok(Self {
+            dimensions,
+            site,
+            records,
+            cursor: 0,
+            directory: directory.as_ref().to_path_buf(),
+            stem: stem.into(),
+            open: None,
+        })
+    }
+
+    /// 还有多少条记录没写（运行结束时应当为 0）。
+    pub fn remaining(&self) -> usize {
+        self.records.len() - self.cursor
+    }
+
+    /// 无雪分支：某一步结束后调用。命中写入时刻就填一条；分组写完就落盘。
+    pub fn push_lct(
+        &mut self,
+        end: CalendarTime,
+        template: &StandardLctRestartTemplate,
+        state: &StandardLctSoilState,
+        output: &StandardLctSoilOutput,
+    ) -> Result<Option<PathBuf>> {
+        let ground = output.energy.ground.temperature_k[0];
+        self.push(end, |buffer, record| {
+            set_lct_state(buffer, record, template, state, ground)?;
+            set_lct_fluxes(buffer, record, &output.water)
+        })
+    }
+
+    /// 积雪分支：与 [`Self::push_lct`] 同构，走雪入口并把 `soil` 那一半当土壤诊断。
+    pub fn push_lct_snow(
+        &mut self,
+        end: CalendarTime,
+        template: &StandardLctRestartTemplate,
+        state: &StandardLctSnowSoilState,
+        output: &colm_core::StandardLctSnowSoilOutput,
+    ) -> Result<Option<PathBuf>> {
+        let ground = output.energy.ground.temperature_k[0];
+        self.push(end, |buffer, record| {
+            set_lct_snow_state(buffer, record, template, state, ground)?;
+            set_lct_fluxes(buffer, record, &output.water.soil)
+        })
+    }
+
+    /// 收尾：把还开着的那个分组落盘。调度已经保证运行结束那一刻会写一条，所以正常
+    /// 情况下这里只是把缓冲区写出。
+    pub fn finish(&mut self) -> Result<Vec<PathBuf>> {
+        let mut written = Vec::new();
+        if let Some((suffix, buffer)) = self.open.take() {
+            written.push(self.write(&suffix, &buffer)?);
+        }
+        Ok(written)
+    }
+
+    fn push(
+        &mut self,
+        end: CalendarTime,
+        fill: impl FnOnce(&mut HistoryBuffers, usize) -> Result<()>,
+    ) -> Result<Option<PathBuf>> {
+        let Some(record) = self.records.get(self.cursor).cloned() else {
+            // 记录写完之后的步不再产生输出 —— 这在"运行比窗口长"时是正常的收尾。
+            return Ok(None);
+        };
+        let tick = tick_of(end)?;
+        if tick != record.write_at_tick {
+            ensure!(
+                tick < record.write_at_tick,
+                "the run reached {tick} but the next history record was due at {}; the schedule \
+                 and the clock disagree",
+                record.write_at_tick
+            );
+            return Ok(None);
+        }
+        // 换分组就先把上一个落了。
+        let mut written = None;
+        if self.open.as_ref().map(|(suffix, _)| suffix) != Some(&record.suffix) {
+            written = self.finish()?.pop();
+            let mut buffer = HistoryBuffers::new(
+                self.dimensions,
+                self.site,
+                self.record_count(&record.suffix),
+            );
+            // 声明本层能负责的变量；写出的文件因此只包含它们。
+            declare_lct_variables(&mut buffer)?;
+            self.open = Some((record.suffix.clone(), buffer));
+        }
+        let (_, buffer) = self.open.as_mut().expect("just opened");
+        buffer.set_time(
+            record.record,
+            i32::try_from(record.label_minutes).with_context(|| {
+                format!(
+                    "the history label {} does not fit an i32",
+                    record.label_minutes
+                )
+            })?,
+        )?;
+        fill(buffer, record.record)?;
+        self.cursor += 1;
+        Ok(written)
+    }
+
+    /// 某个后缀有多少条记录。
+    fn record_count(&self, suffix: &str) -> usize {
+        self.records
+            .iter()
+            .filter(|record| record.suffix == suffix)
+            .count()
+    }
+
+    fn write(&self, suffix: &str, buffer: &HistoryBuffers) -> Result<PathBuf> {
+        std::fs::create_dir_all(&self.directory)
+            .with_context(|| format!("cannot create {}", self.directory.display()))?;
+        let path = self
+            .directory
+            .join(format!("{}_hist_{suffix}.nc", self.stem));
+        buffer.write(&path)?;
+        Ok(path)
+    }
+}
+
+/// `CalendarTime` → tick（秒）。
+fn tick_of(time: CalendarTime) -> Result<i64> {
+    colm_hist::schedule::tick_seconds(
+        time.year,
+        i32::from(time.julian_day),
+        i32::try_from(time.seconds)
+            .with_context(|| format!("{} seconds does not fit an i32", time.seconds))?,
+    )
 }
 
 #[cfg(test)]
