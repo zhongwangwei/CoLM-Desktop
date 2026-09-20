@@ -43,6 +43,9 @@ use colm_init::{
 const BANDS: usize = 2;
 const RADIATION_TYPES: usize = 2;
 
+/// `MOD_Forcing.F90` 里 `forc_xy_po2m = forc_xy_pbot * 0.209`。
+const OXYGEN_VOLUME_FRACTION: f64 = 0.209;
+
 /// 装配一层模板需要的两份重启文件。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RestartStateFiles {
@@ -100,10 +103,9 @@ pub struct LandPhysicsParameters {
     pub boundary_layer_height_m: f64,
     /// `DEF_EMIS`。
     pub ground_emissivity: f64,
-    /// 汽化潜热；上游由地表温度现算，尚未移植。
+    /// 汽化潜热。上游 `MOD_Const_Physical.F90` 里就是常数 `hvap = 2.5104e6`，
+    /// 不随温度变，所以它留在这里而不是每步绑定里。
     pub vaporization_heat_j_kg: f64,
-    pub oxygen_partial_pressure_pa: f64,
-    pub atmospheric_co2_pa: f64,
     /// 喷灌输入；非灌溉算例为 0。
     pub sprinkler_irrigation_kg_m2_s: f64,
     /// `DEF_Runoff_SCHEME` 选的产流分支。
@@ -135,6 +137,11 @@ pub struct StandardLctStepBinding {
     pub seconds_of_day: i32,
     pub greenwich_time: bool,
     pub longitude_radians: f64,
+    /// 大气 CO2 体积分数（ppm × 1e-6），逐月变化。
+    ///
+    /// 分压是**每步**量：上游 `MOD_Forcing` 把 `forc_pbot` 乘上这个分数
+    /// （CO2）与常数 0.209（O2），所以海拔一变化分压就跟着变。
+    pub co2_volume_fraction: f64,
 }
 
 /// 一个 patch 的静态与演化态，已从重启读出并按内核形状组织。
@@ -557,9 +564,11 @@ impl StandardLctRestartTemplate {
                     atmospheric_longwave_w_m2: forcing.downward_longwave_w_m2,
                     sunlit_fraction: 0.0,
                     canopy_longwave_gap_fraction: self.radiation.thermal_gap_fraction,
-                    // 氧气与 CO2 分压来自大气；上游按地表气压与模式 CO2 现算。
-                    oxygen_partial_pressure_pa: physics.oxygen_partial_pressure_pa,
-                    atmospheric_co2_pa: physics.atmospheric_co2_pa,
+                    // 逐层大气分压：`MOD_Forcing` 用 `forc_pbot` 乘体积分数
+                    // （CO2 逐月、O2 恒为 0.209）。写成常数会让高原算例的 O2 偏高
+                    // 约一成，而这一点在任何海平面测试里都看不出来。
+                    oxygen_partial_pressure_pa: forcing.bottom_pressure_pa * OXYGEN_VOLUME_FRACTION,
+                    atmospheric_co2_pa: forcing.bottom_pressure_pa * binding.co2_volume_fraction,
                     soil_roughness_m: physics.soil_roughness_m,
                     snow_roughness_m: physics.snow_roughness_m,
                     snow_cover_fraction: self.snow_cover_fraction,

@@ -14,9 +14,10 @@ use anyhow::{bail, ensure, Context, Result};
 use colm_core::{
     apply_downscaled_runtime_forcing, downscale_forcings, grid_forcing_from_runtime,
     month_day_to_julian, orbital_calendar_day, orbital_cosine_azimuth, standard_lct_soil_step,
-    CalendarTime, DownscalingSolarGeometry, DownscalingTerrain, ForcingDownscalingConfig,
-    ForcingDownscalingInput, LaiUpdateSchedule, RestartFrequency, RuntimeClock, RuntimeForcing,
-    RuntimeStep, StandardLctSoilInput, StandardLctSoilOutput, StandardLctSoilState,
+    CalendarTime, Co2Scenario, DownscalingSolarGeometry, DownscalingTerrain,
+    ForcingDownscalingConfig, ForcingDownscalingInput, LaiUpdateSchedule, RestartFrequency,
+    RuntimeClock, RuntimeForcing, RuntimeStep, StandardLctSoilInput, StandardLctSoilOutput,
+    StandardLctSoilState,
 };
 use colm_forcing::{load_point_forcing, PointForcingSeries};
 use colm_namelist::{parse, Document, Value};
@@ -31,6 +32,8 @@ pub struct PointRuntimeConfig {
     pub spinup_repeats: usize,
     pub lai_update_schedule: LaiUpdateSchedule,
     pub restart_frequency: RestartFrequency,
+    /// `DEF_SSP`：未来 CO2 情景。它只影响 2022 年之后的年份。
+    pub co2_scenario: Co2Scenario,
     pub greenwich: bool,
     pub longitude_degrees: f64,
     pub latitude_degrees: f64,
@@ -82,6 +85,7 @@ pub struct PointRuntime {
     greenwich: bool,
     longitude_degrees: f64,
     latitude_degrees: f64,
+    co2_scenario: Co2Scenario,
 }
 
 impl PointRuntime {
@@ -105,6 +109,7 @@ impl PointRuntime {
             greenwich: config.greenwich,
             longitude_degrees: config.longitude_degrees,
             latitude_degrees: config.latitude_degrees,
+            co2_scenario: config.co2_scenario,
         })
     }
 
@@ -207,12 +212,20 @@ impl PointRuntime {
     {
         let greenwich_time = self.greenwich;
         let longitude_radians = self.longitude_degrees.to_radians();
+        let co2_scenario = self.co2_scenario;
         self.run_with_state(state, |step, next| {
+            let (month, _) = colm_core::month_day(step.clock.forcing_time)?;
             let binding = StandardLctStepBinding {
                 forcing: step.forcing,
                 seconds_of_day: seconds_of_day(step.clock.forcing_time)?,
                 greenwich_time,
                 longitude_radians,
+                // `MOD_Forcing` 每步按年月查 Mauna Loa 月表，再乘 1e-6 转成体积分数。
+                co2_volume_fraction: colm_core::monthly_co2_ppm(
+                    co2_scenario,
+                    step.clock.forcing_time.year,
+                    month,
+                )? * 1.0e-6,
             };
             let output = standard_lct_soil_step(template.input(&binding), next)?;
             on_step(step, &output)
@@ -387,6 +400,7 @@ pub fn read_point_runtime_config(case_namelist: impl AsRef<Path>) -> Result<Poin
             LaiUpdateSchedule::EightDay
         },
         restart_frequency: restart_frequency(&case)?,
+        co2_scenario: co2_scenario(&case)?,
         greenwich: required_bool(&case, "DEF_simulation_time%greenwich")?,
         longitude_degrees: required_real(&case, "SITE_lon_location")?,
         latitude_degrees: required_real(&case, "SITE_lat_location")?,
@@ -408,6 +422,15 @@ fn restart_frequency(document: &Document) -> Result<RestartFrequency> {
             other => bail!("DEF_WRST_FREQ has unsupported value {other:?}"),
         },
         Some(_) => bail!("DEF_WRST_FREQ must be a string"),
+    }
+}
+
+/// `DEF_SSP` 缺省时与上游一致地取 `off`。
+fn co2_scenario(document: &Document) -> Result<Co2Scenario> {
+    match document.get("DEF_SSP") {
+        None => Ok(Co2Scenario::Off),
+        Some(Value::Str(value)) => Co2Scenario::parse(value),
+        Some(_) => bail!("DEF_SSP must be a string"),
     }
 }
 
@@ -733,8 +756,6 @@ mod tests {
             boundary_layer_height_m: 1000.0,
             ground_emissivity: 0.96,
             vaporization_heat_j_kg: 2.5104e6,
-            oxygen_partial_pressure_pa: 21_200.0,
-            atmospheric_co2_pa: 40.0,
             sprinkler_irrigation_kg_m2_s: 0.0,
             runoff_scheme: crate::assembly::StandardLctRunoffScheme::Topmodel,
             topmodel_decay_tuning: 0.1,
@@ -841,6 +862,42 @@ mod tests {
             "a failed step must not advance the soil column"
         );
         assert_eq!(runtime.next_step().unwrap().unwrap().clock.index, 1);
+    }
+
+    /// `DEF_SSP` 决定 2022 年之后用哪张 CO2 表；缺省与上游一致是 `off`。
+    #[test]
+    fn the_case_namelist_selects_the_co2_scenario() {
+        let root = directory("co2-scenario");
+        let case = root.join("case.nml");
+        let forcing = root.join("forcing.nml");
+        write_case(&case, &forcing, "/data/", "POINT");
+        assert_eq!(
+            read_point_runtime_config(&case).unwrap().co2_scenario,
+            Co2Scenario::Off
+        );
+        let contents = std::fs::read_to_string(&case).unwrap();
+        std::fs::write(
+            &case,
+            contents.replace(
+                "DEF_WRST_FREQ='none'",
+                "DEF_SSP='585'\n DEF_WRST_FREQ='none'",
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            read_point_runtime_config(&case).unwrap().co2_scenario,
+            Co2Scenario::Ssp585
+        );
+        // 上游在 `CASE DEFAULT` 里直接停；静默退回 off 会让一份 SSP 算例拿到观测段的 CO2。
+        std::fs::write(
+            &case,
+            contents.replace(
+                "DEF_WRST_FREQ='none'",
+                "DEF_SSP='999'\n DEF_WRST_FREQ='none'",
+            ),
+        )
+        .unwrap();
+        assert!(read_point_runtime_config(&case).is_err());
     }
 
     #[test]

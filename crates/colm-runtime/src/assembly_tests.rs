@@ -73,8 +73,6 @@ fn physics(timestep_seconds: f64) -> LandPhysicsParameters {
         boundary_layer_height_m: 1000.0,
         ground_emissivity: 0.96,
         vaporization_heat_j_kg: 2.5104e6,
-        oxygen_partial_pressure_pa: 21_200.0,
-        atmospheric_co2_pa: 40.0,
         sprinkler_irrigation_kg_m2_s: 0.0,
         runoff_scheme: StandardLctRunoffScheme::Topmodel,
         topmodel_decay_tuning: 0.1,
@@ -101,6 +99,8 @@ fn binding() -> StandardLctStepBinding {
         seconds_of_day: 43_200,
         greenwich_time: false,
         longitude_radians: 0.0,
+        // 2008 年附近约 385 ppm。
+        co2_volume_fraction: 385.04e-6,
     }
 }
 
@@ -348,6 +348,41 @@ fn one_assembled_step_runs_the_ported_lct_chain_from_file_state() {
     assert_eq!(
         input.energy.forcing.air_density_kg_m3,
         other.forcing.air_density_kg_m3
+    );
+}
+
+/// 大气分压是每步量：`MOD_Forcing` 用 `forc_pbot` 乘体积分数算出来，不是常数。
+#[test]
+fn the_oxygen_and_co2_partial_pressures_follow_the_step_pressure() {
+    let (_, template) = assemble("partial-pressures", 1);
+    let mut step = binding();
+    let pressure = step.forcing.bottom_pressure_pa;
+    let input = template.input(&step);
+    assert_eq!(
+        input.energy.leaf_temperature.oxygen_partial_pressure_pa,
+        pressure * 0.209
+    );
+    assert_eq!(
+        input.energy.leaf_temperature.atmospheric_co2_pa,
+        pressure * step.co2_volume_fraction
+    );
+    // 常量 21200 Pa 是海平面的答案；海拔一上来就偏了，所以它不能是模板里的常数。
+    assert_ne!(
+        input.energy.leaf_temperature.oxygen_partial_pressure_pa,
+        21_200.0
+    );
+
+    // 换一个 CO2 体积分数，输入必须跟着换。
+    step.co2_volume_fraction = 1_100.0e-6;
+    let other = template.input(&step);
+    assert_eq!(
+        other.energy.leaf_temperature.atmospheric_co2_pa,
+        pressure * 1_100.0e-6
+    );
+    // 而 O2 只跟气压走，不受 CO2 影响。
+    assert_eq!(
+        other.energy.leaf_temperature.oxygen_partial_pressure_pa,
+        input.energy.leaf_temperature.oxygen_partial_pressure_pa
     );
 }
 

@@ -1181,3 +1181,55 @@ drift 立刻打回（本轮实际踩到两次）。两处要处理：数组加 `
 合成常量强迫下这两条都证明不了什么（气温与秒偏移都不变，漏刷看不出来），所以用的是
 真实文件。这不改变"第三阶段仍是 Fortran `colm.x`"这一事实：`colm-runtime` 至今没有
 可执行文件，`--preprocessors` 也只覆盖前两段。
+
+## 大气分压不再是常数：Mauna Loa CO2 表进入代码生成（2026 年）
+
+`LandPhysicsParameters` 里的 `oxygen_partial_pressure_pa` 与 `atmospheric_co2_pa` 是
+**每步量**，却被当成算例常量给了一次。上游 `MOD_Forcing.F90` 写得很清楚：
+
+```
+pco2m = get_monthly_co2_mlo(year, month)*1.e-6
+CALL block_data_copy (forc_xy_pbot, forc_xy_pco2m, sca = pco2m)
+CALL block_data_copy (forc_xy_pbot, forc_xy_po2m , sca = 0.209_r8 )
+```
+
+即两个分压都是 `forc_pbot` 乘一个体积分数。写成常数 21200 Pa / 40 Pa 只在海平面成立：
+海拔 1000 m 处 `pbot ≈ 90 kPa`，O2 实际约 18.8 kPa，**偏高约一成**；高原算例更甚。
+这正是上一轮修掉的空气密度那一类隐患，只是藏在另外两个字段里。
+
+现在两个分压由 `input()` 按上游公式算：O2 用常数
+`OXYGEN_VOLUME_FRACTION = 0.209`，CO2 用**每步绑定**里的 `co2_volume_fraction`。
+字段从 `LandPhysicsParameters` 移除（少了一个手给错的机会），加进
+`StandardLctStepBinding`。
+
+`vaporization_heat_j_kg` 经核对**不是**每步量：`MOD_Const_Physical.F90` 里就是常数
+`hvap = 2.5104e6`，所以它留在物理参数里，并在注释里记下理由 —— 免得下一轮"顺手"
+把它也搬进绑定。
+
+### CO2 体积分数的来源：`MOD_MonthlyinSituCO2MaunaLoa.F90`
+
+上游按月查 Mauna Loa 观测表，2023 年起按 `DEF_SSP` 切到未来情景。这张表
+（753 行）由 `cargo run -p xtask -- gen-co2mlo` 生成到
+`crates/colm-core/src/co2_generated.rs`（609 行），`crates/colm-core/tests/drift_co2.rs`
+逐字节守住。生成内容是观测段 1849–2022 共 174 行，加五个情景各自的 2023–2100。
+
+生成器遇到的两个坑与 `MOD_Const_LC.F90` 同源，但形态不同：
+
+1. **注释掉的旧年份行就混在同一段里**（`!co2mlo( 2008 ,:) = …`），且年份在括号里
+   带空格（`co2mlo( 1849 ,:)`）。先按 `!` 截断注释、再用宽松空白匹配，缺一不可。
+2. **`off` 情景不是逐行写的**，而是 `co2mlo(2023:eyear,:) = co2mlo(2022,12)`。
+   生成时把它**展开**成逐年一份，Rust 一侧因此没有规则引擎 —— 只有一张可查的表。
+   展开后仍逐情景核对 2023–2100 每一年都有着落，缺一年就报错。
+
+`co2.rs` 里放的是上游 `get_monthly_co2_mlo` 的取值语义：观测段/情景段分界，以及
+两端钳位。钳位是照做而不是"兜底"：上游超出范围时打印警告并返回最早/最晚一条，
+报错会让一个 1849 年之前的算例失败，而上游会给它一个确定值。`DEF_SSP` 的解析则
+**必须报错** —— 上游在 `CASE DEFAULT` 里 `CoLM_stop`，静默退回 `off` 会让一份
+SSP5-8.5 算例拿到观测段的 CO2。
+
+### 测试期望值是读出来的，不是猜的
+
+第一版测试里我猜了三个数（2008-01 = 385.21、SSP5-8.5 的 2100 = 867.19 等），
+全错。实际是 385.04、1135.21——`867.19` 属于 SSP3-7.0。现在期望值逐条对照上游字面量，
+并额外钉住一处容易分错块的地方：**SSP2-4.5 的 2100 年最后两个月在上游里是 867.19**，
+而 SSP3-7.0 整年都是 867.19；只断言"2100 年末值"的话，两个 `CASE` 块分错了也看不出来。

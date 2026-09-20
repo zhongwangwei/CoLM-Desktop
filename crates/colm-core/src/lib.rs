@@ -10,6 +10,8 @@ pub mod bgc;
 pub mod calendar;
 pub mod canopy_layer_profile;
 pub mod canopy_roughness;
+pub mod co2;
+pub mod co2_generated;
 pub mod crop_phenology;
 pub mod forcing_downscaling;
 pub mod glacier;
@@ -96,6 +98,7 @@ pub use canopy_layer_profile::{
     CanopyDiffusivityProfileInput, CanopyProfileRoots, CanopyWindProfileInput,
 };
 pub use canopy_roughness::{canopy_roughness, CanopyRoughness};
+pub use co2::{monthly_co2_ppm, Co2Scenario};
 pub use crop_phenology::{
     crop_phenology_climate_step, crop_phenology_step, CropPhenologyClimateInput,
     CropPhenologyClimateState, CropPhenologyInput, CropPhenologyState,

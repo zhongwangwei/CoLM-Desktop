@@ -65,14 +65,15 @@ jobs:
 
       # 除了需要 PLUMBER2 与 rawdata 的那几个之外，全部在这里跑。
       #
-      # --lib --bins 拿到纯计算的部分；随后六条集成测试各自点名：
-      # judge 与 histmap 只读已入库的黄金文件，roundtrip 与三条 drift 只读
-      # submodule 里的 CoLM 源码 —— 六者都不需要第三方数据。
+      # --lib --bins 拿到纯计算的部分；随后七条集成测试各自点名：
+      # judge 与 histmap 只读已入库的黄金文件，roundtrip 与四条 drift 只读
+      # submodule 里的 CoLM 源码 —— 七者都不需要第三方数据。
       #
-      # histmap 与三条 drift 进这一档的理由与前三条相同：那三张表都是生成的
-      # （MOD_Namelist.F90 / MOD_Hist.F90 / MOD_Const_LC.F90），上游改了而没
-      # 重新生成，只有 drift 会喊；而 histmap 是闸门表唯一的经验校验，落进
-      # 只有自托管 runner 才跑的一档就等于没有。
+      # histmap 与四条 drift 进这一档的理由与前三条相同：那四张表都是生成的
+      # （MOD_Namelist.F90 / MOD_Hist.F90 / MOD_Const_LC.F90 /
+      # MOD_MonthlyinSituCO2MaunaLoa.F90），上游改了而没重新生成，只有 drift
+      # 会喊；而 histmap 是闸门表唯一的经验校验，落进只有自托管 runner 才跑的
+      # 一档就等于没有。
       #
       # 剩下的（colm-srfdata 的 raster/real_sites、colm-forcing 的 met/real_forcing）
       # 要 5.5 GB 的 PLUMBER2 与 38 GB 的 rawdata，只能在 golden 作业里跑。
@@ -96,6 +97,7 @@ jobs:
           cargo test -p oracle --test histmap
           cargo test -p colm-hist --test drift
           cargo test -p colm-core --test drift_landcover
+          cargo test -p colm-core --test drift_co2
           cargo test -p xtask --test kernel_profile
           cargo test -p xtask --test windows_console
           cargo test -p xtask --test ci_golden_status
