@@ -6,6 +6,7 @@
 //! second copy of `colm.x`.
 
 pub mod assembly;
+pub mod history;
 
 use std::path::{Path, PathBuf};
 

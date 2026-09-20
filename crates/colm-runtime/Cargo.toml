@@ -15,10 +15,15 @@ colm-namelist = { path = "../colm-namelist" }
 # 装配层要从写出的 restart 里取静态量与演化态。它属于**执行阶段**，不属于初始化
 # 阶段；把它放进 colm-init 会让那个 crate 变成第二个 colm.x（见其 lib 文档）。
 colm-init = { path = "../colm-init" }
+# history 写出：闸门表 + `HistoryBuffers::write`。它默认不带 netcdf（GUI 那条链
+# 只要闸门表），这里显式开 `io` —— 运行时本来就要链接 netcdf。
+colm-hist = { path = "../colm-hist", features = ["io"] }
 
 [dev-dependencies]
 # 合成 restart 算例只在测试构建里需要，所以 feature 也只开在 dev 依赖上。
 colm-init = { path = "../colm-init", features = ["fixtures"] }
+# 测试要把写出的 history 文件读回来看 schema 与取值。
+netcdf = { workspace = true, features = ["static"] }
 
 [lints]
 workspace = true

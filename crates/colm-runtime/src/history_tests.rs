@@ -1,0 +1,310 @@
+//! history 桥：本层声明的变量能不能真的写出来，以及写出的 schema 是否与黄金文件一致。
+//!
+//! 值只能与本步状态对照（黄金文件是真实 CN-Cng 算例，我们没有它的初始状态），
+//! 但**名字、维度、类型、单位**可以与黄金文件逐项对齐 —— 那是这一层能独立验证的部分。
+
+use super::*;
+use crate::assembly::{
+    assemble_standard_lct_snow_template, assemble_standard_lct_template, LandPhysicsParameters,
+    RestartStateFiles, StandardLctRunoffScheme, StandardLctStepBinding,
+};
+use colm_core::{
+    prepare_runtime_forcing, HydraulicModel, LandCoverScheme, ObservationHeightMode,
+    PrecipitationPhaseScheme, RootFractionScheme, RuntimeForcingInput, StomataOptions,
+    SurfaceLayerScheme, ThermalConductivityScheme,
+};
+use colm_hist::history::{HistoryDimensions, HistorySite};
+use colm_init::fixtures::{SyntheticRestart, SyntheticSnow};
+use std::path::PathBuf;
+
+fn temp_dir(label: &str) -> PathBuf {
+    let path = std::env::temp_dir().join(format!(
+        "colm-runtime-history-{label}-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&path);
+    std::fs::create_dir_all(&path).unwrap();
+    path
+}
+
+fn physics() -> LandPhysicsParameters {
+    LandPhysicsParameters {
+        hydraulic_model: HydraulicModel::VanGenuchten,
+        land_cover_scheme: LandCoverScheme::Igbp,
+        root_fraction_scheme: RootFractionScheme::SchenkJackson,
+        timestep_seconds: 1800.0,
+        precipitation_scheme: PrecipitationPhaseScheme::AirTemperature,
+        surface_resistance_scheme: 1,
+        stress_scheme: 1,
+        surface_layer_scheme: SurfaceLayerScheme::Standard,
+        thermal_conductivity_scheme: ThermalConductivityScheme::Johansen,
+        observation_height_mode: ObservationHeightMode::Absolute,
+        stomata: StomataOptions {
+            use_medlyn: true,
+            use_wue: false,
+            medlyn_g1_override: None,
+            medlyn_g0_override: None,
+            wue_lambda_override: None,
+            ball_berry_slope_override: None,
+            ball_berry_intercept_override: None,
+        },
+        wue_lambda: 2.0,
+        soil_ice_impedance: 6.0,
+        snow_irreducible_saturation: 0.033,
+        impermeable_porosity: 0.05,
+        ponding_limit_mm: 5.0,
+        minimum_soil_potential_mm: -1.0e8,
+        maximum_dew_mm: 0.1,
+        maximum_transpiration_mm_s: 0.001,
+        surface_temperature_factor: 0.5,
+        crank_nicolson_factor: 0.5,
+        soil_roughness_m: 0.01,
+        snow_roughness_m: 0.0024,
+        wind_height_m: 30.0,
+        temperature_height_m: 30.0,
+        humidity_height_m: 30.0,
+        boundary_layer_height_m: 1000.0,
+        ground_emissivity: 0.96,
+        vaporization_heat_j_kg: 2.5104e6,
+        sprinkler_irrigation_kg_m2_s: 0.0,
+        runoff_scheme: StandardLctRunoffScheme::Topmodel,
+        topmodel_decay_tuning: 0.1,
+    }
+}
+
+fn binding() -> StandardLctStepBinding {
+    StandardLctStepBinding {
+        forcing: prepare_runtime_forcing(RuntimeForcingInput {
+            air_temperature_k: 290.0,
+            specific_humidity: 0.008,
+            surface_pressure_pa: 101_325.0,
+            precipitation_kg_m2_s: 1.0e-4,
+            eastward_wind_m_s: 3.0,
+            northward_or_scalar_wind_m_s: 1.0,
+            wind_is_vector: true,
+            downward_shortwave_w_m2: 450.0,
+            downward_longwave_w_m2: 350.0,
+            calendar_day: 172.5,
+            longitude_radians: 0.0,
+            latitude_radians: 0.5,
+        })
+        .unwrap(),
+        seconds_of_day: 43_200,
+        greenwich_time: false,
+        longitude_radians: 0.0,
+        co2_volume_fraction: 385.04e-6,
+    }
+}
+
+/// POINT 算例的 history 维度：一个 patch。
+fn dimensions() -> HistoryDimensions {
+    HistoryDimensions {
+        patch: 1,
+        soil: 10,
+        lake: 10,
+        snow_layers: 5,
+        vegnodes: 4,
+        band: 2,
+        radiation_types: 2,
+        sensor: 1,
+    }
+}
+
+fn site() -> HistorySite {
+    HistorySite {
+        latitude_degrees: 23.0,
+        longitude_degrees: 113.0,
+    }
+}
+
+#[test]
+fn the_bridge_writes_the_state_variables_it_declares() {
+    let root = temp_dir("write");
+    let fixture = SyntheticRestart::write(root.join("restart")).unwrap();
+    let template = assemble_standard_lct_template(
+        &RestartStateFiles {
+            constant: fixture.constant.block.clone(),
+            time: fixture.time.block.clone(),
+        },
+        1,
+        physics(),
+    )
+    .unwrap();
+    let mut state = template.state();
+    let output = colm_core::standard_lct_soil_step(template.input(&binding()), &mut state)
+        .expect("one step");
+
+    let mut buffer = HistoryBuffers::new(dimensions(), site(), 1);
+    declare_lct_state(&mut buffer).unwrap();
+    set_lct_state(
+        &mut buffer,
+        0,
+        &template,
+        &state,
+        output.energy.ground.temperature_k[0],
+    )
+    .unwrap();
+    buffer.set_time(0, 56_802_270).unwrap();
+    let path = root.join("history.nc");
+    buffer.write(&path).unwrap();
+
+    let file = netcdf::open(&path).unwrap();
+    // 声明的十三个变量都在，名字带 `f_` 前缀。
+    for name in LCT_STATE_VARIABLES {
+        assert!(
+            file.variable(&format!("f_{name}")).is_some(),
+            "f_{name} is missing from the written history file"
+        );
+    }
+    // 维度顺序与黄金文件一致：`t_soisno` 是 `(time, patch, soilsnow)`。
+    let variable = file.variable("f_t_soisno").unwrap();
+    let dims = variable
+        .dimensions()
+        .iter()
+        .map(|dimension| dimension.name())
+        .collect::<Vec<_>>();
+    assert_eq!(dims, vec!["time", "patch", "soilsnow"]);
+    let values = variable.get_values::<f64, _>(..).unwrap();
+    // 前五个槽位是雪（无雪分支下为 0），后面是土壤温度。
+    assert!(values[..5].iter().all(|value| *value == 0.0));
+    for (layer, expected) in state.temperature_k.iter().enumerate() {
+        assert_eq!(values[5 + layer], *expected, "soil layer {layer}");
+    }
+    let ground = file
+        .variable("f_t_grnd")
+        .unwrap()
+        .get_values::<f64, _>(..)
+        .unwrap();
+    assert_eq!(ground, vec![output.energy.ground.temperature_k[0]]);
+    let lai = file
+        .variable("f_lai")
+        .unwrap()
+        .get_values::<f64, _>(..)
+        .unwrap();
+    assert_eq!(lai, vec![template.leaf_area_index]);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// 写出的 schema 必须与黄金文件对得上：名字、维度、单位、长名逐项比。
+#[test]
+fn the_written_schema_matches_the_golden_file_for_the_shared_variables() {
+    let golden = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../oracle/golden/CN-Cng_hist_2008-01.nc");
+    if !golden.exists() {
+        // 黄金文件入库，缺失就是仓库坏了。
+        panic!("the golden history file is missing at {}", golden.display());
+    }
+    let root = temp_dir("schema");
+    let fixture = SyntheticRestart::write(root.join("restart")).unwrap();
+    let template = assemble_standard_lct_template(
+        &RestartStateFiles {
+            constant: fixture.constant.block.clone(),
+            time: fixture.time.block.clone(),
+        },
+        1,
+        physics(),
+    )
+    .unwrap();
+    let state = template.state();
+    let mut buffer = HistoryBuffers::new(dimensions(), site(), 1);
+    declare_lct_state(&mut buffer).unwrap();
+    set_lct_state(&mut buffer, 0, &template, &state, state.temperature_k[0]).unwrap();
+    buffer.set_time(0, 56_802_270).unwrap();
+    let path = root.join("history.nc");
+    buffer.write(&path).unwrap();
+
+    let written = netcdf::open(&path).unwrap();
+    let reference = netcdf::open(&golden).unwrap();
+    for name in LCT_STATE_VARIABLES {
+        let file_name = format!("f_{name}");
+        let ours = written.variable(&file_name).unwrap();
+        let theirs = reference
+            .variable(&file_name)
+            .unwrap_or_else(|| panic!("{file_name} is not in the golden file"));
+        let dims = |variable: &netcdf::Variable<'_>| {
+            variable
+                .dimensions()
+                .iter()
+                .map(|dimension| dimension.name())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(dims(&ours), dims(&theirs), "dims of {file_name}");
+        assert_eq!(ours.vartype(), theirs.vartype(), "type of {file_name}");
+        for attribute in ["units", "long_name"] {
+            let mine = ours
+                .attribute_value(attribute)
+                .and_then(Result::ok)
+                .map(|value| format!("{value:?}"));
+            let gold = theirs
+                .attribute_value(attribute)
+                .and_then(Result::ok)
+                .map(|value| format!("{value:?}"));
+            assert_eq!(mine, gold, "{attribute} of {file_name}");
+        }
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// 积雪分支走雪入口，`soilsnow` 的雪段来自雪列而不是零。
+#[test]
+fn the_snow_branch_fills_the_snow_span() {
+    let root = temp_dir("snow");
+    let fixture = SyntheticRestart::write_with_snow(
+        root.join("restart"),
+        SyntheticSnow {
+            depth_m: 0.15,
+            water_equivalent_kg_m2: 45.0,
+            ground_snow_fraction: 1.0,
+            temperature_k: 268.0,
+        },
+    )
+    .unwrap();
+    let template = assemble_standard_lct_snow_template(
+        &RestartStateFiles {
+            constant: fixture.constant.block.clone(),
+            time: fixture.time.block.clone(),
+        },
+        1,
+        physics(),
+    )
+    .unwrap();
+    let mut state = template.snow_state();
+    let output =
+        colm_core::standard_lct_snow_soil_step(template.snow_input(&binding()), &mut state)
+            .expect("one snow step");
+
+    let mut buffer = HistoryBuffers::new(dimensions(), site(), 1);
+    declare_lct_state(&mut buffer).unwrap();
+    set_lct_snow_state(
+        &mut buffer,
+        0,
+        &template,
+        &state,
+        output.energy.ground.temperature_k[0],
+    )
+    .unwrap();
+    buffer.set_time(0, 56_802_270).unwrap();
+    let path = root.join("history.nc");
+    buffer.write(&path).unwrap();
+
+    let file = netcdf::open(&path).unwrap();
+    let values = file
+        .variable("f_t_soisno")
+        .unwrap()
+        .get_values::<f64, _>(..)
+        .unwrap();
+    let slots = template.snow_slots();
+    for (slot, expected) in state.snow.temperature_k.iter().enumerate() {
+        assert_eq!(values[slot], *expected, "snow slot {slot}");
+    }
+    for (layer, expected) in state.soil_temperature_k.iter().enumerate() {
+        assert_eq!(values[slots + layer], *expected, "soil layer {layer}");
+    }
+    let scv = file
+        .variable("f_scv")
+        .unwrap()
+        .get_values::<f64, _>(..)
+        .unwrap();
+    assert_eq!(scv, vec![state.snow.water_equivalent_kg_m2]);
+    std::fs::remove_dir_all(root).unwrap();
+}

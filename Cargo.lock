@@ -149,8 +149,10 @@ dependencies = [
  "anyhow",
  "colm-core",
  "colm-forcing",
+ "colm-hist",
  "colm-init",
  "colm-namelist",
+ "netcdf",
 ]
 
 [[package]]
