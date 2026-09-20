@@ -3260,3 +3260,42 @@ rst = 1./(laisun/rssun + laisha/rssha)
 本窗口土壤冻结、`smp ≈ -2.3e6 mm`，若 Rust 的 `rstfac` 落在 ~0.02 而 Fortran 是 1，
 正好是这个 50 倍。下一步先打印两侧的 `rstfac`/`rssun`/`rssha` 对比，再决定是
 `eroot` 的移植问题还是 `rssun`/`rssha` 的符号处理。
+
+## 蒸腾偏小的入口定位到**夜间净同化的符号**（2026 年，实测）
+
+上一节把 50 倍的蒸腾差记成"最可能是 `rstfac`"。打印之后否掉了一半：
+
+```
+STEP  40 stress=3.005e-1 etr=2.64e-10 tleaf=261.88 rst=5.000000e5
+STEP  80 stress=1.676e-1 etr=1.07e-7  tleaf=268.30 rst=3.5166e3
+STEP 200 stress=8.868e-2 etr=0.0      tleaf=258.29 rst=5.000000e5
+STEP 528 stress=4.568e-2 etr=3.09e-10 tleaf=254.03 rst=5.000000e5
+```
+
+* **`stress` 不是 0.02**，是 0.046~0.30 —— 有胁迫，但只解释 3~20 倍，不是 50 倍。
+* **`rst` 恰好等于 `5.000000e5` 很多步**。这不是算出来的巧合，是**两个分数分量都顶到上限**：
+  `stomata` 末行是 `rst = min(1e6, 1/(gsh2o*tlef/tprcor))`，单叶值封顶 1e6，
+  回到 `rst = 1/(laisun/rssun + laisha/rssha)` 就得到 `1/(2e-6) = 5e5`。
+  也就是说本仓库的气孔是**关死**的。
+
+而 Fortran 的 `rst = -2.53491436`（负的）。负值只可能来自 **Ball-Berry 支**里
+
+```fortran
+hcdma = ei*co2st / ( gradm_used*assmt )     ! assmt < 0 时 hcdma < 0
+...
+es = max( es, 1.e-2)
+gsh2o = es/hcdma + bintc                    ! 仍为负
+rst   = min( 1.e6, 1./(gsh2o*tlef/tprcor) ) ! 取到负值
+```
+
+所以两侧的分歧**不在气孔阻力这一步，而在它的上游**：`assmt`（净同化）的符号。
+夜间呼吸主导时 Fortran 的 `assmt < 0` → `hcdma < 0` → `gsh2o < 0` → `rst < 0`；
+本仓库的净同化是**正的小量** → `hcdma > 0` → `gsh2o ≈ 4.5e-5 mol m-2 s-1`（几乎为零但仍为正）
+→ `rst` 顶到上限 → 蒸腾被掐死。
+
+两侧都走 Ball-Berry（`DEF_USE_MEDLYNST` 在 schema 与 Fortran 里都默认 `.false.`，已核对），
+所以不是分支选错。
+
+**下一步**：在同一个夜间步上打印两侧的 `assimsun`/`respc**`/`assmt`/`hcdma`。
+净同化的符号差通常来自呼吸项（`respc`）或 `update_photosyn` 的夜间分支，
+这是一个单点、可判定的比较。
