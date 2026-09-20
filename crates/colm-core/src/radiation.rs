@@ -256,7 +256,9 @@ pub fn cold_start_pft_broadband_radiation_with_snow(
     )
 }
 
-enum TwoStreamKind {
+/// 上游 `twostream`（地块）与 `twostream_mod`（PFT 向量）是**两套**实现，
+/// 换用会让初始化出来的冠层吸收率变化，所以这里把选择做成显式枚举而不是一个 bool。
+pub(crate) enum TwoStreamKind {
     LandCover { usgs_land_cover: bool },
     Pft,
 }
@@ -323,7 +325,7 @@ fn cold_start_broadband_radiation_with_snow_using(
         ground_snow_fraction,
         ground_temperature_k,
     )?;
-    cold_start_broadband_radiation_from_ground_using(
+    broadband_radiation_from_ground_using(
         patch_type,
         ground_state,
         optics,
@@ -334,6 +336,7 @@ fn cold_start_broadband_radiation_with_snow_using(
         use_lct,
         vegetation_snow,
         two_stream_kind,
+        cold_start_thermal_gap_fraction(patch_type, lai, sai),
     )
 }
 
@@ -355,7 +358,7 @@ pub fn cold_start_broadband_radiation_from_ground(
     usgs_land_cover: bool,
     vegetation_snow: bool,
 ) -> Result<ColdStartRadiation> {
-    cold_start_broadband_radiation_from_ground_using(
+    broadband_radiation_from_ground_using(
         patch_type,
         ground,
         optics,
@@ -366,6 +369,7 @@ pub fn cold_start_broadband_radiation_from_ground(
         use_lct,
         vegetation_snow,
         TwoStreamKind::LandCover { usgs_land_cover },
+        cold_start_thermal_gap_fraction(patch_type, lai, sai),
     )
 }
 
@@ -381,7 +385,7 @@ pub fn cold_start_pft_broadband_radiation_from_ground(
     cosine_zenith: f64,
     vegetation_snow: bool,
 ) -> Result<ColdStartRadiation> {
-    cold_start_broadband_radiation_from_ground_using(
+    broadband_radiation_from_ground_using(
         patch_type,
         ground,
         optics,
@@ -392,11 +396,28 @@ pub fn cold_start_pft_broadband_radiation_from_ground(
         true,
         vegetation_snow,
         TwoStreamKind::Pft,
+        cold_start_thermal_gap_fraction(patch_type, lai, sai),
     )
 }
 
+/// 冷启动时 `thermk` 的起点。
+///
+/// 上游 `albland` 一进来就把 `thermk` 无条件写 1 只发生在 `lai+sai <= 1e-6` 时
+/// （`MOD_Albedo.F90:225-228`，注释写明"夜间长波用上一步的值"）；有冠层时它保留上一次
+/// 调用留下的值，而第一次调用之前它只有 `MOD_Vars_*` 分配时的 `spval`。
+/// `patchtype >= 3` 又不跑冠层解算器，所以那一支留下的就是 `spval`。
+fn cold_start_thermal_gap_fraction(patch_type: i32, lai: f64, sai: f64) -> f64 {
+    if lai + sai <= 1.0e-6 {
+        1.0
+    } else if patch_type >= 3 {
+        crate::MISSING
+    } else {
+        0.0
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
-fn cold_start_broadband_radiation_from_ground_using(
+pub(crate) fn broadband_radiation_from_ground_using(
     patch_type: i32,
     ground_state: ColdStartGroundAlbedo,
     optics: LeafOptics,
@@ -407,6 +428,7 @@ fn cold_start_broadband_radiation_from_ground_using(
     use_lct: bool,
     vegetation_snow: bool,
     two_stream_kind: TwoStreamKind,
+    previous_thermal_gap_fraction: f64,
 ) -> Result<ColdStartRadiation> {
     validate_canopy_from_ground_inputs(
         ground_state,
@@ -420,13 +442,11 @@ fn cold_start_broadband_radiation_from_ground_using(
     let mut sunlit_absorption = [[0.0; RADIATION_TYPES]; BANDS];
     let mut shaded_absorption = [[0.0; RADIATION_TYPES]; BANDS];
     let mut transmission = [[0.0, 1.0, 1.0]; BANDS];
+    // 无冠层时上游把它重置为 1；有冠层时它保留上一次的值，直到 `twostream` 覆盖它。
     let mut thermal_gap_fraction = if lai + sai <= 1.0e-6 {
         1.0
-    } else if patch_type >= 3 {
-        // No canopy solver runs here; cold thermk retains its allocated spval.
-        crate::MISSING
     } else {
-        0.0
+        previous_thermal_gap_fraction
     };
     let mut direct_extinction = 1.0;
     let mut diffuse_extinction = 0.718;
@@ -518,6 +538,48 @@ fn validate_canopy_from_ground_inputs(
     Ok(())
 }
 
+/// `albland` 第 2 节的土壤/水体地面反照率。
+///
+/// `soil_surface_wetness` 就是上游的 `ssw = min(1., 1e-3*wliq_soisno(1)/dz_soisno(1))`
+/// —— 冷启动时由土壤第一层的水量与厚度现算，运行时由 `CoLMMAIN.F90:2135` 直接给。
+pub(crate) fn soil_albedo(
+    patch_type: i32,
+    soil: SoilReflectance,
+    soil_surface_wetness: f64,
+    ground_temperature_k: f64,
+    cosine_zenith: f64,
+) -> Result<[[f64; RADIATION_TYPES]; BANDS]> {
+    ensure!(
+        soil_surface_wetness.is_finite()
+            && (0.0..=1.0).contains(&soil_surface_wetness)
+            && ground_temperature_k.is_finite()
+            && cosine_zenith.is_finite()
+            && cosine_zenith > 0.0,
+        "ground-albedo inputs are invalid"
+    );
+    for value in [
+        soil.saturated_visible,
+        soil.dry_visible,
+        soil.saturated_near_infrared,
+        soil.dry_near_infrared,
+    ] {
+        ensure!(value.is_finite(), "soil reflectance must be finite");
+    }
+    Ok(if patch_type <= 2 {
+        let increase = (0.11 - 0.40 * soil_surface_wetness).max(0.0);
+        let visible = (soil.saturated_visible + increase).min(soil.dry_visible);
+        let near_infrared = (soil.saturated_near_infrared + increase).min(soil.dry_near_infrared);
+        [[visible; RADIATION_TYPES], [near_infrared; RADIATION_TYPES]]
+    } else if patch_type == 3 {
+        [[0.8; RADIATION_TYPES], [0.55; RADIATION_TYPES]]
+    } else if ground_temperature_k < 273.16 {
+        [[0.6; RADIATION_TYPES], [0.4; RADIATION_TYPES]]
+    } else {
+        let albedo_water = 0.05 / (cosine_zenith + 0.15);
+        [[albedo_water, 0.1], [albedo_water, 0.1]]
+    })
+}
+
 /// Applies CoLM's cold-start soil/water and non-SNICAR snow albedo branches.
 #[allow(clippy::too_many_arguments)]
 pub fn cold_start_ground_albedo(
@@ -543,28 +605,13 @@ pub fn cold_start_ground_albedo(
             && cosine_zenith > 0.0,
         "cold-start ground-albedo inputs are invalid"
     );
-    for value in [
-        soil.saturated_visible,
-        soil.dry_visible,
-        soil.saturated_near_infrared,
-        soil.dry_near_infrared,
-    ] {
-        ensure!(value.is_finite(), "soil reflectance must be finite");
-    }
-    let soil = if patch_type <= 2 {
-        let wetness = (1.0e-3 * soil_liquid_water_kg_m2 / soil_thickness_m).min(1.0);
-        let increase = (0.11 - 0.40 * wetness).max(0.0);
-        let visible = (soil.saturated_visible + increase).min(soil.dry_visible);
-        let near_infrared = (soil.saturated_near_infrared + increase).min(soil.dry_near_infrared);
-        [[visible; RADIATION_TYPES], [near_infrared; RADIATION_TYPES]]
-    } else if patch_type == 3 {
-        [[0.8; RADIATION_TYPES], [0.55; RADIATION_TYPES]]
-    } else if ground_temperature_k < 273.16 {
-        [[0.6; RADIATION_TYPES], [0.4; RADIATION_TYPES]]
-    } else {
-        let albedo_water = 0.05 / (cosine_zenith + 0.15);
-        [[albedo_water, 0.1], [albedo_water, 0.1]]
-    };
+    let soil = soil_albedo(
+        patch_type,
+        soil,
+        (1.0e-3 * soil_liquid_water_kg_m2 / soil_thickness_m).min(1.0),
+        ground_temperature_k,
+        cosine_zenith,
+    )?;
     let (snow, snow_age) =
         generic_snow_albedo(snow_depth_m * 250.0, ground_temperature_k, cosine_zenith)?;
     Ok(ColdStartGroundAlbedo {
@@ -589,21 +636,29 @@ pub fn mix_ground_albedo(
     })
 }
 
-/// `albland`'s non-SNICAR snow-age/albedo branch for a freshly initialized column.
-pub(crate) fn generic_snow_albedo(
+/// `albland` 的非 SNICAR 雪面反照率，用于**运行期**（雪龄是状态、不是从零起算）。
+///
+/// 上游 `MOD_Albedo.F90:341-370`：`albsno` 的四个值由 `sanal0 = 0.85`（可见光）与
+/// `snal1 = 0.65`（近红外）经雪龄衰减与天顶角订正得到。冷启动的
+/// [`generic_snow_albedo`] 是它的特例（`deltim = 1800`、`scvold = scv`、`sag = 0`），
+/// 两者必须给出同一组数，否则"从重启续跑"和"从冷启动起跑"在第一个晴天就会分开。
+pub(crate) fn aged_snow_albedo(
     snow_water_equivalent_mm: f64,
+    previous_snow_water_equivalent_mm: f64,
     ground_temperature_k: f64,
     cosine_zenith: f64,
+    time_step_seconds: f64,
+    snow_age: f64,
 ) -> Result<([[f64; RADIATION_TYPES]; BANDS], f64)> {
     if snow_water_equivalent_mm <= 0.0 {
-        return Ok(([[1.0; RADIATION_TYPES]; BANDS], 0.0));
+        return Ok(([[1.0; RADIATION_TYPES]; BANDS], snow_age));
     }
     let snow_age = update_snow_age(
-        1800.0,
+        time_step_seconds,
         ground_temperature_k,
         snow_water_equivalent_mm,
-        snow_water_equivalent_mm,
-        0.0,
+        previous_snow_water_equivalent_mm,
+        snow_age,
     )?;
     let age = 1.0 - 1.0 / (1.0 + snow_age);
     let direct_correction = ((1.5 / (1.0 + 4.0 * cosine_zenith)) - 0.5).max(0.0);
@@ -613,6 +668,26 @@ pub(crate) fn generic_snow_albedo(
         [direct, diffuse]
     };
     Ok(([snow_band(0.85, 0.2), snow_band(0.65, 0.5)], snow_age))
+}
+
+/// `albland`'s non-SNICAR snow-age/albedo branch for a freshly initialized column.
+///
+/// 冷启动就是 [`aged_snow_albedo`] 的一次求值：上游 `mkinidata` 首次调用 `albland` 时
+/// `deltim = 1800`、`scvold = scv`、`sag = 0`。两处**必须**共用同一个式子 —— 分开写
+/// 会让"从冷启动起跑"和"从重启续跑"在第一个晴天给出两组雪面反照率。
+pub(crate) fn generic_snow_albedo(
+    snow_water_equivalent_mm: f64,
+    ground_temperature_k: f64,
+    cosine_zenith: f64,
+) -> Result<([[f64; RADIATION_TYPES]; BANDS], f64)> {
+    aged_snow_albedo(
+        snow_water_equivalent_mm,
+        snow_water_equivalent_mm,
+        ground_temperature_k,
+        cosine_zenith,
+        1800.0,
+        0.0,
+    )
 }
 
 // Shared by broadband and spectral LCT/PFT kernels in MOD_Albedo(_HiRes).

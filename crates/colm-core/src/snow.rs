@@ -238,6 +238,84 @@ pub struct SnowWaterOutcome {
     pub layer_drainage_kg_m2: Vec<f64>,
 }
 
+/// `MOD_SnowFraction:snowfraction` 的三个输出。
+///
+/// `wt`/`sigf` 只影响冠层几何（`CoLMMAIN.F90:2096-2102`：`sai = tsai*sigf`，
+/// `DEF_VEG_SNOW` 打开时还有 `lai = tlai*sigf`），`fsno` 影响地面反照率与
+/// `netsolar` 的土壤/雪吸收拆分。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SnowFraction {
+    /// `wt`：被积雪埋住的植被比例 [-]。
+    pub vegetation_snow_fraction: f64,
+    /// `sigf`：未被雪埋的植被比例，无冠层时为 1 [-]。
+    pub vegetation_free_fraction: f64,
+    /// `fsno`：被雪盖住的地面比例 [-]。
+    pub ground_snow_fraction: f64,
+}
+
+/// 移植 `MOD_SnowFraction:snowfraction`。
+///
+/// 上游无冠层（`lai+sai <= 1e-6`）时把 `wt` 置 0、`sigf` 置 1；有冠层时按
+/// `wt = 0.1*snowdp/z0m` 的埋没比例折算。地面雪盖用
+/// `fsno = tanh(snowdp/(2.5*zlnd*fmelt))`、`fmelt = (scv/snowdp/100)^exponent`，
+/// 只在 `snowdp > 0` 时计算，否则 `fsno = 0`。
+///
+/// **`z0m` 是本步 `THERMAL` 刚算出的冠层动量粗糙度，不是常数。** 上游在每步末尾
+/// 才调用本函数（`CoLMMAIN.F90:2095`），用的正是这一步更新后的 `z0m`；用装配期的
+/// 固定值会让 `fsno` 的埋没项与地面反照率都停在启动时刻。
+///
+/// `zlnd` 是**裸土**粗糙度（`param%z0s`，本仓库 `physics.soil_roughness_m`），
+/// 与 `z0m` 不是一回事。
+pub fn snow_fraction(
+    leaf_area_index: f64,
+    stem_area_index: f64,
+    momentum_roughness_m: f64,
+    soil_roughness_m: f64,
+    snow_water_equivalent_mm: f64,
+    snow_depth_m: f64,
+    cover_exponent: f64,
+) -> Result<SnowFraction> {
+    ensure!(
+        leaf_area_index.is_finite()
+            && leaf_area_index >= 0.0
+            && stem_area_index.is_finite()
+            && stem_area_index >= 0.0
+            && momentum_roughness_m.is_finite()
+            && momentum_roughness_m > 0.0
+            && soil_roughness_m.is_finite()
+            && soil_roughness_m > 0.0
+            && snow_water_equivalent_mm.is_finite()
+            && snow_water_equivalent_mm >= 0.0
+            && snow_depth_m.is_finite()
+            && snow_depth_m >= 0.0
+            && cover_exponent.is_finite()
+            && cover_exponent > 0.0,
+        "snow-fraction inputs are invalid"
+    );
+
+    let (vegetation_snow_fraction, vegetation_free_fraction) =
+        if leaf_area_index + stem_area_index > 1.0e-6 {
+            let buried = 0.1 * snow_depth_m / momentum_roughness_m;
+            let buried = buried / (1.0 + buried);
+            (buried, 1.0 - buried)
+        } else {
+            (0.0, 1.0)
+        };
+
+    let ground_snow_fraction = if snow_depth_m > 0.0 {
+        let melting_factor = (snow_water_equivalent_mm / snow_depth_m / 100.0).powf(cover_exponent);
+        (snow_depth_m / (2.5 * soil_roughness_m * melting_factor)).tanh()
+    } else {
+        0.0
+    };
+
+    Ok(SnowFraction {
+        vegetation_snow_fraction,
+        vegetation_free_fraction,
+        ground_snow_fraction,
+    })
+}
+
 /// Ports `MOD_Albedo:snowage` for the non-SNICAR broadband path.
 ///
 /// `snow_water_equivalent_mm` and `previous_snow_water_equivalent_mm` are

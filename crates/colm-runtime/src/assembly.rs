@@ -30,10 +30,11 @@ use colm_core::{
     root_fraction, soil_hydraulic_models, soil_thermal_inputs, CanopyWater, ClassConstants,
     ColdStartRadiation, HydraulicModel, LandCoverScheme, LeafBiochemistry, LeafTemperatureOptions,
     LeafTemperatureState, ObservationHeightMode, PrecipitationPhaseScheme, RestartSnowSlots,
-    RootFractionScheme, RuntimeSnowColumn, SoilField, SoilHydraulicModel, SoilState,
-    SoilThermalInput, StandardLctSnowSoilInput, StandardLctSnowSoilState, StandardLctSoilInput,
-    StandardLctSoilState, StomataOptions, SurfaceLayerScheme, ThermalConductivityScheme,
-    TopmodelMethod, Water2014Runoff, Water2014SoilFluxes, Water2014SoilState,
+    RootFractionScheme, RuntimeSnowColumn, SoilField, SoilHydraulicModel, SoilReflectance,
+    SoilState, SoilThermalInput, StandardLctSnowSoilInput, StandardLctSnowSoilState,
+    StandardLctSoilInput, StandardLctSoilState, StomataOptions, SurfaceLayerScheme,
+    ThermalConductivityScheme, TopmodelMethod, Water2014Runoff, Water2014SoilFluxes,
+    Water2014SoilState,
 };
 use colm_init::{
     colm_soil_grid, RestartFile, RestartOverride, SOIL_FIELDS_COMMON, SOIL_FIELDS_THERMAL,
@@ -132,6 +133,8 @@ pub struct LandPhysicsParameters {
     pub surface_temperature_factor: f64,
     pub crank_nicolson_factor: f64,
     pub soil_roughness_m: f64,
+    /// `DEF_TUNING_SNOW_COVER_EXPONENT`：`snowfraction` 的雪密度指数。
+    pub snow_cover_exponent: f64,
     pub snow_roughness_m: f64,
     pub wind_height_m: f64,
     pub temperature_height_m: f64,
@@ -205,6 +208,15 @@ struct RestartColumns {
     matric_potential_mm: Vec<f64>,
     /// `hk`：同 `smp` 的形状。
     hydraulic_conductivity_mm_s: Vec<f64>,
+    /// `lai`/`sai`/`sigf`：冠层几何，每步末尾按雪盖重算（见
+    /// [`Self::prepare_surface_optics`]）。
+    leaf_area_index: Vec<f64>,
+    stem_area_index: Vec<f64>,
+    vegetation_free_fraction: Vec<f64>,
+    /// `thermk`/`extkb`/`extkd`：冠层光学，`albland` 每步重算。
+    thermal_gap_fraction: Vec<f64>,
+    direct_extinction: Vec<f64>,
+    diffuse_extinction: Vec<f64>,
 }
 
 /// 续跑写出要用、但**状态里没有**的最后一步输出。
@@ -225,6 +237,26 @@ pub struct EvolvedStepOutput<'a> {
     /// 本步的能量链输出。表面诊断量（相似函数、2 m 气温湿度、粗糙度……）都在里面，
     /// 它们都是 `intent(out)`，状态里没有。
     pub energy: &'a colm_core::StandardLctEnergyOutput,
+}
+
+/// 一次「准备下一步表面光学」需要从步输出里取的量。
+///
+/// `previous_snow_water_equivalent_mm` 是**本步开始时**的 `scv`（上游的 `scvold`，
+/// `CoLMMAIN.F90:814`）—— `snowage` 用它算 `dels = 0.1*max(0, scv-scvold)`，
+/// 也就是"这一步新积了多少雪"。用本步结束时的 `scv` 顶替会让 `dels` 恒为 0，
+/// 雪龄只增不减。
+#[derive(Debug, Clone, Copy)]
+pub struct SurfaceOpticsStep {
+    /// 本步的 `coszen`，**未截断**：上游先用它判夜间。
+    pub cosine_zenith: f64,
+    /// 本步能量链算出的地面温度 `t_grnd` [K]。
+    pub ground_temperature_k: f64,
+    /// 本步 `THERMAL` 算出的冠层动量粗糙度 `z0m` [m]。
+    pub momentum_roughness_m: f64,
+    /// 本步的 `fwet_snow`。
+    pub wet_snow_fraction: f64,
+    /// 本步开始时的 `scv` [mm]。
+    pub previous_snow_water_equivalent_mm: f64,
 }
 
 /// 表面诊断量的**整变量缓冲**（长度 = patch 数），从时间重启读进来。
@@ -392,9 +424,26 @@ pub struct StandardLctRestartTemplate {
     pub leaf: LeafTemperatureState,
     pub temperature_k: Vec<f64>,
     pub water: Water2014SoilState,
+    /// 重启里的 `lai`/`sai`：**第一步**用的冠层几何（上游也是从重启读进来开跑）。
+    /// 之后每步末尾由 [`Self::prepare_surface_optics`] 按雪盖重算。
     pub leaf_area_index: f64,
     pub stem_area_index: f64,
+    /// 时间变量 `tlai`/`tsai`：`snowfraction` 的输入。
+    ///
+    /// 不能拿上面的 `lai`/`sai` 代替：那对已经乘过一次 `sigf`，再乘一次会让雪盖的
+    /// 影响按步累积。上游只在 `DEF_LAI_MONTHLY`/`DYN_PHENOLOGY` 下改这两个量，
+    /// 本分支从重启读到的就是整段窗口的常数。
+    pub temporal_leaf_area_index: f64,
+    pub temporal_stem_area_index: f64,
     pub snow_cover_fraction: f64,
+    /// 重启里的 `sigf`：第一步的 `sai = tsai*sigf` 用的就是它。
+    pub snow_free_vegetation_fraction: f64,
+    /// 常数重启里的四个宽带裸土反照率（`soil_s_v_alb` 等）。
+    ///
+    /// **不能**用 `land_cover_soil_reflectance` 顶替：那是地类色表给的默认值，而
+    /// `mksrfdata` 会把 SITE 的观测写进常数重启 —— 实测 CN-Cng 是
+    /// 0.14/0.25/0.28/0.39，与 IGBP 草地的色表并不相同。
+    pub soil_reflectance: SoilReflectance,
     /// 地类常量表给出、重启里没有的几项。
     ///
     /// `land_class` 就是重启里的 `patchclass`（上游 `MOD_Const_LC` 查表用的地类号），
@@ -590,6 +639,12 @@ fn assemble(
         // 所以 Rust 产出的重启也必须带上它们，否则不是一份合法的续跑底稿。
         matric_potential_mm: time.floats("smp")?.to_vec(),
         hydraulic_conductivity_mm_s: time.floats("hk")?.to_vec(),
+        leaf_area_index: time.floats("lai")?.to_vec(),
+        stem_area_index: time.floats("sai")?.to_vec(),
+        vegetation_free_fraction: time.floats("sigf")?.to_vec(),
+        thermal_gap_fraction: time.floats("thermk")?.to_vec(),
+        direct_extinction: time.floats("extkb")?.to_vec(),
+        diffuse_extinction: time.floats("extkd")?.to_vec(),
     };
     let surface_diagnostics = SurfaceDiagnostics::read(&time)?;
     let radiation_fields = RadiationFields::read(&time)?;
@@ -660,7 +715,16 @@ fn assemble(
     };
     let leaf_area_index = scalar(&time, "lai", patch)?;
     let stem_area_index = scalar(&time, "sai", patch)?;
+    let temporal_leaf_area_index = scalar(&time, "tlai", patch)?;
+    let temporal_stem_area_index = scalar(&time, "tsai", patch)?;
     let snow_cover_fraction = scalar(&time, "fsno", patch)?;
+    let snow_free_vegetation_fraction = scalar(&time, "sigf", patch)?;
+    let soil_reflectance = SoilReflectance {
+        saturated_visible: scalar(&constant, "soil_s_v_alb", patch)?,
+        dry_visible: scalar(&constant, "soil_d_v_alb", patch)?,
+        saturated_near_infrared: scalar(&constant, "soil_s_n_alb", patch)?,
+        dry_near_infrared: scalar(&constant, "soil_d_n_alb", patch)?,
+    };
 
     ensure!(
         physics.timestep_seconds > 0.0,
@@ -785,7 +849,11 @@ fn assemble(
         water,
         leaf_area_index,
         stem_area_index,
+        temporal_leaf_area_index,
+        temporal_stem_area_index,
         snow_cover_fraction,
+        snow_free_vegetation_fraction,
+        soil_reflectance,
         land_class,
         wue_lambda: class.wue_lambda(),
         root_fraction,
@@ -812,6 +880,13 @@ impl StandardLctRestartTemplate {
             energy: colm_core::StandardLctEnergyState {
                 radiation: self.radiation.clone(),
                 leaf: self.leaf,
+                // 第一步用重启里的 `lai`/`sai`；`prepare_surface_optics` 之后每步重算。
+                canopy: colm_core::CanopyGeometry {
+                    leaf_area_index: self.leaf_area_index,
+                    stem_area_index: self.stem_area_index,
+                    // 重启里的 `sigf` 是上一次写出时的值；第一步的 `sai` 就是它乘出来的。
+                    vegetation_free_fraction: self.snow_free_vegetation_fraction,
+                },
             },
             temperature_k: self.temperature_k.clone(),
             water: self.water.clone(),
@@ -1098,11 +1173,78 @@ impl StandardLctRestartTemplate {
             energy: colm_core::StandardLctEnergyState {
                 radiation: self.radiation.clone(),
                 leaf: self.leaf,
+                // 第一步用重启里的 `lai`/`sai`；`prepare_surface_optics` 之后每步重算。
+                canopy: colm_core::CanopyGeometry {
+                    leaf_area_index: self.leaf_area_index,
+                    stem_area_index: self.stem_area_index,
+                    // 重启里的 `sigf` 是上一次写出时的值；第一步的 `sai` 就是它乘出来的。
+                    vegetation_free_fraction: self.snow_free_vegetation_fraction,
+                },
             },
             snow: self.snow.clone(),
             soil_temperature_k: self.temperature_k.clone(),
             soil_water: self.water.clone(),
         }
+    }
+
+    /// 上游 `CoLMMAIN` 每步末尾的「Preparation for the next time step」
+    /// （`CoLMMAIN.F90:2068-2200`）。
+    ///
+    /// 用**本步的输出**（`z0m`、`t_grnd`、`fwet_snow`）与**本步结束时的状态**
+    /// （雪列、土壤第一层的液态水）重算下一步的 `lai`/`sai`/`sigf`/`fsno`/`sag`
+    /// 与全部光学系数。上游把它放在时间循环体末尾而不是任何物理内核里，所以本仓库
+    /// 也让它留在 driver 侧。
+    ///
+    /// `sag` 与 `fsno` 写回 `state.snow`，冠层几何写回 `state.energy.canopy`，
+    /// 光学系数就地写进 `state.energy.radiation`。
+    pub fn prepare_surface_optics(
+        &self,
+        state: &mut StandardLctSnowSoilState,
+        step: SurfaceOpticsStep,
+    ) -> Result<()> {
+        ensure!(
+            state.soil_water.liquid_water_kg_m2.len() == self.layer_thickness_m.len(),
+            "the surface-optics preparation needs one liquid-water value per soil layer"
+        );
+        let optics = colm_core::prepare_surface_optics(
+            colm_core::SurfaceOpticsInput {
+                patch_type: self.patch_type,
+                time_step_seconds: self.physics.timestep_seconds,
+                cosine_zenith: step.cosine_zenith,
+                ground_temperature_k: step.ground_temperature_k,
+                temporal_leaf_area_index: self.temporal_leaf_area_index,
+                temporal_stem_area_index: self.temporal_stem_area_index,
+                momentum_roughness_m: step.momentum_roughness_m,
+                soil_roughness_m: self.physics.soil_roughness_m,
+                snow_cover_exponent: self.physics.snow_cover_exponent,
+                soil: self.soil_reflectance,
+                soil_liquid_water_kg_m2: state.soil_water.liquid_water_kg_m2[0],
+                soil_thickness_m: self.layer_thickness_m[0],
+                optics: colm_core::leaf_optics_from_land_cover_one_based(
+                    self.physics.land_cover_scheme,
+                    i32::try_from(self.land_class)?,
+                )?,
+                wet_snow_fraction: step.wet_snow_fraction,
+                snow_water_equivalent_mm: state.snow.water_equivalent_kg_m2,
+                previous_snow_water_equivalent_mm: step.previous_snow_water_equivalent_mm,
+                snow_depth_m: state.snow.depth_m,
+                snow_layers: state.snow.layer_count,
+                snow_age: state.snow.age,
+                // 本分支只有 `DEF_USE_LCT` 这一条编排。
+                use_lct: true,
+                usgs_land_cover: self.physics.land_cover_scheme == LandCoverScheme::Usgs,
+                vegetation_snow: self.physics.vegetation_snow,
+            },
+            &mut state.energy.radiation,
+        )?;
+        state.snow.ground_snow_fraction = optics.ground_snow_fraction;
+        state.snow.age = optics.snow_age;
+        state.energy.canopy = colm_core::CanopyGeometry {
+            leaf_area_index: optics.leaf_area_index,
+            stem_area_index: optics.stem_area_index,
+            vegetation_free_fraction: optics.vegetation_free_fraction,
+        };
+        Ok(())
     }
 
     /// 绑定本步的 forcing 与时钟，得到积雪分支的内核输入。
@@ -1261,9 +1403,58 @@ impl StandardLctRestartTemplate {
             RestartOverride::new("smp", matric_potential),
             RestartOverride::new("hk", hydraulic_conductivity),
         ];
-        // 逐波段辐射量：`net_solar` 每步都会改它们（吸收率被守恒修正缩放），
-        // 取本步结束后的状态。
+        // 冠层几何与冠层光学：上游都是**时间变量**，每步末尾由
+        // 「Preparation for the next time step」重算（`CoLMMAIN.F90:2096-2102` 的
+        // `lai`/`sai`/`sigf` 与 `albland` 写出的 `thermk`/`extkb`/`extkd`）。
+        // 不写回就等于让下一次续跑从启动时刻的冠层起步。
         let optics = &state.energy.radiation;
+        let canopy = state.energy.canopy;
+        for (name, source, value) in [
+            (
+                "lai",
+                &self.restart_columns.leaf_area_index,
+                canopy.leaf_area_index,
+            ),
+            (
+                "sai",
+                &self.restart_columns.stem_area_index,
+                canopy.stem_area_index,
+            ),
+            (
+                "sigf",
+                &self.restart_columns.vegetation_free_fraction,
+                canopy.vegetation_free_fraction,
+            ),
+        ] {
+            overrides.push(RestartOverride::new(
+                name,
+                replaced(source, self.patch, name, value)?,
+            ));
+        }
+        for (name, source, value) in [
+            (
+                "thermk",
+                &self.restart_columns.thermal_gap_fraction,
+                optics.thermal_gap_fraction,
+            ),
+            (
+                "extkb",
+                &self.restart_columns.direct_extinction,
+                optics.direct_extinction,
+            ),
+            (
+                "extkd",
+                &self.restart_columns.diffuse_extinction,
+                optics.diffuse_extinction,
+            ),
+        ] {
+            overrides.push(RestartOverride::new(
+                name,
+                replaced(source, self.patch, name, value)?,
+            ));
+        }
+        // 逐波段辐射量：`net_solar` 每步都会改它们（吸收率被守恒修正缩放），
+        // 取本步结束后的状态。`optics` 在上面已经取过。
         for (name, source, matrix) in [
             ("alb", &self.radiation_fields.albedo, optics.albedo),
             (

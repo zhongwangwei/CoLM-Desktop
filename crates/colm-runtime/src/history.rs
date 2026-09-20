@@ -347,6 +347,8 @@ pub fn set_lct_state(
             snow_depth_m: 0.0,
             snow_water_equivalent_mm: 0.0,
             ground_snow_fraction: 0.0,
+            leaf_area_index: state.energy.canopy.leaf_area_index,
+            stem_area_index: state.energy.canopy.stem_area_index,
         },
     )
 }
@@ -382,6 +384,10 @@ pub fn set_lct_snow_state(
             snow_depth_m: state.snow.depth_m,
             snow_water_equivalent_mm: state.snow.water_equivalent_kg_m2,
             ground_snow_fraction: state.snow.ground_snow_fraction,
+            // 这两项来自**状态**而不是模板：上游每步末尾按雪盖重算它们，
+            // 而 history 是在那之后写的（见 `run_restart_standard_lct_snow_with_history`）。
+            leaf_area_index: state.energy.canopy.leaf_area_index,
+            stem_area_index: state.energy.canopy.stem_area_index,
         },
     )
 }
@@ -396,6 +402,8 @@ struct Scalars {
     snow_depth_m: f64,
     snow_water_equivalent_mm: f64,
     ground_snow_fraction: f64,
+    leaf_area_index: f64,
+    stem_area_index: f64,
 }
 
 /// 把雪段与土段拼成 history 的 `soilsnow` 顺序（雪在前），再逐变量写进去。
@@ -437,8 +445,8 @@ fn set_columns(
         ("wdsrf", scalars.surface_water_mm),
         ("snowdp", scalars.snow_depth_m),
         ("scv", scalars.snow_water_equivalent_mm),
-        ("lai", template.leaf_area_index),
-        ("sai", template.stem_area_index),
+        ("lai", scalars.leaf_area_index),
+        ("sai", scalars.stem_area_index),
         ("fsno", scalars.ground_snow_fraction),
     ] {
         ensure!(

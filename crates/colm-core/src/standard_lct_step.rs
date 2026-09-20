@@ -43,6 +43,21 @@ pub struct StandardLctEnergyInput<'a> {
     pub ground_temperature: GroundTemperatureInput<'a>,
 }
 
+/// 上游的 `lai`/`sai` 时间变量（`CoLMMAIN.F90:2097-2102`）。
+///
+/// 它们**不是**装配期的常数：每步末尾的「Preparation for the next time step」按雪盖
+/// 重算 —— `sai = tsai*sigf`，`DEF_VEG_SNOW` 打开时还有 `lai = tlai*sigf`。截留、
+/// `netsolar` 与叶温三层都读它们，所以必须跟着状态走，否则一个从无雪起步的算例
+/// 会整段用启动时刻的冠层几何。装配期给的那一对是**第一步**的值（上游也是从重启读）。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CanopyGeometry {
+    pub leaf_area_index: f64,
+    pub stem_area_index: f64,
+    /// `sigf`：未被雪埋的植被比例。内核不用它，但上游把它当时间变量写进重启
+    /// （`MOD_Vars_TimeVariables.F90:1181`），续跑时需要它才能重现同一条 `sai` 序列。
+    pub vegetation_free_fraction: f64,
+}
+
 /// Persistent radiation and canopy state for [`standard_lct_energy_step`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct StandardLctEnergyState {
@@ -50,6 +65,26 @@ pub struct StandardLctEnergyState {
     pub radiation: ColdStartRadiation,
     /// Leaf temperature and canopy water pools carried between time steps.
     pub leaf: LeafTemperatureState,
+    /// `lai`/`sai`：见 [`CanopyGeometry`]。
+    pub canopy: CanopyGeometry,
+}
+
+/// 用状态里的冠层几何覆盖输入里的 `lai`/`sai`。
+///
+/// 上游没有「装配期的 LAI」这种东西：`lai`/`sai` 是 module 时间变量，三个下游
+/// （截留、`netsolar`、`THERMAL`）读的都是同一个当前值。这里把覆盖集中在入口处，
+/// 免得三个调用点各写一遍、漏掉一个就静默用旧值。
+fn with_state_canopy(
+    mut input: StandardLctEnergyInput<'_>,
+    canopy: CanopyGeometry,
+) -> StandardLctEnergyInput<'_> {
+    input.interception.leaf_area_index = canopy.leaf_area_index;
+    input.interception.stem_area_index = canopy.stem_area_index;
+    input.solar.leaf_area_index = canopy.leaf_area_index;
+    input.solar.stem_area_index = canopy.stem_area_index;
+    input.leaf_temperature.leaf_area_index = canopy.leaf_area_index;
+    input.leaf_temperature.stem_area_index = canopy.stem_area_index;
+    input
 }
 
 /// Persistent no-snow standard-LCT state for [`standard_lct_soil_step`].
@@ -150,6 +185,7 @@ pub fn standard_lct_energy_step(
     input: StandardLctEnergyInput<'_>,
     state: &mut StandardLctEnergyState,
 ) -> Result<StandardLctEnergyOutput> {
+    let input = with_state_canopy(input, state.canopy);
     validate(input)?;
     let prepared = prepare_energy(input, state)?;
     finish_energy_step(input, state, prepared)
@@ -412,6 +448,10 @@ pub fn standard_lct_snow_soil_step(
     input: StandardLctSnowSoilInput<'_>,
     state: &mut StandardLctSnowSoilState,
 ) -> Result<StandardLctSnowSoilOutput> {
+    let input = StandardLctSnowSoilInput {
+        energy: with_state_canopy(input.energy, state.energy.canopy),
+        ..input
+    };
     let (snow_layers, template_snow_layers) = validate_snow_soil_step(input, state)?;
     validate(input.energy)?;
     remember_snow_ice_fraction(&mut state.snow);

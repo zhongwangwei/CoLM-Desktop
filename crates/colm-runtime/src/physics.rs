@@ -125,6 +125,8 @@ pub fn land_physics_parameters(
         surface_temperature_factor: real(document, "DEF_TUNING_CAPR")?,
         crank_nicolson_factor: real(document, "DEF_TUNING_CNFAC")?,
         soil_roughness_m: real(document, "DEF_TUNING_ZLND")?,
+        // `snowfraction` 的指数（`MOD_Namelist.F90:618`，默认 1）。
+        snow_cover_exponent: real(document, "DEF_TUNING_SNOW_COVER_EXPONENT")?,
         snow_roughness_m: real(document, "DEF_TUNING_ZSNO")?,
         // 观测高度**不在这里解析**：它挂在 `nl_forcing_type` 上（在 forcing namelist 里），
         // 而且 POINT 下文件里的 `reference_height_*` 会覆盖它

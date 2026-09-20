@@ -2691,3 +2691,125 @@ Fortran 的 `fsno = 0.0176` 只能来自另一处 —— 上游的 `MOD_SnowFrac
 
 雪既反照又隔热，`fsno` 缺失直接影响地表能量收支，所以这两项是下一轮的目标
 （`t_grnd` 现在仍差 +2.45 K）。
+
+## 运行期的表面光学系数：`fsno`/`sag`/`alb` 原来永远停在启动时刻（2026 年，实测）
+
+上一节把剩下的缺口记成"浅雪的 `fsno` 与 `sag`"。追下去发现根因比那更宽：
+**上游每步末尾有一整节「Preparation for the next time step」（`CoLMMAIN.F90:2068-2200`），
+本仓库只在 `mkinidata` 里跑过一次它的冷启动版本。** 于是运行期的
+
+```
+lai, sai, sigf, fsno, sag, alb, ssun, ssha, ssoi, ssno, thermk, extkb, extkd
+```
+
+全部停在启动时刻那一次的值。实测对齐算例 528 步之后：Fortran 的 `fsno = 0.017568`、
+`sag = 0.001243`、`extkb = 1.0`（夜间复位），而 Rust 的 `fsno`/`sag` 是 0、
+`extkb` 是 `659.919`（冷启动时 `coszen` 被钳到 0.001 后算出来的值）。
+
+### 那一段到底做了什么
+
+```
+calday = calendarday(idate)          ! idate 已被 TICKTIME 推到**步末**
+coszen = orb_coszen(calday, patchlonr, patchlatr)
+CALL snowfraction (tlai, tsai, z0m, zlnd, scv, snowdp, wt, sigf, fsno)
+lai = tlai ; sai = tsai * sigf       ! DEF_VEG_SNOW 打开时 lai = tlai * sigf
+ssw = min(1., 1e-3*wliq_soisno(1)/dz_soisno(1))
+CALL albland (..., wt, fsno, scv, scvold, sag, ssw, ...)
+```
+
+关键在**它读的是本步的输出、写的是下一步的输入**：`z0m`、`t_grnd`、`fwet_snow` 来自这一步
+的 `THERMAL`，`scv`/`snowdp` 来自这一步的雪列收尾。所以它只能是 driver 的一节，
+不能塞进任何一个物理内核。
+
+### 移植
+
+* `MOD_SnowFraction:snowfraction` → `colm_core::snow_fraction`。`fsno` 只在
+  `snowdp > 0` 时算，`fmelt = (scv/snowdp/100)**DEF_TUNING_SNOW_COVER_EXPONENT`，
+  `fsno = tanh(snowdp/(2.5*zlnd*fmelt))`。**`z0m` 是本步 `THERMAL` 刚算出的冠层动量
+  粗糙度，不是常数**；`zlnd` 是裸土粗糙度（`DEF_TUNING_ZLND`，默认 0.01）。
+* `albland` 的运行期非 SNICAR 分支 → `colm_core::albland`（私有）+ 公开入口
+  `colm_core::prepare_surface_optics`。它复用已有的 `twostream`（`two_stream`）
+  与冷启动用的 `broadband_radiation_from_ground_using`，只把雪龄换成状态、
+  加上夜间提前返回。为此把 `generic_snow_albedo` 改成
+  `aged_snow_albedo(swe, swe, tg, czen, 1800, 0)` 的一次求值 —— 冷启动与运行期
+  **必须**共用同一个式子。
+* `lai`/`sai`/`sigf` 是时间变量，加进 `StandardLctEnergyState.canopy`
+  （`CanopyGeometry`）；内核入口用状态里的一对覆盖输入里三个子结构
+  （截留、`netsolar`、`THERMAL`）的 `lai`/`sai`。装配期给的那一对只是第一步的值。
+* 装配层补读：时间重启的 `tlai`/`tsai`/`sigf`，常数重启的
+  `soil_s_v_alb`/`soil_d_v_alb`/`soil_s_n_alb`/`soil_d_n_alb`。
+  **裸土反照率不能用地类色表现算**：`mksrfdata` 会把 SITE 观测写进常数重启，
+  实测 CN-Cng 是 0.14/0.25/0.28/0.39，与 IGBP 草地的色表不同。
+* 续跑写出补上 `lai`/`sai`/`sigf`/`thermk`/`extkb`/`extkd`（`alb` 那一组本来就在写）。
+* history 里的 `fsno`/`lai`/`sai` 要取**准备之后**的值：上游 `hist_out`
+  （`CoLM.F90:537`）在 `CoLMDRIVER`（`:512`）之后跑，而末尾那一节在 `CoLMDRIVER` 里面，
+  所以 history 记的是下一步那一组。
+
+### 验证：两个独立的 Fortran 对照点
+
+**一、`albland` 的整条链**。`oracle/work/CN-Cng-noon` 的重启（2008-01-11 12:00，
+`scv = 0`，白天）里存着 `albland` 的全部**输入**（`coszen`/`t_grnd`/`tlai`/`tsai`/`z0m`/
+`fwet_snow`/`wliq_soisno(1)`/`scv`）与全部**输出**（`alb`/`ssun`/`ssha`/`ssoi`/`ssno`/
+`thermk`/`extkb`/`extkd`），是一个闭合的对照点。用它的输入调 Rust 的实现，
+八个输出全部对上到 float32 的量化精度（< 1e-6）：
+
+```
+alb  = 0.168370 0.425790 0.167836 0.405187    (盘上顺序 rtyp*2+band)
+ssun = 0.367243 0.064590 0.212202 0.040314
+ssha = 0.024830 0.009192 0.099148 0.019457
+ssoi = 0.439557 0.500428 0.520814 0.535041
+thermk = 0.546975   extkb = 1.377969   extkd = 0.719
+```
+
+两个坑记在这里：**（a）** 那个探针算例**没有**关 `DEF_VEG_SNOW`（只有 `CN-Cng-aligned`
+写了 `.false.`），所以 `twostream` 里"植被上的雪"那一支是打开的；关掉它 `alb` 差 2.6e-4。
+**（b）** 重启里的 `alb` 是 `[rtyp0 band0, rtyp0 band1, rtyp1 band0, rtyp1 band1]`
+（盘上维度 `(patch, rtyp, band)`），而 Fortran 的 `albv(iw,1)` 是 `(band, rtyp)`；
+两处都显式转置，写反了 `ssha` 会整体错位。
+
+**二、雪面反照率分支**。CN-Cng 的窗口里雪只在最后一个**夜间**步之前形成，
+白天那一支从来没被写到重启上，所以另起一个独立 gfortran 程序逐字复制
+`MOD_Albedo.F90:341-370`（`snowage` + 天顶角订正 + `snal0/snal1`）取四组参照，
+`aged_snow_albedo` 逐个对上到 1e-15。
+
+### 实测：528 步对齐窗口
+
+| | Fortran | 修之前 | 修之后 |
+|---|---|---|---|
+| `fsno` | 0.017568 | **0** | 0.005611 |
+| `sag` | 0.001243 | **0** | 0.001354 |
+| `extkb` | 1.0 | **659.919** | **1.0** |
+| `extkd` | 0.718 | 0.719 | **0.718** |
+| `thermk` | 0.547061 | 0.546975 | 0.547003 |
+| `lai` | 0.2 | 0.2 | 0.2 |
+| `sai` | 0.449830 | 0.449830（没写回） | 0.449944 |
+| `t_grnd` | 255.5818 | 258.0294（+2.448） | 257.7974（**+2.216**） |
+
+`alb`/`ssun`/`ssha`/`ssoi`/`ssno` 在午夜写点两边都是夜间复位值（1 / 0 / 0 / 0 / 0），
+逐位相同。`fsno` 的残差不是公式问题：Rust 的 `scv` 只有 Fortran 的三分之一
+（0.015822 / 0.047188），`fsno` 由 `scv`/`snowdp` 决定，所以它跟着偏小；
+`fsno` 的公式本身在 `snow_fraction` 的单测里对着 Fortran 重启核对过。
+
+### 白天对照点与暴露出的下一个缺陷：`coszen` 取的是步首而不是步末
+
+为了在**有雪且是白天**的点上验证，另建了 `oracle/work/CN-Cng-aligned-day1`
+（= 对齐算例，`end_day = 1`、`end_sec = 43200`），跑 Fortran 得 2008-01-01 12:00 的重启。
+它的 history 说明这场雪在第 6 小时积到 `scv = 0.047188` 之后**再没化过**，所以
+第 1 天正午与第 12 天午夜的 `scv`/`snowdp` 逐位相同 —— 这解释了上一节里
+"两个不同日期却有同一个 `scv`"的疑问。
+
+在这个点上 Rust 的 `alb = 0.192738` 而 Fortran 是 `0.169983`，差 0.023。顺着一查：
+
+```
+Fortran: coszen = 0.3798207139      Rust: coszen = 0.3741924546
+```
+
+差值 0.00563 ≈ 半个步长的太阳时角。原因是**上游有两个不同的 `coszen`**：
+
+* `MOD_Forcing` 在 `TICKTIME` **之前**算 `calday = calendarday(idate)`
+  （`MOD_Forcing.F90:752`）→ **步首**，用于短波直散拆分与地形降尺度；
+* `CoLMMAIN` 在 `TICKTIME` **之后**算（`CoLMMAIN.F90:2076`）→ **步末**，
+  用于 `albland` 并写进重启的 `coszen`。
+
+（`CoLM.F90:480` 的 `CALL TICKTIME(deltim, idate)` 在 `CoLMDRIVER`（`:512`）之前。）
+本仓库只算了一个步首的 `coszen`，两处都用它。这是下一轮的目标。

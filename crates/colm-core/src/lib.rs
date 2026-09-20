@@ -48,6 +48,7 @@ pub mod soil_surface_resistance;
 pub mod soil_water;
 pub mod standard_lct_step;
 pub mod static_state;
+pub mod surface_optics;
 pub mod thermal_properties;
 pub mod thermal_water;
 pub mod time_state;
@@ -193,7 +194,8 @@ pub use radiation::{
     cold_start_broadband_radiation, cold_start_broadband_radiation_from_ground,
     cold_start_broadband_radiation_with_snow, cold_start_ground_albedo,
     cold_start_pft_broadband_radiation_from_ground, cold_start_pft_broadband_radiation_with_snow,
-    leaf_optics_from_land_cover_one_based, ColdStartGroundAlbedo, ColdStartRadiation, LeafOptics,
+    leaf_optics_from_land_cover_one_based, mix_ground_albedo, ColdStartGroundAlbedo,
+    ColdStartRadiation, LeafOptics,
 };
 pub use root_uptake::{root_uptake, RootUptakeInput, RootUptakeState};
 pub use runoff::{
@@ -205,18 +207,19 @@ pub use runoff::{
 pub use runtime_clock::{LaiUpdateSchedule, RestartFrequency, RuntimeClock, RuntimeStep};
 pub use runtime_forcing::{prepare_runtime_forcing, RuntimeForcing, RuntimeForcingInput};
 pub use snow::{
-    add_new_snow, combine_snow_layers, compact_snow_layers, divide_snow_layers, snow_water,
-    update_snow_age, NewSnowInput, NewSnowOutcome, RestartSnowSlots, RuntimeSnowColumn,
-    SnowToSoilTransfer, SnowWaterInput, SnowWaterOutcome,
+    add_new_snow, combine_snow_layers, compact_snow_layers, divide_snow_layers, snow_fraction,
+    snow_water, update_snow_age, NewSnowInput, NewSnowOutcome, RestartSnowSlots, RuntimeSnowColumn,
+    SnowFraction, SnowToSoilTransfer, SnowWaterInput, SnowWaterOutcome,
 };
 pub use soil_surface_resistance::{soil_surface_resistance, SoilSurfaceResistanceInput};
 pub use soil_water::{
     solve_campbell_soil_water, update_groundwater, update_groundwater_topmodel,
     CampbellSoilWaterInput, CampbellSoilWaterState, GroundwaterInput, GroundwaterState,
 };
+pub use surface_optics::{prepare_surface_optics, SurfaceOptics, SurfaceOpticsInput};
 
 pub use standard_lct_step::{
-    standard_lct_energy_step, standard_lct_snow_soil_step, standard_lct_soil_step,
+    standard_lct_energy_step, standard_lct_snow_soil_step, standard_lct_soil_step, CanopyGeometry,
     StandardLctEnergyInput, StandardLctEnergyOutput, StandardLctEnergyState,
     StandardLctSnowSoilInput, StandardLctSnowSoilOutput, StandardLctSnowSoilState,
     StandardLctSoilInput, StandardLctSoilOutput, StandardLctSoilState,

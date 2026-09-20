@@ -4,12 +4,11 @@ use super::*;
 fn snow_age_matches_mod_albedo_and_resets_for_no_or_antarctic_snow() {
     // Standalone gfortran reference from MOD_Albedo:snowage.
     assert!(
-        (update_snow_age(1800.0, 270.0, 25.0, 25.0, 0.0).unwrap() - 0.002_204_192_232_638_983)
-            .abs()
+        (update_snow_age(1800.0, 270.0, 25.0, 25.0, 0.0).unwrap() - 0.002204192232638983).abs()
             < 1.0e-15
     );
     assert!(
-        (update_snow_age(3600.0, 268.0, 12.0, 10.0, 0.4).unwrap() - 0.322_973_468_400_602_3).abs()
+        (update_snow_age(3600.0, 268.0, 12.0, 10.0, 0.4).unwrap() - 0.3229734684006023).abs()
             < 1.0e-14
     );
     assert_eq!(update_snow_age(1800.0, 270.0, 0.0, 10.0, 0.9).unwrap(), 0.0);
@@ -18,6 +17,89 @@ fn snow_age_matches_mod_albedo_and_resets_for_no_or_antarctic_snow() {
         0.0
     );
     assert!(update_snow_age(0.0, 270.0, 1.0, 1.0, 0.0).is_err());
+}
+
+#[test]
+fn snow_fraction_matches_mod_snowfraction() {
+    // 独立 gfortran 程序（`-fdefault-real-8`）逐字复制 MOD_SnowFraction:snowfraction，
+    // 指数取默认 1.0。第一组用的正是 CN-Cng 对齐算例 2008-01-12 00:00 重启里的
+    // `tlai/tsai/z0m/zlnd/scv/snowdp`，Fortran 自己算出 `fsno = 0.01756794`。
+    for (lai, sai, z0m, zlnd, scv, snowdp, wt, sigf, fsno) in [
+        (
+            0.2,
+            0.45,
+            0.120_559_31,
+            0.01,
+            0.047_187_64,
+            0.000_455_27,
+            0.000377489005685568,
+            0.9996225109943144,
+            0.01756811294015333,
+        ),
+        // `snowdp == 0`：`fsno` 恒为 0，`sigf` 为 1。
+        (0.2, 0.45, 0.120_572_65, 0.01, 0.0, 0.0, 0.0, 1.0, 0.0),
+        // 无冠层：`wt`/`sigf` 走 ELSE 支，而 `fsno` 照算。
+        (
+            0.0,
+            0.0,
+            0.1,
+            0.01,
+            5.0,
+            0.02,
+            0.0,
+            1.0,
+            0.30950692121263845,
+        ),
+        (
+            1.0,
+            0.5,
+            0.05,
+            0.01,
+            20.0,
+            0.1,
+            0.16666666666666666,
+            0.8333333333333334,
+            0.9640275800758169,
+        ),
+        (
+            0.5,
+            0.1,
+            0.2,
+            0.02,
+            100.0,
+            0.5,
+            0.2,
+            0.8,
+            0.9999092042625951,
+        ),
+        // 深雪饱和：`tanh` 到 1。
+        (
+            1.0,
+            0.0,
+            0.3,
+            0.01,
+            0.0,
+            0.005,
+            0.0016638935108153079,
+            0.9983361064891847,
+            1.0,
+        ),
+    ] {
+        let fraction = snow_fraction(lai, sai, z0m, zlnd, scv, snowdp, 1.0).unwrap();
+        assert!((fraction.vegetation_snow_fraction - wt).abs() < 1.0e-15);
+        assert!((fraction.vegetation_free_fraction - sigf).abs() < 1.0e-15);
+        assert!((fraction.ground_snow_fraction - fsno).abs() < 1.0e-15);
+    }
+    // 上游的 `snowdp > 0` 判据是**严格**大于：0 深度不给 `fmelt` 一个 `0/0`。
+    assert_eq!(
+        snow_fraction(0.2, 0.45, 0.1, 0.01, 0.0, 0.0, 1.0)
+            .unwrap()
+            .ground_snow_fraction,
+        0.0
+    );
+    // `z0m <= 0` 会让 `wt` 变成 `-0.1*snowdp/0`；上游不检查，这里拒绝。
+    assert!(snow_fraction(0.2, 0.45, 0.0, 0.01, 1.0, 0.01, 1.0).is_err());
+    assert!(snow_fraction(0.2, 0.45, 0.1, 0.0, 1.0, 0.01, 1.0).is_err());
 }
 
 fn input() -> NewSnowInput {
@@ -39,7 +121,7 @@ fn fresh_and_existing_snow_match_current_fortran_newsnow() {
     assert_eq!(state.layer_count, -1);
     close(state.water_equivalent_kg_m2, 3.6);
     close(state.depth_m, 0.036);
-    close(state.ground_snow_fraction, 0.345_214_038_860_646_6);
+    close(state.ground_snow_fraction, 0.3452140388606466);
     close(state.thickness_m[layer_slot(0)], 0.036);
     close(state.node_depth_m[layer_slot(0)], -0.018);
     close(state.interface_depth_m[interface_slot(-1)], -0.036);
@@ -51,7 +133,7 @@ fn fresh_and_existing_snow_match_current_fortran_newsnow() {
     add_new_snow(later, &mut state).unwrap();
     close(state.water_equivalent_kg_m2, 5.4);
     close(state.depth_m, 0.054);
-    close(state.ground_snow_fraction, 0.461_818_892_951_959_55);
+    close(state.ground_snow_fraction, 0.46181889295195955);
     close(state.thickness_m[layer_slot(0)], 0.054);
     close(state.node_depth_m[layer_slot(0)], -0.027);
     close(state.ice_water_kg_m2[layer_slot(0)], 5.4);
@@ -107,9 +189,9 @@ fn compaction_matches_current_fortran_destructive_melt_and_wind_terms() {
 
     compact_snow_layers(&mut state, 1800.0, 8.0, 2.0, &[true, false, true]).unwrap();
 
-    close(state.thickness_m[layer_slot(-2)], 0.117_264_732_760_447_15);
-    close(state.thickness_m[layer_slot(-1)], 0.079_999_907_315_791_97);
-    close(state.thickness_m[layer_slot(0)], 0.039_999_944_612_725_19);
+    close(state.thickness_m[layer_slot(-2)], 0.11726473276044715);
+    close(state.thickness_m[layer_slot(-1)], 0.07999990731579197);
+    close(state.thickness_m[layer_slot(0)], 0.03999994461272519);
 }
 
 #[test]
@@ -200,34 +282,19 @@ fn dividing_thick_snow_matches_current_fortran_enthalpy_and_geometry() {
     assert_eq!(state.layer_count, -3);
     close(state.water_equivalent_kg_m2, 24.0);
     close(state.depth_m, 0.13);
-    close(state.thickness_m[layer_slot(-2)], 0.019_999_999_552_965_164);
-    close(
-        state.liquid_water_kg_m2[layer_slot(-2)],
-        0.799_999_982_118_606_6,
-    );
-    close(
-        state.ice_water_kg_m2[layer_slot(-2)],
-        1.599_999_964_237_213_1,
-    );
+    close(state.thickness_m[layer_slot(-2)], 0.019999999552965164);
+    close(state.liquid_water_kg_m2[layer_slot(-2)], 0.7999999821186066);
+    close(state.ice_water_kg_m2[layer_slot(-2)], 1.5999999642372131);
     close(state.temperature_k[layer_slot(-2)], 270.0);
-    close(state.thickness_m[layer_slot(-1)], 0.050_000_000_745_058_06);
-    close(
-        state.liquid_water_kg_m2[layer_slot(-1)],
-        1.909_090_937_908_030_5,
-    );
+    close(state.thickness_m[layer_slot(-1)], 0.05000000074505806);
+    close(state.liquid_water_kg_m2[layer_slot(-1)], 1.9090909379080305);
     close(state.ice_water_kg_m2[layer_slot(-1)], 7.909_091_011_059_185);
     close(state.temperature_k[layer_slot(-1)], 274.071_557_054_112_7);
-    close(state.thickness_m[layer_slot(0)], 0.059_999_999_701_976_78);
-    close(
-        state.liquid_water_kg_m2[layer_slot(0)],
-        2.290_909_079_973_362_7,
-    );
+    close(state.thickness_m[layer_slot(0)], 0.05999999970197678);
+    close(state.liquid_water_kg_m2[layer_slot(0)], 2.2909090799733627);
     close(state.ice_water_kg_m2[layer_slot(0)], 9.490_909_024_703_601);
     close(state.temperature_k[layer_slot(0)], 274.071_557_054_112_7);
-    close(
-        state.node_depth_m[layer_slot(-2)],
-        -0.120_000_000_223_517_42,
-    );
+    close(state.node_depth_m[layer_slot(-2)], -0.12000000022351742);
     close(state.interface_depth_m[interface_slot(-3)], -0.13);
 }
 
@@ -262,18 +329,12 @@ fn snow_water_matches_current_fortran_percolation_and_surface_fluxes() {
     .unwrap();
 
     close(state.ice_water_kg_m2[layer_slot(-1)], 20.36);
-    close(
-        state.liquid_water_kg_m2[layer_slot(-1)],
-        0.917_306_434_023_990_9,
-    );
+    close(state.liquid_water_kg_m2[layer_slot(-1)], 0.9173064340239909);
     close(state.ice_water_kg_m2[layer_slot(0)], 60.0);
-    close(
-        state.liquid_water_kg_m2[layer_slot(0)],
-        7.203_478_735_005_452_5,
-    );
-    close(outcome.layer_drainage_kg_m2[0], 6.062_693_565_976_009_5);
+    close(state.liquid_water_kg_m2[layer_slot(0)], 7.2034787350054525);
+    close(outcome.layer_drainage_kg_m2[0], 6.0626935659760095);
     close(outcome.layer_drainage_kg_m2[1], 8.859_214_830_970_556);
-    close(outcome.bottom_drainage_kg_m2_s, 0.004_921_786_017_205_864);
+    close(outcome.bottom_drainage_kg_m2_s, 0.004921786017205864);
 }
 
 #[test]

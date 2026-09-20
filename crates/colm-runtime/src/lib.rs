@@ -11,7 +11,7 @@ pub mod physics;
 
 use std::path::{Path, PathBuf};
 
-use crate::assembly::{StandardLctRestartTemplate, StandardLctStepBinding};
+use crate::assembly::{StandardLctRestartTemplate, StandardLctStepBinding, SurfaceOpticsStep};
 use anyhow::{bail, ensure, Context, Result};
 use colm_core::{
     apply_downscaled_runtime_forcing, downscale_forcings, grid_forcing_from_runtime,
@@ -260,6 +260,12 @@ impl PointRuntime {
         })
     }
 
+    /// 上游只有一条入口：`CoLMMAIN` 每步无条件 `newsnow`，雪是状态。所以真正跑算例的
+    /// 那一支是 [`Self::run_restart_standard_lct_snow`] —— 它带末尾的
+    /// 「Preparation for the next time step」。这一支（无雪状态）现在只服务合成算例与
+    /// 单元测试，**不做**那一节：它的 `scv`/`snowdp` 恒为 0，`fsno`/`sag` 没有落点，
+    /// 而 `lai`/`sai` 的差别在这里已经被装配期的断言钉死。
+    ///
     /// Runs an assembled restart template through the whole POINT forcing window.
     ///
     /// This is the layer that was missing: [`StandardLctRestartTemplate`] knows the static
@@ -348,8 +354,18 @@ impl PointRuntime {
         let mut files = Vec::new();
         let steps = self.run_with_state(state, |step, next| {
             let binding = lct_binding(step, greenwich_time, longitude_degrees, co2_scenario)?;
+            // `scvold`：上游在 `newsnow` **之前**把 `scv` 抄一份（`CoLMMAIN.F90:814`），
+            // 所以要在内核动手之前读。
+            let previous_snow_water_equivalent_mm = next.snow.water_equivalent_kg_m2;
             let output =
                 colm_core::standard_lct_snow_soil_step(template.snow_input(&binding), next)?;
+            // 顺序不能反：上游 `hist_out`（`CoLM.F90:537`）在 `CoLMDRIVER`（`:512`）
+            // **之后**跑，而末尾那一节在 `CoLMDRIVER` 里面。所以 history 记下的
+            // `fsno`/`lai`/`sai` 是**下一步**的值，不是这一步用掉的那一组。
+            template.prepare_surface_optics(
+                next,
+                surface_optics_step(step, previous_snow_water_equivalent_mm, &output),
+            )?;
             if let Some(path) =
                 session.push_lct_snow(step.clock.end_time, template, next, &output)?
             {
@@ -385,8 +401,14 @@ impl PointRuntime {
             (self.greenwich, self.longitude_degrees, self.co2_scenario);
         self.run_with_state(state, |step, next| {
             let binding = lct_binding(step, greenwich_time, longitude_degrees, co2_scenario)?;
+            // 同带 history 的那一支：`scvold` 必须在 `newsnow` 之前读。
+            let previous_snow_water_equivalent_mm = next.snow.water_equivalent_kg_m2;
             let output =
                 colm_core::standard_lct_snow_soil_step(template.snow_input(&binding), next)?;
+            template.prepare_surface_optics(
+                next,
+                surface_optics_step(step, previous_snow_water_equivalent_mm, &output),
+            )?;
             on_step(step, &output)
         })
     }
@@ -538,6 +560,25 @@ fn lct_binding(
             month,
         )? * 1.0e-6,
     })
+}
+
+/// 把一步的输出打包成「准备下一步表面光学」的输入。
+///
+/// 三样来自步输出（`t_grnd`、`z0m`、`fwet_snow`），`coszen` 来自 forcing 绑定，
+/// `scvold` 由调用方在**内核动手之前**读出来。上游也是这么取的：`CoLMMAIN.F90`
+/// 的末尾一节用的正是这一步 `THERMAL` 刚写下的全局量。
+fn surface_optics_step(
+    step: PointRuntimeStep,
+    previous_snow_water_equivalent_mm: f64,
+    output: &colm_core::StandardLctSnowSoilOutput,
+) -> SurfaceOpticsStep {
+    SurfaceOpticsStep {
+        cosine_zenith: step.forcing.cosine_zenith,
+        ground_temperature_k: output.energy.ground.temperature_k[0],
+        momentum_roughness_m: output.energy.leaf.momentum_roughness_m,
+        wet_snow_fraction: output.energy.leaf.wet_snow_fraction,
+        previous_snow_water_equivalent_mm,
+    }
 }
 
 /// `MOD_NetSolar` 的 `seconds_of_day` 是当日秒数，核心里要求落在 `[0, 86400)`。
@@ -1020,6 +1061,7 @@ mod tests {
             surface_temperature_factor: 0.5,
             crank_nicolson_factor: 0.5,
             soil_roughness_m: 0.01,
+            snow_cover_exponent: 1.0,
             snow_roughness_m: 0.0024,
             wind_height_m: 30.0,
             temperature_height_m: 30.0,
@@ -1185,6 +1227,22 @@ mod tests {
             .iter()
             .all(|value| value.is_finite()));
         assert!(runtime.next_step().unwrap().is_none());
+        // 末尾那一节（`CoLMMAIN` 的「Preparation for the next time step」）真的跑了。
+        // 两条判据在装配期都**不成立**，所以漏调这一节会被抓住：
+        //   * `sai = tsai*sigf` —— 夹具里 `sai = tsai = 0.5` 而 `sigf = 0.8`，对不上；
+        //   * `fsno` 是 `snowfraction` 按 0.15 m 雪深现算的（≈0.96），夹具里写的是 1.0。
+        let canopy = state.energy.canopy;
+        assert!(
+            (canopy.stem_area_index
+                - template.temporal_stem_area_index * canopy.vegetation_free_fraction)
+                .abs()
+                < 1.0e-12,
+            "the canopy geometry was not recomputed from tsai and sigf"
+        );
+        assert!(canopy.vegetation_free_fraction < 1.0);
+        assert!((0.5..1.0).contains(&state.snow.ground_snow_fraction));
+        // 雪龄也要跟着走：三步里至少有一个白天步（`coszen > -0.3`）。
+        assert!(state.snow.age > 0.0);
     }
 
     /// 配置里的窗口，供需要"比运行更长"的调度时改写。
