@@ -144,11 +144,10 @@ impl ClassConstants {
 
     /// `MOD_AssimStomataConductance:stomata` 的生化参数，逐项取自上表。
     ///
-    /// `canopy_scaling` 由调用方给：上游那个量是 `cint(1:3)`，而 `cintsun` 与
-    /// `cintsha` 是**每步**从 `lai`/`extkb`/`extkd` 算出的两个不同三元素
-    /// （`MOD_LeafTemperature.F90:460-466`），不是地类常量。见
-    /// `docs/implementation-verification.md` 里那条待办。
-    pub fn biochemistry(&self, canopy_scaling: [f64; 3]) -> crate::LeafBiochemistry {
+    /// 冠层积分因子 `cint(1:3)` **不在这里**：它是每步从 `lai`/`extkb`/`extkd` 算出的
+    /// `cintsun`/`cintsha`（`MOD_LeafTemperature.F90:460-466`），由
+    /// `LeafPhotosynthesisInput::canopy_integration` 逐群体传入。
+    pub fn biochemistry(&self) -> crate::LeafBiochemistry {
         crate::LeafBiochemistry {
             quantum_efficiency: self.value(|table| table.effcon),
             maximum_carboxylation_25c_mol_m2_s: self.maximum_carboxylation_25c_mol_m2_s(),
@@ -164,7 +163,6 @@ impl ClassConstants {
             medlyn_g0: self.value(|table| table.g0),
             ball_berry_slope: self.value(|table| table.gradm),
             ball_berry_intercept: self.value(|table| table.binter),
-            canopy_scaling,
         }
     }
 

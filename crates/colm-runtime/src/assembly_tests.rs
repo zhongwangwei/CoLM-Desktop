@@ -39,8 +39,6 @@ fn physics(timestep_seconds: f64) -> LandPhysicsParameters {
             ball_berry_slope_override: None,
             ball_berry_intercept_override: None,
         },
-        // 上游每步算 cintsun/cintsha 两个三元素；合成算例用单位因子。
-        canopy_scaling: [1.0; 3],
         wue_lambda: 2.0,
         soil_ice_impedance: 6.0,
         impermeable_porosity: 0.05,
@@ -510,7 +508,7 @@ fn the_land_cover_table_supplies_the_biochemistry() {
     let (_, template) = assemble("biochemistry", 1);
     // 合成算例 patch 1 的 patchclass 是 2（0 基）→ 上游数组下标 3。
     let class = colm_core::ClassConstants::new(colm_core::LandCoverScheme::Igbp, 3).unwrap();
-    let expected = class.biochemistry([1.0; 3]);
+    let expected = class.biochemistry();
     assert_eq!(template.biochemistry, expected);
     // `vmax25` 在表里是 umol/m2/s，`Init_LC_Const` 折成 mol；忘了这一步差六个数量级。
     assert!(template.biochemistry.maximum_carboxylation_25c_mol_m2_s < 1.0e-3);
@@ -519,8 +517,6 @@ fn the_land_cover_table_supplies_the_biochemistry() {
         template.biochemistry.quantum_efficiency,
         colm_core::land_cover_tables(colm_core::LandCoverScheme::Igbp).effcon[2]
     );
-    // 冠层积分因子来自调用方，装配层不会自己造一个。
-    assert_eq!(template.biochemistry.canopy_scaling, [1.0; 3]);
 }
 
 #[test]

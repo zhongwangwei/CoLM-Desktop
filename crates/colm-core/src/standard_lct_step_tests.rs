@@ -417,7 +417,6 @@ fn input(forcing: crate::RuntimeForcing) -> StandardLctEnergyInput<'static> {
             medlyn_g0: 0.01,
             ball_berry_slope: 9.0,
             ball_berry_intercept: 0.01,
-            canopy_scaling: [1.0; 3],
         },
         soil_water_stress_sunlit: 0.0,
         soil_water_stress_shaded: 0.0,

@@ -225,7 +225,8 @@ pub fn leaf_temperature(
     let fsha = 1.0 - input.sunlit_fraction;
     let laisun = lai * input.sunlit_fraction;
     let laisha = lai * fsha;
-    let cintsun = canopy_scaling(input.direct_extinction, input.diffuse_extinction, lai);
+    let cintsun = sunlit_canopy_integration(input.direct_extinction, input.diffuse_extinction, lai);
+    // `MOD_LeafTemperature.F90:464-466` 的 `cintsha`。
     let cintsha = [
         integrated_extinction(0.110, lai) - cintsun[0],
         integrated_extinction(input.diffuse_extinction, lai) - cintsun[1],
@@ -390,7 +391,7 @@ pub fn leaf_temperature(
                 leaf_boundary_resistance_s_m: leaf_boundary_resistance,
                 absorbed_par_w_m2: input.sunlit_absorbed_par_w_m2,
                 soil_water_stress: stomatal_soil_stress,
-                canopy_scaling: cintsun,
+                canopy_integration: cintsun,
                 canopy_air_co2_pa: canopy_air_co2,
                 canopy_vapor_pressure_pa: canopy_vapor_pressure,
                 leaf_vapor_pressure_pa: leaf_saturation.vapor_pressure_pa,
@@ -407,7 +408,7 @@ pub fn leaf_temperature(
                 } else {
                     input.soil_water_stress_shaded
                 },
-                canopy_scaling: cintsha,
+                canopy_integration: cintsha,
                 canopy_air_co2_pa: canopy_air_co2,
                 canopy_vapor_pressure_pa: canopy_vapor_pressure,
                 leaf_vapor_pressure_pa: leaf_saturation.vapor_pressure_pa,
@@ -492,7 +493,7 @@ pub fn leaf_temperature(
                     leaf_boundary_resistance_s_m: leaf_boundary_resistance,
                     absorbed_par_w_m2: input.sunlit_absorbed_par_w_m2,
                     soil_water_stress: hydraulic_output.sunlit_stress,
-                    canopy_scaling: cintsun,
+                    canopy_integration: cintsun,
                     canopy_air_co2_pa: canopy_air_co2,
                     canopy_vapor_pressure_pa: canopy_vapor_pressure,
                     leaf_vapor_pressure_pa: leaf_saturation.vapor_pressure_pa,
@@ -506,7 +507,7 @@ pub fn leaf_temperature(
                     leaf_boundary_resistance_s_m: leaf_boundary_resistance,
                     absorbed_par_w_m2: input.shaded_absorbed_par_w_m2,
                     soil_water_stress: hydraulic_output.shaded_stress,
-                    canopy_scaling: cintsha,
+                    canopy_integration: cintsha,
                     canopy_air_co2_pa: canopy_air_co2,
                     canopy_vapor_pressure_pa: canopy_vapor_pressure,
                     leaf_vapor_pressure_pa: leaf_saturation.vapor_pressure_pa,
@@ -1069,7 +1070,12 @@ impl Default for Iteration {
     }
 }
 
-fn canopy_scaling(direct: f64, diffuse: f64, lai: f64) -> [f64; 3] {
+/// `MOD_LeafTemperature.F90:460-462` 的 `cintsun`。
+///
+/// 阳叶与阴叶用的是**两个不同**的三元素（`cintsha` 在调用点算，见
+/// `MOD_LeafTemperature.F90:464-466`），所以它按群体传进
+/// `LeafPhotosynthesisInput::canopy_integration`，不再是生化参数的一部分。
+fn sunlit_canopy_integration(direct: f64, diffuse: f64, lai: f64) -> [f64; 3] {
     [
         integrated_extinction(0.110 + direct, lai),
         integrated_extinction(direct + diffuse, lai),
@@ -1090,7 +1096,7 @@ struct StomataStep {
     leaf_boundary_resistance_s_m: f64,
     absorbed_par_w_m2: f64,
     soil_water_stress: f64,
-    canopy_scaling: [f64; 3],
+    canopy_integration: [f64; 3],
     canopy_air_co2_pa: f64,
     canopy_vapor_pressure_pa: f64,
     leaf_vapor_pressure_pa: f64,
@@ -1103,10 +1109,8 @@ fn stomatal_resistance(
     stomata(
         StomataInput {
             photosynthesis: LeafPhotosynthesisInput {
-                biochemistry: LeafBiochemistry {
-                    canopy_scaling: step.canopy_scaling,
-                    ..input.biochemistry
-                },
+                biochemistry: input.biochemistry,
+                canopy_integration: step.canopy_integration,
                 leaf_temperature_k: step.leaf_temperature_k,
                 oxygen_partial_pressure_pa: input.oxygen_partial_pressure_pa,
                 absorbed_par_w_m2: step.absorbed_par_w_m2,
@@ -1130,10 +1134,8 @@ fn hydraulic_stomatal_resistance(
     canopy_conductance_umol_m2_s: f64,
 ) -> Result<StomataState> {
     let photosynthesis = LeafPhotosynthesisInput {
-        biochemistry: LeafBiochemistry {
-            canopy_scaling: step.canopy_scaling,
-            ..input.biochemistry
-        },
+        biochemistry: input.biochemistry,
+        canopy_integration: step.canopy_integration,
         leaf_temperature_k: step.leaf_temperature_k,
         oxygen_partial_pressure_pa: input.oxygen_partial_pressure_pa,
         absorbed_par_w_m2: step.absorbed_par_w_m2,

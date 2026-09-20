@@ -722,8 +722,6 @@ mod tests {
                 ball_berry_slope_override: None,
                 ball_berry_intercept_override: None,
             },
-            // 上游每步算 cintsun/cintsha 两个三元素；这里用单位因子（见 docs）。
-            canopy_scaling: [1.0; 3],
             wue_lambda: 2.0,
             soil_ice_impedance: 6.0,
             impermeable_porosity: 0.05,

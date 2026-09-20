@@ -131,7 +131,6 @@ fn sample_input() -> LeafTemperatureInput<'static> {
             medlyn_g0: 0.01,
             ball_berry_slope: 9.0,
             ball_berry_intercept: 0.01,
-            canopy_scaling: [1.0; 3],
         },
         soil_water_stress_sunlit: 0.8,
         soil_water_stress_shaded: 0.8,
@@ -178,4 +177,50 @@ fn sample_input() -> LeafTemperatureInput<'static> {
         plant_hydraulics: None,
         options: LeafTemperatureOptions::default(),
     }
+}
+
+/// 冠层积分因子：逐项对 `MOD_LeafTemperature.F90:460-466` 的表达式。
+///
+/// 期望值是用那些表达式手算的（`lai = 2.5`、`extkb = 0.4`、`extkd = 0.5`），不是在测试里
+/// 重算同一个实现 —— 那样只是把实现抄一遍。两个群体的差别正是这里要钉住的东西：
+/// 上游给阳叶与阴叶不同的一组因子，`cintsha = 该层积分 - cintsun`。
+#[test]
+fn canopy_integration_factors_match_the_upstream_expressions() {
+    let lai = 2.5;
+    let extkb = 0.4;
+    let extkd = 0.5;
+    let sunlit = super::sunlit_canopy_integration(extkb, extkd, lai);
+    let expected_sunlit = [1.412880454467829, 0.994000861597928, 1.580301397071394];
+    for (index, (actual, expected)) in sunlit.iter().zip(expected_sunlit.iter()).enumerate() {
+        assert!(
+            (actual - expected).abs() <= 1.0e-14,
+            "cintsun[{index}]: {actual:.15} != {expected:.15}"
+        );
+    }
+    let shaded = [
+        super::integrated_extinction(0.110, lai) - sunlit[0],
+        super::integrated_extinction(extkd, lai) - sunlit[1],
+        lai - sunlit[2],
+    ];
+    let expected_shaded = [0.772827516214276, 0.432989544681691, 0.919698602928606];
+    for (index, (actual, expected)) in shaded.iter().zip(expected_shaded.iter()).enumerate() {
+        assert!(
+            (actual - expected).abs() <= 1.0e-14,
+            "cintsha[{index}]: {actual:.15} != {expected:.15}"
+        );
+    }
+    // 两份加起来是整层的积分：第 3 项必然等于 LAI，前两项按各自的消光系数分摊。
+    assert!((sunlit[2] + shaded[2] - lai).abs() <= 1.0e-14);
+    assert_ne!(
+        sunlit, shaded,
+        "the two leaf populations must not share factors"
+    );
+}
+
+/// 消光系数为 0 时上游的表达式会除零，内核按极限值取 `lai`。
+#[test]
+fn a_zero_extinction_uses_the_limit_instead_of_dividing_by_zero() {
+    assert_eq!(super::integrated_extinction(0.0, 3.0), 3.0);
+    assert_eq!(super::integrated_extinction(f64::EPSILON, 3.0), 3.0);
+    assert!(super::integrated_extinction(0.4, 3.0) < 3.0);
 }

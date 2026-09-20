@@ -4,6 +4,8 @@ use super::*;
 
 fn leaf() -> LeafPhotosynthesisInput {
     LeafPhotosynthesisInput {
+        // 上游每步算 cintsun/cintsha；这里给一组非 1 的值，好让断言看得出它们被用上了。
+        canopy_integration: [1.2, 0.8, 1.5],
         biochemistry: LeafBiochemistry {
             quantum_efficiency: 0.05,
             maximum_carboxylation_25c_mol_m2_s: 60e-6,
@@ -19,7 +21,6 @@ fn leaf() -> LeafPhotosynthesisInput {
             medlyn_g0: 0.01,
             ball_berry_slope: 9.0,
             ball_berry_intercept: 0.01,
-            canopy_scaling: [1.2, 0.8, 1.5],
         },
         leaf_temperature_k: 290.0,
         oxygen_partial_pressure_pa: 21_200.0,

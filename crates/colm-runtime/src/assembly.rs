@@ -78,13 +78,6 @@ pub struct LandPhysicsParameters {
     pub thermal_conductivity_scheme: ThermalConductivityScheme,
     pub observation_height_mode: ObservationHeightMode,
     pub stomata: StomataOptions,
-    /// 冠层积分因子 `cint(1:3)`，即内核里的 `LeafBiochemistry::canopy_scaling`。
-    ///
-    /// **上游不是地类常量**：`MOD_LeafTemperature.F90:460-466` 每步由
-    /// `lai`/`extkb`/`extkd` 现算 `cintsun` 与 `cintsha` 两个三元素，分别给
-    /// 阳叶与阴叶。本仓库的内核只收一个，所以这里必须由调用方明确给出 ——
-    /// 装一个「1」进去等于替上游做了一个没核对过的决定。
-    pub canopy_scaling: [f64; 3],
     pub wue_lambda: f64,
     /// `DEF_TUNING_SSI`。
     pub soil_ice_impedance: f64,
@@ -380,8 +373,9 @@ pub fn assemble_standard_lct_template(
     );
     let leaf_angle_distribution = class.leaf_angle_distribution();
     let inverse_sqrt_leaf_dimension_m_neg_half = class.inverse_sqrt_leaf_dimension_m_neg_half();
-    // 生化参数整份来自地类表；只有冠层积分因子要调用方给（见字段文档）。
-    let biochemistry = class.biochemistry(physics.canopy_scaling);
+    // 生化参数整份来自地类表。冠层积分因子不在这里：内核每步从 `lai`/`extkb`/`extkd`
+    // 现算 `cintsun`/`cintsha`（模板已经把这三样都供上了）。
+    let biochemistry = class.biochemistry();
     ensure!(
         leaf_area_index + stem_area_index > 0.0,
         "the standard LCT energy step needs a vegetated canopy"

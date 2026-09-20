@@ -32,13 +32,18 @@ pub struct LeafBiochemistry {
     pub medlyn_g0: f64,
     pub ball_berry_slope: f64,
     pub ball_berry_intercept: f64,
-    pub canopy_scaling: [f64; 3],
 }
 
 /// Inputs common to CoLM's private `calc_photo_params` and public photo updates.
 #[derive(Debug, Clone, Copy)]
 pub struct LeafPhotosynthesisInput {
     pub biochemistry: LeafBiochemistry,
+    /// 冠层积分因子，上游 `MOD_AssimStomataConductance:stomata` 的 `cint(1:3)`。
+    ///
+    /// 它**不是**生化参数：`MOD_LeafTemperature.F90:460-466` 每步由 `lai`/`extkb`/`extkd`
+    /// 现算 `cintsun` 与 `cintsha` 两个不同三元素，分别给阳叶与阴叶。放在
+    /// `LeafBiochemistry` 里会让它看起来像地类常量，而且每次都被调用点覆盖。
+    pub canopy_integration: [f64; 3],
     pub leaf_temperature_k: f64,
     pub oxygen_partial_pressure_pa: f64,
     pub absorbed_par_w_m2: f64,
@@ -135,7 +140,7 @@ pub fn photosynthesis_parameters(
             + maximum_carboxylation / (low_inhibition * high_inhibition)
                 * input.soil_water_stress
                 * c4_fraction)
-            * b.canopy_scaling[0];
+            * input.canopy_integration[0];
     let gas_constant = 8.314_467_591;
     let jmax25 = f77(1.97) * b.maximum_carboxylation_25c_mol_m2_s;
     let mut jmax = jmax25
@@ -150,7 +155,7 @@ pub fn photosynthesis_parameters(
             + ((f77(710.0) * input.leaf_temperature_k - f77(220.0e3))
                 / (gas_constant * input.leaf_temperature_k))
                 .exp());
-    jmax *= input.soil_water_stress * b.canopy_scaling[1];
+    jmax *= input.soil_water_stress * input.canopy_integration[1];
     let electron_transport =
         (f77(4.6e-6) * input.absorbed_par_w_m2 * b.quantum_efficiency).min(jmax);
     let respiration_fraction = f77(0.015) * c3_fraction + f77(0.025) * c4_fraction;
@@ -162,7 +167,7 @@ pub fn photosynthesis_parameters(
                 * (input.leaf_temperature_k - b.respiration_temperature_half_k))
                 .exp())
         * input.soil_water_stress
-        * b.canopy_scaling[0];
+        * input.canopy_integration[0];
     let sink_limit = ((b.maximum_carboxylation_25c_mol_m2_s / f77(2.0))
         * f77(1.8).powf(temperature_factor)
         / low_inhibition
@@ -172,7 +177,7 @@ pub fn photosynthesis_parameters(
             * f77(1.8).powf(temperature_factor)
             * input.soil_water_stress
             * c4_fraction)
-        * b.canopy_scaling[0];
+        * input.canopy_integration[0];
     let pressure_conversion = f77(44.6_f32 * 273.16_f32) * input.air_pressure_pa / f77(1.013e5);
     let boundary_conductance_h2o =
         pressure_conversion / (input.leaf_boundary_resistance_s_m * input.leaf_temperature_k);
@@ -195,7 +200,9 @@ pub fn stomata(input: StomataInput, options: StomataOptions) -> Result<StomataSt
     let photo = photosynthesis_parameters(input.photosynthesis)?;
     let b = input.photosynthesis.biochemistry;
     let (g1, g0, gradm, binter, lambda) = selected_parameters(b, input.wue_lambda, options)?;
-    let bintc = binter * input.photosynthesis.soil_water_stress.max(f77(0.1)) * b.canopy_scaling[2];
+    let bintc = binter
+        * input.photosynthesis.soil_water_stress.max(f77(0.1))
+        * input.photosynthesis.canopy_integration[2];
     let range = input.atmospheric_co2_pa * (1.0 - f77(1.6) / gradm) - photo.co2_compensation_pa;
     let mut errors = [0.0; ITERATIONS];
     let mut co2_guesses = [0.0; ITERATIONS];
@@ -525,9 +532,9 @@ fn validate_photosynthesis(input: LeafPhotosynthesisInput) -> Result<()> {
             b.medlyn_g0,
             b.ball_berry_slope,
             b.ball_berry_intercept,
-            b.canopy_scaling[0],
-            b.canopy_scaling[1],
-            b.canopy_scaling[2],
+            input.canopy_integration[0],
+            input.canopy_integration[1],
+            input.canopy_integration[2],
             input.leaf_temperature_k,
             input.oxygen_partial_pressure_pa,
             input.absorbed_par_w_m2,

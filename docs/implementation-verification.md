@@ -1265,11 +1265,26 @@ cintsha(1) = (1.-exp(-0.110*lai))/0.110 - cintsun(1)     ! 其余两份同理
 ```
 
 所以它是**从 `lai`/`extkb`/`extkd` 每步算出的两个三元素**，不是一个可以塞进模板的常数。
-本仓库的内核只收一个 `[f64; 3]`，也就是只能描述一个叶群体。因此：
-- 该字段**不由装配层填**，仍由调用方显式给出（`LandPhysicsParameters::canopy_scaling`），
-  并写明理由 —— 装一个「1」进去等于替上游做了一个没核对过的决定；
-- 缺口本身记在这里，修它要动 `photosynthesis`/`leaf_temperature` 的内核签名
-  （拆成阳叶/阴叶两个因子），属于另一个切片。合成算例用单位因子。
 
-这也是本项目里第一个"字段名相同、含义比上游窄"的例子：`canopy_scaling` 看起来像地类
-常量，实际是每步的冠层积分因子，且少了一半。
+**上一版这段记录写错了，这里更正。** 当时据此推断"本仓库的内核只收一个 `[f64; 3]`，
+只能描述一个叶群体，修它要动内核签名"。实际去读 `leaf_temperature.rs` 才发现内核**早已
+两套都算、并逐群体传入**：
+
+- `sunlit_canopy_integration`（原名叫 `canopy_scaling`，与字段同名，是这轮误判的起因）
+  算 `cintsun`，`MOD_LeafTemperature.F90:460-462` 三个表达式逐字对应；
+- 调用点旁边就算 `cintsha`（`:464-466`），
+- 两个 `StomataStep` 分别带 `cintsun` / `cintsha`。
+
+真正的问题是**数据流反了**：因子放在 `LeafBiochemistry`（参数结构）里，然后每次调用
+都被调用点用 `LeafBiochemistry { canopy_scaling: step.…, ..input.biochemistry }` 覆盖。
+也就是说这个字段在生产路径上**从来没被读过**，只是让"每步量"看起来像"地类常量" ——
+与它同名的私有函数又强化了这个错觉。
+
+现在因子搬到 `LeafPhotosynthesisInput::canopy_integration`（每步输入该待的地方），
+`LeafBiochemistry` 不再有它，那个私有函数也改名为 `sunlit_canopy_integration`，
+并在两个 `StomataStep` 处注明对应上游哪几行。`LandPhysicsParameters` 随之少一个字段。
+
+教训记在这里：**字段消失不等于缺口消失，但也不等于缺口存在** —— 上一版是先写了结论再去
+找证据。这轮的两个测试（`canopy_integration_factors_match_the_upstream_expressions`、
+`a_zero_extinction_uses_the_limit_instead_of_dividing_by_zero`）现在把两份因子的表达式
+逐项钉住，`cintsha` 与 `cintsun` 不能再被当成同一个东西。

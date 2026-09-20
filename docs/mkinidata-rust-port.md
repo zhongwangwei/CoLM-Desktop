@@ -197,9 +197,10 @@ them. Checked against the current tree:
   split: time invariants from the constant restart (`READ_TimeInvariants`), evolving and
   vegetation state from the time restart, the land-class constants (`rootfr`, leaf angle,
   leaf dimension) from the generated `MOD_Const_LC.F90` tables, and only the parameter
-  tables no source in this repo carries (stomata options, roughness, observation height,
-  and the per-step canopy integration factor) from an explicit `LandPhysicsParameters` with
-  no defaults. The biochemistry is no longer among them: the land-cover tables supply it.
+  tables no source in this repo carries (stomata options, roughness, observation height)
+  from an explicit `LandPhysicsParameters` with no defaults. The biochemistry is no longer
+  among them: the land-cover tables supply it, and the canopy integration factors are
+  recomputed per step by the kernels from `lai`/`extkb`/`extkd`.
   `PointRuntime::run_restart_standard_lct` then drives it through the whole forcing window.
   Still missing: a driver for every other branch, the PFT parameter tables the template
   still takes from its caller (`LeafBiochemistry` has never been constructed outside a
@@ -223,12 +224,6 @@ reusing that generator as-is will not work:
   constants (`htop0_p`, `hbot0_p`), so values have to be found in assignments too;
 - eight leaf-optical properties exist twice, as `_pc` and `_default`, chosen by a
   compile-time/PC branch rather than written once.
-
-There is also a kernel-level gap the assembly uncovered: `LeafBiochemistry::canopy_scaling`
-is upstream's `cint(1:3)`, which `MOD_LeafTemperature.F90:460-466` recomputes every step as
-two different vectors, `cintsun` and `cintsha`, for the sunlit and shaded leaf populations.
-Our kernel takes one, so it can describe only one of them. Closing it means splitting the
-factor through the photosynthesis and leaf-temperature signatures.
 
 Beyond that: a driver for the active-snow chain and the PFT/PC/urban/BGC branches, the
 history writer wired to per-step field values, a Rust `colm` executable that consumes
