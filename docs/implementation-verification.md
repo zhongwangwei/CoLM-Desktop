@@ -4209,3 +4209,62 @@ CALL write_history_variable_4d (..., sumarea_dt, filter_dt, ..., nac_dt)  ! MOD_
 所以拿它去"先喂白天再喂夜间"会把白天那一步覆盖成填充值（踩过）。
 生产路径每次都经 `HistoryAccumulator`，所以这条在真实运行里是对的；
 单测只能校验换序，掩码那一半交给端到端对账。
+
+## 先审计"每个变量自己的累加规则"，再挑批（2026 年，实测）
+
+上一轮被 `f_alb` 的白天过滤教了一次：**不能假定所有变量共用一条累加规则**。
+所以这轮先对剩下 25 个逐个查三件事 —— `acc*` 调用（有没有过滤器）、
+`write_history_variable_*` 的除数、值在本仓库有没有 —— 结果分成了四类：
+
+| 规则 | 变量 |
+|---|---|
+| `acc1d` + `filter`/`nac`（标准） | `ldew` `qintr` `qdrip` `rss` `xerr` `zerr` `wat` `green` `lake_deficit` `rsur_ie` `rsur_se` |
+| `acc2d` + 分层 | `t_lake` `lake_icefrac` |
+| **`vecacc = 值*nac` 再被除 `nac`（瞬时）** | `wat_inst` `wa_inst` `wdsrf_inst` `wetwat_inst` `wetzwt` |
+| 别的模块（廓线 routine） | `us10m` `vs10m` `fm10m` `ustar2` |
+
+### 第三条规则：瞬时量
+
+`MOD_Hist.F90:680-684`：
+
+```fortran
+vecacc = wat
+WHERE(vecacc /= spval) vecacc = vecacc * nac      ! 乘一个 nac
+CALL write_history_variable_2d (..., vecacc, ...) ! 写出器再除一个 nac
+```
+
+乘 `nac` 再除 `nac`，落盘的是**写出时刻那一步的瞬时值**，不是区间平均。
+所以 `HistoryAccumulator` 对这批量必须走"最后一次覆盖"而不是求和 ——
+新增 `INSTANTANEOUS_VARIABLES`，覆盖时把 `count` 钉在 1，于是除数为 1。
+用求和会得到区间平均：在这个窗口上两者只差 3e-5（蓄量变化慢），
+但物理含义不同，蓄量快变时会明显分叉。单测
+`the_instantaneous_water_variables_take_the_last_step_not_the_mean`
+同一串输入同时喂 `wat_inst` 与 `wat`，断言前者出末值、后者出均值 ——
+只断言"有值"抓不住这条。
+
+### 这轮补的五项
+
+| 变量 | 来源 | 实测（对齐算例 264 条） |
+|---|---|---|
+| `wa_inst` | `Water2014SoilState::aquifer_water_mm` | F[4811.87,5085.83] R 同区间，maxdiff **3.07e-2**（6e-6 相对） |
+| `wdsrf_inst` | `surface_water_mm` | 两边**全 0** |
+| `wat_inst` | `sum(wliq+wice) + ldew + scv + wa`（`CoLMMAIN.F90:2254`） | maxdiff **0.211**（3.3e-5 相对） |
+| `rsur_ie` / `rsur_se` | 上游**整列填充值** | 两边 real=0，全填充 |
+
+`rsur_ie`/`rsur_se`（入渗超量/饱和超量地表径流）进 `DECLARED_ONLY`：
+黄金文件 264 条**一个真值都没有**，与 `sensors`/`frcsat` 同类 ——
+声明 + 留空才是忠实。到此黄金文件里的变量缺口从 25 降到 **20**。
+
+`wat_inst` 的算式按上游的**元素级**结合顺序写（`(wliq[i]+wice[i])` 逐层相加再累加），
+不改成 `sum(wliq)+sum(wice)` —— 浮点结合顺序不同会给出一位数的差。
+
+### 剩下 20 个按"卡在哪"分组
+
+```
+ldew / qintr / qdrip / wat / xerr / zerr / xy_rain / xy_snow   规则已明确，值也有，接线即可
+rss                        规则已明确，方案 4 下的电导/阻力映射待核对
+green                      需要把 MOD_LAIEmpirical 内的 vegc 表搬进来
+t_lake / lake_icefrac / lake_deficit      湖泊分支尚未驱动
+wetwat / wetwat_inst / wetzwt             湿地分支尚未驱动
+us10m / vs10m / fm10m / ustar2            出自另一支 Shaofeng 2023 廓线 routine
+```

@@ -94,6 +94,27 @@ pub const LCT_SURFACE_VARIABLES: [&str; 13] = [
 /// 它不是默认产出量。
 pub const LCT_FLUX_VARIABLES: [&str; 6] = ["qinfl", "rnof", "rsub", "rsur", "qcharge", "frcsat"];
 
+/// 本层能填的**瞬时**水量诊断，三项。
+///
+/// 这三项与其它变量的累加规则又不同：上游先把 `vecacc = wat` 再
+/// `WHERE (vecacc /= spval) vecacc = vecacc * nac`，然后交给写出器
+/// `acc_vec = acc_vec / nac`（`MOD_Hist.F90:680-684`）—— 乘一个 `nac`
+/// 再除一个 `nac`，结果是**写出时刻那一步的瞬时值**，不是区间平均。
+///
+/// 所以它们必须走 [`HistoryAccumulator`] 的"最后一次覆盖"路径，
+/// 而不是累加求和；用求和会得到区间平均，在这个窗口上两者只差 0.001%，
+/// 但物理含义不同，且在蓄量快变时会明显分叉。
+///
+/// 定义取 `CoLMMAIN.F90:2254-2258`（非 VSF 分支）：
+/// `wat = sum(wliq+wice) + ldew + scv + wa`，`wa` 是含水层蓄量，
+/// `wdsrf` 是地表积水深；`wa_inst`/`wdsrf_inst` 就是这两个标量本身。
+pub const LCT_WATER_STORAGE_VARIABLES: [&str; 3] = ["wa_inst", "wdsrf_inst", "wat_inst"];
+
+/// 上游写的是**瞬时值**（乘 `nac` 再被除 `nac`）而不是区间平均的那些变量。
+///
+/// 累加器对它们走"最后一次覆盖"，`write_means` 的除数因此恒为 1。
+pub const INSTANTANEOUS_VARIABLES: [&str; 3] = ["wa_inst", "wdsrf_inst", "wat_inst"];
+
 /// 本层能填的**宽带反照率**，一项。
 ///
 /// `alb` 是黄金文件里**唯一的四维**变量，维度 `(time, patch, rtyp, band)`。
@@ -219,7 +240,7 @@ pub const DECLARED_BUT_UNFILLED: [&str; 1] = ["frcsat"];
 /// 上游只有在算例主动往里写东西时才有值。对齐黄金算例 264×1×1 条**全是**
 /// `missing_value`，`oracle/tolerances.toml` 也把它钉在 tier0 并注明这一点。
 /// 所以"声明 + 留空"才是忠实：填任何东西都是无中生有。
-pub const DECLARED_ONLY: [&str; 1] = ["sensors"];
+pub const DECLARED_ONLY: [&str; 3] = ["sensors", "rsur_ie", "rsur_se"];
 
 /// 黄金算例（CN-Cng）里没有、但本层仍会声明的量。
 ///
@@ -251,6 +272,7 @@ pub fn declare_lct_variables(buffer: &mut HistoryBuffers) -> Result<()> {
     names.extend_from_slice(&LCT_CANOPY_VARIABLES);
     names.extend_from_slice(&LCT_DERIVED_SOIL_VARIABLES);
     names.extend_from_slice(&LCT_ALBEDO_VARIABLES);
+    names.extend_from_slice(&LCT_WATER_STORAGE_VARIABLES);
     names.extend_from_slice(&DECLARED_ONLY);
     buffer.declare(&names)
 }
@@ -349,14 +371,21 @@ impl HistorySink for HistoryAccumulator {
         if value == colm_core::MISSING {
             return Ok(());
         }
+        let instantaneous = INSTANTANEOUS_VARIABLES.contains(&name);
         match self
             .sums
             .entry(name.to_owned())
             .or_insert(Accumulated::Scalar { sum: 0.0, count: 0 })
         {
             Accumulated::Scalar { sum, count } => {
-                *sum += value;
-                *count += 1;
+                if instantaneous {
+                    // "最后一次覆盖"：`count` 保持 1，于是除数为 1、写出的是末步的值。
+                    *sum = value;
+                    *count = 1;
+                } else {
+                    *sum += value;
+                    *count += 1;
+                }
             }
             Accumulated::Column { .. } => {
                 bail!("{name} was accumulated as a column, now as a scalar")
@@ -694,6 +723,44 @@ pub fn set_lct_stomatal_diagnostics(
         sink.scalar(name, record, value)?;
     }
     sink.layer("rootr", record, &energy.root_uptake.layer_fraction)?;
+    Ok(())
+}
+
+/// 把一步的瞬时水量诊断写进第 `record` 条记录。
+///
+/// `wat` 的算式见 [`LCT_WATER_STORAGE_VARIABLES`]（非 VSF 分支：
+/// `sum(wliq+wice) + ldew + scv + wa`）。液体与冰分开求和再相加，
+/// 与上游 `sum(wice_soisno(1:)+wliq_soisno(1:))` 的元素级相加**不是**
+/// 同一个结合顺序，所以这里也按元素级累加，别改成两个 `sum()` 相减。
+pub fn set_lct_water_storage(
+    sink: &mut impl HistorySink,
+    record: usize,
+    water: &colm_core::Water2014SoilState,
+    canopy_water_mm: f64,
+    snow_water_equivalent_kg_m2: f64,
+) -> Result<()> {
+    ensure!(
+        water.liquid_water_kg_m2.len() == water.ice_water_kg_m2.len(),
+        "the soil water columns disagree on depth"
+    );
+    let soil: f64 = water
+        .liquid_water_kg_m2
+        .iter()
+        .zip(&water.ice_water_kg_m2)
+        .map(|(wliq, wice)| wliq + wice)
+        .sum();
+    let total = soil + canopy_water_mm + snow_water_equivalent_kg_m2 + water.aquifer_water_mm;
+    for (name, value) in [
+        ("wa_inst", water.aquifer_water_mm),
+        ("wdsrf_inst", water.surface_water_mm),
+        ("wat_inst", total),
+    ] {
+        ensure!(
+            value.is_finite(),
+            "the history value for {name} is not finite"
+        );
+        sink.scalar(name, record, value)?;
+    }
     Ok(())
 }
 
@@ -1114,6 +1181,13 @@ impl HistorySession {
                 template.soil_layer_thickness_m(),
                 &state.water,
             )?;
+            set_lct_water_storage(
+                accumulator,
+                0,
+                &state.water,
+                state.energy.leaf.canopy_water.total_mm,
+                0.0,
+            )?;
             set_lct_albedo(
                 accumulator,
                 0,
@@ -1168,6 +1242,13 @@ impl HistorySession {
                 0,
                 template.soil_layer_thickness_m(),
                 &state.soil_water,
+            )?;
+            set_lct_water_storage(
+                accumulator,
+                0,
+                &state.soil_water,
+                state.energy.leaf.canopy_water.total_mm,
+                state.snow.water_equivalent_kg_m2,
             )?;
             set_lct_albedo(
                 accumulator,

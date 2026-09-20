@@ -245,6 +245,14 @@ fn the_bridge_writes_the_state_variables_it_declares() {
         reference().surface_cosine_zenith,
     )
     .unwrap();
+    set_lct_water_storage(
+        &mut buffer,
+        0,
+        &state.water,
+        state.energy.leaf.canopy_water.total_mm,
+        0.0,
+    )
+    .unwrap();
     buffer.set_time(0, 56_802_270).unwrap();
     let path = root.join("history.nc");
     buffer.write(&path).unwrap();
@@ -262,6 +270,7 @@ fn the_bridge_writes_the_state_variables_it_declares() {
         .chain(LCT_CANOPY_VARIABLES.iter())
         .chain(LCT_DERIVED_SOIL_VARIABLES.iter())
         .chain(LCT_ALBEDO_VARIABLES.iter())
+        .chain(LCT_WATER_STORAGE_VARIABLES.iter())
         .chain(DECLARED_ONLY.iter())
     {
         assert!(
@@ -478,6 +487,7 @@ fn the_written_schema_matches_the_golden_file_for_the_shared_variables() {
         .chain(LCT_CANOPY_VARIABLES.iter())
         .chain(LCT_DERIVED_SOIL_VARIABLES.iter())
         .chain(LCT_ALBEDO_VARIABLES.iter())
+        .chain(LCT_WATER_STORAGE_VARIABLES.iter())
         .chain(DECLARED_ONLY.iter())
     {
         let file_name = format!("f_{name}");
@@ -926,6 +936,51 @@ fn the_derived_soil_moisture_uses_both_phase_densities() {
         (values[1] - 0.1).abs() < 1.0e-12,
         "liquid must divide by denh2o (1000), got {}",
         values[1]
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// `*_inst` 三个量走的是**瞬时**规则，不是区间平均。
+///
+/// 上游 `vecacc = wat` 之后 `WHERE (vecacc /= spval) vecacc = vecacc * nac`
+/// （`MOD_Hist.F90:680-682`），再交给写出器 `acc_vec = acc_vec / nac` ——
+/// 乘一个 `nac` 再除一个 `nac`，写出的是**末步的瞬时值**。
+/// 与 `wat`（普通 `acc1d`，写区间平均）放在一起才看得出这条规则是分开的：
+/// 同一串输入下两者必须给出**不同**的数。
+#[test]
+fn the_instantaneous_water_variables_take_the_last_step_not_the_mean() {
+    let mut accumulator = HistoryAccumulator {
+        sums: std::collections::BTreeMap::new(),
+        steps: 0,
+    };
+    accumulator.steps = 2;
+    for value in [100.0, 200.0] {
+        accumulator.scalar("wat_inst", 0, value).unwrap();
+        accumulator.scalar("wat", 0, value).unwrap();
+    }
+    let mut buffer = HistoryBuffers::new(dimensions(), site(), 1);
+    buffer.declare(&["wat_inst", "wat"]).unwrap();
+    accumulator.write_means(&mut buffer, 0).unwrap();
+    buffer.set_time(0, 56_802_270).unwrap();
+    let root = temp_dir("instantaneous");
+    let path = root.join("history.nc");
+    buffer.write(&path).unwrap();
+    let file = netcdf::open(&path).unwrap();
+    let read = |name: &str| {
+        file.variable(name)
+            .unwrap()
+            .get_values::<f64, _>(..)
+            .unwrap()[0]
+    };
+    assert_eq!(
+        read("f_wat_inst"),
+        200.0,
+        "an instantaneous variable must carry the last step, not the mean"
+    );
+    assert_eq!(
+        read("f_wat"),
+        150.0,
+        "an averaged variable over the same inputs must carry the mean"
     );
     std::fs::remove_dir_all(root).unwrap();
 }
