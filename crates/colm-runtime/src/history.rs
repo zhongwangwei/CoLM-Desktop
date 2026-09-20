@@ -271,11 +271,16 @@ pub fn set_lct_energy_fluxes(
         ("etr", output.energy.leaf.transpiration_kg_m2_s),
         ("sabg", output.energy.shortwave.ground_absorbed_w_m2),
         ("fsenl", output.energy.leaf.leaf_sensible_heat_w_m2),
-        ("fseng", output.energy.leaf.ground_sensible_heat_w_m2),
+        // 地面那一半要取**订正后**的：内核的 `total = leaf + corrected_ground`
+        // （`standard_lct_step.rs:351`），而 `leaf.ground_sensible_heat_w_m2` 是
+        // 叶温求解前的初步值。写初步值会让 `fsenl + fseng != fsena` ——
+        // 实测 CN-Cng 首条记录 Fortran 是 32.183 + 670.575 = 702.758，
+        // 而写初步值的 Rust 是 28.841 + 962.618 = 991.459 ≠ 702.041。
+        ("fseng", output.energy.corrected_ground_sensible_heat_w_m2),
         // `leaf_evaporation` 在核心里就是 `transpiration + wet_evaporation`，
         // 与上游 `fevpl = etr + evplwet` 同一个量，**不要再加一次 `etr`**。
         ("fevpl", output.energy.leaf.leaf_evaporation_kg_m2_s),
-        ("fevpg", output.energy.leaf.ground_evaporation_kg_m2_s),
+        ("fevpg", output.energy.corrected_ground_evaporation_kg_m2_s),
     ] {
         ensure!(
             value.is_finite(),

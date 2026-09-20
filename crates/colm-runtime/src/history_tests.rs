@@ -174,6 +174,11 @@ fn the_bridge_writes_the_state_variables_it_declares() {
         ("fevpa", output.energy.total_evaporation_kg_m2_s),
         ("etr", output.energy.leaf.transpiration_kg_m2_s),
         ("sabg", output.energy.shortwave.ground_absorbed_w_m2),
+        // 拆分项取**订正后**的地面通量：上游 `fsena = fsenl + fseng`、
+        // `fevpa = fevpl + fevpg`。写叶温求解**之前**的初步值（`leaf.ground_*`）
+        // 会让这条恒等式不成立 —— 实测 CN-Cng 首条记录差 289 W/m²。
+        ("fseng", output.energy.corrected_ground_sensible_heat_w_m2),
+        ("fevpg", output.energy.corrected_ground_evaporation_kg_m2_s),
     ] {
         let values = file
             .variable(&format!("f_{name}"))
@@ -181,6 +186,24 @@ fn the_bridge_writes_the_state_variables_it_declares() {
             .get_values::<f64, _>(..)
             .unwrap();
         assert_eq!(values, vec![expected], "f_{name}");
+    }
+    // 拆分之和必须等于总量 —— 上游的恒等式，写初步值就破了。
+    let value = |name: &str| {
+        file.variable(&format!("f_{name}"))
+            .unwrap()
+            .get_values::<f64, _>(..)
+            .unwrap()[0]
+    };
+    // 容差只用来吃掉浮点结合律：内核算的是 `total = leaf + corrected`，
+    // 反过来减回去不一定逐位相等。
+    for (total, parts) in [
+        (value("fsena"), value("fsenl") + value("fseng")),
+        (value("fevpa"), value("fevpl") + value("fevpg")),
+    ] {
+        assert!(
+            (total - parts).abs() <= 1.0e-12 * total.abs().max(1.0),
+            "the split must sum back to {total}, got {parts}"
+        );
     }
     // 诊断量与这一步的输出逐项对上。
     for (name, expected) in [

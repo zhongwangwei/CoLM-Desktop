@@ -2953,14 +2953,33 @@ CN-Cng 第 1 天（24 步、12 条记录），`f_*` 都是区间平均：
 `f_fsena` 从差 94 W/m² 收到 0.7 W/m²，`f_t_grnd` 从差 0.81 K 收到 0.024 K。
 剩下的是真实的状态差（`f_scv` 偏高，见上文）。
 
-### 顺带发现、还没修的两处 history 取值
+### 顺带发现：叶/地面拆分写的是初步值（已修）
 
-对齐之后剩下的差异指向两处**拆分口径**，与平均无关：
+`f_fseng` 首条记录 Fortran 670.58 / Rust 962.62，而总量 `f_fsena` 只差 0.7 W/m² ——
+**总量对、拆分对不上**。原因是 `set_lct_energy_fluxes` 写的是
+`energy.leaf.ground_sensible_heat_w_m2`，那是**叶温求解之前**的初步地面交换；内核的
+总量是 `total = leaf + corrected_ground`（`standard_lct_step.rs:351`），
+所以写初步值会破掉上游的恒等式：
 
-* `f_fseng`（地面感热）首条记录 Fortran 670.58 / Rust 962.62，而两者之和
-  `f_fsena` 只差 0.7 W/m² —— 总量对、叶/地面**拆分**对不上（Fortran 的 `fsenl = 32.18`
-  而 Rust 是 `−260.6`）。要么是 `leaf_sensible_heat_w_m2`/`ground_sensible_heat_w_m2`
-  的定义与 `MOD_Thermal` 的 `fsenl`/`fseng` 不同，要么是两处的参考温度取法不同。
-* `f_lfevpa` 首条记录 184.68 / 615.05，而且 Rust 的值与它自己的
-  `hvap*fevpl + htvp*fevpg` 对不上（按 `f_fevpl`/`f_fevpg` 算出来约 338）。
-  也就是说本仓库的 `set_lct_surface_budget` 里那一项用的蒸发量不是 history 里写的那个。
+```
+Fortran  32.183 + 670.575 = 702.758 = fsena        ← 成立
+Rust     28.841 + 962.618 = 991.459 ≠ 702.041      ← 不成立
+```
+
+改成 `corrected_ground_sensible_heat_w_m2` / `corrected_ground_evaporation_kg_m2_s`
+之后：`673.200 + 28.841 = 702.041` ✓，与 Fortran 的 `fseng` 差 2.6 W/m²。
+`f_fevpg` 同理（原先也偏大）。回归测试现在同时钉住"逐项等于内核字段"与
+"拆分之和回到总量"（后者用 1e-12 的相对容差，只吃掉浮点结合律）。
+
+### 还没修：`f_lfevpa` 与它自己的 `fevpl`/`fevpg` 对不上
+
+```
+Fortran  f_lfevpa = 184.677    hvap*f_fevpl + htvp*f_fevpg = 221.506   ← 差 37
+Rust     f_lfevpa = 615.054    hvap*f_fevpl + htvp*f_fevpg = 615.054   ← 自己自洽
+```
+
+本仓库这一项是自洽的（`set_lct_surface_budget` 里同一批蒸发量算出来的），
+**上游反而不自洽**：它的 `a_lfevpa` 与 `a_fevpl`/`a_fevpg` 采样的不是同一个阶段
+（`MOD_Thermal` 里 `lfevpa` 在 `assimsun`/`assimsha` 订正之前算，而
+`fevpl`/`fevpg` 是订正之后的量）。要对齐必须先定位上游每一个量在 `THERMAL` 里的
+采样点，而不是按名字配对 —— 在这之前 `f_lfevpa` 不参与黄金比对。
