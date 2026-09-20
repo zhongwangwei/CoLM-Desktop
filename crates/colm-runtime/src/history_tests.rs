@@ -228,7 +228,7 @@ fn the_bridge_writes_the_state_variables_it_declares() {
         template.soil_layers(),
     )
     .unwrap();
-    set_lct_forcing_mirrors(&mut buffer, 0, reference()).unwrap();
+    set_lct_forcing_mirrors(&mut buffer, 0, reference(), &output.energy.precipitation).unwrap();
     set_lct_radiation_bands(&mut buffer, 0, &output.energy).unwrap();
     set_lct_canopy_geometry(&mut buffer, 0, &state.energy, &output.energy, &template).unwrap();
     set_lct_derived_soil(

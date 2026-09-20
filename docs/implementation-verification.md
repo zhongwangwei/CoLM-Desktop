@@ -4510,3 +4510,40 @@ ENDIF
 
 `UNFILLED` 相应缩到两条，并顺手修掉上一轮遗留的一处过期描述
 （那一组里 `us10m`/`vs10m`/`fm10m`/`ustar2` 上一轮已经写完，条目却没删）。
+
+## 湖泊/湿地六个量是"**本算例不该有值**"，不是"移植缺"（2026 年，实测）
+
+`UNFILLED` 把它们记成"湖泊/湿地分支尚未驱动"，于是看上去是六个要写的物理分支。
+先把黄金文件里它们的实际内容打出来：
+
+```
+f_t_lake        (time,patch,lake)  real=0/2640  全填充
+f_lake_icefrac  (time,patch,lake)  real=0/2640  全填充
+f_lake_deficit  (time,patch)       real=0/264   全填充
+f_wetwat        (time,patch)       real=0/264   全填充
+f_wetwat_inst   (time,patch)       real=0/264   全填充
+f_wetzwt        (time,patch)       real=0/264   全填充
+```
+
+**六个量一个真值都没有。** 上游只在对应 patch 类型上写它们
+（湖 `patchtype == 1`、湿地 `DEF_USE_WETLAND` 且 `patchtype == 2`），
+而站点是植被 patch —— 与 `sensors`/`frcsat`/`rsur_ie`/`rsur_se` 同一类：
+**声明 + 留空才是与上游一致的那一列**。加进 `DECLARED_ONLY` 后
+两个三维量的 `lake` 维度也对上了（`(time, patch, lake)`）。
+
+**`UNFILLED` 的写法要改**：它该说的是"这一列上游在本算例里留空"，
+而不是"本仓库还没有那支"。这两件事混在一句话里，会让下一个接手的人
+去写一个根本不需要写的分支 —— 这已经是第四轮踩同一个坑
+（`alb` 的四维通路、10 m 的廓线 routine、`green` 的 `vegc` 表、这六个）。
+
+### 顺带把 `f_xy_rain`/`f_xy_snow` 接上
+
+`CoLMMAIN.F90:793` 的 `forc_rain = prc_rain + prl_rain`（雪同理）——
+是**相态拆分之后**的驱动降水，所以取自本步的 `PrecipitationState`
+而不是 `forc_prc`/`forc_prl` 两列。两边都是恒 0（该窗口无降水），**逐位相同**。
+
+缺口 10 → **2**，只剩 `xerr` 与 `zerr` 两个平衡残差。
+`UNFILLED` 现在把两个残差的**完整项表**（含 `xmf`、`Σ(t-t_bef)/fact`、
+以及 `xerr` 需要的**步首**蓄量）逐条写在里面，并注明它们量级是
+1e-10/1e-16、tier2 的 atol 1e-7 能容 —— 所以那一步要防的是**拼错项**
+（会当场变成大数而红），不是精度。这样下一个人不必再读一遍上游。

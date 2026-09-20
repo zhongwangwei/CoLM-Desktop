@@ -229,7 +229,7 @@ pub const LCT_RADIATION_VARIABLES: [&str; 17] = [
 ///
 /// **本层刻意不声明 `f_xy_rain`/`f_xy_snow`**：它们是雨雪**相态拆分**的结果，
 /// 属于内核下游（`MOD_RainSnowTemp`）而不是驱动场本身，上游也是在那之后才累加的。
-pub const LCT_FORCING_VARIABLES: [&str; 9] = [
+pub const LCT_FORCING_VARIABLES: [&str; 11] = [
     "xy_t",
     "xy_q",
     "xy_pbot",
@@ -239,6 +239,11 @@ pub const LCT_FORCING_VARIABLES: [&str; 9] = [
     "xy_frl",
     "xy_prc",
     "xy_prl",
+    // `CoLMMAIN.F90:793` 的 `forc_rain = prc_rain + prl_rain`（雪同理），
+    // 即**相态拆分之后**的驱动降水 —— 所以它们不来自 `forc_prc`/`forc_prl` 两列，
+    // 而来自本步的 `PrecipitationState`（截留之前的那一份）。
+    "xy_rain",
+    "xy_snow",
 ];
 
 /// 本层能填的**冠层光合/气孔链**量，十一项。
@@ -285,7 +290,25 @@ pub const DECLARED_BUT_UNFILLED: [&str; 1] = ["frcsat"];
 /// 上游只有在算例主动往里写东西时才有值。对齐黄金算例 264×1×1 条**全是**
 /// `missing_value`，`oracle/tolerances.toml` 也把它钉在 tier0 并注明这一点。
 /// 所以"声明 + 留空"才是忠实：填任何东西都是无中生有。
-pub const DECLARED_ONLY: [&str; 3] = ["sensors", "rsur_ie", "rsur_se"];
+pub const DECLARED_ONLY: [&str; 9] = [
+    "sensors",
+    "rsur_ie",
+    "rsur_se",
+    // 湖泊与湿地六个量：上游只在**对应的 patch 类型**上写它们
+    // （湖 `patchtype == 1`、湿地 `DEF_USE_WETLAND` 且 `patchtype == 2`），
+    // 本仓库支持的是植被 patch，所以它们在本算例里 264 条**一个真值都没有**
+    // （三维那两个是 2640 个全填充）。声明 + 留空才是与上游一致的那一列。
+    //
+    // **这不等于"本仓库算不出"** —— 声明的意义是让文件 schema 与上游一致；
+    // 真要在湖/湿地 patch 上给出数值，得先有那两支的运行时驱动（现在没有，
+    // `assembly.rs` 只装配植被 patch）。
+    "t_lake",
+    "lake_icefrac",
+    "lake_deficit",
+    "wetwat",
+    "wetwat_inst",
+    "wetzwt",
+];
 
 /// 黄金算例（CN-Cng）里没有、但本层仍会声明的量。
 ///
@@ -296,9 +319,22 @@ pub const NOT_IN_GOLDEN: [&str; 1] = ["qcharge"];
 /// 黄金算例里有、但本层还填不出来的量（按用途分组，便于下一步挑）。
 ///
 /// 这份清单不参与写出，只是把"缺口"写死在代码里：改它就得同时改注释。
-pub const UNFILLED: [&str; 2] = [
-    "`xerr`/`zerr`/`xy_rain`/`xy_snow`：四项都是普通 `acc1d` + `filter`/`nac`，值也在（水平衡残差、能量平衡残差、雨雪拆分），只差接线与各自残差的定义核对",
-    "`t_lake`/`lake_icefrac`/`lake_deficit`（湖泊分支）、`wetwat`/`wetwat_inst`/`wetzwt`（湿地分支）：六个量都只是 `acc1d`/`acc2d` + `filter`/`nac`，**规则不难，难在没有运行时驱动** —— 上游只在 `patchtype == 1`（湖）或`DEF_USE_WETLAND` 下设它们",
+pub const UNFILLED: [&str; 1] = [
+    "`xerr`/`zerr`：两个都是**平衡残差**，规则普通（`acc1d` + `filter`/`nac`）但要把项拼齐 —— \
+     `zerr = errore`（`MOD_Thermal.F90:1394-1401`）：\
+     `sabv + sabg + frl - olrg - fsena - lfevpa - xmf - dheatl + hprl \
+     + cpliq*pg_rain*(t_precip-t_grnd) + cpice*pg_snow*(t_precip-t_grnd) \
+     - Σ_j (t_soisno(j)-t_soisno_bef(j))/fact(j)`（j 取 `lb:nl_soil`，含雪层）；\
+     本仓库已有 `previous_temperature_k`/`layer_factor_seconds_per_j_m2_k`（即 `t_bef`/`fact`）、\
+     `canopy_heat_storage_w_m2`（`dheatl`）、`precipitation_heat_w_m2`（`hprl`），\
+     缺的是 `xmf`（相变热）与 `sabv`/`frl`/`olrg` 的口径核对。\
+     `xerr = errorw/deltim`（`CoLMMAIN.F90:1529-1543`）：\
+     `errorw = (endwb - totwb) - (forc_prc + forc_prl - fevpa - rnof)*deltim`，\
+     `endwb` 与 `totwb` 是**同一条算式**在步末与步首的值：\
+     `Σ(wice+wliq) + ldew + scv + wa + wdsrf` —— 也就是 `wat`，\
+     所以关键是拿到**步首**那一份（步末那份已经在写 `wat` 了）。\
+     两个量都 ~1e-10 与 ~1e-16 量级，tier2 的 atol 1e-7 能容，\
+     所以要防的是**拼错项**（会当场变成大数而红），不是精度。",
 ];
 /// 声明本层能填的全部变量：状态十三项 + 水文六项 + 能量四项 + 地表十三项。
 pub fn declare_lct_variables(buffer: &mut HistoryBuffers) -> Result<()> {
@@ -999,6 +1035,7 @@ pub fn set_lct_forcing_mirrors(
     sink: &mut impl HistorySink,
     record: usize,
     reference: HistoryReferenceState,
+    precipitation: &colm_core::PrecipitationState,
 ) -> Result<()> {
     for (name, value) in [
         ("xy_t", reference.air_temperature_k),
@@ -1012,6 +1049,15 @@ pub fn set_lct_forcing_mirrors(
         ("xy_frl", reference.downward_longwave_w_m2),
         ("xy_prc", reference.convective_precipitation_kg_m2_s),
         ("xy_prl", reference.large_scale_precipitation_kg_m2_s),
+        // 相态拆分之后：`forc_rain = prc_rain + prl_rain`（`CoLMMAIN.F90:793`）。
+        (
+            "xy_rain",
+            precipitation.convective_rain_kg_m2_s + precipitation.large_scale_rain_kg_m2_s,
+        ),
+        (
+            "xy_snow",
+            precipitation.convective_snow_kg_m2_s + precipitation.large_scale_snow_kg_m2_s,
+        ),
     ] {
         ensure!(
             value.is_finite(),
@@ -1293,7 +1339,7 @@ impl HistorySession {
                 &state.energy,
                 reference.surface_cosine_zenith,
             )?;
-            set_lct_forcing_mirrors(accumulator, 0, reference)
+            set_lct_forcing_mirrors(accumulator, 0, reference, &output.energy.precipitation)
         })
     }
 
@@ -1357,7 +1403,7 @@ impl HistorySession {
                 &state.energy,
                 reference.surface_cosine_zenith,
             )?;
-            set_lct_forcing_mirrors(accumulator, 0, reference)
+            set_lct_forcing_mirrors(accumulator, 0, reference, &output.energy.precipitation)
         })
     }
 
