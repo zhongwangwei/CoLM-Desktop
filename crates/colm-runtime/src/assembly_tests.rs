@@ -54,6 +54,7 @@ fn physics(timestep_seconds: f64) -> LandPhysicsParameters {
         crank_nicolson_factor: 0.5,
         soil_roughness_m: 0.01,
         snow_cover_exponent: 1.0,
+        supercool_water: true,
         snow_roughness_m: 0.0024,
         wind_height_m: 30.0,
         temperature_height_m: 30.0,
@@ -105,6 +106,48 @@ fn assemble(label: &str, patch: usize) -> (SyntheticRestart, StandardLctRestartT
     )
     .unwrap();
     (fixture, template)
+}
+
+/// `DEF_USE_SUPERCOOL_WATER`（`MOD_Namelist.F90:281`，默认**开**）必须真的传到
+/// 内核输入里。
+///
+/// 原先这里是写死的 `supercool_water: false`，那会让冰点以下的表层土壤全部结冰：
+/// 实测 CN-Cng 第 1 天正午两边总水量都是 18.78 kg/m²，Fortran 分出 3.27 的液相
+/// （超冷上限）、Rust 是 0，于是 `ssw = 0`、地面反照率顶到上限，`t_grnd` 差 2.5 K。
+/// 这个断言两边都钉：装配默认必须是 `true`，而 `false` 也必须原样传下去
+/// （不能反过来写死 `true`）。
+#[test]
+fn the_supercooled_water_switch_reaches_the_kernel_input() {
+    let (_, template) = assemble("supercool-wiring", 1);
+    assert!(template.physics.supercool_water);
+    assert!(
+        template
+            .snow_input(&binding())
+            .energy
+            .ground_temperature
+            .supercool_water
+    );
+
+    let root = temp_dir("supercool-off");
+    let fixture = SyntheticRestart::write(root.join("restart")).unwrap();
+    let mut off = physics(1800.0);
+    off.supercool_water = false;
+    let template = assemble_standard_lct_template(
+        &RestartStateFiles {
+            constant: fixture.constant.block.clone(),
+            time: fixture.time.block.clone(),
+        },
+        1,
+        off,
+    )
+    .unwrap();
+    assert!(
+        !template
+            .snow_input(&binding())
+            .energy
+            .ground_temperature
+            .supercool_water
+    );
 }
 
 /// 常数重启里的土壤场**按算例选的水力关系读**。

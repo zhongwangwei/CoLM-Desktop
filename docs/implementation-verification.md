@@ -2812,4 +2812,75 @@ Fortran: coszen = 0.3798207139      Rust: coszen = 0.3741924546
   用于 `albland` 并写进重启的 `coszen`。
 
 （`CoLM.F90:480` 的 `CALL TICKTIME(deltim, idate)` 在 `CoLMDRIVER`（`:512`）之前。）
-本仓库只算了一个步首的 `coszen`，两处都用它。这是下一轮的目标。
+本仓库原先只算了一个步首的 `coszen`，两处都用它。修法是把两个值分开：
+`PointRuntimeStep` 多一个 `surface_cosine_zenith`（按 `clock.end_time` 算），
+`forcing.cosine_zenith` 保持步首（降尺度与直散拆分要用它），`albland` 与重启的
+`coszen` 用新的那个。`MOD_NetSolar.F90:292` 的 `local_secs = idate(3)` 同理 ——
+`StandardLctStepBinding.seconds_of_day` 也改成步末，并且要把 `86400` 进位成第二天
+`00:00`（上游的 `idate` 用 `adj2end` 约定，时钟交出来的 `end_time` 保留"当日末尾"
+的写法，不退位会让每个跨日步都撞上 `NetSolar` 的值域断言）。
+
+修完这个点上 `coszen` 差 2.2e-9、`extkb` 差 9.9e-9。**这一个改动同时验证了整条
+太阳几何 → 两流 → `extkb` 的链**：`extkb = proj/czen` 对 `czen` 极敏感
+（`d(extkb)/d(czen) ≈ -3.5`），差半个步长就会放大到 0.026。
+
+## 冰点以下为什么还有液态水：`DEF_USE_SUPERCOOL_WATER` 被写死成了关（2026 年，实测）
+
+修完上面那一条，白天对照点上 `alb` 仍差 0.023。顺着 `ssoi` 反推地面反照率，发现
+Rust 的 `ssw = 0` —— **表层土壤一点液态水都没有**。而两边的总水量逐位相同
+（18.78 kg/m²），只是分割不同：
+
+```
+                 t_soisno(1)   wliq(1)   wice(1)
+Fortran            268.288      3.274    15.510
+Rust               270.832      0.000    18.784
+```
+
+冰点**以下**还有液相不是数值噪声：上游默认打开超冷土壤水方案
+（Niu & Yang 2006）。`MOD_Namelist.F90:281`
+
+```fortran
+logical :: DEF_USE_SUPERCOOL_WATER = .true.     ! supercooled soil water scheme, Niu & Yang (2006)
+```
+
+只有 `DEF_URBAN_RUN` 会把它强关（`:2337`）。`meltf` 里结冰的判据因此不是
+`wliq > 0` 而是 `wliq > supercool(j)`（`MOD_PhaseChange.F90:170`）：
+
+```fortran
+smp = hfus * (t_soisno(j)-tfrz)/(grav*t_soisno(j)) * 1000.     ! mm
+supercool(j) = porsl(j)*(smp/psi0(j))**(-1.0/bsw(j))           ! Campbell
+supercool(j) = supercool(j)*dz(j)*1000.                        ! mm
+```
+
+内核**早就移植好了**（`phase_change.rs` 的 `supercool_limit`，含 Campbell 与
+van Genuchten 两支），问题只在装配层写死了 `supercool_water: false`。
+`physics` 现在从 `DEF_USE_SUPERCOOL_WATER` 读它并传下去。
+
+### 实测：这一条是剩下误差的主要来源
+
+| | Fortran | 写死关 | 读默认（开） |
+|---|---|---|---|
+| `t_grnd`（第 1 天正午） | 268.2883 | 270.8324（**+2.544**） | 268.2334（**−0.055**） |
+| `alb`（vis 直射） | 0.169983 | 0.192366 | **0.170494** |
+| `ssun`（vis 直射） | 0.378046 | 0.384194 | **0.378181** |
+| `ssoi`（vis 直射） | 0.432157 | 0.395392 | **0.432199** |
+| `scv` | 0.047188 | 0.015822 | **0.053120** |
+
+528 步对齐窗口：
+
+| | Fortran | 上一节修完 | 再修这一条 |
+|---|---|---|---|
+| `t_grnd` | 255.5818 | 257.7974（+2.216） | **255.5346（−0.047）** |
+| `sag` | 0.0012434 | 0.0013540 | **0.0012420** |
+| `scv` | 0.047188 | 0.015822 | 0.054715 |
+| `fsno` | 0.017568 | 0.005611 | 0.020906 |
+| `coszen` | −0.92245036 | −0.91681995 | **−0.92245036** |
+| `alb`/`ssun`/`ssha`/`ssoi`/`ssno` | — | 逐位相同 | 逐位相同 |
+| `sai` | 0.4498301 | 0.4499444 | 0.4498005 |
+
+`t_grnd` 从 +2.2 K 掉到 −0.047 K，其余表面量也一起落到位。剩下的 `scv` 偏高 16%
+（Rust 积得略多）与 `fsno` 跟着偏高，是下一轮的目标。
+
+**一条教训**：`DEF_USE_*` 这类**默认开**的开关，写死 `false` 不会报错，只会让整个
+物理过程静默消失。凡是上游声明默认为真的分支，装配层要么把值读进来，要么进
+`unported_branches`；不能留一个没有出处的常量。

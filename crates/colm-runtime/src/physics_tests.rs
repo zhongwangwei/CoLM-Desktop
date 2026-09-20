@@ -70,6 +70,8 @@ fn an_empty_case_maps_every_declared_default() {
     assert_eq!(physics.snow_roughness_m, 0.0024);
     // `snowfraction` 的雪密度指数（`MOD_Namelist.F90:618`，默认 1）。
     assert_eq!(physics.snow_cover_exponent, 1.0);
+    // `DEF_USE_SUPERCOOL_WATER` 默认**开**（`MOD_Namelist.F90:281`）。
+    assert!(physics.supercool_water);
     assert_eq!(physics.maximum_dew_mm, 0.1);
     assert_eq!(physics.surface_temperature_factor, 0.34);
     assert_eq!(physics.crank_nicolson_factor, 0.5);

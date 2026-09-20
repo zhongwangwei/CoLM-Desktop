@@ -133,6 +133,8 @@ pub struct LandPhysicsParameters {
     pub surface_temperature_factor: f64,
     pub crank_nicolson_factor: f64,
     pub soil_roughness_m: f64,
+    /// `DEF_USE_SUPERCOOL_WATER`：超冷土壤水（默认开）。
+    pub supercool_water: bool,
     /// `DEF_TUNING_SNOW_COVER_EXPONENT`：`snowfraction` 的雪密度指数。
     pub snow_cover_exponent: f64,
     pub snow_roughness_m: f64,
@@ -232,7 +234,10 @@ pub struct EvolvedStepOutput<'a> {
     pub matric_potential_mm: &'a [f64],
     /// 本 patch 的逐层导水率，长度等于土层数。
     pub hydraulic_conductivity_mm_s: &'a [f64],
-    /// `coszen`：本步的太阳天顶角余弦，取自强迫场绑定。
+    /// `coszen`：上游 `CoLMMAIN.F90:2076` 的 `orb_coszen(calendarday(idate))`，
+    /// `idate` 是**步末**（`CoLM.F90:480` 的 `TICKTIME` 在 `CoLMDRIVER` 之前）。
+    /// 取 [`crate::PointRuntimeStep::surface_cosine_zenith`]，**不是**
+    /// `forcing.cosine_zenith`（那是 `MOD_Forcing` 按步首算的另一个量）。
     pub cosine_zenith: f64,
     /// 本步的能量链输出。表面诊断量（相似函数、2 m 气温湿度、粗糙度……）都在里面，
     /// 它们都是 `intent(out)`，状态里没有。
@@ -1128,7 +1133,11 @@ impl StandardLctRestartTemplate {
                     ground_temperature_k: self.temperature_k[0],
                     soil_surface_temperature_k: self.temperature_k[top],
                     snow_surface_temperature_k: self.temperature_k[0],
-                    supercool_water: false,
+                    // `DEF_USE_SUPERCOOL_WATER`（默认开）。写死 `false` 会让冰点
+                    // 以下的表层土壤全部结冰：实测 CN-Cng 第 1 天正午两边的总水量
+                    // 都是 18.78 kg/m²，Fortran 分出 3.27 的液相（超冷上限），
+                    // Rust 是 0 —— `ssw = 0` 于是 `inc` 顶到 0.11，`alb` 高 0.023。
+                    supercool_water: physics.supercool_water,
                 },
             },
             water: colm_core::Water2014SoilInput {

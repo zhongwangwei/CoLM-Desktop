@@ -178,7 +178,7 @@ fn run_snow(
                     last_ground_temperature_k = Some(output.energy.ground.temperature_k[0]);
                     last_water = Some(output.water.clone());
                     last_energy = Some(output.energy.clone());
-                    last_cosine_zenith = step.forcing.cosine_zenith;
+                    last_cosine_zenith = step.surface_cosine_zenith;
                     Ok(())
                 },
             )?;
@@ -189,7 +189,7 @@ fn run_snow(
                 last_ground_temperature_k = Some(output.energy.ground.temperature_k[0]);
                 last_water = Some(output.water.clone());
                 last_energy = Some(output.energy.clone());
-                last_cosine_zenith = step.forcing.cosine_zenith;
+                last_cosine_zenith = step.surface_cosine_zenith;
                 Ok(())
             })?,
             None,

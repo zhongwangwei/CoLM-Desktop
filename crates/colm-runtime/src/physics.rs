@@ -125,6 +125,11 @@ pub fn land_physics_parameters(
         surface_temperature_factor: real(document, "DEF_TUNING_CAPR")?,
         crank_nicolson_factor: real(document, "DEF_TUNING_CNFAC")?,
         soil_roughness_m: real(document, "DEF_TUNING_ZLND")?,
+        // 超冷土壤水（Niu & Yang 2006）：`MOD_Namelist.F90:281` 默认**开**，
+        // 只有 `DEF_URBAN_RUN` 会把它强关（`:2337`）。它决定冰点以下土层的
+        // 液相保留量 —— 关掉会让表层土壤在冰点以下全部结冰，`ssw` 归零，
+        // 地面反照率顶到上限。
+        supercool_water: logical(document, "DEF_USE_SUPERCOOL_WATER")?,
         // `snowfraction` 的指数（`MOD_Namelist.F90:618`，默认 1）。
         snow_cover_exponent: real(document, "DEF_TUNING_SNOW_COVER_EXPONENT")?,
         snow_roughness_m: real(document, "DEF_TUNING_ZSNO")?,

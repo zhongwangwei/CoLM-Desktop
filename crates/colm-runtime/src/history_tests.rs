@@ -63,6 +63,7 @@ fn physics() -> LandPhysicsParameters {
         crank_nicolson_factor: 0.5,
         soil_roughness_m: 0.01,
         snow_cover_exponent: 1.0,
+        supercool_water: true,
         snow_roughness_m: 0.0024,
         wind_height_m: 30.0,
         temperature_height_m: 30.0,

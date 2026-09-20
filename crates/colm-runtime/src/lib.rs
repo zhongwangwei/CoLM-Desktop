@@ -15,11 +15,11 @@ use crate::assembly::{StandardLctRestartTemplate, StandardLctStepBinding, Surfac
 use anyhow::{bail, ensure, Context, Result};
 use colm_core::{
     apply_downscaled_runtime_forcing, downscale_forcings, grid_forcing_from_runtime,
-    month_day_to_julian, orbital_calendar_day, orbital_cosine_azimuth, standard_lct_soil_step,
-    CalendarTime, Co2Scenario, DownscalingSolarGeometry, DownscalingTerrain,
-    ForcingDownscalingConfig, ForcingDownscalingInput, LaiUpdateSchedule, RestartFrequency,
-    RuntimeClock, RuntimeForcing, RuntimeStep, StandardLctSnowSoilOutput, StandardLctSnowSoilState,
-    StandardLctSoilInput, StandardLctSoilOutput, StandardLctSoilState,
+    month_day_to_julian, orbital_calendar_day, orbital_cosine_azimuth, orbital_cosine_zenith,
+    standard_lct_soil_step, CalendarTime, Co2Scenario, DownscalingSolarGeometry,
+    DownscalingTerrain, ForcingDownscalingConfig, ForcingDownscalingInput, LaiUpdateSchedule,
+    RestartFrequency, RuntimeClock, RuntimeForcing, RuntimeStep, StandardLctSnowSoilOutput,
+    StandardLctSnowSoilState, StandardLctSoilInput, StandardLctSoilOutput, StandardLctSoilState,
 };
 use colm_forcing::{load_point_forcing, PointForcingSeries};
 use colm_namelist::{parse, Document, Value};
@@ -64,6 +64,14 @@ pub struct PointRuntimeStep {
     pub forcing: RuntimeForcing,
     /// `MOD_OrbCosazi` evaluated from this step's local orbital calendar.
     pub cosine_azimuth: f64,
+    /// `CoLMMAIN.F90:2076` 的 `coszen`：`orb_coszen(calendarday(idate))`，
+    /// 而 `idate` 已被 `CoLM.F90:480` 的 `TICKTIME` 推到**步末**。
+    ///
+    /// **不要**用 [`Self::forcing`] 里那个 `cosine_zenith` 顶替：那一个来自
+    /// `MOD_Forcing`，是在 `TICKTIME` **之前**按步首时刻算的，用于短波直散拆分与
+    /// 地形降尺度。上游确实同时存在这两个值，混用会让 `albland` 的太阳天顶角
+    /// 差半个步长 —— 实测 CN-Cng 第 1 天正午 `0.379821` 与 `0.374192`。
+    pub surface_cosine_zenith: f64,
 }
 
 /// Static terrain data needed to downscale one POINT forcing series.
@@ -522,6 +530,9 @@ impl PointRuntime {
         )?;
         let calendar_day =
             orbital_calendar_day(clock.forcing_time, self.greenwich, self.longitude_degrees)?;
+        // 步末的太阳天顶角：`CoLMMAIN` 用的是被 `TICKTIME` 推过一步的 `idate`。
+        let surface_calendar_day =
+            orbital_calendar_day(clock.end_time, self.greenwich, self.longitude_degrees)?;
         Ok(Some((
             next_clock,
             PointRuntimeStep {
@@ -531,6 +542,11 @@ impl PointRuntime {
                     self.longitude_degrees.to_radians(),
                     self.latitude_degrees.to_radians(),
                     forcing.cosine_zenith,
+                ),
+                surface_cosine_zenith: orbital_cosine_zenith(
+                    surface_calendar_day,
+                    self.longitude_degrees.to_radians(),
+                    self.latitude_degrees.to_radians(),
                 ),
                 forcing,
             },
@@ -550,7 +566,8 @@ fn lct_binding(
     let (month, _) = colm_core::month_day(step.clock.forcing_time)?;
     Ok(StandardLctStepBinding {
         forcing: step.forcing,
-        seconds_of_day: seconds_of_day(step.clock.forcing_time)?,
+        // `MOD_NetSolar.F90:292` 的 `local_secs = idate(3)`，`idate` 同样是步末。
+        seconds_of_day: seconds_of_day(step.clock.end_time)?,
         greenwich_time,
         longitude_radians: longitude_degrees.to_radians(),
         // `MOD_Forcing` 每步按年月查 Mauna Loa 月表，再乘 1e-6 转成体积分数。
@@ -564,16 +581,17 @@ fn lct_binding(
 
 /// 把一步的输出打包成「准备下一步表面光学」的输入。
 ///
-/// 三样来自步输出（`t_grnd`、`z0m`、`fwet_snow`），`coszen` 来自 forcing 绑定，
-/// `scvold` 由调用方在**内核动手之前**读出来。上游也是这么取的：`CoLMMAIN.F90`
-/// 的末尾一节用的正是这一步 `THERMAL` 刚写下的全局量。
+/// 三样来自步输出（`t_grnd`、`z0m`、`fwet_snow`），`coszen` 取**步末**那个
+/// （[`PointRuntimeStep::surface_cosine_zenith`]），`scvold` 由调用方在**内核动手之前**
+/// 读出来。上游也是这么取的：`CoLMMAIN.F90` 的末尾一节用的正是这一步 `THERMAL`
+/// 刚写下的全局量，`coszen` 由 `:2076` 按步末的 `idate` 现算。
 fn surface_optics_step(
     step: PointRuntimeStep,
     previous_snow_water_equivalent_mm: f64,
     output: &colm_core::StandardLctSnowSoilOutput,
 ) -> SurfaceOpticsStep {
     SurfaceOpticsStep {
-        cosine_zenith: step.forcing.cosine_zenith,
+        cosine_zenith: step.surface_cosine_zenith,
         ground_temperature_k: output.energy.ground.temperature_k[0],
         momentum_roughness_m: output.energy.leaf.momentum_roughness_m,
         wet_snow_fraction: output.energy.leaf.wet_snow_fraction,
@@ -581,17 +599,23 @@ fn surface_optics_step(
     }
 }
 
-/// `MOD_NetSolar` 的 `seconds_of_day` 是当日秒数，核心里要求落在 `[0, 86400)`。
+/// `MOD_NetSolar.F90:292` 的 `local_secs = idate(3)`：当日秒数，要求落在 `[0, 86400)`。
 ///
-/// 时钟给出的是同一个量，但类型更宽；这里显式收窄而不是 `as` 一下了事 ——
-/// 越界的当日秒数只会让 `local_noon` 静默走到另一个分支。
+/// **步末的那一天末尾要进位。** 上游的 `idate` 用 `adj2end` 约定（`CoLM.F90:301`），
+/// 一天的末尾写成"第二天 00:00"；而时钟交出来的 `end_time` 保留 `86400` 这个
+/// "当日末尾"的写法。两者是同一时刻，但只有前者落在 `NetSolar` 的定义域里 ——
+/// 直接断言会让每个跨日步都失败（实测跑一次跨月窗口就会撞上）。
 fn seconds_of_day(time: CalendarTime) -> Result<i32> {
     ensure!(
-        time.seconds < 86_400,
+        time.seconds <= 86_400,
         "the runtime clock produced {} seconds into a day; NetSolar requires [0, 86400)",
         time.seconds
     );
-    Ok(time.seconds as i32)
+    Ok(if time.seconds == 86_400 {
+        0
+    } else {
+        time.seconds as i32
+    })
 }
 
 /// Reads the POINT runtime inputs from the same case and forcing namelists that
@@ -1062,6 +1086,7 @@ mod tests {
             crank_nicolson_factor: 0.5,
             soil_roughness_m: 0.01,
             snow_cover_exponent: 1.0,
+            supercool_water: true,
             snow_roughness_m: 0.0024,
             wind_height_m: 30.0,
             temperature_height_m: 30.0,
@@ -1545,6 +1570,74 @@ mod tests {
         assert!(steps[0].forcing.bottom_pressure_pa < steps[0].grid_forcing.bottom_pressure_pa);
         assert!(steps[0].forcing.air_temperature_k < steps[0].grid_forcing.air_temperature_k);
         assert!(runtime.next_step().unwrap().is_none());
+    }
+
+    /// 一步里有**两个**太阳天顶角，不能混：
+    ///
+    /// * `MOD_Forcing` 在 `TICKTIME` 之前按**步首**算的（`MOD_Forcing.F90:752`），
+    ///   用于短波直散拆分与地形降尺度 —— 就是 `forcing.cosine_zenith`；
+    /// * `CoLMMAIN.F90:2076` 在 `TICKTIME` 之后按**步末** `idate` 现算的那个，
+    ///   `albland` 与重启的 `coszen` 用它 —— 就是 `surface_cosine_zenith`。
+    ///
+    /// 本仓库原先只有一个，两处都用步首那一份。实测 CN-Cng 第 1 天正午两个值
+    /// 是 0.379821 与 0.374192，差半个步长的太阳时角；用它算出的 `extkb`
+    /// 也跟着差 0.026。
+    #[test]
+    fn the_surface_cosine_zenith_uses_the_end_of_the_step() {
+        let root = directory("surface-zenith");
+        let case = root.join("case.nml");
+        let forcing = root.join("forcing.nml");
+        let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/Forcing");
+        let source_dir = format!("{}/", source.display());
+        write_case(&case, &forcing, &source_dir, "POINT");
+        let config = read_point_runtime_config(&case).unwrap();
+        let (longitude_degrees, latitude_degrees, greenwich) = (
+            config.longitude_degrees,
+            config.latitude_degrees,
+            config.greenwich,
+        );
+        let mut runtime = PointRuntime::open(config).unwrap();
+        let step = runtime.next_step().unwrap().unwrap();
+        let expected = orbital_cosine_zenith(
+            orbital_calendar_day(step.clock.end_time, greenwich, longitude_degrees).unwrap(),
+            longitude_degrees.to_radians(),
+            latitude_degrees.to_radians(),
+        );
+        assert!((step.surface_cosine_zenith - expected).abs() < 1.0e-15);
+        // 两个时刻确实不同：一个 1800 秒的窗口里两者就不会相等。
+        assert!((step.surface_cosine_zenith - step.forcing.cosine_zenith).abs() > 1.0e-6);
+    }
+
+    /// 当日末尾（`seconds == 86400`）要进位成第二天 00:00 再交给 `NetSolar`。
+    ///
+    /// 上游的 `idate` 用 `adj2end` 约定，而时钟交出来的 `end_time` 保留 86400
+    /// 这个"当日末尾"的写法 —— 直接断言会让每个跨日步都失败。
+    #[test]
+    fn the_seconds_of_day_roll_over_at_the_end_of_a_day() {
+        assert_eq!(
+            seconds_of_day(CalendarTime {
+                year: 2008,
+                julian_day: 1,
+                seconds: 86_400,
+            })
+            .unwrap(),
+            0
+        );
+        assert_eq!(
+            seconds_of_day(CalendarTime {
+                year: 2008,
+                julian_day: 1,
+                seconds: 43_200,
+            })
+            .unwrap(),
+            43_200
+        );
+        assert!(seconds_of_day(CalendarTime {
+            year: 2008,
+            julian_day: 1,
+            seconds: 86_401,
+        })
+        .is_err());
     }
 
     #[test]
