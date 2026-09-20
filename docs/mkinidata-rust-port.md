@@ -186,3 +186,10 @@ them. Checked against the current tree:
 Cutover (`colm-cli run` selecting a Rust `colm`) depends on that layer; until it
 exists the Fortran binary stays the verified runtime, and `--preprocessors` continues
 to cover only the first two stages.
+
+One prerequisite is now in place: the history gate table carries each variable's full
+schema — name, `long_name`, `units` and the layer dimensions in file order — extracted
+from the same write calls that produce the gate conditions and verified against the
+golden file (all 117 intersecting variables agree on all four). A native history
+writer therefore no longer needs to re-parse `MOD_Hist.F90` for its schema; what is
+still missing is the writer itself and the per-step field values it would serialize.
