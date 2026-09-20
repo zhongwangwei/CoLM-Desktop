@@ -78,6 +78,13 @@ pub struct LandPhysicsParameters {
     /// 装配层与内核目前只有经典路径（见 `water_2014.rs`），所以这个字段的作用是
     /// **让调用方能在跑之前发现分支不匹配**，而不是静默按另一套水文算完。
     pub variably_saturated_flow: bool,
+    /// `DEF_USE_PLANTHYDRAULICS`：植物水力。
+    ///
+    /// **默认是 `.true.`**（`MOD_Namelist.F90:531`），也就是说默认配置开着 PHS。
+    /// 它改的是 ET 的分层分配（`soilwater` 里 `IF(.not. DEF_USE_PLANTHYDRAULICS)` 那一支）、
+    /// 冠层阻力的来源、以及 `vegwp` 这个状态量。本仓库的 standard-LCT 分支把这个开关
+    /// 硬写成关（`plant_hydraulics: None`），所以调用方必须能看出算例要的是哪一支。
+    pub plant_hydraulics: bool,
     /// 本算例编译的地类分类体系。
     pub land_cover_scheme: LandCoverScheme,
     /// `ROOTFR_SCHEME`：`rootfr` 取哪一套公式。
@@ -205,6 +212,85 @@ pub struct EvolvedStepOutput<'a> {
     pub matric_potential_mm: &'a [f64],
     /// 本 patch 的逐层导水率，长度等于土层数。
     pub hydraulic_conductivity_mm_s: &'a [f64],
+    /// `coszen`：本步的太阳天顶角余弦，取自强迫场绑定。
+    pub cosine_zenith: f64,
+    /// 本步的能量链输出。表面诊断量（相似函数、2 m 气温湿度、粗糙度……）都在里面，
+    /// 它们都是 `intent(out)`，状态里没有。
+    pub energy: &'a colm_core::StandardLctEnergyOutput,
+}
+
+/// 表面诊断量的**整变量缓冲**（长度 = patch 数），从时间重启读进来。
+///
+/// 它们是 `(patch,)` 形状，而写出是"整变量替换"，所以必须留着原缓冲、只换本 patch
+/// 的那一个数 —— 否则多 patch 的算例会被写成一个只有一项的数组。
+/// 上游同样整段写出（`MOD_Vars_TimeVariables.F90:1154` 一带）。
+///
+/// 每一项都是 `Option`：合成算例的重启里没有这些诊断量，真算例里有。缺了就**不写**，
+/// 而不是编一个值塞进去 —— 那会把一次没有依据的推算写进重启。
+#[derive(Debug, Clone)]
+struct SurfaceDiagnostics {
+    columns: Vec<(&'static str, Option<Vec<f64>>)>,
+}
+
+impl SurfaceDiagnostics {
+    /// 要回写的诊断量，顺序与 `evolved_overrides` 的取值表一致。
+    const NAMES: [&'static str; 16] = [
+        "coszen",
+        "fwet_snow",
+        "tref",
+        "qref",
+        "rst",
+        "gs0sun",
+        "gs0sha",
+        "z0m",
+        "zol",
+        "rib",
+        "ustar",
+        "qstar",
+        "tstar",
+        "fm",
+        "fh",
+        "fq",
+    ];
+
+    fn read(time: &RestartFile) -> Result<Self> {
+        let mut columns = Vec::with_capacity(Self::NAMES.len());
+        for name in Self::NAMES {
+            let column = match time.variable_dimensions(name) {
+                Ok(_) => Some(time.floats(name)?.to_vec()),
+                Err(_) => None,
+            };
+            columns.push((name, column));
+        }
+        Ok(Self { columns })
+    }
+
+    /// 本 patch 的值换掉，其余保持原值；这份重启没有该变量时返回 `None`。
+    fn splice(&self, name: &str, patch: usize, value: f64) -> Result<Option<RestartOverride>> {
+        let Some((name, Some(source))) = self
+            .columns
+            .iter()
+            .find(|(candidate, _)| *candidate == name)
+        else {
+            return Ok(None);
+        };
+        Ok(Some(RestartOverride::new(
+            *name,
+            replaced(source, patch, name, value)?,
+        )))
+    }
+}
+
+/// 把逐 patch 缓冲里本 patch 的那一项换掉，其余保持原值。
+fn replaced(source: &[f64], patch: usize, name: &str, value: f64) -> Result<Vec<f64>> {
+    ensure!(
+        patch < source.len(),
+        "the restart's {name} column has {} patches, so patch {patch} cannot be replaced",
+        source.len()
+    );
+    let mut buffer = source.to_vec();
+    buffer[patch] = value;
+    Ok(buffer)
 }
 
 /// 雪 + 土拼成的模板列，长度随雪层数变。
@@ -267,6 +353,8 @@ pub struct StandardLctRestartTemplate {
     pub snow: RuntimeSnowColumn,
     /// 原时间重启里续跑会用到的整变量缓冲，供 [`Self::evolved_overrides`] 以原值为底。
     restart_columns: RestartColumns,
+    /// 表面诊断量的整变量缓冲，同上。
+    surface_diagnostics: SurfaceDiagnostics,
     /// 雪 + 土的模板列（`soilsnow`），积雪分支的 `GroundTemperatureInput` 需要这个形状。
     ///
     /// 雪段在前、土段在后，与时间重启里的数组同序；无雪时它就是土列本身。
@@ -443,6 +531,7 @@ fn assemble(
         matric_potential_mm: time.floats("smp")?.to_vec(),
         hydraulic_conductivity_mm_s: time.floats("hk")?.to_vec(),
     };
+    let surface_diagnostics = SurfaceDiagnostics::read(&time)?;
     ensure!(
         snow.layer_count == 0 || snow.depth_m > 0.0,
         "the restart carries {} snow layer(s) under no depth",
@@ -644,6 +733,7 @@ fn assemble(
         biochemistry,
         snow,
         restart_columns,
+        surface_diagnostics,
         snow_soil,
         root_flux_zeros: vec![0.0; soil_layers],
         physics,
@@ -1018,6 +1108,7 @@ impl StandardLctRestartTemplate {
         state: &StandardLctSoilState,
         step: EvolvedStepOutput<'_>,
     ) -> Result<Vec<RestartOverride>> {
+        let leaf_output = &step.energy.leaf;
         let ground_temperature_k = step.ground_temperature_k;
         ensure!(
             ground_temperature_k.is_finite() && ground_temperature_k > 0.0,
@@ -1093,7 +1184,7 @@ impl StandardLctRestartTemplate {
         canopy[self.patch] = state.energy.leaf.canopy_water.total_mm;
         canopy_rain[self.patch] = state.energy.leaf.canopy_water.rain_mm;
         canopy_snow[self.patch] = state.energy.leaf.canopy_water.snow_mm;
-        Ok(vec![
+        let mut overrides = vec![
             RestartOverride::new("t_soisno", temperature),
             RestartOverride::new("wliq_soisno", liquid),
             RestartOverride::new("wice_soisno", ice),
@@ -1107,7 +1198,31 @@ impl StandardLctRestartTemplate {
             RestartOverride::new("ldew_snow", canopy_snow),
             RestartOverride::new("smp", matric_potential),
             RestartOverride::new("hk", hydraulic_conductivity),
-        ])
+        ];
+        // 表面诊断量：`(patch,)` 形状，只换本 patch 的那一项，其余保持重启里的原值。
+        for (name, value) in [
+            ("coszen", step.cosine_zenith),
+            ("fwet_snow", leaf_output.wet_snow_fraction),
+            ("tref", leaf_output.air_temperature_2m_k),
+            ("qref", leaf_output.air_specific_humidity_2m),
+            ("rst", leaf_output.canopy_stomatal_resistance_s_m),
+            ("gs0sun", leaf_output.sunlit_stomatal_conductance_mol_m2_s),
+            ("gs0sha", leaf_output.shaded_stomatal_conductance_mol_m2_s),
+            ("z0m", leaf_output.momentum_roughness_m),
+            ("zol", leaf_output.zol),
+            ("rib", leaf_output.bulk_richardson),
+            ("ustar", leaf_output.friction_velocity_m_s),
+            ("qstar", leaf_output.humidity_scale),
+            ("tstar", leaf_output.temperature_scale_k),
+            ("fm", leaf_output.momentum_similarity),
+            ("fh", leaf_output.heat_similarity),
+            ("fq", leaf_output.moisture_similarity),
+        ] {
+            if let Some(override_) = self.surface_diagnostics.splice(name, self.patch, value)? {
+                overrides.push(override_);
+            }
+        }
+        Ok(overrides)
     }
 
     /// 积雪分支的续跑替换项：土壤那十一项，加上雪段与四个雪标量。

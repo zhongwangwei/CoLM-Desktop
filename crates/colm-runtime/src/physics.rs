@@ -66,6 +66,9 @@ pub fn land_physics_parameters(
     // 配置跑的是 VSF**，经典 Richards 路径要显式关掉才走得到。
     let campbell = logical(document, "DEF_USE_Campbell_SOIL_MODEL")?;
     let variably_saturated_flow = logical(document, "DEF_USE_VariablySaturatedFlow")? || !campbell;
+    // `DEF_USE_PLANTHYDRAULICS` 的声明默认值是 `.true.`，所以**默认配置开着 PHS**，
+    // 本仓库的 standard-LCT 分支则是硬关的。调用方要能看出这个不匹配。
+    let plant_hydraulics = logical(document, "DEF_USE_PLANTHYDRAULICS")?;
     Ok(LandPhysicsParameters {
         hydraulic_model: if campbell {
             HydraulicModel::Campbell
@@ -73,6 +76,7 @@ pub fn land_physics_parameters(
             HydraulicModel::VanGenuchten
         },
         variably_saturated_flow,
+        plant_hydraulics,
         land_cover_scheme,
         root_fraction_scheme: ROOT_FRACTION_SCHEME,
         timestep_seconds,

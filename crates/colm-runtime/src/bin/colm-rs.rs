@@ -65,6 +65,19 @@ fn run() -> Result<()> {
     let config = read_point_runtime_config(&case_nml)?;
     let document = read_document(&case_nml)?;
     let physics = land_physics_parameters(&document, arguments.land_cover)?;
+    // 与 VSF 同一类的不匹配：`DEF_USE_PLANTHYDRAULICS` 的声明默认值是 `.true.`，
+    // 所以**默认算例开着植物水力**，而本仓库的 standard-LCT 分支把它硬关
+    // （`assembly.rs` 的 `plant_hydraulics: None`）。PHS 改的是 ET 的分层分配、
+    // 冠层阻力的来源与 `vegwp` 状态，静默按非 PHS 跑完只会得到另一套蒸散。
+    ensure!(
+        !physics.plant_hydraulics,
+        concat!(
+            "this case enables plant hydraulics (DEF_USE_PLANTHYDRAULICS, default true), ",
+            "which the Rust standard-LCT branch does not run: it affects how transpiration ",
+            "is distributed across soil layers, where canopy resistance comes from, and adds ",
+            "the vegwp state. Set DEF_USE_PLANTHYDRAULICS = .false. to use the ported path."
+        )
+    );
     // **跑之前先挡住分支不匹配。** 上游在选了 van Genuchten 时强制打开
     // `DEF_USE_VariablySaturatedFlow`（`MOD_Namelist.F90:1767-1772`），而它的声明
     // 默认值本来就是 `.true.` —— 也就是说默认配置走 VSF 土壤水文。本仓库的
@@ -156,24 +169,30 @@ fn run_soil(
     let mut last_ground_temperature_k = None;
     // `smp`/`hk` 只出现在步输出里（`soilwater` 的 `intent(out)`），而续跑要写它们。
     let mut last_water = None;
+    let mut last_energy = None;
+    let mut last_cosine_zenith = 0.0;
     let (steps, history_files) = match session {
         Some(mut session) => {
             let outcome = runtime.run_restart_standard_lct_with_history(
                 template,
                 &mut state,
                 &mut session,
-                |_, output| {
+                |step, output| {
                     last_ground_temperature_k = Some(output.energy.ground.temperature_k[0]);
                     last_water = Some(output.water.clone());
+                    last_energy = Some(output.energy.clone());
+                    last_cosine_zenith = step.forcing.cosine_zenith;
                     Ok(())
                 },
             )?;
             (outcome.steps, Some(outcome.files.len()))
         }
         None => (
-            runtime.run_restart_standard_lct(template, &mut state, |_, output| {
+            runtime.run_restart_standard_lct(template, &mut state, |step, output| {
                 last_ground_temperature_k = Some(output.energy.ground.temperature_k[0]);
                 last_water = Some(output.water.clone());
+                last_energy = Some(output.energy.clone());
+                last_cosine_zenith = step.forcing.cosine_zenith;
                 Ok(())
             })?,
             None,
@@ -181,12 +200,15 @@ fn run_soil(
     };
     let ground_temperature_k = last_ground_temperature_k.context(NO_STEP)?;
     let last_water = last_water.context(NO_STEP)?;
+    let last_energy = last_energy.context(NO_STEP)?;
     let overrides = template.evolved_overrides(
         &state,
         EvolvedStepOutput {
             ground_temperature_k,
             matric_potential_mm: &last_water.matric_potential_mm,
             hydraulic_conductivity_mm_s: &last_water.hydraulic_conductivity_mm_s,
+            cosine_zenith: last_cosine_zenith,
+            energy: &last_energy,
         },
     )?;
     write_restart(restart_in, &arguments.restart_out, &overrides)?;
@@ -209,24 +231,30 @@ fn run_snow(
     let mut last_ground_temperature_k = None;
     // `smp`/`hk` 只出现在步输出里（`soilwater` 的 `intent(out)`），而续跑要写它们。
     let mut last_water = None;
+    let mut last_energy = None;
+    let mut last_cosine_zenith = 0.0;
     let (steps, history_files) = match session {
         Some(mut session) => {
             let outcome = runtime.run_restart_standard_lct_snow_with_history(
                 template,
                 &mut state,
                 &mut session,
-                |_, output| {
+                |step, output| {
                     last_ground_temperature_k = Some(output.energy.ground.temperature_k[0]);
                     last_water = Some(output.water.clone());
+                    last_energy = Some(output.energy.clone());
+                    last_cosine_zenith = step.forcing.cosine_zenith;
                     Ok(())
                 },
             )?;
             (outcome.steps, Some(outcome.files.len()))
         }
         None => (
-            runtime.run_restart_standard_lct_snow(template, &mut state, |_, output| {
+            runtime.run_restart_standard_lct_snow(template, &mut state, |step, output| {
                 last_ground_temperature_k = Some(output.energy.ground.temperature_k[0]);
                 last_water = Some(output.water.clone());
+                last_energy = Some(output.energy.clone());
+                last_cosine_zenith = step.forcing.cosine_zenith;
                 Ok(())
             })?,
             None,
@@ -234,12 +262,15 @@ fn run_snow(
     };
     let ground_temperature_k = last_ground_temperature_k.context(NO_STEP)?;
     let last_water = last_water.context(NO_STEP)?;
+    let last_energy = last_energy.context(NO_STEP)?;
     let overrides = template.evolved_snow_overrides(
         &state,
         EvolvedStepOutput {
             ground_temperature_k,
             matric_potential_mm: &last_water.soil.matric_potential_mm,
             hydraulic_conductivity_mm_s: &last_water.soil.hydraulic_conductivity_mm_s,
+            cosine_zenith: last_cosine_zenith,
+            energy: &last_energy,
         },
     )?;
     write_restart(restart_in, &arguments.restart_out, &overrides)?;

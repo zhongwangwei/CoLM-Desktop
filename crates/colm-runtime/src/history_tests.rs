@@ -32,6 +32,7 @@ fn physics() -> LandPhysicsParameters {
     LandPhysicsParameters {
         hydraulic_model: HydraulicModel::VanGenuchten,
         variably_saturated_flow: false,
+        plant_hydraulics: false,
         land_cover_scheme: LandCoverScheme::Igbp,
         root_fraction_scheme: RootFractionScheme::SchenkJackson,
         timestep_seconds: 1800.0,

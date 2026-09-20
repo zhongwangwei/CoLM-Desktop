@@ -2175,3 +2175,80 @@ Campbell 的 `smp = psi0*(vliq/porsl)^(-bsw)`（`bsw ≈ 11`）把基质势推�
 
 `t_grnd`/`tleaf` 的 +3.15 K / +1.14 K 仍然独立：修 `hksati` 单位与写 `smp`/`hk`
 都没让它动过一格。
+
+## 第二处默认打开、Rust 硬关的分支：植物水力（2026 年，实测）
+
+把 `smp`/`hk` 与 16 个表面诊断量写进续跑之后，`stage3_diff.py` 第一次把整条地表链摊开
+比较，于是看到 `gs0sun`/`gs0sha`：Fortran `481.34`、Rust `4.79e-5`，差 **1e7**。
+
+查上游出处，`MOD_LeafTemperature.F90:719` 的那条赋值在
+`IF (DEF_USE_PLANTHYDRAULICS)` 里面：
+
+```fortran
+gs0sun = min( 1.e6, 1./(rssun*tl/tprcor) )/ laisun * 1.e6 * o3coefg_sun
+```
+
+而 `DEF_USE_PLANTHYDRAULICS` 的**声明默认值是 `.true.`**（`MOD_Namelist.F90:531`），
+CN-Cng 的算例没有覆盖它 —— 也就是说**上游一直开着植物水力，本仓库的 standard-LCT 分支
+一直硬关着**（`assembly.rs` 的 `plant_hydraulics: None`）。这是与 VSF 同一类的不匹配，
+而且它比 VSF 更隐蔽：不报错、不漏文件，只是把 ET 的分层分配、冠层阻力的来源和 `vegwp`
+状态整条换掉。
+
+影响面（上游 `soilwater` 里的分岔）：
+
+```fortran
+IF(.not. DEF_USE_PLANTHYDRAULICS) THEN
+   sumroot = sum(rootr, mask=is_permeable .and. rootr>0)
+   etroot  = etr*max(rootr,0.)/sumroot     ! 按根分布摊
+ELSE
+   etrdef  = 0.;  etroot = rootflux        ! 由植物水力解出来
+ENDIF
+```
+
+**处置与 VSF 一致：`colm-rs` 拒绝这类算例**，并直接告诉用户把
+`DEF_USE_PLANTHYDRAULICS = .false.` 写进算例就能走已移植的那条。`LandPhysicsParameters`
+新增 `plant_hydraulics`，由 `physics.rs` 从 namelist 读（不自己推默认值）。
+
+### 第一次**全分支对齐**的测量
+
+于是造了第三份算例：Campbell + VSF 关 + **PHS 关**。这就是本仓库目前实现的**全部**
+配置。同窗口 528 步，同一初始重启：
+
+```bash
+colm-cli run oracle/work/CN-Cng-aligned --kernel kernels/default --force 1 --preprocessors fortran
+colm-rs oracle/work/CN-Cng-aligned --land-cover igbp --restart-out /tmp/colm-rs-aligned.nc
+python3 oracle/scripts/stage3_diff.py <initial> <fortran-final> <rust-final>
+```
+
+| | Campbell（PHS 开） | **对齐（PHS 关）** |
+|---|---|---|
+| 共享变量 | 68 | **65**（PHS 关掉后 `vegwp` 及其维度消失） |
+| 逐位相同 | 31 | **34** |
+| Rust 未写出 | 10（真值） | **9** |
+| `wa` 相对差 | 0.33% | **0.17%** |
+| `zwt` 相对差 | 3.9% | **2.1%** |
+| `t_grnd` | +3.15 K | **+3.13 K** |
+
+未写出的 9 个正好是**需要逐波段数据或额外推导**的那些：
+`alb`/`ssun`/`ssha`/`ssoi`（`(patch, rtyp, band)` 四维形状）、`extkb`/`extkd`
+（本仓库不逐步重算消光系数）、`emis`/`trad`（要 `olrb`/`olrg` 的守恒修正）、`rss`
+（`DEF_RSS_SCHEME == 4` 下的 1/0 电导标志）。**其余全部可比**。
+
+### 热力偏差现在可以定性了
+
+三次对齐（VSF、PHS、`hksati` 单位）都没让 `t_grnd` 动过一格：它始终 **+3.1 K**，而：
+
+* `tref`（2 m 气温）只差 **+0.62 K**
+* `tleaf` 差 +1.24 K
+* `z0m` 与 Fortran **逐位级一致**（相对差 1.2e-9）
+
+**2 m 气温基本对、地表温度高 3 K**，说明偏差在**地表热量收支**里，不在大气或粗糙度。
+顺着这条线要看的是尚未写出的 `ssun`/`ssha`/`ssoi`（吸收的短波）与 `emis`/`trad`
+（放出的长波）—— 也就是下一轮把剩下 9 个写出来之后立刻能比的那几个。
+
+另外两条本次新看到的量级差（都属诊断量、不影响状态推进）：
+
+* `zol` 差 84 倍、`rib` 差 49 倍、`tstar` 差 1.8 倍、`ustar` 差 26% —— **地表更不稳定**，
+  与地表偏暖同向，是结果而非原因。
+* `rst`：Fortran 在 PHS 关掉后给出 **-2.53**（负的冠层阻力，本身就值得追），
+  Rust 是钉住的 `500000.`。
