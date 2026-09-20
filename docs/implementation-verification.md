@@ -1674,3 +1674,47 @@ PLUMBER2_ROOT=/Volumes/Data01/Data/PLUMBER2s cargo run -p oracle --bin golden-ru
 另一份 CoLM 快照，而比对在这一里程碑是逐位的。要用它当判据，得先把内核与黄金文件对齐到
 同一快照（重编内核 + 重生成黄金文件），或先让比较消费 `tolerances.toml` 的分层。
 这两件事都不是 Rust 侧能单方面完成的。
+
+## Rust 预处理器在真实算例上产出与 Fortran **完全相同**的 restart（2026 年，实测）
+
+拿到 `/Volumes/Data01/Data/PLUMBER2s` 后跑通了本会话最关键的一关：
+
+```
+PLUMBER2_ROOT=/Volumes/Data01/Data/PLUMBER2s \
+  cargo run -p colm-cli -- run oracle/work/CN-Cng --kernel kernels/default --force 1
+  mksrfdata  ok      ← Rust `mksrfdata-rs`
+  mkinidata  ok      ← Rust `mkinidata-rs`
+  colm       ok      ← 未改动的 Fortran `colm.x`，264 小时跑完
+```
+
+即 **Rust 产出的 restart 被未修改的 Fortran 模型读取并跑完整个算例** —— 端口文档里
+"restart-continuation interoperability" 那条待验收项在真实数据上成立了。
+
+### 逐值对比：204/204 完全相同
+
+把同一算例分别用 Rust（默认）与 Fortran（`--preprocessors fortran`）跑一遍，再逐变量比对
+两套 restart（netCDF4 读入后按值比较，NaN 模式单独比）：
+
+```
+两套 restart 的共享变量：204 个，逐值完全相同 204 个
+仅 Rust 写出的变量：const block 里的 ncd / ncw / bcw
+```
+
+四个文件（时间重启 2008-001-00000 与 2008-012-00000、const block、const 标量）逐个比过：
+变量集合一致、每个共享变量逐值相同。**唯一的差别是 Rust 多写了三个冠层结构变量**，不是
+差异而是超集。
+
+两点必须说清楚：
+
+1. **不能用逐字节比较**。两个写出器的压缩级别不同（时间重启 Rust 207,988 B vs Fortran
+   494,249 B；const block 140,903 B vs 406,941 B），字节不同只反映压缩。上面比的是**取值**。
+2. **由此可推**：既然初始状态的 restart 完全相同，那么上一节 `golden-compare` 报出的
+   history 差异**不是**预处理器引入的 —— 它来自 Fortran 运行时本身（或它读到的其它输入），
+   与 Rust 这两段无关。
+
+### 把这条与黄金比对的关系说清楚
+
+- 预处理器（stage 1–2，Rust）：**逐值完全一致**，有本节的实测支撑；
+- 运行时（stage 3）：仍是 Fortran `colm.x`，其 history 与黄金文件逐位不一致，原因是内核
+  快照不同（见上一节）。Rust 运行时（`colm-runtime`）还没有可执行文件，所以那一段没有
+  可比对象。
