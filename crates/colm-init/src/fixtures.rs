@@ -132,7 +132,16 @@ pub struct SyntheticSnow {
 impl SyntheticRestart {
     /// Writes both restart families under `root` and returns their values.
     pub fn write(root: impl AsRef<Path>) -> Result<Self> {
-        Self::write_inner(root, None)
+        Self::write_inner(root, None, true)
+    }
+
+    /// 与 [`Self::write`] 相同，但常数重启**不带**那五个 van Genuchten 场。
+    ///
+    /// 上游只在选中该关系时才写它们（`restart.rs` 的 `uses_van_genuchten`
+    /// 来自 `ConstantRestartInput`），所以 Campbell 算例的重启就是少这五个变量 ——
+    /// 实测真实算例同样如此（`alpha_vgm`/`n_vgm`/`L_vgm`/`sc_vgm`/`fc_vgm`）。
+    pub fn write_campbell(root: impl AsRef<Path>) -> Result<Self> {
+        Self::write_inner(root, None, false)
     }
 
     /// 与 [`Self::write`] 相同，但时间重启带一份自洽的雪列。
@@ -141,10 +150,14 @@ impl SyntheticRestart {
             snow.depth_m > 0.0 && snow.water_equivalent_kg_m2 > 0.0,
             "a synthetic snow column needs a positive depth and water equivalent"
         );
-        Self::write_inner(root, Some(snow))
+        Self::write_inner(root, Some(snow), true)
     }
 
-    fn write_inner(root: impl AsRef<Path>, snow: Option<SyntheticSnow>) -> Result<Self> {
+    fn write_inner(
+        root: impl AsRef<Path>,
+        snow: Option<SyntheticSnow>,
+        uses_van_genuchten: bool,
+    ) -> Result<Self> {
         let root = root.as_ref().to_path_buf();
         let dimensions = RestartDimensions {
             lake_layers: LAKE_LAYERS,
@@ -383,7 +396,7 @@ impl SyntheticRestart {
                     broadleaf_crown_width_m: &structure[2],
                 }),
                 tuning,
-                uses_van_genuchten: true,
+                uses_van_genuchten,
                 bedrock: None,
                 topmodel: Some(TopmodelFields {
                     topographic_index: &topmodel_values[0],

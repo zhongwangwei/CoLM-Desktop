@@ -104,6 +104,34 @@ fn assemble(label: &str, patch: usize) -> (SyntheticRestart, StandardLctRestartT
     (fixture, template)
 }
 
+/// 常数重启里的土壤场**按算例选的水力关系读**。
+///
+/// 上游只在选中 van Genuchten 时才写那五个场（`restart.rs` 的
+/// `uses_van_genuchten`），所以 Campbell 算例的重启里根本没有它们 ——
+/// 实测真实的 CN-Cng Campbell 重启比 van Genuchten 那份正好少这五个变量。
+/// 无条件去读会把一个完全正常的 Campbell 算例判成"缺字段"。
+#[test]
+fn a_campbell_restart_without_the_van_genuchten_fields_still_assembles() {
+    let root = temp_dir("campbell-restart");
+    let fixture = SyntheticRestart::write_campbell(root.join("restart")).unwrap();
+    let files = RestartStateFiles {
+        constant: fixture.constant.block.clone(),
+        time: fixture.time.block.clone(),
+    };
+
+    let mut campbell = physics(1800.0);
+    campbell.hydraulic_model = HydraulicModel::Campbell;
+    assemble_standard_lct_template(&files, 1, campbell)
+        .expect("a Campbell restart carries bsw and needs no van Genuchten field");
+
+    // 反过来仍然必须报错：选了 van Genuchten 而重启里没有那五个场，
+    // 说明重启与算例不是同一套水力关系，不能靠 0 或默认值糊过去。
+    let error = assemble_standard_lct_template(&files, 1, physics(1800.0))
+        .expect_err("a van Genuchten case needs the five van Genuchten fields");
+    let message = format!("{error:#}");
+    assert!(message.contains("alpha_vgm"), "{message}");
+}
+
 #[test]
 fn static_soil_fields_come_from_the_constant_restart() {
     let (fixture, template) = assemble("statics", 1);

@@ -2019,3 +2019,58 @@ ENDIF
 移植 `WATER_VSF` 的编排（`MOD_SoilSnowHydrology.F90:529-1343`）并把 15 个内核接起来。
 这是目前唯一挡住默认配置的缺口，也是"全面完成"绕不过去的一段。判读工具不变
 （`oracle/scripts/stage3_diff.py`），但接上之后 `wa` 应当是**负值或零**（含水层是亏缺量）。
+
+## 第一次**分支对齐**的第三段测量：2.5 K 的热力偏差与水文无关（2026 年，实测）
+
+上一节把 7 个发散都归给"用 WATER_2014 跑了 VSF 算例"。那个归因只对了一半。为了验证，
+造了一份 **Campbell 配置**的同算例（复制 `oracle/work/CN-Cng`，只改三行）：
+
+```
+DEF_USE_Campbell_SOIL_MODEL   = .true.
+DEF_USE_VariablySaturatedFlow = .false.
+DEF_dir_output                = <新目录>/out/       # colm-cli 拒绝自定义输出目录
+```
+
+用 `colm-cli run ... --force 1 --preprocessors fortran` 重跑三段（`mksrfdata ok /
+mkinidata ok / colm ok`，日志里**没有**那句 `VariablySaturatedFlow is automaticlly set`），
+再用 `colm-rs` 从**同一份**初始重启跑同一个窗口，两边都是 528 步。
+
+### 归因的修正
+
+| | VSF 算例（Rust 走经典） | Campbell 算例（两边都走经典） |
+|---|---|---|
+| `wa` Fortran | **0** | **5077.6** |
+| `wa` Rust | 771.5 | 5440.5（相对差 **7%**） |
+| `wice_soisno` 相对差 | 61× | **4.8×** |
+| `zwt` Fortran / Rust | 0.289 / 0.425 | 2.785 / **0** |
+| `t_grnd` Fortran / Rust | 255.319 / 257.814 | 255.573 / 258.319 |
+
+两件事因此说清楚了：
+
+1. **`wa` 的行为本来就该是"涨"**。上一节看到 Fortran 侧 `wa` 恒为 0，是 VSF 路径的性质，
+   不是"Rust 多算"。分支对齐之后两边同向、同量级（5077.6 vs 5440.5）—— 那个异常消掉了。
+2. **2.5–2.8 K 的热力偏差与水文分支无关**。Fortran 自己在两条分支下的 `t_grnd` 几乎相同
+   （255.319 / 255.573），而 Rust 在两条下都偏暖 2.5–2.8 K。所以它是热力/辐射/湍流那一段
+   的独立缺陷，**不是**上一节说的"经由蒸发传过去"。这是本轮最有用的一条：它把两个问题
+   分开了。
+
+### 分支对齐后仍然对不上的两个，是新的、更窄的线索
+
+* **土壤水被抽干**：初始 `wliq_soisno[5:10] = [8.78, 13.83, 22.81, 37.09, 58.67]`，
+  Fortran 收到 `[2.65, 4.81, 8.05, 13.46, 24.22]`（约三分之一），Rust 收到**全 0**。
+* **地下水位塌到地表**：初始 `zwt = 4.433 m`，Fortran 升到 2.785 m，Rust 到 **0**。
+
+两者互相矛盾（`zwt = 0` 意味着顶层饱和，而 `wliq` 全 0），指向 `update_groundwater`
+里水位对补给的响应过强：`soil_water.rs:381-405` 先 `aquifer += recharge*dt`，再按
+`specific_yield` 把水位往地表推，且 `.max(0.0)` 允许它一路推到 0。下一步从
+`specific_yield` 与那个转移循环入手。
+
+### 顺手修掉的：常数重启的土壤场要按水力关系读
+
+Campbell 算例一上来就报 `constant restart field alpha_vgm for AlphaVgm is missing`。
+对比两份常数重启，Campbell 那份**正好少** `alpha_vgm`/`n_vgm`/`L_vgm`/`sc_vgm`/`fc_vgm`
+五个变量 —— 写出器本来就有 `uses_van_genuchten` 开关（`restart.rs:400`），
+是装配层的 `soil_state` 无条件读了三张表。现在按 `physics.hydraulic_model` 读，
+且 Campbell 时把那五个场填 **NaN 而不是 0**（0 是合法的 `alpha_vgm`，误读会静默算出
+一套假参数；NaN 会被内核的有限性检查当场拦下）。夹具加了 `write_campbell`，
+测试同时钉住两个方向：Campbell 重启能装配，van Genuchten 重启缺那五个场时仍报错。

@@ -359,7 +359,7 @@ fn assemble(
         "standard LCT soil assembly needs patchtype 0 (soil), got {patch_type}"
     );
 
-    let soil = soil_state(&constant, soil_layers, patches)?;
+    let soil = soil_state(&constant, soil_layers, patches, physics.hydraulic_model)?;
     let soil_hydraulic_model = soil_hydraulic_models(&soil, patch, physics.hydraulic_model)?;
     let porosity = soil_field(&soil, SoilField::Porosity, patch, soil_layers);
     let residual_water = soil_field(&soil, SoilField::ThetaR, patch, soil_layers);
@@ -1192,12 +1192,34 @@ fn runoff(
 /// **盘上是 `(patch, soil)`，`SoilState` 里是 `layer * patches + patch`** —— 这里必须
 /// 转一次，否则每个 patch 都会拿到别的 patch 的土层（实测过一次：patch 1 读到了
 /// patch 0 的 `vf_quartz`）。
-fn soil_state(constant: &RestartFile, layers: usize, patches: usize) -> Result<SoilState> {
+/// 常数重启里的土壤场，**按算例选的水力关系读**。
+///
+/// `SOIL_FIELDS_VAN_GENUCHTEN` 那五个场只在 van Genuchten 的重启里存在：写出器
+/// 已经按 `ConstantRestartInput::uses_van_genuchten` 有选择地写（`restart.rs`），
+/// 而这里原先无条件地读。于是 Campbell 算例的常数重启（实测比 van Genuchten 少
+/// 正好 `alpha_vgm`/`n_vgm`/`L_vgm`/`sc_vgm`/`fc_vgm` 五个变量）直接被判成"缺字段"。
+///
+/// 反过来也成立：Campbell 需要的 `bsw` 在 COMMON 里，两条路都有。
+fn soil_state(
+    constant: &RestartFile,
+    layers: usize,
+    patches: usize,
+    hydraulic_model: HydraulicModel,
+) -> Result<SoilState> {
     let mut values: [Vec<f64>; SoilField::COUNT] = std::array::from_fn(|_| Vec::new());
+    let van_genuchten = matches!(hydraulic_model, HydraulicModel::VanGenuchten);
+    // Campbell 的重启里没有那五个 van Genuchten 场，而且**不能**给它们填 0：
+    // 0 是合法的 `alpha_vgm`，一旦有人误读就会静默算出一套假参数。填 NaN —— 内核
+    // 的有限性检查会当场报错，而 `soil_hydraulic_models` 只在选中该关系时才读它们。
+    if !van_genuchten {
+        for (field, _) in SOIL_FIELDS_VAN_GENUCHTEN {
+            values[field as usize] = vec![f64::NAN; layers * patches];
+        }
+    }
     for (field, name) in SOIL_FIELDS_COMMON
         .iter()
         .chain(SOIL_FIELDS_THERMAL.iter())
-        .chain(SOIL_FIELDS_VAN_GENUCHTEN.iter())
+        .chain(SOIL_FIELDS_VAN_GENUCHTEN.iter().filter(|_| van_genuchten))
     {
         let dims = constant
             .variable_dimensions(name)
