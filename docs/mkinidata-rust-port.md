@@ -126,6 +126,27 @@ block filename/schema. A synthetic two-patch/three-member check verifies exact
 values and NetCDF axis order. No local DA-enabled Fortran kernel is available,
 so executable Fortran/Rust DA-file comparison remains open.
 
+## Status on a real case (2026)
+
+Measured on the CN-Cng winter window with `PLUMBER2_ROOT` set, one run per preprocessing
+choice:
+
+| stage | implementation | evidence |
+|---|---|---|
+| `mksrfdata` | Rust `mksrfdata-rs` | stage `ok`; restart values identical to the Fortran run |
+| `mkinidata` | Rust `mkinidata-rs` | stage `ok`; **204 shared restart variables, 204 exact matches**, Rust additionally writes `ncd`/`ncw`/`bcw` |
+| `colm` | unchanged Fortran `colm.x` | stage `ok`, 264 hours from those files |
+
+So for this single-point IGBP case all four conditions above are met: the Rust stages produce
+the restart schema and values the Fortran reference does, and the unchanged Fortran model
+starts and completes from them. Two limits belong with that statement. The history that run
+writes is compared bitwise against the checked-in golden file and disagrees, but that
+comparison is between two CoLM snapshots (the golden file records `4894833`, this tree builds
+`f427762`) and the goldens carry no tolerance consumption yet — it therefore says nothing
+about these Rust stages, and since the initial restarts are identical it cannot be attributed
+to them. And the third stage is still the Fortran model: no Rust `colm` executable exists, so
+nothing here demonstrates a Rust runtime.
+
 ## Validation artifacts
 
 Each ported branch gets a compact synthetic landdata/restart fixture and field-level expected
