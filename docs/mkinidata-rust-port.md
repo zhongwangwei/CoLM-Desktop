@@ -190,6 +190,10 @@ to cover only the first two stages.
 One prerequisite is now in place: the history gate table carries each variable's full
 schema — name, `long_name`, `units` and the layer dimensions in file order — extracted
 from the same write calls that produce the gate conditions and verified against the
-golden file (all 117 intersecting variables agree on all four). A native history
-writer therefore no longer needs to re-parse `MOD_Hist.F90` for its schema; what is
-still missing is the writer itself and the per-step field values it would serialize.
+golden file (all 117 intersecting variables agree on all four), and
+`colm_hist::history` writes a history file from that table. Its acceptance test
+rebuilds the golden file's schema and values: dimensions, variable set, per-variable
+dimension order, dtypes, the three attributes, the index/site coordinates and every
+value of every variable round-trip through the writer unchanged. What remains is
+wiring the writer to the runtime: the per-step field values and the history-group
+scheduling (`DEF_HIST_groupby`/`DEF_HIST_FREQ`).

@@ -19,6 +19,8 @@
 //! `tests/drift.rs` 守住它不与上游脱节。
 
 pub mod generated;
+#[cfg(feature = "io")]
+pub mod history;
 pub mod metric;
 #[cfg(feature = "io")]
 pub mod obs;
