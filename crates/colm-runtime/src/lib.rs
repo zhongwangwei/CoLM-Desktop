@@ -329,7 +329,13 @@ impl PointRuntime {
         let steps = self.run_with_state(state, |step, next| {
             let binding = lct_binding(step, greenwich_time, longitude_degrees, co2_scenario)?;
             let output = standard_lct_soil_step(template.input(&binding), next)?;
-            if let Some(path) = session.push_lct(step.clock.end_time, template, next, &output)? {
+            if let Some(path) = session.push_lct(
+                step.clock.end_time,
+                template,
+                next,
+                &output,
+                crate::history::HistoryReferenceState::from_forcing(&step.forcing),
+            )? {
                 files.push(path);
             }
             on_step(step, &output)
@@ -374,9 +380,13 @@ impl PointRuntime {
                 next,
                 surface_optics_step(step, previous_snow_water_equivalent_mm, &output),
             )?;
-            if let Some(path) =
-                session.push_lct_snow(step.clock.end_time, template, next, &output)?
-            {
+            if let Some(path) = session.push_lct_snow(
+                step.clock.end_time,
+                template,
+                next,
+                &output,
+                crate::history::HistoryReferenceState::from_forcing(&step.forcing),
+            )? {
                 files.push(path);
             }
             on_step(step, &output)

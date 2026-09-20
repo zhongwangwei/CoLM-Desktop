@@ -121,6 +121,42 @@ fn site() -> HistorySite {
     }
 }
 
+/// 按 `set_lct_surface_diagnostics` 的同一套输入重算一次，供测试做期望值。
+fn recompute(energy: &colm_core::StandardLctEnergyOutput) -> colm_core::HistoryDiagnostics {
+    let forcing = binding().forcing;
+    colm_core::history_diagnostics(colm_core::HistoryDiagnosticsInput {
+        wind_height_m: physics().wind_height_m,
+        temperature_height_m: physics().temperature_height_m,
+        humidity_height_m: physics().humidity_height_m,
+        wind_speed_eastward_m_s: forcing.eastward_wind_m_s,
+        wind_speed_northward_m_s: forcing.northward_wind_m_s,
+        air_temperature_k: forcing.air_temperature_k,
+        specific_humidity_kg_kg: forcing.specific_humidity,
+        surface_pressure_pa: forcing.surface_pressure_pa,
+        eastward_stress_kg_m_s2: energy.leaf.eastward_stress_kg_m_s2,
+        northward_stress_kg_m_s2: energy.leaf.northward_stress_kg_m_s2,
+        sensible_heat_w_m2: energy.total_sensible_heat_w_m2,
+        evaporation_kg_m2_s: energy.total_evaporation_kg_m2_s,
+        momentum_roughness_m: energy.leaf.momentum_roughness_m,
+        surface_layer_scheme: physics().surface_layer_scheme,
+        boundary_layer_height_m: forcing.boundary_layer_height_m,
+    })
+    .unwrap()
+}
+
+/// 重算 history 近地层诊断所需的参考层量 —— 与 `binding()` 的强迫同源。
+fn reference() -> HistoryReferenceState {
+    let forcing = binding().forcing;
+    HistoryReferenceState {
+        wind_speed_eastward_m_s: forcing.eastward_wind_m_s,
+        wind_speed_northward_m_s: forcing.northward_wind_m_s,
+        air_temperature_k: forcing.air_temperature_k,
+        specific_humidity_kg_kg: forcing.specific_humidity,
+        surface_pressure_pa: forcing.surface_pressure_pa,
+        boundary_layer_height_m: forcing.boundary_layer_height_m,
+    }
+}
+
 #[test]
 fn the_bridge_writes_the_state_variables_it_declares() {
     let root = temp_dir("write");
@@ -150,7 +186,7 @@ fn the_bridge_writes_the_state_variables_it_declares() {
     .unwrap();
     set_lct_fluxes(&mut buffer, 0, &output.water).unwrap();
     set_lct_energy_fluxes(&mut buffer, 0, &output).unwrap();
-    set_lct_surface_diagnostics(&mut buffer, 0, &output.energy.leaf).unwrap();
+    set_lct_surface_diagnostics(&mut buffer, 0, &output.energy, reference(), &physics()).unwrap();
     buffer.set_time(0, 56_802_270).unwrap();
     let path = root.join("history.nc");
     buffer.write(&path).unwrap();
@@ -373,7 +409,7 @@ fn the_snow_branch_fills_the_snow_span() {
         },
     )
     .unwrap();
-    set_lct_surface_diagnostics(&mut buffer, 0, &output.energy.leaf).unwrap();
+    set_lct_surface_diagnostics(&mut buffer, 0, &output.energy, reference(), &physics()).unwrap();
     buffer.set_time(0, 56_802_270).unwrap();
     let path = root.join("history.nc");
     buffer.write(&path).unwrap();
@@ -451,6 +487,7 @@ fn the_snow_branch_session_fills_the_surface_diagnostics() {
     let mut written = Vec::new();
     let mut steps = Vec::new();
     let mut grounds = Vec::new();
+    let mut energies = Vec::new();
     for half in 1..=2 {
         let end = colm_core::CalendarTime {
             year: 2008,
@@ -461,12 +498,13 @@ fn the_snow_branch_session_fills_the_surface_diagnostics() {
             colm_core::standard_lct_snow_soil_step(template.snow_input(&binding()), &mut state)
                 .expect("one snow step");
         if let Some(path) = session
-            .push_lct_snow(end, &template, &state, &output)
+            .push_lct_snow(end, &template, &state, &output, reference())
             .unwrap()
         {
             written.push(path);
         }
         grounds.push(output.energy.ground.temperature_k[0]);
+        energies.push(output.energy.clone());
         steps.push(output.energy.leaf);
     }
     written.extend(session.finish().unwrap());
@@ -486,6 +524,9 @@ fn the_snow_branch_session_fills_the_surface_diagnostics() {
         .get_values::<f64, _>(..)
         .unwrap();
     assert_eq!(ground, vec![mean([grounds[0], grounds[1]])]);
+    // 近地层那八项是 `accumulate_fluxes` **重算**的，不是 `leaf.*`：这里照着重算一遍
+    // 再取两步的算术平均，所以既钉住重算也钉住平均。
+    let recomputed = energies.iter().map(recompute).collect::<Vec<_>>();
     for (name, expected) in [
         (
             "taux",
@@ -516,16 +557,23 @@ fn the_snow_branch_session_fills_the_surface_diagnostics() {
             "z0m",
             mean([steps[0].momentum_roughness_m, steps[1].momentum_roughness_m]),
         ),
-        ("zol", mean([steps[0].zol, steps[1].zol])),
+        ("zol", mean([recomputed[0].zol, recomputed[1].zol])),
         (
             "rib",
-            mean([steps[0].bulk_richardson, steps[1].bulk_richardson]),
+            mean([recomputed[0].bulk_richardson, recomputed[1].bulk_richardson]),
         ),
         (
             "ustar",
             mean([
-                steps[0].friction_velocity_m_s,
-                steps[1].friction_velocity_m_s,
+                recomputed[0].friction_velocity_m_s,
+                recomputed[1].friction_velocity_m_s,
+            ]),
+        ),
+        (
+            "fm",
+            mean([
+                recomputed[0].momentum_similarity,
+                recomputed[1].momentum_similarity,
             ]),
         ),
     ] {
@@ -592,7 +640,10 @@ fn the_session_writes_one_record_per_scheduled_hour() {
             };
             let output = colm_core::standard_lct_soil_step(template.input(&binding()), &mut state)
                 .expect("one step");
-            if let Some(path) = session.push_lct(end, &template, &state, &output).unwrap() {
+            if let Some(path) = session
+                .push_lct(end, &template, &state, &output, reference())
+                .unwrap()
+            {
                 written.push(path);
             }
         }

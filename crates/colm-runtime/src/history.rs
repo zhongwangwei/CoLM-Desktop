@@ -18,7 +18,7 @@ use colm_hist::schedule::{
     schedule_records, HistoryFrequency, HistoryGrouping, ScheduledRecord, SimulationWindow,
 };
 
-use crate::assembly::StandardLctRestartTemplate;
+use crate::assembly::{LandPhysicsParameters, StandardLctRestartTemplate};
 use colm_core::{StandardLctSnowSoilState, StandardLctSoilState};
 
 /// 本层能填的 history 变量（闸门表写法，不带 `f_` 前缀）。
@@ -227,26 +227,87 @@ impl HistorySink for HistoryAccumulator {
     }
 }
 
+/// 重算 history 的近地层诊断所需的**参考层**强迫量。
+///
+/// 它们不在步输出里（步输出只带 `tref`/`qref` 那种 2 m 诊断），但
+/// `accumulate_fluxes` 的重算要用参考层的风、温、湿、气压与边界层高度。
+#[derive(Debug, Clone, Copy)]
+pub struct HistoryReferenceState {
+    pub wind_speed_eastward_m_s: f64,
+    pub wind_speed_northward_m_s: f64,
+    pub air_temperature_k: f64,
+    pub specific_humidity_kg_kg: f64,
+    pub surface_pressure_pa: f64,
+    pub boundary_layer_height_m: Option<f64>,
+}
+
+impl HistoryReferenceState {
+    /// 取本步的 `forc_*`。
+    pub fn from_forcing(forcing: &colm_core::RuntimeForcing) -> Self {
+        Self {
+            wind_speed_eastward_m_s: forcing.eastward_wind_m_s,
+            wind_speed_northward_m_s: forcing.northward_wind_m_s,
+            air_temperature_k: forcing.air_temperature_k,
+            specific_humidity_kg_kg: forcing.specific_humidity,
+            surface_pressure_pa: forcing.surface_pressure_pa,
+            boundary_layer_height_m: forcing.boundary_layer_height_m,
+        }
+    }
+}
+
 /// 把一步的地表诊断写进第 `record` 条记录。
+///
+/// **`ustar`/`tstar`/`qstar`/`zol`/`rib`/`fm`/`fh`/`fq` 八项要重算，不取内核的
+/// `leaf.*`。** 上游 `MOD_Vars_1DAccFluxes:accumulate_fluxes`
+/// （`:2733-2790`）在累加前用参考层量重算一遍，并且换了位移高度
+/// （`2/3*z0m/0.07`）、加了观测高度下限（`max(hgt, 5+displa)`）——所以这八列
+/// 与**重启里的同名量本来就不是一回事**（实测首条记录 `f_ustar = 0.56451`
+/// 而重启的 `ustar = 0.68583`）。见 `colm_core::history_diagnostics`。
+///
+/// `taux`/`tauy`/`tref`/`qref`/`z0m` 则确实来自模型状态，直接写。
 pub fn set_lct_surface_diagnostics(
     sink: &mut impl HistorySink,
     record: usize,
-    leaf: &colm_core::LeafTemperatureOutput,
+    energy: &colm_core::StandardLctEnergyOutput,
+    reference: HistoryReferenceState,
+    physics: &LandPhysicsParameters,
 ) -> Result<()> {
+    // `fsena`/`fevpa` 的重算输入是**总量**（`fsenl + fseng`、`fevpl + fevpg`），
+    // 其中地面那一半必须是订正后的值 —— 用叶温求解前的初步值会让 `f_ustar`
+    // 这类量跟着偏（见 `CORRECTED_GROUND` 那条注释）。
+    let leaf = &energy.leaf;
+    let recomputed = colm_core::history_diagnostics(colm_core::HistoryDiagnosticsInput {
+        wind_height_m: physics.wind_height_m,
+        temperature_height_m: physics.temperature_height_m,
+        humidity_height_m: physics.humidity_height_m,
+        wind_speed_eastward_m_s: reference.wind_speed_eastward_m_s,
+        wind_speed_northward_m_s: reference.wind_speed_northward_m_s,
+        air_temperature_k: reference.air_temperature_k,
+        specific_humidity_kg_kg: reference.specific_humidity_kg_kg,
+        surface_pressure_pa: reference.surface_pressure_pa,
+        eastward_stress_kg_m_s2: leaf.eastward_stress_kg_m_s2,
+        northward_stress_kg_m_s2: leaf.northward_stress_kg_m_s2,
+        sensible_heat_w_m2: energy.total_sensible_heat_w_m2,
+        evaporation_kg_m2_s: energy.total_evaporation_kg_m2_s,
+        momentum_roughness_m: leaf.momentum_roughness_m,
+        surface_layer_scheme: physics.surface_layer_scheme,
+        boundary_layer_height_m: reference.boundary_layer_height_m,
+    })
+    .context("cannot recompute the history near-surface diagnostics")?;
     for (name, value) in [
         ("taux", leaf.eastward_stress_kg_m_s2),
         ("tauy", leaf.northward_stress_kg_m_s2),
         ("tref", leaf.air_temperature_2m_k),
         ("qref", leaf.air_specific_humidity_2m),
         ("z0m", leaf.momentum_roughness_m),
-        ("zol", leaf.zol),
-        ("rib", leaf.bulk_richardson),
-        ("ustar", leaf.friction_velocity_m_s),
-        ("qstar", leaf.humidity_scale),
-        ("tstar", leaf.temperature_scale_k),
-        ("fm", leaf.momentum_similarity),
-        ("fh", leaf.heat_similarity),
-        ("fq", leaf.moisture_similarity),
+        ("zol", recomputed.zol),
+        ("rib", recomputed.bulk_richardson),
+        ("ustar", recomputed.friction_velocity_m_s),
+        ("qstar", recomputed.humidity_scale),
+        ("tstar", recomputed.temperature_scale_k),
+        ("fm", recomputed.momentum_similarity),
+        ("fh", recomputed.heat_similarity),
+        ("fq", recomputed.moisture_similarity),
     ] {
         ensure!(
             value.is_finite(),
@@ -615,6 +676,7 @@ impl HistorySession {
         template: &StandardLctRestartTemplate,
         state: &StandardLctSoilState,
         output: &StandardLctSoilOutput,
+        reference: HistoryReferenceState,
     ) -> Result<Option<PathBuf>> {
         let ground = output.energy.ground.temperature_k[0];
         self.push(end, |accumulator| {
@@ -628,7 +690,13 @@ impl HistorySession {
                 template.physics.vaporization_heat_j_kg,
                 template.soil_layers(),
             )?;
-            set_lct_surface_diagnostics(accumulator, 0, &output.energy.leaf)
+            set_lct_surface_diagnostics(
+                accumulator,
+                0,
+                &output.energy,
+                reference,
+                &template.physics,
+            )
         })
     }
 
@@ -639,6 +707,7 @@ impl HistorySession {
         template: &StandardLctRestartTemplate,
         state: &StandardLctSnowSoilState,
         output: &colm_core::StandardLctSnowSoilOutput,
+        reference: HistoryReferenceState,
     ) -> Result<Option<PathBuf>> {
         let ground = output.energy.ground.temperature_k[0];
         self.push(end, |accumulator| {
@@ -660,7 +729,13 @@ impl HistorySession {
             // 却从来没有被填过，写出来的 `f_taux`/`f_tauy`/`f_z0m`/`f_zol` … 一直是
             // NetCDF 的填充值。实测 CN-Cng 的积雪分支 history 里这三个是 NaN，
             // 而 Fortran 有值 —— "声明了但没人写"不会报错，只会静默留下一列空洞。
-            set_lct_surface_diagnostics(accumulator, 0, &output.energy.leaf)
+            set_lct_surface_diagnostics(
+                accumulator,
+                0,
+                &output.energy,
+                reference,
+                &template.physics,
+            )
         })
     }
 

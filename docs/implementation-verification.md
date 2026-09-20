@@ -2983,3 +2983,79 @@ Rust     f_lfevpa = 615.054    hvap*f_fevpl + htvp*f_fevpg = 615.054   ← 自�
 （`MOD_Thermal` 里 `lfevpa` 在 `assimsun`/`assimsha` 订正之前算，而
 `fevpl`/`fevpg` 是订正之后的量）。要对齐必须先定位上游每一个量在 `THERMAL` 里的
 采样点，而不是按名字配对 —— 在这之前 `f_lfevpa` 不参与黄金比对。
+
+## history 的近地层八项是**重算**的，不是内核输出（2026 年，实测）
+
+补齐区间平均之后，用 `golden-compare --tolerances oracle/tolerances.toml` 把 Rust 的
+history 与 Fortran 的逐变量比了一遍。剩下最大的偏差集中在近地层诊断上：`f_ustar` 差 11%、
+`f_zol`/`f_rib` 差一倍 —— 而**同一时刻重启里的 `ustar`/`zol`/`rib` 只差 1e-4**。
+同一个量在两个文件里差两个数量级，只能是两个不同的东西。
+
+### 上游确实重算
+
+`MOD_Vars_1DAccFluxes:accumulate_fluxes`（`MOD_Vars_1DAccFluxes.F90:2733-2790`）在累加
+**之前**用参考层量重算一遍，`acc1d` 收的是 `r_ustar`/`r_tstar`/`r_qstar`/`r_zol`/`r_rib`/
+`r_fm`/`r_fh`/`r_fq` 这八个局部量，不是同名的时间变量（`:2811-2820`）：
+
+```fortran
+z0m_av = z0m ; z0h_av = z0m_av ; z0q_av = z0m_av
+displa_av = 2./3.*z0m_av/0.07                       ! 固定式，不是冠层算出来的位移高度
+hgt_u = max(hgt_u, 5.+displa_av)                    ! 观测高度有下限
+zldis = hgt_u - displa_av
+rhoair = (psrf - 0.378*qm*psrf/(0.622+0.378*qm)) / (rgas*tm)   ! 按参考层重算密度
+r_ustar_e = sqrt(max(1.e-6, sqrt(taux**2+tauy**2))/rhoair)     ! 由应力直接算
+r_tstar_e = -fsena_e/(rhoair*r_ustar_e)/cpair
+r_qstar_e = -fevpa_e/(rhoair*r_ustar_e)
+thv = tm*(1e5/psrf)**(rgas/cpair) * (1.+0.61*qm)
+r_zol_e = zldis*vonkar*grav*(r_tstar_e*(1.+0.61*qm)+0.61*th*r_qstar_e)/(r_ustar_e**2*thv)
+r_zol_e = clamp 到 [1e-6, 2] 或 [-100, -1e-6]
+um = 稳定 ? max(ur,0.1) : max(0.1, sqrt(ur**2 + (beta*(-grav*r_ustar*thvstar*zii/thv)**(1/3))**2))
+CALL moninobuk(hgt_u,hgt_t,hgt_q,displa_av,z0m_av,z0h_av,z0q_av, zldis/r_zol_e, um, ...)
+r_rib_e = r_zol_e/vonkar * r_ustar2_e**2 / (vonkar/r_fh_e*um**2) ; min(5., ...)
+```
+
+CN-Cng 的强迫参考高度是 6 m，而 `displa = 2/3*0.1206/0.07 = 1.148`，所以
+`hgt = max(6, 6.148) = 6.148`、`zldis ≡ 5.0` —— **下限真的生效**，这是 `zol`/`rib`
+与重启差一倍的原因。
+
+顺带确认了两条容易搞反的取值：`tref`/`qref`/`z0m`/`taux`/`tauy` 确实是
+`acc1d` 直接累加模型状态（`:2185` 一带），不必重算；`trad` 是
+`r_trad = (olrg/stefnc)**0.25` 从 `olrg` 现算的。
+
+### 移植
+
+`colm_core::history_diagnostics`（`history_diagnostics.rs`）逐行移植上面那一段，
+`moninobuk` 复用已有的 `monin_obukhov_with_scheme`。`set_lct_surface_diagnostics`
+改成收 `&StandardLctEnergyOutput` + 一个 `HistoryReferenceState`（参考层的风/温/湿/气压/
+边界层高度，从 `step.forcing` 取），八个量走重算，其余五项照旧。
+
+### 实测
+
+CN-Cng 第 1 天（区间平均，首条记录）：
+
+| | Fortran | 直接写 `leaf.*` | 重算之后 |
+|---|---|---|---|
+| `f_ustar` | 0.564507 | 0.624830（**+10.7%**） | **0.564537** |
+| `f_zol` | −0.226497 | −0.343605 | **−0.226174** |
+| `f_rib` | −0.061445 | −0.089860 | **−0.061357** |
+| `f_tstar` | −0.909686 | −1.138964 | **−0.908716** |
+| `f_fm` | 3.248590 | 4.114634 | **3.249003** |
+| `f_fh` | 2.862696 | 2.870565 | **2.863380** |
+
+八项全部落到 0.3% 以内（相比之下 `leaf.*` 那条路差 10%~70%）。单位参照是独立
+gfortran 程序：`moninobuk` 原文 + 上面那段逐字复制，两组 CN-Cng 量级的输入。
+
+### 一条顺带的观察：`f77()` 约定带来 1e-8 量级的系统差
+
+`r_rib` 对到 3e-8 而不是 1e-15，来源是本仓库 `monin_obukhov.rs` 的
+
+```rust
+const fn f77(value: f32) -> f64 { value as f64 }
+const VON_KARMAN: f64 = f77(0.4);     // = 0.4000000059604645
+```
+
+而 `MOD_Namelist`/`MOD_Const_Physical` 里的 `0.4` 在 `-fdefault-real-8` 下是 `0.4_r8`。
+两者差 1.5e-8，`r_rib` 里 `vonkar` 出现两次所以放大到 3e-8。**这个约定对"未加后缀的
+Fortran 字面量"是反的**（它们被 `-fdefault-real-8` 提升成 r8，不是 r4）。量级远低于
+所有容差（history tier2 是 rtol=1e-7），所以本轮不改；要改就得逐处核对哪些常量在
+上游是 r4、哪些是 r8，记在下面作为候选工作项。

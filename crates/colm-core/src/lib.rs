@@ -21,6 +21,7 @@ pub mod ground_temperature;
 pub mod ground_thermal_step;
 pub mod high_res_parameters;
 pub mod high_res_radiation;
+pub mod history_diagnostics;
 pub mod hydrology;
 pub mod interception;
 pub mod irrigation;
@@ -132,6 +133,7 @@ pub use high_res_radiation::{
     pft_high_resolution_radiation, weighted_high_resolution_bands, HighResolutionLctRadiation,
     HighResolutionLeafOptics, HighResolutionPftRadiation, HIGH_RES_WAVELENGTHS,
 };
+pub use history_diagnostics::{history_diagnostics, HistoryDiagnostics, HistoryDiagnosticsInput};
 pub use hydrology::{
     equilibrium_water_state, soil_hydraulic_conductivity, soil_psi_from_vliq, soil_vliq_from_psi,
     EquilibriumWaterState, SoilHydraulicModel, MIN_SOIL_PSI,
