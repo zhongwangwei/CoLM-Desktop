@@ -135,7 +135,7 @@ fn the_bridge_writes_the_state_variables_it_declares() {
         .expect("one step");
 
     let mut buffer = HistoryBuffers::new(dimensions(), site(), 1);
-    declare_lct_state(&mut buffer).unwrap();
+    declare_lct_variables(&mut buffer).unwrap();
     set_lct_state(
         &mut buffer,
         0,
@@ -144,17 +144,34 @@ fn the_bridge_writes_the_state_variables_it_declares() {
         output.energy.ground.temperature_k[0],
     )
     .unwrap();
+    set_lct_fluxes(&mut buffer, 0, &output.water).unwrap();
     buffer.set_time(0, 56_802_270).unwrap();
     let path = root.join("history.nc");
     buffer.write(&path).unwrap();
 
     let file = netcdf::open(&path).unwrap();
     // 声明的十三个变量都在，名字带 `f_` 前缀。
-    for name in LCT_STATE_VARIABLES {
+    for name in LCT_STATE_VARIABLES.iter().chain(LCT_FLUX_VARIABLES.iter()) {
         assert!(
             file.variable(&format!("f_{name}")).is_some(),
             "f_{name} is missing from the written history file"
         );
+    }
+    // 诊断量与这一步的输出逐项对上。
+    for (name, expected) in [
+        ("qinfl", output.water.infiltration_mm_s),
+        ("rnof", output.water.total_runoff_mm_s),
+        ("rsub", output.water.subsurface_runoff_mm_s),
+        ("rsur", output.water.surface_runoff_mm_s),
+        ("qcharge", output.water.recharge_mm_s),
+        ("frcsat", output.water.saturated_fraction),
+    ] {
+        let values = file
+            .variable(&format!("f_{name}"))
+            .unwrap()
+            .get_values::<f64, _>(..)
+            .unwrap();
+        assert_eq!(values, vec![expected], "f_{name}");
     }
     // 维度顺序与黄金文件一致：`t_soisno` 是 `(time, patch, soilsnow)`。
     let variable = file.variable("f_t_soisno").unwrap();
@@ -207,7 +224,7 @@ fn the_written_schema_matches_the_golden_file_for_the_shared_variables() {
     .unwrap();
     let state = template.state();
     let mut buffer = HistoryBuffers::new(dimensions(), site(), 1);
-    declare_lct_state(&mut buffer).unwrap();
+    declare_lct_variables(&mut buffer).unwrap();
     set_lct_state(&mut buffer, 0, &template, &state, state.temperature_k[0]).unwrap();
     buffer.set_time(0, 56_802_270).unwrap();
     let path = root.join("history.nc");
@@ -215,12 +232,18 @@ fn the_written_schema_matches_the_golden_file_for_the_shared_variables() {
 
     let written = netcdf::open(&path).unwrap();
     let reference = netcdf::open(&golden).unwrap();
-    for name in LCT_STATE_VARIABLES {
+    let mut compared = 0;
+    let mut skipped = Vec::new();
+    for name in LCT_STATE_VARIABLES.iter().chain(LCT_FLUX_VARIABLES.iter()) {
         let file_name = format!("f_{name}");
         let ours = written.variable(&file_name).unwrap();
-        let theirs = reference
-            .variable(&file_name)
-            .unwrap_or_else(|| panic!("{file_name} is not in the golden file"));
+        // 闸门表里的量不一定会出现在**这个**算例里（`qcharge` 就受运行时条件控制，
+        // 黄金算例没触发）。缺的量记下来，别当成通过。
+        let Some(theirs) = reference.variable(&file_name) else {
+            skipped.push(*name);
+            continue;
+        };
+        compared += 1;
         let dims = |variable: &netcdf::Variable<'_>| {
             variable
                 .dimensions()
@@ -242,6 +265,10 @@ fn the_written_schema_matches_the_golden_file_for_the_shared_variables() {
             assert_eq!(mine, gold, "{attribute} of {file_name}");
         }
     }
+    assert!(
+        compared >= 18,
+        "only {compared} variables were compared against the golden file; skipped: {skipped:?}"
+    );
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -274,7 +301,7 @@ fn the_snow_branch_fills_the_snow_span() {
             .expect("one snow step");
 
     let mut buffer = HistoryBuffers::new(dimensions(), site(), 1);
-    declare_lct_state(&mut buffer).unwrap();
+    declare_lct_variables(&mut buffer).unwrap();
     set_lct_snow_state(
         &mut buffer,
         0,
@@ -283,6 +310,7 @@ fn the_snow_branch_fills_the_snow_span() {
         output.energy.ground.temperature_k[0],
     )
     .unwrap();
+    set_lct_fluxes(&mut buffer, 0, &output.water.soil).unwrap();
     buffer.set_time(0, 56_802_270).unwrap();
     let path = root.join("history.nc");
     buffer.write(&path).unwrap();

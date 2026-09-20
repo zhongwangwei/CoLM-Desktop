@@ -34,6 +34,19 @@ pub const LCT_STATE_VARIABLES: [&str; 13] = [
     "fsno",
 ];
 
+/// 本层能填的**诊断**量：全部来自 `WATER_2014` 的输出，共六个。
+///
+/// 每一个的单位都与闸门表核对过（`qinfl`/`rnof`/`rsub`/`rsur`/`qcharge` 是 `mm/s`，
+/// `frcsat` 是 `-`），不是按名字猜的。闸门表里没有的量（例如 `smp`）不在此列 ——
+/// 它不是默认产出量。
+pub const LCT_FLUX_VARIABLES: [&str; 6] = ["qinfl", "rnof", "rsub", "rsur", "qcharge", "frcsat"];
+
+/// 黄金算例（CN-Cng）里没有、但本层仍会声明的量。
+///
+/// 闸门表允许写不等于这个算例会产出：`qcharge` 受运行时条件控制，黄金算例没触发。
+/// schema 测试因此按"两边都有"来比，并把跳过的名字记下来。
+pub const NOT_IN_GOLDEN: [&str; 1] = ["qcharge"];
+
 /// 黄金算例里有、但本层还填不出来的量（按用途分组，便于下一步挑）。
 ///
 /// 这份清单不参与写出，只是把"缺口"写死在代码里：改它就得同时改注释。
@@ -44,9 +57,38 @@ pub const UNFILLED: [&str; 4] = [
     "湖泊与 BGC 量：各自的分支还没有运行时驱动",
 ];
 
-/// 声明本层能填的变量。
-pub fn declare_lct_state(buffer: &mut HistoryBuffers) -> Result<()> {
-    buffer.declare(&LCT_STATE_VARIABLES)
+/// 声明本层能填的变量：状态十三项 + 诊断六项。
+pub fn declare_lct_variables(buffer: &mut HistoryBuffers) -> Result<()> {
+    let mut names = LCT_STATE_VARIABLES.to_vec();
+    names.extend_from_slice(&LCT_FLUX_VARIABLES);
+    buffer.declare(&names)
+}
+
+/// 把一步的水文诊断写进第 `record` 条记录。
+///
+/// 两支共用：积雪分支把它 `WATER_2014` 输出里的 `soil` 那一半传进来。
+pub fn set_lct_fluxes(
+    buffer: &mut HistoryBuffers,
+    record: usize,
+    water: &colm_core::Water2014SoilOutput,
+) -> Result<()> {
+    for (name, value) in [
+        ("qinfl", water.infiltration_mm_s),
+        ("rnof", water.total_runoff_mm_s),
+        ("rsub", water.subsurface_runoff_mm_s),
+        ("rsur", water.surface_runoff_mm_s),
+        ("qcharge", water.recharge_mm_s),
+        ("frcsat", water.saturated_fraction),
+    ] {
+        ensure!(
+            value.is_finite(),
+            "the history value for {name} is not finite"
+        );
+        buffer
+            .set_patch_scalar(name, record, value)
+            .with_context(|| format!("cannot write {name} into the history buffers"))?;
+    }
+    Ok(())
 }
 
 /// 无雪分支：把一步的状态写进第 `record` 条记录。

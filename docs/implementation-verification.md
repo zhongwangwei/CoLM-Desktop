@@ -1471,3 +1471,23 @@ patch 的。POINT 算例写一个 patch 是正确的，合成夹具的两个 pat
 
 `colm-runtime` 为此加了对 `colm-hist` 的依赖并显式开 `io`（闸门表那一半仍默认不带 netcdf，
 GUI 那条链不受影响：它不依赖 `colm-runtime`）。
+
+## history 桥补上六个水文诊断量（2026 年）
+
+在上一轮的状态十三项之上，`colm_runtime::history` 再声明六个**诊断**量，全部来自
+`WATER_2014` 的输出：`qinfl`（下渗）、`rnof`（总径流）、`rsub`（地下径流）、`rsur`（地表径流）、
+`qcharge`（地下水补给）、`frcsat`（饱和面积比）。共十九项。
+
+**单位是逐项与闸门表核对过的**，不是按名字猜的：前五个是 `mm/s`，`frcsat` 是 `-`。同一个
+检查顺手排除掉一个候选：`smp`（土壤基质势）**不在闸门表里**（不是默认产出量），所以哪怕
+`Water2014SoilOutput` 里有 `matric_potential_mm` 也不声明它。
+
+`qcharge` 带出一个新情况：闸门表允许写不等于**这个算例**会产出。它受运行时条件控制，黄金
+算例（CN-Cng）里没有 `f_qcharge`。schema 测试因此按"两边都有"来比，把跳过的名字收集起来并
+断言至少比到 18 项 —— 缺的量不会静默变成通过，也不会因为一个条件变量就让整条测试放弃。
+
+### 证据
+
+`cargo test -p colm-runtime --lib`：39 通过（3 条 history 测试）。schema 逐变量比对
+（名字、维度顺序、类型、`units`、`long_name`）覆盖 18 项，诊断量的取值与这一步 `WATER_2014`
+的输出逐项相等；积雪分支走雪入口，雪段来自雪列。
