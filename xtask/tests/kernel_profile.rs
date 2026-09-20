@@ -197,7 +197,10 @@ fn spatial_presets_use_flat_spmd_and_keep_river_lake_routing() {
 #[test]
 fn release_and_ci_cover_crop_kernel_bundle() {
     let release = read(".github/workflows/release.yml");
-    let release_presets = "default usgs crop latlon latlon-usgs latlon-crop unstructured unstructured-usgs unstructured-crop catchment catchment-usgs catchment-crop";
+    // 站点三档（default / usgs / crop）加空间 3 网格 × 4 能力（普通 / usgs / crop /
+    // hyperspectral）。`-hyper` 三个由 `8ee597e` 引入 release；`bgc` 与 `urban` 不在
+    // 这份清单里，它们与 `default` 是同一份 generator_args（见 kernels/*/manifest.json）。
+    let release_presets = "default usgs crop latlon latlon-usgs latlon-crop latlon-hyper unstructured unstructured-usgs unstructured-crop unstructured-hyper catchment catchment-usgs catchment-crop catchment-hyper";
     assert!(
         release.contains(&format!(
             "for p in {release_presets}; do ./oracle/scripts/build_kernel.sh \"$p\"; done"
@@ -210,6 +213,25 @@ fn release_and_ci_cover_crop_kernel_bundle() {
         )),
         "macOS bundle check must require every selectable kernel"
     );
+    // 清单在 release.yml 里出现三次（macOS/Linux 构建、Windows 构建、macOS 打包校验）。
+    // 这次失败的根因就是只更新了一部分：构建列表加了 `-hyper`，测试期望的旧清单没跟上。
+    // 与其让三处各自漂移，不如钉住「三处必须逐字相同」。
+    let loops = release
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with("for p in ") && line.ends_with("; do"))
+        .collect::<Vec<_>>();
+    assert!(
+        !loops.is_empty(),
+        "release workflow must enumerate its kernel presets in `for p in ...; do` loops"
+    );
+    for line in &loops {
+        assert_eq!(
+            *line,
+            format!("for p in {release_presets}; do"),
+            "every release kernel loop must use the same preset list"
+        );
+    }
 
     let crop_example = "US-Ne3_2002-2003_FLUXNET2015_CROP";
     assert_eq!(
