@@ -78,8 +78,13 @@ pub struct LandPhysicsParameters {
     pub thermal_conductivity_scheme: ThermalConductivityScheme,
     pub observation_height_mode: ObservationHeightMode,
     pub stomata: StomataOptions,
-    /// PFT 生化表；`MOD_PFTparameters` 尚未移植，所以由调用方给。
-    pub biochemistry: LeafBiochemistry,
+    /// 冠层积分因子 `cint(1:3)`，即内核里的 `LeafBiochemistry::canopy_scaling`。
+    ///
+    /// **上游不是地类常量**：`MOD_LeafTemperature.F90:460-466` 每步由
+    /// `lai`/`extkb`/`extkd` 现算 `cintsun` 与 `cintsha` 两个三元素，分别给
+    /// 阳叶与阴叶。本仓库的内核只收一个，所以这里必须由调用方明确给出 ——
+    /// 装一个「1」进去等于替上游做了一个没核对过的决定。
+    pub canopy_scaling: [f64; 3],
     pub wue_lambda: f64,
     /// `DEF_TUNING_SSI`。
     pub soil_ice_impedance: f64,
@@ -182,6 +187,7 @@ pub struct StandardLctRestartTemplate {
     pub root_fraction: Vec<f64>,
     pub leaf_angle_distribution: f64,
     pub inverse_sqrt_leaf_dimension_m_neg_half: f64,
+    pub biochemistry: LeafBiochemistry,
     /// 非 PHS 分支下 `WATER_2014` 的每步根通量初值，全零且长度等于层数。
     root_flux_zeros: Vec<f64>,
 }
@@ -374,6 +380,8 @@ pub fn assemble_standard_lct_template(
     );
     let leaf_angle_distribution = class.leaf_angle_distribution();
     let inverse_sqrt_leaf_dimension_m_neg_half = class.inverse_sqrt_leaf_dimension_m_neg_half();
+    // 生化参数整份来自地类表；只有冠层积分因子要调用方给（见字段文档）。
+    let biochemistry = class.biochemistry(physics.canopy_scaling);
     ensure!(
         leaf_area_index + stem_area_index > 0.0,
         "the standard LCT energy step needs a vegetated canopy"
@@ -405,6 +413,7 @@ pub fn assemble_standard_lct_template(
         root_fraction,
         leaf_angle_distribution,
         inverse_sqrt_leaf_dimension_m_neg_half,
+        biochemistry,
         root_flux_zeros: vec![0.0; soil_layers],
         physics,
     })
@@ -539,7 +548,7 @@ impl StandardLctRestartTemplate {
                     canopy_top_height_m: self.canopy_top_height_m,
                     inverse_sqrt_leaf_dimension_m_neg_half: self
                         .inverse_sqrt_leaf_dimension_m_neg_half,
-                    biochemistry: physics.biochemistry,
+                    biochemistry: self.biochemistry,
                     // 内核覆盖：`leaf_input` 用本步的土壤水分胁迫与时间步。
                     soil_water_stress_sunlit: 0.0,
                     soil_water_stress_shaded: 0.0,

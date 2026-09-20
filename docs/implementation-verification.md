@@ -1233,3 +1233,43 @@ SSP5-8.5 算例拿到观测段的 CO2。
 全错。实际是 385.04、1135.21——`867.19` 属于 SSP3-7.0。现在期望值逐条对照上游字面量，
 并额外钉住一处容易分错块的地方：**SSP2-4.5 的 2100 年最后两个月在上游里是 867.19**，
 而 SSP3-7.0 整年都是 867.19；只断言"2100 年末值"的话，两个 `CASE` 块分错了也看不出来。
+
+## 生化参数接上地类表；顺带查清 `canopy_scaling` 的真身（2026 年）
+
+`LeafBiochemistry` 是 `LandPhysicsParameters` 里最后一块手给的物理表。查上游后确认：
+**无雪规则土壤这一支的生化参数全部来自 `MOD_Const_LC.F90`**，也就是上一轮已经生成并
+接进装配层的那张表 —— 不需要 PFT 文件。`CoLMMAIN.F90` 的 `USE` 列表直接列出
+`effcon, vmax25, c3c4, slti, hlti, shti, hhti, trda, trdm, trop, g1, g0, gradm, binter`
+这些名字，它们都是地类数组。现在 `ClassConstants::biochemistry` 逐项取表，
+`LandPhysicsParameters::biochemistry` 随之删除（少一个手给错的机会），并在装配处
+断言 `vmax25` 的 `1e-6` 折算仍生效（表里是 umol/m2/s，忘了换算差六个数量级）。
+
+### `canopy_scaling` 不是地类常量，是每步量
+
+`LeafBiochemistry::canopy_scaling` 起初看不出任何上游来源（`MOD_AssimStomataConductance`
+的签名里没有它）。顺藤摸下去：内核里它乘在三个地方 —— `vcmx`、`jmax`、`bintc` ——
+而上游对应的是 `stomata` 的 `cint(1:3)` 参数：
+
+```
+bintc = binter_used * max(0.1, rstfac) * cint(3)     ! MOD_AssimStomataConductance.F90:211-212
+jmax  = jmax * rstfac * cint(2)                      ! 同上 :585-586
+```
+
+而 `cint` 的实参在 `MOD_LeafTemperature.F90:460-466` 里**每步**算，且**阳叶与阴叶不同**：
+
+```
+cintsun(1) = (1.-exp(-(0.110+extkb)*lai))/(0.110+extkb)
+cintsun(2) = (1.-exp(-(extkb+extkd)*lai))/(extkb+extkd)
+cintsun(3) = (1.-exp(-extkb*lai))/extkb
+cintsha(1) = (1.-exp(-0.110*lai))/0.110 - cintsun(1)     ! 其余两份同理
+```
+
+所以它是**从 `lai`/`extkb`/`extkd` 每步算出的两个三元素**，不是一个可以塞进模板的常数。
+本仓库的内核只收一个 `[f64; 3]`，也就是只能描述一个叶群体。因此：
+- 该字段**不由装配层填**，仍由调用方显式给出（`LandPhysicsParameters::canopy_scaling`），
+  并写明理由 —— 装一个「1」进去等于替上游做了一个没核对过的决定；
+- 缺口本身记在这里，修它要动 `photosynthesis`/`leaf_temperature` 的内核签名
+  （拆成阳叶/阴叶两个因子），属于另一个切片。合成算例用单位因子。
+
+这也是本项目里第一个"字段名相同、含义比上游窄"的例子：`canopy_scaling` 看起来像地类
+常量，实际是每步的冠层积分因子，且少了一半。

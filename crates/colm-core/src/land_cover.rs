@@ -142,6 +142,37 @@ impl ClassConstants {
         )
     }
 
+    /// `MOD_AssimStomataConductance:stomata` 的生化参数，逐项取自上表。
+    ///
+    /// `canopy_scaling` 由调用方给：上游那个量是 `cint(1:3)`，而 `cintsun` 与
+    /// `cintsha` 是**每步**从 `lai`/`extkb`/`extkd` 算出的两个不同三元素
+    /// （`MOD_LeafTemperature.F90:460-466`），不是地类常量。见
+    /// `docs/implementation-verification.md` 里那条待办。
+    pub fn biochemistry(&self, canopy_scaling: [f64; 3]) -> crate::LeafBiochemistry {
+        crate::LeafBiochemistry {
+            quantum_efficiency: self.value(|table| table.effcon),
+            maximum_carboxylation_25c_mol_m2_s: self.maximum_carboxylation_25c_mol_m2_s(),
+            c3c4: self.c3c4(),
+            low_temperature_slope: self.value(|table| table.slti),
+            low_temperature_half_k: self.value(|table| table.hlti),
+            high_temperature_slope: self.value(|table| table.shti),
+            high_temperature_half_k: self.value(|table| table.hhti),
+            respiration_temperature_slope: self.value(|table| table.trda),
+            respiration_temperature_half_k: self.value(|table| table.trdm),
+            optimum_temperature_k: self.value(|table| table.trop),
+            medlyn_g1: self.value(|table| table.g1),
+            medlyn_g0: self.value(|table| table.g0),
+            ball_berry_slope: self.value(|table| table.gradm),
+            ball_berry_intercept: self.value(|table| table.binter),
+            canopy_scaling,
+        }
+    }
+
+    /// `c3c4`：1 = C3，0 = C4。
+    pub fn c3c4(&self) -> i32 {
+        self.tables().c3c4[self.class - 1]
+    }
+
     /// `Init_LC_Const` 的 `rho(1,1,:)=rhol_vis` 那一组赋值。
     pub fn leaf_optics(&self) -> LeafOptics {
         LeafOptics {

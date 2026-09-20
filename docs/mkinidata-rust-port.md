@@ -197,8 +197,9 @@ them. Checked against the current tree:
   split: time invariants from the constant restart (`READ_TimeInvariants`), evolving and
   vegetation state from the time restart, the land-class constants (`rootfr`, leaf angle,
   leaf dimension) from the generated `MOD_Const_LC.F90` tables, and only the parameter
-  tables no source in this repo carries (PFT biochemistry, stomata, roughness, observation
-  height) from an explicit `LandPhysicsParameters` with no defaults.
+  tables no source in this repo carries (stomata options, roughness, observation height,
+  and the per-step canopy integration factor) from an explicit `LandPhysicsParameters` with
+  no defaults. The biochemistry is no longer among them: the land-cover tables supply it.
   `PointRuntime::run_restart_standard_lct` then drives it through the whole forcing window.
   Still missing: a driver for every other branch, the PFT parameter tables the template
   still takes from its caller (`LeafBiochemistry` has never been constructed outside a

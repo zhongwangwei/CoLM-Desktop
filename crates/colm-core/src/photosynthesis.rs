@@ -13,7 +13,9 @@ const fn f77(value: f32) -> f64 {
 const ITERATIONS: usize = 6;
 
 /// Land-cover/PFT biochemical parameters shared by `stomata` and `update_photosyn`.
-#[derive(Debug, Clone, Copy)]
+///
+/// `PartialEq` 只给测试用：装配层要逐项核对它等于地类表的取值。
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LeafBiochemistry {
     pub quantum_efficiency: f64,
     pub maximum_carboxylation_25c_mol_m2_s: f64,

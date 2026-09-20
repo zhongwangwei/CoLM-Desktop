@@ -39,23 +39,8 @@ fn physics(timestep_seconds: f64) -> LandPhysicsParameters {
             ball_berry_slope_override: None,
             ball_berry_intercept_override: None,
         },
-        biochemistry: LeafBiochemistry {
-            quantum_efficiency: 0.05,
-            maximum_carboxylation_25c_mol_m2_s: 60e-6,
-            c3c4: 1,
-            low_temperature_slope: 0.2,
-            low_temperature_half_k: 288.16,
-            high_temperature_slope: 0.3,
-            high_temperature_half_k: 313.16,
-            respiration_temperature_slope: 1.3,
-            respiration_temperature_half_k: 328.16,
-            optimum_temperature_k: 298.16,
-            medlyn_g1: 4.0,
-            medlyn_g0: 0.01,
-            ball_berry_slope: 9.0,
-            ball_berry_intercept: 0.01,
-            canopy_scaling: [1.0; 3],
-        },
+        // 上游每步算 cintsun/cintsha 两个三元素；合成算例用单位因子。
+        canopy_scaling: [1.0; 3],
         wue_lambda: 2.0,
         soil_ice_impedance: 6.0,
         impermeable_porosity: 0.05,
@@ -517,6 +502,25 @@ fn the_state_carries_the_restart_radiation() {
         fixture.temperature_k.len(),
         (SNOW_LAYERS + SOIL_LAYERS) * PATCHES
     );
+}
+
+/// 生化参数整份来自地类常量表，只有冠层积分因子是调用方给的。
+#[test]
+fn the_land_cover_table_supplies_the_biochemistry() {
+    let (_, template) = assemble("biochemistry", 1);
+    // 合成算例 patch 1 的 patchclass 是 2（0 基）→ 上游数组下标 3。
+    let class = colm_core::ClassConstants::new(colm_core::LandCoverScheme::Igbp, 3).unwrap();
+    let expected = class.biochemistry([1.0; 3]);
+    assert_eq!(template.biochemistry, expected);
+    // `vmax25` 在表里是 umol/m2/s，`Init_LC_Const` 折成 mol；忘了这一步差六个数量级。
+    assert!(template.biochemistry.maximum_carboxylation_25c_mol_m2_s < 1.0e-3);
+    assert!(matches!(template.biochemistry.c3c4, 0 | 1));
+    assert_eq!(
+        template.biochemistry.quantum_efficiency,
+        colm_core::land_cover_tables(colm_core::LandCoverScheme::Igbp).effcon[2]
+    );
+    // 冠层积分因子来自调用方，装配层不会自己造一个。
+    assert_eq!(template.biochemistry.canopy_scaling, [1.0; 3]);
 }
 
 #[test]
