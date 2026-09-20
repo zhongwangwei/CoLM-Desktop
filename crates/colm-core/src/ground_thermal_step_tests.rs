@@ -35,7 +35,7 @@ fn flux_input() -> GroundFluxInput {
         wind_height_m: 30.0,
         temperature_height_m: 28.0,
         humidity_height_m: 26.0,
-        boundary_layer_height_m: 1000.0,
+        boundary_layer_height_m: None,
         eastward_wind_m_s: 3.0,
         northward_wind_m_s: 1.0,
         air_specific_humidity: 0.005,

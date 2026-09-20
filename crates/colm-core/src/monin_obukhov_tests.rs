@@ -18,6 +18,8 @@ fn unstable() -> MoninObukhovInput {
         moisture_roughness_m: 0.01,
         obukhov_length_m: -100.0,
         stability_adjusted_wind_m_s: 4.0,
+        // 默认算例（`DEF_USE_CBL_HEIGHT = .false.`）的强迫场里没有 `hpbl`。
+        boundary_layer_height_m: None,
     }
 }
 
@@ -68,6 +70,7 @@ fn monin_obukhov_preserves_the_upstream_deeply_unstable_literals() {
         moisture_roughness_m: f77(0.002),
         obukhov_length_m: -6.601_160_578_823_607,
         stability_adjusted_wind_m_s: 3.238_826_995_252_414,
+        boundary_layer_height_m: None,
     })
     .unwrap();
     // Standalone gfortran run of MOD_FrictionVelocity:moninobuk.
@@ -112,17 +115,19 @@ fn canopy_and_initialization_match_current_fortran() {
 
 #[test]
 fn large_eddy_profile_matches_current_fortran() {
-    let scheme = SurfaceLayerScheme::LargeEddy {
-        boundary_layer_height_m: 1000.0,
+    let scheme = SurfaceLayerScheme::LargeEddy;
+    let hpbl = MoninObukhovInput {
+        boundary_layer_height_m: Some(1000.0),
+        ..unstable()
     };
-    let surface = monin_obukhov_with_scheme(unstable(), scheme).unwrap();
+    let surface = monin_obukhov_with_scheme(hpbl, scheme).unwrap();
     close(surface.friction_velocity_m_s, 3.172_171_632_789_877_5e-1);
     close(surface.momentum, 5.043_863_349_962_189);
     close(surface.momentum_at_10m, 4.333_366_626_521_974);
     close(surface.heat, 6.911_964_179_361_94);
     let canopy = canopy_monin_obukhov_with_scheme(
         CanopyMoninObukhovInput {
-            surface: unstable(),
+            surface: hpbl,
             top_layer_displacement_m: 12.0,
             top_layer_roughness_m: 0.1,
             canopy_top_height_m: 15.0,
@@ -134,6 +139,19 @@ fn large_eddy_profile_matches_current_fortran() {
     close(
         canopy.surface.friction_velocity_m_s,
         surface.friction_velocity_m_s,
+    );
+}
+
+/// LES 走的是逐强迫场的 `hpbl`。强迫场里没有它时**必须报错**，
+/// 不能退回 `Standard` 或某个常数 —— 那会让 `DEF_USE_CBL_HEIGHT = .true.`
+/// 的算例静默按另一套廓线算。
+#[test]
+fn large_eddy_without_hpbl_is_refused() {
+    let error = monin_obukhov_with_scheme(unstable(), SurfaceLayerScheme::LargeEddy)
+        .expect_err("the large-eddy scheme cannot run without forc_hpbl");
+    assert!(
+        error.to_string().contains("forc_hpbl"),
+        "the error must name the missing forcing variable: {error}"
     );
 }
 

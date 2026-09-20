@@ -30,6 +30,13 @@ pub struct PointForcingFrame {
     pub northward_or_scalar_wind_m_s: f64,
     pub downward_shortwave_w_m2: f64,
     pub downward_longwave_w_m2: f64,
+    /// `forc_hpbl`：大气边界层高度。
+    ///
+    /// 它是上游在 `DEF_USE_CBL_HEIGHT` 打开时才追加的第 9 个强迫变量
+    /// （`MOD_UserSpecifiedForcing.F90:96`），默认变量名 `DEF_forcing%CBL_vname = 'blh'`。
+    /// 关掉时文件里没有它，所以这里是 `Option` —— 但选了 LES 廓线又缺它，
+    /// 装配期必须报错，不能悄悄按 `Standard` 算。
+    pub boundary_layer_height_m: Option<f64>,
 }
 
 /// Fully preloaded one-point forcing data.
@@ -147,6 +154,16 @@ impl PointForcingSeries {
                 lower_weight,
                 upper_weight,
             ),
+            // 整条序列要么都有 `hpbl`、要么都没有，所以两端一致才插值。
+            boundary_layer_height_m: match (
+                lower.boundary_layer_height_m,
+                upper.boundary_layer_height_m,
+            ) {
+                (Some(lower), Some(upper)) => {
+                    Some(linear(lower, upper, lower_weight, upper_weight))
+                }
+                _ => None,
+            },
         })
     }
 
@@ -176,6 +193,7 @@ impl PointForcingSeries {
             calendar_day,
             longitude_radians,
             latitude_radians,
+            boundary_layer_height_m: frame.boundary_layer_height_m,
         })
     }
 
@@ -318,6 +336,9 @@ pub fn load_point_forcing(path: impl AsRef<Path>) -> Result<PointForcingSeries> 
         summary.steps,
         summary.step_seconds,
     )?;
+    // `forc_hpbl` 是可选的：上游只在 `DEF_USE_CBL_HEIGHT` 打开时才把它当第 9 个变量读。
+    // 名字取 `DEF_forcing%CBL_vname` 的默认值 `blh`，并接受 CoLM 内部量名 `hpbl`。
+    let boundary_layer_height = optional_values(&file, path, &["blh", "hpbl"], summary.steps)?;
     let mut frames = Vec::with_capacity(summary.steps);
     for index in 0..summary.steps {
         let frame = PointForcingFrame {
@@ -330,6 +351,7 @@ pub fn load_point_forcing(path: impl AsRef<Path>) -> Result<PointForcingSeries> 
             northward_or_scalar_wind_m_s: northward_or_scalar_wind[index],
             downward_shortwave_w_m2: shortwave[index],
             downward_longwave_w_m2: longwave[index],
+            boundary_layer_height_m: boundary_layer_height.as_ref().map(|series| series[index]),
         };
         ensure!(
             frame_values(frame).iter().all(|value| value.is_finite()),
@@ -357,6 +379,22 @@ fn slot_values(
     let raw = values(file, path, name, steps)?;
     let units = units(file, name)?;
     crate::units::convert_units_with_step(&units, canonical_units(index), &raw, Some(step_seconds))
+}
+
+/// 读一个**可选**的强迫序列：候选名一个都不在文件里就返回 `None`。
+///
+/// 与 `slot_values` 的区别是它不做单位换算 —— `hpbl` 已经是米，
+/// 而单位表是按 8 个槽位组织的，硬套第 9 个槽会拿到错的期望单位。
+fn optional_values(
+    file: &netcdf::File,
+    path: &Path,
+    candidates: &[&str],
+    steps: usize,
+) -> Result<Option<Vec<f64>>> {
+    let Some(name) = candidates.iter().find(|name| file.variable(name).is_some()) else {
+        return Ok(None);
+    };
+    Ok(Some(values(file, path, name, steps)?))
 }
 
 fn humidity_values(
@@ -424,8 +462,8 @@ fn units(file: &netcdf::File, name: &str) -> Result<String> {
     }
 }
 
-fn frame_values(frame: PointForcingFrame) -> [f64; 9] {
-    [
+fn frame_values(frame: PointForcingFrame) -> Vec<f64> {
+    let mut values = vec![
         frame.time_seconds,
         frame.air_temperature_k,
         frame.specific_humidity,
@@ -435,7 +473,10 @@ fn frame_values(frame: PointForcingFrame) -> [f64; 9] {
         frame.northward_or_scalar_wind_m_s,
         frame.downward_shortwave_w_m2,
         frame.downward_longwave_w_m2,
-    ]
+    ];
+    // 序列里没有 `hpbl` 时它不是「缺失值」，不该被这一关拦下。
+    values.extend(frame.boundary_layer_height_m);
+    values
 }
 
 fn linear(lower: f64, upper: f64, lower_weight: f64, upper_weight: f64) -> f64 {

@@ -948,7 +948,6 @@ mod tests {
             wind_height_m: 30.0,
             temperature_height_m: 30.0,
             humidity_height_m: 30.0,
-            boundary_layer_height_m: 1000.0,
             ground_emissivity: 0.96,
             vaporization_heat_j_kg: 2.5104e6,
             sprinkler_irrigation_kg_m2_s: 0.0,

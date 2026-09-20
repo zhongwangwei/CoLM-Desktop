@@ -67,9 +67,38 @@ fn point_loader_canonicalizes_a_scalar_wind_series_once() {
             northward_or_scalar_wind_m_s: 3.0,
             downward_shortwave_w_m2: 100.0,
             downward_longwave_w_m2: 300.0,
+            boundary_layer_height_m: None,
         }
     );
     assert!(series.frame(2).is_err());
+}
+
+/// `forc_hpbl` 是上游在 `DEF_USE_CBL_HEIGHT` 下追加的第 9 个强迫变量。
+/// 有就逐点读进来（线性插值），没有就是 `None` —— 不能报错，那会让默认算例跑不了。
+#[test]
+fn point_loader_reads_hpbl_only_when_the_file_has_it() {
+    let dir = temp_dir("hpbl");
+    let without = load_point_forcing(point_file(&dir, false)).unwrap();
+    assert_eq!(without.frame(0).unwrap().boundary_layer_height_m, None);
+
+    let dir = temp_dir("hpbl-present");
+    let path = point_file(&dir, false);
+    {
+        let mut file = netcdf::append(&path).unwrap();
+        put(&mut file, "blh", "m", &[1000.0, 2000.0]);
+    }
+    let series = load_point_forcing(&path).unwrap();
+    assert_eq!(
+        series.frame(0).unwrap().boundary_layer_height_m,
+        Some(1000.0)
+    );
+    assert_eq!(
+        series
+            .sample_at_seconds(900.0)
+            .unwrap()
+            .boundary_layer_height_m,
+        Some(1500.0)
+    );
 }
 
 #[test]

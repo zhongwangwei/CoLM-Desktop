@@ -29,6 +29,12 @@ pub struct RuntimeForcingInput {
     pub calendar_day: f64,
     pub longitude_radians: f64,
     pub latitude_radians: f64,
+    /// `forc_hpbl`：`DEF_USE_CBL_HEIGHT` 打开时上游额外读进来的那个强迫变量
+    /// （`MOD_UserSpecifiedForcing.F90:96` 把 `NVAR` 加一）。
+    ///
+    /// `None` 表示强迫文件里没有它 —— 默认算例（`DEF_USE_CBL_HEIGHT = .false.`）
+    /// 就是这个状态，此时只有 `Standard` 近地层方案可用。
+    pub boundary_layer_height_m: Option<f64>,
 }
 
 /// One forcing record in the form consumed by CoLM's physical kernels.
@@ -55,6 +61,8 @@ pub struct RuntimeForcing {
     /// it from the same module that prepared the other forcings, and recomputing it
     /// per branch is how the ground, leaf and soil-resistance paths would drift apart.
     pub air_density_kg_m3: f64,
+    /// `forc_hpbl` 原样带走；选不选 LES 是近地层方案的事，不是强迫场的事。
+    pub boundary_layer_height_m: Option<f64>,
 }
 
 impl RuntimeForcing {
@@ -122,6 +130,7 @@ pub fn prepare_runtime_forcing(input: RuntimeForcingInput) -> Result<RuntimeForc
             input.specific_humidity,
             input.air_temperature_k,
         ),
+        boundary_layer_height_m: input.boundary_layer_height_m,
     })
 }
 
@@ -171,6 +180,14 @@ fn validate(input: RuntimeForcingInput) -> Result<()> {
             && (input.wind_is_vector || input.northward_or_scalar_wind_m_s >= 0.0),
         "runtime forcing is physically invalid"
     );
+    // `hpbl` 可以缺（默认算例就没有），但给了就必须是正的有限值 ——
+    // 它是 LZD2022 廓线的长度尺度，0 或负数只会让 `boundary_zeta` 除出垃圾。
+    if let Some(boundary_layer_height_m) = input.boundary_layer_height_m {
+        ensure!(
+            boundary_layer_height_m.is_finite() && boundary_layer_height_m > 0.0,
+            "forc_hpbl must be a positive finite height, got {boundary_layer_height_m}"
+        );
+    }
     Ok(())
 }
 

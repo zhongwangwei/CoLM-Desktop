@@ -54,7 +54,6 @@ fn physics(timestep_seconds: f64) -> LandPhysicsParameters {
         wind_height_m: 30.0,
         temperature_height_m: 30.0,
         humidity_height_m: 30.0,
-        boundary_layer_height_m: 1000.0,
         ground_emissivity: 0.96,
         vaporization_heat_j_kg: 2.5104e6,
         sprinkler_irrigation_kg_m2_s: 0.0,
@@ -78,6 +77,7 @@ fn binding() -> StandardLctStepBinding {
             calendar_day: 172.5,
             longitude_radians: 0.0,
             latitude_radians: 0.5,
+            boundary_layer_height_m: None,
         })
         .unwrap(),
         seconds_of_day: 43_200,
@@ -287,6 +287,39 @@ fn the_two_other_runoff_schemes_read_their_own_constant_restart_fields() {
     assert_eq!(vic.runoff, Water2014Runoff::SimpleVic { bvic: 1.9 });
 }
 
+/// LES 近地层方案的高度来自**逐步骤的** `forc_hpbl`，不是 `LandPhysicsParameters`。
+///
+/// 这条测试同时钉住两个方向：强迫场里有 `hpbl` 时装配出的模板能跑完一步；
+/// 没有时必须在进内核之前就报错——否则 `DEF_USE_CBL_HEIGHT = .true.` 的算例
+/// 会静默退回 `Standard` 廓线，而结果看上去完全正常。
+#[test]
+fn the_large_eddy_scheme_reads_hpbl_from_the_step_forcing() {
+    let root = temp_dir("large-eddy");
+    let fixture = SyntheticRestart::write(root.join("restart")).unwrap();
+    let files = RestartStateFiles {
+        constant: fixture.constant.block.clone(),
+        time: fixture.time.block.clone(),
+    };
+    let mut les = physics(1800.0);
+    les.surface_layer_scheme = SurfaceLayerScheme::LargeEddy;
+
+    let with_hpbl = assemble_standard_lct_template(&files, 1, les.clone()).unwrap();
+    let mut state = with_hpbl.state();
+    let mut step = binding();
+    step.forcing.boundary_layer_height_m = Some(1200.0);
+    colm_core::standard_lct_soil_step(with_hpbl.input(&step), &mut state)
+        .expect("the large-eddy scheme runs once forc_hpbl is present");
+
+    let without_hpbl = assemble_standard_lct_template(&files, 1, les).unwrap();
+    let mut state = without_hpbl.state();
+    let error = colm_core::standard_lct_soil_step(without_hpbl.input(&binding()), &mut state)
+        .expect_err("the large-eddy scheme cannot run without forc_hpbl");
+    assert!(
+        error.to_string().contains("forc_hpbl"),
+        "the error must name the missing forcing variable: {error}"
+    );
+}
+
 #[test]
 fn one_assembled_step_runs_the_ported_lct_chain_from_file_state() {
     let (fixture, template) = assemble("one-step", 1);
@@ -492,6 +525,7 @@ fn input_of(forcing: colm_core::RuntimeForcing) -> RuntimeForcingInput {
         calendar_day: 172.5,
         longitude_radians: 0.0,
         latitude_radians: 0.5,
+        boundary_layer_height_m: None,
     }
 }
 

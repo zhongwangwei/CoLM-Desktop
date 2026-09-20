@@ -64,7 +64,6 @@ fn physics() -> LandPhysicsParameters {
         wind_height_m: 30.0,
         temperature_height_m: 30.0,
         humidity_height_m: 30.0,
-        boundary_layer_height_m: 1000.0,
         ground_emissivity: 0.96,
         vaporization_heat_j_kg: 2.5104e6,
         sprinkler_irrigation_kg_m2_s: 0.0,
@@ -88,6 +87,7 @@ fn binding() -> StandardLctStepBinding {
             calendar_day: 172.5,
             longitude_radians: 0.0,
             latitude_radians: 0.5,
+            boundary_layer_height_m: None,
         })
         .unwrap(),
         seconds_of_day: 43_200,

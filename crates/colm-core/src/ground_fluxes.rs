@@ -4,7 +4,7 @@
 //! and surface humidity; the result feeds `ground_temperature` without
 //! duplicating either Monin-Obukhov or energy-flux iteration logic.
 
-use anyhow::{ensure, Result};
+use anyhow::{ensure, Context, Result};
 
 use crate::{
     initialize_monin_obukhov, monin_obukhov_with_scheme, MoninObukhovInitialInput,
@@ -32,7 +32,8 @@ pub struct GroundFluxInput {
     pub wind_height_m: f64,
     pub temperature_height_m: f64,
     pub humidity_height_m: f64,
-    pub boundary_layer_height_m: f64,
+    /// `forc_hpbl`；只有 `LargeEddy` 近地层方案会读它，所以 `Standard` 算例可以是 `None`。
+    pub boundary_layer_height_m: Option<f64>,
     pub eastward_wind_m_s: f64,
     pub northward_wind_m_s: f64,
     pub air_specific_humidity: f64,
@@ -129,6 +130,7 @@ pub fn ground_fluxes(input: GroundFluxInput) -> Result<GroundFluxState> {
                 moisture_roughness_m: moisture_roughness,
                 obukhov_length_m: obukhov_length,
                 stability_adjusted_wind_m_s: adjusted_wind,
+                boundary_layer_height_m: input.boundary_layer_height_m,
             },
             input.surface_layer_scheme,
         )?;
@@ -151,9 +153,12 @@ pub fn ground_fluxes(input: GroundFluxInput) -> Result<GroundFluxState> {
         } else {
             dimensionless_height = dimensionless_height.clamp(-100.0, f77(-1.0e-6));
             let boundary_height = match input.surface_layer_scheme {
-                SurfaceLayerScheme::LargeEddy {
-                    boundary_layer_height_m,
-                } => (5.0 * input.wind_height_m).max(boundary_layer_height_m),
+                SurfaceLayerScheme::LargeEddy => {
+                    (5.0 * input.wind_height_m).max(input.boundary_layer_height_m.context(
+                        "the large-eddy surface-layer scheme needs the forcing's boundary-layer \
+                         height (forc_hpbl), which this case does not provide",
+                    )?)
+                }
                 SurfaceLayerScheme::Standard => 1000.0,
             };
             let convective_velocity =
@@ -238,7 +243,6 @@ fn validate(input: GroundFluxInput) -> Result<()> {
         input.wind_height_m,
         input.temperature_height_m,
         input.humidity_height_m,
-        input.boundary_layer_height_m,
         input.eastward_wind_m_s,
         input.northward_wind_m_s,
         input.air_specific_humidity,
@@ -265,7 +269,6 @@ fn validate(input: GroundFluxInput) -> Result<()> {
             && input.wind_height_m > 0.0
             && input.temperature_height_m > 0.0
             && input.humidity_height_m > 0.0
-            && input.boundary_layer_height_m > 0.0
             && input.air_density_kg_m3 > 0.0
             && input.reference_wind_m_s >= 0.0
             && input.virtual_potential_temperature_k > 0.0
@@ -274,6 +277,17 @@ fn validate(input: GroundFluxInput) -> Result<()> {
             && (0.0..=1.0).contains(&input.snow_cover_fraction),
         "ground-flux inputs are invalid"
     );
+    // `Standard` 算例的强迫场里没有 `hpbl`，那是合法的；`LargeEddy` 没有它就是配置错误，
+    // 而错误必须在进迭代之前报出来，不能等到 `MomentumScheme::new` 里才发现。
+    if input.surface_layer_scheme == SurfaceLayerScheme::LargeEddy {
+        ensure!(
+            input
+                .boundary_layer_height_m
+                .is_some_and(|height| height.is_finite() && height > 0.0),
+            "the large-eddy surface-layer scheme needs the forcing's boundary-layer height \
+             (forc_hpbl), which this case does not provide"
+        );
+    }
     Ok(())
 }
 

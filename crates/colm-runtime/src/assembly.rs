@@ -109,7 +109,6 @@ pub struct LandPhysicsParameters {
     pub wind_height_m: f64,
     pub temperature_height_m: f64,
     pub humidity_height_m: f64,
-    pub boundary_layer_height_m: f64,
     /// `DEF_EMIS`。
     pub ground_emissivity: f64,
     /// 汽化潜热。上游 `MOD_Const_Physical.F90` 里就是常数 `hvap = 2.5104e6`，
@@ -655,7 +654,9 @@ impl StandardLctRestartTemplate {
                     wind_height_m: physics.wind_height_m,
                     temperature_height_m: physics.temperature_height_m,
                     humidity_height_m: physics.humidity_height_m,
-                    boundary_layer_height_m: physics.boundary_layer_height_m,
+                    // 逐步骤的 `hpbl` 由强迫场提供，不是装配期常量：
+                    // `SurfaceLayerScheme::LargeEddy` 读的就是它。
+                    boundary_layer_height_m: forcing.boundary_layer_height_m,
                     // 内核覆盖：`ground_flux_input` 从 forcing 重算风、湿度与温度。
                     eastward_wind_m_s: forcing.eastward_wind_m_s,
                     northward_wind_m_s: forcing.northward_wind_m_s,
@@ -719,6 +720,8 @@ impl StandardLctRestartTemplate {
                     atmospheric_co2_pa: forcing.bottom_pressure_pa * binding.co2_volume_fraction,
                     soil_roughness_m: physics.soil_roughness_m,
                     snow_roughness_m: physics.snow_roughness_m,
+                    // 同 `GroundFluxInput`：LES 分支读逐步骤的 `hpbl`。
+                    boundary_layer_height_m: forcing.boundary_layer_height_m,
                     snow_cover_fraction: self.snow_cover_fraction,
                     ground_obukhov_length_m: 0.0,
                     transpiration_limit_kg_m2_s: 0.0,

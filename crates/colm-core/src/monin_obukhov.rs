@@ -3,7 +3,7 @@
 //! Ground, lake, urban, and canopy fluxes call these pure kernels rather than
 //! carrying separate translations of the Monin-Obukhov profile equations.
 
-use anyhow::{ensure, Result};
+use anyhow::{ensure, Context, Result};
 
 // CoLM's physical constants are unsuffixed Fortran literals assigned to r8.
 // Preserve that source rounding for bit-level differential checks.
@@ -26,14 +26,26 @@ pub struct MoninObukhovInput {
     pub moisture_roughness_m: f64,
     pub obukhov_length_m: f64,
     pub stability_adjusted_wind_m_s: f64,
+    /// `hpbl`：本步的大气边界层高度。
+    ///
+    /// **它是逐强迫场的量，不是算例常量。** 上游在 `DEF_USE_CBL_HEIGHT` 打开时把
+    /// `hpbl` 当作一个额外的强迫变量读进来（`MOD_UserSpecifiedForcing.F90:96`：
+    /// `NVAR = NVAR + 1`），再逐步传进 `moninobuk*_leddy`。把它做成装配期的常量
+    /// 会让 LES 分支永远用同一个高度，而任何单点测试都看不出这一点。
+    ///
+    /// `None` 表示本算例的强迫场里没有这个变量 —— 只有 `Standard` 分支允许缺。
+    pub boundary_layer_height_m: Option<f64>,
 }
 
-/// CoLM's selectable surface-layer profile. `LargeEddy` is
-/// `MOD_TurbulenceLEddy`'s LZD2022 branch.
+/// CoLM 的可选近地层廓线。`LargeEddy` 是 `MOD_TurbulenceLEddy` 的 LZD2022 分支。
+///
+/// `LargeEddy` **不携带**边界层高度：那是逐强迫场的 `hpbl`，见
+/// [`MoninObukhovInput::boundary_layer_height_m`]。用枚举载荷传它等于把逐步骤的量
+/// 钉死在装配期。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum SurfaceLayerScheme {
     Standard,
-    LargeEddy { boundary_layer_height_m: f64 },
+    LargeEddy,
 }
 
 /// Outputs of CoLM's `moninobuk` routine.
@@ -319,12 +331,15 @@ impl MomentumScheme {
     fn new(input: MoninObukhovInput, scheme: SurfaceLayerScheme) -> Result<Self> {
         match scheme {
             SurfaceLayerScheme::Standard => Ok(Self::Standard),
-            SurfaceLayerScheme::LargeEddy {
-                boundary_layer_height_m,
-            } => {
+            SurfaceLayerScheme::LargeEddy => {
+                let boundary_layer_height_m = input.boundary_layer_height_m.context(
+                    "the large-eddy surface-layer scheme needs the forcing's boundary-layer \
+                     height (forc_hpbl), which this case does not provide",
+                )?;
                 ensure!(
                     boundary_layer_height_m.is_finite() && boundary_layer_height_m > 0.0,
-                    "large-eddy boundary-layer height must be positive"
+                    "the large-eddy boundary-layer height must be positive, got \
+                     {boundary_layer_height_m}"
                 );
                 let boundary_zeta = (5.0 * input.wind_height_m).max(boundary_layer_height_m)
                     / input.obukhov_length_m;

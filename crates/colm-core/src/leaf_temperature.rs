@@ -5,7 +5,7 @@
 //! root-to-leaf network in [`crate::plant_hydraulics`]; ozone remains a
 //! separate upstream feature branch and is not silently approximated here.
 
-use anyhow::{ensure, Result};
+use anyhow::{ensure, Context, Result};
 
 use crate::{
     canopy_diffusivity_resistance_analytic, canopy_monin_obukhov_with_scheme, canopy_roughness,
@@ -128,6 +128,8 @@ pub struct LeafTemperatureInput<'a> {
     pub atmospheric_co2_pa: f64,
     pub soil_roughness_m: f64,
     pub snow_roughness_m: f64,
+    /// `hpbl`：本步的大气边界层高度，只有 `LargeEddy` 近地层方案会读它。
+    pub boundary_layer_height_m: Option<f64>,
     pub snow_cover_fraction: f64,
     pub ground_obukhov_length_m: f64,
     pub transpiration_limit_kg_m2_s: f64,
@@ -326,6 +328,7 @@ pub fn leaf_temperature(
                     moisture_roughness_m: z0mv,
                     obukhov_length_m: obukhov,
                     stability_adjusted_wind_m_s: stability_wind,
+                    boundary_layer_height_m: input.boundary_layer_height_m,
                 },
                 top_layer_displacement_m: displasink,
                 top_layer_roughness_m: z0mv,
@@ -703,9 +706,12 @@ pub fn leaf_temperature(
         } else {
             let boundary_height = match input.options.surface_layer_scheme {
                 SurfaceLayerScheme::Standard => 1000.0,
-                SurfaceLayerScheme::LargeEddy {
-                    boundary_layer_height_m,
-                } => (5.0 * wind_height).max(boundary_layer_height_m),
+                SurfaceLayerScheme::LargeEddy => {
+                    (5.0 * wind_height).max(input.boundary_layer_height_m.context(
+                        "the large-eddy surface-layer scheme needs the forcing's boundary-layer \
+                         height (forc_hpbl), which this case does not provide",
+                    )?)
+                }
             };
             let convective_velocity = (-GRAVITY_M_S2
                 * surface.friction_velocity_m_s

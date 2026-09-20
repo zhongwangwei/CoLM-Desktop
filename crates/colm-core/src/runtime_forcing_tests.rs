@@ -25,6 +25,7 @@ fn prepared_point_forcing_matches_mod_forcing() {
         calendar_day: 80.5,
         longitude_radians: 0.0,
         latitude_radians: 0.7,
+        boundary_layer_height_m: None,
     })
     .unwrap();
     close(forcing.cosine_zenith, 0.764_842_207_943_357_6);
@@ -72,6 +73,7 @@ fn vector_wind_keeps_its_components_and_bad_scalar_is_rejected() {
         calendar_day: 1.0,
         longitude_radians: 0.0,
         latitude_radians: 0.0,
+        boundary_layer_height_m: None,
     };
     let forcing = prepare_runtime_forcing(input).unwrap();
     assert_eq!(forcing.eastward_wind_m_s, -3.0);
@@ -79,4 +81,50 @@ fn vector_wind_keeps_its_components_and_bad_scalar_is_rejected() {
     input.wind_is_vector = false;
     input.northward_or_scalar_wind_m_s = -1.0;
     assert!(prepare_runtime_forcing(input).is_err());
+}
+
+/// `hpbl` 是可选的第 9 个强迫变量：默认算例没有它，给了就必须是正的有限高度。
+#[test]
+fn boundary_layer_height_is_optional_but_must_be_positive() {
+    let base = RuntimeForcingInput {
+        air_temperature_k: 280.0,
+        specific_humidity: 0.004,
+        surface_pressure_pa: 100_000.0,
+        precipitation_kg_m2_s: 0.0,
+        eastward_wind_m_s: 3.0,
+        northward_or_scalar_wind_m_s: 3.0,
+        wind_is_vector: false,
+        downward_shortwave_w_m2: 0.0,
+        downward_longwave_w_m2: 300.0,
+        calendar_day: 1.0,
+        longitude_radians: 0.0,
+        latitude_radians: 0.0,
+        boundary_layer_height_m: None,
+    };
+    assert_eq!(
+        prepare_runtime_forcing(base)
+            .unwrap()
+            .boundary_layer_height_m,
+        None
+    );
+    for bad in [0.0, -1.0, f64::NAN] {
+        let error = prepare_runtime_forcing(RuntimeForcingInput {
+            boundary_layer_height_m: Some(bad),
+            ..base
+        })
+        .expect_err("a non-positive forc_hpbl must be refused");
+        assert!(
+            error.to_string().contains("forc_hpbl"),
+            "the error must name forc_hpbl: {error}"
+        );
+    }
+    assert_eq!(
+        prepare_runtime_forcing(RuntimeForcingInput {
+            boundary_layer_height_m: Some(1200.0),
+            ..base
+        })
+        .unwrap()
+        .boundary_layer_height_m,
+        Some(1200.0)
+    );
 }

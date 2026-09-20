@@ -242,6 +242,9 @@ pub fn apply_downscaled_runtime_forcing(
             downscaled.specific_humidity,
             downscaled.air_temperature_k,
         ),
+        // `forc_hpbl` 不是被降尺度的量：它是观测到的大气边界层高度，
+        // 原样穿过降尺度，否则 LES 分支会在降尺度前后拿到两个不同的高度。
+        boundary_layer_height_m: forcing.boundary_layer_height_m,
     }
 }
 

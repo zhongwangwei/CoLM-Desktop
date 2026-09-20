@@ -158,6 +158,7 @@ fn sample_input() -> LeafTemperatureInput<'static> {
         atmospheric_co2_pa: 40.0,
         soil_roughness_m: 0.01,
         snow_roughness_m: 0.0024,
+        boundary_layer_height_m: None,
         snow_cover_fraction: 0.0,
         ground_obukhov_length_m: -100.0,
         transpiration_limit_kg_m2_s: 1.0e-3,

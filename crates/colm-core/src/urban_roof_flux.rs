@@ -107,6 +107,8 @@ pub fn urban_roof_flux(input: UrbanRoofFluxInput) -> Result<UrbanRoofFluxState> 
             moisture_roughness_m: heat_roughness_m,
             obukhov_length_m: stability.obukhov_length_m,
             stability_adjusted_wind_m_s: stability.stability_adjusted_wind_m_s,
+            // 屋顶分支固定走 `Standard` 廓线，不读 `hpbl`。
+            boundary_layer_height_m: None,
         })?;
         let temperature_scale_k = VON_KARMAN / current.heat * temperature_difference_k;
         let moisture_scale = VON_KARMAN / current.moisture * humidity_difference_kg_kg;

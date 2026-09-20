@@ -47,6 +47,7 @@ fn standard_lct_energy_step_uses_one_shared_physical_handoff() {
         calendar_day: 172.5,
         longitude_radians: 0.0,
         latitude_radians: 0.5,
+        boundary_layer_height_m: None,
     })
     .unwrap();
     let mut state = energy_state(forcing);
@@ -145,6 +146,7 @@ fn standard_lct_soil_step_carries_one_rust_column_between_energy_and_water() {
         calendar_day: 172.5,
         longitude_radians: 0.0,
         latitude_radians: 0.5,
+        boundary_layer_height_m: None,
     })
     .unwrap();
     let energy = input(forcing);
@@ -197,6 +199,7 @@ fn standard_lct_snow_soil_step_carries_active_snow_and_soil_columns() {
         calendar_day: 20.5,
         longitude_radians: 0.0,
         latitude_radians: 0.5,
+        boundary_layer_height_m: None,
     })
     .unwrap();
     let mut energy = input(forcing);
@@ -373,7 +376,7 @@ fn input(forcing: crate::RuntimeForcing) -> StandardLctEnergyInput<'static> {
         wind_height_m: 30.0,
         temperature_height_m: 30.0,
         humidity_height_m: 30.0,
-        boundary_layer_height_m: 1000.0,
+        boundary_layer_height_m: None,
         eastward_wind_m_s: 0.0,
         northward_wind_m_s: 0.0,
         air_specific_humidity: 0.0,
@@ -444,6 +447,7 @@ fn input(forcing: crate::RuntimeForcing) -> StandardLctEnergyInput<'static> {
         atmospheric_co2_pa: 40.0,
         soil_roughness_m: 0.0,
         snow_roughness_m: 0.0,
+        boundary_layer_height_m: None,
         snow_cover_fraction: 0.0,
         ground_obukhov_length_m: 0.0,
         transpiration_limit_kg_m2_s: 0.0,

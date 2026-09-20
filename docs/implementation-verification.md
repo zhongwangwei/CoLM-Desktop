@@ -1767,3 +1767,64 @@ schema 一侧两者一样严 —— 维度顺序、存储类型、变量级属�
 
 由此立一条规矩：**`Tested:` 里出现的脚本必须入库。** 否则那条证据只对写下它的那次会话
 成立，而且下次同步上游时没人会再跑它。
+
+## `hpbl` 是逐强迫场的量，不是算例常量（2026 年）
+
+`DEF_USE_CBL_HEIGHT` 选的是 `MOD_TurbulenceLEddy` 的 LZD2022 近地层廓线，它的长度尺度是
+**大气边界层高度 `hpbl`**。上游把 `hpbl` 当作**第 9 个强迫变量**读进来 ——
+`MOD_UserSpecifiedForcing.F90:96` 打开这个开关时 `NVAR = NVAR + 1`，变量名取
+`DEF_forcing%CBL_vname`（默认 `'blh'`），再逐步传进 `moninobuk*_leddy`。
+
+Rust 侧此前把它做成了 `LandPhysicsParameters::boundary_layer_height_m` —— 一个**装配期
+常量**。后果不是崩溃而是静默错算：开关打开时每一步都用同一个高度，而单点算例看不出任何
+异常。默认算例（`DEF_USE_CBL_HEIGHT = .false.`）走 `Standard` 分支、根本不读它，所以这个
+错在黄金回归里也不会露头。
+
+现在它按上游的样子走完整条链路：
+
+| 层 | 改动 |
+|---|---|
+| `colm-forcing` | `PointForcingFrame` 多一个 `boundary_layer_height_m: Option<f64>`，从 `blh`/`hpbl` 里**有则读**；单位已是米，不走 8 槽的单位表 |
+| `colm-core` | `RuntimeForcingInput`/`RuntimeForcing` 同样带它；`MoninObukhovInput`、`GroundFluxInput`、`LeafTemperatureInput` 各多一个逐步骤字段 |
+| `SurfaceLayerScheme` | `LargeEddy` **不再携带**高度 —— 枚举载荷是装配期的，带它就等于把逐步骤的量钉死 |
+| 装配层 | 从本步 `forcing.boundary_layer_height_m` 取，`LandPhysicsParameters` 里那个字段删掉 |
+
+两条判定：`hpbl` 可以缺（默认算例就没有，缺了不是错误），但**给了必须是正的有限值**；
+反过来，选了 `LargeEddy` 而强迫场里没有 `hpbl`，**必须报错并点名 `forc_hpbl`** ——
+不能退回 `Standard`，那正是本轮要消灭的那种"跑得完却算错"。三条负向测试分别钉住内核层
+（`monin_obukhov_tests::large_eddy_without_hpbl_is_refused`）、强迫层
+（`runtime_forcing_tests::boundary_layer_height_is_optional_but_must_be_positive`）与
+装配层（`assembly_tests::the_large_eddy_scheme_reads_hpbl_from_the_step_forcing`）。
+
+`forc_hpbl` 不参与降尺度：它是观测到的大气量，不是被地形调整的列量，所以
+`apply_downscaled_runtime_forcing` 原样穿过。
+
+### 顺带查清：`kernels/default` 早就过期了
+
+跑端到端验证前先重建内核是对的，但这一步此前没有被当成硬性前提。实测：
+`kernels/default/` 里那份 `colm.x` 是 **8 月 25 日**从 `f427762` 编的，而
+`vendor/CoLM202X` 在那之后又进过 f48 同步与臭氧扩展。用那份旧二进制跑
+`forcing_convert`，`colm` 段直接死在
+
+```
+.../runtime_unused//Ozone/Global/OZONE-setgrid.nc does not exist.
+```
+
+按 `./oracle/scripts/build_kernel.sh default` 从当前 HEAD 重建之后，同一算例一路跑到
+比对阶段。**`kernels/` 不入库，所以它会静默落后于 `vendor/`** —— 端到端结论若没写明
+内核的 `colm_git_sha`，读者无法判断它对应哪份源码。
+
+### 重建后的 `forcing_convert` 仍然逐位不等，原因不是这次改动
+
+同一份黄金文件（内核快照 `4894833`）对重建后的内核（`60c9e1e`）逐位比，差异分两类：
+
+| 类别 | 例子 | 读法 |
+|---|---|---|
+| 末位重排 | `f_wice_soisno` 4.577840183596859 vs …847、`f_wliq_soisno`、`f_zwt`、`f_zol` | 相对偏差 ~1e-15，换内核快照必然出现 |
+| 缺测值策略 | `f_wetwat` / `f_wetwat_inst` / `f_wetzwt` 逐点 `0.0` vs `-1e36` | 黄金写入时那些量还是"未填"，本机内核写出真值 |
+
+这次改动**在构造上不可能**造成它们：转换管道（`convert.rs`、`forcing-convert`、
+`render.rs`、`met.rs`）完全不碰 `RuntimeForcing` / `prepare_runtime_forcing` /
+`PointForcingFrame`，所以它写出的强迫 NetCDF 与改动前逐位相同，Fortran 内核读到的输入
+也就相同。结论与前一节一致：**这份黄金文件在判定 Rust 移植之前必须先对齐内核快照或
+重生成。**
