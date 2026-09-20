@@ -215,6 +215,12 @@ struct RestartColumns {
     leaf_area_index: Vec<f64>,
     stem_area_index: Vec<f64>,
     vegetation_free_fraction: Vec<f64>,
+    /// `tlai`/`tsai`：上面那一对的**原始**值，`LAI_readin` 每月覆盖。
+    ///
+    /// 上游把这两个也写进重启（`MOD_Vars_TimeVariables.F90:1184`），而且**必须**写：
+    /// 不写的话一个 6 月结束的重启里 `tlai` 还是 1 月的值，续跑就从 1 月的叶面积起步。
+    temporal_leaf_area_index: Vec<f64>,
+    temporal_stem_area_index: Vec<f64>,
     /// `thermk`/`extkb`/`extkd`：冠层光学，`albland` 每步重算。
     thermal_gap_fraction: Vec<f64>,
     direct_extinction: Vec<f64>,
@@ -706,6 +712,8 @@ fn assemble(
         leaf_area_index: time.floats("lai")?.to_vec(),
         stem_area_index: time.floats("sai")?.to_vec(),
         vegetation_free_fraction: time.floats("sigf")?.to_vec(),
+        temporal_leaf_area_index: time.floats("tlai")?.to_vec(),
+        temporal_stem_area_index: time.floats("tsai")?.to_vec(),
         thermal_gap_fraction: time.floats("thermk")?.to_vec(),
         direct_extinction: time.floats("extkb")?.to_vec(),
         diffuse_extinction: time.floats("extkd")?.to_vec(),
@@ -1535,6 +1543,18 @@ impl StandardLctRestartTemplate {
                 "sigf",
                 &self.restart_columns.vegetation_free_fraction,
                 canopy.vegetation_free_fraction,
+            ),
+            // `tlai`/`tsai` 是**原始**时间变量，与上面那三个不是一回事：
+            // `lai`/`sai` 是本步折算后的有效值，它们两个是下一个月的输入。
+            (
+                "tlai",
+                &self.restart_columns.temporal_leaf_area_index,
+                state.energy.temporal_canopy.leaf_area_index,
+            ),
+            (
+                "tsai",
+                &self.restart_columns.temporal_stem_area_index,
+                state.energy.temporal_canopy.stem_area_index,
             ),
         ] {
             overrides.push(RestartOverride::new(

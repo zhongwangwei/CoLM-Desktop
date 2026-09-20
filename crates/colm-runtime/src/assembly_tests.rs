@@ -985,8 +985,8 @@ fn an_evolved_state_writes_back_a_readable_continuation_restart() {
                 .is_ok_and(|dims| dims == ["patch", "rtyp", "band"])
         })
         .count();
-    // 13 项土壤/标量 + 6 项冠层几何与冠层光学（`lai`/`sai`/`sigf`/`thermk`/`extkb`/`extkd`）。
-    assert_eq!(overrides.len(), 19 + diagnostics + radiation);
+    // 13 项土壤/标量 + 8 项冠层几何与冠层光学（`lai`/`sai`/`sigf`/`tlai`/`tsai` + `thermk`/`extkb`/`extkd`）。
+    assert_eq!(overrides.len(), 21 + diagnostics + radiation);
     source.write_with(&written, &overrides).unwrap();
 
     let restart = colm_init::RestartFile::open(&written).unwrap();
@@ -1120,10 +1120,10 @@ fn an_evolved_snow_state_writes_back_a_readable_continuation_restart() {
             },
         )
         .unwrap();
-    // 十一项土壤/标量 + 六项冠层几何/光学 + z_sno + dz_sno + snowdp/scv/fsno/sag。
+    // 十一项土壤/标量 + 八项冠层几何/光学 + z_sno + dz_sno + snowdp/scv/fsno/sag。
     assert_eq!(
         overrides.len(),
-        25 + ["alb", "ssun", "ssha", "ssoi", "ssno"]
+        27 + ["alb", "ssun", "ssha", "ssoi", "ssno"]
             .iter()
             .filter(|name| source
                 .variable_dimensions(name)
