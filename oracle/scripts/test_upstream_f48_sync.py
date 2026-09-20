@@ -16,6 +16,15 @@ def main() -> None:
     hist = read("main/HYDRO/MOD_Grid_RiverLakeHist.F90")
     leaf = read("main/MOD_LeafTemperature.F90")
     leaf_pc = read("main/MOD_LeafTemperaturePC.F90")
+    # `extend_interception` 打开时（default 预设就是）真正参与链接的是 extends/ 下的
+    # 这四份同名替代模块，`main/` 的两份**根本不编译**。第一次同步漏了它们，
+    # 于是 `rstfacsun` 在扩展版里仍是 `intent(out)`：`stomata` 读到的是
+    # `rstfacsun_out` 的 spval(-1e36)，`vm`/`epar`/`respc` 全被它缩放成垃圾，
+    # 冠层光合恒为 0、气孔阻力恒为 0（= 无限制潜在蒸腾）。实测证据见
+    # docs/implementation-verification.md「找到蒸腾链的真凶：扩展截获模块漏了
+    # intent(inout)」一节。
+    leaf_ext = read("extends/interception/MOD_LeafTemperature_Extended.F90")
+    leaf_pc_ext = read("extends/interception/MOD_LeafTemperaturePC_Extended.F90")
     ozone = read("main/MOD_Ozone.F90")
     namelist = read("share/MOD_Namelist.F90")
 
@@ -30,8 +39,11 @@ def main() -> None:
     assert "below-bank river channel storage" in hist
     assert "visible overbank storage excluding levee-protected storage" in hist
     assert "real(r8), intent(inout) :: &\n        rstfacsun" in leaf
+    assert "real(r8), intent(inout) :: &\n        rstfacsun" in leaf_ext
     assert "gssun = (laisun / rssun) * (tprcor / tlbef)" in leaf
+    assert "gssun = (laisun / rssun) * (tprcor / tlbef)" in leaf_ext
     assert "gssun(i) = (laisun(i) / rssun(i)) * (tprcor / tlbef(i))" in leaf_pc
+    assert "gssun(i) = (laisun(i) / rssun(i)) * (tprcor / tlbef(i))" in leaf_pc_ext
     assert "CALL mg2p_ozone%grid2pset (f_ozone, forc_ozone)" in ozone
     assert "logical :: DEF_USE_OZONESTRESS = .false." in namelist
     assert "logical :: DEF_USE_OZONEDATA   = .false." in namelist

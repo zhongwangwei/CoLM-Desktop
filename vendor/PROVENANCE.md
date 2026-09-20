@@ -100,3 +100,32 @@ levee 保护库容在 history 里必须单列（`below-bank river channel storag
 特征字符串，上游带来的与我们自己的各钉几条，断言失败就说明某处 hunk 漏了或被整树覆盖了。
 它此前只存在于工作区，却被三个提交（`5d7f373`、`6d98eb6`、`b25b904`）的 `Tested:` 行
 引用 —— 那三处证据对别人不可复现。现已入库并进 CI。**再同步上游时先跑它。**
+
+## 2026 年 9 月：`extends/interception/` 补上漏掉的那次同步
+
+`extend_interception` 打开时（`kernels/default` 就是），`Makefile:635-647` 用
+`extends/interception/MOD_{Thermal_CanopyPhase,LeafTemperature,LeafTemperaturePC,LeafInterception}_Extended.F90`
+**顶替** `main/` 下的同名模块 —— `main/` 那四份不参与编译。上面那次 `f48fbf9`
+语义同步只改了 `main/`，扩展版因此落后了两处：
+
+1. `MOD_LeafTemperature_Extended.F90` 里 `rstfacsun`/`rstfacsha` 仍在
+   `intent(out)` 块中（`main/MOD_LeafTemperature.F90:269-272` 是单列的
+   `intent(inout)`）。`intent(out)` 使入口值未定义，`stomata` 读到的实际是
+   `rstfacsun_out` 的初值 `spval = -1e36`；`calc_photo_params` 用它无界地缩放
+   `vm`/`jmax`/`respc`/`omss`，于是冠层光合恒为 0、气孔阻力 ≈ 0（无限制潜在蒸腾）。
+2. 两份扩展叶温模块都缺 f48fbf9 的 `gssun`/`gssha` 诊断块。
+
+已按 `main/` 的写法补齐（含 `MOD_LeafTemperaturePC_Extended.F90`），并把
+`oracle/scripts/test_upstream_f48_sync.py` 的三条断言各加一份对 `extends/` 的镜像
+—— 原来只钉 `main/`，所以漏了。**再同步上游时，两份都要看。**
+
+证据、量化改善与"怎么判断哪份文件在编译"记在
+`docs/implementation-verification.md`「找到蒸腾链的真凶：扩展截获模块漏了
+`intent(inout)`」一节。同步后重生成过 `oracle/golden/*.nc` 与
+`oracle/golden/kernel-manifest.json`（原基线距 HEAD 已 560 个提交）。
+
+**没有跟着改的：** 扩展版与 `main/` 之间还有一批差异是那次扩展本身带来的
+（`MOD_LeafTemperature_Extended.F90` 的能量平衡项改用随 `tl` 变的 `htvpl`、
+引入 `canopy_phase_heat`、`qintr_*` 取 `max(0,·)`、`MARK#dtl` 的迭代标记等），
+那是两套有意不同的实现，不在这次同步范围内；本仓库的 Rust 移植按 `main/` 写，
+所以用到截获方案 4~7 时仍要逐处核对。

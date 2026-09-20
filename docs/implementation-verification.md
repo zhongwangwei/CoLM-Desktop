@@ -3521,3 +3521,155 @@ lai                             0.40000001   0.7
 **全年**如此。因此 history 里的 `f_assimsun` **不能**用来判定气孔链 ——
 它被后置的臭氧因子清零了，而 `rssun`/`rssha` 用的是 `stomata` 内部那份真实的同化。
 要判定只能比 `rst`（重启里有）与 `tleaf`/`etr`（history 里有）。
+
+## 找到蒸腾链的真凶：扩展截获模块漏了 `intent(inout)`（2026 年，实测）
+
+上一节把"上游同化恒为 0"归因于臭氧胁迫，**那条归因是错的**：本算例
+`case.nml` 里明写 `DEF_USE_OZONESTRESS = .false.`、`DEF_USE_OZONEDATA = .false.`，
+`CalcOzoneStress` 根本没进过。真正的原因在下一层。
+
+### 先纠正一个更根本的误解：链接的不是 `main/`
+
+`build_kernel.sh default` 生成的宏集里有 **`extend_interception`**
+（`kernels/default/manifest.json` 的 `macros` 字段，实测
+`["LULC_IGBP","SinglePoint","URBAN_MODEL","extend_interception"]`）。
+`vendor/CoLM202X/Makefile:635-647` 在这条宏打开时**用同名模块顶替 `main/`**：
+
+| 编出来的对象 | `main/` 那份 | 实际编译的源码 |
+|---|---|---|
+| `MOD_LeafTemperature.o` | `main/MOD_LeafTemperature.F90` | `extends/interception/MOD_LeafTemperature_Extended.F90` |
+| `MOD_LeafTemperaturePC.o` | `main/MOD_LeafTemperaturePC.F90` | `extends/interception/MOD_LeafTemperaturePC_Extended.F90` |
+| `MOD_Thermal.o` | `main/MOD_Thermal.F90` | `extends/interception/MOD_Thermal_CanopyPhase_Extended.F90` |
+| `MOD_LeafInterception.o` | `main/MOD_LeafInterception.F90` | `extends/interception/MOD_LeafInterception_Extended.F90` |
+| （额外） | — | `extends/interception/MOD_PHSRootfluxBalance.F90` |
+
+**`main/` 的那四份根本不参与编译。** 后果：往 `main/MOD_Thermal.F90` 里插
+`write` 语句、重编、跑，一个字都不会打印（本轮实测：`strings kernels/default/colm.x`
+里没有那句诊断，而同一次构建里 `main/MOD_AssimStomataConductance.F90`
+（无 Extended 替代品）的诊断在）。定位数值问题时**先确认哪份文件在编译**，
+判据是 `Makefile` 的 `EXTENDED_INTERCEPTION_ENABLED` 分派加上
+`.bld/*.o` 的编译命令行 —— 不是文件名像不像。
+
+这条也解释了为什么此前按 `main/MOD_LeafTemperature.F90` 的行号读代码、
+却对不上内核行为。
+
+### 缺陷：`rstfacsun`/`rstfacsha` 在扩展版里是 `intent(out)`
+
+`main/MOD_LeafTemperature.F90:269-272` 有一块独立声明（f48fbf9 同步带来的）：
+
+```fortran
+   ! Read the caller's soil water stress factors; plant hydraulics may update them.
+   real(r8), intent(inout) :: &
+        rstfacsun,  &! factor of soil water stress to transpiration on sunlit leaf
+        rstfacsha
+```
+
+`extends/interception/MOD_LeafTemperature_Extended.F90` 里同样的两个名字却落在
+上面的 `real(r8), intent(out) ::` 块中（原第 255-273 行）。`intent(out)`
+意味着**入口值未定义**，而 `MOD_Thermal` 在调用前刚把它算好
+（`rstfacsun_out = rstfac`，`rstfac` 来自 `MOD_Eroot`）。
+
+于是 `stomata` 读到的 `rstfac` 是调用点寄存器/栈槽里的残留值。实测该残留值就是
+**`spval = -1e36`** —— 因为 `MOD_Vars_TimeVariables.F90:654` 把 `rstfacsun_out(:)`
+初始化成了 `spval`。`calc_photo_params` 用它直接缩放四个量、没有任何上下界：
+
+```fortran
+vm   = vmax25*2.1**qt/temph*rstfac*c3 + ...      ! → -5.7e30
+jmax = jmax*rstfac                               ! → epar = min(...,jmax) 全负
+respc= respcp*...*rstfac                         ! → assimn = 0 - respc = +9.2e28
+omss = ...*rstfac
+```
+
+连锁结果是**冠层光合恒为 0、气孔阻力形同不存在**：
+
+| `stomata` 内量 | 坏内核（`rstfac = -1e36`） | 修好后（`rstfac = 0.25079`） | Rust |
+|---|---|---|---|
+| `vm` | −5.717789e30 | 1.433969e−6 | — |
+| `omc` | −3.557435e30 | 8.921721e−7 | 2.223397e−6 |
+| `ome` | −1.225718e31 | 0 | 0 |
+| `assimn` | +9.211995e28 | −2.310284e−8 | — |
+| `assmt` | 9.211995e28 | 1e−12 | 1e−12 |
+| `bintc` | 3.296800e−4 | 8.268071e−4 | — |
+| `co2st` | 1e−5 | 3.880200e−4 | 3.883888e−4 |
+| `gsh2o` | +3.458904e33 | 3.754783e−8 | 1.773942e−8 |
+| `rst` | **1.2e−32**（≈0 ⇒ 无气孔限制） | 1e6（顶到上限） | 1e6 |
+
+（同一算例同一步第一次 `stomata` 调用，`tlef` 三边逐位相同 283.4848686916271。）
+
+`rssun = rst*laisun ≈ 0` 之后，蒸腾退化成
+`etr = rhoair*(1-fwet)*delta*(lai/rb)*gradient` —— **只受边界层阻力限制的潜在蒸腾**。
+这解释了两个此前无法解释的观测：
+
+1. **`f_etr` 昼夜几乎一样**（6 月 14 日：中午 2.749e−5、夜里 2.383e−5，同日 `f_fsena`
+   从 +276 变到 −45）。真实的气孔调控下不可能。
+2. **`f_assimsun ≡ 0` 在正午也成立** —— 不是臭氧，是 `vm` 被 `spval` 缩成了垃圾。
+
+复现（诊断打印已撤，这里是当时的三处插桩：`stomata` 末尾、
+`MOD_Thermal_CanopyPhase_Extended.F90` 的 `rstfacsun_out = rstfac` 之后、
+`MOD_LeafTemperature_Extended.F90` 的 `IF(lai>0.001)` 入口）：
+
+```
+./oracle/scripts/build_kernel.sh default
+NETCDF_DIR=/opt/homebrew/opt/netcdf cargo run -q -p colm-cli -- \
+  run oracle/work/CN-Cng-dbg --kernel kernels/default --stage colm --force 1 --stream 1
+```
+
+同一段代码、同一个编译器，**只因为往同文件的别处加了一句 `write`，`rstfac`
+就从 −1e36 变成 0.25079**（`stomata` 调用次数也随之从 1242 掉到 666）。
+这本身就是"入口值未定义"的判据：读的是未定义量，值随代码生成变化。
+
+### 处置
+
+1. 把 `rstfacsun`/`rstfacsha` 从 `intent(out)` 块移出、按 `main/` 的写法单列
+   `intent(inout)`（`MOD_LeafTemperature_Extended.F90`）。
+2. 同一次 f48fbf9 同步还漏了 `gssun`/`gssha` 的诊断块
+   （`main/` 的 `:1023-1032`、PC 版 `:1753-1763`），一并补进两份扩展模块。
+3. `oracle/scripts/test_upstream_f48_sync.py` 原来只钉 `main/` 两份 —— 这就是漏网的原因。
+   三条断言各加一份对 `extends/` 的镜像，以后再同步漏掉扩展版会当场红。
+4. **重生成黄金文件**：`oracle/golden/*.nc` 与 `kernel-manifest.json` 记录的是
+   `colm_git_sha = 4894833`，距 HEAD 已 **560 个提交**，且工具链也换过
+   （netcdf 4.10.1→4.9.3、hdf5 空→1.14.6），本来就全红。按
+   `golden-run <case> --write-golden` 重新落了基线，现在
+   `golden-compare` 报 `identical: 127 variables, 10 dimensions`。
+
+### 改善（同一步长、同一起始重启、两边都是区间平均）
+
+冬季 `CN-Cng-aligned`（264 条小时记录）：
+
+| 变量 | 修前 max|Δ| | 修后 max|Δ| | 倍数 |
+|---|---|---|---|
+| `f_etr` | 1.2599e−5 | **1.1495e−8** | 1096× |
+| `f_tleaf` | 7.656e−1 | **1.269e−1** | 6× |
+| `f_fevpg` | 4.267e−6 | **7.851e−7** | 5.4× |
+| `f_fsena` | 2.339e1 | **2.278e0** | 10× |
+| `f_t_grnd` | 7.533e−2 | 7.487e−2 | 1.0× |
+| `f_lfevpa` | 4.304e2 | 4.304e2 | 1.0× |
+
+暖季 6 月 1–16（360 条）：
+
+| 变量 | 修前 max|Δ| | 修后 max|Δ| | 倍数 |
+|---|---|---|---|
+| `f_etr` | 6.529e−5 | **4.147e−6** | 15.7× |
+| `f_tleaf` | 5.853 K | **2.442e−1 K** | 24× |
+| `f_t_grnd` | 2.495 K | **1.093e−1 K** | 23× |
+| `f_fevpg` | 4.409e−5 | **1.170e−6** | 37.7× |
+| `f_fsena` | 1.909e2 | **1.035e1** | 18× |
+| `f_lfevpa` | 1.668e2 | **9.771e1** | 1.7× |
+
+修好后冬季 `f_etr` 峰值 Fortran 3.302e−7 / Rust 3.281e−7（0.6%），
+6 月白天 Fortran 2.736e−5 / Rust 2.390e−5。**此前"Rust 蒸腾小 4~6 倍"这个
+判断作废**：那是拿一份光合被 `spval` 掐死的内核当基准量出来的。
+
+`f_lfevpa` 两季都没动（冬季 430 保持不变，且 Rust 峰值 615.1 对 Fortran 184.7）。
+修前修后它都一样，说明它与叶温链无关，仍是上一轮记下的
+**采样口径问题**（Rust 自洽于 `hvap*fevpl + htvp*fevpg`，Fortran 自己的
+`184.677` 对 `221.506` 也对不上），下一轮单独查。
+
+### 给后来者的两条规矩
+
+* **定位内核行为前先看 `.bld` 的编译命令行。** `main/` 与 `extends/` 同名模块
+  的顶替是构建期发生的，源码树上看不出来；改错文件会得到"改了没反应"，
+  而那很容易被误判成"这段代码不参与计算"。
+* **`intent(out)` 的哑元在入口是未定义的**，`-O2` 下的实际取值随无关改动漂移。
+  同名模块一旦分叉成两份（`main/` 与 `extends/`），语义同步就必须显式钉住 ——
+  这正是 `test_upstream_f48_sync.py` 现在做的事。
