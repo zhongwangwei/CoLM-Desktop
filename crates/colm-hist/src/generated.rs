@@ -7,7 +7,7 @@
 use crate::{Cond, Var};
 
 // 一个变量一行 —— 上游改一处，diff 就只有一行。rustfmt 会把每条拆成
-// 六行（618 条 -> 近四千行），那样 code review 里就看不出改了什么了。
+// 六行（619 条 -> 近四千行），那样 code review 里就看不出改了什么了。
 // colm-schema 的同类文件不用写这条：它有一条 626 字符、断不开的数组
 // 默认值，rustfmt 因此整块放弃 —— 那是巧合，不是设计，这里写明。
 #[rustfmt::skip]
@@ -394,6 +394,7 @@ pub static VARS: &[Var] = &[
     Var { name: "methane_surf_flux_lake", macros: &[], runtime: Some("DEF_USE_TRACER"), line: 848 },
     Var { name: "methane_surf_flux_lake_intensive", macros: &[], runtime: Some("DEF_USE_TRACER"), line: 952 },
     Var { name: "methane_surf_flux_rice", macros: &[], runtime: Some("DEF_USE_TRACER"), line: 856 },
+    Var { name: "methane_surf_flux_rice_intensive", macros: &[], runtime: Some("DEF_USE_TRACER"), line: 1100 },
     Var { name: "methane_surf_flux_soil", macros: &[], runtime: Some("DEF_USE_TRACER"), line: 840 },
     Var { name: "methane_surf_flux_tot", macros: &[], runtime: Some("DEF_USE_TRACER"), line: 824 },
     Var { name: "methane_surf_flux_tot_active", macros: &[], runtime: Some("DEF_USE_TRACER"), line: 399 },

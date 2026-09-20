@@ -74,7 +74,7 @@ fn the_only_over_prediction_is_explained_by_a_runtime_condition() {
     // 改成运行时开关（DEF_USE_BGC/DEF_URBAN_RUN，默认都是 .false.，这份
     // 黄金算例也没有打开）之后，`main/BGC/`、`main/URBAN/` 始终编译进去，
     // 于是它们那两大块变量全部从「宏挡住」变成「宏放行、运行时条件挡住」，
-    // 多报数从 4 涨到 229；纳入 162 个 CH4/TRACER 写出点后是 391——
+    // 多报数从 4 涨到 229；纳入 163 个 CH4/TRACER 写出点后是 392——
     // 不是宏判错了，是如实反映了新架构：这份黄金算例的内核**编译期就有**
     // BGC/URBAN/TRACER 那些变量的写出点，只是这次运行没有打开对应的运行时开关；
     // 另外 Desktop 新算例默认关闭臭氧胁迫，两个臭氧吸收通量也成为有运行时条件的可解释多报。逐一列出 391 个名字不利于维护，所以这里
@@ -85,7 +85,7 @@ fn the_only_over_prediction_is_explained_by_a_runtime_condition() {
         .into_iter()
         .filter(|v| !golden.contains(*v))
         .collect();
-    assert_eq!(over.len(), 391);
+    assert_eq!(over.len(), 392);
 
     let all = colm_hist::all();
     let runtime_of = |n: &str| all.iter().find(|v| v.name == n).and_then(|v| v.runtime);

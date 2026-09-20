@@ -19,8 +19,8 @@ fn default() -> BTreeSet<&'static str> {
 
 #[test]
 fn the_table_covers_every_live_write_site() {
-    // 456 个 MOD_Hist.F90 变量 + 162 个 TRACER/CH4 写出变量。
-    assert_eq!(all().len(), 618);
+    // 456 个 MOD_Hist.F90 变量 + 163 个 TRACER/CH4 写出变量。
+    assert_eq!(all().len(), 619);
     for dead in ["cwddecomp", "cwdprod", "pdcorn", "pdwwheat"] {
         assert!(
             all().iter().all(|v| v.name != dead),
@@ -30,15 +30,15 @@ fn the_table_covers_every_live_write_site() {
 }
 
 #[test]
-fn the_default_preset_can_write_five_hundred_and_eight() {
+fn the_default_preset_can_write_five_hundred_and_nine() {
     // LULC/BGC/CROP/URBAN/LULCC 那组改造之后：BGC 与 URBAN_MODEL 不再是
     // 编译期宏（`main/BGC/`、`main/URBAN/` 始终编译进去，`DEF_USE_BGC`/
     // `DEF_URBAN_RUN` 在 MOD_Namelist.F90 里改成运行时开关），所以
     // `MOD_Hist.F90` 里原来 `#ifdef BGC`/`#ifdef URBAN_MODEL` 包着的写出点
     // 全部从第一道闸门（编译期宏）挪到了第二道闸门（运行时 `IF (DEF_*) THEN`）。
-    // 第一道闸门因此从 123 涨到 346；纳入 TRACER/CH4 写出后是 508。
+    // 第一道闸门因此从 123 涨到 346；纳入 TRACER/CH4 写出后是 509。
     // CH4 写出点统一挂 DEF_USE_TRACER，所以默认无运行时条件的仍是 114。
-    assert_eq!(writable(&default()).len(), 508);
+    assert_eq!(writable(&default()).len(), 509);
     assert_eq!(unconditional(&default()).len(), 114);
 }
 
@@ -54,7 +54,7 @@ fn every_runtime_gated_variable_carries_its_condition() {
     let w = writable(&default());
     let u = unconditional(&default());
     let gated: BTreeSet<&str> = w.difference(&u).cloned().collect();
-    assert_eq!(gated.len(), 394);
+    assert_eq!(gated.len(), 395);
 
     let cond = |n: &str| all().iter().find(|v| v.name == n).unwrap().runtime.unwrap();
 
@@ -180,7 +180,7 @@ fn ifndef_really_does_subtract() {
     //
     // `#ifndef CatchLateralFlow` 则实实在在管着 f_rsur_ie 与 f_rsur_se ——
     // 两个都在黄金文件里（README 记着它们「两窗口恒为 0」）。CatchLateralFlow
-    // 与 BGC/URBAN_MODEL 无关，不受这组改造影响；纳入 TRACER/CH4 后基数是 508。
+    // 与 BGC/URBAN_MODEL 无关，不受这组改造影响；纳入 TRACER/CH4 后基数是 509。
     let base = writable(&default());
     assert!(base.contains("rsur_ie") && base.contains("rsur_se"));
 
@@ -191,5 +191,5 @@ fn ifndef_really_does_subtract() {
     assert!(!after.contains("rsur_se"));
     // 同一个宏的 #ifdef 侧又放行了三个，所以净变化是 +1 而不是 -2。
     assert!(after.contains("fldarea") && after.contains("xwsub") && after.contains("xwsur"));
-    assert_eq!(after.len(), 509);
+    assert_eq!(after.len(), 510);
 }

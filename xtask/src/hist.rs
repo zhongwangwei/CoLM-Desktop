@@ -157,7 +157,13 @@ pub fn extract_at_least(text: &str, minimum: usize) -> Result<Vec<Var>> {
             continue;
         }
 
-        if t.contains("CALL write_history_variable") {
+        // 认出**所有** history 写出例程，不是只认 `write_history_variable*`。
+        // 实测两个源文件里出现过的例程名只有五个：
+        // `write_history_variable_{2d,3d,4d,urb_2d}` 与
+        // `write_history_tracer_ratio_2d`（甲烷模块按「稻区面积强度」写的那一个）。
+        // 按更窄的前缀匹配会把它整条漏掉 —— 漏报正是这张表最不能犯的错：
+        // GUI 会说「这个内核产不出」，而内核明明写得出来。
+        if t.contains("CALL write_history_") {
             let start = i;
             let mut depth = 0i32;
             let mut buf = String::new();
@@ -332,10 +338,10 @@ fn strip_comment(l: &str) -> &str {
 /// grep 会多出 10 个**被注释掉**的写出点（cwddecomp / cwdprod / 8 个 pd*），
 /// 那些变量永远产不出来，进表就是多报。
 ///
-/// 不需要为拼接写出做特殊处理：456 个写出点里以下划线结尾的（即
-/// `'f_bedout_'//trim(x)` 那种前缀）一个都没有 —— 拼接都在本轮不扫的
-/// 别的文件里（见「明确不做」）。将来若扫到了，以 `_` 结尾的名字要单独
-/// 处理，因为它的真实变量名到运行时才成形。
+/// 不需要为拼接写出做特殊处理：写出调用的字面量里没有以 `_` 结尾的（即
+/// `'f_bedout_'//trim(x)` 那种前缀）。实测那类拼接只出现在 `mhist_on(...)`
+/// 的开关判断里，而那些行不是写出调用、本就不扫。将来若写出调用里扫到了，
+/// 以 `_` 结尾的名字要单独处理，因为它的真实变量名到运行时才成形。
 fn literals(s: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut i = 0;
@@ -357,20 +363,21 @@ fn literals(s: &str) -> Vec<String> {
 /// 否则换掉 `BTreeMap` 会让 drift 测试假红。
 pub fn render(vars: &[Var]) -> String {
     let mut s = String::new();
-    s.push_str(
+    s.push_str(&format!(
         "//! 由 `cargo run -p xtask -- gen-histmap` 生成。**不要手改。**\n\
          //!\n\
          //! 源：vendor/CoLM202X/main/MOD_Hist.F90\n\
          //!     vendor/CoLM202X/main/TRACER/MOD_Tracer_Reactive_Methane_Hist.F90\n\
          //! 漂移由 crates/colm-hist/tests/drift.rs 守住。\n\n\
-         use crate::{Cond, Var};\n\n\
+         use crate::{{Cond, Var}};\n\n\
          // 一个变量一行 —— 上游改一处，diff 就只有一行。rustfmt 会把每条拆成\n\
-         // 六行（618 条 -> 近四千行），那样 code review 里就看不出改了什么了。\n\
+         // 六行（{count} 条 -> 近四千行），那样 code review 里就看不出改了什么了。\n\
          // colm-schema 的同类文件不用写这条：它有一条 626 字符、断不开的数组\n\
          // 默认值，rustfmt 因此整块放弃 —— 那是巧合，不是设计，这里写明。\n\
          #[rustfmt::skip]\n\
          pub static VARS: &[Var] = &[\n",
-    );
+        count = vars.len()
+    ));
     let mut sorted: Vec<&Var> = vars.iter().collect();
     sorted.sort_by(|a, b| a.name.cmp(&b.name));
     for v in sorted {
@@ -472,5 +479,27 @@ mod tests {
             vars.iter().find(|v| v.name == "guarded").unwrap().runtime,
             Some("DEF_OUTER".to_string())
         );
+    }
+
+    /// 甲烷模块的「稻区面积强度」诊断走 `write_history_tracer_ratio_2d`，例程名里
+    /// 没有 `_variable` 段。按更窄的前缀匹配会整条漏掉，所以这条测试把它钉在
+    /// 提取器的覆盖面上（`f_methane_surf_flux_rice_intensive` 曾在 618 个写出点
+    /// 之外）。
+    #[test]
+    fn a_tracer_ratio_write_site_is_a_history_write_site() {
+        let vars = extract(&corpus(
+            "IF (DEF_RICE) THEN\n\
+             CALL write_history_tracer_ratio_2d (.true., &\n\
+                hist_ch4_rice_flux_mean, hist_ch4_rice_area_frac, file_hist, &\n\
+                'f_methane_surf_flux_rice_intensive', itime_in_file, filter, &\n\
+                'rice-paddy CH4 surface flux; paddy-area intensive', 'mol/m2/s')\n\
+             ENDIF\n",
+        ))
+        .unwrap();
+        let ratio = vars
+            .iter()
+            .find(|v| v.name == "methane_surf_flux_rice_intensive")
+            .expect("the tracer ratio writer must count as a history write site");
+        assert_eq!(ratio.runtime.as_deref(), Some("DEF_RICE"));
     }
 }
