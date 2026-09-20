@@ -2074,3 +2074,55 @@ Campbell 算例一上来就报 `constant restart field alpha_vgm for AlphaVgm is
 且 Campbell 时把那五个场填 **NaN 而不是 0**（0 是合法的 `alpha_vgm`，误读会静默算出
 一套假参数；NaN 会被内核的有限性检查当场拦下）。夹具加了 `write_campbell`，
 测试同时钉住两个方向：Campbell 重启能装配，van Genuchten 重启缺那五个场时仍报错。
+
+## 三个数量级的单位错：重启里的 `hksati` 本来就是 mm/s（2026 年，实测）
+
+上一节留下两条线索：土柱被抽干、水位塌到 0。顺着 `recharge` 逐步打印（第一步就
+**94 mm/步**，而 Fortran 整个 11 天只涨 277.6 mm）查到了源头 —— 在装配层：
+
+```rust
+// crates/colm-runtime/src/assembly.rs（错的那一版）
+let conductivity_mm_s = soil_field(&soil, SoilField::HydraulicConductivity, ...)
+    .into_iter().map(|value| value * 1000.0).collect();
+```
+
+**那个 `* 1000.0` 是错的。** 上游四处都写着重启里的 `hksati` 就是 mm/s：
+
+* `MOD_Vars_TimeInvariants.F90:238` 声明 `!hydraulic conductivity at saturation [mm h2o/s]`
+* 同文件 `:529` 读、`:743` 写，注释同单位
+* `mkinidata/MOD_IniTimeVariable.F90:122` 同单位
+
+实测对照也一致：常数重启里底层 `hksati = 3.3897e-03`，而 Fortran 写到时间重启里的
+`hk` 底层也是 `3.3897e-03`（`hk` 与 `hksati` 同单位，且那一层始终饱和）。
+
+另有一条独立证据说明**两边写出的单位相同**：Rust 与 Fortran 的 mkinidata 产出做过
+逐位比对（204 个变量 204 个相同），所以 `hksati` 不可能一边 mm/s 一边 m/s。
+
+### 修掉之后的实测（Campbell 算例，528 步，同一初始重启）
+
+| 变量 | 修之前 | 修之后 | Fortran | 修后的相对差 |
+|---|---|---|---|---|
+| `wa` | 5440.5 | **5094.4** | 5077.6 | **0.33%** |
+| `zwt` | **0**（塌到地表） | **2.6769** | 2.7853 | **3.9%** |
+| `wice_soisno` | 4.78× | 2.72× | — | — |
+| `t_grnd` | 258.72 | 258.72 | 255.57 | +3.15 K |
+
+地下水位从"整个塌掉"回到差 3.9%，含水层从差 7% 回到差 0.33%。**这是一处影响每一个
+算例的单位错**，而且它在默认（VSF）配置下根本不会显形 —— 只有把分支对齐到已移植的
+经典路径才看得见。
+
+`t_grnd` 一格没动（+3.15 K），与上一节的结论一致：热力那一支是**独立**缺陷。
+
+### 剩下的 7 个，现在分得很清楚
+
+* `t_soisno` 的雪槽：Fortran 写 0、Rust 保持 `-999`。**非活动槽的写出差异**，不是物理。
+* `wliq_soisno` / `wice_soisno`：Rust 把上面五层的液态水全部冻成了冰并多冻了约一倍
+  （第 7 层固+液：Fortran 13.09，Rust 30.66），**相变分配**的差异。
+* `t_grnd` / `tleaf`：+3.15 K / +1.14 K，且随深度衰减（底层只差 0.35 K）—— 热力链。
+* `zwt` / `wa`：3.9% / 0.33%，已经接近数值精度与参数细节的量级。
+
+判读仍然用 `oracle/scripts/stage3_diff.py`；`colm-rs` 的逐步诊断打印是临时加的，
+排查完已删除（它证明了两件事：第一步补给 94 mm/步，以及 `rsubst = 0` 是**对的** ——
+`Runoff_SimpleVIC` 在 `MOD_Runoff.F90:353` 无条件 `rsubst = 0.`，而
+`SubsurfaceRunoff_SimpleVIC` 在上游只在 `MOD_SoilSnowHydrology.F90:920` 被**注释掉**的
+那一行引用，属于死代码）。

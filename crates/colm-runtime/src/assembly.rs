@@ -365,10 +365,16 @@ fn assemble(
     let residual_water = soil_field(&soil, SoilField::ThetaR, patch, soil_layers);
     let suction_mm = soil_field(&soil, SoilField::Psi0, patch, soil_layers);
     let clapp_hornberger_b = soil_field(&soil, SoilField::Bsw, patch, soil_layers);
-    let conductivity_mm_s = soil_field(&soil, SoilField::HydraulicConductivity, patch, soil_layers)
-        .into_iter()
-        .map(|value| value * 1000.0)
-        .collect::<Vec<_>>();
+    // **不要再乘 1000。** 重启里的 `hksati` 本来就是 mm/s ——
+    // `MOD_Vars_TimeInvariants.F90:238` 的声明、:529 的读、:743 的写三处都写着
+    // `[mm h2o/s]`，`mkinidata/MOD_IniTimeVariable.F90:122` 同理。这里原先乘了
+    // 1000，于是饱和导水率大了三个数量级；实测 Campbell 算例第一层的饱和 `hk`
+    // 因此从 3.3897e-3 变成 3.3897，底部补给通量随之从 Fortran 的每步几百毫米量级
+    // 变成 94 mm/步，11 天里把整根土柱抽干、地下水位塌到 0。
+    //
+    // 另一条独立证据：Rust 与 Fortran 的 mkinidata 产出做过逐位比对
+    // （204 个变量 204 个相同），所以两边写出的 `hksati` 必然是同一个单位。
+    let conductivity_mm_s = soil_field(&soil, SoilField::HydraulicConductivity, patch, soil_layers);
 
     let grid = colm_soil_grid(soil_layers)?;
     let layer_thickness_m = grid.thickness_m.clone();

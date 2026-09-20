@@ -178,6 +178,24 @@ fn static_soil_fields_come_from_the_constant_restart() {
     assert_eq!(template.canopy_top_height_m, fixture.canopy.patch_top_m[1]);
 }
 
+/// 饱和导水率**不做单位换算**：重启里的 `hksati` 就是 mm/s。
+///
+/// 上游三处声明都写着 `[mm h2o/s]`（`MOD_Vars_TimeInvariants.F90:238/529/743`，
+/// `mkinidata/MOD_IniTimeVariable.F90:122`）。装配层原先乘了 1000，实测把 Campbell
+/// 算例的底部分钟补给通量抬到 94 mm/步，11 天抽干整根土柱、地下水位塌到 0。
+#[test]
+fn the_saturated_conductivity_is_not_rescaled() {
+    let (fixture, template) = assemble("conductivity-units", 1);
+    let input = template.input(&binding());
+    for layer in 0..SOIL_LAYERS {
+        assert_eq!(
+            input.water.saturated_hydraulic_conductivity_mm_s[layer],
+            fixture.soil.get(SoilField::HydraulicConductivity, layer, 1),
+            "layer {layer} conductivity was rescaled"
+        );
+    }
+}
+
 #[test]
 fn dynamic_state_and_canopy_optics_come_from_the_time_restart() {
     let (fixture, template) = assemble("dynamics", 1);
