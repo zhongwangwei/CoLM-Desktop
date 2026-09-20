@@ -1034,7 +1034,7 @@ impl StandardLctRestartTemplate {
                     large_scale_rain_kg_m2_s: forcing.large_scale_precipitation_kg_m2_s,
                     large_scale_snow_kg_m2_s: 0.0,
                     sprinkler_irrigation_kg_m2_s: physics.sprinkler_irrigation_kg_m2_s,
-                    vegetation_snow: false,
+                    vegetation_snow: physics.vegetation_snow,
                 },
                 solar: colm_core::NetSolarInput {
                     patch_type: 0,
@@ -1177,7 +1177,7 @@ impl StandardLctRestartTemplate {
                     plant_hydraulics: None,
                     options: LeafTemperatureOptions {
                         observation_height_mode: physics.observation_height_mode,
-                        vegetation_snow: false,
+                        vegetation_snow: physics.vegetation_snow,
                         split_soil_snow: false,
                         soil_resistance_is_conductance: physics.surface_resistance_scheme == 4,
                         surface_layer_scheme: physics.surface_layer_scheme,

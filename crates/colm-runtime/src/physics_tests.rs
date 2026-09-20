@@ -310,3 +310,29 @@ fn the_soil_resistance_scheme_is_forced_to_zero_only_for_van_genuchten() {
     assert_eq!(physics.hydraulic_model, HydraulicModel::Campbell);
     assert_eq!(physics.surface_resistance_scheme, 3);
 }
+
+/// `DEF_VEG_SNOW` 已经移植完，不再进"未移植分支"清单。
+///
+/// 它的分支逻辑在 `interception.rs`/`leaf_temperature.rs`/`radiation.rs`/
+/// `high_res_radiation.rs` 四处都写了，缺的只是 `assembly.rs` 里那两个
+/// 硬写死的 `vegetation_snow: false`（无雪那一支的两个装配点；有雪那一支
+/// 本来就在透传）。改完之后实测 Jan 1-3、`DEF_VEG_SNOW = .true.` 与 Fortran
+/// 的一致性，与已验收的 `.false.` 配置同一水平（`f_t_grnd` 0.075 K、
+/// `f_tleaf` 0.127 K、`f_etr` 1.0e-8，结构量 `f_scv`/`f_snowdp`/`f_fsno` 两边恒 0）。
+///
+/// 这条断言钉住的是**默认配置可跑**：`DEF_VEG_SNOW` 的声明默认就是 `.true.`，
+/// 所以它留在清单里意味着"什么都不写的算例一律被拒"。
+#[test]
+fn vegetation_snow_is_no_longer_an_unported_branch() {
+    use colm_namelist::parse;
+
+    let document = parse("&nl_colm\n  DEF_VEG_SNOW = .true.\n/\n").unwrap();
+    let physics = land_physics_parameters(&document, LandCoverScheme::Igbp, HEIGHTS).unwrap();
+    assert!(physics.vegetation_snow);
+    assert!(
+        !unported_branches(&physics)
+            .iter()
+            .any(|branch| branch.starts_with("DEF_VEG_SNOW")),
+        "vegetation snow must not be reported as unported"
+    );
+}

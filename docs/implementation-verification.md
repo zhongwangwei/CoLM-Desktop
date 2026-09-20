@@ -4399,3 +4399,42 @@ ENDIF
 默认空算例（VG）的 `surface_resistance_scheme` 因此从 1 变成 **0**，
 原有的默认映射断言相应更新；另加一条断言"同一算例打开 Campbell 时必须回到
 namelist 写的 3"，否则一个**无条件**覆盖也能让前一条通过。
+
+## `DEF_VEG_SNOW` 其实是**已移植**的：缺的只是装配处的两个 `false`（2026 年，实测）
+
+`unported_branches` 一直报着"`DEF_VEG_SNOW`：植被上的雪（默认真）…本仓库是 0"。
+这轮去核它到底缺什么 —— 结论是**什么都不缺，只是没接上**：
+
+* 分支逻辑四处都在：`interception.rs`（冠层雨/雪分开记、`fwet_rain`/`fwet_snow`）、
+  `leaf_temperature.rs`（`clai` 与截留项按雪与否分流）、`radiation.rs` 与
+  `high_res_radiation.rs`（两套反照率）。`CanopyWater` 本来就有 `rain_mm`/`snow_mm`。
+* 积雪那一支的装配（`assembly.rs:1361` 的 `snow_input`）**本来就在透传**
+  `self.physics.vegetation_snow`；
+* 只有**无雪那一支**的两个装配点硬写死 `vegetation_snow: false`
+  （`assembly.rs:1037` 的截留输入与 `:1180` 的 `LeafTemperatureOptions`）。
+
+把这两处改成透传，再用 `--allow-unported-branches` 跑 `DEF_VEG_SNOW = .true.`
+（Jan 1-3，48 条）与 Fortran 对照：
+
+| 变量 | Fortran | Rust | maxdiff |
+|---|---|---|---|
+| `f_scv` / `f_snowdp` / `f_fsno` | 恒 0 | 恒 0 | **0** |
+| `f_t_grnd` | [262.56, 272.40] | [262.51, 272.36] | 0.075 K |
+| `f_tleaf` | [256.97, 269.58] | [256.93, 269.55] | 0.127 K |
+| `f_etr` | 峰值 2.8796e-7 | 2.8632e-7 | 1.03e-8 |
+| `f_lfevpa` | [28.63, 184.65] | [28.38, 187.80] | 3.14 |
+| `f_ldew` | [0.01596, 0.11258] | [0.01803, 0.11797] | 5.50e-3 |
+
+**与已验收的 `DEF_VEG_SNOW = .false.` 配置是同一水平**（那一边 `f_t_grnd` 0.0749 K、
+`f_tleaf` 0.1269 K、`f_etr` 1.15e-8），而结构性签名 —— 冠层持雪 ⇒ 地面
+`scv`/`snowdp`/`fsno` 恒为 0 —— 两边完全一致。所以这不再是"未移植分支"，
+`unported_branches` 里的条目删掉。
+
+这件事的分量比补几个 history 变量大：`DEF_VEG_SNOW` 的**声明默认值是 `.true.`**，
+它留在清单里等于"什么都不写的算例一律被拒"，删掉之后默认配置才跑得起来。
+删完再跑一遍对齐算例（显式 `.false.`）确认没有回归：`f_t_grnd` 0.0749 K、
+`f_tleaf` 0.1269 K、`f_etr` 1.1495e-8，与改动前逐位相同。
+
+**没验到的：** 试验窗口里地面无雪（`scv ≡ 0`，该站点前 71 天无降水），
+所以"地面有雪 **且** 冠层持雪"这一组合没走到。这是 PFT/PC 之外该分支唯一
+还没覆盖的组合，记在这里而不是当成已验。

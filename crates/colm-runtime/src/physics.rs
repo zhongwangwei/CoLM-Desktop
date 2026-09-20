@@ -81,7 +81,13 @@ pub fn land_physics_parameters(
     // `DEF_USE_PLANTHYDRAULICS` 的声明默认值是 `.true.`，所以**默认配置开着 PHS**，
     // 本仓库的 standard-LCT 分支则是硬关的。调用方要能看出这个不匹配。
     let plant_hydraulics = logical(document, "DEF_USE_PLANTHYDRAULICS")?;
-    // 同上：`DEF_VEG_SNOW` 的声明默认值也是 `.true.`。
+    // `DEF_VEG_SNOW` 的声明默认值也是 `.true.`。**这一支已经移植并可运行**：
+    // 冠层雨/雪分开记（`CanopyWater::rain_mm`/`snow_mm`）、`fwet_rain`/`fwet_snow`、
+    // 以及 `radiation.rs`/`high_res_radiation.rs` 里按月-雪的两套反照率，
+    // 四处的分支逻辑都在，装配也把本字段透传下去（`assembly.rs` 三处）。
+    // 实测（Jan 1-3、`DEF_VEG_SNOW = .true.`）与 Fortran 的一致性
+    // 与已验收的 `DEF_VEG_SNOW = .false.` 配置**同一水平**：`f_scv`/`f_snowdp`/`f_fsno`
+    // 两边恒为 0，`f_t_grnd` 0.075 K、`f_tleaf` 0.127 K、`f_etr` 1.0e-8。
     let vegetation_snow = logical(document, "DEF_VEG_SNOW")?;
     Ok(LandPhysicsParameters {
         hydraulic_model: if campbell {
@@ -169,13 +175,6 @@ pub fn unported_branches(physics: &LandPhysicsParameters) -> Vec<&'static str> {
         missing.push(
             "DEF_USE_PLANTHYDRAULICS：植物水力（默认真）改的是 ET 的分层分配、冠层阻力\
              的来源与 vegwp 状态；写 DEF_USE_PLANTHYDRAULICS = .false. 可走已移植的那条",
-        );
-    }
-    if physics.vegetation_snow {
-        missing.push(
-            "DEF_VEG_SNOW：植被上的雪（默认真）决定 fwet_snow 与冠层水的雪/雨分配；\
-             实测一步之后 Fortran 的 fwet_snow = 0.061 而本仓库是 0。\
-             写 DEF_VEG_SNOW = .false. 可走已移植的那条",
         );
     }
     missing
