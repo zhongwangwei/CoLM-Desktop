@@ -1388,50 +1388,151 @@ fn validate(input: LeafTemperatureInput<'_>, state: LeafTemperatureState) -> Res
         state.canopy_water.rain_mm,
         state.canopy_water.snow_mm,
     ];
+    // 逐条报出失败的判据。一个笼统的"输入非法"在真实算例上无法定位：这些量来自
+    // 重启、强迫场与上一步的能量链，谁越界了必须当场知道是哪一个。
+    let mut failed: Vec<String> = Vec::new();
+    let mut check = |label: &str, ok: bool| {
+        if !ok {
+            failed.push(label.to_owned());
+        }
+    };
+    check(
+        "some scalar is not finite",
+        scalars.iter().all(|v| v.is_finite()),
+    );
+    check("time_step_seconds > 0", input.time_step_seconds > 0.0);
+    check("maximum_dew_mm > 0", input.maximum_dew_mm > 0.0);
+    check("leaf_area_index > 0.001", input.leaf_area_index > 0.001);
+    check("stem_area_index >= 0", input.stem_area_index >= 0.0);
+    check(
+        "canopy_top_height_m above the roughness lengths",
+        input.canopy_top_height_m > input.soil_roughness_m.max(input.snow_roughness_m),
+    );
+    check(
+        "inverse_sqrt_leaf_dimension_m_neg_half > 0",
+        input.inverse_sqrt_leaf_dimension_m_neg_half > 0.0,
+    );
+    // 上游的 `rstfac`（`MOD_Eroot.F90:101-140`）**没有 1 的上界**：势梯度方案里
+    // `rresis = (1 - smp_node/smpmax)/(1 - psi0/smpmax)` 在湿润层会大于 1，而它正是
+    // `etrc = trsmx0*roota` 的倍数。只有下界是真的。
+    check(
+        &format!(
+            "soil_water_stress_sunlit >= 0, got {}",
+            input.soil_water_stress_sunlit
+        ),
+        input.soil_water_stress_sunlit >= 0.0,
+    );
+    check(
+        &format!(
+            "soil_water_stress_shaded >= 0, got {}",
+            input.soil_water_stress_shaded
+        ),
+        input.soil_water_stress_shaded >= 0.0,
+    );
+    check("wue_lambda > 0", input.wue_lambda > 0.0);
+    check("direct_extinction > 0", input.direct_extinction > 0.0);
+    check("diffuse_extinction > 0", input.diffuse_extinction > 0.0);
+    check(
+        "reference_air_temperature_k > 0",
+        input.reference_air_temperature_k > 0.0,
+    );
+    check(
+        "potential_temperature_k > 0",
+        input.potential_temperature_k > 0.0,
+    );
+    check(
+        "virtual_potential_temperature_k > 0",
+        input.virtual_potential_temperature_k > 0.0,
+    );
+    check(
+        "reference_specific_humidity in 0..1",
+        (0.0..1.0).contains(&input.reference_specific_humidity),
+    );
+    check("surface_pressure_pa > 0", input.surface_pressure_pa > 0.0);
+    check("air_density_kg_m3 > 0", input.air_density_kg_m3 > 0.0);
+    check(
+        "sunlit_fraction in (0,1)",
+        input.sunlit_fraction > 0.0 && input.sunlit_fraction < 1.0,
+    );
+    check(
+        "canopy_longwave_gap_fraction in 0..=1",
+        (0.0..=1.0).contains(&input.canopy_longwave_gap_fraction),
+    );
+    check(
+        "oxygen_partial_pressure_pa >= 0",
+        input.oxygen_partial_pressure_pa >= 0.0,
+    );
+    check("atmospheric_co2_pa >= 0", input.atmospheric_co2_pa >= 0.0);
+    check("soil_roughness_m > 0", input.soil_roughness_m > 0.0);
+    check("snow_roughness_m > 0", input.snow_roughness_m > 0.0);
+    check(
+        "snow_cover_fraction in 0..=1",
+        (0.0..=1.0).contains(&input.snow_cover_fraction),
+    );
+    check(
+        "ground_obukhov_length_m != 0",
+        input.ground_obukhov_length_m != 0.0,
+    );
+    check(
+        "transpiration_limit_kg_m2_s >= 0",
+        input.transpiration_limit_kg_m2_s >= 0.0,
+    );
+    check(
+        "ground_specific_humidity in 0..1",
+        (0.0..1.0).contains(&input.ground_specific_humidity),
+    );
+    check(
+        "soil_specific_humidity in 0..1",
+        (0.0..1.0).contains(&input.soil_specific_humidity),
+    );
+    check(
+        "snow_specific_humidity in 0..1",
+        (0.0..1.0).contains(&input.snow_specific_humidity),
+    );
+    check(
+        "soil_surface_resistance_s_m >= 0",
+        input.soil_surface_resistance_s_m >= 0.0,
+    );
+    check(
+        "ground_emissivity in 0..=1",
+        (0.0..=1.0).contains(&input.ground_emissivity),
+    );
+    check(
+        "intercepted_rain_kg_m2_s >= 0",
+        input.intercepted_rain_kg_m2_s >= 0.0,
+    );
+    check(
+        "intercepted_snow_kg_m2_s >= 0",
+        input.intercepted_snow_kg_m2_s >= 0.0,
+    );
+    check(
+        "ground_latent_heat_j_kg > 0",
+        input.ground_latent_heat_j_kg > 0.0,
+    );
+    check(
+        "state.leaf_temperature_k > 0",
+        state.leaf_temperature_k > 0.0,
+    );
+    check(
+        "state.canopy_water.total_mm >= 0",
+        state.canopy_water.total_mm >= 0.0,
+    );
+    check(
+        "state.canopy_water.rain_mm >= 0",
+        state.canopy_water.rain_mm >= 0.0,
+    );
+    check(
+        "state.canopy_water.snow_mm >= 0",
+        state.canopy_water.snow_mm >= 0.0,
+    );
+    check(
+        "plant hydraulics must match its state",
+        input.plant_hydraulics.is_none() || state.plant_hydraulics.is_some(),
+    );
     ensure!(
-        scalars.iter().all(|value| value.is_finite())
-            && input.time_step_seconds > 0.0
-            && input.maximum_dew_mm > 0.0
-            && input.leaf_area_index > 0.001
-            && input.stem_area_index >= 0.0
-            && input.canopy_top_height_m > input.soil_roughness_m.max(input.snow_roughness_m)
-            && input.inverse_sqrt_leaf_dimension_m_neg_half > 0.0
-            && (0.0..=1.0).contains(&input.soil_water_stress_sunlit)
-            && (0.0..=1.0).contains(&input.soil_water_stress_shaded)
-            && input.wue_lambda > 0.0
-            && input.direct_extinction > 0.0
-            && input.diffuse_extinction > 0.0
-            && input.reference_air_temperature_k > 0.0
-            && input.potential_temperature_k > 0.0
-            && input.virtual_potential_temperature_k > 0.0
-            && (0.0..1.0).contains(&input.reference_specific_humidity)
-            && input.surface_pressure_pa > 0.0
-            && input.air_density_kg_m3 > 0.0
-            && (0.0..1.0).contains(&input.sunlit_fraction)
-            && input.sunlit_fraction > 0.0
-            && input.sunlit_fraction < 1.0
-            && (0.0..=1.0).contains(&input.canopy_longwave_gap_fraction)
-            && input.oxygen_partial_pressure_pa >= 0.0
-            && input.atmospheric_co2_pa >= 0.0
-            && input.soil_roughness_m > 0.0
-            && input.snow_roughness_m > 0.0
-            && (0.0..=1.0).contains(&input.snow_cover_fraction)
-            && input.ground_obukhov_length_m != 0.0
-            && input.transpiration_limit_kg_m2_s >= 0.0
-            && (0.0..1.0).contains(&input.ground_specific_humidity)
-            && (0.0..1.0).contains(&input.soil_specific_humidity)
-            && (0.0..1.0).contains(&input.snow_specific_humidity)
-            && input.soil_surface_resistance_s_m >= 0.0
-            && (0.0..=1.0).contains(&input.ground_emissivity)
-            && input.intercepted_rain_kg_m2_s >= 0.0
-            && input.intercepted_snow_kg_m2_s >= 0.0
-            && input.ground_latent_heat_j_kg > 0.0
-            && state.leaf_temperature_k > 0.0
-            && state.canopy_water.total_mm >= 0.0
-            && state.canopy_water.rain_mm >= 0.0
-            && state.canopy_water.snow_mm >= 0.0
-            && (input.plant_hydraulics.is_none() || state.plant_hydraulics.is_some()),
-        "leaf-temperature inputs are invalid"
+        failed.is_empty(),
+        "leaf-temperature inputs are invalid: {}",
+        failed.join("; ")
     );
     Ok(())
 }

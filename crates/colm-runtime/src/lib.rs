@@ -557,10 +557,23 @@ pub fn read_point_runtime_config(case_namelist: impl AsRef<Path>) -> Result<Poin
     );
     let forcing_directory = required_string(&forcing, "DEF_dir_forcing")?;
     let forcing_name = required_string(&forcing, "DEF_forcing%fprefix(1)")?;
+    let start = simulation_date(&case, "start")?;
+    // `spinup_year = 0` 在上游就是"不预热"的写法：`CoLM.F90:315` 判的是
+    // `is_spinup = ststamp < ptstamp`，年份 0 永远早于真实起报时刻。
+    //
+    // 这类算例里 `spinup_month/day/sec` **不参与任何计算**，而它们常常留着上一个
+    // 算例的值 —— 实测 `oracle/work/CN-Cng/case.nml` 是 `spinup_day = 365`，按"月内
+    // 第几天"根本放不进 `u8`。所以年份为 0 时直接取 `start`，不去解析那三个字段：
+    // 否则一个关掉预热的算例会因为死字段而跑不起来。
+    let spinup_until = if required_integer(&case, "DEF_simulation_time%spinup_year")? == 0 {
+        start
+    } else {
+        simulation_date(&case, "spinup")?
+    };
     Ok(PointRuntimeConfig {
-        start: simulation_date(&case, "start")?,
+        start,
         end: simulation_date(&case, "end")?,
-        spinup_until: simulation_date(&case, "spinup")?,
+        spinup_until,
         timestep_seconds: required_real(&case, "DEF_simulation_time%timestep")?,
         spinup_repeats: usize::try_from(required_integer(
             &case,

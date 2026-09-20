@@ -15,6 +15,9 @@ colm-namelist = { path = "../colm-namelist" }
 # 物理参数的缺省值取自 `MOD_Namelist.F90` 的声明默认值（生成的 schema），
 # 而不是在映射里各写一份 —— 两处默认值迟早会分叉。
 colm-schema = { path = "../colm-schema" }
+# 算例目录布局（`case.nml`、`out/<name>`）与算例名。造文件与跑模型是两件事，
+# 但这个 crate 本来就在执行阶段，读布局不算越界。
+colm-case = { path = "../colm-case" }
 # 装配层要从写出的 restart 里取静态量与演化态。它属于**执行阶段**，不属于初始化
 # 阶段；把它放进 colm-init 会让那个 crate 变成第二个 colm.x（见其 lib 文档）。
 colm-init = { path = "../colm-init" }

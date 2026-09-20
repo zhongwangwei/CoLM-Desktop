@@ -39,25 +39,30 @@ pub enum RootFractionScheme {
     Exponential,
 }
 
-/// `Init_LC_Const` 里被选中的那些数组，按 1 基的 Fortran 下标访问。
+/// `Init_LC_Const` 里被选中的那些数组，按**地类号**访问。
 ///
-/// 上游的数组是 `(i_class)`，`i_class = 1..N_land_classification`，对应 0 基的
-/// 地类 `i_class - 1`。这里保留 1 基下标，免得调用方在两套约定之间来回换算。
+/// 上游那些表的维度是 `(N_land_classification)`，即位置 1..17，而查表写的是
+/// `patchtypes(SITE_landtype)`（`MOD_Vars_TimeVariables.F90:1273`）——
+/// **位置号就是地类号**，所以草地（`patchclass = 10`）读的是第 10 个元素。
+/// 类名表 `patchclassname` 是 `(0:N_land_classification)`，多出的那一个位置 0
+/// 是海洋，数值表里没有对应行，因此本类型只收 1..=N。
 pub struct ClassConstants {
     scheme: LandCoverScheme,
     class: usize,
 }
 
 impl ClassConstants {
-    pub fn new(scheme: LandCoverScheme, fortran_index: usize) -> Result<Self> {
+    /// `class_number` 是重启里的 `patchclass`，也就是上游的表位置号。
+    pub fn new(scheme: LandCoverScheme, class_number: usize) -> Result<Self> {
         let classes = land_cover_classes(scheme);
         ensure!(
-            (1..=classes).contains(&fortran_index),
-            "land class index {fortran_index} is outside 1..={classes} for {scheme:?}"
+            (1..=classes).contains(&class_number),
+            "land class {class_number} is outside 1..={classes} for {scheme:?}; \
+             class 0 is ocean, which has no lookup row"
         );
         Ok(Self {
             scheme,
-            class: fortran_index,
+            class: class_number,
         })
     }
 
@@ -65,9 +70,17 @@ impl ClassConstants {
         land_cover_tables(self.scheme)
     }
 
-    /// 0 基的地类号，即上游的 `patchclass`。
-    pub fn class_zero_based(&self) -> usize {
+    /// 查表用的 0 基下标（Rust 数组里的位置）。
+    ///
+    /// **不是上游的 `patchclass`** —— 那个数就是 [`Self::class_number`] 本身，
+    /// 这里是再减一之后的数组下标。
+    pub fn table_index(&self) -> usize {
         self.class - 1
+    }
+
+    /// 重启里的 `patchclass`，即上游的 `SITE_landtype`。
+    pub fn class_number(&self) -> usize {
+        self.class
     }
 
     fn value(&self, column: fn(&'static LandCoverTables) -> &'static [f64]) -> f64 {

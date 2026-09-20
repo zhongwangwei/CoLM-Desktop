@@ -225,8 +225,8 @@ pub struct StandardLctRestartTemplate {
     pub snow_cover_fraction: f64,
     /// 地类常量表给出、重启里没有的几项。
     ///
-    /// `land_class` 是**上游的 1 基下标**（`patchclass + 1`），与
-    /// `ClassConstants::new` 同义；公开出来是为了让调用方能对着它查表。
+    /// `land_class` 就是重启里的 `patchclass`（上游 `MOD_Const_LC` 查表用的地类号），
+    /// 与 `ClassConstants::new` 收的那个数同义；公开出来是为了让调用方能对着它查表。
     pub land_class: usize,
     /// `lambda`：WUE 的基准值，来自地类表（不是 namelist）。
     pub wue_lambda: f64,
@@ -281,6 +281,37 @@ pub fn assemble_standard_lct_snow_template(
         "the snow assembly needs a snow-bearing patch, but the restart's snow column is empty"
     );
     Ok(template)
+}
+
+/// 这份重启的雪列里有没有水 —— 决定走无雪装配还是积雪装配。
+///
+/// 判据与上游 `CoLMMAIN.F90:816-818` 一致：雪层数由雪槽里的**水量**推出，
+/// 不是 `fsno`（实测 `fsno` 可以是 0 而雪列仍有层）。两支装配各自还会再断言
+/// 一次，这里的作用是让调用方不必靠"先试无雪、报错了再试积雪"来猜 ——
+/// 那种写法会把真正的装配错误也当成"该走另一支"。
+pub fn restart_has_snow_column(files: &RestartStateFiles, patch: usize) -> Result<bool> {
+    let constant = RestartFile::open(&files.constant)?;
+    let time = RestartFile::open(&files.time)?;
+    let soil_layers = constant.dimension("soil")?;
+    let patches = constant.dimension("patch")?;
+    ensure!(
+        patch < patches,
+        "patch {patch} is outside the constant restart's {patches} patches"
+    );
+    let snow_slots = time.dimension("soilsnow")?;
+    ensure!(
+        snow_slots >= soil_layers,
+        "the time restart's soilsnow dimension cannot hold {soil_layers} soil layers"
+    );
+    let patch_type = integer_scalar(&constant, "patchtype", patch)?;
+    let snow = restart_snow_column(
+        &time,
+        patch,
+        patch_type,
+        snow_slots - soil_layers,
+        soil_layers,
+    )?;
+    Ok(snow.layer_count != 0)
 }
 
 /// 两支共用的装配：读重启、派生地类参数、把雪列读出来。
@@ -450,33 +481,43 @@ fn assemble(
     // 手给一份就等于让算例带着一个与它对不上的地类跑。
     //
     // 上游的访问方式是 `array(patchclass(ipatch)+1)`：重启里的 `patchclass` 是
-    // 0 基类号，而数组是 1 基的。`ClassConstants` 收的就是那个 1 基下标。
+    // **`patchclass` 本身就是查表用的地类号，不要再加一。**
+    //
+    // `MOD_Const_LC.F90` 里 `patchtypes_igbp` 一类表的维度是 `(N_land_classification)`，
+    // 即位置 1..17，而 `patchclassname` 是 `(0:N_land_classification)`、内容按 0..17
+    // 依次排开（`patchclassname(i)` 就是 "i <类名>"）。上游查表写的是
+    // `patchtypes(SITE_landtype)`（`MOD_Vars_TimeVariables.F90:1273`），所以**位置号
+    // 等于地类号**：草地是 10，`patchtypes_igbp` 的第 10 个元素是 0（土壤）。
+    //
+    // 这里原先写成 `patchclass + 1`，于是草地读到了第 11 个元素（湿地）：`patchtype`
+    // 断言立刻报错，而 `chil` 一类的表**不会报错，只会静默换成湿地的值** ——
+    // 实测 `chil_igbp(10) = -0.300`（草地）被读成了 `chil_igbp(11) = 0.100`。
+    // 地类号 0 是海洋，数值表里没有它的行。
     let patch_class = integer_scalar(&constant, "patchclass", patch)?;
     let classes = colm_core::land_cover_classes(physics.land_cover_scheme);
-    let fortran_class_index = usize::try_from(patch_class)
+    let land_class = usize::try_from(patch_class)
         .ok()
-        .and_then(|class| class.checked_add(1))
-        .filter(|index| (1..=classes).contains(index))
+        .filter(|class| (1..=classes).contains(class))
         .with_context(|| {
             format!(
-                "patchclass {patch_class} is outside 0..{} for {:?}",
-                classes - 1,
+                "patchclass {patch_class} is outside 1..={classes} for {:?}; class 0 is ocean, \
+                 which has no lookup row",
                 physics.land_cover_scheme
             )
         })?;
-    let class = ClassConstants::new(physics.land_cover_scheme, fortran_class_index)?;
+    let class = ClassConstants::new(physics.land_cover_scheme, land_class)?;
     // 两份 patchtype 必须一致：一份来自地类表，一份来自重启。不一致说明这个 patch
     // 的类别与它被写进重启时用的地类表不是同一套 —— 那会让下面每一项都不可信。
     ensure!(
         i64::from(class.patch_type()) == patch_type,
-        "land class {fortran_class_index} is patchtype {} in MOD_Const_LC but {} in the \
+        "land class {land_class} is patchtype {} in MOD_Const_LC but {} in the \
          constant restart; the restart and the compiled land-cover scheme disagree",
         class.patch_type(),
         patch_type
     );
     let root_fraction = root_fraction(
         physics.land_cover_scheme,
-        fortran_class_index as i32,
+        land_class as i32,
         physics.root_fraction_scheme,
         &interface_depth_m,
     )?;
@@ -555,7 +596,7 @@ fn assemble(
         leaf_area_index,
         stem_area_index,
         snow_cover_fraction,
-        land_class: fortran_class_index,
+        land_class,
         wue_lambda: class.wue_lambda(),
         root_fraction,
         leaf_angle_distribution,

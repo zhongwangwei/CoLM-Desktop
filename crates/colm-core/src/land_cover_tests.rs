@@ -25,14 +25,20 @@ fn the_two_classifications_have_the_counts_upstream_declares() {
 }
 
 #[test]
-fn class_constants_follow_the_fortran_one_based_index() {
-    // IGBP 第 10 类（`chil(10)`）是草地之外的落叶阔叶林那一档；上游源码里
-    // `chil_igbp(10) = -0.300`，0 基地类号是 9。
+fn class_constants_index_the_tables_by_class_number() {
+    // IGBP 的 `patchclassname(10)` 是 "10 Grasslands"，而数值表的位置号就是地类号：
+    // `chil_igbp(10) = -0.300`。**不要再加一** —— 加一会读到第 11 个元素
+    // （湿地，`chil = 0.100`），而 `chil` 这种表不会报错，只会静默换值。
     let class = ClassConstants::new(LandCoverScheme::Igbp, 10).unwrap();
-    assert_eq!(class.class_zero_based(), 9);
+    assert_eq!(class.class_number(), 10);
+    assert_eq!(class.table_index(), 9);
     assert_eq!(class.leaf_angle_distribution(), -0.300);
     assert_eq!(class.patch_type(), 0);
-    // 越界与 0 基误用都要被挡住。
+    // 紧邻的第 11 类必须是湿地，否则这条测试证明不了位置号=地类号。
+    let wetland = ClassConstants::new(LandCoverScheme::Igbp, 11).unwrap();
+    assert_eq!(wetland.patch_type(), 2);
+    assert_eq!(wetland.leaf_angle_distribution(), 0.100);
+    // 越界与 0（海洋没有数值行）都要被挡住。
     assert!(ClassConstants::new(LandCoverScheme::Igbp, 0).is_err());
     assert!(ClassConstants::new(LandCoverScheme::Igbp, 18).is_err());
     assert!(ClassConstants::new(LandCoverScheme::Usgs, 25).is_err());

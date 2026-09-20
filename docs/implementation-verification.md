@@ -1882,3 +1882,80 @@ Rust 侧此前把它做成了 `LandPhysicsParameters::boundary_layer_height_m` �
 - `land_cover_scheme` **必须由调用方传**：它来自内核编译期的 `LULC_IGBP`/`LULC_USGS`，
   namelist 里的 `DEF_USE_IGBP`/`DEF_USE_USGS` 只是只读镜像（`MOD_Namelist.F90:163`），
   默认算例里两个都是 `.false.`，从 namelist 读只能靠猜。
+
+## 第三段的 Rust 版本跑起来了，以及它第一次给出的判读（2026 年，实测）
+
+新增 `crates/colm-runtime/src/bin/colm-rs.rs`：从算例目录读 namelist、装配模板、推进窗口、
+按续跑语义写出 restart。**实测在 `oracle/work/CN-Cng` 上跑完整个 1 月窗口：528 步**
+（与 Fortran 的 528 步一致），写出的 restart 与输入同 68 个变量、同维度。
+
+```bash
+NETCDF_DIR=/opt/homebrew/opt/netcdf cargo run -q -p colm-runtime --bin colm-rs -- \
+  oracle/work/CN-Cng --land-cover igbp --restart-out /tmp/colm-rs-CN-Cng.nc
+```
+
+接口上两处刻意没有默认值：`--land-cover`（来自内核编译期宏，namelist 里读不出来）与
+`--restart-out`（上游的续跑文件名由 `idate` 现算，而初始化器写出的是带 `_w180_s90` 的
+另一套名字，猜一套只会与真实文件对不上）。指向与输入同一个路径会被拒绝：写出语义是
+"以原文件为底、只换声明改过的变量"，同路径会让底稿消失。
+
+### 判读必须三分，不能只数"有多少个变量不等"
+
+`oracle/scripts/stage3_diff.py` 把逐变量结果分成三类 —— 这一个分类就是判读第三段
+唯一可行的办法：
+
+| 类别 | CN-Cng 1 月 | 含义 |
+|---|---|---|
+| 逐位相同 | **31 / 68** | — |
+| Rust 未写出（保持初值） | **30** | 写出集合的差，不是数值错 |
+| 两边都算但不同 | **7** | 真正的数值发散 |
+
+**写出集合的差**（30 个：`alb`/`coszen`/`emis`/`extkb`/`extkd`/`fh`/`fm`/`fq`/`rss`/`rst`/
+`ssun`/`ssha`/`ssoi`/`qstar`/`z0m`/`zol`/`ustar` 等）是刻意的：`evolved_overrides` 只写
+"这次跑真的推进过"的量。Fortran 每步把内存里的整组量都写出去，所以两边文件必然不同 ——
+这**不是**移植错误，但它意味着**在补齐写出集合之前，逐位比较黄金 restart 没有意义**。
+
+**数值发散**那 7 个，按量级分两拨：
+
+| 变量 | Fortran | Rust | 读法 |
+|---|---|---|---|
+| `t_grnd` | 255.319 K | 257.814 K | 差 **+2.5 K** |
+| `tleaf` | 253.826 K | 254.613 K | 差 +0.79 K |
+| `wice_soisno` | 0.1128 | 6.968 | 土壤冰差 **60 倍** |
+| `wliq_soisno` | 0.000468 | 0 | 液相水被抽干 |
+| `zwt` | 0.28913 m | 0.42460 m | 地下水位 |
+| `wa` | 0 | **771.5** | 含水层从 0 涨到 771 mm |
+| `t_soisno` | 雪槽 0 | 雪槽 -999 | 非活动雪槽的写出差异，非物理 |
+
+热力状态在 11 个冬季日后差 2.5 K 是"有偏差但结构正确"；`wa` 从 0 涨到 771 mm 而
+Fortran 一动不动，是**系统性的接线错误**，不是精度问题 —— `DEF_Runoff_SCHEME = 3`
+（SimpleVIC）是**地表**产流方案，含水层的补给不该由它驱动。下一轮从这里入手。
+
+### 顺手修掉的两个真缺陷
+
+1. **地类查表差一位（数值影响明确）。** `assembly.rs` 把 `patchclass + 1` 当查表下标，
+   而 `MOD_Const_LC.F90` 的数值表维度是 `(N_land_classification)`（位置 1..17），
+   `patchclassname` 才是 `(0:N_land_classification)`、内容按 0..17 排开
+   （`patchclassname(i)` 就是 `"i <类名>"`）。上游查表写的是
+   `patchtypes(SITE_landtype)`（`MOD_Vars_TimeVariables.F90:1273`），所以**位置号就是
+   地类号**。后果分两种：`patchtype` 断言会当场报错（这次正是它把问题拦下来的），
+   而 `chil`/`vmax25`/`d50` 一类的表**不报错，只静默换成邻类的值** ——
+   实测草地（10）的 `chil = -0.300` 被读成了湿地（11）的 `0.100`，直接进两流辐射。
+   `ClassConstants::class_zero_based()` 也据此改成 `table_index()`
+   （原注释把"数组下标"说成了"上游的 `patchclass`"）。
+
+2. **`rstfac` 没有 1 的上界。** `leaf_temperature` 的校验要求
+   `soil_water_stress in 0..=1`，而 `MOD_Eroot.F90:101-140` 的势梯度方案里
+   `rresis = (1 - smp_node/smpmax)/(1 - psi0/smpmax)` 在湿润层大于 1，且它正是
+   `etrc = trsmx0*roota` 的倍数。真实算例一跑就撞上这条过严的断言。改成只守下界
+   （与 `photosynthesis.rs` 的 `>= 0.0` 一致）。
+
+   同时把该函数的报错从"leaf-temperature inputs are invalid"改成**逐条列出失败的判据
+   并带上数值** —— 一个笼统的"输入非法"在真实算例上没法定位，这次就是靠它才在两分钟内
+   找到 `soil_water_stress` 的。
+
+3. **关掉预热的算例跑不起来。** `read_point_runtime_config` 无条件解析
+   `spinup_month/day/sec` 并窄化成 `u8`，而 `oracle/work/CN-Cng/case.nml` 里
+   `spinup_day = 365`（预热关掉时的死字段）。上游 `CoLM.F90:315` 的判据是
+   `is_spinup = ststamp < ptstamp`，`spinup_year = 0` 时永远为假。现在年份为 0 就
+   直接取 `start`，不去碰那三个字段。

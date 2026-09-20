@@ -294,10 +294,12 @@ impl SyntheticRestart {
             per_patch(topmodel.chi_twi, 1.0),
             per_patch(topmodel.mu_twi, 1.0),
         ];
-        // patchclass 是 0 基类号（上游 `patchclass(ipatch)`）。取 0 与 2 而不是 1 与 2：
-        // USGS 表里 0 基的第 0 类是城市（patchtype 1），而这份重启写的是土壤（0）——
-        // 于是「地类表与重启对不上」这条防线在换成 USGS 时真的会被触发，测试才有意义。
-        let class = vec![0, 2];
+        // `patchclass` 就是查表用的地类号：`MOD_Const_LC` 的数值表维度是
+        // `(N_land_classification)`（位置 1..17），上游按 `patchtypes(SITE_landtype)`
+        // 查，所以位置号 = 地类号，不要再加一。取 1 与 3 而不是 2 与 3：
+        // IGBP 第 1 类是土壤，而 USGS 第 1 类是城市（patchtype 1）—— 于是
+        // 「地类表与重启对不上」这条防线在换成 USGS 时真的会被触发，测试才有意义。
+        let class = vec![1, 3];
         let kind = vec![0, 0];
         let mask = vec![true, false];
         let longitude = per_patch(1.0, 1.0);

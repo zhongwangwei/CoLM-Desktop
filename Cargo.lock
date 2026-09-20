@@ -147,6 +147,7 @@ name = "colm-runtime"
 version = "0.2.0-beta.4"
 dependencies = [
  "anyhow",
+ "colm-case",
  "colm-core",
  "colm-forcing",
  "colm-hist",

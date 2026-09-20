@@ -545,7 +545,7 @@ fn the_state_carries_the_restart_radiation() {
 #[test]
 fn the_land_cover_table_supplies_the_biochemistry() {
     let (_, template) = assemble("biochemistry", 1);
-    // 合成算例 patch 1 的 patchclass 是 2（0 基）→ 上游数组下标 3。
+    // 合成算例 patch 1 的 patchclass 是 3，也就是查表用的地类号本身。
     let class = colm_core::ClassConstants::new(colm_core::LandCoverScheme::Igbp, 3).unwrap();
     let expected = class.biochemistry();
     assert_eq!(template.biochemistry, expected);
@@ -562,7 +562,7 @@ fn the_land_cover_table_supplies_the_biochemistry() {
 fn the_land_class_and_the_restart_must_agree_on_the_patch_type() {
     let root = temp_dir("patchtype-disagreement");
     let fixture = SyntheticRestart::write(root.join("restart")).unwrap();
-    // 合成算例的 patchclass 是 [1, 2]（0 基），对应的 IGBP 类都是土壤。用 USGS 表去
+    // 合成算例的 patchclass 是 [1, 3]，在 IGBP 表里都是土壤。用 USGS 表去
     // 解释同一份重启，类号含义就变了 —— 装配层必须发现 patchtype 对不上。
     let mut parameters = physics(1800.0);
     parameters.land_cover_scheme = LandCoverScheme::Usgs;
@@ -582,12 +582,7 @@ fn the_land_class_and_the_restart_must_agree_on_the_patch_type() {
 #[test]
 fn the_land_cover_tables_supply_the_root_fraction_and_leaf_geometry() {
     let (_, template) = assemble("land-cover", 1);
-    let class = colm_core::ClassConstants::new(
-        colm_core::LandCoverScheme::Igbp,
-        // 合成算例 patch 1 的 patchclass 是 2（0 基），上游数组是 1 基的。
-        3,
-    )
-    .unwrap();
+    let class = colm_core::ClassConstants::new(colm_core::LandCoverScheme::Igbp, 3).unwrap();
     assert_eq!(template.land_class, 3);
     assert_eq!(
         template.leaf_angle_distribution,
