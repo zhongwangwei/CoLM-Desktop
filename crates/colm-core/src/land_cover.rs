@@ -88,6 +88,15 @@ impl ClassConstants {
         self.value(|table| table.htop0)
     }
 
+    /// `lambda`：WUE 气孔模型的边际耗水成本**基准值**。
+    ///
+    /// 基准来自地类表，不来自 namelist。上游 `DEF_WUE_LAMBDA` 默认 `-1` 表示
+    /// "用表值"，只有 `> 0` 才是覆盖（`MOD_AssimStomataConductance.F90:201`）。
+    /// 拿 namelist 的值当基准，默认算例就会把 `-1` 送进 WUE 求解。
+    pub fn wue_lambda(&self) -> f64 {
+        self.value(|table| table.lambda)
+    }
+
     pub fn canopy_bottom_m(&self) -> f64 {
         self.value(|table| table.hbot0)
     }

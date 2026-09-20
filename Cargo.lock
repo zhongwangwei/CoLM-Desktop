@@ -152,6 +152,7 @@ dependencies = [
  "colm-hist",
  "colm-init",
  "colm-namelist",
+ "colm-schema",
  "netcdf",
 ]
 

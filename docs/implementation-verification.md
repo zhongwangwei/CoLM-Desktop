@@ -1828,3 +1828,57 @@ Rust 侧此前把它做成了 `LandPhysicsParameters::boundary_layer_height_m` �
 `PointForcingFrame`，所以它写出的强迫 NetCDF 与改动前逐位相同，Fortran 内核读到的输入
 也就相同。结论与前一节一致：**这份黄金文件在判定 Rust 移植之前必须先对齐内核快照或
 重生成。**
+
+## namelist → `LandPhysicsParameters`：三处"看起来是参数"其实不是（2026 年）
+
+装配层一直把物理参数留给调用方显式传入，于是"从哪读"这件事没有落地。补上
+`colm-runtime::physics::land_physics_parameters` 时逐字段去核上游出处，又翻出三个
+**字段类别搞错**的量 —— 它们的共同点是：默认算例上取值恰好正确，所以黄金回归
+不会响，只在特定配置下静默算错。
+
+| 量 | 原先的处置 | 真正的出处 |
+|---|---|---|
+| `ground_emissivity` | `LandPhysicsParameters` 的字段（注释还写着 `DEF_EMIS`，而**namelist 里没有这个名字**） | `MOD_Thermal.F90:485-486` 逐步骤推：`emg = 0.96`，`IF (scv>0. .or. patchtype==3) emg = 0.97` |
+| `wue_lambda`（WUE 基准） | 同上，从 namelist 读 | `lambda` 来自**地类表**（`MOD_Const_LC.F90:356/655`）；namelist 的 `DEF_WUE_LAMBDA`（默认 `-1`）只是覆盖 |
+| `boundary_layer_height_m` | 同上 | 第 9 个强迫变量 `forc_hpbl`（已在上一节修） |
+
+**比辐射率**现在由 `colm_core::ground_emissivity(scv, patchtype)` 推出，装配层按模板的
+`scv` 给初值、**积雪分支的内核再用本步的 `scv` 覆盖一次** —— 雪融完之后必须退回 0.96，
+否则融雪后的每一步都按雪面辐射，而能量收支看上去仍然闭合。无雪分支的 `scv` 恒为 0，
+所以那里反过来钉住"装配层传的必须是土壤值"。
+
+**WUE 基准**接到 `ClassConstants::wue_lambda()`（生成表里本来就有 `lambda` 这一列，
+只是没有取用口）。默认算例若从 namelist 取，拿到的是 `-1`，而 `-1` 连内核的参数校验都过不去。
+
+### 顺带纠正：`DEF_Runoff_SCHEME` 的编号在枚举注释里是反的
+
+`StandardLctRunoffScheme` 原先标注 `XinAnJiang` = 1、`SimpleVic` = 2。上游
+`MOD_SoilSnowHydrology.F90:315-348` 的派发是 **0=TOPMODEL、1=VIC、2=XinAnJiang、
+3=SimpleVIC**。照注释写映射会把 XinAnJiang 与 SimpleVIC 对调 —— 两者都能跑完、
+都给出有限的产流，只是数值不同。已改注释，并把没移植的 1（VIC）做成显式报错。
+
+`vic.rs` 里有独立的 VIC 产流内核，但它没有接进 `Water2014Runoff`，所以
+`DEF_Runoff_SCHEME=1` 目前是**报错**而不是静默挑一个相邻方案。
+
+### 一处"该报错却不该报错"的反例
+
+写映射时第一版把"`DEF_USE_MEDLYNST` 与 `DEF_USE_WUEST` 同时为真"当成了错误配置。
+核上游才发现 `MOD_Namelist.F90:2080-2088` 对它的处置是**把两者都置为 `.false.`**、
+落回 Ball-Berry，并打一条 warning —— 也就是上游定义好了结果。拒绝它等于拒绝一个
+上游能跑的算例。而且 `DEF_USE_WUEST` 的声明默认值就是 `.true.`，所以任何只写
+`DEF_USE_MEDLYNST = .true.` 的算例都会落进这个分支，报错的话连 Medlyn 都用不了。
+
+**判据：上游有明确定义的行为就要复现，哪怕它看起来像配置错误；只有上游没有的分支才报错。**
+
+### 映射的取值纪律
+
+- **缺省值只从 `colm-schema` 取**（即 `MOD_Namelist.F90` 的声明值），映射里不写第二份。
+  `physics_tests.rs` 里那条"空算例逐项等于声明默认值"就是在守这一点：任何一处写成
+  字面量，默认值一变就会分叉。
+- **不是 namelist 字段的量不放进这张表**（`hvap` 是常数、`emg` 是逐步推导、`lambda` 来自地类表）。
+- **上游有、本仓库没移植的分支显式报错**：`DEF_Runoff_SCHEME=1`（VIC）与
+  `DEF_USE_IRRIGATION`（喷灌率由 `DEF_TUNING_IRRIGATION_*` 与作物物候逐步算出，
+  给 0 会让开启喷灌的算例静默变成不灌溉）。
+- `land_cover_scheme` **必须由调用方传**：它来自内核编译期的 `LULC_IGBP`/`LULC_USGS`，
+  namelist 里的 `DEF_USE_IGBP`/`DEF_USE_USGS` 只是只读镜像（`MOD_Namelist.F90:163`），
+  默认算例里两个都是 `.false.`，从 namelist 读只能靠猜。

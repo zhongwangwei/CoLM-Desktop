@@ -443,6 +443,14 @@ pub fn standard_lct_snow_soil_step(
         snow_fraction: state.snow.ground_snow_fraction,
         ..input.energy.solar
     };
+    // `MOD_Thermal.F90:485-486` 的 `emg` 按**本步开始时**的 `scv` 与 `patchtype` 定，
+    // 雪在这里可能已经融完 —— 用装配期的固定值会让融雪后的步骤仍按雪面辐射。
+    let emissivity = crate::ground_emissivity(
+        state.snow.water_equivalent_kg_m2,
+        energy_input.ground_temperature.patch_type,
+    );
+    energy_input.ground_temperature.ground_emissivity = emissivity;
+    energy_input.leaf_temperature.ground_emissivity = emissivity;
     energy_input.ground_flux = GroundFluxInput {
         snow_cover_fraction: state.snow.ground_snow_fraction,
         ..input.energy.ground_flux
@@ -534,6 +542,9 @@ fn validate_soil_step(input: StandardLctSoilInput<'_>, state: &StandardLctSoilSt
             && ground.snow_water_equivalent_kg_m2 == 0.0
             && ground.snow_depth_m == 0.0
             && ground.snow_cover_fraction == 0.0
+            // 无雪分支的 `scv` 恒为 0，所以 `emg` 必然是土壤值（`MOD_Thermal.F90:485`）。
+            // 钉在这里，装配层传成雪值时会当场报错，而不是把 0.97 带进无雪步。
+            && ground.ground_emissivity == crate::ground_emissivity(0.0, ground.patch_type)
             && !input.water.urban_run
             && (input.energy.interception.time_step_seconds - input.water.time_step_seconds).abs()
                 <= 1.0e-12

@@ -1,0 +1,213 @@
+use super::*;
+use std::path::PathBuf;
+
+use colm_namelist::parse;
+
+/// 一个只有 namelist 组头的算例：每一项都落在 schema 的声明默认值上。
+fn empty_case() -> Document {
+    parse("&nl_colm\n/\n").expect("an empty nl_colm group parses")
+}
+
+fn case_with(body: &str) -> Document {
+    parse(&format!("&nl_colm\n{body}\n/\n")).expect("the case parses")
+}
+
+fn golden_case(name: &str) -> Document {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../oracle/cases")
+        .join(name)
+        .join("case.nml");
+    let text = std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
+    parse(&text).unwrap_or_else(|error| panic!("cannot parse {}: {error}", path.display()))
+}
+
+/// 空算例必须逐项等于 `MOD_Namelist.F90` 的声明默认值。
+///
+/// 这条测试的价值在于**它读的是 schema**：映射里任何一处写成字面量（例如把
+/// `DEF_TUNING_CAPR` 的 0.34 抄进代码）都会在默认值变动后与 schema 分叉，
+/// 而那时候只有这条会响。
+#[test]
+fn an_empty_case_maps_every_declared_default() {
+    let physics = land_physics_parameters(&empty_case(), LandCoverScheme::Igbp).unwrap();
+    assert_eq!(physics.hydraulic_model, HydraulicModel::VanGenuchten);
+    assert_eq!(physics.land_cover_scheme, LandCoverScheme::Igbp);
+    assert_eq!(physics.timestep_seconds, 1800.0);
+    assert_eq!(
+        physics.precipitation_scheme,
+        PrecipitationPhaseScheme::WetBulb
+    );
+    assert_eq!(physics.surface_resistance_scheme, 1);
+    assert_eq!(physics.stress_scheme, 1);
+    assert_eq!(physics.surface_layer_scheme, SurfaceLayerScheme::Standard);
+    // 声明默认是 4，而 Balland-Arp 在枚举里排第四。
+    assert_eq!(
+        physics.thermal_conductivity_scheme,
+        ThermalConductivityScheme::BallandArp
+    );
+    assert_eq!(
+        physics.observation_height_mode,
+        ObservationHeightMode::Absolute
+    );
+    // 默认 3 是 Simple VIC（不是 XinAnJiang）。
+    assert_eq!(physics.runoff_scheme, StandardLctRunoffScheme::SimpleVic);
+    assert_eq!(physics.topmodel_decay_tuning, 2.0);
+    assert_eq!(physics.wind_height_m, 100.0);
+    assert_eq!(physics.temperature_height_m, 50.0);
+    assert_eq!(physics.humidity_height_m, 50.0);
+    assert_eq!(physics.soil_roughness_m, 0.01);
+    assert_eq!(physics.snow_roughness_m, 0.0024);
+    assert_eq!(physics.maximum_dew_mm, 0.1);
+    assert_eq!(physics.surface_temperature_factor, 0.34);
+    assert_eq!(physics.crank_nicolson_factor, 0.5);
+    assert_eq!(physics.snow_irreducible_saturation, 0.033);
+    assert_eq!(physics.impermeable_porosity, 0.05);
+    assert_eq!(physics.ponding_limit_mm, 10.0);
+    assert_eq!(physics.minimum_soil_potential_mm, -1.0e8);
+    assert_eq!(physics.maximum_transpiration_mm_s, 2.0e-4);
+    assert_eq!(physics.soil_ice_impedance, 6.0);
+    // `hvap` 是 `MOD_Const_Physical` 的常数，namelist 里没有它。
+    assert_eq!(physics.vaporization_heat_j_kg, 2.5104e6);
+    // 默认不开喷灌，所以速率是 0 —— 但它不是从 namelist 读来的。
+    assert_eq!(physics.sprinkler_irrigation_kg_m2_s, 0.0);
+    assert!(physics.stomata.use_wue);
+    assert!(!physics.stomata.use_medlyn);
+}
+
+/// `DEF_Runoff_SCHEME` 的编号必须照 `MOD_SoilSnowHydrology.F90:315-348` 的派发，
+/// 而不是照枚举上原先那两条写反了的注释。
+#[test]
+fn runoff_scheme_numbers_follow_the_upstream_dispatch() {
+    for (number, expected) in [
+        (0, StandardLctRunoffScheme::Topmodel),
+        (2, StandardLctRunoffScheme::XinAnJiang),
+        (3, StandardLctRunoffScheme::SimpleVic),
+    ] {
+        let physics = land_physics_parameters(
+            &case_with(&format!("DEF_Runoff_SCHEME = {number}")),
+            LandCoverScheme::Igbp,
+        )
+        .unwrap();
+        assert_eq!(
+            physics.runoff_scheme, expected,
+            "DEF_Runoff_SCHEME={number}"
+        );
+    }
+}
+
+/// 1 是 VIC 产流。本仓库只移植了 `vic.rs` 的独立内核，没有把它接进方案枚举，
+/// 所以这里必须报错 —— 挑一个相邻方案会让算例跑完却给出别的产流。
+#[test]
+fn the_unported_vic_runoff_scheme_is_refused() {
+    let error = land_physics_parameters(&case_with("DEF_Runoff_SCHEME = 1"), LandCoverScheme::Igbp)
+        .expect_err("the VIC runoff scheme is not ported");
+    let message = error.to_string();
+    assert!(message.contains("VIC"), "{message}");
+    assert!(message.contains("not ported"), "{message}");
+}
+
+#[test]
+fn irrigation_is_refused_rather_than_run_dry() {
+    let error = land_physics_parameters(
+        &case_with("DEF_USE_IRRIGATION = .true."),
+        LandCoverScheme::Igbp,
+    )
+    .expect_err("the sprinkler schedule is not ported");
+    assert!(error.to_string().contains("DEF_USE_IRRIGATION"));
+}
+
+/// 金标准算例用的是 `DEF_Runoff_SCHEME = 3`，也就是 Simple VIC。
+/// 这条把映射接到**仓库里那份真实算例**上，而不是只有构造出来的输入。
+#[test]
+fn the_checked_in_golden_case_selects_simple_vic() {
+    let physics = land_physics_parameters(&golden_case("CN-Cng"), LandCoverScheme::Igbp).unwrap();
+    assert_eq!(physics.runoff_scheme, StandardLctRunoffScheme::SimpleVic);
+    assert_eq!(physics.land_cover_scheme, LandCoverScheme::Igbp);
+    assert_eq!(physics.timestep_seconds, 1800.0);
+}
+
+#[test]
+fn canopy_settings_can_be_overridden_from_the_case() {
+    // `DEF_USE_WUEST` 必须显式关掉：它的声明默认是 `.true.`，留着就会与
+    // `DEF_USE_MEDLYNST` 撞上，而上游对撞车的处置是把两者都关掉（见
+    // `both_stomata_switches_on_fall_back_to_ball_berry`）。
+    let physics = land_physics_parameters(
+        &case_with(
+            "DEF_USE_MEDLYNST = .true.\n\
+             DEF_USE_WUEST = .false.\n\
+             DEF_MEDLYN_G1 = 4.5\n\
+             DEF_WUE_LAMBDA = 1200.\n\
+             DEF_USE_Campbell_SOIL_MODEL = .true.\n\
+             DEF_USE_CBL_HEIGHT = .true.\n\
+             DEF_forcing%HEIGHT_mode = 'relative'\n\
+             DEF_TUNING_CAPR = 0.4",
+        ),
+        LandCoverScheme::Usgs,
+    )
+    .unwrap();
+    assert_eq!(physics.hydraulic_model, HydraulicModel::Campbell);
+    assert_eq!(physics.surface_layer_scheme, SurfaceLayerScheme::LargeEddy);
+    assert_eq!(
+        physics.observation_height_mode,
+        ObservationHeightMode::RelativeToCanopy
+    );
+    assert_eq!(physics.surface_temperature_factor, 0.4);
+    assert_eq!(physics.land_cover_scheme, LandCoverScheme::Usgs);
+    assert!(physics.stomata.use_medlyn);
+    // 阈值判定在内核里，所以映射把 namelist 的值原样带过去。
+    assert_eq!(physics.stomata.medlyn_g1_override, Some(4.5));
+    assert_eq!(physics.stomata.wue_lambda_override, Some(1200.0));
+}
+
+/// 两个气孔开关都开时**上游不报错**：`MOD_Namelist.F90:2080-2088` 把两者都置为
+/// `.false.`，落回 Ball-Berry。映射照做，而不是拒绝这个算例。
+#[test]
+fn both_stomata_switches_on_fall_back_to_ball_berry() {
+    let physics = land_physics_parameters(
+        &case_with("DEF_USE_MEDLYNST = .true.\nDEF_USE_WUEST = .true."),
+        LandCoverScheme::Igbp,
+    )
+    .expect("upstream resolves this conflict instead of failing");
+    assert!(!physics.stomata.use_medlyn);
+    assert!(!physics.stomata.use_wue);
+}
+
+/// 观测高度模式拼错一个字母就该报错：它决定每个参考高度是绝对高度还是相对冠层，
+/// 静默落进另一支会让整条湍流交换算错而没有任何迹象。
+#[test]
+fn a_misspelled_height_mode_is_refused() {
+    let error = land_physics_parameters(
+        &case_with("DEF_forcing%HEIGHT_mode = 'absolut'"),
+        LandCoverScheme::Igbp,
+    )
+    .expect_err("a misspelled mode must not fall through");
+    assert!(error.to_string().contains("absolut"));
+}
+
+#[test]
+fn unknown_and_out_of_range_fields_are_refused() {
+    // 拼错的字段名没有声明默认值可退，必须报错而不是猜。
+    assert!(
+        land_physics_parameters(&case_with("DEF_Runoff_SCHEME = 9"), LandCoverScheme::Igbp)
+            .is_err()
+    );
+    assert!(land_physics_parameters(
+        &case_with("DEF_THERMAL_CONDUCTIVITY_SCHEME = 9"),
+        LandCoverScheme::Igbp
+    )
+    .is_err());
+    assert!(land_physics_parameters(
+        &case_with("DEF_precip_phase_discrimination_scheme = 'IV'"),
+        LandCoverScheme::Igbp
+    )
+    .is_err());
+}
+
+#[test]
+fn fortran_real_literals_parse_with_suffixes_and_d_exponents() {
+    assert_eq!(parse_fortran_real("1800.").unwrap(), 1800.0);
+    assert_eq!(parse_fortran_real("-1.e36_r8").unwrap(), -1.0e36);
+    assert_eq!(parse_fortran_real("2.e-008").unwrap(), 2.0e-8);
+    assert_eq!(parse_fortran_real("1.5D3").unwrap(), 1500.0);
+    assert!(parse_fortran_real("not a number").is_err());
+}

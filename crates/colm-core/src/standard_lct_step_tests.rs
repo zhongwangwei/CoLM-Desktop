@@ -268,6 +268,20 @@ fn standard_lct_snow_soil_step_carries_active_snow_and_soil_columns() {
 
     let first = standard_lct_snow_soil_step(input, &mut state).unwrap();
     assert_eq!(state.snow.layer_count, -2);
+
+    // 调用方传进来的 `emg` 不影响结果：积雪链按**本步**的 `scv` 自己推
+    // （`MOD_Thermal.F90:485-486`）。传一个明显不同的值必须算出相同的结果，
+    // 否则融雪之后仍会按雪面辐射。
+    let mut stale = input;
+    stale.energy.ground_temperature.ground_emissivity = 0.5;
+    stale.energy.leaf_temperature.ground_emissivity = 0.5;
+    let mut fresh_state = state.clone();
+    let mut stale_state = state.clone();
+    assert_eq!(
+        standard_lct_snow_soil_step(input, &mut fresh_state).unwrap(),
+        standard_lct_snow_soil_step(stale, &mut stale_state).unwrap()
+    );
+
     let output = standard_lct_snow_soil_step(input, &mut state).unwrap();
 
     assert!(first.energy.interception.ground_snow_kg_m2_s > 0.0);

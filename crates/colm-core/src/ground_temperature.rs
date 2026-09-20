@@ -20,6 +20,28 @@ const AIR_THERMAL_CONDUCTIVITY_W_M_K: f64 = 0.023;
 const ICE_THERMAL_CONDUCTIVITY_W_M_K: f64 = 2.290;
 const STEFAN_BOLTZMANN_W_M2_K4: f64 = 5.67e-8;
 
+/// `MOD_Thermal.F90:485-486` 的地表比辐射率 `emg`。
+///
+/// **它是逐步骤推出的量，不是算例参数。** 上游每次进 THERMAL 先重置为土壤值，
+/// 只有"雪水当量大于零"或"patch 是湖"时才抬到雪值：
+///
+/// ```fortran
+/// emg = 0.96
+/// IF (scv>0. .or. patchtype==3) emg = 0.97
+/// ```
+///
+/// 把它当常量装配的后果是**雪完全融化之后仍然按雪面辐射**，而那一支算例里的
+/// 能量收支看上去依旧闭合 —— 单点测试看不出来。
+///
+/// `snow_water_equivalent_kg_m2` 就是上游的 `scv`（mm 与 kg m⁻² 同值）。
+pub fn ground_emissivity(snow_water_equivalent_kg_m2: f64, patch_type: i32) -> f64 {
+    if snow_water_equivalent_kg_m2 > 0.0 || patch_type == 3 {
+        0.97
+    } else {
+        0.96
+    }
+}
+
 /// Inputs to one `MOD_GroundTemperature:GroundTemperature` update.
 #[derive(Debug, Clone, Copy)]
 pub struct GroundTemperatureInput<'a> {

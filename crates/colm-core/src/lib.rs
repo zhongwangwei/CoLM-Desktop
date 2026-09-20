@@ -114,7 +114,9 @@ pub use forcing_downscaling::{
 pub use glacier::{glacier_water, GlacierSurfaceWater, GlacierWaterInput};
 pub use ground_fluxes::{ground_fluxes, GroundFluxInput, GroundFluxState};
 pub use ground_humidity::{non_split_ground_humidity, GroundHumidityInput, GroundHumidityState};
-pub use ground_temperature::{ground_temperature, GroundTemperatureInput, GroundTemperatureState};
+pub use ground_temperature::{
+    ground_emissivity, ground_temperature, GroundTemperatureInput, GroundTemperatureState,
+};
 pub use ground_thermal_step::{
     ground_thermal_step, GroundThermalStepInput, GroundThermalStepState,
 };

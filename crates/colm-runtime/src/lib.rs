@@ -7,6 +7,7 @@
 
 pub mod assembly;
 pub mod history;
+pub mod physics;
 
 use std::path::{Path, PathBuf};
 
@@ -933,7 +934,6 @@ mod tests {
                 ball_berry_slope_override: None,
                 ball_berry_intercept_override: None,
             },
-            wue_lambda: 2.0,
             soil_ice_impedance: 6.0,
             snow_irreducible_saturation: 0.033,
             impermeable_porosity: 0.05,
@@ -948,7 +948,6 @@ mod tests {
             wind_height_m: 30.0,
             temperature_height_m: 30.0,
             humidity_height_m: 30.0,
-            ground_emissivity: 0.96,
             vaporization_heat_j_kg: 2.5104e6,
             sprinkler_irrigation_kg_m2_s: 0.0,
             runoff_scheme: crate::assembly::StandardLctRunoffScheme::Topmodel,

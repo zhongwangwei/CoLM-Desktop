@@ -96,3 +96,16 @@ fn surface_energy_can_melt_soil_ice_through_the_shared_phase_kernel() {
     assert!(state.thaw_mass_kg_m2[0] > 0.0);
     assert!((state.liquid_water_kg_m2[0] + state.ice_water_kg_m2[0] - 25.0).abs() < 1.0e-12);
 }
+
+/// `MOD_Thermal.F90:485-486`：土壤 0.96，一旦有雪水当量或 patch 是湖就抬到 0.97。
+///
+/// 钉住这三条是为了防止有人把它"简化"成常量 —— 常量在无雪算例里完全正确，
+/// 所以只有积雪融化那一步会错，而那种错在能量收支上很难看出来。
+#[test]
+fn ground_emissivity_follows_snow_water_and_lake_patch_type() {
+    assert_eq!(ground_emissivity(0.0, 0), 0.96);
+    assert_eq!(ground_emissivity(0.0, 3), 0.97);
+    assert_eq!(ground_emissivity(1.0e-9, 0), 0.97);
+    assert_eq!(ground_emissivity(31.0, 0), 0.97);
+    assert_eq!(ground_emissivity(31.0, 3), 0.97);
+}

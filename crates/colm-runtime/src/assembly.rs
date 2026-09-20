@@ -82,8 +82,11 @@ pub struct LandPhysicsParameters {
     pub surface_layer_scheme: SurfaceLayerScheme,
     pub thermal_conductivity_scheme: ThermalConductivityScheme,
     pub observation_height_mode: ObservationHeightMode,
+    /// 气孔方案与 namelist 的四个覆盖。
+    ///
+    /// WUE 的**基准值**不在这里：它来自地类表（`ClassConstants::wue_lambda`），
+    /// namelist 的 `DEF_WUE_LAMBDA` 只是覆盖（`StomataOptions::wue_lambda_override`）。
     pub stomata: StomataOptions,
-    pub wue_lambda: f64,
     /// `DEF_TUNING_SOIL_ICE_IMPEDANCE`（冻结土壤的水力阻抗指数，默认 6.0）。
     ///
     /// **不是** `DEF_TUNING_SSI`：后者是雪的不可约含水饱和度（默认 0.033），见
@@ -109,8 +112,6 @@ pub struct LandPhysicsParameters {
     pub wind_height_m: f64,
     pub temperature_height_m: f64,
     pub humidity_height_m: f64,
-    /// `DEF_EMIS`。
-    pub ground_emissivity: f64,
     /// 汽化潜热。上游 `MOD_Const_Physical.F90` 里就是常数 `hvap = 2.5104e6`，
     /// 不随温度变，所以它留在这里而不是每步绑定里。
     pub vaporization_heat_j_kg: f64,
@@ -125,11 +126,15 @@ pub struct LandPhysicsParameters {
 /// `DEF_Runoff_SCHEME` 的三个本分支可用取值。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StandardLctRunoffScheme {
-    /// `DEF_Runoff_SCHEME=0`，用常数重启的 `fsatmax`/`fsatdcf`。
+    /// `DEF_Runoff_SCHEME=0`（TOPMODEL），用常数重启的 `fsatmax`/`fsatdcf`。
     Topmodel,
-    /// `DEF_Runoff_SCHEME=1`，用常数重启的 `elvstd`。
+    /// `DEF_Runoff_SCHEME=2`（XinAnJiang），用常数重启的 `elvstd`。
+    ///
+    /// **不是 1。** 上游 `MOD_SoilSnowHydrology.F90:315-348` 的派发是
+    /// 0=TOPMODEL、1=VIC、2=XinAnJiang、3=SimpleVIC；本枚举早先的两条注释把 1 与 2
+    /// 写反了，照注释写映射会把两个方案对调，而两者都能跑完、只给出不同的产流。
     XinAnJiang,
-    /// `DEF_Runoff_SCHEME=2`，用常数重启的 `BVIC`。
+    /// `DEF_Runoff_SCHEME=3`（Simple VIC），用常数重启的 `BVIC`。
     SimpleVic,
 }
 
@@ -193,6 +198,9 @@ struct SnowSoilTemplate {
 pub struct StandardLctRestartTemplate {
     pub patch: usize,
     pub physics: LandPhysicsParameters,
+    /// 重启里的 `patchtype`。本分支要求它是 0（土壤），但 `emg` 的推法要按它判，
+    /// 所以留着而不是当常量写死。
+    pub patch_type: i32,
     /// 常数重启里的 29 个土壤场，保留下来是因为派生量都能从它复算。
     pub soil: SoilState,
     soil_thermal_inputs: Vec<SoilThermalInput>,
@@ -220,6 +228,8 @@ pub struct StandardLctRestartTemplate {
     /// `land_class` 是**上游的 1 基下标**（`patchclass + 1`），与
     /// `ClassConstants::new` 同义；公开出来是为了让调用方能对着它查表。
     pub land_class: usize,
+    /// `lambda`：WUE 的基准值，来自地类表（不是 namelist）。
+    pub wue_lambda: f64,
     pub root_fraction: Vec<f64>,
     pub leaf_angle_distribution: f64,
     pub inverse_sqrt_leaf_dimension_m_neg_half: f64,
@@ -524,6 +534,7 @@ fn assemble(
 
     Ok(StandardLctRestartTemplate {
         patch,
+        patch_type: i32::try_from(patch_type).context("patchtype is outside the kernel's range")?,
         soil,
         soil_thermal_inputs,
         soil_hydraulic_model,
@@ -545,6 +556,7 @@ fn assemble(
         stem_area_index,
         snow_cover_fraction,
         land_class: fortran_class_index,
+        wue_lambda: class.wue_lambda(),
         root_fraction,
         leaf_angle_distribution,
         inverse_sqrt_leaf_dimension_m_neg_half,
@@ -692,7 +704,7 @@ impl StandardLctRestartTemplate {
                     // 内核覆盖：`leaf_input` 用本步的土壤水分胁迫与时间步。
                     soil_water_stress_sunlit: 0.0,
                     soil_water_stress_shaded: 0.0,
-                    wue_lambda: physics.wue_lambda,
+                    wue_lambda: self.wue_lambda,
                     direct_extinction: self.radiation.direct_extinction,
                     diffuse_extinction: self.radiation.diffuse_extinction,
                     wind_height_m: physics.wind_height_m,
@@ -733,7 +745,13 @@ impl StandardLctRestartTemplate {
                     snow_specific_humidity: 0.0,
                     ground_humidity_temperature_slope_k: 0.0,
                     soil_surface_resistance_s_m: 0.0,
-                    ground_emissivity: physics.ground_emissivity,
+                    // `MOD_Thermal.F90:485-486` 的 `emg`：雪有水量或 patch 是湖就抬到 0.97。
+                    // 无雪分支里 `scv` 恒为 0，所以这里必然给 0.96；积雪分支的内核会用
+                    // **本步**的 `scv` 再覆盖一次（融完之后要退回 0.96）。
+                    ground_emissivity: colm_core::ground_emissivity(
+                        self.snow.water_equivalent_kg_m2,
+                        self.patch_type,
+                    ),
                     precipitation_temperature_k: forcing.air_temperature_k,
                     intercepted_rain_kg_m2_s: 0.0,
                     intercepted_snow_kg_m2_s: 0.0,
@@ -789,7 +807,13 @@ impl StandardLctRestartTemplate {
                     evaporation_snow_kg_m2_s: 0.0,
                     ground_flux_temperature_derivative_w_m2_k: 0.0,
                     vaporization_heat_j_kg: physics.vaporization_heat_j_kg,
-                    ground_emissivity: physics.ground_emissivity,
+                    // `MOD_Thermal.F90:485-486` 的 `emg`：雪有水量或 patch 是湖就抬到 0.97。
+                    // 无雪分支里 `scv` 恒为 0，所以这里必然给 0.96；积雪分支的内核会用
+                    // **本步**的 `scv` 再覆盖一次（融完之后要退回 0.96）。
+                    ground_emissivity: colm_core::ground_emissivity(
+                        self.snow.water_equivalent_kg_m2,
+                        self.patch_type,
+                    ),
                     rain_on_ground_kg_m2_s: 0.0,
                     snow_on_ground_kg_m2_s: 0.0,
                     precipitation_temperature_k: forcing.air_temperature_k,
