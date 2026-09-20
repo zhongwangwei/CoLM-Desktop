@@ -147,6 +147,7 @@ fn the_bridge_writes_the_state_variables_it_declares() {
     .unwrap();
     set_lct_fluxes(&mut buffer, 0, &output.water).unwrap();
     set_lct_energy_fluxes(&mut buffer, 0, &output).unwrap();
+    set_lct_surface_diagnostics(&mut buffer, 0, &output.energy.leaf).unwrap();
     buffer.set_time(0, 56_802_270).unwrap();
     let path = root.join("history.nc");
     buffer.write(&path).unwrap();
@@ -157,6 +158,7 @@ fn the_bridge_writes_the_state_variables_it_declares() {
         .iter()
         .chain(LCT_FLUX_VARIABLES.iter())
         .chain(LCT_ENERGY_VARIABLES.iter())
+        .chain(LCT_SURFACE_VARIABLES.iter())
     {
         assert!(
             file.variable(&format!("f_{name}")).is_some(),
@@ -258,6 +260,7 @@ fn the_written_schema_matches_the_golden_file_for_the_shared_variables() {
         .iter()
         .chain(LCT_FLUX_VARIABLES.iter())
         .chain(LCT_ENERGY_VARIABLES.iter())
+        .chain(LCT_SURFACE_VARIABLES.iter())
     {
         let file_name = format!("f_{name}");
         let ours = written.variable(&file_name).unwrap();
@@ -290,7 +293,7 @@ fn the_written_schema_matches_the_golden_file_for_the_shared_variables() {
         }
     }
     assert!(
-        compared >= 22,
+        compared >= 34,
         "only {compared} variables were compared against the golden file; skipped: {skipped:?}"
     );
     std::fs::remove_dir_all(root).unwrap();
@@ -344,6 +347,7 @@ fn the_snow_branch_fills_the_snow_span() {
         },
     )
     .unwrap();
+    set_lct_surface_diagnostics(&mut buffer, 0, &output.energy.leaf).unwrap();
     buffer.set_time(0, 56_802_270).unwrap();
     let path = root.join("history.nc");
     buffer.write(&path).unwrap();

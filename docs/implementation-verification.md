@@ -1608,3 +1608,25 @@ lfevpa = hvap*fevpl + htvp*fevpg   ! W/m^2 (accounting for sublimation)   ! MOD_
 
 `cargo test -p colm-runtime --lib`：43 通过。schema 逐变量比对现在覆盖 **22 项**
 （`qcharge` 不在黄金算例里，被显式跳过），四个能量量与这一步的输出逐项相等。
+
+## history 桥再补十三个地表诊断（2026 年）
+
+新增 `taux`/`tauy`（动量通量）、`tref`/`qref`（2 m 气温与比湿）、`z0m`、`zol`、`rib`、
+`ustar`、`qstar`、`tstar`、`fm`/`fh`/`fq`（Monin-Obukhov 诊断），共 **36** 项。上游把这
+十三个量原样累加后写出（`MOD_Vars_1DAccFluxes.F90` 的 `CALL acc1d (x, a_x)`），与本仓库
+内核的字段是同一批量：`z0m = z0mv`、`tref`/`qref` 由 `MOD_LeafTemperature.F90:1261-1262`
+算出，其余是地表层诊断，名字一一对应、不经换算。
+
+**又排除两个"名字像"的量**（前两个是 `canopy_scaling`/`cint` 与 `lfevpa`）：
+
+- `emis` 是**平均体积发射率**（`MOD_Thermal.F90:1360` 的 `emis = olru/olrb`），不是算例里
+  那个固定的地表发射率。配上会让每个算例都写一个错的值。
+- `rss` 在 `DEF_RSS_SCHEME == 4` 下被赋成 `1.`（LP92 的电导标志），其余方案才由
+  `SoilSurfaceResistance` 输出阻力（`MOD_Thermal.F90:618-628`）。同一个变量两种含义，
+  条件映射得先核对那个子程序的输出语义。
+
+两个都记进 `UNFILLED` 与代码注释，连同缺的量。
+
+### 证据
+
+`cargo test -p colm-runtime --lib`：43 通过。schema 逐变量比对现在覆盖 **34 项**。

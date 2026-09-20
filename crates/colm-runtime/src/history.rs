@@ -55,6 +55,24 @@ pub const LCT_STATE_VARIABLES: [&str; 13] = [
 /// 偏高的潜热通量，而海平面无雪算例看不出来。
 pub const LCT_ENERGY_VARIABLES: [&str; 4] = ["fsena", "fevpa", "etr", "sabg"];
 
+/// 本层能填的**地表诊断**量，十三个，全部来自叶温/地表层求解的直接输出。
+///
+/// 上游把每一个都原样累加后写出（`MOD_Vars_1DAccFluxes.F90` 的
+/// `CALL acc1d (x, a_x)`），所以它们与本仓库内核的字段是同一批量：
+/// `z0m = z0mv`（`MOD_LeafTemperature.F90:1034`）、`tref`/`qref` 由 `:1261-1262` 算出，
+/// 其余是 Monin-Obukhov 诊断。名字一一对应，不经过任何换算。
+///
+/// **两个看起来很像的量刻意不在此列：**
+/// - `emis` 是**平均体积发射率**（`MOD_Thermal.F90:1360` 的 `emis = olru/olrb`），
+///   不是算例里那个固定的地表发射率；
+/// - `rss` 在方案 4 下被赋成 `1.`（LP92 的**电导标志**），其余方案才是阻力
+///   （`MOD_Thermal.F90:618-628`）。同一个变量两种含义，条件映射得先核对
+///   `SoilSurfaceResistance` 的输出语义。
+pub const LCT_SURFACE_VARIABLES: [&str; 13] = [
+    "taux", "tauy", "tref", "qref", "z0m", "zol", "rib", "ustar", "qstar", "tstar", "fm", "fh",
+    "fq",
+];
+
 /// 本层能填的**水文诊断**量：全部来自 `WATER_2014` 的输出，共六个。
 ///
 /// 每一个的单位都与闸门表核对过（`qinfl`/`rnof`/`rsub`/`rsur`/`qcharge` 是 `mm/s`，
@@ -71,20 +89,54 @@ pub const NOT_IN_GOLDEN: [&str; 1] = ["qcharge"];
 /// 黄金算例里有、但本层还填不出来的量（按用途分组，便于下一步挑）。
 ///
 /// 这份清单不参与写出，只是把"缺口"写死在代码里：改它就得同时改注释。
-pub const UNFILLED: [&str; 5] = [
-    "辐射收支（rnet/sabv/olrg）：需要把短波、长波各项分别接出来",
-    "地面热通量与潜热（fgrnd/lfevpa）：`lfevpa` 含升华项 `htvp`，内核当前没有这个量",
+pub const UNFILLED: [&str; 6] = [
+    "辐射收支（rnet/sabv/olrg/emis）与地面热通量（fgrnd）：需要把短波、长波各项分别接出来",
+    "`rss`：方案 4 下上游写的是电导标志而不是阻力，条件映射待核对",
+    "`lfevpa`：含升华项 `htvp`，内核当前没有这个量",
     "分层植被量（laisun/laisha/ssun/ssha/…）：需要冠层分层输出",
     "派生土壤量（h2osoi/…）：需要先核对上游对每个量的定义",
     "湖泊与 BGC 量：各自的分支还没有运行时驱动",
 ];
 
-/// 声明本层能填的变量：状态十三项 + 诊断六项。
+/// 声明本层能填的全部变量：状态十三项 + 水文六项 + 能量四项 + 地表十三项。
 pub fn declare_lct_variables(buffer: &mut HistoryBuffers) -> Result<()> {
     let mut names = LCT_STATE_VARIABLES.to_vec();
     names.extend_from_slice(&LCT_FLUX_VARIABLES);
     names.extend_from_slice(&LCT_ENERGY_VARIABLES);
+    names.extend_from_slice(&LCT_SURFACE_VARIABLES);
     buffer.declare(&names)
+}
+
+/// 把一步的地表诊断写进第 `record` 条记录。
+pub fn set_lct_surface_diagnostics(
+    buffer: &mut HistoryBuffers,
+    record: usize,
+    leaf: &colm_core::LeafTemperatureOutput,
+) -> Result<()> {
+    for (name, value) in [
+        ("taux", leaf.eastward_stress_kg_m_s2),
+        ("tauy", leaf.northward_stress_kg_m_s2),
+        ("tref", leaf.air_temperature_2m_k),
+        ("qref", leaf.air_specific_humidity_2m),
+        ("z0m", leaf.momentum_roughness_m),
+        ("zol", leaf.zol),
+        ("rib", leaf.bulk_richardson),
+        ("ustar", leaf.friction_velocity_m_s),
+        ("qstar", leaf.humidity_scale),
+        ("tstar", leaf.temperature_scale_k),
+        ("fm", leaf.momentum_similarity),
+        ("fh", leaf.heat_similarity),
+        ("fq", leaf.moisture_similarity),
+    ] {
+        ensure!(
+            value.is_finite(),
+            "the history value for {name} is not finite"
+        );
+        buffer
+            .set_patch_scalar(name, record, value)
+            .with_context(|| format!("cannot write {name} into the history buffers"))?;
+    }
+    Ok(())
 }
 
 /// 把一步的能量侧诊断写进第 `record` 条记录。
@@ -336,7 +388,8 @@ impl HistorySession {
         self.push(end, |buffer, record| {
             set_lct_state(buffer, record, template, state, ground)?;
             set_lct_fluxes(buffer, record, &output.water)?;
-            set_lct_energy_fluxes(buffer, record, output)
+            set_lct_energy_fluxes(buffer, record, output)?;
+            set_lct_surface_diagnostics(buffer, record, &output.energy.leaf)
         })
     }
 
