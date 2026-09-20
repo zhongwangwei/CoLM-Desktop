@@ -229,6 +229,13 @@ fn the_bridge_writes_the_state_variables_it_declares() {
     set_lct_forcing_mirrors(&mut buffer, 0, reference()).unwrap();
     set_lct_radiation_bands(&mut buffer, 0, &output.energy).unwrap();
     set_lct_canopy_geometry(&mut buffer, 0, &state.energy, &output.energy).unwrap();
+    set_lct_derived_soil(
+        &mut buffer,
+        0,
+        template.soil_layer_thickness_m(),
+        &state.water,
+    )
+    .unwrap();
     buffer.set_time(0, 56_802_270).unwrap();
     let path = root.join("history.nc");
     buffer.write(&path).unwrap();
@@ -244,6 +251,7 @@ fn the_bridge_writes_the_state_variables_it_declares() {
         .chain(LCT_FORCING_VARIABLES.iter())
         .chain(LCT_RADIATION_VARIABLES.iter())
         .chain(LCT_CANOPY_VARIABLES.iter())
+        .chain(LCT_DERIVED_SOIL_VARIABLES.iter())
         .chain(DECLARED_ONLY.iter())
     {
         assert!(
@@ -439,6 +447,7 @@ fn the_written_schema_matches_the_golden_file_for_the_shared_variables() {
         .chain(LCT_FORCING_VARIABLES.iter())
         .chain(LCT_RADIATION_VARIABLES.iter())
         .chain(LCT_CANOPY_VARIABLES.iter())
+        .chain(LCT_DERIVED_SOIL_VARIABLES.iter())
         .chain(DECLARED_ONLY.iter())
     {
         let file_name = format!("f_{name}");
@@ -836,6 +845,57 @@ fn the_accumulator_skips_missing_samples_and_counts_only_valid_ones() {
         values,
         vec![64.0],
         "one valid sample in a two-step record must average to itself, not to half"
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// `h2osoi` 必须**液相与固相各用自己的密度**。
+///
+/// 上游 `CoLMMAIN.F90:2253` 是
+/// `wliq/(dz*denh2o) + wice/(dz*denice)`，`denh2o=1000`、`denice=917`。
+/// 写成 `(wliq+wice)/(dz*1000)` 是这里最容易犯的错，而且**只在冻土上显形**：
+/// 纯液相时两种写法逐位相同。所以这条测试专门喂一列**纯冰**，把两者分开。
+#[test]
+fn the_derived_soil_moisture_uses_both_phase_densities() {
+    let mut buffer = HistoryBuffers::new(dimensions(), site(), 1);
+    buffer.declare(&["h2osoi"]).unwrap();
+    // 夹具的 `soil` 维度是真实的 `nl_soil = 10`，所以列也得是 10 层。
+    // 第一层纯冰、第二层纯液态，密度一比就分得开，其余留零。
+    let mut thickness = vec![0.1; 10];
+    thickness[1] = 0.2;
+    let mut liquid = vec![0.0; 10];
+    liquid[1] = 20.0;
+    let mut ice = vec![0.0; 10];
+    ice[0] = 9.17;
+    let water = colm_core::Water2014SoilState {
+        liquid_water_kg_m2: liquid,
+        ice_water_kg_m2: ice,
+        water_table_depth_m: 0.0,
+        aquifer_water_mm: 0.0,
+        surface_water_mm: 0.0,
+    };
+    set_lct_derived_soil(&mut buffer, 0, &thickness, &water).unwrap();
+    buffer.set_time(0, 56_802_270).unwrap();
+    let root = temp_dir("h2osoi-densities");
+    let path = root.join("history.nc");
+    buffer.write(&path).unwrap();
+    let file = netcdf::open(&path).unwrap();
+    let values = file
+        .variable("f_h2osoi")
+        .unwrap()
+        .get_values::<f64, _>(..)
+        .unwrap();
+    // 冰：9.17/(0.1*917) = 0.1；若误用 1000 会得到 0.0917。
+    assert!(
+        (values[0] - 0.1).abs() < 1.0e-12,
+        "pure ice must divide by denice (917), got {}",
+        values[0]
+    );
+    // 液态：20/(0.2*1000) = 0.1。
+    assert!(
+        (values[1] - 0.1).abs() < 1.0e-12,
+        "liquid must divide by denh2o (1000), got {}",
+        values[1]
     );
     std::fs::remove_dir_all(root).unwrap();
 }

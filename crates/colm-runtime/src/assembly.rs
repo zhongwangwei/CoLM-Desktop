@@ -1742,6 +1742,14 @@ impl StandardLctRestartTemplate {
         self.temperature_k.len()
     }
 
+    /// 土层层厚（m），`nl_soil` 项。
+    ///
+    /// `h2osoi` 要从每层的 kg/m² 换算成体积含水率
+    /// （`CoLMMAIN.F90:2253`），而层厚只存在于模板里、步输出不带它。
+    pub fn soil_layer_thickness_m(&self) -> &[f64] {
+        &self.layer_thickness_m
+    }
+
     /// 时间重启里雪段的槽位数（`soilsnow - soil`），与编译期的 `maxsnl` 一致。
     pub fn snow_slots(&self) -> usize {
         SNOW_SLOTS

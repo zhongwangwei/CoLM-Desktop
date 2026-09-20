@@ -94,6 +94,25 @@ pub const LCT_SURFACE_VARIABLES: [&str; 13] = [
 /// 它不是默认产出量。
 pub const LCT_FLUX_VARIABLES: [&str; 6] = ["qinfl", "rnof", "rsub", "rsur", "qcharge", "frcsat"];
 
+/// 本层能填的**派生土壤**量，一项。
+///
+/// `h2osoi` 是体积含水率，上游 `CoLMMAIN.F90:2253`：
+///
+/// ```fortran
+/// h2osoi = wliq_soisno(1:)/(dz_soisno(1:)*denh2o) + wice_soisno(1:)/(dz_soisno(1:)*denice)
+/// ```
+///
+/// **液相与固相各用自己的密度**（1000 与 917 kg/m³），不是统一除以 1000 ——
+/// 写成 `(wliq+wice)/(dz*1000)` 会把冰的贡献低估约 8%，而 1 月算例表层是
+/// `wice = 4.3` 对 `wliq = 6.0`，正好落在会被看出来的量级。
+/// 层是**土层**那 `nl_soil` 层（雪层在负下标），所以维度是 `(time, patch, soil)`。
+pub const LCT_DERIVED_SOIL_VARIABLES: [&str; 1] = ["h2osoi"];
+
+/// 上游 `MOD_Const_Physical.F90` 的 `denh2o`/`denice`。两者在 f32 里都能精确表示，
+/// 所以写十进制字面量不会引入误差。
+const WATER_DENSITY_KG_M3: f64 = 1000.0;
+const ICE_DENSITY_KG_M3: f64 = 917.0;
+
 /// 本层能填的**冠层几何**量，三项。
 ///
 /// `sigf` 是"未被雪埋的植被比例"（`MOD_SnowFraction`），本来就在步状态里
@@ -199,12 +218,11 @@ pub const NOT_IN_GOLDEN: [&str; 1] = ["qcharge"];
 ///
 /// 这份清单不参与写出，只是把"缺口"写死在代码里：改它就得同时改注释。
 pub const UNFILLED: [&str; 5] = [
+    "`green`：上游由 `MOD_LAIEmpirical.F90:132-135` 从 `fveg = vegc(ivt)` 得出，而 `vegc` 是该模块内的硬编码表，本仓库还没搬",
+    "`alb`：四维 `(time,patch,rtyp,band)`，内核算得出但没落进步输出",
     "`rss`：方案 4 下上游写的是电导标志而不是阻力，条件映射待核对",
-    "`laisun`/`laisha`/`ssun`/`ssha`：需要冠层 `fsun` 落进步输出（内核里算过，只是没带出来）",
     "`ldew`/`qintr`/`qdrip`：需要一个冠层截留**状态**出口，目前只有通量",
-    "`h2osoi`：定义已核对清楚（见下），只差把它接到分层写出上",
-    "10 m 风/稳定度（us10m/vs10m/fm10m/ustar2）：出自另一支 `Shaofeng, 2023` 的廓线routine，尚未移植",
-    "湖泊与 BGC 量：各自的分支还没有运行时驱动",
+    "10 m 风/稳定度（us10m/vs10m/fm10m/ustar2）：出自另一支 `Shaofeng, 2023` 的廓线 routine；湖泊/湿地/BGC 量各自的分支还没有运行时驱动",
 ];
 
 /// 声明本层能填的全部变量：状态十三项 + 水文六项 + 能量四项 + 地表十三项。
@@ -218,6 +236,7 @@ pub fn declare_lct_variables(buffer: &mut HistoryBuffers) -> Result<()> {
     names.extend_from_slice(&LCT_FORCING_VARIABLES);
     names.extend_from_slice(&LCT_RADIATION_VARIABLES);
     names.extend_from_slice(&LCT_CANOPY_VARIABLES);
+    names.extend_from_slice(&LCT_DERIVED_SOIL_VARIABLES);
     names.extend_from_slice(&DECLARED_ONLY);
     buffer.declare(&names)
 }
@@ -658,6 +677,41 @@ pub fn set_lct_stomatal_diagnostics(
     Ok(())
 }
 
+/// 把一步的派生土壤量写进第 `record` 条记录。
+///
+/// 只做单位换算，公式见 [`LCT_DERIVED_SOIL_VARIABLES`]。层厚由模板提供，
+/// 液体/冰由状态提供，长度都必须等于 `nl_soil`。
+pub fn set_lct_derived_soil(
+    sink: &mut impl HistorySink,
+    record: usize,
+    thickness: &[f64],
+    water: &colm_core::Water2014SoilState,
+) -> Result<()> {
+    let liquid = &water.liquid_water_kg_m2;
+    let ice = &water.ice_water_kg_m2;
+    ensure!(
+        thickness.len() == liquid.len() && thickness.len() == ice.len(),
+        "the soil columns disagree on depth: {} thickness, {} liquid, {} ice",
+        thickness.len(),
+        liquid.len(),
+        ice.len()
+    );
+    let h2osoi = thickness
+        .iter()
+        .zip(liquid)
+        .zip(ice)
+        .map(|((dz, wliq), wice)| {
+            wliq / (dz * WATER_DENSITY_KG_M3) + wice / (dz * ICE_DENSITY_KG_M3)
+        })
+        .collect::<Vec<_>>();
+    ensure!(
+        h2osoi.iter().all(|value| value.is_finite()),
+        "the derived h2osoi column is not finite"
+    );
+    sink.layer("h2osoi", record, &h2osoi)?;
+    Ok(())
+}
+
 /// 把一步的冠层几何量写进第 `record` 条记录。
 ///
 /// `sigf` 取步状态、`laisun`/`laisha` 取叶温出口 —— 两处都是内核已有的量，
@@ -1000,6 +1054,12 @@ impl HistorySession {
             set_lct_stomatal_diagnostics(accumulator, 0, &output.energy)?;
             set_lct_radiation_bands(accumulator, 0, &output.energy)?;
             set_lct_canopy_geometry(accumulator, 0, &state.energy, &output.energy)?;
+            set_lct_derived_soil(
+                accumulator,
+                0,
+                template.soil_layer_thickness_m(),
+                &state.water,
+            )?;
             set_lct_forcing_mirrors(accumulator, 0, reference)
         })
     }
@@ -1043,6 +1103,12 @@ impl HistorySession {
             set_lct_stomatal_diagnostics(accumulator, 0, &output.energy)?;
             set_lct_radiation_bands(accumulator, 0, &output.energy)?;
             set_lct_canopy_geometry(accumulator, 0, &state.energy, &output.energy)?;
+            set_lct_derived_soil(
+                accumulator,
+                0,
+                template.soil_layer_thickness_m(),
+                &state.soil_water,
+            )?;
             set_lct_forcing_mirrors(accumulator, 0, reference)
         })
     }
