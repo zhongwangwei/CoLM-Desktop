@@ -45,7 +45,10 @@ fn an_empty_case_maps_every_declared_default() {
         physics.precipitation_scheme,
         PrecipitationPhaseScheme::WetBulb
     );
-    assert_eq!(physics.surface_resistance_scheme, 1);
+    // `DEF_RSS_SCHEME` 声明默认 1，但空算例是 van Genuchten 土壤，
+    // 于是上游那条与 Campbell 绑定的强制规则把它压到 **0**
+    // （`MOD_Namelist.F90:1946-1950`）。下面另有一条断言证明 Campbell 时不压。
+    assert_eq!(physics.surface_resistance_scheme, 0);
     assert_eq!(physics.stress_scheme, 1);
     assert_eq!(physics.surface_layer_scheme, SurfaceLayerScheme::Standard);
     // 声明默认是 4，而 Balland-Arp 在枚举里排第四。
@@ -281,4 +284,29 @@ fn fortran_real_literals_parse_with_suffixes_and_d_exponents() {
     assert_eq!(parse_fortran_real("2.e-008").unwrap(), 2.0e-8);
     assert_eq!(parse_fortran_real("1.5D3").unwrap(), 1500.0);
     assert!(parse_fortran_real("not a number").is_err());
+}
+
+/// `DEF_RSS_SCHEME` 只在 van Genuchten 土壤上被强制置 0。
+///
+/// 上游 `MOD_Namelist.F90:1946-1950`：`DEF_USE_LCT` 分支里，
+/// `DEF_USE_Campbell_SOIL_MODEL` 为假时把它压到 0（"Soil resistance is
+/// automaticlly turned off for VG soil + USGS|IGBP scheme"）。
+/// 这条测试钉住的是**条件性**：只断言"VG 时是 0"抓不住一个无条件覆盖，
+/// 所以同一份算例再打开 Campbell，必须回到 namelist/默认写的那个值。
+#[test]
+fn the_soil_resistance_scheme_is_forced_to_zero_only_for_van_genuchten() {
+    use colm_namelist::parse;
+
+    // 空算例：VG，默认 1 → 被压到 0。
+    let vg = land_physics_parameters(&empty_case(), LandCoverScheme::Igbp, HEIGHTS).unwrap();
+    assert_eq!(vg.hydraulic_model, HydraulicModel::VanGenuchten);
+    assert_eq!(vg.surface_resistance_scheme, 0);
+
+    // 同一份算例 + Campbell：不压，用文档里的值。
+    let campbell =
+        parse("&nl_colm\n  DEF_USE_Campbell_SOIL_MODEL = .true.\n  DEF_RSS_SCHEME = 3\n/\n")
+            .unwrap();
+    let physics = land_physics_parameters(&campbell, LandCoverScheme::Igbp, HEIGHTS).unwrap();
+    assert_eq!(physics.hydraulic_model, HydraulicModel::Campbell);
+    assert_eq!(physics.surface_resistance_scheme, 3);
 }

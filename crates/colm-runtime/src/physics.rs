@@ -99,7 +99,7 @@ pub fn land_physics_parameters(
             document,
             "DEF_precip_phase_discrimination_scheme",
         )?)?,
-        surface_resistance_scheme: scheme_index(document, "DEF_RSS_SCHEME", 0, 5)?,
+        surface_resistance_scheme: soil_surface_resistance_scheme(document, campbell)?,
         stress_scheme: scheme_index(document, "DEF_RSTFAC", 1, 2)?,
         surface_layer_scheme: if logical(document, "DEF_USE_CBL_HEIGHT")? {
             SurfaceLayerScheme::LargeEddy
@@ -272,6 +272,23 @@ fn stomata(document: &Document) -> Result<StomataOptions> {
 
 /// 字段的有效值：算例里写了就用算例的，否则用 `colm-schema` 的声明默认值。
 ///
+/// `DEF_RSS_SCHEME`，含上游那条**与 Campbell 绑定**的强制规则。
+///
+/// `MOD_Namelist.F90:1946-1950`：在 `DEF_USE_LCT` 分支里，
+/// `DEF_USE_Campbell_SOIL_MODEL` 为假时把 `DEF_RSS_SCHEME` **强制置 0**，
+/// 并打印 "Soil resistance is automaticlly turned off for VG soil + USGS|IGBP scheme"。
+/// 也就是 van Genuchten 土壤下土壤表面阻力恒为 0，算例里写什么都不算数。
+///
+/// **`DEF_USE_LCT` 那道门在本仓库恒成立**：`LandCoverScheme` 只有 `Usgs`/`Igbp`
+/// 两种地类分类，没有 PFT/PC 子网格，运行时走的也只有 standard-LCT 这一条链。
+/// 所以这里只需要判 Campbell。
+fn soil_surface_resistance_scheme(document: &Document, campbell: bool) -> Result<i32> {
+    if !campbell {
+        return Ok(0);
+    }
+    scheme_index(document, "DEF_RSS_SCHEME", 0, 5)
+}
+
 /// 每一档都在**类型**上钉住 schema 的声明类型：`DEF_RSS_SCHEME` 在 schema 里是
 /// 整数，算例里写成 `1.0` 就该报错，而不是被 `as_f64` 悄悄收下。
 /// schema 不认识这个路径同样报错 —— 那说明字段名拼错了，而继续走下去只会拿到
