@@ -72,6 +72,9 @@ variables = [
   "f_t_lake", "f_lake_icefrac", "f_lake_deficit",
   "f_rnof", "f_rsur", "f_rsub", "f_rsur_ie", "f_rsur_se",
   "f_qinfl", "f_qdrip", "f_qintr", "f_ldew",
+  # `f_qcharge` 只在 `DEF_USE_VariablySaturatedFlow = .false.` 时才写出
+  # （`MOD_Hist.F90:698`），黄金算例是开着 VSF 的所以没有它；对齐算例有。
+  "f_qcharge",
   "f_frcsat", "f_rss", "f_respc",
   "f_wdsrf", "f_wdsrf_inst", "f_wetwat", "f_wetwat_inst", "f_wetzwt",
   "f_lai", "f_laisun", "f_laisha",

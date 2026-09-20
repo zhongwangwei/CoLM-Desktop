@@ -3059,3 +3059,44 @@ const VON_KARMAN: f64 = f77(0.4);     // = 0.4000000059604645
 Fortran 字面量"是反的**（它们被 `-fdefault-real-8` 提升成 r8，不是 r4）。量级远低于
 所有容差（history tier2 是 rtol=1e-7），所以本轮不改；要改就得逐处核对哪些常量在
 上游是 r4、哪些是 r8，记在下面作为候选工作项。
+
+## 两条 history 闸门的错位：`frcsat` 多写、`f_qcharge` 少一个层级（2026 年，实测）
+
+重跑分层比对（`golden-compare --tolerances oracle/tolerances.toml`）时，把
+`oracle/work/CN-Cng-aligned/out/CN-Cng/history/` 当作参照，两条**不是数值大小**的问题露出来：
+
+### `frcsat`：上游的 `WATER_2014` 从不设它
+
+对齐算例 264 条记录里 Fortran 的 `f_frcsat` **整列是 `spval`**，而本仓库写的是有限值
+（首条 0.674）。查源码：带 `frcsat` 实参的 `Runoff_TOPMOD`/`Runoff_XinAnJiang`/
+`Runoff_SimpleVIC` 调用全在 **`WATER_VSF`** 里
+（`MOD_SoilSnowHydrology.F90:880-925`，而 `WATER_VSF` 是 `:529-1341`），
+`WATER_2014`（`:…-526`）根本不传这个实参。开了 VSF 的黄金算例则整列有值 —— 两边正好相反。
+
+本仓库给 `Runoff_*` 传了 `frcsat`，于是**造出了上游没有的量**。修法是声明但不填：
+`colm-hist` 的填充值与上游的 `spval` 都是 -1e36，留空即逐位相同。
+新增常量 `DECLARED_BUT_UNFILLED` 把"声明了但按上游不该有值"这件事写进代码，
+并有回归测试断言那一列确实停在填充值。
+
+### `f_qcharge`：容差表缺一个层级
+
+`f_qcharge` 受 `.and. (.not. DEF_USE_VariablySaturatedFlow)` 控制
+（`MOD_Hist.F90:698`）：黄金算例开着 VSF 所以没有这一列，对齐算例关了所以有。
+`oracle/tolerances.toml` 里没有它的层级，比对器报"cannot be judged"。
+已按它的来源（`WATER_2014` 的 `qcharge`，一个确定性诊断）放进 tier2。
+
+### 剩下的差距（分层比对，264 条记录）
+
+| 变量 | Fortran | Rust | 量级 |
+|---|---|---|---|
+| `f_t_grnd` / `f_tleaf` | 268.9966 / 265.8717 | 268.2738 / 266.6364 | 0.7 K |
+| `f_wliq_soisno`（最差槽位） | 0.9174 | 3.1617 | 2.2 kg/m² |
+| `f_ustar` | 0.17322 | 0.18179 | 5% |
+| `f_zol` / `f_rib` | 0.12392 / 0.028574 | 0.084386 / 0.020324 | ~1.4× |
+| `f_fgrnd` | 3.1461 | −7.0048 | 10 W/m² |
+| `f_qinfl` | −9.31e-5 | 0.0 | — |
+| `f_lfevpa` | 184.677 | 615.054 | 见上文，采样阶段待定 |
+
+`f_qinfl` 首条记录 Fortran 是**负**的（−9.31e-5），Rust 是 0：上游 `qinfl` 在
+`WATER_2014` 里由 `gwat - rsur` 得到，夜里 `gwat` 可为负（冻结/再分配），
+而本仓库把负的入渗截成了 0。这是下一个可以单独查的点。

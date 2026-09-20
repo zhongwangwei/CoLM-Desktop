@@ -94,6 +94,13 @@ pub const LCT_SURFACE_VARIABLES: [&str; 13] = [
 /// 它不是默认产出量。
 pub const LCT_FLUX_VARIABLES: [&str; 6] = ["qinfl", "rnof", "rsub", "rsur", "qcharge", "frcsat"];
 
+/// 声明了但**按上游的 `WATER_2014` 不该有值**的量。
+///
+/// `frcsat` 只在 `WATER_VSF` 里由 `Runoff_*` 算出（`MOD_SoilSnowHydrology.F90:135`），
+/// `WATER_2014` 从不设它，所以上游对齐算例那一列整列是 `spval`。声明是为了让文件
+/// 的 schema 与上游一致，不填才是数值上一致。
+pub const DECLARED_BUT_UNFILLED: [&str; 1] = ["frcsat"];
+
 /// 黄金算例（CN-Cng）里没有、但本层仍会声明的量。
 ///
 /// 闸门表允许写不等于这个算例会产出：`qcharge` 受运行时条件控制，黄金算例没触发。
@@ -469,7 +476,12 @@ pub fn set_lct_fluxes(
         ("rsub", water.subsurface_runoff_mm_s),
         ("rsur", water.surface_runoff_mm_s),
         ("qcharge", water.recharge_mm_s),
-        ("frcsat", water.saturated_fraction),
+        // **`frcsat` 刻意不填。** 上游只有 `WATER_VSF` 走 `Runoff_*` 并传 `frcsat`
+        // （`MOD_SoilSnowHydrology.F90:880-925`，在 `WATER_VSF` 里），
+        // `WATER_2014`（本仓库唯一的编排）从不设它 —— 实测对齐算例 264 条记录**全是**
+        // `spval`，而开了 VSF 的黄金算例 264 条全有值。本仓库给 `Runoff_*` 传了
+        // `frcsat`，于是写出了一个上游没有的量。留空即与 Fortran 逐位相同
+        // （`colm-hist` 的填充值与上游的 `spval` 都是 -1e36）。
     ] {
         ensure!(
             value.is_finite(),

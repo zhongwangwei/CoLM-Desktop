@@ -248,7 +248,6 @@ fn the_bridge_writes_the_state_variables_it_declares() {
         ("rsub", output.water.subsurface_runoff_mm_s),
         ("rsur", output.water.surface_runoff_mm_s),
         ("qcharge", output.water.recharge_mm_s),
-        ("frcsat", output.water.saturated_fraction),
     ] {
         let values = file
             .variable(&format!("f_{name}"))
@@ -256,6 +255,19 @@ fn the_bridge_writes_the_state_variables_it_declares() {
             .get_values::<f64, _>(..)
             .unwrap();
         assert_eq!(values, vec![expected], "f_{name}");
+    }
+    // `frcsat` 声明了但**不该**有值：上游只有 `WATER_VSF` 会设它，`WATER_2014`
+    // （本仓库唯一的编排）从不设，写出的就是填充值。见 `DECLARED_BUT_UNFILLED`。
+    for name in DECLARED_BUT_UNFILLED {
+        let values = file
+            .variable(&format!("f_{name}"))
+            .unwrap()
+            .get_values::<f64, _>(..)
+            .unwrap();
+        assert!(
+            values.iter().all(|value| *value <= -1.0e35),
+            "f_{name} must stay at the fill value, got {values:?}"
+        );
     }
     // 维度顺序与黄金文件一致：`t_soisno` 是 `(time, patch, soilsnow)`。
     let variable = file.variable("f_t_soisno").unwrap();
