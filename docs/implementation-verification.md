@@ -3224,3 +3224,39 @@ Warning: Latitude mismatch:    44.593299865722656       in data file and    44.5
 `patchlatr`，那边的差在 1e-9 量级、早已对得上）。
 
 比对数从 46 项收到 **44 项**。
+
+## 下一轮：蒸腾系统性偏小约 50 倍（2026 年，实测）
+
+分层比对剩下 44 项超差，其中**唯一一个系统性、量级性的**是蒸腾：
+
+```
+f_etr  264 条记录里有 130 条 |差| > 1e-6；Fortran 峰值 1.268e-5，Rust 峰值 3.281e-7
+       Fortran   2.517e-6  6.155e-6  7.252e-6  ...  1.268e-5  (kg m-2 s-1)
+       Rust      1.360e-7  2.871e-7  3.281e-7  ...  8.553e-8
+```
+
+不是差一点，是**恒定的约 1/50**。`f_etr` = `acc1d(etr, a_etr)`，而 `etr = etrsun + etrsha`
+来自 `LEAF` 的光合/气孔链；`f_fevpl = etr + evplwet` 与 `f_fevpa = fevpl + fevpg`
+因此也跟着偏（`fevpg` 两侧对得上）。
+
+同时看到一个同源的症状：**重启里的 `rst`（冠层气孔阻力）**
+
+```
+Fortran  rst = -2.53491436     ← 负的
+Rust     rst =  500000
+```
+
+两侧的公式是同一行（`MOD_LeafTemperature.F90:1041` / `leaf_temperature.rs:897`）：
+
+```fortran
+rst = 1./(laisun/rssun + laisha/rssha)
+```
+
+所以差异在 `rssun`/`rssha`：Fortran 那边算出的 `1/(...)` 是负的，说明 `rssun` 或 `rssha`
+为负（夜间呼吸主导时光合为负，CoLM 会得到负的电导）；Rust 这边 `rssun`/`rssha`
+很大且为正，`rst` 到 5e5 → 蒸腾几乎被掐死。
+
+最可能的入口是**土壤水分胁迫因子**（`rstfac`，`MOD_Eroot` 的 `eroot`）：
+本窗口土壤冻结、`smp ≈ -2.3e6 mm`，若 Rust 的 `rstfac` 落在 ~0.02 而 Fortran 是 1，
+正好是这个 50 倍。下一步先打印两侧的 `rstfac`/`rssun`/`rssha` 对比，再决定是
+`eroot` 的移植问题还是 `rssun`/`rssha` 的符号处理。
