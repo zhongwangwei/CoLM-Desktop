@@ -4268,3 +4268,26 @@ t_lake / lake_icefrac / lake_deficit      湖泊分支尚未驱动
 wetwat / wetwat_inst / wetzwt             湿地分支尚未驱动
 us10m / vs10m / fm10m / ustar2            出自另一支 Shaofeng 2023 廓线 routine
 ```
+
+### 同轮续做：冠层截留四项 + `wat`
+
+标准规则那一类（`acc1d` + `filter`/`nac`）先做掉五项：
+
+| 变量 | 来源 | 实测 |
+|---|---|---|
+| `ldew` | `state.energy.leaf.canopy_water.total_mm`（**状态**，不在步输出上） | maxdiff 6.31e-3，峰值 0.0746 |
+| `qintr` | `energy.interception.retained_kg_m2_s`（上游 `qintr = pinf/deltim`） | 两边**全 0** |
+| `qdrip` | `ground_rain + ground_snow`（上游 `qdrip = pg_rain + pg_snow`，`CoLMMAIN.F90:930`） | maxdiff 8.62e-7，峰值 4.07e-6 |
+| `wat` | 与 `wat_inst` **同一算式** | maxdiff 0.194（3e-5 相对） |
+
+`ldew`/`qdrip` 那 8~21% 是已知的冠层露水近抵消链（与 `scv` 同源），不是新问题。
+
+**`wat` 与 `wat_inst` 共用算式却口径不同** —— 前者区间平均、后者取末步。
+同一条算式落进两个累加规则，正好是那个"瞬时"机制最干净的验收点，
+所以单测把它们喂同一串输入、断言两个不同的结果。
+`ldew` 还顺手说明一件事：**状态量不一定在步输出上**（它在 `state.energy.leaf`），
+写 history 时得同时看状态与输出，不能只认 `output`。
+
+到此黄金文件的变量缺口从 25 降到 **16**（本轮共补 9 个），
+`UNFILLED` 按"卡在哪"重写成 4 组 —— 上一轮那条把 `alb` 写成"缺四维写出通路"的
+**判断本身是错的**（根本不需要新通路），留错的清单比留空的更坏。

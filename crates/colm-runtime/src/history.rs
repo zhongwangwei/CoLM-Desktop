@@ -108,7 +108,23 @@ pub const LCT_FLUX_VARIABLES: [&str; 6] = ["qinfl", "rnof", "rsub", "rsur", "qch
 /// 定义取 `CoLMMAIN.F90:2254-2258`（非 VSF 分支）：
 /// `wat = sum(wliq+wice) + ldew + scv + wa`，`wa` 是含水层蓄量，
 /// `wdsrf` 是地表积水深；`wa_inst`/`wdsrf_inst` 就是这两个标量本身。
-pub const LCT_WATER_STORAGE_VARIABLES: [&str; 3] = ["wa_inst", "wdsrf_inst", "wat_inst"];
+/// `wat` 也在这组里，但它**不是**瞬时的：上游用的是普通 `acc1d(wat, a_wat)`
+/// 与 `filter`/`nac`（`MOD_Vars_1DAccFluxes.F90:2155`），写的是区间平均。
+/// 所以同一个算式在这里出两种口径 —— `wat_inst` 取末步、`wat` 取均值 ——
+/// 而这正是单测 `the_instantaneous_water_variables_take_the_last_step_not_the_mean`
+/// 要钉住的东西。
+pub const LCT_WATER_STORAGE_VARIABLES: [&str; 4] = ["wa_inst", "wdsrf_inst", "wat_inst", "wat"];
+
+/// 本层能填的**冠层截留**量，三项。
+///
+/// * `ldew`：冠层持水深（mm），就是 [`colm_core::CanopyWater::total_mm`]；
+/// * `qintr`：截留率（mm/s），上游 `qintr = pinf/deltim`
+///   （`MOD_LeafInterception.F90:335`），即内核的 `retained_kg_m2_s`；
+/// * `qdrip`：到达地面的降水（mm/s），上游 `qdrip = pg_rain + pg_snow`
+///   （`CoLMMAIN.F90:930`），即内核的 `ground_rain + ground_snow`。
+///
+/// 三项都是普通 `acc1d` + `filter`/`nac`（区间平均），没有特殊规则。
+pub const LCT_CANOPY_WATER_VARIABLES: [&str; 3] = ["ldew", "qintr", "qdrip"];
 
 /// 上游写的是**瞬时值**（乘 `nac` 再被除 `nac`）而不是区间平均的那些变量。
 ///
@@ -251,14 +267,12 @@ pub const NOT_IN_GOLDEN: [&str; 1] = ["qcharge"];
 /// 黄金算例里有、但本层还填不出来的量（按用途分组，便于下一步挑）。
 ///
 /// 这份清单不参与写出，只是把"缺口"写死在代码里：改它就得同时改注释。
-pub const UNFILLED: [&str; 5] = [
-    "`green`：上游由 `MOD_LAIEmpirical.F90:132-135` 从 `fveg = vegc(ivt)` 得出，而 `vegc` 是该模块内的硬编码表，本仓库还没搬",
-    "`alb`：黄金文件里**唯一的四维**变量 `(time,patch,rtyp,band)`，值由每步的 `SurfaceOptics::albedo` 提供（续跑写回用的就是它）；缺的不是值而是 `HistorySink` 的一条四维写出通路 —— 现有只有 `scalar` 与 `layer` 两条",
-    "`rss`：方案 4 下上游写的是电导标志而不是阻力，条件映射待核对",
-    "`ldew`/`qintr`/`qdrip`：需要一个冠层截留**状态**出口，目前只有通量",
-    "10 m 风/稳定度（us10m/vs10m/fm10m/ustar2）：出自另一支 `Shaofeng, 2023` 的廓线 routine；湖泊/湿地/BGC 量各自的分支还没有运行时驱动",
+pub const UNFILLED: [&str; 4] = [
+    "`green`：上游由 `MOD_LAIEmpirical.F90:132-135` 从 `fveg = vegc(ivt)` 得出，而 `vegc` 是该模块内的硬编码表（IGBP 那支 17 项：15=Snow/Ice、17=Water 为 0，其余 1），本仓库还没搬；本算例地类 10 恒为 1，但\"恒为 1\"不是实现依据",
+    "`rss`：普通 `acc1d` + `filter`/`nac`，规则已明确；卡在方案 4 下上游写的是电导标志而不是阻力，条件映射待核对",
+    "`xerr`/`zerr`/`xy_rain`/`xy_snow`：四项都是普通 `acc1d` + `filter`/`nac`，值也在（水平衡残差、能量平衡残差、雨雪拆分），只差接线与各自残差的定义核对",
+    "`us10m`/`vs10m`/`fm10m`/`ustar2`（另一支 `Shaofeng, 2023` 廓线 routine）、`t_lake`/`lake_icefrac`/`lake_deficit`（湖泊分支）、`wetwat`/`wetwat_inst`/`wetzwt`（湿地分支）：整支 routine 或分支尚未驱动",
 ];
-
 /// 声明本层能填的全部变量：状态十三项 + 水文六项 + 能量四项 + 地表十三项。
 pub fn declare_lct_variables(buffer: &mut HistoryBuffers) -> Result<()> {
     let mut names = LCT_STATE_VARIABLES.to_vec();
@@ -273,6 +287,7 @@ pub fn declare_lct_variables(buffer: &mut HistoryBuffers) -> Result<()> {
     names.extend_from_slice(&LCT_DERIVED_SOIL_VARIABLES);
     names.extend_from_slice(&LCT_ALBEDO_VARIABLES);
     names.extend_from_slice(&LCT_WATER_STORAGE_VARIABLES);
+    names.extend_from_slice(&LCT_CANOPY_WATER_VARIABLES);
     names.extend_from_slice(&DECLARED_ONLY);
     buffer.declare(&names)
 }
@@ -726,6 +741,34 @@ pub fn set_lct_stomatal_diagnostics(
     Ok(())
 }
 
+/// 把一步的冠层截留量写进第 `record` 条记录。
+///
+/// 定义见 [`LCT_CANOPY_WATER_VARIABLES`]；三项都是区间平均。
+pub fn set_lct_canopy_water(
+    sink: &mut impl HistorySink,
+    record: usize,
+    state: &colm_core::StandardLctEnergyState,
+    energy: &colm_core::StandardLctEnergyOutput,
+) -> Result<()> {
+    let interception = &energy.interception;
+    for (name, value) in [
+        // `ldew` 是**状态**（冠层持水），不在步输出上；通量三项在输出上。
+        ("ldew", state.leaf.canopy_water.total_mm),
+        ("qintr", interception.retained_kg_m2_s),
+        (
+            "qdrip",
+            interception.ground_rain_kg_m2_s + interception.ground_snow_kg_m2_s,
+        ),
+    ] {
+        ensure!(
+            value.is_finite(),
+            "the history value for {name} is not finite"
+        );
+        sink.scalar(name, record, value)?;
+    }
+    Ok(())
+}
+
 /// 把一步的瞬时水量诊断写进第 `record` 条记录。
 ///
 /// `wat` 的算式见 [`LCT_WATER_STORAGE_VARIABLES`]（非 VSF 分支：
@@ -754,6 +797,8 @@ pub fn set_lct_water_storage(
         ("wa_inst", water.aquifer_water_mm),
         ("wdsrf_inst", water.surface_water_mm),
         ("wat_inst", total),
+        // 同一算式，但 `wat` 不在 `INSTANTANEOUS_VARIABLES` 里，所以走区间平均。
+        ("wat", total),
     ] {
         ensure!(
             value.is_finite(),
@@ -1188,6 +1233,7 @@ impl HistorySession {
                 state.energy.leaf.canopy_water.total_mm,
                 0.0,
             )?;
+            set_lct_canopy_water(accumulator, 0, &state.energy, &output.energy)?;
             set_lct_albedo(
                 accumulator,
                 0,
@@ -1250,6 +1296,7 @@ impl HistorySession {
                 state.energy.leaf.canopy_water.total_mm,
                 state.snow.water_equivalent_kg_m2,
             )?;
+            set_lct_canopy_water(accumulator, 0, &state.energy, &output.energy)?;
             set_lct_albedo(
                 accumulator,
                 0,
