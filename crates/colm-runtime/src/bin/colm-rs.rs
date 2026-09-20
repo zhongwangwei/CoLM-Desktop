@@ -28,7 +28,7 @@ use colm_core::{CalendarTime, LandCoverScheme};
 use colm_namelist::{parse, Document, Value};
 use colm_runtime::assembly::{
     assemble_standard_lct_snow_template, assemble_standard_lct_template, restart_has_snow_column,
-    RestartStateFiles, StandardLctRestartTemplate,
+    EvolvedStepOutput, RestartStateFiles, StandardLctRestartTemplate,
 };
 use colm_runtime::history::HistorySession;
 use colm_runtime::physics::land_physics_parameters;
@@ -154,6 +154,8 @@ fn run_soil(
     // `evolved_overrides` 要的是**最后一步**的地表温度：它只出现在步输出里，
     // 状态只带逐层土温。
     let mut last_ground_temperature_k = None;
+    // `smp`/`hk` 只出现在步输出里（`soilwater` 的 `intent(out)`），而续跑要写它们。
+    let mut last_water = None;
     let (steps, history_files) = match session {
         Some(mut session) => {
             let outcome = runtime.run_restart_standard_lct_with_history(
@@ -162,6 +164,7 @@ fn run_soil(
                 &mut session,
                 |_, output| {
                     last_ground_temperature_k = Some(output.energy.ground.temperature_k[0]);
+                    last_water = Some(output.water.clone());
                     Ok(())
                 },
             )?;
@@ -170,13 +173,22 @@ fn run_soil(
         None => (
             runtime.run_restart_standard_lct(template, &mut state, |_, output| {
                 last_ground_temperature_k = Some(output.energy.ground.temperature_k[0]);
+                last_water = Some(output.water.clone());
                 Ok(())
             })?,
             None,
         ),
     };
     let ground_temperature_k = last_ground_temperature_k.context(NO_STEP)?;
-    let overrides = template.evolved_overrides(&state, ground_temperature_k)?;
+    let last_water = last_water.context(NO_STEP)?;
+    let overrides = template.evolved_overrides(
+        &state,
+        EvolvedStepOutput {
+            ground_temperature_k,
+            matric_potential_mm: &last_water.matric_potential_mm,
+            hydraulic_conductivity_mm_s: &last_water.hydraulic_conductivity_mm_s,
+        },
+    )?;
     write_restart(restart_in, &arguments.restart_out, &overrides)?;
     Ok(RunSummary {
         steps,
@@ -195,6 +207,8 @@ fn run_snow(
 ) -> Result<RunSummary> {
     let mut state = template.snow_state();
     let mut last_ground_temperature_k = None;
+    // `smp`/`hk` 只出现在步输出里（`soilwater` 的 `intent(out)`），而续跑要写它们。
+    let mut last_water = None;
     let (steps, history_files) = match session {
         Some(mut session) => {
             let outcome = runtime.run_restart_standard_lct_snow_with_history(
@@ -203,6 +217,7 @@ fn run_snow(
                 &mut session,
                 |_, output| {
                     last_ground_temperature_k = Some(output.energy.ground.temperature_k[0]);
+                    last_water = Some(output.water.clone());
                     Ok(())
                 },
             )?;
@@ -211,13 +226,22 @@ fn run_snow(
         None => (
             runtime.run_restart_standard_lct_snow(template, &mut state, |_, output| {
                 last_ground_temperature_k = Some(output.energy.ground.temperature_k[0]);
+                last_water = Some(output.water.clone());
                 Ok(())
             })?,
             None,
         ),
     };
     let ground_temperature_k = last_ground_temperature_k.context(NO_STEP)?;
-    let overrides = template.evolved_snow_overrides(&state, ground_temperature_k)?;
+    let last_water = last_water.context(NO_STEP)?;
+    let overrides = template.evolved_snow_overrides(
+        &state,
+        EvolvedStepOutput {
+            ground_temperature_k,
+            matric_potential_mm: &last_water.soil.matric_potential_mm,
+            hydraulic_conductivity_mm_s: &last_water.soil.hydraulic_conductivity_mm_s,
+        },
+    )?;
     write_restart(restart_in, &arguments.restart_out, &overrides)?;
     Ok(RunSummary {
         steps,

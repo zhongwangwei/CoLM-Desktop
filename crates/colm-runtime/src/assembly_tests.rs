@@ -837,15 +837,32 @@ fn an_evolved_state_writes_back_a_readable_continuation_restart() {
     let source = colm_init::RestartFile::open(&fixture.time.block).unwrap();
     let written = root.join("restart/continuation.nc");
     let overrides = template
-        .evolved_overrides(&state, second.energy.ground.temperature_k[0])
+        .evolved_overrides(
+            &state,
+            EvolvedStepOutput {
+                ground_temperature_k: second.energy.ground.temperature_k[0],
+                matric_potential_mm: &second.water.matric_potential_mm,
+                hydraulic_conductivity_mm_s: &second.water.hydraulic_conductivity_mm_s,
+            },
+        )
         .unwrap();
-    assert_eq!(overrides.len(), 11);
+    assert_eq!(overrides.len(), 13);
     source.write_with(&written, &overrides).unwrap();
 
     let restart = colm_init::RestartFile::open(&written).unwrap();
     // 推进过的土段逐层对上（盘上是 patch 在前、雪槽在前）。
     let snow_slots = template.snow_slots();
     let layers = template.soil_layers();
+    // `smp`/`hk` 的维度是 `(patch, soil)`，**没有雪槽** —— 步长与 `t_soisno` 不同。
+    // 上游在续跑时会把它们读回来（`MOD_Vars_TimeVariables.F90:1363-1364`），
+    // 所以一份合法的续跑重启必须带上它们。
+    for (name, expected) in [
+        ("smp", second.water.matric_potential_mm.as_slice()),
+        ("hk", second.water.hydraulic_conductivity_mm_s.as_slice()),
+    ] {
+        let column = restart.layer_column(name, 1, layers).unwrap();
+        assert_eq!(column, expected, "{name} was not written back per layer");
+    }
     let column = restart
         .layer_column("t_soisno", 1, snow_slots + layers)
         .unwrap();
@@ -952,10 +969,17 @@ fn an_evolved_snow_state_writes_back_a_readable_continuation_restart() {
     let source = colm_init::RestartFile::open(&fixture.time.block).unwrap();
     let written = root.join("restart/snow_continuation.nc");
     let overrides = template
-        .evolved_snow_overrides(&state, second.energy.ground.temperature_k[0])
+        .evolved_snow_overrides(
+            &state,
+            EvolvedStepOutput {
+                ground_temperature_k: second.energy.ground.temperature_k[0],
+                matric_potential_mm: &second.water.soil.matric_potential_mm,
+                hydraulic_conductivity_mm_s: &second.water.soil.hydraulic_conductivity_mm_s,
+            },
+        )
         .unwrap();
     // 十一项土壤/标量 + z_sno + dz_sno + snowdp/scv/fsno/sag。
-    assert_eq!(overrides.len(), 17);
+    assert_eq!(overrides.len(), 19);
     source.write_with(&written, &overrides).unwrap();
 
     let restart = colm_init::RestartFile::open(&written).unwrap();

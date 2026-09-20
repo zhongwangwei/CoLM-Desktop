@@ -186,6 +186,25 @@ struct RestartColumns {
     canopy_water_mm: Vec<f64>,
     canopy_rain_mm: Vec<f64>,
     canopy_snow_mm: Vec<f64>,
+    /// `smp`：`(patch, soil)`，**没有雪槽**，所以步长与 `t_soisno` 不同。
+    matric_potential_mm: Vec<f64>,
+    /// `hk`：同 `smp` 的形状。
+    hydraulic_conductivity_mm_s: Vec<f64>,
+}
+
+/// 续跑写出要用、但**状态里没有**的最后一步输出。
+///
+/// 这三样都只出现在步输出里：`t_grnd` 由能量链给出，`smp`/`hk` 是 `soilwater`
+/// 的 `intent(out)`。上游把它们都写进重启，而且 `smp`/`hk` 在续跑时会被
+/// **读回来**（`MOD_Vars_TimeVariables.F90:1363-1364`）—— 不写就等于交出一份
+/// 无法续跑的重启。
+#[derive(Debug, Clone, Copy)]
+pub struct EvolvedStepOutput<'a> {
+    pub ground_temperature_k: f64,
+    /// 本 patch 的逐层基质势，长度等于土层数。
+    pub matric_potential_mm: &'a [f64],
+    /// 本 patch 的逐层导水率，长度等于土层数。
+    pub hydraulic_conductivity_mm_s: &'a [f64],
 }
 
 /// 雪 + 土拼成的模板列，长度随雪层数变。
@@ -417,6 +436,12 @@ fn assemble(
         canopy_water_mm: time.floats("ldew")?.to_vec(),
         canopy_rain_mm: time.floats("ldew_rain")?.to_vec(),
         canopy_snow_mm: time.floats("ldew_snow")?.to_vec(),
+        // `smp`/`hk` 的维度是 `(patch, soil)` —— 与 `t_soisno` 的 `soilsnow`
+        // **不同**，没有雪槽。上游把它们写进重启并在续跑时读回
+        // （`MOD_Vars_TimeVariables.F90:1154-1155` 写、`:1363-1364` 读），
+        // 所以 Rust 产出的重启也必须带上它们，否则不是一份合法的续跑底稿。
+        matric_potential_mm: time.floats("smp")?.to_vec(),
+        hydraulic_conductivity_mm_s: time.floats("hk")?.to_vec(),
     };
     ensure!(
         snow.layer_count == 0 || snow.depth_m > 0.0,
@@ -991,11 +1016,17 @@ impl StandardLctRestartTemplate {
     pub fn evolved_overrides(
         &self,
         state: &StandardLctSoilState,
-        ground_temperature_k: f64,
+        step: EvolvedStepOutput<'_>,
     ) -> Result<Vec<RestartOverride>> {
+        let ground_temperature_k = step.ground_temperature_k;
         ensure!(
             ground_temperature_k.is_finite() && ground_temperature_k > 0.0,
             "the ground temperature to write back is not physical"
+        );
+        ensure!(
+            step.matric_potential_mm.len() == self.soil_layers()
+                && step.hydraulic_conductivity_mm_s.len() == self.soil_layers(),
+            "the step output must carry one matric potential and conductivity per soil layer"
         );
         let layers = self.soil_layers();
         ensure!(
@@ -1037,6 +1068,22 @@ impl StandardLctRestartTemplate {
         let mut canopy = scalars(&self.restart_columns.canopy_water_mm)?;
         let mut canopy_rain = scalars(&self.restart_columns.canopy_rain_mm)?;
         let mut canopy_snow = scalars(&self.restart_columns.canopy_snow_mm)?;
+        // `smp`/`hk` 是 `(patch, soil)`：**步长是土层数，不带雪槽**，与
+        // `t_soisno` 的 `snow_slots + layers` 不是一回事。混用会让 patch > 0
+        // 的算例写到别的 patch 的层上。
+        let width = layers;
+        let mut matric_potential = self.restart_columns.matric_potential_mm.clone();
+        let mut hydraulic_conductivity = self.restart_columns.hydraulic_conductivity_mm_s.clone();
+        for layer in 0..layers {
+            let index = self.patch * width + layer;
+            ensure!(
+                index < matric_potential.len() && index < hydraulic_conductivity.len(),
+                "the restart's smp/hk columns are too short for patch {} layer {layer}",
+                self.patch
+            );
+            matric_potential[index] = step.matric_potential_mm[layer];
+            hydraulic_conductivity[index] = step.hydraulic_conductivity_mm_s[layer];
+        }
         water_table[self.patch] = state.water.water_table_depth_m;
         aquifer[self.patch] = state.water.aquifer_water_mm;
         surface[self.patch] = state.water.surface_water_mm;
@@ -1058,6 +1105,8 @@ impl StandardLctRestartTemplate {
             RestartOverride::new("ldew", canopy),
             RestartOverride::new("ldew_rain", canopy_rain),
             RestartOverride::new("ldew_snow", canopy_snow),
+            RestartOverride::new("smp", matric_potential),
+            RestartOverride::new("hk", hydraulic_conductivity),
         ])
     }
 
@@ -1069,14 +1118,14 @@ impl StandardLctRestartTemplate {
     pub fn evolved_snow_overrides(
         &self,
         state: &StandardLctSnowSoilState,
-        ground_temperature_k: f64,
+        step: EvolvedStepOutput<'_>,
     ) -> Result<Vec<RestartOverride>> {
         let soil_state = StandardLctSoilState {
             energy: state.energy.clone(),
             temperature_k: state.soil_temperature_k.clone(),
             water: state.soil_water.clone(),
         };
-        let mut overrides = self.evolved_overrides(&soil_state, ground_temperature_k)?;
+        let mut overrides = self.evolved_overrides(&soil_state, step)?;
         let slots = self.snow_slots();
         ensure!(
             state.snow.temperature_k.len() == slots
