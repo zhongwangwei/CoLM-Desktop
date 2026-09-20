@@ -640,3 +640,78 @@ fn temp_dir(label: &str) -> PathBuf {
     let _ = std::fs::remove_dir_all(&path);
     path
 }
+
+/// 读取器是写出器的逆运算：把全量夹具写出去、读回来，再**与文件本身逐变量
+/// 对账**（覆盖整份文件，不是挑选过的字段），并抽查类型化取用助手。
+#[test]
+fn time_restart_round_trips_through_the_reader() {
+    let root = temp_dir("read-round-trip");
+    std::fs::create_dir_all(&root).unwrap();
+    let path = root.join("restart.nc");
+    write_time_restart_block(&path, input()).unwrap();
+
+    let restart = crate::time_restart_read::TimeRestart::open(&path).unwrap();
+    let file = netcdf::open(&path).unwrap();
+    let mut checked = 0;
+    for variable in file.variables() {
+        let name = variable.name();
+        let dims: Vec<String> = variable
+            .dimensions()
+            .iter()
+            .map(|dimension| dimension.name())
+            .collect();
+        assert_eq!(
+            restart.variable_dimensions(&name).unwrap(),
+            dims.as_slice(),
+            "{name}: dimensions"
+        );
+        match variable.vartype() {
+            netcdf::types::NcVariableType::Float(netcdf::types::FloatType::F64) => {
+                let expected: Vec<f64> = variable.get_values(..).unwrap();
+                assert_eq!(
+                    restart.floats(&name).unwrap(),
+                    expected.as_slice(),
+                    "{name}: values"
+                );
+            }
+            netcdf::types::NcVariableType::Int(netcdf::types::IntType::I32) => {
+                let expected: Vec<i32> = variable.get_values(..).unwrap();
+                assert_eq!(
+                    restart.integers(&name).unwrap(),
+                    expected.as_slice(),
+                    "{name}: values"
+                );
+            }
+            other => panic!("{name} has unexpected type {other:?}"),
+        }
+        checked += 1;
+    }
+    assert!(
+        checked >= 60,
+        "only {checked} variables compared — the fixture should write far more"
+    );
+
+    // 类型化助手对夹具常量：标量场、层列（层在前、patch 最后）、整数域。
+    assert_eq!(restart.patch_scalars("t_grnd").unwrap(), &PATCH);
+    assert_eq!(restart.patch_scalars("trad").unwrap(), &PATCH);
+    assert_eq!(restart.dimension("soilsnow").unwrap(), 4);
+    // 内存里的 SOILSNOW 是 (层, patch)，取某一 patch 要按内存序抽列；
+    // 读回来的 `layer_column` 给的是盘上 `(patch, 层)` 的那一列。
+    for patch in 0..2 {
+        assert_eq!(
+            restart.layer_column("t_soisno", patch, 4).unwrap(),
+            vec![
+                SOILSNOW[patch],
+                SOILSNOW[2 + patch],
+                SOILSNOW[4 + patch],
+                SOILSNOW[6 + patch]
+            ]
+        );
+    }
+    assert_eq!(
+        restart.layer_column("z_sno", 1, 2).unwrap(),
+        vec![10.0, 20.0]
+    );
+    assert_eq!(restart.integers("n_irrig_steps_left").unwrap(), &[10, 20]);
+    std::fs::remove_dir_all(root).unwrap();
+}

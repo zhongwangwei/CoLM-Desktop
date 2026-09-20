@@ -76,6 +76,7 @@ pub mod soil_surface_resistance {
 }
 pub mod surface_data;
 pub mod time_restart;
+pub mod time_restart_read;
 pub mod time_state {
     pub use colm_core::time_state::*;
 }
@@ -222,6 +223,7 @@ pub use time_restart::{
     SnowSoilRestartFields, TimeHyperspectralFields, TimeLakeFields, TimePatchFields,
     TimeRadiationFields, TimeRestartDimensions, TimeRestartFile, TimeRestartInput,
 };
+pub use time_restart_read::TimeRestart;
 pub use time_state::{
     derive_initial_soil_hydraulics, derive_pft_snow_cover, derive_snow_cover, initialize_cold_soil,
     initialize_profile_soil, initialize_snow_layers, interpolate_profile, resolve_cold_start_soil,
