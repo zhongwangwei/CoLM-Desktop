@@ -406,7 +406,7 @@ fn pc_subgrid_is_resolved_exclusively_and_uses_fortran_canopy_layers() {
     )
     .unwrap();
     assert_eq!(
-        single_point_subgrid(&document).unwrap(),
+        single_point_subgrid(&document, None).unwrap(),
         SinglePointSubgrid::Pc
     );
     assert_eq!(pc_canopy_layer(1).unwrap(), 2);
@@ -436,9 +436,32 @@ fn pc_subgrid_is_resolved_exclusively_and_uses_fortran_canopy_layers() {
  /
 "
         )
-        .unwrap()
+        .unwrap(),
+        None
     )
     .is_err());
+}
+
+/// 旧 namelist 没写 DEF_USE_* 时用内核回退补齐，显式声明仍然优先。
+///
+/// 上游把 subgrid 定为运行期选择（`MOD_Namelist.F90:1928-1936`），所以回退只服务
+/// 「namelist 一个字都没说」的旧算例，不能盖掉算例自己的声明。
+#[test]
+fn single_point_subgrid_falls_back_only_when_the_namelist_is_silent() {
+    let silent = parse("&nl_colm\n DEF_CASE_NAME='case'\n /\n").unwrap();
+    assert_eq!(
+        single_point_subgrid(&silent, None).unwrap(),
+        SinglePointSubgrid::Lct
+    );
+    assert_eq!(
+        single_point_subgrid(&silent, Some(SinglePointSubgrid::Pc)).unwrap(),
+        SinglePointSubgrid::Pc
+    );
+    let declared = parse("&nl_colm\n DEF_USE_LCT=.true.\n /\n").unwrap();
+    assert_eq!(
+        single_point_subgrid(&declared, Some(SinglePointSubgrid::Pc)).unwrap(),
+        SinglePointSubgrid::Lct
+    );
 }
 
 #[test]

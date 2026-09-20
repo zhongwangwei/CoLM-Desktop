@@ -335,6 +335,22 @@ pub fn single_point_cold_start_run_from_namelist(
     land_cover_override: Option<LandCoverScheme>,
     block_override: Option<&str>,
 ) -> Result<SinglePointColdStartRun> {
+    single_point_cold_start_run_from_namelist_with_subgrid(
+        namelist,
+        land_cover_override,
+        block_override,
+        None,
+    )
+}
+
+/// Resolves a cold start while retaining a legacy kernel's compile-time
+/// LCT/PFT/PC selection when the namelist does not contain the runtime flags.
+pub fn single_point_cold_start_run_from_namelist_with_subgrid(
+    namelist: impl AsRef<Path>,
+    land_cover_override: Option<LandCoverScheme>,
+    block_override: Option<&str>,
+    subgrid_fallback: Option<SinglePointSubgrid>,
+) -> Result<SinglePointColdStartRun> {
     let namelist = namelist.as_ref();
     let mut static_run =
         single_point_static_run_from_namelist(namelist, land_cover_override, block_override)?;
@@ -342,7 +358,7 @@ pub fn single_point_cold_start_run_from_namelist(
         .with_context(|| format!("cannot read case namelist {}", namelist.display()))?;
     let document = parse(&text)
         .with_context(|| format!("cannot parse case namelist {}", namelist.display()))?;
-    let subgrid = single_point_subgrid(&document)?;
+    let subgrid = single_point_subgrid(&document, subgrid_fallback)?;
     let snicar = crate::SnicarInitialization::from_document(&document)?;
     reject_unsupported_cold_start_features(&document, subgrid)?;
     optional_bool_or(&document, "DEF_USE_TRACER", false)?;
@@ -3157,10 +3173,20 @@ pub(crate) fn patch_type(land_cover: LandCoverScheme, class: i32) -> Result<i32>
     Ok(types[index])
 }
 
-fn single_point_subgrid(document: &colm_namelist::Document) -> Result<SinglePointSubgrid> {
-    let lct = optional_bool_or(document, "DEF_USE_LCT", true)?;
+fn single_point_subgrid(
+    document: &colm_namelist::Document,
+    fallback: Option<SinglePointSubgrid>,
+) -> Result<SinglePointSubgrid> {
+    let declared = ["DEF_USE_LCT", "DEF_USE_PFT", "DEF_USE_PC"]
+        .into_iter()
+        .filter(|field| document.get(field).is_some())
+        .count();
+    let lct = optional_bool_or(document, "DEF_USE_LCT", false)?;
     let pft = optional_bool_or(document, "DEF_USE_PFT", false)?;
     let pc = optional_bool_or(document, "DEF_USE_PC", false)?;
+    if declared == 0 {
+        return Ok(fallback.unwrap_or(SinglePointSubgrid::Lct));
+    }
     ensure!(
         [lct, pft, pc]
             .into_iter()
@@ -3210,10 +3236,6 @@ fn reject_unsupported_cold_start_features(
     ensure!(
         !optional_bool_or(document, "DEF_URBAN_RUN", false)? || subgrid == SinglePointSubgrid::Lct,
         "DEF_URBAN_RUN requires DEF_USE_LCT = .true."
-    );
-    ensure!(
-        subgrid == SinglePointSubgrid::Lct || !optional_bool_or(document, "DEF_USE_LCT", true)?,
-        "DEF_USE_PFT/DEF_USE_PC requires DEF_USE_LCT = .false."
     );
     Ok(())
 }

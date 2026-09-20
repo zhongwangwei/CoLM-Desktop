@@ -9,7 +9,7 @@ use anyhow::{bail, ensure, Context, Result};
 use colm_case::{is_default, is_spatial_case};
 use colm_init::spatial_static::{resolve_vic_parameter_file, VicParameterSource};
 use colm_init::{
-    single_point_cold_start_run_from_namelist, write_catch_lateral_cold_restart,
+    single_point_cold_start_run_from_namelist_with_subgrid, write_catch_lateral_cold_restart,
     write_data_assimilation_restart, write_gridriver_cold_restart,
     write_single_point_cold_time_restarts, write_single_point_constant_restart,
     write_single_point_constant_restarts, write_single_point_hyperspectral_cold_time_restarts,
@@ -18,12 +18,13 @@ use colm_init::{
     write_spatial_pft_constant_restarts, write_spatial_urban_cold_time_restarts,
     write_spatial_urban_constant_restarts, CatchLateralColdStartConfig, GridRiverColdStartConfig,
     HydraulicModel, LaiFrequency, LandCoverScheme, RestartDate, RestartTuning,
-    SinglePointHyperspectralConfig, SinglePointStaticConfig, SnicarInitialization,
-    SpatialLctStaticConfig, SpatialLctTimeConfig, SpatialObservedInitializationPaths,
-    SpatialPftStaticConfig, SpatialPftTimeConfig, SpatialUrbanStaticConfig, SpatialUrbanTimeConfig,
-    UrbanConfig,
+    SinglePointHyperspectralConfig, SinglePointStaticConfig, SinglePointSubgrid,
+    SnicarInitialization, SpatialLctStaticConfig, SpatialLctTimeConfig,
+    SpatialObservedInitializationPaths, SpatialPftStaticConfig, SpatialPftSubgrid,
+    SpatialPftTimeConfig, SpatialUrbanStaticConfig, SpatialUrbanTimeConfig, UrbanConfig,
 };
 use colm_namelist::{parse, Value};
+use colm_srfdata::site::SurfaceSubgrid;
 
 fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
@@ -51,6 +52,7 @@ fn run_namelist(namelist: PathBuf, mut args: impl Iterator<Item = String>) -> Re
     let mut grid_river = false;
     let mut catch_lateral = false;
     let mut data_assimilation = false;
+    let mut subgrid = None;
     let mut high_resolution = HighResolutionOptions::default();
     while let Some(argument) = args.next() {
         match argument.as_str() {
@@ -63,6 +65,11 @@ fn run_namelist(namelist: PathBuf, mut args: impl Iterator<Item = String>) -> Re
             "--grid-river" => grid_river = true,
             "--catch-lateral" => catch_lateral = true,
             "--data-assimilation" => data_assimilation = true,
+            "--subgrid" => {
+                subgrid = Some(parse_subgrid(
+                    &args.next().context("--subgrid needs lct, pft, or pc")?,
+                )?)
+            }
             "--hyperspectral" => high_resolution.enabled = true,
             "--highres-leaf-optics" => {
                 high_resolution.leaf_optics =
@@ -95,21 +102,27 @@ fn run_namelist(namelist: PathBuf, mut args: impl Iterator<Item = String>) -> Re
         .then(|| namelist_data_assimilation_ensembles(&namelist))
         .transpose()?;
     if is_spatial_case(&namelist)? {
-        return run_spatial_namelist(
-            &namelist,
+        return run_spatial_namelist(SpatialNamelistInvocation {
+            namelist: &namelist,
             land_cover,
-            block.as_deref(),
-            &high_resolution,
+            block_override: block.as_deref(),
+            high_resolution: &high_resolution,
             grid_river,
             catch_lateral,
             data_assimilation_ensembles,
-        );
+            subgrid_fallback: subgrid,
+        });
     }
     ensure!(
         !grid_river && !catch_lateral,
         "--grid-river and --catch-lateral require a spatial case because routing kernels are not SinglePoint kernels"
     );
-    let run = single_point_cold_start_run_from_namelist(&namelist, land_cover, block.as_deref())?;
+    let run = single_point_cold_start_run_from_namelist_with_subgrid(
+        &namelist,
+        land_cover,
+        block.as_deref(),
+        subgrid.map(single_point_subgrid),
+    )?;
     let files = if high_resolution.enabled {
         write_single_point_hyperspectral_constant_restarts(&run)?
     } else {
@@ -180,7 +193,8 @@ struct HighResolutionOptions {
 enum SpatialSubgrid {
     Lct,
     Urban,
-    PftOrPc,
+    Pft,
+    Pc,
 }
 
 #[derive(Debug, Clone)]
@@ -224,18 +238,34 @@ struct SpatialNamelistRun {
     snicar: Option<SnicarInitialization>,
 }
 
-fn run_spatial_namelist(
-    namelist: &Path,
+/// 空间冷启动的调用开关。参数已到 clippy 的 7 个上限，聚成一个结构体而不是
+/// 加 `#[allow(clippy::too_many_arguments)]` —— 后面再加空间开关时不必再动签名。
+struct SpatialNamelistInvocation<'a> {
+    namelist: &'a Path,
     land_cover: Option<LandCoverScheme>,
-    block_override: Option<&str>,
-    high_resolution: &HighResolutionOptions,
+    block_override: Option<&'a str>,
+    high_resolution: &'a HighResolutionOptions,
     grid_river: bool,
     catch_lateral: bool,
     data_assimilation_ensembles: Option<usize>,
-) -> Result<()> {
-    let mut run = spatial_namelist_run(namelist)?;
+    /// 旧 namelist 没写 `DEF_USE_LCT/PFT/PC` 时用的内核 subgrid。
+    subgrid_fallback: Option<SurfaceSubgrid>,
+}
+
+fn run_spatial_namelist(invocation: SpatialNamelistInvocation<'_>) -> Result<()> {
+    let SpatialNamelistInvocation {
+        namelist,
+        land_cover,
+        block_override,
+        high_resolution,
+        grid_river,
+        catch_lateral,
+        data_assimilation_ensembles,
+        subgrid_fallback,
+    } = invocation;
+    let mut run = spatial_namelist_run_with_subgrid(namelist, subgrid_fallback)?;
     ensure!(
-        !high_resolution.enabled || run.subgrid == SpatialSubgrid::PftOrPc,
+        !high_resolution.enabled || matches!(run.subgrid, SpatialSubgrid::Pft | SpatialSubgrid::Pc),
         "--hyperspectral is currently supported only by spatial PFT/PC cold starts"
     );
     if catch_lateral {
@@ -255,7 +285,7 @@ fn run_spatial_namelist(
                 )?;
             }
         }
-        SpatialSubgrid::PftOrPc => {
+        SpatialSubgrid::Pft | SpatialSubgrid::Pc => {
             for block in spatial_blocks(&run, block_override)? {
                 write_spatial_pft_namelist_block(
                     namelist,
@@ -514,6 +544,11 @@ fn write_spatial_pft_namelist_block(
         run.land_cover_year,
         block,
     );
+    static_config.subgrid_fallback = Some(match run.subgrid {
+        SpatialSubgrid::Pft => SpatialPftSubgrid::Pft,
+        SpatialSubgrid::Pc => SpatialPftSubgrid::Pc,
+        _ => unreachable!("PFT writer selected only for PFT/PC cases"),
+    });
     static_config.force_soil_texture = run.use_soil_texture;
     let files = write_spatial_pft_constant_restarts(
         static_config,
@@ -564,7 +599,17 @@ fn write_spatial_pft_namelist_block(
     Ok(())
 }
 
+/// 只给测试用的便捷包装：生产路径总是显式传 subgrid 回退（namelist 已声明
+/// DEF_USE_LCT/PFT/PC 时该值为 None）。
+#[cfg(test)]
 fn spatial_namelist_run(namelist: &Path) -> Result<SpatialNamelistRun> {
+    spatial_namelist_run_with_subgrid(namelist, None)
+}
+
+fn spatial_namelist_run_with_subgrid(
+    namelist: &Path,
+    subgrid_fallback: Option<SurfaceSubgrid>,
+) -> Result<SpatialNamelistRun> {
     let text = std::fs::read_to_string(namelist)
         .with_context(|| format!("cannot read case namelist {}", namelist.display()))?;
     let document = parse(&text)
@@ -578,17 +623,8 @@ fn spatial_namelist_run(namelist: &Path) -> Result<SpatialNamelistRun> {
         "DEF_USE_Forcing_Downscaling and DEF_USE_Forcing_Downscaling_Simple are mutually exclusive"
     );
     let lulcc = namelist_bool(&document, "DEF_USE_LULCC", false)?;
-    let lct = namelist_bool(&document, "DEF_USE_LCT", true)?;
-    let pft = namelist_bool(&document, "DEF_USE_PFT", false)?;
-    let pc = namelist_bool(&document, "DEF_USE_PC", false)?;
-    ensure!(
-        [lct, pft, pc]
-            .into_iter()
-            .filter(|enabled| *enabled)
-            .count()
-            == 1,
-        "exactly one of DEF_USE_LCT, DEF_USE_PFT, and DEF_USE_PC must be true"
-    );
+    let selected = colm_srfdata::site::surface_subgrid_from_document(&document, subgrid_fallback)?;
+    let lct = selected == SurfaceSubgrid::Lct;
     // MOD_Namelist forces PFT/PC and LULCC to monthly.  Plain LCT retains
     // the 8-day forcing selected by the case namelist.
     let lai_frequency = if !lai_monthly && lct && !lulcc {
@@ -633,8 +669,10 @@ fn spatial_namelist_run(namelist: &Path) -> Result<SpatialNamelistRun> {
         } else {
             SpatialSubgrid::Lct
         }
+    } else if selected == SurfaceSubgrid::Pft {
+        SpatialSubgrid::Pft
     } else {
-        SpatialSubgrid::PftOrPc
+        SpatialSubgrid::Pc
     };
     let case_name = required_string(&document, "DEF_CASE_NAME")?;
     let output = PathBuf::from(required_string(&document, "DEF_dir_output")?);
@@ -1228,7 +1266,7 @@ fn parse_hydraulic_model(value: Option<&str>) -> Result<HydraulicModel> {
     }
 }
 
-const USAGE: &str = "usage: mkinidata-rs <case.nml> [--land-cover igbp|usgs] [--block label] [--grid-river] [--catch-lateral] [--data-assimilation] [--hyperspectral --highres-urban-albedo PATH --highres-radiation PATH [--highres-leaf-optics PATH] [--highres-water-optics PATH]] (spatial cases discover every landpatch block unless --block is supplied)\n       mkinidata-rs <srfdata.nc> <restart-dir> <case> <lc-year> <block> <igbp|usgs> <campbell|vg> [--urban-only]\n       mkinidata-rs spatial-lct <landdata-dir> <restart-dir> <case> <lc-year> <block> <igbp|usgs> <campbell|vg> [--urban-only] [--bedrock] [--hyperspectral (static only)] [--topmodel] [--simple-terrain|--regular-terrain] [--cold-time YYYY-JJJ-SSSSS] [--lai-year YYYY] [--lai-8day] [--greenwich] [--dynamic-lake] [--no-plant-hydraulics] [--ozone-stress] [--variably-saturated-flow] [--no-vegetation-snow]\n       mkinidata-rs spatial-pft <case.nml> <landdata-dir> <restart-dir> <case> <lc-year> <block> [--bedrock] [--hyperspectral --highres-urban-albedo PATH --highres-radiation PATH [--highres-leaf-optics PATH] [--highres-water-optics PATH]] [--cold-time YYYY-JJJ-SSSSS] [--lai-year YYYY] [--greenwich] [--dynamic-lake] [--no-plant-hydraulics] [--ozone-stress] [--variably-saturated-flow] [--no-vegetation-snow]";
+const USAGE: &str = "usage: mkinidata-rs <case.nml> [--subgrid lct|pft|pc] [--land-cover igbp|usgs] [--block label] [--grid-river] [--catch-lateral] [--data-assimilation] [--hyperspectral --highres-urban-albedo PATH --highres-radiation PATH [--highres-leaf-optics PATH] [--highres-water-optics PATH]] (spatial cases discover every landpatch block unless --block is supplied)\n       mkinidata-rs <srfdata.nc> <restart-dir> <case> <lc-year> <block> <igbp|usgs> <campbell|vg> [--urban-only]\n       mkinidata-rs spatial-lct <landdata-dir> <restart-dir> <case> <lc-year> <block> <igbp|usgs> <campbell|vg> [--urban-only] [--bedrock] [--hyperspectral (static only)] [--topmodel] [--simple-terrain|--regular-terrain] [--cold-time YYYY-JJJ-SSSSS] [--lai-year YYYY] [--lai-8day] [--greenwich] [--dynamic-lake] [--no-plant-hydraulics] [--ozone-stress] [--variably-saturated-flow] [--no-vegetation-snow]\n       mkinidata-rs spatial-pft <case.nml> <landdata-dir> <restart-dir> <case> <lc-year> <block> [--bedrock] [--hyperspectral --highres-urban-albedo PATH --highres-radiation PATH [--highres-leaf-optics PATH] [--highres-water-optics PATH]] [--cold-time YYYY-JJJ-SSSSS] [--lai-year YYYY] [--greenwich] [--dynamic-lake] [--no-plant-hydraulics] [--ozone-stress] [--variably-saturated-flow] [--no-vegetation-snow]";
 
 fn parse_restart_date(value: &str) -> Result<RestartDate> {
     let mut fields = value.split('-');
@@ -1262,6 +1300,23 @@ fn parse_land_cover(value: &str) -> Result<LandCoverScheme> {
         "igbp" => Ok(LandCoverScheme::Igbp),
         "usgs" => Ok(LandCoverScheme::Usgs),
         value => bail!("land-cover scheme must be igbp or usgs, got {value}"),
+    }
+}
+
+fn parse_subgrid(value: &str) -> Result<SurfaceSubgrid> {
+    match value {
+        "lct" => Ok(SurfaceSubgrid::Lct),
+        "pft" => Ok(SurfaceSubgrid::Pft),
+        "pc" => Ok(SurfaceSubgrid::Pc),
+        _ => bail!("--subgrid must be lct, pft, or pc"),
+    }
+}
+
+fn single_point_subgrid(subgrid: SurfaceSubgrid) -> SinglePointSubgrid {
+    match subgrid {
+        SurfaceSubgrid::Lct => SinglePointSubgrid::Lct,
+        SurfaceSubgrid::Pft => SinglePointSubgrid::Pft,
+        SurfaceSubgrid::Pc => SinglePointSubgrid::Pc,
     }
 }
 
@@ -1608,7 +1663,7 @@ mod tests {
             }
         );
         assert_eq!(run.hydraulic_model, HydraulicModel::Campbell);
-        assert_eq!(run.subgrid, SpatialSubgrid::PftOrPc);
+        assert_eq!(run.subgrid, SpatialSubgrid::Pft);
         assert!(run.use_bedrock);
         assert!(run.use_topmodel);
         assert_eq!(run.topmodel_method, 0);
@@ -1625,6 +1680,64 @@ mod tests {
         assert_eq!(run.observations.soil, Some(soil));
         assert_eq!(run.observations.snow, Some(snow));
         assert_eq!(run.observations.water_table, Some(water_table));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn parse_subgrid_accepts_only_the_three_upstream_names() {
+        assert_eq!(parse_subgrid("lct").unwrap(), SurfaceSubgrid::Lct);
+        assert_eq!(parse_subgrid("pft").unwrap(), SurfaceSubgrid::Pft);
+        assert_eq!(parse_subgrid("pc").unwrap(), SurfaceSubgrid::Pc);
+        let error = parse_subgrid("PC").unwrap_err();
+        assert!(error.to_string().contains("lct, pft, or pc"), "{error}");
+    }
+
+    /// 旧 namelist 缺 `DEF_USE_LCT/PFT/PC` 时，dispatch 用调用方给的内核回退；
+    /// 没有回退时保持旧默认 LCT（上游 `DEF_USE_LCT = .true.`）。namelist 一旦
+    /// 声明，回退必须让位 —— 否则算例自己的选择会被内核盖掉。
+    #[test]
+    fn silent_spatial_namelist_carries_the_legacy_kernel_subgrid() {
+        let root =
+            std::env::temp_dir().join(format!("colm-init-legacy-subgrid-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let namelist = root.join("case.nml");
+        let minimal = |extra: &str| {
+            format!(
+                "&nl_colm
+ DEF_CASE_NAME='case'
+ DEF_dir_output='{}'
+ DEF_dir_runtime='{}'
+ DEF_Runoff_SCHEME=1
+ DEF_VIC_OPT=.false.
+{extra} /
+",
+                root.display(),
+                root.join("runtime").display()
+            )
+        };
+
+        std::fs::write(&namelist, minimal("")).unwrap();
+        assert_eq!(
+            spatial_namelist_run_with_subgrid(&namelist, Some(SurfaceSubgrid::Pc))
+                .unwrap()
+                .subgrid,
+            SpatialSubgrid::Pc
+        );
+        assert_eq!(
+            spatial_namelist_run_with_subgrid(&namelist, None)
+                .unwrap()
+                .subgrid,
+            SpatialSubgrid::Lct
+        );
+
+        std::fs::write(&namelist, minimal(" DEF_USE_PFT=.true.\n")).unwrap();
+        assert_eq!(
+            spatial_namelist_run_with_subgrid(&namelist, Some(SurfaceSubgrid::Pc))
+                .unwrap()
+                .subgrid,
+            SpatialSubgrid::Pft
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -2107,15 +2220,16 @@ mod tests {
         )
         .unwrap();
 
-        let error = run_spatial_namelist(
-            &namelist,
-            Some(LandCoverScheme::Igbp),
-            None,
-            &HighResolutionOptions::default(),
-            false,
-            false,
-            None,
-        )
+        let error = run_spatial_namelist(SpatialNamelistInvocation {
+            namelist: &namelist,
+            land_cover: Some(LandCoverScheme::Igbp),
+            block_override: None,
+            high_resolution: &HighResolutionOptions::default(),
+            grid_river: false,
+            catch_lateral: false,
+            data_assimilation_ensembles: None,
+            subgrid_fallback: None,
+        })
         .unwrap_err();
 
         assert!(error
@@ -2148,15 +2262,16 @@ mod tests {
         )
         .unwrap();
 
-        let error = run_spatial_namelist(
-            &namelist,
-            Some(LandCoverScheme::Usgs),
-            None,
-            &HighResolutionOptions::default(),
-            false,
-            false,
-            None,
-        )
+        let error = run_spatial_namelist(SpatialNamelistInvocation {
+            namelist: &namelist,
+            land_cover: Some(LandCoverScheme::Usgs),
+            block_override: None,
+            high_resolution: &HighResolutionOptions::default(),
+            grid_river: false,
+            catch_lateral: false,
+            data_assimilation_ensembles: None,
+            subgrid_fallback: None,
+        })
         .unwrap_err();
 
         assert!(error

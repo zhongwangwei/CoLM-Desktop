@@ -7,7 +7,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{bail, ensure, Context, Result};
 use netcdf::types::{FloatType, IntType, NcVariableType};
 
 /// Geographic bounds used by the existing-surface-data clipping path.
@@ -320,7 +320,11 @@ fn same_longitude(left: f64, right: f64) -> bool {
 
 fn normalize_longitude(value: f64) -> f64 {
     let value = value.rem_euclid(360.0);
-    if value >= 180.0 { value - 360.0 } else { value }
+    if value >= 180.0 {
+        value - 360.0
+    } else {
+        value
+    }
 }
 
 fn longitude_intervals(west: f64, east: f64) -> Vec<(f64, f64)> {

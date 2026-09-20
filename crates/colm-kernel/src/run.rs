@@ -188,16 +188,7 @@ pub fn run_stage_streaming_with_executable(
     on_line: &mut dyn FnMut(&str),
 ) -> Result<StageReport> {
     run_stage_streaming_with_command(
-        kernel,
-        stage,
-        executable,
-        namelist,
-        work,
-        artifacts,
-        arguments,
-        1,
-        false,
-        on_line,
+        kernel, stage, executable, namelist, work, artifacts, arguments, 1, false, on_line,
     )
 }
 

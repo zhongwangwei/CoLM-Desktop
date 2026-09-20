@@ -50,6 +50,8 @@ use crate::{
 #[derive(Debug, Clone, Copy)]
 pub struct SpatialPftStaticConfig<'a> {
     pub namelist: &'a Path,
+    /// 旧 namelist 没写 `DEF_USE_PFT/PC` 时的内核 subgrid 回退。
+    pub subgrid_fallback: Option<SpatialPftSubgrid>,
     /// Force soil texture/BVIC initialization for CatchLateral even when runoff scheme is not Simple VIC.
     pub force_soil_texture: bool,
     pub landdata: &'a Path,
@@ -120,6 +122,7 @@ impl<'a> SpatialPftStaticConfig<'a> {
     ) -> Self {
         Self {
             namelist,
+            subgrid_fallback: None,
             force_soil_texture: false,
             landdata,
             restart_dir,
@@ -381,7 +384,7 @@ pub fn write_spatial_pft_cold_time_restarts(
         );
     }
     let use_nitrification = optional_bool_or(&document, "DEF_USE_NITRIF", true)?;
-    let subgrid = spatial_pft_subgrid(&document)?;
+    let subgrid = spatial_pft_subgrid(&document, config.static_config.subgrid_fallback)?;
     if use_crop {
         ensure!(
             subgrid == SpatialPftSubgrid::Pft
@@ -1196,7 +1199,7 @@ struct CommonColdState {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SpatialPftSubgrid {
+pub enum SpatialPftSubgrid {
     Pft,
     Pc,
 }
@@ -2179,9 +2182,19 @@ fn read_pft_document(namelist: &Path) -> Result<colm_namelist::Document> {
     Ok(document)
 }
 
-fn spatial_pft_subgrid(document: &colm_namelist::Document) -> Result<SpatialPftSubgrid> {
+fn spatial_pft_subgrid(
+    document: &colm_namelist::Document,
+    fallback: Option<SpatialPftSubgrid>,
+) -> Result<SpatialPftSubgrid> {
+    let declared = ["DEF_USE_PFT", "DEF_USE_PC"]
+        .into_iter()
+        .filter(|field| document.get(field).is_some())
+        .count();
     let pc = optional_bool_or(document, "DEF_USE_PC", false)?;
-    let pft = optional_bool_or(document, "DEF_USE_PFT", !pc)?;
+    let pft = optional_bool_or(document, "DEF_USE_PFT", false)?;
+    if declared == 0 {
+        return Ok(fallback.unwrap_or(SpatialPftSubgrid::Pft));
+    }
     ensure!(
         pft != pc,
         "exactly one of DEF_USE_PFT and DEF_USE_PC must be true for a spatial PFT restart"

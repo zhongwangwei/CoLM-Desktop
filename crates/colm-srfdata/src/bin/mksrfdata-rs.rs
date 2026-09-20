@@ -23,7 +23,7 @@ use colm_srfdata::{
     build_methane_ph_patch_selection, build_pft_land_patches_from_raster, build_pft_topology,
     build_spatial_topology_with_filter_grid_and_raw_grids, clip_existing_surface,
     crop_pft_pctshared, gather_patch_raster, map_patch_diagnostic,
-    materialize_single_point_surface, materialize_single_point_surface_from_namelist,
+    materialize_single_point_surface, materialize_single_point_surface_from_namelist_with_subgrid,
     mesh_cell_area_weights, read_coordinate_patch_selection_f64,
     read_coordinate_patch_selection_layers_f64, read_mesh_coordinate_raster_pft_f64,
     read_mesh_open_raster_f64, read_mesh_raster_f64, read_mesh_raster_i32,
@@ -40,8 +40,8 @@ use colm_srfdata::{
     DiagnosticStatistic, FlatLandElements, FlatLandPatches, FlatMesh, Grid, LczUrbanRawFields,
     MeshFilter, NcarUrbanProperties, NcarUrbanRawFields, PftFractionInput, PftIndexInput,
     PftPatchMode, PftTopology, PixelAxes, SiteMode, SpatialBounds, SpatialInputKind,
-    SpatialTopology, TiledRasterFiles, TopographicWetness, UrbanMaterialParameters, COLM_1KM,
-    COLM_500M, COLM_5KM, DIAGNOSTIC_MISSING, MERIT_90M,
+    SpatialTopology, SurfaceSubgrid, TiledRasterFiles, TopographicWetness, UrbanMaterialParameters,
+    COLM_1KM, COLM_500M, COLM_5KM, DIAGNOSTIC_MISSING, MERIT_90M,
 };
 
 const LAKE_SOIL_LAYERS: usize = 10;
@@ -4227,6 +4227,7 @@ fn materialize_case(args: &[String]) -> Result<()> {
     let mut observation = None;
     let mut spatial_blocks = None;
     let mut soil_hyper_albedo_dir = None;
+    let mut subgrid = None;
     let mut index = 1;
     while index < args.len() {
         match args[index].as_str() {
@@ -4240,6 +4241,13 @@ fn materialize_case(args: &[String]) -> Result<()> {
             "--crop" => {
                 crop = true;
                 index += 1;
+            }
+            "--subgrid" => {
+                subgrid = Some(parse_subgrid(
+                    args.get(index + 1)
+                        .context("--subgrid needs lct, pft, or pc")?,
+                )?);
+                index += 2;
             }
             "--observation" => {
                 observation = Some(PathBuf::from(
@@ -4293,12 +4301,13 @@ fn materialize_case(args: &[String]) -> Result<()> {
         println!("clipped existing surface data to {}", destination.display());
         return Ok(());
     }
-    if let Some(mut command) = spatial_case_command(
+    if let Some(mut command) = spatial_case_command_with_subgrid(
         &namelist,
         lct_mode,
         crop,
         observation.as_deref(),
         spatial_blocks.as_ref(),
+        subgrid,
     )? {
         if let Some(directory) = soil_hyper_albedo_dir {
             command.required_directories.push(directory.clone());
@@ -4321,11 +4330,12 @@ fn materialize_case(args: &[String]) -> Result<()> {
     if let Some(directory) = &soil_hyper_albedo_dir {
         colm_srfdata::validate_single_point_hyperspectral_albedo_directory(directory)?;
     }
-    let (run, report) = materialize_single_point_surface_from_namelist(
+    let (run, report) = materialize_single_point_surface_from_namelist_with_subgrid(
         &namelist,
         lct_mode,
         crop,
         observation.as_deref(),
+        subgrid,
     )?;
     if let Some(directory) = soil_hyper_albedo_dir {
         colm_srfdata::append_single_point_hyperspectral_albedo_with_compression(
@@ -4415,12 +4425,26 @@ impl SpatialCaseCommand {
     }
 }
 
+/// 只给测试用的便捷包装：生产路径总是显式传 subgrid（namelist 未声明时由内核
+/// 宏回退），所以这个不带 fallback 的版本只在测试里存在。
+#[cfg(test)]
 fn spatial_case_command(
     namelist: &Path,
     lct_mode: Option<SiteMode>,
     crop_override: bool,
     observation: Option<&Path>,
     blocks: Option<&[String; 2]>,
+) -> Result<Option<SpatialCaseCommand>> {
+    spatial_case_command_with_subgrid(namelist, lct_mode, crop_override, observation, blocks, None)
+}
+
+fn spatial_case_command_with_subgrid(
+    namelist: &Path,
+    lct_mode: Option<SiteMode>,
+    crop_override: bool,
+    observation: Option<&Path>,
+    blocks: Option<&[String; 2]>,
+    subgrid_fallback: Option<SurfaceSubgrid>,
 ) -> Result<Option<SpatialCaseCommand>> {
     let text = std::fs::read_to_string(namelist)
         .with_context(|| format!("cannot read case namelist {}", namelist.display()))?;
@@ -4434,17 +4458,10 @@ fn spatial_case_command(
         "spatial observed surface data is not migrated; Rust refuses to substitute a cold rawdata surface"
     );
     let urban = case_bool(&document, "DEF_URBAN_RUN", false)?;
-    let lct = case_bool(&document, "DEF_USE_LCT", true)?;
-    let pft = case_bool(&document, "DEF_USE_PFT", false)?;
-    let pc = case_bool(&document, "DEF_USE_PC", false)?;
-    ensure!(
-        [lct, pft, pc]
-            .into_iter()
-            .filter(|enabled| *enabled)
-            .count()
-            == 1,
-        "exactly one of DEF_USE_LCT, DEF_USE_PFT, and DEF_USE_PC must be true"
-    );
+    let subgrid = colm_srfdata::site::surface_subgrid_from_document(&document, subgrid_fallback)?;
+    let lct = subgrid == SurfaceSubgrid::Lct;
+    let pft = subgrid == SurfaceSubgrid::Pft;
+    let pc = subgrid == SurfaceSubgrid::Pc;
     let crop = crop_override || case_bool(&document, "DEF_USE_CROP", false)?;
     ensure!(
         !crop || pft || pc,
@@ -5234,6 +5251,15 @@ fn parse_land_cover(value: &str) -> Result<SiteMode> {
     }
 }
 
+fn parse_subgrid(value: &str) -> Result<SurfaceSubgrid> {
+    match value {
+        "lct" => Ok(SurfaceSubgrid::Lct),
+        "pft" => Ok(SurfaceSubgrid::Pft),
+        "pc" => Ok(SurfaceSubgrid::Pc),
+        _ => bail!("--subgrid must be lct, pft, or pc"),
+    }
+}
+
 fn monthly_vegetation_source(prefix: &str, year: i32) -> Result<(String, String)> {
     if year < 0 {
         bail!("monthly vegetation year must be non-negative")
@@ -5258,7 +5284,7 @@ fn monthly_pft_vegetation_source(prefix: &str, year: i32) -> Result<(String, Str
 
 fn usage() -> &'static str {
     "usage:
-  mksrfdata-rs <case.nml> [--land-cover igbp|usgs] [--crop] [--blocks nx ny] [--observation observation.nc] [--soil-hyper-albedo-dir colm_input_ghsad]
+  mksrfdata-rs <case.nml> [--subgrid lct|pft|pc] [--land-cover igbp|usgs] [--crop] [--blocks nx ny] [--observation observation.nc] [--soil-hyper-albedo-dir colm_input_ghsad]
   mksrfdata-rs <site.nc> <landdata-dir> [rawdata] [observation.nc]
   mksrfdata-rs spatial-lct <latlon|unstructured|catchment> <mesh.nc> <landtype.nc> <landdata-dir> <lc-year> --land-cover <igbp|usgs> [--srfdata-compress-level 0..9] [--blocks nx ny] [--land-only true|false] [--mesh-filter filter.nc] [--dominant] [--diagnostics] [--lake-depth lake_depth.nc] [--lake-soil-carbon lake_soilc.nc] [--methane-ph PHH2O1.nc] [--soil-texture soiltexture_0cm-60cm_mean.nc] [--soil-dir soil] [--soil-model vgm|campbell] [--soil-fit true|false] [--soil-brightness soil_brightness.nc] [--soil-hyper-albedo-dir colm_input_ghsad] [--topography topography.nc] [--topographic-wetness TWI.nc] [--simple-topography-factors directory] [--regular-topography-factors directory] [--bedrock bedrock.nc] [--plant-tiles plant_15s] [--canopy-structure-dir canopy_data] [--usgs-forest-height Forest_Height.nc] [--lulcc] [--monthly-vegetation-year year]... [--lai-8day-dir lai_15s_8day --lai-8day-year year]... [--urban-rawdata rawdata --urban-scheme ncar|lcz --urban-geometry ghsl|li --urban-canyon-hwr true|false]
   mksrfdata-rs spatial-pft <latlon|unstructured|catchment> <mesh.nc> <landtype.nc> <landdata-dir> <lc-year> --plant-tiles plant_15s [--canopy-structure-dir canopy_data] [--srfdata-compress-level 0..9] [--lulcc] [--patch-mode merged|separate|fast-pc] [--output-2m-wmo true|false] [--crop-surface global_CFT_surface_data.nc] [--blocks nx ny] [--land-only true|false] [--mesh-filter filter.nc] [--dominant] [--diagnostics] [--lake-depth lake_depth.nc] [--lake-soil-carbon lake_soilc.nc] [--methane-ph PHH2O1.nc] [--soil-texture soiltexture_0cm-60cm_mean.nc] [--soil-dir soil] [--soil-model vgm|campbell] [--soil-fit true|false] [--soil-brightness soil_brightness.nc] [--soil-hyper-albedo-dir colm_input_ghsad] [--topography topography.nc] [--topographic-wetness TWI.nc] [--simple-topography-factors directory] [--regular-topography-factors directory] [--bedrock bedrock.nc] [--monthly-vegetation-year year]..."
@@ -8019,5 +8045,16 @@ mod tests {
             catchment_lct_extra_raw_grids(SiteMode::Igbp, true),
             vec![COLM_500M, COLM_5KM]
         );
+    }
+
+    /// `--subgrid` 的词表与 `colm-cli` 传给预处理器的取值必须完全一致，
+    /// 大小写不匹配就在这一层挡住，而不是落进 `surface_subgrid_from_document`。
+    #[test]
+    fn parse_subgrid_accepts_only_the_three_upstream_names() {
+        assert_eq!(parse_subgrid("lct").unwrap(), SurfaceSubgrid::Lct);
+        assert_eq!(parse_subgrid("pft").unwrap(), SurfaceSubgrid::Pft);
+        assert_eq!(parse_subgrid("pc").unwrap(), SurfaceSubgrid::Pc);
+        let error = parse_subgrid("").unwrap_err();
+        assert!(error.to_string().contains("lct, pft, or pc"), "{error}");
     }
 }

@@ -3396,3 +3396,80 @@ fn lcz_surface_defaults_share_one_validated_upstream_table() {
     assert!((lcz_defaults(0).unwrap_err().to_string()).contains("positive"));
     assert!((lcz_defaults(11).unwrap_err().to_string()).contains("1..=10"));
 }
+
+/// 算例自己声明的 subgrid 永远优先于内核回退 —— 回退只补「namelist 一个字都没说」
+/// 的那一种情况。上游 `MOD_Namelist.F90:1928-1936` 把 subgrid 定为运行期选择，
+/// 所以显式声明是唯一能同时约束三个 stage 的来源。
+#[test]
+fn declared_subgrid_wins_over_the_legacy_kernel_fallback() {
+    let document = parse(
+        "&nl_colm
+ DEF_USE_LCT=.false.
+ DEF_USE_PFT=.false.
+ DEF_USE_PC=.true.
+ /
+",
+    )
+    .unwrap();
+    assert_eq!(
+        surface_subgrid_from_document(&document, Some(SurfaceSubgrid::Pft)).unwrap(),
+        SurfaceSubgrid::Pc
+    );
+}
+
+/// 旧 namelist 没写这三个键时，用调用方给的内核选择补齐；三个值都要能透传，
+/// 因为 `mksrfdata-rs` 与 `mkinidata-rs` 必须落到同一个分支
+/// （此前一个默认 LCT、一个默认 PFT，同一份 namelist 会拆成两套地表数据）。
+#[test]
+fn silent_namelist_takes_the_legacy_kernel_subgrid() {
+    let document = parse("&nl_colm\n DEF_CASE_NAME='case'\n /\n").unwrap();
+    for (fallback, expected) in [
+        (SurfaceSubgrid::Lct, SurfaceSubgrid::Lct),
+        (SurfaceSubgrid::Pft, SurfaceSubgrid::Pft),
+        (SurfaceSubgrid::Pc, SurfaceSubgrid::Pc),
+    ] {
+        assert_eq!(
+            surface_subgrid_from_document(&document, Some(fallback)).unwrap(),
+            expected
+        );
+    }
+}
+
+/// 没有内核回退时退回上游默认 LCT（`DEF_USE_LCT = .true.`），不是报错也不是猜。
+#[test]
+fn silent_namelist_without_a_kernel_fallback_keeps_the_upstream_lct_default() {
+    let document = parse("&nl_colm\n /\n").unwrap();
+    assert_eq!(
+        surface_subgrid_from_document(&document, None).unwrap(),
+        SurfaceSubgrid::Lct
+    );
+}
+
+/// 声明了就必须恰好一个为真：两个真、三个全假、非 logical，全部显式报错 ——
+/// 与上游 `IF (count(...) /= 1) ... CoLM_stop()` 同一判据，不静默挑一个。
+#[test]
+fn ambiguous_or_non_logical_subgrid_declarations_are_refused() {
+    let two_true = parse(
+        "&nl_colm
+ DEF_USE_LCT=.true.
+ DEF_USE_PC=.true.
+ /
+",
+    )
+    .unwrap();
+    assert!(surface_subgrid_from_document(&two_true, None).is_err());
+
+    let all_false = parse(
+        "&nl_colm
+ DEF_USE_LCT=.false.
+ DEF_USE_PFT=.false.
+ DEF_USE_PC=.false.
+ /
+",
+    )
+    .unwrap();
+    assert!(surface_subgrid_from_document(&all_false, Some(SurfaceSubgrid::Pc)).is_err());
+
+    let not_logical = parse("&nl_colm\n DEF_USE_PC=1\n /\n").unwrap();
+    assert!(surface_subgrid_from_document(&not_logical, None).is_err());
+}

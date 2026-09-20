@@ -179,6 +179,14 @@ pub enum SiteMode {
     Urban,
 }
 
+/// LCT/PFT/PC fallback supplied by a legacy kernel manifest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SurfaceSubgrid {
+    Lct,
+    Pft,
+    Pc,
+}
+
 /// Native LCT vegetation cadence resolved from the case namelist.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SinglePointLaiFrequency {
@@ -287,6 +295,22 @@ pub fn single_point_surface_run_from_namelist(
     lct_mode_override: Option<SiteMode>,
     crop_enabled: bool,
 ) -> Result<SinglePointSurfaceRun> {
+    single_point_surface_run_from_namelist_with_subgrid(
+        namelist,
+        lct_mode_override,
+        crop_enabled,
+        None,
+    )
+}
+
+/// Resolves a single-point surface while retaining the old kernel's compile-time
+/// subgrid choice when the namelist predates `DEF_USE_LCT/PFT/PC`.
+pub fn single_point_surface_run_from_namelist_with_subgrid(
+    namelist: impl AsRef<Path>,
+    lct_mode_override: Option<SiteMode>,
+    crop_enabled: bool,
+    subgrid_fallback: Option<SurfaceSubgrid>,
+) -> Result<SinglePointSurfaceRun> {
     let namelist = namelist.as_ref();
     let text = std::fs::read_to_string(namelist)
         .with_context(|| format!("cannot read case namelist {}", namelist.display()))?;
@@ -296,18 +320,12 @@ pub fn single_point_surface_run_from_namelist(
     let output = PathBuf::from(required_namelist_string(&document, "DEF_dir_output")?);
     let source = PathBuf::from(required_namelist_string(&document, "SITE_fsitedata")?);
     let urban = namelist_bool(&document, "DEF_URBAN_RUN", false)?;
-    let lct = namelist_bool(&document, "DEF_USE_LCT", true)?;
-    let pft = namelist_bool(&document, "DEF_USE_PFT", false)?;
-    let pc = namelist_bool(&document, "DEF_USE_PC", false)?;
-    if [lct, pft, pc]
-        .into_iter()
-        .filter(|selected| *selected)
-        .count()
-        != 1
-    {
-        bail!("exactly one of DEF_USE_LCT, DEF_USE_PFT, and DEF_USE_PC must be true");
-    }
-    if crop_enabled && !matches!((pft, pc), (true, false) | (false, true)) {
+    let subgrid = surface_subgrid_from_document(&document, subgrid_fallback)?;
+    ensure!(
+        !urban || subgrid == SurfaceSubgrid::Lct,
+        "DEF_URBAN_RUN requires DEF_USE_LCT = .true."
+    );
+    if crop_enabled && subgrid == SurfaceSubgrid::Lct {
         bail!("CROP surface data requires DEF_USE_PFT or DEF_USE_PC");
     }
     let mode = if urban {
@@ -315,9 +333,9 @@ pub fn single_point_surface_run_from_namelist(
             bail!("CROP surface data is incompatible with DEF_URBAN_RUN");
         }
         SiteMode::Urban
-    } else if pft {
+    } else if subgrid == SurfaceSubgrid::Pft {
         SiteMode::Pft
-    } else if pc {
+    } else if subgrid == SurfaceSubgrid::Pc {
         SiteMode::Pc
     } else {
         let requested = match lct_mode_override {
@@ -336,7 +354,10 @@ pub fn single_point_surface_run_from_namelist(
         .map(PathBuf::from);
     let urban_canyon_hwr = namelist_bool(&document, "DEF_USE_CANYON_HWR", false)?;
     let urban_lai_year_window = urban_lai_year_window(&document, urban)?;
-    let lai_frequency = if !urban && lct && !namelist_bool(&document, "DEF_LAI_MONTHLY", true)? {
+    let lai_frequency = if !urban
+        && subgrid == SurfaceSubgrid::Lct
+        && !namelist_bool(&document, "DEF_LAI_MONTHLY", true)?
+    {
         SinglePointLaiFrequency::EightDay
     } else {
         SinglePointLaiFrequency::Monthly
@@ -413,7 +434,30 @@ pub fn materialize_single_point_surface_from_namelist(
     crop_enabled: bool,
     observation: Option<&Path>,
 ) -> Result<(SinglePointSurfaceRun, Option<Report>)> {
-    let run = single_point_surface_run_from_namelist(namelist, lct_mode_override, crop_enabled)?;
+    materialize_single_point_surface_from_namelist_with_subgrid(
+        namelist,
+        lct_mode_override,
+        crop_enabled,
+        observation,
+        None,
+    )
+}
+
+/// 与 `materialize_single_point_surface_from_namelist` 相同，但多一个内核 subgrid
+/// 回退，供旧 namelist（无 `DEF_USE_LCT/PFT/PC`）使用。
+pub fn materialize_single_point_surface_from_namelist_with_subgrid(
+    namelist: impl AsRef<Path>,
+    lct_mode_override: Option<SiteMode>,
+    crop_enabled: bool,
+    observation: Option<&Path>,
+    subgrid_fallback: Option<SurfaceSubgrid>,
+) -> Result<(SinglePointSurfaceRun, Option<Report>)> {
+    let run = single_point_surface_run_from_namelist_with_subgrid(
+        namelist,
+        lct_mode_override,
+        crop_enabled,
+        subgrid_fallback,
+    )?;
     let report = materialize_single_point_surface_impl(
         &run.source,
         &run.landdata_dir,
@@ -490,6 +534,44 @@ fn namelist_bool(document: &colm_namelist::Document, field: &str, default: bool)
         Some(Value::Bool(value)) => Ok(*value),
         Some(_) => bail!("{field} must be a logical value"),
     }
+}
+
+/// 解析 LCT/PFT/PC 子网格：算例自己的声明 > 内核回退 > 上游默认 LCT。
+///
+/// 上游把这三个键定为**运行期**互斥选择（`MOD_Namelist.F90:1928-1936`），
+/// 默认 `DEF_USE_LCT = .true.`，所以「一个都没声明」在 Fortran 侧就是 LCT ——
+/// 这里保持同一默认，只在 namelist 完全沉默时才采用调用方给的内核回退
+/// （旧算例没有这三个键，而内核宏才是用户实际选中的结构）。声明了却凑不出
+/// 恰好一个真值（两个真、三个全假、非 logical）一律报错，不替用户挑一个。
+pub fn surface_subgrid_from_document(
+    document: &colm_namelist::Document,
+    fallback: Option<SurfaceSubgrid>,
+) -> Result<SurfaceSubgrid> {
+    let declared = ["DEF_USE_LCT", "DEF_USE_PFT", "DEF_USE_PC"]
+        .into_iter()
+        .filter(|field| document.get(field).is_some())
+        .count();
+    let selected = [
+        ("DEF_USE_LCT", SurfaceSubgrid::Lct),
+        ("DEF_USE_PFT", SurfaceSubgrid::Pft),
+        ("DEF_USE_PC", SurfaceSubgrid::Pc),
+    ]
+    .into_iter()
+    .filter_map(|(field, subgrid)| match document.get(field) {
+        Some(Value::Bool(true)) => Some(Ok(subgrid)),
+        Some(Value::Bool(false)) | None => None,
+        Some(_) => Some(Err(anyhow::anyhow!("{field} must be a logical value"))),
+    })
+    .collect::<Result<Vec<_>>>()?;
+    ensure!(
+        (declared == 0 && selected.is_empty()) || selected.len() == 1,
+        "exactly one of DEF_USE_LCT, DEF_USE_PFT, and DEF_USE_PC must be true"
+    );
+    Ok(selected
+        .first()
+        .copied()
+        .or(fallback)
+        .unwrap_or(SurfaceSubgrid::Lct))
 }
 
 fn namelist_i32(document: &colm_namelist::Document, field: &str, default: i32) -> Result<i32> {

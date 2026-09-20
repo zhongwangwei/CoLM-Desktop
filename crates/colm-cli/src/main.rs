@@ -1873,11 +1873,29 @@ fn rust_preprocessor_arguments(
         .with_context(|| format!("cannot read {}", namelist.display()))?;
     let document = colm_namelist::parse(&text)
         .with_context(|| format!("cannot parse {}", namelist.display()))?;
-    let lct = match document.get("DEF_USE_LCT") {
-        Some(colm_namelist::Value::Bool(value)) => *value,
-        Some(other) => bail!("DEF_USE_LCT must be logical, got {other}"),
-        None => true,
+    let subgrid = match namelist_subgrid(&document)? {
+        Some(subgrid) => subgrid,
+        // 旧 namelist 一个键都没写时，上游把它解析成 LCT（`MOD_Namelist.F90:1928-1936`
+        // 三个键互斥、默认 `DEF_USE_LCT = .true.`），而 `colm` **只读 namelist**：
+        // 内核宏再怎么说 PC/PFT，运行期也是 LCT。此时若让 Rust 预处理器跟着内核
+        // 走，就会产出 PC/PFT 的地表与 restart 去喂 LCT 运行时 —— 跑得完、结果错。
+        // 「内核说要 PC、namelist 没说」是算例自己没交代清楚，直接拒绝而不是替它猜。
+        None => {
+            let kernel_choice = kernel_subgrid(kernel)?;
+            ensure!(
+                kernel_choice == Subgrid::Lct,
+                "{} declares none of DEF_USE_LCT, DEF_USE_PFT or DEF_USE_PC, but kernel {} was built for the {} subgrid. \
+                 The Fortran model resolves a namelist without those keys to LCT, so preprocessing as {} would feed an LCT run; \
+                 declare exactly one of the three keys in the namelist, or select an LCT kernel",
+                namelist.display(),
+                kernel.manifest.identity(),
+                kernel_choice.as_str(),
+                kernel_choice.as_str()
+            );
+            Subgrid::Lct
+        }
     };
+    let lct = subgrid == Subgrid::Lct;
     let urban = match document.get("DEF_URBAN_RUN") {
         Some(colm_namelist::Value::Bool(value)) => *value,
         Some(other) => bail!("DEF_URBAN_RUN must be logical, got {other}"),
@@ -1970,6 +1988,62 @@ fn rust_preprocessor_arguments(
     };
     arguments.extend(["--land-cover".into(), land_cover.into()]);
     Ok(arguments)
+}
+
+impl Subgrid {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Lct => "lct",
+            Self::Pft => "pft",
+            Self::Pc => "pc",
+        }
+    }
+}
+
+fn namelist_subgrid(document: &colm_namelist::Document) -> Result<Option<Subgrid>> {
+    let mut selected = Vec::new();
+    let mut declared = false;
+    for (field, subgrid) in [
+        ("DEF_USE_LCT", Subgrid::Lct),
+        ("DEF_USE_PFT", Subgrid::Pft),
+        ("DEF_USE_PC", Subgrid::Pc),
+    ] {
+        match document.get(field) {
+            Some(colm_namelist::Value::Bool(value)) => {
+                declared = true;
+                if *value {
+                    selected.push(subgrid);
+                }
+            }
+            Some(other) => bail!("{field} must be logical, got {other}"),
+            None => {}
+        }
+    }
+    if !declared {
+        return Ok(None);
+    }
+    ensure!(
+        selected.len() == 1,
+        "exactly one of DEF_USE_LCT, DEF_USE_PFT, and DEF_USE_PC must be true"
+    );
+    Ok(selected.first().copied())
+}
+
+fn kernel_subgrid(kernel: &Kernel) -> Result<Subgrid> {
+    let has = |name: &str| kernel.manifest.macros.iter().any(|item| item == name);
+    let selected = [
+        (has("LULC_IGBP") || has("LULC_USGS"), Subgrid::Lct),
+        (has("LULC_IGBP_PFT"), Subgrid::Pft),
+        (has("LULC_IGBP_PC"), Subgrid::Pc),
+    ]
+    .into_iter()
+    .filter_map(|(enabled, subgrid)| enabled.then_some(subgrid))
+    .collect::<Vec<_>>();
+    ensure!(
+        selected.len() == 1,
+        "kernel manifest must select exactly one LCT/PFT/PC subgrid macro"
+    );
+    Ok(selected[0])
 }
 
 fn canonical_input_directory(path: &Path, option: &str) -> Result<PathBuf> {

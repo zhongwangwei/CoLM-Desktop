@@ -653,3 +653,35 @@ fn temp_dir() -> PathBuf {
     let _ = std::fs::remove_dir_all(&path);
     path
 }
+
+/// 旧 namelist 缺 `DEF_USE_PFT/PC` 时用内核回退补齐；只要声明了两个键中的一个，
+/// 回退就不再生效 —— 尤其 `DEF_USE_PC=.true.` 单独出现时必须仍是 PC，
+/// 不能退回 PFT（这个默认值差异是旧代码 `optional_bool_or(..., !pc)` 的语义）。
+#[test]
+fn spatial_pft_subgrid_uses_the_kernel_only_when_the_namelist_is_silent() {
+    let silent = parse("&nl_colm\n DEF_CASE_NAME='case'\n /\n").unwrap();
+    assert_eq!(
+        spatial_pft_subgrid(&silent, None).unwrap(),
+        SpatialPftSubgrid::Pft
+    );
+    assert_eq!(
+        spatial_pft_subgrid(&silent, Some(SpatialPftSubgrid::Pc)).unwrap(),
+        SpatialPftSubgrid::Pc
+    );
+
+    let pc_only = parse("&nl_colm\n DEF_USE_PC=.true.\n /\n").unwrap();
+    assert_eq!(
+        spatial_pft_subgrid(&pc_only, Some(SpatialPftSubgrid::Pft)).unwrap(),
+        SpatialPftSubgrid::Pc
+    );
+
+    let not_a_subgrid = parse(
+        "&nl_colm
+ DEF_USE_PFT=.false.
+ DEF_USE_PC=.false.
+ /
+",
+    )
+    .unwrap();
+    assert!(spatial_pft_subgrid(&not_a_subgrid, Some(SpatialPftSubgrid::Pc)).is_err());
+}

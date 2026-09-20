@@ -2277,3 +2277,76 @@ than encoded as a platform-specific rule. The production solver and tolerance
 remain unchanged. Evidence is in `/tmp/colm-original-raw-input-probe/`,
 `/tmp/colm-vgm-large-probe/`, `/tmp/colm-campbell-large-probe/`, and the rejected
 full run `/tmp/colm-vgm-jacobian-candidate.ZRDUcs/`.
+
+## Legacy namelists resolve one subgrid for both preprocessors
+
+`DEF_USE_LCT` / `DEF_USE_PFT` / `DEF_USE_PC` are a **runtime** choice upstream, with
+LCT as the declared default when a namelist omits all three
+(`share/MOD_Namelist.F90:1928-1936`; `count(...) /= 1` is a fatal error, so silence
+means LCT). The two Rust preprocessors previously disagreed on that silence:
+spatial `mksrfdata-rs` resolved LCT while the spatial PFT/PC writer resolved PFT, so
+one PC case could get an LCT surface with a PFT restart.
+
+Both now resolve through one resolver,
+`colm_srfdata::site::surface_subgrid_from_document`, which takes the declared keys
+first, then an optional caller-supplied fallback, then the upstream LCT default.
+Ambiguous or non-logical declarations (two true, all false, `DEF_USE_PC=1`) are
+refused instead of guessed.
+
+**`colm-cli` refuses the ambiguous composition rather than resolving it.** The
+Fortran `colm` executable only reads the namelist, so a silent namelist always runs
+LCT no matter which kernel was built. Honouring the kernel's subgrid during
+preprocessing would therefore feed PC/PFT surface and restart files to an LCT run:
+a pipeline that finishes with silently wrong results. When the namelist declares
+none of the three keys and the selected kernel manifest selects PFT or PC, `run`
+fails with the missing keys named; a silent namelist with an LCT kernel (or any
+namelist that declares a key) proceeds. Desktop-created cases are unaffected:
+`colm-cli new` always writes the three keys through `add_subgrid_fields`.
+
+The preprocessor binaries keep `--subgrid <lct|pft|pc>` as an explicit escape hatch
+for direct invocation (`mkinidata-rs`/`mksrfdata-rs` called without `colm-cli`),
+which is also how the resolver's fallback branch is exercised; `colm-cli` never
+passes it. That direct path still proceeds when a caller asserts a non-LCT subgrid
+for a silent namelist, so it remains the caller's responsibility.
+
+Reachability was checked against every in-repo caller: all five shipped kernel
+manifests select LCT (`kernels/{default,bgc,crop,urban}` carry `LULC_IGBP`,
+`kernels/usgs` carries `LULC_USGS`), no integration test pairs a silent namelist with
+a PFT/PC kernel, and `golden_run` drives the Fortran stages through
+`colm_kernel::run_stage` instead of the CLI argument builder. So neither the released
+products nor the golden regression can reach the refusal; it fires only for a
+self-built PFT/PC kernel combined with a namelist that omits the keys.
+
+**Correcting the premise behind that inference.** `LULC_IGBP_PFT` and
+`LULC_IGBP_PC` are *retired* compile-time macros: `oracle/scripts/build_kernel.sh:43-52`
+records that the subgrid structure, URBAN_MODEL and BGC all became runtime switches,
+that `main/LULCC/` and the PFT/PC subgrid modules are always compiled in, and that
+`create_defineh.bash`'s second argument now selects only the land *classification*
+(`LULC_IGBP`/`LULC_USGS`). Every kernel this repository builds therefore carries at
+most one LCT macro, and `kernel_subgrid` can only return LCT for it. The PFT/PC
+branches — and the CLI refusal they gate — are defensive paths, reachable only from a
+hand-edited or externally built manifest. They are kept because the alternative is
+inferring a subgrid the runtime will not use, which is the failure this section
+exists to prevent. The substantive fix does not depend on them: one shared resolver
+makes the two preprocessors agree, and ambiguous declarations are refused.
+End-to-end probes against the real binary confirm both directions — a manifest
+claiming `LULC_IGBP_PC` with a silent namelist exits 1 with the actionable message,
+while an LCT kernel proceeds into the preprocessor.
+
+Covered by unit tests: the resolver (declared-wins, each of the three fallbacks,
+upstream default, and ambiguous / all-false / non-logical declarations refused), the
+single-point and spatial-PFT resolvers' fallback path, both binaries' `--subgrid`
+word list, the CLI's refusal for a silent namelist with a PC kernel, and the CLI's
+acceptance of a declared namelist or a silent namelist with an LCT kernel.
+
+## Local verification caveat: NetCDF-heavy test binaries need one thread
+
+`cargo test -p colm-init --lib` and `cargo test -p colm-srfdata --lib` fail 30+ tests
+with `Netcdf(-101): HDF error` under the default parallel harness and pass with
+`--test-threads=1` (colm-init 147/147, colm-srfdata 275/275). Nothing in the
+dependency graph enables `hdf5-sys/threadsafe`, so the vendored HDF5 is not
+thread-safe and concurrent NetCDF/HDF5 creates inside one process are unsafe. The
+branch head `1a7fcb2` reproduces it without any local change (113 passed / 32 failed
+in parallel), so this predates the subgrid work. CI already serializes `colm-cli` for
+the same reason but not the other crates; whether those pass in parallel on the
+runners is unverified from here.

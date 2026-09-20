@@ -38,6 +38,12 @@ fn data_assimilation_kernel() -> Kernel {
     kernel
 }
 
+fn pc_kernel() -> Kernel {
+    let mut kernel = hyperspectral_kernel();
+    kernel.manifest.macros = vec!["LULC_IGBP_PC".into()];
+    kernel
+}
+
 fn hyperspectral_pft_namelist(root: &Path) -> PathBuf {
     let namelist = root.join("case.nml");
     std::fs::write(
@@ -135,6 +141,57 @@ fn data_assimilation_kernel_enables_the_matching_rust_mkinidata_branch() {
         .unwrap(),
         vec!["--data-assimilation", "--land-cover", "igbp"]
     );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// 旧 namelist 没写 `DEF_USE_LCT/PFT/PC`，而内核是 PFT/PC 时，预处理器不能
+/// 「跟着内核走」：`colm` 只读 namelist，会把沉默解析成 LCT，于是 PC/PFT 的
+/// 地表与 restart 被喂给 LCT 运行时 —— 跑得完、结果错。拒绝并点名要补哪个键。
+#[test]
+fn legacy_namelist_with_a_pc_kernel_is_refused_by_both_rust_preprocessors() {
+    let root = test_directory("legacy-pc-subgrid");
+    let namelist = root.join("case.nml");
+    std::fs::write(&namelist, "&nl_colm\nDEF_file_mesh='mesh.nc'\n/\n").unwrap();
+    for stage in [Stage::MkSrfData, Stage::MkIniData] {
+        let error = rust_preprocessor_arguments(stage, &namelist, &pc_kernel(), None, None)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("DEF_USE_LCT, DEF_USE_PFT or DEF_USE_PC"),
+            "{error}"
+        );
+        assert!(error.contains("LCT"), "{error}");
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// 沉默 namelist + LCT 内核（上游默认就是 LCT）无需声明，也不该下发任何
+/// subgrid 参数；算例自己声明了 PC 同样放行。
+#[test]
+fn silent_lct_kernel_and_declared_namelists_need_no_subgrid_argument() {
+    let root = test_directory("declared-subgrid");
+    let namelist = root.join("case.nml");
+    let no_subgrid = |stage: Stage, kernel: &Kernel| {
+        let arguments = rust_preprocessor_arguments(stage, &namelist, kernel, None, None).unwrap();
+        assert!(
+            !arguments.iter().any(|argument| argument == "--subgrid"),
+            "{arguments:?}"
+        );
+    };
+
+    std::fs::write(&namelist, "&nl_colm\nDEF_file_mesh='mesh.nc'\n/\n").unwrap();
+    for stage in [Stage::MkSrfData, Stage::MkIniData] {
+        no_subgrid(stage, &data_assimilation_kernel());
+    }
+
+    std::fs::write(
+        &namelist,
+        "&nl_colm\nDEF_file_mesh='mesh.nc'\nDEF_USE_LCT=.false.\nDEF_USE_PFT=.false.\nDEF_USE_PC=.true.\n/\n",
+    )
+    .unwrap();
+    for stage in [Stage::MkSrfData, Stage::MkIniData] {
+        no_subgrid(stage, &pc_kernel());
+    }
     std::fs::remove_dir_all(root).unwrap();
 }
 
