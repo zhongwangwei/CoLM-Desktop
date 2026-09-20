@@ -16,8 +16,8 @@ use colm_core::{
     month_day_to_julian, orbital_calendar_day, orbital_cosine_azimuth, standard_lct_soil_step,
     CalendarTime, Co2Scenario, DownscalingSolarGeometry, DownscalingTerrain,
     ForcingDownscalingConfig, ForcingDownscalingInput, LaiUpdateSchedule, RestartFrequency,
-    RuntimeClock, RuntimeForcing, RuntimeStep, StandardLctSoilInput, StandardLctSoilOutput,
-    StandardLctSoilState,
+    RuntimeClock, RuntimeForcing, RuntimeStep, StandardLctSnowSoilOutput, StandardLctSnowSoilState,
+    StandardLctSoilInput, StandardLctSoilOutput, StandardLctSoilState,
 };
 use colm_forcing::{load_point_forcing, PointForcingSeries};
 use colm_namelist::{parse, Document, Value};
@@ -210,24 +210,35 @@ impl PointRuntime {
     where
         F: FnMut(PointRuntimeStep, &StandardLctSoilOutput) -> Result<()>,
     {
-        let greenwich_time = self.greenwich;
-        let longitude_radians = self.longitude_degrees.to_radians();
-        let co2_scenario = self.co2_scenario;
+        let (greenwich_time, longitude_degrees, co2_scenario) =
+            (self.greenwich, self.longitude_degrees, self.co2_scenario);
         self.run_with_state(state, |step, next| {
-            let (month, _) = colm_core::month_day(step.clock.forcing_time)?;
-            let binding = StandardLctStepBinding {
-                forcing: step.forcing,
-                seconds_of_day: seconds_of_day(step.clock.forcing_time)?,
-                greenwich_time,
-                longitude_radians,
-                // `MOD_Forcing` 每步按年月查 Mauna Loa 月表，再乘 1e-6 转成体积分数。
-                co2_volume_fraction: colm_core::monthly_co2_ppm(
-                    co2_scenario,
-                    step.clock.forcing_time.year,
-                    month,
-                )? * 1.0e-6,
-            };
+            let binding = lct_binding(step, greenwich_time, longitude_degrees, co2_scenario)?;
             let output = standard_lct_soil_step(template.input(&binding), next)?;
+            on_step(step, &output)
+        })
+    }
+
+    /// Runs an assembled snow-bearing restart template through the POINT window.
+    ///
+    /// The snow sibling of [`Self::run_restart_standard_lct`]: same clock, same binding,
+    /// same transaction — only the kernel and the state type differ. Both share
+    /// [`Self::lct_binding`] so the per-step fields cannot drift between the branches.
+    pub fn run_restart_standard_lct_snow<F>(
+        &mut self,
+        template: &StandardLctRestartTemplate,
+        state: &mut StandardLctSnowSoilState,
+        mut on_step: F,
+    ) -> Result<usize>
+    where
+        F: FnMut(PointRuntimeStep, &StandardLctSnowSoilOutput) -> Result<()>,
+    {
+        let (greenwich_time, longitude_degrees, co2_scenario) =
+            (self.greenwich, self.longitude_degrees, self.co2_scenario);
+        self.run_with_state(state, |step, next| {
+            let binding = lct_binding(step, greenwich_time, longitude_degrees, co2_scenario)?;
+            let output =
+                colm_core::standard_lct_snow_soil_step(template.snow_input(&binding), next)?;
             on_step(step, &output)
         })
     }
@@ -355,6 +366,30 @@ impl PointRuntime {
             },
         )))
     }
+}
+
+/// 当步的绑定：forcing、当日秒数、greenwich 标志、经度与 CO2 体积分数。
+///
+/// 两支（无雪与积雪）共用它，免得各自拼一份而在某个字段上漂开。
+fn lct_binding(
+    step: PointRuntimeStep,
+    greenwich_time: bool,
+    longitude_degrees: f64,
+    co2_scenario: Co2Scenario,
+) -> Result<StandardLctStepBinding> {
+    let (month, _) = colm_core::month_day(step.clock.forcing_time)?;
+    Ok(StandardLctStepBinding {
+        forcing: step.forcing,
+        seconds_of_day: seconds_of_day(step.clock.forcing_time)?,
+        greenwich_time,
+        longitude_radians: longitude_degrees.to_radians(),
+        // `MOD_Forcing` 每步按年月查 Mauna Loa 月表，再乘 1e-6 转成体积分数。
+        co2_volume_fraction: colm_core::monthly_co2_ppm(
+            co2_scenario,
+            step.clock.forcing_time.year,
+            month,
+        )? * 1.0e-6,
+    })
 }
 
 /// `MOD_NetSolar` 的 `seconds_of_day` 是当日秒数，核心里要求落在 `[0, 86400)`。
@@ -724,6 +759,7 @@ mod tests {
             },
             wue_lambda: 2.0,
             soil_ice_impedance: 6.0,
+            snow_irreducible_saturation: 0.033,
             impermeable_porosity: 0.05,
             ponding_limit_mm: 5.0,
             minimum_soil_potential_mm: -1.0e8,
@@ -845,6 +881,60 @@ mod tests {
             "a failed step must not advance the soil column"
         );
         assert_eq!(runtime.next_step().unwrap().unwrap().clock.index, 1);
+    }
+
+    /// 积雪分支跑多步：与无雪那条走同一个 POINT 循环与同一份绑定。
+    #[test]
+    fn an_assembled_snow_template_runs_several_point_steps() {
+        let root = directory("snow-driver");
+        let case = root.join("case.nml");
+        let forcing_namelist = root.join("forcing.nml");
+        let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/Forcing");
+        let source_dir = format!("{}/", source.display());
+        write_case_window(&case, &forcing_namelist, &source_dir, "POINT", 5400);
+        let fixture = colm_init::fixtures::SyntheticRestart::write_with_snow(
+            root.join("restart"),
+            colm_init::fixtures::SyntheticSnow {
+                depth_m: 0.15,
+                water_equivalent_kg_m2: 45.0,
+                ground_snow_fraction: 1.0,
+                temperature_k: 268.0,
+            },
+        )
+        .unwrap();
+        let template = crate::assembly::assemble_standard_lct_snow_template(
+            &crate::assembly::RestartStateFiles {
+                constant: fixture.constant.block.clone(),
+                time: fixture.time.block.clone(),
+            },
+            1,
+            land_physics(),
+        )
+        .unwrap();
+        let mut runtime = PointRuntime::open(read_point_runtime_config(&case).unwrap()).unwrap();
+        let mut state = template.snow_state();
+        let initial = state.snow.water_equivalent_kg_m2;
+        let mut layers = Vec::new();
+        // `state` 正被这次调用可变借用，所以雪层数从 output 里取。
+        let steps = runtime
+            .run_restart_standard_lct_snow(&template, &mut state, |step, output| {
+                layers.push(step.clock.index);
+                // 积雪分支的出水在 `soil` 那一半里；雪那一半给的是底部排水。
+                assert!(output.water.soil.total_runoff_mm_s.is_finite());
+                assert!(output.water.snow.bottom_drainage_kg_m2_s.is_finite());
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(steps, 3);
+        assert_eq!(layers, vec![1, 2, 3]);
+        // 雪列在三步之后仍然存在，且水量推进过。
+        assert!(state.snow.layer_count <= -1);
+        assert_ne!(state.snow.water_equivalent_kg_m2, initial);
+        assert!(state
+            .soil_temperature_k
+            .iter()
+            .all(|value| value.is_finite()));
+        assert!(runtime.next_step().unwrap().is_none());
     }
 
     /// `DEF_SSP` 决定 2022 年之后用哪张 CO2 表；缺省与上游一致是 `off`。

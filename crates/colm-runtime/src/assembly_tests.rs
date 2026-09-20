@@ -41,6 +41,7 @@ fn physics(timestep_seconds: f64) -> LandPhysicsParameters {
         },
         wue_lambda: 2.0,
         soil_ice_impedance: 6.0,
+        snow_irreducible_saturation: 0.033,
         impermeable_porosity: 0.05,
         ponding_limit_mm: 5.0,
         minimum_soil_potential_mm: -1.0e8,
@@ -649,4 +650,93 @@ fn the_assembled_snow_column_matches_the_written_one() {
             assert_eq!(written.temperature_k[slot * PATCHES], 268.0);
         }
     }
+}
+
+/// 积雪分支：从带雪的重启装配，并真的跑一步 `standard_lct_snow_soil_step`。
+#[test]
+fn a_snow_bearing_restart_drives_the_ported_snow_chain() {
+    let root = temp_dir("snowy-step");
+    let fixture = SyntheticRestart::write_with_snow(
+        root.join("restart"),
+        SyntheticSnow {
+            depth_m: 0.15,
+            water_equivalent_kg_m2: 45.0,
+            ground_snow_fraction: 1.0,
+            temperature_k: 268.0,
+        },
+    )
+    .unwrap();
+    let written = fixture.snow.clone().unwrap();
+    let template = crate::assembly::assemble_standard_lct_snow_template(
+        &crate::assembly::RestartStateFiles {
+            constant: fixture.constant.block.clone(),
+            time: fixture.time.block.clone(),
+        },
+        0,
+        physics(1800.0),
+    )
+    .unwrap();
+
+    // 层数由重启的水量推出，与夹具写进去的一致。
+    assert_eq!(template.snow.layer_count, written.layer_count);
+    assert_eq!(template.snow.layer_count, -3);
+    assert_eq!(template.snow.depth_m, 0.15);
+    assert_eq!(template.snow.water_equivalent_kg_m2, 45.0);
+    // 雪 + 土模板列：3 层雪 + 10 层土，界面是它们之间共享的那一个。
+    let input = template.snow_input(&binding());
+    assert_eq!(input.energy.ground_temperature.snow_layers, 3);
+    assert_eq!(input.energy.ground_temperature.layer_thickness_m.len(), 13);
+    assert_eq!(input.energy.ground_temperature.interface_depth_m.len(), 14);
+    assert_eq!(input.energy.ground_temperature.temperature_k[0], 268.0);
+    assert_eq!(input.snow_water.irreducible_saturation, 0.033);
+    // 三个雪盖比必须一致，否则内核的 `validate` 会拒绝。
+    assert_eq!(input.energy.solar.snow_fraction, 1.0);
+    assert_eq!(input.energy.ground_flux.snow_cover_fraction, 1.0);
+    assert_eq!(
+        input.energy.ground_temperature.snow_cover_fraction,
+        input.energy.solar.snow_fraction
+    );
+
+    // 真的跑一步：状态要推进，且雪列与土壤列都被带上。
+    let mut state = template.snow_state();
+    let before = state.snow.water_equivalent_kg_m2;
+    let output =
+        colm_core::standard_lct_snow_soil_step(template.snow_input(&binding()), &mut state)
+            .expect("the assembled snow template must drive one real step");
+    assert_eq!(state.soil_temperature_k.len(), SOIL_LAYERS);
+    assert!(state.snow.layer_count < 0);
+    assert!(output.energy.leaf.energy_balance_error_w_m2.abs() < 0.5);
+    assert!(state
+        .snow
+        .temperature_k
+        .iter()
+        .all(|value| value.is_finite()));
+    assert!(state
+        .soil_water
+        .liquid_water_kg_m2
+        .iter()
+        .all(|value| *value >= 0.0));
+    assert!(
+        (state.snow.water_equivalent_kg_m2 - before).abs() > 0.0,
+        "the snow pack did not move"
+    );
+    // 雪列数在一步之内不应凭空变成 0 层。
+    assert!(state.snow.layer_count <= -1);
+}
+
+/// 无雪重启走积雪入口必须被拒 —— 否则会拿一个空雪列去驱动积雪链。
+#[test]
+fn the_snow_entry_point_refuses_a_snow_free_restart() {
+    let root = temp_dir("snow-entry-refusal");
+    let fixture = SyntheticRestart::write(root.join("restart")).unwrap();
+    let error = crate::assembly::assemble_standard_lct_snow_template(
+        &crate::assembly::RestartStateFiles {
+            constant: fixture.constant.block.clone(),
+            time: fixture.time.block.clone(),
+        },
+        0,
+        physics(1800.0),
+    )
+    .unwrap_err();
+    assert!(format!("{error:#}").contains("snow-bearing"), "{error:#}");
 }

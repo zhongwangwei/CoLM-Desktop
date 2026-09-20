@@ -31,9 +31,9 @@ use colm_core::{
     ColdStartRadiation, HydraulicModel, LandCoverScheme, LeafBiochemistry, LeafTemperatureOptions,
     LeafTemperatureState, ObservationHeightMode, PrecipitationPhaseScheme, RestartSnowSlots,
     RootFractionScheme, RuntimeSnowColumn, SoilField, SoilHydraulicModel, SoilState,
-    SoilThermalInput, StandardLctSoilInput, StandardLctSoilState, StomataOptions,
-    SurfaceLayerScheme, ThermalConductivityScheme, TopmodelMethod, Water2014Runoff,
-    Water2014SoilFluxes, Water2014SoilState,
+    SoilThermalInput, StandardLctSnowSoilInput, StandardLctSnowSoilState, StandardLctSoilInput,
+    StandardLctSoilState, StomataOptions, SurfaceLayerScheme, ThermalConductivityScheme,
+    TopmodelMethod, Water2014Runoff, Water2014SoilFluxes, Water2014SoilState,
 };
 use colm_init::{
     colm_soil_grid, RestartFile, SOIL_FIELDS_COMMON, SOIL_FIELDS_THERMAL, SOIL_FIELDS_VAN_GENUCHTEN,
@@ -83,8 +83,14 @@ pub struct LandPhysicsParameters {
     pub observation_height_mode: ObservationHeightMode,
     pub stomata: StomataOptions,
     pub wue_lambda: f64,
-    /// `DEF_TUNING_SSI`。
+    /// `DEF_TUNING_SOIL_ICE_IMPEDANCE`（冻结土壤的水力阻抗指数，默认 6.0）。
+    ///
+    /// **不是** `DEF_TUNING_SSI`：后者是雪的不可约含水饱和度（默认 0.033），见
+    /// [`Self::snow_irreducible_saturation`]。两者默认值差两个数量级，混用会让阻抗
+    /// 几乎失效而任何测试都看不出来。
     pub soil_ice_impedance: f64,
+    /// `DEF_TUNING_SSI`：雪的不可约含水饱和度（默认 0.033），`snowwater` 的 `ssi`。
+    pub snow_irreducible_saturation: f64,
     /// `DEF_TUNING_WIMP`。
     pub impermeable_porosity: f64,
     /// `DEF_TUNING_PONDMX`。
@@ -146,6 +152,17 @@ pub struct StandardLctStepBinding {
     pub co2_volume_fraction: f64,
 }
 
+/// 雪 + 土拼成的模板列，长度随雪层数变。
+#[derive(Debug, Clone)]
+struct SnowSoilTemplate {
+    layer_thickness_m: Vec<f64>,
+    node_depth_m: Vec<f64>,
+    interface_depth_m: Vec<f64>,
+    temperature_k: Vec<f64>,
+    liquid_water_kg_m2: Vec<f64>,
+    ice_water_kg_m2: Vec<f64>,
+}
+
 /// 一个 patch 的静态与演化态，已从重启读出并按内核形状组织。
 ///
 /// 所有字段自有，`input()` 再借出去 —— 内核的 `StandardLctSoilInput` 全是切片，
@@ -188,12 +205,52 @@ pub struct StandardLctRestartTemplate {
     /// 重启里的雪列。无雪分支下 `layer_count == 0`；留着是因为上游每步都要按它
     /// 判断走不走积雪路径，而雪分支的装配要直接用它。
     pub snow: RuntimeSnowColumn,
+    /// 雪 + 土的模板列（`soilsnow`），积雪分支的 `GroundTemperatureInput` 需要这个形状。
+    ///
+    /// 雪段在前、土段在后，与时间重启里的数组同序；无雪时它就是土列本身。
+    snow_soil: SnowSoilTemplate,
     /// 非 PHS 分支下 `WATER_2014` 的每步根通量初值，全零且长度等于层数。
     root_flux_zeros: Vec<f64>,
 }
 
-/// 从两份写出重启装配一个 patch 的模板。
+/// 从两份写出重启装配无雪 patch 的模板。
+///
+/// 判据在雪列上（见下），不在 `fsno` 上。
 pub fn assemble_standard_lct_template(
+    files: &RestartStateFiles,
+    patch: usize,
+    physics: LandPhysicsParameters,
+) -> Result<StandardLctRestartTemplate> {
+    let template = assemble(files, patch, physics)?;
+    ensure!(
+        template.snow.layer_count == 0,
+        "standard LCT soil assembly needs a snow-free patch, but the restart carries {} snow \
+         layer(s) under a {:.4} m column",
+        template.snow.layer_count.unsigned_abs(),
+        template.snow.depth_m,
+    );
+    Ok(template)
+}
+
+/// 从两份写出重启装配带雪 patch 的模板。
+///
+/// 与无雪版本返回**同一个** [`StandardLctRestartTemplate`]：差别只在用哪个 `input()`。
+/// 雪层数由重启的水量推出（上游 `CoLMMAIN.F90:816-818`），所以这里只要求它非零。
+pub fn assemble_standard_lct_snow_template(
+    files: &RestartStateFiles,
+    patch: usize,
+    physics: LandPhysicsParameters,
+) -> Result<StandardLctRestartTemplate> {
+    let template = assemble(files, patch, physics)?;
+    ensure!(
+        template.snow.layer_count != 0,
+        "the snow assembly needs a snow-bearing patch, but the restart's snow column is empty"
+    );
+    Ok(template)
+}
+
+/// 两支共用的装配：读重启、派生地类参数、把雪列读出来。
+fn assemble(
     files: &RestartStateFiles,
     patch: usize,
     physics: LandPhysicsParameters,
@@ -259,16 +316,13 @@ pub fn assemble_standard_lct_template(
         "the time restart's soilsnow dimension cannot hold {soil_layers} soil layers"
     );
     let snow_layers = snow_slots - soil_layers;
-    // 先按上游的方式把雪列读出来再判断：无雪分支的判据是**列里没有水**，而不是
-    // `fsno == 0`。放在读土壤列之前，报错信息才指向真正的原因；否则会先撞上
-    // `soil_column` 那句"雪槽必须为空"。
+    // 先按上游的方式把雪列读出来。放在读土壤列之前，报错信息才指向真正的原因；
+    // 否则会先撞上 `soil_column` 那句"雪槽必须为空"。
     let snow = restart_snow_column(&time, patch, patch_type, snow_layers, soil_layers)?;
     ensure!(
-        snow.layer_count == 0,
-        "standard LCT soil assembly needs a snow-free patch, but the restart carries {} snow \
-         layer(s) under a {:.4} m column",
-        snow.layer_count.unsigned_abs(),
-        snow.depth_m,
+        snow.layer_count == 0 || snow.depth_m > 0.0,
+        "the restart carries {} snow layer(s) under no depth",
+        snow.layer_count.unsigned_abs()
     );
     let temperature_k = soil_column(&time, "t_soisno", patch, snow_layers, soil_layers)?;
     let liquid_water_kg_m2 = soil_column(&time, "wliq_soisno", patch, snow_layers, soil_layers)?;
@@ -395,6 +449,36 @@ pub fn assemble_standard_lct_template(
         "the standard LCT energy step needs a vegetated canopy"
     );
 
+    // 雪 + 土模板列：上游的 `z_soisno`/`dz_soisno`/`zi_soisno` 是从雪顶一直排到土壤底，
+    // 界面在雪土交界处共享 `zi(0) = 0`，所以土段的第一个界面不重复。
+    let used = SNOW_SLOTS - snow.layer_count.unsigned_abs() as usize;
+    let mut snow_soil = SnowSoilTemplate {
+        layer_thickness_m: snow.thickness_m[used..].to_vec(),
+        node_depth_m: snow.node_depth_m[used..].to_vec(),
+        interface_depth_m: snow.interface_depth_m[used..].to_vec(),
+        temperature_k: snow.temperature_k[used..].to_vec(),
+        liquid_water_kg_m2: snow.liquid_water_kg_m2[used..].to_vec(),
+        ice_water_kg_m2: snow.ice_water_kg_m2[used..].to_vec(),
+    };
+    snow_soil
+        .layer_thickness_m
+        .extend_from_slice(&layer_thickness_m);
+    snow_soil.node_depth_m.extend_from_slice(&node_depth_m);
+    snow_soil
+        .interface_depth_m
+        .extend_from_slice(&interface_depth_m[1..]);
+    snow_soil.temperature_k.extend_from_slice(&temperature_k);
+    snow_soil
+        .liquid_water_kg_m2
+        .extend_from_slice(&water.liquid_water_kg_m2);
+    snow_soil
+        .ice_water_kg_m2
+        .extend_from_slice(&water.ice_water_kg_m2);
+    ensure!(
+        snow_soil.layer_thickness_m.len() == soil_layers + snow.layer_count.unsigned_abs() as usize,
+        "the snow-plus-soil template column does not match its layer count"
+    );
+
     Ok(StandardLctRestartTemplate {
         patch,
         soil,
@@ -423,6 +507,7 @@ pub fn assemble_standard_lct_template(
         inverse_sqrt_leaf_dimension_m_neg_half,
         biochemistry,
         snow,
+        snow_soil,
         root_flux_zeros: vec![0.0; soil_layers],
         physics,
     })
@@ -702,6 +787,68 @@ impl StandardLctRestartTemplate {
         }
     }
 
+    /// 从装配结果取出积雪分支的状态。
+    pub fn snow_state(&self) -> StandardLctSnowSoilState {
+        StandardLctSnowSoilState {
+            energy: colm_core::StandardLctEnergyState {
+                radiation: self.radiation.clone(),
+                leaf: self.leaf,
+            },
+            snow: self.snow.clone(),
+            soil_temperature_k: self.temperature_k.clone(),
+            soil_water: self.water.clone(),
+        }
+    }
+
+    /// 绑定本步的 forcing 与时钟，得到积雪分支的内核输入。
+    ///
+    /// 与 [`Self::input`] 共用同一份静态量，差别只在 `ground_temperature` 用的是
+    /// **雪 + 土**模板列、`snow_layers` 与三个雪标量来自重启，以及多一个
+    /// [`SnowWaterInput`]。`snowwater` 那四个通量由本步能量链重建，这里给的是
+    /// 这一步之前的占位。
+    pub fn snow_input(&self, binding: &StandardLctStepBinding) -> StandardLctSnowSoilInput<'_> {
+        let snow_layers = self.snow.layer_count.unsigned_abs() as usize;
+        let ground = self.input(binding).energy.ground_temperature;
+        StandardLctSnowSoilInput {
+            energy: colm_core::StandardLctEnergyInput {
+                ground_temperature: colm_core::GroundTemperatureInput {
+                    snow_layers,
+                    layer_thickness_m: &self.snow_soil.layer_thickness_m,
+                    node_depth_m: &self.snow_soil.node_depth_m,
+                    interface_depth_m: &self.snow_soil.interface_depth_m,
+                    temperature_k: &self.snow_soil.temperature_k,
+                    liquid_water_kg_m2: &self.snow_soil.liquid_water_kg_m2,
+                    ice_water_kg_m2: &self.snow_soil.ice_water_kg_m2,
+                    snow_water_equivalent_kg_m2: self.snow.water_equivalent_kg_m2,
+                    snow_depth_m: self.snow.depth_m,
+                    snow_cover_fraction: self.snow.ground_snow_fraction,
+                    ..ground
+                },
+                solar: colm_core::NetSolarInput {
+                    snow_fraction: self.snow.ground_snow_fraction,
+                    ..self.input(binding).energy.solar
+                },
+                ground_flux: colm_core::GroundFluxInput {
+                    snow_cover_fraction: self.snow.ground_snow_fraction,
+                    ..self.input(binding).energy.ground_flux
+                },
+                ..self.input(binding).energy
+            },
+            snow_water: colm_core::SnowWaterInput {
+                time_step_seconds: self.physics.timestep_seconds,
+                irreducible_saturation: self.physics.snow_irreducible_saturation,
+                impermeable_porosity: self.physics.impermeable_porosity,
+                // 内核覆盖：`water_2014_snow_soil_step` 用本步能量链的通量重建。
+                rainfall_kg_m2_s: 0.0,
+                evaporation_kg_m2_s: 0.0,
+                dew_kg_m2_s: 0.0,
+                sublimation_kg_m2_s: 0.0,
+                frost_kg_m2_s: 0.0,
+            },
+            soil_water: self.input(binding).water,
+        }
+    }
+
     /// 土壤层数。
     pub fn soil_layers(&self) -> usize {
         self.temperature_k.len()
@@ -845,7 +992,11 @@ fn integer_scalar(file: &RestartFile, name: &str, patch: usize) -> Result<i64> {
         .with_context(|| format!("{name} has no patch {patch}"))
 }
 
-/// 时间重启里带雪槽的列，取后 `layers` 个。
+/// 时间重启里带雪槽的列，取后 `layers` 个（土段）。
+///
+/// **不**在这里核对雪槽为空：那是无雪分支的判据，而两支共用这个读者，带雪时前几槽
+/// 本来就该有值。雪列的一致性由 [`restart_snow_column`] 负责，无雪的要求由
+/// [`assemble_standard_lct_template`] 的包装负责。
 fn soil_column(
     time: &RestartFile,
     name: &str,
@@ -854,13 +1005,6 @@ fn soil_column(
     layers: usize,
 ) -> Result<Vec<f64>> {
     let column = time.layer_column(name, patch, snow_layers + layers)?;
-    if snow_layers == 0 {
-        return Ok(column);
-    }
-    ensure!(
-        column[..snow_layers].iter().all(|value| *value == 0.0),
-        "{name}'s leading {snow_layers} snow slots must be empty for a snow-free patch"
-    );
     Ok(column[snow_layers..].to_vec())
 }
 

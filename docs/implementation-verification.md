@@ -1356,3 +1356,38 @@ under a 0.1500 m column
 写它时踩到一个自己造的错：夹具里数层数时把窗口取成了 `snow_ice[..SNOW_LAYERS * PATCHES]`，
 于是把**两个 patch 的雪层一起数**，`0.15 m` 数出 `-6` 而不是 `-3`。层数是 per-patch 的量，
 现在按 patch 0 数并注明两个 patch 的雪列相同。
+
+## 积雪分支接进装配层与 POINT 循环（2026 年）
+
+雪分支现在能真的跑了：`assemble_standard_lct_snow_template` 装配带雪重启，
+`StandardLctRestartTemplate::snow_input()` 给出内核输入，
+`PointRuntime::run_restart_standard_lct_snow` 走完整个强迫窗口。测试用合成算例的雪列
+（0.15 m、45 kg/m²）跑三步真实 CN-Cng 强迫，断言雪列始终存在、雪水当量推进过、
+土壤温度有限。
+
+设计上有三处取舍：
+
+1. **两支共用同一个模板类型**，差别只在调 `input()` 还是 `snow_input()`。所以把装配
+   拆成私有的 `assemble()` 加两个薄包装：无雪的包装要求雪列为空，积雪的包装要求它非空。
+   拒绝的判据仍在雪列上，不在 `fsno` 上。
+2. **雪 + 土模板列**（`snow_soil`）在装配时拼好存进模板。上游的
+   `z_soisno`/`dz_soisno`/`zi_soisno` 是从雪顶一直排到土壤底，界面在雪土交界处共享
+   `zi(0) = 0`，所以土段的第一个界面不重复（`interface_depth_m[1..]`）。雪层数每步会变，
+   但模板列的形状由重启决定，内核自己负责重排（`packed_snow_soil_state`）。
+3. **`soil_column` 不再核对"雪槽必须为空"**：两支共用这个读者，带雪时前几槽本来就该有值。
+   雪列的一致性由 `restart_snow_column` 管，无雪的要求由包装管 —— 同一个检查放错层会
+   让积雪分支根本读不进来（实测报错就是那句"雪槽必须为空"）。
+
+### 顺带修正：`DEF_TUNING_SSI` 不是土壤冰阻抗
+
+给 `LandPhysicsParameters::soil_ice_impedance` 标来源时发现两个**不同**的调参字段：
+
+| 字段 | 默认 | 上游注释 | 用途 |
+|---|---|---|---|
+| `DEF_TUNING_SOIL_ICE_IMPEDANCE` | 6.0 | Frozen-soil hydraulic impedance exponent | `MOD_SoilSnowHydrology:1213` 的 `10**(-…*icefrac)` |
+| `DEF_TUNING_SSI` | 0.033 | Irreducible snow-water saturation fraction | `snowwater` 的 `ssi` 实参 |
+
+原先的注释把前者标成了 `DEF_TUNING_SSI`，而两者默认值差两个数量级 —— 照注释填 0.033
+会让冻土阻抗几乎失效。现在注释指向正确的字段，并新增
+`LandPhysicsParameters::snow_irreducible_saturation`（`DEF_TUNING_SSI`，0.033）供
+`snowwater` 用。内核那侧的名字（`soil_ice_impedance`）本来就对，只有文档错了。
