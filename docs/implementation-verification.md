@@ -1752,3 +1752,18 @@ schema 一侧两者一样严 —— 维度顺序、存储类型、变量级属�
 
 `oracle/tests/tier_compare.rs` 对每类规则与每条拒绝路径各写一条负向测试（含"整数在浮点层
 下仍逐位"与"换轴但值相同必须报 schema 问题"）。
+
+## 一条被引用了三次却从未入库的验证脚本（2026 年）
+
+`oracle/scripts/test_upstream_f48_sync.py` 在 `5d7f373`、`6d98eb6`、`b25b904` 三个提交的
+`Tested:` 行里都被列为"实际跑过"，但它一直只是工作区里的未跟踪文件 —— 别人 clone 下来
+复现不了那三处证据。现已入库，并加进 CI 的 `kernel-filesystem` 作业。
+
+它守的是 `vendor/CoLM202X` 那次**按语义 hunk** 的 `f48fbf9` 同步：8 个 Fortran 文件里
+16 条特征字符串，既钉上游带进来的（稠密水库轴 `catalogue_to_active`/`icache`、分汊限幅器
+与"净通量定稿后再套路径上限"、levee 库容在 history 里单列与重启开关的一致性、`rstfacsun`
+的 intent、`gssun` 的两处公式），也钉我们自己的臭氧扩展（`mg2p_ozone%grid2pset` 的空间
+映射与两个 namelist 开关）。整树覆盖会静默抹掉后者，这套断言是这条同步路径上少有的警报。
+
+由此立一条规矩：**`Tested:` 里出现的脚本必须入库。** 否则那条证据只对写下它的那次会话
+成立，而且下次同步上游时没人会再跑它。

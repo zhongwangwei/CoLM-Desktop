@@ -80,3 +80,23 @@ GitHub 不许没有 `workflow` scope 的 OAuth token 推它 —— 提 PR #15 �
 本次统一参数目录、GUI 搜索和稀疏覆盖导入导出没有修改 `vendor/CoLM202X`
 中的 Fortran 数值代码。默认值继续从本目录源码解析；尚无验证与真实回归路径的
 PFT 常量保留为 `blocked-pending-hook`，没有为了数量指标运行时化。
+
+## 2026 年 9 月：`f48fbf9` 生产同步与它的静态守卫
+
+`main/HYDRO/MOD_Grid_Reservoir.F90`、`MOD_Grid_RiverLakeBifurcation.F90`、
+`MOD_Grid_RiverLakeFlow.F90`、`MOD_Grid_RiverLakeHist.F90`、`main/MOD_LeafTemperature.F90`、
+`MOD_LeafTemperaturePC.F90`、`MOD_Ozone.F90`、`share/MOD_Namelist.F90` 这 8 个文件
+**按语义 hunk** 同步了上游 `f48fbf9` 的生产状态 —— 不是整树覆盖：
+`MOD_Grid_Reservoir.F90` 里 `#ifdef FLAT_SPMD` 的传输分支（上游没有这条路径）
+必须留住，而水库状态轴的编号要改成上游那套「按活跃水库稠密编号」
+（`catalogue_to_active` / `icache`，catalogue 行号只当参数查表用）。
+
+同步进来的几处顺带改了判据：河湖分汊的限幅器要**在净通量定稿后再套一次路径上限**，
+levee 保护库容在 history 里必须单列（`below-bank river channel storage` /
+`visible overbank storage excluding levee-protected storage`），levee 开关与重启文件
+不一致要报错而不是静默继续。
+
+`oracle/scripts/test_upstream_f48_sync.py` 是这次同步的**静态守卫**：8 个文件里 16 条
+特征字符串，上游带来的与我们自己的各钉几条，断言失败就说明某处 hunk 漏了或被整树覆盖了。
+它此前只存在于工作区，却被三个提交（`5d7f373`、`6d98eb6`、`b25b904`）的 `Tested:` 行
+引用 —— 那三处证据对别人不可复现。现已入库并进 CI。**再同步上游时先跑它。**
