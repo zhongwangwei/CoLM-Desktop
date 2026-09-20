@@ -2884,3 +2884,46 @@ van Genuchten 两支），问题只在装配层写死了 `supercool_water: false
 **一条教训**：`DEF_USE_*` 这类**默认开**的开关，写死 `false` 不会报错，只会让整个
 物理过程静默消失。凡是上游声明默认为真的分支，装配层要么把值读进来，要么进
 `unported_branches`；不能留一个没有出处的常量。
+
+## history 的两处缺陷：声明了没人写的变量，以及缺掉的区间平均（2026 年，实测）
+
+把 Rust 的 history 与 Fortran 逐变量比之后发现两件事，第二件更根本。
+
+### 一、积雪分支声明了十三个地表诊断量，却一个都没写
+
+`push_lct_snow` 漏了 `set_lct_surface_diagnostics`：`declare_lct_variables` 把
+`taux`/`tauy`/`tref`/`qref`/`z0m`/`zol`/`rib`/`ustar`/`qstar`/`tstar`/`fm`/`fh`/`fq`
+都声明进了文件，但没有一步去填它们。实测 CN-Cng 的积雪分支 history 里
+`f_taux`/`f_tauy`/`f_z0m` 全是浮点填充值（`-1e36`）而 Fortran 有值。
+
+**这个错误没有任何提示**：填充值本身是有限数，所以"检查是否有限"的断言抓不住它。
+新加的回归测试逐名对着**最后一步的叶温输出**比，去掉那一句就会失败。
+
+无雪分支（`push_lct`）一直是对的，所以这是"两支入口"这一个错误设计的又一次余波
+（前一次是土柱不会造雪，见上文）。
+
+### 二、Fortran 的 history 是**区间平均**，本仓库写的是瞬时值
+
+上游每步先累加、到写出的那一步再除以累加步数（`MOD_Hist.F90:227` 的
+`accumulate_fluxes`，写出的量都取自 `a_*` 累加器与 `nac_dt`）。本仓库的
+`HistorySession::push` 直接把写出时刻的瞬时值填进记录。
+
+判据是一个闭合的算式。CN-Cng 从 2008-01-01 00:00 跑**两步**（到 01:00）：
+
+```
+一步末 t_grnd = 273.1600     （2008-001-01800 重启）
+两步末 t_grnd = 271.6308     （2008-001-03600 重启）
+Fortran history 的 f_t_grnd = 272.3954 = (273.1600 + 271.6308) / 2   ← 逐位相等
+Rust   history 的 f_t_grnd = 271.5823 = 两步末的瞬时值
+```
+
+同一个算例在 01:00 的 `scv`/`snowdp`/`fsno`/`sag`/`alb`/`thermk`/`extkb`/`extkd`/`sai`/`sigf`
+两边**逐位相同**，`t_grnd` 差 3.7e-6 K —— 也就是说重启层面已经对齐，差的全在 history
+这一层的取平均上。这解释了在此之前看到的"通量差 10~15%"（例如首条记录
+`f_fsena` Fortran 702.76 / Rust 608.51）：那是区间平均与瞬时值之差，不是物理之差。
+
+**结论：在此之前所有基于 history 的 Fortran/Rust 对比都作废**（包括
+`oracle/golden/*.nc` 的逐变量比较），必须先把区间平均补上再比。
+实现要点：累加器按变量名持有逐 step 的和与步数，每步累加（**写出的那一步也要先累加**），
+在写出时刻取平均写入 `HistoryBuffers`，然后清零；`f_xy_*` 那类逐 step 常数量的平均
+等于其本身，不需要特殊处理。

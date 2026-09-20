@@ -377,6 +377,101 @@ fn the_snow_branch_fills_the_snow_span() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
+/// 积雪分支的**会话**也要写地表诊断量（`taux`/`tauy`/`z0m`/`zol`/`tref` …）。
+///
+/// `push_lct_snow` 原先漏了 `set_lct_surface_diagnostics`：那十三个量在
+/// `declare_lct_variables` 里声明了，却一直没人填，写出来就是 NetCDF 的填充值。
+/// 实测 CN-Cng 的积雪分支 history 里 `f_taux`/`f_tauy`/`f_z0m` 全是 NaN，而 Fortran
+/// 有值。"声明了但没人写"不会报错，只会静默留下一列空洞，所以这里逐名断言。
+#[test]
+fn the_snow_branch_session_fills_the_surface_diagnostics() {
+    let root = temp_dir("snow-session");
+    let fixture = SyntheticRestart::write_with_snow(
+        root.join("restart"),
+        SyntheticSnow {
+            depth_m: 0.15,
+            water_equivalent_kg_m2: 45.0,
+            ground_snow_fraction: 1.0,
+            temperature_k: 268.0,
+        },
+    )
+    .unwrap();
+    let template = assemble_standard_lct_snow_template(
+        &RestartStateFiles {
+            constant: fixture.constant.block.clone(),
+            time: fixture.time.block.clone(),
+        },
+        1,
+        physics(),
+    )
+    .unwrap();
+    let mut state = template.snow_state();
+    let window = SimulationWindow {
+        start_year: 2008,
+        start_julian_day: 1,
+        start_seconds: 0,
+        end_year: 2008,
+        end_julian_day: 1,
+        end_seconds: 3_600,
+        timestep_seconds: 1800,
+    };
+    let mut session = HistorySession::new(
+        dimensions(),
+        site(),
+        window,
+        HistoryFrequency::Hourly,
+        HistoryGrouping::Month,
+        root.join("out"),
+        "CN-Cng",
+    )
+    .unwrap();
+    let mut written = Vec::new();
+    let mut last = None;
+    for half in 1..=2 {
+        let end = colm_core::CalendarTime {
+            year: 2008,
+            julian_day: 1,
+            seconds: half * 1800,
+        };
+        let output =
+            colm_core::standard_lct_snow_soil_step(template.snow_input(&binding()), &mut state)
+                .expect("one snow step");
+        if let Some(path) = session
+            .push_lct_snow(end, &template, &state, &output)
+            .unwrap()
+        {
+            written.push(path);
+        }
+        last = Some(output);
+    }
+    written.extend(session.finish().unwrap());
+    assert_eq!(written.len(), 1);
+    let last = last.unwrap();
+
+    let file = netcdf::open(&written[0]).unwrap();
+    // 逐名对着**最后一步**的叶温输出比：没填的变量会读成 `MISSING` 一类的填充值，
+    // 只断言"有限"是抓不住的（填充值本身也是有限数）。
+    for (name, expected) in [
+        ("taux", last.energy.leaf.eastward_stress_kg_m_s2),
+        ("tauy", last.energy.leaf.northward_stress_kg_m_s2),
+        ("tref", last.energy.leaf.air_temperature_2m_k),
+        ("qref", last.energy.leaf.air_specific_humidity_2m),
+        ("z0m", last.energy.leaf.momentum_roughness_m),
+        ("zol", last.energy.leaf.zol),
+        ("rib", last.energy.leaf.bulk_richardson),
+        ("ustar", last.energy.leaf.friction_velocity_m_s),
+    ] {
+        let values = file
+            .variable(&format!("f_{name}"))
+            .unwrap()
+            .get_values::<f64, _>(..)
+            .unwrap();
+        assert_eq!(values, vec![expected], "f_{name}");
+    }
+    assert!(file.variable("f_scv").is_some());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 /// 会话把一次真实多步运行写成按调度分组的文件。
 ///
 /// 窗口取 CN-Cng 黄金算例的同一段（2008-01-01 00:00 → 01-11 24:00、1800 s 步长、

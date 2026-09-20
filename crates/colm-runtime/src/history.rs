@@ -555,7 +555,12 @@ impl HistorySession {
                 &as_soil,
                 template.physics.vaporization_heat_j_kg,
                 template.soil_layers(),
-            )
+            )?;
+            // 这一句原先漏了：十三个地表诊断量在 `declare_lct_variables` 里声明了，
+            // 却从来没有被填过，写出来的 `f_taux`/`f_tauy`/`f_z0m`/`f_zol` … 一直是
+            // NetCDF 的填充值。实测 CN-Cng 的积雪分支 history 里这三个是 NaN，
+            // 而 Fortran 有值 —— "声明了但没人写"不会报错，只会静默留下一列空洞。
+            set_lct_surface_diagnostics(buffer, record, &output.energy.leaf)
         })
     }
 
