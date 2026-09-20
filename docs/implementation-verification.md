@@ -3329,3 +3329,37 @@ f_etrsha     [0, 2.528e-06]
 
 （`f_respc` 那一列 1e28 也说明：`respc` 在这个配置下从未被赋过有意义的值，
 本仓库也**不该**为了让某一列对上而去复现它。）
+
+## 月度 LAI 重读**没有接进运行循环**（2026 年，实测）
+
+上一节说下一步要跑一个暖季窗口来验蒸腾。走到那一步才发现它有个前提没满足：
+
+`DEF_LAI_MONTHLY = .true.`（对齐算例 `case.nml:47`）时，上游每月重读一次 LAI
+（`CoLM.F90:595-605` 的 `CALL LAI_readin(lai_year, month, dir_landdata)`），
+而本仓库：
+
+```rust
+// runtime_clock.rs:174 —— 算出这一位
+self.update_lai = lai_update_due(forcing_time, next_forcing_time, self.lai_schedule);
+```
+
+**没有任何消费者。** 全仓库 grep `update_lai` 只在 `runtime_clock.rs` 内部出现
+（赋值、随步复制、进 `RuntimeStep`），`colm-runtime/src/lib.rs` 一次都没读它。
+
+于是运行期的 `tlai`/`tsai` 恒为装配期从时间重启读到的那一对。11 天的对齐窗口整段在
+1 月内，`LAI_readin` 本来也不会触发，所以这条一直没暴露；**任何跨月的运行都会
+从第二个月起用错 LAI**（影响截留、两流、叶温、蒸腾、地面反照率）。
+
+这也直接决定了两件事：
+
+1. **暖季蒸腾验证的前提是先接上这条链。** 否则拿 1 月的 LAI（`tlai = 0.2`）去比
+   7 月的 Fortran（`LAI_readin` 读到夏季叶面积），蒸腾的差异会被 LAI 差异淹没 ——
+   那正是前两节反复踩的"用错的参照去判定对错"。
+2. 读取器**已经有了**：`crates/colm-init/src/surface_data.rs` 的 LAI 读取
+   （`LAI_readin` 的同月选择也在那里），而 `colm-runtime` 本来就依赖 `colm-init`
+   （`assembly.rs` 用 `colm_init::RestartFile`）。缺的只是"到月就重读、并覆盖
+   `StandardLctRestartTemplate` 里那一对 `tlai`/`tsai`"这一步。
+
+实现要点：`tlai`/`tsai` 现在是**装配期的不可变字段**，而运行期需要它们可变；
+解法与 `lai`/`sai` 那次一样 —— 把它们放进运行态（或每步从运行态取），
+而不是继续留在模板里。`update_lai` 已经算好了，直接用。
