@@ -1959,3 +1959,63 @@ Fortran 一动不动，是**系统性的接线错误**，不是精度问题 —�
    `spinup_day = 365`（预热关掉时的死字段）。上游 `CoLM.F90:315` 的判据是
    `is_spinup = ststamp < ptstamp`，`spinup_year = 0` 时永远为假。现在年份为 0 就
    直接取 `start`，不去碰那三个字段。
+
+## 上一节那 7 个发散的真因：**土壤水文走的是两条不同的路径**（2026 年，实测）
+
+上一节把 `wa` 从 0 涨到 771 mm 记成"接线错误"。查到源头之后，它比"接线错误"严重得多。
+
+**上游是二选一，不是开关：**
+
+```fortran
+! CoLMMAIN.F90:1183
+IF (.not. DEF_USE_VariablySaturatedFlow) THEN
+   CALL WATER_2014 (...)   ! Campbell/Richards，参数表收 bsw
+ELSE
+   CALL WATER_VSF  (...)   ! van Genuchten，参数表收 alpha_vgm/n_vgm/L_vgm/sc_vgm/fc_vgm
+ENDIF
+```
+
+而 `DEF_USE_VariablySaturatedFlow` 的声明默认值是 `.true.`，且
+`MOD_Namelist.F90:1767-1772` 在**选了 van Genuchten 时强制把它置真**：
+
+```fortran
+IF (.not. DEF_USE_Campbell_SOIL_MODEL) THEN
+   DEF_USE_VariablySaturatedFlow = .true.
+ENDIF
+```
+
+**于是默认配置走 VSF，经典 Richards 反而是少数派。** 实测 CN-Cng 的运行日志里正是那句
+`Note: DEF_USE_VariablySaturatedFlow is automaticlly set to .true.`。
+
+本仓库的处境：
+
+| | 上游 | 本仓库 |
+|---|---|---|
+| `WATER_2014`（Campbell/Richards） | 有 | **已编排**（`water_2014.rs` + `soil_water.rs`） |
+| `WATER_VSF`（van Genuchten） | 有 | **只有内核，没有编排** |
+
+`variably_saturated_flow.rs` 有 2604 行、15 个 `pub fn`（子层划分、上下边界跃迁通量、
+最小二乘求解、显式步、含水层交换……），但**这 15 个函数在模块之外没有任何调用者** ——
+`time_state.rs` 只是在冷启动剖面上用那个开关，`standard_lct_step.rs:418` 更是把
+`variably_saturated_flow` 直接写成 `false`。缺的是 `WATER_VSF` 那个驱动器。
+
+所以上一节那张"7 个变量发散"的表**要重新读**：它不是土壤水内核的精度问题，而是
+**Rust 用 WATER_2014 去跑了一个上游用 WATER_VSF 跑的算例**。这解释了全部 7 个
+（`wa`/`zwt`/`wliq_soisno`/`wice_soisno` 是水文本身，`t_grnd`/`tleaf` 差 2.5 K 是蒸发与
+地表湿度经由水文传过去的），也解释了为什么 `wa` 会单调涨到 771 mm：van Genuchten 的
+算例在 Richards 路径下底部边界与含水量关系完全不同。
+
+**处置：`colm-rs` 现在拒绝这类算例**，并在信息里说清上游的判据、当前支持哪一种组合
+（`DEF_USE_Campbell_SOIL_MODEL = .true.` 且 `DEF_USE_VariablySaturatedFlow = .false.`）。
+拒绝而不是"跑完再标注"是刻意的：按经典路径跑完 VSF 算例不会报错，只会给出另一套水文下
+看起来正常的数字 —— 这正是本仓库最忌讳的那种错。
+
+`LandPhysicsParameters` 新增 `variably_saturated_flow` 字段承载**生效后**的取值，
+由 `physics.rs` 按上游那两条规则算出来（声明默认 `true`，且 van Genuchten 时强制 `true`），
+四条组合各有一条测试钉住。调用方不需要自己推这个值 —— 推错就会挑错水文路径。
+
+### 下一步
+
+移植 `WATER_VSF` 的编排（`MOD_SoilSnowHydrology.F90:529-1343`）并把 15 个内核接起来。
+这是目前唯一挡住默认配置的缺口，也是"全面完成"绕不过去的一段。判读工具不变
+（`oracle/scripts/stage3_diff.py`），但接上之后 `wa` 应当是**负值或零**（含水层是亏缺量）。

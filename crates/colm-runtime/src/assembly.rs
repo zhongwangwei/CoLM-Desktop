@@ -69,6 +69,15 @@ pub struct RestartStateFiles {
 pub struct LandPhysicsParameters {
     /// namelist 选的土壤水力关系；决定常数重启里读 `bsw` 还是五个 van Genuchten 场。
     pub hydraulic_model: HydraulicModel,
+    /// `DEF_USE_VariablySaturatedFlow` **生效后**的取值。
+    ///
+    /// 上游 `MOD_Namelist.F90:1767-1772` 在选了 van Genuchten 时**强制**把它置为
+    /// `.true.`，而它的声明默认值本来就是 `.true.` —— 也就是说**默认配置走的是
+    /// VSF 土壤水文**，经典 Richards 路径反而是少数派。
+    ///
+    /// 装配层与内核目前只有经典路径（见 `water_2014.rs`），所以这个字段的作用是
+    /// **让调用方能在跑之前发现分支不匹配**，而不是静默按另一套水文算完。
+    pub variably_saturated_flow: bool,
     /// 本算例编译的地类分类体系。
     pub land_cover_scheme: LandCoverScheme,
     /// `ROOTFR_SCHEME`：`rootfr` 取哪一套公式。

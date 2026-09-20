@@ -61,12 +61,18 @@ pub fn land_physics_parameters(
              so substituting zero would silently run the case unirrigated"
         );
     }
+    // 上游 `MOD_Namelist.F90:1767-1772`：选了 van Genuchten 就把
+    // `DEF_USE_VariablySaturatedFlow` 强制置真。它的声明默认值也是真，所以**默认
+    // 配置跑的是 VSF**，经典 Richards 路径要显式关掉才走得到。
+    let campbell = logical(document, "DEF_USE_Campbell_SOIL_MODEL")?;
+    let variably_saturated_flow = logical(document, "DEF_USE_VariablySaturatedFlow")? || !campbell;
     Ok(LandPhysicsParameters {
-        hydraulic_model: if logical(document, "DEF_USE_Campbell_SOIL_MODEL")? {
+        hydraulic_model: if campbell {
             HydraulicModel::Campbell
         } else {
             HydraulicModel::VanGenuchten
         },
+        variably_saturated_flow,
         land_cover_scheme,
         root_fraction_scheme: ROOT_FRACTION_SCHEME,
         timestep_seconds,

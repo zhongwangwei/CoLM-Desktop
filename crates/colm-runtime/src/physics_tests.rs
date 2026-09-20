@@ -74,6 +74,45 @@ fn an_empty_case_maps_every_declared_default() {
     assert!(!physics.stomata.use_medlyn);
 }
 
+/// `DEF_USE_VariablySaturatedFlow` 的**生效值**：上游 `MOD_Namelist.F90:1767-1772`
+/// 在选了 van Genuchten 时强制置真，而它的声明默认值本来就是真。
+///
+/// 这三条决定了默认配置到底走 `WATER_2014`（Campbell/Richards）还是 `WATER_VSF`
+/// （van Genuchten）—— 而本仓库只编排了前者，所以这个值必须是可读的，
+/// 不能靠调用方自己推。
+#[test]
+fn the_effective_vsf_switch_follows_the_soil_model() {
+    // 默认：van Genuchten + 声明默认 true。
+    let physics = land_physics_parameters(&empty_case(), LandCoverScheme::Igbp).unwrap();
+    assert_eq!(physics.hydraulic_model, HydraulicModel::VanGenuchten);
+    assert!(physics.variably_saturated_flow);
+
+    // 选了 Campbell 但没关 VSF：上游不强制置真，声明默认仍是 true，所以还是 VSF。
+    let physics = land_physics_parameters(
+        &case_with("DEF_USE_Campbell_SOIL_MODEL = .true."),
+        LandCoverScheme::Igbp,
+    )
+    .unwrap();
+    assert!(physics.variably_saturated_flow);
+
+    // 只有显式关掉才落回 WATER_2014，也就是本仓库已经编排的那条。
+    let physics = land_physics_parameters(
+        &case_with("DEF_USE_Campbell_SOIL_MODEL = .true.\nDEF_USE_VariablySaturatedFlow = .false."),
+        LandCoverScheme::Igbp,
+    )
+    .unwrap();
+    assert_eq!(physics.hydraulic_model, HydraulicModel::Campbell);
+    assert!(!physics.variably_saturated_flow);
+
+    // van Genuchten 关不掉：上游会把它强制打开。
+    let physics = land_physics_parameters(
+        &case_with("DEF_USE_VariablySaturatedFlow = .false."),
+        LandCoverScheme::Igbp,
+    )
+    .unwrap();
+    assert!(physics.variably_saturated_flow);
+}
+
 /// `DEF_Runoff_SCHEME` 的编号必须照 `MOD_SoilSnowHydrology.F90:315-348` 的派发，
 /// 而不是照枚举上原先那两条写反了的注释。
 #[test]

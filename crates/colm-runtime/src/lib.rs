@@ -929,6 +929,7 @@ mod tests {
     fn land_physics() -> crate::assembly::LandPhysicsParameters {
         crate::assembly::LandPhysicsParameters {
             hydraulic_model: colm_core::HydraulicModel::VanGenuchten,
+            variably_saturated_flow: false,
             land_cover_scheme: colm_core::LandCoverScheme::Igbp,
             root_fraction_scheme: colm_core::RootFractionScheme::SchenkJackson,
             timestep_seconds: 1800.0,

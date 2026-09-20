@@ -65,6 +65,28 @@ fn run() -> Result<()> {
     let config = read_point_runtime_config(&case_nml)?;
     let document = read_document(&case_nml)?;
     let physics = land_physics_parameters(&document, arguments.land_cover)?;
+    // **跑之前先挡住分支不匹配。** 上游在选了 van Genuchten 时强制打开
+    // `DEF_USE_VariablySaturatedFlow`（`MOD_Namelist.F90:1767-1772`），而它的声明
+    // 默认值本来就是 `.true.` —— 也就是说默认配置走 VSF 土壤水文。本仓库的
+    // `variably_saturated_flow.rs` 有那 15 个内核，但**没有编排**（`WATER_VSF`
+    // 的驱动没人调用），运行时只有经典 Richards 路径。
+    //
+    // 按经典路径跑完 VSF 算例不会报错，只会给出另一套水文下的"看起来正常"的结果 ——
+    // 这正是本仓库最忌讳的那种错。所以在这里拒绝，并说清当前支持哪一种组合。
+    ensure!(
+        !physics.variably_saturated_flow,
+        concat!(
+            "this case runs the variably saturated flow (VSF) soil hydrology, which the ",
+            "Rust runtime does not orchestrate yet: MOD_Namelist.F90:1767 forces ",
+            "DEF_USE_VariablySaturatedFlow on whenever the van Genuchten soil model is ",
+            "selected, and its own default is true. WATER_2014 (the ported routine) is the ",
+            "Campbell/Richards path; the van Genuchten path is WATER_VSF (CoLMMAIN.F90:1215), ",
+            "whose kernels exist in variably_saturated_flow.rs but have no driver. Running ",
+            "this case through the classic path would produce plausible numbers under a ",
+            "different hydrology. Set DEF_USE_Campbell_SOIL_MODEL = .true. and ",
+            "DEF_USE_VariablySaturatedFlow = .false. to use the ported path."
+        )
+    );
     let restarts = restart_files(&layout, &name, &document, &config)?;
     let files = RestartStateFiles {
         constant: restarts.constant.clone(),
