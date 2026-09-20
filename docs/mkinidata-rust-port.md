@@ -225,11 +225,13 @@ reusing that generator as-is will not work:
 - eight leaf-optical properties exist twice, as `_pc` and `_default`, chosen by a
   compile-time/PC branch rather than written once.
 
-The active-snow chain now has its reader: `RuntimeSnowColumn::from_restart` derives the
-layer count, the interface depths and `fiold` the way `CoLMMAIN.F90:816-845` does, because
-the restart cannot state them. What it still needs is a snow-bearing test fixture, an
-assembly template that produces `StandardLctSnowSoilInput`, and the driver call — the same
-three steps the regular-soil branch went through.
+The active-snow chain is now assembled and driven: `RuntimeSnowColumn::from_restart` derives
+the layer count, the interface depths and `fiold` the way `CoLMMAIN.F90:816-845` does (the
+restart cannot state them), `assemble_standard_lct_snow_template` plus
+`StandardLctRestartTemplate::snow_input` produce the kernel input, and
+`PointRuntime::run_restart_standard_lct_snow` runs it. Both LCT branches share one template
+and one per-step binding. SNICAR, split soil/snow and the snow-layer combine/divide
+behaviour over a long run are still unverified.
 
 Beyond that: a driver for the PFT/PC/urban/BGC branches, the history writer wired to
 per-step field values, a Rust `colm` executable that consumes
