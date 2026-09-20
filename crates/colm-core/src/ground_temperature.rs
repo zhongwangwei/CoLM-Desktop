@@ -100,6 +100,12 @@ pub struct GroundTemperatureInput<'a> {
 #[derive(Debug, Clone, PartialEq)]
 pub struct GroundTemperatureState {
     pub temperature_k: Vec<f64>,
+    /// 本步**开始前**的整列温度，与 `temperature_k` 同形状同顺序。
+    ///
+    /// 上游 `MOD_Thermal.F90` 用 `t_soisno_bef` 与 `tinc = t - t_bef` 推三个诊断量
+    /// （`:1337` 的 `fgrnd`、`:1354` 的 `olrg`、`:1362` 的 `emis`/`trad`），它们都进
+    /// history。没有这两个量就没法把地表能量收支的每一项对上，所以状态把它留着。
+    pub previous_temperature_k: Vec<f64>,
     pub liquid_water_kg_m2: Vec<f64>,
     pub ice_water_kg_m2: Vec<f64>,
     pub snow_water_equivalent_kg_m2: f64,
@@ -231,6 +237,7 @@ pub fn ground_temperature(input: GroundTemperatureInput<'_>) -> Result<GroundTem
         phase,
         snow_ice_before,
         input.time_step_seconds,
+        previous_temperature,
         factor,
         interface_conductivity,
     ))
@@ -460,6 +467,7 @@ fn state_from_phase(
     phase: PhaseChangeState,
     snow_ice_before: Vec<f64>,
     time_step_seconds: f64,
+    previous_temperature_k: Vec<f64>,
     layer_factor_seconds_per_j_m2_k: Vec<f64>,
     interface_conductivity_w_m_k: Vec<f64>,
 ) -> GroundTemperatureState {
@@ -476,7 +484,8 @@ fn state_from_phase(
         })
         .collect();
     GroundTemperatureState {
-        temperature_k: phase.temperature_k,
+        temperature_k: phase.temperature_k.clone(),
+        previous_temperature_k,
         liquid_water_kg_m2: phase.liquid_water_kg_m2,
         ice_water_kg_m2: phase.ice_water_kg_m2,
         snow_water_equivalent_kg_m2: phase.snow_water_equivalent_kg_m2,

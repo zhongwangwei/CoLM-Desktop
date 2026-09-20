@@ -8,7 +8,11 @@ use anyhow::{ensure, Result};
 
 use crate::{soil_vliq_from_psi, SoilHydraulicModel, FREEZING_K};
 
-const LATENT_HEAT_FUSION_J_KG: f64 = 0.3336e6;
+/// `hfus`：`MOD_Const_Physical.F90` 的融化潜热。
+///
+/// 公开是因为地表能量收支里的 `htvp = hvap + hfus`（升华潜热）要用它，
+/// 而 `lfevpa` 正是 `hvap*fevpl + htvp*fevpg`。
+pub const LATENT_HEAT_FUSION_J_KG: f64 = 0.3336e6;
 const GRAVITY_M_S2: f64 = 9.80616;
 
 /// Inputs to one `meltf` phase-change update.

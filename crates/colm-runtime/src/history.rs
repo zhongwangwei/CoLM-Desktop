@@ -53,6 +53,10 @@ pub const LCT_STATE_VARIABLES: [&str; 13] = [
 /// `lfevpa = hvap*fevpl + htvp*fevpg`（:1333，注释写着 "accounting for sublimation"）——
 /// 地面那一项用的是升华潜热 `htvp`，不是汽化潜热。按名字配上就会在积雪算例里给出
 /// 偏高的潜热通量，而海平面无雪算例看不出来。
+pub const LCT_SURFACE_BUDGET_VARIABLES: [&str; 8] = [
+    "sabvsun", "sabvsha", "rnet", "olrg", "emis", "trad", "fgrnd", "lfevpa",
+];
+
 pub const LCT_ENERGY_VARIABLES: [&str; 4] = ["fsena", "fevpa", "etr", "sabg"];
 
 /// 本层能填的**地表诊断**量，十三个，全部来自叶温/地表层求解的直接输出。
@@ -89,10 +93,8 @@ pub const NOT_IN_GOLDEN: [&str; 1] = ["qcharge"];
 /// 黄金算例里有、但本层还填不出来的量（按用途分组，便于下一步挑）。
 ///
 /// 这份清单不参与写出，只是把"缺口"写死在代码里：改它就得同时改注释。
-pub const UNFILLED: [&str; 6] = [
-    "辐射收支（rnet/sabv/olrg/emis）与地面热通量（fgrnd）：需要把短波、长波各项分别接出来",
+pub const UNFILLED: [&str; 4] = [
     "`rss`：方案 4 下上游写的是电导标志而不是阻力，条件映射待核对",
-    "`lfevpa`：含升华项 `htvp`，内核当前没有这个量",
     "分层植被量（laisun/laisha/ssun/ssha/…）：需要冠层分层输出",
     "派生土壤量（h2osoi/…）：需要先核对上游对每个量的定义",
     "湖泊与 BGC 量：各自的分支还没有运行时驱动",
@@ -103,6 +105,7 @@ pub fn declare_lct_variables(buffer: &mut HistoryBuffers) -> Result<()> {
     let mut names = LCT_STATE_VARIABLES.to_vec();
     names.extend_from_slice(&LCT_FLUX_VARIABLES);
     names.extend_from_slice(&LCT_ENERGY_VARIABLES);
+    names.extend_from_slice(&LCT_SURFACE_BUDGET_VARIABLES);
     names.extend_from_slice(&LCT_SURFACE_VARIABLES);
     buffer.declare(&names)
 }
@@ -152,6 +155,111 @@ pub fn set_lct_energy_fluxes(
         ("fevpa", output.energy.total_evaporation_kg_m2_s),
         ("etr", output.energy.leaf.transpiration_kg_m2_s),
         ("sabg", output.energy.shortwave.ground_absorbed_w_m2),
+    ] {
+        ensure!(
+            value.is_finite(),
+            "the history value for {name} is not finite"
+        );
+        buffer
+            .set_patch_scalar(name, record, value)
+            .with_context(|| format!("cannot write {name} into the history buffers"))?;
+    }
+    Ok(())
+}
+
+/// 把一步的**地表能量收支**写进第 `record` 条记录。
+///
+/// 上游每一项都在 `MOD_Thermal.F90` 的收尾处算出（`htvp = hvap + hfus`）：
+///
+/// ```fortran
+/// olrg   = ulrad + 4.*emg*stefnc*t_grnd_bef**3*tinc
+/// olrb   = stefnc*t_grnd_bef**3*(4.*tinc)
+/// emis   = (ulrad + emg*olrb) / (ulrad + olrb)
+/// trad   = (olrg/stefnc)**0.25
+/// fgrnd  = sabg + dlrad*emg - emg*stefnc*t_grnd_bef**4            &
+///          - emg*stefnc*t_grnd_bef**3*(4.*tinc) - (fseng+fevpg*htvp) &
+///          + cpliq*pg_rain*(t_precip-t_grnd) + cpice*pg_snow*(t_precip-t_grnd)
+/// lfevpa = hvap*fevpl + htvp*fevpg
+/// rnet   = fsena + lfevpa + fgrnd        ! 与 sabv+sabg+lw_net 恒等
+/// ```
+///
+/// `tinc = t_grnd - t_grnd_bef` 用状态里新留的 `previous_temperature_k`；
+/// 地表层在**打包列**里的下标是 `snow_layers`（雪层在前）。
+///
+/// `emis` 在这里是**平均体积发射率**，与算例里那个固定的地表发射率不是一回事；
+/// 平衡状态下 `tinc` 很小，所以它接近 1 而不是 0.96/0.97 —— 实测黄金 history 里
+/// 均值 1.0000 正是如此。
+pub fn set_lct_surface_budget(
+    buffer: &mut HistoryBuffers,
+    record: usize,
+    output: &StandardLctSoilOutput,
+    vaporization_heat_j_kg: f64,
+    soil_layers: usize,
+) -> Result<()> {
+    const STEFAN_BOLTZMANN_W_M2_K4: f64 = 5.67e-8;
+    const WATER_HEAT_CAPACITY_J_KG_K: f64 = 4188.0;
+    const ICE_HEAT_CAPACITY_J_KG_K: f64 = 2117.27;
+
+    let energy = &output.energy;
+    let ground = &energy.ground;
+    // 打包列里第一个**土层**的下标：列长减去土层数。**不能**写 0 —— 带雪时
+    // `temperature_k[0]` 是雪面温度，而 `t_grnd_bef`/`tinc` 要的是地表那一层。
+    let soil_surface = ground
+        .temperature_k
+        .len()
+        .checked_sub(soil_layers)
+        .filter(|index| *index < ground.temperature_k.len())
+        .context("the packed ground temperature column is shorter than the soil")?;
+    let surface_temperature_k = ground.temperature_k[soil_surface];
+    let previous_surface_temperature_k =
+        ground
+            .previous_temperature_k
+            .get(soil_surface)
+            .copied()
+            .context("the ground temperature state carries no previous surface layer")?;
+    let temperature_change_k = surface_temperature_k - previous_surface_temperature_k;
+
+    let emissivity = colm_core::ground_emissivity(ground.snow_water_equivalent_kg_m2, 0);
+    let upward_longwave = energy.leaf.upward_longwave_w_m2;
+    let blackbody_change = STEFAN_BOLTZMANN_W_M2_K4
+        * previous_surface_temperature_k.powi(3)
+        * (4.0 * temperature_change_k);
+    let outgoing_longwave = upward_longwave + emissivity * blackbody_change;
+    let bulk_emissivity =
+        (upward_longwave + emissivity * blackbody_change) / (upward_longwave + blackbody_change);
+    let radiative_temperature_k = (outgoing_longwave / STEFAN_BOLTZMANN_W_M2_K4).powf(0.25);
+
+    let sublimation_heat = vaporization_heat_j_kg + colm_core::LATENT_HEAT_FUSION_J_KG;
+    let leaf_evaporation = energy.leaf.leaf_evaporation_kg_m2_s;
+    let ground_evaporation = energy.leaf.ground_evaporation_kg_m2_s;
+    let latent_heat =
+        vaporization_heat_j_kg * leaf_evaporation + sublimation_heat * ground_evaporation;
+
+    let precipitation_temperature_k = energy.precipitation.precipitation_temperature_k;
+    let ground_heat = energy.shortwave.ground_absorbed_w_m2
+        + energy.leaf.downward_longwave_w_m2 * emissivity
+        - emissivity * STEFAN_BOLTZMANN_W_M2_K4 * previous_surface_temperature_k.powi(4)
+        - emissivity * blackbody_change
+        - (energy.corrected_ground_sensible_heat_w_m2 + ground_evaporation * sublimation_heat)
+        + WATER_HEAT_CAPACITY_J_KG_K
+            * energy.interception.ground_rain_kg_m2_s
+            * (precipitation_temperature_k - surface_temperature_k)
+        + ICE_HEAT_CAPACITY_J_KG_K
+            * energy.interception.ground_snow_kg_m2_s
+            * (precipitation_temperature_k - surface_temperature_k);
+    // 地表能量收支恒等式：`rnet = H + LE + G`。用它而不是再拼一遍辐射项，
+    // 是因为前者的每一项都已经由内核算过，重复拼装只会引入第二套公式。
+    let net_radiation = energy.total_sensible_heat_w_m2 + latent_heat + ground_heat;
+
+    for (name, value) in [
+        ("sabvsun", energy.shortwave.sunlit_absorbed_w_m2),
+        ("sabvsha", energy.shortwave.shaded_absorbed_w_m2),
+        ("rnet", net_radiation),
+        ("olrg", outgoing_longwave),
+        ("emis", bulk_emissivity),
+        ("trad", radiative_temperature_k),
+        ("fgrnd", ground_heat),
+        ("lfevpa", latent_heat),
     ] {
         ensure!(
             value.is_finite(),
@@ -389,6 +497,13 @@ impl HistorySession {
             set_lct_state(buffer, record, template, state, ground)?;
             set_lct_fluxes(buffer, record, &output.water)?;
             set_lct_energy_fluxes(buffer, record, output)?;
+            set_lct_surface_budget(
+                buffer,
+                record,
+                output,
+                template.physics.vaporization_heat_j_kg,
+                template.soil_layers(),
+            )?;
             set_lct_surface_diagnostics(buffer, record, &output.energy.leaf)
         })
     }
@@ -405,13 +520,17 @@ impl HistorySession {
         self.push(end, |buffer, record| {
             set_lct_snow_state(buffer, record, template, state, ground)?;
             set_lct_fluxes(buffer, record, &output.water.soil)?;
-            set_lct_energy_fluxes(
+            let as_soil = StandardLctSoilOutput {
+                energy: output.energy.clone(),
+                water: output.water.soil.clone(),
+            };
+            set_lct_energy_fluxes(buffer, record, &as_soil)?;
+            set_lct_surface_budget(
                 buffer,
                 record,
-                &StandardLctSoilOutput {
-                    energy: output.energy.clone(),
-                    water: output.water.soil.clone(),
-                },
+                &as_soil,
+                template.physics.vaporization_heat_j_kg,
+                template.soil_layers(),
             )
         })
     }

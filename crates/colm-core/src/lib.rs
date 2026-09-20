@@ -177,7 +177,7 @@ pub use pc_radiation::{
 };
 pub use phase_change::{
     phase_change, urban_phase_change, PhaseChangeInput, PhaseChangeState, UrbanPhaseChangeInput,
-    UrbanPhaseChangeState,
+    UrbanPhaseChangeState, LATENT_HEAT_FUSION_J_KG,
 };
 pub use photosynthesis::{
     photosynthesis_parameters, stomata, update_photosynthesis, LeafBiochemistry,
