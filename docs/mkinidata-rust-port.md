@@ -233,6 +233,13 @@ restart cannot state them), `assemble_standard_lct_snow_template` plus
 and one per-step binding. SNICAR, split soil/snow and the snow-layer combine/divide
 behaviour over a long run are still unverified.
 
+Restart continuation has its writer too: `RestartFile::write_with` re-emits a read restart
+with only the declared variables replaced, preserving every other variable's dimensions and
+type, and `StandardLctRestartTemplate::evolved_overrides` supplies the six quantities the LCT
+state owns (the three soil columns and `zwt`/`wa`/`wdsrf`). The loop is verified by reading
+the result back, but the ground and canopy scalars are still not written back, and no written
+restart has been handed to the Fortran `colm` yet — that interoperability check remains.
+
 Beyond that: a driver for the PFT/PC/urban/BGC branches, the history writer wired to
 per-step field values, a Rust `colm` executable that consumes
 `PointRuntime::run_restart_standard_lct` (nothing outside `colm-runtime` does yet), and the
