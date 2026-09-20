@@ -94,6 +94,26 @@ pub const LCT_SURFACE_VARIABLES: [&str; 13] = [
 /// 它不是默认产出量。
 pub const LCT_FLUX_VARIABLES: [&str; 6] = ["qinfl", "rnof", "rsub", "rsur", "qcharge", "frcsat"];
 
+/// 本层能填的**驱动场镜像**，七项。
+///
+/// 上游把 `forc_*` 原样 `acc1d` 进 `a_xy_*` 再写出（`MOD_Vars_1DAccFluxes.F90`），
+/// 不做任何换算，所以本仓库也是照抄本步的 `RuntimeForcing`。`f_xy_us`/`f_xy_vs`
+/// 要注意标量风：上游标量风下 `forc_vs = 0.`、`forc_us` 就是风速本身。
+///
+/// **本层刻意不声明 `f_xy_rain`/`f_xy_snow`**：它们是雨雪**相态拆分**的结果，
+/// 属于内核下游（`MOD_RainSnowTemp`）而不是驱动场本身，上游也是在那之后才累加的。
+pub const LCT_FORCING_VARIABLES: [&str; 9] = [
+    "xy_t",
+    "xy_q",
+    "xy_pbot",
+    "xy_us",
+    "xy_vs",
+    "xy_solarin",
+    "xy_frl",
+    "xy_prc",
+    "xy_prl",
+];
+
 /// 本层能填的**冠层光合/气孔链**量，十一项。
 ///
 /// 这十一项此前一直挂在 [`UNFILLED`] 的"需要冠层分层输出"名下，其实内核早就算好了：
@@ -157,6 +177,7 @@ pub fn declare_lct_variables(buffer: &mut HistoryBuffers) -> Result<()> {
     names.extend_from_slice(&LCT_SURFACE_BUDGET_VARIABLES);
     names.extend_from_slice(&LCT_SURFACE_VARIABLES);
     names.extend_from_slice(&LCT_STOMATAL_VARIABLES);
+    names.extend_from_slice(&LCT_FORCING_VARIABLES);
     buffer.declare(&names)
 }
 
@@ -279,6 +300,17 @@ pub struct HistoryReferenceState {
     pub specific_humidity_kg_kg: f64,
     pub surface_pressure_pa: f64,
     pub boundary_layer_height_m: Option<f64>,
+    /// `forc_solarin`：`f_xy_solarin` 照抄它，不经过任何换算。
+    ///
+    /// `RuntimeForcing` 只带四个波段，总量由它们相加 —— `MOD_Forcing` 反着来
+    /// （先有总量再拆波段），所以这里要看相加能不能逐位回到上游的总量。
+    pub downward_shortwave_w_m2: f64,
+    /// `forc_frl`：`f_xy_frl` 照抄它。
+    pub downward_longwave_w_m2: f64,
+    /// `forc_prc`：对流降水。
+    pub convective_precipitation_kg_m2_s: f64,
+    /// `forc_prl`：层状降水。
+    pub large_scale_precipitation_kg_m2_s: f64,
 }
 
 impl HistoryReferenceState {
@@ -291,6 +323,13 @@ impl HistoryReferenceState {
             specific_humidity_kg_kg: forcing.specific_humidity,
             surface_pressure_pa: forcing.surface_pressure_pa,
             boundary_layer_height_m: forcing.boundary_layer_height_m,
+            downward_shortwave_w_m2: forcing.shortwave.direct_visible_w_m2
+                + forcing.shortwave.direct_near_infrared_w_m2
+                + forcing.shortwave.diffuse_visible_w_m2
+                + forcing.shortwave.diffuse_near_infrared_w_m2,
+            downward_longwave_w_m2: forcing.downward_longwave_w_m2,
+            convective_precipitation_kg_m2_s: forcing.convective_precipitation_kg_m2_s,
+            large_scale_precipitation_kg_m2_s: forcing.large_scale_precipitation_kg_m2_s,
         }
     }
 }
@@ -536,6 +575,39 @@ pub fn set_lct_stomatal_diagnostics(
         sink.scalar(name, record, value)?;
     }
     sink.layer("rootr", record, &energy.root_uptake.layer_fraction)?;
+    Ok(())
+}
+
+/// 把一步的驱动场镜像写进第 `record` 条记录。
+///
+/// 七项都是**照抄**本步的 `forc_*`，上游也是 `acc1d` 原值后写出，没有任何换算 ——
+/// 所以它们在 `oracle/tolerances.toml` 里是 tier0（逐位）。抄错一次就会在该层
+/// 直接红，这正是它们值得单独列出来的原因：它们量的是"驱动场读到内核里是不是
+/// 同一份"，与物理无关，是排在其他 57 个变量之前该先对上的一组。
+pub fn set_lct_forcing_mirrors(
+    sink: &mut impl HistorySink,
+    record: usize,
+    reference: HistoryReferenceState,
+) -> Result<()> {
+    for (name, value) in [
+        ("xy_t", reference.air_temperature_k),
+        ("xy_q", reference.specific_humidity_kg_kg),
+        ("xy_pbot", reference.surface_pressure_pa),
+        ("xy_us", reference.wind_speed_eastward_m_s),
+        // 标量风算例里 `forc_vs` 恒为 0（`MOD_Forcing` 把标量风放在 `forc_us`）。
+        // `HistoryReferenceState` 已经把标量情形折成 0，这里不再判一次。
+        ("xy_vs", reference.wind_speed_northward_m_s),
+        ("xy_solarin", reference.downward_shortwave_w_m2),
+        ("xy_frl", reference.downward_longwave_w_m2),
+        ("xy_prc", reference.convective_precipitation_kg_m2_s),
+        ("xy_prl", reference.large_scale_precipitation_kg_m2_s),
+    ] {
+        ensure!(
+            value.is_finite(),
+            "the history value for {name} is not finite"
+        );
+        sink.scalar(name, record, value)?;
+    }
     Ok(())
 }
 
@@ -786,7 +858,8 @@ impl HistorySession {
                 reference,
                 &template.physics,
             )?;
-            set_lct_stomatal_diagnostics(accumulator, 0, &output.energy)
+            set_lct_stomatal_diagnostics(accumulator, 0, &output.energy)?;
+            set_lct_forcing_mirrors(accumulator, 0, reference)
         })
     }
 
@@ -826,7 +899,8 @@ impl HistorySession {
                 reference,
                 &template.physics,
             )?;
-            set_lct_stomatal_diagnostics(accumulator, 0, &output.energy)
+            set_lct_stomatal_diagnostics(accumulator, 0, &output.energy)?;
+            set_lct_forcing_mirrors(accumulator, 0, reference)
         })
     }
 

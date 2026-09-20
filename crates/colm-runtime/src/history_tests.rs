@@ -154,6 +154,13 @@ fn reference() -> HistoryReferenceState {
         specific_humidity_kg_kg: forcing.specific_humidity,
         surface_pressure_pa: forcing.surface_pressure_pa,
         boundary_layer_height_m: forcing.boundary_layer_height_m,
+        downward_shortwave_w_m2: forcing.shortwave.direct_visible_w_m2
+            + forcing.shortwave.direct_near_infrared_w_m2
+            + forcing.shortwave.diffuse_visible_w_m2
+            + forcing.shortwave.diffuse_near_infrared_w_m2,
+        downward_longwave_w_m2: forcing.downward_longwave_w_m2,
+        convective_precipitation_kg_m2_s: forcing.convective_precipitation_kg_m2_s,
+        large_scale_precipitation_kg_m2_s: forcing.large_scale_precipitation_kg_m2_s,
     }
 }
 
@@ -219,6 +226,7 @@ fn the_bridge_writes_the_state_variables_it_declares() {
         template.soil_layers(),
     )
     .unwrap();
+    set_lct_forcing_mirrors(&mut buffer, 0, reference()).unwrap();
     buffer.set_time(0, 56_802_270).unwrap();
     let path = root.join("history.nc");
     buffer.write(&path).unwrap();
@@ -231,6 +239,7 @@ fn the_bridge_writes_the_state_variables_it_declares() {
         .chain(LCT_ENERGY_VARIABLES.iter())
         .chain(LCT_SURFACE_VARIABLES.iter())
         .chain(LCT_STOMATAL_VARIABLES.iter())
+        .chain(LCT_FORCING_VARIABLES.iter())
     {
         assert!(
             file.variable(&format!("f_{name}")).is_some(),
@@ -422,6 +431,7 @@ fn the_written_schema_matches_the_golden_file_for_the_shared_variables() {
         .chain(LCT_ENERGY_VARIABLES.iter())
         .chain(LCT_SURFACE_VARIABLES.iter())
         .chain(LCT_STOMATAL_VARIABLES.iter())
+        .chain(LCT_FORCING_VARIABLES.iter())
     {
         let file_name = format!("f_{name}");
         let ours = written.variable(&file_name).unwrap();
