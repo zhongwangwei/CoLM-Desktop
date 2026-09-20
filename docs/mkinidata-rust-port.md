@@ -224,6 +224,12 @@ reusing that generator as-is will not work:
 - eight leaf-optical properties exist twice, as `_pc` and `_default`, chosen by a
   compile-time/PC branch rather than written once.
 
+There is also a kernel-level gap the assembly uncovered: `LeafBiochemistry::canopy_scaling`
+is upstream's `cint(1:3)`, which `MOD_LeafTemperature.F90:460-466` recomputes every step as
+two different vectors, `cintsun` and `cintsha`, for the sunlit and shaded leaf populations.
+Our kernel takes one, so it can describe only one of them. Closing it means splitting the
+factor through the photosynthesis and leaf-temperature signatures.
+
 Beyond that: a driver for the active-snow chain and the PFT/PC/urban/BGC branches, the
 history writer wired to per-step field values, a Rust `colm` executable that consumes
 `PointRuntime::run_restart_standard_lct` (nothing outside `colm-runtime` does yet), and the
