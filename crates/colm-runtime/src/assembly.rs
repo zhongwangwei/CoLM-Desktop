@@ -281,6 +281,56 @@ impl SurfaceDiagnostics {
     }
 }
 
+/// 逐波段的辐射量：`(patch, rtyp, band)`，每个 patch 四个数。
+///
+/// 盘上的下标是 `patch*4 + rtyp*2 + band`（`rtyp` 0 = 直射、1 = 散射；
+/// `band` 0 = 可见光、1 = 近红外），与 `RestartFile::patch_matrix` 的读法互为逆运算。
+/// 这四（五）个量在 `net_solar` 里**逐步骤演化**（吸收率会被地面吸收的守恒修正缩放），
+/// 所以续跑必须写回，否则下一段运行从旧的辐射系数起步。
+#[derive(Debug, Clone)]
+struct RadiationFields {
+    albedo: Vec<f64>,
+    sunlit_absorption: Vec<f64>,
+    shaded_absorption: Vec<f64>,
+    soil_absorption: Vec<f64>,
+    snow_absorption: Vec<f64>,
+}
+
+impl RadiationFields {
+    fn read(time: &RestartFile) -> Result<Self> {
+        Ok(Self {
+            albedo: time.floats("alb")?.to_vec(),
+            sunlit_absorption: time.floats("ssun")?.to_vec(),
+            shaded_absorption: time.floats("ssha")?.to_vec(),
+            soil_absorption: time.floats("ssoi")?.to_vec(),
+            snow_absorption: time.floats("ssno")?.to_vec(),
+        })
+    }
+
+    /// 本 patch 的四个数换掉，其余 patch 保持原值。
+    fn splice(
+        source: &[f64],
+        patch: usize,
+        name: &str,
+        matrix: [[f64; 2]; 2],
+    ) -> Result<RestartOverride> {
+        const PER_PATCH: usize = 4;
+        ensure!(
+            (patch + 1) * PER_PATCH <= source.len(),
+            "the restart's {name} column has {} values, too few for patch {patch}",
+            source.len()
+        );
+        let mut buffer = source.to_vec();
+        for radiation_type in 0..2 {
+            for band in 0..2 {
+                buffer[patch * PER_PATCH + radiation_type * 2 + band] =
+                    matrix[band][radiation_type];
+            }
+        }
+        Ok(RestartOverride::new(name, buffer))
+    }
+}
+
 /// 把逐 patch 缓冲里本 patch 的那一项换掉，其余保持原值。
 fn replaced(source: &[f64], patch: usize, name: &str, value: f64) -> Result<Vec<f64>> {
     ensure!(
@@ -355,6 +405,8 @@ pub struct StandardLctRestartTemplate {
     restart_columns: RestartColumns,
     /// 表面诊断量的整变量缓冲，同上。
     surface_diagnostics: SurfaceDiagnostics,
+    /// 逐波段辐射量的整变量缓冲，同上。
+    radiation_fields: RadiationFields,
     /// 雪 + 土的模板列（`soilsnow`），积雪分支的 `GroundTemperatureInput` 需要这个形状。
     ///
     /// 雪段在前、土段在后，与时间重启里的数组同序；无雪时它就是土列本身。
@@ -532,6 +584,7 @@ fn assemble(
         hydraulic_conductivity_mm_s: time.floats("hk")?.to_vec(),
     };
     let surface_diagnostics = SurfaceDiagnostics::read(&time)?;
+    let radiation_fields = RadiationFields::read(&time)?;
     ensure!(
         snow.layer_count == 0 || snow.depth_m > 0.0,
         "the restart carries {} snow layer(s) under no depth",
@@ -734,6 +787,7 @@ fn assemble(
         snow,
         restart_columns,
         surface_diagnostics,
+        radiation_fields,
         snow_soil,
         root_flux_zeros: vec![0.0; soil_layers],
         physics,
@@ -1199,6 +1253,34 @@ impl StandardLctRestartTemplate {
             RestartOverride::new("smp", matric_potential),
             RestartOverride::new("hk", hydraulic_conductivity),
         ];
+        // 逐波段辐射量：`net_solar` 每步都会改它们（吸收率被守恒修正缩放），
+        // 取本步结束后的状态。
+        let optics = &state.energy.radiation;
+        for (name, source, matrix) in [
+            ("alb", &self.radiation_fields.albedo, optics.albedo),
+            (
+                "ssun",
+                &self.radiation_fields.sunlit_absorption,
+                optics.sunlit_absorption,
+            ),
+            (
+                "ssha",
+                &self.radiation_fields.shaded_absorption,
+                optics.shaded_absorption,
+            ),
+            (
+                "ssoi",
+                &self.radiation_fields.soil_absorption,
+                optics.soil_absorption,
+            ),
+            (
+                "ssno",
+                &self.radiation_fields.snow_absorption,
+                optics.snow_absorption,
+            ),
+        ] {
+            overrides.push(RadiationFields::splice(source, self.patch, name, matrix)?);
+        }
         // 表面诊断量：`(patch,)` 形状，只换本 patch 的那一项，其余保持重启里的原值。
         for (name, value) in [
             ("coszen", step.cosine_zenith),

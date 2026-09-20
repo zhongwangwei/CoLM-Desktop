@@ -876,7 +876,15 @@ fn an_evolved_state_writes_back_a_readable_continuation_restart() {
             .is_ok_and(|dims| dims == ["patch"])
     })
     .count();
-    assert_eq!(overrides.len(), 13 + diagnostics);
+    let radiation = ["alb", "ssun", "ssha", "ssoi", "ssno"]
+        .iter()
+        .filter(|name| {
+            source
+                .variable_dimensions(name)
+                .is_ok_and(|dims| dims == ["patch", "rtyp", "band"])
+        })
+        .count();
+    assert_eq!(overrides.len(), 13 + diagnostics + radiation);
     source.write_with(&written, &overrides).unwrap();
 
     let restart = colm_init::RestartFile::open(&written).unwrap();
@@ -1013,29 +1021,35 @@ fn an_evolved_snow_state_writes_back_a_readable_continuation_restart() {
     // 十一项土壤/标量 + z_sno + dz_sno + snowdp/scv/fsno/sag。
     assert_eq!(
         overrides.len(),
-        19 + [
-            "coszen",
-            "fwet_snow",
-            "tref",
-            "qref",
-            "rst",
-            "gs0sun",
-            "gs0sha",
-            "z0m",
-            "zol",
-            "rib",
-            "ustar",
-            "qstar",
-            "tstar",
-            "fm",
-            "fh",
-            "fq",
-        ]
-        .iter()
-        .filter(|name| source
-            .variable_dimensions(name)
-            .is_ok_and(|dims| dims == ["patch"]))
-        .count()
+        19 + ["alb", "ssun", "ssha", "ssoi", "ssno"]
+            .iter()
+            .filter(|name| source
+                .variable_dimensions(name)
+                .is_ok_and(|dims| dims == ["patch", "rtyp", "band"]))
+            .count()
+            + [
+                "coszen",
+                "fwet_snow",
+                "tref",
+                "qref",
+                "rst",
+                "gs0sun",
+                "gs0sha",
+                "z0m",
+                "zol",
+                "rib",
+                "ustar",
+                "qstar",
+                "tstar",
+                "fm",
+                "fh",
+                "fq",
+            ]
+            .iter()
+            .filter(|name| source
+                .variable_dimensions(name)
+                .is_ok_and(|dims| dims == ["patch"]))
+            .count()
     );
     source.write_with(&written, &overrides).unwrap();
 

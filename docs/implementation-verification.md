@@ -2252,3 +2252,61 @@ python3 oracle/scripts/stage3_diff.py <initial> <fortran-final> <rust-final>
   与地表偏暖同向，是结果而非原因。
 * `rst`：Fortran 在 PHS 关掉后给出 **-2.53**（负的冠层阻力，本身就值得追），
   Rust 是钉住的 `500000.`。
+
+## 第三次对齐之后的新缺口：**逐步骤的冠层光学没有被移植进运行时**（2026 年，实测）
+
+写回 `alb`/`ssun`/`ssha`/`ssoi`/`ssno` 之后，`stage3_diff.py` 把它们归进"与初值相同"那一类
+—— 也就是 **Rust 从头到尾没改过它们**。查调用点，原因很清楚：
+
+```bash
+grep -rn "cold_start_broadband_radiation_from_ground" --include=*.rs crates/
+# 只有 crates/colm-init/src/{single_point.rs,spatial_time.rs} —— 全是初始化器
+```
+
+Rust 里那份"冠层光学"（`ColdStartRadiation`：`albedo`、`sunlit_absorption`、
+`shaded_absorption`、`soil_absorption`、`snow_absorption`、`extkb`、`extkd`、`thermk`）
+**只在冷启动算一次**。上游是逐步骤（`doalb` 为真时）重算的：
+
+```fortran
+! CoLMMAIN.F90:2157
+IF (doalb) THEN
+   CALL albland (ipatch,patchtype,deltim, soil_s_v_alb, ..., alb,ssun,ssha,ssoi,ssno,ssno_lyr,thermk,extkb,extkd)
+ENDIF
+```
+
+而 `MOD_Albedo.F90:294`：
+
+```fortran
+lsai = lai + sai
+IF(coszen <= -0.3) THEN
+   RETURN  !only DO albedo when coszen > -0.3
+ENDIF
+czen = max(coszen, 0.001)
+```
+
+两个直接后果：
+
+1. **`extkb` 带着冷启动的垃圾值跑完整个窗口。** `extkb = proj/coszen`（`:575`）而
+   `czen = max(coszen, 0.001)`，所以夜里冷启动会算出 `proj/0.001 ≈ 660` ——
+   实测初值正是 **659.919**，而 Fortran 跑完之后是 **1.0**。Rust 全程用它做冠层消光。
+2. **`alb`/`ssun`/`ssha`/`ssoi` 不随 LAI、雪盖、土壤湿度变化。** 本算例的 LAI/SAI 是
+   常数（0.2/0.45），所以这一项在本例里影响小；但对生长季或积雪算例是直接错的。
+
+### 有一件事本轮没有查清，如实记下
+
+Fortran 写出的终值是 `alb = 1.`、`ssun = ssha = ssoi = 0.`、`extkb = 1.`。这三个数
+**不像**是两流解出来的（`alb = 1` 是"全反射"，`extkb = 1` 也不是 `proj/czen` 能给出的），
+而 `MOD_Vars_TimeVariables.F90:700` 把 `alb` 初始化成 `spval`。本轮没能定位这三个数的来源
+（`doalb` 的重置时机、写重启与 `albland` 的先后、以及是否存在另一条初始化路径都还没查）。
+**在查清之前不把 Fortran 这三个值当作"正确值"** —— 下一步应当拿一个**有白天写盘点**的算例
+（例如 `DEF_WRST_FREQ = 'DAILY'` 或把窗口移到白天结束）来看 `alb` 到底是多少。
+
+### 因此热力偏差的下一站
+
+`t_grnd` 的 +3.1 K 在三次对齐后没有动过。本轮把范围压到：**地表热量收支**，且
+`z0m` 逐位一致、`tref` 只差 0.62 K。下一步要按顺序确认：
+
+1. 逐步骤光学的移植（把已有的 `cold_start_broadband_radiation_from_ground` 从初始化器
+   挪进运行时，用**当步**的 LAI/SAI/雪盖/土壤湿度）—— 这是本轮确认的缺口；
+2. 用它解开上面那个未查清的问题之后，再比 `ssun`/`ssha`/`ssoi`/`alb`；
+3. 最后才是 `emis`/`trad`（要 `olrb`/`olrg` 的守恒修正，形状与推导都已定位）。
