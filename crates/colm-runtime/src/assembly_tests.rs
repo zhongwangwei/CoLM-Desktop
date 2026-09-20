@@ -845,3 +845,102 @@ fn an_evolved_state_writes_back_a_readable_continuation_restart() {
     .unwrap();
     assert_eq!(reassembled.temperature_k, state.temperature_k);
 }
+
+/// 积雪续跑：雪段与四个雪标量也要写回，且写出的文件能再次装配成积雪模板。
+#[test]
+fn an_evolved_snow_state_writes_back_a_readable_continuation_restart() {
+    let root = temp_dir("snow-continuation");
+    let fixture = SyntheticRestart::write_with_snow(
+        root.join("restart"),
+        SyntheticSnow {
+            depth_m: 0.15,
+            water_equivalent_kg_m2: 45.0,
+            ground_snow_fraction: 1.0,
+            temperature_k: 268.0,
+        },
+    )
+    .unwrap();
+    let files = crate::assembly::RestartStateFiles {
+        constant: fixture.constant.block.clone(),
+        time: fixture.time.block.clone(),
+    };
+    let template =
+        crate::assembly::assemble_standard_lct_snow_template(&files, 1, physics(1800.0)).unwrap();
+    let mut state = template.snow_state();
+    // 两步，让雪柱与土柱都推进。
+    colm_core::standard_lct_snow_soil_step(template.snow_input(&binding()), &mut state)
+        .expect("one step");
+    let second =
+        colm_core::standard_lct_snow_soil_step(template.snow_input(&binding()), &mut state)
+            .expect("two steps");
+
+    let source = colm_init::RestartFile::open(&fixture.time.block).unwrap();
+    let written = root.join("restart/snow_continuation.nc");
+    let overrides = template
+        .evolved_snow_overrides(&state, second.energy.ground.temperature_k[0])
+        .unwrap();
+    // 十一项土壤/标量 + z_sno + dz_sno + snowdp/scv/fsno/sag。
+    assert_eq!(overrides.len(), 17);
+    source.write_with(&written, &overrides).unwrap();
+
+    let restart = colm_init::RestartFile::open(&written).unwrap();
+    let slots = template.snow_slots();
+    let layers = template.soil_layers();
+    // 雪段逐槽对上。
+    let z = restart.layer_column("z_sno", 1, slots).unwrap();
+    for (slot, (written, state_value)) in z.iter().zip(state.snow.node_depth_m.iter()).enumerate() {
+        assert_eq!(written, state_value, "z_sno slot {slot}");
+    }
+    let dz = restart.layer_column("dz_sno", 1, slots).unwrap();
+    for (slot, (written, state_value)) in dz.iter().zip(state.snow.thickness_m.iter()).enumerate() {
+        assert_eq!(written, state_value, "dz_sno slot {slot}");
+    }
+    let t = restart.layer_column("t_soisno", 1, slots + layers).unwrap();
+    for (slot, (written, state_value)) in t
+        .iter()
+        .take(slots)
+        .zip(state.snow.temperature_k.iter())
+        .enumerate()
+    {
+        assert_eq!(written, state_value, "t_soisno snow slot {slot}");
+    }
+    for (layer, (written, state_value)) in t
+        .iter()
+        .skip(slots)
+        .zip(state.soil_temperature_k.iter())
+        .enumerate()
+    {
+        assert_eq!(written, state_value, "t_soisno soil layer {layer}");
+    }
+    // 四个雪标量只换本 patch。
+    assert_eq!(
+        restart.patch_scalars("snowdp").unwrap()[1],
+        state.snow.depth_m
+    );
+    assert_eq!(
+        restart.patch_scalars("scv").unwrap()[1],
+        state.snow.water_equivalent_kg_m2
+    );
+    assert_eq!(
+        restart.patch_scalars("fsno").unwrap()[1],
+        state.snow.ground_snow_fraction
+    );
+    assert_eq!(restart.patch_scalars("sag").unwrap()[1], state.snow.age);
+    assert_eq!(
+        restart.patch_scalars("snowdp").unwrap()[0],
+        source.patch_scalars("snowdp").unwrap()[0]
+    );
+    // 写出的文件仍能被积雪入口读回来，且雪层数一致。
+    let reassembled = crate::assembly::assemble_standard_lct_snow_template(
+        &crate::assembly::RestartStateFiles {
+            constant: fixture.constant.block.clone(),
+            time: written.clone(),
+        },
+        1,
+        physics(1800.0),
+    )
+    .unwrap();
+    assert_eq!(reassembled.snow.layer_count, state.snow.layer_count);
+    assert_eq!(reassembled.snow.depth_m, state.snow.depth_m);
+    assert_eq!(reassembled.temperature_k, state.soil_temperature_k);
+}

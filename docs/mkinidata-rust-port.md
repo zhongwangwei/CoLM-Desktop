@@ -235,10 +235,13 @@ behaviour over a long run are still unverified.
 
 Restart continuation has its writer too: `RestartFile::write_with` re-emits a read restart
 with only the declared variables replaced, preserving every other variable's dimensions and
-type, and `StandardLctRestartTemplate::evolved_overrides` supplies the six quantities the LCT
-state owns (the three soil columns and `zwt`/`wa`/`wdsrf`). The loop is verified by reading
-the result back, but the ground and canopy scalars are still not written back, and no written
-restart has been handed to the Fortran `colm` yet — that interoperability check remains.
+type. `evolved_overrides` supplies the eleven quantities the no-snow state and step output
+own (three soil columns, `zwt`/`wa`/`wdsrf`, `t_grnd`, `tleaf`, and the three canopy water
+amounts), and `evolved_snow_overrides` adds the snow span, `z_sno`/`dz_sno` and
+`snowdp`/`scv`/`fsno`/`sag` for the snow branch. Both loops are verified by reading the
+result back, but no written restart has been handed to the Fortran `colm` yet — that
+interoperability check remains, and diagnostics such as `coszen` and `fwet_snow` are still
+not written back.
 
 Beyond that: a driver for the PFT/PC/urban/BGC branches, the history writer wired to
 per-step field values, a Rust `colm` executable that consumes

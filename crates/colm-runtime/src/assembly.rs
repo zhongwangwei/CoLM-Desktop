@@ -162,6 +162,12 @@ struct RestartColumns {
     water_table_depth_m: Vec<f64>,
     aquifer_water_mm: Vec<f64>,
     surface_water_mm: Vec<f64>,
+    snow_node_depth_m: Vec<f64>,
+    snow_layer_thickness_m: Vec<f64>,
+    snow_depth_m: Vec<f64>,
+    snow_water_equivalent_mm: Vec<f64>,
+    snow_cover_fraction: Vec<f64>,
+    snow_age: Vec<f64>,
     ground_temperature_k: Vec<f64>,
     leaf_temperature_k: Vec<f64>,
     canopy_water_mm: Vec<f64>,
@@ -345,6 +351,12 @@ fn assemble(
         water_table_depth_m: time.floats("zwt")?.to_vec(),
         aquifer_water_mm: time.floats("wa")?.to_vec(),
         surface_water_mm: time.floats("wdsrf")?.to_vec(),
+        snow_node_depth_m: time.floats("z_sno")?.to_vec(),
+        snow_layer_thickness_m: time.floats("dz_sno")?.to_vec(),
+        snow_depth_m: time.floats("snowdp")?.to_vec(),
+        snow_water_equivalent_mm: time.floats("scv")?.to_vec(),
+        snow_cover_fraction: time.floats("fsno")?.to_vec(),
+        snow_age: time.floats("sag")?.to_vec(),
         ground_temperature_k: time.floats("t_grnd")?.to_vec(),
         leaf_temperature_k: time.floats("tleaf")?.to_vec(),
         canopy_water_mm: time.floats("ldew")?.to_vec(),
@@ -964,6 +976,92 @@ impl StandardLctRestartTemplate {
             RestartOverride::new("ldew_rain", canopy_rain),
             RestartOverride::new("ldew_snow", canopy_snow),
         ])
+    }
+
+    /// 积雪分支的续跑替换项：土壤那十一项，加上雪段与四个雪标量。
+    ///
+    /// 复用 [`Self::evolved_overrides`] 的土壤/标量部分，再把三根 `soilsnow` 柱的**雪段**
+    /// 与 `z_sno`/`dz_sno` 换成本步推进后的雪列。重启里雪段**恒为五个槽位**（
+    /// `maxsnl = -5`），与实际层数无关，所以未用的槽位写 0 —— 上游也是整段写出去的。
+    pub fn evolved_snow_overrides(
+        &self,
+        state: &StandardLctSnowSoilState,
+        ground_temperature_k: f64,
+    ) -> Result<Vec<RestartOverride>> {
+        let soil_state = StandardLctSoilState {
+            energy: state.energy.clone(),
+            temperature_k: state.soil_temperature_k.clone(),
+            water: state.soil_water.clone(),
+        };
+        let mut overrides = self.evolved_overrides(&soil_state, ground_temperature_k)?;
+        let slots = self.snow_slots();
+        ensure!(
+            state.snow.temperature_k.len() == slots
+                && state.snow.liquid_water_kg_m2.len() == slots
+                && state.snow.ice_water_kg_m2.len() == slots,
+            "the evolved snow column is not {slots} slots wide"
+        );
+        // 两个偏移量不能混：`soilsnow` 三根柱每个 patch 宽 `slots + 土层数`，
+        // 而 `z_sno`/`dz_sno` 只有雪槽，每个 patch 宽 `slots`。
+        let soilsnow_base = self.patch * (slots + self.soil_layers());
+        let snow_base = self.patch * slots;
+        // 三根 soilsnow 柱：只改雪段，土段是上一步已经填好的。
+        for (name, values) in [
+            ("t_soisno", &state.snow.temperature_k),
+            ("wliq_soisno", &state.snow.liquid_water_kg_m2),
+            ("wice_soisno", &state.snow.ice_water_kg_m2),
+        ] {
+            let entry = overrides
+                .iter_mut()
+                .find(|entry| entry.name == name)
+                .with_context(|| format!("{name} is not among the soil overrides"))?;
+            ensure!(
+                soilsnow_base + slots <= entry.values.len(),
+                "the restart's {name} is too short for patch {}",
+                self.patch
+            );
+            entry.values[soilsnow_base..soilsnow_base + slots].copy_from_slice(values);
+        }
+        // `z_sno`/`dz_sno` 是只有雪槽的变量。
+        let mut node = self.restart_columns.snow_node_depth_m.clone();
+        let mut thickness = self.restart_columns.snow_layer_thickness_m.clone();
+        ensure!(
+            snow_base + slots <= node.len() && snow_base + slots <= thickness.len(),
+            "the restart's snow geometry is too short for patch {}",
+            self.patch
+        );
+        node[snow_base..snow_base + slots].copy_from_slice(&state.snow.node_depth_m);
+        thickness[snow_base..snow_base + slots].copy_from_slice(&state.snow.thickness_m);
+        overrides.push(RestartOverride::new("z_sno", node));
+        overrides.push(RestartOverride::new("dz_sno", thickness));
+        for (name, source, value) in [
+            (
+                "snowdp",
+                &self.restart_columns.snow_depth_m,
+                state.snow.depth_m,
+            ),
+            (
+                "scv",
+                &self.restart_columns.snow_water_equivalent_mm,
+                state.snow.water_equivalent_kg_m2,
+            ),
+            (
+                "fsno",
+                &self.restart_columns.snow_cover_fraction,
+                state.snow.ground_snow_fraction,
+            ),
+            ("sag", &self.restart_columns.snow_age, state.snow.age),
+        ] {
+            let mut column = source.clone();
+            ensure!(
+                self.patch < column.len(),
+                "the restart has no patch {} for {name}",
+                self.patch
+            );
+            column[self.patch] = value;
+            overrides.push(RestartOverride::new(name, column));
+        }
+        Ok(overrides)
     }
 
     /// 土壤层数。
