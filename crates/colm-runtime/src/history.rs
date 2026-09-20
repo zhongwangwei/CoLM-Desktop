@@ -219,7 +219,7 @@ pub const NOT_IN_GOLDEN: [&str; 1] = ["qcharge"];
 /// 这份清单不参与写出，只是把"缺口"写死在代码里：改它就得同时改注释。
 pub const UNFILLED: [&str; 5] = [
     "`green`：上游由 `MOD_LAIEmpirical.F90:132-135` 从 `fveg = vegc(ivt)` 得出，而 `vegc` 是该模块内的硬编码表，本仓库还没搬",
-    "`alb`：四维 `(time,patch,rtyp,band)`，内核算得出但没落进步输出",
+    "`alb`：黄金文件里**唯一的四维**变量 `(time,patch,rtyp,band)`，值由每步的 `SurfaceOptics::albedo` 提供（续跑写回用的就是它）；缺的不是值而是 `HistorySink` 的一条四维写出通路 —— 现有只有 `scalar` 与 `layer` 两条",
     "`rss`：方案 4 下上游写的是电导标志而不是阻力，条件映射待核对",
     "`ldew`/`qintr`/`qdrip`：需要一个冠层截留**状态**出口，目前只有通量",
     "10 m 风/稳定度（us10m/vs10m/fm10m/ustar2）：出自另一支 `Shaofeng, 2023` 的廓线 routine；湖泊/湿地/BGC 量各自的分支还没有运行时驱动",
