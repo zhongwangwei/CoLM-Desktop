@@ -761,8 +761,10 @@ fn an_evolved_state_writes_back_a_readable_continuation_restart() {
     // 以原时间重启为底写出，只换本分支推进过的量。
     let source = colm_init::RestartFile::open(&fixture.time.block).unwrap();
     let written = root.join("restart/continuation.nc");
-    let overrides = template.evolved_overrides(&state).unwrap();
-    assert_eq!(overrides.len(), 6);
+    let overrides = template
+        .evolved_overrides(&state, second.energy.ground.temperature_k[0])
+        .unwrap();
+    assert_eq!(overrides.len(), 11);
     source.write_with(&written, &overrides).unwrap();
 
     let restart = colm_init::RestartFile::open(&written).unwrap();
@@ -798,9 +800,10 @@ fn an_evolved_state_writes_back_a_readable_continuation_restart() {
         restart.patch_scalars("zwt").unwrap()[0],
         fixture.water_table_depth_m[0]
     );
+    // 只换本 patch：另一个 patch 的叶温逐值不变。
     assert_eq!(
-        restart.floats("tleaf").unwrap(),
-        source.floats("tleaf").unwrap()
+        restart.patch_scalars("tleaf").unwrap()[0],
+        source.patch_scalars("tleaf").unwrap()[0]
     );
     // 整型变量的保真在 `colm-init` 的续跑测试里单独钉住（那份夹具带 `patchmask`）；
     // 时间重启本身没有整型变量，这里再核一个没推进的浮点量。
@@ -808,10 +811,27 @@ fn an_evolved_state_writes_back_a_readable_continuation_restart() {
         restart.patch_scalars("fsno").unwrap(),
         source.patch_scalars("fsno").unwrap()
     );
-    // 未推进的 `t_grnd` 明确保持原值：状态里没有它，凑一个近似值等于凭空写数。
+    // 地表温度来自这一步的输出，叶温与冠层水量来自状态。
     assert_eq!(
-        restart.patch_scalars("t_grnd").unwrap(),
-        source.patch_scalars("t_grnd").unwrap()
+        restart.patch_scalars("t_grnd").unwrap()[1],
+        second.energy.ground.temperature_k[0]
+    );
+    assert_eq!(
+        restart.patch_scalars("tleaf").unwrap()[1],
+        state.energy.leaf.leaf_temperature_k
+    );
+    assert_eq!(
+        restart.patch_scalars("ldew").unwrap()[1],
+        state.energy.leaf.canopy_water.total_mm
+    );
+    assert_eq!(
+        restart.patch_scalars("ldew_snow").unwrap()[1],
+        state.energy.leaf.canopy_water.snow_mm
+    );
+    // 没推进的 patch 0 的地表温度保持原值。
+    assert_eq!(
+        restart.patch_scalars("t_grnd").unwrap()[0],
+        source.patch_scalars("t_grnd").unwrap()[0]
     );
     // 写出的文件本身还能被装配层读回来（雪槽仍是 0，所以走无雪入口）。
     let reassembled = crate::assembly::assemble_standard_lct_template(

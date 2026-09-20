@@ -1400,9 +1400,14 @@ under a 0.1500 m column
 数组写出去，不重新决定变量集合。
 
 闭环测试（`an_evolved_state_writes_back_a_readable_continuation_restart`）：
-合成重启 → 装配 → 跑两步 → 写出 → 读回，断言推进过的六项（三根土柱 + `zwt`/`wa`/`wdsrf`）
-对上、本 patch 之外的 patch 保持原值、没推进的变量（`tleaf`/`fsno`）逐值不变，而且写出的
-文件还能被装配层重新读回来。
+合成重启 → 装配 → 跑两步 → 写出 → 读回，断言推进过的十一项（三根土柱 + `zwt`/`wa`/`wdsrf`
++ `t_grnd`/`tleaf`/`ldew`/`ldew_rain`/`ldew_snow`）对上、本 patch 之外的 patch 保持原值、
+没推进的变量（`fsno`）逐值不变，而且写出的文件还能被装配层重新读回来。
+
+`ground_temperature_k` 由调用方传给 `evolved_overrides`：地表温度只出现在**这一步的输出**
+（`StandardLctSoilOutput::energy.ground.temperature_k[0]`）里，状态只带逐层土温。叶温与三个
+冠层水量则在状态里（`energy.leaf`），所以直接取。上一轮那句"`t_grnd` 保持原值"因此改掉了 ——
+不是状态没有就该不写，而是先确认它到底在谁手上。
 
 三处值得记的实现取舍：
 
@@ -1418,6 +1423,5 @@ under a 0.1500 m column
    的值丢了（测试报 `len is 15 but the index is 20`）。现在从原文件的整缓冲出发，只覆盖本
    patch 的土段。
 
-**只写状态真正拥有的量。** `t_grnd`/`tleaf`/冠层水不在 `StandardLctSoilState` 里，所以续跑
-**不碰**它们（保持重启原值），测试明确断言 `t_grnd` 逐值不变。凑一个"用表层土温当 `t_grnd`"
-的近似值等于把一次没有依据的推算写进文件 —— 那正是这个仓库一直在拒绝的事。
+**只写有来源的量。** 剩下的 `fsno`/`fwet_snow`/`sag`/`coszen` 等没有写回：它们要么是诊断量、
+要么由别的分支推进，状态与输出都不拥有它们。凑近似值等于把一次没有依据的推算写进文件。

@@ -162,6 +162,11 @@ struct RestartColumns {
     water_table_depth_m: Vec<f64>,
     aquifer_water_mm: Vec<f64>,
     surface_water_mm: Vec<f64>,
+    ground_temperature_k: Vec<f64>,
+    leaf_temperature_k: Vec<f64>,
+    canopy_water_mm: Vec<f64>,
+    canopy_rain_mm: Vec<f64>,
+    canopy_snow_mm: Vec<f64>,
 }
 
 /// 雪 + 土拼成的模板列，长度随雪层数变。
@@ -340,6 +345,11 @@ fn assemble(
         water_table_depth_m: time.floats("zwt")?.to_vec(),
         aquifer_water_mm: time.floats("wa")?.to_vec(),
         surface_water_mm: time.floats("wdsrf")?.to_vec(),
+        ground_temperature_k: time.floats("t_grnd")?.to_vec(),
+        leaf_temperature_k: time.floats("tleaf")?.to_vec(),
+        canopy_water_mm: time.floats("ldew")?.to_vec(),
+        canopy_rain_mm: time.floats("ldew_rain")?.to_vec(),
+        canopy_snow_mm: time.floats("ldew_snow")?.to_vec(),
     };
     ensure!(
         snow.layer_count == 0 || snow.depth_m > 0.0,
@@ -881,7 +891,17 @@ impl StandardLctRestartTemplate {
     ///
     /// 写出的是**整变量**（所有 patch），所以模板留着原文件的缓冲：本 patch 的土段换成
     /// 推进后的状态，其余 patch 原样保留。
-    pub fn evolved_overrides(&self, state: &StandardLctSoilState) -> Result<Vec<RestartOverride>> {
+    /// `ground_temperature_k` 由调用方给：它只出现在**这一步的输出**里
+    /// （`StandardLctSoilOutput::energy.ground.temperature_k[0]`），状态只带逐层土温。
+    pub fn evolved_overrides(
+        &self,
+        state: &StandardLctSoilState,
+        ground_temperature_k: f64,
+    ) -> Result<Vec<RestartOverride>> {
+        ensure!(
+            ground_temperature_k.is_finite() && ground_temperature_k > 0.0,
+            "the ground temperature to write back is not physical"
+        );
         let layers = self.soil_layers();
         ensure!(
             state.temperature_k.len() == layers
@@ -917,9 +937,20 @@ impl StandardLctRestartTemplate {
         let mut water_table = scalars(&self.restart_columns.water_table_depth_m)?;
         let mut aquifer = scalars(&self.restart_columns.aquifer_water_mm)?;
         let mut surface = scalars(&self.restart_columns.surface_water_mm)?;
+        let mut ground = scalars(&self.restart_columns.ground_temperature_k)?;
+        let mut leaf = scalars(&self.restart_columns.leaf_temperature_k)?;
+        let mut canopy = scalars(&self.restart_columns.canopy_water_mm)?;
+        let mut canopy_rain = scalars(&self.restart_columns.canopy_rain_mm)?;
+        let mut canopy_snow = scalars(&self.restart_columns.canopy_snow_mm)?;
         water_table[self.patch] = state.water.water_table_depth_m;
         aquifer[self.patch] = state.water.aquifer_water_mm;
         surface[self.patch] = state.water.surface_water_mm;
+        // 叶温与冠层水量在状态里（`energy.leaf`）；地表温度只有步输出有，所以由调用方给。
+        ground[self.patch] = ground_temperature_k;
+        leaf[self.patch] = state.energy.leaf.leaf_temperature_k;
+        canopy[self.patch] = state.energy.leaf.canopy_water.total_mm;
+        canopy_rain[self.patch] = state.energy.leaf.canopy_water.rain_mm;
+        canopy_snow[self.patch] = state.energy.leaf.canopy_water.snow_mm;
         Ok(vec![
             RestartOverride::new("t_soisno", temperature),
             RestartOverride::new("wliq_soisno", liquid),
@@ -927,6 +958,11 @@ impl StandardLctRestartTemplate {
             RestartOverride::new("zwt", water_table),
             RestartOverride::new("wa", aquifer),
             RestartOverride::new("wdsrf", surface),
+            RestartOverride::new("t_grnd", ground),
+            RestartOverride::new("tleaf", leaf),
+            RestartOverride::new("ldew", canopy),
+            RestartOverride::new("ldew_rain", canopy_rain),
+            RestartOverride::new("ldew_snow", canopy_snow),
         ])
     }
 
