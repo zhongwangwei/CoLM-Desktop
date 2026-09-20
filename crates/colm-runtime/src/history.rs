@@ -40,7 +40,22 @@ pub const LCT_STATE_VARIABLES: [&str; 13] = [
     "fsno",
 ];
 
-/// 本层能填的**诊断**量：全部来自 `WATER_2014` 的输出，共六个。
+/// 本层能填的**能量侧**诊断量，四个，逐项对照过上游的赋值表达式。
+///
+/// | 变量 | 上游（`MOD_Thermal.F90`） | 本仓库 |
+/// |---|---|---|
+/// | `fsena` | `fsena = fsenl + fseng`（:1331） | `energy.total_sensible_heat_w_m2` |
+/// | `fevpa` | `fevpa = fevpl + fevpg`（:1332） | `energy.total_evaporation_kg_m2_s` |
+/// | `etr` | 叶面蒸腾（`MOD_LeafTemperature.F90:839`） | `energy.leaf.transpiration_kg_m2_s` |
+/// | `sabg` | 地面吸收的短波 | `energy.shortwave.ground_absorbed_w_m2` |
+///
+/// **`lfevpa` 刻意不在此列**，尽管它看起来就是 `fevpa * hvap`。上游写的是
+/// `lfevpa = hvap*fevpl + htvp*fevpg`（:1333，注释写着 "accounting for sublimation"）——
+/// 地面那一项用的是升华潜热 `htvp`，不是汽化潜热。按名字配上就会在积雪算例里给出
+/// 偏高的潜热通量，而海平面无雪算例看不出来。
+pub const LCT_ENERGY_VARIABLES: [&str; 4] = ["fsena", "fevpa", "etr", "sabg"];
+
+/// 本层能填的**水文诊断**量：全部来自 `WATER_2014` 的输出，共六个。
 ///
 /// 每一个的单位都与闸门表核对过（`qinfl`/`rnof`/`rsub`/`rsur`/`qcharge` 是 `mm/s`，
 /// `frcsat` 是 `-`），不是按名字猜的。闸门表里没有的量（例如 `smp`）不在此列 ——
@@ -56,10 +71,11 @@ pub const NOT_IN_GOLDEN: [&str; 1] = ["qcharge"];
 /// 黄金算例里有、但本层还填不出来的量（按用途分组，便于下一步挑）。
 ///
 /// 这份清单不参与写出，只是把"缺口"写死在代码里：改它就得同时改注释。
-pub const UNFILLED: [&str; 4] = [
-    "通量与诊断（rnet/fgrnd/etr/lfevpa/…）：需要内核输出逐项接到 history 变量",
+pub const UNFILLED: [&str; 5] = [
+    "辐射收支（rnet/sabv/olrg）：需要把短波、长波各项分别接出来",
+    "地面热通量与潜热（fgrnd/lfevpa）：`lfevpa` 含升华项 `htvp`，内核当前没有这个量",
     "分层植被量（laisun/laisha/ssun/ssha/…）：需要冠层分层输出",
-    "派生土壤量（h2osoi/smp/hk/…）：需要先核对上游对每个量的定义",
+    "派生土壤量（h2osoi/…）：需要先核对上游对每个量的定义",
     "湖泊与 BGC 量：各自的分支还没有运行时驱动",
 ];
 
@@ -67,7 +83,33 @@ pub const UNFILLED: [&str; 4] = [
 pub fn declare_lct_variables(buffer: &mut HistoryBuffers) -> Result<()> {
     let mut names = LCT_STATE_VARIABLES.to_vec();
     names.extend_from_slice(&LCT_FLUX_VARIABLES);
+    names.extend_from_slice(&LCT_ENERGY_VARIABLES);
     buffer.declare(&names)
+}
+
+/// 把一步的能量侧诊断写进第 `record` 条记录。
+///
+/// 两支共用：积雪分支传整个输出，`leaf`/`shortwave`/总通量都在里面。
+pub fn set_lct_energy_fluxes(
+    buffer: &mut HistoryBuffers,
+    record: usize,
+    output: &StandardLctSoilOutput,
+) -> Result<()> {
+    for (name, value) in [
+        ("fsena", output.energy.total_sensible_heat_w_m2),
+        ("fevpa", output.energy.total_evaporation_kg_m2_s),
+        ("etr", output.energy.leaf.transpiration_kg_m2_s),
+        ("sabg", output.energy.shortwave.ground_absorbed_w_m2),
+    ] {
+        ensure!(
+            value.is_finite(),
+            "the history value for {name} is not finite"
+        );
+        buffer
+            .set_patch_scalar(name, record, value)
+            .with_context(|| format!("cannot write {name} into the history buffers"))?;
+    }
+    Ok(())
 }
 
 /// 把一步的水文诊断写进第 `record` 条记录。
@@ -293,7 +335,8 @@ impl HistorySession {
         let ground = output.energy.ground.temperature_k[0];
         self.push(end, |buffer, record| {
             set_lct_state(buffer, record, template, state, ground)?;
-            set_lct_fluxes(buffer, record, &output.water)
+            set_lct_fluxes(buffer, record, &output.water)?;
+            set_lct_energy_fluxes(buffer, record, output)
         })
     }
 
@@ -308,7 +351,15 @@ impl HistorySession {
         let ground = output.energy.ground.temperature_k[0];
         self.push(end, |buffer, record| {
             set_lct_snow_state(buffer, record, template, state, ground)?;
-            set_lct_fluxes(buffer, record, &output.water.soil)
+            set_lct_fluxes(buffer, record, &output.water.soil)?;
+            set_lct_energy_fluxes(
+                buffer,
+                record,
+                &StandardLctSoilOutput {
+                    energy: output.energy.clone(),
+                    water: output.water.soil.clone(),
+                },
+            )
         })
     }
 

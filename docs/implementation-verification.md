@@ -1580,3 +1580,31 @@ GUI 那条链不受影响：它不依赖 `colm-runtime`）。
 
 测试断言两个文件名、各自记录数（1 与 3）、同文件内标签相差 60 分钟，以及**跨月的相邻两条
 仍连续**（一月的最后一条比二月的第一条早一小时）。
+
+## history 桥再补四个能量侧诊断，并记下一个"名字像但不等"的反例（2026 年）
+
+新增 `fsena`（冠层高度到大气的显热）、`fevpa`（同高度的蒸散）、`etr`（叶面蒸腾）、
+`sabg`（地面吸收短波），共 23 项。每一项都对过上游的**赋值表达式**，不是对名字：
+
+| 变量 | 上游 | 本仓库 |
+|---|---|---|
+| `fsena` | `fsena = fsenl + fseng`（`MOD_Thermal.F90:1331`） | `energy.total_sensible_heat_w_m2` |
+| `fevpa` | `fevpa = fevpl + fevpg`（:1332） | `energy.total_evaporation_kg_m2_s` |
+| `etr` | 叶面蒸腾（`MOD_LeafTemperature.F90:839`） | `energy.leaf.transpiration_kg_m2_s` |
+| `sabg` | 地面吸收短波 | `energy.shortwave.ground_absorbed_w_m2` |
+
+**`lfevpa` 刻意不加**，尽管它看起来就该是 `fevpa * hvap`。上游写的是
+
+```
+lfevpa = hvap*fevpl + htvp*fevpg   ! W/m^2 (accounting for sublimation)   ! MOD_Thermal.F90:1333
+```
+
+地面那一项用的是**升华潜热** `htvp`，不是汽化潜热。按名字配上会在积雪算例里给出偏高的
+潜热通量，而无雪算例完全看不出来 —— 这是本项目里第二个"名字像、量不等"的例子（第一个是
+`canopy_scaling`/`cint`）。它现在记在 `UNFILLED` 与代码注释里，连同缺的量（内核当前没有
+`htvp`）。
+
+### 证据
+
+`cargo test -p colm-runtime --lib`：43 通过。schema 逐变量比对现在覆盖 **22 项**
+（`qcharge` 不在黄金算例里，被显式跳过），四个能量量与这一步的输出逐项相等。

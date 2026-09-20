@@ -146,17 +146,36 @@ fn the_bridge_writes_the_state_variables_it_declares() {
     )
     .unwrap();
     set_lct_fluxes(&mut buffer, 0, &output.water).unwrap();
+    set_lct_energy_fluxes(&mut buffer, 0, &output).unwrap();
     buffer.set_time(0, 56_802_270).unwrap();
     let path = root.join("history.nc");
     buffer.write(&path).unwrap();
 
     let file = netcdf::open(&path).unwrap();
     // 声明的十三个变量都在，名字带 `f_` 前缀。
-    for name in LCT_STATE_VARIABLES.iter().chain(LCT_FLUX_VARIABLES.iter()) {
+    for name in LCT_STATE_VARIABLES
+        .iter()
+        .chain(LCT_FLUX_VARIABLES.iter())
+        .chain(LCT_ENERGY_VARIABLES.iter())
+    {
         assert!(
             file.variable(&format!("f_{name}")).is_some(),
             "f_{name} is missing from the written history file"
         );
+    }
+    // 能量侧四个量与本步的输出逐项相等（单位见 `LCT_ENERGY_VARIABLES` 的表）。
+    for (name, expected) in [
+        ("fsena", output.energy.total_sensible_heat_w_m2),
+        ("fevpa", output.energy.total_evaporation_kg_m2_s),
+        ("etr", output.energy.leaf.transpiration_kg_m2_s),
+        ("sabg", output.energy.shortwave.ground_absorbed_w_m2),
+    ] {
+        let values = file
+            .variable(&format!("f_{name}"))
+            .unwrap()
+            .get_values::<f64, _>(..)
+            .unwrap();
+        assert_eq!(values, vec![expected], "f_{name}");
     }
     // 诊断量与这一步的输出逐项对上。
     for (name, expected) in [
@@ -235,7 +254,11 @@ fn the_written_schema_matches_the_golden_file_for_the_shared_variables() {
     let reference = netcdf::open(&golden).unwrap();
     let mut compared = 0;
     let mut skipped = Vec::new();
-    for name in LCT_STATE_VARIABLES.iter().chain(LCT_FLUX_VARIABLES.iter()) {
+    for name in LCT_STATE_VARIABLES
+        .iter()
+        .chain(LCT_FLUX_VARIABLES.iter())
+        .chain(LCT_ENERGY_VARIABLES.iter())
+    {
         let file_name = format!("f_{name}");
         let ours = written.variable(&file_name).unwrap();
         // 闸门表里的量不一定会出现在**这个**算例里（`qcharge` 就受运行时条件控制，
@@ -267,7 +290,7 @@ fn the_written_schema_matches_the_golden_file_for_the_shared_variables() {
         }
     }
     assert!(
-        compared >= 18,
+        compared >= 22,
         "only {compared} variables were compared against the golden file; skipped: {skipped:?}"
     );
     std::fs::remove_dir_all(root).unwrap();
@@ -312,6 +335,15 @@ fn the_snow_branch_fills_the_snow_span() {
     )
     .unwrap();
     set_lct_fluxes(&mut buffer, 0, &output.water.soil).unwrap();
+    set_lct_energy_fluxes(
+        &mut buffer,
+        0,
+        &colm_core::StandardLctSoilOutput {
+            energy: output.energy.clone(),
+            water: output.water.soil.clone(),
+        },
+    )
+    .unwrap();
     buffer.set_time(0, 56_802_270).unwrap();
     let path = root.join("history.nc");
     buffer.write(&path).unwrap();
