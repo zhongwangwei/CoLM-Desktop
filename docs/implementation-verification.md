@@ -4083,3 +4083,29 @@ f_sigf     F[0.999622,1.000000]  R[0.999561,1.000000]  maxdiff 6.12e-5
 把它搬进来要么新增第四张生成表、要么手抄一张 17 项数组，两种都要先确认
 `USE_SITE_LAI = .true.` 时到底是哪个模块设的 `green`（`LAI_empirical` 还是
 `MOD_LAIReadin`）。**证据不足就不写** —— 填一个恒 1 的常量在别的算例上会静默错。
+
+### 顺带解决一个挂了很久的待核对项：`h2osoi` 是**液 + 固**
+
+`UNFILLED` 里一直写着"`h2osoi` 需要先核对上游对每个量的定义（液态还是液+固态）"。
+查到了，在 `CoLMMAIN.F90:2253`：
+
+```fortran
+h2osoi = wliq_soisno(1:)/(dz_soisno(1:)*denh2o) + wice_soisno(1:)/(dz_soisno(1:)*denice)
+```
+
+**液 + 固，而且两者用各自的密度**（`denh2o = 1000`、`denice = 917` kg/m³），
+不是统一除以 1000。写成 `(wliq+wice)/(dz*1000)` 会在冻土上偏低约 8% 的冰贡献 ——
+本仓库 1 月算例表层冰占 `wice=4.3` 对 `wliq=6.0`，正好是会被看出来的量级。
+
+对应关系：`wliq_soisno(1:nl_soil)`/`wice_soisno(1:nl_soil)`/`dz_soisno(1:nl_soil)`
+就是**土层**那 10 层（雪层在负下标），所以维度是 `(time, patch, soil)`，与黄金一致
+（实测 `f_h2osoi` 区间 [0.3237, 1.154] 是体积含水率）。
+
+内核侧只要把 `state.water.{liquid,ice}_water_kg_m2` 与模板的层厚接一个分层写出即可 ——
+`ICE_DENSITY_KG_M3 = 917.0` 已经在 `ground_temperature.rs` 里了。这一项留在
+`UNFILLED` 里是因为**端口径已经定了、只差接线**，与其余"定义还没定"的项不同类。
+
+10 m 那四个（`us10m`/`vs10m`/`fm10m`/`ustar2`）也一并查了出处：它们不是
+`MOD_Vars_1DAccFluxes` 里那十三个近地表诊断的同批，而是另一支
+（源码里标着 `Shaofeng, 2023.05.20` 的 `r_ustar2_e`/`r_fm10m_e` 廓线 routine），
+要移植是移植那支，不是复用已有的。
