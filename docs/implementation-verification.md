@@ -3100,3 +3100,54 @@ Fortran 字面量"是反的**（它们被 `-fdefault-real-8` 提升成 r8，不�
 `f_qinfl` 首条记录 Fortran 是**负**的（−9.31e-5），Rust 是 0：上游 `qinfl` 在
 `WATER_2014` 里由 `gwat - rsur` 得到，夜里 `gwat` 可为负（冻结/再分配），
 而本仓库把负的入渗截成了 0。这是下一个可以单独查的点。
+
+## 无雪层时融化与蒸发没进土壤收支：土柱偏湿（2026 年，实测）
+
+分层比对里 `f_qinfl` 首条记录 Fortran 是 **−9.313e-5**、Rust 是 **0**。追下去发现
+Rust 的 `f_qinfl` **整段 264 条恒为 0** —— 这不是"差一点"，是整个入渗项没在工作。
+
+对着 Fortran 一列列看，规律立刻出来：
+
+```
+Fortran  f_qinfl = [-9.313e-5, -6.631e-5, -5.177e-5, -5.816e-5, ...]
+Fortran  f_fevpg = [ 9.313e-5,  6.631e-5,  5.177e-5,  5.816e-5, ...]   ← 逐条相反数
+```
+
+`WATER_2014` 的入渗是 `qinfl = gwat - rsur - wdsrf/deltim`
+（`MOD_SoilSnowHydrology.F90:368`），而 `gwat` 分两支（`:235-245`）：
+
+```fortran
+IF (lb>=1) THEN                      ! == snl == 0：没有雪层
+   gwat = pg_rain + sm - qseva       ! 薄雪融化 sm 与液态蒸发 qseva 都进土壤
+ELSE
+   CALL snowwater (..., gwat)        ! 有雪层时由雪柱底部排水给 gwat
+ENDIF
+```
+
+`water_2014_snow_soil_step` 的无雪层支把 `snowmelt_kg_m2_s` 与
+`ground_evaporation_kg_m2_s` **都写成了 0**，理由是"`snowwater` 负责这些通量"——
+可这一支恰恰**跳过**了 `snowwater`。于是蒸发与融化凭空消失，`gwat` 只剩降雨，
+夜里就是 0，土壤只进不出、越来越湿。
+
+修法：无雪层支把 `sm`（`energy.ground.snow_melt_rate_kg_m2_s`，`meltf` 只在
+`lb == 1 && scv > 0` 时赋值，所以有雪层时恒为 0）与 `qseva`
+（`SnowWaterInput::evaporation_kg_m2_s`）原样传给土壤收支。
+
+### 实测：整条序列与重启都改善
+
+对齐算例第 1 天（264 条 history 的最大差）：
+
+| | Fortran | 修之前 | 修之后 |
+|---|---|---|---|
+| `f_qinfl` | −9.313e-5 | 0（恒为 0） | 差 4.3e-6 |
+| `f_wliq_soisno`（最差槽位） | — | 差 2.24 kg/m² | **差 0.49 kg/m²** |
+| `f_t_grnd`（最差记录） | — | 差 **0.72 K** | **差 0.075 K** |
+| `f_rnof` | — | 差 3.1e-4 | 差 7.0e-5 |
+
+528 步后的重启：`wliq_soisno` 最差从 1.017 收到 **0.275** kg/m²，
+`t_grnd` 从 +0.047 K 变成 −0.060 K（端点上略远一点，但 264 条记录的**最差**从
+0.72 K 收到 0.075 K —— 整条轨迹都对了，不是只把终点凑上）。
+
+**教训**：把"某一步的通量已经由另一个内核处理"写成常量 0 时，必须同时检查那条
+路径在这一支上是否真的被执行。这里的注释写的是"`snowwater` 负责降雨、蒸发、
+露、霜、升华"，而代码同一处的 `if` 正是"不调 `snowwater`"。

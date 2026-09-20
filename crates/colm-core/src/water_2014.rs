@@ -259,12 +259,28 @@ pub fn water_2014_snow_soil_step(
             input.snow.rainfall_kg_m2_s,
         )
     };
+    // 无雪层时上游走的是另一条支：`MOD_SoilSnowHydrology.F90:237` 的
+    // `gwat = pg_rain + sm - qseva`（`lb >= 1`）。所以**融化 `sm` 与液态蒸发
+    // `qseva` 都必须进土壤收支** —— 实测对齐算例 Fortran 的 `qinfl` 逐条等于
+    // `-fevpg`（首条 −9.313e-5 对 fevpg 9.313e-5），而原先把这两项给 0，
+    // `qinfl` 整段恒为 0，土壤因此偏湿（`wliq_soisno` 最差槽位差 2.2 kg/m²）。
+    //
+    // 雪层存在时 `meltf` 的 `sm` 恒为 0（只有 `lb == 1 && scv > 0` 才赋值），
+    // 所以把 `snowmelt_kg_m2_s` 无条件接过来是安全的。
+    let (snowmelt_kg_m2_s, ground_evaporation_kg_m2_s) = if snow_state.layer_count < 0 {
+        (0.0, 0.0)
+    } else {
+        (
+            input.soil.fluxes.snowmelt_kg_m2_s,
+            input.snow.evaporation_kg_m2_s,
+        )
+    };
     let soil = water_2014_soil_step(
         Water2014SoilInput {
             fluxes: Water2014SoilFluxes {
                 ground_rain_kg_m2_s,
-                snowmelt_kg_m2_s: 0.0,
-                ground_evaporation_kg_m2_s: 0.0,
+                snowmelt_kg_m2_s,
+                ground_evaporation_kg_m2_s,
                 transpiration_kg_m2_s: input.soil.fluxes.transpiration_kg_m2_s,
                 soil_dew_kg_m2_s: 0.0,
                 soil_frost_kg_m2_s: 0.0,

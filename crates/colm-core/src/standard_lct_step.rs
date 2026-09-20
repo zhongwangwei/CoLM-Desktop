@@ -544,6 +544,10 @@ pub fn standard_lct_snow_soil_step(
             soil: Water2014SoilInput {
                 time_step_seconds: input.energy.interception.time_step_seconds,
                 fluxes: crate::Water2014SoilFluxes {
+                    // 薄雪（无雪层）的融化 `sm`：上游 `WATER_2014` 在 `lb >= 1` 时
+                    // 走 `gwat = pg_rain + sm - qseva`（`MOD_SoilSnowHydrology.F90:237`）。
+                    // 有雪层时 `meltf` 的 `sm` 恒为 0，所以这里无条件接过来。
+                    snowmelt_kg_m2_s: energy.ground.snow_melt_rate_kg_m2_s,
                     transpiration_kg_m2_s: energy.leaf.transpiration_kg_m2_s,
                     ..input.soil_water.fluxes
                 },
