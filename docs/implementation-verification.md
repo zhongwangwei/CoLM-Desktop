@@ -1091,3 +1091,58 @@ patch 选择的产流差异、三个产流分支各自的常数重启来源、�
 `cargo test --workspace --lib --bins --exclude colm-cli` = 1188 通过 / 0 失败；
 `colm-cli --bin` = 215；GUI backend = 161；两个 workspace 的 `fmt --check` 与
 `clippy -D warnings` 均干净。
+
+## 地类常量表进入代码生成（2026 年，`MOD_Const_LC.F90`）
+
+`colm-core` 此前有两份**手抄**的地类常量：`radiation.rs` 里的 `IGBP_LEAF_OPTICS` /
+`USGS_LEAF_OPTICS`（逐类一行 `chil`/`rho`/`tau`），以及 `albedo.rs` 里的土壤颜色映射。
+前者是上游 `MOD_Const_LC.F90` 的同一张表，抄得没错，但没有任何东西拦得住两份漂开。
+现在这张表由 `cargo run -p xtask -- gen-landcover` 生成到
+`crates/colm-core/src/land_cover_generated.rs`（94 张表：IGBP 17 类 + USGS 24 类），
+由 `crates/colm-core/tests/drift_landcover.rs` 逐字节守住；手抄的那一份删掉了。
+
+### 生成器的三个上游坑
+
+1. **注释行不终止续行。** 每张表后面都跟着一段被注释掉的旧版本，形如
+   `!=(/ 17.0, 35.0, ... &`。Fortran 的规则是注释行既不参与也不终止续行，所以
+   「按 `&` 拼接物理行」会把注释里的旧表当成取值 —— 实测 `htop0_igbp` 的旧版本是
+   `1.0, 1.0, 1.0`，新版本是 `0.5, 0.5, 0.5`，接错一步就会让草地冠层高差一倍。
+   正确顺序：先按 `!` 截断注释，**整行只剩空白的跳过**，再判断是否以 `&` 结尾。
+2. **字面量不是合法 Rust。** `2.e-008`、`0.`、`d50` 里写成 `100` 的实数项，在
+   Fortran 里都合法。生成器转换之后**必须真的 `parse()` 一遍**：这条检查比"看起来对"
+   重要得多 —— 写错一个数，编译能过而取值悄悄变了。
+3. **列表后面还跟了一个乘数。** 八张植物水力表写成 `(/ ... /) *1`。照抄可以，但换成
+   别的乘数就**不能**默默折进表里：那会把「上游写了缩放」这件事从 diff 里抹掉。
+   生成器现在只接受 `*1`，其余取值直接报错。
+
+### 生成器自己的一个坑：产物必须 rustfmt 稳定
+
+`cargo fmt --all` 会重排入库文件，而 drift 测试是逐字节比较 —— 生成一次、格式化一次，
+drift 立刻打回（本轮实际踩到两次）。两处要处理：数组加 `#[rustfmt::skip]`（否则 94 张
+表会被重排成竖排，`git diff` 再也看不出上游改的是哪个数），以及文件末尾只留**一个**
+换行。修好之后 `gen-landcover` 的输出与 `cargo fmt` 的结果逐字节相同，再格式化是幂等的。
+
+### 顺带修正：上一轮装配层的根比例检查过严
+
+上一轮给 `colm-runtime` 的装配层加了「`root_fraction` 求和必须为 1」，理由是
+`eroot` 把 `soil_water_stress` 定义成 `sum(rootfr · resistance)`。**这条检查是错的**：
+上游 `ROOTFR_SCHEME != 1` 那一支的末层取 `0.5*(exp(-a·zi_nl) + exp(-b·zi_nl))`，
+而中间层的差分只折到 `zi_(nl-1)`，整个数组求和是 `1 - d_(nl-1) + d_nl` —— **小于 1**，
+缺口随类别而变（IGBP 第 1 类 0.31%、第 2 类 1.94%）。要求等于 1 会把一份合法的上游
+根系比例挡在门外。现在只守上限 `sum <= 1 + 1e-9`，因为会让叶温校验失败的是**超过 1**。
+
+`ROOTFR_SCHEME == 1`（Schenk & Jackson）那一支是逐层差分，求和恰为 1；两支的公式都在
+`colm_core::land_cover` 里，各自有测试钉住（含 IGBP 第 1 类硬编码的十个值）。
+一个凭直觉写下的断言也被实测推翻：`d50 = 15 cm` 且 `beta` 为负时，根系比例在**第 4 层**
+达到峰值，不是表层最多。
+
+### 待核对：地类下标的两套约定
+
+`leaf_optics_from_land_cover(scheme, land_class)` 要求 `land_class >= 1`（内部减一），
+而 `land_cover_soil_reflectance(scheme, land_class)` 要求 `land_class >= 0`。两者不一致。
+上游自己的访问方式是 `array(patchclass(ipatch) + 1)` —— `patchclass` 是 0 基的
+IGBP/USGS 类号，所以**正确的入参是 0 基类号**，1 基那个约定看起来是早期手抄留下的。
+现有测试（`radiation_tests.rs` 的 `leaf_optics_are_the_native_land_cover_constants`、
+`urban_radiation_tests.rs`、`spatial_pft.rs`）都按 1 基调用，改约定会同时动这些调用点，
+所以本轮**只记录不改**：要改必须先拿一个真实算例确认 `patchclass` 的取值来源，
+否则就是把一个通过测试的约定换成另一个同样没被独立验证的约定。

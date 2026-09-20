@@ -23,6 +23,8 @@ pub mod hydrology;
 pub mod interception;
 pub mod irrigation;
 pub mod lake;
+pub mod land_cover;
+pub mod land_cover_generated;
 pub mod leaf_temperature;
 pub mod linear;
 pub mod monin_obukhov;
@@ -146,6 +148,9 @@ pub use lake::{
     lake_thermal_conductivity, LakeColumn, LakeConductivity, LakeConductivityInput,
     LakeNewSnowInput, LakeNewSnowOutcome, LakeRoughness, LakeRoughnessInput, LakeSnowWaterFluxes,
     LakeSnowWaterInput, LakeSnowWaterOutcome, LakeSnowWaterSoil,
+};
+pub use land_cover::{
+    land_cover_classes, land_cover_tables, root_fraction, ClassConstants, RootFractionScheme,
 };
 pub use leaf_temperature::{
     leaf_temperature, LeafPlantHydraulicInput, LeafTemperatureInput, LeafTemperatureOptions,

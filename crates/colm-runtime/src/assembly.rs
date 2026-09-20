@@ -317,13 +317,16 @@ pub fn assemble_standard_lct_template(
         "root_fraction has {} entries, expected {soil_layers}",
         physics.root_fraction.len()
     );
-    // 上游 `Init_LC_Const` 的 `rootfr` 是逐层差分，必然求和为 1；而 `eroot` 把
-    // `soil_water_stress` 直接定义成 sum(rootfr * resistance)，所以一份没归一的
-    // 根系比例会让胁迫大于 1，被下一步的叶温校验拦下 —— 在这里报错能直接指出病因。
+    // `eroot` 把 `soil_water_stress` 直接定义成 sum(rootfr * resistance)，而每一步
+    // 都要求胁迫落在 [0, 1]；所以**求和不得超过 1**。这里只守上限，不要求等于 1：
+    // 上游 `ROOTFR_SCHEME==1` 那一支是逐层差分、求和恰为 1，但指数支的末层取
+    // `0.5*(exp(-a*zi_nl)+exp(-b*zi_nl))`，整个数组求和是 `1 - d_(nl-1) + d_nl`，
+    // 实测比 1 小 0.3%~2%（见 `colm_core::land_cover` 的测试）。要求等于 1 会把一份
+    // 合法的上游根系比例挡在门外。
     let root_total: f64 = physics.root_fraction.iter().sum();
     ensure!(
-        (root_total - 1.0).abs() <= 1.0e-6,
-        "root_fraction must sum to one, but it sums to {root_total}"
+        root_total <= 1.0 + 1.0e-9,
+        "root_fraction must not sum to more than one, but it sums to {root_total}"
     );
     ensure!(
         leaf_area_index + stem_area_index > 0.0,

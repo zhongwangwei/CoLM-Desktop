@@ -3,6 +3,7 @@
 //! 用法:
 //!   cargo run -p xtask -- gen-schema    `MOD_Namelist.F90` -> `colm-schema` 的字段表
 //!   cargo run -p xtask -- gen-histmap   history writers     -> `colm-hist` 的闸门表
+//!   cargo run -p xtask -- gen-landcover `MOD_Const_LC.F90`   -> `colm-core` 的地类常量表
 //!
 //! 两个产物都**入库**，各由自己的 `tests/drift.rs` 守住：重新生成必须逐字节
 //! 一致。入库而不是 build.rs 现生成，是为了让表的变化出现在 code review 的
@@ -11,6 +12,7 @@
 
 mod gui;
 mod hist;
+mod landcover;
 mod namelist;
 mod sidecar;
 mod usage;
@@ -26,10 +28,13 @@ fn main() -> Result<()> {
     match cmd.as_str() {
         "gen-schema" => gen_schema(),
         "gen-histmap" => gen_histmap(),
+        "gen-landcover" => gen_landcover(),
         "check-gui" => gui::check(&repo_root()?),
         "parameter-audit" => parameter_audit(),
         "stage-sidecar" => sidecar::stage(&repo_root()?),
-        _ => bail!("usage: cargo run -p xtask -- <gen-schema|gen-histmap|check-gui|parameter-audit|stage-sidecar>"),
+        _ => bail!(
+            "usage: cargo run -p xtask -- <gen-schema|gen-histmap|gen-landcover|check-gui|parameter-audit|stage-sidecar>"
+        ),
     }
 }
 
@@ -427,6 +432,23 @@ fn gen_schema() -> Result<()> {
     let dst = root.join("crates/colm-schema/src/generated.rs");
     std::fs::write(&dst, out)?;
     println!("wrote {} fields to {}", fields.len(), dst.display());
+    Ok(())
+}
+
+fn gen_landcover() -> Result<()> {
+    let root = repo_root()?;
+    let src = root.join("vendor/CoLM202X/main/MOD_Const_LC.F90");
+    let text =
+        std::fs::read_to_string(&src).with_context(|| format!("cannot read {}", src.display()))?;
+    let tables = landcover::tables(&text)?;
+    let out = landcover::render(&tables)?;
+    let dst = root.join("crates/colm-core/src/land_cover_generated.rs");
+    std::fs::write(&dst, out)?;
+    println!(
+        "wrote {} land-cover tables to {}",
+        tables.len(),
+        dst.display()
+    );
     Ok(())
 }
 

@@ -491,8 +491,9 @@ fn a_root_fraction_that_does_not_sum_to_one_is_refused() {
     let root = temp_dir("unnormalized-root-fraction");
     let fixture = SyntheticRestart::write(root.join("restart")).unwrap();
     let mut parameters = physics(1800.0);
-    // `eroot` 把胁迫定义成 sum(rootfr * resistance)，所以没归一的根系比例会让
+    // `eroot` 把胁迫定义成 sum(rootfr * resistance)，所以归一过头的根系比例会让
     // 胁迫大于 1；装配层要在这里指出病因，而不是等叶温校验报一句笼统的非法输入。
+    // （上限而不是等式：上游指数支的求和本来就小于 1。）
     parameters.root_fraction = vec![0.5; SOIL_LAYERS];
     let error = assemble_standard_lct_template(
         &RestartStateFiles {
@@ -504,5 +505,5 @@ fn a_root_fraction_that_does_not_sum_to_one_is_refused() {
     )
     .unwrap_err();
     let message = format!("{error:#}");
-    assert!(message.contains("sum to one"), "{message}");
+    assert!(message.contains("more than one"), "{message}");
 }

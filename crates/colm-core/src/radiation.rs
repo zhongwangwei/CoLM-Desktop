@@ -64,86 +64,50 @@ impl ColdStartGroundAlbedo {
 ///
 /// This is the `rho`/`tau` assignment in `MOD_Const_LC.F90`; it deliberately
 /// keeps classes one-based, as does the Fortran land-cover contract.
+///
+/// 取值来自 `land_cover_generated.rs`（由 `xtask gen-landcover` 从上游源码生成），
+/// 那里是**唯一的**一份地类常量表。此前这里还手抄了一遍同样的 `rho`/`tau`，
+/// 两份表逐值相同，但没有任何东西拦得住它们漂开。
+///
+/// **下标约定**：`land_class` 是 Fortran 的 1 基下标，即 `chil(land_class)`。
+/// 上游自己的访问方式是 `chil(patchclass(ipatch)+1)` —— patchclass 是 0 基的
+/// IGBP/USGS 类号。本函数与 `land_cover_soil_reflectance`（0 基）**约定不同**，
+/// 见 `docs/implementation-verification.md` 里那条待核对的记录。
 pub fn leaf_optics_from_land_cover(scheme: LandCoverScheme, land_class: i32) -> Result<LeafOptics> {
     let index = usize::try_from(land_class)
         .map_err(|_| anyhow::anyhow!("land class {land_class} is negative"))?
         .checked_sub(1)
         .ok_or_else(|| anyhow::anyhow!("land class must start at one"))?;
-    let table = match scheme {
-        LandCoverScheme::Igbp => &IGBP_LEAF_OPTICS[..],
-        LandCoverScheme::Usgs => &USGS_LEAF_OPTICS[..],
+    let table = crate::land_cover::land_cover_tables(scheme);
+    let optics = |column: fn(&crate::land_cover_generated::LandCoverTables) -> &'static [f64]| {
+        column(table).get(index).copied().ok_or_else(|| {
+            anyhow::anyhow!("land class {land_class} is outside the selected CoLM optical table")
+        })
     };
-    table.get(index).copied().ok_or_else(|| {
-        anyhow::anyhow!("land class {land_class} is outside the selected CoLM optical table")
+    Ok(LeafOptics {
+        chil: optics(|table| table.chil)?,
+        reflectance: [
+            [
+                optics(|table| table.rhol_vis)?,
+                optics(|table| table.rhos_vis)?,
+            ],
+            [
+                optics(|table| table.rhol_nir)?,
+                optics(|table| table.rhos_nir)?,
+            ],
+        ],
+        transmittance: [
+            [
+                optics(|table| table.taul_vis)?,
+                optics(|table| table.taus_vis)?,
+            ],
+            [
+                optics(|table| table.taul_nir)?,
+                optics(|table| table.taus_nir)?,
+            ],
+        ],
     })
 }
-
-#[allow(clippy::too_many_arguments)]
-const fn optics(
-    chil: f64,
-    rhol_vis: f64,
-    rhos_vis: f64,
-    rhol_nir: f64,
-    rhos_nir: f64,
-    taul_vis: f64,
-    taus_vis: f64,
-    taul_nir: f64,
-    taus_nir: f64,
-) -> LeafOptics {
-    LeafOptics {
-        chil,
-        reflectance: [[rhol_vis, rhos_vis], [rhol_nir, rhos_nir]],
-        transmittance: [[taul_vis, taus_vis], [taul_nir, taus_nir]],
-    }
-}
-
-// `main/MOD_Const_LC.F90`, listed one class per row to avoid transposition bugs.
-const IGBP_LEAF_OPTICS: [LeafOptics; 17] = [
-    optics(0.01, 0.07, 0.16, 0.35, 0.39, 0.05, 0.001, 0.10, 0.001),
-    optics(0.10, 0.10, 0.16, 0.45, 0.39, 0.05, 0.001, 0.25, 0.001),
-    optics(0.01, 0.07, 0.16, 0.35, 0.39, 0.05, 0.001, 0.10, 0.001),
-    optics(0.25, 0.10, 0.16, 0.45, 0.39, 0.05, 0.001, 0.25, 0.001),
-    optics(0.125, 0.07, 0.16, 0.40, 0.39, 0.05, 0.001, 0.15, 0.001),
-    optics(0.01, 0.105, 0.16, 0.45, 0.39, 0.05, 0.001, 0.25, 0.001),
-    optics(0.01, 0.105, 0.16, 0.45, 0.39, 0.05, 0.001, 0.25, 0.001),
-    optics(0.01, 0.105, 0.16, 0.58, 0.39, 0.05, 0.001, 0.25, 0.001),
-    optics(0.01, 0.105, 0.16, 0.58, 0.39, 0.05, 0.001, 0.25, 0.001),
-    optics(-0.3, 0.105, 0.36, 0.58, 0.58, 0.07, 0.22, 0.25, 0.38),
-    optics(0.10, 0.105, 0.16, 0.45, 0.39, 0.05, 0.001, 0.25, 0.001),
-    optics(-0.3, 0.105, 0.36, 0.58, 0.58, 0.07, 0.22, 0.25, 0.38),
-    optics(0.01, 0.105, 0.16, 0.45, 0.39, 0.05, 0.001, 0.25, 0.001),
-    optics(-0.3, 0.105, 0.36, 0.58, 0.58, 0.07, 0.22, 0.25, 0.38),
-    optics(0.01, 0.105, 0.16, 0.45, 0.39, 0.05, 0.001, 0.25, 0.001),
-    optics(0.01, 0.105, 0.16, 0.45, 0.39, 0.05, 0.001, 0.25, 0.001),
-    optics(0.01, 0.105, 0.16, 0.58, 0.39, 0.05, 0.001, 0.25, 0.001),
-];
-
-const USGS_LEAF_OPTICS: [LeafOptics; 24] = [
-    optics(-0.3, 0.105, 0.36, 0.58, 0.58, 0.07, 0.22, 0.25, 0.38),
-    optics(-0.3, 0.105, 0.36, 0.58, 0.58, 0.07, 0.22, 0.25, 0.38),
-    optics(-0.3, 0.105, 0.36, 0.58, 0.58, 0.07, 0.22, 0.25, 0.38),
-    optics(-0.3, 0.105, 0.36, 0.58, 0.58, 0.07, 0.22, 0.25, 0.38),
-    optics(-0.3, 0.105, 0.36, 0.58, 0.58, 0.07, 0.22, 0.25, 0.38),
-    optics(-0.3, 0.105, 0.36, 0.58, 0.58, 0.07, 0.22, 0.25, 0.38),
-    optics(-0.3, 0.105, 0.36, 0.58, 0.58, 0.07, 0.22, 0.25, 0.38),
-    optics(0.01, 0.10, 0.16, 0.45, 0.39, 0.07, 0.001, 0.25, 0.001),
-    optics(0.01, 0.10, 0.16, 0.45, 0.39, 0.07, 0.001, 0.25, 0.001),
-    optics(-0.3, 0.105, 0.36, 0.58, 0.58, 0.07, 0.22, 0.25, 0.38),
-    optics(0.25, 0.10, 0.16, 0.45, 0.39, 0.05, 0.001, 0.25, 0.001),
-    optics(0.01, 0.07, 0.16, 0.35, 0.39, 0.05, 0.001, 0.10, 0.001),
-    optics(0.10, 0.10, 0.16, 0.45, 0.39, 0.05, 0.001, 0.25, 0.001),
-    optics(0.01, 0.07, 0.16, 0.35, 0.39, 0.05, 0.001, 0.10, 0.001),
-    optics(0.125, 0.07, 0.16, 0.40, 0.39, 0.05, 0.001, 0.15, 0.001),
-    optics(-0.3, 0.105, 0.36, 0.58, 0.58, 0.07, 0.22, 0.25, 0.38),
-    optics(-0.3, 0.105, 0.36, 0.58, 0.58, 0.07, 0.22, 0.25, 0.38),
-    optics(0.10, 0.10, 0.16, 0.45, 0.39, 0.05, 0.001, 0.25, 0.001),
-    optics(0.01, 0.10, 0.16, 0.45, 0.39, 0.07, 0.001, 0.25, 0.001),
-    optics(-0.3, 0.105, 0.36, 0.58, 0.58, 0.07, 0.22, 0.25, 0.38),
-    optics(-0.3, 0.105, 0.36, 0.58, 0.58, 0.07, 0.22, 0.25, 0.38),
-    optics(-0.3, 0.105, 0.36, 0.58, 0.58, 0.07, 0.22, 0.25, 0.38),
-    optics(-0.3, 0.105, 0.36, 0.58, 0.58, 0.07, 0.22, 0.25, 0.38),
-    optics(-0.3, 0.105, 0.36, 0.58, 0.58, 0.07, 0.22, 0.25, 0.38),
-];
 
 /// Broadband arrays produced by CoLM's cold-start `albland` path.
 #[derive(Debug, Clone, PartialEq)]
