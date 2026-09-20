@@ -1544,3 +1544,23 @@ GUI 那条链不受影响：它不依赖 `colm-runtime`）。
   `CN-Cng_hist_2008-01.nc`，`time` 为 `[56802270, 568022330, 568022390]`
   ——与黄金文件头三个值逐位相同，且 `session.remaining() == 0`；
 - 一步的运行 + 三小时的调度 → 报 `still unwritten`。
+
+## history 会话改从算例 namelist 构造（2026 年）
+
+`read_point_runtime_config` 现在解析 `DEF_HIST_FREQ` 与 `DEF_HIST_groupby`
+（缺省分别与上游一致：`none` 与 `MONTH`），`PointRuntimeConfig::history_session(dir, stem)`
+按同一份配置开会话 —— 窗口、站点、步长都取自配置，调用方不必自己拼 `SimulationWindow`。
+拼错一个字段（例如把结束时刻写成时长）只会让记录数悄悄不对，而记录数是这一层唯一能
+对着黄金文件比的东西。
+
+两个频率字段的解析都走 `colm-hist` 的 `parse`：上游遇到不认识的取值只打一句 warning 然后
+**静默不写 history**，用户会拿到一个空目录而不知道原因；这里报错。
+
+顺带核对了模块门控：`colm-hist` 的 `schedule` **不在** `io` feature 之后（只有 `history`
+与 `obs` 是），所以调度与解析本身不需要 netcdf。
+
+### 证据
+
+两条运行时 history 测试现在都从 `read_point_runtime_config` 出来的配置开会话，并断言解析
+结果（`Hourly` / `Month`）。三小时窗口那条仍然产出 `CN-Cng_hist_2008-01.nc`，`time` 为
+`[56802270, 568022330, 568022390]`；短跑那条仍报 `still unwritten`。

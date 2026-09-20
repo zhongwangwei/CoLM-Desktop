@@ -35,6 +35,10 @@ pub struct PointRuntimeConfig {
     pub restart_frequency: RestartFrequency,
     /// `DEF_SSP`：未来 CO2 情景。它只影响 2022 年之后的年份。
     pub co2_scenario: Co2Scenario,
+    /// `DEF_HIST_FREQ`。缺省与上游一致是 `none`（不写 history）。
+    pub history_frequency: colm_hist::schedule::HistoryFrequency,
+    /// `DEF_HIST_groupby`。缺省与上游一致是 `MONTH`。
+    pub history_grouping: colm_hist::schedule::HistoryGrouping,
     pub greenwich: bool,
     pub longitude_degrees: f64,
     pub latitude_degrees: f64,
@@ -64,6 +68,54 @@ pub struct PointDownscalingTemplate<'a> {
     pub glacier: bool,
     pub terrain: DownscalingTerrain<'a>,
     pub config: ForcingDownscalingConfig,
+}
+
+impl PointRuntimeConfig {
+    /// 按本算例的窗口、频率与分组开一个 history 会话。
+    ///
+    /// 窗口、站点与步长都来自同一份配置，所以调用方不必自己拼 `SimulationWindow` ——
+    /// 拼错一个字段（例如把结束时刻写成时长）只会让记录数悄悄不对。
+    pub fn history_session(
+        &self,
+        directory: impl AsRef<Path>,
+        stem: impl Into<String>,
+    ) -> Result<crate::history::HistorySession> {
+        ensure!(
+            self.timestep_seconds.fract() == 0.0,
+            "the history schedule needs whole-second timesteps"
+        );
+        let timestep_seconds = i32::try_from(self.timestep_seconds as i64)
+            .context("the timestep does not fit the history schedule")?;
+        let field = |time: CalendarTime| -> Result<(i32, i32, i32)> {
+            Ok((
+                time.year,
+                i32::from(time.julian_day),
+                i32::try_from(time.seconds).context("seconds do not fit an i32")?,
+            ))
+        };
+        let (start_year, start_julian_day, start_seconds) = field(self.start)?;
+        let (end_year, end_julian_day, end_seconds) = field(self.end)?;
+        crate::history::HistorySession::new(
+            crate::history::point_dimensions(),
+            colm_hist::history::HistorySite {
+                latitude_degrees: self.latitude_degrees,
+                longitude_degrees: self.longitude_degrees,
+            },
+            colm_hist::schedule::SimulationWindow {
+                start_year,
+                start_julian_day,
+                start_seconds,
+                end_year,
+                end_julian_day,
+                end_seconds,
+                timestep_seconds,
+            },
+            self.history_frequency,
+            self.history_grouping,
+            directory,
+            stem,
+        )
+    }
 }
 
 /// 一次带 history 的运行的产出：走了多少步、写了哪些文件。
@@ -511,6 +563,8 @@ pub fn read_point_runtime_config(case_namelist: impl AsRef<Path>) -> Result<Poin
         },
         restart_frequency: restart_frequency(&case)?,
         co2_scenario: co2_scenario(&case)?,
+        history_frequency: history_frequency(&case)?,
+        history_grouping: history_grouping(&case)?,
         greenwich: required_bool(&case, "DEF_simulation_time%greenwich")?,
         longitude_degrees: required_real(&case, "SITE_lon_location")?,
         latitude_degrees: required_real(&case, "SITE_lat_location")?,
@@ -541,6 +595,27 @@ fn co2_scenario(document: &Document) -> Result<Co2Scenario> {
         None => Ok(Co2Scenario::Off),
         Some(Value::Str(value)) => Co2Scenario::parse(value),
         Some(_) => bail!("DEF_SSP must be a string"),
+    }
+}
+
+/// `DEF_HIST_FREQ` 缺省时与上游一致取 `none`。
+///
+/// 取值由 `colm-hist` 解析：上游遇到不认识的取值只打一句 warning 然后静默不写，
+/// 那会让用户拿到一个空目录而不知道原因；这里报错。
+fn history_frequency(document: &Document) -> Result<colm_hist::schedule::HistoryFrequency> {
+    match document.get("DEF_HIST_FREQ") {
+        None => Ok(colm_hist::schedule::HistoryFrequency::None),
+        Some(Value::Str(value)) => colm_hist::schedule::HistoryFrequency::parse(value),
+        Some(_) => bail!("DEF_HIST_FREQ must be a string"),
+    }
+}
+
+/// `DEF_HIST_groupby` 缺省时与上游一致取 `MONTH`。
+fn history_grouping(document: &Document) -> Result<colm_hist::schedule::HistoryGrouping> {
+    match document.get("DEF_HIST_groupby") {
+        None => Ok(colm_hist::schedule::HistoryGrouping::Month),
+        Some(Value::Str(value)) => colm_hist::schedule::HistoryGrouping::parse(value),
+        Some(_) => bail!("DEF_HIST_groupby must be a string"),
     }
 }
 
@@ -647,7 +722,7 @@ mod tests {
         std::fs::write(
             path,
             format!(
-                "&nl_colm\n DEF_forcing_namelist='{}'\n DEF_simulation_time%start_year=2008\n DEF_simulation_time%start_month=1\n DEF_simulation_time%start_day=1\n DEF_simulation_time%start_sec=0\n DEF_simulation_time%end_year=2008\n DEF_simulation_time%end_month=1\n DEF_simulation_time%end_day=1\n DEF_simulation_time%end_sec={end_sec}\n DEF_simulation_time%spinup_year=0\n DEF_simulation_time%spinup_month=1\n DEF_simulation_time%spinup_day=1\n DEF_simulation_time%spinup_sec=0\n DEF_simulation_time%spinup_repeat=0\n DEF_simulation_time%timestep=1800.\n DEF_simulation_time%greenwich=.false.\n DEF_LAI_MONTHLY=.true.\n DEF_WRST_FREQ='none'\n SITE_lon_location=113.0\n SITE_lat_location=23.0\n /\n",
+                "&nl_colm\n DEF_forcing_namelist='{}'\n DEF_simulation_time%start_year=2008\n DEF_simulation_time%start_month=1\n DEF_simulation_time%start_day=1\n DEF_simulation_time%start_sec=0\n DEF_simulation_time%end_year=2008\n DEF_simulation_time%end_month=1\n DEF_simulation_time%end_day=1\n DEF_simulation_time%end_sec={end_sec}\n DEF_simulation_time%spinup_year=0\n DEF_simulation_time%spinup_month=1\n DEF_simulation_time%spinup_day=1\n DEF_simulation_time%spinup_sec=0\n DEF_simulation_time%spinup_repeat=0\n DEF_simulation_time%timestep=1800.\n DEF_simulation_time%greenwich=.false.\n DEF_LAI_MONTHLY=.true.\n DEF_WRST_FREQ='none'\n DEF_HIST_FREQ='none'\n DEF_HIST_groupby='MONTH'\n SITE_lon_location=113.0\n SITE_lat_location=23.0\n /\n",
                 forcing.display()
             ),
         )
@@ -1012,6 +1087,37 @@ mod tests {
         assert!(runtime.next_step().unwrap().is_none());
     }
 
+    /// 配置里的窗口，供需要"比运行更长"的调度时改写。
+    fn window_of(config: &PointRuntimeConfig) -> colm_hist::schedule::SimulationWindow {
+        colm_hist::schedule::SimulationWindow {
+            start_year: config.start.year,
+            start_julian_day: i32::from(config.start.julian_day),
+            start_seconds: config.start.seconds as i32,
+            end_year: config.end.year,
+            end_julian_day: i32::from(config.end.julian_day),
+            end_seconds: config.end.seconds as i32,
+            timestep_seconds: config.timestep_seconds as i32,
+        }
+    }
+
+    /// 把算例的 history 频率/分组改掉 —— 默认是 `none`，不写 history。
+    fn with_history(case: &Path, frequency: &str, grouping: &str) {
+        let contents = std::fs::read_to_string(case).unwrap();
+        std::fs::write(
+            case,
+            contents
+                .replace(
+                    "DEF_HIST_FREQ='none'",
+                    &format!("DEF_HIST_FREQ='{frequency}'"),
+                )
+                .replace(
+                    "DEF_HIST_groupby='MONTH'",
+                    &format!("DEF_HIST_groupby='{grouping}'"),
+                ),
+        )
+        .unwrap();
+    }
+
     /// 带 history 的运行：一次真实的三小时窗口，产出按调度分组的一个文件。
     #[test]
     fn a_run_with_history_writes_the_scheduled_records() {
@@ -1022,31 +1128,21 @@ mod tests {
         let source_dir = format!("{}/", source.display());
         // 00:00 → 03:00，1800 s 一步：六步，HOURLY 下三条记录。
         write_case_window(&case, &forcing_namelist, &source_dir, "POINT", 3 * 3600);
+        with_history(&case, "hourly", "MONTH");
         let fixture = colm_init::fixtures::SyntheticRestart::write(root.join("restart")).unwrap();
         let template = assembled_template(&fixture);
-        let mut session = crate::history::HistorySession::new(
-            crate::history::point_dimensions(),
-            colm_hist::history::HistorySite {
-                latitude_degrees: 23.0,
-                longitude_degrees: 113.0,
-            },
-            colm_hist::schedule::SimulationWindow {
-                start_year: 2008,
-                start_julian_day: 1,
-                start_seconds: 0,
-                end_year: 2008,
-                end_julian_day: 1,
-                end_seconds: 3 * 3600,
-                timestep_seconds: 1800,
-            },
-            colm_hist::schedule::HistoryFrequency::Hourly,
-            colm_hist::schedule::HistoryGrouping::Month,
-            root.join("out"),
-            "CN-Cng",
-        )
-        .unwrap();
+        let config = read_point_runtime_config(&case).unwrap();
+        assert_eq!(
+            config.history_frequency,
+            colm_hist::schedule::HistoryFrequency::Hourly
+        );
+        assert_eq!(
+            config.history_grouping,
+            colm_hist::schedule::HistoryGrouping::Month
+        );
+        let mut session = config.history_session(root.join("out"), "CN-Cng").unwrap();
 
-        let mut runtime = PointRuntime::open(read_point_runtime_config(&case).unwrap()).unwrap();
+        let mut runtime = PointRuntime::open(config).unwrap();
         let mut state = template.state();
         let outcome = runtime
             .run_restart_standard_lct_with_history(&template, &mut state, &mut session, |_, _| {
@@ -1080,31 +1176,29 @@ mod tests {
         let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/Forcing");
         let source_dir = format!("{}/", source.display());
         write_case_window(&case, &forcing_namelist, &source_dir, "POINT", 1800);
+        with_history(&case, "hourly", "MONTH");
         let fixture = colm_init::fixtures::SyntheticRestart::write(root.join("restart")).unwrap();
         let template = assembled_template(&fixture);
-        // 调度按三小时开，运行只走一步。
+        let config = read_point_runtime_config(&case).unwrap();
+        // 算例只走一步，但调度按三小时开 —— 运行结束时有未写的记录，必须报错。
+        let window = colm_hist::schedule::SimulationWindow {
+            end_seconds: 3 * 3600,
+            ..window_of(&config)
+        };
         let mut session = crate::history::HistorySession::new(
             crate::history::point_dimensions(),
             colm_hist::history::HistorySite {
-                latitude_degrees: 23.0,
-                longitude_degrees: 113.0,
+                latitude_degrees: config.latitude_degrees,
+                longitude_degrees: config.longitude_degrees,
             },
-            colm_hist::schedule::SimulationWindow {
-                start_year: 2008,
-                start_julian_day: 1,
-                start_seconds: 0,
-                end_year: 2008,
-                end_julian_day: 1,
-                end_seconds: 3 * 3600,
-                timestep_seconds: 1800,
-            },
-            colm_hist::schedule::HistoryFrequency::Hourly,
-            colm_hist::schedule::HistoryGrouping::Month,
+            window,
+            config.history_frequency,
+            config.history_grouping,
             root.join("out"),
             "CN-Cng",
         )
         .unwrap();
-        let mut runtime = PointRuntime::open(read_point_runtime_config(&case).unwrap()).unwrap();
+        let mut runtime = PointRuntime::open(config).unwrap();
         let mut state = template.state();
         let error = runtime
             .run_restart_standard_lct_with_history(&template, &mut state, &mut session, |_, _| {
