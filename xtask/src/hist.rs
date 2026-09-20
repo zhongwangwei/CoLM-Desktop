@@ -21,6 +21,8 @@ pub struct Var {
     pub long_name: Option<String>,
     /// 写出调用里的单位字面量。同名多点的单位必须一致，否则报错。
     pub units: Option<String>,
+    /// 除 `time` 与 `patch` 之外的维度名，**按文件里的顺序**。
+    pub dims: Vec<String>,
     pub line: u32,
 }
 
@@ -196,6 +198,7 @@ pub fn extract_at_least(text: &str, minimum: usize) -> Result<Vec<Var>> {
             );
             let lits = raw_literals(&buf);
             let (long_name, units) = call_metadata(&lits);
+            let dims = call_dimensions(&lits);
             for name in literals(&buf) {
                 let macros: Vec<Cond> = mstack.iter().flatten().cloned().collect();
                 let candidate = Var {
@@ -204,6 +207,7 @@ pub fn extract_at_least(text: &str, minimum: usize) -> Result<Vec<Var>> {
                     runtime: rt.clone(),
                     long_name: long_name.clone(),
                     units: units.clone(),
+                    dims: dims.clone(),
                     line: (start + 1) as u32,
                 };
                 match out.entry(candidate.name.clone()) {
@@ -300,6 +304,17 @@ fn merge_sites(existing: &mut Var, candidate: Var) -> Result<()> {
             candidate.line
         );
     }
+    // 维度同理：同一个变量不可能既写 2d 又写 3d。
+    if existing.dims != candidate.dims {
+        bail!(
+            "{} is written with different dimensions ({:?} vs {:?}) at lines {} and {}",
+            existing.name,
+            existing.dims,
+            candidate.dims,
+            existing.line,
+            candidate.line
+        );
+    }
     // `long_name` 允许分歧：实测 `f_methane_surf_flux_lake` 与
     // `f_methane_surf_flux_rice` 各在两个分支里出现（面平均 vs 强度量），
     // 运行期只会有一支生效，而表的 schema 只能留一个。取先出现的那条，
@@ -388,6 +403,30 @@ fn call_metadata(lits: &[String]) -> (Option<String>, Option<String>) {
     )
 }
 
+/// 一次写出调用声明的层维度名，**按文件里的顺序**。
+///
+/// 变量名之后、`long_name`/`units` 之前的字面量就是维度名：`'soil'`、
+/// `'soilsnow'`、`'lake'`、`'band'`、`'rtyp'`、`'ens'`、`'snowp1'` 之类
+/// （`'patch'` 与 `'time'` 由写出例程自己加，不在调用里）。
+///
+/// **文件里的顺序是调用声明序的反序**：`MOD_HistSingle.F90` 的
+/// `single_write_4d` 声明 `(dim1name, dim2name, 'patch', 'time')`，而
+/// `ncio_write_serial` 按 Fortran 列主序倒着建维度表，于是黄金文件里
+/// `f_alb` 是 `(time, patch, rtyp, band)` —— 调用里写的是 `'band' … 'rtyp'`。
+/// 规则已用黄金文件 117 个变量逐一对过（含 4d 与 `soil`/`soilsnow`/`lake`），
+/// 全部一致；619 个变量里没有同名多点维度不一致的情形。
+fn call_dimensions(lits: &[String]) -> Vec<String> {
+    if lits.len() < 3 {
+        return Vec::new();
+    }
+    lits[..lits.len() - 2]
+        .iter()
+        .filter(|literal| !literal.starts_with("f_"))
+        .rev()
+        .cloned()
+        .collect()
+}
+
 /// 取 `'f_…'` 字面量的名字部分。
 ///
 /// 必须在 `strip_comment` 之后、且只在调用内部调用它：实测直接对全文
@@ -449,9 +488,15 @@ pub fn render(vars: &[Var]) -> String {
             Some(value) => format!("Some({value:?})"),
             None => "None".to_string(),
         };
+        let dims = v
+            .dims
+            .iter()
+            .map(|dim| format!("{dim:?}"))
+            .collect::<Vec<_>>()
+            .join(", ");
         let _ = writeln!(
             s,
-            "    Var {{ name: {:?}, macros: &[{macros}], runtime: {runtime}, long_name: {long_name}, units: {units}, line: {} }},",
+            "    Var {{ name: {:?}, macros: &[{macros}], runtime: {runtime}, long_name: {long_name}, units: {units}, dims: &[{dims}], line: {} }},",
             v.name, v.line
         );
     }
@@ -584,6 +629,28 @@ mod tests {
         assert_eq!(find("switched").units.as_deref(), Some("mol/m2/s"));
         assert_eq!(find("four").long_name.as_deref(), Some("averaged albedo"));
         assert_eq!(find("four").units.as_deref(), Some("-"));
+    }
+
+    /// 维度名取「变量名之后、long_name/units 之前」的非 `f_` 字面量，并按文件
+    /// 顺序反序；`mhist_on('f_…')` 的开关字面量不能被当成维度。
+    #[test]
+    fn write_call_dimensions_are_recorded_in_file_order() {
+        let vars = extract(&corpus(
+            "CALL write_history_variable_2d (a, b, file_hist, 'f_scalar', itime, sumarea, filter, 'x','W/m2')\n\
+             CALL write_history_variable_3d (c, d, file_hist, 'f_layered', itime_in_file, 'soil', 1, nl_soil, &\n\
+             sumarea, filter,'x','gC/m3')\n\
+             CALL write_history_variable_4d (e, f, file_hist, 'f_four', itime_in_file, 'soilsnow', 1, n, 'ens', 1, m, &\n\
+             sumarea, filter,'x','mol/m2/s')\n",
+        ))
+        .unwrap();
+        let dims = |name: &str| vars.iter().find(|v| v.name == name).unwrap().dims.clone();
+        assert!(dims("scalar").is_empty());
+        assert_eq!(dims("layered"), vec!["soil".to_string()]);
+        // 调用里声明的是 `'soilsnow', …, 'ens', …`，文件里是反序。
+        assert_eq!(
+            dims("four"),
+            vec!["ens".to_string(), "soilsnow".to_string()]
+        );
     }
 
     /// 没有描述字面量的调用不猜：两个字段留空（`corpus` 的基底就是这种形态）。

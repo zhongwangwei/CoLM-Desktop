@@ -154,7 +154,7 @@ fn the_second_window_agrees_with_the_first() {
     assert_eq!(sets[0], sets[1]);
 }
 
-/// 表里记的 `units` / `long_name` 必须与真实 history 文件的属性一致。
+/// 表里记的 `units` / `long_name` / `dims` 必须与真实 history 文件一致。
 ///
 /// 这是元数据解析（「调用里最后两个字面量」规则）唯一的经验证据：黄金文件里
 /// 与表相交的 117 个变量逐一对属性，对不上就是解析串了位（维度名、`mhist_on`
@@ -192,6 +192,22 @@ fn recorded_metadata_matches_the_golden_file() {
             entry.long_name,
             text_attribute(&variable, "long_name").as_deref(),
             "{name}: long_name"
+        );
+        // 表里记的是除 `time`/`patch` 之外的层维度，且已是文件顺序。
+        let actual_dims: Vec<String> = variable
+            .dimensions()
+            .iter()
+            .map(|dimension| dimension.name())
+            .filter(|dimension| dimension != "time" && dimension != "patch")
+            .collect();
+        assert_eq!(
+            entry
+                .dims
+                .iter()
+                .map(|dimension| dimension.to_string())
+                .collect::<Vec<_>>(),
+            actual_dims,
+            "{name}: dims"
         );
         checked += 1;
     }

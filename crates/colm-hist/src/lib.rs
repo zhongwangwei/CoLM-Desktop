@@ -71,6 +71,9 @@ pub struct Var {
     /// 写出调用里的单位字面量（NetCDF 的 `units`）。同名多点必须一致，
     /// 生成器不一致时会直接报错。
     pub units: Option<&'static str>,
+    /// 除 `time` 与 `patch` 之外的维度名，**按文件里的顺序**（生成器已按
+    /// `ncio_write_serial` 的反序还原）。空数组表示只有 `(time, patch)`。
+    pub dims: &'static [&'static str],
     /// `MOD_Hist.F90` 里的行号，便于回查。
     pub line: u32,
 }
