@@ -1330,3 +1330,29 @@ ENDDO
 
 这一片只到"读回"为止：把它接进装配层的雪模板（还需要给合成算例加一个带雪的变体）
 是下一步，所以它现在仍只有测试在消费 —— 与 round 6 的装配层当时的状态相同。
+
+## 雪列进入装配层：判据从 `fsno` 换成"列里有没有水"（2026 年）
+
+上一轮落的 `RuntimeSnowColumn::from_restart` 现在进了生产路径。装配层的无雪判据原本是
+`fsno == 0`，这一轮换成**先按上游的方式把雪列读出来，再看列里有没有水**：
+
+- `fsno == 0` 却带着雪水（或反之）是一份自相矛盾的重启，只看 `fsno` 会放过它；
+- 读雪列时顺带把 `snl` 的推导、界面递推、`fiold` 都走了一遍，与积雪分支共用同一条路径，
+  所以这条检查不是为无雪分支专门写的旁路。
+
+放在读土壤列**之前**也是刻意的：否则会先撞上 `soil_column` 那句"雪槽必须为空"，报错信息
+指向的是症状而不是原因。现在带雪重启会得到：
+
+```
+standard LCT soil assembly needs a snow-free patch, but the restart carries 3 snow layer(s)
+under a 0.1500 m column
+```
+
+合成算例新增 `SyntheticSnow` / `write_with_snow`：给一份自洽的雪列（层数与厚度用共享的
+`initialize_snow_layers`，水量按层厚分摊，并留 10% 液态水让固态分数不是 1）。装配层则要
+**自己**从水量把层数数回来 —— 这正是要在测试里钉住的那一步。`SyntheticRestart` 现在带上
+`Option<SyntheticSnowValues>`，把写进去的层数/厚度/水量逐槽暴露出来供下游核对。
+
+写它时踩到一个自己造的错：夹具里数层数时把窗口取成了 `snow_ice[..SNOW_LAYERS * PATCHES]`，
+于是把**两个 patch 的雪层一起数**，`0.15 m` 数出 `-6` 而不是 `-3`。层数是 per-patch 的量，
+现在按 patch 0 数并注明两个 patch 的雪列相同。

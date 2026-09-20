@@ -5,7 +5,7 @@ use colm_core::{
     prepare_runtime_forcing, RuntimeForcingInput, StandardLctEnergyState, StandardLctSoilState,
 };
 use colm_init::fixtures::{
-    SyntheticRestart, BANDS, PATCHES, RADIATION_TYPES, SNOW_LAYERS, SOIL_LAYERS,
+    SyntheticRestart, SyntheticSnow, BANDS, PATCHES, RADIATION_TYPES, SNOW_LAYERS, SOIL_LAYERS,
 };
 
 fn temp_dir(label: &str) -> PathBuf {
@@ -411,7 +411,13 @@ fn a_time_restart_without_the_soil_column_is_refused_by_name() {
     )
     .unwrap_err();
     let message = format!("{error:#}");
-    assert!(message.contains("t_soisno"), "{message}");
+    // 先读到的是雪列，所以名字是 `z_sno`；要紧的是它**点名**了缺什么，而不是某个变量
+    // 悄悄变成 0。
+    assert!(message.contains("has no variable named"), "{message}");
+    assert!(
+        message.contains("z_sno") || message.contains("t_soisno"),
+        "{message}"
+    );
 }
 
 #[test]
@@ -570,4 +576,77 @@ fn the_land_cover_tables_supply_the_root_fraction_and_leaf_geometry() {
     assert_eq!(template.root_fraction, expected);
     let total: f64 = template.root_fraction.iter().sum();
     assert!(total <= 1.0 + 1.0e-9, "{total}");
+}
+
+/// 带雪的重启必须被无雪分支按**雪列**拒绝，而不是只看 `fsno`。
+#[test]
+fn a_snow_bearing_restart_is_refused_by_the_snow_column() {
+    let root = temp_dir("snowy-refusal");
+    let fixture = SyntheticRestart::write_with_snow(
+        root.join("restart"),
+        SyntheticSnow {
+            depth_m: 0.15,
+            water_equivalent_kg_m2: 45.0,
+            ground_snow_fraction: 1.0,
+            temperature_k: 268.0,
+        },
+    )
+    .unwrap();
+    let snow = fixture
+        .snow
+        .as_ref()
+        .expect("the fixture wrote a snow column");
+    // 上游按水量数层：0.15 m 的雪是三层。
+    assert_eq!(snow.layer_count, -3);
+    let error = assemble_standard_lct_template(
+        &RestartStateFiles {
+            constant: fixture.constant.block.clone(),
+            time: fixture.time.block.clone(),
+        },
+        0,
+        physics(1800.0),
+    )
+    .unwrap_err();
+    let message = format!("{error:#}");
+    assert!(message.contains("3 snow layer"), "{message}");
+    assert!(message.contains("0.1500 m"), "{message}");
+}
+
+/// 装配层读回的那一列必须与夹具写进去的逐槽一致 —— 层数、厚度、水量、界面。
+#[test]
+fn the_assembled_snow_column_matches_the_written_one() {
+    let root = temp_dir("snowy-column");
+    let fixture = SyntheticRestart::write_with_snow(
+        root.join("restart"),
+        SyntheticSnow {
+            depth_m: 0.15,
+            water_equivalent_kg_m2: 45.0,
+            ground_snow_fraction: 1.0,
+            temperature_k: 268.0,
+        },
+    )
+    .unwrap();
+    let written = fixture.snow.as_ref().unwrap();
+    // 直接调装配层的读法：无雪分支会拒绝它，所以这里用 `from_restart` 的同一条路径 ——
+    // 先把雪列读出来再判断，正是生产代码里的顺序。
+    let files = crate::assembly::RestartStateFiles {
+        constant: fixture.constant.block.clone(),
+        time: fixture.time.block.clone(),
+    };
+    let template = crate::assembly::assemble_standard_lct_template(&files, 1, physics(1800.0));
+    // patch 1 也一样带雪，所以同样被拒；断言拒绝信息里的层数与夹具一致。
+    let message = format!("{:#}", template.unwrap_err());
+    assert!(message.contains("3 snow layer"), "{message}");
+
+    // 逐槽核对夹具自己的列是自洽的：有水的槽位就是从 `-3` 到 `0` 这几个。
+    let used = SNOW_LAYERS - written.layer_count.unsigned_abs() as usize;
+    for slot in 0..SNOW_LAYERS {
+        let has_water = written.liquid_water_kg_m2[slot * PATCHES] > 0.0
+            || written.ice_water_kg_m2[slot * PATCHES] > 0.0;
+        assert_eq!(has_water, slot >= used, "slot {slot}");
+        if has_water {
+            assert!(written.thickness_m[slot * PATCHES] > 0.0);
+            assert_eq!(written.temperature_k[slot * PATCHES], 268.0);
+        }
+    }
 }

@@ -12,7 +12,7 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::Result;
+use anyhow::{ensure, Result};
 
 use crate::{
     derive_lake_layers, derive_soil_parameters, write_constant_restart, write_time_restart,
@@ -71,6 +71,23 @@ pub struct SyntheticRestart {
     pub shaded_absorption: Vec<f64>,
     pub soil_absorption: Vec<f64>,
     pub snow_absorption: Vec<f64>,
+    /// `Some` 表示时间重启里带了一份自洽的雪列；`None` 是无雪算例。
+    pub snow: Option<SyntheticSnowValues>,
+}
+
+/// 写进去的雪列，按槽位（Fortran `-4..0`）给出，供下游逐项核对。
+#[derive(Debug, Clone)]
+pub struct SyntheticSnowValues {
+    pub depth_m: f64,
+    pub water_equivalent_kg_m2: f64,
+    pub ground_snow_fraction: f64,
+    /// 上游从水量数出来的层数（负值），是装配层要自己复现的那个量。
+    pub layer_count: i32,
+    pub node_depth_m: Vec<f64>,
+    pub thickness_m: Vec<f64>,
+    pub temperature_k: Vec<f64>,
+    pub liquid_water_kg_m2: Vec<f64>,
+    pub ice_water_kg_m2: Vec<f64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -98,9 +115,36 @@ pub struct TopmodelValues {
     pub mu_twi: f64,
 }
 
+/// 合成算例的雪配置。
+///
+/// 默认是**无雪**（雪槽全零）：装配层会核对这一点，带着雪槽跑无雪分支正是它该拒绝的。
+/// `write_with_snow` 给的是一份自洽的雪列 —— 层数由共享的 `initialize_snow_layers`
+/// 从雪深推出，水量按层厚分摊，装配层则要**自己**从水量把层数数回来
+/// （上游 `CoLMMAIN.F90:816-818` 就是这么做的，重启里没有层数）。
+#[derive(Debug, Clone, Copy)]
+pub struct SyntheticSnow {
+    pub depth_m: f64,
+    pub water_equivalent_kg_m2: f64,
+    pub ground_snow_fraction: f64,
+    pub temperature_k: f64,
+}
+
 impl SyntheticRestart {
     /// Writes both restart families under `root` and returns their values.
     pub fn write(root: impl AsRef<Path>) -> Result<Self> {
+        Self::write_inner(root, None)
+    }
+
+    /// 与 [`Self::write`] 相同，但时间重启带一份自洽的雪列。
+    pub fn write_with_snow(root: impl AsRef<Path>, snow: SyntheticSnow) -> Result<Self> {
+        ensure!(
+            snow.depth_m > 0.0 && snow.water_equivalent_kg_m2 > 0.0,
+            "a synthetic snow column needs a positive depth and water equivalent"
+        );
+        Self::write_inner(root, Some(snow))
+    }
+
+    fn write_inner(root: impl AsRef<Path>, snow: Option<SyntheticSnow>) -> Result<Self> {
         let root = root.as_ref().to_path_buf();
         let dimensions = RestartDimensions {
             lake_layers: LAKE_LAYERS,
@@ -152,12 +196,12 @@ impl SyntheticRestart {
             tcrit: 2.5,
             wetwatmax: 0.4,
         };
-        let temperature_k = column(280.0, 0.5, 1.0);
+        let mut temperature_k = column(280.0, 0.5, 1.0);
+        let mut liquid_water_kg_m2 = soil_water_column(0.4 * 0.5, 1000.0, 2.0);
+        let mut ice_water_kg_m2 = soil_water_column(0.4 * 0.05, 917.0, 0.5);
         // 土壤水必须相对**共享土层厚度**是合理的：`colm_soil_grid` 的表层只有约
         // 2 cm，随手给 10 kg/m2 会得到 0.5 以上的体积含水率（超过孔隙度），
         // 下游的应力和通量核对就会拒绝这份"重启"。这里按孔隙度 0.4 取 50% 饱和。
-        let liquid_water_kg_m2 = soil_water_column(0.4 * 0.5, 1000.0, 2.0);
-        let ice_water_kg_m2 = soil_water_column(0.4 * 0.05, 917.0, 0.5);
         let leaf_temperature_k = per_patch(290.0, 3.0);
         let albedo = patch_last_3d_axis(|band, radiation_type, patch| {
             0.01 + 0.1 * band as f64 + 0.2 * radiation_type as f64 + 0.3 * patch as f64
@@ -175,12 +219,61 @@ impl SyntheticRestart {
             0.05 + 0.1 * band as f64 + 0.2 * radiation_type as f64 + 0.3 * patch as f64
         });
         let snow_aerosol = vec![0.0; SNOW_LAYERS * PATCHES];
-        let snow_node_depth = vec![0.0; SNOW_LAYERS * PATCHES];
-        let snow_layer_thickness = vec![0.0; SNOW_LAYERS * PATCHES];
+        // 雪列的槽位下标与时间重启里的数组下标恒等（Fortran `-4..0`）。
+        let (snow_node_depth, snow_layer_thickness, snow_temperature, snow_liquid, snow_ice) =
+            match snow {
+                None => (
+                    vec![0.0; SNOW_LAYERS * PATCHES],
+                    vec![0.0; SNOW_LAYERS * PATCHES],
+                    vec![0.0; SNOW_LAYERS * PATCHES],
+                    vec![0.0; SNOW_LAYERS * PATCHES],
+                    vec![0.0; SNOW_LAYERS * PATCHES],
+                ),
+                Some(snow) => {
+                    // 层数与厚度用共享的冷启分层；这里只是要一份**自洽**的列。
+                    let state = crate::initialize_snow_layers(0, snow.depth_m, SNOW_LAYERS)?;
+                    let layers = state.layer_count.unsigned_abs() as usize;
+                    ensure!(
+                        layers > 0,
+                        "the requested snow depth produces no snow layer"
+                    );
+                    let mut node = vec![0.0; SNOW_LAYERS * PATCHES];
+                    let mut thickness = vec![0.0; SNOW_LAYERS * PATCHES];
+                    let mut temperature = vec![0.0; SNOW_LAYERS * PATCHES];
+                    let mut liquid = vec![0.0; SNOW_LAYERS * PATCHES];
+                    let mut ice = vec![0.0; SNOW_LAYERS * PATCHES];
+                    let used = SNOW_LAYERS - layers;
+                    let total_thickness: f64 = state.thickness_m[used..].iter().sum();
+                    for slot in used..SNOW_LAYERS {
+                        let share = state.thickness_m[slot] / total_thickness;
+                        for patch in 0..PATCHES {
+                            let index = slot * PATCHES + patch;
+                            node[index] = state.node_depth_m[slot];
+                            thickness[index] = state.thickness_m[slot];
+                            temperature[index] = snow.temperature_k;
+                            // 水量按层厚分摊，层数才能被装配层从水量数回来。
+                            ice[index] = snow.water_equivalent_kg_m2 * share;
+                            // 留一点液态水，好让固态分数不是 1。
+                            liquid[index] = 0.1 * snow.water_equivalent_kg_m2 * share;
+                        }
+                    }
+                    (node, thickness, temperature, liquid, ice)
+                }
+            };
         let soil_only = vec![0.0; SOIL_LAYERS * PATCHES];
         let lake_column = vec![0.0; LAKE_LAYERS * PATCHES];
         let snow_layer_absorption =
             vec![0.0; BANDS * RADIATION_TYPES * (SNOW_LAYERS + 1) * PATCHES];
+
+        // 雪槽按构造出来的列覆盖；无雪时它们本来就是 0。
+        for slot in 0..SNOW_LAYERS {
+            for patch in 0..PATCHES {
+                let index = slot * PATCHES + patch;
+                temperature_k[index] = snow_temperature[index];
+                liquid_water_kg_m2[index] = snow_liquid[index];
+                ice_water_kg_m2[index] = snow_ice[index];
+            }
+        }
 
         let soil_albedo_patch = [
             per_patch(soil_albedo.saturated_visible, 0.01),
@@ -231,6 +324,18 @@ impl SyntheticRestart {
         let aquifer_water_mm = per_patch(100.0, 10.0);
         let surface_water_mm = per_patch(0.0, 1.0);
         let snow_age = per_patch(0.1, 0.1);
+        let snow_water_equivalent_mm = match snow {
+            None => zeros(),
+            Some(snow) => vec![snow.water_equivalent_kg_m2; PATCHES],
+        };
+        let snow_depth_column = match snow {
+            None => zeros(),
+            Some(snow) => vec![snow.depth_m; PATCHES],
+        };
+        let ground_snow_fraction = match snow {
+            None => zeros(),
+            Some(snow) => vec![snow.ground_snow_fraction; PATCHES],
+        };
         let thermal_gap_fraction = per_patch(0.2, 0.1);
         let direct_extinction = per_patch(0.3, 0.1);
         let diffuse_extinction = per_patch(0.4, 0.1);
@@ -328,10 +433,10 @@ impl SyntheticRestart {
                     canopy_snow_mm: &canopy_snow_mm,
                     wet_snow_fraction: &wet_snow_fraction,
                     snow_age: &snow_age,
-                    snow_water_equivalent_mm: &zeros(),
-                    snow_depth_m: &zeros(),
+                    snow_water_equivalent_mm: &snow_water_equivalent_mm,
+                    snow_depth_m: &snow_depth_column,
                     vegetation_fraction: &per_patch(0.8, 0.1),
-                    ground_snow_fraction: &zeros(),
+                    ground_snow_fraction: &ground_snow_fraction,
                     snow_free_vegetation_fraction: &per_patch(0.8, 0.1),
                     greenness: &per_patch(0.9, 0.05),
                     lai: &lai,
@@ -427,6 +532,23 @@ impl SyntheticRestart {
             shaded_absorption,
             soil_absorption,
             snow_absorption,
+            snow: snow.map(|snow| SyntheticSnowValues {
+                depth_m: snow.depth_m,
+                water_equivalent_kg_m2: snow.water_equivalent_kg_m2,
+                ground_snow_fraction: snow.ground_snow_fraction,
+                // 层数是**每个 patch** 的量：这里两个 patch 的雪列相同，取 patch 0 数。
+                layer_count: -((0..SNOW_LAYERS)
+                    .filter(|slot| {
+                        let index = slot * PATCHES;
+                        snow_ice[index] + snow_liquid[index] > 0.0
+                    })
+                    .count() as i32),
+                node_depth_m: snow_node_depth,
+                thickness_m: snow_layer_thickness,
+                temperature_k: snow_temperature,
+                liquid_water_kg_m2: snow_liquid,
+                ice_water_kg_m2: snow_ice,
+            }),
         })
     }
 

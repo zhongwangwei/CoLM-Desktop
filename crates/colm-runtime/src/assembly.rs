@@ -29,10 +29,11 @@ use anyhow::{ensure, Context, Result};
 use colm_core::{
     root_fraction, soil_hydraulic_models, soil_thermal_inputs, CanopyWater, ClassConstants,
     ColdStartRadiation, HydraulicModel, LandCoverScheme, LeafBiochemistry, LeafTemperatureOptions,
-    LeafTemperatureState, ObservationHeightMode, PrecipitationPhaseScheme, RootFractionScheme,
-    SoilField, SoilHydraulicModel, SoilState, SoilThermalInput, StandardLctSoilInput,
-    StandardLctSoilState, StomataOptions, SurfaceLayerScheme, ThermalConductivityScheme,
-    TopmodelMethod, Water2014Runoff, Water2014SoilFluxes, Water2014SoilState,
+    LeafTemperatureState, ObservationHeightMode, PrecipitationPhaseScheme, RestartSnowSlots,
+    RootFractionScheme, RuntimeSnowColumn, SoilField, SoilHydraulicModel, SoilState,
+    SoilThermalInput, StandardLctSoilInput, StandardLctSoilState, StomataOptions,
+    SurfaceLayerScheme, ThermalConductivityScheme, TopmodelMethod, Water2014Runoff,
+    Water2014SoilFluxes, Water2014SoilState,
 };
 use colm_init::{
     colm_soil_grid, RestartFile, SOIL_FIELDS_COMMON, SOIL_FIELDS_THERMAL, SOIL_FIELDS_VAN_GENUCHTEN,
@@ -45,6 +46,9 @@ const RADIATION_TYPES: usize = 2;
 
 /// `MOD_Forcing.F90` 里 `forc_xy_po2m = forc_xy_pbot * 0.209`。
 const OXYGEN_VOLUME_FRACTION: f64 = 0.209;
+
+/// CoLM 编译期固定的雪层数（`maxsnl = -5`）。
+const SNOW_SLOTS: usize = 5;
 
 /// 装配一层模板需要的两份重启文件。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -181,6 +185,9 @@ pub struct StandardLctRestartTemplate {
     pub leaf_angle_distribution: f64,
     pub inverse_sqrt_leaf_dimension_m_neg_half: f64,
     pub biochemistry: LeafBiochemistry,
+    /// 重启里的雪列。无雪分支下 `layer_count == 0`；留着是因为上游每步都要按它
+    /// 判断走不走积雪路径，而雪分支的装配要直接用它。
+    pub snow: RuntimeSnowColumn,
     /// 非 PHS 分支下 `WATER_2014` 的每步根通量初值，全零且长度等于层数。
     root_flux_zeros: Vec<f64>,
 }
@@ -252,6 +259,17 @@ pub fn assemble_standard_lct_template(
         "the time restart's soilsnow dimension cannot hold {soil_layers} soil layers"
     );
     let snow_layers = snow_slots - soil_layers;
+    // 先按上游的方式把雪列读出来再判断：无雪分支的判据是**列里没有水**，而不是
+    // `fsno == 0`。放在读土壤列之前，报错信息才指向真正的原因；否则会先撞上
+    // `soil_column` 那句"雪槽必须为空"。
+    let snow = restart_snow_column(&time, patch, patch_type, snow_layers, soil_layers)?;
+    ensure!(
+        snow.layer_count == 0,
+        "standard LCT soil assembly needs a snow-free patch, but the restart carries {} snow \
+         layer(s) under a {:.4} m column",
+        snow.layer_count.unsigned_abs(),
+        snow.depth_m,
+    );
     let temperature_k = soil_column(&time, "t_soisno", patch, snow_layers, soil_layers)?;
     let liquid_water_kg_m2 = soil_column(&time, "wliq_soisno", patch, snow_layers, soil_layers)?;
     let ice_water_kg_m2 = soil_column(&time, "wice_soisno", patch, snow_layers, soil_layers)?;
@@ -315,10 +333,6 @@ pub fn assemble_standard_lct_template(
     let leaf_area_index = scalar(&time, "lai", patch)?;
     let stem_area_index = scalar(&time, "sai", patch)?;
     let snow_cover_fraction = scalar(&time, "fsno", patch)?;
-    ensure!(
-        snow_cover_fraction == 0.0,
-        "standard LCT soil assembly needs a snow-free patch, but fsno is {snow_cover_fraction}"
-    );
 
     ensure!(
         physics.timestep_seconds > 0.0,
@@ -408,6 +422,7 @@ pub fn assemble_standard_lct_template(
         leaf_angle_distribution,
         inverse_sqrt_leaf_dimension_m_neg_half,
         biochemistry,
+        snow,
         root_flux_zeros: vec![0.0; soil_layers],
         physics,
     })
@@ -761,6 +776,46 @@ fn soil_state(constant: &RestartFile, layers: usize, patches: usize) -> Result<S
         values[*field as usize] = buffer;
     }
     SoilState::from_fields(layers, patches, values)
+}
+
+/// 事故里那一列雪：槽位顺序就是重启数组顺序（Fortran `-4..0`）。
+fn restart_snow_column(
+    time: &RestartFile,
+    patch: usize,
+    patch_type: i64,
+    snow_layers: usize,
+    soil_layers: usize,
+) -> Result<RuntimeSnowColumn> {
+    // `z_sno`/`dz_sno` 只有雪槽；`t_soisno`/`wliq_soisno`/`wice_soisno` 是
+    // `soilsnow`，雪段在最前面（写出器的内存序就是雪在前）。
+    let span = |name: &str, layers: usize, snow_only: bool| -> Result<[f64; SNOW_SLOTS]> {
+        let column = time.layer_column(name, patch, layers)?;
+        let column = if snow_only {
+            &column[..]
+        } else {
+            &column[..snow_layers]
+        };
+        column.try_into().map_err(|_| {
+            anyhow::anyhow!(
+                "the restart's {name} snow span has {} slots, not {SNOW_SLOTS}",
+                column.len()
+            )
+        })
+    };
+    RuntimeSnowColumn::from_restart(
+        i32::try_from(patch_type).context("patchtype is outside the kernel's range")?,
+        RestartSnowSlots {
+            node_depth_m: &span("z_sno", snow_layers, true)?,
+            thickness_m: &span("dz_sno", snow_layers, true)?,
+            temperature_k: &span("t_soisno", snow_layers + soil_layers, false)?,
+            liquid_water_kg_m2: &span("wliq_soisno", snow_layers + soil_layers, false)?,
+            ice_water_kg_m2: &span("wice_soisno", snow_layers + soil_layers, false)?,
+            water_equivalent_kg_m2: scalar(time, "scv", patch)?,
+            depth_m: scalar(time, "snowdp", patch)?,
+            ground_snow_fraction: scalar(time, "fsno", patch)?,
+            age: scalar(time, "sag", patch)?,
+        },
+    )
 }
 
 fn soil_field(soil: &SoilState, field: SoilField, patch: usize, layers: usize) -> Vec<f64> {
