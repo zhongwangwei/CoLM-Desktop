@@ -9,6 +9,7 @@ pub mod assembly;
 
 use std::path::{Path, PathBuf};
 
+use crate::assembly::{StandardLctRestartTemplate, StandardLctStepBinding};
 use anyhow::{bail, ensure, Context, Result};
 use colm_core::{
     apply_downscaled_runtime_forcing, downscale_forcings, grid_forcing_from_runtime,
@@ -183,6 +184,41 @@ impl PointRuntime {
         })
     }
 
+    /// Runs an assembled restart template through the whole POINT forcing window.
+    ///
+    /// This is the layer that was missing: [`StandardLctRestartTemplate`] knows the static
+    /// state the restart files own, the POINT loop knows the clock and forcing, and the
+    /// per-step [`StandardLctStepBinding`] is what joins them.  The binding is rebuilt on
+    /// every pass on purpose: wind, seconds-of-day and longitude are passed straight
+    /// through by the kernels rather than recomputed, so a template that carried them
+    /// would be one step stale from the second pass on.
+    ///
+    /// `state` is the caller's, so the same state can be written back out as a restart.
+    /// It is committed together with the clock and forcing, which means a failed physics
+    /// or output callback leaves all three at the same retryable step.
+    pub fn run_restart_standard_lct<F>(
+        &mut self,
+        template: &StandardLctRestartTemplate,
+        state: &mut StandardLctSoilState,
+        mut on_step: F,
+    ) -> Result<usize>
+    where
+        F: FnMut(PointRuntimeStep, &StandardLctSoilOutput) -> Result<()>,
+    {
+        let greenwich_time = self.greenwich;
+        let longitude_radians = self.longitude_degrees.to_radians();
+        self.run_with_state(state, |step, next| {
+            let binding = StandardLctStepBinding {
+                forcing: step.forcing,
+                seconds_of_day: seconds_of_day(step.clock.forcing_time)?,
+                greenwich_time,
+                longitude_radians,
+            };
+            let output = standard_lct_soil_step(template.input(&binding), next)?;
+            on_step(step, &output)
+        })
+    }
+
     /// Runs POINT forcing through the shared CoLM terrain-downscaling kernel.
     ///
     /// This is deliberately a forcing hand-off, rather than another physics
@@ -306,6 +342,19 @@ impl PointRuntime {
             },
         )))
     }
+}
+
+/// `MOD_NetSolar` 的 `seconds_of_day` 是当日秒数，核心里要求落在 `[0, 86400)`。
+///
+/// 时钟给出的是同一个量，但类型更宽；这里显式收窄而不是 `as` 一下了事 ——
+/// 越界的当日秒数只会让 `local_noon` 静默走到另一个分支。
+fn seconds_of_day(time: CalendarTime) -> Result<i32> {
+    ensure!(
+        time.seconds < 86_400,
+        "the runtime clock produced {} seconds into a day; NetSolar requires [0, 86400)",
+        time.seconds
+    );
+    Ok(time.seconds as i32)
 }
 
 /// Reads the POINT runtime inputs from the same case and forcing namelists that
@@ -451,10 +500,21 @@ mod tests {
     }
 
     fn write_case(path: &Path, forcing: &Path, forcing_dir: &str, dataset: &str) {
+        write_case_window(path, forcing, forcing_dir, dataset, 1800);
+    }
+
+    /// 与 `write_case` 相同，但窗口末秒可调 —— 多步驱动测试要跑不止一个时间步。
+    fn write_case_window(
+        path: &Path,
+        forcing: &Path,
+        forcing_dir: &str,
+        dataset: &str,
+        end_sec: u32,
+    ) {
         std::fs::write(
             path,
             format!(
-                "&nl_colm\n DEF_forcing_namelist='{}'\n DEF_simulation_time%start_year=2008\n DEF_simulation_time%start_month=1\n DEF_simulation_time%start_day=1\n DEF_simulation_time%start_sec=0\n DEF_simulation_time%end_year=2008\n DEF_simulation_time%end_month=1\n DEF_simulation_time%end_day=1\n DEF_simulation_time%end_sec=1800\n DEF_simulation_time%spinup_year=0\n DEF_simulation_time%spinup_month=1\n DEF_simulation_time%spinup_day=1\n DEF_simulation_time%spinup_sec=0\n DEF_simulation_time%spinup_repeat=0\n DEF_simulation_time%timestep=1800.\n DEF_simulation_time%greenwich=.false.\n DEF_LAI_MONTHLY=.true.\n DEF_WRST_FREQ='none'\n SITE_lon_location=113.0\n SITE_lat_location=23.0\n /\n",
+                "&nl_colm\n DEF_forcing_namelist='{}'\n DEF_simulation_time%start_year=2008\n DEF_simulation_time%start_month=1\n DEF_simulation_time%start_day=1\n DEF_simulation_time%start_sec=0\n DEF_simulation_time%end_year=2008\n DEF_simulation_time%end_month=1\n DEF_simulation_time%end_day=1\n DEF_simulation_time%end_sec={end_sec}\n DEF_simulation_time%spinup_year=0\n DEF_simulation_time%spinup_month=1\n DEF_simulation_time%spinup_day=1\n DEF_simulation_time%spinup_sec=0\n DEF_simulation_time%spinup_repeat=0\n DEF_simulation_time%timestep=1800.\n DEF_simulation_time%greenwich=.false.\n DEF_LAI_MONTHLY=.true.\n DEF_WRST_FREQ='none'\n SITE_lon_location=113.0\n SITE_lat_location=23.0\n /\n",
                 forcing.display()
             ),
         )
@@ -615,6 +675,172 @@ mod tests {
         );
         assert_eq!(state, 1);
         assert!(runtime.next_step().unwrap().is_none());
+    }
+
+    /// 装配层测试用的那套物理参数；这里只需一份，避免第二个测试抄一遍三十多个字段。
+    fn land_physics() -> crate::assembly::LandPhysicsParameters {
+        crate::assembly::LandPhysicsParameters {
+            hydraulic_model: colm_core::HydraulicModel::VanGenuchten,
+            land_cover_scheme: colm_core::LandCoverScheme::Igbp,
+            root_fraction_scheme: colm_core::RootFractionScheme::SchenkJackson,
+            timestep_seconds: 1800.0,
+            precipitation_scheme: colm_core::PrecipitationPhaseScheme::AirTemperature,
+            surface_resistance_scheme: 1,
+            stress_scheme: 1,
+            surface_layer_scheme: colm_core::SurfaceLayerScheme::Standard,
+            thermal_conductivity_scheme: colm_core::ThermalConductivityScheme::Johansen,
+            observation_height_mode: colm_core::ObservationHeightMode::Absolute,
+            stomata: colm_core::StomataOptions {
+                use_medlyn: true,
+                use_wue: false,
+                medlyn_g1_override: None,
+                medlyn_g0_override: None,
+                wue_lambda_override: None,
+                ball_berry_slope_override: None,
+                ball_berry_intercept_override: None,
+            },
+            biochemistry: colm_core::LeafBiochemistry {
+                quantum_efficiency: 0.05,
+                maximum_carboxylation_25c_mol_m2_s: 60e-6,
+                c3c4: 1,
+                low_temperature_slope: 0.2,
+                low_temperature_half_k: 288.16,
+                high_temperature_slope: 0.3,
+                high_temperature_half_k: 313.16,
+                respiration_temperature_slope: 1.3,
+                respiration_temperature_half_k: 328.16,
+                optimum_temperature_k: 298.16,
+                medlyn_g1: 4.0,
+                medlyn_g0: 0.01,
+                ball_berry_slope: 9.0,
+                ball_berry_intercept: 0.01,
+                canopy_scaling: [1.0; 3],
+            },
+            wue_lambda: 2.0,
+            soil_ice_impedance: 6.0,
+            impermeable_porosity: 0.05,
+            ponding_limit_mm: 5.0,
+            minimum_soil_potential_mm: -1.0e8,
+            maximum_dew_mm: 0.1,
+            maximum_transpiration_mm_s: 0.001,
+            surface_temperature_factor: 0.5,
+            crank_nicolson_factor: 0.5,
+            soil_roughness_m: 0.01,
+            snow_roughness_m: 0.0024,
+            wind_height_m: 30.0,
+            temperature_height_m: 30.0,
+            humidity_height_m: 30.0,
+            boundary_layer_height_m: 1000.0,
+            ground_emissivity: 0.96,
+            vaporization_heat_j_kg: 2.5104e6,
+            oxygen_partial_pressure_pa: 21_200.0,
+            atmospheric_co2_pa: 40.0,
+            sprinkler_irrigation_kg_m2_s: 0.0,
+            runoff_scheme: crate::assembly::StandardLctRunoffScheme::Topmodel,
+            topmodel_decay_tuning: 0.1,
+        }
+    }
+
+    fn assembled_template(
+        fixture: &colm_init::fixtures::SyntheticRestart,
+    ) -> crate::assembly::StandardLctRestartTemplate {
+        crate::assembly::assemble_standard_lct_template(
+            &crate::assembly::RestartStateFiles {
+                constant: fixture.constant.block.clone(),
+                time: fixture.time.block.clone(),
+            },
+            1,
+            land_physics(),
+        )
+        .unwrap()
+    }
+
+    /// 装配好的模板 + 真实 POINT 强迫 + 三步窗口：这是整条链第一次真的跑起来。
+    ///
+    /// 用真实强迫而不是合成常量场，是为了让「每步的绑定真的刷新了」这句话有内容：
+    /// 合成常量强迫下秒偏移与气温都不变，装配层漏刷也看不出来。
+    #[test]
+    fn an_assembled_restart_template_runs_several_point_steps() {
+        let root = directory("restart-driver");
+        let case = root.join("case.nml");
+        let forcing_namelist = root.join("forcing.nml");
+        let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/Forcing");
+        let source_dir = format!("{}/", source.display());
+        // 00:00 起、1800 s 一步、走到 01:30，即三步。
+        write_case_window(&case, &forcing_namelist, &source_dir, "POINT", 5400);
+
+        let fixture = colm_init::fixtures::SyntheticRestart::write(root.join("restart")).unwrap();
+        let template = assembled_template(&fixture);
+        let mut runtime = PointRuntime::open(read_point_runtime_config(&case).unwrap()).unwrap();
+        let mut state = template.state();
+        let initial = state.temperature_k.clone();
+        let mut observed = Vec::new();
+        let steps = runtime
+            .run_restart_standard_lct(&template, &mut state, |step, output| {
+                // 从 output 取，而不是从 state：state 正被这次调用可变借用。
+                observed.push((
+                    step.clock.index,
+                    step.clock.forcing_time.seconds,
+                    step.forcing.air_temperature_k,
+                    output.water.total_runoff_mm_s,
+                    output.energy.ground.temperature_k[0],
+                ));
+                Ok(())
+            })
+            .unwrap();
+
+        assert_eq!(steps, 3, "the 01:30 window is three half-hour steps");
+        assert_eq!(
+            observed.iter().map(|entry| entry.1).collect::<Vec<_>>(),
+            vec![0, 1800, 3600],
+            "the per-step binding must refresh seconds-of-day"
+        );
+        assert_eq!(
+            observed.iter().map(|entry| entry.0).collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
+        // 真实强迫的气温逐步变化，绑定的 forcing 也就必须跟着换。
+        assert!(
+            observed.iter().any(|entry| entry.2 != observed[0].2),
+            "the forcing never changed across the window"
+        );
+        assert!(observed
+            .iter()
+            .all(|entry| entry.3.is_finite() && entry.3 >= 0.0));
+        // 三十分钟确实推动了土壤柱，且没有跑飞。
+        assert!(
+            state
+                .temperature_k
+                .iter()
+                .zip(&initial)
+                .all(|(now, before)| now.is_finite() && (now - before).abs() > 0.0),
+            "the soil column did not move"
+        );
+        assert!(runtime.next_step().unwrap().is_none());
+    }
+
+    /// 输出回调失败时，状态与时钟必须一起回滚 —— 否则重试会从一个已经推进的柱子里开始。
+    #[test]
+    fn a_failed_output_callback_rolls_the_restart_state_back() {
+        let root = directory("restart-rollback");
+        let case = root.join("case.nml");
+        let forcing_namelist = root.join("forcing.nml");
+        let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/Forcing");
+        let source_dir = format!("{}/", source.display());
+        write_case_window(&case, &forcing_namelist, &source_dir, "POINT", 5400);
+        let fixture = colm_init::fixtures::SyntheticRestart::write(root.join("restart")).unwrap();
+        let template = assembled_template(&fixture);
+        let mut runtime = PointRuntime::open(read_point_runtime_config(&case).unwrap()).unwrap();
+        let mut state = template.state();
+        let before = state.temperature_k.clone();
+        assert!(runtime
+            .run_restart_standard_lct(&template, &mut state, |_, _| bail!("history failed"))
+            .is_err());
+        assert_eq!(
+            state.temperature_k, before,
+            "a failed step must not advance the soil column"
+        );
+        assert_eq!(runtime.next_step().unwrap().unwrap().clock.index, 1);
     }
 
     #[test]

@@ -1152,3 +1152,32 @@ drift 立刻打回（本轮实际踩到两次）。两处要处理：数组加 `
 `colm-runtime` 的装配层现在是**唯一的**真实调用者，它从常数重启读 `patchclass` 后
 显式 `+1`，并把「地类表算出的 patchtype」与「重启里写的 patchtype」对拍 ——
 对不上就报错，因为那意味着这份重启与编译进来的地类表不是同一套。
+
+## POINT 循环真的驱动了装配出来的模板（2026 年）
+
+上一轮落的装配层此前只被自己的测试消费。现在 `PointRuntime::run_restart_standard_lct`
+把它接进钟与强迫场：一个 `StandardLctSoilState` 走完整个强迫窗口，每步重建
+`StandardLctStepBinding`（forcing、`seconds_of_day`、`greenwich`、经度）。
+
+**每步重建是刻意的，不是保守。** 风、当日秒数与经度在内核里是**透传**字段
+（`prepare_energy` 与 `net_solar` 的 `..input` 更新不碰它们），把模板当成静态量交给
+循环，第二步起就会拿第一步的值。`seconds_of_day` 还从 `u32` 显式收窄进 `[0, 86400)`：
+`MOD_NetSolar` 只在等于 43200 时走正午分支，越界的当日秒数会静默走到另一支。
+
+状态由调用方持有而非函数内部创建 —— 跑完之后同一份状态要能写回 restart；
+它与钟、强迫场在同一笔事务里提交，所以输出回调失败时三者一起回滚。
+
+### 证据
+
+`cargo test -p colm-runtime --lib`：26 通过。其中两条进的是**入库的真实强迫场**
+（`examples/Forcing/CN-Cng_...nc`，35089 条记录）而不是合成常量场：
+
+- `an_assembled_restart_template_runs_several_point_steps` —— 00:00→01:30 三步，
+  断言 `seconds_of_day` 依次为 `0, 1800, 3600`、`istep` 为 `1, 2, 3`、气温在窗口内
+  确实变化过、三层土壤温度**每一层都动了**且有限、runoff 非负有限，最后时钟耗尽。
+- `a_failed_output_callback_rolls_the_restart_state_back` —— 回调报错后土壤柱与第一步
+  逐值相同，且 `next_step()` 仍停在第 1 步。
+
+合成常量强迫下这两条都证明不了什么（气温与秒偏移都不变，漏刷看不出来），所以用的是
+真实文件。这不改变"第三阶段仍是 Fortran `colm.x`"这一事实：`colm-runtime` 至今没有
+可执行文件，`--preprocessors` 也只覆盖前两段。

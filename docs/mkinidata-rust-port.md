@@ -175,26 +175,34 @@ them. Checked against the current tree:
   regular-soil chain. The ported active-snow chain
   (`standard_lct_snow_soil_step`) and the PFT/PC/urban/BGC branches have no runtime
   driver at all.
-- `PointRuntime` has no consumer outside its own tests, and no Rust `colm`
-  executable exists: `xtask`'s `stage-sidecar` builds `colm-cli`, `mksrfdata-rs` and
-  `mkinidata-rs` only, so the third stage is still the Fortran `colm.x`.
+- `PointRuntime` has no consumer outside this crate, and no Rust `colm` executable
+  exists: `xtask`'s `stage-sidecar` builds `colm-cli`, `mksrfdata-rs` and `mkinidata-rs`
+  only, so the third stage is still the Fortran `colm.x`. Inside the crate the loop is now
+  driven: `PointRuntime::run_restart_standard_lct` takes an assembled template and carries
+  one state through the whole forcing window, rebuilding the per-step binding (forcing,
+  seconds-of-day, greenwich flag, longitude) each pass because the kernels pass those
+  through rather than recomputing them. Its test runs three real half-hour steps of the
+  shipped CN-Cng forcing and checks that the seconds-of-day advance, the forcing changes
+  and every soil layer moves, plus that a failing output callback rolls the state back
+  with the clock.
 - The middle layer was the assembly from written restart/surface state into the
   `StandardLct*Input` templates. `colm_init::RestartFile` reads both written restart
   families back — every variable with its on-disk axis order, verified by writing the
   full synthetic fixtures (time and constant) and comparing the reader against each
   file variable by variable.
-- The middle layer now exists for one branch. `colm_runtime::assembly` assembles a
-  written constant/time restart pair into a `StandardLctSoilInput` plus
-  `StandardLctSoilState` for the no-snow, non-split, non-urban, non-lake regular-soil
-  LCT branch — the one `standard_lct_soil_step` supports. Its sources follow upstream's
-  own split: time invariants from the constant restart
-  (`READ_TimeInvariants`), evolving and vegetation state from the time restart, and the
-  physical parameter tables no restart carries (PFT biochemistry, schemes, roughness,
-  observation height, `rootfr`) from an explicit `LandPhysicsParameters` with no
-  defaults. `colm-runtime` now has a cross-crate test that assembles from files and runs
-  one real `standard_lct_soil_step` from the resulting state.
-  Still missing: a driver for every other branch, the wiring of that template into
-  `PointRuntime`'s loop and a Rust `colm` executable.
+- The middle layer now exists and is driven for one branch. `colm_runtime::assembly`
+  assembles a written constant/time restart pair into a `StandardLctSoilInput` plus
+  `StandardLctSoilState` for the no-snow, non-split, non-urban, non-lake regular-soil LCT
+  branch — the one `standard_lct_soil_step` supports. Its sources follow upstream's own
+  split: time invariants from the constant restart (`READ_TimeInvariants`), evolving and
+  vegetation state from the time restart, the land-class constants (`rootfr`, leaf angle,
+  leaf dimension) from the generated `MOD_Const_LC.F90` tables, and only the parameter
+  tables no source in this repo carries (PFT biochemistry, stomata, roughness, observation
+  height) from an explicit `LandPhysicsParameters` with no defaults.
+  `PointRuntime::run_restart_standard_lct` then drives it through the whole forcing window.
+  Still missing: a driver for every other branch, the PFT parameter tables the template
+  still takes from its caller (`LeafBiochemistry` has never been constructed outside a
+  test), and the executable that would make this a third stage.
 
 Cutover (`colm-cli run` selecting a Rust `colm`) depends on those; until they exist the
 Fortran binary stays the verified runtime, and `--preprocessors` continues to cover only
