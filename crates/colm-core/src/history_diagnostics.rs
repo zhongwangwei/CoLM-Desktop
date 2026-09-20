@@ -73,6 +73,16 @@ pub struct HistoryDiagnostics {
     pub momentum_similarity: f64,
     pub heat_similarity: f64,
     pub moisture_similarity: f64,
+    /// `r_ustar2`：第二次 `moninobuk` 调用给出的摩擦速度
+    /// （与 `friction_velocity_m_s` 那条由 `tau/rho` 反算的**不是**同一个量，
+    /// 上游分别写 `f_ustar` 与 `f_ustar2`）。
+    pub similarity_friction_velocity_m_s: f64,
+    /// `r_fm10m`：同一次调用的动量廓线在 10 m 处的积分。上游写 `f_fm10m`。
+    pub momentum_at_10m: f64,
+    /// `r_us10m`/`r_vs10m`：`us/um * r_ustar2/vonkar * r_fm10m`
+    /// （`MOD_Vars_1DAccFluxes.F90:2789-2790`）。上游写 `f_us10m`/`f_vs10m`。
+    pub wind_10m_eastward_m_s: f64,
+    pub wind_10m_northward_m_s: f64,
 }
 
 /// 移植 `MOD_Vars_1DAccFluxes:accumulate_fluxes` 里 `r_*` 那一段。
@@ -189,8 +199,16 @@ pub fn history_diagnostics(input: HistoryDiagnosticsInput) -> Result<HistoryDiag
         / (VON_KARMAN / similarity.heat * stability_adjusted_wind.powi(2)))
     .min(5.0);
 
+    // 10 m 风：两次都用**同一次** MO 调用的 `r_ustar2` 与 `r_fm10m`，
+    // 分母是喂给那次调用的 `um`（稳定化之后的），不是观测风速本身。
+    let wind_10m_scale = similarity.friction_velocity_m_s / VON_KARMAN * similarity.momentum_at_10m
+        / stability_adjusted_wind;
     Ok(HistoryDiagnostics {
         friction_velocity_m_s: friction_velocity,
+        similarity_friction_velocity_m_s: similarity.friction_velocity_m_s,
+        momentum_at_10m: similarity.momentum_at_10m,
+        wind_10m_eastward_m_s: input.wind_speed_eastward_m_s * wind_10m_scale,
+        wind_10m_northward_m_s: input.wind_speed_northward_m_s * wind_10m_scale,
         temperature_scale_k: temperature_scale,
         humidity_scale,
         zol,

@@ -115,6 +115,20 @@ pub const LCT_FLUX_VARIABLES: [&str; 6] = ["qinfl", "rnof", "rsub", "rsur", "qch
 /// 要钉住的东西。
 pub const LCT_WATER_STORAGE_VARIABLES: [&str; 4] = ["wa_inst", "wdsrf_inst", "wat_inst", "wat"];
 
+/// 本层能填的**10 m 诊断**，四项。
+///
+/// 它们不是另一支 routine：`MOD_Vars_1DAccFluxes.F90:2733-2790` 那一段在
+/// **同一次** `moninobuk` 调用上取 `r_ustar2`/`r_fm10m`，再算
+/// `r_us10m = us/um * r_ustar2/vonkar * r_fm10m`（`:2789-2790`）。
+/// 本仓库的 [`colm_core::history_diagnostics`] 早就在做那次调用
+/// （`MoninObukhovState` 本来就带 `friction_velocity_m_s` 与 `momentum_at_10m`），
+/// 缺的只是把它们带出来。
+///
+/// **注意 `ustar2` 与 `ustar` 不是同一个量**：前者来自这次 MO 调用，
+/// 后者由 `tau/rho` 反算（`MOD_Vars_1DAccFluxes.F90:2742`），上游分别写
+/// `f_ustar` 与 `f_ustar2`。
+pub const LCT_SIMILARITY_10M_VARIABLES: [&str; 4] = ["us10m", "vs10m", "fm10m", "ustar2"];
+
 /// 本层能填的**土壤表面阻力**，一项。
 ///
 /// 上游 `rss` 由 `MOD_SoilSurfaceResistance` 按 `DEF_RSS_SCHEME` 分档算出，
@@ -303,6 +317,7 @@ pub fn declare_lct_variables(buffer: &mut HistoryBuffers) -> Result<()> {
     names.extend_from_slice(&LCT_WATER_STORAGE_VARIABLES);
     names.extend_from_slice(&LCT_CANOPY_WATER_VARIABLES);
     names.extend_from_slice(&LCT_SOIL_RESISTANCE_VARIABLES);
+    names.extend_from_slice(&LCT_SIMILARITY_10M_VARIABLES);
     names.extend_from_slice(&DECLARED_ONLY);
     buffer.declare(&names)
 }
@@ -565,6 +580,11 @@ pub fn set_lct_surface_diagnostics(
         ("fm", recomputed.momentum_similarity),
         ("fh", recomputed.heat_similarity),
         ("fq", recomputed.moisture_similarity),
+        // 10 m 四项来自**同一次** MO 调用，见 `LCT_SIMILARITY_10M_VARIABLES`。
+        ("us10m", recomputed.wind_10m_eastward_m_s),
+        ("vs10m", recomputed.wind_10m_northward_m_s),
+        ("fm10m", recomputed.momentum_at_10m),
+        ("ustar2", recomputed.similarity_friction_velocity_m_s),
     ] {
         ensure!(
             value.is_finite(),

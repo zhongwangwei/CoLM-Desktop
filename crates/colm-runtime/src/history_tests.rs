@@ -275,6 +275,7 @@ fn the_bridge_writes_the_state_variables_it_declares() {
         .chain(LCT_WATER_STORAGE_VARIABLES.iter())
         .chain(LCT_CANOPY_WATER_VARIABLES.iter())
         .chain(LCT_SOIL_RESISTANCE_VARIABLES.iter())
+        .chain(LCT_SIMILARITY_10M_VARIABLES.iter())
         .chain(DECLARED_ONLY.iter())
     {
         assert!(
@@ -494,6 +495,7 @@ fn the_written_schema_matches_the_golden_file_for_the_shared_variables() {
         .chain(LCT_WATER_STORAGE_VARIABLES.iter())
         .chain(LCT_CANOPY_WATER_VARIABLES.iter())
         .chain(LCT_SOIL_RESISTANCE_VARIABLES.iter())
+        .chain(LCT_SIMILARITY_10M_VARIABLES.iter())
         .chain(DECLARED_ONLY.iter())
     {
         let file_name = format!("f_{name}");
