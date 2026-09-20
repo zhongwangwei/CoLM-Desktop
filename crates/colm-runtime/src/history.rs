@@ -94,6 +94,37 @@ pub const LCT_SURFACE_VARIABLES: [&str; 13] = [
 /// 它不是默认产出量。
 pub const LCT_FLUX_VARIABLES: [&str; 6] = ["qinfl", "rnof", "rsub", "rsur", "qcharge", "frcsat"];
 
+/// 本层能填的**冠层光合/气孔链**量，十一项。
+///
+/// 这十一项此前一直挂在 [`UNFILLED`] 的"需要冠层分层输出"名下，其实内核早就算好了：
+/// `LeafTemperatureOutput` 的 `sunlit_/shaded_assimilation_mol_m2_s`、
+/// `sunlit_/shaded_transpiration_kg_m2_s`、`sunlit_/shaded_stomatal_conductance_mol_m2_s`
+/// 与上游 `LeafTemperature` 的 `assimsun_out`/`etrsun_out`/`gssun_out` 是同一个出口，
+/// `assim`/`respc` 是它们的冠层和（上游 `MOD_LeafTemperature.F90:1048-1049`
+/// `assim = assimsun + assimsha`、`respc = respcsun + respcsha`）。
+///
+/// **单位是 mol m-2 s-1。** 上游声明处把 `assimsun` 写成 `[umol co2 /m**2/ s]`
+/// （`MOD_LeafTemperature.F90:274` 一带），实测黄金值在 1e-9~1e-7 量级 —— 那条注释是错的，
+/// 照它乘 1e6 会得到一份偏 6 个数量级的文件。
+///
+/// `rstfacsun`/`rstfacsha` 在 LCT 分支里是**同一个** `MOD_Eroot` 的 `rstfac`
+/// （`MOD_Thermal.F90:674-675` 两行同源），所以 LCT 下必然相等；PFT/PC 分支才逐 PFT
+/// 分开（`:1113-1114`）。`rootr` 是 `eroot` 的分层根阻力权重（各层之和为 1），
+/// 维度是 `(time, patch, soil)`。
+pub const LCT_STOMATAL_VARIABLES: [&str; 11] = [
+    "assim",
+    "assimsun",
+    "assimsha",
+    "respc",
+    "etrsun",
+    "etrsha",
+    "gssun",
+    "gssha",
+    "rstfacsun",
+    "rstfacsha",
+    "rootr",
+];
+
 /// 声明了但**按上游的 `WATER_2014` 不该有值**的量。
 ///
 /// `frcsat` 只在 `WATER_VSF` 里由 `Runoff_*` 算出（`MOD_SoilSnowHydrology.F90:135`），
@@ -110,10 +141,11 @@ pub const NOT_IN_GOLDEN: [&str; 1] = ["qcharge"];
 /// 黄金算例里有、但本层还填不出来的量（按用途分组，便于下一步挑）。
 ///
 /// 这份清单不参与写出，只是把"缺口"写死在代码里：改它就得同时改注释。
-pub const UNFILLED: [&str; 4] = [
+pub const UNFILLED: [&str; 5] = [
     "`rss`：方案 4 下上游写的是电导标志而不是阻力，条件映射待核对",
-    "分层植被量（laisun/laisha/ssun/ssha/…）：需要冠层分层输出",
-    "派生土壤量（h2osoi/…）：需要先核对上游对每个量的定义",
+    "`laisun`/`laisha`/`ssun`/`ssha`：需要冠层 `fsun` 落进步输出（内核里算过，只是没带出来）",
+    "`ldew`/`qintr`/`qdrip`：需要一个冠层截留**状态**出口，目前只有通量",
+    "派生土壤量（h2osoi/…）：需要先核对上游对每个量的定义（液态还是液+固态）",
     "湖泊与 BGC 量：各自的分支还没有运行时驱动",
 ];
 
@@ -124,6 +156,7 @@ pub fn declare_lct_variables(buffer: &mut HistoryBuffers) -> Result<()> {
     names.extend_from_slice(&LCT_ENERGY_VARIABLES);
     names.extend_from_slice(&LCT_SURFACE_BUDGET_VARIABLES);
     names.extend_from_slice(&LCT_SURFACE_VARIABLES);
+    names.extend_from_slice(&LCT_STOMATAL_VARIABLES);
     buffer.declare(&names)
 }
 
@@ -462,6 +495,41 @@ pub fn set_lct_surface_budget(
     Ok(())
 }
 
+/// 把一步的冠层光合/气孔链诊断写进第 `record` 条记录。
+///
+/// 取值来源与 [`set_lct_surface_diagnostics`] 同一次 `LeafTemperature` 出口，
+/// 所以叶温、气孔阻力与这里的同化/蒸腾永远是同一迭代的一致快照。
+/// 见 [`LCT_STOMATAL_VARIABLES`] 对单位与维度顺序的说明。
+pub fn set_lct_stomatal_diagnostics(
+    sink: &mut impl HistorySink,
+    record: usize,
+    energy: &colm_core::StandardLctEnergyOutput,
+) -> Result<()> {
+    let leaf = &energy.leaf;
+    let stress = energy.root_uptake.soil_water_stress;
+    for (name, value) in [
+        ("assim", leaf.assimilation_mol_m2_s),
+        ("assimsun", leaf.sunlit_assimilation_mol_m2_s),
+        ("assimsha", leaf.shaded_assimilation_mol_m2_s),
+        ("respc", leaf.respiration_mol_m2_s),
+        ("etrsun", leaf.sunlit_transpiration_kg_m2_s),
+        ("etrsha", leaf.shaded_transpiration_kg_m2_s),
+        ("gssun", leaf.sunlit_stomatal_conductance_mol_m2_s),
+        ("gssha", leaf.shaded_stomatal_conductance_mol_m2_s),
+        // LCT 分支两行同源（`MOD_Thermal.F90:674-675`），所以这里必然相等。
+        ("rstfacsun", stress),
+        ("rstfacsha", stress),
+    ] {
+        ensure!(
+            value.is_finite(),
+            "the history value for {name} is not finite"
+        );
+        sink.scalar(name, record, value)?;
+    }
+    sink.layer("rootr", record, &energy.root_uptake.layer_fraction)?;
+    Ok(())
+}
+
 /// 把一步的水文诊断写进第 `record` 条记录。
 ///
 /// 两支共用：积雪分支把它 `WATER_2014` 输出里的 `soil` 那一半传进来。
@@ -708,7 +776,8 @@ impl HistorySession {
                 &output.energy,
                 reference,
                 &template.physics,
-            )
+            )?;
+            set_lct_stomatal_diagnostics(accumulator, 0, &output.energy)
         })
     }
 
@@ -747,7 +816,8 @@ impl HistorySession {
                 &output.energy,
                 reference,
                 &template.physics,
-            )
+            )?;
+            set_lct_stomatal_diagnostics(accumulator, 0, &output.energy)
         })
     }
 

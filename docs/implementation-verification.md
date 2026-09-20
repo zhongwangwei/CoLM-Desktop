@@ -3673,3 +3673,76 @@ NETCDF_DIR=/opt/homebrew/opt/netcdf cargo run -q -p colm-cli -- \
 * **`intent(out)` 的哑元在入口是未定义的**，`-O2` 下的实际取值随无关改动漂移。
   同名模块一旦分叉成两份（`main/` 与 `extends/`），语义同步就必须显式钉住 ——
   这正是 `test_upstream_f48_sync.py` 现在做的事。
+
+## history 写出面：补上冠层光合/气孔链十一项（2026 年，实测）
+
+上一节修好内核之后，`assim`/`etrsun`/`gssun` 这些量第一次**有真值**；而本仓库的
+history 写出面此前根本不声明它们 —— 黄金算例里有 68 个变量只在 Fortran 侧存在，
+`declare_lct_variables` 只点了自己能负责的 58 个，缺口写在 `UNFILLED` 里。
+第一项"分层植被量：需要冠层分层输出"是**误判**：内核早就算好了，只是没人接。
+
+一次补上十一项（`LCT_STOMATAL_VARIABLES`）：
+
+| 变量 | 上游 | 本仓库 | 维度 |
+|---|---|---|---|
+| `assim` / `assimsun` / `assimsha` | `assim = assimsun + assimsha`（`MOD_LeafTemperature.F90:1048`） | `leaf.assimilation_*_mol_m2_s` | `(time, patch)` |
+| `respc` | `respcsun + respcsha`（`:1049`） | `leaf.respiration_mol_m2_s` | `(time, patch)` |
+| `etrsun` / `etrsha` | `etrsun_out` / `etrsha_out` | `leaf.sunlit_/shaded_transpiration_kg_m2_s` | `(time, patch)` |
+| `gssun` / `gssha` | `gssun_out` / `gssha_out`（f48fbf9 的 `gssun = (laisun/rssun)*(tprcor/tlbef)`） | `leaf.sunlit_/shaded_stomatal_conductance_mol_m2_s` | `(time, patch)` |
+| `rstfacsun` / `rstfacsha` | `MOD_Thermal.F90:674-675` 两行同源 | `energy.root_uptake.soil_water_stress` | `(time, patch)` |
+| `rootr` | `MOD_Eroot` 的分层根阻力权重 | `energy.root_uptake.layer_fraction` | `(time, patch, soil)` |
+
+**单位陷阱：上游把 `assimsun` 注成 `[umol co2 /m**2/ s]`，实际是 mol m⁻² s⁻¹**
+（黄金值峰值 2.83e−7）。照注释乘 1e6 会得到偏 6 个数量级的一列。
+
+对齐算例（冬季 264 条）实测：
+
+```
+f_assim      F 峰值 2.8270e-07   R 2.8268e-07      ← 0.007%
+f_assimsun   F 2.2526e-07        R 2.2543e-07
+f_assimsha   F 1.7302e-07        R 1.7283e-07
+f_etrsun     F 2.8625e-07        R 2.8445e-07
+f_etrsha     F 6.1499e-08        R 6.0996e-08
+f_respc      F 1.3891e-08        R 1.3761e-08
+f_gssun      F 1.9484e-02        R 1.9483e-02
+f_rstfacsun  F 4.5683e-02..0.95100  R 4.5680e-02..0.95100
+f_rootr      逐层逐记录相同，除 2 条过渡记录
+```
+
+`f_rootr` 那 2 条（第 202、203 条）是 `eroot` 的 `t_soisno(i) > tfrz` 判据在
+亚步里早/晚一条记录翻越所致：两条记录的层权重之和都严格是 1，只是第 6 层
+在第 202 条上属于哪一侧不同。**这是判据的时间对齐，不是权重算错。**
+
+冠层光合三兄弟现在是**除 `f_etr` 之外对气孔链最灵敏的探针** —— 它们直接量的是
+`stomata` 的输出，而不是像 `f_tleaf` 那样经过能量平衡的积分。
+
+仍未写出的（`UNFILLED`，已按实际缺口重写）：`rss`（方案 4 的电导/阻力条件映射待核对）、
+`laisun`/`laisha`/`ssun`/`ssha`（内核算过 `fsun` 但没带出步输出）、
+`ldew`/`qintr`/`qdrip`（缺一个冠层截留状态出口）、`h2osoi` 等派生土壤量、
+湖泊/BGC。**"文件里没有"与"内核产不出"是两件事**，`UNFILLED` 的用途就是把前者
+记成待办而不是当成结论。
+
+### 补上之后的对账口径变了，要说清
+
+黄金文件里"只在 Fortran 侧"的变量从 **68 降到 57**，而 tier 比对的**失败数从 43 升到 48**
+—— 后者不是退化。新增的十一项里有五项落在容差外：
+
+```
+f_rootr      1100/2640   最差 2.305e-1 vs 0        ← 那 2 条过渡记录
+f_rstfacsun   261/264    最差 1.269e-1 vs 8.888e-2
+f_rstfacsha   261/264    同上（LCT 下同源，必然同差）
+f_gssun        96/264    最差 5.323e-4 vs 2.011e-3
+f_gssha        97/264    最差 8.950e-3 vs 1.421e-2
+```
+
+`f_assim` 只差 0.007%，而 `f_gssun` 差 4 倍 —— 差别在**判据本身的性质**：
+`gssun = (laisun/rssun)*(tprcor/tlbef)`，低光照时 `assmt` 落到下限 `1e-12`，
+`gsh2o ~ 1e-8`，`rssun` 顶到 `1e6` 上限。**在上限附近，`gsh2o` 的微小差异会被
+`1/(gsh2o*…)` 放大成几倍的 `gssun`** —— 与 `scv` 属于同一类"近抵消探针"，
+量得准不准取决于两侧是否恰好落在上限的同一侧。`f_rstfacsun` 的 30% 同理：
+它的输入是 `eroot` 里 `t_soisno(i) > tfrz` 的分层判据，层在冰点两侧时
+`rresis` 从 0 跳到 1，权重跟着整体重归一化。
+
+所以这五项**留在 tier2、留在失败清单上是对的** —— 按 `oracle/tolerances.toml`
+开头那条"层级不倒挂"的不变式，确定性代数量不该因为"实测对不上"就被降级，
+否则表就失去意义了。它们现在是**已知的、有解释的残余**，不是待修的 bug。

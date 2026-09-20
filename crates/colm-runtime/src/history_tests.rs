@@ -207,6 +207,7 @@ fn the_bridge_writes_the_state_variables_it_declares() {
     set_lct_fluxes(&mut buffer, 0, &output.water).unwrap();
     set_lct_energy_fluxes(&mut buffer, 0, &output).unwrap();
     set_lct_surface_diagnostics(&mut buffer, 0, &output.energy, reference(), &physics()).unwrap();
+    set_lct_stomatal_diagnostics(&mut buffer, 0, &output.energy).unwrap();
     buffer.set_time(0, 56_802_270).unwrap();
     let path = root.join("history.nc");
     buffer.write(&path).unwrap();
@@ -218,6 +219,7 @@ fn the_bridge_writes_the_state_variables_it_declares() {
         .chain(LCT_FLUX_VARIABLES.iter())
         .chain(LCT_ENERGY_VARIABLES.iter())
         .chain(LCT_SURFACE_VARIABLES.iter())
+        .chain(LCT_STOMATAL_VARIABLES.iter())
     {
         assert!(
             file.variable(&format!("f_{name}")).is_some(),
@@ -261,6 +263,45 @@ fn the_bridge_writes_the_state_variables_it_declares() {
             "the split must sum back to {total}, got {parts}"
         );
     }
+    // 冠层光合/气孔链与这一步的 `LeafTemperature` 出口逐项对上（同一个迭代快照）。
+    // `rstfacsun`/`rstfacsha` 在 LCT 下同源，断言它们确实相等而不只是各自对。
+    let stomatal_leaf = &output.energy.leaf;
+    let stomatal_stress = output.energy.root_uptake.soil_water_stress;
+    for (name, expected) in [
+        ("assim", stomatal_leaf.assimilation_mol_m2_s),
+        ("assimsun", stomatal_leaf.sunlit_assimilation_mol_m2_s),
+        ("assimsha", stomatal_leaf.shaded_assimilation_mol_m2_s),
+        ("respc", stomatal_leaf.respiration_mol_m2_s),
+        ("etrsun", stomatal_leaf.sunlit_transpiration_kg_m2_s),
+        ("etrsha", stomatal_leaf.shaded_transpiration_kg_m2_s),
+        ("gssun", stomatal_leaf.sunlit_stomatal_conductance_mol_m2_s),
+        ("gssha", stomatal_leaf.shaded_stomatal_conductance_mol_m2_s),
+        ("rstfacsun", stomatal_stress),
+        ("rstfacsha", stomatal_stress),
+    ] {
+        let values = file
+            .variable(&format!("f_{name}"))
+            .unwrap()
+            .get_values::<f64, _>(..)
+            .unwrap();
+        assert_eq!(values, vec![expected], "f_{name}");
+    }
+    // `rootr` 是唯一的分层冠层量：维度必须是 `(time, patch, soil)`，
+    // 而且 `eroot` 的权重各层之和为 1。
+    let rootr = file.variable("f_rootr").unwrap();
+    let dims = rootr
+        .dimensions()
+        .iter()
+        .map(|dimension| dimension.name())
+        .collect::<Vec<_>>();
+    assert_eq!(dims, vec!["time", "patch", "soil"]);
+    let rootr = rootr.get_values::<f64, _>(..).unwrap();
+    assert_eq!(
+        rootr,
+        output.energy.root_uptake.layer_fraction.as_slice(),
+        "f_rootr"
+    );
+
     // 诊断量与这一步的输出逐项对上。
     for (name, expected) in [
         ("qinfl", output.water.infiltration_mm_s),
@@ -355,6 +396,7 @@ fn the_written_schema_matches_the_golden_file_for_the_shared_variables() {
         .chain(LCT_FLUX_VARIABLES.iter())
         .chain(LCT_ENERGY_VARIABLES.iter())
         .chain(LCT_SURFACE_VARIABLES.iter())
+        .chain(LCT_STOMATAL_VARIABLES.iter())
     {
         let file_name = format!("f_{name}");
         let ours = written.variable(&file_name).unwrap();
@@ -442,6 +484,7 @@ fn the_snow_branch_fills_the_snow_span() {
     )
     .unwrap();
     set_lct_surface_diagnostics(&mut buffer, 0, &output.energy, reference(), &physics()).unwrap();
+    set_lct_stomatal_diagnostics(&mut buffer, 0, &output.energy).unwrap();
     buffer.set_time(0, 56_802_270).unwrap();
     let path = root.join("history.nc");
     buffer.write(&path).unwrap();
