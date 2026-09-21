@@ -5803,3 +5803,40 @@ mol m⁻² s⁻¹）。上游写进重启的 `gs0sun` 是
 `set_lct_state`（无雪入口），而 `standard_lct_snow_soil_step` 才是通用入口
 （无雪起步的算例也走它），于是第一次跑出来整列 1056 个值全是填充值 ——
 "文件里有这一列、但一个真值都没有"，比缺列更难看出来。
+
+## `tier-check oracle/golden/*.nc` 一直是红的：两条判据都判错了对象（2026 年，实测）
+
+这是 `CLAUDE.md` 里列的验收命令之一，实测在改这一轮之前就是红的，而且报的是
+**两条独立的错**（我第一次只看了 `tail`，把上面那半截漏掉了）：
+
+```
+10 tier entry/entries name variables that no longer exist:
+  band  lake  lat  lon  rtyp  soil  soilinterface  soilsnow  time  vegnodes
+1 tier entry/entries name variables that no longer exist:
+  f_qcharge
+```
+
+两条都是**判据选错了对象**，不是容差表写错：
+
+1. **维度轴被当成"变量没了"**。`present` 收的是 `nc.variables()` 的**全部**名字，
+   而 `oracle/tolerances.toml:25` 给 `band`/`lake`/`lat`/`lon`/`rtyp`/`soil`/
+   `soilinterface`/`soilsnow`/`vegnodes` 单列了一组逐位比的**轴**。它们没有 `f_`
+   前缀 → 被判成"表里的名字不存在"。修法：`present` 照收（轴本来就在文件里），
+   判据改成"**既不在文件里、也不在闸门表里**才算没了"。
+2. **运行时条件变量被当成"变量没了"**。`f_qcharge` 挂在
+   `IF (.not. DEF_USE_VariablySaturatedFlow)`（`MOD_Hist.F90:698`）里，
+   而 `oracle/golden/` 两份黄金都是 `CN-Cng` 的默认配置、**都走 VSF**，
+   所以它一份都不在。修法：闸门表里 `runtime.is_some()` 的名字进一个
+   `conditional` 集合，缺席时只输出一行 `note:`，不计错。
+
+`stale` 的新判据是**并集**：黄金文件里有的 ∪ 闸门表标了运行时条件的。
+"改名/删变量"照样抓得住（两边都没有），"这个窗口没跑到"放过。
+闸门表那段条件原文**不求值**：求值要么重写一个 namelist 解释器，要么在这里
+塞一份开关的副本，两条都不如"有运行时条件就不算缺失"来得诚实。
+
+判据被抽成 `classify()` 以便单测，三条回归测试钉住：运行时条件变量不算缺失、
+改名仍然算缺失、轴不算缺失。修完输出 `all 127 golden variables have a tier assignment`
+（127 = 117 个 `f_` 变量 + 10 个轴，与 `histmap.rs` 的 117 对得上）。
+
+**教训**：一条验收命令红了，先看**完整输出**再动手 —— 只 `tail` 会漏掉前一半，
+于是会把一个"两个独立 bug"当成一个。
