@@ -1266,6 +1266,170 @@ fn richards_solver_checks_widths_and_physical_values() {
     assert!(error.to_string().contains("not physical"));
 }
 
+/// `soil_water_vertical_movement` 的夹具：两层柱，界面 0/100/200 mm。
+struct SoilWaterFixture {
+    center_depth_mm: Vec<f64>,
+    interface_depth_mm: Vec<f64>,
+    permeable: Vec<bool>,
+    porosity: Vec<f64>,
+    residual_water: Vec<f64>,
+    saturated_potential_mm: Vec<f64>,
+    saturated_hydraulic_conductivity_mm_s: Vec<f64>,
+    hydraulic_model: Vec<SoilHydraulicModel>,
+    root_fraction: Vec<f64>,
+    root_flux_mm_s: Vec<f64>,
+}
+
+fn soil_water_fixture() -> SoilWaterFixture {
+    let model = SoilHydraulicModel::Campbell { bsw: 4.0 };
+    SoilWaterFixture {
+        center_depth_mm: vec![50.0, 150.0],
+        interface_depth_mm: vec![0.0, 100.0, 200.0],
+        permeable: vec![true, true],
+        porosity: vec![0.45, 0.45],
+        residual_water: vec![0.05, 0.05],
+        saturated_potential_mm: vec![-100.0, -100.0],
+        saturated_hydraulic_conductivity_mm_s: vec![0.01, 0.01],
+        hydraulic_model: vec![model, model],
+        root_fraction: vec![1.0, 0.0],
+        root_flux_mm_s: vec![0.0, 0.0],
+    }
+}
+
+fn soil_water_state(
+    fixture: &SoilWaterFixture,
+    volumetric_water: &[f64],
+) -> VariableSaturatedSoilWaterState {
+    let nlev = fixture.center_depth_mm.len();
+    VariableSaturatedSoilWaterState {
+        ponding_depth_mm: 0.0,
+        // 水位放到柱底以下（300 mm），这样 `izwt = nlev + 1`、下层走排水边界。
+        water_table_depth_mm: 300.0,
+        aquifer_water_mm: 0.0,
+        liquid_water: volumetric_water.to_vec(),
+        matric_potential_mm: vec![0.0; nlev],
+        hydraulic_conductivity_mm_s: vec![0.0; nlev],
+        interface_flux_mm_s: vec![0.0; nlev + 1],
+    }
+}
+
+fn soil_water_input<'a>(
+    fixture: &'a SoilWaterFixture,
+    transpiration_mm_s: f64,
+    ground_water_flux_mm_s: f64,
+    subsurface_runoff_mm_s: f64,
+) -> VariableSaturatedSoilWaterInput<'a> {
+    VariableSaturatedSoilWaterInput {
+        time_step_seconds: 1800.0,
+        center_depth_mm: &fixture.center_depth_mm,
+        interface_depth_mm: &fixture.interface_depth_mm,
+        permeable: &fixture.permeable,
+        porosity: &fixture.porosity,
+        residual_water: &fixture.residual_water,
+        saturated_potential_mm: &fixture.saturated_potential_mm,
+        saturated_hydraulic_conductivity_mm_s: &fixture.saturated_hydraulic_conductivity_mm_s,
+        hydraulic_model: &fixture.hydraulic_model,
+        aquifer_porosity: 0.45,
+        ground_water_flux_mm_s,
+        transpiration_mm_s,
+        root_fraction: &fixture.root_fraction,
+        root_flux_mm_s: &fixture.root_flux_mm_s,
+        subsurface_runoff_mm_s,
+        plant_hydraulics: false,
+        // `WATER_VSF` 传进来的就是这个数（`MOD_SoilSnowHydrology.F90:1101`）。
+        tolerance_mm: 1.0e-3,
+    }
+}
+
+/// 亏缺级联：表层只有 6 mm 水，却要蒸腾 18 mm —— 多出来的 12 mm 必须推到下一层，
+/// 一层都取不满时才算到含水层头上。这一条把 `etroot_actual`/`etroot_aquifer`
+/// 三个诊断的语义钉住。
+#[test]
+fn soil_water_vertical_movement_cascades_the_transpiration_deficit() {
+    let fixture = soil_water_fixture();
+    let mut state = soil_water_state(&fixture, &[0.06, 0.45]);
+    let input = soil_water_input(&fixture, 0.01, 0.0, 0.0);
+    let output = soil_water_vertical_movement(input, &mut state).unwrap();
+
+    // 需求：18 mm 全在第 0 层（root_fraction = [1, 0]）。
+    close(output.transpiration_demand_mm_s[0], 0.01, 1.0e-15);
+    assert_eq!(output.transpiration_demand_mm_s[1], 0.0);
+    // 第 0 层只有 6 mm，全被取走；缺的 12 mm 由第 1 层承担。
+    close(output.transpiration_actual_mm[0], 6.0, 1.0e-9);
+    close(output.transpiration_actual_mm[1], 12.0, 1.0e-9);
+    assert_eq!(output.transpiration_aquifer_mm, 0.0);
+    // 上游自己也做这个检查：`abs(wblc) > tolerance` 会打警告。
+    assert!(
+        output.balance_error_mm.abs() <= 1.0e-3,
+        "water balance error {} mm exceeds the 1e-3 mm tolerance",
+        output.balance_error_mm
+    );
+}
+
+/// 水位在柱底以下 → 最下一段用**排水**下边界；水面通量以降雨边界进来。
+/// 这里只验结构不变量：`smp`/`hk` 逐层有值、含水率不越界、质量平衡达标。
+#[test]
+fn soil_water_vertical_movement_keeps_state_physical_and_balances_mass() {
+    let fixture = soil_water_fixture();
+    let mut state = soil_water_state(&fixture, &[0.30, 0.40]);
+    let input = soil_water_input(&fixture, 1.0e-4, 2.0e-4, 1.0e-6);
+    let output = soil_water_vertical_movement(input, &mut state).unwrap();
+
+    for level in 0..2 {
+        assert!(
+            state.liquid_water[level] >= -1.0e-12
+                && state.liquid_water[level] <= fixture.porosity[level] + 1.0e-12,
+            "level {level} liquid water {} left 0..={}",
+            state.liquid_water[level],
+            fixture.porosity[level]
+        );
+        assert!(state.matric_potential_mm[level].is_finite());
+        assert!(state.matric_potential_mm[level] <= 0.0);
+        assert!(state.hydraulic_conductivity_mm_s[level].is_finite());
+        assert!(state.hydraulic_conductivity_mm_s[level] >= 0.0);
+    }
+    assert!(state.water_table_depth_mm.is_finite());
+    assert!(
+        output.balance_error_mm.abs() <= 1.0e-3,
+        "water balance error {} mm exceeds the 1e-3 mm tolerance",
+        output.balance_error_mm
+    );
+}
+
+/// PHS 打开时逐层根系吸水直接来自 `rootflux`，不再按 `rootr` 摊蒸腾。
+#[test]
+fn soil_water_vertical_movement_uses_the_phs_root_flux_when_enabled() {
+    let mut fixture = soil_water_fixture();
+    fixture.root_flux_mm_s = vec![-2.0e-4, 5.0e-5];
+    let mut state = soil_water_state(&fixture, &[0.30, 0.35]);
+    let input = VariableSaturatedSoilWaterInput {
+        plant_hydraulics: true,
+        ..soil_water_input(&fixture, 0.01, 0.0, 0.0)
+    };
+    let output = soil_water_vertical_movement(input, &mut state).unwrap();
+    // 需求逐层等于 `rootflux`，**不**按 `rootr` 重新摊（`rootr` 是 [1, 0]，会全压到第 0 层）。
+    assert_eq!(output.transpiration_demand_mm_s, vec![-2.0e-4, 5.0e-5]);
+}
+
+/// 长度与物理量校验。
+#[test]
+fn soil_water_vertical_movement_checks_widths_and_physical_values() {
+    let fixture = soil_water_fixture();
+    let mut state = soil_water_state(&fixture, &[0.30, 0.30]);
+    let input = VariableSaturatedSoilWaterInput {
+        interface_depth_mm: &fixture.interface_depth_mm[..2],
+        ..soil_water_input(&fixture, 0.0, 0.0, 0.0)
+    };
+    let error = soil_water_vertical_movement(input, &mut state).unwrap_err();
+    assert!(error.to_string().contains("inputs are invalid"));
+
+    let mut bad = soil_water_fixture();
+    bad.saturated_hydraulic_conductivity_mm_s[1] = 0.0;
+    let input = soil_water_input(&bad, 0.0, 0.0, 0.0);
+    let error = soil_water_vertical_movement(input, &mut state).unwrap_err();
+    assert!(error.to_string().contains("not physical"));
+}
+
 fn close(actual: f64, expected: f64, tolerance: f64) {
     assert!(
         (actual - expected).abs() < tolerance,

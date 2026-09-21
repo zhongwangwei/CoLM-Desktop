@@ -3979,6 +3979,548 @@ pub fn richards_solver(
     Ok(())
 }
 
+/// Inputs to `MOD_Hydro_SoilWater:soil_water_vertical_movement`.
+///
+/// **窗口约定与上层不同**：这个 routine 的层号是 `1..nlev`、界面是 `0..nlev`，
+/// 所以这里的切片下标 0 对应 Fortran 的层 1 / 界面 0（即地表）。
+/// 上游只在把子段交给 `Richards_solver` 时重新裁窗口。
+#[derive(Debug, Clone, Copy)]
+pub struct VariableSaturatedSoilWaterInput<'a> {
+    pub time_step_seconds: f64,
+    /// `sp_zc(1:nlev)`。
+    pub center_depth_mm: &'a [f64],
+    /// `sp_zi(0:nlev)`，长度 `nlev + 1`。
+    pub interface_depth_mm: &'a [f64],
+    pub permeable: &'a [bool],
+    pub porosity: &'a [f64],
+    pub residual_water: &'a [f64],
+    pub saturated_potential_mm: &'a [f64],
+    pub saturated_hydraulic_conductivity_mm_s: &'a [f64],
+    pub hydraulic_model: &'a [SoilHydraulicModel],
+    pub aquifer_porosity: f64,
+    /// `qgtop`：地表入流（雨 + 融雪 + 露），mm/s。
+    pub ground_water_flux_mm_s: f64,
+    /// `etr`：实际蒸腾，mm/s。
+    pub transpiration_mm_s: f64,
+    /// `rootr(1:nlev)`：根系分配比例。
+    pub root_fraction: &'a [f64],
+    /// `rootflux(1:nlev)`：PHS 打开时的**分层**根系吸水，mm/s。
+    pub root_flux_mm_s: &'a [f64],
+    /// `rsubst`：地下径流，mm/s。
+    pub subsurface_runoff_mm_s: f64,
+    /// `DEF_USE_PLANTHYDRAULICS`。
+    pub plant_hydraulics: bool,
+    /// `tolerance`：**整柱**质量平衡的判据 [mm]，上游在 `WATER_VSF` 里硬编码 `1.e-3`。
+    pub tolerance_mm: f64,
+}
+
+/// `soil_water_vertical_movement` 的进/出状态。
+#[derive(Debug, Clone, PartialEq)]
+pub struct VariableSaturatedSoilWaterState {
+    /// `ss_dp`。
+    pub ponding_depth_mm: f64,
+    /// `zwt`。
+    pub water_table_depth_mm: f64,
+    /// `wa`。
+    pub aquifer_water_mm: f64,
+    /// `ss_vliq(1:nlev)`。
+    pub liquid_water: Vec<f64>,
+    /// `smp(1:nlev)`。
+    pub matric_potential_mm: Vec<f64>,
+    /// `hk(1:nlev)`。
+    pub hydraulic_conductivity_mm_s: Vec<f64>,
+    /// `qlayer(0:nlev)`，长度 `nlev + 1`。
+    pub interface_flux_mm_s: Vec<f64>,
+}
+
+/// `soil_water_vertical_movement` 的诊断输出。
+#[derive(Debug, Clone, PartialEq)]
+pub struct VariableSaturatedSoilWaterOutput {
+    /// `qinfl`：真正渗入土壤的通量 [mm/s]。
+    pub infiltration_mm_s: f64,
+    /// `etroot_out`：逐层蒸腾需求 [mm/s]。
+    pub transpiration_demand_mm_s: Vec<f64>,
+    /// `etroot_actual_out`：逐层真正被取走的水 [mm]。
+    pub transpiration_actual_mm: Vec<f64>,
+    /// `etroot_aquifer_out`：含水层承担的蒸腾亏缺 [mm]。
+    pub transpiration_aquifer_mm: f64,
+    /// `wblc`：整柱质量平衡误差 [mm]。
+    pub balance_error_mm: f64,
+}
+
+/// `findloc_ud(array, back=.true.)`：数组里**最后一个**为真的 1-based 下标；
+/// 全假返回 0。上游在 `sp_zi` 上用它，而 `sp_zi` 的下界是 0，
+/// 所以返回值是"界面号 + 1"，可以直接当 1-based 的层号用。
+fn last_true_index(flags: &[bool]) -> usize {
+    flags
+        .iter()
+        .rposition(|flag| *flag)
+        .map(|index| index + 1)
+        .unwrap_or(0)
+}
+
+/// Port of `MOD_Hydro_SoilWater:soil_water_vertical_movement`.
+///
+/// 这是整个 VSF 分支里**唯一含新物理**的一段：蒸腾亏缺级联（上层供不上就往
+/// 下层推，推到柱底还差就交给含水层）、按不透水层把土柱切成互不相连的子段
+/// 逐段调 [`richards_solver`]、再由更新后的水量重定位地下水位、最后按水位
+/// 把含水率折算回逐层的 `smp`/`hk`。
+///
+/// `ss_wt`（水位在各层内的位置）在这里是**局部量**，每步从水位现算；
+/// 但每段调 `richards_solver` 时它是 `intent(inout)`，所以段内被改过的值
+/// 会带到下一段（上游如此）。
+pub fn soil_water_vertical_movement(
+    input: VariableSaturatedSoilWaterInput<'_>,
+    state: &mut VariableSaturatedSoilWaterState,
+) -> Result<VariableSaturatedSoilWaterOutput> {
+    let nlev = validate_soil_water_movement(input, state)?;
+
+    // `sp_dz(1:nlev) = sp_zi(1:nlev) - sp_zi(0:nlev-1)`。
+    let thickness_mm = input
+        .interface_depth_mm
+        .windows(2)
+        .map(|pair| pair[1] - pair[0])
+        .collect::<Vec<_>>();
+    debug_assert_eq!(thickness_mm.len(), nlev);
+
+    // 三套容差都由 `tolerance` 现推；`tol_p` 是上游写死的 `1e-14`。
+    let flux_tolerance_mm_s = input.tolerance_mm / nlev as f64 / input.time_step_seconds / 2.0;
+    let depth_tolerance_mm = flux_tolerance_mm_s * input.time_step_seconds;
+    let volume_tolerance =
+        depth_tolerance_mm / thickness_mm.iter().copied().fold(f64::MIN, f64::max);
+    let pressure_tolerance_mm = 1.0e-14;
+
+    let previous_ponding_depth_mm = state.ponding_depth_mm;
+    let mut water_table_depth_mm = state.water_table_depth_mm;
+
+    // 水位所在的**界面号 + 1**（1-based 层号）；`0` 表示水位在地表之上，
+    // `nlev + 1` 表示在柱底之下。
+    let mut water_table_level = last_true_index(
+        &(0..=nlev)
+            .map(|interface| water_table_depth_mm >= input.interface_depth_mm[interface])
+            .collect::<Vec<_>>(),
+    );
+
+    let mut balance_before_mm = state.ponding_depth_mm;
+    for (level, layer_thickness_mm) in thickness_mm.iter().enumerate() {
+        if !input.permeable[level] {
+            continue;
+        }
+        if level < water_table_level.saturating_sub(1) {
+            balance_before_mm += state.liquid_water[level] * layer_thickness_mm;
+        } else if level + 1 == water_table_level {
+            balance_before_mm += state.liquid_water[level]
+                * (water_table_depth_mm - input.interface_depth_mm[level]);
+            balance_before_mm += input.porosity[level]
+                * (input.interface_depth_mm[level + 1] - water_table_depth_mm);
+        } else {
+            balance_before_mm += input.porosity[level] * layer_thickness_mm;
+        }
+    }
+    balance_before_mm += state.aquifer_water_mm;
+
+    // 蒸腾需求的分层分配。
+    let mut transpiration_demand_mm = vec![0.0; nlev];
+    let mut transpiration_deficit_mm = 0.0;
+    if input.plant_hydraulics {
+        transpiration_demand_mm.copy_from_slice(input.root_flux_mm_s);
+    } else {
+        let root_sum = (0..nlev)
+            .filter(|level| input.permeable[*level] && input.root_fraction[*level] > 0.0)
+            .map(|level| input.root_fraction[level])
+            .sum::<f64>();
+        if root_sum > 0.0 {
+            for (level, demand_mm_s) in transpiration_demand_mm.iter_mut().enumerate() {
+                if input.permeable[level] {
+                    *demand_mm_s =
+                        input.transpiration_mm_s * input.root_fraction[level].max(0.0) / root_sum;
+                }
+            }
+        } else {
+            transpiration_deficit_mm = input.transpiration_mm_s * input.time_step_seconds;
+        }
+    }
+
+    let mut transpiration_actual_mm = vec![0.0; nlev];
+    let mut deficit_mm = transpiration_deficit_mm;
+
+    // 亏缺级联：从最上一层往下，取不满的差额交给下一层。
+    for level in 0..water_table_level.saturating_sub(1) {
+        if input.permeable[level] {
+            let attempted_mm =
+                transpiration_demand_mm[level] * input.time_step_seconds + deficit_mm;
+            let stored_before_mm = state.liquid_water[level] * thickness_mm[level];
+            state.liquid_water[level] = (stored_before_mm - attempted_mm) / thickness_mm[level];
+            if state.liquid_water[level] < 0.0 {
+                let residual_mm = -state.liquid_water[level] * thickness_mm[level];
+                transpiration_actual_mm[level] = stored_before_mm.max(0.0);
+                deficit_mm = residual_mm;
+                state.liquid_water[level] = 0.0;
+            } else if state.liquid_water[level] > input.porosity[level] {
+                transpiration_actual_mm[level] = attempted_mm.max(0.0);
+                deficit_mm =
+                    -(state.liquid_water[level] - input.porosity[level]) * thickness_mm[level];
+                state.liquid_water[level] = input.porosity[level];
+            } else {
+                transpiration_actual_mm[level] = attempted_mm.max(0.0);
+                deficit_mm = 0.0;
+            }
+        } else {
+            deficit_mm += transpiration_demand_mm[level] * input.time_step_seconds;
+        }
+    }
+    for demand_mm_s in transpiration_demand_mm
+        .iter()
+        .skip(water_table_level.saturating_sub(1))
+    {
+        deficit_mm += demand_mm_s * input.time_step_seconds;
+    }
+    let transpiration_aquifer_mm = deficit_mm.max(0.0);
+
+    // 与含水层交换（`wexchange` 是**体积** mm，不是通量）。
+    let aquifer = exchange_soil_water_with_aquifer(VariableSaturatedAquiferInput {
+        water_exchange_mm: input.subsurface_runoff_mm_s * input.time_step_seconds + deficit_mm,
+        interface_depth_mm: input.interface_depth_mm,
+        permeable: input.permeable,
+        porosity: input.porosity,
+        residual_water: input.residual_water,
+        saturated_potential_mm: input.saturated_potential_mm,
+        hydraulic_model: input.hydraulic_model,
+        aquifer_porosity: input.aquifer_porosity,
+        ponding_depth_mm: state.ponding_depth_mm,
+        unsaturated_liquid_water: &state.liquid_water,
+        water_table_depth_mm,
+        aquifer_water_mm: state.aquifer_water_mm,
+    })?;
+    state.ponding_depth_mm = aquifer.ponding_depth_mm;
+    state.liquid_water = aquifer.unsaturated_liquid_water;
+    water_table_depth_mm = aquifer.water_table_depth_mm;
+    state.aquifer_water_mm = aquifer.aquifer_water_mm;
+    water_table_level = aquifer.water_table_interface_count;
+
+    // 水位在每一层内的位置：`izwt` 那一层是"从层底往上到水位"，再往下整层饱和。
+    let mut water_table_thickness_mm = vec![0.0; nlev];
+    if (1..=nlev).contains(&water_table_level) {
+        water_table_thickness_mm[water_table_level - 1] =
+            input.interface_depth_mm[water_table_level] - water_table_depth_mm;
+    }
+    // 注意**不能**用 `copy_from_slice` + 切片区间：`water_table_level` 可以等于
+    // `nlev + 1`（水位在柱底之下），那时 Fortran 的 `DO ilev = izwt+1, nlev` 是
+    // 空循环，而 `[nlev + 1..nlev]` 会 panic。`skip` 对空区间是安全的。
+    for (water_table_thickness, layer_thickness_mm) in water_table_thickness_mm
+        .iter_mut()
+        .zip(&thickness_mm)
+        .skip(water_table_level)
+    {
+        *water_table_thickness = *layer_thickness_mm;
+    }
+
+    // 按不透水层把土柱切成互不相连的子段，逐段求解。
+    let mut interface_flux_mm_s = vec![0.0; nlev + 1];
+    let mut upper = nlev as isize;
+    'soil_column: while upper >= 1 {
+        while !input.permeable[(upper - 1) as usize] {
+            interface_flux_mm_s[(upper - 1) as usize] = 0.0;
+            interface_flux_mm_s[upper as usize] = 0.0;
+            if upper > 1 {
+                upper -= 1;
+            } else {
+                break 'soil_column;
+            }
+        }
+        let mut lower = upper;
+        while lower > 1 {
+            if input.permeable[(lower - 2) as usize] {
+                lower -= 1;
+            } else {
+                break;
+            }
+        }
+        let top_boundary = if lower == 1 {
+            VariableSaturatedBoundary {
+                kind: VariableSaturatedBoundaryKind::Rainfall,
+                value: input.ground_water_flux_mm_s,
+            }
+        } else {
+            VariableSaturatedBoundary {
+                kind: VariableSaturatedBoundaryKind::FixedFlux,
+                value: 0.0,
+            }
+        };
+        let bottom_boundary = if upper == nlev as isize && water_table_level > nlev {
+            VariableSaturatedBoundary {
+                kind: VariableSaturatedBoundaryKind::Drainage,
+                value: 0.0,
+            }
+        } else {
+            VariableSaturatedBoundary {
+                kind: VariableSaturatedBoundaryKind::FixedFlux,
+                value: 0.0,
+            }
+        };
+
+        let first = (lower - 1) as usize;
+        let last = upper as usize;
+        let mut segment = VariableSaturatedRichardsState {
+            ponding_depth_mm: state.ponding_depth_mm,
+            aquifer_water_mm: state.aquifer_water_mm,
+            liquid_water: state.liquid_water[first..last].to_vec(),
+            water_table_thickness_mm: water_table_thickness_mm[first..last].to_vec(),
+            interface_flux_mm_s: interface_flux_mm_s[first..=last].to_vec(),
+            implicit_steps: 0,
+            explicit_steps: 0,
+            wet_to_dry_steps: 0,
+        };
+        richards_solver(
+            VariableSaturatedRichardsInput {
+                time_step_seconds: input.time_step_seconds,
+                center_depth_mm: &input.center_depth_mm[first..last],
+                interface_depth_mm: &input.interface_depth_mm[first..=last],
+                porosity: &input.porosity[first..last],
+                residual_water: &input.residual_water[first..last],
+                saturated_potential_mm: &input.saturated_potential_mm[first..last],
+                saturated_hydraulic_conductivity_mm_s: &input.saturated_hydraulic_conductivity_mm_s
+                    [first..last],
+                hydraulic_model: &input.hydraulic_model[first..last],
+                aquifer_porosity: input.aquifer_porosity,
+                upper_boundary: top_boundary,
+                lower_boundary: bottom_boundary,
+                flux_tolerance_mm_s,
+                depth_tolerance_mm,
+                volume_tolerance,
+                pressure_tolerance_mm,
+            },
+            &mut segment,
+        )?;
+        state.ponding_depth_mm = segment.ponding_depth_mm;
+        state.aquifer_water_mm = segment.aquifer_water_mm;
+        state.liquid_water[first..last].copy_from_slice(&segment.liquid_water);
+        water_table_thickness_mm[first..last].copy_from_slice(&segment.water_table_thickness_mm);
+        interface_flux_mm_s[first..=last].copy_from_slice(&segment.interface_flux_mm_s);
+
+        upper = lower - 1;
+    }
+
+    if !input.permeable[0] {
+        state.ponding_depth_mm = (state.ponding_depth_mm
+            + input.ground_water_flux_mm_s * input.time_step_seconds)
+            .max(0.0);
+    }
+
+    // 用更新后的水量重定位地下水位。
+    if state.aquifer_water_mm >= 0.0 {
+        let mut saturated = true;
+        for level in (0..nlev).rev() {
+            saturated = !input.permeable[level]
+                || state.liquid_water[level] > input.porosity[level] - volume_tolerance
+                || water_table_thickness_mm[level] > thickness_mm[level] - depth_tolerance_mm;
+            if !saturated {
+                water_table_depth_mm =
+                    input.interface_depth_mm[level + 1] - water_table_thickness_mm[level];
+                break;
+            }
+        }
+        if saturated {
+            water_table_depth_mm = 0.0;
+        }
+    } else {
+        water_table_depth_mm = water_table_from_aquifer(
+            input.aquifer_porosity,
+            input.residual_water[nlev - 1],
+            input.saturated_potential_mm[nlev - 1],
+            input.hydraulic_model[nlev - 1],
+            volume_tolerance,
+            depth_tolerance_mm,
+            state.aquifer_water_mm,
+            input.interface_depth_mm[nlev],
+        )?;
+    }
+    water_table_level = last_true_index(
+        &(0..=nlev)
+            .map(|interface| water_table_depth_mm >= input.interface_depth_mm[interface])
+            .collect::<Vec<_>>(),
+    );
+
+    // 水位以上的层把水位占掉的那部分按孔隙度折算进 `ss_vliq`。
+    // 上游这两段循环的范围是 `izwt-1 .. 1`，而那里 `ss_wt` 恒为 0，
+    // 所以是恒等变换 —— 照抄以保持与 Fortran 的一一对应。
+    for level in (0..water_table_level.saturating_sub(1)).rev() {
+        if input.permeable[level] {
+            state.liquid_water[level] = (state.liquid_water[level]
+                * (thickness_mm[level] - water_table_thickness_mm[level])
+                + input.porosity[level] * water_table_thickness_mm[level])
+                / thickness_mm[level];
+        }
+    }
+
+    let infiltration_mm_s = input.ground_water_flux_mm_s
+        - (state.ponding_depth_mm - previous_ponding_depth_mm) / input.time_step_seconds;
+
+    let mut balance_after_mm = state.ponding_depth_mm;
+    for (level, layer_thickness_mm) in thickness_mm.iter().enumerate() {
+        if !input.permeable[level] {
+            continue;
+        }
+        if level < water_table_level.saturating_sub(1) {
+            balance_after_mm += state.liquid_water[level] * layer_thickness_mm;
+        } else if level + 1 == water_table_level {
+            balance_after_mm += state.liquid_water[level]
+                * (water_table_depth_mm - input.interface_depth_mm[level]);
+            balance_after_mm += input.porosity[level]
+                * (input.interface_depth_mm[level + 1] - water_table_depth_mm);
+        } else {
+            balance_after_mm += input.porosity[level] * layer_thickness_mm;
+        }
+    }
+    balance_after_mm += state.aquifer_water_mm;
+
+    let balance_error_mm = balance_after_mm
+        - (balance_before_mm
+            + (input.ground_water_flux_mm_s
+                - transpiration_demand_mm.iter().sum::<f64>()
+                - input.subsurface_runoff_mm_s)
+                * input.time_step_seconds
+            - transpiration_deficit_mm);
+
+    // 逐层的 `smp`/`hk`：水位以上按含水率反解，水位那一层按加权含水率，
+    // 水位以下直接取饱和值。
+    state.matric_potential_mm = vec![0.0; nlev];
+    state.hydraulic_conductivity_mm_s = vec![0.0; nlev];
+    for level in 0..nlev {
+        if level + 1 < water_table_level {
+            state.matric_potential_mm[level] = soil_psi_from_vliq(
+                state.liquid_water[level],
+                input.porosity[level],
+                input.residual_water[level],
+                input.saturated_potential_mm[level],
+                input.hydraulic_model[level],
+            );
+            state.hydraulic_conductivity_mm_s[level] = soil_hydraulic_conductivity(
+                state.matric_potential_mm[level],
+                input.saturated_potential_mm[level],
+                input.saturated_hydraulic_conductivity_mm_s[level],
+                input.hydraulic_model[level],
+            );
+        } else if level + 1 == water_table_level {
+            let layer_thickness_mm =
+                input.interface_depth_mm[level + 1] - input.interface_depth_mm[level];
+            let volumetric_water = (state.liquid_water[level]
+                * (water_table_depth_mm - input.interface_depth_mm[level])
+                + input.porosity[level]
+                    * (input.interface_depth_mm[level + 1] - water_table_depth_mm))
+                / layer_thickness_mm;
+            state.matric_potential_mm[level] = soil_psi_from_vliq(
+                volumetric_water,
+                input.porosity[level],
+                input.residual_water[level],
+                input.saturated_potential_mm[level],
+                input.hydraulic_model[level],
+            );
+            state.hydraulic_conductivity_mm_s[level] = soil_hydraulic_conductivity(
+                state.matric_potential_mm[level],
+                input.saturated_potential_mm[level],
+                input.saturated_hydraulic_conductivity_mm_s[level],
+                input.hydraulic_model[level],
+            );
+        } else {
+            state.matric_potential_mm[level] = input.saturated_potential_mm[level];
+            state.hydraulic_conductivity_mm_s[level] =
+                input.saturated_hydraulic_conductivity_mm_s[level];
+        }
+    }
+
+    // `qlayer` 是唯一直接暴露给 history 的输出。
+    state.interface_flux_mm_s = interface_flux_mm_s;
+    state.water_table_depth_mm = water_table_depth_mm;
+
+    Ok(VariableSaturatedSoilWaterOutput {
+        infiltration_mm_s,
+        transpiration_demand_mm_s: transpiration_demand_mm,
+        transpiration_actual_mm,
+        transpiration_aquifer_mm,
+        balance_error_mm,
+    })
+}
+
+/// 校验 [`soil_water_vertical_movement`] 的窗口与状态长度。
+fn validate_soil_water_movement(
+    input: VariableSaturatedSoilWaterInput<'_>,
+    state: &VariableSaturatedSoilWaterState,
+) -> Result<usize> {
+    let nlev = input.center_depth_mm.len();
+    ensure!(
+        nlev > 0
+            && input.interface_depth_mm.len() == nlev + 1
+            && input.permeable.len() == nlev
+            && input.porosity.len() == nlev
+            && input.residual_water.len() == nlev
+            && input.saturated_potential_mm.len() == nlev
+            && input.saturated_hydraulic_conductivity_mm_s.len() == nlev
+            && input.hydraulic_model.len() == nlev
+            && input.root_fraction.len() == nlev
+            && input.root_flux_mm_s.len() == nlev
+            && state.liquid_water.len() == nlev
+            && state.matric_potential_mm.len() == nlev
+            && state.hydraulic_conductivity_mm_s.len() == nlev
+            && state.interface_flux_mm_s.len() == nlev + 1,
+        "VSF soil water movement inputs are invalid"
+    );
+    ensure!(
+        input.time_step_seconds > 0.0
+            && input.time_step_seconds.is_finite()
+            && input.tolerance_mm > 0.0
+            && input.tolerance_mm.is_finite()
+            && input.aquifer_porosity > 0.0
+            && input.aquifer_porosity.is_finite()
+            && input
+                .interface_depth_mm
+                .windows(2)
+                .all(|pair| pair[1] > pair[0])
+            && input
+                .porosity
+                .iter()
+                .zip(input.residual_water)
+                .all(|(porosity, residual)| {
+                    porosity.is_finite()
+                        && residual.is_finite()
+                        && *residual >= 0.0
+                        && *residual < *porosity
+                })
+            && input
+                .saturated_potential_mm
+                .iter()
+                .all(|value| value.is_finite() && *value < 0.0)
+            && input
+                .saturated_hydraulic_conductivity_mm_s
+                .iter()
+                .all(|value| value.is_finite() && *value > 0.0)
+            && input
+                .root_flux_mm_s
+                .iter()
+                .chain(input.root_fraction.iter())
+                .all(|value| value.is_finite())
+            && state
+                .liquid_water
+                .iter()
+                .chain(&state.matric_potential_mm)
+                .chain(&state.hydraulic_conductivity_mm_s)
+                .chain(&state.interface_flux_mm_s)
+                .all(|value| value.is_finite())
+            && [
+                input.ground_water_flux_mm_s,
+                input.transpiration_mm_s,
+                input.subsurface_runoff_mm_s,
+                state.ponding_depth_mm,
+                state.water_table_depth_mm,
+                state.aquifer_water_mm,
+            ]
+            .iter()
+            .all(|value| value.is_finite()),
+        "VSF soil water movement values are not physical"
+    );
+    Ok(nlev)
+}
+
 /// `lev_update` 只点亮一个位置的辅助数组。
 fn single_level_update(layers: usize, level: usize) -> Vec<bool> {
     let mut update = vec![false; layers + 2];
