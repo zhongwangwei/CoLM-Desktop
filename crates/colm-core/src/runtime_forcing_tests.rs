@@ -25,6 +25,8 @@ fn prepared_point_forcing_matches_mod_forcing() {
         calendar_day: 80.5,
         longitude_radians: 0.0,
         latitude_radians: 0.7,
+        grid_longitude_radians: 0.0,
+        grid_latitude_radians: 0.7,
         boundary_layer_height_m: None,
     })
     .unwrap();
@@ -73,6 +75,8 @@ fn vector_wind_keeps_its_components_and_bad_scalar_is_rejected() {
         calendar_day: 1.0,
         longitude_radians: 0.0,
         latitude_radians: 0.0,
+        grid_longitude_radians: 0.0,
+        grid_latitude_radians: 0.0,
         boundary_layer_height_m: None,
     };
     let forcing = prepare_runtime_forcing(input).unwrap();
@@ -99,6 +103,8 @@ fn boundary_layer_height_is_optional_but_must_be_positive() {
         calendar_day: 1.0,
         longitude_radians: 0.0,
         latitude_radians: 0.0,
+        grid_longitude_radians: 0.0,
+        grid_latitude_radians: 0.0,
         boundary_layer_height_m: None,
     };
     assert_eq!(
@@ -129,77 +135,77 @@ fn boundary_layer_height_is_optional_but_must_be_positive() {
     );
 }
 
-/// 短波拆分的**输入时刻**：四个波段之和恒等于总量，而角度取的是**步首**。
+/// 短波直散拆分喂的是**强迫网格单元中心**的太阳角，不是站点坐标。
 ///
-/// 上游 `MOD_Forcing.F90:965-985` 用 `sunang = orb_coszen(calendarday(idate), lon, lat)`
-/// 把宽带短波拆成四个波段，`difrat = 0.0604/(sunang-0.0223)+0.0683` 在冬季低太阳角下
-/// 对 `sunang` 极敏感（中午附近 `d(difrat)/d(sunang) ≈ -1.7`），所以**喂的是哪一刻的
-/// 角度**会直接改波段比例，而总量看不出来。
+/// 上游 `MOD_Forcing.F90:619-621` 是
+/// `a = max(0., forc_xy_solarin); calday = calendarday(idate);`
+/// `sunang = orb_coszen(calday, gforc%rlon, gforc%rlat)` —— 两个坐标都取自
+/// **强迫网格**。同文件 `:797`（地形降尺度的 `coszen`/`cosazi`）和
+/// `CoLMMAIN.F90:2076` 用的却是 `patchlonr`/`patchlatr`（站点）。同一个
+/// `orb_coszen` 在同一个模式里被喂了两组坐标，差最多 0.5°。
 ///
-/// 实测（CN-Cng 对齐算例，1 月 1 日 12:00 本地正午那一步，
-/// `SWdown = 393.2900`、`f_xy_solarin` 两引擎逐位相同）：
+/// `difrat = 0.0604/(sunang-0.0223)+0.0683` 对 `sunang` 极敏感，所以这 0.5°
+/// 会被放大成整个可见光/近红外波段的百分比级偏差。实测 CN-Cng：
 ///
-/// | 角度取 | `solvd` | 上游 `f_solvdln` |
-/// |---|---|---|
-/// | 步首 11:30 | 64.892454 | |
-/// | 步末 12:00 | 65.123 | |
-/// | 上游实测 | | **64.953960** |
+/// | 喂进去的角度 | `solvd` |
+/// |---|---|
+/// | 站点 44.5933/123.5092 | 64.892454 |
+/// | 网格中心 44.5/123.5 | **64.953960** |
+/// | 上游 `f_solvdln`（黄金） | **64.953960** |
 ///
-/// 步首更接近上游（−0.09% 对 +0.26%），所以本仓库保留步首角。
-/// **但这是 11 条正午记录的一致残差（角度恒差 1.47e-3、折合约 255 秒）**，
-/// 不是零：上游那一步实际用的时刻介于两者之间，来源未定。
-/// 这条测试的作用是钉住"现在喂的是步首" —— 谁把它换成步末，
-/// 或者改了 `orbital_cosine_zenith`，都会在这里红，逼他重新对着上游量一次，
-/// 而不是让一个 0.26% 的波段偏差悄悄扩散到整条辐射链。
+/// 网格中心复现上游到末位（64.95396021855056 逐位相同），而站点坐标差 0.09%。
+/// 修之前这条测试把 0.00148 的角度差（正好是两组坐标的差）当成"约 255 秒的
+/// 时间偏移"，追了好几轮 —— **不是时刻，是坐标**。
+///
+/// `SinglePoint` 的网格是 360×180 的 1° 全球网格，所以单元中心就是
+/// `floor(站点) + 0.5`，见 [`forcing_grid_center_degrees`]。
 #[test]
-fn the_shortwave_split_is_fed_the_step_start_solar_angle() {
-    let total = 393.2900;
+fn the_shortwave_split_is_fed_the_grid_cell_solar_angle() {
+    let total: f64 = 393.2900085449219;
     let longitude_degrees: f64 = 123.50920;
     let latitude_degrees: f64 = 44.59330;
-    let longitude = longitude_degrees.to_radians();
-    let latitude = latitude_degrees.to_radians();
     // `localtime2gmt` 的位移：`int(LocalLongitude/15*3600)`（`MOD_TimeManager.F90`）。
     let shift = (longitude_degrees / 15.0 * 3600.0) as i64;
-    let day: f64 = 1.0;
-    let start_seconds = 41_400; // 11:30，`idate` 的步末是 12:00
-    let end_seconds = 43_200;
-    let start_cosine = crate::orbital_cosine_zenith(
-        day + (start_seconds - shift) as f64 / 86_400.0,
-        longitude,
-        latitude,
+    // 上游那一步的 `calday`（GMT，由 `calendarday(idate)` 给出；`idate` 是步首的
+    // **本地**时刻，2008-01-01 11:30 本地 → 03:30 GMT）。
+    let calendar_day = 1.0 + (41_400 - shift) as f64 / 86_400.0;
+
+    let (grid_latitude, grid_longitude) =
+        forcing_grid_center_degrees(latitude_degrees, longitude_degrees);
+    assert_eq!((grid_latitude, grid_longitude), (44.5, 123.5));
+
+    let grid_angle = crate::orbital_cosine_zenith(
+        calendar_day,
+        grid_longitude.to_radians(),
+        grid_latitude.to_radians(),
     );
-    let end_cosine = crate::orbital_cosine_zenith(
-        day + (end_seconds - shift) as f64 / 86_400.0,
-        longitude,
-        latitude,
+    let site_angle = crate::orbital_cosine_zenith(
+        calendar_day,
+        longitude_degrees.to_radians(),
+        latitude_degrees.to_radians(),
     );
 
-    let start = split_broadband_shortwave(total, start_cosine);
-    let end = split_broadband_shortwave(total, end_cosine);
+    let grid = split_broadband_shortwave(total, grid_angle);
+    let site = split_broadband_shortwave(total, site_angle);
 
     // 四个波段之和恒等于总量 —— 两引擎的 `f_xy_solarin` 逐位相同，靠的就是这条。
-    for (label, forcing) in [("start", start), ("end", end)] {
+    for forcing in [grid, site] {
         let sum = forcing.direct_visible_w_m2
             + forcing.diffuse_visible_w_m2
             + forcing.direct_near_infrared_w_m2
             + forcing.diffuse_near_infrared_w_m2;
         close(sum, total);
-        assert!(forcing.direct_visible_w_m2 > 0.0, "{label}");
     }
 
-    // 步首角复现上游到 0.1% 以内；步末角差 0.26%。两者相差 0.35%，远大于 1e-12，
-    // 所以这条断言真的能区分"喂了哪一刻"。
-    let upstream_direct_visible = 64.953960;
+    // 上游黄金值 `f_solvdln`（本地正午那一步的可见光直射）。网格中心必须逐位命中，
+    // 站点坐标必须明显偏掉 —— 两条一起才钉得住"用的是哪一组坐标"。
+    let upstream_direct_visible: f64 = 64.953_960_218_550_56;
+    assert_eq!(grid.direct_visible_w_m2, upstream_direct_visible);
+    assert_eq!(grid_angle, 0.375_675_581_580_316_3);
+    let off_by =
+        (site.direct_visible_w_m2 - upstream_direct_visible).abs() / upstream_direct_visible;
     assert!(
-        (start.direct_visible_w_m2 - upstream_direct_visible).abs() / upstream_direct_visible
-            < 1.0e-3,
-        "the step-start angle must reproduce upstream's local-noon band, got {}",
-        start.direct_visible_w_m2
-    );
-    assert!(
-        (end.direct_visible_w_m2 - upstream_direct_visible).abs() / upstream_direct_visible
-            > 1.0e-3,
-        "the step-end angle is measurably further from upstream, got {}",
-        end.direct_visible_w_m2
+        off_by > 5.0e-4,
+        "the site coordinates must be measurably worse than the grid cell, got {off_by}"
     );
 }

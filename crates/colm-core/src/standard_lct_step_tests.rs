@@ -47,6 +47,8 @@ fn standard_lct_energy_step_uses_one_shared_physical_handoff() {
         calendar_day: 172.5,
         longitude_radians: 0.0,
         latitude_radians: 0.5,
+        grid_longitude_radians: 0.5,
+        grid_latitude_radians: 0.5,
         boundary_layer_height_m: None,
     })
     .unwrap();
@@ -146,6 +148,8 @@ fn standard_lct_soil_step_carries_one_rust_column_between_energy_and_water() {
         calendar_day: 172.5,
         longitude_radians: 0.0,
         latitude_radians: 0.5,
+        grid_longitude_radians: 0.5,
+        grid_latitude_radians: 0.5,
         boundary_layer_height_m: None,
     })
     .unwrap();
@@ -199,6 +203,8 @@ fn standard_lct_snow_soil_step_carries_active_snow_and_soil_columns() {
         calendar_day: 20.5,
         longitude_radians: 0.0,
         latitude_radians: 0.5,
+        grid_longitude_radians: 0.5,
+        grid_latitude_radians: 0.5,
         boundary_layer_height_m: None,
     })
     .unwrap();

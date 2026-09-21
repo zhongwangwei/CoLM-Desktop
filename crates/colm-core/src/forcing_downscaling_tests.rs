@@ -163,6 +163,8 @@ fn runtime_adapter_uses_one_grid_to_column_forcing_handoff() {
         calendar_day: 172.25,
         longitude_radians: 0.0,
         latitude_radians: 0.0,
+        grid_longitude_radians: 0.0,
+        grid_latitude_radians: 0.0,
         boundary_layer_height_m: None,
     })
     .unwrap();

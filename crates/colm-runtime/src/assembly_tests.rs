@@ -81,6 +81,8 @@ fn binding() -> StandardLctStepBinding {
             calendar_day: 172.5,
             longitude_radians: 0.0,
             latitude_radians: 0.5,
+            grid_longitude_radians: 0.5,
+            grid_latitude_radians: 0.5,
             boundary_layer_height_m: None,
         })
         .unwrap(),
@@ -673,6 +675,8 @@ fn input_of(forcing: colm_core::RuntimeForcing) -> RuntimeForcingInput {
         calendar_day: 172.5,
         longitude_radians: 0.0,
         latitude_radians: 0.5,
+        grid_longitude_radians: 0.5,
+        grid_latitude_radians: 0.5,
         boundary_layer_height_m: None,
     }
 }

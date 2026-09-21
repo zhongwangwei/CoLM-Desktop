@@ -210,7 +210,9 @@ pub use runoff::{
 pub use runtime_clock::{
     end_of_step_calendar_time, LaiUpdateSchedule, RestartFrequency, RuntimeClock, RuntimeStep,
 };
-pub use runtime_forcing::{prepare_runtime_forcing, RuntimeForcing, RuntimeForcingInput};
+pub use runtime_forcing::{
+    forcing_grid_center_degrees, prepare_runtime_forcing, RuntimeForcing, RuntimeForcingInput,
+};
 pub use snow::{
     add_new_snow, combine_snow_layers, compact_snow_layers, divide_snow_layers, snow_fraction,
     snow_water, update_snow_age, NewSnowInput, NewSnowOutcome, RestartSnowSlots, RuntimeSnowColumn,

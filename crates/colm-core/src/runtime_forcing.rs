@@ -27,8 +27,23 @@ pub struct RuntimeForcingInput {
     pub downward_longwave_w_m2: f64,
     /// `calendarday(idate)`, already expressed in CoLM's orbital calendar.
     pub calendar_day: f64,
+    /// **站点**（`patchlonr`/`patchlatr`）的经度（弧度）。
+    ///
+    /// 用来算 [`RuntimeForcing::cosine_zenith`]，也就是上游在
+    /// `MOD_Forcing.F90:797`（地形降尺度的 `coszen` 与 `cosazi`）和
+    /// `CoLMMAIN.F90:2076` 上用的那一份。
     pub longitude_radians: f64,
+    /// 站点的纬度（弧度）。
     pub latitude_radians: f64,
+    /// 强迫**网格单元中心**（`gforc%rlon`/`rlat`）的经度（弧度），见
+    /// [`forcing_grid_center_degrees`]。
+    ///
+    /// **只给短波直散拆分用。** 上游 `MOD_Forcing.F90:621` 的那一处读的是网格中心，
+    /// 与站点相差可达 0.5°；在拆分公式里被放大到 1.8%（实测 CN-Cng 冬季窗口的
+    /// `f_solvd` 等 12 个量）。两个坐标不是一回事，别合并成一个。
+    pub grid_longitude_radians: f64,
+    /// 强迫网格单元中心的纬度（弧度）。
+    pub grid_latitude_radians: f64,
     /// `forc_hpbl`：`DEF_USE_CBL_HEIGHT` 打开时上游额外读进来的那个强迫变量
     /// （`MOD_UserSpecifiedForcing.F90:96` 把 `NVAR` 加一）。
     ///
@@ -103,6 +118,28 @@ impl RuntimeForcing {
     }
 }
 
+/// 站点坐标 → 它所落在的**强迫网格单元中心**（度）。
+///
+/// CoLM 的 `SinglePoint` 构型把强迫网格钉成 360×180 的 1° 全球网格
+/// （`MOD_Namelist.F90` 的 `#ifdef SinglePoint` 把 `DEF_nx_blocks`/`DEF_ny_blocks`
+/// 直接赋成 360/180），再由 `MOD_Grid.F90::grid_define_by_ndims` 生成边界：
+/// `lat_s = 90 - ilat`、`lat_n = 91 - ilat`、`lon_w = -180 + (ilon-1)`、`lon_e = -180 + ilon`。
+/// 所以单元中心就是"下界 + 0.5"，而包含 `x` 的那个单元的判据是 `lat_s <= x < lat_n`
+/// —— 对 `x` 取 `floor(x) + 0.5` 正好（负数也对：−44.5933 落在 [−45,−44]，中心 −44.5）。
+///
+/// `MOD_Forcing` 的短波拆分读的是 `gforc%rlat`/`rlon`（网格单元中心），
+/// 而 `CoLMMAIN` 的 `coszen` 读的是 `patchlatr`/`patchlonr`（站点）。实测 CN-Cng：
+/// 站点 44.5933/123.5092，网格中心 44.5/123.5，短波拆分因此差 1.77%。
+///
+/// 只在 `x` 恰好取到网格外边界（±90、±180）时 `floor` 与上游的搜索规则会分界不同；
+/// 这两个值在 1° 网格上是退化情形，本仓库的站点算例碰不到。
+pub fn forcing_grid_center_degrees(latitude_degrees: f64, longitude_degrees: f64) -> (f64, f64) {
+    (
+        latitude_degrees.floor() + 0.5,
+        longitude_degrees.floor() + 0.5,
+    )
+}
+
 /// Ports the non-downscaled, all-band branch of `MOD_Forcing:read_forcing`.
 ///
 /// CoLM represents scalar wind as equal east/north components, splits source
@@ -121,10 +158,20 @@ pub fn prepare_runtime_forcing(input: RuntimeForcingInput) -> Result<RuntimeForc
         let component = input.northward_or_scalar_wind_m_s * (1.0 / 2.0_f64.sqrt());
         (component, component)
     };
+    // 站点坐标：上游 `MOD_Forcing.F90:797` 的地形降尺度 `coszen`/`cosazi`
+    // 与 `CoLMMAIN.F90:2076` 都用它。
     let cosine_zenith = orbital_cosine_zenith(
         input.calendar_day,
         input.longitude_radians,
         input.latitude_radians,
+    );
+    // **短波拆分另用网格单元中心。** `MOD_Forcing.F90:621` 是
+    // `sunang = orb_coszen(calday, gforc%rlon, gforc%rlat)`；站点与网格中心
+    // 相差可达 0.5°，拆分对 `sunang` 强非线性，实测差到 1.77%。
+    let sun_angle = orbital_cosine_zenith(
+        input.calendar_day,
+        input.grid_longitude_radians,
+        input.grid_latitude_radians,
     );
     Ok(RuntimeForcing {
         air_temperature_k: input.air_temperature_k,
@@ -137,7 +184,7 @@ pub fn prepare_runtime_forcing(input: RuntimeForcingInput) -> Result<RuntimeForc
         northward_wind_m_s,
         downward_longwave_w_m2: input.downward_longwave_w_m2,
         solar_in_w_m2: input.downward_shortwave_w_m2,
-        shortwave: split_broadband_shortwave(input.downward_shortwave_w_m2, cosine_zenith),
+        shortwave: split_broadband_shortwave(input.downward_shortwave_w_m2, sun_angle),
         cosine_zenith,
         air_density_kg_m3: air_density_kg_m3(
             input.surface_pressure_pa,
@@ -179,6 +226,8 @@ fn validate(input: RuntimeForcingInput) -> Result<()> {
         input.calendar_day,
         input.longitude_radians,
         input.latitude_radians,
+        input.grid_longitude_radians,
+        input.grid_latitude_radians,
     ] {
         ensure!(value.is_finite(), "runtime forcing must be finite");
     }
@@ -191,6 +240,8 @@ fn validate(input: RuntimeForcingInput) -> Result<()> {
             && input.downward_longwave_w_m2 >= 0.0
             && input.latitude_radians.abs() <= std::f64::consts::FRAC_PI_2
             && input.longitude_radians.abs() <= std::f64::consts::PI
+            && input.grid_latitude_radians.abs() <= std::f64::consts::FRAC_PI_2
+            && input.grid_longitude_radians.abs() <= std::f64::consts::PI
             && (input.wind_is_vector || input.northward_or_scalar_wind_m_s >= 0.0),
         "runtime forcing is physically invalid"
     );

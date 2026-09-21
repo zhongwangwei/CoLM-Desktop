@@ -9,8 +9,8 @@ use std::path::Path;
 
 use anyhow::{bail, ensure, Context, Result};
 use colm_core::{
-    month_day, orbital_calendar_day, prepare_runtime_forcing, CalendarTime, RuntimeForcing,
-    RuntimeForcingInput,
+    forcing_grid_center_degrees, month_day, orbital_calendar_day, prepare_runtime_forcing,
+    CalendarTime, RuntimeForcing, RuntimeForcingInput,
 };
 
 use crate::{canonical_units, check, days_from_civil, resolve, summarize, MetSummary, Stamp};
@@ -172,12 +172,18 @@ impl PointForcingSeries {
     /// This is deliberately an adapter: scalar-wind expansion, precipitation
     /// splitting, and broadband shortwave partition all remain in `colm-core`
     /// so `colm-init` and the native driver use the same physics hand-off.
+    ///
+    /// 四个坐标参数里，前两个是**站点**、后两个是**强迫网格单元中心** ——
+    /// 上游的短波直散拆分读网格中心、地形降尺度读站点。见
+    /// [`colm_core::forcing_grid_center_degrees`]。
     pub fn runtime_at_seconds(
         &self,
         time_seconds: f64,
         calendar_day: f64,
         longitude_radians: f64,
         latitude_radians: f64,
+        grid_longitude_radians: f64,
+        grid_latitude_radians: f64,
     ) -> Result<RuntimeForcing> {
         let frame = self.sample_at_seconds(time_seconds)?;
         prepare_runtime_forcing(RuntimeForcingInput {
@@ -193,6 +199,8 @@ impl PointForcingSeries {
             calendar_day,
             longitude_radians,
             latitude_radians,
+            grid_longitude_radians,
+            grid_latitude_radians,
             boundary_layer_height_m: frame.boundary_layer_height_m,
         })
     }
@@ -222,11 +230,18 @@ impl PointForcingSeries {
             .context("forcing series is empty")?
             .time_seconds
             + seconds as f64;
+        // 日小数用**站点**经度（上游 `adj2begin` 就是这么移的），太阳天顶角有两份：
+        // `cosine_zenith` 用站点（`MOD_Forcing.F90:797`），短波拆分的另一份用
+        // **网格单元中心**（`:621`）。三个坐标不是一回事，别合并。
+        let (grid_latitude, grid_longitude) =
+            forcing_grid_center_degrees(latitude_degrees, longitude_degrees);
         self.runtime_at_seconds(
             source_seconds,
             orbital_calendar_day(time, greenwich, longitude_degrees)?,
             longitude_degrees.to_radians(),
             latitude_degrees.to_radians(),
+            grid_longitude.to_radians(),
+            grid_latitude.to_radians(),
         )
     }
 }

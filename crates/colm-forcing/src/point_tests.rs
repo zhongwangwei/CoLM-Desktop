@@ -119,11 +119,14 @@ fn point_sampler_uses_fortran_linear_and_nearest_rules() {
 fn point_runtime_adapter_uses_the_shared_core_forcing_path() {
     let dir = temp_dir("runtime");
     let series = load_point_forcing(point_file(&dir, false)).unwrap();
-    let forcing = series.runtime_at_seconds(900.0, 80.5, 0.0, 0.7).unwrap();
+    let forcing = series
+        .runtime_at_seconds(900.0, 80.5, 0.0, 0.7, 0.0, 0.7)
+        .unwrap();
     assert_eq!(forcing.air_temperature_k, 273.65);
     assert_eq!(forcing.convective_precipitation_kg_m2_s, 0.001 / 3.0);
     assert_eq!(forcing.large_scale_precipitation_kg_m2_s, 0.001 * 2.0 / 3.0);
-    assert!((forcing.eastward_wind_m_s - 3.5 / 2.0_f64.sqrt()).abs() < 1.0e-12);
+    // 上游写的是 `sca = 1/sqrt(2.0_r8)`（乘一个折叠好的倒数常量），不是除法。
+    assert_eq!(forcing.eastward_wind_m_s, 3.5 * (1.0 / 2.0_f64.sqrt()));
     assert_eq!(forcing.eastward_wind_m_s, forcing.northward_wind_m_s);
 }
 

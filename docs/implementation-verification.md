@@ -4688,55 +4688,87 @@ gfortran 把 `1/sqrt(2.0_r8)` 折成一个 f64 常量，再与每个样本**相�
 `golden-compare` 的分层残差从 4/27/51 降到 **2/27/51**（总 82 → 80），
 tier0 只剩 `f_xy_solarin`(11/264) 与 `f_xy_q`(3/264)。
 
-## 下一个目标已定位：短波分带那 12 个量，误差形状指向 `sunang`（2026 年，实测）
+## 短波分带那 12 个量：不是时刻，是**坐标**（2026 年，实测）
 
-tier1 的 27 条残差里最大的一簇是**纯强迫层**的短波分带，12 个变量：
-`f_solvd`/`f_solvi`/`f_solnd`/`f_solni`（`solvd = forc_sols`、`solvi = forc_solsd`、
-`solnd = forc_soll`、`solni = forc_solld`，`MOD_NetSolar.F90:279-315`）
-以及四条 `f_sr*` 反射。它们**只依赖入射短波与太阳天顶角**，与模式状态无关，
-所以这一簇的偏差是一个干净的、可独立验证的复现器。
+上一轮把这一簇记成"误差形状指向 `sunang`、疑似 255 秒的时间偏移"。这轮做了一次
+决定性测量，结论是**时刻没错，坐标错了**。
 
-实测（`CN-Cng-aligned`，`f_solvd`，同一天逐小时）：
+### 决定性测量：让内核把 `sunang` 打出来
 
-| 记录 | 上游 | Rust | 相对差 |
-|---|---|---|---|
-| 8 | 5.79044 | 5.68965 | **+1.77%** |
-| 9 | 33.53547 | 33.43152 | +0.31% |
-| 10 | 53.24130 | 53.16934 | +0.14% |
-| 11 | 63.52143 | 63.45880 | +0.10% |
-| 12 | 62.59323 | 62.53404 | +0.09% |
-| 13 | 49.56965 | 49.51237 | +0.12% |
-| 14 | 29.28402 | 29.22583 | +0.20% |
-| 15 | 6.12633 | 6.15276 | **−0.43%** |
+在 `vendor/CoLM202X/main/MOD_Forcing.F90` 的分带块里临时加了一段
+`WRITE`（`/tmp/colm_forc_dump.txt`，逐步输出 `calday`、`a`、`sunang` 与四个波段），
+重建内核后跑 `CN-Cng-aligned`。有了逐步真值，反解就变成直接对比：
 
-**误差在一天的边缘最大、正午最小，并且在下午翻号** —— 这正是"太阳天顶角差一点"
-的指纹：分带公式对 `sunang` 是强非线性的
-（`cloud = (1160*sunang-a)/(963*sunang)`、`difrat = 0.0604/(sunang-0.0223)+0.0683`，
-`MOD_Forcing.F90:604-642`），`sunang` 越小越敏感。
-入射总量本身是对的（`f_xy_solarin` 现在只剩 11 条 1 ULP），所以问题不在读数、
-也不在分带公式的常数，而在**喂进去的那个 `sunang`**。
+```
+step 16: calday=365.99025462962965  a=91.262001038  sunang=0.053003690472386
+```
 
-已经排除与尚未排除的：
+而本仓库在同一时刻、同一 `calday`、用**站点**经纬度算出来的是
+`0.052114304` —— 差 8.9e-4。既然时刻一致，剩下的只能是经纬度。
 
-- **时段约定已核对**：上游 `read_forcing` 在 `TICKTIME` **之前**被调用
-  （`CoLM.F90:452` vs `:479`），传的是 `jdate`（`adj2begin` 后的步首），
-  所以 `MOD_Forcing` 的 `calday = calendarday(jdate)` 是**步首**；
-  本仓库的 `input.calendar_day` 也是步首（`clock.forcing_time`）。
-- **`orb_coszen` 的移植**（`atmosphere.rs::orbital_cosine_zenith`）逐项保留了
-  `SIN`/`COS` 分算与 `mul_add`，注释里已经写着"LLVM 合并配对调用会改一个 ULP"，
-  所以最后一位有保障，但**没有实测过它与上游在同一时刻的逐位一致**。
-- **分带公式本身逐行相同**，只有两处无害但不该留的偏离：
-  Rust 写的是 `cloud.max(0.0001)`（上游是 `cloud = max(cloud, 0.)`；
-  因为紧接着就是 `max(0.58, cloud)`，这一处数值上无影响），
-  以及上游先做 `a = max(0., forc_xy_solarin)` 再用 `a` 参与四个乘积，
-  Rust 用的是未截断的 `total_w_m2`（本算例入射非负，也无影响）。
-- **`orbital_calendar_day` 里的经度平移值得单独查**：它把
-  `seconds -= (lon/15*3600) as i32` 折进日小数，而上游是把经度交给
-  `orb_coszen` 的第二个入参。两者在精确算术下互相抵消
-  （`2*pi*(lon/360) == lon_rad`），但浮点上留下的是"两次舍入之差"，
-  量级 1e-14，不足以解释 1%。
+反解"哪个纬度能复现上游的 `sunang`"，得到的隐含纬度随时刻在 44.5087 与 44.5000
+之间游走；把它当成常数拟合对不上（残差变号）。真正的解释是：**上游在同一个
+`orb_coszen` 上喂了两组不同的坐标**。
 
-下一步该做的是一次**决定性测量**：在 `extends/interception/MOD_LeafTemperature_Extended.F90`
-（或 `MOD_Forcing.F90` 分带块内）把 `sunang` 与 `forc_sols` 逐步打出来，
-与本仓库同步打印的 `forcing.cosine_zenith` 对同一时刻逐位比。
-不要再用"反解分带比值"的办法 —— 记录里是两步平均，反解不出单个 `sunang`。
+### 根因
+
+| 位置 | 坐标 | 用途 |
+|---|---|---|
+| `MOD_Forcing.F90:621` | `gforc%rlon`/`rlat` = **强迫网格单元中心** | 短波直散拆分 |
+| `MOD_Forcing.F90:797` | `patchlonr`/`patchlatr` = **站点** | 地形降尺度的 `coszen`/`cosazi` |
+| `CoLMMAIN.F90:2076` | `patchlonr`/`patchlatr` = **站点** | 地表反照率的 `coszen` |
+
+`SinglePoint` 的强迫网格是 360×180 的 1° 全球网格（`MOD_Namelist.F90` 的
+`#ifdef SinglePoint` 把 `DEF_nx_blocks`/`DEF_ny_blocks` 直接赋成 360/180，
+`MOD_Grid.F90::grid_define_by_ndims` 再由它们生成边界），所以单元中心是
+`floor(站点) + 0.5`：CN-Cng 的 44.5933/123.5092 → **44.5/123.5**。
+
+这个 0.093° 的差在拆分公式里被放大：`difrat = 0.0604/(sunang-0.0223)+0.0683`
+在低太阳角下 `d(difrat)/d(sunang)` 很大，于是可见光波段差 1.77%。
+
+**顺带解掉了"约 255 秒"那条悬案。** 本地正午那一步的角度差实测是
+`0.3756755815803163`（网格中心）对 `0.3741924582917629`（站点），差 1.48e-3
+—— 正是上一轮被折成"255 秒"的那个数。它从来不是时间偏移。
+
+### 修法与结果
+
+`RuntimeForcingInput` 现在同时带**站点**与**网格中心**两组坐标：
+`cosine_zenith`（供降尺度与 `cosazi`）取站点，短波拆分另算一个
+`sun_angle` 取网格中心。`forcing_grid_center_degrees` 把"1° 网格单元中心 =
+`floor(x)+0.5`"这条推导写在一处，`PointForcingSeries::runtime_at_calendar_time`
+是唯一的调用点。
+
+实测同一个本地正午步：
+
+| 喂进去的角度 | `solvd` |
+|---|---|
+| 站点 44.5933/123.5092 | 64.892454 |
+| 网格中心 44.5/123.5 | **64.953960** |
+| 上游 `f_solvdln`（黄金） | **64.953960** |
+
+网格中心**逐位命中**（`64.95396021855056` 与黄金、与内核打印的 `sols` 完全相同）。
+
+`f_solvd`/`f_solvi`/`f_solnd`/`f_solni` 与四个 `*ln` 共 8 个变量从残差表里消失，
+tier1 从 27 降到 **19**（总残差 80 → 72）：
+
+```
+failures by tier: {"tier0": 2, "tier1": 19, "tier2": 51}   改前 {2, 27, 51}
+```
+
+上一轮那条测试（`the_shortwave_split_is_fed_the_step_start_solar_angle`）把
+`64.892454` 当成"步首角"、把 0.00148 的角度差当成未定的时间偏移，正是这个坑的
+产物；已改写成 `the_shortwave_split_is_fed_the_grid_cell_solar_angle`：
+网格中心**断言逐位相等**，站点坐标断言至少偏 5e-4，两条一起钉住用的是哪一组。
+
+### 剩下的一簇：`f_sr*` 与 `f_sab*` 都指向反照率
+
+`f_srvd = solvd*alb(1,1)` 等四条的算式已逐行核对过（`MOD_NetSolar.F90:281-284`、
+`net_solar.rs:130-139`，含 `srvd` 用 direct-direct、`srvi` 用 direct-diffuse 的
+配对），所以 `f_srvd`/`f_srvi`/`f_srnd`/`f_srni`/`f_sr` 这 9 条残差**继承自
+`f_alb`**：`sol*` 现在是逐位对的，剩下的只能是 `alb`。`f_alb` 自身仍在残差表里，
+`f_sabg`/`f_sabvsun`/`f_sabvsha` 同理（地面吸收 = 入射 − 反射）。
+
+**所以下一个目标是 `alb` 这条链**（`albland` + 雪盖混合 + `TwoStream`），
+它一次能解掉 tier1 里 19 条中的 13 条。注意容差表头部写的不变式
+——"一个变量的层级不得严于它任何一个输入的层级"—— 在动 `f_sr*`/`f_sab*`
+的层级之前先修 `f_alb`，否则就是把分层本身毁掉。
