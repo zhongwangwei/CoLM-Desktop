@@ -542,7 +542,7 @@ pub fn standard_lct_snow_soil_step(
         energy: with_state_canopy(input.energy, state.energy.canopy),
         ..input
     };
-    let (snow_layers, template_snow_layers) = validate_snow_soil_step(input, state)?;
+    let (_, template_snow_layers) = validate_snow_soil_step(input, state)?;
     validate(input.energy)?;
     remember_snow_ice_fraction(&mut state.snow);
     let prepared = prepare_energy(input.energy, &mut state.energy)?;
@@ -564,6 +564,15 @@ pub fn standard_lct_snow_soil_step(
         },
         &mut state.snow,
     )?;
+    // `add_new_snow` 可能刚建出一层雪，所以雪层数必须在这里**重新读一次**。
+    // 上游 `newsnow` 在 `THERMAL` 之前跑，而 `snl` 是在它之后才重算的
+    // （`CoLMMAIN.F90:831` 的 `totwb` 取的就是重算后的值）。
+    //
+    // 在 `add_new_snow` 之前读会造出一个"声明 0 层雪、数组却有 11 项"的 packed
+    // 列：`GroundTemperatureInput::snow_layers` 切不掉那一层，`root_uptake` 的
+    // 长度校验当场失败。实测 `US-NR1-snow` 第 5 步 —— 正是雪层出现的那一步，
+    // 也就是说这个缺陷只在**第一次积雪**时暴露，干季/湿季窗口永远碰不到。
+    let snow_layers = state.snow.layer_count.unsigned_abs() as usize;
     let packed = packed_snow_soil_state(
         input.energy.ground_temperature,
         state,

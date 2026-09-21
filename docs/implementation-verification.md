@@ -6341,3 +6341,92 @@ tier3-check <history.nc> --observation <obs.nc> [--tolerances oracle/tolerances.
 结论：Tier 3 现在**有执行者、有作用域、有对照**，并且给出了一个具体的、
 与 tier2 相互印证的待办（湿季潜热偏高约 1%）。这条待办与干季窗口那份施工单
 是同一件事。
+
+## 第三个黄金窗口：`US-NR1-snow`，以及它第一次跑就撞出的雪层缺陷（2026 年，实测）
+
+### 为什么必须加一个积雪窗口
+
+`tolerances.toml` 头部早就写着"尤其是能真正生成雪层的窗口"，而两个现有窗口
+**一场雪都没有**：`CN-Cng` 的两年强迫里 `Tair < tfrz 且 Precip > 0` 只有
+**11 个小时**、最长连续 6 小时、累计 4.6 mm；湿季窗口是 7 月。
+于是 `snow.rs` 的全部内容、`standard_lct_snow_soil_step` 的雪层路径、
+`newsnow`/`snowcompaction`/`snowlayerscombine`/`snowlayersdivide` 在黄金回归里
+**零覆盖** —— 只有单测。
+
+### 怎么选的窗口
+
+按"落地时气温低于冰点的降水总量最大"扫 PLUMBER2 的 91 个站点（注意强迫是
+**1800 s** 步长，不是 3600 s；按小时索引会把窗口整体错位）。选 **US-NR1**
+（Niwot Ridge，40.03°N，海拔约 3000 m）**2013-04-09 → 04-23**：14 天 76 mm
+落地时低于冰点的降水，`Tmean = 265.4 K`。
+
+黄金里的雪：`f_snowdp` 最大 **0.823 m**、`f_scv` 最大 **106 mm**、
+`f_fsno` 到 **1.0**、`f_wice_soisno` 最大 **69 kg/m²**。这是一个真正的深雪盖，
+会走到压缩/合并/分割。
+
+站点文件按 PLUMBER2 → CoLM 的通路补：
+
+```
+cargo run -p colm-srfdata --bin site-fill -- \
+    $PLUMBER2_ROOT/Sitedata/US-NR1_1999-2014_FLUXNET2015_site.nc \
+    oracle/cases/US-NR1-snow/site.nc
+```
+
+12 个必需字段里 7 个走了"模块默认"（土壤反照率、`lakedepth`/`elvstd`/`sloperatio`）
+—— 本机没有全球 rawdata 栅格，`site-fill` 会逐条打出来源，**没有藏起来**。
+
+算例本体（`oracle/cases/US-NR1-snow/`）、输入摘要（`oracle/fixtures/inputs.sha256`
+多了两行）与黄金（`oracle/golden/US-NR1-snow_hist_2013-04.nc`）都入库。
+`--write-golden` 会顺手把 `kernel-manifest.json` 里的三个二进制 `sha256` 换掉，
+那三个值**本来就不可复现**，所以照例 `git checkout` 还原（见 §"清单里两组字段"）。
+
+### 第一次跑就死在一个"读早了"上
+
+```
+colm-rs: root-uptake vectors must be finite and have equal lengths
+```
+
+第 5 步。插桩打长度，一眼看出问题：
+
+```
+RUPROBE soil=0 t=10 liq=10 ...      <- 前 4 步：纯土列，10 项，一致
+RUPROBE soil=0 t=11 liq=11 ...      <- 第 5 步：t/liq 有 11 项，por/dz 还是 10
+RUPROBE soil=0 t=11 liq=11 ...
+```
+
+**根因**：`standard_lct_snow_soil_step` 在 `add_new_snow` **之前**读
+`state.snow.layer_count`，而 `packed_snow_soil_state` 是在它**之后**才拼列的。
+`add_new_snow` 一旦真的建出一层雪，packed 列就变成 `nl_soil + 1` 项，而
+`GroundTemperatureInput::snow_layers` 还是 0 —— `root_uptake_input` 用
+`[soil..]` 切不掉那一层，长度校验当场失败。
+
+上游没有这个问题：`newsnow` 跑在 `THERMAL` 之前，`snl` 是在它之后才重算的
+（`CoLMMAIN.F90:831` 的 `totwb` 取的就是重算后的值）。
+
+修法一行：把 `snow_layers` 的读取挪到 `add_new_snow` 之后，并把
+`validate_snow_soil_step` 的第一个返回值丢掉（它的第二个返回值
+`template_snow_layers` 仍然要在之前取，因为输入列的校验对象是**装配期**的模板）。
+单测 `standard_lct_snow_soil_step_rereads_the_layer_count_after_newsnow`
+构造"这一步才建雪层"的场景 —— **实测把改动还原后该单测失败**，所以它是真守门人。
+
+这条缺陷只在**第一次积雪**那一步暴露。干季、湿季、植被积雪、
+`CN-Cng-phs` 四个已有窗口全都碰不到它。
+
+### 接上之后的结果
+
+720 步跑完，与 `oracle/golden/US-NR1-snow_hist_2013-04.nc` 比对：
+**`{tier0: 6, tier1: 0, tier2: 81}`**（360 条记录）。`tier1` 在**第三个**窗口上
+仍然为空。
+
+* `tier0` 6 条：`f_xy_rain`/`f_xy_snow`/`f_xy_prc`/`f_xy_prl`/`f_xy_solarin`/
+  `f_xy_pbot` 一族，1–2 ULP，与另两个窗口同源。
+* `tier2` 81 条里绝大多数是小量：`f_snowdp` 最大差 0.0029 m、
+  `f_scv` 0.67 mm、`f_fsno` 0.041。
+* **但 `f_t_soisno` 最大差 266 K** —— 那不是数值差，是**雪层数不一致**：
+  第 42–45、49 条黄金把两层合成一层（`snowlayerscombine`），本仓库没合。
+  按"前导零"反推层数：其余 355 条完全一致，只有这 5 条差 1 层；
+  packed 列的槽位因此整体错开一格，`f_t_soisno` 就出现 0 对 266 K。
+  5 条里 `f_snowdp` 的差是 0.0119 对 0.0124（4%），所以是**压缩后厚度**先分叉，
+  再让某一层跨过 `dzmin` 阈值。`dzmin = [0.010, 0.015, 0.025, 0.055, 0.115]`
+  与 `snowlayerscombine` 的两个循环逐行对照过，逻辑一致。
+  下一步就去查 `snowcompaction` 的厚度演化。

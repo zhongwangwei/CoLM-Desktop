@@ -426,6 +426,113 @@ fn standard_lct_snow_soil_step_credits_the_thermal_condensation_to_the_soil() {
     );
 }
 
+/// **雪层是这一步才出现的**：`snow_layers` 必须在 `add_new_snow` **之后**再读一次。
+///
+/// 上游 `newsnow` 跑在 `THERMAL` 之前，而 `snl` 是在它之后才重算的
+/// （`CoLMMAIN.F90:831` 的 `totwb` 取的就是重算后的值）。在它之前读会造出一个
+/// "声明 0 层雪、数组却有 `nl_soil + 1` 项"的 packed 列：`root_uptake` 的
+/// `ground.snow_layers` 切不掉那一层，长度校验当场失败。
+///
+/// 实测 `US-NR1-snow` 第 5 步，也就是这个算例**第一次积雪**的那一步 ——
+/// 干季与湿季两个窗口一场雪都没有，所以这个缺陷在那两处永远碰不到。
+#[test]
+fn standard_lct_snow_soil_step_rereads_the_layer_count_after_newsnow() {
+    let forcing = prepare_runtime_forcing(RuntimeForcingInput {
+        // 降水必须够多：`newsnow` 只在 `depth_m >= 0.01` 时才真的建层
+        // （`snow.rs` 的 `add_new_snow`，对应 `MOD_NewSnow.F90`）。
+        air_temperature_k: 268.0,
+        specific_humidity: 0.002,
+        surface_pressure_pa: 101_325.0,
+        precipitation_kg_m2_s: 2.0e-3,
+        eastward_wind_m_s: 3.0,
+        northward_or_scalar_wind_m_s: 1.0,
+        wind_is_vector: true,
+        downward_shortwave_w_m2: 180.0,
+        downward_longwave_w_m2: 280.0,
+        calendar_day: 20.5,
+        longitude_radians: 0.0,
+        latitude_radians: 0.5,
+        grid_longitude_radians: 0.5,
+        grid_latitude_radians: 0.5,
+        boundary_layer_height_m: None,
+    })
+    .unwrap();
+    let mut energy = input(forcing);
+    // `snow_layers = 0`：packed 列就是**纯土列**，两层的长度与 `water_input()` 一致。
+    let layer_thickness_m = [0.1, 0.3];
+    let node_depth_m = [0.05, 0.25];
+    let interface_depth_m = [0.0, 0.1, 0.4];
+    let temperature_k = [289.0, 288.0];
+    let liquid_water_kg_m2 = [20.0, 80.0];
+    let ice_water_kg_m2 = [0.0, 0.0];
+    energy.solar.snow_fraction = 0.0;
+    energy.ground_flux.snow_cover_fraction = 0.0;
+    energy.ground_temperature = GroundTemperatureInput {
+        snow_layers: 0,
+        layer_thickness_m: &layer_thickness_m,
+        node_depth_m: &node_depth_m,
+        interface_depth_m: &interface_depth_m,
+        temperature_k: &temperature_k,
+        liquid_water_kg_m2: &liquid_water_kg_m2,
+        ice_water_kg_m2: &ice_water_kg_m2,
+        snow_water_equivalent_kg_m2: 0.0,
+        snow_depth_m: 0.0,
+        snow_cover_fraction: 0.0,
+        snow_surface_temperature_k: 268.0,
+        ground_temperature_k: 268.0,
+        ..energy.ground_temperature
+    };
+    let mut state = StandardLctSnowSoilState {
+        energy: energy_state(forcing),
+        snow: RuntimeSnowColumn::empty(),
+        soil_temperature_k: vec![289.0, 288.0],
+        soil_water: Water2014SoilState {
+            liquid_water_kg_m2: vec![20.0, 80.0],
+            ice_water_kg_m2: vec![0.0, 0.0],
+            water_table_depth_m: 1.0,
+            aquifer_water_mm: 100.0,
+            surface_water_mm: 0.0,
+            matric_potential_mm: vec![-10_000.0; 2],
+            hydraulic_conductivity_mm_s: vec![0.0; 2],
+        },
+    };
+
+    let output = standard_lct_snow_soil_step(
+        StandardLctSnowSoilInput {
+            energy,
+            snow_water: SnowWaterInput {
+                time_step_seconds: 1800.0,
+                irreducible_saturation: 0.03,
+                impermeable_porosity: 0.05,
+                rainfall_kg_m2_s: 0.0,
+                evaporation_kg_m2_s: 0.0,
+                dew_kg_m2_s: 0.0,
+                sublimation_kg_m2_s: 0.0,
+                frost_kg_m2_s: 0.0,
+            },
+            soil_water: water_input(),
+        },
+        &mut state,
+    )
+    .unwrap();
+
+    // 这一步真的建了雪层，否则这个测试区分不出读得早还是读得晚。
+    assert_eq!(
+        state.snow.layer_count, -1,
+        "the fixture must create exactly one snow layer on this step"
+    );
+    // 土层没有被雪层挤掉：`sync_snow_soil_state` 的切片用的是重读后的层数。
+    assert_eq!(state.soil_temperature_k.len(), 2);
+    assert_eq!(state.soil_water.liquid_water_kg_m2.len(), 2);
+    assert_eq!(state.soil_water.ice_water_kg_m2.len(), 2);
+    assert!(state
+        .soil_temperature_k
+        .iter()
+        .all(|value| value.is_finite()));
+    assert!(output.water.snow.bottom_drainage_kg_m2_s.is_finite());
+    assert!(output.energy.thermal_water.is_some());
+}
+
 fn energy_state(forcing: crate::RuntimeForcing) -> StandardLctEnergyState {
     StandardLctEnergyState {
         radiation: cold_start_broadband_radiation(
