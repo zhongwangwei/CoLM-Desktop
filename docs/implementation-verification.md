@@ -5386,3 +5386,42 @@ IF(det .lt. dtmin .and. dee .lt. dlemin) EXIT     ! :1277
 
 **教训沉淀为一条规矩**：`main/` 里的同名声明的模块**从不参与编译**。改任何物理量
 之前，先确认它的算式来自 `Makefile:635-647` 指定的那个 `extends/` 文件。
+
+## 最坏的一类分支不匹配：选 PFT/PC 的算例会**静默按 LCT 算完**（2026 年，实测）
+
+顺着"还有哪些分支没被拦住"查了一遍：上游
+`MOD_Namelist.F90:1932-1944` 要求
+
+```fortran
+! Exactly one of DEF_USE_LCT/DEF_USE_PFT/DEF_USE_PC must be .true.
+IF (count((/DEF_USE_LCT, DEF_USE_PFT, DEF_USE_PC/)) /= 1) THEN
+   write(*,*) 'Fatal ERROR: exactly one of DEF_USE_LCT / DEF_USE_PFT / DEF_USE_PC', &
+      ' must be .true. (subgrid structure is a mutually exclusive choice).'
+   CALL CoLM_stop ()
+ENDIF
+```
+
+三者的声明默认值是 `.true.`/`.false.`/`.false.`（默认 LCT）。本仓库**根本不读这三个
+开关** —— `crates/` 里对 `DEF_USE_LCT` 只有两条注释提到它，没有任何 `logical(...)`
+读取。于是：
+
+- 一个写 `DEF_USE_PFT=.true.` 的算例（上游支持的、默认关但完全合法的配置）
+  会在本仓库里**一路按 LCT 的编排跑完**，不报错；算式对、结构错 —— 这是比
+  "拒绝运行"更坏的一类不匹配，因为它在数值上看起来"有结果"。
+- 两个同时为真也不会被拦住，而上游会 `CoLM_stop`。
+
+**修法**：在 `land_physics_parameters` 里读这三个开关，先判"恰好一个"，再判
+"必须是 LCT"，两者都 `bail!`。按本文件的纪律 #3（"上游有、本仓库没移植的分支
+一律报错"）—— 它们**不是默认打开**的分支，所以不进 `unported_branches` 那张
+"默认配置会撞上"的表（VSF/PHS 在那张表里，因为它们的默认值是真）。
+
+新测试 `a_pft_or_pc_subgrid_case_is_refused_rather_than_run_as_lct` 覆盖三种情形：
+选 PFT、选 PC、以及两个同时为真；再确认默认（只有 LCT）照常通过。
+
+### 这一节记一条方法论
+
+判断"某个上游开关本仓库读没读"，`grep` 开关名只在**读它**的时候命中；如果代码里
+只有注释提到它，`grep` 也会命中而没有读取 —— 这两种要分清。上面那两条命中都是
+注释（`physics.rs:281`、`assembly.rs:1379`），而 `physics.rs:281` 那句
+"`DEF_USE_LCT` 那道门在本仓库恒成立"正是把**假设**当成了**检查**：它假设算例
+选的是 LCT，却没有验证。**默认值让一个开关"看起来总是成立"，而默认值不是检查。**

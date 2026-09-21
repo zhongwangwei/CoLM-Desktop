@@ -73,6 +73,40 @@ pub fn land_physics_parameters(
              so substituting zero would silently run the case unirrigated"
         );
     }
+    // 上游 `MOD_Namelist.F90:1932-1944`：`DEF_USE_LCT`/`DEF_USE_PFT`/`DEF_USE_PC`
+    // **恰好一个**必须为真，否则 `CoLM_stop`；三者的声明默认值是
+    // `.true.`/`.false.`/`.false.`，也就是默认走 LCT。
+    //
+    // 本仓库只实现了 LCT 这一条编排（`assembly.rs:1379` 的注释、`assembly.rs`
+    // 只装配植被 patch）。**不读这三个开关会让一个选 PFT/PC 的算例静默按 LCT
+    // 算完** —— 那是最坏的一类分支不匹配：算式对、结构错、还不报错。
+    // 它们不是默认打开的分支，所以按本文件的纪律 #3 直接报错，
+    // 而不是进 `unported_branches` 那张"默认配置会撞上"的表。
+    let subgrid = [
+        ("DEF_USE_LCT", logical(document, "DEF_USE_LCT")?),
+        ("DEF_USE_PFT", logical(document, "DEF_USE_PFT")?),
+        ("DEF_USE_PC", logical(document, "DEF_USE_PC")?),
+    ];
+    let selected: Vec<&str> = subgrid
+        .iter()
+        .filter(|(_, on)| *on)
+        .map(|(name, _)| *name)
+        .collect();
+    if selected.len() != 1 {
+        bail!(
+            "exactly one of DEF_USE_LCT / DEF_USE_PFT / DEF_USE_PC must be .true. \
+             (MOD_Namelist.F90:1942 stops the model otherwise), got {selected:?}"
+        );
+    }
+    if selected[0] != "DEF_USE_LCT" {
+        bail!(
+            "{} selects the {{PFT,PC}} subgrid structure, which the Rust runtime has not \
+             ported; only DEF_USE_LCT is implemented (`assembly.rs` assembles LCT patches \
+             only). Set DEF_USE_LCT=.true. (and the other two .false.) to run the ported path",
+            selected[0]
+        );
+    }
+
     // 上游 `MOD_Namelist.F90:1767-1772`：选了 van Genuchten 就把
     // `DEF_USE_VariablySaturatedFlow` 强制置真。它的声明默认值也是真，所以**默认
     // 配置跑的是 VSF**，经典 Richards 路径要显式关掉才走得到。
