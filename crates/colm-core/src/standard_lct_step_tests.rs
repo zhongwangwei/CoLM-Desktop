@@ -163,6 +163,14 @@ fn standard_lct_soil_step_carries_one_rust_column_between_energy_and_water() {
             water_table_depth_m: 1.0,
             aquifer_water_mm: 100.0,
             surface_water_mm: 0.0,
+            matric_potential_mm: vec![
+                -10_000.0;
+                energy.ground_temperature.liquid_water_kg_m2.len()
+            ],
+            hydraulic_conductivity_mm_s: vec![
+                0.0;
+                energy.ground_temperature.liquid_water_kg_m2.len()
+            ],
         },
     };
     let input = StandardLctSoilInput {
@@ -255,6 +263,8 @@ fn standard_lct_snow_soil_step_carries_active_snow_and_soil_columns() {
             water_table_depth_m: 1.0,
             aquifer_water_mm: 100.0,
             surface_water_mm: 0.0,
+            matric_potential_mm: vec![-10_000.0; 2],
+            hydraulic_conductivity_mm_s: vec![0.0; 2],
         },
     };
     let input = StandardLctSnowSoilInput {
@@ -600,5 +610,7 @@ fn input(forcing: crate::RuntimeForcing) -> StandardLctEnergyInput<'static> {
             snow_surface_temperature_k: 270.0,
             supercool_water: false,
         },
+        // 夹具走非 PHS 分支：内核看到 `None` 就不查 `smp`/`hk`。
+        plant_hydraulics: None,
     }
 }

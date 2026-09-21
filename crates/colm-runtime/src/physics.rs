@@ -16,9 +16,9 @@
 
 use anyhow::{bail, Context, Result};
 use colm_core::{
-    HydraulicModel, LandCoverScheme, ObservationHeightMode, PlantHydraulicParameters,
-    PrecipitationPhaseScheme, RootFractionScheme, StomataOptions, SurfaceLayerScheme,
-    ThermalConductivityScheme,
+    HydraulicModel, LandCoverScheme, ObservationHeightMode, PlantHydraulicOverrides,
+    PlantHydraulicParameters, PrecipitationPhaseScheme, RootFractionScheme, StomataOptions,
+    SurfaceLayerScheme, ThermalConductivityScheme,
 };
 use colm_namelist::{Document, Value};
 use colm_schema::{find, Default as SchemaDefault};
@@ -132,6 +132,23 @@ pub fn land_physics_parameters(
     // `K_AXS` 是轴向导度系数、`FROOT_CARBON`/`ROOT_DENSITY`/`ROOT_RADIUS`
     // 一起定细根长度密度、`FROOT_LEAF` 是细根-叶面积分配、`KRMAX` 是单位长度
     // 单位面积的最大径向导度。
+    // `DEF_LC_*` 的九个植物水力覆盖。schema 的声明默认值是 `-1.e36`，就是上游的
+    // `LC_OVERRIDE_UNSET` —— 读到它表示 namelist 没写这一列，用地类表的值。
+    //
+    // 用 `==` 比而不是容差比：两边都是同一个十进制字面量解析出来的 `f64`，
+    // 位模式必然一致；给这样一个"哨兵值"加容差反而会把一个刚好接近 -1e36 的
+    // 真实覆盖误判成未设置。
+    let plant_hydraulic_overrides = PlantHydraulicOverrides {
+        maximum_sunlit_leaf_conductance: land_cover_override(document, "DEF_LC_KMAX_SUN")?,
+        maximum_shaded_leaf_conductance: land_cover_override(document, "DEF_LC_KMAX_SHA")?,
+        maximum_xylem_conductance: land_cover_override(document, "DEF_LC_KMAX_XYL")?,
+        maximum_root_conductance: land_cover_override(document, "DEF_LC_KMAX_ROOT")?,
+        sunlit_leaf_psi50_mm: land_cover_override(document, "DEF_LC_PSI50_SUN")?,
+        shaded_leaf_psi50_mm: land_cover_override(document, "DEF_LC_PSI50_SHA")?,
+        xylem_psi50_mm: land_cover_override(document, "DEF_LC_PSI50_XYL")?,
+        root_psi50_mm: land_cover_override(document, "DEF_LC_PSI50_ROOT")?,
+        vulnerability_shape: land_cover_override(document, "DEF_LC_CK")?,
+    };
     let plant_hydraulic_parameters = PlantHydraulicParameters {
         coarse_root_lateral_length_m: real(document, "DEF_PH_CROOT_LATERAL_LENGTH")?,
         axial_root_conductivity: real(document, "DEF_PH_K_AXS")?,
@@ -150,6 +167,7 @@ pub fn land_physics_parameters(
         variably_saturated_flow,
         plant_hydraulics,
         plant_hydraulic_parameters,
+        plant_hydraulic_overrides,
         vegetation_snow,
         land_cover_scheme,
         root_fraction_scheme: ROOT_FRACTION_SCHEME,
@@ -222,12 +240,6 @@ pub fn unported_branches(physics: &LandPhysicsParameters) -> Vec<&'static str> {
              内核已移植但缺编排；上游在选 van Genuchten 时强制打开，且自身默认即为真。\
              写 DEF_USE_Campbell_SOIL_MODEL = .true. 与 \
              DEF_USE_VariablySaturatedFlow = .false. 可走已编排的 WATER_2014",
-        );
-    }
-    if physics.plant_hydraulics {
-        missing.push(
-            "DEF_USE_PLANTHYDRAULICS：植物水力（默认真）改的是 ET 的分层分配、冠层阻力\
-             的来源与 vegwp 状态；写 DEF_USE_PLANTHYDRAULICS = .false. 可走已移植的那条",
         );
     }
     missing
@@ -382,6 +394,22 @@ fn real(document: &Document, path: &str) -> Result<f64> {
         }
     };
     parse_fortran_real(&text).with_context(|| format!("{path} is not a readable real: {text:?}"))
+}
+
+/// 上游 `MOD_Namelist.F90` 的 `LC_OVERRIDE_UNSET = -1.e36_r8`。
+///
+/// 它是 `DEF_LC_*` 的声明默认值，含义是"namelist 没写这一列，用地类表的值"——
+/// 而不是一个真实的物理量。所以这里必须把它映射成 `None`，不能当成一个
+/// `-1e36` 的叶导度传下去。
+const LC_OVERRIDE_UNSET: f64 = -1.0e36;
+
+/// 读一个 `DEF_LC_*`，把 `LC_OVERRIDE_UNSET` 折成 `None`。
+fn land_cover_override(document: &Document, path: &str) -> Result<Option<f64>> {
+    let value = real(document, path)?;
+    if value == LC_OVERRIDE_UNSET {
+        return Ok(None);
+    }
+    Ok(Some(value))
 }
 
 fn logical(document: &Document, path: &str) -> Result<bool> {

@@ -1131,6 +1131,7 @@ mod tests {
             variably_saturated_flow: false,
             plant_hydraulics: false,
             plant_hydraulic_parameters: colm_core::PlantHydraulicParameters::default(),
+            plant_hydraulic_overrides: colm_core::PlantHydraulicOverrides::default(),
             vegetation_snow: false,
             land_cover_scheme: colm_core::LandCoverScheme::Igbp,
             root_fraction_scheme: colm_core::RootFractionScheme::SchenkJackson,

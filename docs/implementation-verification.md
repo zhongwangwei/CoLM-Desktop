@@ -5619,3 +5619,187 @@ stage 的写出面，都应该把该 stage 的**重启**也逐变量比一遍 �
 配置**不会**出问题 —— 与 PFT/PC 那次（默认是 LCT，于是选 PFT 的算例被静默按 LCT 算）
 不同，这里要出问题必须显式写反。第二类（high-res / LANDONLY）是**显式关掉会被
 静默忽略**，属于同一族但触发概率低；真要收紧，判据与 PFT/PC 一样：读它，不一致就报错。
+
+## PHS（`DEF_USE_PLANTHYDRAULICS`）从"硬关"到端到端跑通（2026 年，实测）
+
+上游这个开关的**声明默认值是 `.true.`**（`MOD_Namelist.F90:531`），也就是说默认配置
+跑的就是植物水力；本仓库此前在装配层把它硬写成关（`plant_hydraulics: None`），
+并在 `unported_branches` 里拒绝。这一轮把它接上了。做到这一步才发现，
+"接上"不是加一行 `Some(...)`：装配、两个入口的逐步输入、history、重启写出面
+四处都要动，而且沿途挖出三类缺陷。
+
+### 一、验证算例：`CN-Cng-campbell` 的黄金文件是**过期的**，不能拿来比
+
+`CN-Cng-campbell` 的黄金（`oracle/work/CN-Cng-campbell/...`，2026-09-21 02:29）
+里 `f_gssun` 是 **46.18**（µmol），而 `oracle/golden/CN-Cng_hist_2008-01.nc`（05:51）
+是 **4.63e-5**（mol）。同一份源码不可能产出两种单位 —— 前者是
+`0115b58`（f48 同步，06:03）**之前**的内核产物，那个内核里
+`MOD_LeafTemperature_Extended.F90:1305-1314` 那段"无条件诊断 `gssun`"
+还不存在。拿它做 PHS 验证会把内核差异当成移植缺陷。
+
+正确做法：**新建一个只改一个开关的算例并重新产出黄金**。
+`oracle/cases/CN-Cng-phs/` 与 `CN-Cng-aligned` 的 `case.nml` 逐行相同，
+只把 `DEF_USE_PLANTHYDRAULICS` 从 `.false.` 改成 `.true.`；
+`DEF_CASE_NAME` 改成 `CN-Cng-phs`（否则 `golden-run --write-golden` 会覆盖掉
+`oracle/golden/` 里那份 **VSF** 黄金）。产出命令：
+
+```
+PLUMBER2_ROOT=/Volumes/Data01/Data/PLUMBER2s cargo run -q -p oracle --bin golden-run -- CN-Cng-phs
+```
+
+黄金落在 `oracle/work/CN-Cng-phs/out/CN-Cng-phs/history/CN-Cng-phs_hist_2008-01.nc`
+（**不入库**，`oracle/work/` 是 gitignore 的），比对：
+
+```
+NETCDF_DIR=/opt/homebrew/opt/netcdf cargo run -q -p colm-runtime --bin colm-rs -- \
+  oracle/work/CN-Cng-phs --land-cover igbp --history-dir /tmp/h --restart-out /tmp/r.nc
+NETCDF_DIR=/opt/homebrew/opt/netcdf cargo run -q -p oracle --bin golden-compare -- \
+  oracle/work/CN-Cng-phs/out/CN-Cng-phs/history/CN-Cng-phs_hist_2008-01.nc \
+  /tmp/h/colm-rs_hist_2008-01.nc --tolerances oracle/tolerances.toml
+```
+
+### 二、结果：PHS 分支的 tier 分布与已验收基线**同一水平**
+
+| 算例 | PHS | tier0 | tier1 | tier2 | 超容差变量数 |
+|---|---|---|---|---|---|
+| `CN-Cng-aligned` | 关（已验收基线） | 2 | 19 | **48** | 69 |
+| `CN-Cng-phs` | 开 | 2 | 19 | **49** | 70 |
+
+tier0/tier1 完全一致（`f_xy_solarin` 11/264 差 1 ULP、`f_xy_q` 3/264 是上游时刻对齐怪癖，
+两组 19 条都是短波分带与 `f_alb` 一族）。tier2 只多 1 条 —— 多出来的就是
+`f_vegwp` 本身（见第五节）。逐变量的量级：`f_rstfacsun` 2.5%/0.11%、
+`f_rstfacsha` 1.3%/0.12%、`f_rootr` 6.3e-4/2.3e-5、`f_tleaf` 0.0264 K、
+`f_t_grnd` 0.0236 K。
+
+### 三、装配：三处"每步才知道"的量不能进装配期常数
+
+`MOD_LeafTemperature_Extended.F90:881-890` 把 `smp`、`hk`、`hksati`、`rootfr`
+连同 `z_soi`/`dz_soi` 一起交给 `LEAFTEMPERATURE`。这四样**每步都变**：
+
+- `smp`/`hk` 是 `WATER_2014` 的 `intent(out)`，存进**时间变量**、由**下一步**的
+  `THERMAL` 读（能量步在水分步之前）。为此 `Water2014SoilState` 加了
+  `matric_potential_mm`/`hydraulic_conductivity_mm_s` 两个字段，由水分步每步覆写，
+  装配期填重启那一份。
+- `rootfr` 是本步 `MOD_LeafTemperature` 的输入（LCT 分支按地类表算，不是常数）。
+- `hksati` 是常数，但和上面三样一起给才不至于让"开关开了、某个量还是默认"变成一个
+  看不见的状态。
+
+所以 `StandardLctEnergyInput` 只收**静态**的 `Option<PlantHydraulicSettings>`
+（九个地类性状 + 七个 `DEF_PH_*` + `DEF_RSS_SCHEME`），逐步的那一份由
+`standard_lct_soil_step` / `standard_lct_snow_soil_step` 现场拼成
+`LeafPlantHydraulicInput`。
+
+**地类性状必须在装配期求值**（`ClassConstants::plant_hydraulic_traits(overrides)`）：
+地类号来自**重启**的 `patchclass`，性状是"地类表 + `DEF_LC_*` 覆盖"两样一起查出来的，
+所以 `DEF_LC_*` 的九个覆盖只能经 `LandPhysicsParameters` 传下去，不能在那里求值。
+用内核回读实测（见第六节的方法）：IGBP 草地（`patchclass = 10`）得到
+`kmax_sun = kmax_sha = kmax_xyl = kmax_root = 2.000000000000000e-08`、
+`psi50_* = -3.4e5` mm、`ck = 3.95` —— 与上游内核打印的值逐位相同。
+
+**踩坑**：PHS 的土壤列**不能用 `energy.ground_temperature.{node_depth_m,layer_thickness_m}`**。
+积雪分支里那一对是**雪 + 土**的打包列（`snow_layers + nl_soil`），而 `smp`/`hk`
+只有 `nl_soil` 项，`snow_layers > 0` 时长度对不上、`validate` 直接报错。
+上游传的是土壤专用的 `z_soi`/`dz_soi`；`Water2014SoilInput` 本来就带着土壤深度
+（`node_depth_m`/`layer_thickness_m`），改用它即可。两个入口都改。
+
+### 四、`gs0sun`/`gs0sha` 的写出面：Units 错了一个 1e6，物理量还是另一个
+
+`evolved_overrides` 里那两个槽位原先填的是
+`leaf_output.sunlit_stomatal_conductance_mol_m2_s`（`gssun`，**实际**叶导度，
+mol m⁻² s⁻¹）。上游写进重启的 `gs0sun` 是
+`MOD_LeafTemperature_Extended.F90:817` 的
+`min(1e6, 1/(rssun*tl/tprcor))/laisun*1e6`（**最大**叶导度，µmol m⁻² s⁻¹）。
+实测 `oracle/work/CN-Cng-phs` 的 `--restart-out`：本仓库写出 **4.807e-5**，
+上游同一时刻 **481.33925243**。修正后本仓库 **481.34362292**（相对差 9.0e-6）。
+
+这条也解释了为什么之前"重启写出面 0/65"的判据没抓到它：那条判据问的是
+"上游变了而本仓库没变"，而这里是**两边都变、但本仓库写的是另一个量**。
+判据要补一条对称的："同名的两个变量，两边都变了，值的相对差是否与继承残差同量级"。
+
+顺带：**PHS 关掉时这两个变量不写**。上游只在
+`IF (DEF_USE_PLANTHYDRAULICS)` 里给它们赋值，重启里没有这一列时
+（`CN-Cng-aligned` 的入参重启就没有）`write_with` 也不允许新造变量。
+
+### 五、`f_vegwp` 的残差：两段，两因，都不是 `plant_hydraulics.rs` 的算术错
+
+用一个 `DEF_HIST_FREQ = 'TIMESTEP'`、11 天窗口的诊断副本把区间平均拆开看：
+
+- **第 0 步**：相对差 0.73，是整段里最大的一处。把内核自己的输入打印出来
+  （方法见第六节）可以看到，`calcstress_twoleaf` 收到的**每一项都逐位相同**
+  （`smp`、`k_soil_root`、`k_ax_root`、`z_soi`、`kmax_*`、`psi50_*`、`ck`、
+  `laisun`/`laisha`/`sai`/`htop`、`tl`、`rhoair`、`psrf`、`gb_mol`、`qg`、`qaf`、`qm`、`qsatl`），
+  **只有 `gs0sun` 不同**：上游是 **-4.251463361984611e38**，本仓库是 425.1463361984611。
+  反解上游那一个：它等于 `MOD_LeafTemperature_Extended.F90:817` 在
+  `rssun = -1e-30` 时的输出，也就是叶温求解器**第一轮**里 `stomata` 吐出的未定义值。
+  而 `PlantHydraulicStress_twoleaf` 开头就是 `gssun = gs0sun`，于是上游第一轮的
+  需求通量 `qflx` 被这个巨大的假值放大到 **3.305e-5**，本仓库是 **6.858e-9**（差 4820 倍），
+  第一步的 `dx` 因此一个向东一个向西。**这是上游的未定义行为，不可复现，也不该复现** ——
+  与 `0115b58` 里 `rstfacsun` 那次（`Rejected: 复现上游的垃圾 rstfac`）同类。
+  到第 1 步两边就都落到同一个夜间吸引子上（差 0.1%），第 1..117 步相对差 ≤ 2%。
+- **第 118 步起**：开始出现 >2% 的记录，之后在整段里时大时小（最坏 1.10）。
+  这一段**不是**一个新缺陷：`vegwp` 在这段窗口里是**剧烈振荡**的
+  —— 逐步摆动中位数 **6257 mm**、最大 **125827 mm**（±12.6 m 水势）。
+  两个实现的**摆动本身**高度一致：
+
+  | 量 | 值 |
+  |---|---|
+  | 摆动相关系数（527 步） | **0.795** |
+  | 摆动符号一致率 | **87.1%** |
+  | 摆动中位幅度 gold / rust | 6256.9 / 6274.5（差 0.3%） |
+  | 最大摆动 gold / rust | 125827 / 125730（差 0.08%） |
+  | 摆动中位比值 rust/gold | 0.9985 |
+
+  也就是说轨迹是**同一个极限环**，只是每一步的幅度对初值极度敏感
+  （第 116 步两边差 8 mm(0.02%)，第 117 步放大到 93 mm(0.66%)，
+  第 118 步放大到 535 mm(3.6%)）。而初值差只有叶温求解器那 **0.01 K / 0.1 W m⁻²**
+  的收敛容差（已有结论：528 步里有 33 步的迭代次数与上游不同）。
+  **结论**：`f_vegwp` 的残差是叶温求解器容差地板的差经过 PHS 振荡递归放大的结果，
+  不是 `plant_hydraulics.rs` 的算术错 —— 后者已逐项核对干净（见下节）。
+
+### 六、`plant_hydraulics.rs` 的六条实测差异，五条已修
+
+方法：**让内核自己把值打出来**。在 `vendor/CoLM202X/main/MOD_PlantHydraulic.F90`
+的 `calcstress_twoleaf` 里加 `WRITE(96,...)`（日志落在 case 目录的 `fort.96`），
+在 Rust 侧对应位置加 `eprintln!`，两边用**同一个 `x(1)` 区间**做门限，
+于是一定能比到同一步的同一个量。这条方法的两个纪律：
+
+1. **先确认插桩不改结果**：把插桩后的 `DEF_HIST_FREQ='TIMESTEP'` 输出按两步取平均，
+   与插桩前、`HOURLY` 的黄金文件逐位相比 —— `max|Δ| = 0.0`，才继续用。
+2. **插桩必须在 `git add` 之前撤干净**（`464dae1` 那次把临时插桩提交进去了）。
+   两处改动都用 `git checkout --`/逐段删除复原，复原后重跑 `test_upstream_f48_sync.py` 与内核构建。
+
+| # | 位置 | 上游 | 本仓库（修前） | 影响 | 处置 |
+|---|---|---|---|---|---|
+| 1 | 步长救援 `MOD_PlantHydraulic.F90:329-332` | `maxscale = min(max\|dx\|, max\|x\|)/2` | `max(\|dx\|, \|x\|)/2` | 触发条件已是 `max\|dx\|>2e5`，而 `vegwp` 量级 1e4~1e5，于是 `max` 恒等于 `max\|dx\|`，缩放比上游大 `max\|dx\|/max\|x\|` 倍 —— 恰好在它要保护的场景失效，且四个节点一起跳、写回持久状态 | **已修**（取 `min`） |
+| 2 | `gb_mol = 1./rb*cf`（`:210`） | 先取倒数再乘 | `cf/rb` | 1 ULP（200k 抽样里 27% 不同），能翻 `shaded_flux>0`、`determinant!=0`、`max\|dx\|>2e5` 三个**离散**判据 | **已修** |
+| 3 | `wtaq0 = caw*wtsqi`（`:683-685`） | `wtsqi = 1/(caw+cgw+cfw)` 再乘 | `caw/total` | 同上，1 ULP / 27% | **已修** |
+| 4 | `validate` | 上游只校验 namelist 的七个 `DEF_PH_*` | 还要求 `laisun/laisha/sai/htop>0`、`psi50<0`、`RSS_SCHEME ∈ 1..=5` | `DEF_RSS_SCHEME = 0` 是**合法值**（关掉 Campbell 时上游自己置 0，`:674-679` 的 `ELSE` 把 0 与 1 同等对待） | **已修**（放宽到 `0..=5`）；其余几条保留（默认 LCT 算例构造不出反例） |
+| 5 | `getrootqflx_qe2x` | 调一次 | 同一组参数调两遍（第二遍只为拿 `.0`） | 无（解算器确定性，逐位同解） | **已修**（合并成一次） |
+| 6 | 解后有限性检查 | 上游无 | 不覆盖 `potential` 本身 | 无（下一次调用会拒） | 保留 |
+
+这一轮修完 #1~#5 后**重跑同一个算例，`f_vegwp` 的数值一位没变** —— 说明
+`max|dx| > 2e5` 的救援在这条轨迹上从未触发、那两处 1 ULP 也没翻任何分支。
+**但这不等于它们无害**：它们是分支级风险，只在别的算例/别的窗口上才会现形，
+所以照修。另外逐项核对确认**两侧都没有牛顿迭代环**：上游
+`calcstress_twoleaf` 声明了 `iter/iterqflx/itmax=50/toldx/tolf/...` 却**一个都没读**，
+`spacAF_twoleaf` 一次 Jacobian 步 + 一次 `x = x + dx`；本仓库同构。
+
+逐项核对干净的部分（供下一轮免重做）：四个节点顺序与状态带入、`root_conductances`
+全部项、单位与深度约定（`smp`[mm]、`hk`/`hksati`[mm/s]、`z_soi`/`dz_soi`[m]）、
+七个 `DEF_PH_*` 默认值逐位、两个 `getqflx_*` 到结合顺序、`spacAF_twoleaf` 两个行列式与
+全部 Cramer 分子、两个根系解算、`plc`/`d1plc`、三处钳位的位置、夜间分支、
+`getvegwp_twoleaf`；`solve_tridiagonal` 与 `tridia` 是逐操作相同。
+
+### 七、history：`f_vegwp` 是**条件声明**的
+
+`MOD_Hist.F90:4372-4378` 把 `f_vegwp` 整段写在 `IF (DEF_USE_PLANTHYDRAULICS)` 里，
+所以 PHS 关掉的算例里这一列**根本不存在**（实测 `CN-Cng-aligned` 的黄金没有、
+`CN-Cng-phs` 有 4×264）。为此 `declare_lct_variables` 多收一个布尔，
+`LCT_PLANT_HYDRAULIC_VARIABLES` 只在开关打开时并进清单；
+累加规则是普通的 `acc2d`+`nac`（`MOD_Vars_1DFluxes.F90:2494`），
+**不是**末步瞬时值。
+
+**踩坑**：`f_vegwp` 的写出必须挂在**两个** history 入口上。这一轮先只补了
+`set_lct_state`（无雪入口），而 `standard_lct_snow_soil_step` 才是通用入口
+（无雪起步的算例也走它），于是第一次跑出来整列 1056 个值全是填充值 ——
+"文件里有这一列、但一个真值都没有"，比缺列更难看出来。

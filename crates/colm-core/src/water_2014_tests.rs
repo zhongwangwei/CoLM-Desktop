@@ -46,6 +46,8 @@ fn state() -> Water2014SoilState {
         water_table_depth_m: 1.0,
         aquifer_water_mm: 100.0,
         surface_water_mm: 0.0,
+        matric_potential_mm: vec![-10_000.0; 3],
+        hydraulic_conductivity_mm_s: vec![0.0; 3],
     }
 }
 

@@ -35,6 +35,7 @@ fn physics() -> LandPhysicsParameters {
         variably_saturated_flow: false,
         plant_hydraulics: false,
         plant_hydraulic_parameters: PlantHydraulicParameters::default(),
+        plant_hydraulic_overrides: colm_core::PlantHydraulicOverrides::default(),
         vegetation_snow: false,
         land_cover_scheme: LandCoverScheme::Igbp,
         root_fraction_scheme: RootFractionScheme::SchenkJackson,
@@ -213,7 +214,7 @@ fn the_bridge_writes_the_state_variables_it_declares() {
         .expect("one step");
 
     let mut buffer = HistoryBuffers::new(dimensions(), site(), 1);
-    declare_lct_variables(&mut buffer).unwrap();
+    declare_lct_variables(&mut buffer, false).unwrap();
     set_lct_state(
         &mut buffer,
         0,
@@ -487,7 +488,7 @@ fn the_written_schema_matches_the_golden_file_for_the_shared_variables() {
     .unwrap();
     let state = template.state();
     let mut buffer = HistoryBuffers::new(dimensions(), site(), 1);
-    declare_lct_variables(&mut buffer).unwrap();
+    declare_lct_variables(&mut buffer, false).unwrap();
     set_lct_state(&mut buffer, 0, &template, &state, state.temperature_k[0]).unwrap();
     buffer.set_time(0, 56_802_270).unwrap();
     let path = root.join("history.nc");
@@ -581,7 +582,7 @@ fn the_snow_branch_fills_the_snow_span() {
             .expect("one snow step");
 
     let mut buffer = HistoryBuffers::new(dimensions(), site(), 1);
-    declare_lct_variables(&mut buffer).unwrap();
+    declare_lct_variables(&mut buffer, false).unwrap();
     set_lct_snow_state(
         &mut buffer,
         0,
@@ -1021,6 +1022,8 @@ fn the_derived_soil_moisture_uses_both_phase_densities() {
         water_table_depth_m: 0.0,
         aquifer_water_mm: 0.0,
         surface_water_mm: 0.0,
+        matric_potential_mm: vec![-10_000.0; 10],
+        hydraulic_conductivity_mm_s: vec![0.0; 10],
     };
     set_lct_derived_soil(&mut buffer, 0, &thickness, &water).unwrap();
     buffer.set_time(0, 56_802_270).unwrap();

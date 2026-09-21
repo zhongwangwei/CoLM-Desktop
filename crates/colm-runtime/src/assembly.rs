@@ -25,11 +25,11 @@
 
 use std::path::PathBuf;
 
-use anyhow::{ensure, Context, Result};
+use anyhow::{anyhow, ensure, Context, Result};
 use colm_core::{
     root_fraction, soil_hydraulic_models, soil_thermal_inputs, CanopyWater, ClassConstants,
     ColdStartRadiation, HydraulicModel, LandCoverScheme, LeafBiochemistry, LeafTemperatureOptions,
-    LeafTemperatureState, ObservationHeightMode, PlantHydraulicParameters,
+    LeafTemperatureState, ObservationHeightMode, PlantHydraulicParameters, PlantHydraulicState,
     PrecipitationPhaseScheme, RestartSnowSlots, RootFractionScheme, RuntimeSnowColumn, SoilField,
     SoilHydraulicModel, SoilReflectance, SoilState, SoilThermalInput, StandardLctSnowSoilInput,
     StandardLctSnowSoilState, StandardLctSoilInput, StandardLctSoilState, StomataOptions,
@@ -92,6 +92,14 @@ pub struct LandPhysicsParameters {
     /// 但**与开关一起放在这里**：分开两处会让"开关开了、常数还是默认"
     /// 这种组合变成一个看不见的状态。
     pub plant_hydraulic_parameters: PlantHydraulicParameters,
+    /// `DEF_LC_KMAX_SUN` 一族的九个地类表覆盖（`MOD_Namelist.F90:573-581`）。
+    ///
+    /// 与上面的 `DEF_PH_*` 是**两套不同的东西**：`DEF_PH_*` 是整份模型共用的
+    /// 常数，这九个是"把地类表里某一列整体换成一个数"。上游在 `MOD_Const_LC`
+    /// 里先抄地类表、再按 `DEF_LC_X /= LC_OVERRIDE_UNSET` 覆盖，所以覆盖必须和
+    /// 地类号一起用；地类号来自重启（`patchclass`），装配期才知道，
+    /// 于是这一项只能在这里传递、不能在这里求值。
+    pub plant_hydraulic_overrides: colm_core::PlantHydraulicOverrides,
     /// `DEF_VEG_SNOW`：植被上的雪（冠层雪的湿比例、冠层水的雪/雨分配）。
     ///
     /// **默认也是 `.true.`**（`MOD_Namelist.F90:314`）。打开时上游走
@@ -216,6 +224,10 @@ struct RestartColumns {
     matric_potential_mm: Vec<f64>,
     /// `hk`：同 `smp` 的形状。
     hydraulic_conductivity_mm_s: Vec<f64>,
+    /// `vegwp`：`(patch, vegnodes)`。**只有 PHS 算例的重启里才有**这个变量
+    /// （`CN-Cng-aligned` 那份就没有），所以是 `Option`：缺席时既不能读、
+    /// 也不能写回 —— `write_with` 只允许替换源文件里已有的变量。
+    vegetation_water_potential_mm: Option<Vec<f64>>,
     /// `lai`/`sai`/`sigf`：冠层几何，每步末尾按雪盖重算（见
     /// [`Self::prepare_surface_optics`]）。
     leaf_area_index: Vec<f64>,
@@ -557,6 +569,12 @@ pub struct StandardLctRestartTemplate {
     snow_soil: SnowSoilTemplate,
     /// 非 PHS 分支下 `WATER_2014` 的每步根通量初值，全零且长度等于层数。
     root_flux_zeros: Vec<f64>,
+    /// `DEF_USE_PLANTHYDRAULICS` 打开时的叶温/水分内核设置；关掉时是 `None`。
+    ///
+    /// 地类性状要在这里求值（而不是留在 [`LandPhysicsParameters`] 里）：地类号来自
+    /// **重启**的 `patchclass`，装配期才知道，而性状是"地类表 + `DEF_LC_*` 覆盖"
+    /// 两样一起查出来的。
+    plant_hydraulic_settings: Option<colm_core::PlantHydraulicSettings>,
 }
 
 /// 从两份写出重启装配无雪 patch 的模板。
@@ -726,6 +744,10 @@ fn assemble(
         // 所以 Rust 产出的重启也必须带上它们，否则不是一份合法的续跑底稿。
         matric_potential_mm: time.floats("smp")?.to_vec(),
         hydraulic_conductivity_mm_s: time.floats("hk")?.to_vec(),
+        vegetation_water_potential_mm: match time.variable_dimensions("vegwp") {
+            Ok(_) => Some(time.floats("vegwp")?.to_vec()),
+            Err(_) => None,
+        },
         leaf_area_index: time.floats("lai")?.to_vec(),
         stem_area_index: time.floats("sai")?.to_vec(),
         vegetation_free_fraction: time.floats("sigf")?.to_vec(),
@@ -792,8 +814,27 @@ fn assemble(
             rain_mm: scalar(&time, "ldew_rain", patch)?,
             snow_mm: scalar(&time, "ldew_snow", patch)?,
         },
-        // 本分支不启用 PHS；`leaf_temperature` 的 PHS 状态另有持久化字段。
-        plant_hydraulics: None,
+        // `vegwp`：上游 `MOD_Vars_TimeVariables` 的四个节点水势（阳生叶、阴生叶、
+        // 木质部、根），从时间重启读回来续跑。**只有开着 PHS 的算例才有这个变量**
+        // —— `CN-Cng-aligned` 那份重启里就没有，所以按开关决定要不要读，
+        // 不去读一个不存在的变量。
+        plant_hydraulics: if physics.plant_hydraulics {
+            Some(PlantHydraulicState {
+                vegetation_water_potential_mm: {
+                    let nodes =
+                        time.layer_column("vegwp", patch, colm_core::VEGETATION_SEGMENTS)?;
+                    nodes.as_slice().try_into().map_err(|_| {
+                        anyhow!(
+                            "vegwp must hold {} vegetation nodes, got {}",
+                            colm_core::VEGETATION_SEGMENTS,
+                            nodes.len()
+                        )
+                    })?
+                },
+            })
+        } else {
+            None
+        },
     };
     let water = Water2014SoilState {
         liquid_water_kg_m2,
@@ -801,6 +842,12 @@ fn assemble(
         water_table_depth_m: scalar(&time, "zwt", patch)?,
         aquifer_water_mm: scalar(&time, "wa", patch)?,
         surface_water_mm: scalar(&time, "wdsrf", patch)?,
+        // `smp`/`hk` 是**时间变量**：上游从重启读回来，下一步的 THERMAL 与
+        // 植物水力都读它。装配期填的是重启那一份，之后每步由水分步覆写。
+        // 注意形状：`smp`/`hk` 是 `(patch, soil)`，**没有雪槽**，所以直接用
+        // `layer_column`，不能走 `soil_column`（那一个会按 `snow_layers` 偏移）。
+        matric_potential_mm: time.layer_column("smp", patch, soil_layers)?.to_vec(),
+        hydraulic_conductivity_mm_s: time.layer_column("hk", patch, soil_layers)?.to_vec(),
     };
     let leaf_area_index = scalar(&time, "lai", patch)?;
     let stem_area_index = scalar(&time, "sai", patch)?;
@@ -886,6 +933,17 @@ fn assemble(
         "the land class produces a root_fraction summing to {root_total}, which would push the \
          soil-water stress above one"
     );
+    // `DEF_USE_PLANTHYDRAULICS`：上游 `MOD_Const_LC` 先按地类号把九个植物水力性状
+    // 抄进 `kmax_sun` 一族的时间变量，再按 `DEF_LC_X /= LC_OVERRIDE_UNSET` 整列覆盖。
+    // 这里一次算完，两部内核（叶温、水分）共用同一份，避免两处各查一次表而漂移。
+    let plant_hydraulic_settings =
+        physics
+            .plant_hydraulics
+            .then(|| colm_core::PlantHydraulicSettings {
+                traits: class.plant_hydraulic_traits(physics.plant_hydraulic_overrides),
+                parameters: physics.plant_hydraulic_parameters,
+                soil_surface_resistance_scheme: physics.surface_resistance_scheme,
+            });
     let leaf_angle_distribution = class.leaf_angle_distribution();
     let inverse_sqrt_leaf_dimension_m_neg_half = class.inverse_sqrt_leaf_dimension_m_neg_half();
     // 生化参数整份来自地类表。冠层积分因子不在这里：内核每步从 `lai`/`extkb`/`extkd`
@@ -968,6 +1026,7 @@ fn assemble(
         radiation_fields,
         snow_soil,
         root_flux_zeros: vec![0.0; soil_layers],
+        plant_hydraulic_settings,
         physics,
     })
 }
@@ -1206,7 +1265,9 @@ impl StandardLctRestartTemplate {
                     intercepted_rain_kg_m2_s: 0.0,
                     intercepted_snow_kg_m2_s: 0.0,
                     ground_latent_heat_j_kg: physics.vaporization_heat_j_kg,
-                    // 本分支不启用 PHS：PHS 的持久状态在 `LeafTemperatureState`。
+                    // 本步的 PHS 输入由 `standard_lct_soil_step` /
+                    // `standard_lct_snow_soil_step` 现拼（`smp`/`hk`/`rootfr` 都在状态
+                    // 与本步输入里，装配期拿不到），这里只留占位。
                     plant_hydraulics: None,
                     options: LeafTemperatureOptions {
                         observation_height_mode: physics.observation_height_mode,
@@ -1282,11 +1343,16 @@ impl StandardLctRestartTemplate {
                     // Rust 是 0 —— `ssw = 0` 于是 `inc` 顶到 0.11，`alb` 高 0.023。
                     supercool_water: physics.supercool_water,
                 },
+                plant_hydraulics: self.plant_hydraulic_settings,
             },
             water: colm_core::Water2014SoilInput {
                 patch_type: 0,
                 urban_run: false,
-                plant_hydraulics: false,
+                // 打开时 `soilwater` 用**叶温内核给的分层根通量**替换
+                // 「蒸腾 × rootfr」那一支（`MOD_SoilSnowHydrology.F90` 的
+                // `IF (input%plant_hydraulics)`）；两个内核必须同时打开，
+                // 只开一处会让根通量对不上蒸腾。
+                plant_hydraulics: physics.plant_hydraulics,
                 time_step_seconds,
                 impermeable_porosity: physics.impermeable_porosity,
                 ponding_limit_mm: physics.ponding_limit_mm,
@@ -1473,6 +1539,14 @@ impl StandardLctRestartTemplate {
     /// 推进后的状态，其余 patch 原样保留。
     /// `ground_temperature_k` 由调用方给：它只出现在**这一步的输出**里
     /// （`StandardLctSoilOutput::energy.ground.temperature_k[0]`），状态只带逐层土温。
+    /// `DEF_USE_PLANTHYDRAULICS` 是否打开。
+    ///
+    /// history 用它决定要不要声明 `f_vegwp`（见
+    /// [`crate::history::LCT_PLANT_HYDRAULIC_VARIABLES`]）。
+    pub fn plant_hydraulics(&self) -> bool {
+        self.plant_hydraulic_settings.is_some()
+    }
+
     pub fn evolved_overrides(
         &self,
         state: &StandardLctSoilState,
@@ -1569,6 +1643,28 @@ impl StandardLctRestartTemplate {
             RestartOverride::new("smp", matric_potential),
             RestartOverride::new("hk", hydraulic_conductivity),
         ];
+        // `vegwp`：PHS 的四个节点水势，续跑读回的就是它（`MOD_Vars_TimeVariables`
+        // 的 `vegwp`），**不写回等于每步都从启动时刻的水势重来**。宽度是
+        // `nvegwcs`，与 `smp`/`hk` 的土层数不同，所以单独一段。
+        //
+        // 重启里没有这一列时**不新造**：`write_with` 只替换已有变量，而且
+        // 「文件里没有」正是 PHS 关掉时的正常形态（实测 `CN-Cng-aligned`）。
+        if let (Some(plant), Some(source)) = (
+            &state.energy.leaf.plant_hydraulics,
+            &self.restart_columns.vegetation_water_potential_mm,
+        ) {
+            let mut potential = source.clone();
+            for (node, value) in plant.vegetation_water_potential_mm.iter().enumerate() {
+                let index = self.patch * colm_core::VEGETATION_SEGMENTS + node;
+                ensure!(
+                    index < potential.len(),
+                    "the restart's vegwp column is too short for patch {} node {node}",
+                    self.patch
+                );
+                potential[index] = *value;
+            }
+            overrides.push(RestartOverride::new("vegwp", potential));
+        }
         // 冠层几何与冠层光学：上游都是**时间变量**，每步末尾由
         // 「Preparation for the next time step」重算（`CoLMMAIN.F90:2096-2102` 的
         // `lai`/`sai`/`sigf` 与 `albland` 写出的 `thermk`/`extkb`/`extkd`）。
@@ -1679,8 +1775,12 @@ impl StandardLctRestartTemplate {
             // 原先只有 history 在算，重启写回拿不到，于是写的是入参那份（283 / 1.0）。
             ("trad", budget.radiative_temperature_k),
             ("emis", budget.bulk_emissivity),
-            ("gs0sun", leaf_output.sunlit_stomatal_conductance_mol_m2_s),
-            ("gs0sha", leaf_output.shaded_stomatal_conductance_mol_m2_s),
+            // `gs0sun`/`gs0sha` 是 `gs0` 那一对（**最大**叶导度，µmol m-2 s-1），
+            // 不是上面 `f_gssun` 的 `gssun`（实际叶导度，mol m-2 s-1）。
+            // 原先这两个槽位填的是 `gssun`：单位差 1e6、物理量还是另一个，
+            // 于是 `--restart-out` 写出过 4.8e-5 而上游是 481.34 µmol。
+            // PHS 关掉时内核给 `None`，上游那时从不给这两个变量赋值 ——
+            // 保持原值，不写回。
             ("z0m", leaf_output.momentum_roughness_m),
             ("zol", leaf_output.zol),
             ("rib", leaf_output.bulk_richardson),
@@ -1691,6 +1791,23 @@ impl StandardLctRestartTemplate {
             ("fh", leaf_output.heat_similarity),
             ("fq", leaf_output.moisture_similarity),
         ] {
+            if let Some(override_) = self.surface_diagnostics.splice(name, self.patch, value)? {
+                overrides.push(override_);
+            }
+        }
+        for (name, value) in [
+            (
+                "gs0sun",
+                leaf_output.maximum_sunlit_leaf_conductance_umol_m2_s,
+            ),
+            (
+                "gs0sha",
+                leaf_output.maximum_shaded_leaf_conductance_umol_m2_s,
+            ),
+        ] {
+            let Some(value) = value else {
+                continue;
+            };
             if let Some(override_) = self.surface_diagnostics.splice(name, self.patch, value)? {
                 overrides.push(override_);
             }

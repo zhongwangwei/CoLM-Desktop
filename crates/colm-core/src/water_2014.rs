@@ -79,6 +79,15 @@ pub struct Water2014SoilState {
     pub water_table_depth_m: f64,
     pub aquifer_water_mm: f64,
     pub surface_water_mm: f64,
+    /// `smp`：上一层水分步算出的逐层基质势 [mm]。
+    ///
+    /// 上游是 `MOD_Vars_TimeVariables` 的**时间变量**（`WATER_2014` 的
+    /// `intent(out)`），下一步的 `THERMAL` 与植物水力都读它。放在状态里是因为
+    /// 能量步在水分步**之前**跑（`CoLMDRIVER`：THERMAL → WATER_2014），
+    /// 所以它必须是**上一步**的值，不能从本步的输出里拿。
+    pub matric_potential_mm: Vec<f64>,
+    /// `hk`：上一层水分步算出的逐层导水率 [mm/s]。同上。
+    pub hydraulic_conductivity_mm_s: Vec<f64>,
 }
 
 /// 上游的 `totwb`/`endwb`：整根土柱的总蓄水量，单位 mm（`kg/m^2` 与 mm 等值）。
@@ -233,6 +242,9 @@ pub fn water_2014_soil_step(
         + (input.fluxes.soil_frost_kg_m2_s - input.fluxes.soil_sublimation_kg_m2_s)
             * input.time_step_seconds)
         .max(0.0);
+    // `smp`/`hk` 是 `soilwater` 的 `intent(out)`，上游存进时间变量供**下一步**用。
+    state.matric_potential_mm = soil.matric_potential_mm.clone();
+    state.hydraulic_conductivity_mm_s = soil.hydraulic_conductivity_mm_s.clone();
 
     Ok(Water2014SoilOutput {
         water_input_mm_s,
@@ -446,6 +458,11 @@ fn validate(input: Water2014SoilInput<'_>, state: &Water2014SoilState) -> Result
                 .chain(&state.ice_water_kg_m2)
                 .all(|value| value.is_finite() && *value >= 0.0),
         "water_2014_soil_step state layers are invalid"
+    );
+    ensure!(
+        state.matric_potential_mm.len() == layers
+            && state.hydraulic_conductivity_mm_s.len() == layers,
+        "water_2014_soil_step smp/hk columns must have one entry per soil layer"
     );
     ensure!(
         [

@@ -106,6 +106,19 @@ pub const LCT_FLUX_VARIABLES: [&str; 6] = ["qinfl", "rnof", "rsub", "rsur", "qch
 /// 所以验证靠的不是精度而是"拼错项会当场炸成大数"。
 pub const LCT_BALANCE_VARIABLES: [&str; 2] = ["xerr", "zerr"];
 
+/// **只有 `DEF_USE_PLANTHYDRAULICS` 打开时**才产出的 history 变量。
+///
+/// 上游把 `f_vegwp` 整段写在 `IF (DEF_USE_PLANTHYDRAULICS)` 里
+/// （`MOD_Hist.F90:4372-4378`），所以 PHS 关掉的算例里这一列**根本不存在**。
+/// 实测两份黄金：`CN-Cng-aligned`（显式关掉）没有 `f_vegwp`，
+/// `CN-Cng-campbell`（用声明默认值 `.true.`）有 —— 4 个节点 × 264 条。
+/// 因此它不能进 [`declare_lct_variables`] 的固定清单：多声明一列会让文件
+/// schema 在两个算例上都对不上（关掉的那个会多出一列全填充）。
+///
+/// 累加规则是**普通的 `acc2d` + `nac`**（`MOD_Vars_1DAccFluxes.F90:2494`），
+/// 所以写出的是区间平均，不是末步瞬时值 —— 别把它塞进 `INSTANTANEOUS_VARIABLES`。
+pub const LCT_PLANT_HYDRAULIC_VARIABLES: [&str; 1] = ["vegwp"];
+
 /// 本层能填的**瞬时**水量诊断，三项。
 ///
 /// 这三项与其它变量的累加规则又不同：上游先把 `vecacc = wat` 再
@@ -341,7 +354,7 @@ pub const UNFILLED: [&str; 0] = [];
 
 /// 声明本层能填的全部变量：见 [`LCT_STATE_VARIABLES`] 起的一组常量，
 /// 外加 [`DECLARED_ONLY`]（上游在本算例里也留空的那几个槽位）。
-pub fn declare_lct_variables(buffer: &mut HistoryBuffers) -> Result<()> {
+pub fn declare_lct_variables(buffer: &mut HistoryBuffers, plant_hydraulics: bool) -> Result<()> {
     let mut names = LCT_STATE_VARIABLES.to_vec();
     names.extend_from_slice(&LCT_FLUX_VARIABLES);
     names.extend_from_slice(&LCT_ENERGY_VARIABLES);
@@ -358,6 +371,9 @@ pub fn declare_lct_variables(buffer: &mut HistoryBuffers) -> Result<()> {
     names.extend_from_slice(&LCT_SOIL_RESISTANCE_VARIABLES);
     names.extend_from_slice(&LCT_SIMILARITY_10M_VARIABLES);
     names.extend_from_slice(&LCT_BALANCE_VARIABLES);
+    if plant_hydraulics {
+        names.extend_from_slice(&LCT_PLANT_HYDRAULIC_VARIABLES);
+    }
     names.extend_from_slice(&DECLARED_ONLY);
     buffer.declare(&names)
 }
@@ -839,7 +855,6 @@ pub fn set_lct_stomatal_diagnostics(
     energy: &colm_core::StandardLctEnergyOutput,
 ) -> Result<()> {
     let leaf = &energy.leaf;
-    let stress = energy.root_uptake.soil_water_stress;
     for (name, value) in [
         ("assim", leaf.assimilation_mol_m2_s),
         ("assimsun", leaf.sunlit_assimilation_mol_m2_s),
@@ -849,9 +864,12 @@ pub fn set_lct_stomatal_diagnostics(
         ("etrsha", leaf.shaded_transpiration_kg_m2_s),
         ("gssun", leaf.sunlit_stomatal_conductance_mol_m2_s),
         ("gssha", leaf.shaded_stomatal_conductance_mol_m2_s),
-        // LCT 分支两行同源（`MOD_Thermal.F90:674-675`），所以这里必然相等。
-        ("rstfacsun", stress),
-        ("rstfacsha", stress),
+        // 这两个**不能**再取 `energy.root_uptake.soil_water_stress`：那一个是
+        // `eroot`，即 PHS 进来之前的胁迫。上游的 `rstfacsun`/`rstfacsha` 是
+        // `intent(inout)`，PHS 会把它重写成自己的因子，`stomata` 只读不写，
+        // 所以 history 记的是 PHS 那一份。LCT 分支非 PHS 时两行同源，打开后不同源。
+        ("rstfacsun", leaf.sunlit_soil_water_stress),
+        ("rstfacsha", leaf.shaded_soil_water_stress),
     ] {
         ensure!(
             value.is_finite(),
@@ -1158,6 +1176,7 @@ pub fn set_lct_state(
     state: &StandardLctSoilState,
     ground_temperature_k: f64,
 ) -> Result<()> {
+    set_plant_hydraulics(sink, record, &state.energy.leaf)?;
     set_columns(
         sink,
         record,
@@ -1188,6 +1207,23 @@ pub fn set_lct_state(
     )
 }
 
+/// `f_vegwp`：四个节点的植被水势。
+///
+/// 只在 PHS 打开时写 —— 关掉时 `LeafTemperatureState::plant_hydraulics` 是
+/// `None`，而累加器里根本没有这一列（见
+/// [`LCT_PLANT_HYDRAULIC_VARIABLES`]）。给 `None` 编四个 `MISSING` 会让
+/// 非 PHS 算例凭空多出一列全填充，与上游「那一列不存在」不同。
+fn set_plant_hydraulics(
+    sink: &mut impl HistorySink,
+    record: usize,
+    leaf: &colm_core::LeafTemperatureState,
+) -> Result<()> {
+    let Some(plant) = &leaf.plant_hydraulics else {
+        return Ok(());
+    };
+    sink.layer("vegwp", record, &plant.vegetation_water_potential_mm)
+}
+
 /// 积雪分支：把一步的状态写进第 `record` 条记录。
 pub fn set_lct_snow_state(
     sink: &mut impl HistorySink,
@@ -1196,6 +1232,10 @@ pub fn set_lct_snow_state(
     state: &StandardLctSnowSoilState,
     ground_temperature_k: f64,
 ) -> Result<()> {
+    // **必须在积雪入口也写一次**：`standard_lct_snow_soil_step` 才是通用入口
+    // （无雪起步的算例也走它，见它的文档），只补 `set_lct_state` 会让
+    // `f_vegwp` 整列留填充值 —— 实测就是这样漏了一整轮。
+    set_plant_hydraulics(sink, record, &state.energy.leaf)?;
     set_columns(
         sink,
         record,
@@ -1304,6 +1344,12 @@ pub struct HistorySession {
     open: Option<(String, HistoryBuffers)>,
     /// 当前输出区间的累加器（上游的 `a_*` 与 `nac`）。
     accumulator: HistoryAccumulator,
+    /// `DEF_USE_PLANTHYDRAULICS`：决定新开的文件里要不要声明 `f_vegwp`。
+    ///
+    /// 由第一次 `push_lct*` 的模板现场给出（`new` 收不到模板）。默认 `false`
+    /// 是安全方向：少声明一列只会让 PHS 算例的文件少一列，而多声明一列会让
+    /// 非 PHS 算例凭空多出一列全填充。
+    plant_hydraulics: bool,
 }
 
 impl HistorySession {
@@ -1331,6 +1377,7 @@ impl HistorySession {
             stem: stem.into(),
             open: None,
             accumulator: HistoryAccumulator::default(),
+            plant_hydraulics: false,
         })
     }
 
@@ -1349,6 +1396,8 @@ impl HistorySession {
         reference: HistoryReferenceState,
     ) -> Result<Option<PathBuf>> {
         let ground = output.energy.ground.temperature_k[0];
+        // 在开文件之前定下 `f_vegwp` 是否声明。
+        self.plant_hydraulics = template.plant_hydraulics();
         self.push(end, |accumulator| {
             set_lct_state(accumulator, 0, template, state, ground)?;
             set_lct_fluxes(accumulator, 0, &output.water)?;
@@ -1411,6 +1460,7 @@ impl HistorySession {
         reference: HistoryReferenceState,
     ) -> Result<Option<PathBuf>> {
         let ground = output.energy.ground.temperature_k[0];
+        self.plant_hydraulics = template.plant_hydraulics();
         self.push(end, |accumulator| {
             set_lct_snow_state(accumulator, 0, template, state, ground)?;
             set_lct_fluxes(accumulator, 0, &output.water.soil)?;
@@ -1525,7 +1575,7 @@ impl HistorySession {
                 self.record_count(&record.suffix),
             );
             // 声明本层能负责的变量；写出的文件因此只包含它们。
-            declare_lct_variables(&mut buffer)?;
+            declare_lct_variables(&mut buffer, self.plant_hydraulics)?;
             self.open = Some((record.suffix.clone(), buffer));
         }
         let (_, buffer) = self.open.as_mut().expect("just opened");

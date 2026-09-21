@@ -12,7 +12,12 @@ const SUNLIT: usize = 0;
 const SHADED: usize = 1;
 const XYLEM: usize = 2;
 const ROOT: usize = 3;
-const VEGETATION_SEGMENTS: usize = 4;
+/// `nvegwcs`（`MOD_Namelist.F90` 的 `nvegwcs = 4`）：`vegwp` 的四个节点
+/// —— 阳生叶、阴生叶、木质部、根。
+///
+/// 公开是因为**重启里的 `vegwp` 就是这个长度**，装配层要按它读
+/// （`(patch, vegnodes)`），不能另写一个 4。
+pub const VEGETATION_SEGMENTS: usize = 4;
 const MIN_STRESS: f64 = 1.0e-2;
 const MIN_CONDUCTANCE: f64 = 1.0e-16;
 
@@ -116,7 +121,11 @@ pub fn plant_hydraulic_stress(
     let layers = validate(input, *state)?;
     let (soil_root_conductance_mm_s, axial_root_conductance_mm_s) = root_conductances(input)?;
     let conversion = conductance_conversion(input.surface_pressure_pa, input.leaf_temperature_k);
-    let boundary_conductance = conversion / input.leaf_boundary_resistance_s_m;
+    // 上游写的是 `1./rb * cf`（先取倒数再乘），不是 `cf/rb`。两者差 1 ULP，
+    // 而 `boundary_conductance` 会流到整个 A/f 方程组，能翻掉
+    // `shaded_flux > 0`、`determinant != 0`、`max|dx| > 2e5` 这几个**离散**判据
+    // （与已修的 `sqrt(2)` 倒数同类）。所以照抄结合顺序。
+    let boundary_conductance = 1.0 / input.leaf_boundary_resistance_s_m * conversion;
     let (sunlit_demand, shaded_demand) = transpiration_from_conductance(
         input,
         boundary_conductance,
@@ -148,17 +157,18 @@ pub fn plant_hydraulic_stress(
             root_flux,
             root_flux_slope,
         );
-        let maximum = potential
-            .iter()
-            .copied()
-            .chain(change)
-            .map(f64::abs)
-            .fold(0.0, f64::max);
+        // `MOD_PlantHydraulic.F90:329-332`：这一步的**目的**是把过大的牛顿步压到
+        // 「当前水势尺度的一半」以内，所以它取的是 `min(max|dx|, max|x|)/2`。
+        // 原先两处都写成 `max`：触发条件是 `max|dx| > 2e5`，而 `vegwp` 量级是
+        // 1e4~1e5 mm，于是 `max` 恒等于 `max|dx|`，缩放比成了 `max|dx|/2` ——
+        // 比上游大 `max|dx|/max|x|` 倍，恰好在它要保护的场景里失效，而且
+        // 四个节点一起跳、写回持久状态，误差会一路带下去。
         let mut change = change;
-        if change.iter().copied().map(f64::abs).fold(0.0, f64::max) > 200_000.0 {
-            let scale = maximum / 2.0;
-            let largest = change.iter().copied().map(f64::abs).fold(0.0, f64::max);
-            change = change.map(|value| scale * value / largest);
+        let largest_change = change.iter().copied().map(f64::abs).fold(0.0, f64::max);
+        if largest_change > 200_000.0 {
+            let largest_potential = potential.iter().copied().map(f64::abs).fold(0.0, f64::max);
+            let scale = largest_change.min(largest_potential) / 2.0;
+            change = change.map(|value| scale * value / largest_change);
         }
         for (value, delta) in potential.iter_mut().zip(change) {
             *value += delta;
@@ -188,20 +198,16 @@ pub fn plant_hydraulic_stress(
             (sunlit_gs / input.maximum_sunlit_leaf_conductance_umol_m2_s).max(MIN_STRESS);
         let shaded_stress =
             (shaded_gs / input.maximum_shaded_leaf_conductance_umol_m2_s).max(MIN_STRESS);
-        let (_, root_top) = root_potential_from_flux(
+        // `MOD_PlantHydraulic.F90:355-359` 只有一次 `getrootqflx_qe2x`：它同时给出
+        // 逐层根系水势与顶端水势。原先调了两遍（参数逐位相同，解算器确定性），
+        // 第二遍只为拿 `.0` —— 纯重复。
+        let (root_potential, root_top) = root_potential_from_flux(
             input,
             sunlit + shaded,
             &soil_root_conductance_mm_s,
             &axial_root_conductance_mm_s,
         )?;
         potential[ROOT] = root_top;
-        let root_potential = root_potential_from_flux(
-            input,
-            sunlit + shaded,
-            &soil_root_conductance_mm_s,
-            &axial_root_conductance_mm_s,
-        )?
-        .0;
         let root_flux = input
             .soil_matric_potential_mm
             .iter()
@@ -303,9 +309,8 @@ pub fn vegetation_water_potential(
         "plant-hydraulic stress factors must be finite and non-negative"
     );
     let (soil_root_conductance_mm_s, axial_root_conductance_mm_s) = root_conductances(input)?;
-    let boundary_conductance =
-        conductance_conversion(input.surface_pressure_pa, input.leaf_temperature_k)
-            / input.leaf_boundary_resistance_s_m;
+    let boundary_conductance = 1.0 / input.leaf_boundary_resistance_s_m
+        * conductance_conversion(input.surface_pressure_pa, input.leaf_temperature_k);
     let (sunlit_transpiration_kg_m2_s, shaded_transpiration_kg_m2_s) =
         transpiration_from_conductance(
             input,
@@ -438,9 +443,12 @@ fn transpiration_from_conductance(
                     / (1.0 / boundary_conductance_umol_m2_s
                         + 1.0 / shaded_stomatal_conductance_umol_m2_s)
                     / conversion);
-    let total = air + ground + leaf;
-    let air_weight = air / total;
-    let ground_weight = ground / total;
+    // 上游 `MOD_PlantHydraulic.F90:683-685` 是 `wtsqi = 1./(caw+cgw+cfw)` 再
+    // `wtaq0 = caw*wtsqi`（先取倒数再乘），不是 `caw/total`。差 1 ULP，
+    // 一样能翻离散判据（见 `boundary_conductance` 那处的说明）。
+    let inverse_total = 1.0 / (air + ground + leaf);
+    let air_weight = air * inverse_total;
+    let ground_weight = ground * inverse_total;
     let driving_humidity = (air_weight + ground_weight) * input.leaf_saturation_specific_humidity
         - air_weight * input.reference_specific_humidity
         - ground_weight * input.ground_specific_humidity;
@@ -885,7 +893,10 @@ fn validate(input: PlantHydraulicInput<'_>, state: PlantHydraulicState) -> Resul
             && input.parameters.root_tissue_density_g_m3 > 0.0
             && input.parameters.fine_root_to_leaf_area > 0.0
             && input.parameters.maximum_radial_root_conductance > 0.0
-            && (1..=5).contains(&input.soil_surface_resistance_scheme),
+            // `DEF_RSS_SCHEME` 的 0 是**合法值**：`MOD_Namelist.F90:1947-1951` 在
+            // 关掉 Campbell 土壤模型时把它置 0，而 `MOD_PlantHydraulic.F90:674-679`
+            // 的 `ELSE` 把 0 与 1 同等对待（只有 4 走导通支）。
+            && (0..=5).contains(&input.soil_surface_resistance_scheme),
         "plant-hydraulic inputs are physically invalid"
     );
     Ok(layers)

@@ -13,16 +13,32 @@ use crate::{
     ground_temperature, intercept_canopy, net_solar, root_uptake, soil_surface_resistance,
     CanopyInterceptionFluxes, CanopyInterceptionInput, ColdStartRadiation, GroundFluxInput,
     GroundFluxState, GroundHumidityInput, GroundHumidityState, GroundTemperatureInput,
-    GroundTemperatureState, LeafTemperatureInput, LeafTemperatureOutput, LeafTemperatureState,
-    NetSolarFluxes, NetSolarInput, NewSnowInput, PrecipitationPhaseScheme, PrecipitationState,
-    RootUptakeInput, RootUptakeState, RuntimeForcing, RuntimeSnowColumn, SnowToSoilTransfer,
-    SnowWaterInput, SoilSurfaceResistanceInput, SplitThermalWaterFluxes, SplitThermalWaterInput,
-    ThermalWaterFluxes, ThermalWaterInput, Water2014SnowSoilInput, Water2014SnowSoilOutput,
-    Water2014SoilInput, Water2014SoilOutput, Water2014SoilState,
+    GroundTemperatureState, LeafPlantHydraulicInput, LeafTemperatureInput, LeafTemperatureOutput,
+    LeafTemperatureState, NetSolarFluxes, NetSolarInput, NewSnowInput, PrecipitationPhaseScheme,
+    PrecipitationState, RootUptakeInput, RootUptakeState, RuntimeForcing, RuntimeSnowColumn,
+    SnowToSoilTransfer, SnowWaterInput, SoilSurfaceResistanceInput, SplitThermalWaterFluxes,
+    SplitThermalWaterInput, ThermalWaterFluxes, ThermalWaterInput, Water2014SnowSoilInput,
+    Water2014SnowSoilOutput, Water2014SoilInput, Water2014SoilOutput, Water2014SoilState,
 };
 
 const AIR_GAS_CONSTANT_J_KG_K: f64 = 287.04;
 const AIR_HEAT_CAPACITY_J_KG_K: f64 = 1004.64;
+
+/// `DEF_USE_PLANTHYDRAULICS` 的**静态**部分。
+///
+/// 每步变化的那部分（`smp`/`hk` 来自上一层水分步、`rootr` 来自本步）由
+/// [`standard_lct_soil_step`] 从状态与输入上取，所以这里只放装配期就定死的三项：
+/// 九个地类性状、七个 `DEF_PH_*` 常数、以及 `DEF_RSS_SCHEME`。
+///
+/// 上游对应的是 `MOD_Vars_TimeVariables` 的 `kmax_sun`/`psi50_sun`/`ck` 一族
+/// （由 `MOD_Const_LC` 的地类表加 `DEF_LC_*` 覆盖得到，见
+/// [`crate::ClassConstants::plant_hydraulic_traits`]）。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PlantHydraulicSettings {
+    pub traits: crate::PlantHydraulicTraits,
+    pub parameters: crate::PlantHydraulicParameters,
+    pub soil_surface_resistance_scheme: i32,
+}
 
 /// Immutable inputs to one standard LCT energy update.
 ///
@@ -41,6 +57,9 @@ pub struct StandardLctEnergyInput<'a> {
     pub ground_flux: GroundFluxInput,
     pub leaf_temperature: LeafTemperatureInput<'a>,
     pub ground_temperature: GroundTemperatureInput<'a>,
+    /// `DEF_USE_PLANTHYDRAULICS` 打开时的静态参数；关掉时是 `None`，
+    /// 于是叶温内核走 `plant_hydraulics: None` 那一支。
+    pub plant_hydraulics: Option<PlantHydraulicSettings>,
 }
 
 /// 上游的 `lai`/`sai` 时间变量（`CoLMMAIN.F90:2097-2102`）。
@@ -393,6 +412,45 @@ fn finish_energy_step(
 /// ported: a normal soil LCT patch without snow or split soil/snow.  It does
 /// not approximate PFT/PC aggregation, snow, irrigation, VSF, or wetland
 /// hydrology.
+/// 把 PHS 的静态设置与**本步**的土壤状态拼成叶温内核要的输入。
+///
+/// 上游 `MOD_Thermal_CanopyPhase_Extended.F90:719` 把
+/// `smp, hk(1:), hksati(1:)` 连同 `rootfr` 一起交给 `LEAFTEMPERATURE`：
+/// `smp`/`hk` 是 `WATER_2014` 的 `intent(out)` 存进**时间变量**、由**下一步**
+/// 的 `THERMAL` 读的（能量步在水分步之前），`hksati` 是饱和导水率常数，
+/// `rootfr` 是本步的根系分布。三者都不是装配期常数，所以不能放进
+/// `LeafTemperatureInput` 的装配值里。
+#[allow(clippy::too_many_arguments)]
+fn plant_hydraulic_input<'a>(
+    settings: PlantHydraulicSettings,
+    root_fraction: &'a [f64],
+    layer_thickness_m: &'a [f64],
+    node_depth_m: &'a [f64],
+    saturated_hydraulic_conductivity_mm_s: &'a [f64],
+    soil_matric_potential_mm: &'a [f64],
+    soil_hydraulic_conductivity_mm_s: &'a [f64],
+) -> LeafPlantHydraulicInput<'a> {
+    LeafPlantHydraulicInput {
+        node_depth_m,
+        layer_thickness_m,
+        root_fraction,
+        soil_matric_potential_mm,
+        soil_hydraulic_conductivity_mm_s,
+        saturated_hydraulic_conductivity_mm_s,
+        maximum_sunlit_leaf_hydraulic_conductance: settings.traits.maximum_sunlit_leaf_conductance,
+        maximum_shaded_leaf_hydraulic_conductance: settings.traits.maximum_shaded_leaf_conductance,
+        maximum_xylem_hydraulic_conductance: settings.traits.maximum_xylem_conductance,
+        maximum_root_hydraulic_conductance: settings.traits.maximum_root_conductance,
+        sunlit_leaf_psi50_mm: settings.traits.sunlit_leaf_psi50_mm,
+        shaded_leaf_psi50_mm: settings.traits.shaded_leaf_psi50_mm,
+        xylem_psi50_mm: settings.traits.xylem_psi50_mm,
+        root_psi50_mm: settings.traits.root_psi50_mm,
+        vulnerability_shape: settings.traits.vulnerability_shape,
+        soil_surface_resistance_scheme: settings.soil_surface_resistance_scheme,
+        parameters: settings.parameters,
+    }
+}
+
 pub fn standard_lct_soil_step(
     input: StandardLctSoilInput<'_>,
     state: &mut StandardLctSoilState,
@@ -405,6 +463,23 @@ pub fn standard_lct_soil_step(
         ice_water_kg_m2: &state.water.ice_water_kg_m2,
         ..input.energy.ground_temperature
     };
+    if let Some(settings) = input.energy.plant_hydraulics {
+        energy_input.leaf_temperature.plant_hydraulics = Some(plant_hydraulic_input(
+            settings,
+            input.energy.root_uptake.root_fraction,
+            // **土壤列，不是 `energy.ground_temperature` 那一份**：后者在积雪
+            // 分支里是**雪 + 土**的打包列（`snow_layers + nl_soil`），而
+            // `smp`/`hk` 只有 `nl_soil` 项 —— 上游 `MOD_LeafTemperature_Extended`
+            // 传的是土壤专用的 `z_soi`/`dz_soi`。用打包列会让 `snow_layers > 0`
+            // 的算例长度对不上而报错，所幸 `Water2014SoilInput` 本来就带着
+            // 土壤深度（`:61-62`），不必借道。
+            input.water.layer_thickness_m,
+            input.water.node_depth_m,
+            input.water.saturated_hydraulic_conductivity_mm_s,
+            &state.water.matric_potential_mm,
+            &state.water.hydraulic_conductivity_mm_s,
+        ));
+    }
     let energy = standard_lct_energy_step(energy_input, &mut state.energy)?;
     state.temperature_k = energy.ground.temperature_k.clone();
     state.water.liquid_water_kg_m2 = energy.ground.liquid_water_kg_m2.clone();
@@ -526,6 +601,17 @@ pub fn standard_lct_snow_soil_step(
         ..input.energy.ground_flux
     };
 
+    if let Some(settings) = input.energy.plant_hydraulics {
+        energy_input.leaf_temperature.plant_hydraulics = Some(plant_hydraulic_input(
+            settings,
+            input.energy.root_uptake.root_fraction,
+            input.soil_water.layer_thickness_m,
+            input.soil_water.node_depth_m,
+            input.soil_water.saturated_hydraulic_conductivity_mm_s,
+            &state.soil_water.matric_potential_mm,
+            &state.soil_water.hydraulic_conductivity_mm_s,
+        ));
+    }
     let energy = finish_energy_step(energy_input, &mut state.energy, prepared)?;
     sync_snow_soil_state(&energy.ground, snow_layers, state);
     let melted = energy.ground.phase_flag[..snow_layers]

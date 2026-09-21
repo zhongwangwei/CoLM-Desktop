@@ -193,6 +193,7 @@ pub use photosynthesis::{
 pub use plant_hydraulics::{
     plant_hydraulic_stress, vegetation_water_potential, vulnerability, vulnerability_derivative,
     PlantHydraulicInput, PlantHydraulicOutput, PlantHydraulicParameters, PlantHydraulicState,
+    VEGETATION_SEGMENTS,
 };
 pub use prospect::{prospect_leaf_optics, ProspectLeafOptics};
 pub use radiation::{
@@ -229,9 +230,10 @@ pub use surface_optics::{prepare_surface_optics, SurfaceOptics, SurfaceOpticsInp
 
 pub use standard_lct_step::{
     standard_lct_energy_step, standard_lct_snow_soil_step, standard_lct_soil_step, CanopyGeometry,
-    StandardLctEnergyInput, StandardLctEnergyOutput, StandardLctEnergyState,
-    StandardLctSnowSoilInput, StandardLctSnowSoilOutput, StandardLctSnowSoilState,
-    StandardLctSoilInput, StandardLctSoilOutput, StandardLctSoilState, TemporalCanopy,
+    PlantHydraulicSettings, StandardLctEnergyInput, StandardLctEnergyOutput,
+    StandardLctEnergyState, StandardLctSnowSoilInput, StandardLctSnowSoilOutput,
+    StandardLctSnowSoilState, StandardLctSoilInput, StandardLctSoilOutput, StandardLctSoilState,
+    TemporalCanopy,
 };
 pub use static_state::{
     colm_soil_grid, derive_bedrock, derive_lake_layers, derive_soil_parameters,

@@ -238,6 +238,17 @@ pub struct LeafTemperatureOutput {
     pub shaded_transpiration_kg_m2_s: f64,
     /// PHS soil-layer uptake. Empty when plant hydraulics is disabled.
     pub root_flux_kg_m2_s: Vec<f64>,
+    /// 冠层胁迫因子，写进 history 的 `f_rstfacsun`/`f_rstfacsha`。
+    ///
+    /// PHS 关掉时就是调用方给的 `eroot`（LCT 分支两行同源）；PHS 打开时是
+    /// [`crate::plant_hydraulic_stress`] 最后一轮算出的因子 —— 上游那两个变量
+    /// 是 `intent(inout)`，`stomata` 只读不写，所以最终值确实是 PHS 的。
+    pub sunlit_soil_water_stress: f64,
+    pub shaded_soil_water_stress: f64,
+    /// `gs0sun`/`gs0sha` [µmol m-2 s-1]：PHS 的最大叶导度，上游写进重启的两个
+    /// 时间变量。关掉 PHS 时是 `None`（上游那时从不给它们赋值）。
+    pub maximum_sunlit_leaf_conductance_umol_m2_s: Option<f64>,
+    pub maximum_shaded_leaf_conductance_umol_m2_s: Option<f64>,
     pub sunlit_assimilation_mol_m2_s: f64,
     pub shaded_assimilation_mol_m2_s: f64,
     pub downward_longwave_w_m2: f64,
@@ -495,6 +506,21 @@ pub fn leaf_temperature(
         )?;
         let mut root_flux_kg_m2_s = Vec::new();
         let mut hydraulic_transpiration = None;
+        // `MOD_PlantHydraulic.F90:353-368` 的 `calcstress_twoleaf` 把
+        // `rstfacsun`/`rstfacsha` 重写成 **PHS 自己的**胁迫因子
+        // （`amax1(gssun/gs0sun, 1e-2)` 或 `amax1(plc(psi,psi50,ck), 1e-2)`），
+        // 而且是 `intent(inout)`：`stomata` 只读不写，所以循环结束后上游的
+        // `rstfacsun` 就是最后一轮 PHS 给的值。关掉 PHS 时它保持调用方的
+        // `eroot`。两者必须分开记，否则 history 的 `f_rstfacsun` 在 PHS 下
+        // 写的是**没被 PHS 改过**的那个数 —— 实测黄金 0.99988 对 0.0454。
+        let mut sunlit_soil_water_stress = input.soil_water_stress_sunlit;
+        let mut shaded_soil_water_stress = input.soil_water_stress_shaded;
+        // `gs0sun`/`gs0sha`：`MOD_LeafTemperature_Extended.F90:817-818` 的
+        // 「最大叶导度」，`rstfacsun = gssun/gs0sun` 的分母，也是上游写进重启的
+        // 两个时间变量。**只在 PHS 分支里赋值**，所以关掉 PHS 时它们是 `None`
+        // —— 那时上游根本不碰这两个变量，写回任何数都是编的。
+        let mut gs0sun = None;
+        let mut gs0sha = None;
         if let Some(hydraulic) = input.plant_hydraulics {
             let pressure_conversion = 44.6 * 273.16 * input.surface_pressure_pa / 1.013e5;
             let maximum_sunlit_leaf_conductance_umol_m2_s = (1.0
@@ -509,6 +535,8 @@ pub fn leaf_temperature(
                 .min(1.0e6)
                 / laisha
                 * 1.0e6;
+            gs0sun = Some(maximum_sunlit_leaf_conductance_umol_m2_s);
+            gs0sha = Some(maximum_shaded_leaf_conductance_umol_m2_s);
             let hydraulic_state = state.plant_hydraulics.as_mut().ok_or_else(|| {
                 anyhow::anyhow!("plant hydraulics input requires persistent plant hydraulic state")
             })?;
@@ -598,6 +626,8 @@ pub fn leaf_temperature(
                 hydraulic_output.shaded_transpiration_kg_m2_s,
             ));
             root_flux_kg_m2_s = hydraulic_output.root_flux_kg_m2_s;
+            sunlit_soil_water_stress = hydraulic_output.sunlit_stress;
+            shaded_soil_water_stress = hydraulic_output.shaded_stress;
         }
         let leaf_sunlit_resistance = sunlit_resistance.stomatal_resistance_s_m * laisun;
         let leaf_shaded_resistance = shaded_resistance.stomatal_resistance_s_m * laisha;
@@ -842,6 +872,10 @@ pub fn leaf_temperature(
             leaf_sunlit_resistance,
             leaf_shaded_resistance,
             root_flux_kg_m2_s,
+            sunlit_soil_water_stress,
+            shaded_soil_water_stress,
+            maximum_sunlit_leaf_conductance_umol_m2_s: gs0sun,
+            maximum_shaded_leaf_conductance_umol_m2_s: gs0sha,
         };
         iteration += 1;
         if iteration > MIN_ITERATIONS {
@@ -1041,6 +1075,10 @@ pub fn leaf_temperature(
         sunlit_transpiration_kg_m2_s: sunlit_transpiration,
         shaded_transpiration_kg_m2_s: shaded_transpiration,
         root_flux_kg_m2_s,
+        sunlit_soil_water_stress: last.sunlit_soil_water_stress,
+        shaded_soil_water_stress: last.shaded_soil_water_stress,
+        maximum_sunlit_leaf_conductance_umol_m2_s: last.maximum_sunlit_leaf_conductance_umol_m2_s,
+        maximum_shaded_leaf_conductance_umol_m2_s: last.maximum_shaded_leaf_conductance_umol_m2_s,
         sunlit_assimilation_mol_m2_s: last.sunlit_resistance.assimilation_mol_m2_s,
         shaded_assimilation_mol_m2_s: last.shaded_resistance.assimilation_mol_m2_s,
         downward_longwave_w_m2: downward_longwave,
@@ -1103,6 +1141,10 @@ struct Iteration {
     leaf_sunlit_resistance: f64,
     leaf_shaded_resistance: f64,
     root_flux_kg_m2_s: Vec<f64>,
+    sunlit_soil_water_stress: f64,
+    shaded_soil_water_stress: f64,
+    maximum_sunlit_leaf_conductance_umol_m2_s: Option<f64>,
+    maximum_shaded_leaf_conductance_umol_m2_s: Option<f64>,
 }
 
 impl Default for Iteration {
@@ -1161,6 +1203,10 @@ impl Default for Iteration {
             leaf_sunlit_resistance: 0.0,
             leaf_shaded_resistance: 0.0,
             root_flux_kg_m2_s: Vec::new(),
+            sunlit_soil_water_stress: 0.0,
+            shaded_soil_water_stress: 0.0,
+            maximum_sunlit_leaf_conductance_umol_m2_s: None,
+            maximum_shaded_leaf_conductance_umol_m2_s: None,
         }
     }
 }
