@@ -1359,10 +1359,16 @@ pub fn flux_variable_saturated_zone_all(
                 lower_unsaturated_pressure_head_mm: input.unsaturated_pressure_head_mm[i_end],
                 lower_unsaturated_hydraulic_conductivity_mm_s: input
                     .unsaturated_hydraulic_conductivity_mm_s[i_end],
-                saturated_thickness_mm: &input.thickness_mm[i_stt..=i_end],
-                saturated_potential_mm: &input.saturated_potential_mm[i_stt..=i_end],
-                saturated_hydraulic_conductivity_mm_s: &input.saturated_hydraulic_conductivity_mm_s
-                    [i_stt..=i_end],
+                // 上游 `flux_both_transitive_interface` 的 `dz`/`psi_s`/`hksat` dummy 覆盖
+                // **整段** `i_stt:i_end`，但它内部把 `dz(i_stt+1:i_end-1)` 这一**饱和子段**
+                // 交给下层的过渡界面函数，`qlc` 也只覆盖那个子段。本仓库的
+                // `flux_variable_saturated_both_transition` 直接按"饱和子段"建模
+                // （`saturated_thickness_mm.len() == nlev_sat`），所以这里要传子段；
+                // 传整段会让它返回 `i_end-i_stt+1` 个通量、而 `qlc` 只放得下
+                // `i_end-i_stt-1` 个 —— 实测在"两端都在过渡界面上"时直接 panic。
+                saturated_thickness_mm: &thickness_sat_mm,
+                saturated_potential_mm: potential_sat_mm,
+                saturated_hydraulic_conductivity_mm_s: conductivity_sat_mm_s,
                 flux_tolerance_mm_s: input.flux_tolerance_mm_s,
                 depth_tolerance_mm: input.depth_tolerance_mm,
                 pressure_tolerance_mm: input.pressure_tolerance_mm,
@@ -1423,6 +1429,14 @@ pub fn flux_variable_saturated_zone_all(
             None,
         )?
     };
+    // `qlc` 只覆盖 `i_s..=i_e`。任何一支返回的通量个数不对，这里立刻断 ——
+    // 第一版 Case 5 传了整段的厚度切片、于是返回 `i_end-i_stt+1` 个而 `qlc` 只放得下
+    // `i_end-i_stt-1` 个，正是这条断言在单测里抓到的。
+    debug_assert_eq!(
+        segments.len(),
+        i_e - i_s + 1,
+        "flux_sat_zone_all dispatch returned the wrong number of fluxes"
+    );
     saturated_flux_mm_s[i_s..=i_e].copy_from_slice(&segments);
 
     // 上端在层内：`qq_wt` 由层内非饱和段的通量给出（或退化为上一层界面通量）。
@@ -4325,11 +4339,13 @@ pub fn variably_saturated_flow_step(
             center_depth_mm: &center_depth_mm,
             interface_depth_mm: &interface_depth_mm,
             permeable: &permeable,
-            porosity: input.porosity,
+            // 上游第 6 个实参是 `eff_porosity(1:nl_soil)`，不是 `porsl`。
+            porosity: &effective_porosity,
             residual_water: input.residual_water,
             saturated_potential_mm: input.saturated_potential_mm,
             saturated_hydraulic_conductivity_mm_s: input.saturated_hydraulic_conductivity_mm_s,
             hydraulic_model: input.hydraulic_model,
+            // …而第 12 个实参 `porsl(nl_soil)` 才是**真**孔隙度。
             aquifer_porosity: input.porosity[nlev - 1],
             ground_water_flux_mm_s,
             transpiration_mm_s: input.fluxes.transpiration_kg_m2_s,
@@ -4535,7 +4551,11 @@ fn validate_variable_saturated_flow(
                     porosity.is_finite()
                         && residual.is_finite()
                         && *residual >= 0.0
-                        && *residual < *porosity
+                        // `porosity` 在这条链上是**有效**孔隙度（`soil_water_vertical_movement`
+                        // 的 `porsl` dummy 收到的是 `eff_porosity`）：含冰层可以被挤到
+                        // `theta_r` 以下，那时上游把该层判成不透水、根本不进 Richards
+                        // 求解，所以 `theta_r < porosity` 只对**可渗透**层成立。
+                        && *porosity > 0.0
                 })
             && input
                 .saturated_hydraulic_conductivity_mm_s
@@ -4575,11 +4595,21 @@ pub struct VariableSaturatedSoilWaterInput<'a> {
     /// `sp_zi(0:nlev)`，长度 `nlev + 1`。
     pub interface_depth_mm: &'a [f64],
     pub permeable: &'a [bool],
+    /// `porsl` —— **但这个 dummy 收到的是有效孔隙度**（`eff_porosity = porsl - vol_ice`）。
+    ///
+    /// 上游 `soil_water_vertical_movement` 的 dummy 名叫 `porsl`，而**唯一的调用方**
+    /// （`MOD_SoilSnowHydrology.F90:1096`）传进去的是 `eff_porosity(1:nl_soil)`；
+    /// 同一行第 12 个实参 `porsl(nl_soil)` 才是真孔隙度，对应下面的
+    /// [`Self::aquifer_porosity`]。照抄 dummy 名会把这个区别藏起来 ——
+    /// 第一版就在这里传了真孔隙度，于是"含冰层的饱和判定"全错：
+    /// 水位在第一小时就从柱底跳到 69 mm（黄金是 0.88 mm），`vol_liq` 在
+    /// 第 1 层也不再等于 `eff_porosity`。
     pub porosity: &'a [f64],
     pub residual_water: &'a [f64],
     pub saturated_potential_mm: &'a [f64],
     pub saturated_hydraulic_conductivity_mm_s: &'a [f64],
     pub hydraulic_model: &'a [SoilHydraulicModel],
+    /// `porsl(nl_soil)`：含水层的孔隙度，上游这里用的是**真**孔隙度。
     pub aquifer_porosity: f64,
     /// `qgtop`：地表入流（雨 + 融雪 + 露），mm/s。
     pub ground_water_flux_mm_s: f64,
@@ -5059,15 +5089,20 @@ fn validate_soil_water_movement(
                 .interface_depth_mm
                 .windows(2)
                 .all(|pair| pair[1] > pair[0])
+            // `porosity` 在这里是**有效孔隙度**（见 [`VariableSaturatedSoilWaterInput::porosity`]），
+            // 含冰层可以被挤到 `theta_r` 以下 —— 那时上游把该层判成不透水、
+            // 根本不进 Richards 求解，所以 `residual < porosity` 只对**可渗透**层要求。
             && input
                 .porosity
                 .iter()
                 .zip(input.residual_water)
-                .all(|(porosity, residual)| {
+                .zip(input.permeable)
+                .all(|((porosity, residual), permeable)| {
                     porosity.is_finite()
+                        && *porosity > 0.0
                         && residual.is_finite()
                         && *residual >= 0.0
-                        && *residual < *porosity
+                        && (!*permeable || *residual < *porosity)
                 })
             && input
                 .saturated_potential_mm
@@ -5143,6 +5178,9 @@ fn validate_richards(
                     porosity.is_finite()
                         && residual.is_finite()
                         && *residual >= 0.0
+                        // 这里仍要求 `theta_r < eff_porosity`：`Richards_solver` 只被
+                        // **整段可渗透**的窗口调用（`soil_water_vertical_movement` 按
+                        // 不透水层切开），而可渗透的定义就是 `eff > max(wimp, theta_r)`。
                         && *residual < *porosity
                 })
             && input
@@ -5549,7 +5587,7 @@ fn validate_sublevel(input: VariableSaturatedSublevelInput<'_>) -> Result<usize>
                 && input.water_table_thickness_mm[layer].is_finite()
                 && input.porosity[layer] > 0.0
                 && input.residual_water[layer] >= 0.0
-                && input.residual_water[layer] < input.porosity[layer]
+                // 同上：`porosity` 是有效孔隙度，`theta_r < porosity` 不保证。
                 && input.saturated_potential_mm[layer] < 0.0
                 && input.saturated_hydraulic_conductivity_mm_s[layer] >= 0.0
                 && (0.0..=thickness).contains(&input.wetting_front_mm[layer])
@@ -5557,7 +5595,12 @@ fn validate_sublevel(input: VariableSaturatedSublevelInput<'_>) -> Result<usize>
                 && input.wetting_front_mm[layer] + input.water_table_thickness_mm[layer]
                     <= thickness
                 && input.liquid_water[layer] >= 0.0
-                && input.liquid_water[layer] <= input.porosity[layer],
+                // `volume_tolerance` 的余量是刻意的：`check_and_update_level` 用的是
+                // 精确 `.min(vl_s)`，但含水层交换那条路上会经
+                // `soil_vliq_from_psi` 的**反解**回来，实测会有 1 ULP 的超出
+                // （`0.48279477020617934` 对 `0.4827947702061793`）。上游没有任何
+                // 这类断言，所以这里放一个与求解器同源的容差，而不是换个魔数。
+                && input.liquid_water[layer] <= input.porosity[layer] + input.volume_tolerance,
             "VSF sublevel layer inputs are invalid"
         );
     }
@@ -5764,7 +5807,7 @@ fn validate_explicit(input: VariableSaturatedExplicitInput<'_>) -> Result<usize>
                 && input.previous_water_table_thickness_mm[layer].is_finite()
                 && input.porosity[layer] > 0.0
                 && input.residual_water[layer] >= 0.0
-                && input.residual_water[layer] < input.porosity[layer]
+                // 同上：`porosity` 是有效孔隙度，`theta_r < porosity` 不保证。
                 && input.saturated_potential_mm[layer] < 0.0
                 && (0.0..=thickness).contains(&input.wetting_front_mm[layer])
                 && (0.0..=thickness).contains(&input.water_table_thickness_mm[layer])
@@ -5778,7 +5821,8 @@ fn validate_explicit(input: VariableSaturatedExplicitInput<'_>) -> Result<usize>
                 && input.liquid_water[layer] >= 0.0
                 && input.liquid_water[layer] <= input.porosity[layer]
                 && input.previous_liquid_water[layer] >= 0.0
-                && input.previous_liquid_water[layer] <= input.porosity[layer],
+                && input.previous_liquid_water[layer]
+                    <= input.porosity[layer] + input.volume_tolerance,
             "VSF explicit update layer inputs are invalid"
         );
     }
@@ -5831,10 +5875,14 @@ fn validate(input: VariableSaturatedAquiferInput<'_>) -> Result<usize> {
                 && input.unsaturated_liquid_water[layer].is_finite()
                 && input.porosity[layer] > 0.0
                 && input.residual_water[layer] >= 0.0
-                && input.residual_water[layer] < input.porosity[layer]
+                // `porosity` 是**有效**孔隙度（`soil_water_vertical_movement` 传的是
+                // `eff_porosity`）：含冰层可以被挤到 `theta_r` 以下，那时上游把该层
+                // 判成不透水、不参与交换，所以这两个不等式只对**可渗透**层要求。
+                && (!input.permeable[layer]
+                    || (input.residual_water[layer] < input.porosity[layer]
+                        && input.unsaturated_liquid_water[layer] <= input.porosity[layer]))
                 && input.saturated_potential_mm[layer] < 0.0
-                && input.unsaturated_liquid_water[layer] >= 0.0
-                && input.unsaturated_liquid_water[layer] <= input.porosity[layer],
+                && input.unsaturated_liquid_water[layer] >= 0.0,
             "VSF aquifer exchange layer inputs are invalid"
         );
     }
