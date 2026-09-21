@@ -5580,3 +5580,42 @@ stage 的写出面，都应该把该 stage 的**重启**也逐变量比一遍 �
 2. 重启里那 30 来个**没有**被回写、只是"碰巧对得上"的变量（相似函数、
    `fveg`/`green`/`sag`/`snw_rds`/`mss_*` 等）值得逐个确认：这份窗口上它们
    恰好接近，换一个窗口可能就不是。判据是"上游是否把它当时间变量读回来"。
+
+## 两张"已经查干净"的清单（2026 年，实测）
+
+两条审计的结论，连同方法，一起落盘，免得下一轮重做。
+
+### 一、重启写出面：**没有"没被推进却原样写出去"的列了**
+
+判据是**数据驱动**的，不需要读源码：拿入参重启（`2008-001-00000`）、上游输出重启
+（`2008-012-00000`）、本仓库 `--restart-out` 三方比 ——
+
+> 上游从入参到输出**变了**（`max|Δ| > 1e-12`），而本仓库从入参到输出**没变**
+> （`max|Δ| < 1e-15`）的变量，就是"本该推进却没推进"。
+
+结果：**0 个**。65 个变量两边都有、无缺项，最大的差全是继承残差
+（`smp` 2.0e3 mm / 0.09%、`t_soisno`/`t_grnd` 1.4e-2 K、`wa` 5.3e-3、
+`wliq_soisno` 4.6e-3）。上一轮那三条（`rss`/`trad`/`emis`）就是这条判据抓出来的。
+
+**这条判据值得固化**：它比逐变量读 `MOD_Vars_TimeVariables` 快，而且不会漏。
+唯一的前提是有一个"同一时刻的上游重启"可作基准。
+
+### 二、默认值为真的、运行时不读的开关：19 个，逐个归类
+
+方法：`colm-schema` 里 `FieldKind::Logical` 且 `default: true` 的字段，减去
+`colm-runtime`/`colm-case`/`colm-forcing` 里**任何字符串字面量或注释**提到过的名字。
+
+| 开关 | 归类 |
+|---|---|
+| `DEF_Aerosol_Readin` | 被 `DEF_USE_SNICAR`（默认假）挡住 —— 上游日志里也写着 "not needed for DEF_USE_SNICAR off" |
+| `DEF_highResSoil`/`DEF_HighResVeg` | **默认真且本仓库就是按高档算**（`high_res_radiation.rs` 已移植），默认行为一致；显式写 `.false.` 会被静默忽略 |
+| `DEF_LANDONLY` | 同上：默认真，本仓库只算陆面 |
+| `DEF_HIST_vars_out_default` | history 闸门，属 `colm-hist` 的生成表 |
+| `DEF_PC_CROP_SPLIT`、`DEF_URBAN_{BEM,LUCY,TREE,WATER}`、`DEF_USE_CANYON_HWR`、`DEF_USE_CNSOYFIXN`、`DEF_USE_NITRIF`、`DEF_TRACER_SOIL_{,VAPOR_}DIFFUSION` | 作物/BGC/城市/示踪物分支，本仓库无对应 patch 类型或未移植 |
+| `DEF_USE_EstimatedRiverDepth` | 河道分支；LCT 路径没有河流（`discharge`/river 一族在 history 里是"声明+留空"） |
+| `DEF_forcing%data2d`、`%dim2d` | **未决**：`dim2d` 用在降尺度里（`MOD_Forcing.F90:1188`），POINT 下它是否影响本算例还没查 |
+
+**归类的意义**：第一类/第三类/第四类是"默认值与本仓库硬写的行为一致"，所以默认
+配置**不会**出问题 —— 与 PFT/PC 那次（默认是 LCT，于是选 PFT 的算例被静默按 LCT 算）
+不同，这里要出问题必须显式写反。第二类（high-res / LANDONLY）是**显式关掉会被
+静默忽略**，属于同一族但触发概率低；真要收紧，判据与 PFT/PC 一样：读它，不一致就报错。
