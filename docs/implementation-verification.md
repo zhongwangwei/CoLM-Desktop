@@ -7427,3 +7427,95 @@ d5: rust=2.57180651e-08   fortran=2.57180651e-09
 （`MOD_Albedo.F90`、`MOD_SnowLayersCombineDivide.F90`、`MOD_SnowSnicar*.F90`、
 `MOD_3DCanopyRadiation.F90`、`MOD_Urban_Albedo.F90` 等），其中已移植的是
 `MOD_Albedo.F90`（`surface_optics.rs`）。下一步就把这个审计脚本对这几张表跑一遍。
+
+## 系数表普查：审计脚本入库，以及一条"四倍精度"陷阱（2026 年，实测）
+
+`c8`（第 83 轮）与 `d5`（第 86 轮）都是**小数点后多写/少写一个 0** 的 10 倍系数错，
+而两次都是靠"把 Fortran 的十进制字面量和 Rust 的**按 f64 位**比"抓到的。既然
+同类错已经出现两次，这一轮把那套比较写成脚本入库：
+
+```
+oracle/scripts/audit_fortran_literals.py            # 两种模式都跑
+oracle/scripts/audit_fortran_literals.py --tree     # 整棵树模式
+oracle/scripts/audit_fortran_literals.py --tables   # 系数表模式
+```
+
+* **模式 1（整棵树）**：对每个 Rust 源文件取它注释里引用的 `MOD_xxx.F90`，把这些
+  Fortran 文件里有效位数 ≥4 的十进制字面量转成 f64 位，再去**整个 Rust 树**里找同值。
+* **模式 2（系数表）**：只扫 `data` / `parameter ::` 行，**不设位数下限** ——
+  `data scat_sno /0.8, 0.4/` 这种短系数正是模式 1 的盲区。
+
+### 一、结果：端口里没有**新**的系数错
+
+* 模式 2：`MOD_Albedo.F90` 5/5、`MOD_Qsadv.F90` 12/12、`MOD_SoilSnowHydrology.F90`
+  6/6、`MOD_PlantHydraulic.F90` 1/1 全部找到；只有 4 个找不到，全部是
+  `MOD_SnowLayersCombineDivide.F90` 的 `c1 = 2.777e-7` / `c6 = 5.15e-7` /
+  `eta0 = 9.e5` 与 `MOD_LeafInterception_Extended.F90` 的 `2.094e6` —— 前三个上游
+  只在**注释掉的行**里用（`!* ddz2 = -burden*exp(...)/eta0`），Rust 用的是同一函数里
+  真正生效的那条公式；`2.094e6` 在 scheme 5（MATSIRO）里，未移植。
+* 模式 1：33 个未匹配，逐个查清，**没有一个是缺陷**：
+  * 写法定不同：`3.14159` → Rust 写 `314_159.0/100_000.0`（`radiation.rs` 的
+    `FORTRAN_PI`）；`3.14159265358979323846` → `std::f64::consts::PI`；
+    `2.2204460492503131E-16` → `f64::EPSILON`。
+  * **未移植的分支**：`MOD_UserSpecifiedForcing` 里 ERA5/WFDE5 等数据集的
+    `212.`/`10800.`/`21600.`/`2020.`（本仓库只支持 `POINT`）；湖（`1.1925` 等 4 个）；
+    `glacier.rs` 的 `9.828`；scheme 4–7 的 `270.15`/`67.92`/`51.25`；城市冰雪面
+    阻抗的 `4.255`。
+  * **粒度造成的假阳性**：模式 1 按**文件**取"应出现"的字面量，`linear.rs` 引用了
+    三千行的 `MOD_Utils.F90`，于是那个文件里 `pnorm`/`cotan` 的 `D+00` 字面量也被
+    算进来 —— 那些行不是它移植的对象。脚本的 docstring 里已写明这条局限。
+
+**这不是"验证过了"而是"这次没查出新的"**：集合比较抓不到"抄错后的值恰好等于
+Rust 里另一个字面量"的情况。真正的逐位保证仍然来自上一轮那套**独立驱动器**
+（把上游纯函数按内核参数单独编出来按位对比）。
+
+### 二、一条真陷阱：`d0` / `D+00` 在 `-fdefault-real-8` 下是**四倍精度**
+
+`Makeoptions:24` 只有 `-fdefault-real-8`，**没有** `-fdefault-double-8`。
+GCC 的语义是：`DOUBLE PRECISION` 与 `d0` 后缀字面量在 `-fdefault-real-8` 下变成
+`REAL(16)`（quad）。于是含 `d0` 的表达式会**整体按 quad 求值、最后才舍入到 r8**，
+与 f64 逐步求值可以差到 1 ULP —— 这正是上一轮 FMA 收缩问题的同族陷阱。
+
+逐个查了已移植的热路径文件（`MOD_LeafTemperature_Extended`、`MOD_Thermal`、
+`MOD_Albedo`、`MOD_Qsadv`、`MOD_PhaseChange`、`MOD_GroundTemperature`、
+`MOD_PlantHydraulic`、`MOD_Hydro_SoilWater`、`MOD_NewSnow`、`MOD_SoilThermalParameters`、
+`MOD_RainSnowTemp`、`extends/interception/MOD_Thermal_CanopyPhase_Extended`）：
+
+| 文件 | 含 `d0`/`D+` 的行 |
+|---|---|
+| 上面所有文件 | **0** |
+| `MOD_SoilSnowHydrology.F90` | 6，全是 `qinfl_fld_subgrid = 0.0d0` 这类**零初始化**（任何精度都精确，无害） |
+
+但 **scheme 5–8 的拦截例程里有**，例如
+`MOD_LeafInterception_Extended.F90:1832`：
+`(1.14d-11)*1000.*deltim*exp(min(50.0d0, min(ldew_rain_s,satcap_rain)/1000.*3.7d3))`
+—— 这一串在 Fortran 里是 quad 求值。**谁哪天移植 MATSIRO/VIC/JULES，必须照抄成
+quad 或至少知道这里差了 1 ULP**，不要以为 `d0` 只是写法。
+
+### 三、顺手查清：雪窗 `f_alb` 那 2 倍差**不是反照率自身的公式错**
+
+第 86 轮修完 `qsadv` 后，雪窗 `f_alb` 仍有 0.11 的绝对差（相对该量级 ~5%），
+看起来像反照率算错。按分量拆开（206 条白天记录，夜间是 spval）：
+
+| 分量 | 平均绝对差 | 最大 | 金均值 |
+|---|---|---|---|
+| 可见 direct | 0.0075 | 0.108 | 0.214 |
+| 可见 diffuse | 0.00041 | 0.0036 | 0.160 |
+| 近红外 direct | 0.0134 | 0.114 | 0.249 |
+| 近红外 diffuse | 0.0017 | 0.0137 | 0.209 |
+
+`可见 direct` 的 rust/gold 比值**中位数 1.000**（一致），但有个别记录到 **2.6 倍**
+—— 是**离散事件**，不是系统性偏差。这类"多数一致、个别翻倍"的形状指向
+**雪的有无/`fsno` 的状态翻转**（有雪 albsno≈0.8 对裸地≈0.15），而不是反照率公式。
+并且把这条链上的两个纯函数逐式对过上游：
+
+* `snowage`（`MOD_Albedo.F90:1276`）对 `snow.rs::update_snow_age`：分支、`arg`/`arg2`、
+  `dela = 1.e-6*deltim*(age1+age2+age3)`、`dels = 0.1*max(0,scv-scvold)`、
+  `sge = (sag+dela)*(1-dels)` **逐式一致**；
+* `snowcompaction`（`MOD_SnowLayersCombineDivide.F90:31`）对
+  `snow.rs::compact_snow_layers`：`ddz1 = -c3*exp(-c4*td)`、`bi > 100` 的
+  `exp(-46e-3*(bi-100))`、液态水项 `*2`、`eta = f1*4*(bi/450)*exp(0.1*td+c2*bi)*7.62237e6`、
+  `ddz2 = -(burden+wx/2)/eta` **逐式一致**。
+
+所以嫌疑回到**雪的状态量**（`f_scv`/`f_snowdp`/`f_fsno` 那一族），不是反照率。
+下一轮若要继续雪窗，应从雪深/雪水当量的每步收支入手，别去改反照率。
