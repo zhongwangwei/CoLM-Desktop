@@ -82,9 +82,9 @@ pub fn canopy_wetness(
             && stem_area_index >= 0.0
             && leaf_stem_area > 0.0
             && maximum_dew_mm > 0.0
-            && water.total_mm >= 0.0
-            && water.rain_mm >= 0.0
-            && water.snow_mm >= 0.0,
+            && water.total_mm >= -CANOPY_WATER_ROUNDOFF_MM
+            && water.rain_mm >= -CANOPY_WATER_ROUNDOFF_MM
+            && water.snow_mm >= -CANOPY_WATER_ROUNDOFF_MM,
         "canopy wetness inputs are invalid"
     );
     let coverage = |depth_mm: f64, capacity_mm: f64| {
@@ -340,6 +340,15 @@ fn drainage(
         .min(rain_rate * time_step_seconds - direct_rain_mm)
 }
 
+/// 冠层持水允许的负值下限 [mm]。
+///
+/// `CanopyWater` 有三个校验点（本模块的 `validate` 与
+/// `leaf_temperature.rs` 的 `validate_leaf_temperature_*`），它们必须用**同一个**
+/// 数：上游只有一份 `ldew`，`pinf` 可以是 -1 ulp 而 `leaf_interception`
+/// 之后的 `max(0, ldew - evplwet*deltim)` 会把负值抹掉，所以中间态为负
+/// 是合法的。依据见本模块 `validate` 里的实测说明。
+pub(crate) const CANOPY_WATER_ROUNDOFF_MM: f64 = 1.0e-12;
+
 /// **逐项报名字**：一条合起来的 `ensure!` 只会说"state is invalid"，
 /// 而这一类失败通常只差一个字段（实测跨月运行里 `tlai` 从 0.2 跳到 1.8 之后
 /// 就撞上过它），不知道是哪一个就得靠二分。
@@ -397,11 +406,31 @@ fn validate(input: CanopyInterceptionInput, water: &CanopyWater) -> Result<()> {
             "sprinkler_irrigation_kg_m2_s",
             input.sprinkler_irrigation_kg_m2_s,
         ),
+    ] {
+        check(name, value.is_finite() && value >= 0.0, value)?;
+    }
+    // 冠层持水**允许到 `-CANOPY_WATER_ROUNDOFF_MM`**，不能再严。
+    //
+    // 上游 `MOD_LeafInterception.F90:324` 是裸的 `ldew = ldew + pinf`，而
+    // `pinf = p0 - (thru_rain + thru_snow)`：`thru_rain`/`thru_snow` 各自由
+    // `tti`+`tex` 组成，两项都被 `.min()` 截断过，浮点上 `pinf` 可以到 **-1 ulp**。
+    // 上游既不夹 `ldew` 也不校验它，所以"负 1 ulp"是上游的合法状态。
+    // 实测：湿季算例 `CN-Cng-wet` 第一步就给出 -6.9e-18 mm，原先的
+    // `>= 0.0` 把整跑在第一次 `leaf_interception` 就打断 —— 这与
+    // `DEF_RSS_SCHEME = 0` 那次是同一类"校验比上游严"的阻塞。
+    //
+    // 尺度：1e-12 mm 比 1 ulp（~1e-17 mm）大五个数量级，又比任何物理量
+    // （`ldew` 量级 0.1 mm）小十一个数量级，所以它只放行舍入、不放行缺陷。
+    for (name, value) in [
         ("canopy_water total_mm", water.total_mm),
         ("canopy_water rain_mm", water.rain_mm),
         ("canopy_water snow_mm", water.snow_mm),
     ] {
-        check(name, value.is_finite() && value >= 0.0, value)?;
+        check(
+            name,
+            value.is_finite() && value >= -CANOPY_WATER_ROUNDOFF_MM,
+            value,
+        )?;
     }
     Ok(())
 }

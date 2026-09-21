@@ -70,6 +70,43 @@ fn invalid_interception_inputs_are_rejected() {
     assert!(intercept_canopy(invalid, &mut water).is_err());
 }
 
+/// 冠层持水**允许负到 `-CANOPY_WATER_ROUNDOFF_MM`**，但不能更负。
+///
+/// 上游 `MOD_LeafInterception.F90:324` 是裸的 `ldew = ldew + pinf`，而
+/// `pinf = p0 - (thru_rain + thru_snow)`：两个 `thru` 都被 `.min()` 截断过，
+/// 浮点上 `pinf` 可以到 -1 ulp。实测湿季算例第一步就给出 -6.9e-18 mm，
+/// 原先三个校验点的 `>= 0` 把整跑在第一次拦截就算死了。
+///
+/// 三个校验点（`intercept_canopy`、`canopy_wetness`、`leaf_temperature`）
+/// 必须用同一个数，否则会出现"这一个放行、下一个接着炸"的接力。
+#[test]
+fn canopy_water_tolerates_one_ulp_but_not_a_real_deficit() {
+    let roundoff = CanopyWater {
+        total_mm: -6.9e-18,
+        rain_mm: 0.0,
+        snow_mm: 0.0,
+    };
+    assert_eq!(
+        canopy_wetness(2.0, 0.5, 0.1, roundoff, false)
+            .unwrap()
+            .wet_fraction,
+        0.0
+    );
+    let mut water = roundoff;
+    // `-1 ulp` 的量级进到内核里不会被放大：上游自己也不夹。
+    assert!(intercept_canopy(input(), &mut water).is_ok());
+
+    // 真正的亏缺（比舍入大 6 个数量级）仍然要拦。
+    let deficit = CanopyWater {
+        total_mm: -1.0e-6,
+        rain_mm: 0.0,
+        snow_mm: 0.0,
+    };
+    assert!(canopy_wetness(2.0, 0.5, 0.1, deficit, false).is_err());
+    let mut water = deficit;
+    assert!(intercept_canopy(input(), &mut water).is_err());
+}
+
 fn close(actual: f64, expected: f64) {
     assert!(
         (actual - expected).abs() < 1.0e-12,

@@ -1656,18 +1656,27 @@ fn validate(input: LeafTemperatureInput<'_>, state: LeafTemperatureState) -> Res
         "state.leaf_temperature_k > 0",
         state.leaf_temperature_k > 0.0,
     );
-    check(
-        "state.canopy_water.total_mm >= 0",
-        state.canopy_water.total_mm >= 0.0,
-    );
-    check(
-        "state.canopy_water.rain_mm >= 0",
-        state.canopy_water.rain_mm >= 0.0,
-    );
-    check(
-        "state.canopy_water.snow_mm >= 0",
-        state.canopy_water.snow_mm >= 0.0,
-    );
+    // 冠层持水允许到 `-CANOPY_WATER_ROUNDOFF_MM`：`leaf_interception` 里
+    // `pinf` 可以是 -1 ulp，上游不夹也不校验。判据与理由见那个常量的文档。
+    for (name, value) in [
+        (
+            "state.canopy_water.total_mm >= -roundoff",
+            state.canopy_water.total_mm,
+        ),
+        (
+            "state.canopy_water.rain_mm >= -roundoff",
+            state.canopy_water.rain_mm,
+        ),
+        (
+            "state.canopy_water.snow_mm >= -roundoff",
+            state.canopy_water.snow_mm,
+        ),
+    ] {
+        check(
+            name,
+            value >= -crate::interception::CANOPY_WATER_ROUNDOFF_MM,
+        );
+    }
     check(
         "plant hydraulics must match its state",
         input.plant_hydraulics.is_none() || state.plant_hydraulics.is_some(),
