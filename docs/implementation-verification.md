@@ -8713,3 +8713,22 @@ PHS 右端那一节的净效果（`both` 对 `solver`）：干窗超容差值 10
 （插桩坑再记一条：`WRITE(6,'(A,5ES26.17)')` 打 10 个元素的数组会**格式回归**，
 格式从头重来又碰到 `A`，于是把 double 的原始字节当字符写进日志 ——
 要么把实数段写够（`20ES26.17`），要么每条数组单独 `WRITE`。）
+
+### 已经备好的弹药：内核侧 `spacAF_twoleaf` 的中间量（下一轮直接用）
+
+为了避免下一轮再花一次"插桩 + 重建内核"，这一轮已经把**内核**
+`spacAF_twoleaf` 的中间量打出来存盘（源码已还原、内核已重建、黄金仍逐位复现）：
+
+* `/tmp/gf/spacaf_kernel.log` —— 49 次调用，每次 6 行：
+  `SPACA `（A11,A13,A22,A23,A31,A32,A33,A34,A43,A44）、`SPACF `（`f(1:4)`）、
+  `SPACIN `（`x(1:4)`）、`SPACQ `（`qflx_sun,qflx_sha,laisun,laisha`）、
+  `SPACQ2 `（`sai,htop,qeroot,dqeroot`）、`SPACD `/`SPACX `（`determ` 与 `dx(1:4)`）。
+* `/tmp/gf/phs_inputs_kernel.log` —— 328 次调用入口的
+  `vegwp/smp/hk/k_soil_root/k_ax_root`。
+
+**怎么用**：第 0 步第 1 次调用的**输入**两侧逐位相同（这一点已经验过），
+所以只要在 Rust 侧把同样的中间量打出来，就能看到**在 A/f/determ/dx 里第一处**
+开始不同的是哪一个 —— 比"整段 spaAF 逐句读"快得多，而且不用再动内核。
+`kmax_*`/`psi50_*`/`ck` 来自地类表（此前已逐位对过），不必再打。
+
+注意 `/tmp` 只在本次会话内可靠；跨会话要重打（或把日志挪进仓库外的固定位置）。
