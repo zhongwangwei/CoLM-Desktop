@@ -8920,3 +8920,78 @@ PHS 右端那一节的净效果（`both` 对 `solver`）：干窗超容差值 10
 
 **这条路子可以复制**：凡是 "只有一边被黄金走到" 的分支（ELSE / scheme 分支 /
 未启用的方案），都可以用"独立复刻件 + 随机输入差分"验，不需要内核插桩。
+
+## 产流：`sum(乘积)` 要**逐个 fma 累加**，`XinAnJiang` 另有自己的一条式子（实测，**已修**）
+
+这一轮用"独立复刻件 + 随机输入差分"往下扫没被黄金覆盖的产流分支，结果先在手边
+**正在被黄金走到**的 SimpleVIC 上抓到一个：
+
+### 一、`sum(vol_liq(1:6)*dz(1:6))` 是 fma 累加
+
+`MOD_Runoff.F90:250-251`（`Runoff_SimpleVIC`）与 `:262-263`（`XinAnJiang`）都写
+`w_int = sum(vol_liq(1:6)*dz_soisno(1:6))`。Rust 的 `.map(|(v,dz)| v*dz).sum()` 是
+**先各自舍入再相加**，而 gfortran 把每个乘积收进累加器：
+
+| 累加方式 | 与上游逐位相同的组数 |
+|---|---|
+| `acc += v*dz`（逐步舍入） | 14312/20000 |
+| `acc = fma(v, dz, acc)` | **20000/20000** |
+
+`w_int`/`wsat_int` 一差，`frcsat`（history 的 `f_frcsat`）与 `rsur` 全都跟着差 ——
+而这条**三个黄金窗口每步都跑**（默认方案就是 SimpleVIC）。
+
+### 二、`Runoff_XinAnJiang` 不能用 SimpleVIC 那条式子
+
+两支代数等价、**浮点不等价**。上游 XinAnJiang 写的是 `wtmp`/`infil`：
+
+```fortran
+wtmp  = (1-w_int/wsat_int)**(1/(btopo+1)) - watin/((btopo+1)*wsat_int)
+infil = wsat_int - w_int - wsat_int * (max(0., wtmp))**(btopo+1)
+infil = min(infil, watin)
+rsur  = (watin - infil) * 1000. / deltim
+```
+
+而本仓库原先借用了 `storage_distribution_runoff`（`WaterDepthInit`/`WaterDepthMax` 那一套）。
+实测 20000 组随机输入：
+
+| 写法 | `rsur` 逐位相同 |
+|---|---|
+| 借用通用式（改前） | 0/20000 |
+| 照抄上游这一支 + `fma(-ws, pow, ws-w)` | **20000/20000** |
+
+顺带两点：XinAnJiang **没有** `[0, watin]` 钳位（只有 `infil=min(infil,watin)`），
+SimpleVIC 才有；`btopo` 的钳位区间是 `[0.01, 0.5]`，`sigmin/sigmax = 100/1000` ✓ 两边一致。
+
+### 三、还有一处"反解 `BVIC`"的白丢 1 ULP
+
+原来的 `storage_distribution_runoff` 收 `exponent` 再 `bvic = exponent/(1-exponent)` 反解，
+而调用方本来就是 `BVIC/(1+BVIC)` —— 这个来回只有 **43%**（8658/20000）能原样还原
+`BVIC`。现在改成直接收 `BVIC`（`XinAnJiang` 走自己那支，不再经过这个 helper）。
+
+SimpleVIC 那条通用式的最后一个乘积也要收：
+`RunoffSurface = … + wsat_int*(InfilVarTmp**(1+BVIC))` → `fma(capacity, pow, …)`
+（不收缩 2/18185，收缩 **18185/18185**）。
+
+### 四、对拍的是**真的 Rust**，不只是 C 复算
+
+把 20000 组算例通过一个临时 `#[test]`（跑完已删）喂给 `simple_vic_runoff` /
+`xinanjiang_runoff`，输出与复刻件逐位比：
+
+```
+SimpleVIC  : cases=20000  frcsat 20000/20000   rsur 20000/20000
+XinAnJiang : cases=20000  frcsat 20000/20000   rsur 20000/20000
+```
+
+（改前：SimpleVIC 16234/11495，XinAnJiang 16441/11356。）
+
+三个窗口的三口径几乎不动（干窗逐位值 +2、湿窗超容差 +2、雪窗 −1）——
+产流本来就是小项，但它是**被黄金走到**的那条路，现在焊死了。
+
+### 五、下一处（同类，未修）
+
+`SubsurfaceRunoff_TOPMOD` 有两处同型差异，还没做：
+上游先 `dzmm(j) = dz_soisno(j)*1000.` 再 `dzsum = dzsum + dzmm(j)`、
+`icefracsum = icefracsum + icefrac(j)*dzmm(j)`（**乘积进 fma，且整列先乘 1000**），
+Rust 则是用未缩放的 `depth` 求和、`ice + fraction*depth` 不收缩；
+`mean_ice = icefracsum/dzsum` 与 `ice/thickness` 因缩放不同而差 1 ULP。
+照上面的做法补一个 TOPMOD 复刻件即可验（该方案 `DEF_Runoff_SCHEME=1`，黄金没走）。

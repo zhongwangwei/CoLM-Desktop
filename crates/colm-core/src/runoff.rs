@@ -149,7 +149,13 @@ pub fn topmodel_subsurface_runoff(input: TopmodelSubsurfaceInput<'_>) -> Result<
     Ok(ice_impedance * runoff)
 }
 
-/// Ports `Runoff_XinAnJiang`.
+/// Ports `Runoff_XinAnJiang`（`MOD_Runoff.F90:224-282`）。
+///
+/// **不能借用 `storage_distribution_runoff`。** 上游这一支写的是另一套代数等价的
+/// 形式（`wtmp`/`infil`），而浮点不认代数等价：实测 20000 组随机输入里，
+/// 借用通用式的写法与上游 **0%** 逐位相同，照抄上游这一支才是 **100%**。
+/// 另外这里**没有** `[0, watin]` 的钳位（只有 `infil = min(infil, watin)`），
+/// 与 `Runoff_SimpleVIC` 不同。
 pub fn xinanjiang_runoff(
     input: StorageRunoffInput<'_>,
     elevation_standard_deviation_m: f64,
@@ -162,7 +168,29 @@ pub fn xinanjiang_runoff(
     let shape = ((elevation_standard_deviation_m - 100.0)
         / (elevation_standard_deviation_m + 1000.0))
         .clamp(0.01, 0.5);
-    storage_distribution_runoff(input, water, capacity, shape / (1.0 + shape))
+    let saturated_fraction = 1.0 - (1.0 - water / capacity).powf(shape / (1.0 + shape));
+    let input_depth = input.water_input_mm_s * input.time_step_seconds / 1000.0;
+    if input_depth <= 0.0 {
+        return Ok(StorageRunoffState {
+            surface_runoff_mm_s: 0.0,
+            subsurface_runoff_mm_s: 0.0,
+            saturated_fraction,
+        });
+    }
+    let shape_plus_one = shape + 1.0;
+    // `wtmp = (1-w_int/wsat_int)**(1/(btopo+1)) - watin/((btopo+1)*wsat_int)`
+    let wtmp = (1.0 - water / capacity).powf(1.0 / shape_plus_one)
+        - input_depth / (shape_plus_one * capacity);
+    // `infil = wsat_int - w_int - wsat_int*max(0,wtmp)**(btopo+1)`：
+    // 乘积被吸收成 `FNMS(ws, pow, ws-w)` —— 就是上面那 0% → 100% 的那一处。
+    let infiltration = (-capacity)
+        .mul_add(wtmp.max(0.0).powf(shape_plus_one), capacity - water)
+        .min(input_depth);
+    Ok(StorageRunoffState {
+        surface_runoff_mm_s: (input_depth - infiltration) * 1000.0 / input.time_step_seconds,
+        subsurface_runoff_mm_s: 0.0,
+        saturated_fraction,
+    })
 }
 
 /// Ports `Runoff_SimpleVIC`.
@@ -172,7 +200,7 @@ pub fn simple_vic_runoff(input: StorageRunoffInput<'_>, bvic: f64) -> Result<Sto
         "BVIC must be positive and finite"
     );
     let (water, capacity) = storage(input)?;
-    storage_distribution_runoff(input, water, capacity, bvic / (1.0 + bvic))
+    storage_distribution_runoff(input, water, capacity, bvic)
 }
 
 /// Ports `SubsurfaceRunoff_SimpleVIC`.
@@ -226,13 +254,17 @@ pub fn simple_vic_subsurface_runoff(input: SimpleVicSubsurfaceInput<'_>) -> Resu
     Ok(runoff)
 }
 
+/// `Runoff_SimpleVIC` 与 `Runoff_XinAnJiang` **不是**同一条式子，所以这个只能给
+/// SimpleVIC 用（见 [`xinanjiang_runoff`] 的说明）。`bvic` 是上游的 `BVIC` 本身，
+/// 不再从 `exponent` 反解 —— `exponent/(1-exponent)` 只有 43% 的输入能原样还原
+/// `BVIC`，反解一次就白丢 1 ULP。
 fn storage_distribution_runoff(
     input: StorageRunoffInput<'_>,
     water: f64,
     capacity: f64,
-    exponent: f64,
+    bvic: f64,
 ) -> Result<StorageRunoffState> {
-    let saturated_fraction = 1.0 - (1.0 - water / capacity).powf(exponent);
+    let saturated_fraction = 1.0 - (1.0 - water / capacity).powf(bvic / (1.0 + bvic));
     let input_depth = input.water_input_mm_s * input.time_step_seconds / 1000.0;
     if input_depth <= 0.0 {
         return Ok(StorageRunoffState {
@@ -241,14 +273,16 @@ fn storage_distribution_runoff(
             saturated_fraction,
         });
     }
-    let bvic = exponent / (1.0 - exponent);
     let maximum_depth = (1.0 + bvic) * capacity;
     let initial_depth = maximum_depth * (1.0 - (1.0 - saturated_fraction).powf(1.0 / bvic));
     let surface_depth = if initial_depth + input_depth > maximum_depth {
         input_depth - capacity + water
     } else {
         let remaining = 1.0 - (initial_depth + input_depth) / maximum_depth;
-        input_depth - capacity + water + capacity * remaining.powf(1.0 + bvic)
+        // `RunoffSurface = watin - wsat_int + w_int + wsat_int*(InfilVarTmp**(1+BVIC))`：
+        // 最后一个乘积被吸收（`FMA`）。实测 18185 组随机输入：不收缩 2/18185，
+        // 收缩后 **18185/18185**。
+        capacity.mul_add(remaining.powf(1.0 + bvic), input_depth - capacity + water)
     }
     .clamp(0.0, input_depth);
     Ok(StorageRunoffState {
@@ -258,18 +292,22 @@ fn storage_distribution_runoff(
     })
 }
 
+/// `sum(vol_liq(1:6)*dz(1:6))` / `sum(eff_porosity(1:6)*dz(1:6))`（`MOD_Runoff.F90:250-251`
+/// 等）。**gfortran 把每个乘积都收进累加器**（`fma(v, dz, acc)`）：实测 20000 组
+/// 随机输入，逐步 `acc += v*dz` 只有 14312/20000 与上游逐位相同，
+/// `fma` 累加是 **20000/20000**。
+///
+/// 这条在 `SimpleVIC`（三个黄金窗口默认的水文方案）里每步都跑到 ——
+/// `w_int`/`wsat_int` 差 1 ULP，`frcsat`(`f_frcsat`) 与 `rsur`(`f_rsur`) 就跟着差。
 fn storage(input: StorageRunoffInput<'_>) -> Result<(f64, f64)> {
     validate_storage(input)?;
-    let water = input.liquid_volume_fraction[..6]
-        .iter()
-        .zip(&input.layer_thickness_m[..6])
-        .map(|(&water, &thickness)| water * thickness)
-        .sum::<f64>();
-    let capacity = input.effective_porosity[..6]
-        .iter()
-        .zip(&input.layer_thickness_m[..6])
-        .map(|(&porosity, &thickness)| porosity * thickness)
-        .sum::<f64>();
+    let mut water = 0.0;
+    let mut capacity = 0.0;
+    for layer in 0..6 {
+        water = input.liquid_volume_fraction[layer].mul_add(input.layer_thickness_m[layer], water);
+        capacity =
+            input.effective_porosity[layer].mul_add(input.layer_thickness_m[layer], capacity);
+    }
     ensure!(
         capacity > 0.0,
         "storage runoff needs positive water capacity"
