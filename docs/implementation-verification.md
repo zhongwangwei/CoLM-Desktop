@@ -6198,3 +6198,87 @@ tier 汇总 `{tier0:2, tier1:19, tier2:43}` → **`{tier0:2, tier1:19, tier2:38}
   第 232 条最大 —— 近地层稳定性函数，值得单独查。
 * `f_gssun`/`f_gssha` 第 0 条 2.26e31：上游未初始化 `rssun` 的 UB（已知）。
 * `f_etr`/`f_etrsha`/`f_etrsun` 的绝对量只有 1e-7 量级，贴着 tier2 的 `atol=1e-7`。
+
+## 湿季窗口 `CN-Cng-wet` 第一次跑通：一个"校验比上游严"的阻塞（2026 年，实测）
+
+`oracle/golden/CN-Cng-wet_hist_2008-07.nc`（2008-07-01 起 16 天，384 条，
+`tolerances.toml` 的 tier3 基线就是按它定的）**此前从未被本仓库跑过** ——
+不是没比对上，是**根本跑不起来**：
+
+```
+colm-rs: canopy interception canopy_water total_mm is invalid: -0.000000000000000006938893903907228
+```
+
+`-6.9e-18 mm`，即 -1 ulp。
+
+### 根因：上游的 `ldew` 可以是负 1 ulp，而本仓库在三处要求 `>= 0`
+
+上游 `MOD_LeafInterception.F90:324` 是裸的 `ldew = ldew + pinf`，而
+`pinf = p0 - (thru_rain + thru_snow)`：两个 `thru` 各由 `tti`+`tex` 组成，
+两项都被 `.min()` 截断过，所以 `pinf` 在浮点上可以到 **-1 ulp**。
+上游既不夹 `ldew` 也不校验它 —— 负值随后被
+`MOD_LeafTemperature.F90:1165` 的 `ldew = max(0., ldew - evplwet*deltim)` 抹平。
+
+本仓库**三处**独立地要求 `CanopyWater` 非负：
+
+| 位置 | 判据 |
+|---|---|
+| `interception.rs::intercept_canopy` 的 `validate` | `total_mm/rain_mm/snow_mm >= 0` |
+| `interception.rs::canopy_wetness` | 同上（`fwet_snow` 的输入） |
+| `leaf_temperature.rs` 的 `validate_leaf_temperature_*` | 同上（叶温求解的输入） |
+
+于是"每个**单独**看都合理"的三条校验串成一条接力：放开第一条，第二条接着炸。
+这与 `DEF_RSS_SCHEME = 0` 是同一种缺陷 —— **校验比它所守的内核严**。
+
+### 修法
+
+新增 `interception::CANOPY_WATER_ROUNDOFF_MM = 1.0e-12`，三处共用。
+尺度论证：`ldew` 量级 0.1 mm，1 ulp ≈ 1e-17 mm，所以 1e-12 mm
+**比 1 ulp 大五个数量级、比任何物理量小十一个数量级** —— 只放行舍入，不放行缺陷。
+单测 `canopy_water_tolerates_one_ulp_but_not_a_real_deficit` 把两端都钉住
+（`-6.9e-18` 放行、`-1.0e-6` 拒绝）。
+
+### 跑通之后的结果
+
+768 步跑完，与 `oracle/golden/CN-Cng-wet_hist_2008-07.nc` 比对：
+**`{tier0: 4, tier1: 0, tier2: 70}`**。
+
+* `tier1` 在**第二个**黄金窗口上同样为空 —— 这是"把 19 条继承量搬进 tier2"
+  那次改动的独立佐证（换窗口重跑分类，本来就是 `tolerances.toml` 头部要求的）。
+* `tier0` 4 条全是强迫场本身：`f_xy_rain`/`f_xy_prc`/`f_xy_prl`/`f_xy_solarin`，
+  384 条里 16–24 条差 1–2 ULP，最大相对差 2.9e-16。与干季窗口的
+  `f_xy_solarin` 是同一类（读取/进位路径），不是物理。
+* `tier2` 的 70 条里，量级最大的几条：`f_fsenl` 17.8 W/m²（尺度 128）、
+  `f_fsena` 11.2、`f_rnet` 9.9、`f_lfevpa` 12.8、`f_fseng` 7.6、
+  `f_wdsrf` 0.171 mm（黄金最大 0.080，本仓库 0.174）、
+  `f_frcsat` 0.48（单条相对差 93%）、`f_zwt` 0.067 m。
+
+**为什么湿季残差比干季大一到两个数量级**：7 月有雨、土壤接近饱和，
+`frcsat` 长期在 1 附近、`zwt` 打到 0，`rsur_ie`（入渗超限产流）成为表层通量的
+主项，于是**干季里被 `qinfl` 掩盖的状态差在这里直接决定产流**。第一次分开是
+第 111–114 条（雨峰）：`f_frcsat` 0.33644 对 0.32813、`f_zwt` 0.0822 对 0.1446，
+`rsur` 少 8%，缺的那点雨留在 `f_wdsrf` 里，而 `wdsrf` 只在水位到地表时被
+抽干，于是 0.171 mm 的差一直挂到第 121 条。
+
+### 还没做的：tier3 基线根本没有代码
+
+`tolerances.toml` 的 `[tier3.baselines]`（`rnet_r2_min = 0.999`、
+`qle_r2_min = 0.85`）是**设计文档 §2.8/§2.8b 给湿季窗口定的验收判据**，
+但仓库里没有任何代码算它：`tier3` 的 `variables = []`，
+`tier_compare.rs` 对 `statistical` 层一律报"逐变量不可判"。
+所以现在拿 tier2 的逐变量判据去卡湿季窗口，**比设计要求的严**。
+这是下一步该补的洞，也是唯一能让湿季窗口"按它自己的判据通过"的路。
+
+### 干季窗口剩下的施工单（承上文）
+
+* `f_vegwp`（第 0 条是上游 UB；第 1 条起 rel 7e-4，叶温求解器 0.01 K 地板）。
+* `f_zwt`：差值呈**分段常数**（-7e-6 → -4.6e-4 → 0 → -5.7e-4 → … → -5.1e-3），
+  说明水位每次重算时定下一个小差，之后两边同步演化到下一次重算。
+  第 234 条那一跳已查明：`f_zwt` 是两条子步的均值，
+  `(502.707 + 289.13)/2 = 395.918` 正是黄金值 —— 水位"贴到 289.13 mm 界面"
+  晚了一条子步。
+* `f_t_soisno`/`f_wliq_soisno`/`f_wice_soisno` 的最差槽位都在第 221 条第 10 层
+  （0.055 K / 0.096 kg/m²），`f_frcsat` 也只在第 221 条超 1e-4，同一时刻。
+* `f_ldew` 在干季第 78–107 条黄金停在 `1.39931e-34`（子步里一个 0、一个
+  2.799e-34 的均值），本仓库是精确 0。尺度差 34 个数量级，不构成超容差，
+  但它说明两边 `pinf` 的最后一位不同 —— 与上面那个 -1 ulp 同源。
