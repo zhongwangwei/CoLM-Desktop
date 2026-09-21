@@ -650,6 +650,15 @@ pub fn standard_lct_snow_soil_step(
                     // 有雪层时 `meltf` 的 `sm` 恒为 0，所以这里无条件接过来。
                     snowmelt_kg_m2_s: energy.ground.snow_melt_rate_kg_m2_s,
                     transpiration_kg_m2_s: energy.leaf.transpiration_kg_m2_s,
+                    // 地表凝结三项**只能来自本步的 THERMAL**，不能沿用
+                    // `..input.soil_water.fluxes` 里装配期的 0：无雪层时
+                    // `water_2014_snow_soil_step` 要把 `qsdew`/`qfros`/`qsubl`
+                    // 记到土壤表层（上游 `MOD_SoilSnowHydrology.F90:452-457`）。
+                    // 具体量在 `ThermalWaterFluxes` 里由 `wliq(1)/deltim` 与
+                    // `fevpg` 的差额决定 —— 液相抽干后 `fevpg` 全部转成升华。
+                    soil_dew_kg_m2_s: thermal_water.dew_kg_m2_s,
+                    soil_frost_kg_m2_s: thermal_water.frost_kg_m2_s,
+                    soil_sublimation_kg_m2_s: thermal_water.sublimation_kg_m2_s,
                     ..input.soil_water.fluxes
                 },
                 temperature_k: &state.soil_temperature_k,

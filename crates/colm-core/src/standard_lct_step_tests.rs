@@ -322,6 +322,110 @@ fn standard_lct_snow_soil_step_carries_active_snow_and_soil_columns() {
     assert!((snow_mass - state.snow.water_equivalent_kg_m2).abs() < 1.0e-12);
 }
 
+/// `qsdew`/`qfros`/`qsubl` 在**无雪层**时必须记到土壤表层。
+///
+/// 上游 `MOD_SoilSnowHydrology.F90:452-457` 的判据就是 `lb >= 1`（无雪层）。
+/// 装配期这三个字段恒为 0（`assembly.rs` 把它们标成"内核覆盖"），所以内核
+/// 必须自己从本步的 THERMAL 补上。漏掉时冻土地表的冰不再升华：实测 CN-Cng
+/// 第 17 小时起液相已被抽到 `tol_v` 下限、`fevpg` 全部转成升华，而
+/// `f_wice_soisno(1)` 停在原值，到第 11 天与 Fortran 差 2.3 kg/m²。
+#[test]
+fn standard_lct_snow_soil_step_credits_the_thermal_condensation_to_the_soil() {
+    let forcing = prepare_runtime_forcing(RuntimeForcingInput {
+        air_temperature_k: 268.0,
+        specific_humidity: 0.001,
+        surface_pressure_pa: 101_325.0,
+        precipitation_kg_m2_s: 0.0,
+        eastward_wind_m_s: 3.0,
+        northward_or_scalar_wind_m_s: 1.0,
+        wind_is_vector: true,
+        downward_shortwave_w_m2: 180.0,
+        downward_longwave_w_m2: 280.0,
+        calendar_day: 20.5,
+        longitude_radians: 0.0,
+        latitude_radians: 0.5,
+        grid_longitude_radians: 0.5,
+        grid_latitude_radians: 0.5,
+        boundary_layer_height_m: None,
+    })
+    .unwrap();
+    let mut energy = input(forcing);
+    let layer_thickness_m = [0.1, 0.3];
+    let node_depth_m = [0.05, 0.25];
+    let interface_depth_m = [0.0, 0.1, 0.4];
+    let temperature_k = [268.0, 288.0];
+    // 表层液相为 0：`partition_no_split_thermal_water` 的 `qseva` 只能取 0，
+    // 地表蒸发需求于是全部落到 `qsubl` 上（`MOD_Thermal.F90:1260-1261`）。
+    let liquid_water_kg_m2 = [0.0, 80.0];
+    let ice_water_kg_m2 = [30.0, 0.0];
+    energy.ground_temperature = GroundTemperatureInput {
+        snow_layers: 0,
+        layer_thickness_m: &layer_thickness_m,
+        node_depth_m: &node_depth_m,
+        interface_depth_m: &interface_depth_m,
+        temperature_k: &temperature_k,
+        liquid_water_kg_m2: &liquid_water_kg_m2,
+        ice_water_kg_m2: &ice_water_kg_m2,
+        snow_water_equivalent_kg_m2: 0.0,
+        snow_depth_m: 0.0,
+        snow_cover_fraction: 0.0,
+        snow_surface_temperature_k: 268.0,
+        ground_temperature_k: 268.0,
+        ..energy.ground_temperature
+    };
+    let mut state = StandardLctSnowSoilState {
+        energy: energy_state(forcing),
+        snow: RuntimeSnowColumn::empty(),
+        soil_temperature_k: vec![268.0, 288.0],
+        soil_water: Water2014SoilState {
+            liquid_water_kg_m2: vec![0.0, 80.0],
+            ice_water_kg_m2: vec![30.0, 0.0],
+            water_table_depth_m: 1.0,
+            aquifer_water_mm: 100.0,
+            surface_water_mm: 0.0,
+            matric_potential_mm: vec![-10_000.0; 2],
+            hydraulic_conductivity_mm_s: vec![0.0; 2],
+        },
+    };
+
+    let output = standard_lct_snow_soil_step(
+        StandardLctSnowSoilInput {
+            energy,
+            snow_water: SnowWaterInput {
+                time_step_seconds: 1800.0,
+                irreducible_saturation: 0.03,
+                impermeable_porosity: 0.05,
+                rainfall_kg_m2_s: 0.0,
+                evaporation_kg_m2_s: 0.0,
+                dew_kg_m2_s: 0.0,
+                sublimation_kg_m2_s: 0.0,
+                frost_kg_m2_s: 0.0,
+            },
+            soil_water: water_input(),
+        },
+        &mut state,
+    )
+    .unwrap();
+
+    let thermal = output
+        .energy
+        .thermal_water
+        .expect("non-split energy step supplies thermal water");
+    assert_ne!(
+        thermal.frost_kg_m2_s - thermal.sublimation_kg_m2_s,
+        0.0,
+        "the fixture must produce a nonzero ice-side condensation flux, \
+         otherwise this test cannot tell the wiring apart"
+    );
+    // 冰只被这一项动过（`water_2014_soil_step` 的其余分支都不碰 `ice_water`），
+    // 所以这里能写成精确等式。
+    assert_eq!(
+        state.soil_water.ice_water_kg_m2[0],
+        output.energy.ground.ice_water_kg_m2[0]
+            + (thermal.frost_kg_m2_s - thermal.sublimation_kg_m2_s) * 1800.0,
+    );
+}
+
 fn energy_state(forcing: crate::RuntimeForcing) -> StandardLctEnergyState {
     StandardLctEnergyState {
         radiation: cold_start_broadband_radiation(

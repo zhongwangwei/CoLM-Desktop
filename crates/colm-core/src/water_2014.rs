@@ -340,6 +340,25 @@ pub fn water_2014_snow_soil_step(
             input.snow.evaporation_kg_m2_s,
         )
     };
+    // `qsdew`/`qfros`/`qsubl` 只有**无雪层**（`lb >= 1`）时才记到土壤表层
+    // （`MOD_SoilSnowHydrology.F90:452-457`）；有雪层时表层水归 `snowwater`
+    // （`lb <= 0`，那一支根本不碰 `wliq_soisno(1)`）。上游只在
+    // `DEF_SPLIT_SOILSNOW` 打开时才对有雪层的情形用 `qsdew_soil` 等，而本入口
+    // 明确是非 split，所以有雪层时给 0。
+    //
+    // 实测漏掉这一项会冻住地表的冰：算例 CN-Cng 第 17 小时起液相已被抽到
+    // `tol_v` 下限，`fevpg` 全部由升华承担，Fortran 的 `f_wice_soisno(1)` 每小时
+    // 掉约 0.046 kg/m²，而 Rust 只掉 `wblc`（1.8e-5），到第 11 天累积差 2.3 kg/m²。
+    let (soil_dew_kg_m2_s, soil_frost_kg_m2_s, soil_sublimation_kg_m2_s) =
+        if snow_state.layer_count < 0 {
+            (0.0, 0.0, 0.0)
+        } else {
+            (
+                input.soil.fluxes.soil_dew_kg_m2_s,
+                input.soil.fluxes.soil_frost_kg_m2_s,
+                input.soil.fluxes.soil_sublimation_kg_m2_s,
+            )
+        };
     let soil = water_2014_soil_step(
         Water2014SoilInput {
             fluxes: Water2014SoilFluxes {
@@ -347,9 +366,9 @@ pub fn water_2014_snow_soil_step(
                 snowmelt_kg_m2_s,
                 ground_evaporation_kg_m2_s,
                 transpiration_kg_m2_s: input.soil.fluxes.transpiration_kg_m2_s,
-                soil_dew_kg_m2_s: 0.0,
-                soil_frost_kg_m2_s: 0.0,
-                soil_sublimation_kg_m2_s: 0.0,
+                soil_dew_kg_m2_s,
+                soil_frost_kg_m2_s,
+                soil_sublimation_kg_m2_s,
             },
             ..input.soil
         },

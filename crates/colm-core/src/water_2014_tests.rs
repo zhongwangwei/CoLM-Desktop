@@ -109,6 +109,106 @@ fn water_2014_soil_refuses_non_soil_branches() {
     assert!(water_2014_soil_step(input, &mut state()).is_err());
 }
 
+/// `qsdew`/`qfros`/`qsubl` 的无雪层归属。
+///
+/// 上游 `MOD_SoilSnowHydrology.F90:452-457`：`lb >= 1`（无雪层）时
+/// `qsdew` 记进 `wliq_soisno(1)`、`qfros-qsubl` 记进 `wice_soisno(1)`；
+/// `lb <= 0`（有雪层）那一支根本不碰土壤表层 —— 表层水归 `snowwater`。
+#[test]
+fn snow_soil_entry_credits_surface_condensation_only_without_a_snow_layer() {
+    let snow_water = |rainfall_kg_m2_s| crate::SnowWaterInput {
+        time_step_seconds: 1800.0,
+        irreducible_saturation: 0.033,
+        impermeable_porosity: 0.05,
+        rainfall_kg_m2_s,
+        evaporation_kg_m2_s: 0.0,
+        dew_kg_m2_s: 0.0,
+        sublimation_kg_m2_s: 0.0,
+        frost_kg_m2_s: 0.0,
+    };
+    // `input()` 的地表凝结是 dew=1e-6 / frost=2e-6 / subl=5e-7 kg/m²/s。
+    let (dew, frost, sublimation) = (1.0e-6, 2.0e-6, 5.0e-7);
+    let bare = Water2014SoilInput {
+        fluxes: Water2014SoilFluxes {
+            soil_dew_kg_m2_s: 0.0,
+            soil_frost_kg_m2_s: 0.0,
+            soil_sublimation_kg_m2_s: 0.0,
+            ..input().fluxes
+        },
+        ..input()
+    };
+
+    // 无雪层：三项照记。
+    let mut no_snow = state();
+    water_2014_snow_soil_step(
+        Water2014SnowSoilInput {
+            snow: snow_water(0.001),
+            soil: input(),
+        },
+        &mut crate::RuntimeSnowColumn::empty(),
+        &mut no_snow,
+    )
+    .unwrap();
+
+    // 同一算例、只把三项清零：差值必须恰好是它们各自的 `* deltim`。
+    let mut no_snow_zeroed = state();
+    water_2014_snow_soil_step(
+        Water2014SnowSoilInput {
+            snow: snow_water(0.001),
+            soil: bare,
+        },
+        &mut crate::RuntimeSnowColumn::empty(),
+        &mut no_snow_zeroed,
+    )
+    .unwrap();
+
+    assert_eq!(
+        no_snow.ice_water_kg_m2[0] - no_snow_zeroed.ice_water_kg_m2[0],
+        (frost - sublimation) * 1800.0
+    );
+    // 液相应的是 `dew * deltim`，但 `water_2014_soil_step` 之后还会走一遍
+    // 地下水位重算，末位会差几个 ULP，所以这里只比到 1e-12。
+    assert!(
+        (no_snow.liquid_water_kg_m2[0] - no_snow_zeroed.liquid_water_kg_m2[0] - dew * 1800.0).abs()
+            < 1.0e-12
+    );
+
+    // 有雪层：土壤表层一分不改。`water_2014_soil_step` 只在这一处动冰，
+    // 所以冰保持 0 就说明凝结没有漏进土壤。
+    let mut snow_state = crate::RuntimeSnowColumn::empty();
+    crate::add_new_snow(
+        crate::NewSnowInput {
+            patch_type: 0,
+            time_step_seconds: 1800.0,
+            ground_temperature_k: 270.0,
+            ground_snowfall_kg_m2_s: 0.002,
+            new_snow_bulk_density_kg_m3: 100.0,
+            precipitation_temperature_k: 269.0,
+            variably_saturated_flow: false,
+        },
+        &mut snow_state,
+    )
+    .unwrap();
+    assert!(snow_state.layer_count < 0);
+    let mut with_snow = state();
+    water_2014_snow_soil_step(
+        Water2014SnowSoilInput {
+            snow: snow_water(0.001),
+            soil: input(),
+        },
+        &mut snow_state,
+        &mut with_snow,
+    )
+    .unwrap();
+    assert_eq!(with_snow.ice_water_kg_m2[0], 0.0);
+
+    // 反向对照：真的漏了的话，`bare` 与 `input()` 会给出同一个结果。
+    assert_ne!(
+        no_snow.ice_water_kg_m2[0],
+        no_snow_zeroed.ice_water_kg_m2[0]
+    );
+}
+
 #[test]
 fn active_snow_routes_its_bottom_drainage_through_the_shared_soil_kernel() {
     let mut snow_state = crate::RuntimeSnowColumn::empty();
