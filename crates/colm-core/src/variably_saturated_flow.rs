@@ -11,6 +11,12 @@ use crate::{
 };
 
 const RICHARDS_TOLERANCE: f64 = 8.0e-8;
+/// `MOD_Hydro_SoilWater.F90:49` 的 `max_iters_richards`。
+///
+/// 它是**内层 Newton 的迭代上限**，同时也是隐性步被切成显性子步的份数
+/// （`dt_explicit = dt / MAX_ITERS_RICHARDS`）。到顶不报错，而是降级成显式步 ——
+/// 所以降级次数必须被计数，否则 tier2 的残差无法归因。
+const MAX_ITERS_RICHARDS: usize = 10;
 const SOURCE_REFERENCE_STEP_SECONDS: f64 = 1800.0;
 
 /// Boundary modes used by the VSF Richards column.
@@ -3226,6 +3232,829 @@ pub fn flux_variable_saturated_flux_all(
         level_lower = find_unsaturated_level_lower(&state.saturated, level_upper + 1);
     }
     Ok(())
+}
+
+/// Inputs to `MOD_Hydro_SoilWater:Richards_solver`.
+///
+/// 窗口约定与 [`VariableSaturatedFluxAllInput`] 一致：下标 0 就是 `lb`。
+#[derive(Debug, Clone, Copy)]
+pub struct VariableSaturatedRichardsInput<'a> {
+    pub time_step_seconds: f64,
+    /// `sp_zc(lb:ub)`。
+    pub center_depth_mm: &'a [f64],
+    /// `sp_zi(lb-1:ub)`。
+    pub interface_depth_mm: &'a [f64],
+    /// `vl_s(lb:ub)`：孔隙度。
+    pub porosity: &'a [f64],
+    /// `vl_r(lb:ub)`。
+    pub residual_water: &'a [f64],
+    pub saturated_potential_mm: &'a [f64],
+    pub saturated_hydraulic_conductivity_mm_s: &'a [f64],
+    pub hydraulic_model: &'a [SoilHydraulicModel],
+    /// `vl_s_wa`：含水层的孔隙度（标量，取最下一层的）。
+    pub aquifer_porosity: f64,
+    pub upper_boundary: VariableSaturatedBoundary,
+    pub lower_boundary: VariableSaturatedBoundary,
+    pub flux_tolerance_mm_s: f64,
+    pub depth_tolerance_mm: f64,
+    pub volume_tolerance: f64,
+    pub pressure_tolerance_mm: f64,
+}
+
+/// `Richards_solver` 的进/出状态，外加两个上游只在调试宏下统计的计数器。
+#[derive(Debug, Clone, PartialEq)]
+pub struct VariableSaturatedRichardsState {
+    /// `ss_dp`：地表积水深度 [mm]。
+    pub ponding_depth_mm: f64,
+    /// `waquifer`：含水层亏缺 [mm]，负值表示亏缺。
+    pub aquifer_water_mm: f64,
+    /// `ss_vl(lb:ub)`：液态含水率。
+    pub liquid_water: Vec<f64>,
+    /// `ss_wt(lb:ub)`：水位在层内的位置 [mm]。
+    pub water_table_thickness_mm: Vec<f64>,
+    /// `ss_q(lb-1:ub)`：时间步平均的层间通量 [mm/s]，长度 `layers + 1`。
+    pub interface_flux_mm_s: Vec<f64>,
+    /// 按时收敛的子步数（上游 `count_implicit`）。
+    pub implicit_steps: usize,
+    /// 撞上迭代上限而降级为显式形式的子步数（上游 `count_explicit`）。
+    pub explicit_steps: usize,
+    /// 因"湿转干"而提前退出并降级的子步数（上游 `count_wet2dry`）。
+    pub wet_to_dry_steps: usize,
+}
+
+/// 组装 [`flux_variable_saturated_flux_all`] 的输入。
+///
+/// `VariableSaturatedRichardsInput` 是 `Copy` 的，所以按值传进来再协变缩短生命周期，
+/// 返回值统一用最短的那个 `'d`。
+#[allow(clippy::too_many_arguments)]
+fn richards_flux_all_input<'d>(
+    input: VariableSaturatedRichardsInput<'d>,
+    thickness_mm: &'d [f64],
+    level_update: &'d [bool],
+    update_sublevel: bool,
+    pressure_head_mm: &'d [f64],
+    hydraulic_conductivity_mm_s: &'d [f64],
+    surface_water_mm: f64,
+    water_table_depth_mm: f64,
+) -> VariableSaturatedFluxAllInput<'d> {
+    VariableSaturatedFluxAllInput {
+        thickness_mm,
+        center_depth_mm: input.center_depth_mm,
+        interface_depth_mm: input.interface_depth_mm,
+        saturated_liquid_water: input.porosity,
+        saturated_potential_mm: input.saturated_potential_mm,
+        saturated_hydraulic_conductivity_mm_s: input.saturated_hydraulic_conductivity_mm_s,
+        hydraulic_model: input.hydraulic_model,
+        upper_boundary: input.upper_boundary,
+        lower_boundary: input.lower_boundary,
+        level_update,
+        update_sublevel,
+        water_table_depth_mm,
+        surface_water_mm,
+        unsaturated_pressure_head_mm: pressure_head_mm,
+        unsaturated_hydraulic_conductivity_mm_s: hydraulic_conductivity_mm_s,
+        flux_tolerance_mm_s: input.flux_tolerance_mm_s,
+        depth_tolerance_mm: input.depth_tolerance_mm,
+        pressure_tolerance_mm: input.pressure_tolerance_mm,
+    }
+}
+
+/// 组装 [`variable_saturated_water_balance`] 的输入。
+#[allow(clippy::too_many_arguments)]
+fn richards_water_balance_input<'d>(
+    input: VariableSaturatedRichardsInput<'d>,
+    time_step_seconds: f64,
+    zone: &'d VariableSaturatedSaturatedZoneAllState,
+    interface_flux_mm_s: &'d [f64],
+    ponding_depth_mm: f64,
+    aquifer_water_mm: f64,
+    previous_wetting_front_mm: &'d [f64],
+    previous_liquid_water: &'d [f64],
+    previous_water_table_thickness_mm: &'d [f64],
+    previous_ponding_depth_mm: f64,
+    previous_aquifer_water_mm: f64,
+) -> VariableSaturatedWaterBalanceInput<'d> {
+    VariableSaturatedWaterBalanceInput {
+        time_step_seconds,
+        interface_depth_mm: input.interface_depth_mm,
+        saturated: &zone.saturated,
+        porosity: input.porosity,
+        interface_flux_mm_s,
+        upper_boundary: input.upper_boundary,
+        lower_boundary: input.lower_boundary,
+        wetting_front_mm: &zone.wetting_front_mm,
+        liquid_water: &zone.liquid_water,
+        water_table_thickness_mm: &zone.water_table_thickness_mm,
+        ponding_depth_mm,
+        aquifer_water_mm,
+        previous_wetting_front_mm,
+        previous_liquid_water,
+        previous_water_table_thickness_mm,
+        previous_ponding_depth_mm,
+        previous_aquifer_water_mm,
+        tolerance_mm: RICHARDS_TOLERANCE * time_step_seconds,
+    }
+}
+
+/// Port of `MOD_Hydro_SoilWater:Richards_solver`.
+///
+/// 结构照抄上游：外层按 `dt_explicit = dt / 10` 把整步切成子步；每个子步内层跑
+/// Newton（最多 10 次），每次用 `flux_all` + `water_balance` 求残差，再用
+/// `var_perturb_*` 逐层数值微分出 Jacobian，交给
+/// [`solve_variable_saturated_least_squares`] 解出修正量。
+///
+/// **不收敛不是错误**：`iter` 到顶、`dt_this < dt_explicit`、残差不可解、
+/// 或出现"湿转干"时，上游把子步缩短到 `dt_explicit` 并改用
+/// [`apply_variable_saturated_explicit_step`]，然后继续推进。
+/// 三种降级各自的次数记在 [`VariableSaturatedRichardsState`] 里 —— 上游只在
+/// `DEF_USE_CoLMDEBUG` 下统计，而 tier2 的容差说明要求"回退次数变化即为红旗"，
+/// 所以这里无条件统计。
+///
+/// `ss_wf`（湿润锋）在上游是**局部变量**、每次调用从 0 开始，这里保持一致。
+pub fn richards_solver(
+    input: VariableSaturatedRichardsInput<'_>,
+    state: &mut VariableSaturatedRichardsState,
+) -> Result<()> {
+    let layers = validate_richards(input, state)?;
+    let ub = layers - 1;
+    let last_interface_mm = input.interface_depth_mm[ub + 1];
+
+    let thickness_mm = (0..layers)
+        .map(|level| input.interface_depth_mm[level + 1] - input.interface_depth_mm[level])
+        .collect::<Vec<_>>();
+    let explicit_time_step_seconds = input.time_step_seconds / MAX_ITERS_RICHARDS as f64;
+
+    let mut zone = VariableSaturatedSaturatedZoneAllState {
+        saturated: vec![false; layers],
+        has_wetting_front: vec![false; layers],
+        has_water_table: vec![false; layers],
+        // 上游 `ss_wf(lb:ub) = 0`：每次调用都从"没有湿润锋"开始。
+        wetting_front_mm: vec![0.0; layers],
+        liquid_water: state.liquid_water.clone(),
+        water_table_thickness_mm: state.water_table_thickness_mm.clone(),
+        interface_flux_mm_s: vec![0.0; layers + 1],
+        water_table_flux_mm_s: vec![0.0; layers],
+        wetting_front_flux_mm_s: vec![0.0; layers],
+    };
+    let mut pressure_head_mm = vec![0.0; layers];
+    let mut hydraulic_conductivity_mm_s = vec![0.0; layers];
+    let mut active_variable = vec![2i32; layers];
+    let mut ponding_depth_mm = state.ponding_depth_mm;
+    let mut aquifer_water_mm = state.aquifer_water_mm;
+    let mut water_table_depth_mm = 0.0;
+
+    let mut accumulated_flux_mm_s = vec![0.0; layers + 1];
+    let mut time_done_seconds = 0.0;
+    while time_done_seconds < input.time_step_seconds {
+        let mut time_this_seconds = input.time_step_seconds - time_done_seconds;
+
+        let previous_wetting_front_mm = zone.wetting_front_mm.clone();
+        let previous_liquid_water = zone.liquid_water.clone();
+        let previous_water_table_thickness_mm = zone.water_table_thickness_mm.clone();
+
+        let mut balance_before_mm = zone
+            .liquid_water
+            .iter()
+            .zip(&zone.water_table_thickness_mm)
+            .zip(&thickness_mm)
+            .map(|((liquid_water, water_table), thickness)| {
+                liquid_water * (thickness - water_table)
+            })
+            .sum::<f64>()
+            + zone
+                .water_table_thickness_mm
+                .iter()
+                .zip(input.porosity)
+                .map(|(water_table, porosity)| water_table * porosity)
+                .sum::<f64>();
+        let mut previous_ponding_depth_mm = 0.0;
+        if input.upper_boundary.kind == VariableSaturatedBoundaryKind::Rainfall {
+            balance_before_mm += ponding_depth_mm;
+            previous_ponding_depth_mm = ponding_depth_mm.max(0.0);
+        }
+        let mut previous_aquifer_water_mm = 0.0;
+        if input.lower_boundary.kind == VariableSaturatedBoundaryKind::Drainage {
+            balance_before_mm += aquifer_water_mm;
+            previous_aquifer_water_mm = aquifer_water_mm;
+            water_table_depth_mm = water_table_from_aquifer(
+                input.aquifer_porosity,
+                input.residual_water[ub],
+                input.saturated_potential_mm[ub],
+                input.hydraulic_model[ub],
+                input.volume_tolerance,
+                input.depth_tolerance_mm,
+                aquifer_water_mm,
+                last_interface_mm,
+            )?;
+        }
+
+        // 每个子步的 Newton 外层。
+        let mut iteration = 0usize;
+        let mut initial_interface_flux_mm_s = vec![0.0; layers + 1];
+        let mut wet_to_dry = false;
+        loop {
+            iteration += 1;
+
+            // 内联构造而不是闭包：返回值的借用同时挂在 `zone`（短）与 `input`（长）
+            // 上，闭包签名写不出这个关系，会报 lifetime may not live long enough。
+            let sublevels =
+                initialize_variable_saturated_sublevels(VariableSaturatedSublevelInput {
+                    interface_depth_mm: input.interface_depth_mm,
+                    porosity: input.porosity,
+                    residual_water: input.residual_water,
+                    saturated_potential_mm: input.saturated_potential_mm,
+                    saturated_hydraulic_conductivity_mm_s: input
+                        .saturated_hydraulic_conductivity_mm_s,
+                    hydraulic_model: input.hydraulic_model,
+                    upper_boundary: input.upper_boundary,
+                    lower_boundary: input.lower_boundary,
+                    wetting_front_mm: &zone.wetting_front_mm,
+                    liquid_water: &zone.liquid_water,
+                    water_table_thickness_mm: &zone.water_table_thickness_mm,
+                    ponding_depth_mm,
+                    volume_tolerance: input.volume_tolerance,
+                    depth_tolerance_mm: input.depth_tolerance_mm,
+                })?;
+            zone.saturated = sublevels.saturated;
+            zone.has_wetting_front = sublevels.has_wetting_front;
+            zone.has_water_table = sublevels.has_water_table;
+            zone.wetting_front_mm = sublevels.wetting_front_mm;
+            zone.liquid_water = sublevels.liquid_water;
+            zone.water_table_thickness_mm = sublevels.water_table_thickness_mm;
+            pressure_head_mm = sublevels.pressure_head_mm;
+            hydraulic_conductivity_mm_s = sublevels.hydraulic_conductivity_mm_s;
+
+            let all_levels_update = vec![true; layers + 2];
+            flux_variable_saturated_flux_all(
+                richards_flux_all_input(
+                    input,
+                    &thickness_mm,
+                    &all_levels_update,
+                    true,
+                    &pressure_head_mm,
+                    &hydraulic_conductivity_mm_s,
+                    ponding_depth_mm,
+                    water_table_depth_mm,
+                ),
+                &mut zone,
+            )?;
+
+            let balance = variable_saturated_water_balance(richards_water_balance_input(
+                input,
+                time_this_seconds,
+                &zone,
+                &zone.interface_flux_mm_s,
+                ponding_depth_mm,
+                aquifer_water_mm,
+                &previous_wetting_front_mm,
+                &previous_liquid_water,
+                &previous_water_table_thickness_mm,
+                previous_ponding_depth_mm,
+                previous_aquifer_water_mm,
+            ))?;
+
+            if iteration == 1 {
+                initial_interface_flux_mm_s = zone.interface_flux_mm_s.clone();
+                wet_to_dry = false;
+                if input.upper_boundary.kind == VariableSaturatedBoundaryKind::Rainfall {
+                    let influx_mm_s = initial_interface_flux_mm_s[0] - input.upper_boundary.value;
+                    if previous_ponding_depth_mm > input.depth_tolerance_mm
+                        && previous_ponding_depth_mm - influx_mm_s * time_this_seconds
+                            < input.depth_tolerance_mm
+                    {
+                        wet_to_dry = true;
+                    }
+                }
+            }
+
+            let residual_norm_mm = balance
+                .residual_mm
+                .iter()
+                .map(|residual| residual * residual)
+                .sum::<f64>()
+                .sqrt();
+            let converged = residual_norm_mm < RICHARDS_TOLERANCE * time_this_seconds;
+            let forced_explicit = time_this_seconds < explicit_time_step_seconds
+                || iteration >= MAX_ITERS_RICHARDS
+                || !balance.solvable
+                || wet_to_dry;
+            if converged || forced_explicit {
+                if forced_explicit {
+                    time_this_seconds = time_this_seconds.min(explicit_time_step_seconds);
+                    zone.interface_flux_mm_s = initial_interface_flux_mm_s.clone();
+                    let explicit =
+                        apply_variable_saturated_explicit_step(VariableSaturatedExplicitInput {
+                            time_step_seconds: time_this_seconds,
+                            interface_depth_mm: input.interface_depth_mm,
+                            porosity: input.porosity,
+                            residual_water: input.residual_water,
+                            saturated_potential_mm: input.saturated_potential_mm,
+                            hydraulic_model: input.hydraulic_model,
+                            aquifer_porosity: input.aquifer_porosity,
+                            upper_boundary: input.upper_boundary,
+                            lower_boundary: input.lower_boundary,
+                            interface_flux_mm_s: &zone.interface_flux_mm_s,
+                            wetting_front_mm: &zone.wetting_front_mm,
+                            liquid_water: &zone.liquid_water,
+                            water_table_thickness_mm: &zone.water_table_thickness_mm,
+                            ponding_depth_mm,
+                            aquifer_water_mm,
+                            water_table_depth_mm,
+                            previous_wetting_front_mm: &previous_wetting_front_mm,
+                            previous_liquid_water: &previous_liquid_water,
+                            previous_water_table_thickness_mm: &previous_water_table_thickness_mm,
+                            previous_ponding_depth_mm,
+                            previous_aquifer_water_mm,
+                            depth_tolerance_mm: input.depth_tolerance_mm,
+                            volume_tolerance: input.volume_tolerance,
+                        })?;
+                    zone.interface_flux_mm_s = explicit.interface_flux_mm_s;
+                    zone.wetting_front_mm = explicit.wetting_front_mm;
+                    zone.liquid_water = explicit.liquid_water;
+                    zone.water_table_thickness_mm = explicit.water_table_thickness_mm;
+                    ponding_depth_mm = explicit.ponding_depth_mm;
+                    aquifer_water_mm = explicit.aquifer_water_mm;
+                    water_table_depth_mm = explicit.water_table_depth_mm;
+                }
+
+                time_done_seconds += time_this_seconds;
+                // 上游的三分计数：注意判据用的是**可能已被缩短**的 `dt_this`。
+                if residual_norm_mm < RICHARDS_TOLERANCE * time_this_seconds {
+                    state.implicit_steps += 1;
+                } else if iteration >= MAX_ITERS_RICHARDS {
+                    state.explicit_steps += 1;
+                } else if wet_to_dry {
+                    state.wet_to_dry_steps += 1;
+                }
+                break;
+            }
+
+            let dimension = layers + 2;
+            let mut jacobian = vec![0.0; dimension * dimension];
+            let mut active = vec![false; dimension];
+            let mut perturbed;
+
+            if input.upper_boundary.kind == VariableSaturatedBoundaryKind::Rainfall {
+                let rainfall =
+                    perturb_variable_saturated_rainfall(balance.residual_mm[0], ponding_depth_mm);
+                active[0] = rainfall.active;
+                if rainfall.active {
+                    perturbed = zone.clone();
+                    perturbed.interface_flux_mm_s = zone.interface_flux_mm_s.clone();
+                    perturbed.wetting_front_flux_mm_s = zone.wetting_front_flux_mm_s.clone();
+                    perturbed.water_table_flux_mm_s = zone.water_table_flux_mm_s.clone();
+                    let single_update = single_level_update(layers, 0);
+                    flux_variable_saturated_flux_all(
+                        richards_flux_all_input(
+                            input,
+                            &thickness_mm,
+                            &single_update,
+                            false,
+                            &pressure_head_mm,
+                            &hydraulic_conductivity_mm_s,
+                            rainfall.ponding_depth_mm,
+                            water_table_depth_mm,
+                        ),
+                        &mut perturbed,
+                    )?;
+                    let perturbed_balance =
+                        variable_saturated_water_balance(richards_water_balance_input(
+                            input,
+                            time_this_seconds,
+                            &perturbed,
+                            &perturbed.interface_flux_mm_s,
+                            rainfall.ponding_depth_mm,
+                            aquifer_water_mm,
+                            &previous_wetting_front_mm,
+                            &previous_liquid_water,
+                            &previous_water_table_thickness_mm,
+                            previous_ponding_depth_mm,
+                            previous_aquifer_water_mm,
+                        ))?;
+                    for row in 0..dimension {
+                        jacobian[row * dimension] = (perturbed_balance.residual_mm[row]
+                            - balance.residual_mm[row])
+                            / rainfall.delta;
+                    }
+                }
+            }
+
+            for level in 0..layers {
+                if zone.saturated[level] {
+                    continue;
+                }
+                let perturbation =
+                    perturb_variable_saturated_level(VariableSaturatedLevelPerturbationInput {
+                        balance_residual_mm: balance.residual_mm[level + 1],
+                        thickness_mm: thickness_mm[level],
+                        center_depth_mm: input.center_depth_mm[level],
+                        lower_interface_depth_mm: input.interface_depth_mm[level + 1],
+                        porosity: input.porosity[level],
+                        residual_water: input.residual_water[level],
+                        saturated_potential_mm: input.saturated_potential_mm[level],
+                        saturated_hydraulic_conductivity_mm_s: input
+                            .saturated_hydraulic_conductivity_mm_s[level],
+                        hydraulic_model: input.hydraulic_model[level],
+                        saturated: zone.saturated[level],
+                        has_wetting_front: zone.has_wetting_front[level],
+                        has_water_table: zone.has_water_table[level],
+                        incoming_flux_mm_s: zone.interface_flux_mm_s[level],
+                        outgoing_flux_mm_s: zone.interface_flux_mm_s[level + 1],
+                        wetting_front_flux_mm_s: zone.wetting_front_flux_mm_s[level],
+                        water_table_flux_mm_s: zone.water_table_flux_mm_s[level],
+                        wetting_front_mm: zone.wetting_front_mm[level],
+                        liquid_water: zone.liquid_water[level],
+                        water_table_thickness_mm: zone.water_table_thickness_mm[level],
+                        pressure_head_mm: pressure_head_mm[level],
+                        hydraulic_conductivity_mm_s: hydraulic_conductivity_mm_s[level],
+                        volume_tolerance: input.volume_tolerance,
+                    })?;
+                active_variable[level] = match perturbation.coordinate {
+                    VariableSaturatedLevelCoordinate::WettingFront => 1,
+                    VariableSaturatedLevelCoordinate::LiquidWater => 2,
+                    VariableSaturatedLevelCoordinate::WaterTable => 3,
+                };
+                active[level + 1] = perturbation.active;
+                if !perturbation.active {
+                    continue;
+                }
+                perturbed = zone.clone();
+                perturbed.interface_flux_mm_s = zone.interface_flux_mm_s.clone();
+                perturbed.wetting_front_flux_mm_s = zone.wetting_front_flux_mm_s.clone();
+                perturbed.water_table_flux_mm_s = zone.water_table_flux_mm_s.clone();
+                perturbed.wetting_front_mm[level] = perturbation.wetting_front_mm;
+                perturbed.liquid_water[level] = perturbation.liquid_water;
+                perturbed.water_table_thickness_mm[level] = perturbation.water_table_thickness_mm;
+                let mut perturbed_pressure_head_mm = pressure_head_mm.clone();
+                let mut perturbed_conductivity_mm_s = hydraulic_conductivity_mm_s.clone();
+                perturbed_pressure_head_mm[level] = perturbation.pressure_head_mm;
+                perturbed_conductivity_mm_s[level] = perturbation.hydraulic_conductivity_mm_s;
+                let single_update = single_level_update(layers, level + 1);
+                flux_variable_saturated_flux_all(
+                    richards_flux_all_input(
+                        input,
+                        &thickness_mm,
+                        &single_update,
+                        false,
+                        &perturbed_pressure_head_mm,
+                        &perturbed_conductivity_mm_s,
+                        ponding_depth_mm,
+                        water_table_depth_mm,
+                    ),
+                    &mut perturbed,
+                )?;
+                let perturbed_balance =
+                    variable_saturated_water_balance(richards_water_balance_input(
+                        input,
+                        time_this_seconds,
+                        &perturbed,
+                        &perturbed.interface_flux_mm_s,
+                        ponding_depth_mm,
+                        aquifer_water_mm,
+                        &previous_wetting_front_mm,
+                        &previous_liquid_water,
+                        &previous_water_table_thickness_mm,
+                        previous_ponding_depth_mm,
+                        previous_aquifer_water_mm,
+                    ))?;
+                let column = level + 1;
+                for row in 0..dimension {
+                    jacobian[row * dimension + column] = (perturbed_balance.residual_mm[row]
+                        - balance.residual_mm[row])
+                        / perturbation.delta;
+                }
+            }
+
+            if input.lower_boundary.kind == VariableSaturatedBoundaryKind::Drainage {
+                let drainage = perturb_variable_saturated_drainage(
+                    last_interface_mm,
+                    balance.residual_mm[layers + 1],
+                    water_table_depth_mm,
+                );
+                active[layers + 1] = drainage.active;
+                if drainage.active {
+                    perturbed = zone.clone();
+                    perturbed.interface_flux_mm_s = zone.interface_flux_mm_s.clone();
+                    perturbed.wetting_front_flux_mm_s = zone.wetting_front_flux_mm_s.clone();
+                    perturbed.water_table_flux_mm_s = zone.water_table_flux_mm_s.clone();
+                    let perturbed_aquifer_water_mm = -(drainage.water_table_depth_mm
+                        - last_interface_mm)
+                        * (input.aquifer_porosity
+                            - soil_vliq_from_psi(
+                                input.saturated_potential_mm[ub]
+                                    + (last_interface_mm - drainage.water_table_depth_mm) * 0.5,
+                                input.aquifer_porosity,
+                                input.residual_water[ub],
+                                input.saturated_potential_mm[ub],
+                                input.hydraulic_model[ub],
+                            ));
+                    let single_update = single_level_update(layers, layers + 1);
+                    flux_variable_saturated_flux_all(
+                        richards_flux_all_input(
+                            input,
+                            &thickness_mm,
+                            &single_update,
+                            false,
+                            &pressure_head_mm,
+                            &hydraulic_conductivity_mm_s,
+                            ponding_depth_mm,
+                            drainage.water_table_depth_mm,
+                        ),
+                        &mut perturbed,
+                    )?;
+                    let perturbed_balance =
+                        variable_saturated_water_balance(richards_water_balance_input(
+                            input,
+                            time_this_seconds,
+                            &perturbed,
+                            &perturbed.interface_flux_mm_s,
+                            ponding_depth_mm,
+                            perturbed_aquifer_water_mm,
+                            &previous_wetting_front_mm,
+                            &previous_liquid_water,
+                            &previous_water_table_thickness_mm,
+                            previous_ponding_depth_mm,
+                            previous_aquifer_water_mm,
+                        ))?;
+                    let column = layers + 1;
+                    for row in 0..dimension {
+                        jacobian[row * dimension + column] = (perturbed_balance.residual_mm[row]
+                            - balance.residual_mm[row])
+                            / drainage.delta;
+                    }
+                }
+            }
+
+            for level in 0..dimension {
+                active[level] = active[level]
+                    && jacobian[level * dimension + level].abs() > input.flux_tolerance_mm_s;
+            }
+
+            let search =
+                solve_variable_saturated_least_squares(&jacobian, &active, &balance.residual_mm)?;
+
+            if active[0] {
+                ponding_depth_mm = (ponding_depth_mm - search[0]).max(0.0);
+            }
+            for level in 0..layers {
+                if !active[level + 1] {
+                    continue;
+                }
+                let step = search[level + 1];
+                match active_variable[level] {
+                    1 => {
+                        if zone.wetting_front_mm[level] == thickness_mm[level] && step > 0.0 {
+                            let limited = step.min(thickness_mm[level]);
+                            zone.wetting_front_mm[level] -= limited;
+                            pressure_head_mm[level] = input.saturated_potential_mm[level]
+                                + (1.0
+                                    - zone.interface_flux_mm_s[level + 1]
+                                        / input.saturated_hydraulic_conductivity_mm_s[level])
+                                    * limited
+                                    * (input.center_depth_mm[level]
+                                        - input.interface_depth_mm[level])
+                                    / thickness_mm[level];
+                            zone.liquid_water[level] = soil_vliq_from_psi(
+                                pressure_head_mm[level],
+                                input.porosity[level],
+                                input.residual_water[level],
+                                input.saturated_potential_mm[level],
+                                input.hydraulic_model[level],
+                            );
+                            hydraulic_conductivity_mm_s[level] = soil_hydraulic_conductivity(
+                                pressure_head_mm[level],
+                                input.saturated_potential_mm[level],
+                                input.saturated_hydraulic_conductivity_mm_s[level],
+                                input.hydraulic_model[level],
+                            );
+                        } else {
+                            zone.wetting_front_mm[level] = (zone.wetting_front_mm[level] - step)
+                                .max(0.0)
+                                .min(thickness_mm[level] - zone.water_table_thickness_mm[level]);
+                        }
+                    }
+                    2 => {
+                        zone.liquid_water[level] = (zone.liquid_water[level] - step)
+                            .max(input.volume_tolerance)
+                            .min(input.porosity[level]);
+                    }
+                    3 => {
+                        if zone.water_table_thickness_mm[level] == thickness_mm[level] && step > 0.0
+                        {
+                            let limited = step.min(thickness_mm[level]);
+                            zone.water_table_thickness_mm[level] -= limited;
+                            pressure_head_mm[level] = input.saturated_potential_mm[level]
+                                - (1.0
+                                    - zone.interface_flux_mm_s[level]
+                                        / input.saturated_hydraulic_conductivity_mm_s[level])
+                                    * limited
+                                    * (input.interface_depth_mm[level + 1]
+                                        - input.center_depth_mm[level])
+                                    / thickness_mm[level];
+                            zone.liquid_water[level] = soil_vliq_from_psi(
+                                pressure_head_mm[level],
+                                input.porosity[level],
+                                input.residual_water[level],
+                                input.saturated_potential_mm[level],
+                                input.hydraulic_model[level],
+                            );
+                            hydraulic_conductivity_mm_s[level] = soil_hydraulic_conductivity(
+                                pressure_head_mm[level],
+                                input.saturated_potential_mm[level],
+                                input.saturated_hydraulic_conductivity_mm_s[level],
+                                input.hydraulic_model[level],
+                            );
+                        } else {
+                            zone.water_table_thickness_mm[level] =
+                                (zone.water_table_thickness_mm[level] - step)
+                                    .max(0.0)
+                                    .min(thickness_mm[level] - zone.wetting_front_mm[level]);
+                        }
+                    }
+                    other => bail!(
+                        "var_perturb_level returned an unknown active variable {other}; the \
+                         source only has jsbl in 1..=3 (wetting front, water content, water table)"
+                    ),
+                }
+                check_and_update_variable_saturated_level(
+                    thickness_mm[level],
+                    input.porosity[level],
+                    input.residual_water[level],
+                    input.saturated_potential_mm[level],
+                    input.saturated_hydraulic_conductivity_mm_s[level],
+                    input.hydraulic_model[level],
+                    zone.saturated[level],
+                    zone.has_wetting_front[level],
+                    zone.has_water_table[level],
+                    &mut zone.wetting_front_mm[level],
+                    &mut zone.liquid_water[level],
+                    &mut zone.water_table_thickness_mm[level],
+                    &mut pressure_head_mm[level],
+                    &mut hydraulic_conductivity_mm_s[level],
+                    active_variable[level] == 2,
+                    input.volume_tolerance,
+                );
+            }
+
+            if active[layers + 1] {
+                water_table_depth_mm =
+                    (water_table_depth_mm - search[layers + 1]).max(last_interface_mm);
+                aquifer_water_mm = -(water_table_depth_mm - last_interface_mm)
+                    * (input.aquifer_porosity
+                        - soil_vliq_from_psi(
+                            input.saturated_potential_mm[ub]
+                                + (last_interface_mm - water_table_depth_mm) * 0.5,
+                            input.aquifer_porosity,
+                            input.residual_water[ub],
+                            input.saturated_potential_mm[ub],
+                            input.hydraulic_model[ub],
+                        ));
+            }
+        }
+
+        for (accumulated, flux) in accumulated_flux_mm_s
+            .iter_mut()
+            .zip(&zone.interface_flux_mm_s)
+        {
+            *accumulated += flux * time_this_seconds;
+        }
+
+        let mut balance_after_mm = zone
+            .liquid_water
+            .iter()
+            .zip(&zone.water_table_thickness_mm)
+            .zip(&zone.wetting_front_mm)
+            .zip(&thickness_mm)
+            .map(
+                |(((liquid_water, water_table), wetting_front), thickness)| {
+                    liquid_water * (thickness - water_table - wetting_front)
+                },
+            )
+            .sum::<f64>()
+            + zone
+                .water_table_thickness_mm
+                .iter()
+                .zip(&zone.wetting_front_mm)
+                .zip(input.porosity)
+                .map(|((water_table, wetting_front), porosity)| {
+                    (water_table + wetting_front) * porosity
+                })
+                .sum::<f64>();
+        if input.upper_boundary.kind == VariableSaturatedBoundaryKind::Rainfall {
+            balance_after_mm += ponding_depth_mm;
+        }
+        if input.lower_boundary.kind == VariableSaturatedBoundaryKind::Drainage {
+            balance_after_mm += aquifer_water_mm;
+        }
+        // 上游把 `werr` 算出来只用于调试打印；留着是为了让这一段的算式与
+        // Fortran 逐项对应，也让差分测试能直接比对。
+        let _balance_error_mm = balance_after_mm
+            - (balance_before_mm + input.upper_boundary.value * time_this_seconds
+                - input.lower_boundary.value * time_this_seconds);
+    }
+
+    for (accumulated, flux) in state
+        .interface_flux_mm_s
+        .iter_mut()
+        .zip(accumulated_flux_mm_s)
+    {
+        *accumulated = flux / input.time_step_seconds;
+    }
+    state.ponding_depth_mm = ponding_depth_mm;
+    state.aquifer_water_mm = aquifer_water_mm;
+    state.water_table_thickness_mm = zone.water_table_thickness_mm.clone();
+    state.liquid_water = zone.liquid_water.clone();
+
+    // 收尾：把"层内那一段的含水率"折算成**整层平均**含水率，
+    // 把湿润锋与水位占掉的那部分按 `vl_s` 补进去（Fortran `:1090-1096`）。
+    for (level, thickness) in thickness_mm.iter().enumerate() {
+        let water_table = zone.water_table_thickness_mm[level];
+        if (thickness - water_table).abs() > input.depth_tolerance_mm {
+            state.liquid_water[level] = (zone.wetting_front_mm[level] * input.porosity[level]
+                + (thickness - zone.wetting_front_mm[level] - water_table)
+                    * zone.liquid_water[level])
+                / (thickness - water_table);
+        }
+    }
+    Ok(())
+}
+
+/// `lev_update` 只点亮一个位置的辅助数组。
+fn single_level_update(layers: usize, level: usize) -> Vec<bool> {
+    let mut update = vec![false; layers + 2];
+    update[level] = true;
+    update
+}
+
+/// 校验 [`richards_solver`] 的窗口与状态长度。
+fn validate_richards(
+    input: VariableSaturatedRichardsInput<'_>,
+    state: &VariableSaturatedRichardsState,
+) -> Result<usize> {
+    let layers = input.center_depth_mm.len();
+    ensure!(
+        layers > 0
+            && input.interface_depth_mm.len() == layers + 1
+            && input.porosity.len() == layers
+            && input.residual_water.len() == layers
+            && input.saturated_potential_mm.len() == layers
+            && input.saturated_hydraulic_conductivity_mm_s.len() == layers
+            && input.hydraulic_model.len() == layers
+            && state.liquid_water.len() == layers
+            && state.water_table_thickness_mm.len() == layers
+            && state.interface_flux_mm_s.len() == layers + 1,
+        "VSF Richards solver inputs are invalid"
+    );
+    ensure!(
+        input.time_step_seconds > 0.0
+            && input.time_step_seconds.is_finite()
+            && input.aquifer_porosity > 0.0
+            && input.aquifer_porosity.is_finite()
+            && input
+                .porosity
+                .iter()
+                .zip(input.residual_water)
+                .all(|(porosity, residual)| {
+                    porosity.is_finite()
+                        && residual.is_finite()
+                        && *residual >= 0.0
+                        && *residual < *porosity
+                })
+            && input
+                .saturated_potential_mm
+                .iter()
+                .all(|value| value.is_finite() && *value < 0.0)
+            && input
+                .saturated_hydraulic_conductivity_mm_s
+                .iter()
+                .all(|value| value.is_finite() && *value > 0.0)
+            && input
+                .interface_depth_mm
+                .windows(2)
+                .all(|pair| pair[1] > pair[0])
+            && input.center_depth_mm.iter().all(|value| value.is_finite())
+            && state
+                .liquid_water
+                .iter()
+                .chain(&state.water_table_thickness_mm)
+                .chain(&state.interface_flux_mm_s)
+                .all(|value| value.is_finite())
+            && [state.ponding_depth_mm, state.aquifer_water_mm]
+                .iter()
+                .all(|value| value.is_finite())
+            && [
+                input.upper_boundary.value,
+                input.lower_boundary.value,
+                input.flux_tolerance_mm_s,
+                input.depth_tolerance_mm,
+                input.volume_tolerance,
+                input.pressure_tolerance_mm,
+            ]
+            .iter()
+            .all(|value| value.is_finite()),
+        "VSF Richards solver values are not physical"
+    );
+    Ok(layers)
 }
 
 /// 校验 [`flux_variable_saturated_flux_all`] 的窗口、状态与 `lev_update` 长度。

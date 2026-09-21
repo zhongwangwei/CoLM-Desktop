@@ -1102,6 +1102,170 @@ fn flux_all_takes_the_unsaturated_interface_branch_inside_the_column() {
     );
 }
 
+/// `richards_solver` 的夹具：单层柱，Campbell 模型。
+struct RichardsFixture {
+    center_depth_mm: Vec<f64>,
+    interface_depth_mm: Vec<f64>,
+    porosity: Vec<f64>,
+    residual_water: Vec<f64>,
+    saturated_potential_mm: Vec<f64>,
+    saturated_hydraulic_conductivity_mm_s: Vec<f64>,
+    hydraulic_model: Vec<SoilHydraulicModel>,
+}
+
+fn richards_fixture(layers: usize) -> RichardsFixture {
+    let model = SoilHydraulicModel::Campbell { bsw: 4.0 };
+    RichardsFixture {
+        center_depth_mm: (0..layers).map(|i| 50.0 + 100.0 * i as f64).collect(),
+        interface_depth_mm: (0..=layers).map(|i| 100.0 * i as f64).collect(),
+        porosity: vec![0.45; layers],
+        residual_water: vec![0.05; layers],
+        saturated_potential_mm: vec![-100.0; layers],
+        saturated_hydraulic_conductivity_mm_s: vec![0.01; layers],
+        hydraulic_model: vec![model; layers],
+    }
+}
+
+fn richards_input<'a>(
+    fixture: &'a RichardsFixture,
+    upper_boundary: VariableSaturatedBoundary,
+    lower_boundary: VariableSaturatedBoundary,
+) -> VariableSaturatedRichardsInput<'a> {
+    VariableSaturatedRichardsInput {
+        time_step_seconds: 1800.0,
+        center_depth_mm: &fixture.center_depth_mm,
+        interface_depth_mm: &fixture.interface_depth_mm,
+        porosity: &fixture.porosity,
+        residual_water: &fixture.residual_water,
+        saturated_potential_mm: &fixture.saturated_potential_mm,
+        saturated_hydraulic_conductivity_mm_s: &fixture.saturated_hydraulic_conductivity_mm_s,
+        hydraulic_model: &fixture.hydraulic_model,
+        aquifer_porosity: 0.45,
+        upper_boundary,
+        lower_boundary,
+        flux_tolerance_mm_s: 1.0e-10,
+        depth_tolerance_mm: 1.0e-8,
+        volume_tolerance: 1.0e-8,
+        pressure_tolerance_mm: 1.0e-8,
+    }
+}
+
+fn richards_state(
+    fixture: &RichardsFixture,
+    volumetric_water: f64,
+) -> VariableSaturatedRichardsState {
+    let layers = fixture.center_depth_mm.len();
+    VariableSaturatedRichardsState {
+        ponding_depth_mm: 0.0,
+        aquifer_water_mm: 0.0,
+        liquid_water: vec![volumetric_water; layers],
+        water_table_thickness_mm: vec![0.0; layers],
+        interface_flux_mm_s: vec![0.0; layers + 1],
+        implicit_steps: 0,
+        explicit_steps: 0,
+        wet_to_dry_steps: 0,
+    }
+}
+
+fn fixed_flux(value: f64) -> VariableSaturatedBoundary {
+    VariableSaturatedBoundary {
+        kind: VariableSaturatedBoundaryKind::FixedFlux,
+        value,
+    }
+}
+
+/// 两端都是零通量时，一列饱和土是**不动点**：残差第一步就是 0，
+/// Newton 不该动任何状态，通量全为 0。
+#[test]
+fn richards_solver_leaves_a_zero_flux_column_untouched() {
+    let fixture = richards_fixture(2);
+    let mut state = richards_state(&fixture, 0.45);
+    let before = state.clone();
+    let input = richards_input(&fixture, fixed_flux(0.0), fixed_flux(0.0));
+    richards_solver(input, &mut state).unwrap();
+
+    assert_eq!(state.liquid_water, before.liquid_water);
+    // 整柱饱和时 `initialize_sublevel_structure` 会把水位填满每一层
+    // （`wt = dz`），与初始的 0 不同 —— 这是上游的分层判定，不是漂移。
+    for level in 0..2 {
+        let thickness = fixture.interface_depth_mm[level + 1] - fixture.interface_depth_mm[level];
+        close(state.water_table_thickness_mm[level], thickness, 1.0e-12);
+    }
+    for flux in &state.interface_flux_mm_s {
+        close(*flux, 0.0, 1.0e-12);
+    }
+    // 走的是隐性分支（残差本来就 0），没有降级。
+    assert!(state.implicit_steps >= 1);
+    assert_eq!(state.explicit_steps, 0);
+    assert_eq!(state.wet_to_dry_steps, 0);
+}
+
+/// 定通量上边界：`ss_q` 的上下端必须**逐位**等于施加的通量
+/// （`flux_all` 的 `BC_FIX_FLUX` 支直接赋值，`ss_q` 只做时间平均）。
+/// 顺带守住"状态始终落在物理区间内"。
+#[test]
+fn richards_solver_reports_the_imposed_boundary_fluxes_and_keeps_state_physical() {
+    let fixture = richards_fixture(2);
+    let inflow_mm_s = 5.0e-4;
+    let mut state = richards_state(&fixture, 0.20);
+    let input = richards_input(&fixture, fixed_flux(inflow_mm_s), fixed_flux(0.0));
+    richards_solver(input, &mut state).unwrap();
+
+    close(state.interface_flux_mm_s[0], inflow_mm_s, 1.0e-12);
+    close(state.interface_flux_mm_s[2], 0.0, 1.0e-12);
+    for level in 0..fixture.center_depth_mm.len() {
+        assert!(
+            state.liquid_water[level] >= 0.0
+                && state.liquid_water[level] <= fixture.porosity[level],
+            "level {level} liquid water {} left 0..={}",
+            state.liquid_water[level],
+            fixture.porosity[level]
+        );
+        let thickness = fixture.interface_depth_mm[level + 1] - fixture.interface_depth_mm[level];
+        assert!(
+            state.water_table_thickness_mm[level] >= 0.0
+                && state.water_table_thickness_mm[level] <= thickness,
+            "level {level} water table {} left 0..={thickness}",
+            state.water_table_thickness_mm[level]
+        );
+    }
+    assert_eq!(
+        state.implicit_steps + state.explicit_steps + state.wet_to_dry_steps,
+        1,
+        "a step shorter than dt/10 must be solved in exactly one sub-step"
+    );
+    // 走的是**隐性**那一支：Newton 在 10 次迭代内收敛了，没有降级成显式形式。
+    assert_eq!(
+        (
+            state.implicit_steps,
+            state.explicit_steps,
+            state.wet_to_dry_steps
+        ),
+        (1, 0, 0),
+        "the infiltration step should converge implicitly, not fall back"
+    );
+}
+
+/// 长度与物理量的校验：错一处就报错，不静默当成别的窗口。
+#[test]
+fn richards_solver_checks_widths_and_physical_values() {
+    let fixture = richards_fixture(2);
+    let mut state = richards_state(&fixture, 0.30);
+
+    let input = VariableSaturatedRichardsInput {
+        interface_depth_mm: &fixture.interface_depth_mm[..2],
+        ..richards_input(&fixture, fixed_flux(0.0), fixed_flux(0.0))
+    };
+    let error = richards_solver(input, &mut state).unwrap_err();
+    assert!(error.to_string().contains("inputs are invalid"));
+
+    let mut bad = richards_fixture(2);
+    bad.residual_water[0] = 0.5;
+    let input = richards_input(&bad, fixed_flux(0.0), fixed_flux(0.0));
+    let error = richards_solver(input, &mut state).unwrap_err();
+    assert!(error.to_string().contains("not physical"));
+}
+
 fn close(actual: f64, expected: f64, tolerance: f64) {
     assert!(
         (actual - expected).abs() < tolerance,
