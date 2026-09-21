@@ -106,15 +106,34 @@ fn a_generated_case_reproduces_the_golden_history() {
 
     let all = fields(&spec).expect("valid test spin-up");
     let req = required(&all);
-    // 20 而不是 22：预热关掉时截止时刻的年月日秒都落回 CoLM 的默认值而被剪掉。
-    // Desktop 还会显式关闭臭氧胁迫与臭氧数据读取，避免新算例隐式依赖
-    // 上游 2.8 GB 全球臭氧文件，因此这两项都必须保留在最小配置里。
+    // 18 而不是 22：预热关掉时截止时刻的年月日秒都落回 CoLM 的默认值而被剪掉。
+    // 另外两项 `DEF_USE_OZONESTRESS`/`DEF_USE_OZONEDATA` 生成的取值是 `.false.`，
+    // 而上游 `MOD_Namelist.F90` 声明的默认值也是 `.false.` —— 按
+    // `minimal::required` 的判据就得省略（原先这里写 20，是那两条默认值翻成
+    // `.false.` 之前的旧账；因为测试要 `PLUMBER2_ROOT` 才真跑，一直没被发现）。
+    //
+    // **但这条不能只钉数字。** 上游哪天把默认值翻回 `.true.`，省略这两项就会让
+    // 新算例隐式去读 2.8 GB 的全球臭氧文件。所以两项都连默认值一起断言：
+    // 默认值一变，这里先炸，而不是等运行时报缺文件。
+    for field in ["DEF_USE_OZONESTRESS", "DEF_USE_OZONEDATA"] {
+        assert!(
+            !req.iter().any(|(path, _)| path == field),
+            "{field} is emitted even though it matches the CoLM default"
+        );
+        match colm_schema::find(field).map(|found| found.default) {
+            Some(colm_schema::Default::Logical(false)) => {}
+            other => panic!(
+                "upstream flipped the {field} default to {other:?}: the generated case \
+                 would silently start reading the global ozone dataset"
+            ),
+        }
+    }
     // 这条钉的是「生成的算例只写该写的」，不是钉某个具体数字 ——
     // 真正的判据是下面那句 history 与黄金文件逐变量相同。
     assert_eq!(
         req.len(),
-        20,
-        "expected 20 non-default fields, got {}",
+        18,
+        "expected 18 non-default fields, got {}",
         req.len()
     );
     std::fs::write(layout.case_nml(), render(&req)).expect("write case.nml");

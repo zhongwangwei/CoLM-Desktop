@@ -1129,6 +1129,15 @@ fn cmd_scan(dir: &Path, forcing_dir: Option<&Path>, out: Option<&str>, quick: bo
         let Some(name) = p.file_name().and_then(|n| n.to_str()) else {
             continue;
         };
+        // 跳过隐藏文件。macOS 在外置卷上给每个文件配一个 `._<名字>` 的 AppleDouble
+        // 边车，而它的**后缀与真文件完全相同**（`._AT-Neu_2002-2012_FLUXNET2015_site.nc`
+        // 也以 `_site.nc` 结尾），于是下面那张后缀表把它一起收进来 —— 实测
+        // `PLUMBER2_ROOT/Sitedata` 的 90 个站点被扫成 180 个，界面上每个站出现两次
+        // 且其中一份读不出经纬度。按「隐藏」过滤比按 `._` 过滤更稳：`.DS_Store`
+        // 之类同样不该进来，而站点文件的命名约定从不以点开头。
+        if name.starts_with('.') {
+            continue;
+        }
         // 站点文件的判据是命名约定，与 `sibling` 用的是同一张表。
         let Some(stem) = LAYOUTS
             .iter()
