@@ -810,6 +810,298 @@ fn saturated_zone_all_checks_the_window_widths() {
     assert!(error.to_string().contains("dispatch inputs are invalid"));
 }
 
+/// `flux_all` 的夹具。用 Campbell 模型：`soil_hydraulic_conductivity` 在它上面
+/// 是闭式的，测试里可以直接重算期望值来钉住**实参接线**。
+struct FluxAllFixture {
+    thickness_mm: Vec<f64>,
+    center_depth_mm: Vec<f64>,
+    interface_depth_mm: Vec<f64>,
+    saturated_liquid_water: Vec<f64>,
+    saturated_potential_mm: Vec<f64>,
+    saturated_hydraulic_conductivity_mm_s: Vec<f64>,
+    hydraulic_model: Vec<SoilHydraulicModel>,
+    unsaturated_pressure_head_mm: Vec<f64>,
+    unsaturated_hydraulic_conductivity_mm_s: Vec<f64>,
+    level_update: Vec<bool>,
+}
+
+fn flux_all_fixture(layers: usize) -> FluxAllFixture {
+    let model = SoilHydraulicModel::Campbell { bsw: 4.0 };
+    FluxAllFixture {
+        thickness_mm: vec![100.0; layers],
+        center_depth_mm: (0..layers).map(|i| 50.0 + 100.0 * i as f64).collect(),
+        interface_depth_mm: (0..=layers).map(|i| 100.0 * i as f64).collect(),
+        saturated_liquid_water: vec![40.0; layers],
+        saturated_potential_mm: vec![-100.0; layers],
+        saturated_hydraulic_conductivity_mm_s: vec![0.01; layers],
+        hydraulic_model: vec![model; layers],
+        unsaturated_pressure_head_mm: vec![-50.0; layers],
+        unsaturated_hydraulic_conductivity_mm_s: vec![0.004; layers],
+        level_update: vec![true; layers + 2],
+    }
+}
+
+fn flux_all_state(layers: usize) -> VariableSaturatedSaturatedZoneAllState {
+    VariableSaturatedSaturatedZoneAllState {
+        saturated: vec![false; layers],
+        has_wetting_front: vec![false; layers],
+        has_water_table: vec![false; layers],
+        wetting_front_mm: vec![0.0; layers],
+        liquid_water: vec![40.0; layers],
+        water_table_thickness_mm: vec![0.0; layers],
+        interface_flux_mm_s: vec![0.0; layers + 1],
+        water_table_flux_mm_s: vec![0.0; layers],
+        wetting_front_flux_mm_s: vec![0.0; layers],
+    }
+}
+
+fn flux_all_input<'a>(
+    fixture: &'a FluxAllFixture,
+    upper_boundary: VariableSaturatedBoundary,
+    lower_boundary: VariableSaturatedBoundary,
+) -> VariableSaturatedFluxAllInput<'a> {
+    VariableSaturatedFluxAllInput {
+        thickness_mm: &fixture.thickness_mm,
+        center_depth_mm: &fixture.center_depth_mm,
+        interface_depth_mm: &fixture.interface_depth_mm,
+        saturated_liquid_water: &fixture.saturated_liquid_water,
+        saturated_potential_mm: &fixture.saturated_potential_mm,
+        saturated_hydraulic_conductivity_mm_s: &fixture.saturated_hydraulic_conductivity_mm_s,
+        hydraulic_model: &fixture.hydraulic_model,
+        upper_boundary,
+        lower_boundary,
+        level_update: &fixture.level_update,
+        update_sublevel: false,
+        water_table_depth_mm: 1000.0,
+        surface_water_mm: 0.0,
+        unsaturated_pressure_head_mm: &fixture.unsaturated_pressure_head_mm,
+        unsaturated_hydraulic_conductivity_mm_s: &fixture.unsaturated_hydraulic_conductivity_mm_s,
+        flux_tolerance_mm_s: 1.0e-9,
+        depth_tolerance_mm: 1.0e-9,
+        pressure_tolerance_mm: 1.0e-9,
+    }
+}
+
+/// 整柱饱和时 `flux_all` 只走 Case 3 → 直接把整窗口交给
+/// `flux_sat_zone_all`。这里把两条路径的结果逐字段比一遍。
+#[test]
+fn flux_all_delegates_a_fully_saturated_column_to_the_zone_dispatcher() {
+    let fixture = flux_all_fixture(2);
+    let mut through_flux_all = flux_all_state(2);
+    through_flux_all.saturated = vec![true, true];
+    let input = flux_all_input(&fixture, fixed_head(0.0), fixed_head(-300.0));
+    flux_variable_saturated_flux_all(input, &mut through_flux_all).unwrap();
+
+    let mut direct = flux_all_state(2);
+    direct.saturated = vec![true, true];
+    flux_variable_saturated_zone_all(
+        VariableSaturatedSaturatedZoneAllInput {
+            first_saturated_level: 0,
+            last_saturated_level: 1,
+            thickness_mm: &fixture.thickness_mm,
+            center_depth_mm: &fixture.center_depth_mm,
+            interface_depth_mm: &fixture.interface_depth_mm,
+            saturated_liquid_water: &fixture.saturated_liquid_water,
+            saturated_potential_mm: &fixture.saturated_potential_mm,
+            saturated_hydraulic_conductivity_mm_s: &fixture.saturated_hydraulic_conductivity_mm_s,
+            hydraulic_model: &fixture.hydraulic_model,
+            upper_boundary: fixed_head(0.0),
+            lower_boundary: fixed_head(-300.0),
+            surface_water_mm: 0.0,
+            water_table_depth_mm: 1000.0,
+            unsaturated_pressure_head_mm: &fixture.unsaturated_pressure_head_mm,
+            unsaturated_hydraulic_conductivity_mm_s: &fixture
+                .unsaturated_hydraulic_conductivity_mm_s,
+            flux_tolerance_mm_s: 1.0e-9,
+            depth_tolerance_mm: 1.0e-9,
+            pressure_tolerance_mm: 1.0e-9,
+            update_sublevel: false,
+        },
+        &mut direct,
+    )
+    .unwrap();
+
+    assert_eq!(through_flux_all, direct);
+}
+
+/// 单层非饱和柱：先走 Case 1（地表），再走 Case 2（柱底）。
+/// 期望值用同一批内核函数按**手写的实参**重算 —— 钉的是接线，不是公式。
+#[test]
+fn flux_all_wires_case_one_and_case_two_arguments() {
+    let fixture = flux_all_fixture(1);
+    let mut state = flux_all_state(1);
+    let model = fixture.hydraulic_model[0];
+    let input = flux_all_input(&fixture, fixed_head(0.0), fixed_head(-200.0));
+    flux_variable_saturated_flux_all(input, &mut state).unwrap();
+
+    // Case 1，BC_FIX_HEAD，无湿润锋：dz_this = (100-0-0)*(50-0)/100 = 50。
+    let expected_surface_flux_mm_s =
+        flux_inside_variable_saturated_soil(VariableSaturatedHomogeneousFluxInput {
+            saturated_potential_mm: -100.0,
+            saturated_hydraulic_conductivity_mm_s: 0.01,
+            hydraulic_model: model,
+            distance_mm: 50.0,
+            upper_pressure_head_mm: 0.0,
+            lower_pressure_head_mm: -50.0,
+            upper_hydraulic_conductivity_mm_s: soil_hydraulic_conductivity(
+                0.0, -100.0, 0.01, model,
+            ),
+            lower_hydraulic_conductivity_mm_s: 0.004,
+        })
+        .unwrap();
+    close(
+        state.interface_flux_mm_s[0],
+        expected_surface_flux_mm_s,
+        1.0e-15,
+    );
+    // `has_wf(lb) = .false.` → `qq_wf(lb) = qq(lb-1)`。
+    assert_eq!(
+        state.wetting_front_flux_mm_s[0],
+        state.interface_flux_mm_s[0]
+    );
+
+    // Case 2，BC_FIX_HEAD，无水位：dz_this = (100-0-0)*(100-50)/100 = 50。
+    let expected_bottom_flux_mm_s =
+        flux_inside_variable_saturated_soil(VariableSaturatedHomogeneousFluxInput {
+            saturated_potential_mm: -100.0,
+            saturated_hydraulic_conductivity_mm_s: 0.01,
+            hydraulic_model: model,
+            distance_mm: 50.0,
+            upper_pressure_head_mm: -50.0,
+            lower_pressure_head_mm: -200.0,
+            upper_hydraulic_conductivity_mm_s: 0.004,
+            lower_hydraulic_conductivity_mm_s: soil_hydraulic_conductivity(
+                -200.0, -100.0, 0.01, model,
+            ),
+        })
+        .unwrap();
+    close(
+        state.interface_flux_mm_s[1],
+        expected_bottom_flux_mm_s,
+        1.0e-15,
+    );
+    // `has_wt(ub) = .false.` → `qq_wt(ub) = qq(ub)`。
+    assert_eq!(state.water_table_flux_mm_s[0], state.interface_flux_mm_s[1]);
+}
+
+/// Case 1 的 `BC_RAINFALL` 且无积水：`qq(lb-1) = min(ubc_val, qtest)`，
+/// 其中 `qtest` 是无湿润锋、以 `psi_s` 为下端压力头的层内通量。
+#[test]
+fn flux_all_clamps_the_rainfall_surface_flux_to_the_infiltrating_capacity() {
+    let fixture = flux_all_fixture(1);
+    let mut state = flux_all_state(1);
+    let model = fixture.hydraulic_model[0];
+    let rainfall_flux_mm_s = 1.0;
+    let input = flux_all_input(
+        &fixture,
+        VariableSaturatedBoundary {
+            kind: VariableSaturatedBoundaryKind::Rainfall,
+            value: rainfall_flux_mm_s,
+        },
+        fixed_head(-200.0),
+    );
+    flux_variable_saturated_flux_all(input, &mut state).unwrap();
+
+    let capacity_mm_s =
+        flux_inside_variable_saturated_soil(VariableSaturatedHomogeneousFluxInput {
+            saturated_potential_mm: -100.0,
+            saturated_hydraulic_conductivity_mm_s: 0.01,
+            hydraulic_model: model,
+            distance_mm: 50.0,
+            upper_pressure_head_mm: -100.0,
+            lower_pressure_head_mm: -50.0,
+            upper_hydraulic_conductivity_mm_s: 0.01,
+            lower_hydraulic_conductivity_mm_s: 0.004,
+        })
+        .unwrap();
+    close(
+        state.interface_flux_mm_s[0],
+        rainfall_flux_mm_s.min(capacity_mm_s),
+        1.0e-15,
+    );
+    assert!(state.interface_flux_mm_s[0] < rainfall_flux_mm_s);
+}
+
+/// Case 1 有湿润锋时是一个闭式的层内梯度式，直接手算就能钉死：
+/// `qq(lb-1) = -hksat*((psi_s - dp)/wf - 1)`。
+#[test]
+fn flux_all_uses_the_closed_form_wetting_front_flux_at_the_surface() {
+    let fixture = flux_all_fixture(1);
+    let mut state = flux_all_state(1);
+    state.has_wetting_front[0] = true;
+    state.wetting_front_mm[0] = 40.0;
+    let input = flux_all_input(&fixture, fixed_head(-20.0), fixed_head(-200.0));
+    flux_variable_saturated_flux_all(input, &mut state).unwrap();
+
+    close(
+        state.interface_flux_mm_s[0],
+        -0.01 * ((-100.0 - (-20.0)) / 40.0 - 1.0),
+        1.0e-15,
+    );
+    // `has_wf(lb)` 且 `dz_this (50) >= tol_z` → `qq_wf(lb)` 用层内通量，
+    // 不再等于 `qq(lb-1)`。
+    assert_ne!(
+        state.wetting_front_flux_mm_s[0],
+        state.interface_flux_mm_s[0]
+    );
+}
+
+/// `lev_update` 全是假时整支跳过：一个字段都不许动。
+#[test]
+fn flux_all_does_nothing_when_no_level_is_flagged_for_update() {
+    let mut fixture = flux_all_fixture(2);
+    fixture.level_update = vec![false; 4];
+    let mut state = flux_all_state(2);
+    let before = state.clone();
+    let input = flux_all_input(&fixture, fixed_head(0.0), fixed_head(-300.0));
+    flux_variable_saturated_flux_all(input, &mut state).unwrap();
+    assert_eq!(state, before);
+}
+
+/// 三层、两头都非饱和、中间饱和且没有湿润锋 → `has_sat_zone = .false.`，
+/// 走"层内非饱和界面"那一支，四象限里 `dz_upp`/`dz_low` 都够厚的第一支。
+#[test]
+fn flux_all_takes_the_unsaturated_interface_branch_inside_the_column() {
+    let fixture = flux_all_fixture(3);
+    let mut state = flux_all_state(3);
+    state.saturated = vec![false, true, false];
+    let input = flux_all_input(&fixture, fixed_head(0.0), fixed_head(-300.0));
+    flux_variable_saturated_flux_all(input, &mut state).unwrap();
+
+    // 第一段是 Case 1（第 0 层），第二段 `ilev_u = 0`、`ilev_l = 2`：
+    // 中间层饱和但两端都没有水位/湿润锋 → 非饱和界面分支，
+    // `qq_wt(0)` 与 `qq_wf(2)` 被同一次 `flux_at_unsaturated_interface` 写掉。
+    let expected = flux_at_variable_saturated_interface(VariableSaturatedInterfaceFluxInput {
+        upper_saturated_potential_mm: -100.0,
+        upper_saturated_hydraulic_conductivity_mm_s: 0.01,
+        upper_hydraulic_model: fixture.hydraulic_model[0],
+        upper_distance_mm: 50.0,
+        upper_pressure_head_mm: -50.0,
+        upper_hydraulic_conductivity_mm_s: 0.004,
+        lower_saturated_potential_mm: -100.0,
+        lower_saturated_hydraulic_conductivity_mm_s: 0.01,
+        lower_hydraulic_model: fixture.hydraulic_model[2],
+        // `dz_low = (dz(2) - wt(2)) * (sp_zc(2) - sp_zi(0)) / dz(2)`；
+        // 注意下端用的是 `sp_zi(ilev_u)`（跨过中间那个饱和层），不是 `sp_zi(1)`。
+        lower_distance_mm: 150.0,
+        lower_pressure_head_mm: -50.0,
+        lower_hydraulic_conductivity_mm_s: 0.004,
+        flux_tolerance_mm_s: 1.0e-9,
+        pressure_tolerance_mm: 1.0e-9,
+    })
+    .unwrap();
+    close(
+        state.water_table_flux_mm_s[0],
+        expected.upper_flux_mm_s,
+        1.0e-15,
+    );
+    close(
+        state.wetting_front_flux_mm_s[2],
+        expected.lower_flux_mm_s,
+        1.0e-15,
+    );
+}
+
 fn close(actual: f64, expected: f64, tolerance: f64) {
     assert!(
         (actual - expected).abs() < tolerance,

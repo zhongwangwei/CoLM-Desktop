@@ -2730,6 +2730,586 @@ fn validate_interface_flux(input: VariableSaturatedInterfaceFluxInput) -> Result
     Ok(())
 }
 
+/// Inputs to `MOD_Hydro_SoilWater:flux_all`.
+///
+/// 与 [`VariableSaturatedSaturatedZoneAllInput`] 同一套窗口约定（下标 0 即 `lb`），
+/// 多一个 `level_update`：Fortran 的 `lev_update(lb-1:ub+1)`，长度 `layers + 2`，
+/// `level_update[i + 1]` 对应 `lev_update(i)`。
+#[derive(Debug, Clone, Copy)]
+pub struct VariableSaturatedFluxAllInput<'a> {
+    pub thickness_mm: &'a [f64],
+    pub center_depth_mm: &'a [f64],
+    /// `sp_zi(lb-1:ub)`。
+    pub interface_depth_mm: &'a [f64],
+    pub saturated_liquid_water: &'a [f64],
+    pub saturated_potential_mm: &'a [f64],
+    pub saturated_hydraulic_conductivity_mm_s: &'a [f64],
+    pub hydraulic_model: &'a [SoilHydraulicModel],
+    pub upper_boundary: VariableSaturatedBoundary,
+    pub lower_boundary: VariableSaturatedBoundary,
+    /// `lev_update(lb-1:ub+1)`。
+    pub level_update: &'a [bool],
+    pub update_sublevel: bool,
+    /// `zwt`：地下水位埋深 [mm]。上游把它声明成 `intent(inout)`，但这一版只读它。
+    pub water_table_depth_mm: f64,
+    /// `dp`/`wdsrf`：地表积水深度 [mm]。同样只读。
+    pub surface_water_mm: f64,
+    pub unsaturated_pressure_head_mm: &'a [f64],
+    pub unsaturated_hydraulic_conductivity_mm_s: &'a [f64],
+    pub flux_tolerance_mm_s: f64,
+    pub depth_tolerance_mm: f64,
+    pub pressure_tolerance_mm: f64,
+}
+
+/// `find_unsat_lev_lower`：从 `start` 起找第一个**非**饱和层；都饱和就返回 `ub + 1`。
+///
+/// 返回 `isize` 是因为调用方拿它当"层下标或层数"用（`ilev_l == ub+1` 表示
+/// "到底了"），而 `ub + 1 == layers` 本身不是合法层号。
+fn find_unsaturated_level_lower(saturated: &[bool], start: isize) -> isize {
+    let layers = saturated.len() as isize;
+    let mut level = start;
+    while level < layers {
+        if saturated[level as usize] {
+            level += 1;
+        } else {
+            break;
+        }
+    }
+    level
+}
+
+/// Port of `MOD_Hydro_SoilWater:flux_all`.
+///
+/// 按 `lev_update` 把整个 `lb..=ub` 窗口切成若干段：上边界段（`ilev_l == lb`）、
+/// 下边界段（`ilev_u == ub`）、以及中间的段。中间段再分「含饱和区」与
+/// 「不含饱和区」两支，前者转给 [`flux_variable_saturated_zone_all`]，
+/// 后者按上下两个非饱和层的等效厚度是否小于 `tol_z` 走四条子分支。
+///
+/// 与 [`flux_variable_saturated_zone_all`] 一样，这里只有分派与钳位，没有新公式。
+pub fn flux_variable_saturated_flux_all(
+    input: VariableSaturatedFluxAllInput<'_>,
+    state: &mut VariableSaturatedSaturatedZoneAllState,
+) -> Result<()> {
+    let layers = validate_flux_all(input, state)?;
+    let ub = layers as isize - 1;
+    let tolerance_flux_mm_s = input.flux_tolerance_mm_s;
+    let tolerance_depth_mm = input.depth_tolerance_mm;
+
+    let homogeneous = |level: usize,
+                       distance_mm: f64,
+                       upper_pressure_head_mm: f64,
+                       lower_pressure_head_mm: f64,
+                       upper_conductivity_mm_s: f64,
+                       lower_conductivity_mm_s: f64|
+     -> Result<f64> {
+        flux_inside_variable_saturated_soil(VariableSaturatedHomogeneousFluxInput {
+            saturated_potential_mm: input.saturated_potential_mm[level],
+            saturated_hydraulic_conductivity_mm_s: input.saturated_hydraulic_conductivity_mm_s
+                [level],
+            hydraulic_model: input.hydraulic_model[level],
+            distance_mm,
+            upper_pressure_head_mm,
+            lower_pressure_head_mm,
+            upper_hydraulic_conductivity_mm_s: upper_conductivity_mm_s,
+            lower_hydraulic_conductivity_mm_s: lower_conductivity_mm_s,
+        })
+    };
+    let conductivity_from_pressure = |pressure_head_mm: f64, level: usize| {
+        soil_hydraulic_conductivity(
+            pressure_head_mm,
+            input.saturated_potential_mm[level],
+            input.saturated_hydraulic_conductivity_mm_s[level],
+            input.hydraulic_model[level],
+        )
+    };
+    let upper_kind = input.upper_boundary.kind;
+    let upper_value = input.upper_boundary.value;
+    let lower_kind = input.lower_boundary.kind;
+    let lower_value = input.lower_boundary.value;
+
+    let mut level_upper: isize = -1;
+    let mut level_lower = find_unsaturated_level_lower(&state.saturated, 0);
+    loop {
+        let touches_updated_level = input.level_update[(level_upper + 1) as usize]
+            || input.level_update[(level_lower + 1) as usize];
+
+        if touches_updated_level {
+            if level_lower == 0 {
+                // Case 1：地表入流。只有第 0 层非饱和，`level_upper == lb - 1`。
+                let level = 0usize;
+                let unsaturated_thickness_mm = (input.thickness_mm[level]
+                    - state.water_table_thickness_mm[level]
+                    - state.wetting_front_mm[level])
+                    * (input.center_depth_mm[level] - input.interface_depth_mm[0])
+                    / input.thickness_mm[level];
+
+                let surface_flux_mm_s = match upper_kind {
+                    VariableSaturatedBoundaryKind::FixedHead => {
+                        if state.has_wetting_front[level] {
+                            -input.saturated_hydraulic_conductivity_mm_s[level]
+                                * ((input.saturated_potential_mm[level] - upper_value)
+                                    / state.wetting_front_mm[level]
+                                    - 1.0)
+                        } else {
+                            let top_conductivity_mm_s =
+                                conductivity_from_pressure(upper_value, level);
+                            homogeneous(
+                                level,
+                                unsaturated_thickness_mm,
+                                upper_value,
+                                input.unsaturated_pressure_head_mm[level],
+                                top_conductivity_mm_s,
+                                input.unsaturated_hydraulic_conductivity_mm_s[level],
+                            )?
+                        }
+                    }
+                    VariableSaturatedBoundaryKind::Rainfall => {
+                        if state.has_wetting_front[level]
+                            && state.wetting_front_mm[level] >= tolerance_depth_mm
+                        {
+                            -input.saturated_hydraulic_conductivity_mm_s[level]
+                                * ((input.saturated_potential_mm[level] - input.surface_water_mm)
+                                    / state.wetting_front_mm[level]
+                                    - 1.0)
+                        } else if input.surface_water_mm > tolerance_depth_mm {
+                            homogeneous(
+                                level,
+                                unsaturated_thickness_mm,
+                                input.surface_water_mm,
+                                input.unsaturated_pressure_head_mm[level],
+                                input.saturated_hydraulic_conductivity_mm_s[level],
+                                input.unsaturated_hydraulic_conductivity_mm_s[level],
+                            )?
+                        } else {
+                            let test_flux_mm_s = homogeneous(
+                                level,
+                                unsaturated_thickness_mm,
+                                input.saturated_potential_mm[level],
+                                input.unsaturated_pressure_head_mm[level],
+                                input.saturated_hydraulic_conductivity_mm_s[level],
+                                input.unsaturated_hydraulic_conductivity_mm_s[level],
+                            )?;
+                            let flux_mm_s = upper_value.min(test_flux_mm_s);
+                            if input.update_sublevel && flux_mm_s > test_flux_mm_s {
+                                state.has_wetting_front[level] = true;
+                                state.wetting_front_mm[level] = 0.0;
+                            }
+                            flux_mm_s
+                        }
+                    }
+                    VariableSaturatedBoundaryKind::FixedFlux => {
+                        if input.update_sublevel
+                            && !state.has_wetting_front[level]
+                            && upper_value > input.saturated_hydraulic_conductivity_mm_s[level]
+                        {
+                            let test_flux_mm_s = homogeneous(
+                                level,
+                                unsaturated_thickness_mm,
+                                input.saturated_potential_mm[level],
+                                input.unsaturated_pressure_head_mm[level],
+                                input.saturated_hydraulic_conductivity_mm_s[level],
+                                input.unsaturated_hydraulic_conductivity_mm_s[level],
+                            )?;
+                            if upper_value > test_flux_mm_s {
+                                state.has_wetting_front[level] = true;
+                                state.wetting_front_mm[level] = 0.0;
+                            }
+                        }
+                        upper_value
+                    }
+                    VariableSaturatedBoundaryKind::Drainage => bail!(
+                        "flux_all cannot take a drainage upper boundary; the source only \
+                         places BC_DRAINAGE at the bottom of the column"
+                    ),
+                };
+                state.interface_flux_mm_s[0] = surface_flux_mm_s;
+
+                state.wetting_front_flux_mm_s[level] = if state.has_wetting_front[level]
+                    && unsaturated_thickness_mm >= tolerance_depth_mm
+                {
+                    homogeneous(
+                        level,
+                        unsaturated_thickness_mm,
+                        input.saturated_potential_mm[level],
+                        input.unsaturated_pressure_head_mm[level],
+                        input.saturated_hydraulic_conductivity_mm_s[level],
+                        input.unsaturated_hydraulic_conductivity_mm_s[level],
+                    )?
+                } else if state.has_wetting_front[level] {
+                    // 注意上游这一支取的是 `qq(lb)`（下一层界面），不是 `qq(lb-1)`。
+                    state.interface_flux_mm_s[1]
+                } else {
+                    state.interface_flux_mm_s[0]
+                };
+            } else if level_upper == ub {
+                // Case 2：底部出流。只有最下一层非饱和，`level_lower == ub + 1`。
+                let level = ub as usize;
+                let unsaturated_thickness_mm = (input.thickness_mm[level]
+                    - state.wetting_front_mm[level]
+                    - state.water_table_thickness_mm[level])
+                    * (input.interface_depth_mm[level + 1] - input.center_depth_mm[level])
+                    / input.thickness_mm[level];
+
+                let bottom_flux_mm_s = match lower_kind {
+                    VariableSaturatedBoundaryKind::FixedHead => {
+                        if state.has_water_table[level] {
+                            -input.saturated_hydraulic_conductivity_mm_s[level]
+                                * ((lower_value - input.saturated_potential_mm[level])
+                                    / state.water_table_thickness_mm[level]
+                                    - 1.0)
+                        } else {
+                            let bottom_conductivity_mm_s =
+                                conductivity_from_pressure(lower_value, level);
+                            homogeneous(
+                                level,
+                                unsaturated_thickness_mm,
+                                input.unsaturated_pressure_head_mm[level],
+                                lower_value,
+                                input.unsaturated_hydraulic_conductivity_mm_s[level],
+                                bottom_conductivity_mm_s,
+                            )?
+                        }
+                    }
+                    VariableSaturatedBoundaryKind::Drainage => {
+                        let below_water_table =
+                            input.water_table_depth_mm > input.interface_depth_mm[level + 1];
+                        if state.has_water_table[level] {
+                            if below_water_table {
+                                input.saturated_hydraulic_conductivity_mm_s[level]
+                            } else {
+                                0.0
+                            }
+                        } else if below_water_table {
+                            let bottom_pressure_head_mm = input.saturated_potential_mm[level]
+                                + input.interface_depth_mm[level + 1]
+                                - input.water_table_depth_mm;
+                            let bottom_conductivity_mm_s =
+                                conductivity_from_pressure(bottom_pressure_head_mm, level);
+                            homogeneous(
+                                level,
+                                unsaturated_thickness_mm,
+                                input.unsaturated_pressure_head_mm[level],
+                                bottom_pressure_head_mm,
+                                input.unsaturated_hydraulic_conductivity_mm_s[level],
+                                bottom_conductivity_mm_s,
+                            )?
+                        } else {
+                            let flux_mm_s = homogeneous(
+                                level,
+                                unsaturated_thickness_mm,
+                                input.unsaturated_pressure_head_mm[level],
+                                input.saturated_potential_mm[level],
+                                input.unsaturated_hydraulic_conductivity_mm_s[level],
+                                input.saturated_hydraulic_conductivity_mm_s[level],
+                            )?;
+                            if input.update_sublevel && flux_mm_s > 0.0 {
+                                state.has_water_table[level] = true;
+                                state.water_table_thickness_mm[level] = 0.0;
+                                0.0
+                            } else {
+                                flux_mm_s
+                            }
+                        }
+                    }
+                    VariableSaturatedBoundaryKind::FixedFlux => {
+                        if input.update_sublevel
+                            && !state.has_water_table[level]
+                            && lower_value < input.saturated_hydraulic_conductivity_mm_s[level]
+                        {
+                            let test_flux_mm_s = homogeneous(
+                                level,
+                                unsaturated_thickness_mm,
+                                input.unsaturated_pressure_head_mm[level],
+                                input.saturated_potential_mm[level],
+                                input.unsaturated_hydraulic_conductivity_mm_s[level],
+                                input.saturated_hydraulic_conductivity_mm_s[level],
+                            )?;
+                            if test_flux_mm_s > lower_value {
+                                state.has_water_table[level] = true;
+                                state.water_table_thickness_mm[level] = 0.0;
+                            }
+                        }
+                        lower_value
+                    }
+                    VariableSaturatedBoundaryKind::Rainfall => bail!(
+                        "flux_all cannot take a rainfall lower boundary; the source only \
+                         places BC_RAINFALL at the top of the column"
+                    ),
+                };
+                state.interface_flux_mm_s[level + 1] = bottom_flux_mm_s;
+
+                state.water_table_flux_mm_s[level] = if state.has_water_table[level]
+                    && unsaturated_thickness_mm >= tolerance_depth_mm
+                {
+                    homogeneous(
+                        level,
+                        unsaturated_thickness_mm,
+                        input.unsaturated_pressure_head_mm[level],
+                        input.saturated_potential_mm[level],
+                        input.unsaturated_hydraulic_conductivity_mm_s[level],
+                        input.saturated_hydraulic_conductivity_mm_s[level],
+                    )?
+                } else if state.has_water_table[level] {
+                    // 上游这一支取 `qq(ub-1)`（上一层界面）。
+                    state.interface_flux_mm_s[level]
+                } else {
+                    state.interface_flux_mm_s[level + 1]
+                };
+            } else {
+                // Case 3：柱内。先判这一段里到底有没有饱和区。
+                let upper = level_upper as usize;
+                let lower = level_lower as usize;
+                let has_saturated_zone = if level_upper == -1 || level_lower == ub + 1 {
+                    true
+                } else if state.has_wetting_front[lower] {
+                    !(level_lower == level_upper + 1
+                        && state.wetting_front_mm[lower] < tolerance_depth_mm
+                        && state.water_table_thickness_mm[upper] < tolerance_depth_mm)
+                } else {
+                    false
+                };
+
+                if has_saturated_zone {
+                    let first = level_upper.max(0) as usize;
+                    let last = level_lower.min(ub) as usize;
+                    flux_variable_saturated_zone_all(
+                        VariableSaturatedSaturatedZoneAllInput {
+                            first_saturated_level: first,
+                            last_saturated_level: last,
+                            thickness_mm: input.thickness_mm,
+                            center_depth_mm: input.center_depth_mm,
+                            interface_depth_mm: input.interface_depth_mm,
+                            saturated_liquid_water: input.saturated_liquid_water,
+                            saturated_potential_mm: input.saturated_potential_mm,
+                            saturated_hydraulic_conductivity_mm_s: input
+                                .saturated_hydraulic_conductivity_mm_s,
+                            hydraulic_model: input.hydraulic_model,
+                            upper_boundary: input.upper_boundary,
+                            lower_boundary: input.lower_boundary,
+                            surface_water_mm: input.surface_water_mm,
+                            water_table_depth_mm: input.water_table_depth_mm,
+                            unsaturated_pressure_head_mm: input.unsaturated_pressure_head_mm,
+                            unsaturated_hydraulic_conductivity_mm_s: input
+                                .unsaturated_hydraulic_conductivity_mm_s,
+                            flux_tolerance_mm_s: input.flux_tolerance_mm_s,
+                            depth_tolerance_mm: input.depth_tolerance_mm,
+                            pressure_tolerance_mm: input.pressure_tolerance_mm,
+                            update_sublevel: input.update_sublevel,
+                        },
+                        state,
+                    )?;
+                } else {
+                    // Case 3(2)：这一段里全是非饱和层。
+                    let upper_thickness_mm = (input.thickness_mm[upper]
+                        - state.wetting_front_mm[upper])
+                        * (input.interface_depth_mm[upper + 1] - input.center_depth_mm[upper])
+                        / input.thickness_mm[upper];
+                    let lower_thickness_mm = (input.thickness_mm[lower]
+                        - state.water_table_thickness_mm[lower])
+                        * (input.center_depth_mm[lower] - input.interface_depth_mm[upper + 1])
+                        / input.thickness_mm[lower];
+                    let upper_has_depth = upper_thickness_mm >= tolerance_depth_mm;
+                    let lower_has_depth = lower_thickness_mm >= tolerance_depth_mm;
+
+                    if upper_has_depth && lower_has_depth {
+                        let flux = flux_at_variable_saturated_interface(
+                            VariableSaturatedInterfaceFluxInput {
+                                upper_saturated_potential_mm: input.saturated_potential_mm[upper],
+                                upper_saturated_hydraulic_conductivity_mm_s: input
+                                    .saturated_hydraulic_conductivity_mm_s[upper],
+                                upper_hydraulic_model: input.hydraulic_model[upper],
+                                upper_distance_mm: upper_thickness_mm,
+                                upper_pressure_head_mm: input.unsaturated_pressure_head_mm[upper],
+                                upper_hydraulic_conductivity_mm_s: input
+                                    .unsaturated_hydraulic_conductivity_mm_s[upper],
+                                lower_saturated_potential_mm: input.saturated_potential_mm[lower],
+                                lower_saturated_hydraulic_conductivity_mm_s: input
+                                    .saturated_hydraulic_conductivity_mm_s[lower],
+                                lower_hydraulic_model: input.hydraulic_model[lower],
+                                lower_distance_mm: lower_thickness_mm,
+                                lower_pressure_head_mm: input.unsaturated_pressure_head_mm[lower],
+                                lower_hydraulic_conductivity_mm_s: input
+                                    .unsaturated_hydraulic_conductivity_mm_s[lower],
+                                flux_tolerance_mm_s: input.flux_tolerance_mm_s,
+                                pressure_tolerance_mm: input.pressure_tolerance_mm,
+                            },
+                        )?;
+                        state.water_table_flux_mm_s[upper] = flux.upper_flux_mm_s;
+                        state.wetting_front_flux_mm_s[lower] = flux.lower_flux_mm_s;
+
+                        if (flux.upper_flux_mm_s - flux.lower_flux_mm_s).abs() < tolerance_flux_mm_s
+                        {
+                            let mean_flux_mm_s =
+                                (flux.upper_flux_mm_s + flux.lower_flux_mm_s) * 0.5;
+                            state.interface_flux_mm_s[upper + 1] = mean_flux_mm_s;
+                            state.water_table_flux_mm_s[upper] = mean_flux_mm_s;
+                            state.wetting_front_flux_mm_s[lower] = mean_flux_mm_s;
+                            if input.update_sublevel {
+                                state.has_water_table[upper] = false;
+                                state.has_wetting_front[lower] = false;
+                            }
+                        } else if flux.upper_flux_mm_s > flux.lower_flux_mm_s {
+                            if input.update_sublevel {
+                                state.has_water_table[upper] = true;
+                                state.water_table_thickness_mm[upper] = 0.0;
+                                state.has_wetting_front[lower] = true;
+                                state.wetting_front_mm[lower] = 0.0;
+                            }
+                            state.interface_flux_mm_s[upper + 1] =
+                                if state.has_water_table[upper] && state.has_wetting_front[lower] {
+                                    if input.saturated_potential_mm[upper]
+                                        >= input.saturated_potential_mm[lower]
+                                    {
+                                        state.water_table_flux_mm_s[upper]
+                                    } else {
+                                        state.wetting_front_flux_mm_s[lower]
+                                    }
+                                } else {
+                                    (state.water_table_flux_mm_s[upper]
+                                        + state.wetting_front_flux_mm_s[lower])
+                                        * 0.5
+                                };
+                        }
+                    } else if upper_has_depth && !lower_has_depth {
+                        let interface_pressure_head_mm = input.saturated_potential_mm[upper]
+                            .min(input.saturated_potential_mm[lower]);
+                        let interface_conductivity_mm_s =
+                            conductivity_from_pressure(interface_pressure_head_mm, upper);
+                        let flux_mm_s = homogeneous(
+                            upper,
+                            upper_thickness_mm,
+                            input.unsaturated_pressure_head_mm[upper],
+                            interface_pressure_head_mm,
+                            input.unsaturated_hydraulic_conductivity_mm_s[upper],
+                            interface_conductivity_mm_s,
+                        )?;
+                        state.interface_flux_mm_s[upper + 1] = flux_mm_s;
+                        state.water_table_flux_mm_s[upper] = flux_mm_s;
+                        state.wetting_front_flux_mm_s[lower] = flux_mm_s;
+                        state.water_table_flux_mm_s[lower] = flux_mm_s;
+                    } else if !upper_has_depth && lower_has_depth {
+                        let interface_pressure_head_mm = input.saturated_potential_mm[upper]
+                            .min(input.saturated_potential_mm[lower]);
+                        let interface_conductivity_mm_s =
+                            conductivity_from_pressure(interface_pressure_head_mm, lower);
+                        let flux_mm_s = homogeneous(
+                            lower,
+                            lower_thickness_mm,
+                            interface_pressure_head_mm,
+                            input.unsaturated_pressure_head_mm[lower],
+                            interface_conductivity_mm_s,
+                            input.unsaturated_hydraulic_conductivity_mm_s[lower],
+                        )?;
+                        state.interface_flux_mm_s[upper + 1] = flux_mm_s;
+                        state.wetting_front_flux_mm_s[upper] = flux_mm_s;
+                        state.water_table_flux_mm_s[upper] = flux_mm_s;
+                        state.wetting_front_flux_mm_s[lower] = flux_mm_s;
+                    } else {
+                        // 上游注释：This CASE does not exist in principle.
+                        // 浮点上仍然可达，所以照抄 `min(hksat_u, hksat_l)`。
+                        let flux_mm_s = input.saturated_hydraulic_conductivity_mm_s[upper]
+                            .min(input.saturated_hydraulic_conductivity_mm_s[lower]);
+                        state.interface_flux_mm_s[upper + 1] = flux_mm_s;
+                        state.wetting_front_flux_mm_s[upper] = flux_mm_s;
+                        state.water_table_flux_mm_s[upper] = flux_mm_s;
+                        state.wetting_front_flux_mm_s[lower] = flux_mm_s;
+                        state.water_table_flux_mm_s[lower] = flux_mm_s;
+                    }
+                }
+            }
+        }
+
+        if level_lower == ub + 1 {
+            break;
+        }
+        level_upper = level_lower;
+        level_lower = find_unsaturated_level_lower(&state.saturated, level_upper + 1);
+    }
+    Ok(())
+}
+
+/// 校验 [`flux_variable_saturated_flux_all`] 的窗口、状态与 `lev_update` 长度。
+///
+/// `level_update` 是 Fortran 的 `lev_update(lb-1:ub+1)`，所以长度是 `layers + 2`。
+fn validate_flux_all(
+    input: VariableSaturatedFluxAllInput<'_>,
+    state: &VariableSaturatedSaturatedZoneAllState,
+) -> Result<usize> {
+    let layers = input.thickness_mm.len();
+    ensure!(
+        layers > 0
+            && input.center_depth_mm.len() == layers
+            && input.interface_depth_mm.len() == layers + 1
+            && input.saturated_liquid_water.len() == layers
+            && input.saturated_potential_mm.len() == layers
+            && input.saturated_hydraulic_conductivity_mm_s.len() == layers
+            && input.hydraulic_model.len() == layers
+            && input.level_update.len() == layers + 2
+            && input.unsaturated_pressure_head_mm.len() == layers
+            && input.unsaturated_hydraulic_conductivity_mm_s.len() == layers
+            && state.saturated.len() == layers
+            && state.has_wetting_front.len() == layers
+            && state.has_water_table.len() == layers
+            && state.wetting_front_mm.len() == layers
+            && state.liquid_water.len() == layers
+            && state.water_table_thickness_mm.len() == layers
+            && state.interface_flux_mm_s.len() == layers + 1
+            && state.water_table_flux_mm_s.len() == layers
+            && state.wetting_front_flux_mm_s.len() == layers,
+        "VSF flux dispatch inputs are invalid"
+    );
+    ensure!(
+        input
+            .thickness_mm
+            .iter()
+            .all(|value| value.is_finite() && *value > 0.0)
+            && input
+                .saturated_potential_mm
+                .iter()
+                .all(|value| value.is_finite())
+            && input
+                .saturated_hydraulic_conductivity_mm_s
+                .iter()
+                .all(|value| value.is_finite() && *value > 0.0)
+            && input
+                .unsaturated_hydraulic_conductivity_mm_s
+                .iter()
+                .all(|value| value.is_finite() && *value >= 0.0)
+            && input
+                .unsaturated_pressure_head_mm
+                .iter()
+                .all(|value| value.is_finite())
+            && input
+                .interface_depth_mm
+                .iter()
+                .chain(input.center_depth_mm.iter())
+                .all(|value| value.is_finite())
+            && state
+                .wetting_front_mm
+                .iter()
+                .chain(&state.water_table_thickness_mm)
+                .chain(&state.interface_flux_mm_s)
+                .chain(&state.water_table_flux_mm_s)
+                .chain(&state.wetting_front_flux_mm_s)
+                .all(|value| value.is_finite())
+            && [
+                input.upper_boundary.value,
+                input.lower_boundary.value,
+                input.surface_water_mm,
+                input.water_table_depth_mm,
+                input.flux_tolerance_mm_s,
+                input.depth_tolerance_mm,
+                input.pressure_tolerance_mm,
+            ]
+            .iter()
+            .all(|value| value.is_finite())
+            && input.flux_tolerance_mm_s >= 0.0
+            && input.depth_tolerance_mm >= 0.0,
+        "VSF flux dispatch values are not physical"
+    );
+    Ok(layers)
+}
+
 /// 校验 [`flux_variable_saturated_zone_all`] 的窗口与状态长度。
 ///
 /// 长度约定写在一处：`interface_depth_mm` 与 `interface_flux_mm_s` 比层数多 1
