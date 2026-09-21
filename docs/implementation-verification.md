@@ -5158,3 +5158,41 @@ thv = th*(1.+0.61*forc_q)                            !virtual potential T
 `thm` 这个名字看起来就是 "potential temperature" 的缩写，而定义不是。
 上一节的 `htvpl` 也一样（`main/` 的式子与实际编译的 `extends/` 不同）。
 **照着源码里的表达式抄，不要按名字或按 `main/` 推断。**
+
+## 修完三处之后的残差排序，与下一个目标（2026 年，实测）
+
+`thm` 修完后把残差按相对误差排序（`CN-Cng-aligned`，264 条）：
+
+| 变量 | 越界条数 | 最大相对差 | 上游 vs 本仓库（该记录） |
+|---|---|---|---|
+| `f_gssun` | 67/264 | **7.4e-1** | 5.3227e-4 vs 2.0097e-3 |
+| `f_rss` | 261/264 | 4.8e-1 | 1.4665e-2 vs 2.8449e-2 |
+| `f_fgrnd` | 264/264 | 4.3e-1 | −1.48946 vs −0.847464 |
+| `f_gssha` | 39/264 | 3.7e-1 | 8.9499e-3 vs 1.4235e-2 |
+| `f_fsena` | 264/264 | 2.8e-1 | −0.491287 vs −0.678618 |
+| `f_fevpl` | 5/264 | 1.8e-1 | −9.9027e-7 vs −1.2083e-6 |
+| `f_rnet` | 264/264 | 1.6e-1 | 0.129447 vs 0.109236 |
+| `f_lfevpa` | 264/264 | 7.6e-2 | 15.846 vs 14.6369 |
+| `f_fevpg` | 29/264 | 6.7e-2 | 9.2945e-6 vs 8.6681e-6 |
+
+要点：
+
+- **`f_rss` 的 261/264 不等于"处处差 48%"**：tier2 的 atol 是 1e-7，而 `rss` 的量级
+  是 1e-2，所以"有一点差"就记越界；最大那条仍是早已归因的记录 0（首小时瞬变，
+  分子是两个 ~0.3 的量相减出的 5e-7）。
+- **绝对量最大的是叶面通量**（`f_lfevpa` 1.57、`f_fsenl` 0.55、`f_fsena` 0.19 W/m²），
+  它们同源：`f_lfevpa` 现在归到 `f_fevpg`，而 `f_fevpg`/`f_qinfl`/`f_fevpa` 是同一
+  条 6.7% 的地面蒸发链。
+- **`f_gssun`/`f_gssha` 是最大的相对差，也是最像一个独立缺陷的一条。**
+  两边的公式看着等价：上游 `MOD_LeafTemperature_Extended.F90:1308`
+  `gssun = (laisun/rssun)*(tprcor/tlbef)`（注释明确写着 `rssun` 此时是
+  **leaf-scale**），本仓库 `laisun/last.leaf_sunlit_resistance*pressure_conversion/
+  previous_leaf_temperature`，其中 `leaf_sunlit_resistance = stomatal_resistance*laisun`
+  —— 若 `stomatal_resistance` 是 leaf-scale，则两者逐字相同（`f_etr` 到 1e-8
+  也要求这个比例关系成立）。
+
+  **所以嫌疑不在公式，在 `rssun` 的口径或 `lai > 0.001` 那个守卫**：
+  上游有 `IF (lai > 0.001) THEN ... ELSE gssun = 0`，而本仓库没有对应的分叉；
+  另外 67/264 这个越界比例很像**夜间/晨昏**（`laisun` 很小，相对差自然被放大）。
+  下一步该做的是拿 264 条的 `f_gssun` 与 `f_laisun` 对照，看差值是否只在
+  `laisun` 小的那些记录上出现 —— 这与前面三次一样，"打出来"比"读出来"快。
