@@ -1410,14 +1410,6 @@ fn update_canopy_water(
         }
         return Ok(0.0);
     }
-    let lsai = input.leaf_area_index + input.stem_area_index;
-    let mut wet_snow_fraction = if state.canopy_water.snow_mm > 0.0 {
-        ((10.0 / (48.0 * lsai)) * state.canopy_water.snow_mm)
-            .powf(0.666_666_666_666)
-            .min(1.0)
-    } else {
-        0.0
-    };
     if state.leaf_temperature_k > FREEZING_K {
         let evaporation = wet_evaporation_kg_m2_s.max(0.0);
         let dew = (-wet_evaporation_kg_m2_s).max(0.0);
@@ -1443,6 +1435,24 @@ fn update_canopy_water(
             (state.canopy_water.rain_mm - evaporation * input.time_step_seconds).max(0.0);
         state.canopy_water.snow_mm += (frost - sublimation) * input.time_step_seconds;
     }
+    // `fwet_snow`（湿雪覆盖率）必须在**截留/凝结更新之后、相变之前**取值，
+    // 不是在这段更新之前。上游 `MOD_LeafTemperature_Extended.F90:1532` 就是在
+    // `LEAF_interception` 已经把 `ldew_snow` 写完之后才调
+    // `canopy_snow_wetfrac(sigf, lai, sai, dewmx, tl, ldew_snow)`；紧跟着的相变块
+    // （`:1551`/`:1564` 的 Niu(2004) 拉回）用的正是这一个值，此后没有任何一处
+    // 重算。放在更新之前读到的是**上一步**的 `snow_mm`：实测 CN-Cng 第一步
+    // （`tl`=265.88 K < 冰点，走凝华分支）黄金 `fwet_snow`=0.06138738，而这里算成
+    // 0 —— 刚凝华进 `snow_mm` 的那 0.047 mm 完全没进覆盖率。它不是诊断量：
+    // `MOD_Albedo` 的 `scat`/`beta0` 直接吃它，所以 `f_alb` → `f_sr*`/`f_sab*`
+    // → `f_rnet` 那一族的差就是从这一步开始的。
+    let lsai = input.leaf_area_index + input.stem_area_index;
+    let mut wet_snow_fraction = if state.canopy_water.snow_mm > 0.0 {
+        ((10.0 / (48.0 * lsai)) * state.canopy_water.snow_mm)
+            .powf(0.666_666_666_666)
+            .min(1.0)
+    } else {
+        0.0
+    };
     if state.canopy_water.snow_mm > 1.0e-6 && state.leaf_temperature_k > FREEZING_K {
         let melt = (state.canopy_water.snow_mm / input.time_step_seconds).min(
             (state.leaf_temperature_k - FREEZING_K)
