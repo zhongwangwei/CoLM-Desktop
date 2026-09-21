@@ -5933,17 +5933,31 @@ history / 重启侧要一起改的四件事：`f_qlayer` **必须注册并填充
 | `flux_sat_zone_all`（521 行分派） | **已移植**（`20ecc00`），6 条单测 |
 | `flux_all`（344 行分派） | **已移植**（`96fea09`），6 条单测 |
 | `find_unsat_lev_lower` | **已移植**（`find_unsaturated_level_lower`，private） |
-| `Richards_solver` 驱动体 | 未动 —— 待读 `:900-1089`（扰动块的其余部分） |
-| `soil_water_vertical_movement` | 未动 —— 唯一的新物理 |
-| `variably_saturated_flow_step` 编排 | 未动 |
+| `Richards_solver` 驱动体（454 行） | **已移植**（`3ff5880`），3 条单测 |
+| `soil_water_vertical_movement`（329 行） | **已移植**（`c7b1894`），4 条单测 |
+| `variably_saturated_flow_step` 编排 | 未动 —— 只剩这一层 |
 | 运行时/history/重启接线 | 未动 |
 
-两个分派器**故意先落盘**：它们不含公式、只做参数接线，而接错参数是这类移植最
-常见的错法，所以每条分支都用"用同一批内核函数按手写的实参重算"的单测钉住。
-移植时撞出两处**对称但不同**的上游写法，都已按原样保留并在测试里注明：
-`flux_all` 的水面/湿润锋退化支一个取 `qq(lb)`、另一个取 `qq(ub-1)`；
-柱内非饱和界面的下端距离用的是 `sp_zi(ilev_u)`（跨过中间的饱和层），
-不是 `sp_zi(ilev_l-1)` —— 后者是"看起来显然"的那个答案，测试用它跑就是错的。
+**`soil_water_vertical_movement` 自带验收判据**：它算整柱质量平衡误差 `wblc`，
+超过 `tolerance` 就打警告。单测因此直接断言 `|wblc| <= 1e-3`（上游传进来的那个数），
+而不是只查结构不变量 —— `qlayer`、亏缺级联或含水层交换接错一处，这个数立刻爆掉。
+
+移植时撞出的两个坑，都写进注释与单测：
+
+1. **`findloc_ud` 返回的是"数组下标"**，而 `sp_zi` 声明成 `sp_zi(0:nlev)`，
+   于是它返回的是"界面号 + 1"，正好可以当 1-based 的**层号**用。
+   看起来像 off-by-one，其实是刻意的 —— 别"修"它。
+2. **`DO ilev = izwt+1, nlev` 在 `izwt == nlev + 1` 时是空循环**，
+   所以最自然的 Rust 改写 `copy_from_slice(&thickness[izwt..nlev])` 会在
+   "水位在柱底之下"这个常见情形上 panic。clippy 恰好建议了这个改写，
+   被单测当场抓住；正确写法是 `zip().skip()`。
 
 两个分派器落地后**黄金结果一位没变**（`CN-Cng-aligned` tier2 = 48、
 `CN-Cng-phs` tier2 = 49），因为它们还没有调用方。
+
+剩下要做的两步：`variably_saturated_flow_step`（把 `WATER_VSF` 的雪层段、
+`prms` 填充、白名单拒绝、runoff、`smp`/`hk` 冰阻抗、`rnof` 这些外围拼到
+`soil_water_vertical_movement` 上），以及运行时/history/重启接线
+（`f_qlayer` 注册并填充、`f_qcharge` 停止声明、`rsur_se`/`rsur_ie` 实填、
+`frcsat` 实填、`unported_branches` 去掉 VSF）。接完之后验收目标换成
+`oracle/golden/CN-Cng_hist_2008-01.nc`（VSF + PHS 都开，127 个变量）。
