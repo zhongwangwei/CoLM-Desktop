@@ -5334,3 +5334,55 @@ IF(det .lt. dtmin .and. dee .lt. dlemin) EXIT     ! :1277
 但余量不厚）。要做的是给这些量登记叶温地板并**同时**要求
 "迭代计数与回退次数必须一起比"（tier2 描述里已经要求了，`golden-compare` 目前还
 没做这条）。这是下一轮该做的**工具改进**，不是数值修复。
+
+## 把 `main/` 与 `extends/` 的**全部**数值差异机械地列出来（2026 年，实测）
+
+`htvpl`、`thm`、`lfevpa` 三次根因都来自同一件事：本仓库的 Rust 是照着 `main/` 写的，
+而实际编译的是 `extends/interception/` 里的四个文件。既然这一类能一次贡献三个大修，
+就把这一类的**全集**求出来，而不是等它下次再咬人。
+
+做法：把两份文件的**赋值语句**抽出来（先拼续行、去注释、去空白、`_r8` 归一），
+按左端变量名分组，只报"两边都有但算式不同"的那些。
+
+结果（`main/MOD_Thermal.F90` vs `extends/.../MOD_Thermal_CanopyPhase_Extended.F90`：
+2 处；`main/MOD_LeafTemperature.F90` vs `.../MOD_LeafTemperature_Extended.F90`：
+19 处；`main/MOD_LeafInterception.F90` vs `.../MOD_LeafInterception_Extended.F90`：4 处），
+逐条核对本仓库的状态：
+
+| 差异 | 上游 `ext` 的写法 | 本仓库 | 影响 |
+|---|---|---|---|
+| `lfevpa` | `lfevpl + htvp*fevpg`（`lfevpl = htvpl*fevpl`） | 已按 `ext` 改 | **已修**（第 64 轮，3.14 W/m²） |
+| `dele`/`dtl`/`err`/`fsenl` 的 `htvpl` | `htvpl` 而非 `hvap` | 已按 `ext` 改 | **已修**（第 64 轮，13%） |
+| `dtl` 分子/分母、`hprl` 的 `max(0,qintr_*)` | 四处都夹 | **缺**，而且 `validate` 要求非负 | **本轮修** |
+| `errore` 的 `+canopy_phase_heat` | 有 | 无（缺省 scheme 下为 0） | 记录，scheme 4~7 才非零 |
+| `dtl` 的 `+canopy_phase_heat` | 有 | 无（同上为 0） | 记录 |
+| `etr`/`etrsun`/`etrsha`/`etr_dtl` | `dry_factor` 而非 `(1-fwet)` | `evaporation_sign` 等价形式 | 缺省 scheme 下 `dry_factor = 1-fwet`，**等价** |
+| `evplwet`/`evplwet_dtl` | `evp_weight*wet_cond` 而非 `(1-delta*(1-fwet))*(lai+sai)/rb` | 前者 | 缺省 scheme 下 `evp_weight = 1-delta*(1-fwet)`、`wet_cond=(lai+sai)/rb`，**等价** |
+| `cfw` | `wet_cond_cfw` 而非 `(lai+sai)/rb` | 后者 | 缺省 scheme 下 `wet_cond_cfw = (lai+sai)/rb`，**等价** |
+| `elwmax` | `ldew_vic_evap/deltim` | `canopy_water.total_mm/deltim` | 缺省 scheme 下 `ldew_VIC_evap = ldew`，**等价** |
+| `fwet_rain`/`fwet_snow` | `satcap_*_eff` / `canopy_snow_wetfrac(...)` | 未走这条 | `DEF_VEG_SNOW` 分支（本算例关） |
+| `ldew_rain`/`ldew_snow` 的 `max(0,·)` | 有 | — | `DEF_VEG_SNOW` 分支 |
+| `qevpl`/`qsubl` 的相态拆分 | 有 | 有（`phase_change` 一侧） | `DEF_VEG_SNOW` 分支 |
+| `xsc_rain`/`xsc_snow` | 活动分支与 `main` **逐字相同** | 同 | 报告里那些 `(ldew-satcap)*ldew_rain/ldew` 来自**别的** scheme 例程 |
+
+### 本轮改的那一条：`max(0, qintr_*)`
+
+净截留率 `qintr_rain = (prc_rain+prl_rain+qflx_irrig) - thru_rain/deltim`，
+而 `thru_rain = tti_rain + tex_rain` **含冠层排水** `tex_rain` —— 所以
+`qintr_rain = rain*fpi - tex_rain/deltim`，排水超过截留量时它是**负的**。
+`extends` 在四处取 `max(0, ·)`（增量式的分子与分母、循环后 `fsenl` 的修正、`hprl`），
+注释写着"negative net flux does not spuriously inject t_precip-tl energy"。
+
+本仓库不仅没夹，还在 `validate` 里**要求它非负** —— 那会让任何排水步直接报错，
+而不是按上游夹掉。现在：`LeafTemperatureInput` 上仍带**原始**净通量（与上游 `qintr_*`
+同义），在叶温例程内与上游同位置夹，`validate` 只留有限性检查。
+
+新测试 `a_negative_net_interception_rate_is_clamped_not_rejected` 直接喂
+`qintr_rain = -5e-6`、`qintr_snow = -1e-6`：以前返回 `Err`，现在成功且
+`precipitation_heat_w_m2 == 0`（不夹会得到约 +0.23 W/m²）。
+
+`CN-Cng-aligned` 的黄金结果**不变**（该窗口无降水，`qintr ≡ 0`，夹与不夹同值）——
+这一条是**潜在缺陷**的修复，不是当前残差的来源。
+
+**教训沉淀为一条规矩**：`main/` 里的同名声明的模块**从不参与编译**。改任何物理量
+之前，先确认它的算式来自 `Makefile:635-647` 指定的那个 `extends/` 文件。

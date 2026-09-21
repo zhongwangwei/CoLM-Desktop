@@ -111,6 +111,29 @@ fn the_reference_height_temperature_is_not_the_potential_temperature() {
     );
 }
 
+/// 净截留率为负时**夹掉**，不是报错。
+///
+/// `qintr_rain = (prc_rain+prl_rain+qflx_irrig) - thru_rain/deltim`，而
+/// `thru_rain` 含冠层排水 `tex_rain` —— 排水超过截留量时它就是负的。上游
+/// `MOD_LeafTemperature_Extended.F90:1174-1177` 在增量式的**分子与分母**、
+/// `:1335` 在循环后的 `fsenl` 修正、`hprl` 一律取 `max(0, ·)`，注释写着
+/// "negative net flux does not spuriously inject t_precip-tl energy"。
+///
+/// 本仓库原先在 `validate` 里要求它非负，那会让**任何排水步直接报错**。
+#[test]
+fn a_negative_net_interception_rate_is_clamped_not_rejected() {
+    let mut input = sample_input();
+    input.intercepted_rain_kg_m2_s = -5.0e-6;
+    input.intercepted_snow_kg_m2_s = -1.0e-6;
+    input.precipitation_temperature_k = 250.0;
+    let mut state = sample_state();
+    let output = leaf_temperature(input, &mut state).expect("a draining canopy is a valid state");
+    // 两项都被夹成 0，所以 `hprl` 恰好是 0（不夹会得到
+    // `4188*(-5e-6)*(250-260) + 2117*(-1e-6)*(250-260) ≈ +0.23 W/m2`）。
+    assert_eq!(output.precipitation_heat_w_m2, 0.0);
+    assert!(state.leaf_temperature_k.is_finite());
+}
+
 #[test]
 fn leaf_temperature_rejects_missing_leaf_area() {
     let mut input = sample_input();

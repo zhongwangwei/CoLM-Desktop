@@ -362,6 +362,20 @@ pub fn leaf_temperature(
     let mut iteration = 1;
     let mut last = Iteration::default();
 
+    // 上游对**净**截留率取 `max(0, ·)`：`MOD_LeafTemperature_Extended.F90:1174-1177`
+    // 的分子与分母、循环后 `fsenl` 的修正项、以及 `hprl`（`:1335` 的
+    // "VIC-qintr: clamp qintr_* to max(0,·) — must match dtl denom"）。
+    //
+    // **净截留率确实可以为负**：`qintr_rain = (prc_rain+prl_rain+qflx_irrig)
+    // - thru_rain/deltim`，而 `thru_rain` 里含冠层排水 `tex_rain`，排水超过截留时
+    // 它就是负的。负值不能反向"注入" `t_precip - tl` 的能量，所以要夹。
+    //
+    // 本仓库把**原始**净通量放在 `LeafTemperatureInput` 上（与上游 `qintr_*` 同义），
+    // 夹在这里做 —— 与上游同位置。以前 `validate` 直接要求它非负，那会在任何
+    // 排水步上**报错**，而正确行为是按上游夹掉。
+    let intercepted_rain = input.intercepted_rain_kg_m2_s.max(0.0);
+    let intercepted_snow = input.intercepted_snow_kg_m2_s.max(0.0);
+
     while iteration <= MAX_ITERATIONS {
         previous_leaf_temperature = state.leaf_temperature_k;
         // `htvpl`：**叶面**的潜热随叶温在汽化与升华之间切换
@@ -699,8 +713,8 @@ pub fn leaf_temperature(
         let denominator = clai / input.time_step_seconds - net_longwave_temperature_slope
             + leaf_sensible_temperature_slope
             + leaf_latent_heat_j_kg * leaf_evaporation_temperature_slope
-            + WATER_HEAT_CAPACITY_J_KG_K * input.intercepted_rain_kg_m2_s
-            + ICE_HEAT_CAPACITY_J_KG_K * input.intercepted_snow_kg_m2_s;
+            + WATER_HEAT_CAPACITY_J_KG_K * intercepted_rain
+            + ICE_HEAT_CAPACITY_J_KG_K * intercepted_snow;
         ensure!(
             denominator.is_finite() && denominator != 0.0,
             "leaf energy denominator is invalid"
@@ -709,10 +723,10 @@ pub fn leaf_temperature(
             - leaf_sensible_heat
             - leaf_latent_heat_j_kg * leaf_evaporation
             + WATER_HEAT_CAPACITY_J_KG_K
-                * input.intercepted_rain_kg_m2_s
+                * intercepted_rain
                 * (input.precipitation_temperature_k - state.leaf_temperature_k)
             + ICE_HEAT_CAPACITY_J_KG_K
-                * input.intercepted_snow_kg_m2_s
+                * intercepted_snow
                 * (input.precipitation_temperature_k - state.leaf_temperature_k))
             / denominator;
         let unbounded_temperature_change = dtl[iteration];
@@ -859,8 +873,8 @@ pub fn leaf_temperature(
             * (clai / input.time_step_seconds - last.net_longwave_temperature_slope
                 + last.leaf_sensible_temperature_slope
                 + leaf_latent_heat_j_kg * last.leaf_evaporation_temperature_slope
-                + WATER_HEAT_CAPACITY_J_KG_K * input.intercepted_rain_kg_m2_s
-                + ICE_HEAT_CAPACITY_J_KG_K * input.intercepted_snow_kg_m2_s)
+                + WATER_HEAT_CAPACITY_J_KG_K * intercepted_rain
+                + ICE_HEAT_CAPACITY_J_KG_K * intercepted_snow)
         + leaf_latent_heat_j_kg * last.evaporation_imbalance;
     let mut transpiration =
         last.transpiration + last.transpiration_temperature_slope * final_temperature_change;
@@ -951,10 +965,10 @@ pub fn leaf_temperature(
         1.0 - input.canopy_longwave_gap_fraction,
     );
     let precipitation_heat = WATER_HEAT_CAPACITY_J_KG_K
-        * input.intercepted_rain_kg_m2_s
+        * intercepted_rain
         * (input.precipitation_temperature_k - state.leaf_temperature_k)
         + ICE_HEAT_CAPACITY_J_KG_K
-            * input.intercepted_snow_kg_m2_s
+            * intercepted_snow
             * (input.precipitation_temperature_k - state.leaf_temperature_k);
     let canopy_heat_storage = clai / input.time_step_seconds * final_temperature_change;
     let energy_balance_error = input.canopy_absorbed_solar_w_m2
@@ -1578,13 +1592,15 @@ fn validate(input: LeafTemperatureInput<'_>, state: LeafTemperatureState) -> Res
         "ground_emissivity in 0..=1",
         (0.0..=1.0).contains(&input.ground_emissivity),
     );
+    // 净截留率**允许为负**（冠层排水超过截留量），内核按上游取 `max(0, ·)`；
+    // 这里只要求有限，不再要求非负 —— 要求非负会让任何排水步直接报错。
     check(
-        "intercepted_rain_kg_m2_s >= 0",
-        input.intercepted_rain_kg_m2_s >= 0.0,
+        "intercepted_rain_kg_m2_s is finite",
+        input.intercepted_rain_kg_m2_s.is_finite(),
     );
     check(
-        "intercepted_snow_kg_m2_s >= 0",
-        input.intercepted_snow_kg_m2_s >= 0.0,
+        "intercepted_snow_kg_m2_s is finite",
+        input.intercepted_snow_kg_m2_s.is_finite(),
     );
     check(
         "ground_latent_heat_j_kg > 0",
