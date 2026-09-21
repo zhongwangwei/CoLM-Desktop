@@ -429,7 +429,11 @@ fn transpiration_from_conductance(
     } else {
         1.0 / (input.ground_to_canopy_moisture_resistance_s_m + input.soil_surface_resistance_s_m)
     };
-    let leaf = (1.0 - delta * (1.0 - input.wet_canopy_fraction))
+    // `1. - delta*(1.-fwet)`：乘积被吸收成 `FNMA(1-fwet, delta, 1.0)`
+    // （`-fdump-tree-all` 实测；`1. - delta*(1.-fwet)` 不是 `1. - delta` 那种单乘加，
+    // 但 gfortran 照样把 `delta*(1-fwet)` 收进减法里）。两处（`cfw` 与 `cwet`）同型。
+    let dry_fraction = (-(1.0 - input.wet_canopy_fraction)).mul_add(delta, 1.0);
+    let leaf = dry_fraction
         * (input.sunlit_leaf_area_index + input.shaded_leaf_area_index + input.stem_area_index)
         * boundary_conductance_umol_m2_s
         / conversion
@@ -449,9 +453,16 @@ fn transpiration_from_conductance(
     let inverse_total = 1.0 / (air + ground + leaf);
     let air_weight = air * inverse_total;
     let ground_weight = ground * inverse_total;
-    let driving_humidity = (air_weight + ground_weight) * input.leaf_saturation_specific_humidity
-        - air_weight * input.reference_specific_humidity
-        - ground_weight * input.ground_specific_humidity;
+    // `cqi = (wtaq0 + wtgq0)*qsatl - wtaq0*qm - wtgq0*qg`（`:685`）：
+    // 与叶温内核里 `humidity_gradient` 同一个三级减法链，实测收缩成
+    // `fma(-wtgq0, qg, fma(wtaq0+wtgq0, qsatl, -(wtaq0*qm)))`（4000/4000）。
+    let driving_humidity = (-ground_weight).mul_add(
+        input.ground_specific_humidity,
+        (air_weight + ground_weight).mul_add(
+            input.leaf_saturation_specific_humidity,
+            -(air_weight * input.reference_specific_humidity),
+        ),
+    );
     let sunlit = input.air_density_kg_m3
         * (1.0 - input.wet_canopy_fraction)
         * delta
@@ -508,20 +519,31 @@ fn conductance_from_transpiration(
     } else {
         1.0 / (input.ground_to_canopy_moisture_resistance_s_m + input.soil_surface_resistance_s_m)
     };
-    let wet = (1.0 - delta * (1.0 - input.wet_canopy_fraction))
+    let dry_fraction = (-(1.0 - input.wet_canopy_fraction)).mul_add(delta, 1.0);
+    let wet = dry_fraction
         * (input.sunlit_leaf_area_index + input.shaded_leaf_area_index + input.stem_area_index)
         * boundary_conductance_umol_m2_s
         / conversion;
-    let leaf = air * (input.leaf_saturation_specific_humidity - input.reference_specific_humidity)
-        + ground * (input.leaf_saturation_specific_humidity - input.ground_specific_humidity);
+    // `cqi_leaf = caw*(qsatl-qm) + cgw*(qsatl-qg)`：乘积 + 乘积，收左边（GIMPLE 实测）。
+    let leaf = air.mul_add(
+        input.leaf_saturation_specific_humidity - input.reference_specific_humidity,
+        ground * (input.leaf_saturation_specific_humidity - input.ground_specific_humidity),
+    );
     let a1 = leaf - sunlit_transpiration_kg_m2_s / input.air_density_kg_m3;
     let b1 = -sunlit_transpiration_kg_m2_s / input.air_density_kg_m3;
     let c1 = sunlit_transpiration_kg_m2_s * (air + ground + wet) / input.air_density_kg_m3;
     let a2 = -shaded_transpiration_kg_m2_s / input.air_density_kg_m3;
     let b2 = leaf - shaded_transpiration_kg_m2_s / input.air_density_kg_m3;
     let c2 = shaded_transpiration_kg_m2_s * (air + ground + wet) / input.air_density_kg_m3;
-    let sunlit_leaf_conductance = (b1 * c2 - b2 * c1) / (b1 * a2 - b2 * a1);
-    let shaded_leaf_conductance = (a1 * c2 - a2 * c1) / (a1 * b2 - b1 * a2);
+    // 四个 `乘积 - 乘积`：gfortran 各收**一个**乘积，而且收哪个取决于公共子表达式 ——
+    // `B2*A1`（即 `A1*B2`，乘法可交换、值相同）被 `csun` 的分母先算出来并被
+    // `csha` 的分母复用，于是两个分母一个收左、一个收右（GIMPLE 实测）：
+    //   `csun = FMS(b1,c2, b2*c1) / FMS(b1,a2, b2*a1)`
+    //   `csha = FMS(c2,a1, c1*a2) / FNMA(b1,a2, b2*a1)`
+    // 所以这里必须把 `b2*a1` 抽出来复用，不能各写一遍"看起来更对称"的式子。
+    let b2_a1 = b2 * a1;
+    let sunlit_leaf_conductance = b1.mul_add(c2, -(b2 * c1)) / b1.mul_add(a2, -b2_a1);
+    let shaded_leaf_conductance = c2.mul_add(a1, -(c1 * a2)) / (-b1).mul_add(a2, b2_a1);
     if sunlit_transpiration_kg_m2_s > 0.0 {
         sunlit_stomatal_conductance_umol_m2_s = 1.0
             / ((1.0 - input.wet_canopy_fraction) * delta * input.sunlit_leaf_area_index
