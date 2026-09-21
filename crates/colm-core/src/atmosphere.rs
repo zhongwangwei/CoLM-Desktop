@@ -149,7 +149,7 @@ pub fn saturation_specific_humidity(
                     f77(0.001_268_017_03),
                     f77(0.000_024_946_842_7),
                     f77(0.000_000_313_703_411),
-                    f77(0.000_000_025_718_065_1),
+                    f77(0.000_000_002_571_806_51),
                     f77(0.000_000_000_013_326_887_8),
                     f77(0.000_000_000_000_039_411_674_4),
                     f77(0.000_000_000_000_000_049_807_019_6),
@@ -165,13 +165,18 @@ pub fn saturation_specific_humidity(
     );
     let inverse_pressure = 1.0 / (pressure_pa - f77(0.378) * vapor_pressure_pa);
     let humidity_factor = f77(0.622) * inverse_pressure;
+    // `qsdT = esdT * vp2 * p`，其中上游先算 `vp2 = vp1*vp` 再乘 `esdT`
+    // （`MOD_Qsadv.F90:98-104`）。本仓库原先写成 `esdT*vp1*vp*p`，结合顺序不同，
+    // 逐位实测 3045 组 (T,p) 里差 2076 组。这不是无所谓的 1 ULP：`qsdT` 是
+    // 隐式求解里对温度的导数，进 `MOD_SurfaceLayer`/`MOD_SoilSnowHydrology` 的
+    // 迭代系数。
+    let humidity_factor_squared = humidity_factor * inverse_pressure;
     Ok(SaturationState {
         vapor_pressure_pa,
         vapor_pressure_temperature_slope_pa_k,
         specific_humidity: vapor_pressure_pa * humidity_factor,
         specific_humidity_temperature_slope_k: vapor_pressure_temperature_slope_pa_k
-            * humidity_factor
-            * inverse_pressure
+            * humidity_factor_squared
             * pressure_pa,
     })
 }
@@ -439,11 +444,20 @@ fn orbital_declination(calendar_day: f64) -> f64 {
     fortran_asin(fortran_sin(0.409214646) * fortran_sin(lambda))
 }
 
+/// `a0 + td*(a1 + td*(a2 + ...))` 的 Horner 求值。
+///
+/// **必须用 `mul_add`：gfortran 把每一层都收缩成 FMA。** 内核用 `-O2` 编译，
+/// GCC 的 `-ffp-contract=fast` 是默认，`c + x*inner` 正是最容易被收缩的形状；
+/// Rust 不自动收缩。逐位量过：`qsadv` 的系数表在 3045 组 (T,p) 上，
+/// 纯乘加写法差 **1796** 组（59%），写成 `fma(x, inner, c)` 后 **0** 组。
+///
+/// 这条链很长：`qs`/`es` 进 `MOD_Qsadv` 的所有调用方（地面蒸发、叶面饱和比湿、
+/// `metpreprocess` 的比湿夹取……），所以它不只是 `f_xy_q` 那一个 tier0 变量的事。
 fn polynomial(x: f64, coefficients: [f64; 9]) -> f64 {
     coefficients
         .into_iter()
         .rev()
-        .fold(0.0, |value, coefficient| coefficient + x * value)
+        .fold(0.0, |value, coefficient| x.mul_add(value, coefficient))
 }
 
 fn vapor_pressure_and_slope(temperature_c: f64) -> Result<(f64, f64)> {
