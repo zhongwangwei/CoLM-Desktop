@@ -1359,6 +1359,13 @@ ENDIF
          ENDIF
 
       evplwet = evplwet + evplwet_dtl*dtl(it-1)
+
+      ! DEBUG (temporary): one line per step for the single-point case.
+      OPEN (unit=96, file='/tmp/colm_evpl_dump.txt', position='append', status='unknown')
+      WRITE (96, '(14(e24.17,1x))') tl, rhoair, rb, wet_cond, evp_weight, delta, fwet, &
+            wtaq0, wtgq0, qsatl, qm, qg, ldew_VIC_evap, evplwet
+      CLOSE (96)
+
       fevpl   = fevpl_noadj
       fevpl   = fevpl   +   fevpl_dtl*dtl(it-1)
 

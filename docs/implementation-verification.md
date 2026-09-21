@@ -4923,3 +4923,75 @@ f_ldew（冠层水，+2.4%）→ max(0, ldew-satcap) 放大 → pg_snow → f_sc
   → f_scv                      +13~35%，并被**积分**
   → f_fsno → f_sigf → f_alb → f_sr* / f_sab*
 ```
+
+## 叶面潜热要按叶温选 `hvap`/`hsub`，而 `lfevpa` 用的是 `htvpl`（2026 年，实测）
+
+上一节把链条指到"湿冠层蒸发/凝结"。这一节修掉的是它上游的一个**真正的移植分叉**：
+叶温求解里的潜热。
+
+### `main/` 与 `extends/` 又一次：`MOD_Thermal` 也被顶掉了
+
+`Makefile:635-647` 用 `extends/interception/MOD_Thermal_CanopyPhase_Extended.F90`
+顶掉了 `main/MOD_Thermal.F90`。两份的 `lfevpa` **不是同一个式子**：
+
+| 文件 | `lfevpa` |
+|---|---|
+| `main/MOD_Thermal.F90:1333` | `hvap*fevpl + htvp*fevpg` |
+| `extends/interception/MOD_Thermal_CanopyPhase_Extended.F90:1343` | **`lfevpl + htvp*fevpg`** |
+
+而 `lfevpl` 由叶温模块导出：`MOD_LeafTemperature_Extended.F90:1584`
+**`lfevpl = htvpl*fevpl`**，其中 `htvpl = hvap if tl > tfrz else hsub`
+（`:693-697`，每轮准 Newton 迭代开头按**当前** `tl` 重算）。
+
+本仓库此前对叶面那一项硬写 `hvap`，于是差 `(hsub-hvap)*fevpl = 3.336e5*fevpl`。
+
+### 指纹：`f_zerr` 恰好差 `(hsub-hvap)*fevpl`
+
+改叶温求解、**不改** history 的 `lfevpa` 之后，`f_zerr` 从 ~1e-10 跳到 −5.81，
+而它逐条等于 `3.336e5 * f_zerr` 的 `fevpl`：
+
+| 记录 | `fevpl` | `f_zerr` | 比值 |
+|---|---|---|---|
+| 0 | −1.741e-05 | −5.809 | 3.336e5 |
+| 1 | −6.178e-06 | −2.061 | 3.336e5 |
+| 2 | −1.129e-06 | −0.377 | 3.336e5 |
+| 6 | +4.295e-07 | +0.143 | 3.336e5 |
+
+**这就是 `hsub - hvap = hfus = 0.3336e6`。** 残差的指纹把根因按到了小数点后三位，
+比读源码快得多 —— 冠层能量收支是按 `htvpl` 闭合的（Newton 的分子就是
+`- htvpl*fevpl`），而残差里的人为地用了 `hvap`。
+
+### 修法与实测
+
+叶温模块里 `htvpl` 被用在**七处**：增量式的分子与分母、`dele` 收敛判据、
+循环后 `fsenl` 的两项修正（`(dtl_noadj-dtl)` 那一项里的 `htvpl*fevpl_dtl`、以及
+`htvpl*erre`）、`elwdif` 的显热补偿、以及 `err` 能量残差。现在这七处都用
+本仓库按 `previous_leaf_temperature` 选出的 `leaf_latent_heat_j_kg`，并作为
+`LeafTemperatureOutput::leaf_latent_heat_j_kg` 带出来给 history 用
+（`surface_budget` 的 `latent_heat` 因此不再需要 `vaporization_heat_j_kg` 入参，已删）。
+
+注意循环后那三处用的是**最后一轮迭代**的 `htvpl`，而那一轮是按 `tlbef` 取的 ——
+上游的 `htvpl` 正是在 `tl = tlbef + dtl(it)` **之前**算的。拿最终叶温重算会晚半个
+增量，在 `tfrz` 附近翻错相。
+
+实测（`CN-Cng-aligned`，264 条）：
+
+| 变量 | 改前 | 改后 | 倍数 |
+|---|---|---|---|
+| `f_lfevpa` | 3.144 | **2.012** | 1.6× |
+| `f_scv` | 6.968e-3 | **1.830e-3** | 3.8× |
+| `f_fsno` | 3.106e-3 | **6.604e-4** | 4.7× |
+| `f_alb` | 1.034e-3 | **4.200e-4** | 2.5× |
+| `f_tleaf` | 0.1269 | **0.1084** | 1.2× |
+| `f_ldew` | 6.308e-3 | **5.082e-3** | 1.2× |
+| `f_sr` | 0.0206 | **0.0081** | 2.5× |
+| `f_t_grnd` | 7.49e-2 | **6.57e-2** | 1.1× |
+
+**`f_lfevpa` 那条"上游自身不闭合"的旧记录是错的** —— 它一直是这个分叉，
+3.14 W/m² 正好是 `(hsub-hvap)*fevpl` 在该窗口的量级。分层残差条数不变
+（`{tier0: 2, tier1: 19, tier2: 51}`，容差比残差严得多），但每一条的余量都小了。
+
+`leaf_latent_heat_j_kg` 的选取由
+`leaf_temperature_tests.rs::the_leaf_latent_heat_follows_the_leaf_temperature`
+钉住：同一夹具分别喂暖/冷大气，断言叶温跨过冰点时这一项从 `hvap` 换成 `hsub`，
+并顺带核对 `hsub - hvap = hfus`。

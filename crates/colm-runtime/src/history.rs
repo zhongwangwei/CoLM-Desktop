@@ -714,10 +714,9 @@ pub fn set_lct_surface_budget(
     sink: &mut impl HistorySink,
     record: usize,
     output: &StandardLctSoilOutput,
-    vaporization_heat_j_kg: f64,
     soil_layers: usize,
 ) -> Result<()> {
-    let budget = surface_budget(output, vaporization_heat_j_kg, soil_layers)?;
+    let budget = surface_budget(output, soil_layers)?;
     let energy = &output.energy;
     for (name, value) in [
         ("sabvsun", energy.shortwave.sunlit_absorbed_w_m2),
@@ -762,11 +761,7 @@ struct SurfaceBudget {
     net_radiation_w_m2: f64,
 }
 
-fn surface_budget(
-    output: &StandardLctSoilOutput,
-    vaporization_heat_j_kg: f64,
-    soil_layers: usize,
-) -> Result<SurfaceBudget> {
+fn surface_budget(output: &StandardLctSoilOutput, soil_layers: usize) -> Result<SurfaceBudget> {
     let energy = &output.energy;
     let ground = &energy.ground;
     // 打包列里第一个**土层**的下标：列长减去土层数。**不能**写 0 —— 带雪时
@@ -800,6 +795,9 @@ fn surface_budget(
     // 随步输出带出来；这里照抄，不再自己判一次。写成无条件的 `hvap + hfus`
     // 会把所有液态地表的地面蒸发按升华计价 —— 实测冬季窗口 `f_lfevpa` 差 34 W/m²。
     let sublimation_heat = energy.leaf.ground_latent_heat_j_kg;
+    // 叶面那一项同样是**内核自己判定**的 `htvpl`（`lfevpl = htvpl*fevpl`），
+    // 不是 `hvap`。见 [`colm_core::LeafTemperatureOutput::leaf_latent_heat_j_kg`]。
+    let leaf_latent_heat = energy.leaf.leaf_latent_heat_j_kg;
     let leaf_evaporation = energy.leaf.leaf_evaporation_kg_m2_s;
     // **必须取订正后的地面蒸发**，与 `set_lct_energy_fluxes` 写进 `f_fevpg` 的那一列同源。
     // `leaf.ground_evaporation_kg_m2_s` 是叶温求解**之前**的初步值，两者在 CN-Cng
@@ -808,8 +806,7 @@ fn surface_budget(
     // 自相矛盾 —— 实测 Rust 的 `f_lfevpa` 峰值 615 W/m² 而 `hvap*(f_fevpl+f_fevpg)`
     // 只有 187 W/m²；改用订正后立刻落到 196 W/m²（Fortran 184.65）。
     let ground_evaporation = energy.corrected_ground_evaporation_kg_m2_s;
-    let latent_heat =
-        vaporization_heat_j_kg * leaf_evaporation + sublimation_heat * ground_evaporation;
+    let latent_heat = leaf_latent_heat * leaf_evaporation + sublimation_heat * ground_evaporation;
 
     let precipitation_temperature_k = energy.precipitation.precipitation_temperature_k;
     let precipitation_heat = WATER_HEAT_CAPACITY_J_KG_K
@@ -881,10 +878,9 @@ pub fn set_lct_balance_errors(
     output: &StandardLctSoilOutput,
     end_water_storage_mm: f64,
     reference: HistoryReferenceState,
-    vaporization_heat_j_kg: f64,
     soil_layers: usize,
 ) -> Result<()> {
-    let budget = surface_budget(output, vaporization_heat_j_kg, soil_layers)?;
+    let budget = surface_budget(output, soil_layers)?;
     let energy = &output.energy;
     let ground = &energy.ground;
     ensure!(
@@ -1457,13 +1453,7 @@ impl HistorySession {
             set_lct_state(accumulator, 0, template, state, ground)?;
             set_lct_fluxes(accumulator, 0, &output.water)?;
             set_lct_energy_fluxes(accumulator, 0, output)?;
-            set_lct_surface_budget(
-                accumulator,
-                0,
-                output,
-                template.physics.vaporization_heat_j_kg,
-                template.soil_layers(),
-            )?;
+            set_lct_surface_budget(accumulator, 0, output, template.soil_layers())?;
             set_lct_surface_diagnostics(
                 accumulator,
                 0,
@@ -1506,7 +1496,6 @@ impl HistorySession {
                     0.0,
                 ),
                 reference,
-                template.physics.vaporization_heat_j_kg,
                 template.soil_layers(),
             )
         })
@@ -1530,13 +1519,7 @@ impl HistorySession {
                 water: output.water.soil.clone(),
             };
             set_lct_energy_fluxes(accumulator, 0, &as_soil)?;
-            set_lct_surface_budget(
-                accumulator,
-                0,
-                &as_soil,
-                template.physics.vaporization_heat_j_kg,
-                template.soil_layers(),
-            )?;
+            set_lct_surface_budget(accumulator, 0, &as_soil, template.soil_layers())?;
             // 这一句原先漏了：十三个地表诊断量在 `declare_lct_variables` 里声明了，
             // 却从来没有被填过，写出来的 `f_taux`/`f_tauy`/`f_z0m`/`f_zol` … 一直是
             // NetCDF 的填充值。实测 CN-Cng 的积雪分支 history 里这三个是 NaN，
@@ -1583,7 +1566,6 @@ impl HistorySession {
                     state.snow.water_equivalent_kg_m2,
                 ),
                 reference,
-                template.physics.vaporization_heat_j_kg,
                 template.soil_layers(),
             )
         })

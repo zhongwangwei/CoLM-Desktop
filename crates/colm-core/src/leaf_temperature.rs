@@ -20,6 +20,11 @@ use crate::{
 const VON_KARMAN: f64 = 0.4;
 const GRAVITY_M_S2: f64 = 9.80616;
 const LATENT_HEAT_VAPORIZATION_J_KG: f64 = 2.5104e6;
+/// `MOD_Const_Physical.F90:18` 的 `hsub`，叶温求解里的 `htvpl` 用它。
+///
+/// 上游把它声明成**独立常数**（数值上恰好等于 `hvap + hfus`），这里照抄数值而不是
+/// 相加 —— `hfus` 一改就会让相加版悄悄跟着变，而独立常数不会。
+const LATENT_HEAT_SUBLIMATION_J_KG: f64 = 2.8440e6;
 const AIR_HEAT_CAPACITY_J_KG_K: f64 = 1004.64;
 const WATER_HEAT_CAPACITY_J_KG_K: f64 = 4188.0;
 const ICE_HEAT_CAPACITY_J_KG_K: f64 = 2117.27;
@@ -184,6 +189,18 @@ pub struct LeafTemperatureOutput {
     /// 随输入原样带出来，好让 history 的 `lfevpa`/`fgrnd` 与物理用的是**同一个**
     /// `htvp` —— 自己再判一次表层冰水比就会有两份判据。
     pub ground_latent_heat_j_kg: f64,
+    /// 本步冠层蒸发/凝华用的潜热，即上游的 **`lfevpl / fevpl`**（`htvpl`）。
+    ///
+    /// 上游在 `MOD_LeafTemperature_Extended.F90:1584` 导出 `lfevpl = htvpl*fevpl`，
+    /// 而编译进来的 `extends/interception/MOD_Thermal_CanopyPhase_Extended.F90:1343`
+    /// 写的是 **`lfevpa = lfevpl + htvp*fevpg`** —— 叶面那一项用的是 `htvpl`
+    /// （叶温在冰点以下时按升华计价），**不是** `hvap`。
+    ///
+    /// `main/MOD_Thermal.F90:1333` 的 `lfevpa = hvap*fevpl + htvp*fevpg` 是**旧版**，
+    /// 从不参与编译（`Makefile` 用 `extends/` 顶掉了 `MOD_Thermal*`）。照旧版写会让
+    /// `f_lfevpa` 差 `(hsub-hvap)*fevpl ≈ 3.3e5*fevpl`，实测冬季窗口最大 3.14 W/m²；
+    /// 更隐蔽的是它还会让 `f_zerr` 差出同一个量（冠层能量收支是按 `htvpl` 闭合的）。
+    pub leaf_latent_heat_j_kg: f64,
     /// `laisun = lai*fsun`、`laisha = lai*(1-fsun)`。
     ///
     /// 上游把它们当每步的 patch 量累加进 history（`MOD_Vars_1DAccFluxes.F90:2147-2148`），
@@ -327,6 +344,20 @@ pub fn leaf_temperature(
 
     while iteration <= MAX_ITERATIONS {
         previous_leaf_temperature = state.leaf_temperature_k;
+        // `htvpl`：**叶面**的潜热随叶温在汽化与升华之间切换
+        // （`MOD_LeafTemperature_Extended.F90:693-697`，每轮迭代开头按**当前** `tl` 重算）。
+        // 上游在本模块里用它而不是硬写 `hvap` 的地方有七处：增量的分子与分母、
+        // `dele` 收敛判据、循环后 `fsenl` 的三项修正、以及 `err` 那条能量残差。
+        // 写死 `hvap` 会让零下冠层的凝华按汽化计价，差 13%。
+        //
+        // **注意与 `lfevpa` 的区别**：`MOD_Thermal.F90:1333` 的
+        // `lfevpa = hvap*fevpl + htvp*fevpg` 对叶面那一项用的是 `hvap`，
+        // 不是 `htvpl` —— 上游自己就不一致，本仓库两边照各自的写法抄。
+        let leaf_latent_heat_j_kg = if previous_leaf_temperature > FREEZING_K {
+            LATENT_HEAT_VAPORIZATION_J_KG
+        } else {
+            LATENT_HEAT_SUBLIMATION_J_KG
+        };
         let profile = canopy_monin_obukhov_with_scheme(
             CanopyMoninObukhovInput {
                 surface: MoninObukhovInput {
@@ -647,7 +678,7 @@ pub fn leaf_temperature(
         }
         let denominator = clai / input.time_step_seconds - net_longwave_temperature_slope
             + leaf_sensible_temperature_slope
-            + LATENT_HEAT_VAPORIZATION_J_KG * leaf_evaporation_temperature_slope
+            + leaf_latent_heat_j_kg * leaf_evaporation_temperature_slope
             + WATER_HEAT_CAPACITY_J_KG_K * input.intercepted_rain_kg_m2_s
             + ICE_HEAT_CAPACITY_J_KG_K * input.intercepted_snow_kg_m2_s;
         ensure!(
@@ -656,7 +687,7 @@ pub fn leaf_temperature(
         );
         dtl[iteration] = (input.canopy_absorbed_solar_w_m2 + net_longwave
             - leaf_sensible_heat
-            - LATENT_HEAT_VAPORIZATION_J_KG * leaf_evaporation
+            - leaf_latent_heat_j_kg * leaf_evaporation
             + WATER_HEAT_CAPACITY_J_KG_K
                 * input.intercepted_rain_kg_m2_s
                 * (input.precipitation_temperature_k - state.leaf_temperature_k)
@@ -676,7 +707,7 @@ pub fn leaf_temperature(
         let flux_change = (dtl[iteration].powi(2)
             * (net_longwave_temperature_slope.powi(2)
                 + leaf_sensible_temperature_slope.powi(2)
-                + (LATENT_HEAT_VAPORIZATION_J_KG * leaf_evaporation_temperature_slope).powi(2)))
+                + (leaf_latent_heat_j_kg * leaf_evaporation_temperature_slope).powi(2)))
         .sqrt();
         let updated_saturation =
             saturation_specific_humidity(state.leaf_temperature_k, input.surface_pressure_pa)?;
@@ -792,15 +823,25 @@ pub fn leaf_temperature(
     }
 
     let final_temperature_change = dtl[iteration - 1];
+    // 循环后这三处（`fsenl` 的两项修正、`elwdif` 的显热补偿、`err` 残差）用的是
+    // **最后一轮迭代算出的 `htvpl`**，而那一轮是按 `tlbef`（= 此刻的
+    // `previous_leaf_temperature`）取值的 —— 上游的 `htvpl` 正是在更新 `tl`
+    // **之前**算的（`:693-697` 在 `tl = tlbef + dtl(it)` 之前）。别拿最终的
+    // `state.leaf_temperature_k` 重算：那会晚半个增量，在 `tfrz` 附近翻错相。
+    let leaf_latent_heat_j_kg = if previous_leaf_temperature > FREEZING_K {
+        LATENT_HEAT_VAPORIZATION_J_KG
+    } else {
+        LATENT_HEAT_SUBLIMATION_J_KG
+    };
     let leaf_sensible_heat = last.leaf_sensible_heat
         + last.leaf_sensible_temperature_slope * final_temperature_change
         + (last.unbounded_temperature_change - final_temperature_change)
             * (clai / input.time_step_seconds - last.net_longwave_temperature_slope
                 + last.leaf_sensible_temperature_slope
-                + LATENT_HEAT_VAPORIZATION_J_KG * last.leaf_evaporation_temperature_slope
+                + leaf_latent_heat_j_kg * last.leaf_evaporation_temperature_slope
                 + WATER_HEAT_CAPACITY_J_KG_K * input.intercepted_rain_kg_m2_s
                 + ICE_HEAT_CAPACITY_J_KG_K * input.intercepted_snow_kg_m2_s)
-        + LATENT_HEAT_VAPORIZATION_J_KG * last.evaporation_imbalance;
+        + leaf_latent_heat_j_kg * last.evaporation_imbalance;
     let mut transpiration =
         last.transpiration + last.transpiration_temperature_slope * final_temperature_change;
     let mut wet_evaporation =
@@ -811,8 +852,7 @@ pub fn leaf_temperature(
     let excessive_wet_evaporation = (wet_evaporation - wet_evaporation_limit).max(0.0);
     wet_evaporation = wet_evaporation.min(wet_evaporation_limit);
     let leaf_evaporation = leaf_evaporation - excessive_wet_evaporation;
-    let leaf_sensible_heat =
-        leaf_sensible_heat + LATENT_HEAT_VAPORIZATION_J_KG * excessive_wet_evaporation;
+    let leaf_sensible_heat = leaf_sensible_heat + leaf_latent_heat_j_kg * excessive_wet_evaporation;
     let sunlit_transpiration = last.sunlit_transpiration;
     let shaded_transpiration = last.shaded_transpiration;
     let mut root_flux_kg_m2_s = last.root_flux_kg_m2_s;
@@ -901,7 +941,7 @@ pub fn leaf_temperature(
         + last.net_longwave
         + last.net_longwave_temperature_slope * final_temperature_change
         - leaf_sensible_heat
-        - LATENT_HEAT_VAPORIZATION_J_KG * leaf_evaporation
+        - leaf_latent_heat_j_kg * leaf_evaporation
         + precipitation_heat
         - canopy_heat_storage;
     let canopy_stomatal_resistance =
@@ -917,6 +957,7 @@ pub fn leaf_temperature(
     transpiration = transpiration.max(0.0);
     Ok(LeafTemperatureOutput {
         ground_latent_heat_j_kg: input.ground_latent_heat_j_kg,
+        leaf_latent_heat_j_kg,
         sunlit_leaf_area_index: laisun,
         shaded_leaf_area_index: laisha,
         wet_snow_fraction,

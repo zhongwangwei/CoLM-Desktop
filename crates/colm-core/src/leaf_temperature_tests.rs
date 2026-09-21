@@ -33,6 +33,57 @@ fn standard_leaf_solver_closes_the_canopy_energy_balance() {
     assert_eq!(state.canopy_water.snow_mm, 0.0);
 }
 
+/// 冠层的潜热随叶温在**汽化**与**升华**之间切换（上游的 `htvpl`）。
+///
+/// `MOD_LeafTemperature_Extended.F90:1584` 导出 `lfevpl = htvpl*fevpl`，
+/// 而编译进来的 `MOD_Thermal_CanopyPhase_Extended.F90:1343` 是
+/// **`lfevpa = lfevpl + htvp*fevpg`** —— 叶面那一项用 `htvpl`，不是 `hvap`
+/// （`main/MOD_Thermal.F90:1333` 的 `lfevpa = hvap*fevpl + ...` 是**旧版**，
+/// `Makefile` 用 `extends/` 顶掉了 `MOD_Thermal*`，那份从不参与编译）。
+///
+/// 写死 `hvap` 的后果有两处，都不显眼：`f_lfevpa` 差 `(hsub-hvap)*fevpl ≈ 3.3e5*fevpl`
+/// （冬季实测 3.14 W/m²），以及 `f_zerr` 差同一个量 —— 冠层能量收支是按 `htvpl`
+/// 闭合的，而残差里用的是 `lfevpa`。所以这条测试同时钉住 `hsub` 的数值与"按叶温选"。
+#[test]
+fn the_leaf_latent_heat_follows_the_leaf_temperature() {
+    // 样本夹具的叶温收敛到约 289 K，在冰点以上 → `hvap`。
+    let mut state = sample_state();
+    let warm = leaf_temperature(sample_input(), &mut state).unwrap();
+    assert!(state.leaf_temperature_k > FREEZING_K);
+    assert_eq!(
+        warm.leaf_latent_heat_j_kg, LATENT_HEAT_VAPORIZATION_J_KG,
+        "a leaf above freezing must use hvap"
+    );
+
+    // 把大气与地面都压到零下、并关掉短波，叶温就会落到冰点以下 → `hsub`。
+    let mut cold_input = sample_input();
+    cold_input.reference_air_temperature_k = 255.0;
+    cold_input.potential_temperature_k = 255.0;
+    cold_input.virtual_potential_temperature_k = 255.0;
+    cold_input.reference_specific_humidity = 0.001;
+    cold_input.ground_temperature_k = 255.0;
+    cold_input.soil_surface_temperature_k = 255.0;
+    cold_input.ground_specific_humidity = 0.001;
+    cold_input.soil_specific_humidity = 0.001;
+    cold_input.atmospheric_longwave_w_m2 = 180.0;
+    cold_input.sunlit_absorbed_par_w_m2 = 0.0;
+    cold_input.shaded_absorbed_par_w_m2 = 0.0;
+    cold_input.canopy_absorbed_solar_w_m2 = 0.0;
+    let mut cold_state = sample_state();
+    let cold = leaf_temperature(cold_input, &mut cold_state).unwrap();
+    assert!(
+        cold_state.leaf_temperature_k <= FREEZING_K,
+        "the cold fixture must drive the leaf below freezing, got {}",
+        cold_state.leaf_temperature_k
+    );
+    assert_eq!(
+        cold.leaf_latent_heat_j_kg, LATENT_HEAT_SUBLIMATION_J_KG,
+        "a leaf below freezing must use hsub"
+    );
+    // `hsub - hvap = hfus`：确认两个常数没有被写成同一个值。
+    assert!((LATENT_HEAT_SUBLIMATION_J_KG - LATENT_HEAT_VAPORIZATION_J_KG - 0.3336e6).abs() < 1.0);
+}
+
 #[test]
 fn leaf_temperature_rejects_missing_leaf_area() {
     let mut input = sample_input();
