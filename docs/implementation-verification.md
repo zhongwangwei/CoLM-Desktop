@@ -4687,3 +4687,56 @@ gfortran 把 `1/sqrt(2.0_r8)` 折成一个 f64 常量，再与每个样本**相�
 
 `golden-compare` 的分层残差从 4/27/51 降到 **2/27/51**（总 82 → 80），
 tier0 只剩 `f_xy_solarin`(11/264) 与 `f_xy_q`(3/264)。
+
+## 下一个目标已定位：短波分带那 12 个量，误差形状指向 `sunang`（2026 年，实测）
+
+tier1 的 27 条残差里最大的一簇是**纯强迫层**的短波分带，12 个变量：
+`f_solvd`/`f_solvi`/`f_solnd`/`f_solni`（`solvd = forc_sols`、`solvi = forc_solsd`、
+`solnd = forc_soll`、`solni = forc_solld`，`MOD_NetSolar.F90:279-315`）
+以及四条 `f_sr*` 反射。它们**只依赖入射短波与太阳天顶角**，与模式状态无关，
+所以这一簇的偏差是一个干净的、可独立验证的复现器。
+
+实测（`CN-Cng-aligned`，`f_solvd`，同一天逐小时）：
+
+| 记录 | 上游 | Rust | 相对差 |
+|---|---|---|---|
+| 8 | 5.79044 | 5.68965 | **+1.77%** |
+| 9 | 33.53547 | 33.43152 | +0.31% |
+| 10 | 53.24130 | 53.16934 | +0.14% |
+| 11 | 63.52143 | 63.45880 | +0.10% |
+| 12 | 62.59323 | 62.53404 | +0.09% |
+| 13 | 49.56965 | 49.51237 | +0.12% |
+| 14 | 29.28402 | 29.22583 | +0.20% |
+| 15 | 6.12633 | 6.15276 | **−0.43%** |
+
+**误差在一天的边缘最大、正午最小，并且在下午翻号** —— 这正是"太阳天顶角差一点"
+的指纹：分带公式对 `sunang` 是强非线性的
+（`cloud = (1160*sunang-a)/(963*sunang)`、`difrat = 0.0604/(sunang-0.0223)+0.0683`，
+`MOD_Forcing.F90:604-642`），`sunang` 越小越敏感。
+入射总量本身是对的（`f_xy_solarin` 现在只剩 11 条 1 ULP），所以问题不在读数、
+也不在分带公式的常数，而在**喂进去的那个 `sunang`**。
+
+已经排除与尚未排除的：
+
+- **时段约定已核对**：上游 `read_forcing` 在 `TICKTIME` **之前**被调用
+  （`CoLM.F90:452` vs `:479`），传的是 `jdate`（`adj2begin` 后的步首），
+  所以 `MOD_Forcing` 的 `calday = calendarday(jdate)` 是**步首**；
+  本仓库的 `input.calendar_day` 也是步首（`clock.forcing_time`）。
+- **`orb_coszen` 的移植**（`atmosphere.rs::orbital_cosine_zenith`）逐项保留了
+  `SIN`/`COS` 分算与 `mul_add`，注释里已经写着"LLVM 合并配对调用会改一个 ULP"，
+  所以最后一位有保障，但**没有实测过它与上游在同一时刻的逐位一致**。
+- **分带公式本身逐行相同**，只有两处无害但不该留的偏离：
+  Rust 写的是 `cloud.max(0.0001)`（上游是 `cloud = max(cloud, 0.)`；
+  因为紧接着就是 `max(0.58, cloud)`，这一处数值上无影响），
+  以及上游先做 `a = max(0., forc_xy_solarin)` 再用 `a` 参与四个乘积，
+  Rust 用的是未截断的 `total_w_m2`（本算例入射非负，也无影响）。
+- **`orbital_calendar_day` 里的经度平移值得单独查**：它把
+  `seconds -= (lon/15*3600) as i32` 折进日小数，而上游是把经度交给
+  `orb_coszen` 的第二个入参。两者在精确算术下互相抵消
+  （`2*pi*(lon/360) == lon_rad`），但浮点上留下的是"两次舍入之差"，
+  量级 1e-14，不足以解释 1%。
+
+下一步该做的是一次**决定性测量**：在 `extends/interception/MOD_LeafTemperature_Extended.F90`
+（或 `MOD_Forcing.F90` 分带块内）把 `sunang` 与 `forc_sols` 逐步打出来，
+与本仓库同步打印的 `forcing.cosine_zenith` 对同一时刻逐位比。
+不要再用"反解分带比值"的办法 —— 记录里是两步平均，反解不出单个 `sunang`。
