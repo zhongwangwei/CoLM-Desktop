@@ -505,7 +505,6 @@ pub fn leaf_temperature(
             },
         )?;
         let mut root_flux_kg_m2_s = Vec::new();
-        let mut hydraulic_transpiration = None;
         // `MOD_PlantHydraulic.F90:353-368` 的 `calcstress_twoleaf` 把
         // `rstfacsun`/`rstfacsha` 重写成 **PHS 自己的**胁迫因子
         // （`amax1(gssun/gs0sun, 1e-2)` 或 `amax1(plc(psi,psi50,ck), 1e-2)`），
@@ -621,10 +620,6 @@ pub fn leaf_temperature(
                 },
                 hydraulic_output.shaded_stomatal_conductance_umol_m2_s * laisha,
             )?;
-            hydraulic_transpiration = Some((
-                hydraulic_output.sunlit_transpiration_kg_m2_s,
-                hydraulic_output.shaded_transpiration_kg_m2_s,
-            ));
             root_flux_kg_m2_s = hydraulic_output.root_flux_kg_m2_s;
             sunlit_soil_water_stress = hydraulic_output.sunlit_stress;
             shaded_soil_water_stress = hydraulic_output.shaded_stress;
@@ -703,10 +698,31 @@ pub fn leaf_temperature(
                 + laisha / (leaf_boundary_resistance + leaf_shaded_resistance))
             * (air_moisture_weight + ground_moisture_weight)
             * leaf_saturation.specific_humidity_temperature_slope_k;
-        if let Some((sunlit, shaded)) = hydraulic_transpiration {
-            sunlit_transpiration = sunlit;
-            shaded_transpiration = shaded;
-            transpiration = sunlit + shaded;
+        // 上面这一组 `transpiration`/`sunlit_transpiration`/`shaded_transpiration`
+        // 就是上游的 `etr`/`etrsun`/`etrsha`（`MOD_LeafTemperature_Extended.F90:1108-1118`）。
+        // **PHS 分支不把它们换成 PHS 自己解出来的蒸腾量。** 上游那一支
+        // （`:1120-1131`）只做两件事：按逐叶胁迫因子 `rstfacsun`/`rstfacsha`
+        // 与符号把 `etrsun`/`etrsha` 清零，再把 `rootflux` 缩放去对上 `etr`
+        // ——`balance_phs_rootflux` 的第一个参数 `etr` 是 **`intent(in)`**，
+        // 一个字都不回写（`MOD_PHSRootfluxBalance.F90:23-40`）。PHS 对气孔的
+        // 影响走的是 `rssun`/`rssha`（`:904` 由 `gssun`/`gssha` 反算），不是
+        // 直接把"根供得起多少"当成"冠层蒸多少"。
+        // 本仓库此前把它换成 `hydraulic_output.sunlit_transpiration + shaded`，
+        // 等于把"根供得起多少"当成"冠层蒸多少"。**实测这三份窗口里两者贴得很近**：
+        // 改回上游语义后总超差只从 13738/25873/31929 变成 13726/25872/31931
+        // （`f_vegwp` 条数 747→735），所以它不是那些红条的量级来源 —— 改它是为了
+        // 语义对齐，不是为了刷数字。真正把第一步叶温拉偏的是上游 `o3coefg_*`
+        // 的 `spval`（见 docs/implementation-verification.md 对应小节）。
+        // 根通量与 `etr` 的一致性由下面 `root_flux_kg_m2_s` 的按比例缩放保证，
+        // 与上游 `:1342-1357` 同构。
+        if input.plant_hydraulics.is_some() {
+            if sunlit_soil_water_stress < 1.0e-2 || sunlit_transpiration <= 0.0 {
+                sunlit_transpiration = 0.0;
+            }
+            if shaded_soil_water_stress < 1.0e-2 || shaded_transpiration <= 0.0 {
+                shaded_transpiration = 0.0;
+            }
+            transpiration = sunlit_transpiration + shaded_transpiration;
         } else if transpiration >= input.transpiration_limit_kg_m2_s {
             let scale = if transpiration > 0.0 {
                 input.transpiration_limit_kg_m2_s / transpiration

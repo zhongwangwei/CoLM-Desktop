@@ -7031,3 +7031,134 @@ Rust 的 `update_canopy_water` 正好把这两段合在一起，所以取早了�
 3. **`gs0sun = spval × 正常值`**：定位 `:817` 那一行拿到的 `rssun` 是什么，
    以及 `spval` 从哪条路径乘进来。
 4. 把 `sun_angle` 对齐 `orb_coszen`（tier0 的 `f_xy_solarin` 1 ULP，见上一节）。
+
+## 第一步叶温求解器的残差是**上游自己**的 `spval` 污染：`o3coefg_*` 在循环之后才被置 1（2026 年，实测，**未改上游**）
+
+上一节把"第一个不被 `delmax` 夹住的迭代"钉在 `fevpl` 上。这一轮把 `CN-Cng`
+第一步的**逐迭代表**两边都打出来（Fortran 在 `MOD_LeafTemperature_Extended.F90`
+的 `tl = tlbef + dtl(it)` 之后与 `:819` 之后各一组，Rust 在
+`leaf_temperature.rs` 的 `let leaf_evaporation_unadjusted = ...` 之后一组；
+插桩已全部撤销、内核重建、黄金逐位复现）。
+
+### 一、第 1 轮到第 6 轮：气动量的**输入**逐位相同，差全在 `rssun`
+
+`CN-Cng` 第 1 步（`tl` 从 283 K 起步，无降水，`fwet = 0`）：
+
+| it | `qsatl` F / R | `qaf` F / R | `delta`/`esign` | `fwet` | `rssun` F | `rssun` R | `fevpl` F | `fevpl` R |
+|---|---|---|---|---|---|---|---|---|
+| 1 | 7.5882991352415295e-3 **同** | 4.1748864657195975e-3 **同** | 1 / 1 | 0 | **6.4635e-4** | **1.0000e6** | **6.6099e-5** | **1.3712e-8** |
+| 2 | 6.1846605533164272e-3 **同** | 2.7317240992e-3 / 2.5313005485e-3 **不同** | 1 / 1 | 0 | 2.6924e-3 | 1.0000e6 | 5.4312e-5 | 9.9939e-9 |
+| 6 | 2.4677085374e-3 **同** | 2.6900247261e-3 **同** | 1 / **0** | 0 | — | 1.0000e6 | — | −9.5807e-6 |
+
+第 1 轮的 `qsatl`/`qaf`/`delta`/`fwet` **逐位相同** ⇒ 气动式两侧的**分子**一样，
+`etr` 差 4820 倍只能出在 `laisun/(rb+rssun) + laisha/(rb+rssha)` 的分母上：
+`6.4635e-4` 对 `1.0000e6`，六个数量级。**这就是第一步叶温分叉的全部**。
+
+### 二、Fortran 那个 `rssun` 是 `spval` 乘出来的（数字级证明）
+
+在 `:819` 之前再插一组探针，打出 `stomata` 的返回值和 `gs0sun`：
+
+```
+SB it/stomata_rssun/stomata_rssha/gs0sun/gs0sha/tl/tprcor
+   1  1.0000000000000000E+07  1.0000000000000000E+07  -4.2514633619846110E+38 ... 283.0  1.2031641493701876E+04
+```
+
+`rssun = rssha = 1e7`（夜晚气孔全关，合理），`tl = 283`，`tprcor = 12031.64`，于是
+
+```
+1/(rssun*tl/tprcor)                  = 4.2514633619846110e-6
+min(1e6, 上式) / laisun * 1e6        = 4.2514633619846110e2      （laisun = 0.01）
+× o3coefg_sun                        = -4.2514633619846110e38    ← 观测值，17 位全中
+```
+
+而 `spval = -1.0e36`（`MOD_Vars_Global.F90:110`）。**所以 `o3coefg_sun = spval`。**
+`o3coefg_sha` 同理（`gs0sha` 与 `gs0sun` 逐位相同 —— 单点单 PFT 下两者本就同源）。
+
+路径也清楚了：
+
+* 本算例 `DEF_USE_OZONESTRESS = .false.`；
+* 把四个 `o3coef*` 置 1 的 `ELSE` 分支在 **`:1300-1310`，即稳定性循环 `ENDDO` 之后**；
+* 而消费它们的 `:819` 在**循环体内**；
+* 调用方给进来的是初值 —— 探针实测就是 `spval`。
+
+⇒ **第一步的每一次迭代都用 `spval` 乘 `gs0sun`**；第一步的 `LeafTemperature`
+返回时（`:1308`）才被置 1，所以从**第二步**起就正常了。这一步的叶温/PHS 状态
+在 Fortran 里是垃圾：黄金 history 第 0 条的 `f_gssun[0] = f_gssha[0] =
+-2.26258137815510702e31`、`f_vegwp[0]` 的 `[-2021, -2021, -1144, -449]` 就是它；
+第 1 条起 `f_vegwp` 两边**逐位相同**。
+
+### 三、把它补上以后：只修掉第 0 条，**不解释** 11 天的残差（重要的否定结论）
+
+在 `LeafTemperature` 循环之前加一句 `IF (.not. DEF_USE_OZONESTRESS) o3coef*=1`，
+重建内核，重跑 11 天窗口，再拿 Rust 去比（**注意：黄金本身没动，比的是
+"打了补丁的 Fortran" 对 Rust**）：
+
+| 比较对象 | 总超差条数 | `f_gssun` 超差 | `f_vegwp` 超差 | 其余 56 条 |
+|---|---|---|---|---|
+| Rust 对**现有黄金** | 13726 | 1e7 | 7.25e6 | — |
+| Rust 对**补丁后的 Fortran** | 13726 | **3.29e4** | **1.75e6** | **逐条一模一样** |
+
+即：这个 `spval` 只解释了第 0 条那三个量的垃圾，**其余 56 条 tier2 一条都没动**。
+所以上一节"三个窗口的残差都指向第 1 步的叶温"这个说法**要收窄**：
+第 1 步确实分叉（而且是上游自己的病），但它不是 11 天残差的来源。
+
+### 四、把窗口拉到第 2 天（48 步），看**逐日**的差
+
+用同一个初始化、`end = 2008-01-02-00000`，Fortran（含上面的补丁）与 Rust
+各跑一遍，直接比重启文件（68 个变量，28 个不同）：
+
+| 变量 | 最大绝对差 | 最大相对差 |
+|---|---|---|
+| `zwt` | 4.56e-4 m | **3.67e-3** |
+| `ldew` / `ldew_snow` | 8.81e-6 mm | 1.98e-4 |
+| `fwet_snow` | 7.77e-6 | 1.32e-4 |
+| `wice_soisno` | 1.25e-3 kg/m2 | 7.39e-5 |
+| `qstar` | 5.61e-10 | 1.60e-5 |
+| `hk` | 9.72e-9 | 2.87e-6 |
+| `wliq_soisno` | 1.43e-3 | 2.68e-6 |
+| `zol` / `rib` | 1.72e-7 / 4.33e-8 | 1.70e-6 |
+| `t_soisno` / `t_grnd` | 3.97e-4 K | 1.40e-6 |
+| `tleaf` | 2.18e-5 K | 8.40e-8 |
+| `gs0sun` / `gs0sha` | 3.50e-5 | 7.59e-8 |
+
+读法：
+
+1. 第 2 天 `gs0sun` 已是**正常量级**（差 7.6e-8），第一步的污染确实只活一步。
+2. 逐日差的量级是 **1e-6 ~ 1e-4 相对**，与第 1 步（`t_soisno` 1.08e-7）同量级
+   —— 也就是说它**不随步数放大**，是一个**稳态的每步小差**，不是混沌放大。
+   这与上一轮量到的增益 ~100 只作用在"状态被扰动后重收敛"的量上一致。
+3. 最大两条是 `zwt`（0.37%）与冠层水 `ldew`（0.02%）。`ldew`/`fwet_snow` 正是
+   上一节那条 `f_alb → f_sr*/f_sab*` 链的上游，`zwt` 则是 `f_zwt`/`frcsat` 的
+   上游。**下一轮就从这两个量入手**，落点分别是 `MOD_SoilSnowHydrology:groundwater`
+   与 `MOD_LeafInterception`/`update_canopy_water` 的每步收支。
+
+### 五、这一轮顺手改掉的一处语义（`etr` 不是 PHS 的解）
+
+`leaf_temperature.rs` 原先在 PHS 打开时用
+`hydraulic_output.sunlit_transpiration + shaded_transpiration` **顶掉**气动式算出的
+`transpiration`。上游不是这样：`MOD_LeafTemperature_Extended.F90:1125-1131` 只做
+"按 `rstfacsun`/`rstfacsha` 与符号把逐叶分量清零"，然后
+`CALL balance_phs_rootflux(ipatch, p_iam_glb, etr, rootflux, rootfr, 'post-PHS')`
+—— 而 `balance_phs_rootflux` 的第一个参数 `etr` 是 **`intent(in)`**
+（`extends/interception/MOD_PHSRootfluxBalance.F90:26`），它只把 `rootflux`
+按比例缩放到 `etr`，**一个字都不回写**。也就是说 PHS 对冠层蒸腾的影响只走
+`rssun`/`rssha`（`:904` 由 `gssun`/`gssha` 反算），不是"根供得起多少就蒸多少"。
+已按上游语义改回，并保留 `:1342-1357` 的 `rootflux` 比例缩放（本仓库在
+`root_flux_kg_m2_s` 那一处已有同构实现）。
+
+**实测影响很小**（三份窗口总超差 13738→13726 / 25873→25872 / 31929→31931，
+`f_vegwp` 的条数 747→735），因为这两个值在这些窗口里本就贴得很近；
+但它是**语义**上的纠正，留着比"碰巧一样"可靠。
+
+### 六、下一步（四条，按性价比）
+
+1. **上游修复 `o3coef*` 的时序**（把 `:1300-1310` 的 `ELSE` 置 1 提到循环之前，
+   或让调用方初始化成 1），然后**重跑三份黄金**并同步 `docs/design.md §2.8/§2.8b`
+   的观测对比表。这是"上游 bug 修在源头上"的一类改动，本仓库有先例
+   （`CoLM_stop` 的裸 `STOP`→`STOP 1`）；代价是黄金文件与 `kernel-manifest.json`
+   要一起更新。
+2. **`zwt` 的每步 0.37%**：拿第 2 天的重启做落点，在
+   `MOD_SoilSnowHydrology:groundwater` 的进出口比 `qcharge`/`drainage`/`rous`/`jwt`。
+3. **`ldew` 的每步 0.02%**：比 `intercept_canopy` + `update_canopy_water` 的每步收支
+   （已有 `fwet_snow` 一起对照）。
+4. `canopy_phase_heat` 仍是硬编码 0（`interception.rs` 两处），冠层雪融化时会少一块焓。
