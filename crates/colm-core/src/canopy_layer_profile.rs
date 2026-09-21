@@ -8,9 +8,7 @@ use anyhow::{ensure, Result};
 
 use crate::{integrated_monin_obukhov_diffusivity, monin_obukhov_diffusivity};
 
-const fn f77(value: f32) -> f64 {
-    value as f64
-}
+use crate::f77;
 
 const INTEGRATION_STEP_M: f64 = f77(0.001);
 const ROOT_TOLERANCE_M: f64 = f77(0.01);

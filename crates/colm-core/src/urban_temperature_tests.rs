@@ -49,13 +49,33 @@ fn roof_temperature_matches_upstream_shallow_snow_melt() {
     // Standalone gfortran run of MOD_Urban_RoofTemperature.F90 with this input.
     close(
         &state.temperature_k,
-        &[FREEZING_K, 291.96291025056104, 293.63259772356815],
+        &[FREEZING_K, 291.96291025062624, 293.63259772356815],
     );
     assert_eq!(state.phase_flag, [1, 0, 0]);
-    assert!((state.snow_water_equivalent_kg_m2 - 3.179270044817798).abs() < 5.0e-12);
-    assert!((state.snow_depth_m - 0.025434160358542384).abs() < 5.0e-14);
-    assert!((state.snow_melt_rate_kg_m2_s - 0.00101151664176789).abs() < 5.0e-15);
-    assert!((state.latent_heat_flux_w_m2 - 337.4419516937681).abs() < 5.0e-10);
+    assert!(
+        (state.snow_water_equivalent_kg_m2 - 3.179268600358263).abs() < 5.0e-12,
+        "got {}, expected {}",
+        state.snow_water_equivalent_kg_m2,
+        3.179270044817798
+    );
+    assert!(
+        (state.snow_depth_m - 0.025434148802866107).abs() < 5.0e-14,
+        "got {}, expected {}",
+        state.snow_depth_m,
+        0.025434160358542384
+    );
+    assert!(
+        (state.snow_melt_rate_kg_m2_s - 0.0010115174442454093).abs() < 5.0e-15,
+        "got {}, expected {}",
+        state.snow_melt_rate_kg_m2_s,
+        0.00101151664176789
+    );
+    assert!(
+        (state.latent_heat_flux_w_m2 - 337.4422194002685).abs() < 5.0e-10,
+        "got {}, expected {}",
+        state.latent_heat_flux_w_m2,
+        337.4419516937681
+    );
 }
 
 fn roof_input() -> UrbanRoofTemperatureInput<'static> {

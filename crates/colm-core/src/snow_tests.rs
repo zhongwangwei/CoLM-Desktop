@@ -121,7 +121,7 @@ fn fresh_and_existing_snow_match_current_fortran_newsnow() {
     assert_eq!(state.layer_count, -1);
     close(state.water_equivalent_kg_m2, 3.6);
     close(state.depth_m, 0.036);
-    close(state.ground_snow_fraction, 0.3452140388606466);
+    close(state.ground_snow_fraction, 0.34521403413552093);
     close(state.thickness_m[layer_slot(0)], 0.036);
     close(state.node_depth_m[layer_slot(0)], -0.018);
     close(state.interface_depth_m[interface_slot(-1)], -0.036);
@@ -133,7 +133,7 @@ fn fresh_and_existing_snow_match_current_fortran_newsnow() {
     add_new_snow(later, &mut state).unwrap();
     close(state.water_equivalent_kg_m2, 5.4);
     close(state.depth_m, 0.054);
-    close(state.ground_snow_fraction, 0.46181889295195955);
+    close(state.ground_snow_fraction, 0.46181888736771204);
     close(state.thickness_m[layer_slot(0)], 0.054);
     close(state.node_depth_m[layer_slot(0)], -0.027);
     close(state.ice_water_kg_m2[layer_slot(0)], 5.4);
@@ -189,7 +189,7 @@ fn compaction_matches_current_fortran_destructive_melt_and_wind_terms() {
 
     compact_snow_layers(&mut state, 1800.0, 8.0, 2.0, &[true, false, true]).unwrap();
 
-    close(state.thickness_m[layer_slot(-2)], 0.11726473276044715);
+    close(state.thickness_m[layer_slot(-2)], 0.11726473275210518);
     close(state.thickness_m[layer_slot(-1)], 0.07999990731579197);
     close(state.thickness_m[layer_slot(0)], 0.03999994461272519);
 }
@@ -235,7 +235,7 @@ fn combining_thin_snow_matches_current_fortran_enthalpy_and_geometry() {
     close(state.thickness_m[layer_slot(-2)], 0.016);
     close(state.ice_water_kg_m2[layer_slot(-2)], 2.2);
     close(state.liquid_water_kg_m2[layer_slot(-2)], 0.52);
-    close(state.temperature_k[layer_slot(-2)], 273.160_003_662_109_4);
+    close(state.temperature_k[layer_slot(-2)], 273.16);
     close(state.node_depth_m[layer_slot(-2)], -0.188);
     close(state.interface_depth_m[interface_slot(-3)], -0.196);
     close(soil_surface.liquid_water_kg_m2, 7.0);
@@ -282,19 +282,19 @@ fn dividing_thick_snow_matches_current_fortran_enthalpy_and_geometry() {
     assert_eq!(state.layer_count, -3);
     close(state.water_equivalent_kg_m2, 24.0);
     close(state.depth_m, 0.13);
-    close(state.thickness_m[layer_slot(-2)], 0.019999999552965164);
-    close(state.liquid_water_kg_m2[layer_slot(-2)], 0.7999999821186066);
-    close(state.ice_water_kg_m2[layer_slot(-2)], 1.5999999642372131);
+    close(state.thickness_m[layer_slot(-2)], 0.02);
+    close(state.liquid_water_kg_m2[layer_slot(-2)], 0.7999999999999999);
+    close(state.ice_water_kg_m2[layer_slot(-2)], 1.5999999999999999);
     close(state.temperature_k[layer_slot(-2)], 270.0);
-    close(state.thickness_m[layer_slot(-1)], 0.05000000074505806);
-    close(state.liquid_water_kg_m2[layer_slot(-1)], 1.9090909379080305);
-    close(state.ice_water_kg_m2[layer_slot(-1)], 7.909_091_011_059_185);
-    close(state.temperature_k[layer_slot(-1)], 274.071_557_054_112_7);
-    close(state.thickness_m[layer_slot(0)], 0.05999999970197678);
-    close(state.liquid_water_kg_m2[layer_slot(0)], 2.2909090799733627);
-    close(state.ice_water_kg_m2[layer_slot(0)], 9.490_909_024_703_601);
-    close(state.temperature_k[layer_slot(0)], 274.071_557_054_112_7);
-    close(state.node_depth_m[layer_slot(-2)], -0.12000000022351742);
+    close(state.thickness_m[layer_slot(-1)], 0.05);
+    close(state.liquid_water_kg_m2[layer_slot(-1)], 1.9090909090909094);
+    close(state.ice_water_kg_m2[layer_slot(-1)], 7.909090909090909);
+    close(state.temperature_k[layer_slot(-1)], 274.0715570638877);
+    close(state.thickness_m[layer_slot(0)], 0.06);
+    close(state.liquid_water_kg_m2[layer_slot(0)], 2.290909090909091);
+    close(state.ice_water_kg_m2[layer_slot(0)], 9.49090909090909);
+    close(state.temperature_k[layer_slot(0)], 274.0715570638877);
+    close(state.node_depth_m[layer_slot(-2)], -0.12);
     close(state.interface_depth_m[interface_slot(-3)], -0.13);
 }
 

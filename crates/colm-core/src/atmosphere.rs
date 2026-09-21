@@ -7,9 +7,9 @@
 use anyhow::{ensure, Result};
 
 /// CoLM's freezing temperature in kelvin.
-pub const FREEZING_K: f64 = 273.16_f32 as f64;
-const CP_AIR: f64 = 1004.64_f32 as f64;
-const LATENT_HEAT_VAPORIZATION: f64 = 2.5104e6_f32 as f64;
+pub const FREEZING_K: f64 = 273.16;
+const CP_AIR: f64 = 1004.64;
+const LATENT_HEAT_VAPORIZATION: f64 = 2.5104e6;
 
 #[inline(never)]
 fn fortran_sin(value: f64) -> f64 {
@@ -31,9 +31,7 @@ fn fortran_atan(value: f64) -> f64 {
     value.atan()
 }
 
-const fn f77(value: f32) -> f64 {
-    value as f64
-}
+use crate::f77;
 
 /// Saturation vapor pressure and specific humidity at a temperature and pressure.
 #[derive(Debug, Clone, Copy, PartialEq)]

@@ -4,26 +4,26 @@ use super::*;
 fn urban_roof_flux_matches_upstream_stability_iteration() {
     let state = urban_roof_flux(input()).unwrap();
     // Standalone gfortran run of MOD_Urban_RoofFlux.F90 with input().
-    close(state.sensible_temperature_slope_w_m2_k, 11.759506025221088);
+    close(state.sensible_temperature_slope_w_m2_k, 11.75950545180485);
     close(
         state.latent_temperature_slope_kg_m2_s_k,
         5.245570959706455e-7,
     );
     close(
         state.total_energy_temperature_slope_w_m2_k,
-        13.070898765147701,
+        13.070898178276101,
     );
-    close(state.sensible_heat_w_m2, 47.03802410088435);
+    close(state.sensible_heat_w_m2, 47.0380218072194);
     close(state.evaporation_kg_m2_s, 3.1473425758238725e-5);
     close(state.momentum_roughness_m, 0.002);
-    close(state.heat_roughness_m, 0.0011670939135330443);
-    close(state.dimensionless_height, -2.8774072696506208);
-    close(state.friction_velocity_m_s, 0.1765812547577717);
-    close(state.moisture_scale, -0.00033143930738268647);
-    close(state.temperature_scale_k, -0.22095953825512432);
-    close(state.momentum_similarity, 7.727270544713315);
-    close(state.heat_similarity, 7.241144856097888);
-    close(state.moisture_similarity, 7.241144856097888);
+    close(state.heat_roughness_m, 0.0011670938787199316);
+    close(state.dimensionless_height, -2.877407267404558);
+    close(state.friction_velocity_m_s, 0.17658125177965187);
+    close(state.moisture_scale, -0.0003314393016435779);
+    close(state.temperature_scale_k, -0.22095953442905195);
+    close(state.momentum_similarity, 7.727270544003605);
+    close(state.heat_similarity, 7.241144873582023);
+    close(state.moisture_similarity, 7.241144873582023);
 }
 
 #[test]

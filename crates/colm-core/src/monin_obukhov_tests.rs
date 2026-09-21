@@ -37,7 +37,7 @@ fn monin_obukhov_matches_current_fortran_in_unstable_and_stable_air() {
     ]
     .into_iter()
     .zip([
-        3.129_098_877_298_803e-1,
+        0.3129098830671598,
         5.159_827_204_460_502,
         5.159_827_204_460_502,
         4.333_366_626_521_974,
@@ -52,7 +52,7 @@ fn monin_obukhov_matches_current_fortran_in_unstable_and_stable_air() {
         ..unstable()
     })
     .unwrap();
-    close(stable.friction_velocity_m_s, 2.222_598_098_323_94e-1);
+    close(stable.friction_velocity_m_s, 0.22225980652046481);
     close(stable.momentum, 7.198_782_474_656_201);
     close(stable.heat, 9.336_874_696_163_294);
     close(stable.moisture, 9.162_766_724_009_574);
@@ -74,13 +74,13 @@ fn monin_obukhov_preserves_the_upstream_deeply_unstable_literals() {
     })
     .unwrap();
     // Standalone gfortran run of MOD_FrictionVelocity:moninobuk.
-    close(state.friction_velocity_m_s, 1.699_071_525_890_932_5e-1);
-    close(state.heat_at_2m, 5.838_661_178_310_979);
-    close(state.moisture_at_2m, 5.838_661_178_310_979);
-    close(state.momentum_at_10m, 7.181_720_435_998_081);
-    close(state.momentum, 7.624_933_957_542_186);
-    close(state.heat, 6.512_109_801_387_894);
-    close(state.moisture, 6.512_109_801_387_894);
+    close(state.friction_velocity_m_s, 0.16990714903974613);
+    close(state.heat_at_2m, 5.838661225674107);
+    close(state.moisture_at_2m, 5.838661225674107);
+    close(state.momentum_at_10m, 7.181720483433907);
+    close(state.momentum, 7.624934003206092);
+    close(state.heat, 6.512109834864207);
+    close(state.moisture, 6.512109834864207);
 }
 
 #[test]
@@ -121,8 +121,8 @@ fn large_eddy_profile_matches_current_fortran() {
         ..unstable()
     };
     let surface = monin_obukhov_with_scheme(hpbl, scheme).unwrap();
-    close(surface.friction_velocity_m_s, 3.172_171_632_789_877_5e-1);
-    close(surface.momentum, 5.043_863_349_962_189);
+    close(surface.friction_velocity_m_s, 0.3172171571652855);
+    close(surface.momentum, 5.0438633720127655);
     close(surface.momentum_at_10m, 4.333_366_626_521_974);
     close(surface.heat, 6.911_964_179_361_94);
     let canopy = canopy_monin_obukhov_with_scheme(
@@ -135,7 +135,7 @@ fn large_eddy_profile_matches_current_fortran() {
         scheme,
     )
     .unwrap();
-    close(canopy.momentum_at_canopy_top, 4.632_162_479_462_292);
+    close(canopy.momentum_at_canopy_top, 4.632162483915262);
     close(
         canopy.surface.friction_velocity_m_s,
         surface.friction_velocity_m_s,

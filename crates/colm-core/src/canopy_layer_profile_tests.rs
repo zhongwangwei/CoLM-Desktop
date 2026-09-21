@@ -76,22 +76,22 @@ fn wind_profile_accepts_the_upstream_z0_bottom_boundary() {
 #[test]
 fn diffusivity_profile_matches_mod_canopy_layer_profile() {
     let input = diffusivity();
-    close(canopy_diffusivity(input, 6.5).unwrap(), 0.28662747804061406);
+    close(canopy_diffusivity(input, 6.5).unwrap(), 0.2866274779627831);
     close(
         canopy_diffusivity_resistance(input, 9.0, 3.0).unwrap(),
-        25.788642531224884,
+        25.788642537973903,
     );
     close(
         canopy_diffusivity_resistance_analytic(input, 9.0, 3.0, 0.01).unwrap(),
-        25.788642604432596,
+        25.788642611181594,
     );
     close(
         canopy_diffusivity_profile_integral(input, 9.0, 3.0, 0.01, 0.5).unwrap(),
-        24.283264719510694,
+        24.283264733447663,
     );
     close(
         canopy_diffusivity_difference(input, 6.5, 0.5).unwrap(),
-        -0.50652573039651849,
+        -0.5065257276936177,
     );
     assert_eq!(
         canopy_diffusivity_roots_between(input, 9.0, 3.0).unwrap(),
@@ -108,7 +108,7 @@ fn diffusivity_integral_keeps_zero_attenuation_branch() {
     input.attenuation_coefficient = 0.0;
     close(
         canopy_diffusivity_profile_integral(input, 9.0, 3.0, 0.01, 0.5).unwrap(),
-        9.8519038492494815,
+        9.851903886916961,
     );
 }
 

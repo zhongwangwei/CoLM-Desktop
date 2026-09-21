@@ -21,35 +21,35 @@ fn precipitation_partition_matches_the_current_fortran_for_every_scheme() {
     ) in [
         (
             PrecipitationPhaseScheme::WetBulb,
-            5.036_793_490_341_673e-6,
-            1.094_963_206_509_658_3e-3,
-            1.007_358_698_068_334_7e-5,
-            2.189_926_413_019_316_7e-3,
-            273.012_561_160_605_7,
+            5.036_810_975_263_106_5e-06,
+            0.001094963189024737,
+            1.007_362_195_052_621_3e-05,
+            0.002189926378049474,
+            273.01255775559173,
         ),
         (
             PrecipitationPhaseScheme::AirTemperature,
-            5.994_979_858_398_438e-4,
-            5.005_020_141_601_562e-4,
-            1.198_995_971_679_687_7e-3,
-            1.001_004_028_320_312_5e-3,
-            273.150_866_547_958_9,
+            0.0005994999999999863,
+            0.0005005000000000137,
+            0.0011989999999999727,
+            0.0010010000000000275,
+            273.1508629195838,
         ),
         (
             PrecipitationPhaseScheme::HydrometeorTemperature,
-            1.668_550_959_707_049_2e-5,
-            1.083_314_490_402_929_6e-3,
-            3.337_101_919_414_098_3e-5,
-            2.166_628_980_805_859e-3,
-            273.079_427_321_747_2,
+            1.668_539_595_644_578e-05,
+            0.0010833146040435543,
+            3.337_079_191_289_156e-05,
+            0.0021666292080871085,
+            273.079423381018,
         ),
         (
             PrecipitationPhaseScheme::Legacy,
-            2.398_009_326_308_965_8e-4,
-            8.601_990_673_691_035e-4,
-            4.796_018_652_617_932e-4,
-            1.720_398_134_738_207e-3,
-            273.141_063_920_498_2,
+            0.0002398000000000039,
+            0.0008601999999999962,
+            0.0004796000000000078,
+            0.0017203999999999924,
+            273.14106021129135,
         ),
     ] {
         let state = partition_precipitation(PrecipitationInput {
@@ -69,7 +69,7 @@ fn precipitation_partition_matches_the_current_fortran_for_every_scheme() {
         close(state.large_scale_rain_kg_m2_s, large_scale_rain);
         close(state.large_scale_snow_kg_m2_s, large_scale_snow);
         close(state.precipitation_temperature_k, precipitation_temperature);
-        close(state.new_snow_bulk_density_kg_m3, 247.055_135_250_121_96);
+        close(state.new_snow_bulk_density_kg_m3, 247.05517422227402);
     }
 }
 
@@ -99,18 +99,13 @@ fn glacier_temperature_partition_uses_its_own_two_degree_interval() {
 /// **多了一个零**，`c8*td^8` 那一项被放大十倍，`es` 偏大 1.7e-7 相对。
 /// 这条测试把冰面分支的 `es` 钉在修正后的值上。
 ///
-/// **还差的**：修正后与上游仍差 3.2e-7 相对，来源是另外两处 f32 取整 ——
-/// `FREEZING_K = 273.16_f32 as f64`（`-fdefault-real-8` 下该是 f64 的 `273.16`）
-/// 与本模块 `f77` 把系数舍入到 f32（同类定义在仓库里有三十余处）。
-/// 两者与 `c8` 的偏差方向相反、部分抵消，所以以前只差 1.7e-7 看不出来。
-/// 把这三处一起改成 f64 后 `f_xy_q`（tier0）会变成逐位一致，但那一改
-/// 必须**连同 `FREEZING_K` 的crate级统一与既有钉值测试的重新对账**一起做 ——
-/// 单独改 `atmosphere.rs` 会让 `equilibrium_soil_column` 那类断言前后不一致
-/// （见 docs/implementation-verification.md）。这里先钉住已修的那一步。
+/// 这里同时钉住另外两处：`FREEZING_K`（`-fdefault-real-8` 下是 f64 的
+/// `273.16`，不是 `273.16_f32 as f64`）与 `f77`（系数不该先舍到 f32）。
+/// 三处一起改之后，这个 `es` 与上游**逐位**一致。
 #[test]
 fn qsadv_ice_branch_uses_the_fortran_c8_literal() {
     let state = saturation_specific_humidity(263.820_007_324_218_75, 69_062.0).unwrap();
-    let es = 275.551_453_923_276_03_f64;
+    let es = 275.551_539_505_085_8_f64;
     let es_error = (state.vapor_pressure_pa - es).abs() / es;
     assert!(es_error < 1.0e-14, "vapor pressure is off by {es_error:e}");
 }

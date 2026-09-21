@@ -16,7 +16,7 @@ fn standard_leaf_solver_closes_the_canopy_energy_balance() {
     );
     close(
         output.sunlit_stomatal_conductance_mol_m2_s + output.shaded_stomatal_conductance_mol_m2_s,
-        0.263_976_175_644_145_66,
+        0.26397614846048606,
         1.0e-12,
     );
     assert!(output.sunlit_stomatal_conductance_mol_m2_s > 0.0);

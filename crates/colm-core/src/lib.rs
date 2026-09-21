@@ -4,6 +4,25 @@
 //! functions operate on typed scalar/vector state so initialization and time stepping
 //! share one physical implementation instead of becoming two diverging translations.
 
+/// **Fortran 默认实数是 REAL(8)。**
+///
+/// 参考内核由 `vendor/CoLM202X/include/Makeoptions` 构建，其中
+/// `FOPTS_COMMON = -fdefault-real-8`，所以源码里每一个不带 kind 后缀的字面量
+/// （`data c8/0.262655803e-14/`、`0.622`、`2.777e-7`……）都是 f64。
+///
+/// 本 crate 原先在十三个模块里各自定义了一份
+/// `const fn f77(value: f32) -> f64 { value as f64 }`，把字面量先舍到 f32
+/// 再升回 f64 —— 那是在断言"源里的字面量是单精度"，在
+/// `-fdefault-real-8` 下**不成立**。实测代价：`qsadv` 冰面分支的 `es`
+/// 偏大 1.7e-7，`f_xy_q`（tier0）在 `US-NR1-snow` 上差到 4.67%。
+///
+/// 现在只有这一份，而且是恒等 —— 留着这个函数名是为了让
+/// "这里对应 Fortran 的默认实数"这条信息留在调用点上，而不是继续分散成
+/// 十三个各自可能写错的副本。
+pub(crate) const fn f77(value: f64) -> f64 {
+    value
+}
+
 pub mod albedo;
 pub mod atmosphere;
 pub mod bgc;

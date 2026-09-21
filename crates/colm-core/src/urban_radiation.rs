@@ -10,7 +10,7 @@ use crate::{pc_radiation::canopy_scattering, pc_radiation::canopy_transmittance,
 
 const BANDS: usize = 2;
 const RADIATION_TYPES: usize = 2;
-const FREEZING_K: f64 = 273.16;
+use crate::FREEZING_K;
 
 /// Inputs to CoLM's urban albedo initialization.  Arrays use CoLM's native
 /// `[band][direct, diffuse]` order.

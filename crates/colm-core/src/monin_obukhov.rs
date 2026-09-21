@@ -7,9 +7,7 @@ use anyhow::{ensure, Context, Result};
 
 // CoLM's physical constants are unsuffixed Fortran literals assigned to r8.
 // Preserve that source rounding for bit-level differential checks.
-const fn f77(value: f32) -> f64 {
-    value as f64
-}
+use crate::f77;
 
 const VON_KARMAN: f64 = f77(0.4);
 const GRAVITY_M_S2: f64 = f77(9.80616);

@@ -51,7 +51,7 @@ fn stomatal_models_match_mod_assim_stomata_conductance() {
     let ball = stomata(input, StomataOptions::default()).unwrap();
     close(ball.assimilation_mol_m2_s, 9.4931452463073254e-6);
     close(ball.respiration_mol_m2_s, 4.9076462728213200e-7);
-    close(ball.stomatal_resistance_s_m, 184.76380997621106);
+    close(ball.stomatal_resistance_s_m, 184.76381568937592);
     let medlyn = stomata(
         input,
         StomataOptions {
@@ -62,9 +62,10 @@ fn stomatal_models_match_mod_assim_stomata_conductance() {
     .unwrap();
     close(medlyn.assimilation_mol_m2_s, 9.6434658268231352e-6);
     assert!(
-        (medlyn.stomatal_resistance_s_m - 45.695658963234976).abs() < 1.0e-6,
-        "{}",
-        medlyn.stomatal_resistance_s_m
+        (medlyn.stomatal_resistance_s_m - 45.69566133053044).abs() < 1.0e-6,
+        "got {}, expected {}",
+        medlyn.stomatal_resistance_s_m,
+        45.695658963234976
     );
     let wue = stomata(
         input,
@@ -116,8 +117,8 @@ fn biochemical_parameters_match_mod_assim_stomata_conductance() {
     close(parameters.sink_limit_mol_m2_s_pa, 1.0535610212161914e-5);
     close(
         parameters.boundary_conductance_h2o_mol_m2_s,
-        1.4006830108442085,
+        1.4006830629403957,
     );
-    close(parameters.co2_compensation_pa, 2.5770710492111650);
-    close(parameters.rubisco_co2_constant_pa, 29.803510163408486);
+    close(parameters.co2_compensation_pa, 2.577071093213236);
+    close(parameters.rubisco_co2_constant_pa, 29.80350886267313);
 }

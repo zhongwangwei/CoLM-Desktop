@@ -11,7 +11,7 @@ use crate::{
 const LAKE_LAYERS: usize = 10;
 const DEFAULT_THICKNESS_M: [f64; LAKE_LAYERS] =
     [0.1, 1.0, 2.0, 3.0, 4.0, 5.0, 7.0, 7.0, 10.45, 10.45];
-const FREEZING_K: f64 = 273.16;
+use crate::FREEZING_K;
 const LIQUID_HEAT_CAPACITY_J_KG_K: f64 = 4188.0;
 const ICE_HEAT_CAPACITY_J_KG_K: f64 = 2117.27;
 const FUSION_HEAT_J_KG: f64 = 0.3336e6;

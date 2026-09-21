@@ -4,9 +4,7 @@ use anyhow::{ensure, Result};
 
 use crate::FREEZING_K;
 
-const fn f77(value: f32) -> f64 {
-    value as f64
-}
+use crate::f77;
 
 /// CoLM runtime selector DEF_THERMAL_CONDUCTIVITY_SCHEME.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

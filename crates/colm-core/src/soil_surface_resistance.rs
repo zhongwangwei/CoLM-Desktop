@@ -6,9 +6,7 @@ use crate::{
     soil_hydraulic_conductivity, soil_psi_from_vliq, soil_vliq_from_psi, SoilHydraulicModel,
 };
 
-const fn f77(value: f32) -> f64 {
-    value as f64
-}
+use crate::f77;
 
 const WATER_DENSITY_KG_M3: f64 = f77(1000.0);
 const ICE_DENSITY_KG_M3: f64 = f77(917.0);

@@ -55,32 +55,32 @@ fn ground_fluxes_match_current_fortran_stability_iteration() {
     ]
     .into_iter()
     .zip([
-        -9.050_966_145_821_576e-3,
-        -3.016_988_715_273_858e-3,
-        -3.260_403_247_598_156,
-        -5.977_405_953_929_978,
-        -1.901_901_894_432_245,
+        -0.009050966042723508,
+        -0.0030169886809078357,
+        -3.2604031179852844,
+        -5.9774057163063805,
+        -1.9019018188247363,
         -2.791_487_895_779_627e-6,
         -3.349_785_474_935_553e-6,
         -2.233_190_316_623_703e-6,
-        279.448_806_933_432,
+        279.4488069454323,
         4.386_041_915_221_334e-3,
     ]) {
         close(actual, expected);
     }
     close(state.momentum_roughness_m, 8.04e-2);
-    close(state.heat_roughness_m, 9.967_934_940_436_811e-3);
-    close(state.dimensionless_height, 1.838_149_925_512_125);
-    close(state.bulk_richardson_number, 1.445_477_180_093_097e-1);
-    close(state.friction_velocity_m_s, 8.916_537_077_854_563e-2);
+    close(state.heat_roughness_m, 0.009967932936598789);
+    close(state.dimensionless_height, 1.838149882592967);
+    close(state.bulk_richardson_number, 0.14454771795707752);
+    close(state.friction_velocity_m_s, 0.08916537027071159);
     close(state.humidity_scale, 2.608_905_108_382_518e-5);
-    close(state.temperature_scale_k, 3.033_076_604_225_572e-2);
-    close(state.momentum_integral, 14.186_124_858_467_476);
-    close(state.heat_integral, 15.825_515_467_820_178);
-    close(state.moisture_integral, 15.332_102_523_593_068);
+    close(state.temperature_scale_k, 0.030330765451490275);
+    close(state.momentum_integral, 14.186124727873654);
+    close(state.heat_integral, 15.825515540242034);
+    close(state.moisture_integral, 15.332102598772808);
     close(
         state.ground_flux_temperature_derivative_w_m2_k,
-        2.786_789_903_726_313,
+        2.7867897939360136,
     );
 }
 

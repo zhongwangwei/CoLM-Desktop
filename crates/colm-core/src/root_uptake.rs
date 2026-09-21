@@ -4,9 +4,7 @@ use anyhow::{ensure, Result};
 
 use crate::{soil_psi_from_vliq, soil_vliq_from_psi, SoilHydraulicModel, FREEZING_K};
 
-const fn f77(value: f32) -> f64 {
-    value as f64
-}
+use crate::f77;
 
 const WATER_DENSITY_KG_M3: f64 = f77(1000.0);
 const WILTING_POTENTIAL_MM: f64 = f77(-1.5e5);

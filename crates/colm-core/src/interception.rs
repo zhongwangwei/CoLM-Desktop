@@ -4,9 +4,7 @@ use anyhow::{ensure, Result};
 
 use crate::FREEZING_K;
 
-const fn f77(value: f32) -> f64 {
-    value as f64
-}
+use crate::f77;
 
 /// Mutable canopy water pools in mm water equivalent.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -89,7 +87,9 @@ pub fn canopy_wetness(
     );
     let coverage = |depth_mm: f64, capacity_mm: f64| {
         if depth_mm > 0.0 {
-            (depth_mm / capacity_mm).powf(f77(0.666_666_7_f32)).min(1.0)
+            (depth_mm / capacity_mm)
+                .powf(f77(0.666_666_666_666))
+                .min(1.0)
         } else {
             0.0
         }

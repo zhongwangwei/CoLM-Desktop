@@ -11,9 +11,7 @@ use crate::{
     MoninObukhovInput, SurfaceLayerScheme,
 };
 
-const fn f77(value: f32) -> f64 {
-    value as f64
-}
+use crate::f77;
 
 const VON_KARMAN: f64 = f77(0.4);
 const GRAVITY_M_S2: f64 = f77(9.80616);

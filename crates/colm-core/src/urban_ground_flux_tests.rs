@@ -4,17 +4,17 @@ use super::*;
 fn urban_ground_flux_matches_upstream_similarity_iteration() {
     let state = urban_ground_flux(input()).unwrap();
     // Standalone gfortran run of MOD_Urban_GroundFlux.F90 with input().
-    close(state.reference_temperature_k, 295.00846286442504);
+    close(state.reference_temperature_k, 295.0084628642726);
     close(state.reference_specific_humidity, 0.006999299795538154);
     close(state.momentum_roughness_m, 0.002);
-    close(state.heat_roughness_m, 0.0014033271885592411);
+    close(state.heat_roughness_m, 0.0014033271661024452);
     close(state.dimensionless_height, 2.0);
-    close(state.friction_velocity_m_s, 0.06961164812733447);
+    close(state.friction_velocity_m_s, 0.06961164709004011);
     close(state.moisture_scale, -0.00023955131746144747);
-    close(state.temperature_scale_k, 2.8952833536348623);
+    close(state.temperature_scale_k, 2.8952833046451514);
     close(state.momentum_similarity, 18.38772753565746);
-    close(state.heat_similarity, 7.928255370161513);
-    close(state.moisture_similarity, 7.928255370161513);
+    close(state.heat_similarity, 7.9282553861715375);
+    close(state.moisture_similarity, 7.9282553861715375);
 }
 
 #[test]

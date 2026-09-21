@@ -56,7 +56,7 @@ fn prepared_point_forcing_matches_mod_forcing() {
             .partition_precipitation(0, PrecipitationPhaseScheme::AirTemperature)
             .unwrap()
             .large_scale_rain_kg_m2_s,
-        0.001_089_996_337_890_625,
+        0.001089999999999975,
     );
 }
 

@@ -10,9 +10,9 @@ use anyhow::{ensure, Result};
 use crate::{solve_tridiagonal, urban_phase_change, UrbanPhaseChangeInput};
 
 const WATER_HEAT_CAPACITY_J_KG_K: f64 = 4188.0;
-const ICE_HEAT_CAPACITY_J_KG_K: f64 = 2117.27_f32 as f64;
-const AIR_THERMAL_CONDUCTIVITY_W_M_K: f64 = 0.023_f32 as f64;
-const ICE_THERMAL_CONDUCTIVITY_W_M_K: f64 = 2.290_f32 as f64;
+const ICE_HEAT_CAPACITY_J_KG_K: f64 = 2117.27;
+const AIR_THERMAL_CONDUCTIVITY_W_M_K: f64 = 0.023;
+const ICE_THERMAL_CONDUCTIVITY_W_M_K: f64 = 2.290;
 
 /// Inputs to one `UrbanWallTem` Crank-Nicolson update, ordered exterior to
 /// interior.  `interface_depth_m` has one more entry than the layer arrays.

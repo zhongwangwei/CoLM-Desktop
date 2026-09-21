@@ -2,9 +2,7 @@
 
 use anyhow::{ensure, Result};
 
-const fn f77(value: f32) -> f64 {
-    value as f64
-}
+use crate::f77;
 
 const VON_KARMAN: f64 = f77(0.4);
 const LEAF_DRAG_COEFFICIENT: f64 = f77(0.2);
@@ -35,7 +33,7 @@ pub fn canopy_roughness(
         "canopy roughness inputs are invalid"
     );
     let mut square_root_drag = -VON_KARMAN / ((f77(0.01) / canopy_height_m).ln() - PSI_H);
-    square_root_drag = square_root_drag.max(f77(0.0031_f32.powf(0.5)));
+    square_root_drag = square_root_drag.max(f77(0.0031_f64.powf(0.5)));
     let initial_area_index = if square_root_drag <= f77(0.3) {
         ((square_root_drag.powi(2) - f77(0.003)) / f77(0.3))
             .min(canopy_cover_fraction * (1.0 - f77(-20.0).exp()))

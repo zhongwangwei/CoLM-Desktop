@@ -6,9 +6,7 @@
 
 use anyhow::{ensure, Result};
 
-const fn f77(value: f32) -> f64 {
-    value as f64
-}
+use crate::f77;
 
 const ITERATIONS: usize = 6;
 
@@ -178,7 +176,7 @@ pub fn photosynthesis_parameters(
             * input.soil_water_stress
             * c4_fraction)
         * input.canopy_integration[0];
-    let pressure_conversion = f77(44.6_f32 * 273.16_f32) * input.air_pressure_pa / f77(1.013e5);
+    let pressure_conversion = f77(44.6 * 273.16) * input.air_pressure_pa / f77(1.013e5);
     let boundary_conductance_h2o =
         pressure_conversion / (input.leaf_boundary_resistance_s_m * input.leaf_temperature_k);
     Ok(PhotosynthesisParameters {
@@ -298,7 +296,7 @@ pub fn stomata(input: StomataInput, options: StomataOptions) -> Result<StomataSt
         }
     }
     let pressure_conversion =
-        f77(44.6_f32 * 273.16_f32) * input.photosynthesis.air_pressure_pa / f77(1.013e5);
+        f77(44.6 * 273.16) * input.photosynthesis.air_pressure_pa / f77(1.013e5);
     Ok(StomataState {
         assimilation_mol_m2_s: assimilation,
         respiration_mol_m2_s: photo.respiration_mol_m2_s,

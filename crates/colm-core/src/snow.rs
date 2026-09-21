@@ -9,9 +9,7 @@ const MAX_SNOW_LAYERS: usize = 5;
 // `-fdefault-real-8`.
 pub(crate) const SNOW_AGE_FREEZING_K: f64 = 273.16;
 
-const fn f77(value: f32) -> f64 {
-    value as f64
-}
+use crate::f77;
 
 #[derive(Clone, Copy, Default)]
 struct SnowLayer {

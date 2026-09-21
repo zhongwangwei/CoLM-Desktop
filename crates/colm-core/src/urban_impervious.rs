@@ -14,9 +14,9 @@ use crate::{
 const WATER_DENSITY_KG_M3: f64 = 1000.0;
 const ICE_DENSITY_KG_M3: f64 = 917.0;
 const WATER_HEAT_CAPACITY_J_KG_K: f64 = 4188.0;
-const ICE_HEAT_CAPACITY_J_KG_K: f64 = 2117.27_f32 as f64;
-const AIR_THERMAL_CONDUCTIVITY_W_M_K: f64 = 0.023_f32 as f64;
-const ICE_THERMAL_CONDUCTIVITY_W_M_K: f64 = 2.290_f32 as f64;
+const ICE_HEAT_CAPACITY_J_KG_K: f64 = 2117.27;
+const AIR_THERMAL_CONDUCTIVITY_W_M_K: f64 = 0.023;
+const ICE_THERMAL_CONDUCTIVITY_W_M_K: f64 = 2.290;
 
 /// Inputs to `UrbanImperviousTem`, packed top-to-bottom as snow then road.
 #[derive(Debug, Clone, Copy)]
