@@ -7802,3 +7802,105 @@ CN-Cng 的 `forc_hgt_t = 6 m` ⇒ 少 **0.0588 K**，而 `dth ≈ 26 K` ⇒ 0.23
 `f_srnd` 7.98e3→7.66e3、`f_alb` 2.71e3→2.61e3 …）—— 是几十条边缘条目跨过 1e-7
 的线，不是大项变大；而根上的阶梯降了 10–160 倍，所以这一改**更贴上游**，湿窗那
 0.45% 是轨迹重排，不是回归。
+
+## 站点坐标漏了 f32 截断：`coszen` 差 7.8e-10（实测，**已修**）
+
+上一节修完 `thm` 之后，第 1 步重启里仍有 26/68 个变量不同，最大的 `ldew` 2.6e-6。
+这一轮改用**独立差分驱动**逐位定位，先钉死"不是 `GroundFluxes`"，再顺着第 1 步
+重启的**分叉指纹**找到真正的一处。
+
+### 一、`GroundFluxes` 洗清：真实第 1 步输入下逐位相等
+
+`/tmp/gf/` 把上游 `MOD_GroundFluxes.F90` 连同 `MOD_FrictionVelocity`/`MOD_Const_Physical`
+独立编译（桩掉 `mod_namelist` 与 `MOD_TurbulenceLEddy`），配一个读 25 列、吐 23 列的
+驱动；Rust 侧同样把 `ground_fluxes` 包成一个驱动。两件事都做了：
+
+1. 300 组物理量级随机的输入：11 个量有差，**最大 7.6e-16（1–3 ULP）**，
+   即 `moninobuk` 里的 FMA 收缩噪声。
+2. 从真实算例用 `GF_DUMP=1` 落下的第 1 步 `GroundFluxInput`（CN-Cng 干窗
+   2008-01-01 00:00 那一步，`t_grnd=283 K`、`qg=dqgdT=rss=0`）：
+   **23 个输出全部逐位相等**，含 `zol`、`z0hg`、`tstar`、`qstar`、`fm/fh/fq`。
+
+第 1 步的 `GroundFluxes` 至此可以排除 —— 也就是说，重启里 2.6e-6 那一档
+**不是地面通量内核来的**。
+
+### 二、第 1 步重启的分叉指纹：误差最小的那个才是源头
+
+把 26 个不同变量按相对差排序（`t_soisno` 逐元素给出）：
+
+| 量 | max_rel | 绝对差 |
+|---|---|---|
+| `emis` | 5.20e-10 | 5.2e-10 |
+| `coszen` | **7.80e-10** | 7.2e-10 |
+| `t_soisno[6]`（第 2 层） | 1.53e-09 | 4.3e-07 K |
+| `tref` | 1.92e-09 | 5.0e-07 K |
+| `fm` / `trad` / `fh`=`fq` | 1.6e-08 … 3.0e-08 | — |
+| `tleaf` | 3.69e-08 | 9.8e-06 K |
+| `ustar` / `qref` / `qstar` / `rib` / `tstar` / `zol` | 4.5e-08 … 2.9e-07 | — |
+| `wliq_soisno[5]`（第 1 层） | 2.07e-07 | 1.2e-06 kg/m² |
+| `wice_soisno[5]` | 3.61e-07 | 1.1e-06 kg/m² |
+| `smp[0]` / `hk[0]` | 4.47e-07 / 2.37e-06 | — |
+| `fwet_snow` / `ldew` | 1.76e-06 / 2.64e-06 | — |
+
+两件事一眼可见：
+
+* **`t_soisno` 只有第 2…6 层在动，第 1 层与第 7…10 层逐位相等**，而且相对差
+  逐层衰减 1.5e-9 → 7.4e-15 —— 这是热传导三对角解把一个浅层扰动往下传的形状。
+* **`wliq/wice/smp/hk` 只有第 1 层在动**（`smp[1..9]` 还是入参的占位值 `-10`，
+  VSF 下只有顶层被真正更新），第 1 层那一步正好从 283 K 降到 `tfrz` 并结冰
+  3.076 kg/m² —— 分叉落在**土壤第 1 层的相变**上。
+
+### 三、真正的一处：`coszen` 用的是 namelist 的 f64 坐标
+
+`coszen` 是分叉里唯一**不来自重启**、又位于链条最上游的量，所以先查它。
+上游独立驱动给出结论（`0x` 是 `orb_coszen` 的位模式）：
+
+| 传给 `orb_coszen(calday, lon, lat)` 的 lon/lat | 结果 |
+|---|---|
+| 站点文件的 `123.50920104980469 / 44.593299865722656` | `BFED996DB11A70D1` = **Fortran 重启里的值** |
+| namelist 的 `123.50920 / 44.59330` | `BFED996DB17D99DD` = **Rust 重启里的值** |
+
+`calday = 365.6777546296296`（步末 00:30 经地方时订正）两边一致，
+`orb_coszen` 本身也逐位一致（同一份源码独立编译）。所以差的是**坐标**。
+
+上游的真值在 `MOD_SingleSrfdata.F90:239`/`:1508`：
+
+```fortran
+IF ((lon_in /= SITE_lon_location) .and. (SITE_lon_location /= -1.e36_r8)) THEN
+   write(*,*) 'Warning: Longitude mismatch: ', lon_in, ' in data file and ', SITE_lon_location ...
+ENDIF
+SITE_lon_location = lon_in          ! ← 用站点文件（real*4）的值覆盖 namelist 的 f64
+CALL normalize_longitude (SITE_lon_location)
+IF (.not. isgreenwich) LocalLongitude = SITE_lon_location
+```
+
+这一覆盖在**每次运行**都会发生（算例日志里那两条 `Latitude/Longitude mismatch`
+就是它打的）。之后所有几何都用被覆盖后的值：`MOD_Initialize.F90:325-326` 的
+`patchlonr/patchlatr`、`MOD_Forcing.F90:790-791` 的 `coszen`/`cosazi`、
+`MOD_NetSolar` 的 `dlon`、`CoLMMAIN.F90:2076` 的 `coszen`、history 的 `lat`/`lon`。
+
+本仓库的 `site_coordinate_degrees()`（`f64::from(value as f32)`）本来就为 history
+的 `lat`/`lon` 写了这一层量化，但**只用在 history 上**；`read_point_runtime_config`
+里存在 `PointRuntimeConfig` 的仍是 namelist 的 f64，于是 `patchlonr` 那一族
+全部偏了 1.3e-7 度。修法就是让配置里的站点坐标本身过一遍这个函数（一处），
+helper 的文档同步改写。三个黄金算例的站点文件经核对都满足
+`file == f32(namelist)`（CN-Cng、US-NR1-snow 逐位验证）。
+
+修完再跑第 1 步：**`coszen` 从不同变量表里消失（逐位相等）**，重启的
+`coszen` 由 `-0.9249790636648033` 变回 `-0.9249790629433169`。
+
+### 四、诚实记录：这一处**没有**带动其余物理量
+
+同一次重跑里 `emis` 5.20e-10、`t_soisno` 1.53e-09、`tleaf` 3.69e-08、
+`wice_soisno` 3.61e-07 **一个数值都没变**。原因是那 1e-9 的 `coszen` 差进了
+`prepare_surface_optics` 也被夜间分支吃掉（本步 `coszen = -0.925 < 0`，
+反射率用夜间取值），而这三份黄金窗口的 `DEF_USE_Forcing_Downscaling` 都是关的。
+所以这一改是**保真度修正**，在现有黄金上 tier 计数不动（仍是 55/70/79，
+tier0 全零），它保住的是：重启里的 `coszen`、以及开地形降尺度时
+`coszen/cosazi` 那条链。
+
+`coszen` 归位后剩下的分叉起点已经缩到**土壤第 1 层的相变**
+（`wice_soisno[5]` / `wliq_soisno[5]` 是重启里最早上游的一对），而它上游的
+`tleaf` 已经差到 3.7e-8 —— 下一步该查的是叶温内核的**输入**（`net_solar` 的
+`sr/sabg/sabvsun…`、`interception`、`root_uptake`），同一套独立差分驱动的做法
+可以直接搬过去。

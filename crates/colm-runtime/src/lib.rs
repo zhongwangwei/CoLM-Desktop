@@ -89,13 +89,18 @@ pub struct PointDownscalingTemplate<'a> {
     pub config: ForcingDownscalingConfig,
 }
 
-/// history 里的 `lat`/`lon` 取**单精度**的站点坐标。
+/// 站点坐标取**单精度**：上游的站点经纬度是 `real(r4)`。
 ///
-/// 上游把站点经纬度存成 `real(r4)`（`mksrfdata` 会为此报
-/// "Latitude mismatch: 44.593299865722656 in data file and 44.593299999999999 in
-/// namelist"），写进 history 的 `lat`/`lon` 因此是 f32 量化过的值。
-/// 这两个量是 tier0 的**坐标**、按逐位比，所以本仓库也必须量化 ——
-/// 直接写 namelist 里的 f64 会在 `golden-compare` 里报成两个变量超差。
+/// `mksrfdata` 会为此报 "Latitude mismatch: 44.593299865722656 in data file and
+/// 44.593299999999999 in namelist"，随后 `MOD_SingleSrfdata.F90:239`/`:1508`
+/// 把站点文件里读出来的值赋回 `SITE_lon_location`/`SITE_lat_location`，**覆盖**
+/// namelist 里那个 f64。此后所有几何 —— `MOD_Initialize.F90:325-326` 的
+/// `patchlonr/patchlatr`、`MOD_Forcing.F90:790-791` 的 `coszen`/`cosazi`、
+/// `MOD_NetSolar` 的 `dlon`、`CoLMMAIN.F90:2076` 与 history 的 `lat`/`lon` ——
+/// 用的都是这个被 f32 截断过的值。
+///
+/// 本仓库不读站点文件里的经纬度（运行时保持无 NetCDF 依赖），改用 `f32(namelist)`：
+/// 本仓库的站点文件由 namelist 值生成，二者逐位相等。
 fn site_coordinate_degrees(value: f64) -> f64 {
     f64::from(value as f32)
 }
@@ -743,8 +748,15 @@ pub fn read_point_runtime_config(case_namelist: impl AsRef<Path>) -> Result<Poin
         history_frequency: history_frequency(&case)?,
         history_grouping: history_grouping(&case)?,
         greenwich: required_bool(&case, "DEF_simulation_time%greenwich")?,
-        longitude_degrees: required_real(&case, "SITE_lon_location")?,
-        latitude_degrees: required_real(&case, "SITE_lat_location")?,
+        // 站点坐标要过一遍 f32（理由见 [`site_coordinate_degrees`]）。原先这里留的是
+        // namelist 的 f64：CN-Cng 的 `SITE_lat_location = 44.59330` 与站点文件的
+        // `44.593299865722656` 差 1.3e-7 度，于是 `CoLMMAIN.F90:2076` 那个 `coszen`
+        // 差 7.8e-10 —— 实测第 1 步重启的 `coszen` 由 `-0.9249790636648033` 变回
+        // 上游的 `-0.9249790629433169`（逐位相等），`f_coszen` 同样归位。
+        // 白天这一项还会经 `prepare_surface_optics` 进反射率；本步是夜间，所以
+        // 其余物理量一个也没动（见 docs/implementation-verification.md 该节）。
+        longitude_degrees: site_coordinate_degrees(required_real(&case, "SITE_lon_location")?),
+        latitude_degrees: site_coordinate_degrees(required_real(&case, "SITE_lat_location")?),
         forcing_file,
         wind_height_m,
         temperature_height_m,
