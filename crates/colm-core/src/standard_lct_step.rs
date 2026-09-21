@@ -294,6 +294,7 @@ fn finish_energy_step(
         interception,
         root_uptake.soil_water_stress,
         root_uptake.maximum_transpiration_mm_s,
+        precipitation.precipitation_temperature_k,
         soil_surface_resistance_s_m,
         ground_flux_input,
         preliminary_ground_flux,
@@ -975,6 +976,16 @@ fn leaf_input<'a>(
     interception: CanopyInterceptionFluxes,
     soil_water_stress: f64,
     transpiration_limit_kg_m2_s: f64,
+    // **本步** `rain_snow_temp` 的输出 `t_precip`。
+    //
+    // 不能拿 `LeafTemperatureInput` 里那份：装配期只放了一个 `forc_t` 占位，
+    // 而 `LEAFTEMPERATURE` 收的是 `THERMAL` 上游刚由 `rain_snow_temp` 定出来的
+    // 湿球温度（`MOD_RainSnowTemp.F90` 末尾那一段）。实测 CN-Cng 第 1 步：
+    // 湿球 256.5923 对 `forc_t` 256.9100，差 0.318 K。该步截留量为 0，所以这一项
+    // 被 `cw*max(0,qintr)*(t_precip-tleaf)` 乘成 0、当场看不出差别；有雨雪的
+    // 湿窗才显形（`f_ldew` 超差条数 170→160、`f_fevpa` 165→163、`f_qintr`/
+    // `f_qdrip` 的偏差也各降一档），叶温本身在湿窗里也整体更贴上游。
+    precipitation_temperature_k: f64,
     soil_surface_resistance_s_m: f64,
     ground_flux: GroundFluxInput,
     preliminary_ground_flux: GroundFluxState,
@@ -1026,7 +1037,7 @@ fn leaf_input<'a>(
             .ground_humidity_temperature_derivative_kg_kg_k,
         soil_surface_resistance_s_m,
         ground_emissivity: input.ground_emissivity,
-        precipitation_temperature_k: input.precipitation_temperature_k,
+        precipitation_temperature_k,
         intercepted_rain_kg_m2_s: interception.retained_rain_kg_m2_s,
         intercepted_snow_kg_m2_s: interception.retained_snow_kg_m2_s,
         ground_latent_heat_j_kg: ground_flux.vaporization_heat_j_kg,

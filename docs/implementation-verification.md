@@ -7904,3 +7904,110 @@ tier0 全零），它保住的是：重启里的 `coszen`、以及开地形降�
 `tleaf` 已经差到 3.7e-8 —— 下一步该查的是叶温内核的**输入**（`net_solar` 的
 `sr/sabg/sabvsun…`、`interception`、`root_uptake`），同一套独立差分驱动的做法
 可以直接搬过去。
+
+## 叶温内核收到的 `t_precip` 是装配期的 `forc_t` 占位（实测，**已修**）
+
+顺着上一节的分叉指纹继续往下，用**成对探针**（上游 `MOD_Thermal_CanopyPhase_Extended.F90`
+的 `CALL LeafTemperature` 之前、Rust `standard_lct_step.rs` 的 `leaf_input(...)`
+之后各打一组同名标量）把叶温内核的输入逐位比了一遍。
+
+### 一、叶温内核的输入：34 个量里只有一个是错的
+
+| 量 | Fortran | Rust（修前） |
+|---|---|---|
+| `tl`(步初) `lai` `sai` `fsun` `sabv` `parsun` `parsha` `frl` `thermk` `extkb` `extkd` `emg` `t_grnd` `qg` `dqgdT` `rss` `qintr_rain` `qintr_snow` `obug` `z0hg` `ustarg` `zolg` `ribg` `tstarg` `ldew` `ldew_rain` `ldew_snow` `etrc` `rstfac` `htvp` `o2m` `co2m` `dewmx` | — | **逐位相等** |
+| **`t_precip`** | **256.59229215659377** | **256.91000366210938** |
+
+Rust 那份是 `f32(256.91)`，正是 `forc_t`：装配期的 `LeafTemperatureInput`
+（`assembly.rs` 的两处 `precipitation_temperature_k: forcing.air_temperature_k`）
+留的是占位值，而 `LEAFTEMPERATURE` 收的是 `THERMAL` 上游刚由 `rain_snow_temp`
+定出来的**湿球温度**（`MOD_RainSnowTemp.F90` 末尾那一段；`forc_t < 275.65` 时
+`t_precip = min(tfrz, wetbulb)`）。差 **0.318 K**。
+
+修法：把本步 `PrecipitationState::precipitation_temperature_k` 显式传进
+`leaf_input`（同一个 `precipitation` 早已喂给 `interception` 与 `ground_temperature`，
+只有叶温这一支漏了）。修后该组 34 个量**全部逐位相等**。
+
+### 二、这一步在干窗里是**惰性**的，在湿窗里不是
+
+干窗第 1 步 `qintr_rain = qintr_snow = 0`（该步无降水进冠层），而这一项在能量平衡里
+是 `cpliq*max(0,qintr)*(t_precip-tl)` —— 当场乘成 0，所以第 1 步重启里 26 个不同变量
+**一个数值都没变**。湿窗（7 月、有雨雪）才显形：`f_ldew` 超差条数 170→**160**、
+`f_fevpa` 165→**163**、`f_qinfl`/`f_qdrip`/`f_qintr` 的偏差各降一档，
+`f_assimsha`/`f_etrsha` 的峰值也各降一档；tier2 计数仍是 70（都是长期轨迹量）。
+
+## 第 1 步叶温分叉的真凶：**黄金自己**的 `o3coef*` 未初始化（实测，**未修**）
+
+叶温输入全部逐位相等之后，第 1 步的输出**依然**差 3.7e-8。于是把探针挪进
+叶温的迭代循环（上游 `it = it+1` 之前、Rust `iteration += 1` 之前），逐轮比。
+
+### 一、第 1 轮就已经差了，而且差得极大
+
+| 量 | Fortran 第 1 轮 | Rust 第 1 轮 |
+|---|---|---|
+| `tl` `fsenl` `fsenl_dtl` `ustar` `wta0` `wtg0` `cgh` `cgw` `raw` `qsatl` `qsatlDT` | — | 逐位相等 |
+| **`etr` = `fevpl`** | **6.60985755327047220e-05** | **1.37119817067997586e-08** |
+| `fevpl_dtl` | 6.68426870876120065e-06 | 1.38663457599805794e-09 |
+| `dele` | 125.348551869418486 | 114.795849797353341 |
+| `obu` | −11.406859170735791 | −11.444129656300083 |
+| `wtaq0` / `wtgq0` | 0.700110744457918655 / 0.245000584561997442 | 0.740762226776087940 / 0.259226386708448886 |
+| `irab` | −86.3589314410997417 | −86.3589314410997559（1 ULP） |
+
+`etr` 差 **4800 倍**，`wtaq0+wtgq0` 上游是 0.9451（= `(caw+cgw)/(caw+cgw+cfw)`）
+而 Rust 是 1.0 —— 也就是 Rust 的 `cfw ≈ 0`。反推上游 `cfw = 0.01019879` 是对的，
+Rust 的 `cfw = 3.6e-9`；`caw`/`cgw`/`rb`/`rssun` 的前置量全都逐位相等，
+说明 Rust 算的是**另一组** `rssun`/`rssha`：上游这一轮 `rs` 只有约 14 s/m
+（夜间气孔仍开，`g = g0`），Rust 是约 1.1e5 s/m（完全关闭）。
+
+### 二、原因是上游的已知缺陷，不是移植错
+
+`MOD_LeafTemperature_Extended.F90` 里 `o3coefv_sun/o3coefv_sha/o3coefg_sun/o3coefg_sha`
+是 `intent(inout)` 的哑元，调用方（`MOD_Thermal_CanopyPhase_Extended.F90`）用模块
+SAVE 变量传进来。上游**只在迭代循环之后**才给它们赋值：
+
+```fortran
+      ENDDO                                    ! :1310 迭代结束
+      IF(DEF_USE_OZONESTRESS)THEN
+         ...
+      ELSE
+         o3coefv_sun = 1.0_r8                  ! :1323
+         o3coefg_sun = 1.0_r8                  ! :1324
+         o3coefv_sha = 1.0_r8
+         o3coefg_sha = 1.0_r8
+      ENDIF
+```
+
+而循环体内 `:792`/`:807` 就把它们传给了 `stomata`。所以**第一次调用**（第 1 步）
+读到的是未定义值 —— `o3coefg` 于是不再等于 1，`rssun`/`rssha` 随之失真。
+`o3coef*` 是模块 SAVE 变量，`LEAFTEMPERATURE` 每次调用结束都会把它们置回 1，
+**所以只有第 1 步被污染**，第 2 步起上游自己就恢复了。
+（同一个缺陷也是黄金第 1 步 `gs0sun = -4.53e38`、`vegwp`、`rst = -5e-31` 的来源。）
+
+### 三、对照实验：把缺陷补上，两边第 1 轮降到 1 ULP
+
+在叶温子程序入口处提前 `o3coef* = 1`（只改 `vendor/` 的临时副本做实验，已还原），
+重建内核再比：
+
+| 量 | Fortran（补丁后） | Rust | 相对差 |
+|---|---|---|---|
+| `etr`/`fevpl` | 1.37119817067997553e-08 | 1.37119817067997586e-08 | 2.4e-16 |
+| `fevpl_dtl` | 1.38663457599805773e-09 | 1.38663457599805794e-09 | 1.5e-16 |
+| `irab` | −86.3589314410997417 | −86.3589314410997559 | 1.6e-16 |
+| `fsenl` `fsenl_dtl` `ustar` `wta0` `wtg0` `cgh` `cgw` `raw` `qsatl` `qsatlDT` `del` `dirab_dtl` `evplwet` `tl` | — | — | **逐位相等** |
+
+第 1 步重启也从「26 个变量差 1e-6…1e0」降到「18 个变量差 1e-16…1e-12」
+（最差 `fwet_snow` 2.8e-12，`smp` 7.0e-15，`ldew` 1.5e-16）。
+
+**结论：第 1 步的分叉不是移植错误，是黄金算例本身的缺陷。** Rust 侧这一层已经对齐到
+1 ULP；剩下的 1 ULP 是 gfortran `-ffp-contract=fast` 把 `etr = a*b*(...)` 收缩成 FMA、
+而 Rust 没有收缩 —— 与既有的 FMA 类问题同源，量级 1e-16，不是根因。
+
+### 四、下一步（留给下一轮）
+
+三份黄金是拿**带这个缺陷的内核**生成的，所以任何「15 天窗口收敛」的目标都先卡在
+第 1 步的这次污染上。要做的是：把 `o3coef*` 的初始化挪到迭代之前（`vendor/` 的本地
+改动，记进 `vendor/PROVENANCE.md`）→ 重新生成三份黄金 → 重跑 tier 分层
+（`oracle/tolerances.toml` 的 tier1/tier2 分档可能要重排）→ 复核
+`oracle/tests/{histmap,metrics}.rs` 与 `golden-compare` 的期望值。
+`oracle/golden/kernel-manifest.json` 会被 `golden-run --write-golden` 重写，
+那是**应该**跟着更新的（它记的就是生成黄金的那颗内核）。
