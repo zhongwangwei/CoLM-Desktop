@@ -6430,3 +6430,44 @@ RUPROBE soil=0 t=11 liq=11 ...
   再让某一层跨过 `dzmin` 阈值。`dzmin = [0.010, 0.015, 0.025, 0.055, 0.115]`
   与 `snowlayerscombine` 的两个循环逐行对照过，逻辑一致。
   下一步就去查 `snowcompaction` 的厚度演化。
+
+## 清单里的 `colm_git_sha` 记的不是 Fortran 源（2026 年，实测，**未修**）
+
+加 `US-NR1-snow` 黄金时用 `--write-golden`，顺手看到
+`oracle/golden/kernel-manifest.json` 里 `colm_git_sha` 从 `3950ecf` 变成
+`edd6d98`。两个都不是这笔改动碰过的东西 —— 一查就清楚了：
+
+```
+$ git -C vendor/CoLM202X rev-parse --short HEAD
+1fac8e8
+$ git rev-parse --short HEAD
+1fac8e8
+```
+
+`vendor/CoLM202X` 是**入库的源码快照**，目录里没有 `.git`，所以
+`git -C <子目录> rev-parse HEAD` 会**往上走进外层仓库**，返回的是**本仓库**的
+HEAD。也就是说：
+
+* `colm_git_sha` 每做一次 **Rust** 提交就变一次，哪怕一行 Fortran 都没动；
+* 它**无法**识别 Fortran 源 —— 而 `manifest.rs` 的注释把这一组字段定义为
+  "可复现、认定**配置身份**"，`identity()` 还是 `preset@colm_git_sha`；
+* 于是 `golden-run` 的 `check_kernel_provenance` **永远在告警**，而告警的本意是
+  "工具链换了，比对全红可能是漂移不是物理"。一个恒亮的告警等于没有告警。
+
+**建议的修法**（未实施）：把身份换成**只在 vendor 内容变化时才变**的量。最省事
+且语义正确的一条是"最后一个碰过 `vendor/CoLM202X` 的提交"：
+
+```bash
+GIT_SHA=$(git -C "$REPO_ROOT" log -1 --format=%h -- vendor/CoLM202X)
+```
+
+它同样可复现、同样便宜，而且**只随 Fortran 源变化**。
+
+**为什么没有当场改**：改了之后必须重建内核、并**重新产出三份黄金**，否则
+`oracle/golden/kernel-manifest.json` 会记下一份"身份对不上它的产出"的历史。
+重建内核 + 三份黄金是一个独立、可验证的改动，值得单独一轮，不该混在
+"加一个积雪窗口"里 —— 尤其因为黄金的字节会随之成为新的基准，那是另一件事。
+
+**现状**：`oracle/golden/kernel-manifest.json` 保留入库值（`3950ecf`），
+`--write-golden` 之后手工 `git checkout` 还原（它的三个 `sha256` 本来就不可复现）。
+这条记在这里，免得下一个人再查一遍。
