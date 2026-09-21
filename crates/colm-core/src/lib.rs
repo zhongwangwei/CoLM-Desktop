@@ -49,6 +49,7 @@ pub mod soil_surface_resistance;
 pub mod soil_water;
 pub mod standard_lct_step;
 pub mod static_state;
+pub mod surface_budget;
 pub mod surface_optics;
 pub mod thermal_properties;
 pub mod thermal_water;
@@ -252,6 +253,7 @@ pub use time_state::{
     SoilHydraulicState,
 };
 
+pub use surface_budget::{surface_budget, SurfaceBudget};
 pub use urban::{
     derive_urban_geometry, derive_urban_lucy, UrbanConfig, UrbanInput, UrbanLucyInput,
     UrbanLucyState, UrbanState,

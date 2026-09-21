@@ -5527,3 +5527,56 @@ per-PFT 是 `1.e-7` —— 拿错不会报错，只会让导度差 5 倍。`land
 **history 黄金对比只能看见"写出来的列"，看不见"没写出来的列"。** 每补完一个
 stage 的写出面，都应该把该 stage 的**重启**也逐变量比一遍 —— 这轮的三个缺陷
 全部只在重启对比里显形。
+
+## `trad`/`emis` 也回写了，重启差异清空到只剩物理残差（2026 年，实测）
+
+上一节把 `rss` 修好，但 `trad`/`emis` 还差"把它从 history 提到内核"这一步。做法不是
+重写，而是**搬家**：把 `history.rs` 里那份私有的 `SurfaceBudget`/`surface_budget`
+整体挪进 `colm_core`（新文件 `crates/colm-core/src/surface_budget.rs`），字段与函数
+改成 `pub`，两个消费者共用一份：
+
+- history 的 `set_lct_surface_budget` / `set_lct_balance_errors`（`f_olrg`/`f_emis`/
+  `f_trad`/`f_grnd`/`f_lfevpa` 与 `f_zerr`）；
+- 续跑写回的 `evolved_overrides`（`trad`/`emis`）。
+
+顺手把入参从 `&StandardLctSoilOutput` 收窄成 `&StandardLctEnergyOutput` ——
+这个函数从头到尾只用 `output.energy`，从来没用过 `output.water`（`grep output.water`
+是 0 命中），留着整根土柱只会让调用方以为它需要。
+
+**搬家而不是重写**是关键：算式一字未动，所以 history 的黄金结果**逐条不变**
+（`f_trad`/`f_emis`/`f_olrg` 仍在原来的量级），而重启里：
+
+| 变量 | 上游 | 本仓库 | 差 |
+|---|---|---|---|
+| `rss` | 0.03337258 | 0.03337231 | −2.6e-07 |
+| `trad` | 254.2613382 | 254.2492411 | −1.21e-02 K |
+| `emis` | 1.00031475 | 1.00031834 | +3.6e-06 |
+
+`trad` 的 1.2e-2 K 正好是同一时刻 `t_grnd` 的 1.43e-2 K 那个继承残差
+（`trad = (olrg/stefnc)**0.25`）。
+
+### 修完之后：重启里**没有未写出的列**了
+
+再逐变量比一遍（65 个变量两边都有，无缺项），前几名全是物理残差：
+
+| 变量 | max\|d\| | 性质 |
+|---|---|---|
+| `smp` | 2.03e+03（相对 ≤8.7e-4） | 继承自土壤水 |
+| `t_soisno` / `t_grnd` | 1.43e-2 K | 继承 |
+| `trad` | 1.21e-2 K | 继承自 `t_grnd` |
+| `wa` | 5.25e-3 | 继承 |
+| `wliq_soisno` | 4.60e-3 | 继承 |
+| `tleaf` | 2.42e-3 K | 继承 |
+
+也就是说，重启那条线从"三列根本没写"变成了"只剩继承残差"。这一条**只用重启对比
+才能发现**：`rss`/`trad`/`emis` 在 history 里要么没这一列（`trad`/`emis` 有，
+但 history 比的是**写出值**，不是"有没有回写重启"），要么差得看不出来。
+
+**给下一轮的两条**：
+
+1. `smp` 是这次新暴露的量（history 没有它）。相对差 ≤8.7e-4，第 1 层最大 ——
+   与 `wliq` 的分布一致，暂判为继承，但要真判它得把 `soilwater` 的
+   `smp`/`hk` 逐步打出来对照。
+2. 重启里那 30 来个**没有**被回写、只是"碰巧对得上"的变量（相似函数、
+   `fveg`/`green`/`sag`/`snw_rds`/`mss_*` 等）值得逐个确认：这份窗口上它们
+   恰好接近，换一个窗口可能就不是。判据是"上游是否把它当时间变量读回来"。

@@ -291,7 +291,7 @@ struct SurfaceDiagnostics {
 
 impl SurfaceDiagnostics {
     /// 要回写的诊断量，顺序与 `evolved_overrides` 的取值表一致。
-    const NAMES: [&'static str; 17] = [
+    const NAMES: [&'static str; 19] = [
         "coszen",
         "fwet_snow",
         "tref",
@@ -301,6 +301,8 @@ impl SurfaceDiagnostics {
         // **入参**重启里它是 `spval`，不回写就会把一列填充值原样交出去
         // （实测上游同一时刻 0.033373，本仓库曾经写 `-1e36`）。
         "rss",
+        "trad",
+        "emis",
         "gs0sun",
         "gs0sha",
         "z0m",
@@ -1656,6 +1658,9 @@ impl StandardLctRestartTemplate {
         ] {
             overrides.push(RadiationFields::splice(source, self.patch, name, matrix)?);
         }
+        // `olrg`/`emis`/`trad`/`fgrnd`/`lfevpa` 的公共中间量：history 与续跑写回共用
+        // 同一份实现，免得"同一份文件里的两个量互相矛盾"。
+        let budget = colm_core::surface_budget(step.energy, self.soil_layers())?;
         // 表面诊断量：`(patch,)` 形状，只换本 patch 的那一项，其余保持重启里的原值。
         for (name, value) in [
             ("coszen", step.cosine_zenith),
@@ -1668,6 +1673,12 @@ impl StandardLctRestartTemplate {
             // 而算例的入参重启里它是 `spval`（`-1e36`），于是 `--restart-out`
             // 写出一列全填充值，上游同一时刻写的是 0.033373。
             ("rss", step.energy.soil_surface_resistance_s_m),
+            // `trad`/`emis` 同样是 `MOD_Thermal` 收尾处的逐步输出，上游一并写回。
+            // 它们的算式与 history 的 `f_trad`/`f_emis`/`f_olrg` **必须**只有一份，
+            // 所以用刚提到 `colm_core::surface_budget` 的那一份 ——
+            // 原先只有 history 在算，重启写回拿不到，于是写的是入参那份（283 / 1.0）。
+            ("trad", budget.radiative_temperature_k),
+            ("emis", budget.bulk_emissivity),
             ("gs0sun", leaf_output.sunlit_stomatal_conductance_mol_m2_s),
             ("gs0sha", leaf_output.shaded_stomatal_conductance_mol_m2_s),
             ("z0m", leaf_output.momentum_roughness_m),
