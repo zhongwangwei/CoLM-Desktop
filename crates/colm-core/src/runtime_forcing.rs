@@ -54,6 +54,14 @@ pub struct RuntimeForcing {
     pub northward_wind_m_s: f64,
     pub downward_longwave_w_m2: f64,
     pub shortwave: ShortwaveForcing,
+    /// `forc_solarin`：驱动里那一列**总**短波，原样带走。
+    ///
+    /// 必须单独留一份，不能拿 [`Self::shortwave`] 四个波段相加顶替 ——
+    /// 拆波段是"总量 × 权重"再四舍五入，加回去不保证逐位回到总量。实测
+    /// `CN-Cng` 冬季窗口 264 条里有 13 条的 `f_xy_solarin` 因此差 1 ULP
+    /// （tier0 是逐位比较，会红）。上游 `MOD_Forcing` 是反着来的：先有总量
+    /// `forc_solarin`，再拆出四个波段，而 `f_xy_solarin` 照抄的是总量。
+    pub solar_in_w_m2: f64,
     pub cosine_zenith: f64,
     /// `forc_rhoair` from `MOD_Forcing`, the density every THERMAL branch carries.
     ///
@@ -105,7 +113,12 @@ pub fn prepare_runtime_forcing(input: RuntimeForcingInput) -> Result<RuntimeForc
     let (eastward_wind_m_s, northward_wind_m_s) = if input.wind_is_vector {
         (input.eastward_wind_m_s, input.northward_or_scalar_wind_m_s)
     } else {
-        let component = input.northward_or_scalar_wind_m_s / 2.0_f64.sqrt();
+        // **乘 `1/sqrt(2)` 而不是除以 `sqrt(2)`。** 上游是
+        // `forc_xy_us = forcn(6) * (1/sqrt(2.0_r8))`（`MOD_Forcing.F90:547-549`），
+        // gfortran 把 `1/sqrt(2)` 折成一个 f64 常量再乘。除法与"乘倒数"在末位
+        // 会分叉，而 `f_xy_us`/`f_xy_vs` 是 tier0（逐位）比较 —— 实测 264 条里
+        // 39 条因此差 1 ULP。
+        let component = input.northward_or_scalar_wind_m_s * (1.0 / 2.0_f64.sqrt());
         (component, component)
     };
     let cosine_zenith = orbital_cosine_zenith(
@@ -123,6 +136,7 @@ pub fn prepare_runtime_forcing(input: RuntimeForcingInput) -> Result<RuntimeForc
         eastward_wind_m_s,
         northward_wind_m_s,
         downward_longwave_w_m2: input.downward_longwave_w_m2,
+        solar_in_w_m2: input.downward_shortwave_w_m2,
         shortwave: split_broadband_shortwave(input.downward_shortwave_w_m2, cosine_zenith),
         cosine_zenith,
         air_density_kg_m3: air_density_kg_m3(

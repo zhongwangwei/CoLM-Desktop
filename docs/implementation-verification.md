@@ -4628,3 +4628,62 @@ errorw = (endwb - totwb) - (forc_prc + forc_prl - fevpa - rnof) * deltim
 `history_tests.rs::the_balance_residuals_close_on_one_step` 的注释里：
 合成夹具按 patch 序号给了 `wdsrf = 1.0`，测试必须先把步首 `wdsrf` 清零，
 否则残差会是**恰好 -1.0 mm**，与被测的拼项无关。
+
+## 两个 forcing 镜像的逐位分叉：`sqrt(2)` 的除法 vs 乘倒数、以及短波总量（2026 年，实测）
+
+`f_xy_us`/`f_xy_vs`/`f_xy_solarin` 是 tier0（逐位比较）里仅有的三处**能修**的分叉
+（第四处 `f_xy_q` 是上游自己的时间对齐问题，见上）。三条都查到了机制。
+
+### `forc_us`/`forc_vs`：`x / sqrt(2)` 与 `x * (1/sqrt(2))` 不是同一个数
+
+`CN-Cng` 的强迫文件只有**标量风**（`Wind`），nml 里 `vname(5) = 'NULL'`，
+所以走的是 `MOD_Forcing.F90:547-549`：
+
+```fortran
+CALL block_data_copy (forcn(6), forc_xy_us , sca = 1/sqrt(2.0_r8))
+CALL block_data_copy (forcn(6), forc_xy_vs , sca = 1/sqrt(2.0_r8))
+```
+
+gfortran 把 `1/sqrt(2.0_r8)` 折成一个 f64 常量，再与每个样本**相乘**。
+本仓库写的是 `wind / 2.0_f64.sqrt()` —— **除法**。两者在末位会分叉：
+实测第 1 条记录（样本 3.9130001068115234 与 3.6549999713897705）：
+
+```
+上游  0.5*(a*(1/sqrt2) + b*(1/sqrt2)) = 2.675692087658228
+本仓库 0.5*(a/sqrt2     + b/sqrt2    ) = 2.6756920876582284   ← 差 1 ULP
+```
+
+改成乘 `1.0 / 2.0_f64.sqrt()` 后，264 条**逐位相同**（`f_xy_us` 与 `f_xy_vs`
+一起修好，因为它们同源）。这类"除法 vs 乘倒数"的分叉在逐位比较下一定会显形，
+值得记一条规矩：**只要上游写的是 `sca = <常量>`，本仓库就要乘那个常量，
+不要用数学上等价的除法。**
+
+### `f_xy_solarin`：拆出去的波段加不回总量
+
+上游 `MOD_Forcing` 是**先有总量再拆波段**：`forc_xy_solarin = forcn(7)` 原样抄，
+而本仓库的 `RuntimeForcing` 只带四个波段，`f_xy_solarin` 写的是
+`direct_visible + direct_NIR + diffuse_visible + diffuse_NIR`。拆波段是
+"总量 × 权重"再四舍五入，**加回去不保证逐位回到总量** —— 实测 264 条里
+13 条差 1 ULP。
+
+修法不是改拆波段的算法，而是把总量原样带走：`RuntimeForcing` 新增
+`solar_in_w_m2`（`= MOD_Forcing` 的 `forc_solarin`），`f_xy_solarin` 取它。
+降尺度分支同理取降尺度后的**新总量**，而不是把新波段加回去。
+修完从 13 条降到 **11 条**。
+
+### 剩下的 11 条是上游 coszen 重分配的产物，本轮不追
+
+那 11 条的差仍然是 1 ULP（最大 5.68e-14 W/m²，量级 193 W/m²），不是公式错：
+上游短波槽走的是 `tintalgo = 'coszen'`（`MOD_Forcing.F90:495-517`）
+`forcn = cosz/avgcos * forcn_LB|UB`。253 条里那个比值按位等于 1，
+11 条里差 1 ULP —— 要么是 `cosz`/`avgcos` 的时间戳算得差一点，
+要么是线性插值的权重退化成了 `(1-1e-16, 1e-16)`。
+要复现得先把上游的时间戳算法逐位搬过来，成本与收益不成比例，先记录在这里。
+
+`f_xy_q` 那 3 条不是同一类：差值 1.69e-5（相对 1.7%），是上游自己取了
+强迫文件里根本不存在的样本对（见上文），本仓库算的是真·相邻样本均值。
+
+### 结果
+
+`golden-compare` 的分层残差从 4/27/51 降到 **2/27/51**（总 82 → 80），
+tier0 只剩 `f_xy_solarin`(11/264) 与 `f_xy_q`(3/264)。

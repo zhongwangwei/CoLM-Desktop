@@ -230,6 +230,8 @@ pub fn apply_downscaled_runtime_forcing(
         eastward_wind_m_s: downscaled.eastward_wind_m_s,
         northward_wind_m_s: downscaled.northward_wind_m_s,
         downward_longwave_w_m2: downscaled.downward_longwave_w_m2,
+        // 降尺度给出的是**新总量**，所以 `forc_solarin` 取它，而不是把新波段加回去。
+        solar_in_w_m2: downscaled.downward_shortwave_w_m2,
         shortwave: runtime_shortwave_from_total(
             downscaled.downward_shortwave_w_m2,
             forcing.cosine_zenith,
