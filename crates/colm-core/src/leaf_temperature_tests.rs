@@ -84,6 +84,33 @@ fn the_leaf_latent_heat_follows_the_leaf_temperature() {
     assert!((LATENT_HEAT_SUBLIMATION_J_KG - LATENT_HEAT_VAPORIZATION_J_KG - 0.3336e6).abs() < 1.0);
 }
 
+/// `thm` 是 `forc_t + 0.0098*forc_hgt_t`，**不是位温**。
+///
+/// `MOD_Thermal.F90:550` 把它定义成按固定递减率抬到观测高度的气温，
+/// 而同处的 `th` 才是 `forc_t*(1e5/psrf)**(rgas/cpair)`。名字看起来像
+/// "potential temperature" 的缩写，但内容不是 —— 按名字推断会让叶温
+/// 拿到一个差 `0.0098*forc_hgt_t` 的参考温度：本仓库实测（`forc_hgt_t = 6` m）
+/// 是 0.0588 K 的常数偏差，第一步叶温差 0.0316 K，一直传导到 `scv`/`fsno`/`alb`。
+#[test]
+fn the_reference_height_temperature_is_not_the_potential_temperature() {
+    let air_temperature_k = 256.91;
+    let temperature_height_m = 6.0;
+    let reference = reference_height_temperature_k(air_temperature_k, temperature_height_m);
+    assert_eq!(reference, air_temperature_k + 0.0588);
+    assert_eq!(
+        reference_height_temperature_k(air_temperature_k, 0.0),
+        air_temperature_k,
+        "at the surface the correction vanishes"
+    );
+    // 位温是另一条式子（`th`）。取一个真实的高原气压（850 hPa）—— 在接近 1000 hPa
+    // 时两条式子会靠得很近（实测 99920 Pa 下只差 5e-5 K），拿它当判据会漏掉混淆。
+    let potential = air_temperature_k * (100_000.0_f64 / 85_000.0).powf(287.04 / 1004.64);
+    assert!(
+        potential - reference > 1.0,
+        "thm must not be confused with th: {potential} vs {reference}"
+    );
+}
+
 #[test]
 fn leaf_temperature_rejects_missing_leaf_area() {
     let mut input = sample_input();

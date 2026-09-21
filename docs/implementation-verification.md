@@ -5046,3 +5046,115 @@ f_ldew（冠层水，+2.4%）→ max(0, ldew-satcap) 放大 → pg_snow → f_sc
 且 `f_scv`/`f_fsno` 在显式雪层算例上**逐位不变** —— 说明这次改的确实是"叶面潜热"
 那一条，没有碰到雪层质量路径。（`scv`/`fsno` 之所以逐位不变：该算例的雪走显式层，
 而本仓库 `scv` 的分叉在薄雪塌缩路径上，那个算例的 `snowdp` 越过了阈值。）
+
+## 叶温残差的根：`thm` 不是位温（2026 年，实测）
+
+上一节把一切归到"叶温求解剩下的 0.03 K"。这一节按计划逐步比较准 Newton 迭代的
+分子与分母，找到了根 —— 而且它**不在**那条 1500 行的例程里。
+
+### 逐项比较：导数全对，水平项差了
+
+在 `MOD_LeafTemperature_Extended.F90` 循环之后打一条（每步一行）：
+`dtl, sabv, irab, dirab_dtl, fsenl, fsenl_dtl, htvpl, fevpl, fevpl_dtl, clai,
+deltim, qintr_*, t_precip, tl, tlbef`；本仓库在 `leaf_temperature.rs` 的循环之后
+打对应的 `last.*`。第一步（初始状态完全相同）对比：
+
+| 项 | 上游 | 本仓库 | 相对差 |
+|---|---|---|---|
+| `sabv` | 0 | 0 | 0 |
+| `irab` | −14.24104 | −14.12033 | **+0.85%** |
+| `dirab_dtl` | −3.827487 | −3.826125 | +0.036% |
+| `fsenl` | 60.73040 | 61.20513 | **+0.78%** |
+| `fsenl_dtl` | 40.61558 | 40.62748 | +0.029% |
+| `fevpl` | −2.63596e-5 | −2.64981e-5 | +0.53% |
+| `fevpl_dtl` | 7.23414e-6 | 7.20547e-6 | −0.40% |
+
+**两个导数几乎逐位相同，两个通量差 0.8%。** 这正是"线性化对、水平项错"的形状。
+`irab` 的差还刚好等于 `dirab_dtl × ΔT`（−3.827 × (−0.0316) = +0.121，实测 +0.1207），
+说明它是被叶温差驱动的**结果**，不是原因；而 `fsenl` 的差（+0.4747）与
+`fsenl_dtl × ΔT` = −1.28 差了 1.76 W/m²，说明它有一个**独立**的输入差。
+
+把差归一到"温度目标"上：`fsenl = rhoair·cpair·cfh·((wta0+wtg0)·tl − (wta0·thm + wtg0·tg))`，
+而 `fsenl_dtl = rhoair·cpair·cfh·(wta0+wtg0)`，所以
+
+```
+T_target := (wta0*thm + wtg0*tg)/(wta0+wtg0) = tl − fsenl/fsenl_dtl
+上游 264.387691   本仓库 264.344896   →  差 −0.0428 K
+```
+
+### 决定性的一列：`thm` 恒定差 0.0588 K
+
+把 dump 扩成 `wta0, wtg0, thm, tg, rhoair` 之后，第一步：
+
+| 量 | 上游 | 本仓库 | 差 |
+|---|---|---|---|
+| `tg` | 283.0 | 283.0 | **逐位相同** |
+| `rhoair` | 1.3559947226232352 | 1.3559947226232352 | **逐位相同** |
+| `wta0` | 0.5930009697 | 0.5931055474 | +1.0e-4（0.018%） |
+| `wtg0` | 0.2364138446 | 0.2363789881 | −3.5e-5 |
+| `thm` | **256.96880366210939** | **256.91000366210938** | **−0.0588 K（全 528 步恒定）** |
+
+`0.0098 × 6.0 = 0.0588`。上游 `MOD_Thermal.F90:550`（编译的是
+`extends/interception/MOD_Thermal_CanopyPhase_Extended.F90:550`）：
+
+```fortran
+! potential temperature at the reference height
+thm = forc_t + 0.0098*forc_hgt_t                     !intermediate variable equivalent to
+                                                     !forc_t*(pgcm/forc_psrf)**(rgas/cpair)
+th  = forc_t*(100000./forc_psrf)**(rgas/cpair)       !potential T
+thv = th*(1.+0.61*forc_q)                            !virtual potential T
+```
+
+**`thm` 不是位温。** 它按固定递减率把气温抬到观测高度；位温是同处的 `th`。
+本仓库两处（`standard_lct_step.rs` 的 `leaf_input` 与 `assembly.rs` 的模板）都把
+`reference_air_temperature_k` 填成了 `forcing.air_temperature_k`（= `forc_t`）。
+
+叶温模块里两者分工明确，混不得：`dth = thm − taf`、`taf = wta0*thm + wtg0*tg + wtl0*tl`
+用 `thm`，而 `dthv = dth*(1+0.61*qm) + 0.61*th*dqh` 与
+`moninobukini(ur, th, thm, thv, dth, ...)` 里的那一项用 `th`。
+
+### 修法与实测
+
+`colm_core::reference_height_temperature_k(air_temperature_k, temperature_height_m)`
+一处定义 `thm`（常数命名为 `REFERENCE_LAPSE_RATE_K_M = 0.0098`），两处调用点都用它。
+`forc_hgt_t` 取自强迫文件的 `reference_height_t`（本算例 6 m），与
+`MOD_Forcing.F90:297-311` 的优先级一致。
+
+`CN-Cng-aligned`（264 条）：
+
+| 变量 | 上一节末 | 本节末 | 倍数 |
+|---|---|---|---|
+| `f_tleaf` | 1.0841e-1 | **2.6142e-2** | 4.1× |
+| `f_fevpl` | 7.2662e-7 | **2.1807e-7** | 3.3× |
+| `f_lfevpa` | 2.0115 | **1.5723** | 1.3× |
+| `f_ldew` | 5.0819e-3 | **1.6463e-3** | 3.1× |
+| `f_scv` | 1.8301e-3 | **1.5871e-4** | 11.5× |
+| `f_fsno` | 6.6044e-4 | **5.5924e-5** | 11.8× |
+| `f_alb` | 4.1998e-4 | **3.4156e-5** | 12.3× |
+| `f_t_grnd` | 6.5690e-2 | **2.2148e-2** | 3.0× |
+
+`f_qcharge`/`f_qdrip`/`f_z0m`/`f_zerr` 四条**离开残差表**，
+分层残差 `{2, 19, 51}` → **`{2, 19, 48}`**（72 → 69 条）。
+
+积雪算例 `CN-Cng-vegsnow` 同向且更猛（63 → **57** 条，`{"tier1": 19, "tier2": 38}`）：
+
+| 变量 | 上一节末 | 本节末 | 倍数 |
+|---|---|---|---|
+| `f_tleaf` | 5.7573e-2 | **3.1853e-3** | 18× |
+| `f_lfevpa` | 2.0305 | **6.2071e-2** | 33× |
+| `f_t_grnd` | 6.5775e-2 | **1.1337e-3** | 58× |
+| `f_ldew` | 2.0503e-3 | **1.8633e-4** | 11× |
+| `f_fevpl` | 1.3362e-7 | **2.6519e-8** | 5× |
+
+### 顺带更正一条：`f_lfevpa` 的残余现在来自 `fevpg`
+
+`f_lfevpa` 还剩 1.572 W/m²，但它**不再是**叶面那一项：`f_fevpl` 只差 2.18e-7，
+乘 `htvpl` 是 6.2e-4。剩下的 1.572 对应 `1.572/htvp ≈ 5.5e-7` kg/m²/s，
+而 `f_fevpg`（地面蒸发）正是这个量级 —— 所以它现在归到地面蒸发那条已知残差上，
+与叶温链条无关了。
+
+### 一条规矩
+
+`thm` 这个名字看起来就是 "potential temperature" 的缩写，而定义不是。
+上一节的 `htvpl` 也一样（`main/` 的式子与实际编译的 `extends/` 不同）。
+**照着源码里的表达式抄，不要按名字或按 `main/` 推断。**

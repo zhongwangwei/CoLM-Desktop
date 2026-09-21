@@ -162,8 +162,9 @@ pub use land_cover::{
     RootFractionScheme,
 };
 pub use leaf_temperature::{
-    leaf_temperature, LeafPlantHydraulicInput, LeafTemperatureInput, LeafTemperatureOptions,
-    LeafTemperatureOutput, LeafTemperatureState, ObservationHeightMode,
+    leaf_temperature, reference_height_temperature_k, LeafPlantHydraulicInput,
+    LeafTemperatureInput, LeafTemperatureOptions, LeafTemperatureOutput, LeafTemperatureState,
+    ObservationHeightMode,
 };
 pub use monin_obukhov::{
     canopy_monin_obukhov, canopy_monin_obukhov_with_scheme, initialize_monin_obukhov,

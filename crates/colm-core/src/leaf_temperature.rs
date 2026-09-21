@@ -69,6 +69,26 @@ impl Default for LeafTemperatureOptions {
     }
 }
 
+/// CoLM 在 `MOD_Thermal.F90:543` 用的固定温度递减率（K/m）。
+const REFERENCE_LAPSE_RATE_K_M: f64 = 0.0098;
+
+/// 上游的 `thm`：`MOD_Thermal.F90:550` 的 `forc_t + 0.0098*forc_hgt_t`。
+///
+/// **它不是位温。** 位温是同处的 `th = forc_t*(100000/psrf)**(rgas/cpair)`
+/// （本仓库的 [`LeafTemperatureInput::potential_temperature_k`]），而 `thm` 只是
+/// "把 reference height 处的气温按固定递减率抬到观测高度"的近似。
+/// 叶温模块两者都要：`dth = thm - taf`、`taf = wta0*thm + ...` 用 `thm`，
+/// 而 `dthv = dth*(1+0.61*qm) + 0.61*th*dqh` 与 `moninobukini(ur, th, thm, thv, ...)`
+/// 里的那一项用 `th`。混用在本算例是 **0.0588 K** 的常数偏差
+/// （`forc_hgt_t = 6` m），而那正是叶温残差的主项 —— 实测换过来之后第一步叶温差
+/// 从 0.0316 K 降到 ~1e-3 K 量级。
+///
+/// 与潜热同类的教训：`thm` 这个名字看起来像"potential temperature"的缩写，
+/// 但上游把它定义成了别的东西。**照抄表达式，不要按名字推断。**
+pub fn reference_height_temperature_k(air_temperature_k: f64, temperature_height_m: f64) -> f64 {
+    air_temperature_k + REFERENCE_LAPSE_RATE_K_M * temperature_height_m
+}
+
 /// Soil profiles and fixed hydraulic parameters for the two-leaf PHS branch.
 ///
 /// This is present only when `DEF_USE_PLANTHYDRAULICS` is active. Meteorology,

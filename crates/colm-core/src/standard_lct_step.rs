@@ -868,7 +868,13 @@ fn leaf_input<'a>(
         diffuse_extinction: radiation.diffuse_extinction,
         eastward_wind_m_s: forcing.eastward_wind_m_s,
         northward_wind_m_s: forcing.northward_wind_m_s,
-        reference_air_temperature_k: forcing.air_temperature_k,
+        // 上游的 `thm`（`MOD_Thermal.F90:550`），**不是位温** —— 位温是同处
+        // 下面的 `potential_temperature_k`。见
+        // [`crate::reference_height_temperature_k`]。
+        reference_air_temperature_k: crate::reference_height_temperature_k(
+            forcing.air_temperature_k,
+            input.temperature_height_m,
+        ),
         potential_temperature_k: ground_flux.potential_temperature_k,
         virtual_potential_temperature_k: ground_flux.virtual_potential_temperature_k,
         reference_specific_humidity: forcing.specific_humidity,

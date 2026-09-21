@@ -1146,7 +1146,12 @@ impl StandardLctRestartTemplate {
                     eastward_wind_m_s: forcing.eastward_wind_m_s,
                     northward_wind_m_s: forcing.northward_wind_m_s,
                     // 内核覆盖：`leaf_input` 从 forcing 与地面通量重算下列各量。
-                    reference_air_temperature_k: forcing.air_temperature_k,
+                    // `thm = forc_t + 0.0098*forc_hgt_t`（`MOD_Thermal.F90:550`），
+                    // **不是位温** —— 位温是 `th`，由 `ground_flux_input` 重算。
+                    reference_air_temperature_k: colm_core::reference_height_temperature_k(
+                        forcing.air_temperature_k,
+                        physics.temperature_height_m,
+                    ),
                     potential_temperature_k: forcing.air_temperature_k,
                     virtual_potential_temperature_k: forcing.air_temperature_k,
                     reference_specific_humidity: forcing.specific_humidity,
