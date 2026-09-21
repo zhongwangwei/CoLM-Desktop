@@ -5925,3 +5925,25 @@ history / 重启侧要一起改的四件事：`f_qlayer` **必须注册并填充
 `DEF_USE_SNICAR`、`CaMa_Flood`/`LWINFILT`、`CROP`/`DEF_USE_IRRIGATION`、
 `DataAssimilation`、`DEF_SPLIT_SOILSNOW`、tracer、`DEF_URBAN_RUN`、
 `DEF_Runoff_SCHEME == 1`（`Runoff_VIC` 未移植）。CN-Cng 默认下这些全为假。
+
+### 六、施工进度（滚动更新）
+
+| 单元 | 状态 |
+|---|---|
+| `flux_sat_zone_all`（521 行分派） | **已移植**（`20ecc00`），6 条单测 |
+| `flux_all`（344 行分派） | **已移植**（`96fea09`），6 条单测 |
+| `find_unsat_lev_lower` | **已移植**（`find_unsaturated_level_lower`，private） |
+| `Richards_solver` 驱动体 | 未动 —— 待读 `:900-1089`（扰动块的其余部分） |
+| `soil_water_vertical_movement` | 未动 —— 唯一的新物理 |
+| `variably_saturated_flow_step` 编排 | 未动 |
+| 运行时/history/重启接线 | 未动 |
+
+两个分派器**故意先落盘**：它们不含公式、只做参数接线，而接错参数是这类移植最
+常见的错法，所以每条分支都用"用同一批内核函数按手写的实参重算"的单测钉住。
+移植时撞出两处**对称但不同**的上游写法，都已按原样保留并在测试里注明：
+`flux_all` 的水面/湿润锋退化支一个取 `qq(lb)`、另一个取 `qq(ub-1)`；
+柱内非饱和界面的下端距离用的是 `sp_zi(ilev_u)`（跨过中间的饱和层），
+不是 `sp_zi(ilev_l-1)` —— 后者是"看起来显然"的那个答案，测试用它跑就是错的。
+
+两个分派器落地后**黄金结果一位没变**（`CN-Cng-aligned` tier2 = 48、
+`CN-Cng-phs` tier2 = 49），因为它们还没有调用方。
