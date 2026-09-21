@@ -8186,7 +8186,7 @@ IF (wliq_soisno(lb)<=0. .and. wice_soisno(lb)>0.) htvp = hsub
 
 超差**变量数**仍是 55/70/79（同样的变量，只是超差记录少了很多），tier0 全零。
 
-## 还没动的一处：上游 `eroot` 的**数组错位**（实测，**待定**）
+## 上游 `eroot` 的**数组错位**：照抄还是修上游（实测，**已按“照抄”落地**）
 
 `snow` 现在就剩 `f_rootr` 一条逐点超差，而它是**悬崖式**的：
 
@@ -8214,7 +8214,62 @@ CALL eroot (nl_soil,trsmx0,porsl, ..., psi0,rootfr,dz_soisno,t_soisno,wliq_soisn
 
 这条影响的是**物理**（`rstfac`/`etrc`/`rootr` 直接进叶温的蒸腾），不只是诊断量。
 两条路：(a) 照抄上游的错位；(b) 像 `o3coef*` 那样把它当上游缺陷修掉并重生成黄金。
-这是**取舍**，不是纯技术问题，留给作者决定，本轮先记下来。
+
+### 决定：照抄（(a)），理由是黄金就是这份代码生成的
+
+tier0–3 的判据是"与上游**逐位**一致"，而黄金由 `vendor/CoLM202X` 现状生成。选 (b)
+等于同时改上游、重生成黄金、再让移植去追新黄金 —— 那是**换靶子**，会把"移植对不对"
+换成"上游对不对"，而后者不是本仓库要证的东西。（`o3coef*` 那次是例外：那是未初始化，
+不是确定性的错位，黄金自己都不可复现，只能修。）
+
+### 序列关联不是猜测：`gfortran` 上真跑了一遍
+
+```fortran
+real(8) :: col(-2:8)            ! lb=-2（3 层雪），土层 1..8
+subroutine callee(nl, t) ; real(8), intent(in) :: t(1:nl) ; write(*,*) t
+call callee(10, col)            ! 实参是整数组名，不是段
+```
+
+`gfortran -O2 -fdefault-real-8` 实测输出 `-2 -1 0 1 2 3 4 5 6 7`：哑元第 1 项拿到
+`col(-2)`，最后两项（`col(7)`、`col(8)`）**看不见**。错位量 = `-lb` = `|snl|`，与上一节的
+推断完全一致。（`call callee(10, col(-2:8))` 结果相同 —— 整数组名与显式段在这里同义。）
+
+### 落地与实测：`f_rootr` 2362 → 111 个逐位差
+
+`root_uptake_input` 改成用**整列**（下标 0 = 雪顶）的前 `nl_soil` 个元素配土层索引的
+`porsl`/`psi0`/`rootfr`/`theta_r`（`standard_lct_step.rs`）。雪窗 `US-NR1-snow` 全场：
+
+| | 逐位不同的值 | `f_rootr` |
+|---|---|---|
+| 改前（对齐语义） | 48284 | 2362 / 3600 |
+| 改后（照抄错位） | 46033 | **111** / 3600 |
+
+### 但影响面只有 `f_rootr` 一条 —— 因为 PHS 把 `rstfac` 覆盖掉了
+
+改前改后做了一次干净的 A/B（`git stash` 前后各跑一次全窗口），**除 `f_rootr` 外所有
+变量逐位不变**：`f_gssun`/`f_gssha`/`f_assim`/`f_lfevpa`/`f_vegwp` 的新旧差都是 0。
+
+原因不是错位没进物理，而是三个黄金都走 `DEF_USE_PLANTHYDRAULICS = .true.`：
+`MOD_PlantHydraulic.F90:353-368` 的 `calcstress_twoleaf` 把 `rstfacsun`/`rstfacsha`
+（`intent(inout)`）重写成 PHS 自己的胁迫因子，`eroot` 给的 `rstfac` 到不了气孔。
+`etrc` 只剩 `MOD_LeafTemperature_Extended.F90:1137` 的 `IF(etr.ge.etrc) etr = etrc`，
+雪窗四月 `etr` 远小于 `etrc`，这条钳位从不触发 —— 所以 `etrc` 的差也传不下去。
+
+结论：这条**只对关掉 PHS 的算例有物理影响**，对三个黄金只是 `f_rootr` 这条诊断量。
+剩下那 111 个差从第 36 条记录起、量级 1e-8 相对，是黄昏 1 ULP 漂移（见最后一节），
+不再是结构性的。
+
+### 同一缺陷的第二处：`SoilSurfaceResistance`（**同样照抄，本机无算例可验**）
+
+`MOD_Thermal_CanopyPhase_Extended.F90:626-629` 用**同样的方式**把
+`dz_soisno`/`t_soisno`/`wliq_soisno`/`wice_soisno` 整列交给
+`MOD_SoilSurfaceResistance.F90:83-86`，而那里的哑元也是 `(1:nl_soil)`：它第 1 项读到的
+是**雪层**的温度/液态水/冰/层厚，却配 `porsl(1)`/`psi0(1)`/`theta_r(1)`（土层 1）。
+`SoilSurfaceResistance` 内部只用下标 1，所以错位的是那四个标量。Rust 的
+`soil_surface_resistance_input` 原先取 `[snow_layers]`（= 土层 1，对齐语义），已同样
+改成取 `[0]`（雪顶）。三个黄金的 `DEF_RSS_SCHEME = 0`（`MOD_Namelist.F90:1947-1951`：
+LCT + 非 Campbell 自动置 0），这条支路**本机一次都没被走到**，所以它是按语言规则
+照抄的，没有实测支撑 —— `Not-tested`。
 
 ## 气孔 WUE 分支的内部 CO2 选错了支：`gssun` 差 2 倍（实测，**已修**）
 
@@ -8317,3 +8372,45 @@ Rust 的 `bottom_pressure_pa * 体积分数` 同源）、`OXYGEN_VOLUME_FRACTION
 取**第 14/15 步**那两行对比 —— 第 14 步逐位相同意味着种子在第 15 步才出现，
 比"从第 0 步就埋下"好找得多。`f_gssha` 比 `f_gssun` 早一步（第 14 步就 9.35e-07）
 出现差异，说明先查**阴叶**那一支的 `parsha`/`assimsha`。
+
+## `a*b + c*d` 到底收缩哪一个乘：量出来了，是**左边那个**（实测，**纠正一条先前写反的猜测**）
+
+第 7236 节量的是单乘加（`Y + a*b`、`a*b - c`）—— 那类形状只有一个乘可收缩，不存在顺序问题。
+真正的空白是**两个乘相加**：`a*b + c*d` 里 GCC 把哪一个变成 `fma`？这决定了
+`MOD_NetSolar.F90:176-183` 那几行（`parsun`/`parsha`/`sabvsun`/`sabvsha`/`sabvg`）
+要么写 `fma(a,b,c*d)`、要么写 `fma(c,d,a*b)`，两者在多数输入上相等、少数差 1 ULP。
+
+### 方法：Fortran 算值，C 用 libm 的 `fma` 算两个候选
+
+`gfortran` 里**没有** `fma` 内建（写了报 `'fma' declared INTRINSIC ... does not exist`；
+`intrinsic :: fma` 也不能放在 `implicit none` 前面），所以对照值由同一套 GCC 的 C
+`fma()` 提供 —— 它按定义就是正确舍入的一次乘加。3000 组随机 `a..h`，
+`-O2 -fdefault-real-8`（即 `-ffp-contract=fast` 默认）：
+
+| 表达式 | 与 gfortran 逐位相同的候选 |
+|---|---|
+| `a*b + c*d` | `fma(a, b, c*d)` **3000/3000**；`fma(c, d, a*b)` 1952/3000 |
+| `a*b + c*d + e*f + g*h` | `fma(g,h, fma(e,f, fma(a,b, c*d)))` **3000/3000** |
+
+（后者的另外两个候选分别只有 2410、1485。）C 自己编出来的 `a*b + c*d` 与 gfortran
+**逐位相同**，所以这不是"Fortran 前端特殊"。
+
+### 规则：`X + Y` 里收缩**左边**那个乘积，右边的乘积先舍入
+
+- `a*b + c*d` → `fma(a,b, c*d)`：左乘被收缩，右乘 `c*d` 先算好当代数项。
+- 左结合链 `((a*b + c*d) + e*f) + g*h` → 内层按上一条；外层左边已经不是乘了，
+  于是收缩右边那个乘：`fma(e,f, ·)`、`fma(g,h, ·)`。合起来就是
+  `fma(g,h, fma(e,f, fma(a,b, c*d)))` —— **四条乘里只有 `c*d` 保持一次独立舍入**。
+
+所以 `MOD_NetSolar.F90` 的五处应按"左乘进 `fma`、右乘先舍入"来写。这与第 7236 节
+`Y + eccen*X` 的形状不矛盾（那里只有一个乘，收缩它即可）。
+
+### 顺带纠正：`net_solar.rs` 里那条写反的 `mul_add` 已回退
+
+工作区里曾有一版未提交的 `net_solar.rs`，把 `visible_absorption` 写成
+`fma(diffuse_visible, coef[0][1], direct_visible*coef[0][0])` —— 收缩的正是**右边**那个乘，
+与实测相反；它的注释还写着"gfortran 把后一个乘法收缩进加法"。该改动对三个窗口的
+实测输出**没有任何影响**（干窗仍是 27 条 tier2），且触发两条 clippy
+`unnecessary parentheses` 警告，已 `git checkout` 回退。要按上面这条规则重写，
+必须先确认它能改变实测结果，否则只会往热路径里塞没人能验的 `mul_add`
+（本仓库的规矩：`mul_add` 只写在**量过**的地方）。

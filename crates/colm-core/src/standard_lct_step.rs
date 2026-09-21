@@ -934,10 +934,27 @@ fn non_split_ground_humidity_input(
 
 fn root_uptake_input(input: StandardLctEnergyInput<'_>) -> Result<RootUptakeState> {
     let ground = input.ground_temperature;
-    let soil = ground.snow_layers;
+    // **调用点按 Fortran 的序列关联原样复刻，不做“对齐修正”。**
+    //
+    // `MOD_Thermal_CanopyPhase_Extended.F90:672` 把整列 `t_soisno`/`wliq_soisno`/
+    // `dz_soisno` 交给 `eroot`，而这两个名字在 THERMAL 里声明成 `(lb:nl_soil)`（含雪层），
+    // 在 `MOD_Eroot.F90:59-61` 的哑元却声明成 `(1:nl_soil)`。整数组做实参时按元素顺序
+    // 关联，于是 `eroot` 的 `i` 号元素拿到的是调用方 `lb+i-1` 号元素 —— 有雪时整列
+    // **下移 `|snl|` 位**：`eroot` 的 i=1 是雪层，i=snl+1 才是土壤第 1 层，而同一支里
+    // 的 `porsl`/`psi0`/`rootfr`/`theta_r` 是 `(1:nl_soil)`、不跟着移。最下面 `|snl|`
+    // 层土壤因此**根本不参与** `eroot`。
+    //
+    // 这是上游的缺陷（正解是给 `eroot` 传 `(1-snl:)` 的段或让哑元也带 `lb`），但黄金
+    // 就是用这份代码生成的：CN-Cng 首个雪步黄金 `f_rootr` 的第 1、2 项都是 0（雪层 +
+    // 冻结的土壤第 1 层），第 3 项 0.207315 正是“土壤第 2 层的温度/含水量 × 第 3 层
+    // 的 `porsl`/`rootfr`”算出来的值；按对齐语义算只有 0.097654。因此这里**照抄**，
+    // 用整列（下标 0 起 = 雪顶）的前 `nl_soil` 个元素，配土壤索引的 `porsl`/`rootfr`。
+    // 无雪时 `|snl|=0`，本式与对齐写法逐位相同。
+    let layers = ground.soil_porosity.len();
     root_uptake(RootUptakeInput {
-        temperature_k: &ground.temperature_k[soil..],
-        liquid_water_kg_m2: &ground.liquid_water_kg_m2[soil..],
+        layer_thickness_m: &ground.layer_thickness_m[..layers],
+        temperature_k: &ground.temperature_k[..layers],
+        liquid_water_kg_m2: &ground.liquid_water_kg_m2[..layers],
         ..input.root_uptake
     })
 }
@@ -958,16 +975,24 @@ fn soil_surface_resistance_input(
         return soil_surface_resistance(input.soil_surface_resistance);
     };
     let ground = input.ground_temperature;
-    let soil = ground.snow_layers;
+    // 与 `root_uptake_input` 同一条序列关联缺陷（`MOD_Thermal_CanopyPhase_Extended.F90:626-629`
+    // 把整列 `dz_soisno`/`t_soisno`/`wliq_soisno`/`wice_soisno` 交给哑元声明为
+    // `(1:nl_soil)` 的 `MOD_SoilSurfaceResistance.F90:83-86`）：`SoilSurfaceResistance`
+    // 内部**只用下标 1**，有雪时那 1 项拿到的是**雪顶那一层**的温度/液态水/冰/层厚，
+    // 而同一支里的 `porsl(1)`/`psi0(1)`/`theta_r(1)`/`hksati(1)` 仍是土层 1（`(1:nl_soil)`，
+    // 不移）。所以这里取整列下标 0，不是 `[snow_layers]`。
+    // 三个黄金都走 `DEF_RSS_SCHEME = 0`（`MOD_Namelist.F90:1947-1951`：LCT + 非 Campbell
+    // 自动置 0），这条支路在**本机一次都没被走到** —— 改动依据是语言规则 + `eroot` 那处
+    // 已被黄金证实的同型错位，没有端到端实测（见 docs 对应小节）。
     soil_surface_resistance(SoilSurfaceResistanceInput {
         porosity: ground.soil_porosity[0],
         saturated_soil_suction_mm: ground.soil_suction_mm[0],
         residual_water: ground.soil_residual_water[0],
         hydraulic_model: ground.soil_hydraulic_model[0],
-        layer_thickness_m: ground.layer_thickness_m[soil],
-        temperature_k: surface_temperatures(ground).1,
-        liquid_water_kg_m2: ground.liquid_water_kg_m2[soil],
-        ice_water_kg_m2: ground.ice_water_kg_m2[soil],
+        layer_thickness_m: ground.layer_thickness_m[0],
+        temperature_k: ground.temperature_k[0],
+        liquid_water_kg_m2: ground.liquid_water_kg_m2[0],
+        ice_water_kg_m2: ground.ice_water_kg_m2[0],
         snow_cover_fraction: ground.snow_cover_fraction,
         ground_specific_humidity: humidity.ground_specific_humidity,
         ..input.soil_surface_resistance
