@@ -4547,3 +4547,84 @@ f_wetzwt        (time,patch)       real=0/264   全填充
 以及 `xerr` 需要的**步首**蓄量）逐条写在里面，并注明它们量级是
 1e-10/1e-16、tier2 的 atol 1e-7 能容 —— 所以那一步要防的是**拼错项**
 （会当场变成大数而红），不是精度。这样下一个人不必再读一遍上游。
+
+## `xerr`/`zerr` 补上，history 对黄金文件的变量缺口归零（2026 年，实测）
+
+黄金文件里 126 个变量，此前本层声明 124 个、能填 124 个。这轮把最后两个
+平衡残差接上后，**两边变量集合逐名相同**（`set(fortran) - set(rust)` 与
+反向都为空），`declare_lct_variables` 与黄金不再有缺口。上一轮留在
+`UNFILLED` 里的完整项表随实现搬进了 `set_lct_balance_errors` 的文档注释，
+常量本身留成空数组 —— 它承载的规矩（"文件里没有" ≠ "内核产不出"）比它的
+内容重要，四次踩坑都记在上面那条注释里。
+
+### 两个量的项表
+
+`zerr = errore`（`MOD_Thermal.F90:1394-1401`），逐项对到本仓库的字段：
+
+| 项 | 上游 | 本仓库 |
+|---|---|---|
+| `sabv` | `sabvsun + sabvsha`（`:657`） | `shortwave.sunlit_absorbed_w_m2 + shaded_absorbed_w_m2` |
+| `sabg` | 地面吸收短波 | `shortwave.ground_absorbed_w_m2` |
+| `frl` | THERMAL 的**入参** = `forc_frl` | `HistoryReferenceState::downward_longwave_w_m2` |
+| `olrg` | `:1353` | 与 `f_olrg` 同一个 `SurfaceBudget` |
+| `fsena` | `fsenl + fseng`（`:1331`） | `total_sensible_heat_w_m2` |
+| `lfevpa` | `hvap*fevpl + htvp*fevpg`（`:1333`） | 同上 |
+| `xmf` | `MOD_PhaseChange` 的相变潜热 | `ground.latent_heat_flux_w_m2` |
+| `dheatl` | `sum(dheatl_p*pftfrac)`（`:1122`） | `leaf.canopy_heat_storage_w_m2` |
+| `hprl` | `sum(hprl_p*pftfrac)`（`:1121`） | `leaf.precipitation_heat_w_m2` |
+| 降水显热两项 | `:1398-1399` | `SurfaceBudget::precipitation_heat_w_m2` |
+| `Σ(t-t_bef)/fact` | `:1400-1401`，`j = lb:nl_soil` | `temperature_k`/`previous_temperature_k`/`layer_factor_seconds_per_j_m2_k` 三列 `zip` |
+
+`xerr = errorw/deltim`（`CoLMMAIN.F90:1529-1543`，取 `#ifndef CatchLateralFlow` 那一支）：
+
+```
+errorw = (endwb - totwb) - (forc_prc + forc_prl - fevpa - rnof) * deltim
+```
+
+`totwb`/`endwb` 是同一条算式的步首/步末值，`Σ(wice+wliq) + ldew + scv + wa + wdsrf`，
+实现为 `colm_core::total_water_storage_mm`。三个容易错的地方这轮都定死了：
+
+1. **`frl` 不是 `dlrad`。** `MOD_Thermal.F90:517` 只在无冠层时 `dlrad = frl`；
+   有冠层时 `dlrad` 多乘一份透过率。`fgrnd` 用 `dlrad*emg`，这条收支用 `frl` ——
+   实测 `CN-Cng` 冬季窗口两者差 350 与 ~200 W/m² 量级。
+2. **第二行 `errore` 覆盖第一行。** `:1392` 写的是减 `fgrnd` 的版本，`:1396` 立刻
+   改写成减 `xmf` 的版本。`fgrnd` 与 `xmf` 差一整份地面辐射收支（实测
+   `fgrnd = -90.34` 而 `xmf = 12595.8` W/m²），照抄时不能顺手把 `xmf` 换成 `fgrnd`。
+   两条式子其实是同一个恒等式的两种写法：`A - fgrnd` 与 `A - (xmf + storage)`，
+   而 `fgrnd = xmf + storage` 正是地面柱的能量收支。
+3. **`xerr` 不含 `wdsrf` 的那一版不是 `wat`。** `wat` 是 `MOD_Vars_TimeVariables`
+   里的时间变量（`Σ + ldew + scv + wa`），`totwb`/`endwb` 还要加 `wdsrf`。
+
+`deltim` 从 `RuntimeClock::timestep_seconds()` 取**实数**而不是推进日历用的
+`NINT`/`INT` 结果（`CoLM.F90` 物理用原值）；为此给 `RuntimeClock` 留了这个字段与
+访问器。`totwb` 只能由调用方在内核动手**之前**从状态上取，所以它和 `deltim`
+一起进了 `HistoryReferenceState`（`from_forcing` 多了两个入参）。
+
+### 结果
+
+`oracle/work/CN-Cng-aligned` 264 条记录，对 Fortran 黄金：
+
+| 变量 | Fortran 区间 | Rust 区间 | maxdiff |
+|---|---|---|---|
+| `f_xerr` | [−3.883e-16, 4.247e-16] | [−4.379e-16, 3.968e-16] | 6.31e-16 |
+| `f_zerr` | [−2.266e-10, 2.302e-10] | [−1.978e-10, 1.716e-10] | 2.85e-10 |
+
+两者都在"两个 O(100) 量相减"的舍入地板上，tier2 的 atol 1e-7 通过。
+`golden-compare` 的残差条数仍是 82（tier0 4 / tier1 27 / tier2 51），
+与接这两列之前逐位相同 —— 即这轮没有动到任何已有列。
+
+### 顺带查实的一个上游空洞（本地不减，只记录）
+
+`WATER_2014` 的**非 VSF、非灌溉**分支上 `wdsrf` 是 `intent(inout)`，但**从不被赋值**：
+唯一那处 `wdsrf = rsur*deltim` 在 `#ifdef CROP` + `DEF_USE_IRRIGATION` 里
+（`MOD_SoilSnowHydrology.F90:356`），另两处在 `WATER_VSF`（`:1312-1329`）。可是
+`qinfl = gwat - rsur - wdsrf/deltim`（`:368`）每步都把它当入渗量减掉一次。
+于是"步首 `wdsrf` 非零"的土壤 patch 每步凭空多出 `wdsrf` mm 的水，
+`errorw` **恰好**等于 `-wdsrf`。本仓库照抄了这个行为（`Water2014SoilState::surface_water_mm`
+在整个 `water_2014_soil_step` 里没有赋值），所以不是移植分叉；真实算例里
+`wdsrf` 恒为 0（`f_wdsrf_inst` 两边逐位相同，都是 0），空洞不显形。
+
+这条是本轮唯一一次"残差不为零但不是拼错项"，写在
+`history_tests.rs::the_balance_residuals_close_on_one_step` 的注释里：
+合成夹具按 patch 序号给了 `wdsrf = 1.0`，测试必须先把步首 `wdsrf` 清零，
+否则残差会是**恰好 -1.0 mm**，与被测的拼项无关。

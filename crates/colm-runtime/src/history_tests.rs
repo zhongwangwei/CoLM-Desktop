@@ -163,6 +163,11 @@ fn reference() -> HistoryReferenceState {
         large_scale_precipitation_kg_m2_s: forcing.large_scale_precipitation_kg_m2_s,
         // 夹具用的是一段白天（`cosine_zenith > 0`），否则 `f_alb` 会整列留填充值。
         surface_cosine_zenith: 0.5,
+        // `xerr` 要的两个步界量：夹具里步长取 CoLM 的默认半小时，
+        // 步首蓄量取一个固定值 —— 这条测试断言的是**项有没有拼错**（残差会立刻变成大数），
+        // 不是残差本身有多小，所以固定值不会掩盖错误。
+        time_step_seconds: 1_800.0,
+        initial_total_water_mm: 0.0,
     }
 }
 
@@ -255,6 +260,20 @@ fn the_bridge_writes_the_state_variables_it_declares() {
     .unwrap();
     set_lct_canopy_water(&mut buffer, 0, &state.energy, &output.energy).unwrap();
     set_lct_soil_resistance(&mut buffer, 0, &output.energy).unwrap();
+    set_lct_balance_errors(
+        &mut buffer,
+        0,
+        &output,
+        colm_core::total_water_storage_mm(
+            &state.water,
+            state.energy.leaf.canopy_water.total_mm,
+            0.0,
+        ),
+        reference(),
+        physics().vaporization_heat_j_kg,
+        template.soil_layers(),
+    )
+    .unwrap();
     buffer.set_time(0, 56_802_270).unwrap();
     let path = root.join("history.nc");
     buffer.write(&path).unwrap();
@@ -276,6 +295,7 @@ fn the_bridge_writes_the_state_variables_it_declares() {
         .chain(LCT_CANOPY_WATER_VARIABLES.iter())
         .chain(LCT_SOIL_RESISTANCE_VARIABLES.iter())
         .chain(LCT_SIMILARITY_10M_VARIABLES.iter())
+        .chain(LCT_BALANCE_VARIABLES.iter())
         .chain(DECLARED_ONLY.iter())
     {
         assert!(
@@ -496,6 +516,7 @@ fn the_written_schema_matches_the_golden_file_for_the_shared_variables() {
         .chain(LCT_CANOPY_WATER_VARIABLES.iter())
         .chain(LCT_SOIL_RESISTANCE_VARIABLES.iter())
         .chain(LCT_SIMILARITY_10M_VARIABLES.iter())
+        .chain(LCT_BALANCE_VARIABLES.iter())
         .chain(DECLARED_ONLY.iter())
     {
         let file_name = format!("f_{name}");
@@ -893,6 +914,90 @@ fn the_accumulator_skips_missing_samples_and_counts_only_valid_ones() {
         values,
         vec![64.0],
         "one valid sample in a two-step record must average to itself, not to half"
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// 两个收支残差必须**当场闭合**。
+///
+/// `zerr`/`xerr` 是上游自己写的闭合性检查（`MOD_Thermal.F90:1394-1401`、
+/// `CoLMMAIN.F90:1532-1542`），几乎恒为 0 —— 所以这条测试抓的不是精度，而是**项拼错**：
+/// 把 `xmf` 换成 `fgrnd`、把 `frl` 换成冠层下方的 `dlrad`、`errorw` 忘了乘 `deltim`、
+/// 或者步首蓄量取成了步末值，都会让残差立刻从 1e-10 跳到几十 W/m² / 几 mm。
+/// 判据直接照抄上游自己的阈值：`abs(errore) > .5` 会 `CoLM_stop`，
+/// `abs(errorw) > 1e-3` 会打警告 —— 比自定的数字更有说服力。
+#[test]
+fn the_balance_residuals_close_on_one_step() {
+    let root = temp_dir("balance");
+    let fixture = SyntheticRestart::write(root.join("restart")).unwrap();
+    let template = assemble_standard_lct_template(
+        &RestartStateFiles {
+            constant: fixture.constant.block.clone(),
+            time: fixture.time.block.clone(),
+        },
+        1,
+        physics(),
+    )
+    .unwrap();
+    let mut state = template.state();
+    // **必须先把步首的 `wdsrf` 清零。** 夹具按 patch 序号给了 `0.0/1.0`，而这个
+    // patch 拿到的是 1.0 —— 上游在**非 VSF 的普通土壤**分支上根本不更新 `wdsrf`
+    // （`MOD_SoilSnowHydrology.F90` 里唯一那处 `wdsrf = rsur*deltim` 在
+    // `#ifdef CROP` + irrigation 里，另一处在 `WATER_VSF`），却每步都把它当作
+    // 入渗量减掉一次：`qinfl = gwat - rsur - wdsrf/deltim`（`:368`）。
+    // 于是"步首 `wdsrf` 非零"本身就是一个不守恒的状态，残差会**恰好**等于
+    // `-wdsrf`（实测 1.0 mm），与本层的拼项无关。真实算例里 `wdsrf` 恒为 0，
+    // 所以这个上游空洞从不显形（本仓库的 `f_wdsrf_inst` 与黄金逐位相同，都是 0）。
+    state.water.surface_water_mm = 0.0;
+    // `totwb` 必须在**内核之前**取：`standard_lct_soil_step` 会把 `state` 就地推进。
+    let initial = colm_core::total_water_storage_mm(
+        &state.water,
+        state.energy.leaf.canopy_water.total_mm,
+        0.0,
+    );
+    let output = colm_core::standard_lct_soil_step(template.input(&binding()), &mut state)
+        .expect("one step");
+    let end = colm_core::total_water_storage_mm(
+        &state.water,
+        state.energy.leaf.canopy_water.total_mm,
+        0.0,
+    );
+
+    let mut buffer = HistoryBuffers::new(dimensions(), site(), 1);
+    buffer.declare(&LCT_BALANCE_VARIABLES).unwrap();
+    set_lct_balance_errors(
+        &mut buffer,
+        0,
+        &output,
+        end,
+        HistoryReferenceState {
+            initial_total_water_mm: initial,
+            ..reference()
+        },
+        physics().vaporization_heat_j_kg,
+        template.soil_layers(),
+    )
+    .unwrap();
+    buffer.set_time(0, 56_802_270).unwrap();
+    let path = root.join("balance.nc");
+    buffer.write(&path).unwrap();
+
+    let file = netcdf::open(&path).unwrap();
+    let value = |name: &str| {
+        file.variable(name)
+            .unwrap()
+            .get_values::<f64, _>(..)
+            .unwrap()[0]
+    };
+    let zerr = value("f_zerr");
+    let errorw = value("f_xerr") * 1_800.0;
+    assert!(
+        zerr.abs() <= 0.5,
+        "energy balance residual is {zerr} W/m^2; upstream stops above 0.5"
+    );
+    assert!(
+        errorw.abs() <= 1.0e-3,
+        "water balance residual is {errorw} mm per step; upstream warns above 1e-3"
     );
     std::fs::remove_dir_all(root).unwrap();
 }

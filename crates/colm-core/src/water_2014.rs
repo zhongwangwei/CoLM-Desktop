@@ -81,6 +81,32 @@ pub struct Water2014SoilState {
     pub surface_water_mm: f64,
 }
 
+/// 上游的 `totwb`/`endwb`：整根土柱的总蓄水量，单位 mm（`kg/m^2` 与 mm 等值）。
+///
+/// 算式照抄 `CoLMMAIN.F90:831`（步首）与 `:1512`（步末）——
+/// `Σ(wice+wliq) + ldew + scv + wa + wdsrf`，元素级相加而不是先各自 `sum()` 再相减，
+/// 因为 `xerr` 是**两个几乎相等的和之差**（量级 1e-16），换结合顺序就会换掉末几位。
+///
+/// **不能拿 history 的 `wat` 顶替**：`wat` 是 `MOD_Vars_TimeVariables` 里的时间变量，
+/// 不含 `wdsrf`，而收支残差要含。`wat` 的写法见
+/// `colm_runtime::history::set_lct_water_storage`，两处刻意各写一份。
+pub fn total_water_storage_mm(
+    water: &Water2014SoilState,
+    canopy_water_mm: f64,
+    snow_water_equivalent_kg_m2: f64,
+) -> f64 {
+    let soil: f64 = water
+        .liquid_water_kg_m2
+        .iter()
+        .zip(&water.ice_water_kg_m2)
+        .map(|(wliq, wice)| wliq + wice)
+        .sum();
+    soil + canopy_water_mm
+        + snow_water_equivalent_kg_m2
+        + water.aquifer_water_mm
+        + water.surface_water_mm
+}
+
 /// Diagnostics from one no-snow regular-soil `WATER_2014` call.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Water2014SoilOutput {

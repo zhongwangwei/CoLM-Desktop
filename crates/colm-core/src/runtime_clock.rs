@@ -67,6 +67,7 @@ pub struct RuntimeClock {
     elapsed: CalendarTime,
     step_seconds: u32,
     elapsed_step_seconds: u32,
+    timestep_seconds: f64,
     spinup_repeats: usize,
     spinup_cycle: usize,
     is_spinup: bool,
@@ -124,6 +125,8 @@ impl RuntimeClock {
             step_seconds,
             // CoLM.F90 uses `NINT` for TICKTIME but `INT` for itstamp.
             elapsed_step_seconds,
+            // 物理用的是 namelist 里的**实数** `deltim`，只有上面那两处推进日历才取整。
+            timestep_seconds,
             spinup_repeats,
             spinup_cycle: 1,
             is_spinup: before(start, spinup_until),
@@ -140,6 +143,15 @@ impl RuntimeClock {
     pub fn with_restart_frequency(mut self, restart_frequency: RestartFrequency) -> Self {
         self.restart_frequency = restart_frequency;
         self
+    }
+
+    /// 上游的 `deltim`：本步的秒数，**保留 namelist 的实数**而不是推进日历用的取整值。
+    ///
+    /// 只有把通量换算成"每步总量"的诊断才需要它（例如 `xerr` 的
+    /// `errorw = ΔS - Σ(通量)*deltim`）。毫秒级的 `deltim` 在 `NINT`/`INT`
+    /// 之后会变成整数，拿那两个值换算就会引入一步之内的偏差。
+    pub fn timestep_seconds(&self) -> f64 {
+        self.timestep_seconds
     }
 
     /// Returns the next forcing/driver boundary, exactly once per model step.

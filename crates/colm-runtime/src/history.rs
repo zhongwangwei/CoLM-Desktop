@@ -5,9 +5,13 @@
 //! 同一份来源（见 `assembly.rs` 的 `evolved_overrides`），所以两处不会各说一套。
 //!
 //! **没填的变量不声明。** `HistoryBuffers::declare` 只接受调用方点名的变量，写出的文件
-//! 因此只包含本层能负责的那些；`UNFILLED` 列出还差什么，免得"文件里没有"被当成
-//! "这个内核产不出"。补齐它们要么需要更多内核输出，要么需要先核对上游对每个诊断量的
-//! 定义（例如 `h2osoi` 是液态还是液+固态），不是把名字填上就算数。
+//! 因此只包含本层能负责的那些。补齐一个变量要么需要更多内核输出，要么需要先核对上游对
+//! 那个诊断量的定义（例如 `h2osoi` 是液态还是液+固态），不是把名字填上就算数。
+//!
+//! 黄金算例（CN-Cng，126 个变量）此前有缺口，现在**逐名对齐**：本层声明的集合与
+//! 黄金文件的变量集合完全相同。剩下的两个"声明了但没有值"的槽位
+//! （[`DECLARED_BUT_UNFILLED`] / [`DECLARED_ONLY`]）是**上游在本算例里也留空**，
+//! 不是移植缺 —— 这两件事历史上被混为一谈四次，见 [`UNFILLED`] 的注释。
 
 use std::path::{Path, PathBuf};
 
@@ -93,6 +97,14 @@ pub const LCT_SURFACE_VARIABLES: [&str; 13] = [
 /// `frcsat` 是 `-`），不是按名字猜的。闸门表里没有的量（例如 `smp`）不在此列 ——
 /// 它不是默认产出量。
 pub const LCT_FLUX_VARIABLES: [&str; 6] = ["qinfl", "rnof", "rsub", "rsur", "qcharge", "frcsat"];
+
+/// 本层能填的**收支残差**，两项。累加规则普通（`acc1d` + `filter`/`nac`），
+/// 但每一项都要把上游在 `MOD_Thermal`/`CoLMMAIN` 里现拼的算式原样搬过来 ——
+/// 它们不是状态量，也没有任何现成输出能顶替。见 [`set_lct_balance_errors`]。
+///
+/// 两个量的量级分别是 ~1e-10（`zerr`）与 ~1e-16（`xerr`）：**它们几乎恒为 0**，
+/// 所以验证靠的不是精度而是"拼错项会当场炸成大数"。
+pub const LCT_BALANCE_VARIABLES: [&str; 2] = ["xerr", "zerr"];
 
 /// 本层能填的**瞬时**水量诊断，三项。
 ///
@@ -316,27 +328,19 @@ pub const DECLARED_ONLY: [&str; 9] = [
 /// schema 测试因此按"两边都有"来比，并把跳过的名字记下来。
 pub const NOT_IN_GOLDEN: [&str; 1] = ["qcharge"];
 
-/// 黄金算例里有、但本层还填不出来的量（按用途分组，便于下一步挑）。
+/// 黄金算例里有、但本层还填不出来的量。
 ///
-/// 这份清单不参与写出，只是把"缺口"写死在代码里：改它就得同时改注释。
-pub const UNFILLED: [&str; 1] = [
-    "`xerr`/`zerr`：两个都是**平衡残差**，规则普通（`acc1d` + `filter`/`nac`）但要把项拼齐 —— \
-     `zerr = errore`（`MOD_Thermal.F90:1394-1401`）：\
-     `sabv + sabg + frl - olrg - fsena - lfevpa - xmf - dheatl + hprl \
-     + cpliq*pg_rain*(t_precip-t_grnd) + cpice*pg_snow*(t_precip-t_grnd) \
-     - Σ_j (t_soisno(j)-t_soisno_bef(j))/fact(j)`（j 取 `lb:nl_soil`，含雪层）；\
-     本仓库已有 `previous_temperature_k`/`layer_factor_seconds_per_j_m2_k`（即 `t_bef`/`fact`）、\
-     `canopy_heat_storage_w_m2`（`dheatl`）、`precipitation_heat_w_m2`（`hprl`），\
-     缺的是 `xmf`（相变热）与 `sabv`/`frl`/`olrg` 的口径核对。\
-     `xerr = errorw/deltim`（`CoLMMAIN.F90:1529-1543`）：\
-     `errorw = (endwb - totwb) - (forc_prc + forc_prl - fevpa - rnof)*deltim`，\
-     `endwb` 与 `totwb` 是**同一条算式**在步末与步首的值：\
-     `Σ(wice+wliq) + ldew + scv + wa + wdsrf` —— 也就是 `wat`，\
-     所以关键是拿到**步首**那一份（步末那份已经在写 `wat` 了）。\
-     两个量都 ~1e-10 与 ~1e-16 量级，tier2 的 atol 1e-7 能容，\
-     所以要防的是**拼错项**（会当场变成大数而红），不是精度。",
-];
-/// 声明本层能填的全部变量：状态十三项 + 水文六项 + 能量四项 + 地表十三项。
+/// **现在是空的。** 最后一对是 `xerr`/`zerr`（见 [`LCT_BALANCE_VARIABLES`]）。
+/// 上一轮留在这里的两个残差的完整项表已随实现搬进 [`set_lct_balance_errors`] 的注释。
+///
+/// 这个常量留着不删，是因为它承载的规矩比它的内容重要：**"文件里没有"与
+/// "内核产不出"是两件事**。历史上四次把"上游在本算例里就没这一列"（`alb` 的四维通路、
+/// 10 m 的廓线、`green` 的 `vegc` 表、湖/湿地六项）误读成"要写一支新物理"——
+/// 要动这个清单之前，先数一遍黄金文件里那一列的真值个数。
+pub const UNFILLED: [&str; 0] = [];
+
+/// 声明本层能填的全部变量：见 [`LCT_STATE_VARIABLES`] 起的一组常量，
+/// 外加 [`DECLARED_ONLY`]（上游在本算例里也留空的那几个槽位）。
 pub fn declare_lct_variables(buffer: &mut HistoryBuffers) -> Result<()> {
     let mut names = LCT_STATE_VARIABLES.to_vec();
     names.extend_from_slice(&LCT_FLUX_VARIABLES);
@@ -353,6 +357,7 @@ pub fn declare_lct_variables(buffer: &mut HistoryBuffers) -> Result<()> {
     names.extend_from_slice(&LCT_CANOPY_WATER_VARIABLES);
     names.extend_from_slice(&LCT_SOIL_RESISTANCE_VARIABLES);
     names.extend_from_slice(&LCT_SIMILARITY_10M_VARIABLES);
+    names.extend_from_slice(&LCT_BALANCE_VARIABLES);
     names.extend_from_slice(&DECLARED_ONLY);
     buffer.declare(&names)
 }
@@ -538,11 +543,29 @@ pub struct HistoryReferenceState {
     pub convective_precipitation_kg_m2_s: f64,
     /// `forc_prl`：层状降水。
     pub large_scale_precipitation_kg_m2_s: f64,
+    /// 上游的 `deltim`（`= DEF_simulation_time%timestep`），秒。
+    ///
+    /// 只有 `xerr` 用得到：`errorw` 是一条**质量**收支，要乘 `deltim` 才和蓄量同量纲。
+    pub time_step_seconds: f64,
+    /// 步首的 `totwb`（`CoLMMAIN.F90:831`），mm。
+    ///
+    /// 由调用方在**内核动手之前**从状态上取（见 `colm_core::total_water_storage_mm`）——
+    /// 步末的值在内核跑完后已经无从还原，所以只能从外面递进来。
+    pub initial_total_water_mm: f64,
 }
 
 impl HistoryReferenceState {
     /// 取本步的 `forc_*`。
-    pub fn from_forcing(forcing: &colm_core::RuntimeForcing, surface_cosine_zenith: f64) -> Self {
+    ///
+    /// `time_step_seconds` 与 `initial_total_water_mm` 不是 forcing 的量，
+    /// 但它们和 forcing 一样是"这一步的上下文"，且都必须在调用 kernel **之前**取好，
+    /// 所以一并从这里进来 —— 分成两个构造函数只会让调用点更容易漏一个。
+    pub fn from_forcing(
+        forcing: &colm_core::RuntimeForcing,
+        surface_cosine_zenith: f64,
+        time_step_seconds: f64,
+        initial_total_water_mm: f64,
+    ) -> Self {
         Self {
             wind_speed_eastward_m_s: forcing.eastward_wind_m_s,
             wind_speed_northward_m_s: forcing.northward_wind_m_s,
@@ -558,6 +581,8 @@ impl HistoryReferenceState {
             convective_precipitation_kg_m2_s: forcing.convective_precipitation_kg_m2_s,
             large_scale_precipitation_kg_m2_s: forcing.large_scale_precipitation_kg_m2_s,
             surface_cosine_zenith,
+            time_step_seconds,
+            initial_total_water_mm,
         }
     }
 }
@@ -693,10 +718,56 @@ pub fn set_lct_surface_budget(
     vaporization_heat_j_kg: f64,
     soil_layers: usize,
 ) -> Result<()> {
-    const STEFAN_BOLTZMANN_W_M2_K4: f64 = 5.67e-8;
-    const WATER_HEAT_CAPACITY_J_KG_K: f64 = 4188.0;
-    const ICE_HEAT_CAPACITY_J_KG_K: f64 = 2117.27;
+    let budget = surface_budget(output, vaporization_heat_j_kg, soil_layers)?;
+    let energy = &output.energy;
+    for (name, value) in [
+        ("sabvsun", energy.shortwave.sunlit_absorbed_w_m2),
+        ("sabvsha", energy.shortwave.shaded_absorbed_w_m2),
+        ("rnet", budget.net_radiation_w_m2),
+        ("olrg", budget.outgoing_longwave_w_m2),
+        ("emis", budget.bulk_emissivity),
+        ("trad", budget.radiative_temperature_k),
+        ("fgrnd", budget.ground_heat_w_m2),
+        ("lfevpa", budget.latent_heat_w_m2),
+    ] {
+        ensure!(
+            value.is_finite(),
+            "the history value for {name} is not finite"
+        );
+        sink.scalar(name, record, value)?;
+    }
+    Ok(())
+}
 
+/// `MOD_Thermal.F90` 收尾处的物理常数（`stefnc`/`cpliq`/`cpice`）。
+const STEFAN_BOLTZMANN_W_M2_K4: f64 = 5.67e-8;
+const WATER_HEAT_CAPACITY_J_KG_K: f64 = 4188.0;
+const ICE_HEAT_CAPACITY_J_KG_K: f64 = 2117.27;
+
+/// `MOD_Thermal.F90:1331-1362` 收尾处的那一组地表中间量。
+///
+/// 抽出来是因为 `f_fgrnd`/`f_lfevpa`/`f_olrg`（[`set_lct_surface_budget`]）与
+/// `f_zerr`（[`set_lct_balance_errors`]）读的是**同一组项**：分成两份实现，
+/// 迟早会出现"同一份文件里的 `f_zerr` 与 `f_olrg` 互相矛盾"这种只在拼错时才暴露的坑。
+struct SurfaceBudget {
+    outgoing_longwave_w_m2: f64,
+    bulk_emissivity: f64,
+    radiative_temperature_k: f64,
+    latent_heat_w_m2: f64,
+    ground_heat_w_m2: f64,
+    /// `cpliq*pg_rain*(t_precip-t_grnd) + cpice*pg_snow*(t_precip-t_grnd)`。
+    ///
+    /// 单独留一份是因为 `zerr` 要把它原样加回去：它在 `fgrnd` 里是长表达式的一部分，
+    /// 而 `errore` 把它写在末尾 —— 从 `fgrnd` 里反解出来会引入第二套算式。
+    precipitation_heat_w_m2: f64,
+    net_radiation_w_m2: f64,
+}
+
+fn surface_budget(
+    output: &StandardLctSoilOutput,
+    vaporization_heat_j_kg: f64,
+    soil_layers: usize,
+) -> Result<SurfaceBudget> {
     let energy = &output.energy;
     let ground = &energy.ground;
     // 打包列里第一个**土层**的下标：列长减去土层数。**不能**写 0 —— 带雪时
@@ -742,31 +813,117 @@ pub fn set_lct_surface_budget(
         vaporization_heat_j_kg * leaf_evaporation + sublimation_heat * ground_evaporation;
 
     let precipitation_temperature_k = energy.precipitation.precipitation_temperature_k;
+    let precipitation_heat = WATER_HEAT_CAPACITY_J_KG_K
+        * energy.interception.ground_rain_kg_m2_s
+        * (precipitation_temperature_k - surface_temperature_k)
+        + ICE_HEAT_CAPACITY_J_KG_K
+            * energy.interception.ground_snow_kg_m2_s
+            * (precipitation_temperature_k - surface_temperature_k);
     let ground_heat = energy.shortwave.ground_absorbed_w_m2
         + energy.leaf.downward_longwave_w_m2 * emissivity
         - emissivity * STEFAN_BOLTZMANN_W_M2_K4 * previous_surface_temperature_k.powi(4)
         - emissivity * blackbody_change
         - (energy.corrected_ground_sensible_heat_w_m2 + ground_evaporation * sublimation_heat)
-        + WATER_HEAT_CAPACITY_J_KG_K
-            * energy.interception.ground_rain_kg_m2_s
-            * (precipitation_temperature_k - surface_temperature_k)
-        + ICE_HEAT_CAPACITY_J_KG_K
-            * energy.interception.ground_snow_kg_m2_s
-            * (precipitation_temperature_k - surface_temperature_k);
+        + precipitation_heat;
     // 地表能量收支恒等式：`rnet = H + LE + G`。用它而不是再拼一遍辐射项，
     // 是因为前者的每一项都已经由内核算过，重复拼装只会引入第二套公式。
     let net_radiation = energy.total_sensible_heat_w_m2 + latent_heat + ground_heat;
 
-    for (name, value) in [
-        ("sabvsun", energy.shortwave.sunlit_absorbed_w_m2),
-        ("sabvsha", energy.shortwave.shaded_absorbed_w_m2),
-        ("rnet", net_radiation),
-        ("olrg", outgoing_longwave),
-        ("emis", bulk_emissivity),
-        ("trad", radiative_temperature_k),
-        ("fgrnd", ground_heat),
-        ("lfevpa", latent_heat),
-    ] {
+    Ok(SurfaceBudget {
+        outgoing_longwave_w_m2: outgoing_longwave,
+        bulk_emissivity,
+        radiative_temperature_k,
+        latent_heat_w_m2: latent_heat,
+        ground_heat_w_m2: ground_heat,
+        precipitation_heat_w_m2: precipitation_heat,
+        net_radiation_w_m2: net_radiation,
+    })
+}
+
+/// 把一步的**收支残差**写进第 `record` 条记录。
+///
+/// 两个量都是上游自己拼的闭合性检查，既不是状态量，也没有任何一步输出能顶替。
+/// 项表逐条搬自 `MOD_Thermal.F90:1394-1401`（`zerr`）与
+/// `CoLMMAIN.F90:1529-1543`（`xerr`）：
+///
+/// | `zerr` 的项 | 上游 | 本仓库 |
+/// |---|---|---|
+/// | `sabv` | `sabvsun + sabvsha`（`:657`） | `shortwave.sunlit_absorbed_w_m2 + shaded_absorbed_w_m2` |
+/// | `sabg` | 地面吸收短波 | `shortwave.ground_absorbed_w_m2` |
+/// | `frl` | THERMAL 的**入参** = `forc_frl` | `reference.downward_longwave_w_m2` |
+/// | `olrg` | `:1353` | [`SurfaceBudget::outgoing_longwave_w_m2`] |
+/// | `fsena` | `fsenl + fseng`（`:1331`） | `total_sensible_heat_w_m2` |
+/// | `lfevpa` | `hvap*fevpl + htvp*fevpg`（`:1333`） | [`SurfaceBudget::latent_heat_w_m2`] |
+/// | `xmf` | `MOD_PhaseChange` 的相变潜热 | `ground.latent_heat_flux_w_m2` |
+/// | `dheatl` | `sum(dheatl_p*pftfrac)`（`:1122`） | `leaf.canopy_heat_storage_w_m2` |
+/// | `hprl` | `sum(hprl_p*pftfrac)`（`:1121`） | `leaf.precipitation_heat_w_m2` |
+/// | 降水显热两项 | `:1398-1399` | [`SurfaceBudget::precipitation_heat_w_m2`] |
+/// | `Σ(t-t_bef)/fact` | `:1400-1401`，`j = lb:nl_soil` | 下面那条三列 `zip` |
+///
+/// **`frl` 是大气向下长波（`forc_frl`），不是冠层下方的 `dlrad`。** 两者只在
+/// `MOD_Thermal.F90:517`（无冠层）相等；有冠层时 `dlrad` 多乘一份透过率。
+/// `fgrnd` 用的是 `dlrad*emg`，这条收支用的是 `frl` —— 混用会差几十 W/m²。
+///
+/// **`:1392` 那一行 `errore`（减 `fgrnd`）是死代码**：`:1396` 立刻用减 `xmf` 的版本
+/// 覆盖它。两条式子里的 `fgrnd` 与 `xmf` **不是同一个量**（前者含地面辐射收支，
+/// 后者只有相变潜热），所以照抄第二行时不能把 `xmf` 换成 `fgrnd`。
+///
+/// 三个温度列的求和范围是**整根打包列**（雪层 + 土层）：上游写的是
+/// `DO j = lb, nl_soil`，而 `lb` 就是最下一层雪的下标，合起来正是全列。
+///
+/// `xerr = errorw/deltim`，`errorw = (endwb - totwb) - (forc_prc + forc_prl - fevpa - rnof)*deltim`
+/// （`#ifndef CatchLateralFlow` 那一支，也就是本仓库的构建配置）。`totwb` 只能由调用方
+/// 在内核动手**之前**取好（[`HistoryReferenceState::initial_total_water_mm`]）；
+/// `endwb` 就是这里传进来的 `end_water_storage_mm`，与 [`set_lct_water_storage`] 的
+/// `wat` **不是**一条算式（`wat` 不含 `wdsrf`），别把两者合并。
+pub fn set_lct_balance_errors(
+    sink: &mut impl HistorySink,
+    record: usize,
+    output: &StandardLctSoilOutput,
+    end_water_storage_mm: f64,
+    reference: HistoryReferenceState,
+    vaporization_heat_j_kg: f64,
+    soil_layers: usize,
+) -> Result<()> {
+    let budget = surface_budget(output, vaporization_heat_j_kg, soil_layers)?;
+    let energy = &output.energy;
+    let ground = &energy.ground;
+    ensure!(
+        ground.temperature_k.len() == ground.previous_temperature_k.len()
+            && ground.temperature_k.len() == ground.layer_factor_seconds_per_j_m2_k.len(),
+        "the ground temperature state disagrees on depth between the current, previous \
+         and factor columns"
+    );
+    let ground_heat_storage_w_m2: f64 = ground
+        .temperature_k
+        .iter()
+        .zip(&ground.previous_temperature_k)
+        .zip(&ground.layer_factor_seconds_per_j_m2_k)
+        .map(|((now, before), factor)| (now - before) / factor)
+        .sum();
+
+    let zerr = energy.shortwave.sunlit_absorbed_w_m2
+        + energy.shortwave.shaded_absorbed_w_m2
+        + energy.shortwave.ground_absorbed_w_m2
+        + reference.downward_longwave_w_m2
+        - budget.outgoing_longwave_w_m2
+        - energy.total_sensible_heat_w_m2
+        - budget.latent_heat_w_m2
+        - ground.latent_heat_flux_w_m2
+        - energy.leaf.canopy_heat_storage_w_m2
+        + energy.leaf.precipitation_heat_w_m2
+        + budget.precipitation_heat_w_m2
+        - ground_heat_storage_w_m2;
+
+    let errorw = (end_water_storage_mm - reference.initial_total_water_mm)
+        - (reference.convective_precipitation_kg_m2_s
+            + reference.large_scale_precipitation_kg_m2_s
+            - energy.total_evaporation_kg_m2_s
+            - output.water.total_runoff_mm_s)
+            * reference.time_step_seconds;
+    let xerr = errorw / reference.time_step_seconds;
+
+    for (name, value) in [("xerr", xerr), ("zerr", zerr)] {
         ensure!(
             value.is_finite(),
             "the history value for {name} is not finite"
@@ -1339,7 +1496,20 @@ impl HistorySession {
                 &state.energy,
                 reference.surface_cosine_zenith,
             )?;
-            set_lct_forcing_mirrors(accumulator, 0, reference, &output.energy.precipitation)
+            set_lct_forcing_mirrors(accumulator, 0, reference, &output.energy.precipitation)?;
+            set_lct_balance_errors(
+                accumulator,
+                0,
+                output,
+                colm_core::total_water_storage_mm(
+                    &state.water,
+                    state.energy.leaf.canopy_water.total_mm,
+                    0.0,
+                ),
+                reference,
+                template.physics.vaporization_heat_j_kg,
+                template.soil_layers(),
+            )
         })
     }
 
@@ -1403,7 +1573,20 @@ impl HistorySession {
                 &state.energy,
                 reference.surface_cosine_zenith,
             )?;
-            set_lct_forcing_mirrors(accumulator, 0, reference, &output.energy.precipitation)
+            set_lct_forcing_mirrors(accumulator, 0, reference, &output.energy.precipitation)?;
+            set_lct_balance_errors(
+                accumulator,
+                0,
+                &as_soil,
+                colm_core::total_water_storage_mm(
+                    &state.soil_water,
+                    state.energy.leaf.canopy_water.total_mm,
+                    state.snow.water_equivalent_kg_m2,
+                ),
+                reference,
+                template.physics.vaporization_heat_j_kg,
+                template.soil_layers(),
+            )
         })
     }
 

@@ -334,11 +334,19 @@ impl PointRuntime {
     {
         let (greenwich_time, longitude_degrees, co2_scenario) =
             (self.greenwich, self.longitude_degrees, self.co2_scenario);
+        // `deltim` 与 `totwb` 都必须在**闭包外/内核前**取好：前者在 `PointRuntime` 上，
+        // 后者是步首的状态（内核会把 `next` 就地改成步末值）。
+        let time_step_seconds = self.clock.timestep_seconds();
         // 中途换分组时 `push` 会把上一个文件落盘并返回它的路径 —— 丢掉它会让
         // `outcome.files` 少列文件（实测过：跨月运行只报了二月那一个）。
         let mut files = Vec::new();
         let steps = self.run_with_state(state, |step, next| {
             let binding = lct_binding(step, greenwich_time, longitude_degrees, co2_scenario)?;
+            let initial_total_water_mm = colm_core::total_water_storage_mm(
+                &next.water,
+                next.energy.leaf.canopy_water.total_mm,
+                0.0,
+            );
             let output = standard_lct_soil_step(template.input(&binding), next)?;
             if let Some(path) = session.push_lct(
                 step.clock.end_time,
@@ -348,6 +356,8 @@ impl PointRuntime {
                 crate::history::HistoryReferenceState::from_forcing(
                     &step.forcing,
                     step.surface_cosine_zenith,
+                    time_step_seconds,
+                    initial_total_water_mm,
                 ),
             )? {
                 files.push(path);
@@ -379,12 +389,20 @@ impl PointRuntime {
     {
         let (greenwich_time, longitude_degrees, co2_scenario) =
             (self.greenwich, self.longitude_degrees, self.co2_scenario);
+        let time_step_seconds = self.clock.timestep_seconds();
         let mut files = Vec::new();
         let steps = self.run_with_state(state, |step, next| {
             let binding = lct_binding(step, greenwich_time, longitude_degrees, co2_scenario)?;
             // `scvold`：上游在 `newsnow` **之前**把 `scv` 抄一份（`CoLMMAIN.F90:814`），
             // 所以要在内核动手之前读。
             let previous_snow_water_equivalent_mm = next.snow.water_equivalent_kg_m2;
+            // `totwb` 同理：上游在 `snl` 重算之后、任何物理步之前取步首总蓄量
+            // （`CoLMMAIN.F90:831`），`xerr` 要靠它和步末的 `endwb` 相减。
+            let initial_total_water_mm = colm_core::total_water_storage_mm(
+                &next.soil_water,
+                next.energy.leaf.canopy_water.total_mm,
+                next.snow.water_equivalent_kg_m2,
+            );
             let output =
                 colm_core::standard_lct_snow_soil_step(template.snow_input(&binding), next)?;
             // 顺序不能反：上游 `hist_out`（`CoLM.F90:537`）在 `CoLMDRIVER`（`:512`）
@@ -402,6 +420,8 @@ impl PointRuntime {
                 crate::history::HistoryReferenceState::from_forcing(
                     &step.forcing,
                     step.surface_cosine_zenith,
+                    time_step_seconds,
+                    initial_total_water_mm,
                 ),
             )? {
                 files.push(path);
