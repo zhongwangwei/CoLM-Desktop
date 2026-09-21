@@ -92,6 +92,29 @@ fn glacier_temperature_partition_uses_its_own_two_degree_interval() {
     close(state.convective_snow_kg_m2_s, 0.5);
 }
 
+/// `qsadv` 冰面分支的 `c8` 字面量。
+///
+/// 上游 `MOD_Qsadv.F90:65` 是 `c8/0.262655803e-14/`（= `2.6266e-15`），
+/// 而本仓库写成 `0.000_000_000_000_026_265_580_3`（= `2.6266e-14`）——
+/// **多了一个零**，`c8*td^8` 那一项被放大十倍，`es` 偏大 1.7e-7 相对。
+/// 这条测试把冰面分支的 `es` 钉在修正后的值上。
+///
+/// **还差的**：修正后与上游仍差 3.2e-7 相对，来源是另外两处 f32 取整 ——
+/// `FREEZING_K = 273.16_f32 as f64`（`-fdefault-real-8` 下该是 f64 的 `273.16`）
+/// 与本模块 `f77` 把系数舍入到 f32（同类定义在仓库里有三十余处）。
+/// 两者与 `c8` 的偏差方向相反、部分抵消，所以以前只差 1.7e-7 看不出来。
+/// 把这三处一起改成 f64 后 `f_xy_q`（tier0）会变成逐位一致，但那一改
+/// 必须**连同 `FREEZING_K` 的crate级统一与既有钉值测试的重新对账**一起做 ——
+/// 单独改 `atmosphere.rs` 会让 `equilibrium_soil_column` 那类断言前后不一致
+/// （见 docs/implementation-verification.md）。这里先钉住已修的那一步。
+#[test]
+fn qsadv_ice_branch_uses_the_fortran_c8_literal() {
+    let state = saturation_specific_humidity(263.820_007_324_218_75, 69_062.0).unwrap();
+    let es = 275.551_453_923_276_03_f64;
+    let es_error = (state.vapor_pressure_pa - es).abs() / es;
+    assert!(es_error < 1.0e-14, "vapor pressure is off by {es_error:e}");
+}
+
 #[test]
 fn saturation_clamps_temperature_like_qsadv_and_refuses_invalid_inputs() {
     let frozen = saturation_specific_humidity(FREEZING_K - 100.0, 100_000.0).unwrap();

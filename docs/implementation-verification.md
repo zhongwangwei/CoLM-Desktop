@@ -6604,3 +6604,113 @@ GIT_SHA=$(git -C "$REPO_ROOT" log -1 --format=%h -- vendor/CoLM202X)
 `fevpl` 连成一串。上一轮量的"干季 `f_ldew` → `fwet_snow` → `f_alb`"、
 这一轮的"雪季第 1 步叶温 → 冠层凝霜 → 薄雪融化 → 雪深 → 层数"，
 根都在这一个 `fevpl` 上。
+
+## 强迫场比湿漏了一条 `min`，以及 `qsadv` 冰面系数多了一个零（2026 年，实测）
+
+上一轮把雪季第 1 步的叶温差追到 `fevpl`。这一轮往上又追了两层，
+**两个都是真缺陷**，其中一个只修了一半（另一半是耦合改动，见末尾）。
+
+### 一、POINT 强迫的比湿没有夹到饱和值（已修）
+
+上游 `MOD_UserSpecifiedForcing.F90` 的 `metpreprocess` 对
+`DEF_forcing%dataset == 'POINT'` **只做一件事**：
+
+```fortran
+CALL qsadv(T, P, es, esdT, qsat_tmp, dqsat_tmpdT)
+IF (qsat_tmp < q) THEN
+   q = qsat_tmp
+ENDIF
+```
+
+夹的是**刚读进来的原始记录**。本仓库漏了这一步，代价是 `f_xy_q`
+（**tier0，逐位**）在 `US-NR1-snow` 上 150/360 条差到 **4.67%** ——
+PLUMBER2 的 `Qair` 在冷湿站点常常高于同温度的饱和值（实测 0.00259873
+对 0.00248548），上游夹回来、本仓库原样带下去。
+
+修法在 `crates/colm-forcing/src/point.rs` 读帧时做 `min`，并加了两条测试：
+`point_loader_clamps_supersaturated_humidity_like_metpreprocess`（夹具恰好
+过饱和，同时守住"夹"与"不夹"两端）。实测效果：
+
+| 窗口 | `f_xy_q` 修前 | 修后 |
+|---|---|---|
+| `CN-Cng` | maxrel 1.73e-2（3 条） | **2.89e-7** |
+| `CN-Cng-wet` | 0 | 0（7 月没有过饱和记录） |
+| `US-NR1-snow` | maxrel **4.67e-2** | **6.3e-4 → 再降到 3.5e-7**（见二） |
+
+顺带把 `oracle/tolerances.toml` 里"`f_xy_q` 是上游时刻对齐怪癖"那句旧结论推翻：
+它不是时刻对齐，是**缺了一个 `min`**。
+
+### 二、`qsadv` 冰面分支的 `c8` 多了一个零（已修）
+
+顺手把 `saturation_specific_humidity` 与上游逐项核对（用
+`US-NR1-snow` 第 1 步上游真正用到的 `forc_q` 反解出 `es`）：
+
+```
+上游 qm = 2.4854759632703710E-003
+=> es   = 275.5515395050858 Pa
+```
+
+把 `MOD_Qsadv.F90:63-65` 的 `data` 字面量按 f64 逐项重算，
+**逐位**得到同一个 `es`。而本仓库的 `c8` 写的是
+
+```rust
+f77(0.000_000_000_000_026_265_580_3),   // = 2.6266e-14
+```
+
+上游是 `c8/0.262655803e-14/`（= **2.6266e-15**）—— **多了一个零**。
+`c8*td^8` 在 `td ≈ -9.34` 时是 `2.6e-14 × 5.8e7 ≈ 1.5e-6`（正确值 1.5e-7），
+所以冰面分支的 `es` 一律偏大约 1.7e-7 相对。
+
+修掉之后 `f_xy_q` 在雪季窗口从 6.3e-4 再降到 **3.5e-7**，
+`f_scv` 1.20 → 1.12 mm、`f_snowdp` 0.00521 → 0.00283 m 同向改善。
+
+**代价是诚实的**：`f_qintr`/`f_qdrip` 从 4.17e-8 变成 1.28e-7（刚过 tier2 的
+`atol=1e-7`），雪季 tier2 从 79 条变 81 条。原因是这两个量同时依赖
+`interception.rs` 里**还没改**的 f32 常数 —— 修好一处之后误差不再"恰好抵消"。
+换句话说这是**半成品的样子**，不是修错了方向；下一节说清剩下的是什么。
+
+### 三、`f77` 与 `FREEZING_K` 的 f32 取整：`-fdefault-real-8` 下它们是错的（**未修，需整批做**）
+
+`vendor/CoLM202X/include/Makeoptions` 第 24 行是
+`FOPTS_COMMON = -fdefault-real-8 ...`（`Makeoptions.Mac-arm` 同）。
+也就是说**所有 Fortran 字面量都是 REAL(8)**：`data c8/0.262655803e-14/`
+里那串十进制**不会**先落到 f32。可本仓库到处写着
+
+```rust
+const fn f77(value: f32) -> f64 { value as f64 }
+```
+
+—— 仓库里这样的**局部定义有三十余处、调用点 378 个**。实测把
+`atmosphere.rs` 的 `f77` 改成恒等（f64 字面量）、并把
+`FREEZING_K = 273.16_f32 as f64` 改成 f64 的 `273.16`（上游 `tfrz = 273.16`
+就是 f64），三者一起改的效果是：
+
+| 量（`US-NR1-snow`） | 只修 `c8` | 再修 `f77`+`FREEZING_K` |
+|---|---|---|
+| `f_xy_q` maxrel | 3.5e-7 | **9.4e-16（≈4 ULP，tier0 基本逐位）** |
+| `f_xy_snow` maxabs | 2.6e-15 | 2.6e-15 |
+| `f_scv` maxabs | 1.12 | 1.12 |
+| `f_snowdp` maxabs | 0.00283 | 0.00283 |
+
+**但没有把这一改提交，因为它必须整批做**，理由是实测的：
+
+* **单独改 `atmosphere.rs` 会把算例跑崩。** 只改 `f77`+`FREEZING_K`、
+  不改 `c8` 的那个组合直接报
+  `VSF sublevel layer inputs are invalid`；三处同时改才跑得通 ——
+  说明这些常数是**互相咬合**的，不能一处一处来。
+* **`FREEZING_K` 在仓库里有好几份定义、值还不一样**：
+  `atmosphere.rs` 是 `273.16_f32 as f64`，`lake.rs`/`snow.rs` 是 `273.16`。
+  实测把 `atmosphere.rs` 那份改成 f64 之后，
+  `equilibrium_soil_column_stays_at_its_fortran_surface_balance` 的
+  `phase_flag` 从 `[0, 0]` 变成 `[2, 2]`（两个土壤层的相变标志全翻）——
+  因为夹具用的是 `atmosphere::FREEZING_K`，而相变内核比较的是另一份。
+  这类"离散结果被翻"的改动必须一次改齐、再逐条与 Fortran 对账。
+* 连带要重新对账的既有钉值测试有 5 条（`precipitation_partition`、
+  `equilibrium_soil_column`、`standard_leaf_solver`、
+  `urban_phase_change`、`prepared_point_forcing`），偏差都在 1e-8~1e-6 相对量级，
+  看起来正是 f32→f64 该有的量级，但**必须逐条说明它为什么是新的正确值**，
+  不能只把 `expected` 换成 `actual`。
+
+**所以这一轮的处置**：`c8` 与强迫场 `min` 已修并入库；
+`f77`/`FREEZING_K` 记为下一轮的**整批任务**，判据是
+"三处一起改 → `f_xy_q` 在雪季窗口逐位一致 → 五条钉值测试逐条对账"。
