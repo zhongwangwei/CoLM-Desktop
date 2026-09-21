@@ -8263,3 +8263,57 @@ pco2in = pco2i
 
 干窗降了一个数量级、超差变量砍掉一半：原先 11704 条里绝大多数是
 `f_gssun`/`f_gssha` 经 `etr`/`fevpl`/`lfevpa` 一路带出去的。
+
+## 剩余分叉的形态：**日变瞬态**，起点在气孔的黄昏段（实测，**未修**）
+
+把 `CN-Cng` 干窗改成 `DEF_HIST_FREQ='TIMESTEP'` 跑 200 步，逐步看每个量何时开始不同
+—— 形态和之前设想的"逐步累积"完全不同。
+
+### 一、第 0–14 步全逐位相同，第 15 步一起跳
+
+按数据依赖排序，第 14 步（07:00）的值：
+
+| 量 | 第 14 步是否逐位相同 |
+|---|---|
+| `f_lai` `f_sai` `f_laisun` `f_laisha` | **逐位相同** |
+| `f_etr` `f_etrsun` `f_etrsha` `f_tleaf` `f_t_grnd` `f_ustar` `f_fh` `f_fm` `f_olrg` `f_zwt` `f_respc` | **逐位相同** |
+| `f_sabvsun` `f_sabvsha` `f_sabg` `f_sr*` | 差 5e-14…1e-14（1–2 ULP） |
+| `f_gssun` | 差 1.4e-16（1 ULP） |
+| `f_gssha` | **差 9.35e-07** |
+
+第 15 步（07:30）`f_gssun`/`f_gssha`/`f_etr`/`f_etrsun`/`f_etrsha` 一起变成
+**8.3e-07 / 6.9e-07**，而 `f_laisun`/`f_laisha`/`f_tleaf` 仍逐位相同。
+`gssun = (laisun/rssun)*(tprcor/tlbef)` 里前两个因子都逐位相同 ⇒ **差在 `rssun`**，
+即 `stomata` 的输出。
+
+### 二、`f_vegwp` 每天起落一次，不是单调放大
+
+`f_vegwp` 的相对差在第 15 步一步之内从 2.2e-13 跳到 **2.09e-08**（9.4 万倍），
+随后 10 步左右按 ~1.8 倍/步增长到 2e-6，再在 8 步内衰减回 1e-11：
+
+```
+rec 14 2.2e-13 | 15 2.1e-08 | 16 5.4e-08 | 18 2.1e-07 | 20 6.9e-07 | 26 2.0e-06
+rec 30 1.3e-06 | 32 1.7e-07 | 33 1.7e-11 | 34 1.6e-12
+```
+
+同一天里起落一次，此后每天重复（第 63–80、112–128、161–176 步）。
+**这是瞬态，不是失稳**：系统把它拉回来了。而 `f_rstfacsun`/`f_rstfacsha`
+全程只差 1e-15（气孔胁迫因子两侧都被钉在 ~1），所以 PHS 的胁迫因子不是源头，
+`f_vegwp` 是被蒸腾/根通量带出去的结果。
+
+### 三、这一轮还没定位到源头，下一步怎么打
+
+已排除：`lambda`（两侧都是 1000.）、`gradm`/`binter`（地类表逐位）、`gammas`/`kc`/`ko`
+的常数（逐条比对一致）、`po2m`/`pco2m` 的标度（`block_data_copy(pbot, sca=…)` = 压力，
+Rust 的 `bottom_pressure_pa * 体积分数` 同源）、`OXYGEN_VOLUME_FRACTION = 0.209`
+（与上游 `0.209_r8` 一致）、`wue_internal_co2` 的三条公式（与 `WUE_solver` 逐项一致）。
+
+剩下最可能的落点是 `stomata` 的**输入** `ei`/`ea`（叶面饱和水汽压与冠层空气水汽压）
+—— `WUE_solver` 里 `D = max(ei-ea,50)/psrf`，而 `gsh2o = assmt/(co2a-pco2i/psrf)*1.6`
+的分母很小（实测 `rssun` 在第 14 步约 1.0e5 s/m、第 15 步掉到 1.5e4），
+分母小的地方对 `pco2i` 的微小差很敏感。
+
+做法：在 `stomata` 入口与 `WUE_solver` 出口各打一组探针（Rust 与上游各一份），
+取**第 14/15 步**那两行对比 —— 第 14 步逐位相同意味着种子在第 15 步才出现，
+比"从第 0 步就埋下"好找得多。`f_gssha` 比 `f_gssun` 早一步（第 14 步就 9.35e-07）
+出现差异，说明先查**阴叶**那一支的 `parsha`/`assimsha`。
