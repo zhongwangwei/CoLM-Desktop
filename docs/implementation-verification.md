@@ -9061,3 +9061,42 @@ soil_hcap_cond (Balland-Arp): cases=20000  hcap 20000/20000   thk 20000/20000
 不必改。VSF 真正的储量求和（`MOD_SoilSnowHydrology.F90:296/846`）
 是 `sum(wliq_soisno(1:))` 这类**无乘积**的求和 —— 而"无乘积的顺序求和两边一致"
 已经在 `dzsum` 那组 20000/20000 里验过了，不用再动。
+
+## `meltf` 的四条 `hm` 与三个分母（实测，**已修**），以及**一次差点改错的地方**
+
+`MOD_PhaseChange.F90` 的 `meltf` 每步每层都跑。GIMPLE 读出两处收缩：
+
+| 上游 | GIMPLE |
+|---|---|
+| `hm(j) = hs_soil + (1-fsno)*dhsdT*tinc + brr - tinc/fact` | `FMA((1-fsno)*dhsdT, tinc, hs_soil)` |
+| `hm(j) = hs + dhsdT*tinc + brr - tinc/fact` | `FMA(dhsdT, tinc, hs)` |
+| `hm(j) = hs_snow + fsno*dhsdT*tinc + brr - tinc/fact` | `FMA(fsno*dhsdT, tinc, hs_snow)` |
+| `1. - fact*(1-fsno)*dhsdT` / `1. - fact*dhsdT` / `1. - fact*fsno*dhsdT` | 三条 `FNMA(dhsdT, ·, 1.0)` |
+
+`tinc/fact` 是除法，不参与收缩；`hm(j) = brr(j) - tinc/fact(j)`（内部层）本来就没有收缩点。
+
+### 差点改错：`t + fact*heatr` **不是** fma —— 因为 CSE
+
+温度修正那一段上游写四种：
+```
+j > lb 且非分界面 : t = t + fact*heatr
+j > lb 且分界面   : t = t + fact*heatr/(1-fact*(1-fsno)*dhsdT)
+顶层              : t = t + fact*heatr/(1-fact*dhsdT) 或 /(1-fact*fsno*dhsdT)
+```
+第一支 `t + fact*heatr` 单看就是"乘积进加法"，按前几轮总结的规则**应该**写成
+`FMA(fact, heatr, t)` —— 我第一版正是这么改的。但 GIMPLE 显示：
+
+```
+_37 = fact*heatr            ← 四个分支共用一个临时量
+_39 = _37 + t               ← 第一支：先舍入乘积再相加
+_40 = _37 / d1 ; _41 = t + _40
+```
+
+**`fact*heatr` 在多个分支里出现，GCC 把它 CSE 成一个临时量，于是它不再被吸收。**
+所以那一支必须保持"先舍入乘积再相加"。改成 `mul_add` 会让它**离上游更远** ——
+已按 GIMPLE 回退，并在代码注释里记下这次误判。
+
+**教训（写进规矩）**：局部看形状得出的收缩结论会被**跨分支的公共子表达式**推翻。
+判定收缩必须看**整个函数**在 GIMPLE 里的样子，不能只看那一行。
+
+窗口三口径：干/湿窗逐位不变（那两窗的相变路径没进），雪窗逐位值 −49、Σ|Δ| 与超容差不变。

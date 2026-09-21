@@ -206,15 +206,18 @@ pub fn phase_change(input: PhaseChangeInput<'_>) -> Result<PhaseChangeState> {
         }
         let temperature_change = temperature[layer] - input.previous_temperature_k[layer];
         let fortran_layer = layer as isize - input.snow_layers as isize + 1;
+        // `hm(j) = hs[_soil|_snow] + X*dhsdT*tinc + brr(j) - tinc/fact(j)`
+        // （`MOD_PhaseChange.F90:179/181/186/189`）：那条 `X*dhsdT*tinc` 是
+        // `(X*dhsdT)*tinc`，乘积被收进第一个加法 ——
+        // GIMPLE 实测为 `FMA((X*dhsdT), tinc, hs)`。`tinc/fact` 是除法，不参与收缩。
         heat_residual[layer] = if layer > 0 {
             if fortran_layer == 1
                 && input.split_soil_snow
                 && (input.patch_type < 3 || input.is_dry_lake)
             {
-                input.soil_heat_flux_w_m2
-                    + (1.0 - input.snow_cover_fraction)
-                        * input.surface_heat_flux_temperature_derivative_w_m2_k
-                        * temperature_change
+                ((1.0 - input.snow_cover_fraction)
+                    * input.surface_heat_flux_temperature_derivative_w_m2_k)
+                    .mul_add(temperature_change, input.soil_heat_flux_w_m2)
                     + input.residual_heat_flux_w_m2[layer]
                     - temperature_change / input.fact_seconds_per_j_m2_k[layer]
             } else {
@@ -232,15 +235,14 @@ pub fn phase_change(input: PhaseChangeInput<'_>) -> Result<PhaseChangeState> {
                     + snicar_absorption
             }
         } else if fortran_layer == 1 || !input.split_soil_snow || input.patch_type == 3 {
-            input.surface_heat_flux_w_m2
-                + input.surface_heat_flux_temperature_derivative_w_m2_k * temperature_change
+            input
+                .surface_heat_flux_temperature_derivative_w_m2_k
+                .mul_add(temperature_change, input.surface_heat_flux_w_m2)
                 + input.residual_heat_flux_w_m2[layer]
                 - temperature_change / input.fact_seconds_per_j_m2_k[layer]
         } else {
-            input.snow_heat_flux_w_m2
-                + input.snow_cover_fraction
-                    * input.surface_heat_flux_temperature_derivative_w_m2_k
-                    * temperature_change
+            (input.snow_cover_fraction * input.surface_heat_flux_temperature_derivative_w_m2_k)
+                .mul_add(temperature_change, input.snow_heat_flux_w_m2)
                 + input.residual_heat_flux_w_m2[layer]
                 - temperature_change / input.fact_seconds_per_j_m2_k[layer]
         };
@@ -313,24 +315,29 @@ pub fn phase_change(input: PhaseChangeInput<'_>) -> Result<PhaseChangeState> {
         liquid[layer] = (total_water[layer] - ice[layer]).max(0.0);
 
         if heat_left != 0.0 {
+            // 温度修正的四个分支（`MOD_PhaseChange.F90:257-268`）。分母里的
+            // `fact*X*dhsdT` 被收进 `1 - …`（GIMPLE 的三条 `FNMA(dhsdT, ·, 1.0)`），
+            // 但**分子不算收缩**：`fact*heatr` 在四个分支里出现多次，GCC 把它
+            // CSE 成一个临时量（GIMPLE 里就是 `_37 = fact*heatr`，随后
+            // `_39 = _37 + t`、`_40 = _37/d1`），所以"内部层"那一支
+            // `t + fact*heatr` 也**不是** fma。我第一版按"乘积进加法就该收"
+            // 改成了 `mul_add`，正是 GIMPLE 把它拦下来的。
             let denominator = if layer > 0 {
                 if fortran_layer == 1
                     && input.split_soil_snow
                     && (input.patch_type < 3 || input.is_dry_lake)
                 {
-                    1.0 - input.fact_seconds_per_j_m2_k[layer]
-                        * (1.0 - input.snow_cover_fraction)
-                        * input.surface_heat_flux_temperature_derivative_w_m2_k
+                    (-(input.fact_seconds_per_j_m2_k[layer] * (1.0 - input.snow_cover_fraction)))
+                        .mul_add(input.surface_heat_flux_temperature_derivative_w_m2_k, 1.0)
                 } else {
                     1.0
                 }
             } else if fortran_layer == 1 || !input.split_soil_snow || input.patch_type == 3 {
-                1.0 - input.fact_seconds_per_j_m2_k[layer]
-                    * input.surface_heat_flux_temperature_derivative_w_m2_k
+                (-input.fact_seconds_per_j_m2_k[layer])
+                    .mul_add(input.surface_heat_flux_temperature_derivative_w_m2_k, 1.0)
             } else {
-                1.0 - input.fact_seconds_per_j_m2_k[layer]
-                    * input.snow_cover_fraction
-                    * input.surface_heat_flux_temperature_derivative_w_m2_k
+                (-(input.fact_seconds_per_j_m2_k[layer] * input.snow_cover_fraction))
+                    .mul_add(input.surface_heat_flux_temperature_derivative_w_m2_k, 1.0)
             };
             ensure!(
                 denominator != 0.0,
