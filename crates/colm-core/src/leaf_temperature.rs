@@ -467,8 +467,13 @@ pub fn leaf_temperature(
         )?;
         let leaf_saturation =
             saturation_specific_humidity(state.leaf_temperature_k, input.surface_pressure_pa)?;
-        let canopy_vapor_pressure =
-            canopy_air_humidity * input.surface_pressure_pa / (0.622 + 0.378 * canopy_air_humidity);
+        // `eah = qaf*psrf/(0.622 + 0.378*qaf)`（`MOD_LeafTemperature.F90:688`）：
+        // 分母同样是 `a + b*c`，被收缩成 `fma(0.378,qaf,0.622)`（实测 4000/4000
+        // 相同；不收缩时 4000 组里有 33 组不同）。`eah` 进 `stomata` 的
+        // `D = max(ei-ea,50)/psrf`，而这处分母在两个水汽压相近时很小 ——
+        // 同一个 1 ULP 在这里会被放大。分子是单个乘除，无可收缩点。
+        let canopy_vapor_pressure = canopy_air_humidity * input.surface_pressure_pa
+            / 0.378_f64.mul_add(canopy_air_humidity, 0.622);
         let stomatal_soil_stress = if input.plant_hydraulics.is_some() {
             1.0
         } else {
@@ -663,34 +668,56 @@ pub fn leaf_temperature(
         let longwave_factor = 1.0 - input.canopy_longwave_gap_fraction;
         let (net_longwave, net_longwave_temperature_slope) =
             longwave(input, state.leaf_temperature_k, longwave_factor);
+        // `fsenl = rhoair*cpair*cfh*( (wta0+wtg0)*tl - wta0*thm - wtg0*tg )`
+        // （`MOD_LeafTemperature_Extended.F90:1120`）。括号里是三级减法链
+        // `((W*T) - a*A) - b*B`，gfortran **每一级都吸收掉那个乘积**：
+        // 实测 `fma(-b,B, fma(W,T, -(a*A)))` 与内核 4000/4000 组逐位相同，
+        // 而不收缩的写法只有 345/4000 —— 这个形状每轮迭代出现 5 次
+        // （`fsenl`/`etr`/`etrsun`/`etrsha`/`evplwet`），是 `dtl` 的直接输入。
         let leaf_sensible_heat = input.air_density_kg_m3
             * AIR_HEAT_CAPACITY_J_KG_K
             * leaf_heat_conductance
-            * ((air_heat_weight + ground_heat_weight) * state.leaf_temperature_k
-                - air_heat_weight * input.reference_air_temperature_k
-                - ground_heat_weight * input.ground_temperature_k);
+            * (-ground_heat_weight).mul_add(
+                input.ground_temperature_k,
+                (air_heat_weight + ground_heat_weight).mul_add(
+                    state.leaf_temperature_k,
+                    -(air_heat_weight * input.reference_air_temperature_k),
+                ),
+            );
         let leaf_sensible_temperature_slope = input.air_density_kg_m3
             * AIR_HEAT_CAPACITY_J_KG_K
             * leaf_heat_conductance
             * (air_heat_weight + ground_heat_weight);
-        let humidity_gradient = (air_moisture_weight + ground_moisture_weight)
-            * leaf_saturation.specific_humidity
-            - air_moisture_weight * input.reference_specific_humidity
-            - ground_moisture_weight * input.ground_specific_humidity;
+        // 同上：上游 `( (wtaq0 + wtgq0)*qsatl - wtaq0*qm - wtgq0*qg )`
+        // （`:1125` 那一行里对 `etr`/`etrsun`/`etrsha`/`evplwet` 共用的因子）。
+        let humidity_gradient = (-ground_moisture_weight).mul_add(
+            input.ground_specific_humidity,
+            (air_moisture_weight + ground_moisture_weight).mul_add(
+                leaf_saturation.specific_humidity,
+                -(air_moisture_weight * input.reference_specific_humidity),
+            ),
+        );
         let mut transpiration = input.air_density_kg_m3
             * (1.0 - fwet)
             * evaporation_sign
             * (laisun / (leaf_boundary_resistance + leaf_sunlit_resistance)
                 + laisha / (leaf_boundary_resistance + leaf_shaded_resistance))
             * humidity_gradient;
-        let mut sunlit_transpiration =
-            input.air_density_kg_m3 * (1.0 - fwet) * evaporation_sign * laisun
-                / (leaf_boundary_resistance + leaf_sunlit_resistance)
-                * humidity_gradient;
-        let mut shaded_transpiration =
-            input.air_density_kg_m3 * (1.0 - fwet) * evaporation_sign * laisha
-                / (leaf_boundary_resistance + leaf_shaded_resistance)
-                * humidity_gradient;
+        // `etrsun`/`etrsha` 的**结合顺序**与上游不同：上游是
+        // `rhoair*dry_factor*delta*( laisun/(rb+rssun) )*( … )`
+        // —— 先算 `laisun/(rb+rssun)` 再乘；原先写成 `… * laisun / (rb+rssun) * …`
+        // 是**先乘后除**，两者差 1 ULP。`etr`（上面那条）上游本来就是
+        // `( a/(…) + b/(…) )` 的整体因子，所以只有逐叶这两条要加括号。
+        let mut sunlit_transpiration = input.air_density_kg_m3
+            * (1.0 - fwet)
+            * evaporation_sign
+            * (laisun / (leaf_boundary_resistance + leaf_sunlit_resistance))
+            * humidity_gradient;
+        let mut shaded_transpiration = input.air_density_kg_m3
+            * (1.0 - fwet)
+            * evaporation_sign
+            * (laisha / (leaf_boundary_resistance + leaf_shaded_resistance))
+            * humidity_gradient;
         let mut transpiration_temperature_slope = input.air_density_kg_m3
             * (1.0 - fwet)
             * evaporation_sign
@@ -791,12 +818,29 @@ pub fn leaf_temperature(
         .sqrt();
         let updated_saturation =
             saturation_specific_humidity(state.leaf_temperature_k, input.surface_pressure_pa)?;
-        canopy_air_temperature = air_heat_weight * input.reference_air_temperature_k
-            + ground_heat_weight * input.ground_temperature_k
-            + leaf_heat_weight * state.leaf_temperature_k;
-        canopy_air_humidity = air_moisture_weight * input.reference_specific_humidity
-            + ground_moisture_weight * input.ground_specific_humidity
-            + leaf_moisture_weight * updated_saturation.specific_humidity;
+        // 下面三处 `mul_add` 是**照抄 gfortran 的收缩**（内核 `-O2` 下
+        // `-ffp-contract=fast` 是默认，Rust 不自动收缩），不是优化。
+        //
+        // `taf = wta0*thm + wtg0*tg + wtl0*tl` / `qaf = wtaq0*qm + wtgq0*qg +
+        // wtlq0*qsatl` 这种三项乘积链，实测收缩成
+        // `fma(w2,v2, fma(w0,v0, w1*v1))`：4000 组随机输入里逐位全同，
+        // 而不收缩的写法只有 2580/4000 相同 —— 也就是说**每轮迭代都有约 1/3 的
+        // 概率差 1 ULP**，而 `qaf` 直接经 `eah` 进 `stomata`。这正是叶温迭代
+        // 正反馈（`pco2a ↔ assim`）的入口那一侧。
+        canopy_air_temperature = leaf_heat_weight.mul_add(
+            state.leaf_temperature_k,
+            air_heat_weight.mul_add(
+                input.reference_air_temperature_k,
+                ground_heat_weight * input.ground_temperature_k,
+            ),
+        );
+        canopy_air_humidity = leaf_moisture_weight.mul_add(
+            updated_saturation.specific_humidity,
+            air_moisture_weight.mul_add(
+                input.reference_specific_humidity,
+                ground_moisture_weight * input.ground_specific_humidity,
+            ),
+        );
         let pressure_conversion = 44.6 * 273.16 * input.surface_pressure_pa / 1.013e5;
         let air_conductance = 1.0 / raw * pressure_conversion / input.reference_air_temperature_k;
         canopy_air_co2 = input.atmospheric_co2_pa

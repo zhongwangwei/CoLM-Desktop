@@ -8432,3 +8432,75 @@ Rust 的 `bottom_pressure_pa * 体积分数` 同源）、`OXYGEN_VOLUME_FRACTION
 `unnecessary parentheses` 警告，已 `git checkout` 回退。要按上面这条规则重写，
 必须先确认它能改变实测结果，否则只会往热路径里塞没人能验的 `mul_add`
 （本仓库的规矩：`mul_add` 只写在**量过**的地方）。
+
+## 叶温迭代里的 FMA 收缩：`taf`/`qaf`/`eah`/`fsenl`/`humidity_gradient`（实测，**已修**）
+
+上一节把"叶温迭代的 `pco2a ↔ assim` 正反馈"点成剩余分叉的放大器，但没有动它的**输入端**。
+这一轮按第 7236 节那套办法（把 Fortran 表达式单独编出来、用 libm `fma` 当正确舍入的对照）
+把那个循环里出现频率最高的几处乘加逐位量了一遍，量一处修一处。
+
+### 先说量出来的规则：`X + Y` 里收缩**左边**那个乘积；减法链**每层都收**
+
+| 形状 | gfortran 实际收缩成 | 不收缩时的逐位命中率 |
+|---|---|---|
+| `a*b + c*d` | `fma(a,b, c*d)` | 1952/3000 |
+| `a*b + c*d + e*f` | `fma(e,f, fma(a,b, c*d))` | 2580/4000 |
+| `a*b + c*d + e*f + g*h` | `fma(g,h, fma(e,f, fma(a,b, c*d)))` | — |
+| `(w0+w1)*T - w0*T1 - w1*T2` | `fma(-w1,T2, fma(w0+w1,T, -(w0*T1)))` | **345/4000** |
+
+前两行的另外几个候选（`fma(c,d,a*b)`、`fma(a,b,fma(c,d,fma(e,f,g*h)))` 等）都只有
+2300–3100/4000。第四行那个形状每轮叶温迭代出现 **5 次**
+（`fsenl`/`etr`/`etrsun`/`etrsha`/`evplwet` 共用一个括号里的湿度/温度梯度），
+不收缩时 **91% 的输入都会差 1 ULP** —— 这是这一轮找到的最肥的一处。
+
+第 7236 节的 `Y + eccen*X` 与这里不矛盾：那里只有一个乘可收缩。
+
+### 改了哪五处（`crates/colm-core/src/leaf_temperature.rs`）
+
+| 上游 | 收缩点 |
+|---|---|
+| `:1120` `fsenl = rhoair*cpair*cfh*( (wta0+wtg0)*tl - wta0*thm - wtg0*tg )` | 括号里三级减法链 |
+| `:1125` （`etr` 系列共用的）`( (wtaq0+wtgq0)*qsatl - wtaq0*qm - wtgq0*qg )` | 同上 |
+| `:953` `taf = wta0*thm + wtg0*tg + wtl0*tl` | 三项乘积链 |
+| `:954` `qaf = wtaq0*qm + wtgq0*qg + wtlq0*qsatl` | 同上 |
+| `:688` `eah = qaf*psrf/(0.622 + 0.378*qaf)` | 分母 `a + b*c`（4000 组里 33 组不同） |
+
+外加一处**结合顺序**（不是 FMA）：`etrsun`/`etrsha` 上游是
+`rhoair*dry_factor*delta*( laisun/(rb+rssun) )*( … )`，先算除法再乘；原先写成
+`… * laisun / (rb+rssun) * …`，先乘后除，差 1 ULP。`etr` 那条上游本来就带括号，不动。
+
+`qaf` 是 `eah` 的输入、`eah` 是 `stomata` 的 `ea`，而 `stomata` 的
+`D = max(ei-ea,50)/psrf` 在叶片与冠层空气水汽压相近时分母很小 —— 这条链把
+"每轮 1/3 概率差 1 ULP"直接送进正反馈。
+
+### 实测效果：干窗 tier2 从 27 条降到 18 条
+
+三个窗口（`oracle/work` + `oracle/golden`，全场）：
+
+| 窗口 | 改前 | 改后 |
+|---|---|---|
+| `CN-Cng`（干） | 27 条 tier2 | **18** 条 |
+| `CN-Cng-wet` | 68 | 68 |
+| `US-NR1-snow` | 79 | 79 |
+
+干窗里逐变量超差条数普遍下降（`f_wliq_soisno` 45→5、`f_wice_soisno` 30→15、
+`f_zwt` 61→49、`f_fsenl` 78→76），但 `f_vegwp` **升了**（425→477）——
+它是下面那条**迭代次数刀口**的受害者，数值上本来就不可控，不是这轮改动的回归：
+湿窗/雪窗同样变量在改前后**逐位完全不同**、而超差条数一字不差，说明那些条数由
+"状态整体偏了一层"决定，不对 1 ULP 敏感。
+
+### 下一处（这轮没动）：叶温循环的**退出判据是刀口**
+
+`MOD_LeafTemperature_Extended.F90:1288-1292` 的收敛判据是
+`det = max(del,del2) < 0.01 .and. dee = max(dele,dele2) < 0.1`。`del`/`dele` 是
+`dtl` 与能量通量的变化量，黄昏/黎明时正好压在 `0.01`/`0.1` 附近：任何 1 ULP 的输入差
+都会让**迭代次数差一次**，而每次迭代里 `PlantHydraulicStress_twoleaf` 都会把
+`vegwp` 推进一个 Newton 步。
+
+干窗逐条 history 的 `f_vegwp` 正是这个形状：第 5、7 条记录 Fortran 与 Rust 之间是
+**四个节点同一个常数偏移**（-642.4987/-658.1989 = 15.7002，第 7 条 16.2012），
+第 9 条之后又回到 1e-4 量级。同一节点同向同量偏移 = 多推（或少推）了一整步，
+不是公式差异。第 16 步的 `f_rootr` 剩 111 个 1e-8 级差同源。
+
+要证实它得把两边的迭代次数打出来对（Fortran 侧要重建内核），
+`leaf_temperature` 的输出结构里已经有 `iterations` 字段，但还没有和上游对过的工具。
