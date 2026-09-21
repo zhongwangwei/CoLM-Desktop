@@ -197,3 +197,49 @@ fn the_water_body_class_cannot_be_told_apart_by_vegetation_fraction() {
         );
     }
 }
+
+/// 植物水力性状取自**地类表**，不是 per-PFT 表，并且 `DEF_LC_*` 是整列覆盖。
+///
+/// 上游标准 LCT 路径读的是 `MOD_Const_LC.F90:603` 的 `kmax_sun0_igbp` 那一组
+/// （`MOD_Thermal_CanopyPhase_Extended.F90:706`），per-PFT 的 `kmax_sun_p`
+/// 只被 `LeafTemperaturePC` 用（`:922`）。两张表的数不一样：地类是 `2.e-8`，
+/// per-PFT 是 `1.e-7` —— 拿错表不会报错，只会让导度差 5 倍。
+#[test]
+fn plant_hydraulic_traits_come_from_the_land_cover_table() {
+    let igbp = ClassConstants::new(LandCoverScheme::Igbp, 1).unwrap();
+    let traits = igbp.plant_hydraulic_traits(PlantHydraulicOverrides::default());
+    // 逐位对 `MOD_Const_LC.F90:603-624`：IGBP 每一类的四个 kmax 都是 2.e-8、
+    // `ck0` 都是 3.95，`psi50_*` 逐类不同。
+    assert_eq!(traits.maximum_sunlit_leaf_conductance, 2.0e-8);
+    assert_eq!(traits.maximum_shaded_leaf_conductance, 2.0e-8);
+    assert_eq!(traits.maximum_xylem_conductance, 2.0e-8);
+    assert_eq!(traits.maximum_root_conductance, 2.0e-8);
+    assert_eq!(traits.vulnerability_shape, 3.95);
+    assert_eq!(traits.sunlit_leaf_psi50_mm, -465_000.0);
+    assert_eq!(traits.shaded_leaf_psi50_mm, -465_000.0);
+    assert_eq!(traits.xylem_psi50_mm, -465_000.0);
+    assert_eq!(traits.root_psi50_mm, -465_000.0);
+    // IGBP 第 2 类的 psi50 与第 1 类不同 —— 确认取的是本类那一行。
+    let second = ClassConstants::new(LandCoverScheme::Igbp, 2)
+        .unwrap()
+        .plant_hydraulic_traits(PlantHydraulicOverrides::default());
+    assert_eq!(second.sunlit_leaf_psi50_mm, -260_000.0);
+
+    // `DEF_LC_KMAX_SUN` 是**整列**覆盖：只有它变，别的量不动
+    // （`MOD_Const_LC.F90:919` 的 `IF (DEF_LC_X /= LC_OVERRIDE_UNSET) X(lc) = DEF_LC_X`）。
+    let overridden = igbp.plant_hydraulic_traits(PlantHydraulicOverrides {
+        maximum_sunlit_leaf_conductance: Some(1.0e-7),
+        ..PlantHydraulicOverrides::default()
+    });
+    assert_eq!(overridden.maximum_sunlit_leaf_conductance, 1.0e-7);
+    assert_eq!(overridden.maximum_shaded_leaf_conductance, 2.0e-8);
+    assert_eq!(overridden.vulnerability_shape, 3.95);
+
+    // 分类体系必须被尊重：USGS 第 1 类（裸土/城区一带）的 kmax 是 0。
+    let usgs = ClassConstants::new(LandCoverScheme::Usgs, 1).unwrap();
+    assert_eq!(
+        usgs.plant_hydraulic_traits(PlantHydraulicOverrides::default())
+            .maximum_sunlit_leaf_conductance,
+        0.0
+    );
+}

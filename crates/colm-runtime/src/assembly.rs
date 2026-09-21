@@ -29,12 +29,12 @@ use anyhow::{ensure, Context, Result};
 use colm_core::{
     root_fraction, soil_hydraulic_models, soil_thermal_inputs, CanopyWater, ClassConstants,
     ColdStartRadiation, HydraulicModel, LandCoverScheme, LeafBiochemistry, LeafTemperatureOptions,
-    LeafTemperatureState, ObservationHeightMode, PrecipitationPhaseScheme, RestartSnowSlots,
-    RootFractionScheme, RuntimeSnowColumn, SoilField, SoilHydraulicModel, SoilReflectance,
-    SoilState, SoilThermalInput, StandardLctSnowSoilInput, StandardLctSnowSoilState,
-    StandardLctSoilInput, StandardLctSoilState, StomataOptions, SurfaceLayerScheme,
-    ThermalConductivityScheme, TopmodelMethod, Water2014Runoff, Water2014SoilFluxes,
-    Water2014SoilState,
+    LeafTemperatureState, ObservationHeightMode, PlantHydraulicParameters,
+    PrecipitationPhaseScheme, RestartSnowSlots, RootFractionScheme, RuntimeSnowColumn, SoilField,
+    SoilHydraulicModel, SoilReflectance, SoilState, SoilThermalInput, StandardLctSnowSoilInput,
+    StandardLctSnowSoilState, StandardLctSoilInput, StandardLctSoilState, StomataOptions,
+    SurfaceLayerScheme, ThermalConductivityScheme, TopmodelMethod, Water2014Runoff,
+    Water2014SoilFluxes, Water2014SoilState,
 };
 use colm_init::{
     colm_soil_grid, RestartFile, RestartOverride, SOIL_FIELDS_COMMON, SOIL_FIELDS_THERMAL,
@@ -86,6 +86,12 @@ pub struct LandPhysicsParameters {
     /// 冠层阻力的来源、以及 `vegwp` 这个状态量。本仓库的 standard-LCT 分支把这个开关
     /// 硬写成关（`plant_hydraulics: None`），所以调用方必须能看出算例要的是哪一支。
     pub plant_hydraulics: bool,
+    /// `DEF_PH_*` 的七个植物水力常数（`MOD_Namelist.F90:628-634`）。
+    ///
+    /// 它们只在 `DEF_USE_PLANTHYDRAULICS = .true.` 时被用到，
+    /// 但**与开关一起放在这里**：分开两处会让"开关开了、常数还是默认"
+    /// 这种组合变成一个看不见的状态。
+    pub plant_hydraulic_parameters: PlantHydraulicParameters,
     /// `DEF_VEG_SNOW`：植被上的雪（冠层雪的湿比例、冠层水的雪/雨分配）。
     ///
     /// **默认也是 `.true.`**（`MOD_Namelist.F90:314`）。打开时上游走

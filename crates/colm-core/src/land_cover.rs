@@ -58,6 +58,45 @@ pub enum RootFractionScheme {
 /// **位置号就是地类号**，所以草地（`patchclass = 10`）读的是第 10 个元素。
 /// 类名表 `patchclassname` 是 `(0:N_land_classification)`，多出的那一个位置 0
 /// 是海洋，数值表里没有对应行，因此本类型只收 1..=N。
+/// 一个地类的植物水力性状，即上游 `MOD_Vars_TimeVariables` 里
+/// `kmax_sun`/`kmax_sha`/`kmax_xyl`/`kmax_root`、四个 `psi50_*` 与 `ck`
+/// 这九个数组的第 `lc` 个元素。
+///
+/// 单位与上游一致、不做换算：`kmax` 是导度、`psi50` 是**毫米水柱**（注释里的
+/// mmH2O），`ck` 是脆弱性曲线的形状参数（无量纲）。`MOD_PlantHydraulic.F90`
+/// 直接拿它们参与运算，换算会在两处各写一份。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PlantHydraulicTraits {
+    pub maximum_sunlit_leaf_conductance: f64,
+    pub maximum_shaded_leaf_conductance: f64,
+    pub maximum_xylem_conductance: f64,
+    pub maximum_root_conductance: f64,
+    pub sunlit_leaf_psi50_mm: f64,
+    pub shaded_leaf_psi50_mm: f64,
+    pub xylem_psi50_mm: f64,
+    pub root_psi50_mm: f64,
+    pub vulnerability_shape: f64,
+}
+
+/// `DEF_LC_*` 的九个可选覆盖（`MOD_Namelist.F90:573-581`）。
+///
+/// `None` = namelist 没写（schema 的声明默认值是 `-1.e36`，也就是上游的
+/// `LC_OVERRIDE_UNSET`），用表里的值；`Some(_)` = 该列整体覆盖成同一个数。
+/// 上游的判据是 `IF (DEF_LC_X /= LC_OVERRIDE_UNSET) X(lc) = DEF_LC_X`，
+/// 所以是"整列一个数"，不是逐地类。
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct PlantHydraulicOverrides {
+    pub maximum_sunlit_leaf_conductance: Option<f64>,
+    pub maximum_shaded_leaf_conductance: Option<f64>,
+    pub maximum_xylem_conductance: Option<f64>,
+    pub maximum_root_conductance: Option<f64>,
+    pub sunlit_leaf_psi50_mm: Option<f64>,
+    pub shaded_leaf_psi50_mm: Option<f64>,
+    pub xylem_psi50_mm: Option<f64>,
+    pub root_psi50_mm: Option<f64>,
+    pub vulnerability_shape: Option<f64>,
+}
+
 pub struct ClassConstants {
     scheme: LandCoverScheme,
     class: usize,
@@ -163,6 +202,55 @@ impl ClassConstants {
 
     pub fn extinction_coefficient(&self) -> f64 {
         self.value(|table| table.extkn)
+    }
+
+    /// 地类表里的九个植物水力性状，再按 `DEF_LC_*` 覆盖。
+    ///
+    /// 上游 `MOD_Const_LC.F90:763`/`:815` 把 `kmax_sun0_usgs`/`kmax_sun0_igbp`
+    /// 整列抄进 `kmax_sun`，`:919` 再按 `DEF_LC_KMAX_SUN /= LC_OVERRIDE_UNSET`
+    /// 逐个覆盖。**标准 LCT 路径用的是这张地类表**；per-PFT 的那一份
+    /// （`MOD_Const_PFT.F90` 的 `kmax_sun_p`）只被 `LeafTemperaturePC` 用
+    /// （`MOD_Thermal_CanopyPhase_Extended.F90:706` 对 `:922`）。
+    pub fn plant_hydraulic_traits(
+        &self,
+        overrides: PlantHydraulicOverrides,
+    ) -> PlantHydraulicTraits {
+        let pick = |table: f64, over: Option<f64>| over.unwrap_or(table);
+        PlantHydraulicTraits {
+            maximum_sunlit_leaf_conductance: pick(
+                self.value(|table| table.kmax_sun0),
+                overrides.maximum_sunlit_leaf_conductance,
+            ),
+            maximum_shaded_leaf_conductance: pick(
+                self.value(|table| table.kmax_sha0),
+                overrides.maximum_shaded_leaf_conductance,
+            ),
+            maximum_xylem_conductance: pick(
+                self.value(|table| table.kmax_xyl0),
+                overrides.maximum_xylem_conductance,
+            ),
+            maximum_root_conductance: pick(
+                self.value(|table| table.kmax_root0),
+                overrides.maximum_root_conductance,
+            ),
+            sunlit_leaf_psi50_mm: pick(
+                self.value(|table| table.psi50_sun0),
+                overrides.sunlit_leaf_psi50_mm,
+            ),
+            shaded_leaf_psi50_mm: pick(
+                self.value(|table| table.psi50_sha0),
+                overrides.shaded_leaf_psi50_mm,
+            ),
+            xylem_psi50_mm: pick(
+                self.value(|table| table.psi50_xyl0),
+                overrides.xylem_psi50_mm,
+            ),
+            root_psi50_mm: pick(
+                self.value(|table| table.psi50_root0),
+                overrides.root_psi50_mm,
+            ),
+            vulnerability_shape: pick(self.value(|table| table.ck0), overrides.vulnerability_shape),
+        }
     }
 
     /// `d50`：根系分布的特征深度。

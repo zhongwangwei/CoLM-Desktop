@@ -24,6 +24,7 @@ fn physics(timestep_seconds: f64) -> LandPhysicsParameters {
         // 夹具跑的是经典 Richards 路径；VSF 的编排还没移植。
         variably_saturated_flow: false,
         plant_hydraulics: false,
+        plant_hydraulic_parameters: PlantHydraulicParameters::default(),
         vegetation_snow: false,
         land_cover_scheme: LandCoverScheme::Igbp,
         root_fraction_scheme: RootFractionScheme::SchenkJackson,

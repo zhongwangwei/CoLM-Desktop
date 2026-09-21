@@ -5425,3 +5425,59 @@ ENDIF
 注释（`physics.rs:281`、`assembly.rs:1379`），而 `physics.rs:281` 那句
 "`DEF_USE_LCT` 那道门在本仓库恒成立"正是把**假设**当成了**检查**：它假设算例
 选的是 LCT，却没有验证。**默认值让一个开关"看起来总是成立"，而默认值不是检查。**
+
+## PHS 前置件（一）：七个常数与九个地类性状都接上了（2026 年，实测）
+
+上一节末尾说 PHS 比早先估计的近。这一节把它的**前置件**做完并核实，同时把
+"还差什么"写清楚，免得下一轮再从零查一遍。
+
+### 已经就位的（这轮查实，不是新写）
+
+| 件 | 位置 | 状态 |
+|---|---|---|
+| 植物水力内核 | `plant_hydraulics.rs`（896 行） | 已移植：`plant_hydraulic_stress`、`vegetation_water_potential`、`vulnerability*` |
+| 叶温里的接线 | `leaf_temperature.rs:396-520`、`:819-830` | 已在：`Option<LeafPlantHydraulicInput>` 与 `Option<PlantHydraulicState>` 的分支、`gs0sun/gs0sha`、`ristfac` 的来路 |
+| 根通量分派 | `standard_lct_step.rs:416`、`:539` | 已按 `plant_hydraulics` 分支 |
+| **`vegwp` 重启** | `colm-init/src/time_restart.rs:333-341`、`:783-793` | **已写、已校验** —— 通过 `input.plant_hydraulics` 的 `vegetation_nodes` 与 `water_potential_mm` 落到 `vegwp`/`vegnodes` |
+
+也就是说，缺的**不是**内核、不是重启、不是叶温接线。
+
+### 这轮补上的两块
+
+**（1）七个 `DEF_PH_*` 常数**（`MOD_Namelist.F90:628-634`）现在在
+`land_physics_parameters` 里逐个从 namelist 读进 `PlantHydraulicParameters`。
+逐项对过 `MOD_PlantHydraulic.F90:162-200` 的用法：`FROOT_CARBON`/`ROOT_DENSITY`/
+`ROOT_RADIUS` 一起定细根长度密度，`FROOT_LEAF` 是细根-叶面积分配，
+`CROOT_LATERAL_LENGTH` 与 `K_AXS` 分别是侧根长度与轴向导度系数，
+`KRMAX` 是单位长度单位面积的最大径向导度。空算例断言把它们与
+`PlantHydraulicParameters::default()` 逐位绑在 schema 上（纪律 #1）。
+
+**（2）九个地类性状**：`ClassConstants::plant_hydraulic_traits(overrides)` 从
+**地类表**取 `kmax_sun0`/`kmax_sha0`/`kmax_xyl0`/`kmax_root0`、四个 `psi50_*`、
+`ck0`，再按 `DEF_LC_*` 逐列覆盖（`None` = 没写 = schema 的 `-1.e36` =
+`LC_OVERRIDE_UNSET`）。
+
+这里有一个**容易拿错表**的点，值得单独记：标准 LCT 路径读的是
+`MOD_Const_LC.F90:603` 的 `kmax_sun0_igbp` 那一组
+（`MOD_Thermal_CanopyPhase_Extended.F90:706`），而 per-PFT 的 `kmax_sun_p`
+只被 `LeafTemperaturePC` 用（`:922`）。**两张表的数不一样**：地类是 `2.e-8`，
+per-PFT 是 `1.e-7` —— 拿错不会报错，只会让导度差 5 倍。`land_cover_tests.rs`
+里那条测试同时钉住"取地类表"、"逐类不同"、"覆盖只动一列"、"分类体系被尊重"
+（USGS 第 1 类的 kmax 是 0）四件事。
+
+### 还差的（下一轮的施工单）
+
+1. **构 `LeafPlantHydraulicInput`**：`node_depth_m`/`layer_thickness_m` 取
+   `SoilField`；`root_fraction` 取 `rootr`；`soil_matric_potential_mm`/
+   `soil_hydraulic_conductivity_mm_s` 取 `Water2014SoilOutput` 的
+   `matric_potential_mm`/`hydraulic_conductivity_mm_s`；`saturated_hydraulic_conductivity_mm_s`
+   取土壤常数；九个性状取上面那个访问器；`soil_surface_resistance_scheme` 取
+   physics；`parameters` 取 `LandPhysicsParameters::plant_hydraulic_parameters`。
+2. **`LeafTemperatureState::plant_hydraulics = Some(PlantHydraulicState { .. })`**：
+   重启里有 `vegwp` 就用它，缺就照 `CoLMMAIN.F90:2249` 的 `-2.5e4`
+   （注意那一句在 `IF (DEF_USE_PLANTHYDRAULICS)` 里）。
+3. **把 PHS 从 `unported_branches` 拿掉**，并跑一遍黄金对比看
+   `f_etr`/`f_etrsun`/`f_etrsha`/`f_gssun`/`f_gssha`/`f_rstfac*` 的变化。
+   `CN-Cng-aligned` 算例**没有**关 PHS（默认就是开），所以一旦接通，
+   现在的黄金对比会**立刻**变成 PHS 那一支的结果 —— 也就是说这三个文件里的
+   任何一处接错都会当场显形，不需要另造算例。

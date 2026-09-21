@@ -16,8 +16,9 @@
 
 use anyhow::{bail, Context, Result};
 use colm_core::{
-    HydraulicModel, LandCoverScheme, ObservationHeightMode, PrecipitationPhaseScheme,
-    RootFractionScheme, StomataOptions, SurfaceLayerScheme, ThermalConductivityScheme,
+    HydraulicModel, LandCoverScheme, ObservationHeightMode, PlantHydraulicParameters,
+    PrecipitationPhaseScheme, RootFractionScheme, StomataOptions, SurfaceLayerScheme,
+    ThermalConductivityScheme,
 };
 use colm_namelist::{Document, Value};
 use colm_schema::{find, Default as SchemaDefault};
@@ -123,6 +124,23 @@ pub fn land_physics_parameters(
     // 与已验收的 `DEF_VEG_SNOW = .false.` 配置**同一水平**：`f_scv`/`f_snowdp`/`f_fsno`
     // 两边恒为 0，`f_t_grnd` 0.075 K、`f_tleaf` 0.127 K、`f_etr` 1.0e-8。
     let vegetation_snow = logical(document, "DEF_VEG_SNOW")?;
+    // 植物水力的七个常数。逐项对 `MOD_Namelist.F90:628-634` 的声明默认值 ——
+    // 它们与 `PlantHydraulicParameters::default()` 相同，`physics_tests.rs` 有一条
+    // 空算例断言把这件事钉在 schema 上（纪律 #1：缺省来自 schema，不在这里写第二份）。
+    // 上游只在 `MOD_PlantHydraulic.F90:162-200` 用到这七个，用法见
+    // `plant_hydraulics.rs`：`CROOT_LATERAL_LENGTH` 是侧根平均长度、
+    // `K_AXS` 是轴向导度系数、`FROOT_CARBON`/`ROOT_DENSITY`/`ROOT_RADIUS`
+    // 一起定细根长度密度、`FROOT_LEAF` 是细根-叶面积分配、`KRMAX` 是单位长度
+    // 单位面积的最大径向导度。
+    let plant_hydraulic_parameters = PlantHydraulicParameters {
+        coarse_root_lateral_length_m: real(document, "DEF_PH_CROOT_LATERAL_LENGTH")?,
+        axial_root_conductivity: real(document, "DEF_PH_K_AXS")?,
+        fine_root_carbon_g_c_m2: real(document, "DEF_PH_FROOT_CARBON")?,
+        fine_root_radius_m: real(document, "DEF_PH_ROOT_RADIUS")?,
+        root_tissue_density_g_m3: real(document, "DEF_PH_ROOT_DENSITY")?,
+        fine_root_to_leaf_area: real(document, "DEF_PH_FROOT_LEAF")?,
+        maximum_radial_root_conductance: real(document, "DEF_PH_KRMAX")?,
+    };
     Ok(LandPhysicsParameters {
         hydraulic_model: if campbell {
             HydraulicModel::Campbell
@@ -131,6 +149,7 @@ pub fn land_physics_parameters(
         },
         variably_saturated_flow,
         plant_hydraulics,
+        plant_hydraulic_parameters,
         vegetation_snow,
         land_cover_scheme,
         root_fraction_scheme: ROOT_FRACTION_SCHEME,

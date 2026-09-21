@@ -159,7 +159,7 @@ pub use lake::{
 };
 pub use land_cover::{
     land_cover_classes, land_cover_tables, root_fraction, waterbody_class, ClassConstants,
-    RootFractionScheme,
+    PlantHydraulicOverrides, PlantHydraulicTraits, RootFractionScheme,
 };
 pub use leaf_temperature::{
     leaf_temperature, reference_height_temperature_k, LeafPlantHydraulicInput,

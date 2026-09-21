@@ -8,6 +8,7 @@ use crate::assembly::{
     assemble_standard_lct_snow_template, assemble_standard_lct_template, LandPhysicsParameters,
     RestartStateFiles, StandardLctRunoffScheme, StandardLctStepBinding,
 };
+use colm_core::PlantHydraulicParameters;
 use colm_core::{
     prepare_runtime_forcing, HydraulicModel, LandCoverScheme, ObservationHeightMode,
     PrecipitationPhaseScheme, RootFractionScheme, RuntimeForcingInput, StomataOptions,
@@ -33,6 +34,7 @@ fn physics() -> LandPhysicsParameters {
         hydraulic_model: HydraulicModel::VanGenuchten,
         variably_saturated_flow: false,
         plant_hydraulics: false,
+        plant_hydraulic_parameters: PlantHydraulicParameters::default(),
         vegetation_snow: false,
         land_cover_scheme: LandCoverScheme::Igbp,
         root_fraction_scheme: RootFractionScheme::SchenkJackson,

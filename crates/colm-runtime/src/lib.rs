@@ -1130,6 +1130,7 @@ mod tests {
             hydraulic_model: colm_core::HydraulicModel::VanGenuchten,
             variably_saturated_flow: false,
             plant_hydraulics: false,
+            plant_hydraulic_parameters: colm_core::PlantHydraulicParameters::default(),
             vegetation_snow: false,
             land_cover_scheme: colm_core::LandCoverScheme::Igbp,
             root_fraction_scheme: colm_core::RootFractionScheme::SchenkJackson,

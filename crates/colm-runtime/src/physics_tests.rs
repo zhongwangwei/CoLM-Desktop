@@ -76,6 +76,14 @@ fn a_pft_or_pc_subgrid_case_is_refused_rather_than_run_as_lct() {
 fn an_empty_case_maps_every_declared_default() {
     let physics = land_physics_parameters(&empty_case(), LandCoverScheme::Igbp, HEIGHTS).unwrap();
     assert_eq!(physics.hydraulic_model, HydraulicModel::VanGenuchten);
+    // 七个 `DEF_PH_*` 的 namelist 声明默认值必须与
+    // `PlantHydraulicParameters::default()` 逐位相同 —— 这正是纪律 #1
+    // （缺省来自 schema，不在映射里写第二份）。手抄一次就会在
+    // `MOD_Namelist.F90` 改默认值时与 schema 分叉，而只有这条会响。
+    assert_eq!(
+        physics.plant_hydraulic_parameters,
+        PlantHydraulicParameters::default()
+    );
     assert_eq!(physics.land_cover_scheme, LandCoverScheme::Igbp);
     assert_eq!(physics.timestep_seconds, 1800.0);
     assert_eq!(
