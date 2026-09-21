@@ -946,7 +946,18 @@ fn ground_flux_input(
             .eastward_wind_m_s
             .hypot(forcing.northward_wind_m_s)
             .max(0.1),
-        reference_temperature_k: forcing.air_temperature_k,
+        // `GroundFluxes` 收的 `thm` 是 **`forc_t + 0.0098*forc_hgt_t`**
+        // （`MOD_Thermal_CanopyPhase_Extended.F90:550`，与叶温那一支同一个 `thm`），
+        // 不是原始 `forc_t`。这里曾经漏掉这 0.0098*6 m ≈ 0.0588 K 的订正：
+        // `dth = thm - t_grnd` 因此差 0.2%，地面支的 `obug` 差 1.48e-3，
+        // 再经 `frd`(5.3e-5) → `rd` → `cgw` → 冠层水汽权重(1.4e-5/3.9e-5) →
+        // 湿度梯度 → `etr`/`fevpl`(1.37e-5) → `hs`/`dhsdT` → 相变分配 → 土壤柱
+        // → `scv`/`snowdp`（15 天可到 13.8%）一路传下去。叶温那一支本来就带订正
+        // （见 `leaf_input` 的 `reference_air_temperature_k`），只有这一处没有。
+        reference_temperature_k: crate::reference_height_temperature_k(
+            forcing.air_temperature_k,
+            input.temperature_height_m,
+        ),
         potential_temperature_k,
         virtual_potential_temperature_k: potential_temperature_k
             * (1.0 + 0.61 * forcing.specific_humidity),
