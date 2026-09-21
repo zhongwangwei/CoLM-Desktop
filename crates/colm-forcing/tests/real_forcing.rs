@@ -18,10 +18,20 @@ fn forcing_dir() -> PathBuf {
     p
 }
 
+/// PLUMBER2 数据目录在 macOS 上会多出 AppleDouble 边车文件 `._<同名>`，
+/// 它们同样以 `_Met.nc` 结尾但不是 NetCDF（实测 netcdf 报 -51 Unknown file
+/// format），会把四条测试一起打红。按**文件名**排除，不用扩展名——
+/// `Path::extension()` 对 `._X_Met.nc` 返回 `nc`，挡不住。
+fn is_apple_double(path: &std::path::Path) -> bool {
+    path.file_name()
+        .is_some_and(|name| name.to_string_lossy().starts_with("._"))
+}
+
 fn met_files() -> Vec<PathBuf> {
     let mut out: Vec<PathBuf> = std::fs::read_dir(forcing_dir())
         .expect("readable")
         .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| !is_apple_double(p) && p.is_file())
         .filter(|p| p.to_string_lossy().ends_with("_Met.nc"))
         .collect();
     out.sort();
@@ -29,6 +39,10 @@ fn met_files() -> Vec<PathBuf> {
         out.len() >= 85,
         "expected ~90 forcing files, found {}",
         out.len()
+    );
+    assert!(
+        out.iter().all(|p| !is_apple_double(p)),
+        "AppleDouble sidecars leaked into the file list"
     );
     out
 }

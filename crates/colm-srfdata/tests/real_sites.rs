@@ -45,10 +45,20 @@ fn rawdata() -> PathBuf {
     )
 }
 
+/// PLUMBER2 数据目录在 macOS 上会多出 AppleDouble 边车文件 `._<同名>`，
+/// 它们同样以 `.nc` 结尾但不是 NetCDF（实测 netcdf 报 -51 Unknown file
+/// format），会把四条测试一起打红。按**文件名**排除，不用扩展名 ——
+/// `Path::extension()` 对 `._X.nc` 返回 `nc`，挡不住。
+fn is_apple_double(path: &std::path::Path) -> bool {
+    path.file_name()
+        .is_some_and(|name| name.to_string_lossy().starts_with("._"))
+}
+
 fn site_files() -> Option<Vec<PathBuf>> {
     let mut out: Vec<PathBuf> = std::fs::read_dir(plumber2()?.join("Sitedata"))
         .expect("readable")
         .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| !is_apple_double(p) && p.is_file())
         .filter(|p| p.extension().is_some_and(|x| x == "nc"))
         .collect();
     out.sort();
@@ -56,6 +66,10 @@ fn site_files() -> Option<Vec<PathBuf>> {
         out.len() >= 85,
         "expected ~90 site files, found {}",
         out.len()
+    );
+    assert!(
+        out.iter().all(|p| !is_apple_double(p)),
+        "AppleDouble sidecars leaked into the file list"
     );
     Some(out)
 }
@@ -160,7 +174,7 @@ fn every_site_file_carries_its_own_location_and_landtype() {
     let mut classes = std::collections::BTreeSet::new();
     for e in std::fs::read_dir(&dir).expect("Sitedata") {
         let p = e.expect("entry").path();
-        if p.extension().and_then(|x| x.to_str()) != Some("nc") {
+        if is_apple_double(&p) || p.extension().and_then(|x| x.to_str()) != Some("nc") {
             continue;
         }
         let l = colm_srfdata::site::location(&p).expect("location");

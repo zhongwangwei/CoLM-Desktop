@@ -111,6 +111,17 @@ pub fn canopy_wetness(
 ///
 /// The PFT and PC wrapper is intentionally not duplicated: it calls this same
 /// scalar kernel once per PFT and then fraction-weights the returned fluxes.
+///
+/// `canopy_phase_heat_w_m2` 恒为 0 是**对的**，不是没移植完。上游
+/// `extends/interception/MOD_LeafInterception_Extended.F90` 里只有
+/// `LEAF_interception_{NOAHMP,MATSIRO,VIC,JULES}`（`DEF_Interception_scheme`
+/// 4–7）会给它赋值（各 3–4 处）；本仓库移植的 `LEAF_interception_CoLM2014`
+/// （scheme=1，`:399` 一句 `canopy_phase_heat_out = 0._r8` 之后再没碰过）恒 0，
+/// 而三份黄金算例都用默认的 scheme=1。scheme=1 的相变焓走的是**另一条路**：
+/// `MOD_LeafTemperature_Extended.F90:1544-1566` 的 `qmelt`/`qfrz` 质量转移
+/// 加 Niu (2004) 的 `tl = fwet_snow*tfrz + (1-fwet_snow)*tl` 拉回，本仓库
+/// `leaf_temperature.rs::update_canopy_water` 的融化/冻结两段与它逐式对齐。
+/// 真要用 scheme 4–7，`colm-rs` 会先拒绝（未移植分支），不会静默少一块焓。
 pub fn intercept_canopy(
     input: CanopyInterceptionInput,
     water: &mut CanopyWater,

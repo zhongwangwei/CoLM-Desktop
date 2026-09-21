@@ -7162,3 +7162,73 @@ min(1e6, 上式) / laisun * 1e6        = 4.2514633619846110e2      （laisun = 0
 3. **`ldew` 的每步 0.02%**：比 `intercept_canopy` + `update_canopy_water` 的每步收支
    （已有 `fwet_snow` 一起对照）。
 4. `canopy_phase_heat` 仍是硬编码 0（`interception.rs` 两处），冠层雪融化时会少一块焓。
+
+## 两件收尾：`canopy_phase_heat` **不是缺口**，以及 PLUMBER2 目录里的 AppleDouble 边车（2026 年，实测）
+
+### 一、`canopy_phase_heat` 恒为 0 是**对的**（纠正此前把它记成"实打实的缺口"）
+
+前面几节把它记成"未移植的本地扩展，冠层雪融化时会少一块焓"。按方案号数一遍上游
+就好了，结论相反：
+
+| `DEF_Interception_scheme` | 上游 routine | 给 `canopy_phase_heat_out` 赋值的处数 |
+|---|---|---|
+| **1** | `LEAF_interception_CoLM2014`（`:96-402`） | **0**（`:399` 置 0 之后再没碰过） |
+| 2 / 3 / 8 | CLM4 / CLM5 / CoLM202x | 1（各只有那一句置 0） |
+| 4 / 5 / 6 / 7 | NOAHMP / MATSIRO / VIC / JULES | 3 / 3 / 3 / 4（真的有相变焓） |
+
+三份黄金算例一个都没写 `DEF_Interception_scheme`，取 `MOD_Namelist.F90:267` 的默认
+**1**；`colm-rs` 移植的就是 `LEAF_interception_CoLM2014`
+（`interception.rs::intercept_canopy` 的文档注释里写明了对应关系）。scheme=1 的
+相变焓**不走这个出口**，而是 `MOD_LeafTemperature_Extended.F90:1544-1566` 的
+`qmelt`/`qfrz` 质量转移 + Niu (2004) 的 `tl = fwet_snow*tfrz + (1-fwet_snow)*tl`
+拉回 —— 本仓库 `leaf_temperature.rs::update_canopy_water` 的融化/冻结两段
+（`min(...)`、`max(0, ...)`、`wet_snow_fraction` 加权拉回）与它逐式对齐。
+所以 `canopy_phase_heat_w_m2: 0.0` 的两处赋值是**忠实**的，不是偷懒；
+真要在 scheme 4–7 上跑，`colm-rs` 会先拒绝未移植分支，不会静默少焓。
+（已在 `interception.rs` 的函数文档里留下这段依据，免得下一轮又"补"一次。）
+
+### 二、PLUMBER2 目录里的 `._*`：四条真实数据测试一直红着
+
+macOS 在数据盘上会给每个文件配一份 AppleDouble 边车 `._<同名>`，它们同样以
+`_Met.nc` / `.nc` 结尾，`summarize()` 打开就报
+`netcdf error(-51): NetCDF: Unknown file format`。**扩展名挡不住**：
+`Path::extension()` 对 `._X_Met.nc` 返回 `nc`。修法是按**文件名**排除
+（`starts_with("._")` + `is_file()`），两个测试文件各一个 4 行小函数，并加一条
+"边车没漏进来"的断言自证。
+
+实测（`PLUMBER2_ROOT=/Volumes/Data01/Data/PLUMBER2s`）：
+
+| 命令 | 修前 | 修后 |
+|---|---|---|
+| `cargo test -p colm-forcing --test real_forcing` | **0 passed / 4 failed** | **4 passed / 0 failed** |
+| `cargo test -p colm-srfdata --test real_sites` | 2 passed / 4 failed | **5 passed / 1 failed** |
+
+`real_sites` 剩下那一条是 `the_raster_and_the_classifier_disagree_about_as_often_as_measured`，
+它要 `COLM_RAWDATA` 的 38 GB 栅格 —— 本机没有，`CLAUDE.local.md` 已注明
+"别把失败当成回归"。这一改让**另外三条**真正开始跑那 90 个真实站点文件
+（位置/土类、USDA 三角、缺字段集合），`real_forcing` 的四条也开始跑那 90 个真实
+强迫场文件 —— 文件头自己写着这两个语料此前各抓到过一次"只在 CN-Cng 成立的常数"。
+
+### 三、顺手留下的工具（下一轮直接用）
+
+用 `end_sec = 1800*N` 造 N 步窗口，Fortran 与 Rust 各跑一遍，直接比对重启文件，
+可以拿到**逐步**的分叉表。这一轮跑了 N = 1,2,3,4,6,8,12,16,24,48 共 10 组
+（Fortran 每组约 1.2 s、Rust 约 1.7 s，总计不到 1 分钟）。
+
+**注意一个坑**：这套表用的是**没打 `o3coef*` 补丁**的内核，而第一步的叶温求解在
+那里是被 `spval` 污染的（见上一节），所以 N 很小那几行的量级（`ldew` 差
+~1e-6 mm、`tleaf` 差 ~1e-4 K）里混着那份污染，不要直接当"每步固有差"用。
+要干净的逐步表，先用上一节那段补丁重建内核，或者干脆从第 2 天起比。
+
+### 四、这一轮之后的待办（更新）
+
+| 项 | 状态 |
+|---|---|
+| `canopy_phase_heat` 未移植 | **关闭**（scheme=1 下恒 0 是对的） |
+| PLUMBER2 `._*` 打断真实数据测试 | **已修** |
+| 上游 `o3coef*` 时序（`spval` 乘进 `gs0sun`） | 未修，需连同三份黄金一起重跑 |
+| `zwt` / `ldew` 的每步小差（第 2 天 3.7e-3 / 2.0e-4 相对） | 未定位，落点见上一节 |
+| tier3 的"日均无趋势漂移"一半 | 未实现 |
+| `colm_git_sha` 记的是 Rust 仓库 HEAD | 未修 |
+| `f_xy_solarin` / `f_xy_q` 的 1 ULP | 未修（`sun_angle` 未与 `orb_coszen` 对齐） |
+| TOPMOD / XinAnJiang 产流在 VSF 下 | 未测 |
