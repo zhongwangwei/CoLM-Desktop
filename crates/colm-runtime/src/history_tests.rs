@@ -159,10 +159,10 @@ fn reference() -> HistoryReferenceState {
         specific_humidity_kg_kg: forcing.specific_humidity,
         surface_pressure_pa: forcing.surface_pressure_pa,
         boundary_layer_height_m: forcing.boundary_layer_height_m,
-        downward_shortwave_w_m2: forcing.shortwave.direct_visible_w_m2
-            + forcing.shortwave.direct_near_infrared_w_m2
-            + forcing.shortwave.diffuse_visible_w_m2
-            + forcing.shortwave.diffuse_near_infrared_w_m2,
+        direct_visible_w_m2: forcing.shortwave.direct_visible_w_m2,
+        direct_near_infrared_w_m2: forcing.shortwave.direct_near_infrared_w_m2,
+        diffuse_visible_w_m2: forcing.shortwave.diffuse_visible_w_m2,
+        diffuse_near_infrared_w_m2: forcing.shortwave.diffuse_near_infrared_w_m2,
         downward_longwave_w_m2: forcing.downward_longwave_w_m2,
         convective_precipitation_kg_m2_s: forcing.convective_precipitation_kg_m2_s,
         large_scale_precipitation_kg_m2_s: forcing.large_scale_precipitation_kg_m2_s,

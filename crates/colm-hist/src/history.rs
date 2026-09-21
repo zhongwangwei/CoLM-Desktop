@@ -216,6 +216,43 @@ impl HistoryBuffers {
             .with_context(|| format!("{name} was not declared with declare()"))
     }
 
+    /// 往一个已经写过的标量槽里**再加**一项（不是覆盖）。
+    ///
+    /// 上游 `acc1d`（`MOD_Vars_1DAccFluxes.F90:2882`）一步里可能被调用多次，
+    /// 每次把 `var` 加进**同一个**累加器：短波就是四个波段分别累加到同一个
+    /// `a_solarin`（`:2060-2063`），而步数计数器 `nac` 每步只加一次（`:2038`）。
+    /// 直接写缓冲的 sink 没有步数概念，只能"把贡献加进去"来实现同一个顺序，
+    /// 所以需要这个入口。
+    pub fn add_patch_scalar(&mut self, name: &str, record: usize, delta: f64) -> Result<()> {
+        let layers = self.layers_of(name)?;
+        ensure!(
+            layers == 1,
+            "{name} has {layers} values per patch; use set_layered"
+        );
+        ensure!(
+            record < self.records,
+            "record {record} is outside the {}-record group",
+            self.records
+        );
+        ensure!(
+            delta.is_finite(),
+            "the contribution for {name} is not finite"
+        );
+        let start = record * self.dims.patch;
+        let target = self
+            .values
+            .get_mut(name)
+            .expect("layers_of checked the name");
+        for slot in &mut target[start..start + self.dims.patch] {
+            ensure!(
+                *slot != MISSING_VALUE,
+                "{name} was not written before adding a contribution"
+            );
+            *slot += delta;
+        }
+        Ok(())
+    }
+
     /// 落盘：维度、坐标、变量定义与数据。
     pub fn write(&self, path: impl AsRef<Path>) -> Result<()> {
         let path = path.as_ref();

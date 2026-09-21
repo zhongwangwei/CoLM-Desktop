@@ -418,6 +418,23 @@ pub fn declare_lct_variables(
 pub trait HistorySink {
     fn scalar(&mut self, name: &str, record: usize, value: f64) -> Result<()>;
     fn layer(&mut self, name: &str, record: usize, values: &[f64]) -> Result<()>;
+    /// 往**同一个**累加器里再加一项，并声明它算不算一步。
+    ///
+    /// 上游 `acc1d` 一步里可能被调用多次而步数只记一次：短波四波段
+    /// （`MOD_Vars_1DAccFluxes.F90:2060-2063`）分别累加到同一个 `a_solarin`，
+    /// 而 `nac = nac + 1` 在 `:2038` 每步只执行一次。于是"先各步求和、再相加"
+    /// 与"八项从左到右连加"会差 1 ULP，而 `f_xy_solarin` 是 **tier0**
+    /// （实测干 11/264、湿 23/384、雪 22/360 条差 1 ULP）。
+    ///
+    /// 两个 sink 都**必须**显式实现：直接写缓冲的那种没有步数概念，
+    /// 给它一个"忽略 `counts_as_step`"的默认实现会静默把后续项覆盖掉。
+    fn accumulate(
+        &mut self,
+        name: &str,
+        record: usize,
+        value: f64,
+        counts_as_step: bool,
+    ) -> Result<()>;
 }
 
 impl HistorySink for HistoryBuffers {
@@ -429,6 +446,21 @@ impl HistorySink for HistoryBuffers {
     fn layer(&mut self, name: &str, record: usize, values: &[f64]) -> Result<()> {
         self.set_layered(name, record, values)
             .with_context(|| format!("cannot write {name} into the history buffers"))
+    }
+
+    fn accumulate(
+        &mut self,
+        name: &str,
+        record: usize,
+        value: f64,
+        counts_as_step: bool,
+    ) -> Result<()> {
+        if counts_as_step {
+            self.scalar(name, record, value)
+        } else {
+            self.add_patch_scalar(name, record, value)
+                .with_context(|| format!("cannot add a contribution to {name}"))
+        }
     }
 }
 
@@ -492,6 +524,16 @@ impl HistoryAccumulator {
 
 impl HistorySink for HistoryAccumulator {
     fn scalar(&mut self, name: &str, _record: usize, value: f64) -> Result<()> {
+        self.accumulate(name, 0, value, true)
+    }
+
+    fn accumulate(
+        &mut self,
+        name: &str,
+        _record: usize,
+        value: f64,
+        counts_as_step: bool,
+    ) -> Result<()> {
         ensure!(
             value.is_finite(),
             "the history value for {name} is not finite"
@@ -515,7 +557,10 @@ impl HistorySink for HistoryAccumulator {
                     *count = 1;
                 } else {
                     *sum += value;
-                    *count += 1;
+                    // 一步里的多次 `acc1d`（短波四波段）只记一次步数。
+                    if counts_as_step {
+                        *count += 1;
+                    }
                 }
             }
             Accumulated::Column { .. } => {
@@ -573,19 +618,19 @@ pub struct HistoryReferenceState {
     pub specific_humidity_kg_kg: f64,
     pub surface_pressure_pa: f64,
     pub boundary_layer_height_m: Option<f64>,
-    /// `forc_solarin`：`f_xy_solarin` 照抄它。
+    /// `forc_sols`/`forc_soll`/`forc_solsd`/`forc_solld` —— **四个波段原样**带进来。
     ///
-    /// **是四个波段之和，不是总量 `solar_in_w_m2`。** 上游
-    /// `MOD_Vars_1DAccFluxes.F90:2060-2063` 把 `forc_sols`/`forc_soll`/
-    /// `forc_solsd`/`forc_solld` **四次 `acc1d` 累加到同一个 `a_solarin`**，
-    /// 而 `forc_sols+forc_soll+forc_solsd+forc_solld` 是"总量 × 权重"再相加，
-    /// 舍入上不保证逐位回到总量。
-    ///
-    /// 这里以前写成"照抄总量"，还反过来断言"不是四个波段之和" —— 错了。
-    /// 证据就是 1 ULP：`US-NR1-snow` 264→360 条里 22 条 `f_xy_solarin` 差
-    /// 恰好 1 ULP，而两边**逐位相等**的那些记录正是拆分的四项加起来恰好回到
-    /// 总量的记录。相加的**顺序**要对：`sols + soll + solsd + solld`。
-    pub downward_shortwave_w_m2: f64,
+    /// 不要在这里先加起来再传：上游 `MOD_Vars_1DAccFluxes.F90:2060-2063` 是
+    /// **四次 `acc1d` 累加到同一个 `a_solarin`**，而 `nac = nac + 1` 在 `:2038`
+    /// 每步只执行一次 —— 一个两子步的小时是**八项从左到右连加**。先按步求和再
+    /// 相加会差 1 ULP（数学上相同），而 `f_xy_solarin` 是 **tier0**：
+    /// 实测干 11/264、湿 23/384、雪 22/360 条差 1 ULP，且四个波段的**小时均值
+    /// 逐位相等**（`均值×2` 精确），所以差只能出在这一步的结合顺序上。
+    /// 累加顺序固定 `sols → soll → solsd → solld`。
+    pub direct_visible_w_m2: f64,
+    pub direct_near_infrared_w_m2: f64,
+    pub diffuse_visible_w_m2: f64,
+    pub diffuse_near_infrared_w_m2: f64,
     /// `forc_frl`：`f_xy_frl` 照抄它。
     pub downward_longwave_w_m2: f64,
     /// 步末的太阳天顶角余弦（`CoLMMAIN` 那一份），即上游的 `coszen`。
@@ -627,11 +672,12 @@ impl HistoryReferenceState {
             specific_humidity_kg_kg: forcing.specific_humidity,
             surface_pressure_pa: forcing.surface_pressure_pa,
             boundary_layer_height_m: forcing.boundary_layer_height_m,
-            // 顺序必须与上游的四次 `acc1d` 一致：sols → soll → solsd → solld。
-            downward_shortwave_w_m2: forcing.shortwave.direct_visible_w_m2
-                + forcing.shortwave.direct_near_infrared_w_m2
-                + forcing.shortwave.diffuse_visible_w_m2
-                + forcing.shortwave.diffuse_near_infrared_w_m2,
+            // 四个波段**原样**带出去，由 `set_lct_forcing_mirrors` 按上游的四次
+            // `acc1d` 顺序累加：sols → soll → solsd → solld。
+            direct_visible_w_m2: forcing.shortwave.direct_visible_w_m2,
+            direct_near_infrared_w_m2: forcing.shortwave.direct_near_infrared_w_m2,
+            diffuse_visible_w_m2: forcing.shortwave.diffuse_visible_w_m2,
+            diffuse_near_infrared_w_m2: forcing.shortwave.diffuse_near_infrared_w_m2,
             downward_longwave_w_m2: forcing.downward_longwave_w_m2,
             convective_precipitation_kg_m2_s: forcing.convective_precipitation_kg_m2_s,
             large_scale_precipitation_kg_m2_s: forcing.large_scale_precipitation_kg_m2_s,
@@ -1155,7 +1201,6 @@ pub fn set_lct_forcing_mirrors(
         // 标量风算例里 `forc_vs` 恒为 0（`MOD_Forcing` 把标量风放在 `forc_us`）。
         // `HistoryReferenceState` 已经把标量情形折成 0，这里不再判一次。
         ("xy_vs", reference.wind_speed_northward_m_s),
-        ("xy_solarin", reference.downward_shortwave_w_m2),
         ("xy_frl", reference.downward_longwave_w_m2),
         ("xy_prc", reference.convective_precipitation_kg_m2_s),
         ("xy_prl", reference.large_scale_precipitation_kg_m2_s),
@@ -1174,6 +1219,25 @@ pub fn set_lct_forcing_mirrors(
             "the history value for {name} is not finite"
         );
         sink.scalar(name, record, value)?;
+    }
+    // `xy_solarin` 单独走"四次 `acc1d` 进同一个累加器"的路径，不能并进上面的循环：
+    // 上游 `MOD_Vars_1DAccFluxes.F90:2060-2063` 四个波段分别累加，而 `nac` 每步
+    // 只加一次（`:2038`）。只有**第一项**算一步，后三项只进和 —— 见
+    // [`HistorySink::accumulate`] 与 `HistoryReferenceState` 那四个字段的注释。
+    for (index, value) in [
+        reference.direct_visible_w_m2,
+        reference.direct_near_infrared_w_m2,
+        reference.diffuse_visible_w_m2,
+        reference.diffuse_near_infrared_w_m2,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        ensure!(
+            value.is_finite(),
+            "the history value for xy_solarin is not finite"
+        );
+        sink.accumulate("xy_solarin", record, value, index == 0)?;
     }
     Ok(())
 }
