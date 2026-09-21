@@ -5840,3 +5840,88 @@ mol m⁻² s⁻¹）。上游写进重启的 `gs0sun` 是
 
 **教训**：一条验收命令红了，先看**完整输出**再动手 —— 只 `tail` 会漏掉前一半，
 于是会把一个"两个独立 bug"当成一个。
+
+## 下一件大事：VSF 编排（`WATER_VSF`）的实测图谱（2026 年，审阅，未动工）
+
+`DEF_USE_VariablySaturatedFlow` 是本仓库**最后一个被拒绝的分支**，而且它就是
+**默认配置**（选了 van Genuchten 时 `MOD_Namelist.F90:1767-1772` 强制置真，
+声明默认值本来也是真）。`variably_saturated_flow.rs` 的 2604 行内核早已写完并单测，
+缺的只是编排。这一节把"到底缺什么"钉死，免得下一轮从 813 行 Fortran 重新读起。
+
+### 一、编译事实（先排雷）
+
+| 事实 | 证据 |
+|---|---|
+| `WATER_VSF` 在 `main/MOD_SoilSnowHydrology.F90:529-1341` | — |
+| 内核在 `main/HYDRO/MOD_Hydro_SoilWater.F90`（3651 行） | — |
+| 这两个文件**没有** `extends/interception/` 替身 | `Makefile:635-655` 只替换那五个截留模块 |
+| `main/` 与 `extends/` 的坑**不适用**于本分支 | 全树各只有一份 `.F90` |
+
+### 二、已移植内核 → Fortran 逐项对照（**可直接复用，不要重写**）
+
+| Fortran（`MOD_Hydro_SoilWater.F90`） | 行 | Rust |
+|---|---|---|
+| `get_water_equilibrium_state` | 87-157 | `hydrology.rs:32 equilibrium_water_state` |
+| `soil_psi_from_vliq` / `soil_hk_from_psi` | — | `hydrology.rs:128` / `:184` |
+| `soilwater_aquifer_exchange` | 491-633 | `variably_saturated_flow.rs:1570` |
+| `water_balance` | 1093-1187 | `:1097` |
+| `initialize_sublevel_structure` | 1190-1337 | `:1159` |
+| `use_explicit_form` | 1340-1485 | `:1419` |
+| `var_perturb_level/rainfall/drainage` | 1488-1661 | `:223` / `:374` / `:401` |
+| `check_and_update_level` | 1665-1722 | `:1747`（**已移植，只是 private**） |
+| `flux_inside_hm_soil` | 2696-2757 | `:942` |
+| `flux_at_unsaturated_interface` | 2759-2864 | `:1001` |
+| `flux_top/btm/both_transitive_interface` | 2867-3373 | `:628` / `:701` / `:776` |
+| `flux_sat_zone_fixed_bc` | 2597-2692 | `:855` |
+| `get_zwt_from_wa` | 3376-3444 | `:1330` |
+| `solve_least_squares_problem` | 3448-3524 | `:424` |
+| `secant_method_iteration` | 3528-3566 | `:2056`（private） |
+
+### 三、真正缺的只有五处，而且只有一处含新物理
+
+| 缺失单元 | 行 | 行数 | 性质 |
+|---|---|---|---|
+| `flux_sat_zone_all` | `:2073-2594` | 521 | **纯分派**：约 32 处 `CALL` 全部指向已移植函数；键是「6 种几何 × 9 种 `(ubc_typ, lbc_typ)`」 |
+| `Richards_solver`（驱动体） | `:636-1089` | 454 | 亚步循环 + Newton 外层 + 三条夹紧；子过程全已移植 |
+| `flux_all` | `:1726-2069` | 344 | 纯分派：`lev_update` / `has_sat_zone` / 四条 `dz_upp`/`dz_low` vs `tol_z` 分支 |
+| `soil_water_vertical_movement` | `:160-488` | 329 | **唯一的新物理**：蒸腾亏缺级联 + 分段列循环 + 质量平衡诊断 |
+| `find_unsat_lev_lower` | `:3568-3585` | 18 | 10 行线性扫描 |
+
+另外必须新增的共享常量是 `MAX_ITERS_RICHARDS = 10`（`:49`）；
+`RICHARDS_TOLERANCE = 8.0e-8` 已有（对应 `:50 tol_richards`）。
+
+### 四、四条会咬人的细节
+
+1. **`Richards_solver` 不收敛不报错，只降级。** `:831-849`：`iter >= 10` 就转
+   `use_explicit_form` 继续跑完。所以**降级计数必须先暴露出来**，否则 tier2 的
+   残差无法归因。注意此前那条"495/528 步迭代数一致、无一步撞 itmax"是在
+   `WATER_2014` 路径上测的，**不能外推**到 VSF。
+2. **两套容差不许内联。** `soil_water_vertical_movement` 收到的是硬编码的
+   `1.e-3`（`:1101`），由它派生 `tol_q`/`tol_z`/`tol_v`；`Richards_solver` 那一套
+   来自 `8.e-8`。两者差四个量级，都要走常量而不是散在代码里。
+3. **本仓库对 vendor 的两处本地补丁，Rust 必须跟**：
+   `MOD_SoilSnowHydrology.F90:742-746`（`nprms` 恒为 5，Campbell 只填 `prms(1,:)`）、
+   `:1280-1296`（wetland 分支补写 `smp = psi0`/`hk = hksati`，修 `intent(out)` 未定义）。
+   第一条对 Rust 是好事：`prms` 矩阵换成逐层 `SoilHydraulicModel`，两种解释不再共用一个数组。
+4. **`soil_water_vertical_movement:280-290` 就是与 PHS 的接口**：
+   `DEF_USE_PLANTHYDRAULICS` 关闭时 `etroot = etr*max(rootr,0)/sum(rootr)`，
+   打开时 **`etroot(:) = rootflux`**（上一节刚接完的那条链）。
+
+### 五、验收目标换成更强的那一份黄金
+
+编排完成后比对的是 **`oracle/golden/CN-Cng_hist_2008-01.nc`**（127 个变量，
+**含 `f_qlayer`、缺 `f_qcharge`**）—— 它是 VSF **开** + PHS **开**，
+比现在这份 `CN-Cng-aligned`（126 变量、VSF 关）强得多。实测 `f_qlayer`
+n=2904、min −4.74e-5、max 0.0；`f_rsur_se`/`f_rsur_ie`/`f_rsub` 全 0。
+
+history / 重启侧要一起改的四件事：`f_qlayer` **必须注册并填充**
+（`tolerances.toml:71` 已给它 tier2）；**VSF 打开时 `f_qcharge` 不能再声明**
+（它的运行时条件是 `(.not.DEF_USE_VariablySaturatedFlow)`）；
+`rsur_se`/`rsur_ie` 从 `DECLARED_ONLY` 移到实填；`frcsat` 恒写
+（`frcsat` 现在挂 `DECLARED_BUT_UNFILLED`，那条注释里已经写明"只有 VSF 才会填它"）。
+
+**可以合法拒绝的分支**（与 `WATER_2014` 的既有拒绝保持一致）：
+`patchtype ∉ {0,1}`、`is_dry_lake`、`DEF_USE_Dynamic_Wetland`、
+`DEF_USE_SNICAR`、`CaMa_Flood`/`LWINFILT`、`CROP`/`DEF_USE_IRRIGATION`、
+`DataAssimilation`、`DEF_SPLIT_SOILSNOW`、tracer、`DEF_URBAN_RUN`、
+`DEF_Runoff_SCHEME == 1`（`Runoff_VIC` 未移植）。CN-Cng 默认下这些全为假。
