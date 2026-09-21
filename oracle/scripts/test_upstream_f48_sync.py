@@ -44,6 +44,19 @@ def main() -> None:
     assert "gssun = (laisun / rssun) * (tprcor / tlbef)" in leaf_ext
     assert "gssun(i) = (laisun(i) / rssun(i)) * (tprcor / tlbef(i))" in leaf_pc
     assert "gssun(i) = (laisun(i) / rssun(i)) * (tprcor / tlbef(i))" in leaf_pc_ext
+    # 本仓库的本地修复（见 vendor/PROVENANCE.md）：`o3coef*` 必须在迭代**之前**置 1。
+    # 上游只在迭代之后的非臭氧分支里赋值，而循环体已经把 `o3coefg_*` 交给 `stomata`；
+    # `intent(inout)` 的哑元第一次调用读到的是调用方 SAVE 变量的未定义值。实测
+    # CN-Cng 第一步因此 `rssun` 大约 10 倍、冠层蒸腾 `etr` 约 4800 倍。
+    o3_init = (
+        "o3coefv_sun = 1.0_r8\n"
+        "      o3coefv_sha = 1.0_r8\n"
+        "      o3coefg_sun = 1.0_r8\n"
+        "      o3coefg_sha = 1.0_r8"
+    )
+    for text in (leaf, leaf_ext):
+        assert text.index(o3_init) < text.index("DO WHILE (it .le. itmax)")
+        assert text.count("o3coefv_sun = 1.0_r8") == 1
     assert "CALL mg2p_ozone%grid2pset (f_ozone, forc_ozone)" in ozone
     assert "logical :: DEF_USE_OZONESTRESS = .false." in namelist
     assert "logical :: DEF_USE_OZONEDATA   = .false." in namelist

@@ -8011,3 +8011,82 @@ SAVE 变量传进来。上游**只在迭代循环之后**才给它们赋值：
 `oracle/tests/{histmap,metrics}.rs` 与 `golden-compare` 的期望值。
 `oracle/golden/kernel-manifest.json` 会被 `golden-run --write-golden` 重写，
 那是**应该**跟着更新的（它记的就是生成黄金的那颗内核）。
+
+## 修上游 `o3coef*` 未初始化 + 重生成三份黄金（实测，**已修**）
+
+上一节把第 1 步叶温分叉定位到黄金自己的 `o3coef*` 未初始化缺陷。这一轮把它修掉，
+并按 `vendor/PROVENANCE.md` 里既有的先例（扩展截获模块那次 `intent(inout)` 修复）
+**重新生成三份黄金**。
+
+### 一、改的是什么
+
+`main/MOD_LeafTemperature.F90` 与 `extends/interception/MOD_LeafTemperature_Extended.F90`
+（五个预设都开 `extend_interception`，实际编译的是后者）里，四个赋值的位置从迭代后的
+`ELSE` 分支挪到子程序初始化块（`it = 1` 之前）。两份文件同步改；
+`oracle/scripts/test_upstream_f48_sync.py` 加两条断言把它钉住：初始化必须在
+`DO WHILE (it .le. itmax)` 之前，且 `o3coefv_sun = 1.0_r8` 全文件只出现一次。
+
+没跟着改的两处（PC 变体、臭氧应激迭代内可见性）连同理由记在 `vendor/PROVENANCE.md`。
+
+### 二、第 1 步：从 26 个变量差 1e-6…1e0 降到 18 个差 1e-16…1e-12
+
+修好的内核跑 CN-Cng 第 1 步，与 Rust 比（同一份输入重启）：
+
+| 变量 | 相对差 |
+|---|---|
+| `ldew` / `ldew_snow` | 1.46e-16 |
+| `rib` / `t_soisno` / `rst` | 1.9e-16 … 2.3e-16 |
+| `fm` / `zol` / `qstar` / `qref` | 5.3e-16 … 9.0e-16 |
+| `ustar` / `fh`=`fq` / `wliq_soisno` / `tstar` / `wice_soisno` | 1.1e-15 … 2.5e-15 |
+| `smp` / `hk` / `vegwp` / `fwet_snow` | 7.0e-15 … 2.8e-12 |
+
+修前是 26 个变量、最大 2.6e-6（`ldew`）外加三个 1e0 量级的垃圾槽位
+（`gs0sun`/`gs0sha`/`rst`）。叶温迭代第 1 轮的 23 个探测量里，只有
+`etr`/`fevpl`（2.4e-16）、`fevpl_dtl`（1.5e-16）、`irab`（1.6e-16）还差 1 ULP ——
+就是 gfortran `-ffp-contract=fast` 的 FMA 收缩。
+
+### 三、重生成黄金：三份都变了，但没有一个变量变远
+
+| 窗口 | 黄金里变化的变量数 | 变大的 |
+|---|---|---|
+| `CN-Cng` | 69 / 264 条记录全动（`f_ldew`/`f_gssun`/`f_gssha`/`f_vegwp`/`f_xerr`/`f_zerr` 量级 0.1…2.0，其余 ~1e-6） | — |
+| `CN-Cng-wet` | 5（`f_gssun`/`f_gssha` 各 1 条；`f_assim*` 1.7e-11） | — |
+| `US-NR1-snow` | 85（`f_wice_soisno` 9.0e-4、`f_zwt` 1.6e-3、`f_wdsrf` 1.0，其余 1e-3…1e-8） | — |
+
+把**同一份 Rust 输出**分别对新旧两份黄金比（tier 感知的超差记录总数）：
+
+| 窗口 | 旧黄金 | 新黄金 | 超差变量数 |
+|---|---|---|---|
+| `CN-Cng` | 11749 | **11720** | 55 → 55 |
+| `CN-Cng-wet` | 25896 | **25894** | 70 → 70 |
+| `US-NR1-snow` | 31365 | **31325** | 79 → 79 |
+
+逐变量比：**变远的有 0 个**，变近的干窗 12 个（`f_vegwp` 7.3e-1→1.8e-1、
+`f_ldew` 1.0→5.5e-1、`f_gssun` 1.0→7.4e-1、`f_gssha` 1.0→7.6e-1、
+`f_tstar`/`f_fsena`/`f_fseng`/`f_wliq_soisno` …）。超差变量数没动是因为这些条目
+本来就跨着 1e-7 的线，改善的幅度不足以把它们拉回来。
+
+至此**第 1 步这一层已经对齐**（1e-12…1e-16），残余的 1.1-3.1 万条超差记录来自
+**后续步的逐步累积**：最差记录集中在窗口末段（干窗 index 232、雪窗 index 280-301），
+是同一个 ~1e-16 级种子的轨迹放大，外加少数阶梯式分歧（`f_zwt`、`f_wdsrf`）。
+下一步该做的是挑一个**中期**步做同样的成对探针（第 1 步已经不能提供信息了），
+把「逐步种子」也钉到 1 ULP。
+
+## VSF 子层下界断言放行机器量级负值（实测，**已修**）
+
+修好 `o3coef` 之后，`US-NR1-snow` 的 Rust 运行在新轨迹上撞到自建断言：
+
+```
+colm-rs: VSF sublevel layer inputs are invalid
+    layer=1 thickness=27.578969259676253 porosity=0.07035637861010985
+    psi0=-10 hksati=0.011809648407830133 wetting=0 water_table=0
+    liquid=-0.000000000000000008051229283963381 volume_tolerance=4.397646432528619e-5
+```
+
+`liquid_water = -8.05e-18`，相对该层厚度 27.58 mm 是 3e-19 —— 牛顿迭代的舍入。
+上游 `initialize_sublevel_structure` 对 `vl` 没有任何符号断言，照抄就不该拦。
+原先只给上界留了 `volume_tolerance` 的余量（`check_and_update_level` 精确 `.min`
+与含水层交换的反解之间会有 1 ULP 超出），这次把同一个容差对称地用到下界。
+**没有夹到 0**：上游会把那个负值原样带进下游算术，夹掉会让这一层看到不同的数。
+
+修完 `US-NR1-snow` 正常跑满 720 步（15 天 × 48）。

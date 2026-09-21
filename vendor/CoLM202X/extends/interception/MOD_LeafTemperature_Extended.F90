@@ -486,6 +486,21 @@ CONTAINS
 
 !-----------------------------------------------------------------------
 
+! fix-local: the ozone-stress factors must be 1.0 from the very first iteration.
+! Upstream assigns them only AFTER the stability loop, in the non-ozone branch,
+! but the loop body already hands them to `stomata` (and uses them for the
+! `gs0*` diagnostics). Because they are `intent(inout)` dummies fed from the
+! caller's SAVE variables, the first call in a run saw uninitialised values:
+! measured on the CN-Cng first step, that left rssun ~10x too large and the
+! canopy transpiration `etr` ~4800x too small. Setting them here keeps both
+! the ozone and the non-ozone branch on the same, defined starting point.
+! See `vendor/PROVENANCE.md` and the matching section in
+! `docs/implementation-verification.md`.
+      o3coefv_sun = 1.0_r8
+      o3coefv_sha = 1.0_r8
+      o3coefg_sun = 1.0_r8
+      o3coefg_sha = 1.0_r8
+
 ! initialization of errors and  iteration parameters
       it     = 1    !counter for leaf temperature iteration
       del    = 0.0  !change in leaf temperature from previous iteration
@@ -1289,11 +1304,6 @@ ENDIF
          assimsha = assimsha * o3coefv_sha
 !         rssun    = rssun / o3coefg_sun
 !         rssha    = rssha / o3coefg_sha
-      ELSE
-         o3coefv_sun = 1.0_r8
-         o3coefg_sun = 1.0_r8
-         o3coefv_sha = 1.0_r8
-         o3coefg_sha = 1.0_r8
       ENDIF
 
 ! ======================================================================

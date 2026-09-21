@@ -5601,12 +5601,14 @@ fn validate_sublevel(input: VariableSaturatedSublevelInput<'_>) -> Result<usize>
                 && (0.0..=thickness).contains(&input.water_table_thickness_mm[layer])
                 && input.wetting_front_mm[layer] + input.water_table_thickness_mm[layer]
                     <= thickness
-                && input.liquid_water[layer] >= 0.0
-                // `volume_tolerance` 的余量是刻意的：`check_and_update_level` 用的是
-                // 精确 `.min(vl_s)`，但含水层交换那条路上会经
-                // `soil_vliq_from_psi` 的**反解**回来，实测会有 1 ULP 的超出
-                // （`0.48279477020617934` 对 `0.4827947702061793`）。上游没有任何
-                // 这类断言，所以这里放一个与求解器同源的容差，而不是换个魔数。
+                // `volume_tolerance` 的余量是刻意的，**上下两侧都要**：
+                // `check_and_update_level` 用的是精确 `.min(vl_s)`，但含水层交换那条
+                // 路上会经 `soil_vliq_from_psi` 的**反解**回来，实测会有 1 ULP 的超出
+                // （`0.48279477020617934` 对 `0.4827947702061793`）。下界同理：CN-Cng
+                // 湿窗与 US-NR1-snow 的牛顿迭代会吐出 `-8.05e-18` 这种量级的负值
+                // （相对该层厚度 27.58 mm 是 3e-19），上游没有任何这类断言，照抄
+                // 必须放行 —— 夹到 0 反而会让下游看到与上游不同的数。
+                && input.liquid_water[layer] >= -input.volume_tolerance
                 && input.liquid_water[layer] <= input.porosity[layer] + input.volume_tolerance,
             "VSF sublevel layer inputs are invalid"
         );

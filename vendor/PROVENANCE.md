@@ -129,3 +129,48 @@ levee 保护库容在 history 里必须单列（`below-bank river channel storag
 引入 `canopy_phase_heat`、`qintr_*` 取 `max(0,·)`、`MARK#dtl` 的迭代标记等），
 那是两套有意不同的实现，不在这次同步范围内；本仓库的 Rust 移植按 `main/` 写，
 所以用到截获方案 4~7 时仍要逐处核对。
+
+## 2026 年 9 月：`o3coef*` 提前初始化（本地修复，黄金已重生成）
+
+`main/MOD_LeafTemperature.F90` 与 `extends/interception/MOD_LeafTemperature_Extended.F90`
+（`extend_interception` 打开时后者顶替前者，`kernels/*` 五个预设全都是）把
+`o3coefv_sun/o3coefv_sha/o3coefg_sun/o3coefg_sha` 的赋值放在**稳定性迭代之后**的
+非臭氧分支里：
+
+```fortran
+      ENDDO                       ! 迭代结束
+      IF(DEF_USE_OZONESTRESS)THEN
+         ...
+      ELSE
+         o3coefv_sun = 1.0_r8     ! ← 太晚了
+```
+
+而循环体里已经把 `o3coefg_*` 交给了 `stomata`（并用于 `gs0sun/gs0sha` 诊断）。
+这四个是 `intent(inout)` 的哑元，调用方（`MOD_Thermal_CanopyPhase_Extended.F90`）
+用模块 SAVE 变量传进来，所以**一次运行里的第一次调用**读到的是未定义值；
+之后每次调用结束都会被置回 1.0，于是**只有第 1 步**被污染。
+
+实测（CN-Cng 干窗第 1 步，成对探针）：迭代第 1 轮 `rssun` 大 ~10 倍、冠层蒸腾
+`etr` 小 4800 倍（6.60985755327047220e-05 对正确的 1.37119817067997586e-08），
+黄金里的 `gs0sun = -4.53e38`、`vegwp`、`rst = -5e-31` 也都是它。把初始化挪到迭代
+之前后，第 1 轮全部探测量降到 1 ULP，第 1 步重启从「26 个变量差 1e-6…1e0」降到
+「18 个变量差 1e-16…1e-12」。
+
+改动：把四个赋值从迭代后的 `ELSE` 分支移到子程序初始化块（`it = 1` 之前），
+两份文件同步改；`oracle/scripts/test_upstream_f48_sync.py` 加两条断言
+（初始化必须出现在 `DO WHILE (it .le. itmax)` 之前，且全文件只出现一次），
+再同步上游时它会打回。
+
+**两处没有跟着改**，因为本仓库没有能验证它们的算例：
+
+1. `main/MOD_LeafTemperaturePC.F90` 与 `extends/interception/MOD_LeafTemperaturePC_Extended.F90`
+   有同一个缺陷（`o3coef*(i)` 在 `:1780`/`:2047` 才置 1，`:1205`/`:1296` 已在用）。
+   PFT/PC 聚合那条路本仓库的 Rust 还没移植，也没有 PC 黄金算例。
+2. 臭氧应激打开时（`DEF_USE_OZONESTRESS`）`CalcOzoneStress` 仍在迭代之后调用，
+   所以迭代内的气孔看不到氧胁迫 —— 这是与上面同源的设计问题，不是本次的未定义值问题。
+
+黄金文件与 `oracle/golden/kernel-manifest.json` 已用修好的内核重新生成
+（三份，`golden-run <case> --write-golden`）。同一次提交里还给 Rust 侧
+`crates/colm-core/src/variably_saturated_flow.rs` 的下界断言放行了机器量级负值
+（`-8.05e-18`，相对 27.58 mm 层厚是 3e-19）—— 上游没有这类断言，夹到 0 会让下游
+看到与上游不同的数。
