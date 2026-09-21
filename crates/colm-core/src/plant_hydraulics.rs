@@ -676,51 +676,39 @@ fn spac_change(
     let xylem = input.stem_area_index * input.maximum_xylem_hydraulic_conductance
         / input.canopy_top_height_m;
     let gravity = input.canopy_top_height_m * 1000.0;
-    let a11 =
-        -input.sunlit_leaf_area_index * input.maximum_sunlit_leaf_hydraulic_conductance * fxyl
-            - sunlit_flux * dfsun;
-    let a13 = input.sunlit_leaf_area_index
-        * input.maximum_sunlit_leaf_hydraulic_conductance
-        * (dfxyl * (x[XYLEM] - x[SUNLIT]) + fxyl);
-    let a22 =
-        -input.shaded_leaf_area_index * input.maximum_shaded_leaf_hydraulic_conductance * fxyl
-            - shaded_flux * dfsha;
-    let a23 = input.shaded_leaf_area_index
-        * input.maximum_shaded_leaf_hydraulic_conductance
-        * (dfxyl * (x[XYLEM] - x[SHADED]) + fxyl);
-    let a31 = input.sunlit_leaf_area_index * input.maximum_sunlit_leaf_hydraulic_conductance * fxyl;
-    let a32 = input.shaded_leaf_area_index * input.maximum_shaded_leaf_hydraulic_conductance * fxyl;
-    let mut a33 = -input.sunlit_leaf_area_index
-        * input.maximum_sunlit_leaf_hydraulic_conductance
-        * (dfxyl * (x[XYLEM] - x[SUNLIT]) + fxyl)
-        - input.shaded_leaf_area_index
-            * input.maximum_shaded_leaf_hydraulic_conductance
-            * (dfxyl * (x[XYLEM] - x[SHADED]) + fxyl)
+    // 下面四个矩阵元的**分组**必须与上游逐字一致（`MOD_PlantHydraulic.F90:472-489`）。
+    // 上游写的是 `A13 = laisun*kmax_sun*dfx*(x(xyl)-x(leafsun)) + laisun*kmax_sun*fx`，
+    // 本仓库原先提成 `laisun*kmax_sun*(dfx*Δ + fx)` —— 代数等价、**舍入不等价**：
+    // 上游先把两个乘积各自算出来再相加，提公因式之后多了一次"先加后乘"。
+    // 实测：这一步让第 0 次 PHS 调用的 `dx` 差 1 ULP（输入已逐位相同）。
+    let sunlit_conductance =
+        input.sunlit_leaf_area_index * input.maximum_sunlit_leaf_hydraulic_conductance;
+    let shaded_conductance =
+        input.shaded_leaf_area_index * input.maximum_shaded_leaf_hydraulic_conductance;
+    let sunlit_gradient = x[XYLEM] - x[SUNLIT];
+    let shaded_gradient = x[XYLEM] - x[SHADED];
+    let root_gradient = x[ROOT] - x[XYLEM] - gravity;
+    let a11 = -sunlit_conductance * fxyl - sunlit_flux * dfsun;
+    let a13 = sunlit_conductance * dfxyl * sunlit_gradient + sunlit_conductance * fxyl;
+    let a22 = -shaded_conductance * fxyl - shaded_flux * dfsha;
+    let a23 = shaded_conductance * dfxyl * shaded_gradient + shaded_conductance * fxyl;
+    let a31 = sunlit_conductance * fxyl;
+    let a32 = shaded_conductance * fxyl;
+    let mut a33 = -sunlit_conductance * dfxyl * sunlit_gradient
+        - sunlit_conductance * fxyl
+        - shaded_conductance * dfxyl * shaded_gradient
+        - shaded_conductance * fxyl
         - xylem * froot;
-    let a34 = xylem * (dfroot * (x[ROOT] - x[XYLEM] - gravity) + froot);
+    let a34 = xylem * dfroot * root_gradient + xylem * froot;
     let a43 = xylem * froot;
-    let a44 = -xylem * froot - xylem * dfroot * (x[ROOT] - x[XYLEM] - gravity) + root_flux_slope;
+    let a44 = -xylem * froot - xylem * dfroot * root_gradient + root_flux_slope;
     let mut f = [0.0; VEGETATION_SEGMENTS];
-    f[SUNLIT] = sunlit_flux * fsun
-        - input.sunlit_leaf_area_index
-            * input.maximum_sunlit_leaf_hydraulic_conductance
-            * fxyl
-            * (x[XYLEM] - x[SUNLIT]);
-    f[SHADED] = shaded_flux * fsha
-        - input.shaded_leaf_area_index
-            * input.maximum_shaded_leaf_hydraulic_conductance
-            * fxyl
-            * (x[XYLEM] - x[SHADED]);
-    f[XYLEM] = input.sunlit_leaf_area_index
-        * input.maximum_sunlit_leaf_hydraulic_conductance
-        * fxyl
-        * (x[XYLEM] - x[SUNLIT])
-        + input.shaded_leaf_area_index
-            * input.maximum_shaded_leaf_hydraulic_conductance
-            * fxyl
-            * (x[XYLEM] - x[SHADED])
-        - xylem * froot * (x[ROOT] - x[XYLEM] - gravity);
-    f[ROOT] = xylem * froot * (x[ROOT] - x[XYLEM] - gravity) - root_flux;
+    f[SUNLIT] = sunlit_flux * fsun - sunlit_conductance * fxyl * sunlit_gradient;
+    f[SHADED] = shaded_flux * fsha - shaded_conductance * fxyl * shaded_gradient;
+    f[XYLEM] = sunlit_conductance * fxyl * sunlit_gradient
+        + shaded_conductance * fxyl * shaded_gradient
+        - xylem * froot * root_gradient;
+    f[ROOT] = xylem * froot * root_gradient - root_flux;
     let mut change = [0.0; VEGETATION_SEGMENTS];
     if shaded_flux > 0.0 {
         let determinant = a44 * a22 * a33 * a11
