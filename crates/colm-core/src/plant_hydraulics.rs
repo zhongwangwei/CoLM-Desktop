@@ -573,10 +573,17 @@ fn root_flux_from_top_potential(
             + next_distance.map_or(0.0, |distance| axial[layer] / distance)
             + radial[layer];
         super_[row] = next_distance.map_or(0.0, |distance| -axial[layer] / distance);
-        rhs[row] = radial[layer] * input.soil_matric_potential_mm[layer] + axial[layer - 1]
+        // `rmx_hr(j-1) = krad(j)*smp(j) + kax(j-1) - kax(j)`；左边那个乘积被
+        // gfortran 吸收（实测 `fma(p,A,B) - C` 4000/4000，改写成 `p*A+(B-C)`
+        // 只有 2662/4000）。`rmx` 是**第一次** `tridia` 的右端：它差 1 ULP，
+        // `x` 就差，而 `dqeroot`（第二次解的右端 `drmx_hr` 与它无关）可以仍然对上 ——
+        // 实测就是先看到 `qeroot` 差、`dqeroot` 相同。
+        rhs[row] = radial[layer].mul_add(input.soil_matric_potential_mm[layer], axial[layer - 1])
             - next_distance.map_or(0.0, |_| axial[layer]);
         if layer == 1 {
-            rhs[row] += axial[0] / previous_distance * root_one;
+            // `… + kax(j-1)/den1*xroot(1)`：`X + 乘积` 形状，收的是外层那个乘积
+            // （`fma(q,R,acc)` 4000/4000，不收缩 2935/4000）。
+            rhs[row] = (axial[0] / previous_distance).mul_add(root_one, rhs[row]);
             derivative_rhs[row] = axial[0] / previous_distance;
         }
     }
@@ -618,11 +625,16 @@ fn root_potential_from_flux(
             + next_distance.map_or(0.0, |distance| axial[layer] / distance)
             + radial[layer];
         super_[layer] = next_distance.map_or(0.0, |distance| -axial[layer] / distance);
-        rhs[layer] = radial[layer] * input.soil_matric_potential_mm[layer]
-            + previous_distance.map_or(0.0, |_| axial[layer - 1])
-            - next_distance.map_or(0.0, |_| axial[layer]);
+        // `getrootqflx_qe2x` 的右端三行分别是
+        // `krad*smp - qeroot - kax(j)`、`krad*smp + kax(j-1) - kax(j)`、
+        // `krad*smp + kax(j-1)`（`MOD_PlantHydraulic.F90:940-960`）。
+        // 所以首行是**先减 `qeroot` 再减 `kax`** —— 原先先减 `kax`、
+        // 出了循环再减 `qeroot`，结合顺序与上游不同；同时那个乘积也要收缩。
+        rhs[layer] = radial[layer].mul_add(
+            input.soil_matric_potential_mm[layer],
+            previous_distance.map_or(-root_flux_kg_m2_s, |_| axial[layer - 1]),
+        ) - next_distance.map_or(0.0, |_| axial[layer]);
     }
-    rhs[0] -= root_flux_kg_m2_s;
     let potential = solve_tridiagonal(&sub, &diagonal, &super_, &rhs)
         .map_err(anyhow::Error::msg)
         .context("plant-hydraulic root-flux solve failed")?;
