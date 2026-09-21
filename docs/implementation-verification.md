@@ -9100,3 +9100,78 @@ _40 = _37 / d1 ; _41 = t + _40
 判定收缩必须看**整个函数**在 GIMPLE 里的样子，不能只看那一行。
 
 窗口三口径：干/湿窗逐位不变（那两窗的相变路径没进），雪窗逐位值 −49、Σ|Δ| 与超容差不变。
+
+## `GroundTemperature` 的矩阵装配：顶层/内层/底层的 `bt` 与 `rt`（实测，**已修**）
+
+`temperature_system` 是三对角方程组的装配处，每步都跑，之前没按 GIMPLE 校过。
+用 `gfortran -O2 -fdefault-real-8 -ffree-form -fdump-tree-optimized` 读
+`MOD_GroundTemperature.F90:311-380`，读出七处收缩：
+
+| 上游 | GIMPLE | 说明 |
+|---|---|---|
+| `fact(lb) = …/(0.5*(z(j)-zi(j-1)+capr*(z(j+1)-zi(j-1))))` | `FMA(capr, z(j+1)-zi(j-1), z(j)-zi(j-1))` | 分母括号内 |
+| `bt = 1+Q - fsno*fact*dhsdT` | `FNMA(fsno*fact, dhsdT, 1+Q)` | 顶层·雪 |
+| `bt = 1+Q - fact*dhsdT` | `FNMA(fact, dhsdT, 1+Q)` | 顶层·非雪 |
+| `bt = 1+P - (1-fsno)*dhsdT*fact` | `FNMA((1-fsno)*dhsdT, fact, 1+P)` | 内层·`j==1 && split` |
+| `bt = 1 + (1-cnfac)*fact*sum` | `FMA(sum, (1-cnfac)*fact, 1.0)` | 内层·其他 |
+| `rt = t + fact*(hs - dhsdT*t + cnfac*fn)` | `FNMA(dhsdT,t,hs)` → `+cnfac*fn` → `FMA(括号, fact, t)` | 顶层 |
+| `rt = t - cnfac*fact*fn1` | `FNMA(cnfac*fact, fn1, t)` | 底层 |
+
+四处**不**收缩，都是因为它们两侧是**商**而不是乘积：`Q = (1-cnfac)*fact*tk/Δz`、
+`P = sum`（`tk/dzp + tk1/dzm`）、底层的 `bt = 1 + (1-cnfac)*fact*tk/dzm`、
+以及 `j==1 && split` 里 `rt` 的 `t + cnfac*fact*Δ`（下游除法把它留在了括号里）。
+
+### 相邻两条语句结论相反：`bt` 收了，`rt` 没收
+
+顶层与内层的 `rt` 都是 `t + cnfac*fact*(fn - fn1)` 的形状，按"乘积进加法就吸收"的
+形状规则应该写成 `mul_add`。**我第一版内层正是这么写的**，用忠实复刻的
+`top2.f90`（含全部四个分支的数据流，`bt`/`rt` 六个量都镜像出来）跑 20000 组随机
+输入后发现：`rt(2)` 新 Rust 19995/20000，而**旧** Rust 是 20000/20000 —— 也就是说
+那一处本来就和上游一致，改了反而变远。回退后六项全部 20000/20000。
+
+原因同样在 CSE：`cnfac*fact` 那个乘积在雪层／`j==1 && split`／其他三个内层分支里
+共用，GCC 把它提成一个临时量（dump 里的 `_462`）再与 `t` 相加，于是不再被吸收。
+顶层那个 `+ cnfac*fn(0)` 也是同理（两个顶层分支共用 `cnfac*fn(0)`）。
+
+对照表（20000 组随机输入，逐位相等的组数）：
+
+| 量 | 旧 Rust | 新 Rust |
+|---|---|---|
+| `bt(1)` | 19870 | 20000 |
+| `rt(1)` | 19803 | 20000 |
+| `bt(2)` | 19942 | 20000 |
+| `rt(2)` | 20000 | 20000 |
+| `bt(10)` | 20000 | 20000 |
+| `rt(10)` | 20000 | 20000 |
+
+旧 Rust 那三个不满的正是本轮改的顶层 `bt`/`rt` 与内层 `bt`。
+
+**规矩（再次确认）**：判定收缩只能看**整个函数**的 GIMPLE，不能只看那一行；
+`meltf` 的 `fact*heatr` 与本轮的 `cnfac*fact*Δ` 是同一类陷阱，而且这里更进一步 ——
+**同一个函数里紧挨着的两条语句，一条收一条不收**。
+
+### 窗口三口径（诚实记录：干窗三项都变差）
+
+以 `71f1b7a`（`meltf`）为基线，`bash /tmp/gf/win4.sh` 三个窗口：
+
+| 窗口 | 逐位不同值 | Σ\|Δ\| | 超容差 |
+|---|---|---|---|
+| 干（CN-Cng） | 21233 → 21198 | 602.7851 → **753.1381** | 838 → **877** |
+| 湿（CN-Cng-wet） | 33346 → 33349 | 10386.7216 → 10374.7096 | 20666 → 20672 |
+| 雪（US-NR1-snow） | 33587 → **33657** | 不变 | 不变 |
+
+tier2 变量数：干 17 → 18，湿 68，雪 79。
+
+干窗的 Σ\|Δ\| 涨了 25%，这是**唯一**一处单调口径明显变差的地方。仍然保留这次改动，
+理由与前几轮一致：GIMPLE + 20000 组差分已经证明新的算式与上游**逐位等价**，
+端到端指标的移动来自轨迹在阈值附近的抖动（同一份算式换个分支走向就会翻转），
+不是算式更远。这条取舍已在 `meltf` 那节记过一次，此处是同一条规矩的第二次应用。
+
+### 未验的部分
+
+- `j < 1`（雪层）与 `j == 1 && split` 两条分支：差分驱动只喂了土壤层，这两支
+  只有 GIMPLE 解码作依据，没有 20000 组差分。它们的算式与已验分支同形，
+  但按上面的教训，同形**不能**当作证据。
+- `surface_fluxes` 里 `snow`/`soil` 两组表达式尚未按 GIMPLE 扫过。
+
+Tested: `cargo test --workspace --lib --bins -- --test-threads=1`；`cargo clippy --workspace --all-targets -- -D warnings`；`cargo fmt --all --check` 与 `cargo fmt --manifest-path gui/src-tauri/Cargo.toml --all --check`；`cargo test -q -p oracle -- --test-threads=1`；`cargo run -q -p xtask -- check-gui`；`python3 oracle/scripts/test_upstream_f48_sync.py`（PASS）。

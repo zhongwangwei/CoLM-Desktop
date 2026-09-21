@@ -168,11 +168,15 @@ pub fn ground_temperature(input: GroundTemperatureInput<'_>) -> Result<GroundTem
     let (surface_heat_flux, soil_heat_flux, snow_heat_flux, flux_derivative) =
         surface_fluxes(input, use_snicar)?;
     let mut factor = vec![0.0; layers];
+    // `fact(lb) = deltim/cv*dz_soisno/(0.5*(z(j)-zi(j-1)+capr*(z(j+1)-zi(j-1))))`
+    // （`MOD_GroundTemperature.F90:311-312`）：括号里的 `capr*(…)` 被吸收
+    // （GIMPLE：`FMA(capr, z(j+1)-zi(j-1), z(j)-zi(j-1))`）。
     factor[0] = input.time_step_seconds / layer_capacity[0] * input.layer_thickness_m[0]
         / (0.5
-            * (input.node_depth_m[0] - input.interface_depth_m[0]
-                + input.surface_temperature_factor
-                    * (input.node_depth_m[1] - input.interface_depth_m[0])));
+            * input.surface_temperature_factor.mul_add(
+                input.node_depth_m[1] - input.interface_depth_m[0],
+                input.node_depth_m[0] - input.interface_depth_m[0],
+            ));
     for layer in 1..layers {
         factor[layer] = input.time_step_seconds / layer_capacity[layer];
     }
@@ -370,21 +374,28 @@ fn temperature_system(
     let implicit = 1.0 - input.crank_nicolson_factor;
     let top_distance = input.node_depth_m[1] - input.node_depth_m[0];
     super_[0] = -implicit * factor[0] * conductivity[0] / top_distance;
+    // 顶层矩阵元（`MOD_GroundTemperature.F90:331-335`）。收缩点（GIMPLE）：
+    // `bt = 1+Q` 里的 Q 是**商**（不收缩），减去的那个乘积被吸收
+    // （`FNMA(fsno*fact, dhsdT, 1+Q)` / `FNMA(fact, dhsdT, 1+Q)`）；
+    // `rt` 括号里 `hs - dhsdT*t` 被吸收（`FNMA(dhsdT,t,hs)`），
+    // 而 `+ cnfac*fn` 是**被 CSE 成公共临时量**、**不**融合的那一项
+    // （同一个 `cnfac*fn(0)` 两个分支都用），最后 `FMA(括号, fact, t)`。
+    let top_quotient = 1.0 + implicit * factor[0] * conductivity[0] / top_distance;
     if input.snow_layers > 0 && input.use_split_soil_snow {
-        diagonal[0] = 1.0 + implicit * factor[0] * conductivity[0] / top_distance
-            - factor[0] * input.snow_cover_fraction * derivative;
-        rhs[0] = input.temperature_k[0]
-            + factor[0]
-                * (snow_heat_flux
-                    - input.snow_cover_fraction * derivative * input.temperature_k[0]
-                    + input.crank_nicolson_factor * flux[0]);
+        diagonal[0] = (-(input.snow_cover_fraction * factor[0])).mul_add(derivative, top_quotient);
+        rhs[0] = factor[0].mul_add(
+            (-(input.snow_cover_fraction * derivative))
+                .mul_add(input.temperature_k[0], snow_heat_flux)
+                + input.crank_nicolson_factor * flux[0],
+            input.temperature_k[0],
+        );
     } else {
-        diagonal[0] =
-            1.0 + implicit * factor[0] * conductivity[0] / top_distance - factor[0] * derivative;
-        rhs[0] = input.temperature_k[0]
-            + factor[0]
-                * (surface_heat_flux - derivative * input.temperature_k[0]
-                    + input.crank_nicolson_factor * flux[0]);
+        diagonal[0] = (-factor[0]).mul_add(derivative, top_quotient);
+        rhs[0] = factor[0].mul_add(
+            (-derivative).mul_add(input.temperature_k[0], surface_heat_flux)
+                + input.crank_nicolson_factor * flux[0],
+            input.temperature_k[0],
+        );
     }
     for layer in 1..layers - 1 {
         let lower_distance = input.node_depth_m[layer] - input.node_depth_m[layer - 1];
@@ -392,49 +403,48 @@ fn temperature_system(
         let fortran_layer = layer as isize - input.snow_layers as isize + 1;
         sub[layer] = -implicit * factor[layer] * conductivity[layer - 1] / lower_distance;
         super_[layer] = -implicit * factor[layer] * conductivity[layer] / upper_distance;
+        // 内层矩阵元（`:344-372`）。`bt = 1 + (1-cnfac)*fact*sum` 里那个乘积被吸收
+        // （GIMPLE：`FMA(sum, (1-cnfac)*fact, 1.0)`），其中
+        // `sum = tk/dzp + tk1/dzm` 是商之和、本身不参与收缩。
+        let conductivity_sum =
+            conductivity[layer] / upper_distance + conductivity[layer - 1] / lower_distance;
+        let diagonal_sum = conductivity_sum.mul_add(implicit * factor[layer], 1.0);
+        // 但 `rt = t + cnfac*fact*(fn-fn1)` **不融合**：那个乘积在三个内层分支
+        // （雪层／`j==1 && split`／其它）里共用，GCC 把它 CSE 成一个临时量
+        // （GIMPLE 的 `_462`）再与 `t` 相加。**相邻两条语句的结论可以相反**，
+        // 只能逐条看 dump：`bt` 收了，`rt` 没收。
+        let transient = input.temperature_k[layer]
+            + input.crank_nicolson_factor * factor[layer] * (flux[layer] - flux[layer - 1]);
         if fortran_layer < 1 {
-            diagonal[layer] = 1.0
-                + implicit
-                    * factor[layer]
-                    * (conductivity[layer] / upper_distance
-                        + conductivity[layer - 1] / lower_distance);
-            rhs[layer] = input.temperature_k[layer]
-                + input.crank_nicolson_factor * factor[layer] * (flux[layer] - flux[layer - 1])
+            diagonal[layer] = diagonal_sum;
+            rhs[layer] = transient
                 + if use_snicar {
                     input.snow_layer_absorption_w_m2.unwrap()[layer] * factor[layer]
                 } else {
                     0.0
                 };
         } else if fortran_layer == 1 && input.use_split_soil_snow {
-            diagonal[layer] = 1.0
-                + implicit
-                    * factor[layer]
-                    * (conductivity[layer] / upper_distance
-                        + conductivity[layer - 1] / lower_distance)
-                - (1.0 - input.snow_cover_fraction) * derivative * factor[layer];
-            rhs[layer] = input.temperature_k[layer]
-                + input.crank_nicolson_factor * factor[layer] * (flux[layer] - flux[layer - 1])
-                + factor[layer]
-                    * (soil_heat_flux
-                        - (1.0 - input.snow_cover_fraction)
-                            * derivative
-                            * input.temperature_k[layer]);
+            // `bt = 1+P - (1-fsno)*dhsdT*fact` ⇒ 末项吸收（`FNMA((1-fsno)*dhsdT, fact, 1+P)`）。
+            diagonal[layer] = (-((1.0 - input.snow_cover_fraction) * derivative))
+                .mul_add(factor[layer], diagonal_sum);
+            rhs[layer] = factor[layer].mul_add(
+                (-((1.0 - input.snow_cover_fraction) * derivative))
+                    .mul_add(input.temperature_k[layer], soil_heat_flux),
+                transient,
+            );
         } else {
-            diagonal[layer] = 1.0
-                + implicit
-                    * factor[layer]
-                    * (conductivity[layer] / upper_distance
-                        + conductivity[layer - 1] / lower_distance);
-            rhs[layer] = input.temperature_k[layer]
-                + input.crank_nicolson_factor * factor[layer] * (flux[layer] - flux[layer - 1]);
+            diagonal[layer] = diagonal_sum;
+            rhs[layer] = transient;
         }
     }
     let bottom = layers - 1;
     let lower_distance = input.node_depth_m[bottom] - input.node_depth_m[bottom - 1];
     sub[bottom] = -implicit * factor[bottom] * conductivity[bottom - 1] / lower_distance;
     diagonal[bottom] = 1.0 + implicit * factor[bottom] * conductivity[bottom - 1] / lower_distance;
-    rhs[bottom] = input.temperature_k[bottom]
-        - input.crank_nicolson_factor * factor[bottom] * flux[bottom - 1];
+    // `rt = t - cnfac*fact*fn1` ⇒ 乘积被吸收（GIMPLE：`FNMA(cnfac*fact, fn1, t)`）。
+    // `bt = 1 + (1-cnfac)*fact*tk/dzm` 是**商**，不收缩，原样保留。
+    rhs[bottom] = (-(input.crank_nicolson_factor * factor[bottom]))
+        .mul_add(flux[bottom - 1], input.temperature_k[bottom]);
     (sub, diagonal, super_, rhs)
 }
 
