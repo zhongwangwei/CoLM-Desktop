@@ -5935,8 +5935,61 @@ history / 重启侧要一起改的四件事：`f_qlayer` **必须注册并填充
 | `find_unsat_lev_lower` | **已移植**（`find_unsaturated_level_lower`，private） |
 | `Richards_solver` 驱动体（454 行） | **已移植**（`3ff5880`），3 条单测 |
 | `soil_water_vertical_movement`（329 行） | **已移植**（`c7b1894`），4 条单测 |
-| `variably_saturated_flow_step` 编排 | 未动 —— 只剩这一层 |
-| 运行时/history/重启接线 | 未动 |
+| `variably_saturated_flow_step` 编排 | **已移植**（`1869ee1`），4 条单测 |
+| 运行时/history/重启接线 | **已接**（`9afb1eb`） |
+
+### 七、VSF 接上之后：**默认配置第一次跑通并比对黄金**
+
+`DEF_USE_VariablySaturatedFlow` 打开就是**默认配置**（选 van Genuchten 时
+`MOD_Namelist.F90:1767-1772` 强制置真），所以这一条才是"默认算例能不能跑"的关键。
+接线之后：
+
+| 算例 | 配置 | 比对的黄金 | tier0 | tier1 | tier2 |
+|---|---|---|---|---|---|
+| `CN-Cng` | van Genuchten + **VSF 开** + PHS 开 | `oracle/golden/CN-Cng_hist_2008-01.nc`（金标，127 变量） | 2 | 19 | **43** |
+| `CN-Cng-aligned` | Campbell + VSF 关 + PHS 关 | 自带工作目录 | 2 | 19 | 48 |
+| `CN-Cng-phs` | Campbell + VSF 关 + PHS 开 | 自带工作目录 | 2 | 19 | 49 |
+
+tier0/tier1 三份完全一致（`f_xy_solarin` 11/264 差 1 ULP、`f_xy_q` 3/264 是上游
+时刻对齐怪癖、19 条 tier1 都是短波分带与 `f_alb` 一族）。**VSF 那份比另外两份
+还少 5 条 tier2** —— 因为它比的是金标，而金标本身就是 VSF 配置。
+
+`unported_branches` 到这一轮**第一次为空**。
+
+#### 接线时撞出来的一个真阻塞：`DEF_RSS_SCHEME = 0`
+
+关掉 Campbell 土壤模型时，`MOD_Namelist.F90:1947-1951` 把 `DEF_RSS_SCHEME` 置 **0**，
+而 `MOD_Thermal.F90:613-621` 对 0 的处理是**"不启用土壤表面阻力"**：直接把 `rss = 0`，
+**连 `SoilSurfaceResistance` 都不调**。本仓库的能量步无条件调那个内核，而内核只认
+`1..=5`，于是**每一个 van Genuchten 算例都在能量步就死在
+"soil surface resistance inputs are invalid"**，根本走不到水分步。
+修法照抄上游的守卫：`scheme == 0` 直接返回 `rss = 0`。
+
+这条值得记：`0` 不是"没实现的档位"，而是"关掉"的语义值。同族的还有
+`plant_hydraulics.rs` 的 `RSS_SCHEME ∈ 0..=5`（那一处上一轮已经放宽）。
+
+#### 接线时一起改掉的 history 语义
+
+| 量 | VSF 关 | VSF 开 |
+|---|---|---|
+| `f_qcharge` | 声明并填 | **不声明**（上游 `MOD_Hist.F90:698` 的 `IF (.not. VSF)`） |
+| `f_qlayer` | 不声明 | **声明并填**（维度 `soilinterface`） |
+| `f_rsur_se`/`f_rsur_ie` | 声明、留空 | **实填** |
+| `f_frcsat` | 声明、留空 | **实填** |
+
+即 `f_qcharge` 与 `f_qlayer` 是一对**互斥的条件列**，与 `f_vegwp` 是同一类。
+
+#### 下一步：现在才第一次可测的残差
+
+VSF 那份的 tier2 里有两处新东西，值得下一轮先看：
+
+- `f_qinfl` 第 2 条：黄金 **-4.74e-5** 而本仓库 **0.0** —— 上游的入渗率在这一条是
+  负的，本仓库钳到 0。这与对齐算例里 `qinfl` 首条为负是同一个现象
+  （`4fdafa5` 的 commit 里已记过），现在在 VSF 上也复现了。
+- `f_fevpg`/`f_fevpa` 在第 180 条起分叉（黄金 1.27e-7 对 1.59e-5 量级），
+  说明某一步的土壤蒸发路径分开了。
+- `f_xerr` 233/264 超容差、最坏处黄金 4.0e-17 对 1.6e-5 量级 —— 收支残差与状态
+  误差一起放大，属于下游结果而非独立缺陷。
 
 **`soil_water_vertical_movement` 自带验收判据**：它算整柱质量平衡误差 `wblc`，
 超过 `tolerance` 就打警告。单测因此直接断言 `|wblc| <= 1e-3`（上游传进来的那个数），
