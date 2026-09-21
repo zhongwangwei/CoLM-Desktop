@@ -9028,3 +9028,36 @@ SubsurfaceRunoff_TOPMOD rsubst: 20000/20000 bitwise identical
 编译选项下（`-fdefault-real-8` 且**没有** `-fdefault-double-8`）`d0` 字面量是
 **real(16)**，于是 `exp(-3.d0*(…))` 整段在四倍精度里算，`fracice` 与 double 版
 只对得上 6236/20000。**复刻件必须逐字抄源码的字面量**，否则量的是自己造的另一个函数。
+
+## 土壤热参数 `soil_hcap_cond`（Balland-Arp，黄金用的就是 4）四处收缩（实测，**已修**）
+
+`MOD_SoilThermalParameters.F90` 的 `soil_hcap_cond` 每步每层都跑，`DEF_THERMAL_CONDUCTIVITY_SCHEME`
+默认是 **4（Balland-Arp）**。GIMPLE 读出四处收缩，逐条改了：
+
+| 上游 | GIMPLE |
+|---|---|
+| `hcap = csol + vf_water*c_water + vf_ice*c_ice`（`:299`） | `FMA(vfw, cw, csol)` 再 `FMA(vfi, ci, ·)` |
+| `ke` 指数里 `1.+vf_om-BA_alpha*vf_sand-vf_gravels` | `FNMA(BA_alpha, vf_sand, 1+vf_om)` 再减 `vf_gravels` |
+| `(1/(1+exp(-BA_beta*sr)))**3 - ((1-sr)/2)**3` | `FMS(wet, wet*wet, dry**3)` |
+| `thk = (ksat-kdry)*ke + kdry`（`:407-411`，两个分支各一处） | `FMA(ksat-kdry, ke, kdry)` |
+
+用独立复刻件跑 20000 组随机输入（`csol` 1e6…3e6、`kdry` 0.1…0.5、`T` 240…320 K、
+`vf_water`/`vf_ice` 覆盖冻融两侧），把**真的 Rust** `soil_thermal_properties(..., BallandArp)`
+的输出与之逐位比（临时测试，跑完已删）：
+
+```
+soil_hcap_cond (Balland-Arp): cases=20000  hcap 20000/20000   thk 20000/20000
+```
+
+窗口三口径仍是混合方向（干窗逐位值 +25、Σ|Δ| 变大；雪窗逐位值 +41；湿窗略差），
+按既定规矩以 GIMPLE + 差分对拍为准。
+
+### 顺带查掉的一条：VSF 的 `sum(a*b)` 不在关键路径上
+
+上一轮把 `sum(a*b)` 列为待扫项，这一轮查了 VSF 里对应的两处
+（`MOD_Hydro_SoilWater.F90:759/1067` 的 `wsum_m1`/`wsum`，形态是
+`sum(ss_vl*(sp_dz-ss_wt)) + sum(ss_wt*vl_s)`）：**上游自己就没用过 `werr`**
+（`:1075` 算完即弃），Rust 侧对应的是 `let _balance_error_mm = …`，**两边都是死代码**，
+不必改。VSF 真正的储量求和（`MOD_SoilSnowHydrology.F90:296/846`）
+是 `sum(wliq_soisno(1:))` 这类**无乘积**的求和 —— 而"无乘积的顺序求和两边一致"
+已经在 `dzsum` 那组 20000/20000 里验过了，不用再动。

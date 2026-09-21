@@ -53,9 +53,15 @@ pub fn soil_thermal_properties(
     scheme: ThermalConductivityScheme,
 ) -> Result<SoilThermalProperties> {
     validate(input)?;
-    let heat_capacity_j_m3_k = input.dry_heat_capacity_j_m3_k
-        + input.liquid_volume_fraction * f77(4.188e6)
-        + input.ice_volume_fraction * f77(1.94153e6);
+    // `hcap = csol + vf_water*c_water + vf_ice*c_ice`（`MOD_SoilThermalParameters.F90:299`）。
+    // 两个乘积都被收进加法（GIMPLE：`FMA(vfw, cw, csol)` 再 `FMA(vfi, ci, ·)`）——
+    // `csol` 是变量不是乘积，所以第一级收的是右边那个。
+    let heat_capacity_j_m3_k = input.ice_volume_fraction.mul_add(
+        f77(1.94153e6),
+        input
+            .liquid_volume_fraction
+            .mul_add(f77(4.188e6), input.dry_heat_capacity_j_m3_k),
+    );
     let saturation = ((input.liquid_volume_fraction + input.ice_volume_fraction)
         / input.pore_volume_fraction)
         .min(1.0);
@@ -88,7 +94,11 @@ fn conductivity_for_saturated_soil(
             } else {
                 input.saturated_frozen_conductivity_w_m_k
             };
-            (saturated - input.dry_conductivity_w_m_k) * kersten + input.dry_conductivity_w_m_k
+            // `thk = (ksat_u-kdry)*ke + kdry`（`MOD_SoilThermalParameters.F90:407-411`）：
+            // 乘积被吸收（GIMPLE 的 `FMA(ksat-kdry, ke, kdry)`）。这条在**两个**
+            // 方案分支里各出现一次（1–5 一组、6–8 那组），两处都要。
+            (saturated - input.dry_conductivity_w_m_k)
+                .mul_add(kersten, input.dry_conductivity_w_m_k)
         }
         ThermalConductivityScheme::TarnawskiLeong => tarnawski_leong(input, saturation, unfrozen),
         ThermalConductivityScheme::DeVries => de_vries(input, saturation, unfrozen),
@@ -108,7 +118,11 @@ fn conductivity_for_saturated_soil(
             } else {
                 input.saturated_frozen_conductivity_w_m_k
             };
-            (saturated - input.dry_conductivity_w_m_k) * kersten + input.dry_conductivity_w_m_k
+            // `thk = (ksat_u-kdry)*ke + kdry`（`MOD_SoilThermalParameters.F90:407-411`）：
+            // 乘积被吸收（GIMPLE 的 `FMA(ksat-kdry, ke, kdry)`）。这条在**两个**
+            // 方案分支里各出现一次（1–5 一组、6–8 那组），两处都要。
+            (saturated - input.dry_conductivity_w_m_k)
+                .mul_add(kersten, input.dry_conductivity_w_m_k)
         }
     }
 }
@@ -162,14 +176,23 @@ fn kersten_number(
         }
         ThermalConductivityScheme::BallandArp => {
             if unfrozen {
-                saturation.powf(
-                    f77(0.5)
-                        * (1.0 + input.organic_volume_fraction_of_solids
-                            - input.balland_alpha * input.sand_volume_fraction_of_solids
-                            - input.gravel_volume_fraction_of_solids),
-                ) * ((1.0 / (1.0 + (-input.balland_beta * saturation).exp())).powi(3)
-                    - ((1.0 - saturation) / f77(2.0)).powi(3))
-                .powf(1.0 - input.organic_volume_fraction_of_solids)
+                // `ke = sr**(0.5*(1.+vf_om-BA_alpha*vf_sand-vf_gravels))
+                //        * ((1/(1+exp(-BA_beta*sr)))**3 - ((1-sr)/2)**3)**(1-vf_om)`
+                // （`MOD_SoilThermalParameters.F90:369-372`）。三处收缩（GIMPLE 实测）：
+                // `FNMA(BA_alpha, vf_sand, 1+vf_om)`、`FMS(wet, wet*wet, dry**3)`、
+                // 以及最后 `thk` 那条 `FMA(ksat-kdry, ke, kdry)`。
+                let exponent_sum = (-input.balland_alpha).mul_add(
+                    input.sand_volume_fraction_of_solids,
+                    1.0 + input.organic_volume_fraction_of_solids,
+                ) - input.gravel_volume_fraction_of_solids;
+                let wet_cube_base = 1.0 / (1.0 + (-input.balland_beta * saturation).exp());
+                let dry_cube_base = (1.0 - saturation) / f77(2.0);
+                let cube_difference = wet_cube_base.mul_add(
+                    wet_cube_base * wet_cube_base,
+                    -(dry_cube_base * dry_cube_base * dry_cube_base),
+                );
+                saturation.powf(f77(0.5) * exponent_sum)
+                    * cube_difference.powf(1.0 - input.organic_volume_fraction_of_solids)
             } else {
                 saturation.powf(1.0 + input.organic_volume_fraction_of_solids)
             }
