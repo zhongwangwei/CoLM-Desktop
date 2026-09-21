@@ -802,25 +802,37 @@ fn spac_change(
             ) / determinant;
         }
     } else {
-        a33 = -input.sunlit_leaf_area_index
-            * input.maximum_sunlit_leaf_hydraulic_conductance
-            * (dfxyl * (x[XYLEM] - x[SUNLIT]) + fxyl)
+        // `qflx_sha <= 0` 那条分支。**干窗 49 次调用一次都没走到** —— 但写法不能靠猜：
+        // 同样把那六条语句抄成独立程序读 GIMPLE（`/tmp/gf/r96/spacaf_else.f90`），
+        // 收缩点与 IF 分支同一套规则，逐个对应：
+        //   `A33 = FNMS(LKdfx, Δsun, P) - X`
+        //   `f(xyl) = FMS(Δsun, P, X*Δroot)`
+        //   `determ = FNMA(a44, a13*a31, FMS(a33*a11, a44, (a11*a34)*a43))`
+        //   `dx(leafsun)` 的两项：`FMS(a34*a13, f(root), f(xyl)*(a44*a13))`
+        //                    再 `FMA((a33*a44 - a34*a43), f(leafsun), ·)`
+        //   `dx(xyl)`：`FNMA(f(leafsun), a44*a31, FMS(f(xyl), a11*a44, (a11*a34)*f(root)))`
+        //   `dx(root)`：`FMA(f(leafsun), a43*a31,
+        //                    FMS((a11*a33 - a13*a31), f(root), f(xyl)*(a11*a43)))`
+        a33 = (-(sunlit_conductance * dfxyl))
+            .mul_add(sunlit_gradient, -(sunlit_conductance * fxyl))
             - xylem * froot;
-        f[XYLEM] = input.sunlit_leaf_area_index
-            * input.maximum_sunlit_leaf_hydraulic_conductance
-            * fxyl
-            * (x[XYLEM] - x[SUNLIT])
-            - xylem * froot * (x[ROOT] - x[XYLEM] - gravity);
-        let determinant = a11 * a33 * a44 - a34 * a11 * a43 - a13 * a31 * a44;
+        f[XYLEM] =
+            sunlit_gradient.mul_add(sunlit_conductance * fxyl, -(xylem * froot * root_gradient));
+        let determinant = (a11 * a33).mul_add(a44, -((a11 * a34) * a43));
+        let determinant = (-a44).mul_add(a13 * a31, determinant);
         if determinant != 0.0 {
-            change[SUNLIT] =
-                (-a13 * a44 * f[XYLEM] + a13 * a34 * f[ROOT] + (a33 * a44 - a34 * a43) * f[SUNLIT])
-                    / determinant;
-            change[XYLEM] =
-                (a11 * a44 * f[XYLEM] - a11 * a34 * f[ROOT] - a31 * a44 * f[SUNLIT]) / determinant;
-            change[ROOT] =
-                (-a11 * a43 * f[XYLEM] + (a11 * a33 - a13 * a31) * f[ROOT] + a31 * a43 * f[SUNLIT])
-                    / determinant;
+            change[SUNLIT] = a33.mul_add(a44, -(a34 * a43)).mul_add(
+                f[SUNLIT],
+                (a13 * a34).mul_add(f[ROOT], -(f[XYLEM] * (a13 * a44))),
+            ) / determinant;
+            change[XYLEM] = (-(a44 * a31)).mul_add(
+                f[SUNLIT],
+                f[XYLEM].mul_add(a11 * a44, -((a11 * a34) * f[ROOT])),
+            ) / determinant;
+            change[ROOT] = (a43 * a31).mul_add(
+                f[SUNLIT],
+                (a11 * a33 - a13 * a31).mul_add(f[ROOT], -(f[XYLEM] * (a11 * a43))),
+            ) / determinant;
             change[SHADED] = x[SUNLIT] - x[SHADED] + change[SUNLIT];
         }
     }
