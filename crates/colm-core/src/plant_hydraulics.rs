@@ -716,24 +716,55 @@ fn spac_change(
             - a44 * a32 * a23 * a11
             - a43 * a11 * a22 * a34;
         if determinant != 0.0 {
-            change[SUNLIT] = ((a22 * a33 * a44 - a22 * a34 * a43 - a23 * a32 * a44) * f[SUNLIT]
-                + a13 * a32 * a44 * f[SHADED]
-                - a13 * a22 * a44 * f[XYLEM]
-                + a13 * a22 * a34 * f[ROOT])
-                / determinant;
-            change[SHADED] = (a23 * a31 * a44 * f[SUNLIT]
-                + (a11 * a33 * a44 - a11 * a34 * a43 - a13 * a31 * a44) * f[SHADED]
-                - a11 * a23 * a44 * f[XYLEM]
-                + a11 * a23 * a34 * f[ROOT])
-                / determinant;
-            change[XYLEM] = (-a22 * a31 * a44 * f[SUNLIT] - a11 * a32 * a44 * f[SHADED]
-                + a11 * a22 * a44 * f[XYLEM]
-                - a11 * a22 * a34 * f[ROOT])
-                / determinant;
-            change[ROOT] = (a22 * a31 * a43 * f[SUNLIT] + a11 * a32 * a43 * f[SHADED]
-                - a11 * a22 * a43 * f[XYLEM]
-                + (a11 * a22 * a33 - a11 * a23 * a32 - a13 * a22 * a31) * f[ROOT])
-                / determinant;
+            // `spacAF_twoleaf` 的四条 `dx` 回代式（`MOD_PlantHydraulic.F90:499-509`）。
+            // **收缩规则是量出来的，不是猜的**：把上游那四条语句原样抄成独立 Fortran
+            // 程序（`/tmp/gf/spac_replica.f90` 那一份逻辑），先用内核自己打出来的
+            // 49 组 (A11..A44, f, determ, dx) 验证复刻件 49/49，再拿它当"神谕"跑
+            // 20000 组随机输入，与 72 种候选嵌套逐一比对。唯一全中的是：
+            //
+            // * 内层 `P1 - P2 - P3`（P 都是三因子乘积）：第一级收**左**边那个乘积的
+            //   最外层乘法（`fma(a22*a33, a44, -P2)`），第二级收右边的
+            //   （`fma(-a44, a23*a32, acc)`）；
+            // * 外层四项链：第一级同样收左边，之后每一级只有右边是乘积、于是收右边；
+            // * **没被收的那个操作数按源码顺序整项舍入**（例如 `a13*a32*a44*f2` 是
+            //   `((a13*a32)*a44)*f2`，不能拆成 `(a13*a32)*(a44*f2)`）。
+            //
+            // 20000/20000 组（80000/80000 个分量）与 49/49 个真实调用全中；
+            // 原先的"全不收缩"写法在这 20000 组里 0 组全中。
+            // 交叉验证：`gfortran -fdump-tree-all` 的 GIMPLE 里能看到 `.FMA/.FMS/.FNMA`
+            // 恰好落在上面这些位置，与实测一致。
+            let e1 = (a22 * a33).mul_add(a44, -(a22 * a34 * a43));
+            let e1 = (-a44).mul_add(a23 * a32, e1);
+            let e2 = (a11 * a33).mul_add(a44, -(a11 * a34 * a43));
+            let e2 = (-a44).mul_add(a13 * a31, e2);
+            let e3 = (a11 * a22).mul_add(a33, -(a11 * a23 * a32));
+            let e3 = (-(a13 * a22)).mul_add(a31, e3);
+            change[SUNLIT] = (a13 * a22 * a34).mul_add(
+                f[ROOT],
+                (-(a13 * a22 * a44))
+                    .mul_add(f[XYLEM], e1.mul_add(f[SUNLIT], a13 * a32 * a44 * f[SHADED])),
+            ) / determinant;
+            change[SHADED] = (a11 * a23 * a34).mul_add(
+                f[ROOT],
+                (-(a11 * a23 * a44)).mul_add(
+                    f[XYLEM],
+                    (a23 * a31 * a44).mul_add(f[SUNLIT], e2 * f[SHADED]),
+                ),
+            ) / determinant;
+            change[XYLEM] = (-(a11 * a22 * a34)).mul_add(
+                f[ROOT],
+                (a11 * a22 * a44).mul_add(
+                    f[XYLEM],
+                    (-(a22 * a31 * a44)).mul_add(f[SUNLIT], -(a11 * a32 * a44 * f[SHADED])),
+                ),
+            ) / determinant;
+            change[ROOT] = e3.mul_add(
+                f[ROOT],
+                (-(a11 * a22 * a43)).mul_add(
+                    f[XYLEM],
+                    (a22 * a31 * a43).mul_add(f[SUNLIT], a11 * a32 * a43 * f[SHADED]),
+                ),
+            ) / determinant;
         }
     } else {
         a33 = -input.sunlit_leaf_area_index
