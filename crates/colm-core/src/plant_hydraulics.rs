@@ -688,27 +688,40 @@ fn spac_change(
     let sunlit_gradient = x[XYLEM] - x[SUNLIT];
     let shaded_gradient = x[XYLEM] - x[SHADED];
     let root_gradient = x[ROOT] - x[XYLEM] - gravity;
-    let a11 = -sunlit_conductance * fxyl - sunlit_flux * dfsun;
-    let a13 = sunlit_conductance * dfxyl * sunlit_gradient + sunlit_conductance * fxyl;
-    let a22 = -shaded_conductance * fxyl - shaded_flux * dfsha;
-    let a23 = shaded_conductance * dfxyl * shaded_gradient + shaded_conductance * fxyl;
+    // `A`/`f` 的收缩点**直接读 GIMPLE 定下来的**（`gfortran -fdump-tree-all`，
+    // 见 docs 里那一节的说明）。逐条对应：
+    // * `A11 = FNMS(qflx_sun, dfsto1, P)` —— 左边是 `-P`（NEG 节点）不是乘积，
+    //   所以收的是右边那个乘积；
+    // * `A13 = FMA(laisun*kmax_sun*dfx, Δsun, P)` / `A23` 同型（收左边）；
+    // * `A33` 三级：`FNMS(…, Δsun, -P)` → `FNMA(…, Δsha, ·)` → 再两次普通减法；
+    // * `A34 = FMA(xylem*dfr, Δroot, X)`、`A44 = FNMS(xylem*dfr, Δroot, X) + dqeroot`；
+    // * `f(leafsun) = FMS(qflx_sun, fsto1, P*Δsun)`、`f(xyl) = FNMA(X, Δroot, P*Δsun+PS*Δsha)`、
+    //   `f(root) = FMS(X, Δroot, qeroot)`。
+    // 也就是"每层收那个乘积操作数；两边都是乘积时收左边"。被收的那个乘法取的是
+    // **它自己的最外层乘法**（如 `laisun*kmax_sun*dfx` 收成 `fma(laisun*kmax_sun, dfx, ·)`
+    // 的乘数一侧），没收的那侧按源码顺序整项舍入。
+    let a11 = (-sunlit_flux).mul_add(dfsun, -(sunlit_conductance * fxyl));
+    let a13 = (sunlit_conductance * dfxyl).mul_add(sunlit_gradient, sunlit_conductance * fxyl);
+    let a22 = (-shaded_flux).mul_add(dfsha, -(shaded_conductance * fxyl));
+    let a23 = (shaded_conductance * dfxyl).mul_add(shaded_gradient, shaded_conductance * fxyl);
     let a31 = sunlit_conductance * fxyl;
     let a32 = shaded_conductance * fxyl;
-    let mut a33 = -sunlit_conductance * dfxyl * sunlit_gradient
-        - sunlit_conductance * fxyl
-        - shaded_conductance * dfxyl * shaded_gradient
-        - shaded_conductance * fxyl
+    let mut a33 = (-(shaded_conductance * dfxyl)).mul_add(
+        shaded_gradient,
+        (-(sunlit_conductance * dfxyl)).mul_add(sunlit_gradient, -(sunlit_conductance * fxyl)),
+    ) - shaded_conductance * fxyl
         - xylem * froot;
-    let a34 = xylem * dfroot * root_gradient + xylem * froot;
+    let a34 = (xylem * dfroot).mul_add(root_gradient, xylem * froot);
     let a43 = xylem * froot;
-    let a44 = -xylem * froot - xylem * dfroot * root_gradient + root_flux_slope;
+    let a44 = (-(xylem * dfroot)).mul_add(root_gradient, -(xylem * froot)) + root_flux_slope;
     let mut f = [0.0; VEGETATION_SEGMENTS];
-    f[SUNLIT] = sunlit_flux * fsun - sunlit_conductance * fxyl * sunlit_gradient;
-    f[SHADED] = shaded_flux * fsha - shaded_conductance * fxyl * shaded_gradient;
-    f[XYLEM] = sunlit_conductance * fxyl * sunlit_gradient
-        + shaded_conductance * fxyl * shaded_gradient
-        - xylem * froot * root_gradient;
-    f[ROOT] = xylem * froot * root_gradient - root_flux;
+    f[SUNLIT] = sunlit_flux.mul_add(fsun, -(sunlit_conductance * fxyl * sunlit_gradient));
+    f[SHADED] = shaded_flux.mul_add(fsha, -(shaded_conductance * fxyl * shaded_gradient));
+    f[XYLEM] = (-(xylem * froot)).mul_add(
+        root_gradient,
+        sunlit_conductance * fxyl * sunlit_gradient + shaded_conductance * fxyl * shaded_gradient,
+    );
+    f[ROOT] = (xylem * froot).mul_add(root_gradient, -root_flux);
     let mut change = [0.0; VEGETATION_SEGMENTS];
     if shaded_flux > 0.0 {
         let determinant = a44 * a22 * a33 * a11
