@@ -291,12 +291,16 @@ struct SurfaceDiagnostics {
 
 impl SurfaceDiagnostics {
     /// 要回写的诊断量，顺序与 `evolved_overrides` 的取值表一致。
-    const NAMES: [&'static str; 16] = [
+    const NAMES: [&'static str; 17] = [
         "coszen",
         "fwet_snow",
         "tref",
         "qref",
         "rst",
+        // `rss` 与 `rst` 一样是 `intent(out)` 的逐步诊断，必须回写：算例的
+        // **入参**重启里它是 `spval`，不回写就会把一列填充值原样交出去
+        // （实测上游同一时刻 0.033373，本仓库曾经写 `-1e36`）。
+        "rss",
         "gs0sun",
         "gs0sha",
         "z0m",
@@ -1659,6 +1663,11 @@ impl StandardLctRestartTemplate {
             ("tref", leaf_output.air_temperature_2m_k),
             ("qref", leaf_output.air_specific_humidity_2m),
             ("rst", leaf_output.canopy_stomatal_resistance_s_m),
+            // `rss` 是 `SoilSurfaceResistance` 的 `intent(out)`，每步重算。
+            // **原先漏在这里**：写出的重启里 `rss` 一直是**入参那份** ——
+            // 而算例的入参重启里它是 `spval`（`-1e36`），于是 `--restart-out`
+            // 写出一列全填充值，上游同一时刻写的是 0.033373。
+            ("rss", step.energy.soil_surface_resistance_s_m),
             ("gs0sun", leaf_output.sunlit_stomatal_conductance_mol_m2_s),
             ("gs0sha", leaf_output.shaded_stomatal_conductance_mol_m2_s),
             ("z0m", leaf_output.momentum_roughness_m),
