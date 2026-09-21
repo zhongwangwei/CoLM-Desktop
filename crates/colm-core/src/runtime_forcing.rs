@@ -178,8 +178,13 @@ pub fn prepare_runtime_forcing(input: RuntimeForcingInput) -> Result<RuntimeForc
         specific_humidity: input.specific_humidity,
         surface_pressure_pa: input.surface_pressure_pa,
         bottom_pressure_pa: input.surface_pressure_pa,
-        convective_precipitation_kg_m2_s: input.precipitation_kg_m2_s / 3.0,
-        large_scale_precipitation_kg_m2_s: input.precipitation_kg_m2_s * 2.0 / 3.0,
+        // 上游是 `block_data_copy(forcn(4), forc_xy_prl, sca = 2/3._r8)`
+        // （`MOD_Forcing.F90:533-534`）—— 即 `P * (2/3)`，**比例先算**。
+        // 写成 `P * 2.0 / 3.0` 会多一次舍入：实测雪季第 0 条
+        // `f_xy_prl` 因此差 1 ULP（`3.703703744880234e-5` 对 `...344e-5`），
+        // 而它是 **tier0（逐位）** 变量。
+        convective_precipitation_kg_m2_s: input.precipitation_kg_m2_s * (1.0 / 3.0),
+        large_scale_precipitation_kg_m2_s: input.precipitation_kg_m2_s * (2.0 / 3.0),
         eastward_wind_m_s,
         northward_wind_m_s,
         downward_longwave_w_m2: input.downward_longwave_w_m2,

@@ -106,8 +106,16 @@ fn glacier_temperature_partition_uses_its_own_two_degree_interval() {
 fn qsadv_ice_branch_uses_the_fortran_c8_literal() {
     let state = saturation_specific_humidity(263.820_007_324_218_75, 69_062.0).unwrap();
     let es = 275.551_539_505_085_8_f64;
+    // 上游第 1 步真正用到的 `forc_q`（`MOD_Qsadv` 的输出）。
+    let qs = 0.002_485_475_963_270_371_f64;
     let es_error = (state.vapor_pressure_pa - es).abs() / es;
+    let qs_error = (state.specific_humidity - qs).abs() / qs;
     assert!(es_error < 1.0e-14, "vapor pressure is off by {es_error:e}");
+    assert!(
+        qs_error < 1.0e-14,
+        "specific humidity is off by {qs_error:e} (got {:?}, want {qs:?})",
+        state.specific_humidity
+    );
 }
 
 #[test]

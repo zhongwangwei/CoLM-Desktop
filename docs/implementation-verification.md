@@ -6796,3 +6796,66 @@ end program
 > 本 crate 里凡是写成 `f77(x)` 或 `x_f32 as f64` 的地方，都是在**断言
 > "上游那个字面量是单精度"**。参考内核用 `-fdefault-real-8`，所以这个断言
 > 默认是假的；要断言它，就得像第一节那样问一次编译器。
+
+## tier0 只剩两个：降水拆分的**先算比例**，与 `f_xy_solarin` 的**四波段之和**（2026 年，实测）
+
+`-fdefault-real-8` 那批落实之后，三份黄金的 `tier0` 加起来还剩 5 条。这一轮清掉 4 条。
+
+### 一、降水拆分：`P*(1/3)` 而不是 `P/3`
+
+上游 `MOD_Forcing.F90:533-534`：
+
+```fortran
+CALL block_data_copy (forcn(4), forc_xy_prl, sca = 2/3._r8)
+CALL block_data_copy (forcn(4), forc_xy_prc, sca = 1/3._r8)
+```
+
+`sca` 是**先算好的比例**，于是 `prl = P * (2/3)`。本仓库写的是 `P * 2.0 / 3.0` —— 多一次舍入。
+实测（雪季第 0 条，`P = 1.111111123e-4`）：
+
+| 写法 | `f_xy_prl` | 判定 |
+|---|---|---|
+| `P * 2.0 / 3.0` | `3.7037037448802344e-5` | 本仓库旧值 |
+| `P * (2.0/3.0)` | `3.703703744880234e-5` | **黄金值** |
+
+改一行之后 `f_xy_prc`/`f_xy_prl`/`f_xy_snow`/`f_xy_rain` **四条全部逐位一致**
+（`ndiff = 0/360`）；`CN-Cng-wet` 的 tier0 从 4 条降到 **1** 条，`US-NR1-snow` 从 5 条降到 **2** 条。
+
+### 二、`f_xy_solarin` 是**四个波段之和**，不是总量
+
+`MOD_Vars_1DAccFluxes.F90:2060-2063`：
+
+```fortran
+CALL acc1d (forc_sols , a_solarin )
+CALL acc1d (forc_soll , a_solarin )
+CALL acc1d (forc_solsd, a_solarin )
+CALL acc1d (forc_solld, a_solarin )
+```
+
+**四次累加到同一个桶**，也就是 `f_xy_solarin` 写的是
+`(sols+soll+solsd+solld)` 的均值。而 `crates/colm-runtime/src/history.rs` 里
+原先写着"照抄总量 `solar_in_w_m2`，**不是**四个波段之和"，还附了一条实测
+（"`CN-Cng` 冬季窗口 264 条里有 13 条因此差 1 ULP"）—— **那条推断反了**：
+差 1 ULP 恰恰是因为上游写的是四项之和，而四项之和在舍入上不保证逐位回到总量。
+
+改成"四项按 `sols→soll→solsd→solld` 顺序相加"之后……**并没有变好**：
+`f_xy_solarin` 仍是 22/360 差 1 ULP。原因是本仓库的**拆分权重本身**与上游差一点点 ——
+`f_solvd`/`f_solnd`/`f_solvi`/`f_solni` 各差 1–2 ULP（它们是 tier1，`rtol=1e-12`，
+所以一直"过"）。公式两边逐项相同（含常数顺序），所以差的是**喂进去的
+`sunang`**：上游这一块用 `orb_coszen(calday, patchlonr, patchlatr)`，本仓库用
+`prepare_runtime_forcing` 传进来的 `sun_angle`。两者差约 1 ULP。
+
+改法仍然入库了 —— 因为"写总量"是**错的写法**，只是这一改还不足以让这一列逐位；
+真正的下一步是让 `sun_angle` 与 `MOD_Forcing` 那一处逐位一致。
+
+### 三、这一轮之后的 tier0 分布
+
+| 窗口 | tier0 修前 | 修后 | 剩的是 |
+|---|---|---|---|
+| `CN-Cng` | 2 | **2** | `f_xy_solarin`(11/264)、`f_xy_q`(1/264) |
+| `CN-Cng-wet` | 4 | **1** | `f_xy_solarin` |
+| `US-NR1-snow` | 6 | **2** | `f_xy_solarin`(22/360)、`f_xy_q`(64/360) |
+
+两个残留都量清楚了：`f_xy_solarin` 是 `sun_angle` 的 1 ULP；
+`f_xy_q` 是 `qsadv` 的 `qs`（已有单测钉到 <1e-14 相对）与记录均值那一步的舍入。
+tier2 三条窗口都没动（57 / 70 / 81）。

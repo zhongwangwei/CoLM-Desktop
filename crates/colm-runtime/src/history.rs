@@ -573,12 +573,18 @@ pub struct HistoryReferenceState {
     pub specific_humidity_kg_kg: f64,
     pub surface_pressure_pa: f64,
     pub boundary_layer_height_m: Option<f64>,
-    /// `forc_solarin`：`f_xy_solarin` 照抄它，不经过任何换算。
+    /// `forc_solarin`：`f_xy_solarin` 照抄它。
     ///
-    /// **取 [`colm_core::RuntimeForcing::solar_in_w_m2`]，不是四个波段之和。**
-    /// 上游 `MOD_Forcing` 先有总量再拆波段，而 `f_xy_solarin` 写的是总量；
-    /// 拆波段是"总量 × 权重"再四舍五入，加回去不保证逐位回到总量 ——
-    /// 实测 `CN-Cng` 冬季窗口 264 条里有 13 条因此差 1 ULP，而这一列是 tier0。
+    /// **是四个波段之和，不是总量 `solar_in_w_m2`。** 上游
+    /// `MOD_Vars_1DAccFluxes.F90:2060-2063` 把 `forc_sols`/`forc_soll`/
+    /// `forc_solsd`/`forc_solld` **四次 `acc1d` 累加到同一个 `a_solarin`**，
+    /// 而 `forc_sols+forc_soll+forc_solsd+forc_solld` 是"总量 × 权重"再相加，
+    /// 舍入上不保证逐位回到总量。
+    ///
+    /// 这里以前写成"照抄总量"，还反过来断言"不是四个波段之和" —— 错了。
+    /// 证据就是 1 ULP：`US-NR1-snow` 264→360 条里 22 条 `f_xy_solarin` 差
+    /// 恰好 1 ULP，而两边**逐位相等**的那些记录正是拆分的四项加起来恰好回到
+    /// 总量的记录。相加的**顺序**要对：`sols + soll + solsd + solld`。
     pub downward_shortwave_w_m2: f64,
     /// `forc_frl`：`f_xy_frl` 照抄它。
     pub downward_longwave_w_m2: f64,
@@ -621,7 +627,11 @@ impl HistoryReferenceState {
             specific_humidity_kg_kg: forcing.specific_humidity,
             surface_pressure_pa: forcing.surface_pressure_pa,
             boundary_layer_height_m: forcing.boundary_layer_height_m,
-            downward_shortwave_w_m2: forcing.solar_in_w_m2,
+            // 顺序必须与上游的四次 `acc1d` 一致：sols → soll → solsd → solld。
+            downward_shortwave_w_m2: forcing.shortwave.direct_visible_w_m2
+                + forcing.shortwave.direct_near_infrared_w_m2
+                + forcing.shortwave.diffuse_visible_w_m2
+                + forcing.shortwave.diffuse_near_infrared_w_m2,
             downward_longwave_w_m2: forcing.downward_longwave_w_m2,
             convective_precipitation_kg_m2_s: forcing.convective_precipitation_kg_m2_s,
             large_scale_precipitation_kg_m2_s: forcing.large_scale_precipitation_kg_m2_s,
