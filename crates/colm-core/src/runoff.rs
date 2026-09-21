@@ -121,18 +121,31 @@ pub fn topmodel_surface_runoff(input: TopmodelSurfaceInput<'_>) -> Result<Topmod
 pub fn topmodel_subsurface_runoff(input: TopmodelSubsurfaceInput<'_>) -> Result<f64> {
     let layers = validate_topmodel_subsurface(input)?;
     let start = water_table_layer(input.water_table_depth_m, input.interface_depth_m);
-    let (thickness, ice) = input.layer_thickness_m[start..]
-        .iter()
-        .zip(&input.ice_fraction[start..])
-        .fold((0.0, 0.0), |(thickness, ice), (&depth, &fraction)| {
-            (thickness + depth, ice + fraction * depth)
-        });
-    let mean_ice = ice / thickness;
+    // 上游先把 `dzmm(j) = dz_soisno(j)*1000.` 整列算出来，再
+    // `dzsum = dzsum + dzmm(j)`、`icefracsum = icefracsum + icefrac(j)*dzmm(j)`
+    // （`MOD_Runoff.F90:186-204`）。两处都不能省：
+    // * **乘 1000 要先做**：`Σ round(dz*1000)` 与 `Σ dz` 不是一个数。实测 20000 组
+    //   随机输入，用未缩放的 `dz` 求和与上游逐位相同 **0/20000**，先缩放 **20000/20000**；
+    // * `icefracsum` 那个乘积进 fma（不收缩 15370/20000，收缩 20000/20000）。
+    let mut thickness_mm = 0.0;
+    let mut ice_sum = 0.0;
+    for layer in start..layers {
+        let layer_mm = input.layer_thickness_m[layer] * 1000.0;
+        thickness_mm += layer_mm;
+        ice_sum = input.ice_fraction[layer].mul_add(layer_mm, ice_sum);
+    }
+    let mean_ice = ice_sum / thickness_mm;
+    let exp_minus_three = (-3.0_f64).exp();
     let ice_runoff_fraction =
-        ((-3.0 * (1.0 - mean_ice)).exp() - (-3.0_f64).exp()).max(0.0) / (1.0 - (-3.0_f64).exp());
+        ((-3.0 * (1.0 - mean_ice)).exp() - exp_minus_three).max(0.0) / (1.0 - exp_minus_three);
     let ice_impedance = (1.0 - ice_runoff_fraction).max(0.0);
-    let runoff = match input.method {
-        TopmodelMethod::Exponential => 5.5e-3 * (-2.5 * input.water_table_depth_m).exp(),
+    // **`imped` 在乘法链的链首**：上游是 `imped*5.5e-3*exp(-2.5*zwt)`
+    // （`((imped*5.5e-3)*exp)`），不能写成 `imped*(5.5e-3*exp(…))` ——
+    // 实测 12715/20000 对 20000/20000。
+    match input.method {
+        TopmodelMethod::Exponential => {
+            Ok(ice_impedance * 5.5e-3 * (-2.5 * input.water_table_depth_m).exp())
+        }
         TopmodelMethod::Hydraulic {
             mean_topographic_index,
         } => {
@@ -141,12 +154,13 @@ pub fn topmodel_subsurface_runoff(input: TopmodelSubsurfaceInput<'_>) -> Result<
                 .iter()
                 .sum::<f64>()
                 / layers as f64;
-            3.0e4 * mean_conductivity / input.decay_tuning
-                * (-mean_topographic_index).exp()
-                * (-input.decay_tuning * input.water_table_depth_m).exp()
+            Ok(
+                ice_impedance * 3.0e4 * mean_conductivity / input.decay_tuning
+                    * (-mean_topographic_index).exp()
+                    * (-input.decay_tuning * input.water_table_depth_m).exp(),
+            )
         }
-    };
-    Ok(ice_impedance * runoff)
+    }
 }
 
 /// Ports `Runoff_XinAnJiang`（`MOD_Runoff.F90:224-282`）。

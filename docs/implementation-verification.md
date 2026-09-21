@@ -8995,3 +8995,36 @@ XinAnJiang : cases=20000  frcsat 20000/20000   rsur 20000/20000
 Rust 则是用未缩放的 `depth` 求和、`ice + fraction*depth` 不收缩；
 `mean_ice = icefracsum/dzsum` 与 `ice/thickness` 因缩放不同而差 1 ULP。
 照上面的做法补一个 TOPMOD 复刻件即可验（该方案 `DEF_Runoff_SCHEME=1`，黄金没走）。
+
+## `SubsurfaceRunoff_TOPMOD`：先乘 1000、再 fma 累加、`imped` 在链首（实测，**已修**）
+
+上一节记下的同类项，这一轮补完（`DEF_Runoff_SCHEME=1`，黄金没走）。三处都能用
+"独立复刻件 + 20000 组随机输入"直接判：
+
+| 写法 | 与上游逐位相同 |
+|---|---|
+| `dzsum`：先 `dzmm = dz*1000.` 再求和 | **20000/20000** |
+| `dzsum`：直接用未缩放的 `dz` 求和（改前） | **0/20000** |
+| `icefracsum`：`fma(icefrac, dzmm, acc)` | **20000/20000** |
+| `icefracsum`：逐步 `acc += icefrac*dzmm` | 15370/20000 |
+| `rsubst`：`imped*5.5e-3*exp(-2.5*zwt)`（链首） | **20000/20000** |
+| `rsubst`：`imped*(5.5e-3*exp(-2.5*zwt))`（改前） | 12715/20000 |
+
+第一行值得单记：`Σ round(dz*1000)` 与 `Σ dz` **不是一个数**（1000 不是二进制精确的），
+所以"缩放最后再除掉"这种看似无害的化简在这里是 0/20000。`fracice_rsub`/`imped`
+的公式本身两边一致（20000/20000）。
+
+改完把**真的 Rust** 跑同一批算例（临时测试，跑完已删）：
+
+```
+SubsurfaceRunoff_TOPMOD rsubst: 20000/20000 bitwise identical
+```
+
+三个窗口不变（方案 1 与黄金的 3 不同），符合预期。
+
+### 踩到的坑（记下来）
+
+写复刻件时把 `fracice_rsub` 那行的 `3.`/`1.` 写成了 `3.d0`/`1.d0` —— 在这个内核的
+编译选项下（`-fdefault-real-8` 且**没有** `-fdefault-double-8`）`d0` 字面量是
+**real(16)**，于是 `exp(-3.d0*(…))` 整段在四倍精度里算，`fracice` 与 double 版
+只对得上 6236/20000。**复刻件必须逐字抄源码的字面量**，否则量的是自己造的另一个函数。
