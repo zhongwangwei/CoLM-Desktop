@@ -4827,3 +4827,66 @@ f_scv / f_snowdp  →  f_fsno（MOD_SnowFraction）  →  f_sigf  →  f_alb  �
 本仓库的 `RuntimeSnowColumn.ice_water_kg_m2`/`liquid_water_kg_m2`，找第一处
 不等的那个量。注意这一步要的是**逐层逐值**的对比，不是又读一遍 Fortran ——
 上一次 `sunang` 的教训就是"读不出来，得打出来"。
+
+## `scv` 零降水增量的来源找到了：冠层水在 `tleaf <= tfrz` 时按**雪**排掉（2026 年，实测）
+
+上面那节说要"逐步对雪层槽位"。这轮把内核的 `newsnow` 入口打出来，第一个字段就
+把问题定了：
+
+```
+step  pg_rain      pg_snow      scv          snowdp       fsno        wice_snow  t_grnd
+0     0.000e+00    0.000e+00    0.000e+00    0.000e+00    0.000e+00   0.0        283.00
+3     0.000e+00    4.857e-06    8.743e-03    8.233e-05    0.000e+00   0.0        271.14
+4     0.000e+00    5.775e-06    1.914e-02    1.829e-04    3.101e-03   0.0        265.12
+```
+
+**`pg_snow` 在零降水下非零**，而且 `scv` 每一步的增量正好等于 `pg_snow*deltim`
+（step 3：4.857e-06 × 1800 = 8.743e-03，与 `scv` 逐位相合）。所以 `scv` 的雪不是
+从天上来的，是**冠层水**。
+
+源头在 `MOD_LeafInterception_Extended.F90:208-216`（注意：编译的是 `extends/`
+那一份，`main/` 的同名文件从不参与编译）：
+
+```fortran
+w = ldew + p0
+IF (tleaf > tfrz) THEN
+   xsc_rain = max(0., ldew-satcap)
+   xsc_snow = 0.
+ELSE
+   xsc_rain = 0.
+   xsc_snow = max(0., ldew-satcap)     ! 叶温到冰点以下，冠层水按雪排掉
+ENDIF
+ldew = ldew - (xsc_rain + xsc_snow)
+...
+pg_snow = (xsc_snow + thru_snow) / deltim
+```
+
+本仓库 `interception.rs:162-172` 的这段逐行相同，`saturation_capacity = dewmx*vegt`
+也与上游的 `satcap = dewmx*vegt` 同源（`vegt = lai+sai`，实测 0.2+0.45 = 0.65，
+`satcap = 0.1*0.65 = 0.065 mm`）。**所以这里没有移植错误。**
+
+### 真正的放大器是 `max(0, ldew - satcap)`
+
+上游这一步排掉的是**超出饱和容量的那一部分**，即两个几乎相等的量之差：
+
+| 记录 | `f_ldew` 上游 | `f_ldew` 本仓库 | 相对差 | `f_scv` 上游 | `f_scv` 本仓库 | 相对差 |
+|---|---|---|---|---|---|---|
+| 1 | 0.07456731 | 0.07637377 | +2.4% | 0.00437164 | 0.00592401 | **+35%** |
+| 2 | 0.06689785 | 0.06708586 | +0.3% | 0.01983566 | 0.02353442 | +19% |
+| 5 | 0.07156942 | 0.07192795 | +0.5% | 0.04464203 | 0.04983504 | +12% |
+
+`satcap = 0.065 mm` 而 `ldew ≈ 0.075 mm` —— 差值只有 0.01 mm 量级，所以 `ldew` 的
+**2.4% 相对误差被放大成 `pg_snow` 的 ~19%**。更关键的是这个偏移是**持续**的：
+`ldew` 的固定偏差变成每步固定的额外排出量，于是 `scv` 会**积分**它
+（记录 1→6 的 `f_scv` 差从 0.00155 累积到 0.00537）。
+
+链条完整了：
+
+```
+f_ldew（冠层水，+2.4%）→ max(0, ldew-satcap) 放大 → pg_snow → f_scv（+13~35%）
+    → f_fsno（MOD_SnowFraction）→ f_sigf → f_alb → f_sr* / f_sab*
+```
+
+**下一个目标是 `ldew` 的演化。** 它是冠层水收支：截留加、湿冠层蒸发减、凝结加。
+第一记录就有 2.4% 的差，所以要看的是**第一步之后 `ldew` 的收支**，而不是雪。
+不要把 `scv` 当成独立问题查 —— 它只是 `ldew` 误差的积分器。
