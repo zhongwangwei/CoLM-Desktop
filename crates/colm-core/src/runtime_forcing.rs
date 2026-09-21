@@ -261,11 +261,27 @@ fn validate(input: RuntimeForcingInput) -> Result<()> {
     Ok(())
 }
 
+/// Port of `MOD_Forcing.F90:616-646`（`solarin_all_band` 且非 QIAN 的那一支）。
+///
+/// **三处 `mul_add` 是照抄 gfortran 的收缩，不是优化。** 内核用 `-O2` 编译，
+/// GCC 的 `-ffp-contract=fast` 是默认，`a*b-c` / `a+a*b` 这类模式会收缩成
+/// FMA；`f_solvd`/`f_solvi`/`f_solnd`/`f_solni` 是 tier1、`f_xy_solarin` 是
+/// tier0，**差 1 ULP 就是红条**。逐位量过：12 个 `a` × 1000 个 `sunang`
+/// 共 12000 组，纯乘加写法的四个波段里有 7941 个值差 ≥1 ULP；把下面三处都
+/// 写成 `mul_add` 之后 **0 个**。
+///
+/// 收缩点是（对应上游源码行）：
+/// * `cloud = (1160.*sunang-a)/(963.*sunang)` —— 分子的 `1160.*sunang-a`；
+/// * `difrat = difrat+(1.0-difrat)*cloud`；
+/// * `vnrat = (580.-cloud*464.)/((580.-cloud*499.)+(580.-cloud*464.))` 的两个分子。
+///
+/// 写成 `(580.0 - cloud * 464.0)` 会各差 1 ULP，进而让 `f_xy_solarin`
+/// （四个波段之和）差 1 ULP。
 pub(crate) fn split_broadband_shortwave(total_w_m2: f64, cosine_zenith: f64) -> ShortwaveForcing {
     let mut cloud = if cosine_zenith == 0.0 {
         0.0
     } else {
-        (1160.0 * cosine_zenith - total_w_m2) / (963.0 * cosine_zenith)
+        1160.0f64.mul_add(cosine_zenith, -total_w_m2) / (963.0 * cosine_zenith)
     };
     cloud = cloud.max(0.0001);
     cloud = cloud.min(1.0);
@@ -273,9 +289,10 @@ pub(crate) fn split_broadband_shortwave(total_w_m2: f64, cosine_zenith: f64) -> 
     let mut diffuse_fraction = 0.0604 / (cosine_zenith - 0.0223) + 0.0683;
     diffuse_fraction = diffuse_fraction.max(0.0);
     diffuse_fraction = diffuse_fraction.min(1.0);
-    diffuse_fraction += (1.0 - diffuse_fraction) * cloud;
-    let visible_fraction =
-        (580.0 - cloud * 464.0) / ((580.0 - cloud * 499.0) + (580.0 - cloud * 464.0));
+    diffuse_fraction = (1.0 - diffuse_fraction).mul_add(cloud, diffuse_fraction);
+    let visible_term = (-cloud).mul_add(464.0, 580.0);
+    let near_infrared_term = (-cloud).mul_add(499.0, 580.0);
+    let visible_fraction = visible_term / (near_infrared_term + visible_term);
     ShortwaveForcing {
         direct_visible_w_m2: total_w_m2 * (1.0 - diffuse_fraction) * visible_fraction,
         direct_near_infrared_w_m2: total_w_m2 * (1.0 - diffuse_fraction) * (1.0 - visible_fraction),

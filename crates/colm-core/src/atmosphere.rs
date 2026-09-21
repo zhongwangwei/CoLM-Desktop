@@ -421,17 +421,21 @@ pub fn orbital_cosine_azimuth(
 #[allow(clippy::excessive_precision)]
 fn orbital_declination(calendar_day: f64) -> f64 {
     let pi = 4.0 * fortran_atan(1.0);
-    let eccentricity = 1.672393084e-2;
-    let mean_longitude = -3.2625366e-2 + (calendar_day - 80.5) * 2.0 * pi / 365.0;
+    let eccentricity: f64 = 1.672393084e-2;
+    let mean_longitude: f64 = -3.2625366e-2 + (calendar_day - 80.5) * 2.0 * pi / 365.0;
     let mean_anomaly = mean_longitude - 4.92251015;
     let sine = fortran_sin(mean_anomaly);
-    let lambda = mean_longitude
-        + eccentricity
-            * (2.0 * sine
-                + eccentricity
-                    * (1.25 * fortran_sin(2.0 * mean_anomaly)
-                        + eccentricity
-                            * ((13.0 / 12.0) * fortran_sin(3.0 * mean_anomaly) - 0.25 * sine)));
+    // `lamb = lambm + eccen*(2*sinl + eccen*(1.25*sin(2*lmm) + eccen*((13/12)*sin(3*lmm) - 0.25*sinl)))`
+    // 这一串里的三个 `eccen*X + Y` gfortran 在 `-O2`（`-ffp-contract=fast` 是
+    // GCC 默认）下**收缩成 FMA**，而最里层的 `(13/12)*sin(3*lmm) - 0.25*sinl`
+    // **没有**收缩。逐位量过：六组网格中心 × 40 天 × 48 个半步 = 11520 个
+    // `orb_coszen` 取值里，写成纯乘加有 15 个差 1 ULP，只把最里层写成 FMA 同样
+    // 15 个，按下面这样写 **0 个**。`f_solvd`/`f_xy_solarin` 是 tier1/tier0，
+    // 差 1 ULP 就是红条，所以这几处必须照抄编译器的收缩选择。
+    let level_inner = (13.0 / 12.0) * fortran_sin(3.0 * mean_anomaly) - 0.25 * sine;
+    let level_1 = eccentricity.mul_add(level_inner, 1.25 * fortran_sin(2.0 * mean_anomaly));
+    let level_2 = eccentricity.mul_add(level_1, 2.0 * sine);
+    let lambda = eccentricity.mul_add(level_2, mean_longitude);
     fortran_asin(fortran_sin(0.409214646) * fortran_sin(lambda))
 }
 
