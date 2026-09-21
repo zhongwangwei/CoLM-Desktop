@@ -8090,3 +8090,128 @@ colm-rs: VSF sublevel layer inputs are invalid
 **没有夹到 0**：上游会把那个负值原样带进下游算术，夹掉会让这一层看到不同的数。
 
 修完 `US-NR1-snow` 正常跑满 720 步（15 天 × 48）。
+
+## 逐点输出：`rnet` 是按辐射式算的，不是 `H+LE+G`（实测，**已修**）
+
+上一节把残余分叉定位到「逐步累积」，这一轮改用**逐步 history**（把
+`DEF_HIST_FREQ` 改成 `'TIMESTEP'`、跑 10 步）来看每一条记录，一步之内谁先分叉一目了然
+—— 比再加一层探针便宜得多，而且不用重建内核。
+
+### 一、`f_rnet` 从第 1 步就差 19%
+
+`MOD_Vars_1DAccFluxes.F90:2087`：
+```fortran
+rnet = sabg + sabvsun + sabvsha - olrg + forc_frl
+```
+本仓库原先写成 `fsena + lfevpa + fgrnd`，注释里的理由是"与辐射式恒等"。那个恒等只在
+能量收支**精确闭合**时成立；更关键的是 `fgrnd` 本身就含辐射项（`sabg + dlrad*emg - ...`），
+`H_total + LE_total + G` 根本不是同一个表达式的另一种写法。实测 US-NR1-snow
+第 1 步起 `f_rnet` 差 19%，而同一份文件里的 `f_fgrnd`/`f_lfevpa`/`f_olrg`/`f_sabg`
+都是逐位相同的。改用上游的辐射式后，逐步 history 的第 1–3 步**超差条目归零**。
+
+顺带把 `history.rs` 那条注释里的假恒等式删掉了。
+
+## 地表诊断的温度取错了层：`t_grnd = t_soisno(lb)` 不是土层 1（实测，**已修**）
+
+修完 `rnet`，逐步 history 的第 4 步（US-NR1-snow 第一次积雪那一步）冒出一组异常：
+
+| 量 | 黄金 | Rust（修前） |
+|---|---|---|
+| `f_zerr` | −3.06e-11 | **+28.84** |
+| `f_olrg` | 291.071 | 262.206 |
+| `f_emis` | 0.996942 | **1.0**（恰好） |
+| `f_trad` | 267.673 | 260.774 |
+| `f_fgrnd` | −77.929 | −100.537 |
+
+`f_zerr` 是**能量收支残差**，黄金的 1e-11 说明上游那一步是闭合的；Rust 的 28.8 W/m²
+说明它不闭合 —— 而它的量级正好等于 `olrg` 的差（28.87），所以问题在 `olrg`。
+
+`MOD_Thermal.F90:1223`：
+```fortran
+IF (.not.DEF_SPLIT_SOILSNOW) THEN
+   t_grnd = t_soisno(lb)                     ! lb = snl+1
+   tinc   = t_soisno(lb) - t_soisno_bef(lb)
+```
+`lb = snl+1` 是**紧贴土壤的那一层**（没有雪时就是土层 1；有雪时是雪列里最下面那一片）。
+本仓库 `surface_budget` 原先写的是「列长减土层数」＝**永远是土层 1**，注释还写着
+"不能写 0 …… 要的是地表那一层" —— 恰好说反了。带雪时 `tinc` 因此恒为 0：
+`olrb = σ·t_grnd_bef³·4·tinc = 0` ⇒ `emis = ulrad/ulrad = 1.0` 恰好、`olrg = ulrad`。
+
+改法：把这两个温度**算在知道 split 标志的地方**，随能量输出带出来
+（`StandardLctEnergyOutput::surface_temperature_k` / `surface_temperature_k_before`，
+在 `finish_energy_step` 里由 `current_ground_temperature()` 现取，与 `t_grnd` 同一个
+函数），`surface_budget` 只读不再自己推。修后第 4 步：
+`olrg` 291.534 对 291.071、`emis` 0.996898 对 0.996942、`trad` 267.779 对 267.673、
+`fgrnd` −77.371 对 −77.929、`zerr` −7.0e-12（两侧都回到机器零）。
+
+## `htvp` 的判据必须放在 `newsnow` **之后**（实测，**已修**）
+
+修完上面两处，第 4 步仍有 42 条超差，领头的 `f_lfevpa` 差 10%。用 history 里现成的
+分量一验就清楚了：
+
+| | `f_lfevpa` | `hvap*fevpl+hsub*fevpg` | `hvap*(fevpl+fevpg)` |
+|---|---|---|---|
+| 黄金 | 15.2396 | **15.2321** | 13.4520 |
+| Rust | 13.6745 | 15.4755 | **13.6669** |
+
+黄金用 `hsub`（升华），Rust 用 `hvap`。`MOD_Thermal.F90:539-540`：
+```fortran
+htvp = hvap
+IF (wliq_soisno(lb)<=0. .and. wice_soisno(lb)>0.) htvp = hsub
+```
+它读的是 `lb` 那一层，而 `htvp` 是**在 THERMAL 里、`newsnow` 之后**算的。
+本仓库把这段判据放在装配期（`assembly.rs` 的 `snow_input`），而雪层是**本步**
+`add_new_snow` 才建出来的 —— 于是"第一次积雪"那一步模板看到的是土层 1
+（有液态水 ⇒ `hvap`），上游看到的是新雪层（零液态水有冰 ⇒ `hsub`）。
+
+改法：装配期只放**基础汽化热**，判据移进 `standard_lct_snow_soil_step`、在
+`add_new_snow` 之后按 `lb` 那一层现判。
+
+效果（逐步 history 的超差条目数）：
+
+| 记录 | 修前 | 修后 |
+|---|---|---|
+| 0 | 1（`f_frcsat`） | 1（`f_frcsat`） |
+| 1–3 | 0 | 0 |
+| 4 | 32 | **1（`f_rootr`）** |
+| 5–9 | 39…43 | **1（`f_rootr`）** |
+
+整窗超差记录总数：
+
+| 窗口 | 修前 | 修后 |
+|---|---|---|
+| `CN-Cng` | 11720 | **11704** |
+| `CN-Cng-wet` | 25894 | **25892** |
+| `US-NR1-snow` | 31325 | **28982**（−7.5%） |
+
+超差**变量数**仍是 55/70/79（同样的变量，只是超差记录少了很多），tier0 全零。
+
+## 还没动的一处：上游 `eroot` 的**数组错位**（实测，**待定**）
+
+`snow` 现在就剩 `f_rootr` 一条逐点超差，而它是**悬崖式**的：
+
+| | `f_rootr`（第 4 步起，10 层） |
+|---|---|
+| 黄金 | `[0, 0, 0.207315, 0.267158, 0.232743, 0.148124, 0.077591, 0.036841, 0.016755, 0.013473]` |
+| Rust | `[0, 0.097654, 0.187070, 0.241069, 0.210015, 0.133659, 0.070014, 0.033243, 0.015118, 0.012158]` |
+
+同一步的 `f_t_soisno` 逐位相同（土层 1 = 273.16、土层 2 = 274.88），所以不是温度差。
+原因是调用处的**序列关联**：`MOD_Thermal_CanopyPhase_Extended.F90:669`
+
+```fortran
+CALL eroot (nl_soil,trsmx0,porsl, ..., psi0,rootfr,dz_soisno,t_soisno,wliq_soisno,rootr,etrc,rstfac)
+```
+
+`t_soisno`/`dz_soisno`/`wliq_soisno` 在调用方声明成 `(lb:nl_soil)`，而 `eroot` 的哑元是
+`t_soisno(1:nl_soil)` —— 于是 `eroot` 的**第 1 项对应调用方的 `t_soisno(lb)`**：
+有 `|snl|` 层雪时，温度/水量/层厚这三条列整体**错位 `|snl|` 层**，而 `porsl`/`psi0`/
+`rootfr`/`theta_r` 仍是按土层的—— 也就是上游把**第 i 层土的参数**与**第 i−|snl| 层的状态**
+配在一起用。
+
+黄金那组数正是这个错位的形状：第 1 项 = 雪层（`t<tfrz` ⇒ 0）、第 2 项 = 土层 1
+（273.16，不 `>tfrz` ⇒ 0）、第 3…10 项 = 土层 **2…9**（土层 10 根本没被读到）。
+无雪时 `lb = 1`，错位为 0，两边一致 —— 所以干窗、湿窗都看不出来。
+
+这条影响的是**物理**（`rstfac`/`etrc`/`rootr` 直接进叶温的蒸腾），不只是诊断量。
+两条路：(a) 照抄上游的错位；(b) 像 `o3coef*` 那样把它当上游缺陷修掉并重生成黄金。
+这是**取舍**，不是纯技术问题，留给作者决定，本轮先记下来。

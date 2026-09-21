@@ -230,7 +230,7 @@ fn the_bridge_writes_the_state_variables_it_declares() {
     // 地表收支也在这里填一次：原先这个用例没调它，于是 `lfevpa`/`fgrnd`/`rnet`/`olrg`/
     // `emis`/`trad`/`sabvsun`/`sabvsha` 八项虽然声明了却一直是填充值 ——
     // 正是"声明了但没人写"那类静默空洞。
-    set_lct_surface_budget(&mut buffer, 0, &output, template.soil_layers()).unwrap();
+    set_lct_surface_budget(&mut buffer, 0, &output).unwrap();
     set_lct_forcing_mirrors(&mut buffer, 0, reference(), &output.energy.precipitation).unwrap();
     set_lct_radiation_bands(&mut buffer, 0, &output.energy).unwrap();
     set_lct_canopy_geometry(&mut buffer, 0, &state.energy, &output.energy, &template).unwrap();
@@ -268,7 +268,6 @@ fn the_bridge_writes_the_state_variables_it_declares() {
             0.0,
         ),
         reference(),
-        template.soil_layers(),
     )
     .unwrap();
     buffer.set_time(0, 56_802_270).unwrap();
@@ -971,7 +970,6 @@ fn the_balance_residuals_close_on_one_step() {
             initial_total_water_mm: initial,
             ..reference()
         },
-        template.soil_layers(),
     )
     .unwrap();
     buffer.set_time(0, 56_802_270).unwrap();

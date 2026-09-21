@@ -148,6 +148,23 @@ pub struct StandardLctEnergyOutput {
     pub precipitation: PrecipitationState,
     pub interception: CanopyInterceptionFluxes,
     pub shortwave: NetSolarFluxes,
+    /// 本步强迫场的向下长波（`forc_frl`）。
+    ///
+    /// 与 [`crate::LeafTemperatureOutput::downward_longwave_w_m2`] **不是**同一个量：
+    /// 后者是冠层透过率折算后的那一份。`MOD_Vars_1DAccFluxes.F90:2087` 的
+    /// `rnet = sabg + sabvsun + sabvsha - olrg + forc_frl` 用的是**强迫场**那一份。
+    pub forcing_longwave_w_m2: f64,
+    /// 本步**求解之后**的地表温度 `t_grnd`（`MOD_Thermal.F90:1223`）。
+    pub surface_temperature_k: f64,
+    /// 本步**求解之前**的地表温度 `t_grnd_bef`（`MOD_Thermal.F90:526/534`）。
+    ///
+    /// 这两项是 [`crate::surface_budget`] 那组诊断（`fgrnd`/`olrg`/`emis`/`trad`）
+    /// 与 `zerr` 的唯一温度来源。**不能**在 `surface_budget` 里拿"列长减土层数"
+    /// 自己推 —— 非 split 时上游用的是 `t_soisno(lb)`、`lb = snl+1`，带雪时那是
+    /// **最下面那一片雪**，不是土层 1；split 时又是 `fsno*t_snow+(1-fsno)*t_soil`。
+    /// 实测 US-NR1-snow 第 4 步（雪层刚建出来那一步）按土层 1 取会让 `tinc = 0`，
+    /// 于是 `emis` 恰为 1.0、`olrg` 低 28.87 W/m²、`zerr` 从 1e-11 变成 28.84。
+    pub surface_temperature_k_before: f64,
     /// Runtime-derived lower humidity boundary for a non-split surface.
     /// Split soil/snow still has separate soil and snow boundaries.
     pub ground_humidity: Option<GroundHumidityState>,
@@ -323,8 +340,8 @@ fn finish_energy_step(
         snow_surface_temperature_k: snow_temperature_k,
         ..input.ground_temperature
     })?;
-    let ground_temperature_change =
-        solved_ground_temperature_change(input.ground_temperature, &ground)?;
+    let surface_temperature_k = current_ground_temperature(input.ground_temperature, &ground)?;
+    let ground_temperature_change = surface_temperature_k - ground_temperature_k;
     let corrected_soil_sensible_heat_w_m2 = leaf.soil_sensible_heat_w_m2
         + ground_temperature_change * leaf.ground_sensible_temperature_slope_w_m2_k;
     let corrected_snow_sensible_heat_w_m2 = leaf.snow_sensible_heat_w_m2
@@ -392,6 +409,9 @@ fn finish_energy_step(
         precipitation,
         interception,
         shortwave,
+        forcing_longwave_w_m2: input.forcing.downward_longwave_w_m2,
+        surface_temperature_k,
+        surface_temperature_k_before: ground_temperature_k,
         ground_humidity,
         root_uptake,
         soil_surface_resistance_s_m,
@@ -610,6 +630,29 @@ pub fn standard_lct_snow_soil_step(
         snow_cover_fraction: state.snow.ground_snow_fraction,
         ..input.energy.ground_flux
     };
+    // `MOD_Thermal.F90:539-540` 的 `htvp`：`lb = snl+1` 那一层"零液态水 + 有冰"时
+    // 地面蒸发按**升华**计价。`lb` 是紧贴土壤的那一层雪（没有雪时就是土层 1），
+    // 而雪层是本步 `add_new_snow` 才可能建出来的 —— 所以判据必须在这里做，
+    // 不能在装配期按雪前的列做（见 `assembly.rs` 的 `snow_input`）。
+    {
+        let (liquid_at_lb, ice_at_lb) = if state.snow.layer_count < 0 {
+            let lb = crate::snow::snow_layer_slot(state.snow.layer_count + 1);
+            (
+                state.snow.liquid_water_kg_m2[lb],
+                state.snow.ice_water_kg_m2[lb],
+            )
+        } else {
+            (
+                state.soil_water.liquid_water_kg_m2[0],
+                state.soil_water.ice_water_kg_m2[0],
+            )
+        };
+        energy_input.ground_flux.vaporization_heat_j_kg = crate::ground_latent_heat_j_kg(
+            energy_input.ground_flux.vaporization_heat_j_kg,
+            liquid_at_lb,
+            ice_at_lb,
+        );
+    }
 
     if let Some(settings) = input.energy.plant_hydraulics {
         energy_input.leaf_temperature.plant_hydraulics = Some(plant_hydraulic_input(
@@ -1047,7 +1090,11 @@ fn leaf_input<'a>(
     }
 }
 
-fn solved_ground_temperature_change(
+/// 求解后的 `t_grnd`（`MOD_Thermal.F90:1223-1224`）。
+///
+/// 非 split 时就是打包列的第 0 项；split 时是 `fsno*t_snow + (1-fsno)*t_soil`。
+/// 与 [`surface_temperatures`] 的区别在于后者读的是**求解前**的输入列。
+fn current_ground_temperature(
     input: GroundTemperatureInput<'_>,
     state: &GroundTemperatureState,
 ) -> Result<f64> {
@@ -1055,13 +1102,12 @@ fn solved_ground_temperature_change(
         state.temperature_k.len() == input.temperature_k.len(),
         "ground-temperature solver returned a different layer count"
     );
-    let current_ground_temperature_k = if input.use_split_soil_snow {
+    Ok(if input.use_split_soil_snow {
         input.snow_cover_fraction * state.temperature_k[0]
             + (1.0 - input.snow_cover_fraction) * state.temperature_k[input.snow_layers]
     } else {
         state.temperature_k[0]
-    };
-    Ok(current_ground_temperature_k - surface_temperatures(input).0)
+    })
 }
 
 fn surface_temperatures(input: GroundTemperatureInput<'_>) -> (f64, f64, f64) {

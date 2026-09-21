@@ -9,7 +9,7 @@
 //! 放在 `colm-core` 是因为它只依赖内核输出，且**必须**只有一份实现：分成两份
 //! 就会出现"同一份文件里的 `f_zerr` 与 `f_olrg` 互相矛盾"这种只在拼错时才暴露的坑。
 
-use anyhow::{Context, Result};
+use anyhow::{ensure, Result};
 
 use crate::{ground_emissivity, StandardLctEnergyOutput};
 
@@ -37,26 +37,14 @@ pub struct SurfaceBudget {
     pub net_radiation_w_m2: f64,
 }
 
-pub fn surface_budget(
-    energy: &StandardLctEnergyOutput,
-    soil_layers: usize,
-) -> Result<SurfaceBudget> {
+pub fn surface_budget(energy: &StandardLctEnergyOutput) -> Result<SurfaceBudget> {
     let ground = &energy.ground;
-    // 打包列里第一个**土层**的下标：列长减去土层数。**不能**写 0 —— 带雪时
-    // `temperature_k[0]` 是雪面温度，而 `t_grnd_bef`/`tinc` 要的是地表那一层。
-    let soil_surface = ground
-        .temperature_k
-        .len()
-        .checked_sub(soil_layers)
-        .filter(|index| *index < ground.temperature_k.len())
-        .context("the packed ground temperature column is shorter than the soil")?;
-    let surface_temperature_k = ground.temperature_k[soil_surface];
-    let previous_surface_temperature_k =
-        ground
-            .previous_temperature_k
-            .get(soil_surface)
-            .copied()
-            .context("the ground temperature state carries no previous surface layer")?;
+    ensure!(
+        ground.temperature_k.len() == ground.previous_temperature_k.len(),
+        "the ground temperature column disagrees with its previous step"
+    );
+    let surface_temperature_k = energy.surface_temperature_k;
+    let previous_surface_temperature_k = energy.surface_temperature_k_before;
     let temperature_change_k = surface_temperature_k - previous_surface_temperature_k;
 
     let emissivity = ground_emissivity(ground.snow_water_equivalent_kg_m2, 0);
@@ -99,9 +87,19 @@ pub fn surface_budget(
         - emissivity * blackbody_change
         - (energy.corrected_ground_sensible_heat_w_m2 + ground_evaporation * sublimation_heat)
         + precipitation_heat;
-    // 地表能量收支恒等式：`rnet = H + LE + G`。用它而不是再拼一遍辐射项，
-    // 是因为前者的每一项都已经由内核算过，重复拼装只会引入第二套公式。
-    let net_radiation = energy.total_sensible_heat_w_m2 + latent_heat + ground_heat;
+    // `MOD_Vars_1DAccFluxes.F90:2087`：`rnet = sabg + sabvsun + sabvsha - olrg + forc_frl`。
+    //
+    // **曾经写成 `fsena + lfevpa + fgrnd`**，理由是"与辐射式恒等"。那个恒等只在
+    // 能量收支**精确闭合**时成立，而这里每一步都有 ~1e-11 的残差；更关键的是
+    // `fgrnd` 本身就含辐射项（见上），`H_total + LE_total + G` 与辐射式并不是同一个
+    // 表达式的两种写法。实测 US-NR1-snow 逐点输出：第 1 步起 `f_rnet` 差 19%，
+    // 第 4 步差 43%，整窗 360/360 条超差，而同一份文件里的 `f_fgrnd`/`f_lfevpa`/
+    // `f_olrg`/`f_sabg` 都是逐位相同的 —— 差的只是这一个诊断量。
+    let net_radiation = energy.shortwave.ground_absorbed_w_m2
+        + energy.shortwave.sunlit_absorbed_w_m2
+        + energy.shortwave.shaded_absorbed_w_m2
+        - outgoing_longwave
+        + energy.forcing_longwave_w_m2;
 
     Ok(SurfaceBudget {
         outgoing_longwave_w_m2: outgoing_longwave,

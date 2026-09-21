@@ -803,7 +803,7 @@ pub fn set_lct_energy_fluxes(
 ///          - emg*stefnc*t_grnd_bef**3*(4.*tinc) - (fseng+fevpg*htvp) &
 ///          + cpliq*pg_rain*(t_precip-t_grnd) + cpice*pg_snow*(t_precip-t_grnd)
 /// lfevpa = hvap*fevpl + htvp*fevpg
-/// rnet   = fsena + lfevpa + fgrnd        ! 与 sabv+sabg+lw_net 恒等
+/// rnet   = sabg + sabvsun + sabvsha - olrg + forc_frl
 /// ```
 ///
 /// `tinc = t_grnd - t_grnd_bef` 用状态里新留的 `previous_temperature_k`；
@@ -816,9 +816,8 @@ pub fn set_lct_surface_budget(
     sink: &mut impl HistorySink,
     record: usize,
     output: &StandardLctSoilOutput,
-    soil_layers: usize,
 ) -> Result<()> {
-    let budget = surface_budget(&output.energy, soil_layers)?;
+    let budget = surface_budget(&output.energy)?;
     let energy = &output.energy;
     for (name, value) in [
         ("sabvsun", energy.shortwave.sunlit_absorbed_w_m2),
@@ -880,9 +879,8 @@ pub fn set_lct_balance_errors(
     output: &StandardLctSoilOutput,
     end_water_storage_mm: f64,
     reference: HistoryReferenceState,
-    soil_layers: usize,
 ) -> Result<()> {
-    let budget = surface_budget(&output.energy, soil_layers)?;
+    let budget = surface_budget(&output.energy)?;
     let energy = &output.energy;
     let ground = &energy.ground;
     ensure!(
@@ -1525,7 +1523,7 @@ impl HistorySession {
             set_lct_state(accumulator, 0, template, state, ground)?;
             set_lct_fluxes(accumulator, 0, &output.water, variably_saturated)?;
             set_lct_energy_fluxes(accumulator, 0, output)?;
-            set_lct_surface_budget(accumulator, 0, output, template.soil_layers())?;
+            set_lct_surface_budget(accumulator, 0, output)?;
             set_lct_surface_diagnostics(
                 accumulator,
                 0,
@@ -1568,7 +1566,6 @@ impl HistorySession {
                     0.0,
                 ),
                 reference,
-                template.soil_layers(),
             )
         })
     }
@@ -1594,7 +1591,7 @@ impl HistorySession {
                 water: output.water.soil.clone(),
             };
             set_lct_energy_fluxes(accumulator, 0, &as_soil)?;
-            set_lct_surface_budget(accumulator, 0, &as_soil, template.soil_layers())?;
+            set_lct_surface_budget(accumulator, 0, &as_soil)?;
             // 这一句原先漏了：十三个地表诊断量在 `declare_lct_variables` 里声明了，
             // 却从来没有被填过，写出来的 `f_taux`/`f_tauy`/`f_z0m`/`f_zol` … 一直是
             // NetCDF 的填充值。实测 CN-Cng 的积雪分支 history 里这三个是 NaN，
@@ -1641,7 +1638,6 @@ impl HistorySession {
                     state.snow.water_equivalent_kg_m2,
                 ),
                 reference,
-                template.soil_layers(),
             )
         })
     }

@@ -1511,14 +1511,17 @@ impl StandardLctRestartTemplate {
                 },
                 ground_flux: colm_core::GroundFluxInput {
                     snow_cover_fraction: self.snow.ground_snow_fraction,
-                    // 有雪时上游的 `lb = 1-nzsno` 是**最上一层雪**，打包列的下标 0
-                    // （列自雪顶向下排到土壤底，见 `snow_soil` 的装配）。所以积雪分支要
-                    // 用雪列而不是 `input()` 里那份土壤表的判据重新定一次 `htvp`。
-                    vaporization_heat_j_kg: colm_core::ground_latent_heat_j_kg(
-                        self.physics.vaporization_heat_j_kg,
-                        self.snow_soil.liquid_water_kg_m2[0],
-                        self.snow_soil.ice_water_kg_m2[0],
-                    ),
+                    // 这里**只放基础汽化热**，`htvp` 的判据留给
+                    // `standard_lct_snow_soil_step` 在 `add_new_snow` **之后**做。
+                    //
+                    // `MOD_Thermal.F90:539-540` 的 `htvp` 看的是 `wliq_soisno(lb)`/
+                    // `wice_soisno(lb)`，`lb = snl+1` 是紧贴土壤的那一层雪。模板是在
+                    // 装配期按**雪前**的那一列建的，而雪层是本步 `add_new_snow` 才建出来
+                    // 的 —— 于是"第一次积雪"那一步模板看到的是土层 1。实测 US-NR1-snow
+                    // 第 4 步：土层 1 有液态水 ⇒ `hvap`，上游的新雪层零液态水有冰 ⇒
+                    // `hsub`，`lfevpa` 因此低 10%（13.67 对 15.24），再把雪层温度带偏
+                    // 0.12 K、`scv` 2e-4，从这一步起整条轨迹分叉。
+                    vaporization_heat_j_kg: self.physics.vaporization_heat_j_kg,
                     ..self.input(binding).energy.ground_flux
                 },
                 ..self.input(binding).energy
@@ -1766,7 +1769,7 @@ impl StandardLctRestartTemplate {
         }
         // `olrg`/`emis`/`trad`/`fgrnd`/`lfevpa` 的公共中间量：history 与续跑写回共用
         // 同一份实现，免得"同一份文件里的两个量互相矛盾"。
-        let budget = colm_core::surface_budget(step.energy, self.soil_layers())?;
+        let budget = colm_core::surface_budget(step.energy)?;
         // 表面诊断量：`(patch,)` 形状，只换本 patch 的那一项，其余保持重启里的原值。
         for (name, value) in [
             ("coszen", step.cosine_zenith),
