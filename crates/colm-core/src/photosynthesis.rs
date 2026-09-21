@@ -252,11 +252,18 @@ pub fn stomata(input: StomataInput, options: StomataOptions) -> Result<StomataSt
             .max(f77(1.0e-5));
         let positive_assimilation = net_assimilation.max(f77(1.0e-12));
         let next_co2 = if options.use_wue && (photo.c4_fraction - 1.0).abs() >= f77(0.001) {
+            // **WUE 分支的 `pco2i` 要按 `omc < ome` 选一支。**
+            // `MOD_AssimStomataConductance.F90:333-337` 在算 `gsh2o` 之前会把
+            // `pco2i` 重写成 `pco2i_c`（Rubisco 限制）或 `pco2i_e`（电子传输限制），
+            // `gsh2o` 与 `pco2in` 用的都是重写后的那一支。原先这里写死 `internal_co2`
+            // （= `pco2i_c`）：实测 CN-Cng-wet 第 10 步起 `gssun`/`gssha` 恰差 **2.03 倍**、
+            // `etr`/`etrsun`/`etrsha` 同倍，而同一份文件里的 `f_assim`/`f_respc` 只差 1%。
+            let selected_internal_co2 = if omc < ome { rubisco_co2 } else { electron_co2 };
             conductance = positive_assimilation
                 / (input.canopy_air_co2_pa / input.photosynthesis.air_pressure_pa
-                    - internal_co2 / input.photosynthesis.air_pressure_pa)
+                    - selected_internal_co2 / input.photosynthesis.air_pressure_pa)
                 * f77(1.6);
-            internal_co2
+            selected_internal_co2
         } else if options.use_medlyn {
             let vapor_deficit_kpa = (input.leaf_saturation_vapor_pressure_pa
                 - input.canopy_air_vapor_pressure_pa)

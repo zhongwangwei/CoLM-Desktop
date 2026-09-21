@@ -8215,3 +8215,51 @@ CALL eroot (nl_soil,trsmx0,porsl, ..., psi0,rootfr,dz_soisno,t_soisno,wliq_soisn
 这条影响的是**物理**（`rstfac`/`etrc`/`rootr` 直接进叶温的蒸腾），不只是诊断量。
 两条路：(a) 照抄上游的错位；(b) 像 `o3coef*` 那样把它当上游缺陷修掉并重生成黄金。
 这是**取舍**，不是纯技术问题，留给作者决定，本轮先记下来。
+
+## 气孔 WUE 分支的内部 CO2 选错了支：`gssun` 差 2 倍（实测，**已修**）
+
+上一节修完 `htvp` 后，湿窗逐步 history 的第 0–10 步全干净，从第 11 步起
+`f_gssun`/`f_gssha` 开始超差，到第 10 步（日出前后）稳定在 **2.03 倍**：
+
+| 记录 | `f_gssun` 黄金 | Rust | 比值 |
+|---|---|---|---|
+| 10 | 3.2958e-3 | 6.7014e-3 | 2.033 |
+| 11 | 1.2853e-2 | 2.6040e-2 | 2.026 |
+| 12 | 4.7319e-2 | 9.5274e-2 | 2.013 |
+
+同一份文件里 `f_assim`/`f_assimsun`/`f_assimsha`/`f_respc` 只差 1%（绝对差
+2e-8 mol m-2 s-1，远在 atol 之下），`f_laisun`/`f_laisha`/`f_sabvsun`/`f_sabvsha`
+逐位相同，`f_rstfacsun`/`f_rstfacsha` 两侧都是 1.0，`f_tleaf` 只差 2 ULP。
+所以差别在 `stomata` 内部。
+
+`DEF_USE_WUEST` 的默认值是 `.true.`（`MOD_Namelist.F90:533`），三个黄金算例都没改
+—— 走的是 WUE 分支。`MOD_AssimStomataConductance.F90:333-337`：
+
+```fortran
+IF(omc .lt. ome)THEN
+   pco2i = pco2i_c           ! Rubisco 限制
+ELSE
+   pco2i = pco2i_e           ! 电子传输限制
+ENDIF
+gsh2o = assmt / (co2a - pco2i/psrf)*1.6
+pco2in = pco2i
+```
+
+**`pco2i` 会在算 `gsh2o` 之前被重写成选中的那一支。** 本仓库写死用
+`internal_co2`（= `pco2i_c`）：当 `ome < omc`（光限制）时上游用 `pco2i_e`，
+两边分母不同 —— 实测正是这个 2 倍。
+
+改法：WUE 分支里按 `omc < ome` 选 `rubisco_co2`/`electron_co2`，`gsh2o` 与
+`pco2in` 都用选中值。修后 `f_gssun` 3.29576e-3 对 3.29567e-3（3e-5），
+湿窗第 0–10 步全零、第 11 步起只剩 3 条微小条目。
+
+整窗效果（这是这一轮最大的一处）：
+
+| 窗口 | 超差变量数 | 超差记录总数 |
+|---|---|---|
+| `CN-Cng` | 55 → **27** | 11704 → **1092**（−91%） |
+| `CN-Cng-wet` | 70 → **68** | 25892 → **20665**（−20%） |
+| `US-NR1-snow` | 79 → 79 | 28982 → **28205** |
+
+干窗降了一个数量级、超差变量砍掉一半：原先 11704 条里绝大多数是
+`f_gssun`/`f_gssha` 经 `etr`/`fevpl`/`lfevpa` 一路带出去的。
