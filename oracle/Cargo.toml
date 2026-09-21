@@ -66,6 +66,12 @@ path = "src/bin/golden_compare.rs"
 name = "tier-check"
 path = "src/bin/tier_check.rs"
 
+# 整场统计判据（design.md §8.1 的 Tier 3）。`metrics.rs` 把基线钉在黄金文件上，
+# 这个二进制把同一批判据用在**任意一份** history 上 —— 包括 colm-rs 产出的那份。
+[[bin]]
+name = "tier3-check"
+path = "src/bin/tier3_check.rs"
+
 # 一次性的抽取工具：把 21 个 Urban-PLUMBER 站点的土壤剖面点值从全球栅格
 # 里抽成 crates/colm-srfdata/src/urban_soil.rs。产物入库，工具只在换
 # rawdata 时才需要再跑，所以它依赖真实栅格并不妨碍日常构建。

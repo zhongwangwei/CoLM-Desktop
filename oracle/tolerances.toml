@@ -111,6 +111,20 @@ rule = "statistical"
 variables = []          # 逐变量判据由 colm-hist 在计划 3 中定义
 
 [tier3.baselines]
-# 湿季窗口 CN-Cng-wet，剔除前 4 天预热，观测仅 qc==0
-rnet_r2_min = 0.999
+# 湿季窗口 CN-Cng-wet，观测仅 qc==0。
+#
+# `history_suffixes` 是作用域，按后缀认窗口：同一个窗口的两个产出前缀不同
+# （Fortran 是 `CN-Cng-wet_hist_2008-07.nc`，colm-rs 是
+# `colm-rs_hist_2008-07.nc`，后者的 stem 不带算例名），共同的只有时期后缀。
+# 冬季窗口 §2.8 那三行（Rnet R² 0.986 / Qle 0.047）是"冷启动无预热的预期值"，
+# 不是基线 —— 拿这几个数去卡它必红，而那个红是用法错。`tests/metrics.rs`
+# 单独把 §2.8 的六行钉在黄金文件上。判据由 `oracle --bin tier3-check` 执行。
+history_suffixes = ["_hist_2008-07.nc"]
+# 剔除前 4 天 = 96 小时。n 随它变，所以与基线同源。
+spinup_hours = 96
+# **0.998 而不是 design.md 表里的 0.999**：那张表印到三位小数，0.999 是
+# 0.998618 的四舍五入。门槛若照抄 0.999，**黄金文件自己就过不去**（实测
+# 0.998618），那不是回归而是门槛写错了。0.998 既容得下三位显示的舍入，
+# 又仍拦得住真实漂移 —— `tests/metrics.rs` 的时区平移对照把 R² 打到 0.15/0.12。
+rnet_r2_min = 0.998
 qle_r2_min  = 0.85
