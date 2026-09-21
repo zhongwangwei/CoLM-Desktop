@@ -783,25 +783,43 @@ pub fn leaf_temperature(
             evaporation_imbalance = -0.9 * leaf_evaporation;
             leaf_evaporation *= 0.1;
         }
-        let denominator = clai / input.time_step_seconds - net_longwave_temperature_slope
-            + leaf_sensible_temperature_slope
-            + leaf_latent_heat_j_kg * leaf_evaporation_temperature_slope
-            + WATER_HEAT_CAPACITY_J_KG_K * intercepted_rain
-            + ICE_HEAT_CAPACITY_J_KG_K * intercepted_snow;
+        // `dtl(it) = (…)/(…)`（`MOD_LeafTemperature_Extended.F90:1271-1273`）——
+        // **这就是准 Newton 的步长、也就是退出判据 `|dtl| < 0.01` 里的那个量**，
+        // 每差 1 ULP 都可能让迭代次数差一次（PHS 的 `vegwp` 因此整层偏移）。
+        // 分子分母各自是一条"加法链里挂乘积"的形状，gfortran 把每个乘积都收进加法：
+        // 实测 4000 组里，分子 `fma(ci*snow, dt, fma(cl*rain, dt, fma(-h,fe,base)))`
+        // 逐位全同（不收缩只有 2907/4000），分母
+        // `fma(ci,snow, fma(cl,rain, fma(h,C,base)))` 3988/4000（不收缩 2905/4000）。
+        // 分子里 `cpliq*qintr_rain*(t_precip-tl)` 收的是**外层**那个乘积
+        // （把 `cpliq*qintr_rain` 先算成一项再 fma），不是内层的 `rain*(…)`。
+        let precipitation_temperature_difference =
+            input.precipitation_temperature_k - state.leaf_temperature_k;
+        let denominator = ICE_HEAT_CAPACITY_J_KG_K.mul_add(
+            intercepted_snow,
+            WATER_HEAT_CAPACITY_J_KG_K.mul_add(
+                intercepted_rain,
+                leaf_latent_heat_j_kg.mul_add(
+                    leaf_evaporation_temperature_slope,
+                    clai / input.time_step_seconds - net_longwave_temperature_slope
+                        + leaf_sensible_temperature_slope,
+                ),
+            ),
+        );
         ensure!(
             denominator.is_finite() && denominator != 0.0,
             "leaf energy denominator is invalid"
         );
-        dtl[iteration] = (input.canopy_absorbed_solar_w_m2 + net_longwave
-            - leaf_sensible_heat
-            - leaf_latent_heat_j_kg * leaf_evaporation
-            + WATER_HEAT_CAPACITY_J_KG_K
-                * intercepted_rain
-                * (input.precipitation_temperature_k - state.leaf_temperature_k)
-            + ICE_HEAT_CAPACITY_J_KG_K
-                * intercepted_snow
-                * (input.precipitation_temperature_k - state.leaf_temperature_k))
-            / denominator;
+        let numerator = (ICE_HEAT_CAPACITY_J_KG_K * intercepted_snow).mul_add(
+            precipitation_temperature_difference,
+            (WATER_HEAT_CAPACITY_J_KG_K * intercepted_rain).mul_add(
+                precipitation_temperature_difference,
+                (-leaf_latent_heat_j_kg).mul_add(
+                    leaf_evaporation,
+                    input.canopy_absorbed_solar_w_m2 + net_longwave - leaf_sensible_heat,
+                ),
+            ),
+        );
+        dtl[iteration] = numerator / denominator;
         let unbounded_temperature_change = dtl[iteration];
         if dtl[iteration].abs() > MAX_TEMPERATURE_STEP_K {
             dtl[iteration] = MAX_TEMPERATURE_STEP_K * dtl[iteration].signum();
@@ -811,10 +829,22 @@ pub fn leaf_temperature(
         }
         state.leaf_temperature_k = previous_leaf_temperature + dtl[iteration];
         let temperature_change = dtl[iteration].abs();
+        // `dele = dtl*dtl*( dirab_dtl**2 + fsenl_dtl**2 + (hvap*fevpl_dtl)**2 )`
+        // （`MOD_LeafTemperature_Extended.F90:1291` 上面那两行）。**这就是收敛判据本身**
+        // —— `dee` 卡在 `dlemin = 0.1` 上，差 1 ULP 就会让迭代次数差一次。里层是
+        // 三项平方链，按实测规则收缩成 `fma(C,C, fma(A,A, B*B))`：
+        // 4000 组逐位全同，不收缩只有 3112/4000。`temperature_change` 那边
+        // 上游写的是 `sqrt(dtl*dtl)`，但 `dtl` 是叶温增量（`delmax` 限幅），
+        // `sqrt(x*x)` 与 `|x|` 在 4e6 组随机位型里只在 `x*x` 上溢时有别，等价。
+        let latent_flux_slope = leaf_latent_heat_j_kg * leaf_evaporation_temperature_slope;
         let flux_change = (dtl[iteration].powi(2)
-            * (net_longwave_temperature_slope.powi(2)
-                + leaf_sensible_temperature_slope.powi(2)
-                + (leaf_latent_heat_j_kg * leaf_evaporation_temperature_slope).powi(2)))
+            * latent_flux_slope.mul_add(
+                latent_flux_slope,
+                net_longwave_temperature_slope.mul_add(
+                    net_longwave_temperature_slope,
+                    leaf_sensible_temperature_slope * leaf_sensible_temperature_slope,
+                ),
+            ))
         .sqrt();
         let updated_saturation =
             saturation_specific_humidity(state.leaf_temperature_k, input.surface_pressure_pa)?;

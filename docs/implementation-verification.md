@@ -8504,3 +8504,31 @@ Rust 的 `bottom_pressure_pa * 体积分数` 同源）、`OXYGEN_VOLUME_FRACTION
 
 要证实它得把两边的迭代次数打出来对（Fortran 侧要重建内核），
 `leaf_temperature` 的输出结构里已经有 `iterations` 字段，但还没有和上游对过的工具。
+
+### 追加两处（同样是量过的），以及"量过但不改变窗口数字"这件事
+
+同一条线索上又量了两处，都改在 `crates/colm-core/src/leaf_temperature.rs`：
+
+| 上游 | 形状 | 收缩成 | 不收缩 |
+|---|---|---|---|
+| `:1291` `dele = dtl*dtl*( dirab_dtl**2 + fsenl_dtl**2 + (hvap*fevpl_dtl)**2 )` 的里层 | 三项平方链 | `fma(C,C, fma(A,A, B*B))` | 3112/4000 |
+| `:1271-1273` `dtl` 的分子 | `base - h*fevpl + cpliq*qrain*ΔT + cpice*qsnow*ΔT` | `fma(ci*qsnow, ΔT, fma(cl*qrain, ΔT, fma(-h,fevpl,base)))` | 2907/4000 |
+| 同上分母 | `base + h*C + cpliq*qrain + cpice*qsnow` | `fma(ci,qsnow, fma(cl,qrain, fma(h,C,base)))` | 2905/4000（候选 3988）|
+
+`dele` 是**收敛判据**的一半（`dee < dlemin`），`dtl` 就是 `det < dtmin` 里的那个量，
+所以这两处理论上最该改写迭代次数。实测结论是**没有**：干/湿/雪三个窗口的
+tier2 变量数（18/68/79）与**逐变量超差条数**（`f_vegwp` 477、`f_lfevpa` 82 …）
+一字未变，连 `worst at index` 的值都逐位相同。但改动确实生效了 ——
+在 16 步的 `TIMESTEP` 干窗上逐位比，它换掉了 61 个变量（`f_wliq_soisno` 26/240、
+`f_wice_soisno` 21/240、`f_fevpl` 16/16 …）。
+
+**这条负面结论本身有用**：它说明那 18/68/79 条**不是**由"累积的 1 ULP"决定的，
+而是由少数几个**状态整体偏移**决定的 —— 改 1 ULP 只会让偏移换个位置，
+不会把某条记录拉回容差内。要动它们必须找到**那个翻转的量**，而不是继续扫 FMA。
+
+顺带确认了一件事：`temperature_change` 用的是 `dtl.abs()`，而上游写的是
+`sqrt(dtl*dtl)`。400 万组随机位型里两者只在 `x*x` 上溢时有别，而 `dtl` 受
+`delmax` 限幅，所以这不是差异来源 —— 不改。
+
+叶子循环的实测迭代次数（干窗 16 步，Rust 侧插桩，已撤）：7…33，**从不到 40**，
+即退出确实走收敛判据而不是迭代上限。
