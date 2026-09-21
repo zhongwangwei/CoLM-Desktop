@@ -64,6 +64,14 @@ pub struct Manifest {
     pub schema: u32,
     pub preset: String,
     pub platform: String,
+    /// **最后一个碰过 `vendor/CoLM202X` 的提交**（`build_kernel.sh` 用
+    /// `git log -1 --format=%h -- vendor/CoLM202X` 取），不是本仓库的 HEAD。
+    ///
+    /// `vendor/CoLM202X` 是入库的源码快照、目录里没有 `.git`，早先那句
+    /// `git -C vendor/CoLM202X rev-parse HEAD` 会往上走进外层仓库 —— 于是每做一次
+    /// Rust 提交这个字段就变一次，`golden-run` 的 provenance 检查恒亮。
+    /// 现在它只随 Fortran 源变化；动过 `vendor/CoLM202X` 之后要么重跑
+    /// `--write-golden` 重盖章，要么接受一次告警。
     pub colm_git_sha: String,
     pub generator_args: String,
     /// Fortran 构建档位。旧清单没有这个字段，空串保持其原有身份格式。

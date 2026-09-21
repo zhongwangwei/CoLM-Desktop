@@ -6431,7 +6431,7 @@ RUPROBE soil=0 t=11 liq=11 ...
   与 `snowlayerscombine` 的两个循环逐行对照过，逻辑一致。
   下一步就去查 `snowcompaction` 的厚度演化。
 
-## 清单里的 `colm_git_sha` 记的不是 Fortran 源（2026 年，实测，**未修**）
+## 清单里的 `colm_git_sha` 记的不是 Fortran 源（2026 年，实测，**已修**）
 
 加 `US-NR1-snow` 黄金时用 `--write-golden`，顺手看到
 `oracle/golden/kernel-manifest.json` 里 `colm_git_sha` 从 `3950ecf` 变成
@@ -6454,8 +6454,8 @@ HEAD。也就是说：
 * 于是 `golden-run` 的 `check_kernel_provenance` **永远在告警**，而告警的本意是
   "工具链换了，比对全红可能是漂移不是物理"。一个恒亮的告警等于没有告警。
 
-**建议的修法**（未实施）：把身份换成**只在 vendor 内容变化时才变**的量。最省事
-且语义正确的一条是"最后一个碰过 `vendor/CoLM202X` 的提交"：
+**修法**：把身份换成**只在 vendor 内容变化时才变**的量。最省事且语义正确的一条是
+"最后一个碰过 `vendor/CoLM202X` 的提交"：
 
 ```bash
 GIT_SHA=$(git -C "$REPO_ROOT" log -1 --format=%h -- vendor/CoLM202X)
@@ -6463,14 +6463,32 @@ GIT_SHA=$(git -C "$REPO_ROOT" log -1 --format=%h -- vendor/CoLM202X)
 
 它同样可复现、同样便宜，而且**只随 Fortran 源变化**。
 
-**为什么没有当场改**：改了之后必须重建内核、并**重新产出三份黄金**，否则
-`oracle/golden/kernel-manifest.json` 会记下一份"身份对不上它的产出"的历史。
-重建内核 + 三份黄金是一个独立、可验证的改动，值得单独一轮，不该混在
-"加一个积雪窗口"里 —— 尤其因为黄金的字节会随之成为新的基准，那是另一件事。
+### 落地与验证（2026 年 9 月）
 
-**现状**：`oracle/golden/kernel-manifest.json` 保留入库值（`3950ecf`），
-`--write-golden` 之后手工 `git checkout` 还原（它的三个 `sha256` 本来就不可复现）。
-这条记在这里，免得下一个人再查一遍。
+`oracle/scripts/build_kernel.sh` 已改成上面那条；重建 `default` 后
+`kernels/default/manifest.json` 记的是 `ad75e8e` —— 即
+`git log -1 --format=%h -- vendor/CoLM202X`（上一次动 `o3coef*` 的那个提交），
+不再随 Rust 提交滚动。
+
+流程按"改脚本 → 重建内核 → `--write-golden` 重盖章 → `git checkout` 还原 `.nc`"走：
+
+1. 重建后先用 `golden-run <case>`（不带 `--write-golden`）确认告警**只剩它一条**：
+   `colm_git_sha: recorded "21c6e09", current "ad75e8e"`，`built_with`/`netcdf_*`/`hdf5`
+   全都一致 —— 也就是说这台机器上重建内核的**工具链字段是可复现的**，
+   漂移确实只来自那个字段本身。
+2. 三份黄金各自 `--write-golden` 重盖章，然后 `git checkout -- oracle/golden/*.nc`：
+   入库的 `.nc` 字节一个没动（`git status` 里只剩 manifest 与脚本），
+   免得为一次元数据修正往仓库里塞三份二进制改动。
+3. 用 `/tmp` 里事先备份的**入库版**黄金逐个 `golden-compare` + 逐值位比，
+   确认重建出来的内核仍然逐位复现它们：`CN-Cng` 0/46422、`CN-Cng-wet` 0/67970、
+   `US-NR1-snow` 0/63586 个值不同。
+4. 再跑 `golden-run`，三份都是 `provenance matches the recorded kernel` —— 恒亮的告警灭了。
+
+manifest 里那三个 `sha256` 随重建而变是**预期的**：`check_kernel_provenance`
+刻意不比它（Fortran 构建不逐字节可复现），它记的是当前这次构建的二进制。
+**注意**：`ad75e8e` 会随任何一次动 `vendor/CoLM202X` 的提交而变，
+那时要么重跑 `--write-golden`、要么接受一次告警 —— 这正是这一字段该有的行为。
+（`vendor/PROVENANCE.md` 在 `vendor/` 下但不在 `vendor/CoLM202X` 里，动它不会触发。）
 
 ## 雪层数不一致的**因果链**：根在第 1 步的叶温，不在雪（2026 年，实测）
 

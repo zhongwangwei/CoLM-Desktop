@@ -367,7 +367,14 @@ esac
 # 随环境变意味着同一份构建在不同机器上产出的 manifest 字节不同，任何
 # 「这两个内核配置一样吗」的比较都会假报差异。
 MACROS=$(printf '%s\n' "$EFFECTIVE" | awk 'NF{print "\""$0"\""}' | paste -sd, -)
-GIT_SHA=$(git -C "$SRC" rev-parse --short HEAD)
+# `colm_git_sha` 要记的是**这份 Fortran 源**的身份，不是本仓库的 HEAD。
+# `vendor/CoLM202X` 是入库的源码快照、目录里没有 `.git`，所以
+# `git -C "$SRC" rev-parse HEAD` 会往上走进外层仓库 —— 那样每做一次 **Rust**
+# 提交这个字段就变一次，`golden-run` 的 provenance 检查于是恒亮（见
+# docs/implementation-verification.md「清单里的 colm_git_sha 记的不是 Fortran 源」）。
+# 「最后一个碰过 vendor/CoLM202X 的提交」同样可复现、同样便宜，且**只随
+# Fortran 源变化**；`--vendor/CoLM202X` 用长路径写法，免得在别的目录名下歧义。
+GIT_SHA=$(git -C "$REPO_ROOT" log -1 --format=%h -- vendor/CoLM202X)
 # macOS 有 shasum 没 sha256sum，多数 Linux 反之。两者都不通用，所以先探测。
 if command -v shasum >/dev/null 2>&1; then
   sha() { shasum -a 256 "$1" | cut -d' ' -f1; }
