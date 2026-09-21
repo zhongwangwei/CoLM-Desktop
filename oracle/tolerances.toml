@@ -36,13 +36,22 @@ description = "确定性代数、无迭代物理。"
 rule = "relative"
 rtol = 1e-12
 variables = [
+  # **只有下行辐射留在 tier1。** 它们由 `f_xy_solarin`（tier0）经解析分带得来，
+  # 实测 264/264 逐位相等。
   "f_solvd", "f_solvi", "f_solnd", "f_solni",
   "f_solvdln", "f_solviln", "f_solndln", "f_solniln",
-  "f_srvd", "f_srvi", "f_srnd", "f_srni",
-  "f_srvdln", "f_srviln", "f_srndln", "f_srniln",
-  "f_sr", "f_alb", "f_sabg", "f_sabvsun", "f_sabvsha",
-  "f_rnet", "f_emis",
-  "f_fm", "f_fh", "f_fq", "f_fm10m",
+  # `f_sr*`/`f_sab*`/`f_alb`/`f_rnet`/`f_emis`/`f_fm`/`f_fh`/`f_fq`/`f_fm10m`
+  # 已经从 tier1 移入 tier2 —— 它们的"确定性代数"是对的，但**输入全部是 tier2**，
+  # 于是 tier1 的 1e-12 严于输入，违反本文件顶部的不变式。实测链条（CN-Cng）：
+  #   `f_fevpl`（叶温求解器，tier2）→ `f_ldew`（冠层持水，tier2，第 108 条差 3.0%）
+  #   → `fwet_snow = ((10/(48*(lai+sai)))*ldew_snow)**(2/3)`（`MOD_LeafTemperature.F90:1226`）
+  #   → `MOD_Albedo` 的 `scat`/`beta0`（`:629-631`）→ `f_alb`（可见 direct 差 4.3e-3）
+  #   → `f_sr*`（= 下行 × alb）、`f_sab*`（= 下行 × (1-alb)）、`f_rnet`。
+  # 实测 `Δalb` 与 `Δfwet_snow` 的相关系数 0.69（可见正向、近红外反向，符号符合湿冠层
+  # 物理），斜率 0.50/-0.91 —— 是继承，不是反照率算错。
+  #   `f_fm`/`f_fh`/`f_fq`/`f_fm10m` 与 `f_zol`/`f_rib`/`f_ustar`/`f_tstar`/`f_qstar`
+  #   出自**同一个** `MOD_SurfaceLayer` 迭代，后者本来就在 tier2。
+  #   `f_emis` 依赖 `f_lai`（tier2 显式条目）与 `f_t_grnd`（tier2）。
 
 ]
 
@@ -87,6 +96,13 @@ variables = [
   #   f_scv / f_snowdp —— 雪盖状态本身
   #   f_olrg / f_trad —— 由地表与叶片温度导出（实测与 f_t_soisno 相关 +0.98）
   "f_z0m", "f_sai", "f_sigf", "f_fsno", "f_scv", "f_snowdp", "f_olrg", "f_trad",
+  # 2026 年第二轮：tier1 那 19 条全红的量搬进来。它们**不是**新出现的误差，
+  # 而是原来就被 tier1 误判 —— 见 [tier1] 里的实测链条。搬进来之后 tier1 的
+  # "超出即视为实现差异" 才算数：一条红的 tier1 仍要么是 bug，要么还要再搬。
+  "f_alb", "f_sr", "f_sabg", "f_sabvsun", "f_sabvsha",
+  "f_srvd", "f_srvi", "f_srnd", "f_srni",
+  "f_srvdln", "f_srviln", "f_srndln", "f_srniln",
+  "f_rnet", "f_emis", "f_fm", "f_fh", "f_fq", "f_fm10m",
 ]
 
 [tier3]
