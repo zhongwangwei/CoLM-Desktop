@@ -7,7 +7,10 @@
 use anyhow::{bail, ensure, Result};
 
 use crate::{
-    soil_hydraulic_conductivity, soil_psi_from_vliq, soil_vliq_from_psi, SoilHydraulicModel,
+    simple_vic_runoff, soil_hydraulic_conductivity, soil_psi_from_vliq, soil_vliq_from_psi,
+    topmodel_subsurface_runoff, topmodel_surface_runoff, xinanjiang_runoff, SoilHydraulicModel,
+    TopmodelSubsurfaceInput, TopmodelSurfaceInput, Water2014Runoff, Water2014SoilFluxes,
+    Water2014SoilState, FREEZING_K,
 };
 
 const RICHARDS_TOLERANCE: f64 = 8.0e-8;
@@ -18,6 +21,9 @@ const RICHARDS_TOLERANCE: f64 = 8.0e-8;
 /// 所以降级次数必须被计数，否则 tier2 的残差无法归因。
 const MAX_ITERS_RICHARDS: usize = 10;
 const SOURCE_REFERENCE_STEP_SECONDS: f64 = 1800.0;
+/// 与 `water_2014.rs` 各自持有一份（仓库惯例：常数按模块就近定义）。
+const ICE_DENSITY_KG_M3: f64 = 917.0;
+const WATER_DENSITY_KG_M3: f64 = 1000.0;
 
 /// Boundary modes used by the VSF Richards column.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3977,6 +3983,583 @@ pub fn richards_solver(
         }
     }
     Ok(())
+}
+
+/// Inputs to `MOD_SoilSnowHydrology:WATER_VSF`.
+///
+/// 第 [1] 节（雪层水）**不在这里**：`gwat` 由调用方给出。无雪层（`lb >= 1`）时
+/// 它就是 `pg_rain + sm − qseva`；有雪层时它是 `snowwater` 的底部排水。
+/// 这样本函数不必再知道雪列的形状，也与 `water_2014_snow_soil_step` 的分工一致。
+#[derive(Debug, Clone, Copy)]
+pub struct VariableSaturatedFlowInput<'a> {
+    pub time_step_seconds: f64,
+    pub patch_type: i32,
+    pub urban_run: bool,
+    pub plant_hydraulics: bool,
+    /// `wimp`。
+    pub impermeable_porosity: f64,
+    /// `pondmx`。
+    pub ponding_limit_mm: f64,
+    /// `DEF_TUNING_SOIL_ICE_IMPEDANCE`。
+    pub soil_ice_impedance: f64,
+    /// `scale_baseflow(ipatch)`：本仓库没有 `ParaOpt/*_baseflow.nc`，装配期给 1.0。
+    pub baseflow_scale: f64,
+    pub runoff: Water2014Runoff,
+    pub fluxes: Water2014SoilFluxes,
+    /// `gwat`：第 [1] 节的结果 [mm/s]。
+    pub ground_water_flux_mm_s: f64,
+    /// 雪列层数（`snl` 的绝对值）。`0` 时上游走 `lb >= 1` 那一支 ——
+    /// 它决定水量闭合诊断里要不要扣掉土壤表面的凝结项。
+    pub snow_layers: usize,
+    /// `z_soisno(1:nl_soil)` [m]。
+    pub node_depth_m: &'a [f64],
+    pub layer_thickness_m: &'a [f64],
+    /// `zi_soisno(0:nl_soil)` [m]，长度 `nlev + 1`。
+    pub interface_depth_m: &'a [f64],
+    pub temperature_k: &'a [f64],
+    pub porosity: &'a [f64],
+    pub residual_water: &'a [f64],
+    pub saturated_hydraulic_conductivity_mm_s: &'a [f64],
+    pub saturated_potential_mm: &'a [f64],
+    /// 逐层的土壤水力关系：VSF 要的是 van Genuchten 的五参数。
+    pub hydraulic_model: &'a [SoilHydraulicModel],
+    pub root_fraction: &'a [f64],
+    pub root_flux_mm_s: &'a [f64],
+}
+
+/// `WATER_VSF` 的诊断输出。
+#[derive(Debug, Clone, PartialEq)]
+pub struct VariableSaturatedFlowOutput {
+    /// `gwat`。
+    pub water_input_mm_s: f64,
+    /// `qinfl`：真正渗入表层的通量。
+    pub infiltration_mm_s: f64,
+    pub surface_runoff_mm_s: f64,
+    /// `rsur_se`：饱和地表产流。
+    pub saturation_excess_runoff_mm_s: f64,
+    /// `rsur_ie`：入渗超限产流。
+    pub infiltration_excess_runoff_mm_s: f64,
+    pub subsurface_runoff_mm_s: f64,
+    /// `rnof`。
+    pub total_runoff_mm_s: f64,
+    /// `frcsat`。
+    pub saturated_fraction: f64,
+    /// `qlayer(0:nlev)`，长度 `nlev + 1`。**这是 VSF 特有的 history 输出**
+    /// （`f_qlayer` 只在 VSF 打开时存在）。
+    pub soil_interface_flux_mm_s: Vec<f64>,
+    /// `etroot`：逐层蒸腾需求。
+    pub transpiration_demand_mm_s: Vec<f64>,
+    /// `etroot_actual`：逐层真正取走的水 [mm]。
+    pub transpiration_actual_mm: Vec<f64>,
+    /// `etroot_aquifer`。
+    pub transpiration_aquifer_mm: f64,
+    /// `wblc_ice_sink`：为补水量亏缺而融掉的冰 [kg/m²]。
+    pub ice_sink_kg_m2: Vec<f64>,
+    pub matric_potential_mm: Vec<f64>,
+    pub hydraulic_conductivity_mm_s: Vec<f64>,
+    /// `err_solver`：整柱水量闭合误差 [mm]。
+    pub balance_error_mm: f64,
+}
+
+/// 水量的"体积分数 ↔ 质量"换算系数：`dz[m] * 密度` 得到 kg/m² per 单位体积分数。
+fn layer_water_capacity_kg_m2(layer_thickness_m: f64, density_kg_m3: f64) -> f64 {
+    layer_thickness_m * density_kg_m3
+}
+
+/// Port of `MOD_SoilSnowHydrology:WATER_VSF`.
+///
+/// 只有 `patchtype ∈ {0, 1}`（土壤/城市）与 `!is_dry_lake` 这一支被移植；
+/// 湿地、干湖、SNICAR、拆分雪土、灌溉、CaMa 洪水、示踪物与 `Runoff_VIC`
+/// 一律显式拒绝，与 `WATER_2014` 的既有拒绝保持一致。
+///
+/// 步骤顺序照抄上游：体积分数与冰 → 地表/地下产流 → 水位一致性修正 →
+/// [`soil_water_vertical_movement`] → 回填 `wliq_soisno` → 凝结 → 冰汇 →
+/// 积水与 `rnof` → 冰阻抗 → 水量闭合诊断。
+pub fn variably_saturated_flow_step(
+    input: VariableSaturatedFlowInput<'_>,
+    state: &mut Water2014SoilState,
+) -> Result<VariableSaturatedFlowOutput> {
+    let nlev = validate_variable_saturated_flow(input, state)?;
+    let dt = input.time_step_seconds;
+
+    // `w_sum`：整个例程**开头**就算好的整柱水量。后面的每一步都会改状态，
+    // 所以必须在最前面取，而且用的是未截断的 `wdsrf`（上游 `:846` 在
+    // `wdsrf = max(0, wdsrf)` 之前）。
+    let storage_before_kg_m2 = state.liquid_water_kg_m2.iter().sum::<f64>()
+        + state.ice_water_kg_m2.iter().sum::<f64>()
+        + state.aquifer_water_mm
+        + state.surface_water_mm;
+
+    // 冰与有效孔隙度；`wresi` 是"冻胀挤出来的多余水"，算完再补回去。
+    let mut ice_volume = vec![0.0; nlev];
+    let mut ice_fraction = vec![0.0; nlev];
+    let mut effective_porosity = vec![0.0; nlev];
+    let mut permeable = vec![false; nlev];
+    let mut liquid_volume_fraction = vec![0.0; nlev];
+    let mut residual_water_kg_m2 = vec![0.0; nlev];
+    for level in 0..nlev {
+        let ice_capacity =
+            layer_water_capacity_kg_m2(input.layer_thickness_m[level], ICE_DENSITY_KG_M3);
+        ice_volume[level] =
+            (state.ice_water_kg_m2[level] / ice_capacity).min(input.porosity[level]);
+        ice_fraction[level] = if input.porosity[level] < 1.0e-6 {
+            0.0
+        } else {
+            (ice_volume[level] / input.porosity[level]).min(1.0)
+        };
+        effective_porosity[level] =
+            (input.porosity[level] - ice_volume[level]).max(input.impermeable_porosity);
+        permeable[level] =
+            effective_porosity[level] > input.impermeable_porosity.max(input.residual_water[level]);
+        if permeable[level] {
+            let liquid_capacity =
+                layer_water_capacity_kg_m2(input.layer_thickness_m[level], WATER_DENSITY_KG_M3);
+            liquid_volume_fraction[level] = (state.liquid_water_kg_m2[level] / liquid_capacity)
+                .clamp(0.0, effective_porosity[level]);
+            residual_water_kg_m2[level] =
+                state.liquid_water_kg_m2[level] - liquid_capacity * liquid_volume_fraction[level];
+        }
+    }
+
+    // 地表与地下产流。`gwat` 是进入产流算法的水量。
+    let mut surface_runoff_mm_s = 0.0;
+    let mut saturation_excess_runoff_mm_s = 0.0;
+    let mut infiltration_excess_runoff_mm_s = 0.0;
+    let mut saturated_fraction = 0.0;
+    let mut subsurface_runoff_mm_s = 0.0;
+    if input.patch_type <= 1 {
+        match input.runoff {
+            Water2014Runoff::Topmodel {
+                saturated_fraction_max,
+                saturated_fraction_decay_m_inv,
+                decay_tuning,
+                subsurface_method,
+            } => {
+                let surface = topmodel_surface_runoff(TopmodelSurfaceInput {
+                    impermeable_porosity: input.impermeable_porosity,
+                    saturated_hydraulic_conductivity_mm_s: input
+                        .saturated_hydraulic_conductivity_mm_s,
+                    effective_porosity: &effective_porosity,
+                    ice_fraction: &ice_fraction,
+                    saturated_fraction_max,
+                    saturated_fraction_decay_m_inv,
+                    decay_tuning,
+                    water_table_depth_m: state.water_table_depth_m,
+                    water_input_mm_s: input.ground_water_flux_mm_s,
+                })?;
+                surface_runoff_mm_s = surface.surface_runoff_mm_s;
+                saturation_excess_runoff_mm_s = surface.saturation_excess_runoff_mm_s;
+                infiltration_excess_runoff_mm_s = surface.infiltration_excess_runoff_mm_s;
+                saturated_fraction = surface.saturated_fraction;
+                subsurface_runoff_mm_s = topmodel_subsurface_runoff(TopmodelSubsurfaceInput {
+                    method: subsurface_method,
+                    layer_thickness_m: input.layer_thickness_m,
+                    interface_depth_m: input.interface_depth_m,
+                    ice_fraction: &ice_fraction,
+                    saturated_hydraulic_conductivity_mm_s: input
+                        .saturated_hydraulic_conductivity_mm_s,
+                    decay_tuning,
+                    water_table_depth_m: state.water_table_depth_m,
+                })?;
+            }
+            Water2014Runoff::XinAnJiang {
+                elevation_standard_deviation_m,
+            } => {
+                let runoff = xinanjiang_runoff(
+                    crate::StorageRunoffInput {
+                        layer_thickness_m: input.layer_thickness_m,
+                        effective_porosity: &effective_porosity,
+                        liquid_volume_fraction: &liquid_volume_fraction,
+                        water_input_mm_s: input.ground_water_flux_mm_s,
+                        time_step_seconds: dt,
+                    },
+                    elevation_standard_deviation_m,
+                )?;
+                surface_runoff_mm_s = runoff.surface_runoff_mm_s;
+                subsurface_runoff_mm_s = runoff.subsurface_runoff_mm_s;
+                saturated_fraction = runoff.saturated_fraction;
+                saturation_excess_runoff_mm_s = runoff.surface_runoff_mm_s;
+            }
+            Water2014Runoff::SimpleVic { bvic } => {
+                let runoff = simple_vic_runoff(
+                    crate::StorageRunoffInput {
+                        layer_thickness_m: input.layer_thickness_m,
+                        effective_porosity: &effective_porosity,
+                        liquid_volume_fraction: &liquid_volume_fraction,
+                        water_input_mm_s: input.ground_water_flux_mm_s,
+                        time_step_seconds: dt,
+                    },
+                    bvic,
+                )?;
+                surface_runoff_mm_s = runoff.surface_runoff_mm_s;
+                subsurface_runoff_mm_s = runoff.subsurface_runoff_mm_s;
+                saturated_fraction = runoff.saturated_fraction;
+                saturation_excess_runoff_mm_s = runoff.surface_runoff_mm_s;
+            }
+        }
+        subsurface_runoff_mm_s *= input.baseflow_scale;
+    }
+
+    // 渗入表层的通量。
+    let mut ground_water_flux_mm_s = input.ground_water_flux_mm_s - surface_runoff_mm_s;
+
+    // 深度换到 mm：`zwtmm`/`sp_zc`/`sp_zi`。
+    let mut water_table_depth_mm = state.water_table_depth_m * 1000.0;
+    let center_depth_mm = input
+        .node_depth_m
+        .iter()
+        .map(|depth_m| depth_m * 1000.0)
+        .collect::<Vec<_>>();
+    let interface_depth_mm = input
+        .interface_depth_m
+        .iter()
+        .map(|depth_m| depth_m * 1000.0)
+        .collect::<Vec<_>>();
+    let thickness_mm = (0..nlev)
+        .map(|level| interface_depth_mm[level + 1] - interface_depth_mm[level])
+        .collect::<Vec<_>>();
+
+    // 水位与液态水含量的一致性修正。
+    if state.aquifer_water_mm < 0.0 {
+        if water_table_depth_mm <= interface_depth_mm[nlev] {
+            water_table_depth_mm = water_table_from_aquifer(
+                input.porosity[nlev - 1],
+                input.residual_water[nlev - 1],
+                input.saturated_potential_mm[nlev - 1],
+                input.hydraulic_model[nlev - 1],
+                1.0e-5,
+                1.0e-8,
+                state.aquifer_water_mm,
+                interface_depth_mm[nlev],
+            )?;
+        }
+    } else {
+        for level in 0..nlev {
+            if liquid_volume_fraction[level] < effective_porosity[level] - 1.0e-8
+                && water_table_depth_mm <= interface_depth_mm[level]
+            {
+                water_table_depth_mm = interface_depth_mm[level + 1];
+            }
+        }
+    }
+    if water_table_depth_mm < interface_depth_mm[nlev] {
+        for level in (0..nlev).rev() {
+            if water_table_depth_mm >= interface_depth_mm[level]
+                && water_table_depth_mm < interface_depth_mm[level + 1]
+            {
+                if water_table_depth_mm > interface_depth_mm[level] && permeable[level] {
+                    liquid_volume_fraction[level] = (state.liquid_water_kg_m2[level] * 1000.0
+                        / WATER_DENSITY_KG_M3
+                        - effective_porosity[level]
+                            * (interface_depth_mm[level + 1] - water_table_depth_mm))
+                        / (water_table_depth_mm - interface_depth_mm[level]);
+                    if liquid_volume_fraction[level] < 0.0 {
+                        water_table_depth_mm = interface_depth_mm[level + 1];
+                        liquid_volume_fraction[level] = state.liquid_water_kg_m2[level] * 1000.0
+                            / WATER_DENSITY_KG_M3
+                            / thickness_mm[level];
+                    }
+                    liquid_volume_fraction[level] =
+                        liquid_volume_fraction[level].clamp(0.0, effective_porosity[level]);
+                    residual_water_kg_m2[level] = state.liquid_water_kg_m2[level] * 1000.0
+                        / WATER_DENSITY_KG_M3
+                        - effective_porosity[level]
+                            * (interface_depth_mm[level + 1] - water_table_depth_mm)
+                        - liquid_volume_fraction[level]
+                            * (water_table_depth_mm - interface_depth_mm[level]);
+                }
+                break;
+            }
+        }
+    }
+
+    state.surface_water_mm = state.surface_water_mm.max(0.0);
+
+    // 不透水表层：蒸发先从积水扣，再从表层土取。
+    let mut impervious_evaporation_mm = 0.0;
+    let mut impervious_liquid_loss_mm = 0.0;
+    let mut impervious_ice_loss_kg_m2 = 0.0;
+    if !permeable[0] && ground_water_flux_mm_s < 0.0 {
+        let deficit_mm = -ground_water_flux_mm_s * dt;
+        let surface_loss_mm = state.surface_water_mm.max(0.0).min(deficit_mm);
+        if surface_loss_mm > 0.0 {
+            impervious_evaporation_mm += surface_loss_mm;
+            state.surface_water_mm = (state.surface_water_mm - surface_loss_mm).max(0.0);
+        }
+        let soil_deficit_mm = (deficit_mm - surface_loss_mm).max(0.0);
+        if soil_deficit_mm > 0.0 {
+            let (liquid_loss, ice_loss) =
+                if input.temperature_k[0] <= FREEZING_K && state.ice_water_kg_m2[0] > 0.0 {
+                    let ice = state.ice_water_kg_m2[0].max(0.0).min(soil_deficit_mm);
+                    let liquid = state.liquid_water_kg_m2[0]
+                        .max(0.0)
+                        .min((soil_deficit_mm - ice).max(0.0));
+                    (liquid, ice)
+                } else {
+                    let liquid = state.liquid_water_kg_m2[0].max(0.0).min(soil_deficit_mm);
+                    let ice = state.ice_water_kg_m2[0]
+                        .max(0.0)
+                        .min((soil_deficit_mm - liquid).max(0.0));
+                    (liquid, ice)
+                };
+            state.liquid_water_kg_m2[0] = (state.liquid_water_kg_m2[0] - liquid_loss).max(0.0);
+            state.ice_water_kg_m2[0] = (state.ice_water_kg_m2[0] - ice_loss).max(0.0);
+            impervious_liquid_loss_mm = liquid_loss;
+            impervious_ice_loss_kg_m2 = ice_loss;
+        }
+        ground_water_flux_mm_s = 0.0;
+    }
+
+    let mut soil_state = VariableSaturatedSoilWaterState {
+        ponding_depth_mm: state.surface_water_mm,
+        water_table_depth_mm,
+        aquifer_water_mm: state.aquifer_water_mm,
+        liquid_water: liquid_volume_fraction.clone(),
+        matric_potential_mm: vec![0.0; nlev],
+        hydraulic_conductivity_mm_s: vec![0.0; nlev],
+        interface_flux_mm_s: vec![0.0; nlev + 1],
+    };
+    let soil = soil_water_vertical_movement(
+        VariableSaturatedSoilWaterInput {
+            time_step_seconds: dt,
+            center_depth_mm: &center_depth_mm,
+            interface_depth_mm: &interface_depth_mm,
+            permeable: &permeable,
+            porosity: input.porosity,
+            residual_water: input.residual_water,
+            saturated_potential_mm: input.saturated_potential_mm,
+            saturated_hydraulic_conductivity_mm_s: input.saturated_hydraulic_conductivity_mm_s,
+            hydraulic_model: input.hydraulic_model,
+            aquifer_porosity: input.porosity[nlev - 1],
+            ground_water_flux_mm_s,
+            transpiration_mm_s: input.fluxes.transpiration_kg_m2_s,
+            root_fraction: input.root_fraction,
+            root_flux_mm_s: input.root_flux_mm_s,
+            subsurface_runoff_mm_s,
+            plant_hydraulics: input.plant_hydraulics,
+            // 上游 `MOD_SoilSnowHydrology.F90:1101` 传的就是这个硬编码值。
+            tolerance_mm: 1.0e-3,
+        },
+        &mut soil_state,
+    )?;
+    state.surface_water_mm = soil_state.ponding_depth_mm;
+    state.aquifer_water_mm = soil_state.aquifer_water_mm;
+    water_table_depth_mm = soil_state.water_table_depth_mm;
+    liquid_volume_fraction = soil_state.liquid_water.clone();
+
+    // 回填液态水量：水位之下的层整层按有效孔隙度充满。
+    for level in (0..nlev).rev() {
+        if !permeable[level] {
+            continue;
+        }
+        if water_table_depth_mm < interface_depth_mm[level + 1] {
+            if water_table_depth_mm >= interface_depth_mm[level] {
+                state.liquid_water_kg_m2[level] = WATER_DENSITY_KG_M3
+                    * (effective_porosity[level]
+                        * (interface_depth_mm[level + 1] - water_table_depth_mm)
+                        + liquid_volume_fraction[level]
+                            * (water_table_depth_mm - interface_depth_mm[level]))
+                    / 1000.0;
+            } else {
+                state.liquid_water_kg_m2[level] = WATER_DENSITY_KG_M3
+                    * (effective_porosity[level] * thickness_mm[level])
+                    / 1000.0;
+            }
+        } else {
+            state.liquid_water_kg_m2[level] = WATER_DENSITY_KG_M3
+                * (liquid_volume_fraction[level] * thickness_mm[level])
+                / 1000.0;
+        }
+        state.liquid_water_kg_m2[level] += residual_water_kg_m2[level];
+    }
+    state.water_table_depth_m = water_table_depth_mm / 1000.0;
+
+    // 凝结：露/霜/升华按上游的符号约定加回表层。
+    state.liquid_water_kg_m2[0] =
+        (state.liquid_water_kg_m2[0] + input.fluxes.soil_dew_kg_m2_s * dt).max(0.0);
+    state.ice_water_kg_m2[0] = (state.ice_water_kg_m2[0]
+        + (input.fluxes.soil_frost_kg_m2_s - input.fluxes.soil_sublimation_kg_m2_s) * dt)
+        .max(0.0);
+
+    // 水量亏缺由冰补：`wblc > 0` 时自上而下融冰。
+    let mut ice_sink_kg_m2 = vec![0.0; nlev];
+    let mut ice_deficit_mm = soil.balance_error_mm;
+    if ice_deficit_mm > 0.0 {
+        for (level, sink_kg_m2) in ice_sink_kg_m2.iter_mut().enumerate() {
+            if state.ice_water_kg_m2[level] > ice_deficit_mm {
+                *sink_kg_m2 = ice_deficit_mm;
+                state.ice_water_kg_m2[level] -= ice_deficit_mm;
+                ice_deficit_mm = 0.0;
+                break;
+            }
+            *sink_kg_m2 = state.ice_water_kg_m2[level];
+            ice_deficit_mm -= state.ice_water_kg_m2[level];
+            state.ice_water_kg_m2[level] = 0.0;
+        }
+    }
+    // 循环结束后 `ice_deficit_mm` 是没被冰补上的剩余亏缺；上游不再使用它，
+    // 这里显式读一次，免得被当成漏读。
+    let _remaining_ice_deficit_mm = ice_deficit_mm;
+
+    // 积水超过上限的部分转成产流；水位到地表时全部算饱和产流。
+    let total_runoff_mm_s;
+    if input.patch_type <= 1 {
+        if state.surface_water_mm > input.ponding_limit_mm {
+            let excess_mm = state.surface_water_mm - input.ponding_limit_mm;
+            surface_runoff_mm_s += excess_mm / dt;
+            infiltration_excess_runoff_mm_s += excess_mm / dt;
+            state.surface_water_mm = input.ponding_limit_mm;
+        }
+        if state.water_table_depth_m <= 0.0 {
+            infiltration_excess_runoff_mm_s = 0.0;
+            saturation_excess_runoff_mm_s = surface_runoff_mm_s;
+        }
+        total_runoff_mm_s = subsurface_runoff_mm_s + surface_runoff_mm_s;
+    } else if input.patch_type == 2 {
+        bail!(
+            "WATER_VSF's wetland branch is not ported; patchtype 2 needs the \
+             DEF_USE_Dynamic_Wetland column, which this runtime does not assemble"
+        );
+    } else {
+        total_runoff_mm_s = 0.0;
+    }
+
+    // 冰阻抗：冻结层的导水率按含冰比例指数衰减。
+    let mut hydraulic_conductivity_mm_s = soil_state.hydraulic_conductivity_mm_s.clone();
+    for (level, conductivity_mm_s) in hydraulic_conductivity_mm_s.iter_mut().enumerate() {
+        if input.temperature_k[level] <= FREEZING_K {
+            let ice = (state.ice_water_kg_m2[level]
+                / layer_water_capacity_kg_m2(input.layer_thickness_m[level], ICE_DENSITY_KG_M3))
+            .clamp(0.0, input.porosity[level]);
+            let impedance = 10_f64.powf(-input.soil_ice_impedance * (ice / input.porosity[level]));
+            *conductivity_mm_s *= impedance;
+        }
+    }
+
+    let storage_after_kg_m2 = state.liquid_water_kg_m2.iter().sum::<f64>()
+        + state.ice_water_kg_m2.iter().sum::<f64>()
+        + state.aquifer_water_mm
+        + state.surface_water_mm;
+    let mut solver_balance_error_mm = storage_after_kg_m2
+        - storage_before_kg_m2
+        - (input.ground_water_flux_mm_s
+            - input.fluxes.transpiration_kg_m2_s
+            - surface_runoff_mm_s
+            - subsurface_runoff_mm_s)
+            * dt;
+    // 无雪层（`lb >= 1`）时上游再把地表凝结项扣掉一次 —— 因为上面那一步已经
+    // 把 `qsdew`/`qfros`/`qsubl` 加进 `wliq_soisno(1)`/`wice_soisno(1)` 了。
+    if input.snow_layers == 0 {
+        solver_balance_error_mm -= (input.fluxes.soil_dew_kg_m2_s
+            + input.fluxes.soil_frost_kg_m2_s
+            - input.fluxes.soil_sublimation_kg_m2_s)
+            * dt;
+    }
+
+    state.matric_potential_mm = soil_state.matric_potential_mm.clone();
+    state.hydraulic_conductivity_mm_s = hydraulic_conductivity_mm_s.clone();
+
+    let _ = impervious_evaporation_mm;
+    let _ = impervious_liquid_loss_mm;
+    let _ = impervious_ice_loss_kg_m2;
+
+    Ok(VariableSaturatedFlowOutput {
+        water_input_mm_s: input.ground_water_flux_mm_s,
+        infiltration_mm_s: soil.infiltration_mm_s,
+        surface_runoff_mm_s,
+        saturation_excess_runoff_mm_s,
+        infiltration_excess_runoff_mm_s,
+        subsurface_runoff_mm_s,
+        total_runoff_mm_s,
+        saturated_fraction,
+        soil_interface_flux_mm_s: soil_state.interface_flux_mm_s,
+        transpiration_demand_mm_s: soil.transpiration_demand_mm_s,
+        transpiration_actual_mm: soil.transpiration_actual_mm,
+        transpiration_aquifer_mm: soil.transpiration_aquifer_mm,
+        ice_sink_kg_m2,
+        matric_potential_mm: soil_state.matric_potential_mm,
+        hydraulic_conductivity_mm_s,
+        balance_error_mm: solver_balance_error_mm,
+    })
+}
+
+/// 校验 [`variably_saturated_flow_step`] 的窗口、状态与被拒绝的分支。
+fn validate_variable_saturated_flow(
+    input: VariableSaturatedFlowInput<'_>,
+    state: &Water2014SoilState,
+) -> Result<usize> {
+    ensure!(
+        matches!(input.patch_type, 0 | 1),
+        "WATER_VSF is ported only for soil (0) and urban (1) patches; patchtype {} \
+         needs the wetland, dry-lake or glacier branch",
+        input.patch_type
+    );
+    ensure!(
+        !input.urban_run || input.patch_type == 1,
+        "DEF_URBAN_RUN is on for a non-urban patch"
+    );
+    let nlev = input.node_depth_m.len();
+    ensure!(
+        nlev >= 2
+            && input.layer_thickness_m.len() == nlev
+            && input.interface_depth_m.len() == nlev + 1
+            && input.temperature_k.len() == nlev
+            && input.porosity.len() == nlev
+            && input.residual_water.len() == nlev
+            && input.saturated_hydraulic_conductivity_mm_s.len() == nlev
+            && input.saturated_potential_mm.len() == nlev
+            && input.hydraulic_model.len() == nlev
+            && input.root_fraction.len() == nlev
+            && input.root_flux_mm_s.len() == nlev
+            && state.liquid_water_kg_m2.len() == nlev
+            && state.ice_water_kg_m2.len() == nlev,
+        "WATER_VSF inputs must be finite and equally sized"
+    );
+    ensure!(
+        input.time_step_seconds > 0.0
+            && input.time_step_seconds.is_finite()
+            && input.ground_water_flux_mm_s.is_finite()
+            && input.baseflow_scale.is_finite()
+            && input.impermeable_porosity >= 0.0
+            && input.ponding_limit_mm >= 0.0
+            && input.soil_ice_impedance.is_finite()
+            && input
+                .layer_thickness_m
+                .iter()
+                .all(|value| value.is_finite() && *value > 0.0)
+            && input
+                .porosity
+                .iter()
+                .zip(input.residual_water)
+                .all(|(porosity, residual)| {
+                    porosity.is_finite()
+                        && residual.is_finite()
+                        && *residual >= 0.0
+                        && *residual < *porosity
+                })
+            && input
+                .saturated_hydraulic_conductivity_mm_s
+                .iter()
+                .all(|value| value.is_finite() && *value > 0.0)
+            && input
+                .saturated_potential_mm
+                .iter()
+                .all(|value| value.is_finite() && *value < 0.0)
+            && state
+                .liquid_water_kg_m2
+                .iter()
+                .chain(&state.ice_water_kg_m2)
+                .all(|value| value.is_finite() && *value >= 0.0)
+            && [
+                state.water_table_depth_m,
+                state.aquifer_water_mm,
+                state.surface_water_mm,
+            ]
+            .iter()
+            .all(|value| value.is_finite()),
+        "WATER_VSF values are not physical"
+    );
+    Ok(nlev)
 }
 
 /// Inputs to `MOD_Hydro_SoilWater:soil_water_vertical_movement`.

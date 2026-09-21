@@ -1430,6 +1430,191 @@ fn soil_water_vertical_movement_checks_widths_and_physical_values() {
     assert!(error.to_string().contains("not physical"));
 }
 
+/// `WATER_VSF` 的夹具：两层 van Genuchten 土柱，跑简化 VIC 产流（CN-Cng 的配置）。
+struct VariableSaturatedFlowFixture {
+    node_depth_m: Vec<f64>,
+    layer_thickness_m: Vec<f64>,
+    interface_depth_m: Vec<f64>,
+    temperature_k: Vec<f64>,
+    porosity: Vec<f64>,
+    residual_water: Vec<f64>,
+    saturated_hydraulic_conductivity_mm_s: Vec<f64>,
+    saturated_potential_mm: Vec<f64>,
+    hydraulic_model: Vec<SoilHydraulicModel>,
+    root_fraction: Vec<f64>,
+    root_flux_mm_s: Vec<f64>,
+}
+
+fn variable_saturated_flow_fixture() -> VariableSaturatedFlowFixture {
+    let model = SoilHydraulicModel::VanGenuchten {
+        alpha_vgm: 0.02,
+        n_vgm: 1.5,
+        l_vgm: 0.5,
+        sc_vgm: 0.95,
+        fc_vgm: 0.7,
+    };
+    // 六层：`Runoff_SimpleVIC`/`Runoff_XinAnJiang` 的存储分布是**按六层**写的，
+    // 少一层会被 `StorageRunoffInput` 的校验直接拒掉。
+    let layers = 6usize;
+    VariableSaturatedFlowFixture {
+        node_depth_m: (0..layers).map(|i| 0.05 + 0.1 * i as f64).collect(),
+        layer_thickness_m: vec![0.1; layers],
+        interface_depth_m: (0..=layers).map(|i| 0.1 * i as f64).collect(),
+        temperature_k: vec![283.0; layers],
+        porosity: vec![0.45; layers],
+        residual_water: vec![0.05; layers],
+        saturated_hydraulic_conductivity_mm_s: vec![0.01; layers],
+        saturated_potential_mm: vec![-100.0; layers],
+        hydraulic_model: vec![model; layers],
+        root_fraction: vec![1.0 / layers as f64; layers],
+        root_flux_mm_s: vec![0.0; layers],
+    }
+}
+
+fn variable_saturated_flow_state(volumetric_water: f64) -> Water2014SoilState {
+    let layers = 6usize;
+    Water2014SoilState {
+        liquid_water_kg_m2: vec![volumetric_water * 0.1 * 1000.0; layers],
+        ice_water_kg_m2: vec![0.0; layers],
+        water_table_depth_m: 1.0,
+        aquifer_water_mm: 0.0,
+        surface_water_mm: 0.0,
+        matric_potential_mm: vec![0.0; layers],
+        hydraulic_conductivity_mm_s: vec![0.0; layers],
+    }
+}
+
+fn variable_saturated_flow_input<'a>(
+    fixture: &'a VariableSaturatedFlowFixture,
+    ground_water_flux_mm_s: f64,
+    transpiration_mm_s: f64,
+) -> VariableSaturatedFlowInput<'a> {
+    VariableSaturatedFlowInput {
+        time_step_seconds: 1800.0,
+        patch_type: 0,
+        urban_run: false,
+        plant_hydraulics: false,
+        impermeable_porosity: 0.05,
+        ponding_limit_mm: 10.0,
+        soil_ice_impedance: 6.0,
+        baseflow_scale: 1.0,
+        runoff: Water2014Runoff::SimpleVic { bvic: 0.5 },
+        fluxes: Water2014SoilFluxes {
+            ground_rain_kg_m2_s: ground_water_flux_mm_s,
+            snowmelt_kg_m2_s: 0.0,
+            ground_evaporation_kg_m2_s: 0.0,
+            transpiration_kg_m2_s: transpiration_mm_s,
+            soil_dew_kg_m2_s: 0.0,
+            soil_frost_kg_m2_s: 0.0,
+            soil_sublimation_kg_m2_s: 0.0,
+        },
+        ground_water_flux_mm_s,
+        snow_layers: 0,
+        node_depth_m: &fixture.node_depth_m,
+        layer_thickness_m: &fixture.layer_thickness_m,
+        interface_depth_m: &fixture.interface_depth_m,
+        temperature_k: &fixture.temperature_k,
+        porosity: &fixture.porosity,
+        residual_water: &fixture.residual_water,
+        saturated_hydraulic_conductivity_mm_s: &fixture.saturated_hydraulic_conductivity_mm_s,
+        saturated_potential_mm: &fixture.saturated_potential_mm,
+        hydraulic_model: &fixture.hydraulic_model,
+        root_fraction: &fixture.root_fraction,
+        root_flux_mm_s: &fixture.root_flux_mm_s,
+    }
+}
+
+/// 一次完整的 `WATER_VSF`：结构量、物理区间与**整柱水量闭合**三条一起查。
+///
+/// `err_solver` 是上游自己用来判"这一步算坏了没有"的量（`|err_solver| > 1e-3`
+/// 就报警），所以断言它比只查结构不变量强得多 —— `qlayer`、产流、水位或
+/// 回填接错一处，它立刻离开 1e-3。
+#[test]
+fn variable_saturated_flow_closes_the_column_water_balance() {
+    let fixture = variable_saturated_flow_fixture();
+    let mut state = variable_saturated_flow_state(0.30);
+    let input = variable_saturated_flow_input(&fixture, 2.0e-4, 1.0e-4);
+    let output = variably_saturated_flow_step(input, &mut state).unwrap();
+
+    assert_eq!(output.soil_interface_flux_mm_s.len(), 7);
+    assert_eq!(output.matric_potential_mm.len(), 6);
+    assert_eq!(output.hydraulic_conductivity_mm_s.len(), 6);
+    for level in 0..6 {
+        let capacity = fixture.layer_thickness_m[level] * 1000.0;
+        assert!(
+            state.liquid_water_kg_m2[level] >= -1.0e-9
+                && state.liquid_water_kg_m2[level] <= capacity * fixture.porosity[level] + 1.0e-6,
+            "level {level} liquid water {} left 0..={}",
+            state.liquid_water_kg_m2[level],
+            capacity * fixture.porosity[level]
+        );
+        assert!(state.matric_potential_mm[level].is_finite());
+        assert!(state.matric_potential_mm[level] <= 0.0);
+        assert!(state.hydraulic_conductivity_mm_s[level] > 0.0);
+        assert!(state.hydraulic_conductivity_mm_s[level] <= 0.01);
+    }
+    assert!(
+        output.balance_error_mm.abs() <= 1.0e-3,
+        "err_solver {} mm exceeds the 1e-3 mm the source warns at",
+        output.balance_error_mm
+    );
+}
+
+/// 不透水的表层 + 负的入流（蒸发）：水先从积水扣，再从表层土扣，
+/// 而且 `qgtop` 被清零 —— 上游 `:1105-1133` 那一段。
+#[test]
+fn variable_saturated_flow_dries_an_impervious_surface_from_ponding_first() {
+    let fixture = variable_saturated_flow_fixture();
+    let mut state = variable_saturated_flow_state(0.30);
+    state.surface_water_mm = 5.0;
+    // 让表层不可渗透：有效孔隙度（= 孔隙度，无冰）必须不大于 `wimp`。
+    let mut input = variable_saturated_flow_input(&fixture, -3.0e-4, 0.0);
+    input.impermeable_porosity = 0.45;
+    let output = variably_saturated_flow_step(input, &mut state).unwrap();
+
+    // -3e-4 mm/s * 1800 s = 0.54 mm 的需求，积水只有 5 mm，全部由积水承担。
+    close(state.surface_water_mm, 4.46, 1.0e-9);
+    close(output.infiltration_mm_s, 0.0, 1.0e-12);
+    assert_eq!(state.liquid_water_kg_m2[0], 0.30 * 0.1 * 1000.0);
+}
+
+/// 冰阻抗：冻结层的导水率按 `10^(-imped * icefrac)` 衰减，未冻层不动。
+#[test]
+fn variable_saturated_flow_applies_ice_impedance_only_to_frozen_layers() {
+    let fixture = variable_saturated_flow_fixture();
+    let mut state = variable_saturated_flow_state(0.30);
+    // 表层结冰 0.1 m * 917 kg/m3 * 0.225（= 孔隙度的一半）= 20.6 kg/m²。
+    state.ice_water_kg_m2[0] = 0.1 * 917.0 * 0.225;
+    let mut input = variable_saturated_flow_input(&fixture, 0.0, 0.0);
+    input.temperature_k = &[270.0, 284.0, 284.0, 284.0, 284.0, 284.0];
+    let output = variably_saturated_flow_step(input, &mut state).unwrap();
+
+    let impedance = 10_f64.powf(-6.0 * 0.5);
+    assert!(output.hydraulic_conductivity_mm_s[0] < output.hydraulic_conductivity_mm_s[1]);
+    assert!(output.hydraulic_conductivity_mm_s[0] <= 0.01 * impedance + 1.0e-12);
+}
+
+/// 被拒绝的分支与宽度校验。
+#[test]
+fn variable_saturated_flow_refuses_unported_branches_and_bad_widths() {
+    let fixture = variable_saturated_flow_fixture();
+    let mut state = variable_saturated_flow_state(0.30);
+
+    let input = VariableSaturatedFlowInput {
+        patch_type: 2,
+        ..variable_saturated_flow_input(&fixture, 0.0, 0.0)
+    };
+    let error = variably_saturated_flow_step(input, &mut state).unwrap_err();
+    assert!(error.to_string().contains("soil (0) and urban (1)"));
+
+    let input = VariableSaturatedFlowInput {
+        interface_depth_m: &fixture.interface_depth_m[..2],
+        ..variable_saturated_flow_input(&fixture, 0.0, 0.0)
+    };
+    let error = variably_saturated_flow_step(input, &mut state).unwrap_err();
+    assert!(error.to_string().contains("equally sized"));
+}
+
 fn close(actual: f64, expected: f64, tolerance: f64) {
     assert!(
         (actual - expected).abs() < tolerance,
