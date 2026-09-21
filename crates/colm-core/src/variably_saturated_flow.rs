@@ -1466,9 +1466,16 @@ pub fn flux_variable_saturated_zone_all(
                 (upper_value, saturated_flux_mm_s[0] > upper_value)
             }
             VariableSaturatedBoundaryKind::Rainfall => {
+                // 上游 `MOD_Hydro_SoilWater.F90:2483-2490`：判据用 `wdsrf`，
+                // 但 `min` 的两个实参是 **`ubc_val`** 与 `qlc(lb)`，不是积水深度。
+                // 第一版把 `ubc_val` 写成了 `wdsrf`，于是无积水时
+                // `qq(lb-1) = min(0, qlc) = 0` 而 `qlc(lb) = 0` —— 表层通量凭空变成 0。
+                // 后果不是"数值差一点"：`water_balance` 把 0.1398 mm 的失衡记到
+                // **地表那个桶**（`blc(lb-1)`），而地表那格只在 `BC_RAINFALL` 下有变量，
+                // 残差因此 10 次迭代逐位不动（`1.397946e-1`），Newton 被迫降级成显式步。
                 if input.surface_water_mm < input.depth_tolerance_mm {
                     (
-                        input.surface_water_mm.min(saturated_flux_mm_s[0]),
+                        upper_value.min(saturated_flux_mm_s[0]),
                         saturated_flux_mm_s[0] > upper_value,
                     )
                 } else {
