@@ -9,8 +9,8 @@ use anyhow::{ensure, Result};
 use crate::{
     simple_vic_runoff, snow_water, solve_campbell_soil_water, topmodel_surface_runoff,
     update_groundwater, update_groundwater_topmodel, xinanjiang_runoff, CampbellSoilWaterInput,
-    GroundwaterInput, RuntimeSnowColumn, SnowWaterInput, SnowWaterOutcome, StorageRunoffInput,
-    TopmodelMethod, TopmodelSubsurfaceInput,
+    GroundwaterInput, RuntimeSnowColumn, SnowWaterInput, SnowWaterOutcome, SoilHydraulicModel,
+    StorageRunoffInput, TopmodelMethod, TopmodelSubsurfaceInput,
 };
 
 const ICE_DENSITY_KG_M3: f64 = 917.0;
@@ -56,6 +56,21 @@ pub struct Water2014SoilInput<'a> {
     pub ponding_limit_mm: f64,
     pub minimum_soil_potential_mm: f64,
     pub soil_ice_impedance: f64,
+    /// `DEF_USE_VariablySaturatedFlow`：打开时这一层走
+    /// [`crate::variably_saturated_flow_step`] 而不是 Campbell 的
+    /// `solve_campbell_soil_water`。
+    ///
+    /// 上游就是同一个接口的两个实现（`CoLMMAIN.F90:1183` 的
+    /// `IF (.not. DEF_USE_VariablySaturatedFlow)`），所以开关放在这里而不是
+    /// 另立一套入口 —— 装配、雪列交接、history 三处都不必各自分支。
+    pub variably_saturated: bool,
+    /// 逐层的土壤水力关系。VSF 要 van Genuchten 的五参数；Campbell 支不用它
+    /// （它自己从 `clapp_hornberger_b` 建模型）。
+    pub hydraulic_model: &'a [SoilHydraulicModel],
+    /// `snl` 的绝对值：雪列层数。只用于水量闭合诊断里那一个 `lb >= 1` 的分支。
+    pub snow_layers: usize,
+    /// `scale_baseflow(ipatch)`：本仓库没有 `ParaOpt/*_baseflow.nc`，装配期给 1.0。
+    pub baseflow_scale: f64,
     pub runoff: Water2014Runoff,
     pub fluxes: Water2014SoilFluxes,
     pub node_depth_m: &'a [f64],
@@ -122,6 +137,11 @@ pub struct Water2014SoilOutput {
     pub water_input_mm_s: f64,
     pub infiltration_mm_s: f64,
     pub surface_runoff_mm_s: f64,
+    /// `rsur_se`：饱和地表产流。只有 VSF 会填（`WATER_2014` 没有这两个输出，
+    /// 上游那时 `f_rsur_se`/`f_rsur_ie` 留 `spval`）。
+    pub saturation_excess_runoff_mm_s: f64,
+    /// `rsur_ie`：入渗超限产流。同上。
+    pub infiltration_excess_runoff_mm_s: f64,
     pub subsurface_runoff_mm_s: f64,
     pub total_runoff_mm_s: f64,
     pub saturated_fraction: f64,
@@ -155,6 +175,9 @@ pub fn water_2014_soil_step(
     input: Water2014SoilInput<'_>,
     state: &mut Water2014SoilState,
 ) -> Result<Water2014SoilOutput> {
+    if input.variably_saturated {
+        return variably_saturated_soil_step(input, state);
+    }
     let layers = validate(input, state)?;
     let (effective_porosity, ice_fraction, liquid_volume_fraction) = soil_volumes(input, state);
     let water_input_mm_s = input.fluxes.ground_rain_kg_m2_s + input.fluxes.snowmelt_kg_m2_s
@@ -250,6 +273,10 @@ pub fn water_2014_soil_step(
         water_input_mm_s,
         infiltration_mm_s,
         surface_runoff_mm_s,
+        // `WATER_2014` 不产出这两项；上游这时 `f_rsur_se`/`f_rsur_ie` 是 `spval`，
+        // 由 history 层留在填充值上。
+        saturation_excess_runoff_mm_s: 0.0,
+        infiltration_excess_runoff_mm_s: 0.0,
         subsurface_runoff_mm_s: groundwater.subsurface_runoff_mm_s,
         total_runoff_mm_s: surface_runoff_mm_s + groundwater.subsurface_runoff_mm_s,
         saturated_fraction,
@@ -329,6 +356,66 @@ pub fn water_2014_snow_soil_step(
         soil_state,
     )?;
     Ok(Water2014SnowSoilOutput { snow, soil })
+}
+
+/// 把 [`Water2014SoilInput`] 翻成 [`crate::variably_saturated_flow_step`] 的输入并调用它。
+///
+/// `gwat`（第 [1] 节的结果）在这里现算：`pg_rain + sm − qseva`。无雪时它就是
+/// 降雨 + 融雪 − 地表蒸发；有雪时 `water_2014_snow_soil_step` 已经把这三项换成
+/// 雪列底部排水（并把另外两项清零），所以同一个式子两边都对 —— 这也是上游
+/// `lb >= 1` 与 `lb <= 0` 两支的区别所在。
+fn variably_saturated_soil_step(
+    input: Water2014SoilInput<'_>,
+    state: &mut Water2014SoilState,
+) -> Result<Water2014SoilOutput> {
+    let ground_water_flux_mm_s = input.fluxes.ground_rain_kg_m2_s + input.fluxes.snowmelt_kg_m2_s
+        - input.fluxes.ground_evaporation_kg_m2_s;
+    let vsf = crate::variably_saturated_flow_step(
+        crate::VariableSaturatedFlowInput {
+            time_step_seconds: input.time_step_seconds,
+            patch_type: input.patch_type,
+            urban_run: input.urban_run,
+            plant_hydraulics: input.plant_hydraulics,
+            impermeable_porosity: input.impermeable_porosity,
+            ponding_limit_mm: input.ponding_limit_mm,
+            soil_ice_impedance: input.soil_ice_impedance,
+            baseflow_scale: input.baseflow_scale,
+            runoff: input.runoff,
+            fluxes: input.fluxes,
+            ground_water_flux_mm_s,
+            snow_layers: input.snow_layers,
+            node_depth_m: input.node_depth_m,
+            layer_thickness_m: input.layer_thickness_m,
+            interface_depth_m: input.interface_depth_m,
+            temperature_k: input.temperature_k,
+            porosity: input.porosity,
+            residual_water: input.residual_water,
+            saturated_hydraulic_conductivity_mm_s: input.saturated_hydraulic_conductivity_mm_s,
+            saturated_potential_mm: input.saturated_potential_mm,
+            hydraulic_model: input.hydraulic_model,
+            root_fraction: input.root_fraction,
+            root_flux_mm_s: input.root_flux_mm_s,
+        },
+        state,
+    )?;
+    Ok(Water2014SoilOutput {
+        water_input_mm_s: vsf.water_input_mm_s,
+        infiltration_mm_s: vsf.infiltration_mm_s,
+        surface_runoff_mm_s: vsf.surface_runoff_mm_s,
+        saturation_excess_runoff_mm_s: vsf.saturation_excess_runoff_mm_s,
+        infiltration_excess_runoff_mm_s: vsf.infiltration_excess_runoff_mm_s,
+        subsurface_runoff_mm_s: vsf.subsurface_runoff_mm_s,
+        total_runoff_mm_s: vsf.total_runoff_mm_s,
+        saturated_fraction: vsf.saturated_fraction,
+        // `qcharge` 只在 VSF **关掉**时写出（`MOD_Hist.F90:698`），所以这里恒为 0，
+        // history 层也不会去取它。
+        recharge_mm_s: 0.0,
+        soil_interface_flux_mm_s: vsf.soil_interface_flux_mm_s,
+        root_uptake_mm_s: vsf.transpiration_demand_mm_s,
+        root_uptake_amount_mm: vsf.transpiration_actual_mm,
+        matric_potential_mm: vsf.matric_potential_mm,
+        hydraulic_conductivity_mm_s: vsf.hydraulic_conductivity_mm_s,
+    })
 }
 
 fn runoff(

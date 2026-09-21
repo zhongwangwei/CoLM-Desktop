@@ -10,6 +10,12 @@ fn input() -> Water2014SoilInput<'static> {
         ponding_limit_mm: 5.0,
         minimum_soil_potential_mm: -1.0e8,
         soil_ice_impedance: 6.0,
+        // Campbell 分支不读 `hydraulic_model`；置空切片即可，
+        // 真打开 VSF 时 `variably_saturated_flow_step` 的校验会要求逐层模型。
+        variably_saturated: false,
+        hydraulic_model: &[],
+        snow_layers: 0,
+        baseflow_scale: 1.0,
         runoff: Water2014Runoff::Topmodel {
             saturated_fraction_max: 0.5,
             saturated_fraction_decay_m_inv: 0.5,

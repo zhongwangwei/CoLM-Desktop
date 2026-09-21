@@ -214,7 +214,7 @@ fn the_bridge_writes_the_state_variables_it_declares() {
         .expect("one step");
 
     let mut buffer = HistoryBuffers::new(dimensions(), site(), 1);
-    declare_lct_variables(&mut buffer, false).unwrap();
+    declare_lct_variables(&mut buffer, false, false).unwrap();
     set_lct_state(
         &mut buffer,
         0,
@@ -223,7 +223,7 @@ fn the_bridge_writes_the_state_variables_it_declares() {
         output.energy.ground.temperature_k[0],
     )
     .unwrap();
-    set_lct_fluxes(&mut buffer, 0, &output.water).unwrap();
+    set_lct_fluxes(&mut buffer, 0, &output.water, false).unwrap();
     set_lct_energy_fluxes(&mut buffer, 0, &output).unwrap();
     set_lct_surface_diagnostics(&mut buffer, 0, &output.energy, reference(), &physics()).unwrap();
     set_lct_stomatal_diagnostics(&mut buffer, 0, &output.energy).unwrap();
@@ -488,7 +488,7 @@ fn the_written_schema_matches_the_golden_file_for_the_shared_variables() {
     .unwrap();
     let state = template.state();
     let mut buffer = HistoryBuffers::new(dimensions(), site(), 1);
-    declare_lct_variables(&mut buffer, false).unwrap();
+    declare_lct_variables(&mut buffer, false, false).unwrap();
     set_lct_state(&mut buffer, 0, &template, &state, state.temperature_k[0]).unwrap();
     buffer.set_time(0, 56_802_270).unwrap();
     let path = root.join("history.nc");
@@ -582,7 +582,7 @@ fn the_snow_branch_fills_the_snow_span() {
             .expect("one snow step");
 
     let mut buffer = HistoryBuffers::new(dimensions(), site(), 1);
-    declare_lct_variables(&mut buffer, false).unwrap();
+    declare_lct_variables(&mut buffer, false, false).unwrap();
     set_lct_snow_state(
         &mut buffer,
         0,
@@ -591,7 +591,7 @@ fn the_snow_branch_fills_the_snow_span() {
         output.energy.ground.temperature_k[0],
     )
     .unwrap();
-    set_lct_fluxes(&mut buffer, 0, &output.water.soil).unwrap();
+    set_lct_fluxes(&mut buffer, 0, &output.water.soil, false).unwrap();
     set_lct_energy_fluxes(
         &mut buffer,
         0,

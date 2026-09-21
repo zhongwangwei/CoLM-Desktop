@@ -232,17 +232,13 @@ pub fn land_physics_parameters(
 /// 的体验会让"到底能跑什么"变成一个移动靶。
 ///
 /// 每一项都附上实测或上游出处，见 `docs/implementation-verification.md` 的对应小节。
-pub fn unported_branches(physics: &LandPhysicsParameters) -> Vec<&'static str> {
-    let mut missing = Vec::new();
-    if physics.variably_saturated_flow {
-        missing.push(
-            "DEF_USE_VariablySaturatedFlow：土壤水文走 WATER_VSF（van Genuchten），\
-             内核已移植但缺编排；上游在选 van Genuchten 时强制打开，且自身默认即为真。\
-             写 DEF_USE_Campbell_SOIL_MODEL = .true. 与 \
-             DEF_USE_VariablySaturatedFlow = .false. 可走已编排的 WATER_2014",
-        );
-    }
-    missing
+pub fn unported_branches(_physics: &LandPhysicsParameters) -> Vec<&'static str> {
+    // **现在是空的。** 最后一对是 VSF（`DEF_USE_VariablySaturatedFlow`）：
+    // `variably_saturated_flow_step` 接上之后，上游有、本仓库没有的编排分支
+    // 只剩下面这些**在别处**拒绝的（`physics.rs` 里的 runoff scheme 1、
+    // 灌溉；`assembly.rs` 里的 PFT/PC 子网格），它们各自在装配期就报错，
+    // 不需要在这里再列一遍。
+    Vec::new()
 }
 
 /// `MOD_SoilSnowHydrology.F90:315-348` 的 `DEF_Runoff_SCHEME` 派发。

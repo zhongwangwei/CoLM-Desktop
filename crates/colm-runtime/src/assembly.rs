@@ -1358,6 +1358,16 @@ impl StandardLctRestartTemplate {
                 ponding_limit_mm: physics.ponding_limit_mm,
                 minimum_soil_potential_mm: physics.minimum_soil_potential_mm,
                 soil_ice_impedance: physics.soil_ice_impedance,
+                // `DEF_USE_VariablySaturatedFlow`：打开时 `water_2014_soil_step`
+                // 转给 `variably_saturated_flow_step`（`CoLMMAIN.F90:1183` 的
+                // `IF (.not. DEF_USE_VariablySaturatedFlow)` 就是这个判断）。
+                variably_saturated: physics.variably_saturated_flow,
+                hydraulic_model: &self.soil_hydraulic_model,
+                // 模板给的是**重启时刻**的雪层数；积雪分支会用本步的实际层数覆盖。
+                snow_layers: self.snow.layer_count.unsigned_abs() as usize,
+                // `scale_baseflow`：本仓库不携带 `ParaOpt/*_baseflow.nc`，
+                // 上游此时走默认值 1.0（日志里的 "default value is used"）。
+                baseflow_scale: 1.0,
                 runoff: self.runoff,
                 // 内核覆盖：`standard_lct_soil_step` 用本步能量链的通量重建。
                 fluxes: Water2014SoilFluxes {

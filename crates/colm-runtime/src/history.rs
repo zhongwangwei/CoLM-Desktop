@@ -96,7 +96,27 @@ pub const LCT_SURFACE_VARIABLES: [&str; 13] = [
 /// 每一个的单位都与闸门表核对过（`qinfl`/`rnof`/`rsub`/`rsur`/`qcharge` 是 `mm/s`，
 /// `frcsat` 是 `-`），不是按名字猜的。闸门表里没有的量（例如 `smp`）不在此列 ——
 /// 它不是默认产出量。
-pub const LCT_FLUX_VARIABLES: [&str; 6] = ["qinfl", "rnof", "rsub", "rsur", "qcharge", "frcsat"];
+pub const LCT_FLUX_VARIABLES: [&str; 5] = ["qinfl", "rnof", "rsub", "rsur", "frcsat"];
+
+/// `qcharge`：**只有 VSF 关掉时**才产出的水文诊断。
+///
+/// 上游把它写在 `IF (.not. DEF_USE_VariablySaturatedFlow)` 里
+/// （`MOD_Hist.F90:698`），所以 VSF 打开时这一列根本不存在 —— 实测 VSF 黄金
+/// 没有 `f_qcharge`、对齐黄金有。这与 `f_vegwp` 是同一类条件声明。
+pub const LCT_QCHARGE_VARIABLES: [&str; 1] = ["qcharge"];
+
+/// `qlayer`：**只有 VSF 打开时**才产出的逐界面通量。
+///
+/// 上游只在 `WATER_VSF` 里填 `qlayer`（`MOD_SoilSnowHydrology.F90:1101` 的
+/// `soil_water_vertical_movement` 输出），闸门表的运行时条件就是
+/// `DEF_USE_VariablySaturatedFlow`。维度是 `soilinterface`（`nl_soil + 1`）。
+pub const LCT_VSF_FLUX_VARIABLES: [&str; 1] = ["qlayer"];
+
+/// VSF 打开时**实填**的、平时留空的三个量。
+///
+/// `rsur_se`/`rsur_ie` 平时挂在 [`DECLARED_ONLY`]（上游单点算例里整列 `spval`），
+/// `frcsat` 挂在 [`DECLARED_BUT_UNFILLED`]；VSF 一开这三项就都有值。
+pub const LCT_VSF_FILLED_VARIABLES: [&str; 3] = ["rsur_se", "rsur_ie", "frcsat"];
 
 /// 本层能填的**收支残差**，两项。累加规则普通（`acc1d` + `filter`/`nac`），
 /// 但每一项都要把上游在 `MOD_Thermal`/`CoLMMAIN` 里现拼的算式原样搬过来 ——
@@ -354,7 +374,11 @@ pub const UNFILLED: [&str; 0] = [];
 
 /// 声明本层能填的全部变量：见 [`LCT_STATE_VARIABLES`] 起的一组常量，
 /// 外加 [`DECLARED_ONLY`]（上游在本算例里也留空的那几个槽位）。
-pub fn declare_lct_variables(buffer: &mut HistoryBuffers, plant_hydraulics: bool) -> Result<()> {
+pub fn declare_lct_variables(
+    buffer: &mut HistoryBuffers,
+    plant_hydraulics: bool,
+    variably_saturated: bool,
+) -> Result<()> {
     let mut names = LCT_STATE_VARIABLES.to_vec();
     names.extend_from_slice(&LCT_FLUX_VARIABLES);
     names.extend_from_slice(&LCT_ENERGY_VARIABLES);
@@ -373,6 +397,12 @@ pub fn declare_lct_variables(buffer: &mut HistoryBuffers, plant_hydraulics: bool
     names.extend_from_slice(&LCT_BALANCE_VARIABLES);
     if plant_hydraulics {
         names.extend_from_slice(&LCT_PLANT_HYDRAULIC_VARIABLES);
+    }
+    // 两个互斥的条件列：`qcharge` 只在 VSF 关掉时存在，`qlayer` 只在打开时存在。
+    if variably_saturated {
+        names.extend_from_slice(&LCT_VSF_FLUX_VARIABLES);
+    } else {
+        names.extend_from_slice(&LCT_QCHARGE_VARIABLES);
     }
     names.extend_from_slice(&DECLARED_ONLY);
     buffer.declare(&names)
@@ -1145,20 +1175,34 @@ pub fn set_lct_fluxes(
     sink: &mut impl HistorySink,
     record: usize,
     water: &colm_core::Water2014SoilOutput,
+    variably_saturated: bool,
 ) -> Result<()> {
-    for (name, value) in [
+    // `qcharge` 与 VSF 互斥；`qlayer` 只在 VSF 打开时存在。
+    if variably_saturated {
+        sink.layer("qlayer", record, &water.soil_interface_flux_mm_s)?;
+    }
+    let mut scalars = vec![
         ("qinfl", water.infiltration_mm_s),
         ("rnof", water.total_runoff_mm_s),
         ("rsub", water.subsurface_runoff_mm_s),
         ("rsur", water.surface_runoff_mm_s),
-        ("qcharge", water.recharge_mm_s),
-        // **`frcsat` 刻意不填。** 上游只有 `WATER_VSF` 走 `Runoff_*` 并传 `frcsat`
-        // （`MOD_SoilSnowHydrology.F90:880-925`，在 `WATER_VSF` 里），
-        // `WATER_2014`（本仓库唯一的编排）从不设它 —— 实测对齐算例 264 条记录**全是**
-        // `spval`，而开了 VSF 的黄金算例 264 条全有值。本仓库给 `Runoff_*` 传了
-        // `frcsat`，于是写出了一个上游没有的量。留空即与 Fortran 逐位相同
-        // （`colm-hist` 的填充值与上游的 `spval` 都是 -1e36）。
-    ] {
+    ];
+    if variably_saturated {
+        // VSF 打开时这三项有值（`Runoff_*` 的 `rsur_se`/`rsur_ie`/`frcsat`）。
+        scalars.extend_from_slice(&[
+            ("rsur_se", water.saturation_excess_runoff_mm_s),
+            ("rsur_ie", water.infiltration_excess_runoff_mm_s),
+            ("frcsat", water.saturated_fraction),
+        ]);
+    } else {
+        scalars.push(("qcharge", water.recharge_mm_s));
+    }
+    // **`frcsat` 在 VSF 关掉时刻意不填。** 上游只有 `WATER_VSF` 走 `Runoff_*` 并传
+    // `frcsat`（`MOD_SoilSnowHydrology.F90:880-925`，在 `WATER_VSF` 里），
+    // `WATER_2014` 从不设它 —— 实测对齐算例 264 条记录**全是** `spval`，
+    // 而开了 VSF 的黄金算例 264 条全有值。留空即与 Fortran 逐位相同
+    // （`colm-hist` 的填充值与上游的 `spval` 都是 -1e36）。
+    for (name, value) in scalars {
         ensure!(
             value.is_finite(),
             "the history value for {name} is not finite"
@@ -1350,6 +1394,8 @@ pub struct HistorySession {
     /// 是安全方向：少声明一列只会让 PHS 算例的文件少一列，而多声明一列会让
     /// 非 PHS 算例凭空多出一列全填充。
     plant_hydraulics: bool,
+    /// `DEF_USE_VariablySaturatedFlow`：决定 `f_qcharge` 与 `f_qlayer` 谁在文件里。
+    variably_saturated: bool,
 }
 
 impl HistorySession {
@@ -1378,6 +1424,7 @@ impl HistorySession {
             open: None,
             accumulator: HistoryAccumulator::default(),
             plant_hydraulics: false,
+            variably_saturated: false,
         })
     }
 
@@ -1396,11 +1443,13 @@ impl HistorySession {
         reference: HistoryReferenceState,
     ) -> Result<Option<PathBuf>> {
         let ground = output.energy.ground.temperature_k[0];
-        // 在开文件之前定下 `f_vegwp` 是否声明。
+        // 在开文件之前定下 `f_vegwp`/`f_qcharge`/`f_qlayer` 谁在文件里。
         self.plant_hydraulics = template.plant_hydraulics();
+        self.variably_saturated = template.physics.variably_saturated_flow;
+        let variably_saturated = self.variably_saturated;
         self.push(end, |accumulator| {
             set_lct_state(accumulator, 0, template, state, ground)?;
-            set_lct_fluxes(accumulator, 0, &output.water)?;
+            set_lct_fluxes(accumulator, 0, &output.water, variably_saturated)?;
             set_lct_energy_fluxes(accumulator, 0, output)?;
             set_lct_surface_budget(accumulator, 0, output, template.soil_layers())?;
             set_lct_surface_diagnostics(
@@ -1461,9 +1510,11 @@ impl HistorySession {
     ) -> Result<Option<PathBuf>> {
         let ground = output.energy.ground.temperature_k[0];
         self.plant_hydraulics = template.plant_hydraulics();
+        self.variably_saturated = template.physics.variably_saturated_flow;
+        let variably_saturated = self.variably_saturated;
         self.push(end, |accumulator| {
             set_lct_snow_state(accumulator, 0, template, state, ground)?;
-            set_lct_fluxes(accumulator, 0, &output.water.soil)?;
+            set_lct_fluxes(accumulator, 0, &output.water.soil, variably_saturated)?;
             let as_soil = StandardLctSoilOutput {
                 energy: output.energy.clone(),
                 water: output.water.soil.clone(),
@@ -1575,7 +1626,7 @@ impl HistorySession {
                 self.record_count(&record.suffix),
             );
             // 声明本层能负责的变量；写出的文件因此只包含它们。
-            declare_lct_variables(&mut buffer, self.plant_hydraulics)?;
+            declare_lct_variables(&mut buffer, self.plant_hydraulics, self.variably_saturated)?;
             self.open = Some((record.suffix.clone(), buffer));
         }
         let (_, buffer) = self.open.as_mut().expect("just opened");

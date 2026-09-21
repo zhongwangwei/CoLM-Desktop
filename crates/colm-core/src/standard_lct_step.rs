@@ -654,6 +654,8 @@ pub fn standard_lct_snow_soil_step(
                 },
                 temperature_k: &state.soil_temperature_k,
                 root_flux_mm_s,
+                // 水量闭合诊断里 `lb >= 1` 那一个分支要看的是**本步**的雪层数。
+                snow_layers: state.snow.layer_count.unsigned_abs() as usize,
                 ..input.soil_water
             },
         },
@@ -882,6 +884,14 @@ fn soil_surface_resistance_input(
     input: StandardLctEnergyInput<'_>,
     ground_humidity: Option<GroundHumidityState>,
 ) -> Result<f64> {
+    // `MOD_Thermal.F90:613-621`：`DEF_RSS_SCHEME = 0` 的意思是**不启用**土壤表面
+    // 阻力（`DEF_Namelist` 在关掉 Campbell 土壤模型时把它置 0），上游这时把
+    // `rss` 直接置 0、连 `SoilSurfaceResistance` 都不调。原先这里无条件调内核，
+    // 而内核只认 1..=5，于是 van Genuchten 算例（默认走 VSF、scheme 恒为 0）
+    // 在能量步就报 "soil surface resistance inputs are invalid"。
+    if input.soil_surface_resistance.scheme == 0 {
+        return Ok(0.0);
+    }
     let Some(humidity) = ground_humidity else {
         return soil_surface_resistance(input.soil_surface_resistance);
     };
