@@ -5946,7 +5946,7 @@ history / 重启侧要一起改的四件事：`f_qlayer` **必须注册并填充
 
 | 算例 | 配置 | 比对的黄金 | tier0 | tier1 | tier2 |
 |---|---|---|---|---|---|
-| `CN-Cng` | van Genuchten + **VSF 开** + PHS 开 | `oracle/golden/CN-Cng_hist_2008-01.nc`（金标，127 变量） | 2 | 19 | **43** |
+| `CN-Cng` | van Genuchten + **VSF 开** + PHS 开 | `oracle/golden/CN-Cng_hist_2008-01.nc`（金标，127 变量） | 2 | 19 | **38**（修地表凝结前是 43，见文末） |
 | `CN-Cng-aligned` | Campbell + VSF 关 + PHS 关 | 自带工作目录 | 2 | 19 | 48 |
 | `CN-Cng-phs` | Campbell + VSF 关 + PHS 开 | 自带工作目录 | 2 | 19 | 49 |
 
@@ -6055,9 +6055,10 @@ Fortran 的 `SZA` 探针与 Rust 的探针在 `i_stt/i_end`、`sat`、`trans`、
 | `f_frcsat` 前 3 条 | 0.675763 / 1.0 / 0.765763 | 0.675771 / 1.0 / 0.765764 |
 | `f_qlayer` | — | 超容差从 322/2904 降到 **5/2904** |
 
-tier 汇总从 `{2,19,45}` 变成 `{2,19,43}`。
+tier 汇总从 `{2,19,45}` 变成 `{2,19,43}`（后来又降到 38，是因为地表凝结那一项，见文末）。
 
-**还没解决的**（从第 16–17 条起分叉，是另一个缺陷）：
+**还没解决的**（从第 16–17 条起分叉，是另一个缺陷 —— **已经在文末的
+「地表凝结根本没进土壤表层」一节里定位并修掉**，下面这段保留当时的观察）：
 
 - 分叉点在第 16/17 条：黄金的 `f_h2osoi[0]` 继续降到 0.3772，本仓库停在 0.3850；
   同一时刻 `f_wliq_soisno[0]` 两边都已到 `volume_tolerance` 地板（2.7e-5），
@@ -6091,3 +6092,109 @@ tier 汇总从 `{2,19,45}` 变成 `{2,19,43}`。
 （`f_qlayer` 注册并填充、`f_qcharge` 停止声明、`rsur_se`/`rsur_ie` 实填、
 `frcsat` 实填、`unported_branches` 去掉 VSF）。接完之后验收目标换成
 `oracle/golden/CN-Cng_hist_2008-01.nc`（VSF + PHS 都开，127 个变量）。
+
+## 地表凝结（`qsdew`/`qfros`/`qsubl`）根本没进土壤表层：VSF 残差的主因（2026 年，实测）
+
+上一节末尾把"第 16/17 条起分叉"定在**冰**上，但没说清冰是怎么少的。这一轮查清了，
+根因不在 `WATER_VSF` 本身，而在**它上游那三行凝结项**。
+
+### 现象：液相抽干之后，黄金的冰还在升华，本仓库的冰冻住了
+
+`CN-Cng`（van Genuchten + VSF + PHS）第 1 层（`f_*_soisno` 的第 6 列，前 5 列是雪槽）：
+
+| 量 | 第 16 条 | 第 17 条 | 第 22 条 | 说明 |
+|---|---|---|---|---|
+| `f_wliq_soisno[5]` 黄金 | 0.0345665 | 2.7035e-5 | 1.351e-4 | 第 17 条起贴 `tol_v` 地板 |
+| `f_wliq_soisno[5]` 本仓库 | 0.0347742 | 2.7034e-5 | 1.351e-4 | 同步贴地板 |
+| `f_wice_soisno[5]` 黄金 | 6.182359 | 6.136215 | 5.772307 | 每小时掉 ~0.07 |
+| `f_wice_soisno[5]` 本仓库 | 6.182342 | 6.182333 | 6.181756 | **不动** |
+
+`f_fevpg` 两边都是正数且对得上（第 17 条 2.26525e-5 对 2.26657e-5），
+`f_qinfl` 两边都是 `-0`。所以**不是地表通量在驱动，是这份 `fevpg` 的归属错了**。
+
+### 根因：两条独立的缺陷叠在一起
+
+上游 `MOD_SoilSnowHydrology.F90:452-457`：
+
+```fortran
+IF ((.not.DEF_SPLIT_SOILSNOW) .or. (patchtype==1 .and. DEF_URBAN_RUN)) THEN
+   IF(lb >= 1)THEN
+      wliq_soisno(1) = max(0., wliq_soisno(1) + qsdew * deltim)
+      wice_soisno(1) = max(0., wice_soisno(1) + (qfros-qsubl) * deltim)
+   ENDIF
+```
+
+`lb` 是**土壤**顶层号（`CoLMMAIN.F90` 传 `snl+1`），所以 `lb >= 1` 恰好就是
+"无雪层"。`WATER_VSF`（`:1125-1134`）同一处判据。
+
+* **缺陷一**：`water_2014_snow_soil_step` 把这三个字段**硬编码成 0.0**，
+  而不是按手里的雪列决定。
+* **缺陷二**：`standard_lct_snow_soil_step` 又把它们留给
+  `..input.soil_water.fluxes` —— 而装配模板给的就是 0.0，并且注释里明写
+  "内核覆盖：`standard_lct_soil_step` 用本步能量链的通量重建"。
+  这条契约在**土壤入口**（`standard_lct_soil_step`）确实兑现了，
+  在**通用积雪入口**（`standard_lct_snow_soil_step`，无雪时也走它）没有。
+
+两条合起来的效果：`THERMAL` 算出的 `qsubl` 被丢掉了。冻结表层的 `wliq(1)` 一贴到
+`tol_v` 地板，`qseva = min(wliq/deltim, fevpg)` 就只剩 1.5e-8，**`fevpg` 的其余部分
+全是升华**（`MOD_Thermal.F90:1260-1261`），而升华去处被清零 —— 冰于是冻住。
+`fevpg` 的绝对值没有错，`f_fevpg` 的 history 也就对得上，这就是为什么这个问题
+在"只比通量"的视角下看不见。
+
+### 定位手法（可复用）
+
+不再两边插桩，而是先在 **Rust 侧单独**打一行：
+
+```rust
+eprintln!("VSFDBG in subl={:.12e} dew={:.12e} frost={:.12e} liq0={:.12e} ice0={:.12e} wblc={:.12e}", ...);
+```
+
+528 步全部打出 `subl=0 dew=0 frost=0`，而同一步 `liq0` 已经贴地板、`wblc` 只有
+1.8e-5（`wice` 的逐位下降量正好等于 `wblc`，说明冰汇本身是对的）。
+一行就把故障锁死在"这三个字段是 0"，不必再动 Fortran。
+
+### 修法与效果
+
+`water_2014_snow_soil_step` 按 `snow_state.layer_count < 0` 决定传 0 还是透传；
+`standard_lct_snow_soil_step` 从本步的 `thermal_water` 补上三项。
+
+`oracle/golden/CN-Cng_hist_2008-01.nc` 的最大绝对偏差：
+
+| 量 | 修前 | 修后 |
+|---|---|---|
+| `f_wice_soisno` / `f_wliq_soisno` | 19.51 kg/m² | **0.096 kg/m²** |
+| `f_h2osoi` | 0.3772 | **1.45e-4** |
+| `f_t_soisno` | 5.822 K | **0.0548 K** |
+| `f_t_grnd` | 3.601 K | **0.0155 K** |
+| `f_zwt` | 0.3494 m | **0.1068 m** |
+| `f_frcsat` | 0.06726 | **1.002e-4** |
+| `f_tleaf` | 1.666 K | **0.0369 K** |
+| `f_wat` | 6.091 mm | **0.00291 mm** |
+
+tier 汇总 `{tier0:2, tier1:19, tier2:43}` → **`{tier0:2, tier1:19, tier2:38}`**。
+
+两条单测守这个行为：`water_2014_tests.rs` 的
+`snow_soil_entry_credits_surface_condensation_only_without_a_snow_layer`
+（无雪透传 / 有雪归零，用差分验），`standard_lct_step_tests.rs` 的
+`standard_lct_snow_soil_step_credits_the_thermal_condensation_to_the_soil`
+（断言精确等式，并先断言本 fixture 的冰侧通量非零，否则这个测试区分不出接线）。
+
+### 一条新规矩
+
+> 字段注释写着"内核覆盖"的输入是**未兑现的承诺**，不是事实。
+> 装配模板把所有通量填 0、注释说内核会重建 —— 换一条内核入口就必须重新核对
+> 每一个字段，否则 0 会安安静静地一路跑到底。金标回归只给出"哪个量错了"，
+> 不会指出"哪个字段没人写"。
+
+### 修后剩下的残差（下一轮的施工单）
+
+* `f_vegwp` rel 0.57（第 0 条就有；PHS 递归 + 叶温求解器 0.01 K 地板，见 §五）。
+* `f_zwt` 0.107 m：第 215–220 条两边恒差 5.116 mm，第 234 条黄金回落到
+  395.92 mm 而本仓库停在 502.71 mm（水位停在界面上 vs 继续下渗）。
+* `f_t_soisno` / `f_wliq_soisno` / `f_wice_soisno` 的最差槽位都在**第 221 条第 10 层**
+  （0.0548 K / 0.096 kg/m²），与 `f_frcsat`（仅第 221 条超 1e-4）同一时刻，
+  指向又一次分支跳变。
+* `f_fq`/`f_fm`/`f_fh` 三条 rel 都是 1.0729e-2（同一底层量），第 12 条起超容差、
+  第 232 条最大 —— 近地层稳定性函数，值得单独查。
+* `f_gssun`/`f_gssha` 第 0 条 2.26e31：上游未初始化 `rssun` 的 UB（已知）。
+* `f_etr`/`f_etrsha`/`f_etrsun` 的绝对量只有 1e-7 量级，贴着 tier2 的 `atol=1e-7`。
