@@ -584,6 +584,232 @@ fn vsf_two_sided_transitive_flux_matches_current_fortran() {
     close(flux.saturated_flux_mm_s[1], 0.022, 1.0e-14);
 }
 
+/// `flux_sat_zone_all` 的夹具：两层柱，两层都饱和，所以必然落在 Case 1（上下都到边界）。
+///
+/// `psi_s`/`hksat`/`thickness` 都取能心算的值，测试里直接断言解析结果。
+struct ZoneAllFixture {
+    thickness_mm: Vec<f64>,
+    center_depth_mm: Vec<f64>,
+    interface_depth_mm: Vec<f64>,
+    saturated_liquid_water: Vec<f64>,
+    saturated_potential_mm: Vec<f64>,
+    saturated_hydraulic_conductivity_mm_s: Vec<f64>,
+    hydraulic_model: Vec<SoilHydraulicModel>,
+    unsaturated_pressure_head_mm: Vec<f64>,
+    unsaturated_hydraulic_conductivity_mm_s: Vec<f64>,
+}
+
+/// 初始的分层结构单独返回：`input` 借着 `ZoneAllFixture` 的数组，
+/// `state` 要可变借，合成一个结构体会让借用检查器无法拆开。
+fn zone_all_state() -> VariableSaturatedSaturatedZoneAllState {
+    VariableSaturatedSaturatedZoneAllState {
+        saturated: vec![true, true],
+        has_wetting_front: vec![false, false],
+        has_water_table: vec![false, false],
+        wetting_front_mm: vec![0.0, 0.0],
+        liquid_water: vec![40.0, 80.0],
+        water_table_thickness_mm: vec![0.0, 0.0],
+        interface_flux_mm_s: vec![0.0; 3],
+        water_table_flux_mm_s: vec![0.0; 2],
+        wetting_front_flux_mm_s: vec![0.0; 2],
+    }
+}
+
+fn zone_all_fixture() -> ZoneAllFixture {
+    let model = SoilHydraulicModel::Campbell { bsw: 4.0 };
+    ZoneAllFixture {
+        thickness_mm: vec![100.0, 200.0],
+        center_depth_mm: vec![50.0, 200.0],
+        interface_depth_mm: vec![0.0, 100.0, 300.0],
+        saturated_liquid_water: vec![40.0, 80.0],
+        saturated_potential_mm: vec![-100.0, -200.0],
+        saturated_hydraulic_conductivity_mm_s: vec![0.01, 0.02],
+        hydraulic_model: vec![model, model],
+        unsaturated_pressure_head_mm: vec![-50.0, -150.0],
+        unsaturated_hydraulic_conductivity_mm_s: vec![0.004, 0.008],
+    }
+}
+
+fn zone_all_input<'a>(
+    fixture: &'a ZoneAllFixture,
+    upper_boundary: VariableSaturatedBoundary,
+    lower_boundary: VariableSaturatedBoundary,
+    flux_tolerance_mm_s: f64,
+    update_sublevel: bool,
+) -> VariableSaturatedSaturatedZoneAllInput<'a> {
+    VariableSaturatedSaturatedZoneAllInput {
+        first_saturated_level: 0,
+        last_saturated_level: fixture.thickness_mm.len() - 1,
+        thickness_mm: &fixture.thickness_mm,
+        center_depth_mm: &fixture.center_depth_mm,
+        interface_depth_mm: &fixture.interface_depth_mm,
+        saturated_liquid_water: &fixture.saturated_liquid_water,
+        saturated_potential_mm: &fixture.saturated_potential_mm,
+        saturated_hydraulic_conductivity_mm_s: &fixture.saturated_hydraulic_conductivity_mm_s,
+        hydraulic_model: &fixture.hydraulic_model,
+        upper_boundary,
+        lower_boundary,
+        surface_water_mm: 0.0,
+        water_table_depth_mm: 1000.0,
+        unsaturated_pressure_head_mm: &fixture.unsaturated_pressure_head_mm,
+        unsaturated_hydraulic_conductivity_mm_s: &fixture.unsaturated_hydraulic_conductivity_mm_s,
+        flux_tolerance_mm_s,
+        depth_tolerance_mm: 1.0e-9,
+        pressure_tolerance_mm: 1.0e-9,
+        update_sublevel,
+    }
+}
+
+fn fixed_head(value: f64) -> VariableSaturatedBoundary {
+    VariableSaturatedBoundary {
+        kind: VariableSaturatedBoundaryKind::FixedHead,
+        value,
+    }
+}
+
+/// Case 1-1（两端都是固定水头）：`qlc` 由 `flux_sat_zone_fixed_bc` 给出，
+/// 层间界面按"谁限制谁"取。这里 `psi_s` 自上而下变负 → `lower_drains_upward`
+/// 成立，界面通量取下层值。
+#[test]
+fn saturated_zone_all_dispatches_case_one_and_picks_the_limiting_interface_flux() {
+    let fixture = zone_all_fixture();
+    let mut state = zone_all_state();
+    let input = zone_all_input(&fixture, fixed_head(0.0), fixed_head(-300.0), 1.0e-9, false);
+    flux_variable_saturated_zone_all(input, &mut state).unwrap();
+
+    // 心算：pressure_head = [0, max(-100,-200), -300]
+    //   flux[0] = -0.01*((-100-0)/100 - 1) = 0.02
+    //   flux[1] = -0.02*((-300+100)/200 - 1) = 0.04
+    // 界面：psi_s(0) > psi_s(1) → qq(0) = qlc(1) = 0.04；qq(1) 由地表边界给。
+    close(state.interface_flux_mm_s[0], 0.02, 1.0e-12);
+    close(state.interface_flux_mm_s[1], 0.04, 1.0e-12);
+    close(state.interface_flux_mm_s[2], 0.04, 1.0e-12);
+}
+
+/// `is_update_sublevel` 关掉时**不动**分层结构；打开时，被"下层限制"的饱和层
+/// 翻成"上端有湿润锋"的层。这一条钉住 Fortran `:2516-2530` 那段。
+#[test]
+fn saturated_zone_all_only_rewrites_sublevels_when_asked() {
+    let fixture = zone_all_fixture();
+    let mut frozen = zone_all_state();
+    let input = zone_all_input(&fixture, fixed_head(0.0), fixed_head(-300.0), 1.0e-9, false);
+    flux_variable_saturated_zone_all(input, &mut frozen).unwrap();
+    assert!(frozen.saturated[0]);
+    assert!(!frozen.has_wetting_front[0]);
+    assert_eq!(frozen.wetting_front_flux_mm_s[0], 0.0);
+
+    let mut updated = zone_all_state();
+    let input = zone_all_input(&fixture, fixed_head(0.0), fixed_head(-300.0), 1.0e-9, true);
+    flux_variable_saturated_zone_all(input, &mut updated).unwrap();
+    assert!(!updated.saturated[0]);
+    assert!(updated.has_wetting_front[0]);
+    assert!(!updated.has_water_table[0]);
+    assert_eq!(updated.wetting_front_mm[0], 100.0);
+    assert_eq!(updated.water_table_thickness_mm[0], 0.0);
+    assert_eq!(updated.liquid_water[0], 40.0);
+    close(updated.wetting_front_flux_mm_s[0], 0.04, 1.0e-12);
+    close(updated.water_table_flux_mm_s[0], 0.04, 1.0e-12);
+}
+
+/// 上下通量落在同一容差带里时界面取**中点**（Fortran `ELSE qq(iface) = (qupper+qlower)/2`）。
+/// 用一个大于上下之差的 `tol_q` 把这一支单独挑出来。
+#[test]
+fn saturated_zone_all_averages_the_interface_flux_inside_the_tolerance_band() {
+    let fixture = zone_all_fixture();
+    let mut state = zone_all_state();
+    let input = zone_all_input(&fixture, fixed_head(0.0), fixed_head(-300.0), 0.05, false);
+    flux_variable_saturated_zone_all(input, &mut state).unwrap();
+    // 0.04 - 0.02 = 0.02 < tol_q = 0.05 → 取 (0.02 + 0.04)/2。
+    close(state.interface_flux_mm_s[1], 0.03, 1.0e-12);
+}
+
+/// 上游从不把 `BC_DRAINAGE` 放在上边界、也不把 `BC_RAINFALL` 放在下边界。
+/// 那七种组合进来必须报错，不能悄悄走成别的分支。
+#[test]
+fn saturated_zone_all_refuses_boundaries_the_source_never_builds() {
+    let fixture = zone_all_fixture();
+    let mut state = zone_all_state();
+    let input = zone_all_input(
+        &fixture,
+        VariableSaturatedBoundary {
+            kind: VariableSaturatedBoundaryKind::Drainage,
+            value: 0.0,
+        },
+        fixed_head(-300.0),
+        1.0e-9,
+        false,
+    );
+    let error = flux_variable_saturated_zone_all(input, &mut state).unwrap_err();
+    assert!(error.to_string().contains("drainage upper boundary"));
+
+    let input = zone_all_input(
+        &fixture,
+        fixed_head(0.0),
+        VariableSaturatedBoundary {
+            kind: VariableSaturatedBoundaryKind::Rainfall,
+            value: 0.0,
+        },
+        1.0e-9,
+        false,
+    );
+    let error = flux_variable_saturated_zone_all(input, &mut state).unwrap_err();
+    assert!(error.to_string().contains("rainfall lower boundary"));
+}
+
+/// 饱和段退化成空区间时上游会越界访问自己的分配；这里必须报错。
+#[test]
+fn saturated_zone_all_refuses_a_degenerate_saturated_zone() {
+    let fixture = zone_all_fixture();
+    let input = VariableSaturatedSaturatedZoneAllInput {
+        first_saturated_level: 0,
+        last_saturated_level: 0,
+        thickness_mm: &fixture.thickness_mm[..1],
+        center_depth_mm: &fixture.center_depth_mm[..1],
+        interface_depth_mm: &fixture.interface_depth_mm[..2],
+        saturated_liquid_water: &fixture.saturated_liquid_water[..1],
+        saturated_potential_mm: &fixture.saturated_potential_mm[..1],
+        saturated_hydraulic_conductivity_mm_s: &fixture.saturated_hydraulic_conductivity_mm_s[..1],
+        hydraulic_model: &fixture.hydraulic_model[..1],
+        upper_boundary: fixed_head(0.0),
+        lower_boundary: fixed_head(-300.0),
+        surface_water_mm: 0.0,
+        water_table_depth_mm: 1000.0,
+        unsaturated_pressure_head_mm: &fixture.unsaturated_pressure_head_mm[..1],
+        unsaturated_hydraulic_conductivity_mm_s: &fixture.unsaturated_hydraulic_conductivity_mm_s
+            [..1],
+        flux_tolerance_mm_s: 1.0e-9,
+        depth_tolerance_mm: 1.0e-9,
+        pressure_tolerance_mm: 1.0e-9,
+        update_sublevel: false,
+    };
+    let mut state = VariableSaturatedSaturatedZoneAllState {
+        saturated: vec![false],
+        has_wetting_front: vec![false],
+        has_water_table: vec![false],
+        wetting_front_mm: vec![0.0],
+        liquid_water: vec![40.0],
+        water_table_thickness_mm: vec![0.0],
+        interface_flux_mm_s: vec![0.0; 2],
+        water_table_flux_mm_s: vec![0.0],
+        wetting_front_flux_mm_s: vec![0.0],
+    };
+    let error = flux_variable_saturated_zone_all(input, &mut state).unwrap_err();
+    assert!(error.to_string().contains("degenerates"));
+}
+
+/// 长度约定：`interface_depth_mm`/`interface_flux_mm_s` 比层数多 1，其余相等。
+#[test]
+fn saturated_zone_all_checks_the_window_widths() {
+    let fixture = zone_all_fixture();
+    let mut state = zone_all_state();
+    let input = VariableSaturatedSaturatedZoneAllInput {
+        interface_depth_mm: &fixture.interface_depth_mm[..2],
+        ..zone_all_input(&fixture, fixed_head(0.0), fixed_head(-300.0), 1.0e-9, false)
+    };
+    let error = flux_variable_saturated_zone_all(input, &mut state).unwrap_err();
+    assert!(error.to_string().contains("dispatch inputs are invalid"));
+}
+
 fn close(actual: f64, expected: f64, tolerance: f64) {
     assert!(
         (actual - expected).abs() < tolerance,
