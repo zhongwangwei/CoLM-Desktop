@@ -13270,3 +13270,21 @@ Tested: `MOD_AssimStomataConductance.F90:608` 与 `photosynthesis.rs:180` 的对
 `dry_ts.sh 3` + `window_divergence.py` 与三个黄金窗口实测（四处全同）；
 `cargo fmt --all --check`；`cargo test -q -p colm-core --lib`（355 通过）。
 Not-tested: none（惰性改动，无未覆盖面）。
+
+## 顺手核掉的两处 stomata 形状（无需改动）
+
+* `MOD_AssimStomataConductance.F90:318/796` 的 `co2s = co2a - 1.37*assimn/gbh2o`
+  与 Rust `photosynthesis.rs:251/369` 的 `- 1.37 * net_assimilation / gbh2o` **同为**
+  左结合 `((1.37*assim)/gbh2o)`，**一致**；
+* `bintc = bintc*cint(3)`、`vm = vm*cint(1)`、`jmax = jmax*cint(2)`
+  （`:212/571/586/595/599`）在 Rust 里对应 `canopy_integration[2]/[0]/[1]` 的乘法，
+  **一致**。
+
+这两处记进来是为了让 `MOD_AssimStomataConductance` 的"已核"范围可追溯：形状已对过的
+有 `gbh2o`（本轮已按源码改成 `((1/rb)*tprcor)/tlef`）、`co2s`、三个 `cint` 乘法；
+**尚未**逐句核的是该模块里带 `powf`/`exp` 的生化式（`calc_photo_params` 的 `vm`/`jmax`/
+`respc` 那一族）。
+
+Tested: `MOD_AssimStomataConductance.F90:212/318/571/586/595/599/796` 与
+`photosynthesis.rs:141/156/168/178/203/251/369` 的对照。
+Not-tested: `calc_photo_params` 里 `powf`/`exp` 那一族的逐句核对。
