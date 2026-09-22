@@ -12968,3 +12968,35 @@ Tested: `MOD_Vars_1DAccFluxes.F90:2789-2790` 与 `history_diagnostics.rs:210-222
 改动前后 `dry_ts.sh 3` + `window_divergence.py`（逐位不变）与干窗实测（21328 不变）；
 `cargo fmt --all --check`；`cargo test -q -p colm-core --lib`（355 通过）。
 Not-tested: 实参 dump 对照（下一轮）。
+
+## `MOD_Thermal`（对文件）的 dump 终于有了：99 处收缩；`trad` 的形状**是对的**
+
+这个模块过去一直挂着"dump 拿不到"（第 166 轮查明那是走错了文件：内核编的是
+`extends/interception/MOD_Thermal_CanopyPhase_Extended.F90`）。用对文件 + 与
+`MOD_LeafTemperature` 同一套配方，dump 到手：
+
+```bash
+cd vendor/CoLM202X
+gfortran -c -O2 -fdefault-real-8 -ffree-form -cpp -ffree-line-length-0 \
+  -fallow-argument-mismatch -Iextends/interception -I.bld -Iinclude -Imain -Ishare \
+  extends/interception/MOD_Thermal_CanopyPhase_Extended.F90 \
+  -J/tmp/gf/r166 -fdump-tree-optimized=/tmp/gf/r166/th_ext.opt -o /tmp/gf/r166/th_ext.o
+# → 99 处 FMA 类收缩（此前 0：文件根本没编过）
+```
+
+`f_trad` 是干窗第 0 步 1 ULP 名单里的成员（2.19e-16），而它的形状在 dump 里是：
+
+```
+_1828 = prephitmp_5118 / 5.67e-8          ; olrg/stefnc
+_1829 = __builtin_pow (_3486, 2.5e-1)     ; **0.25 走库函数 pow**
+*trad_3487(D) = _1829
+```
+
+Rust 侧 `surface_budget.rs:58` 写的是 `(outgoing_longwave / STEFAN_BOLTZMANN_W_M2_K4).powf(0.25)`
+—— **完全一致**（Rust 的 `powf` 与 GCC 的 `__builtin_pow` 都落到 libm 的 `pow`，不是
+`sqrt(sqrt(x))` 那种展开）。所以 `f_trad` 的那 1 ULP 不是这一句造成的，而是从它的
+输入 `olrg` 来的 —— 与"四个 1 ULP 变量共享同一个上游"的结论一致。
+
+Tested: 对文件 `MOD_Thermal_CanopyPhase_Extended.F90` 的 dump 生成（99 处收缩）；
+dump 第 7228-7235 行与 `surface_budget.rs:58` 的对照。
+Not-tested: 那 99 处的逐条重扫；`olrg` 上游的定位。
