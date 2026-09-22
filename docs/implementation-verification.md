@@ -13753,3 +13753,21 @@ Not-tested: none（索引本身）。
 Tested: `MOD_GroundTemperature.F90:308-312/311-313` 与 `ground_temperature.rs:309-313` 及
 `fact` 那处的对照。
 Not-tested: 该模块其余收缩（`gt.opt` 41 处里未逐条过的部分）。
+
+## `MOD_GroundTemperature` 的**内层矩阵元**也已核（早前轮次按 dump 落过）
+
+`ground_temperature.rs:424-440` 的注释把该处的 GIMPLE 结论写死并与
+`MOD_GroundTemperature.F90:344-372` 对上：`bt = 1+(1-cnfac)*fact*Σ` 里那个乘积**被吸收**
+（`FMA(sum, (1-cnfac)*fact, 1.0)`，而 `sum = tk/dzp + tk1/dzm` 是两个商之和、本身不收缩）；
+而 `rt = t + cnfac*fact*(fn-fn1)` **不融合**，因为该乘积在三个内层分支（雪层 / `j==1 && split` /
+其它）里共用，GCC 把它 CSE 成公共临时量（GIMPLE `_462`）再相加 —— **相邻两条语句结论相反**，
+只能逐条看 dump。三处 `sub`/`super_` 的符号与除序也与源码一致。
+
+至此 `MOD_GroundTemperature`（`gt.opt` 41 处）的已核清单：
+`cv`/`thk` 组装 · 界面导热率 · 降水热双 FMA（土壤支，干窗下与结合顺序等价）· 土壤支 `(1-fsno)`
+加权（干窗 `fsno=0` 精确）· `dhsdT` · `fact(1)` 分母的 `capr` 收缩 · 顶层矩阵元 · **内层矩阵元**。
+**仍未逐条**：底层（`j = nl_soil`）矩阵元、相变段（`phase_change` 的温度/含水量分配与
+`snow_layer_absorption` 相关式）。
+
+Tested: `MOD_GroundTemperature.F90:344-362` 与 `ground_temperature.rs:424-440` 的逐句对照。
+Not-tested: 底层矩阵元、相变段（下一轮入口）。
