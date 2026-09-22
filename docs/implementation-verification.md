@@ -10161,3 +10161,18 @@ Tested: `MOD_SoilSnowHydrology.F90` 本体的 dump（`water_vsf` 17 处逐条列
 1. `variably_saturated_flow.rs` 剩下的 15 处（活的路径）；
 2. `MOD_NetSolar`（35）与 `MOD_Albedo`（136）；
 3. 1 ULP 的 `wliq` 源头（在 VSF 的矩阵装配里）。
+
+### `variably_saturated_flow.rs` 剩下 15 处的落点（从 `water_vsf` 的 dump 逐条对出来）
+
+| dump 里的形态 | 上游语句 | Rust 该落在哪 |
+|---|---|---|
+| `FMA(1-fsno, pg_rain, gwat)` | `gwat = gwat + pg_rain*(1-fsno) - qseva_soil` | **不在** `variably_saturated_flow.rs`：Rust 把 `(1-fsno)` 的加权挪到了调用方（`water_2014.rs` 用雪列底部排水替代 `ground_rain`），属**结构差异**，要动得先改调用方的组装 |
+| `FMA(qsdew, deltim, wliq)` ×4 | 表层露/霜/升华回加 | 已做（`_soil` 两处；`_1548` 与 `qsdew+qfros-qsubl` 的另两处是非 split 走不到的分支） |
+| `FNMA(x, max(…,0), y)` ×2 | 通量限幅后的矩阵项 | `flux_variable_saturated_zone_*` / `apply_variable_saturated_explicit_step` |
+| `FMA(Δ, k, rhs)` ×3、`FNMA(k, Δ, rhs)` ×3 | 三对角/通量矩阵装配 | `flux_at_variable_saturated_interface` 与 `flux_inside_variable_saturated_soil` |
+| `FNMA(x*1000, 1e3, wliq)` | `wliq - porsl*dz*1000` 类的过饱和修正 | `water_table_from_aquifer` / `exchange_soil_water_with_aquifer` 附近 |
+
+也就是说，剩下的都是**矩阵/通量装配**，需要在 `flux_variable_saturated_*` 那一组函数里
+逐个读数据流；那些函数一共约 1500 行，是下一轮的主体工作。
+这也解释了为什么表层那两处改了还是零位移：`wliq` 的 1 ULP 源头在矩阵装配里，
+不在表层更新里。
