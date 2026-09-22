@@ -13367,3 +13367,35 @@ Rust `ground_fluxes.rs:95-98`：`(1.0-fsno).mul_add(soil_roughness, fsno*snow_ro
 
 Tested: `…_Extended.F90:606` 与 `ground_fluxes.rs:95-98` 对照。
 Not-tested: none.
+
+### 入口 A 的**就绪清单**（下一轮可直接执行，无需再找位置）
+
+**上游插入点**：`vendor/CoLM202X/extends/interception/MOD_LeafTemperature_Extended.F90:723-725`
+的 `CALL moninobukm(...)` 前后（`ELSE` 支；CBL 打开时是 `:719` 的 `moninobukm_leddy`）。
+在 `/tmp` 里改副本，插入：
+
+```fortran
+        IF (do_print_step0) WRITE(77,'(A,13E24.16)') 'IN ', hu_,ht_,hq_,displa,z0mv,z0hv,z0qv,obu,um,displasink,z0mv,htop
+        ! … CALL moninobukm(…) 原样 …
+        IF (do_print_step0) WRITE(77,'(A,10E24.16)') 'OUT', ustar,fh2m,fq2m,fmtop,fm,fh,fq,fht,fqt,phih
+```
+
+要点：`hu_/ht_/hq_` 是 `max(hu,z0mv+1)` 那一族**修正后**的量（`:712-718` 附近），
+`displasink`/`htop` 也要打；`do_print_step0` 用一个**首步即真**的逻辑变量，
+或直接无条件 `WRITE` 然后只取第一行。编译时照第 167 轮的配方抄
+（`-Iextends/interception -I.bld …`），链接时用它顶掉 `.bld/MOD_LeafTemperature.o`，
+再链 `kernels/default` 的其余对象（或直接重跑 `build_kernel.sh default` 造一个新内核）。
+
+**Rust 插入点**：`crates/colm-core/src/leaf_temperature.rs:565-585` 的
+`surface = MoninObukhovInput { … }` 构造处（非 PHS 路径），把这 13 个量
+`eprintln!` 出来。注意 Rust 侧对应关系：`displa`=`displacement_height_m`、
+`z0mv`=`momentum_roughness_m`、`z0hv`/`z0qv`、`obu`=`obukhov_length_m`、
+`um`=`stability_adjusted_wind_m_s`、`displasink`=`top_layer_displacement_m`、
+`htop`=`canopy_top_height_m`。
+
+**判据**：13 个实参**逐位相同** → 按"`moninobukm` 已被差分结案（20 输出 20000/20000）"
+的结论，输出必须逐位相同；**第一个不一致的实参就是第 0 步种子的来源**。
+若 13 个全同而输出仍差，则种子在**调用时机**（同一步里被调了几次、用了哪个 `tl`）。
+
+Tested: 插入点行号核对（对文件 `:712-725`、Rust `:565-585`）。
+Not-tested: 探针本身（下一轮）。
