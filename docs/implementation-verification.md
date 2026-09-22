@@ -14323,3 +14323,40 @@ fevpg, fevpg_soil, fevpg_snow, cgrnd, htvp, emg
 
 Tested: 调用点与实参表的定位（`extends/…:1207`、`main/…:1198`）；要打印的量按"形状最敏感"筛出。
 Not-tested: 探针本体（下一轮）。
+
+## 重大重估：干窗第 0 步**地面求解也没执行** —— "第 0 步种子"很可能是 restart 映射差
+
+`step_ground_probe.sh` 完整跑通（锚点唯一、补丁干跑 1 行、插桩重编、跑 1 步、自动还原、
+`f48 sync PASS`），`CALL GroundTemperature`（`extends/…:1207`）**之前**的打印是 **0 行**：
+
+```
+$ wc -l /tmp/gf/gtprobe/gt_in.txt
+       0
+```
+
+把本会话四次插桩的结果并起来，干窗第 0 步**没有执行**的物理：
+
+| 插桩点 | 结果 |
+|---|---|
+| 叶温 PFT / PC 两份的 `CALL moninobukm` | 0 命中（第 194-195 轮）|
+| PC 的 `DO WHILE (it .le. itmax)`（Newton 迭代）| 0 行（第 226 轮）|
+| 累加器的 `CALL moninobuk`（`MOD_Vars_1DAccFluxes:2781`）| 0 命中（第 196 轮）|
+| **`CALL GroundTemperature`（地面温度求解）** | **0 行（本轮）** |
+
+`meltf` 是从 `GroundTemperature` 里调的 —— 既然它没执行，那么 `meltf` 在**本算例第 0 步
+同样没跑**（我此前只用独立驱动证明过它的正确性，那与"它在算例里何时被调"是两件事）。
+
+**这解释了三件事**：
+1. 为什么"逐句形状核对"遍及叶温/地面/相变都找不到种子 —— 那些代码在第 0 步不执行；
+2. 为什么 11 天窗口里 `olrg` 那类修复有效（它们作用在**后续步**），而第 0 步纹丝不动；
+3. 为什么 `t_soisno`/`tleaf` 的差异恰好是 1 ULP —— 若第 0 步根本没算物理，那么 history/restart
+   里写出的就是**从 restart 读入、按同一套映射搬运**的状态，1 ULP 只可能来自**读入/写出的
+   解析与单位换算**（或某一层默认值）。
+
+**下一轮的检验（一步即可定性）**：把**初始** restart（两侧共同读入的那份）与内核第 1 步
+写出的 restart（`…-01800`）对比 —— 若除时间戳外**逐位相同**，即证明第 0 步没有改动状态，
+种子就在 restart 的**读入映射**里（Rust 侧 `restart.rs`/`spatial_static.rs` 的解析与
+`colm-runtime` 的装载），而不在任何物理表达式。
+
+Tested: `step_ground_probe.sh` 完整执行（0 行、自动还原、f48 PASS）；四次插桩结果汇总。
+Not-tested: 初始 restart 与第 1 步 restart 的对比（下一轮，一步定性）。
