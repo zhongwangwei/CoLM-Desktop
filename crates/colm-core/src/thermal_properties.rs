@@ -69,6 +69,8 @@ pub fn soil_thermal_properties(
     // 而方案 6/7 的两段 `IF`（`:432-497`）在它**外面**、且根本不读 `ke` ——
     // 干土上它们照样按自己的式子算。所以这两档不能走早返回，其余各档等价
     // （1–5 的 `thk = (ksat-kdry)*0+kdry`，8 自己重算 `ke`，结果都是 kdry）。
+    // 8 档方案 × 5000 组随机/边界输入的双侧差分（`oracle/scripts/compare_soilthermal.sh`）
+    // 覆盖了这条干土路径 3134 次，两个输出全部逐位一致。
     let conductivity_w_m_k = match scheme {
         ThermalConductivityScheme::TarnawskiLeong | ThermalConductivityScheme::DeVries => {
             conductivity_for_saturated_soil(input, saturation, scheme)

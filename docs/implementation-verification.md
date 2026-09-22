@@ -12199,8 +12199,69 @@ POS  40E2D80B36C8AC77  40993AF2BB3F60EE
 |---|---|
 | `MOD_FrictionVelocity` | 20 个输出 20000/20000（`compare_moninobukm.sh`）|
 | `MOD_Qsadv` | 4 个输出 20000/20000（`compare_qsadv.sh`）|
+| `MOD_SoilThermalParameters:soil_hcap_cond` | 8 档 × 5000 组、2 个输出 40000/40000（`compare_soilthermal.sh`）|
 
 Tested: `oracle/scripts/compare_qsadv.sh`（全区间 20000 组，改前 5021 → 改后 0）；
 `/tmp/gf/r152/clamp.f90` 的四个常量直读；三个黄金窗口三口径 A/B（逐位不变）；
 `cargo test -q -p colm-core --lib -- --test-threads=1`（355 通过）。
 Not-tested: 钳位支在窗口里的端到端影响（三个算例都到不了那个温度）。
+
+## `MOD_SoilThermalParameters:soil_hcap_cond` 结案：8 档方案 × 5000 组、两个输出 40000/40000
+
+这个子程序是**唯一**由 `DEF_THERMAL_CONDUCTIVITY_SCHEME` 分派的物理入口（1=Oleson、
+2=Johansen、3=Cote-Konrad、4=Balland-Arp、5=Lu、6=Tarnawski-Leong、7=DeVries、
+8=Yan-He），此前只被黄金窗口间接覆盖（三个算例实际只走默认那档）。这一轮补上
+`oracle/scripts/compare_soilthermal.sh`（配对物：`oracle/scripts/soil_hcap_cond_diff.f90`
+与 `crates/colm-core/examples/soil_thermal_probe.rs`）。
+
+### 8 档一次跑完：桩住 namelist，而不是重编内核
+
+该子程序唯一读的 namelist 量就是 `DEF_THERMAL_CONDUCTIVITY_SCHEME`，而链接真正的
+`MOD_Namelist` 会把 `MOD_SPMDTask`/`MOD_FileSystem` 一路拖进来。脚本因此就地生成一个
+只含该标志的桩模块，用 `-I"$WORK"` 压在 `.bld` 前面 —— 模块本体仍按产线选项编译
+（`-O2 -fdefault-real-8`，**不加** `-ffp-contract=off`），驱动本身照纪律加
+`-fwrapv -ffp-contract=off`。
+
+### 抽样：一半均匀、一半**踩边界**
+
+边界那 2500 组按固定取值池抽（`vf_pores_s ∈ {0.05,0.1,0.25,0.4,0.6,0.9}`、
+`vf_water/vf_ice` 的分数含 `0`/`1e-12`/`1`、`temperature` 含 `273.15`/`273.16`、
+`kdry/k_solids/ksat` 含 `0`、`vf_gravels_s+vf_sand_s` 含 `0`）。这直接命中了
+`a > 0.40/0.25/0.01` 三档、`sr*vf_pores_s <= 0.09`、`vf_water > 0.01` 这些阈值分支，
+以及 **3134 组 `sr < 1e-10` 的干土路径**（只靠均匀抽样几乎抽不到）。
+
+### 顺带纠正我自己的一处误读
+
+第一次读源码时我把 `MOD_SoilThermalParameters.F90:420` 那个 `ENDIF` 当成了
+`IF(sr >= 1.0e-10)` 的收尾，于是以为干土时 `thk` 从未被赋值（`intent(out)` 未定义）。
+实际上 `:418-420` 的 `ELSE ke = 0.0` 才是那道门的 `ELSE`，而 `thk` 的四处赋值
+（`:422-430` 的 1–5 档、`:432-464` 的 6 档、`:466-497` 的 7 档、`:499-517` 的 8 档）
+全在门外。所以 `thk` **永远有定义**，干土路径也照比 —— `thermal_properties.rs`
+里那段「6/7 档在门外、其余各档等价于 `kdry`」的注释是对的，只是行号得按这个结构读。
+
+### 结果
+
+```
+$ bash oracle/scripts/compare_soilthermal.sh
+soil_hcap_cond: 输入对齐，8 档方案 × 5000 组、2 个输出全部逐位相同
+                (hcap 40000/40000, thk 同)；其中 3134 组走的是 sr<1e-10 的干土路径
+```
+
+这轮**没有改生产代码** —— 现有实现直接全过。
+
+### 本模块的剩余面（如实记下）
+
+`MOD_SoilThermalParameters` 还有两个 `PUBLIC` 数组例程：`hCapacity`（分层热容，
+含 `patchtype` 的湖/湿地/城区分支）与 `hConductivity`（分层导热率＋界面导热率，
+含冰川 `tkice` 分支与「雪节点距界面更近时取 `max(0.5*thk(i+1), ...)`」那条修正），
+自述「Only used in urban model」。它们的 Rust 对应物是
+`ground_temperature.rs::layer_thermal_properties` 与 `urban_impervious.rs` 里的
+界面导热率，**不在本次标量差分的范围内**，目前仍只由黄金窗口与单元测试守着。
+要像 `soil_hcap_cond` 这样逐位结案，得先把数组例程的 Rust 入口暴露成可驱动的
+函数（现在 `layer_thermal_properties` 是私有的）。
+
+Tested: `oracle/scripts/compare_soilthermal.sh`（40000 组 × 2 输出逐位相同）；
+`cargo fmt --all --check`；`NETCDF_DIR=... cargo clippy --workspace --all-targets -- -D warnings`；
+`cargo test --workspace --lib --bins -- --test-threads=1`；`cargo test -q -p oracle`；
+`cargo run -q -p xtask -- check-gui`；`python3 oracle/scripts/test_upstream_f48_sync.py`。
+Not-tested: `hCapacity`/`hConductivity` 的数组级分支（见上）；三个黄金窗口未重跑（本轮不动生产代码）。
