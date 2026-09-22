@@ -14110,3 +14110,26 @@ cases with any difference: 0/10000
 Tested: 三个开关的打印（`F/T/F`）；探针改 `supercool_water=true` 后 10000/10000 逐位全同；
 `phasechange_diff.f90` 编译链接运行与 `phase_change_probe` 各 10000 条。
 Not-tested: Campbell 支（需另配 namelist，仍列为可选）。
+
+### 第 8 个差分已入库：`oracle/scripts/compare_phasechange.sh`
+
+```bash
+$ bash oracle/scripts/compare_phasechange.sh
+== 内核 namelist:  campbell/vgm =  F  supercool =  T  split =  F
+MOD_PhaseChange:meltf: 5 patchtypes x 2000 组、9 个量 10000/10000 逐位相同
+```
+
+脚本把三件事固化在一起（此前只在我的临时命令里）：
+
+1. **链接**：驱动单独 `-c`（纪律 flag），再用 `mpifort` 连 `.bld/*.o`（排除 `CoLM.o`）+
+   netcdf-fortran/lapack/blas —— `meltf` 依赖 `soil_vliq_from_psi` 与 namelist 常量，
+   只链 `MOD_PhaseChange.o` 会缺符号；
+2. **配置打印**：运行前先打印内核 namelist 的三个开关（`campbell/vgm`、`supercool`、`split`），
+   提醒对齐 Rust 探针 —— 这正是上一轮 1753 条假失配的成因；
+3. **归一化比较**：`zfill(16).upper()` 后再逐位比，并按字段统计失配。
+
+至此本会话的 8 个差分各有自己的 `compare_*.sh`，全部可一键复现。
+
+Tested: `compare_phasechange.sh` 完整运行（编译、链接、两侧各 10000 条、逐位比对通过）；
+`cargo fmt --all --check`。
+Not-tested: Campbell 支（需另配 namelist）。
