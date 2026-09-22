@@ -13739,3 +13739,17 @@ Not-tested: 该处分母的收缩是否有实测收益（需按流程 A/B）。
 
 Tested: 本索引每行都对应本文档前面小节的实测输出；提交范围 `a45d55d..481e453`。
 Not-tested: none（索引本身）。
+
+## `dhsdT` / `fact` 两处源码级核对（一致，无需改动）
+
+* `MOD_GroundTemperature.F90:308`：`dhsdT = -cgrnd - 4.*emg*stefnc*t_grnd**3 - cpliq*pg_rain - cpice*pg_snow`
+  Rust `ground_temperature.rs:309-313`：`(-t³).mul_add(emg*4*sigma, -cgrnd) - rain_heat - snow_heat`
+  —— 与 dump 的 `FNMS(stefnc*(emg*4), (t*t)*t, cgrnd)` 同型（取负与乘法可交换，符号精确）；
+* `fact(1) = deltim/cv(1)*dz(1) / (0.5*(z(1)-zi(0)+capr*(z(2)-zi(0))))`
+  Rust `ground_fluxes`/`ground_temperature` 侧是
+  `deltim/capacity*dz / (0.5*factor.mul_add(z(2)-zi(0), z(1)-zi(0)))` —— 括号内那处
+  收缩与顺序都对上（该处更早的轮次已按 dump 落过）。
+
+Tested: `MOD_GroundTemperature.F90:308-312/311-313` 与 `ground_temperature.rs:309-313` 及
+`fact` 那处的对照。
+Not-tested: 该模块其余收缩（`gt.opt` 41 处里未逐条过的部分）。
