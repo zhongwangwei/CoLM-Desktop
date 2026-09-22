@@ -9894,3 +9894,30 @@ Tested: `MOD_Hydro_SoilFunction.F90` 本体的 `-fdump-tree-optimized`（整模�
 `cargo test -q -p colm-core --lib -- --test-threads=1`（354 通过）；`cargo fmt --all --check`；
 `cargo test --workspace --lib --bins -- --test-threads=1`；`cargo clippy --workspace --all-targets -- -D warnings`；
 `cargo test -q -p oracle`；`cargo run -q -p xtask -- check-gui`；`python3 oracle/scripts/test_upstream_f48_sync.py`（PASS）。
+
+## `water_2014` 的头两条：`wliq/wice(1)` 的 `max(0., ... + 通量*deltim)`
+
+`MOD_SoilSnowHydrology.F90:467-468`：
+
+```fortran
+wliq_soisno(1) = max(0., wliq_soisno(1) + qsdew_soil * deltim)
+wice_soisno(1) = max(0., wice_soisno(1) + (qfros_soil-qsubl_soil) * deltim)
+```
+
+GIMPLE 把 `deltim*通量` 收进加法：`FMA(deltim, qsdew_soil, wliq)`、
+`FMA(deltim, qfros-qsubl, wice)`。Rust 已按此写成 `mul_add`。
+
+干窗 TIMESTEP 1 步改动前后**逐位相同**（又一次"改对了但测不到"），
+所以这条同样是"本体 GIMPLE + 上游源码"双重依据、端到端无信号。
+
+### `MOD_SoilSnowHydrology` 的进度与本轮范围
+
+上一轮清点出该模块 67 处收缩。本轮只吃掉 `water_2014` 里最明确的两处
+（`wliq/wice(1)` 的更新），**不是**因为它难，而是因为剩下那 13 处都在
+`wa`/`wdsrf`（`FMA(porsl(1), X, pondmx)` 两个变体）、`gwat`（`FMA(1-fsno, pg_rain, gwat)`）
+以及 `WATER_VSF`/`soilwater` 的数组累积里，需要先把上游那几段的**完整数据流**
+读出来才能确定结合顺序 —— 与前面几轮"同形不同收缩"的教训同源，宁可慢一轮也不要再交一次
+"下轮推翻上轮"。
+
+Tested: `MOD_SoilSnowHydrology.F90` 本体的 `-fdump-tree-optimized`；干窗 TIMESTEP 1 步 Rust-vs-Rust 逐位比对；
+`cargo test -q -p colm-core --lib -- --test-threads=1`（354 通过）；`cargo fmt --all --check`。

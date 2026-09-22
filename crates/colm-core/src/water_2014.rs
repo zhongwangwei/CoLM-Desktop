@@ -258,12 +258,20 @@ pub fn water_2014_soil_step(
     state.liquid_water_kg_m2 = groundwater.liquid_water_kg_m2;
     state.water_table_depth_m = groundwater.water_table_depth_m;
     state.aquifer_water_mm = groundwater.aquifer_water_mm;
-    state.liquid_water_kg_m2[0] = (state.liquid_water_kg_m2[0]
-        + input.fluxes.soil_dew_kg_m2_s * input.time_step_seconds)
+    // `MOD_SoilSnowHydrology.F90:467-468`：
+    // `wliq(1) = max(0., wliq(1) + qsdew_soil*deltim)`（`wice` 同理，用
+    // `qfros_soil-qsubl_soil`）。GIMPLE 把 `deltim*通量` 收进加法：
+    // `FMA(deltim, qsdew_soil, wliq)`、`FMA(deltim, qfros-qsubl, wice)`。
+    state.liquid_water_kg_m2[0] = input
+        .time_step_seconds
+        .mul_add(input.fluxes.soil_dew_kg_m2_s, state.liquid_water_kg_m2[0])
         .max(0.0);
-    state.ice_water_kg_m2[0] = (state.ice_water_kg_m2[0]
-        + (input.fluxes.soil_frost_kg_m2_s - input.fluxes.soil_sublimation_kg_m2_s)
-            * input.time_step_seconds)
+    state.ice_water_kg_m2[0] = input
+        .time_step_seconds
+        .mul_add(
+            input.fluxes.soil_frost_kg_m2_s - input.fluxes.soil_sublimation_kg_m2_s,
+            state.ice_water_kg_m2[0],
+        )
         .max(0.0);
     // `smp`/`hk` 是 `soilwater` 的 `intent(out)`，上游存进时间变量供**下一步**用。
     state.matric_potential_mm = soil.matric_potential_mm.clone();
