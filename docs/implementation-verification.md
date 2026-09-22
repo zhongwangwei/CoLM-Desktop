@@ -9977,3 +9977,32 @@ Tested: `MOD_SoilSnowHydrology.F90` 本体的 `-fdump-tree-optimized`；干窗 T
 `cargo test --workspace --lib --bins -- --test-threads=1`；`cargo clippy --workspace --all-targets -- -D warnings`；
 两处 `cargo fmt --all --check`；`cargo test -q -p oracle`；`cargo run -q -p xtask -- check-gui`；
 `python3 oracle/scripts/test_upstream_f48_sync.py`（PASS）。
+
+## `soilwater` 的 Campbell 指数：`2*bsw+3` 与 `2*bsw+2` 是**两个**指数
+
+`MOD_SoilSnowHydrology.F90:2172-2173`：
+
+```fortran
+hk(j)    = hksati(j) * (vol_liq(j)/porsl(j))**(2.*bsw(j)+3.)
+dhkdw1(j)= hksati(j) * (2.*bsw(j)+3.)*(vol_liq(j)/porsl(j))**(2.*bsw(j)+2.)/porsl(j)
+```
+
+GIMPLE 里是两个**独立**的收缩：`FMA(bsw,2,3)` 与 `FMA(bsw,2,2)`。
+Rust 原先把导数写成 `saturation.powf(exponent - 1.0)` —— 代数上等价，
+但**多舍入一次**（`fl(fl(2bsw+3)-1)` vs `fl(2bsw+2)`，跨 binade 时会差 1 ULP）。
+已改成两个指数各自 `f77(2.0).mul_add(bsw, …)`。
+
+**为什么窗口还是不动**：`CN-Cng` 没有写 `DEF_USE_Campbell_SOIL_MODEL`，
+取 schema 默认 `.false.`，所以走的是 **van Genuchten** 支 —— 这一支在本机
+三个算例里是**死代码**。这是连续第八处窗口测不到的修复，而且这次连"弱证据"
+都不算：分支根本没进。
+
+**清点补充**：`soilwater` 的 23 处里，前 6 处（`2*bsw+3/2` 三个变体）就是本节；
+其余 17 处是
+`FMS/FMA` 形式的界面导水率（`… ∓ X/Y`，`:2186-2192` 那一组）、
+`FNMA(etr, rootr, …)` 的根吸水项、以及 `FMA(dwat, …, errorw)` 的水量平衡误差累积。
+它们的结合顺序需要逐段读上游那几段循环的数据流，留到下一轮。
+
+Tested: `MOD_SoilSnowHydrology.F90` 本体的 `-fdump-tree-optimized`（`soilwater` 23 处逐条列出）；
+干窗 TIMESTEP 1 步 Rust-vs-Rust 逐位比对（不变）；`cargo test -q -p colm-core --lib -- --test-threads=1`（354 通过）；
+`cargo fmt --all --check`。

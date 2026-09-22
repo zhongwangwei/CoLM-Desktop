@@ -6,6 +6,8 @@
 
 use anyhow::{ensure, Context, Result};
 
+use crate::f77;
+
 use crate::{solve_tridiagonal, topmodel_subsurface_runoff, TopmodelSubsurfaceInput, FREEZING_K};
 
 /// One `soilwater` call. All layer vectors use top-to-bottom order; water and
@@ -121,12 +123,17 @@ pub fn solve_campbell_soil_water(
             layer
         };
         let saturation = input.liquid_water[source] / input.porosity[source];
-        let exponent = 2.0 * input.clapp_hornberger_b[source] + 3.0;
+        // `soilwater:2172-2173`：`hk = hksati*(vol/porsl)**(2*bsw+3)`、
+        // `dhkdw1 = hksati*(2*bsw+3)*(vol/porsl)**(2*bsw+2)/porsl`。
+        // **两个指数是各自算出来的**（GIMPLE：`FMA(bsw,2,3)` 与 `FMA(bsw,2,2)`），
+        // 不能写成 `exponent - 1.0` —— 后者多舍入一次，跨 binade 时差 1 ULP。
+        let exponent = f77(2.0).mul_add(input.clapp_hornberger_b[source], 3.0);
+        let exponent_lower = f77(2.0).mul_add(input.clapp_hornberger_b[source], 2.0);
         let conductivity =
             input.saturated_hydraulic_conductivity_mm_s[source] * saturation.powf(exponent);
         let derivative = input.saturated_hydraulic_conductivity_mm_s[source]
             * exponent
-            * saturation.powf(exponent - 1.0)
+            * saturation.powf(exponent_lower)
             / input.porosity[source];
         let impedance = 10_f64.powf(
             -input.soil_ice_impedance
