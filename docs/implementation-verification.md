@@ -13790,3 +13790,33 @@ Not-tested: 底层矩阵元、相变段（下一轮入口）。
 
 Tested: `MOD_GroundTemperature.F90:377-382` 与 `ground_temperature.rs:458-465` 的逐句对照。
 Not-tested: 相变段。
+
+## 更正：`MOD_GroundTemperature` 的"相变段"其实是**独立模块的 PUBLIC 子程序** —— 应走差分而非逐句核
+
+第 208 轮把相变段列为"该模块最后未逐条的部分"，这一轮查明它**不是内联代码**：
+
+```fortran
+! main/MOD_GroundTemperature.F90:411/431
+CALL meltf (patchtype,is_dry_lake,lb,nl_soil,deltim, …, scv,snowdp,sm,xmf,porsl,psi0, …)
+```
+
+`MOD_PhaseChange`（Makefile 与 `strings .bld/MOD_PhaseChange.o` 都指向
+**`main/MOD_PhaseChange.F90`**，与 GroundTemperature 一样是内核直接编 `main/` 的模块）
+对外暴露 `PUBLIC :: meltf`、`meltf_snicar`、`meltf_urban`。
+
+**这意味着它可以用本会话最成功的那套办法处理**：写一个差分驱动，
+**直接链接 `.bld/MOD_PhaseChange.o`**（真产线对象），用同一串 LCG 喂随机输入，
+与 Rust 的 `phase_change`（`crates/colm-core/src/phase_change.rs:143`）逐位比 ——
+而不是在这个 1300 行的模块里逐句找收缩。
+
+**下一轮的具体步骤**（照 `compare_forcingdownscaling*.sh` 的成例）：
+1. `nm -g .bld/MOD_PhaseChange.o | grep meltf` 取到符号，读 `meltf` 的实参表（`patchtype`、
+   `is_dry_lake`、`lb`/`nl_soil`、`deltim`、`t_soisno`/`wice`/`wliq`/`dz`/`scv`/`porsl`/`psi0` …）；
+2. 驱动里把 `patchtype`/`is_dry_lake` 当**可遍历的配置**（0/1/2/3/4），LCG 抽其余输入；
+3. 输出 `t_soisno`/`wice_soisno`/`wliq_soisno`/`xmf`/`sm` 的位型，与 `phase_change` 逐位比；
+4. 差分跑通后用 restart 口径（19/68）与三个窗口复核。
+
+Tested: `Makefile` 的 `MOD_PhaseChange.o:` 规则与 `strings .bld/MOD_PhaseChange.o`；
+`main/MOD_PhaseChange.F90:11-22` 的 `PUBLIC`/`SUBROUTINE meltf`；Rust 侧
+`phase_change.rs:143` 的对应入口。
+Not-tested: `meltf` 的差分驱动（下一轮）。
