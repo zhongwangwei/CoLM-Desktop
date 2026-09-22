@@ -10464,3 +10464,33 @@ _27 = FMA(1-frsnow, 0.5,  frsnow*0.70)          ! 近红外散射
 
 Tested: `MOD_Albedo.F90` 本体的 `-fdump-tree-optimized`（三个小函数的 19 处逐条列出）；
 `grep` 定位 Rust 侧的对应文件；`cargo test -q -p colm-core --lib -- --test-threads=1`（354 通过）、工作树干净。
+
+### 更正：上一节那七处形状属于 `albland`，**不是** `snowage`
+
+上一节把带 `frsnow` 的七处混入形状记成了 `snowage` 的，**这是错的**。
+按函数名过滤时我把 `albland`/`albocean`/`snowage` 三个一起放进了同一个桶，
+而 `frsnow`（`sasdir`/`saldir` 加权）只出现在 **`albland`** 的雪盖混入里。
+
+对照 Rust 侧也印证了这一点：`radiation.rs` 的 `aged_snow_albedo`（`snowage` 那一支）
+算的是
+
+```rust
+let age = 1.0 - 1.0 / (1.0 + snow_age);
+let direct_correction = ((1.5/(1.0 + 4.0*cosine_zenith)) - 0.5).max(0.0);
+let diffuse = new_snow_albedo * (1.0 - age_factor*age);
+let direct  = diffuse + 0.4*direct_correction*(1.0 - diffuse);
+```
+
+—— 与那七处 `FMA(1-frsnow, 0.70, sasdir*frsnow)` **完全不是一回事**，
+所以它们不可能在 `snowage` 里。`1.5/(1.0+4.0*coszen)` 里的 `1+4x` 倒是与
+`_6 = FMA(x, 4.0, 1.0)` 对得上，但 `albland` 也可能有同样的因子。
+
+**规矩**：`dump` 的桶要一个函数一个桶，别把相邻的几个用 `or` 合并 ——
+这次就是因为合并过滤，把两处不同函数的形状混在一张表里，还推导出了错误的落点。
+
+`albland` 的九处对应 Rust 的哪个函数仍**未定位**（`surface_optics.rs` 里的
+`albland` 调用点尚未展开）；下一轮先把 `albland` 单独 dump 一次再动手。
+
+Tested: `MOD_Albedo.F90` 分别按函数重新核对（这次只查 `albland`）；Rust 侧
+`radiation.rs:645 aged_snow_albedo` 逐行比对确认不同式子；本轮无源码改动，
+`cargo test -q -p colm-core --lib`（354 通过）、工作树干净。
