@@ -4292,12 +4292,18 @@ pub fn variably_saturated_flow_step(
                     }
                     liquid_volume_fraction[level] =
                         liquid_volume_fraction[level].clamp(0.0, effective_porosity[level]);
-                    residual_water_kg_m2[level] = state.liquid_water_kg_m2[level] * 1000.0
-                        / WATER_DENSITY_KG_M3
-                        - effective_porosity[level]
-                            * (interface_depth_mm[level + 1] - water_table_depth_mm)
-                        - liquid_volume_fraction[level]
-                            * (water_table_depth_mm - interface_depth_mm[level]);
+                    // `MOD_SoilSnowHydrology.F90:1043-1044`：同一句里两个乘积都被
+                    // 收进减法。用实参逐字复刻成独立子程序读 GIMPLE 验过：
+                    // `_11 = FNMA(eff, sp_zi-zwt, 水量mm)`（与 vol_liq 分子共用的
+                    // CSE 临时量）之后 `_20 = FNMA(vol_liq, zwt-sp_zi(j-1), _11)`
+                    // —— **第二个乘积也照样被吸收**，尽管 `_11` 被用了两次。
+                    let water_mm = state.liquid_water_kg_m2[level] * 1000.0 / WATER_DENSITY_KG_M3;
+                    let above_water_table = interface_depth_mm[level + 1] - water_table_depth_mm;
+                    let below_water_table = water_table_depth_mm - interface_depth_mm[level];
+                    residual_water_kg_m2[level] = (-liquid_volume_fraction[level]).mul_add(
+                        below_water_table,
+                        (-effective_porosity[level]).mul_add(above_water_table, water_mm),
+                    );
                 }
                 break;
             }

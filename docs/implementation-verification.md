@@ -10289,3 +10289,35 @@ Rust 的 `variably_saturated_flow.rs:4140` 那行已改成
 
 Tested: `MOD_SoilSnowHydrology.F90:866-868` 与 dump 的对应；干窗 TIMESTEP 1 步
 Rust-vs-Rust 逐位比对（不变）；`cargo test -q -p colm-core --lib`（354 通过）；`cargo fmt --all --check`。
+
+### 第三处：水位分支的 `wresi` 两句减法**都**被收（用复刻件验证过）
+
+上游 `MOD_SoilSnowHydrology.F90:1043-1044`：
+
+```fortran
+wresi(j) = wliq_soisno(j)*1000.0/denh2o - eff_porosity(j)*(sp_zi(j)-zwtmm) &
+   - vol_liq(j) * (zwtmm - sp_zi(j-1))
+```
+
+这一句里有**两个**乘积进减法，而且第一个子式
+（`wliq*1000/denh2o - eff*(sp_zi-zwt)`）还与 `vol_liq` 的分子**共用**（CSE）。
+按"共用临时量就不会被吸收"的老经验，第二个乘积很可能保持舍入 —— 但这次**不能靠经验**，
+于是把它逐字复刻成独立子程序（`/tmp/gf/r113/rep.f90`，含 `vol_liq` 的三句与 `wresi` 一句）
+用**真实编译选项**读 GIMPLE：
+
+```
+_11 = .FNMA (_5, _9, _4);          ! 共用的第一级，已被吸收
+_20 = .FNMA (_14, M.1_33, _11);    ! 第二级：vol_liq*(zwt-sp_zi) 也被吸收
+```
+
+**两级都是 `.FNMA`**：共用让第一级成为临时量，但第二个乘积照收不误
+（与 `meltf` 的 `fact*heatr`、`spacAF` 的 `f(xyl)` 那两次"CSE 阻止融合"**结论相反**）。
+Rust 的 `residual_water_kg_m2`（水位分支）已按此写成两级 `mul_add`。
+
+教训再强化一次：**CSE 是否阻止融合没有通例，必须对该语句本身读 GIMPLE**；
+"上次是这样"既不能证明也不能否证。
+
+Tested: 逐字复刻件 `/tmp/gf/r113/rep.f90` 的 `-fdump-tree-optimized`（两级 `.FNMA` 都出现）；
+`cargo test -q -p colm-core --lib`（354 通过）；`cargo fmt --all --check`；
+`cargo test --workspace --lib --bins -- --test-threads=1`；`cargo clippy --workspace --all-targets -- -D warnings`；
+`cargo test -q -p oracle`；`cargo run -q -p xtask -- check-gui`；`python3 oracle/scripts/test_upstream_f48_sync.py`（PASS）。
