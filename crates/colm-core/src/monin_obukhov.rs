@@ -300,14 +300,19 @@ pub fn initialize_monin_obukhov(
     let stability_adjusted_wind_m_s = if input.virtual_temperature_difference_k >= 0.0 {
         input.reference_wind_m_s.max(f77(0.1))
     } else {
-        (input.reference_wind_m_s.powi(2) + 0.5_f64.powi(2)).sqrt()
+        // `FMA(um, um, 0.25)`（`0.5**2` 被 GCC 折成常量）。
+        input
+            .reference_wind_m_s
+            .mul_add(input.reference_wind_m_s, 0.5_f64.powi(2))
+            .sqrt()
     };
     let richardson =
         GRAVITY_M_S2 * input.reference_height_m * input.virtual_temperature_difference_k
             / (input.virtual_potential_temperature_k * stability_adjusted_wind_m_s.powi(2));
     let zeta = if richardson >= 0.0 {
+        // 分母是 `FNMA(min(rib,0.19), 5, 1)`。
         (richardson * (input.reference_height_m / input.momentum_roughness_m).ln()
-            / (1.0 - 5.0 * richardson.min(f77(0.19))))
+            / (-5.0_f64).mul_add(richardson.min(f77(0.19)), 1.0))
         .clamp(f77(1.0e-6), 2.0)
     } else {
         (richardson * (input.reference_height_m / input.momentum_roughness_m).ln())
@@ -346,7 +351,8 @@ impl MomentumScheme {
                 } else {
                     boundary_zeta.clamp(f77(-1.0e4), f77(-1.0e-5))
                 };
-                let coefficient = f77(0.0047) * -boundary_zeta + f77(0.1854);
+                // `Bm = 0.0047*(-zetazi) + 0.1854`：GIMPLE 是 `FMA(-zetazi, 0.0047, 0.1854)`。
+                let coefficient = (-boundary_zeta).mul_add(f77(0.0047), f77(0.1854));
                 let transition = (0.5
                     * coefficient.powi(4)
                     * (-16.0 - (256.0 + 4.0 / coefficient.powi(4)).sqrt()))
@@ -368,76 +374,98 @@ impl MomentumScheme {
             } => {
                 let zeta = distance_m / obukhov_length_m;
                 if zeta < transition {
-                    (transition * obukhov_length_m / roughness_m).ln() - psi(1, transition)
-                        + psi(1, roughness_m / obukhov_length_m)
-                        - 2.0 * coefficient * ((-zeta).powf(-0.5) - (-transition).powf(-0.5))
+                    // `FNMA(bm2*2, Δ, 对数链)`：`(-zeta)**(-0.5)` 那一项被吸收。
+                    let log_chain = (transition * obukhov_length_m / roughness_m).ln()
+                        - psi(1, transition)
+                        + psi(1, roughness_m / obukhov_length_m);
+                    let delta = (-zeta).powf(-0.5) - (-transition).powf(-0.5);
+                    (-(2.0 * coefficient)).mul_add(delta, log_chain)
                 } else if zeta < 0.0 {
                     (distance_m / roughness_m).ln() - psi(1, zeta)
                         + psi(1, roughness_m / obukhov_length_m)
                 } else if zeta <= 1.0 {
-                    (distance_m / roughness_m).ln() + 5.0 * zeta
+                    (5.0_f64.mul_add(zeta, (distance_m / roughness_m).ln()))
                         - 5.0 * roughness_m / obukhov_length_m
                 } else {
                     (obukhov_length_m / roughness_m).ln() + 5.0
                         - 5.0 * roughness_m / obukhov_length_m
-                        + (5.0 * zeta.ln() + zeta - 1.0)
+                        + (5.0_f64.mul_add(zeta.ln(), zeta) - 1.0)
                 }
             }
         }
     }
 }
 
+/// `fm` 的三处收缩（内核本体 `MOD_FrictionVelocity.F90` 的 GIMPLE）：
+/// `FMA(Δ, 1.14, 对数链)`、`FMA(zeta, 5, log)`、`FMA(log(zeta), 5, zeta)`。
+/// 三个分支里的 `- 5*z0m/obu` 都是**先舍入的商**，不参与收缩。
 fn momentum_integral(distance_m: f64, roughness_m: f64, obukhov_length_m: f64) -> f64 {
     let zeta = distance_m / obukhov_length_m;
     if zeta < -f77(1.574) {
-        (-f77(1.574) * obukhov_length_m / roughness_m).ln() - psi(1, -f77(1.574))
-            + psi(1, roughness_m / obukhov_length_m)
-            + f77(1.14) * ((-zeta).powf(f77(0.333)) - f77(1.574).powf(f77(0.333)))
+        let log_chain = (-f77(1.574) * obukhov_length_m / roughness_m).ln() - psi(1, -f77(1.574))
+            + psi(1, roughness_m / obukhov_length_m);
+        let delta = (-zeta).powf(f77(0.333)) - f77(1.574).powf(f77(0.333));
+        f77(1.14).mul_add(delta, log_chain)
     } else if zeta < 0.0 {
         (distance_m / roughness_m).ln() - psi(1, zeta) + psi(1, roughness_m / obukhov_length_m)
     } else if zeta <= 1.0 {
-        (distance_m / roughness_m).ln() + 5.0 * zeta - 5.0 * roughness_m / obukhov_length_m
+        (5.0_f64.mul_add(zeta, (distance_m / roughness_m).ln()))
+            - 5.0 * roughness_m / obukhov_length_m
     } else {
         (obukhov_length_m / roughness_m).ln() + 5.0 - 5.0 * roughness_m / obukhov_length_m
-            + (5.0 * zeta.ln() + zeta - 1.0)
+            + (5.0_f64.mul_add(zeta.ln(), zeta) - 1.0)
     }
 }
 
+/// 与 `momentum_integral` 同型的收缩，只是系数是 `0.8`。
 fn heat_integral(distance_m: f64, roughness_m: f64, obukhov_length_m: f64) -> f64 {
     let zeta = distance_m / obukhov_length_m;
     if zeta < -f77(0.465) {
-        (-f77(0.465) * obukhov_length_m / roughness_m).ln() - psi(2, -f77(0.465))
-            + psi(2, roughness_m / obukhov_length_m)
-            + f77(0.8) * (f77(0.465).powf(-f77(0.333)) - (-zeta).powf(-f77(0.333)))
+        let log_chain = (-f77(0.465) * obukhov_length_m / roughness_m).ln() - psi(2, -f77(0.465))
+            + psi(2, roughness_m / obukhov_length_m);
+        let delta = f77(0.465).powf(-f77(0.333)) - (-zeta).powf(-f77(0.333));
+        f77(0.8).mul_add(delta, log_chain)
     } else if zeta < 0.0 {
         (distance_m / roughness_m).ln() - psi(2, zeta) + psi(2, roughness_m / obukhov_length_m)
     } else if zeta <= 1.0 {
-        (distance_m / roughness_m).ln() + 5.0 * zeta - 5.0 * roughness_m / obukhov_length_m
+        (5.0_f64.mul_add(zeta, (distance_m / roughness_m).ln()))
+            - 5.0 * roughness_m / obukhov_length_m
     } else {
         (obukhov_length_m / roughness_m).ln() + 5.0 - 5.0 * roughness_m / obukhov_length_m
-            + (5.0 * zeta.ln() + zeta - 1.0)
+            + (5.0_f64.mul_add(zeta.ln(), zeta) - 1.0)
     }
 }
 
+/// `0.9*vonkar**1.333`：GCC 在编译期把这个乘积折成一个常量（MPFR，正确舍入），
+/// 而运行期 `0.9*0.4_f64.powf(1.333)` 会**差 1 ULP**（libm 的 `pow` 不是正确舍入）。
+/// 这里直接取 gfortran 折出来的那一份（`MOD_FrictionVelocity.F90` 的 GIMPLE：
+/// `0.2653312957296878327184685986139811575412750244140625e+0`）。
+const UNSTABLE_HEAT_COEFFICIENT: f64 = 0.2653312957296878;
+
+/// GIMPLE（`kmoninobuk`）：`FNMA(zeta,16,1)` 得 `1-16ζ`、`FMA(zeta,5,1)` 得 `1+5ζ`。
 fn heat_similarity(zeta: f64) -> f64 {
     if zeta < -f77(0.465) {
-        f77(0.9) * VON_KARMAN.powf(f77(1.333)) * (-zeta).powf(-f77(0.333))
+        UNSTABLE_HEAT_COEFFICIENT * (-zeta).powf(-f77(0.333))
     } else if zeta < 0.0 {
-        (1.0 - 16.0 * zeta).powf(-0.5)
+        (-f77(16.0)).mul_add(zeta, 1.0).powf(-0.5)
     } else if zeta <= 1.0 {
-        1.0 + 5.0 * zeta
+        5.0_f64.mul_add(zeta, 1.0)
     } else {
         5.0 + zeta
     }
 }
 
+/// GIMPLE（内核本体）：`FNMA(zeta, 16, 1)` 得 `1-16ζ`，`FMA(chik, chik, 1)` 得
+/// `1+chik²`；`k==1` 那一支再两级 `FMA(log((1+chik)/2), 2, ·)`、
+/// `FNMA(atan(chik), 2, ·)`（`2*atan(1)` 被 GCC 折成常量 `π/2`）。
 fn psi(kind: i32, zeta: f64) -> f64 {
-    let chik = (1.0 - 16.0 * zeta).powf(0.25);
+    let chik = (-f77(16.0)).mul_add(zeta, 1.0).powf(0.25);
+    let log_half = (chik.mul_add(chik, 1.0) * 0.5).ln();
     if kind == 1 {
-        2.0 * ((1.0 + chik) * 0.5).ln() + ((1.0 + chik * chik) * 0.5).ln() - 2.0 * chik.atan()
-            + 2.0 * 1.0_f64.atan()
+        let sum = ((1.0 + chik) * 0.5).ln().mul_add(2.0, log_half);
+        (-chik.atan()).mul_add(2.0, sum) + 2.0 * 1.0_f64.atan()
     } else {
-        2.0 * ((1.0 + chik * chik) * 0.5).ln()
+        2.0 * log_half
     }
 }
 

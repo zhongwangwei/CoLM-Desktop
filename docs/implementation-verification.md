@@ -9433,3 +9433,92 @@ Tested: 内核本体 `-fdump-tree-optimized`；49 组真实 `(A,f,dx)` 的精确
 `cargo test --workspace --lib --bins -- --test-threads=1`；`cargo clippy --workspace --all-targets -- -D warnings`；
 `cargo fmt --all --check` 与 GUI 侧同名检查；`cargo test -q -p oracle -- --test-threads=1`；
 `cargo run -q -p xtask -- check-gui`；`python3 oracle/scripts/test_upstream_f48_sync.py`（PASS）。
+
+## 近地层（Monin-Obukhov）：整条链子从来没有按 GIMPLE 校过（实测，**已修**）
+
+`monin_obukhov.rs` 里此前**一个 `mul_add` 都没有**，而内核本体
+（`MOD_FrictionVelocity.F90` 与 `MOD_TurbulenceLEddy.F90`）的 `moninobuk`、
+`moninobukm`、`moninobuk_leddy`、`kmoninobuk`、`kintmoninobuk`、`moninobukini`
+六个例程加起来有 60 处 `.FMA/.FNMA/.FMS/.FNMS`。这轮把两个模块**本体**编译出来
+（`-I vendor/CoLM202X/.bld` 取 `.mod`）、写一个直接 `USE` 它们的 Fortran 驱动，
+再用共享 LCG 生成 20000 组输入，拿 **真正的 Rust** 逐位比对七个输出。
+
+### 量出来的收缩点
+
+| 位置 | 上游 | GIMPLE |
+|---|---|---|
+| `psi` 的 `chik` | `(1.-16.*zeta)**0.25` | `FNMA(zeta, 16, 1)` |
+| `psi` 的 `1+chik²` | `(1.+chik*chik)` | `FMA(chik, chik, 1)` |
+| `psi(k=1)` | `2*log((1+chik)*0.5) + log((1+chik²)*0.5)` | `FMA(log, 2, ·)` |
+| `psi(k=1)` 续 | `-2*atan(chik) + 2*atan(1)` | `FNMA(atan, 2, ·)`，`2*atan(1)` 折成常量 `π/2` |
+| `fm`（三种方案） | `… + 1.14*Δ` / `0.8*Δ` | `FMA(Δ, 1.14, ·)` / `FMA(Δ, 0.8, ·)` |
+| `fm` 稳定支 | `log + 5.*zeta` | `FMA(zeta, 5, log)` |
+| `fm` 对数支 | `5.*log(zeta)+zeta` | `FMA(log(zeta), 5, zeta)` |
+| `kmoninobuk` | `1.+5.*zeta` / `(1.-16.*zeta)**(-0.5)` | `FMA(zeta,5,1)` / `FNMA(zeta,16,1)` |
+| `moninobukini` | `sqrt(um**2+0.5**2)` | `FMA(um, um, 0.25)` |
+| `moninobukini` | `1.-5.*min(rib,0.19)` | `FNMA(min(rib,0.19), 5, 1)` |
+| `moninobuk_leddy` | `0.0047*(-zetazi)+0.1854` | `FMA(-zetazi, 0.0047, 0.1854)` |
+| `moninobuk_leddy` | `-2.*Bm2*(Δ)` | `FNMA(Bm2*2, Δ, ·)` |
+
+`zetam = 0.5*Bm**4*(-16.-sqrt(256.+4./Bm**4))` 与各支的 `- 5*z0x/obu` 都**不**收缩
+（分别是常量乘、商）。
+
+### 一个只能靠"编译期折叠"对齐的常量
+
+`kmoninobuk` 里 `0.9*vonkar**1.333` 被 GCC 折成一个常量
+（`0.2653312957296878327184685986139811575412750244140625`）。Rust 在运行期算
+`0.9 * 0.4_f64.powf(1.333)` 会**差 1 ULP**（libm 的 `pow` 不是正确舍入，GCC 的
+折叠是）。所以这一处只能把折叠值写成常量，并在注释里记下来源。同类的
+`1.574**0.333`、`0.465**(-0.333)` 运行期算出来与折叠值逐位相同，不需要特殊处理。
+
+### 差分结果（20000 组，两个方案各七个输出）
+
+| 方案 | ustar | fh2m | fq2m | fm10m | fm | fh | fq |
+|---|---|---|---|---|---|---|---|
+| 修前 LargeEddy | 14445 | 15742 | 15830 | 17634 | 16929 | 15916 | 15995 |
+| 修前 Standard | 14516 | 15742 | 15830 | 17678 | 17045 | 15916 | 15995 |
+| **修后（两个方案）** | **20000** | **20000** | **20000** | **20000** | **20000** | **20000** | **20000** |
+
+### 又一个"测试自己的编译器"的坑（这次在 Fortran 一侧）
+
+第一版差分只对上 ~97%，且失配分散在**所有四个分支**里，看上去像"哪里还差一处收缩"。
+真相是**驱动程序的输入生成**：`hu = 5.0 + uni()*25.0` 被 gfortran 在 `drv.f90` 里
+收缩成 `FMA(u, 25, 5)`，而 Rust 侧是"先乘后加"，于是同一个 case 的 `hu` 差 1 ULP，
+输出自然全差。给驱动加 `-ffp-contract=off`（**只给驱动，模块仍按内核默认编译**）
+之后立刻 20000/20000。
+
+这条与上一轮"clang 默认融合"是同一个坑的镜像：**只要两侧有一段代码的编译选项
+不同，先怀疑编译器，再怀疑算式**。诊断办法是把两边的输入也按位打出来比。
+
+### 窗口三口径（诚实记录：干窗变差，湿/雪窗逐位变好）
+
+| 窗口 | 逐位不同值 | Σ\|Δ\| | 超容差 | 变量数 |
+|---|---|---|---|---|
+| 干（CN-Cng） | 21199 → 21202 | **395.6581 → 816.8618** | 830 → 873 | 17 → 18 |
+| 湿（CN-Cng-wet） | 33349 → **33209** | 10380.6562 → 10386.9072 | 20665 → 20669 | 68 |
+| 雪（US-NR1-snow） | 33661 → **33641** | 不变 | 不变 | 79 |
+
+干窗的 Σ\|Δ\| 又翻了一倍 —— 与第 104 轮同一现象。仍然保留：**七个输出在两个方案、
+四个分支上都是 20000/20000**，算式与内核逐位相同这一条比端到端阈值抖动更有分量
+（第 105 轮干窗 Σ\|Δ\| 腰斩也印证了这类抖动是双向的）。
+
+### 未验的部分
+
+- `moninobukm`/`moninobukm_leddy`（冠层顶）与 `kmoninobuk`/`kintmoninobuk`
+  不是 public，只有 GIMPLE 依据；`heat_similarity` 的三处收缩就是照
+  `kmoninobuk` 的 dump 改的。
+- 干窗 TIMESTEP 第 0 步的分叉在这一轮之后**逐位不变**（同一批 1 ULP 差异、
+  同样的量级），说明它的根因**不在这条链上**，仍在别处。
+
+Tested: 内核本体两个模块的 `-fdump-tree-optimized`；`USE` 本体模块的 Fortran 驱动
+（`-ffp-contract=off`）与真 Rust 的共享 LCG 逐位比对（两方案 × 20000 × 7 输出，含分支统计）；
+干窗 TIMESTEP 1 步比对；三个黄金窗口 + 三口径 A/B；`cargo test -q -p colm-core --lib`（353 通过）；
+`cargo clippy --workspace --all-targets -- -D warnings`；两处 `cargo fmt --all --check`；
+`cargo test -q -p oracle`；`cargo run -q -p xtask -- check-gui`；
+`python3 oracle/scripts/test_upstream_f48_sync.py`（PASS）；`cargo test --workspace --lib --bins -- --test-threads=1`。
+
+**一次并发跑的假警报**：第一次验收把 `-p oracle` 与三个窗口的算例**同时**跑，
+`oracle/tests/generated_case.rs` 的"重跑内核并逐位比黄金"报了不一致 ——
+两条链子抢同一个工作目录。单独重跑整个 `-p oracle` 全绿（12 个二进制、0 失败）。
+这与之前记过的"并行 `cargo test` 不稳定"是同一类问题：**算例类测试不能与别处的
+内核运行并发**。
