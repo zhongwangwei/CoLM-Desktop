@@ -4398,10 +4398,14 @@ pub fn variably_saturated_flow_step(
     state.water_table_depth_m = water_table_depth_mm / 1000.0;
 
     // 凝结：露/霜/升华按上游的符号约定加回表层。
-    state.liquid_water_kg_m2[0] =
-        (state.liquid_water_kg_m2[0] + input.fluxes.soil_dew_kg_m2_s * dt).max(0.0);
-    state.ice_water_kg_m2[0] = (state.ice_water_kg_m2[0]
-        + (input.fluxes.soil_frost_kg_m2_s - input.fluxes.soil_sublimation_kg_m2_s) * dt)
+    state.liquid_water_kg_m2[0] = dt
+        .mul_add(input.fluxes.soil_dew_kg_m2_s, state.liquid_water_kg_m2[0])
+        .max(0.0);
+    state.ice_water_kg_m2[0] = dt
+        .mul_add(
+            input.fluxes.soil_frost_kg_m2_s - input.fluxes.soil_sublimation_kg_m2_s,
+            state.ice_water_kg_m2[0],
+        )
         .max(0.0);
 
     // 水量亏缺由冰补：`wblc > 0` 时自上而下融冰。

@@ -10096,3 +10096,68 @@ FMA(dz, 0.5, bottom)      ! bottom + 0.5*dz
 Tested: `MOD_CanopyLayerProfile.F90`/`MOD_NetSolar.F90`/`MOD_Albedo.F90` 本体的
 `-fdump-tree-optimized`（用于清点）；干窗 TIMESTEP 1 步 Rust-vs-Rust 逐位比对（不变）；
 `cargo test -q -p colm-core --lib -- --test-threads=1`（354 通过）；`cargo fmt --all --check`。
+
+## **重大澄清**：三个黄金算例走的是 VSF，`soil_water.rs` 是死代码
+
+第 110-119 轮反复记录"改了却零位移"。这轮把它查清楚了，根因是一个 namelist 默认值：
+
+```
+DEF_USE_VariablySaturatedFlow = .true.      ! MOD_Namelist.F90:317（schema 同值）
+CN-Cng/case.nml 里没有这一项 → 取默认 → 打开
+```
+
+于是 `water_2014_soil_step` 在第 178 行**直接转给 `variably_saturated_soil_step`**：
+
+```rust
+if input.variably_saturated {
+    return variably_saturated_soil_step(input, state);
+}
+```
+
+**后果**：`soil_water.rs`（Campbell/Richards 的 `soilwater` 与 `groundwater` 移植）
+以及 `water_2014` 尾部那些更新，在**三个黄金算例上全部不执行**。第 113-117 轮
+在 `soil_water.rs`/`water_2014.rs` 里改的那些收缩（`wliq/wice(1)`、van Genuchten 的
+`soil_vliq_from_psi`、`groundwater` 的 `xs1`/`wa`、`soilwater` 的 Campbell 指数与
+三对角装配）都是**另一个配置**（VSF 关掉）才走的路 —— 它们本身没错，
+但对本机算例确实"零位移"，这正是第 119 轮那个"十次零位移"的解释。
+
+**活的路径是 `variably_saturated_flow.rs`（`WATER_VSF` 的移植），它此前
+`mul_add` 数为 0，上游 dump 里有 17 处收缩。** 上游 `WATER_VSF` 的收缩形态
+（`water_vsf`）已经列好：`gwat = FMA(1-fsno, pg_rain, gwat)`、
+`FMA(qsdew, deltim, wliq)` / `FNMA(x, deltim, y)` 的表层与逐层更新、
+`FMA(Δ, k, rhs)` 与 `FNMA(k, max(…,0), rhs)` 的矩阵项、
+`FNMA(x*1000, …, y)` 一处。
+
+### 本轮先做两处（表层露/霜/升华）
+
+`WATER_VSF` 表层两条：
+
+```fortran
+wliq(1) = max(0., wliq(1) + qsdew_soil * deltim)
+wice(1) = max(0., wice(1) + (qfros_soil-qsubl_soil) * deltim)
+```
+
+GIMPLE：`FMA(qsdew_soil, deltim, wliq)`、`FMA(deltim, qfros-qsubl, wice)`。
+`variably_saturated_flow.rs` 两处已改成 `dt.mul_add(…)`。
+
+**但干窗仍逐位不变**：多数步的露/霜/升华是 0，乘积融不融合结果相同 ——
+这两处需要构造有凝结的算例才能看出差别。
+
+### 另一个观察：`hk` 的差异被"相消"放大
+
+顺手比对了 1 步后两侧写出的 restart：`t_grnd`/`zwt`/`wa`/`wdsrf`/`scv`/`snowdp`/`fsno`/
+`tleaf`/`vegwp`/`gs0sun` **逐位相同**，而 `t_soisno`/`wliq_soisno`/`wice_soisno`/`smp`
+各差 1 ULP，`hk` 差 ~2.2e-11 相对。`hk` 这一点不是 1 ULP：van Genuchten 的
+`(1-(1-(esat*sc)**(1/m))**m)**2` 在 `esat*sc≈1` 附近有**相消**，1 ULP 的
+`psi`/`smp` 会被放大上千倍。所以 `hk` 是**结果**不是**源头**，追它没有意义；
+源头是那条 1 ULP 的 `wliq`。
+
+Tested: `MOD_SoilSnowHydrology.F90` 本体的 dump（`water_vsf` 17 处逐条列出）；
+1 步后两侧 restart 的逐位比对（10 个量相同、4 个差 1 ULP、`hk` 放大）；
+干窗 TIMESTEP 1 步 Rust-vs-Rust 逐位比对（不变）；`cargo test -q -p colm-core --lib -- --test-threads=1`（354 通过）。
+
+### 下一轮入口（已改写）
+
+1. `variably_saturated_flow.rs` 剩下的 15 处（活的路径）；
+2. `MOD_NetSolar`（35）与 `MOD_Albedo`（136）；
+3. 1 ULP 的 `wliq` 源头（在 VSF 的矩阵装配里）。
