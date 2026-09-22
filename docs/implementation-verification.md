@@ -12774,3 +12774,41 @@ Tested: `strings .bld/MOD_LeafTemperature.o`/`MOD_Thermal.o` 的来源核对；`
 对文件的 dump 生成（80 处收缩）；`clai`/`thvstar` 落回后 `bash /tmp/gf/dry_ts.sh 3` +
 `window_divergence.py` 的步级实测（574 vs 582）；两处已回退。
 Not-tested: 对文件 80 处收缩的逐条重扫；从 `colm.x` 反汇编取形状（下一轮）。
+
+## 内核二进制的收缩是**真的**，但 DWARF 行号**不足以**逐句裁决
+
+上一轮定的方向是"从 `kernels/default/colm.x` 本体反汇编取形状"。不用重编：`.bld` 下那些
+`.o` 就是内核链接的对象，`vendor/CoLM202X/.bld/MOD_LeafTemperature.o` 里
+
+```
+$ objdump -d --no-show-raw-insn -l .bld/MOD_LeafTemperature.o | grep -c "fmadd\|fmsub\|fnmadd\|fnmsub"
+55
+```
+
+—— 55 条 FMA 类指令，散布在 94 个不同的源码行上（对象是带 `-g` 编的，行号标记形如
+`; /…/MOD_LeafTemperature_Extended.F90:1857`）。所以"上游有大范围收缩"这件事在
+**内核二进制里**是确凿的，之前那些 dump 并没有凭空造出融合。
+
+**但逐句映射做不到**。把指令按行号归类后：
+
+| 语句 | 对文件行号 | 该行被归到的指令数 | 该行 FMA 数 |
+|---|---|---|---|
+| `clai = 0.2*(lai+sai)*cpliq + ldew_rain*cpliq + ldew_snow*cpice` | 542 | **0** | 0 |
+| `thvstar = tstar*(1.+0.61*qm)+0.61*th*qstar` | 1256 | **0** | 0 |
+| `gssun = (laisun/rssun)*(tprcor/tlbef)` | 1320 | **0** | 0 |
+
+优化之后 GCC 把算术块重组/向量化，行号标记落在**邻近**的语句上（例如 1255、1325、1328
+有 FMA，而争议的三行自己没有）。也就是说：**"内核用了 FMA"能证，"哪一句用了 FMA"用
+对象反汇编证不了** —— 这和第 166 轮"独立编译的 dump 不能代表内核二进制"是同一枚硬币
+的两面，一个是代码形状对不上、一个是行号对不上。
+
+**结论（裁决规则最终定版）**：形状问题只有**步级口径 + 把内核对象链进来的差分驱动**
+两条路可走。下一轮的做法照 `compare_forcingdownscaling*.sh` 的成例：写一个驱动
+**直接链接 `.bld/MOD_LeafTemperature.o`**（真产线对象），用 `LeafTemperature` 的
+130 个实参喂同一组随机输入，两侧逐位比 Newton 增量的分子/分母、`thvstar`、`clai`
+这几个量 —— 这样才能把"哪一句收缩了"变成可观测事实。
+
+Tested: `objdump -d -l .bld/MOD_LeafTemperature.o`（55 条 FMA 类指令、94 个行号）；
+`grep -n "MOD_LeafTemperature.o:" vendor/CoLM202X/Makefile`（来源仍为
+`extends/interception/MOD_LeafTemperature_Extended.F90`）；对文件三处争议语句的行号核对。
+Not-tested: 链接 `.bld/MOD_LeafTemperature.o` 的随机差分驱动（下一轮，130 个实参）。
