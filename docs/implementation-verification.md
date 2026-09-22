@@ -13771,3 +13771,22 @@ Not-tested: 该模块其余收缩（`gt.opt` 41 处里未逐条过的部分）�
 
 Tested: `MOD_GroundTemperature.F90:344-362` 与 `ground_temperature.rs:424-440` 的逐句对照。
 Not-tested: 底层矩阵元、相变段（下一轮入口）。
+
+## 底层矩阵元也一致 —— 三对角装配**全部核完**，只剩相变段
+
+`ground_temperature.rs:458-465` ↔ `MOD_GroundTemperature.F90:377-382`：
+
+| 上游 | Rust | 结论 |
+|---|---|---|
+| `at(j) = -(1.-cnfac)*fact(j)*tk(j-1)/dzm` | `sub[bottom] = -implicit*factor*conductivity[bottom-1]/lower_distance` | 一致 |
+| `bt(j) = 1.+(1.-cnfac)*fact(j)*tk(j-1)/dzm` | `diagonal[bottom] = 1.0 + implicit*factor*conductivity[bottom-1]/lower_distance` | 一致（该处是**商**、不收缩，注释已写明）|
+| `ct(j) = 0.` | `super_` 初始化为 0 | 一致 |
+| `rt(j) = t - cnfac*fact*fn(j-1)` | `(-(cnfac*factor)).mul_add(flux[bottom-1], t)` | 一致（`FNMA(cnfac*fact, fn1, t)`）|
+
+至此 `MOD_GroundTemperature`（`gt.opt` 41 处）的**三对角装配全部核完**：
+`cv`/`thk` 组装 · 界面导热率 · 降水热双 FMA · 土壤支加权 · `dhsdT` · `fact` · 顶/内/**底**三层矩阵元 ·
+`interface_fluxes` / `residual_heat_fluxes`。**唯一未逐条的是相变段**（`phase_change` 与
+`snow_layer_absorption` 相关式）—— 下一轮的单一入口。
+
+Tested: `MOD_GroundTemperature.F90:377-382` 与 `ground_temperature.rs:458-465` 的逐句对照。
+Not-tested: 相变段。
