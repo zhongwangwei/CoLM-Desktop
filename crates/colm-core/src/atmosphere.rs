@@ -159,6 +159,30 @@ pub fn saturation_specific_humidity(
     };
     let vapor_pressure_pa = vapor_pressure_hpa * 100.0;
     let vapor_pressure_temperature_slope_pa_k = vapor_pressure_slope_hpa_k * 100.0;
+    // **钳位支用的是上游编译期折出来的常量，不是运行期那条 Horner 链。**
+    //
+    // `MOD_Qsadv.F90:77-84`：先把 `td` 钳到 ±75，之后链里的 `td` 就是常量，
+    // GCC 于是把整条九次链在编译期折掉 —— `gfortran -S` 的 `qs.s` 里 `L4`/`L5`
+    // 只有三次 `ldr` 取常量，直接跳进只算外层的 `L2`，链本身不在运行期。
+    // 而**折的时候没有做 FMA 收缩**：折出的值等于"平铺链"的值，与不钳位支走的
+    // 融合链在 ±75 处相差 1.5e-13（相对 1.2e-12）。
+    //
+    // 四个常量由对象直读确认（`/tmp/gf/r152/clamp.f90`，`T=198` 与 `T=349`）：
+    //   NEG es=0x3FBF43F7A2AC9200  esdT=0x3F938B4D8B53A580
+    //   POS es=0x40E2D80B36C8AC77  esdT=0x40993AF2BB3F60EE
+    // 实测 `oracle/scripts/compare_qsadv.sh`：全区间 5021 组失配（`es`），
+    // 而只跑冷支/暖支各 20000/20000 全同 —— 差异**只**出在这里。
+    let (vapor_pressure_pa, vapor_pressure_temperature_slope_pa_k) =
+        if temperature_k - FREEZING_K < -75.0 {
+            (
+                f77(0.122_130_849_089_963_08),
+                f77(0.019_086_085_919_217_677),
+            )
+        } else if temperature_k - FREEZING_K > 75.0 {
+            (f77(38_592.350_437_485_55), f77(1_614.737_042_417_803_9))
+        } else {
+            (vapor_pressure_pa, vapor_pressure_temperature_slope_pa_k)
+        };
     ensure!(
         pressure_pa > f77(0.378) * vapor_pressure_pa,
         "pressure is too low for the saturation calculation"

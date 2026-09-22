@@ -12169,3 +12169,38 @@ Tested: `oracle/scripts/compare_qsadv.sh` 三次（默认全区间、冷支、�
 `gfortran -S` 的 `qs.s` 里 `L4`/`L5`/`L2` 三个块逐行核对；四个折出常量用 Python
 平铺链复算；`cargo test -q -p colm-core --lib -- --test-threads=1`（355 通过）。
 Not-tested: 钳位支的常量落地（下一轮）；`td = +75` 侧的对象直读（只用平铺链复算过）。
+
+## `qsadv` 结案：钳位支改用编译期折出的常量，**全区间 20000/20000**
+
+按上一节记下的四个常量落地：`saturation_specific_humidity` 在钳位支
+（`T-273.16 < -75` 或 `> 75`）直接返回上游折出的 Pa 值、跳过 `*100`。
+
+```
+$ bash oracle/scripts/compare_qsadv.sh
+qsadv: inputs aligned and all 4 outputs 20000/20000 bitwise identical
+```
+
+（改前全区间 5021 组 `es` 失配。）四个常量在**落地前**先由对象直读确认过：
+
+```
+$ /tmp/gf/r152/clamp.f90        # T=198（td<-75）与 T=349（td>+75）
+NEG  3FBF43F7A2AC9200  3F938B4D8B53A580
+POS  40E2D80B36C8AC77  40993AF2BB3F60EE
+```
+
+**黄金窗口逐位不变**（干 21326 / 湿 32681 / 雪 33651，三个 tier2 变量数 17/68/79）——
+三个算例的气温从不进入 `T <= 198.16 K` 或 `T >= 348.16 K`，所以这条修正对它们**天然惰性**。
+这不是"改了没用"，而是**该模块的忠实度由 20000 组随机输入直接证明**，
+窗口只是恰好覆盖不到钳位支（这与 `MOD_FrictionVelocity` 那轮的结论同一性质）。
+
+**由此关掉的两个模块**（本仓库最强证据类：与内核本体逐位相同）：
+
+| 模块 | 证据 |
+|---|---|
+| `MOD_FrictionVelocity` | 20 个输出 20000/20000（`compare_moninobukm.sh`）|
+| `MOD_Qsadv` | 4 个输出 20000/20000（`compare_qsadv.sh`）|
+
+Tested: `oracle/scripts/compare_qsadv.sh`（全区间 20000 组，改前 5021 → 改后 0）；
+`/tmp/gf/r152/clamp.f90` 的四个常量直读；三个黄金窗口三口径 A/B（逐位不变）；
+`cargo test -q -p colm-core --lib -- --test-threads=1`（355 通过）。
+Not-tested: 钳位支在窗口里的端到端影响（三个算例都到不了那个温度）。
