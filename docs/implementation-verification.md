@@ -14133,3 +14133,34 @@ MOD_PhaseChange:meltf: 5 patchtypes x 2000 组、9 个量 10000/10000 逐位相�
 Tested: `compare_phasechange.sh` 完整运行（编译、链接、两侧各 10000 条、逐位比对通过）；
 `cargo fmt --all --check`。
 Not-tested: Campbell 支（需另配 namelist）。
+
+### 口径补充：**步级基线也是"步数相关"的**（1 步 ≠ 3 步）
+
+第 220 轮重跑基线时发现：`dry_ts.sh 1` 的 history 口径是 **33 个差异变量 / 234/268**，
+而此前一直引用的 **44 / 585/692** 来自 `dry_ts.sh 3` —— 两个都对，但**不可混用**：
+
+```
+$ bash /tmp/gf/dry_ts.sh 1
+$ python3 oracle/scripts/window_divergence.py /tmp/gf/dryts/out/CN-Cng/history/*.nc \
+      /tmp/gf/dryts/colm-rs_hist_2008-01.nc
+variables differing: 33; bitwise identical: 234/268 (87.3134%)
+first divergence step: 0
+
+# 对照（3 步）：44 / 585/692
+```
+
+这与第 200 轮那条"restart 口径必须同步数"是同一类问题。**固定约定**（已并入"复制粘贴流程"）：
+
+| 口径 | 命令 | 基线 |
+|---|---|---|
+| restart | `dry_ts.sh 1`（→ `…-01800`）| **19/68** |
+| 步级 history | `dry_ts.sh 3` | **44 / 585/692** |
+| 黄金窗口 | `win4.sh` | 21328 / 32655 / 33651 |
+
+顺带确认：`gssun`/`rbsun`/`us10m`/`olrg`/`gbh2o` 五处已落地的修复之后，**restart 口径仍是
+19/68 且逐行数值不变**（`rib 1.922e-16` / `t_soisno 2.041e-16` / `trad 2.153e-16` …）——
+即这些修复没有动到种子本身，最后一个开放项依旧原样存在。
+
+Tested: `dry_ts.sh 1` + `window_divergence.py`（33/234）与 `dry_ts.sh 3`（44/585）的对照；
+`dry_ts.sh 1` + `restart_divergence.py`（19/68，逐行与第 200 轮一致）。
+Not-tested: none（本轮只做口径确认）。
