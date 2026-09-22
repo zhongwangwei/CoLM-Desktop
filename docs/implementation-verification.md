@@ -10434,3 +10434,33 @@ netsolar sums: y1 20000/20000, y2 20000/20000, y3 20000/20000
 Tested: 复刻件 `/tmp/gf/r115/sums.f90`（`-O2`，与内核同选项；加 `-fwrapv` 前后各跑一次）；
 Rust 探针对三条和式的逐位比对（20000/20000）；探针已删除，工作树干净；
 `cargo test -q -p colm-core --lib -- --test-threads=1`（354 通过）。
+
+## `MOD_Albedo`：`snowage` 的七处形状已解出，落点已定位到 `surface_optics.rs`
+
+`MOD_Albedo` 是本仓库剩下最大的未扫块（**136** 处：`twostream_wrap` 72、
+`twostream` 45、`albland` 9、`albocean` 8、`snowage` 2）。本轮先把最小的
+`snowage` 那 7 处的形状读出来：
+
+```
+_6  = FMA(x, 4.0, 1.0)                          ! 1 + 4*x（雪龄因子）
+_56 = FMA(y, 0.025, 0.95)   _58 = FMA(y, 0.15, 0.70)
+_20 = FMA(1-frsnow, 0.70, sasdir*frsnow)        ! 可见光直射
+_23 = FMA(1-frsnow, 0.5,  saldir*frsnow)        ! 可见光散射
+_25 = FMA(1-frsnow, 0.70, frsnow*0.95)          ! 近红外直射
+_27 = FMA(1-frsnow, 0.5,  frsnow*0.70)          ! 近红外散射
+```
+
+形状是统一的：**"新雪反照率 × (1-frsnow) + 陈雪/雪面反照率 × frsnow"，
+收的是左边那个乘积** —— 与 `net_solar` 那轮量出来的方向一致
+（最左乘积被吸收、最右是已舍入的加数）。
+
+落点：Rust 侧对应的是 `surface_optics.rs`（它 `use crate::snow::snow_fraction`，
+并带 `vegetation_snow_fraction`/`ground_snow_fraction` 等字段），**不是**
+`albedo.rs`（那个文件只有 77 行，是枚举/元数据）。按常量搜 `0.95`/`0.70`
+找不到，说明 Rust 用的是别的写法或别的命名，下一轮要从 `surface_optics.rs`
+的雪盖反照率混入处逐个对上。
+
+（本轮无源码改动：136 处是大块，先解形状、定位文件，避免在没有落点的情况下改。）
+
+Tested: `MOD_Albedo.F90` 本体的 `-fdump-tree-optimized`（三个小函数的 19 处逐条列出）；
+`grep` 定位 Rust 侧的对应文件；`cargo test -q -p colm-core --lib -- --test-threads=1`（354 通过）、工作树干净。
