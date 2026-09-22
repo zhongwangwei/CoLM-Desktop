@@ -9921,3 +9921,27 @@ GIMPLE 把 `deltim*通量` 收进加法：`FMA(deltim, qsdew_soil, wliq)`、
 
 Tested: `MOD_SoilSnowHydrology.F90` 本体的 `-fdump-tree-optimized`；干窗 TIMESTEP 1 步 Rust-vs-Rust 逐位比对；
 `cargo test -q -p colm-core --lib -- --test-threads=1`（354 通过）；`cargo fmt --all --check`。
+
+## `groundwater` 的 `xs1` 顶层容量（被 `water_2014` 内联）
+
+`MOD_SoilSnowHydrology.F90` 的 `groundwater`（`:2532`，`WATER_2014` 里 `CALL` 它）：
+
+```fortran
+xs1 = wliq_soisno(1) - (pondmx+porsl(1)*dzmm(1)-wice_soisno(1))
+```
+
+dump 里这个例程被**内联进 `water_2014`**，所以按函数名过滤时会误以为是
+`water_2014` 自己的语句 —— 记下来：**内联会打乱"按函数名归属收缩"的直觉**，
+遇到可疑的收缩最好连它的上游源码行一起找，而不是只信 dump 的函数头。
+
+GIMPLE：`FMA(porsl[0], dzmm[0], pondmx)`（`:8362`、`:8937` 两处，对应两支）。
+Rust 的 `update_groundwater_with_resolver` 里那行 `top_capacity` 已改成
+`porosity[0].mul_add(thickness_mm[0], ponding_limit_mm) - ice_water_kg_m2[0]`。
+
+干窗 1 步改动前后**逐位相同**——这是连续第六处"依据充分、本机窗口测不到"的修复。
+注意 `CN-Cng` 走的是 TOPMOD 分支（`update_groundwater_topmodel`），
+`update_groundwater_with_resolver` 未必落在它的路径上，这一点没有单独确认。
+
+Tested: `MOD_SoilSnowHydrology.F90` 本体的 `-fdump-tree-optimized`（含内联归属的核对）；
+干窗 TIMESTEP 1 步 Rust-vs-Rust 逐位比对；`cargo test -q -p colm-core --lib -- --test-threads=1`（354 通过）；
+`cargo fmt --all --check`。

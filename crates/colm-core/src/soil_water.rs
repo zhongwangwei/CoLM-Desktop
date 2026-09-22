@@ -483,8 +483,11 @@ fn update_groundwater_with_resolver(
         liquid_water_kg_m2[layer] = liquid_water_kg_m2[layer].min(capacity);
         liquid_water_kg_m2[layer - 1] += excess;
     }
-    let top_capacity =
-        input.ponding_limit_mm + input.porosity[0] * thickness_mm[0] - input.ice_water_kg_m2[0];
+    // `MOD_SoilSnowHydrology.F90` 的 `groundwater`（被 `water_2014` 内联）：
+    // `xs1 = wliq(1) - (pondmx+porsl(1)*dzmm(1)-wice(1))`；
+    // GIMPLE 把 `porsl(1)*dzmm(1)` 收进加法：`FMA(porsl[0], dzmm[0], pondmx)`。
+    let top_capacity = input.porosity[0].mul_add(thickness_mm[0], input.ponding_limit_mm)
+        - input.ice_water_kg_m2[0];
     let excess_top = (liquid_water_kg_m2[0] - top_capacity).max(0.0);
     liquid_water_kg_m2[0] = liquid_water_kg_m2[0].min(top_capacity);
     subsurface_runoff_mm_s += excess_top / input.time_step_seconds;
