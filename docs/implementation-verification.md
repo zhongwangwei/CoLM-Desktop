@@ -11973,3 +11973,74 @@ Tested: 本节只汇总前文已实测的结论；三个黄金窗口与第二个
 `cargo test -q -p oracle`；`cargo run -q -p xtask -- check-gui`；
 `python3 oracle/scripts/test_upstream_f48_sync.py`。
 Not-tested: 本节没有引入新实测，只是汇总。
+
+## **抓到真缺陷**：`UNSTABLE_HEAT_COEFFICIENT` 的字面量差 1 ULP（冠层 `moninobukm` 的 `phih`）
+
+上一节留下的两个方向里"冠层 MO 的随机差分驱动"做出来了，**第一次就抓到一个真缺陷**。
+
+### 驱动
+
+入库：`oracle/scripts/moninobukm_diff.f90` + `crates/colm-core/examples/mo_probe.rs` +
+`oracle/scripts/compare_moninobukm.sh`。做法与当年关掉 `moninobuk` 的一样：
+
+* 上游侧：用内核真实选项编译 `MOD_FrictionVelocity.F90`（**不加**
+  `-ffp-contract=off` —— 要的就是 GCC 的默认收缩），驱动本身按仓库纪律加
+  `-fwrapv -ffp-contract=off`；
+* 本仓库侧：`cargo run -p colm-core --example mo_probe`，**同一串 LCG**；
+* 两侧各 20000 组随机几何/稳定度，比 `moninobukm` 的 10 个输出
+  （`ustar`/`fh2m`/`fq2m`/`fmtop`/`fm`/`fh`/`fq`/`fht`/`fqt`/`phih`）。
+
+### 结果
+
+```
+第一次：ustar/fh2m/fq2m/fmtop/fm/fh/fq/fht/fqt 全 0/20000，phih 375/20000
+        （按分支拆开：错的全在第一支 zeta < -0.465，376 组里错 375）
+```
+
+`phih` 第一支是 `0.9*vonkar**1.333 * (-zeta)**(-0.333)`，Rust 侧用常量
+`UNSTABLE_HEAT_COEFFICIENT`。dump（`fv.opt` 第 525 行）给的是
+
+```
+phih_27 = _5 * 2.653312957296878327184685986139811575412750244140625e-1
+```
+
+而 Rust 里写的是 `0.2653312957296878` —— 这个十进制只舍到
+**`0x1.0fb301d70ea83p-2`**，dump 那一份是 **`0x1.0fb301d70ea84p-2`**，**差 1 ULP**。
+（注释里当时**抄对了**完整精度，字面量却没写够位数 —— 典型的"注释对、代码错"。）
+
+改成 `0.26533129572968783` 之后：
+
+```
+moninobukm: all 10 outputs 20000/20000 bitwise identical
+```
+
+### 顺带验掉一条我自己的错误假设
+
+中途试过把第二支的 `(1-16ζ)**(-0.5)` 从 `powf(-0.5)` 改成 `1/sqrt(x)`
+（以为 GCC 会把 `**-0.5` 展开成开方），结果 `phih` 的失配从 375 涨到 **3427** ——
+dump 里写得很清楚是 `__builtin_pow(_24, -5.0e-1)`，**没有**展开。已回退。
+
+### 窗口：混合信号，照实记录
+
+| 窗口 | 逐位不同值 | Σ\|Δ\| | 超容差 | 变量数 |
+|---|---|---|---|---|
+| 干 | 21196 → **21326** | 311.43 → **338.93** | 825（不变） | 17（不变） |
+| 湿 | 32530 → **32681** | 10381.65 → **10369.44** | 20664 → **20672** | 68（不变） |
+| 雪 | 33602 → **33651** | 持平 | 持平 | 79（不变） |
+
+干窗逐位变多、湿窗 Σ\|Δ\| 变好而超容差变多 —— 方向不一致；**1 步口径仍是 33 个变量不变**。
+**保留**，理由是本仓库的判据层级：这次不是"形状从 dump 推出来的"，
+而是**与内核本体 20000/20000 逐位相同**的直接差分证据（最强的一类），
+而且三个窗口的 tier2 变量数一个都没变（结构没坏）。
+把这条混合信号钉在这里，供以后有更强判据时回看。
+
+**规矩（补进驱动纪律）**：从 GIMPLE 里抄常量时，**字面量必须能往返到 dump 的那一串** ——
+`f64` 只保留 17 位有效数字，写短了就静默差 1 ULP。抄完立刻用
+`python3 -c "from decimal import Decimal; print(Decimal(0.1…))"` 对一遍。
+
+Tested: `oracle/scripts/compare_moninobukm.sh`（两侧 20000 组、10 个输出）；
+修常量前后各跑一次（`phih` 375 → 0）；`1/sqrt(x)` 的对照（3427，已回退）；
+三个黄金窗口三口径 A/B；干窗 1 步逐位比对（33 不变）；
+`cargo test -q -p colm-core --lib -- --test-threads=1`。
+Not-tested: `-ffp-contract` 关闭时的上游行为（驱动一侧刻意用内核默认）；
+`moninobukm_leddy`（CBL 分支，本机算例不走）。

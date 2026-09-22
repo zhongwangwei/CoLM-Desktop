@@ -443,9 +443,14 @@ fn heat_integral(distance_m: f64, roughness_m: f64, obukhov_length_m: f64) -> f6
 
 /// `0.9*vonkar**1.333`：GCC 在编译期把这个乘积折成一个常量（MPFR，正确舍入），
 /// 而运行期 `0.9*0.4_f64.powf(1.333)` 会**差 1 ULP**（libm 的 `pow` 不是正确舍入）。
-/// 这里直接取 gfortran 折出来的那一份（`MOD_FrictionVelocity.F90` 的 GIMPLE：
-/// `0.2653312957296878327184685986139811575412750244140625e+0`）。
-const UNSTABLE_HEAT_COEFFICIENT: f64 = 0.2653312957296878;
+/// 这里直接取 gfortran 折出来的那一份（`fv.opt` 里 `moninobukm` 的 `phih` 第一支：
+/// `_5 * 2.653312957296878327184685986139811575412750244140625e-1`）。
+///
+/// **字面量必须能往返**：先前写的是 `0.2653312957296878`，它只舍到
+/// `0x1.0fb301d70ea83p-2`，而 dump 里那一份是 `0x1.0fb301d70ea84p-2` —— **差 1 ULP**。
+/// 实测（`MOD_FrictionVelocity:moninobukm` 的 20000 组随机差分驱动）：`phih` 第一支
+/// 376 组里错 **375** 组；改成 `0.26533129572968783` 之后 **0/20000**。
+const UNSTABLE_HEAT_COEFFICIENT: f64 = 0.26533129572968783;
 
 /// GIMPLE（`kmoninobuk`）：`FNMA(zeta,16,1)` 得 `1-16ζ`、`FMA(zeta,5,1)` 得 `1+5ζ`。
 fn heat_similarity(zeta: f64) -> f64 {
