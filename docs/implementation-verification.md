@@ -14590,3 +14590,32 @@ Not-tested: Rust 侧的 23 个量对照（下一轮）。
 Tested: 第 235 轮 dump 的 23 个量按来源分类；与既有 history 差异族（`f_olrg`/`f_rnet`/`f_fseng`/
 `f_fevpg`）的对应。
 Not-tested: Rust 侧那 8 个计算量的打印与逐位比对（下一轮）。
+
+## 探针修好后**结论反转**：叶温 `moninobukm` 在第 0 步**确实被调用**（11 次）
+
+用修好的 `step0_arg_probe3.sh` 重跑（标记 3 个都在二进制里、内核完成标志 1）：
+
+```
+$ head -4 /tmp/gf/argprobe3/probe.txt
+ARGPROBE_EXT  6.000000000000000E+00  6.000000000000000E+00  6.000000000000000E+00 -1.084670892101044E+02
+ARGPROBE_EXT  6.0E+00  6.0E+00  6.0E+00 -1.144412965630008E+02
+ARGPROBE_EXT  6.0E+00  6.0E+00  6.0E+00 -1.976860788342615E+02
+ARGPROBE_EXT  6.0E+00  6.0E+00  6.0E+00 -2.002591638310636E+02
+$ wc -l … → 11
+```
+
+也就是说：
+
+* 叶温 **PFT**（`…_Extended.F90`）那支的 `CALL moninobukm` 在干窗第 0 步**被调用 11 次**
+  （与 Newton 迭代次数 × 阳叶/阴叶相称）；
+* 第 194-232 轮"叶温不执行 / 地面不执行 / THERMAL 不执行"的结论**全部反转** —— 那些都是
+  零步运行 + `cp` 嵌套两个 bug 的产物（第 233、235 轮已定位并修复）；
+* 但**第 236 轮的入参分类仍然成立**：`GroundTemperature` 的 13 个状态量由同一份 restart
+  决定，残差只能从计算量进来。
+
+至此"入口 A"的两侧数据**第一次都可得**：上游侧 11 行 `hu_/ht_/hq_/obu` 已在
+`/tmp/gf/argprobe3/probe.txt`；Rust 侧对应量在 `leaf_temperature.rs` 的
+`MoninObukhovInput` 构造处（字段映射见本文档"入口 A 就绪清单"）。
+
+Tested: `step0_arg_probe3.sh`（修好后）完整跑通：标记 3、完成标志 1、11 行 `ARGPROBE_EXT`、f48 PASS。
+Not-tested: Rust 侧同位置对照（下一轮）。
