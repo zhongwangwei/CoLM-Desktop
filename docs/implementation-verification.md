@@ -12812,3 +12812,63 @@ Tested: `objdump -d -l .bld/MOD_LeafTemperature.o`（55 条 FMA 类指令、94 �
 `grep -n "MOD_LeafTemperature.o:" vendor/CoLM202X/Makefile`（来源仍为
 `extends/interception/MOD_LeafTemperature_Extended.F90`）；对文件三处争议语句的行号核对。
 Not-tested: 链接 `.bld/MOD_LeafTemperature.o` 的随机差分驱动（下一轮，130 个实参）。
+
+## `cfw` 的括号（源码里是**显式中间量**）也被窗口否掉；三条线索合起来指向**装配**而非表达式
+
+`MOD_LeafTemperature_Extended.F90:972-973` 先算
+
+```fortran
+wet_area_cfw = lai + sai
+wet_cond_cfw = wet_area_cfw / rb        ! ← 独立语句
+…
+cfw = (1.-delta*(1.-fwet))*wet_cond_cfw + (1.-fwet)*delta*( laisun/(rb+rssun) + laisha/(rb+rssha) )   ! :1078
+```
+
+Rust 写的是 `(1.0 - delta*(1.0-fwet)) * lsai / leaf_boundary_resistance + …`，按左结合算成
+`((1-delta*(1-fwet))*lsai)/rb`。**这次不是收缩问题**，而是上游把 `lsai/rb` 写成了一个
+**独立中间量** —— 源码级的证据是明确的，不需要 dump。按同样的形状改掉之后：
+
+| | 3 步 bitwise | 干窗 bitwise | 干窗 sumabs | over_tol | ot_vars |
+|---|---|---|---|---|---|
+| 改前（现状）| 582/692 | **21326** | **338.9256** | 825 | 17 |
+| `wet_cond_cfw` 括号 | 582/692（**完全无变化**）| 21319 | **554.2229** | **822** | 17 |
+
+步级口径**一点没动**（对这个窗口惰性），而干窗的 `bitwise` 与 `sumabs` 明显变差。
+已回退。
+
+### 三条线索的合流
+
+到这里，三处"源码/dump 说该改"的形状改动全部被口径否掉：
+
+| 站点 | 依据 | 步级/窗口实测 | 处置 |
+|---|---|---|---|
+| `clai`（对文件 :542）| dump 有 `.FMA` | 3 步 582 → 574 | 回退 |
+| `thvstar`（:1256）| dump 有 `.FMA` | 3 步 582 → 574 | 回退 |
+| `cfw`（:1078）| **源码显式中间量** | 步级不变、干窗 bitwise −7 / sumabs +215 | 回退 |
+
+三处都在 `rb` 的**下游**。而 `rb` 本身两边长得不一样：
+
+```fortran
+! MOD_LeafTemperature_Extended.F90:751-759 / 797-798
+rb    = 1/(cf*uaf)        ! 或 rb = 1./cf
+rbsun = rb / laisun       ! 传给 stomata 的是 rb/laisun
+rbsha = rb / laisha
+```
+```rust
+// leaf_temperature.rs:452
+let leaf_boundary_resistance = 1.0 / (0.01 * input.inverse_sqrt_leaf_dimension_m_neg_half
+    * effective_wind.sqrt());
+// 传给 stomata 的就是它本身，没有再除 laisun
+```
+
+也就是说 Rust 用的是**叶尺度** rb，Fortran 用的是**冠层尺度** rb 再除面积 —— 两者在默认
+配置下必须**数值等价**才能让 `f_gssun` 走到只剩 1 ULP。这个等价性一直是被默认接受的，
+没有正面验证过。**下一轮的第一件事就是核它**：把 `cf`/`uaf` 的定义与
+`leaf_boundary_resistance` 的三处使用（`stomata` 的 `rb`、`cfw` 的 `wet_cond_cfw`、
+`rbsun/rssha`）逐个对上 —— 如果这里的尺度换算差一个因子或一次舍入，所有 `rb` 下游的
+表达式的形状争论都是无意义的，这也正好解释为什么三处形状改动全部被窗口否掉。
+
+Tested: `cfw` 括号改动前后 `bash /tmp/gf/dry_ts.sh 3` + `window_divergence.py`（582 不变）
+与干窗实测（21319/554.2229/822/17）；`MOD_LeafTemperature_Extended.F90:751/759/797/798/972/973/1078`
+与 `leaf_temperature.rs:452` 的对照；改动已回退。
+Not-tested: `rb` 尺度等价性的正面验证（下一轮）；`cf`/`uaf` 的定义。
