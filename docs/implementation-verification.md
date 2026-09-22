@@ -11674,3 +11674,61 @@ Tested: `canopy_monin_obukhov_with_scheme` 与 `CanopyMoninObukhovState` 的逐�
 `MOD_LeafTemperature.F90:515/521-524/535-536` 的 `z0hv`/`z0qv` 赋值核对；
 `fv.opt` 的按例程分账复核；`cargo test -q -p colm-core --lib -- --test-threads=1`（355 通过）。
 Not-tested: `MOD_GroundFluxes` 入口的逐位并排（下一步）。
+
+## **找到信号了**：`MOD_Thermal` 的六条 `tinc` 修正（差异 34 → 33）
+
+前面十几处融合都是零位移，这一轮终于动了一处。按"种子在地面通量那一段、且无条件执行"
+这条线索去看 `MOD_Thermal.F90:1227-1232`：
+
+```fortran
+tinc       = t_grnd - t_grnd_bef
+fseng      = fseng      + tinc*cgrnds
+fseng_soil = fseng_soil + tinc*cgrnds
+fseng_snow = fseng_snow + tinc*cgrnds
+fevpg      = fevpg      + tinc*cgrndl
+fevpg_soil = fevpg_soil + tinc*cgrndl
+fevpg_snow = fevpg_snow + tinc*cgrndl
+```
+
+Rust 的对应物（`standard_lct_step.rs` 的 `corrected_*`）原来是平铺加法，已改成
+`slope.mul_add(tinc, 原值)` 六处。
+
+**为什么这处应该是种子**：`tinc` 是**地表温度的增量**（很小），
+`tinc*cgrnds` 融不融合只动通量的末位、**动不了 `t_grnd`/`t_soisno`** ——
+这正是插桩观测到的"温度逐位相同、`fseng`/`fevpg` 却差 1–2 ULP"的指纹。
+
+**实测（第一次出现位移）**：
+
+| | 改前 | 改后 |
+|---|---|---|
+| 干窗第 0 步逐位不同的变量数 | 34 | **33** |
+| `f_lfevpa` | 差 2.84e-14 | **消失** |
+| `f_fevpa` | 6.7763e-21 | **2.0329e-20** |
+| `f_qstar` | 5.4210e-20 | **2.7105e-20** |
+| `f_qinfl` / `f_qlayer` | 1.6263e-19 | **1.7618e-19 / 1.8974e-19** |
+| `f_fevaq`… `f_fevpg` | 1.6263e-19 | 1.7618e-19 |
+
+同一条邻域里还有 `MOD_Thermal.F90:1256` 的 `fseng = fseng + htvp*egidif`，
+也已改成用 `water_limited_evaporation_kg_m2_s`（就是 `egidif`）自己收
+（`thermal_water` 原先给的是**已经乘好**的 `htvp*egidif`，调用方再相加就丢了融合）。
+这一处没有再动计数，但形状与上游一致。
+
+### 顺手记一个坑：`MOD_Thermal` 单文件编不出来
+
+按前面几轮的办法单独 dump `MOD_Thermal.F90` 时编译失败：
+
+```
+Error: Dummy argument 'smp' with INTENT(IN) in variable definition context
+       (actual argument to INTENT = OUT/INOUT) at (1)
+   MOD_Thermal.F90:1036
+```
+
+也就是说**内核构建时的实际选项与我抄的那一套不同**（`-fallow-argument-mismatch`
+不足以放行 INTENT 冲突）。所以 `MOD_Thermal` 的收缩**还没有 dump 可读** ——
+本轮这两处的依据是"上游源码 + 同型语句的既有 dump 形状 + 位移信号"三者，
+**不是**本模块自己的 GIMPLE。下一轮若要继续这一块，得先把真实选项从
+`vendor/CoLM202X/.bld` 的构建记录里挖出来（或直接对整个树 dump 一次）。
+
+Tested: `MOD_Thermal.F90:1227-1232/1256` 逐行核对；干窗 1 步逐位比对（34 → **33**，
+`f_lfevpa` 消失、四个量级改变）；`cargo test -q -p colm-core --lib -- --test-threads=1`（355 通过）。
+Not-tested: `MOD_Thermal` 本体 dump（单文件编译被 INTENT 冲突挡住，真实选项待查）。

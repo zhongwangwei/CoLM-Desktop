@@ -348,18 +348,29 @@ fn finish_energy_step(
     })?;
     let surface_temperature_k = current_ground_temperature(input.ground_temperature, &ground)?;
     let ground_temperature_change = surface_temperature_k - ground_temperature_k;
-    let corrected_soil_sensible_heat_w_m2 = leaf.soil_sensible_heat_w_m2
-        + ground_temperature_change * leaf.ground_sensible_temperature_slope_w_m2_k;
-    let corrected_snow_sensible_heat_w_m2 = leaf.snow_sensible_heat_w_m2
-        + ground_temperature_change * leaf.ground_sensible_temperature_slope_w_m2_k;
-    let corrected_soil_evaporation_kg_m2_s = leaf.soil_evaporation_kg_m2_s
-        + ground_temperature_change * leaf.ground_latent_temperature_slope_kg_m2_s_k;
-    let corrected_snow_evaporation_kg_m2_s = leaf.snow_evaporation_kg_m2_s
-        + ground_temperature_change * leaf.ground_latent_temperature_slope_kg_m2_s_k;
-    let mut corrected_ground_sensible_heat_w_m2 = leaf.ground_sensible_heat_w_m2
-        + ground_temperature_change * leaf.ground_sensible_temperature_slope_w_m2_k;
-    let mut corrected_ground_evaporation_kg_m2_s = leaf.ground_evaporation_kg_m2_s
-        + ground_temperature_change * leaf.ground_latent_temperature_slope_kg_m2_s_k;
+    // `MOD_Thermal.F90:1227-1232` 的六条 `tinc` 修正：
+    // `fseng(:) = fseng(:) + tinc*cgrnds`、`fevpg(:) = fevpg(:) + tinc*cgrndl`
+    // —— GIMPLE 是 `FMA(tinc, cgrnds, 原值)`，`tinc*系数` 被吸收。
+    // **这正是"温度逐位相同、通量差 1 ULP"该出现的地方**：`tinc` 是地表温度的
+    // 增量（很小），它的乘积融不融合只动通量的末位，动不了 `t_grnd`/`t_soisno`。
+    let corrected_soil_sensible_heat_w_m2 = leaf
+        .ground_sensible_temperature_slope_w_m2_k
+        .mul_add(ground_temperature_change, leaf.soil_sensible_heat_w_m2);
+    let corrected_snow_sensible_heat_w_m2 = leaf
+        .ground_sensible_temperature_slope_w_m2_k
+        .mul_add(ground_temperature_change, leaf.snow_sensible_heat_w_m2);
+    let corrected_soil_evaporation_kg_m2_s = leaf
+        .ground_latent_temperature_slope_kg_m2_s_k
+        .mul_add(ground_temperature_change, leaf.soil_evaporation_kg_m2_s);
+    let corrected_snow_evaporation_kg_m2_s = leaf
+        .ground_latent_temperature_slope_kg_m2_s_k
+        .mul_add(ground_temperature_change, leaf.snow_evaporation_kg_m2_s);
+    let mut corrected_ground_sensible_heat_w_m2 = leaf
+        .ground_sensible_temperature_slope_w_m2_k
+        .mul_add(ground_temperature_change, leaf.ground_sensible_heat_w_m2);
+    let mut corrected_ground_evaporation_kg_m2_s = leaf
+        .ground_latent_temperature_slope_kg_m2_s_k
+        .mul_add(ground_temperature_change, leaf.ground_evaporation_kg_m2_s);
     let (thermal_water, split_thermal_water) = if input.ground_temperature.use_split_soil_snow {
         let snow_layers = input.ground_temperature.snow_layers;
         let snow_layer_exists = snow_layers > 0;
@@ -402,7 +413,14 @@ fn finish_energy_step(
             time_step_seconds: input.ground_temperature.time_step_seconds,
             ground_latent_heat_j_kg: leaf_input.ground_latent_heat_j_kg,
         })?;
-        corrected_ground_sensible_heat_w_m2 += water.sensible_heat_correction_w_m2;
+        // `MOD_Thermal.F90:1256` 的 `fseng = fseng + htvp*egidif`：GIMPLE 是
+        // `FMA(htvp, egidif, fseng)`。`thermal_water` 里存的是**已经乘好的**
+        // `sensible_heat_correction_w_m2`，那样再相加就少一次融合，所以这里
+        // 用它的原始因子 `water_limited_evaporation_kg_m2_s`（就是 `egidif`）自己收。
+        corrected_ground_sensible_heat_w_m2 = leaf_input.ground_latent_heat_j_kg.mul_add(
+            water.water_limited_evaporation_kg_m2_s,
+            corrected_ground_sensible_heat_w_m2,
+        );
         corrected_ground_evaporation_kg_m2_s = water.ground_evaporation_kg_m2_s;
         (Some(water), None)
     };
