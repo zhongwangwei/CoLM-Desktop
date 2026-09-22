@@ -13246,3 +13246,27 @@ Not-tested: 从 `colm.x` 反汇编取形状（工具层面仍缺行号归因能�
 
 同一类陷阱适用于：`/tmp/gf/win4/*`（三窗口）、`/tmp/gf/winCN/*`、`/tmp/gf/fd_*`（差分输出）。
 凡是要拿来当"当前基线"的数字，都要由当轮的脚本重新生成。
+
+## `gbh2o` 的源头顺序（源码显式、四处口径全不动）
+
+`MOD_AssimStomataConductance.F90:608`：
+
+```fortran
+gbh2o = 1./rb * tprcor/tlef        ! 从左到右 ((1/rb)*tprcor)/tlef
+```
+
+Rust 原写 `pressure_conversion / (leaf_boundary_resistance * leaf_temperature_k)`
+（即 `tprcor/(rb*tlef)`）—— 结合顺序不同。改成源码顺序后：
+
+| 口径 | 改前 | 改后 |
+|---|---|---|
+| 3 步 bitwise / 各变量 | 585/692 | 完全相同 |
+| 干 / 湿 / 雪窗 | 21328 / 32655 / 33651 | 完全相同（容差三口径也全同）|
+
+**四处口径一次没动**。落地理由与 `rbsun`/`us10m` 同类：这是**源码显式**的运算顺序
+（不是收缩），照抄不引入未验证的假设，也不会让任何口径变差。
+
+Tested: `MOD_AssimStomataConductance.F90:608` 与 `photosynthesis.rs:180` 的对照；
+`dry_ts.sh 3` + `window_divergence.py` 与三个黄金窗口实测（四处全同）；
+`cargo fmt --all --check`；`cargo test -q -p colm-core --lib`（355 通过）。
+Not-tested: none（惰性改动，无未覆盖面）。

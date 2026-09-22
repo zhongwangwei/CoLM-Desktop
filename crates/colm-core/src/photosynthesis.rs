@@ -177,8 +177,10 @@ pub fn photosynthesis_parameters(
             * c4_fraction)
         * input.canopy_integration[0];
     let pressure_conversion = f77(44.6 * 273.16) * input.air_pressure_pa / f77(1.013e5);
+    // `MOD_AssimStomataConductance.F90:608` 是 `gbh2o = 1./rb * tprcor/tlef`
+    // —— 从左到右 `((1/rb)*tprcor)/tlef`，不是 `tprcor/(rb*tlef)`。
     let boundary_conductance_h2o =
-        pressure_conversion / (input.leaf_boundary_resistance_s_m * input.leaf_temperature_k);
+        (1.0 / input.leaf_boundary_resistance_s_m) * pressure_conversion / input.leaf_temperature_k;
     Ok(PhotosynthesisParameters {
         maximum_carboxylation_mol_m2_s: maximum_carboxylation,
         electron_transport_mol_m2_s: electron_transport,
