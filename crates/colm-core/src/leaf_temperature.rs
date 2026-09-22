@@ -793,35 +793,48 @@ pub fn leaf_temperature(
             evaporation_imbalance = -0.9 * leaf_evaporation;
             leaf_evaporation *= 0.1;
         }
-        // `dtl(it) = (…)/(…)`（`MOD_LeafTemperature_Extended.F90:1271-1273`）——
+        // `dtl(it) = (…)/(…)`（`MOD_LeafTemperature_Extended.F90:1188-1196`）——
         // **这就是准 Newton 的步长、也就是退出判据 `|dtl| < 0.01` 里的那个量**，
         // 每差 1 ULP 都可能让迭代次数差一次（PHS 的 `vegwp` 因此整层偏移）。
-        // 分子分母各自是一条"加法链里挂乘积"的形状，gfortran 把每个乘积都收进加法：
-        // 实测 4000 组里，分子 `fma(ci*snow, dt, fma(cl*rain, dt, fma(-h,fe,base)))`
-        // 逐位全同（不收缩只有 2907/4000），分母
-        // `fma(ci,snow, fma(cl,rain, fma(h,C,base)))` 3988/4000（不收缩 2905/4000）。
-        // 分子里 `cpliq*qintr_rain*(t_precip-tl)` 收的是**外层**那个乘积
-        // （把 `cpliq*qintr_rain` 先算成一项再 fma），不是内层的 `rain*(…)`。
+        //
+        // 分子和分母的收缩形状**不一样**，而且必须先看内核汇编再写（下面紧邻的
+        // 注释给出逐条 `_NNN`）。曾经据独立差分驱动器的 4000 组统计把两边都写成
+        // 全融合，方向是错的 —— 驱动器里没有分母共享乘积这个共同子表达式，
+        // 编译器于是替它做了另一种收缩选择。这条教训与第 166/167 轮同源。
         let precipitation_temperature_difference =
             input.precipitation_temperature_k - state.leaf_temperature_k;
-        let denominator = ICE_HEAT_CAPACITY_J_KG_K.mul_add(
-            intercepted_snow,
-            WATER_HEAT_CAPACITY_J_KG_K.mul_add(
-                intercepted_rain,
-                leaf_latent_heat_j_kg.mul_add(
-                    leaf_evaporation_temperature_slope,
-                    clai / input.time_step_seconds - net_longwave_temperature_slope
-                        + leaf_sensible_temperature_slope,
-                ),
-            ),
-        );
+        // 分子/分母共用 `cpliq*max(0,qintr_rain)` 与 `cpice*max(0,qintr_snow)` 这两个
+        // 乘积 —— 正是这一点决定了 gfortran 的收缩选择：**两个乘积必须先各自
+        // 舍入成一项**（它们在分母里也要用，共同子表达式被 CSE 掉之后，
+        // `x*y + z` 里的那个乘积已经存在，后一个加法无从收缩）。实测
+        // `extends/interception/MOD_LeafTemperature_Extended.F90` 编出来的汇编
+        // （`gfortran -S -O2` 的生产 flag）里，分母是**整条平铺**：
+        //   `_537 = clai/deltim`、`_538 = _537 - dirab_dtl`、`_539 = _538 + fsenl_dtl`
+        //   `_540 = htvpl*fevpl_dtl`(fmul)、`_541 = _539 + _540`(fadd)
+        //   `_526 = cpliq*rain`(fmul)、`_533 = cpice*snow`(fmul，与分子共用)
+        //   `_542 = _526 + _541`(fadd)、`_543 = _542 + _533`(fadd)
+        // 而分子那两处加法**是**收缩的（`fmadd(_526,_530,_525)`、
+        // `fmadd(_530,_533,…)`）—— 注意收缩的是**外层**的 `(cpliq*rain)*(t_precip-tl)`，
+        // 内层的 `cpliq*rain` 仍然是先算好的那一项。
+        //
+        // 先前这里写成三层 `mul_add` 嵌套（分母全融合、分子把 `cpliq*rain` 也融进去），
+        // 依据是独立差分驱动器的 3988/4000 —— 但驱动器里没有分母共享那个乘积，
+        // 编译器于是做出了**不同的**收缩选择，属于本仓库记过的
+        // "独立编译的 dump 不能代表内核二进制"（第 166/167 轮）。以汇编为准。
+        let water_heat_capacity_flux = WATER_HEAT_CAPACITY_J_KG_K * intercepted_rain;
+        let ice_heat_capacity_flux = ICE_HEAT_CAPACITY_J_KG_K * intercepted_snow;
+        let denominator = ((clai / input.time_step_seconds - net_longwave_temperature_slope
+            + leaf_sensible_temperature_slope)
+            + leaf_latent_heat_j_kg * leaf_evaporation_temperature_slope)
+            + water_heat_capacity_flux
+            + ice_heat_capacity_flux;
         ensure!(
             denominator.is_finite() && denominator != 0.0,
             "leaf energy denominator is invalid"
         );
-        let numerator = (ICE_HEAT_CAPACITY_J_KG_K * intercepted_snow).mul_add(
+        let numerator = ice_heat_capacity_flux.mul_add(
             precipitation_temperature_difference,
-            (WATER_HEAT_CAPACITY_J_KG_K * intercepted_rain).mul_add(
+            water_heat_capacity_flux.mul_add(
                 precipitation_temperature_difference,
                 (-leaf_latent_heat_j_kg).mul_add(
                     leaf_evaporation,

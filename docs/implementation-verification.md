@@ -14788,3 +14788,190 @@ Not-tested: `th_ext.opt` 与 `lt_ext.opt` 余下未核行的逐条 A/B。
 
 Tested: 第 0 步 history 的辐射/通量族筛选（上表）；与前几轮结论的合并推断。
 Not-tested: 该链余下收缩的逐条对照（下一轮）。
+
+## 第 245 轮：整核 `-ffp-contract=off` 对照 —— 收缩**确实**是杠杆，但不止它一个
+
+前三轮一直在"逐条猜收缩站点"（第 243 轮方法 1 核了 7 行，只命中"已对"）。本轮换一个
+**不猜**的问法：把整个内核用 `-ffp-contract=off` 再编一遍，看第 0 步 restart 到底有多少
+变量**真的**依赖收缩。
+
+做法（不动 `kernels/default`）：把 `oracle/scripts/build_kernel.sh` 复制到 `/tmp/gf/`，
+给 `MAKE_FF` 追加 `${EXTRA_FFLAGS:-}`、把 make 目标收成 `colm.x`、`REPO_ROOT` 写死，
+再 `EXTRA_FFLAGS="-ffp-contract=off" ... default /tmp/gf/nocontr`。编译行实测是
+`gfortran -fopenmp … -ffp-contract=off -c -O2 -fdefault-real-8 …` —— `FOPTS` 里不含
+`-ffp-contract`，所以这个 off 一路生效。产物 `/tmp/gf/nocontr/default/colm.x`。
+
+### 结果一：收缩影响 19/68 个 restart 变量
+
+干窗 1 步、同一份 `case.nml`（`/tmp/gf/ctr_ts.sh <colm.x> <tag>`，比 `dry_ts.sh` 多一个
+内核参数、只跑内核侧）：
+
+```
+def vs noctr: 19 / 68 个 restart 变量不同
+```
+
+**19 与 Rust 对默认内核的 19 是同一个量级** —— 也就是说"末位残差可不可能全由收缩解释"
+这个问题，答案是"量级上完全可以"，收缩这条线值得继续挖（第 241 轮把靶子重新指回叶温
+是对的）。
+
+### 结果二：三路分类（def / noctr / Rust 同场比较）
+
+对 68 个变量逐个判 `def==noctr`、`def==rust`、`noctr==rust`：
+
+**先记一次自己的错**：这张表的第一版把两格的标签写反了（`(def==noctr, def==rust, noctr==rust)`
+这个三元组是按 `(kd,kn,nr)` 生成的，第一版字典的键与文字错位），据此在对话里得出过
+"9 个写对了、2 个漏融合"的相反结论。下面这一版是重新按三元组逐格核过的。
+
+| 三元组 `(def==noctr, def==rust, noctr==rust)` | 数量 | 变量 | 含义 |
+|---|---|---|---|
+| `(T,T,T)` | 47 | （含 `tleaf`、`t_grnd`、`alb`、`emis`、`sabg`、`lai`…） | 与收缩无关，三方一致 |
+| `(F,F,T)` | 9 | `fh` `fm` `fq` `hk` `rib` `smp` `tstar` `wice_soisno` `wliq_soisno` | Rust **等于不收缩内核**、不等于默认内核 |
+| `(F,T,F)` | 2 | `coszen` `vegwp` | Rust 等于默认内核（收缩形状写对） |
+| `(F,F,F)` | 8 | `fwet_snow` `ldew` `ldew_snow` `qref` `qstar` `t_soisno` `ustar` `zol` | 三方互不相等 |
+| `(T,F,F)` | 2 | `rst` `trad` | **与收缩无关**，只有 Rust 不同 |
+
+**这张表不能直接读成"哪里漏了融合" —— 这是本轮最重要的一条读法警告。**
+`fh`/`fm`/`fq` 落在 `(F,F,T)` 那一格，很容易被读成"Rust 的 `moninobukm` 漏了融合"；
+但 `oracle/scripts/compare_moninobukm.sh` 恰恰**把模块按生产 flag 单独编**（注释里写明
+"不加 `-ffp-contract=off`"），20 个输出 × 20000 组逐位全同 —— 也就是说
+**"输入逐位相同 ⇒ Rust 的 fm/fh/fq 与默认内核逐位相同"已经被证明过**。于是
+`(F,F,T)` 只能解释为：**喂给这个调用的某个上游输入，默认内核与不收缩内核不同，而 Rust
+给的与不收缩内核那一侧一致**。同样的逻辑适用于 `smp`/`hk`/`wliq_soisno`（土壤水力那条
+有 `compare_soilthermal.sh` 的独立差分）。
+
+所以这张表的正确用途是**缩小上游搜索范围**，不是找站点：它把 19 个"收缩敏感"变量分成
+"Rust 站在不收缩那侧"（9 个）、"三方都不同"（8 个）、"与收缩无关"（2 个），
+真正要回答的问题仍然是**哪一个上游量先分叉**。
+
+读法：
+
+* `coszen`/`vegwp` 两个 Rust 与默认内核一致 ⇒ 它们的收缩形状**已经对了**（`vegwp` 的
+  maxrel 1.14e-13 说明它是被放大的下游，不是种子）；
+* `rst`/`trad` 与收缩无关，但**可能是下游继承**：`trad=(olrg/stefnc)**0.25`，而 `olrg` 在
+  `(F,F,F)` 那 8 个里；`rst=1/(laisun/rssun+laisha/rssha)`，`rssun`/`rssha` 来自叶温循环。
+  不能当成"找到一个非收缩缺陷"。
+
+**下一步**：不要再按变量猜站点。回到第 245 轮末尾的结论 —— 用**逐迭代、逐位**的现场探针
+把叶温循环内部（以及 `MOD_GroundFluxes` 那次 `moninobuk`）的**首个分叉量**找出来；
+`(F,F,T)` 那 9 个正好给了探针该盯的输出名单。
+
+Tested: `/tmp/gf/nocontr/default/colm.x` 的构建；`ctr_ts.sh` 两次 1 步跑；
+`restart_divergence.py` 三对比较（19 / 19 / 12）；上面的三路分类脚本（改后重跑一次，
+与改前逐格一致）。
+Not-tested: 逐迭代现场探针（下一轮）。
+
+### 结果三：`11 vs 10` 的 `moninobukm` 计数是**误读**，叶温循环两侧都是 10 轮
+
+第 239 轮据 `/tmp/gf/argprobe3/probe.txt` 的"11 行十六进制"推断"上游调 11 次、Rust 调 10 次"，
+并把它当成"结构不同但良性"。数一下标记前缀就清楚了：
+
+```
+$ grep -o "ARGPROBE_[A-Z]*" /tmp/gf/argprobe3/probe.txt | sort | uniq -c
+      1 ARGPROBE_ACC
+     10 ARGPROBE_EXT
+```
+
+`step0_arg_probe3.sh` 同时给**三个候选文件**插了标记：`EXT`（叶温 `CALL moninobukm`）、
+`ACC`（`main/MOD_Vars_1DAccFluxes.F90` 的 `CALL moninobuk`）、`PC`（另一份叶温）。第 11 行是
+`ACC`，**不是第 11 轮叶温迭代**。也就是说：
+
+* 内核叶温循环 = **10 轮**，与 Rust 的 10 次 `canopy_monin_obukhov_with_scheme` 一致；
+* 第 244 轮那句"上游按阳叶/阴叶各调一次（每轮迭代 2 次）"是**错的**（源码
+  `MOD_LeafTemperature_Extended.F90:700/723` 每轮只有一次调用），撤回；
+* 与"`tleaf` 逐位相同"合起来：**第 223 轮列的第 1 类（迭代次数/调用顺序差）被否**。
+
+`ARGPROBE_ACC` 那一行的 `hu_/ht_/hq_` 是 `401897DED2C68EBA`（≈6.15 m），与叶温那 10 行的
+`4018000000000000`（=6.0 m）不同 —— 对表时要**按前缀分组**，这正是第 244 轮"按值配不要
+按行号配"的同一个坑的另一种表现。
+
+Tested: `probe.txt` 的标记计数（10 EXT / 1 ACC）；与源码 `:700`/`:723` 的单调用对照。
+Not-tested: `ARGPROBE_ACC` 那次调用的输出（不是本轮目标）。
+
+## 第 245 轮：`dtl` 的分母在内核里是**平铺**的 —— 并给"独立 dump 不可信"补上一个可执行的检查
+
+第 243 轮用 `gfortran -S` 的 `.loc` 读汇编，发现叶温 `dtl`（`MOD_LeafTemperature_Extended.F90:1188`）
+的分母是整条平铺、分子才是融合的。这与本仓库此前据**独立差分驱动器** 4000 组统计写下的
+"分母也是三层 `mul_add` 嵌套"（源码里那条注释）冲突。冲突的裁决不能靠再读一遍 `.s` ——
+要证明**这份 `.s` 描述的就是出货内核**。
+
+**新方法（可复用）：对同一函数做"操作码窗口比对"。**
+
+```
+/opt/homebrew/opt/llvm/bin/llvm-objdump \
+    --disassemble-symbols=___mod_leaftemperature_MOD_leaftemperature <file>
+```
+
+对 `/tmp/gf/r166/lt_ext.o`（独立编译、`.s` 的来源）与 `kernels/default/colm.x`（出货内核）
+各取一次，浮点操作码直方图**逐项相同**：
+
+```
+fmul 211  fadd 66  fsub 77  fmadd 52  fmsub 16  fnmsub 7  fdiv 108
+```
+
+差集只有整数/访存类（`ldr 931/901`、`str 386/381`、`add 180/197`、`fmov 91/106`），
+属寄存器分配差异，不影响浮点语义。再看那个 `fdiv` 的**前驱窗口** —— 两份都出现
+
+```
+… fmul, fmadd, ldr, [fmov,] ldr, ldr, fadd, ldr, fadd, fadd, fadd, fdiv
+```
+
+即分母收尾是**三个连续的 `fadd`**。如果分母是三层 `fma`，这里应当是连续的 `fmadd`。
+**分母平铺，判据落在出货二进制上**，不再是"我读的 `.s` 大概是内核那份"。
+
+于是落地的形状（`leaf_temperature.rs`）：
+
+```text
+_539 = (clai/deltim - dirab_dtl) + fsenl_dtl
+_541 = _539 + htvpl*fevpl_dtl             平铺
+_526 = cpliq*max(0,qintr_rain)            先舍入成一项
+_533 = cpice*max(0,qintr_snow)            先舍入成一项
+_543 = ((_541 + _526) + _533)             平铺
+分子：fma(dT, _533, fma(_526, dT, fma(-htvpl, fevpl, sabv+irab-fsenl)))
+```
+
+**为什么分母不收缩**：`_526`/`_533` 这两个乘积**分子里也要用**（分子用它们的"外层"乘积
+`(cpliq*rain)*(t_precip-tl)`）。共同子表达式被 CSE 成独立的一项之后，分母里的加法就
+没有乘积可吸了 —— 这是"共同子表达式挡住收缩"的典型，也正是独立驱动器里**没有**的那一半
+上下文。与第 166/167 轮"独立编译的 dump 不代表内核二进制"同源，但这次给出了可执行的判别。
+
+**度量：这一步是惰性的。** 改完三次口径全部逐字节不变：
+
+```
+restart（干窗 1 步）: 19 / 68，变量表与 maxabs 与改前完全相同
+步级（dry_ts.sh 3）: 44 个变量、585/692（84.5376%），与基线相同
+0 步 history 的 33 个差异变量表：相同
+```
+
+按本仓库的规矩"收缩形状要有度量支持才落"，惰性形状本该回退；这里**留**它是另一条理由：
+它不再是从 dump 猜出来的收缩，而是**出货二进制的操作码窗口直接指明的形状**，属于"照抄
+编译器"，与"源码显式形状即使惰性也照抄"同类。这是**保真度改动，不是度量修复**，据实记录
+以免后来者以为它修好了什么。同时撤回源码里那句 3988/4000 —— 那是独立驱动器的数字，
+对内核不成立。
+
+Tested: `llvm-objdump` 两次（`.o` 与 `colm.x`）的浮点直方图与 `fdiv` 前驱窗口；改后
+`dry_ts.sh 1` / `dry_ts.sh 3` + `restart_divergence.py` / `window_divergence.py`（三次口径
+逐字节同基线）。
+Not-tested: 分子那一侧 `fma(-htvpl,fevpl,·)` 的操作码窗口逐条比对（直方图同；逐条留给下次
+遇到疑点时复用本方法）。
+
+**下一轮**：**不要再按变量猜站点**（本项目到这里已经证明"dump 里看到收缩"与"Rust 里该
+加收缩"之间隔着一个共同子表达式和一个 CSE）。做法改为**逐迭代、逐位的现场探针**：
+
+1. 在 `extends/interception/MOD_LeafTemperature_Extended.F90` 的收敛判据前插一条
+   `WRITE(*,'(A,I3,24Z17)')`，转储 `it, tl, dtl(it), del, dele, fsenl, fevpl, irab,
+   dirab_dtl, fsenl_dtl, fevpl_dtl, obu, ustar, cfh, cfw, raw, rah, wta0, wtg0, wtaq0,
+   wtgq0, taf, qaf, qsatl` 的**位型**；Rust 侧在 `last = Iteration{…}` 之后打同一组
+   （临时插桩，量完立刻 `git checkout` 回来）；
+2. 用现成的 `step_iter_probe.sh` 那套"备份→插桩→重编→跑 1 步→还原→重编"骨架
+   （注意 `trap … EXIT`、**不要预建 `$WORK/out`**、跑完核对 `strings` 与
+   `CoLM Execution Completed`）；
+3. 两侧按迭代号逐行比，找**第一个分叉的量**。目标是 §结果二 里 `(F,F,T)` 那 9 个
+   （`fh fm fq rib tstar` 一族、`smp hk wliq_soisno wice_soisno` 一族）第一次出现不同的
+   那一轮、那一个量。
+
+`rst`/`trad`（与收缩无关的那两个）留作交叉验证：如果现场探针给出的首个分叉量在
+`rssun`/`rssha`/`olrg` 那条链上，就同时解释它们。
+
+同一套"操作码窗口比对"（`llvm-objdump --disassemble-symbols=…` 对 `colm.x` 取窗口）
+下次遇到"这个表达式到底融没融"的争议时直接复用 —— 它是目前唯一**指向出货二进制**的
+判据。
