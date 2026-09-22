@@ -10779,3 +10779,31 @@ Tested: 驱动第 1 算例 8 个输入的逐位打印 + Python 独立复算（8/
 Tested: 驱动 `/tmp/gf/r116/hsol.f90`（`-O2 -fwrapv -ffp-contract=off`）与 Python 模型
 （`Fraction` 精确 fma、含全部早返回）的 20000 组逐位比对：**psi 0、hk 0、vliq 0**；
 驱动第 17 算例输入与 Python 逐位相同；`cargo test -q -p colm-core --lib`（354 通过）、工作树干净。
+
+### `albland` 的第 3、4 处落地：雪龄反照率的三条式子（`aged_snow_albedo`）
+
+上游 `MOD_Albedo.F90:2036-2038`（`1+4*coszrs`）与 `:350-357`（`dfalbs/dfalbl` 与直射修正）：
+
+```
+_86 = FMA(2*c, 2.0, 1.0)                     ! 1 + 4*c（先算 2*c）
+_146 = FNMA(age, {0.2, 0.5}, {1.0, 1.0})     ! 1 - 0.2*age（可见）/ 1 - 0.5*age（近红外）
+_4  = FMA(0.4*max(cff,0), 1-diffuse, diffuse) ! 直射修正，收左边那个乘积
+```
+
+Rust 的 `radiation.rs::aged_snow_albedo` 已按此改（`doubled_zenith.mul_add(2.0, 1.0)`、
+`(-age_factor).mul_add(age, 1.0)`、`(0.4*direct_correction).mul_add(1.0-diffuse, diffuse)`）。
+
+窗口（基线 = `net_solar` 改动之前）：
+
+| 窗口 | 逐位不同值 | Σ\|Δ\| | 超容差 | 变量数 |
+|---|---|---|---|---|
+| 干 | 21229 → 21236 | 216.9941 → 384.4436 | 813 → 837 | 17（不变） |
+| 湿 | 33207 → **33087** | 10386.5309 → **10374.2243** | 20671 → **20662** | 68 |
+| 雪 | 33593 → **33647** | 不变 | 不变 | 79 |
+
+湿窗逐位少了 120 个、雪窗多了 54 个；干窗的 Σ\|Δ\| 变大而 tier2 变量数不变 ——
+与 `net_solar` 那轮同一模式（这次是三个改动的合并效果，无法单独归因）。
+
+Tested: `MOD_Albedo.F90:2036-2038/350-357` 与 `albland` 单独 dump 的第 3、4 处对应；
+三个黄金窗口三口径 A/B；`cargo test -q -p colm-core --lib`（354 通过）；`cargo fmt --all --check`；
+`cargo clippy -q -p colm-core --all-targets -- -D warnings`（干净）。

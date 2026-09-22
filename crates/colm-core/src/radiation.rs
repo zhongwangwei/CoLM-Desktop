@@ -667,10 +667,15 @@ pub(crate) fn aged_snow_albedo(
         snow_age,
     )?;
     let age = 1.0 - 1.0 / (1.0 + snow_age);
-    let direct_correction = ((1.5 / (1.0 + 4.0 * cosine_zenith)) - 0.5).max(0.0);
+    // `MOD_Albedo.F90:2036-2038/350-357` 的三处收缩（`albland` 的
+    // 第 3、4 处）：`1 + 4*coszrs` 是 `FMA(2*c, 2.0, 1.0)`（先算 `2*c`）；
+    // `1 - age_factor*age` 是 `FNMA(age, age_factor, 1.0)`；
+    // 直射修正是 `FMA(0.4*corr, 1-diffuse, diffuse)`（收左边那个乘积）。
+    let doubled_zenith = 2.0 * cosine_zenith;
+    let direct_correction = ((1.5 / doubled_zenith.mul_add(2.0, 1.0)) - 0.5).max(0.0);
     let snow_band = |new_snow_albedo: f64, age_factor: f64| {
-        let diffuse = new_snow_albedo * (1.0 - age_factor * age);
-        let direct = diffuse + 0.4 * direct_correction * (1.0 - diffuse);
+        let diffuse = new_snow_albedo * (-age_factor).mul_add(age, 1.0);
+        let direct = (0.4 * direct_correction).mul_add(1.0 - diffuse, diffuse);
         [direct, diffuse]
     };
     Ok(([snow_band(0.85, 0.2), snow_band(0.65, 0.5)], snow_age))
