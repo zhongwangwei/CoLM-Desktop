@@ -12872,3 +12872,58 @@ Tested: `cfw` 括号改动前后 `bash /tmp/gf/dry_ts.sh 3` + `window_divergence
 与干窗实测（21319/554.2229/822/17）；`MOD_LeafTemperature_Extended.F90:751/759/797/798/972/973/1078`
 与 `leaf_temperature.rs:452` 的对照；改动已回退。
 Not-tested: `rb` 尺度等价性的正面验证（下一轮）；`cf`/`uaf` 的定义。
+
+## `rb` 的尺度问题定案：`rb_opt` 是**硬编码参数 3**，`rbsun = rb/laisun` 是惰性但必须照抄
+
+上一轮列出的"下一轮第一件事"：核 `rb` 的尺度换算。结论如下。
+
+### `rb_opt = 3` 写死在模块里，`uaf = ustar` 那条支是死代码
+
+```fortran
+! MOD_LeafTemperature_Extended.F90:484
+integer, parameter :: rb_opt = 3             ! rb with vertical profile consideration
+…
+uaf = ustar ; cf = 0.01*sqrtdi/sqrt(uaf) ; rb = 1/(cf*uaf)   ! :748-751 —— 永不执行
+IF (rb_opt == 3) THEN
+   utop = ustar/vonkar * fmtop
+   ueff = ueffect(utop, htop, z0mg, z0mg, a_k71, 1._r8, 1._r8)
+   cf   = 0.01*sqrtdi*sqrt(ueff) ; rb = 1./cf                 ! :755-759 —— 恒走这条
+ENDIF
+```
+
+所以 Rust 用 `wind_at_top = ustar/vonkar*fmtop` + `effective_canopy_wind(...)` 再
+`1/(0.01*sqrtdi*sqrt(effective_wind))` 是**对的那一支**（`leaf_temperature.rs:441-453`），
+不是"另一种参数化"。
+
+### 但它缺了调用前的 `rb/laisun`
+
+```fortran
+rbsun = rb / laisun        ! :797，传给 stomata 的边界阻力
+rbsha = rb / laisha        ! :798
+… CALL stomata(… rbsun …)  ! :800
+rssun = rssun * laisun     ! :941，返回后再折回叶尺度
+```
+
+Rust 原来把叶尺度的 `leaf_boundary_resistance` 直接传进 `stomata`，少了 `:797` 那一步。
+按源码补上（只改非 PHS 两处；PHS 那条路在 `:745-752` 传的是 `rb` 本身，不折）：
+
+| 口径 | 改前 | 改后 |
+|---|---|---|
+| 3 步 bitwise / 各变量 ndiff、maxrel | 582/692 | **完全逐位相同** |
+| 干窗 | 21326 / 338.9256 / 825 / 17 | **21328** / 338.9256 / 825 / 17 |
+| 湿窗 | 32681 / 10369.4411 / 20672 / 68 | **32679** / 10369.4411 / 20672 / 68 |
+| 雪窗 | 33651 / 444394.4368 / 25896 / 79 | 同 |
+
+**数值上是惰性的**，原因也清楚了：`gssun = (laisun/rssun)*(tprcor/tlbef)`（`:1320`）
+里调用前的 `/laisun` 与调用后的 `*laisun` 相消。但形状是源码明写的（不是收缩），
+按 `gssun` 那处的同样理由落地：容差三口径一字不变、步级口径逐位不变、逐位计数 ±2
+（干 +2、湿 −2），没有理由不照抄。
+
+**这一条同时解释了前三轮的三次失败**：`clai`/`thvstar`/`cfw` 都在 `rb` 下游，而 `rb`
+这块拼图此前是错的 —— 现在拼上了，但它是惰性的，所以**种子仍然在别处**。
+
+Tested: `…_Extended.F90:484/748-751/755-759/797-798/941/1320` 与
+`leaf_temperature.rs:441-453/609/623/637` 的逐句对照；改动前后 `dry_ts.sh 3` +
+`window_divergence.py`（582 不变）与三个黄金窗口实测；`cargo test -q -p colm-core --lib`
+（355 通过）；`cargo fmt --all --check`；`cargo clippy --workspace --all-targets -D warnings`。
+Not-tested: PHS 那条路上 `rb` 的用法（本配置不走）；第 0 步种子的定位（仍开放）。

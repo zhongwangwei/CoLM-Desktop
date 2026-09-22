@@ -484,11 +484,16 @@ pub fn leaf_temperature(
         } else {
             input.soil_water_stress_sunlit
         };
+        // 上游调用前把叶尺度 `rb` 折成冠层尺度：`rbsun = rb/laisun`、`rbsha = rb/laisha`
+        // （`MOD_LeafTemperature_Extended.F90:797-798`），返回后再 `rssun = rssun*laisun`
+        // （`:941`）。两处的 `laisun` 在 `gssun = (laisun/rssun)*(tprcor/tlbef)`（`:1320`）
+        // 里相消，所以这一处**数值上是惰性的**（实测步级口径逐位不变、三个窗口的容差口径
+        // 也不变），但形状必须照抄 —— PHS 那条路传的是 `rb` 本身（`:745-752`），不折。
         let mut sunlit_resistance = stomatal_resistance(
             input,
             StomataStep {
                 leaf_temperature_k: state.leaf_temperature_k,
-                leaf_boundary_resistance_s_m: leaf_boundary_resistance,
+                leaf_boundary_resistance_s_m: leaf_boundary_resistance / laisun,
                 absorbed_par_w_m2: input.sunlit_absorbed_par_w_m2,
                 soil_water_stress: stomatal_soil_stress,
                 canopy_integration: cintsun,
@@ -501,7 +506,7 @@ pub fn leaf_temperature(
             input,
             StomataStep {
                 leaf_temperature_k: state.leaf_temperature_k,
-                leaf_boundary_resistance_s_m: leaf_boundary_resistance,
+                leaf_boundary_resistance_s_m: leaf_boundary_resistance / laisha,
                 absorbed_par_w_m2: input.shaded_absorbed_par_w_m2,
                 soil_water_stress: if input.plant_hydraulics.is_some() {
                     1.0
