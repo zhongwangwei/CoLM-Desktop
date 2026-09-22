@@ -11381,3 +11381,67 @@ Tested: `oracle/scripts/compare_flag_isolated.sh` 在默认 / `DEF_USE_PLANTHYDR
 `DEF_VEG_SNOW=.false.` 三种配置下的逐位比对（34/37/18 个变量，量级如上表）；
 `cargo fmt --all --check`。
 Not-tested: 第 1 步内 `wliq_soisno` 的逐层打点（需要重建内核，本轮没做）。
+
+## 第 0 步的种子缩到"扩散求解之前"：`fseng`/`fevpg` 在入口就已经差 1–2 ULP
+
+接着上一节的"种子在水分/能量共用的那一环"，这轮**真的重建了内核**做了两次定点插桩
+（`CoLMMAIN` 能量步之后、`MOD_GroundTemperature` 入口/出口），两侧对齐同一点打印。
+插桩是临时的，**已全部还原**（`git status` 干净、`test_upstream_f48_sync.py` PASS、
+内核二进制按 `manifest.json` 的 sha256 复原）。
+
+### 定点一：能量步（THERMAL）之后、水分步之前
+
+`CoLMMAIN.F90` 里 `CALL THERMAL` 与水分调用之间插一个只跑一次的 `write`：
+
+| 量 | 上游 | 本仓库 | 结论 |
+|---|---|---|---|
+| `t_soisno(1)` | 2.7316000000000003E+02 | 同 | 一致 |
+| `t_soisno(2)` | 2.78497805689993**19**E+02 | 2.78497805689993**13**E2 | **差 1 ULP** |
+| `t_soisno(4)` | 2.82942679869602**27**E+02 | 2.82942679869602**33**E2 | **差 1 ULP** |
+| `wliq_soisno(1)` | 5.708467638912**7393**E+00 | 5.708467638912**7313**E0 | 差 ~9 ULP |
+| `wice_soisno(1)` | 3.075678376285**0430**E+00 | 3.075678376285**0506**E0 | 差 ~8 ULP |
+| `smp`, `hk` | — | — | **逐位一致** |
+
+也就是说：**水分步还没跑，`t_soisno` 与表层的 `wliq`/`wice` 就已经不一样了**。
+`t_soisno` 在整套代码里只由热传导/相变写（`WATER_VSF` 只读它），所以种子在
+**能量步**里 —— 这与"`smp`/`hk` 逐位一致"是自洽的（那两项恰恰由水分步写）。
+
+### 定点二：`MOD_GroundTemperature` 入口
+
+| 量 | 上游 | 本仓库 | 结论 |
+|---|---|---|---|
+| `t_grnd` | 2.8300000000000000E+02 | 同 | 一致 |
+| `sabg` | 0 | 0 | 一致 |
+| `fseng` | 1.24578191769597**86**E+03 | 1.24578191769598**02**E3 | **差 1 ULP** |
+| `fevpg` | 3.3723365149310**956**E-04 | 3.3723365149311**015**E-4 | **差 2 ULP** |
+| `t_soisno(1:4)` 入参 | 全 2.83E+02 | 同 | 一致 |
+| `wliq(1:4)` 入参 | 8.784…/13.83… | 同 | 一致 |
+
+**扩散求解的入口就已经带着差异**：`fseng`（地表感热）差 1 ULP、`fevpg`（地表蒸发）
+差 2 ULP，而温度与含水量入参逐位一致。所以种子在**地面通量/叶温那一段**，
+不在扩散求解本身。
+
+（探针第一版把上游的 `frl` 当成"到达地面的下行长波"与 Rust 的
+`downward_longwave_w_m2` 对比，得出 177 W/m² vs 225 W/m² —— 那是**量名对错了**：
+`MOD_GroundTemperature.F90:129-130` 里 `frl` 是"大气红外"、`dlrad` 才是"冠层以下的
+下行长波"，面通量用的是 `dlrad`（`:265-293`）。Rust 的字段对应的是 `dlrad`。
+下一轮要打的是 `dlrad`，不要再拿 `frl` 比。）
+
+### 下一轮的精确入口
+
+`fseng`/`fevpg` 的差异只可能来自 `ground_fluxes` 或 `leaf_temperature` 的输出链
+（`ground_humidity` → `ground_fluxes` 预解 → `leaf_temperature` → 修正后的
+`fseng`/`fevpg`）。既有文档里 `ground_fluxes` 与 `monin_obukhov` 都做过
+20000/20000 的随机差分，所以优先怀疑**它们的输入**：`qg`/`dqgdT`
+（`non_split_ground_humidity`）与 `emg`。下一轮照这一轮的办法再插一个点：
+`MOD_GroundFluxes` 入口打印 `qg`/`dqgdT`/`t_grnd`/`t_soisno(1)`/`wliq(1)`，
+与 Rust 的 `GroundFluxInput` 逐位对齐。
+
+Tested: 内核两次插桩重建（`CoLMMAIN`、`MOD_GroundTemperature`）+ 上游 `colm.x`
+与 `colm-rs` 各跑 1 步的定点对照；插桩全部还原后 `git status` 干净、
+`python3 oracle/scripts/test_upstream_f48_sync.py` PASS、
+`kernels/default/*.x` 的 sha256 与 `manifest.json` 逐项相符；
+`cargo test --workspace --lib --bins -- --test-threads=1`；`cargo clippy --workspace --all-targets -- -D warnings`；
+两处 `cargo fmt --all --check`；`cargo test -q -p oracle`；`cargo run -q -p xtask -- check-gui`；
+三个黄金窗口（17/68/79）。
+Not-tested: `dlrad` 的对齐（探针量名错了）；`MOD_GroundFluxes` 入口的下一层插桩。
