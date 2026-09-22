@@ -10040,3 +10040,23 @@ Tested: `MOD_SoilSnowHydrology.F90` 本体的 `-fdump-tree-optimized`；干窗 T
 `cargo test -q -p colm-core --lib -- --test-threads=1`（354 通过）；`cargo fmt --all --check`；
 `cargo test --workspace --lib --bins -- --test-threads=1`；`cargo clippy --workspace --all-targets -- -D warnings`；
 `cargo test -q -p oracle`；`cargo run -q -p xtask -- check-gui`；`python3 oracle/scripts/test_upstream_f48_sync.py`（PASS）。
+
+## `snowwater` 的表层冰/液更新（两处）
+
+`MOD_SoilSnowHydrology` 的 `snowwater` 里表层两条更新都是
+`wice/wliq = 原值 + 通量*deltim`，GIMPLE 都把 `通量*deltim` 收进加法：
+
+```
+FMA(deltim, frost-sublimation, wice)
+FMA(deltim, rainfall+dew-evaporation, wliq)
+```
+
+Rust 的 `snow.rs` 两处已改成 `time_step_seconds.mul_add(通量, 原值)`。
+`wgdif`（`FMA(qsnowmelt-qsubl, deltim, wgdif)`）与雪层里
+`FNMA(ssi, X, wliq)` 的不可约含水项在 Rust 侧用了别的组织方式，
+**没有一并改** —— 需要先把 `snowwater` 那两个循环的完整数据流读出来。
+
+Tested: `MOD_SoilSnowHydrology.F90` 本体的 `-fdump-tree-optimized`；
+`cargo test --workspace --lib --bins -- --test-threads=1`；`cargo clippy --workspace --all-targets -- -D warnings`；
+两处 `cargo fmt --all --check`；`cargo test -q -p oracle`；`cargo run -q -p xtask -- check-gui`；
+`python3 oracle/scripts/test_upstream_f48_sync.py`（PASS）。

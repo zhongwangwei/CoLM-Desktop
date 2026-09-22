@@ -444,15 +444,21 @@ pub fn snow_water(
 
     let first_layer = state.layer_count + 1;
     let top = layer_slot(first_layer);
-    let top_ice_after_surface_flux = state.ice_water_kg_m2[top]
-        + (input.frost_kg_m2_s - input.sublimation_kg_m2_s) * input.time_step_seconds;
+    // `MOD_SoilSnowHydrology` 的 `snowwater`：表层冰/液更新都是
+    // `wice/wliq = wice/wliq + (通量)*deltim`，GIMPLE 把 `通量*deltim`
+    // 收进加法（`FMA(deltim, 通量, 原值)`）—— 两处都是。
+    let top_ice_after_surface_flux = input.time_step_seconds.mul_add(
+        input.frost_kg_m2_s - input.sublimation_kg_m2_s,
+        state.ice_water_kg_m2[top],
+    );
     state.ice_water_kg_m2[top] = top_ice_after_surface_flux.max(0.0);
     if top_ice_after_surface_flux < 0.0 {
         state.liquid_water_kg_m2[top] += top_ice_after_surface_flux;
     }
-    state.liquid_water_kg_m2[top] += (input.rainfall_kg_m2_s + input.dew_kg_m2_s
-        - input.evaporation_kg_m2_s)
-        * input.time_step_seconds;
+    state.liquid_water_kg_m2[top] = input.time_step_seconds.mul_add(
+        input.rainfall_kg_m2_s + input.dew_kg_m2_s - input.evaporation_kg_m2_s,
+        state.liquid_water_kg_m2[top],
+    );
     if state.liquid_water_kg_m2[top] < 0.0 {
         state.ice_water_kg_m2[top] =
             (state.ice_water_kg_m2[top] + state.liquid_water_kg_m2[top]).max(0.0);
