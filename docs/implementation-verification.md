@@ -11761,3 +11761,85 @@ Not-tested: `MOD_Thermal` 本体 dump（单文件编译被 INTENT 冲突挡住�
 Tested: `MOD_GroundFluxes.opt` 的 8 处与 `ground_fluxes.rs` 的 8 个 `mul_add` 逐条对应；
 `cargo test -q -p colm-core --lib -- --test-threads=1`（355 通过）。
 Not-tested: 冠层 `GroundFluxes` 调用点的入参并排（下一轮，名单 8 个）。
+
+## 补上 `thv`/`dthv`/`thvstar` 的 5 处融合；并认清"融合追猎"已到边际
+
+按"差异在喂给 `GroundFluxes` 的量上"这条线索，核对了那 8 个入参的推导，找到三处
+`1+0.61q` 的**内层没融合**（上游 `MOD_Thermal.F90:546` 的 `thv = th*(1.+0.61*forc_q)`
+与 `MOD_LeafTemperature.F90:559` 的 `dthv`，GIMPLE 是 `_16 = FMA(q, 0.61, 1.0)`
+再乘/再加）：
+
+| 落点 | 上游 | 改动 |
+|---|---|---|
+| `standard_lct_step.rs` | `MOD_Thermal.F90:546` | `th * 0.61.mul_add(q, 1.0)` |
+| `leaf_temperature.rs`（初始化那个 `dthv`） | `:559` | 内层融合 + 外层 `mul_add` |
+| `leaf_temperature.rs`（迭代里的 `thvstar`） | `:904` | 同上 |
+
+**试完这三处之后干窗从 17 变成 18 —— 全部回退了**（见下一小节）。三处都在
+`crates/colm-core` 里改过又改回，最终只留下这份记录。
+
+### **负结果**：dump 支持的融合也可能让窗口变差 —— `dthv`/`fthvstar` 三处回退
+
+这三处的形状是**有 dump 支持的**（`lt.opt` 第 1383-1387、2414-2415 行）：
+
+```
+_116 = FMA(qm, 0.61, 1.0)        _120 = th*0.61
+_121 = dqh*_120                  _122 = FMA(dth, _116, _121)   → dthv
+_491 = _120*qstar                thvstar = FMA(_117, tstar, _491)   ← _117 = _116
+```
+
+按 dump 改完之后：
+
+| | 1 步逐位比对 | 干窗 tier2 变量数 |
+|---|---|---|
+| 改前 | 33 | 17 |
+| 改后 | **33（一字不变）** | **18**（`f_frcsat` 新越界） |
+
+**1 步逐位完全不变、整月却多出一个越界变量** —— 原因是这类改动的效果**通过
+MO 迭代的起点放大**：`dthv`（以及迭代里的 `thvstar`）是 `moninobukini` 的入参，
+差 1 ULP 会让稳定性判据在某个时刻跨过分支阈值，于是某个中间步的迭代路径不同，
+`frcsat` 被推过容差。
+
+**处置：回退**，三个文件都回到改动前（干窗恢复 17）。理由不是"形状不对"，
+而是**本仓库的判据链**：单点形状有 dump 支持、但**没有端到端证据**说明改完更接近
+上游，而窗口是唯一的端到端判据，它给的是负号。要再捡起这一处，必须先有
+`MOD_LeafTemperature` 的**随机差分驱动**（20000 组输入、直接比 `dthv`/`thvstar`），
+把"算式对不对"与"迭代放大"分开。
+
+顺手也试了 `MOD_Thermal.F90:546` 的 `thv`（内层融合）——**单独改它时干窗仍是 18**
+（被上面两处 dominate），而 `MOD_Thermal` 没有 dump，所以一并回退。
+
+**规矩**：dump 支持的形状是**必要条件**，不是充分条件。当端到端判据给出负号、
+而改动又无法用"随机差分"独立证实时，回退并记录，而不是留着赌它"理论上更对"。
+
+### 一个必须如实写下的观察：`f_fseng` 的差是**不变量**
+
+把这几轮的记录并起来看，`f_fseng` 的 `maxabs` 从第 143 轮第一次量到"1 步差异"起就
+**一直是 6.8212e-13**，历经 16 处融合（`tref`/`qref`、收敛后收尾 7 处、`ldew` 4 处、
+`tinc` 6 处、`htvp*egidif`、`thv`/`dthv`/`thvstar` 5 处）**一次都没动过**：
+`f_fh`（8.8818e-16）、`f_fq`（8.8818e-16）、`f_taux`/`f_tauy`（7.2164e-16）、
+`f_fsenl`（5.6133e-13）、`f_gssun`/`f_gssha`（6.7763e-21）同样一字未变。
+只有 `tinc` 那一次动过 `f_fevpg`/`f_qinfl`/`f_qstar` 并让 `f_lfevpa` 消失。
+
+**这条不变性比任何单点结论都强**：它说明这些量的差**不是**由这些表达式里的
+舍入顺序造成的 —— 否则至少会有一处的末位跟着动。结合"温度与含水量入参逐位一致、
+只有 `fseng`/`fevpg`/`fh`/`fq`/`taux` 这一族差 1 ULP"，剩下的可能只有两类：
+
+1. **形状不同**（不是少融合，而是算式结构或分段判据不同）——最可能仍在
+   `moninobukm`（冠层那条）里：它比 `moninobuk` 多算 `fh2m`/`fq2m`/`fht`/`fqt`，
+   而 Rust 用一份 `heat_integral` 共享六个调用点，**共享本身没错，但每个调用点传的
+   `zldis`/粗糙度必须逐个核对**（`fh2m` 用 `2+z0h`、`fht` 用
+   `displat+z0mt-displa`、`fq2m` 用 `2+z0h` 配 `z0q` —— 这三处的搭配极易抄错，
+   而且抄错只差 1 ULP 时不会被 `t_grnd` 发现）。
+2. **同一个表达式但常量不同**（例如某个 `-0.333`/`0.465`/`16` 的分支阈值）。
+
+**下一轮的做法**：照当年关掉 `moninobuk` 的办法，给 `canopy_monin_obukhov`
+（`moninobukm`）写**随机差分驱动** —— 20000 组输入、两侧逐位比对
+`ustar`/`fh`/`fh2m`/`fht`/`fq`/`fq2m`/`fqt`。这是唯一能把"共享实现"里
+某个调用点的搭配错误照出来的办法；继续按模块扫收缩已经没有产出。
+
+Tested: `MOD_Thermal.F90:546`、`MOD_LeafTemperature.F90:559/904` 与
+`MOD_GroundFluxes.opt` 第 2/3 处的同型对照；三处落地后干窗 1 步逐位比对
+（33 个变量、`maxabs` 不变）；`f_fseng` 等 6 个量的 `maxabs` 跨 16 处改动的不变性核对；
+`cargo test -q -p colm-core --lib -- --test-threads=1`（355 通过）；`cargo fmt --all --check`。
+Not-tested: `canopy_monin_obukhov` 的随机差分驱动（下一轮）。

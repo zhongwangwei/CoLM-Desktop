@@ -1077,6 +1077,16 @@ fn ground_flux_input(
             input.temperature_height_m,
         ),
         potential_temperature_k,
+        // `MOD_Thermal.F90:546` 的 `thv = th*(1.+0.61*forc_q)`。
+        //
+        // **这里刻意不融合内层**：`MOD_Thermal.F90` 单文件编不出来（`:1036` 的
+        // `smp` INTENT 冲突），这个模块**没有自己的 dump**，形状无从证实。
+        // 实测把这一处与 `MOD_LeafTemperature` 的 `dthv`/`thvstar`（那两处有 dump
+        // 支持）一起融合之后，干窗 tier2 变量数 17 → **18**（`f_frcsat` 新越界）；
+        // 只回退这一处仍是 18，说明主导项是那两处，这一处没有被单独验证过。
+        // 没有 dump 又拿不到正号，就按原位保留 —— 见
+        // docs/implementation-verification.md 的"负结果：dump 支持的融合也可能让
+        // 窗口变差"。
         virtual_potential_temperature_k: potential_temperature_k
             * (1.0 + 0.61 * forcing.specific_humidity),
         soil_surface_resistance_s_m,
