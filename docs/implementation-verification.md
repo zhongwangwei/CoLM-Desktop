@@ -14729,3 +14729,32 @@ Not-tested: `lt_ext.opt` 80 处的逐条 A/B（下一轮起）。
 
 Tested: `lt_ext.opt` 里 `DEBUG irab/fsenl/…` 的缺失（grep 无命中）；80 处的 FMA 列表已取到前 12 条。
 Not-tested: 上述三种做法的实际效果（下一轮选一种）。
+
+## 方法 1 跑通（`-S -fverbose-asm` 定位到源码行），但第一个候选**已经是对的**
+
+用 `gfortran -S -O2 … -g -fverbose-asm` 生成带 `.loc` 的汇编后，可按源码行统计 FMA 类指令
+（比 `objdump -d -l` 的 DWARF 归因可靠，本会话在 `MOD_FrictionVelocity` 上用过）：
+
+| 对文件行 | 语句 | 该行 FMA 类 |
+|---|---|---|
+| 1104 / 1107 | `irab = (frl - 2*stefnc*tl**4 ± …) * fac` | **0**（纯乘加，不收缩）|
+| **1116** | `fsenl = rhoair*cpair*cfh*((wta0+wtg0)*tl - wta0*thm - wtg0*tg)` | **1**（`fnmsub`）|
+| 1160 | `fevpl = etr + evplwet` | 0 |
+| 1342 | `fsenl = fsenl + fsenl_dtl*dtl(it-1) + …` | 0（该处是逐级 FMA 但落在别的行）|
+| 1379 / 1380 | `fevpl = fevpl - elwdif` / `fsenl = fsenl + htvpl*elwdif` | 1 / 1（`fmadd`）|
+
+**而 1116 那个候选在 Rust 侧已经是对的**：`leaf_temperature.rs:687-695` 正是
+`-ground.mul_add(tg, (a+g).mul_add(tl, -(a*thm)))` 的融合链，注释里还写着"实测 4000/4000 组
+逐位相同（不收缩只有 345/4000）"—— 即**更早的轮次已经按 dump 落过**，本轮只是用独立方法复核
+一致。
+
+**结论**：叶温通量链（`fsenl`/`fevpl`/`irab`）的收缩**已被覆盖**；残余不在这里。这也解释了
+为什么第 241 轮把靶子重新指回叶温后，逐条核下去会不断命中"已经对过"的站点。
+
+**下一步**：把方法 1 用到 `th_ext.opt`（99 处）与 `lt_ext.opt` 里**尚未核对过**的那些行上，
+优先 `f_rnet`/`f_olrg` 的入参链（`MOD_NetSolar`、`MOD_Albedo` 的 `alb`/`emis`）；若再次大面积
+命中"已对"，则应当考虑残余来自**调用顺序**而非表达式（第 223 轮列出的第 1 类）。
+
+Tested: `-S -fverbose-asm` 的行级 FMA 统计（1104/1107/1116/1160/1342/1379/1380）；
+与 `leaf_temperature.rs:687-695` 的对照（含其 4000/4000 的既有证据）。
+Not-tested: `th_ext.opt` 与 `lt_ext.opt` 余下未核行的逐条 A/B。
