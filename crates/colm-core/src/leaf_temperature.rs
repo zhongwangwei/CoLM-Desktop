@@ -341,9 +341,14 @@ pub fn leaf_temperature(
     let mut canopy_air_humidity =
         0.5 * (input.reference_specific_humidity + input.ground_specific_humidity);
     let mut canopy_air_co2 = input.atmospheric_co2_pa;
+    // `MOD_LeafTemperature.F90:556`：`ur = max(0.1, sqrt(us*us+vs*vs))`（us 在前）。
     let reference_wind = input
         .eastward_wind_m_s
-        .hypot(input.northward_wind_m_s)
+        .mul_add(
+            input.eastward_wind_m_s,
+            input.northward_wind_m_s * input.northward_wind_m_s,
+        )
+        .sqrt()
         .max(0.1);
     let mut temperature_difference = input.reference_air_temperature_k - canopy_air_temperature;
     let mut humidity_difference = input.reference_specific_humidity - canopy_air_humidity;

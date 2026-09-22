@@ -1178,7 +1178,15 @@ impl StandardLctRestartTemplate {
                     northward_wind_m_s: forcing.northward_wind_m_s,
                     air_specific_humidity: forcing.specific_humidity,
                     air_density_kg_m3: forcing.air_density_kg_m3,
-                    reference_wind_m_s: forcing.eastward_wind_m_s.hypot(forcing.northward_wind_m_s),
+                    // 与 `standard_lct_step` 同一个 `ur`（内核是 `sqrt(us*us+vs*vs)`，
+                    // 不是 `hypot`）。
+                    reference_wind_m_s: forcing
+                        .eastward_wind_m_s
+                        .mul_add(
+                            forcing.eastward_wind_m_s,
+                            forcing.northward_wind_m_s * forcing.northward_wind_m_s,
+                        )
+                        .sqrt(),
                     reference_temperature_k: forcing.air_temperature_k,
                     potential_temperature_k: forcing.air_temperature_k,
                     virtual_potential_temperature_k: forcing.air_temperature_k,

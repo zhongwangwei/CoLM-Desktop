@@ -1011,9 +1011,16 @@ fn ground_flux_input(
         eastward_wind_m_s: forcing.eastward_wind_m_s,
         northward_wind_m_s: forcing.northward_wind_m_s,
         air_specific_humidity: forcing.specific_humidity,
+        // `MOD_Thermal.F90:547`：`ur = max(0.1, sqrt(forc_us*forc_us+forc_vs*forc_vs))`
+        // —— 内核用平方和开方，不是 `hypot`（两者差几个 ULP，`ur` 直接进
+        // `moninobukini`，是干窗第 0 步分叉的头号嫌疑）。
         reference_wind_m_s: forcing
             .eastward_wind_m_s
-            .hypot(forcing.northward_wind_m_s)
+            .mul_add(
+                forcing.eastward_wind_m_s,
+                forcing.northward_wind_m_s * forcing.northward_wind_m_s,
+            )
+            .sqrt()
             .max(0.1),
         // `GroundFluxes` 收的 `thm` 是 **`forc_t + 0.0098*forc_hgt_t`**
         // （`MOD_Thermal_CanopyPhase_Extended.F90:550`，与叶温那一支同一个 `thm`），

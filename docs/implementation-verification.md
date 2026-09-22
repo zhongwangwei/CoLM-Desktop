@@ -9570,3 +9570,56 @@ Rust-vs-Rust 逐位比对；三个黄金窗口 + 三口径 A/B；`cargo test --w
 
 - `groundfluxes` 参数太多（40+），本轮**没有**像近地层那样写"USE 本体模块"的
   随机差分驱动；六处收缩以本体 GIMPLE 为依据，窗口指标为佐证。
+
+## 风速：内核从不使用 `hypot`（实测，**已修**，端到端中性）
+
+Rust 侧有 **10 处**用 `f64::hypot(east, north)` 算风速，而内核全部写
+`sqrt(us*us+vs*vs)`（`MOD_ForcingDownscaling.F90:395/486`、`MOD_Glacier.F90:222`、
+`MOD_Lake.F90:742`、`MOD_LeafInterception.F90:293`、`MOD_LeafTemperature.F90:556`、
+`MOD_RainSnowTemp.F90:203`、`MOD_SnowLayersCombineDivide.F90:153`、`MOD_Thermal.F90:547`、
+`MOD_Vars_1DAccFluxes.F90:2743/2764` —— grep 遍 `vendor/CoLM202X/main/*.F90`
+**一个 `hypot` 都没有**）。两者不是同一个函数：`hypot` 是为防上溢设计的，
+随机取 200000 组 `(u,v)`，**10956 组（5.5%）结果不同**（各差 1 ULP）：
+
+```
+hypot != sqrt(us^2+vs^2): 10956/200000, max relative ULP 1.00
+```
+
+十处全部按上游的分组改成平方和开方，其中三处**顺序有讲究**：
+`MOD_ForcingDownscaling` 写的是 `sqrt(forc_vs**2 + forc_us**2)`（**vs 在前**，
+GIMPLE 里被吸收的是 vs 那个平方：`FMA(vs, vs, us*us)`），其余各处是 us 在前。
+
+| 位置 | 上游出处 |
+|---|---|
+| `forcing_downscaling.rs` ×2（`ws_g`） | `MOD_ForcingDownscaling.F90:395/486` |
+| `standard_lct_step.rs` / `assembly.rs`（`ur`） | `MOD_Thermal.F90:547` |
+| `leaf_temperature.rs`（`ur`，含 `max(0.1)`） | `MOD_LeafTemperature.F90:556` |
+| `interception.rs`（`FV`） | `MOD_LeafInterception.F90:293` |
+| `snow.rs`（`forc_wind`） | `MOD_SnowLayersCombineDivide.F90:153` |
+| `atmosphere.rs`（降雪密度用的 `forc_wind`） | `MOD_RainSnowTemp.F90:203` |
+| `history_diagnostics.rs` ×2（应力模、`ur`） | `MOD_Vars_1DAccFluxes.F90:2743/2764` |
+| `colm-forcing/gapfill.rs`（由 u/v 合成标量风） | 与内核同一约定 |
+
+**端到端中性**：干窗 TIMESTEP 1 步的 Rust 输出与修前**逐位相同**，三个黄金窗口
+三口径也**逐位不变**（21235 / 291.8579 / 821 / 17）。也就是说这三组算例里
+`hypot` 恰好与平方和开方同值，或者这些调用点没落在差异值上。
+
+这是连续第三处"确实错、但窗口测不出来"的修复（`determ`、近地层、地面通量之后）。
+保留它的判据仍是"内核怎么写就怎么写"：`hypot` 与平方和开方**可证不同**（5.5%），
+而内核一次都没用过 `hypot`。
+
+Tested: 200000 组随机 `(u,v)` 的 `hypot` vs 平方和开方对比（10956 处不同）；
+干窗 TIMESTEP 1 步 Rust-vs-Rust 与 Rust-vs-Fortran 逐位比对；三个黄金窗口 + 三口径 A/B；
+`cargo test --workspace --lib --bins -- --test-threads=1`；`cargo clippy --workspace --all-targets -- -D warnings`；
+两处 `cargo fmt --all --check`；`cargo test -q -p oracle`；`cargo run -q -p xtask -- check-gui`；
+`python3 oracle/scripts/test_upstream_f48_sync.py`（PASS）。
+
+### 未验的部分 / 下一步
+
+- 干窗第 0 步的 1 ULP 分叉在连修三处（近地层、地面通量、风速）后**仍逐位不变**。
+  现在可以断定它既不在近地层/地面通量的算式里，也不在 `ur` 的算法里；
+  剩下的候选是 `thm`/`qm`/`rhoair` 的来源（`MOD_Atmosphere`/`MOD_Forcing` 那条链）
+  与上一步的状态。下一轮应从"把 `groundfluxes` 的**输入**逐位打出来"
+  入手，而不是继续扫模块。
+- `MOD_ForcingDownscaling` 还有 20 处收缩（长短波、降水、风廓线的因子式）未改；
+  它在本机三个算例里似乎没被走到（改不动窗口就是证据）。

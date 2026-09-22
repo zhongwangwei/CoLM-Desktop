@@ -868,7 +868,11 @@ pub fn compact_snow_layers(
     let mut burden = 0.0;
     let mut pseudo_depth = 0.0;
     let mut mobile = true;
-    let wind_speed = eastward_wind_m_s.hypot(northward_wind_m_s);
+    // `MOD_SnowLayersCombineDivide.F90:153` / `MOD_RainSnowTemp.F90:203`：
+    // `forc_wind = sqrt(forc_us**2 + forc_vs**2)`。
+    let wind_speed = eastward_wind_m_s
+        .mul_add(eastward_wind_m_s, northward_wind_m_s * northward_wind_m_s)
+        .sqrt();
     for fortran_layer in state.layer_count + 1..=0 {
         let slot = layer_slot(fortran_layer);
         let water_mass = state.ice_water_kg_m2[slot] + state.liquid_water_kg_m2[slot];

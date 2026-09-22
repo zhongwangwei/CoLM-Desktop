@@ -142,9 +142,14 @@ pub fn history_diagnostics(input: HistoryDiagnosticsInput) -> Result<HistoryDiag
         "the recomputed air density is not physical"
     );
 
+    // `MOD_Vars_1DAccFluxes.F90:2743`：`sqrt(taux_e**2+tauy_e**2)`。
     let stress = input
         .eastward_stress_kg_m_s2
-        .hypot(input.northward_stress_kg_m_s2);
+        .mul_add(
+            input.eastward_stress_kg_m_s2,
+            input.northward_stress_kg_m_s2 * input.northward_stress_kg_m_s2,
+        )
+        .sqrt();
     let friction_velocity = (stress.max(1.0e-6) / air_density).sqrt();
     let temperature_scale =
         -input.sensible_heat_w_m2 / (air_density * friction_velocity) / AIR_HEAT_CAPACITY_J_KG_K;
@@ -169,9 +174,14 @@ pub fn history_diagnostics(input: HistoryDiagnosticsInput) -> Result<HistoryDiag
     let stability_adjusted_wind = stability_adjusted_wind(
         input,
         zol,
+        // `MOD_Vars_1DAccFluxes.F90:2764`：`ur = sqrt(us*us+vs*vs)`。
         input
             .wind_speed_eastward_m_s
-            .hypot(input.wind_speed_northward_m_s),
+            .mul_add(
+                input.wind_speed_eastward_m_s,
+                input.wind_speed_northward_m_s * input.wind_speed_northward_m_s,
+            )
+            .sqrt(),
         friction_velocity,
         virtual_scale,
         virtual_potential_temperature,

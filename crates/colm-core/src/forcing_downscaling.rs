@@ -383,7 +383,12 @@ pub fn downscale_wind(
     } else {
         (northward_wind_m_s / eastward_wind_m_s).atan()
     };
-    let grid_speed = eastward_wind_m_s.hypot(northward_wind_m_s);
+    // `MOD_ForcingDownscaling.F90:395/486`：`ws_g = sqrt(forc_vs**2 + forc_us**2)`
+    // —— **vs 在前**，所以被吸收的是 vs 那个平方（GIMPLE：`FMA(vs, vs, us*us)`）。
+    // `hypot` 不等于 `sqrt(vs*vs+us*us)`（前者是为防上溢设计的），必须照抄。
+    let grid_speed = northward_wind_m_s
+        .mul_add(northward_wind_m_s, eastward_wind_m_s * eastward_wind_m_s)
+        .sqrt();
     let column_speed = slope_radians
         .iter()
         .zip(aspect_radians)
@@ -422,7 +427,12 @@ pub fn downscale_wind_simple(
         northward_wind_m_s.atan2(eastward_wind_m_s)
     };
     wind_direction = compass_direction(wind_direction);
-    let grid_speed = eastward_wind_m_s.hypot(northward_wind_m_s);
+    // `MOD_ForcingDownscaling.F90:395/486`：`ws_g = sqrt(forc_vs**2 + forc_us**2)`
+    // —— **vs 在前**，所以被吸收的是 vs 那个平方（GIMPLE：`FMA(vs, vs, us*us)`）。
+    // `hypot` 不等于 `sqrt(vs*vs+us*us)`（前者是为防上溢设计的），必须照抄。
+    let grid_speed = northward_wind_m_s
+        .mul_add(northward_wind_m_s, eastward_wind_m_s * eastward_wind_m_s)
+        .sqrt();
     let column_speed = slope_tangent
         .iter()
         .zip(area_fraction)

@@ -1677,7 +1677,8 @@ impl Era5Catalog {
                 Ok(east
                     .into_iter()
                     .zip(north)
-                    .map(|(east, north)| east.hypot(north))
+                    // 与内核一致：风速是 `sqrt(us*us+vs*vs)`，不是 `hypot`。
+                    .map(|(east, north)| east.mul_add(east, north * north).sqrt())
                     .collect())
             }
             6 => self.variable_series(

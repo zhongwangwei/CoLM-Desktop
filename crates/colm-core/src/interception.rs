@@ -264,7 +264,15 @@ pub fn intercept_canopy(
             let temperature_unloading =
                 ((input.leaf_temperature_k - FREEZING_K) / f77(1.87e5)).max(0.0);
             let wind_unloading =
-                input.eastward_wind_m_s.hypot(input.northward_wind_m_s) / f77(1.56e5);
+                // `MOD_LeafInterception.F90:293`: `FV = sqrt(us*us+vs*vs)/1.56e5`.
+                input
+                    .eastward_wind_m_s
+                    .mul_add(
+                        input.eastward_wind_m_s,
+                        input.northward_wind_m_s * input.northward_wind_m_s,
+                    )
+                    .sqrt()
+                    / f77(1.56e5);
             drainage_snow_mm = (water.snow_mm / input.time_step_seconds).max(0.0)
                 * (wind_unloading + temperature_unloading)
                 * input.time_step_seconds;

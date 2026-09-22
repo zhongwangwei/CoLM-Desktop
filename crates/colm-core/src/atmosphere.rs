@@ -231,7 +231,10 @@ pub fn new_snow_bulk_density(
         -(f77(50.0) / f77(15.0) + f77(0.0333) * f77(15.0)) * temperature_c
             - f77(0.0333) * temperature_c.powi(2)
     };
-    let wind = eastward_wind_m_s.hypot(northward_wind_m_s);
+    // `MOD_RainSnowTemp.F90:203`：`forc_wind = sqrt(forc_us**2 + forc_vs**2)`。
+    let wind = eastward_wind_m_s
+        .mul_add(eastward_wind_m_s, northward_wind_m_s * northward_wind_m_s)
+        .sqrt();
     if wind > f77(0.1) {
         density += f77(266.861) * ((f77(1.0) + (wind / f77(5.0)).tanh()) / f77(2.0)).powf(f77(8.8));
     }
