@@ -10610,3 +10610,27 @@ Tested: 上游 `MOD_Albedo.F90:2020-2062` 与 dump 的三条 FMA 交叉反推；
 `cargo test --workspace --lib --bins -- --test-threads=1`、`cargo clippy --workspace --all-targets -- -D warnings`、
 两处 `cargo fmt --all --check`、`cargo test -q -p oracle`、`cargo run -q -p xtask -- check-gui`、
 `python3 oracle/scripts/test_upstream_f48_sync.py`（PASS）。本轮无源码改动。
+
+### 上一节的"不一致"是虚惊：上游有**两套**雪面反照率常数
+
+查清了。上游 `MOD_Albedo.F90` 里两对常数各管一支：
+
+| 常数 | 声明 | 用在哪 |
+|---|---|---|
+| `snal0 = 0.85` / `snal1 = 0.65` | `:212-213` | **陆地**支：`:350/:357` 的 `dfalbs = snal0*(1-cons*age)`、`dfalbl = snal1*(1-conn*age)`，配 `snowage` 老化 |
+| `asnows = 0.95` / `asnowl = 0.70` | `:2015` | **`nint(oro)==2`** 那一支：`:2036-2038` 的 `sasdir = min(0.98, sasdif+(1-sasdif)*0.5*(3/(1+4cosz)-1))` |
+
+Rust 的 `aged_snow_albedo`（`radiation.rs:647` 起，注释已写明是 `:341-370` 那支）
+用 **0.85/0.65** 是**对的** ✓；`radiation.rs:670` 的
+`direct_correction = (1.5/(1+4c) - 0.5).max(0)` 也是那一支的式子 ✓。
+另一对 0.95/0.70 属于 `oro==2`（冰/冰川）分支，本机三个算例（igbp 陆地）
+**不走**，所以 Rust 里没有 `0.98` 那个 `min` 并不是缺口。
+
+**教训**：从 dump 反推常数只能提出问题；这次问题的答案是"上游本来就有两套常数、
+分属两支"，而两边各自的归属都对。上一轮把它写成"必有一处要核对"是过头了 ——
+**反推式常数时，先按"同一模块里是否有同名/近名参数"排查，再怀疑移植错误**。
+
+Tested: `MOD_Albedo.F90:186-213、341-357、2015、2020-2062` 逐段核对；Rust
+`radiation.rs:647-676` 与 `surface_optics.rs` 的 `albland` 分支归属核对；
+`grep` 确认 `0.98` 不在 Rust 侧；本轮无源码改动；
+`cargo test -q -p colm-core --lib`（354 通过）、工作树干净。
