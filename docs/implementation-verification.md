@@ -13000,3 +13000,35 @@ Rust 侧 `surface_budget.rs:58` 写的是 `(outgoing_longwave / STEFAN_BOLTZMANN
 Tested: 对文件 `MOD_Thermal_CanopyPhase_Extended.F90` 的 dump 生成（99 处收缩）；
 dump 第 7228-7235 行与 `surface_budget.rs:58` 的对照。
 Not-tested: 那 99 处的逐条重扫；`olrg` 上游的定位。
+
+## 用新拿到的 `MOD_Thermal` dump 修 `olrg`：步级口径 **582 → 585**，`f_trad` 只剩 1 个值
+
+`f_trad` 是 1 ULP 名单成员，而它 = `(olrg/stefnc)**0.25` —— 形状已证一致（上一轮），
+所以差在 `olrg`。对文件 dump（`th_ext.opt`）里 `olrg` 的 GIMPLE 是：
+
+```
+_1813 = emg * 4.0
+_1814 = _1813 * stefnc
+_1816 = _1814 * t_grnd_bef**3
+_1819 = .FMA (_1816, tinc, ulrad)      ← 收缩在最后一步
+*olrg_3439(D) = _1819
+```
+
+Rust 原来写的是 `ulrad + emg*(stefnc*t**3*(4*tinc))` —— 既换了结合顺序（`4*tinc`
+在最里层），也少了那一次收缩。按 dump 改成
+`((emg*4)*stefnc*t**3).mul_add(tinc, ulrad)` 之后：
+
+| 口径 | 改前 | 改后 |
+|---|---|---|
+| 3 步 bitwise | 582/692 | **585/692** |
+| `f_trad` ndiff / maxrel | 2 / 2.19e-16 | **1** / 2.15e-16 |
+| 干窗 | 21328 / 338.9256 / 825 / 17 | **完全相同** |
+
+这是 `gssun` 那处之后**第一处真正改善步级口径**的修复（+3），而且窗口容差三口径一字
+未变。也说明上一轮那句"四个 1 ULP 变量共享同一个上游"要修正为：`f_trad` 有**自己**的
+一处（`olrg`），剩下的 `f_us10m`/`f_vs10m`/`f_gssun`/`f_gssha`/`f_tleaf` 才是同一族。
+
+Tested: `th_ext.opt` 第 7140-7178 行的 GIMPLE 与 `surface_budget.rs` 的对照；改动前后
+`dry_ts.sh 3` + `window_divergence.py`（582 → 585）与干窗实测（21328 不变）；
+`cargo fmt --all --check`；`cargo test -q -p colm-core --lib`（355 通过）。
+Not-tested: `th_ext.opt` 其余 98 处收缩；`f_us10m` 那一族的装配侧定位。

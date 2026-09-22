@@ -52,7 +52,14 @@ pub fn surface_budget(energy: &StandardLctEnergyOutput) -> Result<SurfaceBudget>
     let blackbody_change = STEFAN_BOLTZMANN_W_M2_K4
         * previous_surface_temperature_k.powi(3)
         * (4.0 * temperature_change_k);
-    let outgoing_longwave = upward_longwave + emissivity * blackbody_change;
+    // `olrg = ulrad + 4.*emg*stefnc*t_grnd_bef**3*tinc`（`…Thermal…_Extended.F90:1364`）。
+    // dump（`th_ext.opt`）显示内核把它收成
+    // `_1813=emg*4; _1814=_1813*stefnc; _1816=_1814*t**3; olrg=FMA(_1816,tinc,ulrad)` ——
+    // 写成 `ulrad + emg*(stefnc*t**3*(4*tinc))` 既换了结合顺序也少了收缩。
+    let outgoing_longwave_coefficient =
+        emissivity * 4.0 * STEFAN_BOLTZMANN_W_M2_K4 * previous_surface_temperature_k.powi(3);
+    let outgoing_longwave =
+        outgoing_longwave_coefficient.mul_add(temperature_change_k, upward_longwave);
     let bulk_emissivity =
         (upward_longwave + emissivity * blackbody_change) / (upward_longwave + blackbody_change);
     let radiative_temperature_k = (outgoing_longwave / STEFAN_BOLTZMANN_W_M2_K4).powf(0.25);
