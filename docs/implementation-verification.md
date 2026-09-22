@@ -12310,3 +12310,66 @@ Tested: `oracle/scripts/compare_leddy.sh`（17 个输出 × 20000 组逐位相�
 `cargo fmt --all --check`；`NETCDF_DIR=... cargo clippy --workspace --all-targets -- -D warnings`。
 Not-tested: `MOD_TurbulenceLEddy` 在窗口里的端到端影响（本地算例根本到不了这条支）；
 `hpbl` 的逐强迫场读取路径（`DEF_USE_CBL_HEIGHT` 在本仓库仍是显式拒绝的开关之一）。
+
+## **抓到第二个真缺陷**：风场降尺度的乘法结合顺序（`downscale_wind` 8.9% 样本错）
+
+`MOD_ForcingDownscaling` 是"只靠 GIMPLE 读形状、没有差分驱动"的那一块。这一轮先补
+它最小的两个入口：`downscale_wind`（4 个地形类）与 `downscale_wind_simple`（9 个
+坡向类），4 个输出 × 20000 组。
+
+### 上游侧这次**不重编模块**，直接链接内核对象
+
+`oracle/scripts/compare_forcingdownscaling_wind.sh` 把驱动与 `vendor/CoLM202X/.bld`
+下的全部 `.o` 链接起来，只排除 `CoLM.o`（那个 `PROGRAM` 定义了 `_main`）；LAPACK/BLAS
+与 netcdf-fortran 照 `Makeoptions.Mac-arm` 加。好处是跑的就是内核产线对象
+（`.bld/MOD_ForcingDownscaling.o` 里 `objdump` 能看到 13 条 `fmadd`），连 namelist、
+`MOD_Const_Physical`、`MOD_Vars_Global` 都是真的 —— **不需要桩**。这条链接路子对
+后面"某个模块的驱动要拖一大串运行时依赖"的情况可以复用。
+
+### 差分第一跑就红了：4 个输出里 3.4%–13% 的样本错
+
+```
+us_full    f0=0 f1=0: 1723     us_simple  f0=0 f1=0: 2558
+vs_full    f0=0 f1=0: 1730     vs_simple  f0=0 f1=0: 2544
+（另有 us==0 与 cur==MISSING 那几组的小额失配）
+```
+
+对着 `fd.opt` 逐条读形状，两处都错在**乘法的结合顺序**：
+
+| 位置 | 上游 GIMPLE | 改前的 Rust | 改后 |
+|---|---|---|---|
+| full 的因子 | `_17 = slope*cos(...)`；`_20 = _17*0.58`；`_22 = _20+1.0`；`_24 = cur*0.42`（提到循环外）；`_25 = _22+_24` | `1.0 + 0.58*slope*cos + 0.42*cur`（= `(0.58*slope)*cos`）| `(slope*cos*0.58 + 1.0) + cur*0.42` |
+| simple 的因子 | `_18 = cos(...)*atan(slope)`；`_24 = _18*0.58`；`_26 = _24+1.0`；`_28 = .FMA (cur, 0.42, _26)` | 同一个表达式（**没有 FMA**）| `cur.mul_add(0.42, slope_angle*cos*0.58 + 1.0)` |
+
+两件事值得记下来：
+
+1. **`0.58*wind_dir_slp(i)` 不是 `0.58*slope*cos`**。上游先把 `slope*cos` 存进
+   `wind_dir_slp(i)`（独立语句），再乘 0.58；写成 `0.58*slope*cos` 会按左结合算成
+   `(0.58*slope)*cos`，在 ~9% 的样本上差 1 ULP。差分把它照出来了。
+2. **同一个物理式在两个例程里形状不同**：full 的 `0.42*cur` 被提到循环外、**没有**
+   收缩；simple 的那一条是 `.FMA (cur, 0.42, ...)`。共用一个 Rust 表达式不可能两边都对。
+
+### 另一处"看着像漏判、其实是死代码"的地方（**不改**）
+
+`downscale_wind_simple` 里 `scale_factor = -1e36` 表示缺测，紧接着的钳位
+`IF (scale_factor<-1.5) scale_factor = -1.5` 会**先把标记改成 -1.5**，于是后面
+`IF (scale_factor == -1e36 ...)` 那一支在编译后的上游里根本进不去 —— `fd.opt`
+的 `bb20` PHI（`prephitmp_137 = 1` → `-1.5`）就是这么折的。Rust 的 `.clamp(-1.5,1.5)`
+放在 `MISSING` 判断之前，行为与内核逐位一致；那行 `factor == MISSING` 保留原样，
+并在注释里写明它是死分支，免得后来者把 `.clamp` 挪到后面。
+
+### 结果
+
+```
+$ bash oracle/scripts/compare_forcingdownscaling_wind.sh
+MOD_ForcingDownscaling wind: 4 outputs 20000/20000 bitwise identical
+  分支分布 (f0 f1 -> 组数): 00:18315 01:1145 10:509 11:31
+```
+
+（`f0` = `us == 0` 走 `PI/2` 那条；`f1` = `cur == -1e36`。四种组合都抽到了。）
+
+Tested: `oracle/scripts/compare_forcingdownscaling_wind.sh`（4 个输出 × 20000 组逐位相同，
+改前 3.4%–13% 失配）；`cargo test --workspace --lib --bins -- --test-threads=1`；
+`cargo clippy --workspace --all-targets -- -D warnings`；两个 workspace 的 `cargo fmt --all --check`。
+Not-tested: `downscale_forcings` 本体（下一轮：它还要 `DEF_DS_*` 的多套组合与
+`sf_lut_c`/`svf_c`/`alb` 的可选实参分支）；`downscale_shortwave` 的 full 支。

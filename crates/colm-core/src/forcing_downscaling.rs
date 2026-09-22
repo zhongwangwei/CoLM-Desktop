@@ -402,9 +402,15 @@ pub fn downscale_wind(
         .zip(aspect_radians)
         .zip(area_fraction)
         .map(|((&slope, &aspect), &area)| {
-            let factor = (1.0 + 0.58 * slope * (wind_direction - aspect).cos() + 0.42 * curvature)
-                .clamp(-1.5, 1.5);
-            grid_speed * factor * area
+            // GIMPLE（`fd.opt` 的 `downscale_wind`）：`_17 = slope*cos(...)`、
+            // `_20 = _17*0.58`、`_22 = _20+1.0`、`_24 = cur*0.42`（提到循环外）、
+            // `_25 = _22+_24`。乘法的**结合顺序**在这里是结果的一部分：写成
+            // `0.58*slope*cos` 会让 1 ULP 级别的差异落到近 9% 的样本上（2026 年
+            // 的差分就是这么发现的）。`_26 = factor*ws_g`、`_28 = _26*area`
+            // 的次序可以不管 —— 乘法可交换，逐位结果相同。
+            let wind_direction_slope = slope * (wind_direction - aspect).cos();
+            let factor = (wind_direction_slope * f77(0.58) + 1.0) + curvature * f77(0.42);
+            factor.clamp(-1.5, 1.5) * grid_speed * area
         })
         .sum::<f64>();
     Ok((
@@ -451,14 +457,23 @@ pub fn downscale_wind_simple(
             } else if slope == MISSING || curvature == MISSING {
                 MISSING
             } else {
-                1.0 + 0.58 * slope.atan() * (wind_direction - simple_aspect(index)).cos()
-                    + 0.42 * curvature
+                // GIMPLE（`fd.opt` 的 `downscale_wind_simple`）：`_18 = cos(...)*atan(slope)`、
+                // `_24 = _18*0.58`、`_26 = _24+1.0`、`_28 = .FMA (cur, 0.42, _26)`。
+                // 与 full 版**不同**：那里的 `0.42*cur` 没有收缩，这里是收缩的 ——
+                // 两个例程必须各写各的形状，不能共用一个表达式。
+                let wind_direction_slope =
+                    (wind_direction - simple_aspect(index)).cos() * slope.atan();
+                curvature.mul_add(f77(0.42), wind_direction_slope * f77(0.58) + 1.0)
             }
             .clamp(-1.5, 1.5);
+            // `factor == MISSING` 这一支在**编译后的**上游里已经够不着了：`-1e36` 先被
+            // 上面那道 `scale_factor<-1.5` 改成 `-1.5`，`bb20` 的 PHI 显示 GCC 就是这么
+            // 折的。留着它是为了照抄源码的形状，同时提醒后来者别把 `.clamp` 挪到
+            // `MISSING` 判断之后 —— 那样「缺测」会真的变成 `-1.5` 参与求和。
             if factor == MISSING || area == MISSING {
                 None
             } else {
-                Some(grid_speed * factor * area)
+                Some(factor * grid_speed * area)
             }
         })
         .sum::<f64>();
