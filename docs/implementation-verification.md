@@ -13212,3 +13212,27 @@ done
 
 Tested: 本节命令均已在本会话多次执行（`dry_ts.sh`/`window_divergence.py`/`win4.sh`/`three.py`）。
 Not-tested: 入口 A 的实参 dump（下一轮）。
+
+### `lfevpa` 的地面项收缩：dump 有、步级口径 **-1** —— 不落
+
+`th_ext.opt` 第 7500-7502 行：
+
+```
+lfevpl.1275_1912 = lfevpl
+_2088 = .FMA (M.397_3424, pretmp_5135, lfevpl.1275_1912)   ; htvp*fevpg + lfevpl
+*lfevpa_2269(D) = _2088
+```
+
+即 `lfevpa = FMA(htvp, fevpg, lfevpl)`；Rust 的 `latent_heat` 写成平铺的
+`leaf_latent_heat*leaf_evaporation + sublimation_heat*ground_evaporation`（`sublimation_heat`
+就是内核的 `htvp`）。按 dump 改成 `sublimation_heat.mul_add(ground_evaporation, leaf_latent_heat*leaf_evaporation)`
+之后：3 步 bitwise **585 → 584**（其余变量不变）。
+
+按规则（收缩形状必须有口径支持）**回退**。这是本会话第 5 处"dump 说有收缩、实测不支持"
+的站点（前四处：`clai`、`thvstar`、`cfw`、`fgrnd`），也再次说明**独立编译的 dump 不能当
+逐句判据**；想彻底解决必须从 `kernels/default/colm.x` 反汇编，而 DWARF 行号又不能逐句归因
+（第 167 轮）——这条矛盾目前无解，只能逐处实测。
+
+Tested: `th_ext.opt` 7496-7506 与 `surface_budget.rs` 的对照；`dry_ts.sh 3` +
+`window_divergence.py`（585 → 584）；改动已回退。
+Not-tested: 从 `colm.x` 反汇编取形状（工具层面仍缺行号归因能力）。
