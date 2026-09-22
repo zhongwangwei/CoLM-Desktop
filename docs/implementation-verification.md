@@ -10656,3 +10656,36 @@ Rust 的 `variably_saturated_flow.rs:4396-4400` 已按此写。
 
 Tested: `MOD_SoilSnowHydrology.F90:1106-1122` 与 dump 第 6 处的对应；干窗 TIMESTEP 1 步
 Rust-vs-Rust 逐位比对（不变）；`cargo test -q -p colm-core --lib`（354 通过）；`cargo fmt --all --check`。
+
+## 土壤水力三函数的差分：**结果未收敛，首要嫌疑是驱动自己**
+
+建了一个 `USE MOD_Hydro_SoilFunction` 的驱动（`-fwrapv`，`MOD_Namelist` stub 里
+补上 `DEF_USE_Campbell_SOIL_MODEL = .false.` 以走 van Genuchten），20000 组随机输入
+比对三个**公开**函数：
+
+```
+soil hydraulics: psi 18361/20000, hk 14042/20000, vliq 19304/20000
+```
+
+即三者都在 70%–96% 之间。但随后逐行核对**没有找到任何算式差异**：
+
+- 上游 `soil_hk_from_psi` 的 van Genuchten 支与 Rust 的 GIMPLE 逐句对上，
+  包括 `**2.0_r8` 被 GCC 折成 `powmult = x*x`（所以 Rust 用 `.powi(2)` 是对的）
+  与 `hksat*esat**L` 的乘法顺序；
+- `soil_psi_from_vliq` 的早返回（`vliq >= porsl` / `vliq <= max(vl_r,1e-8)`）
+  与末尾 `max(psi, minsmp)` 都在，且 `minsmp = -1.e8`（上游 `:24`）与 Rust 的
+  `MIN_SOIL_PSI = -1.0e8` 一致；
+- `soil_vliq_from_psi` 的 van Genuchten 支唯一那处收缩（`FMA(porsl-vl_r, esat, vl_r)`）
+  已在第 113 轮改过。
+
+**判断：这更像又一次驱动错位（本会话第五次），而不是"三个函数真的各错 8%–30%"**。
+理由：`hk` 若真有 28% 的输入算错，一个月的黄金窗口不可能只有 tier2 的
+17/68/79 —— 早就在 tier0/tier1 炸开了。本轮**没有据此改任何源码**，把
+结果与判断一并记下，留给下一轮用"先在两侧逐位打印输入"的老办法把驱动对齐后重跑。
+
+（探针已删除，工作树干净。）
+
+Tested: 驱动 `/tmp/gf/r116/hsol.f90`（`-O2 -fwrapv`，`MOD_Namelist` stub）；
+20000 组三函数逐位比对（三种子区间都试过，含把 `psi` 限制到物理负值）；
+上游 `MOD_Hydro_SoilFunction.F90` 三个函数逐行核对；Rust `hydrology.rs:130-185` 核对；
+`cargo test -q -p colm-core --lib`（354 通过）、工作树干净。
