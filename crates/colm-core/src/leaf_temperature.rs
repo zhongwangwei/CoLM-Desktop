@@ -1126,10 +1126,13 @@ pub fn leaf_temperature(
     let canopy_stomatal_resistance =
         1.0 / (laisun / last.leaf_sunlit_resistance + laisha / last.leaf_shaded_resistance);
     let pressure_conversion = 44.6 * 273.16 * input.surface_pressure_pa / 1.013e5;
-    let sunlit_stomatal_conductance =
-        laisun / last.leaf_sunlit_resistance * pressure_conversion / previous_leaf_temperature;
-    let shaded_stomatal_conductance =
-        laisha / last.leaf_shaded_resistance * pressure_conversion / previous_leaf_temperature;
+    // `MOD_LeafTemperature.F90:1040` 是 `gssun = (laisun/rssun) * (tprcor/tlbef)`
+    // —— **右边的除法先算**。平铺成 `a/r * c / t` 会算成 `((a/r)*c)/t`，
+    // 在 `f_gssun`/`f_gssha` 上留下 ~1 ULP 的第 0 步种子（2026 年 `window_divergence.py`
+    // 量到 `f_gssun` 的 maxrel ≈ 2.95e-16，正是 1 ULP 的签名）。
+    let resistance_conversion = pressure_conversion / previous_leaf_temperature;
+    let sunlit_stomatal_conductance = laisun / last.leaf_sunlit_resistance * resistance_conversion;
+    let shaded_stomatal_conductance = laisha / last.leaf_shaded_resistance * resistance_conversion;
     let bulk_richardson = (last.zeta * last.surface.friction_velocity_m_s.powi(2)
         / (VON_KARMAN.powi(2) / last.surface.heat * stability_wind.powi(2)))
     .min(5.0);

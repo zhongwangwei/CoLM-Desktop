@@ -12598,3 +12598,64 @@ variables differing: 44; bitwise identical: 580/692 (83.8150%)
 Tested: `oracle/scripts/window_divergence.py` 在干窗 1 步/3 步、两个变体上的实测；
 `bash /tmp/gf/dry_ts.sh 3`；`cargo test -q -p colm-core --lib -- --test-threads=1`。
 Not-tested: 湿窗/雪窗上的同口径（脚本已可复用）；第 0 步种子的定位（下一轮）。
+
+## **抓到干窗第 0 步种子的第一层**：`gssun` 的除法结合顺序（`MOD_LeafTemperature.F90:1040`）
+
+上一轮新加的 `window_divergence.py` 把 44 个差异变量按 `maxrel` 排队，第一眼就看到
+一个**量级完全不同**的成员：
+
+```
+f_gssun / f_gssha   maxabs 1.36e-20   maxrel 2.95e-16   ← 1 ULP 的签名（2.2e-16）
+f_fevpl             maxrel 1.55e-14
+f_fsenl             maxrel 1.47e-13
+f_gssun 以外的一族   maxrel 1e-14 … 1e-11
+```
+
+其余变量都是**下游被放大的**（1e-14 量级往上），只有 `gssun`/`gssha` 停在 1 ULP ——
+这就是"种子在它自己身上"的判据。顺着它找到源码：
+
+```fortran
+! MOD_LeafTemperature.F90:1040
+gssun = (laisun / rssun) * (tprcor / tlbef)
+```
+
+Rust 写的是 `laisun / rssun * pressure_conversion / previous_leaf_temperature`，按左结合
+算成 `((laisun/rssun)*tprcor)/tlbef` —— **右边那个除法被拉平了**。改成
+
+```rust
+let resistance_conversion = pressure_conversion / previous_leaf_temperature;
+let sunlit_stomatal_conductance = laisun / last.leaf_sunlit_resistance * resistance_conversion;
+```
+
+### 证据：`f_gssun` **完全不差了**，`f_gssha` 还剩 1 ULP
+
+同一套 3 步口径（`bash /tmp/gf/dry_ts.sh 3`）：
+
+| | 差异变量数 | bitwise identical | `f_gssun` | `f_gssha` |
+|---|---|---|---|---|
+| 改前 | 44 | 580/692 | maxrel 2.95e-16 | maxrel 2.95e-16 |
+| 改后 | 43 | **582/692** | **不再出现**（三步逐位相同）| maxrel 2.99e-16（三步里差两步）|
+
+**第一层剥开了，第二层露出来了**：`gssha` 仍差 1 ULP，而它与 `gssun` 共用
+`resistance_conversion`/`previous_leaf_temperature`，所以剩下的种子只能来自
+`laisha / leaf_shaded_resistance` 这一侧 —— 即**阴叶那次 `stomata` 调用**（或其输入
+`cintsha`/`parsha`/`rstfacsha`）。下一轮的目标由此从"整个 44 个变量"缩到**一次
+`stomata` 调用**。
+
+### 窗口：逐位 ±2，容差口径全部不变（照实记录）
+
+| 窗口 | 改前 | 改后 |
+|---|---|---|
+| 干 | 21326 / 338.9256 / 825 / 17 | **21328** / 338.9256 / 825 / 17 |
+| 湿 | 32681 / 10369.4411 / 20672 / 68 | **32679** / 10369.4411 / 20672 / 68 |
+| 雪 | 33651 / 444394.4368 / 25896 / 79 | 33651 / 444394.4368 / 25896 / 79 |
+
+`sumabs`/`over_tol`/`ot_vars` 三个口径**一字不变**，逐位计数 ±2（干 +2、湿 −2）。
+按本轮新立的规矩，裁决依据是**步级证据**：第 0 步 `f_gssun` 的三步逐位相同，
+而源码第 1040 行的括号位置是唯一的 —— 所以接受，不因为 ±2 的窗口抖动而改回。
+
+Tested: `window_divergence.py` 的 3 步口径改前/改后对照；`bash /tmp/gf/dry_ts.sh 3`；
+三个黄金窗口改后实测（上面那张表）；`cargo fmt --all --check`；
+`NETCDF_DIR=... cargo clippy --workspace --all-targets -- -D warnings`；
+`cargo test --workspace --lib --bins -- --test-threads=1`。
+Not-tested: 湿窗/雪窗上的分步口径（脚本可复用，下一轮补）；`gssha` 那一侧的定位。
