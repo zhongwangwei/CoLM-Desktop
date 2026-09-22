@@ -71,7 +71,7 @@ sed -e "s#^   DEF_dir_output.*#   DEF_dir_output  = '$WORK/out/'#" \
     -e "s#^   DEF_dir_rawdata.*#   DEF_dir_rawdata = '$WORK/rawdata_unused/'#" \
     -e "s#^   DEF_dir_runtime.*#   DEF_dir_runtime = '$WORK/runtime_unused/'#" \
     -e "s#^   DEF_simulation_time%end_day.*#   DEF_simulation_time%end_day       = 1#" \
-    -e "s#^   DEF_simulation_time%end_sec.*#   DEF_simulation_time%end_sec       = 0#" \
+    -e "s#^   DEF_simulation_time%end_sec.*#   DEF_simulation_time%end_sec       = 1800#" \
     "$BASE/oracle/work/CN-Cng/case.nml" > "$WORK/case.nml"
 mkdir -p "$WORK/out" "$WORK/run"
 cp "$BASE/oracle/work/CN-Cng/forcing.nml" "$WORK/forcing.nml"

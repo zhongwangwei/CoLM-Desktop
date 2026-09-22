@@ -65,7 +65,7 @@ sed -e "s#^   DEF_dir_output.*#   DEF_dir_output  = '$WORK/out/'#" \
     -e "s#^   DEF_dir_rawdata.*#   DEF_dir_rawdata = '$WORK/rawdata_unused/'#" \
     -e "s#^   DEF_dir_runtime.*#   DEF_dir_runtime = '$WORK/runtime_unused/'#" \
     -e "s#^   DEF_simulation_time%end_day.*#   DEF_simulation_time%end_day       = 1#" \
-    -e "s#^   DEF_simulation_time%end_sec.*#   DEF_simulation_time%end_sec       = 0#" \
+    -e "s#^   DEF_simulation_time%end_sec.*#   DEF_simulation_time%end_sec       = 1800#" \
     "$BASE/oracle/work/CN-Cng/case.nml" > "$WORK/case.nml"
 cp "$BASE/oracle/work/CN-Cng/forcing.nml" "$WORK/forcing.nml"
 cp -R "$BASE/oracle/work/CN-Cng/out" "$WORK/out"
@@ -73,6 +73,11 @@ rm -rf "$WORK/out/CN-Cng/history"
 (cd "$WORK/run" && "$BASE/kernels/default/colm.x" "$WORK/case.nml" > "$WORK/kernel.log" 2>&1) \
   || { echo "！！内核运行失败"; exit 4; }
 
+# 硬闸门：内核必须真的跑完一步（早期版本把 end_sec 设成 0，等于零步，
+# 于是所有插桩都"0 命中"——这个坑踩过一次，此后一律断言完成标志）
+grep -c 'CoLM Execution Completed' "$WORK/kernel.log" | sed 's/^/== 内核完成标志: /'
+grep -q 'CoLM Execution Completed' "$WORK/kernel.log" || {
+  echo "！！内核没有跑完（见 $WORK/kernel.log 末尾），这次插桩结果无效"; exit 5; }
 grep 'GTPROBE_IN' "$WORK/kernel.log" > "$WORK/gt_in.txt" || true
 echo "== 上游入参：$WORK/gt_in.txt"
 head -3 "$WORK/gt_in.txt" || echo "！！没有 GTPROBE_IN 输出 —— 说明这条调用在第 0 步也没执行"

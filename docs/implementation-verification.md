@@ -14459,3 +14459,37 @@ Not-tested: "哪些例程在第 0 步被执行"的系统性清单（下一轮）
 Tested: `:21`/`:1207` 的所属子程序（`THERMAL`）、`CoLMMAIN:177/1052` 的调用与上文、第 231 轮的
 二进制标记核对。
 Not-tested: `CoLMMAIN` 步进循环入口的插桩（下一轮的决定性实验）。
+
+## **重大更正**：四次探针的"0 命中"是**探针脚本的 bug** —— 它们跑的是**零步**
+
+第 194-232 轮的全部"某例程在第 0 步没执行"的结论，追到根上是**我的探针脚本把
+`DEF_simulation_time%end_sec` 设成了 0**：
+
+```
+$ grep end_sec /tmp/gf/dryts/case.nml      # 能跑通的那个（dry_ts.sh）
+   DEF_simulation_time%end_sec       = 1800
+$ grep end_sec /tmp/gf/gtprobe/case.nml    # 我的探针脚本生成的
+   DEF_simulation_time%end_sec       = 0    ← start_sec 也是 0 ⇒ **零步**
+$ wc -l /tmp/gf/gtprobe/kernel.log /tmp/gf/iterprobe2/kernel.log /tmp/gf/argprobe3/kernel.log
+   23 / 23 / 23        ← 三个探针的日志都只有 23 行，且**没有** "CoLM Execution Completed"
+```
+
+**零步运行 ⇒ 任何物理例程都不会被调用 ⇒ 四次插桩必然 0 命中。** 所以下列结论**全部作废**：
+
+* 第 194-196 轮："叶温两份的 `moninobukm`、累加器的 `moninobuk` 在第 0 步不执行"；
+* 第 226 轮："PC 的 Newton 迭代循环不执行"；
+* 第 229/231 轮："`CALL GroundTemperature` 不执行"；
+* 第 232 轮那个"矛盾"（`THERMAL` 的无条件打印没响）—— **矛盾消失**：根本没有步被执行。
+
+**已修**：四个探针脚本的 `end_sec` 全部改为 **1800**，并给每个脚本加了**硬闸门** ——
+断言内核日志里必须有 `CoLM Execution Completed`，否则直接以非零码退出并提示"这次插桩结果无效"。
+
+**仍待解决**：把 `end_sec` 改对之后重跑地面探针，内核**仍然没有跑完**（日志 23 行停在
+`Netcdf error: … rawdata_unused//plant_15s/….nc cannot open`），而 `dry_ts.sh` 的同名运行
+**没有**这条错误、并正常完成（32 行）。两者 case.nml 只差 `DEF_HIST_FREQ`（TIMESTEP vs HOURLY）。
+**下一个要查的就是这个差异**：探针脚本必须先能像 `dry_ts.sh` 一样跑完一步，之后任何
+"入参逐位对照"才有意义。
+
+Tested: `dry_ts.sh` 与三个探针的 case.nml/kernel.log 对比（`end_sec`、完成标志、日志行数）；
+四个脚本的 `end_sec` 修正与硬闸门添加。
+Not-tested: 探针跑不完的根因（`DEF_HIST_FREQ` 或其它设置差异）。
