@@ -13936,3 +13936,37 @@ $ wc -l /tmp/gf/pc_diff/pc.txt → 10000
 
 Tested: `phasechange_diff.f90` 编译、链接（全 `.bld` 集合）、运行（10000 条）。
 Not-tested: Rust 探针与逐位比对（下一轮）。
+
+### Rust 探针的**骨架与全部类型**（下一轮一次写完，不必再读源码）
+
+```rust
+use colm_core::{phase_change, PhaseChangeInput, SoilHydraulicModel};
+
+// `SoilHydraulicModel`（`hydrology.rs:8-19`）只有两个变体 —— 驱动里按 patchtype 交替：
+//   Campbell { bsw }                                  ← 对应上游的 `bsw`
+//   VanGenuchten { alpha_vgm, n_vgm, l_vgm, sc_vgm, fc_vgm }  ← 对应上游那五个数组
+```
+
+`PhaseChangeInput`（`phase_change.rs:47-80`）需要逐项构造：
+`patch_type: i32`、`is_dry_lake: bool`、`time_step_seconds`、`fact_seconds_per_j_m2_k`、
+`residual_heat_flux_w_m2`、`snow_layer_absorption_w_m2: Option<&[f64]>`（**干窗无 SNICAR 传
+`None`**）、`surface_heat_flux_w_m2`、`soil_heat_flux_w_m2`、`snow_heat_flux_w_m2`、
+`snow_cover_fraction`、`surface_heat_flux_temperature_derivative_w_m2_k`、
+`previous_temperature_k`、`temperature_k`、`liquid_water_kg_m2`、`ice_water_kg_m2`、
+`snow_water_equivalent_kg_m2`、`snow_depth_m`、`snow_layers: usize`、`split_soil_snow: bool`、
+`supercool_water: bool`、`soil_layer_thickness_m`、`soil_porosity`、`soil_residual_water`、
+`soil_suction_mm`、`soil_hydraulic_model: &[SoilHydraulicModel]`。
+
+**索引约定（最容易错）**：上游 `lb = 1 - nsnow`，雪层在 `lb:0`、土层在 `1:nl_soil`，一个
+连续数组；Rust 用**紧凑向量 + `snow_layers` 计数**，顺序为「雪在上、土在下」。所以探针里
+`previous_temperature_k`/`temperature_k`/`liquid_water_kg_m2`/`ice_water_kg_m2` 要按
+`[雪层…, 土层…]` 拼；输出侧同理拆回去比 `t(lb)`/`wliq(lb)`/`wice(lb)`（本驱动只比**第 lb 层**，
+即最上面那层雪，以及标量 `scv/sm/xmf` 与两个 `Σqphs`、`Σimelt`）。
+
+`PhaseChangeState` 的字段（`:83-99`）：`temperature_k`、`liquid_water_kg_m2`、
+`ice_water_kg_m2`、`snow_water_equivalent_kg_m2`、`snow_depth_m`、`latent_heat_flux_w_m2`、
+`snow_melt_rate_kg_m2_s`、`phase_flag`、`thaw_mass_kg_m2`、`freeze_mass_kg_m2` —— 与上游
+`t/wliq/wice/scv/snowdp/xmf/sm/imelt/qphs_thaw/qphs_frzc` 一一对应。
+
+Tested: `hydrology.rs:1-30` 与 `phase_change.rs:47-99` 的类型核对。
+Not-tested: 探针本体（下一轮）。
