@@ -14261,3 +14261,30 @@ bash oracle/scripts/step_iter_probe.sh
 
 Tested: `bash -n`；锚点唯一性；补丁体临时副本干跑（1 行 ITPROBE）。
 Not-tested: 脚本完整执行 + Rust 侧同格式转储（下一轮）。
+
+## 迭代探针结果：**PC 叶温求解器在第 0 步整段没执行**
+
+`step_iter_probe.sh` 完整跑通（插桩 → 重编 → 跑 1 步 → 自动还原 → `f48 sync PASS`），
+但 `/tmp/gf/iterprobe2/fort_iter.txt` 是 **0 行**：
+
+```
+== 上游逐迭代转储：/tmp/gf/iterprobe2/fort_iter.txt
+       0 /tmp/gf/iterprobe2/fort_iter.txt
+```
+
+也就是说 `MOD_LeafTemperaturePC_Extended.F90:1063` 的 `DO WHILE (it .le. itmax)` 循环
+在第 0 步**一次都没进**（而该文件里 `moninobukm` 那处此前也证明没执行，第 195-196 轮）。
+
+这条把第 196 轮的结论**从"那次相似性调用"扩大到"整个 PC 叶温求解"**：
+
+* 第 0 步写进 history/restart 的 `tleaf` 只能是**restart 带进来的滞后状态**，不是这一步新解的；
+* 那么 `t_soisno`/`tleaf` 的那 1 ULP 就落在**地面那一支**（`MOD_GroundTemperature` + `meltf`
+  + `tridia` —— 三者都已被差分/形状关掉）或它们的**入参**（`hs`/`hs_soil`/`hs_snow`/`dhsdT`
+  /`fact`/`fn`，来自 `MOD_Thermal`/`MOD_GroundFluxes`，也已核过 8 处与 `olrg` 等）。
+
+**这解释了为什么"逐句形状核对"始终找不到种子**：叶子那一大块（80 处收缩所在）在干窗第 0 步
+根本不参与，而地面那一支的算术又已经被差分关掉 —— 残余只能出在**入参的装配**上，而
+`MOD_GroundFluxes` 的入参推导此前已按名单核过一轮（`:11769` 那三处修复即由此而来）。
+
+Tested: `step_iter_probe.sh` 完整执行（0 行 ITPROBE、自动还原、f48 PASS）。
+Not-tested: 地面支入参在第 0 步的逐位对照（需要新的、针对地面调用的插桩）。
