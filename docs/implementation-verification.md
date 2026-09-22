@@ -9255,3 +9255,89 @@ SNICAR 分支共用）——**这是本轮第三次遇到"相邻语句结论相�
   本节的差分**覆盖了**所有 `split`/`use_snicar`/`lb` 组合。
 
 Tested: `cargo test --workspace --lib --bins -- --test-threads=1`；`cargo clippy --workspace --all-targets -- -D warnings`；`cargo fmt --all --check` 与 `cargo fmt --manifest-path gui/src-tauri/Cargo.toml --all --check`；`cargo test -q -p oracle -- --test-threads=1`；`cargo run -q -p xtask -- check-gui`；`python3 oracle/scripts/test_upstream_f48_sync.py`（PASS）；三个窗口 `bash /tmp/gf/win4.sh` + `golden-compare`。
+
+## `soil_hcap_cond` 的另外七个方案：`sr` 门槛的作用域看错了（实测，**已修**）
+
+第 101 轮只量了黄金用的方案 4（Balland-Arp）。这轮把
+`MOD_SoilThermalParameters.F90:230-521` **逐字**搬成一个独立子例程（只把
+`USE MOD_Precision`/`USE MOD_Const_Physical`/`USE MOD_Namelist` 换成实参 `r8`、
+`tfrz`、`scheme`），再用共享 LCG 生成 20000 组输入，让**真正的 Rust** 与它逐位比对。
+逐字搬是必须的：上游的 `select CASE` 选的是**运行时**量，八个方案同时在一份
+GIMPLE 里，CSE 会跨方案共用临时量。
+
+| 方案 | 旧 Rust | 新 Rust |
+|---|---|---|
+| 1 Oleson | 20000/20000 | 20000/20000 |
+| 2 Johansen | 18609/20000 | **20000/20000** |
+| 3 Cote-Konrad | 18641/20000 | **20000/20000** |
+| 4 Balland-Arp | 20000/20000 | 20000/20000 |
+| 5 Lu | 20000/20000 | 20000/20000 |
+| 6 Tarnawski-Leong | 13990/20000 | **20000/20000** |
+| 7 De Vries | 11436/20000 | **20000/20000** |
+| 8 Yan & He | 18467/20000 | **20000/20000** |
+
+（"旧 Rust"是 `git checkout` 回 HEAD 再跑同一个探针得到的，不是手抄的近似。
+输入里刻意混入 `sr = 0`、`sr ~ 1e-9`、`sr ~ 1e-7` 三档，否则门槛分支一次都进不去。）
+
+### 新量出来的收缩点
+
+| 方案 | 上游 | GIMPLE |
+|---|---|---|
+| 2 粗粒 | `ke = 0.7*log10(max(sr,0.05)) + 1.0` | `FMA(log10, 0.7, 1.0)` |
+| 2 细粒 | `ke = log10(max(sr,0.1)) + 1.0` | 无乘积，不收缩 |
+| 3 | `ke = kappa*sr/(1.0+(kappa-1.0)*sr)` | 分母 `FMA(sr, kappa-1, 1.0)`，分子普通乘积 |
+| 6 | `aa = 0.0237-0.0175*a**3`、`nwm = 0.088-0.037*a**3` | 两条 `FNMA(a**3, ·, ·)` |
+| 6 | `x = 0.6-0.3*a**3` 用在 `sr**(-x)` | GCC 把负号并进收缩：`FNMA(a**3, 0.3, 0.6)` 算的是 `-x` |
+| 6 | `kf*nw + ka*(1-nw)` | `FMA(nw, kf, ka*(1-nw))` |
+| 6 | `sr*vf_pores - nwm*nw` | `FNMA(nw, nwm, vf_pores*sr)` |
+| 6 | `vf_pores*(1-sr) - nwm*(1-nw)` | `FMS(vf_pores, 1-sr, nwm*(1-nw))`，**减数是普通乘积** |
+| 7 | `ga = 0.013+0.944*sr*vf_pores` | 先舍 `0.944*sr`，再 `FMA(vf_pores, ·, 0.013)` |
+| 7 | `ga = 0.333-(1-sr)*vf_pores/vf_pores*(0.333-0.035)` | `FNMA((1-sr)*vf_pores/vf_pores, 0.29800000000000004, 0.333)` |
+| 7 | `gc = 1-2*ga` | `FNMA(ga, 2.0, 1.0)` |
+| 7 | 四个 `1/(1+比值*形状因子)` | 四条 `FMA(形状因子, 比值, 1.0)` |
+| 7 | `thk` 的分子 | `FMA(sr*vf_pores, kf, ·)`、`FMA((1-vf_pores)*aaa, ks, ·)` |
+| 8 | `beta = -0.303*ksat_u - 0.201*wf_sand + 1.532` | `FNMS(ksat_u, 0.303, 0.201*wf_sand) + 1.532` |
+
+方案 1、5 本来就没有乘积可收（`log10(sr)+1`、`log10(max(sr,0.1))+1`、
+`exp(alpha*(1-sr**(alpha-beta)))`），探针也确认旧代码就是 20000/20000。
+
+### 真正的缺陷：`sr < 1e-10` 那道门只管到 `ke`
+
+`:314-420` 的 `IF(sr >= 1.0e-10) ... ELSE ke = 0.0 ... ENDIF` 只影响 `ke`；而方案 6、7
+的两段 `IF(DEF_THERMAL_CONDUCTIVITY_SCHEME == 6/7)`（`:432-497`）在这道门**外面**，
+而且**根本不读 `ke`**。Rust 原来把门槛写成了对**所有**方案的整体早返回：
+
+```rust
+let conductivity_w_m_k = if saturation < 1.0e-10 { dry } else { ... };
+```
+
+干土上方案 6/7 于是直接给 `kdry`，而上游照算自己的式子。还是那组夹具
+（`vf_pores=0.46, a=0.45, k_solids=3.1, ksat_u=1.83, kdry=0.24`、`sr = 0`）：
+
+| 方案 | 上游 Fortran | 旧 Rust |
+|---|---|---|
+| 6 | 1.75832151597518249e-01 | 2.4e-01（= kdry） |
+| 7 | 3.16533017865365807e-01 | 2.4e-01（= kdry） |
+
+这**不是 1 ULP 的差别**，是"门槛作用域"看错了一行 —— 也就是说干土上的方案 6/7
+此前一直是错的。单元测试 `dry_soil_uses_dry_conductivity_for_all_schemes`
+把这个错误行为钉住了（"八个方案都回落到 kdry"），已按上游改成逐方案期望值，
+测试名也跟着改。
+
+### 窗口三口径：逐位不变（符合预期）
+
+`a5e93f4`…`b5b0f95` 这条线上的三个窗口全部**逐位不变**（干 21199 / Σ|Δ| 395.6581 /
+超容差 830；湿 33349 / 10380.6562 / 20665；雪 33661 / 444394.4368 / 25896）。
+黄金算例用的是方案 4，本轮一个字节都没动它 —— 这条"不变"正是本轮改动的边界证据：
+差异只落在别的方案上。
+
+### 未验的部分
+
+- 方案 6/7 的 `sr` 极小区间只验到 `sr = 0` 与 `~1e-7`；两者之间没有别的分支。
+- 输入是随机量而不是真实土壤剖面；`beta`、`sat_*` 的取值区间比真实宽。
+
+Tested: 探针比对（**真正的 Rust** vs 逐字复刻的 Fortran，八方案各 20000 组，共享 LCG）；
+`cargo test --workspace --lib --bins -- --test-threads=1`；`cargo clippy --workspace --all-targets -- -D warnings`；
+`cargo fmt --all --check` 与 `cargo fmt --manifest-path gui/src-tauri/Cargo.toml --all --check`；
+`cargo test -q -p oracle -- --test-threads=1`；`cargo run -q -p xtask -- check-gui`；
+`python3 oracle/scripts/test_upstream_f48_sync.py`（PASS）；三个窗口 `bash /tmp/gf/win4.sh` + 三口径 A/B。

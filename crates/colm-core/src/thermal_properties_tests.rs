@@ -21,12 +21,30 @@ fn input() -> SoilThermalInput {
     }
 }
 
+/// 干土（`sr = 0`）时 `MOD_SoilThermalParameters.F90:314-420` 那道
+/// `IF(sr >= 1e-10)` 门只把 `ke` 置 0，于是 1–5 与 8 落到 `(ksat-kdry)*0+kdry`；
+/// 但**方案 6/7 的两段 `IF`（`:432-497`）在这道门外面，而且根本不读 `ke`** ——
+/// 干土上它们照样按自己的式子算出 0.176 / 0.317，不是 `kdry`。
+///
+/// 这条以前写的是"八个方案都回落到 kdry"，那是把门的作用域看错了。期望值取自
+/// 逐字复刻的 Fortran 例程（`MOD_SoilThermalParameters.F90:230-521`，只把
+/// `USE` 换成实参）在本地用同样输入跑出来的结果。
 #[test]
-fn dry_soil_uses_dry_conductivity_for_all_schemes() {
+fn dry_soil_follows_each_schemes_own_formula() {
     let mut dry = input();
     dry.liquid_volume_fraction = 0.0;
     dry.ice_volume_fraction = 0.0;
-    for scheme in [
+    let expected = [
+        0.24,
+        0.24,
+        0.24,
+        0.24,
+        0.24,
+        0.175_832_151_597_518_25,
+        0.316_533_017_865_365_8,
+        0.24,
+    ];
+    for (scheme, want) in [
         ThermalConductivityScheme::Oleson,
         ThermalConductivityScheme::Johansen,
         ThermalConductivityScheme::CoteKonrad,
@@ -35,10 +53,13 @@ fn dry_soil_uses_dry_conductivity_for_all_schemes() {
         ThermalConductivityScheme::TarnawskiLeong,
         ThermalConductivityScheme::DeVries,
         ThermalConductivityScheme::YanHe,
-    ] {
+    ]
+    .into_iter()
+    .zip(expected)
+    {
         let properties = soil_thermal_properties(dry, scheme).unwrap();
         close(properties.heat_capacity_j_m3_k, 1.21e6);
-        close(properties.conductivity_w_m_k, 0.24);
+        close(properties.conductivity_w_m_k, want);
     }
 }
 
