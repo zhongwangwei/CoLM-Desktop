@@ -13155,3 +13155,60 @@ Not-tested: `_1765`/`_1805`（各分支 `tinc`）的定义链；Rust 侧的对�
 Tested: 三级改动（`ground_heat` 两级 `mul_add`）的 `dry_ts.sh 3` + `window_divergence.py`
 与三个黄金窗口实测（四处全不变）；改动已回退。
 Not-tested: 有地面降水活跃的算例（湿窗也没让它动，说明这条路径在该算例里不活跃）。
+
+## 交接：下一轮的两条入口与**可直接复制的命令**
+
+（本节写于第 181 轮，作为长会话的断点续传点。基线数字见第 175 轮那张表。）
+
+### 入口 A：近地层相似性调用的实参 dump 对照（攻 1 ULP 那一族）
+
+1. 现状基线核对（**先跑这个**，确认仍是 44 个差异变量 / 585/692）：
+
+```bash
+bash /tmp/gf/dry_ts.sh 3
+python3 oracle/scripts/window_divergence.py /tmp/gf/dryts/out/CN-Cng/history/*.nc \
+    /tmp/gf/dryts/colm-rs_hist_2008-01.nc --top 8
+```
+
+2. 在对文件里给 `moninobukm` 调用点加临时打印（**只改 `/tmp` 里的副本**，不动 vendor）：
+   `vendor/CoLM202X/extends/interception/MOD_LeafTemperature_Extended.F90` 里
+   `CALL moninobukm(...)` 前后，dump `hu/ht/hq/displa/z0m/z0h/z0q/obu/um/displat/z0mt/htop`
+   与输出 `ustar/fh2fq2m/fmtop/fm/fh/fq/fht/fqt/phih`（第 0 步）。
+3. Rust 侧同位置（`crates/colm-core/src/leaf_temperature.rs` 的
+   `stomatal_resistance`/`surface` 构造处）加 `eprintln!` 或临时 `pub` 探针，dump 同一组量。
+4. 逐位比对：`moninobukm` 本体已被随机差分关掉（20 输出 20000/20000 全同），
+   所以**只要实参一致、输出就该一致**；不一致的那一个实参即是种子。
+
+### 入口 B：两个模块的收缩逐条重扫
+
+* `MOD_LeafTemperature_Extended.F90` → `/tmp/gf/r166/lt_ext.opt`（**80 处**）
+* `MOD_Thermal_CanopyPhase_Extended.F90` → `/tmp/gf/r166/th_ext.opt`（**99 处**）
+
+重扫规矩（本会话反复验证过的）：
+1. **源码显式**形状（独立语句/中间量）→ 直接照抄，惰性也照抄（例：`rbsun`、`us10m`）；
+2. **收缩**形状 → 必须用上面的步级口径验收（改善才留，例：`olrg` 步级 582→585）；
+   四处口径全不动的一律**不落**（例：`fgrnd`），只记链；
+3. 每处改动都要跑全三个窗口并写入本文档：
+
+```bash
+bash /tmp/gf/win4.sh
+for c in CN-Cng CN-Cng-wet US-NR1-snow; do
+  g=$(ls oracle/golden/ | grep "^${c}_hist"); d=/tmp/gf/win4/$c
+  python3 /tmp/gf/three.py oracle/golden/$g $d/$(ls $d | grep '^colm-rs_hist') $d/cmp.txt "$c"
+done
+```
+
+当前三窗口值：干 `21328/338.9256/825/17`、湿 `32655/10369.4411/20672/68`、
+雪 `33651/444394.4368/25896/79`。
+
+### 已知的坑（别再踩）
+
+* 取 dump 必须用 `extends/interception/*_Extended.F90`（`main/` 那份内核不编；第 166 轮）。
+* 独立编译的 dump **不代表**内核二进制的收缩（第 166 轮）；想彻底解决要从
+  `kernels/default/colm.x` 反汇编，但 DWARF 行号不能逐句归因（第 167 轮）。
+* `window_divergence.py` 认 `maxrel`：≈2e-16 是种子、≥1e-14 是下游放大；别看前 N 行就下结论。
+* 四个 1 ULP 变量里 `f_trad` 已有独立来源（`olrg`，已修）；剩下的确实共享同一次
+ 相似性调用（第 173 轮修正）。
+
+Tested: 本节命令均已在本会话多次执行（`dry_ts.sh`/`window_divergence.py`/`win4.sh`/`three.py`）。
+Not-tested: 入口 A 的实参 dump（下一轮）。
