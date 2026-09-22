@@ -13288,3 +13288,24 @@ Not-tested: none（惰性改动，无未覆盖面）。
 Tested: `MOD_AssimStomataConductance.F90:212/318/571/586/595/599/796` 与
 `photosynthesis.rs:141/156/168/178/203/251/369` 的对照。
 Not-tested: `calc_photo_params` 里 `powf`/`exp` 那一族的逐句核对。
+
+## `calc_photo_params` 的 `powf`/`exp` 族已核（形状一致，无需改动）
+
+上一轮标出的"该模块未核区"（`MOD_AssimStomataConductance.F90:540-600`）逐句对过，Rust
+（`photosynthesis.rs:116-175`）在**底数与形式**上都一致：
+
+| 上游 | Rust |
+|---|---|
+| `kc = 30. * 2.1**qt`、`ko = 30000. * 1.2**qt` | `f77(30.0) * f77(2.1).powf(qt)`、`f77(30_000.0) * f77(1.2).powf(qt)` |
+| `gammas = 0.5*po2m/(2600.*0.57**qt)*c3` | 同底 `f77(0.57).powf(qt)`，除式同序 |
+| `vm = vmax25 * 2.1**qt` | `maximum_carboxylation_25c * f77(2.1).powf(qt)` |
+| `jmax = jmax25*exp(37e3*(tlef-trop)/(rgas*trop*tlef))*(1+exp((710*trop-220e3)/(rgas*trop)))/(1+exp((710*tlef-220e3)/(rgas*tlef)))` | 三段 `exp()` 与两层除式同序（`:148-156`） |
+| `respc = respcp*vmax25*2.0**qt/(1+exp(trda*(tlef-trdm)))*rstfac` | `f77(2.0).powf(qt)` + 同序 |
+| `omss = (vmax25/2.)*(1.8**qt)/templ*rstfac*c3 + (vmax25/5.)*(1.8**qt)*rstfac*c4` | `f77(1.8).powf(qt)` 两项同序（`:170-180`） |
+
+要点：**底数用字面量再 `powf`**（不是 `exp(qt*ln(base))`），这正是与 GCC 的
+`2.1**qt` → `pow(2.1, qt)` 对齐所需要的写法。至此 `MOD_AssimStomataConductance`
+除 `sortin`/`WUE_solver` 两个迭代子程序外，主干式子的形状都已核过。
+
+Tested: `MOD_AssimStomataConductance.F90:540-600` 与 `photosynthesis.rs:116-180` 的逐句对照。
+Not-tested: `sortin`、`WUE_solver` 两个子程序（本配置不走 WUE/不触发 sortin 时无需核）。
