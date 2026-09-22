@@ -11624,3 +11624,53 @@ Tested: `MOD_LeafTemperature.F90:1201-1202` 与 dump 第 2994/2996 处的对应�
 干窗 1 步逐位比对（34 个变量不变）；
 `cargo test -q -p colm-core --lib -- --test-threads=1`（355 通过）；`cargo fmt --all --check`。
 Not-tested: `moninobukm` 的 26 处逐条读形状与独立实现（下一轮）。
+
+### **更正上一节的 `moninobukm` 判断**：它不是"没实现"，我数错了
+
+上一节写"`moninobukm`（26 处）没有独立实现、Rust 拿 `moninobuk` 的算术去顶"。
+**这条判断是错的**，这轮逐句核对后撤回：
+
+* `crates/colm-core/src/monin_obukhov.rs` 的 `canopy_monin_obukhov_with_scheme`
+  确实是 `moninobukm` 的移植：它有独立的 `CanopyMoninObukhovState`
+  （`momentum_at_canopy_top`/`heat_at_top_layer`/`moisture_at_top_layer`/
+  `canopy_top_heat_similarity`），内部用**冠层尺度**的几何（`z0mv` + `displacement`
+  + 观测高度）造一份自己的 `MoninObukhovInput`，再取 `surface.friction_velocity`/
+  `surface.heat`/`heat_at_2m` 等 —— 与上游 `moninobukm` 的 `ustar`/`fm`/`fh`/`fh2m`
+  逐项对应。
+* **处数差是"代码共享 vs 字面复制"造成的**：上游 `moninobukm` 把
+  `fh`/`fh2m`/`fht`/`fq`/`fq2m`/`fqt` **六份**四条分支各写一遍（≈6×4 处收缩），
+  Rust 用一份 `heat_integral` 让六个调用点共享 —— 内联之后编译产物里同样是六份，
+  但源码里只有一个实现。**按源码里的 `mul_add` 个数去对 dump 的处数，
+  在"上游字面复制、Rust 抽成函数"的地方必然对不上。**
+* 顺带核对了冠层那条调用最容易出错的两个参数：上游
+  `MOD_LeafTemperature.F90:515/523-524/535-536` 里 `z0hv = z0mv`、`z0qv = z0mv`，
+  所以 Rust 把 `heat_roughness_m`/`moisture_roughness_m` 都传 `z0mv` 是**对的**。
+
+**规矩（补进前面那条）**：比"dump 处数 vs `mul_add` 个数"之前，先确认上游是
+**字面复制**还是**抽了子程序** —— 抽了子程序的，处数天然偏少，不能当缺口。
+
+### 第 0 步种子：目前的确定边界
+
+把这几轮的插桩与分区结论并起来，可以确定的是：
+
+1. **不在 PHS**（关掉它差异集合不变，34→37 同量级）；
+2. **不在 `DEF_VEG_SNOW` 分支本身**（关掉后叶面那一组降到恰好 1 ULP，说明该分支只是
+   **放大**了一个更小的既有差异）；
+3. **不在水分步**：水分步跑之前 `t_soisno`（两层各 1 ULP）与表层 `wliq`/`wice`
+   就已经不同，而 `WATER_VSF` 只读 `t_soisno`；反之 `smp`/`hk`（水分步写的）逐位一致；
+4. **不在扩散求解本身**：`GroundTemperature` 入口的温度与含水量入参逐位一致，
+   但 `fseng` 1 ULP、`fevpg` 2 ULP 已经不同 —— 也就是**地面通量那一段**；
+5. **不在叶温迭代的收敛后收尾**：那一族是 `FMA(x_dtl, dtl, 旧值)`，`dtl→0` 时恒等
+   （已用扰动试验排除"路径没走到"的另一种解释）；
+6. **不在冠层近地层廓线**（本节更正）。
+
+下一步只剩"地面通量那一段"里、且**无条件执行**的表达式。最直接的打法不再是继续
+扫模块，而是在 `MOD_GroundFluxes` 入口插一个点，把 `ur`/`thm`/`thv`/`t_grnd`/
+`qg`/`dqgdT`/`emg`/`z0m`/`z0h`/`rss` 两侧逐位并排 —— 只要找出**哪一个入参**先差，
+种子就落在它上面；若全部一致而输出仍差，那就是 `GroundFluxes` 本体（它有 8 处收缩、
+Rust 也是 8 个 `mul_add`，需要按 dump 逐条对形状而不是数个数）。
+
+Tested: `canopy_monin_obukhov_with_scheme` 与 `CanopyMoninObukhovState` 的逐字段核对；
+`MOD_LeafTemperature.F90:515/521-524/535-536` 的 `z0hv`/`z0qv` 赋值核对；
+`fv.opt` 的按例程分账复核；`cargo test -q -p colm-core --lib -- --test-threads=1`（355 通过）。
+Not-tested: `MOD_GroundFluxes` 入口的逐位并排（下一步）。
