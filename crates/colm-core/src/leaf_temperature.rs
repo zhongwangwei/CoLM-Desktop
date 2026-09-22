@@ -1538,9 +1538,17 @@ fn update_canopy_water(
             sublimation = evaporation - state.canopy_water.rain_mm / input.time_step_seconds;
             evaporation = state.canopy_water.rain_mm / input.time_step_seconds;
         }
-        state.canopy_water.rain_mm += (dew - evaporation) * input.time_step_seconds;
-        state.canopy_water.snow_mm =
-            (state.canopy_water.snow_mm - sublimation * input.time_step_seconds).max(0.0);
+        // `MOD_LeafTemperature.F90:1201-1202`：GIMPLE（dump 第 2994/2996 处）是
+        // `FMA(deltim, qdewl-qevpl, ldew_rain旧值)` / `FMA(deltim, qfrol-qsubl, ldew_snow旧值)`
+        // —— `deltim*通量` 被吸收、旧值是已舍入的加数。这两句**每步无条件执行**，
+        // 与收敛后收尾那一族（`dtl→0` 时惰性）不同。
+        state.canopy_water.rain_mm = input
+            .time_step_seconds
+            .mul_add(dew - evaporation, state.canopy_water.rain_mm);
+        state.canopy_water.snow_mm = input
+            .time_step_seconds
+            .mul_add(-sublimation, state.canopy_water.snow_mm)
+            .max(0.0);
     } else {
         let sublimation = wet_evaporation_kg_m2_s.max(0.0);
         let frost = (-wet_evaporation_kg_m2_s).max(0.0);
@@ -1550,9 +1558,14 @@ fn update_canopy_water(
             evaporation = sublimation - state.canopy_water.snow_mm / input.time_step_seconds;
             sublimation = state.canopy_water.snow_mm / input.time_step_seconds;
         }
-        state.canopy_water.rain_mm =
-            (state.canopy_water.rain_mm - evaporation * input.time_step_seconds).max(0.0);
-        state.canopy_water.snow_mm += (frost - sublimation) * input.time_step_seconds;
+        // 同上（`:1201-1202` 的另一支，`tl <= tfrz`）：两处都是 `FMA(deltim, 通量, 旧值)`。
+        state.canopy_water.rain_mm = input
+            .time_step_seconds
+            .mul_add(-evaporation, state.canopy_water.rain_mm)
+            .max(0.0);
+        state.canopy_water.snow_mm = input
+            .time_step_seconds
+            .mul_add(frost - sublimation, state.canopy_water.snow_mm);
     }
     // `fwet_snow`（湿雪覆盖率）必须在**截留/凝结更新之后、相变之前**取值，
     // 不是在这段更新之前。上游 `MOD_LeafTemperature_Extended.F90:1532` 就是在

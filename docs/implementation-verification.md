@@ -11566,3 +11566,61 @@ Tested: `MOD_LeafTemperature.F90:1062-1093` 与 dump 第 2636-2650/2720-2733 处
 **扰动试验**（收尾乘 1.0000001 → 36 个变量）证明路径是活的；
 `cargo test -q -p colm-core --lib -- --test-threads=1`（355 通过）；`cargo fmt --all --check`。
 Not-tested: 剩下 42 处（下一步按上面的优先级）。
+
+### 补上 `ldew_rain`/`ldew_snow`（4 处），并锁定下一轮的主目标：**`moninobukm` 的 26 处**
+
+`MOD_LeafTemperature.F90:1201-1202`（两支各两条，`tl>tfrz` 与 `tl<=tfrz`）：
+
+```fortran
+ldew_rain = ldew_rain + (qdewl-qevpl)*deltim
+ldew_snow = ldew_snow + (qfrol-qsubl)*deltim
+```
+
+dump（第 2994/2996 处）是 `FMA(deltim, qdewl-qevpl, ldew_rain旧值)` ——
+`deltim*通量` 被吸收、旧值是已舍入加数。这两句**每步无条件执行**（不是上一节那种
+`dtl→0` 的惰性族），所以值得改。已按此改两支共 4 处。
+
+**干窗仍逐位不变**（34 个变量、`maxabs` 一字不差）。到此从 `MOD_LeafTemperature`
+里补的 13 处全部零位移 —— 结合上一节的惰性论证，可以判定**种子不在这个模块的
+收尾部分**，得往更早的共享量走。
+
+### `MOD_FrictionVelocity` 的 dump 分账：`moninobukm` 独占 26 处
+
+顺手把 `fv.opt` 按例程分了一下（这才是这份 dump 的正确读法）：
+
+| 例程 | 收缩处数 |
+|---|---|
+| `psi`（两个 isra 副本） | 6 |
+| `moninobukini` | 2 |
+| `kintmoninobuk` | 6 |
+| `kmoninobuk` | 2 |
+| **`moninobukm`** | **26** |
+| `moninobuk` | 18 |
+
+而 `crates/colm-core/src/monin_obukhov.rs` **总共只有 18 个 `mul_add`** ——
+也就是说 `moninobuk`（18 处）对上了，**`moninobukm`（26 处）没有独立实现**：
+Rust 让 `canopy_monin_obukhov_with_scheme` 复用同一套
+`momentum_integral`/`heat_integral`/`heat_similarity`/`State`。
+
+这不是"少几次融合"的小事：上游 `moninobukm` 是**独立的两百行例程**
+（`MOD_FrictionVelocity.F90:169-371`），比 `moninobuk` 多算 `fh2m`/`fq2m`/`fht`/`fqt`/
+`fmtop`/`phih`，四条分支各写一遍。而它**正是叶温求解那条活路径上的近地层迭代**
+（`MOD_LeafTemperature.F90:625` 调用；`DEF_USE_CBL_HEIGHT=.false.` 时走这一支，
+另一个 `moninobukm_leddy` 只在打开 CBL 高度时用）。
+
+**为什么这就是种子**：`moninobukm` 的输出 `fh2m`/`fq2m`/`fm`/`fh`/`fq`/`fht`/`fqt`
+一一对应差分集合里的 `f_tref`/`f_qref`/`f_fm`/`f_fh`/`f_fq`/`f_fseng`/`f_fevpg`
+（`tref = thm + vonkar/(fh-fht)*dth*(fh2m/vonkar - fh/vonkar)` 这一句直接把三者
+绑在一起）。Rust 既然用 `moninobuk` 的算术去顶 `moninobukm`，差 1 ULP 完全合理，
+而 `t_grnd` 仍能逐位相同（收敛点相同、通量末位不同）。
+
+**下一轮的第一件事**：把 `moninobukm` 单独 dump 一遍（编译
+`MOD_FrictionVelocity.F90` 后按 `;; Function moninobukm` 取那 26 行），逐条读形状，
+在 Rust 里给冠层那条**独立实现**出来，而不是复用 `moninobuk`。
+
+Tested: `MOD_LeafTemperature.F90:1201-1202` 与 dump 第 2994/2996 处的对应（两支共 4 处落地）；
+`fv.opt` 的按例程分账表；`MONIN_FrictionVelocity` 的 `moninobukm` 源码范围与调用点核对
+（`MOD_LeafTemperature.F90:621/625`、`DEF_USE_CBL_HEIGHT` 默认 `.false.`）；
+干窗 1 步逐位比对（34 个变量不变）；
+`cargo test -q -p colm-core --lib -- --test-threads=1`（355 通过）；`cargo fmt --all --check`。
+Not-tested: `moninobukm` 的 26 处逐条读形状与独立实现（下一轮）。
