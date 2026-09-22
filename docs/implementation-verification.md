@@ -13423,3 +13423,29 @@ bash oracle/scripts/step0_arg_probe.sh
 Tested: `bash -n` 语法检查；两处锚点计数（1/1）；补丁体在临时副本上的干跑（2 行 WRITE）；
 `git status` 干净（干跑未触真文件）。
 Not-tested: 脚本的完整执行（要重编内核，留给干净上下文）。
+
+### 入口 A 第 194 轮：脚本跑通了，但**两条候选文件都没有输出** —— 下一轮打"全候选"
+
+`oracle/scripts/step0_arg_probe.sh` 连跑三次（每次自动还原 + 重编 + f48 PASS）：
+
+| 次 | 打补丁的目标文件 | 结果 |
+|---|---|---|
+| 1 | `MOD_LeafTemperature_Extended.F90`（`WRITE(77,…)`）| `fort.77` 不存在 |
+| 2 | 同上，改 `WRITE(*,…)` 走 stdout | `kernel.log` 里没有 `ARGPROBE_*` |
+| 3 | `MOD_LeafTemperaturePC_Extended.F90`（`:1084-1092`）| 同样没有输出 |
+
+说明**这两条 `moninobukm` 调用在干窗第 0 步都没被执行**。已排除的解释：CBL 关（否则会走
+`*_leddy`，那也在同两个文件里）；`rd_opt = 3` / `rb_opt = 3` 都是**硬编码参数**，
+所以 `IF (rd_opt == 3)` 那条支**是**成立的 —— 那么没执行就只剩"叶温求解走的是**第三个**
+实现"这一种可能（该版本用 `USE_SITE_pctpfts = .true.` 在 PFT/PC 之间切换，而
+`MOD_LeafTemperature*.F90` 至少有 main / Extended / PC 三份）。
+
+**下一轮的做法（已具备全部条件）**：把脚本的目标改成**候选列表**，对
+`MOD_LeafTemperature.F90`、`MOD_LeafTemperature_Extended.F90`、
+`MOD_LeafTemperaturePC_Extended.F90` 三份同时插同一条打印（锚点都在各自的
+`CALL moninobukm(` 前后），一次运行即可由"哪一行出现"确定实际执行的实现；
+`TARGET` 已做成环境变量，改成列表是几行的事。
+
+Tested: 脚本三次完整执行（含自动还原、重编、`f48 sync PASS`）；两次锚点唯一性与补丁干跑；
+`rd_opt`/`rb_opt` 的 `:485/:484` 硬编码参数核对。
+Not-tested: 三候选同时打补丁的那一次运行（下一轮）。

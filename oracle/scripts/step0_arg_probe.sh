@@ -12,7 +12,10 @@ set -euo pipefail
 
 BASE="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 WORK=${WORK:-/tmp/gf/argprobe}
-TARGET="vendor/CoLM202X/extends/interception/MOD_LeafTemperature_Extended.F90"
+# 目标文件由 namelist 决定：CN-Cng 用 `USE_SITE_pctpfts = .true.` → 走 **PC** 叶温
+# （`MOD_LeafTemperaturePC_Extended.F90`），不是 `MOD_LeafTemperature_Extended.F90`。
+# 第 194 轮第一次跑就是打了错文件，内核里一条 ARGPROBE 都没出现。
+TARGET=${TARGET:-vendor/CoLM202X/extends/interception/MOD_LeafTemperaturePC_Extended.F90}
 BACKUP="$WORK/$(basename "$TARGET").orig"
 export NETCDF_DIR=${NETCDF_DIR:-/opt/homebrew/opt/netcdf}
 
@@ -41,18 +44,18 @@ python3 - "$BASE/$TARGET" <<'PY'
 import re, sys
 path = sys.argv[1]
 src = open(path).read()
-anchor = "CALL moninobukm(hu_,ht_,hq_,displa,z0mv,z0hv,z0qv,obu,um, &"
+anchor = "CALL moninobukm(hu_,ht_,hq_,displa_lays(toplay),z0mv,z0hv,z0qv,obu,um, &"
 assert src.count(anchor) == 1, f"锚点出现 {src.count(anchor)} 次，脚本需更新"
 dump_in = (
-    "            WRITE(77,'(A,13E24.16)') 'IN ', hu_,ht_,hq_,displa,z0mv,z0hv,z0qv,obu,um,"
-    "displasink,z0mv,htop\n"
+    "            WRITE(*,'(A,13E24.16)') 'ARGPROBE_IN ', hu_,ht_,hq_,displa_lays(toplay),"
+    "z0mv,z0hv,z0qv,obu,um,displa_lay(toplay),z0m_lay(toplay),htop_lay(toplay)\n"
 )
 src = src.replace(anchor, dump_in + "            " + anchor, 1)
 # 输出打印：插在 ELSE 支那次调用的收尾之后（用带缩进的实参尾行 + ENDIF 定位，
 # 保证唯一 —— 只写 "ENDIF\n! Aerodynamic resistance" 会命中 2 处）
-tail = "                htop,fmtop,fm,fh,fq,fht,fqt,phih)\n            ENDIF\n"
+tail = " " * 28 + "htop_lay(toplay),fmtop,fm,fh,fq,fht,fqt,phih)\n         ENDIF\n"
 assert src.count(tail) == 1, f"收尾锚点出现 {src.count(tail)} 次，脚本需更新"
-dump_out = tail + "            WRITE(77,'(A,10E24.16)') 'OUT', ustar,fh2m,fq2m,fmtop,fm,fh,fq,fht,fqt,phih\n"
+dump_out = tail + "            WRITE(*,'(A,10E24.16)') 'ARGPROBE_OUT', ustar,fh2m,fq2m,fmtop,fm,fh,fq,fht,fqt,phih\n"
 src = src.replace(tail, dump_out, 1)
 open(path, "w").write(src)
 print("   patched")
@@ -76,10 +79,9 @@ cp -R "$BASE/oracle/work/CN-Cng/out" "$WORK/out"
 rm -rf "$WORK/out/CN-Cng/history"
 (cd "$WORK/run" && "$BASE/kernels/default/colm.x" "$WORK/case.nml" \
     > "$WORK/kernel.log" 2>&1) || { echo "！！内核运行失败，见 $WORK/kernel.log"; exit 4; }
-[ -f "$WORK/run/fort.77" ] && cp "$WORK/run/fort.77" "$WORK/fort_args.txt"
-# 有些构建把 WRITE(77) 写到当前目录的 fort.77，另一些写 <case>/fort.77
-[ -f "$WORK/fort_args.txt" ] || find "$WORK" -name 'fort.77' -exec cp {} "$WORK/fort_args.txt" \; -quit
+# 走 stdout（被 kernel.log 捕获）比开文件稳：内核自己可能占用 77 号单元
+grep -E 'ARGPROBE_(IN|OUT)' "$WORK/kernel.log" > "$WORK/fort_args.txt" || true
 echo "== 上游实参：$WORK/fort_args.txt"
-head -4 "$WORK/fort_args.txt" || echo "！！没找到 77 号输出"
+head -4 "$WORK/fort_args.txt" || echo "！！kernel.log 里没有 ARGPROBE 输出 —— 说明那两条支没被执行，先查分支"
 echo "== 下一步：Rust 侧在 leaf_temperature.rs 的 MoninObukhovInput 构造处打同一组 13 个量，"
 echo "   与上面逐位比较（判据见 docs/implementation-verification.md 的『入口 A 就绪清单』）。"
