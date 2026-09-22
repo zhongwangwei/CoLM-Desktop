@@ -10176,3 +10176,20 @@ Tested: `MOD_SoilSnowHydrology.F90` 本体的 dump（`water_vsf` 17 处逐条列
 逐个读数据流；那些函数一共约 1500 行，是下一轮的主体工作。
 这也解释了为什么表层那两处改了还是零位移：`wliq` 的 1 ULP 源头在矩阵装配里，
 不在表层更新里。
+
+### `WATER_VSF` 的水量平衡误差（两级 `FNMA`）
+
+```fortran
+err_solver = (蓄量变化) - (gwat - etr - rsur - rsubst)*deltim
+err_solver = err_solver - (qsdew+qfros-qsubl)*deltim      ! 无雪层时
+```
+
+GIMPLE：`FNMA(通量和, deltim, 蓄量变化)` 与 `FNMA(deltim, 凝结和, 上一项)` ——
+两级都把 `*deltim` 收进减法。`variably_saturated_flow.rs` 的
+`solver_balance_error_mm` 两级已改。
+
+**它不影响历史输出**（这个量只做平衡诊断，不回灌状态），所以窗口照旧逐位不变 ——
+但它是**活路径上的真实收缩**，且平衡误差本身是会被 `tier` 检查/诊断读到的量。
+
+Tested: `MOD_SoilSnowHydrology.F90` 本体的 dump；干窗 TIMESTEP 1 步 Rust-vs-Rust 逐位比对（不变）；
+`cargo test -q -p colm-core --lib -- --test-threads=1`（354 通过）；`cargo fmt --all --check`。

@@ -4467,20 +4467,22 @@ pub fn variably_saturated_flow_step(
         + state.ice_water_kg_m2.iter().sum::<f64>()
         + state.aquifer_water_mm
         + state.surface_water_mm;
-    let mut solver_balance_error_mm = storage_after_kg_m2
-        - storage_before_kg_m2
-        - (input.ground_water_flux_mm_s
-            - input.fluxes.transpiration_kg_m2_s
-            - surface_runoff_mm_s
-            - subsurface_runoff_mm_s)
-            * dt;
+    // `WATER_VSF` 的水量平衡误差：GIMPLE 是
+    // `FNMA(通量和, deltim, 蓄量变化)` —— `通量和*deltim` 被吸收。
+    let mut solver_balance_error_mm = (-(input.ground_water_flux_mm_s
+        - input.fluxes.transpiration_kg_m2_s
+        - surface_runoff_mm_s
+        - subsurface_runoff_mm_s))
+        .mul_add(dt, storage_after_kg_m2 - storage_before_kg_m2);
     // 无雪层（`lb >= 1`）时上游再把地表凝结项扣掉一次 —— 因为上面那一步已经
     // 把 `qsdew`/`qfros`/`qsubl` 加进 `wliq_soisno(1)`/`wice_soisno(1)` 了。
     if input.snow_layers == 0 {
-        solver_balance_error_mm -= (input.fluxes.soil_dew_kg_m2_s
-            + input.fluxes.soil_frost_kg_m2_s
-            - input.fluxes.soil_sublimation_kg_m2_s)
-            * dt;
+        // 同一处的第二级：`FNMA(deltim, qsdew+qfros-qsubl, 上一项)`。
+        solver_balance_error_mm = (-dt).mul_add(
+            input.fluxes.soil_dew_kg_m2_s + input.fluxes.soil_frost_kg_m2_s
+                - input.fluxes.soil_sublimation_kg_m2_s,
+            solver_balance_error_mm,
+        );
     }
 
     state.matric_potential_mm = soil_state.matric_potential_mm.clone();
