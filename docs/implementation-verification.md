@@ -11340,3 +11340,44 @@ Tested: `MOD_Opt_Baseflow.F90:37`、`MOD_Block.F90:620-647`、
 `cargo fmt --all --check`。
 Not-tested: `rsubst ≠ 0` 的算例（本机没有）；`DEF_Optimize_Baseflow = .true.`
 的优化过程本身（仍然拒绝）。
+
+## 用开关把第 0 步的差异分区：种子不在 PHS，也不在 VSF
+
+干窗第 0 步那 34 个变量各差 1 ULP 的**种子**一直没定位。这轮换了个办法：
+**用一条 namelist 开关把整条支路关掉**，看差异集合怎么变。脚本已入库：
+
+```
+oracle/scripts/compare_flag_isolated.sh <tag> "<NAMELIST 行>"
+```
+
+它复制 `CN-Cng`、注入那一行、两侧各跑 1 步（`DEF_HIST_FREQ='TIMESTEP'`），
+打印逐位不同的变量与相对量级。
+
+| 配置 | 逐位不同的变量数 | 最大相对差 | 说明 |
+|---|---|---|---|
+| 默认（PHS on、VEG_SNOW on、VSF on） | 34 | 6.0e-15 | 起点 |
+| `DEF_USE_PLANTHYDRAULICS = .false.` | 37 | 9.2e-15 | **同量级、同一集合** → 种子不在 PHS |
+| `DEF_VEG_SNOW = .false.` | **18** | 3.98e-13 | 叶面那一组降到**恰好 1 ULP（1.2e-16）**，只剩水分 |
+
+两个结论：
+
+1. **PHS 不是种子**。关掉之后差异集合与量级几乎不动（34 → 37，最大 6e-15 → 9.2e-15），
+   说明植物水力那套迭代既不产生也不放大这 1 ULP。此前把它列为候选可以划掉。
+2. **`DEF_VEG_SNOW` 分支会放大一个更小的既有差异**。关掉之后叶面一组
+   （`fevpa`/`fevpl`/`gssun`/`gssha`/`ldew`/`qstar`/`zol`/`rib`/`fsenl`/`us10m`/`vs10m`）
+   从 1e-15 量级降到 **1.2e-16 —— 正好一个 ULP**，也就是说这些量本身只剩"传输一次"
+   的舍入；其余 18 个里最扎眼的是 `f_wliq_soisno` 的**一层**差 3.98e-13
+   （`f_h2osoi` 同源，2.48e-13）。
+
+所以真正的种子在**水分步与能量步共用的那一环**（`f_wliq_soisno` 那一层就是入口），
+`DEF_VEG_SNOW` 只是把它放大两个数量级。下一步该做的是**在第 1 步内给
+`WATER_VSF` 的 `wliq_soisno` 逐层打点**（内核 + Rust 两侧），看它是从
+`qinfl`/`rsur`/`vol_liq` 哪一项开始差的 —— 这一步需要重建内核，留给后续轮次。
+
+**规矩**：定位"整步处处差 1 ULP"这类分叉时，**先开关分区、再逐点打点** ——
+开关分区一次只要一分钟，能把候选子系统从"全部"砍到一两个。
+
+Tested: `oracle/scripts/compare_flag_isolated.sh` 在默认 / `DEF_USE_PLANTHYDRAULICS=.false.` /
+`DEF_VEG_SNOW=.false.` 三种配置下的逐位比对（34/37/18 个变量，量级如上表）；
+`cargo fmt --all --check`。
+Not-tested: 第 1 步内 `wliq_soisno` 的逐层打点（需要重建内核，本轮没做）。
