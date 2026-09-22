@@ -570,8 +570,11 @@ fn downscale_shortwave(
         .zip(terrain.aspect_radians)
         .zip(terrain.area_fraction)
         .map(|((&slope, &aspect), &area)| {
-            let illumination =
-                (slope.cos() + zenith_radians.tan() * slope.sin() * aspect.cos()).clamp(0.0, 1.0);
+            // GIMPLE：`_49 = tan(zen)*sin(slp)`、`_53 = cos(asp)`、
+            // `_57 = .FMA (_49, _53, cos(slp))` —— 与 simple 支同样必须写成收缩式。
+            let illumination = (zenith_radians.tan() * slope.sin())
+                .mul_add(aspect.cos(), slope.cos())
+                .clamp(0.0, 1.0);
             shadow * illumination * optical_factor * area.clamp(0.0, 1.0) * beam_grid
         })
         .sum::<f64>();
@@ -590,19 +593,23 @@ fn downscale_shortwave(
             .iter()
             .map(|slope| {
                 let terrain_configuration = ((1.0 + slope.cos()) / 2.0 - sky_view_factor).max(0.0);
+                // GIMPLE：`_80 = (1-svf)*diff_swrad_c`、`_81 = .FMA (coszen, beam_swrad_c, _80)`。
                 albedo
                     * terrain_configuration
-                    * (beam_column * solar.cosine_zenith + (1.0 - sky_view_factor) * diffuse_column)
+                    * solar
+                        .cosine_zenith
+                        .mul_add(beam_column, (1.0 - sky_view_factor) * diffuse_column)
             })
             .sum::<f64>()
     };
     let shortwave = beam_column + diffuse_column + reflected_column;
-    Ok(shortwave
-        .clamp(
-            grid.downward_shortwave_w_m2 * (1.0 - limit),
-            grid.downward_shortwave_w_m2 * (1.0 + limit),
-        )
-        .max(0.0001))
+    let shortwave = shortwave.clamp(
+        grid.downward_shortwave_w_m2 * (1.0 - limit),
+        grid.downward_shortwave_w_m2 * (1.0 + limit),
+    );
+    // 上游 full 支的收尾是 `IF (forc_swrad_c==0.) forc_swrad_c = 0.0001` —— **只**在
+    // 恰好为 0 时抬到 1e-4；simple 支才是 `< 1e-4 → 1e-4`。用小值抽样就能分辨。
+    Ok(if shortwave == 0.0 { 0.0001 } else { shortwave })
 }
 
 fn downscale_shortwave_simple(
@@ -716,7 +723,8 @@ fn full_shadow_factor(zenith_radians: f64, azimuth_radians: f64, shadow: ShadowM
             if zenith_radians <= segment || a1 <= 1.0e-10 {
                 1.0
             } else {
-                (-(a1 * zenith_radians + a2).min(3.5).exp()).exp()
+                // GIMPLE：`_128 = .FMA (zen_rad, a1, a2)`。
+                (-a1.mul_add(zenith_radians, a2).min(3.5).exp()).exp()
             }
         }
     };

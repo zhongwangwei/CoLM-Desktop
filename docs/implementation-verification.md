@@ -12440,3 +12440,65 @@ Tested: `oracle/scripts/compare_forcingdownscaling.sh`（11 输出 × 20000 组�
 两个 workspace 的 `cargo fmt --all --check`。
 Not-tested: `downscale_shortwave` 的 full 支（`sf_lut_c` 16×101 阴影表 / `sf_curve_c`
 两套，加 `svf_c`/`alb` 的缺失支）—— 下一轮。
+
+## `downscale_shortwave` full 支结案：**两套阴影表各自 2000/2000**，又抓到三处收缩缺失
+
+上一轮把 `downscale_forcings` 的简单支验掉，这一轮补 full 支（`downscale_shortwave`：
+地形/天空视域/反射那一整套）。这次的**主要障碍不在物理，而在编译开关**。
+
+### 先认清 `.bld` 是哪一档：它是**网格**构建，不是单点
+
+上游 `downscale_shortwave` 的阴影实参由编译开关决定：
+
+```
+#ifdef SinglePoint
+   sf_lut_c   (1:num_azimuth,1:num_zenith)            ! 单点：16×101 查找表
+#else
+   sf_curve_c (1:num_azimuth,1:num_zenith_parameter)  ! 网格：16×3 分段曲线
+#endif
+```
+
+`vendor/CoLM202X/include/define.h` 里是 `#define GRIDBASED` + `#undef SinglePoint`，
+`gzip -dc .bld/mod_forcingdownscaling.mod | strings` 里也确实是 `sf_curve_c` ——
+**`.bld` 这套内核对象是网格档**。第一版驱动却按 `-DSinglePoint` 传了 16×101 的查找表，
+被调方按 `sf_curve_c(16,3)` 去读（`segment/sf_curve_c(ia,1)`、`a1=…(ia,2)`、`a2=…(ia,3)`），
+于是 `sf_c` 完全变味 —— 2000 组里 1104 组 `swrad` 对不上（差 1%–170%）。
+这**不是**移植缺陷，是harness 的编译开关与被链对象不一致。
+
+处置：脚本跑**两遍**，每遍都让驱动、模块对象、阴影表三者对齐 ——
+
+* `curve`：驱动不定义 SinglePoint（与 `.bld` 一致），传 `sf_curve_c(16,3)`，48 个值走 LCG；
+* `lut`：单点档。`include/define.h` 里那行 `#undef SinglePoint` 会把命令行上的 `-D` 吃掉，
+  所以脚本把它 sed 成 `#define`，写成 `$WORK/define.h`，再用 `-I"$WORK"` 压在 `include/`
+  前面编 `MOD_ForcingDownscaling.F90`（该模块里 `#ifdef SinglePoint` 只包着阴影表那几行，
+  翻它不动别的语义），链接时顶掉 `.bld` 的同名对象。
+
+### 修掉的三处（全部有 dump 依据）
+
+| 位置 | 上游 GIMPLE | 改前 Rust | 影响 |
+|---|---|---|---|
+| full 的 `cosill` | `_49=tan(zen)*sin(slp)`；`_57=.FMA (_49, cos(asp), cos(slp))` | 平铺 `cos+tan*sin*cos` | 1–2 ULP |
+| 反射项 | `_80=(1-svf)*diff_c`；`_81=.FMA (coszen, beam_c, _80)` | 平铺 `beam*coszen + (1-svf)*diff` | 1 ULP |
+| curve 阴影 | `_128=.FMA (zen_rad, a1, a2)` | 平铺 `a1*zen+a2` | 1 ULP |
+| 收尾 | full 支是 `IF (forc_swrad_c==0.) → 1e-4`（**只**在恰为 0 时） | 两档共用 `max(0.0001)` | 小值抽样下 1.08e-5 → 1e-4 |
+
+最后一条是抽样设计的功劳：驱动专门有一档 `swg = uni()*1e-5`（`MOD(i,13)==0`），
+把"恰为 0 才抬"和"小于 1e-4 就抬"这两种写法分开。上游 simple 支确实是
+`IF (forc_swrad_c < 1.e-4)`，full 支是 `== 0.` —— 两支不同，Rust 里必须分开写。
+
+### 结果
+
+```
+$ bash oracle/scripts/compare_forcingdownscaling_shortwave.sh
+full shortwave [curve]: 11 outputs 2000/2000 bitwise identical  (分支分布 {'000':970,'001':99,'010':394,'011':37,'100':325,'101':37,'110':130,'111':8})
+full shortwave [lut]:   11 outputs 2000/2000 bitwise identical  (分支分布 {'000':980,'001':95,'010':384,'011':41,'100':326,'101':34,'110':129,'111':11})
+```
+
+分支位是 `alb` 缺测（NaN）、`svf` 越界、`coszen == 0`，八种组合都抽到了。
+
+Tested: `oracle/scripts/compare_forcingdownscaling_shortwave.sh`（两档各 11 输出 × 2000 组逐位相同；
+改前 curve 28 组、lut 12 组 1 ULP 失配，harness 未对齐时 1104 组大偏差）；
+`cargo test --workspace --lib --bins -- --test-threads=1`；
+`cargo clippy --workspace --all-targets -- -D warnings`；两个 workspace 的 `cargo fmt --all --check`。
+Not-tested: `sf_lut_c` 在**单点产线内核**里的端到端影响（Rust 运行时目前还没有把 downscaling
+接到装配路径上，这个模块现在只有差分证据）。
