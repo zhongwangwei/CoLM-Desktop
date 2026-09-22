@@ -11266,3 +11266,27 @@ Tested: 832 个 schema 字段的全量交叉搜索脚本；上表逐条回源码
 `cargo fmt --all --check`。
 Not-tested: `ParaOpt/*_baseflow.nc` 的真实读取（本机没有这种文件）；
 `DEF_CheckEquilibrium = .true.` 时的输出文件内容。
+
+### `rss` 那道门修完之后：Campbell + VSF-off 在**三个窗口**上都与黄金配置齐平
+
+用同一套流程（复制 `oracle/work/<case>`、往 `&nl_colm` 里加那两条开关、两侧各跑一遍、
+`golden-compare` 拿上游当参照）把另外两个窗口也跑了：
+
+| 窗口 | Campbell + VSF-off 超容差变量数 | 同窗口黄金配置（VSF on）|
+|---|---|---|
+| 干 `CN-Cng` | **16** | 17 |
+| 湿 `CN-Cng-wet` | **66** | 68 |
+| 雪 `US-NR1-snow` | **79** | 79 |
+
+三个窗口都在同一水平 —— 也就是说这条"另一个配置"的支路在修掉 `rss` 之后
+**没有留下第二条系统偏差**。脚本已入库：`oracle/scripts/compare_second_config.sh <case>`（复制 + 注入开关 +
+两侧跑 + 比对，一条命令；`BASE` 由脚本自身位置推出）。
+
+**这一步的分量**：在此之前文档把这条配置记成"本机一次都没被走到"，于是它上面的
+所有收缩（`soilwater` 23 处、`water_2014` 13 处）都只是"从 dump 读出来的形状"，
+没有任何端到端信号。现在它们有了一个可复现的两侧对照口径，且当前是齐平的。
+
+Tested: `/tmp/gf/camp_any.sh CN-Cng-wet`、`/tmp/gf/camp_any.sh US-NR1-snow`
+（内核 + `colm-rs` + `golden-compare`）；三个窗口的超容差变量数如上表。
+Not-tested: 这条配置**没有入库的黄金文件**，所以它是"可复现实验"而不是回归闸门；
+要不要为它加第四个黄金窗口（含重跑 tier 分层分类）留待后续决定。
