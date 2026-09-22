@@ -12,6 +12,7 @@
 !   t_soisno(1)、wliq_soisno(1)、wice_soisno(1)、scv、sm、xmf、imelt 的逐层和。
 PROGRAM phasechange
   USE MOD_PhaseChange, only: meltf
+  USE MOD_Namelist, only: DEF_USE_Campbell_SOIL_MODEL
   IMPLICIT NONE
   INTEGER, PARAMETER :: r8=8, NL=4, NSNOW=2
   INTEGER(8) :: S
@@ -83,6 +84,7 @@ PROGRAM phasechange
      ENDDO
   ENDDO
   CLOSE(66)
+  PRINT *, 'DEF_USE_Campbell_SOIL_MODEL = ', DEF_USE_Campbell_SOIL_MODEL
   PRINT *, 'done'
 CONTAINS
   FUNCTION uni() RESULT(v)

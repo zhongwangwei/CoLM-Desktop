@@ -13970,3 +13970,34 @@ use colm_core::{phase_change, PhaseChangeInput, SoilHydraulicModel};
 
 Tested: `hydrology.rs:1-30` 与 `phase_change.rs:47-99` 的类型核对。
 Not-tested: 探针本体（下一轮）。
+
+### 最后的配置疑点已实测：链接进来的 namelist 取 **van Genuchten** 分支
+
+`meltf` 的水力模型不是在 `patchtype` 上分岔，而是由**同名 namelist 开关**决定
+（`MOD_PhaseChange.F90:139/447`）：
+
+```fortran
+IF (DEF_USE_Campbell_SOIL_MODEL) THEN
+   supercool(j) = porsl(j)*(smp/psi0(j))**(-1.0/bsw(j))
+ELSE
+   supercool(j) = soil_vliq_from_psi(smp, porsl(j), theta_r(j), -10.0, 5, &
+                    (/alpha_vgm(j), n_vgm(j), L_vgm(j), sc_vgm(j), fc_vgm(j)/))
+ENDIF
+```
+
+而驱动链的是 `.bld` 的**真 namelist**（不调 `read_namelist`，取默认值）。把该标志打出来后实测：
+
+```
+$ /tmp/gf/pc_diff/pc
+ DEF_USE_Campbell_SOIL_MODEL =  F
+```
+
+→ 该驱动跑的是 **van Genuchten** 支，所以 Rust 探针里 `soil_hydraulic_model` 应逐层填
+`SoilHydraulicModel::VanGenuchten { alpha_vgm, n_vgm, l_vgm, sc_vgm, fc_vgm }`。
+
+**注意覆盖面**：这条差分只覆盖 VGM 支；Campbell 支需要另一套配置（改 namelist 默认值 ——
+可照 `compare_second_config.sh` 的成例，或在本驱动里加一个桩 namelist 模块），下一轮可选做。
+
+Tested: 驱动加打印后重编、链接、运行（`DEF_USE_Campbell_SOIL_MODEL = F`）；
+`MOD_PhaseChange.F90:139/447` 的两个分支。
+Not-tested: Campbell 支的差分（需另配 namelist）。
