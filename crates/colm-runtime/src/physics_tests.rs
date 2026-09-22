@@ -245,6 +245,21 @@ fn split_soil_snow_is_refused_rather_than_run_as_non_split() {
 
 /// 基流优化器（`MOD_Opt_Baseflow`）在预热期迭代 `scale_baseflow`，
 /// 而本仓库把它钉成 1.0。开着它跑等于静默地不优化。
+/// `DEF_USE_SNICAR` 此前同样没被读过，而 `assembly.rs` 把 `snow_layer_absorption_w_m2`
+/// 钉成 `None` —— 开着它跑会静默用非 SNICAR 的雪光学。
+#[test]
+fn snicar_is_refused_rather_than_run_with_standard_snow_optics() {
+    let error = land_physics_parameters(
+        &case_with("DEF_USE_SNICAR = .true."),
+        LandCoverScheme::Igbp,
+        HEIGHTS,
+    )
+    .expect_err("the SNICAR snow branch is not carried into the time loop");
+    let message = error.to_string();
+    assert!(message.contains("DEF_USE_SNICAR"), "{message}");
+    assert!(message.contains("snow_layer_absorption_w_m2"), "{message}");
+}
+
 #[test]
 fn baseflow_optimization_is_refused_rather_than_run_unoptimized() {
     let error = land_physics_parameters(

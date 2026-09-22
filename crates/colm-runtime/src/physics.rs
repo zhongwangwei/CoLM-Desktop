@@ -95,6 +95,22 @@ pub fn land_physics_parameters(
              `ParaOpt/*_baseflow_*.nc` *is* read; only the optimizer is missing)"
         );
     }
+    if logical(document, "DEF_USE_SNICAR")? {
+        // `DEF_USE_SNICAR` 与 `DEF_SPLIT_SOILSNOW` 同属"最坏的一类"：它此前**根本
+        // 没被读过**，而 `assembly.rs` 把 `snow_layer_absorption_w_m2` 硬写成 `None`
+        // —— 也就是说 `ground_temperature.rs`/`phase_change.rs` 里那套 SNICAR 分支
+        // 永远不会被选中，写 `.true.` 的算例会**静默按标准雪算完**
+        // （雪粒径增长、分层吸收、融化能量都会与上游的 `SNICAR_AD_RT` 不同）。
+        //
+        // 冷启动那边（`colm-init`）**不拦**：它确实能按 SNICAR 生成重启，
+        // 只是运行期还没有把那条支路接上；拦在运行期才是"接不上就不跑"。
+        bail!(
+            "DEF_USE_SNICAR is on, but the Rust runtime assembles only the standard snow \
+             branch: `assembly.rs` pins `snow_layer_absorption_w_m2` to None and the SNICAR \
+             cold start is not carried into the time loop, so the case would silently run \
+             with the non-SNICAR snow albedo and layer absorption"
+        );
+    }
     if logical(document, "DEF_USE_IRRIGATION")? {
         // 上游的喷灌率由 `DEF_TUNING_IRRIGATION_*` 与作物物候逐步算出，
         // 不是 namelist 里的一个常数。这里给 0 会让开启喷灌的算例静默变成不灌溉。

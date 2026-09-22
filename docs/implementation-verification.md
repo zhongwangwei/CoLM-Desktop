@@ -1879,8 +1879,10 @@ Rust 侧此前把它做成了 `LandPhysicsParameters::boundary_layer_height_m` �
 - **上游有、本仓库没移植的分支显式报错**：`DEF_Runoff_SCHEME=1`（VIC）与
   `DEF_USE_IRRIGATION`（喷灌率由 `DEF_TUNING_IRRIGATION_*` 与作物物候逐步算出，
   给 0 会让开启喷灌的算例静默变成不灌溉）。**`DEF_SPLIT_SOILSNOW` 是后来补上的
-  第三个**（见文档末尾"`DEF_SPLIT_SOILSNOW` 此前根本没被读过"一节）：写 `.true.`
-  的算例会被 `assembly.rs` 里硬写死的 `use_split_soil_snow: false` 静默按非 split 跑完。
+  第三、第四个**（见文档末尾"`DEF_SPLIT_SOILSNOW` 此前根本没被读过"一节）：
+  `DEF_SPLIT_SOILSNOW`（写 `.true.` 会被 `assembly.rs` 里硬写死的
+  `use_split_soil_snow: false` 静默按非 split 跑完）与 `DEF_USE_SNICAR`
+  （同理，`snow_layer_absorption_w_m2` 被钉成 `None`，静默用标准雪光学）。
 - `land_cover_scheme` **必须由调用方传**：它来自内核编译期的 `LULC_IGBP`/`LULC_USGS`，
   namelist 里的 `DEF_USE_IGBP`/`DEF_USE_USGS` 只是只读镜像（`MOD_Namelist.F90:163`），
   默认算例里两个都是 `.false.`，从 namelist 读只能靠猜。
@@ -11843,3 +11845,47 @@ Tested: `MOD_Thermal.F90:546`、`MOD_LeafTemperature.F90:559/904` 与
 （33 个变量、`maxabs` 不变）；`f_fseng` 等 6 个量的 `maxabs` 跨 16 处改动的不变性核对；
 `cargo test -q -p colm-core --lib -- --test-threads=1`（355 通过）；`cargo fmt --all --check`。
 Not-tested: `canopy_monin_obukhov` 的随机差分驱动（下一轮）。
+
+## `DEF_USE_SNICAR` 也是"没被读过"的开关（第五个静默不匹配，已拦）
+
+按上面那条"没被读过但影响行为"的清单继续筛，`DEF_USE_SNICAR` 命中**同一类问题**：
+
+```
+$ grep -rn "snicar" crates/colm-runtime/src/physics.rs crates/colm-runtime/src/assembly.rs
+（无输出）
+$ grep -n "snow_layer_absorption_w_m2" crates/colm-runtime/src/assembly.rs
+1357:                    snow_layer_absorption_w_m2: None,
+```
+
+也就是说：`ground_temperature.rs`/`phase_change.rs` 里那套 SNICAR 分支
+（`use_snicar = snow_layer_absorption_w_m2.is_some()`）**永远不会被选中**，
+写 `DEF_USE_SNICAR = .true.` 的算例会**静默按标准雪光学算完** —— 雪粒径增长、
+分层吸收、融化能量都与上游的 `SNICAR_AD_RT` 不同。这与 `DEF_SPLIT_SOILSNOW`
+是完全相同的形状。
+
+**处置**：`colm-runtime/src/physics.rs::land_physics_parameters` 里直接 `bail!`。
+
+**冷启动那边（`colm-init`）刻意不拦**：它**确实**能按 SNICAR 生成重启
+（`snicar.rs` 的 `initialize_cold`，还会在缺表时报错），现有测试
+（`colm-init/tests/native_pipeline.rs:85`）也在用 `DEF_USE_SNICAR=.true.`。
+"初始器能造、运行期不能跑"是当前的真实状态，拦在运行期才是"接不上就不跑"。
+
+端到端实测：
+
+```
+$ colm-rs /tmp/gf/snicarcheck --land-cover igbp …
+colm-rs: DEF_USE_SNICAR is on, but the Rust runtime assembles only the standard snow
+branch: `assembly.rs` pins `snow_layer_absorption_w_m2` to None and the SNICAR cold
+start is not carried into the time loop, so the case would silently run with the
+non-SNICAR snow albedo and layer absorption
+```
+
+回归测试：`physics_tests::snicar_is_refused_rather_than_run_with_standard_snow_optics`。
+
+**这条也补进"上游有、本仓库没移植的分支显式报错"那张清单**（现在是四个：VIC 产流、
+灌溉、`DEF_SPLIT_SOILSNOW`、`DEF_USE_SNICAR`）。
+
+Tested: `grep` 全仓库确认 `DEF_USE_SNICAR` 与 `snow_layer_absorption_w_m2` 在运行期的
+落点；端到端 `colm-rs` 拒绝信息；`colm-init/tests/native_pipeline.rs:85` 的既有用法核对
+（因此不在 `colm-init` 里拦）；`cargo test -q -p colm-runtime --lib -- --test-threads=1`（73 通过）。
+Not-tested: SNICAR 支路本身（**故意**：拒绝就是不跑）。
