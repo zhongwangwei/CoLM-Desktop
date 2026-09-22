@@ -162,31 +162,44 @@ pub fn solve_campbell_soil_water(
     let mut outflow_upper_derivative = vec![0.0; layers];
 
     outflow[0] = -hydraulic_conductivity_mm_s[0] * gradient[0];
-    outflow_lower_derivative[0] = -(gradient[0] * conductivity_lower_derivative[0]
-        - hydraulic_conductivity_mm_s[0] * potential_derivative[0] / separation_mm[0]);
-    outflow_upper_derivative[0] = -(gradient[0] * conductivity_upper_derivative[0]
-        + hydraulic_conductivity_mm_s[0] * potential_derivative[1] / separation_mm[0]);
+    // `soilwater` 的三对角装配（`:2186-2192` 那一组）：GIMPLE 是
+    // `FMS(gradient, 导数, 商)` / `FMA(gradient, 导数, 商)` —— 商先各自舍入，
+    // 与 `gradient` 相乘的那个乘积被吸收。三处循环体（首层/中间/末层）同型。
+    outflow_lower_derivative[0] = -gradient[0].mul_add(
+        conductivity_lower_derivative[0],
+        -(hydraulic_conductivity_mm_s[0] * potential_derivative[0] / separation_mm[0]),
+    );
+    outflow_upper_derivative[0] = -gradient[0].mul_add(
+        conductivity_upper_derivative[0],
+        hydraulic_conductivity_mm_s[0] * potential_derivative[1] / separation_mm[0],
+    );
     diagonal[0] = thickness_mm[0] / input.time_step_seconds + outflow_lower_derivative[0];
     upper[0] = outflow_upper_derivative[0];
     rhs[0] = input.infiltration_mm_s - outflow[0] - root_uptake_mm_s[0];
 
     for layer in 1..layers - 1 {
         let inflow = -hydraulic_conductivity_mm_s[layer - 1] * gradient[layer - 1];
-        let inflow_lower_derivative = -(gradient[layer - 1]
-            * conductivity_lower_derivative[layer - 1]
-            - hydraulic_conductivity_mm_s[layer - 1] * potential_derivative[layer - 1]
-                / separation_mm[layer - 1]);
-        let inflow_upper_derivative = -(gradient[layer - 1]
-            * conductivity_upper_derivative[layer - 1]
-            + hydraulic_conductivity_mm_s[layer - 1] * potential_derivative[layer]
-                / separation_mm[layer - 1]);
+        let inflow_lower_derivative = -gradient[layer - 1].mul_add(
+            conductivity_lower_derivative[layer - 1],
+            -(hydraulic_conductivity_mm_s[layer - 1] * potential_derivative[layer - 1]
+                / separation_mm[layer - 1]),
+        );
+        let inflow_upper_derivative = -gradient[layer - 1].mul_add(
+            conductivity_upper_derivative[layer - 1],
+            hydraulic_conductivity_mm_s[layer - 1] * potential_derivative[layer]
+                / separation_mm[layer - 1],
+        );
         outflow[layer] = -hydraulic_conductivity_mm_s[layer] * gradient[layer];
-        outflow_lower_derivative[layer] = -(gradient[layer] * conductivity_lower_derivative[layer]
-            - hydraulic_conductivity_mm_s[layer] * potential_derivative[layer]
-                / separation_mm[layer]);
-        outflow_upper_derivative[layer] = -(gradient[layer] * conductivity_upper_derivative[layer]
-            + hydraulic_conductivity_mm_s[layer] * potential_derivative[layer + 1]
-                / separation_mm[layer]);
+        outflow_lower_derivative[layer] = -gradient[layer].mul_add(
+            conductivity_lower_derivative[layer],
+            -(hydraulic_conductivity_mm_s[layer] * potential_derivative[layer]
+                / separation_mm[layer]),
+        );
+        outflow_upper_derivative[layer] = -gradient[layer].mul_add(
+            conductivity_upper_derivative[layer],
+            hydraulic_conductivity_mm_s[layer] * potential_derivative[layer + 1]
+                / separation_mm[layer],
+        );
         lower[layer] = -inflow_lower_derivative;
         diagonal[layer] = thickness_mm[layer] / input.time_step_seconds - inflow_upper_derivative
             + outflow_lower_derivative[layer];
@@ -196,12 +209,16 @@ pub fn solve_campbell_soil_water(
 
     let last = layers - 1;
     let inflow = -hydraulic_conductivity_mm_s[last - 1] * gradient[last - 1];
-    let inflow_lower_derivative = -(gradient[last - 1] * conductivity_lower_derivative[last - 1]
-        - hydraulic_conductivity_mm_s[last - 1] * potential_derivative[last - 1]
-            / separation_mm[last - 1]);
-    let inflow_upper_derivative = -(gradient[last - 1] * conductivity_upper_derivative[last - 1]
-        + hydraulic_conductivity_mm_s[last - 1] * potential_derivative[last]
-            / separation_mm[last - 1]);
+    let inflow_lower_derivative = -gradient[last - 1].mul_add(
+        conductivity_lower_derivative[last - 1],
+        -(hydraulic_conductivity_mm_s[last - 1] * potential_derivative[last - 1]
+            / separation_mm[last - 1]),
+    );
+    let inflow_upper_derivative = -gradient[last - 1].mul_add(
+        conductivity_upper_derivative[last - 1],
+        hydraulic_conductivity_mm_s[last - 1] * potential_derivative[last]
+            / separation_mm[last - 1],
+    );
     outflow[last] = hydraulic_conductivity_mm_s[last];
     outflow_lower_derivative[last] = conductivity_lower_derivative[last];
     lower[last] = -inflow_lower_derivative;

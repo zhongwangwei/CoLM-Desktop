@@ -10006,3 +10006,37 @@ Rust 原先把导数写成 `saturation.powf(exponent - 1.0)` —— 代数上等
 Tested: `MOD_SoilSnowHydrology.F90` 本体的 `-fdump-tree-optimized`（`soilwater` 23 处逐条列出）；
 干窗 TIMESTEP 1 步 Rust-vs-Rust 逐位比对（不变）；`cargo test -q -p colm-core --lib -- --test-threads=1`（354 通过）；
 `cargo fmt --all --check`。
+
+## `soilwater` 的三对角装配：`FMS/FMA(gradient, 导数, 商)`
+
+`MOD_SoilSnowHydrology.F90:2186-2192` 那一组装配（首层/中间/末层三处同型）在
+dump 里是
+
+```
+_171 = .FMS (_162, _165, _170)      ! gradient*下导数 - 商
+_179 = .FMA (_162, _174, _178)      ! gradient*上导数 + 商
+```
+
+其中"商"是 `hk*potential_derivative/separation`（**先各自舍入**），被吸收的是
+`gradient*导数` 那个乘积。Rust 的 `soil_water.rs` 八处（三处循环体 × 上下导数，
+加重复项）已改成 `gradient.mul_add(导数, ∓商)`。`f77` 也已导入该文件。
+
+### 一个必须记下来的**反常事实**
+
+这是连续第九处"改对了但干窗第 0 步逐位不变"的修复，而**这一处明确在
+`CN-Cng` 的路径上**（该算例没写 `DEF_USE_Campbell_SOIL_MODEL`，走 van Genuchten；
+没写 `DEF_USE_VariablySaturatedFlow`，所以走的就是 `soil_water.rs` 这一支）。
+九处、覆盖近地层、地面通量、热参数、土壤水、相变多个模块，全部**零位移** ——
+这已经不像"1 ULP 恰好不传"，更像干窗第 0 步的那批差异**由另一条源头支配**。
+
+因此下一轮**不要再继续扫模块**。应当做的是一次**定点对照**：
+把 Rust 与内核在第一步的**完整状态与强迫**逐位打印并排（restart 读入的
+`t_soisno`/`wliq`/`wice`/`smp`… 与 `forc_t/q/us/vs/pbot/rho` 及其派生
+`thm`/`qm`/`ur`），先确认**两侧的输入是否本来就不同**。
+如果输入相同而输出不同，再回到模块；如果输入不同，问题在读入或装配，
+与物理模块无关 —— 那样前面几轮的"扫模块"就是方向错了。
+
+Tested: `MOD_SoilSnowHydrology.F90` 本体的 `-fdump-tree-optimized`；干窗 TIMESTEP 1 步 Rust-vs-Rust 逐位比对（不变）；
+`cargo test -q -p colm-core --lib -- --test-threads=1`（354 通过）；`cargo fmt --all --check`；
+`cargo test --workspace --lib --bins -- --test-threads=1`；`cargo clippy --workspace --all-targets -- -D warnings`；
+`cargo test -q -p oracle`；`cargo run -q -p xtask -- check-gui`；`python3 oracle/scripts/test_upstream_f48_sync.py`（PASS）。
