@@ -10258,3 +10258,34 @@ Tested: `MOD_SoilSnowHydrology.F90:1036-1038` 与本体 dump 的对应；干窗 
 Rust-vs-Rust 逐位比对（不变）；`cargo test --workspace --lib --bins -- --test-threads=1`；
 `cargo clippy --workspace --all-targets -- -D warnings`；两处 `cargo fmt --all --check`；
 `cargo test -q -p oracle`；`cargo run -q -p xtask -- check-gui`；`python3 oracle/scripts/test_upstream_f48_sync.py`（PASS）。
+
+### 第二处：`WATER_VSF` 的 `wresi`（`vol_liq` 被内联进 FMA）
+
+上游 `MOD_SoilSnowHydrology.F90:866-868`：
+
+```fortran
+vol_liq(j) = wliq_soisno(j)/(dz_soisno(j)*denh2o)
+vol_liq(j) = min(eff_porosity(j), max(0., vol_liq(j)))
+wresi(j)   = wliq_soisno(j) - dz_soisno(j) * denh2o * vol_liq(j)
+```
+
+`vol_liq` 只被用一次，GCC 把它**整条内联**进 `wresi`，于是 dump 里只剩一条：
+
+```
+_108 = dz * 1e3
+_110 = wliq / _108
+M.360 = min(eff_porosity, max(_110, 0))
+_112 = .FNMA (_108, M.360, _107=wliq)
+```
+
+即 `wresi = FNMA(dz*denh2o, min(eff, max(wliq/(dz*denh2o), 0)), wliq)` ——
+**夹取留在乘积的操作数里，被吸收的是 `dz*denh2o*vol_liq` 那个乘积**。
+Rust 的 `variably_saturated_flow.rs:4140` 那行已改成
+`(-liquid_capacity).mul_add(liquid_volume_fraction, wliq)`。
+
+这一处**无条件执行**（不像上一处的湿周分支要水位落在界面附近），干窗 1 步
+仍逐位不变 —— 说明这条路当前步的 `liquid_volume_fraction` 处在夹取边界
+（`vol_liq` 恰好等于 `eff` 或 0）时融合与否无差别，或该量在本步没影响状态。
+
+Tested: `MOD_SoilSnowHydrology.F90:866-868` 与 dump 的对应；干窗 TIMESTEP 1 步
+Rust-vs-Rust 逐位比对（不变）；`cargo test -q -p colm-core --lib`（354 通过）；`cargo fmt --all --check`。

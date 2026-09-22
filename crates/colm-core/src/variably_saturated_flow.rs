@@ -4137,8 +4137,14 @@ pub fn variably_saturated_flow_step(
                 layer_water_capacity_kg_m2(input.layer_thickness_m[level], WATER_DENSITY_KG_M3);
             liquid_volume_fraction[level] = (state.liquid_water_kg_m2[level] / liquid_capacity)
                 .clamp(0.0, effective_porosity[level]);
-            residual_water_kg_m2[level] =
-                state.liquid_water_kg_m2[level] - liquid_capacity * liquid_volume_fraction[level];
+            // `MOD_SoilSnowHydrology.F90:866-868`（`WATER_VSF`）：
+            // `wresi = wliq - dz*denh2o*vol_liq`。`vol_liq` 只被用一次，GCC 把它
+            // 内联进来，于是整条是 `FNMA(dz*denh2o, min(eff, max(wliq/(dz*denh2o),0)), wliq)`
+            // —— 乘积被吸收，而 `min/max` 的夹取留在乘积的操作数里。
+            residual_water_kg_m2[level] = (-liquid_capacity).mul_add(
+                liquid_volume_fraction[level],
+                state.liquid_water_kg_m2[level],
+            );
         }
     }
 
