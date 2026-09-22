@@ -306,9 +306,14 @@ pub fn initialize_monin_obukhov(
             .mul_add(input.reference_wind_m_s, 0.5_f64.powi(2))
             .sqrt()
     };
+    // `rib = grav*zldis*dthv/(thv*um*um)`：分母的**结合**是 `(thv*um)*um`
+    // （GIMPLE：`_12 = um*thv; _13 = um*_12`），不是 `thv*(um*um)` ——
+    // 后者先舍入一次平方，实测让 `obu` 只有 16188/20000 逐位相同。
     let richardson =
         GRAVITY_M_S2 * input.reference_height_m * input.virtual_temperature_difference_k
-            / (input.virtual_potential_temperature_k * stability_adjusted_wind_m_s.powi(2));
+            / (input.virtual_potential_temperature_k
+                * stability_adjusted_wind_m_s
+                * stability_adjusted_wind_m_s);
     let zeta = if richardson >= 0.0 {
         // 分母是 `FNMA(min(rib,0.19), 5, 1)`。
         (richardson * (input.reference_height_m / input.momentum_roughness_m).ln()

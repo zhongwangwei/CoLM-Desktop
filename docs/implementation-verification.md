@@ -9623,3 +9623,65 @@ Tested: 200000 组随机 `(u,v)` 的 `hypot` vs 平方和开方对比（10956 �
   入手，而不是继续扫模块。
 - `MOD_ForcingDownscaling` 还有 20 处收缩（长短波、降水、风廓线的因子式）未改；
   它在本机三个算例里似乎没被走到（改不动窗口就是证据）。
+
+## `groundfluxes` 的随机差分驱动：一个结合律错误（实测，**已修**）
+
+上一轮的结论"分叉在 `groundfluxes` 的输入里"是**错的** —— 那时只有 GIMPLE 依据，
+没有驱动。这轮补上：`MOD_GroundFluxes` 的 `PUBLIC :: GroundFluxes`（注意大写）
+可以单独调用，写一个 49 实参的驱动（`MOD_Namelist` 的两个开关用一个小 stub 顶上，
+取 schema 默认 `DEF_RSS_SCHEME=1` / `DEF_USE_CBL_HEIGHT=.false.`），
+共享 LCG 出 20000 组输入、逐位比 23 个输出。**结果只有 18582–20000/20000**。
+
+顺着输出往回缩，第二个驱动直接调 `moninobukini`（`PUBLIC`）：`um` 20000/20000，
+但 **`obu` 只有 16188/20000**。逐条读 GIMPLE 才看出是**结合律**：
+
+```
+_8  = zldis * grav
+_9  = dthv * _8                ! (zldis*grav)*dthv
+_12 = um * thv                 ! thv*um
+_13 = um * _12                 ! (thv*um)*um   ← 分母是 (thv*um)*um
+rib = _9 / _14
+```
+
+Rust 写的是 `thv * um.powi(2)` = `thv*(um*um)` —— 先舍入一次平方，与内核**不是**
+同一棵树。改成 `thv * um * um` 后 `obu` **20000/20000**。这条错误以前查不出来：
+`um` 是对的，`obu` 只差 1 ULP，而它一路经 `obu → 迭代 → ustar → 阻力 → 通量`
+放大成 23 个输出里的近 1400 处差异。
+
+| 量 | 修前 | 修后 |
+|---|---|---|
+| `moninobukini` 的 `obu` | 16188/20000 | **20000/20000** |
+| `groundfluxes` 的 23 个输出 | 18582–20000 | 18634–**20000** |
+
+`groundfluxes` 本身**仍有缺口**（多数输出 93–98%）：`moninobukini`、`moninobuk`、
+`moninobukm`、`moninobuk_leddy` 四个被调用的例程现在都是 20000/20000，
+所以剩下的差异在 `groundfluxes` 自己的循环里（`z0hg` 的雷诺数式、`thvstar`、
+`zeta`、阻力与通量那几段中的某处）——下一轮用同样的"逐段输出中间量"的办法继续缩。
+
+### 窗口三口径
+
+以 `fb47578`（风速那一轮）为基线：
+
+| 窗口 | 逐位不同值 | Σ\|Δ\| | 超容差 |
+|---|---|---|---|
+| 干（CN-Cng） | 21235 → 21229 | **291.8579 → 216.9941** | 821 → **813** |
+| 湿（CN-Cng-wet） | 33208 → 33207 | 10379.6428 → 10386.5309 | 20662 → 20671 |
+| 雪（US-NR1-snow） | 33660 → 33593 | 不变 | 不变 |
+
+干窗的 Σ\|Δ\| 再创新低（216.99）。仍然保留：`moninobukini` 的 16188→20000 是
+直接把内核本体跑出来的数字，比端到端阈值抖动硬。
+
+Tested: `USE` 内核本体模块的两个 Fortran 驱动（`GroundFluxes` 49 实参 20000 组 ×
+23 输出；`moninobukini` 20000 组 × 2 输出），均以 `-ffp-contract=off` 编译驱动本身；
+干窗 TIMESTEP 1 步逐位比对；三个黄金窗口 + 三口径 A/B；
+`cargo test --workspace --lib --bins -- --test-threads=1`；`cargo clippy --workspace --all-targets -- -D warnings`；
+两处 `cargo fmt --all --check`；`cargo test -q -p oracle`；`cargo run -q -p xtask -- check-gui`；
+`python3 oracle/scripts/test_upstream_f48_sync.py`（PASS）。
+
+### 未验的部分
+
+- `groundfluxes` 的 23 个输出还没有全中，缺口在它自己的循环里（见上）。
+- 干窗第 0 步那批 1 ULP 差异在修完 `rib` 之后**依旧逐位不变**，说明它们
+  既不在这三个模块的算式里，也不在 `ur`/`rib` 的算法里；下一步应当直接
+  同步打印 Rust 与内核在**第一步的完整状态**（restart 读入 + 第一步各中间量），
+  而不是继续逐个模块扫。
