@@ -13515,3 +13515,34 @@ Tested: 五次完整探针运行（每次自动还原、重编、`f48 sync PASS`
 `strings kernels/default/colm.x | grep -c ARGPROBE_` 计数（2/2/3/3）；
 `grep -rln "CALL moninobuk"` 的调用者清单。
 Not-tested: 第 0 步 `r_*`/状态量的 restart 侧逐位比对（下一轮入口）。
+
+## 更锐的口径：**restart 侧**只剩 19/68 个变量差，`t_soisno`/`tleaf` 恰是 1 ULP
+
+上一轮把种子方向从"相似性实参"改为"restart/初始化侧"。这一轮直接用 **restart 文件**做口径：
+干窗跑 1 步后，内核写 `out/CN-Cng/restart/2008-001-05400/…nc`，Rust 写
+`rust_restart.nc`（`dry_ts.sh` 已在传 `--restart-out`），两者**逐位比**：
+
+```
+differing restart variables: 19 / 68
+  t_soisno        maxrel=2.05e-16  ndiff=2   ← 1 ULP
+  tleaf           maxrel=2.18e-16  ndiff=1   ← 1 ULP
+  emis            maxrel=2.21e-16  ndiff=1
+  fm              maxrel=2.66e-16  ndiff=1
+  ustar           maxrel=4.07e-16  ndiff=1
+  fh / fq         maxrel=4.60e-16  ndiff=1
+  qref            maxrel=4.85e-16  ndiff=1
+  ldew / ldew_snow 1.08e-15 · wliq_soisno 1.86e-15 · qstar 2.04e-15 …
+```
+
+要点：
+
+1. **状态量本身**（`t_soisno`、`tleaf`）就停在 1 ULP —— 种子的"落点"是**能量步的温度更新**，
+   与上一轮"不是这一步新算的相似性调用"合起来，指向**无条件执行的温度更新表达式**；
+2. 这是比 history 更锐的口径：只 19 个变量、多数 `ndiff = 1`，没有 11 天窗口那种混沌放大，
+   适合当作**每个候选形状改动的验收尺**（改好了这个数应当下降）；
+3. 用法与 history 口径相同：`bash /tmp/gf/dry_ts.sh 1` 后用上面那段 python 比两个 restart
+   文件（脚本可固化成 `oracle/scripts/restart_divergence.py`，下一轮补）。
+
+Tested: 上述 python 片段对 `/tmp/gf/dryts/out/CN-Cng/restart/2008-001-05400/*.nc` 与
+`/tmp/gf/dryts/rust_restart.nc` 的实比（19/68）。
+Not-tested: 把它固化成脚本并用于逐个候选（下一轮）。
