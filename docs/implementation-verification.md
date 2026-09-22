@@ -10494,3 +10494,32 @@ let direct  = diffuse + 0.4*direct_correction*(1.0 - diffuse);
 Tested: `MOD_Albedo.F90` 分别按函数重新核对（这次只查 `albland`）；Rust 侧
 `radiation.rs:645 aged_snow_albedo` 逐行比对确认不同式子；本轮无源码改动，
 `cargo test -q -p colm-core --lib`（354 通过）、工作树干净。
+
+### `albland` 单独 dump：九处的形状与**方向**（落点已到 `surface_optics.rs:albland`）
+
+按上一轮的规矩（一个函数一个桶）重做，`albland` 的九处是：
+
+```
+[1] FNMA(ssw, 0.4, 0.11)                      ! 0.11 - 0.4*ssw
+[2] FNMA(age, {0.2, 0.5}, {1.0, 1.0})         ! 1 - 0.2*age（可见）/ 1 - 0.5*age（近红外）
+[3] FMA(M.138*2.0, 2.0, 1.0)
+[4] FMA(0.4*max(cff,0), ·, dralbs)            ! 直射修正在两个波段上的混合
+[5] FMA(frsno, albsno, (1-frsno)*albg)        ! ← **雪面/地面反照率混入**
+[6] FMA(1-frsno, ·, frsno*·)
+[7] FMA(1-frsno, ·, frsno*·)
+[8] FMA(1-albsno, tran, ·)
+[9] FMA(tran, 1-albg, ·)
+```
+
+**方向与 `net_solar`/上一节一致**：最左的乘积被吸收、最右的是已舍入的加数
+（`[5]` 里舍入的是 `(1-frsno)*albg`，被吸收的是 `frsno*albsno`）。
+
+落点已定到 `surface_optics.rs` 的 `fn albland`（`:157`，带
+"第 2 节 地面反照率 / 第 3 节 非 SNICAR 雪面反照率"注释）—— 九处具体对应哪几行
+还没逐行对上（该函数较长，含夜间早返回与 `thermk` 的跨步语义），
+下一轮从"雪盖混合"那一段（第 2/3 节之间）逐句比。
+
+（本轮无源码改动：按"形状 → 落点 → 行号 → 改"的次序，现在只到第二步。）
+
+Tested: `MOD_Albedo.F90` 只按 `albland` 过滤的 dump（九处逐条列出）；
+`grep` 定位 `surface_optics.rs:157 fn albland`；`cargo test -q -p colm-core --lib`（354 通过）、工作树干净。
