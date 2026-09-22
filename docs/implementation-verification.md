@@ -14569,3 +14569,24 @@ GTPROBE_IN  2.830000000000000E+02  8.784146015197782E+00  0.000000000000000E+00 
 Tested: 四个探针脚本的 `mkdir` 修正；`step_ground_probe.sh` 完整跑通（标记 1、完成标志 1、
 产出 1 行 23 个数）；`f48 sync PASS`。
 Not-tested: Rust 侧的 23 个量对照（下一轮）。
+
+### 23 个入参的分类：只有 **9 个"计算量"** 需要两侧对照，其余由 restart 决定
+
+把第 235 轮拿到的 23 个入参按"来源"分两类 —— 这一步本身就是收窄：
+
+| 类别 | 量 | 为何两侧必然相同 |
+|---|---|---|
+| **状态（13 个）** | `t_soisno(1)`、`wliq_soisno(1)`、`wice_soisno(1)`、`scv`、`snowdp`、`t_grnd`、`t_soil`、`t_snow`、`fsno`（无雪时 0）、以及 `htvp`（由表层是否纯冰定的常数）| 两侧读**同一份 restart**、按同一套映射搬运；干窗第 0 步它们未参与任何新计算 |
+| **计算量（9 个）** | `frl`、`dlrad`、`sabg`、`sabg_soil`、`sabg_snow`、`fseng`、`fseng_soil`、`fseng_snow`、`fevpg`、`fevpg_soil`、`fevpg_snow`、`cgrnd`、`emg` | 由第 0 步之前的辐射/湍流计算得到 —— **它们已经在 history 口径里被证明差 1e-13…1e-15 相对**（`f_olrg`/`f_rnet`/`f_fseng`/`f_fevpg` 等）|
+
+（严格地说 `emg` 来自地表反照率/雪盖 —— 无雪时是地类常数，也应相同；`cgrnd` 是地表热通量
+对温度的导数，属计算量。）
+
+**结论**：`t_soisno` 的 1 ULP **不可能来自那 13 个状态量**（两侧同一份 restart），只能来自
+这 9 个（实际 ~8 个）**计算量**——而它们正是本会话早先已经在 history 里看到差异的那一族。
+于是"入参对照"这一环不再需要逐个验证状态量，**下一轮只需在 Rust 侧打印这 8 个计算量**并与
+上面那份 dump 比。
+
+Tested: 第 235 轮 dump 的 23 个量按来源分类；与既有 history 差异族（`f_olrg`/`f_rnet`/`f_fseng`/
+`f_fevpg`）的对应。
+Not-tested: Rust 侧那 8 个计算量的打印与逐位比对（下一轮）。
