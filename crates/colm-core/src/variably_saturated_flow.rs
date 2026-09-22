@@ -4393,11 +4393,17 @@ pub fn variably_saturated_flow_step(
         }
         if water_table_depth_mm < interface_depth_mm[level + 1] {
             if water_table_depth_mm >= interface_depth_mm[level] {
+                // `MOD_SoilSnowHydrology.F90:1109-1110`（`WATER_VSF`）：
+                // `wliq = denh2o*((eff*(sp_zi-zwt) + vol_liq*(zwt-sp_zi(j-1)))/1000`。
+                // GIMPLE（`water_vsf` 第 6 处）是
+                // `FMA(eff, sp_zi-zwt, (zwt-sp_zi(j-1))*vol_liq)` ——
+                // **左边**那个乘积被吸收、**右边**的是已舍入的加数。
                 state.liquid_water_kg_m2[level] = WATER_DENSITY_KG_M3
-                    * (effective_porosity[level]
-                        * (interface_depth_mm[level + 1] - water_table_depth_mm)
-                        + liquid_volume_fraction[level]
-                            * (water_table_depth_mm - interface_depth_mm[level]))
+                    * effective_porosity[level].mul_add(
+                        interface_depth_mm[level + 1] - water_table_depth_mm,
+                        liquid_volume_fraction[level]
+                            * (water_table_depth_mm - interface_depth_mm[level]),
+                    )
                     / 1000.0;
             } else {
                 state.liquid_water_kg_m2[level] = WATER_DENSITY_KG_M3

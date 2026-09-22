@@ -10634,3 +10634,25 @@ Tested: `MOD_Albedo.F90:186-213、341-357、2015、2020-2062` 逐段核对；Rus
 `radiation.rs:647-676` 与 `surface_optics.rs` 的 `albland` 分支归属核对；
 `grep` 确认 `0.98` 不在 Rust 侧；本轮无源码改动；
 `cargo test -q -p colm-core --lib`（354 通过）、工作树干净。
+
+### 第四处：`WATER_VSF` 的 `wliq` 重建式（**就是目标量本身的语句**）
+
+上游 `MOD_SoilSnowHydrology.F90:1109-1110`：
+
+```fortran
+wliq_soisno(j) = denh2o * ((eff_porosity(j)*(sp_zi(j)-zwtmm) &
+   + vol_liq(j)*(zwtmm - sp_zi(j-1)))/1000.0
+```
+
+GIMPLE（`water_vsf` 第 6 处）是 `FMA(eff, sp_zi-zwt, (zwt-sp_zi(j-1))*vol_liq)`
+—— **左边**乘积被吸收、**右边**是已舍入的加数（这是方向规则的**第四个**独立来源）。
+Rust 的 `variably_saturated_flow.rs:4396-4400` 已按此写。
+
+干窗 1 步仍逐位不变：这一支要 `zwtmm` 落在该层的两个界面之间才走，
+干窗算例第 0 步的水位不在那一层（走 `vol_liq*厚度` 那一支）。
+所以**这条 1 ULP 的源头仍未找到**，但已把本语句排除在本步之外 ——
+剩下候选是 `else` 两条（`eff*厚度` / `vol_liq*厚度`，单乘积、无加法可吸收）
+与最小二乘求解本身的输入。
+
+Tested: `MOD_SoilSnowHydrology.F90:1106-1122` 与 dump 第 6 处的对应；干窗 TIMESTEP 1 步
+Rust-vs-Rust 逐位比对（不变）；`cargo test -q -p colm-core --lib`（354 通过）；`cargo fmt --all --check`。
