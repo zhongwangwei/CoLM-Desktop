@@ -10579,3 +10579,34 @@ Tested: `MOD_Albedo.F90:2047-2051` 逐行核对 + `albland` 单独 dump 的第 5
 Tested: `cargo test -p colm-init --lib -- --test-threads=1`（156 通过）；
 不带该标志的对照（32 失败，证明是并行干扰）；`cargo test -q -p colm-core --lib`（354 通过）；
 `cargo fmt --all --check`。
+
+### `albland` 的雪面反照率常数：上游 0.95/0.70，Rust 写的是 0.85/0.65
+
+上游 `MOD_Albedo.F90:2036-2038`：
+
+```fortran
+sasdir = min(0.98, sasdif + (1.-sasdif)*0.5*(3./(1.+4.*coszrs)-1.))
+saldir = min(0.98, saldif + (1.-saldif)*0.5*(3./(1.+4.*coszrs)-1.))
+```
+
+其中 `sasdif = asnows`、`saldif = asnowl`（`:2029-2030`）。dump 里那两条
+
+```
+_56 = FMA(_10, 2.5000000000000002e-2, 9.4999999999999996e-1)
+_58 = FMA(_10, 1.5000000000000002e-1, 6.9999999999999996e-1)
+```
+
+正好反推出 **`asnows = 0.95`**（因为 `(1-0.95)*0.5 = 0.025`）与
+**`asnowl = 0.70`**（`(1-0.70)*0.5 = 0.15`），`min(...,0.98)` 是 dump 里的
+`MIN_EXPR` ✓。也就是说这一支的"新雪反照率"是 **0.95 / 0.70**。
+
+**但 Rust 的 `aged_snow_albedo` 用的是 `snow_band(0.85, 0.2)` / `snow_band(0.65, 0.5)`**
+（`radiation.rs:673`）—— 常数不同。两者必有一处需要核对：要么 Rust 把
+`asnows`/`asnowl` 取错了，要么它们来自别处（例如 `MOD_Const_Physical` 里另有定义，
+或被 `oro` 分支覆盖）。**下一轮的第一件事就是查清这一点**，因为它直接决定
+晴天雪面反照率（干窗 `f_alb` 从第 15 步开始差分，很可能与此有关）。
+
+Tested: 上游 `MOD_Albedo.F90:2020-2062` 与 dump 的三条 FMA 交叉反推；
+`cargo test --workspace --lib --bins -- --test-threads=1`、`cargo clippy --workspace --all-targets -- -D warnings`、
+两处 `cargo fmt --all --check`、`cargo test -q -p oracle`、`cargo run -q -p xtask -- check-gui`、
+`python3 oracle/scripts/test_upstream_f48_sync.py`（PASS）。本轮无源码改动。
