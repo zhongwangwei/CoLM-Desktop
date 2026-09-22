@@ -9945,3 +9945,35 @@ Rust 的 `update_groundwater_with_resolver` 里那行 `top_capacity` 已改成
 Tested: `MOD_SoilSnowHydrology.F90` 本体的 `-fdump-tree-optimized`（含内联归属的核对）；
 干窗 TIMESTEP 1 步 Rust-vs-Rust 逐位比对；`cargo test -q -p colm-core --lib -- --test-threads=1`（354 通过）；
 `cargo fmt --all --check`。
+
+## `groundwater` 的 `wa` 两处（`qcharge`/`drainage` 的 `deltim` 乘积）
+
+```fortran
+wa = wa + qcharge*deltim      ! groundwater:2403
+wa = wa - drainage * deltim   ! groundwater:2470
+```
+
+GIMPLE：`FMA(deltim, qcharge, wa)`、`FNMA(deltim, drainage, wa)`。
+Rust 的 `update_groundwater_with_resolver` 两行已改（`aquifer_water_mm`）。
+干窗 1 步仍**逐位相同**（连续第七处）。
+
+### 一处**没有**照搬的地方（记下来，避免误改）
+
+`water_2014` 的雪支还有一句：
+
+```fortran
+gwat = gwat + pg_rain*(1-fsno) - qseva_soil      ! :278
+```
+
+GIMPLE 是 `FMA(1-fsno, pg_rain, gwat)`。但 Rust 这一支**不是**把三项累加进
+`gwat`，而是把 `ground_rain_kg_m2_s` 换成 `snow.bottom_drainage_kg_m2_s`、
+把 `ground_evaporation` 换成雪面蒸发，再由
+`water_input = ground_rain + snowmelt - ground_evaporation` 现算
+（见 `water_2014.rs:320-336` 的注释）。这是**结构不同而非少一次融合**，
+所以没有硬套 `mul_add`；要动它得先把"雪列底部排水是否已含 `pg_rain*(1-fsno)`"
+从 `snowwater` 的输出定义里确认清楚。
+
+Tested: `MOD_SoilSnowHydrology.F90` 本体的 `-fdump-tree-optimized`；干窗 TIMESTEP 1 步 Rust-vs-Rust 逐位比对；
+`cargo test --workspace --lib --bins -- --test-threads=1`；`cargo clippy --workspace --all-targets -- -D warnings`；
+两处 `cargo fmt --all --check`；`cargo test -q -p oracle`；`cargo run -q -p xtask -- check-gui`；
+`python3 oracle/scripts/test_upstream_f48_sync.py`（PASS）。

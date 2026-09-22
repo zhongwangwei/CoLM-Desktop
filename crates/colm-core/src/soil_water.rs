@@ -378,7 +378,10 @@ fn update_groundwater_with_resolver(
         input.clapp_hornberger_b[layers - 1],
     );
 
-    aquifer_water_mm += input.recharge_mm_s * input.time_step_seconds;
+    // `wa = wa + qcharge*deltim`（`groundwater:2403`）⇒ `FMA(deltim, qcharge, wa)`。
+    aquifer_water_mm = input
+        .time_step_seconds
+        .mul_add(input.recharge_mm_s, aquifer_water_mm);
     if initial_water_table_layer == layers {
         water_table_depth_m = (water_table_depth_m
             - input.recharge_mm_s * input.time_step_seconds / 1000.0 / lower_specific_yield)
@@ -439,7 +442,8 @@ fn update_groundwater_with_resolver(
         "groundwater subsurface runoff must be finite"
     );
     if initial_water_table_layer == layers {
-        aquifer_water_mm -= drainage_mm_s * input.time_step_seconds;
+        // `wa = wa - drainage*deltim`（`groundwater:2470`）⇒ `FNMA(deltim, drainage, wa)`。
+        aquifer_water_mm = (-input.time_step_seconds).mul_add(drainage_mm_s, aquifer_water_mm);
         water_table_depth_m = (water_table_depth_m
             + drainage_mm_s * input.time_step_seconds / 1000.0 / lower_specific_yield)
             .max(0.0);
