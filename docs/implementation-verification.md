@@ -13908,3 +13908,31 @@ inout 量）与编译进来的 `.mod` 逐字一致 —— 驱动只要 `-I.bld` 
 Tested: `nm -g .bld/MOD_PhaseChange.o` 的符号；`gzip -dc .bld/mod_phasechange.mod | strings`
 的哑元名核对。
 Not-tested: 驱动本体（下一轮）。
+
+## `meltf` 差分：**上游侧已跑通**（10000 条记录），Rust 探针下一轮
+
+`oracle/scripts/phasechange_diff.f90` 写完并跑通（`nsnow = 2` → `lb = -1`、`nl_soil = 4`，
+`patchtype` 0..4 逐档 × 2000 组，输出 `t/wliq/wice/scv/sm/xmf/Σqthaw/Σqfrz/Σimelt`）：
+
+```
+$ head -2 /tmp/gf/pc_diff/pc.txt
+02  4071128F5C28F5C3 400B46188186180E 400A61C406EFF336 401C73FB6CC0B96C  0 C0561D2EA2985634 0 3FDE8BC32DF1BB38 2
+02  4071128F5C28F5C3 40011D1004E73FA6 4011C798FDF87C47 401DADC5F520D2E8  0 C042DB9BA4EB5176 0 3FCA0C59C0CF2C60 4
+$ wc -l /tmp/gf/pc_diff/pc.txt → 10000
+```
+
+**两处接口细节**（照源码写会错，必须靠 `.mod`/链接器纠正 —— 已按实际改正）：
+
+1. `qphs_thaw_lay`/`qphs_frzc_lay` 是**数组**（`lb:nl_soil`）而不是标量，编译报
+   "Rank mismatch" 才发现；
+2. `meltf` 依赖 `soil_vliq_from_psi`（`MOD_Hydro_SoilFunction`）与 namelist 的
+   `DEF_SPLIT_SOILSNOW`，所以**链接方式照 `compare_forcingdownscaling*.sh`**：
+   驱动单独 `-c`（纪律 flag），再用 `mpifort` 连同 **`.bld/*.o`（排除 `CoLM.o`）**
+   与 netcdf-fortran/lapack/blas 一起链 —— 只链 `MOD_PhaseChange.o` 会缺符号。
+
+**下一轮**：写 `crates/colm-core/examples/phase_change_probe.rs`（同序 LCG、同配置遍历、
+把 `lb:0` 雪层与 `1:nl_soil` 土层拼成同序向量后与 `phase_change` 的输出逐位比）与
+`oracle/scripts/compare_phasechange.sh`，跑通后接三段式验收。
+
+Tested: `phasechange_diff.f90` 编译、链接（全 `.bld` 集合）、运行（10000 条）。
+Not-tested: Rust 探针与逐位比对（下一轮）。
