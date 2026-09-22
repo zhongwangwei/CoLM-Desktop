@@ -517,8 +517,12 @@ fn downscale_longwave(
             );
             let all_sky_emissivity_grid = grid.downward_longwave_w_m2
                 / (STEFAN_BOLTZMANN_W_M2_K4 * grid.air_temperature_k.powi(4));
-            (clear_sky_emissivity_column + all_sky_emissivity_grid - clear_sky_emissivity_grid)
-                * STEFAN_BOLTZMANN_W_M2_K4
+            // GIMPLE（`fd.opt` 的 `downscale_longwave`）：`_20 = allsky_g-clearsky_g`、
+            // `_22 = _20+clearsky_c`、`_24 = _22*sigma`、`_26 = _24*t_c**4`。
+            // 写成 `clear_c + allsky_g - clear_g` 会算成 `(c+a)-g`，与上游的
+            // `(a-g)+c` 在 31% 的样本上差 1–2 ULP（2026 年差分照出来的）。
+            ((all_sky_emissivity_grid - clear_sky_emissivity_grid + clear_sky_emissivity_column)
+                * STEFAN_BOLTZMANN_W_M2_K4)
                 * column_temperature_k.powi(4)
         }
         // GIMPLE：`FNMA(glacier_lapse, Δz, dlrad)`。
@@ -629,9 +633,13 @@ fn downscale_shortwave_simple(
             let illumination = if index == ASPECT_TYPES - 1 {
                 1.0
             } else {
-                (slope.atan().cos()
-                    + zenith_radians.tan() * slope.atan().sin() * simple_aspect(index).cos())
-                .clamp(0.0, 1.0)
+                let slope_angle = slope.atan();
+                // GIMPLE：`_35 = tan(zen)*sin(slp)`、`_38 = cos(asp)`、
+                // `_40 = .FMA (_35, _38, cos(slp))` —— 这里上游**是收缩的**，
+                // 平铺写 `cos + tan*sin*cos` 会在 5/20000 的样本上差 1 ULP。
+                (zenith_radians.tan() * slope_angle.sin())
+                    .mul_add(simple_aspect(index).cos(), slope_angle.cos())
+                    .clamp(0.0, 1.0)
             };
             illumination * optical_factor * area.clamp(0.0, 1.0) * beam_grid
         })

@@ -12373,3 +12373,70 @@ Tested: `oracle/scripts/compare_forcingdownscaling_wind.sh`（4 个输出 × 200
 `cargo clippy --workspace --all-targets -- -D warnings`；两个 workspace 的 `cargo fmt --all --check`。
 Not-tested: `downscale_forcings` 本体（下一轮：它还要 `DEF_DS_*` 的多套组合与
 `sf_lut_c`/`svf_c`/`alb` 的可选实参分支）；`downscale_shortwave` 的 full 支。
+
+## `downscale_forcings`（简单地形支）结案：**又抓到两处 1 ULP 级缺陷**，220000/220000
+
+上一轮把风场那两个入口验掉之后，这一轮补 `MOD_ForcingDownscaling:downscale_forcings`
+本体。上游侧沿用"直接链接 `.bld` 内核对象"的路子 —— 好处在这里兑现了：`DEF_DS_*`
+是**真的 namelist 变量**，驱动逐组赋值就能覆盖多套配置，不用写桩。只跑"不给可选
+实参"的调用形式，于是走 simple shortwave；full 支（`sf_lut_c`/`svf_c`/`alb`）留待下一轮。
+
+驱动：`oracle/scripts/compare_forcingdownscaling.sh`（5000 组输入 × 4 组配置：
+降水方案 I/II × 长波方案 I/II，11 个输出）。**两处失配都是真缺陷**：
+
+### 缺陷一：`downscale_longwave` 方案 I 的结合顺序（31% 样本差 1–2 ULP）
+
+上游 GIMPLE（`fd.opt` 的 `downscale_longwave`）：
+
+```
+_20 = allsky_g - clearsky_g
+_22 = _20 + clearsky_c        ← (allsky-clear_grid) + clear_column
+_24 = _22 * 5.67e-8
+_26 = _24 * t_c**4
+```
+
+Rust 原来写的是 `clear_c + allsky_g - clear_g`（左结合成 `(c+a)-g`）。数学上等价，
+浮点上不是：il=1（方案 I）下 1551/5000 组 `lwrad` 差 1–2 ULP。改成
+`((allsky-clear_g) + clear_c) * sigma * t_c**4` 之后全同。方案 II（LapseRate）
+本来就是对的 —— 这也说明失配确实只出在方案 I 这条支。
+
+### 缺陷二：简单短波的 `cosill` 少了一次收缩（5/20000）
+
+上游把 `cos(slp) + tan(zen)*sin(slp)*cos(asp)` 折成了 FMA：
+
+```
+_35 = tan(zen_rad) * sin(slp_rad)
+_38 = cos(asp_type_c(i))
+_40 = .FMA (_35, _38, cos(slp_rad))
+```
+
+Rust 原来是平铺的 `cos + tan*sin*cos`，5/20000 组差 1 ULP。改成
+`(tan*sin).mul_add(cos(asp), cos(slp))` 后 20000/20000。
+
+### 顺带记两个"读 GIMPLE 的坑"
+
+1. **`.FMA` 与 `.FNMA` 是两个东西**：`.FMA (a,b,c)` = `a*b+c`，`.FNMA (a,b,c)` = `c-a*b`。
+   这一轮差点把 `.FMA (_35, _38, _32)` 读成减法（那就成了"上游算错了"，显然不可能）。
+   判据：`(-4.702).mul_add(clr, 2.3)` 与 `FNMA(clr, 4.702, 2.3)` 逐位相同（先取负再乘
+   与先乘再取负，都在 FMA 内部只舍入一次），所以两种写法都能对上源码
+   `2.3-4.702*clr`；而对 `cos+tan*sin*cos` 这种**符号真正不同**的式子，只有 `.FMA`
+   才对得上，19995/20000 的通过率就是判据。
+2. `a_p`（面积实参）在 `downscale_forcings` 的简单支里**收到的是坡向数组**：
+   `:289-293` 的 `asp_type_c` 传给了被调方名为 `area_type_c` 的形参（`:878-911`）。
+   探针必须照抄这个别名，否则两侧输入不一致。Rust 侧 `SimpleTerrain.area_fraction`
+   因此在装配时也必须喂坡向 —— 这条已写进探针的文档注释。
+
+### 结果
+
+```
+$ bash oracle/scripts/compare_forcingdownscaling.sh
+MOD_ForcingDownscaling:downscale_forcings: 11 outputs x 4 configs = 220000/220000 bitwise identical
+  配置分布 (ip il -> 组数): 11:5000 12:5000 21:5000 22:5000
+```
+
+Tested: `oracle/scripts/compare_forcingdownscaling.sh`（11 输出 × 20000 组逐位相同；
+改前 `lwrad` 1551/5000、`swrad` 5/20000 失配）；`cargo test --workspace --lib --bins
+-- --test-threads=1`；`cargo clippy --workspace --all-targets -- -D warnings`；
+两个 workspace 的 `cargo fmt --all --check`。
+Not-tested: `downscale_shortwave` 的 full 支（`sf_lut_c` 16×101 阴影表 / `sf_curve_c`
+两套，加 `svf_c`/`alb` 的缺失支）—— 下一轮。
