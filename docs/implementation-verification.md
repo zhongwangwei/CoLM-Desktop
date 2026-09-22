@@ -13546,3 +13546,25 @@ differing restart variables: 19 / 68
 Tested: 上述 python 片段对 `/tmp/gf/dryts/out/CN-Cng/restart/2008-001-05400/*.nc` 与
 `/tmp/gf/dryts/rust_restart.nc` 的实比（19/68）。
 Not-tested: 把它固化成脚本并用于逐个候选（下一轮）。
+
+### restart 口径已固化：`oracle/scripts/restart_divergence.py`
+
+```bash
+bash /tmp/gf/dry_ts.sh 1
+python3 oracle/scripts/restart_divergence.py \
+    /tmp/gf/dryts/out/CN-Cng/restart/*05400/*.nc /tmp/gf/dryts/rust_restart.nc
+# → differing restart variables: 19 / 68
+#     2.050e-16 t_soisno  ndiff=2        ← 1 ULP
+#     2.176e-16 tleaf     ndiff=1
+#     2.208e-16 emis      ndiff=1
+#     2.664e-16 fm        ndiff=1
+#     4.071e-16 ustar     ndiff=1
+#     4.602e-16 fh/fq     ndiff=1   …（其余 13 个 maxrel 4.60e-16 … 2.46e-12）
+```
+
+与 `window_divergence.py` 同风格（按 `maxrel` 升序，≈2e-16 即种子），但更快更干净：
+**变量少（19/68）、无 11 天混沌放大**。候选形状改动先用它筛，再用 history 步级口径与
+三个黄金窗口做二、三次确认 —— 这是本会话收敛出的三段式验收。
+
+Tested: 新脚本对现有第 0 步 restart 的实比（19/68，逐变量 maxrel/ndiff/maxabs）。
+Not-tested: 用它筛 `lt_ext.opt`/`th_ext.opt` 里的候选（下一轮）。
