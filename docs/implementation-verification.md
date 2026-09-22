@@ -13602,3 +13602,27 @@ gfortran -c -O2 -fdefault-real-8 -ffree-form -cpp -ffree-line-length-0 \
 Tested: `main/MOD_GroundTemperature.F90` 的 dump 生成（41 处）；Makefile:835 与
 `strings .bld/MOD_GroundTemperature.o` 的来源核对；th_ext.opt 中无 `tinc_`/`t_grnd_` 的确认。
 Not-tested: 那 41 处的逐条筛选（下一轮）。
+
+## `MOD_GroundTemperature` 的降水热双 FMA：dump 有、restart 口径**逐位不变** —— 不落
+
+`gt.opt` 第 970-999 行的地面热通量链把降水热**逐级收进累加器**：
+
+```
+_130 = (sabg+dlrad*emg) - FMA(fevpg,htvp,fseng)
+_138 = .FMA (rain*cpliq, dT, _130)
+_142 = .FMA (dT, snow*cpice, _138)
+```
+
+Rust（`ground_temperature.rs:295-300`）写的是平铺的
+`… + rain_heat_capacity*dT + dT*snow_heat_capacity`。按 dump 改成两级 `mul_add` 后，
+**restart 口径逐行逐位不变**（19/68，连每行的 `maxrel`/`ndiff`/`maxabs` 都完全相同：
+`rib 1.922e-16 / t_soisno 2.041e-16 / trad 2.153e-16 / rst 2.328e-16 / qstar 4.865e-16 /
+fm 5.313e-16`），所以按规则**回退**。
+
+副产物是一条可复用的方法：restart 口径的 A/B 要**固定步数**（这里统一 `dry_ts.sh 1` →
+`2008-001-01800`），否则拿 3 步的 `05400` 与 1 步的 `01800` 比会得出错误结论
+（本轮的第一次比较就踩了这个坑，已改）。
+
+Tested: `gt.opt` 970-999 行与 `ground_temperature.rs:295-300` 对照；`dry_ts.sh 1` +
+`restart_divergence.py` 的 A/B（改与不改，restart 口径输出逐行相同）；改动已回退。
+Not-tested: `gt.opt` 其余 39 处收缩。
