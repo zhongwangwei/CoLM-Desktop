@@ -12927,3 +12927,44 @@ Tested: `…_Extended.F90:484/748-751/755-759/797-798/941/1320` 与
 `window_divergence.py`（582 不变）与三个黄金窗口实测；`cargo test -q -p colm-core --lib`
 （355 通过）；`cargo fmt --all --check`；`cargo clippy --workspace --all-targets -D warnings`。
 Not-tested: PHS 那条路上 `rb` 的用法（本配置不走）；第 0 步种子的定位（仍开放）。
+
+## `us10m`/`vs10m` 的结合顺序（源码显式、实测惰性）；种子收敛到"装配侧 1 ULP"
+
+`f_us10m`/`f_vs10m` 是干窗第 0 步 1 ULP 名单里的成员（maxrel 2.83e-16，且两者
+**同幅**，说明差在两者共用的那个比例因子上）。上游写的是
+
+```fortran
+! MOD_Vars_1DAccFluxes.F90:2789-2790
+r_us10m_e = us/um * r_ustar2_e /vonkar * r_fm10m_e
+```
+
+即从左到右 `((us/um)*ustar2/vonkar)*fm10m`；Rust 原来写成
+`us * (ustar/vonkar*fm10m/um)` —— 数学等价、逐位不等价。按源码改成同一顺序后：
+
+| 口径 | 改前 | 改后 |
+|---|---|---|
+| 3 步 bitwise / `f_us10m` ndiff、maxrel | 582/692、2、2.83e-16 | **完全相同** |
+| 干窗 | 21328 / 338.9256 / 825 / 17 | **完全相同** |
+
+**完全惰性** —— 对这个算例，两种结合顺序给出同值。落地理由是"源码显式形状照抄"
+（与 `gssun` 分组、`rbsun` 折算是同一类），不是靠窗口收益。
+
+### 剩下四个 1 ULP 变量的共同结论
+
+到这一轮为止，干窗第 0 步的 1 ULP 名单是
+`f_trad`(2.19e-16)、`f_us10m`/`f_vs10m`(2.83e-16)、`f_gssun`/`f_gssha`(2.99e-16)、
+`f_tleaf`(2.18e-16，且**整段只差 1 个值**)。它们**全部**依赖同一次近地层相似性调用
+的输出（`ustar2`/`fm10m`/`um`/`obu`）与叶温/地表温度。而 `MOD_FrictionVelocity:moninobukm`
+已经被随机差分关掉（20 个输出 20000/20000 全同），`MOD_LeafTemperature` 的表达式形状
+这四轮改了 4 处、全部惰性或被否 —— **所以种子只可能在"喂给这次调用的实参"上**
+（`displa`/`z0m`/`z0h`/`z0q`/`obu`/`um`/`thm`/`qm` 这一组），这与第 143 轮的判断、
+以及本轮的 `f_us10m` 同幅现象一致。
+
+下一轮的做法（已具备条件）：把 `/tmp/gf/leafprobe` 那套探针接到**对文件**
+（`extends/interception/MOD_LeafTemperature_Extended.F90`）与 Rust 的
+`leaf_temperature` 入口上，dump 干窗第 0 步那几个实参，逐位比。
+
+Tested: `MOD_Vars_1DAccFluxes.F90:2789-2790` 与 `history_diagnostics.rs:210-222` 对照；
+改动前后 `dry_ts.sh 3` + `window_divergence.py`（逐位不变）与干窗实测（21328 不变）；
+`cargo fmt --all --check`；`cargo test -q -p colm-core --lib`（355 通过）。
+Not-tested: 实参 dump 对照（下一轮）。

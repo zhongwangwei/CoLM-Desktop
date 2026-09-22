@@ -211,14 +211,24 @@ pub fn history_diagnostics(input: HistoryDiagnosticsInput) -> Result<HistoryDiag
 
     // 10 m 风：两次都用**同一次** MO 调用的 `r_ustar2` 与 `r_fm10m`，
     // 分母是喂给那次调用的 `um`（稳定化之后的），不是观测风速本身。
-    let wind_10m_scale = similarity.friction_velocity_m_s / VON_KARMAN * similarity.momentum_at_10m
-        / stability_adjusted_wind;
+    // `r_us10m = us/um * r_ustar2/vonkar * r_fm10m`（`MOD_Vars_1DAccFluxes.F90:2789-2790`）
+    // —— 上游是**从左到右** `((us/um)*ustar2/vonkar)*fm10m`。写成
+    // `us * (ustar/vonkar*fm10m/um)` 数学等价、逐位不等价；实测 `f_us10m`/`f_vs10m`
+    // 正是干窗第 0 步 1 ULP 名单里的成员。
+    let wind_10m_eastward_m_s = input.wind_speed_eastward_m_s / stability_adjusted_wind
+        * similarity.friction_velocity_m_s
+        / VON_KARMAN
+        * similarity.momentum_at_10m;
+    let wind_10m_northward_m_s = input.wind_speed_northward_m_s / stability_adjusted_wind
+        * similarity.friction_velocity_m_s
+        / VON_KARMAN
+        * similarity.momentum_at_10m;
     Ok(HistoryDiagnostics {
         friction_velocity_m_s: friction_velocity,
         similarity_friction_velocity_m_s: similarity.friction_velocity_m_s,
         momentum_at_10m: similarity.momentum_at_10m,
-        wind_10m_eastward_m_s: input.wind_speed_eastward_m_s * wind_10m_scale,
-        wind_10m_northward_m_s: input.wind_speed_northward_m_s * wind_10m_scale,
+        wind_10m_eastward_m_s,
+        wind_10m_northward_m_s,
         temperature_scale_k: temperature_scale,
         humidity_scale,
         zol,
