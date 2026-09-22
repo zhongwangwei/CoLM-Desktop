@@ -23,7 +23,9 @@ FILES=(
   "extends/interception/MOD_LeafTemperaturePC_Extended.F90:PC"
 )
 
-rm -rf "$WORK"; mkdir -p "$WORK/out" "$WORK/run"
+# 注意：**不要**预建 $WORK/out —— `cp -R src $WORK/out` 会嵌套成 out/out，
+# 内核于是找不到 out/CN-Cng/landdata 而回落到 rawdata（曾因此让四次探针全部跑不完）。
+rm -rf "$WORK"; mkdir -p "$WORK/run"
 for spec in "${FILES[@]}"; do
   rel=${spec%%:*}
   mkdir -p "$WORK/backup/$(dirname "$rel")"

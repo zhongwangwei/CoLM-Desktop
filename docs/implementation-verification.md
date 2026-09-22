@@ -14530,3 +14530,42 @@ bash /tmp/gf/dry_ts.sh 1 && grep -c 'CoLM Execution Completed' /tmp/gf/dryts/run
 Tested: 两份 case.nml 的逐字节 diff；两份内核日志的 diff；`landdata`/`rawdata_unused` 的存在性对比；
 四个探针脚本的 `end_sec`/`HIST_FREQ` 对齐与硬闸门（地面探针重跑后以 exit 1 退出、未产出结果）。
 Not-tested: "重编内核 vs 预建内核"的对比实验（下一轮第一步）。
+
+## 探针基础设施的两个 bug 都已修掉 —— **首次拿到第 0 步的真实入参**
+
+第 233 轮找到第一个（`end_sec = 0` ⇒ 零步），本轮找到第二个：
+
+```bash
+rm -rf "$WORK"; mkdir -p "$WORK/out" "$WORK/run"     # ← 错：预建了 out
+cp -R "$BASE/oracle/work/CN-Cng/out" "$WORK/out"     # ⇒ 嵌套成 $WORK/out/out！
+```
+
+后果：内核在 `$WORK/out/CN-Cng/landdata/` 下找不到东西，**回落到 rawdata** 并因
+`rawdata_unused/plant_15s/….nc` 不存在而中止 —— 与 `dry_ts.sh` 的表现差异（后者只
+`mkdir -p $d/run`，让 `cp -R` 自己创建 `$d/out`）至此完全解释。
+
+修法：四个探针脚本都改成**只建 `$WORK/run`**（不预建 `out`），并保留完成标志硬闸门。
+
+### 修好之后的第一个真实成果
+
+```
+$ bash oracle/scripts/step_ground_probe.sh
+== 二进制里的 GTPROBE_IN 标记数: 1
+== 内核完成标志: 1
+$ cat /tmp/gf/gtprobe/gt_in.txt        # 1 行、23 个数
+GTPROBE_IN  2.830000000000000E+02  8.784146015197782E+00  0.000000000000000E+00  0.000000000000000E+00
+            0.000000000000000E+00  0.000000000000000E+00  2.830000000000000E+02  2.830000000000000E+02
+            2.830000000000000E+02  1.771419982910156E+02  2.252629943482293E+02  0.000000000000000E+00
+            …  fseng 1.245781917695979E+04 · fevpg 3.372336514931096E-04 · cgrnd 1.180443510784811E+02
+            · htvp 2.5104E+06 · emg 9.6E-01
+```
+
+这正是"入口 A"从第 181 轮起就想要的东西：**干窗第 0 步 `GroundTemperature` 的真实入参**
+（且 `sabg = 0` 说明这是 00:00 的夜间步，与算例起点吻合）。
+
+**下一轮**：在 Rust 侧 `ground_temperature` 的入口打印同一组 23 个量，与上面逐位比 ——
+这是第一次可以做这个对照（此前所有尝试都因探针跑不完而无效）。
+
+Tested: 四个探针脚本的 `mkdir` 修正；`step_ground_probe.sh` 完整跑通（标记 1、完成标志 1、
+产出 1 行 23 个数）；`f48 sync PASS`。
+Not-tested: Rust 侧的 23 个量对照（下一轮）。
