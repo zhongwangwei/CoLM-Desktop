@@ -9522,3 +9522,51 @@ Tested: 内核本体两个模块的 `-fdump-tree-optimized`；`USE` 本体模块
 两条链子抢同一个工作目录。单独重跑整个 `-p oracle` 全绿（12 个二进制、0 失败）。
 这与之前记过的"并行 `cargo test` 不稳定"是同一类问题：**算例类测试不能与别处的
 内核运行并发**。
+
+## `MOD_GroundFluxes` 的六处收缩（实测，**已修**），与"分叉在更上游"的结论
+
+`groundfluxes` 本体的 GIMPLE 只有八条收缩，其中六条在 Rust 侧原本都没写：
+
+| 上游 | GIMPLE |
+|---|---|
+| `z0mg = (1-fsno)*zlnd + fsno*zsno` | `FMA(1-fsno, zlnd, fsno*zsno)` |
+| `dthv = dth*(1+0.61*qm) + 0.61*th*dqh` | `FMA(qm,0.61,1)` 得 `1+0.61qm`；`0.61*th` 也是公共量；`FMA(dth, 1+0.61qm, dqh*(0.61*th))` |
+| `thvstar = tstar*(1+0.61*qm) + 0.61*th*qstar` | 复用上面两个公共量，`FMA(tstar, 1+0.61qm, (0.61*th)*qstar)` |
+| `um = sqrt(ur*ur + wc2)` | `sqrt(FMA(ur, ur, wc2))` |
+| `cgrnd = cgrnds + htvp*cgrndl` | `FMA(cgrndl, htvp, raih)` |
+| `tref` / `qref` | `FMA(tstar, fh2m/fh 差, thm)`、`FMA(qstar, fq2m/fq 差, qm)` |
+
+`z0hg = z0mg/exp(0.13*(ustar*z0mg/1.5e-5)**0.45)` 与 `rib` 都没有收缩点（指数链是普通乘积）。
+
+### 窗口：干窗回到最好水平，湿/雪窗也小幅变好
+
+以 `679b168`（近地层那一轮）为基线：
+
+| 窗口 | 逐位不同值 | Σ\|Δ\| | 超容差 | 变量数 |
+|---|---|---|---|---|
+| 干（CN-Cng） | 21202 → **21235** | **816.8618 → 291.8579** | 873 → **821** | 18 → **17** |
+| 湿（CN-Cng-wet） | 33209 → 33208 | 10386.9072 → **10379.6428** | 20669 → **20662** | 68 |
+| 雪（US-NR1-snow） | 33641 → **33660** | 不变 | 不变 | 79 |
+
+干窗的 Σ\|Δ\| 从上一轮被抬高的 816.9 降到 **291.9**，是本仓库至今最好的数字
+（第 105 轮那次是 395.7）。两项合起来看：**108+109 两轮对干窗是净收益**
+（三口径 21199/395.66/830 → 21235/291.86/821）。
+
+### 一条重要的否定结论：干窗第 0 步的分叉不在这一层
+
+`ground_fluxes` 的输出（`fseng`/`fevpg`/`fgrnd`）正是干窗第 0 步就差的量，
+所以本来预期这次会把它按住。实测：**一维 1 步窗口的 Rust 输出与修前逐位相同**
+（0 处差异）—— 上一轮修近地层时也是这样。也就是说那些 1 ULP 差异是
+`ground_fluxes` **输入**里带进来的，不在它的算式里。往回看只剩
+`thm`/`qm`/`ur`/`rhoair`（`MOD_Atmosphere`/`MOD_Forcing` 那条链）与上一步的状态，
+这是下一轮该扫的地方。
+
+Tested: `MOD_GroundFluxes.F90` 本体的 `-fdump-tree-optimized`；干窗 TIMESTEP 1 步
+Rust-vs-Rust 逐位比对；三个黄金窗口 + 三口径 A/B；`cargo test --workspace --lib --bins -- --test-threads=1`；
+`cargo clippy --workspace --all-targets -- -D warnings`；两处 `cargo fmt --all --check`；
+`cargo test -q -p oracle`；`cargo run -q -p xtask -- check-gui`；`python3 oracle/scripts/test_upstream_f48_sync.py`（PASS）。
+
+### 未验的部分
+
+- `groundfluxes` 参数太多（40+），本轮**没有**像近地层那样写"USE 本体模块"的
+  随机差分驱动；六处收缩以本体 GIMPLE 为依据，窗口指标为佐证。
