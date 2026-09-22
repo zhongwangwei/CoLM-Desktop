@@ -14288,3 +14288,38 @@ Not-tested: 脚本完整执行 + Rust 侧同格式转储（下一轮）。
 
 Tested: `step_iter_probe.sh` 完整执行（0 行 ITPROBE、自动还原、f48 PASS）。
 Not-tested: 地面支入参在第 0 步的逐位对照（需要新的、针对地面调用的插桩）。
+
+### 下一步（已备好锚点与变量名单）：给 `GroundTemperature` 的**入参**做同形探针
+
+第 226 轮把残余收窄到"地面支的入参装配"。调用点已定位：
+
+```
+extends/interception/MOD_Thermal_CanopyPhase_Extended.F90:1207
+   CALL GroundTemperature (patchtype,is_dry_lake,lb,nl_soil,deltim,
+       capr,cnfac,vf_quartz,…,porsl,psi0,bsw,theta_r,alpha_vgm,…,dz_soisno,z_soisno,zi_soisno,
+       t_soisno,t_grnd,t_soil,t_snow,wice_soisno,wliq_soisno,scv,snowdp,fsno,
+       frl,dlrad,sabg,sabg_soil,sabg_snow,sabg_snow_lyr,
+       fseng,fseng_soil,fseng_snow,fevpg,fevpg_soil,fevpg_snow,cgrnd,htvp,emg, …)
+```
+
+（`main/MOD_Thermal.F90:1198` 是同一条调用；内核在本配置下编的是 **extends 那一份**。）
+
+**要打印的 20 个量**（形状最敏感的一批，不必打全 60 个）：
+
+```
+t_soisno(1), wliq_soisno(1), wice_soisno(1), scv, snowdp, fsno, t_grnd, t_soil, t_snow,
+frl, dlrad, sabg, sabg_soil, sabg_snow, fseng, fseng_soil, fseng_snow,
+fevpg, fevpg_soil, fevpg_snow, cgrnd, htvp, emg
+```
+
+**做法**：照 `step0_arg_probe3.sh` 的模板（自带 vendor 还原 + 重编 + f48 自检），把
+锚点从 `CALL moninobuk` 换成 `CALL GroundTemperature (`，插两条 `WRITE(*,…)`（进入前打上面
+这批量、返回后打 `t_soisno`/`t_grnd`/`scv`）；Rust 侧在 `ground_temperature` 的入口与返回处
+打同一批量（`GroundTemperatureInput` 的字段名与上表对应）。
+
+**判据**：入参**逐位相同而输出仍差** → 残余在 `GroundTemperature` 体内（但该模块的算术已被
+差分/形状关掉 → 只剩"未逐条过的收缩"）；入参**已经差** → 顺着差异量往上游追一层
+（`MOD_GroundFluxes` 的 `fseng`/`fevpg` 或辐射项）。
+
+Tested: 调用点与实参表的定位（`extends/…:1207`、`main/…:1198`）；要打印的量按"形状最敏感"筛出。
+Not-tested: 探针本体（下一轮）。
