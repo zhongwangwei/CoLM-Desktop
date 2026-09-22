@@ -10959,3 +10959,83 @@ Tested: `MOD_Albedo.F90`/`MOD_SoilSnowHydrology.F90` 本体 dump（`twostream` 4
 `cargo run -q -p xtask -- check-gui`；`python3 oracle/scripts/test_upstream_f48_sync.py`（PASS）。
 Not-tested: `twostream_mod`（`twostream_wrap` 72 处，PFT/PC 支，本分支不可达）；
 `twostream` 的 `sigma <= 1e-10` 支 19 处；`albocean` 8 处（湖泊/海洋 patch）。
+
+## `MOD_CanopyLayerProfile` 的 24 处收缩：**只有 `cal_z0_displa` 在黄金算例路径上**
+
+`MOD_CanopyLayerProfile.F90` 整模块 24 处收缩，按例程分布：
+
+| 例程 | 处数 |
+|---|---|
+| `cal_z0_displa` | 5 |
+| `kintegral` | 4 |
+| `uintegral` | 4 |
+| `uintegralz` | 4 |
+| `fkint` | 2 |
+| `fuint` | 2 |
+| `kdiff` | 1 |
+| `udiff` | 1 |
+| `uprofile` | 1 |
+
+**可达性先查清楚**（这是本轮唯一真正动窗口的地方）：`uprofile`/`uintegral`/`kintegral`
+这一族只有 `canopy_roughness` 被运行期调用 —— `leaf_temperature.rs:311` 的
+`canopy_roughness(lsai, htop, 1.0)`。其余 14 个例程在本仓库只被
+`canopy_layer_profile_tests` 与初始化诊断用到，`colm-runtime` 一次都不调。
+
+### `cal_z0_displa` 的 5 处（**活的**）
+
+| 上游行 | 形状 | Rust |
+|---|---|---|
+| `:684` `fai = (sqrtdragc**2-0.003)/0.3` | `FMA(sqrtdragc, sqrtdragc, -0.003)` | `canopy_roughness.rs` `square_root_drag.mul_add(square_root_drag, -0.003)` |
+| `:700` `sqrtdragc = min((0.003+0.3*fai)**0.5, 0.3)` | `FMA(fai, 0.3, 0.003)` | `f77(0.3).mul_add(area_index, f77(0.003))` |
+| `:707/:710` 两处几何和 | `FMA(fc*1.1, log(1+(Cd*lai*fc)**0.25), (1-fc)*poly)` | `(fc*1.1).mul_add(log项, (1-fc)*poly)` |
+| `:707` 的 `delta + h*geometry` | `FNMA(h, 几何(lai0), h*几何(lai))` —— **`h*几何(lai0)` 被吸收** | `canopy_height_m.mul_add(-initial_geometry, scaled_geometry)` |
+
+最后一处是本轮唯一**结构**级的改动：原来是先落成 `delta = -h*几何(lai0)` 再相加，
+GIMPLE 里 GCC 根本没有单独舍入那个乘积。为此把 `delta` 拆成
+`initial_geometry`（不带 `h`），在用到的地方一次 `FNMA` 完成。
+
+顺带解掉一个读 dump 时的疑点：`displa` 的 `IF (lai > lai0)` 支里第二个乘积用的是
+**新** `temp1`（`fc*(1-exp(-0.5*lai))` 那一支），而 `delta` 里用的是**初始** `temp1`
+（`(sqrtdragc**2-0.003)/0.3` 那一支）。dump 里 `_33 = _25*prephitmp_232` 用的是
+初始那一支 —— 因为 `_34` 就是 `delta` 的几何式（GCC 把它复用成 `-h*_34` 的加数），
+不是 `IF` 支的那一项；`IF` 支的那一项是 `_250`。**两句都用对了，虚惊一场。**
+
+### 其余 19 处：形状解出来了，但没有窗口信号
+
+- `uprofile`（1）：`FMA(bee*fc, min(uexp,ulog), (1-bee*fc)*ulog)`。
+- `uintegral`/`uintegralz`（各 4）：2 处是循环体（已有）+ 1 处
+  `dz = top-bottom-(n-1)*dz` 的 `FNMA(n-1, dz, top-bottom)` + 1 处被内联的 `uprofile`。
+- `kintegral`（4）：同上，另外 `kintegral = kintegral + 1./k*dz` 的 GIMPLE 是
+  `FMA(1/k, dz, 累积)` —— 注意**不是** `dz/k`：先算一次 `1/k`，那个乘积被吸收。
+  Rust 原先写的是 `step / k`，两者在 1 ULP 上不同，已改。
+- `fkint`（2）：`fkcobint` 的左边乘积被吸收；末尾 `bee*fc*fkexpint+(1-bee*fc)*fkcobint`
+  是 `FMA`。
+- `fuint`（2）：`FULOGINT` 的 `ztop*log(ztop/z0mg) - zbot*log(zbot/z0mg)` 用 `FMS`
+  （左乘积被吸收、右乘积先舍入），末尾同 `fkint`。
+- `kdiff`/`udiff`（各 1）：`kexp - kcob` / `uexp - ulog` 都是
+  `FMS(ktop, exp, 另一个)` —— 那个 `ktop*exp` 并不单独舍入。
+
+### 窗口三口径（基线 = 本轮 `twostream` 那一版）
+
+| 窗口 | 逐位不同值 | Σ\|Δ\| | 超容差 | 变量数 |
+|---|---|---|---|---|
+| 干 | 21230 → **21196** | 263.9500 → 311.4338 | 813 → **825** | 17（不变） |
+| 湿 | 32535 → **32530** | 10380.4730 → 10381.6452 | 20665 → **20664** | 68 |
+| 雪 | 33647 → **33602** | 持平 | 持平 | 79 |
+
+**混合信号，照实记录**：三个窗口的逐位不同值**同向变好**（干 −34、湿 −5、雪 −45），
+湿窗超容差 −1，但**干窗超容差从 813 退到 825**（+1.5%），Σ|Δ| 也变大。
+干窗超容差是本项目此前用来分辨"方向写错"的那个量（`net_solar` 反向时 17→27），
+所以这条不能当噪声；但它的基线 `net_solar` 之前是 813、`52feff5` 之后是 837，
+现在 825 —— 仍好于 `52feff5`，且 **tier2 变量数始终 17**（结构没坏）。
+判据链只有 GIMPLE 一条：五处形状逐一对应，没有一处是猜的。
+**保留，并把这条混合信号钉在这里**：如果以后有更强的判据说明该退，就从
+`canopy_roughness.rs::canopy_roughness` 的 `initial_geometry`/`scaled_geometry`
+那两行退。
+
+Tested: `MOD_CanopyLayerProfile.F90` 本体 dump（24 处逐条归例程、逐条读形状）；
+三个黄金窗口三口径 A/B；`cargo test -q -p colm-core --lib -- --test-threads=1`（354 通过）；
+`cargo clippy -q -p colm-core --all-targets -- -D warnings`；`cargo fmt --all --check`。
+Not-tested: 这 19 处没有随机差分驱动（上游那 14 个例程没有现成调用点，
+`uprofile`/`kintegral` 那两个有 `USE MOD_CanopyLayerProfile` 也还需要按 8/12 个实参搭桩）；
+`cal_z0_displa` 的 ELSE 支（`sqrtdragc > 0.3`，走到就打诊断并取 `fai = 0.29`）没有专门构造。
