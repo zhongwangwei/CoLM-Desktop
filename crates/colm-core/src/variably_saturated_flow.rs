@@ -4269,11 +4269,15 @@ pub fn variably_saturated_flow_step(
                 && water_table_depth_mm < interface_depth_mm[level + 1]
             {
                 if water_table_depth_mm > interface_depth_mm[level] && permeable[level] {
-                    liquid_volume_fraction[level] = (state.liquid_water_kg_m2[level] * 1000.0
-                        / WATER_DENSITY_KG_M3
-                        - effective_porosity[level]
-                            * (interface_depth_mm[level + 1] - water_table_depth_mm))
-                        / (water_table_depth_mm - interface_depth_mm[level]);
+                    // `MOD_SoilSnowHydrology.F90:1036-1038`（`WATER_VSF`）：
+                    // `vol_liq = (wliq*1000/denh2o - eff*(sp_zi-zwtmm))/(zwtmm - sp_zi(j-1))`，
+                    // GIMPLE 把 `eff*(sp_zi-zwtmm)` 收进减法（`FNMA(eff, Δ, 水量mm)`）。
+                    // `denh2o` 是常量 1000，dump 里已被折成 `*1e3/1e3` 两步。
+                    liquid_volume_fraction[level] = (-effective_porosity[level]).mul_add(
+                        interface_depth_mm[level + 1] - water_table_depth_mm,
+                        state.liquid_water_kg_m2[level] * 1000.0 / WATER_DENSITY_KG_M3,
+                    ) / (water_table_depth_mm
+                        - interface_depth_mm[level]);
                     if liquid_volume_fraction[level] < 0.0 {
                         water_table_depth_mm = interface_depth_mm[level + 1];
                         liquid_volume_fraction[level] = state.liquid_water_kg_m2[level] * 1000.0

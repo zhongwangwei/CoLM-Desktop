@@ -10227,3 +10227,34 @@ Rust 侧的候选位置已经缩到 `water_table_from_aquifer`（约 4262-4292 �
 
 Tested: 本轮无源码改动；`cargo test -q -p colm-core --lib`（354 通过）确认工作树干净；
 `MOD_SoilSnowHydrology.F90` 本体的 dump（形状解码）。
+
+### 钉住第一处：`WATER_VSF` 的湿周 `vol_liq` 分子
+
+上游 `MOD_SoilSnowHydrology.F90:1036-1038`：
+
+```fortran
+vol_liq(j) = (wliq_soisno(j)*1000.0/denh2o - eff_porosity(j)*(sp_zi(j)-zwtmm)) &
+   / (zwtmm - sp_zi(j-1))
+```
+
+GIMPLE（`water_vsf` 第 3 处收缩）：
+
+```
+_200 = wliq * 1.0e+3 ; _201 = _200 / 1.0e+3     ! denh2o 是常量 1000，被折成两步
+_203 = (sp_zi - zwtmm)
+_206 = .FNMA (_202=eff_porosity, _203, _201)     ! 分子
+_210 = _206 / (zwtmm - sp_zi(j-1))
+```
+
+Rust 的 `variably_saturated_flow.rs` 对应那段（`water_table_from_aquifer` 里的
+`liquid_volume_fraction` 分支）已改成 `(-eff).mul_add(sp_zi - zwtmm, 水量mm)`。
+同段的 `residual_water_kg_m2 = … - eff*(…) - vol_liq*(…)` 是**另一处**收缩，
+还没钉（它的第二条减法对应的是哪个 dump 位点尚未确认）。
+
+干窗 1 步仍逐位不变（该分支只在「水位在某个界面附近且该层可渗」时才进，
+本步没进）。
+
+Tested: `MOD_SoilSnowHydrology.F90:1036-1038` 与本体 dump 的对应；干窗 TIMESTEP 1 步
+Rust-vs-Rust 逐位比对（不变）；`cargo test --workspace --lib --bins -- --test-threads=1`；
+`cargo clippy --workspace --all-targets -- -D warnings`；两处 `cargo fmt --all --check`；
+`cargo test -q -p oracle`；`cargo run -q -p xtask -- check-gui`；`python3 oracle/scripts/test_upstream_f48_sync.py`（PASS）。
