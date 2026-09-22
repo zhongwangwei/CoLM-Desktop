@@ -13684,3 +13684,20 @@ done
 
 Tested: 上述第 1、2 步的命令本会话多次执行；第 3 步在本会话执行过 4 次。
 Not-tested: none（流程本身）。
+
+## 界面导热率：源码级形状**一致**（剩下的只有收缩，须实测）
+
+`main/MOD_GroundTemperature.F90:241-246` 与 `ground_temperature.rs:146-158` 逐句对过：
+
+| 上游 | Rust |
+|---|---|
+| `tk(i) = 2.*thk(i)*thk(i+1)/(thk(i)+thk(i+1))`，再 `max(0.5*thk(i+1),tk(i))` | `2.0*a*b/(a+b)`，再 `.max(0.5*b)` —— 结合顺序一致 |
+| `tk(i) = thk(i)*thk(i+1)*(z(i+1)-z(i)) / (thk(i)*(z(i+1)-zi(i)) + thk(i+1)*(zi(i)-z(i)))` | `a*b*(z₁-z₀) / (a*(z₁-zi) + b*(zi-z₀))` —— 分子分母同序 |
+| 特殊支的判据 `(i==0) .and. (z(i+1)-zi(i) < zi(i)-z(i))` | `layer+1 == snow_layers && (z[l+1]-zi) < (zi-z[l])` —— 一致（`i==0` 对应"雪层数 == layer+1"）|
+
+也就是说这处**源码级没有差异**；唯一的余地是 GCC 是否把分母里两个乘积收进 `FMA`
+（本模块的 dump `gt.opt` 里那一簇 `FNMA/FMS` 正是这类），而要动它必须走三段式实测 ——
+按本会话 6 次"dump 有收缩、实测不支持"的经验，**没有实测支持不动代码**。
+
+Tested: `MOD_GroundTemperature.F90:241-246` 与 `ground_temperature.rs:146-158` 的逐句对照。
+Not-tested: 该处分母的收缩是否有实测收益（需按流程 A/B）。
