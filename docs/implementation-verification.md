@@ -13309,3 +13309,26 @@ Not-tested: `calc_photo_params` 里 `powf`/`exp` 那一族的逐句核对。
 
 Tested: `MOD_AssimStomataConductance.F90:540-600` 与 `photosynthesis.rs:116-180` 的逐句对照。
 Not-tested: `sortin`、`WUE_solver` 两个子程序（本配置不走 WUE/不触发 sortin 时无需核）。
+
+## 近地层粗糙度族已核（形状一致，无需改动）
+
+种子的 1 ULP 一族依赖近地层相似性链路，其上游 `z0hg`（对流传热粗糙度）也顺手核了：
+
+```fortran
+! MOD_LeafTemperature_Extended.F90:748
+z0hg = z0mg/exp(0.13 * (ustar*z0mg/1.5e-5)**0.45)
+```
+```rust
+// ground_fluxes.rs:145-148
+heat_roughness = momentum_roughness
+    / (ROUGHNESS_REYNOLDS_COEFFICIENT
+        * (ustar * momentum_roughness / MOLECULAR_VISCOSITY_M2_S).powf(ROUGHNESS_EXPONENT))
+    .exp();
+```
+
+**一致**：`0.13` 在 `exp` 内、乘在括号外（`0.13*(...)`）、幂底是 `ustar*z0m/1.5e-5` 的
+同序商、指数用 `powf(0.45)` 的字面量形式。`z0hg → z0qg` 的赋值（`z0qg = z0hg`）也一致。
+同类已核的还有 `lake.rs:732` 的同式（湖面路径）。
+
+Tested: `MOD_LeafTemperature_Extended.F90:748` 与 `ground_fluxes.rs:145-148`、`lake.rs:732` 的对照。
+Not-tested: `z0hg` 下游进入 `moninobuk`/`moninobukm` 的实参链（入口 A 的范围）。
