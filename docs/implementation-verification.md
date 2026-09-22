@@ -13236,3 +13236,13 @@ _2088 = .FMA (M.397_3424, pretmp_5135, lfevpl.1275_1912)   ; htvp*fevpg + lfevpl
 Tested: `th_ext.opt` 7496-7506 与 `surface_budget.rs` 的对照；`dry_ts.sh 3` +
 `window_divergence.py`（585 → 584）；改动已回退。
 Not-tested: 从 `colm.x` 反汇编取形状（工具层面仍缺行号归因能力）。
+
+### 交接补充：`/tmp` 里的 history **会残留上一次实验的状态**（第 183 轮踩到）
+
+核对基线时**必须重跑** `bash /tmp/gf/dry_ts.sh 3` 再读产物。第 183 轮先直接读了
+`/tmp/gf/dryts` 里已有的文件，得到 `584/692` —— 那是**上一次被否掉的 `lfevpa` 实验**的
+产物，不是当前代码的状态；重跑之后才是正确的 `585/692`。`dry_ts.sh` 自己会
+`rm -rf` 目标目录，所以"跑一次"安全，**危险的是不跑就读旧文件**。
+
+同一类陷阱适用于：`/tmp/gf/win4/*`（三窗口）、`/tmp/gf/winCN/*`、`/tmp/gf/fd_*`（差分输出）。
+凡是要拿来当"当前基线"的数字，都要由当轮的脚本重新生成。
