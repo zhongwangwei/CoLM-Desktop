@@ -1149,14 +1149,22 @@ pub fn leaf_temperature(
             * last.ground_moisture_conductance
             * (1.0 - last.ground_moisture_weight)
             * input.ground_humidity_temperature_slope_k,
-        air_temperature_2m_k: input.reference_air_temperature_k
-            + VON_KARMAN / (last.surface.heat - last.top_heat)
-                * temperature_difference
-                * (last.heat_at_2m / VON_KARMAN - last.surface.heat / VON_KARMAN),
-        air_specific_humidity_2m: input.reference_specific_humidity
-            + VON_KARMAN / (last.surface.moisture - last.top_moisture)
-                * humidity_difference
-                * (last.moisture_at_2m / VON_KARMAN - last.surface.moisture / VON_KARMAN),
+        // `MOD_LeafTemperature.F90:1271-1272` 的 `tref`/`qref`：GIMPLE（dump 第
+        // 3169/3181 处）是 `_825 = dth*fl(vonkar/(fh-fht))`、
+        // `_832 = FMA(_825, fh2m/vonkar-fh/vonkar, thm)` —— 左边那个乘积被吸收、
+        // `thm`/`qm` 是已舍入的加数。原先是平铺加法，少一次融合。
+        air_temperature_2m_k: (VON_KARMAN / (last.surface.heat - last.top_heat)
+            * temperature_difference)
+            .mul_add(
+                last.heat_at_2m / VON_KARMAN - last.surface.heat / VON_KARMAN,
+                input.reference_air_temperature_k,
+            ),
+        air_specific_humidity_2m: (VON_KARMAN / (last.surface.moisture - last.top_moisture)
+            * humidity_difference)
+            .mul_add(
+                last.moisture_at_2m / VON_KARMAN - last.surface.moisture / VON_KARMAN,
+                input.reference_specific_humidity,
+            ),
         canopy_stomatal_resistance_s_m: canopy_stomatal_resistance,
         sunlit_stomatal_conductance_mol_m2_s: sunlit_stomatal_conductance,
         shaded_stomatal_conductance_mol_m2_s: shaded_stomatal_conductance,

@@ -11445,3 +11445,75 @@ Tested: 内核两次插桩重建（`CoLMMAIN`、`MOD_GroundTemperature`）+ 上�
 两处 `cargo fmt --all --check`；`cargo test -q -p oracle`；`cargo run -q -p xtask -- check-gui`；
 三个黄金窗口（17/68/79）。
 Not-tested: `dlrad` 的对齐（探针量名错了）；`MOD_GroundFluxes` 入口的下一层插桩。
+
+## **整块漏扫**：`MOD_LeafTemperature` 有 61 处收缩，此前**一次都没 dump 过**
+
+上一节把种子缩到"地面通量/叶温那一段"。顺着这条线去查那一段的 GIMPLE 时发现：
+**`MOD_LeafTemperature.F90` 从来没有进过清点表**。已有的 dump 只有
+`/tmp/gf/r107/*.opt` 那几个，按 `;; Function` 认一下身份：
+
+| dump | 模块 |
+|---|---|
+| `fd.opt` | `MOD_ForcingDownscaling` |
+| `fv.opt` | `MOD_FrictionVelocity` |
+| `ph.opt` | `MOD_PlantHydraulic` |
+| `hsf.opt` | `MOD_Hydro_SoilFunction` |
+| `ssh.opt` | `MOD_SoilSnowHydrology` |
+| `MOD_Albedo.opt` / `MOD_NetSolar.opt` / `MOD_CanopyLayerProfile.opt` / `MOD_GroundFluxes.opt` / `MOD_TurbulenceLEddy.opt` | 各自模块 |
+
+**`MOD_LeafTemperature` 不在其中。** 而它正好是探针指出的那一段。
+
+### 补上 dump
+
+```bash
+cd vendor/CoLM202X
+gfortran -c -O2 -fdefault-real-8 -ffree-form -g -ffpe-trap=invalid,zero,overflow \
+  -fbacktrace -cpp -ffree-line-length-0 -fallow-argument-mismatch \
+  -I.bld -Iinclude -Imain -Imain/HYDRO -Imain/URBAN -Imain/BGC -Ishare \
+  main/MOD_LeafTemperature.F90 \
+  -fdump-tree-optimized=/tmp/gf/r144/lt.opt -o /tmp/gf/r144/lt.o
+```
+
+结果：**61 处**（全部内联进 `leaktemperature` 一个函数的 dump 里），
+而 `crates/colm-core/src/leaf_temperature.rs` 只有 **19 个 `mul_add`** ——
+**约 42 处对不上**。这就是干窗第 0 步那个种子的最可能藏身处：一个只在活路径上、
+却从未按 GIMPLE 逐条对过的模块。
+
+### 本轮顺手补上的两处（`tref`/`qref`）
+
+`MOD_LeafTemperature.F90:1271-1272`：
+
+```fortran
+tref = thm + vonkar/(fh-fht)*dth * (fh2m/vonkar - fh/vonkar)
+qref =  qm + vonkar/(fq-fqt)*dqh * (fq2m/vonkar - fq/vonkar)
+```
+
+GIMPLE（dump 第 3169/3181 处）：
+
+```
+_823 = 0.4/(fh-fht);  _478 = thm-taf;  _825 = _478*_823
+_829 = fh2m/0.4 - fh/0.4
+_832 = FMA(_825, _829, thm)
+```
+
+即 `tref = fma(fl(dth*vonkar/(fh-fht)), fh2m/vonkar-fh/vonkar, thm)` —— 左边那个乘积
+**被吸收**、`thm`/`qm` 是已舍入的加数。Rust 原来是平铺加法，已改。
+
+**但干窗逐位不变**（仍是 34 个变量，`f_qref` 仍差 1.30e-18）：这一次融合在这组输入上
+恰好同值。也就是说这两处是"该补的真收缩"，但不是种子 —— 它俩的差异本身是
+从上游继承来的。
+
+### 下一轮的入口（已缩小到 42 处）
+
+`lt.opt` 里 61 处已按 `;; Function` 全部归到 `leaktemperature`。下一轮照
+`twostream` 那一轮的办法逐条读形状，优先看与 `fseng`/`fevpg`/`qg`/`dqgdT` 同一条
+数据流上的那些（`dirab_dtl`/`fsenl_dtl`/`etr_dtl`/`evplwet_dtl`/`fevpl_dtl` 这一族
+`FMA(x_dtl, prephitmp_2380, x0)` 是叶温 Newton 迭代的线性化更新，同一族里只要有一处
+未融合，收敛后的通量就会差 1 ULP）。
+
+Tested: `MOD_LeafTemperature.F90` 的本体 dump（61 处，本轮首次生成）；
+`fd/fv/ph/hsf/ssh/MOD_Albedo/MOD_NetSolar/MOD_CanopyLayerProfile/MOD_GroundFluxes/MOD_TurbulenceLEddy`
+各 dump 的 `;; Function` 身份核对；`tref`/`qref` 两处的逐行对照与落地；
+干窗 1 步逐位比对（34 个变量，不变）；
+`cargo test -q -p colm-core --lib -- --test-threads=1`（355 通过）；`cargo fmt --all --check`。
+Not-tested: 61 处里剩下的 42 处逐条映射（本轮只做了 `tref`/`qref` 两处）。
