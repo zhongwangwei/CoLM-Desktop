@@ -996,26 +996,42 @@ pub fn leaf_temperature(
     } else {
         LATENT_HEAT_SUBLIMATION_J_KG
     };
-    let leaf_sensible_heat = last.leaf_sensible_heat
-        + last.leaf_sensible_temperature_slope * final_temperature_change
-        + (last.unbounded_temperature_change - final_temperature_change)
-            * (clai / input.time_step_seconds - last.net_longwave_temperature_slope
-                + last.leaf_sensible_temperature_slope
-                + leaf_latent_heat_j_kg * last.leaf_evaporation_temperature_slope
-                + WATER_HEAT_CAPACITY_J_KG_K * intercepted_rain
-                + ICE_HEAT_CAPACITY_J_KG_K * intercepted_snow)
-        + leaf_latent_heat_j_kg * last.evaporation_imbalance;
-    let mut transpiration =
-        last.transpiration + last.transpiration_temperature_slope * final_temperature_change;
-    let mut wet_evaporation =
-        last.wet_evaporation + last.wet_evaporation_temperature_slope * final_temperature_change;
-    let leaf_evaporation = last.leaf_evaporation_unadjusted
-        + last.leaf_evaporation_temperature_slope * final_temperature_change;
+    // `MOD_LeafTemperature.F90:1062-1093` 的收敛后收尾。GIMPLE（dump 第 2636-2650、
+    // 2720-2733 处）是一串**逐级 FMA**：
+    //   `_552 = FMA(fsenl_dtl, dtl, fsenl旧值)`
+    //   `_569 = FMA(dtl_noadj-dtl, 括号, _552)`
+    //   `_571 = FMA(erre, hvap, _569)`
+    //   `_595 = FMA(elwdif, hvap, _571)`
+    //   `etr`/`evplwet`/`fevpl` 各是一处 `FMA(x_dtl, dtl, 旧值)`
+    // —— 原先是平铺加法，这一串少了 7 次融合。
+    let leaf_sensible_heat = {
+        let slope_applied = last
+            .leaf_sensible_temperature_slope
+            .mul_add(final_temperature_change, last.leaf_sensible_heat);
+        let bracket = clai / input.time_step_seconds - last.net_longwave_temperature_slope
+            + last.leaf_sensible_temperature_slope
+            + leaf_latent_heat_j_kg * last.leaf_evaporation_temperature_slope
+            + WATER_HEAT_CAPACITY_J_KG_K * intercepted_rain
+            + ICE_HEAT_CAPACITY_J_KG_K * intercepted_snow;
+        let bracket_applied = (last.unbounded_temperature_change - final_temperature_change)
+            .mul_add(bracket, slope_applied);
+        leaf_latent_heat_j_kg.mul_add(last.evaporation_imbalance, bracket_applied)
+    };
+    let mut transpiration = last
+        .transpiration_temperature_slope
+        .mul_add(final_temperature_change, last.transpiration);
+    let mut wet_evaporation = last
+        .wet_evaporation_temperature_slope
+        .mul_add(final_temperature_change, last.wet_evaporation);
+    let leaf_evaporation = last
+        .leaf_evaporation_temperature_slope
+        .mul_add(final_temperature_change, last.leaf_evaporation_unadjusted);
     let wet_evaporation_limit = state.canopy_water.total_mm / input.time_step_seconds;
     let excessive_wet_evaporation = (wet_evaporation - wet_evaporation_limit).max(0.0);
     wet_evaporation = wet_evaporation.min(wet_evaporation_limit);
     let leaf_evaporation = leaf_evaporation - excessive_wet_evaporation;
-    let leaf_sensible_heat = leaf_sensible_heat + leaf_latent_heat_j_kg * excessive_wet_evaporation;
+    let leaf_sensible_heat =
+        leaf_latent_heat_j_kg.mul_add(excessive_wet_evaporation, leaf_sensible_heat);
     let sunlit_transpiration = last.sunlit_transpiration;
     let shaded_transpiration = last.shaded_transpiration;
     let mut root_flux_kg_m2_s = last.root_flux_kg_m2_s;

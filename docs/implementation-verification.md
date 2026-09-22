@@ -11517,3 +11517,52 @@ Tested: `MOD_LeafTemperature.F90` 的本体 dump（61 处，本轮首次生成�
 干窗 1 步逐位比对（34 个变量，不变）；
 `cargo test -q -p colm-core --lib -- --test-threads=1`（355 通过）；`cargo fmt --all --check`。
 Not-tested: 61 处里剩下的 42 处逐条映射（本轮只做了 `tref`/`qref` 两处）。
+
+### 补上 `MOD_LeafTemperature` 的 9 处（`tref`/`qref` + 收敛后收尾的 7 处）
+
+`MOD_LeafTemperature.F90:1062-1093` 是叶温 Newton 迭代**收敛之后**的收尾：
+
+```fortran
+fsenl = fsenl + fsenl_dtl*dtl(it-1) + (dtl_noadj-dtl(it-1))*(...) + hvap*(...)
+etr     = etr     + etr_dtl*dtl(it-1)
+evplwet = evplwet + evplwet_dtl*dtl(it-1)
+fevpl   = fevpl   + fevpl_dtl*dtl(it-1)
+```
+
+dump（第 2636-2650、2720-2733 处）显示 GCC 把它们编成**逐级 FMA**：
+
+```
+_547 = fsenl旧值
+_552 = FMA(fsenl_dtl, dtl, _547)
+_569 = FMA(dtl_noadj-dtl, 括号, _552)
+_571 = FMA(erre, 2.5104e6, _569)
+…  klwdif = evplwet - ldew/deltim；fsenl = FMA(klwdif, 2.5104e6, _571)
+etr = FMA(etr_dtl, dtl, etr旧值)；evplwet = FMA(...)；fevpl = FMA(...)
+```
+
+Rust 原来是平铺加法，已按上面的次序改成 FMA 链（`fsenl` 那一条是
+`fsenl ← fma(sh_dtl,dT,·) ← fma(dT_noadj-dT,括号,·) ← fma(hvap,imbalance,·) ← fma(hvap,过湿蒸发,·)`）。
+
+### **重要负结果：这一族在收敛后是"惰性"的**
+
+改完 9 处（`tref`/`qref` + 这 7 处）之后，干窗第 0 步**逐位完全不变**，仍是 34 个变量、
+每个变量的 `maxabs` 一字不差。先怀疑"改的不是活路径"，于是做了**扰动试验**：
+把收尾那一行乘 `1.0000001` 再跑 —— 逐位不同的变量从 34 变成 **36**，说明这条路径
+**确实在执行**。
+
+所以零位移的原因是**代数上的**：这一族全是 `FMA(x_dtl, dtl(it-1), 旧值)`，
+而 `dtl(it-1)` 是 Newton 迭代**已经收敛**的那一步的增量 —— 它本身就接近 0
+（`MOD_LeafTemperature.F90:940` 拿 `sqrt(dtl*dtl)` 当收敛判据）。`dtl` 恰好为 0 时
+`fma(x,0,old) ≡ old ≡ old + x*0`，融合与否同值。**这一族不可能解释种子。**
+
+**这条结论直接改下一轮的方向**：种子必须在 `MOD_LeafTemperature` 里**无条件执行、
+且乘数非零**的表达式上，而不是迭代修正项。剩下 42 处里应当优先看
+`clai`/`cfw`（第 1158-1159、1969 行）、`taf`/`thvstar`（2370、2415）、
+`qsatg` 那一族（2000-2062）以及 `ldew_rain`/`ldew_snow`（2994/2996，这两处
+**每步无条件执行**，且 `f_ldew` 恰好在差分集合里）。
+
+Tested: `MOD_LeafTemperature.F90:1062-1093` 与 dump 第 2636-2650/2720-2733 处的逐句对应；
+9 处落地后干窗 1 步逐位比对（34 个变量不变）；
+**扰动试验**（收尾乘 1.0000001 → 36 个变量）证明路径是活的；
+`cargo test -q -p colm-core --lib -- --test-threads=1`（355 通过）；`cargo fmt --all --check`。
+Not-tested: 剩下 42 处（下一步按上面的优先级）。
