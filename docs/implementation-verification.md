@@ -13626,3 +13626,31 @@ fm 5.313e-16`），所以按规则**回退**。
 Tested: `gt.opt` 970-999 行与 `ground_temperature.rs:295-300` 对照；`dry_ts.sh 1` +
 `restart_divergence.py` 的 A/B（改与不改，restart 口径输出逐行相同）；改动已回退。
 Not-tested: `gt.opt` 其余 39 处收缩。
+
+## `gt.opt` 的**土壤支**读清了：三条 FMA，但干窗下只剩结合顺序（故惰性）
+
+`gt.opt` 第 1019-1055 行（bb29，无雪支）是：
+
+```
+_193 = .FMS (dlrad, emg, sigma*t_soil^4)          ; FMS(a,b,c)=a*b-c
+_198 = .FMA (fevpg_soil, htvp, fseng_soil)
+_200 = _193 - _199
+_207 = .FMA (dT, rain*cpliq,  _200)
+_211 = .FMA (dT, snow*cpice, _207)
+_214 = .FMA ((1-fsno), _211, sabg_soil)           ; ← 整个累加器被 (1-fsno) 加权
+```
+
+即内核是 `surface = sabg_soil + (1-fsno) * X`，而 Rust（`ground_temperature.rs:295-300`）
+写成 `sabg_soil + dlrad*emg - … + rain*cpliq*dT + dT*snow*cpice`。
+
+**干窗（无雪）下 `fsno = 0`，`(1-fsno) = 1`，`FMA(1, X, sabg) ≡ X + sabg`** —— 加权是精确的，
+所以这条支与 Rust 的差别**只剩三处 FMA 的结合顺序**；上一轮把其中两处（`_207`/`_211`）
+按形状补上、restart 口径逐行不变，正与此吻合。**真正会因 `(1-fsno)` 加权而分岔的是有雪
+支**（`_173`/`_181`/`_188` 那三条 `FNMA`，`fsno` 不为 0），那属于雪窗，不是干窗种子。
+
+**这给雪窗留了一条明确的候选**：若哪天要收 `US-NR1-snow` 的残差，先核
+`surface_snow_lyr`/`surface_soil` 的 `(1-fsno)`/`fsno` 加权与三条 `FNMA` 的结合顺序。
+
+Tested: `gt.opt` 1019-1055 与 `ground_temperature.rs:288-312` 的逐句对照；上一轮那两处 FMA 的
+restart A/B 结果（逐行不变）与本分析的相互印证。
+Not-tested: 雪支的 `FNMA` 加权（雪窗范围）。
