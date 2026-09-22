@@ -13110,3 +13110,22 @@ maxabs 3.58e-12）。对文件 dump（`th_ext.opt` 第 7167-7170 行）里它不
 
 Tested: `th_ext.opt` 7160-7172 行与 `…Thermal…_Extended.F90:1338-1345` 的对照。
 Not-tested: `_1771`/`_1811` 两条链的逐句核对（下一轮）。
+
+### `fgrnd` 两条链的**尾步形状**（可直接照抄的部分）
+
+`th_ext.opt` 里两个分支的收尾完全同型（`_1765`/`_1805` 是各自分支的 `tinc`，
+`_1759`/`_1799` 是已累加的部分）：
+
+```
+_1767 = .FMA (_1761, _1765, _1759)        ; 分支内倒数第二步
+_1769 = pg_snow * cpice                   ; ← 先算 (pg_snow*cpice)
+_1771 = .FMA (_1765, _1769, _1767)        ; ← 最后一次收缩：acc + tinc*(pg_snow*cpice)
+```
+
+对照源码 `+ cpice*pg_snow*(t_precip-t_grnd)`（`…_Extended.F90:1360`）可知：上游把
+`pg_snow*cpice` 先算成一个因子、再与温度差相乘并**收进 FMA**。Rust 侧要核的就是
+`surface_budget.rs` 里对应项是不是这个形状（先 `pg_snow*cpice`、再 `mul_add(温度差, acc)`），
+而不是平铺的 `cpice*pg_snow*(...)` 累加。
+
+Tested: `th_ext.opt` 7525-7531 与 7569-7575 的对照；`…_Extended.F90:1360` 的对照。
+Not-tested: `_1765`/`_1805`（各分支 `tinc`）的定义链；Rust 侧的对应项（下一轮第一件事）。
