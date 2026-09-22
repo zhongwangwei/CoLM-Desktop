@@ -13654,3 +13654,33 @@ _214 = .FMA ((1-fsno), _211, sabg_soil)           ; ← 整个累加器被 (1-fs
 Tested: `gt.opt` 1019-1055 与 `ground_temperature.rs:288-312` 的逐句对照；上一轮那两处 FMA 的
 restart A/B 结果（逐行不变）与本分析的相互印证。
 Not-tested: 雪支的 `FNMA` 加权（雪窗范围）。
+
+### 候选筛选的**复制粘贴流程**（restart 口径，固定 1 步）
+
+```bash
+BASE=/Users/zhongwangwei/Desktop/Github/CoLM-Desktop
+export NETCDF_DIR=/opt/homebrew/opt/netcdf
+# 1) 改一处形状，然后：
+bash /tmp/gf/dry_ts.sh 1                     # 内核与 Rust 各跑 1 步（restart 落在 …-01800）
+K=$(ls -t /tmp/gf/dryts/out/CN-Cng/restart/2008-001-01800/*.nc | head -1)
+python3 $BASE/oracle/scripts/restart_divergence.py "$K" /tmp/gf/dryts/rust_restart.nc --top 8
+#    基线：differing restart variables: 19 / 68（rib 1.922e-16 / t_soisno 2.041e-16 /
+#          trad 2.153e-16 / rst 2.328e-16 / qstar 4.865e-16 / fm 5.313e-16）
+# 2) 若这个数下降（或 worst maxrel 变小）再上步级口径：
+python3 $BASE/oracle/scripts/window_divergence.py \
+    /tmp/gf/dryts/out/CN-Cng/history/*.nc /tmp/gf/dryts/colm-rs_hist_2008-01.nc --top 8
+#    基线：44 个差异变量 / bitwise identical 585/692 / first divergence step 0
+# 3) 再看三个黄金窗口（容差三口径不得变差）：
+bash /tmp/gf/win4.sh
+for c in CN-Cng CN-Cng-wet US-NR1-snow; do
+  g=$(ls $BASE/oracle/golden/ | grep "^${c}_hist"); d=/tmp/gf/win4/$c
+  python3 /tmp/gf/three.py $BASE/oracle/golden/$g $d/$(ls $d | grep '^colm-rs_hist') $d/cmp.txt "$c"
+done
+#    基线：21328/338.9256/825/17 · 32655/10369.4411/20672/68 · 33651/444394.4368/25896/79
+```
+
+**注意**（第 200 轮踩过）：restart 的目录名带时间戳，`dry_ts.sh 1` 是 `2008-001-01800`、
+`dry_ts.sh 3` 是 `…-05400`；A/B 必须同步数，否则比的是两条不同轨迹。
+
+Tested: 上述第 1、2 步的命令本会话多次执行；第 3 步在本会话执行过 4 次。
+Not-tested: none（流程本身）。
