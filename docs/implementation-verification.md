@@ -12200,6 +12200,7 @@ POS  40E2D80B36C8AC77  40993AF2BB3F60EE
 | `MOD_FrictionVelocity` | 20 个输出 20000/20000（`compare_moninobukm.sh`）|
 | `MOD_Qsadv` | 4 个输出 20000/20000（`compare_qsadv.sh`）|
 | `MOD_SoilThermalParameters:soil_hcap_cond` | 8 档 × 5000 组、2 个输出 40000/40000（`compare_soilthermal.sh`）|
+| `MOD_TurbulenceLEddy` | 17 个输出 20000/20000（`compare_leddy.sh`，本地算例到不了这条支）|
 
 Tested: `oracle/scripts/compare_qsadv.sh`（全区间 20000 组，改前 5021 → 改后 0）；
 `/tmp/gf/r152/clamp.f90` 的四个常量直读；三个黄金窗口三口径 A/B（逐位不变）；
@@ -12265,3 +12266,47 @@ Tested: `oracle/scripts/compare_soilthermal.sh`（40000 组 × 2 输出逐位相
 `cargo test --workspace --lib --bins -- --test-threads=1`；`cargo test -q -p oracle`；
 `cargo run -q -p xtask -- check-gui`；`python3 oracle/scripts/test_upstream_f48_sync.py`。
 Not-tested: `hCapacity`/`hConductivity` 的数组级分支（见上）；三个黄金窗口未重跑（本轮不动生产代码）。
+
+## `MOD_TurbulenceLEddy` 结案：**黄金窗口给不了证据**的模块，靠差分拿下 17 个输出 20000/20000
+
+这个模块的两个 `PUBLIC` 入口（`moninobuk_leddy`、`moninobukm_leddy`，LZD2022 大涡
+近地层方案）**任何本地算例都走不到**：三个黄金算例的强迫场里没有 `hpbl`
+（`DEF_USE_CBL_HEIGHT` 关着），所以窗口对它的覆盖是零，只能靠差分证明。此前
+`compare_moninobukm.sh` 那 20 个输出全部落在 `MOD_FrictionVelocity` 里，这个模块
+一直只是"代码在、没验过"。
+
+新增 `oracle/scripts/compare_leddy.sh`（配对物 `oracle/scripts/turbulence_leddy_diff.f90`
+与 `crates/colm-core/examples/leddy_probe.rs`，`hpbl = 10…3000 m`）：
+
+```
+$ bash oracle/scripts/compare_leddy.sh
+MOD_TurbulenceLEddy: all 17 outputs 20000/20000 bitwise identical
+  分支分布 (ib jb kb zc -> 组数): 0010:724 0020:824 0110:1839 0120:6604
+                                  1130:9685 1131:18 1140:241 1141:65
+```
+
+这轮**没有改生产代码** —— `monin_obukhov_with_scheme` / `canopy_monin_obukhov_with_scheme`
+的 `LargeEddy` 支直接全过。
+
+### 行首四位诊断位不是装饰
+
+`ib`（obu 符号）、`jb`（`Bm < 0.2722`，即 `Bm2 = max(Bm,0.2722)` 的钳位生效）、
+`kb`（动量廓线四支：`zeta<zetam2` / `zetam2<=zeta<0` / `0<=zeta<=1` / `zeta>1`）、
+`zc`（稳定侧 `zetazi` 被上钳到 200）。它们**只在 Fortran 侧算**、只用于给失配分组，
+不参与比对 —— 免得探针里再抄一遍物理。结果把这套方案的取值域说清楚了：
+
+| 诊断 | 覆盖 |
+|---|---|
+| `kb` | 1: 2563、2: 7428、3: 9685、4: 306 —— 四支全到 |
+| `ib` | 不稳定 9899、稳定 10101 |
+| `jb` | 钳位生效 10370、不生效 9630 |
+| `zc` | 稳定侧 `zetazi > 200` 被钳 **83** 次 |
+
+不稳侧的 `zetazi` 两个钳位（`-1e4` 与 `-1e-5`）在 `hu>=1`、`|obu|<=505`、`hpbl` 有限
+的取值域内**不可达**，这不是抽样不够，是量级差太远 —— `zc` 那一列就是为了把这句话
+变成可核对的计数（`1131`/`1141` 是稳定侧的那 83 次，不稳侧一次都没出现）。
+
+Tested: `oracle/scripts/compare_leddy.sh`（17 个输出 × 20000 组逐位相同）；
+`cargo fmt --all --check`；`NETCDF_DIR=... cargo clippy --workspace --all-targets -- -D warnings`。
+Not-tested: `MOD_TurbulenceLEddy` 在窗口里的端到端影响（本地算例根本到不了这条支）；
+`hpbl` 的逐强迫场读取路径（`DEF_USE_CBL_HEIGHT` 在本仓库仍是显式拒绝的开关之一）。
