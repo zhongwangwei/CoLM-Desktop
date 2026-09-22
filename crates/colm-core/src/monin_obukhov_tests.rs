@@ -163,3 +163,37 @@ fn diffusivity_preserves_the_below_displacement_zero_branch() {
     );
     assert!(integrated_monin_obukhov_diffusivity(0.0, 0.01, -100.0, 0.3, 10.0, 2.0).unwrap() > 0.0);
 }
+
+/// `rib = grav*zldis*dthv/(thv*um*um)` 的**结合律**：内核 GIMPLE 是
+/// `_12 = um*thv; _13 = um*_12` 即 `(thv*um)*um`，写成 `thv*(um*um)`
+/// 会先舍入一次平方 —— 实测 `obu` 只有 16188/20000 逐位相同。
+///
+/// 这条用内核本体（`MOD_FrictionVelocity.F90` 的 `moninobukini`，独立驱动跑
+/// 20000 组）给的一组真实数字钉住：输入是第 2 组的原值，期望值
+/// `-68.50766570868211`（`0xC051207D985005C8`）。改成 `thv*(um*um)` 会得到
+/// `0xC051207D985005C9`，这条测试就会红。
+#[test]
+fn moninobukini_rib_keeps_the_kernels_association() {
+    let state = initialize_monin_obukhov(MoninObukhovInitialInput {
+        reference_wind_m_s: 5.166_100_662_720_084,
+        potential_temperature_k: 260.131_479_208_157_7,
+        reference_temperature_k: 267.688_501_952_429_76,
+        virtual_potential_temperature_k: 253.988_832_161_076_8,
+        temperature_difference_k: -19.785_434_386_553_24,
+        humidity_difference_kg_kg: 0.007_765_202_006_638_078,
+        virtual_temperature_difference_k: -3.558_514_298_078_165_4,
+        reference_height_m: 14.861_584_123_784_37,
+        momentum_roughness_m: 0.849_330_721_267_209_2,
+    })
+    .unwrap();
+    assert_eq!(
+        state.stability_adjusted_wind_m_s.to_bits(),
+        0x4014_C2CE_6551_3E06,
+        "um changed"
+    );
+    assert_eq!(
+        state.obukhov_length_m.to_bits(),
+        0xC051_207D_9850_05C8,
+        "obu no longer matches moninobukini"
+    );
+}

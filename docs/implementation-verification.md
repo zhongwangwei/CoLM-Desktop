@@ -9685,3 +9685,22 @@ Tested: `USE` 内核本体模块的两个 Fortran 驱动（`GroundFluxes` 49 实
   既不在这三个模块的算式里，也不在 `ur`/`rib` 的算法里；下一步应当直接
   同步打印 Rust 与内核在**第一步的完整状态**（restart 读入 + 第一步各中间量），
   而不是继续逐个模块扫。
+
+### 补记（第 108 轮）：把 `rib` 的结合律钉成单元测试，以及一次失败的二分
+
+`moninobukini` 的 `rib` 结合律现在有一条**永久回归测试**
+（`monin_obukhov_tests.rs::moninobukini_rib_keeps_the_kernels_association`）：
+输入取内核驱动里第 2 组的原值，期望 `obu = -68.50766570868211`（`0xC051207D985005C8`）、
+`um = 5.190240462382922`（`0x4014C2CE65513E06`）。把分母改回 `thv*um.powi(2)`，
+这条测试立刻红（实测）：
+
+```
+assertion `left == right` failed: obu no longer matches moninobukini
+```
+
+**一次失败的二分（记下来免得下次再撞）**：想按"稳定/不稳定"分流来缩小
+`groundfluxes` 的剩余缺口，做法是把驱动里的 `dthv` 取绝对值后重跑。结果两个驱动
+产出**逐位相同**的文件 —— 因为 `dthv` 根本不是 `GroundFluxes` 的实参，它是**函数体
+内部**由 `dth = thm-t_grnd`、`dqh = qm-qg` 现算的（`:164`）。
+也就是说"改驱动的一个输入来切换分支"这件事在这里做不到：要分流得改
+`thm`/`t_grnd`/`th`/`qm`/`qg` 的生成式。下次分流前先确认那个量是不是实参。
