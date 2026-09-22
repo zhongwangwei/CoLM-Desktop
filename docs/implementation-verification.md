@@ -12073,3 +12073,44 @@ MOD_FrictionVelocity: all 20 outputs 20000/20000 bitwise identical
 Tested: `oracle/scripts/compare_moninobukm.sh`（20 个输出、20000 组）；
 `cargo fmt --all --check`；`cargo test -q -p colm-core --lib -- --test-threads=1`。
 Not-tested: `moninobuk_leddy`（CBL 分支，模块外、本机算例不走）。
+
+## `qsadv` 的差分：**输入已对齐，输出仍差 ~25%**，而它既不是融合链也不是平铺链
+
+把差分驱动扩到 `MOD_Qsadv`（`oracle/scripts/qsadv_diff.f90` +
+`crates/colm-core/examples/qsadv_probe.rs` + `oracle/scripts/compare_qsadv.sh`，
+两侧同一串 LCG、20000 组 `(T,p)`）。
+
+**第一件事：先把输入对齐**（这条纪律救过场）。两份驱动现在都把 `T`/`p` 的位型
+写进第一、二列，比对结果是 **`T`/`p` 0/20000 失配** —— 输入逐位相同，
+所以后面的失配不是驱动错位。
+
+| Rust 的写法 | `es` | `esdT` | `qs` | `qsdT` |
+|---|---|---|---|---|
+| `mul_add` 链（现状） | 5021 | 4873 | 5019 | 4919 |
+| 平铺 `x*v + c` | 8772 | 8479 | 8614 | 8218 |
+
+**内核既不是融合链、也不是平铺链。** 这点很反常，值得写清楚：
+
+* `-fdump-tree-optimized` 里这条 Horner 链**被标成八级 `.FMA`**
+  （`qs.opt` 第 111-128 行，常数逐一对上 c0/c1/c7/c8）；
+* 但把 `MOD_Qsadv.F90` 分别用**默认**、`-ffp-contract=fast`、`-ffp-contract=off`
+  各编一遍，三者对同一个输入给出**完全相同**的值；按 `.FMA` 链精确算（Python 的
+  `Fraction` 精确 fma）却给出另一个值；
+* 换成平铺写法之后失配反而**更多**（5021 → 8772）。
+
+也就是说：**GCC 在这一处做的是"部分融合"** —— 八个层级里只有一部分被收进 FMA，
+树层 dump 的 `.FMA` 既不能当作"全都融合"，`-ffp-contract=off` 的相同结果也不能
+当作"全都没融合"（`-O2` 下 GCC 的默认收缩未必被 `off` 完全关掉，或者后端又做了
+别的安排）。
+
+**处置：不动生产代码**（`polynomial` 保住原来的 `mul_add`，它离内核更近），
+把这个状态与两个候选链的实测数字钉在这里。**下一轮的入口**：直接读
+`qsadv` 的**汇编**（`gfortran -S`，`qs.opt` 同款选项）数出冷/暖两支里
+`fmadd` 与 `fmul` 各自的分布，按汇编还原逐级融合的次序 —— 树层 dump 在这一处
+不可信。
+
+Tested: `oracle/scripts/compare_qsadv.sh`（20000 组，输入 `T`/`p` 0/20000 + 四种输出）；
+`MOD_Qsadv.F90` 用 默认/`-ffp-contract=fast`/`-ffp-contract=off` 三种选项各编一遍、
+对同一输入比 `es` 的位型；`qs.opt` 的 32 处收缩逐条核对；Python 精确 fma 复算两条链；
+`cargo test -q -p colm-core --lib -- --test-threads=1`（355 通过）。
+Not-tested: `qsadv` 的汇编级逐级融合分布（下一轮）；因此**本轮没有改动 `polynomial`**。
