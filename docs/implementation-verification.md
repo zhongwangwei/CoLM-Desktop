@@ -13857,3 +13857,33 @@ Rust 对应结构 `PhaseChangeInput`（`phase_change.rs:47+`）已见的字段�
 
 Tested: `main/MOD_PhaseChange.F90:22-175` 的签名与 intent 逐条核对；`phase_change.rs:47-76` 的字段读取。
 Not-tested: 驱动本体与差分运行（下一轮）。
+
+### `meltf` 差分驱动的**输入/输出映射已补全**（写驱动所需信息到此齐全）
+
+Rust `PhaseChangeInput` 全部 26 个字段（`phase_change.rs:47-80`）与 `PhaseChangeState`
+（`:83-99`）已读全，与上游 33 个实参的对应关系：
+
+| 上游（`meltf`）| Rust |
+|---|---|
+| `patchtype` / `is_dry_lake` | `patch_type` / `is_dry_lake` |
+| `deltim` | `time_step_seconds` |
+| `fact(lb:)` / `brr(lb:)` | `fact_seconds_per_j_m2_k` / `residual_heat_flux_w_m2` |
+| `hs` / `hs_soil` / `hs_snow` | `surface_heat_flux_w_m2` / `soil_heat_flux_w_m2` / `snow_heat_flux_w_m2` |
+| `fsno` / `dhsdT` | `snow_cover_fraction` / `surface_heat_flux_temperature_derivative_w_m2_k` |
+| `t_soisno_bef(lb:)` / `t_soisno(lb:)` | `previous_temperature_k` / `temperature_k` |
+| `wliq_soisno` / `wice_soisno` | `liquid_water_kg_m2` / `ice_water_kg_m2` |
+| `scv` / `snowdp` | `snow_water_equivalent_kg_m2` / `snow_depth_m` |
+| `porsl` / `psi0` / `theta_r` / `bsw` / `alpha_vgm` / `n_vgm` / `L_vgm` / `sc_vgm` / `fc_vgm` | `soil_porosity` / `soil_suction_mm` / `soil_residual_water` / `soil_hydraulic_model`（**每层的模型枚举**选出用哪套参数）|
+| `dz` | `soil_layer_thickness_m` |
+| `imelt(lb:)` | `phase_flag`（**out**：0 无/1 融/2 冻）|
+| `xmf` | `latent_heat_flux_w_m2` |
+| `sm` | `snow_melt_rate_kg_m2_s` |
+| `qphs_thaw_lay` / `qphs_frzc_lay` | `thaw_mass_kg_m2` / `freeze_mass_kg_m2` |
+
+**注意**：内核的 `lb` 是数组下界（`1 - snow_layers`），Rust 用**紧凑索引** + `snow_layers`
+计数；驱动比对时要把 `lb:0` 的雪层与 `1:nl_soil` 的土层拼成同序的两个向量。
+`supercool_water`/`split_soil_snow` 是 Rust 侧的运行开关，对应上游 namelist
+（`DEF_...`），驱动里按配置遍历。
+
+Tested: `phase_change.rs:47-99` 的全部字段与 `MOD_PhaseChange.F90:22-175` 的逐项对照。
+Not-tested: 驱动本体（下一轮；信息已齐全）。
