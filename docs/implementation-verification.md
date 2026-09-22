@@ -14710,3 +14710,22 @@ Not-tested: 11 vs 10 的成因（阳叶/阴叶 vs 单次，或迭代次数差 1�
 
 Tested: 第 0 步 history 的四个量逐位比对（全部不同）；与第 235 轮 dump、第 239 轮实参位型对照的合并推断。
 Not-tested: `lt_ext.opt` 80 处的逐条 A/B（下一轮起）。
+
+### 靶子清点的现实困难（下一轮的方法建议）
+
+第 241 轮把靶子定在 `lt_ext.opt` 的 80 处、优先级按"是否在 `fseng`/`fevpg`/`f_rnet` 链上"。
+本轮清点时遇到一个具体障碍：**这份 dump 里没有 `# DEBUG irab/fsenl/fevpl/dirab/sabv` 标记**
+（`-fdump-tree-optimized` 只在变量跨块时才打 DEBUG 行），所以无法用变量名直接把 80 处归到通量链上。
+
+**下一轮建议的做法**（按可行性排序）：
+
+1. **按源码行号反查**：先在对文件里定位 `irab`/`sabv`/`fsenl`/`fevpl`/`dirab` 的计算语句行号，
+   再在 dump 里找落在这些行附近的 `.FMA/.FNMA`（本会话在 `MOD_FrictionVelocity:downscale_wind`
+   上用过同一手法：dump 的 `_NNN` 与源码语句逐行对应）；
+2. **换更细的 dump**：`-fdump-tree-optimized-raw` 或 `-fopt-info-optimized` 可能保留更多来源
+   信息（未验证）；
+3. **不查 dump，直接经验筛选**：对 80 处涉及的表达式按"Rust 是否平铺"逐个用三段式 A/B —— 
+   本会话的统计是 6 处"dump 有收缩"里 1 处落地（`olrg`）、5 处被否，命中率不高但每次代价有限。
+
+Tested: `lt_ext.opt` 里 `DEBUG irab/fsenl/…` 的缺失（grep 无命中）；80 处的 FMA 列表已取到前 12 条。
+Not-tested: 上述三种做法的实际效果（下一轮选一种）。
