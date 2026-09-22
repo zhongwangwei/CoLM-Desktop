@@ -13887,3 +13887,24 @@ Rust `PhaseChangeInput` 全部 26 个字段（`phase_change.rs:47-80`）与 `Pha
 
 Tested: `phase_change.rs:47-99` 的全部字段与 `MOD_PhaseChange.F90:22-175` 的逐项对照。
 Not-tested: 驱动本体（下一轮；信息已齐全）。
+
+### `meltf` 的符号与 `.mod` 接口已核（写驱动前最后一道去风险）
+
+```
+$ nm -g vendor/CoLM202X/.bld/MOD_PhaseChange.o | grep -i meltf
+000000000000154c T ___mod_phasechange_MOD_meltf
+00000000000006a0 T ___mod_phasechange_MOD_meltf_snicar
+0000000000000000 T ___mod_phasechange_MOD_meltf_urban
+$ gzip -dc .bld/mod_phasechange.mod | strings | grep qphs
+qphs_thaw_lay / qphs_frzc_lay      ← 与 main/MOD_PhaseChange.F90:22-33 的哑元名一致
+```
+
+也就是说：`.bld` 里的对象**确实导出** 三个 `meltf*` 入口，而我读到的签名（含
+`qphs_thaw_lay`/`qphs_frzc_lay` 这两个 Rust 侧叫 `thaw_mass_kg_m2`/`freeze_mass_kg_m2` 的
+inout 量）与编译进来的 `.mod` 逐字一致 —— 驱动只要 `-I.bld` 编译再链该对象即可，
+不会出现"照源码写却与对象不匹配"的情形（本会话在 `MOD_ForcingDownscaling` 上正是被这个
+坑过一次）。写驱动的最后一道前置风险已排除。
+
+Tested: `nm -g .bld/MOD_PhaseChange.o` 的符号；`gzip -dc .bld/mod_phasechange.mod | strings`
+的哑元名核对。
+Not-tested: 驱动本体（下一轮）。
