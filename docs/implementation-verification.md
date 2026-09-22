@@ -11732,3 +11732,32 @@ Error: Dummy argument 'smp' with INTENT(IN) in variable definition context
 Tested: `MOD_Thermal.F90:1227-1232/1256` 逐行核对；干窗 1 步逐位比对（34 → **33**，
 `f_lfevpa` 消失、四个量级改变）；`cargo test -q -p colm-core --lib -- --test-threads=1`（355 通过）。
 Not-tested: `MOD_Thermal` 本体 dump（单文件编译被 INTENT 冲突挡住，真实选项待查）。
+
+## `MOD_GroundFluxes` 的 8 处**逐条对上**了（该模块可以结案）
+
+上一节把 `fseng`/`fevpg` 的种子缩到"地面通量那一段"。这轮先把
+`MOD_GroundFluxes` 自己的 8 处收缩与 `ground_fluxes.rs` 的 8 个 `mul_add`
+**逐条**对上（上一轮刚学的教训：个数相等不等于形状相等）：
+
+| dump | 上游语义 | Rust |
+|---|---|---|
+| `_8 = FMA(1-fsno, zlnd, fsno*zsno)` | `z0mg`（雪/土粗糙度混合） | `(1.0-fsno).mul_add(zlnd, fsno*zsno)` |
+| `_16 = FMA(q, 0.61, 1.0)` | `1+0.61q` | `VIRTUAL_HUMIDITY_COEFFICIENT.mul_add(q, 1.0)` |
+| `_22 = FMA(dth, 1+0.61qm, (0.61*th)*dqh)` | `dthv` | `temperature_difference.mul_add(one_plus_vapor, vapor_times_potential*humidity_difference)` |
+| `thvstar = FMA(tstar, 1+0.61qm, (0.61*th)*qstar)` | 虚拟位温尺度 | `temperature_scale.mul_add(one_plus_vapor, vapor_times_potential*humidity_scale)` |
+| `_57 = FMA(ur, ur, wc2)` | 对流风速 | `reference_wind.mul_add(reference_wind, convective_velocity.powi(2))` |
+| `_85 = FMA(cgrndl, htvp, raih)` | `cgrnd` | `latent_temperature_derivative.mul_add(htvp, sensible_temperature_derivative)` |
+| `_129 = FMA(·, ·, ·)` / `_137 = FMA(·, ·, ·)` | `tref`/`qref` 那一对 | `(vonkar/heat*ΔT).mul_add(…)` / `(vonkar/moisture*Δq).mul_add(…)` |
+
+**八对八，形状也一一对应** —— `MOD_GroundFluxes` 这条可以结案了。
+（顺带：`ground_fluxes.rs:92-93` 的注释早已把这几处写在注释里，
+说明当时是照着 dump 读出来的；这轮做的是**验证**而不是新发现。）
+
+**推论**：既然 `GroundFluxes` 本体忠实、它的输出 `fseng` 却差 1 ULP，
+那么差异只在**喂给它的量**上：`thm`、`thv`、`qg`、`dqgdT`、`ur`、`z0m`/`z0h`、
+`rss`、`rhoair`。下一轮按这个名单在冠层 `GroundFluxes` 调用点插一个探针
+（`MOD_Thermal.F90:931` 那一次），两侧逐位并排 —— 名单只有 8 个，一次就能定位。
+
+Tested: `MOD_GroundFluxes.opt` 的 8 处与 `ground_fluxes.rs` 的 8 个 `mul_add` 逐条对应；
+`cargo test -q -p colm-core --lib -- --test-threads=1`（355 通过）。
+Not-tested: 冠层 `GroundFluxes` 调用点的入参并排（下一轮，名单 8 个）。
