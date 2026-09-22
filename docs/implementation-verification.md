@@ -14239,3 +14239,25 @@ Not-tested: 上表第 1、2 类本身（未逐条穷尽）。
 Tested: `diff /tmp/gf/iterprobe/fort_iter2.txt /tmp/gf/iterprobe/rust_iter2.txt` 的核对
 （56 行 vs 23 行、标记格式不同）；`/tmp/gf/iterprobe/` 的内容与时间戳。
 Not-tested: 重做的迭代探针（下一轮，若要走"调用时机"这条线）。
+
+### 迭代探针已脚本化：`oracle/scripts/step_iter_probe.sh`
+
+把"重做迭代内部探针"做成一条命令（同样的 `trap ... EXIT` 安全设计：还原源码 → 重编 →
+打印 `git status` 与 `f48 sync`）：
+
+```bash
+bash oracle/scripts/step_iter_probe.sh
+# → /tmp/gf/iterprobe2/fort_iter.txt   上游**逐迭代**（含迭代号 it）：
+#   ITPROBE  <it>  tl  fsenl  fevpl  obu  ustar  cfw
+```
+
+插桩点锚在 `MOD_LeafTemperaturePC_Extended.F90:1063` 的 `DO WHILE (it .le. itmax)` 之内
+（锚点唯一已核，补丁体在临时副本上干跑验证：恰好插入 1 行）。
+
+**Rust 侧对应做法**：在 `crates/colm-core/src/leaf_temperature.rs` 的迭代循环里打印
+**同一组量、同一顺序、同一格式**（含 `iteration` 号），再与 `fort_iter.txt` 逐行比 ——
+要验证的是"迭代次数/每次迭代的进入值是否一致"，即第 223 轮列出的第 1 类残余
+（调用时机/顺序）。
+
+Tested: `bash -n`；锚点唯一性；补丁体临时副本干跑（1 行 ITPROBE）。
+Not-tested: 脚本完整执行 + Rust 侧同格式转储（下一轮）。
