@@ -12659,3 +12659,55 @@ Tested: `window_divergence.py` 的 3 步口径改前/改后对照；`bash /tmp/g
 `NETCDF_DIR=... cargo clippy --workspace --all-targets -- -D warnings`；
 `cargo test --workspace --lib --bins -- --test-threads=1`。
 Not-tested: 湿窗/雪窗上的分步口径（脚本可复用，下一轮补）；`gssha` 那一侧的定位。
+
+## **更正上一轮的结论**：`f_gssun` 并没有"不再出现"——工具按变量名截断误导了记录
+
+上一轮的提交 `0c558bf` 与文档里写着"`f_gssun` 不再出现（三步逐位相同）"。**这是错的**：
+`window_divergence.py` 当时按 `(首次分歧步, 变量名)` 排序，`--top 10` 截出来的只是
+**字母序最靠前的十个**，`f_gssun` 恰好被挤到截断线之外 —— 它一直都在，
+`ndiff` 从 3 降到 2、`maxrel` 仍是 2.99e-16。
+
+真实的账：
+
+| | `f_gssun` | `f_gssha` | 3 步 bitwise |
+|---|---|---|---|
+| 改前 | ndiff 3 / maxrel 2.95e-16 | ndiff 3 / maxrel 2.95e-16 | 580/692 |
+| 改后（现状）| ndiff **2** / maxrel 2.99e-16 | ndiff **2** / maxrel 2.99e-16 | **582/692** |
+
+也就是说 `MOD_LeafTemperature.F90:1040` 的括号**确实**是一处真形状差异（两个变量各
+少了 1 个逐位不同的值 = bitwise +2），但它**只解了三分之一**，剩下的种子还在别处。
+
+### 工具已修：排序改成按 `maxrel` 升序
+
+```python
+rows.sort(key=lambda row: (row[0], row[4]))   # (首次分歧步, maxrel)
+```
+
+并在文档串里写明：**不要按变量名截断看**。改完之后种子候选自己冒到最前面
+（干窗 3 步、现状代码）：
+
+```
+first variable        ndiff       maxabs     maxrel
+    0 f_trad              2   5.6843e-14   2.19e-16   ← 1 ULP
+    0 f_us10m             2   8.8818e-16   2.83e-16   ← 1 ULP
+    0 f_vs10m             2   8.8818e-16   2.83e-16   ← 1 ULP
+    0 f_gssha             2   1.3553e-20   2.99e-16   ← 1 ULP
+    0 f_gssun             2   1.3553e-20   2.99e-16   ← 1 ULP
+    0 f_t_soisno          6   1.1369e-13   4.02e-16
+    0 f_olrg              3   1.1369e-13   4.12e-16
+    0 f_qstar             2   5.4210e-20   4.42e-16
+    …（其余 32 个 maxrel 1.42e-16 … 4.35e+00，均为下游放大）
+```
+
+**这张表改变了下一步的方向**：`f_us10m`/`f_vs10m` 正是 `moninobukm` 的输出，而那个
+模块已经被随机差分关掉（20 个输出 20000/20000 全同）—— 所以它们差 1 ULP 只能来自
+**传给它的实参**（`displa`/`z0m`/`z0h`/`obu`/`um`），这与第 143 轮"种子在装配侧"的
+判断一致，而不是在 `stomata` 里。同时 `f_trad`/`f_tleaf` 也在 1 ULP 一档，
+说明**叶温/地表温度本身**已经被种上了 —— 下一轮从这几个 1 ULP 变量往上追它们的
+共同祖先（建议先 dump 干窗第 0 步 `LeafTemperature` 入口处的 `rb`/`z0m`/`obu`/`um`）。
+
+Tested: 修正后的 `window_divergence.py` 在干窗 3 步数据上的实测（上表）；
+`bash /tmp/gf/dry_ts.sh 3`；`cargo fmt --all --check`；
+`cargo test -q -p colm-core --lib -- --test-threads=1`（355 通过）。
+Not-tested: `0c558bf` 的窗口数据本身（干 21328/湿 32679/雪 33651）不受本次更正影响，
+已在上一条记录里逐条给出。
