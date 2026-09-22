@@ -13449,3 +13449,27 @@ Not-tested: 脚本的完整执行（要重编内核，留给干净上下文）�
 Tested: 脚本三次完整执行（含自动还原、重编、`f48 sync PASS`）；两次锚点唯一性与补丁干跑；
 `rd_opt`/`rb_opt` 的 `:485/:484` 硬编码参数核对。
 Not-tested: 三候选同时打补丁的那一次运行（下一轮）。
+
+### 入口 A 第 195 轮：三份候选**同时**打标记，**一条都没命中** —— 下一个诊断已内置
+
+`oracle/scripts/step0_arg_probe3.sh` 对 `main/MOD_LeafTemperature.F90`、
+`extends/interception/MOD_LeafTemperature_Extended.F90`、
+`extends/interception/MOD_LeafTemperaturePC_Extended.F90` 各插一条 `ARGPROBE_{MAIN,EXT,PC}`
+（插在 `CALL moninobukm(hu_,ht_,hq_,` 之前，逐份核对锚点唯一），重编、跑干窗 1 步：
+**三份都没命中**，而脚本照旧自动还原三份源码、重编、`f48 sync PASS`。
+
+已知约束：
+* `moninobukm` 的调用者**只有四份文件**：`main/MOD_LeafTemperature.F90`、
+  `main/MOD_LeafTemperaturePC.F90`、`extends/interception/MOD_LeafTemperature_Extended.F90`、
+  `extends/interception/MOD_LeafTemperaturePC_Extended.F90`（`MOD_GroundFluxes.F90` **不调**它）；
+* Makefile 只编后两份（`MOD_LeafTemperature.o ← …_Extended.F90`、
+  `MOD_LeafTemperaturePC.o ← …PC_Extended.F90`），这两份**都已被打过补丁**；
+* CBL 关、`rd_opt = rb_opt = 3` 是硬编码参数（`:485`/`:484`），所在支**应当**执行。
+
+所以要么"叶温求解在干窗第 0 步根本没被调用"，要么"补丁没进被运行的那个二进制"。
+脚本已内置判据：**打补丁后先 `strings kernels/default/colm.x | grep -c ARGPROBE_`**
+（在还原之前），若为 0 就是构建/链接层的问题，不为 0 则说明那两支确实没执行。
+
+Tested: `step0_arg_probe3.sh` 完整执行（三份补丁、重编、跑一步、无命中、自动还原、f48 PASS）；
+`grep -rln "CALL moninobukm"` 确认调用者只有四份文件；Makefile 的两条映射规则。
+Not-tested: 下一轮的 `strings` 判据（脚本已内置，未跑）。
