@@ -14619,3 +14619,31 @@ $ wc -l … → 11
 
 Tested: `step0_arg_probe3.sh`（修好后）完整跑通：标记 3、完成标志 1、11 行 `ARGPROBE_EXT`、f48 PASS。
 Not-tested: Rust 侧同位置对照（下一轮）。
+
+## 入口 A 第一次真正两侧对照：`hu_/ht_/hq_/obu` **在 16 位有效数字上完全一致**
+
+Rust 侧临时探针（插在 `leaf_temperature.rs:411` 的 `CanopyMoninObukhovInput` 构造处，打印
+`wind_height/temperature_height/humidity_height/obukhov/z0mv/stability_wind`）跑 `dry_ts.sh 1`，
+与上游那 11 行对照：
+
+```
+上游  ARGPROBE_EXT 0.6000000000000000E+01 … -0.1084670892101044E+02
+Rust  PROBE_RB     6.0 6.0 6.0 -10.846708921010444 0.12057264881491078 4.670838949913892
+上游  ARGPROBE_EXT 0.6000000000000000E+01 … -0.1144412965630008E+02
+Rust  PROBE_RB     6.0 6.0 6.0 -11.444129656300083 …
+```
+
+`hu_=ht_=hq_=6.0` 两侧一致；`obu` 也一致到**打印精度所及的最后一位**
+（上游 `-10.84670892101044` 是 `-10.846708921010444` 四舍五入到 16 位有效数字的结果）。
+另外上游 11 行、Rust 10 行 —— **调用次数不同**（值得下一轮看：多出的那一次是哪个分支）。
+
+**但这条对照还不足以下"逐位相同"的结论**：上游探针用的是 `E24.16`（16 位有效数字），
+末位差 1 ULP 会被四舍五入掩盖。**下一轮第一步**：把 `step0_arg_probe3.sh` 的打印格式换成
+**位型**（`WRITE(*,'(A,4Z17)') 'ARGPROBE_…', TRANSFER(<量>, 0_8), …` —— 注意不能用 `B()`
+函数，那段代码插在 vendor 模块内部，只能靠 `TRANSFER` 内联），再重跑对照；同时查 11 vs 10
+的调用次数差异。
+
+（临时加在 `leaf_temperature.rs` 的 `eprintln!` 已回退，工作树干净。）
+
+Tested: Rust 侧临时探针 + `dry_ts.sh 1`（10 行 `PROBE_RB`）与上游 11 行的对照；`git checkout` 回退。
+Not-tested: 位型级对照（格式待升级）；11 vs 10 的差异原因。
