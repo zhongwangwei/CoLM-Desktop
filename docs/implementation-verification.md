@@ -13357,3 +13357,13 @@ Tested: `…_Extended.F90:611-619` 与 `canopy_roughness.rs:14-64` 的结构对�
 `grep egvf` 在 Rust 侧无命中（确认命名不同、非缺失）。
 Not-tested: `egvf` 与 `canopy_roughness` 的**逐位**等价性（该模块跨语句结构不同，
 只能靠窗口与它自己的差分证据，本会话未新做）。
+
+## 地面动量粗糙度 `z0mg` 已核（形状一致）
+
+上游 `…_Extended.F90:606`：`z0mg = (1.-fsno)*zlnd + fsno*zsno`
+Rust `ground_fluxes.rs:95-98`：`(1.0-fsno).mul_add(soil_roughness, fsno*snow_roughness)`
+—— 外层乘积收进 FMA、内层 `fsno*zsno` 先算，与 GCC 对该式的收缩一致（该文件的
+注释块里已列过同族 FMA，此处只做逐句确认）。无需改动。
+
+Tested: `…_Extended.F90:606` 与 `ground_fluxes.rs:95-98` 对照。
+Not-tested: none.
