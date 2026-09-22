@@ -14360,3 +14360,32 @@ $ wc -l /tmp/gf/gtprobe/gt_in.txt
 
 Tested: `step_ground_probe.sh` 完整执行（0 行、自动还原、f48 PASS）；四次插桩结果汇总。
 Not-tested: 初始 restart 与第 1 步 restart 的对比（下一轮，一步定性）。
+
+## **更正第 229 轮的重估**：第 0 步**确有物理在跑**（36 个状态量被改写）
+
+第 229 轮根据"四次插桩 0 命中"推断"第 0 步没算物理、种子在 restart 映射"，**这一步推断
+被下面的一步实验否掉了**：
+
+```
+初始 restart（2008-001-00000） vs 内核第 1 步 restart（2008-001-01800）
+  differing variables: 36     （alb 4 个元素、emis/extkb/extkd/fh/fm/fq/fwvet_snow/gs0sun/gs0sha/hk …）
+```
+
+状态被大量改写 ⇒ **物理确实在跑**，只是**不由我插桩的那四处调用**。于是第 229 轮那条
+"种子在 restart 映射"的推断**不成立**，撤回。
+
+**更可能的原因（本会话反复踩过的那一类）**：地面探针**没有做"补丁是否进了被运行的二进制"
+的检查**。叶温那三次探针都做了（`strings kernels/default/colm.x | grep -c ARGPROBE_` 得到
+2/2/3，证明补丁确实进了二进制），而 `step_ground_probe.sh` 缺这一步 —— 于是"0 命中"有两种
+解释（源码里那条调用真没跑 / 改的文件不是被编的那份），而本轮无法区分。
+
+**下一轮第一件事**（很小的改动）：给 `step_ground_probe.sh` 补上与叶温探针同款的
+`strings … | grep -c GTPROBE_IN` 检查（在还原之前），再重跑一次 ——
+为 0 则是"改错文件"（改用 Makefile 里 `MOD_Thermal.o` 真正对应的那份），不为 0 才是
+"那条调用在第 0 步没执行"。
+
+（教训重申：**任何插桩探针都必须先证明补丁进了被运行的二进制**；这条已在叶温探针里落实，
+本轮的地面探针漏了，直接导致一次错误的"重大重估"。）
+
+Tested: 初始 restart 与第 1 步 restart 的逐位比对（36 个变量被改写）。
+Not-tested: 地面探针的 `strings` 检查与重跑（下一轮）。
