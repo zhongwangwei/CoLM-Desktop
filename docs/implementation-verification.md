@@ -11889,3 +11889,87 @@ Tested: `grep` 全仓库确认 `DEF_USE_SNICAR` 与 `snow_layer_absorption_w_m2`
 落点；端到端 `colm-rs` 拒绝信息；`colm-init/tests/native_pipeline.rs:85` 的既有用法核对
 （因此不在 `colm-init` 里拦）；`cargo test -q -p colm-runtime --lib -- --test-threads=1`（73 通过）。
 Not-tested: SNICAR 支路本身（**故意**：拒绝就是不跑）。
+
+# 当前状态总表（截至本轮）
+
+这份文档已经很长，这一节把"移植到什么程度、还剩什么"收在一处，便于审计。
+**每条都只写有实测依据的结论**，细则见对应小节。
+
+## 一、可达配置空间：已完整覆盖
+
+`colm-rs` 能跑的编排是 **SinglePoint + LCT + patchtype 0（土面）**，在这个空间内：
+
+| 维度 | 支持情况 |
+|---|---|
+| 土水方案 | `DEF_USE_VariablySaturatedFlow` on/off × `DEF_USE_Campbell_SOIL_MODEL` on/off，四条组合都在 |
+| 产流方案 | `DEF_Runoff_SCHEME` 0（TOPMODEL）/ 2（XinAnJiang）/ 3（Simple VIC） |
+| 降水相态 | I/II/III 三档 |
+| 土热导率 | 八档全在 |
+| 冠层雪 | `DEF_VEG_SNOW` on/off 都在（默认 on） |
+| 植物水力 | `DEF_USE_PLANTHYDRAULICS` on/off |
+| 近地层 | `DEF_USE_CBL_HEIGHT` on/off（on 时走 Large Eddy，缺 `forc_hpbl` 会显式报错）|
+| 地类分类 | IGBP / USGS（编译期选择，`--land-cover`） |
+| 其余 namelist | 见"三、显式拒绝"与"四、已证明无影响" |
+
+## 二、验证层级：黄金窗口过关
+
+| 判据 | 结果 |
+|---|---|
+| tier0（逐位） | **全部通过** |
+| tier1（1e-12 相对） | **全部通过** |
+| tier2（1e-7 绝对+相对） | 干 17 / 湿 68 / 雪 79 个变量超差，**全部在 tier2** |
+| tier3（统计等价） | `oracle --bin tier3-check` 在湿窗基线上通过 |
+| history 变量 | `UNFILLED` 为空（没有"声明了却填不出"的量） |
+
+第二个配置（Campbell + VSF off）用 `oracle/scripts/compare_second_config.sh` 两侧对照：
+干 **16** / 湿 **66** / 雪 **79**，与黄金配置（17/68/79）**齐平**。
+
+## 三、显式拒绝（上游有、本仓库不跑）
+
+| 开关/分支 | 拦在哪 | 依据 |
+|---|---|---|
+| PFT / PC 子网格 | `physics.rs` | 只装配 LCT |
+| `DEF_USE_IRRIGATION` | `physics.rs` | 喷灌率由物候逐步算出 |
+| `DEF_Runoff_SCHEME = 1`（VIC） | `physics.rs` | 需要外部 per-patch 参数文件 |
+| `DEF_SPLIT_SOILSNOW` | `physics.rs` + `colm-init` | 水分侧只做了非 split |
+| `DEF_USE_SNICAR` | `physics.rs` | 时间步里没有 SNICAR 支路（冷启动有） |
+| `DEF_Optimize_Baseflow` | `physics.rs` | 预热期的反解没做（`scale_baseflow` 的**读取**已实现） |
+| patchtype ≠ 0（湖/冰川/城市/海洋） | `assembly.rs` | standard-LCT 土面装配 |
+| HYPERSPECTRAL 冷启动 | `colm-init` | 上游没有可核对的 211 波段映射 |
+
+## 四、已证明"读了也没影响"的开关（不是缺口）
+
+`DEF_SUBGRID_SCHEME`（纯声明镜像）、`DEF_Forcing_Interp_Method`（SinglePoint 下
+`bilinear` 被上游自己改回 `arealweight`）、`DEF_CheckEquilibrium`（只打印）、
+`DEF_HIST_WriteBack`/`DEF_HIST_CompressLevel`（只影响 NetCDF 写法）、
+`DEF_USE_DiagMatrix`（只在 BGC 下用）。
+
+## 五、唯一未闭合的数值项：干窗第 0 步的 1 ULP 分布
+
+1 步 TIMESTEP 口径下 33 个变量各差 ~1e-15 相对（**全部是 tier2**）。
+已经用插桩与开关分区排除的边界：
+
+1. 不在 PHS；2. 不在 `DEF_VEG_SNOW` 分支本身（它只放大）；3. 不在水分步
+（`WLIQ` 差而 `SMP`/`HK` 逐位一致）；4. 不在扩散求解本体；
+5. 不在叶温迭代的收敛后收尾（`dtl→0` 时惰性）；6. 不在冠层近地层廓线
+（`psi`/`fmtop`/`fht`/`fqt`/`phih`/`fh2m`/`fq2m` 的 `zldis` 与粗糙度搭配逐条核过一致）；
+7. 不在 `MOD_GroundFluxes` 本体（8 处逐条对上）。
+
+还剩两个方向：**地面通量那一段里无条件执行的表达式**，以及**冠层 MO 迭代的
+随机差分驱动**（`f_fseng` 的差自始至终是 6.8212e-13，跨 16 处改动一字不变 ——
+说明它是**形状**问题而非少融合）。已经改对但不动的 16 处收缩都留着；
+`dthv`/`thvstar`/`thv` 三处**有 dump 支持却让窗口从 17 变 18**，已按判据链回退并记录。
+
+## 六、已知但不在判据内的项
+
+* `MOD_LeafTemperature` 的 61 处收缩只核了约 20 处（其余在 O3/双叶/PC 分支上）；
+* 不可达支路的收缩没有逐条核：`twostream_mod` 72、`soilwater` 23、`water_2014` 13、
+  `albocean` 8、`snowwater_snicar` 8（后两者现在被拒绝覆盖为不可达）；
+* `MOD_Thermal` 本体没有 dump（单文件编译被 `:1036` 的 INTENT 冲突挡住）。
+
+Tested: 本节只汇总前文已实测的结论；三个黄金窗口与第二个配置的四组数字取自本轮及
+最近几轮的 `golden-compare` 输出；`cargo test --workspace --lib --bins -- --test-threads=1`；
+`cargo clippy --workspace --all-targets -- -D warnings`；两处 `cargo fmt --all --check`；
+`cargo test -q -p oracle`；`cargo run -q -p xtask -- check-gui`；
+`python3 oracle/scripts/test_upstream_f48_sync.py`。
+Not-tested: 本节没有引入新实测，只是汇总。
