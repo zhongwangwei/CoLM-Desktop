@@ -68,7 +68,10 @@ for spec in files:
     line_start = src.rindex("\n", 0, at) + 1
     indent = src[line_start:at]
     args = "hgt_u,hgt_t,hgt_q,obu" if tag == "ACC" else "hu_,ht_,hq_,obu"
-    stmt = f"{indent}WRITE(*,'(A,4E24.16)') 'ARGPROBE_{tag} ', {args}\n"
+    # 位型打印：E24.16 只有 16 位有效数字，末位 1 ULP 会被舍入掩盖。
+    # 这段代码插在 vendor 模块内部，没有辅助函数可用，只能内联 TRANSFER。
+    bits = ", ".join(f"TRANSFER({a}, 0_8)" for a in args.split(","))
+    stmt = f"{indent}WRITE(*,'(A,4Z17)') 'ARGPROBE_{tag} ', {bits}\n"
     open(path, "w").write(src[:line_start] + stmt + src[line_start:])
     print(f"   patched {tag}")
 PYEOF
