@@ -12550,3 +12550,51 @@ Tested: `lt.opt` 第 1158-1159/1969/2415 处与源码 `MOD_LeafTemperature.F90:4
 `cargo test -q -p colm-core --lib -- --test-threads=1`（355 通过）。
 Not-tested: 湿窗/雪窗上这三处的单独影响（只跑了干窗）；更细的窗口口径（下一轮）；
 `lt.opt` 里其余收缩处。
+
+## 新增**分步分歧**口径（`oracle/scripts/window_divergence.py`），并用它给 1 ULP 之争收官
+
+上一轮的结论是"`tier2 变量数` 太粗，先补更细的口径"。这一轮补上了
+`oracle/scripts/window_divergence.py`：两侧 history 逐变量给**首次分歧步**、
+逐位不同元素数、最大绝对差、最大**相对**差，并给出全局 `first divergence step`
+与 `bitwise identical` 比例。用法：
+
+```
+python3 oracle/scripts/window_divergence.py <内核 history.nc> <Rust history.nc> [--top N]
+```
+
+### 干窗 3 步实测：种子在**第 0 步就有**，44 个变量
+
+```
+$ bash /tmp/gf/dry_ts.sh 3      # 两侧各跑 3 步，HIST_FREQ=TIMESTEP
+$ python3 oracle/scripts/window_divergence.py /tmp/gf/dryts/out/CN-Cng/history/*.nc \
+      /tmp/gf/dryts/colm-rs_hist_2008-01.nc
+first divergence step: 0
+variables differing: 44; bitwise identical: 580/692 (83.8150%)
+  逐变量 maxrel 最大的是 f_fsenl 1.47e-13、f_fevpl 1.55e-14、f_fsena 1.00e-14 …
+```
+
+**所有 44 个变量的 `first` 都是 0** —— 差异在第一条 history 记录（第 1 步之后）就存在，
+后面两步只是同一批差异继续存在（`ndiff` = 3）。这条把"干窗第 0 步的 1 ULP 种子"
+从模糊说法变成了可复核的数字。
+
+### 用它给 `MOD_LeafTemperature` 那三处 1 ULP 之争收官：**测不出谁更近**
+
+把三处 FMA 再装回去，用同一套口径量 3 步：
+
+| 变体 | 3 步 bitwise | 11 天 bitwise | 11 天 ot_vars | `f_fsenl` maxabs | `f_fseng` maxabs | `f_fh` maxabs |
+|---|---|---|---|---|---|---|
+| 回退（现状）| **580/692** | 21326 | **17** | **5.6133e-13** | 3.2969e-12 | 4.4409e-15 |
+| 三处 FMA | 574/692 | **21360** | 18 | 6.3283e-13 | **1.4779e-12** | **1.3323e-15** |
+
+两边各有胜负（3 步 bitwise 回退版好、11 天 bitwise 融合版好；逐变量量级互有升降），
+而且两版的 `first divergence step` 都是 0、差异变量集合完全相同 —— **说明该变体
+对第 0 步种子没有任何影响，后面所有的差别都是那 1 ULP 经混沌放大后的抖动**。
+
+**处置：维持回退**（与 `16f9b26` 的先例一致，也不是因为窗口更好，而是因为
+"窗口口径无法裁决"时不引入未被证据支持的改动）。真正该修的是第 0 步那 44 个变量；
+把它修掉之后，这类 1 ULP 的形状问题会自动变得无所谓 —— 这也是下一轮的方向：
+用本工具逐变量盯 `f_fsenl`（maxrel 1.47e-13）与 `f_fevpl`，配合调用点实参 dump 定位。
+
+Tested: `oracle/scripts/window_divergence.py` 在干窗 1 步/3 步、两个变体上的实测；
+`bash /tmp/gf/dry_ts.sh 3`；`cargo test -q -p colm-core --lib -- --test-threads=1`。
+Not-tested: 湿窗/雪窗上的同口径（脚本已可复用）；第 0 步种子的定位（下一轮）。
