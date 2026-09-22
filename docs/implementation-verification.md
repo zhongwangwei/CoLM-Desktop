@@ -13820,3 +13820,40 @@ Tested: `Makefile` 的 `MOD_PhaseChange.o:` 规则与 `strings .bld/MOD_PhaseCha
 `main/MOD_PhaseChange.F90:11-22` 的 `PUBLIC`/`SUBROUTINE meltf`；Rust 侧
 `phase_change.rs:143` 的对应入口。
 Not-tested: `meltf` 的差分驱动（下一轮）。
+
+## `meltf` 差分驱动的**实参表**（下一轮直接照抄）
+
+上游签名（`main/MOD_PhaseChange.F90:22-33`，33 个实参，**顺序即驱动调用顺序**）：
+
+```fortran
+SUBROUTINE meltf (patchtype, is_dry_lake, lb, nl_soil, deltim, &
+                  fact, brr, hs, hs_soil, hs_snow, fsno, dhsdT, &
+                  t_soisno_bef, t_soisno, wliq_soisno, wice_soisno, imelt, &
+                  scv, snowdp, sm, xmf, porsl, psi0, &
+                  bsw, theta_r, alpha_vgm, n_vgm, L_vgm, &
+                  sc_vgm, fc_vgm, dz, &
+                  qphs_thaw_lay, qphs_frzc_lay)
+```
+
+intent 已核：`patchtype`/`nl_soil`/`lb`/`is_dry_lake` 为 in；`deltim`、`fact(lb:)`、`brr(lb:)`、
+`hs`/`hs_soil`/`hs_snow`/`fsno`/`dhsdT`、`t_soisno_bef(lb:)`、`scv`/`snowdp`、`sm`/`xmf`、
+`porsl(1:)`、`psi0(1:)`、`bsw(1:)`、`theta_r(1:)`、`alpha_vgm`/`n_vgm`/`L_vgm`/`sc_vgm`/`fc_vgm`、
+`dz(1:)` 为 in；**inout**：`t_soisno(lb:)`、`wice_soisno(lb:)`、`wliq_soisno(lb:)`、
+`scv`、`imelt(lb:)`、`sm`、`xmf`、`qphs_thaw_lay`、`qphs_frzc_lay`。
+
+Rust 对应结构 `PhaseChangeInput`（`phase_change.rs:47+`）已见的字段：
+`patch_type`、`is_dry_lake`、`time_step_seconds`、`fact_seconds_per_j_m2_k`、
+`residual_heat_flux_w_m2`、`snow_layer_absorption_w_m2`、`surface_heat_flux_w_m2`、
+`soil_heat_flux_w_m2`、`snow_heat_flux_w_m2`、`snow_cover_fraction`、
+`surface_heat_flux_temperature_derivative_w_m2_k`、`previous_temperature_k`、`temperature_k`、
+`liquid_water_kg_m2`、`ice_water_kg_m2`、`snow_water_equivalent_kg_m2`、`snow_depth_m`、
+`snow_layers`、`split_soil_snow`、`supercool_water`、`soil_layer_thickness_m`、
+`soil_porosity`、`soil_residual_water`…（其余字段下一轮读全）。
+
+**驱动骨架**：`lb = 1 - snow_layers`（与内核一致），`nl_soil` 取小值（如 5 层）加快；
+`patchtype`/`is_dry_lake` 作**可遍历配置**（0/1/2/3/4 × T/F）；`brr` 用 `fact` 之外的独立随机量
+（它在上游是 `tridia` 之后的余项，驱动里直接抽即可）；输出比对
+`t_soisno`/`wice_soisno`/`wliq_soisno`/`scv`/`imelt`/`sm`/`xmf` 的位型。
+
+Tested: `main/MOD_PhaseChange.F90:22-175` 的签名与 intent 逐条核对；`phase_change.rs:47-76` 的字段读取。
+Not-tested: 驱动本体与差分运行（下一轮）。
