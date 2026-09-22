@@ -33,10 +33,16 @@ fn snicar_cold_bridge_restores_source_slots_and_folds_only_temporary_snow() {
                 assert!(state.layer_absorption[band][incident][..5 - layers]
                     .iter()
                     .all(|x| *x == 0.0));
+                // 混入式的**收缩方向**（`MOD_Albedo.F90:2048-2051`，GIMPLE
+                // `albland` 第 5 处）：地面那一支的乘积先舍入、雪面那一支被吸收
+                // —— `FMA(雪面, frsn, 地面*(1-frsn))`。这里不能按"先算两项再加"
+                // 写，那会差 1 ULP。
                 assert_eq!(
                     state.ground.ground[band][incident],
-                    (1.0 - fraction) * state.ground.soil[band][incident]
-                        + fraction * state.ground.snow[band][incident]
+                    state.ground.snow[band][incident].mul_add(
+                        fraction,
+                        (1.0 - fraction) * state.ground.soil[band][incident],
+                    )
                 );
                 if depth == 0.0 {
                     assert_eq!(state.ground.snow[band][incident], 1.0);

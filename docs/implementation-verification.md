@@ -10550,3 +10550,32 @@ Rust 的落点是 `radiation.rs::mix_ground_albedo`（被 `surface_optics.rs:223
 Tested: `MOD_Albedo.F90:2047-2051` 逐行核对 + `albland` 单独 dump 的第 5 处；
 三个黄金窗口三口径 A/B；`cargo test -q -p colm-core --lib -- --test-threads=1`（354 通过）；
 `cargo fmt --all --check`；`cargo clippy -q -p colm-core --all-targets -- -D warnings`（干净）。
+
+### 连带修好一条**编码旧算式**的测试
+
+`crates/colm-init/src/snicar_tests.rs` 里那条桥接测试把混入式写成
+
+```rust
+(1.0 - fraction) * soil + fraction * snow
+```
+
+—— 那是**移植件旧的（不融合）算式**，不是内核的。改成与
+`mix_ground_albedo` 一致的 `snow.mul_add(fraction, (1-fraction)*soil)` 后
+`cargo test -p colm-init --lib -- --test-threads=1` **156/156 通过**。
+
+（这是本会话第三次遇到"测试钉住了旧的错误行为"：前两次是
+`dry_soil_uses_dry_conductivity_for_all_schemes` 与
+`equilibrium_soil_column_stays_at_its_fortran_surface_balance`。）
+
+### 一个操作上的坑（记下来）
+
+我手动重跑 `cargo test -q -p colm-init --lib`（**没带** `--test-threads=1`）
+时出现 **32 个失败**，而带 `--test-threads=1` 只失败 1 个（就是上面那条真问题）。
+也就是说 `colm-init` 的 lib 测试**并行跑会大面积互相干扰**（约 31 条），
+这是**先于本轮就存在**的问题：同一 crate 内的测试共享状态。
+所以验收里 `--workspace --lib --bins -- --test-threads=1` 这个 `--test-threads=1`
+是**必须**的；单独重跑某个 crate 时也要带上。
+
+Tested: `cargo test -p colm-init --lib -- --test-threads=1`（156 通过）；
+不带该标志的对照（32 失败，证明是并行干扰）；`cargo test -q -p colm-core --lib`（354 通过）；
+`cargo fmt --all --check`。
