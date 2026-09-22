@@ -13701,3 +13701,41 @@ Not-tested: none（流程本身）。
 
 Tested: `MOD_GroundTemperature.F90:241-246` 与 `ground_temperature.rs:146-158` 的逐句对照。
 Not-tested: 该处分母的收缩是否有实测收益（需按流程 A/B）。
+
+## 本会话（第 158-204 轮）产出索引
+
+会话很长，这里按性质归类，便于复查时按主题定位（每条都有对应的提交与本文档小节）。
+
+**A. 新增差分结案（与内核对象逐位相同）**
+
+| 目标 | 证据 |
+|---|---|
+| `MOD_FrictionVelocity` | 20 输出 20000/20000（`compare_moninobukm.sh`）|
+| `MOD_Qsadv` | 4 输出 20000/20000（`compare_qsadv.sh`）|
+| `soil_hcap_cond` | 8 档 × 5000 组、2 输出 40000/40000（`compare_soilthermal.sh`）|
+| `MOD_TurbulenceLEddy` | 17 输出 20000/20000（`compare_leddy.sh`，本地算例到不了）|
+| `MOD_ForcingDownscaling`（四入口）| 风 4 输出、简单支 11 输出 × 4 配置、full 短波 11 输出 × 两套阴影表，全部 20000/2000 组逐位相同 |
+
+**B. 抓到的真缺陷（已修 + 实测）**
+
+风场降尺度乘法结合顺序（8.9% 样本）· 简单短波 `cosill` 漏收缩 · longwave 方案 I 结合顺序（31% 样本 1–2 ULP）· full 短波三处漏收缩 · `gssun` 除法分组（步级 +2）· `rbsun = rb/laisun` · `us10m` 顺序 · `olrg` 结合+FMA（步级 +3）· `gbh2o` 顺序。
+
+**C. 重大更正（都曾被写进过记录）**
+
+1. 内核编的是 `extends/interception/*_Extended.F90`，不是 `main/`（唯一例外：`MOD_GroundTemperature`）；
+2. `window_divergence.py` 初版按变量名排序，导致"`f_gssun` 不再出现"的误报（已改按 `maxrel` 升序）；
+3. 独立编译的 dump **不代表**内核二进制的收缩；DWARF 行号又不能逐句归因 —— 故收缩只能逐处实测（6 处"dump 有、实测不支持"：`clai`/`thvstar`/`cfw`/`fgrnd`/`lfevpa`/`gt` 土壤支）。
+
+**D. 新增工具（都在 `oracle/scripts/`）**
+
+`window_divergence.py`（步级口径）· `restart_divergence.py`（restart 口径，最快）·
+`step0_arg_probe.sh` / `step0_arg_probe3.sh`（内核插桩探针，自带 vendor 还原 + f48 自检）。
+
+**E. 最后开放项**
+
+干窗第 0 步 1 ULP 族：已证明**不是**相似性调用实参（第 196 轮五次探针 + `strings` 计数），
+落点在能量步的温度更新（restart 侧 `t_soisno`/`tleaf` 恰 1 ULP）。靶子与筛法见
+"复制粘贴流程"一节；雪窗另有 `(1-fsno)` 加权的候选。
+
+Tested: 本索引每行都对应本文档前面小节的实测输出；提交范围 `a45d55d..481e453`。
+Not-tested: none（索引本身）。
