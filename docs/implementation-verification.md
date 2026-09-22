@@ -14164,3 +14164,25 @@ first divergence step: 0
 Tested: `dry_ts.sh 1` + `window_divergence.py`（33/234）与 `dry_ts.sh 3`（44/585）的对照；
 `dry_ts.sh 1` + `restart_divergence.py`（19/68，逐行与第 200 轮一致）。
 Not-tested: none（本轮只做口径确认）。
+
+## `rib`（restart 口径最锐的那个）源码级一致
+
+restart 19/68 里 `rib` 的 `maxrel` 最小（1.922e-16，1 个值），是种子最锐的指示器。
+`MOD_Vars_1DAccFluxes.F90:2786-2787`：
+
+```fortran
+r_rib_e = r_zol_e /vonkar * r_ustar2_e**2 / (vonkar/r_fh_e*um**2)
+r_rib_e = min(5.,r_rib_e)
+```
+
+Rust `history_diagnostics.rs:208-210`：
+`(zol / VON_KARMAN * friction_velocity.powi(2) / (VON_KARMAN / heat * wind.powi(2))).min(5.0)`
+—— **结合顺序、`powi(2)` 与 `min(5.)` 全部一致**。所以 `rib` 的那 1 ULP 来自它的**入参**
+（`zol`/`ustar2`/`fh`/`um`），落在同一个"上游族"里，而不是这一句。
+
+同文件同段落的 `us10m`/`vs10m` 本轮之前已按源码改过（结合顺序），`rib` 现在也核完 ——
+即 `MOD_Vars_1DAccFluxes` 这段累加器诊断量的形状已全部对过，剩下的 1 ULP 只能出自
+喂给它们的相似性状态。
+
+Tested: `MOD_Vars_1DAccFluxes.F90:2786-2787` 与 `history_diagnostics.rs:208-210` 的逐句对照。
+Not-tested: `zol`/`ustar2`/`fh`/`um` 的上游来源（即种子本体的定位）。
