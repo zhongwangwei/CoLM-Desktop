@@ -12711,3 +12711,66 @@ Tested: 修正后的 `window_divergence.py` 在干窗 3 步数据上的实测（
 `cargo test -q -p colm-core --lib -- --test-threads=1`（355 通过）。
 Not-tested: `0c558bf` 的窗口数据本身（干 21328/湿 32679/雪 33651）不受本次更正影响，
 已在上一条记录里逐条给出。
+
+## **重大更正**：内核编译的不是 `main/MOD_LeafTemperature.F90`，而是 `extends/interception/` 那一份
+
+本轮为了给 `MOD_Thermal`（一直拿不到 dump 的模块）补 dump，直接照着内核产线对象反查
+来源，结果发现**过去所有 `MOD_LeafTemperature`/`MOD_Thermal` 的 dump 都取错了文件**：
+
+```
+$ strings .bld/MOD_LeafTemperature.o | grep '\.F90'
+extends/interception/MOD_LeafTemperature_Extended.F90
+$ strings .bld/MOD_Thermal.o | grep '\.F90'
+extends/interception/MOD_Thermal_CanopyPhase_Extended.F90
+$ grep -n "MOD_LeafTemperature.o:" vendor/CoLM202X/Makefile
+641:MOD_LeafTemperature.o: extends/interception/MOD_LeafTemperature_Extended.F90 …
+647:MOD_Thermal.o: extends/interception/MOD_Thermal_CanopyPhase_Extended.F90 …
+```
+
+`main/MOD_LeafTemperature.F90` 有 1370 行、`extends/interception/MOD_LeafTemperature_Extended.F90`
+有 **1965** 行；收缩点数量也不一样：**错文件 52 处，对文件 80 处**。也就是说
+`/tmp/gf/r144/lt.opt`（以及当年据此做的那些"逐句对照"）是**另一个文件**的 dump。
+`main/MOD_Thermal.F90` 单文件编不过（`:924`/`:1036` 的 `dheatl` 标量-数组秩不匹配）
+也就不奇怪了 —— 内核根本没用它。
+
+### 对的那份 dump 已经拿到，配方记在这里
+
+```bash
+cd vendor/CoLM202X
+gfortran -c -O2 -fdefault-real-8 -ffree-form -cpp -ffree-line-length-0 \
+  -fallow-argument-mismatch -Iextends/interception -I.bld -Iinclude -Imain -Ishare \
+  extends/interception/MOD_LeafTemperature_Extended.F90 \
+  -J/tmp/gf/r166 -fdump-tree-optimized=/tmp/gf/r166/lt_ext.opt -o /tmp/gf/r166/lt_ext.o
+# → 80 处收缩；`gssun`（:1320）与 `main/` 同型，`clai`（:542）/`thvstar`（:1256）同型，
+#   但 `cfw`（:1078）**不同型**：对文件写的是 `…*wet_cond_cfw + …`，而 `wet_cond_cfw = wet_area_cfw/rb`
+#   是另一条语句先算出来的 —— 拿 `main/` 的 `(lai+sai)/rb` 去推它的括号是**无效推理**。
+```
+
+### 但"对文件 + 对 dump"仍然没有说服力：步级口径把它否掉了
+
+拿对文件 dump 里两处确凿的 `.FMA`（`clai`：`lt_ext.opt:1788`；`thvstar`：`lt_ext.opt:3389`
+`= .FMA(1+0.61*qm, tstar, (0.61*th)*qstar)`）落回 Rust，用步级口径量：
+
+| 代码 | 3 步 bitwise | `f_gssun`/`f_gssha` ndiff | `f_t_soisno` ndiff |
+|---|---|---|---|
+| 现状（只有 `gssun` 那处修复）| **582/692** | **2** | 6 |
+| 再落 `clai`+`thvstar` 两处 FMA | 574/692 | 3 | 7 |
+
+**两个口径同时变差**，而且这是第 0 步的步级计数、不是 11 天窗口的混沌抖动。
+所以即使是"对文件"的 dump，其收缩选择**也不能直接当成内核二进制的行为**：
+独立编译（我的 flag 集）与 `kernels/default` 的实际构建（`include/Makeoptions` 那一套）
+可以给出不同的收缩。**裁决只能靠步级口径实测**，两处均已回退。
+
+### 下一轮
+
+1. `MOD_LeafTemperature_Extended.F90` 的 80 处收缩要从**对文件**重扫（此前按错文件的
+   52 处做过映射，行号与 `cfw` 那一族都要重来）；
+2. 想彻底解决"dump 与二进制不一致"，应当从 `kernels/default/colm.x` 本体反汇编取形状
+   （`objdump -d` 找 `fmadd`），而不是另编一份；
+3. `MOD_Thermal` 要用 `extends/interception/MOD_Thermal_CanopyPhase_Extended.F90` 取 dump，
+   `main/MOD_Thermal.F90` 那条"编不过"的记录本身是走错了文件。
+
+Tested: `strings .bld/MOD_LeafTemperature.o`/`MOD_Thermal.o` 的来源核对；`Makefile:641/647`；
+对文件的 dump 生成（80 处收缩）；`clai`/`thvstar` 落回后 `bash /tmp/gf/dry_ts.sh 3` +
+`window_divergence.py` 的步级实测（574 vs 582）；两处已回退。
+Not-tested: 对文件 80 处收缩的逐条重扫；从 `colm.x` 反汇编取形状（下一轮）。
