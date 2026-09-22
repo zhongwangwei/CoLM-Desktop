@@ -12044,3 +12044,32 @@ Tested: `oracle/scripts/compare_moninobukm.sh`（两侧 20000 组、10 个输出
 `cargo test -q -p colm-core --lib -- --test-threads=1`。
 Not-tested: `-ffp-contract` 关闭时的上游行为（驱动一侧刻意用内核默认）；
 `moninobukm_leddy`（CBL 分支，本机算例不走）。
+
+## 把差分扩到整个 `MOD_FrictionVelocity`：**20 个输出 20000/20000 全同**
+
+上一节只驱动了 `moninobukm`（10 个输出）。这一轮把同一个驱动扩到该模块的**全部公开例程**
+（`oracle/scripts/compare_moninobukm.sh`，两侧仍是同一串 LCG、20000 组）：
+
+| 例程 | 输出 |
+|---|---|
+| `moninobukm` | `ustar`、`fh2m`、`fq2m`、`fmtop`、`fm`、`fh`、`fq`、`fht`、`fqt`、`phih` |
+| `moninobuk` | `ustar`、`fh2m`、`fq2m`、`fm10m`、`fm`、`fh`、`fq` |
+| `kmoninobuk` | 一层扩散率 |
+| `kintmoninobuk` | 层间积分扩散率 |
+| `moninobukini` | 初始 `um`/`obu` 里的 `um` |
+
+```
+MOD_FrictionVelocity: all 20 outputs 20000/20000 bitwise identical
+```
+
+**意义**：`MOD_FrictionVelocity` 的 60 处收缩（分账 26+18+8+6+2）到此**结案** ——
+不再只是"形状从 dump 推出来"，而是**与内核本体逐位相同**的直接差分证据。
+这也**正式退役**了种子追猎里"不在冠层近地层廓线"那条边界：那条以前靠的是
+`psi`/`zldis`/粗糙度搭配的逐条目视核对，现在是 20000 组随机输入的硬证据。
+
+（这一轮没有改任何 `crates/` 生产代码 —— 扩驱动之后直接就是 0 失配，
+说明上一轮修掉的那个常量是这条链上唯一的偏差。）
+
+Tested: `oracle/scripts/compare_moninobukm.sh`（20 个输出、20000 组）；
+`cargo fmt --all --check`；`cargo test -q -p colm-core --lib -- --test-threads=1`。
+Not-tested: `moninobuk_leddy`（CBL 分支，模块外、本机算例不走）。

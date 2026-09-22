@@ -2,8 +2,9 @@
 //!
 //! 两侧用同一串 LCG；输出写到 `/tmp/gf/mo_diff/`，由 `compare_moninobukm.sh` 逐位比对。
 use colm_core::{
-    canopy_monin_obukhov_with_scheme, CanopyMoninObukhovInput, MoninObukhovInput,
-    SurfaceLayerScheme,
+    canopy_monin_obukhov_with_scheme, initialize_monin_obukhov,
+    integrated_monin_obukhov_diffusivity, monin_obukhov_diffusivity, monin_obukhov_with_scheme,
+    CanopyMoninObukhovInput, MoninObukhovInitialInput, MoninObukhovInput, SurfaceLayerScheme,
 };
 
 struct Lcg(u64);
@@ -73,6 +74,65 @@ fn main() {
             state.moisture_at_top_layer,
             state.canopy_top_heat_similarity,
         ];
+        let plain = monin_obukhov_with_scheme(
+            MoninObukhovInput {
+                wind_height_m: hu,
+                temperature_height_m: ht,
+                humidity_height_m: hq,
+                displacement_height_m: displa,
+                momentum_roughness_m: z0m,
+                heat_roughness_m: z0h,
+                moisture_roughness_m: z0q,
+                obukhov_length_m: obu,
+                stability_adjusted_wind_m_s: um,
+                boundary_layer_height_m: None,
+            },
+            SurfaceLayerScheme::Standard,
+        )
+        .expect("validated inputs");
+        let kcob = monin_obukhov_diffusivity(displa, obu, state.surface.friction_velocity_m_s, ht)
+            .expect("validated inputs");
+        let kint = integrated_monin_obukhov_diffusivity(
+            displa,
+            z0h,
+            obu,
+            state.surface.friction_velocity_m_s,
+            ht,
+            hq,
+        )
+        .expect("validated inputs");
+        let th2 = 290.0 + rng.uni() * 20.0;
+        let thm2 = th2;
+        let thv2 = th2 * (1.0 + 0.61 * 0.01);
+        let dth2 = -2.0 + rng.uni() * 4.0;
+        let dqh2 = -0.002 + rng.uni() * 0.004;
+        let dthv2 = dth2 * (1.0 + 0.61 * 0.01) + 0.61 * th2 * dqh2;
+        let zldis2 = hu - displa;
+        let initial = initialize_monin_obukhov(MoninObukhovInitialInput {
+            reference_wind_m_s: um,
+            potential_temperature_k: th2,
+            reference_temperature_k: thm2,
+            virtual_potential_temperature_k: thv2,
+            temperature_difference_k: dth2,
+            humidity_difference_kg_kg: dqh2,
+            virtual_temperature_difference_k: dthv2,
+            reference_height_m: zldis2,
+            momentum_roughness_m: z0m,
+        })
+        .expect("validated inputs");
+        let mut values = values.to_vec();
+        values.extend([
+            plain.friction_velocity_m_s,
+            plain.heat_at_2m,
+            plain.moisture_at_2m,
+            plain.momentum_at_10m,
+            plain.momentum,
+            plain.heat,
+            plain.moisture,
+            kcob,
+            kint,
+            initial.stability_adjusted_wind_m_s,
+        ]);
         for value in values {
             out.push_str(&format!("{:016X} ", value.to_bits()));
         }

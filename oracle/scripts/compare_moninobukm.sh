@@ -5,10 +5,13 @@
 # `-ffp-contract=off` —— 要的就是 GCC 的默认收缩），再与驱动
 # `moninobukm_diff.f90` 链接（驱动本身按仓库纪律加 `-fwrapv -ffp-contract=off`）。
 # 本仓库侧：`cargo run -p colm-core --example mo_probe`，同一串 LCG。
-# 两侧各 20000 组，比 10 个输出（ustar/fh2m/fq2m/fmtop/fm/fh/fq/fht/fqt/phih）。
+# 两侧各 20000 组，比 **20 个输出**，覆盖整个 `MOD_FrictionVelocity` 模块：
+#   `moninobukm` 10 个（ustar/fh2m/fq2m/fmtop/fm/fh/fq/fht/fqt/phih）、
+#   `moninobuk` 7 个（ustar/fh2m/fq2m/fm10m/fm/fh/fq）、
+#   `kmoninobuk`、`kintmoninobuk`、`moninobukini` 各 1 个。
 #
 # 实测（2026）：修掉 UNSTABLE_HEAT_COEFFICIENT 的 1 ULP 之前 phih 第一支
-# 376 组错 375；修完 10/10 输出 20000/20000 全同。
+# 376 组错 375；修完 20/20 输出 20000/20000 全同（该模块的 60 处收缩由此结案）。
 set -euo pipefail
 BASE="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 WORK=${WORK:-/tmp/gf/mo_diff}
@@ -27,7 +30,9 @@ cargo run -q -p colm-core --example mo_probe
 python3 - "$WORK" <<'PY'
 import collections, sys
 work=sys.argv[1]
-names=['ustar','fh2m','fq2m','fmtop','fm','fh','fq','fht','fqt','phih']
+names=['ustar','fh2m','fq2m','fmtop','fm','fh','fq','fht','fqt','phih',
+       'ustar_m','fh2m_m','fq2m_m','fm10m_m','fm_m','fh_m','fq_m',
+       'kcob','kint','uat']
 def rows(path, skip_first):
     out=[]
     for line in open(path):
@@ -42,6 +47,6 @@ for a,b in zip(f,r):
     for k,(x,y) in enumerate(zip(a,b)):
         if x!=y: bad[names[k]]+=1
 if bad:
-    print('moninobukm mismatches / 20000:', dict(bad)); raise SystemExit(1)
-print('moninobukm: all 10 outputs 20000/20000 bitwise identical')
+    print('MOD_FrictionVelocity mismatches / 20000:', dict(bad)); raise SystemExit(1)
+print('MOD_FrictionVelocity: all 20 outputs 20000/20000 bitwise identical')
 PY
