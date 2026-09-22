@@ -9803,3 +9803,57 @@ with the driver's unfused ur: [20000, 20000, 20000, 20000, 20000, 20000, 20000,
 **在 Rust 里生成输入、写成一个文件，让 Fortran 驱动读它**；
 退一步也必须把"驱动侧的每个输入表达式"逐个对着探针抄一遍，
 并且**驱动与探针的编译选项要一起看**（Rust 永不隐式融合，Fortran/C 会）。
+
+## `MOD_ForcingDownscaling` 的十处收缩（实测，**已修**），并确认本机三个算例走不到它
+
+把 `MOD_ForcingDownscaling.F90` 单独 dump（`-I vendor/CoLM202X/.bld`），
+它有 26 处 `.FMA/.FNMA/.FMS/.FNMS`，而 `forcing_downscaling.rs` 此前只有上一轮
+换掉的 `hypot`。这轮按其**本体 GIMPLE** 补齐十处：
+
+| 上游 | GIMPLE |
+|---|---|
+| `rhos`：`egcm = q*p/(wv+(1-wv)*q)` | 分母 `FMA(q, 1-wv, wv)` |
+| `rhos`：`(p-(1-wv)*egcm)/(rair*t)` | 分子 `FNMA(egcm, 1-wv, p)` |
+| `tbot_c = tbot_g-lapse*Δz` | `FNMA(Δz, lapse, tbot_g)` |
+| `thbot_c = thbot_g+(tbot_c-tbot_g)*exp(·)` | `FMA(tbot_c-tbot_g, exp, thbot_g)` |
+| 晴空发射率 `0.23+0.43*X**(1/5.7)` ×2 | `FMA(X, 0.43, 0.23)` |
+| 长波递减率（冰川/普通两支） | 两条 `FNMA(·, Δz, dlrad)` |
+| 降水 ListonElder 的分母 `1-0.27*Δz` | `FNMA(Δz, 0.27, 1.0)` |
+| 日地距离比 `1-0.01672*cos(·)` | `FNMA(cos, 0.01672, 1.0)` |
+| 漫射权重两级 `2.3-4.702*clr`、`0.952-1.041*exp(-exp(·))` | `FNMA(clr, 4.702, 2.3)`、`FNMA(exp, 1.041, 0.952)` |
+
+### 端到端**测不到**，而且原因已经查清
+
+改完之后干窗 TIMESTEP 1 步的 Rust 输出**逐位不变**，三个黄金窗口三口径也
+**逐位不变**。原因不是"数值没差"，而是**这条路本机三个算例根本走不到**：
+
+```
+crates/colm-runtime/src/lib.rs:502   downscale_forcings(...)   ← 在 run_downscaled 里
+crates/colm-runtime/src/bin/colm-rs.rs:190/205  run_restart_standard_lct_snow_with_history
+                                                run_restart_standard_lct_snow  ← 不带降尺度
+```
+
+`run_downscaled` 是另一条公开入口（给需要把格点强迫降到站点的驱动用），
+`colm-rs` 走的是 `run_restart_standard_lct_snow*`。所以这一处的状态是
+**"按本体 GIMPLE 改对了，但本仓库现有算例无法证伪也无法证实"** —— 与前面
+几处"改了但窗口不动"不同，这次连"窗口不动"都不构成弱证据。
+
+保留该改动的理由：`forcing_downscaling.rs` 是移植面的一部分、由 `run_downscaled`
+公开调用，且十处改动全部有本体 GIMPLE 逐条对应。未验的部分照实记下。
+
+**这也顺带解释了干窗第 0 步分叉的排查为什么一直"扫不动"**：能扫到的模块里，
+真正在这条算例路径上的越来越少；下一步只能在**第一步的完整状态与强迫**上做
+逐位对照（restart 读入 + `forc_t/q/us/vs/pbot/rho` 及其派生），而不是继续找模块。
+
+Tested: `MOD_ForcingDownscaling.F90` 本体的 `-fdump-tree-optimized`；`cargo test --workspace --lib --bins -- --test-threads=1`；
+`cargo clippy --workspace --all-targets -- -D warnings`；两处 `cargo fmt --all --check`；`cargo test -q -p oracle`；
+`cargo run -q -p xtask -- check-gui`；`python3 oracle/scripts/test_upstream_f48_sync.py`（PASS）；
+干窗 TIMESTEP 1 步 Rust-vs-Rust 逐位比对；三个黄金窗口 + 三口径 A/B（均逐位不变）。
+
+### 未验的部分
+
+- 十处收缩只有本体 GIMPLE 依据；**没有**像近地层那样写"USE 本体模块"的随机差分驱动
+  （`downscale_forcings` 有 37 个实参，且要按 `SinglePoint` 分支准备 `sf_lut_c`）。
+  下一轮若要把这块真正验掉，应当补这个驱动。
+- 降尺度模块还剩约 6 处收缩（`downscale_shortwave` 的地形因子、`downscale_wind_simple`
+  的因子式等），它们的结合顺序还没从 GIMPLE 里读透，故**没动**。

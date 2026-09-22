@@ -6,6 +6,7 @@
 
 use anyhow::{ensure, Result};
 
+use crate::f77;
 use crate::{saturation_specific_humidity, RuntimeForcing};
 
 /// Number of terrain classes used by CoLM's full shortwave/wind scheme.
@@ -277,11 +278,15 @@ pub fn atmospheric_density(
         "density inputs are physically invalid"
     );
     let water_to_dry_air = WATER_VAPOR_MOLECULAR_WEIGHT / DRY_AIR_MOLECULAR_WEIGHT;
+    // `MOD_ForcingDownscaling.F90:82-83` 的 GIMPLE：
+    // `FMA(qbot, 1-wv, wv)` 做分母、`FNMA(egcm, 1-wv, pbot)` 做分子。
     let vapor_pressure = specific_humidity * pressure_pa
-        / (water_to_dry_air + (1.0 - water_to_dry_air) * specific_humidity);
+        / (1.0 - water_to_dry_air).mul_add(specific_humidity, water_to_dry_air);
     let dry_air_gas_constant = AVOGADRO_PER_KMOLE * BOLTZMANN_J_K / DRY_AIR_MOLECULAR_WEIGHT;
-    Ok((pressure_pa - (1.0 - water_to_dry_air) * vapor_pressure)
-        / (dry_air_gas_constant * temperature_k))
+    Ok(
+        (-vapor_pressure).mul_add(1.0 - water_to_dry_air, pressure_pa)
+            / (dry_air_gas_constant * temperature_k),
+    )
 }
 
 /// Port of `MOD_ForcingDownscaling:downscale_forcings`.
@@ -296,17 +301,20 @@ pub fn downscale_forcings(
     validate_input(input, config)?;
     let grid = input.grid;
     let elevation_difference = input.column_surface_elevation_m - grid.surface_elevation_m;
+    // `tbot_c = tbot_g - lapse*(hsurf_c-hsurf_g)` ⇒ `FNMA(Δz, lapse, tbot_g)`。
     let air_temperature_k =
-        grid.air_temperature_k - config.temperature_lapse_rate_k_m * elevation_difference;
+        (-elevation_difference).mul_add(config.temperature_lapse_rate_k_m, grid.air_temperature_k);
     let scale_height_m =
         dry_air_gas_constant() * 0.5 * (grid.air_temperature_k + air_temperature_k) / GRAVITY_M_S2;
     let bottom_pressure_pa =
         grid.bottom_pressure_pa * (-elevation_difference / scale_height_m).exp();
-    let potential_temperature_k = grid.potential_temperature_k
-        + (air_temperature_k - grid.air_temperature_k)
-            * ((grid.reference_height_m / scale_height_m)
-                * (dry_air_gas_constant() / DRY_AIR_HEAT_CAPACITY_J_KG_K))
-                .exp();
+    // `thbot_c = thbot_g + (tbot_c-tbot_g)*exp(...)` ⇒ `FMA(tbot_c-tbot_g, exp, thbot_g)`。
+    let potential_temperature_k = (air_temperature_k - grid.air_temperature_k).mul_add(
+        ((grid.reference_height_m / scale_height_m)
+            * (dry_air_gas_constant() / DRY_AIR_HEAT_CAPACITY_J_KG_K))
+            .exp(),
+        grid.potential_temperature_k,
+    );
     let specific_humidity = grid.specific_humidity
         * (saturation_specific_humidity(air_temperature_k, bottom_pressure_pa)?.specific_humidity
             / saturation_specific_humidity(grid.air_temperature_k, grid.bottom_pressure_pa)?
@@ -483,26 +491,32 @@ fn downscale_longwave(
                 * saturation_specific_humidity(column_temperature_k, column_pressure_pa)?
                     .vapor_pressure_pa
                 / 100.0;
-            let clear_sky_emissivity_grid =
-                0.23 + 0.43 * (vapor_pressure_grid_hpa / grid.air_temperature_k).powf(1.0 / 5.7);
-            let clear_sky_emissivity_column =
-                0.23 + 0.43 * (vapor_pressure_column_hpa / column_temperature_k).powf(1.0 / 5.7);
+            // `0.23 + 0.43*X**（1/5.7)` ⇒ `FMA(X, 0.43, 0.23)`。
+            let clear_sky_emissivity_grid = f77(0.43).mul_add(
+                (vapor_pressure_grid_hpa / grid.air_temperature_k).powf(1.0 / 5.7),
+                0.23,
+            );
+            let clear_sky_emissivity_column = f77(0.43).mul_add(
+                (vapor_pressure_column_hpa / column_temperature_k).powf(1.0 / 5.7),
+                0.23,
+            );
             let all_sky_emissivity_grid = grid.downward_longwave_w_m2
                 / (STEFAN_BOLTZMANN_W_M2_K4 * grid.air_temperature_k.powi(4));
             (clear_sky_emissivity_column + all_sky_emissivity_grid - clear_sky_emissivity_grid)
                 * STEFAN_BOLTZMANN_W_M2_K4
                 * column_temperature_k.powi(4)
         }
-        LongwaveDownscaling::LapseRate if glacier => {
-            grid.downward_longwave_w_m2
-                - config.glacier_longwave_lapse_rate_w_m2_m * elevation_difference
-        }
+        // GIMPLE：`FNMA(glacier_lapse, Δz, dlrad)`。
+        LongwaveDownscaling::LapseRate if glacier => (-elevation_difference).mul_add(
+            config.glacier_longwave_lapse_rate_w_m2_m,
+            grid.downward_longwave_w_m2,
+        ),
         LongwaveDownscaling::LapseRate => {
-            grid.downward_longwave_w_m2
-                - 4.0 * grid.downward_longwave_w_m2
-                    / (0.5 * (column_temperature_k + grid.air_temperature_k))
-                    * config.temperature_lapse_rate_k_m
-                    * elevation_difference
+            // GIMPLE：`FNMA((4*dlrad/(0.5*(tc+tg)))*lapse, Δz, dlrad)`。
+            let slope = 4.0 * grid.downward_longwave_w_m2
+                / (0.5 * (column_temperature_k + grid.air_temperature_k))
+                * config.temperature_lapse_rate_k_m;
+            (-elevation_difference).mul_add(slope, grid.downward_longwave_w_m2)
         }
     };
     Ok(longwave.clamp(
@@ -623,7 +637,9 @@ fn shortwave_components(
     cosine_zenith: f64,
     simple: bool,
 ) -> (f64, f64, f64) {
-    let earth_sun_distance_ratio = 1.0 - 0.01672 * (0.9856 * (calendar_day - 4.0)).cos();
+    // GIMPLE：`FNMA(cos, 0.01672, 1.0)`。
+    let earth_sun_distance_ratio =
+        (-f77(0.01672)).mul_add((0.9856 * (calendar_day - 4.0)).cos(), 1.0);
     let top_of_atmosphere = SOLAR_CONSTANT_W_M2 * earth_sun_distance_ratio.powi(2) * cosine_zenith;
     let mut clearness_index =
         if (simple && top_of_atmosphere < 1.0e-7) || (!simple && top_of_atmosphere == 0.0) {
@@ -634,8 +650,11 @@ fn shortwave_components(
     if clearness_index > 1.0 {
         clearness_index = 1.0;
     }
-    let diffuse_weight =
-        (0.952 - 1.041 * (-(2.3 - 4.702 * clearness_index).min(3.5).exp()).exp()).clamp(0.0, 1.0);
+    // 两级都是收缩：`FNMA(min(clr,1), 4.702, 2.3)` 与 `FNMA(exp(-exp(·)), 1.041, 0.952)`。
+    let exponent = (-f77(4.702)).mul_add(clearness_index.min(1.0), f77(2.3));
+    let diffuse_weight = (-f77(1.041))
+        .mul_add((-exponent.min(3.5).exp()).exp(), f77(0.952))
+        .clamp(0.0, 1.0);
     let attenuation_coefficient = if clearness_index <= 0.0 {
         0.0
     } else {
@@ -705,8 +724,10 @@ fn downscale_precipitation(
             }
         }
         PrecipitationDownscaling::ListonElder => {
+            // GIMPLE：分母是 `FNMA(Δz, 0.27, 1.0)`。
             precipitation
-                + precipitation * 0.27 * elevation_difference / (1.0 - 0.27 * elevation_difference)
+                + precipitation * 0.27 * elevation_difference
+                    / (-f77(0.27)).mul_add(elevation_difference, 1.0)
         }
     };
     (
