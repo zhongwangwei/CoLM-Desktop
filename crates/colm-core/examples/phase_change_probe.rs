@@ -84,7 +84,8 @@ fn main() {
                 snow_depth_m: snow_depth,
                 snow_layers: 2,
                 split_soil_snow: false,
-                supercool_water: false,
+                // 实测 `.bld` namelist 默认：campbell=F（走 VGM）、supercool=T、split=F
+                supercool_water: true,
                 soil_layer_thickness_m: &thickness,
                 soil_porosity: &porosity,
                 soil_residual_water: &residual,

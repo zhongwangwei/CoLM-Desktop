@@ -14065,3 +14065,48 @@ cases with any difference: 1753/10000
 
 Tested: 归一化前后的对比统计（10000 条）；两组数字与样例行的逐字段核对。
 Not-tested: 冻结支的逐句定位（下一轮）。
+
+## `meltf` 差分**结案**：10000/10000 逐位全同 —— 那 1753 条是我的**探针配置**错了
+
+上一轮把差异收窄到"冻结支（xmf/freeze/imelt）"，这一轮查明它**不是移植缺陷**：内核链进来的
+namelist 默认值是
+
+```
+$ /tmp/gf/pc_diff/pc
+ campbell/vgm =  F  supercool =  T  split =  F
+```
+
+而我的 Rust 探针当时写的是 `supercool_water: false`。上游据此分岔
+（`MOD_PhaseChange.F90:296-301`）：
+
+```fortran
+IF (DEF_USE_SUPERCOOL_WATER) THEN
+   IF(j <= 0 .or. patchtype == 3) THEN          ! 只钉雪层（与 patchtype 3）
+      IF(wliq*wice > 0.) t_soisno(j) = tfrz
+   ENDIF
+ELSE
+   IF(wliq*wice > 0.) t_soisno(j) = tfrz        ! 所有层都钉
+ENDIF
+```
+
+`T` 与 `F` 差在**土壤层是否被钉到冰点**，正好只影响冻结（`freeze`/`imelt`）而不影响
+顶层雪的 `wice`、也不影响融化（`thaw`/`sm`）—— 与上一轮观察到的失配形态**完全吻合**。
+把探针改成 `supercool_water: true` 后：
+
+```
+cases with any difference: 0/10000
+```
+
+**`MOD_PhaseChange:meltf` 由此结案**：5 个 `patchtype` × 2000 组，`t`/`wliq`/`wice`/`scv`/
+`sm`/`xmf`/`Σthaw`/`Σfrzc`/`Σimelt` **全部逐位相同**（本会话第 8 个差分结案，也是实参最多、
+唯一需要"全 `.bld` 链接"的那个）。
+
+### 新规矩（本会话第四次同类教训）
+
+**差分驱动必须把链接进来的 namelist 开关**（本案 3 个：campbell / supercool / split）
+**打出来，并在 Rust 侧逐一匹配**。前三次同类是：dump 取错文件档、工具按名字排序、
+位型字符串未归一化 —— 都不是逻辑错误，而是"两侧配置/口径没对齐"。
+
+Tested: 三个开关的打印（`F/T/F`）；探针改 `supercool_water=true` 后 10000/10000 逐位全同；
+`phasechange_diff.f90` 编译链接运行与 `phase_change_probe` 各 10000 条。
+Not-tested: Campbell 支（需另配 namelist，仍列为可选）。
