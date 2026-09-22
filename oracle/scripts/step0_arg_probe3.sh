@@ -85,6 +85,7 @@ sed -e "s#^   DEF_dir_output.*#   DEF_dir_output  = '$WORK/out/'#" \
     -e "s#^   DEF_dir_runtime.*#   DEF_dir_runtime = '$WORK/runtime_unused/'#" \
     -e "s#^   DEF_simulation_time%end_day.*#   DEF_simulation_time%end_day       = 1#" \
     -e "s#^   DEF_simulation_time%end_sec.*#   DEF_simulation_time%end_sec       = 1800#" \
+    -e "s#^   DEF_HIST_FREQ.*#   DEF_HIST_FREQ    = 'TIMESTEP'#" \
     "$BASE/oracle/work/CN-Cng/case.nml" > "$WORK/case.nml"
 cp "$BASE/oracle/work/CN-Cng/forcing.nml" "$WORK/forcing.nml"
 cp -R "$BASE/oracle/work/CN-Cng/out" "$WORK/out"

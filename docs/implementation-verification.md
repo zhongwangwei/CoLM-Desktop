@@ -14493,3 +14493,40 @@ $ wc -l /tmp/gf/gtprobe/kernel.log /tmp/gf/iterprobe2/kernel.log /tmp/gf/argprob
 Tested: `dry_ts.sh` 与三个探针的 case.nml/kernel.log 对比（`end_sec`、完成标志、日志行数）；
 四个脚本的 `end_sec` 修正与硬闸门添加。
 Not-tested: 探针跑不完的根因（`DEF_HIST_FREQ` 或其它设置差异）。
+
+### 探针跑不完的根因收窄：**不是 case.nml 差异，而是"探针自己重编内核"**
+
+把 `end_sec`、`DEF_HIST_FREQ` 都对齐成 `dry_ts.sh` 的样子之后，地面探针的内核**仍然**跑不完
+（逐字节 diff 两份 case.nml：除路径外只差那两处，且都已对齐）：
+
+```
+$ diff <(grep -v "^ Warning\|^$" /tmp/gf/dryts/run/f.log) <(grep -v "^ Warning\|^$" /tmp/gf/gtprobe/kernel.log)
+< Loading Time Invariants done.     ← dry_ts.sh 的内核（**用现成的 kernels/default/colm.x**）
+< Loading Time Variables done.
+< TIMESTEP = 1 | DATE = 2008-01-01-00000
+< CoLM Execution Completed.
+> Netcdf error: ... /tmp/gf/gtprobe/rawdata_unused//plant_15s/RG_45_120_40_125.MOD2005.nc cannot open
+```
+
+而两侧的输入完全一样：`landdata/` 都只有 `srfdata.nc`，两个 `rawdata_unused/` 目录**都不存在**。
+**唯一的差别是探针脚本会先跑 `build_kernel.sh default`（重编内核）再运行**，而 `dry_ts.sh`
+用的是仓库里现成的 `kernels/default/colm.x`。
+
+⇒ 假设：**重编出来的内核与预建内核行为不同**（例如重编时 `include/define.h` 的生成或
+`.bld` 的配置切换，导致 plant 原始数据的读取被启用）。探针的插桩结果因此全部无效，
+**而且这条假设可以直接判定**：
+
+```bash
+# 不打补丁，只重编，然后跑 dry_ts.sh 的那套 case：
+./oracle/scripts/build_kernel.sh default
+bash /tmp/gf/dry_ts.sh 1 && grep -c 'CoLM Execution Completed' /tmp/gf/dryts/run/f.log
+# 若此时也不完成 ⇒ 是"重编"本身的问题，与插桩无关；
+# 若完成 ⇒ 问题在补丁（但补丁只是加了一行 WRITE，几乎不可能）
+```
+
+**在探针能像 `dry_ts.sh` 一样跑完一步之前，任何插桩结论都不得采信**（探针脚本现已带
+完成标志硬闸门，会直接以非零码退出，不会再产出"0 命中"这种误导性结论）。
+
+Tested: 两份 case.nml 的逐字节 diff；两份内核日志的 diff；`landdata`/`rawdata_unused` 的存在性对比；
+四个探针脚本的 `end_sec`/`HIST_FREQ` 对齐与硬闸门（地面探针重跑后以 exit 1 退出、未产出结果）。
+Not-tested: "重编内核 vs 预建内核"的对比实验（下一轮第一步）。
