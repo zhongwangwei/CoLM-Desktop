@@ -12502,3 +12502,51 @@ Tested: `oracle/scripts/compare_forcingdownscaling_shortwave.sh`（两档各 11 
 `cargo clippy --workspace --all-targets -- -D warnings`；两个 workspace 的 `cargo fmt --all --check`。
 Not-tested: `sf_lut_c` 在**单点产线内核**里的端到端影响（Rust 运行时目前还没有把 downscaling
 接到装配路径上，这个模块现在只有差分证据）。
+
+## `MOD_LeafTemperature` 的三处收缩：dump 说融合、窗口说不要，**按先例回退**
+
+照上一轮留下的优先级，把 `lt.opt` 里三处最像"活路径"的收缩按 dump 改成 FMA：
+
+| 位置 | dump | 上游形状 | 改前 Rust |
+|---|---|---|---|
+| `clai`（`:493`）| `lt.opt:1158-1159` | `_49=(lai+sai)*0.2`；`_52=ldew_rain*cpliq`；`_53=.FMA(_49,cpliq,_52)`；`clai=.FMA(ldew_snow,cpice,_53)` | 三项平铺 |
+| `cfw`（`:812`，Rust 里叫 `leaf_moisture_conductance`）| `lt.opt:1969` | `_257=delta*(1-fwet)`；`_261=(lai+sai)*(1-_257)/rb`；`_268=laisun/(rb+rssun)+laisha/(rb+rssha)`；`cfw=.FMA(_257,_268,_261)` | `left + (1-fwet)*delta*right` |
+| `thvstar`（`:976`）| `lt.opt:2415` | `_491=(0.61*th)*qstar`；`thvstar=.FMA(1+0.61*qm,_484,_491)` | `tstar*(1+0.61*qm) + 0.61*th*qstar` |
+
+先确认了一件事：`MOD_LeafTemperature.F90` 里**一处 `#ifdef` 都没有**，所以这份 dump 的
+收缩选择对单点内核同样成立（内核只多 `-g -ffpe-trap -fbacktrace`，不改收缩）——
+即"dump 说融合"这次是**可信**的，不是上一轮那种"dump 来自网格档"的问题。
+
+### 可是黄金窗口说不要
+
+干窗（CN-Cng）逐组测量：
+
+| 变体 | bitwise | sumabs | over_tol | ot_vars |
+|---|---|---|---|---|
+| 三处全改 | **21360** | 400.2843 | 830 | **18** |
+| 只退 `clai` | 21360 | 400.2843 | 830 | 18 |
+| 只退 `cfw` | 21361 | 400.3077 | 826 | 18 |
+| 只退 `thvstar` | 21303 | 263.9564 | 817 | **17** |
+| 三处全退（现状）| 21326 | 338.9256 | 825 | 17 |
+
+两个指标**打架**：改动让 `bitwise`（逐位相同的数值个数）变好（21326 → 21360），
+却让 `ot_vars`（超容差变量数）从 17 变成 18、`sumabs` 从 339 涨到 400。
+`clai` 那一处在干窗（无雪）走 `else` 分支，逐位同值 —— 它是惰性的。
+
+### 处置：按先例回退，并把矛盾记下来
+
+本仓库对这个矛盾的先例是明确的：`16f9b26` 那轮"dump 支持的 `dthv`/`thvstar` 融合"
+同样让干窗变差（17→18），当时就是**回退**并记录负结果。这一轮照办：三处全部回退，
+干窗回到 `21326 / 338.9256 / 825 / 17`（与改动前逐位同值，已实测）。
+
+要真正裁决这类 1 ULP 级改动，`tier2 变量数` 这个口径太粗（干窗是混沌的，1 ULP
+扰动会翻动个别变量）。下一轮该补的是**更细的窗口口径**：逐变量的相对误差分布、
+或把干窗拉长到 11 天看累计偏差，而不是继续用"超容差变量数"这个会被个别变量
+翻转的计数。在那种口径到手之前，dump 与窗口打架时一律按 `16f9b26` 的先例回退。
+
+Tested: `lt.opt` 第 1158-1159/1969/2415 处与源码 `MOD_LeafTemperature.F90:493/812/976`
+的逐句对照；`MOD_LeafTemperature.F90` 无 `#ifdef` 的核对；上表五个变体各自的干窗
+实测（`bash /tmp/gf/winCN.sh`）；回退后 `21326/338.9256/825/17` 与改动前逐位一致；
+`cargo test -q -p colm-core --lib -- --test-threads=1`（355 通过）。
+Not-tested: 湿窗/雪窗上这三处的单独影响（只跑了干窗）；更细的窗口口径（下一轮）；
+`lt.opt` 里其余收缩处。
