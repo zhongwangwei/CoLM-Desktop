@@ -9341,3 +9341,95 @@ Tested: 探针比对（**真正的 Rust** vs 逐字复刻的 Fortran，八方案
 `cargo fmt --all --check` 与 `cargo fmt --manifest-path gui/src-tauri/Cargo.toml --all --check`；
 `cargo test -q -p oracle -- --test-threads=1`；`cargo run -q -p xtask -- check-gui`；
 `python3 oracle/scripts/test_upstream_f48_sync.py`（PASS）；三个窗口 `bash /tmp/gf/win4.sh` + 三口径 A/B。
+
+## 把 GIMPLE 的来源从"复刻件"换成**内核本体**：`spacAF_twoleaf` 的 `determ` 与三条共用乘积（实测，**已修**）
+
+前几轮量收缩规则时一直用"忠实复刻件"——把上游那几十行抄成一个独立子例程再 dump。
+本轮第一次直接 dump **内核本体**，方法是把 `MOD_PlantHydraulic.F90` 单独编译（模块
+`.mod` 由既有的内核构建产物提供）：
+
+```bash
+B=vendor/CoLM202X
+gfortran -O2 -fdefault-real-8 -ffree-form -g -ffpe-trap=invalid,zero,overflow -fbacktrace \
+  -cpp -ffree-line-length-0 -fallow-argument-mismatch \
+  -I $B/include -I $B/main -I $B/main/HYDRO -I $B/share -I $B/.bld -J/tmp/gf/r107 \
+  -c $B/main/MOD_PlantHydraulic.F90 -fdump-tree-optimized=/tmp/gf/r107/ph.opt
+```
+
+（关键是 `-I $B/.bld`：`.mod` 全在那儿。）这一步立刻暴露了两个复刻件量不出来的东西。
+
+### 一、`f(xyl)` 与 `f(root)` 共用同一个乘积，于是**两条都不收缩**
+
+复刻件里 `f(xyl)`、`f(root)` 各自只出现一次 `X*(x(root)-x(xyl)-grav1)`，按形状规则
+都会被吸收。内核本体里它们**在同一个函数里**，GCC 把它提成一个临时量：
+
+```
+_51 = _10 * _18            ! laisun*kmax_sun*fx * Δsun
+_54 = _23 * _30            ! laisha*kmax_sha*fx * Δsha
+_56 = _51 + _54
+_57 = _40 * _45            ! sai*kmax_xyl/htop*fr * Δroot
+_58 = _56 - _57            ! f(xyl)  ← 普通减法
+_59 = qeroot
+_60 = _57 - _59            ! f(root) ← 普通减法
+```
+
+`_51`/`_54`/`_57` 三个乘积**同时喂给 `qflx_sha > 0` 的 IF 与 ELSE 两条支路**，
+所以一个都不吸收。Rust 四条式子改成：三个乘积显式绑定成变量（`sunlit_term`/
+`shaded_term`/`root_term`），`f(SUNLIT)`/`f(SHADED)` 仍然 `mul_add`（它们收的是
+**另一个**只出现一次的乘积 `qflx*fsto`），`f(XYLEM)/f(ROOT)` 保持普通加减。
+这正是此前那个 4.1e-25 残差的来源 —— 当时的猜测（"内核的 CSE 上下文与复刻件不同"）
+现在被本体 dump 直接证实。
+
+### 二、`determ` 的收缩一直没人验过
+
+`determ = A44*A22*A33*A11 - A44*A22*A31*A13 - A44*A32*A23*A11 - A43*A11*A22*A34`
+在本体里是三级收缩，每级收**本级最后一个乘积**：
+
+```
+_62 = a22*a44*a33 ; _65 = a31*a22*a44*a13
+_66 = FMS(_62, a11, _65)
+_70 = FNMA(a32*a44*a23, a11, _66)
+determ = FNMA(a43*a11*a22, a34, _70)
+```
+
+Rust 原来写的是普通乘减。**这条以前漏验了**：上一轮的做法是拿"神谕算好的
+`determ`"喂进去只比 `dx`，所以四条 `dx` 式子验到 20000/20000，而 `determ` 自己
+的算法没进过任何比对。现在改用**内核自己打出来的 49 组 `(A11..A44, f, dx)`** 反推：
+
+| `determ` 写法 | `dx(leafsun)` | `dx(leafsha)` | `dx(xyl)` | `dx(root)` |
+|---|---|---|---|---|
+| 普通乘减（旧 Rust） | 27/49 | 27/49 | 28/49 | 29/49 |
+| 三级 `mul_add`（新 Rust） | **49/49** | **49/49** | **49/49** | **49/49** |
+
+（FMA 用 `fractions.Fraction(a)*Fraction(b)+Fraction(c)` 精确求值，不依赖
+Python 版本有没有 `math.fma`。）这条同时也反过来确认了四条 `dx` 式子本身没错。
+
+### 三、ELSE 分支逐条对上
+
+`qflx_sha <= 0` 那条支路（干窗 49 次调用一次都没走到）也从本体 dump 里逐条核对过：
+`determ = FNMA(a31*a13, a44, FMS(a11*a33, a44, a43*(a11*a34)))`、三条 `dx` 的
+嵌套、以及 `dx(leafsha) = dx(leafsun) + (x(leafsun)-x(leafsha))`（末式是加法交换，
+不是"先算差再换序"）—— 与 Rust 现有写法逐项一致。
+
+### 四、端到端：中性（诚实记录）
+
+- 干窗 TIMESTEP 30 步：改动前后 Rust **逐位相同**（69 个变量、0 处差异），
+  与 Fortran 的第一处差异仍旧落在第 0 步的 1 ULP 上（`f_t_soisno` 两个层
+  各差 1 ULP，见上一段"第一处差异"的既有记录）。
+- 三个黄金窗口三口径**逐位不变**（干 21199/395.6581/830，湿 33349/10380.6562/20665，
+  雪 33661/444394.4368/25896）。
+
+也就是说这次改的是"确实错、但这几组算例里传不到输出"的地方。保留它的理由与
+`meltf` 那次相同：**49 组真实内核数值已经把新写法钉死**，而窗口指标给不出信号。
+
+### 未验的部分
+
+- 49 组真实调用全部走 `qflx_sha > 0` 那条支路；ELSE 分支只有本体 GIMPLE 依据。
+- 干窗 30 步里 `f_vegwp` 第 1 步就开始差 —— 那是**改动之前就有**的分叉
+  （base 与 fix 逐位相同，所以不是本次引入），它的根因仍未定位。
+
+Tested: 内核本体 `-fdump-tree-optimized`；49 组真实 `(A,f,dx)` 的精确 FMA 反推（`Fraction`）；
+干窗 TIMESTEP 30 步 Rust-vs-Rust 与 Rust-vs-Fortran 逐位比对；三个黄金窗口 + 三口径 A/B；
+`cargo test --workspace --lib --bins -- --test-threads=1`；`cargo clippy --workspace --all-targets -- -D warnings`；
+`cargo fmt --all --check` 与 GUI 侧同名检查；`cargo test -q -p oracle -- --test-threads=1`；
+`cargo run -q -p xtask -- check-gui`；`python3 oracle/scripts/test_upstream_f48_sync.py`（PASS）。

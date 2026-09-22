@@ -737,19 +737,32 @@ fn spac_change(
     let a43 = xylem * froot;
     let a44 = (-(xylem * dfroot)).mul_add(root_gradient, -(xylem * froot)) + root_flux_slope;
     let mut f = [0.0; VEGETATION_SEGMENTS];
-    f[SUNLIT] = sunlit_flux.mul_add(fsun, -(sunlit_conductance * fxyl * sunlit_gradient));
-    f[SHADED] = shaded_flux.mul_add(fsha, -(shaded_conductance * fxyl * shaded_gradient));
-    f[XYLEM] = (-(xylem * froot)).mul_add(
-        root_gradient,
-        sunlit_conductance * fxyl * sunlit_gradient + shaded_conductance * fxyl * shaded_gradient,
-    );
-    f[ROOT] = (xylem * froot).mul_add(root_gradient, -root_flux);
+    // 三个乘积（真实内核 dump 里的 `_51`/`_54`/`_57`）同时喂给下面 IF 与 ELSE
+    // **两条支路**（`f(xyl)` 的两支、`f(root)`），所以 GCC 一律把它们保持成
+    // **已经舍入**的临时量，任何一处都不吸收。表面上看 `f(xyl)`、`f(root)` 都是
+    // "乘积进加减"，按形状规则该写 `mul_add` —— 那样每条都会差 1 ULP，
+    // 也正是此前那 4.1e-25 残差的来源。`f(SUNLIT)`/`f(SHADED)` 收的是**另一个**
+    // 乘积（`qflx*fsto` 那一个，只出现一次），所以那两条仍然收缩。
+    let sunlit_term = sunlit_conductance * fxyl * sunlit_gradient;
+    let shaded_term = shaded_conductance * fxyl * shaded_gradient;
+    let root_term = xylem * froot * root_gradient;
+    f[SUNLIT] = sunlit_flux.mul_add(fsun, -sunlit_term);
+    f[SHADED] = shaded_flux.mul_add(fsha, -shaded_term);
+    f[XYLEM] = sunlit_term + shaded_term - root_term;
+    f[ROOT] = root_term - root_flux;
     let mut change = [0.0; VEGETATION_SEGMENTS];
     if shaded_flux > 0.0 {
-        let determinant = a44 * a22 * a33 * a11
-            - a44 * a22 * a31 * a13
-            - a44 * a32 * a23 * a11
-            - a43 * a11 * a22 * a34;
+        // `determ = A44*A22*A33*A11 - A44*A22*A31*A13 - A44*A32*A23*A11 - A43*A11*A22*A34`
+        // 的收缩点读的是**真实内核**的 dump（`MOD_PlantHydraulic.F90` 本体，不是复刻件）：
+        // `FMS(a22*a44*a33, a11, a31*a22*a44*a13)` → `FNMA(a32*a44*a23, a11, ·)`
+        // → `FNMA(a43*a11*a22, a34, ·)`，每一级收的都是**本级最后一个乘积**。
+        //
+        // 这条以前漏验了：当时是拿"神谕算好的 determ"喂进去只比 `dx`，所以四条 `dx`
+        // 式子验到 20000/20000，而 `determ` 自己的算法没人管。现在用内核自己打出来的
+        // 49 组 `(A, f, dx)` 反推：融合式四个分量**全 49/49**，普通乘减只有 27/49。
+        let determinant = ((a22 * a44) * a33).mul_add(a11, -(((a22 * a44) * a31) * a13));
+        let determinant = (-((a32 * a44) * a23)).mul_add(a11, determinant);
+        let determinant = (-((a43 * a11) * a22)).mul_add(a34, determinant);
         if determinant != 0.0 {
             // `spacAF_twoleaf` 的四条 `dx` 回代式（`MOD_PlantHydraulic.F90:499-509`）。
             // **收缩规则是量出来的，不是猜的**：把上游那四条语句原样抄成独立 Fortran
@@ -816,8 +829,7 @@ fn spac_change(
         a33 = (-(sunlit_conductance * dfxyl))
             .mul_add(sunlit_gradient, -(sunlit_conductance * fxyl))
             - xylem * froot;
-        f[XYLEM] =
-            sunlit_gradient.mul_add(sunlit_conductance * fxyl, -(xylem * froot * root_gradient));
+        f[XYLEM] = sunlit_term - root_term;
         let determinant = (a11 * a33).mul_add(a44, -((a11 * a34) * a43));
         let determinant = (-a44).mul_add(a13 * a31, determinant);
         if determinant != 0.0 {
