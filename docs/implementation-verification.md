@@ -13399,3 +13399,27 @@ Not-tested: none.
 
 Tested: 插入点行号核对（对文件 `:712-725`、Rust `:565-585`）。
 Not-tested: 探针本身（下一轮）。
+
+### 入口 A 已脚本化：`oracle/scripts/step0_arg_probe.sh`
+
+把上一节那份"就绪清单"做成了一条命令（**不改生产流程**：补丁只作用于 vendor 的临时
+副本，`trap ... EXIT` 保证无论成败都还原源码、重编内核、并打印 `git status` 与
+`f48 sync` 结果）：
+
+```bash
+bash oracle/scripts/step0_arg_probe.sh
+# → /tmp/gf/argprobe/fort_args.txt   上游侧 13 个实参（IN）+ 10 个输出（OUT）
+# → 退出时自动：还原 MOD_LeafTemperature_Extended.F90、build_kernel.sh default、f48 sync PASS
+```
+
+脚本的两个锚点已核对唯一性（`CALL moninobukm(...)` 1 处；收尾 `htop,…,phih)` + `ENDIF`
+1 处 —— 只写 `ENDIF` + `! Aerodynamic resistance` 会命中 2 处，已在脚本里注释说明），
+补丁体用临时副本干跑验证过（生成 2 行 `WRITE(77,…)`）。
+
+用法与判据仍照上一节：把 `fort_args.txt` 的 13 个实参与 Rust 侧
+`leaf_temperature.rs:565-585` 打出的同一组量逐位比；第一个不一致者即种子，全同则查调用时机。
+`SKIP_REBUILD=1` 可跳过退出时的重编（只为快速调试）。
+
+Tested: `bash -n` 语法检查；两处锚点计数（1/1）；补丁体在临时副本上的干跑（2 行 WRITE）；
+`git status` 干净（干跑未触真文件）。
+Not-tested: 脚本的完整执行（要重编内核，留给干净上下文）。
