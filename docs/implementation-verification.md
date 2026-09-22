@@ -13332,3 +13332,28 @@ heat_roughness = momentum_roughness
 
 Tested: `MOD_LeafTemperature_Extended.F90:748` 与 `ground_fluxes.rs:145-148`、`lake.rs:732` 的对照。
 Not-tested: `z0hg` 下游进入 `moninobuk`/`moninobukm` 的实参链（入口 A 的范围）。
+
+## 稀疏/稠密冠层的 `egvf` 修正落在 `canopy_roughness.rs`（不是缺失）
+
+对文件 `:611-619` 有一段 X. Zeng 的稀疏/稠密冠层修正：
+
+```fortran
+displa = htop * displar(patchclass(ipatch))
+z0mv = z0m; z0hv = z0mv; z0qv = z0mv
+lt   = min(lai+sai, 2.)
+egvf = (1._r8 - exp(-lt)) / (1._r8 - exp(-2.))
+displa = egvf * displa
+z0mv = exp(egvf*log(z0mv) + (1._r8-egvf)*log(z0mg))
+```
+
+Rust 侧**没有**叫 `egvf` 的量，一度怀疑漏了；查证结果是**同一套 Zeng 方案**
+（`canopy_roughness.rs`，`canopy_roughness()` → `CanopyRoughness`）用**解析反解**的
+形式实现：`:46` 的 `initial_lai = -(1 - area_index/canopy_cover_fraction).ln()/0.5`
+正是该 `egvf` 关系的逆（`d`/`z0m` 的 log-powf 式在 `:35/:52/:64`）。该模块在更早的
+轮次里已按 dump 落过收缩，且它在黄金窗口路径上（干/湿/雪三窗口都过），所以**不是缺口**，
+也不再重复扫。
+
+Tested: `…_Extended.F90:611-619` 与 `canopy_roughness.rs:14-64` 的结构对照；
+`grep egvf` 在 Rust 侧无命中（确认命名不同、非缺失）。
+Not-tested: `egvf` 与 `canopy_roughness` 的**逐位**等价性（该模块跨语句结构不同，
+只能靠窗口与它自己的差分证据，本会话未新做）。
