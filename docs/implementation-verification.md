@@ -10321,3 +10321,51 @@ Tested: 逐字复刻件 `/tmp/gf/r113/rep.f90` 的 `-fdump-tree-optimized`（两
 `cargo test -q -p colm-core --lib`（354 通过）；`cargo fmt --all --check`；
 `cargo test --workspace --lib --bins -- --test-threads=1`；`cargo clippy --workspace --all-targets -- -D warnings`；
 `cargo test -q -p oracle`；`cargo run -q -p xtask -- check-gui`；`python3 oracle/scripts/test_upstream_f48_sync.py`（PASS）。
+
+## **第一次窗口给出信号**：`netsolar` 的累加方向错了（已回退）
+
+`MOD_NetSolar` 的 `netsolar` 有 35 处收缩，dump 里全是**向量化**的
+`val = FMA(a, b, val)` —— 是 `sum(权重*系数)` 形状的累加。我先按产流那轮定下的
+"第一个乘积先舍入、其后每个乘积收进累加"写成
+
+```rust
+fma(a2, b2, round(a1*b1))
+```
+
+**结果干窗明显变差**（这是连续十几轮里第一次窗口动）：
+
+| 干窗 | 改前 | 改后 |
+|---|---|---|
+| 逐位不同值 | 21229 | 21235 |
+| Σ\|Δ\| | 216.9941 | **312.4792** |
+| 超容差 | 813 | **1092** |
+| tier2 变量数 | 17 | **27** |
+
+于是**立刻回退**（`git checkout`），并改用**标量复刻件**（`-fno-tree-vectorize`）
+把方向量准 —— `/tmp/gf/r114/ns.f90`：
+
+```
+_6 = a2 * b2                 ! **最后一个**乘积先各自舍入
+_7 = .FMA (a1, b1, _6)       ! **第一个**乘积被收进加法
+_11 = .FMA (a3, b3, _7)      ! 其后每个乘积依次收进累加
+_15 = .FMA (a4, b4, _11)
+```
+
+**方向与我写的相反**：四级累加里，**最左**的乘积被吸收、**最右**的是被加的
+那个已舍入乘积；其后的项依次收进累加。这解释了窗口为什么变差。
+
+两条教训：
+
+1. **向量化的 dump 不能直接读收缩方向** —— 向量化会把归约改写成
+   `val = FMA(a,b,val)` 的循环，看不出标量语义里的"哪一端是舍入过的"。
+   要定方向必须用 `-fno-tree-vectorize` 的标量复刻件。
+2. **窗口是能分辨的** —— 我之前"窗口对逐点修复不敏感"的说法过于绝对：
+   它对该敏感的地方（这条累加在白天每一步都走）**立刻**给了明确信号，
+   而且方向正确（回退后不变量恢复）。以后遇到窗口大幅变化，先当它是真信号，
+   去核对自己的解码而不是解释成抖动。
+
+（本轮结束时 `net_solar.rs` 已回到改动前状态，未提交任何源码改动。）
+
+Tested: 标量复刻件 `/tmp/gf/r114/ns.f90`（`-fno-tree-vectorize`）的 `-fdump-tree-optimized`；
+干窗三个月度窗口的三口径 A/B（发现变差 → 回退）；`git checkout` 后
+`cargo test -q -p colm-core --lib -- --test-threads=1`（354 通过）、工作树干净。
