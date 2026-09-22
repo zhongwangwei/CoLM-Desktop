@@ -14219,3 +14219,23 @@ Not-tested: `zol`/`ustar2`/`fh`/`um` 的上游来源（即种子本体的定位�
 
 Tested: 本表每一行都对应本文档前述小节的实测输出。
 Not-tested: 上表第 1、2 类本身（未逐条穷尽）。
+
+## 关于"调用时机"假设：老的 `iterprobe` 转储**不可用**（已核对）
+
+第 140 轮前后留下的 `/tmp/gf/iterprobe/{fort_iter2,rust_iter2}.txt` 是叶温 Newton 迭代
+内部的转储，本想直接用它验证"调用时机/顺序"这条残余假设。核对后**判定不可用**：
+
+* **代码状态过时**：那是本会话 5 处修复（`gssun`/`rbsun`/`us10m`/`olrg`/`gbh2o`）之前的产物；
+* **两侧格式不一致**：上游打印标记是 `Q 1_tl`/`Q 2_tl`（两次迭代都有），Rust 侧只有 `Q2 …`
+  一种，且没有迭代 1 的对应行 —— 无法逐次对齐；
+* 数值上确实能看到 1 ULP 级差异（如 `fevpl 1.37119817067997553e-8` vs `…586e-8`），
+  但那只能说明"当时的种子的确在这一带"，不能用于今天的状态。
+
+**若要验证"调用时机"假设**，需要**重做一次**迭代内部探针，且要求：两侧打印**同一组量、
+同一格式、同一迭代序号**（含迭代次数本身）。现成模板可用 `step0_arg_probe3.sh`（自带 vendor
+还原 + 重编 + f48 自检），把插桩点从 `CALL moninobukm` 换成 `DO WHILE (it .le. itmax)`
+循环体内即可；Rust 侧对应 `leaf_temperature.rs` 的迭代循环。
+
+Tested: `diff /tmp/gf/iterprobe/fort_iter2.txt /tmp/gf/iterprobe/rust_iter2.txt` 的核对
+（56 行 vs 23 行、标记格式不同）；`/tmp/gf/iterprobe/` 的内容与时间戳。
+Not-tested: 重做的迭代探针（下一轮，若要走"调用时机"这条线）。
