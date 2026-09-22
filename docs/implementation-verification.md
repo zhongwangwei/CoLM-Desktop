@@ -11039,3 +11039,100 @@ Tested: `MOD_CanopyLayerProfile.F90` 本体 dump（24 处逐条归例程、逐�
 Not-tested: 这 19 处没有随机差分驱动（上游那 14 个例程没有现成调用点，
 `uprofile`/`kintegral` 那两个有 `USE MOD_CanopyLayerProfile` 也还需要按 8/12 个实参搭桩）；
 `cal_z0_displa` 的 ELSE 支（`sqrtdragc > 0.3`，走到就打诊断并取 `fai = 0.29`）没有专门构造。
+
+## **真缺陷**：`rss` 少了上游"第一步不算"那道门（`rss /= spval`）
+
+这是本会话第一次在**没被黄金算例覆盖的配置**上抓到的实打实的数值缺陷，
+而不是 1 ULP。
+
+### 怎么发现的
+
+文档一直把"`DEF_USE_Campbell_SOIL_MODEL = .true.` + `DEF_USE_VariablySaturatedFlow
+= .false.`"这条经典 Richards 配置记成"**本机一次都没被走到**"（它确实不是三个黄金
+算例的配置）。这轮把它**真的跑起来**：复制 `oracle/work/CN-Cng`，在 `case.nml`
+的 `&nl_colm` 里加
+
+```
+DEF_USE_Campbell_SOIL_MODEL   = .true.
+DEF_USE_VariablySaturatedFlow = .false.
+```
+
+两侧各跑一步、再各跑满 11 天，与内核逐位比对。**第一步就差了 50 个变量**，
+量级不是 1 ULP 而是 1e-4…1e-3（`f_rss` 0 对 0.0163、`f_ldew` 1.2e-3、
+`f_wliq_soisno` 1.0e-4）；11 天口径 51 个 tier2 变量超容差。
+
+### 定位
+
+`MOD_Thermal.F90:613-621` 有两道门：
+
+```fortran
+!NOTE: (1) DEF_RSS_SCHEME=0 means no rss considered
+!      (2) Do NOT calculate rss for the first timestep
+IF (DEF_RSS_SCHEME>0 .and. rss/=spval) THEN
+   CALL SoilSurfaceResistance (…)
+ELSE
+   IF (DEF_RSS_SCHEME == 4) THEN
+      rss = 1.        !LP92
+   ELSE
+      rss = 0.        !the other RSS schemes
+   ENDIF
+ENDIF
+```
+
+`rss` 是 `MOD_Vars_TimeVariables` 的 module 时间变量，**起跑重启里是 `spval`**：
+
+```
+$ python3 -c "import netCDF4 as nc; print(nc.Dataset('…/restart/2008-001-00000/….nc').variables['rss'][:])"
+[-1.e+36]
+```
+
+本仓库只实现了第一道门（`scheme == 0` 时返回 0），**第二道完全没有** ——
+第一步照样算，于是多出一个 0.0163 s/m 的土壤表面阻力。黄金算例`scheme` 被
+上游强制置 0，所以这条永远显不出来；只有 Campbell 配置才撞上。
+
+### 判定证据（两次独立、可复现）
+
+1. 把 `DEF_RSS_SCHEME` 显式写成 `0`（把这道门绕开）再跑一步：
+   50 个变量 → **33 个、全部 ~1e-15 相对**，与黄金配置同一水平。
+2. 实现这道门之后不写 `DEF_RSS_SCHEME`：同样 50 → **33 个、~1e-15**，
+   `f_rss` 两侧都是 0；跑满 11 天，超容差变量 **51 → 16**。
+
+### 落地
+
+`rss` 在上游是 module 时间变量，所以 Rust 侧也必须是**跨步状态**，不能每步现算：
+
+* `StandardLctEnergyState` 新增 `soil_surface_resistance_s_m`（`MISSING` = 未算过）；
+* `standard_lct_step.rs::soil_surface_resistance_input` 收下"上一步的 `rss`"，
+  等于 `MISSING` 时按 `scheme == 4 ? 1.0 : 0.0` 返回；
+* `StandardLctRestartTemplate` 从**入参重启**里读 `rss`（起跑是 `spval`，
+  断点续跑是上一段算出的值 —— 写死 `spval` 会让续跑的每一步都当"第一步"）。
+
+回归测试：`standard_lct_step_tests::soil_surface_resistance_is_skipped_on_the_first_timestep`
+（`MISSING` → 0，且写回状态；已有值时 > 0 且写回）。
+
+**规矩**：凡上游用 `x /= spval` 之类**"缺测值即未初始化"**的 module 时间变量做门，
+都要当成跨步状态移植，不能当纯函数。`rss` 是第一个被本仓库发现的；
+同类候选还有 `alb`/`ssun`/`ssha`/`ssoi`/`ssno`/`thermk`/`extkb`/`extkd`（这些
+黄金算例每步都覆盖，暂未暴露）。
+
+### 黄金算例不受影响
+
+`DEF_USE_Campbell_SOIL_MODEL` 为假时上游把 `DEF_RSS_SCHEME` 强制置 0，
+所以那道门在三个黄金窗口里恒不触发。实测三口径**逐位不变**：
+
+| 窗口 | 逐位不同值 | Σ\|Δ\| | 超容差 | 变量数 |
+|---|---|---|---|---|
+| 干 | 21196（持平） | 311.4338（持平） | 825（持平） | 17 |
+| 湿 | 32530（持平） | 10381.6452（持平） | 20664（持平） | 68 |
+| 雪 | 33602（持平） | 444394.4368（持平） | 25896（持平） | 79 |
+
+Tested: `MOD_Thermal.F90:613-621` 与 `MOD_Namelist.F90:1946-1950` 逐行核对；入参重启
+`rss` 的实测值（`-1e36`）；Campbell + VSF-off 配置一步与 11 天的两侧逐位比对
+（改前 50 变量 / 51 超容差，改后 33 变量 / 16 超容差）；`DEF_RSS_SCHEME=0`
+对照实验；三个黄金窗口三口径 A/B（逐位不变）；
+`cargo test -q -p colm-core --lib -- --test-threads=1`（355 通过，含新回归测试）；
+`cargo clippy --workspace --all-targets -- -D warnings`；两处 `cargo fmt --all --check`；
+`cargo test --workspace --lib --bins -- --test-threads=1`；`cargo test -q -p oracle`；
+`cargo run -q -p xtask -- check-gui`；`python3 oracle/scripts/test_upstream_f48_sync.py`（PASS）。
+Not-tested: Campbell + VSF-off 只有一个月窗口、没有入库的黄金文件；`scheme == 4`
+（LP92）的那一支没有算例；其他 `spval` 门（`alb` 那一族）没有逐条排查。

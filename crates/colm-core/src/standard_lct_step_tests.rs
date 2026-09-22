@@ -577,6 +577,8 @@ fn energy_state(forcing: crate::RuntimeForcing) -> StandardLctEnergyState {
             leaf_area_index: 2.0,
             stem_area_index: 0.5,
         },
+        // 单元测试直接调内核；"起跑第一步 rss 是 spval"那道门在运行期状态里模拟。
+        soil_surface_resistance_s_m: 0.0,
     }
 }
 
@@ -830,4 +832,50 @@ fn input(forcing: crate::RuntimeForcing) -> StandardLctEnergyInput<'static> {
         // 夹具走非 PHS 分支：内核看到 `None` 就不查 `smp`/`hk`。
         plant_hydraulics: None,
     }
+}
+
+/// `MOD_Thermal.F90:615` 的第二道门：`IF (DEF_RSS_SCHEME>0 .and. rss/=spval)`。
+///
+/// `rss` 是 module 时间变量，起跑那一步入参重启给的是 `spval`，所以上游
+/// **第一步不算**土壤表面阻力，直接按方案号取 `0.`（方案 4 取 `1.`）。
+/// 漏掉这道门时 `DEF_USE_Campbell_SOIL_MODEL = .true.` 的算例第一步就多出一个
+/// 0.0163 s/m 的阻力，顺着地表蒸发把整步拉开到 1e-4 相对量级。
+#[test]
+fn soil_surface_resistance_is_skipped_on_the_first_timestep() {
+    let forcing = prepare_runtime_forcing(RuntimeForcingInput {
+        air_temperature_k: 290.0,
+        specific_humidity: 0.008,
+        surface_pressure_pa: 101_325.0,
+        precipitation_kg_m2_s: 1.0e-4,
+        eastward_wind_m_s: 3.0,
+        northward_or_scalar_wind_m_s: 1.0,
+        wind_is_vector: true,
+        downward_shortwave_w_m2: 450.0,
+        downward_longwave_w_m2: 350.0,
+        calendar_day: 172.5,
+        longitude_radians: 0.0,
+        latitude_radians: 0.5,
+        grid_longitude_radians: 0.5,
+        grid_latitude_radians: 0.5,
+        boundary_layer_height_m: None,
+    })
+    .unwrap();
+    let input = input(forcing);
+
+    // 起跑第一步：入参重启里 `rss` 还是 `spval`。
+    let mut first_state = energy_state(forcing);
+    first_state.soil_surface_resistance_s_m = crate::MISSING;
+    let first = standard_lct_energy_step(input, &mut first_state).unwrap();
+    assert_eq!(first.soil_surface_resistance_s_m, 0.0);
+    assert_eq!(first_state.soil_surface_resistance_s_m, 0.0);
+
+    // 第二步起：`rss` 已有值，正常计算并**写回状态**（供下一步判定）。
+    let mut later_state = energy_state(forcing);
+    later_state.soil_surface_resistance_s_m = 0.0;
+    let later = standard_lct_energy_step(input, &mut later_state).unwrap();
+    assert!(later.soil_surface_resistance_s_m > 0.0);
+    assert_eq!(
+        later_state.soil_surface_resistance_s_m,
+        later.soil_surface_resistance_s_m
+    );
 }

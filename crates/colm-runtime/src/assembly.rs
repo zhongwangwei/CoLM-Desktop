@@ -354,6 +354,19 @@ impl SurfaceDiagnostics {
             replaced(source, patch, name, value)?,
         )))
     }
+
+    /// **入参**重启里本 patch 的原值；该变量不在重启里时返回 `None`。
+    ///
+    /// `rss` 要用它：上游 `MOD_Thermal.F90:615` 有一道 `rss /= spval` 的门，
+    /// `rss` 是 module 时间变量、起跑重启给的是 `spval`，所以第一步不算。
+    fn input_value(&self, name: &str, patch: usize) -> Option<f64> {
+        self.columns
+            .iter()
+            .find(|(candidate, _)| *candidate == name)
+            .and_then(|(_, column)| column.as_ref())
+            .and_then(|column| column.get(patch))
+            .copied()
+    }
 }
 
 /// 逐波段的辐射量：`(patch, rtyp, band)`，每个 patch 四个数。
@@ -561,6 +574,10 @@ pub struct StandardLctRestartTemplate {
     restart_columns: RestartColumns,
     /// 表面诊断量的整变量缓冲，同上。
     surface_diagnostics: SurfaceDiagnostics,
+    /// **入参**重启里的 `rss`。起跑重启是 `spval`，上游那道 `rss /= spval`
+    /// 因此让第一步不算土壤表面阻力（见 `standard_lct_step.rs` 的同名注释）。
+    /// 断点续跑时它是上一段算出来的值，所以必须从重启里读，不能写死 `spval`。
+    pub soil_surface_resistance_s_m: f64,
     /// 逐波段辐射量的整变量缓冲，同上。
     radiation_fields: RadiationFields,
     /// 雪 + 土的模板列（`soilsnow`），积雪分支的 `GroundTemperatureInput` 需要这个形状。
@@ -987,6 +1004,10 @@ fn assemble(
     Ok(StandardLctRestartTemplate {
         patch,
         patch_type: i32::try_from(patch_type).context("patchtype is outside the kernel's range")?,
+        // 入参重启里没有 `rss` 时按 `spval` 处理 —— 与上游"起跑时是缺测值"一致。
+        soil_surface_resistance_s_m: surface_diagnostics
+            .input_value("rss", patch)
+            .unwrap_or(colm_core::MISSING),
         soil,
         soil_thermal_inputs,
         soil_hydraulic_model,
@@ -1083,6 +1104,7 @@ impl StandardLctRestartTemplate {
                     leaf_area_index: self.temporal_leaf_area_index,
                     stem_area_index: self.temporal_stem_area_index,
                 },
+                soil_surface_resistance_s_m: self.soil_surface_resistance_s_m,
             },
             temperature_k: self.temperature_k.clone(),
             water: self.water.clone(),
@@ -1422,6 +1444,7 @@ impl StandardLctRestartTemplate {
                     leaf_area_index: self.temporal_leaf_area_index,
                     stem_area_index: self.temporal_stem_area_index,
                 },
+                soil_surface_resistance_s_m: self.soil_surface_resistance_s_m,
             },
             snow: self.snow.clone(),
             soil_temperature_k: self.temperature_k.clone(),

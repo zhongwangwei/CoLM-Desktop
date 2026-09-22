@@ -18,7 +18,7 @@ use crate::{
     PrecipitationState, RootUptakeInput, RootUptakeState, RuntimeForcing, RuntimeSnowColumn,
     SnowToSoilTransfer, SnowWaterInput, SoilSurfaceResistanceInput, SplitThermalWaterFluxes,
     SplitThermalWaterInput, ThermalWaterFluxes, ThermalWaterInput, Water2014SnowSoilInput,
-    Water2014SnowSoilOutput, Water2014SoilInput, Water2014SoilOutput, Water2014SoilState,
+    Water2014SnowSoilOutput, Water2014SoilInput, Water2014SoilOutput, Water2014SoilState, MISSING,
 };
 
 const AIR_GAS_CONSTANT_J_KG_K: f64 = 287.04;
@@ -101,6 +101,10 @@ pub struct StandardLctEnergyState {
     pub canopy: CanopyGeometry,
     /// `tlai`/`tsai`：见 [`TemporalCanopy`]。`LAI_readin` 每月覆盖它。
     pub temporal_canopy: TemporalCanopy,
+    /// `rss`：上游 `MOD_Vars_TimeVariables` 的 module 时间变量，**入参重启里是
+    /// `spval`**（起跑那一步），由 `MOD_Thermal` 算完之后覆盖。这里保留同一份
+    /// 语义：初值来自重启，每步由 [`soil_surface_resistance_input`] 读取并更新。
+    pub soil_surface_resistance_s_m: f64,
 }
 
 /// 用状态里的冠层几何覆盖输入里的 `lai`/`sai`。
@@ -284,7 +288,9 @@ fn finish_energy_step(
     )?;
     let ground_humidity = non_split_ground_humidity_input(input)?;
     let root_uptake = root_uptake_input(input)?;
-    let soil_surface_resistance_s_m = soil_surface_resistance_input(input, ground_humidity)?;
+    let soil_surface_resistance_s_m =
+        soil_surface_resistance_input(input, ground_humidity, state.soil_surface_resistance_s_m)?;
+    state.soil_surface_resistance_s_m = soil_surface_resistance_s_m;
     let mut ground_flux_input = ground_flux_input(
         input.ground_flux,
         input.forcing,
@@ -962,6 +968,7 @@ fn root_uptake_input(input: StandardLctEnergyInput<'_>) -> Result<RootUptakeStat
 fn soil_surface_resistance_input(
     input: StandardLctEnergyInput<'_>,
     ground_humidity: Option<GroundHumidityState>,
+    previous_resistance_s_m: f64,
 ) -> Result<f64> {
     // `MOD_Thermal.F90:613-621`：`DEF_RSS_SCHEME = 0` 的意思是**不启用**土壤表面
     // 阻力（`DEF_Namelist` 在关掉 Campbell 土壤模型时把它置 0），上游这时把
@@ -970,6 +977,23 @@ fn soil_surface_resistance_input(
     // 在能量步就报 "soil surface resistance inputs are invalid"。
     if input.soil_surface_resistance.scheme == 0 {
         return Ok(0.0);
+    }
+    // 同一处的第二道门是 `rss /= spval`：`rss` 是 module 时间变量，**起跑那一步
+    // 入参重启给的是 `spval`（-1e36）**，所以上游第一步**根本不算**土壤表面阻力，
+    // 直接落到 `IF (DEF_RSS_SCHEME == 4) rss = 1. ELSE rss = 0.`（源码注释写得
+    // 很清楚："Do NOT calculate rss for the first timestep"）。
+    //
+    // 实测（`DEF_USE_Campbell_SOIL_MODEL = .true.`、`DEF_USE_VariablySaturatedFlow
+    // = .false.`，即唯一会走到 scheme>0 的配置）：漏掉这道门时两侧第一步就差
+    // `f_rss` 0 对 0.0163，那 0.0163 顺着地表蒸发进 `fevpg`（5.8e-4 相对）→
+    // `qinfl` → `wliq_soisno`（1e-4 相对），第一步就拉开 ~50 个变量；把
+    // `DEF_RSS_SCHEME` 显式写成 0 之后立刻回到 1 ULP 量级（33 个变量、~1e-15）。
+    if previous_resistance_s_m == MISSING {
+        return Ok(if input.soil_surface_resistance.scheme == 4 {
+            1.0
+        } else {
+            0.0
+        });
     }
     let Some(humidity) = ground_humidity else {
         return soil_surface_resistance(input.soil_surface_resistance);
