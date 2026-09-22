@@ -628,16 +628,10 @@ pub fn mix_ground_albedo(
     snow: [[f64; RADIATION_TYPES]; BANDS],
     snow_fraction: f64,
 ) -> [[f64; RADIATION_TYPES]; BANDS] {
-    // `MOD_Albedo.F90:2048-2051`：
-    // `alb = alb*(1.-frsnow) + 雪面反照率*frsnow`。GIMPLE（`albland` 第 5 处）是
-    // `FMA(雪面反照率, frsnow, alb*(1-frsnow))` —— **左边**那个（地面）乘积先舍入，
-    // **右边**（雪面）的乘积被吸收；与 `net_solar` 那轮量出的方向一致。
     std::array::from_fn(|band| {
         std::array::from_fn(|radiation_type| {
-            snow[band][radiation_type].mul_add(
-                snow_fraction,
-                (1.0 - snow_fraction) * soil[band][radiation_type],
-            )
+            (1.0 - snow_fraction) * soil[band][radiation_type]
+                + snow_fraction * snow[band][radiation_type]
         })
     })
 }

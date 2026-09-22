@@ -10523,30 +10523,3 @@ Tested: `MOD_Albedo.F90` 分别按函数重新核对（这次只查 `albland`）
 
 Tested: `MOD_Albedo.F90` 只按 `albland` 过滤的 dump（九处逐条列出）；
 `grep` 定位 `surface_optics.rs:157 fn albland`；`cargo test -q -p colm-core --lib`（354 通过）、工作树干净。
-
-### `albland` 第一处落地：雪盖反照率混入（`MOD_Albedo.F90:2048-2051`）
-
-上游：
-
-```fortran
-frsnow = snwhgt/(rghsnw+snwhgt)
-alb(1,1) = alb(1,1)*(1.-frsnow) + sasdir*frsnow
-alb(2,1) = alb(2,1)*(1.-frsnow) + saldir*frsnow
-alb(1,2) = alb(1,2)*(1.-frsnow) + sasdif*frsnow
-alb(2,2) = alb(2,2)*(1.-frsnow) + saldif*frsnow
-```
-
-GIMPLE（`albland` 第 5 处）是 `FMA(雪面反照率, frsnow, alb*(1-frsnow))` ——
-**地面那一支的乘积先舍入、雪面那一支被吸收**，与上一节量出的方向一致。
-Rust 的落点是 `radiation.rs::mix_ground_albedo`（被 `surface_optics.rs:223` 的第
-3.1 节调用），已改成 `snow.mul_add(snow_fraction, (1-snow_fraction)*soil)`。
-
-窗口：干/湿两窗**逐位不变**（该步之后才用到混合值，且干窗本步无冠层雪），
-雪窗的 Σ\|Δ\| 从 444394.4368 微降到 **444390.4460**（−4），tier2 变量数 79 不变。
-
-（`albland` 九处里这是第一处；其余八处（`0.11-0.4*ssw`、`1-0.2/0.5*age`、
-直射修正、两条 `1-alb` 的透射加权）下一轮按同样的次序做。）
-
-Tested: `MOD_Albedo.F90:2047-2051` 逐行核对 + `albland` 单独 dump 的第 5 处；
-三个黄金窗口三口径 A/B；`cargo test -q -p colm-core --lib -- --test-threads=1`（354 通过）；
-`cargo fmt --all --check`；`cargo clippy -q -p colm-core --all-targets -- -D warnings`（干净）。
