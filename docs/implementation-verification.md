@@ -10369,3 +10369,40 @@ _15 = .FMA (a4, b4, _11)
 Tested: 标量复刻件 `/tmp/gf/r114/ns.f90`（`-fno-tree-vectorize`）的 `-fdump-tree-optimized`；
 干窗三个月度窗口的三口径 A/B（发现变差 → 回退）；`git checkout` 后
 `cargo test -q -p colm-core --lib -- --test-threads=1`（354 通过）、工作树干净。
+
+## 用正确方向重做 `netsolar` 的三处累加（上游源码 + 复刻件双重确认）
+
+回退之后按标量复刻件量出的方向（**最左乘积被吸收、最右是已舍入的加数**）重做：
+
+上游 `MOD_NetSolar.F90:176-183` 原样如此：
+
+```fortran
+parsun  = forc_sols*ssun(1,1) + forc_solsd*ssun(1,2)
+sabvsun = forc_sols*ssun(1,1) + forc_solsd*ssun(1,2) &
+        + forc_soll*ssun(2,1) + forc_solld*ssun(2,2)
+sabvg   = forc_sols *(1.-alb(1,1)) + forc_solsd*(1.-alb(1,2)) &
+        + forc_soll *(1.-alb(2,1)) + forc_solld*(1.-alb(2,2))
+```
+
+**三处都是平铺的左到右四项/两项和**（不是"先算 visible 再加两项"），所以
+Rust 的 `absorption` **不能**再调 `visible_absorption` —— 那个调用会把
+visible 那一对先舍成一次结果。`visible_absorption` / `absorption` /
+`absorbed_by_surface` 三个函数已按 `fma(a1,b1, a2*b2)`、外层依次是 a4/a3 的
+嵌套写成。
+
+窗口三口径（基线 = 回退后的状态）：
+
+| 窗口 | 逐位不同值 | Σ\|Δ\| | 超容差 | 变量数 |
+|---|---|---|---|---|
+| 干 | 21229 → 21224 | 216.9941 → 311.4747 | 813 → 821 | 17（不变） |
+| 湿 | 33207 → **33092** | 10386.5309 → **10382.9221** | 20671 → **20663** | 68 |
+| 雪 | 33593 → 33595 | 不变 | 不变 | 79 |
+
+**判据链（为什么保留）**：① 上游源码是平铺和（上面已抄）；② 标量复刻件给出
+方向；③ 方向写反时干窗 tier2 变量数从 17 爆到 **27**，写对后**回到 17** —— 这一条
+比 Σ\|Δ\| 更能分辨对错。干窗的 Σ\|Δ\| 变大是这类改动的常见混合信号
+（湿窗同时变好 115 个逐位值），不构成否决。
+
+Tested: 标量复刻件 `/tmp/gf/r114/ns.f90`；上游 `MOD_NetSolar.F90:176-183` 逐行核对；
+三个黄金窗口的三口径 A/B（含方向写反时的对照）；`cargo test -q -p colm-core --lib`（354 通过）；
+`cargo fmt --all --check`。
