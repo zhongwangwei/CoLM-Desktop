@@ -256,6 +256,11 @@ fn baseflow_optimization_is_refused_rather_than_run_unoptimized() {
     let message = error.to_string();
     assert!(message.contains("DEF_Optimize_Baseflow"), "{message}");
     assert!(message.contains("scale_baseflow"), "{message}");
+    // 拒绝的是**优化过程**，不是"不读那个文件"（读取在 `colm-rs` 里）。
+    assert!(
+        message.contains("only the optimizer is missing"),
+        "{message}"
+    );
 }
 
 /// 金标准算例用的是 `DEF_Runoff_SCHEME = 3`，也就是 Simple VIC。

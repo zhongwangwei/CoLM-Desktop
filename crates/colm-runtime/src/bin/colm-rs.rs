@@ -66,24 +66,6 @@ fn run() -> Result<()> {
     );
     let name = colm_case::case_name(&case_nml)?;
 
-    // `scale_baseflow`：上游从 `DEF_dir_restart/ParaOpt/<case>_baseflow.nc` 读它
-    // （`MOD_Opt_Baseflow.F90:37-38`，`defval = 1.`），本仓库把 `baseflow_scale`
-    // 钉成 1.0。**没有那个文件时两边一致**（内核日志也会打 "default value is used"），
-    // 但文件一旦存在就说明这个算例的参数被标定过，静默用 1.0 会给出另一套产流。
-    let baseflow_scale = layout
-        .out()
-        .join(&name)
-        .join("restart")
-        .join("ParaOpt")
-        .join(format!("{name}_baseflow.nc"));
-    ensure!(
-        !baseflow_scale.is_file(),
-        "{} exists, but the Rust runtime pins `scale_baseflow` to 1.0 and does not read \
-         `ParaOpt/*_baseflow.nc`; remove the file (upstream then uses its default of 1.0) or \
-         run the kernel instead",
-        baseflow_scale.display()
-    );
-
     let config = read_point_runtime_config(&case_nml)?;
     let document = read_document(&case_nml)?;
     let physics = land_physics_parameters(
@@ -156,6 +138,12 @@ fn run() -> Result<()> {
                 .context("DEF_LC_YEAR does not fit an i32")?,
         )?);
     }
+
+    // `scale_baseflow`：上游 `Opt_Baseflow_init` 从
+    // `DEF_dir_restart/ParaOpt/<case>_baseflow.nc` 读一个长度 `landpatch` 的向量，
+    // 文件或变量缺失时取 `defval = 1.`（`MOD_Opt_Baseflow.F90:37-38`）。
+    // 它直接乘在 `rsubst`/`rsub` 上，参数标定过的算例差别是物理量级的。
+    template = template.with_baseflow_scale(read_baseflow_scale(&layout, &name, arguments.patch)?);
 
     // 会话从**配置**开（窗口、站点、步长、频率都在里面），要在 `open` 消费掉
     // 配置之前建好 —— 而它自己不带 forcing，所以先后没有别的影响。
@@ -317,6 +305,38 @@ fn restart_files(
         );
     }
     Ok(RestartFiles { constant, initial })
+}
+
+/// `ParaOpt/<case>_baseflow.nc` 里的 `scale_baseflow(patch)`。
+///
+/// 上游 `ncio_read_vector (file, 'scale_baseflow', landpatch, scale_baseflow, defval = 1.)`
+/// （`MOD_Opt_Baseflow.F90:37-38`）：**文件不在、或文件里没有这个变量**，都取 1.0。
+/// 本机三个黄金算例都属于前者（内核日志会打 "default value is used"），
+/// 所以这道读取对它们没有影响；被标定过的算例则从此与内核一致。
+fn read_baseflow_scale(layout: &colm_case::Layout, name: &str, patch: usize) -> Result<f64> {
+    // 文件名与重启同一套块后缀约定：`MOD_Block.F90:641-645` 的
+    // `get_filename_block` 把 `_<block>` 插在 `.nc` 之前，单点算例是 `w180_s90`。
+    // 写成不带后缀的 `..._baseflow.nc` 内核根本不会读（会打 "not found" 走默认值）。
+    let path = layout
+        .out()
+        .join(name)
+        .join("restart/ParaOpt")
+        .join(format!("{name}_baseflow_w180_s90.nc"));
+    if !path.is_file() {
+        return Ok(1.0);
+    }
+    let file = colm_init::RestartFile::open(&path)?;
+    if file.variable_dimensions("scale_baseflow").is_err() {
+        return Ok(1.0);
+    }
+    let values = file.floats("scale_baseflow")?;
+    ensure!(
+        patch < values.len(),
+        "{} carries {} `scale_baseflow` value(s), too few for patch {patch}",
+        path.display(),
+        values.len()
+    );
+    Ok(values[patch])
 }
 
 /// `%04d-%03d-%05d`：`MOD_Vars_TimeVariables.F90:1109` 的 `cdate`。

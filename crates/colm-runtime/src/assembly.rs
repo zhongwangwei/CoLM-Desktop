@@ -578,6 +578,14 @@ pub struct StandardLctRestartTemplate {
     /// 因此让第一步不算土壤表面阻力（见 `standard_lct_step.rs` 的同名注释）。
     /// 断点续跑时它是上一段算出来的值，所以必须从重启里读，不能写死 `spval`。
     pub soil_surface_resistance_s_m: f64,
+    /// `scale_baseflow`：基流缩放。上游从
+    /// `DEF_dir_restart/ParaOpt/<case>_baseflow.nc` 的 `scale_baseflow` 向量读，
+    /// 文件或变量缺失时取 `defval = 1.`（`MOD_Opt_Baseflow.F90:37-38`）。
+    ///
+    /// **不是常数**：参数标定过的算例会把它写成别的值，而它直接乘在
+    /// `rsubst`/`rsub` 上（`WATER_VSF`/`WATER_2014`）。装配期默认 1.0，
+    /// 由 `colm-rs` 用 [`Self::with_baseflow_scale`] 覆盖成文件里的值。
+    pub baseflow_scale: f64,
     /// 逐波段辐射量的整变量缓冲，同上。
     radiation_fields: RadiationFields,
     /// 雪 + 土的模板列（`soilsnow`），积雪分支的 `GroundTemperatureInput` 需要这个形状。
@@ -1008,6 +1016,8 @@ fn assemble(
         soil_surface_resistance_s_m: surface_diagnostics
             .input_value("rss", patch)
             .unwrap_or(colm_core::MISSING),
+        // 默认 1.0；调用方（`colm-rs`）读过 `ParaOpt/*_baseflow.nc` 之后覆盖。
+        baseflow_scale: 1.0,
         soil,
         soil_thermal_inputs,
         soil_hydraulic_model,
@@ -1059,6 +1069,16 @@ impl StandardLctRestartTemplate {
     /// 而 landdata 路径要算例名与输出目录，那是 `colm-rs` 才知道的东西。
     pub fn with_monthly_leaf_area_index(mut self, lai: MonthlyLeafAreaIndex) -> Self {
         self.monthly_leaf_area_index = Some(lai);
+        self
+    }
+
+    /// `scale_baseflow`：把装配期的默认 1.0 换成 `ParaOpt/*_baseflow.nc` 里的值。
+    ///
+    /// 上游（`MOD_Opt_Baseflow.F90:37-38`）在 `Opt_Baseflow_init` 里读一次，
+    /// 之后只用于 `rsubst = rsubst*scale_baseflow(ipatch)`；本仓库不做那套优化，
+    /// 但**必须读同一个数** —— 标定过的算例差别是物理量级的。
+    pub fn with_baseflow_scale(mut self, scale: f64) -> Self {
+        self.baseflow_scale = scale;
         self
     }
 
@@ -1395,9 +1415,10 @@ impl StandardLctRestartTemplate {
                 hydraulic_model: &self.soil_hydraulic_model,
                 // 模板给的是**重启时刻**的雪层数；积雪分支会用本步的实际层数覆盖。
                 snow_layers: self.snow.layer_count.unsigned_abs() as usize,
-                // `scale_baseflow`：本仓库不携带 `ParaOpt/*_baseflow.nc`，
-                // 上游此时走默认值 1.0（日志里的 "default value is used"）。
-                baseflow_scale: 1.0,
+                // `scale_baseflow`：装配期从 `ParaOpt/*_baseflow.nc` 读进来
+                // （[`Self::with_baseflow_scale`]），文件或变量缺失时保持 1.0
+                // —— 上游 `ncio_read_vector` 的 `defval = 1.`。
+                baseflow_scale: self.baseflow_scale,
                 runoff: self.runoff,
                 // 内核覆盖：`standard_lct_soil_step` 用本步能量链的通量重建。
                 fluxes: Water2014SoilFluxes {

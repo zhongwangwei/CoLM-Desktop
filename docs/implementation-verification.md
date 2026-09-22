@@ -11290,3 +11290,53 @@ Tested: `/tmp/gf/camp_any.sh CN-Cng-wet`、`/tmp/gf/camp_any.sh US-NR1-snow`
 （内核 + `colm-rs` + `golden-compare`）；三个窗口的超容差变量数如上表。
 Not-tested: 这条配置**没有入库的黄金文件**，所以它是"可复现实验"而不是回归闸门；
 要不要为它加第四个黄金窗口（含重跑 tier 分层分类）留待后续决定。
+
+### 反过来：`ParaOpt/*_baseflow.nc` 改成**真读**，不再拒绝
+
+上一条把它做成"文件存在就拒绝"。那是把"静默不一致"堵上了，但拒绝本身也是个缺口 ——
+被标定过的算例本仓库就完全跑不了。这轮改成真读，并做了三道验证。
+
+**文件名要先对**：上游 `MOD_Opt_Baseflow.F90:37` 拼的是
+`<DEF_dir_restart>/ParaOpt/<case>_baseflow.nc`，但 `ncio_read_vector` 走的是
+`ncio_read_vector_complete_real8_1d` → `get_filename_block`
+（`MOD_Block.F90:641-645`），**读盘时把块名插在 `.nc` 之前**：
+
+```
+fileblock = filename(1:i-1) // '_' // blockname // '.nc'
+```
+
+单点算例的块名是 `w180_s90`，所以真正的文件名是
+**`<case>_baseflow_w180_s90.nc`**。实测：写成不带后缀的名字时内核照样打
+"restart data scale_baseflow … not found, default value is used" —— 文件明明在那儿。
+本仓库读的是同一个带后缀的名字（与重启文件名的约定一致）。
+
+**三道验证**（`colm-rs` 的 `read_baseflow_scale`）：
+
+| 情形 | 期望 | 实测 |
+|---|---|---|
+| 文件不存在（三个黄金算例） | 用 `defval = 1.`，结果逐位不变 | ✓ 三窗口三口径逐位不变 |
+| 文件在、内容不是 NetCDF | 报错（证明**真的去开了**） | ✓ `cannot open restart …: NetCDF: Unknown file format` |
+| 文件在、`scale_baseflow = NaN` | 值进到内核输入、被 `WATER_VSF` 的有限性校验拦住 | ✓ `colm-rs: WATER_VSF values are not physical` |
+
+第三道是"值真的流进去了"的直接证据：`variably_saturated_flow.rs` 的
+`validate` 里有 `&& input.baseflow_scale.is_finite()`，NaN 只可能来自那个文件。
+
+**没验到的（说清楚）**：`rsubst` 在三个黄金窗口里**恒为 0**
+（`f_rsub` 最大值的实测：干 0 / 湿 0 / 雪 0），所以 `scale_baseflow` 乘上去
+数值上完全没有可见效果 —— 把文件里的值从 1.0 改成 1.5，内核与本仓库的输出
+**都逐位不变**。这条支路的数值正确性因此只能靠"读的是同一个数"来保证，
+不能靠窗口。上游语义（`rsubst = rsubst*scale_baseflow(ipatch)`）照抄，
+位置在 `assembly.rs` 装配期一次，与 `Opt_Baseflow_init` 只读一次一致。
+
+顺带把入库的对照脚本改成**两侧共用同一棵输出树**（`DEF_dir_output` 指到
+`<case>/out/`）：分成两棵树时 `ParaOpt/*_baseflow_*.nc` 只有一侧看得见。
+改后干窗仍是 16，湿/雪窗口同前。
+
+Tested: `MOD_Opt_Baseflow.F90:37`、`MOD_Block.F90:620-647`、
+`MOD_NetCDFVector.F90:312-336/744` 逐段核对；`colm-rs` 的三道验证（缺文件 /
+坏文件 / NaN）；`scale_baseflow` 1.0 vs 1.5 两侧输出逐位比对（都不变，原因是
+`f_rsub ≡ 0`）；`oracle/scripts/compare_second_config.sh` 三个窗口
+（干 16 / 湿 66 / 雪 79）；`cargo test -q -p colm-runtime --lib -- --test-threads=1`（72 通过）；
+`cargo fmt --all --check`。
+Not-tested: `rsubst ≠ 0` 的算例（本机没有）；`DEF_Optimize_Baseflow = .true.`
+的优化过程本身（仍然拒绝）。

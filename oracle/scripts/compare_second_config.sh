@@ -25,13 +25,16 @@ assert old in s, 'case name line not found'
 s=s.replace(old, old+"\n   DEF_USE_Campbell_SOIL_MODEL   = .true.\n   DEF_USE_VariablySaturatedFlow = .false.", 1)
 open(p,'w').write(s)
 PY
-sed -e "s#^   DEF_dir_output.*#   DEF_dir_output  = '$d/out/'#" \
+# 两侧**共用同一棵输出树**（`<case>/out/<case>/restart`）：上游从
+# `DEF_dir_restart/ParaOpt/<case>_baseflow_w180_s90.nc` 读 `scale_baseflow`，
+# 本仓库从同一路径读。分成两棵树会让这类文件只有一侧看得见。
+sed -e "s#^   DEF_dir_output.*#   DEF_dir_output  = '$d/case/out/'#" \
     -e "s#^   DEF_dir_rawdata.*#   DEF_dir_rawdata = '$d/rawdata_unused/'#" \
     -e "s#^   DEF_dir_runtime.*#   DEF_dir_runtime = '$d/runtime_unused/'#" \
     $d/case/case.nml > $d/case.nml
-mkdir -p $d/out; cp -R $d/case/out/. $d/out/; rm -rf $d/out/$case/history
+rm -rf $d/case/out/$case/history
 (cd $d/run && $BASE/kernels/default/colm.x $d/case.nml > f.log 2>&1)
 cargo run -q --manifest-path $BASE/Cargo.toml -p colm-runtime --bin colm-rs -- $d/case --land-cover igbp --restart-out $d/rust_restart.nc --history-dir $d > $d/r.log 2>&1
-G=$(ls $d/out/$case/history/*.nc); R=$(ls $d/colm-rs_hist*.nc)
+G=$(ls $d/case/out/$case/history/*.nc); R=$(ls $d/colm-rs_hist*.nc)
 cargo run -q --manifest-path $BASE/Cargo.toml -p oracle --bin golden-compare -- $G $R --tolerances $BASE/oracle/tolerances.toml > $d/cmp.txt 2>&1 || true
 echo "=== $case (Campbell, VSF off)"; head -1 $d/cmp.txt; grep "failures by tier" $d/cmp.txt
