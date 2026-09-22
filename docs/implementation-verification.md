@@ -13568,3 +13568,37 @@ python3 oracle/scripts/restart_divergence.py \
 
 Tested: 新脚本对现有第 0 步 restart 的实比（19/68，逐变量 maxrel/ndiff/maxabs）。
 Not-tested: 用它筛 `lt_ext.opt`/`th_ext.opt` 里的候选（下一轮）。
+
+## 第三个（也是**唯一来自 `main/`** 的）关键 dump：`MOD_GroundTemperature` 41 处收缩
+
+`t_soisno`/`t_grnd` 的温度更新**不在** `MOD_Thermal_CanopyPhase_Extended.F90` 里（`th_ext.opt`
+搜不到 `tinc_`/`t_grnd_`），而在 `main/MOD_GroundTemperature.F90` —— 它也是本会话遇到的
+**唯一**由内核直接编 `main/` 版的模块（与 LeafTemperature/Thermal 必须取
+`extends/interception/*_Extended.F90` 相反）：
+
+```
+$ grep -n "MOD_GroundTemperature.o:" vendor/CoLM202X/Makefile
+835:MOD_GroundTemperature.o: MOD_PhaseChange.o MOD_SoilThermalParameters.o
+$ strings .bld/MOD_GroundTemperature.o | grep '\.F90'
+main/MOD_GroundTemperature.F90
+```
+
+dump 已按同一配方产出（**41 处** FMA 类收缩）：
+
+```bash
+gfortran -c -O2 -fdefault-real-8 -ffree-form -cpp -ffree-line-length-0 \
+  -fallow-argument-mismatch -I.bld -Iinclude -Imain -Ishare \
+  main/MOD_GroundTemperature.F90 -J/tmp/gf/r166 \
+  -fdump-tree-optimized=/tmp/gf/r166/gt.opt -o /tmp/gf/r166/gt.o
+```
+
+配合第 197-198 轮的结论（restart 侧 `t_soisno`/`tleaf` 恰 1 ULP），下一轮的筛法已经完整：
+
+1. 在 `gt.opt`（41 处）里找**无条件执行**的温度更新式（三对角求解、界面导热率、
+   `cv`/`thk` 的组装），逐个按对文件形状改；
+2. 每改一处先跑 `bash /tmp/gf/dry_ts.sh 1` + `restart_divergence.py`，
+   看 **19/68** 是否下降；再用 `window_divergence.py`（585/692）与三窗口复核。
+
+Tested: `main/MOD_GroundTemperature.F90` 的 dump 生成（41 处）；Makefile:835 与
+`strings .bld/MOD_GroundTemperature.o` 的来源核对；th_ext.opt 中无 `tinc_`/`t_grnd_` 的确认。
+Not-tested: 那 41 处的逐条筛选（下一轮）。
