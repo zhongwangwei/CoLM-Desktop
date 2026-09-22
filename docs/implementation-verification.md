@@ -13473,3 +13473,45 @@ Not-tested: 三候选同时打补丁的那一次运行（下一轮）。
 Tested: `step0_arg_probe3.sh` 完整执行（三份补丁、重编、跑一步、无命中、自动还原、f48 PASS）；
 `grep -rln "CALL moninobukm"` 确认调用者只有四份文件；Makefile 的两条映射规则。
 Not-tested: 下一轮的 `strings` 判据（脚本已内置，未跑）。
+
+## 入口 A 收官结论：干窗第 0 步**根本不发生** `moninobuk`/`moninobukm` 调用
+
+第 194-196 轮把"种子在近地层相似性调用的实参上"这条假设**证伪**了。方法：给候选文件
+插带标记的打印，重编，跑干窗 1 步，并且**先确认补丁进了被运行的二进制**
+（`strings kernels/default/colm.x | grep -c ARGPROBE_`）。逐次结果：
+
+| 打补丁的候选 | 二进制里的标记数 | 运行时有输出？ |
+|---|---|---|
+| `main/MOD_LeafTemperature.F90`（**Makefile 不编**）| — | — |
+| `extends/…/MOD_LeafTemperature_Extended.F90` | 计入 | **否** |
+| `extends/…/MOD_LeafTemperaturePC_Extended.F90` | 计入 | **否** |
+| `main/MOD_GroundFluxes.F90:180`（`CALL moninobuk(hu,ht,hq,…)`）| 计入 | **否** |
+| `main/MOD_Vars_1DAccFluxes.F90:2781`（`CALL moninobuk(hgt_u,…)`）| 计入 | **否** |
+
+最后一次三份文件同时打标记：`二进制里的 ARGPROBE 标记数: 3`（说明补丁**确实**进了被运行的
+内核），而 `kernel.log` 里一条 `ARGPROBE_*` 都没有 —— 所以不是"打错文件"，也不是
+"补丁没生效"，而是**这些支在第 0 步没被执行**。
+
+`grep -rln "CALL moninobuk"` 列出的全部调用者就是上面五份（外加 `MOD_Glacier`/`MOD_Lake`/
+`MOD_SimpleOcean` 三条本算例不走的路径）。
+
+### 这把种子问题的提法改掉了
+
+第 0 步 history 里那 1 ULP 的 `ustar`/`us10m`/`gssun`/`tleaf` 一族，**不是**这一步新算的
+相似性调用产生的 —— 它只能来自：
+
+1. **初始化/restart 读入并按步复用的滞后面**（`MOD_Vars_1DAccFluxes` 的 `r_*` 累加器、
+   `tleaf`/`t_grnd` 等状态），即种子的来源在"restart → 状态"的映射或第 0 步的更新顺序上；
+2. 或某条**在第 0 步之后**才被调用的路径（例如累加器在步末/步初的调用时机差异，
+   Rust 与本内核的调用时机不同）。
+
+**下一轮的入口**（比之前具体得多）：对干窗**第 0 步** dump
+`r_ustar`/`r_ustar2`/`r_fm10m`/`r_us10m`/`tleaf`/`t_grnd` 的**读入值**（restart 侧）与
+第 0 步结束时的值，与 Rust 的对应量逐位比 —— 位置在
+`MOD_Vars_1DAccFluxes:accumulate_fluxes`（Rust 对应 `history_diagnostics.rs`）。
+若这些量在第 0 步**从 restart 读出时就差 1 ULP**，种子就在 restart 解析/单位换算里。
+
+Tested: 五次完整探针运行（每次自动还原、重编、`f48 sync PASS`）；每轮的
+`strings kernels/default/colm.x | grep -c ARGPROBE_` 计数（2/2/3/3）；
+`grep -rln "CALL moninobuk"` 的调用者清单。
+Not-tested: 第 0 步 `r_*`/状态量的 restart 侧逐位比对（下一轮入口）。

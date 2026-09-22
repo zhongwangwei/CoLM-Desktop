@@ -13,15 +13,21 @@ set -euo pipefail
 BASE="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 WORK=${WORK:-/tmp/gf/argprobe3}
 export NETCDF_DIR=${NETCDF_DIR:-/opt/homebrew/opt/netcdf}
+# 第 196 轮判定：干窗第 0 步**不走**叶温那两支（补丁确实进了二进制 —— `strings` 数到 2 个
+# 标记，就是 Makefile 真正编译的那两份 Extended），真正被执行的是
+# `main/MOD_GroundFluxes.F90:180` 的 `CALL moninobuk(hu,ht,hq,displax,z0mg,z0hg,z0qg,obu,um,…)`。
+# 叶温那两份保留在列表里只作对照；锚点前缀按文件区分。
 FILES=(
-  "main/MOD_LeafTemperature.F90:MAIN"
+  "main/MOD_Vars_1DAccFluxes.F90:ACC"
   "extends/interception/MOD_LeafTemperature_Extended.F90:EXT"
   "extends/interception/MOD_LeafTemperaturePC_Extended.F90:PC"
 )
 
-rm -rf "$WORK"; mkdir -p "$WORK/backup/main" "$WORK/backup/extends/interception" "$WORK/out" "$WORK/run"
+rm -rf "$WORK"; mkdir -p "$WORK/out" "$WORK/run"
 for spec in "${FILES[@]}"; do
-  cp "$BASE/vendor/CoLM202X/${spec%%:*}" "$WORK/backup/${spec%%:*}"
+  rel=${spec%%:*}
+  mkdir -p "$WORK/backup/$(dirname "$rel")"
+  cp "$BASE/vendor/CoLM202X/$rel" "$WORK/backup/$rel"
 done
 
 restore() {
@@ -51,14 +57,16 @@ for spec in files:
     rel, tag = spec.split(":")
     path = f"{base}/vendor/CoLM202X/{rel}"
     src = open(path).read()
-    prefix = "CALL moninobukm(hu_,ht_,hq_,"
+    prefix = ("CALL moninobuk(hgt_u,hgt_t,hgt_q," if tag == "ACC"
+              else "CALL moninobukm(hu_,ht_,hq_,")
     if src.count(prefix) != 1:
         print(f"   SKIP {tag}: 锚点 {src.count(prefix)} 次")
         continue
     at = src.index(prefix)
     line_start = src.rindex("\n", 0, at) + 1
     indent = src[line_start:at]
-    stmt = f"{indent}WRITE(*,'(A,4E24.16)') 'ARGPROBE_{tag} ', hu_,ht_,hq_,obu\n"
+    args = "hgt_u,hgt_t,hgt_q,obu" if tag == "ACC" else "hu_,ht_,hq_,obu"
+    stmt = f"{indent}WRITE(*,'(A,4E24.16)') 'ARGPROBE_{tag} ', {args}\n"
     open(path, "w").write(src[:line_start] + stmt + src[line_start:])
     print(f"   patched {tag}")
 PYEOF
