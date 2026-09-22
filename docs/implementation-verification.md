@@ -14389,3 +14389,38 @@ Not-tested: 初始 restart 与第 1 步 restart 的对比（下一轮，一步�
 
 Tested: 初始 restart 与第 1 步 restart 的逐位比对（36 个变量被改写）。
 Not-tested: 地面探针的 `strings` 检查与重跑（下一轮）。
+
+## 地面探针的 0 命中**不是改错文件**：补丁进了二进制，而那条调用是**无条件**的
+
+给 `step_ground_probe.sh` 补上叶温探针同款的检查后重跑：
+
+```
+== 二进制里的 GTPROBE_IN 标记数: 1        ← 补丁确实进了被运行的内核
+== 上游入参：/tmp/gf/gtprobe/gt_in.txt
+       0 /tmp/gf/gtprobe/gt_in.txt        ← 却没有任何输出
+```
+
+并另做了两项核对：
+
+```
+$ strings .bld/MOD_Thermal.o | grep -o "extends/interception/[A-Za-z_]*\.F90\|main/[A-Za-z_]*\.F90"
+extends/interception/MOD_Thermal_CanopyPhase_Extended.F90      ← 我改的就是被编的那份
+$ 逐个 nm -u .bld/*.o | grep groundtemperature_MOD_groundtemperature
+MOD_Thermal.o                                                  ← 全内核只有它引用 GroundTemperature
+$ sed -n '1205,1208p' （该文件）
+      CALL GroundTemperature (patchtype,is_dry_lake,lb,nl_soil,deltim,&   ← 顶层、**无条件**
+```
+
+三条合起来只有一个解释：**`MOD_Thermal` 里包含这条调用的那个子程序，在第 0 步没有被调用**。
+又由第 230 轮"初始 restart vs 第 1 步 restart 有 36 个变量被改写"可知物理确实在跑 ——
+**所以干窗第 0 步走的是另一条驱动路径**（既不是叶温 PFT/PC 的 Newton 迭代，也不是 Thermal
+的 `[5] Ground temperature`）。
+
+**下一轮的做法（系统性判定，不再逐点猜）**：在上游**肯定会被执行**的入口插一条标记
+（候选：`MOD_SoilSnowHydrology:SoilSnowHydrology`、`MOD_Thermal` 的子程序**入口**本身、
+或 `CoLMMAIN` 里的步进调用），一次跑出"第 0 步实际进入了哪些例程"的清单；Rust 侧同样在
+`standard_lct_step` 的对应位置打印，两侧对齐后再谈 1 ULP。
+
+Tested: `step_ground_probe.sh` 加检查后重跑（标记数 1、0 行输出）；`strings .bld/MOD_Thermal.o`
+的来源；`nm -u` 的调用者清单；`:1207` 的无条件调用上下文。
+Not-tested: "哪些例程在第 0 步被执行"的系统性清单（下一轮）。

@@ -56,6 +56,9 @@ echo "== 重编内核（含插桩）"
 (cd "$BASE" && ./oracle/scripts/build_kernel.sh default >"$WORK/build.log" 2>&1) \
   || { echo "！！编译失败，见 $WORK/build.log"; exit 3; }
 
+echo "== 先确认补丁**进没进被运行的二进制**（叶温探针都有这一步，本脚本此前漏了）"
+strings "$BASE/kernels/default/colm.x" | grep -c 'GTPROBE_IN' | sed 's/^/== 二进制里的 GTPROBE_IN 标记数: /'
+
 echo "== 跑干窗 1 步"
 sed -e "s#^   DEF_dir_output.*#   DEF_dir_output  = '$WORK/out/'#" \
     -e "s#^   DEF_forcing_namelist.*#   DEF_forcing_namelist = '$WORK/forcing.nml'#" \
