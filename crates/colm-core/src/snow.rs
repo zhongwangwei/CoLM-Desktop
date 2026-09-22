@@ -341,10 +341,13 @@ pub fn update_snow_age(
         return Ok(0.0);
     }
     let argument = 5.0e3 * (1.0 / SNOW_AGE_FREEZING_K - 1.0 / ground_temperature_k);
-    let aging =
-        1.0e-6 * time_step_seconds * (argument.exp() + (10.0 * argument).min(0.0).exp() + 0.3);
-    let fresh_snow = 0.1 * (snow_water_equivalent_mm - previous_snow_water_equivalent_mm).max(0.0);
-    Ok(((snow_age + aging) * (1.0 - fresh_snow)).max(0.0))
+    // `MOD_Albedo.F90:1323-1326` 的 `snowage`：GIMPLE 把 `sge = (sag+dela)*(1-dels)`
+    // 拆成 `FMA(deltim*1e-6, 增长项, sag) * FNMA(max(0,scv-scvold), 0.1, 1.0)`
+    // —— `dela` 的乘积与 `dels` 的乘积**都没有单独舍入**，各自被收进一次加法。
+    let aging_rate = 1.0e-6 * time_step_seconds;
+    let growth = argument.exp() + (10.0 * argument).min(0.0).exp() + 0.3;
+    let fresh_snow = (snow_water_equivalent_mm - previous_snow_water_equivalent_mm).max(0.0);
+    Ok((aging_rate.mul_add(growth, snow_age) * (-fresh_snow).mul_add(0.1, 1.0)).max(0.0))
 }
 
 /// Port of MOD_NewSnow.F90:newsnow.
@@ -484,10 +487,16 @@ pub fn snow_water(
     for (relative, fortran_layer) in (first_layer..=0).enumerate() {
         let slot = layer_slot(fortran_layer);
         state.liquid_water_kg_m2[slot] += inflow;
-        let excess_depth_m = (liquid_volume_fraction[relative]
-            - input.irreducible_saturation * effective_porosity[relative])
-            .max(0.0)
-            * state.thickness_m[slot];
+        // `MOD_SoilSnowHydrology.F90:1447/1452`：两条 `j` 分支都是
+        // `qout = max(0., (vol_liq - ssi*eff_porosity)*dz)`。GIMPLE 是
+        // `_48 = FNMA(ssi, eff, vol_liq); _131 = _48*dz; MAX(_131, 0)`
+        // —— 不可约含水那一步（`vol_liq - ssi*eff`）被吸收，`max` 留在乘法**外**。
+        // 这两条分支在 dump 里各出现一次（`bb24`/`bb25`），两处都融合。
+        let excess_depth_m = ((-input.irreducible_saturation).mul_add(
+            effective_porosity[relative],
+            liquid_volume_fraction[relative],
+        ) * state.thickness_m[slot])
+            .max(0.0);
         let outflow = if fortran_layer < 0 {
             let next = relative + 1;
             if effective_porosity[relative] < input.impermeable_porosity

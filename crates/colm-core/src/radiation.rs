@@ -52,8 +52,10 @@ impl ColdStartGroundAlbedo {
                 transmission[band][0] * (1.0 - self.soil[band][1]),
             );
             soil_absorption[band][1] = transmission[band][1] * (1.0 - self.soil[band][1]);
-            snow_absorption[band][0] = transmission[band][0] * (1.0 - self.snow[band][1])
-                + transmission[band][2] * (1.0 - self.snow[band][0]);
+            snow_absorption[band][0] = (1.0 - self.snow[band][0]).mul_add(
+                transmission[band][2],
+                transmission[band][0] * (1.0 - self.snow[band][1]),
+            );
             snow_absorption[band][1] = transmission[band][1] * (1.0 - self.snow[band][1]);
         }
         (soil_absorption, snow_absorption)
@@ -566,7 +568,10 @@ pub(crate) fn soil_albedo(
         ensure!(value.is_finite(), "soil reflectance must be finite");
     }
     Ok(if patch_type <= 2 {
-        let increase = (0.11 - 0.40 * soil_surface_wetness).max(0.0);
+        // `MOD_Albedo.F90:305`：`alb_s_inc = max(0.11-0.40*ssw, 0.)`。
+        // GIMPLE（`albland` 第 1 处）是 `_434 = FNMA(ssw, 0.40, 0.11)` ——
+        // 乘积被吸收、常数 `0.11` 是已舍入的加数；`max` 留在外面。
+        let increase = (-soil_surface_wetness).mul_add(0.40, 0.11).max(0.0);
         let visible = (soil.saturated_visible + increase).min(soil.dry_visible);
         let near_infrared = (soil.saturated_near_infrared + increase).min(soil.dry_near_infrared);
         [[visible; RADIATION_TYPES], [near_infrared; RADIATION_TYPES]]
@@ -734,7 +739,11 @@ pub(crate) fn two_stream(
     usgs_land_cover: bool,
     vegetation_snow: bool,
 ) -> Result<TwoStreamRadiation> {
-    let phi1 = 0.5 - 0.633 * optics.chil - 0.33 * optics.chil * optics.chil;
+    // `MOD_Albedo.F90:611` 的两级链式 FMA（`twostream` dump 第 1、2 处）：
+    // `_3 = FNMA(chil, 0.633, 0.5)`（`0.5-0.633*chil`，乘积被吸收），
+    // `_4 = chil*0.33`（这一项**先单独舍入**、被复用），`phi1 = FNMA(_4, chil, _3)`。
+    let phi1 = (-(0.33 * optics.chil)).mul_add(optics.chil, (-optics.chil).mul_add(0.633, 0.5));
+    // `phi2` 那一句 dump 里**没有**收缩（`_7 = phi1*2; _8 = 1-_7`），保持不融合。
     let phi2 = 0.877 * (1.0 - 2.0 * phi1);
     let projection = phi1 + phi2 * cosine_zenith;
     let direct_extinction = projection / cosine_zenith;
@@ -764,11 +773,12 @@ pub(crate) fn two_stream(
         );
         let directional_scattering = scattering / 2.0 * projection
             / (projection + cosine_zenith * phi2)
-            * (1.0
-                - cosine_zenith * phi1 / (projection + cosine_zenith * phi2)
-                    * ((projection + cosine_zenith * phi2 + cosine_zenith * phi1)
-                        / (cosine_zenith * phi1))
-                        .ln());
+            * (-(cosine_zenith * phi1 / (projection + cosine_zenith * phi2))).mul_add(
+                ((projection + cosine_zenith * phi2 + cosine_zenith * phi1)
+                    / (cosine_zenith * phi1))
+                    .ln(),
+                1.0,
+            );
         let mut upward_scattering = (lai / leaf_stem_area).mul_add(
             optics.transmittance[band][0],
             stem_area / leaf_stem_area * optics.transmittance[band][1],
@@ -780,21 +790,26 @@ pub(crate) fn two_stream(
             * directional_scattering;
         if vegetation_snow {
             let snow_scattering = if band == 0 { 0.8 } else { 0.4 };
-            scattering =
-                (1.0 - wet_snow_fraction) * scattering + wet_snow_fraction * snow_scattering;
-            upward_scattering = ((1.0 - wet_snow_fraction) * scattering * upward_scattering
-                + wet_snow_fraction * snow_scattering * 0.5)
-                / scattering;
-            beta0 = ((1.0 - wet_snow_fraction) * scattering * beta0
-                + wet_snow_fraction * snow_scattering * 0.5)
-                / scattering;
+            // `MOD_Albedo.F90:629-631`：三处同型。GIMPLE 是
+            // `_108 = scat_sno*fwet`（**先舍入**、被复用两次：`scat` 的加数，
+            // 以及 `*0.5` 那一项）、`_110 = (1-fwet)*scat`（用更新后的 `scat`），
+            // 然后三处都对**旧值**做 `FMA(旧值, _110, _113)`。
+            let wet_snow_term = wet_snow_fraction * snow_scattering;
+            scattering = scattering.mul_add(1.0 - wet_snow_fraction, wet_snow_term);
+            let snow_scaled_scattering = (1.0 - wet_snow_fraction) * scattering;
+            upward_scattering =
+                upward_scattering.mul_add(snow_scaled_scattering, wet_snow_term * 0.5) / scattering;
+            beta0 = beta0.mul_add(snow_scaled_scattering, wet_snow_term * 0.5) / scattering;
         }
 
         let be = 1.0 - scattering + upward_scattering;
         let ce = upward_scattering;
+        // `_135 = ce*ce` 在 dump 里只算一次，被 `be²-ce²`（psi）与 `ce²-be²`
+        // （sigma）两处复用；两处都把 `be*be` 收进 FMA、只让 `ce*ce` 先舍入。
+        let ce_squared = ce * ce;
         let de = scattering * zmu * direct_extinction * beta0;
         let fe = scattering * zmu * direct_extinction * (1.0 - beta0);
-        let psi = be.mul_add(be, -(ce * ce)).sqrt() / zmu;
+        let psi = be.mul_add(be, -ce_squared).sqrt() / zmu;
         let power1 = (psi * leaf_stem_area).min(50.0);
         let power2 = (direct_extinction * leaf_stem_area).min(50.0);
         let s1 = (-power1).exp();
@@ -807,20 +822,28 @@ pub(crate) fn two_stream(
         let f2 = 1.0 - ground[band][1] * p2 / ce;
         let h1 = -de.mul_add(p4, ce * fe);
         let h4 = -fe.mul_add(p3, ce * de);
-        let sigma = (zmu * direct_extinction).powi(2) + (ce.powi(2) - be.powi(2));
+        let sigma = (zmu * direct_extinction).powi(2) + (-be).mul_add(be, ce_squared);
+        // `m1`/`m2`/`n1`/`n2` 与两个 Cramer 分母在直接支与漫射支都要用，GIMPLE
+        // 只算一次（`_804.._817` 在分支之前）：`_813 = m2*n1`（已舍入、被复用），
+        // `_814 = FMS(m1,n2,_813)`、`_816 = FNMA(m1,n2,_813)` —— 即
+        // `m1*n2` 被吸收、`m2*n1` 先舍入（另一支反之）。
+        let m1 = f1 * s1;
+        let m2 = f2 / s1;
+        let n1 = p1 / ce;
+        let n2 = p2 / ce;
+        let m2_n1 = m2 * n1;
+        let cramer_direct = m1.mul_add(n2, -m2_n1);
+        let cramer_reverse = (-m1).mul_add(n2, m2_n1);
         let (albedo_direct, transmission_direct, eup_direct, edown_direct) = if sigma.abs()
             > 1.0e-10
         {
             let hh1 = h1 / sigma;
             let hh4 = h4 / sigma;
-            let m1 = f1 * s1;
-            let m2 = f2 / s1;
             let m3 = (ground[band][0] - (-ground[band][1]).mul_add(hh4, hh1)) * s2;
-            let n1 = p1 / ce;
-            let n2 = p2 / ce;
             let n3 = -hh4;
-            let hh2 = m3.mul_add(n2, -(m2 * n3)) / (m1 * n2 - m2 * n1);
-            let hh3 = (m3 * n1 - m1 * n3) / (m2 * n1 - m1 * n2);
+            // `_192 = FMS(m3, n2, n3*m2)`、`_201 = FMS(m3, n1, n3*m1)`。
+            let hh2 = m3.mul_add(n2, -(m2 * n3)) / cramer_direct;
+            let hh3 = m3.mul_add(n1, -(m1 * n3)) / cramer_reverse;
             let hh5 = hh2 * p1 / ce;
             let hh6 = hh3 * p2 / ce;
             (
@@ -835,8 +858,6 @@ pub(crate) fn two_stream(
             )
         } else {
             let zmu2 = zmu * zmu;
-            let m1 = f1 * s1;
-            let m2 = f2 / s1;
             let m3 = h1 / zmu2 * (leaf_stem_area + 1.0 / (2.0 * direct_extinction)) * s2
                 + ground[band][1] / ce
                     * (-h1 / (2.0 * direct_extinction) / zmu2
@@ -844,12 +865,11 @@ pub(crate) fn two_stream(
                         - de)
                     * s2
                 + ground[band][0] * s2;
-            let n1 = p1 / ce;
-            let n2 = p2 / ce;
             let n3 =
                 1.0 / ce * (h1 * p4 / (4.0 * direct_extinction * direct_extinction) / zmu2 + de);
-            let hh2 = (m3 * n2 - m2 * n3) / (m1 * n2 - m2 * n1);
-            let hh3 = (m3 * n1 - m1 * n3) / (m2 * n1 - m1 * n2);
+            // 同一对 Cramer 分子（`_289`/`_298`），形状与直接支一致。
+            let hh2 = m3.mul_add(n2, -(m2 * n3)) / cramer_direct;
+            let hh3 = m3.mul_add(n1, -(m1 * n3)) / cramer_reverse;
             let hh5 = hh2 * p1 / ce;
             let hh6 = hh3 * p2 / ce;
             (
@@ -886,12 +906,10 @@ pub(crate) fn two_stream(
         albedo[band][0] = albedo_direct;
         transmission[band][0] = transmission_direct;
 
-        let m1 = f1 * s1;
-        let m2 = f2 / s1;
-        let n1 = p1 / ce;
-        let n2 = p2 / ce;
-        let hh7 = -m2 / (m1 * n2 - m2 * n1);
-        let hh8 = -m1 / (m2 * n1 - m1 * n2);
+        // 漫射支：`m1`/`m2`/`n1`/`n2` 与两个 Cramer 分母沿用上面那一组
+        // （GIMPLE 在这里没有重算），`m3 = 0`、`n3 = 1`。
+        let hh7 = -m2 / cramer_direct;
+        let hh8 = -m1 / cramer_reverse;
         let hh9 = hh7 * p1 / ce;
         let hh10 = hh8 * p2 / ce;
         let transmission_diffuse = s1.mul_add(hh9, hh10 / s1);

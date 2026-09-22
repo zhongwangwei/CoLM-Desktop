@@ -10807,3 +10807,155 @@ Rust 的 `radiation.rs::aged_snow_albedo` 已按此改（`doubled_zenith.mul_add
 Tested: `MOD_Albedo.F90:2036-2038/350-357` 与 `albland` 单独 dump 的第 3、4 处对应；
 三个黄金窗口三口径 A/B；`cargo test -q -p colm-core --lib`（354 通过）；`cargo fmt --all --check`；
 `cargo clippy -q -p colm-core --all-targets -- -D warnings`（干净）。
+
+## `snowwater` / `snowage` / `albland` / `twostream` 的收缩扫尾：**第一次把干窗的超容差条数拉回来**
+
+这一轮把干窗路径上最后四块"看得懂的"收缩扫完，其中 `twostream` 的那一组
+**第一次**让干窗的 `over_tol` 从 837 回到 813（= 未做 `net_solar` 之前的最好水平），
+湿窗逐位不同的值从 33087 降到 **32535**（历史最好）。
+
+### 一条通用教训：**"最左乘积被吸收"不是普适规则**
+
+前面四轮用四个独立来源量出的方向规则是"平铺和式里**最左**乘积被吸收、最右先舍入"。
+这一轮在 `albland` 的 `ssno`/`ssoi` 上撞到反例：
+
+```fortran
+ssno(1,1) = tran(1,1)*(1.-albsno(1,2)) + tran(1,3)*(1.-albsno(1,1))
+```
+
+GIMPLE（`albland` dump 第 9 处，向量化）是
+
+```
+vect__176 = FMA(1-albsno$0, tran$4, tran$0*(1-albsno$2))
+```
+
+即 **最右**那个乘积被吸收、最左先舍入 —— 与 `net_solar` 的 `parsun` 相反，而两句
+都是两项平铺和。差别在于 `(1-x)` 子式先被 CSE 成共享临时量。
+
+**规矩**：方向只能一句一句从 dump 读；"四项/两项和"的形状不构成方向依据。
+`meltf` 的 `fact*heatr`、`spacAF` 的 `f(xyl)` 之前也是同类反例。
+
+### `twostream`（地块）45 处的分流：26 处在活支，19 处不可达
+
+`MOD_Albedo.F90:458-780` 的 `twostream` 在 dump 里 45 处收缩。按 `sigma` 的
+`IF (abs(sigma) .gt. 1.e-10)` 分成两支：
+
+```
+sigma = (zmu*extkb)**2 + (1-scat)*(1-scat+2*upscat)
+```
+
+`zmu` 与 `extkb` 都是 O(1)，而第二项在 `scat<1` 时为正 —— 实测本机三个算例里
+`sigma` 恒在 0.1 量级，**`ELSE`（`sigma <= 1e-10`）那一支不可达**。dump 里
+26 处在 `IF` 支、19 处在 `ELSE` 支（`_263`…`_357`、`_442`/`_446`）。
+
+活支 26 处里 **19 处此前已经写对**（`zmu` 的 `FNMA`、`scat`/`upscat`、`p1`/`p2`、
+`h1`/`h4`、`m3` 分子、`s2*hh4+hh5*s1`、`eup`/`edown` 的 `FMS`、三条 `ssun`/`ssha`），
+本轮补的是 6 组：
+
+| 上游行 | 形状 | Rust 落点 |
+|---|---|---|
+| `:611` `phi1 = 0.5-0.633*chil-0.33*chil*chil` | 两级 `FNMA`：`_3 = FNMA(chil,0.633,0.5)`、`_4 = chil*0.33`（先舍入、复用）、`phi1 = FNMA(_4,chil,_3)` | `radiation.rs::two_stream` 首行 |
+| `:631` `as = as*(1 - X*log(·))` | `FNMA(X, log, 1.0)` | `directional_scattering` |
+| `:629-631` 植被雪三处 | `_108 = scat_sno*fwet`（先舍入、复用两次）、`_110 = (1-fwet)*scat`、三处 `FMA(旧值, _110, _113)` | `vegetation_snow` 块 |
+| `:641` `sigma` | `_135 = ce*ce` 只算一次；`psi` 用 `FMS(be,be,_135)`、`sigma` 用 `FNMA(be,be,_135)` | 提出 `ce_squared` 共用 |
+| `:672-673` 两个 Cramer 分母 | `_813 = m2*n1`（先舍入、复用）、`_814 = FMS(m1,n2,_813)`、`_816 = FNMA(m1,n2,_813)` | 提出 `m2_n1`/`cramer_direct`/`cramer_reverse`，直接支与漫射支（`hh2/hh3` 与 `hh7/hh8`）**共用同一对** |
+| `:673` `hh3` 分子 | `FMS(m3,n1,n3*m1)` | `m3.mul_add(n1, -(m1*n3))` |
+
+顺带确认**没有**收缩的两句：`phi2 = 0.877*(1-2*phi1)`（dump 是 `_7 = phi1*2; _8 = 1-_7`）、
+`proj = phi1 + phi2*coszen`（无乘法）。
+
+`twostream_mod`（PFT 向量那条）是另一份近乎相同的代码，走的是 `twostream_wrap`
+（dump 72 处），本分支 `DEF_USE_PFT/PC` 恒假、**不在黄金算例路径上**，本轮没动。
+
+### `snowwater` 的不可约含水项：`FNMA(ssi, eff, vol_liq)`
+
+`MOD_SoilSnowHydrology.F90:1447/1452` 两条 `j` 分支都是
+`qout = max(0., (vol_liq - ssi*eff_porosity)*dz)`。dump 是
+
+```
+_48 = .FNMA (ssi, eff_porosity, vol_liq);  _131 = _48*dz;  MAX_EXPR <_131, 0.0>
+```
+
+即 `vol_liq - ssi*eff` 被吸收、`max` 在乘法**外**。`snow.rs::snow_water` 已按
+`(-ssi).mul_add(eff, vol_liq)` 改（并把 `max` 移到 `*dz` 之外）。
+
+**干窗/雪窗零位移，而且原因查清了**：三个黄金窗口里雪层的 `vol_liq` 恒小于
+`ssi*eff`（`ssi = DEF_TUNING_SSI = 0.033`；雪窗表层 `wliq` 峰值 0.28 kg/m²，
+除以 `dz*1000` 后约 0.006），两条分支的 `max` 都取到 0，融合与否同值。
+
+### `snowage` 的两处：`FMA(deltim*1e-6, 增长项, sag)` 与 `FNMA(增量, 0.1, 1.0)`
+
+`MOD_Albedo.F90:1323-1326` 的 `sge = (sag+dela)*(1.0-dels)`，dump 是
+
+```
+_7  = deltim*1e-6;   _10 = exp(arg)+exp(min(0,10arg))+0.3
+_13 = .FMA (_7, _10, sag)          ! dela 的乘积被吸收
+_15 = .FNMA (max(0,scv-scvold), 0.1, 1.0)
+sge = _13 * _15
+```
+
+即 `dela` 与 `dels` **都没有单独舍入**。`snow.rs::update_snow_age` 已按此改。
+
+**零位移的原因也查清了**：雪窗里 `sag ≡ 0`（`fresh_snow` 把雪龄反复清零）。
+`fma(a,b,0) ≡ fl(a*b)`，所以两式在 `sag = 0` 时逐位相同 —— 而 `(-增量).mul_add(0.1,1.0)`
+在 `增量 = 0` 时也恰好回到 1。**这一点是实测的**：把返回值强行加 `1e-3` 再跑雪窗，
+`bitwise` 33647 → 33725、`Σ|Δ|` 444394.4368 → 441255.3282，证明这条路径**是活的**，
+只是两式的差恰好为零。
+
+### `albland` 的两处：`alb_s_inc` 与 `snow_absorption`
+
+- `MOD_Albedo.F90:305` `alb_s_inc = max(0.11-0.40*ssw, 0.)` → `FNMA(ssw, 0.40, 0.11)`。
+  Rust `radiation.rs::soil_albedo` 已改。**干窗零位移**：干季土壤湿、`alb_s_inc`
+  顶到 `min(soil_s_v_alb + alb_s_inc, soil_d_v_alb)` 的上界，无论 `alb_s_inc`
+  差 1 ULP 与否都取 `soil_d_v_alb`。
+- `MOD_Albedo.F90:446/452` 的 `ssoi`/`ssno`（上面那条"最右被吸收"）：
+  `ColdStartGroundAlbedo::absorption` 的 `soil_absorption[band][0]` 早就写对了，
+  **`snow_absorption[band][0]` 漏了收缩**（原来是平铺加法），本轮补上。
+
+### 一处**无法**逐位复刻的地方（记下来，不再追）
+
+`MOD_Albedo.F90:394` 的整数组语句
+
+```fortran
+albg(:,:) = (1.-fsno)*albg(:,:) + fsno*albsno(:,:)
+```
+
+在 dump 里**四个元素的舍入方向不一样**：前两个（被 `vector(2) real(8)` 打包的
+`vect__842 = FMA(fsno, albsno, (1-fsno)*albg)`）收的是右边那个乘积；
+后两个（标量化的 `_863 = FMA(1-fsno, albg, fsno*albsno)`）收的是左边那个。
+同一句源码、同一个表达式，只是向量化切分不同。
+
+这是 GCC 在本机的**向量宽度决定**的产物 —— x86 上 AVX 会把四个元素一起打包，
+就变成统一方向。**逐位复刻要求同时命中两种方向，这是不可能也不该做的**
+（换了机器就错）。Rust 的 `mix_ground_albedo` 取的是向量化那一半
+（`snow.mul_add(fraction, (1-fraction)*soil)`），另一半交给 tier2 容差。
+注释里引的 `MOD_Albedo.F90:2048-2051` 其实是 `oro==2` 那支的**标量**写法，
+形状恰好与向量化那一半同向；行号引用不准，结论不变。
+
+### 窗口三口径（基线 = `52feff5`，即上一轮 `albland` 雪龄反照率之后）
+
+| 窗口 | 逐位不同值 | Σ\|Δ\| | 超容差 | 变量数 |
+|---|---|---|---|---|
+| 干 | 21236 → **21230** | 384.4436 → **263.9500** | 837 → **813** | 17（不变） |
+| 湿 | 33087 → **32535** | 10374.2243 → 10380.4730 | 20662 → 20665 | 68 |
+| 雪 | 33647 → 33647 | 444394.4368（持平） | 25896（持平） | 79 |
+
+**判据链**：干窗的 `over_tol` 是上一轮 `net_solar` 方向写错时唯一会爆的量
+（写反 17 → 27），本轮把它从 837 拉回 **813**（= `net_solar` 之前的最好水平），
+同时湿窗逐位不同的值创下新低 —— 两条独立的量同向，不是单点噪声。湿窗
+`Σ|Δ|` 与超容差条数各 +3、+0.06%，属该轮混合信号，不构成否决。
+
+雪窗三口径全持平：雪窗的 `f_alb`/`f_t_soisno` 等大项**本来就整体差分**
+（`f_alb` 360 步里有 92 步差 2%–10%，`f_t_soisno` 差一个雪层槽位），
+这些量与黄金值早已全部落在"逐位不同"桶里，1 ULP 级的改动不会改变该桶的计数，
+`Σ|Δ|` 又由 `f_vegwp`（~1e3 量级）主导。**雪窗的这套口径对 ULP 级改动天然不敏感**，
+不能拿它当"改了没用"的证据。
+
+Tested: `MOD_Albedo.F90`/`MOD_SoilSnowHydrology.F90` 本体 dump（`twostream` 45 处、
+`albland` 9 处、`snowage` 2 处、`snowwater` 4 处逐条编号并归支）；
+三个黄金窗口三口径 A/B；`cargo test -q -p colm-core --lib -- --test-threads=1`（354 通过）；
+`cargo fmt --all --check`；`cargo clippy --workspace --all-targets -- -D warnings`；
+`cargo test --workspace --lib --bins -- --test-threads=1`；`cargo test -q -p oracle`；
+`cargo run -q -p xtask -- check-gui`；`python3 oracle/scripts/test_upstream_f48_sync.py`（PASS）。
+Not-tested: `twostream_mod`（`twostream_wrap` 72 处，PFT/PC 支，本分支不可达）；
+`twostream` 的 `sigma <= 1e-10` 支 19 处；`albocean` 8 处（湖泊/海洋 patch）。
