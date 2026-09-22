@@ -9175,3 +9175,83 @@ tier2 变量数：干 17 → 18，湿 68，雪 79。
 - `surface_fluxes` 里 `snow`/`soil` 两组表达式尚未按 GIMPLE 扫过。
 
 Tested: `cargo test --workspace --lib --bins -- --test-threads=1`；`cargo clippy --workspace --all-targets -- -D warnings`；`cargo fmt --all --check` 与 `cargo fmt --manifest-path gui/src-tauri/Cargo.toml --all --check`；`cargo test -q -p oracle -- --test-threads=1`；`cargo run -q -p xtask -- check-gui`；`python3 oracle/scripts/test_upstream_f48_sync.py`（PASS）。
+
+## `surface_fluxes`：三条式子形状相同、收缩结论各不相同（实测，**已修**）
+
+`GroundTemperature` 里剩下的未扫部分。用同一套办法（忠实复刻
+`MOD_GroundTemperature.F90:250-305` 的**全部分支** → 读 GIMPLE → 20000 组
+随机输入逐位差分）读出这一段比矩阵装配更"碎"的收缩点：
+
+| 上游 | GIMPLE | 归属 |
+|---|---|---|
+| `- (fseng+fevpg*htvp)` | `FMA(fevpg, htvp, fseng)` | `hs` / `hs_soil` / `hs_snow` 三处都有 |
+| `hs + cpliq*pg_rain*Δ + cpice*pg_snow*Δ` | `cpliq*pg_rain`、`cpice*pg_snow`、`Δ` 先各自成公共量（`_301/_309/_305`），再 `+ _306`、`+ _310` **顺序**相加 | `hs` |
+| `hs_soil + cpliq*pg_rain*Δ + cpice*pg_snow*Δ` | `FMA(Δ, cpliq*pg_rain, ·)`、`FMA(Δ, cpice*pg_snow, ·)` **两级融合** | `hs_soil` / `hs_snow` |
+| `hs - emg*stefnc*t_grnd**4` | `FNMA(t**4, stefnc*emg, hs)` | 不分雪 |
+| `hs - fsno*emg*stefnc*t_snow**4 - (1-fsno)*emg*stefnc*t_soil**4` | `FNMA(t**4, (fsno*emg)*stefnc, ·)`，注意分组是 `(fsno*emg)*stefnc` | 分雪 |
+| `- emg*stefnc*t_soil**4` / `*t_snow**4`（`hs_soil`/`hs_snow` 内部） | `FNMA(t**4, stefnc*emg, dlrad*emg)`，这里用的是 `stefnc*emg` | `hs_soil` / `hs_snow` |
+| `-cgrnd - 4.*emg*stefnc*t_grnd**3 - …` | `FNMS(stefnc*(emg*4), (t*t)*t, cgrnd)` | `dhsdT` |
+| `hs_soil = hs_soil*(1.-fsno) + sabg_soil` | `FMA(1-fsno, hs_soil, sabg_soil)` | 融合 |
+| `hs_snow = hs_snow*fsno + sabg_snow` | `fsno*hs_snow` 先舍入、再 `+ sabg_snow` | **不**融合 |
+| `-cgrnd - cpliq*pg_rain - cpice*pg_snow` | 两个乘积先舍入，顺序相减 | 不融合 |
+
+三条"看起来一样"的降水热：`hs` 里两项**不**融合（两个乘积被 CSE 提成 `_306/_310`，
+在 `IF` 的两个分支里共用），`hs_soil`/`hs_snow` 里两项**都**融合（`_115/_120`）。
+`hs_soil` 的最后一个乘加融合、紧挨着的 `hs_snow` 的那个不融合（`_256` 被两个
+SNICAR 分支共用）——**这是本轮第三次遇到"相邻语句结论相反"**，规矩再确认一遍。
+
+新的算式**不是**把旧式子逐项加 `mul_add` 就能得到的：`hs` 的降水热项必须**拆开**
+写成两次顺序加法（旧的 `precipitation_heat` 闭包把它们先合成一个子式和，等价于
+`+ (_306+_310)`，与上游的 `(+_306)+_310` 不同）。Rust 侧还顺手删掉了那个闭包。
+
+### 差分（20000 组随机输入，八种分支组合全覆盖）
+
+| 量 | 旧 Rust | 新 Rust |
+|---|---|---|
+| `hs` | 11503/20000 | **20000/20000** |
+| `hs_soil` | 13848/20000 | **20000/20000** |
+| `hs_snow` | 15239/20000 | **20000/20000** |
+| `dhsdT` | 19955/20000 | **20000/20000** |
+
+八种组合（`split` × `use_snicar` × `lb<1`）在新的算式下**每一种都是 8/8 满
+20000**，不是靠某一支凑出来的。
+
+两个方法论上的坑，记下来备用：
+
+1. **C 驱动必须加 `-ffp-contract=off`。** clang 在 `-O2` 下默认开 `-ffp-contract=on`，
+   会把 `surface` 里那些本不该融合的 `系数*变量` 顺手融进加法，于是"新算式"
+   只有 ~80% 匹配 —— 看上去像是**解码错了**，其实是**测试自己的编译器**多融了。
+   同一份 C 加上这个开关立刻 20000/20000。上一次量收缩规则时踩的是相反的坑
+   （gfortran `-ffp-contract=fast` 是默认），两边都要显式钉住。
+2. **`f64::powi(3/4)` 与 `(x*x)*x` / `(x*x)*(x*x)` 逐位相同**（200000/200000，随机
+   正数）：gfortran 把 `t**3`/`t**4` 展开成 `powmult` 的形式，Rust 侧用 `powi`
+   是对应的，不必手写成乘积。
+
+### 连带修好一个单元测试的"假象"
+
+`equilibrium_soil_column_stays_at_its_fortran_surface_balance` 断言
+`phase_flag == [2, 2]`（气柱放在 `FREEZING_K`、长波刚好配平的边角夹具）。
+把同一组夹具输入喂给 Fortran 复刻：上游给的是 `hs = +6.93182892583401833e-15`，
+**不是** 0.0。旧算式把这个残差舍成了 0.0，`t == tfrz` 正好落在等号上才得到 2；
+修好后 Rust 逐位复现上游的正残差，顶层落到 0 那一侧。断言按上游改成 `[0, 2]`，
+并在测试注释里写明这条判据是 1-ULP 级的（温度断言仍是 1e-11，物理结论不变）。
+
+### 窗口三口径（这一轮是净收益）
+
+以 `a5e93f4`（`GroundTemperature` 矩阵装配）为基线：
+
+| 窗口 | 逐位不同值 | Σ\|Δ\| | 超容差 | 变量数 |
+|---|---|---|---|---|
+| 干（CN-Cng） | 21198 → 21199 | **753.1381 → 395.6581** | 877 → 830 | 18 → **17** |
+| 湿（CN-Cng-wet） | 33349 → 33349 | 10374.7096 → 10380.6562 | 20672 → **20665** | 68 |
+| 雪（US-NR1-snow） | 33657 → 33661 | 不变 | 不变 | 79 |
+
+干窗的 Σ\|Δ\| 接近腰斩，是本轮唯一一处单调口径的大幅改善 —— 上一轮干窗变差的
+那部分被这次改正的算式拿了回来，说明上一轮那个"端到端更差"确实只是轨迹抖动。
+
+### 未验的部分
+
+- 与上一节相同：`j < 1`（雪层）与 `j == 1 && split` 两条矩阵分支仍是 GIMPLE 依据；
+  本节的差分**覆盖了**所有 `split`/`use_snicar`/`lb` 组合。
+
+Tested: `cargo test --workspace --lib --bins -- --test-threads=1`；`cargo clippy --workspace --all-targets -- -D warnings`；`cargo fmt --all --check` 与 `cargo fmt --manifest-path gui/src-tauri/Cargo.toml --all --check`；`cargo test -q -p oracle -- --test-threads=1`；`cargo run -q -p xtask -- check-gui`；`python3 oracle/scripts/test_upstream_f48_sync.py`（PASS）；三个窗口 `bash /tmp/gf/win4.sh` + `golden-compare`。

@@ -279,70 +279,88 @@ fn surface_fluxes(
     input: GroundTemperatureInput<'_>,
     use_snicar: bool,
 ) -> Result<(f64, f64, f64, f64)> {
-    let precipitation_heat = |temperature: f64| {
-        WATER_HEAT_CAPACITY_J_KG_K
-            * input.rain_on_ground_kg_m2_s
-            * (input.precipitation_temperature_k - temperature)
-            + ICE_HEAT_CAPACITY_J_KG_K
-                * input.snow_on_ground_kg_m2_s
-                * (input.precipitation_temperature_k - temperature)
-    };
+    // `MOD_GroundTemperature.F90:250-305`。这一段里 GCC 把四个乘积提到函数开头
+    // 当公共量（GIMPLE 的 `_292 _258 _301 _309`），它们**各自先舍入一次**再参与
+    // 后面的加减 —— 所以不能把"降水热"写成 `cpliq*rain*Δ + cpice*snow*Δ` 那种
+    // 合成子式和：上游是**顺序**加两个已舍入的乘积（`_25`、`_30`）。
+    let longwave_emissivity = input.downward_longwave_w_m2 * input.ground_emissivity;
+    let emissivity_stefan = input.ground_emissivity * STEFAN_BOLTZMANN_W_M2_K4;
+    let rain_heat_capacity = WATER_HEAT_CAPACITY_J_KG_K * input.rain_on_ground_kg_m2_s;
+    let snow_heat_capacity = ICE_HEAT_CAPACITY_J_KG_K * input.snow_on_ground_kg_m2_s;
     let snow_top_absorption = input
         .snow_layer_absorption_w_m2
         .map(|values| values[0])
         .unwrap_or(0.0);
+    // `fseng+fevpg*htvp` 三处都是 `FMA(fevpg, htvp, fseng)`（`_297/_105/_129`）。
+    let ground_sensible = input
+        .evaporation_ground_kg_m2_s
+        .mul_add(input.vaporization_heat_j_kg, input.sensible_ground_w_m2);
+    let precipitation_delta_ground = input.precipitation_temperature_k - input.ground_temperature_k;
     let mut surface = if use_snicar && input.snow_layers > 0 {
         snow_top_absorption + input.absorbed_soil_shortwave_w_m2
     } else {
         input.absorbed_ground_shortwave_w_m2
-    } + input.downward_longwave_w_m2 * input.ground_emissivity
-        - (input.sensible_ground_w_m2
-            + input.evaporation_ground_kg_m2_s * input.vaporization_heat_j_kg)
-        + precipitation_heat(input.ground_temperature_k);
-    let derivative = -input.ground_flux_temperature_derivative_w_m2_k
-        - 4.0
-            * input.ground_emissivity
-            * STEFAN_BOLTZMANN_W_M2_K4
-            * input.ground_temperature_k.powi(3)
-        - WATER_HEAT_CAPACITY_J_KG_K * input.rain_on_ground_kg_m2_s
-        - ICE_HEAT_CAPACITY_J_KG_K * input.snow_on_ground_kg_m2_s;
+    } + longwave_emissivity
+        - ground_sensible
+        + rain_heat_capacity * precipitation_delta_ground
+        + precipitation_delta_ground * snow_heat_capacity;
+    // `dhsdT` 的辐射项是 `FNMS(stefnc*(emg*4), (t*t)*t, cgrnd)`（`_261/_262/_264/_266`）。
+    let stefan_factor = input.ground_emissivity * 4.0 * STEFAN_BOLTZMANN_W_M2_K4;
+    let derivative = (-input.ground_temperature_k.powi(3)).mul_add(
+        stefan_factor,
+        -input.ground_flux_temperature_derivative_w_m2_k,
+    ) - rain_heat_capacity
+        - snow_heat_capacity;
     if !input.use_split_soil_snow {
-        surface -=
-            input.ground_emissivity * STEFAN_BOLTZMANN_W_M2_K4 * input.ground_temperature_k.powi(4);
+        // `hs = hs - emg*stefnc*t_grnd**4` ⇒ `FNMA(t**4, stefnc*emg, hs)`（`_64`）。
+        surface = (-input.ground_temperature_k.powi(4)).mul_add(emissivity_stefan, surface);
         return Ok((surface, 0.0, 0.0, derivative));
     }
 
-    surface -= input.snow_cover_fraction
-        * input.ground_emissivity
-        * STEFAN_BOLTZMANN_W_M2_K4
-        * input.snow_surface_temperature_k.powi(4)
-        + (1.0 - input.snow_cover_fraction)
-            * input.ground_emissivity
-            * STEFAN_BOLTZMANN_W_M2_K4
-            * input.soil_surface_temperature_k.powi(4);
-    let soil = (input.downward_longwave_w_m2 * input.ground_emissivity
-        - input.ground_emissivity
-            * STEFAN_BOLTZMANN_W_M2_K4
-            * input.soil_surface_temperature_k.powi(4)
-        - (input.sensible_soil_w_m2
-            + input.evaporation_soil_kg_m2_s * input.vaporization_heat_j_kg)
-        + precipitation_heat(input.soil_surface_temperature_k))
-        * (1.0 - input.snow_cover_fraction)
-        + input.absorbed_soil_shortwave_w_m2;
+    // 雪/土分开时辐射项按 `(fsno*emg)*stefnc` 分组后再吸收（`_83/_85`、`_91/_92`），
+    // 与 `hs_soil`/`hs_snow` 里用的 `stefnc*emg`（`_258`）**不是**同一个分组。
+    surface = (-input.snow_surface_temperature_k.powi(4)).mul_add(
+        input.snow_cover_fraction * input.ground_emissivity * STEFAN_BOLTZMANN_W_M2_K4,
+        surface,
+    );
+    surface = (-input.soil_surface_temperature_k.powi(4)).mul_add(
+        (1.0 - input.snow_cover_fraction) * input.ground_emissivity * STEFAN_BOLTZMANN_W_M2_K4,
+        surface,
+    );
+    // 两个降水热项在这里**是** FMA（`_115`、`_120`），与顶层 `hs` 相反：
+    // 顶层的 `cpliq*rain*Δ` 被 CSE 成公共量，这里的没有被提。
+    let soil_sensible = input
+        .evaporation_soil_kg_m2_s
+        .mul_add(input.vaporization_heat_j_kg, input.sensible_soil_w_m2);
+    let soil_delta = input.precipitation_temperature_k - input.soil_surface_temperature_k;
+    let soil_base = (-input.soil_surface_temperature_k.powi(4))
+        .mul_add(emissivity_stefan, longwave_emissivity)
+        - soil_sensible;
+    let soil = soil_delta.mul_add(
+        snow_heat_capacity,
+        soil_delta.mul_add(rain_heat_capacity, soil_base),
+    );
+    let soil = (1.0 - input.snow_cover_fraction).mul_add(soil, input.absorbed_soil_shortwave_w_m2);
     let snow_absorption = if use_snicar && input.snow_layers > 0 {
         snow_top_absorption
     } else {
         input.absorbed_snow_shortwave_w_m2
     };
-    let snow = (input.downward_longwave_w_m2 * input.ground_emissivity
-        - input.ground_emissivity
-            * STEFAN_BOLTZMANN_W_M2_K4
-            * input.snow_surface_temperature_k.powi(4)
-        - (input.sensible_snow_w_m2
-            + input.evaporation_snow_kg_m2_s * input.vaporization_heat_j_kg)
-        + precipitation_heat(input.snow_surface_temperature_k))
-        * input.snow_cover_fraction
-        + snow_absorption;
+    let snow_sensible = input
+        .evaporation_snow_kg_m2_s
+        .mul_add(input.vaporization_heat_j_kg, input.sensible_snow_w_m2);
+    let snow_delta = input.precipitation_temperature_k - input.snow_surface_temperature_k;
+    let snow_base = (-input.snow_surface_temperature_k.powi(4))
+        .mul_add(emissivity_stefan, longwave_emissivity)
+        - snow_sensible;
+    let snow_inner = snow_delta.mul_add(
+        snow_heat_capacity,
+        snow_delta.mul_add(rain_heat_capacity, snow_base),
+    );
+    // `hs_snow = hs_snow*fsno + sabg_snow`：乘积**没有**融合 —— GCC 把它提成
+    // 两个 SNICAR 分支共用的 `_256`，而紧邻的 `hs_soil` 那一支 `FMA(1-fsno, ·, ·)`
+    // 却是融合的。同一段代码里形状相同的两条语句可以有相反的结论。
+    let snow = input.snow_cover_fraction * snow_inner + snow_absorption;
     ensure!(
         (input.absorbed_soil_shortwave_w_m2 + input.absorbed_snow_shortwave_w_m2
             - input.absorbed_ground_shortwave_w_m2)

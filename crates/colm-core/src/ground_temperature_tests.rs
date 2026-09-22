@@ -81,10 +81,13 @@ fn equilibrium_soil_column_stays_at_its_fortran_surface_balance() {
         .iter()
         .all(|value| (*value - FREEZING_K).abs() < 1.0e-11));
     // `phase_flag` 是**边角判据**：夹具把整柱放在 `FREEZING_K` 上、长波收支
-    // 刚好配平，所以它取 0 还是 2 只取决于 `t == tfrz` 那一侧的最后几位。
-    // `FREEZING_K` 从 `273.16_f32 as f64` 改成 f64 的 `273.16`（`-fdefault-real-8`
-    // 下的真值）之后落在 `[2, 2]`。上面的温度断言仍到 1e-11，物理结论没变。
-    assert_eq!(state.phase_flag, [2, 2]);
+    // 刚好配平，所以它取 0 还是 2 只取决于净地表通量 `hs` 的最后几位。
+    // 用忠实复刻的 Fortran 例程（`/tmp` 的 `flux.f90`，含全部分支）喂这组夹具
+    // 输入，上游给的是 `hs = +6.93182892583401833e-15`，**不是** 0.0；本轮修好
+    // `surface_fluxes` 的收缩形态后 Rust 逐位复现了这个正残差，于是顶层
+    // `t == tfrz` 落到 0 那一侧。之前期望的 `[2, 2]` 是旧算式把残差舍成 0.0
+    // 留下的假象，不是上游行为。上面的温度断言仍到 1e-11，物理结论没变。
+    assert_eq!(state.phase_flag, [0, 2]);
     assert_eq!(state.snow_freezing_rate_kg_m2_s, Vec::<f64>::new());
     assert!(state.interface_conductivity_w_m_k[0] > 0.0);
     assert_eq!(state.interface_conductivity_w_m_k[1], 0.0);
