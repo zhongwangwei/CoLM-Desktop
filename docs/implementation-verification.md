@@ -10060,3 +10060,39 @@ Tested: `MOD_SoilSnowHydrology.F90` 本体的 `-fdump-tree-optimized`；
 `cargo test --workspace --lib --bins -- --test-threads=1`；`cargo clippy --workspace --all-targets -- -D warnings`；
 两处 `cargo fmt --all --check`；`cargo test -q -p oracle`；`cargo run -q -p xtask -- check-gui`；
 `python3 oracle/scripts/test_upstream_f48_sync.py`（PASS）。
+
+## `MOD_CanopyLayerProfile` 的两处积分几何式，以及**三个新模块的清点**
+
+`canopy_layer_profile.rs` 此前一处 `mul_add` 也没有。`MOD_CanopyLayerProfile.F90` 的
+积分循环（`uintegral`/`kintegral`）在 dump 里是
+
+```
+FNMA(i-0.5, dz, top)      ! top - (i-0.5)*dz
+FMA(dz, 0.5, bottom)      ! bottom + 0.5*dz
+```
+
+两处循环体（风速积分与扩散率积分）同型，Rust 已按此改成
+`(-(i as f64 - 0.5)).mul_add(step, top)` 与 `step.mul_add(0.5, bottom)`。
+
+### 顺手把三个模块数清楚了（这是"还差多少"的实际答案）
+
+| 模块 | 收缩总数 | 主要分布 |
+|---|---|---|
+| `MOD_CanopyLayerProfile` | **24** | `cal_z0_displa` 5、`kintegral` 4、`uintegralz` 4、`uintegral` 4、`fkint`/`fuint` 各 2 |
+| `MOD_NetSolar` | **35** | 全在 `netsolar` |
+| `MOD_Albedo` | **136** | `twostream_wrap` 72、`twostream` 45、`albland` 9、`albocean` 8、`snowage` 2 |
+
+加上 `MOD_SoilSnowHydrology` 剩下的约 50 处，**干窗路径上还剩约 240 处收缩未扫**。
+（`twostream` 那 117 处是大头，且 `MOD_Albedo` 也有纯 Fortran 的 `twostream` 副本，
+两侧算法应当一致，可以互相印证。）
+
+### 第 10 次"零位移"
+
+加上这一处，已有**十处**依据充分（多数有本体 GIMPLE + 上游源码行双证据、其中几处
+还有 20000/20000 的直接差分）的修复，对干窗第 0 步那 34 个 1 ULP 差异
+**完全没有影响**。这已经足以排除"逐点舍入"的解释，下一轮必须做**输入级对照**
+（Rust 与内核在第一步的状态与强迫逐位并排），而不是继续把模块一个一个扫过去。
+
+Tested: `MOD_CanopyLayerProfile.F90`/`MOD_NetSolar.F90`/`MOD_Albedo.F90` 本体的
+`-fdump-tree-optimized`（用于清点）；干窗 TIMESTEP 1 步 Rust-vs-Rust 逐位比对（不变）；
+`cargo test -q -p colm-core --lib -- --test-threads=1`（354 通过）；`cargo fmt --all --check`。

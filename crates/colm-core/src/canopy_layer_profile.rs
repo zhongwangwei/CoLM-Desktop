@@ -108,10 +108,12 @@ pub fn mean_canopy_wind_between(
     let mut mean = 0.0;
     for index in 1..=intervals {
         let height = if index < intervals {
-            top_height_m - (index as f64 - 0.5) * step
+            // `MOD_CanopyLayerProfile` 的积分循环（`uintegral`/`kintegral`）：
+            // GIMPLE 是 `FNMA(i-0.5, dz, top)` 与 `FMA(dz, 0.5, bottom)`。
+            (-(index as f64 - 0.5)).mul_add(step, top_height_m)
         } else {
             step = top_height_m - bottom_height_m - (intervals - 1) as f64 * step;
-            bottom_height_m + 0.5 * step
+            step.mul_add(0.5, bottom_height_m)
         };
         mean +=
             canopy_wind_speed(input, height)?.max(0.0) * step / (top_height_m - bottom_height_m);
@@ -229,10 +231,12 @@ pub fn canopy_diffusivity_resistance(
     let mut resistance = 0.0;
     for index in 1..=intervals {
         let height = if index < intervals {
-            top_height_m - (index as f64 - 0.5) * step
+            // `MOD_CanopyLayerProfile` 的积分循环（`uintegral`/`kintegral`）：
+            // GIMPLE 是 `FNMA(i-0.5, dz, top)` 与 `FMA(dz, 0.5, bottom)`。
+            (-(index as f64 - 0.5)).mul_add(step, top_height_m)
         } else {
             step = top_height_m - bottom_height_m - (intervals - 1) as f64 * step;
-            bottom_height_m + 0.5 * step
+            step.mul_add(0.5, bottom_height_m)
         };
         resistance += step / canopy_diffusivity(input, height)?;
     }
