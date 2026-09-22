@@ -175,7 +175,9 @@ pub fn soil_vliq_from_psi(
         } => {
             let m_vgm = 1.0 - 1.0 / n_vgm;
             let esat = (1.0 + (psi * -alpha_vgm).powf(n_vgm)).powf(-m_vgm) / sc_vgm;
-            (porosity - residual_water) * esat + residual_water
+            // GIMPLE（`MOD_Hydro_SoilFunction.F90` 的 `soil_vliq_from_psi`）：
+            // 全模块只有这一处收缩 —— `FMA(porsl-vl_r, esat, vl_r)`。
+            (porosity - residual_water).mul_add(esat, residual_water)
         }
     }
 }

@@ -9857,3 +9857,40 @@ Tested: `MOD_ForcingDownscaling.F90` 本体的 `-fdump-tree-optimized`；`cargo 
   下一轮若要把这块真正验掉，应当补这个驱动。
 - 降尺度模块还剩约 6 处收缩（`downscale_shortwave` 的地形因子、`downscale_wind_simple`
   的因子式等），它们的结合顺序还没从 GIMPLE 里读透，故**没动**。
+
+## `soil_vliq_from_psi` 的一处收缩，以及"下一个大件"的**清点**
+
+`MOD_Hydro_SoilFunction.F90` 整模块**只有一处**收缩，在 `soil_vliq_from_psi`
+的 van Genuchten 支（`:162`）：
+
+```
+soil_vliq_from_psi = (porsl - vl_r)*esat + vl_r      ⇒  FMA(porsl-vl_r, esat, vl_r)
+```
+
+Rust 那一行与此前的写法只差这一次融合，已改。`CN-Cng` 算例没有写
+`DEF_USE_Campbell_SOIL_MODEL`，取 schema 默认 `.false.`，所以走的就是这一支。
+干窗 TIMESTEP 1 步改动前后**逐位相同**——单点 1 ULP 在这里传不到历史输出。
+
+### 清点：`MOD_SoilSnowHydrology` 是这条路径上最后一个大件
+
+顺手把剩下没扫过的大模块数了一遍（内核本体 dump 里每个例程的
+`.FMA/.FNMA/.FMS/.FNMS` 条数）：
+
+| 例程 | 收缩条数 |
+|---|---|
+| `soilwater` | 23 |
+| `water_vsf` | 17 |
+| `water_2014` | 15 |
+| `snowwater_snicar` | 8 |
+| `snowwater` | 4 |
+| **合计** | **67** |
+
+这是干窗路径上**最大的一块未扫面积**，而且正好覆盖 `f_wliq_soisno`/`f_wice_soisno`/
+`f_h2osoi`/`f_zwt` 这些仍然差分的量。下一轮从这里进：先做 `water_2014`
+（15 条，标准 LCT 的默认方案），再按需要做 `soilwater`。
+
+Tested: `MOD_Hydro_SoilFunction.F90` 本体的 `-fdump-tree-optimized`（整模块 1 处收缩）；
+`MOD_SoilSnowHydrology.F90` 本体的 dump（66 之外的 67 条清点）；干窗 TIMESTEP 1 步逐位比对；
+`cargo test -q -p colm-core --lib -- --test-threads=1`（354 通过）；`cargo fmt --all --check`；
+`cargo test --workspace --lib --bins -- --test-threads=1`；`cargo clippy --workspace --all-targets -- -D warnings`；
+`cargo test -q -p oracle`；`cargo run -q -p xtask -- check-gui`；`python3 oracle/scripts/test_upstream_f48_sync.py`（PASS）。
