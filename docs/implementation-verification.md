@@ -10193,3 +10193,37 @@ GIMPLE：`FNMA(通量和, deltim, 蓄量变化)` 与 `FNMA(deltim, 凝结和, �
 
 Tested: `MOD_SoilSnowHydrology.F90` 本体的 dump；干窗 TIMESTEP 1 步 Rust-vs-Rust 逐位比对（不变）；
 `cargo test -q -p colm-core --lib -- --test-threads=1`（354 通过）；`cargo fmt --all --check`。
+
+### `water_vsf` 里两处装配的**形状**已经解出来了（落点待钉）
+
+第 122 轮把 `water_vsf` 的通量/矩阵收缩解到"看得懂形状、还差上游行号"的程度，
+记下来供下一轮直接用：
+
+1. **过饱和削顶**：
+   ```
+   _107 = wliq[layer]
+   _108 = _103 * 1.0e+3                      ! 某个体积量换成 mm
+   _110 = _107 / _108
+   M.360 = min(M.357, max(_110, 0))
+   _112 = .FNMA (_108, M.360, _107)          ! wliq - _108*min(...)
+   ```
+   —— `min(...)` 先被夹到 `[0, ·]`，再作为**乘积的左操作数**被收进减法。
+
+2. **湿周修正**：
+   ```
+   _199 = wliq[layer]
+   _200 = _199 * 1.0e+3
+   _201 = _200 / 1.0e+3                      ! 先乘 1000 再除回来（上游写法如此）
+   _203 = _195 - prephitmp_166
+   _206 = .FNMA (_202, _203, _201)           ! _201 - _202*_203
+   ```
+   —— 注意那个 `*1000/1000`：**两次舍入都在**，Rust 若省略任一步就会差位。
+
+Rust 侧的候选位置已经缩到 `water_table_from_aquifer`（约 4262-4292 行那段
+`liquid_volume_fraction`/`residual_water_kg_m2` 的湿周修正）与
+`apply_variable_saturated_explicit_step`；下一轮要做的第一件事是**先在
+`MOD_SoilSnowHydrology.F90` 的 `WATER_VSF` 段里把这两条上游语句的行号找出来**，
+再决定怎么写 —— 上一轮的教训是：形状对上了但组织方式不同的地方**不能**硬套。
+
+Tested: 本轮无源码改动；`cargo test -q -p colm-core --lib`（354 通过）确认工作树干净；
+`MOD_SoilSnowHydrology.F90` 本体的 dump（形状解码）。
