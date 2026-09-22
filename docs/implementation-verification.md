@@ -9704,3 +9704,53 @@ assertion `left == right` failed: obu no longer matches moninobukini
 内部**由 `dth = thm-t_grnd`、`dqh = qm-qg` 现算的（`:164`）。
 也就是说"改驱动的一个输入来切换分支"这件事在这里做不到：要分流得改
 `thm`/`t_grnd`/`th`/`qm`/`qg` 的生成式。下次分流前先确认那个量是不是实参。
+
+### 第 109 轮：给 `groundfluxes` 的循环装探针，以及一个探针自身的坑
+
+把 `MOD_GroundFluxes.F90` **复制到 `/tmp`**（不动 vendor）、只加一句 `WRITE`
+打印每轮的 `tstar/qstar/z0hg/thvstar/zeta/obu/um`，再把它单独编译进驱动。
+第一次把 `WRITE` 放在 `thvstar=` 之后，得到的内核数字与 Rust **处处差 1 ULP**；
+把 `WRITE` 挪到循环体**末尾**（`obuold = obu` 之后）后，第 1 个算例的六轮
+**逐位全中**：
+
+| 量 | 内核（IT 6） | Rust |
+|---|---|---|
+| `tstar` | `3FB940B113FD286E` | 同 |
+| `qstar` | `BF43D40170ECE005` | 同 |
+| `z0hg` | `3F5701F3E8331640` | 同 |
+| `zeta` | `BF5EE8B28F428632` | 同 |
+| `um` | `40274765F8A626A4` | — |
+
+**坑：探针自己会改内核。** 第一次的位置让 `tstar/qstar/z0hg/thvstar` 被提前
+materialize，GCC 后续的 CSE/收缩随之改变，于是"内核"给出了一组根本不属于它的数字。
+这与前面记过的"复刻件 CSE 与本体不同"是同一类问题的第三种形态：
+**量收缩的探针必须放在不干扰被测量的位置**（这里是循环末尾）。
+
+同一个位置错误还解释了第一版把 `zeta` 读成"差 1e9 ULP"——那时它读到的是
+**上一轮**的值（`zeta` 在打印点之后才重算），而且是被扰动过的上一轮。
+
+### 失配算例的指纹（下一步的精确入口）
+
+按"哪些输出不同"给失配算例分类：
+
+| 算例 | 不同的槽位 |
+|---|---|
+| 6 | **只有 13（`bulk_richardson_number`）** |
+| 38 | 0–7（全部通量）、11（`z0hg`）、14（`ustar`）、20–22 |
+| 53 | 0,1,2,9,12（`zeta`）,13,14,15,16,18,19,20,22 |
+| 97 | 0–4,13,14,20,22 |
+
+算例 6 只有 `rib` 不同，而
+
+```
+rib = zeta * ustar**2 / ((vonkar**2/fh) * um**2)     ! GIMPLE：_86 / (_87*_249)
+```
+
+里 `zeta`(12)、`ustar`(14)、`fh`(18) 都是本轮比对**已中**的量，
+唯一没有对外暴露的因子就是 `um`（Rust 的 `adjusted_wind`，只用于算 `rib`）。
+所以下一轮的入口很明确：**不稳定支的 `um = sqrt(ur*ur + wc*wc)` 与
+`wc = (-grav*ustar*thvstar*zii/thv)**(1./3.)`**，以及 `zii` 的取值。
+
+（本轮尝试用公开 API 复刻循环来取 `um` 失败了：`case 6` 的输入没有照 LCG
+逐项对齐，复刻件的 `zeta` 直接被 clamp 到 2.0 —— 复刻件必须先把 `zeta/tstar/qstar`
+对上 Rust 自身的输出才能当证据，这一点下次要先做。）
