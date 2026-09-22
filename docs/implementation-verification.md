@@ -13050,3 +13050,41 @@ Not-tested: `th_ext.opt` 其余 98 处收缩；`f_us10m` 那一族的装配侧�
 
 Tested: `bash /tmp/gf/win4.sh`（三个窗口，上表）；`three.py` 三口径。
 Not-tested: 湿窗 −24 的成因（不作解释，只记录）。
+
+## 干窗第 0 步种子的**当前**清点（第 175 轮基线，交接用）
+
+`olrg` 那处落地后，用同一套口径把现状固化成一张表（`bash /tmp/gf/dry_ts.sh 3` +
+`window_divergence.py`，两侧各跑 3 步、`HIST_FREQ=TIMESTEP`）：
+
+```
+first variable        ndiff       maxabs     maxrel
+    0 f_trad              1   5.6843e-14   2.15e-16   ← 1 ULP
+    0 f_us10m             2   8.8818e-16   2.83e-16   ← 1 ULP
+    0 f_vs10m             2   8.8818e-16   2.83e-16   ← 1 ULP
+    0 f_gssha             2   1.3553e-20   2.99e-16   ← 1 ULP
+    0 f_gssun             2   1.3553e-20   2.99e-16   ← 1 ULP
+    0 f_t_soisno          6   1.1369e-13   4.02e-16
+    0 f_olrg              2   1.1369e-13   4.12e-16
+    0 f_qstar             2   5.4210e-20   4.42e-16
+    …（其余 36 个 maxrel 1.42e-16 … 4.35e+00）
+variables differing: 44; bitwise identical: 585/692 (84.5376%)
+first divergence step: 0
+```
+
+要点（供下一轮直接接着做）：
+
+1. **1 ULP 一档只剩五个变量**：`f_trad`（只剩 1 个值）、`f_us10m`/`f_vs10m`、
+   `f_gssun`/`f_gssha`。`f_us10m`/`f_vs10m` **同幅**，说明差在两者共用的比例因子
+   （`ustar2/vonkar*fm10m/um`），而那个乘积的两个因子都来自同一次近地层相似性调用。
+2. `f_olrg` 已经是形状正确之后的残差（2 ULP），只能来自它的入参
+   （`ulrad`/`emg`/`t_grnd_bef`/`tinc`）—— 同样指向那次调用。
+3. `f_emis`/`f_fm`/`f_lfevpa` 等的 `first` 是 1 或 2，**第 0 步是一致的**，不是种子。
+4. 因此下一轮的唯一入口仍然是**实参**：把 `/tmp/gf/leafprobe` 那套探针接到对文件
+   （`extends/interception/MOD_LeafTemperature_Extended.F90`）与 Rust 的
+   `leaf_temperature` 入口，dump 干窗第 0 步的 `displa`/`z0m`/`z0h`/`z0q`/`obu`/`um`，
+   逐位比。`moninobukm` 本体已被差分关掉，所以只要实参一致，输出就该逐位一致。
+5. 工具与 dump 都已就绪：`oracle/scripts/window_divergence.py`、
+   `/tmp/gf/r166/lt_ext.opt`（80 处）、`/tmp/gf/r166/th_ext.opt`（99 处）。
+
+Tested: 上表的生成命令（`dry_ts.sh 3` + `window_divergence.py --top 8`）。
+Not-tested: 实参 dump 对照（下一轮的入口）。
