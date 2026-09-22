@@ -65,6 +65,33 @@ pub fn land_physics_parameters(
         bail!("DEF_simulation_time%timestep must be positive, got {timestep_seconds}");
     }
     let runoff_scheme = runoff_scheme(integer(document, "DEF_Runoff_SCHEME")?)?;
+    // `DEF_SPLIT_SOILSNOW` 此前**根本没被读过**：写 `.true.` 的算例会在
+    // `assembly.rs` 里被硬写死的 `use_split_soil_snow: false` 静默按非 split 跑完。
+    // 内核侧确实有 split 的能量分配（`partition_split_thermal_water`），但水分侧
+    // 明确只做了非 split（`water_2014.rs` 的入口注释），所以这是一条**只做了一半**
+    // 的支路 —— 让它跑起来比不跑更糟。声明默认值是 `.false.`，按本文件的纪律 #3
+    // 直接报错，而不是塞进 `unported_branches`。
+    if logical(document, "DEF_SPLIT_SOILSNOW")? {
+        bail!(
+            "DEF_SPLIT_SOILSNOW is on, but the Rust runtime only assembles the non-split \
+             soil/snow column: `assembly.rs` pins `use_split_soil_snow` to false and \
+             `water_2014.rs` implements only the non-split hydrology, so the case would \
+             silently run as non-split (upstream gives soil and snow separate surface \
+             temperatures and separate qsdew/qfros/qsubl on each face)"
+        );
+    }
+    if logical(document, "DEF_Optimize_Baseflow")? {
+        // `MOD_ParameterOptimization`/`MOD_Opt_Baseflow`：预热期逐次迭代
+        // `scale_baseflow(ipatch)`（`MOD_Opt_Baseflow.F90:82` 只在 `is_spinup` 时动手），
+        // 并把它写回 `ParaOpt/<case>_baseflow.nc`。本仓库把 `scale_baseflow` 钉成 1.0
+        // 且不做这个优化，开着它跑等于**静默地不优化**。声明默认值是 `.false.`，
+        // 按纪律 #3 直接报错。
+        bail!(
+            "DEF_Optimize_Baseflow is on, but the Rust runtime pins `scale_baseflow` to 1.0 \
+             and does not implement `MOD_Opt_Baseflow`'s spinup iteration, so the case would \
+             silently run with an unoptimized baseflow scale"
+        );
+    }
     if logical(document, "DEF_USE_IRRIGATION")? {
         // 上游的喷灌率由 `DEF_TUNING_IRRIGATION_*` 与作物物候逐步算出，
         // 不是 namelist 里的一个常数。这里给 0 会让开启喷灌的算例静默变成不灌溉。

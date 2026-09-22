@@ -66,6 +66,24 @@ fn run() -> Result<()> {
     );
     let name = colm_case::case_name(&case_nml)?;
 
+    // `scale_baseflow`：上游从 `DEF_dir_restart/ParaOpt/<case>_baseflow.nc` 读它
+    // （`MOD_Opt_Baseflow.F90:37-38`，`defval = 1.`），本仓库把 `baseflow_scale`
+    // 钉成 1.0。**没有那个文件时两边一致**（内核日志也会打 "default value is used"），
+    // 但文件一旦存在就说明这个算例的参数被标定过，静默用 1.0 会给出另一套产流。
+    let baseflow_scale = layout
+        .out()
+        .join(&name)
+        .join("restart")
+        .join("ParaOpt")
+        .join(format!("{name}_baseflow.nc"));
+    ensure!(
+        !baseflow_scale.is_file(),
+        "{} exists, but the Rust runtime pins `scale_baseflow` to 1.0 and does not read \
+         `ParaOpt/*_baseflow.nc`; remove the file (upstream then uses its default of 1.0) or \
+         run the kernel instead",
+        baseflow_scale.display()
+    );
+
     let config = read_point_runtime_config(&case_nml)?;
     let document = read_document(&case_nml)?;
     let physics = land_physics_parameters(

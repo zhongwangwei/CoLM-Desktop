@@ -227,6 +227,37 @@ fn irrigation_is_refused_rather_than_run_dry() {
     assert!(error.to_string().contains("DEF_USE_IRRIGATION"));
 }
 
+/// `DEF_SPLIT_SOILSNOW` 声明默认是 `.false.`，此前**根本没被读过** ——
+/// 写 `.true.` 的算例会被 `assembly.rs` 里硬写死的 `use_split_soil_snow: false`
+/// 静默按非 split 跑完。那是"算式对、结构错、不报错"，必须显式拒绝。
+#[test]
+fn split_soil_snow_is_refused_rather_than_run_as_non_split() {
+    let error = land_physics_parameters(
+        &case_with("DEF_SPLIT_SOILSNOW = .true."),
+        LandCoverScheme::Igbp,
+        HEIGHTS,
+    )
+    .expect_err("the split soil/snow column is not assembled");
+    let message = error.to_string();
+    assert!(message.contains("DEF_SPLIT_SOILSNOW"), "{message}");
+    assert!(message.contains("non-split"), "{message}");
+}
+
+/// 基流优化器（`MOD_Opt_Baseflow`）在预热期迭代 `scale_baseflow`，
+/// 而本仓库把它钉成 1.0。开着它跑等于静默地不优化。
+#[test]
+fn baseflow_optimization_is_refused_rather_than_run_unoptimized() {
+    let error = land_physics_parameters(
+        &case_with("DEF_Optimize_Baseflow = .true."),
+        LandCoverScheme::Igbp,
+        HEIGHTS,
+    )
+    .expect_err("the baseflow optimizer is not ported");
+    let message = error.to_string();
+    assert!(message.contains("DEF_Optimize_Baseflow"), "{message}");
+    assert!(message.contains("scale_baseflow"), "{message}");
+}
+
 /// 金标准算例用的是 `DEF_Runoff_SCHEME = 3`，也就是 Simple VIC。
 /// 这条把映射接到**仓库里那份真实算例**上，而不是只有构造出来的输入。
 #[test]

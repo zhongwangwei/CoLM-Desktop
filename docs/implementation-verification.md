@@ -1878,7 +1878,9 @@ Rust 侧此前把它做成了 `LandPhysicsParameters::boundary_layer_height_m` �
 - **不是 namelist 字段的量不放进这张表**（`hvap` 是常数、`emg` 是逐步推导、`lambda` 来自地类表）。
 - **上游有、本仓库没移植的分支显式报错**：`DEF_Runoff_SCHEME=1`（VIC）与
   `DEF_USE_IRRIGATION`（喷灌率由 `DEF_TUNING_IRRIGATION_*` 与作物物候逐步算出，
-  给 0 会让开启喷灌的算例静默变成不灌溉）。
+  给 0 会让开启喷灌的算例静默变成不灌溉）。**`DEF_SPLIT_SOILSNOW` 是后来补上的
+  第三个**（见文档末尾"`DEF_SPLIT_SOILSNOW` 此前根本没被读过"一节）：写 `.true.`
+  的算例会被 `assembly.rs` 里硬写死的 `use_split_soil_snow: false` 静默按非 split 跑完。
 - `land_cover_scheme` **必须由调用方传**：它来自内核编译期的 `LULC_IGBP`/`LULC_USGS`，
   namelist 里的 `DEF_USE_IGBP`/`DEF_USE_USGS` 只是只读镜像（`MOD_Namelist.F90:163`），
   默认算例里两个都是 `.false.`，从 namelist 读只能靠猜。
@@ -11136,3 +11138,131 @@ Tested: `MOD_Thermal.F90:613-621` 与 `MOD_Namelist.F90:1946-1950` 逐行核对�
 `cargo run -q -p xtask -- check-gui`；`python3 oracle/scripts/test_upstream_f48_sync.py`（PASS）。
 Not-tested: Campbell + VSF-off 只有一个月窗口、没有入库的黄金文件；`scheme == 4`
 （LP92）的那一支没有算例；其他 `spval` 门（`alb` 那一族）没有逐条排查。
+
+## `DEF_SPLIT_SOILSNOW` 此前**根本没被读过** —— 静默按非 split 跑完
+
+上一节的规矩（"上游有、本仓库没移植的分支必须显式报错"）是**列出来的**，而
+`DEF_SPLIT_SOILSNOW` 从来没进过那张清单，也从来没被任何代码读过：
+
+```
+$ grep -rn "SPLIT_SOILSNOW" crates/ --include=*.rs | grep -v "_tests\|generated.rs"
+crates/colm-case/src/parameters/mod.rs:683        ← GUI 的 namelist 分组表，不是校验
+crates/colm-core/src/thermal_water.rs:110          ← 注释
+crates/colm-core/src/standard_lct_step.rs:552      ← 注释
+crates/colm-core/src/water_2014.rs:354             ← 注释
+```
+
+后果：写 `DEF_SPLIT_SOILSNOW = .true.` 的算例，会被 `assembly.rs` 里那句硬写死的
+
+```rust
+use_split_soil_snow: false,
+```
+
+**静默按非 split 跑完** —— 正是本仓库纪律里点名的最坏一类分支不匹配：
+算式对、结构错、还不报错。上游在 split 下给土壤面和雪面**各自一个地表温度**、
+各自一组 `qsdew_soil`/`qfros_soil`/`qsubl_soil` 与 `qsdew_snow`/…（见
+`MOD_SoilSnowHydrology.F90:452-484` 那一对分支）。
+
+**为什么是"拒绝"而不是"补齐"**：内核侧其实已经有 split 的能量分配
+（`colm_core::partition_split_thermal_water`，`ground_temperature.rs` 也按
+`use_split_soil_snow` 分了雪/土两个面），但**水分侧只做了非 split** ——
+`water_2014.rs` 的入口注释写得很直白（"本入口明确是非 split，所以有雪层时给 0"）。
+只接一半会让结果比拒绝更难查。声明默认值是 `.false.`，所以按纪律 #3
+直接 `bail!`，不进 `unported_branches`。
+
+落地两处（**运行期与冷启动都要拦**，否则 `mkinidata` 会为一份跑不起来的配置
+生成"看起来能用"的重启）：
+
+* `colm-runtime/src/physics.rs::land_physics_parameters`：读完 `DEF_Runoff_SCHEME`
+  之后就拦 `DEF_SPLIT_SOILSNOW`；
+* `colm-init/src/single_point.rs::reject_unsupported_cold_start_features`：同一句。
+
+回归测试：`physics_tests::split_soil_snow_is_refused_rather_than_run_as_non_split`。
+端到端实测：
+
+```
+$ colm-rs /tmp/gf/splitcheck --land-cover igbp …
+colm-rs: DEF_SPLIT_SOILSNOW is on, but the Rust runtime only assembles the non-split
+soil/snow column: `assembly.rs` pins `use_split_soil_snow` to false and `water_2014.rs`
+implements only the non-split hydrology, so the case would silently run as non-split
+(upstream gives soil and snow separate surface temperatures and separate
+qsdew/qfros/qsubl on each face)
+```
+
+### 顺带把 `spval` 那道门这一类查了一遍
+
+上一条提交的 Directive 说"凡上游用 `x /= spval` 做门的地方都要当跨步状态"。
+把 `vendor/CoLM202X/main` 全量过了一遍，`spval` 比较只有下列几处：
+
+| 位置 | 性质 |
+|---|---|
+| `MOD_Thermal.F90:615` `rss /= spval` | **数值分支**，已修（上一条提交） |
+| `MOD_LeafTemperature.F90:567/573/579`（及 PC/URBAN 副本） `taux == spval` | 只包一句 `write(6,*)` 警告，无数值影响 |
+| `MOD_Hist*.F90` 的 `WHERE (acc_vec /= spval)` | 历史累加器的缺测掩码；单点、无缺测 |
+| `MOD_Forcing.F90` / `MOD_CheckEquilibrium` / `MOD_CropReadin` | 强迫读入 / 数据同化 / 作物，均不在本仓库路径 |
+
+`alb`/`ssun`/`ssha`/`ssoi`/`ssno`/`thermk`/`extkb`/`extkd` 这几个 module 时间变量
+**没有** `spval` 门，但都逐条核过"第一步读到的是不是未初始化值"：
+
+* `alb`：夜间提前返回时上游写 `alb = 1`，Rust `surface_optics.rs` 的夜间支同样写 1；
+* `ssun`/`ssha`：`none` 时上游在 `netsolar` 开头清零，Rust 同样清零；
+* `ssoi`/`ssno`：由 `tran`（初值 `[0,1,1]`）/`albsoi`/`albsno` 现算，Rust 的
+  `ColdStartGroundAlbedo::absorption` 无条件重算；
+* `extkb`/`extkd`/`thermk`：`thermk` 的"有冠层时保留上一步"已按上游实现
+  （`surface_optics.rs` 的 `previous_thermal_gap_fraction`），`extkb`/`extkd`
+  在夜间支写 1/0.718。
+
+Tested: `grep` 全量 `spval` 比较并逐条归因；`DEF_SPLIT_SOILSNOW` 全仓库读取点核对；
+端到端 `colm-rs` 拒绝信息；`cargo test -q -p colm-init --lib -- --test-threads=1`
+（156 通过 / 9 忽略）；`cargo test -q -p colm-runtime --lib -- --test-threads=1`（71 通过）；
+`cargo fmt --all --check`。
+Not-tested: split 支路本身（**故意**：拒绝就是不跑）；`MOD_Hist*` 的缺测掩码（单点无缺测）。
+
+## 把"没被读过但行为有影响的 namelist 开关"全量筛了一遍（832 个字段）
+
+`DEF_SPLIT_SOILSNOW` 那件事暴露的是一类问题：**schema 里有、算例能写、代码不读**。
+用脚本过了一遍 `crates/colm-schema/src/generated.rs` 的 **832 个字段**，
+逐个在非测试 Rust 源码里搜字段名，563 个"从未出现"。这 563 个里绝大多数是噪声：
+
+| 类别 | 数量级 | 为什么不是问题 |
+|---|---|---|
+| `DEF_hist_vars%*` | ~450 | 历史变量闸门由 `colm-hist` 的表达式机制按名求值，不逐个出现在源码里 |
+| `DEF_TRACER_*` | ~35 | 示踪物支路，本仓库无对应编排 |
+| `DEF_DA_*`、`DEF_Optimize_*` | ~15 | 数据同化 / 参数优化，见下 |
+| BGC / CROP 的 PFT 名数组 | ~40 | 只在 BGC/CROP 宏下使用，本仓库无对应 patch 类型 |
+| `DEF_forcing%*`、`USE_SITE_*` | ~30 | 由 `colm-forcing`/`colm-case` 用别的方式解析（不是按字段名） |
+| `DEF_BlockInfoFile`、`DEF_PIO_groupsize` 等 | ~10 | MPI/并行 I/O，单点不需要 |
+
+真正需要判断的只有下面这几个，逐个查了上游语义：
+
+| 字段 | 声明默认 | 上游语义 | 处置 |
+|---|---|---|---|
+| `DEF_SUBGRID_SCHEME` | `'LCT'` | **只在 `namelist` 与 `mpi_bcast` 里出现，全树没有任何一处读它做派发**（派发用的是 `DEF_USE_LCT/PFT/PC`） | 纯镜像，不读无害 ✓ |
+| `DEF_Forcing_Interp_Method` | `'arealweight'` | `MOD_Namelist.F90:2404-2407`：`#ifdef SinglePoint` 下 `'bilinear'` 被**强制改回** `'arealweight'` 并打警告 | 单点下两边等价 ✓ |
+| `DEF_CheckEquilibrium` | `.false.` | `MOD_CheckEquilibrium` 做诊断；`CoLM.F90:681` 只在末尾打印 `mesg_equilibrium` | 纯诊断/打印，不读不影响数值 ✓ |
+| `DEF_HIST_WriteBack` / `DEF_HIST_CompressLevel` / `DEF_HIST_grid_as_forcing` | `.false.` / `1` | 只影响 NetCDF 写法与压缩，不改物理 | 不读无害 ✓ |
+| `DEF_USE_DiagMatrix` | `.false.` | BGC 诊断矩阵（`leafcCap` 等），只在 BGC 下用 | 本仓库无 BGC 编排 ✓ |
+| **`DEF_Optimize_Baseflow`** | `.false.` | `MOD_Opt_Baseflow.F90:82` 在 `is_spinup` 时迭代 `scale_baseflow(ipatch)` 并写回 `ParaOpt/*_baseflow.nc` | **显式拒绝**（本轮） |
+| **`scale_baseflow` 文件本身** | 无（文件） | `MOD_Opt_Baseflow.F90:37-38` 从 `DEF_dir_restart/ParaOpt/<case>_baseflow.nc` 读，`defval = 1.` | **文件存在时显式拒绝**（本轮） |
+
+### 落地
+
+* `colm-runtime/src/physics.rs`：`DEF_Optimize_Baseflow = .true.` → `bail!`
+  （本仓库把 `baseflow_scale` 钉成 1.0、不做预热优化，开着它等于静默不优化）。
+* `colm-runtime/src/bin/colm-rs.rs`：`<out>/<case>/restart/ParaOpt/<case>_baseflow.nc`
+  **存在**时 → `bail!`。没有这个文件时两边本来就一致（内核日志会打
+  "default value is used"，本机三个黄金算例都是这一支），所以这道门不影响现有算例；
+  文件一旦存在就说明该算例的基流参数被标定过，静默用 1.0 会给出另一套产流。
+
+**没做**：把 `ParaOpt/*_baseflow.nc` 真读进来（读一个长度 `landpatch` 的
+`scale_baseflow` 向量就能消掉这条限制）。当前先用拒绝把"静默不一致"堵上 ——
+按本仓库的纪律，宁可拒绝也不要静默跑出另一套数。
+
+回归测试：`physics_tests::baseflow_optimization_is_refused_rather_than_run_unoptimized`。
+
+Tested: 832 个 schema 字段的全量交叉搜索脚本；上表逐条回源码核对
+（`MOD_Namelist.F90:2404-2407`、`MOD_Opt_Baseflow.F90:37-38/82`、`CoLM.F90:681`）；
+`cargo test -q -p colm-runtime --lib -- --test-threads=1`（72 通过）；
+`cargo fmt --all --check`。
+Not-tested: `ParaOpt/*_baseflow.nc` 的真实读取（本机没有这种文件）；
+`DEF_CheckEquilibrium = .true.` 时的输出文件内容。
