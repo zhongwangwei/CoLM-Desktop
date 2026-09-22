@@ -4,6 +4,7 @@
 set -euo pipefail
 BASE="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 WORK=${WORK:-/tmp/gf/qs_diff}
+export QS_TMIN QS_TMAX
 rm -rf "$WORK"; mkdir -p "$WORK"
 cd "$BASE/vendor/CoLM202X"
 gfortran -c -O2 -fdefault-real-8 -ffree-form -cpp -ffree-line-length-0 \

@@ -16,7 +16,15 @@ fn main() {
     let mut rng = Lcg(20250506);
     let mut out = String::new();
     for _ in 0..20000 {
-        let temperature_k = 150.0 + rng.uni() * 200.0;
+        let tmin = std::env::var("QS_TMIN")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(150.0);
+        let tmax = std::env::var("QS_TMAX")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(350.0);
+        let temperature_k = tmin + rng.uni() * (tmax - tmin);
         let pressure_pa = 30000.0 + rng.uni() * 80000.0;
         let state = saturation_specific_humidity(temperature_k, pressure_pa).expect("valid");
         let values = [
