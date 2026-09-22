@@ -657,12 +657,23 @@ pub fn leaf_temperature(
         } else {
             1.0 / (ground_to_canopy_resistance + input.soil_surface_resistance_s_m)
         };
-        let leaf_moisture_conductance = (1.0 - evaporation_sign * (1.0 - fwet)) * lsai
-            / leaf_boundary_resistance
-            + (1.0 - fwet)
-                * evaporation_sign
-                * (laisun / (leaf_boundary_resistance + leaf_sunlit_resistance)
-                    + laisha / (leaf_boundary_resistance + leaf_shaded_resistance));
+        // 上游的 `wet_area_cfw = lai + sai` / `wet_cond_cfw = wet_area_cfw / rb`
+        // （`MOD_LeafTemperature_Extended.F90:972-973`）—— 与 `cfh`、`evplwet` 共用的
+        // 那个"湿面积导度"。**必须先把 `lsai/rb` 算成一项**：
+        // `cfw` 的汇合点（`lt_ext.s` 的 `L166`）是
+        //   `_382 = (dry_factor*delta) * SUM`
+        //   `cfw  = fma(coef, wet_cond_cfw, _382)`   ← 融合的是**前一项**
+        // 而原先写成 `coef * lsai / rb + …`，既是"先乘后除"（与 `cfh` 的写法不一致），
+        // 加法那一侧也没有收缩。
+        let wet_conductance = lsai / leaf_boundary_resistance;
+        let dry_factor = 1.0 - fwet;
+        let leaf_moisture_transfer_sum = laisun
+            / (leaf_boundary_resistance + leaf_sunlit_resistance)
+            + laisha / (leaf_boundary_resistance + leaf_shaded_resistance);
+        let leaf_moisture_conductance = (1.0 - evaporation_sign * dry_factor).mul_add(
+            wet_conductance,
+            dry_factor * evaporation_sign * leaf_moisture_transfer_sum,
+        );
         let heat_weight =
             1.0 / (canopy_air_heat_conductance + ground_heat_conductance + leaf_heat_conductance);
         let moisture_weight = 1.0
@@ -684,16 +695,25 @@ pub fn leaf_temperature(
         // 实测 `fma(-b,B, fma(W,T, -(a*A)))` 与内核 4000/4000 组逐位相同，
         // 而不收缩的写法只有 345/4000 —— 这个形状每轮迭代出现 5 次
         // （`fsenl`/`etr`/`etrsun`/`etrsha`/`evplwet`），是 `dtl` 的直接输入。
+        // 括号 `( (wta0 + wtg0)*tl - wta0*thm - wtg0*tg )` 的**逐位**形状（`lt_ext.s`
+        // 的 `.loc 1 1116`）：
+        //   `_459 = wta0 + wtg0`
+        //   `_461 = thm * wta0`（`fmul`，**先舍入**）
+        //   `tmp1960 = fmsub(_459, tl, _461)` → `_459*tl - _461`，**只有 `_459*tl` 融合**
+        //   `_463 = tg * wtg0`（`fmul`，**先舍入**）
+        //   `_464 = tmp1960 - _463`
+        // 所以只有中间那个乘积是 fma，`wta0*thm` 与 `wtg0*tg` 都各自先舍入。
+        // 原先把 `-wtg0*tg + X` 也写成 `mul_add`（依据是随机 4000 组的统计），
+        // 逐迭代位型探针在第 1 轮就否掉了它：`fsenl` 差 1 ULP，而同一轮的
+        // `fsenl_dtl`（无 fma 的 `rhoair*cpair*cfh*(wta0+wtg0)`）逐位相同。
+        let heat_weight_sum = air_heat_weight + ground_heat_weight;
         let leaf_sensible_heat = input.air_density_kg_m3
             * AIR_HEAT_CAPACITY_J_KG_K
             * leaf_heat_conductance
-            * (-ground_heat_weight).mul_add(
-                input.ground_temperature_k,
-                (air_heat_weight + ground_heat_weight).mul_add(
-                    state.leaf_temperature_k,
-                    -(air_heat_weight * input.reference_air_temperature_k),
-                ),
-            );
+            * (heat_weight_sum.mul_add(
+                state.leaf_temperature_k,
+                -(air_heat_weight * input.reference_air_temperature_k),
+            ) - ground_heat_weight * input.ground_temperature_k);
         let leaf_sensible_temperature_slope = input.air_density_kg_m3
             * AIR_HEAT_CAPACITY_J_KG_K
             * leaf_heat_conductance
@@ -771,15 +791,22 @@ pub fn leaf_temperature(
             shaded_transpiration *= scale;
             transpiration_temperature_slope = 0.0;
         }
+        // 上游 `evplwet = rhoair * evp_weight * wet_cond * ( … )`
+        // （`:1150-1151`）—— `wet_cond = wet_area/rb` 是**先除好的一项**，
+        // 不是"链尾再除 `rb`"。原先写成 `rhoair * coef * lsai / rb * X`，
+        // 既是先乘后除、也与 `cfw` 那条不一致。**括号照抄上游的左结合**
+        // （`… * (wtaq0+wtgq0)*qsatlDT` 是 `(…*(W))*qsatlDT`，不是 `…*(W*qsatlDT)`）。
+        // 本条在 CN-Cng 干窗里恒等于 0（`evp_weight = 1-delta*(1-fwet)` 在
+        // `fwet=0, delta=1` 时正好为 0），位型探针**测不到**它 —— 属于按上游源码
+        // 形状照抄的保真度改动，由湿窗/雪窗黄金回归把关。
+        let evaporation_weight = 1.0 - evaporation_sign * dry_factor;
         let mut wet_evaporation =
-            input.air_density_kg_m3 * (1.0 - evaporation_sign * (1.0 - fwet)) * lsai
-                / leaf_boundary_resistance
-                * humidity_gradient;
-        let mut wet_evaporation_temperature_slope =
-            input.air_density_kg_m3 * (1.0 - evaporation_sign * (1.0 - fwet)) * lsai
-                / leaf_boundary_resistance
-                * (air_moisture_weight + ground_moisture_weight)
-                * leaf_saturation.specific_humidity_temperature_slope_k;
+            input.air_density_kg_m3 * evaporation_weight * wet_conductance * humidity_gradient;
+        let mut wet_evaporation_temperature_slope = input.air_density_kg_m3
+            * evaporation_weight
+            * wet_conductance
+            * (air_moisture_weight + ground_moisture_weight)
+            * leaf_saturation.specific_humidity_temperature_slope_k;
         if wet_evaporation >= state.canopy_water.total_mm / input.time_step_seconds {
             wet_evaporation = state.canopy_water.total_mm / input.time_step_seconds;
             wet_evaporation_temperature_slope = 0.0;
@@ -1443,31 +1470,42 @@ fn hydraulic_stomatal_resistance(
 }
 
 fn longwave(input: LeafTemperatureInput<'_>, leaf_temperature_k: f64, factor: f64) -> (f64, f64) {
-    let ground_longwave = if input.options.split_soil_snow {
-        (1.0 - input.snow_cover_fraction)
-            * input.ground_emissivity
-            * STEFAN_BOLTZMANN
-            * input.soil_surface_temperature_k.powi(4)
-            + input.snow_cover_fraction
-                * input.ground_emissivity
-                * STEFAN_BOLTZMANN
-                * input.snow_surface_temperature_k.powi(4)
+    // 内核把"叶面四次方 + 地面长波"这一串**逐项融合进累加**，而且融合的是**后一项**：
+    // `.loc 1 1105`（`lt_ext.s` 的 `L417` 与 `LBB245`）：
+    //   `_3199 = frl - (2*stefnc)*tl**4`（`fmsub`）
+    //   非分裂：`_400  = fma(emg*stefnc, tg**4, _3199)`
+    //   分裂  ：`tmp1938 = fma(((1-fsno)*emg)*stefnc, t_soil**4, _3199)`
+    //           `_429    = fma((fsno*emg)*stefnc, t_snow**4, tmp1938)`
+    // 合并点：
+    //   `tmp1923 = fma(_400, fac, _3205)`  ← `*factor + 第二项` 也是融合的
+    //   `irab    = tmp1923 + _3210`        ← 只有最后一项是平铺加法
+    // 原先先把地面两项加成 `ground_longwave`、再整体相加、再平铺 `*factor + …`，
+    // 三处都没融。逐迭代位型探针在第 1 轮抓到 `irab` 差 1 ULP。
+    let leaf_fourth_power = leaf_temperature_k.powi(4);
+    let longwave_base =
+        input.atmospheric_longwave_w_m2 - 2.0 * STEFAN_BOLTZMANN * leaf_fourth_power;
+    let radiated = if input.options.split_soil_snow {
+        (input.snow_cover_fraction * input.ground_emissivity * STEFAN_BOLTZMANN).mul_add(
+            input.snow_surface_temperature_k.powi(4),
+            ((1.0 - input.snow_cover_fraction) * input.ground_emissivity * STEFAN_BOLTZMANN)
+                .mul_add(input.soil_surface_temperature_k.powi(4), longwave_base),
+        )
     } else {
-        input.ground_emissivity * STEFAN_BOLTZMANN * input.ground_temperature_k.powi(4)
+        (input.ground_emissivity * STEFAN_BOLTZMANN)
+            .mul_add(input.ground_temperature_k.powi(4), longwave_base)
     };
     (
-        (input.atmospheric_longwave_w_m2 - 2.0 * STEFAN_BOLTZMANN * leaf_temperature_k.powi(4)
-            + ground_longwave)
-            * factor
-            + (1.0 - input.ground_emissivity)
+        radiated.mul_add(
+            factor,
+            (1.0 - input.ground_emissivity)
                 * input.canopy_longwave_gap_fraction
                 * factor
-                * input.atmospheric_longwave_w_m2
-            + (1.0 - input.ground_emissivity)
-                * (1.0 - input.canopy_longwave_gap_fraction)
-                * factor
-                * STEFAN_BOLTZMANN
-                * leaf_temperature_k.powi(4),
+                * input.atmospheric_longwave_w_m2,
+        ) + (1.0 - input.ground_emissivity)
+            * (1.0 - input.canopy_longwave_gap_fraction)
+            * factor
+            * STEFAN_BOLTZMANN
+            * leaf_fourth_power,
         -8.0 * STEFAN_BOLTZMANN * leaf_temperature_k.powi(3) * factor
             + 4.0
                 * (1.0 - input.ground_emissivity)

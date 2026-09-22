@@ -14975,3 +14975,142 @@ Not-tested: 分子那一侧 `fma(-htvpl,fevpl,·)` 的操作码窗口逐条比�
 同一套"操作码窗口比对"（`llvm-objdump --disassemble-symbols=…` 对 `colm.x` 取窗口）
 下次遇到"这个表达式到底融没融"的争议时直接复用 —— 它是目前唯一**指向出货二进制**的
 判据。
+
+## 第 246 轮：**逐迭代位型探针**把叶温循环的首个分叉钉死在**第 1 轮迭代**
+
+前几轮一直在"猜站点 → 三段式 A/B"，代价高且命中率低。本轮换一个**直接**的问法：
+把内核与 Rust 在同一位置（内核的 `it = it+1` 之前、Rust 的 `iteration += 1` 之前）、
+同一组 34 个量的**位型**逐迭代打出来，逐行比。工具
+`/tmp/gf/leafit_bits_probe.sh`（骨架照 `step_iter_probe.sh`，但目标是
+**`extends/interception/MOD_LeafTemperature_Extended.F90`**，且打印位型而不是
+`E24.16`——末位 1 ULP 会被十进制舍入掩盖）。
+
+第 1 轮迭代（此时**所有输入都还是初值，两侧逐位相同**）的结果：
+
+| 量 | 原状 | 判读 |
+|---|---|---|
+| `fsenl` | 差 1 ULP | 括号的融合形状错 |
+| `irab` | 差 1 ULP | 地面长波**没有逐项融合**、`*fac+第二项`也没融 |
+| `fevpl_dtl` | 差 1 ULP | 等于 `etr_dtl`（该轮 `evplwet_dtl` 恰好为 0） |
+| `cfw` | 差 1 ULP | "先乘后除" + 加法那侧没融 |
+| 其余 30 个 | 逐位相同 | 包括 `dirab_dtl`、`fsenl_dtl`、`qsatl`、`obu`、`cfh` |
+
+**这张表本身就是结论**：`fsenl` 的四个输入（`cfh`、`wta0`、`wtg0`、`tl`）全部逐位相同，
+`fsenl_dtl`（同一行、无 fma 的那个）也逐位相同 —— 所以差的**只能是括号里那个乘积的
+融合选择**。这比"4000 组随机数里 345/4000"那种统计证据锐利得多：它是**实际轨迹上的
+一个反例**，直接把此前按驱动器统计写下的形状否掉了。
+
+### 从 `lt_ext.s` 读出来的四处形状（全部按汇编改）
+
+`fsenl`（`.loc 1 1116`）：
+
+```text
+_459 = wta0 + wtg0
+_461 = thm * wta0            fmul  ← 先舍入
+tmp1960 = fmsub(_459, tl, _461)   → 只有 _459*tl 融合
+_463 = tg * wtg0             fmul  ← 先舍入
+_464 = tmp1960 - _463
+fsenl = _464 * (rhoair*cpair*cfh)
+```
+
+`irab`（`.loc 1 1105`，`L417`/`LBB245`）：
+
+```text
+_3199 = frl - (2*stefnc)*tl**4                    fmsub
+非分裂：_400  = fma(emg*stefnc, tg**4, _3199)
+分裂  ：tmp1938 = fma(((1-fsno)*emg)*stefnc, t_soil**4, _3199)
+        _429    = fma((fsno*emg)*stefnc, t_snow**4, tmp1938)
+tmp1923 = fma(_400, fac, _3205)     ← 第二项是 `(1-emg)*thermk*fac*frl`
+irab    = tmp1923 + _3210           ← 只有第三项是平铺加法
+```
+
+`cfw`（`.loc 1 1076/1079`，默认 scheme 的分支 `L166`）：
+
+```text
+_3064 = dry_factor * delta
+_3067 = 1 - _3064                    （= evp_weight）
+_382  = _3064 * SUM
+cfw   = fma(_3067, wet_cond_cfw, _382)
+wet_cond_cfw = (lai + sai) / rb      ← **先除**，不是 `coef*lsai/rb`
+```
+
+`evplwet`（`:1150-1151`，本轮**测不到**，按源码照抄）：
+
+```text
+evplwet = rhoair * evp_weight * wet_cond * ( … )     wet_cond = wet_area/rb
+```
+
+落地的五处改动在 `crates/colm-core/src/leaf_temperature.rs`：`leaf_sensible_heat` 的括号、
+`longwave()` 的三处融合、`leaf_moisture_conductance`（新增 `wet_conductance`/`dry_factor`
+两个具名中间量）、`wet_evaporation` 与它的温度导数。
+
+### 改完之后：**第 1 轮迭代只剩 `rssun`/`rssha`**
+
+同一个探针重跑（第 4 次）：
+
+```text
+it=1: DIFFERS: fevpl_dtl, cfw, rssun, rssha, etr_dtl
+      rssun  kernel=40F86A00061BA574 rust=40F86A00061BA573
+      rssha  kernel=40F86A00061BA574 rust=40F86A00061BA573
+```
+
+`fsenl`/`irab`/`fsenl_dtl`/`dirab_dtl`/`qsatl`/`wet_cond`/`rb`/`laisun`/`laisha`/`qsatlDT`/
+`evp_weight`/`dry_factor`/`delta` 全部逐位相同。**`cfw`/`etr_dtl`/`fevpl_dtl` 是
+`rssun`/`rssha` 的下游**（`SUM = laisun/(rb+rssun) + laisha/(rb+rssha)`），不是独立缺陷。
+`it=3` 甚至出现过一次**整轮 34 个量全部逐位相同** —— 说明这条链路本身可以完全对齐。
+
+**下一个（也是唯一一个）根因**：`rssun`/`rssha` 的 1 ULP 来自气孔侧。CN-Cng 这一支走的是
+`DEF_USE_PLANTHYDRAULICS`（`vegwp` 会随收缩变化即为旁证），上游 `rssun` 由
+`PlantHydraulicStress_twoleaf` 解出的 `gssun` 反算（`MOD_LeafTemperature_Extended.F90:919`
+的 `rssun = tprcor/tl*1e6/gssun`），不是 `stomata` 的 `rst`。**下一轮把同一个探针挪到
+PHS/气孔那一段**（`gssun`/`gssha`/`gs0sun`/`gs0sha`/`assimsun`/`etr` 一族的位型），
+先判"是 PHS 求解器还是 `update_photosyn`/`Assim`"。
+
+### 三段式度量（含黄金窗口）
+
+| 口径 | 基线 | 本轮 | 判读 |
+|---|---|---|---|
+| restart（干窗 1 步） | 19 / 68 | 19 / 68 | 未动（被 `rssun` 那一支拖着） |
+| 步级（干窗 3 步） | 44 变量 / 585-692 | 43 变量 / 581-692 | **混沌口径**，±4 在噪声内 |
+| 黄金 `ot_vars` | 17 / 68 / 79 | 17 / 68 / 79 | 未变 |
+| 黄金 dry `sumabs` | 338.9256 | **274.5483** | **改善 19%** |
+| 黄金 dry `over_tol` | 825 | **821** | 改善 |
+| 黄金 wet `sumabs`/`over_tol` | 10369.4411 / 20672 | 10373.0521 / 20673 | 噪声内 |
+| 黄金 snow `bitwise`/`sumabs` | 33651 / 444394.4368 | 33593 / 444394.4368 | `sumabs` 相同 |
+
+干窗 `sumabs` 从 338.93 降到 274.55 是**这一轮唯一有分辨力的度量信号**：
+步级"逐位相同元素数"是混沌量（1 ULP 扰动会在某一步放大并翻转个别元素），
+而 `sumabs` 是连续量。这也再次说明**为什么该用逐迭代位型探针而不是三段式来定位**。
+
+### 三条工具教训（都会再踩，写下来）
+
+1. **探针脚本的还原绝不能用 `git checkout --`**：它把工作区里**未提交**的改动一起冲掉。
+   本轮实测——探针跑完把刚写好的四处修复全丢了，只能重写一遍（重写版已存
+   `/tmp/gf/r246_fixes.patch`）。还原要 `cp "$WORK/backup/<file>" <file>`。
+2. **`strings … | grep -q …` 在 `set -o pipefail` 下会假报失败**：`grep -q` 命中即退出，
+   `strings` 吃到 SIGPIPE（141），整条管道被判成非零，于是"标记不在二进制里"。
+   先把 `strings` 落到文件再 grep。本轮因此白等了一次全量内核编译。
+3. **两侧转储的分隔符要一致**：Rust 侧用 `", ".join(...)` 打出来带逗号，比对脚本按空白切
+   就永远不等 —— 第一次跑时 10 轮全被报成"23 个量都不同"。用单空格。
+
+Tested: `/tmp/gf/leafit_bits_probe.sh` 四次（34 个量的位型逐迭代比对）；
+`cmp_leafit.py`；`dry_ts.sh 1` + `restart_divergence.py`（19/68）；
+`dry_ts.sh 3` + `window_divergence.py`（43 / 581-692）；`win4.sh` + `three.py`
+（21334/274.5483/821/17、32653/10373.0521/20673/68、33593/444394.4368/25896/79）；
+`llvm-objdump` 复核 `L166`/`L417`/`LBB245` 的操作码窗口。
+Not-tested: `rssun`/`rssha` 上游（PHS 求解器 / `Assim`）的逐位探针（下一轮）；
+探针里 `wet_evaporation` 那两条（该算例 `evp_weight ≡ 0`，测不到）。
+
+### 附：内核构建**不是逐字节可复现**的（别拿 sha256 当同一性判据）
+
+本轮连续做了三次"干净"构建（源码与 flag 完全相同），得到的
+`kernels/default/colm.x` 分别是 `9b2d7434…`、`3101497b…`、`7f5e7d93…` —— 各不相同；
+每次 `manifest.json` 里记的 sha 都与当下那份二进制一致（构建脚本自算自写，所以自校验会过）。
+**行为**没有变：同一套黄金窗口在三份二进制下 `ot_vars` 都是 17/68/79、`sumabs` 稳定。
+
+因此：
+
+* 不要用 sha256 判断"内核有没有被换过"（例如探针的插桩是否还在）—— 用
+  `strings kernels/default/colm.x` 找探针标记，或直接看行为；
+* 反过来，**探针跑完必须重编**这件事不能省：那时二进制里确实带着插桩，
+  sha 看着"合法"但内容是错的。
