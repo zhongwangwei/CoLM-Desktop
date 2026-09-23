@@ -441,6 +441,18 @@ pub fn perturb_variable_saturated_drainage(
 ///
 /// `jacobian_row_major` is the square `dr_dv` matrix; inactive coordinates
 /// retain the source zero update.
+///
+/// **这里的每一处 `a*b + c` 都必须写 `mul_add`。** 依据是本例程**自己的**反汇编
+/// （`objdump -d --disassemble-symbols=___mod_hydro_soilwater_MOD_solve_least_squares_problem
+/// kernels/default/colm.x`，第 299 轮实测）：Givens 旋转那一段里有 8 条 FMA 族指令
+/// （`fmadd`/`fnmsub`/`fmsub`），正是 `1+tau**2`（两处）、`c*Aii+s*Aji`、
+/// `c*Aik+s*Ajk`、`-s*Aik+c*Ajk`、`c*res(i)+s*res(j)`、`-s*res(i)+c*res(j)`、
+/// `dv(i)-A(i,k)*dv(k)` 这七处。
+///
+/// 还有一个**不能猜**的细节：内核只融合了每个表达式里的**一个**乘积，另一个仍是
+/// 独立的 `fmul`（先舍入一次）。哪个乘积进 FMA 由寄存器序决定，实测映射为
+/// `fmadd(Aik, c, Ajk*s)` 这种形状 —— 也就是"第一个乘积进 FMA、第二个乘积独立舍入"。
+/// 把两个乘积都融合（写成 `Aik.mul_add(c, Ajk.mul_add(s, 0.0))` 之类）同样是错的。
 pub fn solve_variable_saturated_least_squares(
     jacobian_row_major: &[f64],
     active: &[bool],
@@ -465,26 +477,27 @@ pub fn solve_variable_saturated_least_squares(
                 if matrix[lower] != 0.0 {
                     let (cosine, sine) = if matrix[lower].abs() > matrix[diagonal].abs() {
                         let tangent = matrix[diagonal] / matrix[lower];
-                        let sine = 1.0 / (1.0 + tangent.powi(2)).sqrt();
+                        let sine = 1.0 / tangent.mul_add(tangent, 1.0).sqrt();
                         (sine * tangent, sine)
                     } else {
                         let tangent = matrix[lower] / matrix[diagonal];
-                        let cosine = 1.0 / (1.0 + tangent.powi(2)).sqrt();
+                        let cosine = 1.0 / tangent.mul_add(tangent, 1.0).sqrt();
                         (cosine, cosine * tangent)
                     };
-                    matrix[diagonal] = cosine * matrix[diagonal] + sine * matrix[lower];
+                    matrix[diagonal] = matrix[diagonal].mul_add(cosine, sine * matrix[lower]);
                     matrix[lower] = 0.0;
                     for (column, &column_active) in active.iter().enumerate().skip(row + 1) {
                         if column_active {
                             let upper = row * dimension + column;
                             let lower = lower_row * dimension + column;
-                            let value = cosine * matrix[upper] + sine * matrix[lower];
-                            matrix[lower] = -sine * matrix[upper] + cosine * matrix[lower];
+                            let value = matrix[upper].mul_add(cosine, sine * matrix[lower]);
+                            matrix[lower] = matrix[lower].mul_add(cosine, -(matrix[upper] * sine));
                             matrix[upper] = value;
                         }
                     }
-                    let value = cosine * residual[row] + sine * residual[lower_row];
-                    residual[lower_row] = -sine * residual[row] + cosine * residual[lower_row];
+                    let value = residual[row].mul_add(cosine, sine * residual[lower_row]);
+                    residual[lower_row] =
+                        residual[lower_row].mul_add(cosine, -(residual[row] * sine));
                     residual[row] = value;
                 }
             }
@@ -501,7 +514,10 @@ pub fn solve_variable_saturated_least_squares(
             update[row] = residual[row];
             for (column, &column_active) in active.iter().enumerate().skip(row + 1) {
                 if column_active {
-                    update[row] -= matrix[row * dimension + column] * update[column];
+                    // 上游是 `dv(i) = dv(i) - A(i,k)*dv(k)`，内核收缩成 `fmsub`
+                    // （单次舍入）。取负是精确的，所以 `(-A).mul_add(dv_k, dv_i)` 逐位等价。
+                    let coefficient = matrix[row * dimension + column];
+                    update[row] = (-coefficient).mul_add(update[column], update[row]);
                 }
             }
             update[row] /= diagonal;

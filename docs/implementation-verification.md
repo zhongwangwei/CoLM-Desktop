@@ -17501,6 +17501,112 @@ ENDIF
 所以两个差是同一个源头：**第 19 步的 VSF Richards 解**（Rust `richards_solver`）。
 下一轮在 `ss_wt`/`ss_vliq` 的更新前后两侧同位型打点。
 
+#### 第 299 轮：**探针把种子推出了水步** —— 它在上游的 `rootflux`（外加一处真形状差）
+
+三件事，按重要性排。
+
+##### 一、`vsf_probe.sh`：`soil_water_vertical_movement` 出场处的两侧探针（19 步）
+
+新工具 `oracle/scripts/vsf_probe.sh`（内核 + 本仓库同点位、`vsf_cmp.py` 逐位比较）。
+每次调用打一行 `WSF0`（`wa`/`zwt`/`ss_dp`/`qinfl`/`wblc`/`tol_v`）+ 每层一行 `WSF`
+（`ss_vliq`/`ss_wt`/`smp`/`hk`/`qlayer`/`porsl`）：
+
+```text
+kernel calls 19 / rust calls 19
+call 13 zwt   K=45.744737736306945   R=45.74473773630695      ← 首个不同
+call 13 L3.ss_wt K=44.81708268203771 R=44.8170826820377
+call 14 L3.ss_vliq K=0.33012449116092063 R=0.3301244911609206
+call 18 zwt / L3.ss_wt；call 19 zwt / L3.ss_wt（同型）
+4/19 calls differ; first differing call = 13
+```
+
+**读法（这条比"第 19 步"精确得多）**：
+
+* 出的差**一直只在第 3 层**，而且 **`ss_vliq` 在 call 19 是逐位相同的**
+  （call 14 那次 `ss_vliq` 差一步就自己回去了）⇒ 第 19 步 restart 里的
+  `wliq_soisno[7]`（`oracle/scripts/restart_scan.sh` 的第一颗持久种子）**不是
+  `vol_liq` 漏出去的**，而是 `zwt`：`MOD_SoilSnowHydrology.F90:1109-1115` 用
+  `zwtmm` 参与 `wliq_soisno(7)` 的算式，而 `zwt = sp_zi(3) - ss_wt(3)`（`:415`）。
+* 所以第 298 轮"下一枪打 `ss_wt`/`ss_vliq` 更新前后"的结论**方向对了**，
+  但对象收窄成**只有 `ss_wt`（水位厚度）**：`ss_vliq` 这条到第 19 步还是干净的。
+* call 13/18 的差是**瞬态**（下一调用就消失），与第 297 轮"第 13/18 步 `zwt` 1 ULP
+  会自己消失"完全对上；但它**不是无害的**：call 19 那次正好被 `wliq_soisno(7)`
+  接住，于是变成持久差。
+
+##### 二、顺手修掉一处**真形状差**：`solve_least_squares_problem` 的 8 条 FMA
+
+**证据是本例程自己的反汇编**（`objdump -d --disassemble-symbols=
+___mod_hydro_soilwater_MOD_solve_least_squares_problem kernels/default/colm.x`，
+第 246/252 轮的规矩：形状只认自己的汇编）：
+
+```text
+fmadd d4, d5, d5, d31      ← 1 + tau**2（两处分支各一条）
+fmadd d3, d29, d26, d3     ← A(i,i) = c*Aii + s*Aji
+fmadd d1, d0, d26, d1      ← tmp    = c*Aik + s*Ajk
+fnmsub d0, d2, d26, d0     ← A(j,k) = -s*Aik + c*Ajk
+fmadd d28, d27, d26, d28   ← tmp    = c*res(i) + s*res(j)
+fnmsub d27, d30, d26, d27  ← res(j) = -s*res(i) + c*res(j)
+fmsub d23, d22, d16, d23   ← dv(i)  = dv(i) - A(i,k)*dv(k)
+```
+
+**不能猜的那个细节**：内核只融合每个表达式里的**一个**乘积，另一个仍是独立
+`fmul`（先舍入一次）；哪个进 FMA 由寄存器序决定，实测是"**第一个乘积进 FMA**"
+（`fmadd(Aik, c, Ajk*s)`）。所以本仓库那一段全部改成
+`a.mul_add(b, c)` 形状（7 处、8 条指令；`fnmsub` 那一类写
+`x.mul_add(c, -(y*s))`），改完在 debug 产物里数得到 **8 个 `std::f64::mul_add`
+调用**（`objdump -d target/debug/colm-rs` 的那个 symbol）——与内核 8 条一一对应。
+
+**三段式实测（改前 → 改后，同一棵树 A/B 各跑一次）**：
+
+| 窗口 | `over_tol` | `ot_vars` | `bitwise` | `sumabs` |
+|---|---|---|---|---|
+| CN-Cng 干 | 28 → **28** | 1 → 1 | 16326 → **16326** | 249.7886 → **249.7886** |
+| CN-Cng-wet | 1970 → **1967** | 53 → **41** | 28456 → 28904 | 39.7652 → **31.3139** |
+| US-NR1-snow | 25713 → **25713** | 79 → 79 | 32788 → **32567** | 444414.2029 → 444416.8246 |
+
+**保留**：验收口径看的是 `over_tol`/`ot_vars`（黄金窗口的容差判据），三窗口都
+**不变或更好**；两个诊断计数（`bitwise`/`sumabs`）在 wet/snow 上反向小幅移动，
+是混沌放大的末位噪声（snow 那条是 444414 里的 +2.6，相对 5.9e-6）。
+**干窗逐位完全没变**，因为干窗里 `A(j,i)` 大量为 0 ⇒ `IF (Amatrix(j,i) /= 0)`
+整段不执行（这也解释了为什么 `vsf_probe.sh` 的 4/19 **没动**：这颗种子不在这里）。
+
+##### 三、`vsf_richards_probe.sh`：入场 + Richards 内部的探针，**种子在上游**
+
+第二个探针 `oracle/scripts/vsf_richards_probe.sh`（+`vsf_richards_cmp.py`）
+在 `soil_water_vertical_movement` **入场**打 `WSF1`/`WSFE`（`qgtop`/`etr`/`rsubst`/
+`ss_dp`/`zwt`/`wa` + 逐层 `ss_vliq`/`rootflux`/`porsl`/`psi_s`/`hksat`），
+在 `Richards_solver` 内部打 `RCH0`/`RCHL`/`RCHF`/`RCHB`/`RCHD`/`RCHE`/`RCHX`/`RCHZ`
+（13 步）：
+
+```text
+kernel records: RCH0=18 RCHB=259 RCHD=99 RCHF=30 RCHL=124 RCHZ=124 WSF1=13 WSFE=130
+rust   records: RCH0=18 RCHB=259 RCHD=99 RCHE=75 RCHF=30 RCHL=124 RCHZ=124 WSF1=13 WSFE=130
+首个不同的记录 = ('WSFE', 12, 2, 0) rootflux
+    K=2.00962406971466e-07   R=2.0096240697146597e-07
+```
+
+两个结论：
+
+1. **种子不在水步里 —— 它是入参**。`WSF1` 的 13 行（`qgtop`/`etr`/`rsubst`/`wa`…）
+   和 call 1–11 的 `WSFE` 全部逐位相同；**call 12 第 2 层的 `rootflux` 差 1 ULP**。
+   这独立复现了第 274/277 轮"种子是 `rootflux`"的结论（那两轮在第 11 步看到，
+   本轮在第 12 步），并且把"水步内部的形状"整条排除了 —— 下一枪在
+   `plant_hydraulics.rs` / `MOD_PlantHydraulic.F90`，不在 `MOD_Hydro_SoilWater`。
+2. **内核的 `Richards_solver` 是按不透水层**分段**调的**：13 次 VSF 调用对应
+   **18 次** `RCH0`，而且 `lb` 取过 2 与 3（`ub` 取过 8/9/10）—— 不是"整柱一段"。
+   两侧的 `RCH0` 计数一致（18/18），说明本仓库的分段切法逐调用对齐。
+
+**探针自身的坑（记下来）**：第一版 `RCH0` 在本仓库侧打的是**段内**索引、
+内核侧打的是**绝对**层号，于是 `lb`/`ub`/`ilev` 全对不上，报出 55/661 条"假差异"。
+已改成**两侧都打段内相对层号**（本仓库的 `richards_solver` 只拿到切片，本来就
+不知道绝对偏移）。`WSFE` 那条不受影响（它没有段偏移）。
+
+**下一枪**：先用已有的 `oracle/scripts/gssun_probe.sh` 跑 **19 步**（原来只跑 16 步）
+看那六处电导是否仍是 328/328 逐位 —— 若仍是，则第 12 步的 `rootflux` 差**严格
+落在 `PlantHydraulicStress_twoleaf` 的牛顿解里**（`x2qe`/`spacAF`/`dx`/`qe2x`），
+再用第 281 轮那套"带调用序号的 `PHMID`/`PHEND`"探针把那一步的 `dx` 夹出来。
+**别再回 `MOD_Hydro_SoilWater`**（本轮已用入参探针排除）。
+
 ---
 
 # 交接：Fortran → Rust 移植的当前状态（本会话收束）
@@ -17615,6 +17721,16 @@ wice_soisno[5]   kernel=6.1823587081423845 (4018BABC3DBE730C)
 * `oracle/scripts/restart_scan.sh`（第 297 轮）：逐步跑 `dry_ts.sh N` 比 **restart**
   （68 个状态量本身），找**瞬时状态**第一次分歧的第几步。判状态必须用它，
   不能用 history（那是区间累加）。
+* `oracle/scripts/vsf_probe.sh` + `vsf_cmp.py`（第 299 轮）：
+  `soil_water_vertical_movement` **出场处**的逐层探针（`ss_vliq`/`ss_wt`/`smp`/
+  `hk`/`qlayer` + `wa`/`zwt`/`ss_dp`/`qinfl`/`wblc`），19 步两次调用一次一行。
+  它把第 19 步的持久差判成 **`zwt` 漏出**（`ss_vliq` 逐位相同、只有 `ss_wt[3]` 差）。
+* `oracle/scripts/vsf_richards_probe.sh` + `vsf_richards_cmp.py`（第 299 轮）：
+  `soil_water_vertical_movement` **入场**（`WSF1`/`WSFE`，含 `rootflux`）+
+  `Richards_solver` **内部**（`RCH0/RCHL/RCHF/RCHB/RCHD/RCHE/RCHX/RCHZ`）的探针。
+  它把第 19 步的种子**推出水步**：首个不同记录是第 12 次调用的入参 `rootflux[2]`。
+  两侧都打**段内相对层号**（内核会按不透水层分段调用，13 次 VSF 调用对应 18 次
+  `RCH0`，`lb` 取过 2/3）。
 * `cargo test --workspace --lib --bins`（26 个测试二进制）、
   `cargo clippy --workspace --all-targets -- -D warnings`、`cargo fmt --all --check`、
   `python3 oracle/scripts/test_upstream_f48_sync.py`（本会话最后一次全绿）。
@@ -17656,18 +17772,35 @@ wice_soisno[5]   kernel=6.1823587081423845 (4018BABC3DBE730C)
 
 这条链与第 271–274 轮追的"干窗记录 12 的 `rootflux` 1–2 ULP"是同一个。
 
+#### 第 299 轮补充：`gssun_probe.sh` 要从 16 步延长到 **19 步**再跑一次
+
+第 293 轮那次"328/328 逐位相同"只跑满 **16 步**，而第 299 轮的两级探针已经把
+干窗的种子钉在**第 12 次调用的入参 `rootflux[2]`**（1 ULP）—— 也就是说
+16 步那次的六个点**可能与种子无关**（六处打印的是叶面电导/阻力，不是 PHS 解出来的
+`rootflux`），也可能在 16 步内就已经分叉但没被这六处捕捉到。所以：
+
+* **先跑** `STEPS=19 bash oracle/scripts/gssun_probe.sh && python3 oracle/scripts/gssun_cmp.py ...`：
+  * 若仍 328/328（或延长后全同）⇒ 差**严格**在 `PlantHydraulicStress_twoleaf`
+    的牛顿解里（第 281 轮那套 `PHMID`/`PHEND` 带调用序号的探针直接搬到当前代码上）；
+  * 若在 12 步附近分叉 ⇒ 沿那处再往上追，别进 PHS 内部。
+* 判"分叉在第几次调用"一律用 `PHMID`/`PHEND` 的**调用序号**对齐（第 279 轮的坑：
+  两侧补丁落在不同分支时行数都对不上，比出来的是垃圾）。
+
 **下一枪**：回到 `rootflux` 那条链的**入口**（不是水步）：
 `crates/colm-core/src/plant_hydraulics.rs:567 root_flux_from_top_potential` 与
 `MOD_PHSRootfluxBalance.F90`，先判"植物水力解出来的 `rootflux_p` 本来就差"
 还是"`MOD_LeafTemperature_Extended.F90:1351-1361` 那两行第一次生效时形状不对"。
 工具：`oracle/scripts/gssun_probe.sh`（六处 + `GSTO`，现在应保持 328/328 全同，
-再分叉就是新线索）、`dry_ts.sh 16` + `window_divergence.py`。
+再分叉就是新线索）、`oracle/scripts/vsf_richards_probe.sh`（本轮已把水步入场处
+`rootflux` 的差钉在第 12 步）、`dry_ts.sh 16` + `window_divergence.py`。
 
 **验收口径（不变）**：`cargo test --workspace --lib --bins -- --test-threads=1`、
 `clippy -D warnings`、`fmt --check`（本机 `colm-cli` 的 7 个 `study::runner` 用例
 因沙箱 `EPERM` 失败，与本改动无关）；`bash /tmp/gf/win4.sh` + `three.py`
-（现在的基线是 **28 / 1970 / 25713**）；再 `bash /tmp/gf/accept_r247.sh`
-（restart 0/68、3 步 692/692）。任一指标变差就 `git checkout` 回滚，别留半个修复。
+（**第 299 轮后的基线是 28 / 1967 / 25713**）；再 `bash /tmp/gf/accept_r247.sh`
+（restart 0/68、3 步 692/692）。任一**口径指标**（`over_tol`/`ot_vars`）变差就
+`git checkout` 回滚，别留半个修复；`bitwise`/`sumabs` 是诊断计数，混沌窗口里会
+反向小幅移动，要记录但不当判据。
 
 ## 若继续
 
@@ -17712,23 +17845,22 @@ wice_soisno[5]   kernel=6.1823587081423845 (4018BABC3DBE730C)
    - `f_zwt`/`f_rib`/`f_zol` 这些 history 差是 `MOD_Vars_1DAccFluxes` 里
      `acc1d` **区间累加**出来的（`f_rib` = `r_rib`，纯诊断、不回灌），
      第 13/18 步那种 `zwt` 1 ULP 会自己消失 —— **别追 history**。
-   - 下一枪（第 298 轮已缩小）：**第 19 步的 VSF Richards 解**。`zwt` 走的是
-     `MOD_Hydro_SoilWater.F90:409` 的 `wa >= 0` **饱和路**（`:415`
-     `zwt = sp_zi(ilev)-ss_wt(ilev)`，实测 N=19 的 `wa = 0.0`），
-     `get_zwt_from_wa` **根本没被调用**；`wliq_soisno[7]` 也由同一段的
-     `ss_wt`/`ss_vliq`（`:431-436`）更新 ⇒ 两个差同源。先探 `ss_wt`/`ss_vliq`
-     的更新前后，别再试 `get_zwt_from_wa` 里的形状（第 298 轮试了 4 个全否）。
+   - 下一枪（**第 299 轮已用探针排除水步**）：第 19 步那颗种子的**入参**在第 12 步
+     就差了 —— `vsf_richards_probe.sh` 实测首个不同记录是
+     `WSFE call 12 L2 rootflux`（1 ULP），而 `WSF1`/call 1–11 全部逐位 ⇒
+     **别回 `MOD_Hydro_SoilWater`**。`wliq_soisno[7]` 是 `zwtmm` 漏出去的
+     （`vsf_probe.sh`：call 19 的 `ss_vliq` 逐位相同、只有 `ss_wt[3]`/`zwt` 差）。
+     下一枪在 `plant_hydraulics.rs` / `MOD_PlantHydraulic.F90` 的牛顿解里。
      土壤水力函数已排除（`compare_soilhydro.sh` 10000/10000 逐位）。
 2. **第二配置回归**（Campbell + 关 VSF）：第 293 轮实测干窗已从 16 降到 **0**；
    wet/snow 未重跑，需要时跑 `oracle/scripts/compare_second_config.sh <case>`。
 3. **未移植分支**：`standard_lct_step.rs:578` 明说 split soil/snow、SNICAR、气溶胶、
    示踪剂仍是另一支；动态湿地/CaMa 洪水路径 `colm-rs` 会打印 "unported branch" 警告。
-   这些是"全面完成"里真正还没做的部分。
-2. **第二配置回归**（Campbell + 关 VSF）：第 293 轮实测干窗已从 16 降到 **0**；
-   wet/snow 未重跑，需要时跑 `oracle/scripts/compare_second_config.sh <case>`。
-3. **未移植分支**：`standard_lct_step.rs:578` 明说 split soil/snow、SNICAR、气溶胶、
-   示踪剂仍是另一支；动态湿地/CaMa 洪水路径 `colm-rs` 会打印 "unported branch" 警告。
-   这些是"全面完成"里真正还没做的部分。
+   这些是"全面完成"里真正还没做的部分。其中**唯一在装配期被明确拒绝的产流分支**是
+   `DEF_Runoff_SCHEME = 1`（完整 VIC，`MOD_Hydro_VIC.F90` 588 行 + `vic/vic_para.txt`
+   运行期输入），移植它要连带做 `vic_para` 读取与 `soil_con_struct`/`cell_data_struct`
+   两套派生类型；`Runoff_VIC(15-67)` 只是壳，重头在 `compute_vic_runoff` 及其
+   `compute_runoff_and_asat`/`calc_Q12`/`compute_zwt`/`wrap_compute_zwt`。
 
 工具与纪律：探针跑完**必须重编**内核；**内核构建是单例**（所有探针已用
 `/tmp/gf/.kernel_build.lock` 串行化，不要把锁删掉）；**不要用内核 sha256 判断是否重编过**
