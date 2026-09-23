@@ -18589,6 +18589,18 @@ within tolerance: 127 variables, 10 dimensions (tier0=23 tier1=8 tier2=97 tier3=
 与文档里该配置的基线（干窗 0）一致 ⇒ 第 316 轮落地的那 8 处**没有碰坏这条经典
 Richards 支路**。湿/雪的第二配置仍未重跑（历史值 66 / 79）。
 
+**第 319 轮：落地那条 "Not-tested" 的第二半也关掉 —— 全 workspace 测试与 clippy 全绿**
+
+```text
+cargo test --workspace --lib --bins -- --test-threads=1   → rc=0，26 个测试二进制全 ok，0 个 FAILED
+cargo clippy --workspace --all-targets -- -D warnings     → rc=0
+cargo fmt --all --check                                   → 通过（上一轮已跑）
+```
+
+⇒ 第 316 轮落地的那 8 处形状在 `crates/*` 全量测试与 lint 下**没有任何回归**；
+连本机此前因沙箱 `EPERM` 而失败的 `colm-cli` 7 个 `study::runner` 用例也一并通过
+（本会话文件策略为 `danger-full-access`）。
+
 **下一枪**：给 `water_balance` 建第 3 个闭环（照 `compare_flux_inside.sh` 三件套 +
 拷贝放行路线；夹具要大一些：`lb/ub/dz/dt/is_sat/vl_s/q/ubc/lbc/wf/vl/wt/dp/waquifer`
 + 各自的 `_m1`，并按第 317 轮那份"一处一乘积、无歧义"的映射表补 5 处），判对后与
