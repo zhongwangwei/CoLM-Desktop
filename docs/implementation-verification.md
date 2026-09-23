@@ -15672,3 +15672,42 @@ Tested: `/tmp/gf/th6_probe.sh`（PRE 全同 / POST 差 1 ULP）+ 离线位型复
 （restart 0/68；步级 9 / 680-692；黄金 21252/604.5841/826/17、
 32667/10378.8229/20665/68、33494/444394.4368/25896/79）。
 Not-tested: `fseng` 那条订正的真实形状（本算例判不了）；`f_zerr`（下一轮）。
+
+### 第 252 轮追加：`errore` 的逐层减 —— **第 0 步 history 也全同（0 个差异变量）**
+
+第 252 轮把 `fevpg` 修好后，第 0 步只剩 `f_zerr`。它的链条收尾是：
+
+```fortran
+errore = sabv + sabg + frl - olrg - fsena - lfevpa - xmf - dheatl + hprl &
+       + canopy_phase_heat + cpliq*pg_rain*(t_precip-t_grnd) + cpice*pg_snow*(t_precip-t_grnd)
+DO j = lb, nl_soil
+   errore = errore - (t_soisno(j)-t_soisno_bef(j))/fact(j)     ! **逐层边加边减**
+ENDDO
+```
+
+Rust 端原先写成 `... - ground_heat_storage_w_m2`（先 `.sum()` 再整体减），
+结合顺序是 `T - (a₁+a₂+…)` 而不是 `((…((T-a₁)-a₂)…)`。改成同一个循环逐层减之后：
+
+```text
+compare_flag_isolated.sh base -> differing vars: 0
+```
+
+**干窗第 0 步的 history 68→0 个差异变量、restart 0/68，全部逐位相同。**
+
+| 口径 | 第 251 轮 | 第 252 轮（两处修完） |
+|---|---|---|
+| restart（干窗 1 步） | 0 / 68 | 0 / 68 |
+| **第 0 步 history 差异变量** | 8 | **0** |
+| 步级首个分歧步 | 0 | **1** |
+| 步级差异变量 / 逐位相同元素 | 14 / 668-692（96.53%） | **8 / 683-692（98.70%）** |
+| 黄金 dry `ot_vars` / `over_tol` | 17 / 826 | 17 / 826 |
+| 黄金 wet / snow `ot_vars` | 68 / 79 | 68 / 79 |
+
+剩下的分歧从**第 1 步**开始（`f_lfevpa` 2 个元素、然后 `f_fgrnd`/`f_wat`/`f_wat_inst`）——
+即第 0 步的**输出**已经逐位一致，分歧出现在"用第 0 步结果走第 1 步"时，
+下一轮从第 1 步的 `lfevpa` 入手最直接。
+
+Tested: `compare_flag_isolated.sh base`（0 个差异变量）；`accept_r247.sh`
+（restart 0/68；步级首个分歧步 **1**、8 变量 / 683-692；黄金
+21251/604.5841/826/17、32667/10378.8229/20665/68、33492/444394.4368/25896/79）。
+Not-tested: 第 1 步起的分歧（下一轮）。

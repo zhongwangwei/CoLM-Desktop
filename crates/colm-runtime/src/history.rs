@@ -889,15 +889,15 @@ pub fn set_lct_balance_errors(
         "the ground temperature state disagrees on depth between the current, previous \
          and factor columns"
     );
-    let ground_heat_storage_w_m2: f64 = ground
-        .temperature_k
-        .iter()
-        .zip(&ground.previous_temperature_k)
-        .zip(&ground.layer_factor_seconds_per_j_m2_k)
-        .map(|((now, before), factor)| (now - before) / factor)
-        .sum();
-
-    let zerr = energy.shortwave.sunlit_absorbed_w_m2
+    // `MOD_Thermal_CanopyPhase_Extended.F90:1403-1413` 的 `errore`：前两个赋值里
+    // 第一个是**死代码**（立刻被第二个覆盖，只差 `fgrnd` vs `xmf`），真正的链条
+    // 以**逐层边加边减**收尾：
+    //   `DO j = lb, nl_soil ; errore = errore - (t_soisno(j)-t_soisno_bef(j))/fact(j)`
+    // 所以不是"先求和再整体减"，而是 `((…((T - a₁) - a₂) …) - aₙ)`。
+    // 原实现先 `.sum()` 再 `- ground_heat_storage_w_m2`，结合顺序不同 ——
+    // 这是干窗第 0 步最后一个差异（`f_zerr`，`errore` 本身 ~2.6e-11、差 8.9e-14）
+    // 的第一候选。
+    let mut zerr = energy.shortwave.sunlit_absorbed_w_m2
         + energy.shortwave.shaded_absorbed_w_m2
         + energy.shortwave.ground_absorbed_w_m2
         + reference.downward_longwave_w_m2
@@ -907,8 +907,15 @@ pub fn set_lct_balance_errors(
         - ground.latent_heat_flux_w_m2
         - energy.leaf.canopy_heat_storage_w_m2
         + energy.leaf.precipitation_heat_w_m2
-        + budget.precipitation_heat_w_m2
-        - ground_heat_storage_w_m2;
+        + budget.precipitation_heat_w_m2;
+    for ((now, before), factor) in ground
+        .temperature_k
+        .iter()
+        .zip(&ground.previous_temperature_k)
+        .zip(&ground.layer_factor_seconds_per_j_m2_k)
+    {
+        zerr -= (now - before) / factor;
+    }
 
     let errorw = (end_water_storage_mm - reference.initial_total_water_mm)
         - (reference.convective_precipitation_kg_m2_s
