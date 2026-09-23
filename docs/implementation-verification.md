@@ -15839,3 +15839,48 @@ Tested: `dry_ts.sh 2`/`dry_ts.sh 3` + `restart_divergence.py`（1/2/3 步分别 
 `window_divergence.py`（首个分歧步 2）；逐元素位型对照（`wice_soisno[5]`、`hk[0]`、
 `f_wat`、`f_h2osoi`）。
 Not-tested: `MOD_Hydro_SoilFunction` 的差分（下一轮）。
+
+### 第 254 轮追加：给 `MOD_Hydro_SoilFunction`（**水**参数保持曲线）补上差分闭环
+
+干窗第 3 步的 restart 差异落在 `wice_soisno` 与 `hk` 上（见上一节），而
+`MOD_Hydro_SoilFunction`（van Genuchten / Campbell 的 `smp`/`hk`/`vliq` 互相反演）
+**一直没有差分闭环** —— 现有 8 个闭环里只有 `soil_hcap_cond`（**热**参数）。
+本轮把它补上：
+
+* 驱动 `oracle/scripts/soil_hydro_fn_diff.f90`：两档模型 ×（2500 组均匀随机 +
+  2500 组边界取值），三个函数**串联**调用（`psi = soil_psi_from_vliq(…)`，
+  再把同一个 `psi` 喂给 `soil_hk_from_psi`/`soil_vliq_from_psi`），
+  按位型打印 `psi`/`hk`/`vl`；
+* 配对物 `crates/colm-core/examples/soil_hydro_fn_probe.rs`（同一串 LCG、
+  同样的抽签顺序；改一边必须同步改另一边）；
+* 外壳 `oracle/scripts/compare_soilhydro.sh`：模块按**产线 flag** 编译
+  （不加 `-ffp-contract=off`）、驱动加 `-fwrapv -ffp-contract=off`，
+  与 `compare_soilthermal.sh` 同一套骨架；namelist 用只含
+  `DEF_USE_Campbell_SOIL_MODEL` 的桩模块。
+
+结果：
+
+```text
+MOD_Hydro_SoilFunction: all 3 outputs 10000/10000 bitwise identical
+分支分布 {('0','0'):2701, ('0','1'):422, ('0','2'):1877,
+          ('1','0'):2769, ('1','2'):1836, ('1','1'):395}
+```
+
+（`flag` 1 = `vliq>=porsl` 的早退、2 = `vliq<=max(vl_r,1e-8)` 的早退；
+两档模型的两条早退路径都被抽到过，不是"边界没覆盖所以全同"。）
+
+**结论有两条**：
+
+1. 这一族（两档模型 × 三个函数 × 三条分支）**逐位正确** ⇒ 保持曲线不是
+   `wice`/`hk` 那个差的来源；
+2. `hk` 的差（3.9e-13 相对）因此只能是**由发散的 `wice` 经保持曲线推出来**的，
+   与上一节的链条读法一致。
+
+**下一步**：残差只剩"第 2 步第 1 层土壤冰"这一个状态量。它的候选收窄到
+`MOD_PhaseChange` 的**调用参数**（`meltf` 本身已有 9 个量 × 10000 的闭环）
+与 `soilwater`/`water_2014` 里水量分配的结合顺序。
+
+Tested: `bash oracle/scripts/compare_soilhydro.sh`（3 输出 10000/10000 逐位相同，
+两档模型 × 三条分支全命中）；`cargo fmt --all --check`；`cargo clippy --workspace --all-targets -- -D warnings`。
+Not-tested: `MOD_PhaseChange` 的调用参数（下一轮）；`get_derived_parameters_vGM`
+（静态参数推导，不在本驱动覆盖范围；两侧都用抽出来的 `sc_vgm`/`fc_vgm`）。
