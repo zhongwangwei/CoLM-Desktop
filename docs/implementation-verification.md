@@ -16092,9 +16092,21 @@ Not-tested: 第 2 步的 `meltf` 实参（探针仍是 2 步版）。
 `wa` 两侧都是 0 ⇒ 水位走的是"自下而上扫层"那一支（不是 `get_zwt_from_wa` 的迭代），
 而 `zwt = sp_zi(ilev) - ss_wt(ilev)` ⇒ **种子是 Richards 解算器算出的第 1 层饱和厚度
 `ss_wt(1)`**（`MOD_Hydro_SoilWater.F90:1019-1040` 的显/隐式子步分支；Rust 对应
-`variably_saturated_flow.rs` 的 `richards_solver`）。这一步只看输出还分不出是
-`ss_wt(ilev) - dv(ilev)`、`min(dv, sp_dz)` 还是 `q_this(ilev)/hksat(ilev)` 那几处形状，
-下一枪要打该分支的中间量。
+`variably_saturated_flow.rs` 的 `richards_solver`）。`ss_wt` 的那几处更新本身**没有乘积**（`ss_wt - dv`、`min(dv, sp_dz)`、`q/hksat`），
+所以种子不在那三行，而在它上游的值里。Rust 的 `richards_solver`
+（`variably_saturated_flow.rs:3401`）是**结构照抄**上游的（子步 + 每子步 Newton），
+所以候选只剩它内部的五个部件之一：
+
+| 部件 | Rust | 上游 |
+|---|---|---|
+| 子层初始化（饱和/湿润锋/水位标记） | `initialize_variable_saturated_sublevels` | `:880-1050` 的标记段 |
+| 通量 | `flux_variable_saturated_flux_all` | `flux_all` |
+| 水量平衡残差 | `variable_saturated_water_balance` | `water_balance` |
+| 数值 Jacobian | `var_perturb_*` | `var_perturb_*` |
+| 最小二乘修正量 | `solve_variable_saturated_least_squares` | `solve_least_squares_problem` |
+
+下一枪：在第 6 步的**第一个子步**打出这五段的输出（每段取几个标量/层量），
+把差异夹到其中一段；`ss_wf` 在上游是每次调用从 0 开始的局部量，两侧一致。
 
 探针卫生（这一轮踩的两个小坑）：`strings` 默认只列 ≥4 字符的串，所以标签至少 4 个字符
 （`WT ` 只有 3 个字符，明明编进去了却 grep 不到）；`grep` 无匹配在 `set -e` 下会直接
