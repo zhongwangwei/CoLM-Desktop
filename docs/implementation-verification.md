@@ -18281,6 +18281,27 @@ fadd d24,d22,d24 + fmsub d24,d27,d21,d24       ; 第二处同形
 再处理 `soil_water_vertical_movement` 那 15 条差额，最后与第 302 轮那六处
 `get_zwt_from_wa` 形状**一起**落地跑口径。
 
+**第 310 轮：`flux_all` 中间那 1 条认领了 —— 归一化加权平均，**第二个**乘积进 FMA**
+
+```text
+fmul d31, d13, d11        ; d31 = w1*v1
+fadd d13, d13, d12        ; d13 = w1 + w2
+fmadd d31, d12, d30, d31  ; d31 = w2*v2 + (w1*v1)      ← 第二个乘积进 FMA
+fdiv d31, d31, d13        ; (w1*v1 + w2*v2)/(w1 + w2)
+fcmpe d10, d31            ; 再与 min(d28,d29) 比较（取小那类判据）
+```
+
+即 `(w1*v1 + w2*v2)/(w1 + w2)` 形式的**加权平均**（两侧通量都激活时的
+饱和区/双侧界面那一支），**不是** `flux_inside_hm_soil`/割线的形状。本仓库对应的
+`flux_variable_saturated_both_transition` / `flux_variable_saturated_zone_all`
+`mul_add` 计数为 0 ⇒ **又一处缺口**（写法：`(w2).mul_add(v2, w1*v1)` 再除以 `w1+w2`）。
+
+**确证缺口清单（更新）**：`flux_inside_hm_soil` **2** + `water_balance` **5** +
+本轮的加权平均 **1** = **8 处**；`soil_water_vertical_movement` 的 27−12=15 条仍未读。
+
+**下一轮**：一次性把这 8 处补上（写法都已记档），建 `compare_getzwt.sh` 式例程闭环
+验证；再读外层的 15 条差额；最后与第 302 轮那六处 `get_zwt_from_wa` 形状一起落地跑口径。
+
 #### 第 303 轮：水步入场探针 —— 剩下的种子是**第 20 步入场时的冰/水状态**，不是 `eff_porosity` 算错
 
 新工具 `oracle/scripts/vsf_input_probe.sh`：在 `WATER_VSF` 调 `soil_water_vertical_movement`
