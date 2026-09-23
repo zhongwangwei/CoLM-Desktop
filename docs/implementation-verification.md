@@ -17908,6 +17908,46 @@ MOD_PlantHydraulic.F90:148   real(r8), parameter :: rpi = 3.14159265358979_r8
 是本轮之后唯一还没量的环节；如果入场也全同，就落在 `:344-350` 的 `sp_zi(izwt)-zwt`
 与 `findloc_ud` 判级上。
 
+#### 第 301 轮：那一枪打进去了 —— 种子在 **`soilwater_aquifer_exchange`**（含水层交换）
+
+新工具 `oracle/scripts/vsf_wt_probe.sh`（三个 tag：`WSE1` = 第一次 `findloc_ud`
+之后的级号+入场 `zwt`；`WSE0` = `ss_wt` 初始化之后（**交换之后**）的级号 + `zwt` + `wa`
++ `ss_dp`；`WSEL` = 逐层 `ss_wt`/`ss_vliq`/`porsl`），20 步：
+
+```text
+WSE1     kernel=20 rust=20      WSE0 kernel=20 rust=20      WSEL kernel=200 rust=200
+('WSE1', 14, 0, 0) f2 zwt  K=45.744737736306945   R=45.74473773630695    ← 首个不同
+('WSE1', 19/20) / ('WSE0', 13/18/19/20) 同型
+('WSEL', 13, 3, 0) ss_wt   K=44.81708268203771    R=44.8170826820377
+12/240 records differ
+```
+
+**读法与结论**（这条把范围收得比第 300 轮小得多）：
+
+1. `WSE1` 在 **call 1–13 全部逐位相同**（入场级号 `izwt` 与入场 `zwt` 都是）⇒
+   从步进开头到 `findloc_ud(zwt >= sp_zi)` 为止，两侧没有任何差别；
+2. `WSE0` 在 **call 13** 的 `zwt` 差 1 ULP，而**同一次调用的 `izwt` 仍然相同**
+   ⇒ 差是在 `soilwater_aquifer_exchange` 内部造出来的（入场相同、出场不同）；
+3. `WSE1` call 14 = 上一调用（call 13）的出场 `zwt`，值 `45.744737736306945`
+   与第 299 轮 `vsf_probe.sh` 的"call 13 出场 `zwt`"**同一个数** ⇒ 两个探针互相印证；
+4. `WSEL` call 13 第 3 层 `ss_wt` = `sp_zi(3) - zwt` 跟着差 1 ULP，而第 300 轮
+   Richards 内部探针的首差正好落在**该次 VSF 调用对应的 Richards 调用（第 17 次）
+   入场** `ss_wt` 上 —— 整条链现在自洽：**交换改出的 `zwt` → `ss_wt(3)` →
+   Richards 入场的 `ss_wt` → …**。
+
+**所以种子既不在 Richards、也不在 PHS、也不在缩放，而在含水层交换这一步。**
+下一枪（已具体到点位）：在 `soilwater_aquifer_exchange`（Rust
+`exchange_soil_water_with_aquifer`）的**入口**打 `wexchange`/`ss_dp`/`wa`/`zwt`/`izwt`、
+**出口**打 `zwt`/`wa`/`ss_dp`/`izwt`，先判 `wexchange`（= `rsubst*dt + deficit`）
+进来时就差还是内部某一步的形状差；同时用同一套反汇编方法数该子程序的 FMA 条数
+（`objdump -d --disassemble-symbols=___mod_hydro_soilwater_MOD_soilwater_aquifer_exchange`）。
+
+**探针工具的两处加固（本轮顺手做掉）**：
+* `vsf_wt_probe.sh` 把**级号放进"值"里**而不是当键 —— 级号本身可能差，当键会让两侧
+  键不同、比较器直接漏报；
+* `oracle/scripts/probe_diff.py` 增加"共享键数量 < 两侧行数"的显式告警，同样的漏报
+  不会再静默发生。
+
 **验收口径（不变）**：`cargo test --workspace --lib --bins -- --test-threads=1`、
 `clippy -D warnings`、`fmt --check`（本机 `colm-cli` 的 7 个 `study::runner` 用例
 因沙箱 `EPERM` 失败，与本改动无关）；`bash /tmp/gf/win4.sh` + `three.py`
@@ -17959,12 +17999,22 @@ MOD_PlantHydraulic.F90:148   real(r8), parameter :: rpi = 3.14159265358979_r8
    - `f_zwt`/`f_rib`/`f_zol` 这些 history 差是 `MOD_Vars_1DAccFluxes` 里
      `acc1d` **区间累加**出来的（`f_rib` = `r_rib`，纯诊断、不回灌），
      第 13/18 步那种 `zwt` 1 ULP 会自己消失 —— **别追 history**。
-   - 下一枪（**第 299 轮已用探针排除水步**）：第 19 步那颗种子的**入参**在第 12 步
-     就差了 —— `vsf_richards_probe.sh` 实测首个不同记录是
-     `WSFE call 12 L2 rootflux`（1 ULP），而 `WSF1`/call 1–11 全部逐位 ⇒
-     **别回 `MOD_Hydro_SoilWater`**。`wliq_soisno[7]` 是 `zwtmm` 漏出去的
-     （`vsf_probe.sh`：call 19 的 `ss_vliq` 逐位相同、只有 `ss_wt[3]`/`zwt` 差）。
-     下一枪在 `plant_hydraulics.rs` / `MOD_PlantHydraulic.F90` 的牛顿解里。
+   - 下一枪（**第 301 轮已把种子钉死在含水层交换里**）：`oracle/scripts/vsf_wt_probe.sh`
+     在 `ss_wt` 初始化前后各打一个点（`WSE1` 入场级号+`zwt`、`WSE0` 交换后级号+`zwt`+`wa`、
+     `WSEL` 逐层 `ss_wt`/`ss_vliq`/`porsl`），20 步实测：
+
+     ```text
+     WSE1 call 1–13 全同（入场 izwt/zwt 逐位）; 首个不同 = WSE1 call 14 的 zwt（= call 13 的出场）
+     WSE0 call 13 的 zwt 差 1 ULP（izwt 仍同）
+     WSEL call 13 第 3 层 ss_wt 差 1 ULP
+     ```
+
+     ⇒ **入场逐位相同、`soilwater_aquifer_exchange` 之后 `zwt` 差 1 ULP**，同一个调用内
+     `izwt` 不变。所以种子就在 `soilwater_aquifer_exchange`
+     （Rust `exchange_soil_water_with_aquifer`）里，**不在 Richards、不在 PHS、不在缩放**。
+     下一枪：把该子程序的入口（`wexchange`/`ss_dp`/`wa`/`zwt`）与出口
+     （`zwt`/`wa`/`ss_dp`/`izwt`）两侧对打，先判是 `wexchange`（= `rsubst*dt + deficit`）
+     进来时就差，还是交换内部某一步的形状差；同时用同一套反汇编方法数该子程序的 FMA 条数。
      土壤水力函数已排除（`compare_soilhydro.sh` 10000/10000 逐位）。
 2. **第二配置回归**（Campbell + 关 VSF）：第 293 轮实测干窗已从 16 降到 **0**；
    wet/snow 未重跑，需要时跑 `oracle/scripts/compare_second_config.sh <case>`。

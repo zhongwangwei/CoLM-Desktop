@@ -53,6 +53,20 @@ def main() -> int:
         k, r = counts.get(tag, [0, 0])
         mark = "" if k == r else "   <-- 行数不同（补丁落点不同？）"
         print(f"  {tag:8s} kernel={k:5d} rust={r:5d}{mark}")
+    # 键不同也可能是**真差异**（比如级号/层号本身差）——那种情况下两侧的"行数"相等
+    # 但共享键变少，比较器会漏报。所以这里显式检查每个 tag 的共享键数量。
+    for tag in fort_order:
+        if tag not in rust_order:
+            continue
+        fk = {key for key in fort if key[0] == tag}
+        rk = {key for key in rust if key[0] == tag}
+        if len(fk & rk) != len(fk) or len(fk & rk) != len(rk):
+            only_f = sorted(fk - rk)[:3]
+            only_r = sorted(rk - fk)[:3]
+            print(
+                f"  !! {tag}: 共享键 {len(fk & rk)} < 内核 {len(fk)} / 本仓库 {len(rk)}"
+                f"（键本身不同 ⇒ 可能正是差异）; 仅内核 {only_f} 仅本仓库 {only_r}"
+            )
     rank = {tag: index for index, tag in enumerate(fort_order)}
     shared = sorted(set(fort) & set(rust), key=lambda key: (rank.get(key[0], 99), key[1], key[2], key[3]))
     if not shared:
