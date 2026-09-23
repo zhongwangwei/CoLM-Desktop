@@ -16042,8 +16042,47 @@ Not-tested: 第 2 步的 `meltf` 实参（探针仍是 2 步版）。
   **雪层**），土壤层只经 `sum_qfrz`/`xmf` 这类**求和**间接覆盖，1 ULP 会被求和吞掉。
   "9 量 × 10000 逐位闭环"于是并不能证明土壤层分支没问题 —— 本轮差的就是土壤层。
 
+#### 第 257 轮追加：修完之后还剩什么（长程阶梯与下一颗种子）
+
+`bash /tmp/gf/dry_ts.sh 48`（TIMEPSTEP、干窗）逐记录看：
+
+| 步 | 差异变量 | 量级 | 状态量 |
+|---|---|---|---|
+| 0–2 | 0 | — | 全同 |
+| 3 | 5（`f_fgrnd`/`f_olrg`/`f_rnet`/`f_trad`/`f_zerr`） | 1–4 ULP | **全同** |
+| 4–5 | 0 | — | 全同（5 步 restart **0/68**） |
+| 6 | 28（含 `f_t_grnd`/`f_t_soisno`/`f_wliq_soisno`/`f_zwt`） | 1 ULP 种子 + 下游 | **首次分歧** |
+| 7 起 | 37… | 混沌放大 | — |
+
+第 3 步那 5 个量是**纯诊断**（`olrg`/`fgrnd`/`trad`/`rnet` 不回流到状态），所以它们是
+症状、不是第 6 步状态差的原因。把 `olrg` 的输入逐个比出来（`olrg_probe.sh`：
+
+**注意要打 `extends/interception/MOD_Thermal_CanopyPhase_Extended.F90`，
+`main/MOD_Thermal.F90` 不参与编译** —— 第一版打错了文件，构建照样成功、`strings` 里却
+找不到标记，这正是仓库里"编的不是你以为的那个文件"那条坑的又一次现形）：
+
+```text
+第 3 步：ulrad  内核=267.00097916323915  rust=267.0009791632391   ← 1 ULP
+         emg / t_grnd_bef / tinc / stefnc 全同（其余各步 ulrad 也全同）
+```
+
+⇒ 第 3 步的种子是叶温例程的 `ulrad`（`MOD_LeafTemperature_Extended.F90:1410/1416`）。
+
+两个已做过的排查（都**无效果、已还原**，但结论值得记）：
+
+* 第三项结合顺序（`(1-emg)*thermk*thermk*frl` 的左结合 ↔ `(1-emg)*thermk.powi(2)*frl`）
+  A/B：第 3 步差异一字不变 ⇒ 不是这一项。
+* 指数结合顺序**不是**嫌疑：实测 gfortran 的 `x**4` 就是 `(x*x)*(x*x)`
+  （200000 组随机数上 0/200000 不同；`((x*x)*x)*x` 则 69119/200000 不同），
+  与 Rust 的 `powi(4)` 一致；`x**3` 同 `(x*x)*x`。
+
+⇒ 剩下的嫌疑是 `ulrad` 的**分量**（`fac`/`tlbef`/`dtl`/`thermk`/`emg`/`tg`，
+全在叶温 Newton 循环里）以及第 6 步状态那一颗（两条链互不相干）。
+
 Tested: `/tmp/gf/meltf_args_probe3.sh`、`meltf_inner_probe.sh`、`imperv_probe.sh`、
 `balance_probe.sh`（各 3 步，两侧位型；跑完都自动还原源码并重编内核）；
+`olrg_probe.sh`（8 步）；`bash /tmp/gf/dry_ts.sh 48` + `window_divergence.py`；
+`restart_divergence.py`（5 步 restart 0/68）；gfortran 的 `x**3`/`x**4` 结合顺序实测；
 `otool -tv -p ___mod_hydro_soilwater_MOD_soil_water_vertical_movement kernels/default/colm.x`；
 `bash /tmp/gf/accept_r247.sh`（1 步 restart / 3 步 history / 黄金三窗口）；
 `bash /tmp/gf/dry_ts.sh 3` + `restart_divergence.py`（3 步 restart 0/68）。
