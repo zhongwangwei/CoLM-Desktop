@@ -16079,6 +16079,30 @@ Not-tested: 第 2 步的 `meltf` 实参（探针仍是 2 步版）。
 ⇒ 剩下的嫌疑是 `ulrad` 的**分量**（`fac`/`tlbef`/`dtl`/`thermk`/`emg`/`tg`，
 全在叶温 Newton 循环里）以及第 6 步状态那一颗（两条链互不相干）。
 
+#### 第 260 轮追加：第二配置（Campbell + 关 VSF）回归复查 —— 16 / 66 / 79
+
+`cgrnd` 那处修复在**两个配置都会走到**的叶温例程里，所以第二配置必须复查。
+`oracle/scripts/compare_second_config.sh` 三个窗口：
+
+```text
+CN-Cng (Campbell, VSF off)      16 variable(s) outside tolerance
+CN-Cng-wet                      66
+US-NR1-snow                     79
+```
+
+与文档记录的基线 **16 / 66 / 79 完全一致** ⇒ 无回归（这条一直挂在"Not-tested"里，本轮补上）。
+
+短程对齐阶梯（干窗 CN-Cng、TIMESTEP、16 步，逐记录差异）：
+
+| 记录 | 差异变量 | 状态量 |
+|---|---|---|
+| 0–2 | 0 | 全同 |
+| 3 | 5（`ulrad` 那条纯诊断链） | 全同 |
+| 4–6 | 0 | 全同 |
+| 7–11 | 1–6（都是诊断） | **全同** |
+| 12–13 | 1–2（`f_zwt` 1 ULP） | `f_zwt`（**瞬态**，14 记录即消失） |
+| 15 | 56 | 10 个（`t_grnd` 551 ULP 等）—— 混沌/分支放大 |
+
 #### 第 260 轮：**水步那颗种子也修掉了** —— `water_balance` 的 `dmss` 要按三条语句累加
 
 第 259 轮把种子夹到"扰动分支的求值"后，顺着扰动会重新走的 `water_balance` 读源码，
