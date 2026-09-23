@@ -18193,6 +18193,33 @@ flux = t.mul_add(hk_l.powf(rr), hk_u);
 3. 建 `compare_getzwt.sh` 式例程闭环验证（这三个都是 `psi`/`hk`/`dz` 的纯函数）；
 4. 之后再与第 302 轮那六处 `get_zwt_from_wa` 形状一起落地、跑口径。
 
+**第 307 轮：那 3+3 条**不用补**（内联的割线，本仓库在 helper 里已经有了）**
+
+逐条读 `flux_top_transitive_interface` 的 3 条 FMA 上下文：
+
+```text
+fsub d11, d0, d11          ; fval_k1 - fval_k2（分母）
+fnmsub d10, d0, d10, d31   ; 分子：fval_k1*x_k2 - (已舍入的 fval_k2*x_k1) —— **第一个**乘积进 FMA
+fmul d29, d14, d28         ; 夹逼：一个乘积先独立舍入 …
+fmadd d29, d13, d31, d29   ; … 另一个进 FMA
+fdiv d10, d10, d11 / fmaxnm / fmadd d31, d13, d28, d31
+```
+
+这正是 `secant_method_iteration` 的三处，被**内联**进了这个子程序。而本仓库的两个
+transition 例程各自 `bounded_secant_iteration(...)` **调用一次**（`mul_add` 计数在
+**helper** 里，不在调用者里）⇒ **这 3+3 条已经在 `bounded_secant_iteration` 里复现了**
+（第 302 轮的闭环已把那三处判到 10000/10000），**不是缺口**。
+（顺带：分子那一条同样显示"第一个乘积进 FMA"，与第 302 轮闭环的结论一致 ✓ 互相印证。）
+
+**于是第 305 轮那份普查表要这样读**（把"内联"减掉之后）：
+* `flux_inside_hm_soil` **2 条**：第 305/13 轮已确认是**它自己的**表达式 ⇒ **真缺口**；
+* `flux_top/bottom_transitive_interface` 3+3：**内联的割线** ⇒ 已在 helper 里；
+* `flux_all` **7 条**、`water_balance` **5 条**、`soil_water_vertical_movement` 27 vs 12：
+  **还没逐条读上下文**，里面究竟有多少是它们自己的表达式、多少是内联合计，未定。
+**下一轮**：只读这三个（`flux_all` / `water_balance` / `soil_water_vertical_movement`）
+的 FMA 上下文，按同样办法把"自己的表达式"挑出来，然后只给这些补 `mul_add` +
+建闭环；`flux_inside_hm_soil` 那 2 处按第 305 轮记的写法一起改。
+
 #### 第 303 轮：水步入场探针 —— 剩下的种子是**第 20 步入场时的冰/水状态**，不是 `eff_porosity` 算错
 
 新工具 `oracle/scripts/vsf_input_probe.sh`：在 `WATER_VSF` 调 `soil_water_vertical_movement`
