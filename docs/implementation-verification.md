@@ -17241,6 +17241,29 @@ wice_soisno[5]   kernel=6.1823587081423845 (4018BABC3DBE730C)
 "全面完成"若指功能面，缺的正是上表这些被拒绝的分支（split、SNICAR、示踪剂、CaMa 洪水等）；
 若指默认配置的逐位一致，则短程做到记录 0–11 状态全同、黄金窗口与基线齐平或更好。
 
+### 最高优先（已具体到行）：修 PHS 种子公式
+
+第 289 轮已把差异钉死：上游 PHS 的种子是**第二个电导**
+`gssun = (laisun/rssun)*(tprcor/tlbef)`（`MOD_LeafTemperature_Extended.F90:1316-1322`），
+本仓库把 `maximum_*`（= `gs0`，`rstfac` 的分母）兼作种子
+（`leaf_temperature.rs:548-553`）。四处不同：乘/除 `laisun`、`.min(1e6)`、`1e6`、
+`tlbef` vs 当前 `T`。执行步骤：
+
+1. `PlantHydraulicInput` 增两个字段
+   （建议名 `diagnosed_{sunlit,shaded}_stomatal_conductance_umol_m2_s`），
+   并按 `cargo check` 报错逐个补齐构造点（实测 7 处）；
+2. 在叶温那一层按上游公式算它：`lai > 1e-3` 时
+   `(lai/rss)*(tprcor/tlbef)`、否则 0。**两处细节必须先确认**：
+   `rss` 用哪一份（上游注释说"此刻是 leaf-scale"，即
+   `sunlit_resistance.stomatal_resistance_s_m`，不是乘过 lai 的 `leaf_sunlit_resistance`）、
+   `tlbef` 是**求这份阻力时的温度**（不是当前 `state.leaf_temperature_k`）；
+3. `conductance_from_transpiration` 的种子换成新字段；`rstfac` 分母仍用 `gs0`；
+4. 验收：`cargo test --workspace --lib --bins -- --test-threads=1`、
+   `clippy -D warnings`、`fmt --check`；`bash /tmp/gf/win4.sh` + `three.py`
+   （黄金 **821 / 20662 / 25896**，只看 RUST 侧、不必重编内核）；
+   再 `bash /tmp/gf/accept_r247.sh`（restart 0/68、3 步 692/692）。
+   任一指标变差就 `git checkout` 这两个文件，别留半个修复。
+
 ## 若继续
 
 **短程逐位已经干净**（1/3 步 restart 0/68、3 步 history 692/692），所以别再往
