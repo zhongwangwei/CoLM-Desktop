@@ -17267,6 +17267,84 @@ kernel call 289（Rust call 288，同一个包装调用）：
 Rust 侧探针构建与干净构建都被这一步覆盖：探针跑完内核已按 `SKIP_REBUILD=0`
 重编回干净版。
 
+#### 第 293 轮：找到真凶 —— `update_photosyn` 的 `gsh2o` 量纲（实测差 `1e6`）
+
+第 292 轮把首分歧钉在遮荫 `stomata` 的 `rssha`。本轮用三层探针一路往上推，
+把根因收到一个 `1e6` 的量纲差上，并修掉它。
+
+**三层探针（都在 `oracle/scripts/`，16 步 CN-Cng 干窗）**：
+
+1. `stomata_probe.sh`（遮荫支入参 + `stomata` 内部）：首分歧**不在**
+   `stomata` 内部，而是它的入参 **`pco2a`**（第 577 次 `stomata` 调用，
+   相对 `9.5e-7`）；`parsha/rbsha/eah/tl/psrf/rb` 与 `rssun` 全同。
+2. `pco2a_probe.sh`（`MOD_LeafTemperature_Extended.F90:1243-1244` 更新式）：
+   首分歧在 **`assimsun`/`assimha`**（`update_photosyn` 的输出，相对
+   `8.3e-4`/`8.0e-3`），而 `gah2o/raw/thm/tprcor/respcsun/respcsha/rsoil` 全同。
+3. `updphoto_probe.sh`（`update_photosyn` 内部）：入口 **`gsh2o` 在全部 656 次
+   调用上差正好 `1e6`**：内核 `42.51463425289875` 对 `4.251463425289875e-05`。
+
+**根因**（上游注释与实参不一致）：
+
+```fortran
+! MOD_LeafTemperature_Extended.F90:908-911 —— gssun 此刻是**冠层 µmol m-2 s-1**
+gssun = gssun * laisun
+CALL update_photosyn(tl, po2m, pco2m, pco2a, parsun, psrf, rstfacsun, rb, gssun, ...)
+```
+
+`update_photosyn` 的哑元 `gsh2o` 注释写 "mol m-2 s-1"，但调用点传进去的是
+**µmoles 的数值**（PHS 逐叶 µmol 输出 × `laisun`）。本仓库
+`leaf_temperature.rs:1513` 按注释除了 `1e6`，于是
+`pco2in = (co2s - 1.6*assmt/gsh2o)*psrf` 那一项被放大 `1e6` 倍：夜间 `assmt=1e-12`
+时看不出来，**第一个有光的迭代**就分叉（`assim` 差 ~1e-3，再经 `pco2a` 反馈进
+`stomata` 的遮荫支）。这就是"遮荫 `rssha` 差 9.1e-7"的真身。
+
+**修法（2 个数值文件 + 1 个测试）**：
+
+* `leaf_temperature.rs:1508-1517` 原样传 `canopy_conductance_umol_m2_s`；
+  `PhotosynthesisUpdateInput` 的字段改名
+  `canopy_conductance_h2o_mol_m2_s` → `canopy_conductance_h2o_umol_m2_s`，
+  字段与调用点各写清"照抄调用点的数值，不是哑元的注释"。
+* 顺带修一处同源的**钳制混淆**：`MOD_AssimStomataConductance.F90:318-321` 的
+  `co2s`（未钳制，进 `:366` 的 `pco2in`）与 `co2st = max(min(co2s,co2a),1e-5)`
+  （进 Medlyn 的 `acp` `:341` 与 Ball-Berry 的 `hcdma` `:350`）是两个量；
+  在 `update_photosyn` 里 `co2st`（`:797-798`）更是**死代码**。原先 Rust 用一个
+  钳制后的 `co2_surface` 兼两职（夜间 `assimn<0 ⇒ co2s>co2a`，`pco2in` 差
+  ~1e-4 相对）。现在 `co2_surface`（未钳制）进 `pco2in`，`co2_surface_clamped`
+  进两条电导闭式。
+
+**独立参考（不靠 Rust 自证）**：`oracle/scripts/updphotosyn_diff.f90` +
+`compare_updphotosyn.sh` 直接链 `.bld` 的产线对象调内核 `update_photosyn`：
+`gsh2o=40000` → `assim=2.29820183479526886E-05`、`respc=9.81529284775695169E-07`，
+由 `photosynthesis_tests.rs` 钉住（旧的 `0.04` 是 mol 口径，已改成 µmol 的 `40000`）。
+
+**验收（`bash /tmp/gf/accept_r247.sh`，本机实测）**：
+
+| 窗口 | `over_tol` 前 → 后 | `ot_vars` 前 → 后 | `bitwise` 前 → 后 | `sumabs` 前 → 后 |
+|---|---|---|---|---|
+| CN-Cng | 821 → **28** | 17 → 1 | 21003 → 16324 | 224.36 → 249.79 |
+| CN-Cng-wet | 20662 → **1970** | 68 → 53 | 32608 → 28456 | 10383.48 → **39.77** |
+| US-NR1-snow | 25896 → **25713** | 79 → 79 | 33439 → 32788 | 444391.81 → 444414.20 |
+
+restart 干窗 1 步 `0/68`、步级 3 步 `692/692` **不变**。三个窗口的 `over_tol`、
+`ot_vars`、`bitwise` **全部变好**；`sumabs` 在 dry/snow 各升 ~11%/~0.005%，
+逐变量核对后 **100% 来自 `f_vegwp`**（植物水力水势，长记忆混沌量：
+dry 249.79 全部是它；wet 39.77 里 38.37 是它；snow 444414 里 430724 是它），
+其余变量 `sumabs ≈ 0` —— 光合那条系统性偏差被消掉，只剩已知的 PHS 混沌残差。
+
+**第二配置（Campbell + 关 VSF）干窗**：`oracle/scripts/compare_second_config.sh CN-Cng`
+从修复前的 **16 个超容差变量降到 0**（127 个变量全部在容差内）。脚本本身因最后
+`grep "failures by tier"` 找不到而 `exit 1` —— 那是它"全绿"时的行为，不是失败。
+
+**16 步干窗 history**（`dry_ts.sh 16` + `window_divergence.py`）：首分歧仍在
+**第 12 步的 `f_zwt` 1 个值 / 1 ULP**（`maxrel 1.52e-16`），第 14 步
+`f_assimsun` 1 个值；`3446/3448` 逐位相同。这是与"遮荫 `rssha`"**不同的**一条链
+（`rssha` 原来在第 15 步才分叉，那条已修掉），即第 271–274 轮那个 `rootflux`
+1–2 ULP 的残差，本轮未动。
+
+**同一探针复跑（`STEPS=16`）**：修复前首个分歧在 PHS 调用 289（`gs0sha`/`rssha`），
+修复后 **六处 + `GSTO` 全部 328 次调用逐位相同**（`gssun_cmp.py` 报
+`identical (328 calls)`）。
+
 ---
 
 # 交接：Fortran → Rust 移植的当前状态（本会话收束）
@@ -17291,6 +17369,10 @@ history 现在全部逐位相同（692/692）。** 那个追了十几轮的末�
 | 黄金 `ot_vars` dry/wet/snow | 17 / 68 / 79 | 17 / 68 / 79 |
 | 黄金 `over_tol` dry/wet/snow | **821** / 20664 / 25896 | 826 / 20665 / 25896 |
 | 第二配置（Campbell + 关 VSF）`ot_vars` | 16 / 66 / 79（本轮未重跑） | 16 / 66 / 79 |
+
+> **第 293 轮修掉 `update_photosyn` 的 `gsh2o` 量纲后再跑一遍**：`over_tol =
+> 28 / 1970 / 25713`、`ot_vars = 1 / 53 / 79`、`bitwise = 16324 / 28456 / 32788`，
+> restart（1/2/3 步 0/68）与步级（692/692）**不变**。见"第 293 轮"。
 
 ## 原残留（已消除）：第 2 步第 1 层土壤冰
 
@@ -17359,9 +17441,15 @@ wice_soisno[5]   kernel=6.1823587081423845 (4018BABC3DBE730C)
 * `oracle/scripts/gssun_probe.sh` + `gssun_cmp.py`（第 292 轮）：`gssun` 六处
   （`GSIN/GSDEM/GSOUT/GS908/GS919/GS941/GS1320`）与遮荫 `stomata`
   （`GSTO`）两侧同位型探针，跑完自动还原并重编内核回干净版；
-  `STEPS=16 WORK=/tmp/gf/gssun16b bash oracle/scripts/gssun_probe.sh` 后
-  `python3 oracle/scripts/gssun_cmp.py $WORK/fort_probe.txt $WORK/rust_probe.txt`
-  把干窗 16 步的首分歧夹到 kernel call 289 的 `rssha`。
+  `STEPS=16 WORK=/tmp/gf/gssun16fix bash oracle/scripts/gssun_probe.sh` 后
+  `python3 oracle/scripts/gssun_cmp.py $WORK/fort_probe.txt $WORK/rust_probe.txt`。
+  第 293 轮修复前首分歧在 kernel call 289 的 `rssha`，修复后 328/328 全同。
+* 第 293 轮的三层 `update_photosyn` 探针：`stomata_probe.sh` + `stomata_cmp.py`
+  （遮荫支入参/内部）、`pco2a_probe.sh`（`:1243-1244` 更新式）、
+  `updphoto_probe.sh`（`update_photosyn` 入口/内迭代/出口）。
+* `oracle/scripts/updphotosyn_diff.f90` + `compare_updphotosyn.sh`：
+  直接链 `.bld` 调内核 `update_photosyn` 的独立参考值（钉在
+  `photosynthesis_tests.rs`）。
 * `cargo test --workspace --lib --bins`（26 个测试二进制）、
   `cargo clippy --workspace --all-targets -- -D warnings`、`cargo fmt --all --check`、
   `python3 oracle/scripts/test_upstream_f48_sync.py`（本会话最后一次全绿）。
@@ -17386,45 +17474,35 @@ wice_soisno[5]   kernel=6.1823587081423845 (4018BABC3DBE730C)
 "全面完成"若指功能面，缺的正是上表这些被拒绝的分支（split、SNICAR、示踪剂、CaMa 洪水等）；
 若指默认配置的逐位一致，则短程做到记录 0–11 状态全同、黄金窗口与基线齐平或更好。
 
-### 最高优先（**已改向**）：遮荫叶 `stomata` 的 `rssha`
+### 最高优先：**已修（第 293 轮）**；剩下的是 `f_vegwp` 混沌残差
 
-> **第 292 轮把原来的"修 PHS 种子公式"否掉了。** 六处探针标定（见"第 292 轮"）实测：
-> 上游 `:316-317` 每次调用都把 `gssun/gssha` 重置成 `gs0sun/gs0sha`，**没有跨调用
-> 持久状态**；`:1321` 的输出是冠层 mol 的 `intent(out)` 诊断，从不回灌种子。本仓库
-> 传的 `maximum_*` 就是 `gs0`，**与上游种子逐位相同**（第 1 步 10/10、16 步 328/328）。
-> 原来的 `1e9` 是拿"冠层 mol 诊断值"和"逐叶 µmol 的 gs0"直接比出来的，不是真差异。
-> **所以那"两个参数"不要加。**
+> **第 293 轮已修掉原来的首分歧。** 三层探针把"遮荫 `rssha` 差 9.1e-7"一路推到
+> `update_photosyn` 的 `gsh2o` 量纲：上游调用点（`:908-911`）传的是**冠层 µmol 的
+> 数值**，本仓库按哑元注释除了 `1e6`。修好后 16 步探针六处 **328/328 逐位相同**，
+> 黄金 `over_tol` 821/20662/25896 → **28/1970/25713**。细节与证据见"第 293 轮"。
+> （第 292 轮否掉的"PHS 种子公式"仍然作废：`:316-317` 每次重置，没有持久状态。）
 
-真正的首分歧在**遮荫叶气孔阻力**上（16 步 CN-Cng 干窗，kernel call 289 / Rust call 288，
-同一个包装调用）：
+**剩下的残差只有一个量**：`f_vegwp`（植物水力水势，长记忆混沌量）。
 
-```text
-stomata/calc_photo_params 的遮荫入参（在这个首分歧调用上）两侧逐位相同：
-  parsha、rbsha、eah、tl、psrf、rb        全同；rssun 也全同
-输出：rssha  K=2.027254841348288E+04  R=2.0272566867306305E+04   相对 9.1e-07
-下游：gs0sha 同一个相对差 → gssha（PHS 种子）→ :909 → :920/:942 → 最终
-      PHS 输出（:346）在 kernel call 310 才跟着差；sunlit 支 rssun 到
-      call 309 才差（遮荫支分叉后的耦合结果）
-```
+* `sumabs`：三个窗口现在 100% 由它主导 —— dry `249.79/249.79`；
+  wet `39.77` 里 `38.37`；snow `444414` 里 `430724`。其余变量 `sumabs ≈ 0`。
+* `over_tol` 计数：dry 只剩它（`28/28`）；wet 是它 `248/1536` 再加上被它带出来的
+  水状态（`wliq_soisno` 356、`h2osoi` 351、`zwt` 82、`t_soisno` 74…）。
 
-`parsha` 在 16 步**全部 328 次调用**上两侧都逐位相同 ⇒ 不在辐射。
-`rssha` 39/328 次不同；`rssun` 19/328 次不同（晚 21 次调用）。
-差在 `MOD_AssimStomataConductance.F90` 的**遮荫叶分支**（`stomata` 或它内部的
-`calc_photo_params`），**不在 PHS、不在种子、不在辐射**。
+这条链与第 271–274 轮追的"干窗记录 12 的 `rootflux` 1–2 ULP"是同一个。
 
-**下一枪（探针，不读式子猜）**：在 `stomata` 遮荫那一支的入口/出口两侧同位型对打，
-覆盖它**全部**入参（现在只打了 `parsha/rbsha/eah/tl/psrf/rb`，还差
-`ei/po2m/pco2m/pco2a/thm/raw/cintsha/g0/g1/binter` 等）与内部量
-（`calc_photo_params` 的 `ci/assim/respc/anetc` 等）。若入参全同、内部某一步开始
-分叉，就是那一处的形状；若内部也全同而出口不同，就是 `rssha` 闭式的结合顺序。
-`stomata` 的调用点在 `MOD_LeafTemperature_Extended.F90:801/816`，
-Rust 在 `leaf_temperature.rs:500/513`。
+**下一枪**：回到 `rootflux` 那条链的**入口**（不是水步）：
+`crates/colm-core/src/plant_hydraulics.rs:567 root_flux_from_top_potential` 与
+`MOD_PHSRootfluxBalance.F90`，先判"植物水力解出来的 `rootflux_p` 本来就差"
+还是"`MOD_LeafTemperature_Extended.F90:1351-1361` 那两行第一次生效时形状不对"。
+工具：`oracle/scripts/gssun_probe.sh`（六处 + `GSTO`，现在应保持 328/328 全同，
+再分叉就是新线索）、`dry_ts.sh 16` + `window_divergence.py`。
 
 **验收口径（不变）**：`cargo test --workspace --lib --bins -- --test-threads=1`、
-`clippy -D warnings`、`fmt --check`；`bash /tmp/gf/win4.sh` + `three.py`
-（黄金 **821 / 20662 / 25896**，只看 RUST 侧、不必重编内核）；
-再 `bash /tmp/gf/accept_r247.sh`（restart 0/68、3 步 692/692）。
-任一指标变差就 `git checkout` 回滚，别留半个修复。
+`clippy -D warnings`、`fmt --check`（本机 `colm-cli` 的 7 个 `study::runner` 用例
+因沙箱 `EPERM` 失败，与本改动无关）；`bash /tmp/gf/win4.sh` + `three.py`
+（现在的基线是 **28 / 1970 / 25713**）；再 `bash /tmp/gf/accept_r247.sh`
+（restart 0/68、3 步 692/692）。任一指标变差就 `git checkout` 回滚，别留半个修复。
 
 ## 若继续
 
@@ -17441,24 +17519,22 @@ Rust 在 `leaf_temperature.rs:500/513`。
 `MOD_PHSRootfluxBalance.F90`，先判"是植物水力解出来的 `rootflux_p` 本来就差"
 还是"`MOD_LeafTemperature_Extended.F90:1351-1361` 那两行第一次生效时形状不对"
 （第 11 步正是 `etr` 第一次非零的那一步，那两行此前从未生效过）。
-（第 292 轮已把这条的**源头**钉到遮荫叶 `stomata` 的 `rssha`，见下面第 0 条。）
+（第 292/293 轮已把这条的**源头**钉到 `update_photosyn` 的 `gsh2o` 量纲并修掉：
+`over_tol` 821/20662/25896 → 28/1970/25713；剩下的正是本条的 `f_vegwp` 混沌残差。）
 
 剩下三件事，按价值排序：
-0. **（第 292 轮改向）`rootflux` 的 1 ULP 源头是遮荫叶 `stomata` 的 `rssha`**：
-   第 271–277 轮把"第 11 步 `rootflux` 差 1–2 ULP"夹到植物水力解里的叶面蒸腾需求；
-   第 279–285 轮把范围缩到"那一段只有 `gs_sha` 差"，并确认 `qflx→gs` 的闭式是干净的
-   （首个不同在 call 310，且继承自入参 `qflx`）。第 287/288 轮据此提出"跨调用持久的
-   一对电导"语义差；**第 292 轮六处探针把这条否掉了**：`:316-317` 每次调用都重置
-   `gssun=gs0sun`，没有持久状态（第 1 步 10/10、16 步 328/328 种子与 `gs0` 逐位相等），
-   `:1321` 只是冠层 mol 的诊断输出。第 292 轮把真正的首分歧钉在 **`rssha`**
-   （kernel call 289 / Rust call 288）：`stomata` 遮荫支的**全部可打印入参**
-   （`parsha/rbsha/eah/tl/psrf/rb`）与 `rssun` 都逐位相同，输出 `rssha` 差 9.1e-7
-   ⇒ 差在 `MOD_AssimStomataConductance.F90` 的遮荫叶分支
-   （`stomata` / 它内部的 `calc_photo_params`）。**下一枪打这里**：探针覆盖剩余入参
-   （`ei/po2m/pco2m/pco2a/thm/raw/cintsha/g0/g1/binter`）与 `calc_photo_params`
-   内部量；别再回 PHS 或水步。
+0. **（第 293 轮已修）遮荫 `rssha` 那条首分歧**：第 292 轮六处探针把"PHS 种子公式"
+   否掉（`:316-317` 每次重置，无持久状态），把首分歧钉在遮荫 `stomata` 的入参
+   `pco2a`；第 293 轮三层探针（`oracle/scripts/stomata_probe.sh` →
+   `pco2a_probe.sh` → `updphoto_probe.sh`）一路推到 `update_photosyn` 的 `gsh2o`
+   量纲：上游调用点（`:908-911`）传的是**冠层 µmol 的数值**，本仓库按哑元注释除了
+   `1e6`，白天的 `assim` 因此分叉（详见"第 293 轮"）。修好后 16 步探针六处
+   328/328 全同，黄金 `over_tol` → 28/1970/25713。
+   **现在剩下的就是 `f_vegwp`**：三个窗口的 `sumabs` 全由它主导，dry 的 `over_tol`
+   也只剩它。**下一枪是 `rootflux` 的入口**（`plant_hydraulics.rs:567` /
+   `MOD_PHSRootfluxBalance.F90`），别再回 `stomata` 或 PHS 种子。
    验收口径：`accept_r247.sh` 与 `dry_ts.sh 16` + `window_divergence.py`；
-   干窗黄金 `over_tol` 现在是 821 / 20662 / 25896。
+   干窗黄金 `over_tol` 现在是 **28 / 1970 / 25713**。
 0b. **（新）补 `balance_phs_rootflux`**：见第 276 轮。默认配置下它在这三份窗口里
    不生效（警告 0 次），但条件不成立时会静默算错，属于该补的缺口。
 

@@ -1510,7 +1510,11 @@ fn hydraulic_stomatal_resistance(
             photosynthesis,
             atmospheric_co2_pa: input.atmospheric_co2_pa,
             canopy_air_co2_pa: step.canopy_air_co2_pa,
-            canopy_conductance_h2o_mol_m2_s: canopy_conductance_umol_m2_s / 1.0e6,
+            // `MOD_LeafTemperature_Extended.F90:908-911`：调用方把 PHS 的逐叶
+            // µmol 输出乘 `laisun` 后**原样**交给 `update_photosyn`（哑元注释写
+            // "mol"，数值却是 µmol）。这里原先除 `1e6`，第 293 轮探针实测内核
+            // `gsh2o = 42.51463425289875` 对本仓库 `4.251463425289875e-05`。
+            canopy_conductance_h2o_umol_m2_s: canopy_conductance_umol_m2_s,
         },
         input.options.stomata,
     )?;

@@ -102,7 +102,15 @@ pub struct PhotosynthesisUpdateInput {
     pub photosynthesis: LeafPhotosynthesisInput,
     pub atmospheric_co2_pa: f64,
     pub canopy_air_co2_pa: f64,
-    pub canopy_conductance_h2o_mol_m2_s: f64,
+    /// 冠层水汽导度，**µmol m⁻² s⁻¹**。
+    ///
+    /// 上游 `update_photosyn` 的哑元 `gsh2o` 注释写的是 "mol m-2 s-1"，但调用点
+    /// `MOD_LeafTemperature_Extended.F90:908-911` 把 PHS 的**逐叶 µmol** 输出乘
+    /// `laisun` 后**原样**传进去（第 293 轮探针：CN-Cng 干窗第 1 次调用实测
+    /// `gsh2o = 42.51463425289875`）。照抄的是调用点的数值，不是哑元的注释 ——
+    /// 原先这里按注释除了 `1e6`，白天的 `1.6*assmt/gsh2o` 被放大 `1e6` 倍，
+    /// `pco2in`/`eyy` 偏掉，`assim` 在第一个有光的迭代就分叉。
+    pub canopy_conductance_h2o_umol_m2_s: f64,
 }
 
 /// Outputs of CoLM's `update_photosyn` routine.
@@ -249,7 +257,14 @@ pub fn stomata(input: StomataInput, options: StomataOptions) -> Result<StomataSt
         let net_assimilation = assimilation - photo.respiration_mol_m2_s;
         let co2_surface = input.canopy_air_co2_pa / input.photosynthesis.air_pressure_pa
             - f77(1.37) * net_assimilation / photo.boundary_conductance_h2o_mol_m2_s;
-        let co2_surface = co2_surface
+        // `MOD_AssimStomataConductance.F90:318-321` 是两个量，不能合并：
+        //   `co2s`（未钳制）只进 `:366` 的 `pco2in`；
+        //   `co2st = max(min(co2s,co2a),1e-5)` 只进 Medlyn 的 `acp`（`:341`）
+        //     与 Ball-Berry 的 `hcdma`（`:350`）。
+        // 原先用一个钳制后的 `co2_surface` 兼两职：夜间 `assimn<0` ⇒ `co2s>co2a`，
+        // `pco2in` 与内核差 ~1e-4 相对（第 293 轮 UPIT 探针）；白天会把
+        // `1.6*assimn/conductance` 的 `co2s` 也换成钳制值。
+        let co2_surface_clamped = co2_surface
             .min(input.canopy_air_co2_pa / input.photosynthesis.air_pressure_pa)
             .max(f77(1.0e-5));
         let positive_assimilation = net_assimilation.max(f77(1.0e-12));
@@ -271,7 +286,7 @@ pub fn stomata(input: StomataInput, options: StomataOptions) -> Result<StomataSt
                 - input.canopy_air_vapor_pressure_pa)
                 .max(f77(50.0))
                 * f77(1.0e-3);
-            let acp = f77(1.6) * positive_assimilation / co2_surface;
+            let acp = f77(1.6) * positive_assimilation / co2_surface_clamped;
             let a = 1.0;
             let bq = -f77(2.0) * (g0 * f77(1.0e-6) + acp)
                 - (g1 * acp).powi(2)
@@ -283,7 +298,7 @@ pub fn stomata(input: StomataInput, options: StomataOptions) -> Result<StomataSt
             (co2_surface - f77(1.6) * net_assimilation / conductance)
                 * input.photosynthesis.air_pressure_pa
         } else {
-            let hcdma = input.leaf_saturation_vapor_pressure_pa * co2_surface
+            let hcdma = input.leaf_saturation_vapor_pressure_pa * co2_surface_clamped
                 / (gradm * positive_assimilation);
             let a = hcdma;
             let bq = photo.boundary_conductance_h2o_mol_m2_s * hcdma
@@ -325,13 +340,13 @@ pub fn update_photosynthesis(
         [
             input.atmospheric_co2_pa,
             input.canopy_air_co2_pa,
-            input.canopy_conductance_h2o_mol_m2_s,
+            input.canopy_conductance_h2o_umol_m2_s,
         ]
         .iter()
         .all(|value| value.is_finite())
             && input.atmospheric_co2_pa >= 0.0
             && input.canopy_air_co2_pa >= 0.0
-            && input.canopy_conductance_h2o_mol_m2_s > 0.0,
+            && input.canopy_conductance_h2o_umol_m2_s > 0.0,
         "photosynthesis update inputs are invalid"
     );
     let photo = photosynthesis_parameters(input.photosynthesis)?;
@@ -365,13 +380,16 @@ pub fn update_photosynthesis(
             assimilation = omc.min(ome).max(0.0);
         }
         let net_assimilation = assimilation - photo.respiration_mol_m2_s;
-        let co2_surface = (input.canopy_air_co2_pa / input.photosynthesis.air_pressure_pa
-            - f77(1.37) * net_assimilation / photo.boundary_conductance_h2o_mol_m2_s)
-            .min(input.canopy_air_co2_pa / input.photosynthesis.air_pressure_pa)
-            .max(f77(1.0e-5));
+        // `MOD_AssimStomataConductance.F90:796-803`：`update_photosyn` 的 `pco2in`
+        // 用的是**未钳制**的 `co2s`（`:803`）。同一处 `:797-798` 还算了一个
+        // `co2st = max(min(co2s,co2a),1e-5)`，但它在整个子程序里**从未被读** ——
+        // 那是死代码。原先把两者合成一个 `co2_surface`（钳制），夜间
+        // （`assimn<0` ⇒ `co2s>co2a`）就与内核差 ~1e-4 相对（第 293 轮 UPIT 探针）。
+        let co2_surface = input.canopy_air_co2_pa / input.photosynthesis.air_pressure_pa
+            - f77(1.37) * net_assimilation / photo.boundary_conductance_h2o_mol_m2_s;
         let positive_assimilation = net_assimilation.max(f77(1.0e-12));
         let next = (co2_surface
-            - f77(1.6) * positive_assimilation / input.canopy_conductance_h2o_mol_m2_s)
+            - f77(1.6) * positive_assimilation / input.canopy_conductance_h2o_umol_m2_s)
             * input.photosynthesis.air_pressure_pa;
         errors[iteration - 1] = internal - next;
         if errors[iteration - 1].abs() < f77(0.1) {
