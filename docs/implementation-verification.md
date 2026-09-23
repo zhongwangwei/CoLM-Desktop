@@ -16859,6 +16859,39 @@ PHMID: 两侧各 49 行；call ≤310 逐位全同，call 311 首个不同
 （都在逐位相同的区间内），所以"当时全中"与"call 310 差 5.6e-7"并不矛盾：
 形状差只在高抵消倍数处显形。
 
+#### 第 282 轮：A 矩阵与 determ **逐位全同** —— 种子是 `qflx_sun`/`qflx_sha`（叶面蒸腾需求）
+
+在 `spacAF_twoleaf` 的 `determ=` 那一行之后两侧都打
+`A11,A13,A22,A23,A31,A32,A33,A34,A43,A44,determ,f(1..4),qflx_sun,qflx_sha`（`SPACA`）：
+
+```text
+两侧各 49 行；call ≤287 全同；call 310 首个不同（call 288–309 未走到这一支）
+-- call 310（A 与 determ **一个都没列出来 ⇒ 全部逐位相同**）
+     f1        K=1.640052681854531e-10   R=1.6400511585530102e-10
+     f2        K=2.1043157908155635e-08  R=2.1043143656617804e-08
+     qflx_sun  K=1.913006412369971e-10   R=1.91300488906845e-10     (相对差 8.0e-7)
+     qflx_sha  K=2.1070453281519667e-08  R=2.1070439029981837e-08    (相对差 6.8e-7)
+```
+
+**三个结论**：
+
+1. **`spacAF_twoleaf` 洗清了**：十个矩阵元与 `determ` 全部逐位相同 ⇒ 第 278 轮
+   那次"用内核自己打出来的 49 组 (A,f,dx) 反推收缩点"的工作是**对的**
+   （20000/20000、49/49 不是碰巧）。`dx` 的差是从 `f` 继承的。
+2. **种子是 `qflx_sun`/`qflx_sha`**（叶面蒸腾需求），它俩是
+   `getqflx_gs2qflx_twoleaf`（`MOD_PlantHydraulic.F90:617-708`，由 `:318` 调用）
+   的输出，本仓库对应 `transpiration_from_conductance`。`f1 = qflx_sun*fsto1 - …`
+   与 `f2 = qflx_sha*fsto2 - …` 正是因为它俩才差（相对差同量级 ✓ 自洽）。
+   顺带解释了第 279 轮看到的 `etrsun = qflx_sun*plc(·)` 差 —— 同一个来源。
+3. **A11 依赖 `qflx_sun` 却仍逐位相同**并不矛盾：`A11` 的第一项
+   `-laisun*kmax_sun*fx` 量级远大于 `qflx_sun*dfsto1`，8e-7 的相对扰动在小项上
+   不足以改变总和的舍入。
+
+**下一枪**：在 `getqflx_gs2qflx_twoleaf` 的进出口两侧打
+`tl, qsatl, qaf, gssun, gssha, gb_mol, rss, raw, rd, fwet, psrf, rhoair, laisun, laisha, sai`
+与 `qflx_sun, qflx_sha` —— 入口同而出口不同 ⇒ 这个函数的形状差（它是**闭式**，
+不是迭代解，读一遍就能找）；入口已不同 ⇒ 再往上追到叶温那一段（`tl`/`qsatl`）。
+
 ---
 
 # 交接：Fortran → Rust 移植的当前状态（本会话收束）
@@ -16991,13 +17024,13 @@ wice_soisno[5]   kernel=6.1823587081423845 (4018BABC3DBE730C)
 剩下三件事，按价值排序：
 0. **（新，已定位到牛顿步）`rootflux` 的那 1 ULP 在植物水力解算器里**：
    第 277 轮：`etr`/`etr0` 逐位相同、`last.root_flux_kg_m2_s` 第 11 步第 2 层差 1 ULP；
-   第 279/280/281 轮：`PENTR`（入场）两侧各 328 行、row 0–309 全同、row 310 首个不同；
-   加调用序号后夹到**一次调用**：call 310 的 `PHMID`（更新前 `x` + `getrootqflx_x2qe`
-   的 `rf/rfs`）**逐位全同**，而它的 `PHEND` 里 `dx` 差 **5.6e-7 相对** ⇒ 差在
-   `spacAF_twoleaf`↔`spac_change` 这一段。量级符合"`determ` 大项相减把 `A` 里
-   1 ULP 放大 ~1e9 倍"（`determ` ~1e-25、各项 ~1e-16），也解释了为什么前 300 次
-   调用全同。**下一枪**：在 `spacAF_twoleaf`/`spac_change` 末尾打
-   `A11..A44, determ, f(1..4), dx(1..4)`，指出差 1 ULP 的那一项。
+   第 279–282 轮：`PENTR` 328 行（row 0–309 全同）→ 加调用序号夹到一次调用 →
+   `A11..A44` 与 `determ` **全部逐位相同**，而 `f1`/`f2` 差，且
+   **`qflx_sun`/`qflx_sha` 本身差 ~8e-7 相对** ⇒ 种子是叶面蒸腾需求，
+   落在 `getqflx_gs2qflx_twoleaf`（`transpiration_from_conductance`）这一段；
+   `spacAF_twoleaf` 与 `getrootqflx_x2qe` 都已证明干净。**下一枪**：打
+   `getqflx_gs2qflx_twoleaf` 的进出口（`tl/qsatl/qaf/gssun/gssha/gb_mol/rss/raw/rd/...`
+   与 `qflx_sun/qflx_sha`）：入口同而出口不同就是那个**闭式**里的形状差。
    验收口径：`accept_r247.sh` 与 `dry_ts.sh 16` + `window_divergence.py`；
    干窗黄金 `over_tol` 现在是 821 / 20662 / 25896。
 0b. **（新）补 `balance_phs_rootflux`**：见第 276 轮。默认配置下它在这三份窗口里
