@@ -15711,3 +15711,56 @@ Tested: `compare_flag_isolated.sh base`（0 个差异变量）；`accept_r247.sh
 （restart 0/68；步级首个分歧步 **1**、8 变量 / 683-692；黄金
 21251/604.5841/826/17、32667/10378.8229/20665/68、33492/444394.4368/25896/79）。
 Not-tested: 第 1 步起的分歧（下一轮）。
+
+## 第 253 轮：`lfevpa` 与 `emis` 各一处融合 —— 第 1 步也全同，首分歧推到第 2 步
+
+第 252 轮之后首个分歧步是 1，且第 1 步只差一个变量（`f_lfevpa`，2 个元素、1 ULP）。
+第 0 步与第 1 步的输入都逐位相同 ⇒ 只能是形状。
+
+### 1. `lfevpa = lfevpl + htvp*fevpg`（`MOD_Thermal…:1343`）
+
+关键是**加数已经在别处算好了**：`lfevpl = htvpl*fevpl` 是叶温例程里的独立语句，
+所以只有 `htvp*fevpg` 会被吸收：
+
+```text
+lfevpa = FMA(htvp, fevpg, lfevpl)
+```
+
+Rust 原先两项都平铺（`leaf_latent_heat * leaf_evaporation + sublimation_heat * ground_evaporation`）。
+改成 `sublimation_heat.mul_add(ground_evaporation, leaf_latent_heat * leaf_evaporation)` 后
+**首分歧步 1 → 2**，第 1 步整步逐位相同。
+
+### 2. `emis = olru/olrb`（`…:1366-1369`）
+
+```fortran
+olrb = stefnc*t_grnd_bef**3*(4.*tinc)
+olru = ulrad + emg*olrb        ← 这个乘积被吸收
+olrb = ulrad + olrb            ← 纯加法
+emis = olru / olrb
+```
+
+Rust 原先也是平铺的 `(ulrad + emg*bc)/(ulrad + bc)`。改成
+`emissivity.mul_add(blackbody_change, upward_longwave) / (upward_longwave + blackbody_change)`
+后 `f_emis` 归零。
+
+### 结果
+
+| 口径 | 第 252 轮 | **本轮** |
+|---|---|---|
+| restart（干窗 1 步） | 0 / 68 | 0 / 68 |
+| 第 0 步 history 差异 | 0 | 0 |
+| 第 1 步 history 差异 | 1 变量（`f_lfevpa`） | **0** |
+| 步级首个分歧步 | 1 | **2** |
+| 步级差异变量 / 逐位相同元素 | 8 / 683-692（98.70%） | **6 / 686-692（99.13%）** |
+
+剩下的第 2 步差异（各 1 个元素）：`f_fgrnd`、`f_wat`、`f_wat_inst`、`f_h2osoi`、
+`f_wice_soisno`、`f_xerr`。其中 `f_fgrnd` 是 `surface_budget` 里同一条链的产物，
+下一轮第一候选是它那一项
+`- emg*stefnc*t_grnd_bef**3*(4.*tinc)`：内核源码的左结合是
+`(((emg*stefnc)*t**3)*(4.*tinc))`，而 Rust 复用 `blackbody_change`
+（= `stefnc*t**3*(4*tinc)`）再整体乘 `emg`，**结合顺序不同**。
+
+Tested: `dry_ts.sh 3` + `window_divergence.py` 两轮 A/B
+（`lfevpa` 融合：首分歧 1→2；`emis` 融合：6 变量 / 686-692）；
+黄金三窗口沿用上一轮 `accept_r247.sh` 的口径（本轮只跑 A/B，未重跑黄金）。
+Not-tested: `f_fgrnd` 那一项的结合顺序（下一轮）；`f_xerr`（水平衡，可能同 `zerr` 一样是逐层累加的结合顺序）。

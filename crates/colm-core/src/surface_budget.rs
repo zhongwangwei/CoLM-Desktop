@@ -60,8 +60,8 @@ pub fn surface_budget(energy: &StandardLctEnergyOutput) -> Result<SurfaceBudget>
         emissivity * 4.0 * STEFAN_BOLTZMANN_W_M2_K4 * previous_surface_temperature_k.powi(3);
     let outgoing_longwave =
         outgoing_longwave_coefficient.mul_add(temperature_change_k, upward_longwave);
-    let bulk_emissivity =
-        (upward_longwave + emissivity * blackbody_change) / (upward_longwave + blackbody_change);
+    let bulk_emissivity = emissivity.mul_add(blackbody_change, upward_longwave)
+        / (upward_longwave + blackbody_change);
     let radiative_temperature_k = (outgoing_longwave / STEFAN_BOLTZMANN_W_M2_K4).powf(0.25);
 
     // 上游的 `htvp`（`MOD_Thermal.F90:539-540`）由内核按**表层是否纯冰**定好，
@@ -79,7 +79,13 @@ pub fn surface_budget(energy: &StandardLctEnergyOutput) -> Result<SurfaceBudget>
     // 自相矛盾 —— 实测 Rust 的 `f_lfevpa` 峰值 615 W/m² 而 `hvap*(f_fevpl+f_fevpg)`
     // 只有 187 W/m²；改用订正后立刻落到 196 W/m²（Fortran 184.65）。
     let ground_evaporation = energy.corrected_ground_evaporation_kg_m2_s;
-    let latent_heat = leaf_latent_heat * leaf_evaporation + sublimation_heat * ground_evaporation;
+    // 内核 `MOD_Thermal…:1343` 是 `lfevpa = lfevpl + htvp*fevpg`，而 **`lfevpl` 是
+    // 叶温例程里单独算好的一项**（`lfevpl = htvpl*fevpl`）—— 所以加数已经是舍入过的，
+    // 只有 `htvp*fevpg` 会被吸收：`FMA(htvp, fevpg, lfevpl)`。
+    // 原先把两项都平铺：干窗**第 1 步**的 `f_lfevpa` 差 1 ULP（第 0 步已全同、
+    // 该步输入也全同 ⇒ 只能是形状）。
+    let latent_heat =
+        sublimation_heat.mul_add(ground_evaporation, leaf_latent_heat * leaf_evaporation);
 
     let precipitation_temperature_k = energy.precipitation.precipitation_temperature_k;
     let precipitation_heat = WATER_HEAT_CAPACITY_J_KG_K
