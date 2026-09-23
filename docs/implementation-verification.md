@@ -16079,6 +16079,44 @@ Not-tested: 第 2 步的 `meltf` 实参（探针仍是 2 步版）。
 ⇒ 剩下的嫌疑是 `ulrad` 的**分量**（`fac`/`tlbef`/`dtl`/`thermk`/`emg`/`tg`，
 全在叶温 Newton 循环里）以及第 6 步状态那一颗（两条链互不相干）。
 
+#### 第 262 轮：`ulrad` 那一颗修掉了 —— **收缩点可能在加法左边**
+
+第 257 轮留下的"唯一短程可见差异"是第 3 步那条纯诊断链（`f_olrg`/`f_trad`/`f_rnet`/`f_zerr`）。
+当时用 128 种"结合顺序 + 收缩"组合都复现不出内核的 `ulrad`（`4070B00402BA216F`），
+一度怀疑是输入不对；本轮先证伪了那个怀疑：**`ulrad` 的那段代码在 Newton 循环之外**
+（`DO` 在 1100 行之前、`ENDDO` 在 1295，而 ulrad 在 1410），所以探针打印的输入就是
+参与运算的那一份。
+
+真正的缺口是**漏了一维**：`MOD_LeafTemperature_Extended.F90:1416` 的第一个加法是
+
+```fortran
+ulrad = stefnc * ( fac*tlbef**3*(tlbef + 4.*dtl) + ther mk*emg*tg**4 )  &
+      + (1-emg)*thermk*thermk*frl + ...
+```
+
+—— **左边就是乘积** `stefnc*(p1+p2)`，GCC 收的是它：`FMA(stefnc, p1+p2, A)`。
+把"左乘积融合"这一维加进离线穷举后，内核值立刻被唯一复现（平铺得 `…216E`）。
+落码：`STEFAN_BOLTZMANN.mul_add(canopy_emission, A)`，后三个加法保持平铺
+（本算例分辨不出它们的收缩）。
+
+48 步干窗逐记录：
+
+| 口径 | 改前 | 改后 |
+|---|---|---|
+| 首个任意差异记录 | 3（5 个变量：fgrnd/olrg/rnet/trad/zerr） | **3（只剩 `f_fgrnd`）** |
+| 记录 7–11 的零散诊断差异 | 2 / 3 / 3 / 6 / 1 个 | **0** |
+| 首个状态差异记录 | 12（`f_zwt`） | 12（不变，那条是水步的瞬态） |
+
+**新增一条可复用规律（写进方法清单）**：遇到 `表达式 + 乘积` 或 `乘积 + 表达式`，
+收缩点是**那个乘积**，与它在加法的哪一侧无关；只沿"右边是乘积"枚举会漏掉一半。
+已经实锤的三处：`dmss = 乘积 + dmss`、`cgrnd = cgrnds + cgrndl*htvp`、
+`ulrad = stefnc*(…) + A`；而 `A*B + C*D`（两个乘积）在本算例一直分辨不出。
+
+剩下的一颗：**`f_fgrnd`**（第 3 步 1 ULP）。它的输入（sabg/dlrad/emg/fsno/t_soil/
+t_grnd_bef/tinc/fseng/fevpg/htvp）已由 `fgrnd_probe.sh` 取到，Python 平铺模型能复现
+**Rust** 的值（`C081C128CF597630`）而 4 种收缩组合都复现不出内核的 `…631`
+⇒ 与 `ulrad` 同样还有一维没建模到，下一轮按同法继续。
+
 #### 第 260 轮追加二：`flux_sat_zone` 那类 `A*B + C*D` 的收缩 —— 又是一处"看不出来"
 
 按"上游多条语句累加就逐条按收缩落"的思路，把 `MOD_Hydro_SoilWater.F90` 里所有
