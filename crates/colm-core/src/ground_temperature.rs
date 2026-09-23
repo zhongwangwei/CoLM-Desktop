@@ -154,13 +154,23 @@ pub fn ground_temperature(input: GroundTemperatureInput<'_>) -> Result<GroundTem
                 / (conductivity[layer] + conductivity[layer + 1]);
             harmonic.max(0.5 * conductivity[layer + 1])
         } else {
+            // 分母**有一个乘积被吸收**。`MOD_GroundTemperature.F90:243-244` 是
+            // `thk(i)*(z(i+1)-zi(i)) + thk(i+1)*(zi(i)-z(i))`；出货内核
+            // （`gt.o` 的 `groundtemperature`，`0xc94-0xcb4`）编出来是
+            //   `d18 = (zi(i)-z(i))*thk(i+1)`（`fmul`）
+            //   `d18 = fmadd(thk(i), z(i+1)-zi(i), d18)`   ← **第一项被融合**
+            // 原先是平铺。逐元素位型探针（`/tmp/gf/gtcoef_probe.sh`）在干窗第 0 步
+            // 抓到 `tk(3)/tk(5)/tk(7)` 各差 1 ULP，`at`/`ct` 里随之偏 ——
+            // `bt`/`rt` 全同，所以问题只在这一条分母上。
+            let denominator = conductivity[layer].mul_add(
+                input.node_depth_m[layer + 1] - input.interface_depth_m[interface],
+                conductivity[layer + 1]
+                    * (input.interface_depth_m[interface] - input.node_depth_m[layer]),
+            );
             conductivity[layer]
                 * conductivity[layer + 1]
                 * (input.node_depth_m[layer + 1] - input.node_depth_m[layer])
-                / (conductivity[layer]
-                    * (input.node_depth_m[layer + 1] - input.interface_depth_m[interface])
-                    + conductivity[layer + 1]
-                        * (input.interface_depth_m[interface] - input.node_depth_m[layer]))
+                / denominator
         };
     }
     conductivity[layers - 1] = 0.0;

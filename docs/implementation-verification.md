@@ -15393,3 +15393,91 @@ Tested: `/tmp/gf/leafit_bits_probe.sh`（58 个量，10 轮全同，未受本轮
 `cargo fmt/clippy/test`。
 Not-tested: 第 3 条（`!DEF_VEG_SNOW` 的结合顺序）—— 对齐算例都是 `DEF_VEG_SNOW=T`，
 只能按上游源码照抄，测不到。
+
+## 第 250 轮：地面温度界面导热率的融合 —— **干窗第 0 步重启 0/68，逐位全同**
+
+第 249 轮把重启残差压到 1 个元素（`t_soisno` 第 8 槽 = 第 4 层土壤，1 ULP）。
+本轮按同一套办法换到地面温度模块，一次探针就定位到了。
+
+### 新探针：`/tmp/gf/gtcoef_probe.sh`
+
+在 `main/MOD_GroundTemperature.F90` 的 `CALL tridia` **之前**插一条 WRITE，
+把三对角组装的全部中间量按位型打出来，共 **95** 个：
+
+* `at/bt/ct/rt`（1..10，组装结果，40 个）；
+* `fact/cv/tk/z_soisno/t_soisno`（1..10，输入，50 个）；
+* `cnfac/deltim/dhsdT/hs/fsno`（5 个）。
+
+Rust 侧在 `ground_temperature` 里 `solve_tridiagonal` 之前打同序的
+`subdiagonal/diagonal/superdiagonal/rhs` + `factor/layer_capacity/interface_conductivity/
+node_depth_m/temperature_k` + 同 5 个标量。
+
+**第一次跑就只剩 8 个不同**：
+
+```text
+at(4) at(8) ct(3) ct(5) ct(7) tk(3) tk(5) tk(7)     各 1 ULP
+```
+
+`tk` 是**界面导热率**，`at`/`ct` 是由它组装的；`bt`/`rt` 全部逐位相同 ——
+所以问题既不在三对角组装、也不在 `tridia`，而在**界面导热率那一条分母**。
+
+### 根因：分母里第一个乘积被吸收
+
+`MOD_GroundTemperature.F90:243-244`：
+
+```fortran
+tk(i) = thk(i)*thk(i+1)*(z_soisno(i+1)-z_soisno(i)) &
+      /(thk(i)*(z_soisno(i+1)-zi_soisno(i))+thk(i+1)*(zi_soisno(i)-z_soisno(i)))
+```
+
+出货内核（`gt.o` 的 `groundtemperature`，`0xc94-0xcb4`）编出来是：
+
+```text
+d18 = (zi(i)-z(i)) * thk(i+1)              fmul   ← 第二项先舍入
+d18 = fmadd(thk(i), z(i+1)-zi(i), d18)     ← **第一项被吸收**
+tk  = fdiv(  (thk(i)*thk(i+1))*(z(i+1)-z(i)),  d18 )
+```
+
+Rust 原先两项都是平铺。改成
+`conductivity[layer].mul_add(dzp, conductivity[layer+1]*dzm)` 之后，
+**95 个量全部逐位相同**。
+
+`tk` 只在**奇数界面**（3/5/7）上露出来，是因为另外几个界面的两种写法恰好舍入到同一个数 ——
+这也是"逐元素位型 + 只看首个不同"这套办法的价值：形状错不一定处处错。
+
+（`if (i==0) .and. (…)` 那一支的调和平均 `2*thk_i*thk_{i+1}/(thk_i+thk_{i+1})` 与
+`max(0.5*thk_{i+1}, ·)` 也顺带核过：`0xcd0-0xcf0` 与 Rust 的左结合一致，未改。）
+
+### 结果
+
+| 口径 | 第 249 轮 | **本轮** |
+|---|---|---|
+| restart（干窗 1 步） | 1 / 68 | **0 / 68（逐位全同）** |
+| 步级（干窗 3 步）差异变量 / 逐位相同元素 | 16 / 658-692 | **14 / 668-692（96.53%）** |
+| 黄金 dry `over_tol` / `ot_vars` | 1097 / 27 | **826 / 17** |
+| 黄金 wet `over_tol` / `ot_vars` | 20675 / 68 | **20670 / 68** |
+| 黄金 snow 逐位相同元素 / `sumabs` / `ot_vars` | 33442 / 444394.4368 / 79 | **33495** / 444394.4368 / 79 |
+
+**模型状态在第 0 步已经逐位闭环**（68/68 变量、95/95 组装中间量）。
+
+### 剩下的不是状态，是第 0 步的**诊断量**
+
+步级口径里 step 0 仍有 14 个变量各差 1 ULP：`f_fevpg`、`f_qinfl`、`f_qlayer`、
+`f_qstar`、`f_fevpa`、`f_lfevpa`、`f_wliq_soisno`… 它们**不在重启状态里**
+（重启已经 0/68），属于：
+
+* `f_qstar`：走 `colm_core::history_diagnostics` 的**重算**路径（与模型内的 `qstar` 不同一条代码）；
+* `f_fevpg`/`f_fevpa`/`f_lfevpa`：`corrected_ground_evaporation` 一族，
+  源头是叶温例程**循环后**的 `fevpg = rhoair*cgw*(qg-qaf)`；
+* `f_qinfl`/`f_qlayer`：土壤水文（`MOD_SoilSnowHydrology`）的入渗/层间通量。
+
+**下一轮**：把叶温例程**循环后**那一段（`ground_evaporation` 及其温度导数、
+`canopy_air_humidity` 的收尾）做成探针 —— 它现在还没被探针覆盖（探针只到 it=10 的循环体内）；
+`fevpg` 的 1 ULP 很可能就在那里。
+
+Tested: `/tmp/gf/gtcoef_probe.sh` 两次（改前 8 个不同、改后 95 个全同）；
+`dry_ts.sh 1` + `restart_divergence.py`（**0/68**）；`accept_r247.sh`
+（步级 14 / 668-692；黄金 21256/604.5841/826/17、32667/10370.7041/20670/68、
+33495/444394.4368/25896/79）；`gt.o` 的 `0xc94-0xcb4` 与 `0xcd0-0xcf0` 反汇编；
+`cargo fmt/clippy/test`。
+Not-tested: 循环后那一段（下一轮）；`f_qinfl`/`f_qlayer` 的土壤水文路径。
