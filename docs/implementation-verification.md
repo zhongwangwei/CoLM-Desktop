@@ -18148,20 +18148,35 @@ FMA 族指令数与 Rust 对应函数的 `mul_add` 调用数并排列出来（�
 2. 再沿 `flux_all`/`water_balance` 往上做同样的事（或直接在 `vsf_probe.sh` 上验证）；
 3. 全部判对之后，再与第 302 轮的六处 `get_zwt_from_wa` 形状**一起**落地并跑口径。
 
-**第 305 轮追加（方法上的一个重要注意）**：符号级 FMA 计数**含被内联的callee**。
-抽查 `flux_inside_hm_soil`（它自己的源表达式里只有一处 `a + b*c*d`：
-`hk_u + (psi_u-psi_l)/dz * hk_u**(1-rr) * hk_l**rr`），它那 2 条 FMA 里至少有一处
-（`fsub` 出 `d25`、`fadd d28,d28,d28` 再加 `fmadd d24,d25,d28`）对不上这个函数的
-任何一行 —— 那是 `soil_hk_from_psi`/`**` 展开被内联进来的。所以：
-* **`flux_all` 那 7 条不能直接算作"该函数自己没复现 7 处"**（同理
-  `soil_water_vertical_movement` 的 27 里含 `initialize_sublevel_structure`/`use_explicit_form`
-  等被内联的部分）；
-* 但仍然站得住的是：`flux_inside_hm_soil`(2)、`flux_top_transitive_interface`(3)、
-  `flux_btm_transitive_interface`(3) 这三个**各自有独立符号**的通量例程一共 8 条 FMA，
-  而本仓库整条通量链（含全部 callee）`mul_add` 计数是 **0** ⇒ 这 8 条（减去其中属于
-  被内联的 `soil_hk_from_psi` 那部分）是真差异面。
-⇒ **做闭环时不要按"符号 FMA 数 vs 函数 mul_add 数"直接配平**，要用
-`compare_getzwt.sh` 那种"同一批合成输入、两侧逐位比输出"的方式定案。
+**第 305 轮追加（订正第 12 轮那个"内联"猜测）**：符号级 FMA 计数**确实**含被内联的 callee，
+但 `flux_inside_hm_soil` 那 2 条**不是**内联来的 —— 逐条对上它自己的两行：
+
+```text
+ldp d28,d24,[x3,#0x8]      ; d28 = prms(2), d24 = prms(3)
+fsub d25, d28, d30         ; d25 = prms(2) - 1.0     (d30 = 1.0)
+fadd d28, d28, d28         ; d28 = prms(2)*2.0       （×2 是精确的）
+fmadd d28, d24, d25, d28   ; ← r0 的分母：prms(3)*(prms(2)-1) + prms(2)*2
+...
+fdiv d27, d27, d26 / fmul d27, d27, d13
+fmadd d0, d27, d0, d14     ; ← grad_psi>1 支：hk_u + ((psi_u-psi_l)/dz*hk_u**(1-rr))*hk_l**rr
+```
+
+⇒ 这 2 条**都是该函数自己的表达式**（第 12 轮把它读成 `soil_hk_from_psi`/`**` 的内联，
+**是错的**），因此通量链"没复现融合"的结论**比第 12 轮收紧后的说法更强**：
+`flux_inside_hm_soil` 至少要补两处 `mul_add`：
+
+```rust
+// r0 的分母（VG 支）：第一个乘积进 FMA，prms(2)*2 精确
+let denominator = m3.mul_add(m2 - 1.0, m2 * 2.0);          // m2 = prms(2), m3 = prms(3)
+// grad_psi > 1 支：先把 ((psi_u-psi_l)/dz)*hk_u**(1-rr) 算出来，再融合末尾乘积
+let t = (psi_u - psi_l) / dz * hk_u.powf(1.0 - rr);
+flux = t.mul_add(hk_l.powf(rr), hk_u);
+```
+
+**方法的正确用法**（两条都要）：符号 FMA 数**会**含内联，所以不能只看计数；
+但**逐条读反汇编仍能定案** —— 只要把每条 FMA 的寄存器上下文与源表达式对上
+（本条就是这样对上的）。闭环仍然是最省事的最终判据，但"计数可疑 ⇒ 必须上闭环"
+这一步**不成立**：直接读上下文更快。
 
 #### 第 303 轮：水步入场探针 —— 剩下的种子是**第 20 步入场时的冰/水状态**，不是 `eff_porosity` 算错
 
