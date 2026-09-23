@@ -18088,6 +18088,44 @@ N=17/N=18 是**逐位相同**的，所以 `wice_soisno(3)` 的差必然出现在
 `wice_soisno(ilev)`/`porsl(ilev)`（土壤孔隙度，不是 `eff_porosity`）/`dz_soisno(ilev)`,
 就能把"是入参差还是 `soil_volumes` 差"一次判死。
 
+#### 第 303 轮：水步入场探针 —— 剩下的种子是**第 20 步入场时的冰/水状态**，不是 `eff_porosity` 算错
+
+新工具 `oracle/scripts/vsf_input_probe.sh`：在 `WATER_VSF` 调 `soil_water_vertical_movement`
+**之前**（内核 `:1094`，本仓库 `variably_saturated_flow.rs` 的同一调用点）逐层打 7 列
+——`wice_soisno`、`wliq_soisno`、`eff_porosity`、`porsl`、`dz_soisno`、`wimp`、`vol_liq`
+（两侧同序，调用序号对齐）。20 步实测：
+
+```text
+VSFI     kernel=200 rust=200
+('VSFI', 20, 3, 0) f0 wice          K=15.530478817571872   R=15.530478817571856
+('VSFI', 20, 3, 0) f1 wliq          K=7.275363870839836    R=7.275363870839852
+('VSFI', 20, 3, 0) f2 eff_porosity  K=0.12911472434424492  R=0.1291147243442453
+('VSFI', 20, 3, 0) f6 vol_liq       同 f2
+1/200 records differ; first = ('VSFI', 20, 3, 0)
+```
+
+**读法**：`porsl`、`dz_soisno`、`wimp`（f3/f4/f5）**逐位相同**，而 `wice`/`wliq` 各差 1 ULP
+⇒ `eff_porosity`/`vol_liq` 的差是**跟着冰水质量走的**，第 302 轮"查 `eff_porosity` 公式"
+这条到此结清（公式与它的静态入参都没问题）。剩下的种子是：
+**进入第 20 步水步时，第 3 层的 `wice_soisno` 与 `wliq_soisno` 已经差 1 ULP**，
+即差产生在第 19 步的能量/相变/水量更新里（与 `restart_scan.sh` 的
+"N=19 起 `wliq_soisno`"、N=20 起 `wice_soisno` 完全对得上）。
+**下一枪**：在 `MOD_SoilSnowHydrology`/相变那一段打第 19→20 步的 `wice`/`wliq`
+（本探针的 `VSFI` 已经给出精确的层号与步号），或者直接查
+`water_2014`/`meltf`/`wblc` 冰汇那几处（第 255 轮只排除了第 2 步第 1 层的 `meltf` 实参）。
+
+**顺带纠一个本轮自己犯的错（记下来）**：`vsf_wt_probe.sh` 的默认 `WORK` 是
+`/tmp/gf/vsfwt$STEPS`，第 302 轮"带形状"那次复跑**覆盖**了第 301 轮的基线输出，
+于是我先按那份文件得出"基线也有 call 17 的 `eff_porosity` 差"——**是错的**。
+本轮 `VSFI` 用独立目录重测的结论是：基线里 `eff_porosity` 到第 19 步都逐位相同，
+首个不同在第 20 步。**教训：探针的 WORK 目录要跟"这一次的代码状态"一起命名**
+（例如带上 baseline/shapes 后缀），否则复跑会把上一条证据覆盖掉。
+
+**探针工具已加固**（本轮顺手做掉）：`vsf_input_probe.sh` 用独立 WORK 目录，
+不再复用 `vsfwt$STEPS`。
+
+
+
 **验收口径（不变）**：`cargo test --workspace --lib --bins -- --test-threads=1`、
 `clippy -D warnings`、`fmt --check`（本机 `colm-cli` 的 7 个 `study::runner` 用例
 因沙箱 `EPERM` 失败，与本改动无关）；`bash /tmp/gf/win4.sh` + `three.py`
@@ -18160,9 +18198,15 @@ N=17/N=18 是**逐位相同**的，所以 `wice_soisno(3)` 的差必然出现在
      六处正确写法与整张形状扫表在"第 302 轮"一节；把六处都改对后 harness 是
      **10000/10000 逐位相同**，但口径变差（wet `over_tol` 1970 → 1984、N=19 分歧 14×）
      ⇒ 代码已按纪律回退，**形状结论留在文档里**。
-     **下一枪（顺序不能颠倒）**：① 先钉 `vsf_wt_probe.sh` 在 call 17 起报的
-     `WSEL f2`（`porsl` = `eff_porosity`，**入参**）那条独立链 —— 查
-     `MOD_SoilSnowHydrology` 里 `eff_porosity` 的逐层更新与 Rust 对应处；
+     **第 303 轮更新（把 ① 做掉了，方向也修了）**：`oracle/scripts/vsf_input_probe.sh`
+     在水步入场处逐层打 7 列（`wice`/`wliq`/`eff_porosity`/`porsl`/`dz`/`wimp`/`vol_liq`），
+     20 步只有 **1/200** 条不同：**第 20 步入场、第 3 层**的 `wice` 与 `wliq` 各差 1 ULP，
+     而 `porsl`/`dz`/`wimp` 逐位相同 ⇒ `eff_porosity` 公式这一条**结清**，
+     `eff_porosity`/`vol_liq` 是跟着冰水质量走的（与 `restart_scan` 的 N=19 `wliq`、
+     N=20 `wice` 对得上）。
+     **下一枪（顺序不能颠倒）**：① 打第 19 步能量/相变那一段的 `wice`/`wliq`
+     （层号与步号本探针已给：第 3 层、第 19→20 步；第 255 轮只排除了第 2 步第 1 层的
+     `meltf` 实参），或者查 `water_2014`/`wblc` 冰汇那几处；
      ② 再把第 302 轮验证过的六处形状**一起**重新应用；③ 两条都对了才跑口径。
 2. **第二配置回归**（Campbell + 关 VSF）：第 293 轮实测干窗已从 16 降到 **0**；
    wet/snow 未重跑，需要时跑 `oracle/scripts/compare_second_config.sh <case>`。
