@@ -16701,6 +16701,31 @@ Not-tested: 第二配置（Campbell + 关 VSF）本轮未复跑；`rootflux` 1 U
 算错"的缺口 —— 属于"未移植"清单里该补的一项（补它需要 `fr` 权重与 `context` 字符串，
 以及 `warn_count` 那个 `save` 计数器）。
 
+#### 第 277 轮：判别出来了 —— `etr`/`etr0` 相同，**植物水力解出来的 `rootflux` 就差了**
+
+在 `MOD_LeafTemperature_Extended.F90:1351-1352`（`etr0 = etr` / `etr = etr + etr_dtl*dtl`）
+之后、也就是"缩放那一行之前"，两侧都打 `etr`、`etr0`、`rootflux(1..6)`
+（`leaft_probe.sh`，16 步，每步一行）：
+
+```text
+row 11（第 11 步）: etr 同、etr0 同；只有 rootflux2 差 1 ULP
+    K rootflux2 = 3E8AF0C48B125409  (2.0072235921002370e-07)
+    R rootflux2 = 3E8AF0C48B125408  (2.0072235921002367e-07)
+row 15: 全差（那时状态已经被放大，不算证据）
+```
+
+⇒ **判别完成**：缩放的**两个输入 `etr`/`etr0` 逐位相同**，而 `last.root_flux_kg_m2_s`
+（= `PlantHydraulicStress_twoleaf` 的输出）已经差 1 ULP。所以：
+
+- 第 275 轮修的那两处缩放形状（先乘后除 / 左结合 + 收缩）是对的，但**不是**那颗种子；
+- 种子在**植物水力解算器**里 —— `crates/colm-core/src/plant_hydraulics.rs:567
+  `root_flux_from_top_potential`（上游 `MOD_PlantHydraulic.F90` 那一支）。
+
+这也和第 274 轮对上：`etroot` 第 2、3 层差 1–2 ULP，而第 2 层（`rootflux2`）在这里
+就已经差出来了。**下一枪就打在 `plant_hydraulics.rs`**：拿同一时刻的
+`psi`/`root_psi`/`zp`/`layer_thickness` 进出口两侧对打，看是迭代收敛判据
+（`tol` 比较）还是某一处 `a*b + c` 的形状。
+
 ---
 
 # 交接：Fortran → Rust 移植的当前状态（本会话收束）
@@ -16831,13 +16856,13 @@ wice_soisno[5]   kernel=6.1823587081423845 (4018BABC3DBE730C)
 （第 11 步正是 `etr` 第一次非零的那一步，那两行此前从未生效过）。
 
 剩下三件事，按价值排序：
-0. **（新）`rootflux` 的那 1 ULP**：见上。`accept_r247.sh` 与
-   `dry_ts.sh 16` + `window_divergence.py` 是它的两个验收口径；
-   干窗黄金 `over_tol` 现在是 821 / 20662 / 25896。判别只剩两条候选，
-   一趟探针就能分开：在 `MOD_LeafTemperature_Extended.F90:1354`（`etr0 = etr` 之后）
-   把 `etr`/`etr0`/`rootflux(1..6)` 两侧都打出来 —— 若 `etr0` 也差 1 ULP，
-   就是 `last.transpiration` 的传播（缩放那一步）；若 `etr0` 相同而 `rootflux` 差，
-   种子在植物水力解（`plant_hydraulics.rs:567 root_flux_from_top_potential`）。
+0. **（新，已定位）`rootflux` 的那 1 ULP 在植物水力解算器里**：第 277 轮已经判别完
+   —— `etr`/`etr0` 逐位相同，`last.root_flux_kg_m2_s` 在第 11 步第 2 层就差 1 ULP。
+   下一枪打 `crates/colm-core/src/plant_hydraulics.rs:567 root_flux_from_top_potential`
+   （上游 `MOD_PlantHydraulic.F90`）：同一时刻两侧对打
+   `psi`/`root_psi`/`zp`/`layer_thickness` 的进出口，先看**收敛判据的 `tol` 比较**
+   再看 `a*b + c` 的收缩。验收口径：`accept_r247.sh` 与
+   `dry_ts.sh 16` + `window_divergence.py`；干窗黄金 `over_tol` 现在是 821 / 20662 / 25896。
 0b. **（新）补 `balance_phs_rootflux`**：见第 276 轮。默认配置下它在这三份窗口里
    不生效（警告 0 次），但条件不成立时会静默算错，属于该补的缺口。
 
