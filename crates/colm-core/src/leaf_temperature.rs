@@ -1579,24 +1579,26 @@ fn upward_longwave(
     leaf_temperature_change_k: f64,
     factor: f64,
 ) -> f64 {
-    let ground_term = if input.options.split_soil_snow {
-        (1.0 - input.snow_cover_fraction)
-            * input.canopy_longwave_gap_fraction
-            * input.ground_emissivity
-            * input.soil_surface_temperature_k.powi(4)
+    let leaf_canopy_term = factor
+        * previous_leaf_temperature_k.powi(3)
+        * (previous_leaf_temperature_k + 4.0 * leaf_temperature_change_k);
+    // 非 split：`p1 + ther mk*emg*tg**4`（`…:1416` 括号里那一和）——**那个乘积被收进加法**
+    // ⇒ `FMA(thermk*emg, tg**4, p1)`。12 步同时约束的离线穷举里，全部 48 个可行组合
+    // 都带这一条（`/tmp/gf/ulrad12`），所以它和第 262 轮那条"左乘积"一样是实锤。
+    let canopy_emission = if input.options.split_soil_snow {
+        leaf_canopy_term
+            + (1.0 - input.snow_cover_fraction)
+                * input.canopy_longwave_gap_fraction
+                * input.ground_emissivity
+                * input.soil_surface_temperature_k.powi(4)
             + input.snow_cover_fraction
                 * input.canopy_longwave_gap_fraction
                 * input.ground_emissivity
                 * input.snow_surface_temperature_k.powi(4)
     } else {
-        input.canopy_longwave_gap_fraction
-            * input.ground_emissivity
-            * input.ground_temperature_k.powi(4)
+        (input.canopy_longwave_gap_fraction * input.ground_emissivity)
+            .mul_add(input.ground_temperature_k.powi(4), leaf_canopy_term)
     };
-    let canopy_emission = factor
-        * previous_leaf_temperature_k.powi(3)
-        * (previous_leaf_temperature_k + 4.0 * leaf_temperature_change_k)
-        + ground_term;
     // `MOD_LeafTemperature_Extended.F90:1416` 的第一个加法**左边就是乘积**
     // `stefnc*(fac*t³*(t+4*dtl) + ther mk*emg*tg⁴)` ⇒ GCC 把它收进加法：
     // `FMA(stefnc, p1+p2, (1-emg)*thermk*thermk*frl)`。
