@@ -18148,6 +18148,21 @@ FMA 族指令数与 Rust 对应函数的 `mul_add` 调用数并排列出来（�
 2. 再沿 `flux_all`/`water_balance` 往上做同样的事（或直接在 `vsf_probe.sh` 上验证）；
 3. 全部判对之后，再与第 302 轮的六处 `get_zwt_from_wa` 形状**一起**落地并跑口径。
 
+**第 305 轮追加（方法上的一个重要注意）**：符号级 FMA 计数**含被内联的callee**。
+抽查 `flux_inside_hm_soil`（它自己的源表达式里只有一处 `a + b*c*d`：
+`hk_u + (psi_u-psi_l)/dz * hk_u**(1-rr) * hk_l**rr`），它那 2 条 FMA 里至少有一处
+（`fsub` 出 `d25`、`fadd d28,d28,d28` 再加 `fmadd d24,d25,d28`）对不上这个函数的
+任何一行 —— 那是 `soil_hk_from_psi`/`**` 展开被内联进来的。所以：
+* **`flux_all` 那 7 条不能直接算作"该函数自己没复现 7 处"**（同理
+  `soil_water_vertical_movement` 的 27 里含 `initialize_sublevel_structure`/`use_explicit_form`
+  等被内联的部分）；
+* 但仍然站得住的是：`flux_inside_hm_soil`(2)、`flux_top_transitive_interface`(3)、
+  `flux_btm_transitive_interface`(3) 这三个**各自有独立符号**的通量例程一共 8 条 FMA，
+  而本仓库整条通量链（含全部 callee）`mul_add` 计数是 **0** ⇒ 这 8 条（减去其中属于
+  被内联的 `soil_hk_from_psi` 那部分）是真差异面。
+⇒ **做闭环时不要按"符号 FMA 数 vs 函数 mul_add 数"直接配平**，要用
+`compare_getzwt.sh` 那种"同一批合成输入、两侧逐位比输出"的方式定案。
+
 #### 第 303 轮：水步入场探针 —— 剩下的种子是**第 20 步入场时的冰/水状态**，不是 `eff_porosity` 算错
 
 新工具 `oracle/scripts/vsf_input_probe.sh`：在 `WATER_VSF` 调 `soil_water_vertical_movement`
