@@ -18253,6 +18253,34 @@ transition 例程各自 `bounded_secant_iteration(...)` **调用一次**（`mul_
 **下一轮**：只读 `water_balance` 的 5 条 + `flux_all` 块 2 的 1 条（8 条，一次 objdump
 就能看完），把属于自己的挑出来；`soil_water_vertical_movement` 那 15 条差额最后处理。
 
+**第 309 轮：`water_balance` 那 5 条**就是它自己的**（形态可辨认）**
+
+```text
+fsub d31,d0,d31 + fmsub d29,d29,d30,d31        ; (A - B) - C*D        ← "和减乘积"
+fadd d24,d22,d24 + fmsub d24,d27,d21,d24       ; (A + B) - C*D
+fsub/fsub + fmadd d4,d7,d5,d4 + fmadd d22,d3,d22,d4   ; 两处加权求和
+fadd d24,d22,d24 + fmsub d24,d27,d21,d24       ; 第二处同形
+```
+
+全是 `fmsub`/`fmadd` 的"**和（或差）与乘积**"形状，**没有**割线特征
+（没有 `fnmsub` 分子 + `fdiv`），也不是 `flux_inside_hm_soil` 的那两条 ——
+而质量平衡残差正是这种写法 ⇒ **这 5 条属于 `water_balance` 自己**，
+本仓库对应函数 `mul_add` 计数为 0 ⇒ **5 条都是缺口**。
+
+**确证缺口清单（截至本轮）**：
+
+| 位置 | 条数 | 依据 |
+|---|---|---|
+| `flux_inside_hm_soil`（r0 分母 + `grad_psi>1` 支） | **2** | 第 305/13 轮逐条映射 |
+| `variable_saturated_water_balance`（5 处"和减乘积"） | **5** | 本轮形态辨认（无割线/通量内联特征） |
+| `flux_all` 中间那 1 条 | 1 | 待认领 |
+| `soil_water_vertical_movement`（27−12=15） | ? | 待读上下文 |
+
+**下一轮**：把这 7 处按已记的写法/形态补上 `mul_add`，建 `compare_getzwt.sh` 式
+**例程闭环**（`flux_inside_hm_soil` 与 `water_balance` 都是纯函数，合成输入可造），
+再处理 `soil_water_vertical_movement` 那 15 条差额，最后与第 302 轮那六处
+`get_zwt_from_wa` 形状**一起**落地跑口径。
+
 #### 第 303 轮：水步入场探针 —— 剩下的种子是**第 20 步入场时的冰/水状态**，不是 `eff_porosity` 算错
 
 新工具 `oracle/scripts/vsf_input_probe.sh`：在 `WATER_VSF` 调 `soil_water_vertical_movement`
