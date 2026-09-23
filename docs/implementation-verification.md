@@ -17373,6 +17373,44 @@ Rust 日志里 `rootflux balance` 都是 **0 次**，步级仍是 `692/692` 逐�
 变成 **第 8 步 `f_rib`（`maxrel 3.7e-11`）**（`window_divergence.py`：68 个变量
 不同、`39700/56024` 逐位）—— item 1 的旧描述已过时。
 
+#### 第 295 轮：把 golden 分歧**重新标定** —— 小时对齐后前 8 条逐位全同
+
+第 294 轮留下的 item 1 有两处读法不对，本轮用新工具改掉：
+
+1. **`dry_ts.sh` 的"第几步"不是小时级分辨力。** 它把 `DEF_HIST_FREQ` 改成
+   `'TIMESTEP'`，而历史量是**按输出区间累加/平均**的：30 min 窗口与算例自带的
+   `'HOURLY'`（60 min）在**同一时刻**给出不同的值（实测 `time[0]` 相同，
+   `f_zwt` 一个 `8.756e-4`、另一个 `1.751e-3`）。所以第 293 轮记的"第 12 步
+   `f_zwt` 1 ULP"是 **30 min 平均**的分歧，**不能**当成"第 6 小时的状态差"。
+2. **新工具 `oracle/scripts/compare_hourly_window.sh`**：同一份算例、两侧都用
+   `HOURLY`，逐记录比内核 / Rust / 存储 golden。CN-Cng 干窗实测：
+
+```text
+rec 0..7（8 小时）: kernel != rust = 0, kernel != golden = 0   ← 三方逐位全同
+rec 8 （hour 9）  : kernel != rust = 1   （f_rib 差 1 ULP）
+rec 9 （hour 10） : kernel != rust = 5   （f_fgrnd/f_wice_soisno/f_wliq_soisno/
+                                          f_zwt 各 1 ULP + f_zerr 2e-2）
+kernel != golden 在 rec 0..9 **全为 0**  ⇒ 存储 golden 就是当前内核的输出，
+`three.py` 的 28/1970/25713 **不是基准错**。
+```
+
+3. **`f_rib` 不是叶温的 `rib`。** history 的 `f_rib` 来自
+   `MOD_Vars_1DAccFluxes.F90:2786` 的 `r_rib`（`accumulate_fluxes` 为输出**重算**
+   的那组近地层诊断，`MOD_Hist.F90:4530` 只写 `a_rib`），Rust 对应
+   `history_diagnostics.rs:bulk_richardson`。它在 rec 8 差 1 ULP，而它的
+   **history 输入全部逐位相同** ⇒ 是一处形状差（或某个非 history 中间量差 1 ULP）。
+   它是**纯诊断、不回灌**，与 rec 9 的状态分歧是**两条独立的链**。
+4. **本轮改了一处**：`stability_adjusted_wind` 的 `wc` 原先是 `.cbrt()`，
+   而 Fortran 是 `(-grav*…)**(1./3.)`（`MOD_Vars_1DAccFluxes.F90:2771`），
+   `leaf_temperature.rs:1002` 同式已用 `.powf(1.0/3.0)` ⇒ 改成 `.powf(1.0/3.0)`
+   （`cbrt` 对少数值差 1 ULP）。**实测对 10 小时窗口逐位无影响**（说明 rec 8 的
+   那 1 ULP 不在这里）；保留是为了与 Fortran/邻居一致。`ur*ur+wc2` 的 `mul_add`
+   也试过、同样无效，按"形状要按自己的汇编定、不能类比邻居"（第 246/252 轮）
+   **退回平铺**并在注释里写明。
+
+**下一枪**：(a) rec 8 `f_rib` 的三层探针（`zol`/`um`/`r_ustar2`/`r_fh` 与 `r_rib`
+两侧同位型）；(b) rec 9 那条**不经过 `f_rib`** 的状态种子 —— 注意 `f_rib` 不回灌。
+
 ---
 
 # 交接：Fortran → Rust 移植的当前状态（本会话收束）
@@ -17478,6 +17516,9 @@ wice_soisno[5]   kernel=6.1823587081423845 (4018BABC3DBE730C)
 * `oracle/scripts/updphotosyn_diff.f90` + `compare_updphotosyn.sh`：
   直接链 `.bld` 调内核 `update_photosyn` 的独立参考值（钉在
   `photosynthesis_tests.rs`）。
+* `oracle/scripts/compare_hourly_window.sh`（第 295 轮）：短窗口、**小时对齐**的
+  内核/Rust/golden 三方逐位比对。判"状态分歧在第几条"必须用它 ——
+  `dry_ts.sh` 的 `TIMESTEP` 历史是 30 min 区间累加，与算例的 `HOURLY` 不同窗口。
 * `cargo test --workspace --lib --bins`（26 个测试二进制）、
   `cargo clippy --workspace --all-targets -- -D warnings`、`cargo fmt --all --check`、
   `python3 oracle/scripts/test_upstream_f48_sync.py`（本会话最后一次全绿）。
@@ -17567,16 +17608,18 @@ wice_soisno[5]   kernel=6.1823587081423845 (4018BABC3DBE730C)
    `plant_hydraulics.rs:balance_phs_rootflux` + 两个调用点；默认三份窗口里仍不生效
    （警告 0 次），三段式验收与第 293 轮**逐位相同**（证明它惰性、没引入回归）。
 
-1. **11 天黄金窗口与存储 golden 的那条链（第 294 轮更新描述）**：配置已核对
-   **逐字相同**（`colm_git_sha`/`generator_args`/`build_profile`/`macros`/工具链/
-   netCDF 版本；只有 sha256 不同，属已知的非逐字节复现），所以**不是基准错**。
-   当前首分歧是**第 8 步 `f_rib`**（`maxrel 3.7e-11`），68 个变量不同、
-   `39700/56024` 逐位 —— 比旧描述的"第 1 步、1e-7"小得多、晚得多。
-   **第 8 步只有 `f_rib` 一个量**（体块 Richardson 数，纯诊断、不回灌）；
-   真正的**状态**分歧从**第 9 步**起：`f_zwt` / `f_wliq_soisno` /
-   `f_wice_soisno` / `f_fgrnd`（第 11 步才轮到 `f_zol`/`f_h2osoi`）。下一枪：
-   先判 `f_rib` 的四个输入（`zol`/`ustar`/`fh`/`um`）在第 8 步是否逐位，
-   是则 `rib` 的闭式有形状差，否则种子在第 8 步之前的某个非 history 状态量里。
+1. **11 天黄金窗口与存储 golden 的那条链（第 295 轮重新标定）**：配置逐字相同、
+   **内核 == 存储 golden 在小时对齐下前 10 条逐位** ⇒ 不是基准错。
+   `oracle/scripts/compare_hourly_window.sh` 实测：**前 8 条记录（8 小时）
+   内核 == Rust == golden 逐位全同**；rec 8（hour 9）内核 != Rust 1 个元素
+   （`f_rib` 差 1 ULP）；rec 9 起 5 个元素（`f_fgrnd`/`f_wice_soisno`/
+   `f_wliq_soisno`/`f_zwt` 各 1 ULP + `f_zerr` 2e-2）。
+   `f_rib` 是 `MOD_Vars_1DAccFluxes.F90:2786` 的 `r_rib`（纯诊断、不回灌），
+   与 rec 9 的状态链**独立**。下一枪（两条并列）：
+   (a) rec 8 `f_rib` 的 `zol`/`um`/`r_ustar2`/`r_fh` 两侧同位型探针；
+   (b) rec 9 那条不经过 `f_rib` 的状态种子。
+   注意 **`dry_ts.sh` 的 TIMESTEP 历史是 30 min 区间累加**，它的"第几步"不能
+   当小时级分辨力；判状态用 `compare_hourly_window.sh`。
 2. **第二配置回归**（Campbell + 关 VSF）：第 293 轮实测干窗已从 16 降到 **0**；
    wet/snow 未重跑，需要时跑 `oracle/scripts/compare_second_config.sh <case>`。
 3. **未移植分支**：`standard_lct_step.rs:578` 明说 split soil/snow、SNICAR、气溶胶、

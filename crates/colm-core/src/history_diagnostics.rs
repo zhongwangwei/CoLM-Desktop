@@ -256,11 +256,21 @@ fn stability_adjusted_wind(
         (SurfaceLayerScheme::LargeEddy, Some(hpbl)) => (5.0 * input.wind_height_m).max(hpbl),
         _ => DEFAULT_ZII_M,
     };
+    // 上游 `MOD_Vars_1DAccFluxes.F90:2771` 是 `(-grav*…)**(1./3.)` —— 与
+    // `MOD_LeafTemperature.F90:991` 同一条式子。内核用 `pow(·, 1./3.)`，
+    // **不是 `cbrt`**：两者对少数值差 1 ULP。这里原先是 `.cbrt()`，与
+    // `leaf_temperature.rs:1002`（已按 `powf(1./3.)` 对齐）不一致 ——
+    // 第 295 轮实测：CN-Cng 小时窗口第 8 条 `f_rib` 就是这一处差 1 ULP。
     let convective_velocity = (-GRAVITY_M_S2 * friction_velocity * virtual_scale * zii
         / virtual_potential_temperature)
         .max(0.0)
-        .cbrt();
+        .powf(1.0 / 3.0);
     let convective_squared = CONVECTIVE_BETA.powi(2) * convective_velocity.powi(2);
+    // 上游 `um = max(0.1, sqrt(ur*ur+wc2))`。这里**不**把 `ur*ur` 写成 `mul_add`：
+    // 同一条式子在内核 `MOD_LeafTemperature.F90:1273` 编出来是 `fmadd(ur,ur,_613)`，
+    // 但本处是 `MOD_Vars_1DAccFluxes.F90:2773`，形状要按它自己的汇编/位型定，
+    // 不能从邻居类比（第 246/252 轮踩过）。第 295 轮实测：改与不改对本窗口
+    // 逐位无影响，所以先按平铺保留。
     (wind_speed.powi(2) + convective_squared)
         .max(0.0)
         .sqrt()
