@@ -1763,13 +1763,22 @@ pub fn variable_saturated_water_balance(
     }
     let mut active = 0usize;
     for (layer, thickness) in thickness.iter().copied().enumerate() {
-        let mass_change = (input.porosity[layer] - input.previous_liquid_water[layer])
-            * (input.wetting_front_mm[layer] - input.previous_wetting_front_mm[layer])
-            + (input.porosity[layer] - input.previous_liquid_water[layer])
-                * (input.water_table_thickness_mm[layer]
-                    - input.previous_water_table_thickness_mm[layer])
-            + (thickness - input.water_table_thickness_mm[layer] - input.wetting_front_mm[layer])
-                * (input.liquid_water[layer] - input.previous_liquid_water[layer]);
+        // `MOD_Hydro_SoilWater.F90:1146-1148` 是**三条语句**累加：
+        //   dmss = (vl_s-vl_m1)*(wf-wf_m1)
+        //   dmss = (vl_s-vl_m1)*(wt-wt_m1) + dmss        ← 乘积被收进加法
+        //   dmss = (dz-wt-wf)*(vl-vl_m1)   + dmss        ← 同上
+        // 写成一条平铺长链会少两次融合。
+        let porosity_change = input.porosity[layer] - input.previous_liquid_water[layer];
+        let wetting_front_change =
+            input.wetting_front_mm[layer] - input.previous_wetting_front_mm[layer];
+        let water_table_change =
+            input.water_table_thickness_mm[layer] - input.previous_water_table_thickness_mm[layer];
+        let liquid_change = input.liquid_water[layer] - input.previous_liquid_water[layer];
+        let mass_change =
+            porosity_change.mul_add(water_table_change, porosity_change * wetting_front_change);
+        let mass_change =
+            (thickness - input.water_table_thickness_mm[layer] - input.wetting_front_mm[layer])
+                .mul_add(liquid_change, mass_change);
         let flux_sum = input.interface_flux_mm_s[layer] - input.interface_flux_mm_s[layer + 1];
         if !input.saturated[layer] {
             active = layer + 1;
@@ -1780,7 +1789,8 @@ pub fn variable_saturated_water_balance(
                 residual_mm[0] = 0.0;
             }
         }
-        residual_mm[active] += mass_change - flux_sum * input.time_step_seconds;
+        residual_mm[active] =
+            (-flux_sum).mul_add(input.time_step_seconds, residual_mm[active] + mass_change);
     }
     if input.lower_boundary.kind == VariableSaturatedBoundaryKind::Drainage {
         if input.aquifer_water_mm == 0.0 && input.interface_flux_mm_s[layers] >= 0.0 {
