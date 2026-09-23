@@ -17128,6 +17128,38 @@ let maximum_sunlit_leaf_conductance_umol_m2_s = (1.0
 3. 跑三段式验收（restart 0/68、3 步 692/692、黄金 821/20662/25896）。
 **改动跨 2 个文件、3 处，且要新增一个输入字段** —— 本轮只把公式差钉死，留到下一轮实现。
 
+#### 第 290 轮：改动规模缩小了（7 → 2），但暴露出必须先解决的**量纲/尺度**问题
+
+**规模（好消息）**：`plant_hydraulic_stress` 只有 **2 个调用点**
+（`leaf_temperature.rs:565` 与 `plant_hydraulics_tests.rs:8`），所以不必给
+`PlantHydraulicInput` 加字段（那要改 7 个构造点），**改成给它加两个参数**只要动 2 处。
+种子的落点也精确了：
+
+| 位置 | 现在用的 | 应该用的 |
+|---|---|---|
+| `plant_hydraulics.rs:132-133`（进 `transpiration_from_conductance`） | `input.maximum_*` | 诊断电导 `gssun/gssha` |
+| `plant_hydraulics.rs:192-193`（进 `conductance_from_transpiration`） | `input.maximum_*` | 诊断电导 `gssun/gssha` |
+| `plant_hydraulics.rs:198-200`（`rstfac` 分母） | `input.maximum_*` | **保持**（上游 `:353` 用的就是 `gs0`） |
+
+**但暴露出一个必须先解决的问题**：上游那条"诊断"其实是**一次往返**，而且带尺度换算：
+
+```fortran
+tlbef = tl                      ! :702  迭代前的温度
+tl    = tlbef + dtl(it)         ! :1214 迭代后的温度
+rssun = tprcor/tl * 1.e6 / gssun                                     ! :919  用**更新后**的 tl
+gssun = (laisun / rssun) * (tprcor / tlbef)                          ! :1320 用**更新前**的 tlbef
+```
+
+代入即 `gssun_next = laisun² * gssun_leaf * (tl/tlbef) / 1e6`（`:908` 处
+`gssun_canopy = gssun_leaf*laisun`）。这里有 **`laisun²` 与 `1e6`** 两个因子，
+说明"PHS 的 `gssun` 参数到底是什么尺度/单位"这条账我还没算平 ——
+`tl/tlbef` 又是**同一轮迭代前后**的温度比（非常接近 1 但不等于 1）。
+
+**在把 `lai²`/`1e6` 这条账算平之前不能改代码**：那不是"改一个公式"，而是可能把
+一个已验证的管道改出新的系统性偏差（而不是末位级）。**下一枪**：把
+`PlantHydraulicStress_twoleaf` 的 `gssun` 参数在 `:318`/`:346`/`:908`/`:919`/`:1320`
+五处的尺度逐处标注出来（各是逐叶还是冠层、µmol 还是 mol），算平之后再动手。
+
 ---
 
 # 交接：Fortran → Rust 移植的当前状态（本会话收束）
