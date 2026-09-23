@@ -63,7 +63,7 @@ def rows(path):
     return out
 f = rows(f'{work}/fi.txt')
 r = rows(f'{work}/fi_rust.txt')
-assert len(f) == len(r) == 12000, (len(f), len(r))
+assert len(f) == len(r) == 15000, (len(f), len(r))
 bad = collections.Counter()
 flags = collections.Counter()
 for a, b in zip(f, r):
@@ -74,8 +74,8 @@ for a, b in zip(f, r):
         if x.upper().zfill(16) != y.upper().zfill(16):
             bad[names[k]] += 1
 if bad:
-    print('flux_inside_hm_soil mismatches / 12000:', dict(bad))
+    print('flux_inside_hm_soil mismatches / 15000:', dict(bad))
     raise SystemExit(1)
-print('flux_inside_hm_soil: all 3 outputs 12000/12000 bitwise identical;'
+print('flux_inside_hm_soil: all 3 outputs 15000/15000 bitwise identical;'
       f' 分支分布 {dict(sorted(flags.items()))}')
 PY

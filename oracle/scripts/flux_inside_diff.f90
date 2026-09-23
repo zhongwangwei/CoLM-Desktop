@@ -43,7 +43,7 @@ PROGRAM fi
   DO k = 0, 1
      DEF_USE_Campbell_SOIL_MODEL = (k == 1)
      nprm = MERGE(1, 5, k == 1)
-     DO i = 1, 6000
+     DO i = 1, 7500
         IF (i <= 3000) THEN
            psi_s = -(100.0_r8 + uni()*1.0e4_r8)
            hksat = 1.0e-6_r8 + uni()*1.0e-3_r8
@@ -58,7 +58,7 @@ PROGRAM fi
            psi_l = -(1.0_r8 + uni()*1.0e4_r8)
            hk_u  = 1.0e-9_r8 + uni()*1.0e-3_r8
            hk_l  = 1.0e-9_r8 + uni()*1.0e-3_r8
-        ELSE
+        ELSEIF (i <= 6000) THEN
            psi_s = pick(P_PSIS)
            hksat = pick(P_HK)
            bsw   = pick(P_BSW)
@@ -72,6 +72,22 @@ PROGRAM fi
            psi_l = pick(P_PSIL)
            hk_u  = pick(P_HKU)
            hk_l  = pick(P_HKU)
+        ELSE
+           ! 近静水：`grad_psi = 1 - (psi_l-psi_u)/dz ∈ (0.1,1)`，专为覆盖
+           ! `0 < grad_psi < 1` 那条分支（原闭环一例都没抽到）。
+           psi_s = -(100.0_r8 + uni()*1.0e4_r8)
+           hksat = 1.0e-6_r8 + uni()*1.0e-3_r8
+           bsw   = 2.0_r8 + uni()*12.0_r8
+           alpha_vgm = 1.0e-3_r8 + uni()*0.1_r8
+           n_vgm = 1.05_r8 + uni()*2.0_r8
+           l_vgm = 0.5_r8 + uni()*0.5_r8
+           sc_vgm = 0.2_r8 + uni()*0.8_r8
+           fc_vgm = 0.2_r8 + uni()*0.8_r8
+           dz    = 1.0e-3_r8 + uni()*1.0_r8
+           psi_u = -(1.0_r8 + uni()*1.0e4_r8)
+           psi_l = psi_u + uni()*dz*0.9_r8
+           hk_u  = 1.0e-9_r8 + uni()*1.0e-3_r8
+           hk_l  = 1.0e-9_r8 + uni()*1.0e-3_r8
         ENDIF
         IF (k == 1) THEN
            prms(1) = bsw

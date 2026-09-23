@@ -39,7 +39,7 @@ fn main() {
     let mut out = String::new();
     for k in 0..2u32 {
         let campbell = k == 1;
-        for i in 1..=6000u32 {
+        for i in 1..=7500u32 {
             let (psi_s, hksat, bsw, alpha, n, l, sc, fc, dz, psi_u, psi_l, hk_u, hk_l);
             if i <= 3000 {
                 psi_s = -(100.0 + s.uni() * 1.0e4);
@@ -55,7 +55,7 @@ fn main() {
                 psi_l = -(1.0 + s.uni() * 1.0e4);
                 hk_u = 1.0e-9 + s.uni() * 1.0e-3;
                 hk_l = 1.0e-9 + s.uni() * 1.0e-3;
-            } else {
+            } else if i <= 6000 {
                 psi_s = s.pick(P_PSIS);
                 hksat = s.pick(P_HK);
                 bsw = s.pick(P_BSW);
@@ -69,6 +69,21 @@ fn main() {
                 psi_l = s.pick(P_PSIL);
                 hk_u = s.pick(P_HKU);
                 hk_l = s.pick(P_HKU);
+            } else {
+                // 近静水：grad_psi ∈ (0.1, 1)，覆盖 `0 < grad_psi < 1` 那条分支。
+                psi_s = -(100.0 + s.uni() * 1.0e4);
+                hksat = 1.0e-6 + s.uni() * 1.0e-3;
+                bsw = 2.0 + s.uni() * 12.0;
+                alpha = 1.0e-3 + s.uni() * 0.1;
+                n = 1.05 + s.uni() * 2.0;
+                l = 0.5 + s.uni() * 0.5;
+                sc = 0.2 + s.uni() * 0.8;
+                fc = 0.2 + s.uni() * 0.8;
+                dz = 1.0e-3 + s.uni() * 1.0;
+                psi_u = -(1.0 + s.uni() * 1.0e4);
+                psi_l = psi_u + s.uni() * dz * 0.9;
+                hk_u = 1.0e-9 + s.uni() * 1.0e-3;
+                hk_l = 1.0e-9 + s.uni() * 1.0e-3;
             }
             let model = if campbell {
                 SoilHydraulicModel::Campbell { bsw }
