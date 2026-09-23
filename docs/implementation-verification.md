@@ -18439,8 +18439,18 @@ VSFI     kernel=200 rust=200
        `compare_flux_inside.sh` 的三件套 + 私有例程"**拷贝+放行**"编译路线
        （第 311/312 轮实测：模块拷进 `$WORK`、`PRIVATE` 改 `PUBLIC`、
        `-ffunction-sections` + `-Wl,-dead_strip`），判到逐位后再**成组**落地 + 跑三段式。
-     * 之后：读 `soil_water_vertical_movement` 的 27−12=15 条差额（含内联的
-       sublevel/explicit），再回头查第二配置雪窗那 79。
+     * **`flux_all` 里那 1 条未归属的 FMA 已定性质（第 322 轮）**：三个可能的家
+       （`flux_sat_zone_all`、`flux_both_transitive_interface`、`flux_at_unsaturated_interface`）
+       **单独编出来都是 0 条 FMA** ⇒ 那条是**被内联的副本**在调用点上的收缩，
+       **例程级闭环判不了它**（闭环编的是 outlined 那份）。要结清它只能：(a) 读
+       `flux_all` 的反汇编上下文 + 那三个例程的**源表达式**逐条比，或 (b) 让闭环
+       直接驱动 `flux_all`（夹具更接近真实调用）。**别**为这三个例程单独建闭环。
+       （顺带确认：`flux_all` 的 7 条里没有 `r0`/`grad_psi>1` 那两个模式 ⇒ 它在那里
+       是**调用** outlined 的 `flux_inside_hm_soil`，所以第 314/315 轮那两处修复
+       **确实作用在活路径上** ✓）
+     * 之后：读 `soil_water_vertical_movement` 的 27−12=15 条差额（**同样先查是不是
+       内联来的**：其中已知含 `initialize_sublevel_structure`/`use_explicit_form`/
+       `check_and_update_level` 等私有子程序），再回头查第二配置雪窗那 79。
      * **判据纪律（本会话换来的）**：闸门是 `over_tol`/`ot_vars`；`bitwise`/`sumabs`
        与状态残差都是**诊断**（混沌窗口里会双向移动，第 315/321 轮已各有一例）；
        但**单个形状即便逐位判对也不能单独落地** —— 必须把已判对的那批**成组**落地
