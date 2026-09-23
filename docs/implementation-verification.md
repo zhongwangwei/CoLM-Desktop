@@ -17437,6 +17437,36 @@ kernel != golden 在 rec 0..9 **全为 0**  ⇒ 存储 golden 就是当前内核
    的形状（常数已核对：`rgas=287.04`、`cpair=1004.64` 两侧一致）。
 2. rec 9 的状态种子仍然独立（`f_rib` 不回灌）。
 
+#### 第 297 轮：**瞬时状态到第 18 步还逐位** —— history 的分歧是"区间累加"，不是状态
+
+新工具 `oracle/scripts/restart_scan.sh`（`dry_ts.sh N` + `restart_divergence.py`）
+逐步比 **restart（68 个状态量本身）**，CN-Cng 干窗实测：
+
+```text
+N=1..12   0/68                          ← 前 12 步全逐位
+N=13      1/68  zwt  1 ULP  ┐
+N=14..16  0/68              │  zwt 是每步重算的诊断（不是持久状态）
+N=17      0/68              │  1 ULP 会自己消失
+N=18      1/68  zwt  1 ULP  ┘
+N=19      2/68  wliq_soisno 1 ULP + zwt   ← 第一个【持久】状态分歧
+N=20..32  4..5/68  wliq/wice_soisno、t_soisno、smp、hk、zwt
+```
+
+三条结论（修正了之前的读法）：
+
+1. **`dry_ts.sh` 的 `TIMESTEP` history 是区间累加**：`f_zwt` 来自
+   `MOD_Vars_1DAccFluxes` 的 `r_zwt`→`acc1d`（`MOD_Hist.F90:4382` 只写 `a_zwt`）。
+   所以"第 12 步 `f_zwt` 差 1 ULP"**不是**状态差 —— 第 12 步的 restart 是 0/68。
+2. **真正的状态种子在第 19 步**：`wliq_soisno` **第 7 层（0 基）**1 ULP
+   （K=`8.421413232125362` / R=`8.42141323212536`，`maxabs 1.8e-15`）。
+   它落在 hour 10 的第一个时间步，与第 295 轮"小时对齐 rec 9 才首次不同"一致。
+3. `zwt` 在第 13/18 步的 1 ULP 是**每步重算、下一步就消失**的（诊断），
+   不是持久 prognostic —— 别追它。
+
+**下一枪**：第 19 步的水/相变步里 `wliq_soisno` 那一层的 1 ULP 从哪来。
+第 19 步的**输入**（第 18 步末尾的 restart）是逐位的，所以差在一处**值相关**的
+形状（分支/钳制/幂），或某个**不在 restart 里**的中间状态。
+
 ---
 
 # 交接：Fortran → Rust 移植的当前状态（本会话收束）
@@ -17548,6 +17578,9 @@ wice_soisno[5]   kernel=6.1823587081423845 (4018BABC3DBE730C)
 * `oracle/scripts/rib_probe.sh`（第 296 轮）：`f_rib` 那条 history 诊断链
   （`MOD_Vars_1DAccFluxes.F90` 的 `r_*` vs `history_diagnostics.rs`）的逐时间步
   两侧同位型探针，打出 `z0m/zldis/th/thv/thvstar/zol/um/ustar/fh/rib`。
+* `oracle/scripts/restart_scan.sh`（第 297 轮）：逐步跑 `dry_ts.sh N` 比 **restart**
+  （68 个状态量本身），找**瞬时状态**第一次分歧的第几步。判状态必须用它，
+  不能用 history（那是区间累加）。
 * `cargo test --workspace --lib --bins`（26 个测试二进制）、
   `cargo clippy --workspace --all-targets -- -D warnings`、`cargo fmt --all --check`、
   `python3 oracle/scripts/test_upstream_f48_sync.py`（本会话最后一次全绿）。
@@ -17637,18 +17670,21 @@ wice_soisno[5]   kernel=6.1823587081423845 (4018BABC3DBE730C)
    `plant_hydraulics.rs:balance_phs_rootflux` + 两个调用点；默认三份窗口里仍不生效
    （警告 0 次），三段式验收与第 293 轮**逐位相同**（证明它惰性、没引入回归）。
 
-1. **11 天黄金窗口与存储 golden 的那条链（第 295 轮重新标定）**：配置逐字相同、
+1. **默认配置的状态残差（第 297 轮定案）**：配置逐字相同、
    **内核 == 存储 golden 在小时对齐下前 10 条逐位** ⇒ 不是基准错。
-   `oracle/scripts/compare_hourly_window.sh` 实测：**前 8 条记录（8 小时）
-   内核 == Rust == golden 逐位全同**；rec 8（hour 9）内核 != Rust 1 个元素
-   （`f_rib` 差 1 ULP）；rec 9 起 5 个元素（`f_fgrnd`/`f_wice_soisno`/
-   `f_wliq_soisno`/`f_zwt` 各 1 ULP + `f_zerr` 2e-2）。
-   `f_rib` 是 `MOD_Vars_1DAccFluxes.F90:2786` 的 `r_rib`（纯诊断、不回灌），
-   与 rec 9 的状态链**独立**。下一枪（两条并列）：
-   (a) rec 8 `f_rib` 的 `zol`/`um`/`r_ustar2`/`r_fh` 两侧同位型探针；
-   (b) rec 9 那条不经过 `f_rib` 的状态种子。
-   注意 **`dry_ts.sh` 的 TIMESTEP 历史是 30 min 区间累加**，它的"第几步"不能
-   当小时级分辨力；判状态用 `compare_hourly_window.sh`。
+   - **瞬时状态**：`oracle/scripts/restart_scan.sh` 实测 **restart 到第 18 步都是
+     0/68**，第 19 步起 `wliq_soisno` 1 ULP（第一个持久状态分歧），第 20 步起
+     `wice_soisno`/`t_soisno`/`smp`/`hk`。**这是唯一要追的种子。**
+   - `f_zwt`/`f_rib`/`f_zol` 这些 history 差是 `MOD_Vars_1DAccFluxes` 里
+     `acc1d` **区间累加**出来的（`f_rib` = `r_rib`，纯诊断、不回灌），
+     第 13/18 步那种 `zwt` 1 ULP 会自己消失 —— **别追 history**。
+   - 下一枪：第 19 步的水/相变步（输入是逐位的，差在某处值相关的形状或
+     不在 restart 里的中间状态）。
+2. **第二配置回归**（Campbell + 关 VSF）：第 293 轮实测干窗已从 16 降到 **0**；
+   wet/snow 未重跑，需要时跑 `oracle/scripts/compare_second_config.sh <case>`。
+3. **未移植分支**：`standard_lct_step.rs:578` 明说 split soil/snow、SNICAR、气溶胶、
+   示踪剂仍是另一支；动态湿地/CaMa 洪水路径 `colm-rs` 会打印 "unported branch" 警告。
+   这些是"全面完成"里真正还没做的部分。
 2. **第二配置回归**（Campbell + 关 VSF）：第 293 轮实测干窗已从 16 降到 **0**；
    wet/snow 未重跑，需要时跑 `oracle/scripts/compare_second_config.sh <case>`。
 3. **未移植分支**：`standard_lct_step.rs:578` 明说 split soil/snow、SNICAR、气溶胶、
