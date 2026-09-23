@@ -15884,3 +15884,35 @@ Tested: `bash oracle/scripts/compare_soilhydro.sh`（3 输出 10000/10000 逐位
 两档模型 × 三条分支全命中）；`cargo fmt --all --check`；`cargo clippy --workspace --all-targets -- -D warnings`。
 Not-tested: `MOD_PhaseChange` 的调用参数（下一轮）；`get_derived_parameters_vGM`
 （静态参数推导，不在本驱动覆盖范围；两侧都用抽出来的 `sc_vgm`/`fc_vgm`）。
+
+### 第 255 轮：`meltf` 的实参也逐位相同 —— 相变不是 `wice` 那个差的来源
+
+`meltf` 本身有 9 个量 × 10000 的闭环，所以嫌疑在**调用实参**。新探针
+`/tmp/gf/meltf_args_probe.sh` 在 `MOD_GroundTemperature.F90` 的 `CALL meltf` 之前、
+Rust 的 `phase_change(PhaseChangeInput {` 之前取同一组量（**跑 2 步**）：
+`fact/brr/t_soisno_bef/t_soisno/wliq/wice` 的第 1..3 层（18 个）+ 13 个标量。
+
+```text
+step 0: 第 1..3 层的 18 个量与 hs/fsno/dhsdT/scv/snowdp/cnfac/deltim/porsl/psi0 全部逐位相同
+step 1: 同上，全部逐位相同
+```
+
+唯一"不同"的 `hs_soil`/`hs_snow` 是 Rust 侧的**占位**（那两个量只在
+`DEF_SPLIT_SOILSNOW` 分支用，本算例为 false）⇒ 不构成证据。
+
+**结论**：相变在**给定输入下**（第 1..3 层）不可能是 `wice` 那个差的来源。
+残差的候选因此只剩两处：
+
+1. **雪层（`j < 1`）或第 4 层以下**的实参 —— 本探针没覆盖。但 3 步 restart 里
+   `scv`/`snowdp`/`z_sno`/`dz_sno`/`ssno` 与 `wice_soisno[0..4]` **都逐位相同**，
+   雪层那一侧没有差异信号；
+2. **`water_2014`（VSF Richards 求解器）**—— 它在 `GroundTemperature` **之后**运行，
+   自己也会调整 `wliq`/`wice`（含冻融分配）。这是最可能的落点，也解释了
+   "`wliq` 最终逐位相同而 `wice` 差"（液相由压力头反解钉住、冰相只在冻融项里动）。
+
+**下一轮（本会话最后一轮）**：以最终核对与交接为主；若时间允许，按同一套办法
+（探针给输入 + 离线位型复算）查 `crates/colm-core/src/water_2014.rs` 的冻融分配。
+
+Tested: `/tmp/gf/meltf_args_probe.sh`（2 步，18 个层量 + 标量逐位比对）；
+`cargo fmt/clippy`（无代码改动，不需重跑）。
+Not-tested: 雪层与第 4 层以下的实参；`water_2014` 的冻融分配。
