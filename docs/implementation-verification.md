@@ -18431,6 +18431,16 @@ VSFI     kernel=200 rust=200
      然后读 `soil_water_vertical_movement` 的 27−12=15 条差额（其中含内联的
      sublevel/explicit）。这 8 处落地后再带上第 302 轮那六处 `get_zwt_from_wa` 形状
      一起跑口径，才有机会让两条链同时向前。
+
+     **搭闭环前必须知道的一件事（第 311 轮查定）**：要补的那几个例程在模块里是
+     **PRIVATE** —— `PRIVATE :: water_balance`（`:59`）、`PRIVATE :: flux_inside_hm_soil`
+     （`:73`）、`flux_all`/`flux_top_transitive_interface`/… 一长串都在 `:59-82`，
+     符号表里也都是小写 `t`（local）。而 `compare_getzwt.sh` 能直接链是因为
+     `get_zwt_from_wa` 在顶部 PUBLIC 列表里。所以这些例程的闭环**不能**照抄
+     `compare_getzwt.sh` 的编译方式，要用**拷贝+放行**：把
+     `MOD_Hydro_SoilWater.F90` 拷进 `$WORK`，`sed` 掉目标那几行 `PRIVATE ::`
+     （或把它们加进 `PUBLIC ::`），用**那份拷贝**编出 `.mod`（`-I$WORK` 在前），
+     vendor 源树不动。否则会先在"驱动看不到例程"上报错，白花一轮。
 2. **第二配置回归**（Campbell + 关 VSF）：第 293 轮实测干窗已从 16 降到 **0**；
    wet/snow 未重跑，需要时跑 `oracle/scripts/compare_second_config.sh <case>`。
 3. **未移植分支**：`standard_lct_step.rs:578` 明说 split soil/snow、SNICAR、气溶胶、
