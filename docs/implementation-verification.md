@@ -17948,6 +17948,49 @@ WSE1     kernel=20 rust=20      WSE0 kernel=20 rust=20      WSEL kernel=200 rust
 * `oracle/scripts/probe_diff.py` 增加"共享键数量 < 两侧行数"的显式告警，同样的漏报
   不会再静默发生。
 
+##### 第 301 轮追加：按反汇编试出来的 5 处 FMA 形状 —— **两组都被口径否掉，已全部回退**
+
+反汇编 `get_zwt_from_wa`（`secant_method_iteration` 被内联进去）数出 **9 条** FMA 族指令，
+逐条映射出 5 处可以确定源表达式的形状：
+
+| # | 上游表达式 | 反汇编形状 | 本仓库原先是 |
+|---|---|---|---|
+| 1 | `zwt = zmin + (-wa)/vl_s*2.0` | `fdiv` 后 `fmadd(t,2.0,zmin)` | 平铺 |
+| 2 | `psi = psi_s - (zwt-zmin)*0.5` | `fmsub`（乘积收进减法） | 平铺 |
+| 3 | `zwt = zmin + (zwt-zmin)*2 + 0.1` | `fmadd((zwt-zmin),2.0,zmin)` 再单独 `+0.1` | 平铺 |
+| 4 | `fval = wa + (zwt-zmin)*(vl_s-vl)` | `fmadd`（乘积收进 `wa`） | 平铺 |
+| 5 | `secant` 分子 `fval_k1*x_k2 - fval_k2*x_k1` | `fnmsub`（**第一个**乘积进 FMA） | 平铺 |
+| 6/7 | 两处夹逼 `x_l*alp + x_r*(1-alp)` / `x_l*(1-alp) + x_r*alp` | `fmadd`（**第二个**乘积进 FMA） | 平铺 |
+
+**探针侧是正向的**：5 处全改后 `vsf_wt_probe.sh 20` 的差异 **12/240 → 7/240**，
+首差从 **call 13 推到 call 19/20** —— 第 13 次调用那处差**确实被消掉了**，
+说明这几处就是那一段的成因之一（也说明第 298 轮"4 个形状全否"的判据不成立：
+当时用 restart 计数当判据，单个形状改对不会让整条混沌链回到逐位）。
+
+**但两组都被验收口径否掉**（`win4.sh` + `three.py`，同树 A/B 各跑一次）：
+
+| 窗口 | 基线 | 5 处全改 | 只改 1–4（`get_zwt_from_wa`） |
+|---|---|---|---|
+| dry `over_tol` | **28** | 36 ✗ | 28 ✓ |
+| dry `bitwise` / `sumabs` | 16326 / 249.79 | 17387 / 271.97 | 16260 / 263.14 |
+| wet `over_tol` | **1970** | 1822 ✓ | 2070 ✗ |
+| wet `sumabs` | 39.77 | 23.13 | 50.11 |
+| snow `over_tol` | 25713 | 25713 | 25713 |
+| snow `bitwise` / `sumabs` | 32788 / 444414.20 | 32639 / 444416.82 | 32760 / 444416.82 |
+
+⇒ 全改让**干窗 `over_tol` 28 → 36**，只改 1–4 让**wet `over_tol` 1970 → 2070**，
+两者都违反"口径指标不许变差"，按纪律 `git checkout` 整个回退，树回到基线
+（黄金仍是 **28 / 1967 / 25713**）。
+
+**结论（比这次改动本身更值钱）**：**形状与内核一致不自动等于指标变好。**
+这些点位处在 `f_vegwp` 混沌主导的窗口里，把末位改对等于换了一条混沌轨道，
+`over_tol` 可能反向；所以形状改动必须**先过口径**，"探针差异变少"只是必要条件。
+**下一枪（换判据，别再用混沌窗口判形状）**：给这一段做**例程级**差分闭环 ——
+照 `oracle/scripts/updphotosyn_diff.f90` / `compare_soilhydro.sh` 那套，
+写一个直接链内核 `get_zwt_from_wa` / `soilwater_aquifer_exchange` 的 Fortran 驱动器，
+用大批合成输入两侧逐位比（不进混沌窗口）。这样 5 处形状（以及第 298 轮那 4 个）
+可以一次性判**对错**，再拿"对的那一组"去跑口径。
+
 **验收口径（不变）**：`cargo test --workspace --lib --bins -- --test-threads=1`、
 `clippy -D warnings`、`fmt --check`（本机 `colm-cli` 的 7 个 `study::runner` 用例
 因沙箱 `EPERM` 失败，与本改动无关）；`bash /tmp/gf/win4.sh` + `three.py`
