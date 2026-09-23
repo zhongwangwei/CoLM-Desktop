@@ -1219,6 +1219,22 @@ pub fn leaf_temperature(
     let bulk_richardson = (last.zeta * last.surface.friction_velocity_m_s.powi(2)
         / (VON_KARMAN.powi(2) / last.surface.heat * stability_wind.powi(2)))
     .min(5.0);
+    // `MOD_LeafTemperature_Extended.F90:1435-1437`：
+    //   `cgrnds = cpair*rhoair*cgh*(1.-wtg0)`
+    //   `cgrndl = rhoair*cgw*(1.-wtgq0)*dqgdT`
+    //   `cgrnd  = cgrnds + cgrndl*htvp`      ← 最后这个乘积被收进加法
+    // `cgrndl` 在上游是**先算好、舍入过**的独立变量，所以这里也必须先落成局部量，
+    // 再把 `cgrndl*htvp` 收进加法；直接写成一条平铺长链会多一次舍入。
+    let ground_sensible_slope_w_m2_k = AIR_HEAT_CAPACITY_J_KG_K
+        * input.air_density_kg_m3
+        * last.ground_heat_conductance
+        * (1.0 - last.ground_heat_weight);
+    let ground_latent_slope_kg_m2_s_k = input.air_density_kg_m3
+        * last.ground_moisture_conductance
+        * (1.0 - last.ground_moisture_weight)
+        * input.ground_humidity_temperature_slope_k;
+    let ground_flux_temperature_slope_w_m2_k = ground_latent_slope_kg_m2_s_k
+        .mul_add(input.ground_latent_heat_j_kg, ground_sensible_slope_w_m2_k);
     transpiration = transpiration.max(0.0);
     Ok(LeafTemperatureOutput {
         ground_latent_heat_j_kg: input.ground_latent_heat_j_kg,
@@ -1234,15 +1250,7 @@ pub fn leaf_temperature(
         ground_evaporation_kg_m2_s: ground_evaporation,
         soil_evaporation_kg_m2_s: soil_evaporation,
         snow_evaporation_kg_m2_s: snow_evaporation,
-        ground_flux_temperature_slope_w_m2_k: AIR_HEAT_CAPACITY_J_KG_K
-            * input.air_density_kg_m3
-            * last.ground_heat_conductance
-            * (1.0 - last.ground_heat_weight)
-            + input.air_density_kg_m3
-                * last.ground_moisture_conductance
-                * (1.0 - last.ground_moisture_weight)
-                * input.ground_humidity_temperature_slope_k
-                * input.ground_latent_heat_j_kg,
+        ground_flux_temperature_slope_w_m2_k,
         ground_sensible_temperature_slope_w_m2_k: AIR_HEAT_CAPACITY_J_KG_K
             * input.air_density_kg_m3
             * last.ground_heat_conductance
