@@ -18068,6 +18068,26 @@ harness 上那是 1643 与 0 的区别。
 与 Rust 对应处），**然后**把本轮的六处形状一起重新应用，两条都对了再跑口径 ——
 那才是一次干净的、口径也向前走的修复。
 
+##### 六、`eff_porosity` 那一条：公式本身**已逐项对上**，所以要查它的入参
+
+读完两侧的逐层更新（内核 `MOD_SoilSnowHydrology.F90:299-306`，本仓库
+`water_2014.rs:507-528 soil_volumes`），四条式子**逐项一致**（含结合顺序）：
+
+```fortran
+vol_ice(j)      = min(porsl(j), wice_soisno(j)/(dz_soisno(j)*denice))
+eff_porosity(j) = max(0.01, porsl(j)-vol_ice(j))
+vol_liq(j)      = min(eff_porosity(j), wliq_soisno(j)/(dz_soisno(j)*denh2o))
+icefrac(j)      = min(1., vol_ice(j)/porsl(j))   ! porsl<1e-6 时取 0
+```
+
+所以第 17 步第 3 层的 `eff_porosity` 差**不是这个函数造的**，只能来自它的入参在该时刻
+不同：`wice_soisno(3)`、`porsl(3)`（静态）或 `dz_soisno(3)`（静态）。注意 restart 在
+N=17/N=18 是**逐位相同**的，所以 `wice_soisno(3)` 的差必然出现在**步内**（能量步的相变
+之后、水步之前）并在步末又回到同一个值 —— 这也解释了为什么 restart 看不见它。
+**下一步（探针已到位，只需加三列）**：在 `vsf_wt_probe.sh` 的 `WSEL` 里补打
+`wice_soisno(ilev)`/`porsl(ilev)`（土壤孔隙度，不是 `eff_porosity`）/`dz_soisno(ilev)`,
+就能把"是入参差还是 `soil_volumes` 差"一次判死。
+
 **验收口径（不变）**：`cargo test --workspace --lib --bins -- --test-threads=1`、
 `clippy -D warnings`、`fmt --check`（本机 `colm-cli` 的 7 个 `study::runner` 用例
 因沙箱 `EPERM` 失败，与本改动无关）；`bash /tmp/gf/win4.sh` + `three.py`
