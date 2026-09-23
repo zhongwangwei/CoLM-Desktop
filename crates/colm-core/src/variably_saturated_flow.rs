@@ -1640,7 +1640,7 @@ pub fn flux_inside_variable_saturated_soil(
     let exponent = match input.hydraulic_model {
         SoilHydraulicModel::Campbell { bsw } => 1.0 / (3.0 / bsw + 2.0),
         SoilHydraulicModel::VanGenuchten { n_vgm, l_vgm, .. } => {
-            1.0 / (l_vgm * (n_vgm - 1.0) + n_vgm * 2.0)
+            1.0 / l_vgm.mul_add(n_vgm - 1.0, n_vgm * 2.0)
         }
     };
     let flux = if gradient < 0.0 {
@@ -1664,10 +1664,13 @@ pub fn flux_inside_variable_saturated_soil(
     } else if gradient == 1.0 {
         input.upper_hydraulic_conductivity_mm_s
     } else {
-        input.upper_hydraulic_conductivity_mm_s
-            + (input.upper_pressure_head_mm - input.lower_pressure_head_mm) / input.distance_mm
-                * input.upper_hydraulic_conductivity_mm_s.powf(1.0 - exponent)
-                * input.lower_hydraulic_conductivity_mm_s.powf(exponent)
+        let weighted = (input.upper_pressure_head_mm - input.lower_pressure_head_mm)
+            / input.distance_mm
+            * input.upper_hydraulic_conductivity_mm_s.powf(1.0 - exponent);
+        weighted.mul_add(
+            input.lower_hydraulic_conductivity_mm_s.powf(exponent),
+            input.upper_hydraulic_conductivity_mm_s,
+        )
     };
     Ok(flux)
 }
@@ -2048,18 +2051,18 @@ pub fn water_table_from_aquifer(
 
     let liquid_at_depth = |depth_mm: f64| {
         soil_vliq_from_psi(
-            saturated_potential_mm - (depth_mm - minimum_depth_mm) * 0.5,
+            (depth_mm - minimum_depth_mm).mul_add(-0.5, saturated_potential_mm),
             porosity,
             residual_water,
             saturated_potential_mm,
             hydraulic_model,
         )
     };
-    let mut right = minimum_depth_mm + (-aquifer_water_mm) / porosity * 2.0;
+    let mut right = ((-aquifer_water_mm) / porosity).mul_add(2.0, minimum_depth_mm);
     let mut liquid = liquid_at_depth(right);
     let mut expansion = 0usize;
     while aquifer_water_mm <= -(right - minimum_depth_mm) * (porosity - liquid) {
-        right = minimum_depth_mm + (right - minimum_depth_mm) * 2.0 + 0.1;
+        right = (right - minimum_depth_mm).mul_add(2.0, minimum_depth_mm) + 0.1;
         liquid = liquid_at_depth(right);
         expansion += 1;
         ensure!(expansion < 256, "VSF water-table bracket did not converge");
@@ -2071,7 +2074,7 @@ pub fn water_table_from_aquifer(
     let mut depth = (left + right) * 0.5;
     for _ in 0..50 {
         liquid = liquid_at_depth(depth);
-        let value = aquifer_water_mm + (depth - minimum_depth_mm) * (porosity - liquid);
+        let value = (depth - minimum_depth_mm).mul_add(porosity - liquid, aquifer_water_mm);
         if value.abs() < volume_tolerance || right - left < depth_tolerance_mm {
             break;
         }
@@ -2751,13 +2754,14 @@ fn bounded_secant_iteration(
     if *previous_residual == residual_before_previous {
         *value = (*left + *right) * 0.5;
     } else {
-        *value = (*previous_residual * value_before_previous
-            - residual_before_previous * *previous_value)
-            / (*previous_residual - residual_before_previous);
+        *value = previous_residual.mul_add(
+            value_before_previous,
+            -(residual_before_previous * *previous_value),
+        ) / (*previous_residual - residual_before_previous);
         // 上游两处夹逼都用 `(1.0_r8 - alp)`，必须按表达式求值，见 `SECANT_ALPHA`。
         let complement = 1.0 - SECANT_ALPHA;
-        *value = (*value).max(*left * SECANT_ALPHA + *right * complement);
-        *value = (*value).min(*left * complement + *right * SECANT_ALPHA);
+        *value = (*value).max((*left).mul_add(SECANT_ALPHA, *right * complement));
+        *value = (*value).min((*left).mul_add(complement, *right * SECANT_ALPHA));
     }
 }
 
