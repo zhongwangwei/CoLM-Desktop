@@ -15917,6 +15917,78 @@ Tested: `/tmp/gf/meltf_args_probe.sh`（2 步，18 个层量 + 标量逐位比�
 `cargo fmt/clippy`（无代码改动，不需重跑）。
 Not-tested: 雪层与第 4 层以下的实参；`water_2014` 的冻融分配。
 
+### 第 256 轮：残差**不在**第 1 层凝结项；并且踩到了"追错文件"的**函数级**版本
+
+按第 255 轮的候选，先 A/B `water_2014.rs:269`（冰相 `mul_add` ↔ 源码左结合平铺）。
+3 步干窗的 `rust_restart.nc` 与 `colm-rs_hist_2008-01.nc` 与融合版**逐字节相同**
+（`0f226ff6…` / `5c88f691…`），步级仍是 5 变量 / 687 of 692（99.2775 %）。
+怀疑"这行根本没跑"，于是加临时 `eprintln!` 计数 —— **一次都没打**。
+
+原因是函数开头的早退：
+
+```rust
+// crates/colm-core/src/water_2014.rs:178-180
+if input.variably_saturated {
+    return variably_saturated_soil_step(input, state);
+}
+```
+
+本算例（默认配置）`DEF_USE_VariablySaturatedFlow = .true.`，所以
+**`water_2014.rs:261-275` 整段在默认配置里是死代码**；上游对应的是
+`MOD_SoilSnowHydrology.F90` 的 `WATER_VSF`（`:1126-1133`），Rust 侧的活代码在
+`crates/colm-core/src/variably_saturated_flow.rs:4422-4431`。也就是说：**同一条物理语句
+在 Rust 里有两份拷贝（VSF / Campbell），只有前者在默认配置里跑** ——
+这是「编的不是你以为的那个文件」的**函数级**翻版，代价是一轮空转。
+
+把同一个 A/B 做到活代码上（`variably_saturated_flow.rs:4426`）：3 步输出**仍然逐字节相同**。
+再在活代码处打印三个通量（跑 3 步）：
+
+```text
+DBG257 wice0 before=40089AFD43B944E6 fused=… flat=… same=true dt=1.8e3 frost=0e0 subl=0e0 dew=0e0
+DBG257 wice0 before=401851ECA41F6891 fused=… flat=… same=true dt=1.8e3 frost=0e0 subl=0e0 dew=0e0
+DBG257 wice0 before=4018BABC3DBE740C fused=… flat=… same=true dt=1.8e3 frost=0e0 subl=0e0 dew=0e0
+```
+
+`qsdew = qfros = qsubl = 0`（三步全零）⇒ 该语句在本窗口**根本不改冰**，形状自然无所谓。
+**该候选被排除**（第 3 行的 `before` 正是 Rust 第 2 步那个 256 ULP 的值 `…40C`，
+说明它恰恰是**进入该行之前**就偏了）。
+
+顺带把残差位置钉到**层**：`f_wice_soisno` 形状 `(3, 1, 15)`、`f_h2osoi` `(3, 1, 10)`
+⇒ 打包列前 5 个槽是**未启用的雪槽**（`t_soisno(0..4) = 0`，本窗口无雪），
+差异元素 `[:, 0, 5]` 就是**最上土壤层**（Fortran 的 `wice_soisno(1)`）；
+`f_h2osoi[:, 0, 0]` = 同一层，128 ULP，是那 256 ULP 的派生。
+
+**修正后的下一步（比第 255 轮的猜测窄得多）**：第 0、1 步的 restart 与 history 逐位全同
+⇒ 进入第 2 步的**状态完全相同**，所以第 2 步的差只能来自**第 2 步内部**某条分支里
+表达式的形状。本轮把水步（`WATER_VSF`）这一侧**全部排除**掉了：
+
+* `:1128-1133` 凝结项 —— 三个通量三步全零（上面实测）；
+* `:1139-1147` `wblc` 补冰 —— 插桩三行 `DBG258`：`balance_error_mm` 依次为
+  `-3.41e-12 / 0 / 0`，`active=false` 三次 ⇒ **补冰循环一次都没进**；
+* `:1069-1085` imperv —— 要顶层非渗透，本例 `patchtype = 0` 不走。
+
+而 `WATER_VSF` 里改冰的语句总共只有这四处（另两处 `:855`/`:1211` 只读）。
+**结论：第 2 步那 256 ULP 的冰差是在能量步（`meltf` 相变）里产生、又被水步原样留下的**
+—— 这也解释了"`wliq` 逐位相同而 `wice` 不同"（水步会用压力头把 `wliq` 整个重写，
+`wice` 水步不动）。而 `meltf` 本身有 9 量 × 10000 的逐位闭环、第 0/1 步实参也全同，
+所以嫌疑落在**第 2 步才走到的那条分支**上：内核第 1 步 `t_soisno(1)` 恰好停在 273.16、
+第 2 步掉到 265.51，相变（`imelt` 分类）到第 2 步才真正转动。
+
+⇒ 下一枪：把 `/tmp/gf/meltf_args_probe.sh` 的 `end_sec` 从 `3600`（2 步）改成 `5400`（3 步），
+只比**第 2 步**那组实参（`fact/brr/t_soisno_bef/t_soisno/wliq/wice` 第 1..3 层 + 13 个标量）；
+哪个量出现位差，就顺着它往上游追（`fact`/`brr` 来自地面温度里的热参数链，
+`th6_probe.sh` 是同一套骨架）。
+
+Tested: `bash /tmp/gf/dry_ts.sh 3` ×4（死代码平铺/死代码融合/活代码平铺/`err_solver` 平铺，
+`shasum -a 256` 与 `window_divergence.py` 比对：四版全部与基线一字不差）；
+`python3 /tmp/gf/locate257.py`（差异元素与层号定位）；
+`crates/colm-core` 的 `water_2014_soil_calls…` 单测（验证探针确实会打印）；
+插桩 `DBG256`/`DBG257`/`DBG258`（均已 `git checkout --` 撤销，工作树只剩本文件的文档改动）。
+Not-tested: 第 2 步的 `meltf` 实参（探针仍是 2 步版）。
+
+`err_solver`（`:4494-4498` 的 `FNMA(通量和, deltim, 蓄量变化)`）也顺手 A/B 了平铺版：
+输出同样逐字节相同 —— 与 "补冰循环没进" 互为印证（该项只在 `wblc > 0` 时才看得见）。
+
 ---
 
 # 交接：Fortran → Rust 移植的当前状态（本会话收束）
@@ -15951,13 +16023,18 @@ hk[0]            kernel=2.9151756458244646e-26 / rust 2.915175645823325e-26
 ```
 
 `wliq_soisno`/`smp`/`t_soisno` 全同；`f_wat`/`f_h2osoi` 等的差都能由这一个量解释
-（见「第 254 轮」）。已经**排除**的来源：叶温 Newton 循环（58 个量 × 10 轮全同）、
+（见「第 254 轮」）。**已排除**的来源：叶温 Newton 循环（58 个量 × 10 轮全同）、
 地面温度三对角组装（95 个量全同）、`meltf`（9 量 × 10000 闭环 + 第 1..3 层实参全同）、
-保持曲线（`compare_soilhydro.sh` 3 输出 × 10000 全同）。
+保持曲线（`compare_soilhydro.sh` 3 输出 × 10000 全同）、
+**第 1 层凝结项与水步的补冰/imperv**（第 256 轮：`qsdew = qfros = qsubl = 0`；
+`balance_error_mm ≤ 0` ⇒ 补冰循环三步都没进；imperv 要非渗透顶层，本例 `patchtype = 0`）。
 
-**最可能的落点**：`crates/colm-core/src/water_2014.rs` 的冻融/水量分配
-（它在 `GroundTemperature` 之后运行、自己调整 `wliq`/`wice`；这也解释了
-"液相最终被压力头钉回逐位相同、冰相不同"）。
+**已知的位置边界**（第 256 轮）：差异元素是**最上土壤层**（`f_wice_soisno[:, 0, 5]`，
+打包列前 5 槽是未启用的雪槽）；第 0、1 步状态逐位全同 ⇒ 差只产生在**第 2 步内部**；
+而**水步那一侧已全部排除**（凝结通量全零、`wblc` 补冰循环三步都没进、imperv 要非渗透顶层），
+`WATER_VSF` 里再没有能改冰的语句 ⇒ **那 256 ULP 是能量步相变（`meltf`）产生、
+被水步原样留下的**（水步只用压力头重写 `wliq`，所以 `wliq` 反而逐位相同）。
+`meltf` 函数本身有 9 量 × 10000 逐位闭环、第 0/1 步实参全同 ⇒ 打第 2 步才走到的那条相变分支。
 
 ## 可复用的方法（比结论更值钱）
 
@@ -15980,7 +16057,9 @@ hk[0]            kernel=2.9151756458244646e-26 / rust 2.915175645823325e-26
 * **编的不是你以为的那个文件**（第 166 轮）：内核编
   `extends/interception/*_Extended.F90`，而 `main/` 下有同名文件、公式**不一样**
   （第 249 轮 `fwet_snow` 就是按 `main/` 那份实现，差 2.79e-12 相对量）。
-  用 `strings .bld/*.o | grep '\.F90'` 或构建日志确认。
+  用 `strings .bld/*.o | grep '\.F90'` 或构建日志确认。**函数级同理**：同一条上游语句
+  在 Rust 里可能有两份拷贝（VSF 与 Campbell），默认配置只跑其中一份 ——
+  改之前先用临时 `eprintln!` 确认"你改的那行真的被执行了"（第 256 轮为此空转一轮）。
 * **GIMPLE dump 不代表出货二进制**：`th_ext.opt`/`lt_ext.opt` 的收缩结论与本机
   `-O2` 出货二进制多次不一致。判形状用 `llvm-objdump --disassemble-symbols=…`
   对 `kernels/default/colm.x` 取操作码窗口，或直接用位型探针。
@@ -16002,6 +16081,15 @@ hk[0]            kernel=2.9151756458244646e-26 / rust 2.915175645823325e-26
 
 ## 若继续
 
-从 `water_2014.rs` 的冻融分配入手，照第 255 轮的探针骨架（跑 2 步）：
-把该步的 `wliq/wice/t_soisno/smp/hk/imelt/tinc` 在**冻融前后**各取一次位型，
-先判"是不是冻融项造成的"；若是，用第 2 条方法对候选写法做多轮筛选。
+不要从 `water_2014.rs` 的冻融分配入手 —— 默认配置（`DEF_USE_VariablySaturatedFlow = .true.`）
+根本不走那个函数（第 256 轮实测）；也不要再查水步的凝结/补冰/imperv，那三处已排除。
+
+1. 把 `/tmp/gf/meltf_args_probe.sh` 的 `end_sec` 从 `3600`（2 步）改成 `5400`（3 步），
+   只比**第 2 步**的实参（`fact/brr/t_soisno_bef/t_soisno/wliq/wice` 第 1..3 层 + 13 个标量）。
+   哪个量出现位差，就顺着它往上游追（`fact`/`brr` 来自地面温度的热参数链，
+   `th6_probe.sh` 是同一套骨架；都按"跑 3 步、只看第 2 步"来用）。
+2. 实参若全同，则相变分支的**分类**（`imelt`）在第 2 步必然不同或走的是没被
+   9×10000 闭环覆盖的那一支 —— 直接给 `phasechange:meltf` 的差分外壳补上
+   "第 1 步 `t = 273.16`、第 2 步 `t = 265.51`、`wice > 0`、`wliq > 0`"这组实参。
+3. 判"是不是混沌放大"仍用短程对照（1 步 vs 3 步）；任何探针跑完**必须重编**内核，
+   且**不要用内核 sha256 判断是否重编过**（同一份源码三次构建三个 sha）。
