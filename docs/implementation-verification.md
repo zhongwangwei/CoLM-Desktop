@@ -17411,6 +17411,32 @@ kernel != golden 在 rec 0..9 **全为 0**  ⇒ 存储 golden 就是当前内核
 **下一枪**：(a) rec 8 `f_rib` 的三层探针（`zol`/`um`/`r_ustar2`/`r_fh` 与 `r_rib`
 两侧同位型）；(b) rec 9 那条**不经过 `f_rib`** 的状态种子 —— 注意 `f_rib` 不回灌。
 
+#### 第 296 轮：(a) 打进去了 —— `f_rib` 链的首差是 `z0m` / `th`（各 1 ULP）
+
+新工具 `oracle/scripts/rib_probe.sh`：在 `MOD_Vars_1DAccFluxes.F90:2787`（`r_rib_e`
+定稿处）与 `history_diagnostics.rs` 的 `bulk_richardson` 之后两侧同位型打 13 个量。
+10 小时窗口（两侧都 `HOURLY`）实测：
+
+- 两侧都 **20 行** —— `accumulate_fluxes` 每个时间步调一次（`MOD_Hist.F90:227` 在
+  非预热分支无条件调），`acc1d` 把它**累加**进 `a_*`；所以 `f_*` 是**区间平均**。
+  这也解释了为什么 `r_zol_e` 等瞬时量从第 1 步起就差、而 history 前 8 条仍逐位。
+- **首个不同的量是 `z0m`（内核 `z0m_av`）**：第 1 步就差 1 ULP
+  （K=`0.1205726488149108` / R=`0.12057264881491078`），`displa` 跟着差；
+- `th`（位温）从第 2 步起差 1 ULP，`thv` 跟着差；`thvstar`/`um`/`fh`/`zol` 的差
+  都是它们的下游。
+
+**两次形状尝试都被探针否掉、已回退**（按第 246/252 轮的规矩：形状要按**自己的**
+汇编/位型定，不能类比邻居）：`(1.+0.61*qm)` 改 `mul_add`、`ur*ur+wc2` 改 `mul_add`
+—— 实测都不移动 `thv`，所以这轮的改动只有新探针本身。
+
+**下一枪**：
+1. `z0m` 那 1 ULP —— Rust 的 `history_diagnostics` 用的是叶温输出的
+   `leaf.momentum_roughness_m`（`history.rs:725`），内核用的是
+   `MOD_Vars_TimeVariables%z0m`（单点下 `z0m_av` 就是它）。先确认这是不是同一个量
+   （`z0mv` 本体 vs 写回状态时多一次舍入），再看 `th = tm*(1e5/psrf)**(rgas/cpair)`
+   的形状（常数已核对：`rgas=287.04`、`cpair=1004.64` 两侧一致）。
+2. rec 9 的状态种子仍然独立（`f_rib` 不回灌）。
+
 ---
 
 # 交接：Fortran → Rust 移植的当前状态（本会话收束）
@@ -17519,6 +17545,9 @@ wice_soisno[5]   kernel=6.1823587081423845 (4018BABC3DBE730C)
 * `oracle/scripts/compare_hourly_window.sh`（第 295 轮）：短窗口、**小时对齐**的
   内核/Rust/golden 三方逐位比对。判"状态分歧在第几条"必须用它 ——
   `dry_ts.sh` 的 `TIMESTEP` 历史是 30 min 区间累加，与算例的 `HOURLY` 不同窗口。
+* `oracle/scripts/rib_probe.sh`（第 296 轮）：`f_rib` 那条 history 诊断链
+  （`MOD_Vars_1DAccFluxes.F90` 的 `r_*` vs `history_diagnostics.rs`）的逐时间步
+  两侧同位型探针，打出 `z0m/zldis/th/thv/thvstar/zol/um/ustar/fh/rib`。
 * `cargo test --workspace --lib --bins`（26 个测试二进制）、
   `cargo clippy --workspace --all-targets -- -D warnings`、`cargo fmt --all --check`、
   `python3 oracle/scripts/test_upstream_f48_sync.py`（本会话最后一次全绿）。
