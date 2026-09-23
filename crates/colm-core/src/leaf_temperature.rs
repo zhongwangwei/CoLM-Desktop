@@ -1685,14 +1685,18 @@ fn update_canopy_water(
     // 0 —— 刚凝华进 `snow_mm` 的那 0.047 mm 完全没进覆盖率。它不是诊断量：
     // `MOD_Albedo` 的 `scat`/`beta0` 直接吃它，所以 `f_alb` → `f_sr*`/`f_sab*`
     // → `f_rnet` 那一族的差就是从这一步开始的。
-    let lsai = input.leaf_area_index + input.stem_area_index;
-    let mut wet_snow_fraction = if state.canopy_water.snow_mm > 0.0 {
-        ((10.0 / (48.0 * lsai)) * state.canopy_water.snow_mm)
-            .powf(0.666_666_666_666)
-            .min(1.0)
-    } else {
-        0.0
-    };
+    // 上游 `:1542` 的 `fwet_snow = canopy_snow_wetfrac(sigf, lai, sai, dewmx, tl, ldew_snow)`
+    // —— 指数是 `2.0_r8/3.0_r8`、容量是 `48*dewmx*max(lai+sai,0)`、还带
+    // `satcap > 1e-10` 的闸门。**`main/MOD_LeafTemperature.F90:1236` 那一份不同**
+    // （截断字面量 `.666666666666`、`(10/(48*lsai))*ldew`），而内核编的是
+    // `extends/interception/`。实测干窗第 0 步重启的 `fwet_snow` 差 2.79e-12 相对量，
+    // 正是这个差别。
+    let mut wet_snow_fraction = crate::interception::canopy_snow_wet_fraction(
+        input.maximum_dew_mm,
+        input.leaf_area_index,
+        input.stem_area_index,
+        state.canopy_water.snow_mm,
+    );
     if state.canopy_water.snow_mm > 1.0e-6 && state.leaf_temperature_k > FREEZING_K {
         let melt = (state.canopy_water.snow_mm / input.time_step_seconds).min(
             (state.leaf_temperature_k - FREEZING_K)

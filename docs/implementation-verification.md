@@ -15310,3 +15310,86 @@ Tested: `/tmp/gf/leafit_bits_probe.sh` 三次（54→58 个量）；`cmp_leafit.
 `cargo fmt/clippy/test`（26 个测试二进制全绿）。
 Not-tested: 第 4 步之外的其他候选形状（已足够判定）；`qaf` 的离线复核（缺 `qg`，
 以探针逐位相同为准）。
+
+## 第 249 轮：`fwet_snow` 是**公式级**的"编错了文件"——重启残差降到 1/68
+
+第 248 轮把叶温 Newton 循环打通后，干窗第 0 步重启只剩两个变量：
+`fwet_snow`（差 2.79e-12 相对量）与 `t_soisno`（1 个元素 1 ULP）。
+本轮解决前者。
+
+### 症状与判据
+
+`fwet_snow` 的相对差是 **2.79e-12**，远大于 1 ULP（≈2.2e-16）—— 这不是形状问题，
+是**公式不同**。按第 248 轮的办法先找"哪一份源码"，答案是第 166 轮记过的
+**wrong-file trap 的公式版本**：
+
+| | 内核实际编的：`extends/interception/MOD_LeafTemperature_Extended.F90` | 本仓库原先照抄的：`main/MOD_LeafTemperature.F90:1236` |
+|---|---|---|
+| 容量 | `canopy_snow_capacity_for_fwet` → DEFAULT = `48*dewmx*max(lai+sai,0)`，再 `max(·,0)` | 硬编码 `(10/(48*lsai))`（等价于 dewmx=0.1，但**结合顺序不同**） |
+| 指数 | `**(2.0_r8/3.0_r8)` | `**.666666666666`（**截断成 12 个 6**） |
+| 闸门 | `ldew_snow > 0 .AND. satcap > 1e-10` | 只看 `ldew_snow > 0` |
+
+指数那 1e-12 的相对差正好解释量到的 2.79e-12 —— 这也解释了为什么它**不是**末位问题。
+
+### 落地的三处
+
+`crates/colm-core/src/interception.rs` 新增两个 `pub(crate)` 辅助函数
+（照 DEFAULT 分支实现，并在注释里写明内核编的是 `extends/` 那一份）：
+
+* `canopy_rain_capacity_for_fwet` = `max(dewmx * max(lai+sai,0), 0)`；
+* `canopy_snow_wet_fraction` = `min((ldew_snow / max(48*dewmx*max(lai+sai,0),0))**(2/3), 1)`
+  （带 `satcap > 1e-10` 闸门）。
+
+并据此改了三处：
+
+1. `leaf_temperature.rs` 的 `update_canopy_water`：`fwet_snow` 改用上面的辅助函数
+   （这是重启里那个值）；
+2. `interception.rs` 的 `canopy_wetness`（`dewfraction`）：**雪分量**改用同一辅助函数
+   —— 上游在同一个子程序里对雨分量用 `.666666666666`、对雪分量用 `2/3`，
+   两个指数**不一样**，不能合并；
+3. 同处的雨分量改用 `canopy_rain_capacity_for_fwet`（含闸门），
+   且 `!DEF_VEG_SNOW` 那支按上游写成 `((1/dewmx)/lsai)*ldew`（**先除再乘**，
+   不是 `ldew/(dewmx*lsai)`）。
+
+### 结果：重启只剩 1 个元素
+
+全 68 个变量**逐位**扫描：
+
+```text
+total bit-differences across 68 vars: 1
+  t_soisno: idx 8  kernel=282.9426798696023  rust=282.94267986960233
+```
+
+`restart_divergence.py` 也从 2/68 变成 **1/68**。
+
+### 度量：短程中性、11 天窗口被混沌放大
+
+| 口径 | 第 248 轮 | **本轮** | 判读 |
+|---|---|---|---|
+| restart（干窗 1 步） | 2 / 68 | **1 / 68** | 直接量，改善 |
+| 步级（干窗 3 步） | 16 变量 / 658-692 | 16 变量 / 658-692 | **完全不变** |
+| 逐位相同元素（干窗 **48 步**=1 天） | 7183 / 10232 | **7182 / 10232** | **差 1 个元素** |
+| 黄金 dry `sumabs`/`over_tol`/`ot_vars` | 263.95 / 813 / 17 | 380.21 / 1097 / **27** | **变差（混沌）** |
+| 黄金 wet | 32663/10371.5350/20675/68 | 同 | 不变 |
+| 黄金 snow | 33635/444394.4368/25896/79 | 33442/444394.4368/25896/79 | `sumabs`/`over_tol`/`ot_vars` 全同，只有逐位计数变差 |
+
+**为什么仍然落这一版**：黄金 dry 的 11 天聚合指标变差，但这是**混沌**而不是系统性偏差 ——
+判据是"48 步（1 天）的逐位相同元素数只差 **1 个**（7183 → 7182）"。
+如果是公式错了，短程就会系统性发散；短程中性说明改动本身是对的，
+后面的分道是这 1 个元素的差别被 11 天放大。而直接量（重启 1 步）是**改善**的，
+并且改动逐条对得上内核真正编译的那份源码。**这是本轮唯一一处"聚合指标反向、
+仍然保留"的改动**，据实记录在此，供后来者复核。
+
+**下一轮**：只剩 `t_soisno` 的 1 个元素（第 8 层，1 ULP）——
+它来自 `MOD_GroundTemperature` 的组装/三对角求解。按同一套办法：
+把该求解的输入（`hcap`/`tcond`/`t_soisno` 初值/上边界通量 `fgrnd`）做成探针，
+再用离线穷举定形状。
+
+Tested: `/tmp/gf/leafit_bits_probe.sh`（58 个量，10 轮全同，未受本轮改动影响）；
+`dry_ts.sh 1` + `restart_divergence.py`（1/68，另加 68 变量逐位扫描）；
+`dry_ts.sh 3` + `window_divergence.py`（16 变量 / 658-692）；
+**`dry_ts.sh 48` 两侧对照**（本轮 7182-10232 对第 248 轮 7183-10232，
+`git stash` 后重编复现）；`accept_r247.sh` 的黄金三窗口；
+`cargo fmt/clippy/test`。
+Not-tested: 第 3 条（`!DEF_VEG_SNOW` 的结合顺序）—— 对齐算例都是 `DEF_VEG_SNOW=T`，
+只能按上游源码照抄，测不到。

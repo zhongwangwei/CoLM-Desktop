@@ -46,6 +46,40 @@ pub struct CanopyInterceptionFluxes {
     pub canopy_phase_heat_w_m2: f64,
 }
 
+/// `MOD_LeafTemperature_Extended.F90:1812-1858` 的 `canopy_rain_capacity_for_fwet`
+/// （DEFAULT 分支）。**内核编的是 `extends/interception/` 那一份**，不是 `main/`。
+pub(crate) fn canopy_rain_capacity_for_fwet(
+    maximum_dew_mm: f64,
+    leaf_area_index: f64,
+    stem_area_index: f64,
+) -> f64 {
+    let lsai = (leaf_area_index + stem_area_index).max(0.0);
+    (maximum_dew_mm * lsai).max(0.0)
+}
+
+/// `MOD_LeafTemperature_Extended.F90:1860-1917` 的 `canopy_snow_capacity_for_fwet`
+/// （DEFAULT 分支 = `48*dewmx*lsai`）加 `:1919-1940` 的 `canopy_snow_wetfrac`。
+///
+/// **指数是 `2.0_r8/3.0_r8`，不是截断字面量 `.666666666666`。**
+/// `main/MOD_LeafTemperature.F90:1236` 用的才是 `.666666666666`（12 个 6），
+/// 两者相对差约 1e-12 —— 实测干窗第 0 步重启里 `fwet_snow` 正是差
+/// 2.79e-12 相对量：本 crate 当初照 `main/` 那一份实现，而内核编的是
+/// `extends/interception/` 那一份（第 166 轮记过的"编的不是你以为的那个文件"）。
+pub(crate) fn canopy_snow_wet_fraction(
+    maximum_dew_mm: f64,
+    leaf_area_index: f64,
+    stem_area_index: f64,
+    snow_mm: f64,
+) -> f64 {
+    let lsai = (leaf_area_index + stem_area_index).max(0.0);
+    let satcap = (48.0 * maximum_dew_mm * lsai).max(0.0);
+    if snow_mm > 0.0 && satcap > 1.0e-10 {
+        (snow_mm / satcap).powf(2.0 / 3.0).min(1.0)
+    } else {
+        0.0
+    }
+}
+
 /// Wet canopy area and dry transpiring leaf area for one canopy water state.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CanopyWetness {
@@ -85,21 +119,38 @@ pub fn canopy_wetness(
             && water.snow_mm >= -CANOPY_WATER_ROUNDOFF_MM,
         "canopy wetness inputs are invalid"
     );
-    let coverage = |depth_mm: f64, capacity_mm: f64| {
-        if depth_mm > 0.0 {
-            (depth_mm / capacity_mm)
-                .powf(f77(0.666_666_666_666))
-                .min(1.0)
+    // `:1752-1755` 的雨分量：容量走 `canopy_rain_capacity_for_fwet`（内部夹 0），
+    // 覆盖度仍用**截断字面量** `.666666666666` —— 上游 `:1766/1782` 就是它。
+    let rain_coverage = |depth_mm: f64| {
+        let capacity =
+            canopy_rain_capacity_for_fwet(maximum_dew_mm, leaf_area_index, stem_area_index);
+        if depth_mm > 0.0 && capacity > 1.0e-10 {
+            (depth_mm / capacity).powf(f77(0.666_666_666_666)).min(1.0)
         } else {
             0.0
         }
     };
     let wet_fraction = if vegetation_snow {
-        let rain = coverage(water.rain_mm, maximum_dew_mm * leaf_stem_area);
-        let snow = coverage(water.snow_mm, f77(48.0) * maximum_dew_mm * leaf_stem_area);
+        let rain = rain_coverage(water.rain_mm);
+        // 雪分量走 `canopy_snow_wetfrac`：**指数是 `2/3`**，与雨分量不同。
+        let snow = canopy_snow_wet_fraction(
+            maximum_dew_mm,
+            leaf_area_index,
+            stem_area_index,
+            water.snow_mm,
+        );
         (rain + snow - rain * snow).min(1.0)
     } else {
-        coverage(water.total_mm, maximum_dew_mm * leaf_stem_area)
+        // `:1764-1768` 先算的是 `((dewmxi/vegt)*ldew)**.666666666666`
+        // （`dewmxi = 1/dewmx`、`vegt = lsai`）——**先除再乘**，
+        // 不是 `ldew/(dewmx*lsai)`。
+        if water.total_mm > 0.0 {
+            (((1.0 / maximum_dew_mm) / leaf_stem_area) * water.total_mm)
+                .powf(f77(0.666_666_666_666))
+                .min(1.0)
+        } else {
+            0.0
+        }
     };
     Ok(CanopyWetness {
         wet_fraction,
