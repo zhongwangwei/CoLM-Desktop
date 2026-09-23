@@ -16079,6 +16079,35 @@ Not-tested: 第 2 步的 `meltf` 实参（探针仍是 2 步版）。
 ⇒ 剩下的嫌疑是 `ulrad` 的**分量**（`fac`/`tlbef`/`dtl`/`thermk`/`emg`/`tg`，
 全在叶温 Newton 循环里）以及第 6 步状态那一颗（两条链互不相干）。
 
+#### 第 257 轮追加四：`cgrnd` 也是收缩差 —— 地表能量链的第 6 步分歧从 28 个量降到 2 个
+
+按追加三的线索（记录 5 起 `dhsdT` 差 1 ULP，而 `dhsdT = -cgrnd - …`）去读 `cgrnd`
+的算法，发现两边形状不同：
+
+```fortran
+! MOD_LeafTemperature_Extended.F90:1435-1437
+cgrnds = cpair*rhoair*cgh*(1.-wtg0)
+cgrndl = rhoair*cgw*(1.-wtgq0)*dqgdT
+cgrnd  = cgrnds + cgrndl*htvp        ! cgrndl 是**舍入过的独立变量**，最后一项被收缩
+```
+
+Rust 原先把它平铺成一条长链（`… + rho*cgw*(1-wtgq0)*dqgdT*htvp`）⇒ 多一次舍入。
+落码：先落两个局部量，再 `cgrndl.mul_add(htvp, cgrnds)`。
+
+8 步干窗逐记录差异变量数：
+
+| 记录 | 改前 | 改后 |
+|---|---|---|
+| 0–2 | 0 | 0 |
+| 3 | 5（纯诊断 `f_olrg`/`f_trad`/`f_rnet`/`f_fgrnd`/`f_zerr`） | 5（另一条链，见追加二） |
+| 4–5 | 0 | 0 |
+| 6 | **28**（`t_grnd`/`t_soisno`/`frad`/`fseng`…） | **2**（只剩 `f_wliq_soisno`、`f_zwt`） |
+| 7 | 37 | 4 |
+
+三段式验收（`accept_r247.sh`）：1 步 restart 0/68、3 步 history **692/692 逐位全同**、
+黄金 `over_tol` **dry 821 / wet 20664 / snow 25896**（上一轮 825 / 20665 / 25896；
+dry 的 `sumabs` 也从 382.9 降到 248.6）⇒ 能量那条链已经干净，剩下的是**水步**那一颗。
+
 #### 第 257 轮追加三：第 6 步那颗种子进到了 `dhsdT`
 
 **先纠正上一节的一个口径错误**：`end_sec = 10800` 只跑到**第 5 步**（记录 0..5），
@@ -16157,7 +16186,7 @@ history 现在全部逐位相同（692/692）。** 那个追了十几轮的末�
 | 第 0/1/2 步 history | **0 个差异变量** | 第 2 步 5 个 |
 | 步级（3 步、692 个逐位单元） | **692 逐位相同（100%）** | 687（99.28%） |
 | 黄金 `ot_vars` dry/wet/snow | 17 / 68 / 79 | 17 / 68 / 79 |
-| 黄金 `over_tol` dry/wet/snow | **825** / 20665 / 25896 | 826 / 20665 / 25896 |
+| 黄金 `over_tol` dry/wet/snow | **821** / 20664 / 25896 | 826 / 20665 / 25896 |
 | 第二配置（Campbell + 关 VSF）`ot_vars` | 16 / 66 / 79（本轮未重跑） | 16 / 66 / 79 |
 
 ## 原残留（已消除）：第 2 步第 1 层土壤冰
