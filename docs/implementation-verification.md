@@ -16079,6 +16079,19 @@ Not-tested: 第 2 步的 `meltf` 实参（探针仍是 2 步版）。
 ⇒ 剩下的嫌疑是 `ulrad` 的**分量**（`fac`/`tlbef`/`dtl`/`thermk`/`emg`/`tg`，
 全在叶温 Newton 循环里）以及第 6 步状态那一颗（两条链互不相干）。
 
+#### 第 257 轮追加五：水步的种子是 `zwt`（水位），它把 `wliq` 带偏
+
+`water_probe.sh`（8 步；打在 `MOD_Hydro_SoilWater.F90` 的 `wblc = …` 之后）：
+第 0–5 步 `zwt`/`qinfl`/`ss_vliq(1..3)`/`wa` **全同**；**第 6 步 `zwt` 先差**
+（内核 `401D7AC4A7A39AB0`、Rust `401D7AC4A7A39AA2`，14 ULP），第 7 步连 `ss_vliq(1)` 也差。
+
+`wliq_soisno` 的重建在后面（`vol_liq(j) = … (sp_zi(j)-zwtmm) …`），所以顺序是
+**`zwt` → `wliq`**。水位那一段（`MOD_Hydro_SoilWater.F90:408-430`）两条路：
+`wa >= 0` 时自下而上扫第一层非饱和层，`zwt = sp_zi(ilev) - ss_wt(ilev)`；
+否则走 `get_zwt_from_wa`（水位的迭代反解）。探针只打了第 1..3 层的 `ss_vliq`、
+没打 `ss_wt`，所以还没分清是"扫描用的下层量先差"还是"迭代反解本身"。
+下一枪：把 `ss_wt(1:nlev)`、`izwt`、`is_sat` 一起打出来（跑 8 步）。
+
 #### 第 257 轮追加四：`cgrnd` 也是收缩差 —— 地表能量链的第 6 步分歧从 28 个量降到 2 个
 
 按追加三的线索（记录 5 起 `dhsdT` 差 1 ULP，而 `dhsdT = -cgrnd - …`）去读 `cgrnd`
