@@ -15543,19 +15543,22 @@ Not-tested: 循环后那一段（下一轮）；`f_qinfl`/`f_qlayer` 的土壤�
 | `f_xerr` | 1 | 1.5420e-20 | 8.04e-06 |
 | `f_zerr` | 1 | 2.4500e-14 | 9.57e-04 |
 
-**前五个的 `maxabs` 完全相同（1.3553e-20）**—— 它们是同一次 1 ULP 扰动的传播，
-不是五个独立缺陷。顺链读：
+**前五个的 `maxabs` 完全相同（1.3553e-20）** —— 而 `1.3553e-20` 正是 `fevpg ≈ 7.766e-5`
+的 1 ULP（`2^-66`）。这五个量都在同一档量级、各差 1 ULP；**同量级的量各差 1 ULP 时
+`maxabs` 自然相同，所以"相同 maxabs"本身不等于"同一个种子"**。分开取证：
 
-* `fevpa = fevpl + fevpg`，而 `f_fevpl`（叶面）已经逐位相同 ⇒ **种子在 `fevpg`**；
-* `lfevpa = lfevpl + htvp*fevpg`、`qstar = -fevpa/(rhoair*ustar)`
-  （`MOD_Vars_1DAccFluxes.F90:2745`，与 `history_diagnostics.rs:156` 的形状逐字一致 ⇒
-  `f_qstar` 是**继承**来的，不是 `history_diagnostics` 自己的形状错）；
-* `f_qinfl`/`f_qlayer` 是土壤水对同一个扰动的响应（restart 里 `wliq_soisno` 仍逐位相同，
-  说明扰动没进状态）。
+* **蒸发这一支是证过的**：`fevpa = fevpl + fevpg`，而 `f_fevpl`（叶面）已经逐位相同
+  ⇒ `fevpa` 的差只能来自 `fevpg`；`lfevpa = lfevpl + htvp*fevpg` 同理；
+  `qstar = -fevpa/(rhoair*ustar)`（`MOD_Vars_1DAccFluxes.F90:2745`，与
+  `history_diagnostics.rs:156` 的形状逐字一致）⇒ `f_qstar` 是**继承**来的，
+  不是 `history_diagnostics` 自己的形状错。
+* **`f_qinfl`/`f_qlayer` 只是"同档量级的 1 ULP"**：它们属土壤水文，而它们的**状态**
+  （restart 里的 `wliq_soisno`）逐位相同 —— 既可能是扰动相互抵消，也可能是**独立**的
+  1 ULP。**本轮不下结论**，下一轮探针一并查。
 
-**结论：剩下的整个第 0 步残差只有一个源头 —— 叶温例程循环后的
+**已确定的一个源头**：叶温例程循环后的
 `fevpg = rhoair*cgw*(qg-qaf)` 及其订正 `fevpg += tinc*cgrndl`
-（`MOD_LeafTemperature_Extended.F90:1397/1436`、`MOD_Thermal…:1239`）。**
+（`MOD_LeafTemperature_Extended.F90:1397/1436`、`MOD_Thermal…:1239`）。
 
 `f_xerr`/`f_zerr` 是能量/水平衡残差（量级 ~1e-20），它们的**相对**差大只是因为分母接近 0，
 绝对值本身就是 ULP 级，不作为独立目标。
