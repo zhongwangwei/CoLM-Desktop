@@ -15764,3 +15764,29 @@ Tested: `dry_ts.sh 3` + `window_divergence.py` 两轮 A/B
 （`lfevpa` 融合：首分歧 1→2；`emis` 融合：6 变量 / 686-692）；
 黄金三窗口沿用上一轮 `accept_r247.sh` 的口径（本轮只跑 A/B，未重跑黄金）。
 Not-tested: `f_fgrnd` 那一项的结合顺序（下一轮）；`f_xerr`（水平衡，可能同 `zerr` 一样是逐层累加的结合顺序）。
+
+### 第 253 轮追加：`fgrnd` 的两处形状
+
+第 253 轮修完 `lfevpa`/`emis` 后，第 2 步的差异里 `f_fgrnd` 是同一条链的产物，
+两处都不对：
+
+1. 那一项 `- emg*stefnc*t_grnd_bef**3*(4.*tinc)` **不能复用 `blackbody_change`** ——
+   `blackbody_change` 是 `stefnc*t**3*(4*tinc)`（少一层 `emg`），结合顺序与
+   内核的左结合 `(((emg*stefnc)*t**3)*(4.*tinc))` 不同；
+2. `- (fseng+fevpg*htvp)` 里 `fevpg*htvp` 同样被吸收 ⇒ `fma(fevpg, htvp, fseng)`。
+
+改成 `emissivity*STEFAN_BOLTZMANN*t**3*(4*tinc)` 与
+`sublimation_heat.mul_add(ground_evaporation, corrected_ground_sensible_heat)` 后
+`f_fgrnd` 归零。
+
+结果：步级差异变量 6 → **5**、逐位相同元素 686-692 → **687-692（99.28%）**。
+
+剩下的第 2 步差异只剩**土壤水一族**：`f_wat`、`f_wat_inst`、`f_h2osoi`、
+`f_wice_soisno`（各 1 个元素）与 `f_xerr`（水平衡）。`f_wat`/`f_wat_inst` 的 `maxabs`
+完全相同（2.2737e-13）⇒ 同一种子；种子在 `f_h2osoi`/`f_wice_soisno`（土壤水/冰柱）
+那一侧，属 `MOD_SoilSnowHydrology`/WATER_2014 一族 —— 这是本会话第一次把分歧退出
+"叶温 + 地面温度 + 地表收支"这一片。`f_xerr` 的第一候选与 `zerr` 同理
+（水平衡的逐层累加结合顺序）。
+
+Tested: `dry_ts.sh 3` + `window_divergence.py`（`fgrnd` 两处形状 A/B：5 变量 / 687-692）。
+Not-tested: 土壤水一族的形状（下一轮）；`f_xerr`。

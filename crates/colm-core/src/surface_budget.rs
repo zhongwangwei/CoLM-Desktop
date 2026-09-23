@@ -97,8 +97,15 @@ pub fn surface_budget(energy: &StandardLctEnergyOutput) -> Result<SurfaceBudget>
     let ground_heat = energy.shortwave.ground_absorbed_w_m2
         + energy.leaf.downward_longwave_w_m2 * emissivity
         - emissivity * STEFAN_BOLTZMANN_W_M2_K4 * previous_surface_temperature_k.powi(4)
-        - emissivity * blackbody_change
-        - (energy.corrected_ground_sensible_heat_w_m2 + ground_evaporation * sublimation_heat)
+        // 内核这一项是 `emg*stefnc*t_grnd_bef**3*(4.*tinc)`，**左结合**
+        // `(((emg*stefnc)*t**3)*(4.*tinc))`；不能复用 `blackbody_change`
+        // （那是 `stefnc*t**3*(4*tinc)`，少一层 `emg`，结合顺序不同）。
+        - emissivity
+            * STEFAN_BOLTZMANN_W_M2_K4
+            * previous_surface_temperature_k.powi(3)
+            * (4.0 * temperature_change_k)
+        // `- (fseng+fevpg*htvp)`：那个乘积同样会被吸收 ⇒ `fma(fevpg, htvp, fseng)`。
+        - sublimation_heat.mul_add(ground_evaporation, energy.corrected_ground_sensible_heat_w_m2)
         + precipitation_heat;
     // `MOD_Vars_1DAccFluxes.F90:2087`：`rnet = sabg + sabvsun + sabvsha - olrg + forc_frl`。
     //
