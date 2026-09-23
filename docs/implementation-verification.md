@@ -18422,6 +18422,15 @@ VSFI     kernel=200 rust=200
      （层号与步号本探针已给：第 3 层、第 19→20 步；第 255 轮只排除了第 2 步第 1 层的
      `meltf` 实参），或者查 `water_2014`/`wblc` 冰汇那几处；
      ② 再把第 302 轮验证过的六处形状**一起**重新应用；③ 两条都对了才跑口径。
+     **第 305–310 轮的替代路线（已成型，建议先走这条）**：与其继续在混沌窗口里追，
+     不如先把 **8 处已确证的通量链缺口**补齐并用**例程闭环**验证（都是纯函数）：
+     `flux_inside_hm_soil` 2 处（第 305/13 轮的写法）、`water_balance` 5 处
+     （"和（差）减乘积"，第 309 轮）、`flux_all` 的加权平均 1 处（第 310 轮，
+     `(w2).mul_add(v2, w1*v1)/(w1+w2)`）；两个 transition 的 3+3 条**不用补**
+     （内联割线，已在 `bounded_secant_iteration` 里，第 307 轮的闭环 10000/10000）。
+     然后读 `soil_water_vertical_movement` 的 27−12=15 条差额（其中含内联的
+     sublevel/explicit）。这 8 处落地后再带上第 302 轮那六处 `get_zwt_from_wa` 形状
+     一起跑口径，才有机会让两条链同时向前。
 2. **第二配置回归**（Campbell + 关 VSF）：第 293 轮实测干窗已从 16 降到 **0**；
    wet/snow 未重跑，需要时跑 `oracle/scripts/compare_second_config.sh <case>`。
 3. **未移植分支**：`standard_lct_step.rs:578` 明说 split soil/snow、SNICAR、气溶胶、
