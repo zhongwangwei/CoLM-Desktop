@@ -16405,6 +16405,26 @@ wice_soisno[5]   kernel=6.1823587081423845 (4018BABC3DBE730C)
   `cargo clippy --workspace --all-targets -- -D warnings`、`cargo fmt --all --check`、
   `python3 oracle/scripts/test_upstream_f48_sync.py`（本会话最后一次全绿）。
 
+## "未移植"的准确含义：**明确拒绝，不是静默跑错**
+
+`colm-runtime/src/physics.rs:281` 的 `unported_branches()` 现在是**空表**，而"没实现的分支"
+一律在**装配期**报错（有 7 个测试守着，`cargo test -p colm-runtime --lib physics_tests`
+共 17 个用例全绿）：
+
+| 没实现的开关 | 行为 |
+|---|---|
+| `DEF_SPLIT_SOILSNOW = .true.` | 拒绝（不会静默按非 split 跑） |
+| `DEF_USE_SNICAR = .true.` | 拒绝（不会静默用非 SNICAR 雪光学） |
+| `DEF_Runoff_SCHEME = 1`（VIC） | 拒绝（0/2/3 可用） |
+| 灌溉 | 拒绝（不会静默按旱地跑） |
+| PFT/PC 次网格 | 拒绝 |
+| 基流优化 `Opt_Baseflow` | 拒绝（会把 `scale_baseflow` 钉成 1.0） |
+| 高度模式写错 / 未知字段 / 越界取值 | 拒绝 |
+
+也就是说：**默认配置那条链是完整移植的；其余配置是"红着脸拒绝"，不是"绿着脸算错"。**
+"全面完成"若指功能面，缺的正是上表这些被拒绝的分支（split、SNICAR、示踪剂、CaMa 洪水等）；
+若指默认配置的逐位一致，则短程做到记录 0–11 状态全同、黄金窗口与基线齐平或更好。
+
 ## 若继续
 
 **短程逐位已经干净**（1/3 步 restart 0/68、3 步 history 692/692），所以别再往
