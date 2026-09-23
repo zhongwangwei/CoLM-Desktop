@@ -16726,6 +16726,32 @@ row 15: 全差（那时状态已经被放大，不算证据）
 `psi`/`root_psi`/`zp`/`layer_thickness` 进出口两侧对打，看是迭代收敛判据
 （`tol` 比较）还是某一处 `a*b + c` 的形状。
 
+#### 第 278 轮：植物水力里**已经排除**的几处（免得下一轮重走）
+
+打完第 277 轮之后，把植物水力这一支的已知形状逐条核了一遍，下面是**已经对上的**：
+
+| 位置 | 结论 | 证据 |
+|---|---|---|
+| `MOD_Utils:tridia` ↔ `linear.rs:solve_tridiagonal` | 三处 `mul_add` 已对上 | 上一轮离线对照：不收缩 183/2000 逐位、收缩后 2000/2000 |
+| `getrootqflx_qe2x` 右端三行 ↔ `plant_hydraulics.rs:root_potential_from_flux` | 已对上（首行 `先减 qeroot 再减 kax`、乘积收缩） | 源码逐项 + 注释里的实测记录 |
+| `getrootqflx_x2qe` 右端 ↔ `root_flux_from_top_potential` | `rmx_hr(j-1)` 的乘积已收缩 | 注释里 `fma(p,A,B) - C` 4000/4000 |
+| `plc` ↔ `vulnerability` | **内核走 libm `pow`，不是 `exp2`** | `nm kernels/default/colm.x` 只导入 `_pow`，全二进制**没有 `_exp2`** ⇒ `2._r8**tmp` 与 `2.0_f64.powf(tmp)` 同源 |
+| `d1plc` ↔ `vulnerability_derivative` | 左结合逐项相同（`(((ck*ln2)*2**tmp)*tmp)/x`） | 源码逐项 |
+
+**还没核的**（按嫌疑排序，都在 `spacAF_twoleaf` ↔ `spac_change` 这一支里）：
+
+1. `spacAF_twoleaf`（`MOD_PlantHydraulic.F90:379-508`）的 `A11/A22/f(leafsun)/f(leafsha)` ——
+   那几行是密集的 `变量 + 乘积`（例如
+   `f(leafsun) = qflx_sun*fsto1 - laisun*kmax_sun*fx*(x(xyl)-x(leafsun))`），
+   收缩点最多；
+2. `:329-331` 的 `dx` 重标定（`> 200000` 分支）与 `:334` 的 `x = x + dx`；
+3. `getqflx_qflx2gs_twoleaf`（`:710-805`）里那一串 `A1/B1/C1` 与 `qflx/rhow` 的组合。
+
+**下一轮最快的走法不是读这 500 行，而是探针分工**：在 `PlantHydraulicStress_twoleaf`
+的迭代末尾（`:355` `qeroot = etrsun + etrsha` 之后）把 `qeroot`、`x(1:4)`、
+`xroot(1:3)`、`etrsun`、`etrsha` 两侧都打出来，一次构建就能把 1 ULP 夹到
+"迭代状态 `x` 已经差"还是"`qe2x` 那一解差"这一层，再往里走。
+
 ---
 
 # 交接：Fortran → Rust 移植的当前状态（本会话收束）
