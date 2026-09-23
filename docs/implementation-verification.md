@@ -18117,6 +18117,37 @@ N=17/N=18 是**逐位相同**的，所以 `wice_soisno(3)` 的差必然出现在
 与相变那一段的形状；`wblc` 在形状版里已经出现 `K=0.0 / R=-2.27e-13` 的分歧，是一个
 可以顺藤摸的入口。
 
+#### 第 305 轮：把 `MOD_Hydro_SoilWater` 的 FMA 普查了一遍 —— **通量链有 ~15 处没复现**
+
+第 302 轮的闭环只判了 `get_zwt_from_wa`。本轮把该模块**每个例程自己的汇编**里的
+FMA 族指令数与 Rust 对应函数的 `mul_add` 调用数并排列出来（都不编译，纯静态）：
+
+| 内核例程 | FMA 条数 | 本仓库对应 | `mul_add` |
+|---|---|---|---|
+| `flux_inside_hm_soil` | **2** | `flux_inside_variable_saturated_soil` | 0 |
+| `flux_btm_transitive_interface` | **3** | `flux_variable_saturated_bottom_transition` | 0 |
+| `flux_top_transitive_interface` | **3** | `flux_variable_saturated_top_transition` | 0 |
+| `flux_all`（含被内联的下游） | **7** | `flux_variable_saturated_flux_all` | 0 |
+| `water_balance` | **5** | `variable_saturated_water_balance` | 0 |
+| `flux_sat_zone_fixed_bc` | 0 | `flux_variable_saturated_zone_fixed_boundaries` | 0 |
+| `check_and_update_level` | 0 | `check_and_update_variable_saturated_level` | 0 |
+| `soil_water_vertical_movement` | 27 | `soil_water_vertical_movement` | 12 |
+
+**读法**：Rust **不会**自动收缩（没有 `-ffast-math`/不是 Fortran），所以
+`mul_add` 计数为 0 就意味着那一段**没有**复现内核的融合。通量链
+（`flux_all` 及其被内联的 `flux_*_interface` / `flux_sat_zone_*` / `flux_inside_hm_soil`）
+内核有 **~15 条** FMA 而本仓库一处都没有 —— 这是 Richards 解里**调用最频繁**的一段，
+也正是第 304 轮"第二条链"（`ss_vliq`/`eff_porosity` 从 call 17 起、1 ULP）最可能的来源。
+`soil_water_vertical_movement` 27 vs 12 的差额同理需要按例程拆开核对（27 里可能含被
+内联的 `initialize_sublevel_structure`/`use_explicit_form` 等）。
+
+**下一枪（成本可控，顺序明确）**：
+1. 先把 `flux_inside_hm_soil` / `flux_*_transitive_interface` 三个**最小**例程按
+   `compare_getzwt.sh` 那套做**例程级差分闭环**（`flux` 是 `smp`/`hk`/`zi` 的纯函数，
+   合成输入最容易），把形状一次判对；
+2. 再沿 `flux_all`/`water_balance` 往上做同样的事（或直接在 `vsf_probe.sh` 上验证）；
+3. 全部判对之后，再与第 302 轮的六处 `get_zwt_from_wa` 形状**一起**落地并跑口径。
+
 #### 第 303 轮：水步入场探针 —— 剩下的种子是**第 20 步入场时的冰/水状态**，不是 `eff_porosity` 算错
 
 新工具 `oracle/scripts/vsf_input_probe.sh`：在 `WATER_VSF` 调 `soil_water_vertical_movement`
