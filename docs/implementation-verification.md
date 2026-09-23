@@ -18449,6 +18449,20 @@ VSFI     kernel=200 rust=200
      -Iinclude -Ishare -Imain`）编出的 `.o` 里，两个例程都是**全局 `T` 符号**
      （`nm` 实测）⇒ 驱动可以直接 `USE MOD_Hydro_SoilWater, only: …` 调它们。
      下一步就是在这个骨架上加驱动与本仓库侧探针。
+
+**第 313 轮：确认 `flux_inside_hm_soil` 那两处形状**在活分支上**
+
+```fortran
+:45   integer, parameter :: type_upstream_mean           = 1
+:46   integer, parameter :: type_weighted_geometric_mean = 2
+:48   integer, parameter :: effective_hk_type  = type_weighted_geometric_mean   ← 编译期定死
+```
+
+⇒ 第 305/13 轮映射的那两条 FMA（`r0` 的分母 `prms(3)*(prms(2)-1)+prms(2)*2`、
+`grad_psi>1` 支的 `hk_u + ((psi_u-psi_l)/dz*hk_u**(1-rr))*hk_l**rr`）**都在活分支**
+（`type_weighted_geometric_mean`）里，**值得补**；而 `type_upstream_mean` 那一支是
+**死代码**（只影响 Rust 里分支的选取逻辑，其算术不必逐位对齐）。这条排除了
+"补了两处却是死路"的可能（第 298 轮那种教训）。
 2. **第二配置回归**（Campbell + 关 VSF）：第 293 轮实测干窗已从 16 降到 **0**；
    wet/snow 未重跑，需要时跑 `oracle/scripts/compare_second_config.sh <case>`。
 3. **未移植分支**：`standard_lct_step.rs:578` 明说 split soil/snow、SNICAR、气溶胶、
