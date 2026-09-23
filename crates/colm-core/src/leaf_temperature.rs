@@ -926,20 +926,26 @@ pub fn leaf_temperature(
         // 而不收缩的写法只有 2580/4000 相同 —— 也就是说**每轮迭代都有约 1/3 的
         // 概率差 1 ULP**，而 `qaf` 直接经 `eah` 进 `stomata`。这正是叶温迭代
         // 正反馈（`pco2a ↔ assim`）的入口那一侧。
+        // `taf = wta0*thm + wtg0*tg + wtl0*tl` 与 `qaf = wtaq0*qm + wtgq0*qg +
+        // wtlq0*qsatl` 是**两条形状不同**的语句，不能一起照抄（原先按"4000 组里
+        // 收缩成 fma(w2,v2, fma(w0,v0, w1*v1))"把两条都写成两层 mul_add）。
+        // `lt_ext.s` 的 `.loc 1 1233/1234` 逐条：
+        //   `_461 = thm*wta0`、`_463 = tg*wtg0`（**二者都是复用 `fsenl` 里算好的**）
+        //   `_564 = _461 + _463`（fadd）、`taf = fmadd(tl, wtl0, _564)`
+        //   —— 只有 `wtl0*tl` 融合；
+        //   `_481 = wtaq0*qm`、`_483 = wtgq0*qg`（复用 `etr` 的湿度括号）
+        //   `_567 = _481 + _483`（fadd）、`_569 = qsatl*wtlq0`（fmul）
+        //   `_570 = _567 + _569`（fadd）—— **整条平铺，一个都没融**。
+        // 差别来自"哪些乘积已经被别处算过"：`taf` 的 `tl*wtl0` 是新鲜的所以被吸收，
+        // `qaf` 的 `qsatl*wtlq0` 也是新鲜的却没有 —— 这是 GCC 自己的选择，以汇编为准。
         canopy_air_temperature = leaf_heat_weight.mul_add(
             state.leaf_temperature_k,
-            air_heat_weight.mul_add(
-                input.reference_air_temperature_k,
-                ground_heat_weight * input.ground_temperature_k,
-            ),
+            air_heat_weight * input.reference_air_temperature_k
+                + ground_heat_weight * input.ground_temperature_k,
         );
-        canopy_air_humidity = leaf_moisture_weight.mul_add(
-            updated_saturation.specific_humidity,
-            air_moisture_weight.mul_add(
-                input.reference_specific_humidity,
-                ground_moisture_weight * input.ground_specific_humidity,
-            ),
-        );
+        canopy_air_humidity = leaf_moisture_weight * updated_saturation.specific_humidity
+            + (air_moisture_weight * input.reference_specific_humidity
+                + ground_moisture_weight * input.ground_specific_humidity);
         let pressure_conversion = 44.6 * 273.16 * input.surface_pressure_pa / 1.013e5;
         let air_conductance = 1.0 / raw * pressure_conversion / input.reference_air_temperature_k;
         canopy_air_co2 = input.atmospheric_co2_pa
@@ -1520,8 +1526,13 @@ fn longwave(input: LeafTemperatureInput<'_>, leaf_temperature_k: f64, factor: f6
     // 原先先把地面两项加成 `ground_longwave`、再整体相加、再平铺 `*factor + …`，
     // 三处都没融。逐迭代位型探针在第 1 轮抓到 `irab` 差 1 ULP。
     let leaf_fourth_power = leaf_temperature_k.powi(4);
+    // `_3199` 那一步**也是融合的**（`fmsub(_3197, tmp1913, frl)`），上一条注释写着它、
+    // 代码却漏了 —— 用探针输入做的离线复算指出得很干净：kernel 与 Rust 在各个
+    // 候选形状下唯一稳定不同的是这一处（
+    // `/tmp/gf/irab_shapes.py` 的穷举：`base=fma` 命中 kernel 全部四轮、
+    // `base=平铺` 命中 Rust 全部四轮，`tl4=(tl*tl)*(tl*tl)` 两侧都要）。
     let longwave_base =
-        input.atmospheric_longwave_w_m2 - 2.0 * STEFAN_BOLTZMANN * leaf_fourth_power;
+        (-2.0 * STEFAN_BOLTZMANN).mul_add(leaf_fourth_power, input.atmospheric_longwave_w_m2);
     let radiated = if input.options.split_soil_snow {
         (input.snow_cover_fraction * input.ground_emissivity * STEFAN_BOLTZMANN).mul_add(
             input.snow_surface_temperature_k.powi(4),

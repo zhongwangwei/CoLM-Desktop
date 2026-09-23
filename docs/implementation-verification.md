@@ -15230,3 +15230,83 @@ Tested: `/tmp/gf/leafit_bits_probe.sh` 六次（34→48 个量的位型逐迭代
 44 / 577-692；`win4.sh` + `three.py` 三窗口）；第 246 轮基线的黄金重跑
 （17 个越界变量的名单）与逐名对照；`cargo fmt/clippy/test`；`test_upstream_f48_sync.py`。
 Not-tested: it=7 的 `irab`（下一轮）；`powi(4)` 假设已否并回退。
+
+## 第 248 轮：**叶温 Newton 循环 10 轮迭代全部逐位相同**
+
+从"圆整失败"到全同只用了三处形状，而定位它们靠的是本轮新立的方法：
+**探针只负责给输入，形状在离线穷举里定。**
+
+### 方法：离线形状穷举（比读汇编猜形状可靠）
+
+第 247 轮结尾卡在 it=7 的 `irab`（14 ULP，而 `dirab_dtl` 同轮逐位相同）。做法改成：
+
+1. 把 `frl`/`tg`/`emg`/`thermk`/`fac`/`stefnc` 加进探针（54 个量）。
+   探针显示这六个输入**两侧逐位相同**；
+2. 用探针转储的**输入位型**在 Python 里复算 `irab`（本机 Python 3.12 没有 `math.fma`，
+   用 `Fraction` 做**精确** fma —— `Fraction → float` 是正确舍入的，
+   判别式 `fma(1+2^-27, 1+2^-27, -(1+2^-26)) = 2^-54` 已验证）；
+3. 先按"我读汇编读出的形状"复算 → **命中的是 Rust 的值，不是内核的**；
+4. 于是对候选形状空间做**穷举**，判据是"必须在 it=7..10 **四轮同时**命中"：
+
+```text
+kernel = base=fma(-(2*stefnc), tl4, frl) + ground=fma(emg*stefnc, tg4, base)
+         + tl4=(tl*tl)*(tl*tl)              → 24 个候选组合命中全部四轮
+Rust   = base=平铺 frl - tl4*(2*stefnc) + 其余相同 → 48 个组合命中全部四轮
+```
+
+也就是说：**`_3199` 那一步漏了 `fmsub`** —— 而第 246 轮我自己写的注释里明明白白写着
+"`_3199 = frl - (2*stefnc)*tl**4`（`fmsub`）"，代码却落成了平铺。
+这正是"读汇编 → 落代码"之间丢一步的典型，**离线穷举把这一步变成可判定的**：
+它要求连续四轮同时命中，巧合概率极低（对比：按错形状复算在四轮里全不中）。
+
+### 三处形状（第 248 轮实际落的）
+
+| 位置 | 内核（`.loc`） | 原 Rust |
+|---|---|---|
+| `longwave()` 的 `_3199` | `fma(-(2*stefnc), tl4, frl)`（`fmsub`） | 平铺 `frl - 2*stefnc*tl4` |
+| `taf`（`:1233`） | `fma(tl, wtl0, (thm*wta0) + (tg*wtg0))` —— **只有 `wtl0*tl` 融合** | 两层 `mul_add`（把 `wta0*thm` 也融了） |
+| `qaf`（`:1234`） | `((wtaq0*qm) + (wtgq0*qg)) + (qsatl*wtlq0)` —— **整条平铺，一个都没融** | 两层 `mul_add` |
+
+`taf`/`qaf` **两条语句形状不同**这件事本身就是结论：原先按"4000 组里收缩成
+`fma(w2,v2, fma(w0,v0, w1*v1))`"把两条一起照抄，方向错了。差别来自"哪些乘积已经被
+别处算过"（`taf` 的 `thm*wta0`/`tg*wtg0` 复用 `fsenl` 的结果，`tl*wtl0` 是新鲜的所以被吸收；
+`qaf` 的三个乘积里 `qsatl*wtlq0` 也是新鲜的，GCC 却没吸收）—— 以汇编为准，不要类比。
+
+`taf` 的形状用 58 个量的位型离线复核过：`form=kernel` 10/10 命中两侧，
+`form=old`（旧的两层 mul_add）9/10 ——**恰好在 it=7 不中**，与探针观察一致。
+
+### 结果：58 个量 × 10 轮迭代，**全部逐位相同**
+
+```text
+it=1 .. it=10: BITWISE IDENTICAL
+```
+
+### 三段式度量：**每一格都改善**
+
+| 口径 | 基线（第 246 轮前） | 第 247 轮 | **本轮** |
+|---|---|---|---|
+| restart（干窗 1 步） | 19 / 68 | 18 / 68 | **2 / 68** |
+| 步级（干窗 3 步，逐位相同） | 585-692 | 577-692 | **658-692（95.09%）** |
+| 步级差异变量数 | 44 | 44 | **16** |
+| 黄金 dry `over_tol` | 825 | 818 | **813** |
+| 黄金 dry `ot_vars` | 17 | 18 | **17** |
+| 黄金 wet `over_tol`/`ot_vars` | 20672 / 68 | 20665 / 68 | 20675 / 68 |
+| 黄金 snow `ot_vars` | 79 | 79 | 79 |
+
+restart 只剩 **`t_soisno`（1 个元素）与 `fwet_snow`**；步级只剩 16 个变量。
+**叶温模块的 Newton 循环到此逐位闭环**，残差已经不在叶温求解里了。
+
+**下一轮**：这 2 个 restart 差异变量指向**地面/土壤那条链**（`t_soisno`/`fwet_snow`）——
+第 0 步的 `fwet_snow` 由 `update_canopy_water`/`MOD_LeafInterception` 一族的系数决定，
+`t_soisno` 由 `MOD_GroundTemperature` 的三对角求解决定。
+先按同一套办法（探针给输入 + 离线穷举定形状）查 `update_canopy_water`，
+再查 `GroundTemperature` 的组装。
+
+Tested: `/tmp/gf/leafit_bits_probe.sh` 三次（54→58 个量）；`cmp_leafit.py`（10 轮全同）；
+`irab_shapes.py` 的候选形状穷举（16 组合 × 四轮过滤；`frl` 扰动扫描）；
+`tafqaf_shapes.py`（`taf` 四种形状 × 两侧）；`accept_r247.sh`
+（restart 2/68；步级 16 / 658-692；黄金 21297/263.9500/813/17、
+32663/10371.5350/20675/68、33635/444394.4368/25896/79）；
+`cargo fmt/clippy/test`（26 个测试二进制全绿）。
+Not-tested: 第 4 步之外的其他候选形状（已足够判定）；`qaf` 的离线复核（缺 `qg`，
+以探针逐位相同为准）。
