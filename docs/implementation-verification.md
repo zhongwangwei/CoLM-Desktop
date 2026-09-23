@@ -15790,3 +15790,52 @@ Not-tested: `f_fgrnd` 那一项的结合顺序（下一轮）；`f_xerr`（水�
 
 Tested: `dry_ts.sh 3` + `window_divergence.py`（`fgrnd` 两处形状 A/B：5 变量 / 687-692）。
 Not-tested: 土壤水一族的形状（下一轮）；`f_xerr`。
+
+## 第 254 轮：残差第一次进入**状态**——第 2 步的 `wice_soisno[5]`
+
+第 253 轮把第 1 步修成全同之后，本轮先把"状态到底还差不差"量清楚（先前只比过 1 步的 restart）：
+
+| 步数 | restart 差异 | history 首个分歧步 |
+|---|---|---|
+| 1 | **0 / 68** | — |
+| 2 | **0 / 68** | 2 |
+| 3 | **2 / 68** | 2 |
+
+即：**第 0/1 步的状态与输出全部逐位相同，分歧从第 2 步开始**。3 步 restart 的两个差异是：
+
+```text
+wice_soisno[5]  kernel=6.1823587081423845 (4018BABC3DBE730C)
+                rust  =6.182358708142612  (4018BABC3DBE740C)    256 ULP / 3.68e-14 相对
+hk[0]           kernel=2.9151756458244646e-26 (3AA20B47BAF5347C)
+                rust  =2.915175645823325e-26  (3AA20B47BAF52CBB) 3.9e-13 相对
+```
+
+`wliq_soisno` / `smp` / `t_soisno` **全部逐位相同**。链条是清楚的：
+
+* 第 2 步的 history 里 `f_wat`/`f_wat_inst` 只差 **1 ULP**（1604.9742063638062 对 …64），
+  而 `1 ULP(1605) = 2.27e-13` **正好等于** `wice` 那个差 —— 说明它们只是 `Σ(wliq+wice)` 的继承；
+* `f_h2osoi[0]` 差 128 ULP，正是 `wice` 那 2.27e-13 除以 `dz*denice`（≈16）再落到
+  `h2osoi` 的 ULP（≈1.1e-16）上的结果；
+* `hk` 的相对差（3.9e-13）≈ `(2b+3)*d(se)/se`（`b≈5`、`d(se)/se≈3.7e-14`）—— 由**发散的
+  `wice`** 经保持曲线推出来，是下游。
+
+所以本轮的净收益是**把残差归类**：不再是"一堆 1 ULP 诊断量"，而是
+**一个状态量（第 1 层土壤冰）在第 2 步产生 3.7e-14 的相对差**。
+
+`wice` 只由相变（`MOD_PhaseChange`）与水分通量改变，而 `t_soisno`、`wliq_soisno` 都逐位相同 ——
+相变是**阈值型**的（`meltf`/`freezef` 分段），所以最可能是某个**输入差 1 ULP 把阈值翻了过去**。
+两个候选：
+
+1. `MOD_Hydro_SoilFunction` 的 `smp`/`hk`/`se`（van Genuchten 保持曲线）——
+   **它至今没有差分闭环**（现有 8 个闭环里没有它），而 `hk` 恰好在这一步露出 3.9e-13；
+2. `MOD_PhaseChange` 的调用参数（`meltf` 本身有 9 个量 × 10000 的逐位闭环，但那是**给定输入**下的）。
+
+**下一轮**：优先给 `MOD_Hydro_SoilFunction` 补一个差分驱动器（照 `compare_soilthermal.sh`
+的骨架：模块按产线 flag 编、驱动加 `-fwrapv -ffp-contract=off`、逐位比
+`smp`/`hk`/`d(smp)/d(wliq)` 一族），把它从"没有闭环"变成"有闭环"；
+若它全同，再回到 `MOD_PhaseChange` 的调用参数。
+
+Tested: `dry_ts.sh 2`/`dry_ts.sh 3` + `restart_divergence.py`（1/2/3 步分别 0/68、0/68、2/68）；
+`window_divergence.py`（首个分歧步 2）；逐元素位型对照（`wice_soisno[5]`、`hk[0]`、
+`f_wat`、`f_h2osoi`）。
+Not-tested: `MOD_Hydro_SoilFunction` 的差分（下一轮）。
