@@ -16079,6 +16079,30 @@ Not-tested: 第 2 步的 `meltf` 实参（探针仍是 2 步版）。
 ⇒ 剩下的嫌疑是 `ulrad` 的**分量**（`fac`/`tlbef`/`dtl`/`thermk`/`emg`/`tg`，
 全在叶温 Newton 循环里）以及第 6 步状态那一颗（两条链互不相干）。
 
+#### 第 269 轮：显式回退也排除了 —— 两侧都没走那条路
+
+第 268 轮把记录 12 的差推到"解后重建/分支应用"侧。本轮先查最可疑的**显式回退**：
+
+- 内核侧：在 `CALL use_explicit_form` 前插标记，跑 16 步 —— **0 次**（内核全程走隐式）；
+- Rust 侧：在子步收尾处打 `converged/forced/iteration/计数器`（Rust-only 探针，不用重编内核）
+  —— 24 个子步（16 步、多段列）**全部 `converged=true forced=false`**，三个降级计数器恒 0
+  ⇒ Rust 也没走显式回退。
+
+⇒ 回退分支**不是**记录 12 的差源（两边都没走）。
+
+至此记录 12 的候选只剩：
+
+1. **子步初始化**（`initialize_variable_saturated_sublevels` / `initialize_sublevel_structure`
+   每次子步重算 `water_table_thickness_mm`/`wetting_front_mm`，含 `0.1*()`/`0.01*()` 与
+   "饱和层直接给整层厚"等分支）；
+2. **分段切法**（`soilcolumn` 循环把土柱按不透水层切成段，`first..last` 不同会让
+   `ss_wt` 的路径不同）；
+3. `check_and_update_level` 的夹取（形状已核对过一致）。
+
+探针教训（累计）：Fortran 侧下标要用**相对**（`blc(lb-1+k)`，短段 len=3）；Rust 侧插入
+print 时锚点要落在**语句开头**，别插进 `let x = <调用>` 中间（本轮插错一次，编译报
+`no field … on type ()`）。
+
 #### 第 268 轮：Newton 解那一侧**整段被排除** —— 记录 12 的差在解后重建
 
 `newton_probe16.sh`（16 步，两侧位型：Newton 每次迭代的残差 `blc(lb-1..lb+1)` 与
