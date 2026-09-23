@@ -16079,6 +16079,24 @@ Not-tested: 第 2 步的 `meltf` 实参（探针仍是 2 步版）。
 ⇒ 剩下的嫌疑是 `ulrad` 的**分量**（`fac`/`tlbef`/`dtl`/`thermk`/`emg`/`tg`，
 全在叶温 Newton 循环里）以及第 6 步状态那一颗（两条链互不相干）。
 
+#### 第 266 轮：`water_balance` 剩下三处对齐 —— 短程惰性、**湿窗反而更差**（已还原）
+
+把 `water_balance` 里另外三处残差按上游原文对齐（其中 `:1168` 那处是**真的结合顺序
+不同**：上游是 `blc - waquifer_m1 - q(ub)*dt`，Rust 原先写成 `blc - (waquifer_m1 + q*dt)`）：
+
+| 上游 | Rust 原写法 | 本轮试的写法 |
+|---|---|---|
+| `:1140 blc(lb-1) = dmss - qsum*dt` | `mass_change - flux_sum*dt` | `(-flux_sum).mul_add(dt, mass_change)` |
+| `:1168 blc = blc - waq_m1 - q*dt` | `blc -= waq_m1 + q*dt` | `(-q).mul_add(dt, blc - waq_m1)` |
+| `:1170 blc(ub+1) = waq - waq_m1 - q*dt` | 平铺 | `(-q).mul_add(dt, waq - waq_m1)` |
+
+实测：干窗 16 步**一字不变**（记录 12 仍是 `f_zwt` 1 ULP）；三段式验收里
+**湿窗变差**（`over_tol` 20662 → **20667**、`sumabs` 10379.2 → 10388.1、`bitwise` 32611 → 32610），
+干窗与雪窗不变 ⇒ **全部还原**。
+
+**由此得到一条有用的判据**：干窗是混沌的、判不了水步形状，但**湿窗对水步形状有分辨力**
+（这次三处一共差 5 个超容差变量）。以后水步的收缩/结合改动，先用湿窗当尺子。
+
 #### 第 265 轮：`fseng` 的订正其实**不融合** —— 干窗前 12 条记录**每个变量**都逐位相同
 
 第 264 轮把首个差异推到记录 10，差异变量是 `f_fsena`/`f_fseng`/`f_fgrnd`/`f_tstar`/
