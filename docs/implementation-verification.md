@@ -16079,6 +16079,25 @@ Not-tested: 第 2 步的 `meltf` 实参（探针仍是 2 步版）。
 ⇒ 剩下的嫌疑是 `ulrad` 的**分量**（`fac`/`tlbef`/`dtl`/`thermk`/`emg`/`tg`，
 全在叶温 Newton 循环里）以及第 6 步状态那一颗（两条链互不相干）。
 
+#### 第 260 轮追加二：`flux_sat_zone` 那类 `A*B + C*D` 的收缩 —— 又是一处"看不出来"
+
+按"上游多条语句累加就逐条按收缩落"的思路，把 `MOD_Hydro_SoilWater.F90` 里所有
+"含乘积又含加减"的赋值行列了出来（77 行、约 30 个不同变量），其中与本轮修好的
+`water_balance` 最像的是显式步里的
+
+```fortran
+wa_m1 = (wt_m1(ilev)+wf_m1(ilev)) * vl_s(ilev) &
+      + (dz(ilev)-wt_m1(ilev)-wf_m1(ilev)) * vl_m1(ilev)      ! :1410-1411
+```
+
+Rust（`apply_variable_saturated_explicit_step` 的 `previous_water`）是平铺的
+`A*B + C*D`。A/B 了"收右乘积"这一种写法：**无效果**（48 步口径下首个状态差异
+仍是记录 12 的 `f_zwt`），已还原。
+
+结论：`A*B + C*D` 这种**两个乘积相加**的位置，本算例里两种收缩写法都看不出来
+（与 Givens 那两处一致）；真正有效的那两处都是**"乘积加变量"**（`dmss = 乘积 + dmss`、
+`cgrnd = cgrnds + cgrndl*htvp`）。后续若要继续，优先找"乘积 + 变量"的形态。
+
 #### 第 260 轮追加：第二配置（Campbell + 关 VSF）回归复查 —— 16 / 66 / 79
 
 `cgrnd` 那处修复在**两个配置都会走到**的叶温例程里，所以第二配置必须复查。
