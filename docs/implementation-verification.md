@@ -16079,6 +16079,31 @@ Not-tested: 第 2 步的 `meltf` 实参（探针仍是 2 步版）。
 ⇒ 剩下的嫌疑是 `ulrad` 的**分量**（`fac`/`tlbef`/`dtl`/`thermk`/`emg`/`tg`，
 全在叶温 Newton 循环里）以及第 6 步状态那一颗（两条链互不相干）。
 
+#### 第 257 轮追加三：第 6 步那颗种子进到了 `dhsdT`
+
+**先纠正上一节的一个口径错误**：`end_sec = 10800` 只跑到**第 5 步**（记录 0..5），
+而分歧出现在**记录 6** ⇒ 用 6 步探针下的"全同"结论不算数。改成 8 步
+（`end_sec = 14400`）重打，`gtcoef_probe8.sh` 立刻给出：
+
+```text
+记录 0..4：95 个量逐位全同
+记录 5：  2 个量差 1 ULP —— dhsdT、rt(1)        ← 首次分歧
+记录 6：  6 个量差（bt(1)、rt(1) 差 48 ULP、rt(2)、dhsdT、hs、t_soisno(1)）
+```
+
+`rt(1)` 里就含 `dhsdT`（`rt(j) = t_soisno(j) + fact(j)*(hs - dhsdT*t_soisno(j) + cnfac*fn(j))`）
+⇒ **种子是 `dhsdT`**（`MOD_GroundTemperature.F90:307`）：
+
+```fortran
+dhsdT = -cgrnd - 4.*emg*stefnc*t_grnd**3 - cpliq*pg_rain - cpice*pg_snow
+```
+
+两个猜测都 A/B 过、**都无效果已还原**：后两项 `a - b*c` 的收缩（`cpliq*pg_rain`、
+`cpice*pg_snow`，本窗口大概恒 0 所以看不出来）。还没打的是 `cgrnd` 本身
+（它是入参，来自地表通量那一段；这一支的探针目前没打印它）。
+
+另记两条排查（都无效果、已还原）：叶温例程 8 步版、`fseng` 订正的平铺形式。
+
 #### 第 257 轮追加二：第 6 步那颗种子被夹到哪儿了
 
 排除法（都在同一套 6/8 步干窗上）：
