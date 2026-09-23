@@ -17467,6 +17467,40 @@ N=20..32  4..5/68  wliq/wice_soisno、t_soisno、smp、hk、zwt
 第 19 步的**输入**（第 18 步末尾的 restart）是逐位的，所以差在一处**值相关**的
 形状（分支/钳制/幂），或某个**不在 restart 里**的中间状态。
 
+#### 第 298 轮：4 个形状假设全否 + **找错了分支**（`wa >= 0` 走饱和路）
+
+本轮用「改 Rust → `dry_ts.sh N` → 比 restart」的快回路逐个试形状（Rust-only，
+一次 ~1 分钟，全部回退，树最终干净）：
+
+| 试的 `mul_add` | 位置 | 结果 |
+|---|---|---|
+| 夹逼左乘积 `x_l*alp + x_r*(1-alp)` | `bounded_secant_iteration` | N=19 仍 2/68 |
+| 同上右乘积 | 同上 | N=19 仍 2/68 |
+| `fval = wa + (zwt-zmin)*(vl_s-vl)` | `water_table_from_aquifer` | 仍 1/68、1/68、2/68 |
+| `psi = psi_s - (zwt-zmin)*0.5` | 同上（`liquid_at_depth`） | 同上 |
+
+**为什么全否 —— 找错了分支**：`MOD_Hydro_SoilWater.F90:409` 按 `wa` 的符号分两路：
+
+```fortran
+IF (wa >= 0) THEN          ! ← CN-Cng 干窗走这条（实测 N=19 restart 的 wa = 0.0）
+   ... zwt = sp_zi(ilev) - ss_wt(ilev)     ! :415，纯减法
+   IF (is_sat) zwt = 0._r8                 ! :421
+ELSE
+   CALL get_zwt_from_wa (...)              ! :424，含水层路 —— **根本没被调用**
+ENDIF
+```
+
+所以那 4 个形状（3 个在 `get_zwt_from_wa` 里）**一行都没执行**。教训：试形状前先
+用 restart 里的 `wa` 判分支，别先改代码。
+
+**正向确认**：`oracle/scripts/compare_soilhydro.sh` 复跑 **10000/10000 逐位相同**
+（`psi`/`hk`/`vl` 三输出 + 分支分布）—— 第 19 步的种子**不在土壤水力函数**这一族。
+
+**下一枪（探针，不再试形状）**：`zwt` 走 `:415` 的 `zwt = sp_zi(ilev)-ss_wt(ilev)`，
+`wliq_soisno[7]` 也在同一段里由 VSF 的 `ss_wt`/`ss_vliq` 更新（`:431-436` 那段）。
+所以两个差是同一个源头：**第 19 步的 VSF Richards 解**（Rust `richards_solver`）。
+下一轮在 `ss_wt`/`ss_vliq` 的更新前后两侧同位型打点。
+
 ---
 
 # 交接：Fortran → Rust 移植的当前状态（本会话收束）
@@ -17678,8 +17712,13 @@ wice_soisno[5]   kernel=6.1823587081423845 (4018BABC3DBE730C)
    - `f_zwt`/`f_rib`/`f_zol` 这些 history 差是 `MOD_Vars_1DAccFluxes` 里
      `acc1d` **区间累加**出来的（`f_rib` = `r_rib`，纯诊断、不回灌），
      第 13/18 步那种 `zwt` 1 ULP 会自己消失 —— **别追 history**。
-   - 下一枪：第 19 步的水/相变步（输入是逐位的，差在某处值相关的形状或
-     不在 restart 里的中间状态）。
+   - 下一枪（第 298 轮已缩小）：**第 19 步的 VSF Richards 解**。`zwt` 走的是
+     `MOD_Hydro_SoilWater.F90:409` 的 `wa >= 0` **饱和路**（`:415`
+     `zwt = sp_zi(ilev)-ss_wt(ilev)`，实测 N=19 的 `wa = 0.0`），
+     `get_zwt_from_wa` **根本没被调用**；`wliq_soisno[7]` 也由同一段的
+     `ss_wt`/`ss_vliq`（`:431-436`）更新 ⇒ 两个差同源。先探 `ss_wt`/`ss_vliq`
+     的更新前后，别再试 `get_zwt_from_wa` 里的形状（第 298 轮试了 4 个全否）。
+     土壤水力函数已排除（`compare_soilhydro.sh` 10000/10000 逐位）。
 2. **第二配置回归**（Campbell + 关 VSF）：第 293 轮实测干窗已从 16 降到 **0**；
    wet/snow 未重跑，需要时跑 `oracle/scripts/compare_second_config.sh <case>`。
 3. **未移植分支**：`standard_lct_step.rs:578` 明说 split soil/snow、SNICAR、气溶胶、
