@@ -15571,3 +15571,27 @@ Tested: 8 个 `compare_*.sh` 裸跑（全绿，逐位）；`compare_second_confi
 （16/66/79）；`compare_flag_isolated.sh` 的 `base`/`nophs`/`vegsnowoff`（另两个不适用）；
 第 0 步 8 变量逐位扫描（`/tmp/gf/flag_base/`）。
 Not-tested: `split`/`norich` 两个开关（内核跑不完，非证据）；循环后那一段（下一轮）。
+
+### 第 251 轮追加：叶温例程**循环后**那一段探针 —— 22/22 逐位相同
+
+`/tmp/gf/postloop_probe.sh`：在内核 `MOD_LeafTemperature_Extended.F90` 的
+`lfevpl = htvpl * fevpl` 之前插一条 `POSTLP` 位型 WRITE，打 22 个量
+（`fevpg`/`fseng`/`fevpg_soil`/`fevpg_snow`/`cgrndl`/`cgrnds`/`cgrnd`/`cgw`/`cgh`/
+`qaf`/`taf`/`tg`/`qg`/`wtgq0`/`wtg0`/`rhoair`/`tl`/`dqgdT`/`fevpl`/`fsenl`/`etr`/`evplwet`），
+Rust 侧在 `Ok(LeafTemperatureOutput {` 之前打同序的对应量。
+
+结果：**ALL BITWISE IDENTICAL** —— 含 `fevpg` 本身，以及订正要用的 `cgrndl`、`cgw`。
+
+**这把剩下的 1 ULP 从叶温例程里排除掉了**，只剩两个候选：
+
+1. `MOD_Thermal_CanopyPhase_Extended.F90` 第 6 节的订正
+   `fevpg = fevpg + tinc*cgrndl`（Rust：`standard_lct_step.rs:371-373` 的 `mul_add`）；
+2. 同节的 `egsmax` 限幅 `fevpg = min(fevpg, egsmax)`（Rust：`thermal_water.rs:81-88`）。
+
+旁证把候选 1 也压得很小：同一节里 `fseng = fseng + tinc*cgrnds` 形状相同、
+且 `f_fseng` **已经逐位相同**；而候选 2 若起作用，`egsmax` 一变 `egidif` 就会变、
+`f_fseng` 也会跟着变（它也逐位相同）。所以下一轮直接对第 6 节做同款探针
+（`tinc`/`egsmax`/`egidif`/订正前后的 `fevpg`/`fseng`），把最后这一处钉死。
+
+Tested: `/tmp/gf/postloop_probe.sh`（22 个量，全同）；其余见上。
+Not-tested: `MOD_Thermal` 第 6 节与 history 写出路径（下一轮）。
