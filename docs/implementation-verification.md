@@ -17785,14 +17785,51 @@ wice_soisno[5]   kernel=6.1823587081423845 (4018BABC3DBE730C)
   * 若在 12 步附近分叉 ⇒ 沿那处再往上追，别进 PHS 内部。
 * 判"分叉在第几次调用"一律用 `PHMID`/`PHEND` 的**调用序号**对齐（第 279 轮的坑：
   两侧补丁落在不同分支时行数都对不上，比出来的是垃圾）。
+* **实测结果见下面那条补充：19 步仍全同** ⇒ 走第一种情形，但收窄到 `qe2x` 那一段。
 
-**下一枪**：回到 `rootflux` 那条链的**入口**（不是水步）：
-`crates/colm-core/src/plant_hydraulics.rs:567 root_flux_from_top_potential` 与
-`MOD_PHSRootfluxBalance.F90`，先判"植物水力解出来的 `rootflux_p` 本来就差"
-还是"`MOD_LeafTemperature_Extended.F90:1351-1361` 那两行第一次生效时形状不对"。
-工具：`oracle/scripts/gssun_probe.sh`（六处 + `GSTO`，现在应保持 328/328 全同，
-再分叉就是新线索）、`oracle/scripts/vsf_richards_probe.sh`（本轮已把水步入场处
-`rootflux` 的差钉在第 12 步）、`dry_ts.sh 16` + `window_divergence.py`。
+#### 第 299 轮补充（实测）：`gssun_probe.sh` 延到 **19 步**后仍是**全同** —— 嫌疑收窄到 `qe2x`
+
+本轮把第 293 轮那条"328/328 全同"的探针从 16 步延长到 **19 步**（
+`STEPS=19 WORK=/tmp/gf/gssun19 bash oracle/scripts/gssun_probe.sh`，
+`python3 oracle/scripts/gssun_cmp.py $WORK/fort_probe.txt $WORK/rust_probe.txt`）：
+
+```text
+tag       kernel    rust  shared  first-divergence
+GSIN         354     354     354  identical (354 calls)
+GSDEM        354     354     354  identical (354 calls)
+GSOUT         72      72      72  identical (72 calls)
+GS908        354     354     354  identical (354 calls)
+GS919        354     354     354  identical (354 calls)
+GS941        354     354     354  identical (354 calls)
+GS1320        19      19      19  identical (19 calls)
+GSTO         354     354     354  identical (354 calls)
+```
+
+**这条把嫌疑面重新切了一刀**（比第 277–291 轮那次更干净，因为 `gsh2o` 量纲已修）：
+
+* `GSOUT` 打的是 `:346 getqflx_qflx2gs_twoleaf` 的出口（`gssun`/`gssha`/`etrsun`/`etrsha`），
+  第 12 步**逐位相同** ⇒ `qeroot = etrsun + etrsha`（`:354`）也逐位相同。
+* **第 279/280 轮那条"`qe2x` 排除"的论证在本代码上不再成立** —— 它当时的前提是
+  "`qeroot` 在 PYDYN 里已经不同"，而现在 `qeroot` 相同。所以
+  `getrootqflx_qe2x`（本仓库 `root_potential_from_flux`）**重新回到嫌疑名单第一位**，
+  其次是 `x(root) = x_root_top` 之后的 `rootflux(j) = k_soil_root*(smp-xroot)`，
+  再次才是叶温那两行缩放（第 275 轮已修并证过形状）。
+
+**下一枪（已具体到点位）**：一次构建、两侧同序打六个点：
+`RQER`（`:354` 之后，`qeroot`/`etrsun`/`etrsha`）→ `RQE2`/`RQEL`（`:355` `getrootqflx_qe2x`
+返回后，`x_root_top` 与逐层 `xroot`）→ `RQF`（`rootflux(j) = ...` 之后，逐层
+`rootflux`/`k_soil_root`/`smp`）→ 叶温侧 `RFLT0`/`RFLTL`（`:1351` 之前，`etr`/`etr_dtl`/
+`dtl`/逐层 `rootflux`）→ `RFSC0`/`RFSC`（`:1361` 缩放之后）→ `RFBL`（`:1368`
+`balance_phs_rootflux` 之后）。第 12 步第一个不同的 tag 就定案：
+`RQE2` 差 ⇒ 打在 `qe2x`（三对角解 + `plc`）；只有 `RQF` 差 ⇒ 打在 `k_soil_root`/`smp` 那一乘；
+`RFSC` 差而 `RQF` 同 ⇒ 打在缩放/配平那两行。
+
+**下一枪**（就是上面那六个点位，已经用 `gssun_probe.sh` 19 步全同把上位排除掉了）：
+两侧同序打 `RQER`/`RQE2`/`RQEL`/`RQF`/`RFLT0`/`RFLTL`/`RFSC0`/`RFSC`/`RFBL`，
+第一个不同的 tag 定案；判"第几次调用"一律按调用序号对齐（第 279 轮的坑）。
+已有的可用工具：`oracle/scripts/gssun_probe.sh`（八处，19 步全同）、
+`oracle/scripts/vsf_richards_probe.sh`（水步入场处 `rootflux` 的差钉在第 12 步）、
+`dry_ts.sh 16` + `window_divergence.py`。
 
 **验收口径（不变）**：`cargo test --workspace --lib --bins -- --test-threads=1`、
 `clippy -D warnings`、`fmt --check`（本机 `colm-cli` 的 7 个 `study::runner` 用例
