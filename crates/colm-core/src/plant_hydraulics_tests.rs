@@ -150,6 +150,46 @@ fn sample_input() -> PlantHydraulicInput<'static> {
     }
 }
 
+#[test]
+fn rootflux_balance_early_returns_within_tolerance() {
+    // 上游 `MOD_PHSRootfluxBalance.F90:40`：`|etr - sum| <= 1e-7` 直接返回、一个字不改。
+    let mut flux = [1.0e-7, -2.0e-7, 3.0e-7];
+    balance_phs_rootflux(2.0e-7, &mut flux, &[0.5, 0.3, 0.2], "test");
+    assert_eq!(flux, [1.0e-7, -2.0e-7, 3.0e-7]);
+}
+
+#[test]
+fn rootflux_balance_scales_positive_layers_to_etr() {
+    // 正值和 `4e-7`、`etr = 8e-7` ⇒ 倍率 2；负项先被 `max(.,0)` 夹掉（上游 `:55-57`）。
+    let mut flux = [1.0e-7, 3.0e-7, -5.0e-7];
+    balance_phs_rootflux(8.0e-7, &mut flux, &[0.5, 0.3, 0.2], "test");
+    for (actual, expected) in flux.iter().zip([2.0e-7, 6.0e-7, 0.0]) {
+        assert!(
+            (actual - expected).abs() <= 1.0e-22,
+            "actual={actual:.17e} expected={expected:.17e}"
+        );
+    }
+}
+
+#[test]
+fn rootflux_balance_falls_back_to_weights_then_equal_split() {
+    // 没有正值层 ⇒ 按 `fallback_weights`（上游两个调用点都传 `rootfr`）加权（`:59-61`）。
+    let mut flux = [0.0, -1.0e-7];
+    balance_phs_rootflux(1.0e-7, &mut flux, &[0.25, 0.75], "test");
+    for (actual, expected) in flux.iter().zip([2.5e-8, 7.5e-8]) {
+        assert!((actual - expected).abs() <= 1.0e-23, "actual={actual:.17e}");
+    }
+    // 权重和也是 0 ⇒ 均分（`:63`）。`etr` 必须超出 `1e-7` 容差，否则 `:40` 早退。
+    let mut flux = [0.0, 0.0, 0.0];
+    balance_phs_rootflux(9.0e-7, &mut flux, &[0.0, 0.0, 0.0], "test");
+    for actual in &flux {
+        assert!(
+            (actual - 9.0e-7 / 3.0).abs() <= 1.0e-22,
+            "actual={actual:.17e}"
+        );
+    }
+}
+
 fn close_slice(actual: &[f64], expected: &[f64], tolerance: f64) {
     assert_eq!(actual.len(), expected.len());
     for (&actual, &expected) in actual.iter().zip(expected) {

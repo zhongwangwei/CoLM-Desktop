@@ -210,9 +210,9 @@ pub use photosynthesis::{
     PhotosynthesisUpdateState, StomataInput, StomataOptions, StomataState,
 };
 pub use plant_hydraulics::{
-    plant_hydraulic_stress, vegetation_water_potential, vulnerability, vulnerability_derivative,
-    PlantHydraulicInput, PlantHydraulicOutput, PlantHydraulicParameters, PlantHydraulicState,
-    VEGETATION_SEGMENTS,
+    balance_phs_rootflux, plant_hydraulic_stress, vegetation_water_potential, vulnerability,
+    vulnerability_derivative, PlantHydraulicInput, PlantHydraulicOutput, PlantHydraulicParameters,
+    PlantHydraulicState, VEGETATION_SEGMENTS,
 };
 pub use prospect::{prospect_leaf_optics, ProspectLeafOptics};
 pub use radiation::{

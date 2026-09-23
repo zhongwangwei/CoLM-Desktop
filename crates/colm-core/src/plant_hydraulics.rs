@@ -992,6 +992,73 @@ fn validate(input: PlantHydraulicInput<'_>, state: PlantHydraulicState) -> Resul
     Ok(layers)
 }
 
+/// `MOD_PHSRootfluxBalance:balance_phs_rootflux` 的移植。
+///
+/// 把逐层根系吸水按比例缩放到 `sum(rootflux) = etr`：优先保留正值层的分配
+/// （`max(rootflux,0) * etr/sum_pos_flux`），没有正值层时按 `fallback_weights`
+/// （上游两个调用点都传 `rootfr`）加权，权重和也是零才均分。与上游
+/// `MOD_PHSRootfluxBalance.F90:40` 一致，`|etr - sum(rootflux)| <= 1e-7` 时**早退**。
+///
+/// 上游在扩展截留这条路上调它两次（`MOD_LeafTemperature_Extended.F90:1145`
+/// 的 `'post-PHS'` 与 `:1367` 的 `'post-leaf-temperature'`），对应
+/// `leaf_temperature.rs` 里同名 `context` 的两个调用点。
+///
+/// 默认配置的干/湿/雪三份窗口里它每步都早退（内核日志里
+/// `Warning: adjusting vegetation PHS rootflux balance` 出现 0 次），所以它
+/// **不改黄金数字**；补它是为了条件一旦不成立时不静默算错（第 276 轮）。
+pub fn balance_phs_rootflux(
+    etr: f64,
+    root_flux: &mut [f64],
+    fallback_weights: &[f64],
+    context: &str,
+) {
+    const TOL: f64 = 1.0e-7;
+    const TINY_FLUX: f64 = 1.0e-15;
+    // 上游 `warn_limit`；`warn_count` 是模块 `save` 变量，跨调用保留：
+    // 前 5 次真正动手时打警告，第 6 次打一次"不再打印"，之后静默。
+    const WARN_LIMIT: usize = 5;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static WARN_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+    let sum_flux: f64 = root_flux.iter().sum();
+    if (etr - sum_flux).abs() <= TOL {
+        return;
+    }
+    let warn_count = WARN_COUNT.load(Ordering::Relaxed);
+    if warn_count < WARN_LIMIT {
+        eprintln!(
+            "Warning: adjusting vegetation PHS rootflux balance {context} etr={etr} sum={sum_flux} gap={}",
+            (etr - sum_flux).abs()
+        );
+    } else if warn_count == WARN_LIMIT {
+        eprintln!(
+            "Warning: suppressing further vegetation PHS rootflux balance messages on this task."
+        );
+    }
+    WARN_COUNT.store(warn_count + 1, Ordering::Relaxed);
+
+    // 上游 `sum(rootflux, rootflux > 0._r8)`（掩码 SUM）——只累加正值项。
+    let sum_pos_flux: f64 = root_flux.iter().copied().filter(|value| *value > 0.0).sum();
+    if sum_pos_flux.abs() > TINY_FLUX {
+        let scale = etr / sum_pos_flux;
+        for flux in root_flux.iter_mut() {
+            *flux = flux.max(0.0) * scale;
+        }
+    } else {
+        let sum_weight: f64 = fallback_weights.iter().sum();
+        if sum_weight.abs() > TINY_FLUX {
+            for (flux, weight) in root_flux.iter_mut().zip(fallback_weights) {
+                *flux = etr * weight / sum_weight;
+            }
+        } else {
+            let equal_share = etr / root_flux.len() as f64;
+            for flux in root_flux.iter_mut() {
+                *flux = equal_share;
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 #[path = "plant_hydraulics_tests.rs"]
 mod plant_hydraulics_tests;

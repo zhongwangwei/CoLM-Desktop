@@ -17345,6 +17345,34 @@ dry 249.79 全部是它；wet 39.77 里 38.37 是它；snow 444414 里 430724 �
 修复后 **六处 + `GSTO` 全部 328 次调用逐位相同**（`gssun_cmp.py` 报
 `identical (328 calls)`）。
 
+#### 第 294 轮：补上 `balance_phs_rootflux`（第 276 轮那个真缺口）
+
+按第 276 轮的清单，把 `MOD_PHSRootfluxBalance:balance_phs_rootflux` 逐行移植到
+`crates/colm-core/src/plant_hydraulics.rs`，并在上游的**两个**调用点接上：
+
+| 上游 | 位置 | Rust |
+|---|---|---|
+| `'post-PHS'` | `MOD_LeafTemperature_Extended.F90:1145`，`etr = etrsun+etrsha` 之后 | `leaf_temperature.rs` 循环内 PHS 支 |
+| `'post-leaf-temperature'` | `:1367`，`rootflux*etr/etr0` 缩放之后 | `leaf_temperature.rs` 循环后 |
+
+三条分支与上游 `:55-64` 一一对应：`|etr - sum(rootflux)| <= 1e-7` 早退；否则按
+正值层之和 `max(rootflux,0)*(etr/sum_pos_flux)`；没有正值层就按 `fallback_weights`
+（两个调用点都传 `rootfr`）加权；权重和也是零才均分。`warn_count` 那个模块 `save`
+用 `AtomicUsize` 复刻（前 5 次打警告、第 6 次打一次"不再打印"、之后静默）。
+
+**它在默认三份窗口里仍然不生效**（与第 276 轮的判断一致）：`dry_ts.sh 3` 的内核与
+Rust 日志里 `rootflux balance` 都是 **0 次**，步级仍是 `692/692` 逐位相同。补它是
+为了条件一旦不成立时不静默算错。新增 3 个单元测试覆盖三条分支 + 早退
+（`plant_hydraulics_tests.rs`，7 passed）。
+
+**顺带核对第 293 轮留下的 item 1**：`oracle/golden/kernel-manifest.json` 与
+`kernels/default/manifest.json` 的 `colm_git_sha` / `generator_args` /
+`build_profile` / `macros` / 工具链 / netCDF 版本**逐字相同**（只有 sha256 不同，
+那是"内核构建不可逐字节复现"的已知性质），所以"golden 可能是另一套宏"不成立。
+而且 11 天干窗对**存储 golden** 的首分歧已从"第 1 步、1e-7（`f_trad`/`f_rnet`）"
+变成 **第 8 步 `f_rib`（`maxrel 3.7e-11`）**（`window_divergence.py`：68 个变量
+不同、`39700/56024` 逐位）—— item 1 的旧描述已过时。
+
 ---
 
 # 交接：Fortran → Rust 移植的当前状态（本会话收束）
@@ -17535,18 +17563,22 @@ wice_soisno[5]   kernel=6.1823587081423845 (4018BABC3DBE730C)
    `MOD_PHSRootfluxBalance.F90`），别再回 `stomata` 或 PHS 种子。
    验收口径：`accept_r247.sh` 与 `dry_ts.sh 16` + `window_divergence.py`；
    干窗黄金 `over_tol` 现在是 **28 / 1970 / 25713**。
-0b. **（新）补 `balance_phs_rootflux`**：见第 276 轮。默认配置下它在这三份窗口里
-   不生效（警告 0 次），但条件不成立时会静默算错，属于该补的缺口。
+0b. **（第 294 轮已补）`balance_phs_rootflux`**：见第 276 轮与"第 294 轮"。
+   `plant_hydraulics.rs:balance_phs_rootflux` + 两个调用点；默认三份窗口里仍不生效
+   （警告 0 次），三段式验收与第 293 轮**逐位相同**（证明它惰性、没引入回归）。
 
-1. **11 天黄金窗口与存储 golden 的那条链**：干窗与 `oracle/golden/CN-Cng_hist_2008-01.nc`
-   的首次分歧在**第 1 步**、量级 **1e-7**（`f_trad`、`f_rnet`，不是末位级），
-   与第 257 轮修的末位差不是一条链。先查**配置**而不是公式：把
-   `oracle/golden/kernel-manifest.json` 的 `macros`/`build_profile`/`colm_git_sha`
-   与当前 `kernels/default/manifest.json` 逐字比一遍 —— golden 很可能是在另一套宏/另一份
-   Fortran 快照上生成的（那样这条链根本不该拿来当逐位基准）。若配置一致，再用
-   `window_divergence.py` 从第 1 步的两个变量（`f_trad`/`f_rnet`）往上追辐射那一段。
-2. **第二配置回归**（Campbell + 关 VSF）：本轮只动 VSF 路径，理论上不该变；
-   跑 `oracle/scripts/compare_second_config.sh <case>` 确认仍是 16/66/79。
+1. **11 天黄金窗口与存储 golden 的那条链（第 294 轮更新描述）**：配置已核对
+   **逐字相同**（`colm_git_sha`/`generator_args`/`build_profile`/`macros`/工具链/
+   netCDF 版本；只有 sha256 不同，属已知的非逐字节复现），所以**不是基准错**。
+   当前首分歧是**第 8 步 `f_rib`**（`maxrel 3.7e-11`），68 个变量不同、
+   `39700/56024` 逐位 —— 比旧描述的"第 1 步、1e-7"小得多、晚得多。
+   **第 8 步只有 `f_rib` 一个量**（体块 Richardson 数，纯诊断、不回灌）；
+   真正的**状态**分歧从**第 9 步**起：`f_zwt` / `f_wliq_soisno` /
+   `f_wice_soisno` / `f_fgrnd`（第 11 步才轮到 `f_zol`/`f_h2osoi`）。下一枪：
+   先判 `f_rib` 的四个输入（`zol`/`ustar`/`fh`/`um`）在第 8 步是否逐位，
+   是则 `rib` 的闭式有形状差，否则种子在第 8 步之前的某个非 history 状态量里。
+2. **第二配置回归**（Campbell + 关 VSF）：第 293 轮实测干窗已从 16 降到 **0**；
+   wet/snow 未重跑，需要时跑 `oracle/scripts/compare_second_config.sh <case>`。
 3. **未移植分支**：`standard_lct_step.rs:578` 明说 split soil/snow、SNICAR、气溶胶、
    示踪剂仍是另一支；动态湿地/CaMa 洪水路径 `colm-rs` 会打印 "unported branch" 警告。
    这些是"全面完成"里真正还没做的部分。

@@ -8,11 +8,11 @@
 use anyhow::{ensure, Context, Result};
 
 use crate::{
-    canopy_diffusivity_resistance_analytic, canopy_monin_obukhov_with_scheme, canopy_roughness,
-    canopy_wetness, effective_canopy_wind, initialize_monin_obukhov, plant_hydraulic_stress,
-    saturation_specific_humidity, stomata, update_photosynthesis, CanopyDiffusivityProfileInput,
-    CanopyMoninObukhovInput, CanopyWater, CanopyWindProfileInput, LeafBiochemistry,
-    LeafPhotosynthesisInput, MoninObukhovInitialInput, MoninObukhovInput,
+    balance_phs_rootflux, canopy_diffusivity_resistance_analytic, canopy_monin_obukhov_with_scheme,
+    canopy_roughness, canopy_wetness, effective_canopy_wind, initialize_monin_obukhov,
+    plant_hydraulic_stress, saturation_specific_humidity, stomata, update_photosynthesis,
+    CanopyDiffusivityProfileInput, CanopyMoninObukhovInput, CanopyWater, CanopyWindProfileInput,
+    LeafBiochemistry, LeafPhotosynthesisInput, MoninObukhovInitialInput, MoninObukhovInput,
     PhotosynthesisUpdateInput, PlantHydraulicInput, PlantHydraulicParameters, PlantHydraulicState,
     StomataInput, StomataOptions, StomataState, SurfaceLayerScheme, FREEZING_K,
 };
@@ -783,9 +783,10 @@ pub fn leaf_temperature(
         // （`f_vegwp` 条数 747→735），所以它不是那些红条的量级来源 —— 改它是为了
         // 语义对齐，不是为了刷数字。真正把第一步叶温拉偏的是上游 `o3coefg_*`
         // 的 `spval`（见 docs/implementation-verification.md 对应小节）。
-        // 根通量与 `etr` 的一致性由下面 `root_flux_kg_m2_s` 的按比例缩放保证，
-        // 与上游 `:1342-1357` 同构。
-        if input.plant_hydraulics.is_some() {
+        // 根通量与 `etr` 的一致性由两处保证：这里 `balance_phs_rootflux`
+        // （上游 `:1145` 的 `'post-PHS'`），以及循环后的按比例缩放
+        // （上游 `:1352-1367`）。两者都已移植。
+        if let Some(hydraulic) = input.plant_hydraulics {
             if sunlit_soil_water_stress < 1.0e-2 || sunlit_transpiration <= 0.0 {
                 sunlit_transpiration = 0.0;
             }
@@ -793,6 +794,12 @@ pub fn leaf_temperature(
                 shaded_transpiration = 0.0;
             }
             transpiration = sunlit_transpiration + shaded_transpiration;
+            balance_phs_rootflux(
+                transpiration,
+                &mut root_flux_kg_m2_s,
+                hydraulic.root_fraction,
+                "post-PHS",
+            );
         } else if transpiration >= input.transpiration_limit_kg_m2_s {
             let scale = if transpiration > 0.0 {
                 input.transpiration_limit_kg_m2_s / transpiration
@@ -1146,6 +1153,14 @@ pub fn leaf_temperature(
                 *flux = rate.mul_add(final_temperature_change, *flux);
             }
         }
+        // `MOD_LeafTemperature_Extended.F90:1367` 的 `'post-leaf-temperature'`：
+        // 缩放后再按冠层 `etr` 配平一次（默认三份窗口里每步都早退）。
+        balance_phs_rootflux(
+            transpiration,
+            &mut root_flux_kg_m2_s,
+            hydraulic.root_fraction,
+            "post-leaf-temperature",
+        );
     }
     state.canopy_water.total_mm =
         (state.canopy_water.total_mm - wet_evaporation * input.time_step_seconds).max(0.0);
