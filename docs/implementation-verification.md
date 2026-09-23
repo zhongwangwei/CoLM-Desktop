@@ -18601,10 +18601,27 @@ cargo fmt --all --check                                   → 通过（上一轮
 连本机此前因沙箱 `EPERM` 而失败的 `colm-cli` 7 个 `study::runner` 用例也一并通过
 （本会话文件策略为 `danger-full-access`）。
 
+**第 320 轮：第二配置三个窗口全量复跑 —— 干 0 / 湿 0 / 雪 79**
+
+```text
+bash oracle/scripts/compare_second_config.sh CN-Cng        → 127 variables within tolerance（0 超容差）
+bash oracle/scripts/compare_second_config.sh CN-Cng-wet    → 127 within tolerance（0 超容差）
+bash oracle/scripts/compare_second_config.sh US-NR1-snow   → 79 variable(s) outside tolerance，failures by tier {"tier2": 79}
+```
+
+对照文档早期的第二配置记录（**干 16 / 湿 66 / 雪 79**）：干、湿**都已改善到 0**，
+雪仍是 79。**说明**：这三份数字是**带已落地的 8 处形状**测得的；本会话没有为第二配置
+做"带 / 不带 8 处"的 A/B，所以不能把干/湿的改善归给这 8 处（更可能来自本会话更早的
+两处修复：`update_photosyn` 的 `gsh2o` 量纲与截断 π）。**雪窗那 79 是既有差异**
+（早期记录同为 79），不是本届落地引入的回归 —— 但它仍是这条支路上唯一还没查的窗口。
+
+**至此第 316 轮落地那条 "Not-tested" 全部关闭**：第二配置三窗口（本轮）+ 全 workspace
+测试与 lint（第 319 轮）。
+
 **下一枪**：给 `water_balance` 建第 3 个闭环（照 `compare_flux_inside.sh` 三件套 +
 拷贝放行路线；夹具要大一些：`lb/ub/dz/dt/is_sat/vl_s/q/ubc/lbc/wf/vl/wt/dp/waquifer`
 + 各自的 `_m1`，并按第 317 轮那份"一处一乘积、无歧义"的映射表补 5 处），判对后与
-`flux_all` 的加权平均一起作为**第三组**落地，再跑三段式。
+`flux_all` 的加权平均一起作为**第三组**落地，再跑三段式；随后可查第二配置雪窗那 79。
 2. **第二配置回归**（Campbell + 关 VSF）：第 293 轮实测干窗已从 16 降到 **0**；
    wet/snow 未重跑，需要时跑 `oracle/scripts/compare_second_config.sh <case>`。
 3. **未移植分支**：`standard_lct_step.rs:578` 明说 split soil/snow、SNICAR、气溶胶、
