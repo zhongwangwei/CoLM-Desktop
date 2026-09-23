@@ -352,9 +352,17 @@ pub fn leaf_temperature(
         .max(0.1);
     let mut temperature_difference = input.reference_air_temperature_k - canopy_air_temperature;
     let mut humidity_difference = input.reference_specific_humidity - canopy_air_humidity;
-    let virtual_temperature_difference = temperature_difference
-        * (1.0 + 0.61 * input.reference_specific_humidity)
-        + 0.61 * input.potential_temperature_k * humidity_difference;
+    // `(1.+0.61*qm)` 在内核里是**算一次、处处复用**的（`lt_ext.s`：`:657` 处
+    // `fmadd(qm, 0.61, 1.0)` 存进 `[x29,472]`，`:1256` 的 `thvstar` 直接 load 回来），
+    // 而且那一次乘法是**融合**的。两个用处（`dthv` 与循环里的 `thvstar`）形状相同：
+    //   `dthv    = fma(dth, _149, dqh*(0.61*th))`
+    //   `thvstar = fma(tstar, _149, qstar*(0.61*th))`
+    // 原先两处都写成平铺，循环里的那处在 it=6 让 `thvstar` 差 1 ULP。
+    let one_plus_0_61_reference_humidity = 0.61f64.mul_add(input.reference_specific_humidity, 1.0);
+    let virtual_temperature_difference = temperature_difference.mul_add(
+        one_plus_0_61_reference_humidity,
+        (0.61 * input.potential_temperature_k) * humidity_difference,
+    );
     let initial = initialize_monin_obukhov(MoninObukhovInitialInput {
         reference_wind_m_s: reference_wind,
         potential_temperature_k: input.potential_temperature_k,
@@ -718,15 +726,20 @@ pub fn leaf_temperature(
             * AIR_HEAT_CAPACITY_J_KG_K
             * leaf_heat_conductance
             * (air_heat_weight + ground_heat_weight);
-        // 同上：上游 `( (wtaq0 + wtgq0)*qsatl - wtaq0*qm - wtgq0*qg )`
-        // （`:1125` 那一行里对 `etr`/`etrsun`/`etrsha`/`evplwet` 共用的因子）。
-        let humidity_gradient = (-ground_moisture_weight).mul_add(
-            input.ground_specific_humidity,
-            (air_moisture_weight + ground_moisture_weight).mul_add(
-                leaf_saturation.specific_humidity,
-                -(air_moisture_weight * input.reference_specific_humidity),
-            ),
-        );
+        // 与 `fsenl` 同一个坑，`lt_ext.s` 的 `.loc 1 1125` 逐条：
+        //   `_481 = wtaq0 * qm`（`fmul`，先舍入）
+        //   `_479 = wtaq0 + wtgq0`
+        //   `_483 = wtgq0 * qg`（`fmul`，先舍入）
+        //   `tmp1963 = fnmsub(_479, qsatl, _481)` → `_479*qsatl - _481`，**只有它融合**
+        //   `_485 = tmp1963 - _483`
+        // 原先把 `-wtgq0*qg` 也写成 `mul_add`。第 1 轮迭代的位型探针在
+        // `rssun` 修好之后只剩 `etr`/`fevpl` 差 1 ULP，而同一条语句里的
+        // `etr_dtl`（不经过这个括号）逐位相同 —— 差别只可能在这个括号里。
+        let moisture_weight_sum = air_moisture_weight + ground_moisture_weight;
+        let humidity_gradient = moisture_weight_sum.mul_add(
+            leaf_saturation.specific_humidity,
+            -(air_moisture_weight * input.reference_specific_humidity),
+        ) - ground_moisture_weight * input.ground_specific_humidity;
         let mut transpiration = input.air_density_kg_m3
             * (1.0 - fwet)
             * evaporation_sign
@@ -872,7 +885,13 @@ pub fn leaf_temperature(
         dtl[iteration] = numerator / denominator;
         let unbounded_temperature_change = dtl[iteration];
         if dtl[iteration].abs() > MAX_TEMPERATURE_STEP_K {
-            dtl[iteration] = MAX_TEMPERATURE_STEP_K * dtl[iteration].signum();
+            // 上游 `:1203` 是 `dtl(it) = delmax*dtl(it)/abs(dtl(it))` —— **不是**
+            // `delmax*sign(dtl)`：先乘、再除，两次舍入。用 `signum()` 会得到**恰好**
+            // ±3.0，而上游在 `|dtl|` 比 3 大 1 ULP 时给的是 `-2.9999999999999996`。
+            // 逐迭代位型探针在 it=5 抓到：
+            //   `dtl` kernel=C007FFFFFFFFFFFF(=-(3-1ulp))  rust=C008000000000000(=-3.0)
+            // 前四轮迭代改对之后，这是第 5 轮唯一的源头（`del`/`dele` 是它的下游）。
+            dtl[iteration] = MAX_TEMPERATURE_STEP_K * dtl[iteration] / dtl[iteration].abs();
         }
         if iteration >= 2 && dtl[iteration - 1] * dtl[iteration] <= 0.0 {
             dtl[iteration] = 0.5 * (dtl[iteration - 1] + dtl[iteration]);
@@ -936,9 +955,12 @@ pub fn leaf_temperature(
             VON_KARMAN / (surface.heat - profile.heat_at_top_layer) * temperature_difference;
         let humidity_scale =
             VON_KARMAN / (surface.moisture - profile.moisture_at_top_layer) * humidity_difference;
-        let virtual_temperature_scale = temperature_scale
-            * (1.0 + 0.61 * input.reference_specific_humidity)
-            + 0.61 * input.potential_temperature_k * humidity_scale;
+        // 与循环外那个 `dthv` 共用同一个 `(1.+0.61*qm)`（内核 CSE 成一项），
+        // 两个乘积各自融合 —— 见函数上方 `one_plus_0_61_reference_humidity` 的注释。
+        let virtual_temperature_scale = temperature_scale.mul_add(
+            one_plus_0_61_reference_humidity,
+            (0.61 * input.potential_temperature_k) * humidity_scale,
+        );
         let mut zeta = reference_height * VON_KARMAN * GRAVITY_M_S2 * virtual_temperature_scale
             / (surface.friction_velocity_m_s.powi(2) * input.virtual_potential_temperature_k);
         zeta = if zeta >= 0.0 {
@@ -965,7 +987,17 @@ pub fn leaf_temperature(
                 * boundary_height
                 / input.virtual_potential_temperature_k)
                 .powf(1.0 / 3.0);
-            (reference_wind.powi(2) + convective_velocity.powi(2)).sqrt()
+            // 上游 `:1272-1273` 是 `wc2 = beta*beta*(wc*wc)`、`um = sqrt(ur*ur+wc2)`，
+            // 内核编出来是（`.loc 1 1273`）：
+            //   `_613 = wc*wc`（`fmul`）
+            //   `tmp2112 = fmadd(ur, ur, _613)`   ← `ur*ur` **是融合的**
+            //   `um = sqrt(tmp2112)`
+            // `beta = 1.` 且 `zii = 1000.`（`:604-605`），所以 Rust 侧省掉 beta 是对的。
+            // 原先写成平铺的 `ur.powi(2) + wc.powi(2)`，在 it=5 让 `um` 差 1 ULP ——
+            // `um` 不在当时那 34 个探针量里，于是它到 **it=6** 才以 `ustar` 的形式暴露。
+            reference_wind
+                .mul_add(reference_wind, convective_velocity * convective_velocity)
+                .sqrt()
         };
         if prior_obukhov * obukhov < 0.0 {
             obukhov_sign_changes += 1;
@@ -1461,11 +1493,17 @@ fn hydraulic_stomatal_resistance(
         input.options.stomata,
     )?;
     let pressure_conversion = 44.6 * 273.16 * input.surface_pressure_pa / 1.013e5;
+    // 上游 PHS 支路是 `MOD_LeafTemperature_Extended.F90:919` 的
+    //   `rssun = tprcor/tl * 1.e6 / gssun`
+    // 左结合 = `((tprcor/tl)*1e6)/gssun`：**先除 `tl`**，再乘 `1e6`，最后除 `gssun`。
+    // 原先写成 `tprcor*1e6/(tl*gssun)` —— 一次乘、一次除、且分母先乘起来，
+    // 三处舍入点都不同。逐迭代位型探针在第 1 轮抓到 `rssun`/`rssha` 差 1 ULP
+    // （它是该轮唯一不是别人下游的量），`cfw`/`etr_dtl`/`fevpl_dtl` 都跟着它偏。
     Ok(StomataState {
         assimilation_mol_m2_s: update.assimilation_mol_m2_s,
         respiration_mol_m2_s: update.respiration_mol_m2_s,
-        stomatal_resistance_s_m: pressure_conversion * 1.0e6
-            / (step.leaf_temperature_k * canopy_conductance_umol_m2_s),
+        stomatal_resistance_s_m: pressure_conversion / step.leaf_temperature_k * 1.0e6
+            / canopy_conductance_umol_m2_s,
     })
 }
 

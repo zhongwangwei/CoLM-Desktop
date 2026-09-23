@@ -15114,3 +15114,119 @@ Not-tested: `rssun`/`rssha` 上游（PHS 求解器 / `Assim`）的逐位探针�
   `strings kernels/default/colm.x` 找探针标记，或直接看行为；
 * 反过来，**探针跑完必须重编**这件事不能省：那时二进制里确实带着插桩，
   sha 看着"合法"但内容是错的。
+
+## 第 247 轮：探针连破五处形状，叶温迭代**前 6 轮逐位对齐**
+
+第 246 轮结尾把根因指向 `rssun`/`rssha`（气孔侧）。本轮顺着同一个探针一路往下：
+每跑一次探针，它就精确地指到一个量；按 `lt_ext.s` 改掉之后再跑，首轮分叉就往后推一轮。
+**五次探针 → 五处形状**，这是本会话效率最高的一段。
+
+### 1. `rssun`/`rssha`：PHS 支路的结合顺序
+
+`hydraulic_stomatal_resistance`（`leaf_temperature.rs`）里写的是
+`tprcor*1e6/(tl*gssun)`，而内核 `MOD_LeafTemperature_Extended.F90:919` 是
+
+```fortran
+rssun = tprcor/tl * 1.e6 / gssun
+```
+
+左结合 = `((tprcor/tl)*1e6)/gssun` —— 先除 `tl`、再乘 `1e6`、最后除 `gssun`。
+改完 it=1 从 5 个差量（`fevpl_dtl`/`cfw`/`rssun`/`rssha`/`etr_dtl`）缩到 2 个。
+
+### 2. `humidity_gradient`：与 `fsenl` 同一个"过度融合"
+
+`.loc 1 1125` 的括号 `( (wtaq0 + wtgq0)*qsatl - wtaq0*qm - wtgq0*qg )`：
+
+```text
+_481 = wtaq0 * qm              fmul  ← 先舍入
+_479 = wtaq0 + wtgq0
+_483 = wtgq0 * qg              fmul  ← 先舍入
+tmp1963 = fnmsub(_479, qsatl, _481)   → 只有 _479*qsatl 融合
+_485 = tmp1963 - _483
+```
+
+Rust 把 `-wtgq0*qg` 也写成了 `mul_add`（第 246 轮修 `fsenl` 时是同一类错）。
+改完 it=1..4 全同。
+
+### 3. `delmax` 限幅：`signum()` 不等于 `delmax*dtl/abs(dtl)`
+
+内核 `:1203` 是 `dtl(it) = delmax*dtl(it)/abs(dtl(it))` —— **乘一次、除一次**，
+`signum()` 却给**恰好** ±3.0。it=5 抓到的位型对：
+
+```text
+dtl  kernel=C007FFFFFFFFFFFF (= -(3 - 1 ULP))   rust=C008000000000000 (= -3.0)
+```
+
+改完 it=5 全同。（`signum()` 在 crates 里只此一处，已复查。）
+
+### 4. `um`：`sqrt(fma(ur,ur,wc*wc))`
+
+`.loc 1 1273`：`_613 = wc*wc`(fmul)、`tmp2112 = fmadd(ur,ur,_613)`、`fsqrt`。
+Rust 写成平铺的 `ur.powi(2) + wc.powi(2)`。**这一条不在当时那 34 个探针量里**，
+所以它没在 it=5 暴露，而是等到 it=6 以 `ustar`/`obu`/`cfh`/`cfw` 一族的形式炸开。
+教训（下一条已按此执行）：**探针量要覆盖"迭代之间传递的全部状态"**，
+漏一个量就要多烧一轮 12 分钟的探针。
+
+### 5. `thvstar`/`dthv`：共用的 `(1.+0.61*qm)` 是 fma
+
+内核把 `(1.+0.61*qm)` **算一次就存起来**（`:657` 的 `fmadd(qm,0.61,1.0)` 写进
+`[x29,472]`），`:1256` 的 `thvstar` 直接 load 回来用；两处都把自己的乘积融进加法：
+
+```text
+dthv    = fma(dth,   _149, dqh  *(0.61*th))
+thvstar = fma(tstar, _149, qstar*(0.61*th))
+```
+
+Rust 两处都平铺。**这条推翻了本会话早先把 `thvstar` 放进"六处否决"的结论**
+（`clai`/`thvstar`/`cfw`/`fgrnd`/`lfevpa`/`gt`）——那时用的是混沌的聚合度量，
+逐迭代位型在 it=6 直接证明收缩是必需的。撤回那条否决。
+
+### 结果
+
+```text
+it=1 BITWISE IDENTICAL   it=4 BITWISE IDENTICAL
+it=2 BITWISE IDENTICAL   it=5 BITWISE IDENTICAL
+it=3 BITWISE IDENTICAL   it=6 BITWISE IDENTICAL
+it=7 DIFFERS: dtl, del, dele, irab, obu, taf, um, zeta, tstar, thvstar, dth
+```
+
+**it=1..6 全同**（探针已从 34 个量扩到 48 个：加了 `um/zeta/tstar/qstar/thvstar/dth/dqh/
+gah2o/pco2a/ram/rah/fm/fh/fq`）。it=7 的首个差量是 `irab`（差 14 ULP），
+下游才是 `dtl → tl → taf → dth → tstar → thvstar → zeta → obu → um`。
+
+**it=7 的 `irab` 还没解决**，而且它比前面几条难：14 ULP 太大，不像纯结合顺序；
+但 `dirab_dtl`（共享 `fac`/`tl`/`emg`/`thermk`）在同一轮**逐位相同**，
+把 `fac`/`thermk`/`tl`/`emg` 都排除了 —— 只剩**只出现在 `irab` 里、不出现在
+`dirab_dtl` 里**的两个输入：`frl` 与 `tg`。试过"`powi(4)` 的结合顺序"这条假设
+（显式写成 `tl*tl` 再平方），**探针输出逐位不变 ⇒ 假设否掉，改动已回退**。
+
+**下一轮**：把 `frl`/`tg`/`emg`/`thermk`/`fac`/`stefnc` 加进探针量，看 it=7 到底哪个输入不同；
+若全部相同，就逐条比对 `_3199`/`_400`/`tmp1923`/`_413` 的中间位型（在探针里加临时变量）。
+
+### 三段式度量（含黄金窗口）
+
+| 口径 | 基线（第 246 轮前） | 第 246 轮 | **本轮** |
+|---|---|---|---|
+| restart（干窗 1 步） | 19 / 68 | 19 / 68 | **18 / 68**（`rst` 归零） |
+| 步级（干窗 3 步，逐位相同元素） | 585-692 | 581-692 | 577-692 |
+| 黄金 dry `sumabs` | 338.9256 | 274.5483 | **240.2058** |
+| 黄金 dry `over_tol` | 825 | 821 | **818** |
+| 黄金 dry `ot_vars` | 17 | 17 | **18** |
+| 黄金 wet `over_tol` | 20672 | 20673 | **20665** |
+| 黄金 wet `ot_vars` | 68 | 68 | 68 |
+| 黄金 snow | 33651/444394.4368/25896/79 | 33593/…/…/79 | 33639/444394.4368/25896/79 |
+
+`ot_vars` 从 17 变成 18 是本轮唯一的反向指标，**已按名字查清**：把第 246 轮的代码
+（`git checkout` 到 `0e920ee` + 重编 + 重跑黄金）拿出来对照，那一版恰好是 17 个越界变量，
+本轮**原 17 个一个不少**，只多了一个 **`f_frcsat`**（1/264，index 2，0.7658 vs 0.7480）。
+`frcsat` 是"饱和面积比例"这类阈值量，干窗是 11 天混沌窗口 ——
+`sumabs`（338.93→240.21，−29%）与 `over_tol`（825→818）同时改善说明整体更近，
+这一个变量是被 1 ULP 种子推过阈值的。**下一次要连它一起清掉**（第 246/247 两轮已经把
+叶温循环前 6 轮消掉了，剩下的种子还在）。
+
+Tested: `/tmp/gf/leafit_bits_probe.sh` 六次（34→48 个量的位型逐迭代比对，含最后一次
+在显式 `tl**4` 假设下）；`/tmp/gf/cmp_leafit.py`；`/tmp/gf/accept_r247.sh`
+（`dry_ts.sh 1` + `restart_divergence.py` 18/68；`dry_ts.sh 3` + `window_divergence.py`
+44 / 577-692；`win4.sh` + `three.py` 三窗口）；第 246 轮基线的黄金重跑
+（17 个越界变量的名单）与逐名对照；`cargo fmt/clippy/test`；`test_upstream_f48_sync.py`。
+Not-tested: it=7 的 `irab`（下一轮）；`powi(4)` 假设已否并回退。
