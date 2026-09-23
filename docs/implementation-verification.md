@@ -16961,6 +16961,41 @@ gs_mol_sha = 1/((1.-fwet)*delta*laisha/cshaw_dry/cf - 1./gb_mol)
 **下一枪直接枚举**：把 call 288 的入参按第 283 轮的 24 个打印值取出，
 用 `Fraction` 精确算 8 种候选、与内核 call 289 的 `gs_sha` 位型比对。
 
+#### 第 285 轮：`qflx→gs` 的**公式是干净的** —— 第 283/284 轮的口径要修正，线索转向
+`gs` 的**持久状态**
+
+把 `getqflx_qflx2gs_twoleaf` 的 23 个量（入参含 `etrsun/etrsha`、中间量
+`cqi_leaf/A1..C2/csunw_dry/cshaw_dry`、出参 `gs_sun/gs_sha`）两侧对打（`QF2G`）：
+
+```text
+两侧各 49 行、计数器都从 1 起（shift 0 可比 49 对）——**注意这里没有错位**
+首个不同 = 内核 call 310 / Rust call 310，而且 diff 列表里
+`qflx_sun`/`qflx_sha`（这是 :346 的**入参** etrsun/etrsha）本身已经不同，
+`A1..C2`/`csunw_dry`/`cshaw_dry`/`gs_sun`/`gs_sha` 的差都是从它们继承的
+上一次相同的 call = 287
+```
+
+**口径修正（第 283 轮的行数差异有解释，不是错位）**：
+`getqflx_gs2qflx_twoleaf` 有**两个调用点**——`:318`（需求分支内，49 次）和
+`:589`（`getvegwp_twoleaf` 内，无条件），所以 `QG2Q` 印了 328 行；
+而 `getqflx_qflx2gs_twoleaf` 的整个函数体都在外层 `IF(qflx>0)` 里，所以 `QF2G` 只印 49 行。
+两者的**计数器都在 `PlantHydraulicStress_twoleaf` 入口自增一次**，所以
+`QG2Q` 的 289 与 `QF2G`/`SPACA` 的 310 都是**同一个"包装调用序号"**，可以直接比。
+于是第 283 轮"call 289 起只有 `gs_sha` 差"应读作：**进入 call 289 的 `:318` 时
+`gs_sha` 这个状态量已经不同**，它是更早某次调用留下的。
+
+**因此新线索（结构性，不是收缩点）**：内核的 `gssun/gssha` 是
+`PlantHydraulicStress_twoleaf` 的 **`intent(inout)` 持久状态**，`:346` 只在
+`qflx_* > 0` 时改写它们；而本仓库 `PlantHydraulicState` **只有
+`vegetation_water_potential_mm`**，`conductance_from_transpiration` 每次都用
+`input.maximum_*_conductance`（= `gs0`，由**上一次**更新后的气孔阻力反算出来）当种子。
+于是"`qflx_sha > 0` 但 `qflx_sun <= 0`"这类调用里，内核保留旧的 `gs_mol_sha`、
+本仓库返回 `gs0` —— **只影响遮荫那一支**，正好对上"`gs_sun` 全程相同、只有 `gs_sha` 差"。
+
+**下一枪**：(a) 确认 `gs0` 的反算（`1/(rssun*T/pc)…`）与内核持久值是否逐位等价；
+(b) 若不等价，把 `gssun/gssha` 挪进 `PlantHydraulicState` 当持久状态（与上游同构），
+再跑三段式验收（restart 0/68、3 步 692/692、黄金 821/20662/25896）。
+
 ---
 
 # 交接：Fortran → Rust 移植的当前状态（本会话收束）
@@ -17096,11 +17131,12 @@ wice_soisno[5]   kernel=6.1823587081423845 (4018BABC3DBE730C)
    第 279–284 轮：`PENTR` 328 行（row 0–309 全同）→ 加调用序号夹到一次调用 →
    `A11..A44` 与 `determ` **全部逐位相同**、`f1`/`f2` 差 →
    叶面蒸腾需求那一段 24 个量里**只有 `gs_sha` 差**（call 289 起）⇒
-   种子是**遮荫叶气孔导度**；又因 call 288 的入参逐位相同而它算出的 `gs_sha` 不同
-   ⇒ 形状差在 `getqflx_qflx2gs_twoleaf`/`conductance_from_transpiration` 的**遮荫那一支**
-   （`gs_sun` 一直相同）。**下一枪**：枚举 `cshaw_dry` 分子/分母收缩与 `1/(…)` 的
-   2×2×2 种形状，用 `Fraction` 拿 call 288 的入参精确算，与内核 call 289 的
-   `gs_sha` 位型比对。
+   种子是**遮荫叶气孔导度 `gs_sha`**（call 289 起；`gs_sun` 全程相同）。
+   第 285 轮把 `qflx→gs` 的公式洗清了（`QF2G`：49/49 行、首个不同在 call 310，
+   且那里的差全部继承自入参 `qflx`）⇒ **新线索是结构性的**：内核的 `gssun/gssha`
+   是 `intent(inout)` 持久状态，本仓库每次用 `gs0`（由上次的气孔阻力反算）当种子，
+   在 `qflx_sha <= 0 < qflx_sun` 时只影响遮荫那一支。**下一枪**：确认反算是否逐位等价，
+   否则把 `gssun/gssha` 挪进 `PlantHydraulicState`，再跑三段式验收。
    验收口径：`accept_r247.sh` 与 `dry_ts.sh 16` + `window_divergence.py`；
    干窗黄金 `over_tol` 现在是 821 / 20662 / 25896。
 0b. **（新）补 `balance_phs_rootflux`**：见第 276 轮。默认配置下它在这三份窗口里
