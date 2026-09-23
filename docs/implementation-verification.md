@@ -17815,26 +17815,103 @@ GSTO         354     354     354  identical (354 calls)
   其次是 `x(root) = x_root_top` 之后的 `rootflux(j) = k_soil_root*(smp-xroot)`，
   再次才是叶温那两行缩放（第 275 轮已修并证过形状）。
 
-**下一枪（已具体到点位）**：一次构建、两侧同序打六个点：
-`RQER`（`:354` 之后，`qeroot`/`etrsun`/`etrsha`）→ `RQE2`/`RQEL`（`:355` `getrootqflx_qe2x`
-返回后，`x_root_top` 与逐层 `xroot`）→ `RQF`（`rootflux(j) = ...` 之后，逐层
-`rootflux`/`k_soil_root`/`smp`）→ 叶温侧 `RFLT0`/`RFLTL`（`:1351` 之前，`etr`/`etr_dtl`/
-`dtl`/逐层 `rootflux`）→ `RFSC0`/`RFSC`（`:1361` 缩放之后）→ `RFBL`（`:1368`
-`balance_phs_rootflux` 之后）。第 12 步第一个不同的 tag 就定案：
-`RQE2` 差 ⇒ 打在 `qe2x`（三对角解 + `plc`）；只有 `RQF` 差 ⇒ 打在 `k_soil_root`/`smp` 那一乘；
-`RFSC` 差而 `RQF` 同 ⇒ 打在缩放/配平那两行。
+#### 第 300 轮：`rootflux` 的真凶是**截断的 π**（已修）；但它**不是**第 19 步那颗种子
 
-**下一枪**（就是上面那六个点位，已经用 `gssun_probe.sh` 19 步全同把上位排除掉了）：
-两侧同序打 `RQER`/`RQE2`/`RQEL`/`RQF`/`RFLT0`/`RFLTL`/`RFSC0`/`RFSC`/`RFBL`，
-第一个不同的 tag 定案；判"第几次调用"一律按调用序号对齐（第 279 轮的坑）。
-已有的可用工具：`oracle/scripts/gssun_probe.sh`（八处，19 步全同）、
-`oracle/scripts/vsf_richards_probe.sh`（水步入场处 `rootflux` 的差钉在第 12 步）、
-`dry_ts.sh 16` + `window_divergence.py`。
+##### 一、`rootflux_probe.sh`：差出在**PHS 解出来的** `rootflux`，缩放是干净的
+
+新工具 `oracle/scripts/rootflux_probe.sh` + 通用比较器 `oracle/scripts/probe_diff.py`
+（格式 `TAG n k1 k2 f1 …`，按内核文件里 tag 首次出现的次序比，逐位相等才算同）。
+两侧同序打四个 tag：`RFIN`/`RFINL`（`:1351` 之前，缩放**前**的 `rootflux` = PHS 输出）
+与 `RFLT`/`RFLTL`（`:1361` 缩放之后），13 步：
+
+```text
+RFINL (12,2) f0 K=2.007223592100237e-07   R=2.0072235921002367e-07   ← 首个不同（缩放之前）
+RFLTL (12,2) f0 K=2.00962406971466e-07    R=2.0096240697146597e-07
+RFLT 的 13 行（etr / etr0 / etr_dtl / dtl）全部逐位相同
+2/286 records differ
+```
+
+⇒ **叶温那两行缩放是干净的**（第 275 轮的结论成立），差产生在 PHS 的输出里。
+
+##### 二、沿本例程自己的汇编数 FMA（第 299 轮那套方法）
+
+```text
+plc 0   d1plc 0   getqflx_gs2qflx_twoleaf 3   getqflx_qflx2gs_twoleaf 3
+getrootqflx_qe2x 3   getrootqflx_x2qe 5
+planthydraulicstress_twoleaf 0   ← 含内联的 `calcstress_twoleaf`（根导度那一圈全在里面）
+spacaf_twoleaf 41   tridia 3
+```
+
+`qe2x` 的 3 条与 `tridia` 的 3 条逐条对上本仓库的 `mul_add`
+（`root_potential_from_flux` 的三行 `rmx`、`solve_tridiagonal` 的三处），
+`sub`/`super_`/`diagonal` 的结合顺序也逐条核过（`map_or(0.0, …)` 里的 `+0.0` 是精确的）。
+**形状排完就只能查常数** —— 于是发现：
+
+##### 三、真凶：`rpi` 是**截断到 15 位的 π**，与 `std::f64::consts::PI` 差 **7 ULP**
+
+```fortran
+MOD_PlantHydraulic.F90:148   real(r8), parameter :: rpi = 3.14159265358979_r8
+                         :167   root_cross_sec_area = rpi*DEF_PH_ROOT_RADIUS**2
+                         :177   r_soil = sqrt(1./(rpi*root_length_density))
+```
+
+实测 `3.14159265358979 != std::f64::consts::PI`，相对差 9.895e-16（7 ULP）。
+它在根导度那一圈出现两次，解析上会在 `r_soil = sqrt(density*r²/biomass)` 里约掉，
+**浮点上不会** ⇒ 本仓库的 `k_soil_root` 系统性偏 ~1 ULP，而它直接乘进
+`rootflux = k_soil_root*(smp-xroot)`。
+
+修法：`plant_hydraulics.rs` 里新增 `PLANT_HYDRAULIC_PI = 3.14159265358979`（带出处注释），
+把 `root_conductances` 的两处 `std::f64::consts::PI` 换掉。
+
+##### 四、验收（A/B 两边都跑了）
+
+| 口径 | 结果 |
+|---|---|
+| `rootflux_probe.sh 13` | **2/286 → 0/286**（13 步内整条 rootflux 链逐位全同） |
+| 19 步干窗 restart（带 π vs 不带 π） | **0/68 逐位相同** |
+| 黄金三窗口 | `28 / 1967 / 25713`、`16326 / 28904 / 32567`、`249.7886 / 31.3139 / 444416.8246` —— **一个数都没动** |
+| `accept_r247.sh` | restart 0/68、3 步 692/692 |
+
+⇒ 这处修复是**口径中性**的（与第 295 轮的 `cbrt` 同类：为与内核一致而保留），
+但它**推翻了一条旧的因果链**：
+
+##### 五、推翻的旧结论（重要）：`rootflux` 不是第 19 步种子的因
+
+第 274/277 轮把干窗的种子判成"入参 `rootflux` 第 2/3 层差 1 ULP"，第 299 轮的两级探针
+也把"第一条不同记录"钉在入参 `rootflux` 上。**π 修好之后 `rootflux` 的差消失了，
+而第 19 步的状态差一字不动** ⇒ 那条差是**被下游舍入吸收掉的**，不是因。
+教训与第 280 轮同一个：**"第一条不同记录"只说明先后，不说明因果**。
+
+##### 六、水步内部的新定位（`vsf_richards_probe.sh`，先修掉三个探针 bug）
+
+探针自己的 bug（都已修，记下来）：
+1. `RCHL` 在本仓库侧把调用序号**写死成 `1`**（内核侧正常）⇒ 同一个键 18 行、
+   报出 74/755 条"假差异"；
+2. `RCHB`/`RCHD` 的行范围是 `lb-1 .. ub+1`，相对号应是 `ilev-lb+2`（原先按
+   `ilev-lb+1` 打，两侧键整体错开一位）；
+3. `RCHE` 原先用 `insert_after` 落在 `IF (vact(ub+1))` **里面**，而本算例
+   `lbc=FIX_FLUX` ⇒ 内核侧一行都没有（本仓库侧打在 `if` 之前，75 行）。
+
+修好之后（内核侧已存记录离线改键 1 位 + 本仓库侧重编一次）只需比 **797** 条：
+
+```text
+('RCHL', 17, 1, 0) ss_wt  K=44.81708268203771   R=44.8170826820377   ← 首个不同
+('RCHZ', 17, 1, 0) ss_wt  K=44.81708268203771   R=44.8170826820377
+2/797 records differ
+```
+
+**读法**：第 17 次 Richards 调用**入场**的 `ss_wt` 就已经差了，而这次解算内部的
+`RCHF`(f2) / `RCHB`(blc) / `RCHD`(dv) **全部逐位相同** ⇒ 差不是解算造的，是**入场前**
+带进来的（`soil_water_vertical_movement:344-350` 用入参 `zwt` 初始化 `ss_wt`）。
+**下一枪**：把 `WATER_VSF` 每次调用的**入场 `zwt`** 也打出来（现在只有出场）——
+第 299 轮的出场结果显示第一次差在第 13 次调用，所以"出场 → 下一次入场"这一段
+是本轮之后唯一还没量的环节；如果入场也全同，就落在 `:344-350` 的 `sp_zi(izwt)-zwt`
+与 `findloc_ud` 判级上。
 
 **验收口径（不变）**：`cargo test --workspace --lib --bins -- --test-threads=1`、
 `clippy -D warnings`、`fmt --check`（本机 `colm-cli` 的 7 个 `study::runner` 用例
 因沙箱 `EPERM` 失败，与本改动无关）；`bash /tmp/gf/win4.sh` + `three.py`
-（**第 299 轮后的基线是 28 / 1967 / 25713**）；再 `bash /tmp/gf/accept_r247.sh`
+（基线仍是 **28 / 1967 / 25713**）；再 `bash /tmp/gf/accept_r247.sh`
 （restart 0/68、3 步 692/692）。任一**口径指标**（`over_tol`/`ot_vars`）变差就
 `git checkout` 回滚，别留半个修复；`bitwise`/`sumabs` 是诊断计数，混沌窗口里会
 反向小幅移动，要记录但不当判据。

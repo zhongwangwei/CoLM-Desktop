@@ -21,6 +21,19 @@ pub const VEGETATION_SEGMENTS: usize = 4;
 const MIN_STRESS: f64 = 1.0e-2;
 const MIN_CONDUCTANCE: f64 = 1.0e-16;
 
+/// `MOD_PlantHydraulic.F90:148` 的 `rpi = 3.14159265358979_r8`。
+///
+/// 它是**截断到 15 位有效数字的 π**，与 `std::f64::consts::PI` 差 **7 ULP**
+/// （实测相对差 9.895e-16）。两处用途都在根导度那一圈：
+/// `root_cross_sec_area = rpi*r**2`（`:167`）与 `r_soil = sqrt(1/(rpi*rld))`（`:177`）。
+/// 解析上 `rpi` 会在 `r_soil = sqrt(density*r**2/biomass)` 里约掉，**浮点上不会** ——
+/// 用标准 π 会让 `k_soil_root` 系统性偏 ~1 ULP，而它直接乘进
+/// `rootflux = k*(smp-xroot)`。第 299 轮实测：`rootflux` 在干窗第 12 步第 2 层
+/// 差 1 ULP（`RFINL`，缩放**之前**就已经差），换回这个字面量后全同。
+/// 差不是笔误：**故意**用上游那个截断值，`clippy::approx_constant` 在这里必须让路。
+#[allow(clippy::approx_constant)]
+const PLANT_HYDRAULIC_PI: f64 = 3.14159265358979;
+
 /// Runtime equivalents of the `DEF_PH_*` namelist parameters.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PlantHydraulicParameters {
@@ -376,14 +389,14 @@ fn root_conductances(input: PlantHydraulicInput<'_>) -> Result<(Vec<f64>, Vec<f6
                 / input.layer_thickness_m[layer])
                 .max(2.0);
         let root_cross_section_m2 =
-            std::f64::consts::PI * input.parameters.fine_root_radius_m.powi(2);
+            PLANT_HYDRAULIC_PI * input.parameters.fine_root_radius_m.powi(2);
         let root_length_density_m_m3 = root_biomass_density
             / (input.parameters.root_tissue_density_g_m3 * root_cross_section_m2);
         let root_area_index =
             (input.stem_area_index + input.sunlit_leaf_area_index + input.shaded_leaf_area_index)
                 * input.parameters.fine_root_to_leaf_area
                 * input.root_fraction[layer];
-        let root_spacing_m = (1.0 / (std::f64::consts::PI * root_length_density_m_m3)).sqrt();
+        let root_spacing_m = (1.0 / (PLANT_HYDRAULIC_PI * root_length_density_m_m3)).sqrt();
         let soil_conductance = input.saturated_hydraulic_conductivity_mm_s[layer]
             .min(input.soil_hydraulic_conductivity_mm_s[layer])
             / (1000.0 * root_spacing_m);

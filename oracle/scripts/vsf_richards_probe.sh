@@ -51,6 +51,13 @@ path = sys.argv[1]
 lines = open(path).read().split("\n")
 
 
+def insert_before(anchor, block):
+    """anchor 必须是**唯一**的整行（含缩进），在它**前面**插入 block 的各行。"""
+    hits = [i for i, line in enumerate(lines) if line == anchor]
+    assert len(hits) == 1, (anchor, len(hits))
+    lines[hits[0] : hits[0]] = block.split("\n")
+
+
 def insert_after(anchor, block):
     """anchor 必须是**唯一**的整行（含缩进），在它后面插入 block 的各行。
 
@@ -93,13 +100,18 @@ insert_after(
       ENDDO""",
 )
 
+# 层号一律打**段内相对号**（本仓库的 `richards_solver` 只拿到切片，不知道绝对偏移）。
+# `RCHB`/`RCHD` 的行范围是 `lb-1 .. ub+1`，相对号是 `ilev-lb+2`；
+# `RCHL`/`RCHE`/`RCHX`/`RCHZ` 的层范围是 `lb .. ub`，用 `ilev-lb+1`。
+# （第 299 轮实测：打错一位会报出 74/755 条"假差异"，真差异被埋在里面。）
+
 # --- 每个 Newton 迭代：残差范数 + 逐行 blc ---
 insert_after(
     "            f2_norm(iter) = sqrt(sum(blc**2))",
     """            WRITE(*,'(A,1X,I4,1X,I3,1X,I2,4(1X,ES26.17))') 'RCHF', rch_n, iter, 0, &
                dt_this, f2_norm(iter), ss_dp, waquifer
             DO ilev = lb-1, ub+1
-               WRITE(*,'(A,1X,I4,1X,I3,1X,I3,1(1X,ES26.17))') 'RCHB', rch_n, iter, ilev-lb+1, blc(ilev)
+               WRITE(*,'(A,1X,I4,1X,I3,1X,I3,1(1X,ES26.17))') 'RCHB', rch_n, iter, ilev-lb+2, blc(ilev)
             ENDDO""",
 )
 
@@ -107,13 +119,13 @@ insert_after(
 insert_after(
     "            CALL solve_least_squares_problem (ub-lb+3, dr_dv, vact, blc, dv)",
     """            DO ilev = lb-1, ub+1
-               WRITE(*,'(A,1X,I4,1X,I3,1X,I3,3(1X,ES26.17))') 'RCHD', rch_n, iter, ilev-lb+1, &
+               WRITE(*,'(A,1X,I4,1X,I3,1X,I3,3(1X,ES26.17))') 'RCHD', rch_n, iter, ilev-lb+2, &
                   dv(ilev), dr_dv(ilev,ilev), merge(1.0_r8,0.0_r8,vact(ilev))
             ENDDO""",
 )
 
 # --- 逐层更新之后（`IF (vact(ub+1))` 之前；本算例 lbc=FIX_FLUX，那块不执行）---
-insert_after(
+insert_before(
     "            IF (vact(ub+1)) THEN",
     """            DO ilev = lb, ub
                WRITE(*,'(A,1X,I4,1X,I3,1X,I3,6(1X,ES26.17))') 'RCHE', rch_n, iter, ilev-lb+1, &
@@ -211,7 +223,7 @@ src = insert_after(
         for level in 0..layers {
             eprintln!(
                 "RCHL {:4} {:3} {:2} {:e} {:e} {:e}",
-                1, level + 1, 0, state.liquid_water[level],
+                count, level + 1, 0, state.liquid_water[level],
                 state.water_table_thickness_mm[level], 0.0_f64
             );
         }
