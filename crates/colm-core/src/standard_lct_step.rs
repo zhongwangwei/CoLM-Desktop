@@ -365,9 +365,8 @@ fn finish_energy_step(
     let corrected_snow_evaporation_kg_m2_s = leaf
         .ground_latent_temperature_slope_kg_m2_s_k
         .mul_add(ground_temperature_change, leaf.snow_evaporation_kg_m2_s);
-    let mut corrected_ground_sensible_heat_w_m2 = leaf
-        .ground_sensible_temperature_slope_w_m2_k
-        .mul_add(ground_temperature_change, leaf.ground_sensible_heat_w_m2);
+    let mut corrected_ground_sensible_heat_w_m2 = leaf.ground_sensible_heat_w_m2
+        + leaf.ground_sensible_temperature_slope_w_m2_k * ground_temperature_change;
     // `fevpg = fevpg + tinc*cgrndl`（`MOD_Thermal…:1239`）**这一条不融合**。
     // 用探针把两侧的位型都取出来离线复算过（`/tmp/gf/th6_probe.sh` 的 PRE/POST）：
     //   `fevpg_pre + fl(tinc*cgrndl)` = `3F145BB9BCB4DD9C` = **内核**的值；
