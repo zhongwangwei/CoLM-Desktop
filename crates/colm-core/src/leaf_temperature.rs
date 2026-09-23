@@ -1119,11 +1119,15 @@ pub fn leaf_temperature(
     let shaded_transpiration = last.shaded_transpiration;
     let mut root_flux_kg_m2_s = last.root_flux_kg_m2_s;
     if let Some(hydraulic) = input.plant_hydraulics {
-        let root_adjustment = last.transpiration_temperature_slope * final_temperature_change;
         if last.transpiration.abs() >= 1.0e-15 {
-            let scale = transpiration / last.transpiration;
+            // 上游是 `rootflux = rootflux * etr / etr0`
+            // （`MOD_LeafTemperature_Extended.F90:1358`），左结合 —— **先乘后除**。
+            // 抽成 `scale = etr/etr0` 再 `flux *= scale` 在浮点上不等价（差 1 ULP）：
+            // CN-Cng 干窗口第 11 步的第 2、3 层就是这么偏出去的（第 274 轮探针：
+            // `soil_water_vertical_movement` 入场时 `etroot` 只有这两层差 1 ULP，
+            // 其和 `deficit` 跟着差，第 12 步水位才翻出去）。
             for flux in &mut root_flux_kg_m2_s {
-                *flux *= scale;
+                *flux = *flux * transpiration / last.transpiration;
             }
         } else {
             let total_depth = hydraulic.layer_thickness_m.iter().sum::<f64>();
@@ -1135,7 +1139,11 @@ pub fn leaf_temperature(
                 .iter_mut()
                 .zip(hydraulic.layer_thickness_m)
             {
-                *flux += depth / total_depth * root_adjustment;
+                // 上游 `rootflux + dz_soi / sum(dz_soi) * etr_dtl * dtl(it-1)`
+                // （`:1360`）也是左结合（`((dz/sum)*etr_dtl)*dtl`），且
+                // `变量 + 乘积` 会被内核的 `-ffp-contract=fast` 收缩成 FMA。
+                let rate = depth / total_depth * last.transpiration_temperature_slope;
+                *flux = rate.mul_add(final_temperature_change, *flux);
             }
         }
     }

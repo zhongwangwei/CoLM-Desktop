@@ -16559,6 +16559,123 @@ Tested: `/tmp/gf/meltf_args_probe3.sh`、`meltf_inner_probe.sh`、`imperv_probe.
 Not-tested: 第二配置（Campbell + 关 VSF，本轮只动 VSF 路径）；11 天黄金窗口与存储 golden
 之间的首次分歧（第 1 步、1e-7 量级，与本轮修复无关，来源未查）。
 
+#### 第 271 轮：把"水位推出"和"分段求解"拆成两个时刻，两侧都打
+
+`water_table_thickness_mm`（= 上游 `ss_wt`）在 `soil_water_vertical_movement` 里有
+两个关键时刻：**推导之后、逐段求解之前**（`MOD_Hydro_SoilWater.F90:344-350`，记为
+`WTPRE`）与**逐段求解之后、重定位水位之前**（`:403` 之后，记为 `WTPOST`）。
+`wtpre_probe.sh` 把两个时刻在两侧都打出来（取值**长度感知**：`wtbuf` 先清零、
+只拷 `MIN(8,nlev)`，避免重演第 270 轮的越界读），16 步结果：
+
+```text
+步 0–11（WTPRE/WTPOST 共 24 行）：izwt/zwt/wa/ss_wt1..8 **全部逐位相同**
+步 12 WTPRE:  izwt 同、wa 同；zwt 差 1 ULP、ss_wt3 差 1 ULP（方向相反）
+             K zwt=4046DF5390EEC488 R=4046DF5390EEC489
+             K ss_wt3=404668962A52BD6E R=404668962A52BD6D
+```
+
+`ss_wt3` 与 `zwt` 反向 1 ULP 是**恒等式**：`izwt = 3` 时 `ss_wt(3) = sp_zi(3) - zwt`，
+两边 `sp_zi(3)` 是同一个参数 ⇒ 差**只有一个**：`zwt`。所以第 270 轮记的
+"`ss_wt(3)` 在解算之前就差了"要改口径为"**`zwt` 在解算之前就差 1 ULP**"。
+
+#### 第 272 轮：入场相同 ⇒ 差出在本例程开场（蒸腾级联 → 含水层交换）
+
+再加一个入场打印（`WTENTR`，`:256` 的 `izwt = findloc_ud(zwt >= sp_zi)` 之后）：
+
+```text
+步 12 WTENTR: IDENTICAL          （izwt=3、zwt=4046B429B052DA9F、wa=0 全同）
+步 12 WTPRE : zwt 差 1 ULP
+步 13 WTENTR: zwt 差 1 ULP（已经带上一步的差）
+```
+
+入场逐位相同、`WTPRE` 不同 ⇒ 差产生在**入场到推导之间**。这段里能改 `zwt` 的只有
+`soilwater_aquifer_exchange`（`:339-341`）⇒ 种子在含水层交换。
+
+#### 第 273 轮：`wexchange` 在**第 11 步**就差了 1 ULP，而且 `rsubst = etrdef = 0`
+
+把交换的入参也打出来（`WEXCH`：`wexchange, rsubst, deficit, etrdef`）：
+
+```text
+步 0–10 : wexchange = 0（两侧，
+          因为黎明前 etr = 0，deficit 恰好为 0）
+步 11   : K 3EF2F0F1553B1410 (=1.8063719223322032e-05)  R 3EF2F0F1553B13F0 (=1.8063719223321924e-05)
+          rsubst = 0、etrdef = 0 两侧都同 ⇒ 差**全在 `deficit`**
+```
+
+`etrdef = 0` 且内核侧 `sumroot` 打出来是 0 ⇒ **植物水力（`DEF_USE_PLANTHYDRAULICS`）
+默认是 `.true.`**，于是 `etroot(:) = rootflux`（`:293`）——`etroot` 是**入参**，
+不是本例程算的。`deficit` 只是把入参 `rootflux` 按 `deficit + etroot(ilev)*dt`
+累加（`:330-332`，`izwt=3` ⇒ 第 3 层往下）。
+
+#### 第 274 轮：种子的真身 —— `rootflux` 第 2、3 层在第 11 步差 1 ULP
+
+把 `etr` 与 `etroot(1..6)` 也打进 `WEXCH`（`wdem_probe.sh`）：
+
+```text
+步 11   etr       两侧同为 3DB9CA00EAB00A99
+        etroot1   两侧同为 BE45801FED95F211 (-1.0011944539693032e-08)
+        etroot2   K 3E8AF90406937A61  R 3E8AF90406937A5F   (2.00962406971466e-07)
+        etroot3   K 3E8B7B4984603349  R 3E8B7B4984603348   (2.0475380518893196e-07)
+        etroot4/5/6 两侧相同
+```
+
+⇒ 种子在**叶温/植物水力那条链**里：`rootflux` 有两层差 1–2 ULP。上游对应
+`extends/interception/MOD_LeafTemperature_Extended.F90:1351-1361`：
+
+```fortran
+etr0  = etr
+etr   = etr + etr_dtl*dtl(it-1)
+IF (DEF_USE_PLANTHYDRAULICS) THEN
+   IF (abs(etr0) .ge. 1.e-15) THEN
+      rootflux = rootflux * etr / etr0                       ! 左结合：先乘后除
+   ELSE
+      rootflux = rootflux + dz_soi / sum(dz_soi) * etr_dtl* dtl(it-1)   ! 左结合 + 收缩
+   ENDIF
+   CALL balance_phs_rootflux(ipatch, p_iam_glb, etr, rootflux, rootfr, 'post-leaf-temperature')
+ENDIF
+```
+
+注意这**不等于**"差就在这两行"：第 11 步是 `etr` 第一次非零的那一步
+（前 10 步 `wexchange` 恒为 0），所以这两行此前从未真正生效过 ——"第一次生效就偏"
+与"上一级解出来的 `rootflux_p` 本来就差 1 ULP"都还没排除，两者都会表现成这样。
+
+#### 第 275 轮：沿路顺手修掉的三处"形状"差（都有实测证据）
+
+| # | 位置 | 上游形状 | 改前 | 影响 |
+|---|---|---|---|---|
+| 1 | `bounded_secant_iteration` + `water_table_from_aquifer` | `x_l*alp + x_r*(1.0_r8-alp)`，`alp=0.9_r8` | 内联了一份夹逼并写成字面量 `0.1` | `1.0-0.9 = 0.09999999999999998 ≠ 0.1`，夹逼一生效就差 1 ULP |
+| 2 | `deficit` 累加（3 处） | `deficit = deficit + etroot(ilev)*dt` | 先乘后加（未收缩） | 内核 `-ffp-contract=fast` 会收缩成 FMA；`deficit` 从**第二项**起就差 |
+| 3 | 根通量缩放（`leaf_temperature.rs`） | `rootflux * etr / etr0`（左结合）；`rootflux + dz/sum*etr_dtl*dtl` | `scale = etr/etr0` 再 `flux *= scale`；`flux += dz/total*(slope*dtl)` | 结合顺序 + 收缩两处都不等价 |
+
+第 1 处顺带把**手抄的一份** `water_table_from_aquifer` 内联夹逼删掉、改调
+`bounded_secant_iteration` —— 以后只有一份实现，"抄错常数"这类错不会再发生。
+
+**黄金三窗口实测（同一台机器、同一份内核，`git stash` 前后各跑一遍 `win4.sh`）**：
+
+| 窗口 | 改前 | 改后 |
+|---|---|---|
+| CN-Cng（干） | bitwise 21007、sumabs 406.5407、`over_tol` **829** | bitwise 21003、sumabs **224.3599**、`over_tol` **821** |
+| CN-Cng-wet | bitwise 32611、sumabs 10379.1834、`over_tol` 20662 | bitwise **32608**、sumabs 10383.4810、`over_tol` 20662 |
+| US-NR1-snow | bitwise 33486、sumabs 444394.4368、`over_tol` 25896 | bitwise **33439**、sumabs **444391.8131**、`over_tol` 25896 |
+
+干窗的**误差总量降了 45%**（406.5 → 224.4），三个窗口的逐位点数都减少，
+`over_tol` 无一变差。三段式：1 步 restart 0/68、3 步 history **692/692 逐位全同**、
+黄金 dry 821 / wet 20662 / snow 25896。
+
+**但 16 步干窗的逐记录首次分歧仍在记录 12**（`f_zwt`，56 个变量受影响）——
+第 271–274 轮已经把它的**因果链完整走通到 `rootflux`**，只是那条链的最后一跳
+（植物水力解出来的 `rootflux_p`，或第 274 轮那两行的第一次生效）还没定位。
+所以**别再回到水步/`ss_wt`/Richards 解算器里找记录 12**：那三段都已逐位证明是干净的。
+
+Tested: `wtpre_probe.sh`（16 步，`WTPRE`/`WTPOST` 两侧 32 行）；`wtentr_probe.sh`
+（16 步，加 `WTENTR`，两侧 64 行）；`wexch_probe.sh`（16 步，加 `WEXCH`）；
+`wdem_probe.sh`（16 步，加 `etr`/`etroot(1..6)`）；`bash /tmp/gf/dry_ts.sh 16` +
+`oracle/scripts/window_divergence.py`；`bash /tmp/gf/win4.sh` + `three.py`（`git stash` 前后各一遍）；
+`bash /tmp/gf/accept_r247.sh`（1 步 restart 0/68、3 步 history 692/692、黄金三窗口）；
+`cargo test --workspace --lib --bins -- --test-threads=1`（26 个二进制全绿）；
+`cargo clippy --workspace --all-targets -- -D warnings`；`cargo fmt --all --check`。
+Not-tested: 第二配置（Campbell + 关 VSF）本轮未复跑；`rootflux` 1 ULP 的最后一跳未定位。
+
 ---
 
 # 交接：Fortran → Rust 移植的当前状态（本会话收束）
@@ -16676,7 +16793,22 @@ wice_soisno[5]   kernel=6.1823587081423845 (4018BABC3DBE730C)
 
 **短程逐位已经干净**（1/3 步 restart 0/68、3 步 history 692/692），所以别再往
 `meltf`/`water_2014`/水步补冰那几处找 —— 第 257 轮已经把那条链走完并修好。
+
+**第 271–274 轮把干窗"记录 12"那颗种子追到了 `rootflux`**：干窗 16 步里
+记录 0–11 全同，记录 12 的第一颗种子是 `zwt` 差 1 ULP；它在
+`soil_water_vertical_movement` **入场时还是逐位相同的**，是**开场那段**
+（蒸腾级联 → 含水层交换）里被 `deficit` 带出来的；而 `deficit` 的差又全部来自
+**入参 `rootflux` 的第 2、3 层在第 11 步差 1–2 ULP**（`DEF_USE_PLANTHYDRAULICS`
+默认开，`etroot(:) = rootflux`）。**下一枪打这里，别再回水步**：
+`crates/colm-core/src/plant_hydraulics.rs:567 root_flux_from_top_potential` 与
+`MOD_PHSRootfluxBalance.F90`，先判"是植物水力解出来的 `rootflux_p` 本来就差"
+还是"`MOD_LeafTemperature_Extended.F90:1351-1361` 那两行第一次生效时形状不对"
+（第 11 步正是 `etr` 第一次非零的那一步，那两行此前从未生效过）。
+
 剩下三件事，按价值排序：
+0. **（新）`rootflux` 的那 1 ULP**：见上。`accept_r247.sh` 与
+   `dry_ts.sh 16` + `window_divergence.py` 是它的两个验收口径；
+   干窗黄金 `over_tol` 现在是 821 / 20662 / 25896。
 
 1. **11 天黄金窗口与存储 golden 的那条链**：干窗与 `oracle/golden/CN-Cng_hist_2008-01.nc`
    的首次分歧在**第 1 步**、量级 **1e-7**（`f_trad`、`f_rnet`，不是末位级），

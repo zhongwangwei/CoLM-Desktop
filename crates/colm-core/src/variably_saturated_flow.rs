@@ -24,6 +24,14 @@ const SOURCE_REFERENCE_STEP_SECONDS: f64 = 1800.0;
 /// 与 `water_2014.rs` 各自持有一份（仓库惯例：常数按模块就近定义）。
 const ICE_DENSITY_KG_M3: f64 = 917.0;
 const WATER_DENSITY_KG_M3: f64 = 1000.0;
+/// `MOD_Hydro_SoilWater.F90:3536` 里 `secant_method_iteration` 的 `alp = 0.9_r8`。
+///
+/// 夹逼上下界写的是 `x_l*alp + x_r*(1.0_r8-alp)`，而 `1.0 - 0.9` 求值出来是
+/// `0.09999999999999998`，**不是**字面量 `0.1` —— 两者差 1 ULP。原来这里把
+/// `(1.0_r8 - alp)` 直接抄成了 `0.1`，于是夹逼一旦生效，迭代点就差 1 ULP：
+/// CN-Cng 干窗口第 12 步的 `zwt` 正是这么偏出去的（第 272 轮：入场相同、
+/// 含水层交换之后 `zwt` 差 1 ULP，且 `ss_wt(izwt)=sp_zi(izwt)-zwt` 同步反向差 1 ULP）。
+const SECANT_ALPHA: f64 = 0.9;
 
 /// Boundary modes used by the VSF Richards column.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2051,23 +2059,16 @@ pub fn water_table_from_aquifer(
         if value.abs() < volume_tolerance || right - left < depth_tolerance_mm {
             break;
         }
-        if value > 0.0 {
-            right = depth;
-        } else {
-            left = depth;
-        }
-        let before_previous = previous_value;
-        previous_value = value;
-        let before_depth = previous_depth;
-        previous_depth = depth;
-        depth = if previous_value == before_previous {
-            (left + right) * 0.5
-        } else {
-            (previous_value * before_depth - before_previous * previous_depth)
-                / (previous_value - before_previous)
-        };
-        depth = depth.max(left * 0.9 + right * 0.1);
-        depth = depth.min(left * 0.1 + right * 0.9);
+        // 上游这里调的也是 `secant_method_iteration`，所以必须复用同一个实现 ——
+        // 本轮之前这里手抄了一份夹逼，抄错成字面量 `0.1` 并在第 12 步偏出 1 ULP。
+        bounded_secant_iteration(
+            value,
+            &mut previous_value,
+            &mut depth,
+            &mut previous_depth,
+            &mut left,
+            &mut right,
+        );
     }
     ensure!(
         depth.is_finite(),
@@ -2737,8 +2738,10 @@ fn bounded_secant_iteration(
         *value = (*previous_residual * value_before_previous
             - residual_before_previous * *previous_value)
             / (*previous_residual - residual_before_previous);
-        *value = (*value).max(*left * 0.9 + *right * 0.1);
-        *value = (*value).min(*left * 0.1 + *right * 0.9);
+        // 上游两处夹逼都用 `(1.0_r8 - alp)`，必须按表达式求值，见 `SECANT_ALPHA`。
+        let complement = 1.0 - SECANT_ALPHA;
+        *value = (*value).max(*left * SECANT_ALPHA + *right * complement);
+        *value = (*value).min(*left * complement + *right * SECANT_ALPHA);
     }
 }
 
@@ -4809,10 +4812,16 @@ pub fn soil_water_vertical_movement(
     let mut deficit_mm = transpiration_deficit_mm;
 
     // 亏缺级联：从最上一层往下，取不满的差额交给下一层。
+    //
+    // 上游这三处都是 `a*b + c` 形状（`MOD_Hydro_SoilWater.F90:307/326/331`），
+    // 内核按 GCC 默认的 `-ffp-contract=fast` 会收缩成 FMA，所以必须写 `mul_add`。
+    // 只在"与 0 相加"时两者才必然相等，所以第 11 步落盘时 `deficit` 就在
+    // 累积循环的**第二项**上偏了 1 ULP（第 273 轮探针：`wexchange` 与 `deficit`
+    // 两侧差 1 ULP、`rsubst`/`etrdef` 都是 0），第 12 步水位跟着偏出去。
     for level in 0..water_table_level.saturating_sub(1) {
         if input.permeable[level] {
             let attempted_mm =
-                transpiration_demand_mm[level] * input.time_step_seconds + deficit_mm;
+                transpiration_demand_mm[level].mul_add(input.time_step_seconds, deficit_mm);
             let stored_before_mm = state.liquid_water[level] * thickness_mm[level];
             state.liquid_water[level] = (stored_before_mm - attempted_mm) / thickness_mm[level];
             if state.liquid_water[level] < 0.0 {
@@ -4830,14 +4839,15 @@ pub fn soil_water_vertical_movement(
                 deficit_mm = 0.0;
             }
         } else {
-            deficit_mm += transpiration_demand_mm[level] * input.time_step_seconds;
+            deficit_mm =
+                transpiration_demand_mm[level].mul_add(input.time_step_seconds, deficit_mm);
         }
     }
     for demand_mm_s in transpiration_demand_mm
         .iter()
         .skip(water_table_level.saturating_sub(1))
     {
-        deficit_mm += demand_mm_s * input.time_step_seconds;
+        deficit_mm = demand_mm_s.mul_add(input.time_step_seconds, deficit_mm);
     }
     let transpiration_aquifer_mm = deficit_mm.max(0.0);
 
