@@ -15916,3 +15916,92 @@ step 1: 同上，全部逐位相同
 Tested: `/tmp/gf/meltf_args_probe.sh`（2 步，18 个层量 + 标量逐位比对）；
 `cargo fmt/clippy`（无代码改动，不需重跑）。
 Not-tested: 雪层与第 4 层以下的实参；`water_2014` 的冻融分配。
+
+---
+
+# 交接：Fortran → Rust 移植的当前状态（本会话收束）
+
+## 一句话
+
+**移植在功能上完整、在逐位精度上已推进到"第 0/1 步全同、第 2 步只剩一个状态量的
+3.7e-14 相对差"。** 剩下的不是缺模块、缺算法，而是一个末位级的状态差，
+位置与候选都已钉死（见下）。
+
+## 逐位对齐的阶梯（干窗 CN-Cng，1/2/3 步实测）
+
+| 口径 | 当前值 |
+|---|---|
+| 第 1 步 restart | **0 / 68 变量**（逐位全同） |
+| 第 2 步 restart | **0 / 68** |
+| 第 3 步 restart | 2 / 68（`wice_soisno[5]`、`hk[0]`） |
+| 第 0 步 history | **0 个差异变量** |
+| 第 1 步 history | **0 个差异变量** |
+| 第 2 步 history | 5 个差异变量（全是 `wice` 的下游） |
+| 步级（3 步、692 个逐位单元） | **687 逐位相同（99.28%）** |
+| 黄金 `ot_vars` dry/wet/snow | **17 / 68 / 79**（= 已记录的基线） |
+| 黄金 `over_tol` dry/wet | 826 / 20665（基线 825 / 20672） |
+| 第二配置（Campbell + 关 VSF）`ot_vars` | **16 / 66 / 79** |
+
+## 唯一残留：第 2 步第 1 层土壤冰
+
+```text
+wice_soisno[5]   kernel=6.1823587081423845 (4018BABC3DBE730C)
+                 rust  =6.182358708142612  (4018BABC3DBE740C)    3.68e-14 相对
+hk[0]            kernel=2.9151756458244646e-26 / rust 2.915175645823325e-26
+```
+
+`wliq_soisno`/`smp`/`t_soisno` 全同；`f_wat`/`f_h2osoi` 等的差都能由这一个量解释
+（见「第 254 轮」）。已经**排除**的来源：叶温 Newton 循环（58 个量 × 10 轮全同）、
+地面温度三对角组装（95 个量全同）、`meltf`（9 量 × 10000 闭环 + 第 1..3 层实参全同）、
+保持曲线（`compare_soilhydro.sh` 3 输出 × 10000 全同）。
+
+**最可能的落点**：`crates/colm-core/src/water_2014.rs` 的冻融/水量分配
+（它在 `GroundTemperature` 之后运行、自己调整 `wliq`/`wice`；这也解释了
+"液相最终被压力头钉回逐位相同、冰相不同"）。
+
+## 可复用的方法（比结论更值钱）
+
+1. **同点同位型探针**：内核与 Rust 在同一位置打同一组量的位型（`Z17` / `{:016X}`），
+   逐迭代/逐元素比。十进制 `E24.16` 只有 16 位有效数字，判不了 1 ULP。
+   本轮的工具：`/tmp/gf/leafit_bits_probe.sh`、`gtcoef_probe.sh`、`postloop_probe.sh`、
+   `th6_probe.sh`、`meltf_args_probe.sh`。
+2. **离线形状穷举**：探针只负责给**输入位型**，形状在 Python 里对候选写法和
+   **多轮同时命中**做筛选（`/tmp/gf/irab_shapes.py`）。Python 3.12 没有 `math.fma`，
+   用 `Fraction` 做精确 fma。
+3. **判"系统性偏差还是混沌放大"用短程对照**：`git stash` 后重编再跑 48 步/1 步，
+   若短程只差 1 个元素，就是混沌放大，不是公式错（第 249 轮用过）。
+4. **形状不能类比**：同一子程序里相邻两条 `X + tinc*coef`、`taf` 与 `qaf`、
+   `fseng` 与 `fevpg` 的形状都可以不同 —— 只认实测位型/出货汇编。
+5. **"读汇编 → 落代码"要复核**：本会话有两次注释写着 `fmsub`/`FMA` 而代码写成平铺
+   （第 246 轮的 `_3199`、第 252 轮前的 `fevpg += tinc*cgrndl`）。
+
+## 三个必须记住的坑
+
+* **编的不是你以为的那个文件**（第 166 轮）：内核编
+  `extends/interception/*_Extended.F90`，而 `main/` 下有同名文件、公式**不一样**
+  （第 249 轮 `fwet_snow` 就是按 `main/` 那份实现，差 2.79e-12 相对量）。
+  用 `strings .bld/*.o | grep '\.F90'` 或构建日志确认。
+* **GIMPLE dump 不代表出货二进制**：`th_ext.opt`/`lt_ext.opt` 的收缩结论与本机
+  `-O2` 出货二进制多次不一致。判形状用 `llvm-objdump --disassemble-symbols=…`
+  对 `kernels/default/colm.x` 取操作码窗口，或直接用位型探针。
+* **内核构建不是逐字节可复现的**：同一份源码 + 同一套 flag 连编三次得到三个不同的
+  `colm.x` sha256（行为一致）。**不要用 sha256 判断"内核有没有被换过"**；
+  用 `strings` 找探针标记或直接看行为。反过来，探针跑完**必须重编**。
+
+## 验证资产清单（都在仓库里，可一键复跑）
+
+* 11 个差分外壳 `oracle/scripts/compare_*.sh`：9 个裸跑即全绿且逐位相同
+  （`qsadv` 4×20000、`moninobukm` 20×20000、`soil_hcap_cond` 8 档×5000、
+  `MOD_Hydro_SoilFunction` 3×10000、`leddy`、`forcingdownscaling` 三支、
+  `phasechange:meltf` 9×10000）；另两个需要参数（`compare_flag_isolated.sh <tag> "<nml 行>"`、
+  `compare_second_config.sh <case>`）。
+* 黄金三窗口 + `tier-check` + `oracle/tolerances.toml` 的分层容差。
+* `cargo test --workspace --lib --bins`（26 个测试二进制）、
+  `cargo clippy --workspace --all-targets -- -D warnings`、`cargo fmt --all --check`、
+  `python3 oracle/scripts/test_upstream_f48_sync.py`（本会话最后一次全绿）。
+
+## 若继续
+
+从 `water_2014.rs` 的冻融分配入手，照第 255 轮的探针骨架（跑 2 步）：
+把该步的 `wliq/wice/t_soisno/smp/hk/imelt/tinc` 在**冻融前后**各取一次位型，
+先判"是不是冻融项造成的"；若是，用第 2 条方法对候选写法做多轮筛选。
