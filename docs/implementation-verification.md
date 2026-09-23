@@ -15481,3 +15481,90 @@ Tested: `/tmp/gf/gtcoef_probe.sh` 两次（改前 8 个不同、改后 95 个全
 33495/444394.4368/25896/79）；`gt.o` 的 `0xc94-0xcb4` 与 `0xcd0-0xcf0` 反汇编；
 `cargo fmt/clippy/test`。
 Not-tested: 循环后那一段（下一轮）；`f_qinfl`/`f_qlayer` 的土壤水文路径。
+
+## 第 251 轮：全量差分工具复跑 + 残差收敛到**一个量**
+
+前面几轮把干窗第 0 步的 restart 打到 **0/68（逐位全同）**。本轮做一次横向清点，
+把仓库里全部 checked-in 差分工具复跑一遍，并把剩下的差异**定位到单一量**。
+
+### 一、10 个差分工具复跑（本轮实测）
+
+| 工具 | 结果 |
+|---|---|
+| `compare_qsadv.sh` | 4 个输出 20000/20000 逐位相同 |
+| `compare_moninobukm.sh` | 20 个输出 20000/20000 逐位相同 |
+| `compare_soilthermal.sh` | 8 档方案 × 5000 组，`hcap`/`thk` 各 40000/40000 |
+| `compare_leddy.sh` | PASS（8 个分支分布） |
+| `compare_forcingdownscaling.sh` | PASS（4 个分支分布） |
+| `compare_forcingdownscaling_wind.sh` | PASS |
+| `compare_forcingdownscaling_shortwave.sh` | 11 个输出 2000/2000（8 个分支分布） |
+| `compare_phasechange.sh` | `meltf` 5 种 patchtype × 2000，9 个量 10000/10000 |
+| `compare_flag_isolated.sh` | **需要参数**（`<tag> "<namelist 行>"`），见下 |
+| `compare_second_config.sh` | **需要算例名**，见下 |
+
+前 8 个裸跑即全绿（`bitwise identical`）—— 模块级差分这一层的证据是完整的。
+
+### 二、第二个配置（Campbell 土水 + 关 VSF）
+
+三个黄金算例都走 van Genuchten + VSF，这条 Richards 支路平时没有端到端信号。
+本轮三个算例各跑一遍第二配置：
+
+| 算例 | 第二配置 `ot_vars` | 同窗口黄金配置 |
+|---|---|---|
+| CN-Cng | **16** | 17 |
+| CN-Cng-wet | **66** | 68 |
+| US-NR1-snow | **79** | 79 |
+
+即**换一套土壤水方案，精度与主配置齐平**（甚至略好）。
+
+### 三、按开关分区（`compare_flag_isolated.sh`）
+
+| tag | 注入 | 第 0 步差异变量 |
+|---|---|---|
+| `base` | 无 | 8 |
+| `nophs` | `DEF_USE_PLANTHYDRAULICS = .false.` | **同一份名单**（8 个） |
+| `vegsnowoff` | `DEF_VEG_SNOW = .false.` | 换成另一组（`f_h2osoi` 2.48e-13、`f_wat`/`f_wat_inst` 1.42e-15） |
+| `split` / `norich` | `DEF_SPLIT_SOILSNOW=.true.` / `DEF_USE_VSF=.false.` | 内核直接跑不完（该算例的 `out` 不适配），不算证据 |
+
+`nophs` 与 `base` 名单一致 ⇒ 残差**不在 PHS 支路**（与第 246/247 轮的结论一致）。
+
+### 四、残差收敛到**一个量**：`fevpg`
+
+`base` 的第 0 步差异（本轮逐位扫描，8 个变量、每个 1 个元素）：
+
+| 变量 | ndiff | maxabs | maxrel |
+|---|---|---|---|
+| `f_fevpg` | 1 | 1.3553e-20 | 1.75e-16 |
+| `f_qinfl` | 1 | 1.3553e-20 | 1.75e-16 |
+| `f_qlayer` | 1 | 1.3553e-20 | 1.75e-16 |
+| `f_qstar` | 1 | 1.3553e-20 | 2.21e-16 |
+| `f_fevpa` | 1 | 1.3553e-20 | 2.64e-16 |
+| `f_lfevpa` | 1 | 2.8422e-14 | 2.37e-16 |
+| `f_xerr` | 1 | 1.5420e-20 | 8.04e-06 |
+| `f_zerr` | 1 | 2.4500e-14 | 9.57e-04 |
+
+**前五个的 `maxabs` 完全相同（1.3553e-20）**—— 它们是同一次 1 ULP 扰动的传播，
+不是五个独立缺陷。顺链读：
+
+* `fevpa = fevpl + fevpg`，而 `f_fevpl`（叶面）已经逐位相同 ⇒ **种子在 `fevpg`**；
+* `lfevpa = lfevpl + htvp*fevpg`、`qstar = -fevpa/(rhoair*ustar)`
+  （`MOD_Vars_1DAccFluxes.F90:2745`，与 `history_diagnostics.rs:156` 的形状逐字一致 ⇒
+  `f_qstar` 是**继承**来的，不是 `history_diagnostics` 自己的形状错）；
+* `f_qinfl`/`f_qlayer` 是土壤水对同一个扰动的响应（restart 里 `wliq_soisno` 仍逐位相同，
+  说明扰动没进状态）。
+
+**结论：剩下的整个第 0 步残差只有一个源头 —— 叶温例程循环后的
+`fevpg = rhoair*cgw*(qg-qaf)` 及其订正 `fevpg += tinc*cgrndl`
+（`MOD_LeafTemperature_Extended.F90:1397/1436`、`MOD_Thermal…:1239`）。**
+
+`f_xerr`/`f_zerr` 是能量/水平衡残差（量级 ~1e-20），它们的**相对**差大只是因为分母接近 0，
+绝对值本身就是 ULP 级，不作为独立目标。
+
+**下一轮**：把叶温例程**循环后**那一段做成探针（`ground_evaporation`、`cgw`、
+`wtgq0`、`dqgdT`、`cgrndl`、订正后的 `fevpg`）—— 这是探针目前唯一没覆盖的区间
+（现探针只到 it=10 的循环体）。
+
+Tested: 8 个 `compare_*.sh` 裸跑（全绿，逐位）；`compare_second_config.sh` 三个算例
+（16/66/79）；`compare_flag_isolated.sh` 的 `base`/`nophs`/`vegsnowoff`（另两个不适用）；
+第 0 步 8 变量逐位扫描（`/tmp/gf/flag_base/`）。
+Not-tested: `split`/`norich` 两个开关（内核跑不完，非证据）；循环后那一段（下一轮）。
