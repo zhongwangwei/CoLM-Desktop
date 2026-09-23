@@ -16676,6 +16676,31 @@ Tested: `wtpre_probe.sh`（16 步，`WTPRE`/`WTPOST` 两侧 32 行）；`wtentr_
 `cargo clippy --workspace --all-targets -- -D warnings`；`cargo fmt --all --check`。
 Not-tested: 第二配置（Campbell + 关 VSF）本轮未复跑；`rootflux` 1 ULP 的最后一跳未定位。
 
+#### 第 276 轮：一个**真缺口**（这几份窗口里不生效）：`balance_phs_rootflux` 没移植
+
+第 7163 行那句"本仓库在 `root_flux_kg_m2_s` 那一处已有**同构**实现"是错的，本轮纠正：
+上游 `MOD_PHSRootfluxBalance:balance_phs_rootflux` 干的事是"把 `rootflux` 按比例
+缩放到 `sum(rootflux) = etr`"（`max(rootflux,0)*(etr/sum_pos_flux)`，或按 `rootfr`
+权重，或均分），而本仓库在 `leaf_temperature.rs` 里做的是 `rootflux * etr / etr0`
+——**两回事**。上游在扩展截留这条路上调它两次：
+
+| 调用点 | 上游位置 | 本仓库 |
+|---|---|---|
+| `'post-PHS'` | `:1145`，`etr = etrsun + etrsha` 之后 | 未移植 |
+| `'post-leaf-temperature'` | `:1367`，`rootflux*etr/etr0` 之后 | 未移植 |
+
+`crates/colm-core/src/leaf_temperature.rs:613` 那条 `ensure!` **不覆盖**它：它断言的是
+**植物水力解自身**的收支（`hydraulic_output.sunlit + shaded - sum(root_flux) <= 1e-7`），
+而上游判定用的是**冠层** `etr` —— 两者是不同的量。
+
+**但在这三份窗口里它确实不生效**：`balance_phs_rootflux` 一旦真的动手就会打
+`Warning: adjusting vegetation PHS rootflux balance`，而 16 步干窗的内核日志里
+这条警告出现 **0 次**（`grep -c 'rootflux balance' /tmp/gf/dryts/run/f.log` = 0）
+⇒ `abs(etr - sum(rootflux)) <= 1e-7` 每步都成立、函数每步都早退。所以它**不是**
+记录 12 那颗种子的来源，而是一个"默认配置下暂不生效、但条件一旦不成立就会静默
+算错"的缺口 —— 属于"未移植"清单里该补的一项（补它需要 `fr` 权重与 `context` 字符串，
+以及 `warn_count` 那个 `save` 计数器）。
+
 ---
 
 # 交接：Fortran → Rust 移植的当前状态（本会话收束）
@@ -16808,7 +16833,13 @@ wice_soisno[5]   kernel=6.1823587081423845 (4018BABC3DBE730C)
 剩下三件事，按价值排序：
 0. **（新）`rootflux` 的那 1 ULP**：见上。`accept_r247.sh` 与
    `dry_ts.sh 16` + `window_divergence.py` 是它的两个验收口径；
-   干窗黄金 `over_tol` 现在是 821 / 20662 / 25896。
+   干窗黄金 `over_tol` 现在是 821 / 20662 / 25896。判别只剩两条候选，
+   一趟探针就能分开：在 `MOD_LeafTemperature_Extended.F90:1354`（`etr0 = etr` 之后）
+   把 `etr`/`etr0`/`rootflux(1..6)` 两侧都打出来 —— 若 `etr0` 也差 1 ULP，
+   就是 `last.transpiration` 的传播（缩放那一步）；若 `etr0` 相同而 `rootflux` 差，
+   种子在植物水力解（`plant_hydraulics.rs:567 root_flux_from_top_potential`）。
+0b. **（新）补 `balance_phs_rootflux`**：见第 276 轮。默认配置下它在这三份窗口里
+   不生效（警告 0 次），但条件不成立时会静默算错，属于该补的缺口。
 
 1. **11 天黄金窗口与存储 golden 的那条链**：干窗与 `oracle/golden/CN-Cng_hist_2008-01.nc`
    的首次分歧在**第 1 步**、量级 **1e-7**（`f_trad`、`f_rnet`，不是末位级），
