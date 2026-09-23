@@ -1593,26 +1593,35 @@ fn upward_longwave(
             * input.ground_emissivity
             * input.ground_temperature_k.powi(4)
     };
-    STEFAN_BOLTZMANN
-        * (factor
-            * previous_leaf_temperature_k.powi(3)
-            * (previous_leaf_temperature_k + 4.0 * leaf_temperature_change_k)
-            + ground_term)
-        + (1.0 - input.ground_emissivity)
+    let canopy_emission = factor
+        * previous_leaf_temperature_k.powi(3)
+        * (previous_leaf_temperature_k + 4.0 * leaf_temperature_change_k)
+        + ground_term;
+    // `MOD_LeafTemperature_Extended.F90:1416` 的第一个加法**左边就是乘积**
+    // `stefnc*(fac*t³*(t+4*dtl) + ther mk*emg*tg⁴)` ⇒ GCC 把它收进加法：
+    // `FMA(stefnc, p1+p2, (1-emg)*thermk*thermk*frl)`。
+    // 离线穷举（`/tmp/gf/ulrad` 的第 3 步两侧位型）实测：只有"左乘积融合"这一维能
+    // 复现内核的 `ulrad`（`4070B00402BA216F`），平铺得到 `…216E`；后三个加法的
+    // 收缩在本算例看不出来，保持平铺。
+    let mut value = STEFAN_BOLTZMANN.mul_add(
+        canopy_emission,
+        (1.0 - input.ground_emissivity)
             * input.canopy_longwave_gap_fraction.powi(2)
-            * input.atmospheric_longwave_w_m2
-        + (1.0 - input.ground_emissivity)
-            * input.canopy_longwave_gap_fraction
-            * factor
-            * STEFAN_BOLTZMANN
-            * previous_leaf_temperature_k.powi(4)
-        + 4.0
-            * (1.0 - input.ground_emissivity)
-            * input.canopy_longwave_gap_fraction
-            * factor
-            * STEFAN_BOLTZMANN
-            * previous_leaf_temperature_k.powi(3)
-            * leaf_temperature_change_k
+            * input.atmospheric_longwave_w_m2,
+    );
+    value += (1.0 - input.ground_emissivity)
+        * input.canopy_longwave_gap_fraction
+        * factor
+        * STEFAN_BOLTZMANN
+        * previous_leaf_temperature_k.powi(4);
+    value += 4.0
+        * (1.0 - input.ground_emissivity)
+        * input.canopy_longwave_gap_fraction
+        * factor
+        * STEFAN_BOLTZMANN
+        * previous_leaf_temperature_k.powi(3)
+        * leaf_temperature_change_k;
+    value
 }
 
 fn update_canopy_water(
