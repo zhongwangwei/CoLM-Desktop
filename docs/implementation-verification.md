@@ -16752,6 +16752,39 @@ row 15: 全差（那时状态已经被放大，不算证据）
 `xroot(1:3)`、`etrsun`、`etrsha` 两侧都打出来，一次构建就能把 1 ULP 夹到
 "迭代状态 `x` 已经差"还是"`qe2x` 那一解差"这一层，再往里走。
 
+#### 第 279 轮：进植物水力内部了 —— `qe2x` 排除，差在牛顿步里
+
+在 `MOD_PlantHydraulic.F90:355`（`qeroot = etrsun + etrsha`，即调 `getrootqflx_qe2x`
+**之前**）两侧都打 `x(1..4)`、`etrsun`、`etrsha`、`qeroot`（`PYDYN`）：
+
+```text
+PYDYN: 两侧各 49 行，**row 0–29 逐位全同**（含 x、etrsun、etrsha、qeroot）
+row 30（≈ 第 10/11 步）起全差：
+    x1      K=-650.4856155889519   R=-650.4856130277079
+    x2      K=-660.925191753547    R=-660.9251821426992
+    etrsun  K=1.9130064123456775e-10  R=1.9130048890441568e-10
+    qeroot  K=2.126175392246929e-08   R=2.126173951860131e-08
+```
+
+**两个结论**：
+
+1. **`getrootqflx_qe2x` 排除了**：`rootflux(j) = k_soil_root(j)*(smp(j)-xroot(j))`
+   是 `qeroot` 的确定性函数（`smp`/`k_soil_root` 都逐位同），而 `qeroot` 在 row 30
+   就已经不同 ⇒ 逐层 `rootflux` 的差是从这里继承的，不是 `qe2x` 自己产生的。
+   第 278 轮列的"已对上"表因此可以直接把 `qe2x` 划掉。
+2. 差落在**牛顿步**这一段：`PYDYN` 打的是 `x = x + dx`（`:334`）**之后**的状态，
+   所以 row 30 的 x 差可能是 row 30 自己的 `spacAF_twoleaf`+更新造的，也可能是
+   row 29 → row 30 之间的写回/入场造的。**下一枪**：在 `PlantHydraulicStress_twoleaf`
+   **入场处**（`:170` `x = vegwp(1:nvegwcs)` 刚赋值之后）再打一次 `x` ——
+   入场同而更新后不同 ⇒ 就是 row 30 的 `spacAF_twoleaf`/`dx` 重标定；
+   入场已经不同 ⇒ 是调用之间那条写回（`vegwp(1:nvegwcs) = x`，`:220`）。
+
+**探针的坑（记下来）**：`PYRQF`（逐层 rootflux）那一条**不能按行对齐** ——
+同一段 Python 补丁在两侧的落点不同（内核侧打在 `:358-360` 的 `IF` 分支里，
+本仓库侧打在 `if`/`else` 两路汇合之后的 `ensure!` 之前），于是内核侧 49 行、
+本仓库侧 328 行。**教训：两侧补丁要打在语义等价的分支里**，否则行数都不一样，
+比较出来的是垃圾。`PYDYN` 因为落在同一个 `IF` 分支内，49/49 才对得上。
+
 ---
 
 # 交接：Fortran → Rust 移植的当前状态（本会话收束）
@@ -16882,13 +16915,13 @@ wice_soisno[5]   kernel=6.1823587081423845 (4018BABC3DBE730C)
 （第 11 步正是 `etr` 第一次非零的那一步，那两行此前从未生效过）。
 
 剩下三件事，按价值排序：
-0. **（新，已定位）`rootflux` 的那 1 ULP 在植物水力解算器里**：第 277 轮已经判别完
-   —— `etr`/`etr0` 逐位相同，`last.root_flux_kg_m2_s` 在第 11 步第 2 层就差 1 ULP。
-   下一枪打 `crates/colm-core/src/plant_hydraulics.rs:567 root_flux_from_top_potential`
-   （上游 `MOD_PlantHydraulic.F90`）：同一时刻两侧对打
-   `psi`/`root_psi`/`zp`/`layer_thickness` 的进出口，先看**收敛判据的 `tol` 比较**
-   再看 `a*b + c` 的收缩。验收口径：`accept_r247.sh` 与
-   `dry_ts.sh 16` + `window_divergence.py`；干窗黄金 `over_tol` 现在是 821 / 20662 / 25896。
+0. **（新，已定位到牛顿步）`rootflux` 的那 1 ULP 在植物水力解算器里**：
+   第 277 轮：`etr`/`etr0` 逐位相同、`last.root_flux_kg_m2_s` 第 11 步第 2 层差 1 ULP；
+   第 279 轮：`PYDYN` row 0–29 全同、row 30 起 `x`/`qeroot` 差 ⇒ `qe2x` 排除，
+   差在牛顿步。下一枪：在 `PlantHydraulicStress_twoleaf` 入场（`:170`）再打一次 `x`，
+   分开"row 30 的 `spacAF_twoleaf`/`dx` 重标定"与"两次调用之间的 `vegwp` 写回"。
+   验收口径：`accept_r247.sh` 与 `dry_ts.sh 16` + `window_divergence.py`；
+   干窗黄金 `over_tol` 现在是 821 / 20662 / 25896。
 0b. **（新）补 `balance_phs_rootflux`**：见第 276 轮。默认配置下它在这三份窗口里
    不生效（警告 0 次），但条件不成立时会静默算错，属于该补的缺口。
 
