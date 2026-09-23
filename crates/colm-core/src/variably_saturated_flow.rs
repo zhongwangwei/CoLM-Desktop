@@ -4755,14 +4755,20 @@ pub fn soil_water_vertical_movement(
             continue;
         }
         if level < water_table_level.saturating_sub(1) {
-            balance_before_mm += state.liquid_water[level] * layer_thickness_mm;
+            balance_before_mm =
+                state.liquid_water[level].mul_add(*layer_thickness_mm, balance_before_mm);
         } else if level + 1 == water_table_level {
-            balance_before_mm += state.liquid_water[level]
-                * (water_table_depth_mm - input.interface_depth_mm[level]);
-            balance_before_mm += input.porosity[level]
-                * (input.interface_depth_mm[level + 1] - water_table_depth_mm);
+            balance_before_mm = state.liquid_water[level].mul_add(
+                water_table_depth_mm - input.interface_depth_mm[level],
+                balance_before_mm,
+            );
+            balance_before_mm = input.porosity[level].mul_add(
+                input.interface_depth_mm[level + 1] - water_table_depth_mm,
+                balance_before_mm,
+            );
         } else {
-            balance_before_mm += input.porosity[level] * layer_thickness_mm;
+            balance_before_mm =
+                input.porosity[level].mul_add(*layer_thickness_mm, balance_before_mm);
         }
     }
     balance_before_mm += state.aquifer_water_mm;
@@ -5010,14 +5016,19 @@ pub fn soil_water_vertical_movement(
             continue;
         }
         if level < water_table_level.saturating_sub(1) {
-            balance_after_mm += state.liquid_water[level] * layer_thickness_mm;
+            balance_after_mm =
+                state.liquid_water[level].mul_add(*layer_thickness_mm, balance_after_mm);
         } else if level + 1 == water_table_level {
-            balance_after_mm += state.liquid_water[level]
-                * (water_table_depth_mm - input.interface_depth_mm[level]);
-            balance_after_mm += input.porosity[level]
-                * (input.interface_depth_mm[level + 1] - water_table_depth_mm);
+            balance_after_mm = state.liquid_water[level].mul_add(
+                water_table_depth_mm - input.interface_depth_mm[level],
+                balance_after_mm,
+            );
+            balance_after_mm = input.porosity[level].mul_add(
+                input.interface_depth_mm[level + 1] - water_table_depth_mm,
+                balance_after_mm,
+            );
         } else {
-            balance_after_mm += input.porosity[level] * layer_thickness_mm;
+            balance_after_mm = input.porosity[level].mul_add(*layer_thickness_mm, balance_after_mm);
         }
     }
     balance_after_mm += state.aquifer_water_mm;

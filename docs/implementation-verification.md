@@ -15989,52 +15989,112 @@ Not-tested: 第 2 步的 `meltf` 实参（探针仍是 2 步版）。
 `err_solver`（`:4494-4498` 的 `FNMA(通量和, deltim, 蓄量变化)`）也顺手 A/B 了平铺版：
 输出同样逐字节相同 —— 与 "补冰循环没进" 互为印证（该项只在 `wblc > 0` 时才看得见）。
 
+### 第 257 轮：**残差消除** —— `wblc` 的两个逐层累加在 Fortran 里被收缩成 FMA
+
+五枪探针的链条（每枪一个脚本，都在 `/tmp/gf/`）：
+
+1. **3 步版实参探针**（`meltf_args_probe3.sh`，`end_sec` 3600→5400）：第 2 步的 31 个实参
+   （`fact/brr/t_soisno_bef/t_soisno/wliq/wice` 第 1..3 层 + 13 个标量）**逐位全同**。
+2. **打进 `meltf` 内部**（`meltf_inner_probe.sh`）：`supercool`（含缩放前的 `vliq` 与全套
+   VG 参数）、`wice/wliq/t/hm/xm/heatr/imelt`、`xmf` —— 三步全同。**关键反转**：
+   内核 `meltf` 的**输出** `wice = …40C` 与 Rust 逐位相同，而内核第 2 步的 history 是
+   `…30C` ⇒ 差产生在 **meltf 之后的水步**（第 256 轮"能量步产生"的判断反了）。
+3. **`imperv` + `wblc` 探针**（`imperv_probe.sh`）：`is_permeable(1)` 第 1/2 步为真
+   （离线也能验：`vol_ice = 6.182/(0.0175·917) = 0.385`，`eff_porosity = 0.5016-0.385 = 0.1166
+   > θr = 0.11374`）⇒ 不透水那一支不走；水步里能改冰的只剩 `wblc` 补冰循环。实测第 2 步
+   内核 `wblc = +2.2737367544323206e-13`、Rust `= 0`；`WBLCEND` 之后内核冰 `…30C`、
+   Rust `…40C` —— **那 256 ULP 整项就是它**。
+4. **`wblc` 分量探针**（`balance_probe.sh`，逐层打印两个累加值 + 6 个分量）：
+   `w_sum_before`、`sum(etroot)`（本窗口恒 0）、`etrdef`（0）、`qgtop`、`rsubst` **全同**；
+   只有 `w_sum_after`（以及 before/after 的**逐层累加过程**）在**特定层差 −1 ULP 且此后一直保持**
+   （step 0 从第 8 个可透层起、step 1 从第 6 个起、step 2 从第 0/1 个起）。
+   "出现一次就保持"正是 `acc + a*b` 被收缩成 FMA 的指纹（一步舍入 vs 两步舍入）。
+   出货汇编佐证：`otool -tv -p ___mod_hydro_soilwater_MOD_soil_water_vertical_movement
+   kernels/default/colm.x` 里有 **2568 条 `fmadd/fnmadd`**。
+5. **落码**：`variably_saturated_flow.rs` 的 `balance_before_mm` / `balance_after_mm`
+   两个逐层累加（各 4 处）改成 `mul_add`（`acc + a*b` → `a.mul_add(b, acc)`）。
+
+`bash /tmp/gf/accept_r247.sh` 的三段式结果：
+
+| 口径 | 第 256 轮 | **第 257 轮（现在）** |
+|---|---|---|
+| 1 步 restart | 0 / 68 | **0 / 68** |
+| 3 步 restart | 2 / 68（`wice_soisno[5]`、`hk[0]`） | **0 / 68** |
+| 3 步 history（692 个逐位单元） | 687（99.2775 %） | **692（100 %，逐位全同）** |
+| 黄金 `ot_vars` dry/wet/snow | 17 / 68 / 79 | 17 / 68 / 79 |
+| 黄金 `over_tol` dry/wet/snow | 826 / 20665 / 25896 | **825** / 20665 / 25896 |
+
+黄金窗口没动：它与**存储的** golden 文件比，那条链的首次分歧在第 1 步且量级是 1e-7
+（`f_trad`/`f_rnet`，不是末位级），本轮的修复不在这条链上；干窗本身也是混沌的。
+但**第 2 步那个唯一的状态差已经彻底消失**，`wice_soisno`/`hk` 三步全同。
+
+#### 第 257 轮的三个教训
+
+* **因果箭头别对着 history 反推**：`…40C` 是**两侧共有**的 meltf 输出值，`…30C` 是内核
+  水步里再扣 1 ULP 的结果。第 256 轮拿"history 的值"当"候选模块的输出"，把方向搞反了。
+  探针必须打在候选语句的**前后两侧**，而不是拿最终输出当模块输出。
+* **内核构建是单例**（新坑）：`build_kernel.sh` 的临时树固定是 `kernels/build-<preset>`，
+  而每个探针脚本的 `trap restore` 会**再编一次**内核。第二个探针在第一个的 restore 还没跑完时
+  启动，两秒后就把它整棵树删了 —— 两边都报 `No rule to make target 'mksrfdata.x'`，
+  而 `kernels/default/` 里留下的是**上一个探针的带插桩内核**（差一点就拿它当干净内核去比）。
+  现在每个探针开头都用 `mkdir` 抢 `/tmp/gf/.kernel_build.lock`（15 分钟陈旧锁可抢）。
+* **`compare_phasechange.sh` 对土壤层的覆盖是弱的**：它只逐位比 `wice(lb)`（`lb = -1`，
+  **雪层**），土壤层只经 `sum_qfrz`/`xmf` 这类**求和**间接覆盖，1 ULP 会被求和吞掉。
+  "9 量 × 10000 逐位闭环"于是并不能证明土壤层分支没问题 —— 本轮差的就是土壤层。
+
+Tested: `/tmp/gf/meltf_args_probe3.sh`、`meltf_inner_probe.sh`、`imperv_probe.sh`、
+`balance_probe.sh`（各 3 步，两侧位型；跑完都自动还原源码并重编内核）；
+`otool -tv -p ___mod_hydro_soilwater_MOD_soil_water_vertical_movement kernels/default/colm.x`；
+`bash /tmp/gf/accept_r247.sh`（1 步 restart / 3 步 history / 黄金三窗口）；
+`bash /tmp/gf/dry_ts.sh 3` + `restart_divergence.py`（3 步 restart 0/68）。
+Not-tested: 第二配置（Campbell + 关 VSF，本轮只动 VSF 路径）；11 天黄金窗口与存储 golden
+之间的首次分歧（第 1 步、1e-7 量级，与本轮修复无关，来源未查）。
+
 ---
 
 # 交接：Fortran → Rust 移植的当前状态（本会话收束）
 
 ## 一句话
 
-**移植在功能上完整、在逐位精度上已推进到"第 0/1 步全同、第 2 步只剩一个状态量的
-3.7e-14 相对差"。** 剩下的不是缺模块、缺算法，而是一个末位级的状态差，
-位置与候选都已钉死（见下）。
+**移植在功能上完整，短程逐位对齐已经做完：干窗 CN-Cng 第 1/2/3 步的 restart 与
+history 现在全部逐位相同（692/692）。** 那个追了十几轮的末位级状态差在第 257 轮
+定位并消除（`wblc` 的两个逐层累加在 Fortran 里被收缩成 FMA）。剩下的只有两件：
+11 天黄金窗口与**存储 golden** 之间那条 1e-7 量级的分歧（不是末位级、与本轮修复无关），
+以及明确未移植的分支（split soil/snow、SNICAR、tracer、CaMa 洪水等）。
 
 ## 逐位对齐的阶梯（干窗 CN-Cng，1/2/3 步实测）
 
-| 口径 | 当前值 |
-|---|---|
-| 第 1 步 restart | **0 / 68 变量**（逐位全同） |
-| 第 2 步 restart | **0 / 68** |
-| 第 3 步 restart | 2 / 68（`wice_soisno[5]`、`hk[0]`） |
-| 第 0 步 history | **0 个差异变量** |
-| 第 1 步 history | **0 个差异变量** |
-| 第 2 步 history | 5 个差异变量（全是 `wice` 的下游） |
-| 步级（3 步、692 个逐位单元） | **687 逐位相同（99.28%）** |
-| 黄金 `ot_vars` dry/wet/snow | **17 / 68 / 79**（= 已记录的基线） |
-| 黄金 `over_tol` dry/wet | 826 / 20665（基线 825 / 20672） |
-| 第二配置（Campbell + 关 VSF）`ot_vars` | **16 / 66 / 79** |
+| 口径 | 第 257 轮（现在） | 第 256 轮 |
+|---|---|---|
+| 第 1 步 restart | **0 / 68 变量** | 0 / 68 |
+| 第 2 步 restart | **0 / 68** | 0 / 68 |
+| 第 3 步 restart | **0 / 68** | 2 / 68（`wice_soisno[5]`、`hk[0]`） |
+| 第 0/1/2 步 history | **0 个差异变量** | 第 2 步 5 个 |
+| 步级（3 步、692 个逐位单元） | **692 逐位相同（100%）** | 687（99.28%） |
+| 黄金 `ot_vars` dry/wet/snow | 17 / 68 / 79 | 17 / 68 / 79 |
+| 黄金 `over_tol` dry/wet/snow | **825** / 20665 / 25896 | 826 / 20665 / 25896 |
+| 第二配置（Campbell + 关 VSF）`ot_vars` | 16 / 66 / 79（本轮未重跑） | 16 / 66 / 79 |
 
-## 唯一残留：第 2 步第 1 层土壤冰
+## 原残留（已消除）：第 2 步第 1 层土壤冰
+
+第 254–256 轮追的那个差是这个形状：
 
 ```text
 wice_soisno[5]   kernel=6.1823587081423845 (4018BABC3DBE730C)
                  rust  =6.182358708142612  (4018BABC3DBE740C)    3.68e-14 相对
-hk[0]            kernel=2.9151756458244646e-26 / rust 2.915175645823325e-26
 ```
 
-`wliq_soisno`/`smp`/`t_soisno` 全同；`f_wat`/`f_h2osoi` 等的差都能由这一个量解释
-（见「第 254 轮」）。**已排除**的来源：叶温 Newton 循环（58 个量 × 10 轮全同）、
-地面温度三对角组装（95 个量全同）、`meltf`（9 量 × 10000 闭环 + 第 1..3 层实参全同）、
-保持曲线（`compare_soilhydro.sh` 3 输出 × 10000 全同）、
-**第 1 层凝结项与水步的补冰/imperv**（第 256 轮：`qsdew = qfros = qsubl = 0`；
-`balance_error_mm ≤ 0` ⇒ 补冰循环三步都没进；imperv 要非渗透顶层，本例 `patchtype = 0`）。
+**第 257 轮定位并修掉**：`WATER_VSF` 里 `wblc > 0` 的补冰循环从最上土壤层扣冰，
+而这个 `wblc`（= `soil_water_vertical_movement` 的水量闭合误差）在两侧差 1 ULP
+（内核 `+2.27e-13`、Rust `0`，恰好是 1605 mm 蓄量的一个 ULP）。原因是 Rust 的
+`balance_before_mm`/`balance_after_mm` 两个逐层累加写成了 `acc += a * b`（两次舍入），
+而内核把 `acc + a*b` 收缩成一条 FMA（一次舍入）。改成 `a.mul_add(b, acc)` 后
+**1/3 步 restart 都是 0/68、3 步 history 692/692 逐位全同**。
 
-**已知的位置边界**（第 256 轮）：差异元素是**最上土壤层**（`f_wice_soisno[:, 0, 5]`，
-打包列前 5 槽是未启用的雪槽）；第 0、1 步状态逐位全同 ⇒ 差只产生在**第 2 步内部**；
-而**水步那一侧已全部排除**（凝结通量全零、`wblc` 补冰循环三步都没进、imperv 要非渗透顶层），
-`WATER_VSF` 里再没有能改冰的语句 ⇒ **那 256 ULP 是能量步相变（`meltf`）产生、
-被水步原样留下的**（水步只用压力头重写 `wliq`，所以 `wliq` 反而逐位相同）。
-`meltf` 函数本身有 9 量 × 10000 逐位闭环、第 0/1 步实参全同 ⇒ 打第 2 步才走到的那条相变分支。
+过程与证据（逐层累加值差 −1 ULP 且保持、出货汇编 2568 条 FMA）见「第 257 轮」。
+被排除的来源清单（叶温 Newton 循环、地面温度三对角组装、`meltf`、保持曲线、
+凝结项、imperv 分支）也留在那一节里 —— 它们当时的排除都是对的，**错的是把这些
+局部结论拼成"差来自能量步"的那一步推理**。
 
 ## 可复用的方法（比结论更值钱）
 
@@ -16051,6 +16111,10 @@ hk[0]            kernel=2.9151756458244646e-26 / rust 2.915175645823325e-26
    `fseng` 与 `fevpg` 的形状都可以不同 —— 只认实测位型/出货汇编。
 5. **"读汇编 → 落代码"要复核**：本会话有两次注释写着 `fmsub`/`FMA` 而代码写成平铺
    （第 246 轮的 `_3199`、第 252 轮前的 `fevpg += tinc*cgrndl`）。
+6. **累加器指纹**（第 257 轮定的案）：把**逐层累加值**打出来比。若两侧只在**某几层差
+   1 ULP 且此后一直保持**，那就是 `acc + a*b` 收缩与否的差别（收缩=一次舍入），
+   而不是"某个输入值不对"（那会从第一层就开始差、且差值随层数增长）。
+   这条把"末位级差在哪"从"猜表达式"变成"看指纹"。
 
 ## 三个必须记住的坑
 
@@ -16081,15 +16145,23 @@ hk[0]            kernel=2.9151756458244646e-26 / rust 2.915175645823325e-26
 
 ## 若继续
 
-不要从 `water_2014.rs` 的冻融分配入手 —— 默认配置（`DEF_USE_VariablySaturatedFlow = .true.`）
-根本不走那个函数（第 256 轮实测）；也不要再查水步的凝结/补冰/imperv，那三处已排除。
+**短程逐位已经干净**（1/3 步 restart 0/68、3 步 history 692/692），所以别再往
+`meltf`/`water_2014`/水步补冰那几处找 —— 第 257 轮已经把那条链走完并修好。
+剩下三件事，按价值排序：
 
-1. 把 `/tmp/gf/meltf_args_probe.sh` 的 `end_sec` 从 `3600`（2 步）改成 `5400`（3 步），
-   只比**第 2 步**的实参（`fact/brr/t_soisno_bef/t_soisno/wliq/wice` 第 1..3 层 + 13 个标量）。
-   哪个量出现位差，就顺着它往上游追（`fact`/`brr` 来自地面温度的热参数链，
-   `th6_probe.sh` 是同一套骨架；都按"跑 3 步、只看第 2 步"来用）。
-2. 实参若全同，则相变分支的**分类**（`imelt`）在第 2 步必然不同或走的是没被
-   9×10000 闭环覆盖的那一支 —— 直接给 `phasechange:meltf` 的差分外壳补上
-   "第 1 步 `t = 273.16`、第 2 步 `t = 265.51`、`wice > 0`、`wliq > 0`"这组实参。
-3. 判"是不是混沌放大"仍用短程对照（1 步 vs 3 步）；任何探针跑完**必须重编**内核，
-   且**不要用内核 sha256 判断是否重编过**（同一份源码三次构建三个 sha）。
+1. **11 天黄金窗口与存储 golden 的那条链**：干窗与 `oracle/golden/CN-Cng_hist_2008-01.nc`
+   的首次分歧在**第 1 步**、量级 **1e-7**（`f_trad`、`f_rnet`，不是末位级），
+   与第 257 轮修的末位差不是一条链。先查**配置**而不是公式：把
+   `oracle/golden/kernel-manifest.json` 的 `macros`/`build_profile`/`colm_git_sha`
+   与当前 `kernels/default/manifest.json` 逐字比一遍 —— golden 很可能是在另一套宏/另一份
+   Fortran 快照上生成的（那样这条链根本不该拿来当逐位基准）。若配置一致，再用
+   `window_divergence.py` 从第 1 步的两个变量（`f_trad`/`f_rnet`）往上追辐射那一段。
+2. **第二配置回归**（Campbell + 关 VSF）：本轮只动 VSF 路径，理论上不该变；
+   跑 `oracle/scripts/compare_second_config.sh <case>` 确认仍是 16/66/79。
+3. **未移植分支**：`standard_lct_step.rs:578` 明说 split soil/snow、SNICAR、气溶胶、
+   示踪剂仍是另一支；动态湿地/CaMa 洪水路径 `colm-rs` 会打印 "unported branch" 警告。
+   这些是"全面完成"里真正还没做的部分。
+
+工具与纪律：探针跑完**必须重编**内核；**内核构建是单例**（所有探针已用
+`/tmp/gf/.kernel_build.lock` 串行化，不要把锁删掉）；**不要用内核 sha256 判断是否重编过**
+（同一份源码三次构建三个 sha）；判"混沌放大还是系统性偏差"仍用短程对照。
