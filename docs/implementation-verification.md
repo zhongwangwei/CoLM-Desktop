@@ -16098,8 +16098,17 @@ Not-tested: 第 2 步的 `meltf` 实参（探针仍是 2 步版）。
    （右乘积融合 / 左乘积融合）—— 8 步口径下差异一模一样。这也反过来证明
    最小二乘那一步的算术**不是**原因，原因在它拿到的 Jacobian。
 
+5. 又试了三处 A/B，**全部无效果、已还原**（8 步口径下逐记录差异一字不变）：
+   Givens 的右乘积融合、左乘积融合（见上），以及 `flux_at_unsaturated_interface` 里的
+   `psi_i = (dz_l*psi_u + dz_u*psi_l)/(dz_u+dz_l)`（上游 `:2815`，Rust 是逐字平铺）
+   的两种融合写法。
+6. 侧查：`var_perturb_*` 的增量全是 `min(wstep, x*0.5)`、`min(wstep, x*0.1)`、
+   `psi_s - (1-qin/hksat)*(-delta)*(zi-zc)/dz` 这类**乘积在 min/除法里**的写法
+   —— 没有"乘积进加法"的位置，所以扰动增量本身大概率不是种子。
+
 下一枪：在**第一个 Newton 迭代**里把 `dr_dv`/`jacobian` 的对角几项与 `vact`/`active`
-打出来，确认 Jacobian 先差；然后进 `flux_all` 的单层更新分支找算式。
+打出来，确认 Jacobian 先差；再打**每一列的扰动残差** `blc_pb`（列号 = 被扰动的层），
+用"第一个不同的列"定位到 `flux_all` 的单层更新分支里的具体算式。
 
 #### 第 258 轮：水步那颗种子再往里一层 —— Richards 解算器的 `ss_wt(1)`
 
