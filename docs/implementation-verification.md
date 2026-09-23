@@ -16821,6 +16821,44 @@ PYDYN（同一批调用里"需求为正"的那 49 次）:
 `static AtomicUsize`），这样行可以按"同一调用"对齐而不是按位置 ——
 第 279 轮和本轮踩的都是同一个坑（两侧补丁落在不同分支/不同函数时行数就对不上）。
 
+#### 第 281 轮：带**调用序号**夹逼 —— 差落在 `spacAF_twoleaf` 的 `dx`，而它的输入逐位相同
+
+两侧都加调用序号（内核 `MOD_PlantHydraulic` 里 `integer, save :: phs_probe_count`；
+本仓库 `static PHS_PROBE_COUNT: AtomicUsize`），`PHMID` 打在 `getrootqflx_x2qe`
+**刚返回**处（`x` 是更新前、`rf/rfs` 是 x2qe 的输出），`PHEND` 打在 `x = x + dx` 之后：
+
+```text
+注意：内核计数器从 1 起、Rust 的 fetch_add 从 0 起 ⇒ 内核 call n ↔ Rust call n-1
+PHMID: 两侧各 49 行；call ≤310 逐位全同，call 311 首个不同
+   call 310 的 PHMID（更新前 x1..x4 + x2qe 的 rf/rfs）**逐位相同**
+   call 310 的 PHEND：dx **不同**
+       dx1 K=27.6259477669  R=27.6259503282   (相对差 5.6e-7)
+       dx2 K=17.1863716023  R=17.1863812132
+       dx3 K=27.7079503998  R=27.7079528849
+       dx4 K=28.8861261631  R=28.8861278480
+```
+
+**读法**：call 310 的**全部输入**（`x`、`qeroot`/`dqeroot`、以及由 `x` 现算的
+`fsto/fx/dfsto/dfx/fr/dfr`）逐位相同，而出场的 `dx` 差 5.6e-7 相对 ⇒ 差产生在
+`spacAF_twoleaf`（本仓库 `plant_hydraulics.rs:spac_change`）里。嫌疑面从"四段"
+收窄到**一段**。
+
+**为什么可能是 1 ULP 的 `A` 项被放大**：`dx = (numer)/determ`，而
+`determ = A44*A22*A33*A11 − A44*A22*A31*A13 − A44*A32*A23*A11 − A43*A11*A22*A34`
+是**大项相减**。内核在这条链上的 `determ` 量级很小（第 257 轮记过 `4.1e-25` 残差），
+若几项各 ~1e-16 而结果 ~1e-25，抵消倍数就是 ~1e9 —— 于是 `A` 里**任意一项差 1 ULP**
+（1e-16 相对）会让 `dx` 差 ~1e-7 相对 ✓ **正好是实测的 5.6e-7**。这同时解释了
+"为什么前 300 次调用全都逐位相同、到第 310 次才翻"：形状差一直在，只有当
+`determ` 的抵消倍数够大时才冒出来。
+
+**下一枪（已定好）**：在 `spacAF_twoleaf`/`spac_change` **末尾**把
+`A11,A13,A22,A23,A31,A32,A33,A34,A43,A44,determ,f(1..4),dx(1..4)` 两侧都打出来 ——
+一次构建就能指出是哪个 `A` 项（或 `determ` 本身）差 1 ULP。注意第 278 轮那份
+"已对上"的记录里，`spacAF_twoleaf` 的收缩点是用**内核自己打出来的 49 组
+(A,f,dx)** 反推验证的（20000/20000、49/49）—— 那 49 组很可能取自**早期调用**
+（都在逐位相同的区间内），所以"当时全中"与"call 310 差 5.6e-7"并不矛盾：
+形状差只在高抵消倍数处显形。
+
 ---
 
 # 交接：Fortran → Rust 移植的当前状态（本会话收束）
@@ -16953,12 +16991,13 @@ wice_soisno[5]   kernel=6.1823587081423845 (4018BABC3DBE730C)
 剩下三件事，按价值排序：
 0. **（新，已定位到牛顿步）`rootflux` 的那 1 ULP 在植物水力解算器里**：
    第 277 轮：`etr`/`etr0` 逐位相同、`last.root_flux_kg_m2_s` 第 11 步第 2 层差 1 ULP；
-   第 279/280 轮：`PENTR`（入场）两侧各 328 行、row 0–309 全同、row 310 首个不同，
-   而 `PYDYN` 首个不同在 row 30（同一批调用）⇒ **入场逐位相同、出场不同**，
-   差是那一次调用自己造的，且发生在 `PYDYN` 之前 ⇒ `qe2x` 排除。嫌疑面 =
-   `getrootqflx_x2qe`（第一次 `tridia`）→ `spacAF_twoleaf` → `dx` 重标定 → `x = x + dx`
-   → 三处梯度钳制。下一枪：两侧加**调用序号**把 `PENTR`/`PYDYN` 按调用对齐，
-   再往这四段里夹。
+   第 279/280/281 轮：`PENTR`（入场）两侧各 328 行、row 0–309 全同、row 310 首个不同；
+   加调用序号后夹到**一次调用**：call 310 的 `PHMID`（更新前 `x` + `getrootqflx_x2qe`
+   的 `rf/rfs`）**逐位全同**，而它的 `PHEND` 里 `dx` 差 **5.6e-7 相对** ⇒ 差在
+   `spacAF_twoleaf`↔`spac_change` 这一段。量级符合"`determ` 大项相减把 `A` 里
+   1 ULP 放大 ~1e9 倍"（`determ` ~1e-25、各项 ~1e-16），也解释了为什么前 300 次
+   调用全同。**下一枪**：在 `spacAF_twoleaf`/`spac_change` 末尾打
+   `A11..A44, determ, f(1..4), dx(1..4)`，指出差 1 ULP 的那一项。
    验收口径：`accept_r247.sh` 与 `dry_ts.sh 16` + `window_divergence.py`；
    干窗黄金 `over_tol` 现在是 821 / 20662 / 25896。
 0b. **（新）补 `balance_phs_rootflux`**：见第 276 轮。默认配置下它在这三份窗口里
