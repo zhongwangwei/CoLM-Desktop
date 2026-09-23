@@ -18220,6 +18220,39 @@ transition 例程各自 `bounded_secant_iteration(...)` **调用一次**（`mul_
 的 FMA 上下文，按同样办法把"自己的表达式"挑出来，然后只给这些补 `mul_add` +
 建闭环；`flux_inside_hm_soil` 那 2 处按第 305 轮记的写法一起改。
 
+**第 308 轮：`flux_all` 的 7 条里 **6 条也是那两处内联的割线**
+
+逐条读 `flux_all` 的 7 条 FMA，按"前两条相邻指令"分块：
+
+```text
+块 1  fnmsub d29,d9,d13,d29                ; 分子（第一个乘积进 FMA）
+      fmul d27,d31,d26 / fmul d31,d31,d25  ; 两处夹逼各有一个乘积先独立舍入
+      fmadd d27,d30,d25,d27                ; 夹逼 1 的另一半进 FMA
+      fmadd d31,d30,d26,d31                ; 夹逼 2
+      → **3 条 = 割线三处**（`flux_top_transitive_interface` 被内联）
+块 2  fadd d13,d13,d12 + fmadd d31,d12,d30,d31   → **1 条**，待认领
+块 3  fnmsub d27,d31,d13,d27 + fdiv …
+      fmadd d28,d10,d29,d28 / fmul d29,d9,d29 / fmadd d29,d10,d26,d29
+      → **3 条 = 割线三处**（`flux_btm_transitive_interface` 被内联）
+```
+
+3+1+3 = **7 ✓**。所以 `flux_all` 里只有 **1 条**可能是它自己的表达式，另外 6 条是
+那两个 transition 子程序各自内联的割线 —— 而本仓库的 `bounded_secant_iteration`
+**已经**复现了那 6 条（第 302 轮闭环 10000/10000）。
+
+**普查的最终口径**（三层减法之后）：
+
+| 项 | 条数 | 状态 |
+|---|---|---|
+| `flux_inside_hm_soil` 自己的表达式 | **2** | **确证缺口**，写法已记档（第 305 轮） |
+| 两处 transition 的割线（含被内联进 `flux_all` 的 6 条） | 6 | 已在 helper 里 ✓ |
+| `flux_all` 块 2 的 1 条 | 1 | 待认领 |
+| `water_balance` | 5 | 待读上下文 |
+| `soil_water_vertical_movement`（27−12） | ? | 待读上下文（含内联的 sublevel/explicit 等） |
+
+**下一轮**：只读 `water_balance` 的 5 条 + `flux_all` 块 2 的 1 条（8 条，一次 objdump
+就能看完），把属于自己的挑出来；`soil_water_vertical_movement` 那 15 条差额最后处理。
+
 #### 第 303 轮：水步入场探针 —— 剩下的种子是**第 20 步入场时的冰/水状态**，不是 `eff_porosity` 算错
 
 新工具 `oracle/scripts/vsf_input_probe.sh`：在 `WATER_VSF` 调 `soil_water_vertical_movement`
