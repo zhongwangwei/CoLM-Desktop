@@ -17024,6 +17024,32 @@ call 289: gs_sun 两侧都是 468.4265011520596（相同）
 
 **注**：本轮不动代码 —— 假说未证实前不改结构，避免把"碰巧好一点"当成修复。
 
+#### 第 287 轮：`gs` 状态在**调用方**是怎么流的（读源码，未改码）
+
+上一轮把未结清处指到"第二个改写点"。本轮把上游调用方读清楚了，
+`extends/interception/MOD_LeafTemperature_Extended.F90:896-915`：
+
+```fortran
+CALL PlantHydraulicStress_twoleaf (..., gs0sun, gs0sha, k_soil_root, k_ax_root, gssun, gssha)
+etr  = etrsun + etrsha
+gssun = gssun * laisun          ! ← PHS 输出被换算到**冠层尺度**
+gssha = gssha * laisha
+CALL update_photosyn(tl, ..., gssun, ..., assimsun, respcsun)   ! ← gssun 又作为 inout 进去
+```
+
+也就是说内核里 `gssun`/`gssha` 这一对是**跨调用、跨例程复用的同一个变量**：
+PHS 的逐叶输出 → 乘 `lai` 变冠层尺度 → 交给 `update_photosyn` 再改 → 下一次调用又当
+**逐叶**种子传回 PHS。而本仓库这一路（`leaf_temperature.rs:1055` 传
+`maximum_sunlit_leaf_conductance_umol_m2_s: gs0sun`）是把上一轮 PHS 输出经
+`hydraulic_stomatal_resistance → 气孔阻力 → gs0 = (1/(rssun*T/pc)).min(1e6)/lai*1e6`
+**反算**出来的，和"同一个变量被反复乘/改"不是同一条路径。
+
+**结论**：这条链在 283–287 轮里被逐步夹到了一个**语义差**（不是某个收缩点）：
+"跨例程复用的一对电导变量" vs "每次反算"。要结清它得先确定
+`update_photosyn` 对 `gssun` 的改写规则（`MOD_AssimStomataConductance.F90`），
+再决定本仓库是补一个持久对、还是把这条链整体改写成同构。
+**本轮不改代码**：语义未定之前不动结构。
+
 ---
 
 # 交接：Fortran → Rust 移植的当前状态（本会话收束）
@@ -17164,8 +17190,12 @@ wice_soisno[5]   kernel=6.1823587081423845 (4018BABC3DBE730C)
    且那里的差全部继承自入参 `qflx`）。第 286 轮离线核对否掉了"内核保留旧值、
    本仓库用 gs0"这条：两侧在同一个包装调用上**都**改写了 `gs_sha`，只是值不同，
    而且这次改写不来自需求分支的 `:346` ⇒ 是另一个改写点 `:589`
-   （`getvegwp_twoleaf`）。**下一枪**：打 `getvegwp_twoleaf` 那一路的 `gssun/gssha`
-   进出口与包装入口/出口，把持久状态量清楚；**假说未证实前不改结构**。
+   （`getvegwp_twoleaf`）。第 287 轮读上游调用方后确认这是一条**语义差**：
+   内核把 `gssun/gssha` 当"跨调用、跨例程复用的同一对变量"
+   （`:908` 乘 `lai` → `update_photosyn` 再改 → 下次当逐叶种子传回），
+   本仓库是每次反算 `gs0`。**下一枪**：读 `update_photosyn`
+   （`MOD_AssimStomataConductance.F90`）对 `gssun` 的改写规则，再决定补持久对还是整体改写；
+   **语义未定前不改结构**。
    验收口径：`accept_r247.sh` 与 `dry_ts.sh 16` + `window_divergence.py`；
    干窗黄金 `over_tol` 现在是 821 / 20662 / 25896。
 0b. **（新）补 `balance_phs_rootflux`**：见第 276 轮。默认配置下它在这三份窗口里
