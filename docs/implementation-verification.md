@@ -16892,6 +16892,36 @@ PHMID: 两侧各 49 行；call ≤310 逐位全同，call 311 首个不同
 与 `qflx_sun, qflx_sha` —— 入口同而出口不同 ⇒ 这个函数的形状差（它是**闭式**，
 不是迭代解，读一遍就能找）；入口已不同 ⇒ 再往上追到叶温那一段（`tl`/`qsatl`）。
 
+#### 第 283 轮：种子是**一个变量** —— 遮荫叶气孔导度 `gs_sha`
+
+把 `getqflx_gs2qflx_twoleaf` 的 24 个量（输入 + 中间量 + 输出）两侧都打出来
+（`QG2Q`，两侧各 328 行/328 个调用序号），按调用序号对齐：
+
+```text
+可比较 328 对；39 对不同；**首个不同 = 内核 call 289 / Rust call 288**
+--- call 289 的唯一不同项
+    gs_sha   K=23106.44382728509   R=23106.422793824593     (相对差 9.1e-7)
+    （tl/qsatl/qaf/qg/qm/gs_sun/gb_mol/psrf/rhoair/fwet/lai_sun/lai_sha/sai/delta/
+      cf/caw/cgw/cfw/wtsqi/wtaq0/wtgq0 **全部逐位相同**，连 qflx_sun/qflx_sha 也还相同）
+```
+
+**整条链现在是自洽的**：
+
+1. call 289 起 **`gs_sha` 差 9.1e-7 相对**，但此时 `qflx_*` 还舍入到同一个 double；
+2. `cfw` 里含 `laisha/(1/gb+1/gs_sha)`，于是 `gs_sha` 的差经 `cfw → wtsqi → wtaq0/wtgq0
+   → cqi（驱动湿度）`传到**两个**叶面通量 —— 这正好解释第 282 轮看到的
+   "`A11..A44` 与 `determ` 全同、`f1`/`f2` 同差"（`f` 含 `qflx`，`A` 只在
+   `qflx_sun*dfsto1` 这个小项里含）；
+3. call 310 起 `qflx_sun`/`qflx_sha` 差 8e-7 → `f` 差 → `dx` 差 5.6e-7 →
+   牛顿状态 `x` 差 → 逐层 `rootflux` 差 → `deficit` → 水位 → 第 12 步记录翻出去。
+
+**下一枪**：`gs_sha` 是 `calcstress_twoleaf` 的输入，来自
+`getqflx_qflx2gs_twoleaf`（`MOD_PlantHydraulic.F90:710-805`，由 `:346` 调用）
+↔ 本仓库 `conductance_from_transpiration`。打它的进出口
+（`etrsun/etrsha, qsatl, qaf, qg, qm, gb_mol, fwet, lai_*, sai, tl, rhow` 与
+`gssun/gssha`）：入口同而出口不同 ⇒ 就是那个闭式的形状差。注意 `gs_sun` 一直相同，
+所以嫌疑集中在**遮荫那一支**（`A2/B2/C2` 或 `qflx_sha` 的除法链）。
+
 ---
 
 # 交接：Fortran → Rust 移植的当前状态（本会话收束）
@@ -17024,13 +17054,12 @@ wice_soisno[5]   kernel=6.1823587081423845 (4018BABC3DBE730C)
 剩下三件事，按价值排序：
 0. **（新，已定位到牛顿步）`rootflux` 的那 1 ULP 在植物水力解算器里**：
    第 277 轮：`etr`/`etr0` 逐位相同、`last.root_flux_kg_m2_s` 第 11 步第 2 层差 1 ULP；
-   第 279–282 轮：`PENTR` 328 行（row 0–309 全同）→ 加调用序号夹到一次调用 →
-   `A11..A44` 与 `determ` **全部逐位相同**，而 `f1`/`f2` 差，且
-   **`qflx_sun`/`qflx_sha` 本身差 ~8e-7 相对** ⇒ 种子是叶面蒸腾需求，
-   落在 `getqflx_gs2qflx_twoleaf`（`transpiration_from_conductance`）这一段；
-   `spacAF_twoleaf` 与 `getrootqflx_x2qe` 都已证明干净。**下一枪**：打
-   `getqflx_gs2qflx_twoleaf` 的进出口（`tl/qsatl/qaf/gssun/gssha/gb_mol/rss/raw/rd/...`
-   与 `qflx_sun/qflx_sha`）：入口同而出口不同就是那个**闭式**里的形状差。
+   第 279–283 轮：`PENTR` 328 行（row 0–309 全同）→ 加调用序号夹到一次调用 →
+   `A11..A44` 与 `determ` **全部逐位相同**、`f1`/`f2` 差 →
+   叶面蒸腾需求那一段 24 个量里**只有 `gs_sha` 差**（call 289 起，相对 9.1e-7）⇒
+   种子是**遮荫叶气孔导度**，`getqflx_qflx2gs_twoleaf`
+   （`conductance_from_transpiration`）。**下一枪**：打它的进出口
+   （入口同而出口不同 ⇒ 那个闭式里遮荫那一支的形状差）；注意 `gs_sun` 一直相同。
    验收口径：`accept_r247.sh` 与 `dry_ts.sh 16` + `window_divergence.py`；
    干窗黄金 `over_tol` 现在是 821 / 20662 / 25896。
 0b. **（新）补 `balance_phs_rootflux`**：见第 276 轮。默认配置下它在这三份窗口里
