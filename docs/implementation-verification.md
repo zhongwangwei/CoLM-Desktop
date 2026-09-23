@@ -16079,6 +16079,27 @@ Not-tested: 第 2 步的 `meltf` 实参（探针仍是 2 步版）。
 ⇒ 剩下的嫌疑是 `ulrad` 的**分量**（`fac`/`tlbef`/`dtl`/`thermk`/`emg`/`tg`，
 全在叶温 Newton 循环里）以及第 6 步状态那一颗（两条链互不相干）。
 
+#### 第 258 轮：水步那颗种子再往里一层 —— Richards 解算器的 `ss_wt(1)`
+
+`wt_probe.sh`（8 步，`zwt`/`wa` + 每层 `ss_wt`）：
+
+```text
+第 0–5 步：zwt / wa / ss_wt(1..10) 全部逐位相同
+第 6 步：ss_wt(1) 先差（内核 4024492DBE146F92 / Rust 4024492DBE146F99），zwt 随它差
+第 7 步：两者继续差（ss_wt(1) 反向差 14 ULP）
+```
+
+`wa` 两侧都是 0 ⇒ 水位走的是"自下而上扫层"那一支（不是 `get_zwt_from_wa` 的迭代），
+而 `zwt = sp_zi(ilev) - ss_wt(ilev)` ⇒ **种子是 Richards 解算器算出的第 1 层饱和厚度
+`ss_wt(1)`**（`MOD_Hydro_SoilWater.F90:1019-1040` 的显/隐式子步分支；Rust 对应
+`variably_saturated_flow.rs` 的 `richards_solver`）。这一步只看输出还分不出是
+`ss_wt(ilev) - dv(ilev)`、`min(dv, sp_dz)` 还是 `q_this(ilev)/hksat(ilev)` 那几处形状，
+下一枪要打该分支的中间量。
+
+探针卫生（这一轮踩的两个小坑）：`strings` 默认只列 ≥4 字符的串，所以标签至少 4 个字符
+（`WT ` 只有 3 个字符，明明编进去了却 grep 不到）；`grep` 无匹配在 `set -e` 下会直接
+中断脚本，所以"取标记行"的 grep 要允许失败或先判空。
+
 #### 第 257 轮追加五：水步的种子是 `zwt`（水位），它把 `wliq` 带偏
 
 `water_probe.sh`（8 步；打在 `MOD_Hydro_SoilWater.F90` 的 `wblc = …` 之后）：
