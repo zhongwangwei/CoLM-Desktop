@@ -18575,9 +18575,24 @@ FMA"没有歧义（那边是 `a*b + c*d` 两乘积，靠闭环才判出"收第�
 结合顺序写 ⇒ **歧义面很小**。（第 309 轮把链式那两条猜成"加权求和"，本轮读源更正为
 **`dmss` 的两个累加项**。）
 
+**第 318 轮：把第 316 轮那条 "Not-tested" 补上 —— 第二配置没被这 8 处影响**
+
+`bash oracle/scripts/compare_second_config.sh CN-Cng`（Campbell 土水 + **关掉 VSF**，
+与三份黄金窗口的配置正交）：
+
+```text
+=== CN-Cng (Campbell, VSF off)
+within tolerance: 127 variables, 10 dimensions (tier0=23 tier1=8 tier2=97 tier3=0)
+```
+
+⇒ **没有变量超出容差**（127 个变量全部 within；tier 计数之和 128 = 127 + 1 个非数值列），
+与文档里该配置的基线（干窗 0）一致 ⇒ 第 316 轮落地的那 8 处**没有碰坏这条经典
+Richards 支路**。湿/雪的第二配置仍未重跑（历史值 66 / 79）。
+
 **下一枪**：给 `water_balance` 建第 3 个闭环（照 `compare_flux_inside.sh` 三件套 +
 拷贝放行路线；夹具要大一些：`lb/ub/dz/dt/is_sat/vl_s/q/ubc/lbc/wf/vl/wt/dp/waquifer`
-+ 各自的 `_m1`），判对后与 `flux_all` 的加权平均一起作为**第三组**落地，再跑三段式。
++ 各自的 `_m1`，并按第 317 轮那份"一处一乘积、无歧义"的映射表补 5 处），判对后与
+`flux_all` 的加权平均一起作为**第三组**落地，再跑三段式。
 2. **第二配置回归**（Campbell + 关 VSF）：第 293 轮实测干窗已从 16 降到 **0**；
    wet/snow 未重跑，需要时跑 `oracle/scripts/compare_second_config.sh <case>`。
 3. **未移植分支**：`standard_lct_step.rs:578` 明说 split soil/snow、SNICAR、气溶胶、
