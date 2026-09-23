@@ -16079,6 +16079,34 @@ Not-tested: 第 2 步的 `meltf` 实参（探针仍是 2 步版）。
 ⇒ 剩下的嫌疑是 `ulrad` 的**分量**（`fac`/`tlbef`/`dtl`/`thermk`/`emg`/`tg`，
 全在叶温 Newton 循环里）以及第 6 步状态那一颗（两条链互不相干）。
 
+#### 第 260 轮：**水步那颗种子也修掉了** —— `water_balance` 的 `dmss` 要按三条语句累加
+
+第 259 轮把种子夹到"扰动分支的求值"后，顺着扰动会重新走的 `water_balance` 读源码，
+发现上游是**三条语句**累加（`MOD_Hydro_SoilWater.F90:1146-1148`）：
+
+```fortran
+dmss = (vl_s-vl_m1)*(wf-wf_m1)
+dmss = (vl_s-vl_m1)*(wt-wt_m1) + dmss     ! 乘积被收进加法
+dmss = (dz-wt-wf)*(vl-vl_m1)   + dmss     ! 同上
+```
+
+Rust 原先是一条平铺长链（少两次融合）；`residual_mm[active] += mass_change - qsum*dt`
+也没按上游的 `blc + dmss - qsum*dt`（末项收缩）写。落码后：
+
+| 口径 | 改前 | 改后 |
+|---|---|---|
+| 8 步干窗第 6 步差异变量 | 2（`f_wliq_soisno`/`f_zwt`） | **0** |
+| 8 步干窗第 7 步 | 4 | 2 |
+| 48 步干窗**首个状态差异** | 记录 6（`f_zwt`） | **记录 12** |
+| 3 步 history | 692/692 | 692/692 |
+| 黄金 `over_tol` dry/wet/snow | 821 / 20664 / 25896 | 829 / **20662** / 25896 |
+
+干窗的 `over_tol`/`sumabs` 变差是**混沌放大**（文档早已记过干窗 `ot_vars` 没有分辨力）：
+短程逐位与湿窗都朝更一致的方向走，所以按**源码结构 + 短程逐位**保留这个改动。
+
+至此唯一还剩的"短程就看得见"的差异就是**第 3 步那条纯诊断链**（`f_olrg`/`f_trad`/
+`f_rnet`/`f_fgrnd`/`f_zerr`，1–4 ULP，见追加二/三的 `ulrad`）。
+
 #### 第 259 轮：种子在 Richards 解算器里，而且是从**扰动分支**进来的
 
 两枪探针 + 两次 A/B：
