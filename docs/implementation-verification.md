@@ -18557,9 +18557,27 @@ A/B 证据入库。**第 316 轮：两组一起落地 —— **口径不再倒�
 唯一可行的策略。
 
 ⇒ 8 处形状**入库**（`plant_hydraulics.rs` 与 `variably_saturated_flow.rs`），
-并把"逐条改 vs 成组落地"的对照表留在上面。**下一枪**：按同一路线补
-`water_balance`（5 处）与 `flux_all` 加权平均（1 处）的闭环，判对后作为**第三组**
-加入，再跑一次三段式。
+并把"逐条改 vs 成组落地"的对照表留在上面。**第 317 轮：`water_balance` 那 5 处**逐条映射到源表达式**（每处只有一个乘积，不存在"收左还是收右"的歧义）**
+
+读 `MOD_Hydro_SoilWater.F90:1130-1145`（`blc`/`dmss` 的更新）与第 309 轮那份
+`fmsub`/`fmadd` 上下文，五条一一对上：
+
+| 源表达式 | 反汇编 | 该写的 Rust |
+|---|---|---|
+| `blc(lb-1) = dmss - qsum*dt` | `fsub` + `fmsub d29,d29,d30,d31` | `(-qsum).mul_add(dt, dmss)` |
+| `dmss = (vl_s-vl_m1)*(wt-wt_m1) + dmss` | 链式 `fmadd` 1 | `(a-b).mul_add(c-d, dmss)` |
+| `dmss = (dz-wt-wf)*(vl-vl_m1) + dmss` | 链式 `fmadd` 2 | `(dz-wt-wf).mul_add(vl-vl_m1, dmss)` |
+| `blc(jlev) = (blc(jlev) + dmss) - qsum*dt`（两处分支各一次） | 两次 `fadd` + `fmsub` | `(-qsum).mul_add(dt, blc + dmss)` |
+
+**与 `get_zwt_from_wa` 的关键区别**：这里的**每处只有一个乘积**，所以"哪个乘积进
+FMA"没有歧义（那边是 `a*b + c*d` 两乘积，靠闭环才判出"收第一个"）。剩下要小心的
+只是**加数是谁**（`dmss` / `blc+dmss`），而它由源的结合顺序定、本仓库已按同样的
+结合顺序写 ⇒ **歧义面很小**。（第 309 轮把链式那两条猜成"加权求和"，本轮读源更正为
+**`dmss` 的两个累加项**。）
+
+**下一枪**：给 `water_balance` 建第 3 个闭环（照 `compare_flux_inside.sh` 三件套 +
+拷贝放行路线；夹具要大一些：`lb/ub/dz/dt/is_sat/vl_s/q/ubc/lbc/wf/vl/wt/dp/waquifer`
++ 各自的 `_m1`），判对后与 `flux_all` 的加权平均一起作为**第三组**落地，再跑三段式。
 2. **第二配置回归**（Campbell + 关 VSF）：第 293 轮实测干窗已从 16 降到 **0**；
    wet/snow 未重跑，需要时跑 `oracle/scripts/compare_second_config.sh <case>`。
 3. **未移植分支**：`standard_lct_step.rs:578` 明说 split soil/snow、SNICAR、气溶胶、
