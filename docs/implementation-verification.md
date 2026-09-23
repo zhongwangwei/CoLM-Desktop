@@ -16079,9 +16079,30 @@ Not-tested: 第 2 步的 `meltf` 实参（探针仍是 2 步版）。
 ⇒ 剩下的嫌疑是 `ulrad` 的**分量**（`fac`/`tlbef`/`dtl`/`thermk`/`emg`/`tg`，
 全在叶温 Newton 循环里）以及第 6 步状态那一颗（两条链互不相干）。
 
+#### 第 257 轮追加二：第 6 步那颗种子被夹到哪儿了
+
+排除法（都在同一套 6/8 步干窗上）：
+
+| 环节 | 探针 | 结论 |
+|---|---|---|
+| 叶温例程（58 个量 × 24 次迭代 × 6 步） | `leafit_bits_probe6.sh` | **全部逐位相同** |
+| 地面温度三对角**组装**（95 个量 × 6 步） | `gtcoef_probe6.sh`（跑 6 步） | **全部逐位相同** |
+| `meltf`（实参 + 内部 + 输出） | 第 257 轮前三枪 | 逐位相同 |
+
+而第 5 步 restart 是 0/68、第 6 步 `t_soisno`/`t_grnd`/`wliq_soisno`/`zwt` 同时差 1 ULP
+⇒ 种子只剩三个可能：`tridia` 的**求解**本身、解完之后的**订正**（`fseng`/`fevpg` 那两条，
+形状已在第 252 轮定过）、或**水步**。下一枪按这个顺序打。
+
+`ulrad` 那条（第 3 步 1 ULP、纯诊断）另外记一笔未结案的证据：用 `ulrad_probe.sh`
+（修好尾锚之后）拿到的第 3 步输入**逐位相同**，而把上游算式按 Fortran 的写法在 Python 里
+**全平铺**复算，得到的却是 **Rust** 的那个值（`…216E`），内核的 `…216F` 用 128 种
+"结合顺序 + 内层/外层收缩"组合都复现不出来，加上 `pow()`/`(x*x)*x` 两种 `**3`/`**4` 实现也不行
+⇒ 内核那一条的**编译形态还没被建模对**（不是简单的"某一项融合"），先挂着。
+
 Tested: `/tmp/gf/meltf_args_probe3.sh`、`meltf_inner_probe.sh`、`imperv_probe.sh`、
 `balance_probe.sh`（各 3 步，两侧位型；跑完都自动还原源码并重编内核）；
-`olrg_probe.sh`（8 步）；`bash /tmp/gf/dry_ts.sh 48` + `window_divergence.py`；
+`olrg_probe.sh`（8 步）、`ulrad_probe.sh`（8 步）、`leafit_bits_probe6.sh`（6 步）、
+`gtcoef_probe6.sh`（6 步）；`bash /tmp/gf/dry_ts.sh 48` + `window_divergence.py`；
 `restart_divergence.py`（5 步 restart 0/68）；gfortran 的 `x**3`/`x**4` 结合顺序实测；
 `otool -tv -p ___mod_hydro_soilwater_MOD_soil_water_vertical_movement kernels/default/colm.x`；
 `bash /tmp/gf/accept_r247.sh`（1 步 restart / 3 步 history / 黄金三窗口）；
