@@ -17078,6 +17078,56 @@ PHS 的逐叶输出 → 乘 `lai` 变冠层尺度 → 交给 `update_photosyn` �
 **(a)(b) 都需要动多处代码，本轮只把语义问清楚、不动手** —— 这个残差是末位级，
 在没有把握一次做对之前不值得冒险改结构。
 
+#### 第 289 轮：**找到确切的公式差**（并纠正第 288 轮那句"上次输出 × lai"）
+
+第 288 轮只读到 `:908-909`（`gssun *= laisun`）就下了结论，**错了**：再往下
+`:919-920` 与 `:1317-1321` 会把 `gssun` **重新算出来**，它才是下一次 PHS 调用的种子：
+
+```fortran
+! MOD_LeafTemperature_Extended.F90:1316-1322
+      gssun = 0._r8
+      gssha = 0._r8
+      IF (lai > 0.001_r8) THEN
+         gssun = (laisun / rssun) * (tprcor / tlbef)
+         gssha = (laisha / rssha) * (tprcor / tlbef)
+      ENDIF
+```
+
+本仓库对应的那一份（`leaf_temperature.rs:548-553`，当 `maximum_*` 传进 PHS 当种子）：
+
+```rust
+let maximum_sunlit_leaf_conductance_umol_m2_s = (1.0
+    / (sunlit_resistance.stomatal_resistance_s_m * state.leaf_temperature_k
+        / pressure_conversion))
+    .min(1.0e6)
+    / laisun
+    * 1.0e6;
+```
+
+两者**不是同一个量**：
+
+| | 上游 `gssun`（PHS 种子） | 本仓库传给 PHS 的种子 |
+|---|---|---|
+| 形式 | `(laisun/rssun) * (tprcor/tlbef)` | `(pc/(rssun*T)).min(1e6) / laisun * 1e6` |
+| lai | **乘** `laisun` | **除** `laisun` |
+| 钳制 | 无 | `.min(1e6)` |
+| 单位 | 无 `1e6` | `*1e6` |
+| 温度 | `tlbef`（上一次求阻力时的温度） | `state.leaf_temperature_k`（当前） |
+
+上游其实有**两个**量：`gs0sun/gs0sha`（最大导度，`:353` 的 `rstfac` 分母）和
+`gssun/gssha`（这一份"由阻力诊断出来的当前导度"）。本仓库只有一个
+（`maximum_*`），既当 `rstfac` 的分母、又当 PHS 的种子 ⇒ **把两个量并成了一个**。
+这与第 283–286 轮的现象完全吻合：只有遮荫那一支偏（`gs_sun` 一路相同），
+量级 ~9e-7 相对（两种诊断式在 `rssun`/`laisun` 上的差别）。
+
+**修法（已具体到行，但本轮不动手）**：
+1. 在叶温那一层按上游公式算出 `gssun/gssha`（`(lai/rss)*(tprcor/tlbef)`，`lai<=1e-3` 时取 0）
+   并作为**输入字段**传进 `PlantHydraulicInput`；
+2. `conductance_from_transpiration` 的种子换成它（`rstfac` 分母仍用 `gs0`，
+   即现在的 `maximum_*`，那份语义是对的）；
+3. 跑三段式验收（restart 0/68、3 步 692/692、黄金 821/20662/25896）。
+**改动跨 2 个文件、3 处，且要新增一个输入字段** —— 本轮只把公式差钉死，留到下一轮实现。
+
 ---
 
 # 交接：Fortran → Rust 移植的当前状态（本会话收束）
