@@ -15595,3 +15595,80 @@ Rust 侧在 `Ok(LeafTemperatureOutput {` 之前打同序的对应量。
 
 Tested: `/tmp/gf/postloop_probe.sh`（22 个量，全同）；其余见上。
 Not-tested: `MOD_Thermal` 第 6 节与 history 写出路径（下一轮）。
+
+## 第 252 轮：`fevpg` 的订正**不融合** —— 第 0 步残差 8 → 1
+
+第 251 轮把残差收敛到 `fevpg`，并证明叶温例程循环后 22 个量全同。
+本轮用 `/tmp/gf/th6_probe.sh` 直接对 `MOD_Thermal` 第 6 节取证：
+
+* 内核侧插两条位型 WRITE：订正**前**（`TH6PRE`，14 个量）与订正+限幅**后**
+  （`TH6POST`，10 个量）；
+* Rust 侧一个点（`Ok(StandardLctEnergyOutput {` 之前）就够 —— 那里 `leaf`（订正前）
+  与 `corrected_*`（订正后）同时在作用域里。
+
+结果：
+
+```text
+PRE : ALL BITWISE IDENTICAL      ← fevpg_pre/cgrndl/cgrnds/tinc/wliq/wice/deltim 全同
+POST: fevpg_post 差 1 ULP
+```
+
+订正后的 `fevpg` 差 1 ULP，而它三个输入全同、限幅又没生效（`egsmax`=4.88e-3 ≫
+`fevpg`=7.77e-5）。于是拿探针的位型**离线复算**两种写法：
+
+```text
+fma(tinc, cgrndl, fevpg_pre)   = 3F145BB9BCB4DD9B   ← 原 Rust 的值
+fevpg_pre + fl(tinc*cgrndl)    = 3F145BB9BCB4DD9C   ← **内核的值**
+```
+
+即内核在 `MOD_Thermal…:1239` 的 `fevpg = fevpg + tinc*cgrndl` 上**没有融合**。
+（本会话第 246 轮那条 GIMPLE 注释写着 "FMA(tinc, cgrnds, 原值)" —— 又是
+"dump 与出货二进制不一致"的同一类坑，以二进制/实测为准。）
+
+`crates/colm-core/src/standard_lct_step.rs` 改成平铺的
+`leaf.ground_evaporation + slope * tinc`，并在注释里记下：
+**相邻的 `fseng = fseng + tinc*cgrnds` 不能照抄这个结论** —— 那条 fma 与平铺
+在本算例给出同一位型（`4086FEDBB7C44298`），判不了；3 步口径里 `f_fseng` 一直逐位相同，
+所以保留 `mul_add`。
+
+### 结果
+
+| 口径 | 第 251 轮 | **本轮** |
+|---|---|---|
+| restart（干窗 1 步） | 0 / 68 | 0 / 68 |
+| **第 0 步差异变量** | **8** | **1（只剩 `f_zerr`）** |
+| 步级差异变量 / 逐位相同元素 | 14 / 668-692（96.53%） | **9 / 680-692（98.27%）** |
+| 黄金 dry `ot_vars` / `over_tol` | 17 / 826 | 17 / 826 |
+| 黄金 wet `over_tol` / `ot_vars` | 20670 / 68 | 20665 / 68 |
+| 黄金 snow `ot_vars` | 79 | 79 |
+
+`f_fevpg` 修好之后 `f_fevpa`/`f_lfevpa`/`f_qstar`/`f_qinfl`/`f_qlayer`/`f_xerr`
+**一次性全部归零** —— 这也反过来证实了第 251 轮那条（当时被我改成"不下结论"的）
+推断：它们确实是同一个种子的传播。（`f_zerr` 是另一回事，见下。）
+
+### 只剩 `f_zerr`
+
+`f_zerr` 就是内核的 `errore`（`MOD_Thermal…:1403-1413` 的能量平衡检查）：
+两个赋值里第一个是死代码（立刻被第二个覆盖，只差 `fgrnd` vs `xmf`），
+真正的链条是
+
+```fortran
+errore = sabv + sabg + frl - olrg - fsena - lfevpa - xmf - dheatl + hprl &
+       + canopy_phase_heat + cpliq*pg_rain*(t_precip-t_grnd) + cpice*pg_snow*(t_precip-t_grnd)
+DO j = lb, nl_soil
+   errore = errore - (t_soisno(j)-t_soisno_bef(j))/fact(j)     ← 逐层**减**
+ENDDO
+```
+
+Rust 端（`history.rs:900-910`）把最后那一族写成了
+`... - ground_heat_storage_w_m2`（先求和再整体减）—— **结合顺序不同**：
+内核是"边加边减"的连乘链，Rust 是 `T - (a₁+a₂+…)`。这是下一轮的第一候选；
+若不够，再查链条上 `cpliq*pg_rain*(…)` 那两处乘积是否被吸收。
+
+`f_zerr` 的绝对值只有 8.9e-14（`errore` 本身 ~2.6e-11），是"诊断量的诊断量"。
+
+Tested: `/tmp/gf/th6_probe.sh`（PRE 全同 / POST 差 1 ULP）+ 离线位型复算；
+`compare_flag_isolated.sh base`（第 0 步 8 → **1**）；`accept_r247.sh`
+（restart 0/68；步级 9 / 680-692；黄金 21252/604.5841/826/17、
+32667/10378.8229/20665/68、33494/444394.4368/25896/79）。
+Not-tested: `fseng` 那条订正的真实形状（本算例判不了）；`f_zerr`（下一轮）。

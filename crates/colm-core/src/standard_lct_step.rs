@@ -368,9 +368,17 @@ fn finish_energy_step(
     let mut corrected_ground_sensible_heat_w_m2 = leaf
         .ground_sensible_temperature_slope_w_m2_k
         .mul_add(ground_temperature_change, leaf.ground_sensible_heat_w_m2);
-    let mut corrected_ground_evaporation_kg_m2_s = leaf
-        .ground_latent_temperature_slope_kg_m2_s_k
-        .mul_add(ground_temperature_change, leaf.ground_evaporation_kg_m2_s);
+    // `fevpg = fevpg + tinc*cgrndl`（`MOD_Thermal…:1239`）**这一条不融合**。
+    // 用探针把两侧的位型都取出来离线复算过（`/tmp/gf/th6_probe.sh` 的 PRE/POST）：
+    //   `fevpg_pre + fl(tinc*cgrndl)` = `3F145BB9BCB4DD9C` = **内核**的值；
+    //   `fma(tinc, cgrndl, fevpg_pre)` = `3F145BB9BCB4DD9B` = 原 Rust 的值。
+    // 钳位在这套输入下不生效（`egsmax`=4.88e-3 ≫ `fevpg`=7.77e-5），所以差别就在这一条。
+    //
+    // **相邻的 `fseng = fseng + tinc*cgrnds` 不能照抄这个结论**：那一条 fma 与平铺
+    // 在本算例里给出同一位型（`4086FEDBB7C44298`），判不了；而 3 步口径里 `f_fseng`
+    // 一直逐位相同 ⇒ 保留 `mul_add`。两条相邻语句形状不同是编译器自己的选择。
+    let mut corrected_ground_evaporation_kg_m2_s = leaf.ground_evaporation_kg_m2_s
+        + leaf.ground_latent_temperature_slope_kg_m2_s_k * ground_temperature_change;
     let (thermal_water, split_thermal_water) = if input.ground_temperature.use_split_soil_snow {
         let snow_layers = input.ground_temperature.snow_layers;
         let snow_layer_exists = snow_layers > 0;
