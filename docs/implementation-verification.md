@@ -17991,6 +17991,83 @@ WSE1     kernel=20 rust=20      WSE0 kernel=20 rust=20      WSEL kernel=200 rust
 用大批合成输入两侧逐位比（不进混沌窗口）。这样 5 处形状（以及第 298 轮那 4 个）
 可以一次性判**对错**，再拿"对的那一组"去跑口径。
 
+#### 第 302 轮：把那个闭环建起来了 —— 当前这一段**确定性地错了 3604/10000**
+
+##### 一、新工具（确定性判据，不进混沌窗口）
+
+* `oracle/scripts/get_zwt_diff.f90` + `oracle/scripts/compare_getzwt.sh`：
+  按内核**真实选项**编译 `MOD_Hydro_SoilWater`（**不加** `-ffp-contract=off`，
+  要的就是 GCC 默认的 `fast`），驱动本身按仓库纪律 `-fwrapv -ffp-contract=off`；
+  两档模型（Campbell / van Genuchten）× (2500 均匀随机 + 2500 边界取值)，
+  在合成输入上逐位比 `get_zwt_from_wa` 的输出 `zwt`。
+  `-ffunction-sections` + `-Wl,-dead_strip` 把依赖 `MOD_SPMD_Task`（MPI）的未用
+  子程序剔掉，闭环不把 MPI 拖进来。一次全跑 ~30 秒。
+* `crates/colm-core/examples/get_zwt_probe.rs`：同一串 LCG 的本仓库侧
+  （抽签次数与顺序逐条对齐，改一边就得同步改另一边）。
+
+##### 二、实测：**当前提交的 Rust 在 3604/10000 个用例上与内核不同**
+
+```text
+get_zwt_from_wa mismatches / 10000: {'zwt': 3604}
+```
+
+这不再是"末位运气"的争论：**36% 的用例位型不同**，是实打实的形状差。
+
+##### 三、形状扫（每次 ~30 秒，先应用 `get_zwt_from_wa` 四处、再扫 `secant` 三处）
+
+| 分子 | 两处夹逼 | 不匹配 / 10000 |
+|---|---|---|
+| 平铺 | 平铺 | 1923 |
+| 平铺 | 收**第二个**乘积 | 2307 |
+| 平铺 | 收**第一个**乘积 | 1188 |
+| 收**第一个**乘积 | 平铺 | 1159 |
+| 收**第一个**乘积 | 收**第二个**乘积 | 1643 |
+| **收第一个乘积** | **收第一个乘积** | **0（10000/10000 逐位相同）** |
+
+（`get_zwt_from_wa` 那四处单独应用是 3604 → 1923；上表都在"四处已应用"的前提下。）
+
+⇒ 唯一正确的组合：**分子与两处夹逼都收「第一个」乘积**。六处形状的准确写法：
+
+```rust
+// get_zwt_from_wa
+(depth_mm - minimum_depth_mm).mul_add(-0.5, saturated_potential_mm)          // psi
+((-aquifer_water_mm) / porosity).mul_add(2.0, minimum_depth_mm)              // 初值 zwt
+(right - minimum_depth_mm).mul_add(2.0, minimum_depth_mm) + 0.1              // 括号外扩
+(depth - minimum_depth_mm).mul_add(porosity - liquid, aquifer_water_mm)      // fval
+// secant_method_iteration
+previous_residual.mul_add(value_before_previous,
+                          -(residual_before_previous * *previous_value))     // 分子
+(*left).mul_add(SECANT_ALPHA, *right * complement)                           // max 夹逼
+(*left).mul_add(complement, *right * SECANT_ALPHA)                           // min 夹逼
+```
+
+**方向不能按寄存器序猜**：我先按 `fmul`/`fmadd` 的寄存器顺序读成"夹逼收第二个乘积"，
+harness 上那是 1643 与 0 的区别。
+
+##### 四、口径仍然把它挡在门外（同树 A/B）—— 本轮**回退**代码、**保留**闭环
+
+| 窗口 | 当前提交（基线） | 形状已验证正确 |
+|---|---|---|
+| dry `over_tol` | 28 | 28 |
+| wet `over_tol` | 1970 | **1984** ✗ |
+| snow `over_tol` | 25713 | 25713 |
+| `ot_vars` | 1 / 53 / 79 | 1 / 53 / 79 |
+| `bitwise` | 16326 / 28456 / 32788 | 17056 / 28958 / 32707 |
+| `sumabs` | 249.79 / 39.77 / 444414.20 | 330.81 / **29.32** / 444416.82 |
+
+`restart_scan.sh` 同向：N=19 的分歧变大（`wliq_soisno` maxabs 1.78e-15 → 2.49e-14）。
+按"口径指标不许变差"`git checkout` 回退该文件；**六处形状的正确写法与全部证据留在上面**。
+
+##### 五、为什么回退是对的（而不是"形状不对"）
+
+`vsf_wt_probe.sh` 在 call 17 起还报 `WSEL` 的 `f1`(`ss_vliq`)/`f2`(**`porsl`**) 不同，
+而 `porsl` 是**入参**（`eff_porosity`）⇒ 那是一条**独立的上游链**。两条差同时存在时，
+把一条改对只是换一条混沌轨道，口径就成了抛硬币 —— 这正是本轮口径变差而 harness
+变好的原因。**下一枪**：先把 `eff_porosity` 那条（第 17 步起、第 3 层）钉掉
+（点位已由 `WSEL` 给出，接着查 `MOD_SoilSnowHydrology` 里 `eff_porosity` 的逐层更新
+与 Rust 对应处），**然后**把本轮的六处形状一起重新应用，两条都对了再跑口径 ——
+那才是一次干净的、口径也向前走的修复。
+
 **验收口径（不变）**：`cargo test --workspace --lib --bins -- --test-threads=1`、
 `clippy -D warnings`、`fmt --check`（本机 `colm-cli` 的 7 个 `study::runner` 用例
 因沙箱 `EPERM` 失败，与本改动无关）；`bash /tmp/gf/win4.sh` + `three.py`
@@ -18055,10 +18132,18 @@ WSE1     kernel=20 rust=20      WSE0 kernel=20 rust=20      WSEL kernel=200 rust
      ⇒ **入场逐位相同、`soilwater_aquifer_exchange` 之后 `zwt` 差 1 ULP**，同一个调用内
      `izwt` 不变。所以种子就在 `soilwater_aquifer_exchange`
      （Rust `exchange_soil_water_with_aquifer`）里，**不在 Richards、不在 PHS、不在缩放**。
-     下一枪：把该子程序的入口（`wexchange`/`ss_dp`/`wa`/`zwt`）与出口
-     （`zwt`/`wa`/`ss_dp`/`izwt`）两侧对打，先判是 `wexchange`（= `rsubst*dt + deficit`）
-     进来时就差，还是交换内部某一步的形状差；同时用同一套反汇编方法数该子程序的 FMA 条数。
      土壤水力函数已排除（`compare_soilhydro.sh` 10000/10000 逐位）。
+
+     **第 302 轮：这一段已经建好确定性判据，而且测出真错。**
+     `bash oracle/scripts/compare_getzwt.sh`（新工具，~30 秒、不进混沌窗口）实测当前提交的
+     `get_zwt_from_wa` 有 **3604/10000** 个用例与内核不同 —— 形状差是**确定的**，不是末位运气。
+     六处正确写法与整张形状扫表在"第 302 轮"一节；把六处都改对后 harness 是
+     **10000/10000 逐位相同**，但口径变差（wet `over_tol` 1970 → 1984、N=19 分歧 14×）
+     ⇒ 代码已按纪律回退，**形状结论留在文档里**。
+     **下一枪（顺序不能颠倒）**：① 先钉 `vsf_wt_probe.sh` 在 call 17 起报的
+     `WSEL f2`（`porsl` = `eff_porosity`，**入参**）那条独立链 —— 查
+     `MOD_SoilSnowHydrology` 里 `eff_porosity` 的逐层更新与 Rust 对应处；
+     ② 再把第 302 轮验证过的六处形状**一起**重新应用；③ 两条都对了才跑口径。
 2. **第二配置回归**（Campbell + 关 VSF）：第 293 轮实测干窗已从 16 降到 **0**；
    wet/snow 未重跑，需要时跑 `oracle/scripts/compare_second_config.sh <case>`。
 3. **未移植分支**：`standard_lct_step.rs:578` 明说 split soil/snow、SNICAR、气溶胶、
