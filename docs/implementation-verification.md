@@ -17160,6 +17160,36 @@ gssun = (laisun / rssun) * (tprcor / tlbef)                          ! :1320 用
 `PlantHydraulicStress_twoleaf` 的 `gssun` 参数在 `:318`/`:346`/`:908`/`:919`/`:1320`
 五处的尺度逐处标注出来（各是逐叶还是冠层、µmol 还是 mol），算平之后再动手。
 
+#### 第 291 轮：找到缺失的一环（`:941 rssun = rssun*laisun`），但尺度账**仍没平**
+
+上一轮说"代入得 `gssun_next = laisun²·gssun_leaf·(tl/tlbef)/1e6`，`lai²` 与 `1e6` 说不通"。
+本轮找到了**缺失的那一环**（之前只扫了 `:896-920` 与 `:1316-1322`，漏了中间）：
+
+```fortran
+:919   rssun = tprcor/tl * 1.e6 / gssun        ! 用冠层尺度的 gssun
+:941   rssun = rssun * laisun                  ! ← 换成**逐叶**尺度（:1315 的注释就指这里）
+:1320  gssun = (laisun/rssun)*(tprcor/tlbef)
+```
+
+代进去 `laisun` 会消掉一次：`rssun_leaf = (tprcor/tl)*1e6/gssun_leaf_prev`。
+另外从第 283 轮的实测位型里读出本算例的实际尺度：**`laisun = laisha = 0.1`**、
+`sai = 0.45`、`cf ≈ 4.25e7`、`gs_sun = 425.15`（第 1 次调用）。
+并确认 `gs0sun = min(1e6, 1/(rssun*tl/tprcor))/laisun*1e6*o3coefg_sun`
+（`:832`）与本仓库 `maximum_*`（`leaf_temperature.rs:548-553`）**同式**，
+只差 `o3coefg_*` 那个因子（本仓库另有处理）。
+
+**但账仍没平**：用 `laisun=0.1` 再算一次，
+`gssun_next ≈ gssun_leaf_prev·lai²·(tl/tlbef)/1e6 = gssun_leaf_prev·1e-8`，
+而 `gs0sun ≈ gssun_leaf_prev/laisun = gssun_leaf_prev·10`，
+两者差 **~1e9**；若真如此，`rstfacsun = amax1(gssun/gs0sun, 1e-2)` 会**恒被下限钉死**，
+而实测 `gs_sun = 425.15` 是个正常值 ⇒ **至少还有一环我没建模**（某个 `1e6` 或 `lai`
+的换算在别处被抵消/引入）。
+
+**结论**：这一轮把"缺失的一环"补上了、把实测尺度拿到了，但**尺度账仍未平**，
+所以仍然不动代码。**下一枪**：在 `gssun` 五处（`:318/:346/:908/:919/:941/:1320`）
+分别打印实际数值（探针，两侧），用**真实数字**把每一环的换算标出来 ——
+比继续读源码猜更可靠。
+
 ---
 
 # 交接：Fortran → Rust 移植的当前状态（本会话收束）
