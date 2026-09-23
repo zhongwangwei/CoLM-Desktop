@@ -94,9 +94,14 @@ pub fn surface_budget(energy: &StandardLctEnergyOutput) -> Result<SurfaceBudget>
         + ICE_HEAT_CAPACITY_J_KG_K
             * energy.interception.ground_snow_kg_m2_s
             * (precipitation_temperature_k - surface_temperature_k);
-    let ground_heat = energy.shortwave.ground_absorbed_w_m2
-        + energy.leaf.downward_longwave_w_m2 * emissivity
-        - emissivity * STEFAN_BOLTZMANN_W_M2_K4 * previous_surface_temperature_k.powi(4)
+    let ground_heat =
+        energy.shortwave.ground_absorbed_w_m2 + energy.leaf.downward_longwave_w_m2 * emissivity;
+    // `- (1-fsno)*emg*stefnc*t_soil**4`（`MOD_Thermal…:1347`）：这个乘积被**收进减法**。
+    // 离线穷举 8 步的 `fgrnd` 位型（`/tmp/gf/fgrnd`）实测：只有"这一项融合"能与内核
+    // 全部对上，平铺则第 3 步差 1 ULP（`C081C128CF597630` 对 `…631`）。
+    let ground_heat = (-(emissivity * STEFAN_BOLTZMANN_W_M2_K4))
+        .mul_add(previous_surface_temperature_k.powi(4), ground_heat);
+    let ground_heat = ground_heat
         // 内核这一项是 `emg*stefnc*t_grnd_bef**3*(4.*tinc)`，**左结合**
         // `(((emg*stefnc)*t**3)*(4.*tinc))`；不能复用 `blackbody_change`
         // （那是 `stefnc*t**3*(4*tinc)`，少一层 `emg`，结合顺序不同）。
