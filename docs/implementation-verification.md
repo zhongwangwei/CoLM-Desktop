@@ -16922,6 +16922,45 @@ PHMID: 两侧各 49 行；call ≤310 逐位全同，call 311 首个不同
 `gssun/gssha`）：入口同而出口不同 ⇒ 就是那个闭式的形状差。注意 `gs_sun` 一直相同，
 所以嫌疑集中在**遮荫那一支**（`A2/B2/C2` 或 `qflx_sha` 的除法链）。
 
+#### 第 284 轮：把"`gs_sha` 差"再钉一层 —— 它产生在**上一次调用**的 `getqflx_qflx2gs_twoleaf`
+
+先把第 283 轮的因果顺序说准（否则容易多追一轮）：内核一次调用内的顺序是
+`:318 getqflx_gs2qflx_twoleaf`（印 `QG2Q`）→ `:323 x2qe` → `:325 spacAF` → `:334 x+=dx`
+→ `:342-343 etrsun/etrsha` → **`:346 getqflx_qflx2gs_twoleaf`** → `:356 qe2x` → `:359 rootflux`。
+`gs_mol_sha` 只在 `:346` 被改写，所以 **`QG2Q` 在 call N+1 印出来的 `gs_sha`
+是 call N 的 `:346` 算出来的**。
+
+于是：
+
+```text
+QG2Q: call 1..288 的 24 个量全部逐位相同（含 gs_sha）
+      call 289 的 gs_sha 开始差（唯一不同项）
+⇒ call 288 的 `:346` 用**逐位相同的输入**算出了**不同的 `gs_sha`**
+```
+
+为什么输入一定相同：`:346` 的入参是 `etrsun/etrsha = qflx*plc(x(leafsun/sha))`、`gb_mol`、
+`tl/qsatl/qaf/qg/qm`、`raw/rd/rss`、`fwet`、`lai_*`、`sai`、`psrf`、`rhoair`；
+而 `x` 在 call 310 之前逐位相同（第 280/281 轮的 `PENTR`/`PHMID` 已证），
+`qflx` 在 call 310 之前逐位相同（第 282/283 轮已证）⇒ call 288 的这些入参全同。
+**输入相同、输出不同 ⇒ 只能是形状差，而且只在遮荫那一支**
+（`gs_sun` 从头到尾逐位相同）。
+
+嫌疑缩到 `plant_hydraulics.rs:conductance_from_transpiration` 里两条只影响遮荫的式子：
+
+```fortran
+csunw_dry = (B1*C2 - B2*C1)/(B1*A2 - B2*A1)      ! 本仓库：对上了
+cshaw_dry = (A1*C2 - A2*C1)/(A1*B2 - B1*A2)      ! 本仓库：没对上
+gs_mol_sha = 1/((1.-fwet)*delta*laisha/cshaw_dry/cf - 1./gb_mol)
+```
+
+本仓库按"`b2*a1` 被 CSE、于是两个分母一个收左一个收右"写成
+`c2.mul_add(a1, -(c1*a2)) / (-b1).mul_add(a2, b2_a1)` —— 那是**从 GIMPLE dump 反推**的。
+现在有了反例：同样的输入下遮荫那一条确实不等 ⇒ **`cshaw_dry` 分子/分母的收缩选择
+（或 `1/(…)` 那一步的结合）至少有一处与内核不同**。可选的形状只有 2×2×2 种
+（分子收左/收右、分母收左/收右、`gs` 里 `- 1/gb_mol` 是否参与），
+**下一枪直接枚举**：把 call 288 的入参按第 283 轮的 24 个打印值取出，
+用 `Fraction` 精确算 8 种候选、与内核 call 289 的 `gs_sha` 位型比对。
+
 ---
 
 # 交接：Fortran → Rust 移植的当前状态（本会话收束）
@@ -17054,12 +17093,14 @@ wice_soisno[5]   kernel=6.1823587081423845 (4018BABC3DBE730C)
 剩下三件事，按价值排序：
 0. **（新，已定位到牛顿步）`rootflux` 的那 1 ULP 在植物水力解算器里**：
    第 277 轮：`etr`/`etr0` 逐位相同、`last.root_flux_kg_m2_s` 第 11 步第 2 层差 1 ULP；
-   第 279–283 轮：`PENTR` 328 行（row 0–309 全同）→ 加调用序号夹到一次调用 →
+   第 279–284 轮：`PENTR` 328 行（row 0–309 全同）→ 加调用序号夹到一次调用 →
    `A11..A44` 与 `determ` **全部逐位相同**、`f1`/`f2` 差 →
-   叶面蒸腾需求那一段 24 个量里**只有 `gs_sha` 差**（call 289 起，相对 9.1e-7）⇒
-   种子是**遮荫叶气孔导度**，`getqflx_qflx2gs_twoleaf`
-   （`conductance_from_transpiration`）。**下一枪**：打它的进出口
-   （入口同而出口不同 ⇒ 那个闭式里遮荫那一支的形状差）；注意 `gs_sun` 一直相同。
+   叶面蒸腾需求那一段 24 个量里**只有 `gs_sha` 差**（call 289 起）⇒
+   种子是**遮荫叶气孔导度**；又因 call 288 的入参逐位相同而它算出的 `gs_sha` 不同
+   ⇒ 形状差在 `getqflx_qflx2gs_twoleaf`/`conductance_from_transpiration` 的**遮荫那一支**
+   （`gs_sun` 一直相同）。**下一枪**：枚举 `cshaw_dry` 分子/分母收缩与 `1/(…)` 的
+   2×2×2 种形状，用 `Fraction` 拿 call 288 的入参精确算，与内核 call 289 的
+   `gs_sha` 位型比对。
    验收口径：`accept_r247.sh` 与 `dry_ts.sh 16` + `window_divergence.py`；
    干窗黄金 `over_tol` 现在是 821 / 20662 / 25896。
 0b. **（新）补 `balance_phs_rootflux`**：见第 276 轮。默认配置下它在这三份窗口里
