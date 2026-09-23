@@ -18441,6 +18441,14 @@ VSFI     kernel=200 rust=200
      `MOD_Hydro_SoilWater.F90` 拷进 `$WORK`，`sed` 掉目标那几行 `PRIVATE ::`
      （或把它们加进 `PUBLIC ::`），用**那份拷贝**编出 `.mod`（`-I$WORK` 在前），
      vendor 源树不动。否则会先在"驱动看不到例程"上报错，白花一轮。
+
+     **已实测这条编译路线可行**（第 312 轮）：把模块拷进 `$WORK`、只把
+     `PRIVATE :: flux_inside_hm_soil` 与 `PRIVATE :: water_balance` 两行改成
+     `PUBLIC ::`，用内核同款选项（`-O2 -fdefault-real-8 -ffree-form -cpp
+     -ffree-line-length-0 -fallow-argument-mismatch -fopenmp`，`-I$WORK -I.bld
+     -Iinclude -Ishare -Imain`）编出的 `.o` 里，两个例程都是**全局 `T` 符号**
+     （`nm` 实测）⇒ 驱动可以直接 `USE MOD_Hydro_SoilWater, only: …` 调它们。
+     下一步就是在这个骨架上加驱动与本仓库侧探针。
 2. **第二配置回归**（Campbell + 关 VSF）：第 293 轮实测干窗已从 16 降到 **0**；
    wet/snow 未重跑，需要时跑 `oracle/scripts/compare_second_config.sh <case>`。
 3. **未移植分支**：`standard_lct_step.rs:578` 明说 split soil/snow、SNICAR、气溶胶、
