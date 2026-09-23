@@ -18463,6 +18463,46 @@ VSFI     kernel=200 rust=200
 （`type_weighted_geometric_mean`）里，**值得补**；而 `type_upstream_mean` 那一支是
 **死代码**（只影响 Rust 里分支的选取逻辑，其算术不必逐位对齐）。这条排除了
 "补了两处却是死路"的可能（第 298 轮那种教训）。
+
+**第 314 轮：给 `flux_inside_hm_soil` 建了闭环 —— 两处形状判对，但**干窗崩了 13 倍**
+
+新三件套（`oracle/scripts/flux_inside_diff.f90` + `crates/colm-core/examples/flux_inside_probe.rs`
++ `oracle/scripts/compare_flux_inside.sh`）：按第 311/312 轮验证过的"拷贝+放行"路线编译
+（把模块拷进 `$WORK`、把 `PRIVATE :: flux_inside_hm_soil` 改成 `PUBLIC`，
+`-ffunction-sections` + `-Wl,-dead_strip` 剔掉依赖 MPI 的未用子程序），
+两档模型 × (3000 均匀随机 + 3000 边界) 共 **12000** 例，逐位比 `flux`。
+
+```text
+改前：flux_inside_hm_soil mismatches / 12000: {'flux': 1675}
+按第 305 轮映射的两处补 mul_add 后：all 3 outputs 12000/12000 bitwise identical
+分支分布 {grad<0: 5385, grad==0: 46, grad==1: 1218, grad>1: 5351}   ← 注意
+```
+
+**两处形状（`r0` 分母、`grad_psi>1` 支）就此判对**（12000/12000，确定性判据）。
+
+**但黄金口径拒绝**（`win4.sh` + `three.py`，同树 A/B）：
+
+| 窗口 | 基线 | 补这两处 |
+|---|---|---|
+| dry `over_tol` | **28** | **363** ✗（13 倍） |
+| dry `ot_vars` | 1 | **25** ✗ |
+| dry `sumabs` | 249.79 | **383.34** ✗ |
+| wet `over_tol` | 1967 | **1739** ✓ |
+| wet `ot_vars` | 53 | **36** ✓ |
+| wet `sumabs` | 31.31 | **28.01** ✓ |
+| snow | 25713 / 32567 / 444416.82 | 不变 |
+
+**关键线索：`0 < grad_psi < 1` 那一条分支在本闭环里一例都没抽到**（分布里只有
+`grad<0`/`==0`/`==1`/`>1`）。那条分支的式子
+`rr = max(1+r0*psi_l/dz, 1-r0)`、`hk_u**rr * hk_l**(1-rr) * grad_psi` 本仓库也是平铺的
+⇒ **修的那两处在 dry 窗口之外的分支上留下了未修的差**，dry 窗（水位在第 3 层、近饱和）
+恰好走那条分支，于是 1 ULP 的分支级联把轨迹推到完全不同的解（`ot_vars` 1→25 是
+"离散分支翻了"的特征，而不是混沌噪声）。
+**代码已回退**（树与 HEAD 一致），闭环与证据入库。
+**下一枪（顺序）**：① 给闭环补**近静水**用例（`psi_l = psi_u - delta`，`delta ∈ (0, dz)`）
+把 `0<grad<1` 抽到；② 按第 305 轮的办法映射那条分支的 FMA 并补 `mul_add`；
+③ 再跑这个闭环（期望仍 12000+/12000+ 全同）；④ 然后才跑黄金 A/B —— 这次四条分支
+都判对了，`ot_vars` 才可能不再翻。
 2. **第二配置回归**（Campbell + 关 VSF）：第 293 轮实测干窗已从 16 降到 **0**；
    wet/snow 未重跑，需要时跑 `oracle/scripts/compare_second_config.sh <case>`。
 3. **未移植分支**：`standard_lct_step.rs:578` 明说 split soil/snow、SNICAR、气溶胶、
