@@ -18178,6 +18178,21 @@ flux = t.mul_add(hk_l.powf(rr), hk_u);
 （本条就是这样对上的）。闭环仍然是最省事的最终判据，但"计数可疑 ⇒ 必须上闭环"
 这一步**不成立**：直接读上下文更快。
 
+**第 306 轮：把通量链剩下两个例程的**位置**钉住（映射留给下一轮）**
+
+`flux_top_transitive_interface` 不是函数而是 `PRIVATE` 子程序，定义在
+`MOD_Hydro_SoilWater.F90:2867`，被 `flux_all` 在 `:2332`/`:2340` 调用；它自己带一套
+**割线迭代**局部量（`psi_i_r`/`psi_i_l`/`psi_i_k1`/`fval`/`fval_k1`/`iter`），
+`flux_btm_transitive_interface` 同族（符号表里两者各自独立）。所以这两个例程的
+3+3 条 FMA 与 `secant_method_iteration` 是**同类问题**（"哪个乘积进 FMA"），
+映射时必须像第 305 轮那样逐条读寄存器上下文，不能按表达式猜。
+**下一轮的动作**（已具体到文件/行）：
+1. 读 `:2867` 起的子程序体与 `flux_btm_transitive_interface` 的对应体，逐条把
+   3+3 条 FMA 对到源表达式；
+2. 与 `flux_inside_hm_soil` 已定案的 2 处（第 305 轮记的写法）一起补 `mul_add`；
+3. 建 `compare_getzwt.sh` 式例程闭环验证（这三个都是 `psi`/`hk`/`dz` 的纯函数）；
+4. 之后再与第 302 轮那六处 `get_zwt_from_wa` 形状一起落地、跑口径。
+
 #### 第 303 轮：水步入场探针 —— 剩下的种子是**第 20 步入场时的冰/水状态**，不是 `eff_porosity` 算错
 
 新工具 `oracle/scripts/vsf_input_probe.sh`：在 `WATER_VSF` 调 `soil_water_vertical_movement`
