@@ -18663,12 +18663,10 @@ bash oracle/scripts/compare_second_config.sh US-NR1-snow   → 79 variable(s) ou
 （第 3 组：`water_balance` 5 处 + `flux_all` 加权平均 1 处），那时状态残差才有指望回落。
 已落地的 8 处**保留**（口径 wet 1967→1942、干/雪不倒退，短程与第二配置全绿）。
 
-**下一枪（第 323 轮后）**：① `soil_water_vertical_movement` 的 27−12=15 条差额 ——
-**先查内联**：本内核符号表里 `initialize_sublevel_structure`/`use_explicit_form`/
-`Richards_solver`/`secant_method_iteration`/`var_perturb_*`/`flux_sat_zone_all`/
-`flux_at_unsaturated_interface`/`flux_both_transitive_interface` **没有独立符号**
-（全被内联进 `soil_water_vertical_movement` 与 `flux_all`），所以 27 里极可能大部分
-是它们的；`check_and_update_level`/`solve_least_squares_problem` 则**有**独立符号。
+**下一枪（第 324 轮后）**：① `f_vegwp` 一侧剩下的缺口 —— 第 324 轮已把
+`soil_water_vertical_movement` + 两个内联例程的 **17 处**形状全部判好并列进"第 324 轮"
+的表，但整批落地让湿窗 `over_tol` 1907→1984，**按口径未落**；下一轮把 `f_vegwp`
+那条链的缺口凑齐后，照那张表一起补、再跑三段式。
 ② 第二配置雪窗那 79（早期记录同为 79，非本会话引入）。③ 未决小尾巴：`flux_all` 里
 那条加权平均 FMA 只有调用点上下文（option (a)）判过，若要做**实测**判据只能建
 "直接驱动 `flux_all`"的第 4 个闭环（夹具更大）。
@@ -18762,3 +18760,74 @@ fdiv
 15000/15000 复跑通过；`cargo test --workspace --lib --bins`、`clippy --workspace
 --all-targets -- -D warnings`、`fmt --all --check`（两个 workspace）全绿（本机
 `colm-cli` 的 7 个 `study::runner` 用例仍因沙箱 `EPERM` 失败，与本改动无关）。
+
+**第 324 轮：`soil_water_vertical_movement` 的 27−12 差额拆开了 —— 全是内联账，真缺口 17 处；整批落地让湿窗倒退，未落**
+
+**先把"内联"减掉（这是本轮最省事的一步）**：把 `MOD_Hydro_SoilWater.F90` 用
+`gfortran -S -O2 -g`（内核同款选项）编成汇编，按 `.loc` 把 swvm 符号里的 27 条
+FMA **逐条归到源行**。结果是：
+
+```text
+27 = 15 (soil_water_vertical_movement 自己的表达式)
+   +  6 (被内联的 Richards_solver)
+   +  6 (被内联的 use_explicit_form)
+```
+
+符号表印证：本内核里 `Richards_solver`/`use_explicit_form`/`initialize_sublevel_structure`/
+`secant_method_iteration`/`var_perturb_*`/`flux_sat_zone_all`/`flux_at_unsaturated_interface`/
+`flux_both_transitive_interface` **都没有独立符号**（全被内联）；而
+`check_and_update_level`/`solve_least_squares_problem`/`flux_sat_zone_fixed_bc`/
+`flux_inside_hm_soil`/`flux_top|btm_transitive_interface`/`flux_all` **有**。
+顺带纠一个计数：第 305 轮把 Rust 侧记成 12 个 `mul_add`，其中 1 个是**注释里的
+"mul_add" 字样**，实际代码 11 个；这 11 个覆盖了 15 条"自有"里的 10 条。
+
+**真缺口 = 5（swvm 自有）+ 6（`Richards_solver`）+ 6（`use_explicit_form`）= 17**，
+逐条读 `.loc` 上下文定出"哪条乘积独立舍入、哪条进 FMA"：
+
+```text
+--- swvm 自有（5）----------------------------------------------------------
+:338 wexchange = rsubst*dt + deficit            → rsubst.mul_add(dt, deficit)
+:406 ss_dp = max(ss_dp + qgtop*dt, 0)           → qgtop.mul_add(dt, ss_dp).max(0)
+:434 (ss_vliq*(dz-wt)+porsl*wt)/dz              → fmul 舍入 porsl*wt、fmadd 收
+                                                  ss_vliq*(dz-wt)
+:456 wblc = w_sum_after-(w_sum_before+(qgtop-sum-rsubst)*dt-etrdef)
+                                                → (...).mul_add(dt, w_sum_before)
+:478 (ss_vliq*(zwt-zlo)+porsl*(zhi-zwt))/(zhi-zlo)
+                                                → 同 :434（收第一个源乘积）
+--- 内联 Richards_solver（6）----------------------------------------------
+:817 dp_m1 - (q_0(lb-1)-ubc_val)*dt             → (-(q_0-ubc_val)).mul_add(dt, dp_m1)
+:823 f2_norm = sqrt(sum(blc**2))                → fold(0, |a,r| r.mul_add(r, a))
+:966 waquifer_pb 里的 psi_s+(sp_zi-zwt_pb)*0.5  → (sp_zi-zwt_pb).mul_add(0.5, psi_s)
+:1060 waquifer   里的 psi_s+(sp_zi-zwt)*0.5     → 同上
+:1065 ss_q = ss_q + q_this*dt_this               → q_this.mul_add(dt_this, ss_q)
+:1085 (ss_wf*vl_s+(dz-wf-wt)*ss_vl)/(dz-wt)     → 收第一个源乘积，舍入第二个
+--- 内联 use_explicit_form（6）--------------------------------------------
+:1411/:1424 (wt_m1+wf_m1)*vl_s+(dz-wt_m1-wf_m1)*vl_m1
+                                                → fmul 舍入第二个、fmadd 收第一个
+:1464 dp = max(0, dp_m1+(ubc_val-q(lb-1))*dt)   → (ubc_val-q).mul_add(dt, dp_m1)
+:1474 ( ... + dwat)/dz，dwat=(q(layer)-q(layer+1))*dt
+                                                → 两条 FMA：先收第一个乘积，
+                                                  再把 dwat 收进结果
+:1479 waquifer = waquifer_m1 + q(ub)*dt         → q(ub).mul_add(dt, waquifer_m1)
+```
+
+**落地实测（A/B，同树）**：
+
+| 窗口 | 第三组（现基线） | 只落 swvm 5 处 | **整批 17 处** |
+|---|---|---|---|
+| dry `over_tol` / `ot_vars` | 28 / 1 | **20 / 1** ✓ | **20 / 1** ✓ |
+| wet `over_tol` / `ot_vars` | 1907 / 53 | **1960 / 53** ✗ | **1984 / 53** ✗ |
+| snow `over_tol` / `ot_vars` | 25713 / 79 | 25713 / 79 | 25713 / 79 |
+| restart 1 步 / 3 步 | 0/68 / 692/692 | 0/68 / 692/692 | 0/68 / 692/692 |
+| wet `bitwise` / `sumabs` | 28532 / 31.59 | 28868 / 28.57 | 29221 / **17.40** |
+
+**结论与处理**：17 处形状都是 `.loc` 逐条归位的（不是猜的），但**整批落地让湿窗
+`over_tol` 从 1907 退到 1984**，按现行口径"任一 `over_tol`/`ot_vars` 变差就回滚"，
+**未落**（代码已 `git checkout` 回退到第三组）。这与第 315/321 轮同一现象：其它缺陷
+（这条链上主要是 `f_vegwp`）还在场时，把一批逐位都对的形状落地会换掉混沌轨道。
+湿窗 `sumabs` 31.59→17.40 说明这批形状确实让**逐点误差**小了很多，退的只是那个
+混沌主导的 `over_tol` 计数。
+
+**给下一轮**：上表就是可直接照抄的补丁清单（**不要再读一遍汇编**）。正确顺序是
+**先凑齐 `f_vegwp` 一侧的缺口**，再把这份 17 处一起落地重测 —— 才有机会让三个窗口
+同时不倒退（第 316 轮的 8 处就是这么成组的）。
