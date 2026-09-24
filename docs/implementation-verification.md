@@ -18368,7 +18368,25 @@ VSFI     kernel=200 rust=200
 
 ## 若继续
 
-> **第 349 轮更新（最新的指路牌，先读这段）**：湿窗第 63 步那颗种子被**推出植物水力** ——
+> **第 350 轮更新（最新的指路牌，先读这段）**：把 `stomata` 的 **14 处 FMA 形状**按 GIMPLE
+> 补齐（`.FMA=a*b+c`、`.FMS=a*b-c`、`.FNMA=c-a*b`、`.FNMS=-c-a*b`，拿 `:350` 的
+> `bquad` 对照源码钉死）—— **闭环从 `rst 114 + assim 171` 好到 `rst 0 + assim 100 (全 BIG)`，
+> 但湿窗 N=96 从 11/68 变 19/68、黄金 wet 从 `1197/19，8.4418` 变 `1775/52，19.8039`
+> ⇒ 整批已回退**（回退后三项都验过复原）。这次**短程状态扫描也一起变差**，所以不适用
+> 第 249 轮那条例外。
+>
+> * **第 349 轮的定位要更正**：修到"夹具零舍入差"之后，轨迹里的 `stomata` 返回值
+>   **一个 bit 都没变**（PHXS 首差异同 hex 同簇数）⇒ 轨迹里 `rssun`/`assimsun` 的 1–2 ULP
+>   是**从入参透传**的，不是 `stomata` 自己算的。"种子生在 `stomata` 内部"说过头了。
+> * **下一枪**：探针挪到 `CALL stomata` 的**实参表**（`par`/`ei`/`ea`/`pco2a`/`po2m`/`pco2m`/
+>   `rb`/`raw`/`rstfac`/`cint`/`tlef`/`psrf`/`tm`/`g1`/`g0`/`gradm`/`binter`/`lambda`），
+>   两侧 hex、63 步。**先用现成的**第 293 轮 `stomata_probe.sh` + `stomata_cmp.py` 与
+>   `gssun_probe.sh` 的 `GSTO`（注意 `ES23.15` 那档对 1 ULP 是盲的，必须 hex）。
+> * **另记**：Medlyn 块还有 100 例 BIG（`assim` 0 vs 2.57e-4，`eyy` 迭代出口在 0.1 附近翻边），
+>   是结构性差异，与舍入批无关；夹具 k=3 档已按黄金区间采样，所以不能拿"夹具没覆盖"解释。
+> * 14 处形状的逐条对照表在"第 350 轮"里，可直接照抄重打（本仓库**不留**这半个修复）。
+
+> **第 349 轮更新**：湿窗第 63 步那颗种子被**推出植物水力** ——
 > 它生在 **`stomata` 的返回值**里。位型探针往上追三层，每层都是"入参已经不同"：
 > `PHXG` 的 `qflx_sha` → `PHXI` 的 `gssha` → `PHXR` 的 `rssun`（`tl`/`tprcor`/`laisun`/
 > `laisha` 从不差 ⇒ 换算公式不是元凶）→ `PHXS` 的 `rssun`（同一个 hex）⇒ 种子在
@@ -18378,6 +18396,8 @@ VSFI     kernel=200 rust=200
 >   **前面那些都自愈**（叶温迭代回到同一位型），只有第 63 步那一簇进了状态 ——
 >   所以 restart 到 N=62 仍 0/68。`rssun` 单独差（282-286）而 `assim` 不差 ⇒
 >   **不能只用 `assim` 那 4 例残差解释**，`rst`/`gs` 换算里还有一处形状缺口。
+> * **（第 350 轮更正：这句过头了 —— `stomata` 只是"第一个被探到的点"，修好它的舍入后
+>   轨迹里的返回值一个 bit 都没变，差异是从**入参**透传的。见"第 350 轮"⑤。）**
 > * 与已知残差接上头：`compare_stomata.sh` 的 4/4000（全在 `assim`）与第 336 轮那条
 >   `f_assimsun` history 缺口同源；本轮把 **state 级**证据也接到这条链上。
 > * **工具**：探针已入库为 `oracle/scripts/phs_hex_probe.sh`（4 个文件、8 个标签：
@@ -20344,3 +20364,68 @@ history 侧最早的分歧仍是**第 4 条记录的 `f_assimsun`/`f_fgrnd`**（
 ② 给夹具**加一档按黄金窗口真实参数区间采样**（照 CN-Cng-wet 第 1 步的
 `par`/`tlef`/`rstfac`/`c3c4=1`）。判据仍是：湿窗 `wet_ts.sh 63` 的 10/68 要往下走，
 干窗与黄金两窗口不许变差。
+
+**第 350 轮：把 `stomata` 那 14 处形状按 GIMPLE 补齐 —— 闭环好到"零舍入差"，但**状态扫描与黄金湿窗都变差**，整批已回退；顺带更正第 349 轮的定位**
+
+**① 先把 FMA 命名解码确定下来**（第 335/336 轮在这上面绕过圈子）。`MOD_AssimStomataConductance.F90`
+的 GIMPLE 共 40 条 FMA 族：`sortin` 11、`calc_photo_params` 4、`update_photosyn` 8、**`stomata` 17**。
+拿源码对照就能钉死语义（例：`:350` 的 `bquad = gbh2o*hcdma - ei - bintc*hcdma` 编成
+`_121 = .FMS(hcdma, gbh2o, ei)` 再 `bquad = .FNMA(bintc, hcdma, _121)`）：
+
+```text
+.FMA (a,b,c) = a*b + c        .FMS (a,b,c) = a*b - c
+.FNMA(a,b,c) = c - a*b        .FNMS(a,b,c) = -c - (a*b)
+```
+
+**② Rust `stomata` 有 14 处该收没收**（`photosynthesis.rs` 全文只有 4 个 `mul_add`；`range` 与
+`coupled_assimilation` 那两处本来是对的）。逐条（内核形状 → Rust 原写法）：
+
+| 位置 | 内核（`stomata.opt`） | Rust 原写法 |
+|---|---|---|
+| `omc` `:259` | `.FMA(vm*(pco2i_c-gammas)/(pco2i_c+rrkk), c3, vm*c4)` | 平铺 `A*c3 + vm*c4` |
+| `ome` 分母 `:260` | `.FMA(gammas, 2.0, pco2i_e)` | `pco2i_e + 2*gammas` |
+| `ome` 主式 | `.FMA(c3, _53, epar*c4)` | 平铺 |
+| `oms` `:263` | `.FMA(c3, omss, (omss*pco2i)*c4)` | 平铺 |
+| WUE `co2i_e` `:215` | `_368 = .FMA(sqrt(...), 1.37, 1.0)` | `1.0 + 1.37*sqrt(...)` |
+| Medlyn `bquad` `:343` | `.FNMS(g0*1e-6+acp, 2.0, (g1*acp)²/(vpd*gbh2o))` | 平铺 |
+| Medlyn `1-g1²` | `.FNMA(g1, g1, 1.0)` | `1.0 - g1.powi(2)` |
+| Medlyn `cquad` 内 | `.FMA(g0*2.0, 1e-6, (1-g1²)*acp/vpd)` | 平铺 |
+| Medlyn `cquad` 外 | `.FMA(g0*1e-6, g0*1e-6, _108*acp)` | 平铺 |
+| Medlyn `sqrtin` | `.FMS(bquad, bquad, cquad*4.0)` | 平铺 |
+| Ball-Berry `bquad` | `.FMS(hcdma, gbh2o, ei)` + `.FNMA(bintc, hcdma, _121)` | 平铺（两步） |
+| Ball-Berry `cquad` | `.FMA(bintc, hcdma, ea)` | 平铺 |
+| Ball-Berry `sqrtin` | `.FMS(bquad, bquad, (hcdma*4.0)*cquad)` | 平铺 |
+
+**③ 闭环确实大幅改善**：`compare_stomata.sh` 从 `{assim 171, rst 114}` → **`{assim 100, rst 0}`**
+—— **1 ULP 那一档全部清零**（`rst` 全清），剩下 100 例全是 `assim` 的 **BIG**（0 vs 2.57e-4）且
+**全在 Medlyn 块**（回退后是 113 例 BIG）。也就是说这 14 处形状是**对的**。
+
+**④ 但三台判据一致否决**（同一份改动，回退前后各测一遍）：
+
+| 仪器 | **回退后（保留）** | 打了这 14 处 |
+|---|---|---|
+| `stomata` 闭环 | rst 114 + assim 171 | **rst 0 + assim 100（全 BIG）** |
+| 湿窗 restart **N=63** | 10/68 | **10/68（一点没动）** |
+| 湿窗 restart **N=96** | **11/68** | 19/68（**变差**） |
+| 干窗 restart N=288 | 19/68 | 19/68（不变） |
+| 黄金 dry | 9163 / 28 / 1，261.0128 | 9163 / 28 / 1，261.0128（不变） |
+| 黄金 wet | **27066 / 1197 / 19，8.4418** | 27743 / **1775 / 52**，19.8039（**变差**） |
+| 轨迹 PHXS（`stomata` 返回值） | 18 簇，首个 = 迭代 131 `rssun` | **逐位不变**（同 hex、同簇数） |
+
+**这次不是"聚合混沌"**：短程状态扫描（N=96）也一起变差 ⇒ 不适用第 249 轮那条例外，按仓库
+纪律**整批回退**（`git checkout -- crates/colm-core/src/photosynthesis.rs`；回退后闭环回到
+171+114、N=96 回到 11/68、黄金 wet 回到 1197/19 —— 三处都验过）。
+
+**⑤ 更正第 349 轮（重要）**：把 `stomata` 在夹具上修到"零舍入差"之后，**轨迹里的
+`stomata` 返回值一个 bit 都没变**（PHXS 首差异仍是 `40657DD9ECCFF71F` vs `…1E`、簇数 7/6/5/5）。
+⇒ 轨迹里 `rssun`/`assimsun` 的 1–2 ULP **不是 `stomata` 自己算出来的，是从它的入参透传进来的**。
+第 349 轮"种子生在 `stomata` 内部"的说法**过头了**：`stomata` 只是"第一个被探到的点"。
+**下一枪**：把探针往上挪到 `CALL stomata` 的**实参表**（`par`/`ei`/`ea`/`pco2a`/`po2m`/`pco2m`/
+`rb`/`raw`/`rstfac`/`cint`/`tlef`/`psrf`/`tm`/`g1`/`g0`/`gradm`/`binter`/`lambda`），
+两侧打 hex。仓库里已有第 293 轮的 `oracle/scripts/stomata_probe.sh` + `stomata_cmp.py`
+（遮荫支入参/内部）和 `gssun_probe.sh` 的 `GSTO`，**先用它们**（注意 1 ULP 必须 hex：
+`ES23.15` 那一档是盲的），跑 63 步看哪个入参先分叉。
+
+**⑥ 仍待办（本轮没碰）**：Medlyn 块那 100 例 BIG 的 `assim`（0 vs 2.57e-4）——它在夹具里是
+**结构性**差异（`eyy` 迭代出口判据在 0.1 附近的翻边），与本次的舍入批无关；夹具 k=3 档
+（黄金真实区间）已在第 335 轮加上，所以这不是"夹具没覆盖"的解释。
