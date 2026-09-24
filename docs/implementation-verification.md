@@ -18360,7 +18360,33 @@ VSFI     kernel=200 rust=200
 
 ## 若继续
 
-> **第 341 轮更新（最新的指路牌，先读这段）**：植物水力链抓到 `conductance_from_transpiration`
+> **第 348 轮更新（最新的指路牌，先读这段）**：湿窗 N=20 那颗种子关掉了，根因是
+> **Rust 一直照着没编进内核的那份源码抄** —— `Makefile:641` 把 `MOD_LeafTemperature.o`
+> 指向 `extends/interception/MOD_LeafTemperature_Extended.F90`，而
+> `update_canopy_water` 的每一处形状都跟着 `main/MOD_LeafTemperature.F90`。两份在这一段
+> 是两套代码：`main/` 把超配量从水体里扣、**两侧都不夹**；`extends/` 记
+> `phase_flux_deficit` 回投 `fevpl`/`fsenl`，并且 `ldew_rain`/`ldew_snow` **都夹 0**
+> 之后才 `ldew = ldew_rain + ldew_snow`。
+>
+> * 湿窗**首分歧 N=20 → N=63**（N=16…48 全 0/68；N=96 16→**11**）；干窗首分歧推到
+>   **N=224…256 之间**、N=288 从 22/68 → **19/68**；黄金 wet `1908/53，24.8020` →
+>   **1197/19，8.4418**，黄金 dry `28/1，261.0128` **不变**；1 步 0/68、3 步 692/692 不变。
+> * **隔离实验**（本轮最该记的）：基线 + 只加那 4 个 `.max(0.0)`（clamp-only）在**所有**
+>   状态/黄金口径上与落地版**逐位相同** ⇒ N=20 那颗种子**只需要那 4 个夹取**；但黄金 wet
+>   `bitwise` 是 27072（clamp-only）vs **27066**（落地版）⇒ 两笔**回投让 Rust 更靠近内核**，
+>   不能省（雪窗才是它们的主场，本机测不了）。
+> * **顺序也纠了一处**：`energy_balance_error` 移到 `update_canopy_water` **之前**
+>   （上游 `:1449` 的 `err` 在 `:1464` 之前）。
+> * **方法论**：判形状前先 `make -Bn <obj>` 确认**编的是哪份源文件** —— `include/define.h`
+>   只决定 `extends/` 是否参与，`Makefile:641/644/647` 才是最终指向；同一个物理过程在
+>   `main/` 与 `extends/interception/` 里可以是两套代码。
+> * **下一步**：湿窗 **N=63 的 `ldew_rain`（4 ULP，`vegwp` 跟着走）**、干窗 **N=224…256**；
+>   history 侧最早仍是第 4 条记录的 `f_assimsun`/`f_fgrnd`（基线就有，别拿它当首判据）。
+>   另记两处已知偏差（本轮没动）：融化/冻结分支的加侧缺夹取（**可证惰性**）、
+>   `DEF_VEG_SNOW=.false.` 分支抄的是 `main/` 的按比例分回（**不是惰性，但本机测不到**，
+>   要改先造反例）。全表与 GIMPLE 引文见"第 348 轮"。
+
+> **第 341 轮更新**：植物水力链抓到 `conductance_from_transpiration`
 > 里 **3 处多收**的形状 —— 湿窗黄金**大幅改善**。
 >
 > * 湿窗 `sumabs` **28.84 → 5.55**（比第 338 轮之前的原基线 11.03 还小一半）、
@@ -20116,3 +20142,109 @@ Rust 原先写成 `A + (1-fwet)*delta*(…)` 的平铺链，**少收这一处**�
 
 **给下一轮**：湿窗的**下一颗**种子在 **N=20（`wliq_soisno`+`hk`，2/68）**，
 干窗在 **N=288（`tref`/`tleaf`，22/68）**；`vegwp` 那条链（PHS）现在可以认为收口了。
+
+**第 348 轮：湿窗 N=20 那颗种子关掉了 —— 冠层持水的**两侧**夹取 + 超配通量回投（Rust 一直照着**没编进内核的那份源码**抄）**
+
+**① 种子口径先纠一次。** 第 347 轮之后 `wet_ts.sh 20` 给的不再是 `wliq_soisno`+`hk`，
+而是**冠层持水**（因为 `cfw` 那处 FMA 改动了轨迹）：
+
+```text
+ldew       ndiff 1  idx (0,)  gold 0.0                  rust -1.0503208545953324e-19
+ldew_rain  ndiff 1  idx (0,)  gold 0.0                  rust -1.0503208545953324e-19
+（ldew_snow 两侧都是 0.0；tlai=1.8、tsai=0.45、tleaf=293.695 K > tfrz ⇒ 走暖支）
+```
+
+**读法**：`evplwet`（本例是蒸发）被 `elwmax = ldew/deltim` 夹过，暖支里
+`qevpl = ldew_rain/deltim`，于是 `ldew_rain + (qdewl-qevpl)*deltim` 的**理论值恰好是 0**；
+但它是 `FMA(deltim, 0-qevpl, ldew_rain)`，**单次舍入**后可以落到 **−1 ULP**。
+上游把两个分量都夹到 0，Rust 没有 ⇒ 从那一步起 `ldew` 差 1 ULP。
+
+**② 根因不是漏了一个 `max`，是"照错文件抄"。** `Makefile:641` 把
+`MOD_LeafTemperature.o` 指向 `extends/interception/MOD_LeafTemperature_Extended.F90`，
+**不是** `main/MOD_LeafTemperature.F90`；Rust 这一段的每一处形状都跟着 `main/` 走。
+两份源码在这一段的差别是**结构性**的：
+
+```fortran
+! main/MOD_LeafTemperature.F90:1185-1197   ← 从没编进内核
+IF (qevpl  > ldew_rain/deltim) THEN  qsubl = qevpl - ldew_rain/deltim;  qevpl = ldew_rain/deltim  ENDIF  ! 冷支对称
+ldew_rain = ldew_rain + (qdewl-qevpl)*deltim      ! 超配量**从水体里扣**
+ldew_snow = ldew_snow + (qfrol-qsubl)*deltim
+ldew = ldew_rain + ldew_snow                      ! 没有 max
+
+! extends/interception/MOD_LeafTemperature_Extended.F90:1613-1637（partition_canopy_latent_flux）
+IF (qevpl > ldew_rain/deltim) THEN  phase_flux_deficit = qevpl - ldew_rain/deltim;  qevpl = ldew_rain/deltim  ENDIF
+! 超配量**不改水体**，记进 phase_flux_deficit
+```
+
+`extends/` 那一段（`MOD_LeafTemperature_Extended.F90:1468-1495`）的内联 GIMPLE
+（`gfortran -O2 -fdump-tree-optimized`，第 4536-4745 处）逐句给出形状：
+
+```text
+_3169 = MAX(evplwet, 0)            _3171 = ABS(MIN(evplwet, 0))
+bb203: IF (phase_flux_deficit > 0)  fevpl = fevpl - pfd;  fsenl = .FMA(htvpl, pfd, fsenl)   ← evplwet 那一句被优化掉（死存）
+_880 = .FMA(deltim, qdewl-qevpl, ldew_rain旧值)      _887 = .FMA(deltim, qfrol-qsubl, ldew_snow旧值)
+bb205/206: IF (_880 < 0 .OR. _887 < 0)  flux_deficit = MAX(-_880,0)+MAX(-_887,0)
+                                        fevpl = fevpl - flux_deficit/deltim
+                                        fsenl = fsenl + (htvpl*flux_deficit)/deltim     ← **没融合**：mul→div→add
+bb207: ldew_rain = MAX_EXPR<_880,0>;  ldew_snow = MAX_EXPR<_887,0>;  ldew = ldew_rain + ldew_snow
+```
+
+注意 `bb207` 的两个 `MAX_EXPR` 是**无条件**的（`bb206` 只是记账），而 `flux_deficit`
+取的是**夹取前**的两个负值 —— 顺序错了就少收那一笔。
+
+**③ 落地**（`crates/colm-core/src/leaf_temperature.rs::update_canopy_water`）：
+两个分量都夹 0、`ldew = ldew_rain + ldew_snow`；`phase_flux_deficit` 不再从水体里扣；
+`flux_deficit` 由夹取前的两个值算；返回值加上这两个超配量，调用方按上游顺序各退一次
+（第一处 `FMA(htvpl, pfd, fsenl)`，第二处 `fsenl + (htvpl*fd)/deltim` 是平铺 ——
+Rust 默认不融合，正好对上）。`evplwet` 自己那两笔**故意不做**：上游在 `:1489` 之后再没读过它。
+
+顺带纠正一处**顺序**：`energy_balance_error` 原先算在持水更新**之后**，
+而上游 `:1449` 的 `err` 在 `:1464` 之前 ⇒ 移到 `update_canopy_water` 之前。
+这一处同时修掉两个错：`err` 少吃两笔回投，且 `precipitation_heat` 不再用到已被相变
+（Niu(2004) 的 `tl` 拉回）改过的 `leaf_temperature_k`。
+
+**④ 隔离实验（本轮最该记的一步）**：把改动拆成**最小子集**——基线 + 只给两条
+`mul_add` 各加一个 `.max(0.0)`（"clamp-only"）——跑同一批仪器：
+
+| 仪器 | 基线（HEAD `d326254`） | **clamp-only** | **本轮落地** |
+|---|---|---|---|
+| 湿窗首分歧步 | **N=20** | N=63 | **N=63** |
+| 湿窗 N=20 / 21 / 24 / 32 / 48 / 96 | 2 / 2 / 21 / 21 / 19 / 16 | — | **0 / 0 / 0 / 0 / 0 / 11** |
+| 湿窗 N=62 / 63 / 64 / 768 | — | 0 / 10 / 5 / 26 | **0 / 10 / 5 / 26** |
+| 干窗首分歧步 | ≤N=26（N=288 已 22/68） | — | **224 与 256 之间**（N=224 仍 0/68） |
+| 干窗 N=288 | 22/68 | 19/68 | **19/68** |
+| 干窗 1 步 / 3 步 | 0/68 / 692-692 | — | **0/68 / 692-692** |
+| 黄金 dry（`over_tol`/`ot_vars`，`sumabs`） | 28 / 1，261.0128 | 9163 / 28 / 1 / 261.0128 | **9163 / 28 / 1 / 261.0128** |
+| 黄金 wet（`bitwise`/`over_tol`/`ot_vars`/`sumabs`） | — / 1908 / 53 / 24.8020 | **27072** / 1197 / 19 / 8.4418 | **27066** / 1197 / 19 / 8.4418 |
+| 黄金 snow | — | 未测（US-NR1 强迫不在仓库） | 未测（同上） |
+
+两条结论：
+* **clamp-only 与落地版在**所有**状态/黄金口径上逐位相同**（连 N=63 那颗新种子的
+  两个值都一样：`gold 0.010626504408926336` vs `rust 0.010626504408926329`）
+  ⇒ 本轮的"重组 + 回投"在这两个窗口里是**惰性**的，N=20 那颗种子**只需要那 4 个夹取**。
+* 黄金湿窗 `bitwise` **27072 → 27066**（`over_tol`/`sumabs` 不变）⇒ 回投让 Rust
+  **更靠近**内核 6 个值。**所以两笔回投不能省**：它们在冠层有雪时（`qsubl > ldew_snow/deltim`）
+  才是活的，而雪窗本机测不了 —— 省掉等于留一个已知的、只能在雪窗暴露的偏差。
+* 另外单独验过：湿窗 N=16 的 history 首分歧记录**基线与本轮完全相同**（第 4 条记录、
+  `f_assimsun`/`f_fgrnd` 各 1 个值）⇒ 那是**先前就存在**的 history-only 形状缺口，与本轮无关。
+
+**⑤ 方法教训（比结论值钱）**：**先看 Makefile 编的是哪一份源文件**，再去读形状。
+`main/MOD_LeafTemperature.F90` 与 `extends/interception/MOD_LeafTemperature_Extended.F90`
+里同一个物理过程是两套代码（前者把超配量扣水体、无夹取；后者记 `phase_flux_deficit`
+回投通量），Rust 从第 9 轮起抄的是前者。判 1 ULP 级种子时，"哪份源码进了内核"
+必须先用 `make -Bn <obj>` 确认（`vendor/CoLM202X/include/define.h` 只决定 `extends/`
+是否参与，`Makefile:641/644/647` 才是最终指向）。
+
+**⑥ 顺手记下的两处**已知**偏差（本轮**没动**，都不是这两个窗口的种子）**：
+* `update_canopy_water` 的融化/冻结两段：上游是 `ldew_rain = max(0., ldew_rain + qmelt*deltim)`、
+  `ldew_snow = max(0., ldew_snow + qfrz*deltim)`，Rust 只在**减**的那一侧夹。
+  但加数 `qmelt`/`qfrz` 由 `min(…, 正数)` 给出、必 ≥ 0 ⇒ 夹取**可证惰性**（含 ±0 情形）。
+* `DEF_VEG_SNOW = .false.` 那一支：`extends/:1505-1511` 是 `ldew_rain = ldew; ldew_snow = 0.`
+  （或按 `tl` 反号），Rust 抄的是 `main/:1214-1230` 的**按比例分回**——**这一处不是惰性**，
+  只是 `DEF_VEG_SNOW` 默认 `.true.`（`MOD_Namelist.F90:314`）且三份黄金算例都没覆盖它，
+  所以**本机完全测不到**。要改就得先造一个 `DEF_VEG_SNOW=false` 的算例，不能盲改。
+
+**给下一轮**：湿窗首分歧现在是 **N=63 的 `ldew_rain`（4 ULP，`vegwp` 3 个元素跟着走）**，
+它**与本轮改动无关**（clamp-only 逐位复现）；干窗首分歧在 **N=224…256** 之间；
+history 侧最早的分歧仍是**第 4 条记录的 `f_assimsun`/`f_fgrnd`**（基线就有，判据得用
+2 步以上的 restart 或专门探针）。雪窗要等 US-NR1 强迫数据到位。
