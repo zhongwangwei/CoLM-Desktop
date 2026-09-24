@@ -4451,13 +4451,16 @@ pub fn variably_saturated_flow_step(
                 // `MOD_SoilSnowHydrology.F90:1109-1110`（`WATER_VSF`）：
                 // `wliq = denh2o*((eff*(sp_zi-zwt) + vol_liq*(zwt-sp_zi(j-1)))/1000`。
                 // GIMPLE（`water_vsf` 第 6 处）是
-                // `FMA(eff, sp_zi-zwt, (zwt-sp_zi(j-1))*vol_liq)` ——
-                // **左边**那个乘积被吸收、**右边**的是已舍入的加数。
+                // `_247 = eff*(sp_zi-zwt)`（**独立舍入**）之后
+                // `_253 = .FMA(vol_liq, zwt-sp_zi(j-1), _247)` ——
+                // 进 FMA 的是**第二个**乘积，第一个是已舍入的加数。
+                // （第 337 轮更正：原先按"左乘积被吸收"写反了，注释里的
+                // `FMA(eff, sp_zi-zwt, …)` 与 dump 不符。）
                 state.liquid_water_kg_m2[level] = WATER_DENSITY_KG_M3
-                    * effective_porosity[level].mul_add(
-                        interface_depth_mm[level + 1] - water_table_depth_mm,
-                        liquid_volume_fraction[level]
-                            * (water_table_depth_mm - interface_depth_mm[level]),
+                    * liquid_volume_fraction[level].mul_add(
+                        water_table_depth_mm - interface_depth_mm[level],
+                        effective_porosity[level]
+                            * (interface_depth_mm[level + 1] - water_table_depth_mm),
                     )
                     / 1000.0;
             } else {
