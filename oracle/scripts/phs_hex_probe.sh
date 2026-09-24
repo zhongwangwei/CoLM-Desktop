@@ -31,6 +31,10 @@ END_DAY=$((1 + TOTAL / 86400))
 FORT_PH="vendor/CoLM202X/main/MOD_PlantHydraulic.F90"
 # `gs0sun`/`gs0sha` 与 `stomata` 的出生点在**叶温**那一份里（不是 PHS 那一份）。
 FORT_LT="vendor/CoLM202X/extends/interception/MOD_LeafTemperature_Extended.F90"
+# 第 359 轮：`qg` 的生产者。注意 Makefile:647 把 MOD_Thermal.o 指向 **extends** 那份，
+# main/MOD_Thermal.F90 不是编进内核的源码。
+FORT_TH="vendor/CoLM202X/extends/interception/MOD_Thermal_CanopyPhase_Extended.F90"
+RUST_GH="crates/colm-core/src/ground_humidity.rs"
 RUST_PH="crates/colm-core/src/plant_hydraulics.rs"
 RUST_LT="crates/colm-core/src/leaf_temperature.rs"
 export NETCDF_DIR=${NETCDF_DIR:-/opt/homebrew/opt/netcdf}
@@ -44,12 +48,12 @@ for _ in $(seq 1 240); do
 done
 [ -d "$LOCK" ] || { echo "!! another kernel build holds $LOCK" >&2; exit 9; }
 rm -rf "$WORK"; mkdir -p "$WORK/run" "$WORK/backup"
-for f in "$FORT_PH" "$FORT_LT" "$RUST_PH" "$RUST_LT"; do
+for f in "$FORT_PH" "$FORT_LT" "$FORT_TH" "$RUST_PH" "$RUST_LT" "$RUST_GH"; do
   cp "$BASE/$f" "$WORK/backup/$(basename "$f")"
 done
 restore() {
   cd "$BASE"
-  for f in "$FORT_PH" "$FORT_LT" "$RUST_PH" "$RUST_LT"; do
+  for f in "$FORT_PH" "$FORT_LT" "$FORT_TH" "$RUST_PH" "$RUST_LT" "$RUST_GH"; do
     b="$WORK/backup/$(basename "$f")"
     diff -q "$b" "$BASE/$f" >/dev/null 2>&1 || { cp "$b" "$BASE/$f"; echo "== restored $f"; }
   done
@@ -153,10 +157,30 @@ open(path, "w").write("\n".join(lines))
 print("   patched MOD_LeafTemperature_Extended.F90")
 FEOF2
 
+python3 - "$BASE/$FORT_TH" <<'FEOF3'
+import sys
+path = sys.argv[1]
+lines = open(path).read().split("\n")
+
+def after(lines, anchor, block, tag):
+    idx = [i for i, l in enumerate(lines) if l.strip() == anchor]
+    assert len(idx) == 1, (tag, len(idx))
+    lines[idx[0] + 1:idx[0] + 1] = block
+    return lines
+
+# `qg` 的入参（非 split 支）：fsno psit t_grnd forc_q qsatg hr qred qg
+hexq2 = ("      WRITE(*,'(A,8(1X,Z16.16))') 'PHXQ2', &\n"
+         "           TRANSFER(fsno,0_8),TRANSFER(psit,0_8),TRANSFER(t_grnd,0_8),TRANSFER(forc_q,0_8), &\n"
+         "           TRANSFER(qsatg,0_8),TRANSFER(hr,0_8),TRANSFER(qred,0_8),TRANSFER(qg,0_8)").split("\n")
+lines = after(lines, "q_snow = qg", hexq2, "PHXQ2")
+open(path, "w").write("\n".join(lines))
+print("   patched MOD_Thermal_CanopyPhase_Extended.F90")
+FEOF3
+
 (cd "$BASE" && ./oracle/scripts/build_kernel.sh default >"$WORK/build.log" 2>&1) \
   || { echo "!! compile failed"; tail -20 "$WORK/build.log"; exit 3; }
 strings "$BASE/kernels/default/colm.x" > "$WORK/strings.txt"
-for m in PHXD PHXF PHXI PHXR PHXS PHXG PHXQ PHXA PHXH; do
+for m in PHXD PHXF PHXI PHXR PHXS PHXG PHXQ PHXA PHXH PHXQ2; do
   grep -q "$m" "$WORK/strings.txt" || { echo "!! marker $m missing"; exit 3; }
 done
 
@@ -295,6 +319,7 @@ open(path, "w").write(src)
 print("   patched plant_hydraulics.rs")
 REOF
 
+
 python3 - "$BASE/$RUST_LT" <<'REOF2'
 import sys
 path = sys.argv[1]
@@ -357,6 +382,29 @@ open(path, "w").write(src)
 print("   patched leaf_temperature.rs")
 REOF2
 
+python3 - "$BASE/$RUST_GH" <<'REOF3'
+import sys
+path = sys.argv[1]
+src = open(path).read()
+anchor = "    Ok(GroundHumidityState {"
+assert src.count(anchor) == 1, src.count(anchor)
+block = """    println!(
+        "PHXQ2 {:016X} {:016X} {:016X} {:016X} {:016X} {:016X} {:016X} {:016X}",
+        input.snow_cover_fraction.to_bits(),
+        soil_potential_mm.to_bits(),
+        input.ground_temperature_k.to_bits(),
+        input.air_specific_humidity.to_bits(),
+        saturation.specific_humidity.to_bits(),
+        relative_humidity.to_bits(),
+        humidity_reduction.to_bits(),
+        ground_specific_humidity.to_bits()
+    );
+"""
+src = src.replace(anchor, block + anchor, 1)
+open(path, "w").write(src)
+print("   patched ground_humidity.rs")
+REOF3
+
 (cd "$BASE" && cargo build -q -p colm-runtime --bin colm-rs >"$WORK/rust_build.log" 2>&1) \
   || { echo "!! rust build failed"; tail -25 "$WORK/rust_build.log"; exit 3; }
 ( cd "$WORK" && "$BASE/target/debug/colm-rs" "$WORK" --land-cover igbp --restart-out "$WORK/rust_restart.nc" --history-dir "$WORK" \
@@ -371,7 +419,7 @@ def rows(p):
     out = []
     for line in open(p):
         parts = line.split()
-        if parts and parts[0] in ("PHXG", "PHXA", "PHXQ", "PHXD", "PHXF", "PHXI", "PHXR", "PHXS", "PHXH"):
+        if parts and parts[0] in ("PHXG", "PHXA", "PHXQ", "PHXD", "PHXF", "PHXI", "PHXR", "PHXS", "PHXH", "PHXQ2"):
             out.append(parts)
     return out
 f = rows(f'{work}/fort_probe.txt')

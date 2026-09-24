@@ -18373,7 +18373,22 @@ VSFI     kernel=200 rust=200
 
 ## 若继续
 
-> **第 358 轮更新（最新的指路牌，先读这段）**：干窗第 251 步的**因果链**定下来了 ——
+> **第 359 轮更新（最新的指路牌，先读这段）**：干窗第 251 步的**土壤侧入口是 `psit`** ——
+> 新标签 `PHXQ2`（6 个被探文件，新增 `extends/.../MOD_Thermal_CanopyPhase_Extended.F90`
+> 与 `ground_humidity.rs`）实测：`psit` 差 34 步，而 `hr`/`qred`/`qg` **只在第 251 步**同时差，
+> `fsno`/`t_grnd`/`forc_q`/`qsatg` **从不差**。
+>
+> * ⇒ **不走 ground-temperature chain**；土壤侧入口是 `psit = f(表层 wliq/wice, porsl, theta_r, psi0)`，
+>   即**表层水在步内瞬时差**（步末自愈 —— restart 第 251 步差的是第 6 层，不是表层）。
+> * **完整因果链（355+358+359 实测）**：步内表层水差 → `psit` → `hr`/`qred`/`qg` → `qaf`/`ea`
+>   + 驱动湿度 `cqi` → `qflx_sun/qflx_sha` → `etr`/`rootflux`（水步入场）→ `ss_vliq`
+>   → 第 6 层 `wliq/wice` → `hk`/`t_soisno` → 近地层诊断。`psit` 差 34 步却只在 1 步投影出去
+>   ⇒ 这是耦合叶↔土回路里持续 1 ULP 的**偶发投影**。
+> * **下一枪**：hex 打 `psit` 的入参（`wx`/`wliq_soisno(1)`/`wice_soisno(1)`/`porsl`/`theta_r`/`psi0`/`fac`），
+>   判表层水是哪一次写入带进来的；并查 `soil_psi_from_vliq` 的 VG 支在真实参数区间上是否有
+>   闭环（3×10000 合成输入）没覆盖的形状差。
+
+> **第 358 轮更新**：干窗第 251 步的**因果链**定下来了 ——
 > `qg`（地表比湿）→ `qaf`/`ea` + 驱动湿度 `cqi = (wtaq0+wtgq0)*qsatl - wtaq0*qm - wtgq0*qg`
 > → **`qflx_sun`/`qflx_sha`** → `etr`/`rootflux`（水步入场）→ `ss_vliq`/`wliq[0,5]` → `hk`/`t_soisno`
 > → 近地层诊断。**第 251 步里 `stomata` 的输出并不差**（`PHXS` 全同），差的是 `PHXH` 的
@@ -20934,3 +20949,41 @@ PHXG       差异 7 条：418, 2547…2552               （首个 418：`qflx_s
 两侧 hex。`qg` 的式子已证同形（第 357 轮），所以这一步会直接告诉我们是**外层能量迭代的
 `t_grnd`** 还是**土壤侧的 `psit`** 先把 1 ULP 带进来 —— 那也就把干窗种子推到
 `MOD_Thermal`/`GroundTemperature` 那一段（本目标点名的"ground-temperature chain"）。
+
+**第 359 轮：干窗第 251 步的土壤侧入口是 **`psit`（表层基质势）** —— `psit → hr → qred → qg` 全链只在这一步同时差**
+
+给 `phs_hex_probe.sh` 加了第 6 个被探文件对：`extends/interception/MOD_Thermal_CanopyPhase_Extended.F90`
+（**注意 `Makefile:647` 把 `MOD_Thermal.o` 指向 extends 那份**，`main/MOD_Thermal.F90` 不编进内核）
+与 `crates/colm-core/src/ground_humidity.rs`，新标签 `PHXQ2`（8 字段：
+`fsno, psit, t_grnd, forc_q, qsatg, hr, qred, qg`）。干窗 251 步（两侧各 20171 行）：
+
+```text
+PHXQ2 每步 1 条（251 条）；差异 34 条
+  `psit` 差 34 步（65,68,69,70,71,73,…,214,251）—— 最大的一族
+  `hr`/`qred`/`qg` 各只差 **1 次**，都在**第 251 步**
+  `fsno`/`t_grnd`/`forc_q`/`qsatg` **从不差**
+第 65 步实测: psit K=-348.90071475521734 R=-348.90071475521773（hr/qg 仍逐位相同）
+第 251 步:    psit → hr → qred → qg **整条都差**
+```
+
+**读法**：
+* **不是地面温度那一侧**：`t_grnd`/`fsno` 从不差 ⇒ 干窗种子不走 ground-temperature chain；
+* **土壤侧入口是 `psit`** = `f(wx, porsl(1), theta_r(1), psi0(1))`，而 `wx` 由**表层**的
+  `wliq_soisno(1)`/`wice_soisno(1)` 决定 ⇒ **表层水/冰在步内瞬时差**（它在步末会自愈：
+  restart 第 251 步差的是**第 6 层**（0 基索引 5），不是表层）；
+* `psit` 差 34 步但只有第 251 步把 `hr`/`qred`/`qg` 带出去 ⇒ 这正是"**偶发投影**"：
+  耦合的叶↔土回路里持续存在的 1 ULP，偶尔才投影到状态上。
+
+**把 355/358/359 串起来（干窗第 251 步的完整因果链，全部实测）**：
+
+```text
+（步内瞬时的）表层水差 → psit(34 步; 第 251 步生效) → hr → qred → qg（第 251 步首次全差）
+  → qaf/ea 与驱动湿度 cqi → qflx_sun/qflx_sha → etr/rootflux（水步入场）
+  → 水步的 ss_vliq → 第 6 层 wliq/wice → hk/t_soisno → qstar/zol/rib/qref/rst/trad/t_grnd
+```
+
+**下一枪**：在 `MOD_Thermal` 的 `psit` 赋值处两侧 hex 打它的入参（`wx`、`wliq_soisno(1)`、
+`wice_soisno(1)`、`porsl(1)`、`theta_r(1)`、`psi0(1)`、`fac`）—— 判"表层水瞬时差"到底来自
+水步的哪一次写入（`vsf_probe.sh` 的 `WSF` 出场标签已把 `ss_vliq` 指到第 1 层 ✓），
+以及 `soil_psi_from_vliq` 的 VG 支在**真实参数区间**上是否有闭环没覆盖的形状差
+（闭环 3×10000 是合成输入 ✓）。
