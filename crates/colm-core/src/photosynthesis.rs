@@ -475,6 +475,19 @@ fn selected_parameters(
     Ok((g1, g0, gradm, binter, lambda))
 }
 
+/// 供 `sortin` 闭环探针调用（第 333 轮）。**不是**业务 API —— 只为把
+/// `sortin` 的形状残差夹在一个函数里逐位判（`compare_sortin.sh`）。
+#[doc(hidden)]
+pub fn sortin_for_probe(
+    errors: &mut [f64; ITERATIONS],
+    guesses: &mut [f64; ITERATIONS],
+    range: f64,
+    gamma: f64,
+    iteration: usize,
+) {
+    sortin(errors, guesses, range, gamma, iteration);
+}
+
 fn sortin(
     errors: &mut [f64; ITERATIONS],
     co2: &mut [f64; ITERATIONS],

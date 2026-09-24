@@ -19109,3 +19109,41 @@ Ball-Berry 的 `:353`/`:354`/`:356`，以及 `update_photosyn` 的 8 条（`upda
 `range`/`gammas`/`ic`/`iterationtotal`；Rust 侧要把 `fn sortin` 提升到 `pub` 或加
 `#[doc(hidden)]` 包装），把最后 61 条夹到一个函数里逐条对；`stomata` 闭环保持 61 的
 状态不动，直到 `sortin` 也 0。
+
+**第 333 轮：给 `sortin` 建了第 6 个闭环 —— 残差夹到 `ic≥4` 的二次拟合，形状回退**
+
+第 332 轮记的下一步。`sortin` 是 **PRIVATE**，所以按"拷贝+放行"路线（`PRIVATE :: sortin`
+→ `PUBLIC`）；三件套：`oracle/scripts/sortin_diff.f90` +
+`crates/colm-core/examples/sortin_probe.rs` + `oracle/scripts/compare_sortin.sh`。
+Rust 侧加了一个 `#[doc(hidden)] pub fn sortin_for_probe`（只为探针，不是业务 API）。
+逐位比 `eyy(1..6)` 与 `pco2y(1..6)`。
+
+**baseline**：`pco2y2` 231、`pco2y3` 277、`pco2y4` 96、`pco2y5` 78、`pco2y6` 70；
+`eyy*` 全 0（**排序本身逐位对**）。
+
+按汇编补的形状（重测直接照抄，别再读一遍）：
+```text
+:414/:415/:416 首猜   co2[0]=0.5.mul_add(range,gamma)、
+                     co2[1]=(0.5-0.3*eyy_a).mul_add(range,gamma)、
+                     co2[2]=(-eyy[0]).mul_add(ratio, co2[0])
+:453 linear          (-eyy[is]).mul_add(ratio, co2[is])
+:459/:460 ac1/ac2    (-eyy[i2]).mul_add(eyy[i2], eyy[i1]^2) /
+                     (-eyy[i3]).mul_add(eyy[i3], eyy[i2]^2)
+:465 bterm           cc1.mul_add(ac2, -(cc2*ac1)) /
+                     (bc1.mul_add(ac2, -(ac1*bc2)) + 1e-10)
+:466 aterm           (-bc1).mul_add(bterm, cc1) / (ac1 + 1e-10)
+:467/:469 cterm      (-eyy[i2]).mul_add(aterm*eyy[i2], co2[i2]) 再 (-eyy[i2]).mul_add(bterm, …)
+```
+
+→ `pco2y2/3` **归 0**、`pco2y4/5/6` **96/78/70 → 39/32/41**。残差全在 **`ic≥4`**
+（二次拟合分支），各档约 8%。试过的变体：`bterm` 分子分母"收另一个乘积"→ 56/52/54；
+`ac2` 用 `eyy(i1)` 而不是 `eyy(i2)` → 320/334/332 ⇒ 两个现写法都对，但还有一处没夹准。
+
+**形状仍不落**：这一批与第 331/332 轮那批一起套上时 `stomata` 闭环到 61、黄金湿窗
+1287→2237（第 332 轮已记）。本轮只把 `sortin` 夹小、仍未到 0 ⇒ 代码回退，
+**只留闭环入库**（`compare_sortin.sh` + `sortin_for_probe` 包装）；`stomata` 回到 148/114。
+
+**下一枪**：把 `sortin` 的 `ic≥4` 那 ~1.3% 推到 0。重点三处：`bterm` 两条 `fnmsub`
+究竟收哪一个乘积（现写法收 `cc1*ac2`/`bc1*ac2`，对了一大半）、`cterm` 两条 `fmsub`
+的收法、以及 `n=3` 时 `i1`/`pco2b` 的夹取。闭环在手，一次改一处看 `pco2y4/5/6` 计数即可；
+到 0 之后再把 `stomata` 那一整批一起落地重测。
