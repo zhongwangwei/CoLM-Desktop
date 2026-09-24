@@ -18373,7 +18373,22 @@ VSFI     kernel=200 rust=200
 
 ## 若继续
 
-> **第 363 轮更新（最新的指路牌，先读这段）**：干窗种子已证不在叶链（第 362 轮），本轮把
+> **第 364 轮更新（最新的指路牌，先读这段）**：`thermal` 的 99 处按源码行分布，**最大一簇 ~45 处
+> 在 `:1081-1138` —— 那是 PC 逐 PFT → patch 的加权聚合 `sum(x_p*pftfrac)`**，它聚合的正是
+> `etr`/`tref`/`qref`/`tleaf`/`ldew_*`/`fsenl`/`fevpl` 这一批 ✓。
+>
+> * 这解释了第 362 轮的否证：干窗水步入场首差异是 **`etr`**（聚合量），目标点名的
+>   `tref`/`tleaf` 也都在这一段 ⇒ **差异若生在 patch 级聚合上，修 per-PFT 的叶温/气孔当然
+>   不会改变 patch 级结果** ✓。
+> * 内核：1 patch × **2 PFT**（`pctpfts=[0.54,0.46]`）逐 PFT 算完再聚合；
+>   Rust：`colm-srfdata/src/site.rs` 有 `pft_components`（读 `pfttyp`/`pctpfts` ✓），
+>   但 `colm-core` 的 `standard_lct_step.rs`/`assembly.rs` **没有逐 PFT 循环**，
+>   `pft_fraction` 只在 `bgc.rs`（黄金 BGC 关）⇒ **聚合发生在哪一层、形状是否一致，必须查清**。
+> * **下一枪**：定位 Rust 侧 `sum(x_p*pftfrac)` 的实现，把 `.FMA(x1,f1,x0*f0)`（或反向）
+>   与其写法逐条对；判据用**干窗首分歧步**（现 N=251）。若形状差在这里，它会同时解释
+>   `etr` 与 `tref`/`tleaf`。
+
+> **第 363 轮更新**：干窗种子已证不在叶链（第 362 轮），本轮把
 > **水/土侧三个编进内核的文件**做了 GIMPLE 普查并把 `water_vsf` **17 处逐条收口**：
 > `:1110` 第 338 轮已修、`:1128/:1132/:1133`（顶层凝结写回）Rust 已是 FMA、
 > `:827/:867/:1037/:1045`（预解算 `vol_liq`/`wresi` 换算）Rust 注释里逐条对过 ⇒
@@ -21202,3 +21217,38 @@ Rust 侧计数：variably_saturated_flow.rs 67 个 mul_add；ground_temperature.
 ② `soil_water_vertical_movement` 29 处（Rust 同文件 67 个 `mul_add`，差值最小、最可能需要逐行核）；
 ③ `get_zwt_from_wa` 9 / `flux_all` 7 / `solve_least_squares_problem` 8。
 方法照旧：`-loc` 定站点 → GIMPLE 定操作数 → 状态扫描首分歧步判是否落地。
+
+**第 364 轮：`thermal` 那 99 处按源码行分布 —— 最大一簇（45 处）是**PC 逐 PFT → patch 的加权聚合**，而它聚合的正是干窗那些量**
+
+用 `-S` + `.loc` 把 `MOD_Thermal_CanopyPhase_Extended.F90` 的 99 条 FMA 指令落到源码行：
+
+```text
+83 个不同源码行，集中在四段：
+  :531-615     12 处  —— `psit`/`hr`/`qred`/`qg` 那一段（第 357/359 轮已逐条对过 ✓）
+  :1081-1138  ~45 处  —— **逐 PFT → patch 的加权聚合** `sum( x_p * pftfrac )`
+  :1343-1372  ~17 处  —— `fgrnd` / `olrg` / `olrb` / `emis`
+  :967-1013      5 处  —— 另两处
+```
+
+**`:1081-1138` 那一段聚合的量**（读源码）：`laisun`/`laisha`/`tleaf`/`ldew_rain`/`ldew_snow`/
+`canopy_smelt_mass`/`canopy_frzc_mass`/`fwet_snow`/`respc`/`fsenl`/`fevpl`/`lfevpl`/**`etr`**/
+`dlrad`/`ulrad`/**`tref`**/**`qref`**/`taux`/`tauy`… —— 全部是 `sum(x_p*pftfrac)` ✓。
+
+**为什么这一簇值得优先查**：干窗的探针链里，
+* 水步入场首差异就是 **`etr`**（第 355 轮，`('WSF1',251) etr`）—— 而 `etr` 是**聚合出来的**；
+* 目标点名的干窗种子正是 **`tref`/`tleaf`**（两者都在这一段里聚合 ✓）；
+* 而**叶链的修复对干窗状态投影无效**（第 362 轮）：如果差异生在 **patch 级聚合**上，
+  那么修 per-PFT 的叶温/气孔计算当然不会改变 patch 级的 `etr`/`tref`/`tleaf` ✓✓
+  —— 这条正好解释了第 362 轮那个"链起点修好了、投影点却不动"的否证结果。
+
+**两侧现状**：
+* 内核：1 个 patch、**2 个 PFT**（`site.nc` 的 `pctpfts = [0.54, 0.46]`），PC 路径逐 PFT 算完再
+  `sum(x_p*pftfrac)` 聚合 ✓；
+* Rust：`colm-srfdata/src/site.rs` 有 `pft_components`（读 `pfttyp`/`pctpfts` + `fraction` ✓），
+  但 `colm-core` 的 `standard_lct_step.rs`/`assembly.rs` 里**没有逐 PFT 的循环**，
+  `pft_fraction` 只出现在 `bgc.rs`（黄金三例 BGC 关）⇒ **聚合发生在哪一层、形状是否与内核一致，
+  下一步必须查清**。
+
+**下一枪**：定位 Rust 侧 `sum(x_p*pftfrac)` 的实现（读入层还是装配层），把
+`.FMA(x1, f1, x0*f0)`（或反向）与它的写法逐条对；判据仍用**干窗首分歧步**（现 N=251）
+—— 若形状差在这里，这会同时解释 `etr` 与 `tref`/`tleaf`。
