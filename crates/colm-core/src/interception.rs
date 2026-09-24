@@ -219,7 +219,15 @@ pub fn intercept_canopy(
         + input.large_scale_snow_kg_m2_s
         + input.sprinkler_irrigation_kg_m2_s)
         * input.time_step_seconds;
-    let precipitation_amount = convective_amount + large_scale_amount;
+    // `:193 p0 = (prc_rain+prc_snow+prl_rain+prl_snow+irrig)*deltim`：**先加五个通量再乘**。
+    // 上面的 `convective_amount`/`large_scale_amount` 是 `ppc`/`ppl`（各自先乘再加），
+    // `p0 ≠ ppc + ppl`，写成 `convective_amount + large_scale_amount` 会差末位。
+    let precipitation_amount = (input.convective_rain_kg_m2_s
+        + input.convective_snow_kg_m2_s
+        + input.large_scale_rain_kg_m2_s
+        + input.large_scale_snow_kg_m2_s
+        + input.sprinkler_irrigation_kg_m2_s)
+        * input.time_step_seconds;
 
     let mut released_rain_mm = if input.leaf_temperature_k > FREEZING_K {
         (water.total_mm - saturation_capacity).max(0.0)
@@ -331,14 +339,14 @@ pub fn intercept_canopy(
                 + (vegetation_fraction * snow_rate - intercepted_snow_rate))
                 * input.time_step_seconds;
         }
+        // `:321-323` 先各求 `thru_rain=tti_rain+tex_rain`、`thru_snow=tti_snow+tex_snow`，
+        // 再 `pinf = p0 - (thru_rain + thru_snow)`；摊成四项连减会换结合顺序、末位不同。
+        let through_rain_mm = direct_rain_mm + drainage_rain_mm;
+        let through_snow_mm = direct_snow_mm + drainage_snow_mm;
         (
-            direct_rain_mm + drainage_rain_mm,
-            direct_snow_mm + drainage_snow_mm,
-            precipitation_amount
-                - direct_rain_mm
-                - drainage_rain_mm
-                - direct_snow_mm
-                - drainage_snow_mm,
+            through_rain_mm,
+            through_snow_mm,
+            precipitation_amount - (through_rain_mm + through_snow_mm),
         )
     } else {
         (0.0, 0.0, precipitation_amount)
@@ -346,8 +354,11 @@ pub fn intercept_canopy(
 
     water.total_mm += retained_mm;
     if input.vegetation_snow {
-        water.rain_mm += rain_rate * input.time_step_seconds - through_rain_mm;
-        water.snow_mm += snow_rate * input.time_step_seconds - through_snow_mm;
+        // `:328-329`：出货汇编是 `fmadd rate,dt,ldew_x` 再单独 `fsub thru_x`
+        // （`.loc 1 328/329`）—— 既不是 `ldew + (rate*dt - thru)` 的结合顺序，
+        // 也没把乘积独立舍入。
+        water.rain_mm = rain_rate.mul_add(input.time_step_seconds, water.rain_mm) - through_rain_mm;
+        water.snow_mm = snow_rate.mul_add(input.time_step_seconds, water.snow_mm) - through_snow_mm;
         water.total_mm = water.rain_mm + water.snow_mm;
     }
 

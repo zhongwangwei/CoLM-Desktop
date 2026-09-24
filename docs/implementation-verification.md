@@ -18663,15 +18663,19 @@ bash oracle/scripts/compare_second_config.sh US-NR1-snow   → 79 variable(s) ou
 （第 3 组：`water_balance` 5 处 + `flux_all` 加权平均 1 处），那时状态残差才有指望回落。
 已落地的 8 处**保留**（口径 wet 1967→1942、干/雪不倒退，短程与第二配置全绿）。
 
-**下一枪（第 324 轮后）**：① `f_vegwp` 一侧剩下的缺口 —— 第 324 轮已把
-`soil_water_vertical_movement` + 两个内联例程的 **17 处**形状全部判好并列进"第 324 轮"
-的表，但整批落地让湿窗 `over_tol` 1907→1984，**按口径未落**；下一轮把 `f_vegwp`
-那条链的缺口凑齐后，照那张表一起补、再跑三段式。
-② 【第 325 轮已查】第二配置雪窗那 79 —— 与第一配置雪窗 **76/79 同集**，种子是 step 0 的
-1 ULP 冠层/湍流（`f_ldew`/`f_qintr`，两套配置共享），**不是** Campbell/VSF-off 特有、
-也不是雪模块的账；不需要为第二配置单独建闭环（详见"第 325 轮"）。③ 未决小尾巴：`flux_all` 里
-那条加权平均 FMA 只有调用点上下文（option (a)）判过，若要做**实测**判据只能建
-"直接驱动 `flux_all`"的第 4 个闭环（夹具更大）。
+**下一枪（第 326 轮后）**：
+* **已入库（第 326 轮）**：`intercept_canopy` 三处结合/收缩形状（`p0` 先加后乘、`pinf`
+  先合 `thru`、`:328-329` 的 `fmadd`+`fsub`）。湿窗 `over_tol` **1907→1287**、
+  `ot_vars` **53→24**，干/雪口径不动，短程 0/68 与 692/692 保持。
+* ① `f_vegwp` 一侧剩下的缺口 —— 第 324 轮已把 `soil_water_vertical_movement` + 两个
+  内联例程的 **17 处**形状判好并列进"第 324 轮"的表，但（在**截留修复之前**的基线上）
+  整批落地让湿窗 1907→1984；**现在基线已变成 1287**，值得**重做一次那个 A/B** ——
+  截留修复正好动的是冠层水/叶温那条链，17 处里 `Richards_solver`/`use_explicit_form`
+  的形状很可能与新基线相容。若仍倒退，再等 `f_vegwp` 凑齐。
+* ② 雪窗 step-0 现在只剩 MO 诊断 1 ULP（`f_zol`；第一配置另 `f_rib`/`f_ustar2`）——
+  先按 `history_diagnostics.rs:164/208` 核对这两处形状，再决定要不要动 step-1 气孔链。
+* ③ 未决小尾巴：`flux_all` 里那条加权平均 FMA 只有调用点上下文（option (a)）判过，
+  若要做**实测**判据只能建"直接驱动 `flux_all`"的第 4 个闭环（夹具更大）。
 2. **第二配置回归**（Campbell + 关 VSF）：第 293 轮实测干窗已从 16 降到 **0**；
    wet/snow 未重跑，需要时跑 `oracle/scripts/compare_second_config.sh <case>`。
 3. **未移植分支**：`standard_lct_step.rs:578` 明说 split soil/snow、SNICAR、气溶胶、
@@ -18870,3 +18874,46 @@ f_ustar2 1.56e-16 / f_rib 1.72e-16   （只有第一配置）
 
 **结论**：第二配置雪窗 79 **不是**"Campbell / VSF-off 特有"，两套配置共享同一颗种子
 ⇒ **不需要为第二配置单独建闭环**；它会被冠层/湍流那条链的修复一起带走。
+
+**第 326 轮：冠层截留三处结合/收缩形状 —— 湿窗 `over_tol` 1907→1287、`ot_vars` 53→24**
+
+顺着第 325 轮那颗 step-0 的 1 ULP 种子往下打。`f_ldew` 是**冠层持水状态**（不是通量），
+所以把 `MOD_LeafInterception.F90` 用内核同款选项 + `-S -g` 编成汇编（`-I.bld`，
+**用真的 `mod_namelist.mod`** —— `DEF_VEG_SNOW` 默认 `.true.`，冠层雪那一段是活的），
+按 `.loc` 把 `leaf_interception_colm2014` 里的 15 条 FMA 归到源行，对上三处 Rust 写错：
+
+```text
+:193 p0 = (prc_rain+prc_snow+prl_rain+prl_snow+irrig)*deltim   ← 先加五个通量再乘
+     Rust 写的是 convective_amount + large_scale_amount，即 ppc+ppl；
+     ppc/ppl 各自"先乘再加"，p0 ≠ ppc+ppl
+:321-323 thru_rain=tti_rain+tex_rain; thru_snow=tti_snow+tex_snow;
+         pinf = p0 - (thru_rain + thru_snow)
+     Rust 摊成 p0 - direct_rain - drainage_rain - direct_snow - drainage_snow（换结合顺序）
+:328-329 ldew_rain = ldew_rain + rate*deltim - thru_rain
+     出货汇编是 `fmadd rate,dt,ldew_x`（`.loc 1 328/329`）再单独 `fsub thru_x`；
+     Rust 写成 `ldew += rate*dt - thru`（结合顺序错、且没收缩）
+```
+
+三处落码后，两套配置的 step-0 **有限值**差异里 `f_ldew`/`f_qintr` **消失**，
+只剩 Monin-Obukhov 诊断（`f_zol`；第一配置另有 `f_rib`/`f_ustar2`）各 1 ULP。
+
+**三段式（同树 A/B）**：
+
+| 窗口 | 第三组（基线） | **+ 截留三处** |
+|---|---|---|
+| dry `over_tol` / `ot_vars` | 28 / 1 | **28 / 1**（不动） |
+| wet `over_tol` / `ot_vars` | 1907 / 53 | **1287 / 24** ✓✓ |
+| snow `over_tol` / `ot_vars` | 25713 / 79 | **25713 / 79**（不动） |
+| restart 1 步 / 3 步 | 0/68 / 692/692 | **0/68 / 692/692** ✓ |
+| wet `bitwise` / `sumabs` | 28418 / 31.59 | **27981 / 11.03** |
+| snow `bitwise` / `sumabs` | 32707 / 444414.20 | 32728 / 444416.82 |
+
+**湿窗大幅改善**（`over_tol` −620、`ot_vars` −29），干窗与雪窗口径不变，短程逐位保持 ⇒
+**已入库**。第二配置干/湿仍是 0，雪窗 79 不变（现在由 MO 诊断那颗 1 ULP 顶着）。
+`compare_water_balance.sh`/`compare_getzwt.sh`/`compare_flux_inside.sh` 复跑全同。
+
+**下一枪**：step-0 只剩 Monin-Obukhov 诊断（`f_zol`/`f_rib`/`f_ustar2`）1 ULP —— 但文档
+第 297 轮已判定 `f_rib`/`f_zol` 是 `acc1d` 的**纯诊断、不回灌**，所以雪窗 step 1 的分歧
+（`f_gssun`/`f_gssha`/`f_rstfac*`）要么来自 `zol` 作下一步迭代初值，要么是 step-1
+气孔/光合自身的形状；先按 `history_diagnostics.rs` 那三处（`:164` 的 `zol`、
+`:208` 的 `rib`）做形状核对，再决定要不要动气孔那条链。
