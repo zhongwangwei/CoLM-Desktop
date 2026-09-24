@@ -19846,3 +19846,51 @@ determinant 3 + `e1`/`e2`/`e3` 各 2 + 四个 `change[…]` 各 3 = **21** 恰�
 ② 三个具名种子仍在：湿窗 **N=18 `vegwp`**（2 个分量：`[1]` shaded、`[2]` xylem，各 1 ULP）、
 **N=20 `wliq_soisno`+`hk`**、干窗 **N=288 `tref`/`tleaf`**；
 ③ 第 341 轮那四处改动里**哪一处**贡献了湿窗改善还没拆开 A/B。
+
+**第 343 轮：先修一个自己踩的坑（`.mod` 污染让 `build_kernel.sh` 挂掉），再把 gssun 双侧探针搬到湿窗 step 18 —— 结论：现有探针对 1 ULP 是**盲的**，种子在 PHS 求解内部**
+
+**① 自己踩的坑（要紧，记规矩）**：我这几轮为了数 FMA 直接跑
+`gfortran ... -S main/xxx.F90 -o /tmp/gf/xxx.s`，**没加 `-J`**，于是 gfortran 把 `.mod`
+写进了 `vendor/CoLM202X/`（共 9 个）。而 `build_kernel.sh` 是**把整棵 vendor 树 tar 进构建目录**的
+（它自己的注释就写了"构建会往树里写 `.o`/`.mod`/`include/define.h`，直接在 `vendor/` 里编会污染入库源码"），
+于是那份**过期的 `mod_leaftemperature.mod`** 被带进构建，`MOD_Thermal_CanopyPhase_Extended`
+按旧接口绑定实参，报了一串**假**错误：
+
+```text
+extends/interception/MOD_Thermal_CanopyPhase_Extended.F90:936:39:
+Error: Keyword argument 'canopy_smelt_mass_out' at (1) is already associated with another actual argument
+Error: Dummy argument 'hksati' with INTENT(IN) in variable definition context …
+make: *** [MOD_Thermal.o] Error 1
+```
+
+**症状具有欺骗性**：它指向 `extends/` 里一个与本次改动毫无关系的调用点，而且 `git status` 干净
+（`*.mod` 被 ignore），很容易误判成"committed 的构建坏了"。删掉那 9 个 `.mod` 之后
+`./oracle/scripts/build_kernel.sh default` 立刻 **exit 0**（`colm.x` 重编成 16:05），
+`wet_ts.sh 18` 的状态分歧与之前**逐位一致**（仍只有 `vegwp` 2 个分量各 1 ULP）。
+⇒ **规矩：任何 ad-hoc 的 `gfortran -S/-c` 都要加 `-J<临时目录>`（或换个 scratch cwd），
+绝不在 `vendor/CoLM202X/` 里编。** 这也解释了本仓库历史上"内核老是编不过"的一类假故障。
+
+**② gssun 双侧探针搬到了湿窗**：把 `oracle/scripts/gssun_probe.sh` 复制成
+`/tmp/gf/gssun_wet.sh`（只改三处 case 路径 + `STEPS=${STEPS:-18}` + `WORK`），
+它在 step 18 上打 8 个点、两侧各 834 行。`gssun_cmp.py`（相对容差 2e-14）报"全同"，
+但那个口径**看不见 1 ULP**（2.2e-16）。我把两侧都归一到 16 位有效数字再逐字段比：
+
+```text
+GSIN 120 calls 0 diffs | GSDEM 120 0 | GSOUT 96 0 | GS908 120 0
+GS941 120 0 | GS1320 18 0 | GSTO 120 0 | GS919 240（探针字段定义两侧不同，忽略）
+```
+
+⇒ **step 18 上，PHS 链的入参（`gs0sun/gs0sha/tl/psrf/sai/fwet/rb/rss`）与出参
+（`gssun/gssha/etrsun/etrsha/qflx_sun/qflx_sha`）到 16 位有效数字都相同**。
+而同一时刻 restart 里 `vegwp[1]`(shaded) 与 `vegwp[2]`(xylem) 仍各差 1 ULP。
+⇒ **种子在 PHS 求解内部**（`spac_change` 的 4×4 解 / Newton 更新 / `root_flux_from_top_potential`），
+不在它上游的叶温-气孔链上。
+
+**③ 下一轮（已经把路铺好）**：
+1. **把探针改成打位型**：内核侧现在打的是 `ES23.15`（16 位有效数字，**不能**唯一确定 f64），
+   要照 `stomata_diff.f90` 的 `B(x) = TRANSFER(x, 0_8)` 改成 `Z17` 十六进制，
+   这样才能真正逐位判 —— 这也是"gssun 探针报全同、状态却差 1 ULP"的唯一解。
+2. 在 `plant_hydraulic_stress` 里加探针点打 **`vegwp`（4 分量）、`root_flux`/`dqeroot`、
+   `spac_change` 的 `A`/`f`/`determ`/`dx`** —— 目标是把 1 ULP 的第一出生点夹到具体一个量。
+3. `A`/`f`/`dx` 那一段已有 oracle 49/49 的验证（`spac_change` 里注释），所以重点看
+   `vegwp` 的 Newton 更新与 `enforce_potential_gradient` 那几行。
