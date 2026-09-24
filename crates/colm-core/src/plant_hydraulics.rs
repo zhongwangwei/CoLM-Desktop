@@ -448,20 +448,25 @@ fn transpiration_from_conductance(
     // `:779 cwet = (1.-delta*(1.-fwet))*…`：出货汇编在 779/780 上没有 FMA（只有
     // `fmul`/`fsub`/`fdiv`），所以这里**不收缩**（第 341 轮更正）。
     let dry_fraction = 1.0 - delta * (1.0 - input.wet_canopy_fraction);
-    let leaf = dry_fraction
-        * (input.sunlit_leaf_area_index + input.shaded_leaf_area_index + input.stem_area_index)
-        * boundary_conductance_umol_m2_s
-        / conversion
-        + (1.0 - input.wet_canopy_fraction)
-            * delta
-            * (input.sunlit_leaf_area_index
+    // 第 347 轮：GIMPLE 具名操作数（`getqflx_gs2qflx_twoleaf`）把 `cfw` 定死成
+    //   `_22 = 1 - _21`（`_21 = (1-fwet)*delta`，**平铺**）、`_33 = _22*(laisun+laisha+sai)*gb_mol/cf`
+    //   （第一项，已舍入）、`_47 = laisun/(1/gb+1/gs_sun)/cf + laisha/(1/gb+1/gs_sha)/cf`（已舍入）、
+    //   `cfw = .FMA(_21, _47, _33)` —— **第二项的最外层乘积收进加法**，第一项是加数。
+    // 原先写成 `A + (1-fwet)*delta*(…)` 的平铺链，少收这一处。
+    let wet_fraction = (1.0 - input.wet_canopy_fraction) * delta;
+    let leaf = wet_fraction.mul_add(
+        input.sunlit_leaf_area_index
+            / (1.0 / boundary_conductance_umol_m2_s + 1.0 / sunlit_stomatal_conductance_umol_m2_s)
+            / conversion
+            + input.shaded_leaf_area_index
                 / (1.0 / boundary_conductance_umol_m2_s
-                    + 1.0 / sunlit_stomatal_conductance_umol_m2_s)
-                / conversion
-                + input.shaded_leaf_area_index
-                    / (1.0 / boundary_conductance_umol_m2_s
-                        + 1.0 / shaded_stomatal_conductance_umol_m2_s)
-                    / conversion);
+                    + 1.0 / shaded_stomatal_conductance_umol_m2_s)
+                / conversion,
+        dry_fraction
+            * (input.sunlit_leaf_area_index + input.shaded_leaf_area_index + input.stem_area_index)
+            * boundary_conductance_umol_m2_s
+            / conversion,
+    );
     // 上游 `MOD_PlantHydraulic.F90:683-685` 是 `wtsqi = 1./(caw+cgw+cfw)` 再
     // `wtaq0 = caw*wtsqi`（先取倒数再乘），不是 `caw/total`。差 1 ULP，
     // 一样能翻离散判据（见 `boundary_conductance` 那处的说明）。

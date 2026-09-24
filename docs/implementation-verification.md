@@ -20049,3 +20049,70 @@ N=21 从 2/68 变 3/68（变差）⇒ `git checkout` 回退。
 `wet_ts.sh`/`dry_ts.sh` 与干/湿两个黄金窗口**完全离线可跑** ✓
 （`examples/Forcing/` 里只有 CN-Cng、AT-Neu、AU-Preston、US-Ne3 四个；**US-NR1 不在**，
 所以雪窗仍需要网络卷或另找数据）。仓库文件依旧一个没动。
+
+**第 347 轮：湿窗 N=18 那颗种子关掉了 —— `transpiration_from_conductance` 的 `cfw` 少收一处乘积；干/湿黄金都变好或不变**
+
+**① 探针把出生点钉在"两个需求通量"上。** 在 `PHXA` 之后再加一个点：
+
+```text
+PHXG  qflx_sun, qflx_sha   —— getqflx_gs2qflx_twoleaf（内核）/ transpiration_from_conductance（Rust）返回之后
+```
+
+18 步湿窗、两侧各 504 行，逐位结果：
+
+```text
+首个差异: (499, 'PHXG', 1, '3EC3A258B0446F26', '3EC3A258B0446F25')   ← qflx_sun 差 1 ULP
+差异计数: PHXG {1:1, 2:1}  PHXA {11:1, 12:1}  PHXD {2,3,5,6,7,8 各 1}  PHXF {2,3,5 各 1}
+```
+
+⇒ 第 95 次调用上 **`qflx_sun`/`qflx_sha` 各差 1 ULP**，后面 `f`→`dx`→`vegwp` 的差都是它的下游。
+（`PHXQ` 与十个 A 元素仍然全同 ⇒ 根通量解与 A 的组装都没问题。）
+
+**② 两个假设都被实测否掉，然后 GIMPLE 具名操作数给出了真形状。**
+
+* 把 `driving_humidity` 内层 FMA 的收缩侧翻转（收 `wtaq0*qm` 而不是 `(wtaq0+wtgq0)*qsatl`）
+  ⇒ **大幅变差**：湿窗 N=16 从 0/68 变 **20/68**、N=18 从 1 变 13 ⇒ 回退。
+  事后 GIMPLE 证实原形状是对的：`_64 = .FMS(qsatl, wtaq0+wtgq0, qm*wtaq0)`、
+  `_66 = .FNMA(qg, wtgq0, _64)` —— 收的确实是 `(wtaq0+wtgq0)*qsatl`（第一项）。
+* 把 `cfw` 里 `1 - delta*(1-fwet)` 的收缩补回来 ⇒ 状态扫描**逐位不变**（惰性）⇒ 回退。
+  事后 GIMPLE 证实该平铺：`_21 = (1-fwet)*delta`、`_22 = 1 - _21`（**没有 FMA**）
+  —— 第 341 轮把两处一起拉平是对的，`.loc 683` 那条 FMA 其实是**下面 `cfw` 求和**那一条。
+
+真正的缺口是 `cfw` 的**求和**：
+
+```text
+_21 = (1-fwet)*delta                                   ← 已舍入
+_22 = 1 - _21                                          ← 平铺（dry_fraction）
+_33 = _22*(laisun+laisha+sai)*gb_mol/cf                ← 第一项，已舍入
+_47 = laisun/(1/gb+1/gs_sun)/cf + laisha/(1/gb+1/gs_sha)/cf
+cfw = .FMA(_21, _47, _33)                              ← **第二项的最外层乘积收进加法**
+```
+
+Rust 原先写成 `A + (1-fwet)*delta*(…)` 的平铺链，**少收这一处**。补上
+（`wet_fraction.mul_add(括号和, 第一项)`）之后 ——
+
+| 仪器 | 补之前 | **补之后** |
+|---|---|---|
+| 湿窗 restart N=16 / **18** / 19 | 0 / **1** / 0 （per 68） | **0 / 0 / 0** |
+| 湿窗 N=20 / 21 / 24 / 32 / 48 / 96 | 2 / 2 / 21 / 21 / 19 / 15–16 | 2 / 2 / 21 / 21 / 19 / 16（不变） |
+| 干窗 N=18…26 / N=288 | 0…0 / 22 | **0…0 / 22**（不变） |
+| 干窗 1 步 / 3 步 | 0/68 / 692-692 | 0/68 / 692-692（不变） |
+| 黄金 dry（`over_tol`/`ot_vars`，`sumabs`） | 28 / 1，261.0128 | **28 / 1，261.0128**（不变） |
+| 黄金 wet | 1927 / 54，28.8358 | **1908 / 53，24.8020**（变好） |
+| 黄金 snow | — | **未测**（US-NR1 强迫数据不在仓库里，见下） |
+
+`cargo fmt --all --check`、`cargo clippy --workspace --all-targets -- -D warnings`、
+`cargo test --workspace --lib --bins -- --test-threads=1`（26 个二进制）全绿。
+
+**③ 强迫数据的两个新事实**：
+
+* 仓库里**自带** CN-Cng 的 Met 文件：`examples/Forcing/CN-Cng_2008-2009_FLUXNET2015_Met.nc`
+  （还有 AT-Neu / AU-Preston / US-Ne3）⇒ 湿/干窗**完全离线可跑**；**US-NR1 不在**，
+  所以雪窗这轮没测（这是本轮唯一没跑的一项）。
+* Rust 侧的算例还要把 **`case.nml` 的 `DEF_forcing_namelist`** 一起改到拷贝那一份 ——
+  它默认指向**原目录**的 `forcing.nml`，只 sed `forcing.nml` 本身是不够的
+  （第一次跑就是这么失败的：Rust 仍去读 `/Volumes/Data01/...`）。
+  `wet_ts.sh`/`dry_ts.sh` 一直都改了这一行，所以它们没踩到；`win4.sh` 我补上了。
+
+**给下一轮**：湿窗的**下一颗**种子在 **N=20（`wliq_soisno`+`hk`，2/68）**，
+干窗在 **N=288（`tref`/`tleaf`，22/68）**；`vegwp` 那条链（PHS）现在可以认为收口了。
