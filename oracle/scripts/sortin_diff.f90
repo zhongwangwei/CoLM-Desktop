@@ -9,9 +9,11 @@
 ! 上游侧用内核同款选项编译（**不加** `-ffp-contract=off`），驱动本身按仓库纪律加
 ! `-fwrapv -ffp-contract=off`。抽签次数与顺序必须与 Rust 侧逐条对齐。
 !
-! 输出：`ic` 后 12 列十六进制 —— `eyy(1..6)` 与 `pco2y(1..6)`（调用后）。
+! 输出：`ic` 后 21 列十六进制 —— `eyy(1..6)`、`pco2y(1..6)`（调用后），再 9 个中间量
+! `ac1,ac2,bc1,bc2,cc1,cc2,bterm,aterm,cterm`（`ic<4` 时为 0）。中间量由闭环脚本往
+! **拷贝**里注入的 `dbg_intermediates` 模块数组导出，vendor 源树不动。
 PROGRAM srt
-  USE MOD_AssimStomataConductance, only: sortin
+  USE MOD_AssimStomataConductance, only: sortin, dbg_intermediates
   IMPLICIT NONE
   INTEGER, PARAMETER :: r8 = 8
   INTEGER, PARAMETER :: IT = 6
@@ -33,7 +35,8 @@ PROGRAM srt
         pco2y(j) = gammas + uni()*range
      ENDDO
      CALL sortin (eyy, pco2y, range, gammas, ic, IT)
-     WRITE(66,'(I1,1X,12(1X,Z17))') ic, (B(eyy(j)), B(pco2y(j)), j=1,IT)
+     WRITE(66,'(I1,1X,21(1X,Z17))') ic, (B(eyy(j)), B(pco2y(j)), j=1,IT), &
+          (B(dbg_intermediates(j)), j=1,9)
   ENDDO
   CLOSE(66)
 

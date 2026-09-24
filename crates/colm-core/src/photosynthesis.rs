@@ -488,12 +488,38 @@ pub fn sortin_for_probe(
     sortin(errors, guesses, range, gamma, iteration);
 }
 
+/// 第 335 轮：把 `sortin` 二次拟合分支的中间量导出，供闭环定位**第一处分叉**。
+/// 顺序：`ac1, ac2, bc1, bc2, cc1, cc2, bterm, aterm, cterm`（`iteration < 4` 时全 0）。
+#[doc(hidden)]
+pub fn sortin_intermediates_for_probe(
+    errors: &mut [f64; ITERATIONS],
+    guesses: &mut [f64; ITERATIONS],
+    range: f64,
+    gamma: f64,
+    iteration: usize,
+) -> [f64; 9] {
+    let mut debug = [0.0; 9];
+    sortin_impl(errors, guesses, range, gamma, iteration, Some(&mut debug));
+    debug
+}
+
 fn sortin(
     errors: &mut [f64; ITERATIONS],
     co2: &mut [f64; ITERATIONS],
     range: f64,
     gamma: f64,
     iteration: usize,
+) {
+    sortin_impl(errors, co2, range, gamma, iteration, None);
+}
+
+fn sortin_impl(
+    errors: &mut [f64; ITERATIONS],
+    co2: &mut [f64; ITERATIONS],
+    range: f64,
+    gamma: f64,
+    iteration: usize,
+    debug: Option<&mut [f64; 9]>,
 ) {
     if iteration < 4 {
         let error_sign = if errors[0] < 0.0 { -1.0 } else { 1.0 };
@@ -542,8 +568,20 @@ fn sortin(
         let cc2 = co2[i2] - co2[i3];
         let bterm = (cc1 * ac2 - cc2 * ac1) / (bc1 * ac2 - ac1 * bc2 + f77(1.0e-10));
         let aterm = (cc1 - bc1 * bterm) / (ac1 + f77(1.0e-10));
-        let quadratic = (co2[i2] - aterm * errors[i2].powi(2) - bterm * errors[i2]).max(lower);
+        let cterm = co2[i2] - aterm * errors[i2].powi(2) - bterm * errors[i2];
+        let quadratic = cterm.max(lower);
         co2[iteration - 1] = f77(0.5) * (linear + quadratic);
+        if let Some(slot) = debug {
+            slot[0] = ac1;
+            slot[1] = ac2;
+            slot[2] = bc1;
+            slot[3] = bc2;
+            slot[4] = cc1;
+            slot[5] = cc2;
+            slot[6] = bterm;
+            slot[7] = aterm;
+            slot[8] = cterm;
+        }
     }
     co2[iteration - 1] = co2[iteration - 1].max(f77(0.01));
 }
