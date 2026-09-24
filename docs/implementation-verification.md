@@ -18373,7 +18373,24 @@ VSFI     kernel=200 rust=200
 
 ## 若继续
 
-> **第 362 轮更新（最新的指路牌，先读这段）**：把"第 350 轮那 14 处形状"与"`pco2a` 的 `.FNMA`"
+> **第 363 轮更新（最新的指路牌，先读这段）**：干窗种子已证不在叶链（第 362 轮），本轮把
+> **水/土侧三个编进内核的文件**做了 GIMPLE 普查并把 `water_vsf` **17 处逐条收口**：
+> `:1110` 第 338 轮已修、`:1128/:1132/:1133`（顶层凝结写回）Rust 已是 FMA、
+> `:827/:867/:1037/:1045`（预解算 `vol_liq`/`wresi` 换算）Rust 注释里逐条对过 ⇒
+> **预解算换算与顶层写回都忠实**（与第 355 轮"`Richards` 内部逐位相同、差异在子步之间"互洽）。
+>
+> * **普查表**：`MOD_Hydro_SoilWater.F90` 71 处（`soil_water_vertical_movement` 29、
+>   `get_zwt_from_wa` 9、`solve_least_squares_problem` 8、`flux_all` 7、`water_balance` 4、
+>   `soilwater_aquifer_exchange` 4、两个 interface 3+3）；`MOD_SoilSnowHydrology.F90` 67 处
+>   （`soilwater` 23、`snowwater*` 12、**`water_vsf` 17**、`water_2014` 15）；
+>   `MOD_Thermal_CanopyPhase_Extended.F90` **99 处（全在 `thermal`）**。
+> * **下一枪（干窗，按可能性排序）**：① **`thermal` 99 处** —— Rust 拆在
+>   `ground_temperature.rs`(27)+`thermal_properties.rs`(25)+`ground_thermal_step.rs`(**0**)，
+>   且 `MOD_Thermal` 正是 `psit`/`qg`/`t_soisno` 的生产者；② `soil_water_vertical_movement` 29 处；
+>   ③ `get_zwt_from_wa`/`flux_all`/`solve_least_squares_problem`。方法照旧：
+>   `-S`+`.loc` 定站点 → GIMPLE 定操作数角色 → **状态扫描首分歧步**判是否落地。
+
+> **第 362 轮更新**：把"第 350 轮那 14 处形状"与"`pco2a` 的 `.FNMA`"
 > **叠加**着测，得到一个**决定性否证**：
 >
 > * 14 处形状**确实修掉了干窗链的起点**（`STOUT` 出参差 66 → **2**，首个从第 302 次移到第 834 次；
@@ -21146,3 +21163,42 @@ STOUT 差异 66 组：调用 **302**,303,314,315,362,363,…            ← 最�
 第 355 轮已把出场首差异钉在**第 1 层 `ss_vliq`**，而 `Richards` 内部的
 `RCHF/RCHB/RCHD/RCHE` **全部逐位相同** ⇒ 差异是在**子步之间**由 `rootflux` 经状态写回带进来的；
 既然叶链已证无关，就要看写回路径里（`ss_vliq`/`wliq`/`wice`/`smp`/`hk` 的更新式）有哪一处形状没对齐。
+
+**第 363 轮：水/土侧的 GIMPLE 普查 —— `water_vsf` 那 17 处全部收口，剩下的大头是 `thermal` 的 99 处**
+
+干窗种子已证不在叶链（第 362 轮），本轮把**水/土侧**三个编进内核的文件做了 GIMPLE 普查
+（方法同第 340 轮：站点清单用 `-S` + `.loc`，操作数角色用 `-fdump-tree-optimized`）：
+
+```text
+MOD_Hydro_SoilWater.F90            71 处
+    soil_water_vertical_movement 29 / get_zwt_from_wa 9 / solve_least_squares_problem 8
+    flux_all 7 / water_balance 4 / soilwater_aquifer_exchange 4
+    flux_top_transitive_interface 3 / flux_btm_transitive_interface 3
+MOD_SoilSnowHydrology.F90          67 处
+    soilwater 23 / snowwater_snicar 8 / snowwater 4 / **water_vsf 17** / water_2014 15
+MOD_Thermal_CanopyPhase_Extended.F90 99 处（全部内联进 `thermal`）
+Rust 侧计数：variably_saturated_flow.rs 67 个 mul_add；ground_temperature.rs 27；
+             thermal_properties.rs 25；ground_thermal_step.rs **0**（59 行的薄封装）
+```
+
+**`water_vsf` 的 17 处逐条收口**（`-S` + `.loc` 给到源码行）：
+
+| 源码行 | 内容 | 结论 |
+|---|---|---|
+| `:1110` | 顶层 `wliq_soisno` 回填 | **第 338 轮已修**（操作数写反）✓ |
+| `:1128` `:1132` `:1133` | 顶层凝结写回 `max(0, ldew + qsdew*dt)` 一族 | Rust `:4517-4525` **已是 FMA** ✓ |
+| `:827` | `gwat = gwat + pg_rain*(1-fsno) - qseva_soil` | 预解算入流 |
+| `:867` | `wresi = wliq - dz*denh2o*vol_liq` | Rust `:4237` 注释逐条对过 ✓ |
+| `:1037` `:1045` | `vol_liq`/`wresi` 的反解 | Rust `:4375`/`:4393-4394`/`:4493` 逐条对过 ✓ |
+| 其余（`:278`/`:434-473`/`:1220-1273`/`:2534`/`:2561`） | 被内联进来的其它例程（多为雪支） | 干窗不走（`fsno=0`），雪窗本机测不了 |
+
+⇒ **预解算的状态换算（`vol_liq`/`wresi`）与顶层凝结写回都已忠实** —— 这与第 355 轮
+"`Richards` 内部 `RCHF/RCHB/RCHD/RCHE` 全部逐位相同、差异在子步之间"互洽。
+
+**下一枪**：普查表里**尚未逐条过**的三块，按"干窗最可能"排序：
+① **`thermal`（99 处）** —— Rust 侧拆在 `ground_temperature.rs`(27) + `thermal_properties.rs`(25) +
+`ground_thermal_step.rs`(0)，是"叶链之外"最大的一块，且 `MOD_Thermal` 正是 `psit`/`qg`/`t_soisno`
+的生产者；
+② `soil_water_vertical_movement` 29 处（Rust 同文件 67 个 `mul_add`，差值最小、最可能需要逐行核）；
+③ `get_zwt_from_wa` 9 / `flux_all` 7 / `solve_least_squares_problem` 8。
+方法照旧：`-loc` 定站点 → GIMPLE 定操作数 → 状态扫描首分歧步判是否落地。
