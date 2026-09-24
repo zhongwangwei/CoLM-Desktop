@@ -18373,7 +18373,22 @@ VSFI     kernel=200 rust=200
 
 ## 若继续
 
-> **第 364 轮更新（最新的指路牌，先读这段）**：`thermal` 的 99 处按源码行分布，**最大一簇 ~45 处
+> **第 365 轮更新（最新的指路牌，先读这段）**：**第 364 轮那条线索作废** —— `thermal` 的
+> `:1081-1138`（PC 逐 PFT → patch 聚合）位于 `DEF_USE_PFT .or. DEF_USE_PC` 之下，而
+> `MOD_Namelist.F90:170-171` 两个默认都是 **`.false.`**、三个 case.nml 也都没设 ⇒ 黄金算例走
+> **patch（LCT）路径**，那 45 处**不执行**（patch 级植被量是初始化时聚合好的，Rust 读 landdata ✓）。
+>
+> * **仍然活在干窗路径上的两大簇**：`:531-615`（12 处，`psit`/`hr`/`qred`/`qg`，第 357/359 轮
+>   已逐条对过 ✓）与 **`:1343-1372`（~17 处，`fgrnd`/`olrg`/`olrb`/`olru`/`emis`/`trad`，未审）**。
+>   `emis`/`trad`/`t_grnd` 都是重启变量且都在干窗差异表里出现过（第 348 轮 N=288 各 1 处）⇒
+>   这一簇是当前最值得逐条对的地方。
+> * **下一枪**：`:1343-1372` 的 17 处按 `.loc` 列出（`fgrnd` 是长加链、`olrb`/`olru`/`emis` 三行
+>   同理），与 Rust 的 `ground_fluxes.rs`(8)/`ground_temperature.rs`(27)/`ground_thermal_step.rs`(**0**)
+>   逐条对；判据用**干窗首分歧步**（现 N=251）。
+> * **方法教训**：读"某簇是最大的一簇"之后，先确认它在**当前配置**下**是否执行**（子网格/宏开关），
+>   再投入逐条比对。
+
+> **第 364 轮更新**：`thermal` 的 99 处按源码行分布，**最大一簇 ~45 处
 > 在 `:1081-1138` —— 那是 PC 逐 PFT → patch 的加权聚合 `sum(x_p*pftfrac)`**，它聚合的正是
 > `etr`/`tref`/`qref`/`tleaf`/`ldew_*`/`fsenl`/`fevpl` 这一批 ✓。
 >
@@ -21252,3 +21267,38 @@ Rust 侧计数：variably_saturated_flow.rs 67 个 mul_add；ground_temperature.
 **下一枪**：定位 Rust 侧 `sum(x_p*pftfrac)` 的实现（读入层还是装配层），把
 `.FMA(x1, f1, x0*f0)`（或反向）与它的写法逐条对；判据仍用**干窗首分歧步**（现 N=251）
 —— 若形状差在这里，这会同时解释 `etr` 与 `tref`/`tleaf`。
+
+**第 365 轮：更正第 364 轮的线索 —— `:1081-1138` 那簇**不在**黄金路径上；下一个目标是 `:1343-1372`（`fgrnd`/`olrg`/`olrb`/`emis`）**
+
+第 364 轮据"`thermal` 最大一簇是 PC 逐 PFT → patch 的聚合"提出了查 `sum(x_p*pftfrac)` 的下一枪。
+本轮把**子网格开关**查清后否掉了它：
+
+```text
+MOD_Namelist.F90:169-171   DEF_USE_LCT = .true.   DEF_USE_PFT = .false.   DEF_USE_PC = .false.
+oracle/work/CN-Cng*/case.nml  三个都没设 ⇒ 用默认 ⇒ **patch（LCT）路径**
+MOD_Thermal_CanopyPhase_Extended.F90:747   IF (patchtype==0 .and. (DEF_USE_PFT .or. DEF_USE_PC))
+                                      :992   IF ( DEF_USE_PC .and. pn.ge.ps )
+```
+
+⇒ `:1081-1138` 的 `sum(x_p*pftfrac)` 聚合**两个开关都是 .false. ⇒ 不执行**（死代码）；
+黄金算例的 patch 级植被量出自**初始化时**对站点 PFT 数据的加权（landdata 由内核自己的
+`mkinidata` 写好、Rust 直接读）✓ —— 这也解释了为什么这条"聚合"两侧不会分叉。
+⇒ **第 364 轮那条下一枪作废**。
+
+**仍然活在干窗路径上的两大簇**（本轮重新排定）：
+
+| 簇 | 处数 | 内容 | 状态 |
+|---|---|---|---|
+| `:531-615` | 12 | `psit`/`hr`/`qred`/`qg` | 第 357/359 轮逐条对过 ✓（式子同形） |
+| **`:1343-1372`** | **~17** | `fgrnd` / `olrg` / `olrb` / `olru` / **`emis`** / `trad` 那一族 | **未审** |
+
+`fgrnd` 是那条**长加链**（`sabg + dlrad*emg - emg*stefnc*t_grnd_bef**4
+- emg*stefnc*t_grnd_bef**3*(4*tinc) - (fseng+fevpg*htvp) + cpliq*pg_rain*(t_precip-t_grnd)
++ cpice*pg_snow*(t_precip-t_grnd)` ✓ —— GCC 会把其中 4–5 个乘积各自收进相邻加减 ✓；
+`olrg`/`olrb`/`emis` 三行同理（`olrb = stefnc*t_grnd_bef**3*(4*tinc)` 等 ✓）。
+而 `emis`/`trad`/`t_grnd` 都是**重启变量**且都在干窗差异表里出现过（第 348 轮 N=288：
+`emis`/`trad`/`t_grnd` 各 1 处 ✓）⇒ 这一簇值得逐条对。
+
+**下一枪**：把 `:1343-1372` 的 17 处按 `.loc` 逐条列出，与 Rust 的
+`ground_fluxes.rs`(8 个 mul_add) / `ground_temperature.rs`(27) / `ground_thermal_step.rs`(**0**)
+对应表达式逐条对；判据仍是**干窗首分歧步**（现 N=251）。
