@@ -19048,3 +19048,34 @@ mod_assim_stomata_conductance` 这个**值级**单测钉住，但它不判逐位
 Ball-Berry 的 `:353`/`:354`/`:356`，以及 `update_photosyn` 的 8 条（`update_photosyn`
 要单独加驱动块或另建小闭环）。**方法**：照这个闭环一次改一处、看 `assim`/`rst`
 计数是否下降；`respc` 已 0，说明 `calc_photo_params` 那条（`respc` 的算式）是对的。
+
+**第 331 轮：气孔链补到 `assim` 498→102 / `rst` 114→0，但湿窗 1287→2181 ⇒ 整批回退**
+
+按第 330 轮的闭环继续啃，又按 `.loc` 补了 6 处（都已按汇编定死）：
+
+```text
+:258/:259 omc/ome = vm_term*c3 + vm*c4        第一个（c3）乘积进 FMA
+                                               （`fmadd d23,d31,d25,d23`，d25=c3、d13=c4）
+:262 oms = c3*omss + (omss*pco2i)*c4          c3 乘积进 FMA
+:343/:344/:346 Medlyn bquad/cquad/sqrtin      `-2*(g0+acp)`、`1-g1^2`(fmsub)、`g0_term^2`(fmadd)、
+                                               `bq^2 - 4*cquad` 的 `bq^2` 各进 FMA
+:353/:354/:356 Ball-Berry bquad/cquad/sqrtin  两处乘积各 fmsub/fnmadd；`ea+hcdma*bintc` 内层 fmadd
+:861 WUE_solver `1 + 1.37*sqrt(...)`          1.37*sqrt 进 FMA
+```
+
+闭环推进得很干净：`rst` **114→0**（三模型电导全逐位）、`assim` **498→102**；**模型 2（WUE）
+整条 0 差**。剩下的 102 条全在模型 0/1（都用 `sortin` 取 `pco2i`），`assim` 只差末位
+（`assim - respc` 那一步把 1 ULP 吸收掉了，所以 `rst` 仍全同）。`sortin` 本身**没有 FMA**，
+试过 `cterm` 的 `aterm*eyy*eyy` 结合顺序、以及把 `ac1/ac2` 的 `powi(2)` 改成显式连乘，
+**计数都没动**（仍 102）⇒ 剩下的差在 `sortin` 的别处或 `coupled_assimilation` 的某个末位，未定。
+
+**但三段式拒绝**：wet `over_tol` **1287→2181**、`ot_vars` **24→54**、`sumabs`
+11.03→53.41（dry 28/1、snow 25713/79、restart 0/68、3 步 692/692 不变）。
+⇒ 按口径**整批回退**（`git checkout` 回 `9e916a2`），只保留第 330 轮那 2 处形状 + 闭环。
+这与第 315/321/326 轮是同一现象：**闭环没到 100% 之前，成批"逐位更准"的改动会把混沌
+窗口换到更差的轨道**（这次 wet 涨了 69%）。
+
+**下一枪**：先把 `stomata` 闭环推到 **`assim` 0 / `rst` 0** —— 重点查 `sortin`
+（这条链上唯一没有 FMA、却仍在 102 条 `assim` 里出差的函数：它的分支/下标逻辑、
+`cterm` 的三项结合、以及 `coupled_assimilation` 的三项结合都还没在闭环里逐条对过），
+再整批落地重测。第 330 轮的闭环就是这一轮的判据，不用重建。
