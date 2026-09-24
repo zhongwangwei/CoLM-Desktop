@@ -18373,6 +18373,26 @@ VSFI     kernel=200 rust=200
 
 ## 若继续
 
+> **第 374 轮更新（最新的指路牌，先读这段）**：**湿窗整窗逐位相同了**。第 373 轮之后剩下的
+> N=489 种子，用**改造成湿窗的地面温度三对角探针**（`gtcoef_wet.sh`）钉到 `hs`（地表净能量通量）：
+> 三对角系数 489 行全同、只有 `hs` 在 81 行差 1 ULP，而第 489 行连 `rt(1)` 也差。
+> `MOD_GroundTemperature.F90` 是**第四个从来没进过普查清单的模块**（42 条 FMA / 24 行），
+> 逐条读 GIMPLE 发现 `hs` 的**四段累加链全部收缩**，而 `ground_temperature.rs` 的旧注释
+> （"四个乘积各自先舍入一次"，抄自另一版 dump）把它写成了平铺 ⇒ 补上。
+>
+> * **湿窗 restart 整窗（N=1–720，15 天）逐位相同**；**干窗整窗仍逐位相同**。
+> * **黄金湿窗：`bitwise` 27055 → 31、`over_tol` 1197 → 0、`ot_vars` 19 → 0、
+>   `sumabs` 8.4418 → 0.0000**；黄金干窗 `bitwise` 153 → 81、`over_tol`/`ot_vars` 仍 0、
+>   `sumabs` 仍 0.0000。**两个窗口的每一项都变好**，所以不再需要"口径例外"。
+> * 三个光合闭环从"一直失败"变成 **3000/3000、3000/3000、`assim` 1/4000**。
+> * `oracle/patches/` 那套挂起的工作集（`pco2a` + 光合 30 处 + runoff）**随本轮一起落地**，
+>   目录已删除 —— 第 372 轮定的"凑齐后一次性落"策略兑现。
+> * **下一枪**：湿窗/干窗状态都已整窗逐位相同，剩下的只有 history 的 1 ULP 级诊断量
+>   （黄金 dry 还剩 81 个元素、wet 31 个，`sumabs` 都是 0.0000）；
+>   以及 `compare_stomata` 的 1/4000（row 514，分支差）。
+> * **判据（本轮落地后）**：湿窗 restart N=1–720 全 0/68、干窗 N=1–528 全 0/68、
+>   黄金 dry `81 / 0 / 0，0.0000`、黄金 wet `31 / 0 / 0，0.0000`。
+
 > **第 373 轮更新（最新的指路牌，先读这段）**：把第 372 轮那个"水步入场 `qgtop` 先差"再往上游走一层 ——
 > 改用 **history 的逐变量首分歧**（`window_divergence.py`，比探针便宜、直接给变量名），
 > 第一颗会传播的种子是 **`f_rootr` 第 466 步 1 ULP**（分层根吸水权重）。
@@ -22027,6 +22047,9 @@ oracle/scripts/compare_all.sh stomata  # 只跑名字里含这个子串的
 * `oracle/patches/wet-seed-working-set.diff` —— 在 `HEAD` 上 `git apply` 即可；
 * `oracle/patches/README.md` —— 每一块的来源、改前改后的闭环与窗口数字、当前逐位范围、
   以及**为什么不能单独落地**。
+* **第 374 轮更新**：这套工作集连同 `MOD_GroundTemperature` 的 `hs` 链**已经落地**
+  （湿窗整窗逐位相同、黄金湿窗 `over_tol` 归零），`oracle/patches/` 目录已删除 ——
+  下面这段"重放方式"从此只是历史记录。
 
 **教训**：写进文档的"可重放"补丁**必须真的重放一遍**再写。当时是"改完就写"，而分步用 `edit`
 与脚本混着改，脚本就和树脱了节（那份只覆盖 19/30）。
@@ -22328,3 +22351,85 @@ vsfr_wet.sh 489 的第一条不同记录 = ('WSF1', 489, 0, 0) qgtop
    （`compare_moninobukm.sh` 只覆盖摩擦速度那一族）。
 2. **干窗**整窗 restart 逐位相同、黄金 127 个变量零超差，已收口（只剩 1 ULP 级诊断量）。
 3. `compare_stomata` 的 1/4000（row 514）仍未解释。
+
+## 第 374 轮：**湿窗整窗逐位相同** —— `MOD_GroundTemperature` 的 `hs` 链（第 4 个从未普查的模块），工作集一并落地
+
+**一句话**：第 373 轮之后湿窗还剩 N=489 一颗种子。用**改造成湿窗的地面温度三对角探针**
+（`gtcoef_wet.sh`，把 `gtcoef_probe.sh` 的 case 换成 `CN-Cng-wet`、步数参数化）逐元素比，
+发现**三对角系数全部逐位相同**、只有 `hs`（地表净能量通量）在 489 步里有 81 步差 1 ULP，
+而**第 489 步连 `rt(1)` 也差了** ⇒ 种子在 `hs` 那条链上。`MOD_GroundTemperature.F90`
+**是第四个从来没进过普查清单的模块**（前三个：`MOD_Eroot`、`MOD_Runoff`、
+`MOD_Hydro_SoilWater` 之外的那些），42 条 FMA / 24 行。逐条读 GIMPLE 后发现 `hs` 的
+**四段累加链全部收缩**，而 `ground_temperature.rs` 的旧注释写着"四个乘积各自先舍入一次"
+（抄自另一版 dump），把 `dlrad*emg` 与两个降水热项都写成了平铺。补上之后：
+
+* **湿窗 restart 整窗（N=1–720，15 天）逐位相同**；
+* **黄金湿窗：`bitwise` 27055 → 31、`over_tol` 1197 → 0、`ot_vars` 19 → 0、
+  `sumabs` 8.4418 → 0.0000**；
+* 黄金干窗：`bitwise` 153 → 81、`over_tol`/`ot_vars` 仍 0、`sumabs` 仍 0.0000；
+* 干窗 restart 仍整窗逐位相同；三个光合闭环 3000/3000、3000/3000、`assim` 1/4000。
+
+⇒ **`oracle/patches/` 里那套挂起的工作集（`pco2a` + 光合 30 处 + runoff）连同本轮这一处
+一次性落地** —— 这正是第 372 轮定的策略（"湿窗没法一处一处地落，必须凑齐后一次性落"）的兑现。
+**`oracle/patches/` 目录本轮删除**（挂起候选已变成代码；来源与数字都留在本节与下面几张表里）。
+
+### 一、怎么钉到 `hs` 的
+
+```text
+① 工作集 + eroot 之后：湿窗 restart 逐位 N=1–488，N=489 差 3/68（emis/t_grnd/t_soisno）
+② history 逐变量排名指向 f_fevpg（index 488）—— 但 fevpg 自己的式子
+   （`fevpg = rhoair*cgw*(qg-qaf)`）与 cgw 的三个分支都和 Rust 对得上 ⇒ 不是它本身
+③ 换探针：gtcoef_wet.sh 489（地面温度三对角 at/bt/ct/rt + 输入 + 5 个标量，95 列位型）
+     → 489 行里三对角系数全同，只有 hs 在 81 行差 1 ULP，且**第 489 行 rt(1) 也差**
+④ hs = 地表净能量通量（`MOD_GroundTemperature.F90:251-271`）⇒ 同族表达式第三次出现
+   （`fgrnd` 在 surface_budget.rs、`fgrnd` 在 MOD_Thermal、现在 hs 在 MOD_GroundTemperature）
+⑤ 逐条读 GIMPLE → 旧注释把形状记反了 ⇒ 补上
+```
+
+### 二、落地的形状（`hs` 链，`:260-263`）
+
+```text
+_147 = .FMA (dlrad, emg, sabg)                  ; sabg + dlrad*emg       ← Rust 曾平铺
+_152 = .FMA (fevpg, htvp, fseng)                ; Rust 已有 ✓
+_154 = _147 - _152
+_156 = pg_rain*cpliq ; _162 = .FMA (_156, Δ, _154)   ; Rust 曾平铺
+_164 = pg_snow*cpice ; _166 = .FMA (Δ, _164, _162)   ; Rust 曾平铺
+:267  _173 = .FNMA (t_grnd**4, emg*stefnc, hs)       ; Rust 已有 ✓
+```
+
+### 三、实测（同一把尺子，改前 = 第 373 轮的 HEAD + eroot）
+
+| 口径 | 改前 | 改后（**落地**） |
+|---|---|---|
+| 湿窗 restart | 逐位 N=1–488；N=489 3/68、N=528 23/68 | **整窗 N=1–720 全 0/68** |
+| 干窗 restart | 整窗 0/68 | 整窗 0/68 |
+| 黄金 dry（`bitwise`/`over_tol`/`ot_vars`/`sumabs`） | 153 / 0 / 0，0.0000 | **81 / 0 / 0，0.0000** |
+| 黄金 wet | 27055 / **1197 / 19**，8.4418 | **31 / 0 / 0，0.0000** |
+| `compare_sortin` | `bterm` 差 853 … | **3000/3000** |
+| `compare_update_photosyn` | `assim` 差 225 | **3000/3000** |
+| `compare_stomata` | `rst` 114 + `assim` 171 | **`assim` 1/4000** |
+
+两个窗口的**每一项**都变好（湿窗的 `over_tol` 直接归零），所以这一批不再需要"例外"——
+按纪律与目标判据（首分歧步中性或更好）**双双通过**。
+
+### 四、方法总结（这四轮最有价值的东西）
+
+1. **普查清单要按"编进内核的 `.F90` 文件"枚举**，不要按例程名 ——
+   本轮之前已经有**四个**模块从没进过清单（`MOD_Eroot`、`MOD_Runoff`、`MOD_GroundTemperature`，
+   加上第 367 轮才补上的 `MOD_Hydro_SoilWater` 全量），而缺口恰好全在这些"没被看过"的地方。
+2. **同一条物理在本仓库里有多个拷贝**：`fgrnd`/`hs` 是同一族表达式，
+   `fgrnd` 在 `surface_budget.rs` 与 `MOD_Thermal` 各一份、`hs` 在 `MOD_GroundTemperature` 又一份；
+   `porsl-theta_r + ...` 那条保持曲线实参有三份。**改一处要 grep 全部**。
+3. **仪器分工**：`restart_divergence.py` 给"哪些状态量差"，
+   `window_divergence.py` 给"哪个 history 量先差"（便宜、有名字），
+   `*_probe.sh`（改造 case 即可）给"内部哪一条先差"。三者配合能把种子从"第 N 步"钉到"哪一行"。
+4. **混沌窗口的正确落法**：形状集不完整时每一处改对都可能让聚合指标反向（第 371/372 轮量过
+   1650/1876/1968/1933 四个数），**凑齐之后一次性落地**才是对的 —— 本轮就是兑现。
+
+### 五、下一枪
+
+1. 湿窗与干窗的状态都已整窗逐位相同；**剩下的只有 history 里 1 ULP 级的诊断量**
+   （黄金 dry 还剩 81 个元素、黄金 wet 31 个元素，`sumabs` 都是 0.0000）。
+   下一步是用 `window_divergence.py` 把这两批逐变量列出来，按 `f_*` 找最后的形状差。
+2. `compare_stomata` 的 1/4000（row 514，分支差）仍未解释。
+3. 雪窗（US-NR1-snow）仍不可测（`examples/Forcing/` 缺那份强迫）。

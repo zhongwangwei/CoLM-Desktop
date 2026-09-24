@@ -978,13 +978,16 @@ pub fn leaf_temperature(
         // 它就减在 `pco2a` 的括号和里 ⇒ 第 351 轮的 hex 探针量到的 `pco2a` 1 ULP 分叉
         // （20/1004 次调用）有一部分来自这里。
         let soil_respiration = 0.22 * 1.0e-6;
-        canopy_air_co2 = input.atmospheric_co2_pa
-            - 1.37 * input.surface_pressure_pa / air_conductance.max(0.446)
-                * (sunlit_resistance.assimilation_mol_m2_s
-                    + shaded_resistance.assimilation_mol_m2_s
-                    - sunlit_resistance.respiration_mol_m2_s
-                    - shaded_resistance.respiration_mol_m2_s
-                    - soil_respiration);
+        // `MOD_LeafTemperature_Extended.F90:1244` 的 GIMPLE 是
+        //   `_585 = .FNMA(1.37*psrf/max(0.446,gah2o), 括号和, pco2m)`
+        // —— 那条"抽走率 × 括号和"的乘积**被收进减法**（一次舍入），平铺会多舍一次。
+        let co2_drawdown_rate = 1.37 * input.surface_pressure_pa / air_conductance.max(0.446);
+        let co2_sink = sunlit_resistance.assimilation_mol_m2_s
+            + shaded_resistance.assimilation_mol_m2_s
+            - sunlit_resistance.respiration_mol_m2_s
+            - shaded_resistance.respiration_mol_m2_s
+            - soil_respiration;
+        canopy_air_co2 = (-co2_drawdown_rate).mul_add(co2_sink, input.atmospheric_co2_pa);
         temperature_difference = input.reference_air_temperature_k - canopy_air_temperature;
         humidity_difference = input.reference_specific_humidity - canopy_air_humidity;
         let temperature_scale =

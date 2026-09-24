@@ -306,14 +306,25 @@ fn surface_fluxes(
         .evaporation_ground_kg_m2_s
         .mul_add(input.vaporization_heat_j_kg, input.sensible_ground_w_m2);
     let precipitation_delta_ground = input.precipitation_temperature_k - input.ground_temperature_k;
-    let mut surface = if use_snicar && input.snow_layers > 0 {
+    // **第 374 轮更正**：这一段原先的注释写着"四个乘积各自先舍入一次再参与后面的加减"、
+    // 于是 `dlrad*emg` 与两个降水热项都写成了平铺 —— 但 `-fdump-tree-optimized-lineno`
+    // 在 `:263` 上给出的是一条**四段全熔**的链：
+    //   `_147 = .FMA(dlrad, emg, sabg)`
+    //   `_152 = .FMA(fevpg, htvp, fseng)`、`_154 = _147 - _152`
+    //   `_156 = pg_rain*cpliq`、`_162 = .FMA(_156, Δ, _154)`
+    //   `_164 = pg_snow*cpice`、`_166 = .FMA(Δ, _164, _162)`
+    // （`hs_soil`/`hs_snow` 的 `:279`/`:287` 同形。）旧注释大概是从另一版 dump 抄的。
+    let surface = if use_snicar && input.snow_layers > 0 {
         snow_top_absorption + input.absorbed_soil_shortwave_w_m2
     } else {
         input.absorbed_ground_shortwave_w_m2
-    } + longwave_emissivity
-        - ground_sensible
-        + rain_heat_capacity * precipitation_delta_ground
-        + precipitation_delta_ground * snow_heat_capacity;
+    };
+    let surface = input
+        .downward_longwave_w_m2
+        .mul_add(input.ground_emissivity, surface);
+    let surface = surface - ground_sensible;
+    let surface = rain_heat_capacity.mul_add(precipitation_delta_ground, surface);
+    let mut surface = precipitation_delta_ground.mul_add(snow_heat_capacity, surface);
     // `dhsdT` 的辐射项是 `FNMS(stefnc*(emg*4), (t*t)*t, cgrnd)`（`_261/_262/_264/_266`）。
     let stefan_factor = input.ground_emissivity * 4.0 * STEFAN_BOLTZMANN_W_M2_K4;
     let derivative = (-input.ground_temperature_k.powi(3)).mul_add(

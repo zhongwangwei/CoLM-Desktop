@@ -288,11 +288,18 @@ fn storage_distribution_runoff(
         });
     }
     let maximum_depth = (1.0 + bvic) * capacity;
-    let initial_depth = maximum_depth * (1.0 - (1.0 - saturated_fraction).powf(1.0 / bvic));
-    let surface_depth = if initial_depth + input_depth > maximum_depth {
+    // `:342/:346` 的 GIMPLE 是 `_30 = .FMA(_29, waterdepthmax, watin)` ——
+    // `WaterDepthInit + watin` 这条加法把 `WaterDepthMax*(1-(1-SSF)**(1/BVIC))` 那个乘积
+    // **收进 FMA**（一次舍入）；`WaterDepthInit` 单独并不存在（CSE 后只有这一个值）。
+    // 这一个 ULP 同时进 `ELSEIF ((WaterDepthInit+watin) > WaterDepthMax)` 的**分支判定**
+    // 与 `InfilVarTmp` 的分子 ⇒ 湿季（`watin > 0`、土壤接近饱和）能把整支翻掉，
+    // 而干季根本走不到这里（`watin <= 0` 直接返回）。
+    let depth_factor = 1.0 - (1.0 - saturated_fraction).powf(1.0 / bvic);
+    let depth_with_input = depth_factor.mul_add(maximum_depth, input_depth);
+    let surface_depth = if depth_with_input > maximum_depth {
         input_depth - capacity + water
     } else {
-        let remaining = 1.0 - (initial_depth + input_depth) / maximum_depth;
+        let remaining = 1.0 - depth_with_input / maximum_depth;
         // `RunoffSurface = watin - wsat_int + w_int + wsat_int*(InfilVarTmp**(1+BVIC))`：
         // 最后一个乘积被吸收（`FMA`）。实测 18185 组随机输入：不收缩 2/18185，
         // 收缩后 **18185/18185**。

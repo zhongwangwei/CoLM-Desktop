@@ -141,24 +141,29 @@ pub fn photosynthesis_parameters(
         + (b.high_temperature_slope * (input.leaf_temperature_k - b.high_temperature_half_k)).exp();
     let mut maximum_carboxylation =
         b.maximum_carboxylation_25c_mol_m2_s * f77(2.1).powf(temperature_factor);
-    maximum_carboxylation =
-        (maximum_carboxylation / high_inhibition * input.soil_water_stress * c3_fraction
-            + maximum_carboxylation / (low_inhibition * high_inhibition)
-                * input.soil_water_stress
-                * c4_fraction)
-            * input.canopy_integration[0];
+    // `:570 vm = vm/temph*rstfac*c3 + vm/(templ*temph)*rstfac*c4` 的 GIMPLE 是
+    // `.FMA(vm/temph*rstfac, c3, vm/(templ*temph)*rstfac*c4)` —— `c4` 那条链整体
+    // 独立舍入当加数，`c3` 那一乘收进 FMA。
+    let high_term = maximum_carboxylation / high_inhibition * input.soil_water_stress;
+    let low_term = maximum_carboxylation / (low_inhibition * high_inhibition)
+        * input.soil_water_stress
+        * c4_fraction;
+    maximum_carboxylation = high_term.mul_add(c3_fraction, low_term) * input.canopy_integration[0];
     let gas_constant = 8.314_467_591;
     let jmax25 = f77(1.97) * b.maximum_carboxylation_25c_mol_m2_s;
     let mut jmax = jmax25
         * (f77(37.0e3) * (input.leaf_temperature_k - b.optimum_temperature_k)
             / (gas_constant * b.optimum_temperature_k * input.leaf_temperature_k))
             .exp()
+        // `:579-580` 的两个分子 `710.*t-220.e3` 各自是一条 FMA（`:580` 的 GIMPLE
+        // `_67 = .FMA(t, 7.1e2, -2.2e5)`）。
         * (1.0
-            + ((f77(710.0) * b.optimum_temperature_k - f77(220.0e3))
+            + (f77(710.0)
+                .mul_add(b.optimum_temperature_k, -f77(220.0e3))
                 / (gas_constant * b.optimum_temperature_k))
                 .exp())
         / (1.0
-            + ((f77(710.0) * input.leaf_temperature_k - f77(220.0e3))
+            + (f77(710.0).mul_add(input.leaf_temperature_k, -f77(220.0e3))
                 / (gas_constant * input.leaf_temperature_k))
                 .exp());
     jmax *= input.soil_water_stress * input.canopy_integration[1];
@@ -174,16 +179,17 @@ pub fn photosynthesis_parameters(
                 .exp())
         * input.soil_water_stress
         * input.canopy_integration[0];
-    let sink_limit = ((b.maximum_carboxylation_25c_mol_m2_s / f77(2.0))
+    // `:597-598 omss = (vmax25/2)*1.8**qt/templ*rstfac*c3 + (vmax25/5)*1.8**qt*rstfac*c4`
+    // 与 `:570` 同形（`.FMA(_118, cstore_128, _124)`）。
+    let low_sink = (b.maximum_carboxylation_25c_mol_m2_s / f77(2.0))
         * f77(1.8).powf(temperature_factor)
         / low_inhibition
+        * input.soil_water_stress;
+    let high_sink = (b.maximum_carboxylation_25c_mol_m2_s / f77(5.0))
+        * f77(1.8).powf(temperature_factor)
         * input.soil_water_stress
-        * c3_fraction
-        + (b.maximum_carboxylation_25c_mol_m2_s / f77(5.0))
-            * f77(1.8).powf(temperature_factor)
-            * input.soil_water_stress
-            * c4_fraction)
-        * input.canopy_integration[0];
+        * c4_fraction;
+    let sink_limit = low_sink.mul_add(c3_fraction, high_sink) * input.canopy_integration[0];
     let pressure_conversion = f77(44.6 * 273.16) * input.air_pressure_pa / f77(1.013e5);
     // `MOD_AssimStomataConductance.F90:608` 是 `gbh2o = 1./rb * tprcor/tlef`
     // —— 从左到右 `((1/rb)*tprcor)/tlef`，不是 `tprcor/(rb*tlef)`。
@@ -242,17 +248,31 @@ pub fn stomata(input: StomataInput, options: StomataOptions) -> Result<StomataSt
                 );
                 (rubisco, rubisco, electron)
             };
-        let omc = photo.maximum_carboxylation_mol_m2_s * (rubisco_co2 - photo.co2_compensation_pa)
-            / (rubisco_co2 + photo.rubisco_co2_constant_pa)
-            * photo.c3_fraction
-            + photo.maximum_carboxylation_mol_m2_s * photo.c4_fraction;
-        let ome = photo.electron_transport_mol_m2_s * (electron_co2 - photo.co2_compensation_pa)
-            / (electron_co2 + f77(2.0) * photo.co2_compensation_pa)
-            * photo.c3_fraction
-            + photo.electron_transport_mol_m2_s * photo.c4_fraction;
+        // `:258/:259/:262` 三条都是 `商*c3 + 整条 c4 链`：
+        //   `omc = .FMA(vm*(pco2i_c-gammas)/(pco2i_c+rrkk), c3, vm*c4)`
+        //   `ome = .FMA(c3, epar*(…)/(pco2i_e+2*gammas), epar*c4)`，分母那一条
+        //         `.FMA(gammas, 2.0, pco2i_e)`（第 336 轮就定死的那处）
+        //   `oms = .FMA(c3, omss, (omss*pco2i)*c4)`
+        let omc_quotient = photo.maximum_carboxylation_mol_m2_s
+            * (rubisco_co2 - photo.co2_compensation_pa)
+            / (rubisco_co2 + photo.rubisco_co2_constant_pa);
+        let omc = omc_quotient.mul_add(
+            photo.c3_fraction,
+            photo.maximum_carboxylation_mol_m2_s * photo.c4_fraction,
+        );
+        let ome_denominator = f77(2.0).mul_add(photo.co2_compensation_pa, electron_co2);
+        let ome_quotient = photo.electron_transport_mol_m2_s
+            * (electron_co2 - photo.co2_compensation_pa)
+            / ome_denominator;
+        let ome = photo.c3_fraction.mul_add(
+            ome_quotient,
+            photo.electron_transport_mol_m2_s * photo.c4_fraction,
+        );
         if !options.use_wue || (photo.c4_fraction - 1.0).abs() < f77(0.001) {
-            let oms = photo.sink_limit_mol_m2_s_pa * photo.c3_fraction
-                + photo.sink_limit_mol_m2_s_pa * internal_co2 * photo.c4_fraction;
+            let oms = photo.c3_fraction.mul_add(
+                photo.sink_limit_mol_m2_s_pa,
+                photo.sink_limit_mol_m2_s_pa * internal_co2 * photo.c4_fraction,
+            );
             assimilation = coupled_assimilation(omc, ome, oms);
         } else {
             assimilation = omc.min(ome).max(0.0);
@@ -291,25 +311,38 @@ pub fn stomata(input: StomataInput, options: StomataOptions) -> Result<StomataSt
                 * f77(1.0e-3);
             let acp = f77(1.6) * positive_assimilation / co2_surface_clamped;
             let a = 1.0;
-            let bq = -f77(2.0) * (g0 * f77(1.0e-6) + acp)
-                - (g1 * acp).powi(2)
-                    / (photo.boundary_conductance_h2o_mol_m2_s * vapor_deficit_kpa);
-            let c = (g0 * f77(1.0e-6)).powi(2)
-                + (f77(2.0) * g0 * f77(1.0e-6) + acp * (1.0 - g1.powi(2)) / vapor_deficit_kpa)
-                    * acp;
-            conductance = (-bq + (bq.powi(2) - f77(4.0) * a * c).max(0.0).sqrt()) / (f77(2.0) * a);
+            // `:343` 里 `(g0*1e-6 + acp)` 的乘积是一条 FMA（`_108 = .FMA(g0, 1e-6, acp)`）。
+            let bracket = g0 * f77(1.0e-6) + acp;
+            let quotient =
+                (g1 * acp).powi(2) / (photo.boundary_conductance_h2o_mol_m2_s * vapor_deficit_kpa);
+            let bq = (-bracket).mul_add(f77(2.0), -quotient);
+            let g0_scaled = g0 * f77(1.0e-6);
+            let one_minus_g1_squared = (-g1).mul_add(g1, 1.0);
+            let c_tail = (f77(2.0) * g0)
+                .mul_add(f77(1.0e-6), one_minus_g1_squared * acp / vapor_deficit_kpa);
+            let c = g0_scaled.mul_add(g0_scaled, c_tail * acp);
+            // `:346` `sqrtin = max(0, bquad**2 - 4*aquad*cquad)`：`bquad**2` 进 FMA。
+            conductance =
+                (-bq + bq.mul_add(bq, -(f77(4.0) * a * c)).max(0.0).sqrt()) / (f77(2.0) * a);
             (co2_surface - f77(1.6) * net_assimilation / conductance)
                 * input.photosynthesis.air_pressure_pa
         } else {
             let hcdma = input.leaf_saturation_vapor_pressure_pa * co2_surface_clamped
                 / (gradm * positive_assimilation);
             let a = hcdma;
-            let bq = photo.boundary_conductance_h2o_mol_m2_s * hcdma
-                - input.leaf_saturation_vapor_pressure_pa
-                - bintc * hcdma;
+            // `:353 bquad = gbh2o*hcdma - ei - bintc*hcdma` 是**两条** `fmsub`：
+            // 先 `fma(hcdma, gbh2o, -ei)`，再 `fma(-bintc, hcdma, 上一步)`。
+            let first = hcdma.mul_add(
+                photo.boundary_conductance_h2o_mol_m2_s,
+                -input.leaf_saturation_vapor_pressure_pa,
+            );
+            let bq = (-bintc).mul_add(hcdma, first);
+            // `:354 cquad = -gbh2o*(ea + hcdma*bintc)`：括号里是一条 FMA。
             let c = -photo.boundary_conductance_h2o_mol_m2_s
-                * (input.canopy_air_vapor_pressure_pa + hcdma * bintc);
-            conductance = (-bq + (bq.powi(2) - f77(4.0) * a * c).max(0.0).sqrt()) / (f77(2.0) * a);
+                * bintc.mul_add(hcdma, input.canopy_air_vapor_pressure_pa);
+            // `:356` 同 `:346`。
+            conductance =
+                (-bq + bq.mul_add(bq, -(f77(4.0) * a * c)).max(0.0).sqrt()) / (f77(2.0) * a);
             let surface_vapor = ((conductance - bintc) * hcdma)
                 .min(input.leaf_saturation_vapor_pressure_pa)
                 .max(f77(1.0e-2));
@@ -370,17 +403,28 @@ pub fn update_photosynthesis(
             iteration,
         );
         let internal = co2_guesses[iteration - 1];
-        let omc = photo.maximum_carboxylation_mol_m2_s * (internal - photo.co2_compensation_pa)
-            / (internal + photo.rubisco_co2_constant_pa)
-            * photo.c3_fraction
-            + photo.maximum_carboxylation_mol_m2_s * photo.c4_fraction;
-        let ome = photo.electron_transport_mol_m2_s * (internal - photo.co2_compensation_pa)
-            / (internal + f77(2.0) * photo.co2_compensation_pa)
-            * photo.c3_fraction
-            + photo.electron_transport_mol_m2_s * photo.c4_fraction;
+        // `:737/:738/:740` 与 `stomata` 的 `:258/:259/:262` 同形（WUE 关着时
+        // `pco2i_c = pco2i_e = pco2i`）。
+        let omc_quotient = photo.maximum_carboxylation_mol_m2_s
+            * (internal - photo.co2_compensation_pa)
+            / (internal + photo.rubisco_co2_constant_pa);
+        let omc = omc_quotient.mul_add(
+            photo.c3_fraction,
+            photo.maximum_carboxylation_mol_m2_s * photo.c4_fraction,
+        );
+        let ome_denominator = f77(2.0).mul_add(photo.co2_compensation_pa, internal);
+        let ome_quotient = photo.electron_transport_mol_m2_s
+            * (internal - photo.co2_compensation_pa)
+            / ome_denominator;
+        let ome = photo.c3_fraction.mul_add(
+            ome_quotient,
+            photo.electron_transport_mol_m2_s * photo.c4_fraction,
+        );
         if !options.use_wue || (photo.c4_fraction - 1.0).abs() < f77(0.001) {
-            let oms = photo.sink_limit_mol_m2_s_pa * photo.c3_fraction
-                + photo.sink_limit_mol_m2_s_pa * internal * photo.c4_fraction;
+            let oms = photo.c3_fraction.mul_add(
+                photo.sink_limit_mol_m2_s_pa,
+                photo.sink_limit_mol_m2_s_pa * internal * photo.c4_fraction,
+            );
             assimilation = coupled_assimilation(omc, ome, oms);
         } else {
             assimilation = omc.min(ome).max(0.0);
@@ -394,10 +438,11 @@ pub fn update_photosynthesis(
         let co2_surface = input.canopy_air_co2_pa / input.photosynthesis.air_pressure_pa
             - f77(1.37) * net_assimilation / photo.boundary_conductance_h2o_mol_m2_s;
         let positive_assimilation = net_assimilation.max(f77(1.0e-12));
-        let next = (co2_surface
-            - f77(1.6) * positive_assimilation / input.canopy_conductance_h2o_umol_m2_s)
-            * input.photosynthesis.air_pressure_pa;
-        errors[iteration - 1] = internal - next;
+        // `:805 eyy(ic) = pco2i - (co2s - 1.6*assmt/gsh2o)*psrf` 出货是
+        // `fsub` + `fmsub` ⇒ `pco2i - bracket*psrf` 收成一条 FMA（加数是 `pco2i`）。
+        let bracket =
+            co2_surface - f77(1.6) * positive_assimilation / input.canopy_conductance_h2o_umol_m2_s;
+        errors[iteration - 1] = (-bracket).mul_add(input.photosynthesis.air_pressure_pa, internal);
         if errors[iteration - 1].abs() < f77(0.1) {
             break;
         }
@@ -523,9 +568,10 @@ fn sortin_impl(
 ) {
     if iteration < 4 {
         let error_sign = if errors[0] < 0.0 { -1.0 } else { 1.0 };
-        co2[0] = gamma + f77(0.5) * range;
-        co2[1] = gamma + range * (f77(0.5) - f77(0.3) * error_sign);
-        co2[2] = co2[0] - (co2[0] - co2[1]) / (errors[0] - errors[1] + f77(1.0e-10)) * errors[0];
+        co2[0] = f77(0.5).mul_add(range, gamma);
+        co2[1] = range.mul_add(f77(0.5) - f77(0.3) * error_sign, gamma);
+        let slope = (co2[0] - co2[1]) / (errors[0] - errors[1] + f77(1.0e-10));
+        co2[2] = (-slope).mul_add(errors[0], co2[0]);
         let pmin = co2[0].min(co2[1]);
         let emin = errors[0].min(errors[1]);
         if emin > 0.0 && co2[2] > pmin {
@@ -558,17 +604,20 @@ fn sortin_impl(
         let i3 = i1 + 2;
         let isp = (index + 1).min(n - 1);
         let is = isp - 1;
-        let linear =
-            co2[is] - (co2[is] - co2[isp]) / (errors[is] - errors[isp] + f77(1.0e-10)) * errors[is];
-        let ac1 = errors[i1].powi(2) - errors[i2].powi(2);
-        let ac2 = errors[i2].powi(2) - errors[i3].powi(2);
+        let slope = (co2[is] - co2[isp]) / (errors[is] - errors[isp] + f77(1.0e-10));
+        let linear = (-slope).mul_add(errors[is], co2[is]);
+        let error_two_squared = errors[i2] * errors[i2];
+        let ac1 = errors[i1].mul_add(errors[i1], -error_two_squared);
+        let ac2 = (-errors[i3]).mul_add(errors[i3], error_two_squared);
         let bc1 = errors[i1] - errors[i2];
         let bc2 = errors[i2] - errors[i3];
         let cc1 = co2[i1] - co2[i2];
         let cc2 = co2[i2] - co2[i3];
-        let bterm = (cc1 * ac2 - cc2 * ac1) / (bc1 * ac2 - ac1 * bc2 + f77(1.0e-10));
-        let aterm = (cc1 - bc1 * bterm) / (ac1 + f77(1.0e-10));
-        let cterm = co2[i2] - aterm * errors[i2].powi(2) - bterm * errors[i2];
+        let bterm =
+            ac2.mul_add(cc1, -(cc2 * ac1)) / (ac2.mul_add(bc1, -(ac1 * bc2)) + f77(1.0e-10));
+        let aterm = (-bc1).mul_add(bterm, cc1) / (ac1 + f77(1.0e-10));
+        let first = (-(aterm * errors[i2])).mul_add(errors[i2], co2[i2]);
+        let cterm = (-bterm).mul_add(errors[i2], first);
         let quadratic = cterm.max(lower);
         co2[iteration - 1] = f77(0.5) * (linear + quadratic);
         if let Some(slot) = debug {
@@ -598,9 +647,13 @@ fn wue_internal_co2(
     let rubisco = canopy_co2
         - (f77(1.6) * vapor_difference * (canopy_co2 - gamma / air_pressure).max(0.0) / lambda)
             .sqrt();
+    // `:861` 的 GIMPLE 是 `_368 = .FMA(sqrt(lambda*gammas/psrf/D), 1.37, 1.0)`。
     let electron = canopy_co2
         - canopy_co2
-            / (1.0 + f77(1.37) * (lambda * gamma / air_pressure / vapor_difference).sqrt());
+            / f77(1.37).mul_add(
+                (lambda * gamma / air_pressure / vapor_difference).sqrt(),
+                1.0,
+            );
     (rubisco * air_pressure, electron * air_pressure)
 }
 
