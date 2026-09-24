@@ -445,7 +445,9 @@ fn transpiration_from_conductance(
     // `1. - delta*(1.-fwet)`：乘积被吸收成 `FNMA(1-fwet, delta, 1.0)`
     // （`-fdump-tree-all` 实测；`1. - delta*(1.-fwet)` 不是 `1. - delta` 那种单乘加，
     // 但 gfortran 照样把 `delta*(1-fwet)` 收进减法里）。两处（`cfw` 与 `cwet`）同型。
-    let dry_fraction = (-(1.0 - input.wet_canopy_fraction)).mul_add(delta, 1.0);
+    // `:779 cwet = (1.-delta*(1.-fwet))*…`：出货汇编在 779/780 上没有 FMA（只有
+    // `fmul`/`fsub`/`fdiv`），所以这里**不收缩**（第 341 轮更正）。
+    let dry_fraction = 1.0 - delta * (1.0 - input.wet_canopy_fraction);
     let leaf = dry_fraction
         * (input.sunlit_leaf_area_index + input.shaded_leaf_area_index + input.stem_area_index)
         * boundary_conductance_umol_m2_s
@@ -532,7 +534,9 @@ fn conductance_from_transpiration(
     } else {
         1.0 / (input.ground_to_canopy_moisture_resistance_s_m + input.soil_surface_resistance_s_m)
     };
-    let dry_fraction = (-(1.0 - input.wet_canopy_fraction)).mul_add(delta, 1.0);
+    // `:779 cwet = (1.-delta*(1.-fwet))*…`：出货汇编在 779/780 上没有 FMA（只有
+    // `fmul`/`fsub`/`fdiv`），所以这里**不收缩**（第 341 轮更正）。
+    let dry_fraction = 1.0 - delta * (1.0 - input.wet_canopy_fraction);
     let wet = dry_fraction
         * (input.sunlit_leaf_area_index + input.shaded_leaf_area_index + input.stem_area_index)
         * boundary_conductance_umol_m2_s
@@ -548,15 +552,15 @@ fn conductance_from_transpiration(
     let a2 = -shaded_transpiration_kg_m2_s / input.air_density_kg_m3;
     let b2 = leaf - shaded_transpiration_kg_m2_s / input.air_density_kg_m3;
     let c2 = shaded_transpiration_kg_m2_s * (air + ground + wet) / input.air_density_kg_m3;
-    // 四个 `乘积 - 乘积`：gfortran 各收**一个**乘积，而且收哪个取决于公共子表达式 ——
-    // `B2*A1`（即 `A1*B2`，乘法可交换、值相同）被 `csun` 的分母先算出来并被
-    // `csha` 的分母复用，于是两个分母一个收左、一个收右（GIMPLE 实测）：
-    //   `csun = FMS(b1,c2, b2*c1) / FMS(b1,a2, b2*a1)`
-    //   `csha = FMS(c2,a1, c1*a2) / FNMA(b1,a2, b2*a1)`
-    // 所以这里必须把 `b2*a1` 抽出来复用，不能各写一遍"看起来更对称"的式子。
+    // `:794/:795` 的两条 FMA 都在**分子**上 —— GIMPLE 是
+    // `_51 = .FNMS(_44, c2, _50)`（`_50 = c1*b2`）与 `_59 = .FMS(a1, c2, _58)`（`_58 = c1*a2`），
+    // 而两个分母是 `_55 = _53 - _54`、`_61 = _54 - _53`，即**两个已舍入乘积的普通减法**，
+    // **不收缩**。所以分母要把 `b2*a1` 抽出来复用、并且两边都留成普通减法。
+    // （第 341 轮更正：原先分母也写了 `mul_add`，那是多收了一处。）
+    let b1_a2 = b1 * a2;
     let b2_a1 = b2 * a1;
-    let sunlit_leaf_conductance = b1.mul_add(c2, -(b2 * c1)) / b1.mul_add(a2, -b2_a1);
-    let shaded_leaf_conductance = c2.mul_add(a1, -(c1 * a2)) / (-b1).mul_add(a2, b2_a1);
+    let sunlit_leaf_conductance = b1.mul_add(c2, -(b2 * c1)) / (b1_a2 - b2_a1);
+    let shaded_leaf_conductance = c2.mul_add(a1, -(c1 * a2)) / (b2_a1 - b1_a2);
     if sunlit_transpiration_kg_m2_s > 0.0 {
         sunlit_stomatal_conductance_umol_m2_s = 1.0
             / ((1.0 - input.wet_canopy_fraction) * delta * input.sunlit_leaf_area_index
@@ -629,9 +633,14 @@ fn root_flux_from_top_potential(
         .map_err(anyhow::Error::msg)
         .context("plant-hydraulic root-potential derivative solve failed")?;
     let root_two = tail[0];
-    let root_flux = radial[0] * (input.soil_matric_potential_mm[0] - root_one)
-        + (root_two - root_one) * axial[0] / (depth_mm[1] - depth_mm[0])
-        - axial[0];
+    // `:892 qeroot = krad*(smp(1)-xroot(1)) + (xroot(2)-xroot(1))*kax/den2 - kax`：
+    // 出货汇编 `fmul d0,d0,d13; fdiv d0,d0,d15; fsub d31,d31,d14; fmadd d0,d26,d31,d0`
+    // ⇒ **第一个**源乘积 `krad*(smp-xroot(1))` 进 FMA，第二个是独立舍入的加数，
+    // 末尾 `- kax` 仍是普通 fsub。（第 341 轮补上；原先两个乘积都独立舍入。）
+    let root_flux = radial[0].mul_add(
+        input.soil_matric_potential_mm[0] - root_one,
+        (root_two - root_one) * axial[0] / (depth_mm[1] - depth_mm[0]),
+    ) - axial[0];
     let slope = -radial[0] + (derivative_tail[0] - 1.0) * axial[0] / (depth_mm[1] - depth_mm[0]);
     Ok((root_flux, slope))
 }
