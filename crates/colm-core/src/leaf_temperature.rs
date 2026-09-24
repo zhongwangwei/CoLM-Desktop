@@ -294,10 +294,20 @@ pub fn leaf_temperature(
         integrated_extinction(input.diffuse_extinction, lai) - cintsun[1],
         lai - cintsun[2],
     ];
+    // `MOD_LeafTemperature_Extended.F90:542` 的 GIMPLE 是两条 FMA：
+    //   `_53 = .FMA(ldew_rain, cpliq, 0.2*(lai+sai)*cpliq)`、
+    //   `clai = .FMA(ldew_snow, cpice, _53)`
+    // —— `0.2*(lai+sai)*cpliq` 那条链独立舍入，另两个乘积各自熔进当时的累加值。
     let clai = if input.options.vegetation_snow {
-        0.2 * lsai * WATER_HEAT_CAPACITY_J_KG_K
-            + state.canopy_water.rain_mm * WATER_HEAT_CAPACITY_J_KG_K
-            + state.canopy_water.snow_mm * ICE_HEAT_CAPACITY_J_KG_K
+        let canopy_capacity = 0.2 * lsai * WATER_HEAT_CAPACITY_J_KG_K;
+        let canopy_capacity = state
+            .canopy_water
+            .rain_mm
+            .mul_add(WATER_HEAT_CAPACITY_J_KG_K, canopy_capacity);
+        state
+            .canopy_water
+            .snow_mm
+            .mul_add(ICE_HEAT_CAPACITY_J_KG_K, canopy_capacity)
     } else {
         0.0
     };
@@ -314,10 +324,15 @@ pub fn leaf_temperature(
     let displacement = roughness.displacement_height_m;
     let displasink = (input.canopy_top_height_m / 2.0).max(displacement);
     let hsink = z0mv + displasink;
-    let z0mg = (1.0 - input.snow_cover_fraction) * input.soil_roughness_m
-        + input.snow_cover_fraction * input.snow_roughness_m;
+    // `:606 z0mg = (1-fsno)*zlnd + fsno*zsno` 的 GIMPLE 是
+    // `.FMA(1-fsno, zlnd, fsno*zsno)` —— 第一个乘积进 FMA，第二个独立舍入。
+    let z0mg = (1.0 - input.snow_cover_fraction).mul_add(
+        input.soil_roughness_m,
+        input.snow_cover_fraction * input.snow_roughness_m,
+    );
     let frontal_area = 1.0 - (-0.5 * lsai).exp();
-    let sqrt_drag = (0.003 + 0.3 * frontal_area).sqrt().min(0.3);
+    // `:639 sqrtdragc = min((0.003+0.3*fai)**0.5, 0.3)` 的 GIMPLE 是 `.FMA(fai, 0.3, 0.003)`。
+    let sqrt_drag = 0.3_f64.mul_add(frontal_area, 0.003).sqrt().min(0.3);
     let attenuation = input.canopy_top_height_m
         / (input.canopy_top_height_m - displacement)
         / (VON_KARMAN / sqrt_drag);
@@ -1803,8 +1818,13 @@ fn update_canopy_water(
         state.canopy_water.snow_mm =
             (state.canopy_water.snow_mm - melt * input.time_step_seconds).max(0.0);
         state.canopy_water.rain_mm += melt * input.time_step_seconds;
-        state.leaf_temperature_k =
-            wet_snow_fraction * FREEZING_K + (1.0 - wet_snow_fraction) * state.leaf_temperature_k;
+        // `:1561/:1574 tl = fwet_snow*tfrz + (1-fwet_snow)*tl` 的 GIMPLE 是
+        // `.FMA(fwet_snow, 2.7316e2, (1-fwet_snow)*tl)` —— `fwet_snow*tfrz` 进 FMA，
+        // `(1-fwet_snow)*tl` 独立舍入当加数。
+        state.leaf_temperature_k = wet_snow_fraction.mul_add(
+            FREEZING_K,
+            (1.0 - wet_snow_fraction) * state.leaf_temperature_k,
+        );
     }
     if state.canopy_water.rain_mm > 1.0e-6 && state.leaf_temperature_k < FREEZING_K {
         let freeze = (state.canopy_water.rain_mm / input.time_step_seconds).min(
@@ -1816,8 +1836,13 @@ fn update_canopy_water(
         state.canopy_water.rain_mm =
             (state.canopy_water.rain_mm - freeze * input.time_step_seconds).max(0.0);
         state.canopy_water.snow_mm += freeze * input.time_step_seconds;
-        state.leaf_temperature_k =
-            wet_snow_fraction * FREEZING_K + (1.0 - wet_snow_fraction) * state.leaf_temperature_k;
+        // `:1561/:1574 tl = fwet_snow*tfrz + (1-fwet_snow)*tl` 的 GIMPLE 是
+        // `.FMA(fwet_snow, 2.7316e2, (1-fwet_snow)*tl)` —— `fwet_snow*tfrz` 进 FMA，
+        // `(1-fwet_snow)*tl` 独立舍入当加数。
+        state.leaf_temperature_k = wet_snow_fraction.mul_add(
+            FREEZING_K,
+            (1.0 - wet_snow_fraction) * state.leaf_temperature_k,
+        );
     }
     state.canopy_water.total_mm = state.canopy_water.rain_mm + state.canopy_water.snow_mm;
     wet_snow_fraction = wet_snow_fraction.min(1.0);
