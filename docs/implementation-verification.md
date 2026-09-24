@@ -19079,3 +19079,33 @@ Ball-Berry 的 `:353`/`:354`/`:356`，以及 `update_photosyn` 的 8 条（`upda
 （这条链上唯一没有 FMA、却仍在 102 条 `assim` 里出差的函数：它的分支/下标逻辑、
 `cterm` 的三项结合、以及 `coupled_assimilation` 的三项结合都还没在闭环里逐条对过），
 再整批落地重测。第 330 轮的闭环就是这一轮的判据，不用重建。
+
+**第 332 轮：`sortin` 的 FMA 也逐条补了 —— 闭环 102→61，但湿窗仍 1287→2237 ⇒ 再回退**
+
+第 331 轮把 6 处单独记下后，本轮把它们重新应用并继续把 `sortin` 的 FMA 补上。
+`sortin` 是在 `MOD_assimstomataconductance_MOD_sortin.constprop.0` 里（**独立的 149 条
+指令函数**，不是内联 —— 所以第一次 dump `_stomata` 时看不到它的 `.loc`，要按它自己的
+标号解析）。它自己的 FMA（都已按汇编定死）：
+
+```text
+:414/:415/:416 首猜三条   pco2y(1)=fmadd(range,0.5,gamma)、pco2y(2)=fmadd(range,d0,gamma)、
+                          pco2y(3)=fmsub(ratio,eyy(1),pco2y(1))
+:453 pco2yl              fmsub(ratio,eyy(is),pco2y(is))
+:459/:460 ac1/ac2        平方差里的第二个平方各进 fnmsub/fmsub
+:465 bterm               分子分母各一条 fnmsub（各收一个乘积），1e-10 在分母算完之后加
+:466 aterm               fmsub：`cc1 - bc1*bterm`
+:467/:469 cterm          两条 fmsub：`pco2y(i2) - eyy(i2)*(aterm*eyy(i2)) - eyy(i2)*bterm`
+```
+
+闭环：`assim` **102→61**（模型 0 BB 23→11、模型 1 Medlyn 79→50、模型 2 WUE 仍 0）、
+`rst` 三模型仍全 0。**但三段式仍拒绝**：wet `over_tol` **1287→2237**、`ot_vars` **24→55**、
+`sumabs` 11.03→47.49（dry/snow/restart/3 步不变）⇒ **整批再回退**（`git checkout`）。
+
+**教训（第 331 轮同款，这次更硬）**：闭环从 148 一路推到 61（每步都"更准"），湿窗却从
+1287 单调涨到 2237 —— **"离 0 还有多少"与"黄金窗口好不好"在这条链上完全脱钩**，
+只有 **0** 才算数。
+
+**下一枪**：给 `sortin` 单独建一个小闭环（只有 7 个哑元：`eyy`/`pco2y` 两个数组 +
+`range`/`gammas`/`ic`/`iterationtotal`；Rust 侧要把 `fn sortin` 提升到 `pub` 或加
+`#[doc(hidden)]` 包装），把最后 61 条夹到一个函数里逐条对；`stomata` 闭环保持 61 的
+状态不动，直到 `sortin` 也 0。
