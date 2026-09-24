@@ -17731,6 +17731,14 @@ wice_soisno[5]   kernel=6.1823587081423845 (4018BABC3DBE730C)
 * 湿窗（CN-Cng-wet）的逐步 restart 扫描：`/tmp/gf/wet_ts.sh N`（与 `dry_ts.sh` 同构）
   + `oracle/scripts/restart_divergence.py`。第 336 轮用它证明光合/气孔链（25 处 FMA）
   对湿窗**状态轨迹零影响**，并把湿窗首个状态分歧定在 N=4 的 `wliq_soisno[0,5]`。
+* `oracle/scripts/phs_hex_probe.sh`（第 345-349 轮，第 349 轮入库）：PHS 链 + `gs0sun`/`stomata`
+  的**位型**（`TRANSFER(x,0_8)` / `f64::to_bits()`）双侧探针，四个打点文件
+  （`MOD_PlantHydraulic.F90`、`extends/interception/MOD_LeafTemperature_Extended.F90`、
+  `plant_hydraulics.rs`、`leaf_temperature.rs`），八个标签
+  `PHXI`（gs2qflx 的 17 个入参）/`PHXG`（返回的 qflx_sun,qflx_sha）/`PHXQ`/`PHXA`/`PHXD`/`PHXF`
+  （PHS 内部）+ `PHXR`（`gs0sun`/`gs0sha` 出生点）/`PHXS`（`stomata` 返回值）。
+  `STEPS=63 WORK=/tmp/gf/phshex63 bash oracle/scripts/phs_hex_probe.sh`，跑完自动还原并重编。
+  它把湿窗第 63 步的状态种子一路推到 `stomata` 的 `rssun`/`rssha`（第 349 轮）。
 * `oracle/scripts/vsf_probe.sh` + `vsf_cmp.py`（第 299 轮）：
   `soil_water_vertical_movement` **出场处**的逐层探针（`ss_vliq`/`ss_wt`/`smp`/
   `hk`/`qlayer` + `wa`/`zwt`/`ss_dp`/`qinfl`/`wblc`），19 步两次调用一次一行。
@@ -18360,8 +18368,29 @@ VSFI     kernel=200 rust=200
 
 ## 若继续
 
-> **第 348 轮更新（最新的指路牌，先读这段）**：湿窗 N=20 那颗种子关掉了，根因是
-> **Rust 一直照着没编进内核的那份源码抄** —— `Makefile:641` 把 `MOD_LeafTemperature.o`
+> **第 349 轮更新（最新的指路牌，先读这段）**：湿窗第 63 步那颗种子被**推出植物水力** ——
+> 它生在 **`stomata` 的返回值**里。位型探针往上追三层，每层都是"入参已经不同"：
+> `PHXG` 的 `qflx_sha` → `PHXI` 的 `gssha` → `PHXR` 的 `rssun`（`tl`/`tprcor`/`laisun`/
+> `laisha` 从不差 ⇒ 换算公式不是元凶）→ `PHXS` 的 `rssun`（同一个 hex）⇒ 种子在
+> `MOD_AssimStomataConductance.F90` **内部**，`respcsun`/`respcsha` 从不差。
+>
+> * 18/502 次调用有差（131、137-139、152-153、267-268、282-286、351、498-501），
+>   **前面那些都自愈**（叶温迭代回到同一位型），只有第 63 步那一簇进了状态 ——
+>   所以 restart 到 N=62 仍 0/68。`rssun` 单独差（282-286）而 `assim` 不差 ⇒
+>   **不能只用 `assim` 那 4 例残差解释**，`rst`/`gs` 换算里还有一处形状缺口。
+> * 与已知残差接上头：`compare_stomata.sh` 的 4/4000（全在 `assim`）与第 336 轮那条
+>   `f_assimsun` history 缺口同源；本轮把 **state 级**证据也接到这条链上。
+> * **工具**：探针已入库为 `oracle/scripts/phs_hex_probe.sh`（4 个文件、8 个标签：
+>   `PHXI/PHXG/PHXQ/PHXA/PHXD/PHXF/PHXR/PHXS`），`STEPS=63 WORK=… bash` 即可复跑；
+>   踩过的坑：`gs0sun` 在**叶温**那份源文件里（不在 PHS 那份）、`STEPS>48` 要算
+>   `END_DAY/END_SEC`。
+> * **下一步**：进 `stomata` 内部 —— ① 导出 `omc/ome/oms/bq/c/conductance/internal/eyy`
+>   把 4 例残差钉到具体量；② 给夹具加一档**黄金窗口真实参数区间**的采样
+>   （CN-Cng-wet 第 1 步的 `par`/`tlef`/`rstfac`/`c3c4=1`）。判据：`wet_ts.sh 63` 的
+>   10/68 往下走，干窗与黄金两窗口不许变差。本轮**没改模型代码**，上一轮口径原样成立。
+
+> **第 348 轮更新**：湿窗 N=20 那颗种子关掉了，根因是 **Rust 一直照着没编进内核的那份
+> 源码抄** —— `Makefile:641` 把 `MOD_LeafTemperature.o`
 > 指向 `extends/interception/MOD_LeafTemperature_Extended.F90`，而
 > `update_canopy_water` 的每一处形状都跟着 `main/MOD_LeafTemperature.F90`。两份在这一段
 > 是两套代码：`main/` 把超配量从水体里扣、**两侧都不夹**；`extends/` 记
@@ -20248,3 +20277,70 @@ Rust 默认不融合，正好对上）。`evplwet` 自己那两笔**故意不做
 它**与本轮改动无关**（clamp-only 逐位复现）；干窗首分歧在 **N=224…256** 之间；
 history 侧最早的分歧仍是**第 4 条记录的 `f_assimsun`/`f_fgrnd`**（基线就有，判据得用
 2 步以上的 restart 或专门探针）。雪窗要等 US-NR1 强迫数据到位。
+
+**第 349 轮：湿窗第 63 步那颗种子被推出**植物水力** —— 它生在 `stomata` 的返回值里（`rssun`/`rssha`）**
+
+本轮**没有改模型代码**（只加探针 + 记录），所以上一轮的全部口径原样成立
+（湿窗 N=16…48 全 0/68、首分歧 N=63；干窗 N=288 19/68；黄金 dry 28/1，261.0128；
+黄金 wet 1197/19，8.4418）。
+
+**① 方法：把 63 步的位型探针往上追三层。** 第 348 轮的种子是"第 63 步的
+`ldew_rain`+`vegwp`+`gs0sun`/`gs0sha`"，而 `PHXG`（PHS 入场通量）在**第 18 步的
+第 137 次 PHS 调用**就已经差 1 ULP。于是给 `/tmp/gf/phs_hex_probe.sh`
+（现提升为 `oracle/scripts/phs_hex_probe.sh`）加三个上游点，逐个问"这一层的入参是不是已经不同"：
+
+| 打点 | 位置 | 字段数 | 首个差异字段 | 结论 |
+|---|---|---|---|---|
+| `PHXG` | `gs2qflx` 返回后（PHS 入场需求） | 2 | **`qflx_sha`** | 种子在 PHS **解题之前** |
+| `PHXI` | `gs2qflx` 的 **17 个入参** | 17 | **`gssha`**（第 3 字段） | 该例程自己的入参已不同 ⇒ 不是它的形状。`gb_mol`/`laisun`/`laisha`/`sai`/`fwet`/`tl`/`qsatl`/`qg`/`qm`/`psrf`/`rhoair`/`rd`/`rss` **从不**差 |
+| `PHXR` | `gs0sun`/`gs0sha` 的**出生点**（`MOD_LeafTemperature_Extended.F90:832-833`） | 8 | **`rssun`**（`40657DD9ECCFF71F` vs `…1E`） | `tl`/`tprcor`/`laisun`/`laisha`（字段 3-6）**从不**差 ⇒ 换算公式不是元凶，差在电阻里 |
+| `PHXS` | **`stomata` 返回后**（`MOD_AssimStomataConductance.F90`） | 6 | **`rssun`（同一个 hex）** | 种子**生在 `stomata` 内部**；`respcsun`/`respcsha` **从不**差 |
+
+即：`rssun` → `gs0sun` → `gssun`（PHS 入参）→ `qflx_sha` → `PHXA/PHXD/PHXF` → 状态。
+
+**② 18/502 次调用有差，且大都自愈。** `PHXS` 逐调用（每次 `stomata` 调用一行）差异簇：
+
+```text
+迭代 131: rssun,assimsun             rssun=171.9328522      ← 首个（第 18 步）
+迭代 137: rssha,assimsun,assimsha
+迭代 152: rssun,rssha,assimsun,assimsha
+迭代 267: rssun,assimsun      迭代 282-286: 连续 5 次只有 rssun
+迭代 351: assimsha（rssun 被 1e6 夹住，看不出来）
+迭代 498-501: 第 63 步的最后一簇  ← 只有它进了状态（restart N=62 仍 0/68、N=63 差 10/68）
+```
+
+读法：叶温的迭代循环**能自愈** 1 ULP（131 差完 132-136 又回到同一位型），
+所以 restart 到第 62 步都是 0/68；只有第 63 步那一簇自愈失败 ⇒ 这颗种子**不是**
+"第 63 步新生的"，而是"同一类 1 ULP 在第 63 步恰好没被吸收"。
+另外 `rssun` 单独差（282-286）而 `assim` 不差 ⇒ **不能只用 `assim` 的残差解释**，
+`rst`/`gs` 的换算里还有一处形状缺口。
+
+**③ 与已知闭环残差接上头。** `oracle/scripts/compare_stomata.sh`（第 328/335 轮）
+在 4 个模型块 × 1000 例上只剩 **4 例**差，全在 `assim`（Ball-Berry 1 + Medlyn 3）；
+第 336 轮那条 `f_assimsun` 的 history 缺口（湿窗第 4 条记录、基线与本轮都差）
+与它同源。**本轮把"state 级"的证据也接到了同一条链上** —— 湿窗第 63 步的状态种子
+就是 `stomata` 的输出。
+
+**④ 工具经验（都踩过）**：
+
+* **`gs0sun`/`gs0sha` 在 `extends/interception/MOD_LeafTemperature_Extended.F90` 里，
+  不在 `MOD_PlantHydraulic.F90` 里。** 第一版把 `PHXR` 的锚点写进 PHS 那一份，
+  `after()` 的 `assert len(idx)==1` 立刻报 0 命中 —— 探针脚本的断言值钱。
+* **`STEPS > 48` 会撞 `end_day=1` 的日期上界**（`calendar time 2008-183 113400s is out of range`）
+  —— 探针现在照 `wet_ts.sh` 算 `END_DAY/END_SEC`。
+* 探针从"只 patch 2 个文件"扩到 **4 个**（`MOD_PlantHydraulic.F90`、
+  `MOD_LeafTemperature_Extended.F90`、`plant_hydraulics.rs`、`leaf_temperature.rs`），
+  8 个标签，跑完自动还原并重编；已入库为 `oracle/scripts/phs_hex_probe.sh`
+  （第 345-348 轮它只在 `/tmp` 里）。
+* `o3coefg_sun`/`o3coefg_sha` 在 `stomata` 里是 **`intent(in)`**
+  （`MOD_AssimStomataConductance.F90:110-113`），`DEF_USE_OZONESTRESS=.false.` 时
+  在 `:501-502` 被置成**恰好 1.0**，所以 Rust 在 `gs0sun`/`gs0sha` 里省掉
+  `* o3coefg_*` 这一因子**是精确的**（本例三个算例都关了臭氧）—— 但这是**潜在**偏差：
+  开臭氧胁迫时会差。记在这里，不要当成"已对齐"。
+
+**⑤ 下一枪：进 `stomata` 内部。** 现成的资产是 `compare_stomata.sh` 那条闭环，
+按第 335 轮列的两件事做：① 导出 `omc`/`ome`/`oms`/`bq`/`c`/`conductance`/`internal`/`eyy`
+把 4 例残差钉到具体量（`assimsun` 与 `rssun` 的对应关系要和轨迹里 282-286 那簇对得上）；
+② 给夹具**加一档按黄金窗口真实参数区间采样**（照 CN-Cng-wet 第 1 步的
+`par`/`tlef`/`rstfac`/`c3c4=1`）。判据仍是：湿窗 `wet_ts.sh 63` 的 10/68 要往下走，
+干窗与黄金两窗口不许变差。
