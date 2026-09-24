@@ -19424,6 +19424,16 @@ GIMPLE 逐条确认（`_1372/_1373/_1380` 一式收第一个乘积、`:1474` 的
   `:150` `(z_n-zwtmm).mul_add(0.5, psi_zwt)`）。它在 `main/` 里**没有调用点**（只有 `PUBLIC`
   声明），本仓库 `equilibrium_water_state` 只在冷启动用一次 ⇒ 与 N≥1 的分歧无关，**未落**。
 
+**模块内剩下的账已经清完（别再来翻）**：把 `soil_water_vertical_movement` 符号里
+**全部** `.FMA/.FNMA` 过一遍，除了上面 17 处，只剩两类 ——
+① `Richards_solver` 里两个 `wsum = sum(…)` 的累加（GIMPLE `w_sum_before_*`/`w_sum_after_*`，
+8 条）：Rust 用的是 `.sum::<f64>()`（不加 FMA），但这两个和**只喂 `_balance_error_mm`**，
+而上游算 `werr` 也只为调试打印（`crates/.../variably_saturated_flow.rs:4031-4035` 的注释已记）
+⇒ **死账**，加不加都不改轨迹；
+② 蒸腾级联里的 `deficit` 累加（`:308-320`）：第 273 轮已按同一套办法做过
+（`variably_saturated_flow.rs:4860-4892` 的注释与 `:338`/`:406` 的 `wextreme`/`ss_dp` 形状都在）。
+⇒ **湿窗 N=4 那颗种子不在 `MOD_Hydro_SoilWater` 里**，别在这个模块继续找。
+
 **判据用哪个：三个仪器给三个方向，记下来备查（同树 A/B）**：
 
 | 仪器 | 平基线 | 12 处 + 气孔交换**错序** | 12 处 + 气孔交换**GIMPLE 正序** |
