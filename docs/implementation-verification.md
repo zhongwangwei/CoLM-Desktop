@@ -19004,3 +19004,21 @@ flux_inside）复跑全同。
 系数/气孔导度）领跑，`f_qintr`/`f_qdrip` **已退出前六** ⇒ 冠层水那条链**不再是**
 种子，**下一枪是 `MOD_AssimStomataConductance` / `MOD_LeafTemperature` 的气孔/光合链**
 （同样先 `-S -g` + `.loc` 普查它的 FMA）。
+
+**第 329 轮：气孔/光合链的 FMA 普查（只定位，未动码）**
+
+雪窗 step-1 的种子已在第 328 轮定位到气孔那条链。本轮按同样的
+`gfortran -S -O2 -g` + `.loc` 办法把 `MOD_AssimStomataConductance.F90` 的两个例程数了一遍：
+
+```text
+stomata           : 17 条 FMA（:223, :258-266, :343-356, :861）
+update_photosyn   :  8 条 FMA（:710, :737-744, :805）
+本仓库 photosynthesis.rs 的 mul_add 计数： 0
+```
+
+⇒ **整条气孔/光合链一处 FMA 都没复现**（`leaf_temperature.rs` 的 42 处是叶温能量平衡那条，
+不是这里）。这解释了 step-1 的 `f_rstfacsha/sun`/`f_gssun/sha` 为什么差 1 ULP。
+**下一枪**：照第 328 轮给 `MOD_AssimStomataConductance` 建第 5 个闭环
+（`stomata`/`update_photosyn` 都是纯函数式输入输出，夹具比截留还小），再按 `.loc`
+一条条把 25 处补上 —— 注意 `update_photosyn` 已被 `hydraulic_photosynthesis_update_matches_
+mod_assim_stomata_conductance` 这个**值级**单测钉住，但它不判逐位形状。
