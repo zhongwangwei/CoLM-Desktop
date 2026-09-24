@@ -18386,9 +18386,11 @@ VSFI     kernel=200 rust=200
 >   Richards 探针修了 3 个过期锚点、停用 `RCHZ`（第 339 轮后字段不在作用域，且与 `WSF` 重复）；
 >   **`vsf_richards_cmp.py` 的 `WSF1` 名称表漏了先打的 `nlev`**，导致每个标签错位一格 ——
 >   前半段读出的"`rsubst` 差"其实是 `etr` 差（值比得对、名字全错），已修并留注释。
-> * **下一枪**：给 `phs_hex_probe.sh` 加 `CASE=`，指到**干窗 251 步**，判 PHS 入参
->   （`gssun`/`gssha`/`laisun`/`laisha`/`fwet`/`tl`）是否已分叉；再往上就是
->   `stomata` 的入参（复用已 hex 化的 `stomata_probe.sh`）。
+> * **干窗 251 步的 PHS 位型探针（`phs_hex_probe.sh` 已加 `CASE=`）**：首个差异是
+>   `PHXS` 的 **`rssha`**（`stomata` 的返回值）⇒ **两个窗口同一条链**，不是猜测；
+>   干窗里 `qaf`/`qg`（冠层空气/地表比湿）各差 6 次（湿窗只 1–2 次）⇒ 湿度那一支参与更深。
+> * **下一枪（两窗口共用）**：用已 hex 化的 `stomata_probe.sh`（有 `CASE=`）跑**干窗 251 步**，
+>   判 13 个入参里唯一分叉的是不是又是 `pco2a`；并把 `qaf`/`qg` 那一支也纳入比较。
 
 > **第 353 轮更新**：**干窗首分歧夹到第 251 步**（`2008-006-19800`，
 > 当地 05:30）—— N=250 仍 0/68、N=251 11/68。差同时落在**土壤侧**（`t_soisno[0,5]`、
@@ -20725,3 +20727,29 @@ vsf_richards_probe.sh  Richards_solver **入场/内部**：9112 条记录只有 
 （`gssun`/`gssha`/`laisun`/`laisha`/`fwet`/`tl`）是否已经分叉；若已分叉，再往上就是
 `stomata` 的入参（`etr = etrsun+etrsha` 由 `transpiration` 给出），可复用第 351 轮的
 `stomata_probe.sh`（已 hex 化）。
+
+**第 355 轮追加：干窗 251 步的 PHS 位型探针 —— 与湿窗**同一条链**（`stomata` 的返回值），而且这次还看到 `qaf`/`qg`**
+
+给 `oracle/scripts/phs_hex_probe.sh` 加了 `CASE=` 选择器（原来写死 `CN-Cng-wet`），
+指到干窗 251 步（`CASE=CN-Cng STEPS=251`），两侧各 17368 行，逐位结果：
+
+```text
+首个差异: (1292, 'PHXS', 2, '40D3B58354960AE5', '40D3B58354960AE9')   ← `rssha` 差 4 ULP
+差异按标签/字段: PHXS {rssun 1, rssha 4, assimsun 2, assimsha 4}
+                PHXR {rssun 1, rssha 4, gs0sun 1, gs0sha 4}
+                PHXI {gssun 1, gssha 4, qaf 6, qg 6}
+                PHXG {qflx_sun 7, qflx_sha 7}   PHXA/PHXD/PHXF 若干
+```
+
+**读法**：
+* 干窗的可见首分歧同样是 **`stomata` 的返回值**（`PHXS`），字段是 **`rssha`**（湿窗是 `rssun`）——
+  两个窗口的种子在**同一条叶温-气孔-植物水力链**上，这不再是猜测。
+* 与湿窗不同的是，干窗里 **`qaf`（冠层空气比湿）与 `qg`（地表比湿）各差 6 次**（湿窗只差 1–2 次）
+  ⇒ 干窗的这条链上，**湿度那一支**（`qaf` 由叶温迭代里的加权湿度给出、`qg` 由地表给出）
+  参与得更深，值得作为下一条候选线。
+* `PHXI` 的 `gssun`/`gssha` 只差 1/4 次、`PHXR` 的 `gs0sun`/`gs0sha` 同 —— 即"**入参已经不同**"
+  的模式与湿窗一致：`stomata` 依旧只是透传。
+
+**下一枪（两窗口共用）**：用**已 hex 化**的 `stomata_probe.sh`（有 `CASE=`）跑干窗 251 步，
+判 `stomata` 的 13 个入参里**唯一**分叉的是不是又是 `pco2a`；再用 `pco2a_probe.sh`（待 hex 化）
+与 `qaf`/`qg` 的比较器把湿度那一支也覆盖上。

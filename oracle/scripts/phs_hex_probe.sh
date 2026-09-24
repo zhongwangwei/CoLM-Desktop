@@ -24,6 +24,7 @@ set -euo pipefail
 BASE="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 WORK=${WORK:-/tmp/gf/phshex}
 STEPS=${STEPS:-18}
+CASE=${CASE:-CN-Cng-wet}   # 第 355 轮起可换窗口（干窗用 CASE=CN-Cng）
 TOTAL=$((1800 * STEPS))
 END_SEC=$((TOTAL % 86400))
 END_DAY=$((1 + TOTAL / 86400))
@@ -152,7 +153,7 @@ for m in PHXD PHXF PHXI PHXR PHXS PHXG PHXQ PHXA; do
   grep -q "$m" "$WORK/strings.txt" || { echo "!! marker $m missing"; exit 3; }
 done
 
-# ---- 内核跑 18 步 CN-Cng-wet ----
+# ---- 内核跑 STEPS 步 $CASE ----
 sed -e "s#^   DEF_dir_output.*#   DEF_dir_output  = '$WORK/out/'#" \
     -e "s#^   DEF_forcing_namelist.*#   DEF_forcing_namelist = '$WORK/forcing.nml'#" \
     -e "s#^   DEF_dir_rawdata.*#   DEF_dir_rawdata = '$WORK/rawdata_unused/'#" \
@@ -160,12 +161,12 @@ sed -e "s#^   DEF_dir_output.*#   DEF_dir_output  = '$WORK/out/'#" \
     -e "s#^   DEF_simulation_time%end_day.*#   DEF_simulation_time%end_day       = $END_DAY#" \
     -e "s#^   DEF_simulation_time%end_sec.*#   DEF_simulation_time%end_sec       = $END_SEC#" \
     -e "s#^   DEF_HIST_FREQ.*#   DEF_HIST_FREQ    = 'TIMESTEP'#" \
-    "$BASE/oracle/work/CN-Cng-wet/case.nml" > "$WORK/case.nml"
-cp "$BASE/oracle/work/CN-Cng-wet/forcing.nml" "$WORK/forcing.nml"
+    "$BASE/oracle/work/$CASE/case.nml" > "$WORK/case.nml"
+cp "$BASE/oracle/work/$CASE/forcing.nml" "$WORK/forcing.nml"
 # PLUMBER2 挂载点变了（/Volumes/Data01 -> /Volumes/Data）：只改这份拷贝
 sed -i '' "s#/Volumes/Data01/Data/PLUMBER2s/Forcing/#/Users/zhongwangwei/Desktop/Github/CoLM-Desktop/examples/Forcing/#" "$WORK/forcing.nml"
-cp -R "$BASE/oracle/work/CN-Cng-wet/out" "$WORK/out"
-rm -rf "$WORK/out/CN-Cng-wet/history"
+cp -R "$BASE/oracle/work/$CASE/out" "$WORK/out"
+rm -rf "$WORK/out/$CASE/history"
 ( cd "$WORK/run" && "$BASE/kernels/default/colm.x" "$WORK/case.nml" > "$WORK/kernel.log" 2>&1 ) \
   || { echo "!! kernel run failed"; exit 4; }
 grep -q 'CoLM Execution Completed' "$WORK/kernel.log" || { echo "!! incomplete"; tail -5 "$WORK/kernel.log"; exit 4; }
