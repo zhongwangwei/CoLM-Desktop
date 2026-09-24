@@ -18373,7 +18373,22 @@ VSFI     kernel=200 rust=200
 
 ## 若继续
 
-> **第 365 轮更新（最新的指路牌，先读这段）**：**第 364 轮那条线索作废** —— `thermal` 的
+> **第 366 轮更新（最新的指路牌，先读这段）**：逐条核第 303/310 轮的"确证缺口清单"后发现
+> **它已基本作废**（`flux_inside_hm_soil` 2 处、加权平均 1 处都已在库里；那两个 interface 的
+> 3+3 条其实在共享的 `secant_method_iteration`，第 339 轮已核并落地；
+> `solve_least_squares_problem`/`aquifer_exchange` 也都在）⇒ **水侧真正剩下的只有
+> `soil_water_vertical_movement`：内核 27 处 vs Rust 17 处 = 差 10 处**（第 305 轮记的是 27 vs 12）。
+>
+> * 那 27 处的源码行已按 `.loc` 映射好：`:263-268/326-338`（含水层/交换）、`:406-478`（`zwt`/水位）、
+>   `:1060-1085`（水量回填）、`:1411-1479`（质量平衡/误差）—— 而它正是**水步的状态写回函数**，
+>   干窗种子已证的所在侧。
+> * **下一枪**：把差的那 10 处逐条读 GIMPLE 操作数角色、与 Rust 同名函数逐条对，补齐后跑
+>   **干窗首分歧步**（现 N=251）+ 湿窗（N=63）+ 两个黄金窗口。
+> * **方法教训（两轮连着踩）**：**别按函数名对计数** —— 内核例程名与 Rust 公共函数名不是一一对应
+>   （`flux_all` 自己 0 条、7 条是内联下游之和；两个 interface 的 6 条在共享 secant 里）。
+>   用第 305 轮那张映射表，或直接按 `.loc` 落到源码行再比。
+
+> **第 365 轮更新**：**第 364 轮那条线索作废** —— `thermal` 的
 > `:1081-1138`（PC 逐 PFT → patch 聚合）位于 `DEF_USE_PFT .or. DEF_USE_PC` 之下，而
 > `MOD_Namelist.F90:170-171` 两个默认都是 **`.false.`**、三个 case.nml 也都没设 ⇒ 黄金算例走
 > **patch（LCT）路径**，那 45 处**不执行**（patch 级植被量是初始化时聚合好的，Rust 读 landdata ✓）。
@@ -21333,3 +21348,36 @@ flux_variable_saturated_zone_all              0
 **下一枪**：按第 310 轮已记档的写法，把这 7 处（`flux_inside_hm_soil` 2 + 加权平均 1 +
 两个 interface 各若干）逐条补上，用**干窗首分歧步**（现 N=251）判是否落地，
 湿窗（现 N=63）与两个黄金窗口一并复测。
+
+**第 366 轮：水侧"确证缺口清单"**已基本作废** —— 真正剩下的只有 `soil_water_vertical_movement` 的 **27 vs 17 = 10 处****
+
+逐条核第 303/310 轮那份清单，结果全是"**已经补过了**"（只是**函数名对不上**，所以第 365 轮按名字数 `mul_add` 时看漏了）：
+
+| 内核例程 | 内核 FMA | Rust 对应 | Rust `mul_add` | 结论 |
+|---|---|---|---|---|
+| `flux_inside_hm_soil` | 2 | `flux_inside_variable_saturated_soil` | **2** ✓ | 第 305 轮记的写法已在库里（`:1643` 的 `l_vgm.mul_add(n_vgm-1, n_vgm*2)`、`:1667-1673` 的 `weighted.mul_add(...)`） |
+| `flux_all` 的加权平均 | 1 | 同上/`both_transition` | **已有** ✓ | `psi_i = (dz_l*psi_u+dz_u*psi_l)/(dz_u+dz_l)` 已是 `mul_add` ✓ |
+| `flux_top/btm_transitive_interface` | 3+3 | —— | —— | **不是这两个例程自己的**：6 条全在共享子程序 `secant_method_iteration`（`.loc` 指到 `:3559-3561`），**第 339 轮已核并落地** ✓ |
+| `water_balance` | 5 | `variable_saturated_water_balance` | **4** ✓ | 只差 1 处 |
+| `solve_least_squares_problem` | 8 | `solve_variable_saturated_least_squares` | **9** ✓ | 第 339 轮已核 ✓ |
+| `soilwater_aquifer_exchange` / `get_water_equilibrium_state` | 4 / 2 | —— | —— | 第 339 轮成组落地 ✓ |
+| **`soil_water_vertical_movement`** | **27** | 同名函数 | **17** ✗ | **差 10 处 ← 唯一实打实的缺口**（第 305 轮记的是 27 vs 12，此后已补 5 处） |
+
+**水侧那 27 处的源码行映射（`-S` + `.loc`，26 行）**：
+
+```text
+:263 265 266 268 | :326 331 338 | :406 434 445 447 448 450 456 478 |
+:817 823 | :966 | :1060 1065 1085 | :1411 1424 1464 | :1474(×2) 1479
+```
+
+分成四段：含水层/交换（`:263-338`）、`zwt`/水位（`:406-478`）、水量回填（`:1060-1085`）、
+质量平衡/误差（`:1411-1479`）—— 而 `soil_water_vertical_movement` 正是**水步的状态写回函数**
+（干窗种子已证的所在侧），所以这 10 处是当前最值得逐条读的地方。
+
+**方法教训**（两轮连着踩）：**别按"函数名"对计数** —— 内核的例程名与 Rust 的公共函数名**不是一一对应**
+（`flux_top_transitive_interface` 的 FMA 其实在共享的 `secant_method_iteration` 里；
+`flux_all` 的 7 条是它**被内联的下游**之和，它自己一个都没有）。**用第 305 轮那张映射表**，
+或者直接按 `.loc` 落到源码行再比。
+
+**下一枪**：把这 10 处按 `.loc` 逐条读 GIMPLE 操作数角色，与 Rust 同名函数逐条对，
+补齐后跑**干窗首分歧步**（现 N=251）+ 湿窗（N=63）+ 两个黄金窗口。
