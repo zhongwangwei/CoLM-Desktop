@@ -18360,7 +18360,21 @@ VSFI     kernel=200 rust=200
 
 ## 若继续
 
-> **第 339 轮更新（最新的指路牌，先读这段）**：第 337 轮那批 21 处在第 338 轮修正之上
+> **第 340 轮更新（最新的指路牌，先读这段）**：**FMA 普查口径更正** + 植物水力链普查。
+>
+> * **站点清单必须用 `gfortran -O2 -g -S` + `.loc` 数**，GIMPLE dump 会数错
+>   （`spacaf_twoleaf` 25 vs **41**、`soilwater` 19 vs **24**、`water_vsf` 17 vs **15**）。
+>   操作数角色仍用 GIMPLE 的具名操作数 —— **两者缺一不可**。全表与逐行图见"第 340 轮"。
+> * 黄金算例走得到的 FMA 站点：`water_vsf` 15、`meltf` 8、`spacaf_twoleaf` 41 +
+>   其余植物水力 14；`soilwater`/`water_2014`/`snowwater*`/`meltf_snicar`/`meltf_urban`/
+>   `compute_vic_runoff` 这些**黄金不走**（`DEF_USE_VariablySaturatedFlow=.true.`、
+>   `DEF_SPLIT_SOILSNOW=.false.`、`DEF_USE_SNICAR` 关、`patchtype<3`、无雪）。
+> * 已核一处：`getrootqflx_qe2x:941/950/959` 三行在 Rust 里由**一条** `mul_add` 覆盖，逐条对得上
+>   ⇒ 总数差（55 vs 50）不等于漏 5 处，必须逐站点对。
+> * **下一步**：按文档里 `spacaf_twoleaf`(41) / `water_vsf`(15) 两张逐行图做站点级操作数比对，
+>   判据用 `wet_ts.sh 18/20` 与 `dry_ts.sh 288` 的首分歧步。
+
+> **第 339 轮**：第 337 轮那批 21 处在第 338 轮修正之上
 > **成组落地**了 —— 短程大幅改善是关键：
 >
 > * **干窗 restart 首分歧 N=19 → N=288**（N=18…192 全 0/68），干窗黄金三口径全线改善
@@ -19629,3 +19643,79 @@ Fortran 的赋值序），所以照"收第二个"写了
    所以 split/VIC/2014 那几支可以先不管）。
 3. 判据仍以**状态扫描首分歧步**为准；`over_tol`/`ot_vars`/`sumabs` 三者都会被混沌带偏
    （本轮 `ot_vars` +1 而短程大幅改善就是例子）。
+
+**第 340 轮：FMA 普查口径更正 —— 站点清单必须从 `-S -g` 的 `.loc` 数，GIMPLE dump 会数错；顺带把植物水力链普查了（55 处）**
+
+**口径更正（本轮最要紧的一条）**：第 337/339 轮我用
+`-fdump-tree-optimized` 的 dump 数 `.FMA/.FNMA` 来做"这个符号有几处"，
+**那是不可靠的** —— 向量化/循环展开会**复制**同一条源表达式的 FMA，GCC 也**合并**
+过一些，于是两个方向都会错。同一份源码两种数法的实测差：
+
+| 符号 | GIMPLE dump 数 | **`-S -g` 汇编数** |
+|---|---|---|
+| `spacaf_twoleaf` | 25 | **41** |
+| `soilwater` | 19 | **24** |
+| `water_vsf` | 17 | **15** |
+
+（`water_vsf` 那 17 里有两处是 `:1109-1110` 一带的向量化副本。）
+⇒ **规矩**：**站点清单**用 `gfortran -O2 -g -S` + `.loc` 逐行数；
+**操作数角色**用 `-fdump-tree-optimized` 的**具名操作数** + 数组身份。
+两者缺一不可 —— 第 338 轮找到 `:1109` 靠的是后者，第 337 轮漏掉
+`soilwater_aquifer_exchange` 靠的是前者没数全。第 339 轮文档里引的
+"`water_2014` 15 / `snowwater` 4 / `meltf` 8 / `compute_vic_runoff` 3" 那几个数
+也来自 GIMPLE，本轮换成汇编口径重新给在下面。
+
+**汇编口径普查（黄金算例走得到的水/植物/相变模块）**：
+
+```text
+MOD_Hydro_SoilWater
+  soil_water_vertical_movement  29   （第 337 轮已全部归位：17 处已判 + 12 处已落）
+MOD_SoilSnowHydrology
+  water_vsf                     15   ← 黄金走这一支
+  soilwater                     24   （只在 WATER_2014 分支，DEF_USE_VariablySaturatedFlow=.true. ⇒ 不走）
+  water_2014                    15   （同上，不走）
+  snowwater                      4   （lb<=0 才走；黄金无雪）
+  snowwater_snicar               8   （DEF_USE_SNICAR 关，不走）
+MOD_PhaseChange
+  meltf                          8
+  meltf_snicar                   8   （SNICAR 关）
+  meltf_urban                    2   （patchtype>=3；黄金不走）
+MOD_Hydro_VIC
+  compute_vic_runoff             3   （DEF_Runoff_SCHEME=3 是 Simple-VIC，走的是 runoff.rs 的
+                                       `simple_vic_runoff`，不是这一支 —— 待核）
+MOD_PlantHydraulic
+  spacaf_twoleaf                41   ← 湿窗 N=18 的 `vegwp` 种子在这条链上
+  getrootqflx_x2qe               5
+  getrootqflx_qe2x               3
+  getqflx_qflx2gs_twoleaf        3
+  getqflx_gs2qflx_twoleaf        3   （合计 55；plant_hydraulics.rs 现有 50 个 `mul_add`）
+```
+
+**逐行图（下一轮直接照这两张表做站点级比对，不用再编汇编）**：
+
+```text
+water_vsf（15 处）
+  827: 1   867: 1   1037: 1   1045: 2   1110: 1   1128: 1   1132: 1   1133: 1
+  1220: 1  1228: 1  1231: 1   1262: 1   1267: 1   1273: 1
+  （`:1110` 就是第 338 轮修好的那处回填）
+spacaf_twoleaf（41 处）
+  456: 1  457: 1  458: 1  459: 1  464: 2  465: 2  468: 1  471: 1  472: 1
+  479: 3  483: 5  485: 5  487: 3  489: 5  496: 2  498: 3  499: 2  500: 2
+soil_water_vertical_movement（29 处，第 337 轮已归位）
+  137: 1  150: 1  263: 1  265: 1  266: 1  268: 1  326: 1  331: 1  338: 1
+  406: 1  434: 1  445: 1  447: 1  448: 1  450: 1  456: 1  478: 1  817: 1
+  823: 1  966: 1  1060: 1 1065: 1 1085: 1 1411: 1 1424: 1 1464: 1 1474: 2
+  1479: 1
+```
+
+**已核过的一处（植物水力）**：`getrootqflx_qe2x` 的 `:941`/`:950`/`:959` 三行
+（`krad*smp - qeroot - kax`、`krad*smp + kax(j-1) - kax(j)`、`krad*smp + kax(j-1)`）
+在 Rust 里由 `root_potential_from_flux` 的**一条** `mul_add` 覆盖 ——
+三支共用"收 `krad*smp`"这一个形状、末项 `-kax` 折进 `map_or(0.0, …)`，
+逐条对得上（`plant_hydraulics.rs:660-666` 有注释）。所以"55 vs 50"的差**不是**
+5 处漏形状，得逐站点对，不能按总数推。
+
+**下一轮**：按上面两张逐行图做站点级操作数比对 —— 先 `spacaf_twoleaf` 的 41 处
+（对应 `plant_hydraulics.rs:spac_change` 的 40 处，注释里已有一批 FNMS/FMA 的 GIMPLE 读数），
+再看 `water_vsf` 的 15 处里除 `:1110` 之外的 14 处。判据仍是
+`wet_ts.sh 18/20`、`dry_ts.sh 288` 的首分歧步。
