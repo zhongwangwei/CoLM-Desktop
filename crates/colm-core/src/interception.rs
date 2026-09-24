@@ -252,15 +252,21 @@ pub fn intercept_canopy(
     let (through_rain_mm, through_snow_mm, retained_mm) = if precipitation_amount > 1.0e-8 {
         let convective_fraction = convective_amount / precipitation_amount;
         let large_scale_fraction = large_scale_amount / precipitation_amount;
-        let ap = convective_fraction * 20.0 + large_scale_fraction * 0.206e-8;
-        let cp = convective_fraction * 0.0001 + large_scale_fraction * 0.9999;
+        // `.loc 1 221/222`：`ap`/`cp` 这两个"两乘积相加"里，**第一个**源乘积进 FMA
+        // （`fmadd d28,d25,d17,d28` / `fmadd d29,d25,d27,d29`，加数是第二个乘积）。
+        let ap = convective_fraction.mul_add(20.0, large_scale_fraction * 0.206e-8);
+        let cp = convective_fraction.mul_add(0.0001, large_scale_fraction * 0.9999);
         let chiv = if input.leaf_angle_distribution.abs() <= f77(0.01) {
             f77(0.01)
         } else {
             input.leaf_angle_distribution
         };
-        let aa1 = f77(0.5) - f77(0.633) * chiv - f77(0.33) * chiv * chiv;
-        let bb1 = f77(0.877) * (f77(1.0) - f77(2.0) * aa1);
+        // `.loc 1 229`：`0.5 - 0.633*chiv - 0.33*chiv*chiv` 的两步减法各是一条 `fmsub`
+        // （第二步收的是 `chiv*(0.33*chiv)`）。
+        let aa1 = (-f77(0.633)).mul_add(chiv, f77(0.5));
+        let aa1 = (-(f77(0.33) * chiv)).mul_add(chiv, aa1);
+        // `.loc 1 230`：`0.877*(1. - 2.*aa1)` 里的 `1 - 2*aa1` 是 `fmsub`。
+        let bb1 = f77(0.877) * (-f77(2.0)).mul_add(aa1, f77(1.0));
         let exrain = aa1 + bb1;
         let interception_fraction = f77(0.25) * (f77(1.0) - (-exrain * leaf_stem_area).exp());
         let direct_rain_mm =
@@ -311,8 +317,10 @@ pub fn intercept_canopy(
             );
 
             let vegetation_fraction = f77(1.0) - (-f77(0.52) * leaf_stem_area).exp();
+            // `:285 FP = (ppc+ppl)/(10.*ppc+ppl)`：出货汇编是
+            // `fmadd d29,d16,d30,d18`（d16=ppc、d30=10）⇒ 分母的 `10.*ppc` 进 FMA。
             let snow_loading_factor = (convective_amount + large_scale_amount)
-                / (f77(10.0) * convective_amount + large_scale_amount);
+                / f77(10.0).mul_add(convective_amount, large_scale_amount);
             let intercepted_snow_rate = (vegetation_fraction * snow_rate * snow_loading_factor)
                 .min(
                     (saturation_snow - water.snow_mm) / input.time_step_seconds
@@ -335,9 +343,12 @@ pub fn intercept_canopy(
             drainage_snow_mm = (water.snow_mm / input.time_step_seconds).max(0.0)
                 * (wind_unloading + temperature_unloading)
                 * input.time_step_seconds;
-            direct_snow_mm = ((f77(1.0) - vegetation_fraction) * snow_rate
-                + (vegetation_fraction * snow_rate - intercepted_snow_rate))
-                * input.time_step_seconds;
+            // `:295 tti_snow = (1-fvegc)*rate + (fvegc*rate - qintr_snow)` 的出货汇编是
+            // `fmadd d30,d23,d19,d30`（第一个乘积进 FMA），`.loc 1 299`。
+            direct_snow_mm = (f77(1.0) - vegetation_fraction).mul_add(
+                snow_rate,
+                vegetation_fraction * snow_rate - intercepted_snow_rate,
+            ) * input.time_step_seconds;
         }
         // `:321-323` 先各求 `thru_rain=tti_rain+tex_rain`、`thru_snow=tti_snow+tex_snow`，
         // 再 `pinf = p0 - (thru_rain + thru_snow)`；摊成四项连减会换结合顺序、末位不同。
@@ -392,7 +403,10 @@ fn saturated_fraction(
             / (precipitation_mm * interception_fraction * ap)
             - cp / ap;
         if argument > 1.0e-9 {
-            return (-argument.ln() / f77(20.0)).clamp(0.0, 1.0);
+            // `:245 xs = -1./bp * log(arg)`：出货汇编是 `fnmul`，即
+            // `-(0.05 * log(arg))` —— **先乘倒数再取负**；写成
+            // `-log(arg)/20` 是"先取负再除"，末位不同。
+            return (-(f77(0.05) * argument.ln())).clamp(0.0, 1.0);
         }
     }
     1.0
@@ -410,12 +424,17 @@ fn drainage(
     saturated_fraction: f64,
     direct_rain_mm: f64,
 ) -> f64 {
-    let drainage = rain_rate
-        * time_step_seconds
-        * interception_fraction
-        * (ap / f77(20.0) * (f77(1.0) - (-f77(20.0) * saturated_fraction).exp())
-            + cp * saturated_fraction)
-        - (saturation_capacity - water_mm).max(0.0) * saturated_fraction;
+    // `:253-254`：`(ap/bp*(1-exp(-bp*xs))+cp*xs)` 里**第一个**乘积进 FMA
+    // （`fmadd d17,d1,d17,d0`）；外层 `A*fpi*(...) - max(0,…)*xs` 是 `fnmsub`
+    // （`A*fpi*(...)` 那个乘积进 FMA、`max(0,…)*xs` 是加数）。
+    let bracket = (ap / f77(20.0)).mul_add(
+        f77(1.0) - (-f77(20.0) * saturated_fraction).exp(),
+        cp * saturated_fraction,
+    );
+    let drainage = (rain_rate * time_step_seconds * interception_fraction).mul_add(
+        bracket,
+        -((saturation_capacity - water_mm).max(0.0) * saturated_fraction),
+    );
     drainage
         .max(0.0)
         .min(rain_rate * time_step_seconds - direct_rain_mm)

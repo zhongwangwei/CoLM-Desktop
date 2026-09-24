@@ -18663,22 +18663,25 @@ bash oracle/scripts/compare_second_config.sh US-NR1-snow   → 79 variable(s) ou
 （第 3 组：`water_balance` 5 处 + `flux_all` 加权平均 1 处），那时状态残差才有指望回落。
 已落地的 8 处**保留**（口径 wet 1967→1942、干/雪不倒退，短程与第二配置全绿）。
 
-**下一枪（第 327 轮后）**：
+**下一枪（第 328 轮后）**：
 * **已入库（第 326 轮）**：`intercept_canopy` 三处结合/收缩形状（`p0` 先加后乘、`pinf`
   先合 `thru`、`:328-329` 的 `fmadd`+`fsub`）。湿窗 `over_tol` **1907→1287**、
   `ot_vars` **53→24**，干/雪口径不动，短程 0/68 与 692/692 保持。
 * **已入库（第 327 轮）**：`history_diagnostics` 三处 FMA（`(1+0.61q)`、`thvstar`
   外积、`ur*ur+wc2`）。第一配置雪窗 **step 0 有限值逐位全同**，`first divergence step`
   0→1；三窗口口径不变。
+* **已入库（第 328 轮）**：第 4 个闭环 `compare_interception.sh`（`intercept_canopy`
+  **4000/4000**，8 输出 × 两档 `DEF_VEG_SNOW`）+ 补齐的 5 处形状（`ap`/`cp`/`aa1`/`bb1`/
+  `drainage`/`saturated_fraction`/`FP`/`tti_snow`）。口径不变（那几处在黄金输入上取不到差）。
 * ① `f_vegwp` 一侧剩下的缺口 —— 第 324 轮已把 `soil_water_vertical_movement` + 两个
   内联例程的 **17 处**形状判好并列进"第 324 轮"的表。**第 326 轮之后重测过**：在
   湿窗 **1287/24** 的新基线上，整批 17 处让湿窗退到 **2000/53**（干窗 28→20），
   所以**仍然未落** —— 截留那三处没有让这份 17 处变相容。按第 324 轮的表留着，
   等 `f_vegwp` 那条链一起补。
-* ② 雪窗现在从 **step 1** 起分歧，领先变量 `f_rstfacsha/sun`、`f_gssun/sha`、
-  `f_qintr`/`f_qdrip`。注意 `f_qintr` 到 step 1 才差 ⇒ 冠层水/叶温的**内部量**
-  （`water.rain_mm`/`snow_mm` 分量、叶温 `zeta`）里可能还有 step-0 未导出的差；
-  先按 `MOD_LeafTemperature`/`MOD_AssimStomataConductance` 做 `.loc` 普查。
+* ② **下一枪**：雪窗从 **step 1** 起分歧，领先变量是气孔那条链的 `f_rstfacsha/sun`、
+  `f_gssun/sha`（截留的 `f_qintr`/`f_qdrip` 已在第 328 轮退出前六）⇒ 对
+  `MOD_AssimStomataConductance` / `MOD_LeafTemperature` 做 `-S -g` + `.loc` 普查
+  （`update_photosyn`/`stomata`/`leaftemperature`），必要时照第 328 轮建第 5 个闭环。
 * ③ 未决小尾巴：`flux_all` 里那条加权平均 FMA 只有调用点上下文（option (a)）判过，
   若要做**实测**判据只能建"直接驱动 `flux_all`"的第 4 个闭环（夹具更大）。
 2. **第二配置回归**（Campbell + 关 VSF）：第 293 轮实测干窗已从 16 降到 **0**；
@@ -18957,3 +18960,47 @@ f_ustar2 1.56e-16 / f_rib 1.72e-16   （只有第一配置）
 注意 `f_qintr` 现在**到 step 1 才差** —— 冠层水在两 step 之间的**内部量**
 （`water.rain_mm`/`snow_mm` 分量、叶温的 `zeta`）可能还有一处 step-0 未导出的差；
 先按 `MOD_LeafTemperature`/`MOD_AssimStomataConductance` 那条链做 `.loc` 普查。
+
+**第 328 轮：给冠层截留建了第 4 个闭环 —— `intercept_canopy` 全输入空间逐位对齐（4000/4000）**
+
+第 326 轮的 3 处让湿窗 1907→1287，但雪窗 step 0 全同之后 step 1 仍有 1 ULP 的冠层水
+差异。剩下的 12 条 FMA 只影响 `ldew_rain`/`ldew_snow` 这些 **history 不导出的分量** ——
+黄金窗口判不了它们，所以照 `compare_water_balance.sh` 的三件套建了第 4 个闭环：
+
+* `oracle/scripts/interception_diff.f90` +
+  `crates/colm-core/examples/interception_probe.rs` + `oracle/scripts/compare_interception.sh`；
+* `LEAF_interception_CoLM2014` 在模块里是 **PUBLIC** ⇒ **不需要**"拷贝+放行"，
+  直接链 `.bld/MOD_LeafInterception.o`；
+* `DEF_VEG_SNOW`（`MOD_Namelist` 的模块变量，默认 `.true.`）在 k=0/1 两档各 2000 例，
+  逐位比 8 个输出（`ldew`/`ldew_rain`/`ldew_snow` + `pg_rain`/`pg_snow`/`qintr`/
+  `qintr_rain`/`qintr_snow`）。
+
+**改前 baseline**：`pg_snow` 232、`qintr_snow` 230、`ldew_snow` 154、`qintr` 147、
+`ldew` 118、`pg_rain` 26、`qintr_rain` 26、`ldew_rain` 13（`ldew_rain`/`ldew_snow`
+差异正是"分量不同、总量相同"的直接证据）。再读 `.loc` 上下文补 5 处：
+
+```text
+:221/:222 ap/cp                          "第一个源乘积进 FMA"（加数是第二个乘积）
+:229 aa1 = 0.5-0.633*chiv-0.33*chiv*chiv 两步减法各一条 fmsub
+:230 bb1 = 0.877*(1.-2.*aa1)             内层 `1-2*aa1` 是 fmsub
+:245 xs = -1./bp*log(arg)                出货是 `fnmul` ⇒ `-(0.05*log(arg))`，
+                                         不是 `-log(arg)/20`（先乘倒数 vs 先取负）
+:253-254 drainage                        bracket 第一乘积进 FMA；外层是 `fnmsub`
+                                         （`A*fpi*(...)` 进 FMA、`max(0,…)*xs` 是加数）
+:285 FP 分母 `10.*ppc+ppl`               `10.*ppc` 进 FMA
+:295/299 tti_snow                        `(1-fvegc)*rate` 进 FMA
+```
+
+闭环从"8 个输出全差" → **4000/4000 全同**（8 输出 × 两档 `DEF_VEG_SNOW`）。
+
+**三段式**：dry **28/1**、wet **1287/24**、snow **25713/79** —— **口径一字未动**
+（这几处在黄金窗口的输入上取不到差别，`bitwise` 只动 2 个元素），restart 0/68、
+3 步 692/692 保持；第二配置干/湿仍 0、雪仍 79。三个旧闭环（water_balance/get_zwt/
+flux_inside）复跑全同。
+
+⇒ **落码 + 闭环入库**（这个闭环从今往后守住 `intercept_canopy` 的逐位形状）。
+
+**雪窗 step-1 的种子现在定位清楚了**：`f_rstfacsha/sun`、`f_gssun/sha`（气孔阻力
+系数/气孔导度）领跑，`f_qintr`/`f_qdrip` **已退出前六** ⇒ 冠层水那条链**不再是**
+种子，**下一枪是 `MOD_AssimStomataConductance` / `MOD_LeafTemperature` 的气孔/光合链**
+（同样先 `-S -g` + `.loc` 普查它的 FMA）。
