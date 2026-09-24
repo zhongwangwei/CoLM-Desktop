@@ -21,11 +21,15 @@ rm -rf "$W"; mkdir -p "$W/run"
 sed -e "s#^   DEF_dir_output.*#   DEF_dir_output  = '$W/out/'#" \
     -e "s#^   DEF_dir_rawdata.*#   DEF_dir_rawdata = '$W/rawdata_unused/'#" \
     -e "s#^   DEF_dir_runtime.*#   DEF_dir_runtime = '$W/runtime_unused/'#" \
+    -e "s#^   DEF_forcing_namelist.*#   DEF_forcing_namelist = '$W/forcing.nml'#" \
     -e "s#^   DEF_simulation_time%end_day.*#   DEF_simulation_time%end_day       = 1#" \
     -e "s#^   DEF_simulation_time%end_sec.*#   DEF_simulation_time%end_sec       = $((HOURS * 3600))#" \
     "$BASE/oracle/work/CN-Cng/case.nml" > "$W/case.nml"
 grep -q "DEF_HIST_FREQ    = 'HOURLY'" "$W/case.nml" || {
   echo "!! 算例的 HIST_FREQ 不是 HOURLY，本脚本的窗口对齐假设不成立" >&2; exit 2; }
+cp "$BASE/oracle/work/CN-Cng/forcing.nml" "$W/forcing.nml"
+# PLUMBER2 挂载点变了：只改这份拷贝（第 351 轮补，原先本脚本没有这一步，本机跑不起来）
+sed -i '' "s#/Volumes/Data01/Data/PLUMBER2s/Forcing/#$BASE/examples/Forcing/#" "$W/forcing.nml"
 cp -R "$BASE/oracle/work/CN-Cng/out" "$W/out"
 rm -rf "$W/out/CN-Cng/history"
 ( cd "$W/run" && "$BASE/kernels/default/colm.x" "$W/case.nml" > "$W/f.log" 2>&1 ) \

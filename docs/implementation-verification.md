@@ -17721,6 +17721,11 @@ wice_soisno[5]   kernel=6.1823587081423845 (4018BABC3DBE730C)
 * `oracle/scripts/restart_scan.sh`（第 297 轮）：逐步跑 `dry_ts.sh N` 比 **restart**
   （68 个状态量本身），找**瞬时状态**第一次分歧的第几步。判状态必须用它，
   不能用 history（那是区间累加）。
+* `oracle/scripts/stomata_probe.sh` + `stomata_cmp.py`（第 293 轮建、**第 351 轮 hex 化**）：
+  `CALL stomata` 的入口（`STIN` 13 个入参）/`calc_photo_params` 出口（`STPH` 11）/6 次内迭代
+  （`STIT` 10）/出口（`STOUT` 4）两侧**位型**探针，`CASE=<算例> STEPS=N` 可换窗口；
+  比较器 hex 档按 `(tag,n,ic)` 逐位比（十进制档保留）。它把湿窗第 63 步的种子定到
+  **`pco2a`**（唯一分叉的入参，第 351 轮）——注意 WUE 支的 `pco2i`/`eyy` 两列两侧不可比（见探针头注释）。
 * `oracle/scripts/compare_stomata.sh` / `compare_sortin.sh` / `compare_update_photosyn.sh`
   （第 328/333/336 轮）：气孔-光合链的三个随机差分闭环，分别逐位判 `stomata`
   （4 个模型块 × 1000 = 4000）、`sortin`（`ic≥4` 的二次拟合 + 9 个中间量）、
@@ -18368,7 +18373,29 @@ VSFI     kernel=200 rust=200
 
 ## 若继续
 
-> **第 350 轮更新（最新的指路牌，先读这段）**：把 `stomata` 的 **14 处 FMA 形状**按 GIMPLE
+> **第 351 轮更新（最新的指路牌，先读这段）**：`stomata` 探针 **hex 化**后，湿窗 63 步的
+> 1004 次调用给出：`STPH` 全同、`STIN` 里**唯一**分叉的入参是 **`pco2a`**（20/1004 次差 1 ULP，
+> 首个在第 262 次调用 ≈ 第 33 步），`STIT` 的物理字段全同（只有两个**探针口径**列不同）。
+> ⇒ 第 349 轮"种子在 `stomata` 内部"的更正**实测闭环**。
+>
+> * **`pco2a` 那行按 GIMPLE 是 `.FNMA(1.37*psrf/max(0.446,gah2o), 和, pco2m)`**（乘积在 FMA 里
+>   精确、只舍一次）；补上它：**湿窗首分歧 N=63 → N=73…84**（N=63/72 全 0/68）、干窗不变、
+>   黄金 dry 不变，但**黄金 wet `1197/19，8.4418` → `1650/35`**、湿窗 N=96 11→14。
+>   按硬规则**已回退**；但它是"首判据推进 + 逐条对得上 GIMPLE + 聚合混沌"的第 249 轮例外候选，
+>   **连同 `baea8c5`/`f7e9e31` 一起等你裁**（改动记录在"第 351 轮"④，随时可重打）。
+> * **"黄金是否另一套编译产物"已被否掉**：修好 `compare_hourly_window.sh`（原来在本机跑不起来）
+>   后，干窗前 8 小时 **kernel == Rust == golden 逐位全同（0/0/0）** ⇒ 黄金就是当前内核跑得出来的；
+>   湿窗聚合指标反向是**它自己首分歧之后**的混沌，**判据必须用首分歧步**。
+> * **顺带抓到一处结构性偏差（已证惰性、按第 347 轮先例不落地）**：WUE 支内核是
+>   `pco2in = pco2i`（重写后）⇒ `eyy≡0` ⇒ `ic=1` 就退出；Rust 用重写前的 `internal_co2`
+>   算 `errors`，所以跑满 6 轮空转（`SRIT` 5639 行 vs `STIT` 1004 行，同调用内各行逐位相同）。
+>   这使 `STIT` 的 `pco2i`/`eyy` 两列在 WUE 支**不可比**（探针头已注明）。
+> * **工具（本轮入库）**：`stomata_probe.sh` 两侧 hex + `CASE=`；`stomata_cmp.py` 加 hex 档；
+>   `compare_hourly_window.sh` 补强迫重定向。
+> * **下一枪**：把 `pco2a` 的**入参**（`assimsun`/`assimsha`/`respcsun`/`respcsha`/`rsoil`、
+>   `gah2o`）按同样办法 hex 化 —— 现成 `pco2a_probe.sh`（第 293 轮，`:1243-1244`）先改 hex。
+
+> **第 350 轮更新**：把 `stomata` 的 **14 处 FMA 形状**按 GIMPLE
 > 补齐（`.FMA=a*b+c`、`.FMS=a*b-c`、`.FNMA=c-a*b`、`.FNMS=-c-a*b`，拿 `:350` 的
 > `bquad` 对照源码钉死）—— **闭环从 `rst 114 + assim 171` 好到 `rst 0 + assim 100 (全 BIG)`，
 > 但湿窗 N=96 从 11/68 变 19/68、黄金 wet 从 `1197/19，8.4418` 变 `1775/52，19.8039`
@@ -20429,3 +20456,81 @@ history 侧最早的分歧仍是**第 4 条记录的 `f_assimsun`/`f_fgrnd`**（
 **⑥ 仍待办（本轮没碰）**：Medlyn 块那 100 例 BIG 的 `assim`（0 vs 2.57e-4）——它在夹具里是
 **结构性**差异（`eyy` 迭代出口判据在 0.1 附近的翻边），与本次的舍入批无关；夹具 k=3 档
 （黄金真实区间）已在第 335 轮加上，所以这不是"夹具没覆盖"的解释。
+
+**第 351 轮：把 `stomata` 探针 hex 化 —— 入参里**唯一**分叉的是 `pco2a`；它的 FMA 能关掉第 63 步那颗种子，但黄金湿窗变差（按纪律已回退，等你裁）**
+
+**① 工具（已入库）**
+* `oracle/scripts/stomata_probe.sh`：**两侧全改位型**（`TRANSFER(x,0_8)`+`Z16.16` / `to_bits()`+`{:016X}`）。
+  原版是 `ES23.15`/`{:e}` + 2e-14 相对容差 —— **对 1 ULP 是盲的**，而这条链的残留正是 1 ULP。
+  另加 `CASE=<算例>`（原来写死 CN-Cng）与 `END_DAY/END_SEC` 回绕（`STEPS>48` 会撞日期上界），
+  并补了强迫路径改写。字段布局两侧逐位对齐（`STIN` 13 / `STPH` 11 / `STIT` 10 / `STOUT` 4）。
+* `oracle/scripts/stomata_cmp.py`：加 **hex 档**（按 `(tag,n,ic)` 对齐、逐位比较；十进制档保留）。
+* `oracle/scripts/compare_hourly_window.sh`：**原来本机跑不起来**（没设 `DEF_forcing_namelist`、
+  没拷 `forcing.nml`）—— 本轮补上（含挂载点改写）。
+
+**② 湿窗 63 步、1004 次 `stomata` 调用（`CASE=CN-Cng-wet STEPS=63`）的逐位结果**
+
+```text
+STPH  1004/1004 全同        （vm epar respc omss gbh2o gammas rrkk c3 c4 bintc range）
+STIN  唯一分叉字段 = pco2a  （20/1004 次差 1 ULP，首个在第 262 次调用；
+                             tlef/psrf/po2m/pco2m/ea/ei/par/rb/rstfac/cint(1..3) 从不差）
+STIT  分叉字段只有 pco2i / eyy（这两个是**探针口径**的差异，见 ③；
+                             omc/ome/assim/assimn/co2s/assmt/gsh2o/pco2in 在入参相同的调用上逐位相同）
+STOUT gsh2o/rst 17/1004（pco2a → gsh2o 的下游）
+```
+
+⇒ 第 349 轮"种子生在 `stomata` 内部"的更正**到此实测闭环**：`stomata` 的物理输出跟着入参走，
+**唯一先分叉的入参是 `pco2a`**（冠层空气 CO₂），首个出现在第 262 次调用（≈ 第 33 步）。
+
+**③ 顺带抓到一处**结构性**偏差：WUE 支的迭代计数（已证惰性，**按第 347 轮先例不落地**）**
+
+内核 `MOD_AssimStomataConductance.F90:333-337` 在 WUE 支把 `pco2i` **重写**成
+`pco2i_c`/`pco2i_e` 之一，紧接着 `pco2in = pco2i` ⇒ `eyy(ic) = pco2i - pco2in` **恒为 0** ⇒
+`ic=1` 就 `EXIT`。Rust 的 `errors[iteration-1] = internal_co2 - next_co2` 用的却是
+**重写前**的 `internal_co2`（= `pco2i_c`），所以当 `omc >= ome` 时它跑满 6 轮：
+实测 `SRIT` 5639 行 vs 内核 `STIT` 1004 行，且**同一次调用内所有 `SRIT` 行逐位相同**
+（WUE 支的量对猜测值不敏感 ⇒ 这 6 轮是纯空转，输出不变）。
+⇒ 这也解释了 `STIT` 的 `pco2i`/`eyy` 两列在 WUE 支里**本来就不可比**（探针头已注明）。
+
+**④ `pco2a` 的 FMA：能关掉第 63 步那颗种子，但黄金湿窗变差 ⇒ 已回退（按规则），等你裁**
+
+GIMPLE（`lt.opt` 第 3945-3971 处）把这一行收成**一条 FNMA**：
+
+```text
+_573 = psrf*1.37;  _574 = _573/MAX(gah2o,0.446)
+_582 = ((assimsun+assimsha)-respcsun)-respcsha-2.2e-7
+_585 = .FNMA(_574, _583, pco2m)      ⇒  pco2m - _574*_583，乘积**在 FMA 里精确**、只舍一次
+```
+
+Rust 原先写成 `pco2m - (1.37*psrf/max)*(和)`（乘积先舍一次）。把它改成
+`(-rate).mul_add(sink, pco2m)` 后实测：
+
+| 仪器 | 回退后（保留） | 打这条 FMA |
+|---|---|---|
+| 湿窗首分歧步 | **N=63** | **N=73…84**（N=63、N=72 全 0/68；N=84 8/68） |
+| 湿窗 N=96 | **11/68** | 14/68 |
+| 干窗 N=288 | 19/68 | 19/68（不变） |
+| 黄金 dry | 9163 / 28 / 1，261.0128 | 9163 / 28 / 1，261.0128（不变） |
+| 黄金 wet | **27066 / 1197 / 19，8.4418** | 27087 / **1650 / 35**，19.2429（**变差**） |
+
+**这是与第 350 轮不同的情形**：那条改动的**首分歧步没动**（N=63 还是 10/68），所以回退毫无争议；
+这一条把**首判据（首分歧步）推进了 10–21 步**、且改动逐条对得上 GIMPLE —— 按第 249 轮那条例外
+（短程改善 + 逐条对得上编译源码 + 聚合反向是混沌）**它够格**，但按"任一 `over_tol`/`ot_vars`
+变差就回滚"的硬规则**本轮先回退**（连同 `baea8c5`/`f7e9e31` 一起等你裁）。
+
+**⑤ "黄金是不是另一套编译产物"这个假设，本轮被否掉**：把
+`compare_hourly_window.sh` 修好后跑干窗前 8 小时的三方逐位比对 ——
+
+```text
+rec 0..7:  kernel!=rust 0   kernel!=golden 0   rust!=golden 0
+first kernel!=rust record: None      first kernel!=golden record: None
+```
+
+⇒ 黄金**就是当前内核**跑得出来的（位级全同）。所以黄金湿窗的聚合指标变差**不是**
+"参考值来自另一套 contraction"，而是：湿窗在**它自己的首分歧步之后**已经进入混沌区，
+任何位级改动（哪怕是更忠实的）都会把聚合指标推向任一边。**判据必须用首分歧步**。
+
+**⑥ 下一枪**：新的首分歧在 **73–84**（若落地 ④ 就是这条线）。先把 `pco2a` 自己的入参打 hex：
+`assimsun`/`assimsha`/`respcsun`/`respcsha`/`rsoil`（`:1243` 的括号和）与 `gah2o`/`gmax`；
+现成资产是第 293 轮的 `oracle/scripts/pco2a_probe.sh`（`:1243-1244` 更新式），
+先按本轮的办法把它 hex 化（`ES23.15` 那档对 1 ULP 是盲的）。
