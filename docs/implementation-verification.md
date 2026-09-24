@@ -18373,7 +18373,20 @@ VSFI     kernel=200 rust=200
 
 ## 若继续
 
-> **第 356 轮更新（最新的指路牌，先读这段）**：湿窗 `stomata` 入参里唯一分叉的是 **`pco2a`**
+> **第 357 轮更新（最新的指路牌，先读这段）**：干窗第 251 步的 `ea`（= 唯一在**整步 12 次调用**
+> 都差的 `stomata` 入参）追到 **`qg`（地表比湿）**：新加的 `PHXH` 标签（`wtaq0,wtgq0,wtlq0,
+> qm,qg,qsatl,qaf`）在干窗 251 步显示只有 `qg` 差 6 次（`wtlq0` 1 次），
+> `qsatl`/`qm`/`wtaq0`/`wtgq0` 从不差。
+>
+> * **`qg` 的式子两侧同形**：非 split 支 `qred = (1-fsno)*hr + fsno` 再 `qg = qred*qsatg`
+>   （+ 同一个夹逼）↔ Rust `ground_humidity.rs::non_split_ground_humidity` ✓
+>   ⇒ **差在入参**：`fsno`、`hr = exp(psit/roverg/t_grnd)`、`t_grnd`、`forc_q`、`forc_psrf`。
+> * **下一枪**：在 `MOD_Thermal` 的 `qg` 赋值处（Rust 在 `non_split_ground_humidity` 入口）
+>   两侧 hex 打这五个量，跑**干窗 251 步** —— 把种子推到地面/土壤侧或钉在外层能量迭代上。
+> * 提醒：`DEF_SPLIT_SOILSNOW` 是运行期开关、默认 `.false.`（黄金走非 split 支），
+>   Rust **只移植了非 split 支**。
+
+> **第 356 轮更新**：湿窗 `stomata` 入参里唯一分叉的是 **`pco2a`**
 > （20/1004）；**干窗不是它** —— 干窗 14 组差异是 `pco2a`（调用 835/836，≈第 105 步，自愈）
 > 与 **`ea`（调用 5093…5104 = 第 251 步的全部 12 次）**，即干窗种子以**冠层空气水汽压**
 > 进 `stomata`（`ea = qaf*psrf/(0.622+0.378*qaf)`，内核 `:791`）。把 `pco2a` 的 GIMPLE 形状
@@ -20837,3 +20850,39 @@ STIN 差异组: 14 / 5104
 **探针**：把 `qaf = wtaq0*qm + wtgq0*qg + wtlq0*qsatl` 与 `eah = qaf*psrf/(0.622+0.378*qaf)`
 两侧 hex 打出来（连同 `qg`、三个权重、`caw/cgw/cfw/wtsqi`），跑干窗 251 步。
 另：`pco2a_probe.sh` 也一并 hex 化（它现在还是 `ES23.15`）。
+
+**第 357 轮：干窗第 251 步的 `ea` 追到 **`qg`（地表比湿）**—— `qg` 的式子两侧同形，差在它的入参**
+
+**① 给 `phs_hex_probe.sh` 加了 `PHXH`**（打在 `qaf = wtaq0*qm + wtgq0*qg + wtlq0*qsatl` 之后，
+两侧同序）：`wtaq0, wtgq0, wtlq0, qm, qg, qsatl, qaf` 七个位型。
+
+**② 干窗 251 步（两侧各 19920 行）的结果**
+
+```text
+首个差异仍是 PHXS 的 `rssha`（4 ULP，第 355 轮）
+PHXH 差异 = 字段 3 `wtlq0` ×1、字段 5 **`qg`** ×6、字段 7 `qaf` ×6
+            `wtaq0`/`wtgq0`/`qm`/`qsatl` **从不差**
+```
+
+⇒ 干窗的 `qaf`（进而 `ea = qaf*psrf/(0.622+0.378*qaf)`）差异来自 **`qg`**；
+`wtlq0` 那 1 次是 `cfw*wtsqi` 那条线（第 347 轮刚修过 `cfw`），量级很小。
+
+**③ `qg` 的生产者与两侧写法**：`MOD_Thermal.F90:576/582` 的**非 split 支**
+
+```fortran
+qred = (1.-fsno)*hr + fsno
+CALL qsadv(t_grnd,forc_psrf,eg,degdT,qsatg,qsatgdT)
+qg   = qred*qsatg
+IF (qsatg > forc_q .and. forc_q > qred*qsatg) THEN qg = forc_q; dqgdT = 0. ENDIF
+```
+
+Rust `ground_humidity.rs::non_split_ground_humidity` 与之**代数同形**：
+`humidity_reduction = (1-snow)*rh + snow` → `reduced_humidity = humidity_reduction*qsatg`
+→ 同一个夹逼（`qsatg > forc_q > reduced` 时取 `forc_q`）✓ ⇒ **不是式子的问题，是入参**。
+（`DEF_SPLIT_SOILSNOW` 是**运行期**开关、默认 `.false.`，黄金三例都走非 split 支；
+Rust 只移植了非 split 支 —— 打开 split 时两边会分道，记在这里。）
+
+**④ 下一枪**：`qg` 的入参 = `fsno`、`hr = exp(psit/roverg/t_grnd)`（`psit` 来自土壤水）、
+`t_grnd`、`forc_q`、`forc_psrf`。在 `MOD_Thermal` 的 `qg` 赋值处加一个 hex 打印
+（Rust 打在 `non_split_ground_humidity` 入口），跑**干窗 251 步**，判是 `psit`/`hr`
+还是 `fsno`/`t_grnd` 先分叉 —— 这一步会把种子推到**地面/土壤那一侧**或钉在**外层能量迭代**上。

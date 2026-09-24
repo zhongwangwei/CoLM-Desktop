@@ -137,6 +137,13 @@ hexr = ("               WRITE(*,'(A,8(1X,Z16.16))') 'PHXR', &\n"
         "                    TRANSFER(rssun,0_8),TRANSFER(rssha,0_8),TRANSFER(tl,0_8),TRANSFER(tprcor,0_8), &\n"
         "                    TRANSFER(laisun,0_8),TRANSFER(laisha,0_8),TRANSFER(gs0sun,0_8),TRANSFER(gs0sha,0_8)").split("\n")
 lines = after(lines, "gs0sha = min( 1.e6, 1./(rssha*tl/tprcor) )/ laisha * 1.e6 * o3coefg_sha", hexr, "PHXR")
+# 第 357 轮：`qaf`/`ea` 的生产者 —— 干窗第 251 步进 `stomata` 的差异字段是 `ea`，
+# 而 `ea = qaf*psrf/(0.622+0.378*qaf)`；`qaf` 的更新式本身已证忠实（GIMPLE 整条平铺），
+# 所以要打的是它的**入参**：三个湿度权重、`qm`、`qg`、`qsatl`，外加结果 `qaf`。
+hexh = ("      WRITE(*,'(A,7(1X,Z16.16))') 'PHXH', &\n"
+        "           TRANSFER(wtaq0,0_8),TRANSFER(wtgq0,0_8),TRANSFER(wtlq0,0_8), &\n"
+        "           TRANSFER(qm,0_8),TRANSFER(qg,0_8),TRANSFER(qsatl,0_8),TRANSFER(qaf,0_8)").split("\n")
+lines = after(lines, "qaf = wtaq0*qm + wtgq0*qg + wtlq0*qsatl", hexh, "PHXH")
 # 第 349 轮追加：`stomata` 的**返回值**（判轨迹里的 1 ULP 是 `assim` 还是 `rst`）
 hexs = ("               WRITE(*,'(A,6(1X,Z16.16))') 'PHXS', &\n"
         "                    TRANSFER(rssun,0_8),TRANSFER(rssha,0_8),TRANSFER(assimsun,0_8), &\n"
@@ -149,7 +156,7 @@ FEOF2
 (cd "$BASE" && ./oracle/scripts/build_kernel.sh default >"$WORK/build.log" 2>&1) \
   || { echo "!! compile failed"; tail -20 "$WORK/build.log"; exit 3; }
 strings "$BASE/kernels/default/colm.x" > "$WORK/strings.txt"
-for m in PHXD PHXF PHXI PHXR PHXS PHXG PHXQ PHXA; do
+for m in PHXD PHXF PHXI PHXR PHXS PHXG PHXQ PHXA PHXH; do
   grep -q "$m" "$WORK/strings.txt" || { echo "!! marker $m missing"; exit 3; }
 done
 
@@ -308,6 +315,27 @@ blocks = """        println!(
 assert src.count(anchors) == 1, src.count(anchors)
 src = src.replace(anchors, blocks)
 
+anchorh = """        canopy_air_humidity = leaf_moisture_weight * updated_saturation.specific_humidity
+            + (air_moisture_weight * input.reference_specific_humidity
+                + ground_moisture_weight * input.ground_specific_humidity);
+"""
+blockh = """        canopy_air_humidity = leaf_moisture_weight * updated_saturation.specific_humidity
+            + (air_moisture_weight * input.reference_specific_humidity
+                + ground_moisture_weight * input.ground_specific_humidity);
+        println!(
+            "PHXH {:016X} {:016X} {:016X} {:016X} {:016X} {:016X} {:016X}",
+            air_moisture_weight.to_bits(),
+            ground_moisture_weight.to_bits(),
+            leaf_moisture_weight.to_bits(),
+            input.reference_specific_humidity.to_bits(),
+            input.ground_specific_humidity.to_bits(),
+            updated_saturation.specific_humidity.to_bits(),
+            canopy_air_humidity.to_bits()
+        );
+"""
+assert src.count(anchorh) == 1, src.count(anchorh)
+src = src.replace(anchorh, blockh)
+
 anchorr = """            gs0sha = Some(maximum_shaded_leaf_conductance_umol_m2_s);
 """
 blockr = """            println!(
@@ -343,7 +371,7 @@ def rows(p):
     out = []
     for line in open(p):
         parts = line.split()
-        if parts and parts[0] in ("PHXG", "PHXA", "PHXQ", "PHXD", "PHXF", "PHXI", "PHXR", "PHXS"):
+        if parts and parts[0] in ("PHXG", "PHXA", "PHXQ", "PHXD", "PHXF", "PHXI", "PHXR", "PHXS", "PHXH"):
             out.append(parts)
     return out
 f = rows(f'{work}/fort_probe.txt')
