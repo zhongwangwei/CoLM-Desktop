@@ -19313,9 +19313,10 @@ WUE 之外的分支（`k=0` BB 1 条 ~1 ULP；`k=1` Medlyn 3 条，其中 `1975`
 | 25 处全开（含本轮 3 处） | 4,8,12,16,24,32,48,64 | **逐位相同** |
 | 第 324 轮的 swvm 自有 5 处 | 4,5,6 | **逐位相同** |
 
-⇒ **这条光合/气孔链（`stomata` 17 + `update_photosyn` 8 = 25 处 FMA）对湿窗状态轨迹
-零影响**；湿窗的种子在土壤水里，不在这条链上。链条确实会改 `history`（它经叶温进湍流
-诊断），所以 `over_tol` 会摆动 —— 但那是**诊断层**的 1 ULP 经混沌放大，不是状态层的账。
+⇒ **这条光合/气孔链（`stomata` 17 + `update_photosyn` 8 + `calc_photo_params` 4 = 29 处
+FMA）对湿窗状态轨迹零影响**；湿窗的种子在土壤水里，不在这条链上。链条确实会改 `history`
+（它经叶温进湍流诊断），所以 `over_tol` 会摆动 —— 但那是**诊断层**的 1 ULP 经混沌放大，
+不是状态层的账。
 
 **三段式实测（A/B，同树）**：
 
@@ -19352,6 +19353,18 @@ eyy（:805，仅 update_photosyn）  (-bracket).mul_add(psrf, pco2i)   —— **
 应用脚本（会话内）`/tmp/gf/photo_variant.py` + `/tmp/gf/photo_extra.py`，
 全形状快照 `/tmp/gf/photo_all_extras.rs`。
 
+**普查补一笔：`calc_photo_params` 是 `isra.0` 独立符号，另有 4 条 FMA**（第 329 轮
+只数了 `stomata` 17 + `update_photosyn` 8）。它的符号在 `assim.s:361-753`
+（`___mod_assimstomataconductance_MOD_calc_photo_params.isra.0`），
+`.loc` 落在 `:571`（`vm = vm/temph*rstfac*c3 + vm/(templ*temph)*rstfac*c4`）、
+`:580`（两条，`respcp`/`respc` 一线）、`:599`。**这 4 条全是 `A*c3 + B*c4` 的形**，
+在 `c3`,`c4 ∈ {0,1}` 下与不融合逐位相同 ⇒ 恒等，不用改。
+所以这个模块的完整账是 **17 + 8 + 4 = 29 条 FMA**，其中 6 条（`stomata:258/:259/:262`、
+`update_photosyn:737/:738/:740`、`calc_photo_params` 那 4 条）**恒等**。
+⇒ `stomata` 闭环剩下那 4 条**不是"还有没归属的 FMA"**：29 条已全部归位，
+残余只能是非 FMA 的表达式/分支差（`k=0` BB 1 条 ~1 ULP、`k=1` Medlyn 3 条），
+且都在黄金窗口走不到的分支里。
+
 **给下一轮（按优先级）**：
 
 1. **打 N=4 那颗 `wliq_soisno[0,5]` 的种子** —— 这是黄金湿窗唯一的状态种子。
@@ -19362,3 +19375,6 @@ eyy（:805，仅 update_photosyn）  (-bracket).mul_add(psrf, pco2i)   —— **
 2. 湿窗 `f_h2osoi` 那条**换算式**的 1 ULP（层厚来源 = `template.soil_layer_thickness_m()`）
    单独查一遍 —— 它不改状态，但一直占着"第一条分歧记录"。
 3. 光合链那 4 处数值有效的形状，等 1 或 2 落地后**成组**重放（第 316 轮就是这么成组的）。
+4. `stomata` 那 4 条残余（BB/Medlyn 分支）**优先级最低**：它们不在黄金路径上，
+   而且要判就得照第 333 轮给 `stomata` 也导中间量（`omc`/`ome`/`oms`/`bq`/`c`/
+   `conductance`/`internal`/`eyy`），需要把 `stomata` 也走"拷贝+放行"路线注入 `dbg` 数组。
