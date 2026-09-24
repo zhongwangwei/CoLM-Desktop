@@ -19894,3 +19894,54 @@ GS941 120 0 | GS1320 18 0 | GSTO 120 0 | GS919 240（探针字段定义两侧不
    `spac_change` 的 `A`/`f`/`determ`/`dx`** —— 目标是把 1 ULP 的第一出生点夹到具体一个量。
 3. `A`/`f`/`dx` 那一段已有 oracle 49/49 的验证（`spac_change` 里注释），所以重点看
    `vegwp` 的 Newton 更新与 `enforce_potential_gradient` 那几行。
+
+**第 344 轮：新建第 8 个闭环 `compare_vulnerability.sh`（`plc`/`d1plc` 200000/200000 逐位全同）；`pow` 两侧逐位相同；湿窗 N=18 的种子可以排除脆弱性曲线**
+
+**① 先判一个系统性风险点：`pow`。** gfortran 的 `**` 与 Rust 的 `powf` 是否同一份 libm？
+写了个 200000 组的位型对拍（`/tmp/gf/pow2/`：`(a/1e5)**b` 与 `2.0**t` 两种形态，
+gfortran 打 `TRANSFER(x,0_8)` 十六进制，Rust 打 `to_bits()`）：
+
+```text
+pow(a,b) 差异: 0 /200000
+pow(2,t) 差异: 0 /200000
+```
+
+⇒ 跨语言 `pow` **逐位一致**，这个风险点排除。
+
+**② 第 8 个闭环**：`oracle/scripts/compare_vulnerability.sh` +
+`vulnerability_diff.f90` + `crates/colm-core/examples/vulnerability_probe.rs` ——
+`MOD_PlantHydraulic` 的 `plc`（脆弱性曲线）与 `d1plc`（其一阶导）各 200000 组、逐位比。
+`plc`/`d1plc` 在模块里**默认 PUBLIC**（模块只列了 `PRIVATE :: calcstress_twoleaf`），
+所以直接链 `.bld` 的对象，不用"拷贝+放行"。结果：
+
+```text
+vulnerability: plc + d1plc 200000/200000 bitwise identical
+```
+
+⇒ **脆弱性曲线不是湿窗第 18 步那颗种子的来源。**
+
+（踩坑记录：Rust 侧一开始写 `{:017X}`（17 宽）而 Fortran 侧是 `Z17`（17 宽、左补空格，
+`split()` 后只剩 16 位），一个 16 位一个 17 位带前导零，字符串比会**假报 200000 处全不符**；
+改成与其它闭环一致的 `{:016X}` 后全同。以后照抄 `compare_stomata.sh` 的宽度。）
+
+**③ PHS 求解链的逐表达式复核（两头都读过，为下一轮缩小范围）**：
+
+* `extends/interception/MOD_PHSRootfluxBalance.F90`（`balance_phs_rootflux`）**0 条 FMA**，
+  Rust 的 `balance_phs_rootflux` 也是 0 ✓。
+* `calcstress_twoleaf` 是**单趟**（不是 Newton 循环）：`x = x + dx` → 三个
+  `x(a) ≤ x(b)` 夹取 → `etrsun/etrsha = qflx*plc(x(leaf…))` → `qflx2gs` →
+  `rstfac* = max(gss/gs0, 1e-2)` → `qeroot = etrsun+etrsha` → `qe2x` →
+  `x(root) = x_root_top` → `rootflux(j) = k_soil_root(j)*(smp(j)-xroot(j))`。
+  Rust 的 `plant_hydraulic_stress` 顺序逐条一致 ✓（含 `min(max|dx|,max|x|)/2` 那个缩放，
+  代码注释显示早前已修）。
+* `getvegwp_twoleaf` ↔ `vegetation_water_potential`、`root_conductances` 整条、
+  以及 `x(xyl) = x(root) - grav1 - Q/(fr*kmax_root/htop*sai)`、
+  `x(leafsha) = x(xyl) - etrsha/(fx*kmax_xyl*laisha)` 的**乘除顺序**逐一对照：全一致 ✓。
+* `htop`（`canopy_top_height_m`）来自常数文件的 `htop` 标量（两侧读同一文件）✓；
+  `sai`/`laisun`/`laisha` 由探针打印且 16 位有效数字相同 ✓。
+
+**④ 结论与下一轮**：湿窗 N=18 的 `vegwp[2]`(xylem) 与由它派生的 `vegwp[1]`(shaded)
+各 1 ULP 仍未定位，但候选已缩到很小的集合 —— `x(xyl)` 那一式的舍入、
+或 `spac_change` 的 `dx`（已有 oracle 49/49）、或某个**探针没覆盖**的量。
+**下一轮**：上 hex 探针（内核侧 `TRANSFER(x,0_8)`）打 `x(1:4)`/`dx(1:4)`/`qeroot`/`x_root_top`，
+把 1 ULP 的出生点夹到具体一个量；这也是第 343 轮就列好的下一步。
