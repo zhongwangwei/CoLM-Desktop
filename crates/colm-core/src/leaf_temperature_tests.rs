@@ -326,3 +326,17 @@ fn a_zero_extinction_uses_the_limit_instead_of_dividing_by_zero() {
     assert_eq!(super::integrated_extinction(f64::EPSILON, 3.0), 3.0);
     assert!(super::integrated_extinction(0.4, 3.0) < 3.0);
 }
+
+#[test]
+fn soil_respiration_keeps_the_fortran_product_of_literals() {
+    // `MOD_LeafTemperature.F90:652` 写的是 `rsoil = 0.22 * 1.e-6`（**两个字面量相乘**），
+    // 不是 `0.22e-6`。两者差 1 ULP：
+    //   内核 `fl(0.22)*fl(1e-6)` 再舍一次 = `3E8D87247702C0CF`
+    //   （GIMPLE `lt.opt` 里就是 `_582 = _581 - 2.1999999999999998475...e-7`，位型相同）
+    //   而 `0.22e-6`（正确舍入的十进制）= `3E8D87247702C0D0`
+    // 它减在 `pco2a` 的括号和里，写错就是一处静默的 1 ULP（第 352 轮）。
+    // 这条断言防止后来者把它"化简"成 `0.22e-6`。
+    assert_eq!((0.22_f64 * 1.0e-6).to_bits(), 0x3E8D_8724_7702_C0CF);
+    assert_eq!(0.22e-6_f64.to_bits(), 0x3E8D_8724_7702_C0D0);
+    assert_ne!(0.22_f64 * 1.0e-6, 0.22e-6_f64);
+}

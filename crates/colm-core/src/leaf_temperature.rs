@@ -955,13 +955,20 @@ pub fn leaf_temperature(
                 + ground_moisture_weight * input.ground_specific_humidity);
         let pressure_conversion = 44.6 * 273.16 * input.surface_pressure_pa / 1.013e5;
         let air_conductance = 1.0 / raw * pressure_conversion / input.reference_air_temperature_k;
+        // `:652` 的 `rsoil = 0.22 * 1.e-6` 是**两个字面量的乘积**，不是 `0.22e-6`：
+        //   内核 `fl(0.22)*fl(1e-6)` 再舍一次 = `3E8D87247702C0CF`
+        //   （GIMPLE 里就是 `_582 = _581 - 2.1999999999999998475...e-7`，位型 `…C0CF`）
+        //   而 Rust 原先的 `0.22e-6` = 正确舍入的十进制 = `3E8D87247702C0D0`，**大 1 ULP**。
+        // 它就减在 `pco2a` 的括号和里 ⇒ 第 351 轮的 hex 探针量到的 `pco2a` 1 ULP 分叉
+        // （20/1004 次调用）有一部分来自这里。
+        let soil_respiration = 0.22 * 1.0e-6;
         canopy_air_co2 = input.atmospheric_co2_pa
             - 1.37 * input.surface_pressure_pa / air_conductance.max(0.446)
                 * (sunlit_resistance.assimilation_mol_m2_s
                     + shaded_resistance.assimilation_mol_m2_s
                     - sunlit_resistance.respiration_mol_m2_s
                     - shaded_resistance.respiration_mol_m2_s
-                    - 0.22e-6);
+                    - soil_respiration);
         temperature_difference = input.reference_air_temperature_k - canopy_air_temperature;
         humidity_difference = input.reference_specific_humidity - canopy_air_humidity;
         let temperature_scale =
