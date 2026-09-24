@@ -19996,3 +19996,56 @@ PHXF  x(1:4), qeroot, x_root_top            —— `x(root) = x_root_top` 之后
 **③ 这一轮的边界**：位型探针那次跑成功了（上面的数就是它给的），
 但随后卷掉了，`PHXQ` 那版探针与后续状态扫描都跑不动。所以本轮的结论
 只有"种子在 `dx`"这一条，`PHXQ`/`A`/`f` 的细分留到卷回来之后。
+
+**第 346 轮：位型探针再进一层 —— 差异落在 `spac_change` 的 `f(leafsun)`/`f(leafsha)`；翻转它们的收缩侧**没有**修好（已回退）；顺带找到**仓库自带**的强迫数据**
+
+**① 探针链（PHXQ → PHXA）把种子夹到 `f` 的两行。** 在上一轮 `PHXD`/`PHXF` 之后加两个点：
+
+```text
+PHXQ  x_root_top, qeroot, dqeroot   —— x2qe 返回之后（A/f 的入参）
+PHXA  A11 A13 A22 A23 A31 A32 A33 A34 A43 A44 f(1..4)  —— spacAF_twoleaf 的 A/f 组装之后
+```
+
+18 步湿窗、两侧各 **384 行**（96 次调用 × 4 点），逐位结果：
+
+```text
+首个差异: (381, 'PHXA', 11, '3DE4EDD21436D986', '3DE4EDD214369986')
+差异计数: PHXA {11:1, 12:1}   PHXD {2:1,3:1,5:1,6:1,7:1,8:1}   PHXF {2:1,3:1,5:1}
+```
+
+* **`PHXQ` 96 次调用全部逐位相同** ⇒ 根通量解（`root_flux_from_top_potential`/`x2qe`）
+  给出的 `qeroot`/`dqeroot` **不是**来源。
+* **十个 A 元素与 `f(xyl)`/`f(root)` 全同**（`PHXA` 只有字段 11、12 差）⇒ A 的组装没问题。
+* 差的是 **`f(leafsun)`（字段 11）与 `f(leafsha)`（字段 12）**，而且**相对差约 1e-11**
+  —— 这两行是**残差**（两个大项相消），所以绝对差仍然是 1 ULP 量级，
+  相对差被相消放大 ✓ 与"状态只差 1 ULP"自洽。
+
+（踩坑：第一版 `PHXQ` 两侧字段顺序不同 —— 内核打 `qeroot,dqeroot,x_root_top`、
+Rust 打 `potential[ROOT],root_flux,root_flux_slope` —— 于是 96 次全报差异；
+对齐成 `x_root_top,qeroot,dqeroot` 之后是 0 差异。**两侧字段顺序必须逐字对齐**。）
+
+**② 翻转 `f(SUNLIT)`/`f(SHADED)` 的收缩侧 —— 没有修好，按纪律回退。**
+代码注释原本写"`f(SUNLIT)`/`f(SHADED)` 收的是 `qflx*fsto`（只出现一次的那个乘积）"，
+按探针的提示改成收 `(lk*fxyl)*Δsun` 那一侧：
+
+```rust
+f[SUNLIT] = (-(sunlit_conductance * fxyl)).mul_add(sunlit_gradient, sunlit_flux * fsun);
+f[SHADED] = (-(shaded_conductance * fxyl)).mul_add(shaded_gradient, shaded_flux * fsha);
+```
+
+实测：湿窗 N=18 仍是 **1/68**（`vegwp` 2 分量、maxrel 2.198e-16，**与改前一模一样**），
+N=21 从 2/68 变 3/68（变差）⇒ `git checkout` 回退。
+
+**③ 这条负结果把范围又缩了一步**：`f(leafsun) = qflx_sun*fsto1 - (lk*fx*Δsun)` 的
+四个量里，`lk*fxyl`（=A31）与 `Δsun`（由 A13 反推）都逐位相同、`fsto1` 是 `plc`（第 344 轮
+200000/200000 逐位全同），**只剩 `qflx_sun`/`qflx_sha`（两个需求通量）没在 hex 下比过**。
+⇒ 下一轮就探它们：在 `getqflx_gs2qflx_twoleaf` 返回之后（内核）/`transpiration_from_conductance`
+返回之后（Rust）打位型；若它们相同，则说明内核在 `f` 里用的既不是"收左"也不是"收右"，
+而是第三种形状（例如两个乘积都先舍入）。
+
+**④ 顺带：仓库里就有强迫数据。** 上一轮说"PLUMBER2 卷掉了、算例跑不动"——其实
+**`examples/Forcing/CN-Cng_2008-2009_FLUXNET2015_Met.nc` 就在仓库里**（用户提醒）。
+把 scratch 脚本的 sed 目标从挂载点改成 `$BASE/examples/Forcing/` 之后，
+`wet_ts.sh`/`dry_ts.sh` 与干/湿两个黄金窗口**完全离线可跑** ✓
+（`examples/Forcing/` 里只有 CN-Cng、AT-Neu、AU-Preston、US-Ne3 四个；**US-NR1 不在**，
+所以雪窗仍需要网络卷或另找数据）。仓库文件依旧一个没动。
