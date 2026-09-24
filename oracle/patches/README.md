@@ -32,10 +32,18 @@ bash /tmp/gf/wet_ts.sh 432 && python3 /tmp/gf/rdiff.py   # 0/68
    WaterDepthMax)` 的分支判定**，只有湿季（`watin > 0`）才走到 ⇒ 干窗永远看不到它。
    补上后湿窗 restart 的逐位范围从 N=63 推到 **N=432**；单独落它黄金湿窗 1197 → 1876。
 
-**当前状态**：三块合起来，湿窗 restart 在 **N=1–432 逐位相同**（干窗 N=1–528 逐位相同）；
-下一个种子钉在 **N=489**（`emis`/`t_grnd`/`t_soisno` 各 1 ULP），
-`vsfr_wet.sh 489` 的内部探针显示**第一条不同的记录又是 `WSF1` 入场的 `qgtop`**
-（即再往上游：`qseva`/`fevpg` 那条叶/热链）。
+**当前状态**（第 373 轮更新）：三块合起来、再叠上**已经在 HEAD 里**的 `root_uptake.rs`
+那一处（`MOD_Eroot.F90:96` 的 VG 实参 FMA，第 373 轮落地、口径中性），
+湿窗 restart 在 **N=1–488 逐位相同**（干窗 N=1–528 逐位相同）；
+下一个种子钉在 **N=489**（`emis`/`t_grnd`/`t_soisno` 各 1 ULP）。
+
+第 373 轮换了个更省事的入口来定位：**history 的逐变量首分歧**
+（`python3 oracle/scripts/window_divergence.py <kernel-hist> <rust-hist> --top 14`，
+不用重建内核、直接给变量名）。它给出的排序是
+`f_fgrnd`（累积量口径的老账，干窗也有）→ `f_zerr` → **`f_rootr` 第 466 步 1 ULP**（已由
+第 373 轮落地的那一处消掉）→ 第 488 步一整批（`f_taux`/`f_emis`/`f_t_grnd`/`f_olrg`/`f_rnet`/
+`f_fseng`/`f_fevpg`/…）。**`vsfr_wet.sh` 与 `window_divergence.py` 配合**：
+探针定"哪一层"（水步入场），history 定"哪个量"（`fevpg`，第 489 步的地面蒸发）。
 
 **要落地它的条件**：把湿窗也做到逐位相同（那时口径自然是 0），
 或者由维护者明确为湿窗开"口径例外"。**不要**单独落其中任何一块。

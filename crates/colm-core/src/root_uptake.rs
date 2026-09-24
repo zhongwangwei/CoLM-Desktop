@@ -71,9 +71,13 @@ fn potential_stress(input: RootUptakeInput<'_>, layer: usize) -> f64 {
         SoilHydraulicModel::Campbell { bsw } => {
             input.saturated_soil_suction_mm[layer] * saturation.powf(-bsw)
         }
+        // `MOD_Eroot.F90:96/98` 的 GIMPLE 是 `_26 = .FMA(porsl-theta_r, s_node, theta_r)`
+        // （`s_node` 是已夹取的 `M.32`）—— 与 `MOD_Thermal…:579`、`MOD_Hydro_SoilWater:579`
+        // 同一个形状；平铺会多舍一次。这一处进 `eroot` 的 `smp_node` ⇒ `rresis` ⇒
+        // `rootr`（分层根吸水权重），实测黄金湿窗第 466 步的 `f_rootr` 恰差 1 ULP。
         model => soil_psi_from_vliq(
-            saturation * (input.porosity[layer] - input.residual_water[layer])
-                + input.residual_water[layer],
+            (input.porosity[layer] - input.residual_water[layer])
+                .mul_add(saturation, input.residual_water[layer]),
             input.porosity[layer],
             input.residual_water[layer],
             input.saturated_soil_suction_mm[layer],

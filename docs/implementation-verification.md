@@ -18373,6 +18373,22 @@ VSFI     kernel=200 rust=200
 
 ## 若继续
 
+> **第 373 轮更新（最新的指路牌，先读这段）**：把第 372 轮那个"水步入场 `qgtop` 先差"再往上游走一层 ——
+> 改用 **history 的逐变量首分歧**（`window_divergence.py`，比探针便宜、直接给变量名），
+> 第一颗会传播的种子是 **`f_rootr` 第 466 步 1 ULP**（分层根吸水权重）。
+> 它来自 `MOD_Eroot:eroot` —— **这个模块从来没进过任何一轮的普查清单**，144 行里只有 1 条 FMA：
+> `:96/98` `.FMA(porsl-theta_r, s_node, theta_r)`（VG 保持曲线的实参），而 `root_uptake.rs`
+> 写成平铺。补上后那颗 1 ULP 消失，且 `over_tol`/`ot_vars`/`sumabs` **三项逐位不变** ⇒ **落地**。
+> * 同一个形状这是**第三次**被漏（`ground_humidity.rs:57`、`MOD_Thermal…:579`、`MOD_Eroot:96`）——
+>   同一条保持曲线实参在三个例程里各写了一遍，干窗走的那条链用的是另一份拷贝，所以一直没被测出来。
+> * **湿窗当前**：工作集（`oracle/patches/wet-seed-working-set.diff`）+ 本轮这一处 ⇒ restart 逐位
+>   **N=1–488**；**下一颗种子 N=489**（3/68，`emis`/`t_grnd`/`t_soisno`），history 排名指向
+>   **`f_fevpg`**（第 489 步的地面蒸发），同一步还有 `f_emis`/`f_olrg`/`f_rnet`/`f_fseng`。
+> * **下一枪**：`fevpg = rhoair*cgw*(qg-qaf)`（`MOD_LeafTemperature_Extended.F90:1397`）的合成链 ——
+>   重点是**还没有闭环兜底**的 `cgw`/`qaf`。
+> * **判据**：干窗 restart 整窗 0/68、黄金 dry `153 / 0 / 0，0.0000`、
+>   黄金 wet `27056 / 1197 / 19，8.4418`（HEAD）、工作集下黄金 dry `81 / 0 / 0，0.0000`。
+
 > **第 372 轮更新（最新的指路牌，先读这段）**：把第 371 轮那份工作集当**工作基线**用起来之后，
 > 湿窗的逐位范围从 N=63 一路推到 **N=432** —— 本轮新找到并验证了一处**会翻分支**的漏熔：
 > `MOD_Runoff.F90:342` 的 `.FMA(_29, waterdepthmax, watin)`（即 `WaterDepthInit + watin`），
@@ -22231,4 +22247,84 @@ vsfr_wet.sh 489 的第一条不同记录 = ('WSF1', 489, 0, 0) qgtop
    剩下的站点里还可能有"只在湿季现形"的形状（就像本轮的 runoff 那处）。
 2. 干窗那边**整窗 restart 逐位相同**、黄金 127 个变量零超差，已经收口；
    剩下只有 1 ULP 级的诊断量（`f_assim`/`f_fgrnd` 第 10 步等）。
+3. `compare_stomata` 的 1/4000（row 514）仍未解释。
+
+## 第 373 轮：`MOD_Eroot` 的漏熔（**口径中性、落地**）—— 湿窗下一颗种子收窄到第 489 步的 `fevpg`
+
+**一句话**：顺着第 372 轮 `vsfr_wet.sh` 钉出的"水步入场 `qgtop` 先差"，改用 **history 逐变量首分歧**
+（`window_divergence.py`）往上游找，第一颗**会传播**的种子是 **`f_rootr` 在第 466 步差 1 ULP**
+（`rootr` = `MOD_Eroot:eroot` 出的分层根吸水权重）。`MOD_Eroot.F90` **从来没进过任何一轮的普查清单**
+（第 363 轮那张表里没有它），普查出来 144 行里只有 **1 条** FMA：`:96/98`
+`.FMA(porsl(i)-theta_r(i), s_node, theta_r(i))`（VG 保持曲线的实参），
+而 `root_uptake.rs::potential_stress` 写成平铺。补上后那颗 1 ULP **消失**，
+且**所有口径逐位不变** ⇒ 落地。
+
+### 一、定位链（这一轮换了个更省事的入口）
+
+```text
+① vsfr_wet.sh 489 → 第一条不同记录仍是 WSF1 入场的 qgtop（与上一轮同一个入口）
+② 换用 history 逐变量排名：window_divergence.py <kernel-hist> <rust-hist> --top 14
+     first  variable        ndiff   maxabs      maxrel
+       0    f_fgrnd           19   3.59e-13    3.96e-14   ← 累积量口径的老账（干窗也有）
+     235    f_zerr             2   3.26e-12    2.90e-02
+     466    f_rootr            1   1.39e-17    1.42e-16   ← **1 ULP，第一颗会传播的种子**
+     488    f_taux/tauy/emis/t_grnd/t_soisno/olrg/rnet/fseng/fevpg/qinfl/… 各 1-2 个
+③ f_rootr 是分层根吸水权重 ⇒ `MOD_Thermal…:672` 的 `CALL rootfr(...)` ⇒ `MOD_Eroot:eroot`
+④ `MOD_Eroot.F90`（144 行）只有 1 条 FMA —— 此前从未普查
+⑤ `root_uptake.rs::potential_stress` 的 VG 实参平铺 ⇒ 补上
+```
+
+**方法收获**：`vsfr_wet.sh` 只能说到"水步入场先差"（它从水步入口开始打），再往上游就得靠
+**history 的逐变量首分歧** —— 这个口径比探针便宜（不用重建内核）而且直接给**变量名**。
+两者配合：**探针定"哪一层"，history 定"哪个量"**。
+
+### 二、落地的改动（本会话第二处"既忠实又能落"的）
+
+| 内核 | GIMPLE 操作数角色 | Rust（改前） |
+|---|---|---|
+| `MOD_Eroot.F90:96/98` `smp_node = soil_psi_from_vliq(s_node*(porsl(i)-theta_r(i)) + theta_r(i), …)` | `_22 = theta_r`、`M.32 = s_node`（已夹取）、`_26 = .FMA(porsl-theta_r, M.32, _22)` | `root_uptake.rs::potential_stress`：`saturation*(porosity-residual) + residual`（平铺） |
+
+**同一个形状这是第三次被漏**：第 367 轮修了 `ground_humidity.rs:57`、第 368 轮修了
+`MOD_Thermal…:579`，现在 `MOD_Eroot:96` —— 同一条保持曲线实参在三个例程里各写了一遍，
+三次都漏了同一处收缩。（这也解释了为什么它一直没被测出来：干窗走的那条链用的是另一份拷贝。）
+
+### 三、实测
+
+| 口径 | HEAD（`4c0f0b7`） | +`eroot` 一处 |
+|---|---|---|
+| 湿窗 restart N=63 | 10/68 | **10/68**（不变） |
+| 干窗 restart N=251 | 0/68 | **0/68** |
+| 黄金 dry（`bitwise`/`over_tol`/`ot_vars`/`sumabs`） | 153 / 0 / 0，0.0000 | **153 / 0 / 0，0.0000** |
+| 黄金 wet | 27055 / 1197 / 19，8.4418 | **27056 / 1197 / 19，8.4418** |
+
+三项聚合（`over_tol`/`ot_vars`/`sumabs`）**逐位不变**、首分歧步不动，只有逐位元素数 +1。
+**连带证据**（工作集 + 这一处，`window_divergence` 里第 466 步那一行消失）：
+
+```text
+                 工作集                     工作集 + eroot
+ first variable  f_rootr 466  1 ULP  →     不见了（其余不变）
+```
+
+### 四、湿窗当前状态
+
+```text
+工作集（oracle/patches/wet-seed-working-set.diff）+ 本轮的 eroot：
+  湿窗 restart 逐位范围 = N=1–488（抽测 63/72/96/…/432/480/486/487/488 全 0/68）
+  下一个种子 = N=489，3/68（emis / t_grnd / t_soisno 各 1 ULP）
+  history 排名 = f_fevpg 在 index 488 首次不同 ⇒ 种子是**第 489 步的 fevpg**（地面蒸发）
+```
+
+`fevpg` 那条链（`MOD_LeafTemperature_Extended.F90:1397 fevpg = rhoair*cgw*(qg-qaf)`）本轮已顺带核了
+其中**湿季才会走**的一段：`cfw`（`:1076` / `:1078-1079`；`DEF_Interception_scheme` 默认 **1**
+⇒ 走 `:1078` 那支）与 Rust 的 `leaf_moisture_conductance`
+（`(1.0 - evaporation_sign*dry_factor).mul_add(wet_conductance, dry_factor*evaporation_sign*sum)`）
+**逐条对得上** ✓。
+
+### 五、下一枪
+
+1. **N=489 = `fevpg`**：核 `:1397 fevpg = rhoair*cgw*(qg-qaf)` 的合成链。
+   `cgw` 是本步的地下水分导度、`qaf` 是叶温迭代收敛出的冠层空气比湿 ——
+   两者都在 `ground_fluxes.rs`/`leaf_temperature.rs` 里，**`cgw` 还没有闭环兜底**
+   （`compare_moninobukm.sh` 只覆盖摩擦速度那一族）。
+2. **干窗**整窗 restart 逐位相同、黄金 127 个变量零超差，已收口（只剩 1 ULP 级诊断量）。
 3. `compare_stomata` 的 1/4000（row 514）仍未解释。
