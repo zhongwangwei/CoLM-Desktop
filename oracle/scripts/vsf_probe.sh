@@ -23,7 +23,9 @@ set -euo pipefail
 BASE="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 STEPS=${1:-19}
 WORK=${WORK:-/tmp/gf/vsf$STEPS}
-END_SEC=$((1800 * STEPS))
+TOTAL=$((1800 * STEPS))
+END_SEC=$((TOTAL % 86400))
+END_DAY=$((1 + TOTAL / 86400))
 FORT="vendor/CoLM202X/main/HYDRO/MOD_Hydro_SoilWater.F90"
 RUST="crates/colm-core/src/variably_saturated_flow.rs"
 export NETCDF_DIR=${NETCDF_DIR:-/opt/homebrew/opt/netcdf}
@@ -89,11 +91,13 @@ sed -e "s#^   DEF_dir_output.*#   DEF_dir_output  = '$WORK/out/'#" \
     -e "s#^   DEF_forcing_namelist.*#   DEF_forcing_namelist = '$WORK/forcing.nml'#" \
     -e "s#^   DEF_dir_rawdata.*#   DEF_dir_rawdata = '$WORK/rawdata_unused/'#" \
     -e "s#^   DEF_dir_runtime.*#   DEF_dir_runtime = '$WORK/runtime_unused/'#" \
-    -e "s#^   DEF_simulation_time%end_day.*#   DEF_simulation_time%end_day       = 1#" \
+    -e "s#^   DEF_simulation_time%end_day.*#   DEF_simulation_time%end_day       = $END_DAY#" \
     -e "s#^   DEF_simulation_time%end_sec.*#   DEF_simulation_time%end_sec       = $END_SEC#" \
     -e "s#^   DEF_HIST_FREQ.*#   DEF_HIST_FREQ    = 'TIMESTEP'#" \
     "$BASE/oracle/work/CN-Cng/case.nml" > "$WORK/case.nml"
 cp "$BASE/oracle/work/CN-Cng/forcing.nml" "$WORK/forcing.nml"
+# PLUMBER2 挂载点变了：只改这份拷贝（第 355 轮补）
+sed -i '' "s#/Volumes/Data01/Data/PLUMBER2s/Forcing/#$BASE/examples/Forcing/#" "$WORK/forcing.nml"
 cp -R "$BASE/oracle/work/CN-Cng/out" "$WORK/out"
 rm -rf "$WORK/out/CN-Cng/history"
 ( cd "$WORK/run" && "$BASE/kernels/default/colm.x" "$WORK/case.nml" > "$WORK/kernel.log" 2>&1 ) \

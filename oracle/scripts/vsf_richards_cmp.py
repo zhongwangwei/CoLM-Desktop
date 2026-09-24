@@ -35,7 +35,10 @@ TAG_RANK = {
 }
 
 FIELDS = {
-    "WSF1": ["qgtop", "etr", "rsubst", "ss_dp", "zwt", "wa", "tolerance"],
+    # ⚠ 内核那一行先打 `real(nlev,r8)`（层数），Rust 侧同序也打 `nlev`。
+    # 第 355 轮之前这里漏了 `nlev`，于是**每个名字都错位一格** —— 报出来的
+    # "`rsubst` 差" 其实是 `etr` 差（值是对的，标签是错的）。别再删它。
+    "WSF1": ["nlev", "qgtop", "etr", "rsubst", "ss_dp", "zwt", "wa", "tolerance"],
     "WSFE": ["ss_vliq", "rootflux", "porsl", "psi_s", "hksat"],
     "RCH0": [
         "layers",

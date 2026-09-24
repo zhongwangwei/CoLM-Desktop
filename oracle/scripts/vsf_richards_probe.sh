@@ -15,7 +15,9 @@ set -euo pipefail
 BASE="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 STEPS=${1:-13}
 WORK=${WORK:-/tmp/gf/vsfr$STEPS}
-END_SEC=$((1800 * STEPS))
+TOTAL=$((1800 * STEPS))
+END_SEC=$((TOTAL % 86400))
+END_DAY=$((1 + TOTAL / 86400))
 FORT="vendor/CoLM202X/main/HYDRO/MOD_Hydro_SoilWater.F90"
 RUST="crates/colm-core/src/variably_saturated_flow.rs"
 export NETCDF_DIR=${NETCDF_DIR:-/opt/homebrew/opt/netcdf}
@@ -167,11 +169,13 @@ sed -e "s#^   DEF_dir_output.*#   DEF_dir_output  = '$WORK/out/'#" \
     -e "s#^   DEF_forcing_namelist.*#   DEF_forcing_namelist = '$WORK/forcing.nml'#" \
     -e "s#^   DEF_dir_rawdata.*#   DEF_dir_rawdata = '$WORK/rawdata_unused/'#" \
     -e "s#^   DEF_dir_runtime.*#   DEF_dir_runtime = '$WORK/runtime_unused/'#" \
-    -e "s#^   DEF_simulation_time%end_day.*#   DEF_simulation_time%end_day       = 1#" \
+    -e "s#^   DEF_simulation_time%end_day.*#   DEF_simulation_time%end_day       = $END_DAY#" \
     -e "s#^   DEF_simulation_time%end_sec.*#   DEF_simulation_time%end_sec       = $END_SEC#" \
     -e "s#^   DEF_HIST_FREQ.*#   DEF_HIST_FREQ    = 'TIMESTEP'#" \
     "$BASE/oracle/work/CN-Cng/case.nml" > "$WORK/case.nml"
 cp "$BASE/oracle/work/CN-Cng/forcing.nml" "$WORK/forcing.nml"
+# PLUMBER2 挂载点变了：只改这份拷贝（第 355 轮补）
+sed -i '' "s#/Volumes/Data01/Data/PLUMBER2s/Forcing/#$BASE/examples/Forcing/#" "$WORK/forcing.nml"
 cp -R "$BASE/oracle/work/CN-Cng/out" "$WORK/out"
 rm -rf "$WORK/out/CN-Cng/history"
 ( cd "$WORK/run" && "$BASE/kernels/default/colm.x" "$WORK/case.nml" > "$WORK/kernel.log" 2>&1 ) \
@@ -233,11 +237,14 @@ src = insert_after(
 
 # --- 每个 Newton 迭代：残差范数 + 逐行 blc ---
 src = insert_after(
+    # 注意：这段代码在后续轮次被改过（现在每个平方用 `mul_add` 收进累加器），
+    # 锚点必须跟着当前源码走 —— 第 355 轮就是把旧锚点换成下面这一份才跑起来的。
     """            let residual_norm_mm = balance
                 .residual_mm
                 .iter()
-                .map(|residual| residual * residual)
-                .sum::<f64>()
+                .fold(0.0, |accumulator, residual| {
+                    residual.mul_add(*residual, accumulator)
+                })
                 .sqrt();
 """,
     """            if std::env::var_os("COLM_VSF_RICHARDS_PROBE").is_some() {
@@ -322,31 +329,33 @@ open(path, "w").write(src)
 print("   patched variably_saturated_flow.rs (richards)")
 REOF
 
-python3 - "$BASE/$RUST" <<'REOF'
-import sys
-
-path = sys.argv[1]
-src = open(path).read()
-anchor = """                / (thickness - water_table);
-        }
-    }
-"""
-assert src.count(anchor) == 1, src.count(anchor)
-block = """    if std::env::var_os("COLM_VSF_RICHARDS_PROBE").is_some() {
-        let count = RICHARDS_PROBE_COUNT.load(std::sync::atomic::Ordering::Relaxed);
-        for level in 0..layers {
-            eprintln!(
-                "RCHZ {:4} {:3} {:2} {:e} {:e} {:e} {:e}",
-                count, level + 1, 0, state.liquid_water[level],
-                state.water_table_thickness_mm[level], zone.wetting_front_mm[level],
-                state.interface_flux_mm_s[level]
-            );
-        }
-    }
-"""
-open(path, "w").write(src.replace(anchor, anchor + block, 1))
-print("   patched variably_saturated_flow.rs (exit)")
-REOF
+# 第 355 轮：**停用** `RCHZ`（出场）这一块。理由：第 339 轮重构后
+# `zone`/`state.water_table_thickness_mm` 已经不在该作用域里（E0425/E0609），
+# 而它要打的信息与 `vsf_probe.sh` 的 `WSF`（出场）标签**重复**，不值得为它改探针口径。
+# 原始块留在下面的注释里，等谁需要时按当时的源码重新锚定。
+# python3 - "$BASE/$RUST" <<'REOF'
+# import sys
+# 
+# path = sys.argv[1]
+# src = open(path).read()
+# anchor = """    state.water_table_depth_mm = water_table_depth_mm;
+# """
+# assert src.count(anchor) == 1, src.count(anchor)
+# block = """    if std::env::var_os("COLM_VSF_RICHARDS_PROBE").is_some() {
+#         let count = RICHARDS_PROBE_COUNT.load(std::sync::atomic::Ordering::Relaxed);
+#         for level in 0..layers {
+#             eprintln!(
+#                 "RCHZ {:4} {:3} {:2} {:e} {:e} {:e} {:e}",
+#                 count, level + 1, 0, state.liquid_water[level],
+#                 state.water_table_thickness_mm[level], zone.wetting_front_mm[level],
+#                 state.interface_flux_mm_s[level]
+#             );
+#         }
+#     }
+# """
+# open(path, "w").write(src.replace(anchor, anchor + block, 1))
+# print("   patched variably_saturated_flow.rs (exit)")
+# REOF
 
 # `soil_water_vertical_movement` 的入场块（在另一个函数里，单独插）。
 python3 - "$BASE/$RUST" <<'REOF'

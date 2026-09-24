@@ -18373,7 +18373,24 @@ VSFI     kernel=200 rust=200
 
 ## 若继续
 
-> **第 353 轮更新（最新的指路牌，先读这段）**：**干窗首分歧夹到第 251 步**（`2008-006-19800`，
+> **第 355 轮更新（最新的指路牌，先读这段）**：干窗第 251 步的种子**推出水步** ——
+> `vsf_richards_probe.sh` 的 `WSF1`（水步**入场**）第一条不同记录就是 **`etr`**（蒸腾），
+> 另有 WSFE 的 `rootflux[1,3,4,7]`；`vsf_probe.sh` 的 `WSF`（出场）只有第 251 次调用不同、
+> 首个字段是 `ss_vliq` ⇒ **水步只是把上游的 1 ULP 传下去**。
+>
+> * **两个窗口的种子在同一条链上**：湿窗第 63 步 = `pco2a`→`stomata`→PHS；
+>   干窗第 251 步 = `etr`/`rootflux`（`etr = etrsun+etrsha`）。都落在
+>   **叶温-气孔-植物水力**那侧 ⇒ 第 349-351 轮那条链（含挂起的 `pco2a` `.FNMA` 例外）
+>   是两个窗口的**共同瓶颈**。
+> * **修好/踩到的工具**：`vsf_probe.sh` 与 `vsf_richards_probe.sh` 补了日期回绕 + 强迫重定向；
+>   Richards 探针修了 3 个过期锚点、停用 `RCHZ`（第 339 轮后字段不在作用域，且与 `WSF` 重复）；
+>   **`vsf_richards_cmp.py` 的 `WSF1` 名称表漏了先打的 `nlev`**，导致每个标签错位一格 ——
+>   前半段读出的"`rsubst` 差"其实是 `etr` 差（值比得对、名字全错），已修并留注释。
+> * **下一枪**：给 `phs_hex_probe.sh` 加 `CASE=`，指到**干窗 251 步**，判 PHS 入参
+>   （`gssun`/`gssha`/`laisun`/`laisha`/`fwet`/`tl`）是否已分叉；再往上就是
+>   `stomata` 的入参（复用已 hex 化的 `stomata_probe.sh`）。
+
+> **第 353 轮更新**：**干窗首分歧夹到第 251 步**（`2008-006-19800`，
 > 当地 05:30）—— N=250 仍 0/68、N=251 11/68。差同时落在**土壤侧**（`t_soisno[0,5]`、
 > `wice_soisno[0,5]`、`wliq_soisno[0,5]`、`hk[0,0]`）与**近地层侧**（`qstar`、`zol`、`rib`、
 > `qref`），外加 `trad`/`rst` ⇒ 种子在这两支的**共同上游**；夜间 `rst`≈5e5、`assim`≈0
@@ -20666,3 +20683,45 @@ BASELINE(d326254) dry history 首个差异记录: 14 变量: ['f_assimsun']
 里 `CALL GroundTemperature` **之前**的 23 个量）指到 **251 步**：入参已差 ⇒ 往上游
 （`MOD_GroundFluxes` 的 `fseng`/`fevpg` 或辐射项）追一层；入参全同 ⇒ 残余在地面支体内。
 本轮的 11 个变量已把"共同上游"限定在这两支之间。
+
+**第 355 轮：干窗第 251 步的种子推出**水步**——它在 `etr`/`rootflux`（叶-植物水力那一侧）；顺带修掉一个把标签错位一格的比较器 bug**
+
+**① 先把两条现成探针修好（都因为写于第 299 轮、之后源码改过而跑不起来）**
+
+| 文件 | 修了什么 |
+|---|---|
+| `oracle/scripts/vsf_probe.sh` | `END_DAY/END_SEC` 回绕（`STEPS>48` 原本撞日期上界）+ 强迫路径重定向 |
+| `oracle/scripts/vsf_richards_probe.sh` | 同上；另修 **3 个过期锚点**（`residual_norm_mm` 已改成 `fold+mul_add`、routine 尾部、`zone` 作用域）；**停用 `RCHZ`（出场）那一块** —— 第 339 轮重构后 `zone`/`state.water_table_thickness_mm` 已不在作用域（E0425/E0609），而它要打的信息与 `vsf_probe.sh` 的 `WSF`（出场）**重复**，不值得为它改口径（原块留在注释里） |
+| `oracle/scripts/vsf_richards_cmp.py` | **名称表 bug**：`WSF1` 的字段名漏了内核先打的 `nlev` ⇒ **每个名字错位一格**（值比得对、标签全错）。第 355 轮前半段据此读出的"`rsubst` 差"其实是 **`etr`** 差 —— 差一步就去追径流链了。已补上 `nlev` 并留注释 |
+
+**② 定位链（全部实测，干窗 251 步）**
+
+```text
+restart 扫描           N=250 0/68、N=251 11/68        ⇒ 首分歧 = 第 251 步（第 353 轮）
+vsf_probe.sh 251       WATER_VSF **出场**：251 次调用只有第 251 次不同，
+                       首个不同字段 = `ss_vliq`（第 1 层，1 ULP）  ⇒ 差生在**本步水步内部**
+vsf_richards_probe.sh  Richards_solver **入场/内部**：9112 条记录只有 6 条不同，
+                       第一条 = ('WSF1', 251) **`etr`**          ⇒ 水步**入场前**就已经差
+                       另有 WSFE 的 `rootflux[1,3,4,7]`（同一步）与 RCHL 的 `ss_vl`（下游）
+```
+
+⇒ **干窗第 251 步的种子在水步的上游：`etr`（蒸腾）与 `rootflux`（逐层根吸水）已经差 1 ULP**，
+水步只是把它传下去（`ss_vliq` → restart 的 `wliq/wice/t_soisno[0,5]` → 该层 `hk` →
+近地层的 `qstar/zol/rib/qref/rst/trad/t_grnd`）。
+（顺带纠正第 353 轮的一个读法：`hk[0,0]` 与 `wliq_soisno[0,5]` 是**同一层** ——
+`hk` 是 10 层数组、`t_soisno` 是 15 槽（0-4 是空雪层），不存在"层 0 的 hk 差而水不变"的怪事。）
+
+**③ 两个窗口的种子在**同一条链**上**
+
+* 湿窗：第 63 步 = `pco2a`（`stomata` 唯一分叉的入参）→ `stomata` → PHS → `vegwp`/`ldew_rain`；
+* 干窗：第 251 步 = `etr`/`rootflux`（水步入参）——`etr = etrsun + etrsha`、`rootflux` 是
+  PHS 的输出（`MOD_LeafTemperature_Extended.F90:1358-1367`）。
+
+两条都落在**叶温-气孔-植物水力**这一侧 ⇒ 第 349-351 轮那条链（以及挂起的 `pco2a` `.FNMA`
+例外）是**两个窗口共同的瓶颈**，不再是"湿窗专属"。
+
+**④ 下一枪**：把 `phs_hex_probe.sh`（第 345-349 轮那位型探针，现在支持 `WORK/STEPS`）
+加一个 `CASE` 选择器后指到**干窗 251 步** —— 判 PHS 链在干窗第 251 步的**入参**
+（`gssun`/`gssha`/`laisun`/`laisha`/`fwet`/`tl`）是否已经分叉；若已分叉，再往上就是
+`stomata` 的入参（`etr = etrsun+etrsha` 由 `transpiration` 给出），可复用第 351 轮的
+`stomata_probe.sh`（已 hex 化）。
