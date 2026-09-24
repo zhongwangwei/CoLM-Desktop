@@ -21302,3 +21302,34 @@ MOD_Thermal_CanopyPhase_Extended.F90:747   IF (patchtype==0 .and. (DEF_USE_PFT .
 **下一枪**：把 `:1343-1372` 的 17 处按 `.loc` 逐条列出，与 Rust 的
 `ground_fluxes.rs`(8 个 mul_add) / `ground_temperature.rs`(27) / `ground_thermal_step.rs`(**0**)
 对应表达式逐条对；判据仍是**干窗首分歧步**（现 N=251）。
+
+**第 365 轮追加：第 303/310 轮那份"确证缺口清单"**今天仍然是缺口** —— 水侧 `flux_variable_saturated_*` 全族 `mul_add = 0`**
+
+顺着"干窗种子在水/土侧"往下核时，把 Rust 侧水模块**逐函数**数了一遍 `mul_add`：
+
+```text
+solve_variable_saturated_least_squares        9   （第 339 轮已核 ✓）
+variable_saturated_water_balance              4   （第 303 轮记的 5 处缺口 → 4 处已有）
+flux_variable_saturated_both_transition       0   ← 第 310 轮记的"归一化加权平均"缺口
+flux_variable_saturated_zone_fixed_boundaries 0
+flux_variable_saturated_zone_all              0
+```
+
+而本轮普查（第 363 轮）在**内核**侧数到：`flux_all` **7 处**、
+`flux_top_transitive_interface` **3**、`flux_btm_transitive_interface` **3** ✅
+⇒ **水侧 `flux` 全族仍是"内核有 FMA、Rust 一个都没有"**。
+
+这条与第 303/310 轮的记录完全一致（当时写的是"确证缺口清单（更新）：
+`flux_inside_hm_soil` **2** + `water_balance` **5** + `flux_all` 中间的加权平均 **1** = **8 处**，
+写法都已记档"，并说"下一轮把这 8 处补上"）—— 那之后 336–339 轮只落了
+`swvm`/`Richards_solver`/`use_explicit_form`/`soilwater_aquifer_exchange` 那几批，
+**`flux` 这一族没动** ✓。
+
+**这一步为什么重要**：干窗种子已证在**水/土侧**（第 362 轮否掉叶链、第 363 轮把
+`water_vsf` 的 17 处与预解算换算全部收口），而 `flux_variable_saturated_*` 正是
+**Richards 求解器每次迭代都要调的通量/界面函数**（第 355 轮量到求解器内部
+`RCHF/RCHB/RCHD/RCHE` 逐位相同、差异在子步之间 ⇒ 那么**子步之间**的通量函数就是下一个要看的地方 ✓）。
+
+**下一枪**：按第 310 轮已记档的写法，把这 7 处（`flux_inside_hm_soil` 2 + 加权平均 1 +
+两个 interface 各若干）逐条补上，用**干窗首分歧步**（现 N=251）判是否落地，
+湿窗（现 N=63）与两个黄金窗口一并复测。
