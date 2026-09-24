@@ -42,7 +42,7 @@ def rows(path):
     return out
 f = rows(f'{work}/stm.txt')
 r = rows(f'{work}/stm_rust.txt')
-assert len(f) == len(r) == 3000, (len(f), len(r))
+assert len(f) == len(r) == 4000, (len(f), len(r))
 bad = collections.Counter()
 flags = collections.Counter()
 for a, b in zip(f, r):
@@ -53,9 +53,9 @@ for a, b in zip(f, r):
         if x.upper().zfill(16) != y.upper().zfill(16):
             bad[names[k]] += 1
 if bad:
-    print('stomata mismatches / 3000:', dict(bad))
+    print('stomata mismatches / 4000:', dict(bad))
     print('  模型计数:', dict(sorted(flags.items())))
     raise SystemExit(1)
-print('stomata: all 3 outputs 3000/3000 bitwise identical;'
+print('stomata: all 3 outputs 4000/4000 bitwise identical;'
       f' 模型计数 {dict(sorted(flags.items()))}')
 PY

@@ -10,7 +10,8 @@
 !
 ! **抽签次数与顺序必须与 Rust 侧逐条对齐**，改一边就得同步改另一边。
 ! 三种气孔模型各跑 1000 例（`MOD_Namelist` 的模块开关）：
-!   k=0 Ball-Berry（两个开关都 .false.）、k=1 Medlyn、k=2 WUE
+!   k=0 Ball-Berry（两个开关都 .false.）、k=1 Medlyn、k=2 WUE、
+!   k=3 WUE + **黄金窗口的真实参数区间**（c3c4=1、par≤800、tlef∈[275,315]、rstfac∈[0.3,1]）
 ! 覆盖值全部设成哨兵 `-1`，让实参里的 `g1/g0/gradm/binter/lambda` 生效。
 !
 ! 输出：`k` 后 3 列十六进制 —— `assim`/`respc`/`rst`。
@@ -38,14 +39,14 @@ PROGRAM stm
   DEF_WUE_LAMBDA = -1.0_r8
   DEF_BALL_BERRY_GRADM = -1.0_r8
   DEF_BALL_BERRY_BINTER = -1.0_r8
-  DO k = 0, 2
+  DO k = 0, 3
      DEF_USE_MEDLYNST = (k == 1)
-     DEF_USE_WUEST = (k == 2)
+     DEF_USE_WUEST = (k == 2) .OR. (k == 3)
      DO i = 1, 1000
         vmax25 = 10.0_r8 + uni()*80.0_r8
         effcon = 0.01_r8 + uni()*0.08_r8
         c3c4 = MERGE(1, 0, uni() < 0.5_r8)
-        IF (k == 2) c3c4 = 1
+        IF (k >= 2) c3c4 = 1
         slti = 0.1_r8 + uni()*0.3_r8
         hlti = 280.0_r8 + uni()*20.0_r8
         shti = 0.2_r8 + uni()*0.3_r8
@@ -64,14 +65,15 @@ PROGRAM stm
         pco2a = pco2m*(0.9_r8 + uni()*0.15_r8)
         ea = uni()*2000.0_r8
         ei = 100.0_r8 + uni()*4000.0_r8
-        tlef = 250.0_r8 + uni()*60.0_r8
-        par = uni()*300.0_r8
+        ! k=3：按黄金窗口（CN-Cng-wet，C3 + 默认 WUE）的真实区间取一档。
+        tlef = MERGE(275.0_r8, 250.0_r8, k == 3) + uni()*MERGE(40.0_r8, 60.0_r8, k == 3)
+        par = uni()*MERGE(800.0_r8, 300.0_r8, k == 3)
         o3coefv = uni()
         o3coefg = uni()
         lambda = 100.0_r8 + uni()*5000.0_r8
         rb = 10.0_r8 + uni()*200.0_r8
         ra = 10.0_r8 + uni()*200.0_r8
-        rstfac = uni()
+        rstfac = MERGE(0.3_r8, 0.0_r8, k == 3) + uni()*MERGE(0.7_r8, 1.0_r8, k == 3)
         cint(1) = uni()
         cint(2) = uni()
         cint(3) = uni()

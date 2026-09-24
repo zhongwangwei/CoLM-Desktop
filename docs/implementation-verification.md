@@ -17721,6 +17721,16 @@ wice_soisno[5]   kernel=6.1823587081423845 (4018BABC3DBE730C)
 * `oracle/scripts/restart_scan.sh`（第 297 轮）：逐步跑 `dry_ts.sh N` 比 **restart**
   （68 个状态量本身），找**瞬时状态**第一次分歧的第几步。判状态必须用它，
   不能用 history（那是区间累加）。
+* `oracle/scripts/compare_stomata.sh` / `compare_sortin.sh` / `compare_update_photosyn.sh`
+  （第 328/333/336 轮）：气孔-光合链的三个随机差分闭环，分别逐位判 `stomata`
+  （4 个模型块 × 1000 = 4000）、`sortin`（`ic≥4` 的二次拟合 + 9 个中间量）、
+  `update_photosyn`（3 个模型块 × 1000，`assim` + `respc`）。
+  **`compare_update_photosyn.sh` 与第 293 轮的 `compare_updphotosyn.sh` 是两件东西**：
+  前者是随机差分闭环（3000 例逐位比），后者是"内核侧参考值 +
+  `photosynthesis_tests.rs` 里钉死"的单配置金值，**别混**。
+* 湿窗（CN-Cng-wet）的逐步 restart 扫描：`/tmp/gf/wet_ts.sh N`（与 `dry_ts.sh` 同构）
+  + `oracle/scripts/restart_divergence.py`。第 336 轮用它证明光合/气孔链（25 处 FMA）
+  对湿窗**状态轨迹零影响**，并把湿窗首个状态分歧定在 N=4 的 `wliq_soisno[0,5]`。
 * `oracle/scripts/vsf_probe.sh` + `vsf_cmp.py`（第 299 轮）：
   `soil_water_vertical_movement` **出场处**的逐层探针（`ss_vliq`/`ss_wt`/`smp`/
   `hk`/`qlayer` + `wa`/`zwt`/`ss_dp`/`qinfl`/`wblc`），19 步两次调用一次一行。
@@ -18349,6 +18359,18 @@ VSFI     kernel=200 rust=200
 反向小幅移动，要记录但不当判据。
 
 ## 若继续
+
+> **第 336 轮更新（最新的指路牌，先读这段）**：气孔-光合链的闭环已全部建成，
+> 口径是 **`sortin` 3000/3000、`update_photosyn` 3000/3000、`stomata` 4/4000**
+> （残余全在黄金窗口走不到的 BB/Medlyn 分支）。这批形状（25 处 FMA）**已按现行口径回退**，
+> 原因与清单见"第 336 轮"。两条更重要的结论：
+> ① `stomata` 那批形状在黄金窗口上**恒等**（C3 ⇒ `c3_fraction∈{0,1}`；Medlyn/BB 是死分支），
+> 所以"它让湿窗倒退"是错的归因 —— 账全在 `sortin`；
+> ② 用湿窗 restart 扫描量出：**这条链对湿窗状态轨迹零影响**，湿窗唯一的状态种子是
+> **N=4 的 `wliq_soisno[0,5]`（顶层土壤液态水，1 ULP）**，在土壤水里。
+> **下一枪**：第 324 轮那 17 处里还没测过的 **内联 `Richards_solver` 6 处 +
+> `use_explicit_form` 6 处**（该轮表里有现成的 `.loc` 行号与形状），判据用
+> `/tmp/gf/wet_ts.sh 4` + `restart_divergence.py`，不要再用 `over_tol`。
 
 **短程逐位已经干净**（1/3 步 restart 0/68、3 步 history 692/692），所以别再往
 `meltf`/`water_2014`/水步补冰那几处找 —— 第 257 轮已经把那条链走完并修好。
@@ -19208,3 +19230,130 @@ Ball-Berry `:353-356`、WUE `:861`）：`stomata` 闭环 **148/114 → 4/0** —
 `internal`/`eyy`），把那 4 条定位到具体量；② 给夹具**加一档按黄金窗口真实参数区间的
 采样**（照 CN-Cng-wet 第一步的 `par`/`tlef`/`rstfac`/`c3c4=1`），先把"夹具覆盖"这件事
 本身验证掉，再谈落地。
+
+**第 336 轮：`update_photosyn` 第 7 个闭环建成并把这条链判到 3000/3000；同时证明 `stomata` 那批形状在黄金窗口上**恒等**、黄金湿窗的状态种子其实在**土壤水****
+
+**先把第 335 轮留的"夹具覆盖"问题回答掉 —— 答案是"不必覆盖，因为恒等"**：把
+`sortin` 与 `wue_internal_co2` 那一处退回平、只留 `stomata` 函数里的形状
+（`omc`/`ome`/`oms` + Medlyn + Ball-Berry），黄金湿窗实测
+`bitwise=27972 sumabs=11.0278 over_tol=1287 ot_vars=24` —— 与**平基线逐位相同**。
+原因不是巧合，是恒等：
+
+* `c3_fraction`/`c4_fraction` 只取 `{0,1}`（`c3c4` 只取 0/1），于是
+  `vm_term.mul_add(c3, vm*c4)` 与 `vm_term*c3 + vm*c4` 逐位相同（`mul_add(a,0,b)==b`、
+  `a*0+b==b`）。`:258`/`:259`/`:262`/`:737`/`:738`/`:740` 六条 FMA 全是这种，
+  **改不改都一样**。
+* Medlyn（`:343`/`:344`/`:346`/`:354`）与 Ball-Berry（`:353`/`:356`）只在
+  `use_medlyn`/两者皆假时才走；黄金默认 `DEF_USE_WUEST=.true.`，是**死分支**。
+* C3 下 `assim = max(0, min(omc,ome))`，`coupled_assimilation`（`:264`/`:266`/`:742`/`:744`）
+  也不走。
+
+⇒ 第 331/332 轮记的"stomata 形状让湿窗倒退 1287→2237"**全部来自 `sortin`**，
+与 `stomata` 函数无关。这也解释了为什么夹具加到 4000 例（含按黄金区间采样的 k=3 块）
+也拦不住：那批形状本来就动不了黄金窗口。
+
+**复核 `.loc` 时抓到 3 处从没进过任何一轮清单的缺口**（把 `stomata` 的 17 条、
+`update_photosyn` 的 8 条重新逐条对齐源行）：
+
+```text
+stomata :259  / (electron_co2 + f77(2.0)*gammas)
+              出货 `fmov d29,2.0e+0` + `fmadd d29,d9,d29,d28`（d9=gammas、d28=pco2i_e）
+              ⇒ / f77(2.0).mul_add(photo.co2_compensation_pa, electron_co2)
+update  :738  同款（internal）：`fmov d29,2.0e+0` + `fmadd d29,d9,d29,d28`
+update  :805  errors[..] = internal - next
+              出货 `fsub d31,d30,d31`（bracket）+ `fmsub d28,d31,d14,d28`
+              （d28=pco2i、d14=psrf）⇒ (-bracket).mul_add(air_pressure, internal)
+```
+
+`:805` 那条是这条链一直判不到 0 的关键。注意 `stomata` 的对应处（`:323`/`:355`）
+出货**没有** `fmsub`，所以只加在 `update_photosyn` 一侧 —— 两边照抄就会过度收缩。
+顺带把 `wue_internal_co2` 的 `1+1.37*sqrt(...)` 用 `fmadd d21,d31,d25,d29`（`.loc 1 861`）
+钉死：与现有 Rust 写法同形，确认无误。
+
+**第 7 个闭环：`oracle/scripts/compare_update_photosyn.sh`**
+（`update_photosyn_diff.f90` + `crates/colm-core/examples/update_photosyn_probe.rs`）。
+3 个模型块 × 1000，逐位比 `assim`/`respc`：k=0 WUE+黄金区间（c3c4=1、par≤800、
+tlef∈[275,315]、rstfac∈[0.3,1]）、k=1 WUE（c3c4 随机，两支都走）、
+k=2 Ball-Berry（WUE 关 ⇒ 恒走 `coupled_assimilation`）。
+`update_photosyn` 在模块里是 **PUBLIC**，直接链 `.bld` 的对象，**不需要**"拷贝+放行"。
+它一次覆盖 `calc_photo_params` + `sortin` 的 6 次迭代 + `coupled_assimilation` + `:223` 的 `range`。
+
+| 形状集合 | `update_photosyn` 逐位 |
+|---|---|
+| 平（HEAD） | `assim` **225**/3000 |
+| + 第 331/332/333 轮那批 | `assim` 190/3000 |
+| + 本轮 3 处（`:259` 分母、`:738` 分母、`:805`） | **3000/3000** ✓ |
+
+`stomata` 闭环同口径：平 HEAD `assim` 171 / `rst` 114（4000），加完全部形状后
+**`assim` 4 / `rst` 0**，且**本轮那处分母 FMA 没有动这 4 条** —— 残余全在
+WUE 之外的分支（`k=0` BB 1 条 ~1 ULP；`k=1` Medlyn 3 条，其中 `1975` 号 Gold 得 `0`
+而 Rust 得 `0x3F00D79435E50D79`，像 `max(0,·)` 的分支边界）。黄金窗口走不到，先记着。
+
+**新器材：湿窗 restart 逐步扫描 —— 它比 `over_tol` 锐得多，而且本轮推翻了一个归因**
+
+`history` 里的量是 `MOD_Vars_1DAccFluxes` 的 `acc1d` 累加/换算出来的，**第 1 条记录**
+就带 1 ULP 的**派生量**差：`f_h2osoi[1,0,0]` 差 1 ULP 而同一记录的 `f_wliq_soisno`
+逐位相同 —— 那只可能是换算式（层厚/除法）的舍入，不是状态。这种差会污染 `over_tol`。
+判形状要用**瞬时状态**，所以照 `restart_scan.sh` 给湿窗配了
+`/tmp/gf/wet_ts.sh N`（`oracle/scripts/restart_divergence.py` 判 68 个状态量）。
+
+实测：湿窗首个状态分歧在 **N=4**，`wliq_soisno[0,5]`（顶层土壤液态水）
+`9.034010105577982` vs `9.034010105577984`，1 ULP。然后做 A/B：
+
+| 变体 | 跑过的 N | 与平 HEAD 的状态分歧清单 |
+|---|---|---|
+| 平 HEAD | 4,8,12,16,24,32,48,64 | （基准：N=4 起 `wliq_soisno[0,5]` 1 ULP） |
+| 只 `stomata` 函数形状 | 1,2,3,4 | **逐位相同** |
+| 17+`sortin` 全部（旧 22 处，缺本轮 3 处） | 4,5,6,8 | **逐位相同** |
+| 25 处全开（含本轮 3 处） | 4,8,12,16,24,32,48,64 | **逐位相同** |
+| 第 324 轮的 swvm 自有 5 处 | 4,5,6 | **逐位相同** |
+
+⇒ **这条光合/气孔链（`stomata` 17 + `update_photosyn` 8 = 25 处 FMA）对湿窗状态轨迹
+零影响**；湿窗的种子在土壤水里，不在这条链上。链条确实会改 `history`（它经叶温进湍流
+诊断），所以 `over_tol` 会摆动 —— 但那是**诊断层**的 1 ULP 经混沌放大，不是状态层的账。
+
+**三段式实测（A/B，同树）**：
+
+| 窗口 | 平基线（HEAD） | 25 处全开 |
+|---|---|---|
+| dry | 28 / 1，bitwise 17057，sumabs 330.8133 | 28 / 1，bitwise 17056，sumabs 330.8133 |
+| wet | 1287 / 24，bitwise 27972，sumabs 11.0278 | **1890 / 52**，bitwise 28605，sumabs 23.7476 |
+| snow | 25713 / 79，bitwise 32721，sumabs 444416.8246 | 25713 / 79，bitwise 32719，sumabs 444416.8246 |
+
+干窗/雪窗的 `over_tol`/`ot_vars` 一字不动，湿窗 `over_tol` 1287→1890、
+`ot_vars` 24→52。按现行口径（任一窗口变差即回退）**整批回退**（`git checkout`），
+只留第 7 个闭环与第 335 轮那批调试设施。
+
+**这条链的 25 处 FMA 全清单（照 Fortran 行号，`update_photosyn` 与 `stomata` 共用
+公式的地方标"同"）**：
+
+```text
+range（:223 stomata / :710 update_photosyn）—— **已入库 HEAD**
+  pco2m.mul_add(1.0 - 1.6/gradm, -gammas)
+omc（:258 / :737）  vm_term.mul_add(c3, vm*c4)                    —— 恒等
+ome 分母（:259 / :738） f77(2.0).mul_add(gammas, pco2i)            —— **数值有效**
+ome（:259 / :738）  epar_term.mul_add(c3, epar*c4)                —— 恒等
+oms（:262 / :740）  omss.mul_add(c3, omss*pco2i*c4)              —— 恒等
+耦合判别式（:264/:266 / :742/:744）coupled_assimilation（已入库）—— 仅非 WUE/C4 分支
+Medlyn（:343 bq / :344 c / :346 判别式 / :354 conductance）        —— 死分支
+Ball-Berry（:353 bq,c / :356 conductance）                        —— 死分支
+wue 电子（:861）    f77(1.37).mul_add(sqrt, 1.0)                  —— 数值有效（仅 stomata）
+eyy（:805，仅 update_photosyn）  (-bracket).mul_add(psrf, pco2i)   —— **数值有效**
+```
+
+⇒ 对黄金窗口**真正有数值作用**的只有 4 处：`:223`/`:710` 的 `range`（已入库）、
+`:259`/`:738` 的 `ome` 分母、`:805` 的 `eyy`、`:861` 的 `wue` 电子。其余 21 处要么恒等、
+要么死分支。**下一轮重放时只有这 4 处需要先落**，其余跟着一起落只为把闭环钉到 0。
+应用脚本（会话内）`/tmp/gf/photo_variant.py` + `/tmp/gf/photo_extra.py`，
+全形状快照 `/tmp/gf/photo_all_extras.rs`。
+
+**给下一轮（按优先级）**：
+
+1. **打 N=4 那颗 `wliq_soisno[0,5]` 的种子** —— 这是黄金湿窗唯一的状态种子。
+   第 324 轮的 17 处里，本轮只测了 **swvm 自有那 5 处**（对 N≤6 无影响）；
+   **内联的 `Richards_solver` 6 处 + `use_explicit_form` 6 处还没测**，
+   `.loc` 行号与形状在第 324 轮那张表里现成（`:817/:823/:966/:1060/:1065/:1085`、
+   `:1411/:1424/:1464/:1474/:1479`）。判据就用 `wet_ts.sh 4` 的状态分歧是否消失/后移。
+2. 湿窗 `f_h2osoi` 那条**换算式**的 1 ULP（层厚来源 = `template.soil_layer_thickness_m()`）
+   单独查一遍 —— 它不改状态，但一直占着"第一条分歧记录"。
+3. 光合链那 4 处数值有效的形状，等 1 或 2 落地后**成组**重放（第 316 轮就是这么成组的）。
