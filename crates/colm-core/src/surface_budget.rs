@@ -94,24 +94,49 @@ pub fn surface_budget(energy: &StandardLctEnergyOutput) -> Result<SurfaceBudget>
         + ICE_HEAT_CAPACITY_J_KG_K
             * energy.interception.ground_snow_kg_m2_s
             * (precipitation_temperature_k - surface_temperature_k);
-    let ground_heat =
-        energy.shortwave.ground_absorbed_w_m2 + energy.leaf.downward_longwave_w_m2 * emissivity;
-    // `- (1-fsno)*emg*stefnc*t_soil**4`（`MOD_Thermal…:1347`）：这个乘积被**收进减法**。
-    // 离线穷举 8 步的 `fgrnd` 位型（`/tmp/gf/fgrnd`）实测：只有"这一项融合"能与内核
-    // 全部对上，平铺则第 3 步差 1 ULP（`C081C128CF597630` 对 `…631`）。
+    // 内核 `MOD_Thermal…:1352` 这一支是一条 6 段的累加链，**每一段的乘积都各自
+    // 熔进当时的累加值**（不是先算一个 `precipitation_heat` 再加上去）：
+    //   _1747 = .FMA(dlrad, emg, sabg)
+    //   _1751 = .FNMA(emg*stefnc, t_grnd_bef**4, _1747)
+    //   _1753 = (emg*stefnc)*t_grnd_bef**3 ; _1757 = .FNMA(_1753, 4*tinc, _1751)
+    //   _1758 = .FMA(fevpg, htvp, fseng)    ; _1760 = _1757 - _1758
+    //   _1762 = pg_rain*cpliq ; _1768 = .FMA(_1762, t_precip-t_grnd, _1760)
+    //   _1770 = pg_snow*cpice ; _1772 = .FMA(t_precip-t_grnd, _1770, _1768)
+    // 所以只能一段一段写。旧写法有三段是平铺的；旧的"8 步离线穷举"看不见它们，
+    // 因为探针那 8 行输入恰好 `sabg=0`、`fsno=0`、`t_soil==t_grnd_bef`、
+    // `4*tinc` 那一乘在这几组数上熔不熔位型相同（见下）。
+    let ground_heat = energy
+        .leaf
+        .downward_longwave_w_m2
+        .mul_add(emissivity, energy.shortwave.ground_absorbed_w_m2);
+    // `- emg*stefnc*t_grnd_bef**4`：这个乘积被**收进减法**。
+    // 离线穷举那份 8 步位型实测：只有"这一项融合"能与内核全部对上，
+    // 平铺则 6/8 步差 1 ULP（`C081C128CF597630` 对 `…631`）。
     let ground_heat = (-(emissivity * STEFAN_BOLTZMANN_W_M2_K4))
         .mul_add(previous_surface_temperature_k.powi(4), ground_heat);
+    // 内核这一项是 `emg*stefnc*t_grnd_bef**3*(4.*tinc)`，**左结合**
+    // `(((emg*stefnc)*t**3)*(4.*tinc))`；不能复用 `blackbody_change`
+    // （那是 `stefnc*t**3*(4*tinc)`，少一层 `emg`，结合顺序不同）。
+    // `_1757` 是 `.FNMA(_1753, 4*tinc, …)` —— **最后那一乘也熔进减法**。
+    let ground_heat =
+        (-(emissivity * STEFAN_BOLTZMANN_W_M2_K4 * previous_surface_temperature_k.powi(3)))
+            .mul_add(4.0 * temperature_change_k, ground_heat);
+    // `- (fseng+fevpg*htvp)`：那个乘积同样会被吸收 ⇒ `fma(fevpg, htvp, fseng)`。
     let ground_heat = ground_heat
-        // 内核这一项是 `emg*stefnc*t_grnd_bef**3*(4.*tinc)`，**左结合**
-        // `(((emg*stefnc)*t**3)*(4.*tinc))`；不能复用 `blackbody_change`
-        // （那是 `stefnc*t**3*(4*tinc)`，少一层 `emg`，结合顺序不同）。
-        - emissivity
-            * STEFAN_BOLTZMANN_W_M2_K4
-            * previous_surface_temperature_k.powi(3)
-            * (4.0 * temperature_change_k)
-        // `- (fseng+fevpg*htvp)`：那个乘积同样会被吸收 ⇒ `fma(fevpg, htvp, fseng)`。
-        - sublimation_heat.mul_add(ground_evaporation, energy.corrected_ground_sensible_heat_w_m2)
-        + precipitation_heat;
+        - sublimation_heat.mul_add(
+            ground_evaporation,
+            energy.corrected_ground_sensible_heat_w_m2,
+        );
+    // 降水显热两项：内核把**每一项**熔进累加器（`_1768`/`_1772`），不是先求和再加。
+    // `precipitation_heat_w_m2` 那一列是 `MOD_Thermal…:1398-1399` 的**诊断量**
+    // （`crates/colm-runtime/src/history.rs:910` 用它写 `hprl`），保持原算式不动。
+    let precipitation_temperature_difference = precipitation_temperature_k - surface_temperature_k;
+    let ground_heat = (WATER_HEAT_CAPACITY_J_KG_K * energy.interception.ground_rain_kg_m2_s)
+        .mul_add(precipitation_temperature_difference, ground_heat);
+    let ground_heat = precipitation_temperature_difference.mul_add(
+        ICE_HEAT_CAPACITY_J_KG_K * energy.interception.ground_snow_kg_m2_s,
+        ground_heat,
+    );
     // `MOD_Vars_1DAccFluxes.F90:2087`：`rnet = sabg + sabvsun + sabvsha - olrg + forc_frl`。
     //
     // **曾经写成 `fsena + lfevpa + fgrnd`**，理由是"与辐射式恒等"。那个恒等只在

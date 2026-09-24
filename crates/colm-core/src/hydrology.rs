@@ -82,8 +82,13 @@ pub fn equilibrium_water_state(
                 psi_s_mm[layer],
                 model[layer],
             );
-            liquid_water_kg_m2[layer] = upper_water * (water_table_mm - interface_mm[layer])
-                + porosity[layer] * (interface_mm[layer + 1] - water_table_mm);
+            // `MOD_Hydro_SoilWater.F90:137` 的 GIMPLE 是
+            // `.FMA(zwtmm - sp_zi(ilev-1), vliq_up, porsl*(sp_zi(ilev) - zwtmm))`：
+            // 第二个源乘积 `porsl*(...)` 独立舍入，第一个源乘积进 FMA。
+            liquid_water_kg_m2[layer] = (water_table_mm - interface_mm[layer]).mul_add(
+                upper_water,
+                porosity[layer] * (interface_mm[layer + 1] - water_table_mm),
+            );
             matric_potential_mm[layer] = soil_psi_from_vliq(
                 liquid_water_kg_m2[layer] / (interface_mm[layer + 1] - interface_mm[layer]),
                 porosity[layer],
@@ -104,7 +109,9 @@ pub fn equilibrium_water_state(
         );
     }
     let aquifer_water_mm = if water_layer == layers + 1 {
-        let psi = psi_at_water_table - (water_table_mm - interface_mm[layers]) * 0.5;
+        // `:150` 的 GIMPLE 是 `.FNMA(zwtmm - sp_zi(nlev), 5.0e-1, psi_zwt)`：
+        // `psi_zwt - (zwtmm - sp_zi(nlev))*0.5` 是一条 FMA，取负是精确的。
+        let psi = (water_table_mm - interface_mm[layers]).mul_add(-0.5, psi_at_water_table);
         let water = soil_vliq_from_psi(
             psi,
             porosity[layers - 1],

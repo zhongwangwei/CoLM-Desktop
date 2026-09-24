@@ -18373,6 +18373,29 @@ VSFI     kernel=200 rust=200
 
 ## 若继续
 
+> **第 367 轮更新（最新的指路牌，先读这段）**：**第 366 轮那条"水侧差 10 处"作废** ——
+> `MOD_Hydro_SoilWater.F90` **整个文件**只有 **71 条** `.FMA/.FNMA/.FMS`（落在 56 个源码行，
+> 不是 27），逐条按 `.loc` 落到源码行 + 读 GIMPLE 操作数角色之后：**69 条早有对应写法**，
+> 只有 `get_water_equilibrium_state` 的 **2 条**（`:137`/`:150`）从来没落过，**本轮已补**
+> （它在 `hydrology.rs`，运行时一次都不进，只有新加的闭环 `compare_water_equilibrium.sh`
+> 看得见：位型 109949/109949）。当年"27 vs 17"是拿**含内联下游**的函数体汇编条数（29）
+> 去比 Rust **拆开**后的同名函数（15 自身 + 6 + 8 = 29，Rust 拆成三个函数）。
+>
+> * **同时补的**：`MOD_Thermal…:1352` 那条 `fgrnd` 累加链在 `surface_budget.rs` 里少熔 3 段
+>   （`sabg+dlrad*emg`、`t**3*(4*tinc)`、降水两项各自熔进累加器）—— 这是**运行时路径**，
+>   两个黄金窗口的位型差异各降 11 个元素（9163→9152、27066→27055），
+>   `over_tol`/`ot_vars`/`sumabs` 一律不动；干湿窗首分歧不动（`sabg=0`、`fsno=0` 时那几段不可分辨）。
+> * **水侧的账现在清了**：`MOD_Hydro_SoilWater.F90` 71/71 有着落。**下一枪转 `thermal`**：
+>   `MOD_Thermal_CanopyPhase_Extended.F90` 99 条语句 / 83 个源码行，第 365 轮点的 `:1343-1372`
+>   （17 条）本轮已收口（`lfevpa`/`olrg`/`olru`/`fgrnd`），大头是还没按 `.loc` 落过行的那些簇
+>   （普查底稿 `/tmp/gf/cen/therm.opt`）。
+> * **判据**：干窗 restart 首分歧 **N=251（11/68）**、湿窗 **N=63（10/68）**、
+>   黄金 dry `9152 / 28 / 1，261.0128`、黄金 wet `27055 / 1197 / 19，8.4418`。
+> * **方法**：① `.loc` 落源码行 → ② GIMPLE（`-fdump-tree-optimized-lineno`；正则要容
+>   `[^\]]*`，否则 `discrim N`/`[tail call]` 的语句会被静默漏掉——本轮第一版就漏了 `:456`）
+>   读操作数角色 → ③ 状态扫描首分歧步判落地 → ④ 运行时进不到的例程必须建**闭环**，
+>   "✓ 已落地"要挂判据（`get_water_equilibrium_state` 那两条被记成"成组落地 ✓"挂了 28 轮）。
+
 > **第 366 轮更新（最新的指路牌，先读这段）**：逐条核第 303/310 轮的"确证缺口清单"后发现
 > **它已基本作废**（`flux_inside_hm_soil` 2 处、加权平均 1 处都已在库里；那两个 interface 的
 > 3+3 条其实在共享的 `secant_method_iteration`，第 339 轮已核并落地；
@@ -21381,3 +21404,247 @@ flux_variable_saturated_zone_all              0
 
 **下一枪**：把这 10 处按 `.loc` 逐条读 GIMPLE 操作数角色，与 Rust 同名函数逐条对，
 补齐后跑**干窗首分歧步**（现 N=251）+ 湿窗（N=63）+ 两个黄金窗口。
+
+## 第 367 轮：水侧"差 10 处"是按函数名数出来的假象 —— 真缺口 2 处在 `hydrology.rs` 的冷启动上，另补了 `fgrnd` 那条长链
+
+**一句话**：第 366 轮那条"下一枪"（`soil_water_vertical_movement` 内核 27 处 vs Rust 17 处 = **差 10 处**）
+**作废**。把 `MOD_Hydro_SoilWater.F90` **整个文件**用 `gfortran -O2 -fdump-tree-optimized-lineno`
+数一遍：一共 **71 条** `.FMA/.FNMA/.FMS`（落在 **56 个源码行**上，不是 27），逐条按 `.loc` 落到源码行、
+把 GIMPLE 的操作数角色读出来之后 —— **69 条早有对应写法**，只有
+`get_water_equilibrium_state` 的 **2 条**（`:137`、`:150`）从来没落过；而它根本不在
+`variably_saturated_flow.rs` 里，在 `hydrology.rs`。顺着同一条方法把 `MOD_Thermal_CanopyPhase_Extended.F90`
+的 `:1352` 那条 `fgrnd` 长链也逐条核了，另外补上 3 处未熔的乘积（运行时路径）。
+
+### 一、"27 vs 17"为什么必然对不上：**汇编条数含内联下游，Rust 那边是拆开的**
+
+第 363 轮那张表是 `-S` + `.loc` 数**汇编里的 FMA 指令**得到的，数的是一个**函数体**，
+而 GCC 把被调例程**内联**进了调用者：
+
+| 第 363 轮数出的 | = 自身 | + 内联下游 | 验算 |
+|---|---|---|---|
+| `soil_water_vertical_movement` 29 | 15（`:263-478`） | `Richards_solver` 6 + `use_explicit_form` 8 | 15+6+8 = **29** ✓ |
+| `get_zwt_from_wa` 9 | 6（`:3402-3426`） | `secant_method_iteration` 3（调用点 `:3431`） | 6+3 = **9** ✓ |
+| `flux_all` 7 | 0 | `flux_at_unsaturated_interface` 1 + `secant_method_iteration` 3×2（两个调用点各内联一次） | **7** ✓ |
+
+这张表不是推的，是**从 dump 里按函数体直接数出来的**（`-fdump-tree-optimized-lineno` 的
+`;; Function <名字>` 分段，数段内的 `.FMA/.FNMA/.FMS` 语句及其源码行）：
+
+```text
+water_balance                     total= 4  lines=[1140,1147,1148,1162]
+solve_least_squares_problem       total= 8  lines=[3478,3482,3486,3491,3492,3497,3498,3515]
+flux_inside_hm_soil               total= 2  lines=[2734,2750]
+flux_top_transitive_interface     total= 3  lines=[3559,3560,3561]        ← 全是内联的 secant
+flux_btm_transitive_interface     total= 3  lines=[3559,3560,3561]        ← 同上
+flux_all                          total= 7  lines=[2815,3559,3560,3561]    ← 1 + 3×2，自身 0
+get_zwt_from_wa                   total= 9  lines=[3402,3403,3407,3408,3423,3426,3559,3560,3561]
+soilwater_aquifer_exchange        total= 4  lines=[560,564,569,573]
+soil_water_vertical_movement      total=29  lines=[263,265,266,268,326,331,338,406,434,445,447,
+                                                   448,450,456,478, 817,823,966,1060,1065,1085,
+                                                   1411,1424,1464,1474,1479]   ← 自身 15 + 6 + 8
+get_water_equilibrium_state       total= 2  lines=[137,150]
+```
+
+（`water_balance` 的 4 条**没有**被内联进 `swvm` —— 它在 dump 里是独立函数，
+所以 `swvm` 是 29 而不是 33；这条也能从分段表直接看出来。）
+
+而 Rust 侧把这些**拆成了独立函数**（`soil_water_vertical_movement` / `richards_solver` /
+`apply_variable_saturated_explicit_step` / `variable_saturated_water_balance`…，
+`bounded_secant_iteration` 还是共享的），所以"按同名函数比计数"必然对不上。
+第 366 轮正是拿了上游的 29（记成 27）去比 Rust 的 17，得出"差 10 处"。
+**这条方法教训第 366 轮自己已经写出来了，但只用在 `flux_all` 上，没回头查 `swvm` 那个 27。**
+正确的做法只有一个：**按 `.loc` 落到源码行**，再读 GIMPLE 的操作数角色。
+
+### 二、整个文件 71 条 FMA 的逐条归宿
+
+`gfortran -O2 -fdefault-real-8 -g -cpp -ffree-form -ffree-line-length-0 -fallow-argument-mismatch
+-Iinclude -I.bld -fdump-tree-optimized=<f> -fdump-tree-optimized-lineno`
+（`-J` 指到临时目录，不在 `vendor/` 里落 `.mod`；`build-default` 那棵树是把
+`build_kernel.sh` 的 `trap ... EXIT` 去掉留下来的）：
+
+| 内核例程 | `.loc` 源码行 | FMA 语句 | Rust 侧 | 结论 |
+|---|---|---|---|---|
+| `get_water_equilibrium_state` | 137, 150 | 2 | `hydrology.rs::equilibrium_water_state` | **本轮补** |
+| `soil_water_vertical_movement` | 263, 265, 266, 268, 326, 331, 338, 406, 434, 445, 447, 448, 450, 456, 478 | 15 | `variably_saturated_flow.rs` 同名函数（16 个代码点） | ✓ 已在 |
+| `soilwater_aquifer_exchange` | 560, 564, 569, 573 | 4 | `exchange_soil_water_with_aquifer` | ✓ 第 337 轮 |
+| `Richards_solver` | 817, 823, 966, 1060, 1065, 1085 | 6 | `richards_solver` | ✓ 已在 |
+| `water_balance` | 1140, 1147, 1148, 1162 | 4 | `variable_saturated_water_balance` | ✓ 已在 |
+| `use_explicit_form` | 1411, 1424, 1464, 1474(×4), 1479 | 8 | `apply_variable_saturated_explicit_step`（6 个代码点） | ✓ 已在 |
+| `flux_inside_hm_soil`（FUNCTION） | 2734, 2750 | 2 | `flux_inside_variable_saturated_soil` | ✓ 已在 |
+| `flux_at_unsaturated_interface` | 2815 | 1 | `flux_at_variable_saturated_interface` | ✓ 已在 |
+| `get_zwt_from_wa` | 3402, 3403, 3407, 3408, 3423, 3426 | 6 | `water_table_from_aquifer`（4 个代码点） | ✓ 已在 |
+| `solve_least_squares_problem` | 3478, 3482, 3486, 3491, 3492, 3497, 3498, 3515 | 8 | `solve_variable_saturated_least_squares`（9 个代码点） | ✓ 已在 |
+| `secant_method_iteration` | 3559, 3560, 3561（各 ×5） | 15 | `bounded_secant_iteration` | ✓ 第 339 轮 |
+| **合计** | 56 行 | **71** | | **缺 2** |
+
+"Rust 代码点数 ≠ 内核语句数"的地方都逐条看过原因，不是漏：
+`:1474` 的 4 条是**两条嵌套 FMA**（`dwat` 收进"加权和"那个和），Rust 写成
+`water_change_factor.mul_add(dt, …mul_add(…))` = 2 个点；
+`:3403/:3408/:3423` 是**同一个闭包** `liquid_at_depth` 被内联到 3 个调用点；
+`secant_method_iteration` 的 `:3559-3561` 在汇编里出现 5 份，是 5 个内联点。
+
+旧 banner 点名的那 26 行**逐条**都对上了（GIMPLE 操作数角色 ⇒ Rust 行）：
+
+| 旧 banner 的行 | GIMPLE | Rust |
+|---|---|---|
+| `:263/:265/:266/:268` | `.FMA(ss_vliq, sp_dz, Σ)`、`.FMA(ss_vliq(izwt), zwt-sp_zi(j-1), Σ)`、`.FMA(porsl, sp_zi(j)-zwt, Σ)`、`.FMA(porsl, sp_dz, Σ)` | `:4853/:4855/:4859/:4865` ✓ |
+| `:326/:331` | `.FMA(dt, etroot, deficit)` / `.FMA(etroot, dt, deficit)` | `:4905`+`:4924` / `:4931` ✓ |
+| `:338` | `.FMA(rsubst, dt, deficit)` | `:4941` ✓ |
+| `:406` | `.FMA(qgtop, dt, ss_dp)` | `:5067` ✓ |
+| `:434` | `.FMA(ss_vliq, sp_dz-ss_wt, porsl*ss_wt)`（第二个源乘积独立舍入） | `:5113` ✓ |
+| `:445/447/448/450` | 同 `:263/265/266/268`，作用在 `w_sum_after` | `:5130/:5132/:5136/:5141` ✓ |
+| `:456` | `.FMA(qgtop-Σetroot-rsubst, dt, w_sum_before)`，再 `- etrdef` | `:5148-5153` ✓ |
+| `:478` | `.FMA(ss_vliq, zwt-zlo, porsl*(zhi-zwt))` | `:5180` ✓ |
+| `:817` | `.FNMA(dt_this, q_0-ubc, dp_m1)`（wet2dry 判定，影响迭代出口） | `:3638` ✓ |
+| `:823` | `.FMA(blc, blc, Σ)`（收敛范数的平方和） | `:3651` ✓ |
+| `:966` / `:1060` | `.FMA(sp_zi-zwt, 5.0e-1, psi_s)` | `:3864` / `:4026` ✓ |
+| `:1065` | `.FMA(q_this, dt_this, ss_q)` | `:4040` ✓ |
+| `:1085` | `.FMA(ss_wf, vl_s, (dz-wf-wt)*ss_vl)` | `:4096` ✓ |
+| `:1411/:1424` | `.FMA(wt_m1+wf_m1, vl_s, (dz-wt_m1-wf_m1)*vl_m1)` | `:2153`/`:2176` ✓ |
+| `:1464` | `.FMA(ubc_val-q, dt, dp_m1)` | `:2226` ✓ |
+| `:1474`(×4) | `.FMA(dwat, dt, (wt+wf).mul_add(vl_s, …))` | `:2236`+`:2240` ✓ |
+| `:1479` | `.FMA(q(lb), dt, wa_m1)` | `:2252` ✓ |
+
+### 三、真缺口之一：`get_water_equilibrium_state` 的 `:137` / `:150`
+
+```text
+:137  GIMPLE  _57 = porsl(ilev)*(sp_zi(ilev)-zwtmm)              ← 第二项独立舍入
+              _58 = .FMA(zwtmm-sp_zi(ilev-1), vliq_up, _57)
+:150  GIMPLE  _78 = zwtmm - sp_zi(nlev)
+              _80 = .FNMA(_78, 5.0e-1, psi_zwt)
+```
+
+Rust（`crates/colm-core/src/hydrology.rs::equilibrium_water_state`）两处都是**平铺**：
+`upper_water * (water_table_mm - interface_mm[layer]) + porosity*(…)` 与
+`psi_at_water_table - (water_table_mm - interface_mm[layers]) * 0.5`。
+`git log -S mul_add -- crates/colm-core/src/hydrology.rs` 只有一条 `d062257`
+（那是 `soil_vliq_from_psi` 的 van Genuchten 乘积）⇒ **这两处从来没落过**。
+
+第 366 轮表格里"`get_water_equilibrium_state` **2** —— 第 339 轮成组落地 ✓"是错的：
+第 339 轮落地的是同一批次里的 `soilwater_aquifer_exchange` 那 **4** 处（`:560/564/569/573`，
+`/tmp/gf/aquifer_fix.py` 里还留着重排操作数顺序的记录），均衡这两处被一起记成了"✓"。
+**教训：没有可复跑闭环的"✓"不算落地。**
+
+### 四、这个例程**运行时一次都不进**，只能建闭环
+
+`get_water_equilibrium_state` 的唯一调用点是 `mkinidata/MOD_IniTimeVariable.F90:463`
+（`use_wtd` 分支）；Rust 侧 `equilibrium_water_state` 也只被 `colm-init` 的
+`resolve_cold_start_soil` 调（`crates/colm-init/src/{single_point,spatial_time}.rs`），
+`colm-runtime` 一次都不调 ⇒ **干湿窗首分歧与三份黄金窗口对它都不敏感**（实测见下，
+改前改后逐位不变）。所以照 `compare_getzwt.sh` / `compare_soilhydro.sh` 的成法补了一个闭环：
+
+* `oracle/scripts/water_equilibrium_diff.f90` —— 上游侧驱动，`USE MOD_Hydro_SoilWater`，
+  **不加** `-ffp-contract=off`（要的就是 GCC 默认收缩），驱动自己加 `-fwrapv -ffp-contract=off`；
+* `crates/colm-core/examples/water_equilibrium_probe.rs` —— 同一串 LCG；
+* `oracle/scripts/compare_water_equilibrium.sh` —— 编译、跑、逐位比。
+
+覆盖：两档模型（Campbell / van Genuchten）×（2000 组均匀随机 + 2000 组边界取值），
+层数从 `{1,2,3,5,10}` 抽（`flag=1` 的含水层分支约占一半），比较 `wa` 与逐层
+`wliq / smp / hk` 的**位型**，共 **109949** 个输出。
+
+**敏感性先自证**（闭环能不能当判据的前提）：
+
+```text
+# 改之前（pristine HEAD 的 hydrology.rs）
+get_water_equilibrium_state mismatches: {'wliq[1]': 79, 'smp[1]': 53, 'hk[1]': 38,
+  'wliq[2]': 25, 'wliq[3]': 25, 'smp[3]': 23, 'smp[2]': 18, 'hk[3]': 16,
+  'wliq[4]': 14, 'smp[4]': 12, 'hk[2]': 12, 'wliq[5]': 9}      # most_common(12)
+                                                              # 合计 403 / 109949
+
+# 改之后
+get_water_equilibrium_state: all outputs bitwise identical; 109949 个输出
+```
+
+### 五、真缺口之二：`fgrnd` 那条累加链（**运行时路径**，`MOD_Thermal…:1352`）
+
+`MOD_Thermal_CanopyPhase_Extended.F90` 的 `:1343-1372` 这一簇共 17 条 FMA。
+其中 `lfevpa`（`:1343`）、`olrg`（`:1366`）、`olru`（`:1370`）三处
+`surface_budget.rs` 已逐条对上（`:88` / `:62` / `:63`，注释里都引了 dump）；
+但 `fgrnd` 那条 6 段的链，Rust 只熔了 **1** 段（`:102` 的 `t_grnd_bef**4`），
+另外 3 段是平铺的。`DEF_SPLIT_SOILSNOW` 是运行时 namelist、默认 `.false.`
+（`share/MOD_Namelist.F90:309`）⇒ 活的是 `.not.DEF_SPLIT_SOILSNOW` 那一支：
+
+```text
+:1352（GIMPLE，按 .loc 落行）
+  _1743 = sabg
+  _1747 = .FMA (dlrad, emg, _1743)                        ← Rust 平铺
+  _1748 = emg * 5.67e-8
+  powmult_2171 = t*t ; powmult_2170 = t2*t2 ; powmult_2172 = t2*t
+  _1751 = .FNMA (_1748, powmult_2170, _1747)              ← Rust :102 ✓
+  _1753 = _1748 * powmult_2172
+  _1754 = tinc * 4.0
+  _1757 = .FNMA (_1753, _1754, _1751)                     ← Rust 平铺（漏一次收缩）
+  _1758 = .FMA (fevpg, htvp, fseng) ; _1760 = _1757 - _1758 ← Rust :113 ✓
+  _1762 = pg_rain * cpliq ; _1768 = .FMA (_1762, ΔT, _1760)  ← Rust 先算 `precipitation_heat` 再加
+  _1770 = pg_snow * cpice ; _1772 = .FMA (ΔT, _1770, _1768)  ← 同上
+```
+
+**为什么第 262/353 轮那个"8 步离线穷举"看不见它们**：探针
+（`/tmp/gf/fgrnd/fort_bits.txt`，8 行 `fgrnd` + 10 个输入）里
+`sabg` **全是 0**、`fsno` **全是 0**、`t_soil == t_grnd_bef`（都 283.0），
+于是"`sabg + dlrad*emg` 熔不熔"、"两支 `fgrnd` 选哪支"、"`4*tinc` 那一乘熔不熔"
+在这 8 行上**恰好全部不可见**。本轮把那份位型重算了一遍确认：
+
+```text
+t4_fused=True  t3_fused=True  -> match 8/8
+t4_fused=True  t3_fused=False -> match 8/8     ← 现库里的写法，与上行不可区分
+t4_fused=False t3_fused=True  -> match 6/8
+t4_fused=False t3_fused=False -> match 6/8
+```
+
+所以按 GIMPLE 角色把 6 段各自熔进累加器写完（`precipitation_heat_w_m2` 那一列是
+`MOD_Thermal…:1398-1399` 的**诊断量**，`crates/colm-runtime/src/history.rs:910` 用它写
+`hprl`，算式保持不动、不再拿它当加数）。
+
+### 六、第 367 轮实测
+
+| 口径 | 改前（基线） | 只补 `hydrology.rs` 2 处 | 再补 `fgrnd` 3 处（**最终**） |
+|---|---|---|---|
+| 闭环 `compare_water_equilibrium.sh` | 位型不匹配（**403 / 109949**；`wliq[1]` 79 处、`smp[1]` 53 处 …） | **109949/109949 逐位相同** | 109949/109949 ✓ |
+| 干窗 restart 首分歧 N=250 | 0/68 | 0/68 | 0/68 |
+| 干窗 restart 首分歧 **N=251** | 11/68 | **11/68**（不变） | **11/68**（不变） |
+| 湿窗 restart 首分歧 **N=63** | 10/68 | **10/68**（不变） | **10/68**（不变） |
+| 黄金 dry（`bitwise`/`over_tol`/`ot_vars`/`sumabs`） | 9163 / 28 / 1，261.0128 | 9163 / 28 / 1，261.0128 | **9152** / 28 / 1，261.0128 |
+| 黄金 wet | 27066 / 1197 / 19，8.4418 | 27066 / 1197 / 19，8.4418 | **27055** / 1197 / 19，8.4418 |
+
+* 两处冷启动缺口对四个窗口**逐位不可见** —— 与"`colm-runtime` 不调它"的判断互洽，
+  只有闭环能看见它（`wliq[1]` 79 处 → 0）。
+* `fgrnd` 那 3 处让**两个黄金窗口的位型差异各降 11 个元素**（9163→9152、27066→27055），
+  **`over_tol`/`ot_vars`/`sumabs` 一律不动** ⇒ 按仓库纪律"不许变差"可以落地；
+  干湿窗的 restart 首分歧两档都不动，说明它**不是** N=251 那颗种子（`sabg=0`、
+  `fsno=0`、`4*tinc` 那几组输入上仍不可分辨），但它在运行时路径上、且方向正确。
+
+验证命令：
+
+```text
+cargo clippy --workspace --all-targets -- -D warnings                       # clean（8m12s）
+cargo test --workspace --exclude colm-init --exclude colm-srfdata --lib --bins   # 全绿
+cargo test -p colm-init    --lib -- --test-threads=1                        # 156 passed
+cargo test -p colm-srfdata --lib -- --test-threads=1                        # 270 passed
+cargo test -p colm-schema --test drift ; -p colm-hist --test drift ;
+cargo test -p colm-core --test drift_landcover ; --test drift_co2 ;
+cargo test -p colm-namelist --test roundtrip ; -p oracle --test histmap     # 全绿
+bash oracle/scripts/compare_water_equilibrium.sh
+bash /tmp/gf/dry_ts.sh 250 && python3 /tmp/gf/rdiff_dry.py
+bash /tmp/gf/dry_ts.sh 251 && python3 /tmp/gf/rdiff_dry.py
+bash /tmp/gf/wet_ts.sh 63  && python3 /tmp/gf/rdiff.py
+bash /tmp/gf/win4.sh ; python3 /tmp/gf/three.py oracle/golden/<gold> <rust-hist> <cmp.txt> <label>
+```
+
+* `colm-init` / `colm-srfdata` 的 `--lib` **必须单线程**跑：并发时它们往共享临时目录写
+  HDF 会互踩（`NetCDF: HDF error(-101)`），pristine HEAD 上同样复现（20~35 个随机失败），
+  单线程两档全绿。这是本机环境问题，不是回归。
+* `win4.sh` 里 `US-NR1-snow` 仍报 `cannot open …US-NR1_1999-2014_FLUXNET2015_Met.nc`
+  （`examples/Forcing/` 里没有这份强迫），维持"不可测"。
+
+### 七、方法教训（这一轮真正的产出）
+
+1. **"函数体级"的汇编计数 ≠ 该例程自己的 FMA 数**：GCC 会把被调例程内联进去，
+   数出来的 29 是"自身 15 + 内联 6 + 内联 8"。要对就按 `.loc` 落到**源码行**，
+   或者直接数 GIMPLE 语句（带 `-fdump-tree-optimized-lineno`）。
+2. **`-fdump-tree-optimized` 的行号要带 `-lineno` 才有**，而且语句前缀里可能有
+   `discrim N`、`[tail call]` —— 解析正则必须容得下 `[^\]]*`，否则会静默漏掉
+   （本轮第一版正则就因为 `:456:88 discrim 4]` 漏掉了 `:456`，数出 60 条而不是 71 条）。
+3. **"✓ 已落地"必须挂一个可复跑的闭环**：`get_water_equilibrium_state` 那 2 处被
+   记成"第 339 轮成组落地 ✓"挂了 28 轮，就是因为当年只写了结论、没留判据。
+4. **`-S` 的 `.loc` 只能定"哪条乘积进 FMA"的位置，操作数角色必须读 GIMPLE**；
+   反过来，GIMPLE 不给（或给了也判不了）的调用点上下文，要靠闭环。
