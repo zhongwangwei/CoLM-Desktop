@@ -19795,3 +19795,54 @@ wetland `:1262`/`:1267`/`:1273`，后者本仓库直接 `bail!`）。
 `transpiration_from_conductance`（Rust 3 处 vs 汇编 `:683`/`:691`×2 三处）值得逐行对；
 `spacaf_twoleaf` 41 处里有 15 处（`:479`/`:483`/`:485`/`:487`/`:489`/`:496`/`:498`/`:499`/`:500`）
 是 4×4 求逆那一段，`spac_change` 只有 40 处，那个差额还没查清。
+
+**第 342 轮：叶温/地温链的 FMA 普查（供下一轮照表比对）+ 植物水力链收口；本轮没有关掉种子**
+
+第 341 轮那三处改动把湿窗 `sumabs` 压到 5.55 之后，按目标的下一步转去叶温/地温链。
+
+**`MOD_LeafTemperature` 的 `Leaftemperature` 符号共 60 条 FMA**（`-S -g` + `.loc`；
+含被内联的 `dewfraction`/`longwave`/`upward_longwave` —— 它们在本内核里没有独立符号）：
+
+```text
+493: 2   508: 1   541: 1   556: 1   557: 1   559: 2   688: 1   813: 1   838: 2
+843: 4   846: 1   849: 1   856: 1   912: 3   941: 2   953: 1   964: 1   976: 1
+993: 1  1067: 3  1070: 1  1091: 1  1099: 1  1100: 1  1112: 2  1113: 2  1118: 1
+1119: 1 1127: 2  1134: 2  1141: 3  1144: 1  1155: 1  1164: 2  1175: 1  1201: 1
+1202: 1 1254: 1  1264: 1  1271: 1  1272: 1  1361: 1
+```
+
+Rust `leaf_temperature.rs` 共 42 处 `mul_add`（`leaf_temperature` 31、`longwave` 5、
+`upward_longwave` 2、`update_canopy_water` 4）。**差额不能用数数裁**：内联/拆分两边的口径不同，
+而且这条链的关键两段已经有**离线位型穷举**级别的证据 —— `longwave`（`irab`）的注释记着
+"`base=fma` 命中 kernel 全部四轮、`base=平铺` 命中 Rust 全部四轮，`tl4=(tl*tl)*(tl*tl)` 两侧都要"，
+`upward_longwave`（`ulrad`）记着"只有'左乘积融合'这一维能复现内核的 `4070B00402BA216F`，
+平铺得到 `…216E`"。⇒ **叶温链下一轮要用位型探针（照 `irab_shapes.py` / `ulrad` 那套离线穷举），
+不要用计数**。
+
+**`MOD_GroundTemperature` 的 `groundtemperature` 符号共 42 条**：
+
+```text
+202: 2  206: 1  216: 2  246: 1  258: 3  263: 5  267: 1  271: 2  279: 2  281: 3
+287: 2  290: 2  307: 1  312: 1  331: 1  332: 2  334: 1  335: 2  345: 1  348: 1
+362: 1  364: 2  382: 1  397: 1  400: 1
+```
+
+Rust `ground_temperature.rs` 27 处。两个大簇都逐条读过：`:255-290` 的 `hs` 累加链
+（`dlrad*emg - emg*stefnc*T**4 - (fseng+fevpg*htvp) + cpliq*pg_rain*Δ + cpice*pg_snow*Δ`）
+与 Rust `surface_fluxes` 的展开式（`soil_base` → `soil_delta.mul_add(rain_heat_capacity, …)`
+→ `.mul_add(snow_heat_capacity, …)`）**结合顺序一致**；`:331-400` 的 `-emg*stefnc*T**4`
+与三对角组装也和 `temperature_system` 对得上。同样**不能靠数数**下结论。
+
+**植物水力链可以收口了**：`spacaf_twoleaf` 的 4×4 求逆段
+（`:479` 3 + `:483` 5 + `:485` 5 + `:487` 3 + `:489` 5 = **21**）与 Rust `spac_change` 的
+determinant 3 + `e1`/`e2`/`e3` 各 2 + 四个 `change[…]` 各 3 = **21** 恰好对上。
+`A`/`f` 段表面上 11 vs 10，但把 `.loc 465` 那两条 FMA 读出来就清楚了：
+`fmsub d11,d20,d26,d11` 与 `fmadd d20,d31,d11,d10`，后者是
+`(X*dfr)*Δroot + X*fr`（`X = sai*kmax_xyl/htop`）—— 正是 Rust 的
+`(xylem*dfroot).mul_add(root_gradient, xylem*froot)`；前者属于同页的 `:464`（A33 的 `-X*fr` 项）。
+⇒ 那 1 条差是 `.loc` 归属噪声，**不是漏形状**。
+
+**下一轮**：① 叶温/地温链改用位型探针（离线穷举候选形状，而不是对 FMA 计数）；
+② 三个具名种子仍在：湿窗 **N=18 `vegwp`**（2 个分量：`[1]` shaded、`[2]` xylem，各 1 ULP）、
+**N=20 `wliq_soisno`+`hk`**、干窗 **N=288 `tref`/`tleaf`**；
+③ 第 341 轮那四处改动里**哪一处**贡献了湿窗改善还没拆开 A/B。
