@@ -157,9 +157,17 @@ pub fn history_diagnostics(input: HistoryDiagnosticsInput) -> Result<HistoryDiag
 
     let potential_temperature = temperature
         * (100_000.0 / pressure).powf(AIR_GAS_CONSTANT_J_KG_K / AIR_HEAT_CAPACITY_J_KG_K);
-    let virtual_potential_temperature = potential_temperature * (1.0 + 0.61 * humidity);
-    let virtual_scale =
-        temperature_scale * (1.0 + 0.61 * humidity) + 0.61 * potential_temperature * humidity_scale;
+    // `MOD_Vars_1DAccFluxes.F90:2749` 的 `(1.+0.61*qm)` 在出货汇编里是
+    // `fmadd d29,d13,d31,d29`（`d29=1.0`、`d31=0.61`）—— `0.61*qm` 被收进 `1.0`。
+    let one_plus_061_humidity = 0.61f64.mul_add(humidity, 1.0);
+    let virtual_potential_temperature = potential_temperature * one_plus_061_humidity;
+    // `:2751-2752` 的 `thvstar = r_tstar_e*(1+0.61*qm) + 0.61*th*r_qstar_e`：
+    // 出货汇编是 `fmsub d31,d9,d29,d31`（`d9=-r_tstar_e`、`d29=1+0.61*qm`），
+    // 即 `r_tstar_e*F` 那个乘积被收进 `0.61*th*r_qstar_e`。
+    let virtual_scale = temperature_scale.mul_add(
+        one_plus_061_humidity,
+        (0.61 * potential_temperature) * humidity_scale,
+    );
 
     let zol = height_scale * VON_KARMAN * GRAVITY_M_S2 * virtual_scale
         / (friction_velocity.powi(2) * virtual_potential_temperature);
@@ -266,12 +274,11 @@ fn stability_adjusted_wind(
         .max(0.0)
         .powf(1.0 / 3.0);
     let convective_squared = CONVECTIVE_BETA.powi(2) * convective_velocity.powi(2);
-    // 上游 `um = max(0.1, sqrt(ur*ur+wc2))`。这里**不**把 `ur*ur` 写成 `mul_add`：
-    // 同一条式子在内核 `MOD_LeafTemperature.F90:1273` 编出来是 `fmadd(ur,ur,_613)`，
-    // 但本处是 `MOD_Vars_1DAccFluxes.F90:2773`，形状要按它自己的汇编/位型定，
-    // 不能从邻居类比（第 246/252 轮踩过）。第 295 轮实测：改与不改对本窗口
-    // 逐位无影响，所以先按平铺保留。
-    (wind_speed.powi(2) + convective_squared)
+    // 上游 `um = max(0.1, sqrt(ur*ur+wc2))`。**本**例程里的出货汇编是
+    // `fmadd d9,d9,d9,d0`（`d9=ur`、`d0=wc2`）⇒ `ur*ur` 被收进 `wc2`。
+    // （第 295 轮那句"本处按平铺保留"是拿不出反汇编时的保守写法，现按实测更正。）
+    wind_speed
+        .mul_add(wind_speed, convective_squared)
         .max(0.0)
         .sqrt()
         .max(0.1)

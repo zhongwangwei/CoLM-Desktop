@@ -18663,17 +18663,22 @@ bash oracle/scripts/compare_second_config.sh US-NR1-snow   → 79 variable(s) ou
 （第 3 组：`water_balance` 5 处 + `flux_all` 加权平均 1 处），那时状态残差才有指望回落。
 已落地的 8 处**保留**（口径 wet 1967→1942、干/雪不倒退，短程与第二配置全绿）。
 
-**下一枪（第 326 轮后）**：
+**下一枪（第 327 轮后）**：
 * **已入库（第 326 轮）**：`intercept_canopy` 三处结合/收缩形状（`p0` 先加后乘、`pinf`
   先合 `thru`、`:328-329` 的 `fmadd`+`fsub`）。湿窗 `over_tol` **1907→1287**、
   `ot_vars` **53→24**，干/雪口径不动，短程 0/68 与 692/692 保持。
+* **已入库（第 327 轮）**：`history_diagnostics` 三处 FMA（`(1+0.61q)`、`thvstar`
+  外积、`ur*ur+wc2`）。第一配置雪窗 **step 0 有限值逐位全同**，`first divergence step`
+  0→1；三窗口口径不变。
 * ① `f_vegwp` 一侧剩下的缺口 —— 第 324 轮已把 `soil_water_vertical_movement` + 两个
   内联例程的 **17 处**形状判好并列进"第 324 轮"的表。**第 326 轮之后重测过**：在
   湿窗 **1287/24** 的新基线上，整批 17 处让湿窗退到 **2000/53**（干窗 28→20），
   所以**仍然未落** —— 截留那三处没有让这份 17 处变相容。按第 324 轮的表留着，
   等 `f_vegwp` 那条链一起补。
-* ② 雪窗 step-0 现在只剩 MO 诊断 1 ULP（`f_zol`；第一配置另 `f_rib`/`f_ustar2`）——
-  先按 `history_diagnostics.rs:164/208` 核对这两处形状，再决定要不要动 step-1 气孔链。
+* ② 雪窗现在从 **step 1** 起分歧，领先变量 `f_rstfacsha/sun`、`f_gssun/sha`、
+  `f_qintr`/`f_qdrip`。注意 `f_qintr` 到 step 1 才差 ⇒ 冠层水/叶温的**内部量**
+  （`water.rain_mm`/`snow_mm` 分量、叶温 `zeta`）里可能还有 step-0 未导出的差；
+  先按 `MOD_LeafTemperature`/`MOD_AssimStomataConductance` 做 `.loc` 普查。
 * ③ 未决小尾巴：`flux_all` 里那条加权平均 FMA 只有调用点上下文（option (a)）判过，
   若要做**实测**判据只能建"直接驱动 `flux_all`"的第 4 个闭环（夹具更大）。
 2. **第二配置回归**（Campbell + 关 VSF）：第 293 轮实测干窗已从 16 降到 **0**；
@@ -18917,3 +18922,38 @@ f_ustar2 1.56e-16 / f_rib 1.72e-16   （只有第一配置）
 （`f_gssun`/`f_gssha`/`f_rstfac*`）要么来自 `zol` 作下一步迭代初值，要么是 step-1
 气孔/光合自身的形状；先按 `history_diagnostics.rs` 那三处（`:164` 的 `zol`、
 `:208` 的 `rib`）做形状核对，再决定要不要动气孔那条链。
+
+**第 327 轮：Monin-Obukhov 诊断三处形状 —— 雪窗 step 0 首次做到逐位全同，分歧推到 step 1**
+
+按第 326 轮留的入口，把 `MOD_Vars_1DAccFluxes.F90` 用内核同款选项 + `-S -g` 编成汇编，
+按 `.loc` 读 `accumulate_fluxes` 里 zol/rib/us10m 那一段的 FMA，对上
+`history_diagnostics.rs` 三处（**都是"乘积该进 FMA"的形状**）：
+
+```text
+:2749 (1.+0.61*qm)                       出货 `fmadd d29,d13,d31,d29`（d29=1.0、d31=0.61）
+     ⇒ `0.61*qm` 收进 `1.0`；Rust 原写 `1.0 + 0.61*humidity`（两次舍入）。
+       这个因子同时喂 `thv` 与 `thvstar`
+:2751-2752 thvstar = r_tstar_e*(1+0.61*qm) + 0.61*th*r_qstar_e
+     出货 `fmsub d31,d9,d29,d31`（d9=-r_tstar_e）⇒ `r_tstar_e*F` 收进 `0.61*th*r_qstar_e`
+:2773 um = max(0.1, sqrt(ur*ur+wc2))      出货 `fmadd d9,d9,d9,d0` ⇒ `ur*ur` 收进 `wc2`
+```
+
+第 295 轮那句"本处按平铺保留、改与不改对窗口逐位无影响"（`history_diagnostics.rs`
+旧注释）是**当时没反汇编**的保守写法，本轮按实测更正。
+
+**结果**：第一配置雪窗 **step 0 的有限值差异清零**（此前只剩 `f_zol`/`f_rib`/`f_ustar2`
+各 1 ULP），`window_divergence.py` 的 `first divergence step` 从 **0 推到 1**；step 1 的
+领先变量是 `f_rstfacsha/sun`、`f_gssun/sha` 与 `f_qintr`/`f_qdrip`。
+
+**三段式**：dry **28/1**、wet **1287/24**、snow **25713/79** —— **三窗口口径一字未动**
+（这三处只喂 history、不回灌），restart 0/68、3 步 692/692 保持；`bitwise` 只动了个位数
+元素（dry 17056→17057、wet 27981→27971、snow 32728→32723）。第二配置雪窗仍 **79**。
+
+⇒ **落码**（形状已按汇编定死，且无任何窗口倒退）。**代价说明**：这是"只影响 history
+输出"的修复、口径不变；价值在于把雪窗的种子从 step 0 赶到 step 1，下一步追 step-1
+气孔链时不再被诊断噪声干扰。
+
+**下一枪**：step 1 领先的 `f_rstfacsha/sun`（气孔阻力系数）与 `f_qintr`/`f_qdrip`。
+注意 `f_qintr` 现在**到 step 1 才差** —— 冠层水在两 step 之间的**内部量**
+（`water.rain_mm`/`snow_mm` 分量、叶温的 `zeta`）可能还有一处 step-0 未导出的差；
+先按 `MOD_LeafTemperature`/`MOD_AssimStomataConductance` 那条链做 `.loc` 普查。
