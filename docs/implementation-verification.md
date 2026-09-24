@@ -19945,3 +19945,54 @@ vulnerability: plc + d1plc 200000/200000 bitwise identical
 或 `spac_change` 的 `dx`（已有 oracle 49/49）、或某个**探针没覆盖**的量。
 **下一轮**：上 hex 探针（内核侧 `TRANSFER(x,0_8)`）打 `x(1:4)`/`dx(1:4)`/`qeroot`/`x_root_top`，
 把 1 ULP 的出生点夹到具体一个量；这也是第 343 轮就列好的下一步。
+
+**第 345 轮：PHS 求解内部的**位型**探针把湿窗第 18 步那颗种子夹到"第 95 次 PHS 调用的 `dx`"里；顺带记一个环境坑（PLUMBER2 挂载点变了）**
+
+**① 位型探针（这是第 343 轮就列好的下一步）。** `/tmp/gf/phs_hex_probe.sh`：
+把内核 `MOD_PlantHydraulic.F90:calcstress_twoleaf` 与 Rust `plant_hydraulics.rs:plant_hydraulic_stress`
+各打两个/三个点，**两侧都打十六进制**（`TRANSFER(x,0_8)` / `to_bits()`）：
+
+```text
+PHXQ  qeroot, dqeroot, x_root_top          —— getrootqflx_x2qe 返回之后（A/f 的入参）
+PHXD  x(1:4), dx(1:4)                      —— `x = x + dx` 之后
+PHXF  x(1:4), qeroot, x_root_top            —— `x(root) = x_root_top` 之后
+```
+
+18 步湿窗、两侧各 **192 行**（96 次 PHS 调用 × 2 个点），**逐位**对比结果：
+
+```text
+首个差异: (190, 'PHXD', 2, 'C0902970C98996F3', 'C0902970C98996F2')   ← x(shaded) 差 1 ULP
+差异计数: PHXD {2:1, 3:1, 5:1, 6:1, 7:1, 8:1}   PHXF {2:1, 3:1, 5:1}
+```
+
+解读：**第 190/192 行之前全部逐位相同**（95 次调用一致），差异出现在**第 95 次 PHS 调用**：
+`x(shaded)`(字段2) 与 `x(xylem)`(字段3) 各 1 ULP，而且 **`dx(1:4)` 四个分量全都差**
+（字段 5–8）。`dx` 是在 `x = x + dx` 之前算出来的，所以
+
+> **种子在 `dx` 里 —— 也就是 `spac_change` 的 4×4 解或它吃进去的 `A`/`f`/`qeroot`/`dqeroot`，
+> 不在 `x = x + dx` 的更新算术里。**
+
+`PHXF` 的 `qeroot`（字段5）也差，但那是用**新的** `x` 重算出来的 → 是下游。
+⇒ 下一轮加 `PHXQ`/`A`/`f` 三个更细的点（`PHXQ` 已经在脚本里，只是这轮没跑成，见下），
+把"是 `qeroot` 先把差带进来"还是"`A`/`f` 自己生出来的"分开。
+
+**② 环境坑（会伪装成"内核坏了"）：PLUMBER2 挂载点变了。**
+`oracle/work/*/forcing.nml`（**21 个文件**）里硬编码
+`DEF_dir_forcing = '/Volumes/Data01/Data/PLUMBER2s/Forcing/'`。
+这台机器上的 SMB 卷这轮换了名字（先是 `/Volumes/Data`，随后整个掉了），于是所有算例
+——内核与 Rust 两侧——都会以
+
+```text
+/Volumes/Data/Data/PLUMBER2s/Forcing/CN-Cng_2008-2009_FLUXNET2015_Met.nc does not exist.
+```
+
+失败。**这不是模型问题**。我的做法是**只改 scratch 拷贝**：
+`/tmp/gf/{wet_ts,dry_ts}.sh` 在把 `forcing.nml` 拷进 `$d` 之后 sed 一次挂载点；
+`/tmp/gf/win4.sh` 为 Rust 侧复制一份 case 目录再 sed；探针脚本同理。
+**仓库里的 `oracle/work/*/forcing.nml` 一个都没动**（`git status` 干净）。
+⇒ 建议（留给你定）：让算例 namelist 认 `PLUMBER2_ROOT`，或者跑之前由 harness 替换，
+别再硬编码绝对路径 —— 现在换一次挂载点就要坏 21 个文件。
+
+**③ 这一轮的边界**：位型探针那次跑成功了（上面的数就是它给的），
+但随后卷掉了，`PHXQ` 那版探针与后续状态扫描都跑不动。所以本轮的结论
+只有"种子在 `dx`"这一条，`PHXQ`/`A`/`f` 的细分留到卷回来之后。
