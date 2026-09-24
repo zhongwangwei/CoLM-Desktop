@@ -18373,7 +18373,21 @@ VSFI     kernel=200 rust=200
 
 ## 若继续
 
-> **第 357 轮更新（最新的指路牌，先读这段）**：干窗第 251 步的 `ea`（= 唯一在**整步 12 次调用**
+> **第 358 轮更新（最新的指路牌，先读这段）**：干窗第 251 步的**因果链**定下来了 ——
+> `qg`（地表比湿）→ `qaf`/`ea` + 驱动湿度 `cqi = (wtaq0+wtgq0)*qsatl - wtaq0*qm - wtgq0*qg`
+> → **`qflx_sun`/`qflx_sha`** → `etr`/`rootflux`（水步入场）→ `ss_vliq`/`wliq[0,5]` → `hk`/`t_soisno`
+> → 近地层诊断。**第 251 步里 `stomata` 的输出并不差**（`PHXS` 全同），差的是 `PHXH` 的
+> `qg`/`qaf` 与 `PHXG` 的 `qflx_*` —— 合理：C3 + WUE 支里 `gsh2o` 不含 `ea`，而 `cqi` 含。
+>
+> * 探针流里更早的差异（序号 294≈第 29 步、298、418≈第 41 步、2209≈第 217 步）**都自愈**，
+>   不是种子。
+> * **判据纪律（新）**：`qaf` **不是重启变量**但**跨步保存**（模块变量）⇒
+>   "restart 到 250 步 0/68"排除不了"非重启量早已差"；这类量只能用**探针流**判首分歧。
+> * **下一枪**：`qg` 的入参（`fsno`/`hr = exp(psit/roverg/t_grnd)`/`psit`/`t_grnd`/`forc_q`）
+>   两侧 hex，跑干窗 251 步 —— 判是**外层能量迭代的 `t_grnd`** 还是**土壤侧 `psit`**
+>   先带进 1 ULP，把种子推进 `MOD_Thermal`/`GroundTemperature` 那一段。
+
+> **第 357 轮更新**：干窗第 251 步的 `ea`（= 唯一在**整步 12 次调用**
 > 都差的 `stomata` 入参）追到 **`qg`（地表比湿）**：新加的 `PHXH` 标签（`wtaq0,wtgq0,wtlq0,
 > qm,qg,qsatl,qaf`）在干窗 251 步显示只有 `qg` 差 6 次（`wtlq0` 1 次），
 > `qsatl`/`qm`/`wtaq0`/`wtgq0` 从不差。
@@ -20886,3 +20900,37 @@ Rust 只移植了非 split 支 —— 打开 split 时两边会分道，记在�
 `t_grnd`、`forc_q`、`forc_psrf`。在 `MOD_Thermal` 的 `qg` 赋值处加一个 hex 打印
 （Rust 打在 `non_split_ground_humidity` 入口），跑**干窗 251 步**，判是 `psit`/`hr`
 还是 `fsno`/`t_grnd` 先分叉 —— 这一步会把种子推到**地面/土壤那一侧**或钉在**外层能量迭代**上。
+
+**第 358 轮：干窗第 251 步的因果链定下来了 —— `qg` → `qaf`/`ea` + 驱动湿度 → `qflx`/`etr` → 水步；**不是** `stomata` 的输出**
+
+把第 357 轮那份干窗 251 步探针（2552 次 PHS 调用）按**标签序号**逐条展开（`PHXH`/`PHXG`
+没打调用号，按该标签第几条对齐；其余按调用号）：
+
+```text
+PHXS/PHXR  差异 4 条：序号 294, 298, 418, 2209     （首个 294：`rssha`/`gs0sha`）
+PHXI       差异 10 条：294, 298, 418, 2209, 2547…2552（首个 294：`gssha`）
+PHXH       差异 7 条：418, 2547…2552               （首个 418：`wtlq0`）
+PHXG       差异 7 条：418, 2547…2552               （首个 418：`qflx_sun`/`qflx_sha`）
+```
+
+2552/251 ≈ 10.2 次调用/步 ⇒ **2547…2552 = 第 251 步的最后 6 次调用**。读法：
+
+* 序号 294（≈第 29 步）、298、418（≈第 41 步）、2209（≈第 217 步）的差异**都自愈了**
+  （restart 到 250 步仍 0/68），所以它们不是种子；
+* **第 251 步那一簇里，`stomata` 的输出（`PHXS` 的 `rssun`/`rssha`/`assim*`）并不差**，
+  差的是 **`PHXH` 的 `qg`/`qaf`** 与 **`PHXG` 的 `qflx_sun`/`qflx_sha`** ✓
+  ⇒ 机制是：`qg`（地表比湿）→ `qaf`/`ea` 与 `getqflx_gs2qflx` 里的**驱动湿度**
+  `cqi = (wtaq0+wtgq0)*qsatl - wtaq0*qm - wtgq0*qg` → **`qflx_sun`/`qflx_sha`（蒸腾需求）**
+  → `etr`/`rootflux`（水步入场，第 355 轮）→ `ss_vliq`/`wliq[0,5]` → `hk`/`t_soisno` → 近地层诊断。
+* **`rssha` 在 251 步不差是合理的**：CN-Cng 是 C3 + WUE 开 ⇒ 走 WUE 支，
+  `gsh2o = assmt/(co2a - pco2i/psrf)*1.6` 里**没有 `ea`**；而 `qflx` 那一支有 `cqi`，
+  所以 `ea` 的 1 ULP 只从**蒸腾需求**那条路出去 ✓✓。
+
+**顺带记一条判据纪律**：`qaf` **不是重启变量**（68 个状态量里没有它），但它跨步保存
+（模块变量）。所以"restart 到 250 步 0/68"**不能**排除"某个非重启量在第 251 步之前就已经差了"
+—— 这类量（`qaf`/`qflx`/`etr` 一族）只能用**探针流**判首分歧，不能用 restart 扫描。
+
+**下一枪**：`qg` 的入参（`fsno`、`hr = exp(psit/roverg/t_grnd)`、`psit`、`t_grnd`、`forc_q`、`forc_psrf`）
+两侧 hex。`qg` 的式子已证同形（第 357 轮），所以这一步会直接告诉我们是**外层能量迭代的
+`t_grnd`** 还是**土壤侧的 `psit`** 先把 1 ULP 带进来 —— 那也就把干窗种子推到
+`MOD_Thermal`/`GroundTemperature` 那一段（本目标点名的"ground-temperature chain"）。
