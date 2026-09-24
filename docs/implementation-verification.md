@@ -18373,6 +18373,24 @@ VSFI     kernel=200 rust=200
 
 ## 若继续
 
+> **第 372 轮更新（最新的指路牌，先读这段）**：把第 371 轮那份工作集当**工作基线**用起来之后，
+> 湿窗的逐位范围从 N=63 一路推到 **N=432** —— 本轮新找到并验证了一处**会翻分支**的漏熔：
+> `MOD_Runoff.F90:342` 的 `.FMA(_29, waterdepthmax, watin)`（即 `WaterDepthInit + watin`），
+> 它同时进 `ELSEIF ((WaterDepthInit+watin) > WaterDepthMax)` 的判定，
+> **只有湿季（`watin > 0`）才走得到**，所以干窗永远看不到它。
+> * 定位链：工作集 + `wet_ts` 扫描（63→222）→ 二分钉 N=222 → `restart_divergence.py`
+>   → `vsfr_wet.sh`（把 vsf 探针改成湿窗）第一条不同记录 = `WSF1` 入场的 **`qgtop`**
+>   → `qgtop = gwat - rsur`，`DEF_Runoff_SCHEME=3` ⇒ `Runoff_SimpleVIC` ⇒ 4 条 FMA 逐条对。
+> * **下一个种子钉在 N=489**（`emis`/`t_grnd`/`t_soisno` 各 1 ULP），内部探针显示
+>   **第一条不同记录又是 `WSF1` 入场的 `qgtop`** ⇒ 这次差的是 `gwat` 里的 `qseva`（地面蒸发），
+>   种子在**叶/热链**一侧。
+> * **策略结论**：湿窗在这个纪律下**没法一处一处地落** —— 每处改对都换一条混沌轨道，
+>   黄金湿窗聚合在 1100–2000 之间随机跳（`pco2a` 1650、30 处 1968、runoff 1876、合起来 1933）。
+>   唯一同时满足两条判据的路是把湿窗做到**逐位相同**（那时口径自然是 0）再**一次性**落地；
+>   完整工作集已存成 **`oracle/patches/wet-seed-working-set.diff`**（+ `README.md`）。
+> * **判据**：干窗 restart 整窗 0/68、黄金 dry `81 / 0 / 0，0.0000`（工作集下）；
+>   湿窗逐位 **N=1–488**（工作集 + runoff）；HEAD 上仍是黄金 wet `1197 / 19，8.4418`。
+
 > **第 371 轮更新（最新的指路牌，先读这段）**：**湿窗种子在"改对"这一侧已经没有悬念** ——
 > `pco2a` 的 `.FNMA` 在当前树上仍然把 restart 首分歧从 N=63（10/68）关到 **0/68**
 > （N=72 也 0/68），干窗黄金位型逐位不变；代价是黄金湿窗口径 1197 → 1650 ⇒ 按纪律回退。
@@ -21986,317 +22004,16 @@ oracle/scripts/compare_all.sh stomata  # 只跑名字里含这个子串的
 ### 五、重放方式（一步到位）
 
 **第 371 轮更正**：这一节原先内联的 Python 补丁**不完整也有错** —— 它只覆盖了 19 处
-（`calc_photo_params` 4 + `stomata` 16 里除 `:264/:266` 外的那些 + `update_photosyn` 8），
-`sortin` 那 11 处与 `WUE_solver` 那 1 处是第 369 轮直接用 `edit` 改的、从没进过脚本；
-而且脚本里留着两处**已知会改坏数值**的初版写法（Medlyn 的 `bq`/`cquad` 把 `g0*1e-6+acp` 也熔了、
-`:805` 写成 `err = internal - next`）—— 直接重放会得到"干窗 21161 / over_tol 3643"那种崩掉的结果。
+（`sortin` 那 11 处与 `WUE_solver` 那 1 处当时是直接用 `edit` 改的、从没进过脚本；
+脚本里还留着两处**已知会改坏数值**的初版写法）。第 371 轮重新拼出完整候选并逐项验证，
+**第 372 轮又把 `runoff.rs` 那一处并了进来**，现在这份完整工作集落在仓库里：
 
-下面这份是**第 371 轮重新拼出来并逐项验证过**的完整候选（unified diff，含 `pco2a` 那一条）：
-测试 359 全过、`compare_sortin` 3000/3000、`compare_update_photosyn` 3000/3000、
-`compare_stomata` 的 `assim` 1/4000。**教训：写进文档的"可重放"补丁必须真的重放一遍再写。**
+* `oracle/patches/wet-seed-working-set.diff` —— 在 `HEAD` 上 `git apply` 即可；
+* `oracle/patches/README.md` —— 每一块的来源、改前改后的闭环与窗口数字、当前逐位范围、
+  以及**为什么不能单独落地**。
 
-```diff
-diff --git a/crates/colm-core/src/leaf_temperature.rs b/crates/colm-core/src/leaf_temperature.rs
-index 89c336d..0516ee1 100644
---- a/crates/colm-core/src/leaf_temperature.rs
-+++ b/crates/colm-core/src/leaf_temperature.rs
-@@ -978,13 +978,16 @@ pub fn leaf_temperature(
-         // 它就减在 `pco2a` 的括号和里 ⇒ 第 351 轮的 hex 探针量到的 `pco2a` 1 ULP 分叉
-         // （20/1004 次调用）有一部分来自这里。
-         let soil_respiration = 0.22 * 1.0e-6;
--        canopy_air_co2 = input.atmospheric_co2_pa
--            - 1.37 * input.surface_pressure_pa / air_conductance.max(0.446)
--                * (sunlit_resistance.assimilation_mol_m2_s
--                    + shaded_resistance.assimilation_mol_m2_s
--                    - sunlit_resistance.respiration_mol_m2_s
--                    - shaded_resistance.respiration_mol_m2_s
--                    - soil_respiration);
-+        // `MOD_LeafTemperature_Extended.F90:1244` 的 GIMPLE 是
-+        //   `_585 = .FNMA(1.37*psrf/max(0.446,gah2o), 括号和, pco2m)`
-+        // —— 那条"抽走率 × 括号和"的乘积**被收进减法**（一次舍入），平铺会多舍一次。
-+        let co2_drawdown_rate = 1.37 * input.surface_pressure_pa / air_conductance.max(0.446);
-+        let co2_sink = sunlit_resistance.assimilation_mol_m2_s
-+            + shaded_resistance.assimilation_mol_m2_s
-+            - sunlit_resistance.respiration_mol_m2_s
-+            - shaded_resistance.respiration_mol_m2_s
-+            - soil_respiration;
-+        canopy_air_co2 = (-co2_drawdown_rate).mul_add(co2_sink, input.atmospheric_co2_pa);
-         temperature_difference = input.reference_air_temperature_k - canopy_air_temperature;
-         humidity_difference = input.reference_specific_humidity - canopy_air_humidity;
-         let temperature_scale =
-diff --git a/crates/colm-core/src/photosynthesis.rs b/crates/colm-core/src/photosynthesis.rs
-index 193e625..8fc81f1 100644
---- a/crates/colm-core/src/photosynthesis.rs
-+++ b/crates/colm-core/src/photosynthesis.rs
-@@ -141,24 +141,29 @@ pub fn photosynthesis_parameters(
-         + (b.high_temperature_slope * (input.leaf_temperature_k - b.high_temperature_half_k)).exp();
-     let mut maximum_carboxylation =
-         b.maximum_carboxylation_25c_mol_m2_s * f77(2.1).powf(temperature_factor);
--    maximum_carboxylation =
--        (maximum_carboxylation / high_inhibition * input.soil_water_stress * c3_fraction
--            + maximum_carboxylation / (low_inhibition * high_inhibition)
--                * input.soil_water_stress
--                * c4_fraction)
--            * input.canopy_integration[0];
-+    // `:570 vm = vm/temph*rstfac*c3 + vm/(templ*temph)*rstfac*c4` 的 GIMPLE 是
-+    // `.FMA(vm/temph*rstfac, c3, vm/(templ*temph)*rstfac*c4)` —— `c4` 那条链整体
-+    // 独立舍入当加数，`c3` 那一乘收进 FMA。
-+    let high_term = maximum_carboxylation / high_inhibition * input.soil_water_stress;
-+    let low_term = maximum_carboxylation / (low_inhibition * high_inhibition)
-+        * input.soil_water_stress
-+        * c4_fraction;
-+    maximum_carboxylation = high_term.mul_add(c3_fraction, low_term) * input.canopy_integration[0];
-     let gas_constant = 8.314_467_591;
-     let jmax25 = f77(1.97) * b.maximum_carboxylation_25c_mol_m2_s;
-     let mut jmax = jmax25
-         * (f77(37.0e3) * (input.leaf_temperature_k - b.optimum_temperature_k)
-             / (gas_constant * b.optimum_temperature_k * input.leaf_temperature_k))
-             .exp()
-+        // `:579-580` 的两个分子 `710.*t-220.e3` 各自是一条 FMA（`:580` 的 GIMPLE
-+        // `_67 = .FMA(t, 7.1e2, -2.2e5)`）。
-         * (1.0
--            + ((f77(710.0) * b.optimum_temperature_k - f77(220.0e3))
-+            + (f77(710.0)
-+                .mul_add(b.optimum_temperature_k, -f77(220.0e3))
-                 / (gas_constant * b.optimum_temperature_k))
-                 .exp())
-         / (1.0
--            + ((f77(710.0) * input.leaf_temperature_k - f77(220.0e3))
-+            + (f77(710.0).mul_add(input.leaf_temperature_k, -f77(220.0e3))
-                 / (gas_constant * input.leaf_temperature_k))
-                 .exp());
-     jmax *= input.soil_water_stress * input.canopy_integration[1];
-@@ -174,16 +179,17 @@ pub fn photosynthesis_parameters(
-                 .exp())
-         * input.soil_water_stress
-         * input.canopy_integration[0];
--    let sink_limit = ((b.maximum_carboxylation_25c_mol_m2_s / f77(2.0))
-+    // `:597-598 omss = (vmax25/2)*1.8**qt/templ*rstfac*c3 + (vmax25/5)*1.8**qt*rstfac*c4`
-+    // 与 `:570` 同形（`.FMA(_118, cstore_128, _124)`）。
-+    let low_sink = (b.maximum_carboxylation_25c_mol_m2_s / f77(2.0))
-         * f77(1.8).powf(temperature_factor)
-         / low_inhibition
-+        * input.soil_water_stress;
-+    let high_sink = (b.maximum_carboxylation_25c_mol_m2_s / f77(5.0))
-+        * f77(1.8).powf(temperature_factor)
-         * input.soil_water_stress
--        * c3_fraction
--        + (b.maximum_carboxylation_25c_mol_m2_s / f77(5.0))
--            * f77(1.8).powf(temperature_factor)
--            * input.soil_water_stress
--            * c4_fraction)
--        * input.canopy_integration[0];
-+        * c4_fraction;
-+    let sink_limit = low_sink.mul_add(c3_fraction, high_sink) * input.canopy_integration[0];
-     let pressure_conversion = f77(44.6 * 273.16) * input.air_pressure_pa / f77(1.013e5);
-     // `MOD_AssimStomataConductance.F90:608` 是 `gbh2o = 1./rb * tprcor/tlef`
-     // —— 从左到右 `((1/rb)*tprcor)/tlef`，不是 `tprcor/(rb*tlef)`。
-@@ -242,17 +248,31 @@ pub fn stomata(input: StomataInput, options: StomataOptions) -> Result<StomataSt
-                 );
-                 (rubisco, rubisco, electron)
-             };
--        let omc = photo.maximum_carboxylation_mol_m2_s * (rubisco_co2 - photo.co2_compensation_pa)
--            / (rubisco_co2 + photo.rubisco_co2_constant_pa)
--            * photo.c3_fraction
--            + photo.maximum_carboxylation_mol_m2_s * photo.c4_fraction;
--        let ome = photo.electron_transport_mol_m2_s * (electron_co2 - photo.co2_compensation_pa)
--            / (electron_co2 + f77(2.0) * photo.co2_compensation_pa)
--            * photo.c3_fraction
--            + photo.electron_transport_mol_m2_s * photo.c4_fraction;
-+        // `:258/:259/:262` 三条都是 `商*c3 + 整条 c4 链`：
-+        //   `omc = .FMA(vm*(pco2i_c-gammas)/(pco2i_c+rrkk), c3, vm*c4)`
-+        //   `ome = .FMA(c3, epar*(…)/(pco2i_e+2*gammas), epar*c4)`，分母那一条
-+        //         `.FMA(gammas, 2.0, pco2i_e)`（第 336 轮就定死的那处）
-+        //   `oms = .FMA(c3, omss, (omss*pco2i)*c4)`
-+        let omc_quotient = photo.maximum_carboxylation_mol_m2_s
-+            * (rubisco_co2 - photo.co2_compensation_pa)
-+            / (rubisco_co2 + photo.rubisco_co2_constant_pa);
-+        let omc = omc_quotient.mul_add(
-+            photo.c3_fraction,
-+            photo.maximum_carboxylation_mol_m2_s * photo.c4_fraction,
-+        );
-+        let ome_denominator = f77(2.0).mul_add(photo.co2_compensation_pa, electron_co2);
-+        let ome_quotient = photo.electron_transport_mol_m2_s
-+            * (electron_co2 - photo.co2_compensation_pa)
-+            / ome_denominator;
-+        let ome = photo.c3_fraction.mul_add(
-+            ome_quotient,
-+            photo.electron_transport_mol_m2_s * photo.c4_fraction,
-+        );
-         if !options.use_wue || (photo.c4_fraction - 1.0).abs() < f77(0.001) {
--            let oms = photo.sink_limit_mol_m2_s_pa * photo.c3_fraction
--                + photo.sink_limit_mol_m2_s_pa * internal_co2 * photo.c4_fraction;
-+            let oms = photo.c3_fraction.mul_add(
-+                photo.sink_limit_mol_m2_s_pa,
-+                photo.sink_limit_mol_m2_s_pa * internal_co2 * photo.c4_fraction,
-+            );
-             assimilation = coupled_assimilation(omc, ome, oms);
-         } else {
-             assimilation = omc.min(ome).max(0.0);
-@@ -291,25 +311,38 @@ pub fn stomata(input: StomataInput, options: StomataOptions) -> Result<StomataSt
-                 * f77(1.0e-3);
-             let acp = f77(1.6) * positive_assimilation / co2_surface_clamped;
-             let a = 1.0;
--            let bq = -f77(2.0) * (g0 * f77(1.0e-6) + acp)
--                - (g1 * acp).powi(2)
--                    / (photo.boundary_conductance_h2o_mol_m2_s * vapor_deficit_kpa);
--            let c = (g0 * f77(1.0e-6)).powi(2)
--                + (f77(2.0) * g0 * f77(1.0e-6) + acp * (1.0 - g1.powi(2)) / vapor_deficit_kpa)
--                    * acp;
--            conductance = (-bq + (bq.powi(2) - f77(4.0) * a * c).max(0.0).sqrt()) / (f77(2.0) * a);
-+            // `:343` 里 `(g0*1e-6 + acp)` 的乘积是一条 FMA（`_108 = .FMA(g0, 1e-6, acp)`）。
-+            let bracket = g0 * f77(1.0e-6) + acp;
-+            let quotient =
-+                (g1 * acp).powi(2) / (photo.boundary_conductance_h2o_mol_m2_s * vapor_deficit_kpa);
-+            let bq = (-bracket).mul_add(f77(2.0), -quotient);
-+            let g0_scaled = g0 * f77(1.0e-6);
-+            let one_minus_g1_squared = (-g1).mul_add(g1, 1.0);
-+            let c_tail = (f77(2.0) * g0)
-+                .mul_add(f77(1.0e-6), one_minus_g1_squared * acp / vapor_deficit_kpa);
-+            let c = g0_scaled.mul_add(g0_scaled, c_tail * acp);
-+            // `:346` `sqrtin = max(0, bquad**2 - 4*aquad*cquad)`：`bquad**2` 进 FMA。
-+            conductance =
-+                (-bq + bq.mul_add(bq, -(f77(4.0) * a * c)).max(0.0).sqrt()) / (f77(2.0) * a);
-             (co2_surface - f77(1.6) * net_assimilation / conductance)
-                 * input.photosynthesis.air_pressure_pa
-         } else {
-             let hcdma = input.leaf_saturation_vapor_pressure_pa * co2_surface_clamped
-                 / (gradm * positive_assimilation);
-             let a = hcdma;
--            let bq = photo.boundary_conductance_h2o_mol_m2_s * hcdma
--                - input.leaf_saturation_vapor_pressure_pa
--                - bintc * hcdma;
-+            // `:353 bquad = gbh2o*hcdma - ei - bintc*hcdma` 是**两条** `fmsub`：
-+            // 先 `fma(hcdma, gbh2o, -ei)`，再 `fma(-bintc, hcdma, 上一步)`。
-+            let first = hcdma.mul_add(
-+                photo.boundary_conductance_h2o_mol_m2_s,
-+                -input.leaf_saturation_vapor_pressure_pa,
-+            );
-+            let bq = (-bintc).mul_add(hcdma, first);
-+            // `:354 cquad = -gbh2o*(ea + hcdma*bintc)`：括号里是一条 FMA。
-             let c = -photo.boundary_conductance_h2o_mol_m2_s
--                * (input.canopy_air_vapor_pressure_pa + hcdma * bintc);
--            conductance = (-bq + (bq.powi(2) - f77(4.0) * a * c).max(0.0).sqrt()) / (f77(2.0) * a);
-+                * bintc.mul_add(hcdma, input.canopy_air_vapor_pressure_pa);
-+            // `:356` 同 `:346`。
-+            conductance =
-+                (-bq + bq.mul_add(bq, -(f77(4.0) * a * c)).max(0.0).sqrt()) / (f77(2.0) * a);
-             let surface_vapor = ((conductance - bintc) * hcdma)
-                 .min(input.leaf_saturation_vapor_pressure_pa)
-                 .max(f77(1.0e-2));
-@@ -370,17 +403,28 @@ pub fn update_photosynthesis(
-             iteration,
-         );
-         let internal = co2_guesses[iteration - 1];
--        let omc = photo.maximum_carboxylation_mol_m2_s * (internal - photo.co2_compensation_pa)
--            / (internal + photo.rubisco_co2_constant_pa)
--            * photo.c3_fraction
--            + photo.maximum_carboxylation_mol_m2_s * photo.c4_fraction;
--        let ome = photo.electron_transport_mol_m2_s * (internal - photo.co2_compensation_pa)
--            / (internal + f77(2.0) * photo.co2_compensation_pa)
--            * photo.c3_fraction
--            + photo.electron_transport_mol_m2_s * photo.c4_fraction;
-+        // `:737/:738/:740` 与 `stomata` 的 `:258/:259/:262` 同形（WUE 关着时
-+        // `pco2i_c = pco2i_e = pco2i`）。
-+        let omc_quotient = photo.maximum_carboxylation_mol_m2_s
-+            * (internal - photo.co2_compensation_pa)
-+            / (internal + photo.rubisco_co2_constant_pa);
-+        let omc = omc_quotient.mul_add(
-+            photo.c3_fraction,
-+            photo.maximum_carboxylation_mol_m2_s * photo.c4_fraction,
-+        );
-+        let ome_denominator = f77(2.0).mul_add(photo.co2_compensation_pa, internal);
-+        let ome_quotient = photo.electron_transport_mol_m2_s
-+            * (internal - photo.co2_compensation_pa)
-+            / ome_denominator;
-+        let ome = photo.c3_fraction.mul_add(
-+            ome_quotient,
-+            photo.electron_transport_mol_m2_s * photo.c4_fraction,
-+        );
-         if !options.use_wue || (photo.c4_fraction - 1.0).abs() < f77(0.001) {
--            let oms = photo.sink_limit_mol_m2_s_pa * photo.c3_fraction
--                + photo.sink_limit_mol_m2_s_pa * internal * photo.c4_fraction;
-+            let oms = photo.c3_fraction.mul_add(
-+                photo.sink_limit_mol_m2_s_pa,
-+                photo.sink_limit_mol_m2_s_pa * internal * photo.c4_fraction,
-+            );
-             assimilation = coupled_assimilation(omc, ome, oms);
-         } else {
-             assimilation = omc.min(ome).max(0.0);
-@@ -394,10 +438,11 @@ pub fn update_photosynthesis(
-         let co2_surface = input.canopy_air_co2_pa / input.photosynthesis.air_pressure_pa
-             - f77(1.37) * net_assimilation / photo.boundary_conductance_h2o_mol_m2_s;
-         let positive_assimilation = net_assimilation.max(f77(1.0e-12));
--        let next = (co2_surface
--            - f77(1.6) * positive_assimilation / input.canopy_conductance_h2o_umol_m2_s)
--            * input.photosynthesis.air_pressure_pa;
--        errors[iteration - 1] = internal - next;
-+        // `:805 eyy(ic) = pco2i - (co2s - 1.6*assmt/gsh2o)*psrf` 出货是
-+        // `fsub` + `fmsub` ⇒ `pco2i - bracket*psrf` 收成一条 FMA（加数是 `pco2i`）。
-+        let bracket =
-+            co2_surface - f77(1.6) * positive_assimilation / input.canopy_conductance_h2o_umol_m2_s;
-+        errors[iteration - 1] = (-bracket).mul_add(input.photosynthesis.air_pressure_pa, internal);
-         if errors[iteration - 1].abs() < f77(0.1) {
-             break;
-         }
-@@ -523,9 +568,10 @@ fn sortin_impl(
- ) {
-     if iteration < 4 {
-         let error_sign = if errors[0] < 0.0 { -1.0 } else { 1.0 };
--        co2[0] = gamma + f77(0.5) * range;
--        co2[1] = gamma + range * (f77(0.5) - f77(0.3) * error_sign);
--        co2[2] = co2[0] - (co2[0] - co2[1]) / (errors[0] - errors[1] + f77(1.0e-10)) * errors[0];
-+        co2[0] = f77(0.5).mul_add(range, gamma);
-+        co2[1] = range.mul_add(f77(0.5) - f77(0.3) * error_sign, gamma);
-+        let slope = (co2[0] - co2[1]) / (errors[0] - errors[1] + f77(1.0e-10));
-+        co2[2] = (-slope).mul_add(errors[0], co2[0]);
-         let pmin = co2[0].min(co2[1]);
-         let emin = errors[0].min(errors[1]);
-         if emin > 0.0 && co2[2] > pmin {
-@@ -558,17 +604,20 @@ fn sortin_impl(
-         let i3 = i1 + 2;
-         let isp = (index + 1).min(n - 1);
-         let is = isp - 1;
--        let linear =
--            co2[is] - (co2[is] - co2[isp]) / (errors[is] - errors[isp] + f77(1.0e-10)) * errors[is];
--        let ac1 = errors[i1].powi(2) - errors[i2].powi(2);
--        let ac2 = errors[i2].powi(2) - errors[i3].powi(2);
-+        let slope = (co2[is] - co2[isp]) / (errors[is] - errors[isp] + f77(1.0e-10));
-+        let linear = (-slope).mul_add(errors[is], co2[is]);
-+        let error_two_squared = errors[i2] * errors[i2];
-+        let ac1 = errors[i1].mul_add(errors[i1], -error_two_squared);
-+        let ac2 = (-errors[i3]).mul_add(errors[i3], error_two_squared);
-         let bc1 = errors[i1] - errors[i2];
-         let bc2 = errors[i2] - errors[i3];
-         let cc1 = co2[i1] - co2[i2];
-         let cc2 = co2[i2] - co2[i3];
--        let bterm = (cc1 * ac2 - cc2 * ac1) / (bc1 * ac2 - ac1 * bc2 + f77(1.0e-10));
--        let aterm = (cc1 - bc1 * bterm) / (ac1 + f77(1.0e-10));
--        let cterm = co2[i2] - aterm * errors[i2].powi(2) - bterm * errors[i2];
-+        let bterm =
-+            ac2.mul_add(cc1, -(cc2 * ac1)) / (ac2.mul_add(bc1, -(ac1 * bc2)) + f77(1.0e-10));
-+        let aterm = (-bc1).mul_add(bterm, cc1) / (ac1 + f77(1.0e-10));
-+        let first = (-(aterm * errors[i2])).mul_add(errors[i2], co2[i2]);
-+        let cterm = (-bterm).mul_add(errors[i2], first);
-         let quadratic = cterm.max(lower);
-         co2[iteration - 1] = f77(0.5) * (linear + quadratic);
-         if let Some(slot) = debug {
-@@ -598,9 +647,13 @@ fn wue_internal_co2(
-     let rubisco = canopy_co2
-         - (f77(1.6) * vapor_difference * (canopy_co2 - gamma / air_pressure).max(0.0) / lambda)
-             .sqrt();
-+    // `:861` 的 GIMPLE 是 `_368 = .FMA(sqrt(lambda*gammas/psrf/D), 1.37, 1.0)`。
-     let electron = canopy_co2
-         - canopy_co2
--            / (1.0 + f77(1.37) * (lambda * gamma / air_pressure / vapor_difference).sqrt());
-+            / f77(1.37).mul_add(
-+                (lambda * gamma / air_pressure / vapor_difference).sqrt(),
-+                1.0,
-+            );
-     (rubisco * air_pressure, electron * air_pressure)
- }
- 
-```
+**教训**：写进文档的"可重放"补丁**必须真的重放一遍**再写。当时是"改完就写"，而分步用 `edit`
+与脚本混着改，脚本就和树脱了节（那份只覆盖 19/30）。
 
 ### 六、下一枪
 
@@ -22421,4 +22138,97 @@ compare_stomata                    # assim 1/4000（HEAD 上 rst 114 + assim 171
 2. 若要走"把湿窗也做到逐位相同"（那时口径自然是 0），还差的是**叶链剩下约 38 条**
    没有闭环兜底的内核站点（`:1076/:1079` 的 `cfw`、`:1192`、`:1349`、`:1392/:1393`）——
    本轮验证了"完整**已知**集"还不够，所以缺口很可能就在那 38 条里。
+3. `compare_stomata` 的 1/4000（row 514）仍未解释。
+
+## 第 372 轮：湿窗的逐位范围从 N=63 推到 **N=432** —— 新找到 `Runoff_SimpleVIC` 一处**会翻分支**的漏熔，下一颗种子钉在 N=489
+
+**一句话**：把第 371 轮那份工作集（`pco2a` + 光合 30 处）当**工作基线**用起来之后，
+湿窗 restart 的首分歧从 N=63 推到 **N=222**；用 `vsfr_wet.sh` 的内部探针把它钉在
+**`WSF1` 入场的 `qgtop`**（水步的输入，不在水步里），顺藤查到 `MOD_Runoff.F90`：
+`Runoff_SimpleVIC` 的 `WaterDepthInit + watin` 在 GIMPLE 里是一条
+`.FMA(_29, waterdepthmax, watin)`，而 Rust 写成两次舍入的加法 ——
+**这一处同时进 `ELSEIF ((WaterDepthInit+watin) > WaterDepthMax)` 的分支判定**，
+所以它只在湿季（`watin > 0`）现形、干窗永远看不到。补上后湿窗逐位范围一路推到 **N=432**。
+
+### 一、这一轮怎么把种子一层层钉住的（方法可直接复用）
+
+```text
+① 工作集 + wet_ts 扫描：N=63 0/68 … N=192 0/68，N=240 17/68  ⇒ 新种子在 (192,240]
+② 二分：216 0/68 / 224 21/68 → 220 0/68 / 221 0/68 / 222 3/68 ⇒ 钉在 N=222
+③ restart_divergence.py：3 个量，种子是 wliq_soisno[5]（3.7e-15）
+④ vsfr_wet.sh 222（把 vsf_richards_probe.sh 改成湿窗）：第一条不同的记录
+   = ('WSF1', 222, 0, 0) qgtop K=7.11966634207791e-05 R=7.119666342076667e-05
+   ⇒ 差异在**水步的入口**，不在水步里
+⑤ qgtop = gwat - rsur（MOD_SoilSnowHydrology.F90:958）；DEF_Runoff_SCHEME=3
+   ⇒ rsur 来自 Runoff_SimpleVIC（MOD_Runoff.F90:286-358）
+⑥ 该子程序 4 条 FMA 逐条对：315/316（w_int/wsat_int 的 FMA 累加）Rust 已有 ✓、
+   347（RunoffSurface 的最后一个乘积）Rust 已有 ✓、342 缺 ✗
+```
+
+`vsf_richards_probe.sh` 原来只跑干窗（`oracle/work/CN-Cng`）。本轮的改法：
+拷到 `/tmp` 把 BASE 写成绝对路径、把三处 `oracle/work/CN-Cng*` 换成 `-wet`，
+`bash /tmp/gf/vsfr_wet.sh 222`（脚本自己会恢复被 patch 的源并重建内核）。
+
+### 二、新找到的缺口：`runoff.rs::storage_distribution_runoff`
+
+```text
+:342  _30 = .FMA (_29, waterdepthmax_77, watin_56)     ; WaterDepthInit + watin
+:441  if (_31 > waterdepthmax_77)                       ; ELSEIF 用的就是 _30
+:447  _33 = _31 / waterdepthmax_77                      ; InfilVarTmp 的分子也是 _30
+```
+
+内核里 `WaterDepthInit` 单独并不存在（CSE 后只有 `_30` 这一个值）——
+即 `WaterDepthMax*(1-(1-SSF)**(1/BVIC))` 那个乘积被**收进加法**。
+Rust 原先写 `let initial_depth = maximum_depth * (1.0 - …); if initial_depth + input_depth > maximum_depth`，
+乘积先舍一次、加法再舍一次。**这个 1 ULP 会同时改分支判定与 `remaining` 的分子**，
+所以它能整支翻掉 —— 与前面那些"只差最后一位"的缺口不同，这也解释了 N=222 处
+一步之内就放大到 27 ULP 的形态。
+
+**实测（同树 A/B）**
+
+| 口径 | HEAD | 工作集（`pco2a`+30 处） | 工作集 + runoff |
+|---|---|---|---|
+| 湿窗 restart 首分歧 | N=63（10/68） | **N=222** | **N=489** |
+| 湿窗逐位范围 | 1–62 | 1–221 | **1–488**（抽测 63/72/96/120/…/432/480/486/487/488 全 0/68） |
+| 干窗 restart | 整窗 0/68 | 整窗 0/68 | 整窗 0/68 |
+| 黄金 dry | 153 / 0 / 0，0.0000 | 81 / 0 / 0，0.0000 | 81 / 0 / 0，0.0000 |
+| 黄金 wet（`over_tol`/`ot_vars`/`sumabs`） | 1197 / 19，8.4418 | 1933 / 52，35.80 | （未逐项复测；工作集本身已变差） |
+
+**runoff 单独落（在真 HEAD 上）**：湿窗 N=63 仍 10/68、干窗 0/68、
+黄金 **dry 逐位不变**（`153 / 0 / 0，0.0000`）—— 因为干季 `watin <= 0` 直接返回；
+但黄金 wet 1197 → **1876 / 53**，22.85… ⇒ 按纪律仍不能单独落地。
+
+### 三、当前钉住的下一个种子：N=489
+
+```text
+wet N=488 -> 0/68        wet N=489 -> 3/68
+  emis      ndiff=1  gold=0.9999635463846389  rust=0.9999635463846388
+  t_grnd    ndiff=1  gold=293.5126389392602   rust=293.5126389392603
+  t_soisno  ndiff=2  idx=(0,5)
+vsfr_wet.sh 489 的第一条不同记录 = ('WSF1', 489, 0, 0) qgtop
+  K=-2.9887022545128015e-07  R=-2.988702254512928e-07
+```
+
+⇒ **又是"水步入场的 `qgtop` 先差"**：`qgtop = gwat - rsur`，runoff 已补，
+所以这次差的是 `gwat = pg_rain + sm - qseva` 里的 **`qseva`**（地面蒸发）
+⇒ 种子在**叶/热链**（`qseva`/`fevpg` → `emis`/`t_grnd` 也在同一侧），不在水侧。
+
+### 四、策略上的结论（这条比上面任何一处都重要）
+
+湿窗在这个纪律下**没法"一处一处地"落**：任何一处改对都会换一条混沌轨道，
+聚合指标在 1100–2000 之间随机跳（`pco2a` 1650、30 处 1968、runoff 1876、合起来 1933）。
+**唯一能同时满足两条判据的路**是：把湿窗做到**逐位相同**（那时 `over_tol` 自然是 0），
+再把这套形状**一次性**落地。所以：
+
+* 完整工作集存档在 **`oracle/patches/wet-seed-working-set.diff`**（+ `README.md` 说明每块的来源与数字）；
+* 下一轮从 **N=489** 继续：种子在 `qseva`/`fevpg` 一侧的叶/热链，
+  照第 370 轮"内核源码行清单 ↔ Rust `mul_add` 逐条配对"的笨办法往上游走。
+
+### 五、下一枪
+
+1. **N=489**：叶/热链里 `qseva`/`fevpg` 的 1 ULP。第 370 轮已经把那条链的 42 个 `mul_add`
+   与内核 80 条站点对过一遍（补了 5 处），但**那 5 处是"口径中性"才落地的**；
+   剩下的站点里还可能有"只在湿季现形"的形状（就像本轮的 runoff 那处）。
+2. 干窗那边**整窗 restart 逐位相同**、黄金 127 个变量零超差，已经收口；
+   剩下只有 1 ULP 级的诊断量（`f_assim`/`f_fgrnd` 第 10 步等）。
 3. `compare_stomata` 的 1/4000（row 514）仍未解释。
