@@ -19211,8 +19211,13 @@ ac2 用 eyy(i1) 而不是 eyy(i2)                            → 320/334/332
 （收第二个平方）**恰好相反**。写成
 `errors[i1].mul_add(errors[i1], -(errors[i2]*errors[i2]))` 后，
 **`sortin` 闭环 3000/3000 逐位全同**（`eyy` + `pco2y` + 9 个中间量）。
-（方法论纠错：`fnmsub`/`fnmadd` **取反的是加数**、不是乘积 —— 前几轮一直按错的语义
-读，才在 6 个变体里打转。）
+（方法论纠错：`fnmsub` **取反的是加数**、不是乘积 —— 前几轮一直按错的语义
+读，才在 6 个变体里打转。**但这句话对 `fnmadd` 不成立**，见第 336 轮的更正：
+AArch64 的 `fnmadd d,n,m,a = -a - n*m`（加数与乘积**都**取反），
+`fnmsub d,n,m,a = -a + n*m`（只取反加数）。第 336 轮用 `stomata:343` 的
+`fnmadd d21,d20,d31,d21` 反推 `bquad = -2*(g0_term+acp) - (g1*acp)**2/(gbh2o*vpd)`
+证实：只有 `-a - n*m` 这一读法与下游 `bquad**2 - 4*aquad*cquad`、
+`(sqrt - bquad)/2` 自洽。）
 
 再叠加第 331/332 轮那 5 处 stomata 形状（`omc`/`ome`/`oms`、Medlyn `:343-346`、
 Ball-Berry `:353-356`、WUE `:861`）：`stomata` 闭环 **148/114 → 4/0** —— 只剩
