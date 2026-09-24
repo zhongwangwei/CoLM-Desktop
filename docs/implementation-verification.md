@@ -18360,17 +18360,30 @@ VSFI     kernel=200 rust=200
 
 ## 若继续
 
-> **第 336 轮更新（最新的指路牌，先读这段）**：气孔-光合链的闭环已全部建成，
-> 口径是 **`sortin` 3000/3000、`update_photosyn` 3000/3000、`stomata` 4/4000**
+> **第 337 轮更新（最新的指路牌，先读这段）**：第 336 轮那两条结论仍然成立，
+> 并且第 337 轮把下面这条"下一枪"打完了一半：
+>
+> * 第 324 轮那 12 处（内联 `Richards_solver` 6 + `use_explicit_form` 6）**已按
+>   GIMPLE 具名操作数逐条判好并实测**，另外发现 `soilwater_aquifer_exchange` 自有
+>   **独立符号 + 4 条 FMA**（第 324 轮漏了）、`get_water_equilibrium_state` 2 条
+>   （只在冷启动用）。清单与 A/B 全表见"第 337 轮"。
+> * **湿窗 N=4 那颗种子不在 `MOD_Hydro_SoilWater` 全模块**：五个变体在
+>   N=4/5/6/8 上的状态差异清单逐位相同。下一个靶子是 `MOD_SoilSnowHydrology` 的
+>   `WATER_VSF` 回填（`:1105-1120` 已逐条对过、没问题）与 `runoff`/相变。
+> * **判据要换**：`over_tol` 和 restart 残留**个数**都被混沌翻转（干窗 N=18 的个数
+>   甚至偏好一个 GIMPLE 判为**错序**的版本），**只有 `sumabs` 单调** —— GIMPLE 正序
+>   把 dry `sumabs` 从 330.81 压到 223.68。建议下一轮以 dry `sumabs` 为第一判据。
+> * **方法**：判形状**先用 `-fdump-tree-optimized` 的 GIMPLE 定操作数角色**，再用
+>   `.loc` 定位。`.loc` + 反汇编判不出"进 FMA 的是哪个乘积"，本轮因此写反了 4 处。
+
+> **第 336 轮**：气孔-光合链的闭环已全部建成，口径是
+> **`sortin` 3000/3000、`update_photosyn` 3000/3000、`stomata` 4/4000**
 > （残余全在黄金窗口走不到的 BB/Medlyn 分支）。这批形状（25 处 FMA）**已按现行口径回退**，
 > 原因与清单见"第 336 轮"。两条更重要的结论：
 > ① `stomata` 那批形状在黄金窗口上**恒等**（C3 ⇒ `c3_fraction∈{0,1}`；Medlyn/BB 是死分支），
 > 所以"它让湿窗倒退"是错的归因 —— 账全在 `sortin`；
 > ② 用湿窗 restart 扫描量出：**这条链对湿窗状态轨迹零影响**，湿窗唯一的状态种子是
 > **N=4 的 `wliq_soisno[0,5]`（顶层土壤液态水，1 ULP）**，在土壤水里。
-> **下一枪**：第 324 轮那 17 处里还没测过的 **内联 `Richards_solver` 6 处 +
-> `use_explicit_form` 6 处**（该轮表里有现成的 `.loc` 行号与形状），判据用
-> `/tmp/gf/wet_ts.sh 4` + `restart_divergence.py`，不要再用 `over_tol`。
 
 **短程逐位已经干净**（1/3 步 restart 0/68、3 步 history 692/692），所以别再往
 `meltf`/`water_2014`/水步补冰那几处找 —— 第 257 轮已经把那条链走完并修好。
@@ -19378,3 +19391,71 @@ eyy（:805，仅 update_photosyn）  (-bracket).mul_add(psrf, pco2i)   —— **
 4. `stomata` 那 4 条残余（BB/Medlyn 分支）**优先级最低**：它们不在黄金路径上，
    而且要判就得照第 333 轮给 `stomata` 也导中间量（`omc`/`ome`/`oms`/`bq`/`c`/
    `conductance`/`internal`/`eyy`），需要把 `stomata` 也走"拷贝+放行"路线注入 `dbg` 数组。
+
+**第 337 轮：把第 324 轮那 12 处补测了（湿窗种子照旧不动）；顺手发现 `soilwater_aquifer_exchange` 的 4 处从没入账；并换来一个判据升级 —— 用 GIMPLE 具名操作数代替 `.loc` 猜操作数角色**
+
+**先说方法升级（本轮最值钱的部分）**：`.loc` + 反汇编只能判"**哪条乘积进了 FMA**"，
+判不了"**操作数是谁**"。第 336 轮结尾刚发现 `fnmadd` 语义被读错就是同一类坑。
+`gfortran -O2 -fdump-tree-optimized` 的 GIMPLE 里 FMA 是具名的：
+
+```text
+_344 = ss_vliq(izwt) * (zwt - sp_zi(izwt-1))       ← 独立舍入的乘积
+_56  = .FMA (zwtp - zwt, porsl, _344)             ← 进 FMA 的是**第二个**乘积
+```
+
+本轮照这个把 `MOD_Hydro_SoilWater.F90` 逐条过了一遍，**一次就抓出 4 处操作数写反**
+（我第一版按"收第一个源乘积"的成见写了 `soilwater_aquifer_exchange` 的 `:560/:569/:573`，
+GIMPLE 说这三处收的是**第二个**）。⇒ 以后判形状**先用 GIMPLE 定角色、再用 `.loc` 定位**。
+
+**补测的两组（第 324 轮的 12 处）**：内联 `Richards_solver` 6 处
+（`:817` 湿转干判据、`:823` `sqrt(sum(blc**2))`、`:966`/`:1060` `psi_s+(sp_zi-zwt)*0.5`、
+`:1065` `ss_q` 累加、`:1085` `ss_vl` 收尾）+ 内联 `use_explicit_form` 6 处
+（`:1411`/`:1424` `wa_m1`、`:1464` `dp`、`:1474` **两条**、`:1479` `waquifer`）。
+GIMPLE 逐条确认（`_1372/_1373/_1380` 一式收第一个乘积、`:1474` 的第二条是
+`_3266 = .FMA(dt, q(ilev-1)-q(ilev), _616)`，`:1085` 的 `_1159 = .FMA(_1151,_1152,_1158)`
+收第一个）。
+
+**新入账的两组**：
+
+* `soilwater_aquifer_exchange` 有**独立符号**（第 324 轮那张表没提它），自带 4 条 FMA
+  （`:560/:564/:569/:573`）。`:564` 是 `zwtp - 0.5*(sp_zi+zwt)`（GIMPLE `.FNMA(_66, 5.0e-1, zwtp)`），
+  另三条见上面的"收第二个"。**已按 GIMPLE 更正。**
+* `get_water_equilibrium_state` 另有 2 条（`:137` `(zwtmm-z_prev).mul_add(vliq_up, porsl*(z_i-zwtmm))`、
+  `:150` `(z_n-zwtmm).mul_add(0.5, psi_zwt)`）。它在 `main/` 里**没有调用点**（只有 `PUBLIC`
+  声明），本仓库 `equilibrium_water_state` 只在冷启动用一次 ⇒ 与 N≥1 的分歧无关，**未落**。
+
+**判据用哪个：三个仪器给三个方向，记下来备查（同树 A/B）**：
+
+| 仪器 | 平基线 | 12 处 + 气孔交换**错序** | 12 处 + 气孔交换**GIMPLE 正序** |
+|---|---|---|---|
+| 湿窗 restart N=4/5/6/8 | 1/1/1/5（per 68） | **完全相同** | **完全相同** |
+| 干窗 restart N=18/19/20/21/22 | 5/5/5/7/— | **0/2/1/0/0** | 5/6/6/7/22 |
+| dry `over_tol` / `ot_vars` | 28 / 1 | 32 / 1 | 32 / 1 |
+| dry `sumabs` | 330.8133 | 330.8866 | **223.6837** |
+| wet `over_tol` / `ot_vars` / `sumabs` | 1287 / 24 / 11.0278 | 2047 / 53 / 41.3839 | 1515 / 32 / 21.5579 |
+| snow `over_tol` / `ot_vars` / `sumabs` | 25713 / 79 / 444416.8246 | 同 | 同 |
+
+**三条结论**：
+
+1. **这 16 处（乃至整条 `MOD_Hydro_SoilWater`）不产生湿窗 N=4 那颗种子**：五个变体在
+   N=4/5/6/8 上的 68 状态量差异清单**逐位相同**（`wliq_soisno[0,5]` 1 ULP）。
+   湿窗的种子在 `MOD_Hydro_SoilWater` **之外**的顶层水量路径上（`WATER_VSF` 的回填
+   `MOD_SoilSnowHydrology.F90:1105-1120` 已逐条对过、`runoff`/相变还没过）。
+2. **restart 扫描是"定位器"，不是"裁判"**：干窗 N=18 的残留**个数**偏好那个被 GIMPLE 判为
+   错序的版本（0/2/1/0 vs 5/6/6/7）。个数是 1 ULP 硬币的计数，和 `over_tol` 一样会被混沌
+   翻转；**只有 `sumabs`（逐点误差）是单调的** —— GIMPLE 正序把 dry `sumabs` 从
+   330.81 压到 **223.68**（−32%），错序则与平基线持平（330.89）。这反过来说明正序是对的。
+3. 按现行口径（任一窗口 `over_tol`/`ot_vars` 变差即回退）**整批回退**（`git checkout`）。
+   但请把上表当成一个**待裁决**的问题：口径用的是 `over_tol`，而它在这一轮里给出的
+   方向与 `sumabs` 正相反。全形状快照：`/tmp/gf/vsf_17plus4_correct.rs`。
+
+**给下一轮**：
+
+1. **换仪器**：`over_tol` 与 restart 残留**个数**都不能裁这条链，改用
+   **dry `sumabs`**（单调、且本轮给出了 330.81→223.68 的明确信号）作为第一判据，
+   `over_tol` 只做"不许大幅变差"的护栏。
+2. **找湿窗 N=4 那颗种子**：已排除 `MOD_Hydro_SoilWater` 全模块（含气孔交换）。
+   下一个靶子是 `MOD_SoilSnowHydrology` 的 `WATER_VSF` 回填与 `runoff`/相变；
+   建议照本轮的办法先做 **GIMPLE 普查**（`-fdump-tree-optimized` 里 grep `.FMA`/`.FNMA`），
+   按符号归属到 Rust 函数，再逐条比。
+3. `get_water_equilibrium_state` 那 2 处只在冷启动路径，优先级最低，但补上能让 N=0 也逐位。
