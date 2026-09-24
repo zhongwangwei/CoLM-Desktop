@@ -20987,3 +20987,25 @@ PHXQ2 每步 1 条（251 条）；差异 34 条
 水步的哪一次写入（`vsf_probe.sh` 的 `WSF` 出场标签已把 `ss_vliq` 指到第 1 层 ✓），
 以及 `soil_psi_from_vliq` 的 VG 支在**真实参数区间**上是否有闭环没覆盖的形状差
 （闭环 3×10000 是合成输入 ✓）。
+
+**第 359 轮追加：`soil_psi_from_vliq` 的 VG 支已被闭环覆盖 ⇒ `psit` 的差只能来自入参（表层水）**
+
+查了现成闭环 `oracle/scripts/compare_soilhydro.sh` + `soil_hydro_fn_diff.f90` 的覆盖面
+（文件头注释已写清，无需重跑）：
+
+```text
+覆盖 soil_psi_from_vliq / soil_hk_from_psi / soil_vliq_from_psi，
+两档模型（Campbell / van Genuchten）× (2500 组均匀随机 + 2500 组边界取值)，
+三个函数**串联**调用（psi 从 vliq 算出后再喂给另外两个）——
+即"一处差就会在下游显形"，不是各自独立合成输入。
+```
+
+⇒ `psit` 计算里走的 **VG 支**（`DEF_USE_Campbell_SOIL_MODEL = .false.`，默认）在这 5000 组上
+**逐位全同** ⇒ **`psit` 的 34 次差异只能来自它的入参**，也就是 `wx`
+（= `(wliq_soisno(1)/denh2o + wice_soisno(1)/denice)/dz_soisno(1)`）与
+`porsl(1)`/`theta_r(1)`/`psi0(1)`（后三个是站点常数 ✓）。
+
+**结论（干窗种子的根）**：**表层水/冰的步内瞬时差** —— 而 `vsf_probe.sh` 的 `WSF` 出场标签
+（第 355 轮）已把它指到**第 1 层的 `ss_vliq`** ✓。剩下要钉的是"水步里哪一次写入/哪一个分支
+把它带进来"，即 Richards 内部那几层（`vsf_richards_probe.sh` 的 `RCHL` 已在第 355 轮给出
+`ss_vl` 第 1 层差 ✓，可以作为下一层的入口）。
