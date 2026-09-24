@@ -2,7 +2,16 @@
 # `MOD_AssimStomataConductance:sortin` 的两侧逐位差分闭环。
 #
 # 为什么：第 330–332 轮把 `stomata` 闭环 498→61，剩下的全在模型 0/1 的 `assim`，
-# 而它们唯一的共同路径就是 `sortin`（`stomata` 这条链上唯一没有 FMA 的函数）。
+# 而它们唯一的共同路径就是 `sortin`。
+#
+# **第 369 轮更正**：这里原先写的是"`sortin` 是这条链上唯一没有 FMA 的函数" —— 错的。
+# `gfortran -O2 -fdump-tree-optimized-lineno` 数出来 `sortin` 有 **11 条**
+# `.FMA/.FNMA/.FMS`（`:414/415/416/453/459/460/465×2/466/467×2`）。旧结论只数了
+# `-S` 里带 `.loc` 的指令，漏了别的形态。这 11 处目前**没有**落地：闭环 3000 例里
+# `bterm` 差 853、`aterm` 925、`ac1` 640 ……；补上后 3000/3000 逐位相同，
+# 但黄金湿窗的口径指标变差（混沌），按"口径指标不许变差"整批回退 ——
+# 正确写法与全部证据见 `docs/implementation-verification.md` 第 369 轮。
+#
 # `sortin` 是 **PRIVATE** ⇒ 走"拷贝+放行"：把模块拷进 `$WORK`、`PRIVATE :: sortin`
 # 改 `PUBLIC`，用拷贝编 `.mod`（`-I$WORK` 在 `-I.bld` 之前），vendor 源树不动。
 #

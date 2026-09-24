@@ -18373,6 +18373,25 @@ VSFI     kernel=200 rust=200
 
 ## 若继续
 
+> **第 369 轮更新（最新的指路牌，先读这段）**：**闭环要全跑** —— 本轮把 18 个差分闭环
+> 一次全跑（新脚本 `oracle/scripts/compare_all.sh`），发现 **3 个一直在失败**：
+> `compare_sortin`、`compare_stomata`、`compare_update_photosyn`，全落在
+> `MOD_AssimStomataConductance.F90`（这个模块 40 条 FMA，本仓库只落了 5 条；`sortin` 那 11 条
+> 还被旧注释误记成"这条链上唯一没有 FMA 的函数"）。
+>
+> * 差的 30 处形状**全部读出并量过**：三个闭环分别变成 3000/3000、3000/3000、3999/4000，
+>   干窗黄金位型 153 → **81**、干窗 restart 仍整窗 0/68 —— 但**黄金湿窗口径变差**
+>   （`over_tol` 1197 → **1968**、`ot_vars` 19 → **53**、`sumabs` 8.4418 → **33.37**）
+>   ⇒ 按"口径指标不许变差"**整批 `git checkout` 回退**；30 处的 GIMPLE 角色与**可重放补丁全文**
+>   留在第 369 轮那节，下次一步就能重放。
+> * **判据（回退后复测，与本轮开头逐位一致）**：干窗 restart **N=250–528 全 0/68**、
+>   湿窗 **N=63（10/68）**、黄金 dry `153 / 0 / 0，0.0000`、黄金 wet `27055 / 1197 / 19，8.4418`。
+> * **下一枪**：① 湿窗 N=63 的上游 —— `gs0sun`/`gs0sha` 的输入侧，也就是那条挂起的
+>   `pco2a` `.FNMA`（本轮又给它添了一个"同源整批"候选）；
+>   ② `compare_stomata` 只剩的 **1/4000**（row 514，差得比 1 ULP 大 ⇒ 像分支差而不是舍入差）。
+> * **方法**：闭环是"形状对不对"的唯一判据，黄金窗口是混沌的 ——
+>   **每轮收尾跑一遍 `oracle/scripts/compare_all.sh`**，别只跑与当轮改动相关的那一个。
+
 > **第 368 轮更新（最新的指路牌，先读这段）**：**干窗那颗种子关掉了**。把
 > `MOD_Thermal_CanopyPhase_Extended.F90` 的 99 条 FMA 先按 `.loc` + **守卫栈**分活/死
 > （活 **25** / 死 **74**；`:1081-1154` 那 56 条确实在 `DEF_USE_PFT/PC` 守卫里 —— `747` 的
@@ -21820,3 +21839,358 @@ python3 oracle/scripts/window_divergence.py oracle/golden/CN-Cng_hist_2008-01.nc
    从 N=63 推到 73–84，但黄金 wet 的 `over_tol` 1197 → 1650、`ot_vars` 19 → 35
    ⇒ 按仓库纪律不能落。**注意它换来的正是本轮这条"干窗式"胜利的同款证据（首分歧推后），
    却与黄金聚合反向** —— 这条分歧本身值得作为"纪律是否要为例外开口"的判例继续留着。
+## 第 369 轮：闭环普查发现**三个差分闭环一直在失败** —— 光合/气孔链 30 处未落地形状（按纪律回退，写法全部留档）
+
+**一句话**：把仓库里 **18 个差分闭环一次全跑**（以前从没跑过全量），发现 **3 个在失败**：
+`compare_sortin`、`compare_stomata`、`compare_update_photosyn` —— 全落在
+`MOD_AssimStomataConductance.F90`。逐条按 `.loc` + GIMPLE 读出来：这个模块有 **40 条**
+`.FMA/.FNMA/.FMS`，本仓库只落了 5 条。把差的 **30 处全补上**后三个闭环分别变成
+**3000/3000、3000/3000、3999/4000**，干窗黄金位型 **153 → 81**、`over_tol` 仍 0、
+干窗 restart 仍整窗 0/68 —— 但**黄金湿窗口径变差**（`over_tol` 1197 → **1968**、
+`ot_vars` 19 → **53**、`sumabs` 8.4418 → **33.37**）⇒ 按 **"口径指标不许变差"**
+整批 `git checkout` 回退，**写法与全部证据留在本节**（下次可以直接重放）。
+
+### 一、闭环全量普查（本轮新加的 `oracle/scripts/compare_all.sh`）
+
+以前每一轮只跑与当轮改动相关的那一个闭环；本轮把它固化成一条命令：
+
+```text
+oracle/scripts/compare_all.sh          # 全跑；有任一失败则退出码 1
+oracle/scripts/compare_all.sh stomata  # 只跑名字里含这个子串的
+
+闭环: 17 通过 / 3 失败
+失败: compare_sortin compare_stomata compare_update_photosyn
+跳过（需要位置参数，不是闭环）: compare_flag_isolated compare_second_config
+```
+
+逐条输出（`HEAD` = `6668e30`）：
+
+```text
+== compare_moninobukm   rc=0  MOD_FrictionVelocity: all 20 outputs 20000/20000 bitwise identical
+== compare_leddy        rc=0  ...
+== compare_soilthermal  rc=0  hcap 40000/40000, thk 同
+== compare_sortin       rc=1  {'inter:bterm': 853, 'inter:aterm': 925, 'inter:ac2': 528,
+                               'pco2y3': 277, 'pco2y4': 96, 'inter:cterm': 536,
+                               'inter:ac1': 640, 'pco2y2': 231, 'pco2y5': 78, 'pco2y6': 70}  /3000
+== compare_qsadv        rc=0  20000/20000
+== compare_phasechange  rc=0  10000/10000
+== compare_interception rc=0  4000/4000
+== compare_water_balance rc=0 12000/12000
+== compare_flux_inside  rc=0  15000/15000
+== compare_soilhydro    rc=0  10000/10000
+== compare_stomata      rc=1  {'rst': 114, 'assim': 171}  /4000
+== compare_update_photosyn rc=1 {'assim': 225}  /3000
+== compare_updphotosyn  rc=0
+== compare_vulnerability rc=0 200000/200000
+== compare_getzwt       rc=0  10000/10000
+== compare_water_equilibrium rc=0 109949/109949
+```
+
+（`compare_flag_isolated.sh` / `compare_second_config.sh` 需要位置参数，不能裸跑，未计入。）
+
+**这一步本身就是方法**：以前每一轮只跑与当轮改动相关的那一个闭环，于是"三个闭环在失败"
+可以躺很久 —— `compare_sortin.sh` 的头注释里还写着"`sortin` 是这条链上唯一**没有 FMA** 的函数"，
+而这正是它一直失败的原因被记反了。
+
+### 二、`sortin` 有 11 条 FMA（旧结论被推翻）
+
+`gfortran -O2 -fdump-tree-optimized-lineno` 数出 `sortin`（`:383-476`）**11 条**，
+源码行 `:414/415/416/453/459/460/465×2/466/467×2`。逐条操作数角色：
+
+| 源码 | GIMPLE | 写法 |
+|---|---|---|
+| `:414 co2(1) = gammas + 0.5*range` | `.FMA(range, 0.5, gammas)` | `f77(0.5).mul_add(range, gammas)` |
+| `:415 co2(2) = gammas + range*(0.5-0.3*eyy_a)` | `.FMA(range, prephitmp, gammas)` | `range.mul_add(f77(0.5)-f77(0.3)*sign, gamma)` |
+| `:416 co2(3) = co2(1) - (…)/(…)*eyy(1)` | `.FNMA(_24, eyy(1), co2(1))` | `(-slope).mul_add(errors[0], co2[0])` |
+| `:453 pco2yl = …` | `.FNMA(_67, _72, co2[is])` | 同上 |
+| `:459 ac1 = e1²-e2²` | `.FMS(e1, e1, e2*e2)`（**e2² 独立舍入当被减数**） | `errors[i1].mul_add(errors[i1], -e2sq)` |
+| `:460 ac2 = e2²-e3²` | `.FNMA(e3, e3, e2*e2)`（**方向相反**，e2² 当减数） | `(-errors[i3]).mul_add(errors[i3], e2sq)` |
+| `:465 bterm = (cc1*ac2-cc2*ac1)/(bc1*ac2-ac1*bc2+1e-10)` | 两条 `.FMS`：`ac2*cc1-_96`、`ac2*bc1-_100` | 分子/分母各一条 `mul_add`，`1e-10` 普通加 |
+| `:466 aterm = (cc1-bc1*bterm)/(ac1+1e-10)` | `.FNMA(bc1, bterm, cc1)` | `(-bc1).mul_add(bterm, cc1)` |
+| `:467 cterm = p2 - aterm*e2² - bterm*e2` | 两条 `.FNMA`（`_111 = e2*aterm` 独立舍入） | `(-(aterm*e2)).mul_add(e2, p2)` 再 `(-bterm).mul_add(e2, …)` |
+
+`ac1`/`ac2` 方向相反那一条是这轮最容易写错的地方（Rust 原先是 `powi(2) - powi(2)` 平铺）。
+
+### 三、另外 19 处（`stomata` 16 / `update_photosyn` 8 / `calc_photo_params` 4 / `WUE_solver` 1）
+
+| 源码 | GIMPLE 角色 | 备注 |
+|---|---|---|
+| `:570 vm = vm/temph*rstfac*c3 + vm/(templ*temph)*rstfac*c4` | `.FMA(_47, c3, 整条 c4 链)` | `:598 omss` 同形 |
+| `:579/:580 (710.*t-220.e3)` | `.FMA(t, 7.1e2, -2.2e5)` | 两处（`trop`/`tlef`） |
+| `:258 omc` | `.FMA(vm*(…)/(…), c3, vm*c4)` | |
+| `:259 ome` | `.FMA(gammas, 2.0, pco2i_e)` + `.FMA(c3, 商, epar*c4)` | 第一条第 336 轮已定 |
+| `:262 oms` | `.FMA(c3, omss, (omss*pco2i)*c4)` | |
+| `:343 bquad`(Medlyn) | `.FNMS(g0*1e-6+acp, 2.0, 商)` —— **括号里是普通加法**，熔的是末尾那一乘 | 我第一版把括号也熔了，被单测 `hydraulic_photosynthesis_update_matches_mod_assim_stomata_conductance` 抓住（差 2 倍） |
+| `:344 cquad`(Medlyn) | `.FNMA(g1,g1,1.0)` + `.FMA(2*g0, 1e-6, (1-g1²)*acp/vpd)` + `.FMA(g0*1e-6, g0*1e-6, …)` | 三条 |
+| `:353 bquad`(BB) | `.FMS(hcdma, gbh2o, -ei)` 再 `.FNMA(bintc, hcdma, …)` | 两条 |
+| `:354 cquad`(BB) | `.FMA(bintc, hcdma, ea)` | |
+| `:346/:356 sqrtin` | `.FMS(bquad, bquad, 4*aquad*cquad)` | 两处 |
+| `:805 eyy(ic) = pco2i - bracket*psrf` | `.FNMA(bracket, psrf, pco2i)` —— **这条 FMA 的结果就是 `eyy` 本身** | 我第一版仍写 `internal - next`，同一个单测抓住 |
+| `:861 1 + 1.37*sqrt(…)` | `.FMA(sqrt, 1.37, 1.0)` | |
+
+### 四、补上之后的实测（**随后整批回退**）
+
+同树 A/B（`HEAD` = `6668e30`，即第 368 轮末）：
+
+| 口径 | HEAD | 只补 `sortin` 11 处 | 再补其余 19 处（**最终**） |
+|---|---|---|---|
+| `compare_sortin` | `bterm` 853 / `aterm` 925 / … ✗ | **3000/3000** ✓ | 3000/3000 ✓ |
+| `compare_update_photosyn` | `assim` 225 ✗ | 190 | **3000/3000** ✓ |
+| `compare_stomata` | `rst` 114 + `assim` 171 ✗ | `rst` 114 + `assim` 120 | **`assim` 1**（3999/4000） |
+| 干窗 restart N=251 / 528 | 0/68 / 0/68 | 0/68（252/288/528 全 0） | 0/68 / 0/68 ✓ |
+| 湿窗 restart N=63 | 10/68 | 10/68 | 10/68 |
+| 黄金 dry（`bitwise`/`over_tol`/`ot_vars`/`sumabs`） | 153 / 0 / 0，0.0000 | 150 / 0 / 0，0.0000 | **81** / 0 / 0，0.0000 ✓ |
+| 黄金 wet | 27055 / 1197 / 19，8.4418 | 26840 / **1281 / 27**，8.9121 ✗ | 27340 / **1968 / 53**，33.3682 ✗ |
+
+⇒ **干窗三项全好、湿窗口径三项全差**。按本仓库写死的纪律（第 18005 / 18082 行那两处先例：
+"两者都违反'口径指标不许变差'，按纪律 `git checkout` 整个回退"，且"第 249 轮例外"已在第 362 轮
+被判不成立）⇒ **整批回退**，树回到 `6668e30` 的基线（回退后复测：黄金 dry `153 / 0 / 0，0.0000`、
+黄金 wet `27055 / 1197 / 19，8.4418`、湿窗 N=63 `10/68`，与基线逐位一致）。
+
+**这不是"改错了"**：30 处形状逐条对着 GIMPLE 操作数角色写成，三个闭环从失败变全过，
+单测（含那条 `hydraulic_photosynthesis_update_matches_mod_assim_stomata_conductance`）全绿。
+湿窗口径变差是**混沌**：`f_vegwp` 主导的 11 天窗口里，把 30 处末位改对会把轨道换一条，
+聚合指标可以反向 —— 与第 301/351/361 轮同一个现象。**这条负结果和那三次放在一起，
+构成"口径指标不许变差"这条纪律在混沌窗口上的第四个反例**；要不要为它开口是用户的决定。
+
+### 五、重放方式（一步到位）
+
+把下面这段存成 `photo_shapes_r369.py` 跑一次即可（它就是我这一轮用的补丁，逐条带断言）：
+
+```python
+"""第 369 轮：把 `MOD_AssimStomataConductance.F90` 剩下的 29 条 FMA 逐条补上。
+
+`-fdump-tree-optimized-lineno` 数出这个模块 40 条 `.FMA/.FNMA/.FMS`：
+`sortin` 11（本轮已补）、`calc_photo_params` 4、`stomata` 16、`update_photosyn` 8、
+`WUE_solver` 1。逐条读操作数角色后写在这里。
+
+`stomata` 与 `update_photosyn` 的 `omc/ome/oms/range/sqrtin` 是**同形**的两份；
+`update_photosyn` 里 `internal` 一路（WUE 关着时 `pco2i_c=pco2i_e=pco2i`）与 `stomata`
+的 `internal_co2` 一样，所以两处写同一种形状。
+"""
+P = '/Users/zhongwangwei/Desktop/Github/CoLM-Desktop/crates/colm-core/src/photosynthesis.rs'
+s = open(P).read()
+
+
+def rep(old, new, count=1):
+    global s
+    assert s.count(old) == count, (s.count(old), count, old[:100])
+    s = s.replace(old, new, count)
+
+
+# ---------------------------------------------------------------- A. calc_photo_params
+# `:570` / `:598`：`…*rstfac*c3 + …*rstfac*c4`，`c3` 那一条乘进 FMA。
+rep("""    maximum_carboxylation =
+        (maximum_carboxylation / high_inhibition * input.soil_water_stress * c3_fraction
+            + maximum_carboxylation / (low_inhibition * high_inhibition)
+                * input.soil_water_stress
+                * c4_fraction)
+            * input.canopy_integration[0];""",
+    """    // `:570 vm = vm/temph*rstfac*c3 + vm/(templ*temph)*rstfac*c4` 的 GIMPLE 是
+    // `.FMA(vm/temph*rstfac, c3, vm/(templ*temph)*rstfac*c4)` —— `c4` 那条链整体
+    // 独立舍入当加数，`c3` 那一乘收进 FMA。
+    let high_term = maximum_carboxylation / high_inhibition * input.soil_water_stress;
+    let low_term = maximum_carboxylation / (low_inhibition * high_inhibition)
+        * input.soil_water_stress
+        * c4_fraction;
+    maximum_carboxylation =
+        high_term.mul_add(c3_fraction, low_term) * input.canopy_integration[0];""")
+
+# `:580` 两处 `710*t - 220e3` 的分子是一条 FMA。
+rep("""        * (1.0
+            + ((f77(710.0) * b.optimum_temperature_k - f77(220.0e3))
+                / (gas_constant * b.optimum_temperature_k))
+                .exp())
+        / (1.0
+            + ((f77(710.0) * input.leaf_temperature_k - f77(220.0e3))
+                / (gas_constant * input.leaf_temperature_k))
+                .exp());""",
+    """        // `:579-580` 的两个分子 `710.*t-220.e3` 各自是一条 FMA（`:580` 的 GIMPLE
+        // `_67 = .FMA(t, 7.1e2, -2.2e5)`）。
+        * (1.0
+            + (f77(710.0)
+                .mul_add(b.optimum_temperature_k, -f77(220.0e3))
+                / (gas_constant * b.optimum_temperature_k))
+                .exp())
+        / (1.0
+            + (f77(710.0)
+                .mul_add(input.leaf_temperature_k, -f77(220.0e3))
+                / (gas_constant * input.leaf_temperature_k))
+                .exp());""")
+
+rep("""    let sink_limit = ((b.maximum_carboxylation_25c_mol_m2_s / f77(2.0))
+        * f77(1.8).powf(temperature_factor)
+        / low_inhibition
+        * input.soil_water_stress
+        * c3_fraction
+        + (b.maximum_carboxylation_25c_mol_m2_s / f77(5.0))
+            * f77(1.8).powf(temperature_factor)
+            * input.soil_water_stress
+            * c4_fraction)
+        * input.canopy_integration[0];""",
+    """    // `:597-598 omss = (vmax25/2)*1.8**qt/templ*rstfac*c3 + (vmax25/5)*1.8**qt*rstfac*c4`
+    // 与 `:570` 同形（`.FMA(_118, cstore_128, _124)`）。
+    let low_sink = (b.maximum_carboxylation_25c_mol_m2_s / f77(2.0))
+        * f77(1.8).powf(temperature_factor)
+        / low_inhibition
+        * input.soil_water_stress;
+    let high_sink = (b.maximum_carboxylation_25c_mol_m2_s / f77(5.0))
+        * f77(1.8).powf(temperature_factor)
+        * input.soil_water_stress
+        * c4_fraction;
+    let sink_limit = low_sink.mul_add(c3_fraction, high_sink) * input.canopy_integration[0];""")
+
+# ---------------------------------------------------------------- B. stomata
+rep("""        let omc = photo.maximum_carboxylation_mol_m2_s * (rubisco_co2 - photo.co2_compensation_pa)
+            / (rubisco_co2 + photo.rubisco_co2_constant_pa)
+            * photo.c3_fraction
+            + photo.maximum_carboxylation_mol_m2_s * photo.c4_fraction;
+        let ome = photo.electron_transport_mol_m2_s * (electron_co2 - photo.co2_compensation_pa)
+            / (electron_co2 + f77(2.0) * photo.co2_compensation_pa)
+            * photo.c3_fraction
+            + photo.electron_transport_mol_m2_s * photo.c4_fraction;
+        if !options.use_wue || (photo.c4_fraction - 1.0).abs() < f77(0.001) {
+            let oms = photo.sink_limit_mol_m2_s_pa * photo.c3_fraction
+                + photo.sink_limit_mol_m2_s_pa * internal_co2 * photo.c4_fraction;""",
+    """        // `:258/:259/:262` 三条都是 `商*c3 + 整条 c4 链`：
+        //   `omc = .FMA(vm*(pco2i_c-gammas)/(pco2i_c+rrkk), c3, vm*c4)`
+        //   `ome = .FMA(c3, epar*(…)/(pco2i_e+2*gammas), epar*c4)`，分母那一条
+        //         `.FMA(gammas, 2.0, pco2i_e)`（第 336 轮就定死的那处）
+        //   `oms = .FMA(c3, omss, (omss*pco2i)*c4)`
+        let omc_quotient = photo.maximum_carboxylation_mol_m2_s
+            * (rubisco_co2 - photo.co2_compensation_pa)
+            / (rubisco_co2 + photo.rubisco_co2_constant_pa);
+        let omc = omc_quotient.mul_add(
+            photo.c3_fraction,
+            photo.maximum_carboxylation_mol_m2_s * photo.c4_fraction,
+        );
+        let ome_denominator = f77(2.0).mul_add(photo.co2_compensation_pa, electron_co2);
+        let ome_quotient = photo.electron_transport_mol_m2_s
+            * (electron_co2 - photo.co2_compensation_pa)
+            / ome_denominator;
+        let ome = photo.c3_fraction.mul_add(
+            ome_quotient,
+            photo.electron_transport_mol_m2_s * photo.c4_fraction,
+        );
+        if !options.use_wue || (photo.c4_fraction - 1.0).abs() < f77(0.001) {
+            let oms = photo.c3_fraction.mul_add(
+                photo.sink_limit_mol_m2_s_pa,
+                photo.sink_limit_mol_m2_s_pa * internal_co2 * photo.c4_fraction,
+            );""")
+
+# Medlyn 分支
+rep("""            let acp = f77(1.6) * positive_assimilation / co2_surface_clamped;
+            let a = 1.0;
+            let bq = -f77(2.0) * (g0 * f77(1.0e-6) + acp)
+                - (g1 * acp).powi(2)
+                    / (photo.boundary_conductance_h2o_mol_m2_s * vapor_deficit_kpa);
+            let c = (g0 * f77(1.0e-6)).powi(2)
+                + (f77(2.0) * g0 * f77(1.0e-6) + acp * (1.0 - g1.powi(2)) / vapor_deficit_kpa)
+                    * acp;
+            conductance = (-bq + (bq.powi(2) - f77(4.0) * a * c).max(0.0).sqrt()) / (f77(2.0) * a);""",
+    """            let acp = f77(1.6) * positive_assimilation / co2_surface_clamped;
+            let a = 1.0;
+            // `:343` 里 `(g0*1e-6 + acp)` 的乘积是一条 FMA（`_108 = .FMA(g0, 1e-6, acp)`）。
+            let bq = -f77(2.0) * g0.mul_add(f77(1.0e-6), acp)
+                - (g1 * acp).powi(2)
+                    / (photo.boundary_conductance_h2o_mol_m2_s * vapor_deficit_kpa);
+            // `:344`：`1-g1**2` 是一条 `fnmsub`（`_104`）；`(g0*1e-6)**2` 与后半条链
+            // 相加也是一条 FMA（`cquad = .FMA(_289, _289, _110)`）。
+            let g0_scaled = g0 * f77(1.0e-6);
+            let one_minus_g1_squared = (-g1).mul_add(g1, 1.0);
+            let c_tail = (f77(2.0) * g0_scaled
+                + acp * one_minus_g1_squared / vapor_deficit_kpa)
+                * acp;
+            let c = g0_scaled.mul_add(g0_scaled, c_tail);
+            // `:346` `sqrtin = max(0, bquad**2 - 4*aquad*cquad)`：`bquad**2` 进 FMA。
+            conductance = (-bq
+                + bq.mul_add(bq, -(f77(4.0) * a * c)).max(0.0).sqrt())
+                / (f77(2.0) * a);""")
+
+# Ball-Berry 分支
+rep("""            let a = hcdma;
+            let bq = photo.boundary_conductance_h2o_mol_m2_s * hcdma
+                - input.leaf_saturation_vapor_pressure_pa
+                - bintc * hcdma;
+            let c = -photo.boundary_conductance_h2o_mol_m2_s
+                * (input.canopy_air_vapor_pressure_pa + hcdma * bintc);
+            conductance = (-bq + (bq.powi(2) - f77(4.0) * a * c).max(0.0).sqrt()) / (f77(2.0) * a);""",
+    """            let a = hcdma;
+            // `:353 bquad = gbh2o*hcdma - ei - bintc*hcdma` 是**两条** `fmsub`：
+            // 先 `fma(hcdma, gbh2o, -ei)`，再 `fma(-bintc, hcdma, 上一步)`。
+            let first = hcdma.mul_add(
+                photo.boundary_conductance_h2o_mol_m2_s,
+                -input.leaf_saturation_vapor_pressure_pa,
+            );
+            let bq = (-bintc).mul_add(hcdma, first);
+            // `:354 cquad = -gbh2o*(ea + hcdma*bintc)`：括号里是一条 FMA。
+            let c = -photo.boundary_conductance_h2o_mol_m2_s
+                * bintc.mul_add(hcdma, input.canopy_air_vapor_pressure_pa);
+            // `:356` 同 `:346`。
+            conductance = (-bq
+                + bq.mul_add(bq, -(f77(4.0) * a * c)).max(0.0).sqrt())
+                / (f77(2.0) * a);""")
+
+# ---------------------------------------------------------------- C. update_photosyn
+rep("""        let omc = photo.maximum_carboxylation_mol_m2_s * (internal - photo.co2_compensation_pa)
+            / (internal + photo.rubisco_co2_constant_pa)
+            * photo.c3_fraction
+            + photo.maximum_carboxylation_mol_m2_s * photo.c4_fraction;
+        let ome = photo.electron_transport_mol_m2_s * (internal - photo.co2_compensation_pa)
+            / (internal + f77(2.0) * photo.co2_compensation_pa)
+            * photo.c3_fraction
+            + photo.electron_transport_mol_m2_s * photo.c4_fraction;
+        if !options.use_wue || (photo.c4_fraction - 1.0).abs() < f77(0.001) {
+            let oms = photo.sink_limit_mol_m2_s_pa * photo.c3_fraction
+                + photo.sink_limit_mol_m2_s_pa * internal * photo.c4_fraction;""",
+    """        // `:737/:738/:740` 与 `stomata` 的 `:258/:259/:262` 同形（WUE 关着时
+        // `pco2i_c = pco2i_e = pco2i`）。
+        let omc_quotient = photo.maximum_carboxylation_mol_m2_s
+            * (internal - photo.co2_compensation_pa)
+            / (internal + photo.rubisco_co2_constant_pa);
+        let omc = omc_quotient.mul_add(
+            photo.c3_fraction,
+            photo.maximum_carboxylation_mol_m2_s * photo.c4_fraction,
+        );
+        let ome_denominator = f77(2.0).mul_add(photo.co2_compensation_pa, internal);
+        let ome_quotient = photo.electron_transport_mol_m2_s
+            * (internal - photo.co2_compensation_pa)
+            / ome_denominator;
+        let ome = photo.c3_fraction.mul_add(
+            ome_quotient,
+            photo.electron_transport_mol_m2_s * photo.c4_fraction,
+        );
+        if !options.use_wue || (photo.c4_fraction - 1.0).abs() < f77(0.001) {
+            let oms = photo.c3_fraction.mul_add(
+                photo.sink_limit_mol_m2_s_pa,
+                photo.sink_limit_mol_m2_s_pa * internal * photo.c4_fraction,
+            );""")
+
+rep("""        let positive_assimilation = net_assimilation.max(f77(1.0e-12));
+        let next = (co2_surface
+            - f77(1.6) * positive_assimilation / input.canopy_conductance_h2o_umol_m2_s)
+            * input.photosynthesis.air_pressure_pa;""",
+    """        let positive_assimilation = net_assimilation.max(f77(1.0e-12));
+        // `:805 eyy(ic) = pco2i - (co2s - 1.6*assmt/gsh2o)*psrf` 出货是
+        // `fsub` + `fmsub` ⇒ `pco2i - bracket*psrf` 收成一条 FMA（加数是 `pco2i`）。
+        let bracket = co2_surface
+            - f77(1.6) * positive_assimilation / input.canopy_conductance_h2o_umol_m2_s;
+        let next = (-bracket).mul_add(input.photosynthesis.air_pressure_pa, internal);""")
+
+open(P, 'w').write(s)
+print('photosynthesis patched')
+```
+
+### 六、下一枪
+
+1. **湿窗 N=63（10/68）仍是湿侧唯一未关的状态种子**，而且这一轮把它所在的链**量清楚了**：
+   差的是 `MOD_AssimStomataConductance.F90` 的 30 处（写法已在上文），补上后闭环全过、
+   湿窗首分歧仍停在 63 —— 说明**首分歧那一步还另有上游**（`gs0sun`/`gs0sha` 的输入侧），
+   也就是那条挂起的 `pco2a` `.FNMA`（现在四个例外候选里的第三个）。
+2. **`compare_stomata` 剩下的那 1/4000**（row 514，模型 0，`assim` 从 `…E451` 到 `…E3CA`，
+   差得比 1 ULP 大 ⇒ 像分支差而不是舍入差）值得单独看一眼：它是唯一还没解释的。
+
+3. **全量普查已经固化**：`oracle/scripts/compare_all.sh`（本轮新增，全跑 → 17 通过 / 3 失败，
+   有失败则退出码 1，可以直接挂进 CI）。它比手工那份多覆盖了三个闭环
+   （`compare_forcingdownscaling`、`compare_forcingdownscaling_shortwave`、
+   `compare_forcingdownscaling_wind`、`compare_hourly_window`），都通过 ✓。
