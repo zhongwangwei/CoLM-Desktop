@@ -54,8 +54,10 @@ pub fn non_split_ground_humidity(input: GroundHumidityInput) -> Result<GroundHum
             input.saturated_soil_suction_mm * saturation_fraction.powf(-bsw)
         }
         model => soil_psi_from_vliq(
-            saturation_fraction * (input.top_layer_porosity - input.top_layer_residual_water)
-                + input.top_layer_residual_water,
+            // `MOD_Thermal…:579` 的 GIMPLE 是 `_86 = .FMA(porsl(1)-theta_r(1), fac, theta_r(1))`
+            // —— 乘积被收进加法；平铺写 `fac*(porsl-theta_r) + theta_r` 会多一次舍入。
+            (input.top_layer_porosity - input.top_layer_residual_water)
+                .mul_add(saturation_fraction, input.top_layer_residual_water),
             input.top_layer_porosity,
             input.top_layer_residual_water,
             input.saturated_soil_suction_mm,
@@ -65,8 +67,9 @@ pub fn non_split_ground_humidity(input: GroundHumidityInput) -> Result<GroundHum
     .max(-1.0e8);
     let relative_humidity =
         (soil_potential_mm / WATER_GAS_GRAVITY_MM_K / input.ground_temperature_k).exp();
+    // `MOD_Thermal…:583` 的 GIMPLE 是 `qred = .FMA(1-fsno, hr, fsno)`。
     let humidity_reduction =
-        (1.0 - input.snow_cover_fraction) * relative_humidity + input.snow_cover_fraction;
+        (1.0 - input.snow_cover_fraction).mul_add(relative_humidity, input.snow_cover_fraction);
     let saturation =
         saturation_specific_humidity(input.ground_temperature_k, input.surface_pressure_pa)?;
     let reduced_humidity = humidity_reduction * saturation.specific_humidity;

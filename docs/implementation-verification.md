@@ -18373,6 +18373,31 @@ VSFI     kernel=200 rust=200
 
 ## 若继续
 
+> **第 368 轮更新（最新的指路牌，先读这段）**：**干窗那颗种子关掉了**。把
+> `MOD_Thermal_CanopyPhase_Extended.F90` 的 99 条 FMA 先按 `.loc` + **守卫栈**分活/死
+> （活 **25** / 死 **74**；`:1081-1154` 那 56 条确实在 `DEF_USE_PFT/PC` 守卫里 —— `747` 的
+> `ENDIF` 在 **1200** 行不是 1076，那个例程顶层 `IF` 全顶在第 1 列，**不能按缩进判块**）。
+> 活的那 25 条里还剩 3 处 Rust 写成平铺：`thm`（`:550`）、psit 的 VG 实参（`:579`）、
+> `qred`（`:583`）。补上之后：
+>
+> * **干窗 restart 从 N=251 起逐位相同**，抽测 250/251/252/260/288/320/400/480/**528（整窗末步）
+>   全部 0/68**（改前 N=251 = 11/68）；
+> * **黄金 dry：`over_tol` 28 → 0、`ot_vars` 1 → 0、`sumabs` 261.0128 → 0.0000**，
+>   `golden-compare` 报零变量超差（`tier0=23 tier1=8 tier2=97`）；`three.py` 位型只剩
+>   153/56024，且全是**诊断量**的 1 ULP（`f_assim`/`f_fgrnd` 第 10 步、`f_rnet`/`f_zerr`
+>   第 130 步、`f_trad` 第 175 步）—— 状态已整窗逐位相同；
+> * 湿窗 N=63（10/68）与黄金 wet（27055/1197/19）**逐位不变**。
+> * **植物水力这条也排掉了**：`main/MOD_PlantHydraulic.F90` 57 条 FMA / 30 行，两个
+>   `getqflx_*`（3+3）✓，两个 `getrootqflx_*`（6/4 条 vs Rust 3/1 个站点）是**循环/向量
+>   共享**、不是缺口；只剩 `spacAF_twoleaf` 的 41 条（雅可比组装 + 两支 4×4）没逐条审。
+> * **下一枪**：**湿窗 N=63 是湿侧唯一未关的状态种子**（`gs0sun`/`gs0sha` → PHS →
+>   `qflx_sha` → `vegwp`/`ldew(_rain)`，外加 M-O 的 `zol`/`rib`/`qstar`/`qref`）；
+>   照干窗的成法普查 `MOD_LeafTemperature_Extended.F90`（80 条 / 60 行）与
+>   `spacAF_twoleaf`（41 条）。`pco2a` 的 `.FNMA` 仍是悬案（首分歧 63→73–84 变好，
+>   黄金 wet 1197→1650 变差 ⇒ 按纪律不能落，等裁决）。
+> * **判据**：干窗 restart **N=250–528 全 0/68**、湿窗 **N=63（10/68）**、
+>   黄金 dry **`153 / 0 / 0，0.0000`**、黄金 wet `27055 / 1197 / 19，8.4418`。
+
 > **第 367 轮更新（最新的指路牌，先读这段）**：**第 366 轮那条"水侧差 10 处"作废** ——
 > `MOD_Hydro_SoilWater.F90` **整个文件**只有 **71 条** `.FMA/.FNMA/.FMS`（落在 56 个源码行，
 > 不是 27），逐条按 `.loc` 落到源码行 + 读 GIMPLE 操作数角色之后：**69 条早有对应写法**，
@@ -21648,3 +21673,150 @@ bash /tmp/gf/win4.sh ; python3 /tmp/gf/three.py oracle/golden/<gold> <rust-hist>
    记成"第 339 轮成组落地 ✓"挂了 28 轮，就是因为当年只写了结论、没留判据。
 4. **`-S` 的 `.loc` 只能定"哪条乘积进 FMA"的位置，操作数角色必须读 GIMPLE**；
    反过来，GIMPLE 不给（或给了也判不了）的调用点上下文，要靠闭环。
+
+## 第 368 轮：干窗那颗种子关掉了 —— `thermal` 三处未熔的乘积，干窗**整窗 restart 逐位相同**、黄金 dry 零超差
+
+**一句话**：把 `MOD_Thermal_CanopyPhase_Extended.F90` 的 **99 条** FMA 语句先按 `.loc` +
+**守卫栈**分成"活/死"（活 **25** 条、死 **74** 条），再把活的那 25 条逐条核 GIMPLE 角色 ——
+还剩 **3 处** Rust 写成平铺：`thm`（`:550`）、psit 的 VG 实参（`:579`）、`qred`（`:583`）。
+补上之后 **干窗首分歧从 N=251（11/68）直接归零**，并且**抽测到的每一步（250→528，整窗 528 步）
+restart 全部 0/68**；黄金 dry 的 `over_tol` 28 → **0**、`ot_vars` 1 → **0**、
+`sumabs` 261.0128 → **0.0000**。湿窗与黄金 wet **逐位不变**。
+
+### 一、99 条先分"活/死"（守卫栈，不按缩进猜）
+
+`thermal` 是 21-1431 行的单个大例程，99 条 FMA 全在它里面。用守卫栈（`IF(...)THEN`/`DO`
+入栈、`ENDIF`/`ENDDO` 出栈）把每条落到最内层守卫：
+
+| 簇（源码行） | 语句 | 最内层守卫 | 活/死 |
+|---|---|---|---|
+| 531-583 | 9 | `IF (.not.DEF_SPLIT_SOILSNOW)`@529 / 顶层 | **活 5** + 死 4（`ulrad`） |
+| 612-615 | 2 | `IF (.not.DEF_SPLIT_SOILSNOW)`@586 的 **ELSE** 支 | 死 |
+| 967-971 | 3 | `IF (patchtype==0 .and. (DEF_USE_PFT .or. DEF_USE_PC))`@747 | 死 |
+| 1012-1013 | 2 | 同上 + `IF (DEF_USE_PC …)`@992 | 死 |
+| 1081-1154 | 56 | 同上（PFT→patch 加权聚合） | 死 |
+| 1232 | 1 | `@1228` 的 **ELSE** 支（split） | 死 |
+| 1265-1296 | 7 | `@1261` 的 IF 支 1 条、ELSE 支 6 条 | **活 1** |
+| 1343-1370 | 17 | 顶层 | 活（第 367 轮已收口） |
+| 1410 | 2 | 顶层（`errore`，诊断量） | 活 |
+
+⇒ **活 25 条 / 死 74 条**。
+
+两点复核（第 365 轮的判断本轮独立验了一遍）：
+
+* **`:1081-1154` 那 56 条确实在 `DEF_USE_PFT/PC` 守卫里** —— 关键是 `747` 那个 `IF` 的
+  `ENDIF` 在 **1200** 行，**不是 1076**（1076 关的是 992 那个）。`DEF_USE_PFT/PC` 是运行时
+  namelist、两个默认 `.false.`、三个 `case.nml` 也都没设 ⇒ 这条 60 行的大块**不执行**。
+  这个例程的缩进很不规则（顶层 `IF`/`ENDIF` 都顶在第 1 列），**不能按缩进判块**。
+* **`:531/533/536` 的 `ulrad` 是死代码**：`ulrad` 在 `LeafTemperature/PC` 里是
+  `intent(out)`（`MOD_LeafTemperature_Extended.F90:311`，与 `taux`/`fseng`/`rst`/`tref`
+  同一段声明），内核 `:531` 算完立刻被叶温例程覆盖，`:1364` 的 `olrg` 用的是**覆盖后**的值
+  ⇒ Rust 拿 `energy.leaf.upward_longwave_w_m2` 当 `ulrad` 是对的 ✓（第 367 轮那三处
+  `fgrnd`/`olrg` 的形状结论不受影响）。
+
+活的那 25 条里，`553`（`thv` 的 `FMA(0.61, forc_q, 1.0)`）与 `554`（`ur` 的平方和 FMA）
+在 `ground_fluxes.rs` 里早已是 `mul_add` ✓，`:1265`（`fseng = fseng + htvp*egidif`）在
+`standard_lct_step.rs:428` 也早已是 `mul_add`（注释里引了 GIMPLE）✓，`:1343-1370` 的 17 条
+第 367 轮已收口 ✓。
+
+### 二、三处真缺口（都在文档记过的干窗链上）
+
+| 内核 | GIMPLE 操作数角色 | Rust（改前） |
+|---|---|---|
+| `:550` `thm = forc_t + 0.0098*forc_hgt_t` | `_50 = .FMA(forc_hgt_t, 9.8e-3, forc_t)` | `leaf_temperature.rs:89` `air + LAPSE*hgt`（平铺） |
+| `:579` `soil_psi_from_vliq(fac*(porsl(1)-theta_r(1)) + theta_r(1), …)` | `_83 = porsl-theta_r`、`_86 = .FMA(_83, fac, theta_r)` | `ground_humidity.rs:57` `fac*(por-thr) + thr`（平铺） |
+| `:583` `qred = (1.-fsno)*hr + fsno` | `_98 = fsno`、`_99 = 1-fsno`、`qred = .FMA(_99, hr, _98)` | `ground_humidity.rs:68` `(1-fsno)*hr + fsno`（平铺） |
+
+三条正好落在第 355/357/359 轮量出来的那条干窗链上：
+`thm` → Monin-Obukhov（`qstar`/`zol`/`rib`/`qref`）、`psit` → `hr` → `qred` → `qg` → `qaf`/`ea`。
+`thm` 那条还正好是第 355 轮反复强调"**它不是位温**"的那个量（`leaf_temperature.rs:75-87`
+的注释）—— 这一年多来它只被核过"用哪个量"，没核过"怎么算"。
+
+### 三、第 368 轮实测
+
+| 口径 | 改前（第 367 轮末） | 改后 |
+|---|---|---|
+| 干窗 restart N=250 | 0/68 | 0/68 |
+| 干窗 restart **N=251** | **11/68** | **0/68** |
+| 干窗 restart N=252 / 260 / 288 / 320 / 400 / 480 / **528（整窗末步）** | （改前 N=251 已 11/68 ⇒ 这些点必然非零） | **全部 0/68** |
+| 湿窗 restart N=63 | 10/68 | **10/68**（不变） |
+| 黄金 dry（`bitwise`/`over_tol`/`ot_vars`/`sumabs`） | 9152 / 28 / 1，261.0128 | **153 / 0 / 0，0.0000** |
+| 黄金 wet | 27055 / 1197 / 19，8.4418 | **27055 / 1197 / 19，8.4418**（不变） |
+
+* **干窗整窗 528 步的 restart 状态逐位相同**（68 个变量一个元素都不差）。
+* 黄金 dry 的 `golden-compare`：`within tolerance: 127 variables … (tier0=23 tier1=8 tier2=97 tier3=0)`，
+  **零个变量超差**；`three.py` 的位型口径还剩 153/56024 个元素差、但 `sumabs = 0.0000`。
+  按 `window_divergence.py` 看，剩下的差全在**诊断量**上，且都是 1 ULP 级：
+
+```text
+ first variable                         ndiff       maxabs     maxrel
+    10 f_assim                             25   2.1176e-22   2.40e-16
+    10 f_fgrnd                             76   5.6843e-14   3.50e-14
+    12 f_assimsha                          23   5.2940e-23   2.48e-16
+    12 f_assimsun                          24   2.1176e-22   3.22e-16
+   130 f_rnet                               2   2.8422e-14   2.27e-16
+   130 f_zerr                               2   2.8422e-14   8.16e-04
+   175 f_trad                               1   2.8422e-14   1.11e-16
+first divergence step: 10
+variables differing: 7; bitwise identical: 55871/56024 (99.7269%)
+```
+
+* `f_assim`/`f_assimsun`/`f_assimsha` 在第 10-12 步就 1 ULP 差 ⇒ **叶/气孔/光合那条链上
+  还有一处形状差**，但它**不回灌状态**（restart 整窗逐位相同）。`f_fgrnd` 也在第 10 步差
+  1 ULP（`maxabs 5.68e-14` 正是 256 附近的 1 ULP），说明它的某个**输入**（`fseng`/`fevpg`
+  或 `assim` 那条链）先差了 1 ULP —— 第 367 轮补的三段本身没错（`sabg=0` 时那三段各自
+  与内核逐位一致）。
+* `f_zerr` 的相对差 8.16e-04 是老账（`errore` 是诊断量，绝对值 2.8e-14；`history.rs:892`
+  那段注释记着来龙去脉）。
+
+### 四、验证命令
+
+闸门（全部在最终树上跑）：
+
+```text
+cargo clippy --workspace --all-targets -- -D warnings                    # clean
+cargo test --workspace --exclude colm-init --exclude colm-srfdata --lib --bins
+cargo test -p colm-init --lib -- --test-threads=1                        # 156 passed
+cargo test -p colm-srfdata --lib -- --test-threads=1                     # 270 passed
+cargo test -p colm-schema --test drift ; -p colm-hist --test drift ;
+cargo test -p colm-core --test drift_landcover ; --test drift_co2 ;
+cargo test -p colm-namelist --test roundtrip ; -p oracle --test histmap
+cargo run -q -p oracle --bin tier-check -- oracle/golden/*.nc
+bash oracle/scripts/compare_water_equilibrium.sh                         # 109949/109949
+bash /tmp/gf/dry_ts.sh {250,251,252,260,288,320,400,480,528} && python3 /tmp/gf/rdiff_dry.py
+bash /tmp/gf/wet_ts.sh 63 && python3 /tmp/gf/rdiff.py
+bash /tmp/gf/win4.sh
+python3 /tmp/gf/three.py oracle/golden/CN-Cng_hist_2008-01.nc <rust-hist> <cmp.txt> CN-Cng
+python3 oracle/scripts/window_divergence.py oracle/golden/CN-Cng_hist_2008-01.nc <rust-hist> --top 8
+```
+
+### 五、下一枪
+
+0. **先把"植物水力"这条排掉**：本轮顺手把 `main/MOD_PlantHydraulic.F90` 也普查了
+   （57 条 FMA / 30 行）：
+
+   | 内核例程 | 语句（去重后站点） | Rust | 结论 |
+   |---|---|---|---|
+   | `spacAF_twoleaf`（`:379-508`） | 41（18 行） | `plant_hydraulics.rs::spac_change` 39 个代码点 | **未逐条审**（下一枪） |
+   | `getqflx_gs2qflx_twoleaf` | 3 | `transpiration_from_conductance` 3 | ✓ |
+   | `getqflx_qflx2gs_twoleaf` | 3 | `conductance_from_transpiration` 3 | ✓ |
+   | `getrootqflx_x2qe` | 6（去重 5：`:854`×2/`:864`/`:874`/`:892`） | `root_flux_from_top_potential` 3 | ✓（`:864`/`:874` 是同一个循环体，`:854` 的 `+kax/den1*xroot(1)` 与 `:892` 各一条） |
+   | `getrootqflx_qe2x` | 4（去重 3；`:950` 那条还有一份向量化拷贝） | `root_potential_from_flux` 1 | ✓（三行是同一个循环体的三个分支，Rust 一条覆盖；`history` 注释里记着"先减 `qeroot` 再减 `kax`"的次序） |
+
+   ⇒ **两条"6 vs 3 / 4 vs 1"是循环/向量共享造成的，不是缺口**（又一次"计数会骗人"）。
+   真正还没逐条读的是 `spacAF_twoleaf` 那 41 条（`A11..A44` 的雅可比组装 + 两支 4×4
+   行列式），它产出的是 `dx` → `vegwp`。
+
+1. **湿窗 N=63（10/68）是湿侧唯一还没关的状态种子**。差异表：
+   `qref`/`vegwp`/`ldew`/`ldew_rain`/`zol`/`rib`/`rst`/`qstar`/`gs0sha`/`gs0sun`
+   —— 与第 362 轮那条湿链（`pco2a` → `gssun`/`gssha` → `gs0*` → PHS → `qflx_sha` →
+   `vegwp`/`ldew_rain`）一致。干侧这一轮的成法可以照搬：先把 `MOD_LeafTemperature_Extended.F90` /
+   `MOD_LeafTemperaturePC_Extended.F90` 按 `.loc` + 守卫栈普查（**先分活死**），
+   再逐条读 GIMPLE 角色。
+2. **干窗剩下的 1 ULP 全在诊断量上**（`f_assim` 第 10 步、`f_fgrnd` 第 10 步、
+   `f_rnet`/`f_zerr` 第 130 步、`f_trad` 第 175 步）—— 状态已整窗逐位相同，
+   所以这是一条**诊断链**的清理，优先级低于湿窗。
+3. **悬而未决（等用户裁决）**：`pco2a` 的 `.FNMA`（第 351/356 轮）。它把湿窗首分歧
+   从 N=63 推到 73–84，但黄金 wet 的 `over_tol` 1197 → 1650、`ot_vars` 19 → 35
+   ⇒ 按仓库纪律不能落。**注意它换来的正是本轮这条"干窗式"胜利的同款证据（首分歧推后），
+   却与黄金聚合反向** —— 这条分歧本身值得作为"纪律是否要为例外开口"的判例继续留着。

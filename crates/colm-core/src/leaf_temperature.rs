@@ -86,7 +86,8 @@ const REFERENCE_LAPSE_RATE_K_M: f64 = 0.0098;
 /// 与潜热同类的教训：`thm` 这个名字看起来像"potential temperature"的缩写，
 /// 但上游把它定义成了别的东西。**照抄表达式，不要按名字推断。**
 pub fn reference_height_temperature_k(air_temperature_k: f64, temperature_height_m: f64) -> f64 {
-    air_temperature_k + REFERENCE_LAPSE_RATE_K_M * temperature_height_m
+    // `:550` 的 GIMPLE 是 `thm = .FMA(forc_hgt_t, 9.8e-3, forc_t)`：那条乘积被收进加法。
+    REFERENCE_LAPSE_RATE_K_M.mul_add(temperature_height_m, air_temperature_k)
 }
 
 /// Soil profiles and fixed hydraulic parameters for the two-leaf PHS branch.
