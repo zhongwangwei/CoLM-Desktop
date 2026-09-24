@@ -18433,12 +18433,12 @@ VSFI     kernel=200 rust=200
      * **状态残差**（`restart_scan.sh`）：首分歧现在是 **N=18（5/68）**
        （落地前是 N=19 的 1 ULP `wliq_soisno`）—— 这是"还有别的 1 ULP 缺陷在场"时
        混沌轨道被换掉的必然结果（第 315/321 轮两个独立实例），**不要**据此回退。
-     * **待做第三组**：`water_balance` 5 处（映射表见第 317 轮：**每处只有一个乘积、
-       无"收左/收右"歧义**，只需按结合顺序定加数）+ `flux_all` 的加权平均 1 处
-       （第 310 轮：`(w2).mul_add(v2, w1*v1)/(w1+w2)`）。做这两件事要照
-       `compare_flux_inside.sh` 的三件套 + 私有例程"**拷贝+放行**"编译路线
-       （第 311/312 轮实测：模块拷进 `$WORK`、`PRIVATE` 改 `PUBLIC`、
-       `-ffunction-sections` + `-Wl,-dead_strip`），判到逐位后再**成组**落地 + 跑三段式。
+     * **【第 323 轮：第三组已落地】** `water_balance` 闭环（12000/12000，6 种情形 ×
+       2000 例）判出两处与第 317 轮**相反**的形状 + 一处结合顺序；`flux_all` 的加权
+       平均 1 处按调用点反汇编（第 322 轮 option (a)）落。落地后口径：干 **28/1**、
+       湿 **1907/53**（原 1942/53）、雪 **25713/79**；restart **0/68**、3 步
+       **692/692**。第 317 轮"每处只有一个乘积、无收左/收右歧义"在 `:1147` 那条
+       **双乘积链**上不成立 —— 闭环实测出的正是"独立舍入的是哪一条"。详见"第 323 轮"。
      * **`flux_all` 里那 1 条未归属的 FMA 已定性质（第 322 轮）**：三个可能的家
        （`flux_sat_zone_all`、`flux_both_transitive_interface`、`flux_at_unsaturated_interface`）
        **单独编出来都是 0 条 FMA** ⇒ 那条是**被内联的副本**在调用点上的收缩，
@@ -18663,10 +18663,15 @@ bash oracle/scripts/compare_second_config.sh US-NR1-snow   → 79 variable(s) ou
 （第 3 组：`water_balance` 5 处 + `flux_all` 加权平均 1 处），那时状态残差才有指望回落。
 已落地的 8 处**保留**（口径 wet 1967→1942、干/雪不倒退，短程与第二配置全绿）。
 
-**下一枪**：给 `water_balance` 建第 3 个闭环（照 `compare_flux_inside.sh` 三件套 +
-拷贝放行路线；夹具要大一些：`lb/ub/dz/dt/is_sat/vl_s/q/ubc/lbc/wf/vl/wt/dp/waquifer`
-+ 各自的 `_m1`，并按第 317 轮那份"一处一乘积、无歧义"的映射表补 5 处），判对后与
-`flux_all` 的加权平均一起作为**第三组**落地，再跑三段式 + 本扫描。
+**下一枪（第 323 轮后）**：① `soil_water_vertical_movement` 的 27−12=15 条差额 ——
+**先查内联**：本内核符号表里 `initialize_sublevel_structure`/`use_explicit_form`/
+`Richards_solver`/`secant_method_iteration`/`var_perturb_*`/`flux_sat_zone_all`/
+`flux_at_unsaturated_interface`/`flux_both_transitive_interface` **没有独立符号**
+（全被内联进 `soil_water_vertical_movement` 与 `flux_all`），所以 27 里极可能大部分
+是它们的；`check_and_update_level`/`solve_least_squares_problem` 则**有**独立符号。
+② 第二配置雪窗那 79（早期记录同为 79，非本会话引入）。③ 未决小尾巴：`flux_all` 里
+那条加权平均 FMA 只有调用点上下文（option (a)）判过，若要做**实测**判据只能建
+"直接驱动 `flux_all`"的第 4 个闭环（夹具更大）。
 2. **第二配置回归**（Campbell + 关 VSF）：第 293 轮实测干窗已从 16 降到 **0**；
    wet/snow 未重跑，需要时跑 `oracle/scripts/compare_second_config.sh <case>`。
 3. **未移植分支**：`standard_lct_step.rs:578` 明说 split soil/snow、SNICAR、气溶胶、
@@ -18680,3 +18685,80 @@ bash oracle/scripts/compare_second_config.sh US-NR1-snow   → 79 variable(s) ou
 工具与纪律：探针跑完**必须重编**内核；**内核构建是单例**（所有探针已用
 `/tmp/gf/.kernel_build.lock` 串行化，不要把锁删掉）；**不要用内核 sha256 判断是否重编过**
 （同一份源码三次构建三个 sha）；判"混沌放大还是系统性偏差"仍用短程对照。
+
+**第 323 轮：`water_balance` 闭环判出两处"与文档相反"的形状；第三组落地**
+
+新三件套（`oracle/scripts/water_balance_diff.f90` +
+`crates/colm-core/examples/water_balance_probe.rs` + `oracle/scripts/compare_water_balance.sh`），
+照第 311/312 轮验证过的"拷贝+放行"路线编译（模块拷进 `$WORK`、`PRIVATE :: water_balance`
+改 `PUBLIC`、`-ffunction-sections` + `-Wl,-dead_strip`）。**6 种情形 × 2000 = 12000 例**：
+上边界 {定水头, 降雨} × 下边界 {定水头, 排水, 排水且 `waquifer==0 && q(ub)>=0`}，
+非饱和层比例取遍 {0, 0.3, 0.7, 1}，逐位比 `blc(0:nlev+1)` 与 `solvable`
+（`dz` 由界面深度相邻相减复原，两边看到逐位相同的厚度）。
+
+**改前 baseline 是 `blc[0..6]` 全都差**（256/877/727/540/389/256/126）—— 说明不止
+"少了 `:1140` 那一处"。逐条读内核 `water_balance` 的 5 条 FMA 上下文（从栈参偏移定出
+`x21=wf, x24=wf_m1, x23=wt, x27=wt_m1`），读出三件事与第 317 轮那份映射表不同：
+
+```text
+:1140 blc(lb-1) = dmss - qsum*dt         → 单条 fmsub（乘积进 FMA、dmss 是加数）   [文档对]
+:1147 dmss = (vl_s-vl_m1)*(wt-wt_m1)+dmss
+      → fmul 先算 (wt-wt_m1)*(vl_s-vl_m1)，fmadd 才把 (vl_s-vl_m1)*(wf-wf_m1) 收进去
+      ⇒ **独立舍入的是 wt 那条**，与源语句书写顺序**相反**                        [文档错]
+:1148 dmss = (dz-wt-wf)*(vl-vl_m1)+dmss  → fmadd d3*d22+d4，factor=(dz-wt)-wf       [文档对]
+:1162 blc(ilev) = blc(ilev)+dmss-qsum*dt → fadd + fmsub                             [文档对]
+:1168 排水子分支 waquifer==0 && q(ub)>=0
+      blc(ilev) = blc(ilev) - waquifer_m1 - q(ub)*dt
+      → 两条 fsub，`q(ub)*dt` 是**独立 fmul** ⇒ (blc-waquifer_m1)-q(ub)*dt，
+        而不是 blc -= (waquifer_m1 + q(ub)*dt)                                  [文档没记]
+```
+
+⇒ 第 317 轮"每处只有一个乘积、所以无收左/收右歧义"这条**在 `:1147` 上不成立**：
+那是一条**两个乘积相加**的链，GCC 把**第二个**源乘积留在外面独立舍入。这正是
+"读源猜形状"与"读汇编写形状"的差别（第 305 轮的方法论：计数可疑要读上下文，
+方向仍要闭环判）。落码三处（都在 `variable_saturated_water_balance`）：
+
+1. `:1147` → `porosity_change.mul_add(wetting_front_change, water_table_change*porosity_change)`；
+2. `:1140` → `(-flux_sum).mul_add(input.time_step_seconds, mass_change)`；
+3. `:1168` 拆成两条 `-=`（先 `waquifer_m1`、再 `q(ub)*dt`）。
+
+闭环从"全差" → **12000/12000 逐位相同**（`bash oracle/scripts/compare_water_balance.sh`）。
+
+**`flux_all` 那 1 条未归属 FMA 也定案（第 322 轮 option (a)）**：反汇编 `flux_all` 的
+`0x1001703e0`，周围正是 `psi_s_min`/`psi_i_r`/`psi_i_l` 的 `fminnm/fmaxnm` 与两处夹逼
+比较 ⇒ 它就是**被内联的 `flux_at_unsaturated_interface`** 的 `psi_i` 加权平均：
+
+```text
+fadd d28,d13,d30      ; psi_u + dz_u      ⇒ d13=dz_u, d30=psi_u
+fsub d29,d11,d12      ; psi_l - dz_l      ⇒ d11=psi_l, d12=dz_l
+fmul d31,d13,d11      ; 独立舍入 dz_u*psi_l
+fadd d13,d13,d12      ; dz_u + dz_l
+fmadd d31,d12,d30,d31 ; 收进 dz_l*psi_u
+fdiv
+```
+
+⇒ Rust 改成
+`lower_distance_mm.mul_add(upper_pressure_head_mm, upper_distance_mm*lower_pressure_head_mm)`
+（与第 310 轮的 `(w2).mul_add(v2, w1*v1)` 一致）。**outlined 版仍是 0 条 FMA**（第 322 轮），
+所以这一处结构性上只能从调用点上下文判 —— 例程级闭环判不了它，本组按 option (a) 落。
+
+**第三组落地后三段式**（`bash /tmp/gf/win4.sh` + `three.py`；`bash /tmp/gf/accept_r247.sh`）：
+
+| 窗口 | 8 处落地后（基线） | **第三组** |
+|---|---|---|
+| dry `over_tol` / `ot_vars` | 28 / 1 | **28 / 1** ✓ |
+| wet `over_tol` / `ot_vars` | 1942 / 53 | **1907 / 53** ✓（改善 35） |
+| snow `over_tol` / `ot_vars` | 25713 / 79 | **25713 / 79** ✓ |
+| restart 1 步 / 3 步 | 0/68 / 692/692 | **0/68 / 692/692** ✓ |
+| `bitwise`（dry/wet/snow） | 17056 / 28532 / 32707 | 17056 / **28418** / 32707 |
+| `sumabs`（dry/wet/snow） | 330.81 / 29.71 / 444414.20 | 330.81 / 31.59 / 444414.20 |
+
+**口径没有一处倒退，湿窗还改善 35 条**；干窗与雪窗一字未动。诊断计数按既定读法不当判据
+（wet `sumabs` 反向小幅移动，与第 315/321 轮记录的混沌特征一致）。
+
+`bash oracle/scripts/restart_scan.sh 18 19 20 21`（第三组落地后）：**5/5/5/7 per 68**，
+与 8 处基线**逐条相同** ⇒ 第三组不动干窗的状态残差（诊断，不是判据；`N=18` 仍是第一个
+持久分歧）。其它：`compare_getzwt.sh` 10000/10000、`compare_flux_inside.sh`
+15000/15000 复跑通过；`cargo test --workspace --lib --bins`、`clippy --workspace
+--all-targets -- -D warnings`、`fmt --all --check`（两个 workspace）全绿（本机
+`colm-cli` 的 7 个 `study::runner` 用例仍因沙箱 `EPERM` 失败，与本改动无关）。

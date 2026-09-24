@@ -1732,9 +1732,21 @@ pub fn flux_at_variable_saturated_interface(
         }
         right = minimum_saturated_potential_mm;
     }
-    let mut interface_pressure_head_mm = (input.lower_distance_mm * input.upper_pressure_head_mm
-        + input.upper_distance_mm * input.lower_pressure_head_mm)
-        / (input.upper_distance_mm + input.lower_distance_mm);
+    // `psi_i = (dz_l*psi_u + dz_u*psi_l)/(dz_u+dz_l)`：第 310 轮在 `flux_all` 的
+    // 汇编里认出这条加权平均（`flux_at_unsaturated_interface` 被内联进 `flux_all`，
+    // 所以只在调用点看到）。反汇编上下文是
+    //   fadd d28,d13,d30   ; psi_u + dz_u
+    //   fsub d29,d11,d12   ; psi_l - dz_l
+    //   fmaxnm/fminnm ...  ; psi_i_r / psi_i_l
+    //   fmul  d31,d13,d11  ; 独立舍入的是 dz_u*psi_l
+    //   fadd  d13,d13,d12  ; dz_u + dz_l
+    //   fmadd d31,d12,d30,d31  ; 收进去的是 dz_l*psi_u
+    // ⇒ 收的是**第一个**源乘积 `dz_l*psi_u`。outlined 版（第 322 轮）GCC 不收缩，
+    // 所以这一处只能靠调用点上下文判定，例程级闭环判不了。
+    let mut interface_pressure_head_mm = input.lower_distance_mm.mul_add(
+        input.upper_pressure_head_mm,
+        input.upper_distance_mm * input.lower_pressure_head_mm,
+    ) / (input.upper_distance_mm + input.lower_distance_mm);
     if interface_pressure_head_mm < left || interface_pressure_head_mm > right {
         interface_pressure_head_mm = (right + left) * 0.5;
     }
@@ -1786,7 +1798,9 @@ pub fn variable_saturated_water_balance(
         let mass_change =
             input.ponding_depth_mm.max(0.0) - input.previous_ponding_depth_mm.max(0.0);
         let flux_sum = input.upper_boundary.value - input.interface_flux_mm_s[0];
-        residual_mm[0] = mass_change - flux_sum * input.time_step_seconds;
+        // 上游是 `blc(lb-1) = dmss - qsum*dt`，出货汇编只有一条 `fmsub`
+        // ⇒ 乘积进 FMA、`dmss` 是加数。
+        residual_mm[0] = (-flux_sum).mul_add(input.time_step_seconds, mass_change);
     }
     let mut active = 0usize;
     for (layer, thickness) in thickness.iter().copied().enumerate() {
@@ -1801,8 +1815,13 @@ pub fn variable_saturated_water_balance(
         let water_table_change =
             input.water_table_thickness_mm[layer] - input.previous_water_table_thickness_mm[layer];
         let liquid_change = input.liquid_water[layer] - input.previous_liquid_water[layer];
+        // 注意收的是**哪一个**乘积：反汇编里 `fmul` 先算的是
+        // `(wt-wt_m1)*(vl_s-vl_m1)`，`fmadd` 再把 `(vl_s-vl_m1)*(wf-wf_m1)` 收进去
+        // —— 与源语句的书写顺序**相反**（源把 wf 那条写成独立的 `dmss` 赋值）。
+        // 第 317 轮"每处只有一个乘积、无收左收右歧义"的说法在这条链上是错的，
+        // 闭环实测才判出来（见 `compare_water_balance.sh`）。
         let mass_change =
-            porosity_change.mul_add(water_table_change, porosity_change * wetting_front_change);
+            porosity_change.mul_add(wetting_front_change, water_table_change * porosity_change);
         let mass_change =
             (thickness - input.water_table_thickness_mm[layer] - input.wetting_front_mm[layer])
                 .mul_add(liquid_change, mass_change);
@@ -1821,8 +1840,11 @@ pub fn variable_saturated_water_balance(
     }
     if input.lower_boundary.kind == VariableSaturatedBoundaryKind::Drainage {
         if input.aquifer_water_mm == 0.0 && input.interface_flux_mm_s[layers] >= 0.0 {
-            residual_mm[active] -= input.previous_aquifer_water_mm
-                + input.interface_flux_mm_s[layers] * input.time_step_seconds;
+            // 出货汇编是 `fsub`+`fsub`（`q(ub)*dt` 是**独立 fmul**，不收缩），
+            // 即 `(blc - waquifer_m1) - q(ub)*dt`；写成
+            // `blc -= (waquifer_m1 + q(ub)*dt)` 会换一种结合顺序、末位不同。
+            residual_mm[active] -= input.previous_aquifer_water_mm;
+            residual_mm[active] -= input.interface_flux_mm_s[layers] * input.time_step_seconds;
         } else {
             residual_mm[layers + 1] = input.aquifer_water_mm
                 - input.previous_aquifer_water_mm
