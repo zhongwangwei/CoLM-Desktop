@@ -19022,3 +19022,29 @@ update_photosyn   :  8 条 FMA（:710, :737-744, :805）
 （`stomata`/`update_photosyn` 都是纯函数式输入输出，夹具比截留还小），再按 `.loc`
 一条条把 25 处补上 —— 注意 `update_photosyn` 已被 `hydraulic_photosynthesis_update_matches_
 mod_assim_stomata_conductance` 这个**值级**单测钉住，但它不判逐位形状。
+
+**第 330 轮：给气孔链建了第 5 个闭环 —— baseline 量出，修了 2/17（未到 100%）**
+
+按第 329 轮的普查建三件套：`oracle/scripts/stomata_diff.f90` +
+`crates/colm-core/examples/stomata_probe.rs` + `oracle/scripts/compare_stomata.sh`。
+`stomata` 是 PUBLIC、纯函数式：三种模型（Ball-Berry / Medlyn / WUE，由驱动写
+`MOD_Namelist` 的 `DEF_USE_MEDLYNST`/`DEF_USE_WUEST` 切换）各 1000 例，逐位比
+`assim`/`respc`/`rst`；覆盖值全部设成哨兵 `-1`，让实参里的 `g1`/`g0`/`gradm`/
+`binter`/`lambda` 生效。
+
+**baseline**：`assim` 498、`rst` 114、`respc` 0。已按 `.loc` 补 2 处：
+
+```text
+:223 range = pco2m*(1-1.6/gradm) - gammas   出货 `fnmsub d31,d31,d29,d8`（乘积进 FMA）
+:264/:266 max(0,(a+b)**2 - 4*theta*a*b)     `(a+b)` 的平方进 FMA（`fnmsub d29,d29,...`）
+```
+
+→ `assim` 498→**148**、`rst` 114 不变。两处都按汇编定死，三段式口径**一字未动**
+（dry 28/1、wet 1287/24、snow 25713/79；restart 0/68、3 步 692/692）。
+
+**未完成（下一轮）**：还剩约 15 处 —— `omc`/`ome`/`oms` 的
+`vm*(...)*c3 + vm*c4`（`:258`/`:259`/`:262`，注意 `:258` 的 `fmadd d23,d31,d25,d23`
+里 `d31` 已经是 `fdiv` 之后的商，寄存器流要看全）、Medlyn 的 `:343`/`:344`/`:346`、
+Ball-Berry 的 `:353`/`:354`/`:356`，以及 `update_photosyn` 的 8 条（`update_photosyn`
+要单独加驱动块或另建小闭环）。**方法**：照这个闭环一次改一处、看 `assim`/`rst`
+计数是否下降；`respc` 已 0，说明 `calc_photo_params` 那条（`respc` 的算式）是对的。

@@ -211,7 +211,10 @@ pub fn stomata(input: StomataInput, options: StomataOptions) -> Result<StomataSt
     let bintc = binter
         * input.photosynthesis.soil_water_stress.max(f77(0.1))
         * input.photosynthesis.canopy_integration[2];
-    let range = input.atmospheric_co2_pa * (1.0 - f77(1.6) / gradm) - photo.co2_compensation_pa;
+    // `:223` 出货是 `fnmsub d31,d31,d29,d8` ⇒ `pco2m*(1-1.6/gradm) - gammas` 的乘积进 FMA。
+    let range = input
+        .atmospheric_co2_pa
+        .mul_add(1.0 - f77(1.6) / gradm, -photo.co2_compensation_pa);
     let mut errors = [0.0; ITERATIONS];
     let mut co2_guesses = [0.0; ITERATIONS];
     let mut assimilation = 0.0;
@@ -351,7 +354,10 @@ pub fn update_photosynthesis(
     );
     let photo = photosynthesis_parameters(input.photosynthesis)?;
     let (_, _, gradm, _, _) = selected_parameters(input.photosynthesis.biochemistry, 1.0, options)?;
-    let range = input.atmospheric_co2_pa * (1.0 - f77(1.6) / gradm) - photo.co2_compensation_pa;
+    // `:223` 出货是 `fnmsub d31,d31,d29,d8` ⇒ `pco2m*(1-1.6/gradm) - gammas` 的乘积进 FMA。
+    let range = input
+        .atmospheric_co2_pa
+        .mul_add(1.0 - f77(1.6) / gradm, -photo.co2_compensation_pa);
     let mut errors = [0.0; ITERATIONS];
     let mut co2_guesses = [0.0; ITERATIONS];
     let mut assimilation = 0.0;
@@ -403,13 +409,20 @@ pub fn update_photosynthesis(
 }
 
 fn coupled_assimilation(rubisco: f64, electron: f64, sink: f64) -> f64 {
+    // `:264`/`:266` 的 `max(0,(a+b)^2 - 4*theta*a*b)` 里 `(a+b)^2` 那个乘积进 FMA
+    // （出货 `fnmsub d25,d29,d29,d25`）。
     let first = ((rubisco + electron)
-        - ((rubisco + electron).powi(2) - f77(4.0) * f77(0.877) * rubisco * electron)
+        - (rubisco + electron)
+            .mul_add(
+                rubisco + electron,
+                -(f77(4.0) * f77(0.877) * rubisco * electron),
+            )
             .max(0.0)
             .sqrt())
         / (f77(2.0) * f77(0.877));
     ((sink + first)
-        - ((sink + first).powi(2) - f77(4.0) * f77(0.95) * first * sink)
+        - (sink + first)
+            .mul_add(sink + first, -(f77(4.0) * f77(0.95) * first * sink))
             .max(0.0)
             .sqrt())
     .max(0.0)
