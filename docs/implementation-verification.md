@@ -20807,3 +20807,30 @@ STOUT `gsh2o` 66/5104（`pco2a` 的下游）
 `MOD_LeafTemperature_Extended.F90` 里 `qaf = wtaq0*qm + wtgq0*qg + wtlq0*qsatl` 那一段
 （Rust 在 `leaf_temperature.rs` 的 `canopy_air_humidity` 加权更新），
 并把 `pco2a_probe.sh` 先 hex 化后一并跑 251 步。
+
+**第 356 轮更正（重要）：干窗第 251 步进 `stomata` 的差异字段是 `ea`，不是 `pco2a`**
+
+`stomata_cmp.py` 的那行 `字段 [...]` 只列**第一组**差异里的字段 —— 本轮据此写出
+"干窗里唯一分叉的入参是 `pco2a`"是**读错了**。把干窗 251 步的 5104 组逐组展开
+（注意内核计数 1 基、Rust 0 基，要对齐）：
+
+```text
+STIN 差异组: 14 / 5104
+  调用 835, 836                → 字段 `pco2a`（≈ 第 105 步，之后自愈）
+  调用 5093…5104（= 第 251 步的全部 12 次调用） → 字段 **`ea`**
+```
+
+⇒ **第 251 步的种子是以 `ea`（冠层空气水汽压）进 `stomata` 的**，这也正好解释了两件事：
+* 第 356 轮把 `pco2a` 的 `.FNMA` 补回来时，干窗口**逐位不变** ✓（干窗的差异字段是 `ea`）；
+* 第 355 轮 PHS 探针里 `PHXI` 的 `qaf`/`qg` 各差 6 次 ✓ 与之同源
+  （`ea` = `qaf*psrf/(0.622+0.378*qaf)`，内核 `:791` 的 `eah`）。
+
+**下一枪（干窗种子）**：`qaf` 那条更新式**本身是忠实的** —— 读 GIMPLE 已确认它是**整条平铺**
+（`_481 = wtaq0*qm`、`_483 = wtgq0*qg`、`_567 = fadd`、`_569 = qsatl*wtlq0`、`_570 = fadd`，
+一个都没融；Rust 的 `canopy_air_humidity` 写法与它逐位一致，见 `leaf_temperature.rs:940-948`
+的注释）。所以差在它的**入参**：`qg`（地表比湿，PHXI 探针已见差）、`qsatl`（= f(tl,psrf)，
+`tl` 在 PHXR 里从不差）、`qm`，或三个湿度权重 `wtaq0/wtgq0/wtlq0`（= `caw/cgw/cfw * wtsqi`，
+其中 `cfw` 第 347 轮刚修过）。
+**探针**：把 `qaf = wtaq0*qm + wtgq0*qg + wtlq0*qsatl` 与 `eah = qaf*psrf/(0.622+0.378*qaf)`
+两侧 hex 打出来（连同 `qg`、三个权重、`caw/cgw/cfw/wtsqi`），跑干窗 251 步。
+另：`pco2a_probe.sh` 也一并 hex 化（它现在还是 `ES23.15`）。
