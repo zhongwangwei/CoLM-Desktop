@@ -18373,6 +18373,16 @@ VSFI     kernel=200 rust=200
 
 ## 若继续
 
+> **第 391 轮更新（最新的指路牌，先读这段）**：把开关读取审计做成了**快照门禁**
+> （`oracle/scripts/audit_namelist_reads.sh` + 入库的 `oracle/nml-unread.snapshot`，
+> 已接进 `compare_all.sh` 第三节）。
+>
+> * 先证伪了静态法：精炼后的"访问器参数"正则仍**漏掉 27/87 个真被读到的**名字
+>   （单参数 `.get("X")`、表驱动读、名字经常量传下去）⇒ 不能当门禁。
+> * 快照法（同 drift 测试）：**新增"声明了却没被读"的开关就变红**；`--update` 重写快照，
+>   `--report` 打分类报告。实测确定性（两次连跑 117/712 一致）。
+> * 当前 712 条"没被读"里，绝大多数是未移植家族与 `DEF_hist_vars%*`（后者由 `colm-hist` 处理）。
+
 > **第 390 轮更新（最新的指路牌，先读这段）**：把第 389 轮建议的**运行期 namelist 读取审计**
 > 做出来了（`Document::get` 加 `COLM_NML_TRACE` 埋点 + `oracle/scripts/audit_namelist_reads.sh`：
 > 跑 1 步、拿"真被问过的 key"与 825 条声明对差）。
@@ -23545,3 +23555,44 @@ DEF_LC_VMAX25 = 60.0  → 显式报错：… the Rust runtime applies only the p
 **候选名表**去文件里认（`colm-forcing/src/slots.rs:39` 起，例如温度槽认
 `Tair/TA_F/TA/air_temperature/temperature`）。所以只要数据集用的是候选表里的名字就能读、
 认不出就报错；但**算例里显式写的 `vname` 不生效** —— 与内核语义不同，记在这里备查。
+
+## 第 391 轮：把开关读取审计做成**快照门禁**（接进 `compare_all.sh`）
+
+第 390 轮有了运行期 trace，本轮把它变成可回归的门禁。先试了**静态法**（不做运行）：
+
+```text
+精炼后的"访问器参数"正则（任何名字里含 integer/logical/real/string/text 的函数，
+以及 .get("X")）静态提取到 103 个名字；
+与第 390 轮的运行期 trace（87 个）对差：**漏掉 27 个真被读到的**
+（DEF_HIST_FREQ、DEF_RSTFAC、DEF_SSP、DEF_WRST_FREQ、DEF_simulation_time%*、
+ DEF_forcing%HEIGHT_*、DEF_LC_KMAX_*/PSI50_* …）
+```
+
+漏的原因分三类，都不是正则能补的：① 单参数 `document.get("X")`；
+② **表驱动**读（名字写在数组里循环取，如 `DEF_simulation_time%*`）；
+③ 名字经常量/helper 传下去。所以静态法**不能当门禁**（第 389 轮那条纪律：
+假阴性率未知的方法不许当检查）。
+
+改成**快照法**（与仓库既有的 drift 测试同型）：
+
+* `oracle/scripts/audit_namelist_reads.sh` 现在有三种模式：
+  `--report`（按组打印分类报告）、`--update`（重写快照）、
+  默认 `--check`（与快照对差，**有新增的"声明了却没被读"就退出 1**）。
+* 快照入库：`oracle/nml-unread.snapshot`（712 条）。判据是"**不许新增**"——
+  以后往 `MOD_Namelist.F90` 加一个开关却没人读，快照对差会当场变红；
+  反过来把某个开关读起来（`-` 行）也会提示去 `--update`。
+* 接进 `compare_all.sh` 作为第三节（跑 1 步 ≈ 10 秒）。
+
+### 实测
+
+```text
+$ bash oracle/scripts/audit_namelist_reads.sh --update
+snapshot rewritten: oracle/nml-unread.snapshot (712 unread)
+$ bash oracle/scripts/audit_namelist_reads.sh
+runtime keys queried: 117; unread: 712 (snapshot 712)
+matches the snapshot: no new declared-but-unread switch
+```
+
+（两次连跑数字一致 ⇒ trace 是确定性的，不会让门禁抖。）
+运行期被问到的 key 从第 390 轮那次记录的 87 涨到 117，是脚本这一轮把
+forcing namelist 的路径也一并走全了的结果，不是行为变化。

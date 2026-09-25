@@ -97,6 +97,20 @@ if [ -z "$filter" ]; then
   done
 fi
 echo "整例对照（第二配置）: ${whole_pass} 通过 / ${whole_fail} 失败"
+
+# ---------- 三、开关读取审计（快照） ----------
+# `audit_namelist_reads.sh` 跑 1 步拿运行期 trace，与 `oracle/nml-unread.snapshot` 对差：
+# 有**新增**的"声明了却没被读"的开关就失败。为什么必须真跑：静态法的假阴性率实测很高
+# （精炼后的访问器正则仍漏 27/87 个真被读到的名字，见 docs 第 389/391 轮）。
+if [ -z "$filter" ]; then
+  if out=$(bash oracle/scripts/audit_namelist_reads.sh 2>&1); then
+    printf '  ok   %-30s %s\n' "audit_namelist_reads" "$(printf '%s\n' "$out" | tail -1 | cut -c1-140)"
+  else
+    whole_fail=$((whole_fail + 1))
+    failed+=("audit_namelist_reads")
+    printf '  FAIL %-30s %s\n' "audit_namelist_reads" "$(printf '%s\n' "$out" | grep -E 'NEW declared|^   \+' | head -3 | tr '\n' ' ' | cut -c1-140)"
+  fi
+fi
 if [ "${#whole_skip[@]}" -gt 0 ]; then
   echo "整例对照跳过: ${whole_skip[*]}"
 fi
