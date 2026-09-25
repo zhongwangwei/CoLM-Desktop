@@ -1733,27 +1733,30 @@ fn update_canopy_water(
     wet_evaporation_kg_m2_s: f64,
 ) -> Result<(f64, f64, f64)> {
     if !input.options.vegetation_snow {
-        let components = state.canopy_water.rain_mm + state.canopy_water.snow_mm;
-        if components > 1.0e-10 {
-            // 按比例分回两个分量。**上界要夹到 `total_mm`**：不夹的话
-            // `rain_mm` 可能比 `total_mm` 大一点点（浮点结合律），于是
-            // `snow_mm = total - rain` 变成 −3e-18 —— 一个纯舍入的负水深，
-            // 实测跨月算例里它会把 `intercept_canopy` 的入参校验打掉。
-            let total = state.canopy_water.total_mm;
-            let rain = (state.canopy_water.rain_mm * total / components).clamp(0.0, total);
-            state.canopy_water.rain_mm = rain;
-            state.canopy_water.snow_mm = total - rain;
-        } else if state.canopy_water.total_mm > 0.0 {
-            if state.leaf_temperature_k > FREEZING_K {
-                state.canopy_water.rain_mm = state.canopy_water.total_mm;
-                state.canopy_water.snow_mm = 0.0;
-            } else {
-                state.canopy_water.rain_mm = 0.0;
-                state.canopy_water.snow_mm = state.canopy_water.total_mm;
-            }
+        // `DEF_VEG_SNOW = .false.` 是**另一套语义**（"不追踪相态"），不是"同一套算法的简化"。
+        // 规格就写在本仓库给 vendor 打的那段注释里
+        // （`extends/interception/MOD_LeafTemperature_Extended.F90:1502-1522`）：
+        //   * 只更新总水量：`ldew = max(0., ldew - evplwet*deltim)` —— 这一句在调用方
+        //     （本文件上一处 `total_mm` 的更新）已经做过；
+        //   * **整段分量分区/两条 FMA/超配退回/夹取全部跳过**（`:1467-1497` 在
+        //     `IF (DEF_VEG_SNOW)` 里），所以两个 deficit 恒为 0；
+        //   * 分量按**当前温度**重新指定（注释明确否决"按旧比例缩放"：
+        //     "reconcile components using the current temperature (tl) rather than
+        //     scaling by an old ratio"）；
+        //   * `ldew` **不重算**成 `ldew_rain + ldew_snow` —— 总水量就是上面那个值。
+        // 另外 `:1540-1583` 的两支都带 `DEF_VEG_SNOW` 条件，所以这个配置里
+        // `fwet_snow` **一次都没被赋值**（它是模块变量，初值 0），相变块
+        // （`qmelt`/`qfrz` 与 Niu(2004) 的 `tl` 拉回）也不跑。
+        // 原实现按旧比例缩放、还跑完整段分区与夹取、最后把总水量重算成分量之和
+        // —— 三处都与规格不同，实测在 `CN-Cng` 第 10 步的 `f_ldew` 上留下 1 ULP
+        // （见 docs 第 385 轮）。
+        let total = state.canopy_water.total_mm;
+        if state.leaf_temperature_k > FREEZING_K {
+            state.canopy_water.rain_mm = total;
+            state.canopy_water.snow_mm = 0.0;
         } else {
             state.canopy_water.rain_mm = 0.0;
-            state.canopy_water.snow_mm = 0.0;
+            state.canopy_water.snow_mm = total;
         }
         return Ok((0.0, 0.0, 0.0));
     }

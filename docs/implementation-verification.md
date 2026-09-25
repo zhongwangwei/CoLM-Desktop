@@ -18373,6 +18373,18 @@ VSFI     kernel=200 rust=200
 
 ## 若继续
 
+> **第 386 轮更新（最新的指路牌，先读这段）**：把 `DEF_VEG_SNOW = .false.` 那一支
+> 按厂商注释的规格重写成**开关守卫的早退分支**（总水量不重算、分量按当前温度指定、
+> 分区/FMA/夹取/超配退回全跳过、deficit 恒 0、`fwet_snow` 恒 0、相变块不跑）。
+>
+> * 默认路径**一个字节没动**：黄金 dry/wet 仍 **bitwise=0 / 0**，restart 仍 0/68。
+> * **但 rec-10 的 `f_ldew` 1 ULP 症状仍在**（数值一模一样）⇒ 那一位**不是这一支出来的**。
+> * 顺着链条已排除：`interception` 的释放逻辑（两侧都带 `DEF_VEG_SNOW` 守卫、逐句同形）、
+>   `ldew = ldew + pinf` 与现库 `total_mm += retained_mm`（同形）。
+> * **下一枪**：开环那一段的 `tex_rain`/`thru` —— 上游在 `DEF_VEG_SNOW` 为真时用
+>   `ldew_rain` **重算**一遍 `tex_rain`（`MOD_LeafInterception_Extended.F90:272-290`），
+>   关掉时不重算；现库这段的重算条件与落点要逐句核。
+
 > **第 385 轮更新（最新的指路牌，先读这段）**：把 `DEF_VEG_SNOW = .false.` 那条支路
 > rec-10 的 `f_ldew`（1 ULP）钉到根因 —— **是结构差，不是形状差**。
 >
@@ -23287,3 +23299,38 @@ ENDIF
 `update_canopy_water` 加一个**由开关守卫的早退分支**（按温度指定分量、总水量保持
 `:1464` 的值、两个 deficit 恒 0，并顺带确认 `fwet_snow` 在开关关掉时的取值），
 让默认配置那条路一个字都不动。规格已经引在上面，下一轮可以直接照它写。
+
+## 第 386 轮：把 `DEF_VEG_SNOW = .false.` 那一支按厂商注释的规格重写（症状仍在，已排除这一支）
+
+第 385 轮把 rec-10 那个 `f_ldew` 的根因记成"三处结构差异"。本轮把这三处**按规格改掉**：
+`update_canopy_water` 在 `!vegetation_snow` 时改为 **早退分支** ——
+
+* 总水量保持调用方已经算好的 `max(0, total - evplwet*deltim)`（`:1464`），**不重算**；
+* 分量按**当前温度**指定（`tl > tfrz` ⇒ `rain = total, snow = 0`，否则相反），
+  不再按旧比例缩放（规格注释明确否决"scaling by an old ratio"）；
+* 整段通量分区/两条 FMA/夹取/超配退回**全部跳过** ⇒ 两个 deficit 恒 0（上游在这个分支里
+  一次都不返回它们，调用方也就不会去改 `fevpl`/`fsenl`）；
+* `fwet_snow` 在这个配置里恒 0（`:1540`/`:1578` 两支都带 `DEF_VEG_SNOW` 条件，
+  它是模块变量、初值 0），相变块（`qmelt`/`qfrz` + Niu(2004) 的 `tl` 拉回）同样不跑。
+
+### 实测：默认路径不动，但**症状仍在**
+
+```text
+黄金 dry / wet history   bitwise=0 / 0，over_tol/ot_vars 0，sumabs 0.0000   ← 不变（分支由开关守卫）
+restart                  dry N=16 0/68                                      ← 状态中性
+compare_switch_paths 36  vegsnow_off 首个量级差仍是 **rec 10 f_ldew 1.3878e-17**（一模一样）
+```
+
+也就是说：**rec-10 那 1 ULP 不是这一支出来的**（至少不全是）。顺着冠层水这条链往下游再排：
+
+* `interception` 的释放逻辑已经逐句对过，且**两侧都有 `DEF_VEG_SNOW` 守卫**：
+  上游 `xsc_rain/xsc_snow = max(0., ldew-satcap)`、`ldew = ldew - (xsc_rain+xsc_snow)`，
+  然后是 `IF (DEF_VEG_SNOW)` 里按分量重算（`MOD_LeafInterception_Extended.F90:207-224`）；
+  现库 `interception.rs:232-250` 与之同形 ✓。
+* `ldew = ldew + pinf`（`:334`）与现库 `water.total_mm += retained_mm`（`interception.rs:366`）同形 ✓。
+* 剩下的嫌疑集中在**开环那一段的 `tex_rain`/`thru`**：上游在 `DEF_VEG_SNOW` 为真时会**用
+  `ldew_rain` 重算一遍 `tex_rain`**（`:272-290`），关掉时不重算 —— 现库那一段的重算条件与
+  落点还需要逐句核。留作下一枪。
+
+这一轮的价值在于：那一支**现在与厂商注释的规格逐条一致**（原先三处都与它相反），
+而且因为是开关守卫的早退分支，默认配置一个字节都没动（黄金窗口仍逐位全同）。
