@@ -201,6 +201,60 @@ pub fn land_physics_parameters(
     // 用 `==` 比而不是容差比：两边都是同一个十进制字面量解析出来的 `f64`，
     // 位模式必然一致；给这样一个"哨兵值"加容差反而会把一个刚好接近 -1e36 的
     // 真实覆盖误判成未设置。
+    // 声明里有、但本仓库**不读**的 `DEF_LC_*` 地类表"逐列覆盖"（上游是"地类表 + 覆盖"，
+    // 哨兵就是 schema 的声明默认值 `-1.e36`）。现库只实现了下面那九列植物水力覆盖。
+    //
+    // 为什么要挡：这些列被算例**显式设过**之后再静默用地类表的值跑完，等于换了一套参数。
+    // 发现方式不是 grep —— 是给 `Document::get` 加运行期 trace（`COLM_NML_TRACE`），
+    // 把"真被问过的 key"与 808 条声明对差，一次判完所有开关读没读，见
+    // `oracle/scripts/audit_namelist_reads.sh`。
+    const UNIMPLEMENTED_LC_OVERRIDES: [&str; 29] = [
+        "DEF_LC_BETA",
+        "DEF_LC_CHIL",
+        "DEF_LC_D50",
+        "DEF_LC_DISPLAR",
+        "DEF_LC_EFFCON",
+        "DEF_LC_EXTKN",
+        "DEF_LC_FVEG0",
+        "DEF_LC_HBOT0",
+        "DEF_LC_HHTI",
+        "DEF_LC_HLTI",
+        "DEF_LC_HTOP0",
+        "DEF_LC_RESPCP",
+        "DEF_LC_RHOL_NIR",
+        "DEF_LC_RHOL_VIS",
+        "DEF_LC_RHOS_NIR",
+        "DEF_LC_RHOS_VIS",
+        "DEF_LC_SAI0",
+        "DEF_LC_SHTI",
+        "DEF_LC_SLTI",
+        "DEF_LC_SQRTDI",
+        "DEF_LC_TAUL_NIR",
+        "DEF_LC_TAUL_VIS",
+        "DEF_LC_TAUS_NIR",
+        "DEF_LC_TAUS_VIS",
+        "DEF_LC_TRDA",
+        "DEF_LC_TRDM",
+        "DEF_LC_TROP",
+        "DEF_LC_VMAX25",
+        "DEF_LC_Z0MR",
+    ];
+    for name in UNIMPLEMENTED_LC_OVERRIDES {
+        if land_cover_override(document, name)?.is_some() {
+            bail!(
+                "{name} is set to a per-class value, but the Rust runtime applies only the \
+                 plant-hydraulic DEF_LC_* columns (KMAX_*/PSI50_*/CK); the case would silently \
+                 keep the land-cover table value for this column instead"
+            );
+        }
+    }
+    // `DEF_LC_C3C4` 是整数列，哨兵是 schema 的声明默认值 `-1`（上游同义）。
+    if integer(document, "DEF_LC_C3C4")? != -1 {
+        bail!(
+            "DEF_LC_C3C4 is set to a per-class value, but the Rust runtime does not apply it; \
+             the case would silently keep the land-cover table value instead"
+        );
+    }
     let plant_hydraulic_overrides = PlantHydraulicOverrides {
         maximum_sunlit_leaf_conductance: land_cover_override(document, "DEF_LC_KMAX_SUN")?,
         maximum_shaded_leaf_conductance: land_cover_override(document, "DEF_LC_KMAX_SHA")?,

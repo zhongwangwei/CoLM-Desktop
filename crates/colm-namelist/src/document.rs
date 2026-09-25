@@ -55,6 +55,7 @@ pub struct Document {
 impl Document {
     /// 按路径取最后一次赋值，与 Fortran 一致。写法如 `DEF_forcing%fprefix(1)`。
     pub fn get(&self, path: &str) -> Option<&Value> {
+        trace_read(path);
         let want = Path::parse(path).ok()?;
         self.items.iter().rev().find_map(|i| match i {
             Item::Entry(e) if e.path == want => Some(&e.value),
@@ -177,6 +178,42 @@ fn group_matches(line: &str, group: &str) -> bool {
         .trim_start_matches('&')
         .trim()
         .eq_ignore_ascii_case(group)
+}
+
+/// `COLM_NML_TRACE=<文件>`：把**运行期真正被问到的** namelist key 逐个记进那个文件。
+///
+/// 为什么要有它：判"某个 `DEF_*` 到底有没有被读"**不能靠 grep** —— 注释里提一句
+/// 就算命中（`DEF_Interception_scheme` 就是这样漏掉的，见 docs 第 389 轮），
+/// 而名字经常通过常量/helper 传下去、正则也看不见。这份 trace 记的是**真被问过的
+/// 名字**，对那两种假阴性都免疫；拿它与 `colm-schema` 的声明对差，就能一次性判完
+/// 所有开关"读没读"。
+///
+/// 不设这个环境变量时只是一次 `OnceLock` 判空，`get` 又只在读 namelist 时被调，
+/// 代价可忽略。设了却打不开文件就**当场报错** —— 一个被显式要求的诊断设施
+/// 静默不工作比崩掉更糟。
+fn trace_read(path: &str) {
+    use std::collections::HashSet;
+    use std::io::Write;
+    use std::sync::{Mutex, OnceLock};
+
+    type Trace = Option<Mutex<(std::fs::File, HashSet<String>)>>;
+    static STATE: OnceLock<Trace> = OnceLock::new();
+    let state = STATE.get_or_init(|| {
+        let file = std::env::var("COLM_NML_TRACE").ok()?;
+        let handle = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&file)
+            .unwrap_or_else(|error| panic!("COLM_NML_TRACE={file}: {error}"));
+        Some(Mutex::new((handle, HashSet::new())))
+    });
+    if let Some(state) = state {
+        let mut guard = state.lock().expect("namelist trace lock");
+        let (handle, seen) = &mut *guard;
+        if seen.insert(path.to_string()) {
+            writeln!(handle, "{path}").expect("write namelist trace");
+        }
+    }
 }
 
 impl std::fmt::Display for Document {

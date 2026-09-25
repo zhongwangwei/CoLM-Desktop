@@ -18373,6 +18373,19 @@ VSFI     kernel=200 rust=200
 
 ## 若继续
 
+> **第 390 轮更新（最新的指路牌，先读这段）**：把第 389 轮建议的**运行期 namelist 读取审计**
+> 做出来了（`Document::get` 加 `COLM_NML_TRACE` 埋点 + `oracle/scripts/audit_namelist_reads.sh`：
+> 跑 1 步、拿"真被问过的 key"与 825 条声明对差）。
+>
+> * 实测 87 个 key 被问、742 条没被问；其中 `DEF_hist_vars%*` 482 条由 `colm-hist` 处理（不是问题），
+>   其余绝大多数是未移植家族（DA/TRACER/CaMa/crop/urban/GRID）。
+> * **真发现**：`DEF_LC_*` 地类表逐列覆盖 40 条里只有 10 条被读，**30 条静默忽略**
+>   ⇒ 已加**只在算例真设过时才触发**的 `bail!`（复用已有的 `land_cover_override` 判哨兵）。
+> * 实测：`DEF_LC_VMAX25 = 60.` 现在显式报错；黄金 dry/wet 仍 `bitwise=0/0`、第二配置仍 0、
+>   四条开关支路 4 步仍无差异。
+> * 另记：forcing namelist 的 `vname`/`tintalgo`/`dtime` 等 29 条没被问 —— 不是漏读，而是现库
+>   改用**候选名表**认变量（`colm-forcing/src/slots.rs`），与内核"照 `vname` 取"语义不同。
+
 > **第 389 轮更新（最新的指路牌，先读这段）**：试着把"这个开关到底有没有被读"做成**系统审计**，
 > 结论是**grep 法不可靠**，两次尝试都留了假阴性（第一次：注释里提一句就算命中；
 > 第二次：名字经常经常量/helper 传下去，正则看不见）。
@@ -23475,3 +23488,60 @@ scheme 1   → 仍然 0 个不同量
 **本轮实际拿到的**：覆盖面表里声称支持的那些物理开关（土水方案/产流方案/降水相态/
 土热导率八档/冠层雪/植物水力/近地层/地类）**都在运行时里出现过** ✓；
 唯一"声明里有、运行时没有"的是截留方案，已经按第 388 轮改成显式拒绝 ✓。
+
+## 第 390 轮：运行期 namelist 读取审计（第 389 轮建议的方法）+ `DEF_LC_*` 列覆盖的显式拒绝
+
+### 一、把"读没读"做成可跑的工具
+
+第 389 轮说 grep 法不可靠、可靠的是**运行期 trace**。本轮把它做出来了：
+
+* `crates/colm-namelist/src/document.rs`：最低层的那个访问器 `Document::get` 加了一段
+  由 `COLM_NML_TRACE=<文件>` 打开的埋点，记**真被问过的 key**（去重）。
+  不设环境变量时只是一次 `OnceLock` 判空；设了却打不开文件就当场报错 ——
+  一个被显式要求的诊断设施静默不工作比崩掉更糟。
+* `oracle/scripts/audit_namelist_reads.sh`：跑一个 1 步的算例（namelist 启动时一次读完），
+  再把"被问过的 key"与 `colm-schema` 的 825 条声明对差。
+
+### 二、结果：87 个 key 被问到，742 条声明没被问
+
+```text
+运行期被问到的 key: 87 个
+声明里从没被问过: 742 / 825
+  [nl_colm_history] 482: DEF_hist_vars%* 一整族
+  [nl_colm] 231:（未移植家族 DA/TRACER/CaMa/crop/urban/GRID 占绝大多数）
+  [nl_colm_forcing] 29
+```
+
+* `DEF_hist_vars%*` 那 482 条**不是**问题：它们由 `colm-hist` 按变量名处理
+  （`colm-hist/src/lib.rs:12`），本来就不走运行时。
+* 未移植家族（DA/TRACER/CaMa/crop/urban/GRID 分块）整族没被问 —— 与文档一致。
+* **真发现**：`DEF_LC_*`（地类表"逐列覆盖"，上游 40 条）里只有 **10** 条被读
+  （9 条植物水力 `KMAX_*`/`PSI50_*`/`CK` + `DEF_LC_YEAR`），**另外 30 条静默忽略**
+  （29 条实数 + `DEF_LC_C3C4`）。算例写 `DEF_LC_VMAX25 = 60.` 之类会被无声丢掉、
+  仍用地类表的值 —— 与第 388 轮的截留方案同一类问题。
+
+### 三、改法：只在**真被设过**时才拒绝
+
+在 `physics.rs` 里加一张 29 个实数覆盖的名表 + `DEF_LC_C3C4` 一项，用**已有的**
+`land_cover_override`（它本来就把哨兵 `-1.e36` 折成 `None`）判断"算例是否设过"：
+设过就 `bail!`。整数那一列（`DEF_LC_C3C4`，哨兵 `-1`）单独判。
+哨兵比对用 `==` 而不是容差（两个值都是同一个十进制字面量解析出来的，位型必然一致；
+给哨兵加容差反而会把恰好接近哨兵的真实覆盖误判）。
+
+### 四、实测
+
+```text
+DEF_LC_VMAX25 = 60.0  → 显式报错：… the Rust runtime applies only the plant-hydraulic
+                        DEF_LC_* columns (KMAX_*/PSI50_*/CK) …
+黄金 dry / wet         → bitwise=0 / 0（不变；三个算例一条覆盖都没设，守卫静默）
+第二配置 CN-Cng        → 0 variable(s) outside tolerance（不变）
+开关支路 4 步          → 四条路仍然没有量级差（不变）
+```
+
+### 五、顺带记一笔：forcing namelist 的 `vname` 走的是另一套
+
+审计还显示 `DEF_forcing%vname`/`tintalgo`/`dtime`/`dim2d` 等 29 条**没被问过**。
+原因不是漏读，而是**设计不同**：现库不去按 `vname` 逐槽取变量名，而是按槽位的
+**候选名表**去文件里认（`colm-forcing/src/slots.rs:39` 起，例如温度槽认
+`Tair/TA_F/TA/air_temperature/temperature`）。所以只要数据集用的是候选表里的名字就能读、
+认不出就报错；但**算例里显式写的 `vname` 不生效** —— 与内核语义不同，记在这里备查。
