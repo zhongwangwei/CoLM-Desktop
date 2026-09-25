@@ -32,7 +32,10 @@ for f in oracle/scripts/compare_*.sh; do
     compare_all)
       continue
       ;;
-    compare_flag_isolated)
+    compare_flag_isolated|compare_switch_paths)
+      # 两个都是**诊断探针**（不判通过/失败）：`compare_flag_isolated` 用开关分区，
+      # `compare_switch_paths` 找非默认开关支路的首差 —— 后者现在还能找出两个
+      # **未修**的种子（见 docs 第 381 轮），所以不能当门禁。
       skipped+=("$name")
       continue
       ;;
@@ -98,7 +101,7 @@ if [ "${#whole_skip[@]}" -gt 0 ]; then
   echo "整例对照跳过: ${whole_skip[*]}"
 fi
 if [ "${#skipped[@]}" -gt 0 ]; then
-  echo "跳过（诊断探针，需要位置参数）: ${skipped[*]}"
+  echo "跳过（诊断探针，不判通过/失败）: ${skipped[*]}"
 fi
 if [ $((fail + whole_fail)) -ne 0 ]; then
   printf '失败: %s\n' "${failed[*]}"

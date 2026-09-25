@@ -18373,6 +18373,20 @@ VSFI     kernel=200 rust=200
 
 ## 若继续
 
+> **第 381 轮更新（最新的指路牌，先读这段）**：补上了**非默认开关支路**的端到端信号
+> （新脚本 `oracle/scripts/compare_switch_paths.sh`，短窗口逐记录找首差）。找到**两个还没修的种子**：
+>
+> * `DEF_VEG_SNOW = .false.`：rec 0–7 **逐位相同**，**rec 8** 首个量级差 = `f_xerr`
+>   一个值 `1.26e-16`（水分收支残差的 1 ULP）⇒ 种子在冠层雪关掉那一支的水量收支上。
+> * `DEF_USE_PLANTHYDRAULICS = .false.`：rec 0–10 **只差零的符号**（`maxabs=0`），
+>   **rec 11** 首个量级差 `f_zwt 3.0e-06` / `f_wliq_soisno 5.0e-09` / `f_h2osoi 2.9e-10`
+>   ⇒ 种子在 `soilwater` 里 PHS 关掉那一支的根吸水/ET 分配上。
+> * 这两个种子**不进** `compare_all.sh` 门禁（诊断探针，不判通过/失败）。
+> * `DEF_SPLIT_SOILSNOW = .true.` 是**显式拒绝**（`colm-rs` 直接报错退出），属已知未移植。
+> * **方法教训**：短窗口差分的时间窗/`HIST_FREQ` 必须写进**两侧各自读的那份** namelist
+>   （内核读 `case.nml`、Rust 读 `case/case.nml`）；否则记录条数不同、逐记录比较全是垃圾。
+>   抓出来的方式是"整体比较报 0、逐记录报 78"这种**工具互相矛盾**。
+
 > **第 380 轮更新（最新的指路牌，先读这段）**：这一轮不加形状，修的是**验证基建的静默缺口**。
 >
 > * `compare_second_config.sh`（第二配置整例对照）与 `compare_flag_isolated.sh`（诊断探针）
@@ -22967,3 +22981,71 @@ $ bash oracle/scripts/compare_all.sh          # exit=0
 最大相对差 ~6e-15）。它记在头注释里的那套"用开关分区"的数字从此只是历史 ——
 那些 1 ULP 种子（`f_rstfacsha/sun`、`f_gssun/sha`、`f_wliq_soisno` 那一组）都已经被
 第 329–379 轮修掉了。
+
+## 第 381 轮：非默认开关支路的**首差定位** —— 两个还没修的种子，钉到具体步与量
+
+可达配置空间那张表（本文件"一、可达配置空间"）写着植物水力与冠层雪 on/off "都在"，
+但三个黄金算例都跑**默认**配置 —— 这两条开关的**另一支**在本机从来没有端到端信号。
+本轮补上这个缺口：新脚本 `oracle/scripts/compare_switch_paths.sh` 把每一支都在同一个
+算例上真跑一遍（短窗口 + `TIMESTEP` 历史），逐记录找**第一个出现量级差的步**。
+
+### 一、为什么不用"整月 + 容差"当判据
+
+先按第二配置那套写了个整月版，实测：
+
+```text
+DEF_VEG_SNOW = .false.            : 24 个值超容差（f_vegwp 24/1056）
+DEF_USE_PLANTHYDRAULICS = .false. : 11726 个值超容差（52 个变量）
+```
+
+但逐记录一扫就看出来：**这是混沌放大，不是形状错**。PHS 关掉那一支在前 36 步里
+rec 0–10 只差零的符号、rec 11 才出现第一个 3e-6 的量级差，然后一个月里长成 52 个
+超容差变量。**任何** 1 ULP 种子都会这样，所以"超没超容差"分不出形状对错 ——
+可行动的信号只有"第一个量级差出现在第几条记录、哪个量"。
+
+### 二、实测（CN-Cng 2008-01 前 36 步）
+
+```text
+$ bash oracle/scripts/compare_switch_paths.sh CN-Cng 36
+=== vegsnow_off (DEF_VEG_SNOW = .false.), 36 步
+  两侧记录数: kernel=36 rust=36
+  首个**量级差**在第 8 条记录:
+    f_xerr           ndiff=   1 maxabs=1.2632e-16
+=== phs_off (DEF_USE_PLANTHYDRAULICS = .false.), 36 步
+  两侧记录数: kernel=36 rust=36
+  第 0..10 条记录: 只差零的符号（f_etr/f_etrsha/f_etrsun，2–3 个值）
+  首个**量级差**在第 11 条记录:
+    f_zwt            ndiff=   1 maxabs=2.9970e-06
+    f_wliq_soisno    ndiff=   2 maxabs=5.0450e-09
+    f_h2osoi         ndiff=   2 maxabs=2.8808e-10
+```
+
+* **`DEF_VEG_SNOW = .false.`**：rec 0–7 **逐位相同**，rec 8 首个量级差只有
+  `f_xerr` 一个值、`1.26e-16` —— 水分收支残差的 1 ULP。种子在冠层雪关掉那一支的
+  **水量收支**上。
+* **`DEF_USE_PLANTHYDRAULICS = .false.`**：rec 0–10 **只差零的符号**
+  （`maxabs=0`，数值完全相同），rec 11 首个量级差落在 `f_zwt`/`f_wliq_soisno`/
+  `f_h2osoi` —— 全是水文量 ⇒ 种子在 `soilwater` 里 PHS 关掉那一支的
+  **根吸水/ET 分配**上（上游 `etroot = etr*max(rootr,0)/sum(rootr)`，
+  见本文件"`DEF_USE_PLANTHYDRAULICS` 关闭时…"一节）。
+* **`DEF_SPLIT_SOILSNOW = .true.` 不在表里**：`colm-rs` 遇到它会**直接报错退出**
+  （`assembly.rs` 把 `use_split_soil_snow` 钉成 false，报错原文见脚本注释）——
+  这是**显式拒绝**，不是静默跑成另一套。它属于"已知未移植"。
+* 顺带确认：Rust **确实**认这个开关（把 PHS 翻过来，它自己的输出有 20392 个值变化），
+  所以上面那两条不是"开关被忽略"，是那一支真的还没对齐。
+
+**两条种子都还没修**，所以这个脚本不进 `compare_all.sh` 的门禁，只在跳过行里列出。
+
+### 三、踩的坑（方法教训，值得单列）
+
+第一版逐记录扫描把内核跑 8 步、Rust 跑**一整个月**（264 条记录）—— 因为
+**内核读 `$d/case.nml`，Rust 读 `$d/case/case.nml`**，而我只把时间窗与
+`DEF_HIST_FREQ` 改进了前者。于是逐记录比较全是"拿第 i 步对一个月的第 i 条"，
+我一度据此写下"PHS 关掉从第 0 步就差 O(100) W/m²"—— 那是假的。
+
+抓出来的方式是**两个工具互相矛盾**：整体数组比较（形状不同就 `continue`）报
+"0 个值不同"，而逐记录扫描报"rec 0 有 78 个值不同"。**两边不一致时先怀疑夹具**。
+
+> **规矩**：造短窗口差分时，时间窗与 `HIST_FREQ` 必须写进**两侧各自读的那份**
+> namelist；判"两侧看的是同一个窗口"的最省事办法，是比较两侧的记录条数
+> （脚本现在每次都把它打出来）。
