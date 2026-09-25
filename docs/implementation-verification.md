@@ -18373,6 +18373,21 @@ VSFI     kernel=200 rust=200
 
 ## 若继续
 
+> **第 382 轮更新（最新的指路牌，先读这段）**：新建 **`compare_eroot` 闭环**，
+> 补上一个真实覆盖缺口 —— `eroot` 的 `rootr`/`etrc` 两个输出只在
+> `DEF_USE_PLANTHYDRAULICS = .false.` 那一支里被用，三个黄金算例全开植物水力，
+> 所以它们从来没有端到端信号。
+>
+> * 覆盖 4 种配置（Campbell / van Genuchten × `DEF_RSTFAC` 1/2）×（1000 组均匀随机 +
+>   1000 组**边界/零值**），**8000/8000 逐位相同**；`compare_all.sh` 按命名自动带上
+>   （闭环 **21 条**）。
+> * **本条先抓到的是我自己夹具的错**：驱动里 `MERGE(..., MOD(j,2)==0)` 的 `j` 是
+>   **1-based**，探针里用了 0-based ⇒ 边界批两侧输入不同（奇偶反过来），
+>   看起来像"整层错位"。改成 `(j+1)%2`/`(j+1)%3` 后全过。
+>   **随机批当时是全过的** —— 这个错只有边界批能暴露。
+> * 副产物：第 381 轮那个 PHS 关闭时的"零的符号"种子**不在 `eroot` 里**（三个输出
+>   含零值边界全同），搜索范围收窄到叶温例程里 `etr` 那条乘积链。
+
 > **第 381 轮更新（最新的指路牌，先读这段）**：补上了**非默认开关支路**的端到端信号
 > （新脚本 `oracle/scripts/compare_switch_paths.sh`，短窗口逐记录找首差）。找到**两个还没修的种子**：
 >
@@ -23049,3 +23064,56 @@ $ bash oracle/scripts/compare_switch_paths.sh CN-Cng 36
 > **规矩**：造短窗口差分时，时间窗与 `HIST_FREQ` 必须写进**两侧各自读的那份**
 > namelist；判"两侧看的是同一个窗口"的最省事办法，是比较两侧的记录条数
 > （脚本现在每次都把它打出来）。
+
+## 第 382 轮：给 `eroot` 建闭环 —— 一个新的覆盖缺口被补上（8000/8000）
+
+第 381 轮把 PHS 关掉那一支的种子钉到 rec 11 的水文量上，顺着"谁喂这些量"往上游走，
+就到了 `MOD_Eroot:eroot`。它的三个输出里**只有 `rstfac` 被黄金窗口走到**
+（气孔阻力用）；`rootr`（逐层根阻力份额）与 `etrc`（最大可能蒸腾率）只在
+`DEF_USE_PLANTHYDRAULICS = .false.` 那一支里被用 —— 三个黄金算例全开植物水力，
+所以这两个输出在本机**从来没有端到端信号**，而 `oracle/scripts/` 的 20 个闭环里
+也**没有 `compare_eroot`**。
+
+### 一、新闭环
+
+* `oracle/scripts/eroot_diff.f90`：驱动（`eroot` 是 PUBLIC，直接链 `.bld/MOD_Eroot.o`
+  + `MOD_Hydro_SoilFunction.o` + `MOD_Namelist.o`）。
+* `crates/colm-core/examples/eroot_probe.rs`：配对物。
+* `oracle/scripts/compare_eroot.sh`：逐位差分。
+
+覆盖 **4 种配置** —— `DEF_USE_Campbell_SOIL_MODEL` on/off × `DEF_RSTFAC` 1/2 ——
+每档 2000 例 = 1000 组均匀随机 + 1000 组**边界/零值**。零值那一批是刻意加的：
+`etrc = trsmx0*roota`、`rootr = rootfr*rresis/roota` 这类式子在零上的**符号**
+随机取值几乎撞不到，而要找的正是这种。边界批里 `t_soisno` 一半冻一半融、
+`wliq_soisno` 一半为 0、`rootfr` 每三层留一个 0。
+
+### 二、实测
+
+```text
+$ bash oracle/scripts/compare_eroot.sh
+eroot: all 12 outputs 8000/8000 bitwise identical; 配置计数 {'0': 2000, '1': 2000, '2': 2000, '3': 2000}
+```
+
+`compare_all.sh` 按 `compare_*.sh` 的命名自动带上它（**闭环 21 条**），不需要改脚本。
+
+### 三、这一轮先抓到的是**我自己夹具的错**
+
+第一版跑出来 `rootr1/2/5/6/7/8` 在 4000/8000 例上不同（正好是四个配置的**边界批**），
+而且 kernel 的非零落在第 1/5/7 层、Rust 的落在第 2/6/8 层 —— 看着像"整层错位"。
+**实际是驱动与探针的下标约定不一致**：Fortran 的 `MERGE(..., MOD(j,2)==0)`、
+`MOD(j,3)==0` 里 `j` 是 **1-based** 的 1..nl，我在 Rust 里直接用了 0-based 的 `j`，
+于是两侧在边界批拿到的是**不同的输入**（奇偶正好反过来）。改成 `(j+1)%2`/`(j+1)%3` 之后
+就是 8000/8000。
+
+> **规矩**：驱动里的下标条件一律以 Fortran 的 1-based 语义为准写进探针；
+> 边界批（含 `MERGE`/`MOD` 的那些）尤其要逐条对，随机批是发现不了这个错的
+> —— 随机批当时是**全过**的。
+
+### 四、对第 381 轮那个种子的影响
+
+`eroot` 三个输出在两套土壤方案、两种 `DEF_RSTFAC`、含零值边界上全部逐位相同
+⇒ **PHS 关掉时那 3 个"零的符号"差不在 `eroot` 里**。搜索范围因此收窄：
+`etrc`/`rootr` 已排除，剩下的嫌疑是叶温例程里 `etr` 那条乘积链自身
+（`rhoair * (1-fwet) * delta * (Σ lai/(rb+rs)) * humidity_gradient`）以及
+`soilwater` 里 PHS 关掉那一支的分配 —— 前者是零符号的直接来源，后者是它第 11 步
+放大到 `f_zwt`/`f_wliq_soisno`/`f_h2osoi` 的通路。
