@@ -18373,6 +18373,17 @@ VSFI     kernel=200 rust=200
 
 ## 若继续
 
+> **第 388 轮更新（最新的指路牌，先读这段）**：`DEF_Interception_scheme`（声明允许 1..8、
+> 默认 1）**端口从来没读过** ⇒ 写 4–7 会**静默按 CoLM2014** 跑完，而它们在上游是不同的公式。
+>
+> * 逐档实测（`CN-Cng` 第 0 步、两侧逐位）：**1/2/3/8 逐位相同；4/5/6/7 差到
+>   `f_zerr` 0.5 量级的相对差**；0 让内核 `CALL abort`。
+> * 改法照 `DEF_SPLIT_SOILSNOW` 的先例：`physics.rs` 里 `!= 1` 直接 `bail!`
+>   （消息写清只实现 scheme 1、4–7 已实测有差、2/3/8 未验证）。
+> * 实测：scheme 4 现在显式报错；scheme 1 仍 0 个不同量；黄金 dry/wet 仍 **bitwise=0 / 0**；
+>   第二配置仍 0 超容差。
+> * 另外两档维度已确认干净：`DEF_RSS_SCHEME` 2/5、`DEF_Interception_scheme` 2/3/8（第 0 步）。
+
 > **第 387 轮更新（最新的指路牌，先读这段）**：rec-10 那个 `f_ldew` 1 ULP 的嫌疑逐个证伪。
 >
 > * 端口**确实认** `DEF_VEG_SNOW`（只翻它、比 Rust 自己两份历史：226 个值不同）
@@ -23380,3 +23391,52 @@ rec 10 只有 `f_ldew` 一个值差、且相邻的每一步（rec 9/11）都相�
 下一枪应该是**两侧逐步打点**：在 `ldew` 进/出 `interception`、进/出叶温例程、
 以及写历史这三处各打一次位型，钉出它是在哪一段被舍入出来的
 （内核侧用第 380 轮那套 `Makeoptions` 选项编译插桩副本，别再用驱动的 `-ffp-contract=off`）。
+
+## 第 388 轮：`DEF_Interception_scheme` 从来没被读过 —— 9 档里 4 档**静默跑错**，改成显式拒绝
+
+第 383 轮补了产流方案两档之后，下一个没人碰过的维度是**截留方案**：
+声明里它允许 1..8（默认 1 = CoLM2014），三个黄金算例都没写 ⇒ 全走默认。
+
+### 一、把 9 档逐个测一遍（`CN-Cng` 第 0 步，两侧逐位比）
+
+```text
+DEF_Interception_scheme = 0 : 内核 CALL abort（`MOD_LeafInterception_Extended.F90:1498` 的 ELSE）
+                         = 1 : 逐位相同（黄金默认）
+                         = 2 : 逐位相同
+                         = 3 : 逐位相同
+                         = 4 : 差很大（f_zerr rel 0.52、f_lfevpa 0.30、f_qstar 0.27）
+                         = 5 : 差很大（f_fsenl rel 8.64、f_zerr 0.83、f_lfevpa 0.44）
+                         = 6 : 差很大（f_fsenl 8.63、f_lfevpa 0.39、f_qstar 0.34）
+                         = 7 : 差很大（f_fevpa 2.38、f_fsenl 0.43、f_ldew 0.40）
+                         = 8 : 逐位相同
+```
+
+（命令：`bash oracle/scripts/compare_flag_isolated.sh icpt<k> "DEF_Interception_scheme = <k>"`；
+另测 `DEF_RSS_SCHEME` 2/5 也都是 0 个不同量。）
+
+### 二、根因：端口**根本没读**这个开关
+
+`grep -rn "Interception_scheme" crates/ --include=*.rs` 只有两处：生成的 schema、
+和 `interception.rs:168` 的一句注释。装配层从来没有把它传进任何地方 ⇒
+**不管写几，跑的都是 CoLM2014 那一套**。声明注释里明说那 7 档是**不同的公式**
+（`LEAF_interception_{NOAHMP,MATSIRO,VIC,JULES}`），所以 4–7 档属于
+"静默按另一个模式算完"——正是本仓库在 `DEF_SPLIT_SOILSNOW` 那里明确拒绝过的那类情形。
+
+### 三、改法：照 `DEF_SPLIT_SOILSNOW` 的先例**直接报错**
+
+在 `physics.rs` 里紧挨着 `DEF_SPLIT_SOILSNOW` 那条守卫加一段：`DEF_Interception_scheme != 1`
+就 `bail!`，消息里写清"只实现了 scheme 1"、"4–7 已实测有差（`f_zerr` ~0.5 相对）"、
+"2/3/8 未验证"，并说明否则会静默按 CoLM2014 跑完。
+
+### 四、实测
+
+```text
+scheme 4   → 现在显式报错：colm-rs: DEF_Interception_scheme = 4, but the Rust runtime
+             implements only scheme 1 (CoLM2014, `interception.rs`): schemes 4-7 …
+scheme 1   → 仍然 0 个不同量
+黄金 dry / wet history   bitwise=0 / 0（不变）
+第二配置 CN-Cng          0 variable(s) outside tolerance（不变）
+```
+
+2/3/8 三档在第 0 步与现库逐位相同，但**没有**更长的证据，所以一并挡在门外 ——
+等哪天真要支持某一档，先给它建闭环再说。
