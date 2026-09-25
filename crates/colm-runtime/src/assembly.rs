@@ -104,9 +104,13 @@ pub struct LandPhysicsParameters {
     ///
     /// **默认也是 `.true.`**（`MOD_Namelist.F90:314`）。打开时上游走
     /// `MOD_LeafTemperature` 的 vegetation-snow 分支并调用
-    /// `canopy_snow_wetfrac` 算 `fwet_snow`；本仓库的装配层把它硬写成 `false`
-    /// （`vegetation_snow: false`），那一整支被绕过。实测一步之后：Fortran 的
-    /// `fwet_snow = 0.061`、Rust 是 0 —— 分支没跑，不是数值差。
+    /// `canopy_snow_wetfrac` 算 `fwet_snow`。
+    ///
+    /// **这里按 namelist 真传**（`physics.vegetation_snow`），不再是"硬写成 false"：
+    /// 实测把开关翻过来，端口自己的输出有 226 个值变化（第 387 轮），所以两支都在跑。
+    /// 关掉时那一支的语义见 `colm_core::leaf_temperature::update_canopy_water` 的
+    /// 注释（按 `MOD_LeafTemperature_Extended.F90:1502-1522` 的规格：只更新总水量、
+    /// 分量按当前温度指定、不重算总水量）。
     pub vegetation_snow: bool,
     /// 本算例编译的地类分类体系。
     pub land_cover_scheme: LandCoverScheme,
