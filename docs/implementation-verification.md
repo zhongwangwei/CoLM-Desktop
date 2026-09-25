@@ -18373,6 +18373,21 @@ VSFI     kernel=200 rust=200
 
 ## 若继续
 
+> **第 379 轮更新（最新的指路牌，先读这段）**：**闭环 20 通过 / 0 失败**（本仓库第一次全绿）。
+> 最后一个是 `compare_stomata` 的 `assim` 1/4000：`coupled_assimilation` 第一处
+> `4.*atheta*ome*omc` 的**因子顺序**写反了 —— 内核先乘 `ome`（电子传输项），现库写成先乘
+> `rubisco`。乘法可交换但舍入点不同，落在 `(a+b)²-4θab` 这个相消量上被放大成 135 ULP。
+>
+> * 复现方法：驱动自带 LCG 可逐位重放 ⇒ 用 Python 拿到失败例的 30 个输入 ⇒ 生成**单例驱动**
+>   （直接从 `INT(Z'…',8)` 位型赋值）链接内核对象，输出与黄金行逐位相同。
+> * **新规矩**：插桩内核模块副本时**必须**用该模块在 Makefile 里的同一组选项（`-O2` + 默认
+>   `-ffp-contract=fast`）。第一版照抄了驱动的 `-ffp-contract=off`，插桩版算的是平铺算术，
+>   制造出 `range`/`pco2i` 两个**幻影 1 ULP 差**，白查了一阵 `gradm`/`sortin`。
+> * 两个黄金窗口的 history 仍是 `bitwise=0`，`over_tol`/`ot_vars`/`sumabs` 不变；
+>   restart dry N=16/528、wet N=96/720 全 0/68。
+> * **下一枪**：`fgrnd_probe.sh` 的 Rust 侧锚点仍过期（第 367 轮重构把 `ground_heat` 挪后了），
+>   修好它能两侧对输入 —— 现在 `f_fgrnd` 已全同，这个探针只剩考古价值。
+
 > **第 378 轮更新（最新的指路牌，先读这段）**：**两个黄金窗口的 history 现在全部逐位相同**
 > （dry 56024 + wet 81464 个值，`bitwise=0`）。本轮修的是湿窗最后的 `f_zerr`：
 >
@@ -22811,3 +22826,74 @@ CN-Cng-wet  bitwise=0  sumabs=0.0000  over_tol=0  ot_vars=0  n=81464
 ```
 
 剩下的唯一未解释项是 `compare_stomata` 的 `assim` 1/4000（row 514，分支差，与本轮无关）。
+
+## 第 379 轮：`coupled_assimilation` 第一处 `4*θ*a*b` 的因子顺序 —— **闭环 20/20 全绿**
+
+`compare_stomata` 的最后一个失败：`assim` 1/4000（第 515 例，k=0 Ball-Berry，内核
+`3EF2E4791654E451` 对现库 `3EF2E4791654E3CA`，差 135 ULP）。本轮把它关掉了，
+**闭环从 19/1 变成 20/0**。
+
+### 一、把失败例变成可控复现
+
+`oracle/scripts/stomata_diff.f90` 的抽签是自带的 LCG（`S*6364136223846793005+1442695040888963407`，
+`ISHFT(S,-11)/2^53`），可以逐位重放。用 Python 重放拿到第 515 例的 30 个输入后，
+生成一个**单例驱动**（用 `TRANSFER(INT(Z'…',8),1.0_r8)` 直接从位型赋值，不经十进制），
+链接内核的 `.bld/MOD_AssimStomataConductance.o` —— 输出与黄金行**逐位相同**，
+于是有了一例可以反复跑的复现。
+
+### 二、插桩必须在**内核的编译选项**下重建（本轮的教训）
+
+第一版插桩副本照抄了**驱动**的选项（含 `-ffp-contract=off`）去编译，结果插桩版算的是
+**平铺**的算术，与真正被链接的 `.bld/*.o`（`Makeoptions:17-28` 的 `-O2` + 默认
+`-ffp-contract=fast`）不是同一套。于是出现了两个**幻影差**：
+
+```text
+平铺插桩：range = 4043D5009CBF5884→885（差 1 ULP）、IT1 的 pco2i 差 2 ULP
+内核选项：range = 4043D5009CBF5884   ← 与 census 的 `.FMS` 一致，与现库一致
+```
+
+我为此白查了一阵 `gradm`/`binc`/`sortin`。改用内核选项（`-O2 -fdefault-real-8 -ffree-form -g
+-ffpe-trap=invalid,zero,overflow -fbacktrace -fdump-core -cpp -ffree-line-length-0
+-fallow-argument-mismatch -fopenmp`，**不加** `-ffp-contract`）重建插桩副本后，
+`range` 与 census 完全对上，IT1-IT5 的**每一个中间量**（pco2i/omc/ome/oms/omp）也与现库逐位相同。
+
+> **规矩**：插桩一个要拿来做差分的内核模块副本时，**必须**用该模块在 Makefile 里的同一组
+> 选项编译。抄驱动的选项（`-ffp-contract=off`）会让插桩版与真正链接的对象算的不是同一套算术，
+> 制造出根本不存在的 1 ULP 分歧。
+
+### 三、真正的差在 `coupled_assimilation` 第一处的因子顺序
+
+IT6 两侧的 `pco2i/omc/ome/oms/respc` **全部逐位相同**，只有 `assim` 不同 ⇒ 差在
+`:264`/`:266` 那两个二次式里。GIMPLE（census `assim.opt`，`stomata` 函数）：
+
+```text
+:264  _63 = ome * 3.508 ; _64 = _63 * omc ; _65 = .FMS(_245,_245,_64)   ; _245 = omc+ome
+:266  _70 = omp * 3.8   ; _71 = _70 * oms ; _72 = .FMS(_250,_250,_71)   ; _250 = oms+omp
+```
+
+源码 `4.*atheta*ome*omc` 左结合成 `((4.*atheta)*ome)*omc` —— **常量先乘 `ome`（电子传输项）**；
+`:266` 的 `4.*btheta*omp*oms` 先乘的是 `omp`。现库把两处都写成"常量 * rubisco * electron"，
+第一处就成了 `(3.508*rubisco)*electron`：乘法可交换，但**舍入点不同**。
+
+用内核选项下拿到的（与现库逐位相同的）`omc/ome/oms` 做精确离线复算：
+
+```text
+(3.508*rubisco)*electron ⇒ omp=3EF2E6A57F87E352  assim=3EF2E4791654E3CA   ← 改前 Rust 的值
+(3.508*electron)*rubisco ⇒ omp=3EF2E6A57F87E3E4  assim=3EF2E4791654E451   ← 内核值
+```
+
+135 ULP 的量级来自 `(a+b)² - 4θab` 这个**相消量**：`omp` 只差 1 ULP，到 `assim` 就被放大成 135。
+改法只有一处：`coupled_assimilation` 第一处写成 `… * electron * rubisco`（第二处不动）。
+该函数被 `stomata` 与 `update_photosynthesis` 共用，两条链同时修正。
+
+### 四、实测
+
+```text
+compare_stomata    assim/respc/rst 4000/4000 逐位相同
+闭环               20 通过 / 0 失败     ← 本仓库第一次全绿
+黄金 dry / wet     bitwise=0 / 0，sumabs 0.0000，over_tol 0，ot_vars 0    ← 保持不变
+restart            dry N=16/528、wet N=96/720 全 0/68
+```
+
+`assim` 虽然是喂叶温能量平衡的量，但两个黄金窗口本来就已经逐位相同（说明这两处的两种结合
+顺序在那两条轨迹上给出同一个值），所以本轮对状态中性；这一点由 restart 扫描守住。

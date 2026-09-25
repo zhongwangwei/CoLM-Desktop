@@ -456,11 +456,23 @@ pub fn update_photosynthesis(
 fn coupled_assimilation(rubisco: f64, electron: f64, sink: f64) -> f64 {
     // `:264`/`:266` 的 `max(0,(a+b)^2 - 4*theta*a*b)` 里 `(a+b)^2` 那个乘积进 FMA
     // （出货 `fnmsub d25,d29,d29,d25`）。
+    //
+    // **第二个因子的顺序不能照参数名的顺序写。** 内核 `:264` 的 GIMPLE 是
+    //   `_63 = ome * 3.508 ; _64 = _63 * omc`   （`:266` 是 `_70 = omp * 3.8 ; _71 = _70 * oms`）
+    // 即 `4.*atheta*ome*omc` 左结合成 `((4.*atheta)*ome)*omc` —— **先乘 `ome`（电子传输项）**，
+    // 而 `:266` 先乘的是 `omp`（这里叫 `first`）。原先把两处都写成"常量 * rubisco * electron"，
+    // 第一处就成了 `(3.508*rubisco)*electron`：乘法可交换但**舍入点不同**，
+    // `(3.508*a)*b != (3.508*b)*a`。
+    // 实测（`oracle/scripts/compare_stomata.sh` 第 515 例，Ball-Berry）：
+    //   `(3.508*rubisco)*electron` ⇒ `omp=…E352`、`assim=3EF2E4791654E3CA`（正是改前 Rust 的值）
+    //   `(3.508*electron)*rubisco` ⇒ `omp=…E3E4`、`assim=3EF2E4791654E451`（内核值）
+    // 该例的 `omc/ome/oms/pco2i` 两侧**逐位相同**，所以差就出在这一处结合顺序上；
+    // 又因为它落在 `(a+b)^2 - 4θab` 这个相消量上，135 ULP 被放大出来。
     let first = ((rubisco + electron)
         - (rubisco + electron)
             .mul_add(
                 rubisco + electron,
-                -(f77(4.0) * f77(0.877) * rubisco * electron),
+                -(f77(4.0) * f77(0.877) * electron * rubisco),
             )
             .max(0.0)
             .sqrt())
