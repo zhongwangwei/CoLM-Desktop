@@ -18373,6 +18373,23 @@ VSFI     kernel=200 rust=200
 
 ## 若继续
 
+> **第 376 轮更新（最新的指路牌，先读这段）**：`dlrad` 里 `thermk*frl` 那一乘被内核收进叶发射项
+> （`…LeafTemperature_Extended.F90:1407` 的 `_768 = .FMA(thermk, frl, 叶发射项)`），补上后
+> **`f_fgrnd` 在两个黄金窗口都归零**。
+>
+> * 黄金 **dry `bitwise` 81 → 5**、**wet `31 → 2**，`sumabs` 仍 0.0000、`over_tol`/`ot_vars` 仍 0/0；
+>   闭环仍 19/1（`compare_stomata` 的 `assim` 1/4000 不变）。
+> * 状态**中性**：干窗 restart N=16 改动前后都 0/68，干窗 N=528、湿窗 N=96、湿窗 N=720 全 0/68。
+>   原因已量化：`hs` 进三对角右端被 `deltim/(cv*dz)≈1e-5` 缩小，其 1 ULP（~1e-14 W/m²）
+>   落到状态上只有 ~1e-19 K，低于 `t_soisno` 的 ULP —— 所以这是纯诊断修正。
+> * **踩坑（新规矩）**：第一版把 `gap` 与 `1-gap` 的角色对调了（`thermk` 本身就是**缝隙率**，
+>   `fac = 1-thermk` 才是叶发射权重）⇒ 干窗 16 步 restart 立刻 **31/68**。
+>   GIMPLE 只说"哪一项被吸收"，**不说**"哪个变量扮哪个角色"；互补对必须回声明处确认。
+> * **下一枪**：剩下 dry `f_rnet` 2 / `f_trad` 1 / `f_zerr` 2、wet `f_zerr` 2（都是相消敏感量，
+>   由 `olrg` 的单步 1 ULP 放大而来，累加平均把它藏住了）。`ulrad` 的 GIMPLE 里已找到
+>   **唯一一处关联顺序差**：第二项该是 `((1-emg)*thermk)*thermk*frl`，现库写成
+>   `(1-emg)*(gap*gap)*frl`。`ulrad` 只喂诊断，风险面窄。
+
 > **第 375 轮更新（最新的指路牌，先读这段）**：第 374 轮之后两个窗口的 **restart 已整窗逐位相同**，
 > `over_tol`/`ot_vars` 都是 0、`sumabs` 都是 0.0000；剩下只有 history 的 1 ULP 级诊断量
 > （`f_fgrnd` 76/29 个时刻、`f_rnet`/`f_zerr`/`f_trad`）。
@@ -22516,3 +22533,116 @@ Rust：crates/colm-runtime/src/assembly.rs:1824   let budget = surface_budget(st
    Rust 的 `longwave()` 里能看到的是 **`ulrad`/`irab`** 那一条（注释里写得比代码细），
    **`dlrad` 在 Rust 侧由哪里产生、形状对不对，这一轮没有查清** —— 下一轮从这里接着走。
 3. `compare_stomata` 的 1/4000（row 514）仍未解释。
+
+## 第 376 轮：`dlrad` 的 `thermk*frl` 融合 —— `f_fgrnd` 诊断差全线关闭
+
+第 375 轮把 `fgrnd` 的公式在 16 步输入上穷举证明"现库写法 16/16 逐位一致"，因此差只可能在
+**输入**上。本轮从"唯一没有历史量兜底的输入" `dlrad` 入手，读 GIMPLE 后一击命中。
+
+### 一、证据：内核把 `thermk*frl` 收进叶发射项
+
+`extends/interception/MOD_LeafTemperature_Extended.F90:1406-1407`（Makefile:641 确认这就是
+**实际编译**的那一份，不是 `main/` 下的同义文件）的 GIMPLE，census dump 第 4386-4394 处：
+
+```text
+_761 = fac_1484 * 5.6699…e-8            ; fac*stefnc
+powmult_1033 = t*t ; powmult_1034 = powmult_1033*t     ; tlbef**3 = (t*t)*t
+_763 = _761 * powmult_1034              ; (fac*stefnc)*tlbef**3
+_765 = .FMA (dtl, 4.0e+0, tlbef)        ; tlbef + 4.*dtl   ← 这一乘被吸收
+_767 = _763 * _765
+_768 = .FMA (_389, pretmp_3195, _767)   ; _389 = thermk（:1098 读的）、pretmp_3195 = frl
+*dlrad = _768
+```
+
+⇒ `dlrad = FMA(thermk, frl, 叶发射项)`：**被吸收的是 `thermk*frl`，叶发射项是加数**。
+现库写的是平铺的 `thermk*frl + 叶发射项`，少一次收缩。
+
+### 二、踩的坑（值得单列）：互补量的角色对调
+
+第一版改动的两处收缩写对了，**却把 `gap` 与 `1-gap` 的角色对调了** —— 我按"名字里有 gap
+就是缝隙率、叶发射项该乘缝隙率"的直觉写，正好反了：
+
+* `:203` 的声明注释写着 `thermk, ! canopy gap fraction for tir radiation` —— **`thermk`
+  本身就是冠层缝隙率**；
+* `:1098` 的 `fac = 1. - thermk` **才是叶发射权重**。
+
+判据给得很干脆：干窗 16 步 restart **31/68 分歧**（对照：未改是 **0/68**）。
+这是量级错误（`dlrad` 差 ~100 W/m²），不是舍入差 —— 也正是"改形状必须两侧对照"这条规矩的价值。
+
+> **规矩**：GIMPLE 只能告诉你"哪一项被吸收"，**不能**告诉你"哪个变量扮演哪个角色"。
+> 遇到 `x` 与 `1-x` 这种互补对，必须回到声明注释/赋值处确认角色，别按物理直觉猜。
+
+改成正确的角色后：`let leaf_emission = stefnc*(1-gap)*t³*4.0f64.mul_add(dtc, t);` 与
+`downward_longwave = gap.mul_add(frl, leaf_emission);` ⇒ 干窗 16 步 **0/68**。
+
+### 三、为什么"形状差能修诊断、却不回灌状态"（第 375 轮结构性结论的量化）
+
+`dlrad` 在 Rust 里**确实**喂给 `ground_temperature`（`standard_lct_step.rs:331`
+`downward_longwave_w_m2: leaf.downward_longwave_w_m2`）⇒ 进 `hs`。但 `hs` 进三对角右端时被
+`deltim/(cv*dz)` 缩小：`hs` 的 1 ULP ≈ `1e-14 W/m²`，乘上 `~1e-5` 后 ≈ `1e-19 K`，
+**远低于状态量 `t_soisno`（~300 K）的 ULP（~5.7e-14）** ⇒ 在状态里被舍入吃掉，
+在直接按 ~100 W/m² 输出的 `fgrnd` 里显形。这就是"修好形状后 restart 仍整窗 0/68、
+而 `f_fgrnd` 从 76 个时刻差 1 ULP 变成 0"的原因。
+
+### 四、实测（全部实际跑过）
+
+```text
+干窗 restart        N=16  0/68（改动前 0/68、改动后 0/68）   ← 状态中性
+干窗 restart        N=528 0/68                              ← 整窗
+湿窗 restart        N=96  0/68                              ← 第 361 轮定的必备额外检查
+湿窗 restart        N=720 0/68                              ← 整窗
+黄金 dry   bitwise  81 → 5      sumabs 0.0000 → 0.0000   over_tol 0 → 0   ot_vars 0 → 0
+黄金 wet   bitwise  31 → 2      sumabs 0.0000 → 0.0000   over_tol 0 → 0   ot_vars 0 → 0
+闭环      19 通过 / 1 失败（`compare_stomata` 的 `assim` 1/4000，与本轮无关，不变）
+```
+
+`f_fgrnd` 在**两个窗口都归零**（此前 dry 76 个时刻 / wet 29 个时刻）。剩下的全部（见下）
+就是本仓库里**最后一组** 1 ULP 诊断差。
+
+### 五、剩下的三个（dry `f_rnet` 2 / `f_trad` 1 / `f_zerr` 2，wet `f_zerr` 2）
+
+新加的 `/tmp/gf/lsdiff.py`（列出全部有差的变量 + `maxabs`/`maxrel` + 首个最大位置）报出：
+
+```text
+CN-Cng      f_rnet ndiff=2 maxabs=2.84e-14 maxrel=2.27e-16 at=130 gold=125.21137458970985 rust=…88
+            f_trad ndiff=1 maxabs=2.84e-14 maxrel=1.11e-16 at=175 gold=255.94267971098625 rust=…23
+            f_zerr ndiff=2 maxabs=2.84e-14 maxrel=3.04e-04 at=130 gold=-9.353666452494025e-11
+CN-Cng-wet  f_zerr ndiff=2 maxabs=3.55e-15 maxrel=5.60e-05 at=117
+```
+
+三条都是**相消敏感量**，可以一次说清：
+
+* `MOD_Vars_1DAccFluxes.F90:2087` 的 `rnet = sabg + sabvsun + sabvsha - olrg + forc_frl`，
+  前四项相消成很小的数、再加 `forc_frl`（~300 W/m²）⇒ `olrg` 里 1 ULP（~5.7e-14）会
+  原样留在 `rnet`（其 ULP ~2.8e-14）上；
+* `MOD_Thermal.F90:1392-1400` 的 `errore`（= `zerr`）是一长串 ~百 W/m² 的交替和，
+  恒在 ~1e-10 ⇒ **相对**差 3e-4 而绝对差 2.8e-14；
+* `f_olrg` 之所以自己看不出差，是因为它是 `acc1d` 的**时间平均**，单步 1 ULP 被平均掉。
+
+**否决的假设**：`f_trad = (olrg/stefnc)**0.25` 曾怀疑 Rust 的 `powf(0.25)` 被 LLVM 改写成
+`sqrt(sqrt(x))` 而 gfortran 走 libm `pow`。直接看代码生成否掉了：
+
+```text
+$ rustc -O --crate-type=lib --emit asm  # pub fn pow_quarter(x: f64)->f64 {(x).powf(0.25)}
+_pow_quarter:
+	b	_pow            ← 尾调用 libm `pow`，与 gfortran 的 `**0.25` 同一条路
+```
+
+### 六、下一枪（已在同一轮里读到证据）
+
+`olrg = ulrad + emg*(stefnc*t_grnd_bef³*(4*tinc))`（`surface_budget.rs:59-62`，顺序与
+GIMPLE `_1813/_1814/_1816` 一致），所以嫌疑落在 `ulrad`。`ulrad` 的 GIMPLE
+（`…Extended.F90:1414/1421`，dump 第 4396-4442 处）里**唯一的关联顺序差**是第二项：
+
+```text
+_3203 = thermk * (1-emg)                 ; :1110
+_3178 = thermk * _3203                   ; 左结合 ⇒ ((1-emg)*thermk)*thermk
+_3179 = _3178 * frl
+```
+
+而 `upward_longwave()`（`leaf_temperature.rs:1701-1703`）写的是
+`(1-emg) * gap.powi(2) * frl`，即 `((1-emg)*(gap*gap))*frl` —— 两次乘法都在，但
+**中间量的舍入点不同**。另外三项（`:1413` 的 `(1-emg)*thermk*fac*stefnc*t⁴`、
+`:1414` 的 `4*(1-emg)*thermk*fac*stefnc*t³*dtl`、以及 `*factor` 那一处收缩）逐项对过，
+与现库一致。`ulrad` **只喂诊断**（`surface_budget` 的 `olrg`；`GroundTemperatureInput`
+的字段表里没有它）⇒ 这一处可以单独改、风险面很窄。留作下一轮。

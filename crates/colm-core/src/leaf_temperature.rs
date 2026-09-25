@@ -1266,11 +1266,27 @@ pub fn leaf_temperature(
                     input.surface_pressure_pa,
                 )?
                 .specific_humidity);
-    let downward_longwave = input.canopy_longwave_gap_fraction * input.atmospheric_longwave_w_m2
-        + STEFAN_BOLTZMANN
-            * (1.0 - input.canopy_longwave_gap_fraction)
-            * previous_leaf_temperature.powi(3)
-            * (previous_leaf_temperature + 4.0 * final_temperature_change);
+    // `MOD_LeafTemperature_Extended.F90:1406-1407` 的 GIMPLE（census dump 第 4386-4394 处）：
+    //   _761 = fac*stefnc ; powmult_1033 = t*t ; powmult_1034 = powmult_1033*t
+    //   _763 = _761 * powmult_1034            ← `stefnc*fac*tlbef**3` 左结合
+    //   _765 = .FMA(dtl, 4.0, tlbef)          ← `tlbef + 4.*dtl` 那一乘被吸收
+    //   _767 = _763 * _765
+    //   _768 = .FMA(_389, pretmp_3195, _767)  ← `_389 = thermk`（1098 处读的）、
+    //                                           `pretmp_3195 = frl`
+    // 所以**被吸收的是 `thermk*frl` 那一项，叶发射项 `_767` 是加数** —— 方向与直觉相反。
+    //
+    // 注意 `thermk` 是**冠层缝隙率**（`MOD_LeafTemperature_Extended.F90:203` 的声明注释
+    // 就写着 "canopy gap fraction for tir radiation"），`fac = 1 - thermk` 才是叶发射权重
+    // （`:1098`）。第一版改动把两边的权重对调了，干窗 16 步的 restart 立刻 31/68 分歧
+    // （对照：未改是 0/68）—— 权重对调是量级错误，不是舍入差。
+    // `4.*dtl` 那一乘按 2 的幂（4.0）所以熔不熔逐位等价，但仍然照 GIMPLE 写上。
+    let leaf_emission = STEFAN_BOLTZMANN
+        * (1.0 - input.canopy_longwave_gap_fraction)
+        * previous_leaf_temperature.powi(3)
+        * 4.0f64.mul_add(final_temperature_change, previous_leaf_temperature);
+    let downward_longwave = input
+        .canopy_longwave_gap_fraction
+        .mul_add(input.atmospheric_longwave_w_m2, leaf_emission);
     let upward_longwave = upward_longwave(
         input,
         previous_leaf_temperature,
