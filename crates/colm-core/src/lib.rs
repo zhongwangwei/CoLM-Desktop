@@ -275,7 +275,7 @@ pub use time_state::{
     SoilHydraulicState,
 };
 
-pub use surface_budget::{surface_budget, SurfaceBudget};
+pub use surface_budget::{add_precipitation_heat, surface_budget, SurfaceBudget};
 pub use urban::{
     derive_urban_geometry, derive_urban_lucy, UrbanConfig, UrbanInput, UrbanLucyInput,
     UrbanLucyState, UrbanState,

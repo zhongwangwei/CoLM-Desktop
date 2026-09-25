@@ -840,8 +840,9 @@ pub fn set_lct_surface_budget(
 /// 把一步的**收支残差**写进第 `record` 条记录。
 ///
 /// 两个量都是上游自己拼的闭合性检查，既不是状态量，也没有任何一步输出能顶替。
-/// 项表逐条搬自 `MOD_Thermal.F90:1394-1401`（`zerr`）与
-/// `CoLMMAIN.F90:1529-1543`（`xerr`）：
+/// 项表逐条搬自 **`extends/interception/MOD_Thermal_CanopyPhase_Extended.F90:1403-1413`**
+/// （`zerr`；Makefile:647 确认编译的是这份 Extended，行号与 `main/MOD_Thermal.F90` 差 ~7 行）
+/// 与 `CoLMMAIN.F90:1529-1543`（`xerr`）：
 ///
 /// | `zerr` 的项 | 上游 | 本仓库 |
 /// |---|---|---|
@@ -854,8 +855,9 @@ pub fn set_lct_surface_budget(
 /// | `xmf` | `MOD_PhaseChange` 的相变潜热 | `ground.latent_heat_flux_w_m2` |
 /// | `dheatl` | `sum(dheatl_p*pftfrac)`（`:1122`） | `leaf.canopy_heat_storage_w_m2` |
 /// | `hprl` | `sum(hprl_p*pftfrac)`（`:1121`） | `leaf.precipitation_heat_w_m2` |
-/// | 降水显热两项 | `:1398-1399` | [`SurfaceBudget::precipitation_heat_w_m2`] |
-/// | `Σ(t-t_bef)/fact` | `:1400-1401`，`j = lb:nl_soil` | 下面那条三列 `zip` |
+/// | `canopy_phase_heat` | `:1408` 比 `main/` 下多的一项 | `interception.canopy_phase_heat_w_m2` |
+/// | 降水显热两项 | `:1409-1410` | [`colm_core::add_precipitation_heat`]（**逐项熔进**累加值） |
+/// | `Σ(t-t_bef)/fact` | `:1412-1413`，`j = lb:nl_soil` | 下面那条三列 `zip` |
 ///
 /// **`frl` 是大气向下长波（`forc_frl`），不是冠层下方的 `dlrad`。** 两者只在
 /// `MOD_Thermal.F90:517`（无冠层）相等；有冠层时 `dlrad` 多乘一份透过率。
@@ -897,7 +899,7 @@ pub fn set_lct_balance_errors(
     // 原实现先 `.sum()` 再 `- ground_heat_storage_w_m2`，结合顺序不同 ——
     // 这是干窗第 0 步最后一个差异（`f_zerr`，`errore` 本身 ~2.6e-11、差 8.9e-14）
     // 的第一候选。
-    let mut zerr = energy.shortwave.sunlit_absorbed_w_m2
+    let zerr = energy.shortwave.sunlit_absorbed_w_m2
         + energy.shortwave.shaded_absorbed_w_m2
         + energy.shortwave.ground_absorbed_w_m2
         + reference.downward_longwave_w_m2
@@ -907,7 +909,14 @@ pub fn set_lct_balance_errors(
         - ground.latent_heat_flux_w_m2
         - energy.leaf.canopy_heat_storage_w_m2
         + energy.leaf.precipitation_heat_w_m2
-        + budget.precipitation_heat_w_m2;
+        // `+ canopy_phase_heat`：`MOD_Thermal_CanopyPhase_Extended.F90:1408` 比 `main/`
+        // 下的同名语句多这一项，而 Makefile:647 确认**编译的就是 Extended 那一份**。
+        // scheme=1 下它恒为 0（见 `InterceptionOutput::canopy_phase_heat_w_m2` 的注释），
+        // 所以两个黄金窗口都看不出来；scheme 4/5/6/7 会真非零，漏掉就是实打实的残差。
+        + energy.interception.canopy_phase_heat_w_m2;
+    // 降水显热两项：内核把**每一项**分别熔进当时的累加值（`_1871`/`_1872`），
+    // 不是先求和再加 —— 与 `fgrnd` 共用 `add_precipitation_heat`。
+    let mut zerr = colm_core::add_precipitation_heat(energy, zerr);
     for ((now, before), factor) in ground
         .temperature_k
         .iter()

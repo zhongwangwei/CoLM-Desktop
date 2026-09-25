@@ -29,12 +29,32 @@ pub struct SurfaceBudget {
     pub radiative_temperature_k: f64,
     pub latent_heat_w_m2: f64,
     pub ground_heat_w_m2: f64,
-    /// `cpliq*pg_rain*(t_precip-t_grnd) + cpice*pg_snow*(t_precip-t_grnd)`。
-    ///
-    /// 单独留一份是因为 `zerr` 要把它原样加回去：它在 `fgrnd` 里是长表达式的一部分，
-    /// 而 `errore` 把它写在末尾 —— 从 `fgrnd` 里反解出来会引入第二套算式。
-    pub precipitation_heat_w_m2: f64,
     pub net_radiation_w_m2: f64,
+}
+
+/// 把降水显热两项**逐项熔进**累加器。
+///
+/// 内核 `MOD_Thermal_CanopyPhase_Extended.F90:1405`（`fgrnd` 那一支是 `:1352`）的 GIMPLE
+/// 对两条链给的是同一个形状：
+/// ```text
+/// _1762 = pg_rain*cpliq ; _1768 = .FMA(_1762, t_precip-t_grnd, 累加值)
+/// _1770 = pg_snow*cpice ; _1772 = .FMA(t_precip-t_grnd, _1770, _1768)
+/// _1871 = .FMA(pg_rain*cpliq, t_precip-t_grnd, _1870)     ← errore（f_zerr）那一支
+/// _1872 = .FMA(t_precip-t_grnd, cpice*pg_snow, _1871)
+/// ```
+/// 即**两项各自熔进当时的累加值**，不是先求和再加。原先 `zerr` 那一支用的是
+/// `SurfaceBudget` 里预先求和的 `precipitation_heat_w_m2` ⇒ 湿窗 `f_zerr` 残留 2 个
+/// 1 ULP（干窗降水为 0，看不出来）。现在两条链共用这一个实现，`SurfaceBudget` 里
+/// 那个"两项之和"的字段随之删除 —— 留着它只会再被误用一次。
+pub fn add_precipitation_heat(energy: &StandardLctEnergyOutput, accumulator: f64) -> f64 {
+    let difference =
+        energy.precipitation.precipitation_temperature_k - energy.surface_temperature_k;
+    let accumulator = (WATER_HEAT_CAPACITY_J_KG_K * energy.interception.ground_rain_kg_m2_s)
+        .mul_add(difference, accumulator);
+    difference.mul_add(
+        ICE_HEAT_CAPACITY_J_KG_K * energy.interception.ground_snow_kg_m2_s,
+        accumulator,
+    )
 }
 
 pub fn surface_budget(energy: &StandardLctEnergyOutput) -> Result<SurfaceBudget> {
@@ -87,15 +107,8 @@ pub fn surface_budget(energy: &StandardLctEnergyOutput) -> Result<SurfaceBudget>
     let latent_heat =
         sublimation_heat.mul_add(ground_evaporation, leaf_latent_heat * leaf_evaporation);
 
-    let precipitation_temperature_k = energy.precipitation.precipitation_temperature_k;
-    let precipitation_heat = WATER_HEAT_CAPACITY_J_KG_K
-        * energy.interception.ground_rain_kg_m2_s
-        * (precipitation_temperature_k - surface_temperature_k)
-        + ICE_HEAT_CAPACITY_J_KG_K
-            * energy.interception.ground_snow_kg_m2_s
-            * (precipitation_temperature_k - surface_temperature_k);
     // 内核 `MOD_Thermal…:1352` 这一支是一条 6 段的累加链，**每一段的乘积都各自
-    // 熔进当时的累加值**（不是先算一个 `precipitation_heat` 再加上去）：
+    // 熔进当时的累加值**（不是先算一个两项之和再加上去）：
     //   _1747 = .FMA(dlrad, emg, sabg)
     //   _1751 = .FNMA(emg*stefnc, t_grnd_bef**4, _1747)
     //   _1753 = (emg*stefnc)*t_grnd_bef**3 ; _1757 = .FNMA(_1753, 4*tinc, _1751)
@@ -128,15 +141,8 @@ pub fn surface_budget(energy: &StandardLctEnergyOutput) -> Result<SurfaceBudget>
             energy.corrected_ground_sensible_heat_w_m2,
         );
     // 降水显热两项：内核把**每一项**熔进累加器（`_1768`/`_1772`），不是先求和再加。
-    // `precipitation_heat_w_m2` 那一列是 `MOD_Thermal…:1398-1399` 的**诊断量**
-    // （`crates/colm-runtime/src/history.rs:910` 用它写 `hprl`），保持原算式不动。
-    let precipitation_temperature_difference = precipitation_temperature_k - surface_temperature_k;
-    let ground_heat = (WATER_HEAT_CAPACITY_J_KG_K * energy.interception.ground_rain_kg_m2_s)
-        .mul_add(precipitation_temperature_difference, ground_heat);
-    let ground_heat = precipitation_temperature_difference.mul_add(
-        ICE_HEAT_CAPACITY_J_KG_K * energy.interception.ground_snow_kg_m2_s,
-        ground_heat,
-    );
+    // 这里与 `zerr` 共用 [`add_precipitation_heat`]，别再写第二套。
+    let ground_heat = add_precipitation_heat(energy, ground_heat);
     // `MOD_Vars_1DAccFluxes.F90:2087`：`rnet = sabg + sabvsun + sabvsha - olrg + forc_frl`。
     //
     // **曾经写成 `fsena + lfevpa + fgrnd`**，理由是"与辐射式恒等"。那个恒等只在
@@ -157,7 +163,6 @@ pub fn surface_budget(energy: &StandardLctEnergyOutput) -> Result<SurfaceBudget>
         radiative_temperature_k,
         latent_heat_w_m2: latent_heat,
         ground_heat_w_m2: ground_heat,
-        precipitation_heat_w_m2: precipitation_heat,
         net_radiation_w_m2: net_radiation,
     })
 }

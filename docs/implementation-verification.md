@@ -18373,6 +18373,22 @@ VSFI     kernel=200 rust=200
 
 ## 若继续
 
+> **第 378 轮更新（最新的指路牌，先读这段）**：**两个黄金窗口的 history 现在全部逐位相同**
+> （dry 56024 + wet 81464 个值，`bitwise=0`）。本轮修的是湿窗最后的 `f_zerr`：
+>
+> * `MOD_Thermal.o` 编译的是 **`extends/interception/MOD_Thermal_CanopyPhase_Extended.F90`**
+>   （Makefile:647），它的 `errore`（`:1403-1413`）比 `main/` 下多一项 `+ canopy_phase_heat`
+>   —— 这一项现库**整个漏了**。scheme=1 下它恒 0（`interception.rs:166` 有记录），
+>   所以两个黄金窗口都测不出来，但 scheme 4/5/6/7 会真非零。
+> * 同一个 GIMPLE 还定死了降水显热两项是**各自熔进当时的累加值**
+>   （`_1871 = .FMA(pg_rain*cpliq, t_precip-t_grnd, _1870)`、`_1872 = .FMA(t_precip-t_grnd, cpice*pg_snow, _1871)`），
+>   而现库 `zerr` 链用的是预先求和的 `SurfaceBudget::precipitation_heat_w_m2` ⇒ 湿窗残留 2 个 1 ULP。
+> * 改法：新增 `colm_core::add_precipitation_heat(energy, accumulator)`，`fgrnd` 与 `f_zerr`
+>   两条链共用；`SurfaceBudget::precipitation_heat_w_m2`（两项之和）**删除** —— 它唯一的消费者
+>   就是这条链，留着只会再被误用一次。
+> * 状态中性：dry N=16/528、wet N=96/720 restart 全 0/68；闭环仍 19/1；`over_tol`/`ot_vars`/`sumabs` 不变。
+> * **剩下的唯一未解释项**：`compare_stomata` 的 `assim` 1/4000（row 514，分支差）。
+
 > **第 377 轮更新（最新的指路牌，先读这段）**：`ulrad` 第二项 `(1-emg)*thermk*thermk*frl`
 > 在 GIMPLE 里是**左结合**（`_3203 = thermk*(1-emg)` → `_3178 = thermk*_3203` → `*frl`），
 > 现库写成了 `(1-emg)*(gap*gap)*frl` —— 补上后**黄金干窗整窗逐位相同**。
@@ -22722,3 +22738,76 @@ _pow_quarter:
 ```
 
 `f_trad` 的真因就是 `olrg`（`f_olrg` 自己是 `acc1d` 时间平均，把单步 1 ULP 平均掉了）。
+
+## 第 378 轮：`f_zerr` 的降水显热**逐项熔进**累加器 + 补上漏掉的 `canopy_phase_heat` —— **黄金湿窗整窗逐位相同**
+
+### 一、证据：编译的是 CanopyPhase_Extended，而它多了两项
+
+`/tmp/gf/k1/build-default/Makefile:647` 写的是 `MOD_Thermal.o: extends/interception/MOD_Thermal_CanopyPhase_Extended.F90`
+—— 与 `MOD_LeafTemperature.o` 一样，**编译的不是 `main/` 下的同名文件**。这两个文件的 `errore`
+语句确实不同（Extended 在 `:1403-1413`）：
+
+```fortran
+errore = sabv + sabg + frl - olrg - fsena - lfevpa - xmf - dheatl + hprl &
+       + canopy_phase_heat &                                   ← main/ 下**没有这一项**
+       + cpliq*pg_rain*(t_precip-t_grnd) + cpice*pg_snow*(t_precip-t_grnd)
+DO j = lb, nl_soil ; errore = errore - (t_soisno(j)-t_soisno_bef(j))/fact(j) ; ENDDO
+```
+
+GIMPLE（`therm.opt` 第 8368-8391 处）逐段印证，顺带定死了两处形状：
+
+```text
+_1845 = sabv + sabg ; _1847 = + frl ; _1848 = - olrg ; _1850 = - fsena ; _1852 = - lfevpa
+_1867 = _1852 - xmf ; _1868 = _1867 - dheatl
+_1869 = hprl + _1868                          ← hprl 与左边那串相加
+_1870 = canopy_phase_heat + _1869             ← `+ canopy_phase_heat`
+_1871 = .FMA (_1857, _1861, _1870)            ; _1857 = pg_rain*cpliq、_1861 = t_precip - t_grnd
+_1872 = .FMA (_1861, _1864, _1871)            ; _1864 = pg_snow*cpice
+```
+
+两条结论：
+
+1. **降水显热两项是各自熔进当时的累加值**，不是先求和再加。现库 `history.rs` 用的是
+   `SurfaceBudget::precipitation_heat_w_m2`（预先求和的**两项之和**）⇒ 湿窗 `f_zerr` 残留
+   2 个元素（`maxabs 3.55e-15`）。干窗降水为 0，所以一直看不出来。
+2. **`+ canopy_phase_heat` 这一项现库整个漏了**。这是实打实的漏项，不是舍入：
+   scheme=1 下它恒为 0（`interception.rs:166` 已记录上游 `:399` 一句
+   `canopy_phase_heat_out = 0._r8` 之后再没碰过），所以两个黄金窗口都测不出来；
+   但 scheme 4/5/6/7 会真非零 —— 那时它就是一个纯粹的残差错误。
+
+### 二、改法：一处实现、两条链共用
+
+`precipitation_heat_w_m2` 那个"两项之和"的字段**删掉**了 —— 它唯一的消费者就是这条
+`zerr` 链，而这条链要的恰恰不是它。取而代之的是 `colm-core` 里的
+
+```rust
+pub fn add_precipitation_heat(energy: &StandardLctEnergyOutput, accumulator: f64) -> f64
+```
+
+`fgrnd`（`surface_budget`）与 `f_zerr`（`colm-runtime` 的 `set_lct_balance_errors`）都改成调它，
+"两项逐项熔进"从此只有一个实现。`zerr` 链同时补上
+`+ energy.interception.canopy_phase_heat_w_m2`，位置照 `:1408`（`+ hprl` 之后、降水两项之前）。
+
+### 三、实测
+
+```text
+黄金 dry   bitwise   0 → 0     ← 保持整窗逐位相同
+黄金 wet   bitwise   2 → 0     ← 整窗 81464 个值**全部逐位相同**
+两个窗口   sumabs 0.0000、over_tol 0、ot_vars 0 都不变
+```
+
+`zerr`/`xerr` 是纯历史诊断（`LCT_BALANCE_VARIABLES`），不进状态。状态中性实测：
+
+```text
+干窗 restart N=16  0/68    干窗 N=528 0/68
+湿窗 restart N=96  0/68    湿窗 N=720 0/68
+```
+
+### 四、两个黄金窗口的 history **全部逐位相同**（本仓库第一次）
+
+```text
+CN-Cng      bitwise=0  sumabs=0.0000  over_tol=0  ot_vars=0  n=56024
+CN-Cng-wet  bitwise=0  sumabs=0.0000  over_tol=0  ot_vars=0  n=81464
+```
+
+剩下的唯一未解释项是 `compare_stomata` 的 `assim` 1/4000（row 514，分支差，与本轮无关）。
