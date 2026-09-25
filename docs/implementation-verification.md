@@ -18373,6 +18373,17 @@ VSFI     kernel=200 rust=200
 
 ## 若继续
 
+> **第 383 轮更新（最新的指路牌，先读这段）**：给开关诊断脚本加了**产流方案**两档
+> （黄金算例走 3，`oracle/scripts/` 里没有 runoff 闭环）。
+>
+> * `DEF_Runoff_SCHEME = 0`（TOPMODEL）与 `= 2`（XinAnJiang）**前 36 步逐位完全相同**
+>   （连"零的符号"差都没有）—— 这两档在本机的第一次端到端信号。
+> * 否证：`DEF_VEG_SNOW = .false.` 那条 rec-8 的 `f_xerr` 种子**不在公式形状里** ——
+>   `CoLMMAIN.F90:1532` 的 GIMPLE 是 `S*deltim` 平铺乘法 + 平铺减法，与现库同形。
+>   嫌疑收到 `totwb`/`endwb` 这条只喂 `xerr` 的水量记账上。
+> * 顺带记一笔：`-fdump-tree-optimized` **必须**再加 `-fdump-tree-optimized-lineno`，
+>   否则 dump 里没有 `.loc` 行号（本轮第一次就漏了）。
+
 > **第 382 轮更新（最新的指路牌，先读这段）**：新建 **`compare_eroot` 闭环**，
 > 补上一个真实覆盖缺口 —— `eroot` 的 `rootr`/`etrc` 两个输出只在
 > `DEF_USE_PLANTHYDRAULICS = .false.` 那一支里被用，三个黄金算例全开植物水力，
@@ -23117,3 +23128,44 @@ eroot: all 12 outputs 8000/8000 bitwise identical; 配置计数 {'0': 2000, '1':
 （`rhoair * (1-fwet) * delta * (Σ lai/(rb+rs)) * humidity_gradient`）以及
 `soilwater` 里 PHS 关掉那一支的分配 —— 前者是零符号的直接来源，后者是它第 11 步
 放大到 `f_zwt`/`f_wliq_soisno`/`f_h2osoi` 的通路。
+
+## 第 383 轮：产流方案 0/2 的端到端信号（逐位全同）+ `xerr` 公式形状的否证
+
+第 381 轮那个开关诊断脚本原来只有两档（冠层雪、植物水力）。顺着"哪些维度没有端到端信号"
+往下数，**产流方案**是下一个：黄金算例走 `DEF_Runoff_SCHEME = 3`（SimpleVIC），
+0（TOPMODEL）与 2（XinAnJiang）在本机从来没跑过，而 `oracle/scripts/` 的 21 条闭环里
+**也没有 runoff 的闭环**。往表里加两档（同一算例、前 36 步、`TIMESTEP` 历史）：
+
+```text
+=== runoff_topmodel (DEF_Runoff_SCHEME = 0), 36 步
+  两侧记录数: kernel=36 rust=36
+  前 36 条记录里没有量级差（只有零的符号或完全相同）
+=== runoff_xinanjiang (DEF_Runoff_SCHEME = 2), 36 步
+  两侧记录数: kernel=36 rust=36
+  前 36 条记录里没有量级差（只有零的符号或完全相同）
+```
+
+脚本只在"该记录存在位差"时才逐条打印，这两档一条都没打印 ⇒ **36 条记录逐位完全相同**
+（连前面那两档会出现的"零的符号"差都没有）。这是这两档产流方案在本机的**第一次端到端信号**。
+
+### 一、`xerr` 公式形状的否证（第 381 轮那个 rec-8 种子不在公式里）
+
+第 381 轮把 `DEF_VEG_SNOW = .false.` 的首个量级差钉在 rec 8 的 `f_xerr`（1 个值、`1.26e-16`）。
+先怀疑是 `errorw` 的收缩形状（和 376–378 那三处同类）。为此补了一次 `CoLMMAIN` 的 GIMPLE 普查
+（`-fdump-tree-optimized` **必须**再加 `-fdump-tree-optimized-lineno`，否则 dump 里没有
+`.loc` 行号 —— 第一次漏了，dump 里一条行号都没有）：
+
+```text
+[main/CoLMMAIN.F90:1532:67] _3713 = forc_prc + forc_prl
+                           _3715 = _3713 - fevpa
+                           _3717 = _3715 - rnof        ; S = ((forc_prc+forc_prl)-fevpa)-rnof
+                           _3719 = deltim * _3717      ; S*deltim —— **平铺乘法**
+                           _1363 = (endwb - totwb) - _3719   ; **平铺减法**
+```
+
+⇒ 内核在 `errorw` 上**没有**任何收缩，现库
+`(end - tot) - (c + d - e - f) * dt` 逐字同形 ⇒ **公式不是嫌疑**。
+`f_xerr` 在 rec 8 的 1 ULP 只可能来自它某个**入参**：`endwb`（步末水量）、
+`totwb`（步前总量，由调用方在动手前取好）、`forc_prc`/`forc_prl`/`fevpa`/`rnof`。
+而同一记录里其余历史量都逐位相同 ⇒ 嫌疑集中在 `totwb`/`endwb` 这条**只喂 `xerr`** 的水量记账上。
+这条留作下一枪。

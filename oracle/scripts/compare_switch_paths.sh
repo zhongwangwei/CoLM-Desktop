@@ -26,7 +26,12 @@
 #                                       `f_wliq_soisno` 5.0e-09、`f_h2osoi` 2.9e-10
 #                                       ⇒ 种子在 `soilwater` 里 PHS 关掉那一支的
 #                                       根吸水/ET 分配上。
-# 两条都还是**未修的种子**，所以本脚本不进 `compare_all.sh` 的门禁。
+#   `DEF_Runoff_SCHEME = 0`（TOPMODEL）/ `= 2`（XinAnJiang）：
+#                                       **前 36 条记录逐位完全相同**（连零的符号
+#                                       都没有差）—— 黄金算例走的是 3（SimpleVIC），
+#                                       这两档在本机是第一次拿到端到端信号，
+#                                       `oracle/scripts/` 里也没有 runoff 的闭环。
+# 前两条还是**未修的种子**，所以本脚本不进 `compare_all.sh` 的门禁。
 set -euo pipefail
 BASE="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 export NETCDF_DIR=/opt/homebrew/opt/netcdf
@@ -36,6 +41,10 @@ steps=${2:-36}
 SWITCHES=(
   "vegsnow_off|DEF_VEG_SNOW = .false."
   "phs_off|DEF_USE_PLANTHYDRAULICS = .false."
+  # 产流方案：黄金算例是 3（SimpleVIC），0（TOPMODEL）与 2（XinAnJiang）
+  # 在本机从来没有端到端信号，`oracle/scripts/` 里也没有 runoff 的闭环。
+  "runoff_topmodel|DEF_Runoff_SCHEME = 0"
+  "runoff_xinanjiang|DEF_Runoff_SCHEME = 2"
 )
 
 patch() {  # $1 = 要打的 namelist 路径；结果写到 stdout
