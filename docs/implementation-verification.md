@@ -18373,6 +18373,23 @@ VSFI     kernel=200 rust=200
 
 ## 若继续
 
+> **第 375 轮更新（最新的指路牌，先读这段）**：第 374 轮之后两个窗口的 **restart 已整窗逐位相同**，
+> `over_tol`/`ot_vars` 都是 0、`sumabs` 都是 0.0000；剩下只有 history 的 1 ULP 级诊断量
+> （`f_fgrnd` 76/29 个时刻、`f_rnet`/`f_zerr`/`f_trad`）。
+>
+> * 本轮把 8 步的 `fgrnd` 探针扩到 16 步并做离线穷举：**现库写法与内核 16/16 逐位一致**
+>   （`T4` 不熔掉到 13/16 ⇒ 第 367 轮那处融合是必要的，其余三维在这批输入上不可分辨：
+>   `sabg` 前 14 步是 0、降水 16 步全 0）。
+> * **结构性结论**：`MOD_Thermal` 的 `fgrnd`（`surface_budget.rs`）在本仓库里是**能量收支/历史诊断**，
+>   **不喂地面温度求解**；状态走的是 `MOD_GroundTemperature` 的 `hs`（第 374 轮刚修好）。
+>   这解释了为什么 `f_fgrnd` 能差 ~256 ULP 而 restart 仍逐位相同，也解释了第 367 轮修 `fgrnd`
+>   只动了黄金 dry 的逐位元素数（9163→9152）。
+> * **下一枪**：`fgrnd_probe.sh` 的 **Rust 侧锚点过期**（第 367 轮重构把 `ground_heat` 挪后了），
+>   修好它就能两侧对输入；在那之前，从 history 反推剩下的候选输入只有
+>   `dlrad`/`emg`/`t_soil`/`tinc`/`htvp`/降水项，其中**最可疑的是 `dlrad`**
+>   （内核 `:1406-1407` 的 GIMPLE 已抄在下面；Rust 侧 `dlrad` 由哪里产生这一轮没查清）。
+> * `compare_stomata` 的 1/4000（row 514）仍未解释。
+
 > **第 374 轮更新（最新的指路牌，先读这段）**：**湿窗整窗逐位相同了**。第 373 轮之后剩下的
 > N=489 种子，用**改造成湿窗的地面温度三对角探针**（`gtcoef_wet.sh`）钉到 `hs`（地表净能量通量）：
 > 三对角系数 489 行全同、只有 `hs` 在 81 行差 1 ULP，而第 489 行连 `rt(1)` 也差。
@@ -22433,3 +22450,69 @@ _164 = pg_snow*cpice ; _166 = .FMA (Δ, _164, _162)   ; Rust 曾平铺
    下一步是用 `window_divergence.py` 把这两批逐变量列出来，按 `f_*` 找最后的形状差。
 2. `compare_stomata` 的 1/4000（row 514，分支差）仍未解释。
 3. 雪窗（US-NR1-snow）仍不可测（`examples/Forcing/` 缺那份强迫）。
+
+## 第 375 轮：`fgrnd` 剩下的诊断差 —— 形状已验证正确，而它**不喂状态**（结构性结论）
+
+第 374 轮之后两个窗口的 restart 都已整窗逐位相同。剩下的只有 history 的 1 ULP 级诊断量：
+
+```text
+黄金 dry：f_fgrnd（第 10 步起，76 个时刻，maxabs 5.68e-14）、f_rnet（130）、f_zerr（130）、f_trad（175）
+黄金 wet：f_fgrnd（第 0 步起，29 个时刻，maxabs 5.68e-14）、f_zerr（117）
+两个窗口的 over_tol / ot_vars 都是 0，sumabs 都是 0.0000
+```
+
+### 一、先证明"形状没问题"：把 8 步探针扩到 16 步 + 离线穷举
+
+`f_fgrnd` 的首分歧在第 10 步，而 `/tmp/gf/fgrnd_probe.sh` 只跑 8 步（第 262 轮留下的），
+于是把它的 `end_sec` 改成 28800（16 步）跑了一遍，拿到内核侧 16 行的
+`fgrnd + sabg/dlrad/emg/fsno/t_soil/t_grnd_bef/tinc/fseng/fevpg/htvp`
+（`/tmp/gf/fgrnd16/fort_bits.txt`），再做离线穷举（`Fraction` 精确 FMA）：
+
+```text
+match 16/16  T1fused=True  T2fused=True  T3fused=True  T4fused=True  t4=(t*t)*(t*t)
+match 16/16  T1fused=True  T2fused=True  T3fused=False T4fused=True  t4=(t*t)*(t*t)
+match 16/16  T1fused=False T2fused=True  T3fused=True  T4fused=True  t4=(t*t)*(t*t)
+...
+match 13/16  ...T4fused=False...
+```
+
+⇒ **现库写法（四项全熔、`t⁴=(t*t)*(t*t)`）与内核在这 16 步全部逐位一致**；
+`T4`（`-(fseng+fevpg*htvp)`）不熔会掉到 13/16（所以第 367 轮那处融合是必要的），
+其余三维在这 16 行输入上不可分辨（`sabg` 前 14 步是 0、`pg_rain`/`pg_snow` 16 步全 0）。
+
+### 二、真正的结构性发现：`fgrnd` **不喂状态**
+
+```text
+Rust：crates/colm-runtime/src/assembly.rs:1824   let budget = surface_budget(step.energy)?;   ← 状态侧？
+      crates/colm-runtime/src/history.rs:820/883 surface_budget(&output.energy)?              ← 历史/zerr 侧
+      状态侧真正使用的是：standard_lct_step.rs:326  ground_temperature(GroundTemperatureInput{…})
+      —— 即 MOD_GroundTemperature 的 **hs** 链（第 374 轮刚修好、补上后状态整窗逐位相同）
+```
+
+也就是说 `MOD_Thermal` 的 `fgrnd`（→ `surface_budget.rs`）在本仓库里是**能量收支/历史诊断**，
+**不是**地面温度求解的驱动项；驱动项是 `MOD_GroundTemperature` 的 `hs`。这解释了两件此前一直
+对不上的事：
+
+* 为什么 `f_fgrnd` 能差 ~256 ULP 而 **restart 仍逐位相同**（它不进状态）；
+* 为什么第 374 轮修 `hs` 能把状态一次打开，而第 367 轮修 `fgrnd` 只让黄金 dry 的逐位元素数
+  从 9163 降到 9152（**它本来就只是诊断**）。
+
+⇒ **`fgrnd` 的诊断差可以继续查，但它与"状态种子"不再是同一件事** ——
+本目标的判据（restart 首分歧）已经全绿。
+
+### 三、这一轮没做完的（下一步的入口）
+
+1. `fgrnd_probe.sh` 的 **Rust 侧锚点已经过期**：它的打印插在
+   `surface_budget.rs` 的 `radiative_temperature_k` 之后，而第 367 轮重构把 `ground_heat` 挪到了
+   更后面 ⇒ 探针报 `cannot find value ground_heat`（Fortran 侧仍可用，`fort_bits.txt` 照旧产出）。
+   修法：把插入点挪到函数末尾（`Ok(SurfaceBudget {` 之前），并把列扩成与内核侧一致的 15 列
+   （含 `pg_rain/pg_snow/t_precip/t_grnd`）。这是我这一轮试了两次都没编过的地方，留作入口。
+2. 拿不到 Rust 侧输入，就只能从 history 反推：`f_sabg`/`f_fsno`/`f_t_grnd`/`f_fseng`/`f_fevpg`
+   都是历史量且**逐位相同**；剩下的候选输入只有 `dlrad`/`emg`/`t_soil`/`tinc`/`htvp`/
+   `pg_rain`/`pg_snow`/`t_precip` —— 其中 `emg`/`t_soil`/`tinc`/`htvp` 由状态决定（状态已逐位相同），
+   所以**最可疑的是 `dlrad`**（叶温/辐射链给的下行长波，没有历史量兜底）。
+   内核侧 `dlrad`（`:1406-1407`）的 GIMPLE 是
+   `_765 = .FMA(dtl, 4.0, tlbef)`、`_768 = .FMA(stefnc*fac*tlbef³, _765, thermk*frl)`；
+   Rust 的 `longwave()` 里能看到的是 **`ulrad`/`irab`** 那一条（注释里写得比代码细），
+   **`dlrad` 在 Rust 侧由哪里产生、形状对不对，这一轮没有查清** —— 下一轮从这里接着走。
+3. `compare_stomata` 的 1/4000（row 514）仍未解释。
