@@ -338,9 +338,9 @@ pub use vegetation::{
 };
 pub use vic::{vic_runoff, VicRunoffInput, VicRunoffState};
 pub use water_2014::{
-    total_water_storage_mm, water_2014_snow_soil_step, water_2014_soil_step, Water2014Runoff,
-    Water2014SnowSoilInput, Water2014SnowSoilOutput, Water2014SoilFluxes, Water2014SoilInput,
-    Water2014SoilOutput, Water2014SoilState,
+    initial_total_water_storage_mm, total_water_storage_mm, water_2014_snow_soil_step,
+    water_2014_soil_step, Water2014Runoff, Water2014SnowSoilInput, Water2014SnowSoilOutput,
+    Water2014SoilFluxes, Water2014SoilInput, Water2014SoilOutput, Water2014SoilState,
 };
 
 pub use snow_grain::{

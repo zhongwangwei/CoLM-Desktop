@@ -105,11 +105,18 @@ pub struct Water2014SoilState {
     pub hydraulic_conductivity_mm_s: Vec<f64>,
 }
 
-/// 上游的 `totwb`/`endwb`：整根土柱的总蓄水量，单位 mm（`kg/m^2` 与 mm 等值）。
+/// 上游的 `endwb`：**步末**整根土柱的总蓄水量，单位 mm（`kg/m^2` 与 mm 等值）。
 ///
-/// 算式照抄 `CoLMMAIN.F90:831`（步首）与 `:1512`（步末）——
-/// `Σ(wice+wliq) + ldew + scv + wa + wdsrf`，元素级相加而不是先各自 `sum()` 再相减，
-/// 因为 `xerr` 是**两个几乎相等的和之差**（量级 1e-16），换结合顺序就会换掉末几位。
+/// 算式照抄 `CoLMMAIN.F90:1512`：`Σ(wice+wliq) + ldew + scv + wa`，再 `+ wdsrf`
+/// （`:1517`）—— 元素级相加而不是先各自 `sum()` 再相减，因为 `xerr` 是
+/// **两个几乎相等的和之差**（量级 1e-16），换结合顺序就会换掉末几位。
+///
+/// **步首那一份不是这个顺序**：`totwb` 写的是 `ldew + scv + Σ(...) + wa`
+/// （`CoLMMAIN.F90:831`，再 `+ wdsrf`）。加法可交换但**不可结合**，两个顺序会差
+/// 1 ULP，而 `xerr = (endwb-totwb) - ...` 正是拿这两份相减 —— 所以步首必须用
+/// [`initial_total_water_storage_mm`]，不能复用本函数。本仓库原先两处都调这一个，
+/// 于是 `DEF_VEG_SNOW = .false.` 那一支在第 8 步的 `f_xerr` 差 1.26e-16
+/// （见 docs 第 381/383/384 轮）。
 ///
 /// **不能拿 history 的 `wat` 顶替**：`wat` 是 `MOD_Vars_TimeVariables` 里的时间变量，
 /// 不含 `wdsrf`，而收支残差要含。`wat` 的写法见
@@ -127,6 +134,29 @@ pub fn total_water_storage_mm(
         .sum();
     soil + canopy_water_mm
         + snow_water_equivalent_kg_m2
+        + water.aquifer_water_mm
+        + water.surface_water_mm
+}
+
+/// 上游的 `totwb`：**步首**总蓄水量，给 `xerr` 当被减数（`CoLMMAIN.F90:831`、`:835`）。
+///
+/// 与 [`total_water_storage_mm`] 只差**结合顺序**，而这一步是刻意的：
+/// 上游步首写 `ldew + scv + Σ(wice+wliq) + wa + wdsrf`，步末写
+/// `Σ(wice+wliq) + ldew + scv + wa + wdsrf`。两者相差 1 ULP，正是 `xerr`
+/// 残差里那一位的来源；把两份合并成一个顺序会让残差凭空变干净（或变脏）。
+pub fn initial_total_water_storage_mm(
+    water: &Water2014SoilState,
+    canopy_water_mm: f64,
+    snow_water_equivalent_kg_m2: f64,
+) -> f64 {
+    let soil: f64 = water
+        .liquid_water_kg_m2
+        .iter()
+        .zip(&water.ice_water_kg_m2)
+        .map(|(wliq, wice)| wliq + wice)
+        .sum();
+    (canopy_water_mm + snow_water_equivalent_kg_m2)
+        + soil
         + water.aquifer_water_mm
         + water.surface_water_mm
 }

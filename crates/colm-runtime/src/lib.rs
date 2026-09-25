@@ -347,7 +347,10 @@ impl PointRuntime {
         let mut files = Vec::new();
         let steps = self.run_with_state(state, |step, next| {
             let binding = lct_binding(step, greenwich_time, longitude_degrees, co2_scenario)?;
-            let initial_total_water_mm = colm_core::total_water_storage_mm(
+            // 步首总量用 `totwb` 的**结合顺序**（与步末的 `endwb` 不同，见
+            // `colm_core::initial_total_water_storage_mm` 的注释）——
+            // `xerr` 就是这两份相减，顺序混用会凭空多出/少掉那一位残差。
+            let initial_total_water_mm = colm_core::initial_total_water_storage_mm(
                 &next.water,
                 next.energy.leaf.canopy_water.total_mm,
                 0.0,
@@ -403,7 +406,7 @@ impl PointRuntime {
             let previous_snow_water_equivalent_mm = next.snow.water_equivalent_kg_m2;
             // `totwb` 同理：上游在 `snl` 重算之后、任何物理步之前取步首总蓄量
             // （`CoLMMAIN.F90:831`），`xerr` 要靠它和步末的 `endwb` 相减。
-            let initial_total_water_mm = colm_core::total_water_storage_mm(
+            let initial_total_water_mm = colm_core::initial_total_water_storage_mm(
                 &next.soil_water,
                 next.energy.leaf.canopy_water.total_mm,
                 next.snow.water_equivalent_kg_m2,

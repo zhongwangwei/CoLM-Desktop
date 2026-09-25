@@ -18373,6 +18373,18 @@ VSFI     kernel=200 rust=200
 
 ## 若继续
 
+> **第 384 轮更新（最新的指路牌，先读这段）**：修掉第 381 轮那个 rec-8 种子 ——
+> 上游给步首 `totwb` 与步末 `endwb` 写的是**两种不同的结合顺序**
+> （`:831` 是 `ldew + scv + Σ + wa`，`:1512` 是 `Σ + ldew + scv + wa`），
+> 而现库两处都调同一个 `total_water_storage_mm`（只实现了 `endwb` 那一种），
+> 它的文档注释还把两个式子写成了同一个 —— 而 `xerr` 正是这两份相减。
+>
+> * 新增 `colm_core::initial_total_water_storage_mm`（按 `:831` 写），步首取量改用它。
+> * 实测：黄金 dry/wet 仍 **bitwise=0 / 0**、restart 仍 0/68（状态中性）；
+>   `DEF_VEG_SNOW = .false.` 的首个量级差从 **rec 8 → rec 10**（`f_xerr` 那一条消失）。
+> * **下一枪**：rec 10 的 `f_ldew` 1 个值、`1.39e-17`（1 ULP）—— 冠层液态水（状态量），
+>   嫌疑在 `DEF_VEG_SNOW` 关掉时的冠层水量记账分支。
+
 > **第 383 轮更新（最新的指路牌，先读这段）**：给开关诊断脚本加了**产流方案**两档
 > （黄金算例走 3，`oracle/scripts/` 里没有 runoff 闭环）。
 >
@@ -23169,3 +23181,47 @@ eroot: all 12 outputs 8000/8000 bitwise identical; 配置计数 {'0': 2000, '1':
 `totwb`（步前总量，由调用方在动手前取好）、`forc_prc`/`forc_prl`/`fevpa`/`rnof`。
 而同一记录里其余历史量都逐位相同 ⇒ 嫌疑集中在 `totwb`/`endwb` 这条**只喂 `xerr`** 的水量记账上。
 这条留作下一枪。
+
+## 第 384 轮：`totwb`/`endwb` 的**结合顺序不同** —— 第 381 轮 rec-8 的种子修掉
+
+第 383 轮否掉了 `xerr` 的公式形状（内核在那个式子上没有收缩），嫌疑落到只喂 `xerr` 的
+两个总量上。读源码一眼就看出来了 —— **上游给这两个总量写的是两种不同的结合顺序**：
+
+```fortran
+totwb = ldew + scv + sum(wice_soisno(1:)+wliq_soisno(1:)) + wa    ! :831（步首）
+totwb = totwb + wdsrf                                             ! :835
+...
+endwb = sum(wice_soisno(1:)+wliq_soisno(1:)) + ldew + scv + wa    ! :1512（步末）
+endwb = endwb + wdsrf                                             ! :1517
+```
+
+加法可交换但**不可结合** ⇒ 步首与步末这两份即使数值上"应该相等"，末几位也会不同 ——
+而 `errorw = (endwb-totwb) - S*deltim` 正是拿它们相减，`xerr` 的残差里那一位就是这么来的。
+
+本仓库的 `total_water_storage_mm` 只实现了一个顺序（`Σ + ldew + scv + wa + wdsrf`，
+即 `endwb` 那一支），**两处都调它**；它的文档注释还把两个式子写成了同一个
+（"`CoLMMAIN.F90:831`（步首）与 `:1512`（步末）—— `Σ(wice+wliq) + ldew + scv + wa + wdsrf`"）
+—— 注释本身就是这个 bug 的化石。
+
+改法：新增 `colm_core::initial_total_water_storage_mm`，按 `:831` 写
+`(ldew + scv) + Σ + wa + wdsrf`；`lib.rs` 的两处**步首**取量改用它，步末（`history.rs`
+里那两处）继续用原函数。注释也改成明确写"步首/步末各一个顺序、不能合并"。
+
+### 实测
+
+```text
+黄金 dry / wet history     bitwise=0 / 0，over_tol/ot_vars 0/0，sumabs 0.0000   ← 不变
+restart                    dry N=16 0/68、wet N=96 0/68                        ← 状态中性
+compare_switch_paths 36 步  vegsnow_off 的首个量级差  rec 8 → **rec 10**          ← 种子被修掉
+```
+
+`DEF_VEG_SNOW = .false.` 那条支路的 rec-8 种子（`f_xerr`，1.26e-16）**消失**，
+下一个种子后移到 rec 10：
+
+```text
+首个**量级差**在第 10 条记录:
+  f_ldew           ndiff=   1 maxabs=1.3878e-17
+```
+
+`f_ldew` 是冠层液态水（状态量）⇒ 新的嫌疑在冠层水量更新那一支（`DEF_VEG_SNOW` 关掉时
+冠层雪的记账分支），量级仍是 1 ULP。留作下一枪。
