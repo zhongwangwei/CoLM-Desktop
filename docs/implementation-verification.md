@@ -18373,6 +18373,18 @@ VSFI     kernel=200 rust=200
 
 ## 若继续
 
+> **第 385 轮更新（最新的指路牌，先读这段）**：把 `DEF_VEG_SNOW = .false.` 那条支路
+> rec-10 的 `f_ldew`（1 ULP）钉到根因 —— **是结构差，不是形状差**。
+>
+> * 上游（本仓库打过补丁的 `MOD_LeafTemperature_Extended.F90:1502-1522`，注释就是规格）
+>   在开关关掉时只做：`ldew = max(0, ldew - evplwet*deltim)`、**整段分量分区/两条 FMA/
+>   超配退回/夹取全部跳过**、然后按**当前温度**指定 `ldew_rain`/`ldew_snow`
+>   （注释明确否决"按旧比例缩放"），且**不重算** `ldew`。
+> * 现库那段 `update_canopy_water` 恰好三处不同：按旧比例缩放、开关关掉仍跑通量分区
+>   （于是多返回两个 deficit 给调用方去改 `fevpl`/`fsenl`）、末尾 `total = rain + snow`
+>   多一次舍入（= 实测那 1 ULP）。
+> * 改法是**由开关守卫的早退分支**，默认路径不动；规格已抄进文档，下一轮可直接落地。
+
 > **第 384 轮更新（最新的指路牌，先读这段）**：修掉第 381 轮那个 rec-8 种子 ——
 > 上游给步首 `totwb` 与步末 `endwb` 写的是**两种不同的结合顺序**
 > （`:831` 是 `ldew + scv + Σ + wa`，`:1512` 是 `Σ + ldew + scv + wa`），
@@ -23225,3 +23237,53 @@ compare_switch_paths 36 步  vegsnow_off 的首个量级差  rec 8 → **rec 10*
 
 `f_ldew` 是冠层液态水（状态量）⇒ 新的嫌疑在冠层水量更新那一支（`DEF_VEG_SNOW` 关掉时
 冠层雪的记账分支），量级仍是 1 ULP。留作下一枪。
+
+## 第 385 轮：`f_ldew` 那个 rec-10 种子的根因 —— `DEF_VEG_SNOW` 关掉时冠层水记账是**结构**不同
+
+第 384 轮把 rec-8 修掉之后，`DEF_VEG_SNOW = .false.` 的首个量级差后移到 rec 10：
+`f_ldew` 1 个值、`1.3878e-17`（1 ULP），而且 **rec 11 就又相同了**（不是发散的种子，
+是一次舍入差）。历史里只有 `f_ldew` 这一个冠层水变量（没有 `f_ldew_rain`/`f_ldew_snow`）。
+
+根因在**厂商源码自己的注释里**（这份是仓库的本地补丁，`MOD_LeafTemperature_Extended.F90:1502-1522`）：
+
+```fortran
+! When DEF_VEG_SNOW is false, only ldew is updated above
+! (via ldew = max(0., ldew - evplwet*deltim)), but ldew_rain/ldew_snow
+! remain unchanged. Downstream interception routines (schemes 1, 3-8)
+! resync ldew = ldew_rain + ldew_snow at entry, which would silently
+! revert the evaporation adjustment.
+!
+! DEF_VEG_SNOW=false signals "do not track phase"
+! — components only exist so that ldew_rain+ldew_snow == ldew holds
+! at the scheme interface. We therefore reconcile components using
+! the current temperature (tl) rather than scaling by an old ratio:
+! this avoids long-term phase drift while keeping the total mass
+! identical.
+IF (.not. DEF_VEG_SNOW) THEN
+   IF (tl > tfrz) THEN ; ldew_rain = ldew ; ldew_snow = 0.
+   ELSE               ; ldew_rain = 0.   ; ldew_snow = ldew
+   ENDIF
+ENDIF
+```
+
+即开关关掉时上游只做三件事：`ldew = max(0, ldew - evplwet*deltim)`（`:1464`）、
+**整段 `IF (DEF_VEG_SNOW)` 分区/两条 FMA/超配退回/夹取/`ldew = ldew_rain+ldew_snow`
+全部跳过**、然后按**当前温度**把两个分量重新指定（注释里明确写了"不要按旧比例缩放"）。
+`MOD_LeafInterception_Extended.F90:334-340` 同构：只有 `ldew = ldew + pinf` 那一步，
+分量在那一段里一个字都不动。
+
+现库的 `update_canopy_water`（`leaf_temperature.rs:1735-1757` 与共用的尾部 `:1797-1811`）
+与这份规格有**三处结构差异**：
+
+1. 它按**旧比例**缩放（`rain*total/components`）——正是上游注释里点名否决的做法；
+2. 开关关掉时**仍然跑**那段通量分区/两条 FMA/夹取，于是会向调用方返回
+   `phase_flux_deficit`/`flux_deficit`（上游在这个分支里恒不返回），
+   调用方据此去改 `fevpl`/`fsenl` ⇒ 多了一笔上游没有的能量调整；
+3. 末尾把 `total_mm` 重算成 `rain_mm + snow_mm` —— 上游在这个分支里**不重算**
+   （`ldew` 就是 `max(0, ldew - evplwet*deltim)` 那个值）。这一处多出来的舍入
+   就是实测 rec-10 那 1 ULP。
+
+**这是结构差、不是形状差**，所以本轮只记录不落地：正确的改法是给
+`update_canopy_water` 加一个**由开关守卫的早退分支**（按温度指定分量、总水量保持
+`:1464` 的值、两个 deficit 恒 0，并顺带确认 `fwet_snow` 在开关关掉时的取值），
+让默认配置那条路一个字都不动。规格已经引在上面，下一轮可以直接照它写。
