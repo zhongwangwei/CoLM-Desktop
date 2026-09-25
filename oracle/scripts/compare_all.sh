@@ -7,14 +7,17 @@
 # （"`sortin` 是这条链上唯一没有 FMA 的函数"）。闭环是"形状对不对"的唯一判据
 # （黄金窗口是混沌的），所以它必须能一键全跑、一眼看出谁在失败。
 #
-# 需要位置参数的**整例对照**（`compare_flag_isolated.sh` 要 `<tag> "<namelist 行>"`
-# 和 `compare_second_config.sh` 要 `<case>`）不是闭环，跳过并列出。
+# 需要位置参数的**整例对照**分两类：
+#   * `compare_second_config.sh <case>`（Campbell 土水 + 关 VSF，第 380 轮起**纳入本脚本**，
+#     判据是"超容差变量数为 0"，跑不了的算例按 forcing 文件在不在逐个说明）；
+#   * `compare_flag_isolated.sh <tag> "<namelist 行>"` 是**诊断探针**（用开关分区，
+#     没有通过/失败判据），仍然跳过并列出。
 #
 # 用法:
 #   oracle/scripts/compare_all.sh              # 全跑
 #   oracle/scripts/compare_all.sh stomata      # 只跑名字里含 "stomata" 的
 #
-# 退出码：有任一闭环失败 → 1（可以直接挂进 CI）。
+# 退出码：有任一闭环或整例对照失败 → 1（可以直接挂进 CI）。
 set -uo pipefail
 BASE="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$BASE"
@@ -29,8 +32,12 @@ for f in oracle/scripts/compare_*.sh; do
     compare_all)
       continue
       ;;
-    compare_flag_isolated|compare_second_config)
+    compare_flag_isolated)
       skipped+=("$name")
+      continue
+      ;;
+    compare_second_config)
+      # 第 380 轮起不在这里跳过：它由下面的"整例对照"一节带算例名跑。
       continue
       ;;
   esac
@@ -57,10 +64,43 @@ for f in oracle/scripts/compare_*.sh; do
 done
 echo
 echo "闭环: ${pass} 通过 / ${fail} 失败"
-if [ "${#skipped[@]}" -gt 0 ]; then
-  echo "跳过（需要位置参数，不是闭环）: ${skipped[*]}"
+
+# ---------- 整例对照：第二配置（Campbell 土水 + 关 VSF） ----------
+# 判据不是逐位相同（整例是混沌的），而是"超容差变量数为 0"。
+# 跑不了的算例**逐个说出为什么**（本机 `oracle/work/US-NR1-snow` 要的
+# `US-NR1_1999-2014_FLUXNET2015_Met.nc` 不在 `examples/Forcing/` 里）。
+whole_pass=0
+whole_fail=0
+whole_skip=()
+if [ -z "$filter" ]; then
+  for case in CN-Cng CN-Cng-wet US-NR1-snow; do
+    fprefix=$(grep -oE "fprefix\(1\)[[:space:]]*=[[:space:]]*'[^']+'" \
+                "oracle/work/$case/forcing.nml" 2>/dev/null | head -1 | sed -E "s/.*'([^']+)'.*/\1/")
+    if [ -z "$fprefix" ] || [ ! -f "examples/Forcing/$fprefix" ]; then
+      whole_skip+=("$case(缺 examples/Forcing/${fprefix:-?})")
+      continue
+    fi
+    out=$(bash oracle/scripts/compare_second_config.sh "$case" 2>&1)
+    rc=$?
+    last=$(printf '%s\n' "$out" | grep -E 'outside tolerance|^!!' | tail -1 | cut -c1-140)
+    if [ "$rc" -eq 0 ]; then
+      whole_pass=$((whole_pass + 1))
+      printf '  ok   %-30s %s\n' "second_config:$case" "$last"
+    else
+      whole_fail=$((whole_fail + 1))
+      failed+=("second_config:$case")
+      printf '  FAIL %-30s %s\n' "second_config:$case" "$last"
+    fi
+  done
 fi
-if [ "$fail" -ne 0 ]; then
+echo "整例对照（第二配置）: ${whole_pass} 通过 / ${whole_fail} 失败"
+if [ "${#whole_skip[@]}" -gt 0 ]; then
+  echo "整例对照跳过: ${whole_skip[*]}"
+fi
+if [ "${#skipped[@]}" -gt 0 ]; then
+  echo "跳过（诊断探针，需要位置参数）: ${skipped[*]}"
+fi
+if [ $((fail + whole_fail)) -ne 0 ]; then
   printf '失败: %s\n' "${failed[*]}"
   exit 1
 fi

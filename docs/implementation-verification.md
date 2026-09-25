@@ -18373,6 +18373,19 @@ VSFI     kernel=200 rust=200
 
 ## 若继续
 
+> **第 380 轮更新（最新的指路牌，先读这段）**：这一轮不加形状，修的是**验证基建的静默缺口**。
+>
+> * `compare_second_config.sh`（第二配置整例对照）与 `compare_flag_isolated.sh`（诊断探针）
+>   一直指着老挂载点 `/Volumes/Data01/…`，从挂载点变更起就**跑不起来**；而 `compare_all.sh`
+>   又把它们当"需要位置参数"无条件跳过 ⇒ 这个整例对照静默失效了很久。第 351 轮给
+>   `compare_hourly_window.sh` 补过同样的 sed，这两个漏了。
+> * 修法照老规矩：只改**拷贝**里的 `forcing.nml`，仓库里的 `oracle/work/*/forcing.nml`
+>   （colm-forcing 生成）不动；两侧都指到拷贝；跑失败要显式报错。
+> * `compare_all.sh` 现在**会跑**第二配置，跑不了的算例（本机的 US-NR1-snow，缺 forcing）
+>   逐个说明原因。实测：**闭环 20/0 + 整例对照 2/0**，两套配置都是 0 超容差。
+> * `compare_flag_isolated.sh default` 复测 **`differing vars: 0`**（当年 34 个）——
+>   那些 1 ULP 种子都修掉了，这条探针从此只留给新的种子用。
+
 > **第 379 轮更新（最新的指路牌，先读这段）**：**闭环 20 通过 / 0 失败**（本仓库第一次全绿）。
 > 最后一个是 `compare_stomata` 的 `assim` 1/4000：`coupled_assimilation` 第一处
 > `4.*atheta*ome*omc` 的**因子顺序**写反了 —— 内核先乘 `ome`（电子传输项），现库写成先乘
@@ -22897,3 +22910,60 @@ restart            dry N=16/528、wet N=96/720 全 0/68
 
 `assim` 虽然是喂叶温能量平衡的量，但两个黄金窗口本来就已经逐位相同（说明这两处的两种结合
 顺序在那两条轨迹上给出同一个值），所以本轮对状态中性；这一点由 restart 扫描守住。
+
+## 第 380 轮：把"被静默跳过的整例对照"接进一键验证（并修好两个跑不起来的脚本）
+
+第 379 轮之后闭环 20/0 全绿，于是把注意力转到**验证基建本身还漏了什么**。找到两处：
+
+### 一、两个 `oracle/scripts/` 脚本从挂载点变更起就一直是坏的
+
+```text
+$ bash oracle/scripts/compare_second_config.sh CN-Cng
+ /Volumes/Data01/Data/PLUMBER2s/Forcing/CN-Cng_2008-2009_FLUXNET2015_Met.nc does not exist.
+```
+
+`compare_second_config.sh`（Campbell 土水 + 关 VSF 的**整例对照**）和
+`compare_flag_isolated.sh`（开关分区**诊断探针**）都还在用老的 PLUMBER2 挂载点
+`/Volumes/Data01/…`，而算例的 `DEF_forcing_namelist` 指向仓库里那份由 `colm-forcing`
+生成的 `oracle/work/*/forcing.nml` —— 那份里的挂载点也是老的。别的脚本
+（`win4.sh`/`dry_ts.sh`/`wet_ts.sh`，以及第 351 轮补过的 `compare_hourly_window.sh`）
+都在拷贝上把这一段 sed 掉了，**这两个漏了**。
+
+更糟的是 `compare_all.sh` 把这两个当"需要位置参数、不是闭环"**无条件跳过**，
+所以这个整例对照静默失效了很久 —— 文档里最后一次第二配置记录还是"干 16 / 湿 66"那一年，
+后来改成 0 之后没有任何自动化的东西再跑过它。
+
+### 二、修法与接线
+
+修法照仓库既有规矩：**只改拷贝**里的 `forcing.nml`（`oracle/work/*/forcing.nml` 是
+生成产物，一律不动），并把两侧的 `DEF_forcing_namelist` 都指到那份拷贝；两个脚本还补上了
+内核/Rust 跑失败时的显式报错（原先 `set -e` 只是静默退出）。两个脚本现在都用**退出码**
+表达判据（超容差变量数 != 0 → 1）。
+
+`compare_all.sh` 新增"整例对照"一节：按算例要的 forcing 文件在不在 `examples/Forcing/`
+逐个决定跑还是跳过，**跳过的一定说出为什么**；`compare_flag_isolated.sh` 是诊断探针
+（没有通过/失败判据），仍然跳过，但理由写清楚了。
+
+### 三、实测
+
+```text
+$ bash oracle/scripts/compare_all.sh          # exit=0
+闭环: 20 通过 / 0 失败
+  ok   second_config:CN-Cng           === CN-Cng (Campbell, VSF off): 0 variable(s) outside tolerance
+  ok   second_config:CN-Cng-wet       === CN-Cng-wet (Campbell, VSF off): 0 variable(s) outside tolerance
+整例对照（第二配置）: 2 通过 / 0 失败
+整例对照跳过: US-NR1-snow(缺 examples/Forcing/US-NR1_1999-2014_FLUXNET2015_Met.nc)
+跳过（诊断探针，需要位置参数）: compare_flag_isolated
+```
+
+⇒ 本机可跑的整例对照现在**两套配置（黄金 van Genuchten+VSF / 第二配置 Campbell+Richards）
+都是 0 超容差**。唯一进不去的是雪窗，原因是 `examples/Forcing/` 里没有 US-NR1 的
+`FLUXNET2015_Met.nc`（本机也没有 PLUMBER2 挂载）—— 这条限制现在**由脚本自己说出来**，
+不再是一个没人知道的静默跳过。
+
+### 四、诊断探针的复测
+
+`compare_flag_isolated.sh default` 复测：**`differing vars: 0`**（当年是 34 个变量、
+最大相对差 ~6e-15）。它记在头注释里的那套"用开关分区"的数字从此只是历史 ——
+那些 1 ULP 种子（`f_rstfacsha/sun`、`f_gssun/sha`、`f_wliq_soisno` 那一组）都已经被
+第 329–379 轮修掉了。
