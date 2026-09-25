@@ -1696,11 +1696,15 @@ fn upward_longwave(
     // 离线穷举（`/tmp/gf/ulrad` 的第 3 步两侧位型）实测：只有"左乘积融合"这一维能
     // 复现内核的 `ulrad`（`4070B00402BA216F`），平铺得到 `…216E`；后三个加法的
     // 收缩在本算例看不出来，保持平铺。
+    let reflected_longwave = (1.0 - input.ground_emissivity) * input.canopy_longwave_gap_fraction;
     let mut value = STEFAN_BOLTZMANN.mul_add(
         canopy_emission,
-        (1.0 - input.ground_emissivity)
-            * input.canopy_longwave_gap_fraction.powi(2)
-            * input.atmospheric_longwave_w_m2,
+        // 第二项从 `…:1412` 的 `(1-emg)*thermk*thermk*frl` 经 CSE 变成 `:1110` 的
+        // `_3203 = thermk*(1-emg)` → `_3178 = thermk*_3203` → `_3179 = _3178*frl`，
+        // 即**左结合** `((1-emg)*thermk)*thermk*frl`。原先写成
+        // `(1-emg)*gap.powi(2)*frl` 是 `((1-emg)*(gap*gap))*frl` —— 乘法次数一样，
+        // 中间那个量的舍入点不同，是相消敏感量 `olrg` 上残留 1 ULP 的来源。
+        input.canopy_longwave_gap_fraction * reflected_longwave * input.atmospheric_longwave_w_m2,
     );
     value += (1.0 - input.ground_emissivity)
         * input.canopy_longwave_gap_fraction

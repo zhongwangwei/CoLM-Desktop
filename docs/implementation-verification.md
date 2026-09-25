@@ -18373,6 +18373,18 @@ VSFI     kernel=200 rust=200
 
 ## 若继续
 
+> **第 377 轮更新（最新的指路牌，先读这段）**：`ulrad` 第二项 `(1-emg)*thermk*thermk*frl`
+> 在 GIMPLE 里是**左结合**（`_3203 = thermk*(1-emg)` → `_3178 = thermk*_3203` → `*frl`），
+> 现库写成了 `(1-emg)*(gap*gap)*frl` —— 补上后**黄金干窗整窗逐位相同**。
+>
+> * 黄金 **dry `bitwise` 5 → 0**（56024 个值全同）、wet 2 → 2（湿窗那 2 个另有原因，见第 378 轮）；
+>   `sumabs`/`over_tol`/`ot_vars` 都不变；闭环仍 19/1。
+> * `ulrad` 只进 `SurfaceBudget` 的 `olrg`，**不进** `GroundTemperatureInput` ⇒ 纯诊断量；
+>   状态中性由 restart 守住（干窗 N=16/528、湿窗 N=96/720 全 0/68）。
+> * **否决**：`f_trad` 的 `powf(0.25)` → `sqrt(sqrt(x))` 假设。`rustc -O --crate-type=lib --emit asm`
+>   显示 `b _pow`（尾调用 libm），与 gfortran 的 `**0.25` 同一条路，假设不成立。
+> * **下一枪**：湿窗剩的 `f_zerr` 2 个元素（`maxabs 3.55e-15`，相消敏感）。
+
 > **第 376 轮更新（最新的指路牌，先读这段）**：`dlrad` 里 `thermk*frl` 那一乘被内核收进叶发射项
 > （`…LeafTemperature_Extended.F90:1407` 的 `_768 = .FMA(thermk, frl, 叶发射项)`），补上后
 > **`f_fgrnd` 在两个黄金窗口都归零**。
@@ -22646,3 +22658,67 @@ _3179 = _3178 * frl
 `:1414` 的 `4*(1-emg)*thermk*fac*stefnc*t³*dtl`、以及 `*factor` 那一处收缩）逐项对过，
 与现库一致。`ulrad` **只喂诊断**（`surface_budget` 的 `olrg`；`GroundTemperatureInput`
 的字段表里没有它）⇒ 这一处可以单独改、风险面很窄。留作下一轮。
+
+## 第 377 轮：`ulrad` 第二项的关联顺序 —— **黄金干窗整窗逐位相同**
+
+第 376 轮之后干窗只剩 `f_rnet` 2 / `f_trad` 1 / `f_zerr` 2，且已论证它们都是**相消敏感量**：
+`rnet = sabg + sabvsun + sabvsha - olrg + forc_frl` 前四项相消后只剩很小的数再加 `forc_frl`，
+`errore` 更是一长串 ~百 W/m² 的交替和、恒在 ~1e-10。所以"某处单步 1 ULP"就是唯一解释，
+而 `olrg = ulrad + emg*(stefnc*t_grnd_bef³*(4*tinc))` 里 `ulrad` 是唯一没有历史量兜底的输入。
+
+### 一、证据：`ulrad` 第二项是左结合
+
+`…LeafTemperature_Extended.F90:1414/1421`（dump 第 4396-4442 处）里，四项的收缩/结合逐项核对：
+
+```text
+_3176 = powmult_1034 * fac                    ; tlbef**3 * fac
+_3177 = _766 * _3176                          ; * (tlbef+4*dtl)      ← 与现库一致
+_773  = thermk * emg
+powmult_1030 = tg*tg ; powmult_1031 = powmult_1030*powmult_1030      ; tg**4 = (t*t)*(t*t)
+_776  = .FMA(_773, powmult_1031, _3177)       ; 乘积收进加法          ← 现库一致
+_784  = .FMA(_777, stefnc, _3179)             ; `*factor` 那一乘收进加法 ← 现库一致
+_789  = _784 + _3182                          ; 平铺                 ← 现库一致
+_796  = _789 + _3187                          ; 平铺                 ← 现库一致
+```
+
+**唯一不一致的是第二项** `(1-emg)*thermk*thermk*frl`（`:1412`，被 CSE 到 `:1110` 那一处）：
+
+```text
+_3202 = 1-emg ; _3203 = thermk * _3202 ; _3178 = thermk * _3203 ; _3179 = _3178 * frl
+```
+
+即内核是 `thermk*((1-emg)*thermk)*frl`（**先算 `(1-emg)*thermk`，再乘 `thermk`**），
+而现库写成 `(1.0-emg)*gap.powi(2)*frl` = `(1-emg)*(gap*gap)*frl`（先算 `gap*gap`）。
+乘法次数一样、中间量的舍入点不同 —— 这正是那 5 个元素的来源。
+
+改法（`upward_longwave()`，`leaf_temperature.rs:1699` 起）：
+
+```rust
+let reflected_longwave = (1.0 - input.ground_emissivity) * input.canopy_longwave_gap_fraction;
+...
+input.canopy_longwave_gap_fraction * reflected_longwave * input.atmospheric_longwave_w_m2
+```
+
+### 二、实测
+
+```text
+黄金 dry   bitwise   5 → 0     ← 整窗 56024 个值**全部逐位相同**
+黄金 wet   bitwise   2 → 2     （这一处与湿窗无关，见第 378 轮）
+两个窗口   sumabs 0.0000、over_tol 0、ot_vars 0 都不变
+```
+
+`upward_longwave()` 的输出只进 `SurfaceBudget` 的 `olrg`，**不进** `GroundTemperatureInput`
+（那个结构体字段表里没有向上长波），所以是纯诊断量。状态中性由 restart 扫描守住（见下）。
+
+### 三、否决：`powf(0.25)` 被改写成 `sqrt(sqrt(x))`
+
+`f_trad = (olrg/stefnc)**0.25` 曾怀疑 Rust 的 `powf(0.25)` 被 LLVM 折成 `sqrt(sqrt(x))`
+而 gfortran 走 libm `pow`。看代码生成直接否掉：
+
+```text
+$ rustc -O --crate-type=lib --emit asm   # pub fn pow_quarter(x: f64)->f64 {(x).powf(0.25)}
+_pow_quarter:
+	b	_pow         ← 尾调用 libm pow，与 gfortran 的 **0.25 同一条路
+```
+
+`f_trad` 的真因就是 `olrg`（`f_olrg` 自己是 `acc1d` 时间平均，把单步 1 ULP 平均掉了）。
