@@ -255,6 +255,41 @@ pub fn land_physics_parameters(
              the case would silently keep the land-cover table value instead"
         );
     }
+    // 声明里有、本仓库**不读**的物理开关（默认值取自 schema 的声明）。判据是
+    // "算例把它设成了非声明默认值" —— 只写默认值不算设过（那正是黄金窗口验证过的路径）。
+    // 这张表来自 `oracle/scripts/audit_namelist_reads.sh` 的快照
+    // （`oracle/nml-unread.snapshot`）：里面还有一大批本来就与 SinglePoint/LCT 无关的
+    // 开关（CaMa 河网、湿地、DA、TRACER、crop/urban、以及调试/输出类），
+    // 那些**不列**在这里 —— 它们在 Golden 内核里同样不生效，忽略是对的。
+    // 列的是"设了就会改变物理、而本仓库不会照做"的那些，其中 `DEF_TUNING_SIMPLE_VIC_*`
+    // 尤其要紧：黄金配置的产流方案正是 SimpleVIC。
+    const UNREAD_PHYSICS_SWITCHES: [&str; 16] = [
+        "DEF_TUNING_CSOILC",
+        "DEF_TUNING_SMPMAX",
+        "DEF_TUNING_SMPMAX_HR",
+        "DEF_TUNING_SMPMIN_HR",
+        "DEF_TUNING_WETWATMAX",
+        "DEF_TUNING_SIMPLE_VIC_DS",
+        "DEF_TUNING_SIMPLE_VIC_WS",
+        "DEF_SOIL_REFL_SCHEME",
+        "DEF_TOPMOD_method",
+        "DEF_USE_BEDROCK",
+        "DEF_USE_DiagMatrix",
+        "DEF_USE_SOILPAR_UPS_FIT",
+        "DEF_LANDONLY",
+        "DEF_USE_DOMINANT_PATCHTYPE",
+        "DEF_LAI_START_YEAR",
+        "DEF_LAI_END_YEAR",
+    ];
+    for name in UNREAD_PHYSICS_SWITCHES {
+        if sets_non_default(document, name) {
+            bail!(
+                "{name} is set to a non-default value, but the Rust runtime never reads it, so \
+                 the case would silently run with the runtime's own hard-coded behaviour \
+                 instead (see oracle/nml-unread.snapshot)"
+            );
+        }
+    }
     let plant_hydraulic_overrides = PlantHydraulicOverrides {
         maximum_sunlit_leaf_conductance: land_cover_override(document, "DEF_LC_KMAX_SUN")?,
         maximum_shaded_leaf_conductance: land_cover_override(document, "DEF_LC_KMAX_SHA")?,
@@ -523,6 +558,32 @@ fn land_cover_override(document: &Document, path: &str) -> Result<Option<f64>> {
         return Ok(None);
     }
     Ok(Some(value))
+}
+
+/// 算例是否把 `name` 设成了**非声明默认值**（`colm-schema` 里那份声明就是判据）。
+///
+/// 只写默认值不算"设过" —— 那正是黄金窗口验证过的路径；写别的值才是"要一份
+/// 本仓库不会照做的行为"。实数按**解析后的 `f64` 比**（namelist 里的 `0.004` 与声明里的
+/// `"0.004_r8"` 是同一个值），类型对不上或解析不了就按"设过"处理（宁可报错，别静默丢）。
+fn sets_non_default(document: &Document, name: &str) -> bool {
+    let (Ok(field), Some(value)) = (field(name), document.get(name)) else {
+        return false;
+    };
+    match (&field.default, value) {
+        (SchemaDefault::Logical(declared), Value::Bool(actual)) => declared != actual,
+        (SchemaDefault::Integer(declared), Value::Int(actual)) => declared != actual,
+        (SchemaDefault::Real(declared), Value::Real { text }) => {
+            match (
+                declared.trim_end_matches("_r8").parse::<f64>(),
+                text.trim_end_matches("_r8").parse::<f64>(),
+            ) {
+                (Ok(declared), Ok(actual)) => declared != actual,
+                _ => true,
+            }
+        }
+        (SchemaDefault::Str(declared), Value::Str(actual)) => declared != actual,
+        _ => true,
+    }
 }
 
 fn logical(document: &Document, path: &str) -> Result<bool> {

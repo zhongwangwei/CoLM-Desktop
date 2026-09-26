@@ -18373,6 +18373,19 @@ VSFI     kernel=200 rust=200
 
 ## 若继续
 
+> **第 393 轮更新（最新的指路牌，先读这段）**：把快照里"**会改变物理、而本仓库不读**"
+> 的那些开关逐个挡住（16 条，判据是"算例把它设成了**非声明默认值**"）。
+>
+> * 守卫表：`DEF_TUNING_{CSOILC,SMPMAX,SMPMAX_HR,SMPMIN_HR,WETWATMAX,SIMPLE_VIC_DS,SIMPLE_VIC_WS}`、
+>   `DEF_SOIL_REFL_SCHEME`、`DEF_TOPMOD_method`、`DEF_USE_{BEDROCK,DiagMatrix,SOILPAR_UPS_FIT}`、
+>   `DEF_LANDONLY`、`DEF_USE_DOMINANT_PATCHTYPE`、`DEF_LAI_{START,END}_YEAR` ——
+>   其中 `DEF_TUNING_SIMPLE_VIC_*` 尤其要紧（黄金配置的产流方案就是 SimpleVIC）。
+> * 快照里另外两类**故意不管**：与本配置无关的未移植家族（CaMa/DA/TRACER/crop/urban/GRID，
+>   在黄金内核里同样不生效）与调试/输出类开关。
+> * 新增 `sets_non_default()`：拿 schema 的声明默认值比，实数按解析后的 `f64` 比；
+>   **写默认值不误报**（实测 `= 0.061` 正常跑、`= 0.1` 报错）。
+> * 顺带确认：`DEF_USE_SNICAR` 早已被守卫拒绝；土热导率没测过的 7 档逐个 0 个不同量。
+
 > **第 392 轮更新（最新的指路牌，先读这段）**：把开关审计从"只跑黄金默认算例"扩成
 > **8 个配置取并集**（default / 第二配置 / vegsnow_off / phs_off / runoff0 / rss2 /
 > thermal2 / precip2），并**量出它的边际价值很小**：默认单跑 117 个 key、
@@ -23643,3 +23656,52 @@ runoff0 / rss2 / thermal2 / precip2
 `oracle/nml-unread.snapshot` 从 712 条更新到 711 条，`--check` 复核通过：
 `runtime keys queried: 118; unread: 711 (snapshot 711)` ⇒
 `matches the snapshot: no new declared-but-unread switch`。
+
+## 第 393 轮：把"声明了却不读的**物理**开关"也挡在门外（16 条）
+
+第 390 轮为 `DEF_LC_*` 加了守卫、第 391/392 轮把审计做成快照门禁。有了快照，
+就能系统地看"哪些声明从没被读过"，再把**其中会改变物理的那些**逐个挡住。
+
+### 一、先做一次开关分档（把"读没读"与"该不该管"分开）
+
+快照里 711 条"没被读"按性质分三类：
+
+1. **与本配置无关**（CaMa 河网/湿地/水库、DA、TRACER、crop/urban、GRID 分块）——
+   它们在黄金内核里同样不生效（`CaMaOFF`、`DEF_USE_DA/TRACER/BGC/URBAN` 全关），
+   忽略是**对的**，不列进守卫。
+2. **调试/输出类**（`DEF_USE_CoLMDEBUG`、`DEF_CheckEquilibrium`、`DEF_USE_RangeCheck`、
+   `DEF_Output_2mWMO`、`DEF_HISTORY_IN_VECTOR`、`DEF_HIST_*`）——不影响物理，
+   也不列。
+3. **会改变物理、而本仓库不照做的** —— 这些必须挡（本轮的工作）。
+
+### 二、16 条守卫（判据：算例把它设成了**非声明默认值**）
+
+```text
+DEF_TUNING_CSOILC / SMPMAX / SMPMAX_HR / SMPMIN_HR / WETWATMAX
+DEF_TUNING_SIMPLE_VIC_DS / SIMPLE_VIC_WS        ← 黄金配置的产流方案正是 SimpleVIC
+DEF_SOIL_REFL_SCHEME / DEF_TOPMOD_method
+DEF_USE_BEDROCK / DEF_USE_DiagMatrix / DEF_USE_SOILPAR_UPS_FIT
+DEF_LANDONLY / DEF_USE_DOMINANT_PATCHTYPE
+DEF_LAI_START_YEAR / DEF_LAI_END_YEAR
+```
+
+判据与第 390 轮同一条纪律：**只写默认值不算设过**（那正是黄金窗口验证过的路径），
+写别的值才是"要一份本仓库不会照做的行为"。实现上新增一个
+`sets_non_default(document, name)`：拿 `colm-schema` 的**声明默认值**比，
+实数按解析后的 `f64` 比（namelist 的 `0.004` 与声明里的 `"0.004_r8"` 是同一个值），
+类型对不上或解析不了就按"设过"处理（宁可报错，别静默丢）。
+
+### 三、实测
+
+```text
+DEF_TUNING_SIMPLE_VIC_DS = 0.1    → 显式报错（消息指向 oracle/nml-unread.snapshot）
+DEF_TUNING_SIMPLE_VIC_DS = 0.061  → 正常运行，0 个不同量（写默认值不误报）
+黄金 dry / wet                    → bitwise=0 / 0（不变）
+第二配置 CN-Cng                   → 0 variable(s) outside tolerance（不变）
+```
+
+### 四、顺带确认的两个"已经挡住了"
+
+* `DEF_USE_SNICAR = .true.` → 已被守卫显式拒绝（"only the standard snow branch…"）✓
+* 土热导率 8 档里没测过的 7 档（1/2/3/5/6/7/8）逐一跑过：**逐个 0 个不同量** ✓
+  —— 说明这个开关的**派发**是对的（模块算术早有 `compare_soilthermal` 40000/40000 兜底）。
