@@ -21,7 +21,7 @@ fn profile_and_water_table_read_one_month_and_nearest_cell() {
         read_single_point_water_table(&wtd, 9.8, 19.8, 2).unwrap(),
         Some(2.0)
     );
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 }
 
 #[test]
@@ -40,7 +40,7 @@ fn missing_water_table_marks_soil_profile_invalid() {
             .unwrap()
             .valid
     );
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 }
 
 #[test]
@@ -57,7 +57,7 @@ fn cn_state_reads_profiles_in_fortran_pool_order() {
     assert_eq!(state.nitrate_g_m3[0..2], [400.0, 401.0]);
     assert_eq!(state.vegetation_carbon.leaf_g_m2, 500.0);
     assert_eq!(state.vegetation_carbon.dead_coarse_root_g_m2, 507.0);
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 }
 
 fn write_soil_state(path: &std::path::Path) {

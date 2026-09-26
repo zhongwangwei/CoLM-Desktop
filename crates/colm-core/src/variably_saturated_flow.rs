@@ -4545,8 +4545,12 @@ pub fn variably_saturated_flow_step(
     let _remaining_ice_deficit_mm = ice_deficit_mm;
 
     // 积水超过上限的部分转成产流；水位到地表时全部算饱和产流。
-    let total_runoff_mm_s;
-    if input.patch_type <= 1 {
+    //
+    // 写成 `let x = if … else …` 而不是先声明再在各分支里赋值：clippy 1.98 的
+    // `needless_late_init` 会为此报警（本机 1.97.1 不报 ⇒ 这是 CI 才能发现的
+    // 版本差）。两者语义相同 —— 分支里对 `surface_runoff_mm_s` 等的修改仍在取值
+    // 之前发生，浮点结果逐位不变。
+    let total_runoff_mm_s = if input.patch_type <= 1 {
         if state.surface_water_mm > input.ponding_limit_mm {
             let excess_mm = state.surface_water_mm - input.ponding_limit_mm;
             surface_runoff_mm_s += excess_mm / dt;
@@ -4557,15 +4561,15 @@ pub fn variably_saturated_flow_step(
             infiltration_excess_runoff_mm_s = 0.0;
             saturation_excess_runoff_mm_s = surface_runoff_mm_s;
         }
-        total_runoff_mm_s = subsurface_runoff_mm_s + surface_runoff_mm_s;
+        subsurface_runoff_mm_s + surface_runoff_mm_s
     } else if input.patch_type == 2 {
         bail!(
             "WATER_VSF's wetland branch is not ported; patchtype 2 needs the \
              DEF_USE_Dynamic_Wetland column, which this runtime does not assemble"
         );
     } else {
-        total_runoff_mm_s = 0.0;
-    }
+        0.0
+    };
 
     // 冰阻抗：冻结层的导水率按含冰比例指数衰减。
     let mut hydraulic_conductivity_mm_s = soil_state.hydraulic_conductivity_mm_s.clone();

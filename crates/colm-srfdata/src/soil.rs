@@ -769,11 +769,25 @@ fn statistic(values: &[f64], cells: &[usize], area: &[f64], method: SoilStatisti
 #[cfg(test)]
 mod tests {
 
-    /// 参考位型是**在 macOS 上**从上游 Fortran 回调里取的；`residual`/`jacobian`
-    /// 里含 `pow/exp`（Campbell 与 van Genuchten 的曲线），实测 ubuntu 的 libm 与
-    /// macOS 差 1 ULP（`…563` vs `…564`）。所以 macOS 上逐位钉死，其他平台按
-    /// **8 ULP** 比 —— 真算错是量级差，这个容差抓得住；平台 libm 的末位差不再把 CI 弄红。
+    /// 参考位型是**在 macOS 上**从上游 Fortran 回调里取的。
+    ///
+    /// macOS 上逐位钉死，那才是这些测试要守的东西：FMA 的操作数顺序
+    /// （`.FMA(a,b,c)=a*b+c`）一旦接反，结果只差 ~1 ULP，只有逐位比才抓得住。
+    ///
+    /// 其他平台不能这么比，而且**不是只差 1 ULP**。`residual`/`jacobian` 里含
+    /// `pow/exp`（Campbell 与 van Genuchten 的曲线），glibc 与 macOS libm 的末位差
+    /// 经雅可比放大后实测到 ~21 ULP（vgm 雅可比第 25 个元素：
+    /// -5.97827883200612198e-1 vs -5.97827883200609866e-1，绝对值差 2.33e-15）；
+    /// 而雅可比里还有靠相减得到的小量（~1e-9），那里连相对容差都不成立。
+    /// 上一版按「8 ULP」比，就是这样在 ubuntu 上红的。
+    ///
+    /// 所以非 macOS 分支只做**结构性 sanity**：`atol + rtol*|expected|`。
+    /// 实测最坏偏差 ~2.4e-15，这个界留了三个数量级余量；量级、符号、公式接错
+    /// 都会被抓住。**抓不住 1 ULP 级的 FMA 操作数错位** —— 那一条只在 macOS 上
+    /// 成立，ubuntu/Windows 作业不负责它，别把这里的绿色当成 FMA 已验。
     fn assert_bits_close(actual: &[f64], expected_hex: &str, context: &str) {
+        const ATOL: f64 = 1.0e-12;
+        const RTOL: f64 = 1.0e-12;
         let expected: Vec<u64> = expected_hex
             .split_whitespace()
             .map(|value| u64::from_str_radix(value, 16).expect("valid hex golden"))
@@ -784,10 +798,10 @@ mod tests {
             if cfg!(target_os = "macos") {
                 assert_eq!(value.to_bits(), *bits, "{context}: element {index}");
             } else {
-                let tolerance = 8.0 * f64::EPSILON * expected_value.abs();
+                let tolerance = ATOL + RTOL * expected_value.abs();
                 assert!(
                     (value - expected_value).abs() <= tolerance,
-                    "{context}: element {index}: {value:.17e} != {expected_value:.17e} (超出 8 ULP)"
+                    "{context}: element {index}: {value:.17e} != {expected_value:.17e} (超出 1e-12 结构性容差)"
                 );
             }
         }

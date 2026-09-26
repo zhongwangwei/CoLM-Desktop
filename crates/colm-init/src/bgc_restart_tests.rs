@@ -121,7 +121,7 @@ fn cold_start_bgc_constants_match_fortran_schema_values_and_layout() {
             .unwrap(),
         [-9_999, -9_999]
     );
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 }
 
 #[test]
@@ -155,8 +155,8 @@ fn bgc_constant_restart_compresses_only_block_vectors() {
     )
     .is_err());
     assert!(!invalid.exists());
-    std::fs::remove_dir_all(root).unwrap();
-    std::fs::remove_dir_all(root0).unwrap();
+    crate::remove_test_tree(root);
+    crate::remove_test_tree(root0);
 }
 
 #[test]
@@ -250,7 +250,7 @@ fn cold_start_bgc_constants_match_the_upstream_fortran_reference() {
         &native.block,
         &upstream.join("CN-Cng_restart_bgc_const_lc2005_w180_s90.nc"),
     );
-    std::fs::remove_dir_all(directory).unwrap();
+    crate::remove_test_tree(directory);
 }
 
 fn compare_netcdf(actual_path: &std::path::Path, expected_path: &std::path::Path) {

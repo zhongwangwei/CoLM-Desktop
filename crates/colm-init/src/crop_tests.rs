@@ -114,7 +114,7 @@ fn management_maps_keep_restart_inputs_independent_of_runtime_application() {
     assert_eq!(irrigation.rice_1_method, [-9_999]);
     assert_eq!(irrigation.groundwater_allocation, [0.65]);
     assert_eq!(irrigation.surface_water_allocation, [0.35]);
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 }
 
 #[test]
@@ -182,7 +182,7 @@ fn spatial_management_maps_are_areal_and_irrigation_uses_the_largest_overlap() {
     let irrigation = source_two.irrigation_fields(&[0.0]).unwrap();
     assert!((irrigation.groundwater_allocation[0] - 0.45).abs() < 1.0e-12);
     assert!((irrigation.surface_water_allocation[0] - 0.55).abs() < 1.0e-12);
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 }
 
 #[test]
@@ -264,7 +264,7 @@ fn spatial_management_allows_empty_pft_axis_but_keeps_patch_crop_maps() {
         },
     )
     .is_err());
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 }
 
 fn temp_runtime_dir(label: &str) -> std::path::PathBuf {

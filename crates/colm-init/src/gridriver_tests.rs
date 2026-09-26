@@ -137,7 +137,7 @@ fn cold_restart_matches_gridriver_schema_two_base_state() {
     );
     assert!(file.variable("wdsrf_ucat_prev").is_none());
     drop(file);
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 }
 
 #[test]
@@ -188,7 +188,7 @@ fn gridriver_restart_compresses_vectors_but_not_transaction_scalars() {
     })
     .is_err());
     assert!(!invalid.join("restart").exists());
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 }
 
 #[test]
@@ -216,7 +216,7 @@ fn cold_restart_refuses_unimplemented_reservoir_methods() {
     .to_string();
     assert!(error.contains("reservoir method"));
     assert!(!root.join("restart").exists());
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 }
 
 #[test]
@@ -295,7 +295,7 @@ fn cold_restart_carries_native_zero_bifurcation_state() {
         [0.0, 0.0]
     );
     drop(file);
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 }
 
 #[test]
@@ -340,7 +340,7 @@ fn cold_restart_carries_zero_levee_state() {
         );
     }
     drop(file);
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 }
 
 #[test]
@@ -405,7 +405,7 @@ fn cold_restart_carries_native_reservoir_identity_and_volume() {
         );
     }
     drop(file);
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 }
 
 fn write_unit_catchment(path: &std::path::Path) {

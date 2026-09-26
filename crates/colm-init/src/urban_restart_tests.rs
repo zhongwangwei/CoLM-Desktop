@@ -81,7 +81,7 @@ fn urban_constant_restart_matches_fortran_filename_schema_and_axis_order() {
     );
     assert_eq!(file.variables().count(), 35);
     drop(file);
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 }
 
 #[test]
@@ -190,7 +190,7 @@ fn urban_constant_and_time_restart_obey_compression_level() {
     )
     .is_err());
     assert!(!invalid.exists());
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 }
 
 #[test]
@@ -380,7 +380,7 @@ fn urban_time_restart_writes_the_complete_upstream_field_family() {
     assert_eq!(dimension_names(&snow), ["urban", "snow"]);
     assert_eq!(snow.get_values::<f64, _>(..).unwrap(), [0.0, 2.0, 1.0, 3.0]);
     drop(file);
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 }
 
 #[test]
@@ -482,7 +482,7 @@ fn cold_urban_writer_preserves_layer_major_soil_water_for_every_patch() {
         &water[20..],
         &[1.0, 3.0, 5.0, 7.0, 9.0, 11.0, 13.0, 15.0, 17.0, 19.0]
     );
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 }
 
 fn cold_radiation(value: f64) -> UrbanRadiationState {

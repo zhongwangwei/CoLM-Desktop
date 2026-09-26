@@ -152,7 +152,7 @@ fn bgc_time_restart_matches_fortran_axis_layout_and_optional_fields() {
             .unwrap(),
         PATCH_I8
     );
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 }
 
 #[test]
@@ -199,7 +199,7 @@ fn bgc_crop_restart_writes_the_exact_fortran_tail_schema() {
         PATCH
     );
     drop(file);
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 }
 
 #[test]
@@ -238,8 +238,8 @@ fn bgc_time_restart_compresses_only_crop_tail_fields() {
     bad.compression_level = 10;
     assert!(write_bgc_time_restart_block(invalid.join("restart.nc"), bad).is_err());
     assert!(!invalid.exists());
-    std::fs::remove_dir_all(root).unwrap();
-    std::fs::remove_dir_all(root0).unwrap();
+    crate::remove_test_tree(root);
+    crate::remove_test_tree(root0);
 }
 
 #[test]
@@ -488,7 +488,7 @@ fn bgc_time_restart_matches_the_upstream_fortran_reference() {
     )
     .unwrap();
     compare_netcdf(&native.block, &reference_path);
-    std::fs::remove_dir_all(directory).unwrap();
+    crate::remove_test_tree(directory);
 }
 
 fn sample_input() -> BgcTimeRestartInput<'static> {

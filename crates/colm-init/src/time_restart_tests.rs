@@ -88,7 +88,7 @@ fn time_restart_matches_fortran_filename_dimensions_and_axis_order() {
         .collect::<Vec<_>>();
     assert_eq!(lake_order, ["dz_lake", "t_lake", "lake_icefrc"]);
     drop(file);
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 }
 
 #[test]
@@ -110,7 +110,7 @@ fn time_restart_dynamic_lake_schema_follows_layer_thickness_input() {
     assert!(file.variable("dz_lake").is_none());
     assert!(file.variable("t_lake").is_some());
     drop(file);
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 }
 
 #[test]
@@ -182,7 +182,7 @@ fn time_restart_writes_hyperspectral_fields_in_fortran_patch_last_order() {
         patch_last_3d(optics, 211, 16, 2)
     );
     drop(file);
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 }
 
 #[test]
@@ -227,7 +227,7 @@ fn hyperspectral_fields_append_to_the_shared_common_restart() {
         patch_last_3d(&optics, 211, 16, 2)
     );
     drop(file);
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 }
 
 #[test]
@@ -252,7 +252,7 @@ fn time_restart_compresses_all_common_restart_fields_and_preserves_decoded_value
         [1.0, 2.0, 3.0, 4.0, 11.0, 12.0, 13.0, 14.0]
     );
     drop(file);
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 }
 
 #[test]
@@ -284,7 +284,7 @@ fn time_restart_honors_explicit_compression_and_append_levels_and_rejects_invali
     let header = ncdump_header(&path);
     assert_eq!(deflate_level(&header, "alb_hires"), None);
     assert_eq!(deflate_level(&header, "reflectance_out"), None);
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 
     let mut invalid = input();
     invalid.compression_level = 10;
@@ -311,7 +311,7 @@ fn time_restart_schema_matches_the_upstream_fortran_reference() {
     assert_eq!(dimension_lengths(&actual), dimension_lengths(&reference));
     drop(actual);
     drop(reference);
-    std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    crate::remove_test_tree(path.parent().unwrap());
 }
 
 fn input() -> TimeRestartInput<'static> {
@@ -729,5 +729,5 @@ fn time_restart_round_trips_through_the_reader() {
         restart.integers("n_irrig_steps_left").unwrap(),
         &[10_i64, 20]
     );
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 }

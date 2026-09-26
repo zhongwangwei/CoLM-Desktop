@@ -74,7 +74,7 @@ fn single_point_bedrock_is_optional_until_the_namelist_enables_it() {
     );
     drop(restart);
     std::fs::remove_file(path).unwrap();
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 }
 
 #[test]

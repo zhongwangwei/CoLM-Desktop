@@ -391,7 +391,7 @@ fn namelist_static_run_uses_colm_paths_defaults_and_surface_contract() {
             .static_run;
     assert_eq!(configured.static_config().tuning.zlnd, 0.025);
     assert_eq!(configured.static_config().tuning.capr, 0.42);
-    std::fs::remove_dir_all(directory).unwrap();
+    crate::remove_test_tree(directory);
 }
 
 #[test]
@@ -725,7 +725,7 @@ fn cold_namelist_errors_on_missing_snicar_tables_and_keeps_non_snicar_state_sour
     assert!(run.variably_saturated_flow);
     assert_eq!(run.snow_cover_exponent, 0.75);
     assert!(run.snicar.is_none());
-    std::fs::remove_dir_all(directory).unwrap();
+    crate::remove_test_tree(directory);
 }
 
 #[test]
@@ -816,7 +816,7 @@ fn single_point_pft_pc_nonvegetated_scalar_consumers_accept_zero_pft_layout() {
     assert_eq!(values_f64(&observed_common, "sigf"), [1.0]);
     assert_eq!(values_f64(&observed_common, "fsno"), [0.0]);
 
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 }
 
 #[test]
@@ -902,7 +902,7 @@ fn single_point_nonnatural_hyperspectral_uses_scalar_canopy_and_rejects_snow() {
         "{error:#}"
     );
     assert!(!run.static_run.restart_dir.exists());
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 }
 
 #[test]
@@ -1027,7 +1027,7 @@ fn single_point_scalar_consumes_tracer_cn_and_vegetation_snow_flag() {
         "DEF_VEG_SNOW=.false. must reach scalar broadband radiation"
     );
 
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 }
 
 #[test]
@@ -1095,7 +1095,7 @@ fn single_point_lake_soil_carbon_uses_bgc_and_derived_organic_matter() {
         single_point_static_run_from_namelist(&namelist, Some(LandCoverScheme::Igbp), None)
             .is_err()
     );
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 }
 
 #[test]
@@ -1164,7 +1164,7 @@ fn single_point_vic_sources_are_written_and_grid_missing_values_are_rejected() {
         None,
     )
     .is_err());
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 }
 
 #[test]
@@ -1254,7 +1254,7 @@ fn urban_only_uses_the_selected_land_class_and_changes_only_the_single_point_mas
             }
         }
     }
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 }
 
 #[test]
@@ -1325,7 +1325,7 @@ fn single_point_runoff_texture_mapping_preserves_active_values_and_ignores_inact
         assert_eq!(values_i32(&file, "soiltext"), [class]);
         assert_eq!(values_f64(&file, "BVIC"), [BVIC_USDA[class as usize]]);
     }
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 }
 
 #[test]
@@ -1369,7 +1369,7 @@ fn single_point_runoff_namelist_forces_topmodel_method_zero_and_resolves_vic_pat
         run.static_run.vic_grid_file,
         Some(runtime.join("vic/vic_para.nc"))
     );
-    std::fs::remove_dir_all(directory).unwrap();
+    crate::remove_test_tree(directory);
 }
 
 #[test]
@@ -1397,7 +1397,7 @@ fn cold_namelist_uses_start_year_for_lulcc_restarts() {
 
     let run = single_point_cold_start_run_from_namelist(&namelist, None, None).unwrap();
     assert_eq!(run.static_run.land_cover_year, 2008);
-    std::fs::remove_dir_all(directory).unwrap();
+    crate::remove_test_tree(directory);
 }
 
 #[test]
@@ -1426,7 +1426,7 @@ fn cold_lct_namelist_accepts_native_eight_day_lai() {
     let run = single_point_cold_start_run_from_namelist(&namelist, None, None).unwrap();
     assert_eq!(run.subgrid, SinglePointSubgrid::Lct);
     assert!(!run.lai_monthly);
-    std::fs::remove_dir_all(directory).unwrap();
+    crate::remove_test_tree(directory);
 }
 
 #[test]
@@ -1460,7 +1460,7 @@ fn urban_namelist_uses_lct_and_resolves_the_shared_runtime_contract() {
             runtime_dir: Some(PathBuf::from("/runtime")),
         })
     );
-    std::fs::remove_dir_all(directory).unwrap();
+    crate::remove_test_tree(directory);
 }
 
 #[test]
@@ -1502,7 +1502,7 @@ fn bgc_namelist_requires_a_vector_subgrid_and_resolves_its_runtime_source() {
     )
     .unwrap();
     assert!(single_point_cold_start_run_from_namelist(&namelist, None, None).is_err());
-    std::fs::remove_dir_all(directory).unwrap();
+    crate::remove_test_tree(directory);
 }
 
 #[test]
@@ -1662,7 +1662,7 @@ fn crop_common_restart_keeps_each_cft_on_its_own_patch_axis() {
         &[0.0, 100.0, 10.0, 110.0, 1.0, 101.0, 11.0, 111.0]
     );
     assert!(snow_absorption[24..].iter().all(|value| *value == 0.0));
-    std::fs::remove_dir_all(directory).unwrap();
+    crate::remove_test_tree(directory);
 }
 
 #[test]
@@ -1751,7 +1751,7 @@ fn native_single_point_bgc_cold_restart_matches_the_upstream_reference() {
         &expected_root.join("2008-001-00000/CN-Cng_restart_pft_2008-001-00000_lc2005_w180_s90.nc"),
     );
     assert!(native_constants.bgc.is_some());
-    std::fs::remove_dir_all(directory).unwrap();
+    crate::remove_test_tree(directory);
 }
 
 #[test]
@@ -1818,7 +1818,7 @@ fn native_single_point_static_restart_matches_the_upstream_reference() {
             values_f64(&expected_tuning, name)
         );
     }
-    std::fs::remove_dir_all(directory).unwrap();
+    crate::remove_test_tree(directory);
 }
 
 #[test]
@@ -1877,7 +1877,7 @@ fn native_single_point_cold_time_restart_matches_the_upstream_reference() {
             );
         }
     }
-    std::fs::remove_dir_all(directory).unwrap();
+    crate::remove_test_tree(directory);
 }
 
 const F64_FIELDS: &[&str] = &[

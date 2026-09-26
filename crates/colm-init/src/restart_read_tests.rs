@@ -73,7 +73,7 @@ fn missing_variables_and_wrong_shapes_name_the_offender() {
         .unwrap_err()
         .to_string();
     assert!(error.contains("out of 2"), "{error}");
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 }
 
 /// `f32` 与 `i8` 都要按加宽后的 `f64`/`i64` 读出来 —— 写出器实测会写这两种。
@@ -96,7 +96,7 @@ fn narrower_types_are_widened_instead_of_refused() {
     let restart = RestartFile::open(&path).unwrap();
     assert_eq!(restart.floats("topo_std").unwrap(), &[0.5, 1.5]);
     assert_eq!(restart.integers("patchmask").unwrap(), &[1, 0]);
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 }
 
 /// `u64` 不能加宽进 `i64`，必须报错而不是截断。
@@ -115,7 +115,7 @@ fn an_unwidenable_type_is_refused_by_name() {
     let error = RestartFile::open(&path).unwrap_err().to_string();
     assert!(error.contains("weird"), "{error}");
     assert!(error.contains("u64"), "{error}");
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 }
 
 #[test]
@@ -175,7 +175,7 @@ fn a_three_dimensional_field_is_returned_in_memory_order() {
     // 形状与 patch 越界都要点名报错。
     assert!(restart.patch_matrix("field", 2, first, second).is_err());
     assert!(restart.patch_matrix("field", 0, first, second + 1).is_err());
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 }
 
 /// 续跑写出：结构原样搬过去，只换声明过的那几个变量；类型也必须还原。
@@ -231,7 +231,7 @@ fn a_continuation_write_preserves_the_schema_and_applies_overrides() {
     assert_eq!(restart.floats("t_soisno").unwrap(), evolved.as_slice());
     assert_eq!(restart.integers("patchmask").unwrap(), &[1, 0]);
     assert_eq!(restart.dimension("snow").unwrap(), layers);
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 }
 
 #[test]
@@ -281,5 +281,5 @@ fn a_continuation_write_refuses_a_bad_override() {
     );
     // 失败的写出不该留下一个能被读的残缺文件。
     assert!(RestartFile::open(&written).is_err());
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 }

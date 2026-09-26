@@ -10,11 +10,23 @@ publish.workspace = true
 [dependencies]
 anyhow.workspace = true
 colm-namelist = { path = "../colm-namelist" }
-netcdf.workspace = true
-rayon.workspace = true
-
-[target.'cfg(windows)'.dependencies]
+# 静态 netcdf/HDF5（`netcdf-sys/static` → 从源码编 netcdf-c 与 HDF5）。
+#
+# 这一条原本只写在 `[target.'cfg(windows)'.dependencies]` 里 —— 因为 Windows
+# 上根本没有系统 netcdf，不静态就编不出来。但理由对三个平台同样成立：本 crate 的
+# `mksrfdata-rs` 是**跟着桌面程序分发的 sidecar**，用户机器上不装 netcdf/HDF5。
+# 只在 Windows 上静态的后果实测有两层：
+#   * CI 上 `-p colm-srfdata --bin mksrfdata-rs` 单独编（`stage-sidecar` 就是一个
+#     包一次 cargo build，没有别的成员替它打开 static）时，macOS runner 上
+#     `hdf5-metno-sys` 找不到 HDF5 直接 panic；Linux runner 只是恰好有系统 netcdf。
+#   * 更要紧的是产物：macOS/Linux 的 sidecar 会动态链接构建机 brew 的
+#     libnetcdf/libhdf5，装到用户机器上起不来 —— 与 windows-kernel.yml 里
+#     记的那类 DLL 缺失是同一个形状。
+# 三平台静态构建的可行性不是推断：`rust` 作业的 `cargo build --workspace
+# --all-targets` 一直在做带 static 的全量构建（特性在同一次调用里被
+# colm-cli/colm-init/colm-forcing 等统一打开），三个平台都过。
 netcdf = { workspace = true, features = ["static"] }
+rayon.workspace = true
 
 [lints]
 workspace = true

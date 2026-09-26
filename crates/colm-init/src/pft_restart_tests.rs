@@ -58,7 +58,7 @@ fn pft_constant_restart_matches_fortran_name_schema_and_crop_branch() {
         [1.0, 2.0]
     );
     drop(file);
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 }
 
 #[test]
@@ -110,7 +110,7 @@ fn pftless_single_point_keeps_an_empty_constant_vector() {
     )
     .is_err());
     assert!(!invalid.exists());
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 }
 
 #[test]
@@ -169,7 +169,7 @@ fn pft_time_restart_preserves_fortran_axis_order_and_feature_schema() {
     );
     assert_eq!(file.variables().count(), 33);
     drop(file);
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 }
 
 #[test]
@@ -230,7 +230,7 @@ fn pft_bgc_restart_writes_every_upstream_carbon_nitrogen_field_in_order() {
         [1.0, 2.0]
     );
     drop(file);
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 }
 
 #[test]
@@ -308,7 +308,7 @@ fn pft_crop_restart_writes_the_exact_fortran_tail_schema() {
         [99_999_999, 99_999_998]
     );
     drop(file);
-    std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    crate::remove_test_tree(path.parent().unwrap());
 }
 
 #[test]
@@ -355,7 +355,7 @@ fn pft_restart_applies_def_rest_compression_to_constant_and_time_variables() {
         [0.0, 4.0, 2.0, 6.0, 1.0, 5.0, 3.0, 7.0]
     );
     drop(file);
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 }
 
 #[test]
@@ -385,7 +385,7 @@ fn pft_restart_honors_level_zero_and_four_and_rejects_invalid_preoutput() {
             expected
         );
     }
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 
     let fixture = Fixture::new();
     let mut invalid = fixture.time_input();
@@ -553,7 +553,7 @@ fn pft_bgc_restart_matches_the_upstream_fortran_reference() {
     )
     .unwrap();
     compare_netcdf(&native, &reference_path);
-    std::fs::remove_dir_all(directory).unwrap();
+    crate::remove_test_tree(directory);
 }
 
 #[test]

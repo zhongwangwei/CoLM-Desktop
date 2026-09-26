@@ -190,17 +190,20 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
 
-      # macOS 打包这一步会编 sidecar（`colm-srfdata` 的 `mksrfdata-rs`），而那条链要
-      # **系统 HDF5**：`hdf5-metno-sys` 的 build.rs 明确去找 Homebrew 的 HDF5，
-      # macOS runner 上没装就直接 `Unable to locate HDF5 root directory and/or headers`
-      # （实测第一次推 main 时这个作业就红在这里）。Linux/Windows 上它能自己找到。
+      # 打包会编 sidecar（`colm-srfdata` 的 `mksrfdata-rs`），而它现在三平台都
+      # **静态**链接 netcdf/HDF5，所以这里刻意什么都不装 —— 与 `rust` 作业
+      # 「不装系统 netCDF」是同一条纪律，而且这里更要紧：sidecar 是要发给用户的。
       #
-      # 与 `rust` 作业"故意不装系统 netCDF、只用静态 netcdf"的设计**不冲突**：
-      # 那条纪律针对的是引擎测试的链接路径，而这里要验的是真实打包路径 ——
-      # 开发机上也正是 `brew install hdf5 netcdf` 这一套。
-      - name: macOS HDF5 for the bundled sidecar
-        if: runner.os == 'macOS'
-        run: brew install hdf5 netcdf
+      # 这一条曾经反着写过，值得留个记录。第一次推 main 时本作业红在
+      # `hdf5-metno-sys`: `Unable to locate HDF5 root directory and/or headers`，
+      # 当时的修法是加一步 `brew install hdf5 netcdf` —— **它没有修好**，第二次
+      # 仍旧红在同一个地方。真正的原因在 Cargo.toml：`colm-srfdata` 只在
+      # `cfg(windows)` 上打开 `netcdf/static`，于是 macOS/Linux 的 sidecar 去动态
+      # 链接系统 netcdf；而 `hdf5-metno-sys` 的 build.rs 在 macOS 上只探 Homebrew 的
+      # **带版本** formula（hdf5@2.1/@2.0/@1.14/@1.12/@1.10/@1.8、hdf5-mpi），
+      # 从不探 plain `hdf5`，所以装 plain hdf5 也找不到。
+      # 现在静态是无条件的，这层就不该再有系统库 —— 装上去只会把
+      # 「sidecar 又偷偷依赖系统 netcdf」这类回归掩盖成绿色。
 
       - name: Build, lint and test the window process
         shell: bash

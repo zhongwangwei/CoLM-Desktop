@@ -252,7 +252,7 @@ mod tests {
                 6.25, 7.25, 4.25, 5.25, 6.25, 7.25, 4.25, 5.25, 6.25, 7.25,
             ]
         );
-        std::fs::remove_dir_all(root).unwrap();
+        crate::remove_test_tree(root);
     }
 
     #[test]

@@ -192,8 +192,17 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Continue'
-          cargo build --release -p colm-cli
-          if ($LASTEXITCODE -ne 0) { Write-Host "::error::colm-cli 没编出来"; exit 1 }
+          # **三个 sidecar 都要编，不能只编 colm-cli。**
+          # `colm-cli run` 默认走 Rust 预处理/初始化器（`--preprocessors rust`
+          # 就是默认值），而它按可执行文件同目录找 `mksrfdata-rs.exe` 与
+          # `mkinidata-rs.exe`。这里原先只 `cargo build --release -p colm-cli`，
+          # 于是算例跑到一半报：
+          #   Rust preprocessor is missing beside colm-cli: …\target\release\mksrfdata-rs.exe
+          # 而这条路径正是用户在桌面上点「运行」时走的 —— `beforeBuildCommand`
+          # 调的就是 `xtask stage-sidecar`。所以这里调同一个命令，别手抄那份清单
+          # （`stage-sidecar` 逐个包 `cargo build --bin`，并且自会检查产物在不在）。
+          cargo run -q -p xtask -- stage-sidecar
+          if ($LASTEXITCODE -ne 0) { Write-Host "::error::sidecar 没编出来"; exit 1 }
           $cli = ".\target\release\colm-cli.exe"
           $site = "examples\Sitedata\CN-Cng_2008-2009_FLUXNET2015_site.nc"
 

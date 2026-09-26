@@ -63,7 +63,7 @@ fn spatial_pft_writes_the_separate_constant_restart_and_honors_overrides() {
     assert_eq!(values_f64(&output, "htop_p").unwrap(), [20.0, 3.0]);
     assert_eq!(values_f64(&output, "ncd_p").unwrap(), [1.0, 2.0]);
     assert!(values_f64(&output, "hbot_p").unwrap()[0] >= 1.0);
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 }
 
 #[test]
@@ -92,7 +92,7 @@ fn spatial_pft_constant_restart_copies_crop_fractions_by_landpatch() {
     assert_eq!(values_i32(&output, "pftclass").unwrap(), [15]);
     assert_eq!(values_f64(&output, "pftfrac").unwrap(), [1.0]);
     assert_eq!(values_f64(&output, "cropfrac").unwrap(), [0.4]);
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 }
 
 #[test]
@@ -114,7 +114,7 @@ fn spatial_pft_constant_restart_rejects_misaligned_crop_fractions() {
     .unwrap_err();
     assert!(error.to_string().contains("pct_crops"));
     assert!(!restart.exists());
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 }
 
 #[test]
@@ -164,7 +164,7 @@ fn spatial_pft_soil_texture_gate_tracks_scheme_and_explicit_catch_force() {
     config.force_soil_texture = true;
     let err = write_spatial_pft_constant_restarts(config, false, false).unwrap_err();
     assert!(err.to_string().contains("soiltexture_patches"), "{err}");
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 }
 
 #[test]
@@ -240,7 +240,7 @@ fn spatial_pft_common_honors_urban_only_for_pft_and_pc_and_rejects_malformed_fla
     .unwrap_err();
     assert!(err.to_string().contains("DEF_URBAN_ONLY"), "{err}");
     assert!(!restart_bad.exists());
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 }
 
 #[test]
@@ -264,7 +264,7 @@ fn spatial_pft_time_requires_bgc_for_crop_before_materializing_any_restart() {
         .to_string()
         .contains("spatial CROP cold starts require DEF_USE_BGC"));
     assert!(!root.join("restart").exists());
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 }
 
 #[test]
@@ -301,7 +301,7 @@ fn spatial_pft_runoff_scheme_one_uses_shared_vic_source_resolution() {
     .unwrap_err();
     assert!(!error.to_string().contains("DEF_file_VIC_OPT"), "{error}");
     assert!(!restart.exists());
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 }
 
 #[test]
@@ -365,7 +365,7 @@ fn empty_pft_inputs_require_nonnatural_owners_and_reject_orphan_or_corrupt_data(
         .unwrap_err()
         .to_string()
         .contains("cannot open"));
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 }
 
 #[test]
@@ -423,7 +423,7 @@ fn spatial_pft_time_config_defaults_to_loading_snicar_from_document() {
         },
     );
     assert!(config.snicar.is_none());
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 }
 
 #[test]

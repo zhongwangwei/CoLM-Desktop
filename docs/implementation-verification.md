@@ -18373,6 +18373,33 @@ VSFI     kernel=200 rust=200
 
 ## 若继续
 
+> **第 395 轮更新（最新的指路牌，先读这段）**：第 394 轮的第一层+第二层推上去
+> （`94981f3`）后 CI 仍红，查出**四个互相独立**的根因，其中两个是**产品缺陷**：
+>
+> * **`colm-srfdata` 只在 `cfg(windows)` 上 `netcdf/static`** ⇒ macOS/Linux 的
+>   sidecar `mksrfdata-rs` 动态链接**构建机**的 netcdf/HDF5，用户机器上起不来。
+>   第 394 轮那句"`brew install hdf5 netcdf`"**没修好**：`hdf5-metno-sys` 在 macOS 上
+>   只探 `hdf5@2.1`/`@2.0`/`@1.14`… 这些**带版本**的 formula，从不探 plain `hdf5`
+>   （本机有 `hdf5@2.1` 才一直没暴露）。改成**无条件静态**，并删掉那步 brew ——
+>   装上系统库只会把同类回归掩盖成绿色。`release.yml` 的 `bundle` 是 **skipped**，
+>   所以 macOS 打包路径**只有 `ci` 的 `gui` 作业在验**。
+> * **`soil.rs` 那两条 FMA 操作数断言在 ubuntu 上差 ~21 ULP，不是 1 ULP**：
+>   `residual` 差 1 ULP，`jacobian` 经 `pow/exp` 放大到 18–21 ULP（还有 ~1e-9 的
+>   相减小量）⇒ 8 ULP 的界结构上不成立。非 macOS 分支改成 `atol+rtol=1e-12` 的
+>   **结构性 sanity**，并写明**它抓不住 1 ULP 级的 FMA 操作数错位**（那条只在 macOS 上成立）。
+> * **20 处测试文件名把块名写成大写**（`landpatch_W180_S90.nc`），而 `block_filename`
+>   产出小写 `w180`/`s90`；APFS 大小写不敏感，只有 ext4 会以 `Netcdf(2)` 揭穿。
+>   19 处在 `mksrfdata-rs.rs` 的测试模块里，被 fail-fast 挡在后面。
+> * **`windows-kernel` 只编 `colm-cli`**，而 `colm-cli run` 默认要在同目录找
+>   `mksrfdata-rs.exe`/`mkinidata-rs.exe` ⇒ 改成调 `xtask stage-sidecar`
+>   （与桌面 `beforeBuildCommand` 同一条命令）。
+> * **CI 的 clippy 是 1.98，本机是 1.97.1**：`variably_saturated_flow.rs:4548` 的
+>   `let x; … x = …` 触发 `needless_late_init`，本机不报 ⇒ 写成 `let x = if … else …`。
+>   **本机 clippy rc=0 不算反证**，看红先看日志里的 `rust-x.y.z`。
+> * **Windows 上 35 个 `colm-init` 测试删不掉临时目录**（`Os { code: 32 }`）：清理时
+>   `netcdf::open` 的 Dataset 还活着（117 处 `.unwrap()`、66 个句柄、若干被 shadow）⇒
+>   新增 `colm_init::remove_test_tree()`，unix 上失败仍是失败，Windows 上只记录不失败。
+
 > **第 394 轮更新（最新的指路牌，先读这段）**：第一次推 `origin/main`（855 个 commit）后
 > CI 报红，逐条查清是**三类平台/环境**问题，**都不是端口算错**：
 >
@@ -23777,3 +23804,191 @@ Error: cargo build -p colm-srfdata --bin mksrfdata-rs failed
 `hdf5-metno-sys` 自己能找到，macOS 上找不到）。改法：给 macOS 加一步
 `brew install hdf5 netcdf` —— 与 `rust` 作业那条"只用静态 netcdf"的纪律**不冲突**：
 那条针对引擎测试的链接路径，这里要验的是真实打包路径，开发机上也正是这一套。
+
+> **第 395 轮更正：这一步没有修好。** 第二次 CI 里它确实跑了（日志有
+> `Bottle hdf5 (2.2.0)`），同一个 panic 又出现一次；真正的原因在
+> `colm-srfdata/Cargo.toml` 的 `cfg(windows)` 上，见第 395 轮第一节。
+
+## 第 395 轮：把 CI 修绿的第二、三层 —— 四个根因，其中两个是**产品缺陷**而非 CI 噪声
+
+第 394 轮的第一层与第二层一起推上去（`94981f3`）之后 CI 仍旧红。逐条读日志得到四个
+**互相独立**的根因。读的手段：作业还没结束时 `gh run view --log-failed` 会拒绝，
+用 `gh api /repos/<owner>/<repo>/actions/jobs/<job_id>/logs` 取。
+
+### 一、`colm-srfdata` 只在 `cfg(windows)` 上静态链接 netcdf ⇒ 发出去的 macOS/Linux sidecar 依赖系统 netcdf（产品缺陷）
+
+`gui (macos-latest)` 红在：
+
+```text
+error: failed to run custom build command for `hdf5-metno-sys v0.12.2`
+  Unable to locate HDF5 root directory and/or headers.
+Error: cargo build -p colm-srfdata --bin mksrfdata-rs failed
+```
+
+原因有两层，缺一层都查不到底：
+
+* `hdf5-metno-sys` 的 `build.rs` 在 macOS 上**只探带版本的 Homebrew formula**
+  （`hdf5@2.1`/`@2.0`/`@1.14`/`@1.12`/`@1.10`/`@1.8`、`hdf5-mpi`），**从不探 plain `hdf5`**
+  （`hdf5-metno-sys-0.12.2/build.rs:346-437`）。所以 `brew install hdf5` 解决不了它。
+  本机一直没事，是因为开发机上装着 `hdf5@2.1` 与 `hdf5@1.14`，那个探测恰好命中。
+* 更根本的是**为什么会在 macOS 上找系统 HDF5**：`colm-srfdata/Cargo.toml` 把
+  `netcdf = { …, features = ["static"] }` 写在 `[target.'cfg(windows)'.dependencies]` 里。
+  `netcdf/static → netcdf-sys/static → hdf5-metno-sys/static`（从源码编 `netcdf-src`
+  与 `hdf5-metno-src`），所以**只有 Windows** 走静态。`stage-sidecar` 是一次一个包地
+  `cargo build --release -p <pkg> --bin <bin>`，单独选 `colm-srfdata` 时没有别的成员
+  替它把 `static` 打开 ⇒ macOS/Linux 上它去动态链接**构建机上**的 netcdf/HDF5。
+
+  这不是 CI 噪声：`mksrfdata-rs` 是**跟着桌面程序分发的 sidecar**，用户机器上没有 brew
+  netcdf ⇒ 装上去起不来。与 `windows-kernel.yml` 里记的那类 DLL 缺失是同一个形状。
+  而 `release.yml` 的 `bundle` 作业在 `main` 上是 **skipped**，所以 macOS 打包路径
+  **只有 `ci` 的 `gui` 作业在验**：它红了就等于这条路径从来没验过。
+
+改法：static 改成**无条件**，并删掉 `ci.yml` 里那步无效的 `brew install`。可行性不是推断
+—— `rust` 作业的 `cargo build --workspace --all-targets` 一直在三平台做带 static 的全量
+构建（`colm-cli`/`colm-init`/`colm-forcing`/`oracle`/`colm-hist` 都开着 `static`，特性在同一
+次调用里被统一），三个平台都过。改完单独选这个包也验证了：
+
+```text
+$ cargo tree -p colm-srfdata -i hdf5-metno-sys -e features
+hdf5-metno-sys feature "static"
+└── netcdf-sys feature "static" (*)
+    └── netcdf feature "static"
+        └── colm-srfdata v0.2.0-beta.4
+```
+
+反过来也成立：装上系统库只会把「sidecar 又偷偷依赖系统 netcdf」这类回归**掩盖成绿色**，
+所以这层现在刻意什么都不装。
+
+### 二、那两条"FMA 操作数"断言在 ubuntu 上不是差 1 ULP，而是差 ~21 ULP（我的容差写窄了）
+
+第 394 轮把 `soil.rs` 那两条改成「macOS 逐位、其他平台 8 ULP」，第二次 CI **仍然红，
+但红在容差分支内部**（`soil.rs:788`）：
+
+```text
+Campbell Jacobian … element 7:   4.83011867416826501e-1 != 4.83011867416825502e-1   ← 9.99e-16 ≈ 18 ULP
+VGM Jacobian      … element 25: -5.97827883200612198e-1 != -5.97827883200609866e-1  ← 2.33e-15 ≈ 21 ULP
+```
+
+`residual` 只差 1 ULP，**`jacobian` 差到 ~21 ULP**：两者都含 `pow/exp`（Campbell 与 van
+Genuchten 曲线），glibc 与 macOS libm 的末位差经雅可比放大（那里还有靠相减得到的 ~1e-9
+小量）。所以 8 ULP 这个界**结构上就不成立**，换一个 ULP 数也只是撞运气。
+
+改法：非 macOS 分支只做**结构性 sanity** —— `atol + rtol*|expected|`（各取 1e-12）。
+实测最坏偏差 2.33e-15，留了约 400 倍余量；量级、符号、公式接错都会被抓住。同时把
+**它抓不住什么**写进 doc comment：1 ULP 级的 FMA 操作数错位
+（`.FMA(a,b,c)=a*b+c` 接反只差 ~1 ULP）在这个分支上抓不到，那条只在 macOS 上成立 ——
+别把 ubuntu/Windows 的绿色当成"FMA 已验"。雅可比里有 |expected|~1e-9 的元素，那里相对
+容差本身不成立，靠 `atol` 兜住。
+
+### 三、20 处测试文件名把块名写成大写，只有 ext4 会揭穿
+
+```text
+spatial_tests.rs:2662  Netcdf(2)   ← ENOENT
+```
+
+`block_filename`（`spatial.rs:5228`）产出的是**小写** `w180`/`s90`
+（`format!("w{:03}")` / `format!("s{:02}")`），而测试里写的是 `landpatch_W180_S90.nc`。
+macOS 的 APFS **大小写不敏感**，拼错了照样 `open` 成功；ext4 上就是 `Netcdf(2)`。同一个
+测试下面那行 `patchfrac_elm_w180_s90.nc` 是小写的、指向同一个块 —— 所以不是"有两套命名"，
+就是拼错。
+
+同一形状在 `crates/colm-srfdata/src/bin/mksrfdata-rs.rs` 的测试模块里**还有 19 处**
+（`mesh`/`landpatch`/`landpft`/`pct_pfts`/`htop`/`LAI`/`lulcc`），只是 `cargo test` 的
+fail-fast 让它们还没轮到跑。核对方式：`spatial.rs` 里所有写文件的调用点
+（`3530/3607/3691/4079/4125/5124/5214`）**全部**经 `block_filename`，
+`LAI/2005/{kind}_patches01_…` 里的 `01` 只是 file stem 的一部分，块后缀仍是小写
+⇒ 20 处一律改成小写，并在 `spatial_tests.rs` 那个位置留了注释说明这个坑。
+
+**本机验不了**（APFS 不区分大小写）：本地只能验"文本上 `_W180_S90` 归零"与"写文件的 8 个
+调用点都过 `block_filename`"。真正的判据是下一次 ubuntu 作业 —— ext4 就是那条断言。
+
+### 四、`windows-kernel` 只编了 `colm-cli`，而算例现在要三个 sidecar（工作流漏了一步）
+
+```text
+Error: Rust preprocessor is missing beside colm-cli: D:\a\…\target\release\mksrfdata-rs.exe
+run exit code: 1
+::error::算例没跑完
+```
+
+`colm-cli run` 现在默认 `--preprocessors rust`（`main.rs:1839` 的 `unwrap_or("rust")`），
+并按**可执行文件同目录**找 `mksrfdata-rs.exe` / `mkinidata-rs.exe`
+（`rust_preprocessor_executable`，`main.rs:1849`），而该步骤原先只
+`cargo build --release -p colm-cli`。这不是本轮的回归：`9105c12` 与 `71982ed` 两次都红在
+同一处。
+
+改法：这一步改成调 `cargo run -q -p xtask -- stage-sidecar`。桌面程序的
+`beforeBuildCommand` 调的就是它（`gui/src-tauri/tauri.bundle.conf.json:3`），而它已经在
+`gui (windows-latest)` 作业上验证过；在 workflow 里另抄一份 sidecar 清单迟早会再漏一个。
+
+### 五、macOS 的 `rust` 作业这一轮才露出**新 clippy 的 lint**（本机版本低于 CI）
+
+`94981f3` 那次 `rust (macos-latest)` 的**测试全过**，红在 clippy：
+
+```text
+error: unneeded late initialization
+  --> crates/colm-core/src/variably_saturated_flow.rs:4548:5
+   = note: `-D clippy::needless-late-init` implied by `-D warnings`
+   = note: rust-1.98.0
+```
+
+`let total_runoff_mm_s;` 先声明、再在各分支里赋值 —— clippy 1.98 的
+`needless_late_init` 认这个形状，本机（Homebrew 1.97.1）**不报**。所以这一条只能由 CI
+发现，本机 clippy rc=0 不构成反证。ubuntu/Windows 两个作业同样是 1.98，只是它们此前在
+测试那一步就红了、根本没走到 clippy。
+
+改法：按 clippy 的建议写成 `let x = if … else …`。语义逐位不变 —— 分支内对
+`surface_runoff_mm_s`/`infiltration_excess_runoff_mm_s` 的修改仍发生在取值之前。
+
+**教训**：本机 rust 比 CI 旧时，"clippy 本地干净"只说明本机这个版本没有这条 lint。
+以后看到 `-D warnings` 的红，先看日志里的 `rust-x.y.z`，别先怀疑代码。
+
+### 六、35 个 `colm-init` 测试在 Windows 上删不掉临时目录（`Os { code: 32 }`）
+
+`rust (windows-latest)` 过了 `colm-hist` 那层之后，`colm-init` 一次红 35 个，全是同一形状：
+
+```text
+thread 'spatial_static::spatial_static_tests::spatial_lct_…' panicked at
+  crates\colm-init\src\spatial_static_tests.rs:211:35:
+called `Result::unwrap()` on an `Err` value: Os { code: 32, kind: Uncategorized,
+  message: "The process cannot access the file because it is being used by another process." }
+```
+
+`crates/colm-init/src/*_tests.rs` 里 117 处清理都是
+`std::fs::remove_dir_all(root).unwrap();`，而测试用 `netcdf::open` 打开的 `Dataset`
+大多活到函数末尾（有的一个测试里好几个句柄，有的还被 shadow）⇒ 清理时目录里仍有本进程
+打开着的文件。unix 允许删打开着的文件，Windows 不允许。与 `colm-hist` 那条 `remove_file`
+（第 394 轮已修）是同一个坑，只是数量大得多。
+
+改法：新增 `colm_init::remove_test_tree()`（`#[cfg(test)]`），117 处全部改调它。
+**unix 上失败仍然是失败**，Windows 上打印 `Windows: 临时目录没清掉 …` 但不失败 ——
+临时目录留在系统 temp 里，好过把 35 个测试弄红。这个 helper 不校验任何物理量，
+放宽它不改变任何断言的口径。
+
+被否决的两个方案（理由都是改动面，不是正确性）：
+
+* 逐处 `drop` 掉句柄 —— 66 个句柄，其中若干被 shadow（同一个 `let block = …` 两次），
+  要重组作用域才拿得到旧句柄；本机还一样验不了（unix 删打开着的文件不报错）。
+* 把 `temporary()` 改成 Drop 时删除的 guard 类型 —— guard 第一行声明就最后 drop，
+  句柄都已关闭，是从根上解决；但要动 9 个文件的测试支撑、clone/move 的用法会逐个报错，
+  Windows 上的效果本机仍然验不了。
+
+### 本轮本地实测
+
+```text
+cargo fmt --all --check                                rc=0（引擎）
+cargo fmt --all --check（gui workspace）                rc=0
+cargo clippy --workspace --all-targets -- -D warnings  rc=0（**本机 1.97.1，见第五节**）
+cargo clippy -p colm-init --all-targets -- -D warnings rc=0（新 doc comment 曾触发
+                                                       clippy::doc_lazy_continuation：
+                                                       列表后紧接一段没空行；已补空行）
+cargo test -p colm-srfdata --lib                       270 passed; 1 ignored
+cargo test -p colm-srfdata --bins                       49 passed   ← 静态 netcdf 在本机能编能跑
+cargo test -p colm-init --lib -- --test-threads=1      156 passed; 9 ignored
+cargo test -p colm-core --lib                          359 passed  ← 第五节的 if/else 改写
+```
+
+`remove_test_tree` 在本机走的是**严格分支**（unix）：156 passed 说明 117 处替换没有
+把哪个测试的清理弄坏。Windows 分支（只记录不失败）本机跑不到。
+
+第三、五、六节的真正判据都在 CI 上（ext4 的大小写、clippy 1.98、Windows 的文件占用），
+本机三条都验不了 —— 所以这三条修完必须再看一次三平台的结果，不能以本地绿收工。

@@ -120,7 +120,7 @@ fn cold_restart_uses_the_surface_hru_order_and_native_four_vectors() {
             .all(|value| *value == 0.0));
     }
     drop(file);
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 }
 
 #[test]
@@ -175,7 +175,7 @@ fn catch_lateral_restart_compresses_dynamic_vectors_but_not_identity() {
         .is_err()
     );
     assert!(!invalid.join("restart").exists());
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 }
 
 #[test]
@@ -233,7 +233,7 @@ fn cold_restart_uses_native_lake_depths() {
         [7.0]
     );
     drop(file);
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 }
 
 #[test]
@@ -286,7 +286,7 @@ fn estimated_river_depth_accumulates_native_runoff_downstream() {
     assert!((basin[1] - second).abs() < 1.0e-12);
     assert_eq!(basin, hru);
     drop(file);
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 }
 
 fn write_mesh(path: &std::path::Path) {

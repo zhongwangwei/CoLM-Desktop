@@ -95,7 +95,7 @@ fn lct_spatial_block_becomes_a_constant_restart() {
     assert_eq!(values_f64(&block, "vf_quartz").unwrap()[0], 0.3);
     assert!(block.variable("debdrock").is_none());
     assert!(block.variable("soil_alb").is_none());
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 }
 
 #[test]
@@ -175,7 +175,7 @@ fn spatial_lake_soil_carbon_preserves_source_and_only_defaults_absent_data() {
     let file = netcdf::open(write_spatial_lct_constant_restart(config).unwrap().block).unwrap();
     assert!(file.variable("lake_soilc_srf").is_none());
     drop(file);
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 }
 
 #[test]
@@ -208,7 +208,7 @@ fn spatial_lct_inactive_soil_texture_skips_missing_source_with_deterministic_pla
     let block = netcdf::open(files.block).unwrap();
     assert_eq!(values_i32(&block, "soiltext").unwrap(), [0]);
     assert_eq!(values_f64(&block, "BVIC").unwrap(), [BVIC_USDA[0]]);
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 }
 
 #[test]
@@ -254,7 +254,7 @@ fn spatial_lct_active_soil_texture_requires_source_and_preserves_normalization()
     let block = netcdf::open(files.block).unwrap();
     assert_eq!(values_i32(&block, "soiltext").unwrap(), [0]);
     assert_eq!(values_f64(&block, "BVIC").unwrap(), [BVIC_USDA[0]]);
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 }
 
 #[test]
@@ -301,7 +301,7 @@ fn spatial_lct_constant_restart_masks_virtual_wmo_patch() {
         (values_f64(&block, "patchlonr").unwrap()[0] - (-179.0_f64).to_radians()).abs() < 1.0e-12
     );
 
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 }
 
 #[test]
@@ -402,7 +402,7 @@ fn spatial_lct_urban_only_masks_nonurban_through_urban_wrapper_without_compactin
             }
         }
     }
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 }
 
 #[test]
@@ -442,7 +442,7 @@ fn spatial_lct_urban_only_preserves_wmo_sentinel_mask_and_usgs_urban_class() {
     let block = netcdf::open(files.block).unwrap();
     assert_eq!(values_i32(&block, "patchclass").unwrap(), [1, 2]);
     assert_eq!(mask_values(&block), [1, 0]);
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 }
 
 #[test]
@@ -492,7 +492,7 @@ fn spatial_lct_writes_only_enabled_bedrock_and_hyperspectral_fields() {
     assert_eq!(albedo.len(), 211);
     assert_eq!(albedo.first(), Some(&0.04));
     assert_eq!(albedo.last(), Some(&0.25));
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 }
 
 #[test]
@@ -551,7 +551,7 @@ fn spatial_lct_writes_enabled_topmodel_and_simple_terrain_fields() {
         values_f64(&block, "asp_type_patches").unwrap(),
         [8.0, 7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0, 0.0]
     );
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 }
 
 #[test]
@@ -611,7 +611,7 @@ fn spatial_runoff_topmodel_methods_read_only_their_selected_sources() {
     assert_eq!(values_f64(&block, "fsatmax").unwrap(), [0.38]);
     assert_eq!(values_f64(&block, "alp_twi").unwrap(), [1.5]);
     assert_eq!(values_f64(&block, "mu_twi").unwrap(), [7.0]);
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 }
 
 #[test]
@@ -669,7 +669,7 @@ fn spatial_vic_scalar_and_grid_parameters_follow_runoff_scheme_one() {
     let mut conflicting = config;
     conflicting.use_topmodel = true;
     assert!(write_spatial_lct_constant_restart(conflicting).is_err());
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 }
 
 #[test]
@@ -729,7 +729,7 @@ fn spatial_lct_writes_enabled_regular_terrain_fields() {
         values_f64(&block, "sf_curve_patches").unwrap(),
         (0..48).map(f64::from).collect::<Vec<_>>()
     );
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 }
 
 #[test]
@@ -821,7 +821,7 @@ fn spatial_pft_cold_start_writes_common_and_pft_constant_restarts() {
     assert_eq!(values_f64(&pft, "hbot_p").unwrap(), [20.0 / 17.0]);
     assert_eq!(values_f64(&common, "hbot").unwrap(), [20.0 / 17.0]);
     assert!(files.bgc.is_some());
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 }
 
 #[test]
@@ -910,7 +910,7 @@ fn spatial_pft_wmo_virtual_patch_keeps_sentinel_geometry_and_time_state() {
     let common_time = netcdf::open(&files.common.block).unwrap();
     assert_eq!(values_f64(&common_time, "sai").unwrap(), [0.8]);
     assert_eq!(values_f64(&common_time, "tsai").unwrap(), [0.4]);
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 }
 
 #[test]
@@ -1002,7 +1002,7 @@ fn spatial_pft_cold_start_writes_pft_time_and_replaces_common_optics() {
     let pc = netcdf::open(pc_files.pft.unwrap()).unwrap();
     let shade = values_f64(&pc, "fshade_p").unwrap()[0];
     assert!(shade.is_finite() && shade != crate::MISSING);
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 }
 
 #[test]
@@ -1142,7 +1142,7 @@ fn spatial_pft_hyperspectral_cold_start_writes_shared_common_and_pft_spectra() {
         .unwrap()
         .iter()
         .all(|value| *value == 0.0));
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 }
 
 #[test]
@@ -1227,7 +1227,7 @@ fn spatial_hyperspectral_keeps_nonnatural_patches_out_of_pft_canopy() {
         let pft = netcdf::open(files.pft.unwrap()).unwrap();
         assert_eq!(values_f64(&pft, "tlai_p").unwrap().len(), 1);
     }
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 }
 
 #[test]
@@ -1341,7 +1341,7 @@ fn spatial_pft_pc_empty_blocks_keep_common_cn_and_crop_without_pft_files() {
             }
         }
     }
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 }
 
 #[test]
@@ -1404,7 +1404,7 @@ fn spatial_crop_tuning_writes_pft_and_bgc_restart_state_without_management_maps(
     let bgc = netcdf::open(files.bgc.unwrap().block).unwrap();
     assert_eq!(values_f64(&bgc, "cphase").unwrap(), [4.0]);
     assert_eq!(values_f64(&bgc, "pdrice2").unwrap(), [0.0]);
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 }
 
 #[test]
@@ -1486,7 +1486,7 @@ fn spatial_crop_management_maps_reach_the_shared_restart_writers() {
         let bgc = netcdf::open(files.bgc.unwrap().block).unwrap();
         assert_eq!(values_f64(&bgc, "pdrice2").unwrap(), [2.0]);
     }
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 }
 
 #[test]
@@ -1537,7 +1537,7 @@ fn spatial_bgc_cn_equilibrium_maps_soil_by_patch_and_vegetation_by_pft() {
     assert_eq!(values_f64(&pft, "leafc_p").unwrap(), [200.0]);
     let bgc = netcdf::open(files.bgc.unwrap().block).unwrap();
     assert_eq!(values_f64(&bgc, "sminn_vr").unwrap(), [10.0; 10]);
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 }
 
 #[test]
@@ -1692,7 +1692,7 @@ fn spatial_pft_and_pc_seed_only_tracer_wetland_cn_without_synthetic_pfts() {
     let error = crate::write_spatial_pft_cold_time_restarts(config).unwrap_err();
     assert!(error.to_string().contains("DEF_USE_TRACER"));
     assert!(!restart.exists());
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 }
 
 #[test]
@@ -1726,7 +1726,7 @@ fn spatial_lct_cold_start_writes_the_timestamped_restart_from_monthly_landdata()
     assert_eq!(values_f64(&file, "t_lake").unwrap(), vec![285.0; 10]);
     assert_eq!(values_f64(&file, "dz_lake").unwrap().len(), 10);
     assert!(file.variable("vegwp").is_none());
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 }
 
 #[test]
@@ -1756,7 +1756,7 @@ fn spatial_lct_cold_start_reads_8_day_lai_and_native_stem_area() {
     let file = netcdf::open(output.block).unwrap();
     assert_eq!(values_f64(&file, "tlai").unwrap(), [2.5]);
     assert_eq!(values_f64(&file, "tsai").unwrap(), [2.0]);
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 }
 
 #[test]
@@ -1797,7 +1797,7 @@ fn spatial_lct_cold_start_area_averages_observed_soil_and_snow() {
     assert_eq!(values_f64(&file, "snowdp").unwrap(), [0.2]);
     assert_eq!(values_f64(&file, "scv").unwrap(), [50.0]);
     assert!(values_f64(&file, "fsno").unwrap()[0] > 0.0);
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 }
 
 #[test]
@@ -1833,7 +1833,7 @@ fn spatial_lct_observed_soil_masks_every_field_from_missing_water_table() {
     let file = netcdf::open(output.block).unwrap();
     assert_eq!(values_f64(&file, "t_soisno").unwrap()[5], 270.0);
     assert_eq!(values_f64(&file, "zwt").unwrap(), [3.0]);
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 }
 
 #[test]
@@ -1869,7 +1869,7 @@ fn spatial_lct_cold_start_uses_explicit_edge_water_table_without_soil() {
     let file = netcdf::open(output.block).unwrap();
     assert_eq!(values_f64(&file, "zwt").unwrap(), [2.0]);
     assert_eq!(values_f64(&file, "t_soisno").unwrap()[5], 283.0);
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 }
 
 #[test]
@@ -1933,7 +1933,7 @@ fn spatial_lcz_urban_cold_start_writes_common_and_urban_restarts() {
     assert!((values_f64(&common, "fveg").unwrap()[0] - 1.0 / 3.0).abs() < 1.0e-12);
     let urban = netcdf::open(time.urban.unwrap()).unwrap();
     assert_eq!(values_f64(&urban, "tree_lai").unwrap(), [2.5]);
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 }
 
 fn write_urban_landdata(landdata: &Path, year: i32, block: &str) {

@@ -257,3 +257,38 @@ pub(crate) fn ncdump_available() -> bool {
         .status()
         .is_ok()
 }
+
+/// 删掉测试用的临时目录。
+///
+/// 为什么需要它：这些测试用 `netcdf::open` 打开的 `Dataset` 大多活到函数末尾
+/// （还有被 shadow 的，以及一个测试里好几个句柄的），于是清理时目录里仍有**本进程
+/// 打开着的**文件。unix 允许删打开着的文件，Windows 不允许 —— `remove_dir_all`
+/// 报 `Os { code: 32 }`（文件正被另一个进程使用）。实测 `rust (windows-latest)`
+/// 上 35 个测试同时红在这里，而本机（APFS/unix）永远看不到，所以这是 CI 才能发现的
+/// 平台假设，和 colm-hist 那条 `remove_file` 是同一个形状。
+///
+/// 处理方式是权衡后的选择：**unix 上失败仍然是失败**（那里没有借口），Windows 上
+/// 打印出来但不失败 —— 临时目录留在系统 temp 里，好过把 35 个测试弄红。这个方法
+/// 本身不校验任何物理量，所以放宽它不改变任何断言的口径。
+///
+/// 被否决的两个方案，否决理由是改动面而不是正确性：
+///   * 逐处 `drop` 掉句柄（colm-hist 的 `remove_file` 就是那么修的）—— 这里涉及
+///     66 个句柄，其中若干被 shadow（同一个 `let block = …` 两次），要逐个重组
+///     作用域才拿得到旧句柄；
+///   * 把 `temporary()` 改成 Drop 时删除的 guard 类型（guard 第一行声明 ⇒ 最后
+///     drop ⇒ 句柄都已关闭，从根上解决）—— 要动 9 个文件的测试支撑，clone/move
+///     的用法会逐个报错，而 Windows 上的效果本机一样验不了。
+///
+/// 新写的测试如果只有一个句柄，清理前直接 `drop` 掉更干净。
+#[cfg(test)]
+pub(crate) fn remove_test_tree(root: impl AsRef<std::path::Path>) {
+    let root = root.as_ref();
+    let Err(error) = std::fs::remove_dir_all(root) else {
+        return;
+    };
+    if cfg!(windows) {
+        eprintln!("Windows: 临时目录没清掉 {}: {error}", root.display());
+    } else {
+        panic!("cannot remove {}: {error}", root.display());
+    }
+}

@@ -2659,7 +2659,11 @@ fn wmo_surface_writes_sentinels_zero_fractions_and_copies_zipped_sources() {
     let output = root.join("landdata");
     let blocks = BlockLayout::regular(1, 1).unwrap();
     write_spatial_topology(&output, 2005, &topology, &patches, &blocks, 1).unwrap();
-    let file = netcdf::open(output.join("landpatch/2005/landpatch_W180_S90.nc")).unwrap();
+    // 文件名一律小写：`block_filename` 生成的是 `w180`/`s90`（`format!("w{:03}")`）。
+    // 这里曾经写成 `landpatch_W180_S90.nc` —— macOS 的 APFS 大小写不敏感，拼错了
+    // 照样能 open；换到 ext4 上就是 `Netcdf(2)`（ENOENT），实测 ubuntu 上红在这里。
+    // 同一测试下面那行 `patchfrac_elm_w180_s90.nc` 是小写的，正是同一个块。
+    let file = netcdf::open(output.join("landpatch/2005/landpatch_w180_s90.nc")).unwrap();
     let starts = file
         .variable("ipxstt")
         .unwrap()

@@ -52,7 +52,7 @@ fn restart_tuning_namelist_preserves_all_overrides_in_netcdf() {
         assert_eq!(variable.get_value::<f64, _>(()).unwrap(), value, "{name}");
     }
     file.close().unwrap();
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 }
 
 #[test]
@@ -171,7 +171,7 @@ fn constant_restart_matches_fortran_variable_order_shapes_and_transposition() {
             .unwrap(),
         [16.0]
     );
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 }
 
 #[test]
@@ -234,7 +234,7 @@ fn optional_fortran_restart_sections_have_native_netcdf_dimensions() {
     );
     assert!(file.variable("topoweti").is_some());
     drop(file);
-    std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    crate::remove_test_tree(path.parent().unwrap());
 }
 
 #[test]
@@ -266,7 +266,7 @@ fn static_restart_schema_matches_the_upstream_fortran_reference() {
     assert_eq!(actual_dimensions, reference_dimensions);
     drop(actual);
     drop(reference);
-    std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    crate::remove_test_tree(path.parent().unwrap());
 }
 
 #[test]
@@ -308,7 +308,7 @@ fn constant_restart_writes_optional_lake_soil_carbon_with_compression_and_valida
     let omitted = netcdf::open(&omitted_path).unwrap();
     assert!(omitted.variable("lake_soilc_srf").is_none());
     drop(omitted);
-    std::fs::remove_dir_all(omitted_path.parent().unwrap()).unwrap();
+    crate::remove_test_tree(omitted_path.parent().unwrap());
 
     let values = (0..20)
         .map(|index| {
@@ -345,7 +345,7 @@ fn constant_restart_writes_optional_lake_soil_carbon_with_compression_and_valida
         let header = ncdump_header(&path);
         let expected = if level == 0 { None } else { Some(level) };
         assert_eq!(deflate_level(&header, "lake_soilc_srf"), expected);
-        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+        crate::remove_test_tree(path.parent().unwrap());
     }
 
     for (label, bad_values) in [
@@ -415,7 +415,7 @@ fn constant_restart_applies_def_rest_compression_only_to_upstream_compressed_fie
         [20.0, 30.0]
     );
     drop(file);
-    std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    crate::remove_test_tree(path.parent().unwrap());
 }
 
 #[test]
@@ -436,7 +436,7 @@ fn constant_restart_honors_explicit_compression_levels_and_rejects_invalid_befor
         let expected = if level == 0 { None } else { Some(level) };
         assert_eq!(deflate_level(&header, "lakedepth"), expected);
         assert_eq!(deflate_level(&header, "patchclass"), None);
-        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+        crate::remove_test_tree(path.parent().unwrap());
     }
 
     let mut invalid = input(&soil, &lake, &canopy);
@@ -764,5 +764,5 @@ fn constant_restart_round_trips_through_the_reader() {
         block.layer_column("vf_quartz", 1, 10).unwrap(),
         on_disk[10..20].to_vec()
     );
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 }

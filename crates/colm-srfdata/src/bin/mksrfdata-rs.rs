@@ -6255,7 +6255,7 @@ mod tests {
             filter.display().to_string(),
         ])
         .unwrap();
-        let mesh = netcdf::open(output.join("mesh/2005/mesh_W180_S90.nc")).unwrap();
+        let mesh = netcdf::open(output.join("mesh/2005/mesh_w180_s90.nc")).unwrap();
         assert_eq!(
             mesh.variable("elmindex")
                 .unwrap()
@@ -6270,7 +6270,7 @@ mod tests {
                 .unwrap(),
             [3, 1, 6, 1, 7, 1]
         );
-        let patches = netcdf::open(output.join("landpatch/2005/landpatch_W180_S90.nc")).unwrap();
+        let patches = netcdf::open(output.join("landpatch/2005/landpatch_w180_s90.nc")).unwrap();
         assert_eq!(
             patches
                 .variable("settyp")
@@ -6445,7 +6445,7 @@ mod tests {
                 assert_eq!(bits(&actual), bits(expected), "zip={zip} {path}:{variable}");
             };
             check(
-                "landpft/2005/landpft_W180_S90.nc",
+                "landpft/2005/landpft_w180_s90.nc",
                 "pctshared",
                 &pfts.pctshared,
             );
@@ -6463,7 +6463,7 @@ mod tests {
                 crop_excluded_class: None,
             };
             let fractions = aggregate_pft_fractions(&layout, input).unwrap();
-            check("pctpft/2005/pct_pfts_W180_S90.nc", "pct_pfts", &fractions);
+            check("pctpft/2005/pct_pfts_w180_s90.nc", "pct_pfts", &fractions);
             let height = read_mesh_tiled_raster_f64(
                 &root,
                 "MOD2005",
@@ -6474,12 +6474,12 @@ mod tests {
             )
             .unwrap();
             check(
-                "htop/2005/htop_patches_W180_S90.nc",
+                "htop/2005/htop_patches_w180_s90.nc",
                 "htop_patches",
                 &layout.aggregate_igbp_forest_height(&height, &area).unwrap(),
             );
             let height = aggregate_pft_height(&layout, input, &height).unwrap();
-            check("htop/2005/htop_pfts_W180_S90.nc", "htop_pfts", &height);
+            check("htop/2005/htop_pfts_w180_s90.nc", "htop_pfts", &height);
             let mut outputs = vec![bits(&fractions), bits(&height)];
             for kind in ["LAI", "SAI"] {
                 let raw = read_mesh_tiled_raster_pft_time_f64(
@@ -6507,12 +6507,12 @@ mod tests {
                 )
                 .unwrap();
                 check(
-                    &format!("LAI/2005/{kind}_patches01_W180_S90.nc"),
+                    &format!("LAI/2005/{kind}_patches01_w180_s90.nc"),
                     &format!("{kind}_patches"),
                     &index.patch_index,
                 );
                 check(
-                    &format!("LAI/2005/{kind}_pfts01_W180_S90.nc"),
+                    &format!("LAI/2005/{kind}_pfts01_w180_s90.nc"),
                     &format!("{kind}_pfts"),
                     &index.pft_index,
                 );
@@ -6613,7 +6613,7 @@ mod tests {
             materialize_spatial_pft(&args).unwrap();
 
             let patches =
-                netcdf::open(output.join("landpatch/2005/landpatch_W180_S90.nc")).unwrap();
+                netcdf::open(output.join("landpatch/2005/landpatch_w180_s90.nc")).unwrap();
             assert_eq!(
                 patches
                     .variable("settyp")
@@ -6623,7 +6623,7 @@ mod tests {
                 [11, 13, 15, 17],
                 "{label}"
             );
-            let htop = netcdf::open(output.join("htop/2005/htop_patches_W180_S90.nc")).unwrap();
+            let htop = netcdf::open(output.join("htop/2005/htop_patches_w180_s90.nc")).unwrap();
             assert_eq!(
                 htop.variable("htop_patches")
                     .unwrap()
@@ -6633,9 +6633,9 @@ mod tests {
                 "{label}"
             );
             for path in [
-                "landpft/2005/landpft_W180_S90.nc",
-                "pctpft/2005/pct_pfts_W180_S90.nc",
-                "htop/2005/htop_pfts_W180_S90.nc",
+                "landpft/2005/landpft_w180_s90.nc",
+                "pctpft/2005/pct_pfts_w180_s90.nc",
+                "htop/2005/htop_pfts_w180_s90.nc",
             ] {
                 assert!(
                     !output.join(path).exists(),
@@ -6718,7 +6718,7 @@ mod tests {
                 wmo.to_string(),
             ];
             materialize_spatial_pft(&args).unwrap();
-            let pfts = netcdf::open(output.join("landpft/2005/landpft_W180_S90.nc")).unwrap();
+            let pfts = netcdf::open(output.join("landpft/2005/landpft_w180_s90.nc")).unwrap();
             let shares = pfts
                 .variable("pctshared")
                 .unwrap()
@@ -6801,7 +6801,7 @@ mod tests {
         ])
         .unwrap();
         let patches =
-            netcdf::open(crop_output.join("landpatch/2005/landpatch_W180_S90.nc")).unwrap();
+            netcdf::open(crop_output.join("landpatch/2005/landpatch_w180_s90.nc")).unwrap();
         assert_eq!(
             patches
                 .variable("settyp")
@@ -6820,7 +6820,7 @@ mod tests {
         {
             assert!((actual - expected).abs() < 1.0e-12);
         }
-        let pfts = netcdf::open(crop_output.join("landpft/2005/landpft_W180_S90.nc")).unwrap();
+        let pfts = netcdf::open(crop_output.join("landpft/2005/landpft_w180_s90.nc")).unwrap();
         assert_eq!(
             pfts.variable("settyp")
                 .unwrap()
@@ -6888,13 +6888,13 @@ mod tests {
             &patches,
         )
         .unwrap();
-        let lc1 = netcdf::open(transfer_output.join("lulcc/2005/lccpct_patches_lc01_W180_S90.nc"))
+        let lc1 = netcdf::open(transfer_output.join("lulcc/2005/lccpct_patches_lc01_w180_s90.nc"))
             .unwrap()
             .variable("lccpct_patches")
             .unwrap()
             .get_values::<f64, _>(..)
             .unwrap();
-        let lc2 = netcdf::open(transfer_output.join("lulcc/2005/lccpct_patches_lc02_W180_S90.nc"))
+        let lc2 = netcdf::open(transfer_output.join("lulcc/2005/lccpct_patches_lc02_w180_s90.nc"))
             .unwrap()
             .variable("lccpct_patches")
             .unwrap()
@@ -7040,7 +7040,7 @@ mod tests {
         let type_count = 18;
         assert!((values[type_count + 1] - 0.5).abs() < 1.0e-12);
         assert!((values[type_count + 2] - 0.5).abs() < 1.0e-12);
-        let patch_lc1 = netcdf::open(output.join("lulcc/2005/lccpct_patches_lc01_W180_S90.nc"))
+        let patch_lc1 = netcdf::open(output.join("lulcc/2005/lccpct_patches_lc01_w180_s90.nc"))
             .unwrap()
             .variable("lccpct_patches")
             .unwrap()
