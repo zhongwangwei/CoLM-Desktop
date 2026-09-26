@@ -21,7 +21,15 @@ jobs:
     runs-on: windows-latest
     # **挂住比失败更贵**：一次去掉 `-ffpe-trap` 的尝试让 mksrfdata 跑了
     # 三十多分钟也不结束，而作业的默认上限是六小时。
-    timeout-minutes: 30
+    #
+    # 30 分钟在 2026-09-26 那次（`c74e727`）只剩 2 分半余量 —— 实测分解：
+    # 装 MSYS2 1m52s、编 Fortran 内核 14m12s、`A real case, end to end` 10m17s，
+    # 合计 27m22s。那一步在这一轮才第一次**真的干活**（以前一发现
+    # `mksrfdata-rs.exe` 缺失就退出）：现在要编三个 sidecar，再加绝对/相对两条
+    # 端到端各跑一遍算例。30 分钟对 runner 的抖动没有任何缓冲，所以放宽到 45：
+    # 仍然把"挂住"限制在有界时间内，但不会因为机器慢一点就假红。
+    # 真跑到 45 分钟说明是挂住（那时上面那个 GDB 步骤会指出卡在哪一段）。
+    timeout-minutes: 45
     steps:
       - name: Keep line endings as committed
         run: git config --global core.autocrlf false

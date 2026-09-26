@@ -462,7 +462,7 @@ fn the_bridge_writes_the_state_variables_it_declares() {
         .get_values::<f64, _>(..)
         .unwrap();
     assert_eq!(lai, vec![template.leaf_area_index]);
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 }
 
 /// 写出的 schema 必须与黄金文件对得上：名字、维度、单位、长名逐项比。
@@ -549,7 +549,7 @@ fn the_written_schema_matches_the_golden_file_for_the_shared_variables() {
         compared >= 34,
         "only {compared} variables were compared against the golden file; skipped: {skipped:?}"
     );
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 }
 
 /// 积雪分支走雪入口，`soilsnow` 的雪段来自雪列而不是零。
@@ -625,7 +625,7 @@ fn the_snow_branch_fills_the_snow_span() {
         .get_values::<f64, _>(..)
         .unwrap();
     assert_eq!(scv, vec![state.snow.water_equivalent_kg_m2]);
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 }
 
 /// 积雪分支的**会话**也要写地表诊断量（`taux`/`tauy`/`z0m`/`zol`/`tref` …）。
@@ -777,7 +777,7 @@ fn the_snow_branch_session_fills_the_surface_diagnostics() {
         assert_eq!(values, vec![expected], "f_{name}");
     }
     assert!(file.variable("f_scv").is_some());
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 }
 
 /// 会话把一次真实多步运行写成按调度分组的文件。
@@ -861,7 +861,7 @@ fn the_session_writes_one_record_per_scheduled_hour() {
     assert_eq!(times[3], 0);
     // 变量也写出来了，且带着标签。
     assert!(file.variable("f_t_soisno").is_some());
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 }
 
 /// 累加器必须**跳过 `spval` 并只按有效步数取平均**。
@@ -911,7 +911,7 @@ fn the_accumulator_skips_missing_samples_and_counts_only_valid_ones() {
         vec![64.0],
         "one valid sample in a two-step record must average to itself, not to half"
     );
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 }
 
 /// 两个收支残差必须**当场闭合**。
@@ -993,7 +993,7 @@ fn the_balance_residuals_close_on_one_step() {
         errorw.abs() <= 1.0e-3,
         "water balance residual is {errorw} mm per step; upstream warns above 1e-3"
     );
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 }
 
 /// `h2osoi` 必须**液相与固相各用自己的密度**。
@@ -1046,7 +1046,7 @@ fn the_derived_soil_moisture_uses_both_phase_densities() {
         "liquid must divide by denh2o (1000), got {}",
         values[1]
     );
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 }
 
 /// `*_inst` 三个量走的是**瞬时**规则，不是区间平均。
@@ -1091,5 +1091,5 @@ fn the_instantaneous_water_variables_take_the_last_step_not_the_mean() {
         150.0,
         "an averaged variable over the same inputs must carry the mean"
     );
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 }

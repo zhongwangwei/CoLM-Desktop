@@ -18373,6 +18373,21 @@ VSFI     kernel=200 rust=200
 
 ## 若继续
 
+> **第 396 轮更新（最新的指路牌，先读这段）**：`c74e727` 让 `gui (macos-latest)` **转绿**
+> （无条件静态 netcdf 成立），`release`/`gui` 另两平台/kernel-filesystem 也都绿；
+> 三个 `rust` 作业红在三处新地方：
+>
+> * `soil.rs` 里**还有两条逐位断言**（我只换了前两条）：lmder 拟合结果差 1–3 ULP，
+>   而 `(3*lambda+2)` 那个**相减小量**差 **512 ULP**（绝对值才 7.1e-15）—— 正好说明
+>   "8 ULP 那种界"为什么不成立、而 `atol+rtol=1e-12` 为什么够。两条都改 `assert_bits_close`。
+> * `colm-runtime` 的 9 个 Windows 清理点（`Os { code: 32 }`），与 `colm-init` 同一形状 ⇒
+>   同一份 `remove_test_tree`（两个 crate 互不依赖，各留一份）。
+> * **macOS 的 `colm-srfdata` 23 个红是 HDF5 非线程安全**，不是端口错误：一个真
+>   `Netcdf(-101)` 之后 poison 共享锁，22 个 `PoisonError` 是连锁。本机并行 15/59 失败、
+>   串行 270/0；同一 runner 在 `71982ed`/`94981f3` 上都是 270/0 —— **一直是侥幸绿**。
+>   ⇒ CI 把 `colm-init`/`colm-srfdata` 也串行（改执行方式，不改断言）。
+>   **仓库里任何 open/create NetCDF 的新测试目标，只要进默认并行那条命令就是在赌核数。**
+
 > **第 395 轮更新（最新的指路牌，先读这段）**：第 394 轮的第一层+第二层推上去
 > （`94981f3`）后 CI 仍红，查出**四个互相独立**的根因，其中两个是**产品缺陷**：
 >
@@ -23972,6 +23987,44 @@ called `Result::unwrap()` on an `Err` value: Os { code: 32, kind: Uncategorized,
   句柄都已关闭，是从根上解决；但要动 9 个文件的测试支撑、clone/move 的用法会逐个报错，
   Windows 上的效果本机仍然验不了。
 
+### 七、顺带发现：`colm-init --lib` 在多核机器上**并行跑会假红**（不是本轮改出来的）
+
+改 `remove_test_tree` 时按 CI 的命令在本机跑了一遍，`colm-init::lib` 一次红 31 个，
+失败信息是 HDF5 的 `Netcdf(-101)`（`NC_EHDFERR`），位置全在 **open/create**：
+
+```text
+$ cargo test --workspace --lib --bins --exclude colm-cli
+test result: FAILED. 125 passed; 31 failed; 9 ignored     ← colm-init::lib
+gridriver_tests.rs:371  called `Result::unwrap()` on an `Err` value: Netcdf(-101)
+```
+
+逐一排除（每次都是同一条命令）：
+
+| 条件 | `colm-init --lib` 结果 |
+|---|---|
+| 本机默认并行（10 核） | 125 passed / **31 failed**（再跑一次 120/36 —— 数量随机） |
+| 本机 `--test-threads=4` | 139 passed / **17 failed** |
+| 本机 `--test-threads=1` | **156 passed / 0 failed** |
+| `crates/colm-init/src` 换回 `94981f3`（**本轮改动之前**），默认并行 | 125 passed / **31 failed**，19 处 `Netcdf(-101)` |
+| CI `macos-latest`（3 核），默认并行 | **156 passed / 0 failed**，29.75s |
+
+结论三条：
+
+1. **不是本轮改动引入的** —— 改之前的代码在同样条件下同样红（31 个、同样 19 处 `-101`）。
+2. 是**并发**问题：netcdf/HDF5 的 C 库默认不是线程安全的，165 个测试并发 open/create
+   同一批 HDF5 文件会互相踩。线程数降下来失败数就降，降到 1 就全绿。
+   （`mkinidata-rs` 的 bin 测试 24 个并行也全绿 —— 只有 lib 这一档会踩。）
+3. CI 的 runner 只有 3 核，所以一直没暴露。**核多的机器上 `CLAUDE.md` 里那条
+   `cargo test --workspace --lib --bins` 会假红**，31 个失败会把真正的回归淹掉。
+
+本轮**不改 CI**：这个目标在 CI 上一直是绿的，而 `cargo test` 没有"只给一个 crate 设
+线程数"的开关（往 `.cargo/config.toml` 写 `RUST_TEST_THREADS=1` 会把整个 workspace
+拖慢）。记在这里是因为自托管 runner（`golden` 作业跑的是 `cargo test --workspace`）
+核多，哪天跑起来会撞上。本机绕法：
+`cargo test -p colm-init --lib -- --test-threads=1`。真要根治就在测试侧加一把全局
+NetCDF 互斥锁 —— `colm-cli` 的测试已经是这个形状（`static NETCDF_LOCK: Mutex<()>`），
+但 colm-init 这档是 165 处，另开一轮。
+
 ### 本轮本地实测
 
 ```text
@@ -23992,3 +24045,123 @@ cargo test -p colm-core --lib                          359 passed  ← 第五节
 
 第三、五、六节的真正判据都在 CI 上（ext4 的大小写、clippy 1.98、Windows 的文件占用），
 本机三条都验不了 —— 所以这三条修完必须再看一次三平台的结果，不能以本地绿收工。
+
+## 第 396 轮：第三层的续集 —— 两处同类收尾，加一处**库级限制**（HDF5 非线程安全）
+
+`c74e727` 的结果：`gui (macos-latest)` **转绿**（无条件静态 netcdf 那一修成立，这是本轮
+最有价值的一条 —— 它同时修掉了"发出去的 sidecar 依赖构建机 netcdf"这个产品缺陷）、
+`release` 绿、`gui` 的另外两个平台与 `kernel-filesystem` 绿；`ci` 的三个 `rust` 作业
+**仍红**，而且红在三处完全不同的地方。
+
+### 一、`soil.rs` 里还有两条"逐位"断言（上一轮只换了前两条）
+
+第 395 轮把 `assert_bits_close` 换上之后，ubuntu 上**同一个测试**继续红，但换到了
+**后面的**断言：
+
+```text
+soil.rs:1113  VGM lmder final fit must match original callback plus MOD_Utils bits
+              left  [4591659154293484863, 4579091356085103040, 4608473575275113518, 4626146328016980759]
+              right [4591659154293484863, 4579091356085103039, 4608473575275113518, 4626146328016980762]
+soil.rs:1251  Campbell (3*lambda+2) coefficient …
+              left  4553224774719402544      right 4553224774719402032
+```
+
+* 前者是 **lmder 的拟合结果**（迭代求解）：差 1–3 ULP，末位差随迭代累积。
+* 后者是**相减得到的小量**（~0.064）：差 **512 ULP**（绝对值只有 7.1e-15）。
+  这一条恰好回答了"为什么 8 ULP 那种界不成立" —— 不是一个 ULP 常数能覆盖的量，
+  但**绝对值仍然小**，`atol=1e-12` 留了约 140 倍余量。
+
+两条都改成 `assert_bits_close`：macOS 逐位、其他平台 `atol+rtol=1e-12` 的结构性 sanity。
+口径没有偷偷放松的地方要说清楚：`residual`/`jacobian` 的 **FMA 操作数**校验本来就只在
+macOS 上成立，非 macOS 分支从来抓不住 1 ULP 级的操作数错位（第 395 轮已写进 doc comment）。
+
+### 二、`colm-runtime` 的 9 个 Windows 清理点（`colm-init` 那一类的续集）
+
+`colm-init` 修好之后，`rust (windows-latest)` 往下走到 `colm-runtime`，一次红 9 个：
+
+```text
+history_tests.rs:465 / 552 / 628 / 780 / 864 / 914 / 996 / 1049 / 1094
+called `Result::unwrap()` on an `Err` value: Os { code: 32, …
+  "The process cannot access the file because it is being used by another process." }
+```
+
+同样是 `std::fs::remove_dir_all(root).unwrap()` 撞上还开着的 `Dataset`。加了
+`colm_runtime::remove_test_tree`（与 `colm_init` 那份同一个形状 —— 两个 crate 按设计
+互不依赖，所以各留一份），9 处全改；`assembly_tests.rs`/`lib.rs` 里原有的
+`let _ = …` 三处不动（那是另一类：路径可能本来就不存在）。
+
+### 三、macOS 的 `colm-srfdata` 23 个红：**HDF5 不是线程安全的**（库级限制，不是端口错误）
+
+```text
+site_tests.rs:2334  called `Result::unwrap()` on an `Err` value: Netcdf(-101)
+site.rs:1523        called `Result::unwrap()` on an `Err` value: PoisonError { .. }   ← 连锁
+```
+
+一个真的 `Netcdf(-101)`（NC_EHDFERR）之后共享锁被 poison，另外 22 个跟着报
+`PoisonError` —— 看上去 23 个缺陷，源头只有一个。本机复现（`cargo test -p colm-srfdata --lib`）：
+
+| 执行方式 | 结果 |
+|---|---|
+| 并行（默认，10 核） | 255 passed / **15 failed**（7 处 `Netcdf(-101)`） |
+| 并行（再跑一次） | 211 passed / **59 failed**（3 处 `-101` + 47 处 `PoisonError`） |
+| `--test-threads=1` | **270 passed / 0 failed** |
+
+**失败数随线程数变化 ⇒ 竞态**。而同一个 macOS runner 在 `71982ed` 与 `94981f3` 上都是
+`270 passed; 0 failed` —— 这一直是**侥幸**绿，核一多或调度一变就红。根因是 netcdf/HDF5
+的 C 库默认**不是线程安全的**：`site.rs:1522` 那句注释
+（"NetCDF/HDF5 writes are serialized"）只把**写**串行化，并发测试里的**读**
+（`netcdf::open`）不受那把锁保护，读写并发就能踩坏 HDF5 的全局状态。
+
+处置：**CI 里把 `colm-init` 与 `colm-srfdata` 也串行**（与 `colm-cli` 早就有的一致）。
+这是改**执行方式**，不改任何断言、不改任何数字：
+
+```yaml
+cargo test --workspace --lib --bins --exclude colm-cli --exclude colm-init --exclude colm-srfdata
+cargo test -p colm-cli --bin colm-cli -- --test-threads=1
+cargo test -p colm-init --lib --bins -- --test-threads=1
+cargo test -p colm-srfdata --lib --bins -- --test-threads=1
+```
+
+被否决：在测试侧给 NetCDF 加一把覆盖*读*的全局锁 —— 那是根治，但要动 165 + 271 处
+调用点，而问题只在并发执行方式上，留作日后可选。
+被否决：只调默认线程数 —— `cargo test` 没有"只给一个 crate 设线程数"的开关，
+`.cargo/config.toml` 里写 `RUST_TEST_THREADS=1` 会把整个 workspace 拖慢。
+
+**这一条的经验值得单独记**：`cargo test` 默认并行，而 HDF5 把"进程内并发访问"
+当成未定义行为。本仓库任何新增的、会 open/create NetCDF 的测试目标，
+只要它进了默认并行的那一条命令，就是在赌核数与调度。核多的机器（本机 10 核、
+自托管 runner）必输。
+
+### 第 396 轮本地实测：把 CI 的 `Test` 步骤整段在本机跑了一遍
+
+改 `ci.yml` 的那几行不能只"看起来对"，所以把该步骤的 18 条命令原样抄成脚本跑完：
+
+```text
+cargo fmt --all --check                                                    rc=0
+cargo clippy --workspace --all-targets -- -D warnings                     rc=0
+cargo test --workspace --lib --bins --exclude colm-cli \
+           --exclude colm-init --exclude colm-srfdata                      rc=0   ← 其余 crate 并行仍全绿
+cargo test -p colm-cli --bin colm-cli -- --test-threads=1                 rc=0
+cargo test -p colm-init --lib --bins -- --test-threads=1                  rc=0
+cargo test -p colm-srfdata --lib --bins -- --test-threads=1               rc=0
+cargo test -p colm-cli --test study_cli_tuning -- --test-threads=1        rc=0
+cargo test -p oracle --test judge                                          rc=0
+cargo test -p oracle --test golden_run                                     rc=0
+cargo test -p colm-namelist --test roundtrip                               rc=0
+cargo test -p colm-schema --test drift                                     rc=0
+cargo test -p oracle --test histmap                                        rc=0
+cargo test -p colm-hist --test drift                                       rc=0
+cargo test -p colm-core --test drift_landcover                             rc=0
+cargo test -p colm-core --test drift_co2                                   rc=0
+cargo test -p xtask --test kernel_profile                                  rc=0
+cargo test -p xtask --test windows_console                                 rc=0
+cargo test -p xtask --test ci_golden_status                                rc=0
+```
+
+第三条 rc=0 顺带回答了一个问题：**只有 `colm-init` 与 `colm-srfdata` 会踩 HDF5 的
+并发**，其余 crate（`colm-runtime`、`colm-hist`、`colm-core`、`oracle`、`xtask`……）
+在 10 核并行下依然全绿，所以串行名单不必再扩大。
+
+`c74e727` 那次的 `windows-kernel` **转绿**（`stage-sidecar` 那一修成立），耗时
+27m22s / 上限 30 分钟 —— 余量只剩 2 分半，所以本轮把上限放宽到 45 并记下分解
+（MSYS2 1m52s、Fortran 内核 14m12s、真实算例 10m17s）。

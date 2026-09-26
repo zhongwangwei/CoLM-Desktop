@@ -91,9 +91,21 @@ jobs:
         # GitHub 的 bash 带 `set -eo pipefail`。
         shell: bash
         run: |
-          cargo test --workspace --lib --bins --exclude colm-cli
-          # colm-cli tests share NetCDF/HDF5 process state; keep only this binary serial.
+          cargo test --workspace --lib --bins --exclude colm-cli --exclude colm-init --exclude colm-srfdata
+          # 下面三个 crate 的测试**共享 NetCDF/HDF5 的进程状态**，必须串行。
+          # netcdf/HDF5 的 C 库默认不是线程安全的：并发 open/create 会以
+          # `Netcdf(-101)`（NC_EHDFERR）互相踩，失败数随线程数变化 —— 实测本机
+          # 10 核同时跑 `cargo test --workspace --lib --bins`：
+          #   colm-init     125 passed / 31 failed（`--test-threads=4` 时 17 个，
+          #                 1 线程 156 passed）
+          #   colm-srfdata  255 passed / 15 failed（另一次 211/59：1 个真 `-101`
+          #                 之后 47 个 `PoisonError` 连锁；1 线程 270 passed）
+          # CI 的 runner 核少，此前是**侥幸**过的：c74e727 那次 macOS 就红在
+          # colm-srfdata 的 23 个。这与 `--test-threads=1` 是同一类处置，
+          # 不是把断言放宽 —— 串行只改执行方式，不改任何一个数字。
           cargo test -p colm-cli --bin colm-cli -- --test-threads=1
+          cargo test -p colm-init --lib --bins -- --test-threads=1
+          cargo test -p colm-srfdata --lib --bins -- --test-threads=1
           # Exercise the actual CLI scheduler/DE path, not just test-only reducers.
           # The fake-kernel shell harness runs on Unix; Windows uses unit/native jobs.
           cargo test -p colm-cli --test study_cli_tuning -- --test-threads=1

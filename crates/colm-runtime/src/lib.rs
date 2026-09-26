@@ -933,6 +933,28 @@ fn required_real(document: &Document, field: &str) -> Result<f64> {
     Ok(value)
 }
 
+/// 删掉测试用的临时目录。与 `colm_init::remove_test_tree` 同一个东西、同一个理由
+/// （两个 crate 互不依赖，所以各留一份）：
+///
+/// 测试用 `netcdf::open` 打开的 `Dataset` 大多活到函数末尾，清理时目录里仍有本进程
+/// 打开着的文件。unix 允许删打开着的文件，Windows 不允许 —— `rust (windows-latest)`
+/// 上 `history_tests.rs` 一次红了 9 个，全是 `Os { code: 32 }`。
+///
+/// 权衡：**unix 上失败仍然是失败**，Windows 上打印出来但不失败（临时目录留在系统
+/// temp 里）。这个 helper 不校验任何物理量，所以放宽它不改变任何断言的口径。
+#[cfg(test)]
+pub(crate) fn remove_test_tree(root: impl AsRef<std::path::Path>) {
+    let root = root.as_ref();
+    let Err(error) = std::fs::remove_dir_all(root) else {
+        return;
+    };
+    if cfg!(windows) {
+        eprintln!("Windows: 临时目录没清掉 {}: {error}", root.display());
+    } else {
+        panic!("cannot remove {}: {error}", root.display());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
