@@ -18373,6 +18373,17 @@ VSFI     kernel=200 rust=200
 
 ## 若继续
 
+> **第 394 轮更新（最新的指路牌，先读这段）**：第一次推 `origin/main`（855 个 commit）后
+> CI 报红，逐条查清是**三类平台/环境**问题，**都不是端口算错**：
+>
+> * `colm-core` 两条 1 ULP 断言（`radiation_tests.rs` / `runtime_forcing_tests.rs`）把
+>   **libm 末位**当成了跨平台不变量 —— 参考值是 macOS 上生成的，ubuntu/windows 的 libm
+>   差 1 ULP。改成 **macOS 逐位钉死、其他平台 8 ULP**。这两个测试文件是端口线新增的。
+> * 7 个 `colm-init` 测试 shell 出去跑 **`ncdump`**，而 CI 的 `rust` 作业**故意不装系统 netCDF**
+>   ⇒ 加了 `ncdump_available()` + **响亮跳过**（crate 没有读压缩级别的接口，工作区也禁 FFI）。
+> * macOS 的 `gui` 打包作业缺**系统 HDF5**（`hdf5-metno-sys` 找 Homebrew 的 HDF5）⇒
+>   该作业补 `brew install hdf5 netcdf`。
+
 > **第 393 轮更新（最新的指路牌，先读这段）**：把快照里"**会改变物理、而本仓库不读**"
 > 的那些开关逐个挡住（16 条，判据是"算例把它设成了**非声明默认值**"）。
 >
@@ -23705,3 +23716,59 @@ DEF_TUNING_SIMPLE_VIC_DS = 0.061  → 正常运行，0 个不同量（写默认�
 * `DEF_USE_SNICAR = .true.` → 已被守卫显式拒绝（"only the standard snow branch…"）✓
 * 土热导率 8 档里没测过的 7 档（1/2/3/5/6/7/8）逐一跑过：**逐个 0 个不同量** ✓
   —— 说明这个开关的**派发**是对的（模块算术早有 `compare_soilthermal` 40000/40000 兜底）。
+
+## 第 394 轮：第一次推 main 之后 —— 三处**平台/环境**问题（不是端口算错）
+
+把 855 个 commit 推上 `origin/main` 后 CI 起了三个 workflow。实测结果：
+
+```text
+release            success（7m39s，比上次 1h18m 快）
+windows-kernel     in_progress
+ci                 failure —— 三个平台的 rust 作业都红，外加 macOS 的 gui 作业
+```
+
+逐个查出来是**三类不同**的原因，都不是"端口算错了"：
+
+### 一、`colm-core` 两条断言把 libm 的末位当成跨平台不变量（我的测试写窄了）
+
+```text
+radiation_tests.rs:452        left 4577306880377570131  right 4577306880377570132   ← 1 ULP
+runtime_forcing_tests.rs:204  left 0.37567558158031616  right 0.3756755815803163    ← 1 ULP
+```
+
+* `radiation` 那条**ubuntu 与 windows 同样差 1 ULP**，而 **macOS CI 通过** ⇒ 是
+  **平台 libm** 差异（`two_stream` 里含 `exp/pow/sqrt`）。
+* `runtime_forcing` 那条**只有 ubuntu 差**（windows/macOS 相同）⇒ glibc 的 `sin/cos` 末位。
+
+这两份参考值是在 **macOS** 上由上游 Fortran 生成的（与黄金文件同源），所以"逐位"只能
+在 macOS 上成立。改法：**macOS 上仍然 `assert_eq!(to_bits())` 逐位钉死**，其他平台放宽到
+**8 ULP**（真算错是量级差，8 ULP 抓得住；平台 libm 的末位差不再把 CI 弄红）。
+两个文件都是端口线**新增**的（旧 main 里不存在），所以这是"新测试从没在别的平台跑过"，
+不是回归。
+
+### 二、7 个 `colm-init` 测试依赖外部 `ncdump`，而 CI **刻意**没有它
+
+失败原文是 `Os { code: 2, kind: NotFound }`，追到 `ncdump_header()` —— 它们 shell 出去跑
+`ncdump -sh` 读 NetCDF 头（看逐变量 deflate 级别）。而 `ci.yml` 的 `rust` 作业写明**故意不装
+系统 netCDF**（HDF5 与 netcdf-c 从源码静态编）⇒ runner 上没有 `ncdump`。这不是环境配错，
+是**设计**。`netcdf` crate 只提供 `set_compression`、**没有读回来的接口**，工作区的
+`unsafe_code = forbid` 也不让直接 FFI 调 `nc_inq_var_deflate` ⇒ 无法在进程内替代。
+
+改法：加 `colm_init::ncdump_available()`（`#[cfg(test)]`），7 个测试开头**明确跳过并打印原因**。
+本机有 `ncdump`，所以本机仍然跑真实路径（156 passed 不变），CI 上则是**响亮的跳过**而不是
+"假装跑过"。
+
+### 三、macOS 打包作业缺系统 HDF5（CI 环境的真实缺口）
+
+```text
+error: failed to run custom build command for `hdf5-metno-sys v0.12.2`
+  Attempting to find HDF5 via Homebrew (any version)...
+  Unable to locate HDF5 root directory and/or headers.
+Error: cargo build -p colm-srfdata --bin mksrfdata-rs failed
+```
+
+`gui` 作业在 macOS 上要**打包**（编 sidecar `mksrfdata-rs`），那条链要系统 HDF5，
+而该作业只给 Linux 装了 webkit 依赖、macOS/Windows 什么都没装（Windows 上
+`hdf5-metno-sys` 自己能找到，macOS 上找不到）。改法：给 macOS 加一步
+`brew install hdf5 netcdf` —— 与 `rust` 作业那条"只用静态 netcdf"的纪律**不冲突**：
+那条针对引擎测试的链接路径，这里要验的是真实打包路径，开发机上也正是这一套。

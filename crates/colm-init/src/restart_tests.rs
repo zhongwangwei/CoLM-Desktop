@@ -295,6 +295,10 @@ fn restart_rejects_conflicting_or_incomplete_optional_sections() {
 
 #[test]
 fn constant_restart_writes_optional_lake_soil_carbon_with_compression_and_validation() {
+    if !crate::ncdump_available() {
+        eprintln!("skip constant_restart_writes_optional_lake_soil_carbon_with_compression_and_validation: ncdump not found（CI 刻意不装系统 netCDF）");
+        return;
+    }
     let soil = soil_state();
     let lake = derive_lake_layers(&[20.0, 30.0], 10).unwrap();
     let canopy = canopy();
@@ -366,6 +370,10 @@ fn constant_restart_writes_optional_lake_soil_carbon_with_compression_and_valida
 
 #[test]
 fn constant_restart_applies_def_rest_compression_only_to_upstream_compressed_fields() {
+    if !crate::ncdump_available() {
+        eprintln!("skip constant_restart_applies_def_rest_compression_only_to_upstream_compressed_fields: ncdump not found（CI 刻意不装系统 netCDF）");
+        return;
+    }
     let soil = soil_state();
     let lake = derive_lake_layers(&[20.0, 30.0], 10).unwrap();
     let canopy = canopy();
@@ -412,6 +420,10 @@ fn constant_restart_applies_def_rest_compression_only_to_upstream_compressed_fie
 
 #[test]
 fn constant_restart_honors_explicit_compression_levels_and_rejects_invalid_before_output() {
+    if !crate::ncdump_available() {
+        eprintln!("skip constant_restart_honors_explicit_compression_levels_and_rejects_invalid_before_output: ncdump not found（CI 刻意不装系统 netCDF）");
+        return;
+    }
     let soil = soil_state();
     let lake = derive_lake_layers(&[20.0, 30.0], 10).unwrap();
     let canopy = canopy();

@@ -232,6 +232,10 @@ fn hyperspectral_fields_append_to_the_shared_common_restart() {
 
 #[test]
 fn time_restart_compresses_all_common_restart_fields_and_preserves_decoded_values() {
+    if !crate::ncdump_available() {
+        eprintln!("skip time_restart_compresses_all_common_restart_fields_and_preserves_decoded_values: ncdump not found（CI 刻意不装系统 netCDF）");
+        return;
+    }
     let root = temp_dir("compression-default");
     let path = root.join("restart.nc");
     write_time_restart_block(&path, input()).unwrap();
@@ -253,6 +257,10 @@ fn time_restart_compresses_all_common_restart_fields_and_preserves_decoded_value
 
 #[test]
 fn time_restart_honors_explicit_compression_and_append_levels_and_rejects_invalid_preoutput() {
+    if !crate::ncdump_available() {
+        eprintln!("skip time_restart_honors_explicit_compression_and_append_levels_and_rejects_invalid_preoutput: ncdump not found（CI 刻意不装系统 netCDF）");
+        return;
+    }
     let root = temp_dir("compression-levels");
     let mut restart = input();
     restart.compression_level = 4;

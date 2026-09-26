@@ -313,6 +313,10 @@ fn pft_crop_restart_writes_the_exact_fortran_tail_schema() {
 
 #[test]
 fn pft_restart_applies_def_rest_compression_to_constant_and_time_variables() {
+    if !crate::ncdump_available() {
+        eprintln!("skip pft_restart_applies_def_rest_compression_to_constant_and_time_variables: ncdump not found（CI 刻意不装系统 netCDF）");
+        return;
+    }
     let root = temp_dir("compression-default");
     let const_path = write_pft_constant_restart(
         &root,
@@ -356,6 +360,10 @@ fn pft_restart_applies_def_rest_compression_to_constant_and_time_variables() {
 
 #[test]
 fn pft_restart_honors_level_zero_and_four_and_rejects_invalid_preoutput() {
+    if !crate::ncdump_available() {
+        eprintln!("skip pft_restart_honors_level_zero_and_four_and_rejects_invalid_preoutput: ncdump not found（CI 刻意不装系统 netCDF）");
+        return;
+    }
     let root = temp_dir("compression-levels");
     for (level, label) in [(0, "zero.nc"), (4, "four.nc")] {
         write_pft_constant_restart_block(

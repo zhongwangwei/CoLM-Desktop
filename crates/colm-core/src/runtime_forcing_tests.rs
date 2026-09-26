@@ -201,7 +201,14 @@ fn the_shortwave_split_is_fed_the_grid_cell_solar_angle() {
     // 站点坐标必须明显偏掉 —— 两条一起才钉得住"用的是哪一组坐标"。
     let upstream_direct_visible: f64 = 64.953_960_218_550_56;
     assert_eq!(grid.direct_visible_w_m2, upstream_direct_visible);
-    assert_eq!(grid_angle, 0.375_675_581_580_316_3);
+    // 角度本身由 `sin/cos` 算出，glibc 与 macOS 差 1 ULP（实测 ubuntu 差 1 ULP，
+    // windows/macOS 相同）。这条要钉的是"喂进去的是**网格中心**那一组坐标"，
+    // 而下面站点的偏移量是 5e-4 —— 比 ULP 大 12 个量级，给 8 ULP 完全够。
+    let grid_angle_tolerance = 8.0 * f64::EPSILON * 0.375_675_581_580_316_3_f64.abs();
+    assert!(
+        (grid_angle - 0.375_675_581_580_316_3).abs() <= grid_angle_tolerance,
+        "grid angle {grid_angle:.17e} is not 0.3756755815803163 within 8 ULP"
+    );
     let off_by =
         (site.direct_visible_w_m2 - upstream_direct_visible).abs() / upstream_direct_visible;
     assert!(

@@ -449,7 +449,22 @@ fn lct_two_stream_matches_all_original_pearl_river_outputs() {
             ]);
         for (index, (actual, expected)) in actual.zip(expected).enumerate() {
             if exact {
-                assert_eq!(actual.to_bits(), expected, "class {class}, output {index}");
+                // 参考位型是**在 macOS 上**由上游 Fortran 生成的（与黄金文件同源），
+                // 而 `two_stream` 里含 `exp/pow/sqrt`：实测 ubuntu 与 windows 的 libm
+                // 与 macOS 差 **1 ULP**（`…131` vs `…132`），macOS CI 与本机逐位相同。
+                // 所以 macOS 上仍然逐位钉死，其他平台放宽到 8 ULP —— 真算错是量级差，
+                // 8 ULP 抓得住；平台 libm 的末位差不再把 CI 弄红。
+                let expected_value = f64::from_bits(expected);
+                if cfg!(target_os = "macos") {
+                    assert_eq!(actual.to_bits(), expected, "class {class}, output {index}");
+                } else {
+                    let tolerance = 8.0 * f64::EPSILON * expected_value.abs();
+                    assert!(
+                        (actual - expected_value).abs() <= tolerance,
+                        "class {class}, output {index}: {actual:.17e} != {expected_value:.17e} \
+                         (超出 8 ULP)"
+                    );
+                }
             } else {
                 let expected = f64::from_bits(expected);
                 assert!((actual - expected).abs() <= 1.0e-12 + 1.0e-12 * expected.abs(),

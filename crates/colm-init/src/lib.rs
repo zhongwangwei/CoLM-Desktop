@@ -238,3 +238,22 @@ pub use urban_restart::{
     write_urban_time_restart_block, UrbanConstantRestartInput, UrbanNamedField, UrbanThermalFields,
     UrbanTimeRestartDimensions, UrbanTimeRestartInput,
 };
+
+/// CI 三平台**刻意不装系统 netCDF**（HDF5 与 netcdf-c 从源码静态编，见
+/// `.github/workflows/ci.yml`），所以 runner 上没有 `ncdump`。
+///
+/// 有几个测试靠外部 `ncdump -sh` 读 NetCDF 头（看逐变量的 deflate 级别）——
+/// `netcdf` crate 只提供 `set_compression`、**没有读回来的接口**，而工作区的
+/// `unsafe_code = forbid` 也不让直接 FFI 调 `nc_inq_var_deflate`。所以这些头检查
+/// 只能在**装了该工具**的地方跑；没装就**明确跳过并在日志里说明**，
+/// 而不是把 CI 弄红（也不假装跑过）。
+#[cfg(test)]
+pub(crate) fn ncdump_available() -> bool {
+    std::process::Command::new("ncdump")
+        .arg("-h")
+        .arg("/dev/null")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok()
+}

@@ -190,6 +190,18 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
 
+      # macOS 打包这一步会编 sidecar（`colm-srfdata` 的 `mksrfdata-rs`），而那条链要
+      # **系统 HDF5**：`hdf5-metno-sys` 的 build.rs 明确去找 Homebrew 的 HDF5，
+      # macOS runner 上没装就直接 `Unable to locate HDF5 root directory and/or headers`
+      # （实测第一次推 main 时这个作业就红在这里）。Linux/Windows 上它能自己找到。
+      #
+      # 与 `rust` 作业"故意不装系统 netCDF、只用静态 netcdf"的设计**不冲突**：
+      # 那条纪律针对的是引擎测试的链接路径，而这里要验的是真实打包路径 ——
+      # 开发机上也正是 `brew install hdf5 netcdf` 这一套。
+      - name: macOS HDF5 for the bundled sidecar
+        if: runner.os == 'macOS'
+        run: brew install hdf5 netcdf
+
       - name: Build, lint and test the window process
         shell: bash
         working-directory: gui/src-tauri
