@@ -18373,6 +18373,20 @@ VSFI     kernel=200 rust=200
 
 ## 若继续
 
+> **第 397 轮更新（最新的指路牌，先读这段）**：`cce627a` 让 **`rust (macos-latest)` 与
+> `rust (ubuntu-latest)` 双双转绿**（串行化治竞态、`assert_bits_close` 治拟合断言），
+> `windows-kernel` 与 `release` 也绿。只剩 `rust (windows-latest)`，它**又往前走了一站**：
+> `colm-srfdata` 的 18 处 `Os { code: 32 }`。
+>
+> **关键区别**：串行化治的是**竞态**（并发才发生），而"删一个还打开着的文件"在 Windows 上
+> **单线程也不允许** —— 两类处置不能互相替代。改法同前：lib 加 `remove_test_tree` /
+> `remove_test_file`，98 处严格清理全改（bin 里 27 处用 bin 自己的一份）。
+>
+> **Rust 细节**：lib 里的 `#[cfg(test)]` helper **对同 crate 的 bin 与集成测试不可见**
+> （那时 lib 是正常编译的）—— 它们需要自己的一份。这个 Windows 清理坑已经走了四站
+> （`colm-hist` → `colm-init` → `colm-runtime` → `colm-srfdata`），规则一句话：
+> **测试清理前先 `drop` 句柄，或用 `remove_test_*`。**
+
 > **第 396 轮更新（最新的指路牌，先读这段）**：`c74e727` 让 `gui (macos-latest)` **转绿**
 > （无条件静态 netcdf 成立），`release`/`gui` 另两平台/kernel-filesystem 也都绿；
 > 三个 `rust` 作业红在三处新地方：
@@ -24165,3 +24179,50 @@ cargo test -p xtask --test ci_golden_status                                rc=0
 `c74e727` 那次的 `windows-kernel` **转绿**（`stage-sidecar` 那一修成立），耗时
 27m22s / 上限 30 分钟 —— 余量只剩 2 分半，所以本轮把上限放宽到 45 并记下分解
 （MSYS2 1m52s、Fortran 内核 14m12s、真实算例 10m17s）。
+
+## 第 397 轮：`colm-srfdata` 的 Windows 清理点（同一个坑的第三站）
+
+`cce627a` 的结果：**`rust (macos-latest)` 与 `rust (ubuntu-latest)` 双双转绿**
+（串行化治好了 HDF5 竞态、`assert_bits_close` 治好了那两条拟合断言），
+`windows-kernel` 与 `release` 也绿；只剩 `rust (windows-latest)`，而且它**又往前走了一站**：
+
+```text
+crates\colm-srfdata\src\site_tests.rs:2692:35   ← 以及另 17 处
+called `Result::unwrap()` on an `Err` value: Os { code: 32, … "being used by another process." }
+test result: FAILED. 252 passed; 18 failed; 1 ignored
+```
+
+**这一站说明前两轮的两类处置是两件事**：
+* 上一轮把 `colm-init` / `colm-srfdata` 串行化，治的是**竞态**（并发才发生）；
+* 而"**删一个还打开着的文件**"在 Windows 上**单线程也不允许** —— 串行化对它无效。
+  两者都是 HDF5/netcdf 的进程语义，但一个靠串行、一个只能靠"别再删它"。
+
+顺带确认了前两站是对的：Windows 这次**过了** `colm-cli --bin` 与 `colm-init`
+（`Os code 32` 那一修在 Windows 上成立），才走到 `colm-srfdata`。
+
+改法（与 `colm-init`/`colm-runtime` 同一形状）：lib 里加 `remove_test_tree` 与
+`remove_test_file`，把该 crate 里 **98 处**严格清理（90 处目录 + 8 处文件，分布在
+`site_tests.rs` 35+26、`spatial_tests.rs` 35、`mesh.rs` 4、`raster.rs` 2、
+`region_tests.rs` 1、`urban_tests.rs` 1，以及 bin 里 27）全部改成调它们。
+unix 上失败仍然是失败，Windows 上打印原因不失败。
+
+**一个必须记住的 Rust 细节**：`src/bin/mksrfdata-rs.rs` 的测试**看不到** lib 里那个
+`#[cfg(test)]` helper —— 测 bin 目标时，它链接的 lib 是**正常编译**的（不带 `cfg(test)`），
+所以那份 helper 根本不存在。bin 里另留了一份（该文件本来就有根级 `#[cfg(test)] fn`）。
+同理，集成测试（`oracle/tests/*.rs`）也看不到 `#[cfg(test)]` 的 lib 项 ——
+`oracle/tests/judge.rs:153` 那一处因此**没动**：它的 NetCDF 句柄都在循环作用域里
+（写文件走 `write_file()`，返回即 drop），而且那个目标在端口合并之前就是 Windows 绿的。
+
+### 第 397 轮本地实测
+
+```text
+cargo fmt --all --check                                            rc=0
+cargo clippy --workspace --all-targets -- -D warnings              rc=0   ← helper 在 lib 与 bin
+                                                                          两个测试目标里都能编
+cargo test -p colm-srfdata --lib --bins -- --test-threads=1        270 passed; 1 ignored
+                                                                    49 passed（bin）
+```
+
+Windows 那一支仍然只能由 CI 判。到目前为止这个坑已经"往前走了三站"
+（`colm-hist` → `colm-init` → `colm-runtime` → `colm-srfdata`），每一站都是同一句话：
+**测试清理前先 `drop` 句柄，或者用 `remove_test_*`。**
