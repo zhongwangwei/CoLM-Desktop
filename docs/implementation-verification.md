@@ -18373,6 +18373,15 @@ VSFI     kernel=200 rust=200
 
 ## 若继续
 
+> **第 398 轮更新（最新的指路牌，先读这段）**：`81481e6` 让 Windows 过了
+> `colm-srfdata --lib`，随即红在**同一个 crate 的 bin 目标**：`mksrfdata-rs` 的 9 个
+> 测试比的是**路径字符串**，而生产把 namelist 里的 `$ROOT/raw`（带 `/`）再 `join`，
+> Windows 上得到 `<root>/raw\soil/lake_soilc.nc` 这种**混合分隔符**。
+> **9 个只是每个测试的第一条断言，后面还压着 15 处**。
+> 改法：能精确复刻的 16 处用 `raw_path()`；不能精确复刻的 24 处（`contains` /
+> `destination` / 数组）两侧过 `unified()` 再比。**没动生产** —— Windows 上两种分隔符
+> 等价，`windows-kernel` 的端到端算例已经带着混合分隔符跑通了，是测试写窄了。
+
 > **第 397 轮更新（最新的指路牌，先读这段）**：`cce627a` 让 **`rust (macos-latest)` 与
 > `rust (ubuntu-latest)` 双双转绿**（串行化治竞态、`assert_bits_close` 治拟合断言），
 > `windows-kernel` 与 `release` 也绿。只剩 `rust (windows-latest)`，它**又往前走了一站**：
@@ -24226,3 +24235,64 @@ cargo test -p colm-srfdata --lib --bins -- --test-threads=1        270 passed; 1
 Windows 那一支仍然只能由 CI 判。到目前为止这个坑已经"往前走了三站"
 （`colm-hist` → `colm-init` → `colm-runtime` → `colm-srfdata`），每一站都是同一句话：
 **测试清理前先 `drop` 句柄，或者用 `remove_test_*`。**
+
+## 第 398 轮：`mksrfdata-rs` 自己的测试在 Windows 上红在**路径分隔符**
+
+`81481e6` 让 `colm-srfdata --lib` 在 Windows 上过了（第三站的修法成立），
+`rust (windows-latest)` 随即走进**同一个 crate 的 bin 目标**，红 9 个：
+
+```text
+test result: FAILED. 40 passed; 9 failed; 0 ignored
+mksrfdata-rs.rs:7321  assertion `left == right` failed
+  left:  Some("C:\\Users\\RUNNER~1\\AppData\\Local\\Temp\\colm-srfdata-…-8296/raw\\soil/lake_soilc.nc")
+ right: Some("C:\\Users\\RUNNER~1\\AppData\\Local\\Temp\\colm-srfdata-…-8296/raw/soil/lake_soilc.nc")
+```
+
+**同一个文件，两个不同的字符串**。生产把 namelist 里的
+`DEF_dir_rawdata='$ROOT/raw'`（展开后**保留那个 `/`**）再 `join` 一层：
+
+```rust
+let lake_soil_carbon = if rawdata.join("lake_soilc.nc").is_file() {
+    rawdata.join("lake_soilc.nc")
+} else {
+    rawdata.join("soil/lake_soilc.nc")      // ← Windows 上插一个 `\`
+};
+```
+
+于是 Windows 上得到 `<root>/raw\soil/lake_soilc.nc` 这种**混合分隔符**，
+而测试里手写的是 `<root>/raw/soil/lake_soilc.nc`。
+
+**9 个只是"每个测试的第一条断言"**：后面还压着 15 处同样的比较（每个测试在第一条
+失败断言处就停了），所以只改报出来的 9 处，下一次 CI 还会红在同类上。这正是本轮
+把 bin 目标里**所有**路径比较都过了一遍的原因。
+
+改法分两类，因为它们的可复现程度不同：
+
+* **能精确复现的**：16 处 `format!("{}/raw/…", root.display())` 改成 `raw_path()`，
+  它就是生产那两行的逐字复刻（`Path::new("<root>/raw").join(rest)`）。
+  保留精确性是有意的 —— 万一哪天生产的基准目录变了，它仍然会红。
+* **不能精确复现的**：23 处 `command.required_files` / `required_directories` 的
+  `contains` 和 1 处 `destination` 相等。生产**插几个 `\` 取决于它对那个参数
+  join 了几次**（`rawdata.join("urban/x.nc")` 与 `rawdata.join("urban").join("x.nc")`
+  结果不同），逐个去数既脆又难读，所以两侧都过 `unified()`（`\` → `/`）再比。
+  另有 1 处数组比较同时含 namelist 字面量与 join 两次的输出目录，同样两侧过 `unified`。
+* 两处 `root.join("diag/…")` 是**读文件**不是比字符串，不动（Windows 两种分隔符都认）。
+
+**没有改生产的分隔符**，理由值得记下来：Windows 上 `\` 与 `/` 等价，Fortran 内核两边
+都认，而 `windows-kernel` 的端到端算例（`cce627a` 转绿那次）**已经**带着这种混合分隔符
+跑通了 —— 所以生产没有问题，是**测试写窄了**。反过来把生产改成一律 `/` 虽然能让这些
+测试"碰巧"变绿，却会改动 Windows 上 `case.nml` 的内容，而那是我本机验不了的平台。
+
+### 第 398 轮本地实测
+
+```text
+cargo fmt --all --check / cargo fmt --all                      rc=0
+cargo clippy --workspace --all-targets -- -D warnings          rc=0（曾报一次
+                                                               redundant_closure：
+                                                               `.map(|a| unified(a))` → `.map(unified)`）
+cargo test -p colm-srfdata --lib --bins -- --test-threads=1   270 passed; 1 ignored
+                                                               49 passed
+```
+
+本地（unix）这些改动**逐字节等价**，所以本机绿不能证明 Windows 绿；改法是逐处对照
+生产在该参数上的构造方式做的。真正的判据仍是下一次 `rust (windows-latest)`。
