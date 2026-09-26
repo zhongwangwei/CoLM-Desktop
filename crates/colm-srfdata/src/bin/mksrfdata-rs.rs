@@ -4438,6 +4438,41 @@ fn spatial_case_command(
     spatial_case_command_with_subgrid(namelist, lct_mode, crop_override, observation, blocks, None)
 }
 
+/// 期望值的拼法必须与生产一致：生产把 `--rawdata`（namelist 里写作
+/// `DEF_dir_rawdata='$ROOT/raw'`，展开后带 `/`）再 `join` 一层，于是 Windows 上得到
+/// `<root>/raw\soil/lake_soilc.nc` —— **混合分隔符**。测试里手写
+/// `format!("{root}/raw/…")` 只有 unix 才对得上：实测 Windows 上 `mksrfdata-rs` 的
+/// 测试红 9 个（另有 7 处只是还没跑到，因为前面的断言先挂了）。
+///
+/// 不去改生产的那几处 `join`：Windows 上 `\` 与 `/` 等价，Fortran 内核两边都认，
+/// 而 `windows-kernel` 的端到端算例已经证明混合分隔符能跑通。这是测试写窄了。
+#[cfg(test)]
+fn raw_path(root: &Path, rest: &str) -> String {
+    let base = format!("{}/raw", root.display());
+    Path::new(&base).join(rest).display().to_string()
+}
+
+/// 只用于测试比较：Windows 上 `\` 与 `/` **都当分隔符**，但 `PathBuf`/`String` 的
+/// 相等是按字节比的。生产把 namelist 里的 `$ROOT/raw`（带 `/`）再 `join` 若干次，
+/// 于是 Windows 上得到 `<root>/raw\urban/LUCY_regionid.nc` 这种**混合分隔符** ——
+/// 具体在哪一段插 `\` 取决于生产 join 了几次。测试里无论手写
+/// `root.join("raw/urban/…")` 还是 `format!("{}/raw/urban/…")` 都很难恰好同形，
+/// 而两者指向同一个文件。所以**比路径时统一成 `/`**。
+///
+/// 这也是为什么不去改生产的分隔符：Windows 上两者等价、Fortran 内核两边都认，
+/// 而 `windows-kernel` 的端到端算例已经证明混合分隔符能跑通。是测试写窄了。
+#[cfg(test)]
+fn unified(path: impl AsRef<Path>) -> String {
+    path.as_ref().display().to_string().replace('\\', "/")
+}
+
+/// `required_files` 是按字节比的 `Vec<PathBuf>`，所以要用 `unified` 逐项比。
+#[cfg(test)]
+fn requires_path(required: &[PathBuf], expected: impl AsRef<Path>) -> bool {
+    let expected = unified(expected);
+    required.iter().any(|path| unified(path) == expected)
+}
+
 /// 删掉测试用的临时目录 —— 与 lib 里 `colm_srfdata::remove_test_tree` 同一个东西。
 ///
 /// **必须是这里的一份**：测 bin 目标时链接的 lib 是正常编译的（没有 `cfg(test)`），
@@ -6952,10 +6987,7 @@ mod tests {
         assert_eq!(command.args[4], "1999");
         assert_eq!(
             command.args[2],
-            format!(
-                "{}/raw/landtypes/landtype-igbp-modis-1995.nc",
-                root.display()
-            )
+            raw_path(&root, "landtypes/landtype-igbp-modis-1995.nc")
         );
         assert_eq!(
             option_value(&command.args, "--monthly-vegetation-year"),
@@ -6965,10 +6997,11 @@ mod tests {
         assert_eq!(parsed.year, 1999);
         assert!(parsed.lulcc);
         assert!(!parsed.lulcc_lai_only);
-        assert!(command.required_files.contains(&root.join("mesh.nc")));
-        assert!(command
-            .required_files
-            .contains(&root.join("raw/landtypes/landtype-igbp-modis-1995.nc")));
+        assert!(requires_path(&command.required_files, root.join("mesh.nc")));
+        assert!(requires_path(
+            &command.required_files,
+            root.join("raw/landtypes/landtype-igbp-modis-1995.nc")
+        ));
         for skipped in [
             "raw/lake_depth.nc",
             "raw/soil/soiltexture_0cm-60cm_mean.nc",
@@ -6976,16 +7009,18 @@ mod tests {
             "raw/topography.nc",
         ] {
             assert!(
-                !command.required_files.contains(&root.join(skipped)),
+                !requires_path(&command.required_files, root.join(skipped)),
                 "LAI-only case should not preflight {skipped}"
             );
         }
-        assert!(command
-            .required_directories
-            .contains(&root.join("raw/plant_15s")));
-        assert!(!command
-            .required_directories
-            .contains(&root.join("raw/soil")));
+        assert!(requires_path(
+            &command.required_directories,
+            root.join("raw/plant_15s")
+        ));
+        assert!(!requires_path(
+            &command.required_directories,
+            root.join("raw/soil")
+        ));
         crate::remove_test_tree(root);
     }
 
@@ -7320,15 +7355,16 @@ mod tests {
             .unwrap();
         assert_eq!(
             option_value(&command.args, "--lake-soil-carbon").map(str::to_owned),
-            Some(format!("{}/raw/soil/lake_soilc.nc", root.display()))
+            Some(raw_path(&root, "soil/lake_soilc.nc"))
         );
         assert_eq!(
             option_value(&command.args, "--methane-ph").map(str::to_owned),
-            Some(format!("{}/raw/soil/PHH2O1.nc", root.display()))
+            Some(raw_path(&root, "soil/PHH2O1.nc"))
         );
-        assert!(!command
-            .required_files
-            .contains(&root.join("raw/soil/PHH2O1.nc")));
+        assert!(!requires_path(
+            &command.required_files,
+            root.join("raw/soil/PHH2O1.nc")
+        ));
         crate::remove_test_tree(root);
     }
 
@@ -7436,16 +7472,16 @@ mod tests {
                 .unwrap();
 
         assert!(!command.pft_or_pc);
+        // 这一条是整段参数的比较，里面第 4 个是输出目录（生产 `out.join(case).join("landdata")`
+        // —— join 两次，Windows 上是两个 `\`），而第 2 个 mesh 来自 namelist 字面量。
+        // 混在一起没法逐个手写同形，所以两侧都过 `unified`。
         assert_eq!(
-            command.args[..5],
+            command.args[..5].iter().map(unified).collect::<Vec<_>>(),
             [
                 "latlon".to_owned(),
-                format!("{}/mesh.nc", root.display()),
-                format!(
-                    "{}/raw/landtypes/landtype-igbp-modis-2005.nc",
-                    root.display()
-                ),
-                format!("{}/out/case/landdata", root.display()),
+                unified(format!("{}/mesh.nc", root.display())),
+                unified(raw_path(&root, "landtypes/landtype-igbp-modis-2005.nc")),
+                unified(format!("{}/out/case/landdata", root.display())),
                 "2005".to_owned()
             ]
         );
@@ -7455,7 +7491,7 @@ mod tests {
         );
         assert_eq!(
             option_value(&command.args, "--topographic-wetness").map(str::to_owned),
-            Some(format!("{}/raw/TWI.nc", root.display()))
+            Some(raw_path(&root, "TWI.nc"))
         );
         assert_eq!(
             option_value(&command.args, "--simple-topography-factors").map(str::to_owned),
@@ -7463,7 +7499,7 @@ mod tests {
         );
         assert_eq!(
             option_value(&command.args, "--plant-tiles").map(str::to_owned),
-            Some(format!("{}/raw/plant_15s", root.display()))
+            Some(raw_path(&root, "plant_15s"))
         );
         assert_eq!(
             command
@@ -7479,19 +7515,26 @@ mod tests {
             .windows(3)
             .any(|args| args == ["--blocks", "2", "3"]));
         assert!(parse_spatial_lct(&command.args).unwrap().land_only);
-        assert!(command
-            .required_files
-            .contains(&root.join("raw/bedrock.nc")));
-        assert!(command.required_files.contains(&root.join("raw/TWI.nc")));
-        assert!(command
-            .required_files
-            .contains(&root.join("topography-factors/topography_MERITHydro.nc")));
-        assert!(command
-            .required_files
-            .contains(&root.join("topography-factors/curvature_MERITHydro.nc")));
-        assert!(command
-            .required_directories
-            .contains(&root.join("raw/soil")));
+        assert!(requires_path(
+            &command.required_files,
+            root.join("raw/bedrock.nc")
+        ));
+        assert!(requires_path(
+            &command.required_files,
+            root.join("raw/TWI.nc")
+        ));
+        assert!(requires_path(
+            &command.required_files,
+            root.join("topography-factors/topography_MERITHydro.nc")
+        ));
+        assert!(requires_path(
+            &command.required_files,
+            root.join("topography-factors/curvature_MERITHydro.nc")
+        ));
+        assert!(requires_path(
+            &command.required_directories,
+            root.join("raw/soil")
+        ));
         crate::remove_test_tree(root);
     }
 
@@ -7507,7 +7550,7 @@ mod tests {
 
         assert_eq!(
             option_value(&command.args, "--lai-8day-dir").map(str::to_owned),
-            Some(format!("{}/raw/lai_15s_8day", root.display()))
+            Some(raw_path(&root, "lai_15s_8day"))
         );
         assert_eq!(
             command
@@ -7526,13 +7569,14 @@ mod tests {
             .args
             .iter()
             .any(|argument| argument == "--monthly-vegetation-year"));
-        assert!(command
-            .required_directories
-            .contains(&root.join("raw/lai_15s_8day")));
+        assert!(requires_path(
+            &command.required_directories,
+            root.join("raw/lai_15s_8day")
+        ));
         for year in [2006, 2007] {
-            assert!(command.required_files.contains(
-                &root
-                    .join("raw/lai_15s_8day")
+            assert!(requires_path(
+                &command.required_files,
+                root.join("raw/lai_15s_8day")
                     .join(format!("lai_8-day_15s_{year}.nc"))
             ));
         }
@@ -7569,9 +7613,10 @@ mod tests {
             "sky_view_factor.nc",
             "curvature.nc",
         ] {
-            assert!(command
-                .required_files
-                .contains(&root.join("topography-factors").join(source)));
+            assert!(requires_path(
+                &command.required_files,
+                root.join("topography-factors").join(source)
+            ));
         }
         crate::remove_test_tree(root);
     }
@@ -7598,7 +7643,10 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(command.source, root.join("larger-landdata"));
-        assert_eq!(command.destination, root.join("out/case/landdata"));
+        assert_eq!(
+            unified(&command.destination),
+            unified(root.join("out/case/landdata"))
+        );
         assert_eq!(
             command.bounds,
             SpatialBounds {
@@ -7656,16 +7704,19 @@ mod tests {
             Some("2004")
         );
         for directory in ["urban_type", "urban", "urban_lai_500m"] {
-            assert!(command
-                .required_directories
-                .contains(&root.join("raw").join(directory)));
+            assert!(requires_path(
+                &command.required_directories,
+                root.join("raw").join(directory)
+            ));
         }
-        assert!(command
-            .required_files
-            .contains(&root.join("raw/urban/LUCY_regionid.nc")));
-        assert!(!command
-            .required_files
-            .contains(&root.join("raw/urban/NCAR_urban_properties.nc")));
+        assert!(requires_path(
+            &command.required_files,
+            root.join("raw/urban/LUCY_regionid.nc")
+        ));
+        assert!(!requires_path(
+            &command.required_files,
+            root.join("raw/urban/NCAR_urban_properties.nc")
+        ));
         crate::remove_test_tree(root);
     }
 
@@ -7696,27 +7747,28 @@ mod tests {
         assert_eq!(command.args[4], "1999");
         assert_eq!(
             command.args[2],
-            format!(
-                "{}/raw/landtypes/landtype-igbp-modis-1995.nc",
-                root.display()
-            )
+            raw_path(&root, "landtypes/landtype-igbp-modis-1995.nc")
         );
         assert_eq!(
             option_value(&command.args, "--monthly-vegetation-year"),
             Some("1999")
         );
-        assert!(command
-            .required_directories
-            .contains(&root.join("raw/urban_type")));
-        assert!(!command
-            .required_directories
-            .contains(&root.join("raw/urban")));
-        assert!(!command
-            .required_directories
-            .contains(&root.join("raw/urban_lai_500m")));
-        assert!(!command
-            .required_files
-            .contains(&root.join("raw/urban/LUCY_regionid.nc")));
+        assert!(requires_path(
+            &command.required_directories,
+            root.join("raw/urban_type")
+        ));
+        assert!(!requires_path(
+            &command.required_directories,
+            root.join("raw/urban")
+        ));
+        assert!(!requires_path(
+            &command.required_directories,
+            root.join("raw/urban_lai_500m")
+        ));
+        assert!(!requires_path(
+            &command.required_files,
+            root.join("raw/urban/LUCY_regionid.nc")
+        ));
         assert!(command.args.iter().any(|arg| arg == "--urban-rawdata"));
         crate::remove_test_tree(root);
     }
@@ -7744,9 +7796,10 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(option_value(&command.args, "--urban-scheme"), Some("ncar"));
-        assert!(command
-            .required_files
-            .contains(&root.join("raw/urban/NCAR_urban_properties.nc")));
+        assert!(requires_path(
+            &command.required_files,
+            root.join("raw/urban/NCAR_urban_properties.nc")
+        ));
         crate::remove_test_tree(root);
     }
 
@@ -7778,7 +7831,7 @@ mod tests {
         assert_eq!(command.args[0], "unstructured");
         assert_eq!(
             option_value(&command.args, "--crop-surface").map(str::to_owned),
-            Some(format!("{}/raw/global_CFT_surface_data.nc", root.display()))
+            Some(raw_path(&root, "global_CFT_surface_data.nc"))
         );
         assert_eq!(
             option_value(&command.args, "--monthly-vegetation-year"),
@@ -7786,12 +7839,16 @@ mod tests {
         );
         assert_eq!(
             option_value(&command.args, "--topographic-wetness").map(str::to_owned),
-            Some(format!("{}/raw/TWI.nc", root.display()))
+            Some(raw_path(&root, "TWI.nc"))
         );
-        assert!(command.required_files.contains(&root.join("raw/TWI.nc")));
-        assert!(command
-            .required_directories
-            .contains(&root.join("raw/plant_15s")));
+        assert!(requires_path(
+            &command.required_files,
+            root.join("raw/TWI.nc")
+        ));
+        assert!(requires_path(
+            &command.required_directories,
+            root.join("raw/plant_15s")
+        ));
         crate::remove_test_tree(root);
     }
 
@@ -7832,26 +7889,28 @@ mod tests {
         assert!(!command.pft_or_pc);
         assert_eq!(
             command.args[2],
-            format!("{}/raw/landtypes/landtype-usgs-update.nc", root.display())
+            raw_path(&root, "landtypes/landtype-usgs-update.nc")
         );
         assert_eq!(
             option_value(&command.args, "--plant-tiles").map(str::to_owned),
-            Some(format!("{}/raw/plant_15s", root.display()))
+            Some(raw_path(&root, "plant_15s"))
         );
         assert_eq!(
             option_value(&command.args, "--usgs-forest-height").map(str::to_owned),
-            Some(format!("{}/raw/Forest_Height.nc", root.display()))
+            Some(raw_path(&root, "Forest_Height.nc"))
         );
         assert_eq!(
             option_value(&command.args, "--monthly-vegetation-year"),
             Some("2000")
         );
-        assert!(command
-            .required_files
-            .contains(&root.join("raw/Forest_Height.nc")));
-        assert!(command
-            .required_directories
-            .contains(&root.join("raw/plant_15s")));
+        assert!(requires_path(
+            &command.required_files,
+            root.join("raw/Forest_Height.nc")
+        ));
+        assert!(requires_path(
+            &command.required_directories,
+            root.join("raw/plant_15s")
+        ));
         crate::remove_test_tree(root);
     }
 
@@ -7880,14 +7939,11 @@ mod tests {
         assert!(command.args.iter().any(|argument| argument == "--lulcc"));
         assert_eq!(
             option_value(&command.args, "--plant-tiles").map(str::to_owned),
-            Some(format!("{}/raw/plant_15s", root.display()))
+            Some(raw_path(&root, "plant_15s"))
         );
         assert_eq!(
             command.args[2],
-            format!(
-                "{}/raw/landtypes/landtype-igbp-modis-2005.nc",
-                root.display()
-            )
+            raw_path(&root, "landtypes/landtype-igbp-modis-2005.nc")
         );
         crate::remove_test_tree(root);
     }
@@ -7922,7 +7978,7 @@ mod tests {
             assert!(command.args.iter().any(|argument| argument == "--lulcc"));
             assert_eq!(
                 option_value(&command.args, "--plant-tiles").map(str::to_owned),
-                Some(format!("{}/raw/plant_15s", root.display()))
+                Some(raw_path(&root, "plant_15s"))
             );
             assert!(parse_spatial_pft(&command.args).unwrap().lulcc);
             crate::remove_test_tree(root);
