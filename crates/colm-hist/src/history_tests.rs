@@ -171,6 +171,9 @@ fn a_written_history_file_matches_the_golden_schema_and_values() {
         let theirs: Vec<f64> = golden_file.variable(name).unwrap().get_values(..).unwrap();
         assert_eq!(ours, theirs, "{name}: site coordinate");
     }
+    // Windows 上**打开的 NetCDF 文件不能删**（`Os code 32`：被另一个进程占用）；
+    // unix 允许删掉打开着的文件，所以本机看不出来。先放掉句柄再删。
+    drop(produced);
     std::fs::remove_file(&produced_path).unwrap();
 }
 

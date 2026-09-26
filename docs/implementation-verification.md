@@ -18383,6 +18383,11 @@ VSFI     kernel=200 rust=200
 >   ⇒ 加了 `ncdump_available()` + **响亮跳过**（crate 没有读压缩级别的接口，工作区也禁 FFI）。
 > * macOS 的 `gui` 打包作业缺**系统 HDF5**（`hdf5-metno-sys` 找 Homebrew 的 HDF5）⇒
 >   该作业补 `brew install hdf5 netcdf`。
+> * **第二层**（`cargo test` 的 fail-fast 把第一层修好后才露出来）：`colm-srfdata` 两组
+>   "FMA 操作数位模式"断言同样只有 ubuntu 差 1 ULP ⇒ 同一个 `assert_bits_close`；
+>   `colm-hist` 在 Windows 上删不掉**打开着的** NetCDF（`Os code 32`）⇒ 先 `drop`；
+>   `artifacts/parameter-audit/` **过期**（5 行：两个 `default: true→false` 与
+>   `DEF_HIGHRESURBAN_ALBEDO` 的分类）⇒ 重新生成。
 
 > **第 393 轮更新（最新的指路牌，先读这段）**：把快照里"**会改变物理、而本仓库不读**"
 > 的那些开关逐个挡住（16 条，判据是"算例把它设成了**非声明默认值**"）。
