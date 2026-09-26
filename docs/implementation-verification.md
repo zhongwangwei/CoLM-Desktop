@@ -18373,6 +18373,16 @@ VSFI     kernel=200 rust=200
 
 ## 若继续
 
+> **第 392 轮更新（最新的指路牌，先读这段）**：把开关审计从"只跑黄金默认算例"扩成
+> **8 个配置取并集**（default / 第二配置 / vegsnow_off / phs_off / runoff0 / rss2 /
+> thermal2 / precip2），并**量出它的边际价值很小**：默认单跑 117 个 key、
+> 并集 118 个 —— 因为 `physics.rs` 装配参数时把开关**无条件全读**，支路选择在之后。
+> 所以扩配置主要是防护性的（防"以后有人在支路里才读"），代价是审计 ~10s → ~80s。
+>
+> * 顺带修掉夹具错误：`DEF_precip_phase_discrimination_scheme` 是**字符**（`'I'/'II'/'III'`），
+>   写成整数会被显式拒绝。
+> * 快照更新为 711 条，`--check` 复核通过。
+
 > **第 391 轮更新（最新的指路牌，先读这段）**：把开关读取审计做成了**快照门禁**
 > （`oracle/scripts/audit_namelist_reads.sh` + 入库的 `oracle/nml-unread.snapshot`，
 > 已接进 `compare_all.sh` 第三节）。
@@ -23596,3 +23606,40 @@ matches the snapshot: no new declared-but-unread switch
 （两次连跑数字一致 ⇒ trace 是确定性的，不会让门禁抖。）
 运行期被问到的 key 从第 390 轮那次记录的 87 涨到 117，是脚本这一轮把
 forcing namelist 的路径也一并走全了的结果，不是行为变化。
+
+## 第 392 轮：把开关审计扩成**多配置并集**（并量出它的边际价值很小）
+
+第 391 轮的审计只跑黄金默认算例。理论上有些开关**只在非默认支路里**才被读，
+只跑默认会把它们误记成"没被读"。本轮扩成 8 个配置取**并集**：
+
+```text
+default / second_config（Campbell+关 VSF）/ vegsnow_off / phs_off /
+runoff0 / rss2 / thermal2 / precip2
+```
+
+每个配置跑 1 步、各自记 trace，最后 `sort -u` 合并再与快照对差。
+
+### 实测：并集只比默认多 1 个 key
+
+```text
+默认单跑        : 117 个 key 被问到
+8 配置并集      : 118 个 key 被问到（711 条没被问，快照已随之更新）
+```
+
+**为什么边际价值这么小**：`physics.rs` 装配 `LandPhysicsParameters` 时把开关
+**无条件全读一遍**，支路选择发生在之后（用的是已经读进结构体的值）。也就是说
+"只在某条支路里才读某个开关"这种写法在本仓库基本不存在 ⇒ 单跑默认已经接近完备。
+这一次扩配置的收益因此主要是**防护性**的（万一以后有人在支路里才读，并集能抓住），
+代价是审计从 ~10 秒变成 ~80 秒。
+
+### 顺带修掉的一个夹具错误
+
+`DEF_precip_phase_discrimination_scheme` 是**字符**不是整数：我第一次写
+`= 2`，运行期直接报 `must be a character value, got Int(2)`；正确取值是
+`'I'/'II'/'III'`（`physics.rs:379-385`）。这也顺带证明了那个报错信息足够定位问题。
+
+### 快照
+
+`oracle/nml-unread.snapshot` 从 712 条更新到 711 条，`--check` 复核通过：
+`runtime keys queried: 118; unread: 711 (snapshot 711)` ⇒
+`matches the snapshot: no new declared-but-unread switch`。

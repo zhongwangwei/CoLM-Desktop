@@ -18,12 +18,29 @@ BASE="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 export NETCDF_DIR=/opt/homebrew/opt/netcdf
 mode=${1:---check}
 case=${2:-CN-Cng}
+
+# 跑哪些配置：`tag|注入的 namelist 行`（多行用 ';' 分隔；default 是空）。
+# 为什么要多配置：有些开关**只在非默认支路里**才被读（`DEF_USE_SNARCAR` 的伴生项、
+# 第二配置的 Campbell/VSF、CBL、RSS、土热导率……）。只跑默认算例会把它们误记为
+# "没被读"，快照就不准；取**并集**才准。
+CONFIGS=(
+  "default|"
+  "second_config|DEF_USE_Campbell_SOIL_MODEL = .true.;DEF_USE_VariablySaturatedFlow = .false."
+  "vegsnow_off|DEF_VEG_SNOW = .false."
+  "phs_off|DEF_USE_PLANTHYDRAULICS = .false."
+  "runoff0|DEF_Runoff_SCHEME = 0"
+  "rss2|DEF_RSS_SCHEME = 2"
+  "thermal2|DEF_THERMAL_CONDUCTIVITY_SCHEME = 2"
+  "precip2|DEF_precip_phase_discrimination_scheme = 'II'"
+)
 case "$mode" in
   --check|--update|--report) ;;
   *) echo "usage: $0 [--check|--update|--report] [<case>]" >&2; exit 2 ;;
 esac
 d=/tmp/gf/nml_audit
 rm -rf "$d"; mkdir -p "$d/run"
+UNION="$d/keys_all.txt"
+: > "$UNION"
 cp -R "$BASE/oracle/work/$case" "$d/case"
 python3 - "$d" "$case" <<'PY'
 import re, sys
@@ -43,12 +60,38 @@ sed -e "s#^   DEF_dir_output.*#   DEF_dir_output  = '$d/case/out/'#" \
     -e "s#^   DEF_dir_rawdata.*#   DEF_dir_rawdata = '$d/rawdata_unused/'#" \
     -e "s#^   DEF_dir_runtime.*#   DEF_dir_runtime = '$d/runtime_unused/'#" \
     "$d/case/case.nml" > "$d/case.nml"
-: > "$d/keys.txt"
+for entry in "${CONFIGS[@]}"; do
+  tag="${entry%%|*}"
+  flags="${entry#*|}"
+  run="$d/run_$tag"
+  rm -rf "$run"; mkdir -p "$run"
+  cp -R "$d/case" "$run/case"
+  sed -i '' "s#^   DEF_dir_output.*#   DEF_dir_output  = '$run/case/out/'#" "$run/case/case.nml"
+  if [ -n "$flags" ]; then
+    python3 - "$run" "$flags" <<'PY'
+import sys
+run, flags = sys.argv[1], sys.argv[2]
+p = f"{run}/case/case.nml"
+s = open(p).read()
+old = "   DEF_CASE_NAME"
+i = s.index(old)
+s = s[:i] + "".join(f"   {line}\n" for line in flags.split(";")) + s[i:]
+open(p, "w").write(s)
+PY
+  fi
+  : > "$run/keys.txt"
+  ( cd "$BASE" && COLM_NML_TRACE="$run/keys.txt" cargo run -q -p colm-runtime --bin colm-rs -- \
+      "$run/case" --land-cover igbp --restart-out "$run/rust_restart.nc" --history-dir "$run" \
+      > "$run/r.log" 2>&1 ) \
+    || { echo "  .. $tag: run failed (its keys are not collected)"; tail -3 "$run/r.log" | sed 's/^/     /'; continue; }
+  cat "$run/keys.txt" >> "$UNION"
+done
+sort -u "$UNION" -o "$UNION"
 ( cd "$BASE" && COLM_NML_TRACE="$d/keys.txt" cargo run -q -p colm-runtime --bin colm-rs -- \
     "$d/case" --land-cover igbp --restart-out "$d/rust_restart.nc" --history-dir "$d" \
     > "$d/r.log" 2>&1 ) || { echo "!! rust run failed"; tail -5 "$d/r.log"; exit 3; }
 SNAPSHOT="$BASE/oracle/nml-unread.snapshot"
-python3 - "$BASE" "$d/keys.txt" "$mode" "$SNAPSHOT" <<'PY'
+python3 - "$BASE" "$UNION" "$mode" "$SNAPSHOT" <<'PY'
 import collections
 import pathlib
 import re

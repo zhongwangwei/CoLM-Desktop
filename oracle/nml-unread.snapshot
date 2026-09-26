@@ -55,7 +55,6 @@ DEF_PC_CROP_SPLIT
 DEF_PIO_groupsize
 DEF_PROSPECT
 DEF_REST_CompressLevel
-DEF_RSS_SCHEME
 DEF_ReservoirPara_file
 DEF_Reservoir_Method
 DEF_SOIL_REFL_SCHEME
