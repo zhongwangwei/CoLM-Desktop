@@ -696,7 +696,7 @@ mod tests {
         assert_eq!(topology.pixel.lon_e, [-180.0, -135.0]);
         assert_eq!(topology.mesh.pixels(0).unwrap(), (&[1][..], &[1][..]));
         assert_eq!(topology.mesh.pixels(1).unwrap(), (&[2][..], &[1][..]));
-        std::fs::remove_file(path).unwrap();
+        crate::remove_test_file(path);
     }
 
     #[test]
@@ -728,7 +728,7 @@ mod tests {
                 (summary.active_cells, summary.nlon, summary.nlat),
                 (5, 3, 2)
             );
-            std::fs::remove_file(path).unwrap();
+            crate::remove_test_file(path);
         }
         assert!(MeshWindow::covering_bbox(grid, 179.0, -179.0, 0.0, 45.0).is_err());
         assert!(MeshWindow::covering_bbox(grid, 179.0, 180.0, 0.0, 45.0).is_err());
@@ -779,7 +779,7 @@ mod tests {
                 .with_non_ocean_mask(&path, "mask")
                 .unwrap();
             assert_eq!(masked.element_ids().unwrap(), [0, 1, 8, 0]);
-            std::fs::remove_file(path).unwrap();
+            crate::remove_test_file(path);
         }
         // A full-width crop has global dimensions. Explicit (1,1) metadata
         // still denotes the global frame; a rotated local frame must match.
@@ -813,7 +813,7 @@ mod tests {
                 };
                 assert_eq!(masked.unwrap().element_ids().unwrap(), expected);
             }
-            std::fs::remove_file(path).unwrap();
+            crate::remove_test_file(path);
         }
     }
 

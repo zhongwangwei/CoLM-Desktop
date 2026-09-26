@@ -92,3 +92,45 @@ pub use urban::{
     NcarUrbanRawFields, UrbanGeometry, UrbanMaterialParameters, URBAN_LAYERS,
     URBAN_RADIATION_TYPES, URBAN_SOLAR_BANDS,
 };
+
+/// 删掉测试用的临时目录 / 临时文件。与 `colm_init::remove_test_tree`、`colm_runtime`
+/// 里那份同一个东西、同一个理由（三个 crate 按设计互不依赖，所以各留一份）。
+///
+/// 测试用 `netcdf::open` 打开的 `Dataset` 常常活到函数末尾（`site.rs`/`site_tests.rs`
+/// 里还有好几处一个测试开四五个句柄），清理时目录里仍有**本进程打开着的**文件。
+/// unix 允许删打开着的文件，Windows 不允许 —— `rust (windows-latest)` 上
+/// `colm-srfdata` 一次红了 18 个，全是 `Os { code: 32 }`。
+///
+/// 权衡：**unix 上失败仍然是失败**（那里没有借口），Windows 上打印原因但不失败
+/// —— 临时目录留在系统 temp 里，好过把测试弄红。两个 helper 都不校验任何物理量，
+/// 所以放宽清理不改变任何断言的口径。新写的测试如果只有一个句柄，清理前 `drop`
+/// 掉更干净。
+///
+/// 注意：`src/bin/mksrfdata-rs.rs` 里另有一份同名的 —— bin 目标测试时链接的是
+/// **没有** `cfg(test)` 的 lib，看不到这里。
+#[cfg(test)]
+pub(crate) fn remove_test_tree(root: impl AsRef<std::path::Path>) {
+    let root = root.as_ref();
+    let Err(error) = std::fs::remove_dir_all(root) else {
+        return;
+    };
+    if cfg!(windows) {
+        eprintln!("Windows: 临时目录没清掉 {}: {error}", root.display());
+    } else {
+        panic!("cannot remove {}: {error}", root.display());
+    }
+}
+
+/// 单个文件版本，理由同上。
+#[cfg(test)]
+pub(crate) fn remove_test_file(path: impl AsRef<std::path::Path>) {
+    let path = path.as_ref();
+    let Err(error) = std::fs::remove_file(path) else {
+        return;
+    };
+    if cfg!(windows) {
+        eprintln!("Windows: 临时文件没删掉 {}: {error}", path.display());
+    } else {
+        panic!("cannot remove {}: {error}", path.display());
+    }
+}

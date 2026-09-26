@@ -290,7 +290,7 @@ mod raster_tests {
             point_time_f64(&path, "pixel", -180.0, 90.0, 2).unwrap(),
             2.0
         );
-        std::fs::remove_file(path).unwrap();
+        crate::remove_test_file(path);
     }
 
     #[test]
@@ -327,7 +327,7 @@ mod raster_tests {
                 .unwrap(),
             400.0
         );
-        std::fs::remove_dir_all(directory).unwrap();
+        crate::remove_test_tree(directory);
     }
 
     #[test]

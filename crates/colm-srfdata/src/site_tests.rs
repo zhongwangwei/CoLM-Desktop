@@ -121,7 +121,7 @@ fn hyperspectral_point_sampler_adds_the_complete_site_spectrum() {
     assert_deflate(&surface_default, "soil_hyper_albedo", 1);
 
     assert!(append_single_point_hyperspectral_albedo(&surface, &source).is_err());
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 }
 
 #[test]
@@ -298,8 +298,8 @@ fn water_site_fill_preserves_native_missing_soil_reflectance() {
         );
     }
     drop(file);
-    std::fs::remove_file(source).unwrap();
-    std::fs::remove_file(output).unwrap();
+    crate::remove_test_file(source);
+    crate::remove_test_file(output);
 }
 
 // ---------------------------------------------------------------- 城市
@@ -1494,7 +1494,7 @@ fn case_namelist_resolves_the_same_single_point_landdata_path_as_colm() {
     assert!(pft.use_bedrock);
     assert!(!pft.use_site_dbedrock);
 
-    std::fs::remove_dir_all(directory).unwrap();
+    crate::remove_test_tree(directory);
 }
 
 #[test]
@@ -1579,7 +1579,7 @@ fn landtype_rawdata_fallback_and_explicit_case_override() {
         super::landtype_for_mode(&surface, super::SiteMode::Igbp).unwrap(),
         Some(7)
     );
-    std::fs::remove_dir_all(directory).unwrap();
+    crate::remove_test_tree(directory);
 }
 
 #[test]
@@ -1681,7 +1681,7 @@ fn soil_rawdata_fallback_replaces_disabled_site_profiles() {
             .unwrap(),
         9
     );
-    std::fs::remove_dir_all(directory).unwrap();
+    crate::remove_test_tree(directory);
 }
 
 #[test]
@@ -1725,7 +1725,7 @@ fn case_namelist_rejects_ambiguous_lct_classifications_without_an_override() {
         super::SiteMode::Usgs
     );
 
-    std::fs::remove_dir_all(directory).unwrap();
+    crate::remove_test_tree(directory);
 }
 
 #[test]
@@ -1889,7 +1889,7 @@ fn pft_surface_projection_keeps_active_vectors_and_the_eight_soil_layers() {
     assert_deflate(&output, "pfttyp", 4);
     assert_deflate(&output, "LAI_year", 4);
     assert_no_deflate(&output, "depth_to_bedrock");
-    std::fs::remove_dir_all(directory).unwrap();
+    crate::remove_test_tree(directory);
 }
 
 #[test]
@@ -1977,7 +1977,7 @@ fn eight_day_lct_surface_projection_uses_j8day_without_monthly_sai() {
         .get_values::<f64, _>(..)
         .unwrap();
     assert_eq!((lai[0], lai[45]), (0.0, 4.5));
-    std::fs::remove_dir_all(directory).unwrap();
+    crate::remove_test_tree(directory);
 }
 
 #[test]
@@ -2018,7 +2018,7 @@ fn eight_day_lct_rawdata_fallback_samples_and_scales_native_lai() {
         .get_values::<f64, _>(..)
         .unwrap();
     assert_eq!((lai[0], lai[45]), (1.0, 5.5));
-    std::fs::remove_dir_all(directory).unwrap();
+    crate::remove_test_tree(directory);
 }
 
 #[test]
@@ -2078,7 +2078,7 @@ fn monthly_lct_rawdata_fallback_samples_native_lai_and_sai() {
         .get_values::<f64, _>(..)
         .unwrap();
     assert_eq!((lai[0], lai[11], sai[0], sai[11]), (1.0, 12.0, 0.1, 1.2));
-    std::fs::remove_dir_all(directory).unwrap();
+    crate::remove_test_tree(directory);
 }
 
 #[test]
@@ -2195,7 +2195,7 @@ fn monthly_lct_use_site_lai_false_replaces_a_complete_site_series() {
             .unwrap()[11],
         1.2
     );
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 }
 
 fn single_point_options_for_runoff(
@@ -2365,7 +2365,7 @@ fn pft_pc_audit_accepts_nonnatural_igbp_without_pft_arrays() {
         }
     }
 
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 }
 
 #[test]
@@ -2387,7 +2387,7 @@ fn pft_components_are_empty_only_for_nonnatural_singlepoint_classes() {
     let err = super::pft_components(&bare, false, None).unwrap_err();
     assert!(err.to_string().contains("pfttyp/pctpfts"), "{err:#}");
 
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 }
 
 #[test]
@@ -2424,7 +2424,7 @@ fn pftless_site_landtype_override_publishes_without_raw_pft_data() {
     assert!(file.variable("pfttyp").is_none());
     assert!(file.variable("LAI_monthly").is_some());
 
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 }
 
 #[test]
@@ -2474,7 +2474,7 @@ fn raw_landtype_update_from_pftless_to_natural_does_not_request_scalar_lai_rawda
     assert!(err.contains("cannot read PCT_PFT class 0"), "{err:#}");
     assert!(!err.contains("monthly scalar LAI"), "{err:#}");
 
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 }
 
 #[test]
@@ -2507,7 +2507,7 @@ fn pftless_eight_day_site_does_not_require_monthly_lai_rawdata() {
     assert!(file.variable("LAI_monthly").is_none());
     assert!(file.variable("SAI_monthly").is_none());
 
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 }
 
 #[test]
@@ -2584,7 +2584,7 @@ fn pftless_nonnatural_surface_omits_pft_dimension_and_keeps_scalar_lai() {
         [10.5, 11.5, 12.5]
     );
 
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 }
 
 #[test]
@@ -2610,7 +2610,7 @@ fn bare_igbp_sixteen_remains_a_positive_pft_host() {
     .unwrap_err();
     assert!(err.to_string().contains("pfttyp/pctpfts"), "{err:#}");
     assert!(!output.exists());
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 }
 
 #[test]
@@ -2639,7 +2639,7 @@ fn runoff_scheme_zero_one_two_publish_complete_site_without_soil_texture() {
             "DEF_Runoff_SCHEME={scheme} must not publish SITE soil_texture"
         );
     }
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 }
 
 #[test]
@@ -2663,7 +2663,7 @@ fn runoff_scheme_three_publication_requires_site_soil_texture() {
     .unwrap_err();
     assert!(err.to_string().contains("soil_texture"), "{err:#}");
     assert!(!output.exists());
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 }
 
 #[test]
@@ -2689,7 +2689,7 @@ fn inactive_runoff_scheme_omits_present_site_soil_texture() {
     .unwrap();
     let output = netcdf::open(landdata.join("srfdata.nc")).unwrap();
     assert!(output.variable("soil_texture").is_none());
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 }
 
 #[test]
@@ -2850,7 +2850,7 @@ fn pft_rawdata_fallback_materializes_native_composition_height_and_vegetation() 
         .get_values::<f64, _>(..)
         .unwrap();
     assert_eq!((lai[0], lai[23], sai[0], sai[23]), (1.0, 12.01, 2.0, 13.01));
-    std::fs::remove_dir_all(directory).unwrap();
+    crate::remove_test_tree(directory);
 }
 
 #[test]
@@ -2995,7 +2995,7 @@ fn crop_rawdata_fallback_materializes_cfts_and_weighted_pft_vegetation() {
         .get_values::<f64, _>(..)
         .unwrap();
     assert_eq!((lai[0], lai[1], sai[0], sai[1]), (2.4, 2.4, 3.4, 3.4));
-    std::fs::remove_dir_all(directory).unwrap();
+    crate::remove_test_tree(directory);
 }
 
 #[test]
@@ -3045,7 +3045,7 @@ fn lct_height_rawdata_fallback_replaces_the_site_value() {
             .unwrap(),
         [18.0]
     );
-    std::fs::remove_dir_all(directory).unwrap();
+    crate::remove_test_tree(directory);
 }
 
 #[test]
@@ -3093,7 +3093,7 @@ fn bedrock_rawdata_fallback_replaces_the_site_value() {
         panic!("bedrock source must be a string")
     };
     assert_eq!(source, "rawdata bedrock.nc/dbedrock");
-    std::fs::remove_dir_all(directory).unwrap();
+    crate::remove_test_tree(directory);
 }
 
 #[test]
@@ -3223,7 +3223,7 @@ fn static_rawdata_fallback_replaces_disabled_site_fields() {
         );
     }
     drop(water);
-    std::fs::remove_dir_all(directory).unwrap();
+    crate::remove_test_tree(directory);
 }
 
 #[test]
@@ -3383,7 +3383,7 @@ fn native_single_point_surface_is_accepted_by_upstream_mkinidata() {
     assert!(restart
         .join("2008-001-00000/CN-Cng_restart_2008-001-00000_lc2005_w180_s90.nc")
         .is_file());
-    std::fs::remove_dir_all(directory).unwrap();
+    crate::remove_test_tree(directory);
 }
 
 #[test]

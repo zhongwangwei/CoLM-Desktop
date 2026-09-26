@@ -302,7 +302,7 @@ fn surface_writers_apply_requested_deflate_and_keep_metadata_exceptions() {
     )
     .is_err());
     assert!(!invalid.exists());
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 }
 
 #[test]
@@ -330,7 +330,7 @@ fn gridbased_mesh_expands_aligned_cells_into_colm_pixel_order() {
         (area.iter().sum::<f64>() / 6371.22_f64.powi(2) - 4.0 * std::f64::consts::PI).abs() < 1e-12
     );
 
-    std::fs::remove_dir_all(directory).unwrap();
+    crate::remove_test_tree(directory);
 }
 
 #[test]
@@ -349,7 +349,7 @@ fn unstructured_mesh_keeps_one_element_across_multiple_input_cells() {
     assert_eq!(topology.mesh.element_id(0).unwrap(), 77);
     assert_eq!(topology.mesh.pixel_count(0).unwrap(), 8);
 
-    std::fs::remove_dir_all(directory).unwrap();
+    crate::remove_test_tree(directory);
 }
 
 #[test]
@@ -428,7 +428,7 @@ fn land_only_filters_pixels_and_empty_elements_before_lct_or_pft_partition() {
             file.close().unwrap();
         }
     }
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 }
 
 #[test]
@@ -471,7 +471,7 @@ fn domain_crossing_dateline_maps_each_side_to_its_source_cell() {
     assert_eq!(assignments[&77], (0, 0));
     assert_eq!(assignments[&88], (70, 0));
     assert_eq!(patches.element_ids, [77, 88]);
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 }
 
 #[test]
@@ -537,7 +537,7 @@ fn unstructured_off_grid_edges_are_assimilated_not_snapped() {
     )
     .unwrap();
     assert_eq!(sampled, [12, 13, 14, 8, 9, 10, 14, 15, 10, 11]);
-    std::fs::remove_dir_all(directory).unwrap();
+    crate::remove_test_tree(directory);
 }
 
 #[test]
@@ -567,7 +567,7 @@ fn lct_patch_builder_reads_raw_rows_in_the_mesh_pixel_order() {
     assert_eq!(topology.mesh.pixels(0).unwrap().0, &[1, 2, 1, 2]);
     assert_eq!(topology.mesh.pixels(0).unwrap().1, &[2, 2, 1, 1]);
 
-    std::fs::remove_dir_all(directory).unwrap();
+    crate::remove_test_tree(directory);
 }
 
 #[test]
@@ -597,7 +597,7 @@ fn pft_patch_builder_merges_only_igbp_soil_ground() {
     assert_eq!(patches.element_ids, vec![1, 1, 2, 2, 2]);
     assert_eq!(patches.set_type, vec![1, 13, 1, 11, 15]);
 
-    std::fs::remove_dir_all(directory).unwrap();
+    crate::remove_test_tree(directory);
 }
 
 #[test]
@@ -646,7 +646,7 @@ fn pft_patch_modes_match_original_merged_separate_and_fast_pc() {
     .unwrap();
     assert_eq!(fast_pc.set_type, vec![1, 12, 13, 1, 11, 12, 15]);
 
-    std::fs::remove_dir_all(directory).unwrap();
+    crate::remove_test_tree(directory);
 }
 
 #[test]
@@ -786,7 +786,7 @@ fn five_degree_tiles_keep_the_fortran_filename_and_axis_contract() {
         vec![2.0, 20.0, 200.0, 2000.0]
     );
 
-    std::fs::remove_dir_all(directory).unwrap();
+    crate::remove_test_tree(directory);
 }
 
 #[test]
@@ -1004,7 +1004,7 @@ fn floating_raster_and_patch_vector_keep_the_landpatch_block_order() {
         vec![10.0, 100.0, 30.0, 300.0, 50.0, 500.0, 20.0, 200.0, 40.0, 400.0, 60.0, 600.0]
     );
 
-    std::fs::remove_dir_all(directory).unwrap();
+    crate::remove_test_tree(directory);
 }
 
 #[test]
@@ -1036,7 +1036,7 @@ fn layered_raster_keeps_layer_and_mesh_pixel_order_without_global_reads() {
         ]
     );
 
-    std::fs::remove_dir_all(directory).unwrap();
+    crate::remove_test_tree(directory);
 }
 
 #[test]
@@ -1265,7 +1265,7 @@ fn spatial_topology_writes_the_fortran_blocked_restart_contract() {
     let lai = netcdf::open(landdata.join("urban/2005/LAI/urban_LAI_01_w180_s90.nc")).unwrap();
     assert_eq!(dim_names(&lai, "TREE_LAI"), ["urban"]);
 
-    std::fs::remove_dir_all(directory).unwrap();
+    crate::remove_test_tree(directory);
 }
 
 #[test]
@@ -1334,7 +1334,7 @@ fn shared_pixelsets_write_pctshared() {
             .unwrap(),
         [0.5, 0.25, 0.25]
     );
-    std::fs::remove_dir_all(directory).unwrap();
+    crate::remove_test_tree(directory);
 }
 
 #[test]
@@ -1428,7 +1428,7 @@ fn coordinate_cft_raster_keeps_mesh_order_without_assuming_the_500m_grid() {
     let mut layered_expected = scalar_expected.clone();
     layered_expected.extend(scalar_expected.iter().map(|value| value + 10.0));
     assert_eq!(layered, layered_expected);
-    std::fs::remove_dir_all(directory).unwrap();
+    crate::remove_test_tree(directory);
 }
 
 #[test]
@@ -1529,7 +1529,7 @@ fn coordinate_patch_selection_keeps_all_hires_cells_and_native_areas() {
             .abs()
             < 1.0e-12
     );
-    std::fs::remove_dir_all(directory).unwrap();
+    crate::remove_test_tree(directory);
 }
 
 #[test]
@@ -1598,7 +1598,7 @@ fn coordinate_patch_selection_uses_native_mesh_pixels_not_a_500m_proxy() {
         .aggregate_bedrock(&values, selection.areas())
         .unwrap();
     assert!(aggregate[0] < aggregate[1]);
-    std::fs::remove_dir_all(directory).unwrap();
+    crate::remove_test_tree(directory);
 }
 
 #[test]
@@ -1688,7 +1688,7 @@ fn methane_ph_selection_uses_exact_source_patch_intersections() {
     let expected = -((10_f64.powi(-4) + 10_f64.powi(-8)) * 0.5).log10();
     assert!((aggregated[0] - expected).abs() < 1.0e-12);
     assert!((aggregated[1] - expected).abs() < 1.0e-12);
-    std::fs::remove_dir_all(directory).unwrap();
+    crate::remove_test_tree(directory);
 }
 
 fn write_catchment_mesh(path: &std::path::Path) {
@@ -1811,7 +1811,7 @@ fn catchment_reads_lon_lat_arrays_through_original_fortran_cache_layout() {
         .unwrap()
     );
 
-    std::fs::remove_dir_all(directory).unwrap();
+    crate::remove_test_tree(directory);
 }
 
 #[test]
@@ -1876,7 +1876,7 @@ fn catchment_hierarchy_keeps_hru_boundaries_and_forces_lakes_to_water() {
         vec![1, 2, -1]
     );
 
-    std::fs::remove_dir_all(directory).unwrap();
+    crate::remove_test_tree(directory);
 }
 
 #[test]
@@ -1920,7 +1920,7 @@ fn catchment_patchfrac_hru_is_normalized_by_hru_and_shared_area() {
     assert!((values[3] - 1.0).abs() < 1e-12);
     output.close().unwrap();
 
-    std::fs::remove_dir_all(directory).unwrap();
+    crate::remove_test_tree(directory);
 }
 
 #[test]
@@ -1958,7 +1958,7 @@ fn finer_spatial_pixels_reuse_their_coarser_rawdata_cells() {
         vec![10, 10, 10, 10, 20, 20, 20, 20]
     );
 
-    std::fs::remove_dir_all(directory).unwrap();
+    crate::remove_test_tree(directory);
 }
 
 #[test]
@@ -1998,7 +1998,7 @@ fn timed_raw_raster_streams_the_requested_named_time_slice() {
         vec![30.0, 40.0]
     );
 
-    std::fs::remove_dir_all(directory).unwrap();
+    crate::remove_test_tree(directory);
 }
 
 #[test]
@@ -2057,7 +2057,7 @@ fn catchment_pft_partition_keeps_natural_patches_inside_each_hru() {
         assert_eq!(patches.set_type, expected_types, "{mode:?}");
     }
 
-    std::fs::remove_dir_all(directory).unwrap();
+    crate::remove_test_tree(directory);
 }
 
 #[test]
@@ -2241,7 +2241,7 @@ fn source_block_owner_uses_domain_start_for_clipped_first_cell() {
         .unwrap();
         assert_eq!(rows, [Some(17), Some(18)]);
     }
-    std::fs::remove_dir_all(directory).unwrap();
+    crate::remove_test_tree(directory);
 }
 
 #[test]
@@ -2318,7 +2318,7 @@ fn element_block_owner_uses_source_cell_before_land_only_filtering() {
 
     assert!(landdata.join("mesh/2005/mesh_e105_n20.nc").exists());
     assert!(!landdata.join("mesh/2005/mesh_e110_n20.nc").exists());
-    std::fs::remove_dir_all(directory).unwrap();
+    crate::remove_test_tree(directory);
 }
 
 fn write_mesh_filter(
@@ -2413,7 +2413,7 @@ fn mesh_filter_applies_explicit_edges_zero_negative_and_outside_fill() {
     assert_eq!(topology.mesh.pixels(0).unwrap().0, &[1, 2]);
     assert_eq!(topology.mesh.pixels(0).unwrap().1, &[1, 2]);
 
-    std::fs::remove_dir_all(directory).unwrap();
+    crate::remove_test_tree(directory);
 }
 
 #[test]
@@ -2434,7 +2434,7 @@ fn mesh_filter_reports_when_every_element_is_removed() {
     .unwrap();
     assert!(filter.apply(&mut topology).is_err());
 
-    std::fs::remove_dir_all(directory).unwrap();
+    crate::remove_test_tree(directory);
 }
 
 #[test]
@@ -2462,7 +2462,7 @@ fn topology_landonly_can_be_applied_before_custom_filter() {
     assert_eq!(topology.mesh.len(), 1);
     assert_eq!(topology.mesh.pixel_count(0).unwrap(), 1);
 
-    std::fs::remove_dir_all(directory).unwrap();
+    crate::remove_test_tree(directory);
 }
 
 #[test]
@@ -2494,7 +2494,7 @@ fn catchment_filter_builder_matches_unfiltered_when_mask_is_all_positive() {
     assert_eq!(filtered.topology.mesh, unfiltered.topology.mesh);
     assert_eq!(filtered.land_hrus, unfiltered.land_hrus);
 
-    std::fs::remove_dir_all(directory).unwrap();
+    crate::remove_test_tree(directory);
 }
 
 #[test]
@@ -2539,7 +2539,7 @@ fn catchment_mesh_filter_runs_before_hru_sort_and_preserves_block_owners() {
         Some(owners) if owners.owners.len() == 3
     ));
 
-    std::fs::remove_dir_all(directory).unwrap();
+    crate::remove_test_tree(directory);
 }
 
 #[test]
@@ -2560,7 +2560,7 @@ fn mesh_filter_open_normalizes_lonwrap_and_ascending_lat_edges() {
     assert_eq!(filter.grid.lat_s, vec![-90.0, 0.1]);
     assert_eq!(filter.grid.lat_n, vec![0.1, 90.0]);
 
-    std::fs::remove_dir_all(directory).unwrap();
+    crate::remove_test_tree(directory);
 }
 
 #[test]
@@ -2571,7 +2571,7 @@ fn mesh_filter_open_accepts_independent_coordinate_dimension_names() {
 
     assert!(MeshFilter::open(&filter_file).is_ok());
 
-    std::fs::remove_dir_all(directory).unwrap();
+    crate::remove_test_tree(directory);
 }
 
 #[test]
@@ -2616,7 +2616,7 @@ fn mesh_filter_open_normalizes_descending_lat_edges() {
     assert_eq!(filter.grid.lat_s, vec![0.0, -90.0]);
     assert_eq!(filter.grid.lat_n, vec![89.0, 0.0]);
 
-    std::fs::remove_dir_all(directory).unwrap();
+    crate::remove_test_tree(directory);
 }
 
 #[test]
@@ -2711,7 +2711,7 @@ fn wmo_surface_writes_sentinels_zero_fractions_and_copies_zipped_sources() {
         .unwrap()
     };
     assert_eq!(map(&physical), map(&patches));
-    std::fs::remove_dir_all(root).unwrap();
+    crate::remove_test_tree(root);
 }
 
 fn block_order_test_pixel() -> PixelAxes {

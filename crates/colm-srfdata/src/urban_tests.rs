@@ -120,7 +120,7 @@ fn ncar_table_reader_normalizes_layer_and_spectral_axes_once() {
     let _ = std::fs::remove_file(&path);
     write_ncar_table(&path, &table);
     assert_eq!(NcarUrbanProperties::read(&path).unwrap(), table);
-    std::fs::remove_file(path).unwrap();
+    crate::remove_test_file(path);
 }
 
 #[test]

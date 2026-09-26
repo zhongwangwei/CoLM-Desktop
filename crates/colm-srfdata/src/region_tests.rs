@@ -159,5 +159,5 @@ fn existing_surface_clip_keeps_only_vectors_owned_by_selected_elements() {
         }
     ));
 
-    std::fs::remove_dir_all(source).unwrap();
+    crate::remove_test_tree(source);
 }

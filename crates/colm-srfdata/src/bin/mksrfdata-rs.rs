@@ -4438,6 +4438,25 @@ fn spatial_case_command(
     spatial_case_command_with_subgrid(namelist, lct_mode, crop_override, observation, blocks, None)
 }
 
+/// 删掉测试用的临时目录 —— 与 lib 里 `colm_srfdata::remove_test_tree` 同一个东西。
+///
+/// **必须是这里的一份**：测 bin 目标时链接的 lib 是正常编译的（没有 `cfg(test)`），
+/// 所以 lib 里那个 `#[cfg(test)]` 的 helper 在 bin 的测试里**不存在**。
+/// 理由与 lib 那份相同：`netcdf::open` 的 `Dataset` 活到函数末尾时，Windows 上
+/// `remove_dir_all` 会报 `Os { code: 32 }`（unix 允许删打开着的文件）。
+#[cfg(test)]
+fn remove_test_tree(root: impl AsRef<Path>) {
+    let root = root.as_ref();
+    let Err(error) = std::fs::remove_dir_all(root) else {
+        return;
+    };
+    if cfg!(windows) {
+        eprintln!("Windows: 临时目录没清掉 {}: {error}", root.display());
+    } else {
+        panic!("cannot remove {}: {error}", root.display());
+    }
+}
+
 fn spatial_case_command_with_subgrid(
     namelist: &Path,
     lct_mode: Option<SiteMode>,
@@ -5906,7 +5925,7 @@ mod tests {
                 + 1;
             invalid[value] = "invalid".into();
             assert!(parse_spatial_pft(&invalid).is_err());
-            std::fs::remove_dir_all(root).unwrap();
+            crate::remove_test_tree(root);
         }
     }
 
@@ -6001,7 +6020,7 @@ mod tests {
                     )
                     .is_err());
                 }
-                std::fs::remove_dir_all(root).unwrap();
+                crate::remove_test_tree(root);
             }
         }
     }
@@ -6043,7 +6062,7 @@ mod tests {
                     invalid.extend(["--output-2m-wmo".into(), "invalid".into()]);
                     assert!(parse_spatial_pft(&invalid).is_err());
                 }
-                std::fs::remove_dir_all(root).unwrap();
+                crate::remove_test_tree(root);
             }
         }
     }
@@ -6085,7 +6104,7 @@ mod tests {
                 } else {
                     parse_spatial_lct(&invalid).is_err()
                 });
-                std::fs::remove_dir_all(root).unwrap();
+                crate::remove_test_tree(root);
             }
         }
         assert!(optional_mesh_filter(None).unwrap().is_none());
@@ -6138,7 +6157,7 @@ mod tests {
             .map(|element| topology.mesh.pixel_count(element).unwrap())
             .sum::<usize>();
         assert_eq!(pixel_count, 48 * 48);
-        std::fs::remove_dir_all(root).unwrap();
+        crate::remove_test_tree(root);
     }
 
     #[test]
@@ -6190,7 +6209,7 @@ mod tests {
         assert!((topology.pixel.edge_east + 179.9).abs() < 1.0e-12);
         assert_eq!(topology.mesh.len(), 2);
         assert!(topology.pixel.lon_w.len() > 48);
-        std::fs::remove_dir_all(root).unwrap();
+        crate::remove_test_tree(root);
     }
 
     #[test]
@@ -6281,7 +6300,7 @@ mod tests {
         );
         drop(patches);
         drop(mesh);
-        std::fs::remove_dir_all(root).unwrap();
+        crate::remove_test_tree(root);
     }
 
     #[test]
@@ -6526,7 +6545,7 @@ mod tests {
                 "fixture must detect each incorrectly routed field family"
             );
         }
-        std::fs::remove_dir_all(root).unwrap();
+        crate::remove_test_tree(root);
     }
 
     #[test]
@@ -6642,7 +6661,7 @@ mod tests {
                     "{label} unexpectedly wrote {path}"
                 );
             }
-            std::fs::remove_dir_all(root).unwrap();
+            crate::remove_test_tree(root);
         }
     }
 
@@ -6902,7 +6921,7 @@ mod tests {
             .unwrap();
         assert_eq!(lc1, vec![0.5, 0.0]);
         assert_eq!(lc2, vec![0.5, 0.0]);
-        std::fs::remove_dir_all(root).unwrap();
+        crate::remove_test_tree(root);
     }
 
     #[test]
@@ -6967,7 +6986,7 @@ mod tests {
         assert!(!command
             .required_directories
             .contains(&root.join("raw/soil")));
-        std::fs::remove_dir_all(root).unwrap();
+        crate::remove_test_tree(root);
     }
 
     #[test]
@@ -7047,7 +7066,7 @@ mod tests {
             .get_values::<f64, _>(..)
             .unwrap();
         assert_eq!(patch_lc1, vec![1.0, 1.0]);
-        std::fs::remove_dir_all(root).unwrap();
+        crate::remove_test_tree(root);
     }
 
     #[test]
@@ -7281,7 +7300,7 @@ mod tests {
                 .join(format!("soil/2005/{name}_w180_s90.nc"))
                 .exists());
         }
-        std::fs::remove_dir_all(root).unwrap();
+        crate::remove_test_tree(root);
     }
 
     #[test]
@@ -7310,7 +7329,7 @@ mod tests {
         assert!(!command
             .required_files
             .contains(&root.join("raw/soil/PHH2O1.nc")));
-        std::fs::remove_dir_all(root).unwrap();
+        crate::remove_test_tree(root);
     }
 
     #[test]
@@ -7349,7 +7368,7 @@ mod tests {
                     let error = result.err().expect("invalid logical value").to_string();
                     assert!(error.contains("DEF_USE_DOMINANT_PATCHTYPE"), "{error}");
                 }
-                std::fs::remove_dir_all(root).unwrap();
+                crate::remove_test_tree(root);
             }
         }
     }
@@ -7367,7 +7386,7 @@ mod tests {
             .args
             .iter()
             .any(|argument| argument == "--diagnostics"));
-        std::fs::remove_dir_all(root).unwrap();
+        crate::remove_test_tree(root);
     }
 
     #[test]
@@ -7473,7 +7492,7 @@ mod tests {
         assert!(command
             .required_directories
             .contains(&root.join("raw/soil")));
-        std::fs::remove_dir_all(root).unwrap();
+        crate::remove_test_tree(root);
     }
 
     #[test]
@@ -7517,7 +7536,7 @@ mod tests {
                     .join(format!("lai_8-day_15s_{year}.nc"))
             ));
         }
-        std::fs::remove_dir_all(root).unwrap();
+        crate::remove_test_tree(root);
     }
 
     #[test]
@@ -7554,7 +7573,7 @@ mod tests {
                 .required_files
                 .contains(&root.join("topography-factors").join(source)));
         }
-        std::fs::remove_dir_all(root).unwrap();
+        crate::remove_test_tree(root);
     }
 
     #[test]
@@ -7589,7 +7608,7 @@ mod tests {
                 east: -170.0,
             }
         );
-        std::fs::remove_dir_all(root).unwrap();
+        crate::remove_test_tree(root);
     }
 
     #[test]
@@ -7647,7 +7666,7 @@ mod tests {
         assert!(!command
             .required_files
             .contains(&root.join("raw/urban/NCAR_urban_properties.nc")));
-        std::fs::remove_dir_all(root).unwrap();
+        crate::remove_test_tree(root);
     }
 
     #[test]
@@ -7699,7 +7718,7 @@ mod tests {
             .required_files
             .contains(&root.join("raw/urban/LUCY_regionid.nc")));
         assert!(command.args.iter().any(|arg| arg == "--urban-rawdata"));
-        std::fs::remove_dir_all(root).unwrap();
+        crate::remove_test_tree(root);
     }
 
     #[test]
@@ -7728,7 +7747,7 @@ mod tests {
         assert!(command
             .required_files
             .contains(&root.join("raw/urban/NCAR_urban_properties.nc")));
-        std::fs::remove_dir_all(root).unwrap();
+        crate::remove_test_tree(root);
     }
 
     #[test]
@@ -7773,7 +7792,7 @@ mod tests {
         assert!(command
             .required_directories
             .contains(&root.join("raw/plant_15s")));
-        std::fs::remove_dir_all(root).unwrap();
+        crate::remove_test_tree(root);
     }
 
     #[test]
@@ -7833,7 +7852,7 @@ mod tests {
         assert!(command
             .required_directories
             .contains(&root.join("raw/plant_15s")));
-        std::fs::remove_dir_all(root).unwrap();
+        crate::remove_test_tree(root);
     }
 
     #[test]
@@ -7870,7 +7889,7 @@ mod tests {
                 root.display()
             )
         );
-        std::fs::remove_dir_all(root).unwrap();
+        crate::remove_test_tree(root);
     }
 
     #[test]
@@ -7906,7 +7925,7 @@ mod tests {
                 Some(format!("{}/raw/plant_15s", root.display()))
             );
             assert!(parse_spatial_pft(&command.args).unwrap().lulcc);
-            std::fs::remove_dir_all(root).unwrap();
+            crate::remove_test_tree(root);
         }
     }
 
