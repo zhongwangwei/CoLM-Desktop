@@ -99,47 +99,42 @@ pub fn surface_budget(energy: &StandardLctEnergyOutput) -> Result<SurfaceBudget>
     // 自相矛盾 —— 实测 Rust 的 `f_lfevpa` 峰值 615 W/m² 而 `hvap*(f_fevpl+f_fevpg)`
     // 只有 187 W/m²；改用订正后立刻落到 196 W/m²（Fortran 184.65）。
     let ground_evaporation = energy.corrected_ground_evaporation_kg_m2_s;
-    // 内核 `MOD_Thermal…:1343` 是 `lfevpa = lfevpl + htvp*fevpg`，而 **`lfevpl` 是
-    // 叶温例程里单独算好的一项**（`lfevpl = htvpl*fevpl`）—— 所以加数已经是舍入过的，
-    // 只有 `htvp*fevpg` 会被吸收：`FMA(htvp, fevpg, lfevpl)`。
-    // 原先把两项都平铺：干窗**第 1 步**的 `f_lfevpa` 差 1 ULP（第 0 步已全同、
-    // 该步输入也全同 ⇒ 只能是形状）。
-    let latent_heat =
-        sublimation_heat.mul_add(ground_evaporation, leaf_latent_heat * leaf_evaporation);
+    // `main/MOD_Thermal.F90:1466` 是 `lfevpa = hvap*fevpl + htvp*fevpg`，GIMPLE 为
+    // `_272 = fevpg*htvp ; lfevpa = .FMA (fevpl, 2.5104e6, _272)` —— 熔进去的是**叶面**那一项。
+    // （扩展截获那一版是 `lfevpl + htvp*fevpg`，熔的是地面项；同步到 `main/` 后方向反了。）
+    // `_272` 随后在 `fgrnd` 里被原样复用，见下。
+    let ground_latent_heat = ground_evaporation * sublimation_heat;
+    let latent_heat = leaf_evaporation.mul_add(leaf_latent_heat, ground_latent_heat);
 
-    // 内核 `MOD_Thermal…:1352` 这一支是一条 6 段的累加链，**每一段的乘积都各自
-    // 熔进当时的累加值**（不是先算一个两项之和再加上去）：
-    //   _1747 = .FMA(dlrad, emg, sabg)
-    //   _1751 = .FNMA(emg*stefnc, t_grnd_bef**4, _1747)
-    //   _1753 = (emg*stefnc)*t_grnd_bef**3 ; _1757 = .FNMA(_1753, 4*tinc, _1751)
-    //   _1758 = .FMA(fevpg, htvp, fseng)    ; _1760 = _1757 - _1758
-    //   _1762 = pg_rain*cpliq ; _1768 = .FMA(_1762, t_precip-t_grnd, _1760)
-    //   _1770 = pg_snow*cpice ; _1772 = .FMA(t_precip-t_grnd, _1770, _1768)
-    // 所以只能一段一段写。旧写法有三段是平铺的；旧的"8 步离线穷举"看不见它们，
-    // 因为探针那 8 行输入恰好 `sabg=0`、`fsno=0`、`t_soil==t_grnd_bef`、
-    // `4*tinc` 那一乘在这几组数上熔不熔位型相同（见下）。
+    // `main/MOD_Thermal.F90:1475-1489` 的 `fgrnd` 是一条累加链，GIMPLE（非 split，bb 487）：
+    //   _1778 = .FMA (dlrad, emg, sabg)
+    //   _1782 = .FNMA (emg*stefnc, t_grnd_bef**4, _1778)
+    //   _1788 = .FNMA ((emg*stefnc)*t_grnd_bef**3, 4*tinc, _1782)
+    //   _1789 = _272 + fseng ; _1791 = _1788 - _1789        ← `fevpg*htvp` 复用 lfevpa 的乘积，不融合
+    //   _1799 = .FMA (pg_rain*cpliq, t_precip-t_grnd, _1791)
+    //   _1803 = .FMA (t_precip-t_grnd, pg_snow*cpice, _1799)
+    // split（bb 488）把第二段换成雪面、土面各一段：
+    //   .FNMA ((emg*fsno)*stefnc, t_snow**4, …) ; .FNMA ((emg*(1-fsno))*stefnc, t_soil**4, …)
+    // `t_snow`/`t_soil` 是**求解前**的值（`:566-567` 取的），不是步末的。
     let ground_heat = energy
         .leaf
         .downward_longwave_w_m2
         .mul_add(emissivity, energy.shortwave.ground_absorbed_w_m2);
-    // `- emg*stefnc*t_grnd_bef**4`：这个乘积被**收进减法**。
-    // 离线穷举那份 8 步位型实测：只有"这一项融合"能与内核全部对上，
-    // 平铺则 6/8 步差 1 ULP（`C081C128CF597630` 对 `…631`）。
-    let ground_heat = (-(emissivity * STEFAN_BOLTZMANN_W_M2_K4))
-        .mul_add(previous_surface_temperature_k.powi(4), ground_heat);
-    // 内核这一项是 `emg*stefnc*t_grnd_bef**3*(4.*tinc)`，**左结合**
-    // `(((emg*stefnc)*t**3)*(4.*tinc))`；不能复用 `blackbody_change`
-    // （那是 `stefnc*t**3*(4*tinc)`，少一层 `emg`，结合顺序不同）。
-    // `_1757` 是 `.FNMA(_1753, 4*tinc, …)` —— **最后那一乘也熔进减法**。
+    let ground_heat = match energy.split_surface {
+        None => (-(emissivity * STEFAN_BOLTZMANN_W_M2_K4))
+            .mul_add(previous_surface_temperature_k.powi(4), ground_heat),
+        Some(split) => {
+            let snow = (-(emissivity * split.snow_cover_fraction * STEFAN_BOLTZMANN_W_M2_K4))
+                .mul_add(split.snow_temperature_k_before.powi(4), ground_heat);
+            (-(emissivity * (1.0 - split.snow_cover_fraction) * STEFAN_BOLTZMANN_W_M2_K4))
+                .mul_add(split.soil_temperature_k_before.powi(4), snow)
+        }
+    };
     let ground_heat =
         (-(emissivity * STEFAN_BOLTZMANN_W_M2_K4 * previous_surface_temperature_k.powi(3)))
             .mul_add(4.0 * temperature_change_k, ground_heat);
-    // `- (fseng+fevpg*htvp)`：那个乘积同样会被吸收 ⇒ `fma(fevpg, htvp, fseng)`。
-    let ground_heat = ground_heat
-        - sublimation_heat.mul_add(
-            ground_evaporation,
-            energy.corrected_ground_sensible_heat_w_m2,
-        );
+    let ground_heat =
+        ground_heat - (ground_latent_heat + energy.corrected_ground_sensible_heat_w_m2);
     // 降水显热两项：内核把**每一项**熔进累加器（`_1768`/`_1772`），不是先求和再加。
     // 这里与 `zerr` 共用 [`add_precipitation_heat`]，别再写第二套。
     let ground_heat = add_precipitation_heat(energy, ground_heat);

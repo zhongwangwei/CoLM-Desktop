@@ -3,6 +3,8 @@ use super::*;
 fn input() -> GroundHumidityInput {
     GroundHumidityInput {
         ground_temperature_k: 280.0,
+        soil_temperature_k: 280.0,
+        snow_temperature_k: 280.0,
         surface_pressure_pa: 90_000.0,
         air_specific_humidity: 0.001,
         snow_cover_fraction: 0.0,
@@ -91,5 +93,49 @@ fn close(actual: f64, expected: f64) {
     assert!(
         (actual - expected).abs() < 1.0e-12 * expected.abs().max(1.0),
         "{actual} != {expected}"
+    );
+}
+
+/// split 的两个端点：无雪时 `qg = q_soil = hr*qsat(t_soil)`，全雪时 `qg = q_snow = qsat(t_snow)`；
+/// 雪面温度只进 `q_snow`，土面温度只进 `q_soil`。
+#[test]
+fn split_ground_humidity_weights_the_soil_and_snow_faces_by_snow_cover() {
+    let base = GroundHumidityInput {
+        soil_temperature_k: 278.0,
+        snow_temperature_k: 265.0,
+        air_specific_humidity: 0.0001,
+        ..input()
+    };
+    let bare = split_ground_humidity(GroundHumidityInput {
+        snow_cover_fraction: 0.0,
+        ..base
+    })
+    .unwrap();
+    let soil_saturation =
+        crate::saturation_specific_humidity(278.0, base.surface_pressure_pa).unwrap();
+    assert_eq!(
+        bare.soil_specific_humidity,
+        bare.relative_humidity * soil_saturation.specific_humidity
+    );
+    assert_eq!(bare.ground_specific_humidity, bare.soil_specific_humidity);
+
+    let covered = split_ground_humidity(GroundHumidityInput {
+        snow_cover_fraction: 1.0,
+        ..base
+    })
+    .unwrap();
+    let snow_saturation =
+        crate::saturation_specific_humidity(265.0, base.surface_pressure_pa).unwrap();
+    assert_eq!(
+        covered.snow_specific_humidity,
+        snow_saturation.specific_humidity
+    );
+    assert_eq!(
+        covered.ground_specific_humidity,
+        snow_saturation.specific_humidity
+    );
+    assert_eq!(
+        covered.ground_humidity_temperature_slope_kg_kg_k,
+        snow_saturation.specific_humidity_temperature_slope_k
     );
 }

@@ -135,7 +135,9 @@ pub use forcing_downscaling::{
 };
 pub use glacier::{glacier_water, GlacierSurfaceWater, GlacierWaterInput};
 pub use ground_fluxes::{ground_fluxes, GroundFluxInput, GroundFluxState};
-pub use ground_humidity::{non_split_ground_humidity, GroundHumidityInput, GroundHumidityState};
+pub use ground_humidity::{
+    non_split_ground_humidity, split_ground_humidity, GroundHumidityInput, GroundHumidityState,
+};
 pub use ground_temperature::{
     ground_emissivity, ground_temperature, GroundTemperatureInput, GroundTemperatureState,
 };
@@ -250,7 +252,7 @@ pub use surface_optics::{prepare_surface_optics, SurfaceOptics, SurfaceOpticsInp
 
 pub use standard_lct_step::{
     standard_lct_energy_step, standard_lct_snow_soil_step, standard_lct_soil_step, CanopyGeometry,
-    PlantHydraulicSettings, StandardLctEnergyInput, StandardLctEnergyOutput,
+    PlantHydraulicSettings, SplitSurface, StandardLctEnergyInput, StandardLctEnergyOutput,
     StandardLctEnergyState, StandardLctSnowSoilInput, StandardLctSnowSoilOutput,
     StandardLctSnowSoilState, StandardLctSoilInput, StandardLctSoilOutput, StandardLctSoilState,
     TemporalCanopy,
@@ -339,8 +341,9 @@ pub use vegetation::{
 pub use vic::{vic_runoff, VicRunoffInput, VicRunoffState};
 pub use water_2014::{
     initial_total_water_storage_mm, total_water_storage_mm, water_2014_snow_soil_step,
-    water_2014_soil_step, Water2014Runoff, Water2014SnowSoilInput, Water2014SnowSoilOutput,
-    Water2014SoilFluxes, Water2014SoilInput, Water2014SoilOutput, Water2014SoilState,
+    water_2014_soil_step, SplitSoilWater, Water2014Runoff, Water2014SnowSoilInput,
+    Water2014SnowSoilOutput, Water2014SoilFluxes, Water2014SoilInput, Water2014SoilOutput,
+    Water2014SoilState,
 };
 
 pub use snow_grain::{

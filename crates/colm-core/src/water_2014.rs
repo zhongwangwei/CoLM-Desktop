@@ -183,11 +183,24 @@ pub struct Water2014SoilOutput {
     pub hydraulic_conductivity_mm_s: Vec<f64>,
 }
 
-/// Inputs to the active-snow, non-split `WATER_2014` hand-off.
+/// Inputs to the active-snow `WATER_2014`/`WATER_VSF` hand-off.
 #[derive(Debug, Clone, Copy)]
 pub struct Water2014SnowSoilInput<'a> {
+    /// split 时这里的雨与四项通量是**雪面**那一份（`pg_rain*fsno`、`q*_snow`）。
     pub snow: SnowWaterInput,
     pub soil: Water2014SoilInput<'a>,
+    /// `DEF_SPLIT_SOILSNOW` 打开时的土面那一份；`None` 即非 split。
+    pub split: Option<SplitSoilWater>,
+}
+
+/// split 土面那一份（`MOD_SoilSnowHydrology.F90:909-935`、`:1283-1296`）。
+#[derive(Debug, Clone, Copy)]
+pub struct SplitSoilWater {
+    /// 冠层下的**全部**降雨 `pg_rain`（雪面那份 `pg_rain*fsno` 已在 `snow` 里）。
+    pub rainfall_kg_m2_s: f64,
+    pub snow_cover_fraction: f64,
+    /// 土面的 `qseva_soil`/`qsdew_soil`/`qsubl_soil`/`qfros_soil`（已按 `1-fsno` 加权）。
+    pub soil: crate::ThermalWaterFluxes,
 }
 
 /// Diagnostics from the linked snow-percolation and soil-water calls.
@@ -349,6 +362,9 @@ pub fn water_2014_snow_soil_step(
     // 关键是**雨要直接落到土上** —— 有雪时雨先经雪列、由底部排水转给土壤，
     // 无雪时上游 `gwat = pg_rain + sm - ...` 里的 `pg_rain` 就是雨水本身。
     // 这里若给 0，等于把降雨吞掉。
+    if let Some(split) = input.split {
+        return split_snow_soil_step(input, split, snow_state, soil_state);
+    }
     let (snow, ground_rain_kg_m2_s) = if snow_state.layer_count < 0 {
         let snow = snow_water(input.snow, snow_state)?;
         let ground_rain_kg_m2_s = snow.bottom_drainage_kg_m2_s;
@@ -408,6 +424,55 @@ pub fn water_2014_snow_soil_step(
                 soil_frost_kg_m2_s,
                 soil_sublimation_kg_m2_s,
             },
+            ..input.soil
+        },
+        soil_state,
+    )?;
+    Ok(Water2014SnowSoilOutput { snow, soil })
+}
+
+/// `DEF_SPLIT_SOILSNOW` 那一支的第 [1] 节与凝结更新。
+///
+/// * 有雪层：`snowwater` 只拿雪面那份（`pg_rain*fsno` 与 `q*_snow`），土壤收到
+///   `gwat + pg_rain*(1-fsno) - qseva_soil` —— GIMPLE 是 `.FMA (1-fsno, pg_rain, gwat) - qseva_soil`。
+/// * 无雪层：`gwat = pg_rain + sm - qseva_soil`。
+/// * 土层 1 的露/霜/升华**不论有没有雪层**都用 `_soil` 那一份（非 split 只在无雪层时记）。
+fn split_snow_soil_step(
+    input: Water2014SnowSoilInput<'_>,
+    split: SplitSoilWater,
+    snow_state: &mut RuntimeSnowColumn,
+    soil_state: &mut Water2014SoilState,
+) -> Result<Water2014SnowSoilOutput> {
+    let (snow, ground_rain_kg_m2_s, snowmelt_kg_m2_s) = if snow_state.layer_count < 0 {
+        let snow = snow_water(input.snow, snow_state)?;
+        let ground_rain = (1.0 - split.snow_cover_fraction)
+            .mul_add(split.rainfall_kg_m2_s, snow.bottom_drainage_kg_m2_s);
+        // 有雪层时 `meltf` 的 `sm` 恒为 0，式子里也没有它。
+        (snow, ground_rain, 0.0)
+    } else {
+        (
+            SnowWaterOutcome {
+                bottom_drainage_kg_m2_s: 0.0,
+                layer_drainage_kg_m2: Vec::new(),
+            },
+            split.rainfall_kg_m2_s,
+            input.soil.fluxes.snowmelt_kg_m2_s,
+        )
+    };
+    let soil = water_2014_soil_step(
+        Water2014SoilInput {
+            fluxes: Water2014SoilFluxes {
+                ground_rain_kg_m2_s,
+                snowmelt_kg_m2_s,
+                ground_evaporation_kg_m2_s: split.soil.evaporation_kg_m2_s,
+                transpiration_kg_m2_s: input.soil.fluxes.transpiration_kg_m2_s,
+                soil_dew_kg_m2_s: split.soil.dew_kg_m2_s,
+                soil_frost_kg_m2_s: split.soil.frost_kg_m2_s,
+                soil_sublimation_kg_m2_s: split.soil.sublimation_kg_m2_s,
+            },
+            // `snow_layers` 在土壤步里只管水量闭合诊断那一句"`lb >= 1` 才扣凝结项"；
+            // split 那一支（`:1293-1295`）**无条件**扣 `_soil` 那一份，等价于无雪层。
+            snow_layers: 0,
             ..input.soil
         },
         soil_state,

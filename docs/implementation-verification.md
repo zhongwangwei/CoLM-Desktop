@@ -24481,3 +24481,47 @@ cargo clippy --all-targets -D warnings、cargo fmt --check（两套 workspace）
 * 黄金没有重生成（`/Volumes/Data01` 未挂载），上面的数字是对**同一新内核的当场运行**，不是对入库黄金。
 * 源码注释里还有不少 `*_Extended.F90:行号` 的引用。那些文件仍在 `vendor/` 里，引用可以追溯，
   但行号对应的已不是被编译的代码；逐条改指 `main/` 留作后续。
+
+## 第 401 轮：`DEF_SPLIT_SOILSNOW` 接进 Rust 主循环（A1 第一项），以及 NetSolar 用错雪盖
+
+此前 `physics.rs` 拒绝 `DEF_SPLIT_SOILSNOW = .true.`：能量侧的凝结拆分做了，比湿、水分侧和
+地表收支诊断都没有。本轮补齐，并用同一新内核逐步对照。
+
+### 一、补的部分
+
+| 位置 | 上游 | Rust |
+|---|---|---|
+| 地面比湿 | `MOD_Thermal.F90:634-652`：`q_soil = hr*qsat(t_soil)`、`q_snow = qsat(t_snow)`，过饱和夹取只作用于土面且清零整个 `dqgdT` | `ground_humidity::split_ground_humidity` |
+| `t_grnd`（求解前/后） | GIMPLE：`.FMA (t_snow, fsno, t_soil*(1-fsno))` / `.FMA (fsno, t_soisno(lb), (1-fsno)*t_soisno(1))` | 原先平铺，改为同形 |
+| `qg` | `.FMA (1-fsno, q_soil, qsatg*fsno)`（熔的是**左边**乘积） | 同形 |
+| 水分第 [1] 节 | `snowwater` 只拿 `pg_rain*fsno` 与 `q*_snow`；土面 `.FMA (1-fsno, pg_rain, gwat) - qseva_soil` | `water_2014::split_snow_soil_step` |
+| 土层 1 凝结 | split 时**有雪层也**记 `qsdew_soil`/`qfros_soil`/`qsubl_soil` | 同上；闭合诊断按"无条件扣"处理 |
+| `fgrnd` | split 把 `-emg*stefnc*t_grnd_bef**4` 换成雪面、土面两段 `FNMA` | `SplitSurface` 带出求解前的 `t_soil`/`t_snow`/`fsno` |
+
+### 二、顺带更正的两处（非 split 也受影响）
+
+1. **`lfevpa` 与 `fgrnd` 的收缩方向**（`main/` 的 GIMPLE）：`lfevpa = .FMA (fevpl, hvap, fevpg*htvp)`，
+   熔的是**叶面**项；`fgrnd` 里的 `fseng + fevpg*htvp` 复用那个已舍入的乘积、**不**融合。
+   Rust 原先照扩展版写成 `FMA(htvp, fevpg, lfevpl)` 与 `FMA(fevpg, htvp, fseng)`。
+   改后三个整月窗口的 tier 计数不变（33/25/59），只动末位。
+2. **NetSolar 用了 `newsnow` 之后的雪盖。** 上游 `CoLMMAIN.F90:772` 的 `netsolar` 在 `:959` 的
+   `newsnow` **之前**，而 `newsnow` 会按新雪改写 `fsno`。Rust 把改写后的值交给了 NetSolar。
+   非 split 时 `fsno` 只影响 `sabg_soil`/`sabg_snow` 的拆分，看不出来；split 时这个拆分直接进地温方程。
+   定位过程：AT-Neu 1 月第 159 步（第一个"有雪层 + 有日照"的步）两边打印 `hs_soil`/`hs_snow` 的全部输入，
+   `sabg` 总量逐位相同而 `sabg_soil` 0.28073 对 0.28285；再打印 `albsoi`/`albsno`/`tran` 与 NetSolar
+   实际用的 `ssoi`/`ssno` —— 两边都一致，按 Fortran 雪盖 0.796285（上一步末）反算单位吸收比
+   2.71813，与 Rust 的 2.71811 相同，Rust 用的是 0.798335（`newsnow` 之后）。
+
+### 三、实测
+
+```text
+AT-Neu 1 月 1-6 日逐步（DEF_SPLIT_SOILSNOW=.true.，split 与非 split 的 Fortran 自第 130 步分开）：
+  修 NetSolar 雪盖之前：第 159 步起 t_grnd/scv/fgrnd 偏离（4e-6 相对）
+  修之后：相对差 >1e-9 的首个量在第 225 步（叶温 1e-4 K，输入只差 1e-13，见下）
+golden-compare，split 整月：AT-Neu 2010-01 tier2=52、2010-02 tier2=65，tier0=0
+非 split 整月（回归）：CN-Cng 33、AT-Neu 25/59，tier0=0，与第 400 轮相同
+```
+
+第 225 步那种"输入差 1e-13、叶温差 1e-4 K"是叶温迭代的离散收敛判据把 ULP 种子放大。种子来自叶温仍按
+扩展版 GIMPLE 调的融合位型（非 split 第 9 步 `fsenl` 的 1 ULP 也是它）。下一步先按 `main/` 的 GIMPLE
+把叶温过一遍，再做后面的特性，免得每项新特性的逐步验收都被这个种子干扰。

@@ -65,21 +65,9 @@ pub fn land_physics_parameters(
         bail!("DEF_simulation_time%timestep must be positive, got {timestep_seconds}");
     }
     let runoff_scheme = runoff_scheme(integer(document, "DEF_Runoff_SCHEME")?)?;
-    // `DEF_SPLIT_SOILSNOW` 此前**根本没被读过**：写 `.true.` 的算例会在
-    // `assembly.rs` 里被硬写死的 `use_split_soil_snow: false` 静默按非 split 跑完。
-    // 内核侧确实有 split 的能量分配（`partition_split_thermal_water`），但水分侧
-    // 明确只做了非 split（`water_2014.rs` 的入口注释），所以这是一条**只做了一半**
-    // 的支路 —— 让它跑起来比不跑更糟。声明默认值是 `.false.`，按本文件的纪律 #3
-    // 直接报错，而不是塞进 `unported_branches`。
-    if logical(document, "DEF_SPLIT_SOILSNOW")? {
-        bail!(
-            "DEF_SPLIT_SOILSNOW is on, but the Rust runtime only assembles the non-split \
-             soil/snow column: `assembly.rs` pins `use_split_soil_snow` to false and \
-             `water_2014.rs` implements only the non-split hydrology, so the case would \
-             silently run as non-split (upstream gives soil and snow separate surface \
-             temperatures and separate qsdew/qfros/qsubl on each face)"
-        );
-    }
+    // `DEF_SPLIT_SOILSNOW`：能量侧（比湿、`t_grnd`、凝结拆分、`fgrnd`）与水分侧
+    // （`snowwater` 只拿雪面那份、土面走 `pg_rain*(1-fsno) - qseva_soil`）都已接上。
+    let split_soil_snow = logical(document, "DEF_SPLIT_SOILSNOW")?;
     // `DEF_Interception_scheme` **从来没被读过**：`interception.rs` 只实现了 scheme 1
     // （CoLM2014，闭环 `compare_interception` 的名字就是 `LEAF_interception_CoLM2014`），
     // 而声明注释里那 7 档是**不同的公式**（`LEAF_interception_{NOAHMP,MATSIRO,VIC,JULES}`，
@@ -321,6 +309,7 @@ pub fn land_physics_parameters(
         plant_hydraulic_parameters,
         plant_hydraulic_overrides,
         vegetation_snow,
+        split_soil_snow,
         land_cover_scheme,
         root_fraction_scheme: ROOT_FRACTION_SCHEME,
         timestep_seconds,

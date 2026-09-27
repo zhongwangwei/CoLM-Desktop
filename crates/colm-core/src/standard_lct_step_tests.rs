@@ -59,6 +59,8 @@ fn standard_lct_energy_step_uses_one_shared_physical_handoff() {
     input.soil_surface_resistance.ground_specific_humidity = 0.02;
     let humidity = non_split_ground_humidity(GroundHumidityInput {
         ground_temperature_k: input.ground_temperature.ground_temperature_k,
+        soil_temperature_k: input.ground_temperature.ground_temperature_k,
+        snow_temperature_k: input.ground_temperature.ground_temperature_k,
         surface_pressure_pa: forcing.surface_pressure_pa,
         air_specific_humidity: forcing.specific_humidity,
         snow_cover_fraction: input.ground_temperature.snow_cover_fraction,

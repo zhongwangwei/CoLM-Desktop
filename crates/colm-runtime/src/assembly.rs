@@ -108,10 +108,11 @@ pub struct LandPhysicsParameters {
     ///
     /// **这里按 namelist 真传**（`physics.vegetation_snow`），不再是"硬写成 false"：
     /// 实测把开关翻过来，端口自己的输出有 226 个值变化（第 387 轮），所以两支都在跑。
-    /// 关掉时那一支的语义见 `colm_core::leaf_temperature::update_canopy_water` 的
-    /// 注释（按 `MOD_LeafTemperature_Extended.F90:1502-1522` 的规格：只更新总水量、
-    /// 分量按当前温度指定、不重算总水量）。
+    /// 关掉时那一支的语义见 `colm_core::leaf_temperature::update_canopy_water`
+    /// （`main/MOD_LeafTemperature.F90:1239-1256`：总水量按比例拆回雨/雪两份）。
     pub vegetation_snow: bool,
+    /// `DEF_SPLIT_SOILSNOW`：土面与雪面分开算温度、比湿与凝结（默认 `.false.`）。
+    pub split_soil_snow: bool,
     /// 本算例编译的地类分类体系。
     pub land_cover_scheme: LandCoverScheme,
     /// `ROOTFR_SCHEME`：`rootfr` 取哪一套公式。
@@ -1326,7 +1327,7 @@ impl StandardLctRestartTemplate {
                     options: LeafTemperatureOptions {
                         observation_height_mode: physics.observation_height_mode,
                         vegetation_snow: physics.vegetation_snow,
-                        split_soil_snow: false,
+                        split_soil_snow: physics.split_soil_snow,
                         soil_resistance_is_conductance: physics.surface_resistance_scheme == 4,
                         surface_layer_scheme: physics.surface_layer_scheme,
                         stomata: physics.stomata,
@@ -1356,7 +1357,7 @@ impl StandardLctRestartTemplate {
                     snow_water_equivalent_kg_m2: 0.0,
                     snow_depth_m: 0.0,
                     snow_cover_fraction: self.snow_cover_fraction,
-                    use_split_soil_snow: false,
+                    use_split_soil_snow: physics.split_soil_snow,
                     // `None` 选标准分支而不是 SNICAR。
                     snow_layer_absorption_w_m2: None,
                     // 内核覆盖：`finish_energy_step` 用本步短波与湍流通量填这些。

@@ -144,6 +144,7 @@ fn snow_soil_entry_credits_surface_condensation_only_without_a_snow_layer() {
         Water2014SnowSoilInput {
             snow: snow_water(0.001),
             soil: input(),
+            split: None,
         },
         &mut crate::RuntimeSnowColumn::empty(),
         &mut no_snow,
@@ -156,6 +157,7 @@ fn snow_soil_entry_credits_surface_condensation_only_without_a_snow_layer() {
         Water2014SnowSoilInput {
             snow: snow_water(0.001),
             soil: bare,
+            split: None,
         },
         &mut crate::RuntimeSnowColumn::empty(),
         &mut no_snow_zeroed,
@@ -195,6 +197,7 @@ fn snow_soil_entry_credits_surface_condensation_only_without_a_snow_layer() {
         Water2014SnowSoilInput {
             snow: snow_water(0.001),
             soil: input(),
+            split: None,
         },
         &mut snow_state,
         &mut with_snow,
@@ -239,6 +242,7 @@ fn active_snow_routes_its_bottom_drainage_through_the_shared_soil_kernel() {
                 frost_kg_m2_s: 0.0,
             },
             soil: input(),
+            split: None,
         },
         &mut snow_state,
         &mut soil_state,
@@ -255,4 +259,113 @@ fn active_snow_routes_its_bottom_drainage_through_the_shared_soil_kernel() {
         .liquid_water_kg_m2
         .iter()
         .all(|value| *value >= 0.0));
+}
+
+/// split 有雪层时：雪面只拿 `pg_rain*fsno`，土面收到
+/// `FMA(1-fsno, pg_rain, 雪底排水) - qseva_soil`（`MOD_SoilSnowHydrology.F90:909-935`），
+/// 土层 1 的露/霜/升华用 `_soil` 那一份 —— 有雪层也照记。
+#[test]
+fn split_soil_snow_gives_the_uncovered_rain_and_soil_face_fluxes_to_the_soil() {
+    let mut snow_state = crate::RuntimeSnowColumn::empty();
+    crate::add_new_snow(
+        crate::NewSnowInput {
+            patch_type: 0,
+            time_step_seconds: 1800.0,
+            ground_temperature_k: 270.0,
+            ground_snowfall_kg_m2_s: 0.002,
+            new_snow_bulk_density_kg_m3: 100.0,
+            precipitation_temperature_k: 269.0,
+            variably_saturated_flow: false,
+        },
+        &mut snow_state,
+    )
+    .unwrap();
+    assert!(snow_state.layer_count < 0);
+    let fsno = 0.6;
+    let rain = 0.001;
+    let soil_face = crate::ThermalWaterFluxes {
+        evaporation_kg_m2_s: 3.0e-6,
+        dew_kg_m2_s: 1.0e-6,
+        frost_kg_m2_s: 2.0e-6,
+        sublimation_kg_m2_s: 5.0e-7,
+        ..Default::default()
+    };
+    let mut soil_state = state();
+    let output = water_2014_snow_soil_step(
+        Water2014SnowSoilInput {
+            snow: crate::SnowWaterInput {
+                time_step_seconds: 1800.0,
+                irreducible_saturation: 0.033,
+                impermeable_porosity: 0.05,
+                rainfall_kg_m2_s: rain * fsno,
+                evaporation_kg_m2_s: 0.0,
+                dew_kg_m2_s: 0.0,
+                sublimation_kg_m2_s: 0.0,
+                frost_kg_m2_s: 0.0,
+            },
+            soil: input(),
+            split: Some(SplitSoilWater {
+                rainfall_kg_m2_s: rain,
+                snow_cover_fraction: fsno,
+                soil: soil_face,
+            }),
+        },
+        &mut snow_state,
+        &mut soil_state,
+    )
+    .unwrap();
+
+    let expected = (1.0 - fsno).mul_add(rain, output.snow.bottom_drainage_kg_m2_s)
+        - soil_face.evaporation_kg_m2_s;
+    assert_eq!(output.soil.water_input_mm_s, expected);
+
+    // 同一算例把土面凝结三项清零：土层 1 的冰差值必须正好是 `(qfros_soil-qsubl_soil)*deltim`。
+    let mut snow_again = crate::RuntimeSnowColumn::empty();
+    crate::add_new_snow(
+        crate::NewSnowInput {
+            patch_type: 0,
+            time_step_seconds: 1800.0,
+            ground_temperature_k: 270.0,
+            ground_snowfall_kg_m2_s: 0.002,
+            new_snow_bulk_density_kg_m3: 100.0,
+            precipitation_temperature_k: 269.0,
+            variably_saturated_flow: false,
+        },
+        &mut snow_again,
+    )
+    .unwrap();
+    let mut bare_state = state();
+    water_2014_snow_soil_step(
+        Water2014SnowSoilInput {
+            snow: crate::SnowWaterInput {
+                time_step_seconds: 1800.0,
+                irreducible_saturation: 0.033,
+                impermeable_porosity: 0.05,
+                rainfall_kg_m2_s: rain * fsno,
+                evaporation_kg_m2_s: 0.0,
+                dew_kg_m2_s: 0.0,
+                sublimation_kg_m2_s: 0.0,
+                frost_kg_m2_s: 0.0,
+            },
+            soil: input(),
+            split: Some(SplitSoilWater {
+                rainfall_kg_m2_s: rain,
+                snow_cover_fraction: fsno,
+                soil: crate::ThermalWaterFluxes {
+                    evaporation_kg_m2_s: soil_face.evaporation_kg_m2_s,
+                    ..Default::default()
+                },
+            }),
+        },
+        &mut snow_again,
+        &mut bare_state,
+    )
+    .unwrap();
+    let frost_minus_sublimation =
+        (soil_face.frost_kg_m2_s - soil_face.sublimation_kg_m2_s) * 1800.0;
+    assert!(
+        (soil_state.ice_water_kg_m2[0] - bare_state.ice_water_kg_m2[0] - frost_minus_sublimation)
+            .abs()
+            < 1.0e-12
+    );
 }

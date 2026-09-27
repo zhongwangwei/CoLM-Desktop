@@ -163,6 +163,14 @@ impl StandardLctSnowSoilState {
     }
 }
 
+/// split 土面/雪面在**求解前**的状态（`MOD_Thermal.F90:566-567` 的 `t_soil`/`t_snow`）。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SplitSurface {
+    pub snow_cover_fraction: f64,
+    pub soil_temperature_k_before: f64,
+    pub snow_temperature_k_before: f64,
+}
+
 /// The component results of one standard LCT energy update.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StandardLctEnergyOutput {
@@ -186,6 +194,8 @@ pub struct StandardLctEnergyOutput {
     /// 实测 US-NR1-snow 第 4 步（雪层刚建出来那一步）按土层 1 取会让 `tinc = 0`，
     /// 于是 `emis` 恰为 1.0、`olrg` 低 28.87 W/m²、`zerr` 从 1e-11 变成 28.84。
     pub surface_temperature_k_before: f64,
+    /// `DEF_SPLIT_SOILSNOW` 时 `fgrnd` 要的求解前土面/雪面温度与雪盖；非 split 为 `None`。
+    pub split_surface: Option<SplitSurface>,
     /// 本步 THERMAL **实际用的**地面发射率 `emg`（`MOD_Thermal.F90:512-513`）。
     ///
     /// `emg` 在 THERMAL 入口按 newsnow **之后**的 `scv` 定，诊断量
@@ -311,7 +321,7 @@ fn finish_energy_step(
         },
         &mut state.radiation,
     )?;
-    let ground_humidity = non_split_ground_humidity_input(input)?;
+    let ground_humidity = ground_humidity_input(input)?;
     let root_uptake = root_uptake_input(input)?;
     let soil_surface_resistance_s_m =
         soil_surface_resistance_input(input, ground_humidity, state.soil_surface_resistance_s_m)?;
@@ -328,8 +338,8 @@ fn finish_energy_step(
     ground_flux_input.snow_temperature_k = snow_temperature_k;
     if let Some(humidity) = ground_humidity {
         ground_flux_input.ground_specific_humidity = humidity.ground_specific_humidity;
-        ground_flux_input.soil_specific_humidity = humidity.ground_specific_humidity;
-        ground_flux_input.snow_specific_humidity = humidity.ground_specific_humidity;
+        ground_flux_input.soil_specific_humidity = humidity.soil_specific_humidity;
+        ground_flux_input.snow_specific_humidity = humidity.snow_specific_humidity;
         ground_flux_input.ground_humidity_temperature_derivative_kg_kg_k =
             humidity.ground_humidity_temperature_slope_kg_kg_k;
     }
@@ -469,6 +479,14 @@ fn finish_energy_step(
         surface_temperature_k,
         surface_temperature_k_before: ground_temperature_k,
         ground_emissivity: input.ground_temperature.ground_emissivity,
+        split_surface: input
+            .ground_temperature
+            .use_split_soil_snow
+            .then_some(SplitSurface {
+                snow_cover_fraction: input.ground_temperature.snow_cover_fraction,
+                soil_temperature_k_before: soil_temperature_k,
+                snow_temperature_k_before: snow_temperature_k,
+            }),
         ground_humidity,
         root_uptake,
         soil_surface_resistance_s_m,
@@ -624,6 +642,11 @@ pub fn standard_lct_snow_soil_step(
     validate(input.energy)?;
     remember_snow_ice_fraction(&mut state.snow);
     let prepared = prepare_energy(input.energy, &mut state.energy)?;
+    // `CoLMMAIN.F90:772` 的 `netsolar` 在 `:959` 的 `newsnow` **之前**：NetSolar 用的是
+    // 上一步末的 `fsno`，而 `newsnow` 会按新雪改写它。split 时 `sabg_soil`/`sabg_snow`
+    // 按这个雪盖拆分 —— AT-Neu 1 月第 159 步（第一个有雪层又有日照的步）用新雪盖拆出
+    // `sabg_soil` 0.2807 对 Fortran 0.2828。
+    let net_solar_snow_fraction = state.snow.ground_snow_fraction;
     add_new_snow(
         NewSnowInput {
             patch_type: 0,
@@ -672,7 +695,7 @@ pub fn standard_lct_snow_soil_step(
         ..input.energy.ground_temperature
     };
     energy_input.solar = NetSolarInput {
-        snow_fraction: state.snow.ground_snow_fraction,
+        snow_fraction: net_solar_snow_fraction,
         ..input.energy.solar
     };
     // `MOD_Thermal.F90:485-486` 的 `emg` 按**本步开始时**的 `scv` 与 `patchtype` 定，
@@ -729,9 +752,25 @@ pub fn standard_lct_snow_soil_step(
         .map(|flag| *flag == 1)
         .collect::<Vec<_>>();
 
-    let thermal_water = energy
-        .thermal_water
-        .expect("validated non-split active-snow energy step supplies thermal water");
+    // 非 split：雪面与土面是同一组 `q*`；split：雪面拿 `q*_snow` 与 `pg_rain*fsno`，
+    // 土面那一份经 `SplitSoilWater` 交给水分入口（`MOD_SoilSnowHydrology.F90:909-935`）。
+    let (thermal_water, snow_rainfall_kg_m2_s, split) = match (
+        energy.thermal_water,
+        energy.split_thermal_water,
+        energy.split_surface,
+    ) {
+        (Some(water), None, None) => (water, energy.interception.ground_rain_kg_m2_s, None),
+        (None, Some(fluxes), Some(surface)) => (
+            fluxes.snow,
+            energy.interception.ground_rain_kg_m2_s * surface.snow_cover_fraction,
+            Some(crate::SplitSoilWater {
+                rainfall_kg_m2_s: energy.interception.ground_rain_kg_m2_s,
+                snow_cover_fraction: surface.snow_cover_fraction,
+                soil: fluxes.soil,
+            }),
+        ),
+        _ => anyhow::bail!("the energy step returned an inconsistent split soil/snow partition"),
+    };
     let root_flux_mm_s = if input.soil_water.plant_hydraulics {
         ensure!(
             energy.leaf.root_flux_kg_m2_s.len() == state.soil_temperature_k.len(),
@@ -745,7 +784,7 @@ pub fn standard_lct_snow_soil_step(
         Water2014SnowSoilInput {
             snow: SnowWaterInput {
                 time_step_seconds: input.energy.interception.time_step_seconds,
-                rainfall_kg_m2_s: energy.interception.ground_rain_kg_m2_s,
+                rainfall_kg_m2_s: snow_rainfall_kg_m2_s,
                 evaporation_kg_m2_s: thermal_water.evaporation_kg_m2_s,
                 dew_kg_m2_s: thermal_water.dew_kg_m2_s,
                 sublimation_kg_m2_s: thermal_water.sublimation_kg_m2_s,
@@ -777,6 +816,7 @@ pub fn standard_lct_snow_soil_step(
                 snow_layers: state.snow.layer_count.unsigned_abs() as usize,
                 ..input.soil_water
             },
+            split,
         },
         &mut state.snow,
         &mut state.soil_water,
@@ -850,7 +890,6 @@ fn validate_snow_soil_step(
     ensure!(
         ground.patch_type == 0
             && input.soil_water.patch_type == 0
-            && !ground.use_split_soil_snow
             && (-5..=0).contains(&state.snow.layer_count)
             && !input.soil_water.urban_run
             && same(
@@ -964,29 +1003,31 @@ fn sync_snow_soil_state(
     state.soil_water.ice_water_kg_m2 = ground.ice_water_kg_m2[snow_layers..].to_vec();
 }
 
-fn non_split_ground_humidity_input(
-    input: StandardLctEnergyInput<'_>,
-) -> Result<Option<GroundHumidityState>> {
+fn ground_humidity_input(input: StandardLctEnergyInput<'_>) -> Result<Option<GroundHumidityState>> {
     let ground = input.ground_temperature;
-    if ground.use_split_soil_snow {
-        return Ok(None);
-    }
     let soil = ground.snow_layers;
-    Ok(Some(crate::non_split_ground_humidity(
-        GroundHumidityInput {
-            ground_temperature_k: surface_temperatures(ground).0,
-            surface_pressure_pa: input.forcing.surface_pressure_pa,
-            air_specific_humidity: input.forcing.specific_humidity,
-            snow_cover_fraction: ground.snow_cover_fraction,
-            top_layer_thickness_m: ground.layer_thickness_m[soil],
-            top_layer_liquid_water_kg_m2: ground.liquid_water_kg_m2[soil],
-            top_layer_ice_water_kg_m2: ground.ice_water_kg_m2[soil],
-            top_layer_porosity: ground.soil_porosity[0],
-            top_layer_residual_water: ground.soil_residual_water[0],
-            saturated_soil_suction_mm: ground.soil_suction_mm[0],
-            hydraulic_model: ground.soil_hydraulic_model[0],
-        },
-    )?))
+    let (ground_temperature_k, soil_temperature_k, snow_temperature_k) =
+        surface_temperatures(ground);
+    let humidity = if ground.use_split_soil_snow {
+        crate::split_ground_humidity
+    } else {
+        crate::non_split_ground_humidity
+    };
+    Ok(Some(humidity(GroundHumidityInput {
+        ground_temperature_k,
+        soil_temperature_k,
+        snow_temperature_k,
+        surface_pressure_pa: input.forcing.surface_pressure_pa,
+        air_specific_humidity: input.forcing.specific_humidity,
+        snow_cover_fraction: ground.snow_cover_fraction,
+        top_layer_thickness_m: ground.layer_thickness_m[soil],
+        top_layer_liquid_water_kg_m2: ground.liquid_water_kg_m2[soil],
+        top_layer_ice_water_kg_m2: ground.ice_water_kg_m2[soil],
+        top_layer_porosity: ground.soil_porosity[0],
+        top_layer_residual_water: ground.soil_residual_water[0],
+        saturated_soil_suction_mm: ground.soil_suction_mm[0],
+        hydraulic_model: ground.soil_hydraulic_model[0],
+    })?))
 }
 
 fn root_uptake_input(input: StandardLctEnergyInput<'_>) -> Result<RootUptakeState> {
@@ -1208,8 +1249,11 @@ fn current_ground_temperature(
         "ground-temperature solver returned a different layer count"
     );
     Ok(if input.use_split_soil_snow {
-        input.snow_cover_fraction * state.temperature_k[0]
-            + (1.0 - input.snow_cover_fraction) * state.temperature_k[input.snow_layers]
+        // GIMPLE（`MOD_Thermal.F90:1339` 的 split 支）：`.FMA (fsno, t_soisno(lb), (1-fsno)*t_soisno(1))`。
+        input.snow_cover_fraction.mul_add(
+            state.temperature_k[0],
+            (1.0 - input.snow_cover_fraction) * state.temperature_k[input.snow_layers],
+        )
     } else {
         state.temperature_k[0]
     })
@@ -1219,8 +1263,11 @@ fn surface_temperatures(input: GroundTemperatureInput<'_>) -> (f64, f64, f64) {
     let snow_temperature_k = input.temperature_k[0];
     let soil_temperature_k = input.temperature_k[input.snow_layers];
     let ground_temperature_k = if input.use_split_soil_snow {
-        input.snow_cover_fraction * snow_temperature_k
-            + (1.0 - input.snow_cover_fraction) * soil_temperature_k
+        // GIMPLE（`MOD_Thermal.F90:572`）：`.FMA (t_snow, fsno, t_soil*(1-fsno))`。
+        snow_temperature_k.mul_add(
+            input.snow_cover_fraction,
+            soil_temperature_k * (1.0 - input.snow_cover_fraction),
+        )
     } else {
         snow_temperature_k
     };
@@ -1249,8 +1296,9 @@ fn validate(input: StandardLctEnergyInput<'_>) -> Result<()> {
             && same(input.solar.stem_area_index, leaf.stem_area_index)
             && same(input.interception.leaf_area_index, leaf.leaf_area_index)
             && same(input.interception.stem_area_index, leaf.stem_area_index)
-            && same(input.solar.snow_fraction, ground_flux.snow_cover_fraction)
-            && same(input.solar.snow_fraction, ground.snow_cover_fraction)
+            // NetSolar 的雪盖是 `newsnow` 之前的（见 `standard_lct_snow_soil_step`），
+            // 不必等于地温求解用的那个；只有湍流与地温两边必须一致。
+            && same(ground_flux.snow_cover_fraction, ground.snow_cover_fraction)
             && same(
                 input.soil_surface_resistance.air_density_kg_m3,
                 ground_flux.air_density_kg_m3,

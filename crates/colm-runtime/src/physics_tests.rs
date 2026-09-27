@@ -227,20 +227,19 @@ fn irrigation_is_refused_rather_than_run_dry() {
     assert!(error.to_string().contains("DEF_USE_IRRIGATION"));
 }
 
-/// `DEF_SPLIT_SOILSNOW` 声明默认是 `.false.`，此前**根本没被读过** ——
-/// 写 `.true.` 的算例会被 `assembly.rs` 里硬写死的 `use_split_soil_snow: false`
-/// 静默按非 split 跑完。那是"算式对、结构错、不报错"，必须显式拒绝。
+/// `DEF_SPLIT_SOILSNOW` 现在真的接上了：它必须被读进 `split_soil_snow`，
+/// 而不是像从前那样被装配层硬写成 `false`（那样算例会静默按非 split 跑完）。
 #[test]
-fn split_soil_snow_is_refused_rather_than_run_as_non_split() {
-    let error = land_physics_parameters(
+fn split_soil_snow_is_read_into_the_physics_parameters() {
+    let split = land_physics_parameters(
         &case_with("DEF_SPLIT_SOILSNOW = .true."),
         LandCoverScheme::Igbp,
         HEIGHTS,
     )
-    .expect_err("the split soil/snow column is not assembled");
-    let message = error.to_string();
-    assert!(message.contains("DEF_SPLIT_SOILSNOW"), "{message}");
-    assert!(message.contains("non-split"), "{message}");
+    .unwrap();
+    assert!(split.split_soil_snow);
+    let default = land_physics_parameters(&case_with(""), LandCoverScheme::Igbp, HEIGHTS).unwrap();
+    assert!(!default.split_soil_snow);
 }
 
 /// 基流优化器（`MOD_Opt_Baseflow`）在预热期迭代 `scale_baseflow`，
