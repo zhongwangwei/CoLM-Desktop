@@ -11,7 +11,7 @@
 
 use anyhow::{ensure, Result};
 
-use crate::{ground_emissivity, StandardLctEnergyOutput};
+use crate::StandardLctEnergyOutput;
 
 /// `MOD_Thermal.F90` 收尾处的物理常数（`stefnc`/`cpliq`/`cpice`）。
 const STEFAN_BOLTZMANN_W_M2_K4: f64 = 5.67e-8;
@@ -67,7 +67,7 @@ pub fn surface_budget(energy: &StandardLctEnergyOutput) -> Result<SurfaceBudget>
     let previous_surface_temperature_k = energy.surface_temperature_k_before;
     let temperature_change_k = surface_temperature_k - previous_surface_temperature_k;
 
-    let emissivity = ground_emissivity(ground.snow_water_equivalent_kg_m2, 0);
+    let emissivity = energy.ground_emissivity;
     let upward_longwave = energy.leaf.upward_longwave_w_m2;
     let blackbody_change = STEFAN_BOLTZMANN_W_M2_K4
         * previous_surface_temperature_k.powi(3)

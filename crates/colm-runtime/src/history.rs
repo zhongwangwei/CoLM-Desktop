@@ -840,8 +840,8 @@ pub fn set_lct_surface_budget(
 /// 把一步的**收支残差**写进第 `record` 条记录。
 ///
 /// 两个量都是上游自己拼的闭合性检查，既不是状态量，也没有任何一步输出能顶替。
-/// 项表逐条搬自 **`extends/interception/MOD_Thermal_CanopyPhase_Extended.F90:1403-1413`**
-/// （`zerr`；Makefile:647 确认编译的是这份 Extended，行号与 `main/MOD_Thermal.F90` 差 ~7 行）
+/// 项表逐条搬自 **`main/MOD_Thermal.F90:1534-1543`**（`zerr`；同步到 CoLM-SYSU-integration@3c799bae
+/// 之后内核不再编译 `extends/interception` 那一份，它多出的 `canopy_phase_heat` 一项随之去掉）
 /// 与 `CoLMMAIN.F90:1529-1543`（`xerr`）：
 ///
 /// | `zerr` 的项 | 上游 | 本仓库 |
@@ -855,15 +855,14 @@ pub fn set_lct_surface_budget(
 /// | `xmf` | `MOD_PhaseChange` 的相变潜热 | `ground.latent_heat_flux_w_m2` |
 /// | `dheatl` | `sum(dheatl_p*pftfrac)`（`:1122`） | `leaf.canopy_heat_storage_w_m2` |
 /// | `hprl` | `sum(hprl_p*pftfrac)`（`:1121`） | `leaf.precipitation_heat_w_m2` |
-/// | `canopy_phase_heat` | `:1408` 比 `main/` 下多的一项 | `interception.canopy_phase_heat_w_m2` |
-/// | 降水显热两项 | `:1409-1410` | [`colm_core::add_precipitation_heat`]（**逐项熔进**累加值） |
-/// | `Σ(t-t_bef)/fact` | `:1412-1413`，`j = lb:nl_soil` | 下面那条三列 `zip` |
+/// | 降水显热两项 | `:1539` | [`colm_core::add_precipitation_heat`]（**逐项熔进**累加值） |
+/// | `Σ(t-t_bef)/fact` | `:1541-1543`，`j = lb:nl_soil` | 下面那条三列 `zip` |
 ///
 /// **`frl` 是大气向下长波（`forc_frl`），不是冠层下方的 `dlrad`。** 两者只在
 /// `MOD_Thermal.F90:517`（无冠层）相等；有冠层时 `dlrad` 多乘一份透过率。
 /// `fgrnd` 用的是 `dlrad*emg`，这条收支用的是 `frl` —— 混用会差几十 W/m²。
 ///
-/// **`:1392` 那一行 `errore`（减 `fgrnd`）是死代码**：`:1396` 立刻用减 `xmf` 的版本
+/// **`:1534` 那一行 `errore`（减 `fgrnd`）是死代码**：`:1538` 立刻用减 `xmf` 的版本
 /// 覆盖它。两条式子里的 `fgrnd` 与 `xmf` **不是同一个量**（前者含地面辐射收支，
 /// 后者只有相变潜热），所以照抄第二行时不能把 `xmf` 换成 `fgrnd`。
 ///
@@ -891,7 +890,7 @@ pub fn set_lct_balance_errors(
         "the ground temperature state disagrees on depth between the current, previous \
          and factor columns"
     );
-    // `MOD_Thermal_CanopyPhase_Extended.F90:1403-1413` 的 `errore`：前两个赋值里
+    // `MOD_Thermal.F90:1534-1543` 的 `errore`：前两个赋值里
     // 第一个是**死代码**（立刻被第二个覆盖，只差 `fgrnd` vs `xmf`），真正的链条
     // 以**逐层边加边减**收尾：
     //   `DO j = lb, nl_soil ; errore = errore - (t_soisno(j)-t_soisno_bef(j))/fact(j)`
@@ -908,12 +907,7 @@ pub fn set_lct_balance_errors(
         - budget.latent_heat_w_m2
         - ground.latent_heat_flux_w_m2
         - energy.leaf.canopy_heat_storage_w_m2
-        + energy.leaf.precipitation_heat_w_m2
-        // `+ canopy_phase_heat`：`MOD_Thermal_CanopyPhase_Extended.F90:1408` 比 `main/`
-        // 下的同名语句多这一项，而 Makefile:647 确认**编译的就是 Extended 那一份**。
-        // scheme=1 下它恒为 0（见 `InterceptionOutput::canopy_phase_heat_w_m2` 的注释），
-        // 所以两个黄金窗口都看不出来；scheme 4/5/6/7 会真非零，漏掉就是实打实的残差。
-        + energy.interception.canopy_phase_heat_w_m2;
+        + energy.leaf.precipitation_heat_w_m2;
     // 降水显热两项：内核把**每一项**分别熔进当时的累加值（`_1871`/`_1872`），
     // 不是先求和再加 —— 与 `fgrnd` 共用 `add_precipitation_heat`。
     let mut zerr = colm_core::add_precipitation_heat(energy, zerr);
@@ -1595,7 +1589,7 @@ impl HistorySession {
         output: &colm_core::StandardLctSnowSoilOutput,
         reference: HistoryReferenceState,
     ) -> Result<Option<PathBuf>> {
-        let ground = output.energy.ground.temperature_k[0];
+        let ground = state.surface_temperature_k();
         self.plant_hydraulics = template.plant_hydraulics();
         self.variably_saturated = template.physics.variably_saturated_flow;
         let variably_saturated = self.variably_saturated;

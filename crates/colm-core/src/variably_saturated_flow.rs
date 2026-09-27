@@ -4408,37 +4408,22 @@ pub fn variably_saturated_flow_step(
 
     state.surface_water_mm = state.surface_water_mm.max(0.0);
 
-    // 不透水表层：蒸发先从积水扣，再从表层土取。
-    let mut impervious_evaporation_mm = 0.0;
-    let mut impervious_liquid_loss_mm = 0.0;
-    let mut impervious_ice_loss_kg_m2 = 0.0;
+    // 不透水表层上的蒸发亏损（`qgtop < 0`）。按 CoLM-SYSU-integration 非 TRACER 构建的写法
+    // （`MOD_SoilSnowHydrology.F90` `WATER_VSF`）：有积水先让积水承担，积水变负的部分从
+    // 表层**液态水**里扣；没有积水就直接扣表层液态水。**不动冰。**
+    // 分叉点 `CoLM202X@2f91b435` 对所有构建都按冰/液比例扣，本函数此前照它写；上游这一版
+    // 只在 TRACER 构建里保留那种写法（见 docs/upstream-bugs.md 第 10 条）。
     if !permeable[0] && ground_water_flux_mm_s < 0.0 {
-        let deficit_mm = -ground_water_flux_mm_s * dt;
-        let surface_loss_mm = state.surface_water_mm.max(0.0).min(deficit_mm);
-        if surface_loss_mm > 0.0 {
-            impervious_evaporation_mm += surface_loss_mm;
-            state.surface_water_mm = (state.surface_water_mm - surface_loss_mm).max(0.0);
-        }
-        let soil_deficit_mm = (deficit_mm - surface_loss_mm).max(0.0);
-        if soil_deficit_mm > 0.0 {
-            let (liquid_loss, ice_loss) =
-                if input.temperature_k[0] <= FREEZING_K && state.ice_water_kg_m2[0] > 0.0 {
-                    let ice = state.ice_water_kg_m2[0].max(0.0).min(soil_deficit_mm);
-                    let liquid = state.liquid_water_kg_m2[0]
-                        .max(0.0)
-                        .min((soil_deficit_mm - ice).max(0.0));
-                    (liquid, ice)
-                } else {
-                    let liquid = state.liquid_water_kg_m2[0].max(0.0).min(soil_deficit_mm);
-                    let ice = state.ice_water_kg_m2[0]
-                        .max(0.0)
-                        .min((soil_deficit_mm - liquid).max(0.0));
-                    (liquid, ice)
-                };
-            state.liquid_water_kg_m2[0] = (state.liquid_water_kg_m2[0] - liquid_loss).max(0.0);
-            state.ice_water_kg_m2[0] = (state.ice_water_kg_m2[0] - ice_loss).max(0.0);
-            impervious_liquid_loss_mm = liquid_loss;
-            impervious_ice_loss_kg_m2 = ice_loss;
+        if state.surface_water_mm > 0.0 {
+            state.surface_water_mm += ground_water_flux_mm_s * dt;
+            if state.surface_water_mm < 0.0 {
+                state.liquid_water_kg_m2[0] =
+                    (state.liquid_water_kg_m2[0] + state.surface_water_mm).max(0.0);
+                state.surface_water_mm = 0.0;
+            }
+        } else {
+            state.liquid_water_kg_m2[0] =
+                (state.liquid_water_kg_m2[0] + ground_water_flux_mm_s * dt).max(0.0);
         }
         ground_water_flux_mm_s = 0.0;
     }
@@ -4607,10 +4592,6 @@ pub fn variably_saturated_flow_step(
 
     state.matric_potential_mm = soil_state.matric_potential_mm.clone();
     state.hydraulic_conductivity_mm_s = hydraulic_conductivity_mm_s.clone();
-
-    let _ = impervious_evaporation_mm;
-    let _ = impervious_liquid_loss_mm;
-    let _ = impervious_ice_loss_kg_m2;
 
     Ok(VariableSaturatedFlowOutput {
         water_input_mm_s: input.ground_water_flux_mm_s,

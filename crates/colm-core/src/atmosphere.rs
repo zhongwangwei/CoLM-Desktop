@@ -226,10 +226,12 @@ pub fn wet_bulb_temperature(
         let saturation = saturation_specific_humidity(wet_bulb_k, pressure_pa)?;
         let saturated_mixing_ratio =
             saturation.specific_humidity / (1.0 - saturation.specific_humidity);
-        wet_bulb_k = (wet_bulb_k
-            + air_temperature_k
-            + LATENT_HEAT_VAPORIZATION / CP_AIR * (mixing_ratio - saturated_mixing_ratio))
-            / 2.0;
+        // `(twc + t + hvap/cpair*(r-rws))/2.0`：GIMPLE 是
+        // `.FMA (r-rws, hvap/cpair, twc+t)`（`MOD_WetBulb.F90`，`-fdump-tree-optimized`）。
+        wet_bulb_k = (LATENT_HEAT_VAPORIZATION / CP_AIR).mul_add(
+            mixing_ratio - saturated_mixing_ratio,
+            wet_bulb_k + air_temperature_k,
+        ) / 2.0;
     }
     Ok(wet_bulb_k)
 }
@@ -337,9 +339,10 @@ pub fn partition_precipitation(input: PrecipitationInput) -> Result<Precipitatio
             if delta > f77(3.0) {
                 1.0
             } else if delta >= f77(-2.0) {
-                (f77(1.0)
-                    - f77(1.0) / (f77(1.0) + f77(5.00e-5) * (f77(2.0) * (delta + f77(4.0))).exp()))
-                .max(f77(0.0))
+                // `1.0+5.00e-5*exp(...)`：GIMPLE 是 `.FMA (exp, 5e-5, 1.0)`
+                // （`-fdump-tree-optimized` of `MOD_RainSnowTemp.F90`）。
+                let exponential = ((delta + f77(4.0)) * f77(2.0)).exp();
+                (f77(1.0) - f77(1.0) / exponential.mul_add(f77(5.00e-5), f77(1.0))).max(f77(0.0))
             } else {
                 0.0
             }
@@ -377,7 +380,11 @@ pub fn partition_precipitation(input: PrecipitationInput) -> Result<Precipitatio
             if input.air_temperature_k > FREEZING_K + f77(2.0) {
                 1.0
             } else {
-                (f77(-54.632) + f77(0.2) * input.air_temperature_k).max(f77(0.0))
+                // GIMPLE：`.FMA (forc_t, 0.2, -54.632)`。
+                input
+                    .air_temperature_k
+                    .mul_add(f77(0.2), f77(-54.632))
+                    .max(f77(0.0))
             }
         }
     };

@@ -219,7 +219,6 @@ fn run_snow(
     session: Option<HistorySession>,
 ) -> Result<RunSummary> {
     let mut state = template.snow_state();
-    let mut last_ground_temperature_k = None;
     // `smp`/`hk` 只出现在步输出里（`soilwater` 的 `intent(out)`），而续跑要写它们。
     let mut last_water = None;
     let mut last_energy = None;
@@ -231,7 +230,6 @@ fn run_snow(
                 &mut state,
                 &mut session,
                 |step, output| {
-                    last_ground_temperature_k = Some(output.energy.ground.temperature_k[0]);
                     last_water = Some(output.water.clone());
                     last_energy = Some(output.energy.clone());
                     last_cosine_zenith = step.surface_cosine_zenith;
@@ -242,7 +240,6 @@ fn run_snow(
         }
         None => (
             runtime.run_restart_standard_lct_snow(template, &mut state, |step, output| {
-                last_ground_temperature_k = Some(output.energy.ground.temperature_k[0]);
                 last_water = Some(output.water.clone());
                 last_energy = Some(output.energy.clone());
                 last_cosine_zenith = step.surface_cosine_zenith;
@@ -251,8 +248,9 @@ fn run_snow(
             None,
         ),
     };
-    let ground_temperature_k = last_ground_temperature_k.context(NO_STEP)?;
     let last_water = last_water.context(NO_STEP)?;
+    // 重启里的 `t_grnd` 是雪层合并之后重取的那个（`CoLMMAIN.F90:1452`）。
+    let ground_temperature_k = state.surface_temperature_k();
     let last_energy = last_energy.context(NO_STEP)?;
     let overrides = template.evolved_snow_overrides(
         &state,

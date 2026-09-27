@@ -146,6 +146,23 @@ pub struct StandardLctSnowSoilState {
     pub soil_water: Water2014SoilState,
 }
 
+impl StandardLctSnowSoilState {
+    /// 步末的 `t_grnd = t_soisno(snl+1)`（`CoLMMAIN.F90:1451-1452`）。
+    ///
+    /// 上游在雪层合并/分裂**之后**重取一次表层温度，history 的 `f_t_grnd`、步末
+    /// 那次 `albland` 与重启里的 `t_grnd` 都读这个值。不能拿 THERMAL 时打包列的
+    /// 第 0 层顶替：那一层在同一步里可能已被合并掉 —— AT-Neu 1 月第 140 步
+    /// `snowdp` 跌破 0.01 m、唯一的雪层并进土壤，Fortran 写的是土层 1 的 270.91 K，
+    /// 顶替值是那片已消失的雪 266.18 K。
+    pub fn surface_temperature_k(&self) -> f64 {
+        if self.snow.layer_count < 0 {
+            self.snow.temperature_k[crate::snow::snow_layer_slot(self.snow.layer_count + 1)]
+        } else {
+            self.soil_temperature_k[0]
+        }
+    }
+}
+
 /// The component results of one standard LCT energy update.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StandardLctEnergyOutput {
@@ -169,6 +186,14 @@ pub struct StandardLctEnergyOutput {
     /// 实测 US-NR1-snow 第 4 步（雪层刚建出来那一步）按土层 1 取会让 `tinc = 0`，
     /// 于是 `emis` 恰为 1.0、`olrg` 低 28.87 W/m²、`zerr` 从 1e-11 变成 28.84。
     pub surface_temperature_k_before: f64,
+    /// 本步 THERMAL **实际用的**地面发射率 `emg`（`MOD_Thermal.F90:512-513`）。
+    ///
+    /// `emg` 在 THERMAL 入口按 newsnow **之后**的 `scv` 定，诊断量
+    /// `fgrnd`/`olrg`/`emis`/`trad` 与 `zerr` 都得用同一个值。不能在
+    /// `surface_budget` 里拿步末的 `scv` 重算：新雪在同一步里融完时步末 `scv = 0`，
+    /// 会把 0.97 算成 0.96 —— AT-Neu 第 46 步实测 `f_fgrnd` 差 0.034 W/m²、
+    /// `f_olrg` 差 0.017 W/m²，而 `t_grnd` 逐位相同（求解用的是对的那个）。
+    pub ground_emissivity: f64,
     /// Runtime-derived lower humidity boundary for a non-split surface.
     /// Split soil/snow still has separate soil and snow boundaries.
     pub ground_humidity: Option<GroundHumidityState>,
@@ -443,6 +468,7 @@ fn finish_energy_step(
         forcing_longwave_w_m2: input.forcing.downward_longwave_w_m2,
         surface_temperature_k,
         surface_temperature_k_before: ground_temperature_k,
+        ground_emissivity: input.ground_temperature.ground_emissivity,
         ground_humidity,
         root_uptake,
         soil_surface_resistance_s_m,

@@ -33,19 +33,15 @@ fn standard_leaf_solver_closes_the_canopy_energy_balance() {
     assert_eq!(state.canopy_water.snow_mm, 0.0);
 }
 
-/// 冠层的潜热随叶温在**汽化**与**升华**之间切换（上游的 `htvpl`）。
+/// 叶面潜热恒为 `hvap`，**不随叶温切换**。
 ///
-/// `MOD_LeafTemperature_Extended.F90:1584` 导出 `lfevpl = htvpl*fevpl`，
-/// 而编译进来的 `MOD_Thermal_CanopyPhase_Extended.F90:1343` 是
-/// **`lfevpa = lfevpl + htvp*fevpg`** —— 叶面那一项用 `htvpl`，不是 `hvap`
-/// （`main/MOD_Thermal.F90:1333` 的 `lfevpa = hvap*fevpl + ...` 是**旧版**，
-/// `Makefile` 用 `extends/` 顶掉了 `MOD_Thermal*`，那份从不参与编译）。
-///
-/// 写死 `hvap` 的后果有两处，都不显眼：`f_lfevpa` 差 `(hsub-hvap)*fevpl ≈ 3.3e5*fevpl`
-/// （冬季实测 3.14 W/m²），以及 `f_zerr` 差同一个量 —— 冠层能量收支是按 `htvpl`
-/// 闭合的，而残差里用的是 `lfevpa`。所以这条测试同时钉住 `hsub` 的数值与"按叶温选"。
+/// 内核自 CoLM-SYSU-integration 同步起编的是 `main/MOD_LeafTemperature.F90`：增量、
+/// `dele`、`fsenl` 修正、`err` 都用 `hvap`，`MOD_Thermal` 的
+/// `lfevpa = hvap*fevpl + htvp*fevpg` 也是。随叶温在汽化/升华间切换的 `htvpl`
+/// 是扩展版（`extends/interception/`）的写法，那份已不参与编译。
+/// 这条测试在零下冠层上钉住"仍是 `hvap`"。
 #[test]
-fn the_leaf_latent_heat_follows_the_leaf_temperature() {
+fn the_leaf_latent_heat_is_hvap_at_any_leaf_temperature() {
     // 样本夹具的叶温收敛到约 289 K，在冰点以上 → `hvap`。
     let mut state = sample_state();
     let warm = leaf_temperature(sample_input(), &mut state).unwrap();
@@ -55,7 +51,7 @@ fn the_leaf_latent_heat_follows_the_leaf_temperature() {
         "a leaf above freezing must use hvap"
     );
 
-    // 把大气与地面都压到零下、并关掉短波，叶温就会落到冰点以下 → `hsub`。
+    // 把大气与地面都压到零下、并关掉短波，叶温就会落到冰点以下，潜热仍是 `hvap`。
     let mut cold_input = sample_input();
     cold_input.reference_air_temperature_k = 255.0;
     cold_input.potential_temperature_k = 255.0;
@@ -77,11 +73,9 @@ fn the_leaf_latent_heat_follows_the_leaf_temperature() {
         cold_state.leaf_temperature_k
     );
     assert_eq!(
-        cold.leaf_latent_heat_j_kg, LATENT_HEAT_SUBLIMATION_J_KG,
-        "a leaf below freezing must use hsub"
+        cold.leaf_latent_heat_j_kg, LATENT_HEAT_VAPORIZATION_J_KG,
+        "main/ uses hvap for the leaf even below freezing"
     );
-    // `hsub - hvap = hfus`：确认两个常数没有被写成同一个值。
-    assert!((LATENT_HEAT_SUBLIMATION_J_KG - LATENT_HEAT_VAPORIZATION_J_KG - 0.3336e6).abs() < 1.0);
 }
 
 /// `thm` 是 `forc_t + 0.0098*forc_hgt_t`，**不是位温**。
@@ -111,26 +105,26 @@ fn the_reference_height_temperature_is_not_the_potential_temperature() {
     );
 }
 
-/// 净截留率为负时**夹掉**，不是报错。
+/// 净截留率为负时照常参与计算，既不报错、也不夹到 0。
 ///
-/// `qintr_rain = (prc_rain+prl_rain+qflx_irrig) - thru_rain/deltim`，而
-/// `thru_rain` 含冠层排水 `tex_rain` —— 排水超过截留量时它就是负的。上游
-/// `MOD_LeafTemperature_Extended.F90:1174-1177` 在增量式的**分子与分母**、
-/// `:1335` 在循环后的 `fsenl` 修正、`hprl` 一律取 `max(0, ·)`，注释写着
-/// "negative net flux does not spuriously inject t_precip-tl energy"。
-///
-/// 本仓库原先在 `validate` 里要求它非负，那会让**任何排水步直接报错**。
+/// `qintr_rain = (prc_rain+prl_rain+qflx_irrig) - thru_rain/deltim`，排水超过截留时为负。
+/// `main/MOD_LeafTemperature.F90` 直接把它乘进 `cpliq*qintr_rain*(t_precip-tl)`
+/// （增量的分子分母、循环后的 `fsenl` 修正、`hprl`）；取 `max(0,·)` 是扩展版的写法。
 #[test]
-fn a_negative_net_interception_rate_is_clamped_not_rejected() {
+fn a_negative_net_interception_rate_enters_the_precipitation_heat() {
     let mut input = sample_input();
     input.intercepted_rain_kg_m2_s = -5.0e-6;
     input.intercepted_snow_kg_m2_s = -1.0e-6;
     input.precipitation_temperature_k = 250.0;
     let mut state = sample_state();
     let output = leaf_temperature(input, &mut state).expect("a draining canopy is a valid state");
-    // 两项都被夹成 0，所以 `hprl` 恰好是 0（不夹会得到
-    // `4188*(-5e-6)*(250-260) + 2117*(-1e-6)*(250-260) ≈ +0.23 W/m2`）。
-    assert_eq!(output.precipitation_heat_w_m2, 0.0);
+    // 负通量乘负温差：`hprl` 为正，量级约 `(4188*5e-6 + 2117*1e-6)*(tl-250)`。
+    assert!(
+        output.precipitation_heat_w_m2 > 0.0,
+        "{}",
+        output.precipitation_heat_w_m2
+    );
+    assert!(output.precipitation_heat_w_m2 < 2.0);
     assert!(state.leaf_temperature_k.is_finite());
 }
 

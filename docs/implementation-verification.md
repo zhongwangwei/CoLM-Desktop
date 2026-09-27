@@ -24400,3 +24400,84 @@ PHS 关那一支的发散就是第 381 轮记下、尚未对齐的种子（`soil
 * 城市（`MOD_Urban_Thermal.F90`）那一处没有 Rust 对应物（城市不在 `colm-rs` 覆盖面内），
   Fortran 侧只验证了编译。
 * `DEF_RSS_SCHEME > 0` 的 `SoilSurfaceResistance` 支路本轮算例未走到（自动置 0），改动依据是语言规则。
+
+## 第 400 轮：内核换成 `main/` 之后 Rust 主循环的对齐（同步 CoLM-SYSU-integration@3c799bae 的第三步）
+
+同步（`1deb5ee`）之后内核不再编译 `extends/interception`（上游 `d6de53e9` 起即如此），而
+`colm-rs` 的叶温/截获是照 `*_Extended.F90` 移植的。本轮把它们改成 `main/` 的语义，并用
+逐步输出（`DEF_HIST_FREQ='TIMESTEP'`）对新内核逐步定位剩下的差。
+
+### 一、改成 `main/` 语义的地方（按 `main/MOD_LeafTemperature.F90`、`MOD_LeafInterception.F90`）
+
+* 叶面潜热一律 `hvap`（扩展版按叶温在 `hvap`/`hsub` 间切换）；`qintr_rain/snow` 不再 `max(0)` 夹取。
+* PHS 支：`etr` 与 `Σrootflux` 只做 1e-7 的一致性断言，删掉扩展版的 `balance_phs_rootflux`；
+  非 PHS 支：`etr<0` 只截断 `etr` 本身并把斜率置 0，不再按比例改 sunlit/shaded，也没有循环后再平衡。
+* 冠层水更新：无夹取、无 `deficit` 回退；`DEF_VEG_SNOW` 关时按比例分相；
+  `fwet_snow = ((10/(48*lsai))*ldew_snow)**0.666666666666`；露/霜是 `abs(min(evplwet,0))`。
+* `dewfraction`：`((1/dewmx)/(scale*lsai))*depth)**0.666666666666`，雪的 `scale = 48`，无门槛。
+* `fseng`/`fevpg`（及 soil/snow 分量）用**相变之前**的 `tl`：`main/` 在冠层水更新与 Niu (2004)
+  拉回之前就算好了这几项。
+* 不透水顶层 `qgtop<0`：非 TRACER 语义（先扣地表积水、再扣 `wliq(1)`，冰不动；见
+  `docs/upstream-bugs.md` 第 10 条）。
+* `zerr` 去掉 `canopy_phase_heat`（只有 Extended 的 `errore` 有这一项；scheme=1 下它本就恒 0，
+  删除不改变任何一位）。
+
+### 二、逐步定位中查出的两处 Rust 缺陷（与同步无关，同步前就在）
+
+1. **`emg` 用了步末的 `scv`。** `surface_budget` 按**步末** `scv` 重算地面发射率，而上游
+   `MOD_Thermal.F90:512-513` 在 THERMAL 入口按 newsnow **之后**的 `scv` 定。新雪在同一步里融完时
+   两者不同（0.97 对 0.96）。AT-Neu 第 46 步：`f_fgrnd` −32.7845 对 −32.7507、`f_olrg` 差 0.0173，
+   而 `t_grnd` 逐位相同（求解用的是对的那个）。改为由步输出带出内核实际用的 `ground_emissivity`。
+2. **步末 `t_grnd` 取了 THERMAL 时打包列的第 0 层。** 上游 `CoLMMAIN.F90:1451-1452` 在雪层
+   合并/分裂之后重取 `t_grnd = t_soisno(snl+1)`；history、步末 `albland` 与重启都读它。
+   AT-Neu 1 月第 140 步 `snowdp` 跌破 0.01 m、唯一的雪层并进土壤：Fortran 写 270.91 K（土层 1），
+   Rust 写 266.18 K（已消失的雪层）。新增 `StandardLctSnowSoilState::surface_temperature_k`，
+   history、表面光学、`colm-rs` 写重启三处都改用它。
+
+### 三、GIMPLE 证实的 FMA 收缩（`-fdump-tree-optimized`，生产编译选项）
+
+| 位置 | 内核 | Rust 旧写法 |
+|---|---|---|
+| `MOD_WetBulb.F90` 迭代 | `.FMA (r-rws, hvap/cpair, twc+t)` | 平铺 |
+| `MOD_RainSnowTemp.F90` 方案 I | `.FMA (exp(...), 5e-5, 1.0)` | 平铺 |
+| `MOD_RainSnowTemp.F90` 默认方案 | `.FMA (forc_t, 0.2, -54.632)` | 平铺 |
+
+AT-Neu 2010-02 第 129 条 `f_xy_rain`/`f_xy_snow` 的 tier0 失败（同步前旧内核对旧 Rust 就有）由此消失：
+逐步反推出 Fortran 的 `flfall` 比 Rust 小 2 ULP，前两处合起来正好补上。
+另外冠层水更新的 `ldew_rain + (qdewl-qevpl)*deltim` 改成 FMA（`-ffp-contract=fast` 下必然收缩）；
+这一处没有单独的 dump 佐证，蒸干那一步的残量数值（~1e-19）取决于前几步已有的 ULP 差。
+
+### 四、实测
+
+```text
+golden-compare --tolerances oracle/tolerances.toml（新内核 kernels/default 对 colm-rs）
+  CN-Cng 2008-01   tier2=33            tier0=0
+  AT-Neu 2010-01   tier2=25            tier0=0
+  AT-Neu 2010-02   tier2=59            tier0=0（本轮前 2）
+  AT-Neu 2010-02   f_t_grnd 最大差 6.0e-4 K（本轮前 1.3 K）
+cargo test --lib --bins（全 workspace；colm-init/colm-srfdata --test-threads=1）全过
+cargo clippy --all-targets -D warnings、cargo fmt --check（两套 workspace）干净
+```
+
+剩下的 tier2 都是 ULP 种子（第 9 步起 `fsenl`/`t_grnd` 1 ULP）被两类机制放大，不是实现差：
+
+* **PHS 求解病态**：CN-Cng 第 448 步 `vegwp` 四层**整体平移** 33.78 mm，`etr` 却在 1e-11 相对精度内一致
+  —— 导水率很小时水势差很大而通量几乎不变，下一条记录又回到一致。
+* **离散阈值翻转**：CN-Cng `f_zwt` 在 0.289/0.391 两个离散值间跳，单条记录翻过去、下一条回来。
+
+原先按 Extended 内核 GIMPLE 调出的融合位型，在 `main/` 上有若干处不再一致（第 9 步那个 1 ULP 即是），
+本轮没有逐 ULP 追。
+
+### 五、覆盖面与范围（写明，免得被当成遗漏）
+
+* **不做 Rust 版**：`extends/`（上游已不编译）、CaMa-Flood、流域网格（CATCHMENT）。
+* **要做、尚未做**：Rust 主循环目前只覆盖 SinglePoint + LCT 土面 patch。经纬度网格与非结构网格
+  由 Fortran 内核（`latlon`/`unstructured` 预设）和 Rust 前处理支持，`--engine rust` 会在第一段之前
+  拒绝并提示 `--engine fortran`。两种网格的内核都强制 `GridRiverLakeFlow`，所以 Rust 侧的空间支持
+  要与网格河湖流一起做。决定：Rust 覆盖完整之前不发布，而不是做自动回退到 Fortran。
+
+### 六、没做的（Not-tested）
+
+* 黄金没有重生成（`/Volumes/Data01` 未挂载），上面的数字是对**同一新内核的当场运行**，不是对入库黄金。
+* 源码注释里还有不少 `*_Extended.F90:行号` 的引用。那些文件仍在 `vendor/` 里，引用可以追溯，
+  但行号对应的已不是被编译的代码；逐条改指 `main/` 留作后续。

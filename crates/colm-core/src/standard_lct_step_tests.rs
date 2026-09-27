@@ -879,3 +879,50 @@ fn soil_surface_resistance_is_skipped_on_the_first_timestep() {
         later.soil_surface_resistance_s_m
     );
 }
+
+/// 步末 `t_grnd = t_soisno(snl+1)`：有雪取最上面那一层雪，雪层合并掉以后取土层 1。
+/// 写成"打包列第 0 层"会在雪刚消失的那一步写出已不存在的雪温（AT-Neu 1 月第 140 步差 4.7 K）。
+#[test]
+fn the_step_end_surface_temperature_follows_the_combined_snow_layer_count() {
+    let forcing = prepare_runtime_forcing(RuntimeForcingInput {
+        air_temperature_k: 268.0,
+        specific_humidity: 0.002,
+        surface_pressure_pa: 101_325.0,
+        precipitation_kg_m2_s: 0.0,
+        eastward_wind_m_s: 3.0,
+        northward_or_scalar_wind_m_s: 1.0,
+        wind_is_vector: true,
+        downward_shortwave_w_m2: 0.0,
+        downward_longwave_w_m2: 250.0,
+        calendar_day: 20.5,
+        longitude_radians: 0.0,
+        latitude_radians: 0.5,
+        grid_longitude_radians: 0.5,
+        grid_latitude_radians: 0.5,
+        boundary_layer_height_m: None,
+    })
+    .unwrap();
+    let mut snow = RuntimeSnowColumn::empty();
+    snow.layer_count = -2;
+    snow.temperature_k[crate::snow::snow_layer_slot(-1)] = 262.0;
+    snow.temperature_k[crate::snow::snow_layer_slot(0)] = 266.0;
+    let mut state = StandardLctSnowSoilState {
+        energy: energy_state(forcing),
+        snow,
+        soil_temperature_k: vec![271.0, 272.0],
+        soil_water: Water2014SoilState {
+            liquid_water_kg_m2: vec![20.0, 80.0],
+            ice_water_kg_m2: vec![0.0, 0.0],
+            water_table_depth_m: 1.0,
+            aquifer_water_mm: 100.0,
+            surface_water_mm: 0.0,
+            matric_potential_mm: vec![-10_000.0; 2],
+            hydraulic_conductivity_mm_s: vec![0.0; 2],
+        },
+    };
+    assert_eq!(state.surface_temperature_k(), 262.0);
+
+    // 雪层全部并进土壤：雪槽里的旧温度不再算数。
+    state.snow.layer_count = 0;
+    assert_eq!(state.surface_temperature_k(), 271.0);
+}

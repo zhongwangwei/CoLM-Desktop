@@ -416,10 +416,13 @@ impl PointRuntime {
             // 顺序不能反：上游 `hist_out`（`CoLM.F90:537`）在 `CoLMDRIVER`（`:512`）
             // **之后**跑，而末尾那一节在 `CoLMDRIVER` 里面。所以 history 记下的
             // `fsno`/`lai`/`sai` 是**下一步**的值，不是这一步用掉的那一组。
-            template.prepare_surface_optics(
-                next,
-                surface_optics_step(step, previous_snow_water_equivalent_mm, &output),
-            )?;
+            let optics = surface_optics_step(
+                step,
+                previous_snow_water_equivalent_mm,
+                next.surface_temperature_k(),
+                &output,
+            );
+            template.prepare_surface_optics(next, optics)?;
             if let Some(path) = session.push_lct_snow(
                 step.clock.end_time,
                 template,
@@ -469,10 +472,13 @@ impl PointRuntime {
             let previous_snow_water_equivalent_mm = next.snow.water_equivalent_kg_m2;
             let output =
                 colm_core::standard_lct_snow_soil_step(template.snow_input(&binding), next)?;
-            template.prepare_surface_optics(
-                next,
-                surface_optics_step(step, previous_snow_water_equivalent_mm, &output),
-            )?;
+            let optics = surface_optics_step(
+                step,
+                previous_snow_water_equivalent_mm,
+                next.surface_temperature_k(),
+                &output,
+            );
+            template.prepare_surface_optics(next, optics)?;
             refresh_lai(step, template, next)?;
             on_step(step, &output)
         })
@@ -663,18 +669,20 @@ fn refresh_lai(
 
 /// 把一步的输出打包成「准备下一步表面光学」的输入。
 ///
-/// 三样来自步输出（`t_grnd`、`z0m`、`fwet_snow`），`coszen` 取**步末**那个
+/// `t_grnd` 取**步末状态**（雪层合并之后），`z0m`、`fwet_snow` 来自步输出，`coszen` 取**步末**那个
 /// （[`PointRuntimeStep::surface_cosine_zenith`]），`scvold` 由调用方在**内核动手之前**
 /// 读出来。上游也是这么取的：`CoLMMAIN.F90` 的末尾一节用的正是这一步 `THERMAL`
 /// 刚写下的全局量，`coszen` 由 `:2076` 按步末的 `idate` 现算。
 fn surface_optics_step(
     step: PointRuntimeStep,
     previous_snow_water_equivalent_mm: f64,
+    ground_temperature_k: f64,
     output: &colm_core::StandardLctSnowSoilOutput,
 ) -> SurfaceOpticsStep {
     SurfaceOpticsStep {
         cosine_zenith: step.surface_cosine_zenith,
-        ground_temperature_k: output.energy.ground.temperature_k[0],
+        // 雪层合并之后的 `t_soisno(snl+1)`，见 [`colm_core::StandardLctSnowSoilState::surface_temperature_k`]。
+        ground_temperature_k,
         momentum_roughness_m: output.energy.leaf.momentum_roughness_m,
         wet_snow_fraction: output.energy.leaf.wet_snow_fraction,
         previous_snow_water_equivalent_mm,

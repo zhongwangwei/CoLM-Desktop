@@ -43,41 +43,6 @@ pub struct CanopyInterceptionFluxes {
     pub retained_snow_kg_m2_s: f64,
     pub released_rain_kg_m2_s: f64,
     pub released_snow_kg_m2_s: f64,
-    pub canopy_phase_heat_w_m2: f64,
-}
-
-/// `MOD_LeafTemperature_Extended.F90:1812-1858` 的 `canopy_rain_capacity_for_fwet`
-/// （DEFAULT 分支）。**内核编的是 `extends/interception/` 那一份**，不是 `main/`。
-pub(crate) fn canopy_rain_capacity_for_fwet(
-    maximum_dew_mm: f64,
-    leaf_area_index: f64,
-    stem_area_index: f64,
-) -> f64 {
-    let lsai = (leaf_area_index + stem_area_index).max(0.0);
-    (maximum_dew_mm * lsai).max(0.0)
-}
-
-/// `MOD_LeafTemperature_Extended.F90:1860-1917` 的 `canopy_snow_capacity_for_fwet`
-/// （DEFAULT 分支 = `48*dewmx*lsai`）加 `:1919-1940` 的 `canopy_snow_wetfrac`。
-///
-/// **指数是 `2.0_r8/3.0_r8`，不是截断字面量 `.666666666666`。**
-/// `main/MOD_LeafTemperature.F90:1236` 用的才是 `.666666666666`（12 个 6），
-/// 两者相对差约 1e-12 —— 实测干窗第 0 步重启里 `fwet_snow` 正是差
-/// 2.79e-12 相对量：本 crate 当初照 `main/` 那一份实现，而内核编的是
-/// `extends/interception/` 那一份（第 166 轮记过的"编的不是你以为的那个文件"）。
-pub(crate) fn canopy_snow_wet_fraction(
-    maximum_dew_mm: f64,
-    leaf_area_index: f64,
-    stem_area_index: f64,
-    snow_mm: f64,
-) -> f64 {
-    let lsai = (leaf_area_index + stem_area_index).max(0.0);
-    let satcap = (48.0 * maximum_dew_mm * lsai).max(0.0);
-    if snow_mm > 0.0 && satcap > 1.0e-10 {
-        (snow_mm / satcap).powf(2.0 / 3.0).min(1.0)
-    } else {
-        0.0
-    }
 }
 
 /// Wet canopy area and dry transpiring leaf area for one canopy water state.
@@ -119,38 +84,28 @@ pub fn canopy_wetness(
             && water.snow_mm >= -CANOPY_WATER_ROUNDOFF_MM,
         "canopy wetness inputs are invalid"
     );
-    // `:1752-1755` 的雨分量：容量走 `canopy_rain_capacity_for_fwet`（内部夹 0），
-    // 覆盖度仍用**截断字面量** `.666666666666` —— 上游 `:1766/1782` 就是它。
-    let rain_coverage = |depth_mm: f64| {
-        let capacity =
-            canopy_rain_capacity_for_fwet(maximum_dew_mm, leaf_area_index, stem_area_index);
-        if depth_mm > 0.0 && capacity > 1.0e-10 {
-            (depth_mm / capacity).powf(f77(0.666_666_666_666)).min(1.0)
-        } else {
-            0.0
-        }
-    };
-    let wet_fraction = if vegetation_snow {
-        let rain = rain_coverage(water.rain_mm);
-        // 雪分量走 `canopy_snow_wetfrac`：**指数是 `2/3`**，与雨分量不同。
-        let snow = canopy_snow_wet_fraction(
-            maximum_dew_mm,
-            leaf_area_index,
-            stem_area_index,
-            water.snow_mm,
-        );
-        (rain + snow - rain * snow).min(1.0)
-    } else {
-        // `:1764-1768` 先算的是 `((dewmxi/vegt)*ldew)**.666666666666`
-        // （`dewmxi = 1/dewmx`、`vegt = lsai`）——**先除再乘**，
-        // 不是 `ldew/(dewmx*lsai)`。
-        if water.total_mm > 0.0 {
-            (((1.0 / maximum_dew_mm) / leaf_stem_area) * water.total_mm)
+    // `main/MOD_LeafTemperature.F90` 的 `dewfraction`（TRACER 关闭那一支）：三个覆盖度都是
+    // `((dewmxi/vegt)*depth)**.666666666666`，**先除再乘**（`dewmxi = 1/dewmx`、
+    // `vegt = lsai`），雪分量的容量再除以 48，都没有容量闸门。
+    //
+    // 2026-09 起内核编的是 `main/` 这一份。此前编的是 `extends/interception/` 的扩展版
+    // （雨走 `canopy_rain_capacity_for_fwet`、雪走 `canopy_snow_wetfrac` 且指数 `2/3`），
+    // 本函数当时照它写；上游 `d6de53e9` 不再编译扩展截获后改回 `main/`。
+    let coverage = |capacity_scale: f64, depth_mm: f64| {
+        if depth_mm > 0.0 {
+            (((1.0 / maximum_dew_mm) / (capacity_scale * leaf_stem_area)) * depth_mm)
                 .powf(f77(0.666_666_666_666))
                 .min(1.0)
         } else {
             0.0
         }
+    };
+    let wet_fraction = if vegetation_snow {
+        let rain = coverage(1.0, water.rain_mm);
+        let snow = coverage(48.0, water.snow_mm);
+        (rain + snow - rain * snow).min(1.0)
+    } else {
+        coverage(1.0, water.total_mm)
     };
     Ok(CanopyWetness {
         wet_fraction,
@@ -163,16 +118,6 @@ pub fn canopy_wetness(
 /// The PFT and PC wrapper is intentionally not duplicated: it calls this same
 /// scalar kernel once per PFT and then fraction-weights the returned fluxes.
 ///
-/// `canopy_phase_heat_w_m2` 恒为 0 是**对的**，不是没移植完。上游
-/// `extends/interception/MOD_LeafInterception_Extended.F90` 里只有
-/// `LEAF_interception_{NOAHMP,MATSIRO,VIC,JULES}`（`DEF_Interception_scheme`
-/// 4–7）会给它赋值（各 3–4 处）；本仓库移植的 `LEAF_interception_CoLM2014`
-/// （scheme=1，`:399` 一句 `canopy_phase_heat_out = 0._r8` 之后再没碰过）恒 0，
-/// 而三份黄金算例都用默认的 scheme=1。scheme=1 的相变焓走的是**另一条路**：
-/// `MOD_LeafTemperature_Extended.F90:1544-1566` 的 `qmelt`/`qfrz` 质量转移
-/// 加 Niu (2004) 的 `tl = fwet_snow*tfrz + (1-fwet_snow)*tl` 拉回，本仓库
-/// `leaf_temperature.rs::update_canopy_water` 的融化/冻结两段与它逐式对齐。
-/// 真要用 scheme 4–7，`colm-rs` 会先拒绝（未移植分支），不会静默少一块焓。
 pub fn intercept_canopy(
     input: CanopyInterceptionInput,
     water: &mut CanopyWater,
@@ -206,7 +151,6 @@ pub fn intercept_canopy(
             retained_snow_kg_m2_s: 0.0,
             released_rain_kg_m2_s: released_rain,
             released_snow_kg_m2_s: released_snow,
-            canopy_phase_heat_w_m2: 0.0,
         });
     }
 
@@ -386,7 +330,6 @@ pub fn intercept_canopy(
         retained_snow_kg_m2_s,
         released_rain_kg_m2_s: released_rain_mm / input.time_step_seconds,
         released_snow_kg_m2_s: released_snow_mm / input.time_step_seconds,
-        canopy_phase_heat_w_m2: 0.0,
     })
 }
 

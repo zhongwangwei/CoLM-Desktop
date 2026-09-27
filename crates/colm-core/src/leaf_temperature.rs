@@ -8,11 +8,11 @@
 use anyhow::{ensure, Context, Result};
 
 use crate::{
-    balance_phs_rootflux, canopy_diffusivity_resistance_analytic, canopy_monin_obukhov_with_scheme,
-    canopy_roughness, canopy_wetness, effective_canopy_wind, initialize_monin_obukhov,
-    plant_hydraulic_stress, saturation_specific_humidity, stomata, update_photosynthesis,
-    CanopyDiffusivityProfileInput, CanopyMoninObukhovInput, CanopyWater, CanopyWindProfileInput,
-    LeafBiochemistry, LeafPhotosynthesisInput, MoninObukhovInitialInput, MoninObukhovInput,
+    canopy_diffusivity_resistance_analytic, canopy_monin_obukhov_with_scheme, canopy_roughness,
+    canopy_wetness, effective_canopy_wind, initialize_monin_obukhov, plant_hydraulic_stress,
+    saturation_specific_humidity, stomata, update_photosynthesis, CanopyDiffusivityProfileInput,
+    CanopyMoninObukhovInput, CanopyWater, CanopyWindProfileInput, LeafBiochemistry,
+    LeafPhotosynthesisInput, MoninObukhovInitialInput, MoninObukhovInput,
     PhotosynthesisUpdateInput, PlantHydraulicInput, PlantHydraulicParameters, PlantHydraulicState,
     StomataInput, StomataOptions, StomataState, SurfaceLayerScheme, FREEZING_K,
 };
@@ -20,11 +20,6 @@ use crate::{
 const VON_KARMAN: f64 = 0.4;
 const GRAVITY_M_S2: f64 = 9.80616;
 const LATENT_HEAT_VAPORIZATION_J_KG: f64 = 2.5104e6;
-/// `MOD_Const_Physical.F90:18` 的 `hsub`，叶温求解里的 `htvpl` 用它。
-///
-/// 上游把它声明成**独立常数**（数值上恰好等于 `hvap + hfus`），这里照抄数值而不是
-/// 相加 —— `hfus` 一改就会让相加版悄悄跟着变，而独立常数不会。
-const LATENT_HEAT_SUBLIMATION_J_KG: f64 = 2.8440e6;
 const AIR_HEAT_CAPACITY_J_KG_K: f64 = 1004.64;
 const WATER_HEAT_CAPACITY_J_KG_K: f64 = 4188.0;
 const ICE_HEAT_CAPACITY_J_KG_K: f64 = 2117.27;
@@ -402,36 +397,18 @@ pub fn leaf_temperature(
     let mut iteration = 1;
     let mut last = Iteration::default();
 
-    // 上游对**净**截留率取 `max(0, ·)`：`MOD_LeafTemperature_Extended.F90:1174-1177`
-    // 的分子与分母、循环后 `fsenl` 的修正项、以及 `hprl`（`:1335` 的
-    // "VIC-qintr: clamp qintr_* to max(0,·) — must match dtl denom"）。
-    //
-    // **净截留率确实可以为负**：`qintr_rain = (prc_rain+prl_rain+qflx_irrig)
-    // - thru_rain/deltim`，而 `thru_rain` 里含冠层排水 `tex_rain`，排水超过截留时
-    // 它就是负的。负值不能反向"注入" `t_precip - tl` 的能量，所以要夹。
-    //
-    // 本仓库把**原始**净通量放在 `LeafTemperatureInput` 上（与上游 `qintr_*` 同义），
-    // 夹在这里做 —— 与上游同位置。以前 `validate` 直接要求它非负，那会在任何
-    // 排水步上**报错**，而正确行为是按上游夹掉。
-    let intercepted_rain = input.intercepted_rain_kg_m2_s.max(0.0);
-    let intercepted_snow = input.intercepted_snow_kg_m2_s.max(0.0);
+    // `main/MOD_LeafTemperature.F90` 直接用净截留率 `qintr_rain/qintr_snow`，不取 `max(0,·)`
+    // —— 那个夹取是扩展版（`MOD_LeafTemperature_Extended.F90:1174-1177`）才有的。
+    // 净截留率可以为负（冠层排水超过截留时），`main/` 照样把它乘进 `t_precip - tl`。
+    let intercepted_rain = input.intercepted_rain_kg_m2_s;
+    let intercepted_snow = input.intercepted_snow_kg_m2_s;
 
     while iteration <= MAX_ITERATIONS {
         previous_leaf_temperature = state.leaf_temperature_k;
-        // `htvpl`：**叶面**的潜热随叶温在汽化与升华之间切换
-        // （`MOD_LeafTemperature_Extended.F90:693-697`，每轮迭代开头按**当前** `tl` 重算）。
-        // 上游在本模块里用它而不是硬写 `hvap` 的地方有七处：增量的分子与分母、
-        // `dele` 收敛判据、循环后 `fsenl` 的三项修正、以及 `err` 那条能量残差。
-        // 写死 `hvap` 会让零下冠层的凝华按汽化计价，差 13%。
-        //
-        // **注意与 `lfevpa` 的区别**：`MOD_Thermal.F90:1333` 的
-        // `lfevpa = hvap*fevpl + htvp*fevpg` 对叶面那一项用的是 `hvap`，
-        // 不是 `htvpl` —— 上游自己就不一致，本仓库两边照各自的写法抄。
-        let leaf_latent_heat_j_kg = if previous_leaf_temperature > FREEZING_K {
-            LATENT_HEAT_VAPORIZATION_J_KG
-        } else {
-            LATENT_HEAT_SUBLIMATION_J_KG
-        };
+        // `main/` 的叶面潜热恒为 `hvap`（增量的分子分母、`dele`、循环后 `fsenl` 的修正、
+        // `err`，以及 `MOD_Thermal` 的 `lfevpa = hvap*fevpl + htvp*fevpg`）。
+        // 随叶温在汽化/升华间切换的 `htvpl` 是扩展版的写法。
+        let leaf_latent_heat_j_kg = LATENT_HEAT_VAPORIZATION_J_KG;
         let profile = canopy_monin_obukhov_with_scheme(
             CanopyMoninObukhovInput {
                 surface: MoninObukhovInput {
@@ -802,7 +779,7 @@ pub fn leaf_temperature(
         // 根通量与 `etr` 的一致性由两处保证：这里 `balance_phs_rootflux`
         // （上游 `:1145` 的 `'post-PHS'`），以及循环后的按比例缩放
         // （上游 `:1352-1367`）。两者都已移植。
-        if let Some(hydraulic) = input.plant_hydraulics {
+        if input.plant_hydraulics.is_some() {
             if sunlit_soil_water_stress < 1.0e-2 || sunlit_transpiration <= 0.0 {
                 sunlit_transpiration = 0.0;
             }
@@ -810,21 +787,16 @@ pub fn leaf_temperature(
                 shaded_transpiration = 0.0;
             }
             transpiration = sunlit_transpiration + shaded_transpiration;
-            balance_phs_rootflux(
-                transpiration,
-                &mut root_flux_kg_m2_s,
-                hydraulic.root_fraction,
-                "post-PHS",
+            // `main/` 不改 `rootflux`，只检查它与冠层蒸腾一致，否则 `CoLM_stop`。
+            // 扩展版在这里调用 `balance_phs_rootflux` 把 `rootflux` 缩放到 `etr`。
+            let root_total: f64 = root_flux_kg_m2_s.iter().sum();
+            ensure!(
+                (transpiration - root_total).abs() <= 1.0e-7,
+                "water balance violation in vegetation PHS: etr {transpiration}, sum(rootflux) {root_total}"
             );
         } else if transpiration >= input.transpiration_limit_kg_m2_s {
-            let scale = if transpiration > 0.0 {
-                input.transpiration_limit_kg_m2_s / transpiration
-            } else {
-                0.0
-            };
+            // `main/` 只截断 `etr` 并把 `etr_dtl` 置 0，`etrsun/etrsha` 保持原值。
             transpiration = input.transpiration_limit_kg_m2_s;
-            sunlit_transpiration *= scale;
-            shaded_transpiration *= scale;
             transpiration_temperature_slope = 0.0;
         }
         // 上游 `evplwet = rhoair * evp_weight * wet_cond * ( … )`
@@ -1102,16 +1074,7 @@ pub fn leaf_temperature(
     }
 
     let final_temperature_change = dtl[iteration - 1];
-    // 循环后这三处（`fsenl` 的两项修正、`elwdif` 的显热补偿、`err` 残差）用的是
-    // **最后一轮迭代算出的 `htvpl`**，而那一轮是按 `tlbef`（= 此刻的
-    // `previous_leaf_temperature`）取值的 —— 上游的 `htvpl` 正是在更新 `tl`
-    // **之前**算的（`:693-697` 在 `tl = tlbef + dtl(it)` 之前）。别拿最终的
-    // `state.leaf_temperature_k` 重算：那会晚半个增量，在 `tfrz` 附近翻错相。
-    let leaf_latent_heat_j_kg = if previous_leaf_temperature > FREEZING_K {
-        LATENT_HEAT_VAPORIZATION_J_KG
-    } else {
-        LATENT_HEAT_SUBLIMATION_J_KG
-    };
+    let leaf_latent_heat_j_kg = LATENT_HEAT_VAPORIZATION_J_KG;
     // `MOD_LeafTemperature.F90:1062-1093` 的收敛后收尾。GIMPLE（dump 第 2636-2650、
     // 2720-2733 处）是一串**逐级 FMA**：
     //   `_552 = FMA(fsenl_dtl, dtl, fsenl旧值)`
@@ -1145,8 +1108,8 @@ pub fn leaf_temperature(
     let wet_evaporation_limit = state.canopy_water.total_mm / input.time_step_seconds;
     let excessive_wet_evaporation = (wet_evaporation - wet_evaporation_limit).max(0.0);
     wet_evaporation = wet_evaporation.min(wet_evaporation_limit);
-    let mut leaf_evaporation = leaf_evaporation - excessive_wet_evaporation;
-    let mut leaf_sensible_heat =
+    let leaf_evaporation = leaf_evaporation - excessive_wet_evaporation;
+    let leaf_sensible_heat =
         leaf_latent_heat_j_kg.mul_add(excessive_wet_evaporation, leaf_sensible_heat);
     // 残差必须**在这一步**算：上游 `:1449` 的 `err` 在冠层持水更新（`:1464`）之前，
     // 所以它吃的是 `elwdif` 修正之后的 `fsenl`/`fevpl`、**没有**吃下面那两笔退回，
@@ -1198,35 +1161,13 @@ pub fn leaf_temperature(
                 *flux = rate.mul_add(final_temperature_change, *flux);
             }
         }
-        // `MOD_LeafTemperature_Extended.F90:1367` 的 `'post-leaf-temperature'`：
-        // 缩放后再按冠层 `etr` 配平一次（默认三份窗口里每步都早退）。
-        balance_phs_rootflux(
-            transpiration,
-            &mut root_flux_kg_m2_s,
-            hydraulic.root_fraction,
-            "post-leaf-temperature",
-        );
     }
     state.canopy_water.total_mm =
         (state.canopy_water.total_mm - wet_evaporation * input.time_step_seconds).max(0.0);
-    let (wet_snow_fraction, phase_flux_deficit, flux_deficit) =
-        update_canopy_water(input, state, wet_evaporation)?;
-    // `:1470-1474`（`bb203`）与 `:1485-1491`（`bb206`）：截留/相变把蒸发量削下来的
-    // 部分要**原样退回** `fevpl`/`fsenl`，否则这些能量凭空消失。两处的出货形状不同，
-    // 不能合并成一次减法：第一处是 `fevpl - pfd` 配 **`FMA(htvpl, pfd, fsenl)`**；
-    // 第二处的感热项是 `fsenl + (htvpl*fd)/deltim` —— GIMPLE 里它是
-    // `_892 = htvpl*flux_deficit; _893 = _892/_508; _894 = _891+_893`，**没融合**
-    // （除法的结果不是乘积，`-ffp-contract=fast` 也收缩不了）；Rust 默认同样不融合。
-    // `evplwet` 自己也要减这两笔，但它在 `:1489` 之后再没被读过 —— 是死存，
-    // 所以这里不动 `wet_evaporation`。
-    if phase_flux_deficit > 0.0 {
-        leaf_evaporation -= phase_flux_deficit;
-        leaf_sensible_heat = leaf_latent_heat_j_kg.mul_add(phase_flux_deficit, leaf_sensible_heat);
-    }
-    if flux_deficit > 0.0 {
-        leaf_evaporation -= flux_deficit / input.time_step_seconds;
-        leaf_sensible_heat += leaf_latent_heat_j_kg * flux_deficit / input.time_step_seconds;
-    }
+    // `main/` 在冠层水更新与相变（Niu 2004 把 `tl` 拉向冰点）**之前**就算好了
+    // `fseng*`/`fevpg*`（`wtl0*tl`、`wtlq0*qsatl`），所以下面这几项用的是相变前的叶温。
+    let leaf_temperature_before_phase_change_k = state.leaf_temperature_k;
+    let wet_snow_fraction = update_canopy_water(input, state, wet_evaporation)?;
     let ground_sensible_heat = AIR_HEAT_CAPACITY_J_KG_K
         * input.air_density_kg_m3
         * last.ground_heat_conductance
@@ -1236,13 +1177,13 @@ pub fn leaf_temperature(
         * last.ground_heat_conductance
         * ((1.0 - last.ground_heat_weight) * input.soil_surface_temperature_k
             - last.air_heat_weight * input.reference_air_temperature_k
-            - last.leaf_heat_weight * state.leaf_temperature_k);
+            - last.leaf_heat_weight * leaf_temperature_before_phase_change_k);
     let snow_sensible_heat = AIR_HEAT_CAPACITY_J_KG_K
         * input.air_density_kg_m3
         * last.ground_heat_conductance
         * ((1.0 - last.ground_heat_weight) * input.snow_surface_temperature_k
             - last.air_heat_weight * input.reference_air_temperature_k
-            - last.leaf_heat_weight * state.leaf_temperature_k);
+            - last.leaf_heat_weight * leaf_temperature_before_phase_change_k);
     let ground_evaporation = input.air_density_kg_m3
         * last.ground_moisture_conductance
         * (input.ground_specific_humidity - last.canopy_air_humidity);
@@ -1252,7 +1193,7 @@ pub fn leaf_temperature(
             - last.air_moisture_weight * input.reference_specific_humidity
             - last.leaf_moisture_weight
                 * saturation_specific_humidity(
-                    state.leaf_temperature_k,
+                    leaf_temperature_before_phase_change_k,
                     input.surface_pressure_pa,
                 )?
                 .specific_humidity);
@@ -1262,7 +1203,7 @@ pub fn leaf_temperature(
             - last.air_moisture_weight * input.reference_specific_humidity
             - last.leaf_moisture_weight
                 * saturation_specific_humidity(
-                    state.leaf_temperature_k,
+                    leaf_temperature_before_phase_change_k,
                     input.surface_pressure_pa,
                 )?
                 .specific_humidity);
@@ -1721,158 +1662,98 @@ fn upward_longwave(
     value
 }
 
-/// 冠层持水两侧的更新，返回 `(fwet_snow, phase_flux_deficit, flux_deficit)`。
+/// 冠层持水两侧的更新（`main/MOD_LeafTemperature.F90` 迭代后那一段），返回 `fwet_snow`。
 ///
-/// 后两个是上游把"削掉的通量"退回 `fevpl`/`fsenl` 用的**超配量**：
-/// `phase_flux_deficit` 是通量（kg m-2 s-1），`flux_deficit` 是水深
-/// （kg m-2，调用方要再除 `deltim`）。上游按这个顺序各退一次，见
-/// `:1470-1474` / `:1485-1491`；顺序不能合并（结合次序会变）。
+/// 调用方已经做过 `ldew = max(0, ldew - evplwet*deltim)`（`total_mm`）。
+///
+/// 与此前照扩展版写的实现相比，`main/` 这一份：分相时**不**把超出可用量的通量退回
+/// `fevpl/fsenl`、**不**把分量夹到 0；`DEF_VEG_SNOW` 关闭时按**旧比例**缩放分量
+/// （扩展版是按当前叶温整体改派）；`fwet_snow` 用 `((10/(48*lsai))*ldew_snow)**.666666666666`；
+/// 相变之后**不**重算 `ldew`。
 fn update_canopy_water(
     input: LeafTemperatureInput<'_>,
     state: &mut LeafTemperatureState,
     wet_evaporation_kg_m2_s: f64,
-) -> Result<(f64, f64, f64)> {
+) -> Result<f64> {
+    let dt = input.time_step_seconds;
+    let water = &mut state.canopy_water;
     if !input.options.vegetation_snow {
-        // `DEF_VEG_SNOW = .false.` 是**另一套语义**（"不追踪相态"），不是"同一套算法的简化"。
-        // 规格就写在本仓库给 vendor 打的那段注释里
-        // （`extends/interception/MOD_LeafTemperature_Extended.F90:1502-1522`）：
-        //   * 只更新总水量：`ldew = max(0., ldew - evplwet*deltim)` —— 这一句在调用方
-        //     （本文件上一处 `total_mm` 的更新）已经做过；
-        //   * **整段分量分区/两条 FMA/超配退回/夹取全部跳过**（`:1467-1497` 在
-        //     `IF (DEF_VEG_SNOW)` 里），所以两个 deficit 恒为 0；
-        //   * 分量按**当前温度**重新指定（注释明确否决"按旧比例缩放"：
-        //     "reconcile components using the current temperature (tl) rather than
-        //     scaling by an old ratio"）；
-        //   * `ldew` **不重算**成 `ldew_rain + ldew_snow` —— 总水量就是上面那个值。
-        // 另外 `:1540-1583` 的两支都带 `DEF_VEG_SNOW` 条件，所以这个配置里
-        // `fwet_snow` **一次都没被赋值**（它是模块变量，初值 0），相变块
-        // （`qmelt`/`qfrz` 与 Niu(2004) 的 `tl` 拉回）也不跑。
-        // 原实现按旧比例缩放、还跑完整段分区与夹取、最后把总水量重算成分量之和
-        // —— 三处都与规格不同，实测在 `CN-Cng` 第 10 步的 `f_ldew` 上留下 1 ULP
-        // （见 docs 第 385 轮）。
-        let total = state.canopy_water.total_mm;
-        if state.leaf_temperature_k > FREEZING_K {
-            state.canopy_water.rain_mm = total;
-            state.canopy_water.snow_mm = 0.0;
+        let total = water.total_mm;
+        if water.rain_mm + water.snow_mm > 1.0e-10 {
+            water.rain_mm = total * (water.rain_mm / (water.rain_mm + water.snow_mm));
+            water.snow_mm = total - water.rain_mm;
+        } else if total > 0.0 {
+            if state.leaf_temperature_k > FREEZING_K {
+                water.rain_mm = total;
+                water.snow_mm = 0.0;
+            } else {
+                water.rain_mm = 0.0;
+                water.snow_mm = total;
+            }
         } else {
-            state.canopy_water.rain_mm = 0.0;
-            state.canopy_water.snow_mm = total;
+            water.rain_mm = 0.0;
+            water.snow_mm = 0.0;
         }
-        return Ok((0.0, 0.0, 0.0));
+        // `fwet_snow` 在这一支从未赋值（模块变量，初值 0），相变块也不跑。
+        return Ok(0.0);
     }
-    // `:1468-1495`（`partition_canopy_latent_flux` 内联后）。GIMPLE 逐句给出形状
-    // （编的是 `extends/interception/MOD_LeafTemperature_Extended.F90`，
-    // Makefile `:641` 把 `MOD_LeafTemperature.o` 指到它而不是 `main/`），
-    // 第 4536-4745 处：
-    //   `_3169 = MAX(evplwet,0)`、`_3171 = ABS(MIN(evplwet,0))`；
-    //   暖支 `qevpl=_3169, qdewl=_3171, qsubl=qfrol=0`，`qevpl > ldew_rain/deltim`
-    //   时把超出部分记进 `phase_flux_deficit` 并把 `qevpl` 砍到可用量；冷支对称。
-    // **超配的那部分不改水体**：它进 `phase_flux_deficit`，由调用方退回
-    // `fevpl`/`fsenl`（`bb203`）。旧实现照 `main/MOD_LeafTemperature.F90:1185-1197`
-    // 把它从 `ldew_rain`（暖支则是 `ldew_snow`）里扣掉 —— 那是**没编进内核的那份
-    // 源码**，实测湿窗 `CN-Cng-wet` 第 20 步的 `ldew`/`ldew_rain` 种子就出在这里
-    // （第 348 轮）。
     let evaporation = wet_evaporation_kg_m2_s.max(0.0);
-    let dew = (-wet_evaporation_kg_m2_s).max(0.0);
-    let (qevpl, qdewl, qsubl, qfrol, phase_flux_deficit) = if state.leaf_temperature_k > FREEZING_K
-    {
-        let mut qevpl = evaporation;
-        let mut deficit = 0.0;
-        let available = state.canopy_water.rain_mm / input.time_step_seconds;
-        if qevpl > available {
-            deficit = qevpl - available;
-            qevpl = available;
+    // `qdewl/qfrol = abs(min(evplwet, 0))`
+    let dew = wet_evaporation_kg_m2_s.min(0.0).abs();
+    let (qevpl, qdewl, qsubl, qfrol) = if state.leaf_temperature_k > FREEZING_K {
+        let available = water.rain_mm / dt;
+        if evaporation > available {
+            (available, dew, evaporation - available, 0.0)
+        } else {
+            (evaporation, dew, 0.0, 0.0)
         }
-        (qevpl, dew, 0.0, 0.0, deficit)
     } else {
-        let mut qsubl = evaporation;
-        let mut deficit = 0.0;
-        let available = state.canopy_water.snow_mm / input.time_step_seconds;
-        if qsubl > available {
-            deficit = qsubl - available;
-            qsubl = available;
+        let available = water.snow_mm / dt;
+        if evaporation > available {
+            (evaporation - available, 0.0, available, dew)
+        } else {
+            (0.0, 0.0, evaporation, dew)
         }
-        (0.0, 0.0, qsubl, dew, deficit)
     };
-    // `bb204` 的两条 FMA **无条件**执行（`_880 = .FMA(deltim, qdewl-qevpl, ldew_rain旧值)`、
-    // `_887 = .FMA(deltim, qfrol-qsubl, ldew_snow旧值)`）：`deltim*通量` 被吸收、
-    // 旧值是已舍入的加数。收敛后收尾那一族在 `dtl→0` 时惰性，这两句不是。
-    let rain_mm = input
-        .time_step_seconds
-        .mul_add(qdewl - qevpl, state.canopy_water.rain_mm);
-    let snow_mm = input
-        .time_step_seconds
-        .mul_add(qfrol - qsubl, state.canopy_water.snow_mm);
-    // `bb205-207`：**两侧**都要夹到 0（`M.98`/`M.99`），再 `ldew = ldew_rain + ldew_snow`。
-    // 漏掉任何一个夹取都是 1 ULP 级的种子：`qevpl = ldew_rain/deltim` 让
-    // `FMA(deltim, -qevpl, ldew_rain)` 的理论值恰好是 0，实际会落到 **−1 ULP**
-    // （实测 −1.0503208545953324e-19 mm，内核是干净的 0.0）。`flux_deficit` 取的是
-    // **夹取前**两个负值之和（`M.96+M.97`），所以必须在夹取之前算。
-    let flux_deficit = (-rain_mm).max(0.0) + (-snow_mm).max(0.0);
-    state.canopy_water.rain_mm = rain_mm.max(0.0);
-    state.canopy_water.snow_mm = snow_mm.max(0.0);
-    state.canopy_water.total_mm = state.canopy_water.rain_mm + state.canopy_water.snow_mm;
-    // `fwet_snow`（湿雪覆盖率）必须在**截留/凝结更新之后、相变之前**取值，
-    // 不是在这段更新之前。上游 `MOD_LeafTemperature_Extended.F90:1532` 就是在
-    // `LEAF_interception` 已经把 `ldew_snow` 写完之后才调
-    // `canopy_snow_wetfrac(sigf, lai, sai, dewmx, tl, ldew_snow)`；紧跟着的相变块
-    // （`:1551`/`:1564` 的 Niu(2004) 拉回）用的正是这一个值，此后没有任何一处
-    // 重算。放在更新之前读到的是**上一步**的 `snow_mm`：实测 CN-Cng 第一步
-    // （`tl`=265.88 K < 冰点，走凝华分支）黄金 `fwet_snow`=0.06138738，而这里算成
-    // 0 —— 刚凝华进 `snow_mm` 的那 0.047 mm 完全没进覆盖率。它不是诊断量：
-    // `MOD_Albedo` 的 `scat`/`beta0` 直接吃它，所以 `f_alb` → `f_sr*`/`f_sab*`
-    // → `f_rnet` 那一族的差就是从这一步开始的。
-    // 上游 `:1542` 的 `fwet_snow = canopy_snow_wetfrac(sigf, lai, sai, dewmx, tl, ldew_snow)`
-    // —— 指数是 `2.0_r8/3.0_r8`、容量是 `48*dewmx*max(lai+sai,0)`、还带
-    // `satcap > 1e-10` 的闸门。**`main/MOD_LeafTemperature.F90:1236` 那一份不同**
-    // （截断字面量 `.666666666666`、`(10/(48*lsai))*ldew`），而内核编的是
-    // `extends/interception/`。实测干窗第 0 步重启的 `fwet_snow` 差 2.79e-12 相对量，
-    // 正是这个差别。
-    let mut wet_snow_fraction = crate::interception::canopy_snow_wet_fraction(
-        input.maximum_dew_mm,
-        input.leaf_area_index,
-        input.stem_area_index,
-        state.canopy_water.snow_mm,
-    );
-    if state.canopy_water.snow_mm > 1.0e-6 && state.leaf_temperature_k > FREEZING_K {
-        let melt = (state.canopy_water.snow_mm / input.time_step_seconds).min(
-            (state.leaf_temperature_k - FREEZING_K)
-                * ICE_HEAT_CAPACITY_J_KG_K
-                * state.canopy_water.snow_mm
-                / (input.time_step_seconds * FUSION_HEAT_J_KG),
+    // `ldew_rain + (qdewl-qevpl)*deltim` 是 `变量 + 乘积`，内核的
+    // `-ffp-contract=fast` 会收成 FMA。蒸干那一步 Fortran 留下 ~1e-19 的舍入残量
+    // （AT-Neu 第 71 步 `f_ldew = 5.1e-19`），平铺写法恒得精确的 0；残量的具体数值
+    // 取决于前几步已有的 ULP 差，这里只保证形状一致。
+    water.rain_mm = (qdewl - qevpl).mul_add(dt, water.rain_mm);
+    water.snow_mm = (qfrol - qsubl).mul_add(dt, water.snow_mm);
+    water.total_mm = water.rain_mm + water.snow_mm;
+
+    let lsai = input.leaf_area_index + input.stem_area_index;
+    let mut wet_snow_fraction = if water.snow_mm > 0.0 {
+        ((10.0 / (48.0 * lsai)) * water.snow_mm)
+            .powf(crate::f77(0.666_666_666_666))
+            .min(1.0)
+    } else {
+        0.0
+    };
+    if water.snow_mm > 1.0e-6 && state.leaf_temperature_k > FREEZING_K {
+        let melt = (water.snow_mm / dt).min(
+            (state.leaf_temperature_k - FREEZING_K) * ICE_HEAT_CAPACITY_J_KG_K * water.snow_mm
+                / (dt * FUSION_HEAT_J_KG),
         );
-        state.canopy_water.snow_mm =
-            (state.canopy_water.snow_mm - melt * input.time_step_seconds).max(0.0);
-        state.canopy_water.rain_mm += melt * input.time_step_seconds;
-        // `:1561/:1574 tl = fwet_snow*tfrz + (1-fwet_snow)*tl` 的 GIMPLE 是
-        // `.FMA(fwet_snow, 2.7316e2, (1-fwet_snow)*tl)` —— `fwet_snow*tfrz` 进 FMA，
-        // `(1-fwet_snow)*tl` 独立舍入当加数。
-        state.leaf_temperature_k = wet_snow_fraction.mul_add(
-            FREEZING_K,
-            (1.0 - wet_snow_fraction) * state.leaf_temperature_k,
-        );
+        water.snow_mm = (water.snow_mm - melt * dt).max(0.0);
+        water.rain_mm = (water.rain_mm + melt * dt).max(0.0);
+        // Niu et al. (2004)
+        state.leaf_temperature_k =
+            wet_snow_fraction * FREEZING_K + (1.0 - wet_snow_fraction) * state.leaf_temperature_k;
     }
-    if state.canopy_water.rain_mm > 1.0e-6 && state.leaf_temperature_k < FREEZING_K {
-        let freeze = (state.canopy_water.rain_mm / input.time_step_seconds).min(
-            (FREEZING_K - state.leaf_temperature_k)
-                * WATER_HEAT_CAPACITY_J_KG_K
-                * state.canopy_water.rain_mm
-                / (input.time_step_seconds * FUSION_HEAT_J_KG),
+    if water.rain_mm > 1.0e-6 && state.leaf_temperature_k < FREEZING_K {
+        let freeze = (water.rain_mm / dt).min(
+            (FREEZING_K - state.leaf_temperature_k) * WATER_HEAT_CAPACITY_J_KG_K * water.rain_mm
+                / (dt * FUSION_HEAT_J_KG),
         );
-        state.canopy_water.rain_mm =
-            (state.canopy_water.rain_mm - freeze * input.time_step_seconds).max(0.0);
-        state.canopy_water.snow_mm += freeze * input.time_step_seconds;
-        // `:1561/:1574 tl = fwet_snow*tfrz + (1-fwet_snow)*tl` 的 GIMPLE 是
-        // `.FMA(fwet_snow, 2.7316e2, (1-fwet_snow)*tl)` —— `fwet_snow*tfrz` 进 FMA，
-        // `(1-fwet_snow)*tl` 独立舍入当加数。
-        state.leaf_temperature_k = wet_snow_fraction.mul_add(
-            FREEZING_K,
-            (1.0 - wet_snow_fraction) * state.leaf_temperature_k,
-        );
+        water.rain_mm = (water.rain_mm - freeze * dt).max(0.0);
+        water.snow_mm = (water.snow_mm + freeze * dt).max(0.0);
+        state.leaf_temperature_k =
+            wet_snow_fraction * FREEZING_K + (1.0 - wet_snow_fraction) * state.leaf_temperature_k;
     }
-    state.canopy_water.total_mm = state.canopy_water.rain_mm + state.canopy_water.snow_mm;
     wet_snow_fraction = wet_snow_fraction.min(1.0);
-    Ok((wet_snow_fraction, phase_flux_deficit, flux_deficit))
+    Ok(wet_snow_fraction)
 }
 
 fn validate(input: LeafTemperatureInput<'_>, state: LeafTemperatureState) -> Result<()> {
