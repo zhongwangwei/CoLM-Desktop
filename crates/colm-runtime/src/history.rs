@@ -920,12 +920,15 @@ pub fn set_lct_balance_errors(
         zerr -= (now - before) / factor;
     }
 
-    let errorw = (end_water_storage_mm - reference.initial_total_water_mm)
-        - (reference.convective_precipitation_kg_m2_s
-            + reference.large_scale_precipitation_kg_m2_s
-            - energy.total_evaporation_kg_m2_s
-            - output.water.total_runoff_mm_s)
-            * reference.time_step_seconds;
+    // `CoLMMAIN.F90:1518`：GIMPLE 是 `.FNMA (通量和, deltim, endwb-totwb)` —— 乘积熔进减法。
+    let errorw = (-(reference.convective_precipitation_kg_m2_s
+        + reference.large_scale_precipitation_kg_m2_s
+        - energy.total_evaporation_kg_m2_s
+        - output.water.total_runoff_mm_s))
+        .mul_add(
+            reference.time_step_seconds,
+            end_water_storage_mm - reference.initial_total_water_mm,
+        );
     let xerr = errorw / reference.time_step_seconds;
 
     for (name, value) in [("xerr", xerr), ("zerr", zerr)] {

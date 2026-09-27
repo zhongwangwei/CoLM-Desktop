@@ -405,10 +405,12 @@ pub fn add_new_snow(input: NewSnowInput, state: &mut RuntimeSnowColumn) -> Resul
             state.interface_depth_m[interface_slot(top_index)] - f77(0.5) * state.thickness_m[top];
         state.interface_depth_m[interface_slot(top_index - 1)] =
             state.interface_depth_m[interface_slot(top_index)] - state.thickness_m[top];
-        state.ground_snow_fraction = f77(1.0)
-            - (f77(1.0)
-                - (f77(0.1) * input.ground_snowfall_kg_m2_s * input.time_step_seconds).tanh())
-                * (f77(1.0) - state.ground_snow_fraction);
+        // `fsno = 1. - (1. - tanh(0.1*pg_snow*deltim))*(1. - fsno)`（`MOD_NewSnow.F90:121`）：
+        // GIMPLE 是 `.FNMA (1-tanh, 1-fsno, 1.0)`。平铺写法让 AT-Neu 1 月第 131 步
+        // （雪层建出后第一次往层里加雪）的 `fsno` 差 1 ULP（第 402 轮）。
+        state.ground_snow_fraction = (-(f77(1.0)
+            - (f77(0.1) * input.ground_snowfall_kg_m2_s * input.time_step_seconds).tanh()))
+        .mul_add(f77(1.0) - state.ground_snow_fraction, f77(1.0));
         state.ground_snow_fraction = state.ground_snow_fraction.min(f77(1.0));
     }
     Ok(NewSnowOutcome {
@@ -919,15 +921,20 @@ pub fn compact_snow_layers(
         let viscosity = liquid_factor
             * f77(4.0)
             * (ice_density / f77(450.0))
-            * (f77(0.1) * temperature_deficit + f77(23.0e-3) * ice_density).exp()
+            // `exp(0.1*td + c2*bi)`：GIMPLE 是 `exp(.FMA (td, 0.1, bi*0.023))`。
+            * temperature_deficit
+                .mul_add(f77(0.1), ice_density * f77(23.0e-3))
+                .exp()
             * f77(7.62237e6);
         let overburden = -(burden + water_mass / f77(2.0)) / viscosity;
         let relative = (fortran_layer - (state.layer_count + 1)) as usize;
+        // `ddz3 = - 1.0/deltim * max(0.0,(fiold(j) - fi)/fiold(j))`：左结合，先算 `1/deltim`
+        // 再乘（GIMPLE `_47 = 1/deltim ; _48 = _47*max(...)`），不是除以 `deltim`。
         let melt = if melted[relative] {
-            -((state.previous_ice_fraction[slot] - ice_fraction)
-                / state.previous_ice_fraction[slot])
-                .max(0.0)
-                / time_step_seconds
+            -(1.0 / time_step_seconds
+                * ((state.previous_ice_fraction[slot] - ice_fraction)
+                    / state.previous_ice_fraction[slot])
+                    .max(0.0))
         } else {
             0.0
         };
@@ -941,9 +948,10 @@ pub fn compact_snow_layers(
         let compaction_rate = destructive + overburden + melt + wind;
         let minimum_thickness =
             state.ice_water_kg_m2[slot] / f77(917.0) + state.liquid_water_kg_m2[slot] / f77(1000.0);
+        // `dz*(1.0+pdzdtc*deltim)`：GIMPLE 是 `dz*.FMA (pdzdtc, deltim, 1.0)`。
         state.thickness_m[slot] = (state.thickness_m[slot]
-            * (1.0 + compaction_rate * time_step_seconds))
-            .max(minimum_thickness);
+            * compaction_rate.mul_add(time_step_seconds, 1.0))
+        .max(minimum_thickness);
         burden += water_mass;
     }
     Ok(())
@@ -959,18 +967,24 @@ fn wind_drift_compaction(
     if !*mobile {
         return 0.0;
     }
-    let density_factor = 1.25 - 0.0042 * (ice_density_kg_m3.max(50.0) - 50.0);
-    let mobility_index = 0.34 * (-0.583 * 0.35e-3 - 0.833 * 1.0 + 0.833) + 0.66 * density_factor;
-    let mut driftability = -2.868 * (-0.085 * wind_speed_m_s).exp() + 1.0 + mobility_index;
+    // `winddriftcompaction`（内联进 `snowcompaction`）的 GIMPLE：
+    //   `frho = .FNMA (max(bi,50)-50, 0.0042, 1.25)`
+    //   `mo   = .FMA (frho, 0.66, 0.34*(-0.583*gs-0.833*sp+0.833))`（后者编译期折成常数）
+    //   `si   = mo + .FNMA (exp(-0.085*wind), 2.868, 1.0)`
+    //   `zpseudo += .FMA (dz*0.5, 3.25-si, zpseudo)` 的两次累加也都是 FMA。
+    let density_factor = (-(ice_density_kg_m3.max(50.0) - 50.0)).mul_add(0.0042, 1.25);
+    let mobility_index =
+        density_factor.mul_add(0.66, 0.34 * (-0.583 * 0.35e-3 - 0.833 * 1.0 + 0.833));
+    let mut driftability = mobility_index + (-(-0.085 * wind_speed_m_s).exp()).mul_add(2.868, 1.0);
     if driftability <= 0.0 {
         *mobile = false;
         return 0.0;
     }
     driftability = driftability.min(3.25);
-    *pseudo_depth_m += 0.5 * thickness_m * (3.25 - driftability);
+    *pseudo_depth_m = (0.5 * thickness_m).mul_add(3.25 - driftability, *pseudo_depth_m);
     let rate = -((350.0 - ice_density_kg_m3).max(0.0))
         * (driftability * (-*pseudo_depth_m / 0.1).exp() / (48.0 * 3600.0));
-    *pseudo_depth_m += 0.5 * thickness_m * (3.25 - driftability);
+    *pseudo_depth_m = (0.5 * thickness_m).mul_add(3.25 - driftability, *pseudo_depth_m);
     rate
 }
 

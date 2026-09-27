@@ -103,7 +103,9 @@ pub fn canopy_wetness(
     let wet_fraction = if vegetation_snow {
         let rain = coverage(1.0, water.rain_mm);
         let snow = coverage(48.0, water.snow_mm);
-        (rain + snow - rain * snow).min(1.0)
+        // `fwet = fwet_rain + fwet_snow - fwet_rain*fwet_snow`：GIMPLE 是
+        // `.FNMA (fwet_rain, fwet_snow, fwet_rain+fwet_snow)`（AT-Neu 1 月第 298 步差 1 ULP）。
+        (-rain).mul_add(snow, rain + snow).min(1.0)
     } else {
         coverage(1.0, water.total_mm)
     };

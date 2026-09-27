@@ -658,22 +658,22 @@ pub fn leaf_temperature(
         } else {
             1.0 / (ground_to_canopy_resistance + input.soil_surface_resistance_s_m)
         };
-        // 上游的 `wet_area_cfw = lai + sai` / `wet_cond_cfw = wet_area_cfw / rb`
-        // （`MOD_LeafTemperature_Extended.F90:972-973`）—— 与 `cfh`、`evplwet` 共用的
-        // 那个"湿面积导度"。**必须先把 `lsai/rb` 算成一项**：
-        // `cfw` 的汇合点（`lt_ext.s` 的 `L166`）是
-        //   `_382 = (dry_factor*delta) * SUM`
-        //   `cfw  = fma(coef, wet_cond_cfw, _382)`   ← 融合的是**前一项**
-        // 而原先写成 `coef * lsai / rb + …`，既是"先乘后除"（与 `cfh` 的写法不一致），
-        // 加法那一侧也没有收缩。
-        let wet_conductance = lsai / leaf_boundary_resistance;
+        // `cfw = (1.-delta*(1.-fwet))*(lai+sai)/rb + (1.-fwet)*delta*(laisun/(rb+rssun) + laisha/(rb+rssha))`
+        // （`main/MOD_LeafTemperature.F90:824-825`），GIMPLE：
+        //   `_256 = delta*(1-fwet) ; _257 = 1 - _256`（**不**融合）
+        //   `_259 = (lai+sai)*_257 ; _260 = _259/rb`          ← 先乘 `lsai`、再除 `rb`
+        //   `cfw = .FMA (_256, SUM, _260)`                     ← 熔进去的是**干叶**那一项
+        // 扩展版是先算 `lsai/rb` 再熔湿叶项，方向相反；同步到 `main/` 后 CN-Cng 第 1 步
+        // 第 8 次迭代的 `evplwet` 就差 1 ULP（位型探针，第 402 轮）。
         let dry_factor = 1.0 - fwet;
+        let dry_share = evaporation_sign * dry_factor;
+        let evaporation_weight = 1.0 - dry_share;
         let leaf_moisture_transfer_sum = laisun
             / (leaf_boundary_resistance + leaf_sunlit_resistance)
             + laisha / (leaf_boundary_resistance + leaf_shaded_resistance);
-        let leaf_moisture_conductance = (1.0 - evaporation_sign * dry_factor).mul_add(
-            wet_conductance,
-            dry_factor * evaporation_sign * leaf_moisture_transfer_sum,
+        let leaf_moisture_conductance = dry_share.mul_add(
+            leaf_moisture_transfer_sum,
+            lsai * evaporation_weight / leaf_boundary_resistance,
         );
         let heat_weight =
             1.0 / (canopy_air_heat_conductance + ground_heat_conductance + leaf_heat_conductance);
@@ -799,22 +799,16 @@ pub fn leaf_temperature(
             transpiration = input.transpiration_limit_kg_m2_s;
             transpiration_temperature_slope = 0.0;
         }
-        // 上游 `evplwet = rhoair * evp_weight * wet_cond * ( … )`
-        // （`:1150-1151`）—— `wet_cond = wet_area/rb` 是**先除好的一项**，
-        // 不是"链尾再除 `rb`"。原先写成 `rhoair * coef * lsai / rb * X`，
-        // 既是先乘后除、也与 `cfw` 那条不一致。**括号照抄上游的左结合**
-        // （`… * (wtaq0+wtgq0)*qsatlDT` 是 `(…*(W))*qsatlDT`，不是 `…*(W*qsatlDT)`）。
-        // 本条在 CN-Cng 干窗里恒等于 0（`evp_weight = 1-delta*(1-fwet)` 在
-        // `fwet=0, delta=1` 时正好为 0），位型探针**测不到**它 —— 属于按上游源码
-        // 形状照抄的保真度改动，由湿窗/雪窗黄金回归把关。
-        let evaporation_weight = 1.0 - evaporation_sign * dry_factor;
-        let mut wet_evaporation =
-            input.air_density_kg_m3 * evaporation_weight * wet_conductance * humidity_gradient;
-        let mut wet_evaporation_temperature_slope = input.air_density_kg_m3
-            * evaporation_weight
-            * wet_conductance
-            * (air_moisture_weight + ground_moisture_weight)
-            * leaf_saturation.specific_humidity_temperature_slope_k;
+        // `evplwet = rhoair*(1.-delta*(1.-fwet))*(lai+sai)/rb * ( … )`（`:895-898`），GIMPLE：
+        //   `_392 = w*rhoair ; _396 = _392*(lai+sai) ; _397 = _396/rb`
+        //   `evplwet = X*_397` ； `evplwet_dtl = qsatlDT*((wtaq0+wtgq0)*_397)`
+        // —— 公共因子 `_397` 先算好，`(wtaq0+wtgq0)` 先乘它、最后才乘 `qsatlDT`。
+        let wet_factor =
+            evaporation_weight * input.air_density_kg_m3 * lsai / leaf_boundary_resistance;
+        let mut wet_evaporation = humidity_gradient * wet_factor;
+        let mut wet_evaporation_temperature_slope = leaf_saturation
+            .specific_humidity_temperature_slope_k
+            * ((air_moisture_weight + ground_moisture_weight) * wet_factor);
         if wet_evaporation >= state.canopy_water.total_mm / input.time_step_seconds {
             wet_evaporation = state.canopy_water.total_mm / input.time_step_seconds;
             wet_evaporation_temperature_slope = 0.0;
@@ -1595,13 +1589,19 @@ fn longwave(input: LeafTemperatureInput<'_>, leaf_temperature_k: f64, factor: f6
             * factor
             * STEFAN_BOLTZMANN
             * leaf_fourth_power,
-        -8.0 * STEFAN_BOLTZMANN * leaf_temperature_k.powi(3) * factor
-            + 4.0
-                * (1.0 - input.ground_emissivity)
+        // `dirab_dtl`（`main/MOD_LeafTemperature.F90:857-858`）的 GIMPLE：
+        //   `_337 = (((1-emg)*4)*(1-thermk))*fac*stefnc`
+        //   `_341 = (tl**3*(8*stefnc))*fac`
+        //   `dirab_dtl = .FMS (_337, tl**3, _341)`   ← 第二项与 `tl**3` 的那一乘熔进减法
+        // 平铺写法在 CN-Cng 第 2 步第 15 次迭代差 1 ULP（第 402 轮位型探针）。
+        {
+            let leaf_cube = leaf_temperature_k.powi(3);
+            (4.0 * (1.0 - input.ground_emissivity)
                 * (1.0 - input.canopy_longwave_gap_fraction)
                 * factor
-                * STEFAN_BOLTZMANN
-                * leaf_temperature_k.powi(3),
+                * STEFAN_BOLTZMANN)
+                .mul_add(leaf_cube, -(leaf_cube * (8.0 * STEFAN_BOLTZMANN) * factor))
+        },
     )
 }
 
@@ -1739,8 +1739,12 @@ fn update_canopy_water(
         water.snow_mm = (water.snow_mm - melt * dt).max(0.0);
         water.rain_mm = (water.rain_mm + melt * dt).max(0.0);
         // Niu et al. (2004)
-        state.leaf_temperature_k =
-            wet_snow_fraction * FREEZING_K + (1.0 - wet_snow_fraction) * state.leaf_temperature_k;
+        // `tl = fwet_snow*tfrz + (1.-fwet_snow)*tl`：GIMPLE 是
+        // `.FMA (fwet_snow, tfrz, tl*(1-fwet_snow))`（`main/MOD_LeafTemperature.F90:1280/1290`）。
+        state.leaf_temperature_k = wet_snow_fraction.mul_add(
+            FREEZING_K,
+            state.leaf_temperature_k * (1.0 - wet_snow_fraction),
+        );
     }
     if water.rain_mm > 1.0e-6 && state.leaf_temperature_k < FREEZING_K {
         let freeze = (water.rain_mm / dt).min(
@@ -1749,8 +1753,12 @@ fn update_canopy_water(
         );
         water.rain_mm = (water.rain_mm - freeze * dt).max(0.0);
         water.snow_mm = (water.snow_mm + freeze * dt).max(0.0);
-        state.leaf_temperature_k =
-            wet_snow_fraction * FREEZING_K + (1.0 - wet_snow_fraction) * state.leaf_temperature_k;
+        // `tl = fwet_snow*tfrz + (1.-fwet_snow)*tl`：GIMPLE 是
+        // `.FMA (fwet_snow, tfrz, tl*(1-fwet_snow))`（`main/MOD_LeafTemperature.F90:1280/1290`）。
+        state.leaf_temperature_k = wet_snow_fraction.mul_add(
+            FREEZING_K,
+            state.leaf_temperature_k * (1.0 - wet_snow_fraction),
+        );
     }
     wet_snow_fraction = wet_snow_fraction.min(1.0);
     Ok(wet_snow_fraction)

@@ -248,14 +248,26 @@ pub fn new_snow_bulk_density(
             && northward_wind_m_s.is_finite(),
         "snow-density inputs must be finite"
     );
+    // 三支的形状照 `MOD_RainSnowTemp.F90` 的 GIMPLE（`-fdump-tree-optimized`）：
+    // * 暖支 `50.0 + 1.7*(17.0)**1.5` 与极冷支（`t = -57.55`）被 GCC 在编译期整式折成常数，
+    //   运行期逐步算会差 1 ULP，所以直接用它折出来的值；
+    // * 中间支 `.FMA (pow(t-tfrz+15, 1.5), 1.7, 50.0)`；
+    // * 冷支 `.FNMS (t, c, (t*t)*0.0333)`，`c = 50/15 + 0.0333*15` 同样是编译期常数。
+    // AT-Neu 1 月第 68 步（第一场雪）平铺写法让 `snowdp` 差 1 ULP。
+    const WARM_BULK_DENSITY: f64 = 1.691_577_525_803_503_8e2;
+    const COLDEST_BULK_DENSITY: f64 = 1.102_898_750_833_333_3e2;
+    const COLD_SLOPE: f64 = 3.832_833_333_333_333_3;
     let mut density = if air_temperature_k > FREEZING_K + 2.0 {
-        f77(50.0) + f77(1.7) * f77(17.0).powf(f77(1.5))
+        WARM_BULK_DENSITY
     } else if air_temperature_k > FREEZING_K - 15.0 {
-        f77(50.0) + f77(1.7) * (air_temperature_k - FREEZING_K + f77(15.0)).powf(f77(1.5))
+        (air_temperature_k - FREEZING_K + f77(15.0))
+            .powf(f77(1.5))
+            .mul_add(f77(1.7), f77(50.0))
+    } else if air_temperature_k > FREEZING_K - 57.55 {
+        let temperature_c = air_temperature_k - FREEZING_K;
+        (-temperature_c).mul_add(COLD_SLOPE, -(temperature_c * temperature_c * f77(0.0333)))
     } else {
-        let temperature_c = (air_temperature_k - FREEZING_K).max(f77(-57.55));
-        -(f77(50.0) / f77(15.0) + f77(0.0333) * f77(15.0)) * temperature_c
-            - f77(0.0333) * temperature_c.powi(2)
+        COLDEST_BULK_DENSITY
     };
     // `MOD_RainSnowTemp.F90:203`：`forc_wind = sqrt(forc_us**2 + forc_vs**2)`。
     let wind = eastward_wind_m_s

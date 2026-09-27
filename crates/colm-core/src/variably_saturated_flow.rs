@@ -4879,34 +4879,37 @@ pub fn soil_water_vertical_movement(
 
     // 亏缺级联：从最上一层往下，取不满的差额交给下一层。
     //
-    // 上游这三处都是 `a*b + c` 形状（`MOD_Hydro_SoilWater.F90:307/326/331`），
-    // 内核按 GCC 默认的 `-ffp-contract=fast` 会收缩成 FMA，所以必须写 `mul_add`。
-    // 只在"与 0 相加"时两者才必然相等，所以第 11 步落盘时 `deficit` 就在
-    // 累积循环的**第二项**上偏了 1 ULP（第 273 轮探针：`wexchange` 与 `deficit`
-    // 两侧差 1 ULP、`rsubst`/`etrdef` 都是 0），第 12 步水位跟着偏出去。
+    // 形状照 `main/HYDRO/MOD_Hydro_SoilWater.F90:314-342` 的 GIMPLE（同步到
+    // CoLM-SYSU-integration 之后与旧内核不同）：
+    // * `etroot(ilev)*dt` 算一次（`_3076`），`:320` 的 `(pre - _3076) - deficit`、
+    //   `:317` 的 `attempted = _3076 + deficit` 与 `:336` 的 `deficit + _3076` 都复用它，
+    //   **不**融合；
+    // * 溢出支 `etroot_actual_out = ss_vliq_pre - porsl*sp_dz` 是 `.FNMA (sp_dz, porsl, pre)`，
+    //   正常支直接取 `attempted`（上游不再 `max(0)`）；
+    // * 只有水位以下那一段 `:341` 是 `.FMA (etroot, dt, deficit)`。
     for level in 0..water_table_level.saturating_sub(1) {
+        let root_mm = transpiration_demand_mm[level] * input.time_step_seconds;
         if input.permeable[level] {
-            let attempted_mm =
-                transpiration_demand_mm[level].mul_add(input.time_step_seconds, deficit_mm);
             let stored_before_mm = state.liquid_water[level] * thickness_mm[level];
-            state.liquid_water[level] = (stored_before_mm - attempted_mm) / thickness_mm[level];
+            state.liquid_water[level] =
+                (stored_before_mm - root_mm - deficit_mm) / thickness_mm[level];
             if state.liquid_water[level] < 0.0 {
                 let residual_mm = -state.liquid_water[level] * thickness_mm[level];
                 transpiration_actual_mm[level] = stored_before_mm.max(0.0);
                 deficit_mm = residual_mm;
                 state.liquid_water[level] = 0.0;
             } else if state.liquid_water[level] > input.porosity[level] {
-                transpiration_actual_mm[level] = attempted_mm.max(0.0);
+                transpiration_actual_mm[level] =
+                    (-thickness_mm[level]).mul_add(input.porosity[level], stored_before_mm);
                 deficit_mm =
                     -(state.liquid_water[level] - input.porosity[level]) * thickness_mm[level];
                 state.liquid_water[level] = input.porosity[level];
             } else {
-                transpiration_actual_mm[level] = attempted_mm.max(0.0);
+                transpiration_actual_mm[level] = root_mm + deficit_mm;
                 deficit_mm = 0.0;
             }
         } else {
-            deficit_mm =
-                transpiration_demand_mm[level].mul_add(input.time_step_seconds, deficit_mm);
+            deficit_mm += root_mm;
         }
     }
     for demand_mm_s in transpiration_demand_mm
@@ -4918,12 +4921,11 @@ pub fn soil_water_vertical_movement(
     let transpiration_aquifer_mm = deficit_mm.max(0.0);
 
     // 与含水层交换（`wexchange` 是**体积** mm，不是通量）。
-    // `:338 wexchange = rsubst*dt + deficit` 在出货汇编里是一条 `fmadd`
-    // （`.loc 1 338`：`fmadd d31, d8, d11, d31`，d8=rsubst、d11=dt、d31=deficit）。
+    // `:345 wexchange = rsubst*dt + deficit`：`main/` 的 GIMPLE 是 `_100 = rsubst*dt ;
+    // _102 = _100 + deficit`，**不**融合（旧内核的出货汇编是 `fmadd`）。CN-Cng 1 月第 57 步
+    // 的 `zwt` 1 ULP 就是从这里来的（第 402 轮探针：`get_zwt_from_wa` 的入参 `-reswater` 已不同）。
     let aquifer = exchange_soil_water_with_aquifer(VariableSaturatedAquiferInput {
-        water_exchange_mm: input
-            .subsurface_runoff_mm_s
-            .mul_add(input.time_step_seconds, deficit_mm),
+        water_exchange_mm: input.subsurface_runoff_mm_s * input.time_step_seconds + deficit_mm,
         interface_depth_mm: input.interface_depth_mm,
         permeable: input.permeable,
         porosity: input.porosity,

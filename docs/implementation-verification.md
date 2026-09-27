@@ -24525,3 +24525,50 @@ golden-compare，split 整月：AT-Neu 2010-01 tier2=52、2010-02 tier2=65，tie
 第 225 步那种"输入差 1e-13、叶温差 1e-4 K"是叶温迭代的离散收敛判据把 ULP 种子放大。种子来自叶温仍按
 扩展版 GIMPLE 调的融合位型（非 split 第 9 步 `fsenl` 的 1 ULP 也是它）。下一步先按 `main/` 的 GIMPLE
 把叶温过一遍，再做后面的特性，免得每项新特性的逐步验收都被这个种子干扰。
+
+## 第 402 轮：按 `main/` 内核的 GIMPLE 逐位对齐 —— CN-Cng、AT-Neu 整个 1 月逐位相同
+
+第 400/401 轮之后剩下的差异都是 ULP 种子被放大：Rust 里的融合位型是按**扩展截获版旧内核**的
+汇编调的，同步到 CoLM-SYSU-integration 之后内核编的是 `main/`，GCC 的收缩选择在一批语句上变了。
+本轮的办法不变：逐步输出（`DEF_HIST_FREQ='TIMESTEP'`）找首个逐位不同的量 → 两边在同一位置打探针
+（Fortran 侧改 `$S/bld` 的临时副本、不动 `vendor/`；先确认调试内核的 history 与生产内核逐位相同）→
+`-fdump-tree-optimized-lineno` 读那条语句的形状 → 照改。
+
+### 一、改动（全部有 GIMPLE 为据）
+
+| 位置 | `main/` 的形状 | Rust 原先 |
+|---|---|---|
+| `cfw`（`MOD_LeafTemperature.F90:824`） | `.FMA (delta*(1-fwet), SUM, ((lai+sai)*w)/rb)` | 熔湿叶项、`lsai/rb` 先除 |
+| `evplwet`/`evplwet_dtl`（`:895-898`） | `X*(((w*rhoair)*lsai)/rb)`；`qsatlDT*((wtaq0+wtgq0)*因子)` | `rhoair*w*(lsai/rb)*X` |
+| `dirab_dtl`（`:857`） | `.FMS (4(1-emg)(1-thermk)fac·σ, tl³, (tl³·8σ)·fac)` | 平铺 |
+| Niu (2004) 拉回（`:1280/1290`） | `.FMA (fwet_snow, tfrz, tl*(1-fwet_snow))` | 平铺 |
+| `fwet` 雨雪合成（`:1399`） | `.FNMA (fwet_rain, fwet_snow, rain+snow)` | 平铺 |
+| `lfevpa`/`fgrnd`（`MOD_Thermal.F90:1466/1475`） | 见第 401 轮 | 扩展版方向 |
+| `errorw`（`CoLMMAIN.F90:1518`） | `.FNMA (通量和, deltim, endwb-totwb)` | 平铺 |
+| `bifall`（`MOD_RainSnowTemp.F90`） | 暖支、极冷支是编译期常数；中支 `.FMA (pow, 1.7, 50)`；冷支 `.FNMS` | 运行期逐步算 |
+| 湿球温度、降水相态两个方案 | `.FMA` ×3（第 400 轮） | 平铺 |
+| `albg` 雪/地混合（`MOD_Albedo.F90:394`） | **直射一列** `.FMA (fsno, albsno, (1-fsno)*albg)`（向量化），**散射一列** `.FMA (1-fsno, albg, fsno*albsno)`（标量） | 四个元素都用直射形状 |
+| 薄雪热容（`MOD_GroundTemperature.F90:202`） | `.FMA (scv, cpice, cv(1))` | 平铺 |
+| 雪层 `cv`/`thk`（`:206/216`） | `.FMA (wliq, cpliq, wice*cpice)`；两层 FMA 的 Jordan 导热 | 平铺 |
+| `newsnow` 的 `fsno`（`MOD_NewSnow.F90:121`） | `.FNMA (1-tanh, 1-fsno, 1.0)` | 平铺 |
+| 雪层压实（`snowcompaction`，含内联的风吹压实） | `eta` 的 `exp` 参数、`ddz3 = (1/deltim)*…`、`frho`/`mo`/`si`、伪深度两次累加、`dz*FMA(pdzdtc,dt,1)` 共 7 处 | 平铺或除法 |
+| VSF 亏缺级联（`MOD_Hydro_SoilWater.F90:314-345`） | `etroot*dt` 算一次、三处复用**不融合**；`wexchange = rsubst*dt + deficit` **不融合**（旧内核是 `fmadd`）；饱和溢出支 `etroot_actual_out = .FNMA (dz, porsl, pre)`，正常支取 `attempted`（上游不再 `max(0)`） | 融合 / 取 `max(0)` |
+
+`MOD_Albedo.F90:394` 那一条值得单独记：**同一条数组赋值语句，GCC 向量化了前两个元素、剩下两个走标量**，
+两半的收缩方向相反。"一条语句一种形状"的假设在这里不成立。
+
+### 二、实测
+
+```text
+逐步窗口（DEF_HIST_FREQ='TIMESTEP'，新内核 kernels/default 对 colm-rs）
+  CN-Cng 2008-01-01..10：全部变量逐位相同（本轮前第 1 步 f_fevpl/f_fsenl 就差 1 ULP）
+  AT-Neu 2010-01-01..10：全部变量逐位相同（本轮前第 9 步）
+整月（golden-compare --tolerances，外加逐位首差）
+  CN-Cng 2008-01：逐位相同（本轮前 tier2=33）
+  AT-Neu 2010-01：逐位相同（本轮前 tier2=25）
+  AT-Neu 2010-02：首个逐位差在第 94 条，tier2=57
+  AT-Neu split 2010-01/02：首差在第 0 条，tier2=51/65（split 专属的形状还没对齐，下一轮）
+cargo test --lib --bins（全 workspace；colm-init/colm-srfdata --test-threads=1）、clippy -D warnings、fmt --check 全过
+```
+
+`colm-init` 的 SNICAR 冷启动测试原先把 `albg` 混合写死成"四个元素同一形状"，随上表一起改成按列区分。

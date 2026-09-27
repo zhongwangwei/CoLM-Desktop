@@ -134,7 +134,12 @@ pub fn ground_temperature(input: GroundTemperatureInput<'_>) -> Result<GroundTem
     let (heat_capacity, mut conductivity) = layer_thermal_properties(input)?;
     let mut layer_capacity = heat_capacity;
     if input.snow_layers == 0 && input.snow_water_equivalent_kg_m2 > 0.0 {
-        layer_capacity[0] += ICE_HEAT_CAPACITY_J_KG_K * input.snow_water_equivalent_kg_m2;
+        // `cv(1) = cv(1) + cpice*scv`（`MOD_GroundTemperature.F90:202`）：GIMPLE 是
+        // `.FMA (scv, cpice, cv(1))`。平铺写法让 `fact(1)` 差 1 ULP —— AT-Neu 1 月第 89 步
+        // 薄雪融化时 `scv`/`snowdp`/`qinfl` 由此偏开（第 402 轮探针）。
+        layer_capacity[0] = input
+            .snow_water_equivalent_kg_m2
+            .mul_add(ICE_HEAT_CAPACITY_J_KG_K, layer_capacity[0]);
     }
     ensure!(
         layer_capacity
@@ -274,13 +279,23 @@ fn layer_thermal_properties(input: GroundTemperatureInput<'_>) -> Result<(Vec<f6
         conductivity[layer] = properties.conductivity_w_m_k;
     }
     for layer in 0..input.snow_layers {
-        heat_capacity[layer] = WATER_HEAT_CAPACITY_J_KG_K * input.liquid_water_kg_m2[layer]
-            + ICE_HEAT_CAPACITY_J_KG_K * input.ice_water_kg_m2[layer];
+        // `MOD_GroundTemperature.F90:206/216` 的 GIMPLE：
+        //   `cv = .FMA (wliq, cpliq, wice*cpice)`
+        //   `thk = .FMA (.FMA (rho, 7.75e-5, (rho*1.105e-6)*rho), tkice-tkair, tkair)`
+        // 平铺写法在 AT-Neu 1 月第 130 步（第一个雪层）让 `tk(0)` 与 `cv(0)` 各差 1 ULP，
+        // 土壤 1-3 层温度随之偏开（第 402 轮探针）。
+        heat_capacity[layer] = input.liquid_water_kg_m2[layer].mul_add(
+            WATER_HEAT_CAPACITY_J_KG_K,
+            input.ice_water_kg_m2[layer] * ICE_HEAT_CAPACITY_J_KG_K,
+        );
         let density = (input.liquid_water_kg_m2[layer] + input.ice_water_kg_m2[layer])
             / input.layer_thickness_m[layer];
-        conductivity[layer] = AIR_THERMAL_CONDUCTIVITY_W_M_K
-            + (7.75e-5 * density + 1.105e-6 * density * density)
-                * (ICE_THERMAL_CONDUCTIVITY_W_M_K - AIR_THERMAL_CONDUCTIVITY_W_M_K);
+        conductivity[layer] = density
+            .mul_add(7.75e-5, density * 1.105e-6 * density)
+            .mul_add(
+                ICE_THERMAL_CONDUCTIVITY_W_M_K - AIR_THERMAL_CONDUCTIVITY_W_M_K,
+                AIR_THERMAL_CONDUCTIVITY_W_M_K,
+            );
     }
     Ok((heat_capacity, conductivity))
 }

@@ -33,17 +33,17 @@ fn snicar_cold_bridge_restores_source_slots_and_folds_only_temporary_snow() {
                 assert!(state.layer_absorption[band][incident][..5 - layers]
                     .iter()
                     .all(|x| *x == 0.0));
-                // 混入式的**收缩方向**（`MOD_Albedo.F90:2048-2051`，GIMPLE
-                // `albland` 第 5 处）：地面那一支的乘积先舍入、雪面那一支被吸收
-                // —— `FMA(雪面, frsn, 地面*(1-frsn))`。这里不能按"先算两项再加"
-                // 写，那会差 1 ULP。
-                assert_eq!(
-                    state.ground.ground[band][incident],
-                    state.ground.snow[band][incident].mul_add(
-                        fraction,
-                        (1.0 - fraction) * state.ground.soil[band][incident],
-                    )
-                );
+                // 混入式的**收缩方向**（`main/MOD_Albedo.F90:394`）：GCC 把它拆成两半 ——
+                // 直射那一列向量化成 `FMA(雪面, fsno, 地面*(1-fsno))`，散射那一列是
+                // 标量 `FMA(1-fsno, 地面, fsno*雪面)`。按"先算两项再加"写会差 1 ULP。
+                let soil = state.ground.soil[band][incident];
+                let snow = state.ground.snow[band][incident];
+                let expected = if incident == 0 {
+                    snow.mul_add(fraction, (1.0 - fraction) * soil)
+                } else {
+                    (1.0 - fraction).mul_add(soil, fraction * snow)
+                };
+                assert_eq!(state.ground.ground[band][incident], expected);
                 if depth == 0.0 {
                     assert_eq!(state.ground.snow[band][incident], 1.0);
                     assert_eq!(state.layer_absorption[band][incident], [0.0; 6]);
