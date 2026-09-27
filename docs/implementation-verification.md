@@ -24572,3 +24572,44 @@ cargo test --lib --bins（全 workspace；colm-init/colm-srfdata --test-threads=
 ```
 
 `colm-init` 的 SNICAR 冷启动测试原先把 `albg` 混合写死成"四个元素同一形状"，随上表一起改成按列区分。
+
+## 第 403 轮：split 与 AT-Neu 二月也逐位对齐 —— 五个示例月全部逐位相同
+
+接第 402 轮，同样的"逐步 + 两侧探针 + GIMPLE"办法。
+
+### 一、split 专属的形状
+
+| 位置 | `main/` 的形状 | Rust 原先 |
+|---|---|---|
+| 叶温收尾 `fseng_soil/snow`（`MOD_LeafTemperature.F90:1134-1135`） | `(cpair·ρ·cgh)·.FNMA (tl, wtl0, .FMS (1-wtg0, t_face, wta0·thm))` | 平铺 |
+| 叶温收尾 `fevpg_soil/snow`（`:1140-1141`） | `(cgw·ρ)·(.FMS (1-wtgq0, q_face, wtaq0·qm) - wtlq0·qsatl)`，末项复用 `qaf` 的乘积 | 平铺 |
+| split `ulrad`（`:1158-1160`） | 叶发射项起点，土面、雪面各一次 `.FMA` | 平铺 |
+| `hs_soil`/`hs_snow` 首段（`MOD_GroundTemperature.F90:275-287`） | `.FMS (dlrad, emg, t⁴·(emg·σ))`，熔 `dlrad·emg` | 熔黑体项 |
+| THERMAL 的 `tinc` 修正与 split 限水（`MOD_Thermal.F90:1347-1415`） | `tinc·cgrnds`/`tinc·cgrndl` 各算一次**平铺**加到总量与两面；两面 `fseng += htvp·egidif` 是 FMA；合成 `.FMA (土面, 1-fsno, 雪面·fsno)` | 先算"修正量"再拼 |
+
+最后一项是结构性的：Rust 原先把 split 的限水写成"算好 `htvp·egidif` 再加到加权和上"，数学等价、
+舍入不同。`partition_split_thermal_water` 改成照上游**逐句**更新两个面的 `fseng`/`fevpg`，直接给出合成后的
+总量；顺带把"面量"语义对回上游（`fevpg_soil`/`fevpg_snow` 是未加权的面值，只有分相后的 `q*` 才乘雪盖）。
+
+### 二、另外两处
+
+* **冠层热容** `clai = 0.2·lsai·cpliq + ldew_rain·cpliq + ldew_snow·cpice`：`.FMA (lsai·0.2, cpliq, ldew_rain·cpliq)`，
+  熔冠层项、雨项先舍入。前面几十天冠层上只有雪（`ldew_rain = 0`）所以看不出来，AT-Neu 2 月第 189 步
+  （第一次有冠层雨）差 1 ULP，经叶温迭代放大成 7.6e-5 K。
+* **空雪槽清零**：`CoLMMAIN.F90:1442-1449` 在雪层合并/分裂后把 `maxsnl+1:snl` 的 `wice/wliq/t/z/dz` 置 0。
+  Rust 没做，合并后的空槽留着旧值 —— 物理上不再被读，但写进 history/重启的 `f_t_soisno`/`f_wice_soisno`
+  与 Fortran 不同（split 1 月第 396 步两层并一层）。
+
+### 三、实测
+
+```text
+golden-compare --tolerances + 逐位首差（新内核 kernels/default 对 colm-rs）
+  CN-Cng 2008-01            逐位相同
+  AT-Neu 2010-01、2010-02    逐位相同
+  AT-Neu split 2010-01、02   逐位相同
+逐步窗口：AT-Neu 2010-01-01..02-05（非 split）、2010-01-01..10（split）、CN-Cng 2008-01-01..10 全部逐位相同
+cargo test（全 workspace --lib --bins；colm-core/colm-runtime --tests）、clippy -D warnings、fmt --check 全过
+```
+
+这意味着 Rust 主循环在当前覆盖面（SinglePoint + LCT 土面 patch，含 VSF、PHS、`DEF_VEG_SNOW`、split）上
+与同步后的 Fortran 内核**逐位等价**。之后扩覆盖面（A1 其余、A2…）时，逐位对照就是验收标准。

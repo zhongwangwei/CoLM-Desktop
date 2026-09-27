@@ -43,10 +43,15 @@ pub struct ThermalWaterFluxes {
 }
 
 /// Inputs to the split soil/snow section of `MOD_Thermal`.
+///
+/// 四个面量都已经加过 `tinc*cgrnds`/`tinc*cgrndl`（`MOD_Thermal.F90:1347-1352`，
+/// 乘积各算一次、**平铺**加上）。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SplitThermalWaterInput {
     pub snow_layer_exists: bool,
     pub snow_cover_fraction: f64,
+    pub corrected_soil_sensible_heat_w_m2: f64,
+    pub corrected_snow_sensible_heat_w_m2: f64,
     pub corrected_soil_evaporation_kg_m2_s: f64,
     pub corrected_snow_evaporation_kg_m2_s: f64,
     pub soil_liquid_water_kg_m2: f64,
@@ -62,9 +67,10 @@ pub struct SplitThermalWaterInput {
 /// Area-mean split soil/snow fluxes passed to `WATER_2014`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SplitThermalWaterFluxes {
+    /// 合成后的 `fseng`：有雪层 `FMA(fseng_soil, 1-fsno, fseng_snow*fsno)`，无雪层就是 `fseng_soil`。
+    pub ground_sensible_heat_w_m2: f64,
+    /// 合成后的 `fevpg`，同上。
     pub ground_evaporation_kg_m2_s: f64,
-    pub water_limited_evaporation_kg_m2_s: f64,
-    pub sensible_heat_correction_w_m2: f64,
     /// Soil component, already weighted by the uncovered fraction when snow exists.
     pub soil: ThermalWaterFluxes,
     /// Snow component, already weighted by snow cover when a snow layer exists.
@@ -108,74 +114,92 @@ pub fn partition_no_split_thermal_water(input: ThermalWaterInput) -> Result<Ther
 }
 
 /// Ports the `DEF_SPLIT_SOILSNOW` water-limit and phase-partition block in
-/// `MOD_Thermal` after `GroundTemperature`.
+/// `MOD_Thermal` after `GroundTemperature`（`MOD_Thermal.F90:1398-1455`）。
 ///
-/// Component fluxes are returned as patch-area means, matching the
-/// `qseva_soil`/`qseva_snow` values consumed by `WATER_2014`.
+/// 逐句照上游的顺序与收缩（GIMPLE）：
+/// * 有雪层：雪面 `egidif = max(0, fevpg_snow-egsmax)`、`fevpg_snow = min(…)`、
+///   `fseng_snow = .FMA (egidif, htvp, fseng_snow)`；
+/// * 无雪层：`fevpg_soil = .FMA (fevpg_soil, 1-fsno, fevpg_snow*fsno)`；
+/// * 土面同样限水，`fseng_soil = .FMA (egidif, htvp, fseng_soil)`；
+/// * 合成：有雪层 `.FMA (土面, 1-fsno, 雪面*fsno)`，无雪层直接取土面（雪面清零）；
+/// * 分相：雪面 `min(wliq(lb)/deltim, fevpg_snow)` 等乘 `fsno`，土面按 `t_soisno(1)`，
+///   有雪层时再乘 `1-fsno`。
 pub fn partition_split_thermal_water(
     input: SplitThermalWaterInput,
 ) -> Result<SplitThermalWaterFluxes> {
     validate_split(input)?;
-    let soil_input = |evaporation| ThermalWaterInput {
-        corrected_ground_evaporation_kg_m2_s: evaporation,
-        upper_liquid_water_kg_m2: input.soil_liquid_water_kg_m2,
-        upper_ice_water_kg_m2: input.soil_ice_water_kg_m2,
-        upper_temperature_k: input.soil_temperature_k,
-        time_step_seconds: input.time_step_seconds,
-        ground_latent_heat_j_kg: input.ground_latent_heat_j_kg,
-    };
-    if !input.snow_layer_exists {
-        let soil = partition_no_split_thermal_water(soil_input(
-            input.corrected_soil_evaporation_kg_m2_s * (1.0 - input.snow_cover_fraction)
-                + input.corrected_snow_evaporation_kg_m2_s * input.snow_cover_fraction,
-        ))?;
-        return Ok(SplitThermalWaterFluxes {
-            ground_evaporation_kg_m2_s: soil.ground_evaporation_kg_m2_s,
-            water_limited_evaporation_kg_m2_s: soil.water_limited_evaporation_kg_m2_s,
-            sensible_heat_correction_w_m2: soil.sensible_heat_correction_w_m2,
-            soil,
-            snow: ThermalWaterFluxes::default(),
-        });
+    let dt = input.time_step_seconds;
+    let htvp = input.ground_latent_heat_j_kg;
+    let fsno = input.snow_cover_fraction;
+    let mut fseng_soil = input.corrected_soil_sensible_heat_w_m2;
+    let mut fseng_snow = input.corrected_snow_sensible_heat_w_m2;
+    let mut fevpg_soil = input.corrected_soil_evaporation_kg_m2_s;
+    let mut fevpg_snow = input.corrected_snow_evaporation_kg_m2_s;
+
+    if input.snow_layer_exists {
+        let egsmax = (input.snow_ice_water_kg_m2 + input.snow_liquid_water_kg_m2) / dt;
+        let egidif = (fevpg_snow - egsmax).max(0.0);
+        fevpg_snow = fevpg_snow.min(egsmax);
+        fseng_snow = egidif.mul_add(htvp, fseng_snow);
+    } else {
+        fevpg_soil = fevpg_soil.mul_add(1.0 - fsno, fevpg_snow * fsno);
     }
-    let soil = scale_fluxes(
-        partition_no_split_thermal_water(soil_input(input.corrected_soil_evaporation_kg_m2_s))?,
-        1.0 - input.snow_cover_fraction,
-    );
-    let snow = scale_fluxes(
-        partition_no_split_thermal_water(ThermalWaterInput {
-            corrected_ground_evaporation_kg_m2_s: input.corrected_snow_evaporation_kg_m2_s,
-            upper_liquid_water_kg_m2: input.snow_liquid_water_kg_m2,
-            upper_ice_water_kg_m2: input.snow_ice_water_kg_m2,
-            upper_temperature_k: input.snow_temperature_k,
-            time_step_seconds: input.time_step_seconds,
-            ground_latent_heat_j_kg: input.ground_latent_heat_j_kg,
-        })?,
-        input.snow_cover_fraction,
-    );
+    let egsmax = (input.soil_ice_water_kg_m2 + input.soil_liquid_water_kg_m2) / dt;
+    let egidif = (fevpg_soil - egsmax).max(0.0);
+    fevpg_soil = fevpg_soil.min(egsmax);
+    fseng_soil = egidif.mul_add(htvp, fseng_soil);
+
+    let (fseng, fevpg) = if input.snow_layer_exists {
+        (
+            fseng_soil.mul_add(1.0 - fsno, fseng_snow * fsno),
+            fevpg_soil.mul_add(1.0 - fsno, fevpg_snow * fsno),
+        )
+    } else {
+        fevpg_snow = 0.0;
+        (fseng_soil, fevpg_soil)
+    };
+
+    let mut snow = ThermalWaterFluxes {
+        ground_evaporation_kg_m2_s: fevpg_snow,
+        ..ThermalWaterFluxes::default()
+    };
+    if fevpg_snow >= 0.0 {
+        let evaporation = (input.snow_liquid_water_kg_m2 / dt).min(fevpg_snow);
+        snow.evaporation_kg_m2_s = evaporation * fsno;
+        snow.sublimation_kg_m2_s = (fevpg_snow - evaporation) * fsno;
+    } else if input.snow_temperature_k < FREEZING_K {
+        snow.frost_kg_m2_s = (fevpg_snow * fsno).abs();
+    } else {
+        snow.dew_kg_m2_s = (fevpg_snow * fsno).abs();
+    }
+
+    let mut soil = ThermalWaterFluxes {
+        ground_evaporation_kg_m2_s: fevpg_soil,
+        ..ThermalWaterFluxes::default()
+    };
+    if fevpg_soil >= 0.0 {
+        let evaporation = (input.soil_liquid_water_kg_m2 / dt).min(fevpg_soil);
+        soil.evaporation_kg_m2_s = evaporation;
+        soil.sublimation_kg_m2_s = fevpg_soil - evaporation;
+    } else if input.soil_temperature_k < FREEZING_K {
+        soil.frost_kg_m2_s = fevpg_soil.abs();
+    } else {
+        soil.dew_kg_m2_s = fevpg_soil.abs();
+    }
+    if input.snow_layer_exists {
+        let uncovered = 1.0 - fsno;
+        soil.evaporation_kg_m2_s *= uncovered;
+        soil.sublimation_kg_m2_s *= uncovered;
+        soil.frost_kg_m2_s *= uncovered;
+        soil.dew_kg_m2_s *= uncovered;
+    }
     Ok(SplitThermalWaterFluxes {
-        ground_evaporation_kg_m2_s: soil.ground_evaporation_kg_m2_s
-            + snow.ground_evaporation_kg_m2_s,
-        water_limited_evaporation_kg_m2_s: soil.water_limited_evaporation_kg_m2_s
-            + snow.water_limited_evaporation_kg_m2_s,
-        sensible_heat_correction_w_m2: soil.sensible_heat_correction_w_m2
-            + snow.sensible_heat_correction_w_m2,
+        ground_sensible_heat_w_m2: fseng,
+        ground_evaporation_kg_m2_s: fevpg,
         soil,
         snow,
     })
 }
-
-fn scale_fluxes(fluxes: ThermalWaterFluxes, fraction: f64) -> ThermalWaterFluxes {
-    ThermalWaterFluxes {
-        ground_evaporation_kg_m2_s: fluxes.ground_evaporation_kg_m2_s * fraction,
-        evaporation_kg_m2_s: fluxes.evaporation_kg_m2_s * fraction,
-        sublimation_kg_m2_s: fluxes.sublimation_kg_m2_s * fraction,
-        dew_kg_m2_s: fluxes.dew_kg_m2_s * fraction,
-        frost_kg_m2_s: fluxes.frost_kg_m2_s * fraction,
-        water_limited_evaporation_kg_m2_s: fluxes.water_limited_evaporation_kg_m2_s * fraction,
-        sensible_heat_correction_w_m2: fluxes.sensible_heat_correction_w_m2 * fraction,
-    }
-}
-
 fn validate(input: ThermalWaterInput) -> Result<()> {
     ensure!(
         [
@@ -201,6 +225,8 @@ fn validate_split(input: SplitThermalWaterInput) -> Result<()> {
     ensure!(
         [
             input.snow_cover_fraction,
+            input.corrected_soil_sensible_heat_w_m2,
+            input.corrected_snow_sensible_heat_w_m2,
             input.corrected_soil_evaporation_kg_m2_s,
             input.corrected_snow_evaporation_kg_m2_s,
             input.soil_liquid_water_kg_m2,

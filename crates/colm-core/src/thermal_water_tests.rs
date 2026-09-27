@@ -70,6 +70,8 @@ fn split_partition_weights_separate_soil_and_snow_limits() {
     let output = partition_split_thermal_water(SplitThermalWaterInput {
         snow_layer_exists: true,
         snow_cover_fraction: 0.25,
+        corrected_soil_sensible_heat_w_m2: 10.0,
+        corrected_snow_sensible_heat_w_m2: 20.0,
         corrected_soil_evaporation_kg_m2_s: 0.8,
         corrected_snow_evaporation_kg_m2_s: 0.5,
         soil_liquid_water_kg_m2: 3.0,
@@ -83,14 +85,20 @@ fn split_partition_weights_separate_soil_and_snow_limits() {
     })
     .unwrap();
 
-    close(output.soil.ground_evaporation_kg_m2_s, 0.375);
+    // `fevpg_soil`/`fevpg_snow` 是**面值**（未按雪盖加权），分相后的四项才乘 `1-fsno`/`fsno`。
+    close(output.soil.ground_evaporation_kg_m2_s, 0.5);
     close(output.soil.evaporation_kg_m2_s, 0.225);
     close(output.soil.sublimation_kg_m2_s, 0.15);
-    close(output.snow.ground_evaporation_kg_m2_s, 0.05);
+    close(output.snow.ground_evaporation_kg_m2_s, 0.2);
     close(output.snow.evaporation_kg_m2_s, 0.025);
     close(output.snow.sublimation_kg_m2_s, 0.025);
     close(output.ground_evaporation_kg_m2_s, 0.425);
-    close(output.water_limited_evaporation_kg_m2_s, 0.3);
+    // 土面限水 egidif = 0.8-0.5 = 0.3、雪面 egidif = 0.5-0.2 = 0.3，各自按 htvp 加进本面，
+    // 再按 1-fsno / fsno 合成。
+    close(
+        output.ground_sensible_heat_w_m2,
+        (10.0 + 2.5e6 * 0.3) * 0.75 + (20.0 + 2.5e6 * 0.3) * 0.25,
+    );
 }
 
 #[test]
@@ -98,6 +106,8 @@ fn split_without_snow_blends_before_the_soil_water_limit() {
     let output = partition_split_thermal_water(SplitThermalWaterInput {
         snow_layer_exists: false,
         snow_cover_fraction: 0.25,
+        corrected_soil_sensible_heat_w_m2: 10.0,
+        corrected_snow_sensible_heat_w_m2: 20.0,
         corrected_soil_evaporation_kg_m2_s: 0.8,
         corrected_snow_evaporation_kg_m2_s: 0.4,
         soil_liquid_water_kg_m2: 5.0,
@@ -114,7 +124,9 @@ fn split_without_snow_blends_before_the_soil_water_limit() {
     close(output.ground_evaporation_kg_m2_s, 0.5);
     close(output.soil.evaporation_kg_m2_s, 0.5);
     close(output.snow.ground_evaporation_kg_m2_s, 0.0);
-    close(output.water_limited_evaporation_kg_m2_s, 0.2);
+    // 无雪层：先 0.8*0.75+0.4*0.25 = 0.7 再按土面限水到 0.5，egidif = 0.2 进土面感热，
+    // 合成后的感热就是土面那份。
+    close(output.ground_sensible_heat_w_m2, 10.0 + 2.5e6 * 0.2);
 }
 
 fn close(actual: f64, expected: f64) {

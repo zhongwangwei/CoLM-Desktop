@@ -308,7 +308,6 @@ fn surface_fluxes(
     // 当公共量（GIMPLE 的 `_292 _258 _301 _309`），它们**各自先舍入一次**再参与
     // 后面的加减 —— 所以不能把"降水热"写成 `cpliq*rain*Δ + cpice*snow*Δ` 那种
     // 合成子式和：上游是**顺序**加两个已舍入的乘积（`_25`、`_30`）。
-    let longwave_emissivity = input.downward_longwave_w_m2 * input.ground_emissivity;
     let emissivity_stefan = input.ground_emissivity * STEFAN_BOLTZMANN_W_M2_K4;
     let rain_heat_capacity = WATER_HEAT_CAPACITY_J_KG_K * input.rain_on_ground_kg_m2_s;
     let snow_heat_capacity = ICE_HEAT_CAPACITY_J_KG_K * input.snow_on_ground_kg_m2_s;
@@ -369,9 +368,13 @@ fn surface_fluxes(
         .evaporation_soil_kg_m2_s
         .mul_add(input.vaporization_heat_j_kg, input.sensible_soil_w_m2);
     let soil_delta = input.precipitation_temperature_k - input.soil_surface_temperature_k;
-    let soil_base = (-input.soil_surface_temperature_k.powi(4))
-        .mul_add(emissivity_stefan, longwave_emissivity)
-        - soil_sensible;
+    // `hs_soil`/`hs_snow` 的第一段（`main/MOD_GroundTemperature.F90:275-287`）GIMPLE 是
+    // `.FMS (dlrad, emg, t**4*(emg*stefnc))` —— 熔进去的是 `dlrad*emg`，不是黑体项
+    // （旧内核相反）。AT-Neu split 1 月第 233 步的雪层温度 1 ULP 由此而来。
+    let soil_base = input.downward_longwave_w_m2.mul_add(
+        input.ground_emissivity,
+        -(input.soil_surface_temperature_k.powi(4) * emissivity_stefan),
+    ) - soil_sensible;
     let soil = soil_delta.mul_add(
         snow_heat_capacity,
         soil_delta.mul_add(rain_heat_capacity, soil_base),
@@ -386,9 +389,10 @@ fn surface_fluxes(
         .evaporation_snow_kg_m2_s
         .mul_add(input.vaporization_heat_j_kg, input.sensible_snow_w_m2);
     let snow_delta = input.precipitation_temperature_k - input.snow_surface_temperature_k;
-    let snow_base = (-input.snow_surface_temperature_k.powi(4))
-        .mul_add(emissivity_stefan, longwave_emissivity)
-        - snow_sensible;
+    let snow_base = input.downward_longwave_w_m2.mul_add(
+        input.ground_emissivity,
+        -(input.snow_surface_temperature_k.powi(4) * emissivity_stefan),
+    ) - snow_sensible;
     let snow_inner = snow_delta.mul_add(
         snow_heat_capacity,
         snow_delta.mul_add(rain_heat_capacity, snow_base),

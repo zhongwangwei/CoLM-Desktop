@@ -294,11 +294,13 @@ pub fn leaf_temperature(
     //   `clai = .FMA(ldew_snow, cpice, _53)`
     // —— `0.2*(lai+sai)*cpliq` 那条链独立舍入，另两个乘积各自熔进当时的累加值。
     let clai = if input.options.vegetation_snow {
-        let canopy_capacity = 0.2 * lsai * WATER_HEAT_CAPACITY_J_KG_K;
-        let canopy_capacity = state
-            .canopy_water
-            .rain_mm
-            .mul_add(WATER_HEAT_CAPACITY_J_KG_K, canopy_capacity);
+        // `clai = 0.2*(lai+sai)*cpliq + ldew_rain*cpliq + ldew_snow*cpice`（`main/…:500`）：
+        // GIMPLE 是 `.FMA (lsai*0.2, cpliq, ldew_rain*cpliq)` 再 `.FMA (ldew_snow, cpice, …)`
+        // —— 熔进去的是冠层项，雨项先舍入（AT-Neu 2 月第 189 步差 1 ULP）。
+        let canopy_capacity = (lsai * 0.2).mul_add(
+            WATER_HEAT_CAPACITY_J_KG_K,
+            state.canopy_water.rain_mm * WATER_HEAT_CAPACITY_J_KG_K,
+        );
         state
             .canopy_water
             .snow_mm
@@ -1166,41 +1168,43 @@ pub fn leaf_temperature(
         * input.air_density_kg_m3
         * last.ground_heat_conductance
         * (input.ground_temperature_k - last.canopy_air_temperature);
-    let soil_sensible_heat = AIR_HEAT_CAPACITY_J_KG_K
-        * input.air_density_kg_m3
-        * last.ground_heat_conductance
-        * ((1.0 - last.ground_heat_weight) * input.soil_surface_temperature_k
-            - last.air_heat_weight * input.reference_air_temperature_k
-            - last.leaf_heat_weight * leaf_temperature_before_phase_change_k);
-    let snow_sensible_heat = AIR_HEAT_CAPACITY_J_KG_K
-        * input.air_density_kg_m3
-        * last.ground_heat_conductance
-        * ((1.0 - last.ground_heat_weight) * input.snow_surface_temperature_k
-            - last.air_heat_weight * input.reference_air_temperature_k
-            - last.leaf_heat_weight * leaf_temperature_before_phase_change_k);
+    // split 的四条收尾式（`main/MOD_LeafTemperature.F90:1134-1141`）的 GIMPLE：
+    //   `fseng_face = (cpair*rhoair*cgh) * .FNMA (tl, wtl0, .FMS (1-wtg0, t_face, wta0*thm))`
+    //   `fevpg_face = (cgw*rhoair) * (.FMS (1-wtgq0, q_face, wtaq0*qm) - wtlq0*qsatl)`
+    // 后者最后那一乘复用 `qaf` 算过的乘积，不融合。非 split 时这几项不进任何输出。
+    let sensible_factor =
+        AIR_HEAT_CAPACITY_J_KG_K * input.air_density_kg_m3 * last.ground_heat_conductance;
+    let face_sensible = |face_temperature_k: f64| {
+        sensible_factor
+            * (-leaf_temperature_before_phase_change_k).mul_add(
+                last.leaf_heat_weight,
+                (1.0 - last.ground_heat_weight).mul_add(
+                    face_temperature_k,
+                    -(last.air_heat_weight * input.reference_air_temperature_k),
+                ),
+            )
+    };
+    let soil_sensible_heat = face_sensible(input.soil_surface_temperature_k);
+    let snow_sensible_heat = face_sensible(input.snow_surface_temperature_k);
     let ground_evaporation = input.air_density_kg_m3
         * last.ground_moisture_conductance
         * (input.ground_specific_humidity - last.canopy_air_humidity);
-    let soil_evaporation = input.air_density_kg_m3
-        * last.ground_moisture_conductance
-        * ((1.0 - last.ground_moisture_weight) * input.soil_specific_humidity
-            - last.air_moisture_weight * input.reference_specific_humidity
-            - last.leaf_moisture_weight
-                * saturation_specific_humidity(
-                    leaf_temperature_before_phase_change_k,
-                    input.surface_pressure_pa,
-                )?
-                .specific_humidity);
-    let snow_evaporation = input.air_density_kg_m3
-        * last.ground_moisture_conductance
-        * ((1.0 - last.ground_moisture_weight) * input.snow_specific_humidity
-            - last.air_moisture_weight * input.reference_specific_humidity
-            - last.leaf_moisture_weight
-                * saturation_specific_humidity(
-                    leaf_temperature_before_phase_change_k,
-                    input.surface_pressure_pa,
-                )?
-                .specific_humidity);
+    let leaf_moisture_term = last.leaf_moisture_weight
+        * saturation_specific_humidity(
+            leaf_temperature_before_phase_change_k,
+            input.surface_pressure_pa,
+        )?
+        .specific_humidity;
+    let evaporation_factor = last.ground_moisture_conductance * input.air_density_kg_m3;
+    let face_evaporation = |face_humidity: f64| {
+        evaporation_factor
+            * ((1.0 - last.ground_moisture_weight).mul_add(
+                face_humidity,
+                -(last.air_moisture_weight * input.reference_specific_humidity),
+            ) - leaf_moisture_term)
+    };
+    let soil_evaporation = face_evaporation(input.soil_specific_humidity);
+    let snow_evaporation = face_evaporation(input.snow_specific_humidity);
     // `MOD_LeafTemperature_Extended.F90:1406-1407` 的 GIMPLE（census dump 第 4386-4394 处）：
     //   _761 = fac*stefnc ; powmult_1033 = t*t ; powmult_1034 = powmult_1033*t
     //   _763 = _761 * powmult_1034            ← `stefnc*fac*tlbef**3` 左结合
@@ -1618,15 +1622,16 @@ fn upward_longwave(
     // ⇒ `FMA(thermk*emg, tg**4, p1)`。12 步同时约束的离线穷举里，全部 48 个可行组合
     // 都带这一条（`/tmp/gf/ulrad12`），所以它和第 262 轮那条"左乘积"一样是实锤。
     let canopy_emission = if input.options.split_soil_snow {
-        leaf_canopy_term
-            + (1.0 - input.snow_cover_fraction)
-                * input.canopy_longwave_gap_fraction
-                * input.ground_emissivity
-                * input.soil_surface_temperature_k.powi(4)
-            + input.snow_cover_fraction
-                * input.canopy_longwave_gap_fraction
-                * input.ground_emissivity
-                * input.snow_surface_temperature_k.powi(4)
+        // split（`main/MOD_LeafTemperature.F90:1158-1160`）的 GIMPLE：叶发射项作起点，
+        // 先 `.FMA (((1-fsno)*thermk)*emg, t_soil**4, …)`、再 `.FMA ((fsno*thermk)*emg, t_snow**4, …)`。
+        (input.snow_cover_fraction * input.canopy_longwave_gap_fraction * input.ground_emissivity)
+            .mul_add(
+                input.snow_surface_temperature_k.powi(4),
+                ((1.0 - input.snow_cover_fraction)
+                    * input.canopy_longwave_gap_fraction
+                    * input.ground_emissivity)
+                    .mul_add(input.soil_surface_temperature_k.powi(4), leaf_canopy_term),
+            )
     } else {
         (input.canopy_longwave_gap_fraction * input.ground_emissivity)
             .mul_add(input.ground_temperature_k.powi(4), leaf_canopy_term)

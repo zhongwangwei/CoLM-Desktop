@@ -383,42 +383,27 @@ fn finish_energy_step(
     })?;
     let surface_temperature_k = current_ground_temperature(input.ground_temperature, &ground)?;
     let ground_temperature_change = surface_temperature_k - ground_temperature_k;
-    // `MOD_Thermal.F90:1227-1232` 的六条 `tinc` 修正：
-    // `fseng(:) = fseng(:) + tinc*cgrnds`、`fevpg(:) = fevpg(:) + tinc*cgrndl`
-    // —— GIMPLE 是 `FMA(tinc, cgrnds, 原值)`，`tinc*系数` 被吸收。
-    // **这正是"温度逐位相同、通量差 1 ULP"该出现的地方**：`tinc` 是地表温度的
-    // 增量（很小），它的乘积融不融合只动通量的末位，动不了 `t_grnd`/`t_soisno`。
-    let corrected_soil_sensible_heat_w_m2 = leaf
-        .ground_sensible_temperature_slope_w_m2_k
-        .mul_add(ground_temperature_change, leaf.soil_sensible_heat_w_m2);
-    let corrected_snow_sensible_heat_w_m2 = leaf
-        .ground_sensible_temperature_slope_w_m2_k
-        .mul_add(ground_temperature_change, leaf.snow_sensible_heat_w_m2);
-    let corrected_soil_evaporation_kg_m2_s = leaf
-        .ground_latent_temperature_slope_kg_m2_s_k
-        .mul_add(ground_temperature_change, leaf.soil_evaporation_kg_m2_s);
-    let corrected_snow_evaporation_kg_m2_s = leaf
-        .ground_latent_temperature_slope_kg_m2_s_k
-        .mul_add(ground_temperature_change, leaf.snow_evaporation_kg_m2_s);
-    let mut corrected_ground_sensible_heat_w_m2 = leaf.ground_sensible_heat_w_m2
-        + leaf.ground_sensible_temperature_slope_w_m2_k * ground_temperature_change;
-    // `fevpg = fevpg + tinc*cgrndl`（`MOD_Thermal…:1239`）**这一条不融合**。
-    // 用探针把两侧的位型都取出来离线复算过（`/tmp/gf/th6_probe.sh` 的 PRE/POST）：
-    //   `fevpg_pre + fl(tinc*cgrndl)` = `3F145BB9BCB4DD9C` = **内核**的值；
-    //   `fma(tinc, cgrndl, fevpg_pre)` = `3F145BB9BCB4DD9B` = 原 Rust 的值。
-    // 钳位在这套输入下不生效（`egsmax`=4.88e-3 ≫ `fevpg`=7.77e-5），所以差别就在这一条。
-    //
-    // **相邻的 `fseng = fseng + tinc*cgrnds` 不能照抄这个结论**：那一条 fma 与平铺
-    // 在本算例里给出同一位型（`4086FEDBB7C44298`），判不了；而 3 步口径里 `f_fseng`
-    // 一直逐位相同 ⇒ 保留 `mul_add`。两条相邻语句形状不同是编译器自己的选择。
-    let mut corrected_ground_evaporation_kg_m2_s = leaf.ground_evaporation_kg_m2_s
-        + leaf.ground_latent_temperature_slope_kg_m2_s_k * ground_temperature_change;
+    // `MOD_Thermal.F90:1347-1352` 的六条 `tinc` 修正：`main/` 的 GIMPLE 把
+    // `tinc*cgrnds`、`tinc*cgrndl` 各算**一次**，总量与两个面都**平铺**加上这个乘积
+    // （不融合）。旧内核在其中几条上是 `fmadd`，那是扩展版的形状。
+    let sensible_change = leaf.ground_sensible_temperature_slope_w_m2_k * ground_temperature_change;
+    let evaporation_change =
+        leaf.ground_latent_temperature_slope_kg_m2_s_k * ground_temperature_change;
+    let corrected_soil_sensible_heat_w_m2 = leaf.soil_sensible_heat_w_m2 + sensible_change;
+    let corrected_snow_sensible_heat_w_m2 = leaf.snow_sensible_heat_w_m2 + sensible_change;
+    let corrected_soil_evaporation_kg_m2_s = leaf.soil_evaporation_kg_m2_s + evaporation_change;
+    let corrected_snow_evaporation_kg_m2_s = leaf.snow_evaporation_kg_m2_s + evaporation_change;
+    let mut corrected_ground_sensible_heat_w_m2 = leaf.ground_sensible_heat_w_m2 + sensible_change;
+    let mut corrected_ground_evaporation_kg_m2_s =
+        leaf.ground_evaporation_kg_m2_s + evaporation_change;
     let (thermal_water, split_thermal_water) = if input.ground_temperature.use_split_soil_snow {
         let snow_layers = input.ground_temperature.snow_layers;
         let snow_layer_exists = snow_layers > 0;
         let split = crate::partition_split_thermal_water(SplitThermalWaterInput {
             snow_layer_exists,
             snow_cover_fraction: input.ground_temperature.snow_cover_fraction,
+            corrected_soil_sensible_heat_w_m2,
+            corrected_snow_sensible_heat_w_m2,
             corrected_soil_evaporation_kg_m2_s,
             corrected_snow_evaporation_kg_m2_s,
             soil_liquid_water_kg_m2: ground.liquid_water_kg_m2[snow_layers],
@@ -438,12 +423,7 @@ fn finish_energy_step(
             time_step_seconds: input.ground_temperature.time_step_seconds,
             ground_latent_heat_j_kg: leaf_input.ground_latent_heat_j_kg,
         })?;
-        corrected_ground_sensible_heat_w_m2 = if snow_layer_exists {
-            corrected_soil_sensible_heat_w_m2 * (1.0 - input.ground_temperature.snow_cover_fraction)
-                + corrected_snow_sensible_heat_w_m2 * input.ground_temperature.snow_cover_fraction
-        } else {
-            corrected_soil_sensible_heat_w_m2
-        } + split.sensible_heat_correction_w_m2;
+        corrected_ground_sensible_heat_w_m2 = split.ground_sensible_heat_w_m2;
         corrected_ground_evaporation_kg_m2_s = split.ground_evaporation_kg_m2_s;
         (None, Some(split))
     } else {
@@ -837,6 +817,18 @@ pub fn standard_lct_snow_soil_step(
     state.soil_water.ice_water_kg_m2[0] = soil_surface.ice_water_kg_m2;
     if state.snow.layer_count < 0 {
         divide_snow_layers(&mut state.snow)?;
+    }
+    // `CoLMMAIN.F90:1442-1449`：`snl > maxsnl` 时把空出来的雪槽 `maxsnl+1:snl` 的
+    // `wice/wliq/t/z/dz` 清零。不清的话合并后的空槽留着旧值 —— 物理上不再被读，但写进
+    // history/重启的 `f_t_soisno`/`f_wice_soisno` 与 Fortran 不同（AT-Neu split 1 月第 396 步
+    // 两层并一层，空槽里还是 267.87 K / 1.08 kg/m²）。
+    for index in -(crate::snow::MAX_SNOW_LAYERS as i32) + 1..=state.snow.layer_count {
+        let slot = crate::snow::snow_layer_slot(index);
+        state.snow.ice_water_kg_m2[slot] = 0.0;
+        state.snow.liquid_water_kg_m2[slot] = 0.0;
+        state.snow.temperature_k[slot] = 0.0;
+        state.snow.node_depth_m[slot] = 0.0;
+        state.snow.thickness_m[slot] = 0.0;
     }
     Ok(StandardLctSnowSoilOutput { energy, water })
 }
