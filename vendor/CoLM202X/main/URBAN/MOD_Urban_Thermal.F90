@@ -838,10 +838,12 @@ CONTAINS
       IF ( doveg ) THEN
 
          ! soil water stress factor on stomatal resistance
+         ! Pass the soil sections (1:): the dummies are (1:nl_soil), and the whole
+         ! (lb:nl_soil) arrays would be sequence-associated shifted by |snl| layers.
          CALL eroot (nl_soil,trsmx0,porsl,&
             bsw,&
             theta_r, alpha_vgm, n_vgm, L_vgm, sc_vgm, fc_vgm, &
-            psi0,rootfr,dz_gpersno,t_gpersno,wliq_gpersno,rootr,etrc,rstfac)
+            psi0,rootfr,dz_gpersno(1:),t_gpersno(1:),wliq_gpersno(1:),rootr,etrc,rstfac)
 
          nurb = 3
 

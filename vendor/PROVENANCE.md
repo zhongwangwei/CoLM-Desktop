@@ -174,3 +174,19 @@ levee 保护库容在 history 里必须单列（`below-bank river channel storag
 `crates/colm-core/src/variably_saturated_flow.rs` 的下界断言放行了机器量级负值
 （`-8.05e-18`，相对 27.58 mm 层厚是 3e-19）—— 上游没有这类断言，夹到 0 会让下游
 看到与上游不同的数。
+
+## 2026 年 9 月：`eroot`/`SoilSurfaceResistance` 改传 `(1:)` 段（本地修复，黄金**待**重生成）
+
+`main/MOD_Thermal.F90`（3 处）、`extends/interception/MOD_Thermal_CanopyPhase_Extended.F90`（3 处）、
+`main/URBAN/MOD_Urban_Thermal.F90`（1 处）把 `(lb:nl_soil)` 的 `dz/t/wliq/wice_*sno` 整列交给
+哑元为 `(1:nl_soil)` 的 `eroot` 与 `SoilSurfaceResistance`，有雪时整列下移 `|snl|` 层。
+全部改为传 `(1:)` 段 —— `MOD_BGC_Veg_CNFireLi2016.F90:109` 早就是这种写法。
+最新上游 `CoLM-SYSU-integration@3c799bae` **仍有**这 4 处（`extends/` 那 3 处上游已不编译），
+**同步时要保住本地版本**，最好也提给上游。
+
+证据与数值影响见 `docs/implementation-verification.md` 第 399 轮。三份黄金是带错位的内核生成的，
+PLUMBER2 盘挂载后需重生成。
+
+同一轮对照最新上游的复核结论（详表同见第 399 轮）：`o3coef*` 两处（含本仓库未修的
+`MOD_LeafTemperaturePC`）上游**已修**，同步时取上游；`create_defineh.bash` 的 `LATERAL_FLOW`
+与 `SiteSYSUAtmos_IGBP_VG.nml` 的未声明键上游**仍在**，本地修复要保住。

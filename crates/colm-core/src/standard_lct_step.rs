@@ -965,27 +965,21 @@ fn non_split_ground_humidity_input(
 
 fn root_uptake_input(input: StandardLctEnergyInput<'_>) -> Result<RootUptakeState> {
     let ground = input.ground_temperature;
-    // **调用点按 Fortran 的序列关联原样复刻，不做“对齐修正”。**
+    // 取**土层**段 `[snow_layers..snow_layers+nl_soil]`，与 `porsl`/`psi0`/`rootfr` 对齐。
     //
-    // `MOD_Thermal_CanopyPhase_Extended.F90:672` 把整列 `t_soisno`/`wliq_soisno`/
-    // `dz_soisno` 交给 `eroot`，而这两个名字在 THERMAL 里声明成 `(lb:nl_soil)`（含雪层），
-    // 在 `MOD_Eroot.F90:59-61` 的哑元却声明成 `(1:nl_soil)`。整数组做实参时按元素顺序
-    // 关联，于是 `eroot` 的 `i` 号元素拿到的是调用方 `lb+i-1` 号元素 —— 有雪时整列
-    // **下移 `|snl|` 位**：`eroot` 的 i=1 是雪层，i=snl+1 才是土壤第 1 层，而同一支里
-    // 的 `porsl`/`psi0`/`rootfr`/`theta_r` 是 `(1:nl_soil)`、不跟着移。最下面 `|snl|`
-    // 层土壤因此**根本不参与** `eroot`。
-    //
-    // 这是上游的缺陷（正解是给 `eroot` 传 `(1-snl:)` 的段或让哑元也带 `lb`），但黄金
-    // 就是用这份代码生成的：CN-Cng 首个雪步黄金 `f_rootr` 的第 1、2 项都是 0（雪层 +
-    // 冻结的土壤第 1 层），第 3 项 0.207315 正是“土壤第 2 层的温度/含水量 × 第 3 层
-    // 的 `porsl`/`rootfr`”算出来的值；按对齐语义算只有 0.097654。因此这里**照抄**，
-    // 用整列（下标 0 起 = 雪顶）的前 `nl_soil` 个元素，配土壤索引的 `porsl`/`rootfr`。
-    // 无雪时 `|snl|=0`，本式与对齐写法逐位相同。
+    // 上游 `MOD_Thermal.F90`（以及扩展版、城市版）曾把整列 `(lb:nl_soil)` 的
+    // `t_soisno`/`wliq_soisno`/`dz_soisno` 交给哑元为 `(1:nl_soil)` 的 `eroot`，序列关联
+    // 使有雪时整列下移 `|snl|` 层（雪层被当成土壤第 1 层，最下 `|snl|` 层土壤不参与）。
+    // 旧版本这里照抄了那次错位，黄金 CN-Cng 首个雪步 `f_rootr` 第 3 项 0.207315 就是
+    // 它的产物（对齐语义 0.097654）。`vendor/` 已改为传 `(1:)` 段（与
+    // `MOD_BGC_Veg_CNFireLi2016.F90:109` 的既有写法一致），这里随之对齐；
+    // 无雪时两种写法逐位相同。
     let layers = ground.soil_porosity.len();
+    let soil = ground.snow_layers..ground.snow_layers + layers;
     root_uptake(RootUptakeInput {
-        layer_thickness_m: &ground.layer_thickness_m[..layers],
-        temperature_k: &ground.temperature_k[..layers],
-        liquid_water_kg_m2: &ground.liquid_water_kg_m2[..layers],
+        layer_thickness_m: &ground.layer_thickness_m[soil.clone()],
+        temperature_k: &ground.temperature_k[soil.clone()],
+        liquid_water_kg_m2: &ground.liquid_water_kg_m2[soil],
         ..input.root_uptake
     })
 }
@@ -1024,24 +1018,18 @@ fn soil_surface_resistance_input(
         return soil_surface_resistance(input.soil_surface_resistance);
     };
     let ground = input.ground_temperature;
-    // 与 `root_uptake_input` 同一条序列关联缺陷（`MOD_Thermal_CanopyPhase_Extended.F90:626-629`
-    // 把整列 `dz_soisno`/`t_soisno`/`wliq_soisno`/`wice_soisno` 交给哑元声明为
-    // `(1:nl_soil)` 的 `MOD_SoilSurfaceResistance.F90:83-86`）：`SoilSurfaceResistance`
-    // 内部**只用下标 1**，有雪时那 1 项拿到的是**雪顶那一层**的温度/液态水/冰/层厚，
-    // 而同一支里的 `porsl(1)`/`psi0(1)`/`theta_r(1)`/`hksati(1)` 仍是土层 1（`(1:nl_soil)`，
-    // 不移）。所以这里取整列下标 0，不是 `[snow_layers]`。
-    // 三个黄金都走 `DEF_RSS_SCHEME = 0`（`MOD_Namelist.F90:1947-1951`：LCT + 非 Campbell
-    // 自动置 0），这条支路在**本机一次都没被走到** —— 改动依据是语言规则 + `eroot` 那处
-    // 已被黄金证实的同型错位，没有端到端实测（见 docs 对应小节）。
+    // 与 `root_uptake_input` 同一处上游错位（已在 `vendor/` 修正）：`SoilSurfaceResistance`
+    // 只用下标 1，本意是土壤第 1 层；取 `[snow_layers]`，不是整列下标 0（雪顶）。
+    let top_soil = ground.snow_layers;
     soil_surface_resistance(SoilSurfaceResistanceInput {
         porosity: ground.soil_porosity[0],
         saturated_soil_suction_mm: ground.soil_suction_mm[0],
         residual_water: ground.soil_residual_water[0],
         hydraulic_model: ground.soil_hydraulic_model[0],
-        layer_thickness_m: ground.layer_thickness_m[0],
-        temperature_k: ground.temperature_k[0],
-        liquid_water_kg_m2: ground.liquid_water_kg_m2[0],
-        ice_water_kg_m2: ground.ice_water_kg_m2[0],
+        layer_thickness_m: ground.layer_thickness_m[top_soil],
+        temperature_k: ground.temperature_k[top_soil],
+        liquid_water_kg_m2: ground.liquid_water_kg_m2[top_soil],
+        ice_water_kg_m2: ground.ice_water_kg_m2[top_soil],
         snow_cover_fraction: ground.snow_cover_fraction,
         ground_specific_humidity: humidity.ground_specific_humidity,
         ..input.soil_surface_resistance

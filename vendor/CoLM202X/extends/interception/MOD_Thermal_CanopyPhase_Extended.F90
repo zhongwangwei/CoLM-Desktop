@@ -623,10 +623,12 @@ ENDIF
 
          !NOTE: If the beta scheme is used, the rss is not soil resistance,
          !but soil beta factor (soil wetness relative to field capacity [0-1]).
+         ! Pass the soil sections (1:): the dummies are (1:nl_soil), and the whole
+         ! (lb:nl_soil) arrays would be sequence-associated shifted by |snl| layers.
          CALL SoilSurfaceResistance (nl_soil,forc_rhoair,hksati,porsl,psi0, &
                             bsw, &
                             theta_r, alpha_vgm, n_vgm, L_vgm, sc_vgm, fc_vgm, &
-                            dz_soisno,t_soisno,wliq_soisno,wice_soisno,fsno,qg,rss)
+                            dz_soisno(1:),t_soisno(1:),wliq_soisno(1:),wice_soisno(1:),fsno,qg,rss)
       ELSE
          IF (DEF_RSS_SCHEME == 4) THEN
             rss = 1.        !LP92
@@ -666,10 +668,12 @@ IF ( patchtype==0.and.DEF_USE_LCT .or. patchtype>0 ) THEN
       IF (lai+sai > 1e-6) THEN
 
          ! soil water stress factor on stomatal resistance
+         ! Pass the soil sections (1:): the dummies are (1:nl_soil), and the whole
+         ! (lb:nl_soil) arrays would be sequence-associated shifted by |snl| layers.
          CALL eroot (nl_soil,trsmx0,porsl,&
             bsw,&
             theta_r, alpha_vgm, n_vgm, L_vgm, sc_vgm, fc_vgm, &
-            psi0,rootfr,dz_soisno,t_soisno,wliq_soisno,rootr,etrc,rstfac)
+            psi0,rootfr,dz_soisno(1:),t_soisno(1:),wliq_soisno(1:),rootr,etrc,rstfac)
 
          ! fraction of sunlit and shaded leaves of canopy
          fsun = ( 1. - exp(-min(extkb*lai,40.))) / max( min(extkb*lai,40.), 1.e-6 )
@@ -804,11 +808,13 @@ IF (patchtype==0 .and. (DEF_USE_PFT .or. DEF_USE_PC)) THEN
 
          IF (lai_p(i)+sai_p(i) > 1e-6) THEN
 
+            ! Pass the soil sections (1:): the dummies are (1:nl_soil), and the whole
+            ! (lb:nl_soil) arrays would be sequence-associated shifted by |snl| layers.
             CALL eroot (nl_soil,trsmx0,porsl,&
                bsw, &
                theta_r, alpha_vgm, n_vgm, L_vgm, sc_vgm, fc_vgm, &
                psi0,rootfr_p(:,p),&
-               dz_soisno,t_soisno,wliq_soisno,rootr_p(:,i),etrc_p(i),rstfac_p(i))
+               dz_soisno(1:),t_soisno(1:),wliq_soisno(1:),rootr_p(:,i),etrc_p(i),rstfac_p(i))
 
             ! fraction of sunlit and shaded leaves of canopy
             fsun_p(i) = ( 1. - exp(-min(extkb_p(i)*lai_p(i),40.))) &

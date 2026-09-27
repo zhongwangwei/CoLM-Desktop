@@ -24296,3 +24296,107 @@ cargo test -p colm-srfdata --lib --bins -- --test-threads=1   270 passed; 1 igno
 
 本地（unix）这些改动**逐字节等价**，所以本机绿不能证明 Windows 绿；改法是逐处对照
 生产在该参数上的构造方式做的。真正的判据仍是下一次 `rust (windows-latest)`。
+
+## 第 399 轮：`colm` 第三段默认走 Rust（`--engine`），以及同步前核对出的一处上游真缺陷
+
+本轮三件事：给 `colm-cli run/all/study-run` 加 `--engine rust|fortran`（默认 rust）；
+对照最新上游 `CoLM-SYSU-integration@3c799bae` 逐条复核本文档与 `vendor/PROVENANCE.md`
+记载过的上游缺陷；修掉其中仍在的 `eroot`/`SoilSurfaceResistance` 序列关联错位。
+
+### 一、双引擎：前处理与主循环分开选
+
+`--preprocessors` 选 mksrfdata/mkinidata 的实现（本来就默认 rust），新加的 `--engine`
+选第三段。两者**不合并**成一个开关：Rust 前处理已覆盖 LCT/PFT/PC 与空间算例，
+`colm-rs` 仍只覆盖 SinglePoint + LCT 土面 patch，合成一个开关只能"全 Rust 或全 Fortran"。
+
+* `colm-rs` 新增 `--case-outputs`：重启与 history 的落点按 `colm.x` 在算例目录里的约定推出
+  （`restart/<cdate>/<case>_restart_<cdate>_lc<year>_w180_s90.nc`、`history/<case>_hist_*.nc`），
+  下游 `metrics`/`series`/指纹不必知道是哪个引擎跑的。成功时打印与 `colm.x` 逐字相同的
+  `CoLM Execution Completed.`，`colm-kernel` 的成败判定原样适用。
+* `colm-rs --preflight`：只做能力检查（空间算例、PFT/PC 内核、未移植分支）。`colm-cli` 在
+  **第一段之前**调它，Rust 接不住的算例立即拒绝并提示 `--engine fortran`，不必等预处理跑完。
+* 指纹：`colm-rs` 的 sha256 只并进 **colm 段**的身份。切换引擎或重编 `colm-rs` 只重跑第三段；
+  Fortran 引擎的身份与改动前逐字节相同（单测钉住），既有算例升级后不重跑。
+* 两个实测暴露的缺口，已修：
+  1. `colm-runtime` 的 `required_*` 缺字段就报错，而 `colm-cli new` 会**省略等于默认值的字段**
+     （实测只写了 `start_year`）→ 改为回落到 `MOD_Namelist.F90` 的声明默认值，与 Fortran 一致。
+  2. 终点 `sec = 86400` 时 `colm.x` 写 `2008-032-00000`，`colm-rs` 写 `2008-031-86400`，
+     切换引擎后续跑找不到文件 → 按 `TICKTIME` 进位。
+  3. `load_point_forcing` 复用前处理的 `check()`，文件**缺** `reference_height_*` 即拒绝；
+     `colm.x` 此时用 forcing namelist 的 `HEIGHT_*`（`MOD_Forcing.F90` 只判 `ncio_var_exist`）。
+     仓库自带 AT-Neu 示例就没有这三个变量 → 拆出 `check_series()` 给运行期用，
+     文件里给了但非法的高度仍由 `observation_heights` 拒绝。
+
+实测（`examples/` 的 CN-Cng，2008-01 一个月，冷启动无预热，内核 `default`）：
+
+```text
+colm-cli run tmp/e2e --kernel …/default                 # 三段全 Rust，4.8 s
+colm-cli run tmp/e2f --kernel …/default --engine fortran
+golden-compare <fortran hist> <rust hist> --tolerances oracle/tolerances.toml
+within tolerance: 127 variables, 10 dimensions (tier0=23 tier1=8 tier2=97 tier3=0)
+```
+
+### 二、上游缺陷复核（对 `CoLM-SYSU-integration@3c799bae`）
+
+| 缺陷 | 最新上游 | 处理 |
+|---|---|---|
+| `MOD_LeafTemperature` 的 `o3coef*` 迭代后才初始化 | 已修（初始化 :474 < 循环 :625） | 同步时取上游 |
+| `MOD_LeafTemperaturePC` 同一缺陷（本仓库未修：:1780 才置 1，:1183 已用） | 已修（:577/578） | 同步时取上游 |
+| 扩展版 `rstfacsun/sha` 为 `intent(out)` | 上游已不编 `extends/interception` | 无 |
+| `create_defineh.bash` 的 TRACER 硬错误 | 已去掉 | 无 |
+| `create_defineh.bash` 发出源码不读的 `LATERAL_FLOW`（源码读 `CatchLateralFlow`，20+ 处） | **仍在**（:185/188） | 真缺陷；本地修复同步时必须保住 |
+| `SiteSYSUAtmos_IGBP_VG.nml` 用未声明的 `USE_SITE_topostd/BVIC` | **仍在** | 真缺陷（namelist `iostat` → `CoLM_Stop`）；本地修复保住 |
+| `eroot`/`SoilSurfaceResistance` 接整列 `(lb:nl_soil)` | **仍在** | 真缺陷，本轮修（见下） |
+
+### 三、`eroot`/`SoilSurfaceResistance` 的序列关联错位（真缺陷，已修两侧）
+
+**判据**：两个子程序的哑元声明为 `(1:nl_soil)`，`MOD_Thermal.F90` 却把 `(lb:nl_soil)` 的
+`dz/t/wliq/wice_soisno` 整列传进去。有雪时 `dummy(i) = actual(lb+i-1)`：雪层被当作土壤第 1 层，
+配的却是土层的 `porsl/psi0/rootfr`，最下 `|snl|` 层土壤不参与。作者本意有旁证 ——
+同一个 `eroot` 在 `MOD_BGC_Veg_CNFireLi2016.F90:109` 是以 `t_soisno(1:,i)` 切片调用的。
+
+**全量扫描**（把所有裸传 `*soisno/*sno` 数组的 CALL 与被调哑元边界逐一核对）：`GroundTemperature`、
+城市三个温度子程序、冰川、`albland`、tracer 的哑元都是 `(lb:…)`/`(maxsnl+1:…)`，对齐无误；
+只有 `eroot` 与 `SoilSurfaceResistance` 是 `(1:nl_soil)`。上游 4 处调用点
+（`MOD_Thermal.F90` ×3、`MOD_Urban_Thermal.F90` ×1），`vendor/` 另有 `extends/interception`
+的 3 处镜像（`kernels/*` 打开 `extend_interception`，编的正是它们）。
+
+**改法**：Fortran 7 处改传 `(1:)` 段；Rust `standard_lct_step.rs` 的 `root_uptake_input` 取
+`[snow_layers..snow_layers+nl_soil]`、`soil_surface_resistance_input` 取 `[snow_layers]`
+（此前两处都是**照抄错位**，注释里记着黄金 CN-Cng 首个雪步 `f_rootr` 第 3 项 0.207315 即其产物）。
+
+**实测**（`examples/` 的 AT-Neu，2010-01..02，1 月 744 步里 521 步有雪；新内核 `kernels/default`
+由修过的 `vendor/` 编出，旧内核是主 checkout 的 `ad75e8e`；"旧 Rust"是用 HEAD 的
+`standard_lct_step.rs` 临时编的 `colm-rs`）：
+
+```text
+默认配置（PHS 开）            修复带来的变化（新-旧）        两引擎变化之差 |ΔF-ΔR|
+  f_rootr  1 月               max 4.829e-01（1192 个值）     5.75e-17（相对）
+  f_rootr  2 月               max 4.893e-01                   0
+  f_etr / f_lfevpa / f_rss    0（PHS 开时 rootr 只是诊断量；此配置 DEF_RSS_SCHEME=0）
+PHS 关（rootr 决定分层吸水）
+  f_lfevpa 2 月               max 10.2 W/m2
+  f_zwt    2 月               max 0.21 m
+```
+
+两引擎之间的超差**修复前后相同**，属既有残差而非本轮引入：
+
+```text
+PHS 开，golden-compare --tolerances：修复前 1 月 tier2=29；2 月 tier0=2 tier2=56
+                                     修复后 1 月 tier2=29；2 月 tier0=2 tier2=56
+PHS 关，F-vs-R 最大差（修复前 | 修复后）：
+  f_zwt 2 月 4.210e-01 | 4.210e-01    f_rootr 2 月 4.129e-01 | 4.129e-01
+  f_lfevpa 2 月 7.015e+00 | 7.007e+00 f_wliq_soisno 2 月 1.811e-01 | 3.346e-01
+```
+
+PHS 关那一支的发散就是第 381 轮记下、尚未对齐的种子（`soilwater` 的根吸水/ET 分配），
+被雪季放大；`wliq_soisno` 那一格变大是同一种子换了条轨迹，不是新误差源。
+
+### 四、没做的（Not-tested）
+
+* **黄金没有重生成。** 三份黄金是带这个错位的内核生成的（CN-Cng 雪步 `f_rootr` 有实测痕迹），
+  本机 PLUMBER2 所在的 `/Volumes/Data01` 本轮未挂载，`golden-run --write-golden` 跑不了。
+  挂上后须对三个算例重生成黄金与 `kernel-manifest.json`，再跑 `compare_all.sh`。
+* 城市（`MOD_Urban_Thermal.F90`）那一处没有 Rust 对应物（城市不在 `colm-rs` 覆盖面内），
+  Fortran 侧只验证了编译。
+* `DEF_RSS_SCHEME > 0` 的 `SoilSurfaceResistance` 支路本轮算例未走到（自动置 0），改动依据是语言规则。
