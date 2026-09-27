@@ -23,6 +23,7 @@ pub struct RunOptions<'a> {
     pub stream: bool,
     pub retry_failed: bool,
     pub preprocessors: crate::PreprocessorMode,
+    pub engine: crate::ModelEngine,
 }
 
 struct StudyRunLock {
@@ -403,7 +404,7 @@ pub fn run(study_dir: &Path, options: RunOptions<'_>) -> Result<StudyState> {
         bail!("Study Rust preprocessing does not yet support HYPERSPECTRAL input fingerprints; use --preprocessors fortran");
     }
     super::engine::ensure_supported_study_manifest(&manifest, Some(&kernel.manifest.macros))?;
-    let rust_identities = if options.preprocessors == crate::PreprocessorMode::Rust {
+    let mut rust_identities = if options.preprocessors == crate::PreprocessorMode::Rust {
         crate::RustPreprocessorIdentities {
             surface: Some(crate::rust_preprocessor_stage_identity(
                 crate::Stage::MkSrfData,
@@ -413,10 +414,16 @@ pub fn run(study_dir: &Path, options: RunOptions<'_>) -> Result<StudyState> {
                 crate::Stage::MkIniData,
                 &[],
             )?),
+            model: None,
         }
     } else {
         crate::RustPreprocessorIdentities::default()
     };
+    // 与 `run_case` 同一条身份规则：否则复用判断会把 Fortran 跑出来的成员当成
+    // Rust 引擎的结果（或反之）而跳过。
+    if options.engine == crate::ModelEngine::Rust {
+        rust_identities.model = Some(crate::rust_model_identity()?);
+    }
     if manifest.spec.kernel_dir.is_none() || manifest.provenance.kernel_id.is_empty() {
         bail!("Study has no frozen kernel identity; create a new Study");
     }
@@ -485,6 +492,7 @@ pub fn run(study_dir: &Path, options: RunOptions<'_>) -> Result<StudyState> {
                 &kernel_dir,
                 &kernel_id,
                 options.preprocessors,
+                options.engine,
                 &rust_identities,
                 jobs,
                 options.stream,
@@ -527,6 +535,7 @@ pub fn run(study_dir: &Path, options: RunOptions<'_>) -> Result<StudyState> {
         &kernel_dir,
         &kernel_id,
         options.preprocessors,
+        options.engine,
         &rust_identities,
         jobs,
         options.stream,
@@ -548,6 +557,7 @@ pub fn run(study_dir: &Path, options: RunOptions<'_>) -> Result<StudyState> {
             &kernel_dir,
             &kernel_id,
             options.preprocessors,
+            options.engine,
             &rust_identities,
             jobs,
             options.stream,
@@ -915,6 +925,7 @@ fn run_members(
     kernel_dir: &Path,
     kernel_id: &str,
     preprocessors: crate::PreprocessorMode,
+    engine: crate::ModelEngine,
     rust_identities: &crate::RustPreprocessorIdentities,
     jobs: usize,
     stream: bool,
@@ -1058,6 +1069,7 @@ fn run_members(
                     None,
                     1,
                     preprocessors,
+                    engine,
                     None,
                     None,
                     true,
@@ -1827,6 +1839,7 @@ fn run_de_generations(
     kernel_dir: &Path,
     kernel_id: &str,
     preprocessors: crate::PreprocessorMode,
+    engine: crate::ModelEngine,
     rust_identities: &crate::RustPreprocessorIdentities,
     jobs: usize,
     stream: bool,
@@ -1913,6 +1926,7 @@ fn run_de_generations(
             kernel_dir,
             kernel_id,
             preprocessors,
+            engine,
             rust_identities,
             jobs,
             stream,
@@ -4606,6 +4620,7 @@ mod tests {
                 stream: false,
                 retry_failed: false,
                 preprocessors: crate::PreprocessorMode::Fortran,
+                engine: crate::ModelEngine::Fortran,
             },
         )
         .unwrap_err()
@@ -4664,6 +4679,7 @@ mod tests {
                 stream: false,
                 retry_failed: false,
                 preprocessors: crate::PreprocessorMode::Fortran,
+                engine: crate::ModelEngine::Fortran,
             },
         )
         .unwrap_err()
@@ -5164,6 +5180,7 @@ esac
                 stream: false,
                 retry_failed: false,
                 preprocessors: crate::PreprocessorMode::Fortran,
+                engine: crate::ModelEngine::Fortran,
             },
         )
         .unwrap();

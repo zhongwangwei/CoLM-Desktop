@@ -14,8 +14,8 @@
 //!                    [--spinup-years N] [--spinup-repeat N]
 //!                    [--mode igbp|usgs|pft|pc|urban|urban-igbp|urban-usgs|urban-pft|urban-pc]
 //! colm-cli run       <算例目录> --kernel <目录> [--stream 1] [--ranks N]
-//!                    [--preprocessors rust|fortran] [--highres-params <dir>]
-//!                    [--soil-hyper-albedo-dir <dir>]
+//!                    [--preprocessors rust|fortran] [--engine rust|fortran]
+//!                    [--highres-params <dir>] [--soil-hyper-albedo-dir <dir>]
 //!                    [--stage mksrfdata|mkinidata|colm]
 //! colm-cli metrics   <算例目录> --obs <Flux.nc> [--spinup N] [--from UNIX] [--to UNIX]
 //!                    [--json 1] [--corrected 1]
@@ -29,6 +29,7 @@
 //! colm-cli study-create <case-root> --spec study.json
 //! colm-cli study-status <study-dir>
 //! colm-cli study-run <study-dir> --kernel <目录> [--stream 1] [--preprocessors rust|fortran]
+//!                    [--engine rust|fortran]
 //! colm-cli study-export <study-dir> --out <目录>
 //! colm-cli study-pause|study-resume|study-cancel <study-dir>
 //! colm-cli study-finalize-cancel <study-dir> --pid <pid>
@@ -83,12 +84,15 @@ usage:
                    # 21 个 Urban-PLUMBER 站不给也能跑，表外的站点才要 --rawdata
   colm-cli run     <case-dir> --kernel <dir> [--stream 1] [--force 1] [--ranks N]
                    [--stage mksrfdata|mkinidata|colm] [--preprocessors rust|fortran]
+                   [--engine rust|fortran]
                    [--highres-params <dir>] [--soil-hyper-albedo-dir <dir>]
                    # --force 不读取或写入指纹，三段全部重跑
                    # --stage 只运行指定阶段；与 --force 合用时强制重跑该阶段
                    # --stream 把子进程每一行原样转发出来（GUI 用；终端下嫌吵）
                    # --ranks 使用 MPI 启动；进程角色由内核决定，默认 1
-                   # Rust 默认只替换 mksrfdata/mkinidata；colm 保持已校验的 Fortran 内核
+                   # --preprocessors 选 mksrfdata/mkinidata 的实现，--engine 选 colm 主循环；
+                   # 两者默认都是 rust。Rust 主循环覆盖 SinglePoint + LCT 土面 patch，
+                   # 跑不了的算例会在第一段之前被预检拒绝，并提示改用 --engine fortran
                    # HYPERSPECTRAL PFT/PC：--highres-params 包含 fsds/、
                    # leaf_optical_properties/ 和 water_params.txt；--soil-hyper-albedo-dir
                    # 包含 colm_soil_albedo_400nm.nc ... colm_soil_albedo_2500nm.nc
@@ -114,6 +118,7 @@ usage:
   colm-cli study-status <study-dir>
                    # 输出 Study manifest 与成员状态
   colm-cli study-run <study-dir> --kernel <dir> [--stream 1] [--preprocessors rust|fortran]
+                   [--engine rust|fortran]
                    # 串行运行尚未完成的成员算例
   colm-cli study-export <study-dir> --out <dir>
                    # 导出 manifest、samples、status、report.md/html
@@ -133,6 +138,7 @@ usage:
                    # 读取并校验单个成员结果
   colm-cli all     --site <site.nc> --out <dir> --kernel <dir> [--obs <Flux.nc>] [--name N]
                    [--start Y-M-D] [--end Y-M-D] [--spinup N]
+                   [--preprocessors rust|fortran] [--engine rust|fortran]
   colm-cli observation-table-probe <obs.csv|txt|tsv> [--json 1]
                            # 探测可选验证数据，自动识别站点/时间/评估变量
   colm-cli observation-table-convert <obs.csv|txt|tsv> <Observation-dir>
@@ -234,6 +240,7 @@ fn main() -> Result<()> {
                 requested_run_stage(opts.get("--stage").as_deref())?,
                 opts.count("--ranks", 1)? as usize,
                 requested_preprocessors(opts.get("--preprocessors").as_deref())?,
+                requested_engine(opts.get("--engine").as_deref())?,
                 opts.get("--highres-params").as_deref().map(Path::new),
                 opts.get("--soil-hyper-albedo-dir")
                     .as_deref()
@@ -342,6 +349,7 @@ fn main() -> Result<()> {
                     .unwrap_or(manifest.spec.budget.jobs),
                 opts.get("--retry-failed").is_some(),
                 requested_preprocessors(opts.get("--preprocessors").as_deref())?,
+                requested_engine(opts.get("--engine").as_deref())?,
             )?;
         }
         "study-export" => {
@@ -390,6 +398,7 @@ fn main() -> Result<()> {
                 None,
                 opts.count("--ranks", 1)? as usize,
                 requested_preprocessors(opts.get("--preprocessors").as_deref())?,
+                requested_engine(opts.get("--engine").as_deref())?,
                 opts.get("--highres-params").as_deref().map(Path::new),
                 opts.get("--soil-hyper-albedo-dir")
                     .as_deref()
@@ -1835,6 +1844,106 @@ impl PreprocessorMode {
     }
 }
 
+/// 第三段（`colm`）用哪个引擎。
+///
+/// 与 [`PreprocessorMode`] 分开：两者的覆盖面不同 —— Rust 前处理已经覆盖
+/// LCT/PFT/PC 与空间算例，而 Rust 主循环（`colm-rs`）目前只覆盖 SinglePoint + LCT
+/// 土面 patch。合成一个开关就只能二选一地"全 Rust"或"全 Fortran"，
+/// 而用户最常见的需要恰恰是"前处理 Rust、主循环按算例能力选"。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ModelEngine {
+    Rust,
+    Fortran,
+}
+
+impl ModelEngine {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Rust => "rust",
+            Self::Fortran => "fortran",
+        }
+    }
+}
+
+fn requested_engine(value: Option<&str>) -> Result<ModelEngine> {
+    match value.unwrap_or("rust") {
+        "rust" => Ok(ModelEngine::Rust),
+        "fortran" => Ok(ModelEngine::Fortran),
+        other => bail!("--engine must be rust or fortran, got {other:?}"),
+    }
+}
+
+/// `colm-rs` 的 `--land-cover`：它来自内核的编译期 LULC 宏，namelist 里读不出来
+/// （见 `colm-rs` 模块文档）。PFT/PC 内核没有对应的 Rust 主循环，直接拒绝。
+fn rust_model_land_cover(kernel: &Kernel) -> Result<&'static str> {
+    let has = |name: &str| kernel.manifest.macros.iter().any(|item| item == name);
+    if has("LULC_IGBP") {
+        Ok("igbp")
+    } else if has("LULC_USGS") {
+        Ok("usgs")
+    } else {
+        bail!(
+            "the Rust model engine only runs LCT (LULC_IGBP / LULC_USGS) cases, but kernel {} is built for another subgrid; \
+             rerun with --engine fortran",
+            kernel.manifest.identity()
+        )
+    }
+}
+
+fn sidecar_executable(name: &str) -> Result<PathBuf> {
+    let name = if cfg!(windows) {
+        format!("{name}.exe")
+    } else {
+        name.to_owned()
+    };
+    let cli = std::env::current_exe().context("cannot locate the running colm-cli executable")?;
+    Ok(cli
+        .parent()
+        .context("colm-cli has no parent directory")?
+        .join(name))
+}
+
+fn rust_model_executable() -> Result<PathBuf> {
+    let executable = sidecar_executable("colm-rs")?;
+    if !executable.is_file() {
+        bail!(
+            "Rust model engine is missing beside colm-cli: {}\nrebuild the desktop sidecars with `cargo run -p xtask -- stage-sidecar`, or use --engine fortran",
+            executable.display()
+        );
+    }
+    Ok(executable)
+}
+
+/// 在跑前两段**之前**确认 `colm-rs` 接得住这个算例。
+///
+/// 不做的话，一个 Rust 跑不了的算例（打开了 SNICAR、PFT 内核、湖泊站点……）要等
+/// mksrfdata/mkinidata 跑完才在第三段失败 —— 用 rawdata 时那是几分钟的白等。
+/// patchtype（湖/冰川/城市）要读重启才知道，预检挡不住，仍由 `colm-rs` 在第三段报。
+fn preflight_rust_model(case_nml: &Path, kernel: &Kernel, ranks: usize) -> Result<()> {
+    ensure!(
+        ranks == 1,
+        "the Rust model engine runs one process; --ranks {ranks} needs --engine fortran"
+    );
+    ensure!(
+        !colm_case::is_spatial_case(case_nml)?,
+        "the Rust model engine only runs SinglePoint cases; rerun this spatial case with --engine fortran"
+    );
+    let land_cover = rust_model_land_cover(kernel)?;
+    let executable = rust_model_executable()?;
+    let output = std::process::Command::new(&executable)
+        .arg(case_nml)
+        .args(["--land-cover", land_cover, "--preflight"])
+        .output()
+        .with_context(|| format!("cannot start {}", executable.display()))?;
+    if !output.status.success() {
+        bail!(
+            "the Rust model engine cannot run this case:\n{}\nrerun with --engine fortran to use the Fortran kernel",
+            String::from_utf8_lossy(&output.stderr).trim_end()
+        );
+    }
+    Ok(())
+}
+
 fn requested_preprocessors(value: Option<&str>) -> Result<PreprocessorMode> {
     match value.unwrap_or("rust") {
         "rust" => Ok(PreprocessorMode::Rust),
@@ -1847,18 +1956,11 @@ fn rust_preprocessor_executable(stage: Stage) -> Result<PathBuf> {
     let name = match stage {
         Stage::MkSrfData => "mksrfdata-rs",
         Stage::MkIniData => "mkinidata-rs",
-        Stage::Colm => bail!("colm always runs the verified Fortran kernel executable"),
+        Stage::Colm => {
+            bail!("the Rust model engine is selected with --engine, not --preprocessors")
+        }
     };
-    let name = if cfg!(windows) {
-        format!("{name}.exe")
-    } else {
-        name.to_owned()
-    };
-    let cli = std::env::current_exe().context("cannot locate the running colm-cli executable")?;
-    let executable = cli
-        .parent()
-        .context("colm-cli has no parent directory")?
-        .join(name);
+    let executable = sidecar_executable(name)?;
     if !executable.is_file() {
         bail!(
             "Rust preprocessor is missing beside colm-cli: {}\nrebuild the desktop sidecars with `cargo run -p xtask -- stage-sidecar`, or use --preprocessors fortran",
@@ -2186,6 +2288,16 @@ fn rust_preprocessor_input_identity(arguments: &[String]) -> Result<String> {
 pub(crate) struct RustPreprocessorIdentities {
     surface: Option<String>,
     initial: Option<String>,
+    /// `--engine rust` 时 `colm-rs` 的二进制指纹；Fortran 引擎为 `None`，
+    /// 这样既有算例的 colm 指纹不因本字段的引入而失效。
+    model: Option<String>,
+}
+
+fn rust_model_identity() -> Result<String> {
+    Ok(format!(
+        "colm-rs={}",
+        fingerprint::sha256_file(&rust_model_executable()?)?
+    ))
 }
 
 fn rust_preprocessor_stage_identity(stage: Stage, arguments: &[String]) -> Result<String> {
@@ -2208,7 +2320,7 @@ fn stage_kernel_identity(
     stage: Stage,
     identities: &RustPreprocessorIdentities,
 ) -> String {
-    stage_preprocessor_input_identity(
+    let identity = stage_preprocessor_input_identity(
         stage,
         identities.surface.as_deref(),
         identities.initial.as_deref(),
@@ -2216,7 +2328,13 @@ fn stage_kernel_identity(
     .map_or_else(
         || kernel_id.to_owned(),
         |inputs| format!("{kernel_id};rust-preprocessor-inputs={inputs}"),
-    )
+    );
+    // 引擎只改变第三段的产物：切换引擎（或重编 `colm-rs`）必须让 colm 重跑，
+    // 但不该让前两段白跑一遍。
+    match (stage, identities.model.as_deref()) {
+        (Stage::Colm, Some(model)) => format!("{identity};model-engine={model}"),
+        (Stage::Colm | Stage::MkSrfData | Stage::MkIniData, _) => identity,
+    }
 }
 
 fn stage_preprocessor_input_identity(
@@ -2254,6 +2372,7 @@ fn cmd_run(
     only_stage: Option<Stage>,
     ranks: usize,
     preprocessors: PreprocessorMode,
+    engine: ModelEngine,
     highres_params: Option<&Path>,
     soil_hyper_albedo_dir: Option<&Path>,
 ) -> Result<()> {
@@ -2265,6 +2384,7 @@ fn cmd_run(
         only_stage,
         ranks,
         preprocessors,
+        engine,
         highres_params,
         soil_hyper_albedo_dir,
         false,
@@ -2281,6 +2401,7 @@ fn run_case(
     only_stage: Option<Stage>,
     ranks: usize,
     preprocessors: PreprocessorMode,
+    engine: ModelEngine,
     highres_params: Option<&Path>,
     soil_hyper_albedo_dir: Option<&Path>,
     quiet: bool,
@@ -2309,8 +2430,16 @@ fn run_case(
             kernel.manifest.identity(),
             kernel.manifest.platform
         );
+        println!("model engine: {}", engine.as_str());
     }
     let layout = Layout::new(case);
+    let runs_model = only_stage.is_none_or(|stage| stage == Stage::Colm);
+    let rust_model_land_cover = if engine == ModelEngine::Rust && runs_model {
+        preflight_rust_model(&layout.case_nml(), &kernel, ranks)?;
+        Some(rust_model_land_cover(&kernel)?)
+    } else {
+        None
+    };
     preflight_spatial_case(&layout.case_nml(), &kernel, only_stage)?;
     ensure_cli_output_dir(&layout.case_nml(), &layout.out())?;
     let name = colm_case::case_name(&layout.case_nml())?;
@@ -2368,6 +2497,9 @@ fn run_case(
         initial: rust_mkinidata_arguments
             .as_deref()
             .map(|arguments| rust_preprocessor_stage_identity(Stage::MkIniData, arguments))
+            .transpose()?,
+        model: (engine == ModelEngine::Rust)
+            .then(rust_model_identity)
             .transpose()?,
     };
     let mut marks = fingerprint::load(case);
@@ -2484,7 +2616,22 @@ fn run_case(
                 let _ = o.flush();
             }
         };
-        let r = if preprocessors == PreprocessorMode::Rust
+        let r = if let (Stage::Colm, Some(land_cover)) = (*stage, rust_model_land_cover) {
+            colm_kernel::run_stage_streaming_with_executable(
+                &kernel,
+                *stage,
+                &rust_model_executable()?,
+                &layout.case_nml(),
+                case,
+                artifacts,
+                &[
+                    "--land-cover".to_owned(),
+                    land_cover.to_owned(),
+                    "--case-outputs".to_owned(),
+                ],
+                &mut forward,
+            )?
+        } else if preprocessors == PreprocessorMode::Rust
             && matches!(stage, Stage::MkSrfData | Stage::MkIniData)
         {
             let executable = rust_preprocessor_executable(*stage)?;
@@ -2856,6 +3003,7 @@ fn cmd_study_run(
     jobs: usize,
     retry_failed: bool,
     preprocessors: PreprocessorMode,
+    engine: ModelEngine,
 ) -> Result<()> {
     let state = study::runner::run(
         study_dir,
@@ -2865,6 +3013,7 @@ fn cmd_study_run(
             stream,
             retry_failed,
             preprocessors,
+            engine,
         },
     )?;
     if !stream {

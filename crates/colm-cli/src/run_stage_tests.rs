@@ -428,3 +428,55 @@ fn a_changed_hyperspectral_surface_source_invalidates_downstream_stages() {
         );
     }
 }
+
+#[test]
+fn rust_model_engine_is_the_default_and_fortran_is_selectable() {
+    assert_eq!(requested_engine(None).unwrap(), ModelEngine::Rust);
+    assert_eq!(
+        requested_engine(Some("fortran")).unwrap(),
+        ModelEngine::Fortran
+    );
+    assert!(requested_engine(Some("auto")).is_err());
+}
+
+#[test]
+fn model_engine_identity_only_changes_the_colm_stage_fingerprint() {
+    let fortran = RustPreprocessorIdentities {
+        surface: Some("mksrfdata=a".into()),
+        initial: Some("mkinidata=b".into()),
+        model: None,
+    };
+    let rust = RustPreprocessorIdentities {
+        surface: Some("mksrfdata=a".into()),
+        initial: Some("mkinidata=b".into()),
+        model: Some("colm-rs=c".into()),
+    };
+    for stage in [Stage::MkSrfData, Stage::MkIniData] {
+        assert_eq!(
+            stage_kernel_identity("k", stage, &fortran),
+            stage_kernel_identity("k", stage, &rust),
+            "{stage:?} must not rerun when only the model engine changes"
+        );
+    }
+    let fortran_colm = stage_kernel_identity("k", Stage::Colm, &fortran);
+    let rust_colm = stage_kernel_identity("k", Stage::Colm, &rust);
+    assert_ne!(fortran_colm, rust_colm);
+    // Fortran 引擎的身份与引入 `model` 字段之前逐字节相同：既有算例不因升级而重跑。
+    assert_eq!(
+        fortran_colm,
+        "k;rust-preprocessor-inputs=mksrfdata=a;mkinidata=b"
+    );
+    assert!(rust_colm.ends_with(";model-engine=colm-rs=c"));
+}
+
+#[test]
+fn rust_model_engine_needs_an_lct_kernel() {
+    let mut kernel = hyperspectral_kernel();
+    kernel.manifest.macros = vec!["LULC_USGS".into()];
+    assert_eq!(rust_model_land_cover(&kernel).unwrap(), "usgs");
+    kernel.manifest.macros = vec!["LULC_IGBP".into(), "URBAN_MODEL".into()];
+    assert_eq!(rust_model_land_cover(&kernel).unwrap(), "igbp");
+    kernel.manifest.macros = vec!["LULC_IGBP_PFT".into()];
+    let error = rust_model_land_cover(&kernel).unwrap_err().to_string();
+    assert!(error.contains("--engine fortran"), "{error}");
+}

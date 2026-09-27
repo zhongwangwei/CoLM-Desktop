@@ -33,8 +33,22 @@ fn temp_root(name: &str) -> PathBuf {
     root
 }
 
+/// 这些测试用假内核模拟 Fortran 的三段；`--engine` 默认已是 rust，
+/// 不显式选 fortran 的话 colm 段会去找并不存在的 `colm-rs`。
+/// Rust 主循环的调度另有 `run_stage_tests.rs` 与端到端记录覆盖。
+fn with_fortran_model<'a>(args: &[&'a str]) -> Vec<&'a str> {
+    let mut args = args.to_vec();
+    if matches!(args.first(), Some(&"run" | &"study-run" | &"all")) && !args.contains(&"--engine") {
+        args.extend(["--engine", "fortran"]);
+    }
+    args
+}
+
 fn run_ok(args: &[&str]) -> String {
-    let output = Command::new(bin()).args(args).output().unwrap();
+    let output = Command::new(bin())
+        .args(with_fortran_model(args))
+        .output()
+        .unwrap();
     assert!(
         output.status.success(),
         "{args:?}\nstdout={}\nstderr={}",
@@ -45,7 +59,10 @@ fn run_ok(args: &[&str]) -> String {
 }
 
 fn run_fail(args: &[&str]) -> String {
-    let output = Command::new(bin()).args(args).output().unwrap();
+    let output = Command::new(bin())
+        .args(with_fortran_model(args))
+        .output()
+        .unwrap();
     assert!(
         !output.status.success(),
         "{args:?} unexpectedly succeeded: {}",
@@ -55,7 +72,10 @@ fn run_fail(args: &[&str]) -> String {
 }
 
 fn run_with_bin_ok(program: &Path, args: &[&str]) -> String {
-    let output = Command::new(program).args(args).output().unwrap();
+    let output = Command::new(program)
+        .args(with_fortran_model(args))
+        .output()
+        .unwrap();
     assert!(
         output.status.success(),
         "{} {args:?}\nstdout={}\nstderr={}",
@@ -67,7 +87,10 @@ fn run_with_bin_ok(program: &Path, args: &[&str]) -> String {
 }
 
 fn run_with_bin_fail(program: &Path, args: &[&str]) -> String {
-    let output = Command::new(program).args(args).output().unwrap();
+    let output = Command::new(program)
+        .args(with_fortran_model(args))
+        .output()
+        .unwrap();
     assert!(
         !output.status.success(),
         "{} {args:?} unexpectedly succeeded: {}",
@@ -1378,6 +1401,8 @@ fn pause_resume_keeps_open_de_generation_selection_and_patience_stable() {
     let child = Command::new(bin())
         .args([
             "study-run",
+            "--engine",
+            "fortran",
             &paused_study,
             "--kernel",
             paused_kernel.to_str().unwrap(),
@@ -1567,6 +1592,8 @@ fn jobs_greater_than_one_pause_resume_and_cancel_are_recoverable() {
     let mut child = Command::new(bin())
         .args([
             "study-run",
+            "--engine",
+            "fortran",
             &study,
             "--kernel",
             kernel.to_str().unwrap(),
@@ -1620,6 +1647,8 @@ fn jobs_greater_than_one_pause_resume_and_cancel_are_recoverable() {
     let mut child = Command::new(bin())
         .args([
             "study-run",
+            "--engine",
+            "fortran",
             &cancel_study,
             "--kernel",
             cancel_kernel.to_str().unwrap(),
@@ -1656,6 +1685,8 @@ fn jobs_greater_than_one_pause_resume_and_cancel_are_recoverable() {
     let mut child = Command::new(bin())
         .args([
             "study-run",
+            "--engine",
+            "fortran",
             &recovery_study,
             "--kernel",
             recovery_kernel.to_str().unwrap(),

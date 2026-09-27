@@ -28,7 +28,7 @@ pub mod snicar;
 pub mod tabular;
 pub mod units;
 
-pub use check::{check, MetSummary, REQUIRED_VARS};
+pub use check::{check, check_series, MetSummary, REQUIRED_VARS};
 pub use civil::{civil_from_days, days_from_civil, Stamp};
 pub use convert::{canonical_units, parse_heights, parse_slot_spec};
 pub use gapfill::{

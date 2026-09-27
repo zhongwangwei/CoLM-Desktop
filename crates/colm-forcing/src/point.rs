@@ -13,7 +13,9 @@ use colm_core::{
     CalendarTime, RuntimeForcing, RuntimeForcingInput,
 };
 
-use crate::{canonical_units, check, days_from_civil, resolve, summarize, MetSummary, Stamp};
+use crate::{
+    canonical_units, check_series, days_from_civil, resolve, summarize, MetSummary, Stamp,
+};
 
 /// One canonical forcing record consumed by a Rust surface step.
 ///
@@ -268,7 +270,7 @@ fn stamp_seconds(stamp: Stamp) -> i64 {
 pub fn load_point_forcing(path: impl AsRef<Path>) -> Result<PointForcingSeries> {
     let path = path.as_ref();
     let summary = summarize(path)?;
-    let problems = check(&summary, None);
+    let problems = check_series(&summary, None);
     ensure!(
         problems.is_empty(),
         "{} is not a usable CoLM POINT forcing file: {}",

@@ -204,3 +204,18 @@ fn only_a_file_that_says_utc_is_treated_as_greenwich() {
     m.time_shown_in = Some("local standard time".into());
     assert!(!m.is_greenwich());
 }
+
+#[test]
+fn the_runtime_check_leaves_missing_heights_to_the_namelist_fallback() {
+    // AT-Neu 的示例 Met 文件没有 reference_height_*：前处理要报（写 namelist 用），
+    // 运行期不报 —— `colm.x` 此时用 forcing namelist 的 HEIGHT_*。
+    let mut m = ok_met();
+    m.height_v = f64::NAN;
+    m.height_t = f64::NAN;
+    m.height_q = f64::NAN;
+    assert_eq!(check(&m, None).len(), 3);
+    assert!(check_series(&m, None).is_empty());
+    // 其余问题照报：拆分不能顺带放掉别的检查。
+    m.step_uniform = false;
+    assert_eq!(check_series(&m, None).len(), 1);
+}

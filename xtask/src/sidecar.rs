@@ -1,4 +1,4 @@
-//! 把 `colm-cli` 与 Rust 预处理器暂存到 Tauri 打包要找的位置。
+//! 把 `colm-cli`、Rust 预处理器与 Rust 主循环（`colm-rs`）暂存到 Tauri 打包要找的位置。
 //!
 //! Tauri 的 `bundle.externalBin` 要求文件名带**目标三元组**后缀
 //! （`colm-cli-aarch64-apple-darwin`），打包时它按当前目标去找。
@@ -25,6 +25,7 @@ pub fn stage(root: &Path) -> Result<()> {
         ("colm-cli", "colm-cli"),
         ("colm-srfdata", "mksrfdata-rs"),
         ("colm-init", "mkinidata-rs"),
+        ("colm-runtime", "colm-rs"),
     ] {
         let status = Command::new("cargo")
             .args(["build", "--release", "-p", package, "--bin", binary])
@@ -39,7 +40,7 @@ pub fn stage(root: &Path) -> Result<()> {
     let ext = if cfg!(windows) { ".exe" } else { "" };
     let dir = root.join("gui/src-tauri/binaries");
     std::fs::create_dir_all(&dir)?;
-    for name in ["colm-cli", "mksrfdata-rs", "mkinidata-rs"] {
+    for name in ["colm-cli", "mksrfdata-rs", "mkinidata-rs", "colm-rs"] {
         let src = root.join("target/release").join(format!("{name}{ext}"));
         if !src.is_file() {
             bail!("built but {} is missing", src.display());

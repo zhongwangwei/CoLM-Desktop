@@ -8,7 +8,8 @@
     "externalBin": [
       "binaries/colm-cli",
       "binaries/mksrfdata-rs",
-      "binaries/mkinidata-rs"
+      "binaries/mkinidata-rs",
+      "binaries/colm-rs"
     ],
     "resources": {
       "../../kernels": "kernels",

@@ -891,11 +891,26 @@ fn simulation_date(document: &Document, prefix: &str) -> Result<CalendarTime> {
     })
 }
 
+// `required_*`：算例里写了就用算例的，没写就用 `MOD_Namelist.F90` 的声明默认值 ——
+// 与 Fortran 读 namelist 的语义一致（未出现的成员保留声明初值）。
+//
+// 早先这里缺字段就报错。那条规则在黄金算例上看不出问题（模板把每个字段都写全了），
+// 但 `colm-cli new` 会**省略等于默认值的字段**（实测 CN-Cng 只写了 `start_year`，
+// 没写 `start_month/day/sec`），于是 `colm-cli run --engine rust` 在一个 Fortran
+// 能跑的算例上报 "missing numeric field DEF_simulation_time%start_month"。
+
+fn schema_default(field: &str) -> Option<&'static colm_schema::Default> {
+    colm_schema::find(field).map(|field| &field.default)
+}
+
 fn required_string(document: &Document, field: &str) -> Result<String> {
     match document.get(field) {
         Some(Value::Str(value)) => Ok(value.clone()),
         Some(_) => bail!("{field} must be a string"),
-        None => bail!("namelist is missing required field {field}"),
+        None => match schema_default(field) {
+            Some(colm_schema::Default::Str(value)) => Ok((*value).to_owned()),
+            _ => bail!("namelist is missing required field {field}"),
+        },
     }
 }
 
@@ -903,7 +918,10 @@ fn required_bool(document: &Document, field: &str) -> Result<bool> {
     match document.get(field) {
         Some(Value::Bool(value)) => Ok(*value),
         Some(_) => bail!("{field} must be a logical value"),
-        None => bail!("namelist is missing required field {field}"),
+        None => match schema_default(field) {
+            Some(colm_schema::Default::Logical(value)) => Ok(*value),
+            _ => bail!("namelist is missing required field {field}"),
+        },
     }
 }
 
@@ -925,10 +943,20 @@ fn required_integer(document: &Document, field: &str) -> Result<i64> {
 }
 
 fn required_real(document: &Document, field: &str) -> Result<f64> {
-    let value = document
-        .get(field)
-        .and_then(Value::as_f64)
-        .with_context(|| format!("namelist is missing numeric field {field}"))?;
+    let value = match document.get(field) {
+        Some(value) => value
+            .as_f64()
+            .with_context(|| format!("{field} must be numeric"))?,
+        None => match schema_default(field) {
+            Some(colm_schema::Default::Integer(value)) => *value as f64,
+            Some(colm_schema::Default::Real(text)) => text
+                .replace(['d', 'D'], "e")
+                .trim_end_matches("_r8")
+                .parse()
+                .with_context(|| format!("the declared default for {field} is unreadable"))?,
+            _ => bail!("namelist is missing numeric field {field}"),
+        },
+    };
     ensure!(value.is_finite(), "{field} must be finite");
     Ok(value)
 }

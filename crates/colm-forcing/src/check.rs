@@ -94,7 +94,33 @@ impl MetSummary {
 }
 
 /// 检查一份强迫场描述，可选地连同模拟窗口一起检查。返回全部问题；空即通过。
+///
+/// 包括三个观测高度：前处理要把它们写进 forcing namelist，文件里没有就无从写起。
 pub fn check(m: &MetSummary, window: Option<(Stamp, Stamp)>) -> Vec<String> {
+    let mut p = check_series(m, window);
+    for (name, value) in [
+        ("reference_height_v / DEF_forcing%HEIGHT_V", m.height_v),
+        ("reference_height_t / DEF_forcing%HEIGHT_T", m.height_t),
+        ("reference_height_q / DEF_forcing%HEIGHT_Q", m.height_q),
+    ] {
+        if !value.is_finite() || value <= 0.0 {
+            p.push(format!(
+                "{name} must be a finite positive observation height; got {value:?}"
+            ));
+        }
+    }
+    p
+}
+
+/// [`check`] 去掉观测高度那三条：运行期用。
+///
+/// 运行期的高度按上游 `MOD_Forcing.F90` 的规则另行解析 —— 文件里**有**
+/// `reference_height_*` 就用文件的，没有就用 forcing namelist 的 `HEIGHT_*`
+/// （见 `colm-runtime` 的 `observation_heights`）。文件里缺这三个变量是合法的：
+/// 仓库自带的 AT-Neu 示例就没有，`colm.x` 用 namelist 的 3.0 m 正常跑完，
+/// 而沿用 [`check`] 的 Rust 引擎却拒绝了它。文件里给了但非法（NaN、≤0）
+/// 仍由 `observation_heights` 拒绝。
+pub fn check_series(m: &MetSummary, window: Option<(Stamp, Stamp)>) -> Vec<String> {
     let mut p = Vec::new();
 
     // CoLM 按固定字符位置解析这个字符串，所以形状必须一模一样。
@@ -117,18 +143,6 @@ pub fn check(m: &MetSummary, window: Option<(Stamp, Stamp)>) -> Vec<String> {
              read the wrong instants without saying so"
                 .to_string(),
         );
-    }
-
-    for (name, value) in [
-        ("reference_height_v / DEF_forcing%HEIGHT_V", m.height_v),
-        ("reference_height_t / DEF_forcing%HEIGHT_T", m.height_t),
-        ("reference_height_q / DEF_forcing%HEIGHT_Q", m.height_q),
-    ] {
-        if !value.is_finite() || value <= 0.0 {
-            p.push(format!(
-                "{name} must be a finite positive observation height; got {value:?}"
-            ));
-        }
     }
 
     if m.steps == 0 {

@@ -1,10 +1,17 @@
 //! `colm` 第三段的 Rust 版本：从算例目录跑一个 POINT 窗口。
 //!
 //! ```text
-//! colm-rs <case-dir> --land-cover igbp|usgs --restart-out <path> \
+//! colm-rs <case-dir|case.nml> --land-cover igbp|usgs --restart-out <path> \
 //!         [--patch N] [--history-dir <dir>] [--history-stem <stem>] \
 //!         [--allow-unported-branches]
+//! colm-rs <case-dir|case.nml> --land-cover igbp|usgs --case-outputs [--preflight]
 //! ```
+//!
+//! `--case-outputs` 是 `colm-cli run --engine rust` 用的形态：重启、history 目录与
+//! 前缀都按 Fortran `colm.x` 在算例目录里的落点推出（见 [`CaseOutputs`]），于是下游的
+//! `metrics`/`series`/指纹检查不必知道这一段是哪个引擎跑的。`--preflight` 只做
+//! 能力检查（空间算例、未移植分支）就退出 —— 让 `colm-cli` 在跑前两段**之前**就能
+//! 拒绝 Rust 引擎跑不了的算例，而不是等几分钟预处理之后才失败。
 //!
 //! **它只覆盖已经移植的那一条链**（`standard_lct` 的规则土壤 patch，无雪与积雪两支），
 //! 其余一律报错。这不是保守：第三段的内核里有 PFT/PC/城市/BGC/湖/痕量物等十几条并行
@@ -49,6 +56,10 @@ fn main() -> ExitCode {
         }
     }
 }
+
+/// `colm-kernel` 的成败判定要求这一行（`Stage::Colm.success_marker()`），与
+/// Fortran `colm.x` 的最后一行逐字相同。只在真正写完重启之后打印。
+const SUCCESS_MARKER: &str = "CoLM Execution Completed.";
 
 fn run() -> Result<()> {
     let arguments = Arguments::parse(std::env::args().skip(1))?;
@@ -104,7 +115,28 @@ fn run() -> Result<()> {
             eprintln!("  - {branch}");
         }
     }
+    if arguments.preflight {
+        println!("colm-rs preflight: ok");
+        return Ok(());
+    }
     let restarts = restart_files(&layout, &name, &document, &config)?;
+    let outputs = arguments
+        .outputs
+        .resolve(&layout, &name, &document, &config)?;
+    ensure!(
+        outputs.restart_out != restarts.initial,
+        "the evolved restart would overwrite the input restart {}; \
+         DEF_simulation_time%end must be after %start",
+        restarts.initial.display()
+    );
+    if let Some(parent) = outputs.restart_out.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("cannot create {}", parent.display()))?;
+    }
+    if let Some(directory) = &outputs.history_directory {
+        std::fs::create_dir_all(directory)
+            .with_context(|| format!("cannot create {}", directory.display()))?;
+    }
     let files = RestartStateFiles {
         constant: restarts.constant.clone(),
         time: restarts.initial.clone(),
@@ -147,7 +179,7 @@ fn run() -> Result<()> {
 
     // 会话从**配置**开（窗口、站点、步长、频率都在里面），要在 `open` 消费掉
     // 配置之前建好 —— 而它自己不带 forcing，所以先后没有别的影响。
-    let session = history_session(&config, &arguments)?;
+    let session = history_session(&config, &outputs)?;
     let mut runtime = PointRuntime::open(config)?;
     // **一个入口跑到底。** 上游每步无条件先 `newsnow`（`CoLMMAIN.F90:976`）再造打包列，
     // 所以"这一步有没有雪"是状态、不是配置；这里同理 —— 从无雪起步的运行也必须能长雪。
@@ -155,18 +187,19 @@ fn run() -> Result<()> {
         &mut runtime,
         &template,
         &restarts.initial,
-        &arguments,
+        &outputs.restart_out,
         session,
     )?;
     println!(
         "colm-rs: {} step(s) on patch {}; wrote {}",
         summary.steps,
         arguments.patch,
-        arguments.restart_out.display()
+        outputs.restart_out.display()
     );
     if let Some(files) = summary.history_files {
         println!("colm-rs: {} history file(s)", files);
     }
+    println!("{SUCCESS_MARKER}");
     Ok(())
 }
 
@@ -182,7 +215,7 @@ fn run_snow(
     runtime: &mut PointRuntime,
     template: &StandardLctRestartTemplate,
     restart_in: &Path,
-    arguments: &Arguments,
+    restart_out: &Path,
     session: Option<HistorySession>,
 ) -> Result<RunSummary> {
     let mut state = template.snow_state();
@@ -231,7 +264,7 @@ fn run_snow(
             energy: &last_energy,
         },
     )?;
-    write_restart(restart_in, &arguments.restart_out, &overrides)?;
+    write_restart(restart_in, restart_out, &overrides)?;
     Ok(RunSummary {
         steps,
         history_files,
@@ -260,14 +293,72 @@ fn write_restart(
 /// 算例开了 history 就开一个会话，否则返回 `None`（不建目录、不写文件）。
 fn history_session(
     config: &PointRuntimeConfig,
-    arguments: &Arguments,
+    outputs: &ResolvedOutputs,
 ) -> Result<Option<HistorySession>> {
-    let Some(directory) = &arguments.history_directory else {
+    let Some(directory) = &outputs.history_directory else {
         return Ok(None);
     };
     config
-        .history_session(directory, arguments.history_stem.clone())
+        .history_session(directory, outputs.history_stem.clone())
         .map(Some)
+}
+
+/// 输出落点的两种来源：命令行逐项给，或按算例目录约定推出。
+enum OutputSpec {
+    Explicit {
+        restart_out: PathBuf,
+        history_directory: Option<PathBuf>,
+        history_stem: String,
+    },
+    CaseOutputs,
+}
+
+struct ResolvedOutputs {
+    restart_out: PathBuf,
+    history_directory: Option<PathBuf>,
+    history_stem: String,
+}
+
+impl OutputSpec {
+    /// `CaseOutputs` 照 Fortran `colm.x` 的落点：
+    ///
+    /// * 重启：`<out>/<case>/restart/<cdate>/<case>_restart_<cdate>_lc<year>_w180_s90.nc`，
+    ///   `cdate` 取**窗口终点**（上游在最后一步之后按 `idate` 写续跑文件，
+    ///   `MOD_Vars_TimeVariables.F90:1109`）；
+    /// * history：`<out>/<case>/history/<case>_hist_*.nc` —— `colm-cli` 的
+    ///   `history_files` 只认 `*_hist_*.nc`，前缀必须是算例名，而不是缺省的 `colm-rs`。
+    fn resolve(
+        &self,
+        layout: &colm_case::Layout,
+        name: &str,
+        document: &Document,
+        config: &PointRuntimeConfig,
+    ) -> Result<ResolvedOutputs> {
+        match self {
+            Self::Explicit {
+                restart_out,
+                history_directory,
+                history_stem,
+            } => Ok(ResolvedOutputs {
+                restart_out: restart_out.clone(),
+                history_directory: history_directory.clone(),
+                history_stem: history_stem.clone(),
+            }),
+            Self::CaseOutputs => {
+                let year = integer_field(document, "DEF_LC_YEAR")?;
+                let out = layout.out().join(name);
+                let label = date_label(normalized_day_end(config.end));
+                Ok(ResolvedOutputs {
+                    restart_out: out
+                        .join("restart")
+                        .join(&label)
+                        .join(format!("{name}_restart_{label}_lc{year:04}_w180_s90.nc")),
+                    history_directory: Some(out.join("history")),
+                    history_stem: name.to_owned(),
+                })
+            }
+        }
+    }
 }
 
 /// 算例目录 → 两份输入重启的路径。
@@ -339,6 +430,31 @@ fn read_baseflow_scale(layout: &colm_case::Layout, name: &str, patch: usize) -> 
     Ok(values[patch])
 }
 
+/// 窗口终点写成 `sec = 86400` 时，上游写续跑文件用的 `idate` 已经被 `TICKTIME`
+/// 进位成次日 0 秒：实测 1 月 31 日 86400 秒的窗口，`colm.x` 写的是
+/// `2008-032-00000`，不是 `2008-031-86400`。两边名字不同，Fortran→Rust 切换后
+/// 续跑就找不到文件。
+fn normalized_day_end(time: CalendarTime) -> CalendarTime {
+    if time.seconds < 86_400 {
+        return time;
+    }
+    let leap = time.year % 4 == 0 && (time.year % 100 != 0 || time.year % 400 == 0);
+    let days_in_year = if leap { 366 } else { 365 };
+    if time.julian_day >= days_in_year {
+        CalendarTime {
+            year: time.year + 1,
+            julian_day: 1,
+            seconds: 0,
+        }
+    } else {
+        CalendarTime {
+            julian_day: time.julian_day + 1,
+            seconds: 0,
+            ..time
+        }
+    }
+}
+
 /// `%04d-%03d-%05d`：`MOD_Vars_TimeVariables.F90:1109` 的 `cdate`。
 fn date_label(time: CalendarTime) -> String {
     format!(
@@ -385,9 +501,9 @@ struct Arguments {
     case_directory: PathBuf,
     patch: usize,
     land_cover: LandCoverScheme,
-    restart_out: PathBuf,
-    history_directory: Option<PathBuf>,
-    history_stem: String,
+    outputs: OutputSpec,
+    /// 只做能力检查就退出，不读重启、不推进。
+    preflight: bool,
     /// 显式允许跑"本仓库没实现的那些分支"。默认关。
     allow_unported_branches: bool,
 }
@@ -402,6 +518,8 @@ impl Arguments {
         let mut history_directory = None;
         let mut history_stem = None;
         let mut allow_unported_branches = false;
+        let mut case_outputs = false;
+        let mut preflight = false;
         while let Some(flag) = values.next() {
             let mut value = |name: &str| -> Result<String> {
                 values
@@ -427,6 +545,8 @@ impl Arguments {
                 }
                 "--history-stem" => history_stem = Some(value("--history-stem")?),
                 "--allow-unported-branches" => allow_unported_branches = true,
+                "--case-outputs" => case_outputs = true,
+                "--preflight" => preflight = true,
                 other if other.starts_with("--") => {
                     bail!("unknown option {other}; the accepted set is documented in this binary's module docs")
                 }
@@ -441,8 +561,16 @@ impl Arguments {
         }
         let case_directory =
             case_directory.context("a case directory is required as the first argument")?;
-        let restart_out = restart_out
-            .context("--restart-out is required: the evolved restart has no derivable name")?;
+        // `colm-kernel` 启动每一段时第一个参数总是 namelist 路径（与 `colm.x` 同一个
+        // 调用约定），所以这里也收 `case.nml` 本身，取它所在的目录作算例目录。
+        let case_directory = if case_directory.is_file() {
+            case_directory
+                .parent()
+                .map(Path::to_path_buf)
+                .context("the case namelist has no parent directory")?
+        } else {
+            case_directory
+        };
         let land_cover = land_cover
             .context("--land-cover is required: the compiled LULC scheme is not in the namelist")?;
         // 一个只在有 `--history-dir` 时才生效的 `--history-stem` 是陷阱：
@@ -453,15 +581,34 @@ impl Arguments {
                 "--history-stem without --history-dir would be silently ignored"
             );
         }
+        let outputs = if case_outputs {
+            // 两套来源混用时谁说了算不明确，干脆不许。
+            ensure!(
+                restart_out.is_none() && history_directory.is_none(),
+                "--case-outputs derives --restart-out and --history-dir; do not pass them too"
+            );
+            OutputSpec::CaseOutputs
+        } else if preflight {
+            // 预检不写任何东西，落点无意义。
+            OutputSpec::CaseOutputs
+        } else {
+            OutputSpec::Explicit {
+                restart_out: restart_out.context(
+                    "--restart-out is required: the evolved restart has no derivable name \
+                     (or pass --case-outputs to use the case directory layout)",
+                )?,
+                history_directory,
+                // 上游 history 文件名的默认前缀是算例名，不是可执行名 —— 但是否写、
+                // 写在哪由调用方决定，这里只给一个能认出来的中性名。
+                history_stem: history_stem.unwrap_or_else(|| "colm-rs".to_owned()),
+            }
+        };
         Ok(Self {
             case_directory,
             patch,
             land_cover,
-            restart_out,
-            history_directory,
-            // 上游 history 文件名的默认前缀是算例名，不是可执行名 —— 但是否写、
-            // 写在哪由调用方决定，这里只给一个能认出来的中性名。
-            history_stem: history_stem.unwrap_or_else(|| "colm-rs".to_owned()),
+            outputs,
+            preflight,
             allow_unported_branches,
         })
     }
