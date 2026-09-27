@@ -387,11 +387,8 @@ fn runoff_scheme(scheme: i64) -> Result<StandardLctRunoffScheme> {
     Ok(match scheme {
         0 => StandardLctRunoffScheme::Topmodel,
         2 => StandardLctRunoffScheme::XinAnJiang,
+        1 => StandardLctRunoffScheme::Vic,
         3 => StandardLctRunoffScheme::SimpleVic,
-        1 => bail!(
-            "DEF_Runoff_SCHEME=1 selects the VIC runoff scheme, which the Rust runtime has not \
-             ported; 0 (TOPMODEL), 2 (XinAnJiang) and 3 (Simple VIC) are available"
-        ),
         other => bail!("DEF_Runoff_SCHEME={other} is not one of the four upstream schemes 0..=3"),
     })
 }

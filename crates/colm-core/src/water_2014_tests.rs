@@ -30,6 +30,7 @@ fn input() -> Water2014SoilInput<'static> {
             soil_dew_kg_m2_s: 1.0e-6,
             soil_frost_kg_m2_s: 2.0e-6,
             soil_sublimation_kg_m2_s: 5.0e-7,
+            total_ground_evaporation_kg_m2_s: 0.0,
         },
         node_depth_m: &[0.05, 0.25, 0.65],
         layer_thickness_m: &[0.1, 0.3, 0.5],
@@ -133,6 +134,7 @@ fn snow_soil_entry_credits_surface_condensation_only_without_a_snow_layer() {
             soil_dew_kg_m2_s: 0.0,
             soil_frost_kg_m2_s: 0.0,
             soil_sublimation_kg_m2_s: 0.0,
+            total_ground_evaporation_kg_m2_s: 0.0,
             ..input().fluxes
         },
         ..input()

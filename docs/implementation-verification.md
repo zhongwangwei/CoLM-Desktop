@@ -24613,3 +24613,42 @@ cargo test（全 workspace --lib --bins；colm-core/colm-runtime --tests）、cl
 
 这意味着 Rust 主循环在当前覆盖面（SinglePoint + LCT 土面 patch，含 VSF、PHS、`DEF_VEG_SNOW`、split）上
 与同步后的 Fortran 内核**逐位等价**。之后扩覆盖面（A1 其余、A2…）时，逐位对照就是验收标准。
+
+## 第 404 轮：VIC 产流（`DEF_Runoff_SCHEME = 1`）接进 Rust 主循环，以及内核里的四倍精度
+
+### 一、接线
+
+`vic.rs` 原本只是一个独立内核，`physics.rs` 拒绝方案 1。本轮：`Water2014Runoff::Vic` 带五个参数
+（运行期从时不变量文件读 `vic_b_infilt`/`vic_Dsmax`/`vic_Ds`/`vic_Ws`/`vic_c`，初始化按 `DEF_file_VIC_para`
+写入）；VSF 与经典 Richards 两条路径都分派到它；土壤通量里新增**总**地面蒸发 `fevpg`（`Runoff_VIC` 要的是
+总量，不是只含液态的 `qseva`）；VSF 输入补上 `bsw`。经典路径下 VIC 的地下水与 XinAnJiang/SimpleVIC 同样走
+`groundwater`。
+
+### 二、对照内核改的地方（全部有 GIMPLE 或源码为据）
+
+* 子步循环的结合顺序照上游括号：`liq = liq + (inflow - dt_runoff) - (Q12 + evap)`、
+  `liq = liq + Q12 - (evap + dt_baseflow)`、残余水量订正 `X = X + (liq+ice) - resid`；
+  回灌溢出先累加进本冻土区的 `runoff`，最后才乘 `frost_fract`。
+* 收缩：基流第二项 `.FMA (Dsmax*(1-Ds/Ws), frac**c, dt_baseflow)`；`i_0` 内联后 `i_0 + inflow` 是 `.FMA`；
+  `runoff` 的 `basis**(1+b)` 项；`sum_liq`；`cell%runoff`；`CoLM2VIC_weight` 的逐层累加。
+* **`calc_Q12` 在内核里是四倍精度算的**：源码的 `1.0d0` 在 `-fdefault-real-8`（不带 `-fdefault-double-8`）下被
+  提升成 `real(kind=16)`，整条走 `powq`。Rust 新增 `colm-core/src/extended.rs`（双倍双精度，~106 位，`exp`/`ln`/`pow`
+  与 300 位 mpmath 比误差 < 1e-30 相对），`q12` 按 GIMPLE 的分段用它求值。全内核里这样被提升的有 7 个模块，
+  记为 upstream-bugs 第 17 条；后面移植 PC 三维辐射、城市、PROSPECT 时都要用这套。
+* **`VIC_IceLay` 的三个分量是三个冻土区**，不是三层；上游最后一律 `vic_ice(2) = 总和 - 两端`（原先 Rust 直接拷贝
+  中间值，差 1 ULP）。4 层那一组（土层 7–10）把未初始化的 `intent(out)` 当累加器，gfortran 下读到的是
+  上一组刚写下的值（upstream-bugs 第 18 条）；原先 Rust 用"守恒拆分"绕开，结果与内核不同，现在照内核实际行为。
+* VIC 那一支上游不给 `frcsat` 赋值（upstream-bugs 第 16 条），`f_frcsat` 整列填充值；Rust 同样不写。
+
+### 三、实测
+
+```text
+AT-Neu 2010-01，DEF_Runoff_SCHEME=1（b_infilt 0.2, Dsmax 10, Ds 0.1, Ws 0.9, c 2），VSF 开
+  小时输出整月：逐位相同；golden-compare 127 个变量全部在容差内
+  逐步输出：第 174 次调用 Q12 ≈ 2.7e-18 时差 1 ULP —— tmp_liq ≈ 30，最后一步相消 ~65 位，
+  四倍精度也只剩 ~48 位，末位由 libquadmath 的 powq 舍入决定；该差不传到写出的量上
+五个非 VIC 示例月（第 403 轮）：仍然逐位相同
+cargo test（全 workspace）、clippy -D warnings、fmt --check 全过
+```
+
+本机没有 `vic_para.txt`，测试用的参数文件是按上游格式手写的（一行表头 + 五个数）。

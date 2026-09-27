@@ -201,19 +201,17 @@ fn runoff_scheme_numbers_follow_the_upstream_dispatch() {
     }
 }
 
-/// 1 是 VIC 产流。本仓库只移植了 `vic.rs` 的独立内核，没有把它接进方案枚举，
-/// 所以这里必须报错 —— 挑一个相邻方案会让算例跑完却给出别的产流。
+/// 1 是 VIC 产流，必须映射到 VIC 而不是相邻的方案（上游派发是 0=TOPMODEL、1=VIC、
+/// 2=XinAnJiang、3=SimpleVIC；挑错一个也能跑完，只是给出别的产流）。
 #[test]
-fn the_unported_vic_runoff_scheme_is_refused() {
-    let error = land_physics_parameters(
+fn runoff_scheme_one_selects_vic() {
+    let parameters = land_physics_parameters(
         &case_with("DEF_Runoff_SCHEME = 1"),
         LandCoverScheme::Igbp,
         HEIGHTS,
     )
-    .expect_err("the VIC runoff scheme is not ported");
-    let message = error.to_string();
-    assert!(message.contains("VIC"), "{message}");
-    assert!(message.contains("not ported"), "{message}");
+    .unwrap();
+    assert_eq!(parameters.runoff_scheme, StandardLctRunoffScheme::Vic);
 }
 
 #[test]

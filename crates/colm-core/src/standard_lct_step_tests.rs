@@ -614,6 +614,7 @@ fn water_input() -> Water2014SoilInput<'static> {
             soil_dew_kg_m2_s: 0.0,
             soil_frost_kg_m2_s: 0.0,
             soil_sublimation_kg_m2_s: 0.0,
+            total_ground_evaporation_kg_m2_s: 0.0,
         },
         node_depth_m: &[0.05, 0.25],
         layer_thickness_m: &[0.1, 0.3],

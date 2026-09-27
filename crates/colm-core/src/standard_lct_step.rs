@@ -584,6 +584,7 @@ pub fn standard_lct_soil_step(
                 soil_dew_kg_m2_s: thermal_water.dew_kg_m2_s,
                 soil_frost_kg_m2_s: thermal_water.frost_kg_m2_s,
                 soil_sublimation_kg_m2_s: thermal_water.sublimation_kg_m2_s,
+                total_ground_evaporation_kg_m2_s: energy.corrected_ground_evaporation_kg_m2_s,
             },
             temperature_k: &state.temperature_k,
             root_flux_mm_s,
@@ -788,6 +789,7 @@ pub fn standard_lct_snow_soil_step(
                     soil_dew_kg_m2_s: thermal_water.dew_kg_m2_s,
                     soil_frost_kg_m2_s: thermal_water.frost_kg_m2_s,
                     soil_sublimation_kg_m2_s: thermal_water.sublimation_kg_m2_s,
+                    total_ground_evaporation_kg_m2_s: energy.corrected_ground_evaporation_kg_m2_s,
                     ..input.soil_water.fluxes
                 },
                 temperature_k: &state.soil_temperature_k,

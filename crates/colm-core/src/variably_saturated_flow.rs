@@ -4140,6 +4140,8 @@ pub struct VariableSaturatedFlowInput<'a> {
     pub saturated_potential_mm: &'a [f64],
     /// 逐层的土壤水力关系：VSF 要的是 van Genuchten 的五参数。
     pub hydraulic_model: &'a [SoilHydraulicModel],
+    /// Campbell 的 `bsw`：只有 VIC 产流用（`Runoff_VIC` 的实参），与 `hydraulic_model` 无关。
+    pub clapp_hornberger_b: &'a [f64],
     pub root_fraction: &'a [f64],
     pub root_flux_mm_s: &'a [f64],
 }
@@ -4318,6 +4320,30 @@ pub fn variably_saturated_flow_step(
                 subsurface_runoff_mm_s = runoff.subsurface_runoff_mm_s;
                 saturated_fraction = runoff.saturated_fraction;
                 saturation_excess_runoff_mm_s = runoff.surface_runoff_mm_s;
+            }
+            Water2014Runoff::Vic { .. } => {
+                let (surface, subsurface) = crate::water_2014::vic_runoff_for(
+                    input.runoff,
+                    crate::water_2014::VicColumn {
+                        time_step_seconds: dt,
+                        layer_thickness_m: input.layer_thickness_m,
+                        porosity: input.porosity,
+                        residual_water: input.residual_water,
+                        saturated_hydraulic_conductivity_mm_s: input
+                            .saturated_hydraulic_conductivity_mm_s,
+                        clapp_hornberger_b: input.clapp_hornberger_b,
+                        ice_water_kg_m2: &state.ice_water_kg_m2,
+                        liquid_water_kg_m2: &state.liquid_water_kg_m2,
+                        fluxes: input.fluxes,
+                        root_flux_mm_s: input.root_flux_mm_s,
+                        water_input_mm_s: input.ground_water_flux_mm_s,
+                    },
+                )?;
+                surface_runoff_mm_s = surface;
+                subsurface_runoff_mm_s = subsurface;
+                saturation_excess_runoff_mm_s = surface;
+                // `frcsat` 上游不赋值（`intent(out)` 未写），history 留 spval。
+                saturated_fraction = f64::NAN;
             }
         }
         subsurface_runoff_mm_s *= input.baseflow_scale;

@@ -1507,6 +1507,7 @@ fn variable_saturated_flow_input<'a>(
             soil_dew_kg_m2_s: 0.0,
             soil_frost_kg_m2_s: 0.0,
             soil_sublimation_kg_m2_s: 0.0,
+            total_ground_evaporation_kg_m2_s: 0.0,
         },
         ground_water_flux_mm_s,
         snow_layers: 0,
@@ -1519,6 +1520,7 @@ fn variable_saturated_flow_input<'a>(
         saturated_hydraulic_conductivity_mm_s: &fixture.saturated_hydraulic_conductivity_mm_s,
         saturated_potential_mm: &fixture.saturated_potential_mm,
         hydraulic_model: &fixture.hydraulic_model,
+        clapp_hornberger_b: &[5.0; 10],
         root_fraction: &fixture.root_fraction,
         root_flux_mm_s: &fixture.root_flux_mm_s,
     }

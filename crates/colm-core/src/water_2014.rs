@@ -31,6 +31,15 @@ pub enum Water2014Runoff {
     SimpleVic {
         bvic: f64,
     },
+    /// `DEF_Runoff_SCHEME = 1`（`MOD_Hydro_VIC.F90:Runoff_VIC`）。五个参数来自时不变量
+    /// 文件的 `vic_b_infilt`/`vic_Dsmax`/`vic_Ds`/`vic_Ws`/`vic_c`。
+    Vic {
+        infiltration_shape: f64,
+        maximum_baseflow_mm_day: f64,
+        baseflow_fraction: f64,
+        baseflow_threshold: f64,
+        baseflow_exponent: f64,
+    },
 }
 
 /// Ground fluxes handed from `THERMAL` to the no-snow `WATER_2014` branch.
@@ -43,6 +52,9 @@ pub struct Water2014SoilFluxes {
     pub soil_dew_kg_m2_s: f64,
     pub soil_frost_kg_m2_s: f64,
     pub soil_sublimation_kg_m2_s: f64,
+    /// THERMAL 收尾后的**总**地面蒸发 `fevpg`（含升华，结露为负）。只有 VIC 产流用它
+    /// （`Runoff_VIC` 的第 8 个实参），与上面那个只含液态蒸发的 `qseva` 不是一回事。
+    pub total_ground_evaporation_kg_m2_s: f64,
 }
 
 /// Immutable regular-soil inputs to one `WATER_2014` call.
@@ -294,9 +306,9 @@ pub fn water_2014_soil_step(
                 water_table_depth_m: state.water_table_depth_m,
             },
         )?,
-        Water2014Runoff::XinAnJiang { .. } | Water2014Runoff::SimpleVic { .. } => {
-            update_groundwater(groundwater_input)?
-        }
+        Water2014Runoff::XinAnJiang { .. }
+        | Water2014Runoff::SimpleVic { .. }
+        | Water2014Runoff::Vic { .. } => update_groundwater(groundwater_input)?,
     };
     state.liquid_water_kg_m2 = groundwater.liquid_water_kg_m2;
     state.water_table_depth_m = groundwater.water_table_depth_m;
@@ -423,6 +435,10 @@ pub fn water_2014_snow_soil_step(
                 soil_dew_kg_m2_s,
                 soil_frost_kg_m2_s,
                 soil_sublimation_kg_m2_s,
+                total_ground_evaporation_kg_m2_s: input
+                    .soil
+                    .fluxes
+                    .total_ground_evaporation_kg_m2_s,
             },
             ..input.soil
         },
@@ -469,6 +485,10 @@ fn split_snow_soil_step(
                 soil_dew_kg_m2_s: split.soil.dew_kg_m2_s,
                 soil_frost_kg_m2_s: split.soil.frost_kg_m2_s,
                 soil_sublimation_kg_m2_s: split.soil.sublimation_kg_m2_s,
+                total_ground_evaporation_kg_m2_s: input
+                    .soil
+                    .fluxes
+                    .total_ground_evaporation_kg_m2_s,
             },
             // `snow_layers` 在土壤步里只管水量闭合诊断那一句"`lb >= 1` 才扣凝结项"；
             // split 那一支（`:1293-1295`）**无条件**扣 `_soil` 那一份，等价于无雪层。
@@ -515,6 +535,7 @@ fn variably_saturated_soil_step(
             saturated_hydraulic_conductivity_mm_s: input.saturated_hydraulic_conductivity_mm_s,
             saturated_potential_mm: input.saturated_potential_mm,
             hydraulic_model: input.hydraulic_model,
+            clapp_hornberger_b: input.clapp_hornberger_b,
             root_fraction: input.root_fraction,
             root_flux_mm_s: input.root_flux_mm_s,
         },
@@ -593,7 +614,79 @@ fn runoff(
                 runoff.saturated_fraction,
             ))
         }
+        Water2014Runoff::Vic { .. } => {
+            let (surface, subsurface) = vic_runoff_for(
+                input.runoff,
+                VicColumn {
+                    time_step_seconds: input.time_step_seconds,
+                    layer_thickness_m: input.layer_thickness_m,
+                    porosity: input.porosity,
+                    residual_water: input.residual_water,
+                    saturated_hydraulic_conductivity_mm_s: input
+                        .saturated_hydraulic_conductivity_mm_s,
+                    clapp_hornberger_b: input.clapp_hornberger_b,
+                    ice_water_kg_m2: &state.ice_water_kg_m2,
+                    liquid_water_kg_m2: &state.liquid_water_kg_m2,
+                    fluxes: input.fluxes,
+                    root_flux_mm_s: input.root_flux_mm_s,
+                    water_input_mm_s: storage.water_input_mm_s,
+                },
+            )?;
+            // `WATER_2014` 没有 `frcsat` 这个输出，值不会被读。
+            Ok((surface, subsurface, f64::NAN))
+        }
     }
+}
+
+/// VIC 产流要的整柱量（`Runoff_VIC` 的实参，`MOD_SoilSnowHydrology.F90:349-356/999-1010`）。
+pub(crate) struct VicColumn<'a> {
+    pub time_step_seconds: f64,
+    pub layer_thickness_m: &'a [f64],
+    /// 真孔隙度 `porsl`（不是有效孔隙度）。
+    pub porosity: &'a [f64],
+    pub residual_water: &'a [f64],
+    pub saturated_hydraulic_conductivity_mm_s: &'a [f64],
+    pub clapp_hornberger_b: &'a [f64],
+    pub ice_water_kg_m2: &'a [f64],
+    pub liquid_water_kg_m2: &'a [f64],
+    pub fluxes: Water2014SoilFluxes,
+    pub root_flux_mm_s: &'a [f64],
+    /// `gwat`。
+    pub water_input_mm_s: f64,
+}
+
+/// `DEF_Runoff_SCHEME = 1`：返回 `(rsur, rsubst)`。`frcsat` 上游在这一支**不赋值**
+/// （`intent(out)` 却没写，见 `docs/upstream-bugs.md` 第 16 条），调用方按"没有值"处理。
+pub(crate) fn vic_runoff_for(runoff: Water2014Runoff, column: VicColumn<'_>) -> Result<(f64, f64)> {
+    let Water2014Runoff::Vic {
+        infiltration_shape,
+        maximum_baseflow_mm_day,
+        baseflow_fraction,
+        baseflow_threshold,
+        baseflow_exponent,
+    } = runoff
+    else {
+        anyhow::bail!("vic_runoff_for needs the VIC runoff scheme");
+    };
+    let vic = crate::vic_runoff(crate::VicRunoffInput {
+        time_step_seconds: column.time_step_seconds,
+        layer_thickness_m: column.layer_thickness_m,
+        porosity: column.porosity,
+        residual_water: column.residual_water,
+        saturated_hydraulic_conductivity_mm_s: column.saturated_hydraulic_conductivity_mm_s,
+        clapp_hornberger_b: column.clapp_hornberger_b,
+        ice_water_kg_m2: column.ice_water_kg_m2,
+        liquid_water_kg_m2: column.liquid_water_kg_m2,
+        ground_evaporation_mm_s: column.fluxes.total_ground_evaporation_kg_m2_s,
+        root_flux_mm_s: column.root_flux_mm_s,
+        water_input_mm_s: column.water_input_mm_s,
+        infiltration_shape,
+        maximum_baseflow_mm_day,
+        baseflow_fraction,
+        baseflow_threshold,
+        baseflow_exponent,
+    })?;
+    Ok((vic.surface_runoff_mm_s, vic.subsurface_runoff_mm_s))
 }
 
 fn soil_volumes(

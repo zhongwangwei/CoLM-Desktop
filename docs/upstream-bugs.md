@@ -55,6 +55,39 @@
   打开时同源）。
 - **处理**：迭代前无条件置 1（臭氧打开时迭代后的 `CalcOzoneStress` 照常覆盖）。
 
+### 16. VIC 产流那一支不给 `frcsat` 赋值
+
+- **位置**：`main/MOD_SoilSnowHydrology.F90:999-1012`（`WATER_VSF` 的 `DEF_Runoff_SCHEME == 1`）。
+- **原因**：`frcsat` 在 `WATER_VSF` 里是 `intent(out)`（`:741`），其余三个产流方案都给它赋值，
+  VIC 这一支没有。按标准是未定义值；gfortran 下实际保留数组里原来的值（分配时的 `spval`），
+  所以 `f_frcsat` 整列是填充值。
+- **处理**：`vendor/` 未改（改了会改变输出）；Rust 照内核的实际结果，VIC 时不写 `f_frcsat`。
+
+### 17. `-fdefault-real-8` 不带 `-fdefault-double-8`：带 `d0` 的表达式被提升成四倍精度
+
+- **位置**：全部 `Makeoptions*`；受影响的是源码里写了 `1.0d0` 之类 `DOUBLE PRECISION` 字面量的表达式。
+  全内核 GIMPLE 里有 7 个模块含 `real(kind=16)`：`HYDRO/MOD_Hydro_VIC.F90`（`calc_Q12`）、
+  `MOD_3DCanopyRadiation.F90`、`MOD_IncompleteGamma.F90`、`URBAN/MOD_Urban_Shortwave.F90`、
+  `URBAN/MOD_Urban_Longwave.F90`、`MOD_Utils.F90`（`lmder` 等）、`MOD_prospect_DB.F90`。
+- **原因**：`-fdefault-real-8` 把默认 `REAL` 变成 8 字节的同时把 `DOUBLE PRECISION` 提升成 16 字节，
+  这些表达式于是整条走 binary128（`powq` 等软件实现）。结果依赖编译器与 libquadmath：换 ifort，
+  或加上 `-fdefault-double-8`，数值就不同；而且明显更慢。
+- **影响**：`calc_Q12` 在"可排水量几乎为零"时（`tmp_liq ≈ resid_moist`）最后一步相消超过 53 位，
+  Fortran 结果的末几位由 `powq` 的舍入决定。
+- **处理**：`vendor/` 未改。Rust 用双倍双精度（`colm-core/src/extended.rs`，约 106 位）复现这些表达式；
+  相消超过约 50 位的极少数情形不保证逐位一致。建议上游加 `-fdefault-double-8`，或把这些 `d0` 改成 `_r8`。
+
+### 18. `VIC_IceLay` 在 4 层分组时把未初始化的 `intent(out)` 当累加器
+
+- **位置**：`HYDRO/MOD_Hydro_VIC_Variables.F90` 的 `VIC_IceLay`，`colm_lay > 3` 那一支。
+- **原因**：`vic_ice(1) = vic_ice(1) + …`、`vic_ice(3) = vic_ice(3) + …` 读的是 `intent(out)` 的 `vic_ice`，
+  之前没有清零。默认 10 层按 3/3/4 分组，最深一组（土层 7–10）走这一支；gfortran 下读到的是调用方
+  `vic_para` 同一个局部数组里上一组（土层 4–6）刚写下的冻土区冰量。于是最深 VIC 层三个冻土区的冰是
+  `wice(4)+wice(7)`、`总和-两端`、`wice(6)+wice(10)`，中间那一区可能为负，也不守恒于本组。
+  另外这一组本意的拆分也有问题：`multiplier = merge((colm_lay-idx*vic_lay)/vic_lay, 0, …)` 是整数除法，恒为 0。
+- **处理**：`vendor/` 未改；Rust 照内核的实际行为复现（`vic.rs::partition_ice`），以保持两个引擎可比。
+  建议上游在循环前 `vic_ice = 0`，并重写这一支的拆分。
+
 ## 二、TRACER 编译开关改变了物理（需要上游确认哪一边是对的）
 
 这一版上游在很多地方给 TRACER 构建和非 TRACER 构建写了**不同的物理**，不只是记账不同。

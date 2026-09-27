@@ -32,6 +32,7 @@ pub mod canopy_roughness;
 pub mod co2;
 pub mod co2_generated;
 pub mod crop_phenology;
+pub mod extended;
 pub mod forcing_downscaling;
 pub mod glacier;
 pub mod ground_fluxes;

@@ -182,6 +182,9 @@ pub enum StandardLctRunoffScheme {
     /// 0=TOPMODEL、1=VIC、2=XinAnJiang、3=SimpleVIC；本枚举早先的两条注释把 1 与 2
     /// 写反了，照注释写映射会把两个方案对调，而两者都能跑完、只给出不同的产流。
     XinAnJiang,
+    /// `DEF_Runoff_SCHEME=1`（VIC），用常数重启的 `vic_b_infilt`/`vic_Dsmax`/`vic_Ds`/
+    /// `vic_Ws`/`vic_c`（初始化时从 `DEF_file_VIC_para` 读入）。
+    Vic,
     /// `DEF_Runoff_SCHEME=3`（Simple VIC），用常数重启的 `BVIC`。
     SimpleVic,
 }
@@ -1434,6 +1437,7 @@ impl StandardLctRestartTemplate {
                     soil_dew_kg_m2_s: 0.0,
                     soil_frost_kg_m2_s: 0.0,
                     soil_sublimation_kg_m2_s: 0.0,
+                    total_ground_evaporation_kg_m2_s: 0.0,
                 },
                 node_depth_m: &self.node_depth_m,
                 layer_thickness_m: &self.layer_thickness_m,
@@ -2018,6 +2022,13 @@ fn runoff(
         },
         StandardLctRunoffScheme::SimpleVic => Water2014Runoff::SimpleVic {
             bvic: scalar(constant, "BVIC", patch)?,
+        },
+        StandardLctRunoffScheme::Vic => Water2014Runoff::Vic {
+            infiltration_shape: scalar(constant, "vic_b_infilt", patch)?,
+            maximum_baseflow_mm_day: scalar(constant, "vic_Dsmax", patch)?,
+            baseflow_fraction: scalar(constant, "vic_Ds", patch)?,
+            baseflow_threshold: scalar(constant, "vic_Ws", patch)?,
+            baseflow_exponent: scalar(constant, "vic_c", patch)?,
         },
     })
 }

@@ -1288,6 +1288,11 @@ pub fn set_lct_fluxes(
     // 而开了 VSF 的黄金算例 264 条全有值。留空即与 Fortran 逐位相同
     // （`colm-hist` 的填充值与上游的 `spval` 都是 -1e36）。
     for (name, value) in scalars {
+        // VIC 产流那一支上游不给 `frcsat` 赋值（`intent(out)` 未写，见 upstream-bugs 第 16 条），
+        // 数组里一直是分配时的 `spval`，`acc1d` 跳过它 —— 这里就不写，留填充值。
+        if name == "frcsat" && value.is_nan() {
+            continue;
+        }
         ensure!(
             value.is_finite(),
             "the history value for {name} is not finite"
