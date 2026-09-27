@@ -459,6 +459,16 @@
           <input class="input" id="cpu-workers" type="number" min="1" step="1" value="2">
           <span class="muted mini" id="cpu-capacity"></span>
         </div>
+        <div class="run-parallel-setting">
+          <div>
+            <label for="model-engine">模拟引擎</label>
+            <span>只影响 colm 模拟阶段。Rust 引擎目前支持站点 + LCT 土地覆盖；不支持的算例会在运行前提示改用 Fortran 内核。</span>
+          </div>
+          <select class="select" id="model-engine">
+            <option value="rust" selected>Rust 引擎（默认）</option>
+            <option value="fortran">Fortran 内核</option>
+          </select>
+        </div>
         <div class="run-parallel-setting" id="mpi-setting">
           <div>
             <label for="mpi-ranks">每个算例的 MPI 进程数</label>

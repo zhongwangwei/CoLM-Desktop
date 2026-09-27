@@ -87,6 +87,11 @@ async function assertAppStringsTranslated() {
   }
 }
 
+if (translateZh('模拟引擎') !== 'Model engine'
+    || translateZh('Rust 引擎（默认）') !== 'Rust engine (default)'
+    || translateZh('Fortran 内核') !== 'Fortran kernel') {
+  throw new Error('the model engine selector must be translated');
+}
 if (translateZh('这次要跑什么？') !== 'What would you like to run?') {
   throw new Error('wizard title is not translated');
 }

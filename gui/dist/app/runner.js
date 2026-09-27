@@ -10,6 +10,7 @@ import { setRunning, renderSteps, setStatus } from './shell.js';
 import { renderFields } from './params.js';
 import { kernelForSubgrid, urbanEnabled } from './kernel.js';
 import { acceptsRunEvent, appendLogText, progressText } from './run-format.js';
+import { modelEngine } from './engine.js';
 
 // 单点内核不启 MPI；空间算例默认最多使用八个 MPI rank。
 const cpuCapacity = Math.max(1, Number(navigator.hardwareConcurrency) || 1);
@@ -303,11 +304,12 @@ async function runRequested(stage) {
     if (dirs.length === 1) {
       await invoke('run_case', {
         runId, case: dirs[0], kernel: $('kernel').value, force, stage, mpiRanks,
+        engine: modelEngine(),
       });
     } else {
       await invoke('run_batch', {
         runId, cases: dirs, kernel: $('kernel').value, maxConcurrent: requestedWorkers(),
-        force, stage, mpiRanks,
+        force, stage, mpiRanks, engine: modelEngine(),
       });
     }
   } catch (e) {

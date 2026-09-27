@@ -655,8 +655,10 @@ fn run_args(
     force: bool,
     stage: Option<&str>,
     mpi_ranks: usize,
+    engine: Option<&str>,
 ) -> Result<Vec<String>, String> {
     validate_run_stage(stage)?;
+    validate_engine(engine)?;
     if mpi_ranks == 0 {
         return Err("mpiRanks must be at least 1".into());
     }
@@ -676,7 +678,19 @@ fn run_args(
     if force {
         args.extend(["--force".to_string(), "1".to_string()]);
     }
+    // 不给就不写：`colm-cli` 自己的默认值（rust）是唯一的来源，界面不再复述一份。
+    if let Some(engine) = engine {
+        args.extend(["--engine".to_string(), engine.to_string()]);
+    }
     Ok(args)
+}
+
+/// `colm` 第三段的引擎。拼错的值在这里拦下，而不是让 sidecar 起来之后才报。
+fn validate_engine(engine: Option<&str>) -> Result<(), String> {
+    match engine {
+        None | Some("rust") | Some("fortran") => Ok(()),
+        Some(other) => Err(format!("未知模拟引擎 {other:?}；只能选择 rust 或 fortran")),
+    }
 }
 
 /// 跑一个算例。返回子进程的退出码。
@@ -691,12 +705,13 @@ pub async fn run_case(
     force: bool,
     stage: Option<String>,
     mpi_ranks: usize,
+    engine: Option<String>,
 ) -> Result<i32, String> {
     validate_run_id(&run_id)?;
     let processes = processes.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         run_case_blocking(
-            app, processes, run_id, case, kernel, force, stage, mpi_ranks,
+            app, processes, run_id, case, kernel, force, stage, mpi_ranks, engine,
         )
     })
     .await
@@ -882,6 +897,7 @@ pub async fn run_batch(
     force: bool,
     stage: Option<String>,
     mpi_ranks: usize,
+    engine: Option<String>,
 ) -> Result<BatchSummary, String> {
     validate_run_id(&run_id)?;
     let processes = processes.inner().clone();
@@ -896,6 +912,7 @@ pub async fn run_batch(
             force,
             stage,
             mpi_ranks,
+            engine,
         )
     })
     .await
@@ -914,8 +931,10 @@ fn run_batch_blocking(
     force: bool,
     stage: Option<String>,
     mpi_ranks: usize,
+    engine: Option<String>,
 ) -> Result<BatchSummary, String> {
     validate_run_stage(stage.as_deref())?;
+    validate_engine(engine.as_deref())?;
     if mpi_ranks == 0 {
         return Err("mpiRanks must be at least 1".into());
     }
@@ -929,7 +948,7 @@ fn run_batch_blocking(
     let succeeded = Arc::new(AtomicUsize::new(0));
     let mut workers = Vec::with_capacity(width);
     for _ in 0..width {
-        let (a, r, k, q, ok, requested_stage, p) = (
+        let (a, r, k, q, ok, requested_stage, p, e) = (
             app.clone(),
             run_id.clone(),
             kernel.clone(),
@@ -937,6 +956,7 @@ fn run_batch_blocking(
             Arc::clone(&succeeded),
             stage.clone(),
             processes.clone(),
+            engine.clone(),
         );
         workers.push(std::thread::spawn(move || loop {
             // 一个 worker 的 panic 不该把队列锁永久毒死；恢复锁后其余站点
@@ -956,6 +976,7 @@ fn run_batch_blocking(
                     force,
                     requested_stage.as_deref(),
                     mpi_ranks,
+                    e.as_deref(),
                 )
             }));
             match outcome {
@@ -1023,6 +1044,7 @@ fn run_case_blocking(
     force: bool,
     stage: Option<String>,
     mpi_ranks: usize,
+    engine: Option<String>,
 ) -> Result<i32, String> {
     processes.prepare(std::slice::from_ref(&case))?;
     run_one(
@@ -1034,6 +1056,7 @@ fn run_case_blocking(
         force,
         stage.as_deref(),
         mpi_ranks,
+        engine.as_deref(),
     )
 }
 
@@ -1048,6 +1071,7 @@ fn run_one(
     force: bool,
     stage: Option<&str>,
     mpi_ranks: usize,
+    engine: Option<&str>,
 ) -> Result<i32, String> {
     if processes.take_cancelled(case)? {
         let _ = app.emit(
@@ -1067,7 +1091,7 @@ fn run_one(
     }
     let cli = resolve_cli();
     let mut cmd = sidecar_command(&cli);
-    let args = run_args(case, kernel, force, stage, mpi_ranks)?;
+    let args = run_args(case, kernel, force, stage, mpi_ranks, engine)?;
     let mut child = colm_kernel::run::top_level_sidecar(&mut cmd)
         .args(args)
         .stdout(std::process::Stdio::piped())
@@ -1989,6 +2013,9 @@ pub async fn study_status(study_dir: String) -> Result<String, String> {
 }
 
 #[tauri::command]
+// Named IPC arguments, as for `run_batch`: a wrapper struct would only add a
+// second frontend/backend shape for the same fields.
+#[allow(clippy::too_many_arguments)]
 pub async fn study_run(
     app: tauri::AppHandle,
     processes: tauri::State<'_, RunProcesses>,
@@ -1997,10 +2024,12 @@ pub async fn study_run(
     stream: bool,
     jobs: Option<usize>,
     retry_failed: Option<bool>,
+    engine: Option<String>,
 ) -> Result<String, String> {
+    validate_engine(engine.as_deref())?;
     let key = study_process_key(&study_dir);
     processes.prepare(std::slice::from_ref(&key))?;
-    let args = study_run_args(study_dir, kernel, stream, jobs, retry_failed);
+    let args = study_run_args(study_dir, kernel, stream, jobs, retry_failed, engine);
     let processes = processes.inner().clone();
     tauri::async_runtime::spawn_blocking(move || study_run_blocking(app, processes, args))
         .await
@@ -2013,6 +2042,7 @@ fn study_run_args(
     _stream: bool,
     jobs: Option<usize>,
     retry_failed: Option<bool>,
+    engine: Option<String>,
 ) -> Vec<String> {
     let mut args = vec!["study-run".to_string(), study_dir];
     if !kernel.trim().is_empty() {
@@ -2028,6 +2058,9 @@ fn study_run_args(
     if retry_failed.unwrap_or(false) {
         args.push("--retry-failed".into());
         args.push("1".into());
+    }
+    if let Some(engine) = engine {
+        args.extend(["--engine".into(), engine]);
     }
     args
 }

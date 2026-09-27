@@ -11,6 +11,7 @@ import { go, renderSteps } from './shell.js';
 import { metricText } from './metric-format.js';
 import { language, translateZh } from './i18n.js';
 import { fieldLabel } from './param-presentation.js';
+import { modelEngine } from './engine.js';
 import { aggregateStudy, aggregateStudyStatuses, bestTuningSummary, MAX_STUDY_CANDIDATES, paginate, percentageWindow, replaceScopedStudyDirs, scopedStudyDirs, studyActionState, studyBudget, studySiteId, studyWarnings } from './study-model.js';
 import {
   LruCache, METRIC_META, boundedMap, envelopeDiagnostics, finite, metricKey, ranking, resultCases,
@@ -3031,6 +3032,7 @@ async function runStudy(kind) {
         dir,
         out: await invoke('study_run', {
           studyDir: dir, kernel, stream: true, jobs: perStudyJobs, retryFailed: false,
+          engine: modelEngine(),
         }),
       };
     });

@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn run_arguments_forward_plain_mpi_rank_count() {
-    let args = run_args("/case", "/kernel", false, None, 8).expect("args");
+    let args = run_args("/case", "/kernel", false, None, 8, None).expect("args");
     assert_eq!(
         args.windows(2).find(|pair| pair[0] == "--ranks"),
         Some(&["--ranks".into(), "8".into()][..])
@@ -580,7 +580,7 @@ fn batch_summary_distinguishes_success_from_attempted() {
 #[test]
 fn a_requested_stage_is_forwarded_to_the_cli_without_changing_full_runs() {
     assert_eq!(
-        run_args("/case", "/kernel", false, Some("mksrfdata"), 1).unwrap(),
+        run_args("/case", "/kernel", false, Some("mksrfdata"), 1, None).unwrap(),
         [
             "run",
             "/case",
@@ -595,10 +595,10 @@ fn a_requested_stage_is_forwarded_to_the_cli_without_changing_full_runs() {
         ]
     );
     assert_eq!(
-        run_args("/case", "/kernel", true, None, 1).unwrap(),
+        run_args("/case", "/kernel", true, None, 1, None).unwrap(),
         ["run", "/case", "--kernel", "/kernel", "--stream", "1", "--ranks", "1", "--force", "1",]
     );
-    assert!(run_args("/case", "/kernel", false, Some("unknown"), 1).is_err());
+    assert!(run_args("/case", "/kernel", false, Some("unknown"), 1, None).is_err());
 }
 
 #[test]
@@ -609,6 +609,7 @@ fn study_run_always_uses_streaming_ndjson() {
         false,
         Some(4),
         Some(true),
+        None,
     );
     assert_eq!(
         args,
@@ -626,7 +627,7 @@ fn study_run_always_uses_streaming_ndjson() {
         ]
     );
 
-    let args = study_run_args("/study".into(), "  ".into(), true, None, None);
+    let args = study_run_args("/study".into(), "  ".into(), true, None, None, None);
     assert_eq!(args, ["study-run", "/study", "--stream", "1"]);
 }
 
@@ -728,4 +729,22 @@ fn contextual_study_rows_keep_catalog_id_and_pft_index() {
     assert_eq!(row.scope_instance.index, Some(2));
     assert_eq!(row.default, 45.0);
     assert_eq!(row.min, Some(0.0));
+}
+
+#[test]
+fn engine_is_forwarded_only_when_chosen_and_must_be_known() {
+    let args = run_args("/case", "/kernel", false, None, 1, Some("fortran")).unwrap();
+    assert!(args.ends_with(&["--engine".to_string(), "fortran".to_string()]));
+    let args = run_args("/case", "/kernel", false, None, 1, None).unwrap();
+    assert!(!args.iter().any(|arg| arg == "--engine"));
+    assert!(run_args("/case", "/kernel", false, None, 1, Some("auto")).is_err());
+    let args = study_run_args(
+        "/s".into(),
+        "/k".into(),
+        true,
+        None,
+        None,
+        Some("rust".into()),
+    );
+    assert!(args.ends_with(&["--engine".to_string(), "rust".to_string()]));
 }

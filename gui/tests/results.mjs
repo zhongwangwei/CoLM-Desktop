@@ -925,6 +925,7 @@ console.log('results: scope, Study controls, bounded loading, PDF, and nine pane
   );
   let spatial = false;
   let runs = 0;
+  const engines = [];
   const runStudy = runInNewContext(helper + resultUi.slice(
     resultUi.indexOf('async function runStudy('),
     resultUi.indexOf('\nasync function retryStudy('),
@@ -942,11 +943,17 @@ console.log('results: scope, Study controls, bounded loading, PDF, and nine pane
       }
       return out;
     },
-    invoke: async command => { if (command === 'study_run') runs++; return 'ok'; },
+    invoke: async (command, args) => {
+      if (command === 'study_run') { runs++; engines.push(args.engine); }
+      return 'ok';
+    },
     refreshStudy: async () => {}, setPreview() {}, renderStudyWizard() {},
+    modelEngine: () => 'fortran',
   });
   await runStudy('uq').catch(() => {});
   if (runs !== 1) throw new Error('spatial switch must stop queued Study runs without killing the already-started one');
+  // Study 与普通运行共用运行页的引擎选择；漏传就会悄悄落回 colm-cli 的默认值。
+  if (engines.join() !== 'fortran') throw new Error(`Study runs must forward the selected model engine, got ${engines}`);
 }
 
 {
