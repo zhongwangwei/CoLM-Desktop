@@ -113,6 +113,8 @@ pub struct LandPhysicsParameters {
     pub vegetation_snow: bool,
     /// `DEF_SPLIT_SOILSNOW`：土面与雪面分开算温度、比湿与凝结（默认 `.false.`）。
     pub split_soil_snow: bool,
+    /// `DEF_Interception_scheme = 8`（CoLM2024）；`false` 即方案 1。
+    pub colm2024_interception: bool,
     /// 本算例编译的地类分类体系。
     pub land_cover_scheme: LandCoverScheme,
     /// `ROOTFR_SCHEME`：`rootfr` 取哪一套公式。
@@ -529,6 +531,8 @@ pub struct StandardLctRestartTemplate {
     interface_depth_m: Vec<f64>,
     runoff: Water2014Runoff,
     canopy_top_height_m: f64,
+    /// 截获方案 8 的冠层结构（常数重启的 `ncd`/`ncw`/`bcw` + `htop` + 地类号）；方案 1 为 `None`。
+    colm2024_canopy: Option<colm_core::Colm2024Canopy>,
     /// 时间重启里的冠层光学与叶状态。
     pub radiation: ColdStartRadiation,
     pub leaf: LeafTemperatureState,
@@ -741,6 +745,23 @@ fn assemble(
 
     let runoff = runoff(&constant, patch, &physics)?;
     let canopy_top_height_m = scalar(&constant, "htop", patch)?;
+    // 截获方案 8：`LEAF_interception_wrap` 传的是 `patchclass, ncd(ipatch), ncw(ipatch), bcw(ipatch), htop`
+    // （`CoLMMAIN.F90:890`），LCT 的 `is_pft = .false.`。单点算例里三个冠层尺寸常是 spval，
+    // 那时容量函数自己退回 `dewmx*(lai+sai)`。
+    let colm2024_canopy = if physics.colm2024_interception {
+        Some(colm_core::Colm2024Canopy {
+            canopy_top_m: canopy_top_height_m,
+            needleleaf_crown_depth_m: scalar(&constant, "ncd", patch)?,
+            needleleaf_crown_width_m: scalar(&constant, "ncw", patch)?,
+            broadleaf_crown_width_m: scalar(&constant, "bcw", patch)?,
+            vegetation_class: i32::try_from(integer_scalar(&constant, "patchclass", patch)?)
+                .context("patchclass is outside the i32 range")?,
+            is_pft: false,
+            land_cover: physics.land_cover_scheme,
+        })
+    } else {
+        None
+    };
 
     // 时间重启的土壤列带雪槽（`soilsnow`），雪槽在前；本分支雪层为 0，
     // 取后 `soil_layers` 个。
@@ -1039,6 +1060,7 @@ fn assemble(
         interface_depth_m,
         runoff,
         canopy_top_height_m,
+        colm2024_canopy,
         radiation,
         leaf,
         temperature_k,
@@ -1172,6 +1194,7 @@ impl StandardLctRestartTemplate {
                     large_scale_snow_kg_m2_s: 0.0,
                     sprinkler_irrigation_kg_m2_s: physics.sprinkler_irrigation_kg_m2_s,
                     vegetation_snow: physics.vegetation_snow,
+                    colm2024: self.colm2024_canopy,
                 },
                 solar: colm_core::NetSolarInput {
                     patch_type: 0,

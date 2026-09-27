@@ -24652,3 +24652,42 @@ cargo test（全 workspace）、clippy -D warnings、fmt --check 全过
 ```
 
 本机没有 `vic_para.txt`，测试用的参数文件是按上游格式手写的（一行表头 + 五个数）。
+
+## 第 405 轮：截获方案 8（CoLM2024）接进 Rust 主循环，以及一个残留的 `etr` 夹取
+
+### 一、范围
+
+`main/` 的 `LEAF_interception_wrap` 在非扩展构建里只接受方案 1 与 8，其余档位 `CALL abort`
+（`MOD_LeafInterception.F90:614-617`）。所以 Rust 只需要补 8，2–7 与内核一样拒绝（错误信息写明原因）。
+方案 8 就是 CoLM2014 外加 `canopy_storage_capacity_colm2024` 算出的雨容量 `satcap_rain_override`
+（关掉 `DEF_VEG_SNOW` 时 `satcap` 也跟着换）。非 TRACER 构建里叶温的 `dewfraction` 不受影响。
+
+### 二、改动
+
+* colm-core：`Colm2024Canopy`（冠高、针叶冠深/冠宽、阔叶冠宽、地类号）挂在截获输入上，`intercept_canopy`
+  在 `lai+sai > 1e-6` 那一支现算容量；容量函数按上游分针叶/阔叶/灌木/混交四类，唯一收缩是风速
+  `sqrt(.FMA (us, us, vs*vs))`。
+* colm-runtime：`physics.rs` 读 `DEF_Interception_scheme`；装配层从常数重启读 `ncd`/`ncw`/`bcw`/`htop`/`patchclass`。
+* **前处理**：单点方案 8 在上游要求站点给出 `ncd`/`ncw`/`bcw`（或 `<rawdata>/canopy_data` 栅格），否则
+  `CoLM_stop('SinglePoint CoLM2024 needs canopy_data or site ncd/ncw/bcw')`（`MOD_SingleSrfdata.F90:492-540`），
+  并把它们写进 srfdata（`:2997-3000`），mkinidata 再原样写进常数文件（`MOD_HtopReadin.F90:54-58`）。
+  Rust 的 colm-srfdata 原先完全不带这三个量、colm-init 一律写 spval —— 于是 Fortran 主循环读 Rust 前处理的
+  产物时直接停。现在 colm-srfdata 照上游写进 srfdata（站点缺量时报同样的错；不读 `canopy_data` 栅格），
+  colm-init 读回写进常数文件。PFT/PC 的 `*_pfts` 版本明确拒绝，随 A3 一起做。
+
+### 三、顺带查出的 Rust 缺陷：叶温收尾的 `etr = max(0, etr)`
+
+`leaf_temperature.rs` 收尾处有一句 `transpiration = transpiration.max(0.0)`，`main/` 与扩展版都没有：
+非 TRACER 路径允许收尾后的 `etr = etr + etr_dtl*dtl` 为很小的负数（TRACER 构建才在 `:1107-1113` 把负值并进
+`evplwet` 再置 0）。测方案 8 时换成灌木地类（IGBP 6）才走到：1 月第 647 条 Fortran `f_etr = -1.7e-14`、Rust 0。
+方案 1 同地类也一样，所以与方案 8 无关。删掉之后所有算例逐位相同。
+
+### 四、实测
+
+```text
+AT-Neu 2010-01，站点地类改成 IGBP 6（郁闭灌木，SITE_landtype = 6），站点加 ncd=5 ncw=4 bcw=3
+  DEF_Interception_scheme = 8：两个引擎从 mksrfdata 起跑，整月小时输出逐位相同
+  DEF_Interception_scheme = 1（同地类）：逐位相同
+回归：CN-Cng 2008-01、AT-Neu 2010-01..02、split 2010-01..02、VIC 2010-01 仍全部逐位相同
+cargo test（全 workspace）、clippy -D warnings、fmt --check 全过
+```

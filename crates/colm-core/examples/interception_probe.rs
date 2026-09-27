@@ -84,6 +84,7 @@ fn main() {
                     large_scale_snow_kg_m2_s,
                     sprinkler_irrigation_kg_m2_s,
                     vegetation_snow,
+                    colm2024: None,
                 },
                 &mut water,
             )

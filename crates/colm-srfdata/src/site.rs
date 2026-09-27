@@ -231,6 +231,9 @@ pub struct SinglePointSurfaceRun {
     pub use_site_soilparameters: bool,
     /// `DEF_Runoff_SCHEME=3` requires the native soil-texture point product.
     pub runoff_scheme: i32,
+    /// `DEF_Interception_scheme = 8`（CoLM2024）：LCT 单点要把站点的 `ncd`/`ncw`/`bcw`
+    /// 写进 srfdata（`MOD_SingleSrfdata.F90:2997-3000`）。
+    pub colm2024_interception: bool,
     pub use_site_lakedepth: bool,
     pub use_site_soilreflectance: bool,
     pub use_site_topography: bool,
@@ -273,6 +276,7 @@ struct SinglePointMaterializeOptions<'a> {
     site_landtype: Option<i32>,
     use_site_soilparameters: bool,
     runoff_scheme: i32,
+    colm2024_interception: bool,
     use_site_lakedepth: bool,
     use_site_soilreflectance: bool,
     use_site_topography: bool,
@@ -389,6 +393,7 @@ pub fn single_point_surface_run_from_namelist_with_subgrid(
     };
     let use_site_soilparameters = namelist_bool(&document, "USE_SITE_soilparameters", true)?;
     let runoff_scheme = namelist_i32(&document, "DEF_Runoff_SCHEME", 3)?;
+    let colm2024_interception = namelist_i32(&document, "DEF_Interception_scheme", 1)? == 8;
     let use_site_lakedepth = namelist_bool(&document, "USE_SITE_lakedepth", true)?;
     let use_site_soilreflectance = namelist_bool(&document, "USE_SITE_soilreflectance", true)?;
     let use_site_topography = namelist_bool(&document, "USE_SITE_topography", true)?;
@@ -413,6 +418,7 @@ pub fn single_point_surface_run_from_namelist_with_subgrid(
         site_landtype,
         use_site_soilparameters,
         runoff_scheme,
+        colm2024_interception,
         use_site_lakedepth,
         use_site_soilreflectance,
         use_site_topography,
@@ -479,6 +485,7 @@ pub fn materialize_single_point_surface_from_namelist_with_subgrid(
             site_landtype: run.site_landtype,
             use_site_soilparameters: run.use_site_soilparameters,
             runoff_scheme: run.runoff_scheme,
+            colm2024_interception: run.colm2024_interception,
             use_site_lakedepth: run.use_site_lakedepth,
             use_site_soilreflectance: run.use_site_soilreflectance,
             use_site_topography: run.use_site_topography,
@@ -1859,6 +1866,7 @@ pub fn materialize_single_point_surface(
             site_landtype: None,
             use_site_soilparameters: true,
             runoff_scheme: 3,
+            colm2024_interception: false,
             use_site_lakedepth: true,
             use_site_soilreflectance: true,
             use_site_topography: true,
@@ -2044,6 +2052,7 @@ fn materialize_single_point_surface_impl(
             use_soil_texture,
             options.srfdata_compression,
         )?;
+        add_colm2024_canopy_structure(options.colm2024_interception, mode, source, &target)?;
         return Ok(None);
     }
 
@@ -2175,8 +2184,52 @@ fn materialize_single_point_surface_impl(
         options.srfdata_compression,
     )
     .context("cannot publish the materialized single-point surface")?;
+    add_colm2024_canopy_structure(options.colm2024_interception, mode, source, &target)?;
     std::fs::remove_file(&temporary)?;
     Ok(report)
+}
+
+/// `DEF_Interception_scheme = 8`：把站点的冠层结构 `ncd`/`ncw`/`bcw` 写进 srfdata
+/// （`MOD_SingleSrfdata.F90:492-540` 读、`:2997-3000` 写）。
+///
+/// 上游在站点没有这三个量时去读 `<rawdata>/canopy_data` 的 500 m 栅格，再没有就
+/// `CoLM_stop('SinglePoint CoLM2024 needs canopy_data or site ncd/ncw/bcw')`。本仓库不读
+/// 那个栅格，所以站点缺量时直接报同样的错。PFT/PC 的 `*_pfts` 版本还没接（Rust 主循环
+/// 也还没有 PFT/PC），明确拒绝。
+fn add_colm2024_canopy_structure(
+    enabled: bool,
+    mode: SiteMode,
+    site: &Path,
+    target: &Path,
+) -> Result<()> {
+    if !enabled {
+        return Ok(());
+    }
+    ensure!(
+        matches!(mode, SiteMode::Igbp | SiteMode::Usgs),
+        "DEF_Interception_scheme = 8 with a {mode:?} single-point surface needs the per-PFT \
+         canopy structure (ncd_pfts/ncw_pfts/bcw_pfts), which the Rust preprocessor does not \
+         write yet"
+    );
+    let input = netcdf::open(site).with_context(|| format!("cannot open {}", site.display()))?;
+    let mut values = Vec::with_capacity(3);
+    for name in ["ncd", "ncw", "bcw"] {
+        ensure!(
+            input.variable(name).is_some(),
+            "SinglePoint CoLM2024 needs canopy_data or site ncd/ncw/bcw: {} has no {name} \
+             (the Rust preprocessor does not read the canopy_data raster)",
+            site.display()
+        );
+        values.push((name, scalar_f64(&input, name)?));
+    }
+    let mut output =
+        netcdf::append(target).with_context(|| format!("cannot reopen {}", target.display()))?;
+    for (name, value) in values {
+        if output.variable(name).is_none() {
+            emit_scalar(&mut output, name, value)?;
+        }
+    }
+    Ok(())
 }
 
 fn single_point_variable_exists(surface: &Path, name: &str) -> Result<bool> {

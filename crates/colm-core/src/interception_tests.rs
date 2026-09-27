@@ -16,6 +16,7 @@ fn input() -> CanopyInterceptionInput {
         large_scale_snow_kg_m2_s: 0.0001,
         sprinkler_irrigation_kg_m2_s: 0.0001,
         vegetation_snow: false,
+        colm2024: None,
     }
 }
 
@@ -147,4 +148,31 @@ fn leaf_wetness_matches_leaf_temperature_dewfraction() {
     let with_snow = canopy_wetness(2.0, 0.5, 0.1, water, true).unwrap();
     close(with_snow.wet_fraction, 0.2539253390183295);
     close(with_snow.dry_leaf_fraction, 0.5968597287853364);
+}
+
+/// 方案 8 的容量：灌木只看风速（`0.5*(1 + 1/(1+clamp(wind,1,4)))`）；针叶/阔叶的冠层尺寸
+/// 缺失（spval）或越界时退回 `dewmx*(lai+sai)`；非林地类也退回默认。
+#[test]
+fn colm2024_capacity_follows_the_canopy_type() {
+    let igbp = crate::LandCoverScheme::Igbp;
+    // 灌木（IGBP 6），风速 3 m/s：0.5*(1 + 1/4) = 0.625
+    let shrub = canopy_storage_capacity_colm2024(
+        0.1, 1.0, 0.5, 3.0, 0.0, 0.5, -1.0e36, -1.0e36, -1.0e36, 6, false, igbp,
+    );
+    assert_eq!(shrub, 0.5 * (1.0 + 1.0 / (1.0 + 3.0)));
+    // 针叶（IGBP 1）尺寸缺失：默认容量
+    let fallback = canopy_storage_capacity_colm2024(
+        0.1, 1.0, 0.5, 3.0, 0.0, 10.0, -1.0e36, -1.0e36, -1.0e36, 1, false, igbp,
+    );
+    assert_eq!(fallback, 0.1 * 1.5);
+    // 针叶尺寸齐全：(clamp(ncd,3,11)+clamp(ncw,2.9,7)) / (4*(1+clamp(wind,1,3.6)))
+    let needle = canopy_storage_capacity_colm2024(
+        0.1, 1.0, 0.5, 3.0, 0.0, 10.0, 5.0, 4.0, -1.0e36, 1, false, igbp,
+    );
+    assert_eq!(needle, (5.0 + 4.0) / (4.0 * (1.0 + 3.0)));
+    // 草地（IGBP 10）：默认
+    let grass = canopy_storage_capacity_colm2024(
+        0.1, 1.0, 0.5, 3.0, 0.0, 0.5, 5.0, 4.0, 3.0, 10, false, igbp,
+    );
+    assert_eq!(grass, 0.1 * 1.5);
 }

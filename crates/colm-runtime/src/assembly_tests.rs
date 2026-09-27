@@ -28,6 +28,7 @@ fn physics(timestep_seconds: f64) -> LandPhysicsParameters {
         plant_hydraulic_overrides: colm_core::PlantHydraulicOverrides::default(),
         vegetation_snow: false,
         split_soil_snow: false,
+        colm2024_interception: false,
         land_cover_scheme: LandCoverScheme::Igbp,
         root_fraction_scheme: RootFractionScheme::SchenkJackson,
         timestep_seconds,

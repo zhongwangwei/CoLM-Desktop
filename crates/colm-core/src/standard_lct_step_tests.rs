@@ -746,6 +746,7 @@ fn input(forcing: crate::RuntimeForcing) -> StandardLctEnergyInput<'static> {
             large_scale_snow_kg_m2_s: 0.0,
             sprinkler_irrigation_kg_m2_s: 0.0,
             vegetation_snow: false,
+            colm2024: None,
         },
         solar: NetSolarInput {
             patch_type: 0,

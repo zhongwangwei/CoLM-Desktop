@@ -909,6 +909,10 @@ fn write_single_point_constant_restart_from_surface(
         .then(|| single_point_topmodel(config.topmodel_method, patches))
         .transpose()?;
     let vic = single_point_vic_parameters(config.vic_parameters, surface, patches)?;
+    // `MOD_HtopReadin.F90:54-58`：方案 8 的单点直接用站点值 `ncd = SITE_ncd` 等。
+    let canopy_structure = surface
+        .canopy_structure_m
+        .map(|[ncd, ncw, bcw]| [vec![ncd; patches], vec![ncw; patches], vec![bcw; patches]]);
     let mask =
         vec![!config.urban_only || surface.land_class == urban_class(config.land_cover); patches];
     let hyperspectral_albedo = hyperspectral_albedo
@@ -956,7 +960,13 @@ fn write_single_point_constant_restart_from_surface(
             lake_soil_carbon: lake_soil_carbon.as_deref(),
             soil: &soil,
             canopy: &canopy,
-            canopy_structure: None,
+            canopy_structure: canopy_structure.as_ref().map(|[ncd, ncw, bcw]| {
+                crate::CanopyStructureFields {
+                    needleleaf_crown_depth_m: ncd,
+                    needleleaf_crown_width_m: ncw,
+                    broadleaf_crown_width_m: bcw,
+                }
+            }),
             tuning: config.tuning,
             uses_van_genuchten: config.hydraulic_model == HydraulicModel::VanGenuchten,
             bedrock: bedrock.as_ref(),

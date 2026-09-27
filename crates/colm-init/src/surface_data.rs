@@ -28,6 +28,9 @@ pub struct SinglePointSurfaceData {
     pub slope_ratio: f64,
     /// Optional raw `dbedrock` depth in centimetres, enabled by `DEF_USE_BEDROCK`.
     pub bedrock_depth_cm: Option<f64>,
+    /// 截获方案 8 的冠层结构 `(ncd, ncw, bcw)`：srfdata 只在 `DEF_Interception_scheme = 8`
+    /// 时带这三个量（`MOD_SingleSrfdata.F90:2997-3000`），`MOD_HtopReadin` 再原样写进常数文件。
+    pub canopy_structure_m: Option<[f64; 3]>,
     /// The first eight CoLM soil layers, from top to bottom.
     pub soil_layers: Vec<SoilLayerInput>,
 }
@@ -543,6 +546,14 @@ fn single_point_surface_from_file(
         elevation_std_m: scalar(file, "elvstd")?,
         slope_ratio: scalar(file, "sloperatio")?,
         bedrock_depth_cm: optional_scalar(file, "depth_to_bedrock")?,
+        canopy_structure_m: match (
+            optional_scalar(file, "ncd")?,
+            optional_scalar(file, "ncw")?,
+            optional_scalar(file, "bcw")?,
+        ) {
+            (Some(ncd), Some(ncw), Some(bcw)) => Some([ncd, ncw, bcw]),
+            _ => None,
+        },
         soil_layers: source.into_layers(),
     })
 }

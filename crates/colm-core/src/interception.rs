@@ -31,6 +31,8 @@ pub struct CanopyInterceptionInput {
     pub large_scale_snow_kg_m2_s: f64,
     pub sprinkler_irrigation_kg_m2_s: f64,
     pub vegetation_snow: bool,
+    /// `DEF_Interception_scheme = 8`（CoLM2024）要的冠层结构；方案 1 为 `None`。
+    pub colm2024: Option<Colm2024Canopy>,
 }
 
 /// Ground throughfall and retained-canopy diagnostics from one interception step.
@@ -115,6 +117,102 @@ pub fn canopy_wetness(
     })
 }
 
+/// 方案 8（`LEAF_interception_CoLM2024`）的静态冠层参数（常数重启里的 `htop`/`ncd`/`ncw`/`bcw`
+/// 与地类号）。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Colm2024Canopy {
+    pub canopy_top_m: f64,
+    pub needleleaf_crown_depth_m: f64,
+    pub needleleaf_crown_width_m: f64,
+    pub broadleaf_crown_width_m: f64,
+    pub vegetation_class: i32,
+    pub is_pft: bool,
+    pub land_cover: crate::LandCoverScheme,
+}
+
+/// `canopy_storage_capacity_colm2024`（`main/MOD_LeafInterception.F90`）：方案 8 的冠层雨容量。
+///
+/// 按地类（LCT 用 IGBP/USGS 类号，PFT 用 PFT 号）分成针叶、阔叶、灌木、混交四类，
+/// 针叶用冠深/冠宽 `ncd`/`ncw`、阔叶用冠宽 `bcw` 与冠高 `htop`，两者都随风速减小。
+/// 参数缺失（单点常见的 spval）或超出 (0, 1000) 时退回 `dewmx*(lai+sai)`。
+/// GIMPLE 里唯一的收缩是风速 `sqrt(.FMA (us, us, vs*vs))`。
+#[allow(clippy::too_many_arguments)]
+pub fn canopy_storage_capacity_colm2024(
+    maximum_dew_mm: f64,
+    leaf_area_index: f64,
+    stem_area_index: f64,
+    eastward_wind_m_s: f64,
+    northward_wind_m_s: f64,
+    canopy_top_m: f64,
+    needleleaf_crown_depth_m: f64,
+    needleleaf_crown_width_m: f64,
+    broadleaf_crown_width_m: f64,
+    vegetation_class: i32,
+    is_pft: bool,
+    land_cover: crate::LandCoverScheme,
+) -> f64 {
+    let fallback = maximum_dew_mm * (leaf_area_index + stem_area_index).max(0.0);
+    // 1 针叶、2 阔叶、3 灌木、4 混交；0 = 用默认容量。
+    let canopy_type = if is_pft {
+        match vegetation_class {
+            1..=3 => 1,
+            4..=8 => 2,
+            9..=11 => 3,
+            _ => 0,
+        }
+    } else {
+        match land_cover {
+            crate::LandCoverScheme::Usgs => match vegetation_class {
+                12 | 14 => 1,
+                11 | 13 => 2,
+                8 => 3,
+                15 => 4,
+                _ => 0,
+            },
+            crate::LandCoverScheme::Igbp => match vegetation_class {
+                1 | 3 => 1,
+                2 | 4 => 2,
+                5 => 4,
+                6 | 7 => 3,
+                _ => 0,
+            },
+        }
+    };
+    if canopy_type == 0 {
+        return fallback;
+    }
+    let wind = eastward_wind_m_s
+        .mul_add(eastward_wind_m_s, northward_wind_m_s * northward_wind_m_s)
+        .max(0.0)
+        .sqrt();
+    let in_range = |value: f64| value.is_finite() && value > 0.0 && value < 1000.0;
+    let needle_valid = (canopy_type == 1 || canopy_type == 4)
+        && needleleaf_crown_depth_m.is_finite()
+        && needleleaf_crown_width_m.is_finite()
+        && in_range(needleleaf_crown_depth_m)
+        && in_range(needleleaf_crown_width_m);
+    let broad_valid = (canopy_type == 2 || canopy_type == 4)
+        && broadleaf_crown_width_m.is_finite()
+        && canopy_top_m.is_finite()
+        && in_range(broadleaf_crown_width_m)
+        && in_range(canopy_top_m);
+    let needle_capacity = || {
+        (needleleaf_crown_depth_m.clamp(3.0, 11.0) + needleleaf_crown_width_m.clamp(2.9, 7.0))
+            / (4.0 * (1.0 + wind.clamp(1.0, 3.6)))
+    };
+    let broad_capacity = || {
+        let crown_ratio = (canopy_top_m / broadleaf_crown_width_m).clamp(1.0, 7.0);
+        broadleaf_crown_width_m.clamp(2.0, 8.0) / (2.0 * (wind.clamp(1.5, 4.0) + crown_ratio))
+    };
+    match canopy_type {
+        1 if needle_valid => needle_capacity(),
+        2 if broad_valid => broad_capacity(),
+        3 => 0.5 * (1.0 + 1.0 / (1.0 + wind.clamp(1.0, 4.0))),
+        4 if needle_valid && broad_valid => 0.5 * (needle_capacity() + broad_capacity()),
+        _ => fallback,
+    }
+}
+
 /// Port of MOD_LeafInterception.F90:LEAF_interception_CoLM2014.
 ///
 /// The PFT and PC wrapper is intentionally not duplicated: it calls this same
@@ -156,8 +254,33 @@ pub fn intercept_canopy(
         });
     }
 
-    let saturation_capacity = input.maximum_dew_mm * leaf_stem_area;
-    let saturation_rain = saturation_capacity;
+    let mut saturation_capacity = input.maximum_dew_mm * leaf_stem_area;
+    let mut saturation_rain = saturation_capacity;
+    // 方案 8：`LEAF_interception_CoLM2024` 在 `lai+sai > 1e-6` 时（这里已经在那一支里）
+    // 算出容量交给 CoLM2014 当 `satcap_rain_override`。`main/MOD_LeafInterception.F90:309-311`：
+    // 覆盖值只替换雨容量；关掉 `DEF_VEG_SNOW` 时 `satcap` 也跟着换（雪容量 `48*satcap` 于是也变）。
+    let rain_capacity_override = input.colm2024.map(|canopy| {
+        canopy_storage_capacity_colm2024(
+            input.maximum_dew_mm,
+            input.leaf_area_index,
+            input.stem_area_index,
+            input.eastward_wind_m_s,
+            input.northward_wind_m_s,
+            canopy.canopy_top_m,
+            canopy.needleleaf_crown_depth_m,
+            canopy.needleleaf_crown_width_m,
+            canopy.broadleaf_crown_width_m,
+            canopy.vegetation_class,
+            canopy.is_pft,
+            canopy.land_cover,
+        )
+    });
+    if let Some(capacity) = rain_capacity_override {
+        saturation_rain = capacity.max(0.0);
+        if !input.vegetation_snow {
+            saturation_capacity = saturation_rain;
+        }
+    }
     let saturation_snow = f77(48.0) * saturation_capacity;
     let convective_amount =
         (input.convective_rain_kg_m2_s + input.convective_snow_kg_m2_s) * input.time_step_seconds;

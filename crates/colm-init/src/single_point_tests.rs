@@ -1971,6 +1971,7 @@ fn single_point_restart_surface() -> SinglePointSurfaceData {
         elevation_std_m: 5.0,
         slope_ratio: 1.2,
         bedrock_depth_cm: None,
+        canopy_structure_m: None,
         soil_layers: (0..8)
             .map(|_| SoilLayerInput {
                 vf_quartz: 0.3,

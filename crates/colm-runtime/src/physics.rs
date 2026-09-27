@@ -68,23 +68,18 @@ pub fn land_physics_parameters(
     // `DEF_SPLIT_SOILSNOW`：能量侧（比湿、`t_grnd`、凝结拆分、`fgrnd`）与水分侧
     // （`snowwater` 只拿雪面那份、土面走 `pg_rain*(1-fsno) - qseva_soil`）都已接上。
     let split_soil_snow = logical(document, "DEF_SPLIT_SOILSNOW")?;
-    // `DEF_Interception_scheme` **从来没被读过**：`interception.rs` 只实现了 scheme 1
-    // （CoLM2014，闭环 `compare_interception` 的名字就是 `LEAF_interception_CoLM2014`），
-    // 而声明注释里那 7 档是**不同的公式**（`LEAF_interception_{NOAHMP,MATSIRO,VIC,JULES}`，
-    // 见 `interception.rs:168`）。写别的档位以前会静默按 CoLM2014 跑完。
-    // 实测（第 388 轮，`CN-Cng` 第 0 步、两侧逐位比）：1/2/3/8 相同；
-    // **4/5/6/7 差到 `f_zerr` 0.5 量级的相对差**；0 让内核 `CALL abort`
-    // （`MOD_LeafInterception_Extended.F90:1498` 的 `ELSE CALL abort`）。
-    // 声明默认值是 1，所以按本文件的纪律 #3 把非 1 的档位直接报错。
+    // `DEF_Interception_scheme`：`main/` 的 `LEAF_interception_wrap` 只接受 1（CoLM2014）
+    // 与 8（CoLM2024，CoLM2014 外加按冠层结构算的雨容量），其余档位在非扩展构建里
+    // `CALL abort`（`MOD_LeafInterception.F90:614-617`）。这里照样拒绝。
     let interception_scheme = integer(document, "DEF_Interception_scheme")?;
-    if interception_scheme != 1 {
-        bail!(
-            "DEF_Interception_scheme = {interception_scheme}, but the Rust runtime implements \
-             only scheme 1 (CoLM2014, `interception.rs`): schemes 4-7 (Noah-MP/MATSIRO/VIC/JULES) \
-             are measured to differ (CN-Cng step 0: f_zerr ~0.5 relative) and 2/3/8 are \
-             unverified, so the case would silently run the CoLM2014 interception instead"
-        );
-    }
+    let colm2024_interception = match interception_scheme {
+        1 => false,
+        8 => true,
+        other => bail!(
+            "DEF_Interception_scheme = {other}: the kernel (main/, non-extended build) supports only \
+             schemes 1 (CoLM2014) and 8 (CoLM2024) and aborts on any other value"
+        ),
+    };
     if logical(document, "DEF_Optimize_Baseflow")? {
         // `MOD_ParameterOptimization`/`MOD_Opt_Baseflow`：预热期逐次迭代
         // `scale_baseflow(ipatch)`（`MOD_Opt_Baseflow.F90:82` 只在 `is_spinup` 时动手），
@@ -310,6 +305,7 @@ pub fn land_physics_parameters(
         plant_hydraulic_overrides,
         vegetation_snow,
         split_soil_snow,
+        colm2024_interception,
         land_cover_scheme,
         root_fraction_scheme: ROOT_FRACTION_SCHEME,
         timestep_seconds,

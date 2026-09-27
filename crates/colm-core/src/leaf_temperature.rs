@@ -1092,7 +1092,7 @@ pub fn leaf_temperature(
             .mul_add(bracket, slope_applied);
         leaf_latent_heat_j_kg.mul_add(last.evaporation_imbalance, bracket_applied)
     };
-    let mut transpiration = last
+    let transpiration = last
         .transpiration_temperature_slope
         .mul_add(final_temperature_change, last.transpiration);
     let mut wet_evaporation = last
@@ -1261,7 +1261,9 @@ pub fn leaf_temperature(
         * input.ground_humidity_temperature_slope_k;
     let ground_flux_temperature_slope_w_m2_k = ground_latent_slope_kg_m2_s_k
         .mul_add(input.ground_latent_heat_j_kg, ground_sensible_slope_w_m2_k);
-    transpiration = transpiration.max(0.0);
+    // **不**把 `etr` 夹到非负：`main/` 的非 TRACER 路径允许收尾后的 `etr = etr + etr_dtl*dtl`
+    // 为很小的负数（只有 TRACER 构建在 `:1107-1113` 把负值并进 `evplwet` 再置 0）。早先这里有
+    // 一句 `max(0)`，AT-Neu 灌木地类 1 月第 647 条 Fortran `f_etr = -1.7e-14` 而 Rust 为 0。
     Ok(LeafTemperatureOutput {
         ground_latent_heat_j_kg: input.ground_latent_heat_j_kg,
         leaf_latent_heat_j_kg,

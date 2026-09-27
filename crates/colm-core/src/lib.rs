@@ -166,8 +166,8 @@ pub use urban_bem::{urban_bem, UrbanBemInput, UrbanBemState};
 pub use urban_flux_diagnostics::UrbanFluxDiagnostics;
 
 pub use interception::{
-    canopy_wetness, intercept_canopy, CanopyInterceptionFluxes, CanopyInterceptionInput,
-    CanopyWater, CanopyWetness,
+    canopy_storage_capacity_colm2024, canopy_wetness, intercept_canopy, CanopyInterceptionFluxes,
+    CanopyInterceptionInput, CanopyWater, CanopyWetness, Colm2024Canopy,
 };
 pub use irrigation::{
     irrigation_application_fluxes, irrigation_is_scheduled, IrrigationApplicationFluxes,

@@ -429,3 +429,24 @@ fn vegetation_snow_is_no_longer_an_unported_branch() {
         "vegetation snow must not be reported as unported"
     );
 }
+
+/// 截获方案：`main/` 只接受 1 与 8，其余档位内核 `CALL abort`，这里同样拒绝。
+#[test]
+fn interception_scheme_eight_is_read_and_other_schemes_are_refused() {
+    let colm2024 = land_physics_parameters(
+        &case_with("DEF_Interception_scheme = 8"),
+        LandCoverScheme::Igbp,
+        HEIGHTS,
+    )
+    .unwrap();
+    assert!(colm2024.colm2024_interception);
+    let default = land_physics_parameters(&case_with(""), LandCoverScheme::Igbp, HEIGHTS).unwrap();
+    assert!(!default.colm2024_interception);
+    let error = land_physics_parameters(
+        &case_with("DEF_Interception_scheme = 5"),
+        LandCoverScheme::Igbp,
+        HEIGHTS,
+    )
+    .expect_err("scheme 5 aborts in the kernel");
+    assert!(error.to_string().contains("schemes 1"), "{error}");
+}

@@ -1207,6 +1207,7 @@ mod tests {
             plant_hydraulic_overrides: colm_core::PlantHydraulicOverrides::default(),
             vegetation_snow: false,
             split_soil_snow: false,
+            colm2024_interception: false,
             land_cover_scheme: colm_core::LandCoverScheme::Igbp,
             root_fraction_scheme: colm_core::RootFractionScheme::SchenkJackson,
             timestep_seconds: 1800.0,
