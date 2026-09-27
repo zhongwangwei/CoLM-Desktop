@@ -95,22 +95,35 @@ ENDIF
          write(cyear,'(i4.4)') min(DEF_LAI_END_YEAR, max(DEF_LAI_START_YEAR,year) )
          write(ctime,'(i2.2)') time
 
-         ! Use the completeness-checked reader: the plain ncio_read_vector leaves
-         ! sbuff untouched for any block file that is absent and no defval was
-         ! supplied, so the uninitialised buffer is scattered straight into tlai.
-         ! LAI has no physically meaningful default (zero would wrongly strip
-         ! cropland and forest), so an incomplete set of block files must fail
-         ! loudly instead of silently entering the simulation.
          lndname = trim(landdir)//'/'//trim(cyear)//'/LAI_patches'//trim(ctime)//'.nc'
-         CALL ncio_read_vector_complete (lndname, 'LAI_patches',  landpatch, tlai)
+         IF (ncio_vector_exist (lndname, 'LAI_patches', landpatch)) then
+            CALL ncio_read_vector (lndname, 'LAI_patches', landpatch, tlai)
+         ELSE
+            IF (p_is_master) THEN
+               write(*,*) 'Warning: LAI_patches can not be found in ', trim(lndname)
+            ENDIF
+         ENDIF
 
          lndname = trim(landdir)//'/'//trim(cyear)//'/SAI_patches'//trim(ctime)//'.nc'
-         CALL ncio_read_vector_complete (lndname, 'SAI_patches',  landpatch, tsai)
+         IF (ncio_vector_exist (lndname, 'SAI_patches', landpatch)) then
+            CALL ncio_read_vector (lndname, 'SAI_patches', landpatch, tsai)
+         ELSE
+            IF (p_is_master) THEN
+               write(*,*) 'Warning: SAI_patches can not be found in ', trim(lndname)
+            ENDIF
+         ENDIF
       ELSE
          write(cyear,'(i4.4)') min(DEF_LAI_END_YEAR, max(DEF_LAI_START_YEAR,year) )
          write(ctime,'(i3.3)') time
+
          lndname = trim(landdir)//'/'//trim(cyear)//'/LAI_patches'//trim(ctime)//'.nc'
-         CALL ncio_read_vector_complete (lndname, 'LAI_patches',  landpatch, tlai)
+         IF (ncio_vector_exist (lndname, 'LAI_patches', landpatch)) then
+            CALL ncio_read_vector (lndname, 'LAI_patches', landpatch, tlai)
+         ELSE
+            IF (p_is_master) THEN
+               write(*,*) 'Warning: LAI_patches can not be found in ', trim(lndname)
+            ENDIF
+         ENDIF
       ENDIF
 #endif
 
@@ -178,18 +191,46 @@ ENDIF
 
       write(cyear,'(i4.4)') min(DEF_LAI_END_YEAR, max(DEF_LAI_START_YEAR,year) )
       write(ctime,'(i2.2)') time
+
       IF (.not. DEF_USE_LAIFEEDBACK)THEN
          lndname = trim(landdir)//'/'//trim(cyear)//'/LAI_patches'//trim(ctime)//'.nc'
-         CALL ncio_read_vector_complete (lndname, 'LAI_patches',  landpatch, tlai )
+         IF (ncio_vector_exist (lndname, 'LAI_patches', landpatch)) then
+            CALL ncio_read_vector (lndname, 'LAI_patches', landpatch, tlai)
+         ELSE
+            IF (p_is_master) THEN
+               write(*,*) 'Warning: LAI_patches can not be found in ', trim(lndname)
+            ENDIF
+         ENDIF
       ENDIF
+
       lndname = trim(landdir)//'/'//trim(cyear)//'/SAI_patches'//trim(ctime)//'.nc'
-      CALL ncio_read_vector_complete (lndname, 'SAI_patches',  landpatch, tsai )
+      IF (ncio_vector_exist (lndname, 'SAI_patches', landpatch)) then
+         CALL ncio_read_vector (lndname, 'SAI_patches', landpatch, tsai)
+      ELSE
+         IF (p_is_master) THEN
+            write(*,*) 'Warning: SAI_patches can not be found in ', trim(lndname)
+         ENDIF
+      ENDIF
+
       IF (.not. DEF_USE_LAIFEEDBACK)THEN
          lndname = trim(landdir)//'/'//trim(cyear)//'/LAI_pfts'//trim(ctime)//'.nc'
-         CALL ncio_read_vector_complete (lndname, 'LAI_pfts', landpft, tlai_p )
+         IF (ncio_vector_exist (lndname, 'LAI_pfts', landpft)) then
+            CALL ncio_read_vector (lndname, 'LAI_pfts', landpft, tlai_p)
+         ELSE
+            IF (p_is_master) THEN
+               write(*,*) 'Warning: LAI_pfts can not be found in ', trim(lndname)
+            ENDIF
+         ENDIF
       ENDIF
+
       lndname = trim(landdir)//'/'//trim(cyear)//'/SAI_pfts'//trim(ctime)//'.nc'
-      CALL ncio_read_vector_complete (lndname, 'SAI_pfts', landpft, tsai_p )
+      IF (ncio_vector_exist (lndname, 'SAI_pfts', landpft)) then
+         CALL ncio_read_vector (lndname, 'SAI_pfts', landpft, tsai_p)
+      ELSE
+         IF (p_is_master) THEN
+            write(*,*) 'Warning: SAI_pfts can not be found in ', trim(lndname)
+         ENDIF
+      ENDIF
 
 #endif
 

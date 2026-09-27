@@ -959,7 +959,7 @@ CONTAINS
 	      USE MOD_Vars_TimeInvariants, only: patchtype
 	      integer, intent(in) :: patchclass_new(:), patchclass_old(:)
 	      integer*8, intent(in) :: eindex_new(:), eindex_old(:)
-	      real(r8), intent(in), optional :: lccpct_patches(:,:)
+	      real(r8), intent(in), optional :: lccpct_patches(:,0:)
 	      real(r8), intent(in), optional :: new_patch_area(:)
 	      real(r8), intent(in), optional :: old_patch_area(:)
       integer :: nnew, np

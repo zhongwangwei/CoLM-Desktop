@@ -156,8 +156,8 @@ CONTAINS
 
       IF (tracers(itrc)%ref_ratio > 0._r8) THEN
          DO i = 1, n_isotope_physics
-            IF (isotope_physics(i)%ref_ratio_hint > trc_tiny .and. &
-                abs(tracers(itrc)%ref_ratio - isotope_physics(i)%ref_ratio_hint) / &
+            IF (isotope_physics(i)%ref_ratio_hint <= trc_tiny) CYCLE
+            IF (abs(tracers(itrc)%ref_ratio - isotope_physics(i)%ref_ratio_hint) / &
                 isotope_physics(i)%ref_ratio_hint < isotope_physics(i)%ref_ratio_tolerance) THEN
                find_isotope_physics = i
                RETURN
@@ -179,7 +179,8 @@ CONTAINS
 
       isotope_alpha_liq_vap = 1._r8
       idx = find_isotope_physics(itrc)
-      IF (idx > 0 .and. associated(isotope_physics(idx)%alpha_liq_vap)) &
+      IF (idx <= 0) RETURN
+      IF (associated(isotope_physics(idx)%alpha_liq_vap)) &
          isotope_alpha_liq_vap = isotope_physics(idx)%alpha_liq_vap(temp_k)
    END FUNCTION isotope_alpha_liq_vap
 
@@ -190,7 +191,8 @@ CONTAINS
 
       isotope_alpha_ice_vap = 1._r8
       idx = find_isotope_physics(itrc)
-      IF (idx > 0 .and. associated(isotope_physics(idx)%alpha_ice_vap)) &
+      IF (idx <= 0) RETURN
+      IF (associated(isotope_physics(idx)%alpha_ice_vap)) &
          isotope_alpha_ice_vap = isotope_physics(idx)%alpha_ice_vap(temp_k)
    END FUNCTION isotope_alpha_ice_vap
 
@@ -200,7 +202,8 @@ CONTAINS
 
       isotope_diffusivity_ratio_air = 1._r8
       idx = find_isotope_physics(itrc)
-      IF (idx > 0 .and. associated(isotope_physics(idx)%diffusivity_ratio_air)) &
+      IF (idx <= 0) RETURN
+      IF (associated(isotope_physics(idx)%diffusivity_ratio_air)) &
          isotope_diffusivity_ratio_air = isotope_physics(idx)%diffusivity_ratio_air()
    END FUNCTION isotope_diffusivity_ratio_air
 
@@ -220,7 +223,8 @@ CONTAINS
 
       isotope_leaf_liquid_diffusivity = 0._r8
       idx = find_isotope_physics(itrc)
-      IF (idx > 0 .and. associated(isotope_physics(idx)%leaf_liquid_diffusivity)) &
+      IF (idx <= 0) RETURN
+      IF (associated(isotope_physics(idx)%leaf_liquid_diffusivity)) &
          isotope_leaf_liquid_diffusivity = isotope_physics(idx)%leaf_liquid_diffusivity(temp_k)
    END FUNCTION isotope_leaf_liquid_diffusivity
 

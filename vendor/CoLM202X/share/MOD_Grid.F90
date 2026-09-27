@@ -105,6 +105,7 @@ MODULE MOD_Grid
    type :: grid_concat_type
       integer :: ndatablk
       integer :: nxseg, nyseg
+      integer :: ilon0 = 1, ilat0 = 1
       type(segment_type), allocatable :: xsegs(:), ysegs(:)
       type(grid_info_type) :: ginfo
    CONTAINS
@@ -781,6 +782,7 @@ CONTAINS
       ilat_l = findloc_ud(grid%yblk /= 0)
       ilat_u = findloc_ud(grid%yblk /= 0, back=.true.)
 
+      this%ilat0 = ilat_l
       this%ginfo%nlat = ilat_u - ilat_l + 1
       IF (allocated(this%ginfo%lat_s)) deallocate(this%ginfo%lat_s)
       IF (allocated(this%ginfo%lat_n)) deallocate(this%ginfo%lat_n)
@@ -850,6 +852,7 @@ CONTAINS
          ENDDO
       ENDIF
 
+      this%ilon0 = ilon_w
       this%ginfo%nlon = ilon_e - ilon_w + 1
       IF (this%ginfo%nlon <= 0) THEN
          this%ginfo%nlon = this%ginfo%nlon + grid%nlon

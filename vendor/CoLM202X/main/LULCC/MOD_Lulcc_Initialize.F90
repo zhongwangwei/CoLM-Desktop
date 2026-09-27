@@ -51,6 +51,8 @@ CONTAINS
    USE MOD_Vars_TimeInvariants
    USE MOD_Vars_TimeVariables
    USE MOD_Initialize
+   USE MOD_Tracer_Defs, only: ntracers
+   USE MOD_Namelist, only: DEF_LULCC_SCHEME
 
    IMPLICIT NONE
 
@@ -64,12 +66,17 @@ CONTAINS
 
 !-------------------------- Local Variables ----------------------------
    integer :: year, jday
+   logical :: old_has_patches
 
 !-----------------------------------------------------------------------
 
       ! initial time of model run and consts
       year = jdate(1)
       jday = jdate(2)
+      IF (DEF_USE_TRACER) THEN
+      old_has_patches = .false.
+      IF (p_is_worker) old_has_patches = numpatch > 0
+      ENDIF
 
       CALL Init_GlobalVars
       CALL Init_LC_Const
@@ -99,6 +106,12 @@ CONTAINS
 
       ! load landpatch data of next year
       CALL pixelset_load_from_file (dir_landdata, 'landpatch', landpatch, numpatch, year)
+      IF (DEF_USE_TRACER) THEN
+      IF (p_is_worker .and. ntracers > 0 .and. DEF_LULCC_SCHEME == 2) THEN
+         IF (old_has_patches .neqv. (numpatch > 0)) &
+            CALL CoLM_stop('TRACER LULCC worker element footprint changed')
+      ENDIF
+      ENDIF
 
       ! load pft data of PFT/PC of next year
       IF (DEF_USE_PFT .or. DEF_USE_PC) THEN

@@ -81,6 +81,8 @@ CONTAINS
       ENDIF
       deallocate (counts, disps, rcache, sendbuf)
 #elif defined(USEMPI)
+      CALL mpi_barrier (p_comm_glb, p_err)
+
       IF (p_is_worker) THEN
          mesg = (/p_iam_glb, vlen/)
          CALL mpi_send (mesg, 2, MPI_INTEGER, p_address_master, mpi_tag_mesg, p_comm_glb, p_err)
@@ -117,7 +119,6 @@ CONTAINS
 
    END SUBROUTINE vector_gather_to_master
 
-   ! -------
    SUBROUTINE vector_gather_matrix_to_master ( &
          matrix, nrow, ncol_local, ncol_global, global_id, wdata)
 
@@ -140,8 +141,6 @@ CONTAINS
 
       IF (nrow <= 0 .or. ncol_global <= 0) RETURN
 
-      ! Current use assumes dense global IDs in 1..ncol_global, with one
-      ! column per global pathway ID across all workers.
       IF (size(global_id) /= ncol_local) THEN
          CALL CoLM_stop ('vector_gather_matrix_to_master: global_id size mismatch')
       ENDIF
@@ -489,7 +488,6 @@ CONTAINS
 
    END SUBROUTINE vector_read_and_scatter
 
-   ! -----
    SUBROUTINE vector_read_matrix_and_scatter ( &
          filein, matrix, nrow, ncol_local, varname, global_id, ncol_global)
 

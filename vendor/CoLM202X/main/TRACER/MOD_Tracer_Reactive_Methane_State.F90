@@ -2139,9 +2139,15 @@ CONTAINS
 	         WHERE (invalid_restart_value(conc_methane_sat_component(:,component,:)))
 	            conc_methane_sat_component(:,component,:) = conc_methane_sat
 	         END WHERE
-	         WHERE (invalid_restart_value(layer_sat_lag_component(:,component,:)))
-	            layer_sat_lag_component(:,component,:) = layer_sat_lag
-	         END WHERE
+	         IF (component_state_present) THEN
+	            WHERE (invalid_restart_fraction_or_sentinel(layer_sat_lag_component(:,component,:)))
+	               layer_sat_lag_component(:,component,:) = layer_sat_lag
+	            END WHERE
+	         ELSE
+	            WHERE (invalid_restart_value(layer_sat_lag_component(:,component,:)))
+	               layer_sat_lag_component(:,component,:) = layer_sat_lag
+	            END WHERE
+	         ENDIF
 	         WHERE (invalid_restart_value(annavg_agnpp_component(component,:)))
 	            annavg_agnpp_component(component,:) = annavg_agnpp
 	         END WHERE
@@ -2169,12 +2175,24 @@ CONTAINS
 	         WHERE (invalid_restart_value(tempavg_finrw_component(component,:)))
 	            tempavg_finrw_component(component,:) = tempavg_finrw
 	         END WHERE
-	         WHERE (invalid_restart_value(fsat_bef_component(component,:)))
-	            fsat_bef_component(component,:) = fsat_bef
-	         END WHERE
-	         WHERE (invalid_restart_value(finundated_lag_component(component,:)))
-	            finundated_lag_component(component,:) = finundated_lag
-	         END WHERE
+	         IF (component_state_present) THEN
+	            WHERE (invalid_restart_fraction_or_sentinel(fsat_bef_component(component,:)))
+	               fsat_bef_component(component,:) = fsat_bef
+	            END WHERE
+	         ELSE
+	            WHERE (invalid_restart_value(fsat_bef_component(component,:)))
+	               fsat_bef_component(component,:) = fsat_bef
+	            END WHERE
+	         ENDIF
+	         IF (component_state_present) THEN
+	            WHERE (invalid_restart_fraction_or_sentinel(finundated_lag_component(component,:)))
+	               finundated_lag_component(component,:) = finundated_lag
+	            END WHERE
+	         ELSE
+	            WHERE (invalid_restart_value(finundated_lag_component(component,:)))
+	               finundated_lag_component(component,:) = finundated_lag
+	            END WHERE
+	         ENDIF
 	      END DO
 	      WHERE (invalid_restart_value(conc_o2_unsat_component)) conc_o2_unsat_component = 1._r8
 	      WHERE (invalid_restart_value(conc_o2_sat_component)) conc_o2_sat_component = 1._r8
@@ -2562,7 +2580,7 @@ CONTAINS
 	      USE MOD_SPMD_Task, only: CoLM_stop
 	      integer, intent(in) :: patchclass_new(:), patchclass_old(:)
 	      integer*8, intent(in) :: eindex_new(:), eindex_old(:)
-	      real(r8), intent(in), optional :: lccpct_patches(:,:)
+      real(r8), intent(in), optional :: lccpct_patches(:,0:)
 	      real(r8), intent(in), optional :: new_patch_area(:)
 	      real(r8), intent(in), optional :: old_patch_area(:)
 	      integer :: nnew, np, op, link
@@ -2576,7 +2594,7 @@ CONTAINS
 	      CALL init_methane_wetland_fraction_cache (nnew)
 
 		      IF (.not. methane_lulcc_snapshot_valid) THEN
-         IF (allocated(patchtype) .and. allocated(lake_soilc_srf)) THEN
+         IF (allocated(patchtype)) THEN
             CALL initialize_methane_lake_soilc_from_surface (patchtype, lake_soilc_srf, &
                DEF_METHANE%allowlakeprod)
          ENDIF
@@ -2627,14 +2645,8 @@ CONTAINS
       CALL remap2d(lulcc_layer_sat_lag_old,        layer_sat_lag)
       CALL remap2d(lulcc_lake_soilc_old,           lake_soilc)
       IF (allocated(patchtype)) THEN
-         IF (DEF_METHANE%allowlakeprod .and. count(patchtype == PATCHTYPE_LAKE) > 0 .and. &
-             .not. allocated(lake_soilc_srf)) THEN
-            CALL CoLM_stop (' ***** ERROR: LULCC lake CH4 production requires lake_soilc surface data.')
-         ENDIF
-         IF (allocated(lake_soilc_srf)) THEN
-            CALL initialize_methane_lake_soilc_from_surface (patchtype, lake_soilc_srf, &
-               DEF_METHANE%allowlakeprod, initialize_lake_from_surface)
-         ENDIF
+         CALL initialize_methane_lake_soilc_from_surface (patchtype, lake_soilc_srf, &
+            DEF_METHANE%allowlakeprod, initialize_lake_from_surface)
       ENDIF
       CALL remap2d(lulcc_c_atm_old,                c_atm)
 	  CALL remap_component_fraction(lulcc_rice_fraction_prev_old, rice_fraction_prev)
@@ -3509,11 +3521,12 @@ CONTAINS
       initialize_patch)
       USE MOD_SPMD_Task, only: CoLM_stop
       integer,  intent(in) :: patchtype_in(:)
-      real(r8), intent(in) :: lake_soilc_srf_in(:,:)
+      real(r8), intent(in), optional :: lake_soilc_srf_in(:,:)
       logical,  intent(in) :: allowlakeprod
       logical,  intent(in), optional :: initialize_patch(:)
 
       integer :: ipatch, npatch
+      logical, allocatable :: needs_initialization(:)
       integer :: lake_soilc_nlake, lake_soilc_missing
       real(r8), parameter :: smallnumber = 1.e-12_r8
 
@@ -3524,8 +3537,7 @@ CONTAINS
       IF (lake_soilc_nlake == 0) RETURN
 
       npatch = size(lake_soilc,2)
-      IF (size(patchtype_in) /= npatch .or. size(lake_soilc_srf_in,1) < nl_soil .or. &
-          size(lake_soilc_srf_in,2) /= npatch) THEN
+      IF (size(patchtype_in) /= npatch) THEN
          CALL CoLM_stop (' ***** ERROR: lake CH4 surface carbon dimensions do not match the active patch layout.')
       ENDIF
       IF (present(initialize_patch)) THEN
@@ -3534,9 +3546,29 @@ CONTAINS
          ENDIF
       ENDIF
 
+      ! Only cold/new lakes need surface carbon. Existing lakes may have
+      ! legitimately exhausted their inventory and must never be refilled.
+      allocate(needs_initialization(npatch))
+      needs_initialization = patchtype_in == PATCHTYPE_LAKE
+      IF (present(initialize_patch)) THEN
+         needs_initialization = needs_initialization .and. initialize_patch
+      ELSE
+         DO ipatch = 1, npatch
+            IF (sum(max(lake_soilc(:,ipatch), 0._r8)) > smallnumber) &
+               needs_initialization(ipatch) = .false.
+         ENDDO
+      ENDIF
+      IF (.not. any(needs_initialization)) RETURN
+      IF (.not. present(lake_soilc_srf_in)) THEN
+         CALL CoLM_stop (' ***** ERROR: lake CH4 initialization requires lake_soilc surface data.')
+      ENDIF
+      IF (size(lake_soilc_srf_in,1) < nl_soil .or. size(lake_soilc_srf_in,2) /= npatch) THEN
+         CALL CoLM_stop (' ***** ERROR: lake CH4 surface carbon dimensions do not match the active patch layout.')
+      ENDIF
+
       lake_soilc_missing = 0
       DO ipatch = 1, npatch
-         IF (patchtype_in(ipatch) /= PATCHTYPE_LAKE) CYCLE
+         IF (.not. needs_initialization(ipatch)) CYCLE
          IF (any(invalid_restart_value(lake_soilc_srf_in(1:nl_soil,ipatch))) .or. &
              any(lake_soilc_srf_in(1:nl_soil,ipatch) < 0._r8) .or. &
              sum(lake_soilc_srf_in(1:nl_soil,ipatch)) <= smallnumber) THEN
@@ -3545,18 +3577,13 @@ CONTAINS
       END DO
 
       IF (lake_soilc_missing > 0) THEN
-         write(6,*) ' ERROR: lake CH4 production requires positive finite lake_soilc for every lake patch; missing ', &
+         write(6,*) ' ERROR: lake CH4 production requires positive finite lake_soilc for every initialized lake patch; missing ', &
             lake_soilc_missing, ' of ', lake_soilc_nlake, ' local lake patches.'
          CALL CoLM_stop (' ***** ERROR: incomplete lake_soilc input while lake CH4 production is enabled.')
       ENDIF
 
       DO ipatch = 1, npatch
-         IF (patchtype_in(ipatch) /= PATCHTYPE_LAKE) CYCLE
-         IF (present(initialize_patch)) THEN
-            IF (.not. initialize_patch(ipatch)) CYCLE
-         ELSE
-            IF (sum(max(lake_soilc(:,ipatch), 0._r8)) > smallnumber) CYCLE
-         ENDIF
+         IF (.not. needs_initialization(ipatch)) CYCLE
          lake_soilc(:,ipatch) = max(lake_soilc_srf_in(1:nl_soil,ipatch), 0._r8)
       END DO
    END SUBROUTINE initialize_methane_lake_soilc_from_surface

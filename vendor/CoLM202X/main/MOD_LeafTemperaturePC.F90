@@ -21,9 +21,11 @@ MODULE MOD_LeafTemperaturePC
 ! /////////////////////////////////////////////////////////////////////
 !
 !-----------------------------------------------------------------------
+   USE MOD_Namelist, only: DEF_USE_TRACER
    USE MOD_Precision
+   USE MOD_LeafInterception, only: canopy_storage_capacity_colm2024
    USE MOD_Namelist, only: DEF_USE_CBL_HEIGHT, DEF_USE_PLANTHYDRAULICS, DEF_USE_OZONESTRESS, &
-                           DEF_RSS_SCHEME, DEF_SPLIT_SOILSNOW, &
+                           DEF_RSS_SCHEME, DEF_Interception_scheme, DEF_SPLIT_SOILSNOW, &
                            DEF_VEG_SNOW
    IMPLICIT NONE
    SAVE
@@ -33,6 +35,7 @@ MODULE MOD_LeafTemperaturePC
 
 ! PRIVATE MEMBER FUNCTIONS:
    PRIVATE :: dewfraction
+   PRIVATE :: colm2024_rain_capacity_for_fwet
 
 
 !-----------------------------------------------------------------------
@@ -114,6 +117,7 @@ CONTAINS
    USE MOD_Const_Physical, only: vonkar, grav, hvap, hsub, cpair, stefnc, &
                                  cpliq, cpice, hfus, tfrz, denice, denh2o
    USE MOD_Const_PFT
+   USE MOD_Vars_TimeInvariants, only: ncd_p, ncw_p, bcw_p
    USE MOD_FrictionVelocity
    USE MOD_CanopyLayerProfile
    USE MOD_TurbulenceLEddy
@@ -552,6 +556,20 @@ CONTAINS
       dtl(:,:) = 0.
       fevpl_bef(:) = 0.
 
+! ==== FIX 2026-08-16 #4 BEGIN: when ozone stress is OFF, the ozone coefficients
+! were left as spval (never read from restart, and the ELSE branch below that sets
+! them to 1.0 runs only AFTER the stability iteration). They are USED inside the
+! iteration (gs0sun at line ~1200), so initialize them to 1.0 BEFORE the loop. ====
+      IF (.not. DEF_USE_OZONESTRESS) THEN
+         DO i = ps, pe
+            o3coefv_sun(i) = 1.0_r8
+            o3coefg_sun(i) = 1.0_r8
+            o3coefv_sha(i) = 1.0_r8
+            o3coefg_sha(i) = 1.0_r8
+         ENDDO
+      ENDIF
+! ==== FIX 2026-08-16 #4 END ====
+
       d_opt  = 2
       rd_opt = 3
       rb_opt = 3
@@ -634,8 +652,16 @@ CONTAINS
          ENDIF
 
          IF (fcover(i)>0 .and. lsai(i)>1.e-6) THEN
+            IF (DEF_USE_TRACER) THEN
+            CALL dewfraction (sigf(i),lai(i),sai(i),dewmx,&
+                              ldew(i),ldew_rain(i),ldew_snow(i),fwet(i),fdry(i) &
+                              ,colm2024_rain_capacity_for_fwet(dewmx,lai(i),sai(i), &
+                              us,vs,htop(i),pftclass(i),.true.,ncd_p(i),ncw_p(i),bcw_p(i)) &
+                              )
+            ELSE
             CALL dewfraction (sigf(i),lai(i),sai(i),dewmx,&
                               ldew(i),ldew_rain(i),ldew_snow(i),fwet(i),fdry(i))
+            ENDIF
             CALL qsadv(tl(i),psrf,ei(i),deiDT(i),qsatl(i),qsatlDT(i))
          ENDIF
       ENDDO
@@ -1839,6 +1865,16 @@ ENDIF
             fevpl  (i) = fevpl_noadj(i)
             fevpl  (i) = fevpl(i)   +   fevpl_dtl(i)*dtl(it-1,i)
 
+      IF (DEF_USE_TRACER) THEN
+            IF (etr(i) < 0._r8) THEN
+               evplwet(i) = evplwet(i) + etr(i)
+               etr(i) = 0._r8
+               etrsun(i) = 0._r8
+               etrsha(i) = 0._r8
+               IF (DEF_USE_PLANTHYDRAULICS) rootflux(:,i) = 0._r8
+            ENDIF
+
+      ENDIF
             elwmax = ldew(i)/deltim
 
             ! 03/02/2018, yuan: convert fc to whole area
@@ -1860,6 +1896,10 @@ ENDIF
 !-----------------------------------------------------------------------
 ! Update dew accumulation (kg/m2)
 !-----------------------------------------------------------------------
+            ! Upstream TRACER builds use the colm2014 update for every scheme (plus the
+            ! VEG_SNOW-off component split below); other builds branch per scheme.
+            IF (DEF_USE_TRACER .or. DEF_Interception_scheme .eq. 1 .or. DEF_Interception_scheme .eq. 8) THEN !colm2014
+
                ldew(i) = max(0., ldew(i)-evplwet(i)*deltim)
 
                ! account for vegetation snow and update ldew_rain, ldew_snow, ldew
@@ -1891,6 +1931,76 @@ ENDIF
 
                   ldew(i) = ldew_rain(i) + ldew_snow(i)
                ENDIF
+
+               IF (DEF_USE_TRACER) THEN
+               IF (.not. DEF_VEG_SNOW) THEN
+                  IF (ldew_rain(i) + ldew_snow(i) > 1.e-10_r8) THEN
+                     ldew_rain(i) = ldew(i) * (ldew_rain(i) / (ldew_rain(i) + ldew_snow(i)))
+                     ldew_snow(i) = ldew(i) - ldew_rain(i)
+                  ELSEIF (tl(i) > tfrz) THEN
+                     ldew_rain(i) = ldew(i)
+                     ldew_snow(i) = 0._r8
+                  ELSE
+                     ldew_rain(i) = 0._r8
+                     ldew_snow(i) = ldew(i)
+                  ENDIF
+               ENDIF
+               ENDIF
+            ELSEIF (DEF_Interception_scheme .eq. 2) THEN!CLM4.5
+               ldew(i) = max(0., ldew(i)-evplwet(i)*deltim)
+            ELSEIF (DEF_Interception_scheme .eq. 3) THEN !CLM5
+               IF (ldew_rain(i) .gt. evplwet(i)*deltim) THEN
+                  ldew_rain(i) = ldew_rain(i)-evplwet(i)*deltim
+                  ldew_snow(i) = ldew_snow(i)
+                  ldew(i)=ldew_rain(i)+ldew_snow(i)
+               ELSE
+                  ldew_rain(i) = 0.0
+                  ldew_snow(i) = max(0., ldew(i)-evplwet(i)*deltim)
+                  ldew (i)     = ldew_snow(i)
+               ENDIF
+            ELSEIF (DEF_Interception_scheme .eq. 4) THEN !Noah-MP
+               IF (ldew_rain(i) .gt. evplwet(i)*deltim) THEN
+                  ldew_rain(i) = ldew_rain(i)-evplwet(i)*deltim
+                  ldew_snow(i) = ldew_snow(i)
+                  ldew(i)=ldew_rain(i)+ldew_snow(i)
+               ELSE
+                  ldew_rain(i) = 0.0
+                  ldew_snow(i) = max(0., ldew(i)-evplwet(i)*deltim)
+                  ldew (i)     = ldew_snow(i)
+               ENDIF
+            ELSEIF (DEF_Interception_scheme .eq. 5) THEN !MATSIRO
+               IF (ldew_rain(i) .gt. evplwet(i)*deltim) THEN
+                  ldew_rain(i) = ldew_rain(i)-evplwet(i)*deltim
+                  ldew_snow(i) = ldew_snow(i)
+                  ldew(i)=ldew_rain(i)+ldew_snow(i)
+               ELSE
+                  ldew_rain(i) = 0.0
+                  ldew_snow(i) = max(0., ldew(i)-evplwet(i)*deltim)
+                  ldew (i)     = ldew_snow(i)
+               ENDIF
+            ELSEIF (DEF_Interception_scheme .eq. 6) THEN !VIC
+               IF (ldew_rain(i) .gt. evplwet(i)*deltim) THEN
+                  ldew_rain(i) = ldew_rain(i)-evplwet(i)*deltim
+                  ldew_snow(i) = ldew_snow(i)
+                  ldew(i)=ldew_rain(i)+ldew_snow(i)
+               ELSE
+                  ldew_rain(i) = 0.0
+                  ldew_snow(i) = max(0., ldew(i)-evplwet(i)*deltim)
+                  ldew (i)     = ldew_snow(i)
+               ENDIF
+            ELSEIF (DEF_Interception_scheme .eq. 7) THEN !JULES
+               IF (ldew_rain(i) .gt. evplwet(i)*deltim) THEN
+                  ldew_rain(i) = ldew_rain(i)-evplwet(i)*deltim
+                  ldew_snow(i) = ldew_snow(i)
+                  ldew(i)=ldew_rain(i)+ldew_snow(i)
+               ELSE
+                  ldew_rain(i) = 0.0
+                  ldew_snow(i) = max(0., ldew(i)-evplwet(i)*deltim)
+                  ldew (i)     = ldew_snow(i)
+               ENDIF
+            ELSE
+               CALL abort
+            ENDIF
 
             IF ( DEF_VEG_SNOW ) THEN
                ! update fwet_snow
@@ -2025,7 +2135,7 @@ ENDIF
 !----------------------------------------------------------------------
 
 
-   SUBROUTINE dewfraction (sigf,lai,sai,dewmx,ldew,ldew_rain,ldew_snow,fwet,fdry)
+   SUBROUTINE dewfraction (sigf,lai,sai,dewmx,ldew,ldew_rain,ldew_snow,fwet,fdry,satcap_rain_override)
 !=======================================================================
 !  Original author: Yongjiu Dai, September 15, 1999
 !
@@ -2049,10 +2159,12 @@ ENDIF
    real(r8), intent(in)  :: ldew_snow !depth of snow on foliage [kg/m2/s]
    real(r8), intent(out) :: fwet      !fraction of foliage covered by water&snow [-]
    real(r8), intent(out) :: fdry      !fraction of foliage that is green and dry [-]
+   real(r8), intent(in), optional :: satcap_rain_override
 
    real(r8) :: lsai                   !lai + sai
    real(r8) :: dewmxi                 !inverse of maximum allowed dew [1/mm]
    real(r8) :: vegt                   !sigf*lsai, NOTE: remove sigf
+   real(r8) :: satcap_rain
    real(r8) :: fwet_rain              !fraction of foliage covered by water [-]
    real(r8) :: fwet_snow              !fraction of foliage covered by snow [-]
 
@@ -2063,10 +2175,18 @@ ENDIF
       dewmxi = 1.0/dewmx
       ! 06/2018, yuan: remove sigf, to compatible with PFT
       vegt   =  lsai
+      IF (DEF_USE_TRACER) THEN
+      satcap_rain = dewmx * vegt
+      IF (present(satcap_rain_override)) satcap_rain = max(0._r8, satcap_rain_override)
+      ENDIF
 
       fwet = 0
       IF (ldew > 0.) THEN
+      IF (DEF_USE_TRACER) THEN
+         fwet = (ldew/max(satcap_rain,1.e-10_r8))**.666666666666
+      ELSE
          fwet = ((dewmxi/vegt)*ldew)**.666666666666
+      ENDIF
          ! Check for maximum limit of fwet
          fwet = min(fwet,1.0)
       ENDIF
@@ -2077,7 +2197,11 @@ ENDIF
 
          fwet_rain = 0
          IF(ldew_rain > 0.) THEN
+      IF (DEF_USE_TRACER) THEN
+            fwet_rain = (ldew_rain/max(satcap_rain,1.e-10_r8))**.666666666666
+      ELSE
             fwet_rain = ((dewmxi/vegt)*ldew_rain)**.666666666666
+      ENDIF
             ! Check for maximum limit of fwet_rain
             fwet_rain = min(fwet_rain,1.0)
          ENDIF
@@ -2098,5 +2222,24 @@ ENDIF
       fdry = (1.-fwet)*lai/lsai
 
    END SUBROUTINE dewfraction
+
+
+   FUNCTION colm2024_rain_capacity_for_fwet(dewmx,lai,sai,forc_us,forc_vs,htop_in, &
+                                            veg_class,is_pft,ncd_eff,ncw_eff,bcw_eff) RESULT(satcap)
+   USE MOD_Precision
+   IMPLICIT NONE
+   real(r8), intent(in) :: dewmx, lai, sai, forc_us, forc_vs, htop_in
+   integer,  intent(in) :: veg_class
+   logical,  intent(in) :: is_pft
+   real(r8), intent(in) :: ncd_eff, ncw_eff, bcw_eff
+   real(r8)             :: satcap
+      satcap = dewmx * max(0._r8, lai+sai)
+      IF (DEF_Interception_scheme == 8 .and. lai+sai > 1.e-6_r8) THEN
+         satcap = canopy_storage_capacity_colm2024(dewmx,lai,sai,forc_us,forc_vs,htop_in, &
+                                                   ncd_eff,ncw_eff,bcw_eff,veg_class,is_pft)
+      ENDIF
+   END FUNCTION colm2024_rain_capacity_for_fwet
+
+
 
 END MODULE MOD_LeafTemperaturePC

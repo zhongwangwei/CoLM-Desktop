@@ -62,7 +62,7 @@ CONTAINS
         sm_roof        ,sm_gimp        ,sm_gper        ,sm_lake        ,&
         lake_icefrac   ,scv_lake       ,snowdp_lake    ,imelt_lake     ,&
         fioldl         ,w_old                                          ,&
-#if (defined CaMa_Flood)
+#if (defined CaMa_Flood) || (defined GridRiverLakeFlow)
         flddepth       ,fldfrc         ,qinfl_fld                      ,&
 #endif
         forc_us        ,forc_vs                                        ,&
@@ -158,7 +158,7 @@ CONTAINS
 
    real(r8), intent(inout) :: rootflux(1:nl_soil)
 
-#if (defined CaMa_Flood)
+#if (defined CaMa_Flood) || (defined GridRiverLakeFlow)
    real(r8), intent(inout) :: flddepth  ! inundation water depth [mm]
    real(r8), intent(in)    :: fldfrc    ! inundation water depth [0-1]
    real(r8), intent(out)   :: qinfl_fld ! grid averaged inundation water input from top (mm/s)
@@ -256,19 +256,6 @@ CONTAINS
 
    real(r8) :: a, aa, xs1
 
-   ! WATER_2014's tracer soil/snow water-diagnostic outputs are mandatory,
-   ! always-present arguments now (TRACER is a runtime switch, DEF_USE_TRACER,
-   ! MOD_Namelist.F90; the arguments themselves are unconditional). Full urban
-   ! TRACER is still intentionally unsupported (guarded in CoLMDRIVER) and
-   ! UrbanHydrology does not call tracer_soil_water; these local buffers only
-   ! satisfy WATER_2014's explicit interface while preserving the existing
-   ! urban water calculation.
-   real(r8) :: qlayer_urb(0:nl_soil)
-   real(r8) :: etroot_trc_urb(1:nl_soil)
-   real(r8) :: etroot_actual_trc_urb(1:nl_soil)
-   real(r8) :: etroot_aquifer_trc_urb
-   real(r8) :: snow_qout_layer_urb(min(lbp, 0):0)
-
 !-----------------------------------------------------------------------
 
       fg = 1 - froof
@@ -296,9 +283,7 @@ CONTAINS
              0.          ,& ! fsno, not active
              rsur_gper   ,rnof_gper   ,qinfl       ,pondmx      ,ssi         ,&
              wimp        ,smpmin      ,zwt         ,wdsrf       ,wa          ,qcharge     ,&
-             qlayer_urb  ,etroot_trc_urb ,etroot_actual_trc_urb ,&
-             etroot_aquifer_trc_urb ,snow_qout_layer_urb                  ,&
-#if (defined CaMa_Flood)
+#if (defined CaMa_Flood) || (defined GridRiverLakeFlow)
              flddepth    ,fldfrc      ,qinfl_fld                             ,&
 #endif
 ! SNICAR model variables

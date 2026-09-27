@@ -3,6 +3,8 @@
 MODULE MOD_Vars_1DAccFluxes
 
    USE MOD_Precision
+   ! Runtime switches read by land_history_restart.inc (module procedures).
+   USE MOD_Namelist, only: DEF_URBAN_RUN, DEF_USE_TRACER, DEF_USE_PFT, DEF_USE_PC, DEF_USE_BGC
 #ifdef DataAssimilation
    USE MOD_DA_Vars_TimeVariables
    USE MOD_DA_Vars_1DFluxes
@@ -12,6 +14,10 @@ MODULE MOD_Vars_1DAccFluxes
    USE MOD_Lake_1DAccVars
 #endif
    USE MOD_Tracer_LandPhase, only: tracer_flush_acc_fluxes, tracer_accumulate_fluxes
+
+   interface history_acc_write
+      module procedure history_acc_write1, history_acc_write2, history_acc_write3
+   end interface
 
    real(r8) :: nac ! number of accumulation
    real(r8), allocatable :: nac_ln      (:)
@@ -493,7 +499,6 @@ CONTAINS
    IMPLICIT NONE
 
       IF (p_is_worker) THEN
-         IF (numpatch > 0) THEN
 
             allocate (a_us        (numpatch))
             allocate (a_vs        (numpatch))
@@ -963,7 +968,6 @@ ENDIF
             allocate (nac_dt      (numpatch))
             allocate (filter_dt   (numpatch))
 
-         ENDIF
       ENDIF
 
 #ifdef EXTERNAL_LAKE
@@ -985,7 +989,6 @@ ENDIF
    IMPLICIT NONE
 
       IF (p_is_worker) THEN
-         IF (numpatch > 0) THEN
 
             deallocate (a_us     )
             deallocate (a_vs     )
@@ -1457,7 +1460,6 @@ ENDIF
             deallocate (nac_dt      )
             deallocate (filter_dt   )
 
-         ENDIF
       ENDIF
 
 #ifdef EXTERNAL_LAKE
@@ -1989,7 +1991,7 @@ ENDIF
    USE MOD_Vars_1DFluxes
    USE MOD_FrictionVelocity
    USE MOD_Namelist, only: DEF_USE_CBL_HEIGHT, DEF_USE_OZONESTRESS, DEF_USE_PLANTHYDRAULICS, DEF_USE_NITRIF, &
-      DEF_USE_TRACER, DEF_USE_PFT, DEF_USE_PC, DEF_USE_BGC
+      DEF_USE_TRACER, DEF_USE_PFT, DEF_USE_PC, DEF_USE_BGC, DEF_USE_VariablySaturatedFlow
    USE MOD_TurbulenceLEddy
    USE MOD_Vars_Global
 #ifdef CatchLateralFlow
@@ -2130,7 +2132,11 @@ ENDIF
             CALL acc1d (etrsun_out    , a_etrsun         )
             CALL acc1d (etrsha_out    , a_etrsha         )
 
+      IF (DEF_USE_TRACER) THEN
+            IF (.not. DEF_USE_VariablySaturatedFlow) CALL acc1d (qcharge, a_qcharge)
+      ELSE
             CALL acc1d (qcharge       , a_qcharge        )
+      ENDIF
 
             CALL acc1d (t_grnd        , a_t_grnd         )
             CALL acc1d (tleaf         , a_tleaf          )
@@ -2965,6 +2971,8 @@ ENDIF
       ENDDO
 
    END SUBROUTINE acc3d
+
+#include <land_history_restart.inc>
 
 END MODULE MOD_Vars_1DAccFluxes
 ! ---------- EOP ------------

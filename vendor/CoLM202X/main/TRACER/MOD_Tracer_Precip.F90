@@ -345,7 +345,7 @@ CONTAINS
 
          throughfall = max(forc_snow * deltim - intercepted, 0._r8)
          drip = max(max(pg_snow, 0._r8) * deltim - xsc_mass - throughfall, 0._r8)
-         drip = min(drip, max(intercepted, 0._r8))
+         drip = min(drip, max(water_mixed, 0._r8))
 
          trc_ldew_snow(itrc, ipatch) = max(trc_mixed - drip * R_mixed, 0._r8)
 

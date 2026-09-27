@@ -42,6 +42,8 @@ MODULE CMF_CTRL_SED_MOD
   PUBLIC  :: CMF_ERROR_ABORT
   PUBLIC  :: CMF_SED_DIAG_AVEMAX_ADPSTP
   PUBLIC  :: CMF_SED_RESTART_WRITE
+  CHARACTER(LEN=24), PARAMETER :: SED_HIST_NAMES(4) = [CHARACTER(LEN=24) :: &
+    'history_sedout', 'history_sedinp', 'history_bedout', 'history_netflw']
   ! Define CMF_ERROR_ABORT interface
   INTERFACE CMF_ERROR_ABORT
     MODULE PROCEDURE CMF_ERROR_ABORT_STRING
@@ -198,7 +200,7 @@ CONTAINS
 
     ! Set Default Values
     lambda           = 0.4_JPRB
-    lyrdph           = 0.05d0       ! Default active layer depth 5 cm
+    lyrdph           = 0.00005d0    ! Default active layer depth 10cm
     nsed             = 3
     psedD            = 2.65d0       !  
     pset             = 1.d0     ! typical value for natural sand
@@ -272,6 +274,8 @@ CONTAINS
     !==========================================================
     USE NETCDF
     use CMF_UTILS_MOD,           only: NCERROR
+    use YOS_CMF_INPUT,           only: LRESTART
+    use CMF_CTRL_RESTART_MOD,    only: LRESTCDF
     IMPLICIT NONE
 
     ! Local variables
@@ -424,6 +428,7 @@ CONTAINS
   d2rivsto_pre(:) = P2RIVSTO(:,1)
   d2rivout_sed(:) = 0.d0
   d2rivvel_sed(:) = 0.d0
+  IF (LRESTART .AND. LRESTCDF) CALL CMF_SED_HISTORY_READ_CDF
   print *, "d2rivsto_pre:", d2rivsto_pre(1)
   print *, "d2rivout_sed:", d2rivout_sed(1)
   print *, "d2rivvel_sed:", d2rivvel_sed(1)
@@ -507,9 +512,99 @@ CONTAINS
       enddo
   
       if ( REGIONTHIS == 1 ) close(tmpnam)
+      CALL CMF_SED_HISTORY_WRITE_CDF
   
     !endif
   end subroutine CMF_SED_RESTART_WRITE
+
+  SUBROUTINE CMF_SED_HISTORY_WRITE_CDF
+    USE NETCDF
+    USE YOS_CMF_INPUT, ONLY: CSUFCDF
+    USE CMF_CTRL_RESTART_MOD, ONLY: LRESTCDF, CRESTDIR, CVNREST
+    USE CMF_UTILS_MOD, ONLY: NCERROR, vecP2mapP
+#ifdef UseMPI_CMF
+    USE CMF_CTRL_MPI_MOD, ONLY: CMF_MPI_AllReduce_P2MAP
+#endif
+    IMPLICIT NONE
+    INTEGER(KIND=JPIM) :: NCID, LONID, LATID, TIMEID, SEDID, VARID, IVAR, ISED
+    CHARACTER(LEN=256) :: CDATE, CFILE
+    REAL(KIND=JPRD) :: P2VEC(NSEQMAX,1), P2MAP(NX,NY), P3MAP(NX,NY,nsed)
+    IF (.NOT.LRESTCDF) RETURN
+    WRITE(CDATE,'(I8.8,I2.2)') JYYYYMMDD,JHOUR
+    CFILE=TRIM(CRESTDIR)//TRIM(CVNREST)//TRIM(CDATE)//TRIM(CSUFCDF)
+    IF (REGIONTHIS==1) THEN
+      CALL NCERROR(NF90_OPEN(CFILE,NF90_WRITE,NCID),'opening sediment history '//TRIM(CFILE))
+      CALL NCERROR(NF90_REDEF(NCID))
+      CALL NCERROR(NF90_INQ_DIMID(NCID,'lon',LONID))
+      CALL NCERROR(NF90_INQ_DIMID(NCID,'lat',LATID))
+      CALL NCERROR(NF90_INQ_DIMID(NCID,'time',TIMEID))
+      CALL NCERROR(NF90_DEF_DIM(NCID,'sediment_class',nsed,SEDID))
+      DO IVAR=1,4
+        CALL NCERROR(NF90_DEF_VAR(NCID,TRIM(SED_HIST_NAMES(IVAR)),NF90_DOUBLE, &
+                     (/LONID,LATID,SEDID,TIMEID/),VARID,DEFLATE_LEVEL=6))
+      ENDDO
+      CALL NCERROR(NF90_ENDDEF(NCID))
+    ENDIF
+    DO IVAR=1,4
+      DO ISED=1,nsed
+        P2VEC(:,1)=REAL(d2sedv_avg(:,ISED,IVAR),KIND=JPRD)
+        CALL vecP2mapP(P2VEC,P2MAP)
+#ifdef UseMPI_CMF
+        CALL CMF_MPI_AllReduce_P2MAP(P2MAP)
+#endif
+        P3MAP(:,:,ISED)=P2MAP
+      ENDDO
+      IF (REGIONTHIS==1) THEN
+        CALL NCERROR(NF90_INQ_VARID(NCID,TRIM(SED_HIST_NAMES(IVAR)),VARID))
+        CALL NCERROR(NF90_PUT_VAR(NCID,VARID,P3MAP,(/1,1,1,1/),(/NX,NY,nsed,1/)))
+      ENDIF
+    ENDDO
+    IF (REGIONTHIS==1) CALL NCERROR(NF90_CLOSE(NCID))
+  END SUBROUTINE CMF_SED_HISTORY_WRITE_CDF
+
+  SUBROUTINE CMF_SED_HISTORY_READ_CDF
+    USE NETCDF
+    USE CMF_CTRL_RESTART_MOD, ONLY: CRESTSTO, LLEGACY_DAILY_HISTORY
+    USE YOS_CMF_DIAG, ONLY: NADD_out
+    USE CMF_UTILS_MOD, ONLY: NCERROR, mapP2vecD
+    IMPLICIT NONE
+    INTEGER(KIND=JPIM) :: NCID, DIMID, DLEN, VARID, STATUS, IVAR, ISED
+    REAL(KIND=JPRD) :: P3MAP(NX,NY,nsed)
+    REAL(KIND=JPRB) :: D2TMP(NSEQMAX,1)
+    CALL NCERROR(NF90_OPEN(TRIM(CRESTSTO),NF90_NOWRITE,NCID),'opening sediment history')
+    STATUS=NF90_INQ_VARID(NCID,TRIM(SED_HIST_NAMES(1)),VARID)
+    IF (STATUS==NF90_ENOTVAR) THEN
+      IF (.NOT.LLEGACY_DAILY_HISTORY .OR. MOD(KMINSTART,1440_JPIM)/=0 .OR. NADD_out/=0._JPRB) THEN
+        WRITE(LOGNAM,*) 'READ_REST: checkpoint lacks sediment daily history'
+        STOP 9
+      ENDIF
+      DO IVAR=2,4
+        STATUS=NF90_INQ_VARID(NCID,TRIM(SED_HIST_NAMES(IVAR)),VARID)
+        IF (STATUS/=NF90_ENOTVAR) THEN
+          WRITE(LOGNAM,*) 'READ_REST: incomplete sediment daily history'
+          STOP 9
+        ENDIF
+      ENDDO
+      CALL NCERROR(NF90_CLOSE(NCID))
+      RETURN
+    ENDIF
+    CALL NCERROR(STATUS,'finding sediment history')
+    CALL NCERROR(NF90_INQ_DIMID(NCID,'sediment_class',DIMID))
+    CALL NCERROR(NF90_INQUIRE_DIMENSION(NCID,DIMID,LEN=DLEN))
+    IF (DLEN/=nsed) THEN
+      WRITE(LOGNAM,*) 'READ_REST: sediment class count mismatch', DLEN, nsed
+      STOP 9
+    ENDIF
+    DO IVAR=1,4
+      CALL NCERROR(NF90_INQ_VARID(NCID,TRIM(SED_HIST_NAMES(IVAR)),VARID))
+      CALL NCERROR(NF90_GET_VAR(NCID,VARID,P3MAP,(/1,1,1,1/),(/NX,NY,nsed,1/)))
+      DO ISED=1,nsed
+        CALL mapP2vecD(P3MAP(:,:,ISED),D2TMP)
+        d2sedv_avg(:,ISED,IVAR)=D2TMP(:,1)
+      ENDDO
+    ENDDO
+    CALL NCERROR(NF90_CLOSE(NCID))
+  END SUBROUTINE CMF_SED_HISTORY_READ_CDF
   !####################################################################
 
 

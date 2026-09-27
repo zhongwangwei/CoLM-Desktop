@@ -15,45 +15,29 @@ MODULE MOD_Grid_RiverLakeTimeVars
    USE MOD_Grid_RiverLakeBifurcation, only: write_bifurcation_restart
    IMPLICIT NONE
 
-   real(r8), parameter :: RIVERLAKE_DRY_DEPTH = 1.e-5_r8
    integer, parameter :: GRIDRIVER_RESTART_SCHEMA_VERSION = 2
    integer, parameter :: GRIDRIVER_UCATCH_IDENTITY_VERSION = 1
    integer, parameter :: GRIDRIVER_RESERVOIR_IDENTITY_VERSION = 1
 
    ! -- state variables --
-   real(r8), allocatable, target :: wdsrf_ucat (:) ! river or lake water depth [m]
-   ! River depth paired with the carried bifurcation pathway momentum. CaMa's
-   ! channel local-inertial scheme uses this previous-substep depth in a
-   ! geometric mean with the current depth, so it is prognostic restart state.
-   real(r8), allocatable, target :: wdsrf_ucat_prev (:) ! previous BIF depth [m]
+   real(r8), allocatable, target :: wdsrf_ucat (:)
+   real(r8), allocatable, target :: wdsrf_ucat_prev (:)
    logical :: wdsrf_ucat_prev_valid = .false.
    logical :: wdsrf_ucat_prev_restart_found = .false.
    logical :: restart_transaction_validated = .false.
    logical :: restart_feature_manifest_present = .false.
    logical :: restart_bifurcation_enabled = .false.
    logical :: restart_levee_enabled = .false.
-   real(r8), allocatable, target :: veloc_riv  (:) ! river velocity            [m/s]
+   real(r8), allocatable, target :: veloc_riv  (:)
    real(r8), allocatable :: momen_riv  (:) ! unit river momentum       [m^2/s]
    real(r8), allocatable :: volresv    (:) ! reservoir water volume    [m^3]
-   ! Prognostic routing volume [m^3]. For ordinary cells this is the total
-   ! movable river/floodplain volume; for levee cells it is the visible
-   ! river-side volume and levsto carries the protected-side volume.  This is
-   ! owned by TimeVars because it is a hydrologic state/restart variable, not a
-   ! levee-parameter variable; the levee module may read/write it through
-   ! explicit arguments only.
    real(r8), allocatable :: volwater_ucat (:)
    logical               :: volwater_ucat_valid = .false.
 
-   ! -- routing accumulator state (must persist across restart so that a
-   !    restart written mid routing-period does not drop the land-runoff
-   !    increments queued for the next flush). Owned here (rather than in
-   !    MOD_Grid_RiverLakeFlow) so WRITE/READ_GridRiverLakeTimeVars can
-   !    serialise them without a circular USE; Flow imports them via the
-   !    existing USE MOD_Grid_RiverLakeTimeVars at the top of that module.
-   real(r8), save       :: acctime_rnof = 0._r8     ! accumulated land time since last routing flush [s]
-   real(r8), allocatable :: acc_rnof_uc (:)         ! accumulated runoff depth per ucatch [m]
+   real(r8), save       :: acctime_rnof = 0._r8
+   real(r8), allocatable :: acc_rnof_uc (:)
 
-   ! -- restart file path (saved for deferred particle-tracer restart read) --
+   ! -- restart file path (saved for deferred sediment restart read) --
    character(len=512) :: gridriver_restart_file = ''
 
    ! PUBLIC MEMBER FUNCTIONS:
@@ -100,7 +84,6 @@ CONTAINS
    integer, allocatable :: global_id_local(:)
    real(r8), allocatable :: identity(:,:), identity_global(:,:)
 
-      ! The empty identity is valid and needs no zero-column NetCDF variable.
       IF (totalnumucat <= 0) RETURN
 
       CALL build_gridriver_ucatch_identity (identity)
@@ -231,10 +214,6 @@ CONTAINS
          CALL CoLM_stop ('GridRiverLake restart transaction is not complete')
       ENDIF
 
-      ! Schema v1 predates explicit feature ownership. Preserve its original
-      ! permissive deferred-reader behaviour; schema v2 makes both declarations
-      ! mandatory so an absent payload can no longer be confused with disabled
-      ! physics.
       IF (restart_schema == 1) THEN
          restart_transaction_validated = .true.
          RETURN
@@ -288,8 +267,6 @@ CONTAINS
       first_mismatch_gid = huge(first_mismatch_gid)
       IF (p_is_worker) THEN
          DO i = 1, numucat
-            ! Validate finiteness first: `/=` against NaN may raise invalid
-            ! before the identity mismatch can be rejected under FP traps.
             IF (any(.not. ieee_is_finite(identity_restart(:, i)))) THEN
                mismatch_count = mismatch_count + 1
                first_mismatch_gid = min(first_mismatch_gid, global_id_local(i))
@@ -345,9 +322,6 @@ CONTAINS
       CALL mpi_bcast (has_identity, 1, MPI_LOGICAL, p_address_master, p_comm_glb, p_err)
 #endif
       IF (.not. has_identity) THEN
-         ! Schema v1 predates this identity.  Schema v2 writes volresv as a
-         ! required transaction field and must also prove what each ordinal
-         ! represents before that state may be scattered.
          IF (restart_feature_manifest_present) THEN
             CALL CoLM_stop ('GridRiverLake schema-v2 restart is missing required reservoir identity')
          ENDIF
@@ -424,9 +398,6 @@ CONTAINS
          nresv_state = numresv
       ENDIF
 
-      ! Restart gather wrappers are entered by master, worker, and IO ranks.
-      ! Keep every actual argument allocated, using zero-length arrays where a
-      ! rank owns no state, so the assumed-shape dummy contract is valid.
       allocate (wdsrf_ucat (ncell_state))
       allocate (wdsrf_ucat_prev (ncell_state))
       allocate (veloc_riv  (ncell_state))
@@ -436,8 +407,6 @@ CONTAINS
       acc_rnof_uc = 0._r8
       wdsrf_ucat_prev = 0._r8
 
-      ! Allocated on every rank because read_levee_restart is collective and
-      ! receives this TimeVars-owned state via an assumed-shape argument.
       allocate (volwater_ucat(ncell_state))
       volwater_ucat = 0._r8
 
@@ -476,9 +445,6 @@ CONTAINS
       CALL validate_gridriver_ucatch_identity (file_restart, legacy_restart)
       CALL validate_gridriver_reservoir_identity (file_restart, legacy_restart)
 
-      ! A restart read is a new state transaction. Missing optional variables
-      ! must retain cold-start defaults, not state from an earlier in-process
-      ! read of another file.
       acctime_rnof = 0._r8
       IF (allocated(acc_rnof_uc)) acc_rnof_uc = 0._r8
       IF (allocated(wdsrf_ucat_prev)) wdsrf_ucat_prev = 0._r8
@@ -487,10 +453,6 @@ CONTAINS
       IF (allocated(volwater_ucat)) volwater_ucat = 0._r8
       volwater_ucat_valid = .false.
 
-      ! Probe the base-state payload once on master. Schema v2 turns the
-      ! writer's always-emitted physical state into a complete transaction;
-      ! schema v1 and fully legacy files retain their historical optional
-      ! accumulator/visible-volume fields.
       base_var_flags = 0
       IF (p_is_master) THEN
          IF (ncio_var_exist(file_restart, 'wdsrf_ucat', readflag = .false.)) base_var_flags(1) = 1
@@ -523,9 +485,6 @@ CONTAINS
          CALL vector_read_and_scatter (file_restart, veloc_riv,  numucat, 'veloc_riv',  ucat_data_address)
       ENDIF
 
-      ! Additive restart field: old/legacy files lack it, so initialize the
-      ! first semi-implicit BIF step with current depth. New files preserve the
-      ! exact depth paired with pth_momen, including MPI repartitioning.
       has_var = .false.
       IF (p_is_master .and. totalnumucat > 0) &
          has_var = ncio_var_exist(file_restart, 'wdsrf_ucat_prev', readflag = .false.)
@@ -545,8 +504,6 @@ CONTAINS
 
          invalid_prev_count = 0
          DO i = 1, size(wdsrf_ucat_prev)
-            ! Fortran logical evaluation is not short-circuiting: never compare
-            ! a NaN against zero when invalid floating-point traps are enabled.
             IF (.not. ieee_is_finite(wdsrf_ucat_prev(i))) THEN
                invalid_prev_count = invalid_prev_count + 1
             ELSEIF (wdsrf_ucat_prev(i) < 0._r8) THEN
@@ -561,8 +518,6 @@ CONTAINS
             IF (.not. legacy_restart) THEN
                CALL CoLM_stop ('GridRiverLake restart has invalid wdsrf_ucat_prev')
             ENDIF
-            ! A legacy file has no transaction-level integrity guarantee. Keep
-            ! it readable, but cold-start the paired BIF momentum/depth unit.
             wdsrf_ucat_prev = wdsrf_ucat
          ELSE
             wdsrf_ucat_prev_restart_found = .true.
@@ -578,9 +533,6 @@ CONTAINS
          ENDIF
       ENDIF
 
-      ! Routing accumulator recovery. Absent variables (old-format restart
-      ! or first cold start) keep the zero defaults from allocate_*, so the
-      ! old behaviour is preserved when the file predates this persistence.
       IF (base_var_flags(3) == 1) THEN
          CALL ncio_read_bcast_serial (file_restart, 'acctime_rnof', acctime_rnof)
       ENDIF
@@ -593,10 +545,6 @@ CONTAINS
          CALL vector_read_and_scatter (file_restart, volwater_ucat, numucat, 'volwater_ucat', ucat_data_address)
       ENDIF
 
-      ! Validate finiteness before every ordered comparison so corrupted NaNs
-      ! are rejected cleanly under -ffpe-trap=invalid. acc_rnof_uc may be
-      ! signed by upstream forcing/numerics, so only its finiteness is an
-      ! invariant here.
       invalid_base_count = 0
       DO i = 1, size(wdsrf_ucat)
          IF (.not. ieee_is_finite(wdsrf_ucat(i))) THEN
@@ -649,19 +597,6 @@ CONTAINS
       ENDIF
       IF (base_var_flags(5) == 1) volwater_ucat_valid = .true.
 
-      ! Note: levee restart (levsto) is read separately in grid_riverlake_flow_init
-      ! after levee_init() allocates the levsto array. Same deferred-restart pattern.
-
-      ! Note: bifurcation restart (pth_veloc, pth_momen) is read separately
-      ! in grid_riverlake_flow_init after bifurcation_init() allocates the
-      ! arrays. Same deferred-restart pattern as levee.
-
-      ! Note: tracer restart is read separately in grid_riverlake_flow_init
-      ! after river_lake_tracer_init() allocates the arrays. Same pattern as others.
-
-      ! Note: particle-tracer restart is read through MOD_Tracer_Lifecycle,
-      ! called from grid_riverlake_flow_init after particle species are initialized.
-
    END SUBROUTINE READ_GridRiverLakeTimeVars
 
 
@@ -697,8 +632,6 @@ CONTAINS
          wdsrf_ucat, numucat, totalnumucat, ucat_data_address, file_restart, 'wdsrf_ucat', 'ucatch')
 
       IF (DEF_USE_BIFURCATION .and. totalnpthout > 0 .and. npthlev_bif > 0) THEN
-         ! A restart may be requested before the first BIF routing flush. In
-         ! that case current depth is the correct cold-start previous depth.
          IF (.not. wdsrf_ucat_prev_valid) THEN
             wdsrf_ucat_prev = wdsrf_ucat
             wdsrf_ucat_prev_valid = .true.
@@ -711,9 +644,6 @@ CONTAINS
       CALL vector_gather_and_write (&
          veloc_riv, numucat, totalnumucat, ucat_data_address, file_restart, 'veloc_riv', 'ucatch')
 
-      ! Persist the routing accumulator so a restart written mid routing
-      ! period does not lose the queued land-runoff increments. Paired
-      ! with the acctime_rnof / acc_rnof_uc reads in READ_*.
       IF (p_is_master) CALL ncio_write_serial (file_restart, 'acctime_rnof', acctime_rnof)
       CALL vector_gather_and_write (&
          acc_rnof_uc, numucat, totalnumucat, ucat_data_address, file_restart, 'acc_rnof_uc', 'ucatch')

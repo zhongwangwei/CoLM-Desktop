@@ -428,10 +428,6 @@ CONTAINS
    character(len=*), optional :: mesg
 
       IF (present(mesg)) write(*,*) trim(mesg)
-
-      ! Flush before tearing the job down.  mpi_abort kills every rank at once,
-      ! so a buffered message never reaches the log and the reason for the stop
-      ! is lost -- the run then looks like an unexplained "Abort(1)".
       flush(6)
 
 #ifdef USEMPI

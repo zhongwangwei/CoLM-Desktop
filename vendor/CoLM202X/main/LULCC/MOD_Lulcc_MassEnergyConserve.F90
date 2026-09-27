@@ -169,7 +169,7 @@ CONTAINS
 
 IF (patchtype(np) .ne. 3) THEN !not a glacier patch
 
-IF (DEF_USE_PFT .or. DEF_FAST_PC) THEN
+IF ((DEF_USE_PFT .and. .not. DEF_SOLO_PFT) .or. DEF_FAST_PC) THEN
                      lccpct_np(:) = 0
                      lccpct_np(1) = sum(lccpct_patches(np,1:), mask=patchtypes(:)==0)
                      lccpct_np(URBAN  )   = lccpct_patches(np,URBAN  )

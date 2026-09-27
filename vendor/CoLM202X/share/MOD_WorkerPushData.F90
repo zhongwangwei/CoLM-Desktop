@@ -11,11 +11,10 @@ MODULE MOD_WorkerPushData
    USE MOD_Utils
    IMPLICIT NONE
 
-   integer, parameter, private :: WORKER_PUSH_MAPPING_UNSET  = 0
+   integer, parameter, private :: WORKER_PUSH_MAPPING_UNSET = 0
    integer, parameter, private :: WORKER_PUSH_MAPPING_SINGLE = 1
-   integer, parameter, private :: WORKER_PUSH_MAPPING_MULTI  = 2
+   integer, parameter, private :: WORKER_PUSH_MAPPING_MULTI = 2
 
-   ! -- Non-owning descriptor for one real8 field in a batched push --
    type :: worker_push_real8_field_type
       real(r8), pointer :: send(:) => null()
       real(r8), pointer :: recv(:) => null()
@@ -39,12 +38,7 @@ MODULE MOD_WorkerPushData
       integer :: nself
       integer,  allocatable :: self_from (:)
       integer,  allocatable :: self_to   (:)
-
-      ! Reused real8 communication scratch.  A push mapping is immutable after
-      ! construction, so its unique receive size, peer counts, and packed
-      ! message sizes are also immutable.  Keeping these buffers with the
-      ! mapping avoids several heap allocations in every routing/tracer push.
-      real(r8), allocatable :: recv_uniq_real8 (:)
+      real(r8), allocatable :: recv_uniq_real8(:)
       logical :: real8_scratch_ready = .false.
 #ifdef USEMPI
       ! data is on other processors
@@ -52,17 +46,11 @@ MODULE MOD_WorkerPushData
       integer, allocatable :: n_from_other (:)
       type(pointer_int32_1d), allocatable :: to_other (:)
       type(pointer_int32_1d), allocatable :: other_to (:)
-      real(r8), allocatable :: sendcache_real8 (:)
-      real(r8), allocatable :: recvcache_real8 (:)
       integer :: real8_batch_capacity = 0
-      real(r8), allocatable :: sendcache_real8_batch (:)
-      real(r8), allocatable :: recvcache_real8_batch (:)
-      integer,  allocatable :: req_send_real8  (:)
-      integer,  allocatable :: req_recv_real8  (:)
-      integer,  allocatable :: send_peer_real8 (:)
-      integer,  allocatable :: recv_peer_real8 (:)
-      integer,  allocatable :: send_disp_real8 (:)
-      integer,  allocatable :: recv_disp_real8 (:)
+      real(r8), allocatable :: sendcache_real8_batch(:), recvcache_real8_batch(:)
+      integer, allocatable :: req_send_real8(:), req_recv_real8(:)
+      integer, allocatable :: send_peer_real8(:), recv_peer_real8(:)
+      integer, allocatable :: send_disp_real8(:), recv_disp_real8(:)
 #endif
    CONTAINS
       final :: worker_pushdata_free_mem
@@ -131,10 +119,10 @@ CONTAINS
 #endif
    integer :: i, iloc, iworker, jworker, n_req_other
 
-      CALL reset_worker_push_real8_scratch (pushdata)
 
       IF (p_is_worker) THEN
 
+         CALL reset_worker_push_real8_scratch (pushdata)
          pushdata%required_send_size = 0
 
          IF (num_me > 0) THEN
@@ -265,7 +253,6 @@ CONTAINS
 
    END SUBROUTINE build_worker_pushdata_uniq
 
-   ! ----------
    SUBROUTINE update_worker_push_required_send_size (pushdata)
 
    IMPLICIT NONE
@@ -311,10 +298,7 @@ CONTAINS
       IF (p_is_worker) THEN
 
          n_req_uniq = 0
-         ! A zero-sized allocated actual is valid; an array section of an
-         ! unallocated allocatable is not.  Empty workers still build every
-         ! mapping collectively, including mappings with no local requests.
-         allocate (ids_req_uniq (num_req))
+         allocate(ids_req_uniq(num_req))
 
          IF (num_req > 0) THEN
             DO i = 1, size(ids_req)
@@ -360,9 +344,7 @@ CONTAINS
 
          n_req_uniq = 0
          ndim1 = size(ids_req,1)
-         ! See the single-map builder above: keep the zero-request actual
-         ! allocated so build_worker_pushdata_uniq receives a legal 1:0 slice.
-         allocate (ids_req_uniq (ndim1*num_req))
+         allocate(ids_req_uniq(ndim1*num_req))
 
          IF (num_req > 0) THEN
             DO j = 1, num_req
@@ -420,6 +402,9 @@ CONTAINS
             pushdata%sum_area = sum(pushdata%area_multi, dim = 1)
 
             deallocate (id_found)
+         ELSE
+            allocate (pushdata%area_multi (ndim1,0))
+            allocate (pushdata%sum_area   (0))
          ENDIF
 
          IF (allocated (ids_req_uniq)) deallocate(ids_req_uniq)
@@ -452,6 +437,7 @@ CONTAINS
 
       IF (p_is_worker) THEN
 
+         CALL reset_worker_push_real8_scratch (pushdata_out)
          pushdata_out%mapping_kind = WORKER_PUSH_MAPPING_SINGLE
 
          IF (num_me > 0) THEN
@@ -724,8 +710,6 @@ CONTAINS
       pushdata%real8_scratch_ready = .false.
       IF (allocated(pushdata%recv_uniq_real8)) deallocate(pushdata%recv_uniq_real8)
 #ifdef USEMPI
-      IF (allocated(pushdata%sendcache_real8)) deallocate(pushdata%sendcache_real8)
-      IF (allocated(pushdata%recvcache_real8)) deallocate(pushdata%recvcache_real8)
       pushdata%real8_batch_capacity = 0
       IF (allocated(pushdata%sendcache_real8_batch)) deallocate(pushdata%sendcache_real8_batch)
       IF (allocated(pushdata%recvcache_real8_batch)) deallocate(pushdata%recvcache_real8_batch)
@@ -738,17 +722,14 @@ CONTAINS
 #endif
 
    END SUBROUTINE reset_worker_push_real8_scratch
-
-   ! ----------
    SUBROUTINE ensure_worker_push_real8_scratch (pushdata)
 
    IMPLICIT NONE
 
    type(worker_pushdata_type), intent(inout) :: pushdata
 
-   integer :: ndatasend, ndatarecv, nsendpeer, nrecvpeer
 #ifdef USEMPI
-   integer :: iworker, ipeer, idsp
+   integer :: iworker, ipeer, idsp, nsendpeer, nrecvpeer
 #endif
 
       IF (pushdata%real8_scratch_ready) RETURN
@@ -761,20 +742,8 @@ CONTAINS
          allocate(pushdata%recv_uniq_real8(pushdata%num_req_uniq))
 
 #ifdef USEMPI
-      ndatasend = sum(pushdata%n_to_other)
-      ndatarecv = sum(pushdata%n_from_other)
       nsendpeer = count(pushdata%n_to_other > 0)
       nrecvpeer = count(pushdata%n_from_other > 0)
-
-      IF (allocated(pushdata%sendcache_real8)) THEN
-         IF (size(pushdata%sendcache_real8) /= ndatasend) deallocate(pushdata%sendcache_real8)
-      ENDIF
-      IF (.not. allocated(pushdata%sendcache_real8)) allocate(pushdata%sendcache_real8(ndatasend))
-
-      IF (allocated(pushdata%recvcache_real8)) THEN
-         IF (size(pushdata%recvcache_real8) /= ndatarecv) deallocate(pushdata%recvcache_real8)
-      ENDIF
-      IF (.not. allocated(pushdata%recvcache_real8)) allocate(pushdata%recvcache_real8(ndatarecv))
 
       IF (allocated(pushdata%req_send_real8)) THEN
          IF (size(pushdata%req_send_real8) /= nsendpeer) deallocate(pushdata%req_send_real8)
@@ -814,8 +783,6 @@ CONTAINS
       pushdata%real8_scratch_ready = .true.
 
    END SUBROUTINE ensure_worker_push_real8_scratch
-
-   ! ----------
    SUBROUTINE ensure_worker_push_real8_batch_scratch (pushdata, nfield)
 
    IMPLICIT NONE
@@ -844,82 +811,116 @@ CONTAINS
 
    END SUBROUTINE ensure_worker_push_real8_batch_scratch
 
-   ! ----------
    SUBROUTINE worker_push_data_uniq_real8 ( &
-         pushdata, vec_send, fillvalue)
+         pushdata, vec_send, vec_recv, fillvalue)
 
    IMPLICIT NONE
 
-   type(worker_pushdata_type), intent(inout) :: pushdata
+   type(worker_pushdata_type), intent(in) :: pushdata
 
    real(r8), intent(in)   , optional :: vec_send (:)
+   real(r8), intent(inout), optional :: vec_recv (:)
    real(r8), intent(in)   , optional :: fillvalue
 
    ! Local Variables
+   integer :: ndatasend
+   integer,  allocatable :: req_send  (:)
+   real(r8), allocatable :: sendcache (:)
+
+   integer :: ndatarecv
+   integer,  allocatable :: req_recv  (:)
+   real(r8), allocatable :: recvcache (:)
+
    integer :: iworker, iproc, idsp, istt, iend, i, i_to
 
 
       IF (p_is_worker) THEN
 
          IF (pushdata%num_req_uniq > 0) THEN
-            pushdata%recv_uniq_real8 = fillvalue
+            vec_recv = fillvalue
          ENDIF
 
          IF (pushdata%nself > 0) THEN
-            pushdata%recv_uniq_real8(pushdata%self_to) = vec_send(pushdata%self_from)
+            vec_recv(pushdata%self_to) = vec_send(pushdata%self_from)
          ENDIF
 
 #ifdef USEMPI
-         IF (size(pushdata%send_peer_real8) > 0) THEN
-            DO iproc = 1, size(pushdata%send_peer_real8)
-                  iworker = pushdata%send_peer_real8(iproc)
-                  istt  = pushdata%send_disp_real8(iproc)
-                  iend  = istt + pushdata%n_to_other(iworker) - 1
+         ndatasend = sum(pushdata%n_to_other)
+         IF (ndatasend > 0) THEN
 
-                  pushdata%sendcache_real8(istt:iend) = vec_send(pushdata%to_other(iworker)%val)
-                  CALL mpi_isend(pushdata%sendcache_real8(istt:iend), pushdata%n_to_other(iworker), MPI_REAL8, &
-                     iworker, 101, p_comm_worker, pushdata%req_send_real8(iproc), p_err)
+            allocate (sendcache(ndatasend))
+            allocate (req_send (count(pushdata%n_to_other > 0)))
+
+            iproc = 0
+            idsp  = 0
+            DO iworker = 0, p_np_worker-1
+               IF (pushdata%n_to_other(iworker) > 0) THEN
+                  iproc = iproc + 1
+                  istt  = idsp + 1
+                  iend  = idsp + pushdata%n_to_other(iworker)
+
+                  sendcache(istt:iend) = vec_send(pushdata%to_other(iworker)%val)
+                  CALL mpi_isend(sendcache(istt:iend), pushdata%n_to_other(iworker), MPI_REAL8, &
+                     iworker, 101, p_comm_worker, req_send(iproc), p_err)
+
+                  idsp = iend
+               ENDIF
             ENDDO
          ENDIF
 
-         IF (size(pushdata%recv_peer_real8) > 0) THEN
-            DO iproc = 1, size(pushdata%recv_peer_real8)
-                  iworker = pushdata%recv_peer_real8(iproc)
-                  istt  = pushdata%recv_disp_real8(iproc)
-                  iend  = istt + pushdata%n_from_other(iworker) - 1
+         ndatarecv = sum(pushdata%n_from_other)
+         IF (ndatarecv > 0) THEN
 
-                  CALL mpi_irecv(pushdata%recvcache_real8(istt:iend), pushdata%n_from_other(iworker), MPI_REAL8, &
-                     iworker, 101, p_comm_worker, pushdata%req_recv_real8(iproc), p_err)
+            allocate (recvcache(ndatarecv))
+            allocate (req_recv (count(pushdata%n_from_other > 0)))
+
+            iproc = 0
+            idsp  = 0
+            DO iworker = 0, p_np_worker-1
+               IF (pushdata%n_from_other(iworker) > 0) THEN
+                  iproc = iproc + 1
+                  istt  = idsp + 1
+                  iend  = idsp + pushdata%n_from_other(iworker)
+
+                  CALL mpi_irecv(recvcache(istt:iend), pushdata%n_from_other(iworker), MPI_REAL8, &
+                     iworker, 101, p_comm_worker, req_recv(iproc), p_err)
+
+                  idsp = iend
+               ENDIF
             ENDDO
          ENDIF
 
-         IF (size(pushdata%recv_peer_real8) > 0) THEN
+         IF (ndatarecv > 0) THEN
 
-            CALL mpi_waitall(size(pushdata%req_recv_real8), pushdata%req_recv_real8, MPI_STATUSES_IGNORE, p_err)
+            CALL mpi_waitall(size(req_recv), req_recv, MPI_STATUSES_IGNORE, p_err)
 
-            DO iproc = 1, size(pushdata%recv_peer_real8)
-               iworker = pushdata%recv_peer_real8(iproc)
-               idsp = pushdata%recv_disp_real8(iproc) - 1
+            idsp = 0
+            DO iworker = 0, p_np_worker-1
                DO i = 1, pushdata%n_from_other(iworker)
 
-                  IF (pushdata%recvcache_real8(idsp+i) /= fillvalue) THEN
+                  IF (recvcache(idsp+i) /= fillvalue) THEN
                      i_to = pushdata%other_to(iworker)%val(i)
-                     IF (pushdata%recv_uniq_real8(i_to) == fillvalue) THEN
-                        pushdata%recv_uniq_real8(i_to) = pushdata%recvcache_real8(idsp+i)
+                     IF (vec_recv(i_to) == fillvalue) THEN
+                        vec_recv(i_to) = recvcache(idsp+i)
                      ELSE
-                        pushdata%recv_uniq_real8(i_to) = pushdata%recv_uniq_real8(i_to) &
-                           + pushdata%recvcache_real8(idsp+i)
+                        vec_recv(i_to) = vec_recv(i_to) + recvcache(idsp+i)
                      ENDIF
                   ENDIF
 
                ENDDO
+               idsp = idsp + pushdata%n_from_other(iworker)
             ENDDO
 
          ENDIF
 
-         IF (size(pushdata%send_peer_real8) > 0) THEN
-            CALL mpi_waitall(size(pushdata%req_send_real8), pushdata%req_send_real8, MPI_STATUSES_IGNORE, p_err)
+         IF (ndatasend > 0) THEN
+            CALL mpi_waitall(size(req_send), req_send, MPI_STATUSES_IGNORE, p_err)
          ENDIF
+
+         IF (allocated(req_send )) deallocate(req_send )
+         IF (allocated(sendcache)) deallocate(sendcache)
+         IF (allocated(req_recv )) deallocate(req_recv )
+         IF (allocated(recvcache)) deallocate(recvcache)
 #endif
 
       ENDIF
@@ -1048,24 +1049,30 @@ CONTAINS
 
    IMPLICIT NONE
 
-   type(worker_pushdata_type), intent(inout) :: pushdata
+   type(worker_pushdata_type) :: pushdata
 
    real(r8), intent(in)    :: vec_send (:)
    real(r8), intent(inout) :: vec_recv (:)
    real(r8), intent(in)    :: fillvalue
 
+   ! Local Variables
+   real(r8), allocatable   :: vec_recv_uniq (:)
+
       IF (p_is_worker) THEN
 
-         CALL ensure_worker_push_real8_scratch (pushdata)
+         ! Always allocate (zero-length if no requests) to avoid passing
+         ! unallocated array to worker_push_data_uniq_real8.
+         allocate (vec_recv_uniq (pushdata%num_req_uniq))
          IF (pushdata%num_req_uniq > 0) THEN
-            pushdata%recv_uniq_real8(:) = fillvalue
+            vec_recv_uniq(:) = fillvalue
          ENDIF
 
-         CALL worker_push_data_uniq_real8 (pushdata, vec_send, fillvalue)
+         CALL worker_push_data_uniq_real8 (pushdata, vec_send, vec_recv_uniq, fillvalue)
 
          IF (pushdata%num_req_uniq > 0) THEN
-            vec_recv = pushdata%recv_uniq_real8(pushdata%addr_single)
+            vec_recv = vec_recv_uniq(pushdata%addr_single)
          ENDIF
+         deallocate (vec_recv_uniq)
 
       ENDIF
 
@@ -1076,7 +1083,7 @@ CONTAINS
 
    IMPLICIT NONE
 
-   type(worker_pushdata_type), intent(inout) :: pushdata
+   type(worker_pushdata_type) :: pushdata
 
    real(r8), intent(in)    :: vec_send (:)
    real(r8), intent(inout) :: vec_recv (:)
@@ -1085,27 +1092,31 @@ CONTAINS
    character(len=*), intent(in) :: mode
 
    ! Local Variables
+   real(r8), allocatable :: vec_recv_uniq (:)
    integer  :: i, j
    real(r8) :: val, sumarea
 
       IF (p_is_worker) THEN
 
-         CALL ensure_worker_push_real8_scratch (pushdata)
-         vec_recv(:) = fillvalue
+         ! Always allocate (zero-length if no requests) to avoid passing
+         ! unallocated array to worker_push_data_uniq_real8.
+         allocate (vec_recv_uniq (pushdata%num_req_uniq))
          IF (pushdata%num_req_uniq > 0) THEN
-            pushdata%recv_uniq_real8(:) = fillvalue
+            vec_recv_uniq(:) = fillvalue
          ENDIF
 
-         CALL worker_push_data_uniq_real8 (pushdata, vec_send, fillvalue)
+         CALL worker_push_data_uniq_real8 (pushdata, vec_send, vec_recv_uniq, fillvalue)
 
          IF (pushdata%num_req_uniq > 0) THEN
+
+            vec_recv(:) = fillvalue
+
             DO j = 1, size(pushdata%addr_multi,2)
 
                sumarea = 0.
 
                DO i = 1, size(pushdata%addr_multi,1)
-                  IF (pushdata%area_multi(i,j) <= 0._r8) CYCLE
-                  val = pushdata%recv_uniq_real8(pushdata%addr_multi(i,j))
+                  val = vec_recv_uniq(pushdata%addr_multi(i,j))
                   IF (val /= fillvalue) THEN
                      IF (vec_recv(j) == fillvalue) THEN
                         vec_recv(j) = val * pushdata%area_multi(i,j)
@@ -1117,13 +1128,15 @@ CONTAINS
                ENDDO
 
                IF (trim(mode) == 'average') THEN
-                  IF (vec_recv(j) /= fillvalue .and. sumarea > 0._r8) THEN
+                  IF (vec_recv(j) /= fillvalue .and. sumarea > 0.) THEN
                      vec_recv(j) = vec_recv(j) / sumarea
                   ENDIF
                ENDIF
             ENDDO
 
          ENDIF
+         deallocate (vec_recv_uniq)
+
       ENDIF
 
    END SUBROUTINE worker_push_data_multi_real8
@@ -1173,7 +1186,6 @@ CONTAINS
 
    END SUBROUTINE validate_worker_push_real8_batch
 
-   ! ----------
    SUBROUTINE worker_push_data_multi_real8_batch (pushdata, fields, mode)
 
    IMPLICIT NONE
@@ -1185,6 +1197,7 @@ CONTAINS
    integer :: ifield, i, j, i_to
    real(r8) :: val, sumarea
    character(len=16) :: batch_mode
+   logical :: do_average
 #ifdef USEMPI
    integer :: iworker, iproc, npeer, ibase, istt, iend
 #endif
@@ -1196,6 +1209,7 @@ CONTAINS
          CALL ensure_worker_push_real8_batch_scratch (pushdata, size(fields))
          batch_mode = ''
          IF (present(mode)) batch_mode = mode
+         do_average = (trim(batch_mode) == 'average')
 
          DO ifield = 1, size(fields)
             fields(ifield)%recv(:) = fields(ifield)%fillvalue
@@ -1288,7 +1302,7 @@ CONTAINS
                         ENDIF
                      ENDDO
 
-                     IF (trim(batch_mode) == 'average') THEN
+                     IF (do_average) THEN
                         IF (fields(ifield)%recv(j) /= fields(ifield)%fillvalue .and. &
                             sumarea > 0._r8) THEN
                            fields(ifield)%recv(j) = fields(ifield)%recv(j) / sumarea
@@ -1310,7 +1324,6 @@ CONTAINS
 
    END SUBROUTINE worker_push_data_multi_real8_batch
 
-   ! ----------
    SUBROUTINE worker_push_data_single_int32 (pushdata, vec_send, vec_recv, fillvalue)
 
    IMPLICIT NONE
@@ -1415,7 +1428,6 @@ CONTAINS
                DO ipart = 1, remapdata%npart(iset)
                   iloc = remapdata%part_to(iset)%val(ipart)
                   area = remapdata%areapart(iset)%val(ipart)
-                  IF (area <= 0._r8) CYCLE
 
                   IF (vec_in(iloc) /= fillvalue) THEN
                      IF (vec_out(iset) == fillvalue) THEN
@@ -1428,7 +1440,7 @@ CONTAINS
                ENDDO
 
                IF (trim(mode) == 'average') THEN
-                  IF (vec_out(iset) /= fillvalue .and. sumarea > 0._r8) THEN
+                  IF (vec_out(iset) /= fillvalue .and. sumarea > 0.) THEN
                      vec_out(iset) = vec_out(iset) / sumarea
                   ENDIF
                ENDIF
@@ -1457,17 +1469,16 @@ CONTAINS
       IF (allocated(this%n_from_other)) deallocate(this%n_from_other)
       IF (allocated(this%to_other    )) deallocate(this%to_other    )
       IF (allocated(this%other_to    )) deallocate(this%other_to    )
-      IF (allocated(this%sendcache_real8)) deallocate(this%sendcache_real8)
-      IF (allocated(this%recvcache_real8)) deallocate(this%recvcache_real8)
       IF (allocated(this%sendcache_real8_batch)) deallocate(this%sendcache_real8_batch)
       IF (allocated(this%recvcache_real8_batch)) deallocate(this%recvcache_real8_batch)
-      IF (allocated(this%req_send_real8 )) deallocate(this%req_send_real8 )
-      IF (allocated(this%req_recv_real8 )) deallocate(this%req_recv_real8 )
+      IF (allocated(this%req_send_real8)) deallocate(this%req_send_real8)
+      IF (allocated(this%req_recv_real8)) deallocate(this%req_recv_real8)
       IF (allocated(this%send_peer_real8)) deallocate(this%send_peer_real8)
       IF (allocated(this%recv_peer_real8)) deallocate(this%recv_peer_real8)
       IF (allocated(this%send_disp_real8)) deallocate(this%send_disp_real8)
       IF (allocated(this%recv_disp_real8)) deallocate(this%recv_disp_real8)
 #endif
+
       this%mapping_kind = WORKER_PUSH_MAPPING_UNSET
       this%required_send_size = 0
 

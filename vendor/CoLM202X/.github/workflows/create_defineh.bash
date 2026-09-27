@@ -166,7 +166,7 @@ $CaMa
 
 #define GridRiverLakeFlow
 !    Conflicts :
-#if (defined CATCHMENT || defined SinglePoint)
+#if (defined CATCHMENT || defined SinglePoint || defined CaMa_Flood)
 #undef GridRiverLakeFlow
 #endif
 
@@ -191,9 +191,6 @@ $CROP
 !    (every main/LULCC/ module). DEF_USE_LULCC (MOD_Namelist.F90, default
 !    .false.) picks whether it runs -- no existing kernel/preset ever
 !    set the old "#define LULCC" here, so this stays .false. by default.
-
-! 12b. If defined, extended canopy interception schemes are enabled.
-#define extend_interception
 
 ! 13. Water tracer module (isotope / solute / particle / gas families).
 !     TRACER used to live here as a compile-time macro (the old script

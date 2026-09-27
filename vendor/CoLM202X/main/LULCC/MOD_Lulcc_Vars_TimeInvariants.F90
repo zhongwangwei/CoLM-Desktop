@@ -121,11 +121,11 @@ CONTAINS
    IMPLICIT NONE
 
       IF (p_is_worker) THEN
+         numpatch_ = numpatch
+         numelm_ = numelm
          IF (numpatch > 0) THEN
             CALL copy_pixelset (landpatch, landpatch_ )
             CALL copy_pixelset (landelm  , landelm_   )
-            numpatch_             = numpatch
-            numelm_               = numelm
             patchclass_       (:) = patchclass       (:)
             patchtype_        (:) = patchtype        (:)
             csol_           (:,:) = csol           (:,:)

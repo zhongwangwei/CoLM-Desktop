@@ -38,7 +38,7 @@ USE YOS_CMF_INPUT,      ONLY: LADPSTP,  LFPLAIN,  LKINE,    LFLDOUT,  LPTHOUT,  
                             & LROSPLIT, LGDWDLY,  LSLPMIX,  LMEANSL,  LSEALEV,  LOUTPUT,  &
                             & LRESTART, LSTOONLY, LGRIDMAP, LLEAPYR,  LMAPEND,  LBITSAFE, &
                             & LSTG_ES,  LLEVEE,   LOUTINS,  LOUTINI,  LSEDIMENT,  LTRACE,   &
-                            & LSLOPEMOUTH,LWEVAP,LWINFILT, LWEVAPFIX,LWINFILTFIX,LWEXTRACTRIV,       LSPAMAT
+                            & LSLOPEMOUTH,LWEVAP,LWINFILT, LWEVAPFIX,LWINFILTFIX,LWEXTRACTRIV,       LSPAMAT, LCOLMFEEDBACK
 ! dimention & time
 USE YOS_CMF_INPUT,      ONLY: CDIMINFO, DT,       NX,NY,    NLFP,     NXIN,NYIN,    INPN, &
                             & IFRQ_INP, DTIN,     WEST,EAST,NORTH,SOUTH
@@ -66,8 +66,8 @@ WRITE(LOGNAM,*) "!--------------------"
 
 ! *** 0. SET INPUT UNIT AND OPEN FILE 
 NSETFILE=INQUIRE_FID()               !!  for namelist
-OPEN(NSETFILE,FILE=CSETFILE,STATUS="OLD")
-WRITE(LOGNAM,*) "CMF::CONFIG_NMLIST: namelist opened: ", TRIM(CSETFILE), NSETFILE 
+IF( CSETFILE/="NONE" ) OPEN(NSETFILE,FILE=CSETFILE,STATUS="OLD")
+IF( CSETFILE/="NONE" ) WRITE(LOGNAM,*) "CMF::CONFIG_NMLIST: namelist opened: ", TRIM(CSETFILE), NSETFILE
 
 !============================
 !*** 1. basic simulation run version
@@ -114,8 +114,13 @@ LBITSAFE = .FALSE.           !! true: for Bit Identical (not used from v410, set
 LSTG_ES  = .FALSE.           !! true: for Vector Processor optimization (CMF_OPT_FLDSTG_ES) 
 
 !* change
-REWIND(NSETFILE)
-READ(NSETFILE,NML=NRUNVER)
+IF( CSETFILE/="NONE" ) REWIND(NSETFILE)
+IF( CSETFILE/="NONE" ) READ(NSETFILE,NML=NRUNVER)
+IF( CSETFILE=="NONE" )THEN
+  LWEVAP=LCOLMFEEDBACK
+  LWINFILT=LCOLMFEEDBACK
+  LOUTPUT=.TRUE.
+ENDIF
 
 WRITE(LOGNAM,*) ""
 WRITE(LOGNAM,*) "=== NAMELIST, NRUNVER ==="
@@ -163,10 +168,14 @@ WRITE(LOGNAM,*) "LSPAMAT " , LSPAMAT
 CDIMINFO ="NONE"
 DT       = 24*60*60          !! dt = 1day (automatically set by adaptive time step)
 IFRQ_INP = 24                !! daily (24h) input
+IF( CSETFILE=="NONE" )THEN
+  DT=60*60
+  IFRQ_INP=1
+ENDIF
 
 !* change
-REWIND(NSETFILE)
-READ(NSETFILE,NML=NDIMTIME)
+IF( CSETFILE/="NONE" ) REWIND(NSETFILE)
+IF( CSETFILE/="NONE" ) READ(NSETFILE,NML=NDIMTIME)
 
 DTIN  = IFRQ_INP*60*60       !! hour -> second
 
@@ -241,8 +250,8 @@ CSUFPTH='.pth'
 CSUFCDF='.nc'
 
 ! * change
-REWIND(NSETFILE)
-READ(NSETFILE,NML=NPARAM)
+IF( CSETFILE/="NONE" ) REWIND(NSETFILE)
+IF( CSETFILE/="NONE" ) READ(NSETFILE,NML=NPARAM)
 
 WRITE(LOGNAM,*) ""
 WRITE(LOGNAM,*) "=== NAMELIST, NPARAM ==="
@@ -264,7 +273,7 @@ WRITE(LOGNAM,*) "CSUFCDF  ", TRIM(CSUFCDF)
 
 !===============================
 !*** CLOSE FILE 
-CLOSE(NSETFILE)
+IF( CSETFILE/="NONE" ) CLOSE(NSETFILE)
 
 WRITE(LOGNAM,*) "CMF::CONFIG_NMLIST: end "
 

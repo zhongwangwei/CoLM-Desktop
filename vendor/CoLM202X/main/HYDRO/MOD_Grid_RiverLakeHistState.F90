@@ -66,7 +66,7 @@ MODULE MOD_Grid_RiverLakeHistState
 CONTAINS
 
    !-----------------------
-   SUBROUTINE read_gridriverlake_hist_restart (file_restart)
+   SUBROUTINE read_gridriverlake_hist_restart (file_restart, primary_identity_validated, strict)
 
    USE MOD_SPMD_Task
    USE MOD_Namelist, only: DEF_USE_LEVEE, DEF_USE_BIFURCATION, DEF_Reservoir_Method
@@ -77,12 +77,51 @@ CONTAINS
    IMPLICIT NONE
 
    character(len=*), intent(in) :: file_restart
-   integer :: ncol_local_bif
+   logical, optional, intent(in) :: primary_identity_validated
+   logical, optional, intent(in) :: strict
+   integer :: ncol_local_bif, i, nrequired
+   character(len=32) :: required(20)
    logical :: has_bif_signature
    integer, allocatable :: pth_global_id_bif(:)
    real(r8), allocatable :: bif_acctime_tmp(:,:)
 
       IF (.not. allocated(acctime_ucat)) RETURN
+
+      IF (present(strict)) THEN
+         IF (strict) THEN
+            nrequired=0
+            IF (totalnumucat>0) THEN
+               required(1:10)=[character(len=32) :: 'hist_acctime_ucat', 'hist_wdsrf_ucat', &
+                  'hist_veloc_riv', 'hist_discharge', 'hist_floodarea', 'hist_rivsto', &
+                  'hist_fldsto', 'hist_flddph', 'hist_storge', 'hist_sfcelv']
+               nrequired=10
+               IF (DEF_USE_LEVEE .and. allocated(a_levsto)) THEN
+                  required(nrequired+1:nrequired+2)=[character(len=32) :: 'hist_levsto', 'hist_levdph']
+                  nrequired=nrequired+2
+               ENDIF
+               IF (DEF_USE_BIFURCATION .and. allocated(a_bifout)) THEN
+                  nrequired=nrequired+1; required(nrequired)='hist_bifout'
+               ENDIF
+            ENDIF
+            IF (DEF_Reservoir_Method>0 .and. totalnumresv>0 .and. allocated(acctime_resv)) THEN
+               required(nrequired+1:nrequired+4)=[character(len=32) :: 'hist_acctime_resv', &
+                  'hist_volresv', 'hist_qresv_in', 'hist_qresv_out']
+               nrequired=nrequired+4
+            ENDIF
+            IF (DEF_USE_BIFURCATION .and. totalnpthout>0 .and. npthlev_bif>0 .and. &
+                allocated(a_bifflw_lev)) THEN
+               required(nrequired+1:nrequired+2)=[character(len=32) :: 'hist_bifflw_lev', &
+                  'hist_bifflw_acctime']
+               nrequired=nrequired+2
+            ENDIF
+            DO i=1,nrequired
+               IF (.not.restart_var_exists(file_restart, trim(required(i)))) THEN
+                  IF (p_is_master) write(*,'(A,A)') 'ERROR: missing river-history sidecar field ', trim(required(i))
+                  CALL CoLM_stop('incomplete river-history sidecar')
+               ENDIF
+            ENDDO
+         ENDIF
+      ENDIF
 
       IF (totalnumucat > 0) THEN
          IF (restart_var_exists(file_restart, 'hist_acctime_ucat')) &
@@ -137,6 +176,11 @@ CONTAINS
          ! reordered network. The BIF state reader performs the full signature
          ! comparison later during flow initialization.
          has_bif_signature = restart_var_exists(file_restart, 'bif_path_signature')
+         ! The history sidecar is read only after the physical BIF restart has
+         ! validated its complete pathway signature against this network.
+         IF (present(primary_identity_validated)) THEN
+            IF (primary_identity_validated) has_bif_signature = .true.
+         ENDIF
          IF (has_bif_signature) THEN
             IF (p_is_worker) THEN
                ncol_local_bif = npthout_local

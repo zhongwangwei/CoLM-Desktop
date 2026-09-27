@@ -65,6 +65,9 @@
    DEF_TRACER_NAMES             = "H2_18O,HDO"
    DEF_TRACER_TYPES             = "isotope,isotope"
    DEF_TRACER_USE_FRACTIONATION = .true.
+   ! Required with VSF isotopes: set DEF_TRACER_AQUIFER_MIXING_WATER_MM
+   ! to a measured/calibrated positive effective mixing depth [mm].
+   ! No value is supplied here deliberately; see main/TRACER/README.md.
    ! Merlivat pair: consistent with the IsoGSM forcing below (d-excess).
    DEF_TRACER_KINETIC_SCHEME    = 'MERLIVAT1978' ! or 'CAPPA2003'
    DEF_TRACER_PARAM_FILES       = 'H2_18O:/share/home/dq013/zhwei/colm/script/CoLM202X/run/standard_O18_parameter.nml,HDO:/share/home/dq013/zhwei/colm/script/CoLM202X/run/standard_HDO_parameter.nml'

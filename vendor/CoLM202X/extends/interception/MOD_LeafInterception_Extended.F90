@@ -8,11 +8,15 @@ MODULE MOD_LeafInterception
 ! For calculating vegetation canopy precipitation interception.
 !
 ! This MODULE is the coupler for the colm and CaMa-Flood model.
+! CoLM2024 interception: Zhongwang Wei @ SYSU.
+! Li, Q., Jin, X., Wei, Z. et al. (2026), Three-dimensional canopy morphology
+! and wind dynamics govern global rainfall interception.
+! Commun. Earth Environ. 7, 699. doi:10.1038/s43247-026-03694-7
 
 !ANCILLARY FUNCTIONS AND SUBROUTINES
 !-------------------
    !* :SUBROUTINE:"LEAF_interception_CoLM2014" : Leaf interception and drainage schemes based on colm2014 version
-   !* :SUBROUTINE:"LEAF_interception_CoLM202x" : Leaf interception and drainage schemes besed on new colm version (under development)
+   !* :SUBROUTINE:"LEAF_interception_CoLM2024" : Canopy-morphology and wind-dependent CoLM2024 scheme
    !* :SUBROUTINE:"LEAF_interception_CLM4"     : Leaf interception and drainage schemes modified from CLM4
    !* :SUBROUTINE:"LEAF_interception_CLM5"     : Leaf interception and drainage schemes modified from CLM5
    !* :SUBROUTINE:"LEAF_interception_NOAHMP"   : Leaf interception and drainage schemes modified from Noah-MP
@@ -36,6 +40,7 @@ MODULE MOD_LeafInterception
    USE MOD_Precision
    USE MOD_Const_Physical, only: tfrz, denh2o, denice, cpliq, cpice, hfus
    USE MOD_Namelist, only: DEF_Interception_scheme, DEF_VEG_SNOW, DEF_MATSIRO_CWCAP_SCALE
+   USE, INTRINSIC :: ieee_arithmetic, only: ieee_is_finite
 
    IMPLICIT NONE
 
@@ -78,6 +83,7 @@ MODULE MOD_LeafInterception
    real(r8)  :: ap, cp, aa1, bb1, exrain, arg, w
    real(r8)  :: thru_rain, thru_snow
    real(r8)  :: xsc_rain, xsc_snow
+   PRIVATE :: xsc_rain, xsc_snow
 
    real(r8)  :: fvegc                     ! vegetation fraction
    real(r8)  :: FT                        ! the temperature factor for snow unloading
@@ -93,13 +99,97 @@ MODULE MOD_LeafInterception
    real(r8)  :: int_snow
 CONTAINS
 
+   PURE REAL(r8) FUNCTION canopy_storage_capacity_colm2024 (dewmx,lai,sai,forc_us,forc_vs, &
+                                                             htop,ncd,ncw,bcw,veg_class,is_pft)
+      USE, INTRINSIC :: ieee_arithmetic, only: ieee_is_finite
+      real(r8), intent(in) :: dewmx, lai, sai, forc_us, forc_vs
+      real(r8), intent(in) :: htop, ncd, ncw, bcw
+      integer,  intent(in) :: veg_class
+      logical,  intent(in) :: is_pft
+
+      integer :: canopy_type
+      real(r8) :: wind, needle_cap, broad_cap, crown_ratio
+      logical :: needle_valid, broad_valid
+
+      canopy_storage_capacity_colm2024 = dewmx * max(0._r8, lai+sai)
+      canopy_type = 0
+
+      IF (is_pft) THEN
+         IF (veg_class >= 1 .and. veg_class <= 3) canopy_type = 1
+         IF (veg_class >= 4 .and. veg_class <= 8) canopy_type = 2
+         IF (veg_class >= 9 .and. veg_class <= 11) canopy_type = 3
+      ELSE
+#ifdef LULC_USGS
+         ! Only classes with an unambiguous published vegetation type use the
+         ! morphology formula. Heterogeneous USGS classes retain legacy capacity.
+         SELECT CASE (veg_class)
+         CASE (12,14)
+            canopy_type = 1
+         CASE (11,13)
+            canopy_type = 2
+         CASE (8)
+            canopy_type = 3
+         CASE (15)
+            canopy_type = 4
+         END SELECT
+#elif defined LULC_IGBP
+         SELECT CASE (veg_class)
+         CASE (1,3)
+            canopy_type = 1
+         CASE (2,4)
+            canopy_type = 2
+         CASE (5)
+            canopy_type = 4
+         CASE (6,7)
+            canopy_type = 3
+         END SELECT
+#endif
+      ENDIF
+
+      IF (canopy_type == 0) RETURN
+      wind = sqrt(max(0._r8, forc_us*forc_us + forc_vs*forc_vs))
+      needle_valid = .false.
+      broad_valid = .false.
+      IF (canopy_type == 1 .or. canopy_type == 4) THEN
+         IF (all(ieee_is_finite([ncd, ncw]))) &
+            needle_valid = ncd > 0._r8 .and. ncd < 1000._r8 .and. ncw > 0._r8 .and. ncw < 1000._r8
+      ENDIF
+      IF (canopy_type == 2 .or. canopy_type == 4) THEN
+         IF (all(ieee_is_finite([bcw, htop]))) &
+            broad_valid = bcw > 0._r8 .and. bcw < 1000._r8 .and. htop > 0._r8 .and. htop < 1000._r8
+      ENDIF
+
+      IF (needle_valid) needle_cap = &
+         (min(11._r8,max(3._r8,ncd)) + min(7._r8,max(2.9_r8,ncw))) / &
+         (4._r8 * (1._r8 + min(3.6_r8,max(1._r8,wind))))
+
+      IF (broad_valid) THEN
+         crown_ratio = min(7._r8,max(1._r8,htop/bcw))
+         broad_cap = min(8._r8,max(2._r8,bcw)) / &
+            (2._r8 * (min(4._r8,max(1.5_r8,wind)) + crown_ratio))
+      ENDIF
+
+      SELECT CASE (canopy_type)
+      CASE (1)
+         IF (needle_valid) canopy_storage_capacity_colm2024 = needle_cap
+      CASE (2)
+         IF (broad_valid) canopy_storage_capacity_colm2024 = broad_cap
+      CASE (3)
+         canopy_storage_capacity_colm2024 = &
+            0.5_r8 * (1._r8 + 1._r8/(1._r8 + min(4._r8,max(1._r8,wind))))
+      CASE (4)
+         IF (needle_valid .and. broad_valid) &
+            canopy_storage_capacity_colm2024 = 0.5_r8 * (needle_cap + broad_cap)
+      END SELECT
+   END FUNCTION canopy_storage_capacity_colm2024
+
    SUBROUTINE LEAF_interception_CoLM2014 (deltim,dewmx,forc_us,forc_vs,chil,sigf,lai,sai,tair,tleaf,&
                                           prc_rain,prc_snow,prl_rain,prl_snow,qflx_irrig_sprinkler,bifall,&
                                           ldew,ldew_rain,ldew_snow,z0m,hu,pg_rain,pg_snow,qintr,qintr_rain,qintr_snow,&
                                           gross_intr_rain,gross_intr_snow,&
                                           xsc_rain_out,xsc_snow_out,&
                                           ldew_smelt_out,ldew_frzc_out,&
-                                          canopy_phase_heat_out)
+                                          canopy_phase_heat_out,satcap_rain_override)
 !DESCRIPTION
 !===========
    ! Calculation of  interception and drainage of precipitation
@@ -151,7 +241,6 @@ CONTAINS
    !---2002.08.31  Yongjiu Dai
 !=======================================================================
 
-   USE MOD_Namelist, only: DEF_USE_CoLMDEBUG
    IMPLICIT NONE
 
    real(r8), intent(in) :: deltim       !seconds in a time step [second]
@@ -189,16 +278,52 @@ CONTAINS
    real(r8), intent(out), optional :: ldew_smelt_out  !canopy snow->rain transfer [mm]
    real(r8), intent(out), optional :: ldew_frzc_out   !canopy rain->snow transfer [mm]
    real(r8), intent(out), optional :: canopy_phase_heat_out !canopy fusion heat flux [W/m2]
+   real(r8), intent(in),  optional :: satcap_rain_override !CoLM2024 liquid capacity [mm]
+   logical :: total_valid, phases_valid
 
 !-----------------------------------------------------------------------
+
+      ! These are module-level: without a reset a canopy-free call would
+      ! report the previous patch's release.
+      xsc_rain = 0._r8
+      xsc_snow = 0._r8
+
+      ! Old single-bucket restarts may contain unset rain/snow components.
+      ! Preserve the authoritative total store and reconstruct its phase.
+      IF (DEF_VEG_SNOW) THEN
+         total_valid = ieee_is_finite(ldew) .and. ldew >= 0._r8
+         phases_valid = ieee_is_finite(ldew_rain) .and. ldew_rain >= 0._r8 .and. &
+                        ieee_is_finite(ldew_snow) .and. ldew_snow >= 0._r8
+         IF (.not. total_valid) THEN
+            IF (phases_valid) THEN
+               ldew = ldew_rain + ldew_snow
+            ELSE
+               ldew = 0._r8
+               ldew_rain = 0._r8
+               ldew_snow = 0._r8
+            ENDIF
+         ELSEIF (.not. phases_valid .or. &
+                 abs(ldew_rain + ldew_snow - ldew) > 1.e-10_r8*max(1._r8,ldew)) THEN
+            IF (tleaf > tfrz) THEN
+               ldew_rain = ldew
+               ldew_snow = 0._r8
+            ELSE
+               ldew_rain = 0._r8
+               ldew_snow = ldew
+            ENDIF
+         ENDIF
+      ENDIF
 
       IF (lai+sai > 1e-6) THEN
          lsai   = lai + sai
          vegt   = lsai
          satcap = dewmx*vegt
          satcap_rain = satcap
-         satcap_snow = 6.6*(0.27+46./bifall)*vegt  ! Niu et al., 2004
-         satcap_snow = 48.*satcap                  ! Simple one without snow density input
+         IF (present(satcap_rain_override)) THEN
+            satcap_rain = max(0._r8, satcap_rain_override)
+            IF (.not. DEF_VEG_SNOW) satcap = satcap_rain
+         ENDIF
+         satcap_snow = 48._r8*satcap
 
          p0  = (prc_rain + prc_snow + prl_rain + prl_snow + qflx_irrig_sprinkler)*deltim
          ppc = (prc_rain + prc_snow)*deltim
@@ -299,9 +424,10 @@ CONTAINS
 
                ! snow unloading rate
 
-               FT = max(0.0, (tleaf - tfrz) / 1.87e5)
-               FV = sqrt(forc_us*forc_us + forc_vs*forc_vs) / 1.56e5
-               tex_snow = max(0., ldew_snow/deltim) * (FV+FT)
+               FT = max(0._r8, (tleaf - tfrz) / 1.87e5_r8)
+               FV = sqrt(forc_us*forc_us + forc_vs*forc_vs) / 1.56e5_r8
+               tex_snow = max(0._r8, ldew_snow) * (FV+FT)
+               tex_snow = min(tex_snow, max(0._r8,ldew_snow)/deltim + qintr_snow)
                tti_snow = (1.0-fvegc)*(prc_snow+prl_snow) + (fvegc*(prc_snow+prl_snow) - qintr_snow)
 
                ! rate -> mass
@@ -310,11 +436,11 @@ CONTAINS
                tex_snow = tex_snow * deltim
             ENDIF
 
-            IF (DEF_USE_CoLMDEBUG) THEN
+#if (defined CoLMDEBUG)
             IF (tex_rain+tex_snow+tti_rain+tti_snow-p0 > 1.e-10 .and. .not.DEF_VEG_SNOW) THEN
                write(6,*) 'tex_ + tti_ > p0 in interception code : ',ldew,tex_rain,tex_snow,tti_rain,tti_snow,p0
             ENDIF
-            ENDIF
+#endif
 
          ELSE
             ! all intercepted by canopy leaves for very small precipitation
@@ -347,7 +473,7 @@ CONTAINS
          qintr_rain = prc_rain + prl_rain + qflx_irrig_sprinkler - thru_rain / deltim
          qintr_snow = prc_snow + prl_snow - thru_snow / deltim
 
-         IF (DEF_USE_CoLMDEBUG) THEN
+#if (defined CoLMDEBUG)
          w = w - ldew - (pg_rain+pg_snow)*deltim
          IF (abs(w) > INTERCEPTION_BALANCE_TOL) THEN
             write(6,*) 'something wrong in interception code: '
@@ -360,7 +486,7 @@ CONTAINS
             write(6,*) ldew, ldew_rain, ldew_snow
             CALL abort
          ENDIF
-         ENDIF
+#endif
 
       ELSE
          ! 07/15/2023, yuan: #bug found for ldew value reset.
@@ -389,19 +515,21 @@ CONTAINS
 
       ! Compatibility outputs for the TRACER-aware dispatcher.  Keep the
       ! CoLM2014 interception physics above identical to upstream; this
-      ! bookkeeping only exposes neutral/default tracer diagnostics.
+      ! bookkeeping only exposes tracer diagnostics.  The old-pool release must
+      ! match main/MOD_LeafInterception.F90 (CoLM2024 dispatches through here).
       IF (present(gross_intr_rain))       gross_intr_rain       = max(0._r8, qintr_rain)
       IF (present(gross_intr_snow))       gross_intr_snow       = max(0._r8, qintr_snow)
-      IF (present(xsc_rain_out))          xsc_rain_out          = 0._r8
-      IF (present(xsc_snow_out))          xsc_snow_out          = 0._r8
+      IF (present(xsc_rain_out))          xsc_rain_out          = xsc_rain / deltim
+      IF (present(xsc_snow_out))          xsc_snow_out          = xsc_snow / deltim
       IF (present(ldew_smelt_out))        ldew_smelt_out        = 0._r8
       IF (present(ldew_frzc_out))         ldew_frzc_out         = 0._r8
       IF (present(canopy_phase_heat_out)) canopy_phase_heat_out = 0._r8
 
    END SUBROUTINE LEAF_interception_CoLM2014
 
-   SUBROUTINE LEAF_interception_CoLM202x (deltim,dewmx,forc_us,forc_vs,chil,sigf,lai,sai,tair,tleaf,&
+   SUBROUTINE LEAF_interception_CoLM2024 (deltim,dewmx,forc_us,forc_vs,chil,sigf,lai,sai,tair,tleaf,&
                                           prc_rain,prc_snow,prl_rain,prl_snow,qflx_irrig_sprinkler,&
+                                          bifall,veg_class,is_pft,ncd,ncw,bcw,htop,&
                                           ldew,ldew_rain,ldew_snow,z0m,hu,pg_rain,pg_snow,&
                                           qintr,qintr_rain,qintr_snow,&
                                           gross_intr_rain,gross_intr_snow,&
@@ -410,247 +538,44 @@ CONTAINS
                                           canopy_phase_heat_out)
 !DESCRIPTION
 !===========
-   ! Calculation of interception and drainage of precipitation (under development)
-   ! the scheme developed by Zhongwang wei @ SYSU (not finished yet)
+   ! CoLM2024 uses the CoLM2014 interception physics unchanged and replaces
+   ! only the maximum canopy-water storage capacity with the morphology- and
+   ! wind-dependent parameterization of Li et al. (2026).
 
-!Original Author:
-!-------------------
-   !---Zhongwang Wei @ SYSU
-
-!References:
-!-------------------
-   !---Zhong, F., Jiang, S., van Dijk, A.I., Ren, L., Schellekens, J. and Miralles, D.G., 2022.
-   !   Revisiting large-scale interception patterns constrained by a synthesis of global experimental
-   !   data. Hydrology and Earth System Sciences, 26(21), pp.5647-5667.
-   !---
-
-!ANCILLARY FUNCTIONS AND SUBROUTINES
-!-------------------
-
-!REVISION HISTORY
-!----------------
-   !---2023.04.30  Zhongwang Wei @ SYSU : Snow and rain interception
-!=======================================================================
-
-   USE MOD_Namelist, only: DEF_USE_CoLMDEBUG
    IMPLICIT NONE
 
-   real(r8), intent(in) :: deltim       !seconds in a time step [second]
-   real(r8), intent(in) :: dewmx        !maximum dew [mm]
-   real(r8), intent(in) :: forc_us      !wind speed
-   real(r8), intent(in) :: forc_vs      !wind speed
-   real(r8), intent(in) :: chil         !leaf angle distribution factor
-   real(r8), intent(in) :: prc_rain     !convective rainfall [mm/s]
-   real(r8), intent(in) :: prc_snow     !convective snowfall [mm/s]
-   real(r8), intent(in) :: prl_rain     !large-scale rainfall [mm/s]
-   real(r8), intent(in) :: prl_snow     !large-scale snowfall [mm/s]
-   real(r8), intent(in) :: qflx_irrig_sprinkler ! irrigation and sprinkler water flux [mm/s]
-   real(r8), intent(in) :: sigf         !fraction of veg cover, excluding snow-covered veg [-]
-   real(r8), intent(in) :: lai          !leaf area index [-]
-   real(r8), intent(in) :: sai          !stem area index [-]
-   real(r8), intent(in) :: tair         !air temperature [K]
-   real(r8), intent(in) :: tleaf        !sunlit canopy leaf temperature [K]
-
-   real(r8), intent(inout) :: ldew      !depth of water on foliage [mm]
-   real(r8), intent(inout) :: ldew_rain !depth of water on foliage [mm]
-   real(r8), intent(inout) :: ldew_snow !depth of water on foliage [mm]
-   real(r8), intent(in)    :: z0m       !roughness length
-   real(r8), intent(in)    :: hu        !forcing height of U
-
-   real(r8), intent(out) :: pg_rain     !rainfall onto ground including canopy runoff [kg/(m2 s)]
-   real(r8), intent(out) :: pg_snow     !snowfall onto ground including canopy runoff [kg/(m2 s)]
-   real(r8), intent(out) :: qintr       !interception [kg/(m2 s)]
-   real(r8), intent(out) :: qintr_rain  !rainfall interception (mm h2o/s) [NET storage-related flux; can be <0 when canopy drains faster than new rain intercepts. Use gross_intr_rain for gross interception]
-   real(r8), intent(out) :: qintr_snow  !snowfall interception (mm h2o/s) [NET storage-related flux; can be <0 (e.g. snow unloading/blowing with no new snow). Use gross_intr_snow for gross interception]
-   real(r8), intent(out) :: gross_intr_rain !gross rain entering canopy mixed pool (mm h2o/s, >=0)
-   real(r8), intent(out) :: gross_intr_snow !gross snow entering canopy mixed pool (mm h2o/s, >=0)
-   real(r8), intent(out) :: xsc_rain_out    !pre-mix rain release rate from old canopy pool (mm h2o/s, >=0)
-   real(r8), intent(out) :: xsc_snow_out    !pre-mix snow release rate from old canopy pool (mm h2o/s, >=0)
-   ! Phase-change tracer transfer (grid-scale mm, >=0). CoLM202x does not
-   ! perform canopy rain<->snow phase change in this routine.
-   real(r8), intent(out) :: ldew_smelt_out
-   real(r8), intent(out) :: ldew_frzc_out
-   ! Canopy phase-change fusion heat flux [W/m^2]. Zero for CoLM202x.
+   real(r8), intent(in) :: deltim, dewmx, forc_us, forc_vs, chil, sigf
+   real(r8), intent(in) :: lai, sai, tair
+   real(r8), intent(inout) :: tleaf
+   real(r8), intent(in) :: prc_rain, prc_snow, prl_rain, prl_snow
+   real(r8), intent(in) :: qflx_irrig_sprinkler, bifall
+   integer,  intent(in) :: veg_class
+   logical,  intent(in) :: is_pft
+   real(r8), intent(in) :: ncd, ncw, bcw, htop
+   real(r8), intent(inout) :: ldew, ldew_rain, ldew_snow
+   real(r8), intent(in) :: z0m, hu
+   real(r8), intent(out) :: pg_rain, pg_snow, qintr, qintr_rain, qintr_snow
+   real(r8), intent(out) :: gross_intr_rain, gross_intr_snow
+   real(r8), intent(out) :: xsc_rain_out, xsc_snow_out
+   real(r8), intent(out) :: ldew_smelt_out, ldew_frzc_out
    real(r8), intent(out) :: canopy_phase_heat_out
 
-   ! Local clamps for precipitation inputs [mm/s]. See CoLM2014 block for rationale.
-   real(r8) :: rain_clamp, snow_clamp
+   real(r8) :: satcap_2024
 
-      ldew_smelt_out        = 0._r8
-      ldew_frzc_out         = 0._r8
-      canopy_phase_heat_out = 0._r8
-
-      IF (lai+sai > 1e-6) THEN
-         lsai   = lai + sai
-         vegt   = lsai
-         satcap = dewmx*vegt
-
-         ! Clamp precipitation inputs once at scheme entry and use the
-         ! clamped rates everywhere downstream.
-         rain_clamp = MAX(0.0_r8, prc_rain + prl_rain + qflx_irrig_sprinkler)
-         snow_clamp = MAX(0.0_r8, prc_snow + prl_snow)
-         p0  = (rain_clamp + snow_clamp) * deltim
-         ppc = MAX(0.0_r8, prc_rain + prc_snow) * deltim
-         ppl = MAX(0.0_r8, p0 - ppc)
-
-         ! C2 + back-compat: seed components from ldew if the
-         ! restart/init state only populated ldew (CoLM202x before C2 did
-         ! not maintain components). Otherwise trust the components and
-         ! resync ldew to their sum.
-         IF (ldew > 1.e-12_r8 .and. (ldew_rain + ldew_snow) < 1.e-12_r8) THEN
-            IF (tleaf > tfrz) THEN
-               ldew_rain = ldew
-               ldew_snow = 0._r8
-            ELSE
-               ldew_rain = 0._r8
-               ldew_snow = ldew
-            ENDIF
-         ELSE
-            ldew = ldew_rain + ldew_snow
-         ENDIF
-
-         w = ldew+p0
-
-         ! CoLM202x uses a SINGLE combined bucket (satcap = dewmx*vegt).
-         ! The previous per-component comparison allowed (ldew_rain,
-         ! ldew_snow) to each sit at satcap, doubling the effective total
-         ! capacity. Compute combined excess and split it by the current
-         ! phase ratio to preserve single-bucket semantics while keeping
-         ! rain/snow components phase-consistent.
-         IF (ldew > satcap .and. ldew > 1.e-12_r8) THEN
-            xsc_rain = (ldew - satcap) * ldew_rain / ldew
-            xsc_snow = (ldew - satcap) * ldew_snow / ldew
-         ELSE
-            xsc_rain = 0._r8
-            xsc_snow = 0._r8
-         ENDIF
-         ldew_rain = ldew_rain - xsc_rain
-         ldew_snow = ldew_snow - xsc_snow
-         ldew = ldew_rain + ldew_snow
-
-         ap = pcoefs(2,1)
-         cp = pcoefs(2,2)
-
-         IF (p0 > 1.e-8) THEN
-            ap = ppc/p0 * pcoefs(1,1) + ppl/p0 * pcoefs(2,1)
-            cp = ppc/p0 * pcoefs(1,2) + ppl/p0 * pcoefs(2,2)
-            !----------------------------------------------------------------------
-            !      proportional saturated area (xs) and leaf drainage(tex)
-            !-----------------------------------------------------------------------
-            chiv = chil
-            IF ( abs(chiv) .le. 0.01 ) chiv = 0.01
-            aa1 = 0.5 - 0.633 * chiv - 0.33 * chiv * chiv
-            bb1 = 0.877 * ( 1. - 2. * aa1 )
-            exrain = aa1 + bb1
-
-            ! coefficient of interception
-            ! set fraction of potential interception to max 0.25 (Lawrence et al. 2007)
-            alpha_rain = 0.25
-            fpi = alpha_rain * ( 1.-exp(-exrain*lsai) )
-            tti_rain = rain_clamp*deltim * ( 1.-fpi )
-            tti_snow = snow_clamp*deltim * ( 1.-fpi )
-
-            xs = 1.
-            IF (p0*fpi>1.e-9) THEN
-               arg = (satcap-ldew)/(p0*fpi*ap) - cp/ap
-               IF (arg>1.e-9) THEN
-                  xs = -1./bp * log( arg )
-                  xs = min( xs, 1. )
-                  xs = max( xs, 0. )
-               ENDIF
-            ENDIF
-
-            ! assume no fall down of the intercepted snowfall in a time step drainage
-            tex_rain = rain_clamp*deltim * fpi * (ap/bp*(1.-exp(-bp*xs))+cp*xs) &
-                     - max(0., (satcap-ldew)) * xs
-            tex_rain = max( tex_rain, 0. )
-            ! Ensure physical constraint: tex_rain + tti_rain <= total rain input
-            tex_rain = min( tex_rain, rain_clamp*deltim - tti_rain )
-            tex_snow = 0.
-
-            IF (DEF_USE_CoLMDEBUG) THEN
-            IF (tex_rain+tex_snow+tti_rain+tti_snow-p0 > 1.e-10) THEN
-               write(6,*) 'tex_ + tti_ > p0 in interception code : '
-            ENDIF
-            ENDIF
-
-         ELSE
-            ! all intercepted by canopy leves for very small precipitation
-            tti_rain = 0.
-            tti_snow = 0.
-            tex_rain = 0.
-            tex_snow = 0.
-         ENDIF
-
-         !----------------------------------------------------------------------
-         !   total throughfall (thru) and store augmentation
-         !----------------------------------------------------------------------
-
-         thru_rain = tti_rain + tex_rain
-         thru_snow = tti_snow + tex_snow
-         pinf = p0 - (thru_rain + thru_snow)
-         ldew = ldew + pinf
-
-         ! Maintain rain/snow components (was missing — only `ldew` was
-         ! updated, leaving components stale). Because CoLM202x does not
-         ! separate snow drainage (tex_snow stays 0), all rain excess goes
-         ! into the rain component; snow interception is purely absorbed
-         ! into ldew_snow with no drainage out.
-         ldew_rain = ldew_rain + rain_clamp*deltim - thru_rain
-         ldew_snow = ldew_snow + snow_clamp*deltim - thru_snow
-         ldew_rain = max(0._r8, ldew_rain)
-         ldew_snow = max(0._r8, ldew_snow)
-         ldew = ldew_rain + ldew_snow
-
-         pg_rain = (xsc_rain + thru_rain) / deltim
-         pg_snow = (xsc_snow + thru_snow) / deltim
-         qintr   = pinf / deltim
-
-         qintr_rain = rain_clamp - (thru_rain / deltim)
-         qintr_snow = snow_clamp - (thru_snow / deltim)
-
-         ! Gross interception rate (see CoLM2014 block for rationale).
-         gross_intr_rain = max(0._r8, rain_clamp &
-                                       - tti_rain / deltim)
-         gross_intr_snow = max(0._r8, snow_clamp - tti_snow / deltim)
-
-         ! Pre-mix old-pool release rate (see CoLM2014 block for rationale).
-         xsc_rain_out = xsc_rain / deltim
-         xsc_snow_out = xsc_snow / deltim
-
-         IF (DEF_USE_CoLMDEBUG) THEN
-         w = w - ldew - (pg_rain+pg_snow)*deltim
-         IF (abs(w) > INTERCEPTION_BALANCE_TOL) THEN
-            write(6,*) 'something wrong in interception code : '
-            write(6,*) w, ldew, (pg_rain+pg_snow)*deltim, satcap
-            CALL abort
-         ENDIF
-
-         CALL check_interception_balance('CoLM202x', &
-              ldew, ldew_rain, ldew_snow, pg_rain, pg_snow, &
-              qintr, qintr_rain, qintr_snow)
-         ENDIF
-
-      ELSE
-         ! Release by phase instead of tleaf-based mixing. CoLM202x now
-         ! tracks ldew_rain and ldew_snow separately, so phase conservation
-         ! is straightforward here.
-         ! Clamp raw precipitation to prevent negative noise from propagating
-         ! to pg_* in the no-vegetation branch, matching the in-branch clamp
-         ! and JULES's no-veg treatment.
-         ! Preserve pre-existing canopy water signature for tracer attribution.
-         ! The ldew_rain / ldew_snow released here is OLD canopy water
-         ! (R_canopy_pre), not fresh throughfall (R_input). Route it through
-         ! xsc_*_out BEFORE ldew is reset so tracer_precip classifies it
-         ! correctly (otherwise it would be lumped into throughfall and diluted
-         ! by fresh precip signature).
-         CALL release_no_vegetation_canopy_storage(deltim,tleaf, &
-              prc_rain,prc_snow,prl_rain,prl_snow,qflx_irrig_sprinkler, &
-              ldew,ldew_rain,ldew_snow,pg_rain,pg_snow, &
-              qintr,qintr_rain,qintr_snow,gross_intr_rain,gross_intr_snow, &
-              xsc_rain_out,xsc_snow_out)
+      satcap_2024 = dewmx * max(0._r8, lai+sai)
+      IF (lai+sai > 1.e-6_r8) THEN
+         satcap_2024 = canopy_storage_capacity_colm2024 (dewmx,lai,sai,forc_us,forc_vs, &
+                                                         htop,ncd,ncw,bcw,veg_class,is_pft)
       ENDIF
-   END SUBROUTINE LEAF_interception_CoLM202x
+
+      CALL LEAF_interception_CoLM2014 (deltim,dewmx,forc_us,forc_vs,chil,sigf,lai,sai,tair,tleaf,&
+         prc_rain,prc_snow,prl_rain,prl_snow,qflx_irrig_sprinkler,bifall,&
+         ldew,ldew_rain,ldew_snow,z0m,hu,pg_rain,pg_snow,qintr,qintr_rain,qintr_snow,&
+         gross_intr_rain,gross_intr_snow,xsc_rain_out,xsc_snow_out,&
+         ldew_smelt_out,ldew_frzc_out,canopy_phase_heat_out, &
+         satcap_rain_override=satcap_2024)
+
+   END SUBROUTINE LEAF_interception_CoLM2024
 
    SUBROUTINE LEAF_interception_CLM4 (deltim,dewmx,forc_us,forc_vs,chil,sigf,lai,sai,tair,tleaf,&
                                        prc_rain,prc_snow,prl_rain,prl_snow,qflx_irrig_sprinkler,&
@@ -695,7 +620,6 @@ CONTAINS
    ! 2002.08.31  Yongjiu Dai
 !=======================================================================
 
-   USE MOD_Namelist, only: DEF_USE_CoLMDEBUG
    IMPLICIT NONE
 
    real(r8), intent(in) :: deltim       !seconds in a time step [second]
@@ -839,11 +763,11 @@ CONTAINS
             tex_rain = min(tex_rain, max(0._r8, rain_clamp*deltim - tti_rain))
             tex_snow = min(tex_snow, max(0._r8, snow_clamp*deltim - tti_snow))
 
-            IF (DEF_USE_CoLMDEBUG) THEN
+#if (defined CoLMDEBUG)
             IF (tex_rain+tex_snow+tti_rain+tti_snow-p0 > 1.e-10) THEN
                write(6,*) 'tex_ + tti_ > p0 in interception code : '
             ENDIF
-            ENDIF
+#endif
 
 
          ELSE
@@ -888,14 +812,14 @@ CONTAINS
          xsc_rain_out = xsc_rain / deltim
          xsc_snow_out = xsc_snow / deltim
 
-         IF (DEF_USE_CoLMDEBUG) THEN
+#if (defined CoLMDEBUG)
          w = w - ldew - (pg_rain+pg_snow)*deltim
          IF (abs(w) > INTERCEPTION_BALANCE_TOL) THEN
             write(6,*) 'something wrong in interception code : '
             write(6,*) w, ldew, (pg_rain+pg_snow)*deltim, satcap
             CALL abort
          ENDIF
-         ENDIF
+#endif
 
       ELSE
          ! Release canopy water per phase. CLM4 now tracks
@@ -974,7 +898,6 @@ CONTAINS
    ! 2021.12.08  Zhongwang Wei @ SYSU
 !=======================================================================
 
-   USE MOD_Namelist, only: DEF_USE_CoLMDEBUG
    IMPLICIT NONE
 
    real(r8), intent(in) :: deltim       !seconds in a time step [second]
@@ -1121,10 +1044,16 @@ CONTAINS
          ! Now matches original CLM5 exactly.
          IF (ldew_snow > 1.e-8) THEN
             U10           = sqrt(forc_us*forc_us + forc_vs*forc_vs)
+            ! unl_snow_temp/unl_snow_wind are RATES [mm/s] (CLM5
+            ! CanopyHydrologyMod.F90 qflx_snow_unload convention: storage
+            ! * per-second unloading-timescale constant). Cap the rate
+            ! against the max rate that would empty the bucket this step,
+            ! then convert rate -> mass by *deltim before touching storage.
             unl_snow_temp = max(0._r8, ldew_snow * (tair - 270.15_r8) / 1.87e5_r8)
             unl_snow_wind = max(0._r8, 0.5_r8 * U10 * ldew_snow / 1.56e5_r8)
             unl_snow      = unl_snow_temp + unl_snow_wind
-            unl_snow      = min(unl_snow, ldew_snow)
+            unl_snow      = min(unl_snow, ldew_snow/deltim)
+            unl_snow      = unl_snow * deltim
             ldew_snow     = ldew_snow - unl_snow
          ENDIF
 
@@ -1159,7 +1088,7 @@ CONTAINS
          xsc_rain_out = 0._r8
          xsc_snow_out = 0._r8
 
-         IF (DEF_USE_CoLMDEBUG) THEN
+#if (defined CoLMDEBUG)
          ! Mass balance check
          w = w - ldew - (pg_rain+pg_snow)*deltim
          IF (abs(w) > INTERCEPTION_BALANCE_TOL) THEN
@@ -1172,7 +1101,7 @@ CONTAINS
          CALL check_interception_balance('CLM5', &
               ldew, ldew_rain, ldew_snow, pg_rain, pg_snow, &
               qintr, qintr_rain, qintr_snow)
-         ENDIF
+#endif
 
       ELSE
          ! 07/15/2023, Hua Yuan: bug found for ldew value reset when vegetation disappears
@@ -1253,7 +1182,6 @@ CONTAINS
    ! 2021.12.08  Zhongwang Wei @ SYSU
 !=======================================================================
 
-   USE MOD_Namelist, only: DEF_USE_CoLMDEBUG
    IMPLICIT NONE
 
    real(r8), intent(in)    :: deltim     !seconds in a time step [second]
@@ -1463,11 +1391,11 @@ CONTAINS
             ! Drip: excess precipitation on vegetation that cannot be intercepted
             tex_rain = rain_clamp*fvegc*deltim  - int_rain*deltim
             tex_snow = snow_clamp*fvegc*deltim - int_snow*deltim
-            IF (DEF_USE_CoLMDEBUG) THEN
+#if (defined CoLMDEBUG)
             IF (tex_rain+tex_snow+tti_rain+tti_snow-p0 > 1.e-10) THEN
                write(6,*) 'tex_ + tti_ > p0 in interception code : '
             ENDIF
-            ENDIF
+#endif
          ELSE
             ! all intercepted by canopy leaves for very small precipitation
             tti_rain = 0.
@@ -1530,7 +1458,7 @@ CONTAINS
          xsc_rain_out = xsc_rain / deltim
          xsc_snow_out = xsc_snow / deltim
 
-         IF (DEF_USE_CoLMDEBUG) THEN
+#if (defined CoLMDEBUG)
          w = w - ldew - (pg_rain+pg_snow)*deltim
          IF (abs(w) > INTERCEPTION_BALANCE_TOL) THEN
             write(6,*) 'something wrong in interception code : '
@@ -1541,7 +1469,7 @@ CONTAINS
          CALL check_interception_balance('NoahMP', &
               ldew, ldew_rain, ldew_snow, pg_rain, pg_snow, &
               qintr, qintr_rain, qintr_snow)
-         ENDIF
+#endif
 
       ELSE
          ! 07/15/2023, Hua Yuan: bug found for ldew value reset when vegetation disappears
@@ -1604,7 +1532,6 @@ CONTAINS
    ! 2021.12.08  Zhongwang Wei @ SYSU
 !=======================================================================
 
-   USE MOD_Namelist, only: DEF_USE_CoLMDEBUG
    IMPLICIT NONE
 
    real(r8), intent(in) :: deltim       !seconds in a time step [second]
@@ -1944,7 +1871,7 @@ CONTAINS
          ! residual accumulated into xsc_rain/xsc_snow BEFORE interception.
          xsc_rain_out = xsc_rain / deltim
          xsc_snow_out = xsc_snow / deltim
-         IF (DEF_USE_CoLMDEBUG) THEN
+#if (defined CoLMDEBUG)
          w = w - ldew - (pg_rain+pg_snow)*deltim
          IF (abs(w) > INTERCEPTION_BALANCE_TOL) THEN
             write(6,*) 'something wrong in interception code : '
@@ -1955,7 +1882,7 @@ CONTAINS
          CALL check_interception_balance('MATSIRO', &
               ldew, ldew_rain, ldew_snow, pg_rain, pg_snow, &
               qintr, qintr_rain, qintr_snow)
-         ENDIF
+#endif
 
       ELSE
          ! No vegetation: all precipitation passes through, release any
@@ -2016,7 +1943,6 @@ CONTAINS
 !=======================================================================
 
 
-   USE MOD_Namelist, only: DEF_USE_CoLMDEBUG
    IMPLICIT NONE
 
    real(r8), intent(in) :: deltim       !seconds in a time step [second]
@@ -2460,7 +2386,7 @@ CONTAINS
          xsc_rain_out = xsc_rain / deltim
          xsc_snow_out = xsc_snow / deltim
 
-         IF (DEF_USE_CoLMDEBUG) THEN
+#if (defined CoLMDEBUG)
          w = w - ldew - (pg_rain+pg_snow)*deltim
          IF (abs(w) > INTERCEPTION_BALANCE_TOL) THEN
             write(6,*) 'something wrong in interception code : '
@@ -2471,7 +2397,7 @@ CONTAINS
          CALL check_interception_balance('VIC', &
               ldew, ldew_rain, ldew_snow, pg_rain, pg_snow, &
               qintr, qintr_rain, qintr_snow)
-         ENDIF
+#endif
 
       ELSE
          ! No vegetation: all precipitation passes through, release any
@@ -2577,7 +2503,6 @@ CONTAINS
       ! 2021.12.08  Zhongwang Wei @ SYSU
    !=======================================================================
 
-   USE MOD_Namelist, only: DEF_USE_CoLMDEBUG
    IMPLICIT NONE
 
    real(r8), intent(in)    :: deltim     !seconds in a time step [second]
@@ -2988,7 +2913,7 @@ CONTAINS
          ! Same per-veg -> grid-scale conversion for the fusion heat flux.
          canopy_phase_heat_out = canopy_phase_heat_out * sigf_safe
 
-         IF (DEF_USE_CoLMDEBUG) THEN
+#if (defined CoLMDEBUG)
          ! Mass balance check: w_l (grid-scale old storage + precip) should equal
          ! new grid-scale storage + grid-scale ground flux
          w_l = w_l - ldew - (pg_rain + pg_snow) * deltim
@@ -3001,7 +2926,7 @@ CONTAINS
          CALL check_interception_balance('JULES', &
               ldew, ldew_rain, ldew_snow, pg_rain, pg_snow, &
               qintr, qintr_rain, qintr_snow)
-         ENDIF
+#endif
 
       ELSE
          ! No vegetation: all precipitation passes through, release any
@@ -3023,6 +2948,7 @@ CONTAINS
 
    SUBROUTINE LEAF_interception_wrap(deltim,dewmx,forc_us,forc_vs,chil,sigf,fsno,lai,sai,tair,tleaf, &
                                prc_rain,prc_snow,prl_rain,prl_snow,qflx_irrig_sprinkler,bifall, &
+                               patchclass,ncd,ncw,bcw,htop, &
                                                        ldew,ldew_rain,ldew_snow,z0m,hu,pg_rain, &
                                                             pg_snow,qintr,qintr_rain,qintr_snow, &
                                                             gross_intr_rain,gross_intr_snow, &
@@ -3059,6 +2985,8 @@ CONTAINS
    real(r8), intent(in)    :: prl_snow   !large-scale snowfall [mm/s]
    real(r8), intent(in)    :: qflx_irrig_sprinkler !irrigation and sprinkler water [mm/s]
    real(r8), intent(in)    :: bifall     !bulk density of newly fallen dry snow [kg/m3]
+   integer,  intent(in)    :: patchclass !IGBP land-cover class
+   real(r8), intent(in)    :: ncd, ncw, bcw, htop !canopy morphology [m]
    real(r8), intent(in)    :: sigf       !fraction of veg cover, excluding snow-covered veg [-]
    real(r8), intent(in)    :: fsno       !fraction of ground covered by snow [-]
    real(r8), intent(in)    :: lai        !leaf area index [-]
@@ -3090,7 +3018,6 @@ CONTAINS
    ! - cools canopy. Non-zero only for NoahMP/MATSIRO/VIC/JULES; MOD_Thermal
    ! consumes it in the canopy energy balance.
    real(r8), intent(out)   :: canopy_phase_heat_out
-
       IF (DEF_Interception_scheme==1) THEN
          CALL LEAF_interception_CoLM2014 (deltim,dewmx,forc_us,forc_vs,chil,sigf,lai,sai,tair,tleaf,&
                                              prc_rain,prc_snow,prl_rain,prl_snow,qflx_irrig_sprinkler,bifall,&
@@ -3158,8 +3085,9 @@ CONTAINS
                                              canopy_phase_heat_out)
 
       ELSEIF  (DEF_Interception_scheme==8) THEN
-         CALL LEAF_interception_colm202x (deltim,dewmx,forc_us,forc_vs,chil,sigf,lai,sai,tair,tleaf,&
+         CALL LEAF_interception_CoLM2024 (deltim,dewmx,forc_us,forc_vs,chil,sigf,lai,sai,tair,tleaf,&
                                              prc_rain,prc_snow,prl_rain,prl_snow,qflx_irrig_sprinkler,&
+                                             bifall,patchclass,.false.,ncd,ncw,bcw,htop,&
                                              ldew,ldew_rain,ldew_snow,z0m,hu,pg_rain,&
                                              pg_snow,qintr,qintr_rain,qintr_snow,&
                                              gross_intr_rain,gross_intr_snow,&
@@ -3186,6 +3114,7 @@ CONTAINS
 
    END SUBROUTINE LEAF_interception_wrap
 
+#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
    SUBROUTINE LEAF_interception_pftwrap (ipatch,deltim,dewmx,forc_us,forc_vs,forc_t,fsno,&
                                prc_rain,prc_snow,prl_rain,prl_snow,qflx_irrig_sprinkler,bifall,&
                                ldew,ldew_rain,ldew_snow,z0m,hu,pg_rain,pg_snow,qintr,qintr_rain,qintr_snow,&
@@ -3430,8 +3359,9 @@ CONTAINS
       ELSEIF (DEF_Interception_scheme==8) THEN
          DO i = ps, pe
             p = pftclass(i)
-            CALL LEAF_interception_CoLM202x (deltim,dewmx,forc_us,forc_vs,chil_p(p),sigf_p(i),lai_p(i),sai_p(i),forc_t,tleaf_p(i),&
+            CALL LEAF_interception_CoLM2024 (deltim,dewmx,forc_us,forc_vs,chil_p(p),sigf_p(i),lai_p(i),sai_p(i),forc_t,tleaf_p(i),&
                                              prc_rain,prc_snow,prl_rain,prl_snow,qflx_irrig_sprinkler,&
+                                             bifall,p,.true.,ncd_p(i),ncw_p(i),bcw_p(i),htop_p(i),&
                                              ldew_p(i),ldew_rain_p(i),ldew_snow_p(i),z0m_p(i),hu,pg_rain,pg_snow,qintr_p(i),qintr_rain_p(i),qintr_snow_p(i),&
                                                 gross_intr_rain_pft,gross_intr_snow_pft,&
                                                 xsc_rain_pft,xsc_snow_pft,&
@@ -3477,6 +3407,7 @@ CONTAINS
 
 
    END SUBROUTINE LEAF_interception_pftwrap
+#endif
 
    SUBROUTINE release_no_vegetation_canopy_storage(deltim,tleaf, &
          prc_rain,prc_snow,prl_rain,prl_snow,qflx_irrig_sprinkler, &

@@ -165,19 +165,12 @@ CONTAINS
             minutes = minutes - 262800
          END select
 
-         ! `hist_out` writes more than one SinglePoint history file for the
-         ! same model timestamp (main history first, optional tracer history
-         ! second).  The write-back cache is shared across those calls, so a
-         ! second call for the same timestamp must reuse the memory slot instead
-         ! of advancing it; otherwise the final flush defines one file with N
-         ! time records while later variables are written with slot N+1.
-         IF (itime_mem <= 0) THEN
+         IF (itime_mem == 0) THEN
+            itime_mem = 1
+         ELSEIF (time_memory(itime_mem) /= minutes) THEN
             itime_mem = itime_mem + 1
-            time_memory(itime_mem) = minutes
-         ELSEIF (minutes /= time_memory(itime_mem)) THEN
-            itime_mem = itime_mem + 1
-            time_memory(itime_mem) = minutes
          ENDIF
+         time_memory(itime_mem) = minutes
 
          IF (memory_to_disk) THEN
             CALL ncio_define_dimension(filename, 'time', itime_mem)

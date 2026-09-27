@@ -16,7 +16,8 @@ MODULE MOD_Tracer_Hist
       trc_delta_sanity_max, trc_flux_water_min_for_delta, trc_water_min_for_delta, &
       trc_water_min_for_ratio, &
       tracer_uses_delta_diagnostics, tracer_uses_land_water_transport, &
-      tracer_concentration_units, tracer_is_nonvolatile_solute
+      tracer_concentration_units, tracer_is_nonvolatile_solute, tracer_is_isotope, &
+      tracer_aquifer_actual_water, tracer_aquifer_actual_mass
    USE MOD_Tracer_Vars
 
    IMPLICIT NONE
@@ -62,7 +63,7 @@ CONTAINS
       real(r8), intent(in) :: wa, wdsrf, wetwat, scv
 
       integer :: itrc, j, jsnow
-      real(r8) :: layer_water, layer_tracer
+      real(r8) :: layer_water, layer_tracer, actual_aquifer_water, actual_aquifer_mass
 
       IF (ntracers <= 0) RETURN
 
@@ -121,6 +122,12 @@ CONTAINS
             ! from concentration diagnostics to avoid tiny-denominator deltas.
             IF (wa > 1._r8) a_water_wa(ipatch) = a_water_wa(ipatch) + wa
             IF (wa < -1._r8) a_water_wa_debt(ipatch) = a_water_wa_debt(ipatch) - wa
+            actual_aquifer_water = tracer_aquifer_actual_water(wa, trc_aquifer_ref_water(ipatch))
+            IF (trc_aquifer_ref_water(ipatch) > 0._r8 .and. &
+                actual_aquifer_water > trc_water_min_for_ratio) &
+               a_water_aquifer_actual(ipatch) = a_water_aquifer_actual(ipatch) + actual_aquifer_water
+            IF (trc_aquifer_ref_water(ipatch) <= 0._r8 .and. wa > 1._r8) &
+               a_water_aquifer_actual(ipatch) = a_water_aquifer_actual(ipatch) + wa
          a_water_wdsrf (ipatch) = a_water_wdsrf (ipatch) + wdsrf
          a_water_wetwat(ipatch) = a_water_wetwat(ipatch) + wetwat
          ! CoLM's `scv` is total snow water equivalent even after layered
@@ -133,6 +140,18 @@ CONTAINS
          ENDIF
          DO itrc = 1, ntracers
             IF (.not. tracer_uses_land_water_transport(itrc)) CYCLE
+            IF (tracer_is_isotope(itrc) .and. trc_aquifer_ref_water(ipatch) > 0._r8 .and. &
+                actual_aquifer_water > trc_water_min_for_ratio) THEN
+               actual_aquifer_mass = tracer_aquifer_actual_mass(trc_wa(itrc, ipatch), &
+                  trc_aquifer_ref_mass(itrc, ipatch))
+               a_trc_aquifer_actual_mass(itrc, ipatch) = &
+                  a_trc_aquifer_actual_mass(itrc, ipatch) + actual_aquifer_mass
+               IF (wa < -1._r8) a_trc_wa_debt_mass(itrc, ipatch) = &
+                  a_trc_wa_debt_mass(itrc, ipatch) - wa * actual_aquifer_mass / actual_aquifer_water
+            ELSE
+            IF (tracer_is_isotope(itrc) .and. wa > 1._r8) &
+               a_trc_aquifer_actual_mass(itrc, ipatch) = &
+                  a_trc_aquifer_actual_mass(itrc, ipatch) + trc_wa(itrc, ipatch)
             IF (wa > 1._r8) THEN
                a_trc_wa_mass(itrc, ipatch) = a_trc_wa_mass(itrc, ipatch) + trc_wa(itrc, ipatch)
             ENDIF
@@ -140,6 +159,7 @@ CONTAINS
                   a_trc_wa_debt_mass(itrc, ipatch) = a_trc_wa_debt_mass(itrc, ipatch) &
                      + max(-trc_wa(itrc, ipatch), 0._r8)
                ENDIF
+            ENDIF
             a_trc_wdsrf_mass (itrc, ipatch) = a_trc_wdsrf_mass (itrc, ipatch) + trc_wdsrf (itrc, ipatch)
          a_trc_wetwat_mass(itrc, ipatch) = a_trc_wetwat_mass(itrc, ipatch) + trc_wetwat(itrc, ipatch)
          a_trc_surface_residue_mass(itrc, ipatch) = a_trc_surface_residue_mass(itrc, ipatch) + &
@@ -584,10 +604,17 @@ CONTAINS
                   write(trc_varname , '(A,A)')   'f_trc_conc_wa_', trim(tracers(itrc_loc)%name)
                   write(trc_longname, '(5A)') 'aquifer tracer ', trim(trc_ratio_word), &
                      ' (', trim(tracers(itrc_loc)%name), ')'
-                     CALL write_history_tracer_ratio_2d (DEF_hist_vars%wa, &
-                        a_trc_wa_mass(itrc_loc, :), a_water_wa, &
-                        file_hist, trim(trc_varname), itime_in_file, &
-                        filter, trim(trc_longname), trim(trc_ratio_units))
+                     IF (tracer_is_isotope(itrc_loc)) THEN
+                        CALL write_history_tracer_ratio_2d (DEF_hist_vars%wa, &
+                           a_trc_aquifer_actual_mass(itrc_loc, :), a_water_aquifer_actual, &
+                           file_hist, trim(trc_varname), itime_in_file, &
+                           filter, trim(trc_longname), trim(trc_ratio_units))
+                     ELSE
+                        CALL write_history_tracer_ratio_2d (DEF_hist_vars%wa, &
+                           a_trc_wa_mass(itrc_loc, :), a_water_wa, &
+                           file_hist, trim(trc_varname), itime_in_file, &
+                           filter, trim(trc_longname), trim(trc_ratio_units))
+                     ENDIF
 
                      write(trc_varname , '(A,A)')   'f_trc_conc_wa_debt_', trim(tracers(itrc_loc)%name)
                      write(trc_longname, '(5A)') 'aquifer debt tracer ', trim(trc_ratio_word), &
@@ -1068,6 +1095,7 @@ CONTAINS
       USE MOD_LandElm
       USE MOD_LandPatch, only: elm_patch
       USE MOD_ElmVector
+      USE MOD_LandPatch, only: elm_patch
 #endif
       IMPLICIT NONE
 
@@ -1284,6 +1312,7 @@ CONTAINS
       USE MOD_LandElm
       USE MOD_LandPatch, only: elm_patch
       USE MOD_ElmVector
+      USE MOD_LandPatch, only: elm_patch
 #endif
       IMPLICIT NONE
 

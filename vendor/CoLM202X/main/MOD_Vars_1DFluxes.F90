@@ -170,11 +170,10 @@ CONTAINS
             allocate ( qlayer (0:nl_soil,numpatch) ); qlayer(:,:) = spval ! water flux between soil layer [mm h2o/s]
             allocate ( lake_deficit (numpatch) ); lake_deficit(:) = spval ! lake deficit due to evaporation (mm h2o/s)
 
-            allocate ( oroflag(numpatch) )  ; oroflag(:) = 1.0   ! /ocean(0)/seaice(2) flag
-
             allocate ( sensors(nsensor,numpatch) ); sensors(:,:) = spval !
 
          ENDIF
+         allocate ( oroflag(numpatch) )  ; oroflag(:) = 1.0   ! /ocean(0)/seaice(2) flag
       ENDIF
 
 IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
@@ -268,11 +267,10 @@ ENDIF
             deallocate ( qlayer  )  ! water flux between soil layer [mm h2o/s]
             deallocate ( lake_deficit )  ! lake deficit due to evaporation (mm h2o/s)
 
-            deallocate ( oroflag )  !
-
             deallocate ( sensors )  !
 
          ENDIF
+         IF (allocated(oroflag)) deallocate ( oroflag )
       ENDIF
 
 IF (DEF_USE_PFT .or. DEF_USE_PC) THEN

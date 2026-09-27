@@ -173,8 +173,12 @@ SUBROUTINE Aggregation_SoilParameters ( &
    integer, parameter   :: nprint = 0
    integer              :: ldfjac,info,ipvtc(nc),ipvtv(nv),ipvtb(nb),maxfev,nfev,njev
    real(r8)             :: xc(nc),xv(nv),xb(nb),diagc(nc),diagv(nv),diagb(nb),qtfc(nc),qtfv(nv),qtfb(nb)
-   real(r8)             :: fjacc(npointw-7,nc),fvecc(npointw-7)
-   real(r8)             :: fjacv(npointw,nv),fvecv(npointw)
+! the jacobian matrix required in Levenberg-Marquardt fitting method
+! the values of objective functions to be fitted
+   real(r8)             :: fjacc(npointw-7,nc),fvecc(npointw-7)   ! calculated in SW_CB_dist
+! the jacobian matrix required in Levenberg-Marquardt fitting method
+! the values of objective functions to be fitted
+   real(r8)             :: fjacv(npointw,nv),fvecv(npointw)           ! calculated in SW_VG_dist
    real(r8),allocatable :: fjacb(:,:),fvecb(:)
    integer isiter                         ! flags to tell whether the iteration is completed, 1=Yes, 0=No
 
@@ -266,6 +270,10 @@ SUBROUTINE Aggregation_SoilParameters ( &
          write(c,'(i1)') nsl
 
          ! (1) volumetric fraction of quartz within mineral soil
+         ! (2) volumetric fraction of gravels
+         ! (3) volumetric fraction of sand
+         ! (4) volumetric fraction of organic matter
+         ! with the parameter alpha and beta in the Balland V. and P. A. Arp (2005) model
          IF (p_is_io) THEN
 
             CALL allocate_block_data (gland, vf_quartz_mineral_s_grid)
@@ -327,6 +335,8 @@ SUBROUTINE Aggregation_SoilParameters ( &
                   vf_sand_s_patches (ipatch) = sum (vf_sand_s_one * (area_one/sum(area_one)))
                   vf_om_s_patches (ipatch) = sum (vf_om_s_one * (area_one/sum(area_one)))
 
+                  ! the parameter values of Balland and Arp (2005) Ke-Sr relationship,
+                  ! modified by Barry-Macaulay et al.(2015), Evaluation of soil thermal conductivity models
                   WHERE ((vf_gravels_s_one + vf_sand_s_one) > 0.4)
                      vf_quartz_mineral_s_one = 0.38
                   ELSEWHERE ((vf_gravels_s_one + vf_sand_s_one) > 0.25)
@@ -490,6 +500,7 @@ SUBROUTINE Aggregation_SoilParameters ( &
          ENDIF
 
          ! (5) gravimetric fraction of gravels
+         ! (6) gravimetric fraction of sand
          IF (p_is_io) THEN
 
             CALL allocate_block_data (gland, wf_gravels_s_grid)
@@ -1086,6 +1097,11 @@ SUBROUTINE Aggregation_SoilParameters ( &
          ENDIF
 
          ! (15) heat capacity of soil solids [J/(m3 K)]
+         ! (16) thermal conductivity of unfrozen saturated soil [W/m-K]
+         ! (17) thermal conductivity of frozen saturated soil [W/m-K]
+         ! (18) thermal conductivity for dry soil [W/(m-K)]
+         ! (19) thermal conductivity of soil solids [W/m-K]
+         ! (20) OM_density [kg/m3]
          IF (p_is_io) THEN
             CALL allocate_block_data (gland, csol_grid)
             lndname = trim(dir_rawdata)//'/soil/csol.nc'
@@ -1320,6 +1336,9 @@ SUBROUTINE Aggregation_SoilParameters ( &
          ENDIF
 
          ! (21) bulk density of soil (GRAVELS + OM + Mineral Soils)
+         ! (22) volumetric fraction of clay
+         ! (23) gravimetric fraction of om
+         ! (24) gravimetric fraction of clay
          IF (p_is_io) THEN
 
             CALL allocate_block_data (gland, BD_all_s_grid)

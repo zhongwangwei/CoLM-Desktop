@@ -3,10 +3,13 @@
 MODULE MOD_Tracer_Vars
 
    USE MOD_Precision
-   USE MOD_Namelist, only: DEF_TRACER_LULCC_ABORT_NBAD
+   USE MOD_Namelist, only: DEF_TRACER_LULCC_ABORT_NBAD, &
+      DEF_TRACER_AQUIFER_MIXING_WATER_MM, DEF_USE_VariablySaturatedFlow
    USE MOD_SPMD_Task, only: p_is_io, CoLM_stop
-   USE MOD_Tracer_Defs, only: ntracers, tracers, &
-      tracer_uses_land_water_transport, tracer_equilibrate_dissolved
+   USE MOD_Tracer_Defs, only: ntracers, tracers, tracer_build_descriptor_identity, &
+      tracer_uses_land_water_transport, tracer_is_isotope, &
+      tracer_aquifer_actual_water, tracer_equilibrate_dissolved
+   USE MOD_Const_LC, only: patchtypes
 
    IMPLICIT NONE
    SAVE
@@ -15,12 +18,17 @@ MODULE MOD_Tracer_Vars
    logical :: lulcc_area_fallback_warned = .false.
    real(r8), parameter :: lulcc_mass_abs_tol = 1.e-8_r8
    real(r8), parameter :: lulcc_mass_rel_tol = 1.e-10_r8
+   integer, parameter :: TRC_HISTORY_FIELDS = 44
 
    real(r8), allocatable :: trc_ldew_rain  (:,:)
    real(r8), allocatable :: trc_ldew_snow  (:,:)
    real(r8), allocatable :: trc_wliq_soisno(:,:,:)
    real(r8), allocatable :: trc_wice_soisno(:,:,:)
    real(r8), allocatable :: trc_wa         (:,:)
+   ! Fixed isotope-only reference carrier. trc_wa remains a relative mass
+   ! so its constant reference cancels from existing conservation budgets.
+   real(r8), allocatable :: trc_aquifer_ref_water(:)
+   real(r8), allocatable :: trc_aquifer_ref_mass(:,:)
    real(r8), allocatable :: trc_wdsrf      (:,:)
    real(r8), allocatable :: trc_wetwat     (:,:)
    ! Waterless surface residue for nonvolatile conservative solutes.
@@ -91,6 +99,8 @@ MODULE MOD_Tracer_Vars
    real(r8), allocatable :: lulcc_trc_wliq_soisno_old(:,:,:)
    real(r8), allocatable :: lulcc_trc_wice_soisno_old(:,:,:)
    real(r8), allocatable :: lulcc_trc_wa_old(:,:)
+   real(r8), allocatable :: lulcc_trc_aquifer_ref_water_old(:,:)
+   real(r8), allocatable :: lulcc_trc_aquifer_ref_mass_old(:,:)
    real(r8), allocatable :: lulcc_trc_wdsrf_old(:,:)
    real(r8), allocatable :: lulcc_trc_wetwat_old(:,:)
    real(r8), allocatable :: lulcc_trc_surface_residue_old(:,:)
@@ -150,6 +160,7 @@ MODULE MOD_Tracer_Vars
 	   ! Explicit numerical source/sink used only to reconcile solver residuals
 	   ! that have no physical flux signature. Positive adds tracer to storage.
 	   real(r8), allocatable :: trc_numerical_residual_step(:,:)
+	   real(r8), allocatable :: trc_numerical_water_step(:,:)
 
    real(r8), allocatable :: a_trc_ldew_mass (:,:)
    real(r8), allocatable :: a_water_ldew    (:)
@@ -169,6 +180,8 @@ MODULE MOD_Tracer_Vars
 	   real(r8), allocatable :: a_water_wa       (:)     ! (numpatch)
 	   real(r8), allocatable :: a_trc_wa_debt_mass(:,:)  ! signed-debt magnitude diagnostics
 	   real(r8), allocatable :: a_water_wa_debt   (:)    ! aquifer debt magnitude
+   real(r8), allocatable :: a_water_aquifer_actual(:)
+   real(r8), allocatable :: a_trc_aquifer_actual_mass(:,:)
    real(r8), allocatable :: a_trc_wdsrf_mass (:,:)
    real(r8), allocatable :: a_water_wdsrf    (:)
    real(r8), allocatable :: a_trc_wetwat_mass(:,:)
@@ -191,6 +204,7 @@ MODULE MOD_Tracer_Vars
    PUBLIC :: trc_ldew_rain, trc_ldew_snow
    PUBLIC :: trc_wliq_soisno, trc_wice_soisno
    PUBLIC :: trc_wa, trc_wdsrf, trc_wetwat
+   PUBLIC :: trc_aquifer_ref_water, trc_aquifer_ref_mass
    PUBLIC :: trc_surface_residue, trc_subsurface_residue, trc_waterstorage
    PUBLIC :: trc_solid_soisno, trc_surface_solid, trc_subsurface_solid
    PUBLIC :: trc_canopy_solid, trc_waterstorage_solid
@@ -199,7 +213,7 @@ MODULE MOD_Tracer_Vars
    PUBLIC :: trc_leaf_delta_e, trc_leaf_delta_b, trc_leaf_peclet
    PUBLIC :: trc_leaf_water_moles, trc_leaf_iso_storage
    PUBLIC :: trc_storage_beg, trc_balance_err
-   PUBLIC :: trc_reactive_source_step, trc_numerical_residual_step
+   PUBLIC :: trc_reactive_source_step, trc_numerical_residual_step, trc_numerical_water_step
 
    PUBLIC :: TRC_EVAP_KIND_TRANSP, TRC_EVAP_KIND_SOILEVAP
    PUBLIC :: TRC_EVAP_KIND_CANOPYEVAP, TRC_EVAP_KIND_SUBL, TRC_EVAP_KIND_WETLAND
@@ -213,10 +227,13 @@ MODULE MOD_Tracer_Vars
    PUBLIC :: a_trc_ldew_mass, a_water_ldew
    PUBLIC :: a_trc_soil_mass, a_water_soil, a_trc_snow_mass, a_water_snow
    PUBLIC :: a_trc_wa_mass, a_water_wa, a_trc_wa_debt_mass, a_water_wa_debt
+   PUBLIC :: a_water_aquifer_actual, a_trc_aquifer_actual_mass
    PUBLIC :: a_trc_wdsrf_mass, a_water_wdsrf
    PUBLIC :: a_trc_wetwat_mass, a_water_wetwat
    PUBLIC :: a_trc_surface_residue_mass, a_trc_subsurface_residue_mass
    PUBLIC :: a_trc_layer_dry_mass, a_trc_solid_mass, a_trc_scv_mass, a_water_scv
+   PUBLIC :: TRC_HISTORY_FIELDS, tracer_history_required, tracer_history_manifest
+   PUBLIC :: tracer_history_write, tracer_history_restore
 
 CONTAINS
 
@@ -224,13 +241,17 @@ CONTAINS
       IMPLICIT NONE
       integer, intent(in) :: numpatch, maxsnl, nl_soil
       integer :: itrc
-      IF (ntracers <= 0 .or. numpatch <= 0) RETURN
+      ! History writers slice tracer rows on every rank, including the master
+      ! and empty workers. Keep their second dimension empty, not unallocated.
+      IF (ntracers <= 0) RETURN
 
       allocate(trc_ldew_rain   (ntracers, numpatch));           trc_ldew_rain   = 0._r8
       allocate(trc_ldew_snow   (ntracers, numpatch));           trc_ldew_snow   = 0._r8
       allocate(trc_wliq_soisno (ntracers, maxsnl+1:nl_soil, numpatch)); trc_wliq_soisno = 0._r8
       allocate(trc_wice_soisno (ntracers, maxsnl+1:nl_soil, numpatch)); trc_wice_soisno = 0._r8
       allocate(trc_wa          (ntracers, numpatch));           trc_wa          = 0._r8
+      allocate(trc_aquifer_ref_water(numpatch));                trc_aquifer_ref_water = 0._r8
+      allocate(trc_aquifer_ref_mass(ntracers, numpatch));       trc_aquifer_ref_mass = 0._r8
       allocate(trc_wdsrf       (ntracers, numpatch));           trc_wdsrf       = 0._r8
       allocate(trc_wetwat      (ntracers, numpatch));           trc_wetwat      = 0._r8
       allocate(trc_surface_residue(ntracers, numpatch));        trc_surface_residue = 0._r8
@@ -285,6 +306,7 @@ CONTAINS
 	      allocate(trc_balance_err (ntracers, numpatch));           trc_balance_err = 0._r8
 	      allocate(trc_reactive_source_step(ntracers, numpatch));   trc_reactive_source_step = 0._r8
 	      allocate(trc_numerical_residual_step(ntracers, numpatch)); trc_numerical_residual_step = 0._r8
+	      allocate(trc_numerical_water_step(ntracers, numpatch)); trc_numerical_water_step = 0._r8
 
 	      allocate(a_trc_ldew_mass (ntracers, numpatch));           a_trc_ldew_mass = 0._r8
       allocate(a_water_ldew    (numpatch));                     a_water_ldew    = 0._r8
@@ -297,6 +319,8 @@ CONTAINS
 	      allocate(a_water_wa       (numpatch));                    a_water_wa        = 0._r8
 	      allocate(a_trc_wa_debt_mass(ntracers, numpatch));         a_trc_wa_debt_mass = 0._r8
 	      allocate(a_water_wa_debt   (numpatch));                   a_water_wa_debt    = 0._r8
+      allocate(a_water_aquifer_actual(numpatch));              a_water_aquifer_actual = 0._r8
+      allocate(a_trc_aquifer_actual_mass(ntracers, numpatch)); a_trc_aquifer_actual_mass = 0._r8
       allocate(a_trc_wdsrf_mass (ntracers, numpatch));          a_trc_wdsrf_mass  = 0._r8
       allocate(a_water_wdsrf    (numpatch));                    a_water_wdsrf     = 0._r8
       allocate(a_trc_wetwat_mass(ntracers, numpatch));          a_trc_wetwat_mass = 0._r8
@@ -316,6 +340,8 @@ CONTAINS
       IF (allocated(trc_wliq_soisno)) deallocate(trc_wliq_soisno)
       IF (allocated(trc_wice_soisno)) deallocate(trc_wice_soisno)
       IF (allocated(trc_wa         )) deallocate(trc_wa         )
+      IF (allocated(trc_aquifer_ref_water)) deallocate(trc_aquifer_ref_water)
+      IF (allocated(trc_aquifer_ref_mass)) deallocate(trc_aquifer_ref_mass)
       IF (allocated(trc_wdsrf      )) deallocate(trc_wdsrf      )
       IF (allocated(trc_wetwat     )) deallocate(trc_wetwat     )
       IF (allocated(trc_surface_residue)) deallocate(trc_surface_residue)
@@ -363,6 +389,7 @@ CONTAINS
 	      IF (allocated(trc_balance_err)) deallocate(trc_balance_err)
 	      IF (allocated(trc_reactive_source_step)) deallocate(trc_reactive_source_step)
 	      IF (allocated(trc_numerical_residual_step)) deallocate(trc_numerical_residual_step)
+	      IF (allocated(trc_numerical_water_step)) deallocate(trc_numerical_water_step)
 	      IF (allocated(a_trc_ldew_mass)) deallocate(a_trc_ldew_mass)
       IF (allocated(a_water_ldew   )) deallocate(a_water_ldew   )
       IF (allocated(a_trc_soil_mass)) deallocate(a_trc_soil_mass)
@@ -373,6 +400,8 @@ CONTAINS
 	      IF (allocated(a_water_wa       )) deallocate(a_water_wa       )
 	      IF (allocated(a_trc_wa_debt_mass)) deallocate(a_trc_wa_debt_mass)
 	      IF (allocated(a_water_wa_debt   )) deallocate(a_water_wa_debt   )
+      IF (allocated(a_water_aquifer_actual)) deallocate(a_water_aquifer_actual)
+      IF (allocated(a_trc_aquifer_actual_mass)) deallocate(a_trc_aquifer_actual_mass)
       IF (allocated(a_trc_wdsrf_mass )) deallocate(a_trc_wdsrf_mass )
       IF (allocated(a_water_wdsrf    )) deallocate(a_water_wdsrf    )
       IF (allocated(a_trc_wetwat_mass)) deallocate(a_trc_wetwat_mass)
@@ -407,6 +436,10 @@ CONTAINS
       lulcc_trc_wice_soisno_old = trc_wice_soisno
       allocate(lulcc_trc_wa_old(size(trc_wa,1), size(trc_wa,2)))
       lulcc_trc_wa_old = trc_wa
+      allocate(lulcc_trc_aquifer_ref_water_old(1, size(trc_aquifer_ref_water)))
+      lulcc_trc_aquifer_ref_water_old(1, :) = trc_aquifer_ref_water
+      allocate(lulcc_trc_aquifer_ref_mass_old(size(trc_aquifer_ref_mass,1), size(trc_aquifer_ref_mass,2)))
+      lulcc_trc_aquifer_ref_mass_old = trc_aquifer_ref_mass
       allocate(lulcc_trc_wdsrf_old(size(trc_wdsrf,1), size(trc_wdsrf,2)))
       lulcc_trc_wdsrf_old = trc_wdsrf
       allocate(lulcc_trc_wetwat_old(size(trc_wetwat,1), size(trc_wetwat,2)))
@@ -449,12 +482,13 @@ CONTAINS
       IMPLICIT NONE
       integer,   intent(in) :: patchclass_new(:), patchclass_old(:)
       integer*8, intent(in) :: eindex_new(:), eindex_old(:)
-      real(r8),  intent(in), optional :: lccpct_patches(:,:)
+      real(r8),  intent(in), optional :: lccpct_patches(:,0:)
       real(r8),  intent(in), optional :: new_patch_area(:), old_patch_area(:)
 
-      integer :: nnew, maxsnl_saved, nl_soil_saved
+      integer :: nnew, maxsnl_saved, nl_soil_saved, np, itrc
       real(r8), allocatable :: mass_before(:), mass_after(:)
-      logical :: check_lulcc_mass
+      real(r8), allocatable :: remapped_ref_water(:,:)
+      logical :: check_lulcc_mass, require_isotope_reference
 
       IF (.not. land_tracer_lulcc_snapshot_valid) RETURN
       IF (.not. allocated(lulcc_trc_wliq_soisno_old)) THEN
@@ -496,6 +530,34 @@ CONTAINS
       CALL remap3d_mass(lulcc_trc_wliq_soisno_old,       trc_wliq_soisno)
       CALL remap3d_mass(lulcc_trc_wice_soisno_old,       trc_wice_soisno)
       CALL remap2d_mass(lulcc_trc_wa_old,                trc_wa)
+      allocate(remapped_ref_water(1, nnew))
+      remapped_ref_water = 0._r8
+      CALL remap2d_mass(lulcc_trc_aquifer_ref_water_old, remapped_ref_water)
+      trc_aquifer_ref_water = remapped_ref_water(1, :)
+      deallocate(remapped_ref_water)
+      CALL remap2d_mass(lulcc_trc_aquifer_ref_mass_old, trc_aquifer_ref_mass)
+      require_isotope_reference = .false.
+      IF (DEF_USE_VariablySaturatedFlow .and. DEF_TRACER_AQUIFER_MIXING_WATER_MM > 0._r8) THEN
+         DO itrc = 1, ntracers
+            IF (tracer_uses_land_water_transport(itrc) .and. tracer_is_isotope(itrc)) &
+               require_isotope_reference = .true.
+         ENDDO
+      ENDIF
+      IF (require_isotope_reference .or. any(lulcc_trc_aquifer_ref_water_old > 0._r8)) THEN
+         DO np = 1, nnew
+            IF (patchclass_new(np) < lbound(patchtypes, 1) .or. &
+                patchclass_new(np) > ubound(patchtypes, 1)) &
+               CALL CoLM_stop('invalid LULCC patch class for aquifer isotope reference')
+            IF (trc_aquifer_ref_water(np) > 0._r8 .and. &
+                patchtypes(patchclass_new(np)) /= 0 .and. &
+                patchtypes(patchclass_new(np)) /= 2) &
+               CALL CoLM_stop('LULCC cannot transfer isotope aquifer reference to special patch')
+            IF (require_isotope_reference .and. trc_aquifer_ref_water(np) <= 0._r8 .and. &
+                (patchtypes(patchclass_new(np)) == 0 .or. &
+                 patchtypes(patchclass_new(np)) == 2)) &
+               CALL CoLM_stop('LULCC cannot create soil or wetland isotope aquifer without reference')
+         ENDDO
+      ENDIF
       CALL remap2d_mass(lulcc_trc_wdsrf_old,             trc_wdsrf)
       CALL remap2d_mass(lulcc_trc_wetwat_old,            trc_wetwat)
       CALL remap2d_mass(lulcc_trc_surface_residue_old,    trc_surface_residue)
@@ -532,6 +594,8 @@ CONTAINS
          IF (allocated(lulcc_trc_wliq_soisno_old))  CALL accumulate_lulcc_mass_3d(lulcc_trc_wliq_soisno_old, area, total)
          IF (allocated(lulcc_trc_wice_soisno_old))  CALL accumulate_lulcc_mass_3d(lulcc_trc_wice_soisno_old, area, total)
          IF (allocated(lulcc_trc_wa_old))           CALL accumulate_lulcc_mass_2d(lulcc_trc_wa_old, area, total)
+         IF (allocated(lulcc_trc_aquifer_ref_mass_old)) &
+            CALL accumulate_lulcc_mass_2d(lulcc_trc_aquifer_ref_mass_old, area, total)
          IF (allocated(lulcc_trc_wdsrf_old))        CALL accumulate_lulcc_mass_2d(lulcc_trc_wdsrf_old, area, total)
          IF (allocated(lulcc_trc_wetwat_old))       CALL accumulate_lulcc_mass_2d(lulcc_trc_wetwat_old, area, total)
          IF (allocated(lulcc_trc_surface_residue_old)) &
@@ -562,6 +626,8 @@ CONTAINS
          IF (allocated(trc_wliq_soisno))  CALL accumulate_lulcc_mass_3d(trc_wliq_soisno, area, total)
          IF (allocated(trc_wice_soisno))  CALL accumulate_lulcc_mass_3d(trc_wice_soisno, area, total)
          IF (allocated(trc_wa))           CALL accumulate_lulcc_mass_2d(trc_wa, area, total)
+         IF (allocated(trc_aquifer_ref_mass)) &
+            CALL accumulate_lulcc_mass_2d(trc_aquifer_ref_mass, area, total)
          IF (allocated(trc_wdsrf))        CALL accumulate_lulcc_mass_2d(trc_wdsrf, area, total)
          IF (allocated(trc_wetwat))       CALL accumulate_lulcc_mass_2d(trc_wetwat, area, total)
          IF (allocated(trc_surface_residue)) CALL accumulate_lulcc_mass_2d(trc_surface_residue, area, total)
@@ -921,6 +987,8 @@ CONTAINS
       IF (allocated(lulcc_trc_wliq_soisno_old)) deallocate(lulcc_trc_wliq_soisno_old)
       IF (allocated(lulcc_trc_wice_soisno_old)) deallocate(lulcc_trc_wice_soisno_old)
       IF (allocated(lulcc_trc_wa_old)) deallocate(lulcc_trc_wa_old)
+      IF (allocated(lulcc_trc_aquifer_ref_water_old)) deallocate(lulcc_trc_aquifer_ref_water_old)
+      IF (allocated(lulcc_trc_aquifer_ref_mass_old)) deallocate(lulcc_trc_aquifer_ref_mass_old)
       IF (allocated(lulcc_trc_wdsrf_old)) deallocate(lulcc_trc_wdsrf_old)
       IF (allocated(lulcc_trc_wetwat_old)) deallocate(lulcc_trc_wetwat_old)
       IF (allocated(lulcc_trc_surface_residue_old)) deallocate(lulcc_trc_surface_residue_old)
@@ -974,6 +1042,8 @@ CONTAINS
 	      IF (allocated(a_water_wa       )) a_water_wa        = 0._r8
 	      IF (allocated(a_trc_wa_debt_mass)) a_trc_wa_debt_mass = 0._r8
 	      IF (allocated(a_water_wa_debt   )) a_water_wa_debt    = 0._r8
+      IF (allocated(a_water_aquifer_actual)) a_water_aquifer_actual = 0._r8
+      IF (allocated(a_trc_aquifer_actual_mass)) a_trc_aquifer_actual_mass = 0._r8
       IF (allocated(a_trc_wdsrf_mass )) a_trc_wdsrf_mass  = 0._r8
       IF (allocated(a_water_wdsrf    )) a_water_wdsrf     = 0._r8
       IF (allocated(a_trc_wetwat_mass)) a_trc_wetwat_mass = 0._r8
@@ -990,6 +1060,7 @@ CONTAINS
 	      IF (allocated(trc_sm_carry     )) trc_sm_carry      = 0._r8
 	      IF (allocated(trc_reactive_source_step)) trc_reactive_source_step = 0._r8
 	      IF (allocated(trc_numerical_residual_step)) trc_numerical_residual_step = 0._r8
+	      IF (allocated(trc_numerical_water_step)) trc_numerical_water_step = 0._r8
 	   END SUBROUTINE flush_Tracer_Acc
 
    SUBROUTINE zero_provider_owned_land_tracer_state ()
@@ -1006,6 +1077,7 @@ CONTAINS
          IF (allocated(trc_wliq_soisno)) trc_wliq_soisno(itrc, :, :) = 0._r8
          IF (allocated(trc_wice_soisno)) trc_wice_soisno(itrc, :, :) = 0._r8
          IF (allocated(trc_wa         )) trc_wa         (itrc, :)    = 0._r8
+         IF (allocated(trc_aquifer_ref_mass)) trc_aquifer_ref_mass(itrc, :) = 0._r8
          IF (allocated(trc_wdsrf      )) trc_wdsrf      (itrc, :)    = 0._r8
          IF (allocated(trc_wetwat     )) trc_wetwat     (itrc, :)    = 0._r8
          IF (allocated(trc_surface_residue)) trc_surface_residue(itrc, :) = 0._r8
@@ -1053,10 +1125,12 @@ CONTAINS
          IF (allocated(trc_balance_err)) trc_balance_err(itrc, :) = 0._r8
          IF (allocated(trc_reactive_source_step)) trc_reactive_source_step(itrc, :) = 0._r8
          IF (allocated(trc_numerical_residual_step)) trc_numerical_residual_step(itrc, :) = 0._r8
+         IF (allocated(trc_numerical_water_step)) trc_numerical_water_step(itrc, :) = 0._r8
          IF (allocated(a_trc_ldew_mass)) a_trc_ldew_mass(itrc, :) = 0._r8
          IF (allocated(a_trc_soil_mass)) a_trc_soil_mass(itrc, :, :) = 0._r8
          IF (allocated(a_trc_snow_mass)) a_trc_snow_mass(itrc, :, :) = 0._r8
          IF (allocated(a_trc_wa_mass    )) a_trc_wa_mass    (itrc, :) = 0._r8
+         IF (allocated(a_trc_aquifer_actual_mass)) a_trc_aquifer_actual_mass(itrc, :) = 0._r8
          IF (allocated(a_trc_wa_debt_mass)) a_trc_wa_debt_mass(itrc, :) = 0._r8
          IF (allocated(a_trc_wdsrf_mass )) a_trc_wdsrf_mass (itrc, :) = 0._r8
          IF (allocated(a_trc_wetwat_mass)) a_trc_wetwat_mass(itrc, :) = 0._r8
@@ -1155,7 +1229,12 @@ CONTAINS
          ENDIF
       ENDDO
 
-      trc_wa   (itrc, ipatch) = wa * R_mix
+      IF (tracer_is_isotope(itrc)) THEN
+         trc_wa(itrc, ipatch) = tracer_aquifer_actual_water( &
+            wa, trc_aquifer_ref_water(ipatch)) * R_mix - trc_aquifer_ref_mass(itrc, ipatch)
+      ELSE
+         trc_wa(itrc, ipatch) = wa * R_mix
+      ENDIF
       trc_wdsrf(itrc, ipatch) = max(wdsrf, 0._r8) * R_mix
       CALL tracer_equilibrate_dissolved(itrc, wa, trc_wa(itrc, ipatch), &
          trc_subsurface_solid(itrc, ipatch))
@@ -1168,5 +1247,7 @@ CONTAINS
          trc_scv(itrc, ipatch) = max(scv, 0._r8) * R_mix
       ENDIF
    END SUBROUTINE sync_tracer_patch_ratio
+
+#include <tracer_land_history_restart.inc>
 
 END MODULE MOD_Tracer_Vars

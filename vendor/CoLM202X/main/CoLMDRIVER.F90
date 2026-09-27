@@ -25,11 +25,12 @@ SUBROUTINE CoLMDRIVER (idate,deltim,dolai,doalb,dosst,oro,istep_in)
    USE MOD_LandUrban, only: patch2urban
    USE MOD_Namelist, only: DEF_forcing, DEF_URBAN_RUN, DEF_USE_TRACER, DEF_USE_BGC
    USE MOD_Forcing, only: forcmask_pch
-
+   USE omp_lib
    USE MOD_Tracer_LandPhase, only: tracer_resolve_step, tracer_lake_step, &
       tracer_wetland_decomp, tracer_soil_step, tracer_report
    USE MOD_Tracer_Defs, only: ntracers
    USE MOD_SPMD_Task, only: CoLM_stop
+   USE MOD_Tracer_SpecialPatches, only: waterbody_hist_sample
 #ifdef HYPERSPECTRAL
   USE MOD_HighRes_Parameters
 #endif
@@ -37,6 +38,10 @@ SUBROUTINE CoLMDRIVER (idate,deltim,dolai,doalb,dosst,oro,istep_in)
    ! get flood variables: inundation depth[mm], inundation fraction [0-1],
    ! inundation evaporation [mm/s], inundation re-infiltration[mm/s]
    USE MOD_CaMa_Vars, only: flddepth_cama,fldfrc_cama,fevpg_fld,finfg_fld
+#elif defined(GridRiverLakeFlow)
+   USE MOD_Grid_RiverLakeFlow, only: flddepth_cama => flood_depth_patch, &
+      fldfrc_cama => flood_fraction_patch, fevpg_fld => flood_evap_patch, &
+      finfg_fld => flood_infil_patch
 #endif
 
    IMPLICIT NONE
@@ -49,16 +54,22 @@ SUBROUTINE CoLMDRIVER (idate,deltim,dolai,doalb,dosst,oro,istep_in)
    logical,  intent(in) :: dosst    ! true if time for update sst/ice/snow
 
    real(r8), intent(inout) :: oro(numpatch)  ! ocean(0)/seaice(2)/ flag
-   integer,  intent(in), optional :: istep_in  ! time-step index from CoLM.F90 (METHANE uses it; DA path may omit)
+   integer,  intent(in), optional :: istep_in
 
    real(r8) :: deltim_phy
    integer  :: steps_in_one_deltim
    integer  :: i, m, u, k
-   integer  :: istep_local      ! resolved from optional istep_in
+   integer  :: istep_local
 
 ! ======================================================================
 
       IF (DEF_USE_TRACER) CALL tracer_resolve_step (istep_in, istep_local)
+
+#ifdef OPENMP
+!$OMP PARALLEL DO NUM_THREADS(OPENMP) &
+!$OMP PRIVATE(i, m, u, k, steps_in_one_deltim, deltim_phy) &
+!$OMP SCHEDULE(STATIC, 1)
+#endif
 
       DO i = 1, numpatch
 
@@ -91,6 +102,9 @@ SUBROUTINE CoLMDRIVER (idate,deltim,dolai,doalb,dosst,oro,istep_in)
          IF (.not.DEF_URBAN_RUN .or. m.ne.URBAN) THEN
 
             DO k = 1, steps_in_one_deltim
+      IF (DEF_USE_TRACER) THEN
+               waterbody_hist_sample = k == steps_in_one_deltim
+      ENDIF
                !                ***** Call CoLM main program *****
                !
                CALL CoLMMAIN (  i,idate,         coszen(i),       deltim_phy,      &
@@ -109,7 +123,7 @@ SUBROUTINE CoLMDRIVER (idate,deltim,dolai,doalb,dosst,oro,istep_in)
                dksatf(1:,i),    dkdry(1:,i),     BA_alpha(1:,i),  BA_beta(1:,i),   &
                rootfr(1:,m),    lakedepth(i),    dz_lake(1:,i),   elvstd(i),       &
                BVIC(i),                                                            &
-#if (defined CaMa_Flood)
+#if (defined CaMa_Flood) || (defined GridRiverLakeFlow)
              ! flood variables [mm, m2/m2, mm/s, mm/s]
                flddepth_cama(i),fldfrc_cama(i),  fevpg_fld(i),    finfg_fld(i),    &
 #endif
@@ -221,8 +235,7 @@ SUBROUTINE CoLMDRIVER (idate,deltim,dolai,doalb,dosst,oro,istep_in)
          ENDIF
 
 
-         IF (DEF_USE_BGC) THEN
-         ! Vegetated soil patches: full CN driver (vegetation + soil decomp).
+      IF ((DEF_USE_BGC)) THEN
          IF(patchtype(i) .eq. 0)THEN
             !
             !               ***** Call CoLM BGC model *****
@@ -331,7 +344,7 @@ SUBROUTINE CoLMDRIVER (idate,deltim,dolai,doalb,dosst,oro,istep_in)
             mss_bcpho(:,i)  ,mss_bcphi(:,i)  ,mss_ocpho(:,i)  ,mss_ocphi(:,i)  ,&
             mss_dst1(:,i)   ,mss_dst2(:,i)   ,mss_dst3(:,i)   ,mss_dst4(:,i)   ,&
 
-#if (defined CaMa_Flood)
+#if (defined CaMa_Flood) || (defined GridRiverLakeFlow)
           ! flood variables [mm, m2/m2, mm/s, mm/s]
             flddepth_cama(i),fldfrc_cama(i)  ,fevpg_fld(i)    ,finfg_fld(i)    ,&
 #endif
@@ -369,13 +382,16 @@ SUBROUTINE CoLMDRIVER (idate,deltim,dolai,doalb,dosst,oro,istep_in)
             ustar(i)        ,qstar(i)        ,tstar(i)        ,fm(i)           ,&
             fh(i)           ,fq(i)           ,forc_hpbl(i)                      )
             rsub(i) = rnof(i) - rsur(i)
-
          ENDIF
 
       ENDDO
+#ifdef OPENMP
+!$OMP END PARALLEL DO
+#endif
 
-      ! Surface tracer diagnostics are routed through the TRACER entry point.
-      IF (DEF_USE_TRACER) CALL tracer_report ()
+      IF (DEF_USE_TRACER) THEN
+      CALL tracer_report ()
+      ENDIF
 
 END SUBROUTINE CoLMDRIVER
 ! ---------- EOP ------------

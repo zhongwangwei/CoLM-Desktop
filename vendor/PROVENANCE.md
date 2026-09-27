@@ -190,3 +190,63 @@ PLUMBER2 盘挂载后需重生成。
 同一轮对照最新上游的复核结论（详表同见第 399 轮）：`o3coef*` 两处（含本仓库未修的
 `MOD_LeafTemperaturePC`）上游**已修**，同步时取上游；`create_defineh.bash` 的 `LATERAL_FLOW`
 与 `SiteSYSUAtmos_IGBP_VG.nml` 的未声明键上游**仍在**，本地修复要保住。
+
+## 2026-09-28：整体同步到 `CoLM-SYSU-integration@3c799bae`
+
+**上游换了。** 此后以 `https://github.com/zhongwangwei/CoLM-SYSU-integration`（`master`）为准，
+不再跟 `CoLM202X`。两者历史相连：`CoLM202X@2f91b435`（本副本的分叉点）与
+`integration@3c799bae` 的合并基是 `8c72cae2`。
+
+### 方法：把本地改动重放到新上游上，而不是反过来
+
+在一个临时仓库里：以 `2f91b435` 为父提交，提交本副本的全部内容（= 本地改动），
+再把这一个提交 cherry-pick 到 `integration@3c799bae` 上。这样三方合并的基就是
+`2f91b435`，冲突只落在"上游与本地都改过"的地方：40 个文件、约 200 处，逐处判断。
+`CoLMMAIN.F90`、`MOD_Grid_RiverLakeFlow.F90`、`Makefile` 三个文件上游重构过大，
+直接取上游全文，再手工重放本地改动。
+
+### 关键取舍
+
+1. **扩展截获不再编译。** 上游 `d6de53e9` 去掉了 `extend_interception` 的接线，CoLM2024
+   截获并入 `main/`。本副本跟随：`Makefile`、`create_defineh.bash`、`include/define.h`
+   都不再有它；`extends/interception/` 取上游原样（休眠）。Rust 只对齐 `main/`。
+   **代价**：黄金是用扩展版生成的，且 Rust 的叶温移植的是扩展版（`htvpl` 等），
+   两者都要跟着重做（见 docs/implementation-verification.md 第 400 轮）。
+2. **CaMa 不管。** `extends/CaMa` 取上游原样；桌面预设都不编 CaMa（`f90b793` 的
+   `CAMA_*_OBJ` 条件化照旧重放进新 Makefile）。河道只对齐格网河湖流（GridRiverLakeFlow）。
+3. **宏→运行时开关（8 个维度）照旧。** 上游新代码里约 370 处这类条件编译按
+   `docs/plan-macro-runtime.md` 的规则转换；`oracle/scripts/test_upstream_f48_sync.py`
+   现在会扫描 `main/ share/ mksrfdata/ mkinidata/ include/`，任何一处漏网都报错。
+4. **本地修复全部保住**：eroot/`SoilSurfaceResistance` 的 `(1:)` 切片、`CatchLateralFlow`、
+   示例 namelist 的未声明键、`pn = ps - 1` 无条件、`MOD_Filesystem`/`CoLM_Mkdir.c`、
+   `o3coef*` 迭代前无条件置 1（上游这次也修了，但只修臭氧关闭的情形，已删掉其重复段）。
+
+### 上游"TRACER 开关改变物理"——同步时发现，按上游两种构建各自的行为保留
+
+上游这版在很多地方给 TRACER 构建和非 TRACER 构建写了**不同的物理**，不只是记账不同。
+转换成 `DEF_USE_TRACER` 运行时开关时，一律保留两边各自的行为（开关关 = 上游非 TRACER
+构建），**没有擅自统一**。它们应当报给上游确认哪一边是对的：
+
+| 位置 | TRACER 构建 | 非 TRACER 构建 |
+|---|---|---|
+| `MOD_LeafTemperature(PC)`：`dewfraction` / `LEAF_temperature` 的 `ipft_index` | 截获方案 8 用逐 PFT 的 `ncd_p/ncw_p/bcw_p` | 退回 patch 级参数 |
+| `MOD_LeafTemperaturePC` 露水更新 | 所有方案都用 colm2014 写法，另加 VEG_SNOW 关闭时的分相 | 方案 2–7 各自的写法 |
+| `MOD_Hydro_SoilWater` 含水层交换 | PHS 根系净回水与基流分**两次**交换 | 合成**一次**交换 |
+| `MOD_Hydro_SoilWater` Richards 收敛 | 收敛后做液态水质量投影 | 不投影 |
+| `MOD_SoilSnowHydrology` 不透水顶层 `qgtop<0` | 按冰/液分配扣减（分叉点 `2f91b435` 对所有构建都是这样） | **改回**只扣液态水 |
+| `MOD_SoilSnowHydrology` 露水/霜 | 受第 1 层孔隙容量限制，超出与被霜挤出的液态水进地表积水 | 直接加进第 1 层 |
+| `CoLMMAIN` | 土壤表层霜冰重分配 `relocate_soil_frost_ice` | 不调用 |
+| `CoLM.F90` 氮沉降初始年份 | `s_year` | `sdate(1)`（1 月 1 日 0 时起算时被 `adj2end` 推到前一年） |
+| `MOD_NewSnow` 湿地暖地面降雪 | 另要求无雪层 | 无此条件 |
+| `MOD_LeafInterception` CoLM2014 入口 | 修复 `ldew` 与雨/雪分量的不一致 | 不修复 |
+
+另有一处上游**只在 TRACER 构建里**修掉的缺陷：`MOD_Thermal` 的 `pn = ps - 1`
+（非 TRACER 构建里 `pn` 未定义）。本副本对所有构建都执行它。
+
+### 验证（本次）
+
+`oracle/scripts/build_kernel.sh default` 通过；CN-Cng/AT-Neu 示例三段跑通；schema/histmap
+两张生成表已重生成（字段 +9 −1，见第 400 轮）；`test_upstream_f48_sync.py` PASS。
+**黄金未重生成**（PLUMBER2 盘未挂载）。
+
+上游缺陷与"TRACER 改变物理"的完整清单（含行号与处理方式）见 `docs/upstream-bugs.md`，以后新发现的也记在那里。

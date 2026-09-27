@@ -50,10 +50,6 @@ MODULE MOD_NetCDFVector
       MODULE procedure ncio_read_vector_real8_5d
    END INTERFACE ncio_read_vector
 
-   ! Restart fields that are optional for backward compatibility still need
-   ! to be transactionally complete when present.  Legacy/defaultable reads
-   ! accept a variable absent from every block; a committed-schema scope makes
-   ! the same field required.  Both modes reject a mixed hot/cold field.
    INTERFACE ncio_read_vector_complete
       MODULE procedure ncio_read_vector_complete_real8_1d
       MODULE procedure ncio_read_vector_complete_real8_2d
@@ -64,9 +60,6 @@ MODULE MOD_NetCDFVector
    PUBLIC :: ncio_vector_group_presence
    PUBLIC :: ncio_vector_var_present
 
-   ! A committed schema restart is not a legacy/defaultable read: every field
-   ! requested through ncio_read_vector_complete must exist on every block.
-   ! The methane restart callback scopes this flag around its transaction.
    logical, private, save :: complete_require_present = .false.
 
    PUBLIC :: ncio_create_file_vector
@@ -95,7 +88,6 @@ CONTAINS
 
    END SUBROUTINE ncio_set_complete_require_present
 
-   !---------------------------------------------------------
    SUBROUTINE ncio_require_complete_vector_var (filename, dataname, pixelset, &
          expected_rank, allow_missing, all_present, expected_dim1)
 
@@ -122,16 +114,8 @@ CONTAINS
       counts(:) = 0
       all_present = .false.
 
-      ! The control master has no vector blocks and is intentionally outside
-      ! the IO/worker group.  It still enters high-level restart callbacks;
-      ! treating its empty singleton group as a missing required variable
-      ! would stop a healthy MPI restart before the real IO ranks inspect it.
       IF (.not. (p_is_io .or. p_is_worker)) RETURN
 
-      ! Only IO ranks inspect their assigned files.  The IO-wide reduction
-      ! makes the result global across all block groups; the following group
-      ! broadcast gives each group's workers the same decision before any
-      ! scatter collective can be entered.
       IF (p_is_io) THEN
          counts(1) = pixelset%nblkgrp
          DO iblkgrp = 1, pixelset%nblkgrp
@@ -188,11 +172,6 @@ CONTAINS
 
    END SUBROUTINE ncio_require_complete_vector_var
 
-   !---------------------------------------------------------
-   ! Collective block-aware existence probe for vector files.  The unsuffixed
-   ! base filename is not itself a NetCDF file when vector data are split by
-   ! block, so restart compatibility checks must use this helper.  Mixed
-   ! presence is corruption, not an optional legacy field.
    logical FUNCTION ncio_vector_var_present (filename, dataname, pixelset)
 
    USE MOD_NetCDFSerial, only: ncio_var_exist
@@ -243,12 +222,6 @@ CONTAINS
 
    END FUNCTION ncio_vector_var_present
 
-   !---------------------------------------------------------
-   ! Probe an optional feature group in one block scan and one pair of MPI
-   ! reductions.  This is the group equivalent of ncio_vector_var_present:
-   ! each returned flag is true only when the field exists on every block,
-   ! and mixed per-block presence is corruption.  Batching avoids one global
-   ! collective per feature field during restart initialization.
    SUBROUTINE ncio_vector_group_presence (filename, datanames, pixelset, present_flags)
 
    USE MOD_NetCDFSerial, only: ncio_var_exist
@@ -308,7 +281,6 @@ CONTAINS
       deallocate(counts, global_counts)
    END SUBROUTINE ncio_vector_group_presence
 
-   !---------------------------------------------------------
    SUBROUTINE ncio_read_vector_complete_real8_1d (filename, dataname, pixelset, rdata, defval)
 
    USE MOD_Precision
@@ -335,7 +307,6 @@ CONTAINS
 
    END SUBROUTINE ncio_read_vector_complete_real8_1d
 
-   !---------------------------------------------------------
    SUBROUTINE ncio_read_vector_complete_real8_2d (filename, dataname, ndim1, pixelset, rdata, defval)
 
    USE MOD_Precision
@@ -363,6 +334,47 @@ CONTAINS
       ENDIF
 
    END SUBROUTINE ncio_read_vector_complete_real8_2d
+
+   !---------------------------------------------------------
+   logical FUNCTION ncio_vector_exist (filename, dataname, pixelset)
+
+   USE MOD_NetCDFSerial
+   USE MOD_SPMD_Task
+   USE MOD_Block
+   USE MOD_Pixelset
+   IMPLICIT NONE
+
+   character(len=*), intent(in) :: filename
+   character(len=*), intent(in) :: dataname
+   type(pixelset_type), intent(in) :: pixelset
+
+   ! Local variables
+   integer :: iblkgrp, iblk, jblk
+   character(len=256) :: fileblock
+   logical :: any_data_exists
+
+      any_data_exists = .false.
+
+      IF (p_is_io) THEN
+         DO iblkgrp = 1, pixelset%nblkgrp
+            iblk = pixelset%xblkgrp(iblkgrp)
+            jblk = pixelset%yblkgrp(iblkgrp)
+
+            CALL get_filename_block (filename, iblk, jblk, fileblock)
+            IF (ncio_var_exist(fileblock,dataname,readflag=.false.)) THEN
+               any_data_exists = .true.
+               exit
+            ENDIF
+         ENDDO
+      ENDIF
+
+#ifdef USEMPI
+      CALL mpi_allreduce (MPI_IN_PLACE, any_data_exists, 1, MPI_LOGICAL, MPI_LOR, p_comm_glb, p_err)
+#endif
+
+      ncio_vector_exist = any_data_exists
+
+   END FUNCTION ncio_vector_exist
 
    !---------------------------------------------------------
    SUBROUTINE ncio_read_vector_int32_1d ( &

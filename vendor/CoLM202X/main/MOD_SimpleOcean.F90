@@ -194,7 +194,7 @@ CONTAINS
 !=======================================================================
 
    USE MOD_Precision
-   USE MOD_Const_Physical, only: cpair,rgas,vonkar,grav
+   USE MOD_Const_Physical, only: cpair,rgas,vonkar,grav,tfrz
    USE MOD_FrictionVelocity
    USE MOD_Qsadv
    IMPLICIT NONE
@@ -313,7 +313,7 @@ CONTAINS
 
       IF(nint(oro).eq.0)THEN          ! ocean
        ! Kinematic viscosity of dry air (m2/s)- Andreas (1989) CRREL Rep. 89-11
-         visa=1.326e-5*(1.+6.542e-3*tm + 8.301e-6*tm**2 - 4.84e-9*tm**3)
+         visa=1.326e-5*(1.+6.542e-3*(tm-tfrz) + 8.301e-6*(tm-tfrz)**2 - 4.84e-9*(tm-tfrz)**3)
 
        ! loop to obtain initial and good ustar and zo
          ustar=0.06

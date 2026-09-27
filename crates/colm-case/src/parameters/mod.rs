@@ -613,6 +613,9 @@ pub fn field_section(name: &str, group: Option<&str>) -> Option<&'static str> {
         "RIVERDEPTH",
         "LEVEE",
         "BIFURCATION",
+        // CoLM-SYSU-integration 起的格网河湖洪水反馈（FloodFeedback/FloodInfiltMax/
+        // FloodplainStorageFix）。
+        "GRIDRIVERLAKE",
     ]) {
         return Some("河道与水库");
     }

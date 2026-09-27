@@ -29,6 +29,34 @@ The canonical `DEF_TRACER_TYPES` values are therefore:
 isotope, solute, particle, gas
 ```
 
+### VSF aquifer isotope mixing reference
+
+With a generic-water isotope and `DEF_USE_VariablySaturatedFlow=.true.`, set
+`DEF_TRACER_AQUIFER_MIXING_WATER_MM` to a **measured or calibrated positive**
+effective mixed aquifer water depth (mm) in the main namelist. Its default is
+`-1` (unset and rejected for this configuration); it is not a numerical
+epsilon or a claim about geological aquifer thickness. The actual isotope
+carrier is `Vref + wa`, where `wa` is CoLM's signed anomaly/debt relative to
+the reference state; the isotope mass is `Mref + trc_wa`. No reference carrier
+is added for solutes, gas, sediment, or lake/glacier/urban patches. Wetland
+isotopes retain the existing fully mixed bulk pool, with the reference water
+buffering composition changes. Negative actual carrier or further withdrawal
+from an empty carrier stops; the terminal `Vref + wa = 0, Mref + trc_wa = 0`
+state is allowed without deleting mass.
+
+Restart schema 5 stores the patch reference water and isotope reference mass,
+and refuses a changed calibration in the namelist. Hydrology-only restarts
+without generic tracer state may cold-initialize isotopes at the configured
+`DEF_TRACER_INIT_DELTA`; older generic **isotope** checkpoints cannot be
+automatically reinterpreted and require an explicit fresh tracer initialization
+instead. Coherent schema-4 non-isotope generic transport state remains readable.
+Generic land-history tracer numerators and water denominators (including
+aquifer concentration) share the committed land-history sidecar and preserve
+the output window across a mid-record restart. An active legacy sidecar
+without these fields is rejected rather than mixing pre-restart water counts
+with post-restart tracer sums. A legacy restart without any sidecar starts a
+new history window, as before.
+
 `conservative` is accepted as a legacy spelling of `solute`. Legacy `reactive`
 rows are accepted only to ease migration; new configurations should name the
 physical family and let a positive `reactive_decay_rate` or compiled provider
@@ -157,6 +185,26 @@ hooks. A new provider therefore changes neither land nor HYDRO call sites.
 
 ## Configuration examples
 
+Compiling `TRACER` does not implicitly enable any species: `DEF_TRACER_NUM`
+defaults to zero and the descriptor lists are empty. Isotopes, CH4 and other
+tracers all use the same explicit `NUM` / `NAMES` / `TYPES` selection and
+`PARAM_FILES` mapping. Runs that previously relied on the implicit H2_18O/HDO
+pair must add the selection below; existing explicit selections are unchanged.
+Optional `DEF_TRACER_SOIL_INIT_VARS` overrides are empty by default; the existing
+species-owned isotope registry supplies soil variable names when omitted.
+
+### Water isotopes
+
+```fortran
+DEF_TRACER_NUM         = 2
+DEF_TRACER_NAMES       = 'H2_18O,HDO'
+DEF_TRACER_TYPES       = 'isotope,isotope'
+DEF_TRACER_PARAM_FILES = 'H2_18O:run/standard_O18_parameter.nml,HDO:run/standard_HDO_parameter.nml'
+```
+
+Molecular weights, reference ratios and initial deltas come from the species
+parameter files, not isotope-specific defaults in the main namelist.
+
 ### Descriptor-only solute
 
 Chloride needs no compiled CL module:
@@ -202,6 +250,49 @@ DEF_TRACER_PARAM_FILES = 'SEDIMENT:run/standard_sediment_parameter.nml'
 The mapped file contains generic descriptor metadata plus
 `&nl_colm_sediment_parameter`, which is read by the sediment provider. There
 is no separate top-level sediment switch.
+
+GridRiverLake sediment rain is an **intensive** forcing, unlike runoff volume.
+At every land step, precipitation and valid area use the same current patch mask
+(including missing, non-finite and negative precipitation checks). Valid dry
+patches count in the area; missing patches do not. The mapped rain is
+`P_t = sum(P_patch * mapped_area) / sum(valid_mapped_area)`.
+The yield moment remains inside the time integral:
+`sum(P_t**p * A_valid,t * dt) / sum(A_valid,t * dt)`, summed over the forcing
+steps whose rain rate exceeds the threshold (`SED_PRECIP_THRESHOLD_MM_DAY`,
+default 10 mm/day); a step at or below it adds exposure time but no yield, as in
+CaMa-Flood's `prcp_convert_sed`. The threshold and the power law therefore act
+on the same per-step rate, and the result does not depend on the routing-window
+length. Never replace this with `mean(P)**p`. A restart written inside a routing
+window by an older build carries yield sums that include sub-threshold steps;
+restart at a completed routing window when comparing.
+
+This retains the existing uniform-unit-catchment erosion model: sampled rain is
+assumed representative of the full erosion area and routing window. It is not
+an estimate restricted to the observed area, nor a patch-resolved erosion model.
+An entirely missing catchment/window contributes no new rain-driven erosion;
+it is not recorded as observed zero rain. Runoff and tracer input volumes are
+**not** enlarged to compensate for missing land forcing. The existing
+`sed_precip_time_vec` checkpoint field now preserves every catchment's exposure
+(valid-area fraction times seconds), including zero exposure and empty workers.
+Older full-coverage time vectors remain readable, but bias already accumulated
+by older code cannot be reconstructed without its historical masks; restart at
+a completed routing window when comparing old and corrected runs.
+
+Restart compatibility notes:
+
+* The river tracer restart also carries the history numerators
+  (`trc_hist_stor_*`, `trc_hist_levsto_*`, `trc_hist_out_*`, `trc_hist_bifout_*`,
+  `trc_hist_water_storage`, `trc_hist_levsto_water`) and their local denominator
+  `trc_hist_acctime`. A restart inside a history window preserves both. Older
+  restarts without tracer history start a post-restart tracer window; transitional
+  restarts with all six numerators but no local clock use the water clock.
+* `MAX_SED_CONC` (0.1 -> 0.01) and `SED_PRECIP_THRESHOLD_MM_DAY` (2 -> 10) are
+  echoed in the sediment restart metadata (`sed_max_conc_meta`,
+  `sed_precip_threshold_meta`) and checked on read, so a sediment restart from an
+  older build is rejected on purpose. These two values are configuration echoes,
+  not state layout: to continue such a run deliberately, rewrite the two
+  metadata fields to the new values. Suspended sediment above the new
+  concentration cap is deposited to the bed on the next step (mass is kept).
 
 Suspended sediment is prognosed as per-size-class solid volume (`sedsto`, m3),
 not as concentration times whatever water volume happens to be current.
@@ -249,6 +340,17 @@ land_tracer_final
 `tracer_defs_final` owns the descriptor table and therefore remains last.
 
 ## Current physics boundaries
+
+The last valid gridded precipitation/vapor tracer ratio is part of the land
+restart state: a near-dry forcing record reuses it after restart just as it
+does in a continuous run. Current checkpoints save the two patch-local caches
+inside the generic land tracer transaction and require an exact forcing
+descriptor/configuration match on load. A hydrology-only cold start retains
+the configured initial ratios; an older hot generic tracer checkpoint lacking
+the cache cannot reconstruct it and is rejected if runtime tracer forcing is
+active. LULCC still intentionally resets these caches when it rebuilds the
+patch map; the following checkpoint saves the reset values, never an unmapped
+old patch array.
 
 - The CH4 provider is offline only with respect to atmospheric CH4 feedback. It
   predicts soil, wetland, rice-paddy, and reduced-order lake-sediment CH4 fluxes

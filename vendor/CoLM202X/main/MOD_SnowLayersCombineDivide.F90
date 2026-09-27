@@ -263,7 +263,6 @@ CONTAINS
 !  with, and executes the combination of mass and energy in
 !  clm_combo.f90
 !
-!  Optional TRACER arrays follow the same layer topology updates.
 !=======================================================================
 
    USE MOD_Precision
@@ -305,7 +304,7 @@ CONTAINS
 
    ! TRACER aggregates for the snowdp<0.01 collapse branch
    real(r8), allocatable :: zwtrc_ice(:), zwtrc_liq(:), zwtrc_solid(:)
-   integer :: ntr            ! number of tracers (inferred from trc_wliq shape)
+   integer :: ntr
    integer :: itrc
 
    data dzmin /0.010, 0.015, 0.025, 0.055, 0.115/
@@ -486,10 +485,6 @@ CONTAINS
 
                   snl = snl + 1
                   IF (present(trc_wliq) .and. present(trc_wice)) THEN
-                     ! After removing one snow layer, the active snow window is
-                     ! snl+1:0.  Clear only slots below that window; clearing
-                     ! old snl+2 here would erase the repacked bottom survivor
-                     ! for multi-layer combines such as -3 -> -2.
                      IF (snl >= lb) THEN
                         trc_wliq(:, lb:snl) = 0._r8
                         trc_wice(:, lb:snl) = 0._r8
@@ -535,8 +530,6 @@ CONTAINS
 !  Original author: Yongjiu Dai, September 15, 1999
 !
 !  subdivides snow layer when its thickness exceed the prescribed maximum
-!
-!  Optional TRACER arrays follow the same layer split operations.
 !=======================================================================
 
    USE MOD_Precision
@@ -1255,10 +1248,6 @@ CONTAINS
 
                   snl = snl + 1
                   IF (present(trc_wliq) .and. present(trc_wice)) THEN
-                     ! After removing one snow layer, the active snow window is
-                     ! snl+1:0.  Clear only slots below that window; clearing
-                     ! old snl+2 here would erase the repacked bottom survivor
-                     ! for multi-layer combines such as -3 -> -2.
                      IF (snl >= lb) THEN
                         trc_wliq(:, lb:snl) = 0._r8
                         trc_wice(:, lb:snl) = 0._r8

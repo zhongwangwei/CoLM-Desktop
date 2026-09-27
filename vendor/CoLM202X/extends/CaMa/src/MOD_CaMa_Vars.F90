@@ -30,17 +30,18 @@ MODULE MOD_CaMa_Vars
    USE MOD_DataType
    USE PARKIND1,                 only: JPRB
    USE MOD_SpatialMapping
-   USE YOS_CMF_INPUT,            only: RMIS, DMIS,LSEDIMENT
+   USE YOS_CMF_INPUT,            only: RMIS, DMIS,LSEDIMENT,CSETFILE
    USE MOD_Vars_Global,          only: spval
    USE YOS_CMF_INPUT,            ONLY: LOGNAM
    USE CMF_CTRL_SED_MOD,         ONLY: nsed, sDiam, d2sedout_avg, d2sedcon, d2sedinp_avg, d2bedout_avg, d2netflw_avg, d2layer
 
-   real(r8) :: nacc                                        ! number of accumulation
+   real(r8) :: nacc
    real(r8), allocatable         :: a_rnof_cama (:)        ! on worker : total runoff [mm/s]
    type(block_data_real8_2d)     :: f_rnof_cama            ! on IO     : total runoff [mm/s]
    real(r8), allocatable         :: runoff_2d (:,:)        ! on Master : total runoff [mm/s]
    ! Precipitation for sediment forcing (coupled mode)
    real(r8), allocatable         :: a_prcp_cama (:)        ! on worker : precipitation (rain+snow) [mm/s]
+   real(r8), allocatable         :: a_prcp_time (:)
    type(block_data_real8_2d)     :: f_prcp_cama            ! on IO     : precipitation [mm/s]
    real(r8), allocatable         :: prcp_2d (:,:)          ! on Master : precipitation [mm/s]
    
@@ -90,6 +91,8 @@ MODULE MOD_CaMa_Vars
 
    type (spatial_mapping_type) :: mp2g_cama               ! mapping pset to grid
    type (spatial_mapping_type) :: mg2p_cama               ! mapping grid to pset
+   real(r8), allocatable :: flood_credit(:)
+   type(pointer_real8_1d), allocatable :: flood_credit_part(:), flood_sink_part(:)
 
    type (grid_concat_type)       :: cama_gather            ! gather grid
 
@@ -178,14 +181,16 @@ CONTAINS
 
       !allocate cama-flood variables on worker
       IF (p_is_worker) THEN
-         IF (numpatch > 0) THEN
+         IF (numpatch > 0 .OR. CSETFILE=='NONE') THEN
             allocate (a_rnof_cama(numpatch))
             allocate (a_fevpg_fld(numpatch))
             allocate (a_finfg_fld(numpatch))
             allocate (a_dirrig_cama(numpatch))
             allocate (a_prcp_cama(numpatch))
+            IF(CSETFILE=='NONE') allocate(a_prcp_time(numpatch))
          ENDIF
       ENDIF
+      IF(CSETFILE=='NONE'.AND..NOT.p_is_worker) allocate(a_prcp_time(0))
 
    END SUBROUTINE allocate_acc_cama_fluxes
 
@@ -207,7 +212,7 @@ CONTAINS
    IMPLICIT NONE
 
       IF (p_is_worker) THEN
-         IF (numpatch > 0) THEN
+         IF (numpatch > 0 .OR. CSETFILE=='NONE') THEN
             deallocate (a_rnof_cama)
             deallocate (a_prcp_cama)
             deallocate (a_fevpg_fld)
@@ -215,6 +220,7 @@ CONTAINS
             deallocate (a_dirrig_cama)
          ENDIF
       ENDIF
+      IF(allocated(a_prcp_time)) deallocate(a_prcp_time)
 
    END SUBROUTINE deallocate_acc_cama_fluxes
 
@@ -243,6 +249,7 @@ CONTAINS
             ! flush the Fluxes for accumulation
             a_rnof_cama (:) = spval
             a_prcp_cama (:) = spval
+            IF(allocated(a_prcp_time)) a_prcp_time(:)=0._r8
             a_fevpg_fld (:) = spval
             a_finfg_fld (:) = spval
             a_dirrig_cama(:)= spval
@@ -251,7 +258,7 @@ CONTAINS
 
    END SUBROUTINE FLUSH_acc_cama_fluxes
 
-   SUBROUTINE accumulate_cama_fluxes
+   SUBROUTINE accumulate_cama_fluxes(deltim)
 !DESCRIPTION
 !===========
    ! This subrountine is used for accumulating  cama-flood variables
@@ -270,25 +277,45 @@ CONTAINS
    USE MOD_Vars_1DForcing, only: forc_rain
    USE MOD_Vars_TimeVariables, only: reservoirriver_demand
    USE MOD_LandPatch, only: numpatch
+   USE MOD_Namelist, only: DEF_forcing
+   USE MOD_Forcing, only: forcmask_pch
+   USE YOS_CMF_INPUT, only: LWEVAP, LWINFILT, LDAMIRR
 
    IMPLICIT NONE
 
+      real(r8), optional, intent(in) :: deltim
+      logical :: valid_patch(numpatch)
       integer :: i
 
       IF (p_is_worker) THEN
          IF (numpatch > 0) THEN
-            nacc = nacc + 1
-            CALL acc1d_cama (rnof, a_rnof_cama)
-            CALL acc1d_cama (forc_rain, a_prcp_cama)
-            CALL acc1d_cama (fevpg_fld, a_fevpg_fld)
-            CALL acc1d_cama (finfg_fld, a_finfg_fld)
-            call acc1d_cama (reservoirriver_demand, a_dirrig_cama)
+            IF(CSETFILE=='NONE')THEN
+               IF(.NOT.PRESENT(deltim)) ERROR STOP 'CaMa: missing coupling time step'
+               valid_patch=.true.
+               IF(DEF_forcing%has_missing_value) valid_patch=forcmask_pch
+               nacc=nacc+deltim
+               CALL acc1d_cama(rnof,a_rnof_cama,deltim,valid_patch)
+               IF(LSEDIMENT)THEN
+                  CALL acc1d_cama(forc_rain,a_prcp_cama,deltim,valid_patch)
+                  WHERE(valid_patch.AND.forc_rain/=spval) a_prcp_time=a_prcp_time+deltim
+               ENDIF
+               IF(LWEVAP) CALL acc1d_cama(fevpg_fld,a_fevpg_fld,deltim,valid_patch)
+               IF(LWINFILT) CALL acc1d_cama(finfg_fld,a_finfg_fld,deltim,valid_patch)
+               IF(LDAMIRR) CALL acc1d_cama(reservoirriver_demand,a_dirrig_cama,msk=valid_patch)
+            ELSE
+               nacc = nacc + 1
+               CALL acc1d_cama (rnof, a_rnof_cama)
+               CALL acc1d_cama (forc_rain, a_prcp_cama)
+               CALL acc1d_cama (fevpg_fld, a_fevpg_fld)
+               CALL acc1d_cama (finfg_fld, a_finfg_fld)
+               call acc1d_cama (reservoirriver_demand, a_dirrig_cama)
+            ENDIF
          ENDIF
       ENDIF
 
    END SUBROUTINE accumulate_cama_fluxes
 
-   SUBROUTINE acc1d_cama (var, s)
+   SUBROUTINE acc1d_cama (var, s, weight, msk)
 !DESCRIPTION
 !===========
    ! This subrountine is used for accumulating 1D cama-flood variables
@@ -307,18 +334,24 @@ CONTAINS
 
       real(r8), intent(in)    :: var(:) ! variable to be accumulated
       real(r8), intent(inout) :: s  (:) ! new added value
+      real(r8), optional, intent(in) :: weight
+      logical, optional, intent(in) :: msk(:)
 !----------------------- Dummy argument --------------------------------
       logical, dimension(size(var)) :: valid_var, valid_s
+      real(r8) :: wt
 
       ! Use vectorized operations for better performance
+      wt=1._r8
+      IF(PRESENT(weight)) wt=weight
       valid_var = (var /= spval)
+      IF(PRESENT(msk)) valid_var=valid_var.AND.msk
       valid_s   = (s /= spval)
       
       ! Initialize where s is invalid but var is valid
-      WHERE (valid_var .and. .not. valid_s) s = var
+      WHERE (valid_var .and. .not. valid_s) s = var*wt
       
       ! Accumulate where both are valid
-      WHERE (valid_var .and. valid_s) s = s + var
+      WHERE (valid_var .and. valid_s) s = s + var*wt
 
    END SUBROUTINE acc1d_cama
 
@@ -376,6 +409,9 @@ CONTAINS
 
    USE MOD_SPMD_Task
    USE CMF_CALC_DIAG_MOD,  only: CMF_DIAG_GETAVE_OUTPUT, CMF_DIAG_RESET_OUTPUT
+   USE YOS_CMF_TIME,       only: KMIN, KMINEND, JDD, JMM, JHHMM
+   USE MOD_Namelist,       only: DEF_HIST_FREQ
+   USE YOS_CMF_DIAG,       only: NADD_out, RESTART_DIAG_FIELD
    USE YOS_CMF_PROG,       only: P2RIVSTO,     P2FLDSTO,     P2GDWSTO, &
          P2damsto,P2LEVSTO !!! added
    USE YOS_CMF_DIAG,       only: D2RIVDPH,     D2FLDDPH,     D2FLDFRC,     D2FLDARE,     &
@@ -384,13 +420,47 @@ CONTAINS
          D2RIVVEL_oAVG, D2GDWRTN_oAVG, D2RUNOFF_oAVG, D2ROFSUB_oAVG,                         &
          D2OUTFLW_oMAX, D2STORGE_oMAX, D2RIVDPH_oMAX,                                       &
          d2daminf_oavg, D2WEVAPEX_oAVG,D2WINFILTEX_oAVG, D2LEVDPH, D2OUTINS !!! added
+   USE YOS_CMF_MAP, only: NSEQMAX, NPTHOUT, PTH_UPST
  !      USE MOD_Vars_2DFluxes
 
    IMPLICIT NONE
 
    character(LEN=*), intent(in) :: file_hist
    integer, intent(in)          :: itime_in_file
+   real(r8), allocatable :: pthflw_cell(:,:)
+   integer :: ipth
+   real(JPRB), allocatable :: raw_history(:,:,:), raw_pthflw(:,:)
+   real(JPRB), pointer :: history_field(:,:)
+   real(JPRB) :: raw_elapsed
+   character(len=32) :: history_name
+   logical :: preserve_partial_history
+   integer :: ihist
 
+
+      IF (CSETFILE=='NONE' .AND. NADD_out<=0._r8) RETURN
+      preserve_partial_history=.false.
+      IF (CSETFILE=='NONE' .AND. KMIN>=KMINEND) THEN
+         SELECT CASE (TRIM(ADJUSTL(DEF_HIST_FREQ)))
+         CASE ('HOURLY')
+            preserve_partial_history=MOD(KMIN,60)/=0
+         CASE ('DAILY')
+            preserve_partial_history=MOD(KMIN,1440)/=0
+         CASE ('MONTHLY')
+            preserve_partial_history=JDD/=1 .OR. JHHMM/=0
+         CASE ('YEARLY')
+            preserve_partial_history=JMM/=1 .OR. JDD/=1 .OR. JHHMM/=0
+         END SELECT
+      ENDIF
+      IF (preserve_partial_history) THEN
+         raw_elapsed=NADD_out
+         allocate(raw_history(NSEQMAX,1,14))
+         raw_history=0._JPRB
+         DO ihist=1,14
+            CALL RESTART_DIAG_FIELD(ihist,history_name,history_field)
+            IF (associated(history_field)) raw_history(:,:,ihist)=history_field
+         ENDDO
+         raw_pthflw=D1PTHFLW_oAVG
+      ENDIF
 
       !*** average variable
       CALL CMF_DIAG_GETAVE_OUTPUT
@@ -438,8 +508,25 @@ CONTAINS
       CALL flux_map_and_write_2d_cama(DEF_hist_cama_vars%storge, &
       real(D2STORGE), file_hist, 'storge', itime_in_file,'total storage (river+floodplain)','m3')
 
-      CALL flux_map_and_write_2d_cama(DEF_hist_cama_vars%pthflw, &
-      real(D1PTHFLW_oAVG), file_hist, 'pthflw', itime_in_file,'bifurcation channel discharge ','m3/s')
+      IF(CSETFILE=='NONE'.AND.DEF_hist_cama_vars%pthflw)THEN
+         allocate(pthflw_cell(NSEQMAX,1))
+         pthflw_cell=0._r8
+         IF(allocated(PTH_UPST).AND.allocated(D1PTHFLW_oAVG))THEN
+            DO ipth=1,NPTHOUT
+               IF(PTH_UPST(ipth)<1.OR.PTH_UPST(ipth)>NSEQMAX) &
+                  ERROR STOP 'CaMa: invalid bifurcation upstream cell'
+               pthflw_cell(PTH_UPST(ipth),1)=pthflw_cell(PTH_UPST(ipth),1)+ &
+                  REAL(SUM(D1PTHFLW_oAVG(ipth,:)),KIND=r8)
+            ENDDO
+         ENDIF
+         CALL flux_map_and_write_2d_cama(.true.,pthflw_cell,file_hist,'pthflw',itime_in_file, &
+            'bifurcation channel discharge (sum over levels, attributed to the upstream cell)','m3/s')
+         deallocate(pthflw_cell)
+      ELSE IF(CSETFILE/='NONE')THEN
+         CALL flux_map_and_write_2d_cama(DEF_hist_cama_vars%pthflw, &
+            real(D1PTHFLW_oAVG),file_hist,'pthflw',itime_in_file, &
+            'bifurcation channel discharge ','m3/s')
+      ENDIF
 
       CALL flux_map_and_write_2d_cama(DEF_hist_cama_vars%pthout, &
       real(D2PTHOUT_oAVG), file_hist, 'pthout', itime_in_file,'net bifurcation discharge','m3/s')
@@ -484,12 +571,12 @@ CONTAINS
 
       IF (DEF_hist_cama_vars%wevap) THEN
       CALL flux_map_and_write_2d_cama(DEF_hist_cama_vars%wevap, &
-      real(D2WEVAPEX_oAVG), file_hist, 'wevap', itime_in_file,'inundation water evaporation','m/s')
+      real(D2WEVAPEX_oAVG), file_hist, 'wevap', itime_in_file,'inundation water evaporation','m3/s')
       ENDIF
 
       IF (DEF_hist_cama_vars%winfilt) THEN
       CALL flux_map_and_write_2d_cama(DEF_hist_cama_vars%winfilt, &
-      real(D2WINFILTEX_oAVG), file_hist, 'winfilt', itime_in_file,'inundation water infiltration','m/s')
+      real(D2WINFILTEX_oAVG), file_hist, 'winfilt', itime_in_file,'inundation water infiltration','m3/s')
       ENDIF
 
       IF (DEF_hist_cama_vars%levsto) THEN
@@ -544,6 +631,15 @@ CONTAINS
 
       !*** reset variable
       CALL CMF_DIAG_RESET_OUTPUT
+
+      IF (preserve_partial_history) THEN
+         NADD_out=raw_elapsed
+         DO ihist=1,14
+            CALL RESTART_DIAG_FIELD(ihist,history_name,history_field)
+            IF (associated(history_field)) history_field=raw_history(:,:,ihist)
+         ENDDO
+         D1PTHFLW_oAVG=raw_pthflw
+      ENDIF
 
    END SUBROUTINE hist_out_cama
 
@@ -630,7 +726,7 @@ CONTAINS
          USE YOS_CMF_MAP,    only: NSEQMAX
          USE PARKIND1,       only: JPRM
          USE CMF_UTILS_MOD,  only: vecP2mapR
-         USE MOD_NetCDFSerial,    only: ncio_write_serial_time, ncio_put_attr
+         USE MOD_NetCDFSerial,    only: ncio_write_serial_time, ncio_put_attr, ncio_var_exist
          USE YOS_CMF_MAP,        only: I2NEXTX, I2NEXTY
          IMPLICIT NONE
          logical, intent(in)          :: is_hist
@@ -645,6 +741,7 @@ CONTAINS
          real(KIND=JPRM)             :: R2OUT(NX,NY)
          integer  :: i,j
          integer  :: compress
+         logical  :: var_is_new
       
             IF (.not. is_hist) RETURN
             CALL vecP2mapR(var_in(1:NSEQMAX,1),R2OUT)
@@ -657,9 +754,10 @@ CONTAINS
             enddo
  
             compress = DEF_HIST_CompressLevel
+            var_is_new = .not. ncio_var_exist (file_hist, varname, readflag = .false.)
             CALL ncio_write_serial_time (file_hist, varname,  &
                itime_in_file, real(R2OUT,kind=8), 'lon_cama', 'lat_cama', 'time',compress)
-            IF (itime_in_file == 1) THEN
+            IF (itime_in_file == 1 .or. var_is_new) THEN
                CALL ncio_put_attr (file_hist, varname, 'long_name', longname)
                CALL ncio_put_attr (file_hist, varname, 'units', units)
                CALL ncio_put_attr (file_hist, varname, 'missing_value',real(real(spval,kind=JPRM),kind=8))
@@ -689,7 +787,7 @@ CONTAINS
    USE YOS_CMF_MAP,    only: NSEQMAX
    USE PARKIND1,       only: JPRM
    USE CMF_UTILS_MOD,  only: vecP2mapR
-   USE MOD_NetCDFSerial,    only: ncio_write_serial_time, ncio_put_attr
+   USE MOD_NetCDFSerial,    only: ncio_write_serial_time, ncio_put_attr, ncio_var_exist
 
    IMPLICIT NONE
    logical, intent(in)          :: is_hist
@@ -704,14 +802,16 @@ CONTAINS
    real(KIND=JPRM)             :: R2OUT(NX,NY)
 
    integer  :: compress
+   logical  :: var_is_new
 
       IF (.not. is_hist) RETURN
 
       CALL vecP2mapR(var_in(1:NSEQMAX,1),R2OUT)
       compress = DEF_HIST_CompressLevel
+      var_is_new = .not. ncio_var_exist (file_hist, varname, readflag = .false.)
       CALL ncio_write_serial_time (file_hist, varname,  &
          itime_in_file, real(R2OUT,kind=8), 'lon_cama', 'lat_cama', 'time',compress)
-      IF (itime_in_file == 1) THEN
+      IF (itime_in_file == 1 .or. var_is_new) THEN
          CALL ncio_put_attr (file_hist, varname, 'long_name', longname)
          CALL ncio_put_attr (file_hist, varname, 'units', units)
          CALL ncio_put_attr (file_hist, varname, 'missing_value',real(real(spval,kind=JPRM),kind=8))
@@ -741,7 +841,7 @@ CONTAINS
    USE YOS_CMF_MAP,    only: NSEQMAX
    USE PARKIND1,       only: JPRM
    USE CMF_UTILS_MOD,  only: vecP2mapR
-   USE MOD_NetCDFSerial,    only: ncio_write_serial_time, ncio_put_attr, ncio_write_serial_real8_1d, ncio_define_dimension
+   USE MOD_NetCDFSerial,    only: ncio_write_serial_time, ncio_put_attr, ncio_var_exist, ncio_write_serial_real8_1d, ncio_define_dimension
 
    IMPLICIT NONE
    logical, intent(in)          :: is_hist
@@ -756,6 +856,7 @@ CONTAINS
    real(KIND=JPRM)             :: R3OUT(NX,NY,nsed)
    integer                     :: compress
    integer                     :: ised
+   logical                     :: var_is_new
 
       IF (.not. is_hist) RETURN
 
@@ -771,10 +872,11 @@ CONTAINS
       IF (LSEDIMENT) THEN
          CALL ncio_define_dimension (file_hist, 'sedD', nsed)
       ENDIF
+      var_is_new = .not. ncio_var_exist (file_hist, varname, readflag = .false.)
       CALL ncio_write_serial_time (file_hist, varname,  &
          itime_in_file, real(R3OUT,kind=8), 'lon_cama', 'lat_cama', 'sedD', 'time', compress)
 
-      IF (itime_in_file == 1) THEN
+      IF (itime_in_file == 1 .or. var_is_new) THEN
          CALL ncio_put_attr (file_hist, varname, 'long_name', longname)
          CALL ncio_put_attr (file_hist, varname, 'units', units)
          CALL ncio_put_attr (file_hist, varname, 'missing_value', real(real(spval,kind=JPRM),kind=8))
@@ -788,7 +890,14 @@ CONTAINS
 
    END SUBROUTINE flux_map_and_write_3d_cama
 
-   SUBROUTINE colm2cama_real8 (WorkerVar, IOVar, MasterVar)
+   FUNCTION cama_master_cols (dsp, cnt, n) RESULT (cols)
+   IMPLICIT NONE
+   integer, intent(in) :: dsp, cnt, n
+   integer :: cols(cnt), k
+      cols = (/ (mod(dsp + cama_gather%ilon0 + k - 2, n) + 1, k = 1, cnt) /)
+   END FUNCTION cama_master_cols
+
+   SUBROUTINE colm2cama_real8 (WorkerVar, IOVar, MasterVar, integral, flood_sink, valid_time)
 !DESCRIPTION
 !===========
    ! This subrountine is used for mapping colm output to cama input.
@@ -816,9 +925,13 @@ CONTAINS
    real(r8),                  intent(inout) :: WorkerVar(:)    !varialbe on worker processer
    type(block_data_real8_2d), intent(inout) :: IOVar           !varialbe on IO processer
    real(r8),                  intent(inout) :: MasterVar(:,:)  !varialbe on master processer
+   logical, optional, intent(in) :: integral, flood_sink
+   real(r8), optional, intent(in) :: valid_time(:)
 
    type(block_data_real8_2d) :: sumwt                          !sum of weight
    logical,  allocatable     :: filter(:)                      !filter for patchtype
+   logical :: volumes, newmode, credits
+   integer :: ip
    !----------------------- Dummy argument --------------------------------
    integer :: xblk, yblk, xloc, yloc
    integer :: iblk, jblk, idata, ixseg, iyseg
@@ -826,29 +939,66 @@ CONTAINS
    integer :: xdsp, ydsp, xcnt, ycnt
    real(r8), allocatable :: rbuf(:,:), sbuf(:,:), vdata(:,:)
 
+      volumes = .false.
+      IF(PRESENT(integral)) volumes = integral
+      credits = .false.
+      IF(PRESENT(flood_sink)) credits = flood_sink
+      newmode=CSETFILE=='NONE'
+      IF(credits.AND..NOT.newmode) ERROR STOP 'CaMa: flood sink mapping requires NC mode'
+      IF(PRESENT(valid_time).AND.(volumes.OR.credits)) ERROR STOP 'CaMa: valid time requires an intensive field'
       IF(p_is_master)THEN
          MasterVar(:,:) = spval
+         IF(volumes.OR.newmode) MasterVar(:,:) = 0._r8
       ENDIF
 
       IF (p_is_worker) THEN
-         WHERE (WorkerVar /= spval)
-            WorkerVar = WorkerVar / nacc
-         endwhere
+         IF(newmode.AND.numpatch>0.AND.nacc<=0._r8) ERROR STOP 'CaMa: empty flux window'
+         IF(.NOT.PRESENT(valid_time))THEN
+            WHERE (WorkerVar /= spval)
+               WorkerVar = WorkerVar / nacc
+            ENDWHERE
+         ENDIF
 
          IF (numpatch > 0) THEN
             allocate (filter (numpatch))
 
             filter(:) = patchtype < 99
-            IF (DEF_forcing%has_missing_value) THEN
+            IF(newmode) filter=filter.AND.WorkerVar/=spval
+            IF(newmode.AND.PRESENT(valid_time)) filter=filter.AND.valid_time>0._r8
+            IF (.NOT.newmode.AND.DEF_forcing%has_missing_value) THEN
                filter = filter .and. forcmask_pch
             ENDIF
          ENDIF
       ENDIF
 
-      CALL mp2g_cama%pset2grid (WorkerVar, IOVar, spv = spval, msk = filter)
+      IF(credits)THEN
+         IF(p_is_worker)THEN
+            DO ip=1,numpatch
+               IF(mg2p_cama%npart(ip)==0) CYCLE
+               flood_sink_part(ip)%val=0._r8
+               IF(WorkerVar(ip)==spval) CYCLE
+               IF(WorkerVar(ip)<0._r8) ERROR STOP 'CaMa: negative flood sink'
+               IF(flood_credit(ip)>0._r8)THEN
+                  flood_sink_part(ip)%val=flood_credit_part(ip)%val * &
+                     (WorkerVar(ip)*1.e-3_r8/flood_credit(ip))
+               ELSEIF(WorkerVar(ip)>1.e-12_r8)THEN
+                  ERROR STOP 'CaMa: patch consumed unpublished flood water'
+               ENDIF
+            ENDDO
+         ENDIF
+         CALL mg2p_cama%part2grid(flood_sink_part,IOVar)
+      ELSE
+         CALL mp2g_cama%pset2grid (WorkerVar, IOVar, spv = spval, msk = filter)
+      ENDIF
 
-      IF (p_is_io) CALL allocate_block_data (gcama, sumwt)
-      CALL mp2g_cama%get_sumarea (sumwt, filter)
+      IF (.NOT.volumes) THEN
+         IF (p_is_io) CALL allocate_block_data (gcama, sumwt)
+         IF(PRESENT(valid_time))THEN
+            CALL mp2g_cama%pset2grid(valid_time,sumwt,spv=spval,msk=filter)
+         ELSE
+            CALL mp2g_cama%get_sumarea (sumwt, filter)
+         ENDIF
+      ENDIF
 
 
       IF (p_is_io) THEN
@@ -858,14 +1008,29 @@ CONTAINS
                   DO yloc = 1, gcama%ycnt(yblk)
                      DO xloc = 1, gcama%xcnt(xblk)
 
-                        IF (sumwt%blk(xblk,yblk)%val(xloc,yloc) > 0.00001) THEN
+                        IF (credits) THEN
+                           IF(IOVar%blk(xblk,yblk)%val(xloc,yloc)==spval)THEN
+                              IOVar%blk(xblk,yblk)%val(xloc,yloc)=0._r8
+                           ELSE
+                              IOVar%blk(xblk,yblk)%val(xloc,yloc)= &
+                                 IOVar%blk(xblk,yblk)%val(xloc,yloc) * &
+                                 mg2p_cama%areagrid%blk(xblk,yblk)%val(xloc,yloc)*1.e6_r8
+                           ENDIF
+                        ELSEIF (volumes) THEN
+                           IF (IOVar%blk(xblk,yblk)%val(xloc,yloc) == spval) THEN
+                              IOVar%blk(xblk,yblk)%val(xloc,yloc) = 0._r8
+                           ELSE
+                              IOVar%blk(xblk,yblk)%val(xloc,yloc) = &
+                                 IOVar%blk(xblk,yblk)%val(xloc,yloc) * 1.e3_r8
+                           ENDIF
+                        ELSEIF (sumwt%blk(xblk,yblk)%val(xloc,yloc) > MERGE(0._r8,0.00001_r8,newmode)) THEN
                            IF (IOVar%blk(xblk,yblk)%val(xloc,yloc) /= spval) THEN
                               IOVar%blk(xblk,yblk)%val(xloc,yloc) &
                                  = IOVar%blk(xblk,yblk)%val(xloc,yloc) &
                                  / sumwt%blk(xblk,yblk)%val(xloc,yloc)
                            ENDIF
                         ELSE
-                           IOVar%blk(xblk,yblk)%val(xloc,yloc) = spval
+                           IOVar%blk(xblk,yblk)%val(xloc,yloc) = MERGE(0._r8,spval,newmode)
                         ENDIF
                      ENDDO
                   ENDDO
@@ -890,7 +1055,12 @@ CONTAINS
             allocate (rbuf(xcnt,ycnt))
             CALL mpi_recv (rbuf, xcnt * ycnt, MPI_DOUBLE, &
                isrc, 10011, p_comm_glb, p_stat, p_err)
-            MasterVar (xdsp+1:xdsp+xcnt,ydsp+1:ydsp+ycnt) = rbuf
+            IF(newmode)THEN
+               MasterVar(cama_master_cols(xdsp,xcnt,size(MasterVar,1)), &
+                  ydsp+cama_gather%ilat0:ydsp+cama_gather%ilat0+ycnt-1) = rbuf
+            ELSE
+               MasterVar(xdsp+1:xdsp+xcnt,ydsp+1:ydsp+ycnt) = rbuf
+            ENDIF
 
             deallocate (rbuf)
          ENDDO
@@ -1035,7 +1205,12 @@ CONTAINS
             allocate (rbuf(xcnt,ycnt))
             CALL mpi_recv (rbuf, xcnt * ycnt, MPI_DOUBLE, &
                isrc, 10011, p_comm_glb, p_stat, p_err)
-            MasterVar (xdsp+1:xdsp+xcnt,ydsp+1:ydsp+ycnt) = rbuf
+            IF(CSETFILE=='NONE')THEN
+               MasterVar(cama_master_cols(xdsp,xcnt,size(MasterVar,1)), &
+                  ydsp+cama_gather%ilat0:ydsp+cama_gather%ilat0+ycnt-1) = rbuf
+            ELSE
+               MasterVar(xdsp+1:xdsp+xcnt,ydsp+1:ydsp+ycnt) = rbuf
+            ENDIF
             deallocate (rbuf)
          ENDDO
 
@@ -1123,7 +1298,12 @@ CONTAINS
                   ycnt = cama_gather%ysegs(iyseg)%cnt
 
                   allocate (sbuf (xcnt,ycnt))
-                  sbuf = MasterVar (xdsp+1:xdsp+xcnt, ydsp+1:ydsp+ycnt)
+                  IF(CSETFILE=='NONE')THEN
+                     sbuf = MasterVar(cama_master_cols(xdsp,xcnt,size(MasterVar,1)), &
+                        ydsp+cama_gather%ilat0:ydsp+cama_gather%ilat0+ycnt-1)
+                  ELSE
+                     sbuf = MasterVar(xdsp+1:xdsp+xcnt,ydsp+1:ydsp+ycnt)
+                  ENDIF
                   smesg = (/ixseg, iyseg/)
                   CALL mpi_send (smesg, 2, MPI_INTEGER, &
                      gblock%pio(iblk,jblk), 10000, p_comm_glb, p_err)
@@ -1218,7 +1398,12 @@ CONTAINS
                   ycnt = cama_gather%ysegs(iyseg)%cnt
 
                   allocate (sbuf (xcnt,ycnt))
-                  sbuf = MasterVar (xdsp+1:xdsp+xcnt, ydsp+1:ydsp+ycnt)
+                  IF(CSETFILE=='NONE')THEN
+                     sbuf = MasterVar(cama_master_cols(xdsp,xcnt,size(MasterVar,1)), &
+                        ydsp+cama_gather%ilat0:ydsp+cama_gather%ilat0+ycnt-1)
+                  ELSE
+                     sbuf = MasterVar(xdsp+1:xdsp+xcnt,ydsp+1:ydsp+ycnt)
+                  ENDIF
                   smesg = (/ixseg, iyseg/)
                   CALL mpi_send (smesg, 2, MPI_INTEGER, &
                      gblock%pio(iblk,jblk), 10000, p_comm_glb, p_err)

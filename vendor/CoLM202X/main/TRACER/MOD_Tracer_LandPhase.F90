@@ -39,6 +39,7 @@ MODULE MOD_Tracer_LandPhase
    !    called inside the CoLMMAIN patch loop (per ipatch, snl, nl_soil) --
    PUBLIC :: ntracers, trc_tiny, tracer_uses_land_water_transport
    PUBLIC :: tracer_precip, tracer_evapo, tracer_soil_water, tracer_wetland
+   PUBLIC :: tracer_flood_evap_loss
    PUBLIC :: tracer_newsnow, tracer_save_storage, tracer_balance_check
    PUBLIC :: tracer_apply_reactive_processes
    PUBLIC :: trc_wliq_soisno, trc_wice_soisno, trc_solid_soisno, trc_scv
@@ -56,7 +57,7 @@ CONTAINS
 
    SUBROUTINE land_tracer_init (numpatch, maxsnl, nl_soil, init_month, lc_year, jdate, &
       casename, dir_restart, dir_landdata, ldew_rain, ldew_snow, wliq_soisno, &
-      wice_soisno, wa, wdsrf, wetwat, scv, waterstorage)
+      wice_soisno, wa, wdsrf, wetwat, scv, waterstorage, loaded_restart, restart_file)
 
       IMPLICIT NONE
       integer, intent(in) :: numpatch, maxsnl, nl_soil
@@ -75,6 +76,8 @@ CONTAINS
       real(r8), allocatable, intent(in), optional :: wetwat(:)
       real(r8), allocatable, intent(in), optional :: scv(:)
       real(r8), allocatable, intent(in), optional :: waterstorage(:)
+      logical, intent(out), optional :: loaded_restart
+      character(len=*), intent(out), optional :: restart_file
 
       character(len=256) :: file_restart_trc
       character(len=14)  :: cdate_restart
@@ -88,6 +91,8 @@ CONTAINS
       write(cdate_restart,'(i4.4,"-",i3.3,"-",i5.5)') jdate(1), jdate(2), jdate(3)
       file_restart_trc = trim(dir_restart)//'/'//trim(cdate_restart)//'/'//trim(casename)// &
                          '_restart_'//trim(cdate_restart)//'_lc'//trim(cyear_restart)//'.nc'
+      IF (present(restart_file)) restart_file = file_restart_trc
+      IF (present(loaded_restart)) loaded_restart = .false.
 
       have_patch_state = present(ldew_rain) .and. present(ldew_snow) .and. &
          present(wliq_soisno) .and. present(wice_soisno) .and. present(wa) .and. &
@@ -106,13 +111,14 @@ CONTAINS
                ldew_rain, ldew_snow, wliq_soisno, wice_soisno, &
                wa, wdsrf, wetwat, scv, file_restart_trc, waterstorage, &
                init_month=init_month, lc_year=lc_year, jdate=jdate, &
-               casename=casename, dir_restart=dir_restart, dir_landdata=dir_landdata)
+               casename=casename, dir_restart=dir_restart, dir_landdata=dir_landdata, &
+               loaded_restart=loaded_restart)
          ELSE
             CALL tracer_init_from_arrays (numpatch, maxsnl, nl_soil, &
                ldew_rain, ldew_snow, wliq_soisno, wice_soisno, &
                wa, wdsrf, wetwat, scv, file_restart_trc, init_month=init_month, &
                lc_year=lc_year, jdate=jdate, casename=casename, &
-               dir_restart=dir_restart, dir_landdata=dir_landdata)
+               dir_restart=dir_restart, dir_landdata=dir_landdata, loaded_restart=loaded_restart)
          ENDIF
       ELSE
          ! Vector restart I/O is collective over IO/worker groups. Non-worker
@@ -126,7 +132,7 @@ CONTAINS
             tracer_dummy_patch, tracer_dummy_patch, tracer_dummy_patch, &
             tracer_dummy_patch, file_restart_trc, init_month=init_month, &
             lc_year=lc_year, jdate=jdate, casename=casename, &
-            dir_restart=dir_restart, dir_landdata=dir_landdata)
+            dir_restart=dir_restart, dir_landdata=dir_landdata, loaded_restart=loaded_restart)
          deallocate(tracer_dummy_patch, tracer_dummy_soisno)
       ENDIF
 
@@ -135,7 +141,7 @@ CONTAINS
    SUBROUTINE tracer_init_from_arrays (numpatch, maxsnl, nl_soil, &
       ldew_rain, ldew_snow, wliq_soisno, wice_soisno, &
       wa, wdsrf, wetwat, scv, file_restart, waterstorage, init_month, &
-      lc_year, jdate, casename, dir_restart, dir_landdata)
+      lc_year, jdate, casename, dir_restart, dir_landdata, loaded_restart)
 
       IMPLICIT NONE
       integer,  intent(in) :: numpatch, maxsnl, nl_soil
@@ -159,6 +165,7 @@ CONTAINS
       character(len=*), intent(in), optional :: casename
       character(len=*), intent(in), optional :: dir_restart
       character(len=*), intent(in), optional :: dir_landdata
+      logical, intent(out), optional :: loaded_restart
       logical :: found_restart, scv_missing, waterstorage_missing
       integer :: soil_init_month
 
@@ -174,9 +181,10 @@ CONTAINS
       CALL deallocate_tracer_conservation()
       CALL tracer_defs_init()
       CALL tracer_lifecycle_init()
+      IF (present(loaded_restart)) loaded_restart = .false.
       IF (present(lc_year) .and. present(jdate) .and. present(casename) .and. &
           present(dir_restart) .and. present(dir_landdata)) THEN
-         CALL tracer_lifecycle_land_init (numpatch, lc_year, jdate, casename, dir_restart, dir_landdata)
+         CALL tracer_lifecycle_land_init (numpatch, lc_year, jdate, casename, dir_restart, dir_landdata, file_restart)
       ENDIF
       IF (ntracers <= 0) RETURN
       CALL allocate_Tracer_Vars(numpatch, maxsnl, nl_soil)
@@ -185,7 +193,7 @@ CONTAINS
       waterstorage_missing = .false.
       IF (present(file_restart)) THEN
          CALL read_land_tracer_restart(file_restart, maxsnl, nl_soil, &
-            found_restart, scv_missing, waterstorage_missing)
+            found_restart, scv_missing, waterstorage_missing, wa)
       ENDIF
 #ifdef USEMPI
       ! The control/master rank does not own vector restart blocks, so
@@ -201,6 +209,7 @@ CONTAINS
       scv_missing = scv_missing .and. found_restart
       waterstorage_missing = waterstorage_missing .and. found_restart
 #endif
+      IF (present(loaded_restart)) loaded_restart = found_restart
       IF (.not. found_restart) THEN
          soil_init_month = 1
          IF (present(init_month)) soil_init_month = init_month
@@ -232,12 +241,17 @@ CONTAINS
       ! by the generic land-water descriptor.  Each provider probes its own
       ! mandatory fields and no-ops when the checkpoint has no provider state.
       IF (present(file_restart)) CALL tracer_lifecycle_land_read_restart(file_restart)
-      IF (present(waterstorage)) THEN
-         CALL tracer_enforce_solubility_from_water(numpatch, maxsnl, nl_soil, &
-            ldew_rain, wliq_soisno, wa, wdsrf, wetwat, waterstorage)
-      ELSE
-         CALL tracer_enforce_solubility_from_water(numpatch, maxsnl, nl_soil, &
-            ldew_rain, wliq_soisno, wa, wdsrf, wetwat)
+      ! A committed restart already contains every dissolved/solid pool. Do not
+      ! re-equilibrate it: that also mixes the distinct wetland/surface pools.
+      ! Legacy/incompatible checkpoints take the cold-start branch above.
+      IF (.not. found_restart) THEN
+         IF (present(waterstorage)) THEN
+            CALL tracer_enforce_solubility_from_water(numpatch, maxsnl, nl_soil, &
+               ldew_rain, wliq_soisno, wa, wdsrf, wetwat, waterstorage)
+         ELSE
+            CALL tracer_enforce_solubility_from_water(numpatch, maxsnl, nl_soil, &
+               ldew_rain, wliq_soisno, wa, wdsrf, wetwat)
+         ENDIF
       ENDIF
    END SUBROUTINE tracer_init_from_arrays
 

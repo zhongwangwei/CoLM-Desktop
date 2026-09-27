@@ -79,11 +79,11 @@ CONTAINS
                      ENDIF
                   ENDDO
 
-                  IF (nelm > 0) THEN
+                  allocate (elmindx (nelm))
+                  allocate (npxlall (nelm))
+                  allocate (elmpixels (2,totlen))
 
-                     allocate (elmindx (nelm))
-                     allocate (npxlall (nelm))
-                     allocate (elmpixels (2,totlen))
+                  IF (nelm > 0) THEN
 
                      je = 0
                      ndsp = 0

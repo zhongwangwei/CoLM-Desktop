@@ -148,6 +148,7 @@ CONTAINS
             trc_rnof_step(itrc, ipatch) = 0._r8
             IF (allocated(trc_reactive_source_step)) trc_reactive_source_step(itrc, ipatch) = 0._r8
             IF (allocated(trc_numerical_residual_step)) trc_numerical_residual_step(itrc, ipatch) = 0._r8
+            IF (allocated(trc_numerical_water_step)) trc_numerical_water_step(itrc, ipatch) = 0._r8
 
          ! Phase-1 re-sync of the irrigation reservoir tracer to current
          ! waterstorage. Under no-fractionation tests all refills arrive at
@@ -177,6 +178,9 @@ CONTAINS
                storage_comp(2) = storage_comp(2) + trc_wliq_soisno(itrc, j, ipatch)
                storage_comp(3) = storage_comp(3) + trc_wice_soisno(itrc, j, ipatch)
             ENDDO
+         ! The aquifer reference isotope mass is fixed for this patch. Keep
+         ! the relative component here: Mref cancels from the step's delta,
+         ! matching hydrology's wa-only budget (the fixed Vref also cancels).
          storage_comp(4) = trc_wa(itrc, ipatch)
          storage_comp(5) = trc_wdsrf(itrc, ipatch)
          storage_comp(6) = trc_wetwat(itrc, ipatch)
@@ -306,7 +310,7 @@ CONTAINS
    SUBROUTINE tracer_balance_check (ipatch, snl, nl_soil, deltim, xerr_tracer, &
                                     patchtype_in, water_err_in, water_dS_in, &
                                     water_input_in, water_output_in, &
-                                    water_evap_in, water_rnof_in)
+                                    water_evap_in, water_rnof_in, flood_heterogeneous_in)
       IMPLICIT NONE
       integer,  intent(in)  :: ipatch, snl, nl_soil
       real(r8), intent(in)  :: deltim
@@ -321,6 +325,7 @@ CONTAINS
       real(r8), intent(in), optional :: water_output_in
       real(r8), intent(in), optional :: water_evap_in
       real(r8), intent(in), optional :: water_rnof_in
+      logical, intent(in), optional :: flood_heterogeneous_in
 
       integer  :: itrc, j, lb_store
       real(r8) :: storage_end, step_input, step_evap, step_rnof, step_output, err
@@ -392,6 +397,21 @@ CONTAINS
          IF (allocated(trc_runtime_forced)) THEN
             fixed_signature_step = fixed_signature_step .and. .not. trc_runtime_forced(itrc)
          ENDIF
+         ! Floodwater can carry a river signature different from R_init even
+         ! when precipitation is fixed-signature. That signature persists in
+         ! soil after a wet step and across restart. With feedback enabled,
+         ! retain raw conservation but do not use R_init as a soil-patch
+         ! flux or host-closure correction on later dry steps either.
+         IF (present(flood_heterogeneous_in)) THEN
+            IF (flood_heterogeneous_in) THEN
+               fixed_signature_step = .false.
+               ! The raw tracer budget already subtracts its explicitly
+               ! booked numerical source/sink. Applying R_init times the
+               ! host water closure as well would double-correct a flooded
+               ! column whose incoming isotope ratio is not R_init.
+               water_corrected_check = .false.
+            ENDIF
+         ENDIF
 
          ! Per-step fluxes = current accumulator - snapshot at step start.
          ! Conservation always uses the amounts actually booked. Fixed-
@@ -444,7 +464,11 @@ CONTAINS
          ELSE
             water_err = 0._r8
          ENDIF
-         water_err_R = water_err * R_init
+         IF (allocated(trc_numerical_water_step)) THEN
+            water_err_R = (water_err - trc_numerical_water_step(itrc, ipatch)) * R_init
+         ELSE
+            water_err_R = water_err * R_init
+         ENDIF
          err_minus_water = err - water_err_R
          ! The hard tracer check should ignore host water-budget non-closure
          ! for isotope tracers. Fractionation and runtime atmospheric forcing
@@ -503,13 +527,10 @@ CONTAINS
          signature_error = 0._r8
          signature_scale = 0._r8
          IF (fixed_signature_step) THEN
-            IF (present(water_input_in)) THEN
-               signature_error = max(signature_error, abs(in_minus_water_R))
-               signature_scale = max(signature_scale, abs(step_input), abs(water_input * R_init))
-            ENDIF
-            IF (present(water_evap_in)) THEN
-               signature_error = max(signature_error, abs(evap_minus_water_R))
-               signature_scale = max(signature_scale, abs(step_evap), abs(water_evap * R_init))
+            IF (present(water_input_in) .or. present(water_evap_in)) THEN
+               signature_error = max(signature_error, abs(in_minus_water_R - evap_minus_water_R))
+               signature_scale = max(signature_scale, abs(step_input), abs(water_input * R_init), &
+                  abs(step_evap), abs(water_evap * R_init))
             ENDIF
 #ifndef CatchLateralFlow
             IF (present(water_rnof_in)) THEN

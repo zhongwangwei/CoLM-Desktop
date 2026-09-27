@@ -24,6 +24,7 @@ CONTAINS
    USE MOD_Const_LC
    USE MOD_Const_PFT
    USE MOD_Vars_TimeInvariants
+   USE MOD_Namelist, only: DEF_Interception_scheme
    USE MOD_LandPatch
    USE MOD_LandPFT
    USE MOD_Vars_PFTimeInvariants
@@ -40,7 +41,7 @@ CONTAINS
 
    ! Local Variables
    character(len=256) :: c
-   character(len=256) :: landdir, lndname, cyear
+   character(len=256) :: landdir, cstructdir, lndname, cyear
    integer :: i,j,t,p,ps,pe,m,n,npatch
 
    real(r8), allocatable :: htoplc  (:)
@@ -48,6 +49,26 @@ CONTAINS
 
       write(cyear,'(i4.4)') lc_year
       landdir = trim(dir_landdata) // '/htop/' // trim(cyear)
+      cstructdir = trim(dir_landdata) // '/cstructure/' // trim(cyear)
+
+      IF (DEF_Interception_scheme == 8) THEN
+#ifdef SinglePoint
+         IF (p_is_worker) THEN
+            ncd = SITE_ncd
+            ncw = SITE_ncw
+            bcw = SITE_bcw
+         ENDIF
+#else
+#if (defined LULC_USGS || defined LULC_IGBP)
+         lndname = trim(cstructdir)//'/ncd_patches.nc'
+         CALL ncio_read_vector (lndname, 'ncd_patches', landpatch, ncd)
+         lndname = trim(cstructdir)//'/ncw_patches.nc'
+         CALL ncio_read_vector (lndname, 'ncw_patches', landpatch, ncw)
+         lndname = trim(cstructdir)//'/bcw_patches.nc'
+         CALL ncio_read_vector (lndname, 'bcw_patches', landpatch, bcw)
+#endif
+#endif
+      ENDIF
 
 
 #ifdef LULC_USGS
@@ -101,10 +122,23 @@ IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
       IF (numpft > 0) THEN
          allocate(htoppft(numpft))
          htoppft = pack(SITE_htop_pfts, SITE_pctpfts > 0.)
+         IF (DEF_Interception_scheme == 8) THEN
+            ncd_p = pack(SITE_ncd_pfts, SITE_pctpfts > 0.)
+            ncw_p = pack(SITE_ncw_pfts, SITE_pctpfts > 0.)
+            bcw_p = pack(SITE_bcw_pfts, SITE_pctpfts > 0.)
+         ENDIF
       ENDIF
 #else
       lndname = trim(landdir)//'/htop_pfts.nc'
       CALL ncio_read_vector (lndname, 'htop_pfts', landpft,   htoppft)
+      IF (DEF_Interception_scheme == 8) THEN
+         lndname = trim(cstructdir)//'/ncd_pfts.nc'
+         CALL ncio_read_vector (lndname, 'ncd_pfts', landpft, ncd_p)
+         lndname = trim(cstructdir)//'/ncw_pfts.nc'
+         CALL ncio_read_vector (lndname, 'ncw_pfts', landpft, ncw_p)
+         lndname = trim(cstructdir)//'/bcw_pfts.nc'
+         CALL ncio_read_vector (lndname, 'bcw_pfts', landpft, bcw_p)
+      ENDIF
 #endif
 
       IF (p_is_worker) THEN

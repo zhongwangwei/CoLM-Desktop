@@ -103,7 +103,7 @@ CONTAINS
             indexelm = landelm%eindex
          ENDIF
 
-         IF (p_iam_worker == p_root) allocate (numelm_worker (0:p_np_worker-1))
+         allocate (numelm_worker (0:p_np_worker-1))
          CALL mpi_gather (numelm, 1, MPI_INTEGER, &
             numelm_worker, 1, MPI_INTEGER, p_root, p_comm_worker, p_err)
 

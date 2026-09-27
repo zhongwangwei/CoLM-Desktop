@@ -17,6 +17,7 @@ MODULE MOD_BGC_CNCStateUpdate1
 !                   2) Record the accumulated phenology-associated C transfer for veg and soil C semi-analytic spinup
 !                   3) Record the accumulated decomposition-associated C transfer for soil C semi-analytic spinup
 
+   USE MOD_Namelist, only: DEF_USE_TRACER
    USE MOD_Precision
    USE MOD_Namelist, only: DEF_USE_SASU, DEF_USE_DiagMatrix
    USE MOD_Vars_PFTimeInvariants, only: pftclass, pftfrac
@@ -154,7 +155,7 @@ CONTAINS
    integer ,intent(in) :: npcropmin             ! index of first crop pft
 
 ! Local variables
-   integer j
+   integer j,k
    integer ivt, m
 
       DO m = ps, pe
@@ -175,7 +176,53 @@ CONTAINS
          ENDDO
       ENDIF
 
+      IF (DEF_USE_TRACER) THEN
       CALL CDecompStateUpdate(i, deltim, nl_soil, ndecomp_transitions)
+      ELSE
+      DO k = 1, ndecomp_transitions
+         DO j = 1,nl_soil
+            decomp_cpools_sourcesink(j,donor_pool(k),i) = &
+                 decomp_cpools_sourcesink(j,donor_pool(k),i) &
+                 - (decomp_hr_vr(j,k,i) + decomp_ctransfer_vr(j,k,i)) * deltim
+         ENDDO
+      ENDDO
+
+      DO k = 1,ndecomp_transitions
+         IF ( receiver_pool(k) /= 0 ) THEN  ! skip terminal transitions
+            DO j = 1,nl_soil
+               decomp_cpools_sourcesink(j,receiver_pool(k),i) = &
+                    decomp_cpools_sourcesink(j,receiver_pool(k),i) &
+                    + decomp_ctransfer_vr(j,k,i) * deltim
+            ENDDO
+         ENDIF
+      ENDDO
+
+      IF(DEF_USE_SASU .or. DEF_USE_DiagMatrix)THEN
+         DO j = 1, nl_soil
+            AKX_met_to_soil1_c_vr_acc  (j,i) = AKX_met_to_soil1_c_vr_acc  (j,i) + decomp_ctransfer_vr(j, 1,i) * deltim
+            AKX_cel_to_soil1_c_vr_acc  (j,i) = AKX_cel_to_soil1_c_vr_acc  (j,i) + decomp_ctransfer_vr(j, 2,i) * deltim
+            AKX_lig_to_soil2_c_vr_acc  (j,i) = AKX_lig_to_soil2_c_vr_acc  (j,i) + decomp_ctransfer_vr(j, 3,i) * deltim
+            AKX_soil1_to_soil2_c_vr_acc(j,i) = AKX_soil1_to_soil2_c_vr_acc(j,i) + decomp_ctransfer_vr(j, 4,i) * deltim
+            AKX_cwd_to_cel_c_vr_acc    (j,i) = AKX_cwd_to_cel_c_vr_acc    (j,i) + decomp_ctransfer_vr(j, 5,i) * deltim
+            AKX_cwd_to_lig_c_vr_acc    (j,i) = AKX_cwd_to_lig_c_vr_acc    (j,i) + decomp_ctransfer_vr(j, 6,i) * deltim
+            AKX_soil1_to_soil3_c_vr_acc(j,i) = AKX_soil1_to_soil3_c_vr_acc(j,i) + decomp_ctransfer_vr(j, 7,i) * deltim
+            AKX_soil2_to_soil1_c_vr_acc(j,i) = AKX_soil2_to_soil1_c_vr_acc(j,i) + decomp_ctransfer_vr(j, 8,i) * deltim
+            AKX_soil2_to_soil3_c_vr_acc(j,i) = AKX_soil2_to_soil3_c_vr_acc(j,i) + decomp_ctransfer_vr(j, 9,i) * deltim
+            AKX_soil3_to_soil1_c_vr_acc(j,i) = AKX_soil3_to_soil1_c_vr_acc(j,i) + decomp_ctransfer_vr(j,10,i) * deltim
+
+            AKX_met_exit_c_vr_acc      (j,i) = AKX_met_exit_c_vr_acc      (j,i) + (decomp_hr_vr(j, 1,i) + decomp_ctransfer_vr(j, 1,i)) * deltim
+            AKX_cel_exit_c_vr_acc      (j,i) = AKX_cel_exit_c_vr_acc      (j,i) + (decomp_hr_vr(j, 2,i) + decomp_ctransfer_vr(j, 2,i)) * deltim
+            AKX_lig_exit_c_vr_acc      (j,i) = AKX_lig_exit_c_vr_acc      (j,i) + (decomp_hr_vr(j, 3,i) + decomp_ctransfer_vr(j, 3,i)) * deltim
+            AKX_soil1_exit_c_vr_acc    (j,i) = AKX_soil1_exit_c_vr_acc    (j,i) + (decomp_hr_vr(j, 4,i) + decomp_ctransfer_vr(j, 4,i)) * deltim
+            AKX_cwd_exit_c_vr_acc      (j,i) = AKX_cwd_exit_c_vr_acc      (j,i) + (decomp_hr_vr(j, 5,i) + decomp_ctransfer_vr(j, 5,i)) * deltim
+            AKX_cwd_exit_c_vr_acc      (j,i) = AKX_cwd_exit_c_vr_acc      (j,i) + (decomp_hr_vr(j, 6,i) + decomp_ctransfer_vr(j, 6,i)) * deltim
+            AKX_soil1_exit_c_vr_acc    (j,i) = AKX_soil1_exit_c_vr_acc    (j,i) + (decomp_hr_vr(j, 7,i) + decomp_ctransfer_vr(j, 7,i)) * deltim
+            AKX_soil2_exit_c_vr_acc    (j,i) = AKX_soil2_exit_c_vr_acc    (j,i) + (decomp_hr_vr(j, 8,i) + decomp_ctransfer_vr(j, 8,i)) * deltim
+            AKX_soil2_exit_c_vr_acc    (j,i) = AKX_soil2_exit_c_vr_acc    (j,i) + (decomp_hr_vr(j, 9,i) + decomp_ctransfer_vr(j, 9,i)) * deltim
+            AKX_soil3_exit_c_vr_acc    (j,i) = AKX_soil3_exit_c_vr_acc    (j,i) + (decomp_hr_vr(j,10,i) + decomp_ctransfer_vr(j,10,i)) * deltim
+         ENDDO
+      ENDIF
+      ENDIF
 
       DO m = ps , pe
          ivt = pftclass(m)

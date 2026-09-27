@@ -35,18 +35,21 @@ MODULE MOD_Grid_RiverLakeHistRoute
    USE MOD_SPMD_Task
    USE MOD_Namelist
    USE MOD_NetCDFSerial
+   USE MOD_TimeManager, only: minutes_since_1900
    ! Sharded (block-mode) writers live in their own module; the generic
    ! master-gather writers stay in MOD_Vector_ReadWrite.
    USE MOD_Vector_ReadWrite
    USE MOD_Grid_RiverLakeHistShard
    USE MOD_Grid_RiverLakeNetwork, only: numucat, totalnumucat, ucat_data_address, &
       ucat_ucid, x_ucat, y_ucat, griducat
-   USE MOD_Grid_Reservoir, only: numresv, totalnumresv, resv_data_address, dam_GRAND_ID
+   USE MOD_Grid_Reservoir, only: numresv, totalnumresv, resv_global_id, &
+      resv_data_address, dam_GRAND_ID
 
    IMPLICIT NONE
 
    PUBLIC :: route_hist_begin
    PUBLIC :: route_hist_end
+   PUBLIC :: route_hist_final
    PUBLIC :: route_hist_write_ucat
    PUBLIC :: route_hist_write_resv
    PUBLIC :: route_hist_write_bif_matrix
@@ -67,6 +70,10 @@ MODULE MOD_Grid_RiverLakeHistRoute
    type(route_shard_layout_type) :: rh_resv_layout
    type(route_shard_layout_type) :: rh_bif_layout
    logical :: rh_bif_layout_built = .false.
+   ! The shard file whose bifurcation dimensions and pth_global_id are already
+   ! defined.  The layout is built once per run, but every new history file
+   ! needs its own dimensions, so this cannot be folded into the flag above.
+   character(len=256) :: rh_bif_dims_file = ''
 
    ! Identity of the current run segment: the date at which this process first
    ! wrote a shard. A restart re-enters with a different one, which is what
@@ -112,16 +119,21 @@ CONTAINS
    !! record index the writers below use.  Keeping it here is what stops the
    !! two modes from growing separate copies of the skeleton logic.
    SUBROUTINE route_hist_begin (file_hist_ucat, idate, is_first_in_file, &
-         lon_ucat, lat_ucat, itime_in_file_ucat)
+         lon_ucat, lat_ucat, itime_in_file_ucat, window_seconds)
 
    character(len=*), intent(in)  :: file_hist_ucat
    integer,          intent(in)  :: idate(3)
    logical,          intent(in)  :: is_first_in_file
    real(r8),         intent(in)  :: lon_ucat (:), lat_ucat (:)
    integer,          intent(out) :: itime_in_file_ucat
+   real(r8), optional, intent(in) :: window_seconds
 
    character(len=256) :: fshard
    logical :: fexists
+   real(r8) :: elapsed_seconds
+
+      elapsed_seconds=0._r8
+      IF (present(window_seconds)) elapsed_seconds=window_seconds
 
       rh_file_one = file_hist_ucat
       rh_first    = is_first_in_file
@@ -163,6 +175,18 @@ CONTAINS
             ENDIF
             CALL ncio_write_time (trim(file_hist_ucat), 'time', idate, &
                itime_in_file_ucat, DEF_HIST_FREQ)
+            CALL ncio_write_serial_time (trim(file_hist_ucat), 'history_window_seconds', &
+               itime_in_file_ucat, elapsed_seconds, 'time')
+            CALL ncio_write_serial_time (trim(file_hist_ucat), 'history_window_end_minutes', &
+               itime_in_file_ucat, real(minutes_since_1900(idate(1), idate(2), idate(3)), r8) + &
+               real(mod(idate(3),60),r8)/60._r8, 'time')
+            IF (itime_in_file_ucat==1) THEN
+               CALL ncio_put_attr(trim(file_hist_ucat), 'history_window_seconds', 'units', 's')
+               CALL ncio_put_attr(trim(file_hist_ucat), 'history_window_seconds', 'long_name', &
+                  'elapsed window ending at history_window_end_minutes; terminal and resumed records can overlap')
+               CALL ncio_put_attr(trim(file_hist_ucat), 'history_window_end_minutes', 'units', &
+                  'minutes since 1900-1-1 0:0:0')
+            ENDIF
          ENDIF
          rh_itime = itime_in_file_ucat
          RETURN
@@ -173,9 +197,15 @@ CONTAINS
          trim(rh_segment_id))
       rh_file_shard = fshard
 
-      ! Layouts are collective over p_comm_group and must therefore be built
-      ! by IO ranks and workers together; the master is a singleton group and
-      ! takes no part.
+      ! Layouts are collective over p_comm_group, so they are built by IO ranks
+      ! and workers together.  The master is neither p_is_io nor p_is_worker and
+      ! sits in a singleton group of its own (MOD_SPMD_Task.F90:219-223), so it
+      ! takes no part here -- and, symmetrically, it must not enter the group
+      ! collectives of route_hist_write_ucat / route_hist_write_resv either.
+      ! Those two callers used to dispatch to the shard writer for every rank,
+      ! so the master reached the layout%built guard at
+      ! MOD_Grid_RiverLakeHistShard.F90:188 and stopped the run; they are now
+      ! guarded like the BIF writer below always has been.
       IF (p_is_io .or. p_is_worker) THEN
          IF (is_first_in_file .or. .not. rh_ucat_layout%built) THEN
             CALL route_shard_layout_build (rh_ucat_layout, local_ucat_count(), local_ucat_ids())
@@ -205,6 +235,18 @@ CONTAINS
          ENDIF
          CALL ncio_write_time (trim(rh_file_shard), 'time', idate, &
             itime_in_file_ucat, DEF_HIST_FREQ)
+         CALL ncio_write_serial_time (trim(rh_file_shard), 'history_window_seconds', &
+            itime_in_file_ucat, elapsed_seconds, 'time')
+         CALL ncio_write_serial_time (trim(rh_file_shard), 'history_window_end_minutes', &
+            itime_in_file_ucat, real(minutes_since_1900(idate(1), idate(2), idate(3)), r8) + &
+            real(mod(idate(3),60),r8)/60._r8, 'time')
+         IF (itime_in_file_ucat==1) THEN
+            CALL ncio_put_attr(trim(rh_file_shard), 'history_window_seconds', 'units', 's')
+            CALL ncio_put_attr(trim(rh_file_shard), 'history_window_seconds', 'long_name', &
+               'elapsed window ending at history_window_end_minutes; terminal and resumed records can overlap')
+            CALL ncio_put_attr(trim(rh_file_shard), 'history_window_end_minutes', 'units', &
+               'minutes since 1900-1-1 0:0:0')
+         ENDIF
       ENDIF
       rh_itime = itime_in_file_ucat
 
@@ -263,6 +305,27 @@ CONTAINS
 
    END SUBROUTINE route_hist_end
 
+   SUBROUTINE route_hist_final ()
+
+      CALL route_shard_layout_free (rh_ucat_layout)
+      CALL route_shard_layout_free (rh_resv_layout)
+      CALL route_shard_layout_free (rh_bif_layout)
+      IF (allocated(rh_lon_cache)) deallocate (rh_lon_cache)
+      IF (allocated(rh_lat_cache)) deallocate (rh_lat_cache)
+      rh_active = .false.
+      rh_block = .false.
+      rh_first = .false.
+      rh_bif_layout_built = .false.
+      rh_bif_dims_file = ''
+      rh_seg_set = .false.
+      rh_seg_date = 0
+      rh_segment_id = ''
+      rh_file_one = ''
+      rh_file_shard = ''
+      rh_itime = 0
+
+   END SUBROUTINE route_hist_final
+
    ! ------------------------------------------------------------------
    !> One unit-catchment field. In 'one' mode this is the existing
    !! gather-to-master + regrid + serial write; in 'block' mode it is a
@@ -282,12 +345,19 @@ CONTAINS
       IF (present(no_time)) with_time = .not. no_time
 
       IF (rh_block) THEN
-         IF (with_time) THEN
-            CALL route_shard_write_vector (rh_ucat_layout, vector, trim(rh_file_shard), &
-               varname, 'unitcat_local', rh_itime, longname, units)
-         ELSE
-            CALL route_shard_write_vector (rh_ucat_layout, vector, trim(rh_file_shard), &
-               varname, 'unitcat_local', longname=longname, units=units)
+         ! The shard writer gathers over p_comm_group.  The master is neither
+         ! p_is_io nor p_is_worker and belongs to no data group, so it must skip
+         ! the group collective entirely -- exactly as route_hist_write_bif_matrix
+         ! below does.  Without this guard the master entered
+         ! route_shard_write_vector with layout%built still false and halted.
+         IF (p_is_io .or. p_is_worker) THEN
+            IF (with_time) THEN
+               CALL route_shard_write_vector (rh_ucat_layout, vector, trim(rh_file_shard), &
+                  varname, 'unitcat_local', rh_itime, longname, units)
+            ELSE
+               CALL route_shard_write_vector (rh_ucat_layout, vector, trim(rh_file_shard), &
+                  varname, 'unitcat_local', longname=longname, units=units)
+            ENDIF
          ENDIF
       ELSE
          IF (with_time) THEN
@@ -315,8 +385,12 @@ CONTAINS
       CALL assert_active ('route_hist_write_resv')
 
       IF (rh_block) THEN
-         CALL route_shard_write_vector (rh_resv_layout, vector, trim(rh_file_shard), &
-            varname, 'reservoir_local', rh_itime, longname, units)
+         ! Same rule as route_hist_write_ucat: the master takes no part in the
+         ! p_comm_group collective, and rh_resv_layout is never built for it.
+         IF (p_is_io .or. p_is_worker) THEN
+            CALL route_shard_write_vector (rh_resv_layout, vector, trim(rh_file_shard), &
+               varname, 'reservoir_local', rh_itime, longname, units)
+         ENDIF
       ELSE
          CALL vector_gather_and_write (vector, numresv, totalnumresv, resv_data_address, &
             trim(rh_file_one), varname, 'reservoir', rh_itime, longname, units)
@@ -345,7 +419,13 @@ CONTAINS
             IF (.not. rh_bif_layout_built) THEN
                CALL route_shard_layout_build (rh_bif_layout, ncol_local, global_id)
                rh_bif_layout_built = .true.
-               IF (p_is_io) CALL define_bif_shard_dims (nrow)
+            ENDIF
+            IF (p_is_io) THEN
+               IF (trim(rh_bif_dims_file) /= trim(rh_file_shard)) THEN
+                  IF (.not. ncio_var_exist (trim(rh_file_shard), 'pth_global_id', readflag = .false.)) &
+                     CALL define_bif_shard_dims (nrow)
+                  rh_bif_dims_file = rh_file_shard
+               ENDIF
             ENDIF
             CALL route_shard_write_matrix (rh_bif_layout, matrix, nrow, &
                trim(rh_file_shard), varname, 'bifurcation_level', &
@@ -393,13 +473,13 @@ CONTAINS
       IF (p_is_worker) local_resv_count = numresv
    END FUNCTION local_resv_count
 
-   !> Reservoirs carry no separate stable id array, so the global index the
-   !! 'one' path already uses is reconstructed from the scatter address book.
+   !> The worker-local dense global state IDs are the same IDs used by the
+   !! one-file gather and restart identity paths.
    FUNCTION local_resv_ids () RESULT (ids)
    integer, allocatable :: ids(:)
-      IF (p_is_worker .and. numresv > 0 .and. allocated(resv_data_address)) THEN
+      IF (p_is_worker .and. numresv > 0 .and. allocated(resv_global_id)) THEN
          allocate (ids(numresv))
-         ids = resv_data_address(p_iam_worker)%val(1:numresv)
+         ids = resv_global_id
       ELSE
          allocate (ids(1)); ids = 0
       ENDIF
@@ -408,6 +488,8 @@ CONTAINS
    SUBROUTINE create_shard_skeleton (lon_ucat, lat_ucat)
 
    real(r8), intent(in) :: lon_ucat (:), lat_ucat (:)
+
+   integer, allocatable :: shard_x(:), shard_y(:)
 
       CALL ncio_create_file (trim(rh_file_shard))
       CALL ncio_define_dimension (trim(rh_file_shard), 'time', 0)
@@ -420,10 +502,11 @@ CONTAINS
       ! to rebuild lon_ucat x lat_ucat without consulting any other file.
       CALL ncio_write_serial (trim(rh_file_shard), 'ucat_ucid', &
          rh_ucat_layout%gid(1:max(rh_ucat_layout%ntotal,0)), 'unitcat_local')
+      CALL shard_coords (shard_x, shard_y)
       CALL ncio_write_serial (trim(rh_file_shard), 'x_ucat', &
-         shard_x_ucat(), 'unitcat_local')
+         shard_x(1:max(rh_ucat_layout%ntotal,0)), 'unitcat_local')
       CALL ncio_write_serial (trim(rh_file_shard), 'y_ucat', &
-         shard_y_ucat(), 'unitcat_local')
+         shard_y(1:max(rh_ucat_layout%ntotal,0)), 'unitcat_local')
       IF (rh_resv_layout%ntotal > 0) THEN
          CALL ncio_write_serial (trim(rh_file_shard), 'resv_global_index', &
             rh_resv_layout%gid(1:rh_resv_layout%ntotal), 'reservoir_local')
@@ -439,25 +522,46 @@ CONTAINS
 
    END SUBROUTINE create_shard_skeleton
 
-   FUNCTION shard_x_ucat () RESULT (xs)
-   integer, allocatable :: xs(:)
-   integer :: k, n
+   !> Grid coordinates of the gathered unit catchments.
+   !!
+   !! rh_ucat_layout%gid holds gathered *sequence* indices: ucat_ucid is simply
+   !! 1..totalnumucat (MOD_Grid_RiverLakeNetwork.F90:389), and that is also what
+   !! this shard stores as ucat_ucid.  They therefore cannot index x_ucat/y_ucat
+   !! -- those are the rank-LOCAL arrays, holding numucat entries on a worker
+   !! and zero-length on an IO rank, which is never a worker
+   !! (MOD_Grid_RiverLakeNetwork.F90:443,460; MOD_SPMD_Task.F90:218).
+   !! The sequence -> (x,y) map is the static seq_x/seq_y that the master loads
+   !! into the global x_ucat/y_ucat (MOD_Grid_RiverLakeNetwork.F90:194-195).
+   !! Only this rank needs it, once per new shard file, so read it here rather
+   !! than widening x_ucat/y_ucat to the global length on every rank -- they are
+   !! used as *local* arrays elsewhere (e.g. the one-file mapping writer).
+   SUBROUTINE shard_coords (xs, ys)
+
+   integer, allocatable, intent(out) :: xs(:), ys(:)
+
+   integer, allocatable :: seq_x(:), seq_y(:)
+   integer :: k, n, gid_max
+
       n = max(rh_ucat_layout%ntotal, 0)
       allocate (xs(max(n,1))); xs = 0
-      DO k = 1, n
-         xs(k) = x_ucat(rh_ucat_layout%gid(k))
-      ENDDO
-   END FUNCTION shard_x_ucat
-
-   FUNCTION shard_y_ucat () RESULT (ys)
-   integer, allocatable :: ys(:)
-   integer :: k, n
-      n = max(rh_ucat_layout%ntotal, 0)
       allocate (ys(max(n,1))); ys = 0
+      IF (n <= 0) RETURN
+
+      CALL ncio_read_serial (get_unitcatchment_file (), 'seq_x', seq_x)
+      CALL ncio_read_serial (get_unitcatchment_file (), 'seq_y', seq_y)
+
+      gid_max = maxval(rh_ucat_layout%gid(1:n))
+      IF (minval(rh_ucat_layout%gid(1:n)) < 1 .or. &
+          gid_max > size(seq_x) .or. gid_max > size(seq_y)) THEN
+         CALL CoLM_stop ('shard_coords: gathered unit-catchment id outside seq_x/seq_y')
+      ENDIF
+
       DO k = 1, n
-         ys(k) = y_ucat(rh_ucat_layout%gid(k))
+         xs(k) = seq_x(rh_ucat_layout%gid(k))
+         ys(k) = seq_y(rh_ucat_layout%gid(k))
       ENDDO
-   END FUNCTION shard_y_ucat
+
+   END SUBROUTINE shard_coords
 
    FUNCTION shard_resv_grand_id () RESULT (ids)
    integer, allocatable :: ids(:)

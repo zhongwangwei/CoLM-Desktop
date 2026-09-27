@@ -25,6 +25,7 @@ INTEGER(KIND=JPIM)              :: NSETFILE                !! input namelist fil
 INTEGER(KIND=JPIM)              :: TMPNAM                  !! temporal I/O   file FIG
 CHARACTER(LEN=256)              :: CLOGOUT                 !! default log    file name
 CHARACTER(LEN=256)              :: CSETFILE                !! input namelist file name
+CHARACTER(LEN=256)              :: CROUTINGNC = 'NONE'
 
 DATA LLOGOUT       /.TRUE./
 DATA CLOGOUT       /'./log_CaMa.txt'/
@@ -44,6 +45,7 @@ LOGICAL                         :: LLEVEE                  !! true: activate lev
 !~~ used in ECMWF
 LOGICAL                         :: LROSPLIT                !! true: input if surface (Qs) and sub-surface (Qsb) runoff
 LOGICAL                         :: LWEVAP                  !! true: input water evaporation to extract from floodplain
+LOGICAL                         :: LCOLMFEEDBACK = .FALSE.
 LOGICAL                         :: LWEVAPFIX               !! true: water balance closure extracting water from evap when available
 LOGICAL                         :: LWINFILT                !! true: input water infiltration to extract from floodplain
 LOGICAL                         :: LWINFILTFIX             !! true: water balance closure extracting water from Infiltration when available

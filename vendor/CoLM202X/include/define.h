@@ -79,7 +79,6 @@
 !    set the old "#define LULCC" here, so this stays .false. by default.
 
 ! 12b. If defined, extended canopy interception schemes are enabled.
-#define extend_interception
 
 ! 13. Water tracer module (isotope / solute / particle / gas families).
 !     TRACER used to live here as a compile-time macro (the old script

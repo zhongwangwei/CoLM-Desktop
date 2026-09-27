@@ -274,10 +274,6 @@ CONTAINS
          ! acc_vec was assembled collectively above.
 #elif defined(USEMPI)
          DO iwork = 0, p_np_worker-1
-            ! Receive exactly one header from each worker for this variable.
-            ! All variables reuse mpi_tag_mesg/mpi_tag_data; MPI_ANY_SOURCE
-            ! could therefore consume a fast worker's next-variable header
-            ! before a slower worker has sent the current one.
             isrc = p_address_worker(iwork)
             CALL mpi_recv (mesg, 2, MPI_INTEGER, isrc, &
                mpi_tag_mesg, p_comm_glb, p_stat, p_err)

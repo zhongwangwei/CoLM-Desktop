@@ -54,7 +54,8 @@ CONTAINS
    USE MOD_SPMD_Task
    USE MOD_NetCDFSerial
    USE MOD_Utils
-   USE MOD_Namelist,              only: DEF_ReservoirPara_file, DEF_Reservoir_Method
+   USE MOD_Namelist,              only: DEF_ReservoirPara_file, DEF_Reservoir_Method, &
+      DEF_UnitCatchment_regional, regional_unitcatchment_file
    USE MOD_Grid_RiverLakeNetwork, only: numucat, ucat_ucid, lake_type
    USE, INTRINSIC :: ieee_arithmetic, only: ieee_is_finite
 
@@ -72,6 +73,7 @@ CONTAINS
    integer,  allocatable :: icache (:)
 
    integer :: i, iloc, irsv, nresv, iworker, nresv_catalogue
+   integer,  allocatable :: src_index(:), regional_index(:)
 
 
       parafile = DEF_ReservoirPara_file
@@ -85,7 +87,31 @@ CONTAINS
       nresv_catalogue = size(dam_seq)
       IF (size(dam_GRAND_ID) /= nresv_catalogue) &
          CALL CoLM_stop ('reservoir dam_GRAND_ID and dam_seq lengths differ')
-      numresv = 0  ! Safe default for all ranks; workers overwrite below
+
+      IF (DEF_UnitCatchment_regional) THEN
+         IF (p_is_master) THEN
+            IF (ncio_var_exist(parafile, 'seq_src_index', readflag = .false.)) &
+               CALL CoLM_stop ('DEF_ReservoirPara_file must use the source unit catchment numbering')
+         ENDIF
+         CALL ncio_read_bcast_serial (regional_unitcatchment_file (), 'seq_src_index', src_index)
+         allocate (regional_index (max(maxval(src_index), 1)))
+         regional_index = 0
+         DO i = 1, size(src_index)
+            regional_index(src_index(i)) = i
+         ENDDO
+         DO i = 1, nresv_catalogue
+            iloc = 0
+            IF (dam_seq(i) >= 1 .and. dam_seq(i) <= size(regional_index)) iloc = regional_index(dam_seq(i))
+            IF (iloc > 0) THEN
+               dam_seq(i) = iloc
+            ELSE
+               dam_seq(i) = -i
+            ENDIF
+         ENDDO
+         deallocate (src_index, regional_index)
+      ENDIF
+
+      numresv = 0
 
       allocate (order (nresv_catalogue))
       order = (/(i, i = 1, nresv_catalogue)/)
@@ -123,9 +149,6 @@ CONTAINS
 
       ENDIF
 
-      ! The parameter file may be a global catalogue while the active ucatch
-      ! network is regional. Rows outside the active domain are valid; only an
-      ! active row owned more than once is an invalid state mapping.
       allocate (ordinal_count(nresv_catalogue))
       ordinal_count = 0
       IF (p_is_worker) THEN
@@ -150,8 +173,6 @@ CONTAINS
             ' of ', nresv_catalogue
       ENDIF
 
-      ! State/history/restart vectors use a dense active-reservoir axis. The
-      ! original catalogue row remains in loc2all solely for parameter lookup.
       allocate (catalogue_to_active(nresv_catalogue))
       catalogue_to_active = 0
       totalnumresv = 0
@@ -228,10 +249,8 @@ CONTAINS
 
       ENDIF
 
-      ! Every non-master rank enters gather/scatter calls; an allocated
-      ! zero-size address book is a valid unused actual argument there.
       IF (.not. p_is_master .and. .not. allocated(resv_data_address)) THEN
-         allocate (resv_data_address (0:-1))  ! zero-size
+         allocate (resv_data_address (0:-1))
       ENDIF
 #endif
 #else

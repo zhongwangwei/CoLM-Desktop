@@ -23,11 +23,11 @@ fn the_table_has_the_measured_number_of_fields() {
     // 若这个数再变了，要么上游改了，要么生成器漏了 —— 两种都必须有人看一眼。
     let total = all().len();
     assert!(
-        (790..=840).contains(&total),
-        "expected roughly 832 fields, got {total}"
+        (800..=880).contains(&total),
+        "expected roughly 840 fields, got {total}"
     );
     let top = all().iter().filter(|f| f.owner.is_none()).count();
-    assert_eq!(top, 297, "top-level count changed");
+    assert_eq!(top, 305, "top-level count changed");
 }
 
 #[test]

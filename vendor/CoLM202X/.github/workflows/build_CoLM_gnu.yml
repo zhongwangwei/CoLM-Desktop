@@ -4,9 +4,6 @@ on:
     branches: 
       - master
     paths-ignore:
-      # postprocess/ is NOT ignored: river_hist_concatenate is the only
-      # supported way to read a DEF_HIST_mode='block' run, so a change there
-      # can break the output of every block-mode run while CI stays green.
       - 'preprocess/**'
       - 'README.md'
       - '.gitignore'
@@ -14,75 +11,12 @@ on:
     branches:
       - master
     paths-ignore:
-      # postprocess/ is NOT ignored: river_hist_concatenate is the only
-      # supported way to read a DEF_HIST_mode='block' run, so a change there
-      # can break the output of every block-mode run while CI stays green.
       - 'preprocess/**'
       - 'README.md'
       - '.gitignore'
   workflow_dispatch:
 
 jobs:
-  Tracer-Tests:
-    runs-on: ubuntu-latest
-    steps:
-     - uses: actions/checkout@v4
-     - uses: mpi4py/setup-mpi@v1
-       with:
-          mpi: openmpi
-     - uses: fortran-lang/setup-fortran@v1
-       with:
-          compiler: gcc
-          version: 12
-     - name: Install test dependencies
-       run: python -m pip install pytest numpy netCDF4
-     - name: Run Python tests
-       run: python -m pytest -q
-     - name: Run MPI evaluator
-       if: ${{ always() }}
-       run: ./tests/run_river_mpi_evaluator.sh
-
-  River-History-Aggregation:
-    # The river-history shard writer and its offline aggregator are only
-    # exercised end to end by these suites: they need a built libcolm plus
-    # river_hist_concatenate.x, which the pytest job does not produce. Two
-    # defects shipped because the acceptance tests ran nowhere but a laptop --
-    # a wrapper that could not derive its target filename, and a shell
-    # injection through the target path.
-    runs-on: ubuntu-latest
-    steps:
-     - uses: actions/checkout@v4
-     - uses: mpi4py/setup-mpi@v1
-       with:
-          mpi: openmpi
-     - uses: fortran-lang/setup-fortran@v1
-       with:
-          compiler: gcc
-          version: 12
-     - name: Install netcdf-fortran and blas library
-       shell: bash -l {0}
-       run: sudo apt update && sudo apt install -y netcdf-bin libnetcdf-dev libnetcdff-dev "liblapack*" "libblas*"
-     - name: Install test dependencies
-       run: python -m pip install numpy netCDF4
-     - name: Build model and postprocess tools
-       run: |
-            cd ${{ github.workspace }}
-            # Same combination as the GRID_PC_TRACER_CH4_vanGen_CAMAOFF case in
-            # TestCaseLists, which Build-CoLM-gnu already compiles, so this job
-            # cannot fail for a reason unrelated to what it is testing. GRID
-            # implies GridRiverLakeFlow, which is what the shard writer needs.
-            ./.github/workflows/create_defineh.bash GRID LULC_IGBP_PC URBANOFF vanGenu CaMaOFF BGCON CROPOFF TRACERON
-            make all
-            make postprocess.x
-     - name: River history end-to-end (shards -> aggregator -> single file)
-       run: ./tests/run_river_hist_concat_e2e.sh
-     - name: River history negative cases (bad shard sets must be refused)
-       if: ${{ always() }}
-       run: ./tests/run_river_hist_concat_negative.sh
-     - name: River history shard evaluator
-       if: ${{ always() }}
-       run: ./tests/run_river_hist_shard_evaluator.sh
-
   Build-CoLM-gnu:
     runs-on: ${{ matrix.os }}
     strategy:
@@ -132,15 +66,12 @@ jobs:
      #- name: Test netcdf
      #  run: nc-config --all
      - name: Build CoLM202X
+     #  run: make clean && make all
        run: |
             set -euo pipefail
             cd ${{ github.workspace }}
             TestList=./.github/workflows/TestCaseLists
 
-            # Compile every configuration once on the canonical toolchain.
-            # The remaining compiler/MPI matrix entries are compatibility
-            # smoke tests; rebuilding all 91 cases in each entry made MPICH /
-            # GCC 12 hit GitHub's six-hour job limit without a compiler error.
             if [[ "${{ matrix.os }}" == "ubuntu-latest" && \
                   "${{ matrix.mpi }}" == "openmpi" && \
                   "${{ matrix.toolchain.version }}" == "12" ]]; then

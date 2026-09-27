@@ -19,6 +19,7 @@ MODULE MOD_Grid_RiverLakeHist
    PUBLIC :: hist_grid_riverlake_init
    PUBLIC :: hist_grid_riverlake_out
    PUBLIC :: hist_grid_riverlake_final
+   PUBLIC :: flush_acc_fluxes_riverlake
 
 !--------------------------------------------------------------------------
 CONTAINS
@@ -34,7 +35,6 @@ CONTAINS
    USE MOD_LandPatch,           only: numpatch
    USE MOD_Forcing,             only: forcmask_pch
    USE MOD_Vars_TimeInvariants, only: patchtype, patchmask
-   USE MOD_Grid_RiverLakeTimeVars, only: gridriver_restart_file
    USE MOD_Namelist
 
    IMPLICIT NONE
@@ -48,12 +48,7 @@ CONTAINS
 
 
       ! ----- allocate memory for accumulative variables -----
-      ! All ranks must allocate (zero-length on non-workers / numucat=0)
-      ! because vector_gather_map2grid_and_write passes assumed-shape arrays
-      ! on every rank including master and IO.
 
-      ! numucat is 0 on non-worker ranks (set in build_riverlake_network),
-      ! so these allocate zero-length arrays automatically.
       allocate (acctime_ucat (numucat))
       allocate (a_wdsrf_ucat (numucat))
       allocate (a_veloc_riv  (numucat))
@@ -75,54 +70,45 @@ CONTAINS
       ENDIF
 
       IF (p_is_worker) THEN
-         IF (numpatch > 0) THEN
-            allocate (a_wdsrf_ucat_pch (numpatch))
-            allocate (a_veloc_riv_pch  (numpatch))
-            allocate (a_discharge_pch  (numpatch))
-            allocate (a_dis_rmth_pch   (numpatch))
-            allocate (a_floodfrc_pch   (numpatch))
-         ENDIF
+         allocate (a_wdsrf_ucat_pch (numpatch))
+         allocate (a_veloc_riv_pch  (numpatch))
+         allocate (a_discharge_pch  (numpatch))
+         allocate (a_dis_rmth_pch   (numpatch))
+         allocate (a_floodfrc_pch   (numpatch))
       ENDIF
 
-      ! Reservoir arrays: all ranks allocate (zero-length on non-workers / numresv=0)
-      ! because vector_gather_and_write is called on all ranks.
       allocate (acctime_resv (numresv))
       allocate (a_volresv    (numresv))
       allocate (a_qresv_in   (numresv))
       allocate (a_qresv_out  (numresv))
 
       CALL flush_acc_fluxes_riverlake ()
-      IF (len_trim(gridriver_restart_file) > 0) THEN
-         CALL read_gridriverlake_hist_restart(gridriver_restart_file)
-      ENDIF
 
       ! ----- get longitude and latitude -----
-      IF (p_is_master) THEN
-         allocate (lon_ucat (griducat%nlon))
-         allocate (lat_ucat (griducat%nlat))
+      allocate (lon_ucat (griducat%nlon))
+      allocate (lat_ucat (griducat%nlat))
 
-         lat_ucat = (griducat%lat_s + griducat%lat_n) * 0.5
+      lat_ucat = (griducat%lat_s + griducat%lat_n) * 0.5
 
-         DO ilon = 1, griducat%nlon
-            IF (griducat%lon_w(ilon) > griducat%lon_e(ilon)) THEN
-               lon_ucat(ilon) = (griducat%lon_w(ilon) + griducat%lon_e(ilon)+360.) * 0.5
-               CALL normalize_longitude (lon_ucat(ilon))
-            ELSE
-               lon_ucat(ilon) = (griducat%lon_w(ilon) + griducat%lon_e(ilon)) * 0.5
-            ENDIF
-         ENDDO
-      ENDIF
+      DO ilon = 1, griducat%nlon
+         IF (griducat%lon_w(ilon) > griducat%lon_e(ilon)) THEN
+            lon_ucat(ilon) = (griducat%lon_w(ilon) + griducat%lon_e(ilon)+360.) * 0.5
+            CALL normalize_longitude (lon_ucat(ilon))
+         ELSE
+            lon_ucat(ilon) = (griducat%lon_w(ilon) + griducat%lon_e(ilon)) * 0.5
+         ENDIF
+      ENDDO
 
       ! ----- for auxiliary data -----
       IF (p_is_worker) THEN
          IF (numucat  > 0) allocate (vec_ucat  (numucat ))
          IF (numinpm  > 0) allocate (vec_grid  (numinpm ))
          IF (numinpm  > 0) allocate (vec_inpm  (numinpm ))
-         IF (numpatch > 0) allocate (vec_patch (numpatch))
+         allocate (vec_patch (numpatch))
 
          ! Patches excluding (type >= 99), virtual patches and thos forcing missed
+         allocate (filter_basic (numpatch))
          IF (numpatch > 0) THEN
-            allocate (filter_basic (numpatch))
             filter_basic = patchtype < 99
             filter_basic = filter_basic .and. patchmask
             IF (DEF_forcing%has_missing_value) THEN
@@ -140,8 +126,8 @@ CONTAINS
          CALL worker_remap_data_grid2pset ( &
             remap_patch2inpm, vec_grid, vec_patch, fillvalue = spval, mode = 'average')
 
+         allocate (filter_ucat (numpatch))
          IF (numpatch > 0) THEN
-            allocate (filter_ucat (numpatch))
             filter_ucat = filter_basic .and. (vec_patch /= spval)
 
             WHERE (filter_ucat)
@@ -176,8 +162,8 @@ CONTAINS
          CALL worker_remap_data_grid2pset (remap_patch2inpm, vec_grid, vec_patch, &
             fillvalue = spval, mode = 'average')
 
+         allocate (filter_rivmth (numpatch))
          IF (numpatch > 0) THEN
-            allocate (filter_rivmth (numpatch))
             filter_rivmth = filter_ucat .and. (vec_patch /= spval)
 
             WHERE (filter_rivmth)
@@ -202,8 +188,8 @@ CONTAINS
          CALL worker_remap_data_grid2pset (remap_patch2inpm, vec_inpm, vec_patch, &
             fillvalue = spval, mode = 'average')
 
+         allocate (filter_inpm (numpatch))
          IF (numpatch > 0) THEN
-            allocate (filter_inpm (numpatch))
             filter_inpm = filter_basic .and. (vec_patch /= spval)
          ENDIF
       ENDIF
@@ -215,9 +201,7 @@ CONTAINS
 
       ! ----- 4) mask of unit catchments with all upstreams in simulation region -----
       IF (p_is_worker) THEN
-         IF (numpatch > 0) THEN
-            allocate (allups_mask_pch (numpatch))
-         ENDIF
+         allocate (allups_mask_pch (numpatch))
       ENDIF
 
       IF (p_is_worker) THEN
@@ -288,30 +272,28 @@ CONTAINS
    real(r8), allocatable :: acc_vec_grid    (:)
    real(r8), allocatable :: bifflw_local    (:,:)
    real(r8), allocatable :: a_floodfrc_ucat (:)  ! flooded area fraction
-   real(r8), allocatable :: levsto_local    (:)  ! safe buffer for levee hist
-   real(r8), allocatable :: levdph_local    (:)  ! safe buffer for levee hist
-   real(r8), allocatable :: bifout_local    (:)  ! safe buffer for bifurcation hist
-   real(r8), allocatable :: volresv_local   (:)  ! safe buffer for reservoir hist
-   real(r8), allocatable :: qresv_in_local  (:)  ! safe buffer for reservoir hist
-   real(r8), allocatable :: qresv_out_local (:)  ! safe buffer for reservoir hist
+   real(r8), allocatable :: levsto_local    (:)
+   real(r8), allocatable :: levdph_local    (:)
+   real(r8), allocatable :: bifout_local    (:)
+   real(r8), allocatable :: volresv_local   (:)
+   real(r8), allocatable :: qresv_in_local  (:)
+   real(r8), allocatable :: qresv_out_local (:)
    real(r8), allocatable :: a_floodfrc_inpm (:)  ! flooded area fraction
+   real(r8) :: window_seconds
 
-      ! Derived on every rank, not just the master: under DEF_HIST_mode='block'
-      ! each IO rank builds its own shard name from this, and the transform is
-      ! a pure function of file_hist, which every rank already has.
       i = len_trim (file_hist)
       DO WHILE (file_hist(i:i) /= '_')
          i = i - 1
       ENDDO
       file_hist_ucat = file_hist(1:i) // 'unitcat_' // file_hist(i+1:)
 
-      ! Opens the output for this write and returns its time record. Both the
-      ! single-file and the sharded skeleton live inside this call, so the two
-      ! modes cannot grow separate copies of the layout. Every route variable
-      ! below is then written through route_hist_write_*, which is what keeps
-      ! one/block coverage identical without a hand-maintained list.
+      window_seconds=0._r8
+      IF (p_is_worker .and. size(acctime_ucat)>0) window_seconds=maxval(acctime_ucat)
+#ifdef USEMPI
+      CALL mpi_allreduce(MPI_IN_PLACE, window_seconds, 1, MPI_REAL8, MPI_MAX, p_comm_glb, p_err)
+#endif
       CALL route_hist_begin (file_hist_ucat, idate, is_first_in_file, &
-         lon_ucat, lat_ucat, itime_in_file_ucat)
+         lon_ucat, lat_ucat, itime_in_file_ucat, window_seconds)
 
       IF (is_first_in_file) THEN
          IF (trim(histform) == 'Gridded') THEN
@@ -455,7 +437,6 @@ CONTAINS
             CALL worker_remap_data_grid2pset (remap_patch2inpm, a_floodfrc_inpm, a_floodfrc_pch, &
                fillvalue = spval, mode = 'average')
          ELSE
-            ! Non-worker: zero-length safe buffer
             allocate (a_floodfrc_ucat (0))
          ENDIF
 
@@ -469,7 +450,6 @@ CONTAINS
 
       ENDIF
 
-      ! ----- river/floodplain storage separation and water surface elevation -----
       IF (p_is_worker) THEN
          IF (numucat > 0) THEN
             WHERE (acctime_ucat > 0.)
@@ -502,7 +482,6 @@ CONTAINS
          longname = 'water surface elevation', &
          units = 'm')
 
-      ! ----- levee variables -----
       IF (DEF_USE_LEVEE) THEN
          IF (p_is_worker .and. numucat > 0 .and. allocated(a_levsto)) THEN
             allocate (levsto_local (numucat))
@@ -531,9 +510,7 @@ CONTAINS
          deallocate (levdph_local)
       ENDIF
 
-      ! ----- bifurcation variables -----
       IF (DEF_USE_BIFURCATION) THEN
-         ! a_bifout: use safe local buffer for all ranks
          IF (p_is_worker .and. numucat > 0 .and. allocated(a_bifout)) THEN
             allocate (bifout_local (numucat))
             WHERE (acctime_ucat > 0.)
@@ -551,7 +528,6 @@ CONTAINS
 
          deallocate (bifout_local)
 
-         ! a_bifflw_lev: pathway-layer matrix gather
          IF (npthlev_bif > 0 .and. totalnpthout > 0) THEN
             IF (p_is_master) THEN
                CALL ncio_define_dimension (file_hist_ucat, 'bifurcation_level', npthlev_bif)
@@ -674,7 +650,6 @@ CONTAINS
    USE MOD_Grid_Reservoir,        only: numresv
    IMPLICIT NONE
 
-      ! Zero-length arrays on non-workers are safe to assign (no-op).
       IF (allocated(acctime_ucat)) acctime_ucat = 0.
       IF (allocated(a_wdsrf_ucat)) a_wdsrf_ucat = 0.
       IF (allocated(a_veloc_riv )) a_veloc_riv  = 0.
@@ -712,7 +687,10 @@ CONTAINS
    !---------------------------------------
    SUBROUTINE hist_grid_riverlake_final ()
 
+   USE MOD_Grid_RiverLakeHistRoute, only: route_hist_final
    IMPLICIT NONE
+
+      CALL route_hist_final ()
 
       IF (allocated(acctime_ucat    )) deallocate (acctime_ucat    )
       IF (allocated(a_wdsrf_ucat    )) deallocate (a_wdsrf_ucat    )

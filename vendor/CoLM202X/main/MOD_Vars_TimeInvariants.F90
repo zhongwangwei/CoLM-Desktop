@@ -22,6 +22,9 @@ MODULE MOD_Vars_PFTimeInvariants
    real(r8), allocatable :: pftfrac     (:) !PFT fractional cover
    real(r8), allocatable :: htop_p      (:) !canopy top height [m]
    real(r8), allocatable :: hbot_p      (:) !canopy bottom height [m]
+   real(r8), allocatable :: ncd_p       (:)
+   real(r8), allocatable :: ncw_p       (:)
+   real(r8), allocatable :: bcw_p       (:)
 #ifdef CROP
    real(r8), allocatable :: cropfrac    (:) !Crop fractional cover
 #endif
@@ -58,6 +61,12 @@ CONTAINS
             allocate (pftfrac       (numpft))
             allocate (htop_p        (numpft))
             allocate (hbot_p        (numpft))
+            allocate (ncd_p         (numpft))
+            allocate (ncw_p         (numpft))
+            allocate (bcw_p         (numpft))
+            ncd_p = spval
+            ncw_p = spval
+            bcw_p = spval
          ENDIF
 
 #ifdef CROP
@@ -74,6 +83,7 @@ CONTAINS
    USE MOD_NetCDFVector
    USE MOD_LandPatch
    USE MOD_LandPFT
+   USE MOD_Namelist, only: DEF_Interception_scheme
    IMPLICIT NONE
 
    character(len=*), intent(in) :: file_restart
@@ -82,6 +92,11 @@ CONTAINS
       CALL ncio_read_vector (file_restart, 'pftfrac ', landpft, pftfrac ) !
       CALL ncio_read_vector (file_restart, 'htop_p  ', landpft, htop_p  ) !
       CALL ncio_read_vector (file_restart, 'hbot_p  ', landpft, hbot_p  ) !
+      IF (DEF_Interception_scheme == 8) THEN
+         CALL ncio_read_vector (file_restart, 'ncd_p', landpft, ncd_p)
+         CALL ncio_read_vector (file_restart, 'ncw_p', landpft, ncw_p)
+         CALL ncio_read_vector (file_restart, 'bcw_p', landpft, bcw_p)
+      ENDIF
 #ifdef CROP
       CALL ncio_read_vector (file_restart, 'cropfrac ', landpatch, cropfrac) !
 #endif
@@ -110,6 +125,11 @@ CONTAINS
       CALL ncio_write_vector (file_restart, 'pftfrac ', 'pft', landpft, pftfrac , compress) !
       CALL ncio_write_vector (file_restart, 'htop_p  ', 'pft', landpft, htop_p  , compress) !
       CALL ncio_write_vector (file_restart, 'hbot_p  ', 'pft', landpft, hbot_p  , compress) !
+      IF (DEF_Interception_scheme == 8) THEN
+         CALL ncio_write_vector (file_restart, 'ncd_p', 'pft', landpft, ncd_p, compress)
+         CALL ncio_write_vector (file_restart, 'ncw_p', 'pft', landpft, ncw_p, compress)
+         CALL ncio_write_vector (file_restart, 'bcw_p', 'pft', landpft, bcw_p, compress)
+      ENDIF
 
 #ifdef CROP
       CALL ncio_define_dimension_vector (file_restart, landpatch, 'patch')
@@ -131,6 +151,9 @@ CONTAINS
             deallocate (pftfrac )
             deallocate (htop_p  )
             deallocate (hbot_p  )
+            deallocate (ncd_p)
+            deallocate (ncw_p)
+            deallocate (bcw_p)
 #ifdef CROP
             deallocate (cropfrac)
 #endif
@@ -245,6 +268,9 @@ MODULE MOD_Vars_TimeInvariants
    real(r8), allocatable :: BA_beta      (:,:)  !beta in Balland and Arp(2005) thermal conductivity scheme
    real(r8), allocatable :: htop           (:)  !canopy top height [m]
    real(r8), allocatable :: hbot           (:)  !canopy bottom height [m]
+   real(r8), allocatable :: ncd            (:)
+   real(r8), allocatable :: ncw            (:)
+   real(r8), allocatable :: bcw            (:)
 
    real(r8), allocatable :: dbedrock       (:)  !depth to bedrock
    integer , allocatable :: ibedrock       (:)  !bedrock level
@@ -384,6 +410,12 @@ ENDIF
             allocate (BA_beta      (nl_soil,numpatch))
             allocate (htop                 (numpatch))
             allocate (hbot                 (numpatch))
+            allocate (ncd                  (numpatch))
+            allocate (ncw                  (numpatch))
+            allocate (bcw                  (numpatch))
+            ncd = spval
+            ncw = spval
+            bcw = spval
             allocate (dbedrock             (numpatch))
             allocate (ibedrock             (numpatch))
             allocate (elvmean              (numpatch))
@@ -536,6 +568,11 @@ ENDIF
       CALL ncio_read_vector (file_restart, 'BA_beta' ,     nl_soil, landpatch, BA_beta )   ! beta in Balland and Arp(2005) thermal conductivity scheme
       CALL ncio_read_vector (file_restart, 'htop'    ,     landpatch, htop)                !
       CALL ncio_read_vector (file_restart, 'hbot'    ,     landpatch, hbot)                !
+      IF (DEF_Interception_scheme == 8) THEN
+         CALL ncio_read_vector (file_restart, 'ncd', landpatch, ncd)
+         CALL ncio_read_vector (file_restart, 'ncw', landpatch, ncw)
+         CALL ncio_read_vector (file_restart, 'bcw', landpatch, bcw)
+      ENDIF
 
       IF(DEF_USE_BEDROCK)THEN
          CALL ncio_read_vector (file_restart, 'debdrock' ,    landpatch, dbedrock)         !
@@ -626,8 +663,8 @@ ENDIF
    ! Original version: Yongjiu Dai, September 15, 1999, 03/2014
    !====================================================================
 
-   USE MOD_Namelist, only: DEF_REST_CompressLevel, DEF_USE_BEDROCK, DEF_USE_Campbell_SOIL_MODEL, &
-                           DEF_USE_PFT, DEF_USE_PC, DEF_USE_BGC, DEF_URBAN_RUN
+   USE MOD_Namelist, only: DEF_REST_CompressLevel, DEF_USE_BEDROCK, DEF_Interception_scheme, &
+                           DEF_USE_Campbell_SOIL_MODEL, DEF_USE_PFT, DEF_USE_PC, DEF_USE_BGC, DEF_URBAN_RUN
    USE MOD_SPMD_Task
    USE MOD_NetCDFSerial
    USE MOD_NetCDFVector
@@ -751,6 +788,11 @@ ENDIF
 
       CALL ncio_write_vector (file_restart, 'htop' , 'patch', landpatch, htop)                                       !
       CALL ncio_write_vector (file_restart, 'hbot' , 'patch', landpatch, hbot)                                       !
+      IF (DEF_Interception_scheme == 8) THEN
+         CALL ncio_write_vector (file_restart, 'ncd', 'patch', landpatch, ncd, compress)
+         CALL ncio_write_vector (file_restart, 'ncw', 'patch', landpatch, ncw, compress)
+         CALL ncio_write_vector (file_restart, 'bcw', 'patch', landpatch, bcw, compress)
+      ENDIF
 
       IF(DEF_USE_BEDROCK)THEN
          CALL ncio_write_vector (file_restart, 'debdrock' , 'patch', landpatch, dbedrock)
@@ -922,6 +964,9 @@ ENDIF
 
             deallocate (htop           )
             deallocate (hbot           )
+            deallocate (ncd)
+            deallocate (ncw)
+            deallocate (bcw)
 
             deallocate (dbedrock       )
             deallocate (ibedrock       )

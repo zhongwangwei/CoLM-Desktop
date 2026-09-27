@@ -44,7 +44,7 @@
    DEF_LAI_CHANGE_YEARLY = .false.
 
    ! Canopy DEF Interception scheme selection
-   DEF_Interception_scheme=1 !1:CoLM2014; 2:CLM4.5; 3:CLM5; 4:Noah-MP; 5:MATSIRO; 6:VIC; 7:JULES; 8:CoLM202x (dev)
+   DEF_Interception_scheme=1 !1:CoLM2014; 2:CLM4.5; 3:CLM5; 4:Noah-MP; 5:MATSIRO; 6:VIC; 7:JULES; 8:CoLM2024
 !   DEF_USE_IRRIGATION = .true.
 
    ! ----- forcing -----

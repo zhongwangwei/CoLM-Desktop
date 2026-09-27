@@ -10,19 +10,58 @@ MODULE MOD_Tracer_Evapo
    USE MOD_Tracer_Frac, only: tracer_fractionation_active, tracer_alpha_kinetic_craig_gordon, &
       tracer_craig_gordon_evap_ratio, tracer_equilibrium_deposition_ratio, &
       tracer_rayleigh_freezing_loss, tracer_surface_relhum, &
-      tracer_equilibration_exchange, tracer_alpha_liq_vap
+      tracer_equilibration_exchange, tracer_alpha_liq_vap, tracer_alpha_kinetic_open_water
    USE MOD_Namelist, only: DEF_TRACER_SUBL_SKIN_MM, DEF_TRACER_CANOPY_EQUILIBRATION
-   USE MOD_Tracer_EvapLimit, only: tracer_evaporative_tracer_loss, &
+   USE MOD_Tracer_EvapLimit, only: tracer_evaporative_tracer_loss, tracer_atmospheric_tracer_loss, &
       tracer_skin_limited_tracer_loss
 	   USE MOD_Tracer_Vars, only: trc_ldew_rain, trc_ldew_snow, &
 	      trc_wliq_soisno, trc_wice_soisno, trc_solid_soisno, trc_canopy_solid, &
 	      trc_numerical_residual_step, &
-	      a_trc_precip, a_trc_vapor_exchange, tracer_book_evap_loss, &
+	      a_trc_precip, a_water_precip, a_trc_vapor_exchange, tracer_book_evap_loss, &
 	      TRC_EVAP_KIND_CANOPYEVAP, TRC_EVAP_KIND_SOILEVAP, TRC_EVAP_KIND_SUBL
 
    IMPLICIT NONE
 
 CONTAINS
+
+   SUBROUTINE tracer_flood_evap_loss(ipatch, water_credit, tracer_credit, water_evap, &
+      temp_k, forc_q, forc_psrf, forc_us, forc_vs, tracer_loss)
+      ! Flood evaporation belongs to the routing pool, not land a_trc_evap.
+      ! A negative Craig-Gordon loss is atmospheric isotope uptake.
+      integer, intent(in) :: ipatch
+      real(r8), intent(in) :: water_credit, tracer_credit(:), water_evap
+      real(r8), intent(in) :: temp_k, forc_q, forc_psrf, forc_us, forc_vs
+      real(r8), intent(out) :: tracer_loss(:)
+      integer :: itrc
+      real(r8) :: vapor_ratio
+
+      tracer_loss = 0._r8
+      IF (water_credit <= trc_tiny .or. water_evap <= trc_tiny) RETURN
+      DO itrc = 1, ntracers
+         IF (.not. tracer_uses_land_water_transport(itrc)) CYCLE
+         IF (tracer_is_nonvolatile_solute(itrc)) CYCLE
+         vapor_ratio = tracer_forcing_vapor_value(itrc, ipatch)
+         tracer_loss(itrc) = tracer_atmospheric_tracer_loss( &
+            tracer_credit(itrc), water_credit, water_evap, temp_k, .false., &
+            evap_ratio, trc_tiny, &
+            merge(tracers(itrc)%ref_ratio * (1._r8+trc_delta_sanity_max/1000._r8), &
+                  0._r8, tracer_fractionation_active(itrc)), .false.)
+      ENDDO
+
+   CONTAINS
+      real(r8) FUNCTION evap_ratio(source_ratio, temp, from_ice)
+         real(r8), intent(in) :: source_ratio, temp
+         logical, intent(in) :: from_ice
+         real(r8) :: relhum, alpha_k
+         evap_ratio = source_ratio
+         IF (.not. tracer_fractionation_active(itrc)) RETURN
+         relhum = tracer_surface_relhum(forc_q, forc_psrf, temp, from_ice)
+         alpha_k = tracer_alpha_kinetic_open_water(itrc, &
+            sqrt(max(forc_us*forc_us+forc_vs*forc_vs,0._r8)))
+         evap_ratio = tracer_craig_gordon_evap_ratio(itrc, source_ratio, vapor_ratio, &
+            temp, relhum, alpha_k, from_ice)
+      END FUNCTION evap_ratio
+   END SUBROUTINE tracer_flood_evap_loss
 
    !---------------------------------------------------------------
    ! Delta-based ET tracer update after THERMAL.
@@ -151,6 +190,7 @@ CONTAINS
             trc_flux = d_rain_external * ratio
             trc_ldew_rain(itrc, ipatch) = trc_ldew_rain(itrc, ipatch) + trc_flux
             a_trc_precip(itrc, ipatch) = a_trc_precip(itrc, ipatch) + trc_flux
+            a_water_precip(itrc, ipatch) = a_water_precip(itrc, ipatch) + d_rain_external
          ENDIF
          trc_ldew_rain(itrc, ipatch) = max(trc_ldew_rain(itrc, ipatch), 0._r8)
 
@@ -170,6 +210,7 @@ CONTAINS
             trc_flux = d_snow_external * ratio
             trc_ldew_snow(itrc, ipatch) = trc_ldew_snow(itrc, ipatch) + trc_flux
             a_trc_precip(itrc, ipatch) = a_trc_precip(itrc, ipatch) + trc_flux
+            a_water_precip(itrc, ipatch) = a_water_precip(itrc, ipatch) + d_snow_external
          ENDIF
          trc_ldew_snow(itrc, ipatch) = max(trc_ldew_snow(itrc, ipatch), 0._r8)
 
@@ -341,6 +382,7 @@ CONTAINS
                   ratio = deposition_ratio_for(layer_temp(j), .false.)
                   trc_wliq_soisno(itrc, j, ipatch) = trc_wliq_soisno(itrc, j, ipatch) + trc_flux * ratio
                   a_trc_precip(itrc, ipatch) = a_trc_precip(itrc, ipatch) + trc_flux * ratio
+                  a_water_precip(itrc, ipatch) = a_water_precip(itrc, ipatch) + trc_flux
                ELSE ! DEEP_STORAGE_RESIDUAL liquid gain: preserve local/fallback signature.
                   IF (wliq_post_phase > trc_tiny) THEN
                      ratio = trc_wliq_soisno(itrc, j, ipatch) / wliq_post_phase
@@ -391,6 +433,7 @@ CONTAINS
                   ratio = deposition_ratio_for(layer_temp(j), .true.)
                   trc_wice_soisno(itrc, j, ipatch) = trc_wice_soisno(itrc, j, ipatch) + trc_flux * ratio
                   a_trc_precip(itrc, ipatch) = a_trc_precip(itrc, ipatch) + trc_flux * ratio
+                  a_water_precip(itrc, ipatch) = a_water_precip(itrc, ipatch) + trc_flux
                ELSE ! DEEP_STORAGE_RESIDUAL ice gain: preserve local/fallback signature.
                   IF (wice_post_phase > trc_tiny) THEN
                      ratio = trc_wice_soisno(itrc, j, ipatch) / wice_post_phase

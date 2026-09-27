@@ -173,10 +173,6 @@ CONTAINS
 
    SUBROUTINE CNDriverSummarizeNonvegetatedSoilStates(i,nl_soil,dz_soi,ndecomp_pools)
 
-! !DESCRIPTION:
-! Rebuild soil and whole-column aggregate C/N state after a non-vegetated
-! caller updates only the vertically resolved soil pools.  This deliberately
-! avoids the PFT summaries, whose ps:pe range is not valid for wetland patches.
 
    integer, intent(in) :: i
    integer, intent(in) :: nl_soil
@@ -375,7 +371,11 @@ CONTAINS
       cphase(i)             = sum(cphase_p(ps:pe)             * pftfrac(ps:pe))
       hui(i)                = hui_p(ps)           
       gddplant(i)           = sum(gddplant_p(ps:pe)           * pftfrac(ps:pe))
-      gddmaturity(i)        = sum(gddmaturity_p(ps:pe)        * pftfrac(ps:pe))
+      IF (any(gddmaturity_p(ps:pe) /= spval)) THEN
+         gddmaturity(i) = sum(gddmaturity_p(ps:pe) * pftfrac(ps:pe), mask=gddmaturity_p(ps:pe) /= spval)
+      ELSE
+         gddmaturity(i) = spval
+      ENDIF
       vf(i)                 = sum(vf_p(ps:pe)             * pftfrac(ps:pe))
   
       fertnitro_corn(i)     = 0._r8

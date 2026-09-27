@@ -2,12 +2,22 @@
 
 MODULE MOD_Tracer_Forcing
 
+   USE, INTRINSIC :: ieee_arithmetic, only: ieee_is_finite
+   USE netcdf, only: NF90_NOERR, NF90_NOWRITE, NF90_MAX_NAME, NF90_MAX_VAR_DIMS, &
+      nf90_open, nf90_close, nf90_inq_varid, nf90_inquire_variable, nf90_inquire_dimension
    USE MOD_Precision
-   USE MOD_Namelist, only: DEF_forcing, DEF_Forcing_Interp_Method
+   USE MOD_Namelist, only: DEF_forcing, DEF_Forcing_Interp_Method, DEF_REST_CompressLevel, &
+      DEF_dir_forcing, DEF_USE_PFT, DEF_SOLO_PFT, DEF_FAST_PC
+   USE MOD_Const_LC, only: patchtypes
+   USE MOD_Vars_Global, only: CROPLAND, N_land_classification
    USE MOD_SPMD_Task
    USE MOD_Grid
    USE MOD_DataType
    USE MOD_NetCDFBlock, only: ncio_read_block_time
+   USE MOD_NetCDFSerial, only: ncio_var_exist, ncio_inquire_varsize, ncio_read_serial, &
+      ncio_write_serial, ncio_define_dimension
+   USE MOD_NetCDFVector, only: ncio_read_vector, ncio_write_vector
+   USE MOD_Block, only: get_filename_block
    USE MOD_SpatialMapping
    USE MOD_LandPatch
    USE MOD_TimeManager
@@ -46,6 +56,8 @@ MODULE MOD_Tracer_Forcing
    real(r8), parameter :: trc_forc_min_prcp = 1.0e-7_r8
    real(r8), parameter :: trc_forc_min_q    = 1.0e-12_r8
    real(r8), parameter :: trc_forc_max_abs  = 1.0e10_r8
+   integer, parameter :: TRC_FORC_CACHE_SCHEMA = 1
+   integer, parameter :: TRC_FORC_ID_WIDTH = 8 + 6*256
 
    logical :: trc_runtime_forcing_enabled = .false.
    integer :: trc_forcing_log_count = 0
@@ -76,6 +88,11 @@ MODULE MOD_Tracer_Forcing
 
    real(r8), allocatable :: trc_forc_precip_value(:,:)
    real(r8), allocatable :: trc_forc_vapor_value(:,:)
+   ! Last-valid compositions survive the annual patch rebuild; they are
+   ! intensive forcing state, not tracer mass.
+   real(r8), allocatable :: lulcc_precip_old(:,:), lulcc_vapor_old(:,:)
+   real(r8), allocatable :: lulcc_precip_new(:,:), lulcc_vapor_new(:,:)
+   real(r8), allocatable :: lulcc_old_patch_area(:)
    logical,  allocatable :: trc_forc_has_precip(:,:)
    logical,  allocatable :: trc_forc_has_vapor(:,:)
    integer,  allocatable :: trc_forc_precip_status(:,:)
@@ -96,6 +113,8 @@ MODULE MOD_Tracer_Forcing
    PUBLIC :: tracer_forcing_has_precip
    PUBLIC :: tracer_forcing_has_vapor
    PUBLIC :: tracer_forcing_ratio_to_delta
+   PUBLIC :: tracer_forcing_write_restart, tracer_forcing_read_restart
+   PUBLIC :: tracer_forcing_lulcc_save, tracer_forcing_lulcc_remap, tracer_forcing_lulcc_restore
 
 CONTAINS
 
@@ -203,6 +222,491 @@ CONTAINS
       idx_total_precip = 0
       idx_total_vapor = 0
    END SUBROUTINE tracer_forcing_final
+
+   SUBROUTINE tracer_forcing_lulcc_save ()
+      IF (.not. p_is_worker .or. .not. trc_runtime_forcing_enabled) RETURN
+      IF (.not. allocated(trc_forc_precip_value) .or. allocated(lulcc_precip_old)) &
+         CALL CoLM_stop('tracer forcing LULCC snapshot is unavailable or already active')
+      IF (size(trc_forc_precip_value,2) == 0) RETURN
+      IF (.not. allocated(elm_patch%subfrc)) &
+         CALL CoLM_stop('tracer forcing LULCC requires old element-patch area fractions')
+      IF (size(elm_patch%subfrc) /= size(trc_forc_precip_value,2)) &
+         CALL CoLM_stop('tracer forcing LULCC old element-patch area shape mismatch')
+      lulcc_old_patch_area = elm_patch%subfrc
+      CALL move_alloc(trc_forc_precip_value, lulcc_precip_old)
+      CALL move_alloc(trc_forc_vapor_value, lulcc_vapor_old)
+   END SUBROUTINE tracer_forcing_lulcc_save
+
+   ! Called while LulccDriver still holds both patch maps and the transfer
+   ! trace. Forcing init occurs later, so keep the mapped values until then.
+   SUBROUTINE tracer_forcing_lulcc_remap (patchclass_new, eindex_new, patchclass_old, eindex_old, &
+      lccpct_patches)
+      integer, intent(in) :: patchclass_new(:), patchclass_old(:)
+      integer*8, intent(in) :: eindex_new(:), eindex_old(:)
+      real(r8), intent(in), optional :: lccpct_patches(:,0:)
+      integer :: itrc, unsupported, ignored
+      integer :: raw, source_class(0:N_land_classification)
+
+      IF (.not. p_is_worker .or. .not. allocated(lulcc_precip_old)) RETURN
+      IF (allocated(lulcc_precip_new)) CALL CoLM_stop('tracer forcing LULCC remap repeated')
+      allocate(lulcc_precip_new(ntracers, size(patchclass_new)))
+      allocate(lulcc_vapor_new(ntracers, size(patchclass_new)))
+      DO itrc = 1, ntracers
+         lulcc_precip_new(itrc,:) = tracer_precip_default_ratio(itrc)
+         lulcc_vapor_new(itrc,:) = tracer_vapor_default_ratio(itrc)
+      ENDDO
+      source_class = [(raw, raw=0,N_land_classification)]
+      IF ((DEF_USE_PFT .and. .not. DEF_SOLO_PFT) .or. DEF_FAST_PC) THEN
+         DO raw = 1, N_land_classification
+            IF (patchtypes(raw) /= 0) CYCLE
+            source_class(raw) = 1
+            IF (DEF_FAST_PC .and. (raw == CROPLAND .or. raw == 14)) &
+               source_class(raw) = CROPLAND
+         ENDDO
+      ENDIF
+      CALL tracer_forcing_lulcc_map(lulcc_precip_old, lulcc_precip_new, &
+         patchclass_new, eindex_new, patchclass_old, eindex_old, unsupported, &
+         lccpct_patches, lulcc_old_patch_area, source_class)
+      CALL tracer_forcing_lulcc_map(lulcc_vapor_old, lulcc_vapor_new, &
+         patchclass_new, eindex_new, patchclass_old, eindex_old, ignored, &
+         lccpct_patches, lulcc_old_patch_area, source_class)
+      IF (unsupported > 0) WRITE(*,'(A,I0,A)') 'Tracer forcing LULCC: ', unsupported, &
+         ' patch(es) have no eligible transfer source; using configured forcing defaults.'
+      deallocate(lulcc_precip_old, lulcc_vapor_old, lulcc_old_patch_area)
+   END SUBROUTINE tracer_forcing_lulcc_remap
+
+   SUBROUTINE tracer_forcing_lulcc_restore ()
+      IF (.not. p_is_worker) RETURN
+      IF (allocated(lulcc_precip_old)) THEN
+         IF (.not. allocated(trc_forc_precip_value)) &
+            CALL CoLM_stop('tracer forcing LULCC restore precedes forcing init')
+         IF (size(trc_forc_precip_value,2) > 0) &
+            CALL CoLM_stop('tracer forcing LULCC remap missing for rebuilt patches')
+         deallocate(lulcc_precip_old, lulcc_vapor_old, lulcc_old_patch_area)
+      ENDIF
+      IF (.not. allocated(lulcc_precip_new)) RETURN
+      IF (.not. allocated(trc_forc_precip_value)) &
+         CALL CoLM_stop('tracer forcing LULCC restore precedes forcing init')
+      IF (any(shape(trc_forc_precip_value) /= shape(lulcc_precip_new)) .or. &
+          any(shape(trc_forc_vapor_value) /= shape(lulcc_vapor_new))) &
+         CALL CoLM_stop('tracer forcing LULCC patch/species count changed after remap')
+      CALL move_alloc(lulcc_precip_new, trc_forc_precip_value)
+      CALL move_alloc(lulcc_vapor_new, trc_forc_vapor_value)
+   END SUBROUTINE tracer_forcing_lulcc_restore
+
+   SUBROUTINE tracer_forcing_lulcc_map (old, mapped, patchclass_new, eindex_new, &
+      patchclass_old, eindex_old, unsupported, lccpct_patches, old_patch_area, source_class)
+      real(r8), intent(in) :: old(:,:)
+      real(r8), intent(inout) :: mapped(:,:)
+      integer, intent(in) :: patchclass_new(:), patchclass_old(:)
+      integer*8, intent(in) :: eindex_new(:), eindex_old(:)
+      integer, intent(out) :: unsupported
+      real(r8), intent(in), optional :: lccpct_patches(:,0:), old_patch_area(:)
+      integer, intent(in), optional :: source_class(0:)
+      integer :: np, op, oq, c, raw, source_count, source_patch
+      real(r8) :: weight, total_weight
+      real(r8), allocatable :: class_area(:)
+      logical :: same_class, old_sorted
+      integer :: lo, hi
+
+      IF (size(old,1) /= size(mapped,1) .or. size(old,2) /= size(patchclass_old) .or. &
+          size(old,2) /= size(eindex_old) .or. size(mapped,2) /= size(patchclass_new) .or. &
+          size(mapped,2) /= size(eindex_new)) CALL CoLM_stop('tracer forcing LULCC map shape mismatch')
+      IF (present(lccpct_patches)) THEN
+         IF (size(lccpct_patches,1) < size(patchclass_new)) &
+            CALL CoLM_stop('tracer forcing LULCC trace is shorter than new patch map')
+         IF (any(.not. ieee_is_finite(lccpct_patches))) &
+            CALL CoLM_stop('tracer forcing LULCC trace has invalid source fractions')
+         IF (any(lccpct_patches < 0._r8)) &
+            CALL CoLM_stop('tracer forcing LULCC trace has invalid source fractions')
+      ENDIF
+      IF (present(old_patch_area)) THEN
+         IF (size(old_patch_area) /= size(patchclass_old)) &
+            CALL CoLM_stop('tracer forcing LULCC old-area shape mismatch')
+         IF (any(.not. ieee_is_finite(old_patch_area))) &
+            CALL CoLM_stop('tracer forcing LULCC old-area fractions are invalid')
+         IF (any(old_patch_area < 0._r8)) &
+            CALL CoLM_stop('tracer forcing LULCC old-area fractions are invalid')
+      ENDIF
+      IF (present(source_class) .and. present(lccpct_patches)) THEN
+         IF (ubound(source_class,1) /= ubound(lccpct_patches,2)) &
+            CALL CoLM_stop('tracer forcing LULCC source-class map shape mismatch')
+      ENDIF
+      IF (any(.not. ieee_is_finite(old))) &
+         CALL CoLM_stop('tracer forcing LULCC old cache contains non-finite values')
+      old_sorted = .true.
+      IF (size(eindex_old) > 1) old_sorted = all(eindex_old(2:) >= eindex_old(:size(eindex_old)-1))
+      IF (present(lccpct_patches) .and. present(old_patch_area)) THEN
+         allocate(class_area(size(patchclass_old)))
+         class_area = 0._r8
+         DO op = 1, size(patchclass_old)
+            CALL element_range (eindex_old(op), lo, hi)
+            DO oq = lo, hi
+               IF (eindex_old(oq) == eindex_old(op) .and. &
+                   patchclass_old(oq) == patchclass_old(op)) &
+                  class_area(op) = class_area(op) + old_patch_area(oq)
+            ENDDO
+         ENDDO
+      ENDIF
+      unsupported = 0
+      DO np = 1, size(patchclass_new)
+         total_weight = 0._r8
+         source_count = 0
+         source_patch = 0
+         same_class = .false.
+         ! SAT has no transfer trace: prefer the unchanged class, then the
+         ! same element's area mean for a newly created class.
+         CALL element_range (eindex_new(np), lo, hi)
+         IF (.not. present(lccpct_patches)) THEN
+            DO op = lo, hi
+               IF (eindex_old(op) == eindex_new(np) .and. &
+                   patchclass_old(op) == patchclass_new(np)) THEN
+                  IF (present(old_patch_area)) THEN
+                     IF (old_patch_area(op) <= tiny(1._r8)) CYCLE
+                  ENDIF
+                  same_class = .true.
+               ENDIF
+            ENDDO
+         ENDIF
+         DO op = lo, hi
+            IF (eindex_old(op) /= eindex_new(np)) CYCLE
+            IF (present(lccpct_patches)) THEN
+               c = patchclass_old(op)
+               weight = 0._r8
+               IF (present(source_class)) THEN
+                  DO raw = 0, ubound(source_class,1)
+                     IF (source_class(raw) == c) &
+                        weight = weight + lccpct_patches(np,raw)
+                  ENDDO
+               ELSE
+                  IF (c < 0 .or. c > ubound(lccpct_patches,2)) CYCLE
+                  weight = lccpct_patches(np,c)
+               ENDIF
+               IF (weight <= 0._r8) CYCLE
+               IF (present(old_patch_area)) THEN
+                  IF (class_area(op) <= tiny(1._r8)) CYCLE
+                  weight = weight * old_patch_area(op) / class_area(op)
+               ENDIF
+            ELSE
+               IF (same_class .and. patchclass_old(op) /= patchclass_new(np)) CYCLE
+               weight = 1._r8
+               IF (present(old_patch_area)) weight = max(0._r8, old_patch_area(op))
+            ENDIF
+            IF (weight <= 0._r8) CYCLE
+            IF (total_weight == 0._r8) mapped(:,np) = 0._r8
+            mapped(:,np) = mapped(:,np) + weight * old(:,op)
+            total_weight = total_weight + weight
+            source_count = source_count + 1
+            source_patch = op
+         ENDDO
+         IF (total_weight > 0._r8) THEN
+            IF (source_count == 1) THEN
+               mapped(:,np) = old(:,source_patch)
+            ELSE
+               mapped(:,np) = mapped(:,np) / total_weight
+            ENDIF
+         ELSE
+            unsupported = unsupported + 1
+         ENDIF
+      ENDDO
+
+   CONTAINS
+
+      SUBROUTINE element_range (eidx, lo, hi)
+         integer*8, intent(in) :: eidx
+         integer, intent(out) :: lo, hi
+         integer :: a, b, m
+
+         IF (.not. old_sorted) THEN
+            lo = 1
+            hi = size(eindex_old)
+            RETURN
+         ENDIF
+         a = 1
+         b = size(eindex_old) + 1
+         DO WHILE (a < b)
+            m = (a + b) / 2
+            IF (eindex_old(m) < eidx) THEN
+               a = m + 1
+            ELSE
+               b = m
+            ENDIF
+         ENDDO
+         lo = a
+         b = size(eindex_old) + 1
+         DO WHILE (a < b)
+            m = (a + b) / 2
+            IF (eindex_old(m) <= eidx) THEN
+               a = m + 1
+            ELSE
+               b = m
+            ENDIF
+         ENDDO
+         hi = a - 1
+      END SUBROUTINE element_range
+
+   END SUBROUTINE tracer_forcing_lulcc_map
+
+   SUBROUTINE forcing_identity_put (identity, column, slot, value)
+      integer, intent(inout) :: identity(:,:)
+      integer, intent(in) :: column, slot
+      character(len=*), intent(in) :: value
+      integer :: k, start
+
+      start = 8 + (slot-1)*256
+      DO k = 1, min(len_trim(value), 256)
+         identity(start+k, column) = iachar(value(k:k))
+      ENDDO
+   END SUBROUTINE forcing_identity_put
+
+   SUBROUTINE tracer_forcing_identity (identity)
+      integer, allocatable, intent(out) :: identity(:,:)
+      integer :: iv
+
+      allocate(identity(TRC_FORC_ID_WIDTH, n_trc_forc_vars+1))
+      identity = 0
+      identity(1:8,1) = [n_trc_forc_vars, ntracers, DEF_forcing%startyr, &
+         DEF_forcing%startmo, merge(1,0,DEF_forcing%leapyear), idx_total_precip, &
+         idx_total_vapor, 0]
+      CALL forcing_identity_put(identity, 1, 1, DEF_forcing%dataset)
+      CALL forcing_identity_put(identity, 1, 2, DEF_forcing%groupby)
+      CALL forcing_identity_put(identity, 1, 3, DEF_Forcing_Interp_Method)
+      CALL forcing_identity_put(identity, 1, 4, DEF_forcing%fprefix(2))
+      CALL forcing_identity_put(identity, 1, 5, DEF_forcing%fprefix(4))
+      CALL forcing_identity_put(identity, 1, 6, DEF_dir_forcing)
+      DO iv = 1, n_trc_forc_vars
+         identity(1:8,iv+1) = [trc_var_stream(iv), trc_var_itrc(iv), trc_var_mode(iv), &
+            trc_var_total(iv), trc_var_dtime(iv), trc_var_offset(iv), 0, 0]
+         CALL forcing_identity_put(identity, iv+1, 1, trc_var_fprefix(iv))
+         CALL forcing_identity_put(identity, iv+1, 2, trc_var_vname(iv))
+         CALL forcing_identity_put(identity, iv+1, 3, trc_var_tintalgo(iv))
+         CALL forcing_identity_put(identity, iv+1, 4, trc_var_timelog(iv))
+      ENDDO
+   END SUBROUTINE tracer_forcing_identity
+
+   logical FUNCTION tracer_forcing_dim_names_match (fileblock, varname, dim1, dim2)
+      character(len=*), intent(in) :: fileblock, varname, dim1, dim2
+      integer :: ncid, varid, ndims, dimids(NF90_MAX_VAR_DIMS), status
+      character(len=NF90_MAX_NAME) :: name
+
+      tracer_forcing_dim_names_match = .false.
+      status = nf90_open(trim(fileblock), NF90_NOWRITE, ncid)
+      IF (status /= NF90_NOERR) RETURN
+      status = nf90_inq_varid(ncid, trim(varname), varid)
+      IF (status == NF90_NOERR) status = nf90_inquire_variable(ncid, varid, ndims=ndims, dimids=dimids)
+      IF (status == NF90_NOERR) THEN
+         IF (ndims == 2) THEN
+            status = nf90_inquire_dimension(ncid, dimids(1), name=name)
+            IF (status == NF90_NOERR) THEN
+               IF (trim(name) == dim1) THEN
+                  status = nf90_inquire_dimension(ncid, dimids(2), name=name)
+                  IF (status == NF90_NOERR) tracer_forcing_dim_names_match = trim(name) == dim2
+               ENDIF
+            ENDIF
+         ENDIF
+      ENDIF
+      status = nf90_close(ncid)
+      IF (status /= NF90_NOERR) tracer_forcing_dim_names_match = .false.
+   END FUNCTION tracer_forcing_dim_names_match
+
+   ! Called while the generic land restart transaction marker is incomplete.
+   SUBROUTINE tracer_forcing_write_restart (file_restart)
+      character(len=*), intent(in) :: file_restart
+      integer, allocatable :: identity(:,:)
+      integer :: iblkgrp, iblk, jblk
+      character(len=256) :: fileblock
+
+      IF (ntracers <= 0) RETURN
+      IF (n_trc_forc_vars > 0 .and. .not. allocated(trc_forc_precip_value)) &
+         CALL CoLM_stop('tracer forcing cache is not allocated at restart write')
+      IF (n_trc_forc_vars > 0 .and. p_is_worker) THEN
+         IF (size(trc_forc_precip_value,1) /= ntracers .or. &
+             size(trc_forc_precip_value,2) /= landpatch%nset .or. &
+             any(shape(trc_forc_vapor_value) /= shape(trc_forc_precip_value))) &
+            CALL CoLM_stop('tracer forcing cache shape mismatch at restart write')
+         IF (any(.not. ieee_is_finite(trc_forc_precip_value)) .or. &
+             any(.not. ieee_is_finite(trc_forc_vapor_value))) &
+            CALL CoLM_stop('non-finite tracer forcing cache at restart write')
+      ENDIF
+      IF (p_is_io) THEN
+         DO iblkgrp = 1, landpatch%nblkgrp
+            iblk = landpatch%xblkgrp(iblkgrp)
+            jblk = landpatch%yblkgrp(iblkgrp)
+            CALL get_filename_block(file_restart, iblk, jblk, fileblock)
+            CALL ncio_write_serial(fileblock, 'trc_forcing_cache_schema', TRC_FORC_CACHE_SCHEMA)
+            CALL ncio_write_serial(fileblock, 'trc_forcing_cache_count', n_trc_forc_vars)
+         ENDDO
+      ENDIF
+      IF (n_trc_forc_vars <= 0) RETURN
+      CALL tracer_forcing_identity(identity)
+      IF (p_is_io) THEN
+         DO iblkgrp = 1, landpatch%nblkgrp
+            iblk = landpatch%xblkgrp(iblkgrp)
+            jblk = landpatch%yblkgrp(iblkgrp)
+            CALL get_filename_block(file_restart, iblk, jblk, fileblock)
+            CALL ncio_define_dimension(fileblock, 'trc_forcing_id_field', TRC_FORC_ID_WIDTH)
+            CALL ncio_define_dimension(fileblock, 'trc_forcing_id_var', n_trc_forc_vars+1)
+            CALL ncio_define_dimension(fileblock, 'trc_forcing_species', ntracers)
+            CALL ncio_write_serial(fileblock, 'trc_forcing_cache_identity', identity, &
+               'trc_forcing_id_field', 'trc_forcing_id_var', DEF_REST_CompressLevel)
+         ENDDO
+      ENDIF
+      deallocate(identity)
+      CALL ncio_write_vector(file_restart, 'trc_forcing_precip_last', 'trc_forcing_species', ntracers, &
+         'patch', landpatch, trc_forc_precip_value, DEF_REST_CompressLevel)
+      CALL ncio_write_vector(file_restart, 'trc_forcing_vapor_last', 'trc_forcing_species', ntracers, &
+         'patch', landpatch, trc_forc_vapor_value, DEF_REST_CompressLevel)
+   END SUBROUTINE tracer_forcing_write_restart
+
+   ! Restore only after tracer_forcing_init has created its patch-local arrays.
+   ! A hydrology-only cold start has no previous cache and keeps the defaults.
+   SUBROUTINE tracer_forcing_read_restart (file_restart, loaded_restart)
+#ifdef USEMPI
+      USE MOD_SPMD_Task, only: p_comm_glb, p_err, MPI_IN_PLACE, MPI_INTEGER, MPI_SUM
+#endif
+      character(len=*), intent(in) :: file_restart
+      logical, intent(in) :: loaded_restart
+      integer, allocatable :: expected(:,:), ondisk(:,:), varsize(:)
+      real(r8), allocatable :: precip(:,:), vapor(:,:)
+      integer :: iblkgrp, iblk, jblk, schema, nvars, counts(4), itrc
+      logical :: have_schema, have_count, block_ok
+      character(len=256) :: fileblock
+
+      IF (.not. loaded_restart .or. ntracers <= 0) RETURN
+      IF (n_trc_forc_vars > 0) CALL tracer_forcing_identity(expected)
+      counts = 0
+      IF (p_is_io) THEN
+         DO iblkgrp = 1, landpatch%nblkgrp
+            iblk = landpatch%xblkgrp(iblkgrp)
+            jblk = landpatch%yblkgrp(iblkgrp)
+            CALL get_filename_block(file_restart, iblk, jblk, fileblock)
+            have_schema = ncio_var_exist(fileblock, 'trc_forcing_cache_schema', readflag=.false.)
+            have_count = ncio_var_exist(fileblock, 'trc_forcing_cache_count', readflag=.false.)
+            IF (.not. have_schema .and. .not. have_count) THEN
+               counts(1) = counts(1) + 1
+               CYCLE
+            ENDIF
+            counts(4) = counts(4) + 1
+            block_ok = have_schema .and. have_count
+            IF (block_ok) THEN
+               CALL ncio_inquire_varsize(fileblock, 'trc_forcing_cache_schema', varsize)
+               block_ok = allocated(varsize)
+               IF (block_ok) THEN
+                  block_ok = size(varsize) == 0
+                  deallocate(varsize)
+               ENDIF
+               CALL ncio_inquire_varsize(fileblock, 'trc_forcing_cache_count', varsize)
+               block_ok = block_ok .and. allocated(varsize)
+               IF (allocated(varsize)) THEN
+                  block_ok = block_ok .and. size(varsize) == 0
+                  deallocate(varsize)
+               ENDIF
+            ENDIF
+            IF (.not. block_ok) THEN
+               counts(2) = counts(2) + 1
+               CYCLE
+            ENDIF
+            CALL ncio_read_serial(fileblock, 'trc_forcing_cache_schema', schema)
+            CALL ncio_read_serial(fileblock, 'trc_forcing_cache_count', nvars)
+            IF (schema /= TRC_FORC_CACHE_SCHEMA .or. nvars /= n_trc_forc_vars) THEN
+               counts(3) = counts(3) + 1
+               CYCLE
+            ENDIF
+            IF (nvars <= 0) CYCLE
+            IF (.not. ncio_var_exist(fileblock, 'trc_forcing_cache_identity', readflag=.false.) .or. &
+                .not. ncio_var_exist(fileblock, 'trc_forcing_precip_last', readflag=.false.) .or. &
+                .not. ncio_var_exist(fileblock, 'trc_forcing_vapor_last', readflag=.false.)) THEN
+               counts(2) = counts(2) + 1
+               CYCLE
+            ENDIF
+            CALL ncio_inquire_varsize(fileblock, 'trc_forcing_cache_identity', varsize)
+            block_ok = allocated(varsize)
+            IF (block_ok) THEN
+               block_ok = size(varsize) == 2
+               IF (block_ok) block_ok = all(varsize == shape(expected))
+               deallocate(varsize)
+            ENDIF
+            CALL ncio_inquire_varsize(fileblock, 'trc_forcing_precip_last', varsize)
+            block_ok = block_ok .and. allocated(varsize)
+            IF (allocated(varsize)) THEN
+               IF (size(varsize) == 2) THEN
+                  block_ok = block_ok .and. varsize(1) == ntracers .and. &
+                     varsize(2) == landpatch%vecgs%vlen(iblk,jblk)
+               ELSE
+                  block_ok = .false.
+               ENDIF
+               deallocate(varsize)
+            ENDIF
+            CALL ncio_inquire_varsize(fileblock, 'trc_forcing_vapor_last', varsize)
+            block_ok = block_ok .and. allocated(varsize)
+            IF (allocated(varsize)) THEN
+               IF (size(varsize) == 2) THEN
+                  block_ok = block_ok .and. varsize(1) == ntracers .and. &
+                     varsize(2) == landpatch%vecgs%vlen(iblk,jblk)
+               ELSE
+                  block_ok = .false.
+               ENDIF
+               deallocate(varsize)
+            ENDIF
+            IF (block_ok) block_ok = tracer_forcing_dim_names_match(fileblock, &
+               'trc_forcing_cache_identity', 'trc_forcing_id_field', 'trc_forcing_id_var') .and. &
+               tracer_forcing_dim_names_match(fileblock, 'trc_forcing_precip_last', &
+                  'trc_forcing_species', 'patch') .and. &
+               tracer_forcing_dim_names_match(fileblock, 'trc_forcing_vapor_last', &
+                  'trc_forcing_species', 'patch')
+            IF (.not. block_ok) THEN
+               counts(2) = counts(2) + 1
+               CYCLE
+            ENDIF
+            CALL ncio_read_serial(fileblock, 'trc_forcing_cache_identity', ondisk)
+            IF (any(ondisk /= expected)) counts(3) = counts(3) + 1
+            deallocate(ondisk)
+         ENDDO
+      ENDIF
+#ifdef USEMPI
+      CALL mpi_allreduce(MPI_IN_PLACE, counts, 4, MPI_INTEGER, MPI_SUM, p_comm_glb, p_err)
+#endif
+      IF (counts(1) > 0 .and. counts(4) > 0) &
+         CALL CoLM_stop('mixed legacy/current tracer forcing cache blocks')
+      IF (counts(1) > 0 .and. n_trc_forc_vars > 0) &
+         CALL CoLM_stop('old tracer restart lacks last-valid forcing cache; cannot reconstruct it')
+      IF (counts(2) > 0) CALL CoLM_stop('incomplete or malformed tracer forcing cache restart')
+      IF (counts(3) > 0) CALL CoLM_stop('tracer forcing cache configuration differs from restart')
+      IF (n_trc_forc_vars <= 0) RETURN
+      CALL ncio_read_vector(file_restart, 'trc_forcing_precip_last', ntracers, landpatch, &
+         precip, known_present=.true.)
+      CALL ncio_read_vector(file_restart, 'trc_forcing_vapor_last', ntracers, landpatch, &
+         vapor, known_present=.true.)
+      counts = 0
+      IF (p_is_worker) THEN
+         IF (size(trc_forc_precip_value,2) > 0 .and. &
+             (.not. allocated(precip) .or. .not. allocated(vapor))) counts(2) = counts(2) + 1
+         IF (allocated(precip) .and. allocated(vapor)) THEN
+            IF (any(.not. ieee_is_finite(precip)) .or. any(.not. ieee_is_finite(vapor))) THEN
+               counts(2) = counts(2) + 1
+            ELSE
+               IF (any(abs(precip) >= trc_forc_max_abs) .or. &
+                   any(abs(vapor) >= trc_forc_max_abs)) counts(2) = counts(2) + 1
+               DO itrc = 1, ntracers
+                  IF (.not. tracer_uses_land_water_transport(itrc)) CYCLE
+                  IF (tracer_is_isotope(itrc)) THEN
+                     IF (any(precip(itrc,:) <= trc_tiny) .or. any(vapor(itrc,:) <= trc_tiny)) &
+                        counts(2) = counts(2) + 1
+                  ELSE
+                     IF (any(precip(itrc,:) < 0._r8) .or. any(vapor(itrc,:) < 0._r8)) &
+                        counts(2) = counts(2) + 1
+                  ENDIF
+               ENDDO
+            ENDIF
+         ENDIF
+      ENDIF
+#ifdef USEMPI
+      CALL mpi_allreduce(MPI_IN_PLACE, counts, 4, MPI_INTEGER, MPI_SUM, p_comm_glb, p_err)
+#endif
+      IF (counts(2) > 0) CALL CoLM_stop('non-finite or invalid tracer forcing cache restart')
+      IF (p_is_worker .and. allocated(precip)) trc_forc_precip_value = precip
+      IF (p_is_worker .and. allocated(vapor)) trc_forc_vapor_value = vapor
+   END SUBROUTINE tracer_forcing_read_restart
 
    SUBROUTINE tracer_forcing_configure ()
       IMPLICIT NONE

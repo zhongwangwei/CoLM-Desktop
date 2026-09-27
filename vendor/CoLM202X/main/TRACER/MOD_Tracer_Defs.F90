@@ -6,7 +6,8 @@ MODULE MOD_Tracer_Defs
    USE MOD_Namelist, only: DEF_TRACER_NUM, DEF_TRACER_NAMES, DEF_TRACER_TYPES, &
       DEF_TRACER_MRAT, DEF_TRACER_REF_RATIO, DEF_TRACER_INIT_DELTA, &
       DEF_TRACER_REACTIVE_DECAY_RATE, DEF_TRACER_PARAM_FILES, &
-      DEF_TRACER_USE_FRACTIONATION
+      DEF_TRACER_USE_FRACTIONATION, DEF_USE_VariablySaturatedFlow, &
+      DEF_TRACER_AQUIFER_MIXING_WATER_MM
    USE, INTRINSIC :: IEEE_ARITHMETIC, only: ieee_is_finite
 
    IMPLICIT NONE
@@ -121,6 +122,8 @@ MODULE MOD_Tracer_Defs
 
    PUBLIC :: tracer_defs_init, tracer_defs_final
    PUBLIC :: mass_to_delta, delta_to_R, R_to_mass
+   PUBLIC :: tracer_aquifer_isotope_state_valid
+   PUBLIC :: tracer_aquifer_actual_water, tracer_aquifer_actual_mass, tracer_aquifer_isotope_ratio
    PUBLIC :: tracer_is_isotope, tracer_is_conservative, tracer_is_reactive
    PUBLIC :: tracer_is_solute, tracer_is_particle, tracer_is_gas
    PUBLIC :: tracer_is_nonvolatile_solute, tracer_uses_land_water_transport
@@ -144,6 +147,69 @@ MODULE MOD_Tracer_Defs
                 trc_delta_sanity_max
 
 CONTAINS
+
+   pure real(r8) FUNCTION tracer_aquifer_actual_water (wa, reference_water)
+      real(r8), intent(in) :: wa, reference_water
+      tracer_aquifer_actual_water = wa + reference_water
+   END FUNCTION tracer_aquifer_actual_water
+
+   pure real(r8) FUNCTION tracer_aquifer_actual_mass (relative_mass, reference_mass)
+      real(r8), intent(in) :: relative_mass, reference_mass
+      tracer_aquifer_actual_mass = relative_mass + reference_mass
+   END FUNCTION tracer_aquifer_actual_mass
+
+   pure real(r8) FUNCTION tracer_aquifer_isotope_ratio (wa, relative_mass, &
+                                                        reference_water, reference_mass, fallback)
+      real(r8), intent(in) :: wa, relative_mass, reference_water, reference_mass, fallback
+      real(r8) :: actual_water
+
+      actual_water = tracer_aquifer_actual_water(wa, reference_water)
+      tracer_aquifer_isotope_ratio = fallback
+      IF (abs(actual_water) > trc_water_min_for_ratio) &
+         tracer_aquifer_isotope_ratio = &
+            tracer_aquifer_actual_mass(relative_mass, reference_mass) / actual_water
+   END FUNCTION tracer_aquifer_isotope_ratio
+
+   pure logical FUNCTION tracer_aquifer_isotope_state_valid (water_mass, isotope_mass, ref_ratio, &
+                                                             reference_water, reference_mass)
+      real(r8), intent(in) :: water_mass, isotope_mass, ref_ratio
+      real(r8), intent(in), optional :: reference_water, reference_mass
+      real(r8) :: dust_mass, ratio, ref_water, ref_mass, actual_water, actual_mass
+
+      tracer_aquifer_isotope_state_valid = .false.
+      IF (.not. ieee_is_finite(water_mass) .or. .not. ieee_is_finite(isotope_mass)) RETURN
+      IF (.not. ieee_is_finite(ref_ratio) .or. ref_ratio <= 0._r8) RETURN
+      ref_water = 0._r8
+      ref_mass = 0._r8
+      IF (present(reference_water)) ref_water = reference_water
+      IF (present(reference_mass)) ref_mass = reference_mass
+      IF (.not. ieee_is_finite(ref_water) .or. .not. ieee_is_finite(ref_mass)) RETURN
+      IF (ref_water < 0._r8 .or. ref_mass < 0._r8) RETURN
+      IF (ref_water > huge(1._r8) - abs(water_mass)) RETURN
+      IF (ref_mass > huge(1._r8) - abs(isotope_mass)) RETURN
+      actual_water = tracer_aquifer_actual_water(water_mass, ref_water)
+      actual_mass = tracer_aquifer_actual_mass(isotope_mass, ref_mass)
+      ! Below the resolved water floor there is no aquifer carrier.  Allow
+      ! only isotope mass at the corresponding round-off scale, not a
+      ! material orphan that would otherwise be cleared as a residual.
+      dust_mass = max(trc_water_min_for_ratio * ref_ratio, &
+                      16._r8 * epsilon(1._r8) * max(abs(isotope_mass), ref_mass))
+      IF (abs(actual_water) <= trc_water_min_for_ratio) THEN
+         tracer_aquifer_isotope_state_valid = abs(actual_water) <= trc_water_min_for_ratio &
+            .and. abs(actual_mass) <= dust_mass
+      ELSE
+         ! R=0 is the admissible isotope-free (delta=-1000 permil) limit.
+         ! Check signs and the quotient range before division: debug builds
+         ! trap floating-point overflow before ieee_is_finite can inspect it.
+         IF (ref_water > 0._r8 .and. actual_water < 0._r8) RETURN
+         IF (actual_water * sign(1._r8, actual_mass) < 0._r8 .and. actual_mass /= 0._r8) RETURN
+         IF (abs(actual_water) < 1._r8) THEN
+            IF (abs(actual_mass) > huge(1._r8) * abs(actual_water)) RETURN
+         ENDIF
+         ratio = actual_mass / actual_water
+         tracer_aquifer_isotope_state_valid = ieee_is_finite(ratio) .and. ratio >= 0._r8
+      ENDIF
+   END FUNCTION tracer_aquifer_isotope_state_valid
 
    SUBROUTINE tracer_build_descriptor_identity (identity, transport_only)
       IMPLICIT NONE
@@ -346,6 +412,15 @@ CONTAINS
          ENDIF
          CALL derive_tracer_taxonomy (i)
          CALL validate_tracer_descriptor (i)
+         IF (DEF_USE_VariablySaturatedFlow .and. tracer_is_isotope(i)) THEN
+            IF (.not. ieee_is_finite(DEF_TRACER_AQUIFER_MIXING_WATER_MM) .or. &
+                DEF_TRACER_AQUIFER_MIXING_WATER_MM <= 0._r8) THEN
+               IF (p_is_master) WRITE(*,'(A)') &
+                  'ERROR tracer_defs_init: VSF isotopes require explicit positive '// &
+                  'DEF_TRACER_AQUIFER_MIXING_WATER_MM.'
+               CALL CoLM_stop()
+            ENDIF
+         ENDIF
       ENDDO
       deallocate(tokens)
    END SUBROUTINE tracer_defs_init
@@ -460,7 +535,7 @@ CONTAINS
       logical, intent(out) :: found
 
       integer :: start_pos, end_pos, list_len, colon_pos, positional_index
-      character(len=512) :: entry, key, value
+      character(len=len(DEF_TRACER_PARAM_FILES)) :: entry, key, value
       logical :: matched
 
       file_param = ''
@@ -485,12 +560,18 @@ CONTAINS
                IF (len_trim(key) <= 0 .or. len_trim(value) <= 0) THEN
                   CALL CoLM_stop('MOD_Tracer_Defs: empty tracer parameter file mapping entry: '//trim(entry))
                ENDIF
+               IF (len_trim(value) > len(file_param)) THEN
+                  CALL CoLM_stop('MOD_Tracer_Defs: tracer parameter file path exceeds supported length')
+               ENDIF
                IF (.not. matched .and. tracer_param_key_matches(itrc, key, aliases)) THEN
                   file_param = trim(value)
                   found = trim(tracer_lower(file_param)) /= 'null'
                   matched = .true.
                ENDIF
             ELSE
+               IF (len_trim(entry) > len(file_param)) THEN
+                  CALL CoLM_stop('MOD_Tracer_Defs: tracer parameter file path exceeds supported length')
+               ENDIF
                positional_index = positional_index + 1
                IF (.not. matched .and. positional_index == itrc) THEN
                   file_param = trim(entry)
@@ -877,7 +958,8 @@ CONTAINS
            trim(tracer_upper(tracers(itrc)%name)) == 'METHANE') .and. &
           tracers(itrc)%state_owner == STATE_OWNER_PROVIDER) THEN
          CALL tracer_descriptor_error(itrc, 'unit_kind', &
-            'species-owned CH4 requires DEF_USE_BGC = .true.')
+            'species-owned CH4 requires DEF_USE_BGC = .true.; full soil/wetland/rice CH4 requires '// &
+            'DEF_USE_PFT or DEF_USE_PC with real carbon, NPP, and root-respiration states')
       ENDIF
       ENDIF
 

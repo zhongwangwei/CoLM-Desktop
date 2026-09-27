@@ -63,7 +63,8 @@ IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
 
       IF (DEF_USE_RangeCheck) THEN
       IF (p_is_worker) THEN
-         npatch = count(patchtypes(landpatch%settyp) == 0)
+         npatch = 0
+         IF (numpatch > 0) npatch = count(patchtypes(landpatch%settyp) == 0)
          allocate (sumpct (npatch))
 
          npatch = 0

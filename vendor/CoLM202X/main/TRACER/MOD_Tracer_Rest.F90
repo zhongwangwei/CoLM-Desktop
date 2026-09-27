@@ -6,21 +6,25 @@ MODULE MOD_Tracer_Rest
    USE MOD_Tracer_Defs, only: ntracers, tracer_init_water_ratio, trc_tiny, &
       trc_water_min_for_ratio, tracers, &
       tracer_uses_delta_diagnostics, tracer_uses_land_water_transport, tracer_is_nonvolatile_solute, &
+      tracer_is_isotope, tracer_aquifer_isotope_state_valid, &
       tracer_equilibrate_dissolved, tracer_build_descriptor_identity, &
       TRACER_DESCRIPTOR_IDENTITY_WIDTH
    USE MOD_Tracer_Vars
    USE MOD_LandPatch, only: landpatch
+   USE MOD_Vars_TimeInvariants, only: patchtype
    USE MOD_Block, only: get_filename_block
-   USE MOD_Namelist, only: DEF_REST_CompressLevel
+   USE MOD_Namelist, only: DEF_REST_CompressLevel, DEF_TRACER_AQUIFER_MIXING_WATER_MM, &
+      DEF_USE_VariablySaturatedFlow
    USE MOD_NetCDFSerial, only: ncio_var_exist, ncio_inquire_varsize, ncio_read_serial, &
       ncio_write_serial, ncio_define_dimension
    USE MOD_NetCDFVector, only: ncio_read_vector, ncio_write_vector
    USE MOD_Tracer_Lifecycle, only: tracer_lifecycle_land_write_restart
+   USE MOD_Tracer_Forcing, only: tracer_forcing_write_restart
    USE MOD_SPMD_Task, only: CoLM_stop
 
    IMPLICIT NONE
 
-   integer, parameter :: LAND_TRACER_RESTART_SCHEMA_VERSION = 4
+   integer, parameter :: LAND_TRACER_RESTART_SCHEMA_VERSION = 5
    integer, parameter :: LAND_TRACER_DESCRIPTOR_FIELDS = TRACER_DESCRIPTOR_IDENTITY_WIDTH
    real(r8), parameter :: LAND_TRACER_RESTART_NEGATIVE_DUST = 1.0e-12_r8
 
@@ -55,7 +59,7 @@ CONTAINS
    ! read past the buffer. Detect the mismatch up front so the caller
    ! can fall back to tracer_init_from_water instead of crashing.
    !-------------------------------------------------------------------
-   logical FUNCTION tracer_dim_matches (file_restart, varname, expect_soilsnow)
+   logical FUNCTION tracer_dim_matches (file_restart, varname, expect_soilsnow, patch_only)
 #ifdef USEMPI
       USE MOD_SPMD_Task, only: p_is_io, p_comm_glb, p_err, &
          MPI_IN_PLACE, MPI_INTEGER, MPI_SUM
@@ -71,6 +75,7 @@ CONTAINS
       ! otherwise pass the row-count-only check and then silently misalign
       ! per-layer data via ncio_read_vector's reshape.
       integer, intent(in), optional :: expect_soilsnow
+      logical, intent(in), optional :: patch_only
       integer, allocatable :: varsize(:)
       integer :: iblkgrp, iblk, jblk, expected_rank, ntransport
       integer :: counts(3)
@@ -79,6 +84,9 @@ CONTAINS
 
       counts(:) = 0
       expected_rank = merge(3, 2, present(expect_soilsnow))
+      IF (present(patch_only)) THEN
+         IF (patch_only) expected_rank = 1
+      ENDIF
       ntransport = land_transport_tracer_count()
 
       ! Vector restart files are split by block via get_filename_block().
@@ -100,8 +108,8 @@ CONTAINS
             block_shape_ok = .false.
             IF (allocated(varsize)) THEN
                IF (size(varsize) == expected_rank) THEN
-                  block_shape_ok = varsize(1) == ntransport .and. &
-                     varsize(expected_rank) == landpatch%vecgs%vlen(iblk,jblk)
+                  block_shape_ok = varsize(expected_rank) == landpatch%vecgs%vlen(iblk,jblk)
+                  IF (expected_rank > 1) block_shape_ok = block_shape_ok .and. varsize(1) == ntransport
                   IF (block_shape_ok .and. present(expect_soilsnow)) THEN
                      block_shape_ok = varsize(2) == expect_soilsnow
                   ENDIF
@@ -120,7 +128,7 @@ CONTAINS
          counts(2) == counts(1) .and. counts(3) == 0
    END FUNCTION tracer_dim_matches
 
-   logical FUNCTION land_tracer_descriptor_matches (file_restart)
+   logical FUNCTION land_tracer_descriptor_matches (file_restart, state_present, restart_schema)
 #ifdef USEMPI
       USE MOD_SPMD_Task, only: p_is_io, p_iam_glb, p_comm_glb, p_err, &
          MPI_IN_PLACE, MPI_INTEGER, MPI_SUM, MPI_MIN
@@ -129,23 +137,34 @@ CONTAINS
 #endif
       IMPLICIT NONE
       character(len=*), intent(in) :: file_restart
-      integer :: iblkgrp, iblk, jblk, schema, complete, transport_count
-      integer :: counts(5)
+      logical, intent(out), optional :: state_present
+      integer, intent(out), optional :: restart_schema
+      integer :: iblkgrp, iblk, jblk, schema, complete, transport_count, itrc
+      integer :: counts(7)
       integer, allocatable :: expected(:,:), ondisk(:,:)
       integer, allocatable :: local_reference_identity(:,:), reference_identity(:,:)
       integer, allocatable :: varsize(:)
       integer :: local_reference_schema, local_reference_count
       integer :: local_reference_rank, reference_rank(1), reference_metadata(2)
       integer :: generation_mismatch_count(1)
+      real(r8) :: ondisk_mixing
       character(len=256) :: fileblock
-      logical :: block_ok, has_schema, has_count, has_identity, has_commit
-      logical :: has_local_generation, generation_mismatch
+      logical :: block_ok, has_schema, has_count, has_identity, has_commit, has_mixing
+      logical :: has_local_generation, generation_mismatch, require_isotope_reference
 
       counts = 0
       has_local_generation = .false.
       generation_mismatch = .false.
       local_reference_schema = -1
       local_reference_count = -1
+      reference_metadata = -1
+      require_isotope_reference = .false.
+      IF (DEF_USE_VariablySaturatedFlow) THEN
+         DO itrc = 1, ntracers
+            IF (tracer_uses_land_water_transport(itrc) .and. tracer_is_isotope(itrc)) &
+               require_isotope_reference = .true.
+         ENDDO
+      ENDIF
       CALL tracer_build_descriptor_identity(expected, transport_only=.true.)
 
       IF (p_is_io) THEN
@@ -158,11 +177,16 @@ CONTAINS
             has_count = ncio_var_exist(fileblock, 'trc_land_transport_count', readflag=.false.)
             has_identity = ncio_var_exist(fileblock, 'trc_land_descriptor_identity', readflag=.false.)
             has_commit = ncio_var_exist(fileblock, 'trc_land_restart_complete', readflag=.false.)
+            has_mixing = ncio_var_exist(fileblock, 'trc_aquifer_mixing_water_mm', readflag=.false.)
 
             ! No marker is an old, non-transactional restart.  It is safe only
             ! when every block is old: the caller cold-starts the entire generic
             ! land domain before any vector scatter.
             IF (.not. has_commit) THEN
+               ! A pre-transactional file is an old generic tracer restart
+               ! only if it actually carries a generic prognostic pool.
+               IF (ncio_var_exist(fileblock, 'trc_wa', readflag=.false.)) &
+                  counts(6) = counts(6) + 1
                counts(2) = counts(2) + 1
                CYCLE
             ENDIF
@@ -198,7 +222,8 @@ CONTAINS
                CALL ncio_read_serial(fileblock, 'trc_land_restart_schema', schema)
             ENDIF
             transport_count = -1
-            IF (block_ok .and. schema == LAND_TRACER_RESTART_SCHEMA_VERSION) THEN
+            IF (block_ok .and. &
+                (schema == LAND_TRACER_RESTART_SCHEMA_VERSION .or. schema == 4)) THEN
                IF (.not. has_count) THEN
                   block_ok = .false.
                ELSE
@@ -215,12 +240,34 @@ CONTAINS
                   ENDIF
                ENDIF
             ENDIF
+            IF (block_ok .and. schema == LAND_TRACER_RESTART_SCHEMA_VERSION) THEN
+               IF (.not. has_mixing) THEN
+                  block_ok = .false.
+               ELSE
+                  CALL ncio_inquire_varsize(fileblock, 'trc_aquifer_mixing_water_mm', varsize)
+                  IF (.not. allocated(varsize)) THEN
+                     block_ok = .false.
+                  ELSE
+                     block_ok = size(varsize) == 0
+                     deallocate(varsize)
+                  ENDIF
+                  IF (block_ok) THEN
+                     CALL ncio_read_serial(fileblock, 'trc_aquifer_mixing_water_mm', ondisk_mixing)
+                     ! No silent reinterpretation of the persistent isotope inventory.
+                     IF (require_isotope_reference .and. transport_count > 0) THEN
+                        block_ok = ondisk_mixing == DEF_TRACER_AQUIFER_MIXING_WATER_MM
+                        IF (.not. block_ok) counts(7) = counts(7) + 1
+                     ENDIF
+                  ENDIF
+               ENDIF
+            ENDIF
 
-            ! Schema 4 represents a provider-only checkpoint explicitly with
+            ! Schemas 4/5 represent a provider-only checkpoint explicitly with
             ! transport_count=0.  It intentionally carries no zero-length
             ! descriptor dimension; a stale descriptor in a reused file is
             ! ignored because the committed count is the source of truth.
-            IF (block_ok .and. schema == LAND_TRACER_RESTART_SCHEMA_VERSION .and. &
+            IF (block_ok .and. &
+                (schema == LAND_TRACER_RESTART_SCHEMA_VERSION .or. schema == 4) .and. &
                 transport_count > 0) THEN
                IF (.not. has_identity) THEN
                   block_ok = .false.
@@ -240,7 +287,8 @@ CONTAINS
                   IF (block_ok) &
                      CALL ncio_read_serial(fileblock, 'trc_land_descriptor_identity', ondisk)
                ENDIF
-            ELSEIF (block_ok .and. schema /= LAND_TRACER_RESTART_SCHEMA_VERSION) THEN
+            ELSEIF (block_ok .and. schema /= LAND_TRACER_RESTART_SCHEMA_VERSION .and. &
+                    schema /= 4) THEN
                ! The previous transactional schema had no explicit count.  A
                ! committed descriptor is coherent but incompatible and must
                ! cold-start, while marker/schema-only fragments remain fatal.
@@ -272,6 +320,10 @@ CONTAINS
             IF (block_ok) THEN
                IF (transport_count > 0 .and. .not. allocated(ondisk)) block_ok = .false.
             ENDIF
+            ! A committed count=0 is a provider-only/hydrology checkpoint,
+            ! not old isotope state to reinterpret. The count dominates stale
+            ! vector variables in a reused NetCDF target by design.
+            IF (block_ok .and. transport_count > 0) counts(6) = counts(6) + 1
             IF (block_ok) THEN
                IF (.not. has_local_generation) THEN
                   has_local_generation = .true.
@@ -294,7 +346,8 @@ CONTAINS
             ENDIF
             IF (.not. block_ok) THEN
                counts(5) = counts(5) + 1
-            ELSEIF (schema /= LAND_TRACER_RESTART_SCHEMA_VERSION .or. &
+            ELSEIF ((schema /= LAND_TRACER_RESTART_SCHEMA_VERSION .and. &
+                     (schema /= 4 .or. require_isotope_reference)) .or. &
                     transport_count /= size(expected, 2)) THEN
                counts(4) = counts(4) + 1
             ELSEIF (transport_count == 0) THEN
@@ -313,7 +366,7 @@ CONTAINS
       ENDIF
 
 #ifdef USEMPI
-      CALL mpi_allreduce(MPI_IN_PLACE, counts, 5, MPI_INTEGER, MPI_SUM, p_comm_glb, p_err)
+      CALL mpi_allreduce(MPI_IN_PLACE, counts, 7, MPI_INTEGER, MPI_SUM, p_comm_glb, p_err)
 
       ! Select one rank's exact generation as the global reference.  A single
       ! broadcast plus a logical reduction is exact (unlike a checksum) while
@@ -363,6 +416,8 @@ CONTAINS
       generation_mismatch = generation_mismatch_count(1) > 0
 #endif
 
+      IF (counts(7) > 0) &
+         CALL CoLM_stop('aquifer reference calibration differs from tracer restart')
       IF (generation_mismatch .or. counts(5) > 0 .or. &
           (counts(2) > 0 .and. counts(2) < counts(1)) .or. &
           (counts(3) > 0 .and. counts(4) > 0)) THEN
@@ -373,6 +428,14 @@ CONTAINS
       ! for another configuration.  Cold-start the generic domain as one unit;
       ! never mix its rows with the current descriptor.
       land_tracer_descriptor_matches = counts(1) > 0 .and. counts(3) == counts(1)
+      IF (present(state_present)) state_present = counts(6) > 0
+      IF (present(restart_schema)) THEN
+#ifdef USEMPI
+         restart_schema = reference_metadata(1)
+#else
+         restart_schema = local_reference_schema
+#endif
+      ENDIF
       IF (allocated(local_reference_identity)) deallocate(local_reference_identity)
       deallocate(expected)
    END FUNCTION land_tracer_descriptor_matches
@@ -411,6 +474,8 @@ CONTAINS
             CALL get_filename_block(file_restart, iblk, jblk, fileblock)
             CALL ncio_write_serial(fileblock, 'trc_land_restart_schema', LAND_TRACER_RESTART_SCHEMA_VERSION)
             CALL ncio_write_serial(fileblock, 'trc_land_transport_count', size(identity, 2))
+            CALL ncio_write_serial(fileblock, 'trc_aquifer_mixing_water_mm', &
+               DEF_TRACER_AQUIFER_MIXING_WATER_MM)
             IF (size(identity, 2) > 0) THEN
                CALL ncio_define_dimension(fileblock, 'trc_land_descriptor_field', LAND_TRACER_DESCRIPTOR_FIELDS)
                CALL ncio_define_dimension(fileblock, 'trc_land_transport', size(identity, 2))
@@ -603,7 +668,8 @@ CONTAINS
       ENDDO
    END SUBROUTINE clamp_nonnegative_soilsnow
 
-   SUBROUTINE validate_land_tracer_restart_state ()
+   SUBROUTINE validate_land_tracer_restart_state (wa)
+      USE, INTRINSIC :: ieee_arithmetic, only: ieee_is_finite
 #ifdef USEMPI
       USE MOD_SPMD_Task, only: p_is_worker, p_is_master, p_comm_glb, p_err, &
          MPI_IN_PLACE, MPI_INTEGER, MPI_SUM
@@ -611,19 +677,31 @@ CONTAINS
       USE MOD_SPMD_Task, only: p_is_worker, p_is_master
 #endif
       IMPLICIT NONE
-      integer :: invalid_counts(5)
+      real(r8), intent(in), optional :: wa(:)
+      integer :: invalid_counts(7), itrc, ip
+      logical :: require_isotope_reference
+      real(r8) :: expected_refmass
 
       ! [nonfinite physical amount, significantly negative physical amount,
       !  nonfinite signed/diagnostic value, Peclet outside [0,1],
-      !  missing state allocation].  trc_wa is
+      !  missing state allocation, invalid isotope aquifer state, reference]. trc_wa is
       ! deliberately signed because the wetland correction debt is prognostic;
       ! leaf isotope storage is likewise a signed NSS anomaly.
       invalid_counts = 0
+      require_isotope_reference = .false.
+      IF (DEF_USE_VariablySaturatedFlow) THEN
+         DO itrc = 1, ntracers
+            IF (tracer_uses_land_water_transport(itrc) .and. tracer_is_isotope(itrc)) &
+               require_isotope_reference = .true.
+         ENDDO
+      ENDIF
       IF (p_is_worker) THEN
          IF (landpatch%nset > 0) THEN
             IF (.not. (allocated(trc_ldew_rain) .and. allocated(trc_ldew_snow) .and. &
                        allocated(trc_wliq_soisno) .and. allocated(trc_wice_soisno) .and. &
-                       allocated(trc_wa) .and. allocated(trc_wdsrf) .and. allocated(trc_wetwat) .and. &
+                       allocated(trc_wa) .and. allocated(trc_aquifer_ref_water) .and. &
+                       allocated(trc_aquifer_ref_mass) .and. &
+                       allocated(trc_wdsrf) .and. allocated(trc_wetwat) .and. &
                        allocated(trc_surface_residue) .and. allocated(trc_subsurface_residue) .and. &
                        allocated(trc_solid_soisno) .and. allocated(trc_canopy_solid) .and. &
                        allocated(trc_surface_solid) .and. allocated(trc_subsurface_solid) .and. &
@@ -638,6 +716,57 @@ CONTAINS
          IF (allocated(trc_wliq_soisno)) CALL count_nonnegative_soilsnow(trc_wliq_soisno, invalid_counts)
          IF (allocated(trc_wice_soisno)) CALL count_nonnegative_soilsnow(trc_wice_soisno, invalid_counts)
          IF (allocated(trc_wa)) CALL count_signed_patch(trc_wa, invalid_counts)
+         IF (allocated(trc_aquifer_ref_mass)) CALL count_nonnegative_patch(trc_aquifer_ref_mass, invalid_counts)
+         IF (allocated(trc_aquifer_ref_water)) THEN
+            DO ip = 1, size(trc_aquifer_ref_water)
+               IF (.not. ieee_is_finite(trc_aquifer_ref_water(ip))) THEN
+                  invalid_counts(7) = invalid_counts(7) + 1
+               ELSEIF (trc_aquifer_ref_water(ip) < 0._r8) THEN
+                  invalid_counts(7) = invalid_counts(7) + 1
+               ELSEIF (.not. require_isotope_reference .and. trc_aquifer_ref_water(ip) > 0._r8) THEN
+                  invalid_counts(7) = invalid_counts(7) + 1
+               ELSEIF (allocated(patchtype)) THEN
+                  IF (ip <= size(patchtype)) THEN
+                     IF (require_isotope_reference .and. &
+                         (patchtype(ip) == 0 .or. patchtype(ip) == 2) .and. &
+                         trc_aquifer_ref_water(ip) <= 0._r8) invalid_counts(7) = invalid_counts(7) + 1
+                     IF (patchtype(ip) /= 0 .and. patchtype(ip) /= 2 .and. &
+                         trc_aquifer_ref_water(ip) > 0._r8) invalid_counts(7) = invalid_counts(7) + 1
+                  ENDIF
+               ENDIF
+            ENDDO
+         ENDIF
+         IF (allocated(trc_aquifer_ref_water) .and. allocated(trc_aquifer_ref_mass)) THEN
+            DO itrc = 1, ntracers
+               IF (.not. tracer_uses_land_water_transport(itrc)) CYCLE
+               DO ip = 1, min(size(trc_aquifer_ref_water), size(trc_aquifer_ref_mass, 2))
+                  expected_refmass = 0._r8
+                  IF (tracer_is_isotope(itrc)) &
+                     expected_refmass = trc_aquifer_ref_water(ip) * tracers(itrc)%ref_ratio
+                  IF (.not. ieee_is_finite(expected_refmass)) THEN
+                     invalid_counts(7) = invalid_counts(7) + 1
+                  ELSEIF (abs(trc_aquifer_ref_mass(itrc, ip) - expected_refmass) > &
+                          max(1.e-12_r8, 1.e-10_r8 * abs(expected_refmass))) THEN
+                     invalid_counts(7) = invalid_counts(7) + 1
+                  ENDIF
+               ENDDO
+            ENDDO
+         ENDIF
+         IF (present(wa)) THEN
+            IF (allocated(trc_wa) .and. allocated(trc_aquifer_ref_water) .and. &
+                allocated(trc_aquifer_ref_mass)) THEN
+               DO itrc = 1, ntracers
+                  IF (.not. tracer_is_isotope(itrc)) CYCLE
+                  IF (.not. tracer_uses_land_water_transport(itrc)) CYCLE
+                  DO ip = 1, min(size(wa), size(trc_wa, 2))
+                     IF (.not. tracer_aquifer_isotope_state_valid(wa(ip), trc_wa(itrc, ip), &
+                           tracers(itrc)%ref_ratio, trc_aquifer_ref_water(ip), &
+                           trc_aquifer_ref_mass(itrc, ip))) &
+                        invalid_counts(6) = invalid_counts(6) + 1
+                  ENDDO
+               ENDDO
+            ENDIF
+         ENDIF
          IF (allocated(trc_wdsrf)) CALL count_nonnegative_patch(trc_wdsrf, invalid_counts)
          IF (allocated(trc_wetwat)) CALL count_nonnegative_patch(trc_wetwat, invalid_counts)
          IF (allocated(trc_surface_residue)) CALL count_nonnegative_patch(trc_surface_residue, invalid_counts)
@@ -661,9 +790,9 @@ CONTAINS
 #endif
 
       IF (any(invalid_counts > 0)) THEN
-         IF (p_is_master) WRITE(*,'(A,5(I0,1X))') &
+         IF (p_is_master) WRITE(*,'(A,7(I0,1X))') &
             'ERROR generic land tracer restart state counts '// &
-            '[amount_nan amount_neg signed_nan peclet_range missing_state]: ', invalid_counts
+            '[amount_nan amount_neg signed_nan peclet_range missing_state aquifer_state reference]: ', invalid_counts
          CALL CoLM_stop('invalid generic land tracer restart state')
       ENDIF
 
@@ -745,7 +874,23 @@ CONTAINS
             ! producing a 2× over-concentration in the recovered wetwat.
             ! wdsrf/wetwat stay with max(.,0) since WATER_VSF never leaves
             ! them negative by construction (overflow case L1196-1207).
-            trc_wa    (itrc, ip) = wa(ip) * R_init
+            IF (tracer_is_isotope(itrc) .and. DEF_USE_VariablySaturatedFlow .and. &
+                DEF_TRACER_AQUIFER_MIXING_WATER_MM > 0._r8) THEN
+               IF (.not. allocated(patchtype)) CALL CoLM_stop('missing patchtype for isotope aquifer reference')
+               IF (ip > size(patchtype)) CALL CoLM_stop('missing patchtype for isotope aquifer reference')
+               IF (patchtype(ip) == 0 .or. patchtype(ip) == 2) THEN
+                  trc_aquifer_ref_water(ip) = DEF_TRACER_AQUIFER_MIXING_WATER_MM
+                  trc_aquifer_ref_mass(itrc, ip) = trc_aquifer_ref_water(ip) * tracers(itrc)%ref_ratio
+                  IF (wa(ip) + trc_aquifer_ref_water(ip) < 0._r8) &
+                     CALL CoLM_stop('negative isotope aquifer mixing water at cold start')
+               ENDIF
+               ! Initial actual composition follows INIT_DELTA, not the
+               ! standard reference used only to anchor signed anomalies.
+               trc_wa(itrc, ip) = (wa(ip) + trc_aquifer_ref_water(ip)) * R_init &
+                  - trc_aquifer_ref_mass(itrc, ip)
+            ELSE
+               trc_wa(itrc, ip) = wa(ip) * R_init
+            ENDIF
             trc_wdsrf (itrc, ip) = max(wdsrf(ip),  0._r8) * R_init
             trc_wetwat(itrc, ip) = max(wetwat(ip), 0._r8) * R_init
             CALL tracer_equilibrate_dissolved(itrc, max(wdsrf(ip), 0._r8), &
@@ -792,26 +937,27 @@ CONTAINS
    END SUBROUTINE tracer_init_from_water
 
    SUBROUTINE read_land_tracer_restart (file_restart, maxsnl, nl_soil, found_restart, &
-      scv_missing, waterstorage_missing)
+      scv_missing, waterstorage_missing, wa)
       USE MOD_SPMD_Task, only: p_is_master
       IMPLICIT NONE
       character(len=*), intent(in) :: file_restart
       integer, intent(in) :: maxsnl, nl_soil
       logical, intent(out) :: found_restart
       ! These outputs remain for caller ABI compatibility.  Transactional
-      ! schema v4 never mixes an optional legacy pool into a hot generic load:
+      ! schema v5 never mixes an optional legacy pool into a hot generic load:
       ! an old checkpoint cold-starts the whole generic land domain instead.
       logical, optional, intent(out) :: scv_missing
       logical, optional, intent(out) :: waterstorage_missing
-      integer :: ntransport
-      logical :: descriptor_matches, restart_complete, field_matches
+      real(r8), intent(in), optional :: wa(:)
+      integer :: ntransport, itrc, restart_schema
+      logical :: descriptor_matches, restart_complete, field_matches, state_present, active_isotope
 
       found_restart = .false.
       IF (present(scv_missing)) scv_missing = .false.
       IF (present(waterstorage_missing)) waterstorage_missing = .false.
       CALL zero_provider_owned_land_tracer_state()
       ntransport = land_transport_tracer_count()
-      descriptor_matches = land_tracer_descriptor_matches(file_restart)
+      descriptor_matches = land_tracer_descriptor_matches(file_restart, state_present, restart_schema)
       IF (ntransport <= 0) THEN
          ! Provider-owned species have their own lifecycle restart callbacks.
          ! Validate any present transaction (marker=0/partial remains fatal),
@@ -825,6 +971,15 @@ CONTAINS
       ! incomplete metadata/transactions; a complete descriptor for another
       ! tracer configuration is safe but incompatible and also cold-starts.
       IF (.not. descriptor_matches) THEN
+         active_isotope = .false.
+         IF (DEF_USE_VariablySaturatedFlow) THEN
+            DO itrc = 1, ntracers
+               IF (tracer_uses_land_water_transport(itrc) .and. tracer_is_isotope(itrc)) &
+                  active_isotope = .true.
+            ENDDO
+         ENDIF
+         IF (active_isotope .and. state_present) &
+            CALL CoLM_stop('old/incompatible isotope tracer restart: explicit fresh tracer initialization required')
          IF (p_is_master) WRITE(*,'(3A)') &
             'Generic land tracer restart is legacy/incompatible in ', &
             TRIM(file_restart), '; using whole-domain cold start.'
@@ -851,6 +1006,12 @@ CONTAINS
       restart_complete = restart_complete .and. field_matches
       field_matches = tracer_dim_matches(file_restart, 'trc_wa')
       restart_complete = restart_complete .and. field_matches
+      IF (restart_schema == LAND_TRACER_RESTART_SCHEMA_VERSION) THEN
+         field_matches = tracer_dim_matches(file_restart, 'trc_aquifer_ref_water', patch_only=.true.)
+         restart_complete = restart_complete .and. field_matches
+         field_matches = tracer_dim_matches(file_restart, 'trc_aquifer_ref_mass')
+         restart_complete = restart_complete .and. field_matches
+      ENDIF
       field_matches = tracer_dim_matches(file_restart, 'trc_wdsrf')
       restart_complete = restart_complete .and. field_matches
       field_matches = tracer_dim_matches(file_restart, 'trc_wetwat')
@@ -893,6 +1054,16 @@ CONTAINS
       CALL read_transport_soilsnow_field(file_restart, 'trc_solid_soisno', &
          nl_soil-maxsnl, trc_solid_soisno)
       CALL read_transport_patch_field(file_restart, 'trc_wa', trc_wa)
+      IF (restart_schema == LAND_TRACER_RESTART_SCHEMA_VERSION) THEN
+         CALL ncio_read_vector(file_restart, 'trc_aquifer_ref_water', landpatch, &
+            trc_aquifer_ref_water, known_present=.true.)
+         CALL read_transport_patch_field(file_restart, 'trc_aquifer_ref_mass', trc_aquifer_ref_mass)
+      ELSE
+         ! Schema 4 has no isotope reference; only non-VSF-isotope generic
+         ! transport is admitted here, preserving its exact old hot state.
+         trc_aquifer_ref_water = 0._r8
+         trc_aquifer_ref_mass = 0._r8
+      ENDIF
       CALL read_transport_patch_field(file_restart, 'trc_wdsrf', trc_wdsrf)
       CALL read_transport_patch_field(file_restart, 'trc_wetwat', trc_wetwat)
       CALL read_transport_patch_field(file_restart, 'trc_surface_residue', trc_surface_residue)
@@ -909,7 +1080,7 @@ CONTAINS
       CALL read_transport_patch_field(file_restart, 'trc_leaf_water_moles', trc_leaf_water_moles)
       CALL read_transport_patch_field(file_restart, 'trc_leaf_iso_storage', trc_leaf_iso_storage)
 
-      CALL validate_land_tracer_restart_state()
+      CALL validate_land_tracer_restart_state(wa)
       CALL zero_provider_owned_land_tracer_state()
       found_restart = .true.
    END SUBROUTINE read_land_tracer_restart
@@ -971,7 +1142,7 @@ CONTAINS
       real(r8), intent(in) :: waterstorage(numpatch)
 
       integer  :: itrc, ip, j, snl_local
-      real(r8) :: R_init, ratio, water_ref, tracer_ref
+      real(r8) :: R_init, ratio, water_ref, tracer_ref, aquifer_water_ref, aquifer_mass_ref
 
       IF (ntracers <= 0) RETURN
       IF (.not. allocated(trc_waterstorage)) RETURN
@@ -988,12 +1159,18 @@ CONTAINS
                   EXIT
                ENDIF
             ENDDO
+            aquifer_water_ref = max(wa(ip), 0._r8)
+            aquifer_mass_ref = max(trc_wa(itrc, ip), 0._r8)
+            IF (tracer_is_isotope(itrc) .and. trc_aquifer_ref_water(ip) > 0._r8) THEN
+               aquifer_water_ref = max(wa(ip) + trc_aquifer_ref_water(ip), 0._r8)
+               aquifer_mass_ref = max(trc_wa(itrc, ip) + trc_aquifer_ref_mass(itrc, ip), 0._r8)
+            ENDIF
             water_ref = max(ldew_rain(ip), 0._r8) + max(ldew_snow(ip), 0._r8) &
-                      + max(wa(ip), 0._r8) + max(wdsrf(ip), 0._r8) &
+                      + aquifer_water_ref + max(wdsrf(ip), 0._r8) &
                       + max(wetwat(ip), 0._r8) + max(scv(ip), 0._r8)
             tracer_ref = max(trc_ldew_rain(itrc, ip), 0._r8) &
                        + max(trc_ldew_snow(itrc, ip), 0._r8) &
-                       + max(trc_wa(itrc, ip), 0._r8) &
+                       + aquifer_mass_ref &
                        + max(trc_wdsrf(itrc, ip), 0._r8) &
                        + max(trc_wetwat(itrc, ip), 0._r8) &
                        + max(trc_scv(itrc, ip), 0._r8)
@@ -1092,8 +1269,11 @@ CONTAINS
 
       ! Reject corrupt in-memory state before publishing the in-progress
       ! marker. A crash after marker=0 can never masquerade as a committed load.
-      CALL validate_land_tracer_restart_state()
+      CALL validate_land_tracer_restart_state(wa)
       CALL write_land_tracer_transaction_marker(file_restart, 0)
+      ! The packed vectors use trc_land_transport as a NetCDF dimension.
+      ! Define their descriptor/dimension before the first vector write.
+      CALL write_land_tracer_descriptor_metadata(file_restart)
 
       have_patch_data = p_is_worker .and. numpatch > 0
       allocate(restart_patch(ntransport, numpatch))
@@ -1133,6 +1313,14 @@ CONTAINS
       restart_patch = 0._r8
       IF (have_patch_data .and. allocated(trc_wa)) CALL pack_transport_patch(trc_wa, restart_patch)
       CALL ncio_write_vector(file_restart, 'trc_wa', 'trc_land_transport', ntransport, &
+         'patch', landpatch, restart_patch, DEF_REST_CompressLevel)
+
+      CALL ncio_write_vector(file_restart, 'trc_aquifer_ref_water', 'patch', landpatch, &
+         trc_aquifer_ref_water, DEF_REST_CompressLevel)
+      restart_patch = 0._r8
+      IF (have_patch_data .and. allocated(trc_aquifer_ref_mass)) &
+         CALL pack_transport_patch(trc_aquifer_ref_mass, restart_patch)
+      CALL ncio_write_vector(file_restart, 'trc_aquifer_ref_mass', 'trc_land_transport', ntransport, &
          'patch', landpatch, restart_patch, DEF_REST_CompressLevel)
 
       restart_patch = 0._r8
@@ -1223,7 +1411,7 @@ CONTAINS
          'patch', landpatch, restart_patch, DEF_REST_CompressLevel)
 
       deallocate(restart_patch)
-      CALL write_land_tracer_descriptor_metadata(file_restart)
+      CALL tracer_forcing_write_restart(file_restart)
       CALL write_land_tracer_transaction_marker(file_restart, 1)
    END SUBROUTINE write_land_tracer_restart
 

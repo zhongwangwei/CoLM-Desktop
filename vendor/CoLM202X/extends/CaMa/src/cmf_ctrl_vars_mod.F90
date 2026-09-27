@@ -100,7 +100,7 @@ ENDIF
       !! Used in CoLM
 IF( LWINFILT ) THEN  !! additional prognostics for LWINFILT
   ALLOCATE( D2WINFILT(NSEQMAX,1)     )
-  D2WEVAP(:,:)=0._JPRB
+  D2WINFILT(:,:)=0._JPRB
 ENDIF
 !! keep these variables even when LGDWDLY is not used. (for simplifying runoff calculation)
 ALLOCATE( P2GDWSTO(NSEQMAX,1)     )
@@ -192,6 +192,7 @@ USE YOS_CMF_DIAG,       ONLY: D2RIVOUT_oAVG, D2FLDOUT_oAVG, D2OUTFLW_oAVG, D2RIV
                             & D2DAMINF_oAVG, D2STORGE_oMAX, D2OUTFLW_oMAX, D2RIVDPH_oMAX, NADD_out
 USE YOS_CMF_DIAG,       ONLY: D2RIVOUT_aAVG, D2FLDOUT_aAVG, D2OUTFLW_aAVG, D2RIVVEL_aAVG, D2PTHOUT_aAVG, &
                             & D2GDWRTN_aAVG, D2RUNOFF_aAVG, D2ROFSUB_aAVG, D1PTHFLW_aAVG, D2WEVAPEX_aAVG,&
+                            & D2WINFILTEX_aAVG, &
                             & D2DAMINF_aAVG, D2STORGE_aMAX, D2OUTFLW_aMAX, D2RIVDPH_aMAX, NADD_adp,      &
                             & D1PTHFLWSUM_aAVG
 IMPLICIT NONE
@@ -296,6 +297,10 @@ ENDIF
 IF ( LWEVAP ) THEN
   ALLOCATE(D2WEVAPEX_aAVG(NSEQMAX,1))
   D2WEVAPEX_aAVG(:,:)=0._JPRB
+ENDIF
+IF ( LWINFILT ) THEN
+  ALLOCATE(D2WINFILTEX_aAVG(NSEQMAX,1))
+  D2WINFILTEX_aAVG(:,:)=0._JPRB
 ENDIF
 
 !*** 2b time-average 1D Diagnostics (bifurcation channel) for adaptive time step
