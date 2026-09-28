@@ -25068,3 +25068,79 @@ cargo test core 367 / runtime 76 / hist 50 / init 156 / lapack 6 / forcing 148 /
 
 未验证：城市积雪（这一年 AU-Preston 没有雪）、Windows/Linux 参考 LAPACK 后端、全局网格模式下
 `get_lonlat_radian` 的面积加权经纬度（SinglePoint 走不到）。
+
+## 第 412 轮：PFT 子网格（`DEF_USE_PFT`）接进 Rust 主循环
+
+### 一、结构
+
+上游把 LCT 的单冠层换成"逐 PFT 算、按 `pftfrac` 聚合"的只有五段，其余（地面温度、土壤水、雪）
+仍是 patch 级。所以 Rust 侧只新增这五段，聚合量交回 LCT 原路径：
+
+| 段 | 上游 | Rust |
+|---|---|---|
+| 截留 | `LEAF_interception_pftwrap` | `pft::intercept_pfts`（`prepare_energy` 分支） |
+| 短波 | `netsolar` 的 PFT 段 | `pft::aggregate_pft_absorption` + `pft::pft_shortwave` |
+| 冠层能量 | `THERMAL` 的 PFT 循环（`MOD_Thermal.F90:790-1232`） | `pft::pft_canopy_energy` |
+| 雪盖 | `snowfraction_pftwrap` | `pft::pft_snow_fraction` |
+| 反照率 | `albland` PFT 段 + `twostream_wrap` | `surface_optics::prepare_pft_surface_optics` |
+
+`StandardLctEnergyState::pft: Option<Box<PftPatch>>` 为 `Some` 时走上表分支；`leaf`/`radiation`
+里存聚合后的 patch 量（它们照旧写主重启），逐 PFT 时间变量写 `*_restart_pft_*`。参数与 `mkinidata`
+同一张表（`colm_init::pft_parameter`：`MOD_Const_PFT` 默认 + `DEF_PFT_*(class+1)`），`vmax25`
+表值与覆盖值统一乘 `1e-6`，`rootfr_p` 用 Schenk–Jackson（`MOD_Const_PFT` 里 `ROOTFR_SCHEME`
+是私有常量 1，抽出 `colm_core::schenk_jackson_root_fraction` 与 LCT 共用）。
+
+聚合的数值形状全部是"从 0 起、按 PFT 顺序的 FMA 链"（`colm_core::pft_sum`）：THERMAL 里 50 条
+`sum(x_p*pftfrac)`、pftwrap 里手写的 `tmp = tmp + x*pftfrac(i)`、`LAI_readin` 的
+`tlai = sum(SITE_LAI_pfts_monthly*SITE_pctpfts)`（对 16 项含零份额的全表求和，零份额项
+`FMA(x,0,acc)=acc`，所以只对打包后的 PFT 求和逐位相同）。例外：`rootr` 是
+`FMA(rootr_p*etr_p, pftfrac, acc)/etr`（乘积先舍入）；裸地 PFT 的 `ulrad` 是
+`FMA(t^4, emg*stefnc, frl*(1-emg))`，`t^4 = (t*t)*(t*t)`。
+
+### 二、几处不看源码就会写错的语义
+
+1. **`DEF_RSS_SCHEME` 只在 LCT 下被强制关掉**（`MOD_Namelist.F90:1860-1867`，VG 土壤）；PFT/PC
+   保留 namelist 值，默认 1。漏掉时 3-PFT 算例第一条 history 的 `f_rss` 是 0 对 0.00885，
+   随后 `fevpg`/`etr` 在 1e-4 相对量级上分叉。
+2. **`rootr`/`rootflux` 每步在 THERMAL 入口清零**（`MOD_Thermal.F90:558-559`），PFT 聚合只在
+   `abs(etr) > 0` 时覆盖 —— 所以 `etr == 0` 时是 0，**不是**沿用上一步（`MOD_Vars_TimeVariables`
+   里它们初值 `spval`，容易误以为是持久量）。PHS 打开时只聚合 `rootflux`，`rootr` 整步是 0。
+3. **裸地 PFT 用前置 `GroundFluxes` 的结果**：`:984` 那次调用的实参与 `:683` 完全相同，所以直接
+   复用 `preliminary_ground_flux`；`tleaf_p = forc_t`、`rst_p = 2e4`、`dlrad_p = frl`、PHS 下
+   `vegwp_p = -2.5e4`，`ldew*_p`/`fwet_snow_p` 在第一个 PFT 循环里清零。
+4. **patch 的 `thermk`** 在 PFT 模式下只在 `lai+sai <= 1e-6` 时被 `albland` 置 1，否则保持上一步；
+   `extkb`/`extkd` 恒为 1/0.718（逐 PFT 那一份才是真值）。`albland` 入口对 `ssun_p`/`ssha_p`/
+   `extkb_p`/`extkd_p` 的默认化在夜间返回**之前**。
+5. **`gs0sun`/`gs0sha`（patch 级）** 在 PFT 模式下 THERMAL 不碰，续跑写出保持原值；逐 PFT 的写 `_p`。
+
+### 三、顺带修掉的 LCT 缺陷：`hprl` 的 FMA 形状
+
+`MOD_LeafTemperature.F90:1166` 的
+`hprl = cpliq*qintr_rain*(t_precip-tl) + cpice*qintr_snow*(t_precip-tl)` 在 GIMPLE 里是
+`FMA(cpliq*qintr_rain, t_precip-tl, (cpice*qintr_snow)*(t_precip-tl))`；Rust 原先两项平铺。
+只有雨、雪**同时**被截留的步才不同（单相时另一项为 0，FMA 与平铺同值），31 例 LCT 回归从没碰到。
+带裸地与 C4 草的 4-PFT AT-Neu 全年在 11 月出现：1440 步里 10 步 `hprl` 差 1 ULP，只在 `f_zerr`
+的一条小时记录上显形（-5.44437828e-11 对 -5.44428946e-11）。两侧在 `errore` 处逐步打印 14 个分量
+定位到 `hprl`，改后 1440 步全部分量逐位。
+
+### 四、实测
+
+```text
+AT-Neu（DEF_USE_LCT=.false. / DEF_USE_PFT=.true.，VG 土壤 + VSF，DEF_VEG_SNOW 默认开），
+纯 Fortran（--preprocessors fortran --engine fortran）对 纯 Rust：
+  pf  1 PFT（class 13），1-2 月，PHS 开                        history 2 + 主/PFT 重启  逐位
+  pm  3 PFT（13/7/1，0.6/0.25/0.15），1-2 月，PHS 开            history 2 + 主/PFT 重启  逐位
+  py  同 pm，全年                                              history 12 + 主/PFT 重启 逐位
+  pb  4 PFT（0 裸地/14 C4 草/4 常绿阔叶/13，0.2/0.3/0.35/0.15），全年，PHS 关
+                                                              history 12 + 主/PFT 重启 逐位
+  以上 release 与 debug 两种构建都逐位；常数重启（含 PFT 常数）与冷启动重启 diff 0
+回归（PROFILE=release，比对范围扩到 PFT/城市重启）：LCT/城市 31 例逐位
+  （hp 的月度重启是 12:22 之前留下的旧文件、ui 只有 Fortran 参照，二者不是回退）
+cargo test core 370 / runtime 78 / hist 50 / init 156 / lapack 6 / forcing 148；
+clippy --all-targets -D warnings 无告警；fmt 通过
+```
+
+未验证：`DEF_Interception_scheme = 8` 的 PFT 支（逐 PFT 冠层尺寸 `ncd_p/ncw_p/bcw_p` 没装配，
+遇到即报错）、`DEF_USE_LAIFEEDBACK`、`DEF_SPLIT_SOILSNOW` 下的裸地 `ulrad` 分支（代码按 GIMPLE 写了，
+算例没开）、PFT 与作物（CFT ≥ 15）和 BGC 的组合、多 patch 的 PFT 重启（单点只有一个 patch，
+没读 `patch_pft_s/e`）。PC（`DEF_USE_PC`）仍在运行期入口报错。

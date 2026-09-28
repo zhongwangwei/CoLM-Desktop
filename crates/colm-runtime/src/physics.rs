@@ -152,14 +152,16 @@ pub fn land_physics_parameters(
              (MOD_Namelist.F90:1942 stops the model otherwise), got {selected:?}"
         );
     }
-    if selected[0] != "DEF_USE_LCT" {
+    // PFT 已移植（逐 PFT 截留/短波/叶温/雪盖/反照率，聚合后复用 LCT 的地面与水分路径）；
+    // PC 的三维冠层辐射与 `LeafTemperaturePC` 还没有。
+    if selected[0] == "DEF_USE_PC" {
         bail!(
-            "{} selects the {{PFT,PC}} subgrid structure, which the Rust runtime has not \
-             ported; only DEF_USE_LCT is implemented (`assembly.rs` assembles LCT patches \
-             only). Set DEF_USE_LCT=.true. (and the other two .false.) to run the ported path",
-            selected[0]
+            "DEF_USE_PC selects the plant-community subgrid (3D canopy radiation and \
+             LeafTemperaturePC), which the Rust runtime has not ported; use DEF_USE_LCT or \
+             DEF_USE_PFT"
         );
     }
+    let use_pft = selected[0] == "DEF_USE_PFT";
 
     // 上游 `MOD_Namelist.F90:1767-1772`：选了 van Genuchten 就把
     // `DEF_USE_VariablySaturatedFlow` 强制置真。它的声明默认值也是真，所以**默认
@@ -301,6 +303,7 @@ pub fn land_physics_parameters(
         maximum_radial_root_conductance: real(document, "DEF_PH_KRMAX")?,
     };
     Ok(LandPhysicsParameters {
+        use_pft,
         hydraulic_model: if campbell {
             HydraulicModel::Campbell
         } else {
@@ -320,7 +323,7 @@ pub fn land_physics_parameters(
             document,
             "DEF_precip_phase_discrimination_scheme",
         )?)?,
-        surface_resistance_scheme: soil_surface_resistance_scheme(document, campbell)?,
+        surface_resistance_scheme: soil_surface_resistance_scheme(document, campbell, use_pft)?,
         stress_scheme: scheme_index(document, "DEF_RSTFAC", 1, 2)?,
         surface_layer_scheme: if logical(document, "DEF_USE_CBL_HEIGHT")? {
             SurfaceLayerScheme::LargeEddy
@@ -489,8 +492,16 @@ fn stomata(document: &Document, urban_run: bool) -> Result<StomataOptions> {
 /// **`DEF_USE_LCT` 那道门在本仓库恒成立**：`LandCoverScheme` 只有 `Usgs`/`Igbp`
 /// 两种地类分类，没有 PFT/PC 子网格，运行时走的也只有 standard-LCT 这一条链。
 /// 所以这里只需要判 Campbell。
-fn soil_surface_resistance_scheme(document: &Document, campbell: bool) -> Result<i32> {
-    if !campbell {
+/// `MOD_Namelist.F90:1860-1867`：只有 **LCT** 在 van Genuchten 土壤下把
+/// `DEF_RSS_SCHEME` 强制置 0（"Soil resistance is automaticlly turned off for VG soil +
+/// USGS|IGBP scheme"）；PFT/PC 保留 namelist 值，默认 1。3-PFT AT-Neu 算例漏掉这一条时
+/// 第一条 history 的 `f_rss` 是 0 对 Fortran 的 0.00885。
+fn soil_surface_resistance_scheme(
+    document: &Document,
+    campbell: bool,
+    use_pft: bool,
+) -> Result<i32> {
+    if !campbell && !use_pft {
         return Ok(0);
     }
     scheme_index(document, "DEF_RSS_SCHEME", 0, 5)

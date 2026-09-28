@@ -35,31 +35,39 @@ fn golden_case(name: &str) -> Document {
 /// 这条测试的价值在于**它读的是 schema**：映射里任何一处写成字面量（例如把
 /// `DEF_TUNING_CAPR` 的 0.34 抄进代码）都会在默认值变动后与 schema 分叉，
 /// 而那时候只有这条会响。
-/// 选 PFT/PC 子网格结构的算例必须**当场报错**，不能静默按 LCT 算完。
+/// 子网格结构开关：PFT 已移植、PC 必须**当场报错**，不能静默按 LCT 算完。
 ///
 /// 上游 `MOD_Namelist.F90:1932-1944` 要求 `DEF_USE_LCT`/`DEF_USE_PFT`/`DEF_USE_PC`
-/// 恰好一个为真，默认是 LCT。本仓库只实现了 LCT 的编排，而**以前根本不读这三个
-/// 开关** —— 一个写 `DEF_USE_PFT=.true.` 的算例会一路跑完，算式对、结构错、不报错。
+/// 恰好一个为真，默认是 LCT。以前**根本不读这三个开关** —— 一个写
+/// `DEF_USE_PC=.true.` 的算例会一路跑完，算式对、结构错、不报错。
+///
+/// PFT 还牵动 `DEF_RSS_SCHEME`：`:1860-1867` 只在 LCT 下把 VG 土壤的土壤表面阻力关掉，
+/// PFT 保留 namelist 值（默认 1）。
 #[test]
-fn a_pft_or_pc_subgrid_case_is_refused_rather_than_run_as_lct() {
-    for (body, expected) in [
-        (
-            "DEF_USE_LCT=.false.\nDEF_USE_PFT=.true.\nDEF_USE_PC=.false.",
-            "DEF_USE_PFT",
-        ),
-        (
-            "DEF_USE_LCT=.false.\nDEF_USE_PFT=.false.\nDEF_USE_PC=.true.",
-            "DEF_USE_PC",
-        ),
-    ] {
-        let error = land_physics_parameters(&case_with(body), LandCoverScheme::Igbp, HEIGHTS)
-            .expect_err("a PFT/PC subgrid case must not map to physics parameters");
-        let message = error.to_string();
-        assert!(
-            message.contains(expected) && message.contains("not"),
-            "the refusal must name {expected}: {message}"
-        );
-    }
+fn a_pc_subgrid_case_is_refused_and_pft_keeps_soil_resistance() {
+    let pft = land_physics_parameters(
+        &case_with("DEF_USE_LCT=.false.\nDEF_USE_PFT=.true.\nDEF_USE_PC=.false."),
+        LandCoverScheme::Igbp,
+        HEIGHTS,
+    )
+    .expect("a PFT case maps to physics parameters");
+    assert!(pft.use_pft);
+    assert_eq!(pft.surface_resistance_scheme, 1);
+    let lct = land_physics_parameters(&empty_case(), LandCoverScheme::Igbp, HEIGHTS).unwrap();
+    assert!(!lct.use_pft);
+    assert_eq!(lct.surface_resistance_scheme, 0);
+
+    let error = land_physics_parameters(
+        &case_with("DEF_USE_LCT=.false.\nDEF_USE_PFT=.false.\nDEF_USE_PC=.true."),
+        LandCoverScheme::Igbp,
+        HEIGHTS,
+    )
+    .expect_err("a PC subgrid case must not map to physics parameters");
+    let message = error.to_string();
+    assert!(
+        message.contains("DEF_USE_PC") && message.contains("not"),
+        "the refusal must name DEF_USE_PC: {message}"
+    );
     // 两个或三个同时为真也要报错（上游 `CoLM_stop`）。
     let error = land_physics_parameters(
         &case_with("DEF_USE_LCT=.true.\nDEF_USE_PFT=.true."),

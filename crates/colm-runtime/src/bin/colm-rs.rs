@@ -155,6 +155,16 @@ fn run() -> Result<()> {
         assemble_standard_lct_template(&files, arguments.patch, physics)
             .context("cannot assemble the snow-free standard LCT template")?
     };
+    // `DEF_USE_PFT`：土壤 patch 的 PFT 子网格来自同目录的 `*_restart_pft_*` 两份重启。
+    if template.physics.use_pft {
+        template = template
+            .with_pft(
+                &colm_runtime::pft::pft_restart_path(&files.constant)?,
+                &colm_runtime::pft::pft_restart_path(&files.time)?,
+                &document,
+            )
+            .context("cannot assemble the PFT subgrid")?;
+    }
     // `DEF_LAI_MONTHLY` 打开时每月重读 LAI（`CoLM.F90:595-605`）。**不装就等于关门**：
     // 跨月的运行会从第二个月起一直用第一天的叶面积，而且不会报错。
     if logical_field(&document, "DEF_LAI_MONTHLY")? {
@@ -180,6 +190,19 @@ fn run() -> Result<()> {
                 year("DEF_LAI_START_YEAR")?,
                 year("DEF_LAI_END_YEAR")?,
             )?);
+        } else if template.pft.is_some() {
+            // `LAI_readin` 的 PFT 段：逐 PFT 读 `LAI_pfts_monthly`，patch 值取聚合。
+            let year = |key: &str| -> Result<i32> {
+                i32::try_from(integer_field(&document, key)?)
+                    .with_context(|| format!("{key} does not fit an i32"))
+            };
+            template = template.with_pft_monthly_leaf_area_index(
+                &path,
+                logical_field(&document, "USE_SITE_LAI")?,
+                change_yearly,
+                land_cover_year,
+                (year("DEF_LAI_START_YEAR")?, year("DEF_LAI_END_YEAR")?),
+            )?;
         } else if logical_field(&document, "DEF_URBAN_RUN")? {
             // 城市单点里的非城市 patch：`LAI_readin` 的单点分支被 `.not. DEF_URBAN_RUN`
             // 整个跳过，`tlai`/`tsai` 保持重启值 —— 不装读取器就是这个行为。
@@ -397,6 +420,14 @@ fn write_evolved_restart(
             .with_context(|| format!("cannot create {}", parent.display()))?;
     }
     write_restart(restart_in, restart_out, overrides.as_slice())?;
+    // PFT 子网格另有一份时间重启（`<case>_restart_pft_<date>_…nc`），与主重启同目录。
+    if let (Some(pft_template), Some(pft)) = (&template.pft, &state.energy.pft) {
+        write_restart(
+            &colm_runtime::pft::pft_restart_path(restart_in)?,
+            &colm_runtime::pft::pft_restart_path(restart_out)?,
+            &pft_template.overrides(pft),
+        )?;
+    }
     // 城市单元另有一份时间重启（`<case>_restart_urban_<date>_…nc`），与主重启同目录。
     if let (Some(urban_template), Some(urban)) = (&template.urban, &state.urban) {
         let urban_path = |path: &Path| -> Result<std::path::PathBuf> {

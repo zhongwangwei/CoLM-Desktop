@@ -162,9 +162,49 @@ fn albland(
     stem_area_index: f64,
     radiation: &mut ColdStartRadiation,
 ) -> Result<f64> {
+    let Some((ground, previous_thermal_gap_fraction, czen)) = albland_ground(
+        input,
+        ground_snow_fraction,
+        surface_wetness,
+        leaf_area_index + stem_area_index,
+        radiation,
+    )?
+    else {
+        return Ok(input.snow_age);
+    };
+    // 第 4 节：叠冠层两流。
+    *radiation = broadband_radiation_from_ground_using(
+        input.patch_type,
+        ground,
+        input.optics,
+        leaf_area_index,
+        stem_area_index,
+        input.wet_snow_fraction,
+        czen,
+        input.use_lct,
+        input.vegetation_snow,
+        TwoStreamKind::LandCover {
+            usgs_land_cover: input.usgs_land_cover,
+        },
+        previous_thermal_gap_fraction,
+    )?;
+    Ok(ground.snow_age)
+}
+
+/// `albland` 的前三节：默认化、夜间返回与地面（土 + 雪）反照率。
+///
+/// 夜间返回 `None`（`radiation` 已写成默认值）；白天返回地面反照率、
+/// 按冠层面积重置过的上一步 `thermk` 与截断后的 `czen`。
+fn albland_ground(
+    input: &SurfaceOpticsInput,
+    ground_snow_fraction: f64,
+    surface_wetness: f64,
+    leaf_stem_area: f64,
+    radiation: &mut ColdStartRadiation,
+) -> Result<Option<(ColdStartGroundAlbedo, f64, f64)>> {
     // 第 1 节：`thermk` 只在无冠层时被重置为 1（`MOD_Albedo.F90:225-228`，注释写明
     // "夜间长波用上一步的值"）；有冠层时它保留上一次调用的结果。
-    let previous_thermal_gap_fraction = if leaf_area_index + stem_area_index <= 1.0e-6 {
+    let previous_thermal_gap_fraction = if leaf_stem_area <= 1.0e-6 {
         1.0
     } else {
         radiation.thermal_gap_fraction
@@ -184,7 +224,7 @@ fn albland(
         radiation.transmission = Some([[0.0, 1.0, 1.0]; 2]);
         radiation.direct_extinction = 1.0;
         radiation.diffuse_extinction = 0.718;
-        return Ok(input.snow_age);
+        return Ok(None);
     }
     let czen = input.cosine_zenith.max(0.001);
 
@@ -217,29 +257,95 @@ fn albland(
         ([[1.0; 2]; 2], input.snow_age)
     };
 
-    // 第 3.1 节与第 4 节：按雪盖比例混合，再叠冠层两流。
+    // 第 3.1 节：按雪盖比例混合。
     let ground = crate::mix_ground_albedo(soil, snow, ground_snow_fraction);
-    *radiation = broadband_radiation_from_ground_using(
-        input.patch_type,
+    Ok(Some((
         ColdStartGroundAlbedo {
             soil,
             snow,
             ground,
             snow_age,
         },
-        input.optics,
+        previous_thermal_gap_fraction,
+        czen,
+    )))
+}
+
+/// PFT patch 的「Preparation for the next time step」（`CoLMMAIN.F90:2112-2130` 与
+/// `albland` 的 PFT 段）。
+///
+/// `input` 里 patch 级的 `temporal_leaf_area_index` 是 `tlai(ipatch)`（关掉
+/// `DEF_VEG_SNOW` 时 `lai` 直接取它）；`momentum_roughness_m`、`optics`、
+/// `wet_snow_fraction` 不读 —— 那三样都换成了逐 PFT 的量。
+pub fn prepare_pft_surface_optics(
+    input: SurfaceOpticsInput,
+    patch: &mut crate::PftPatch,
+    radiation: &mut ColdStartRadiation,
+) -> Result<SurfaceOptics> {
+    ensure!(
+        input.patch_type == 0
+            && input.cosine_zenith.is_finite()
+            && input.soil_thickness_m > 0.0
+            && input.snow_water_equivalent_mm >= 0.0
+            && (-5..=0).contains(&input.snow_layers),
+        "PFT surface-optics inputs are invalid"
+    );
+    let fraction = crate::pft_snow_fraction(
+        patch,
+        input.soil_roughness_m,
+        input.snow_water_equivalent_mm,
+        input.snow_depth_m,
+        input.snow_cover_exponent,
+        input.vegetation_snow,
+    )?;
+    for column in &mut patch.columns {
+        column.leaf_area_index = if input.vegetation_snow {
+            column.temporal_leaf_area_index * column.vegetation_free_fraction
+        } else {
+            column.temporal_leaf_area_index
+        };
+        column.stem_area_index = column.temporal_stem_area_index * column.vegetation_free_fraction;
+    }
+    let leaf_area_index = if input.vegetation_snow {
+        patch.sum(|column| column.leaf_area_index)
+    } else {
+        input.temporal_leaf_area_index
+    };
+    let stem_area_index = patch.sum(|column| column.stem_area_index);
+
+    let surface_wetness =
+        (1.0e-3 * input.soil_liquid_water_kg_m2 / input.soil_thickness_m).min(1.0);
+    // `albland` 入口对 PFT 量的默认化在夜间返回**之前**（`MOD_Albedo.F90:247-257`）。
+    crate::pft::reset_pft_radiation(patch);
+    let snow_age = match albland_ground(
+        &input,
+        fraction.ground_snow_fraction,
+        surface_wetness,
+        leaf_area_index + stem_area_index,
+        radiation,
+    )? {
+        None => input.snow_age,
+        Some((ground, previous_thermal_gap_fraction, czen)) => {
+            radiation.thermal_gap_fraction = previous_thermal_gap_fraction;
+            crate::pft::pft_canopy_radiation(
+                patch,
+                ground,
+                czen,
+                leaf_area_index + stem_area_index,
+                input.vegetation_snow,
+                radiation,
+            )?;
+            ground.snow_age
+        }
+    };
+    Ok(SurfaceOptics {
         leaf_area_index,
         stem_area_index,
-        input.wet_snow_fraction,
-        czen,
-        input.use_lct,
-        input.vegetation_snow,
-        TwoStreamKind::LandCover {
-            usgs_land_cover: input.usgs_land_cover,
-        },
-        previous_thermal_gap_fraction,
-    )?;
-    Ok(snow_age)
+        vegetation_snow_fraction: fraction.vegetation_snow_fraction,
+        vegetation_free_fraction: fraction.vegetation_free_fraction,
+        ground_snow_fraction: fraction.ground_snow_fraction,
+        snow_age,
+    })
 }
 
 #[cfg(test)]

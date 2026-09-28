@@ -101,6 +101,7 @@ pub mod linear;
 pub mod monin_obukhov;
 pub mod net_solar;
 pub mod pc_radiation;
+pub mod pft;
 pub mod phase_change;
 pub mod photosynthesis;
 pub mod plant_hydraulics;
@@ -252,8 +253,9 @@ pub use lake_temperature::{
     LakeThermalFluxes, LAKE_EMISSIVITY,
 };
 pub use land_cover::{
-    land_cover_classes, land_cover_tables, root_fraction, waterbody_class, ClassConstants,
-    PlantHydraulicOverrides, PlantHydraulicTraits, RootFractionScheme,
+    land_cover_classes, land_cover_tables, root_fraction, schenk_jackson_root_fraction,
+    waterbody_class, ClassConstants, PlantHydraulicOverrides, PlantHydraulicTraits,
+    RootFractionScheme,
 };
 pub use leaf_temperature::{
     leaf_temperature, reference_height_temperature_k, LeafPlantHydraulicInput,
@@ -321,8 +323,14 @@ pub use soil_water::{
     solve_campbell_soil_water, update_groundwater, update_groundwater_topmodel,
     CampbellSoilWaterInput, CampbellSoilWaterState, GroundwaterInput, GroundwaterState,
 };
-pub use surface_optics::{prepare_surface_optics, SurfaceOptics, SurfaceOpticsInput};
+pub use surface_optics::{
+    prepare_pft_surface_optics, prepare_surface_optics, SurfaceOptics, SurfaceOpticsInput,
+};
 
+pub use pft::{
+    aggregate_pft_radiation, pft_snow_fraction, pft_sum, PftColumn, PftParameters, PftPatch,
+    PftShortwave, PftSnowFraction, BARE_PFT_WATER_POTENTIAL_MM,
+};
 pub use standard_lct_step::{
     standard_lct_energy_step, standard_lct_snow_soil_step, standard_lct_soil_step, CanopyGeometry,
     PlantHydraulicSettings, SplitSurface, StandardLctEnergyInput, StandardLctEnergyOutput,

@@ -8,6 +8,7 @@
 pub mod assembly;
 pub mod baseflow_optimizer;
 pub mod history;
+pub mod pft;
 pub mod physics;
 
 use std::path::{Path, PathBuf};
@@ -1501,6 +1502,7 @@ mod tests {
     /// 装配层测试用的那套物理参数；这里只需一份，避免第二个测试抄一遍三十多个字段。
     fn land_physics() -> crate::assembly::LandPhysicsParameters {
         crate::assembly::LandPhysicsParameters {
+            use_pft: false,
             hydraulic_model: colm_core::HydraulicModel::VanGenuchten,
             variably_saturated_flow: false,
             plant_hydraulics: false,

@@ -20,11 +20,11 @@ use crate::{
 
 const VON_KARMAN: f64 = 0.4;
 const GRAVITY_M_S2: f64 = 9.80616;
-const LATENT_HEAT_VAPORIZATION_J_KG: f64 = 2.5104e6;
+pub(crate) const LATENT_HEAT_VAPORIZATION_J_KG: f64 = 2.5104e6;
 const AIR_HEAT_CAPACITY_J_KG_K: f64 = 1004.64;
 const WATER_HEAT_CAPACITY_J_KG_K: f64 = 4188.0;
 const ICE_HEAT_CAPACITY_J_KG_K: f64 = 2117.27;
-const STEFAN_BOLTZMANN: f64 = 5.67e-8;
+pub(crate) const STEFAN_BOLTZMANN: f64 = 5.67e-8;
 const FUSION_HEAT_J_KG: f64 = 0.3336e6;
 const MAX_ITERATIONS: usize = 40;
 const MIN_ITERATIONS: usize = 6;
@@ -1114,12 +1114,16 @@ pub fn leaf_temperature(
     // 也没有吃相变段（`dheatl` 的 Niu(2004) 项、`tl` 拉回）—— 那两样都在它之后。
     // 移到更新之后会同时踩到这两点，`precipitation_heat` 还会用到已被相变改过的
     // `leaf_temperature_k`。
-    let precipitation_heat = WATER_HEAT_CAPACITY_J_KG_K
-        * intercepted_rain
-        * (input.precipitation_temperature_k - state.leaf_temperature_k)
-        + ICE_HEAT_CAPACITY_J_KG_K
-            * intercepted_snow
-            * (input.precipitation_temperature_k - state.leaf_temperature_k);
+    // `:1166 hprl = cpliq*qintr_rain*(t_precip-tl) + cpice*qintr_snow*(t_precip-tl)` 的 GIMPLE
+    // 是 `FMA(cpliq*qintr_rain, t_precip-tl, (cpice*qintr_snow)*(t_precip-tl))`：雨项熔进去，
+    // 雪项先舍入。只有雨雪**同时**被截留的步才与平铺写法不同（单相时另一项为 0），
+    // 所以 LCT 回归一直没碰到；3-PFT 带裸地的 AT-Neu 11 月有 10 步差 1 ULP，只在 `f_zerr` 显形。
+    let precipitation_temperature_difference =
+        input.precipitation_temperature_k - state.leaf_temperature_k;
+    let precipitation_heat = (WATER_HEAT_CAPACITY_J_KG_K * intercepted_rain).mul_add(
+        precipitation_temperature_difference,
+        ICE_HEAT_CAPACITY_J_KG_K * intercepted_snow * precipitation_temperature_difference,
+    );
     let canopy_heat_storage = clai / input.time_step_seconds * final_temperature_change;
     let energy_balance_error = input.canopy_absorbed_solar_w_m2
         + last.net_longwave

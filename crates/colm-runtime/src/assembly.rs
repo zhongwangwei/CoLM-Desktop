@@ -68,6 +68,8 @@ pub struct RestartStateFiles {
 /// 再翻译一遍。
 #[derive(Debug, Clone)]
 pub struct LandPhysicsParameters {
+    /// `DEF_USE_PFT`：土壤 patch 按 PFT 子网格算（见 [`crate::pft`]）；否则是 LCT。
+    pub use_pft: bool,
     /// namelist 选的土壤水力关系；决定常数重启里读 `bsw` 还是五个 van Genuchten 场。
     pub hydraulic_model: HydraulicModel,
     /// `DEF_USE_VariablySaturatedFlow` **生效后**的取值。
@@ -781,6 +783,8 @@ pub struct StandardLctRestartTemplate {
     pub lake: Option<LakeTemplate>,
     /// 城市 patch 的城市常数与初始城市状态；其余 patch 为 `None`。
     pub urban: Option<UrbanTemplate>,
+    /// `DEF_USE_PFT` 下土壤 patch 的逐 PFT 参数与初始状态（[`Self::with_pft`] 装上）。
+    pub pft: Option<crate::pft::PftTemplate>,
     /// 雪 + 土的模板列（`soilsnow`），积雪分支的 `GroundTemperatureInput` 需要这个形状。
     ///
     /// 雪段在前、土段在后，与时间重启里的数组同序；无雪时它就是土列本身。
@@ -1249,6 +1253,7 @@ fn assemble(
     Ok(StandardLctRestartTemplate {
         lake,
         urban,
+        pft: None,
         patch,
         patch_type: i32::try_from(patch_type).context("patchtype is outside the kernel's range")?,
         // 入参重启里没有 `rss` 时按 `spval` 处理 —— 与上游"起跑时是缺测值"一致。
@@ -1312,6 +1317,54 @@ impl StandardLctRestartTemplate {
         self
     }
 
+    /// `DEF_USE_PFT`：装上 PFT 子网格（常数与时间 PFT 重启、`DEF_PFT_*` 参数）。
+    ///
+    /// 只有土壤 patch（`patchtype == 0`）有 PFT；其余 patch 在 PFT 模式下仍走各自的分支。
+    pub fn with_pft(
+        mut self,
+        constant: &std::path::Path,
+        time: &std::path::Path,
+        document: &colm_namelist::Document,
+    ) -> Result<Self> {
+        ensure!(
+            self.patch_type == 0,
+            "DEF_USE_PFT gives PFTs only to soil patches, but this patch has patchtype {}",
+            self.patch_type
+        );
+        self.pft = Some(crate::pft::PftTemplate::read(
+            constant,
+            time,
+            document,
+            &self.physics,
+            &self.interface_depth_m,
+        )?);
+        Ok(self)
+    }
+
+    /// 给 PFT 子网格装上月度 LAI 源（见 [`crate::pft::PftTemplate::with_monthly_leaf_area_index`]）。
+    pub fn with_pft_monthly_leaf_area_index(
+        mut self,
+        path: impl AsRef<std::path::Path>,
+        use_site_lai: bool,
+        change_yearly: bool,
+        land_cover_year: i32,
+        (start_year, end_year): (i32, i32),
+    ) -> Result<Self> {
+        let pft = self
+            .pft
+            .take()
+            .context("the PFT monthly LAI needs a PFT template first")?;
+        self.pft = Some(pft.with_monthly_leaf_area_index(
+            path,
+            use_site_lai,
+            change_yearly,
+            land_cover_year,
+            start_year,
+            end_year,
+        )?);
+        Ok(self)
+    }
+
     /// `scale_baseflow`：把装配期的默认 1.0 换成 `ParaOpt/*_baseflow.nc` 里的值。
     ///
     /// 上游（`MOD_Opt_Baseflow.F90:37-38`）在 `Opt_Baseflow_init` 里读一次，
@@ -1341,6 +1394,17 @@ impl StandardLctRestartTemplate {
         time: colm_core::CalendarTime,
         state: &mut StandardLctSnowSoilState,
     ) -> Result<bool> {
+        // PFT 段（`MOD_LAIReadin.F90:166-185`）：逐 PFT 换 `tlai_p`/`tsai_p`，
+        // patch 的 `tlai`/`tsai` 取聚合，没有 LCT 那一段 `fveg0` 后处理。
+        if let (Some(template), Some(patch)) = (&self.pft, state.energy.pft.as_mut()) {
+            if let Some((tlai, tsai)) = template.refresh_monthly_leaf_area_index(time, patch)? {
+                state.energy.temporal_canopy = colm_core::TemporalCanopy {
+                    leaf_area_index: tlai,
+                    stem_area_index: tsai,
+                };
+                return Ok(true);
+            }
+        }
         let Some(lai) = &self.monthly_leaf_area_index else {
             return Ok(false);
         };
@@ -1396,6 +1460,7 @@ impl StandardLctRestartTemplate {
                     stem_area_index: self.temporal_stem_area_index,
                 },
                 soil_surface_resistance_s_m: self.soil_surface_resistance_s_m,
+                pft: self.pft.as_ref().map(|pft| Box::new(pft.initial.clone())),
             },
             temperature_k: self.temperature_k.clone(),
             water: self.water.clone(),
@@ -1740,6 +1805,7 @@ impl StandardLctRestartTemplate {
                     stem_area_index: self.temporal_stem_area_index,
                 },
                 soil_surface_resistance_s_m: self.soil_surface_resistance_s_m,
+                pft: self.pft.as_ref().map(|pft| Box::new(pft.initial.clone())),
             },
             snow: self.snow.clone(),
             soil_temperature_k: self.temperature_k.clone(),
@@ -1771,37 +1837,40 @@ impl StandardLctRestartTemplate {
             state.soil_water.liquid_water_kg_m2.len() == self.layer_thickness_m.len(),
             "the surface-optics preparation needs one liquid-water value per soil layer"
         );
-        let optics = colm_core::prepare_surface_optics(
-            colm_core::SurfaceOpticsInput {
-                patch_type: self.patch_type,
-                time_step_seconds: self.physics.timestep_seconds,
-                cosine_zenith: step.cosine_zenith,
-                ground_temperature_k: step.ground_temperature_k,
-                temporal_leaf_area_index: state.energy.temporal_canopy.leaf_area_index,
-                temporal_stem_area_index: state.energy.temporal_canopy.stem_area_index,
-                momentum_roughness_m: step.momentum_roughness_m,
-                soil_roughness_m: self.physics.soil_roughness_m,
-                snow_cover_exponent: self.physics.snow_cover_exponent,
-                soil: self.soil_reflectance,
-                soil_liquid_water_kg_m2: state.soil_water.liquid_water_kg_m2[0],
-                soil_thickness_m: self.layer_thickness_m[0],
-                optics: colm_core::leaf_optics_from_land_cover_one_based(
-                    self.physics.land_cover_scheme,
-                    i32::try_from(self.land_class)?,
-                )?,
-                wet_snow_fraction: step.wet_snow_fraction,
-                snow_water_equivalent_mm: state.snow.water_equivalent_kg_m2,
-                previous_snow_water_equivalent_mm: step.previous_snow_water_equivalent_mm,
-                snow_depth_m: state.snow.depth_m,
-                snow_layers: state.snow.layer_count,
-                snow_age: state.snow.age,
-                // 本分支只有 `DEF_USE_LCT` 这一条编排。
-                use_lct: true,
-                usgs_land_cover: self.physics.land_cover_scheme == LandCoverScheme::Usgs,
-                vegetation_snow: self.physics.vegetation_snow,
-            },
-            &mut state.energy.radiation,
-        )?;
+        let input = colm_core::SurfaceOpticsInput {
+            patch_type: self.patch_type,
+            time_step_seconds: self.physics.timestep_seconds,
+            cosine_zenith: step.cosine_zenith,
+            ground_temperature_k: step.ground_temperature_k,
+            temporal_leaf_area_index: state.energy.temporal_canopy.leaf_area_index,
+            temporal_stem_area_index: state.energy.temporal_canopy.stem_area_index,
+            momentum_roughness_m: step.momentum_roughness_m,
+            soil_roughness_m: self.physics.soil_roughness_m,
+            snow_cover_exponent: self.physics.snow_cover_exponent,
+            soil: self.soil_reflectance,
+            soil_liquid_water_kg_m2: state.soil_water.liquid_water_kg_m2[0],
+            soil_thickness_m: self.layer_thickness_m[0],
+            optics: colm_core::leaf_optics_from_land_cover_one_based(
+                self.physics.land_cover_scheme,
+                i32::try_from(self.land_class)?,
+            )?,
+            wet_snow_fraction: step.wet_snow_fraction,
+            snow_water_equivalent_mm: state.snow.water_equivalent_kg_m2,
+            previous_snow_water_equivalent_mm: step.previous_snow_water_equivalent_mm,
+            snow_depth_m: state.snow.depth_m,
+            snow_layers: state.snow.layer_count,
+            snow_age: state.snow.age,
+            // 本分支只有 `DEF_USE_LCT` 这一条编排。
+            use_lct: true,
+            usgs_land_cover: self.physics.land_cover_scheme == LandCoverScheme::Usgs,
+            vegetation_snow: self.physics.vegetation_snow,
+        };
+        let optics = match state.energy.pft.as_mut() {
+            Some(pft) => {
+                colm_core::prepare_pft_surface_optics(input, pft, &mut state.energy.radiation)?
+            }
+            None => colm_core::prepare_surface_optics(input, &mut state.energy.radiation)?,
+        };
         state.snow.ground_snow_fraction = optics.ground_snow_fraction;
         state.snow.age = optics.snow_age;
         state.energy.canopy = colm_core::CanopyGeometry {

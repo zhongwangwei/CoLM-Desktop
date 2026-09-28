@@ -591,6 +591,7 @@ fn energy_state(forcing: crate::RuntimeForcing) -> StandardLctEnergyState {
         },
         // 单元测试直接调内核；"起跑第一步 rss 是 spval"那道门在运行期状态里模拟。
         soil_surface_resistance_s_m: 0.0,
+        pft: None,
     }
 }
 

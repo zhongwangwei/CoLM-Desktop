@@ -106,6 +106,11 @@ pub struct StandardLctEnergyState {
     /// `spval`**（起跑那一步），由 `MOD_Thermal` 算完之后覆盖。这里保留同一份
     /// 语义：初值来自重启，每步由 [`soil_surface_resistance_input`] 读取并更新。
     pub soil_surface_resistance_s_m: f64,
+    /// `DEF_USE_PFT` 时的逐 PFT 子网格；LCT 为 `None`。
+    ///
+    /// 有它时截留、短波吸收与冠层能量三段改走逐 PFT 再聚合（见 [`crate::pft`]），
+    /// 上面的 `leaf`/`radiation` 存的是聚合后的 patch 量（它们也写进主重启）。
+    pub pft: Option<Box<crate::PftPatch>>,
 }
 
 /// 用状态里的冠层几何覆盖输入里的 `lai`/`sai`。
@@ -274,6 +279,8 @@ pub struct StandardLctSnowSoilOutput {
 struct PreparedEnergy {
     precipitation: PrecipitationState,
     interception: CanopyInterceptionFluxes,
+    /// PFT patch 的逐 PFT 截留（叶温要 `qintr_rain_p`/`qintr_snow_p`）。
+    pft_interception: Vec<CanopyInterceptionFluxes>,
 }
 
 /// Runs the normal LCT `CoLMMAIN → THERMAL` energy chain without duplicating a
@@ -287,7 +294,7 @@ pub fn standard_lct_energy_step(
     state: &mut StandardLctEnergyState,
 ) -> Result<StandardLctEnergyOutput> {
     let input = with_state_canopy(input, state.canopy);
-    validate(input)?;
+    validate(input, state.pft.is_some())?;
     let prepared = prepare_energy(input, state)?;
     finish_energy_step(input, state, prepared)
 }
@@ -299,20 +306,25 @@ fn prepare_energy(
     let precipitation = input
         .forcing
         .partition_precipitation(0, input.precipitation_scheme)?;
-    let interception = intercept_canopy(
-        CanopyInterceptionInput {
-            convective_rain_kg_m2_s: precipitation.convective_rain_kg_m2_s,
-            convective_snow_kg_m2_s: precipitation.convective_snow_kg_m2_s,
-            large_scale_rain_kg_m2_s: precipitation.large_scale_rain_kg_m2_s,
-            large_scale_snow_kg_m2_s: precipitation.large_scale_snow_kg_m2_s,
-            leaf_temperature_k: state.leaf.leaf_temperature_k,
-            ..input.interception
-        },
-        &mut state.leaf.canopy_water,
-    )?;
+    let template = CanopyInterceptionInput {
+        convective_rain_kg_m2_s: precipitation.convective_rain_kg_m2_s,
+        convective_snow_kg_m2_s: precipitation.convective_snow_kg_m2_s,
+        large_scale_rain_kg_m2_s: precipitation.large_scale_rain_kg_m2_s,
+        large_scale_snow_kg_m2_s: precipitation.large_scale_snow_kg_m2_s,
+        leaf_temperature_k: state.leaf.leaf_temperature_k,
+        ..input.interception
+    };
+    let (interception, pft_interception) = match state.pft.as_mut() {
+        Some(pft) => crate::pft::intercept_pfts(template, pft, &mut state.leaf.canopy_water)?,
+        None => (
+            intercept_canopy(template, &mut state.leaf.canopy_water)?,
+            Vec::new(),
+        ),
+    };
     Ok(PreparedEnergy {
         precipitation,
         interception,
+        pft_interception,
     })
 }
 
@@ -324,7 +336,11 @@ fn finish_energy_step(
     let PreparedEnergy {
         precipitation,
         interception,
+        pft_interception,
     } = prepared;
+    if let Some(pft) = state.pft.as_mut() {
+        crate::pft::aggregate_pft_absorption(pft, &mut state.radiation);
+    }
     let shortwave = net_solar(
         NetSolarInput {
             forcing: input.forcing.shortwave,
@@ -333,7 +349,6 @@ fn finish_energy_step(
         &mut state.radiation,
     )?;
     let ground_humidity = ground_humidity_input(input)?;
-    let root_uptake = root_uptake_input(input)?;
     let soil_surface_resistance_s_m =
         soil_surface_resistance_input(input, ground_humidity, state.soil_surface_resistance_s_m)?;
     state.soil_surface_resistance_s_m = soil_surface_resistance_s_m;
@@ -355,20 +370,43 @@ fn finish_energy_step(
             humidity.ground_humidity_temperature_slope_kg_kg_k;
     }
     let preliminary_ground_flux = ground_fluxes(ground_flux_input)?;
-    let leaf_input = leaf_input(
-        input.leaf_temperature,
-        input.forcing,
-        &state.radiation,
-        shortwave,
-        interception,
-        root_uptake.soil_water_stress,
-        root_uptake.maximum_transpiration_mm_s,
-        precipitation.precipitation_temperature_k,
-        soil_surface_resistance_s_m,
-        ground_flux_input,
-        preliminary_ground_flux,
-    );
-    let leaf = crate::leaf_temperature(leaf_input, &mut state.leaf)?;
+    let (leaf, root_uptake) = if let Some(pft) = state.pft.as_mut() {
+        let pft_shortwave =
+            crate::pft::pft_shortwave(pft, input.forcing.shortwave, input.solar.patch_type);
+        crate::pft::pft_canopy_energy(
+            crate::pft::PftCanopyContext {
+                input,
+                precipitation_temperature_k: precipitation.precipitation_temperature_k,
+                soil_surface_resistance_s_m,
+                ground_flux: ground_flux_input,
+                preliminary_ground_flux,
+                shortwave: &pft_shortwave,
+                interception: &pft_interception,
+            },
+            pft,
+            &mut state.leaf,
+        )?
+    } else {
+        let root_uptake = root_uptake_input(input, input.root_uptake.root_fraction)?;
+        let leaf_input = leaf_input(
+            input.leaf_temperature,
+            input.forcing,
+            CanopyDrive::patch(&state.radiation, shortwave, interception),
+            root_uptake.soil_water_stress,
+            root_uptake.maximum_transpiration_mm_s,
+            precipitation.precipitation_temperature_k,
+            soil_surface_resistance_s_m,
+            ground_flux_input,
+            preliminary_ground_flux,
+        );
+        (
+            crate::leaf_temperature(leaf_input, &mut state.leaf)?,
+            root_uptake,
+        )
+    };
+    // 两支共用的地面边界：`htvp` 与 `emg` 与叶温无关，直接从入参取。
+    let ground_latent_heat_j_kg = ground_flux_input.vaporization_heat_j_kg;
+    let ground_emissivity = input.leaf_temperature.ground_emissivity;
     let ground = ground_temperature(GroundTemperatureInput {
         time_step_seconds: input.interception.time_step_seconds,
         absorbed_ground_shortwave_w_m2: shortwave.ground_absorbed_w_m2,
@@ -382,8 +420,8 @@ fn finish_energy_step(
         evaporation_soil_kg_m2_s: leaf.soil_evaporation_kg_m2_s,
         evaporation_snow_kg_m2_s: leaf.snow_evaporation_kg_m2_s,
         ground_flux_temperature_derivative_w_m2_k: leaf.ground_flux_temperature_slope_w_m2_k,
-        vaporization_heat_j_kg: leaf_input.ground_latent_heat_j_kg,
-        ground_emissivity: leaf_input.ground_emissivity,
+        vaporization_heat_j_kg: ground_latent_heat_j_kg,
+        ground_emissivity,
         rain_on_ground_kg_m2_s: interception.ground_rain_kg_m2_s,
         snow_on_ground_kg_m2_s: interception.ground_snow_kg_m2_s,
         precipitation_temperature_k: precipitation.precipitation_temperature_k,
@@ -432,7 +470,7 @@ fn finish_energy_step(
             },
             snow_temperature_k: ground.temperature_k[0],
             time_step_seconds: input.ground_temperature.time_step_seconds,
-            ground_latent_heat_j_kg: leaf_input.ground_latent_heat_j_kg,
+            ground_latent_heat_j_kg,
         })?;
         corrected_ground_sensible_heat_w_m2 = split.ground_sensible_heat_w_m2;
         corrected_ground_evaporation_kg_m2_s = split.ground_evaporation_kg_m2_s;
@@ -444,13 +482,13 @@ fn finish_energy_step(
             upper_ice_water_kg_m2: ground.ice_water_kg_m2[0],
             upper_temperature_k: ground.temperature_k[0],
             time_step_seconds: input.ground_temperature.time_step_seconds,
-            ground_latent_heat_j_kg: leaf_input.ground_latent_heat_j_kg,
+            ground_latent_heat_j_kg,
         })?;
         // `MOD_Thermal.F90:1256` 的 `fseng = fseng + htvp*egidif`：GIMPLE 是
         // `FMA(htvp, egidif, fseng)`。`thermal_water` 里存的是**已经乘好的**
         // `sensible_heat_correction_w_m2`，那样再相加就少一次融合，所以这里
         // 用它的原始因子 `water_limited_evaporation_kg_m2_s`（就是 `egidif`）自己收。
-        corrected_ground_sensible_heat_w_m2 = leaf_input.ground_latent_heat_j_kg.mul_add(
+        corrected_ground_sensible_heat_w_m2 = ground_latent_heat_j_kg.mul_add(
             water.water_limited_evaporation_kg_m2_s,
             corrected_ground_sensible_heat_w_m2,
         );
@@ -635,7 +673,7 @@ pub fn standard_lct_snow_soil_step(
         ..input
     };
     let (_, template_snow_layers) = validate_snow_soil_step(input, state)?;
-    validate(input.energy)?;
+    validate(input.energy, state.energy.pft.is_some())?;
     remember_snow_ice_fraction(&mut state.snow);
     let prepared = prepare_energy(input.energy, &mut state.energy)?;
     // `CoLMMAIN.F90:772` 的 `netsolar` 在 `:959` 的 `newsnow` **之前**：NetSolar 用的是
@@ -1049,7 +1087,10 @@ fn ground_humidity_input(input: StandardLctEnergyInput<'_>) -> Result<Option<Gro
     })?))
 }
 
-fn root_uptake_input(input: StandardLctEnergyInput<'_>) -> Result<RootUptakeState> {
+pub(crate) fn root_uptake_input(
+    input: StandardLctEnergyInput<'_>,
+    root_fraction: &[f64],
+) -> Result<RootUptakeState> {
     let ground = input.ground_temperature;
     // 取**土层**段 `[snow_layers..snow_layers+nl_soil]`，与 `porsl`/`psi0`/`rootfr` 对齐。
     //
@@ -1066,6 +1107,7 @@ fn root_uptake_input(input: StandardLctEnergyInput<'_>) -> Result<RootUptakeStat
         layer_thickness_m: &ground.layer_thickness_m[soil.clone()],
         temperature_k: &ground.temperature_k[soil.clone()],
         liquid_water_kg_m2: &ground.liquid_water_kg_m2[soil],
+        root_fraction,
         ..input.root_uptake
     })
 }
@@ -1169,13 +1211,48 @@ fn ground_flux_input(
     }
 }
 
+/// 叶温内核从本步辐射与截留里要的那几项。
+///
+/// LCT 取 patch 的 `extkb`/`extkd`/`thermk`/`parsun`/`sabvsun`/`qintr_rain`…，
+/// PFT 取同名的 `_p` 量；两者之后的拼装（`fsun`、`thm`、地面边界）完全相同。
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct CanopyDrive {
+    pub(crate) direct_extinction: f64,
+    pub(crate) diffuse_extinction: f64,
+    pub(crate) thermal_gap_fraction: f64,
+    pub(crate) par_sunlit_w_m2: f64,
+    pub(crate) par_shaded_w_m2: f64,
+    pub(crate) sunlit_absorbed_w_m2: f64,
+    pub(crate) shaded_absorbed_w_m2: f64,
+    pub(crate) retained_rain_kg_m2_s: f64,
+    pub(crate) retained_snow_kg_m2_s: f64,
+}
+
+impl CanopyDrive {
+    fn patch(
+        radiation: &ColdStartRadiation,
+        shortwave: NetSolarFluxes,
+        interception: CanopyInterceptionFluxes,
+    ) -> Self {
+        Self {
+            direct_extinction: radiation.direct_extinction,
+            diffuse_extinction: radiation.diffuse_extinction,
+            thermal_gap_fraction: radiation.thermal_gap_fraction,
+            par_sunlit_w_m2: shortwave.par_sunlit_w_m2,
+            par_shaded_w_m2: shortwave.par_shaded_w_m2,
+            sunlit_absorbed_w_m2: shortwave.sunlit_absorbed_w_m2,
+            shaded_absorbed_w_m2: shortwave.shaded_absorbed_w_m2,
+            retained_rain_kg_m2_s: interception.retained_rain_kg_m2_s,
+            retained_snow_kg_m2_s: interception.retained_snow_kg_m2_s,
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
-fn leaf_input<'a>(
+pub(crate) fn leaf_input<'a>(
     input: LeafTemperatureInput<'a>,
     forcing: RuntimeForcing,
-    radiation: &ColdStartRadiation,
-    shortwave: NetSolarFluxes,
-    interception: CanopyInterceptionFluxes,
+    canopy: CanopyDrive,
     soil_water_stress: f64,
     transpiration_limit_kg_m2_s: f64,
     // **本步** `rain_snow_temp` 的输出 `t_precip`。
@@ -1192,9 +1269,8 @@ fn leaf_input<'a>(
     ground_flux: GroundFluxInput,
     preliminary_ground_flux: GroundFluxState,
 ) -> LeafTemperatureInput<'a> {
-    let direct_leaf_optical_depth = (radiation.direct_extinction * input.leaf_area_index).min(40.0);
-    let canopy_absorbed_solar_w_m2 =
-        shortwave.sunlit_absorbed_w_m2 + shortwave.shaded_absorbed_w_m2;
+    let direct_leaf_optical_depth = (canopy.direct_extinction * input.leaf_area_index).min(40.0);
+    let canopy_absorbed_solar_w_m2 = canopy.sunlit_absorbed_w_m2 + canopy.shaded_absorbed_w_m2;
     let sunlit_fraction = if forcing.cosine_zenith <= 0.0 || canopy_absorbed_solar_w_m2 < 1.0 {
         0.5
     } else {
@@ -1202,8 +1278,8 @@ fn leaf_input<'a>(
     };
     LeafTemperatureInput {
         time_step_seconds: input.time_step_seconds,
-        direct_extinction: radiation.direct_extinction,
-        diffuse_extinction: radiation.diffuse_extinction,
+        direct_extinction: canopy.direct_extinction,
+        diffuse_extinction: canopy.diffuse_extinction,
         eastward_wind_m_s: forcing.eastward_wind_m_s,
         northward_wind_m_s: forcing.northward_wind_m_s,
         // 上游的 `thm`（`MOD_Thermal.F90:550`），**不是位温** —— 位温是同处
@@ -1217,12 +1293,12 @@ fn leaf_input<'a>(
         virtual_potential_temperature_k: ground_flux.virtual_potential_temperature_k,
         reference_specific_humidity: forcing.specific_humidity,
         surface_pressure_pa: forcing.surface_pressure_pa,
-        sunlit_absorbed_par_w_m2: shortwave.par_sunlit_w_m2,
-        shaded_absorbed_par_w_m2: shortwave.par_shaded_w_m2,
+        sunlit_absorbed_par_w_m2: canopy.par_sunlit_w_m2,
+        shaded_absorbed_par_w_m2: canopy.par_shaded_w_m2,
         canopy_absorbed_solar_w_m2,
         atmospheric_longwave_w_m2: forcing.downward_longwave_w_m2,
         sunlit_fraction,
-        canopy_longwave_gap_fraction: radiation.thermal_gap_fraction,
+        canopy_longwave_gap_fraction: canopy.thermal_gap_fraction,
         soil_roughness_m: ground_flux.soil_roughness_m,
         snow_roughness_m: ground_flux.snow_roughness_m,
         snow_cover_fraction: ground_flux.snow_cover_fraction,
@@ -1240,8 +1316,8 @@ fn leaf_input<'a>(
         soil_surface_resistance_s_m,
         ground_emissivity: input.ground_emissivity,
         precipitation_temperature_k,
-        intercepted_rain_kg_m2_s: interception.retained_rain_kg_m2_s,
-        intercepted_snow_kg_m2_s: interception.retained_snow_kg_m2_s,
+        intercepted_rain_kg_m2_s: canopy.retained_rain_kg_m2_s,
+        intercepted_snow_kg_m2_s: canopy.retained_snow_kg_m2_s,
         ground_latent_heat_j_kg: ground_flux.vaporization_heat_j_kg,
         soil_water_stress_sunlit: soil_water_stress,
         soil_water_stress_shaded: soil_water_stress,
@@ -1287,7 +1363,9 @@ fn surface_temperatures(input: GroundTemperatureInput<'_>) -> (f64, f64, f64) {
     (ground_temperature_k, soil_temperature_k, snow_temperature_k)
 }
 
-fn validate(input: StandardLctEnergyInput<'_>) -> Result<()> {
+/// `pft`：PFT patch 的 patch 级叶面积可以为 0（全是裸地 PFT 时），
+/// 冠层在逐 PFT 那一层各自判断，所以不要求 `lai+sai > 1e-6`。
+fn validate(input: StandardLctEnergyInput<'_>, pft: bool) -> Result<()> {
     let leaf = input.leaf_temperature;
     let ground_flux = input.ground_flux;
     let ground = input.ground_temperature;
@@ -1327,7 +1405,7 @@ fn validate(input: StandardLctEnergyInput<'_>) -> Result<()> {
                 == (ground_flux.surface_resistance_scheme == 4)
             && same(leaf.air_density_kg_m3, ground_flux.air_density_kg_m3)
             && same(leaf.ground_emissivity, ground.ground_emissivity)
-            && leaf.leaf_area_index + leaf.stem_area_index > 1.0e-6
+            && (pft || leaf.leaf_area_index + leaf.stem_area_index > 1.0e-6)
             && ground.temperature_k.len() > ground.snow_layers,
         "standard LCT energy step needs one consistent soil-patch state and one shared time step"
     );

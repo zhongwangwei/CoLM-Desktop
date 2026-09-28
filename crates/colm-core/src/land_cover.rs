@@ -371,12 +371,7 @@ pub fn root_fraction(
                 d50 > 0.0,
                 "land class {land_class} has a non-positive d50, so its root distribution is undefined"
             );
-            let cumulative = |nsl: usize| 1.0 / (1.0 + (zi(nsl) * 100.0 / d50).lpow(beta));
-            fractions[0] = cumulative(1);
-            fractions[layers - 1] = 1.0 - cumulative(layers - 1);
-            for nsl in 2..layers {
-                fractions[nsl - 1] = cumulative(nsl) - cumulative(nsl - 1);
-            }
+            fractions = schenk_jackson_root_fraction(d50, beta, interface_depth_m);
         }
         RootFractionScheme::Exponential => {
             let (roota, rootb) = class.root_exponential_rates();
@@ -389,6 +384,23 @@ pub fn root_fraction(
         }
     }
     Ok(fractions)
+}
+
+/// `ROOTFR_SCHEME == 1` 的 Schenk & Jackson (2002) 根系分布。
+///
+/// 地类表（`MOD_Const_LC`）与 PFT 表（`MOD_Const_PFT.F90:1870-1883`）写的是同一个
+/// 式子，只是 `d50`/`beta` 的来源不同 —— PFT 那一份的 `ROOTFR_SCHEME` 是模块私有的
+/// 常量 1，不受 namelist 控制。`interface_depth_m` 是 `zi_soi(0:nl_soil)`。
+pub fn schenk_jackson_root_fraction(d50: f64, beta: f64, interface_depth_m: &[f64]) -> Vec<f64> {
+    let layers = interface_depth_m.len() - 1;
+    let cumulative = |nsl: usize| 1.0 / (1.0 + (interface_depth_m[nsl] * 100.0 / d50).lpow(beta));
+    let mut fractions = vec![0.0; layers];
+    fractions[0] = cumulative(1);
+    fractions[layers - 1] = 1.0 - cumulative(layers - 1);
+    for nsl in 2..layers {
+        fractions[nsl - 1] = cumulative(nsl) - cumulative(nsl - 1);
+    }
+    fractions
 }
 
 #[cfg(test)]

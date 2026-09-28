@@ -184,7 +184,7 @@ pub use runtime::{
     read_single_point_water_table, RuntimeCnState, RuntimeCnVegetationCarbon, RuntimeSoilProfile,
 };
 pub use single_point::{
-    single_point_cold_start_run_from_namelist,
+    pft_parameter, single_point_cold_start_run_from_namelist,
     single_point_cold_start_run_from_namelist_with_subgrid, single_point_static_run_from_namelist,
     write_single_point_cold_time_restart, write_single_point_cold_time_restarts,
     write_single_point_constant_restart, write_single_point_constant_restarts,

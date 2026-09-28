@@ -2633,7 +2633,7 @@ pub(crate) fn pft_leaf_optics(
     })
 }
 
-fn pft_parameter(
+pub fn pft_parameter(
     document: &colm_namelist::Document,
     name: &str,
     class: i32,
@@ -2738,88 +2738,7 @@ pub(crate) fn pc_uses_three_dimensional_canopy(class: i32, pc_crop_split: bool) 
     !pc_crop_split || class < 15
 }
 
-pub(crate) fn aggregate_pft_radiation(
-    states: &[ColdStartRadiation],
-    fraction: &[f64],
-    leaf_stem_area: f64,
-    ground: Option<&colm_core::ColdStartGroundAlbedo>,
-) -> Result<ColdStartRadiation> {
-    ensure!(
-        !states.is_empty() && states.len() == fraction.len(),
-        "PFT radiation states and fractions must be nonempty and have matching lengths"
-    );
-    let aggregate = |select: fn(&ColdStartRadiation) -> [[f64; 2]; 2]| {
-        std::array::from_fn(|band| {
-            std::array::from_fn(|radiation_type| {
-                states
-                    .iter()
-                    .zip(fraction)
-                    .map(|(state, fraction)| select(state)[band][radiation_type] * fraction)
-                    .sum()
-            })
-        })
-    };
-    // Original twostream_wrap uses stored-order FMA for its broadband sums.
-    let absorption = |select: fn(&ColdStartRadiation) -> [[f64; 2]; 2]| {
-        std::array::from_fn(|band| {
-            std::array::from_fn(|radiation_type| {
-                states
-                    .iter()
-                    .zip(fraction)
-                    .fold(0.0, |sum, (state, &weight)| {
-                        select(state)[band][radiation_type].mul_add(weight, sum)
-                    })
-            })
-        })
-    };
-    let transmission =
-        states
-            .iter()
-            .zip(fraction)
-            .try_fold([[0.0; 3]; 2], |mut sum, (state, &weight)| {
-                let transmission = state.transmission?;
-                for band in 0..2 {
-                    for beam in 0..3 {
-                        sum[band][beam] = transmission[band][beam].mul_add(weight, sum[band][beam]);
-                    }
-                }
-                Some(sum)
-            });
-    // albland derives ssoi/ssno only after twostream_wrap has summed tran.
-    // Spectral callers retain their wavelength-resolved absorption instead.
-    let (soil_absorption, snow_absorption) = if let Some(ground) = ground {
-        ground.absorption(transmission.context(
-            "broadband PFT ground absorption requires canopy transmission for every PFT",
-        )?)
-    } else {
-        (
-            aggregate(|state| state.soil_absorption),
-            aggregate(|state| state.snow_absorption),
-        )
-    };
-    Ok(ColdStartRadiation {
-        albedo: if ground.is_some() {
-            absorption(|state| state.albedo)
-        } else {
-            aggregate(|state| state.albedo)
-        },
-        transmission,
-        sunlit_absorption: absorption(|state| state.sunlit_absorption),
-        shaded_absorption: absorption(|state| state.shaded_absorption),
-        soil_absorption,
-        snow_absorption,
-        snow_age: states[0].snow_age,
-        // `albland` leaves this common field untouched for leafy PFT patches;
-        // only the PFT-vector thermal gap is a live initial state.
-        thermal_gap_fraction: if leaf_stem_area <= 1.0e-6 {
-            1.0
-        } else {
-            MISSING
-        },
-        direct_extinction: 1.0,
-        diffuse_extinction: 0.718,
-    })
-}
+pub(crate) use colm_core::aggregate_pft_radiation;
 
 fn initial_snow_depth(
     run: &SinglePointColdStartRun,
