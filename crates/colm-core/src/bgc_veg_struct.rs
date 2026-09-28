@@ -36,10 +36,9 @@ pub fn cn_veg_struct_update(
             tsai_old = p.tsai_p[m];
             if sw.laifeedback {
                 p.tlai_p[m] = ((c.slatop[class].mul_add(s.pft.leafc_p[m], natlaimx))
-                    - ((-4.0 * theta * natlaimx * c.slatop[class]).mul_add(
-                        s.pft.leafc_p[m],
-                        (c.slatop[class].mul_add(s.pft.leafc_p[m], natlaimx))
-                            * (c.slatop[class].mul_add(s.pft.leafc_p[m], natlaimx)),
+                    - ((c.slatop[class].mul_add(s.pft.leafc_p[m], natlaimx)).mul_add(
+                        c.slatop[class].mul_add(s.pft.leafc_p[m], natlaimx),
+                        -(4.0 * theta * natlaimx * c.slatop[class] * s.pft.leafc_p[m]),
                     ))
                     .sqrt())
                     / (2.0 * theta);

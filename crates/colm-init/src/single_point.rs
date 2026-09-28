@@ -16,7 +16,7 @@ use colm_core::{
     expand_broadband_ground_albedo, expand_broadband_leaf_optics,
     high_resolution_nonnatural_cold_start_state, high_resolution_pft_cold_start_state,
     pft_high_resolution_radiation, prospect_leaf_optics, ColdStartGroundAlbedo,
-    HighResolutionLeafOptics, HIGH_RES_WAVELENGTHS,
+    HighResolutionLeafOptics, HIGH_RES_WAVELENGTHS, PFT_BGC_F64_VARIABLES,
 };
 use colm_forcing::{
     read_high_resolution_leaf_optics, read_high_resolution_radiation_table,
@@ -211,6 +211,8 @@ pub struct SinglePointColdStartRun {
     pub bgc: bool,
     pub cn_initial_state: Option<PathBuf>,
     pub nitrification: bool,
+    /// `DEF_USE_LAIFEEDBACK`：BGC 关闭时上游强制置假（`MOD_Namelist.F90:1915`）。
+    pub lai_feedback: bool,
     pub soil_initial_state: Option<PathBuf>,
     pub snow_initial_state: Option<PathBuf>,
     pub water_table_initial_state: Option<PathBuf>,
@@ -411,6 +413,7 @@ pub fn single_point_cold_start_run_from_namelist_with_subgrid(
         bgc,
         cn_initial_state: enabled_existing_path(&document, "DEF_USE_CN_INIT", "DEF_file_cn_init")?,
         nitrification: optional_bool_or(&document, "DEF_USE_NITRIF", true)?,
+        lai_feedback: bgc && optional_bool_or(&document, "DEF_USE_LAIFEEDBACK", false)?,
         soil_initial_state: enabled_existing_path(
             &document,
             "DEF_USE_SoilInit",
@@ -1825,6 +1828,38 @@ fn write_single_point_pft_cold_time_restarts(
         }
     }
     let snow_depth_m = initial_snow_depth(run, &surface, month)?;
+    // `DEF_USE_LAIFEEDBACK`：初始化时 `LAI_readin` 跳过 `tlai`/`tlai_p`（`MOD_LAIReadin.F90:170-186`），
+    // 两者停在分配时的 spval；`IniTimeVariable` 末尾再令 `tlai_p = max(0, slatop·leafc_p)`、
+    // `lai_p = tlai_p`、`lai = sum(lai_p·pftfrac)`（`MOD_IniTimeVariable.F90:988-996`），
+    // patch `tlai` 一直是 spval 写进重启。反照率在其后按这组 LAI 算（`MOD_Initialize.F90:1518`）。
+    let feedback_lai = if run.lai_feedback {
+        // 雪初值那一支在反馈块之前就用 spval 的 `tlai`/`tlai_p` 算雪盖（`:527-545`），
+        // 上游这条路径本身不自洽；作物段把 `tlai_p` 清零的顺序也另有讲究，暂不移植。
+        ensure!(
+            snow_depth_m == 0.0 && crop.is_none(),
+            "DEF_USE_LAIFEEDBACK cold starts with initial snow or DEF_USE_CROP are not ported"
+        );
+        let state = bgc_state
+            .as_ref()
+            .context("DEF_USE_LAIFEEDBACK requires the BGC cold-start state")?;
+        let leaf_carbon = PFT_BGC_F64_VARIABLES
+            .iter()
+            .position(|&name| name == "leafc_p")
+            .map(|index| &state.pft_values[index])
+            .context("the BGC cold-start state has no leafc_p")?;
+        let slatop = pft_parameters(
+            &document,
+            "DEF_PFT_SLATOP",
+            &pft.class,
+            config.hydraulic_model == HydraulicModel::Campbell,
+        )?;
+        for ((lai, &slatop), &leafc) in total_lai_p.iter_mut().zip(&slatop).zip(leaf_carbon) {
+            *lai = (slatop * leafc).max(0.0);
+        }
+        Some(weighted_sum(&total_lai_p, &pft.fraction)?)
+    } else {
+        None
+    };
     ensure!(
         hyperspectral.is_none() || snow_depth_m == 0.0,
         "HYPERSPECTRAL snow cold start is not implemented: upstream has no verified 211-band SNICAR snow output mapping"
@@ -1890,7 +1925,14 @@ fn write_single_point_pft_cold_time_restarts(
         .zip(&pft_snow.pft_snow_free_vegetation_fraction)
         .map(|(sai, sigf)| sai * sigf)
         .collect::<Vec<_>>();
-    let total_lai = weighted_sum(&total_lai_p, &pft.fraction)?;
+    // `lai`：反馈时是 `sum(lai_p·pftfrac)`，否则就是 `tlai`；`tlai` 反馈时是 spval。
+    let (total_lai, lai) = match feedback_lai {
+        Some(lai) => (MISSING, lai),
+        None => {
+            let total = weighted_sum(&total_lai_p, &pft.fraction)?;
+            (total, total)
+        }
+    };
     let total_sai = weighted_sum(&total_sai_p, &pft.fraction)?;
     let sai = weighted_sum(&sai_p, &pft.fraction)?;
     let calendar_day = orbital_calendar_day(
@@ -1991,7 +2033,7 @@ fn write_single_point_pft_cold_time_restarts(
         radiation: aggregate_pft_radiation(
             &one_dimensional_radiation,
             &pft.fraction,
-            total_lai + sai,
+            lai + sai,
             common_ground,
         )?,
         sunlit: pft_radiation_values(&one_dimensional_radiation, |state| state.sunlit_absorption),
@@ -2098,7 +2140,7 @@ fn write_single_point_pft_cold_time_restarts(
                 pft_radiation.diffuse_extinction[index] = state.diffuse_extinction;
             }
             pft_radiation.radiation =
-                aggregate_pft_radiation(&common, &pft.fraction, total_lai + sai, common_ground)?;
+                aggregate_pft_radiation(&common, &pft.fraction, lai + sai, common_ground)?;
         }
     }
     let (
@@ -2203,7 +2245,7 @@ fn write_single_point_pft_cold_time_restarts(
             pft_radiation.radiation = aggregate_pft_radiation(
                 &one_dimensional_radiation,
                 &pft.fraction,
-                total_lai + sai,
+                lai + sai,
                 None,
             )?;
             // `albland_HiRes` retains canopy absorption in landpft; the shared
@@ -2274,7 +2316,7 @@ fn write_single_point_pft_cold_time_restarts(
             vegetation_fraction: 1.0,
             greenness: 1.0,
             snow_free_vegetation_fraction: pft_snow.patch.snow_free_vegetation_fraction,
-            lai: total_lai,
+            lai,
             sai,
             radiation: &pft_radiation.radiation,
             snicar: snicar_state.as_ref(),

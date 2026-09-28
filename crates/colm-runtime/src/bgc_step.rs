@@ -631,7 +631,6 @@ pub fn refuse_unported(switches: BgcSwitches) -> Result<()> {
             switches.sasu || switches.diag_matrix,
             "DEF_USE_SASU / DEF_USE_DiagMatrix",
         ),
-        (switches.laifeedback, "DEF_USE_LAIFEEDBACK"),
         (switches.crop, "CROP"),
     ];
     for (on, name) in unported {

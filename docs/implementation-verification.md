@@ -25388,3 +25388,43 @@ NITRIF 关（by）复查：1440/1440 回放、39/39 重启；PFT/PC 与抽查的
 实测（AT-Neu 3-PFT，2010 全年，纯 Rust 对纯 Fortran）：NITRIF 开/关各 12 个月度历史文件，变量集合完全相同、
 全部变量逐位一致（3264 / 3240 个变量×文件）；39/39 重启 `diff 0`；release 与 debug 相同。
 至此 `DEF_USE_BGC`（NITRIF 开或关、FIRE/SASU/LAI 反馈/作物之外）的单点算例，重启与历史都与参考内核逐位一致。
+
+## 第 419 轮：LAI 反馈（`DEF_USE_LAIFEEDBACK`）
+
+LAI 反馈打开后，`lai_p`/`tlai_p` 由 `CNVegStructUpdate` 按叶 C 池更新，不再取月表；和 Fortran 对齐走了四处。
+
+**一、运行时 LAI 链。** `LAI_readin` 只换 `tsai_p`/`tsai`（`MOD_LAIReadin.F90:170-186`）；准备段不再令
+`lai_p = tlai_p`，patch `lai = sum(lai_p·pftfrac)`（`CoLMMAIN.F90:2116-2117`）。
+
+**二、冷启动（`colm-init`）。** 初始化时 `LAI_readin` 跳过 `tlai`/`tlai_p`，两者停在分配时的 spval；`IniTimeVariable`
+末尾再令 `tlai_p = max(0, slatop·leafc_p)`、`lai_p = tlai_p`、`lai = sum(lai_p·pftfrac)`（`MOD_IniTimeVariable.F90:988-996`），
+**patch `tlai` 以 spval 写进重启**，反照率按这组 LAI 算。AT-Neu 的两个落叶 PFT 冷启动 `leafc_p = 0`，所以
+`tlai_p = [0, 0, 1.222]`、`lai = 0.1833`（Rust 原先写的是月表的 0.504）。初始积雪与作物两条路径未移植、当场拒绝：
+上游的雪初值一支在反馈块之前就用 spval 的 `tlai`/`tlai_p` 算雪盖，本身不自洽。
+
+**三、叶温对 `lai ≤ 0.001` 的处理。** Rust 的 `leaf_temperature` 原来把 `lai > 0.001` 当成输入合法性检查，
+`fsun` 还要求严格落在 (0,1)。这两条都比上游严：上游只要 `lai+sai > 1e-6` 就调 `LeafTemperature`，其中
+`IF (lai > 0.001)`（`:698/1051/1062`）不成立时不调 `stomata`，冠层尺度阻抗置 2e20、光合与呼吸置 0（PHS 下 `etr`/`rootflux` 置 0，
+`vegwp`、`gs0sun/gs0sha`、`rstfac` 保持原值），收尾 `rst = 2e4`、`gssun = gssha = 0`；`fsun = (1−e^{−x})/max(x,1e−6)` 在 `lai = 0` 时是 0、
+`x` 极小时舍入成 1。LCT 与非反馈 PFT 的 LAI 来自月表，平时走不到这一支；LAI 反馈下落叶 PFT 的 `lai_p = 0` 是常态，
+第一步就会撞上。现已补上该分支，校验放宽为 `lai ≥ 0`、`fsun ∈ [0,1]`。
+
+**四、转写器：`**2` 也是可收缩的乘积。** `tlai_p = ((natlaimx + slatop·leafc) − sqrt((natlaimx + slatop·leafc)**2 − 4·θ·natlaimx·slatop·leafc))/(2θ)`
+的 GIMPLE 是 `_25 = slatop*25.6; _26 = leafc*_25; _27 = .FMS (_75, _75, _26)`——`y**2` 在 gimplify 阶段就展开成 `y*y`，
+作为左乘积被熔进减法，右边那个乘积先舍入。转写器原先只认 `*` 节点，于是熔了右边，第 3 步 `tlai_p` 差 1 ULP。
+`f2rs.py` 的 `try_fma` 把整数平方视为 `(y, y)` 乘积后重生成，只有 `bgc_veg_struct.rs` 变化，其余生成模块逐字节不变。
+
+实测（AT-Neu 3-PFT，2010 全年，NITRIF 开 + LAI 反馈，纯 Rust 对纯 Fortran）：
+
+```
+冷启动三份重启（主/PFT/BGC）                  → diff 0 / 0 / 0
+bgc_replay bl1-fortran（前 20 步逐过程）      → 620 identical, 0 differing, 0 not ported
+bgc_trace_cmp.py bl1（前 20 步）              → 660 records identical
+bgc_trace_cmp.py bl（全年抽样）               → 1584 records identical
+39 个重启：release diff 0 = 39，debug diff 0 = 39；12 个月度历史文件全部变量逐位一致（release 与 debug）
+```
+
+回归（release）：BGC `bn/by/bc/bf/bs/bt`、LCT/城市/湖泊/PC/PFT 共 44 个算例历史与重启逐位（`bm/hn/pa/pi/ui` 本地只有 Fortran 侧，未跑）；`hp/sp/tc/ts` 仍是过期重启日期
+（历史逐位）；`pn/qr` 的分歧用 HEAD 二进制复跑，新旧输出 4/4 重启逐位相同，属既有问题，与本轮无关。
+叶温新分支只在旧代码会报错退出的输入上生效，冷启动与转写器改动只作用于 LAI 反馈，这与实测一致。
+至此 BGC 单点算例只剩 FIRE、SASU/DiagMatrix 与作物三条分支在运行时拒绝。

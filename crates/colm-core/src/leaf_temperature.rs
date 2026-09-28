@@ -283,6 +283,11 @@ pub fn leaf_temperature(
     let fsha = 1.0 - input.sunlit_fraction;
     let laisun = lai * input.sunlit_fraction;
     let laisha = lai * fsha;
+    // `IF (lai > 0.001)`（`MOD_LeafTemperature.F90:698/1051/1062`）：叶太少时上游不调 `stomata`，
+    // 冠层尺度阻抗置 2e20、光合与呼吸置 0，收尾再把 `rst` 写成 2e4、`gssun/gssha` 写成 0。
+    // 单 patch 的 LCT 地类只在 `lai+sai > 1e-6` 时才进来且 LAI 取自月表，这一支平时碰不到；
+    // BGC 的 LAI 反馈让 `lai_p` 由叶 C 池算出，落叶期某个 PFT 的 LAI 可以只有 1e-4 量级。
+    let stomata_active = lai > 0.001;
     let cintsun = sunlit_canopy_integration(input.direct_extinction, input.diffuse_extinction, lai);
     // `MOD_LeafTemperature.F90:464-466` 的 `cintsha`。
     let cintsha = [
@@ -494,36 +499,49 @@ pub fn leaf_temperature(
         // （`:941`）。两处的 `laisun` 在 `gssun = (laisun/rssun)*(tprcor/tlbef)`（`:1320`）
         // 里相消，所以这一处**数值上是惰性的**（实测步级口径逐位不变、三个窗口的容差口径
         // 也不变），但形状必须照抄 —— PHS 那条路传的是 `rb` 本身（`:745-752`），不折。
-        let mut sunlit_resistance = stomatal_resistance(
-            input,
-            StomataStep {
-                leaf_temperature_k: state.leaf_temperature_k,
-                leaf_boundary_resistance_s_m: leaf_boundary_resistance / laisun,
-                absorbed_par_w_m2: input.sunlit_absorbed_par_w_m2,
-                soil_water_stress: stomatal_soil_stress,
-                canopy_integration: cintsun,
-                canopy_air_co2_pa: canopy_air_co2,
-                canopy_vapor_pressure_pa: canopy_vapor_pressure,
-                leaf_vapor_pressure_pa: leaf_saturation.vapor_pressure_pa,
-            },
-        )?;
-        let mut shaded_resistance = stomatal_resistance(
-            input,
-            StomataStep {
-                leaf_temperature_k: state.leaf_temperature_k,
-                leaf_boundary_resistance_s_m: leaf_boundary_resistance / laisha,
-                absorbed_par_w_m2: input.shaded_absorbed_par_w_m2,
-                soil_water_stress: if input.plant_hydraulics.is_some() {
-                    1.0
-                } else {
-                    input.soil_water_stress_shaded
+        let dormant = crate::StomataState {
+            assimilation_mol_m2_s: 0.0,
+            respiration_mol_m2_s: 0.0,
+            stomatal_resistance_s_m: 2.0e20,
+        };
+        let mut sunlit_resistance = if !stomata_active {
+            dormant
+        } else {
+            stomatal_resistance(
+                input,
+                StomataStep {
+                    leaf_temperature_k: state.leaf_temperature_k,
+                    leaf_boundary_resistance_s_m: leaf_boundary_resistance / laisun,
+                    absorbed_par_w_m2: input.sunlit_absorbed_par_w_m2,
+                    soil_water_stress: stomatal_soil_stress,
+                    canopy_integration: cintsun,
+                    canopy_air_co2_pa: canopy_air_co2,
+                    canopy_vapor_pressure_pa: canopy_vapor_pressure,
+                    leaf_vapor_pressure_pa: leaf_saturation.vapor_pressure_pa,
                 },
-                canopy_integration: cintsha,
-                canopy_air_co2_pa: canopy_air_co2,
-                canopy_vapor_pressure_pa: canopy_vapor_pressure,
-                leaf_vapor_pressure_pa: leaf_saturation.vapor_pressure_pa,
-            },
-        )?;
+            )?
+        };
+        let mut shaded_resistance = if !stomata_active {
+            dormant
+        } else {
+            stomatal_resistance(
+                input,
+                StomataStep {
+                    leaf_temperature_k: state.leaf_temperature_k,
+                    leaf_boundary_resistance_s_m: leaf_boundary_resistance / laisha,
+                    absorbed_par_w_m2: input.shaded_absorbed_par_w_m2,
+                    soil_water_stress: if input.plant_hydraulics.is_some() {
+                        1.0
+                    } else {
+                        input.soil_water_stress_shaded
+                    },
+                    canopy_integration: cintsha,
+                    canopy_air_co2_pa: canopy_air_co2,
+                    canopy_vapor_pressure_pa: canopy_vapor_pressure,
+                    leaf_vapor_pressure_pa: leaf_saturation.vapor_pressure_pa,
+                },
+            )?
+        };
         let mut root_flux_kg_m2_s = Vec::new();
         // `MOD_PlantHydraulic.F90:353-368` 的 `calcstress_twoleaf` 把
         // `rstfacsun`/`rstfacsha` 重写成 **PHS 自己的**胁迫因子
@@ -540,7 +558,12 @@ pub fn leaf_temperature(
         // —— 那时上游根本不碰这两个变量，写回任何数都是编的。
         let mut gs0sun = None;
         let mut gs0sha = None;
-        if let Some(hydraulic) = input.plant_hydraulics {
+        // 叶太少时 PHS 也不解：上游只把 `etr`/`rootflux` 清零（`:786-792`），`vegwp`、
+        // `gs0sun/gs0sha` 与 `rstfacsun/rstfacsha` 都保持调用前的值。
+        if let (false, Some(hydraulic)) = (stomata_active, input.plant_hydraulics) {
+            root_flux_kg_m2_s = vec![0.0; hydraulic.root_fraction.len()];
+        }
+        if let Some(hydraulic) = input.plant_hydraulics.filter(|_| stomata_active) {
             let pressure_conversion = 44.6 * 273.16 * input.surface_pressure_pa / 1.013e5;
             let maximum_sunlit_leaf_conductance_umol_m2_s = (1.0
                 / (sunlit_resistance.stomatal_resistance_s_m * state.leaf_temperature_k
@@ -1238,16 +1261,26 @@ pub fn leaf_temperature(
         final_temperature_change,
         1.0 - input.canopy_longwave_gap_fraction,
     );
-    let canopy_stomatal_resistance =
-        1.0 / (laisun / last.leaf_sunlit_resistance + laisha / last.leaf_shaded_resistance);
+    let stomata_active = lai > 0.001;
+    let canopy_stomatal_resistance = if stomata_active {
+        1.0 / (laisun / last.leaf_sunlit_resistance + laisha / last.leaf_shaded_resistance)
+    } else {
+        2.0e4
+    };
     let pressure_conversion = 44.6 * 273.16 * input.surface_pressure_pa / 1.013e5;
     // `MOD_LeafTemperature.F90:1040` 是 `gssun = (laisun/rssun) * (tprcor/tlbef)`
     // —— **右边的除法先算**。平铺成 `a/r * c / t` 会算成 `((a/r)*c)/t`，
     // 在 `f_gssun`/`f_gssha` 上留下 ~1 ULP 的第 0 步种子（2026 年 `window_divergence.py`
     // 量到 `f_gssun` 的 maxrel ≈ 2.95e-16，正是 1 ULP 的签名）。
     let resistance_conversion = pressure_conversion / previous_leaf_temperature;
-    let sunlit_stomatal_conductance = laisun / last.leaf_sunlit_resistance * resistance_conversion;
-    let shaded_stomatal_conductance = laisha / last.leaf_shaded_resistance * resistance_conversion;
+    let (sunlit_stomatal_conductance, shaded_stomatal_conductance) = if stomata_active {
+        (
+            laisun / last.leaf_sunlit_resistance * resistance_conversion,
+            laisha / last.leaf_shaded_resistance * resistance_conversion,
+        )
+    } else {
+        (0.0, 0.0)
+    };
     let bulk_richardson = (last.zeta * last.surface.friction_velocity_m_s.powi(2)
         / (VON_KARMAN.powi(2) / last.surface.heat * stability_wind.powi(2)))
     .min(5.0);
@@ -1846,7 +1879,7 @@ fn validate(input: LeafTemperatureInput<'_>, state: LeafTemperatureState) -> Res
     );
     check("time_step_seconds > 0", input.time_step_seconds > 0.0);
     check("maximum_dew_mm > 0", input.maximum_dew_mm > 0.0);
-    check("leaf_area_index > 0.001", input.leaf_area_index > 0.001);
+    check("leaf_area_index >= 0", input.leaf_area_index >= 0.0);
     check("stem_area_index >= 0", input.stem_area_index >= 0.0);
     check(
         "canopy_top_height_m above the roughness lengths",
@@ -1894,9 +1927,11 @@ fn validate(input: LeafTemperatureInput<'_>, state: LeafTemperatureState) -> Res
     );
     check("surface_pressure_pa > 0", input.surface_pressure_pa > 0.0);
     check("air_density_kg_m3 > 0", input.air_density_kg_m3 > 0.0);
+    // `fsun = (1-exp(-x))/max(x,1e-6)`（`MOD_Thermal.F90:866`）：`x = extkb·lai` 很小时舍入成
+    // 恰好 1，`lai = 0`（只有茎）时是 0 —— 两端都是上游会传进来的合法值。
     check(
-        "sunlit_fraction in (0,1)",
-        input.sunlit_fraction > 0.0 && input.sunlit_fraction < 1.0,
+        "sunlit_fraction in 0..=1",
+        (0.0..=1.0).contains(&input.sunlit_fraction),
     );
     check(
         "canopy_longwave_gap_fraction in 0..=1",

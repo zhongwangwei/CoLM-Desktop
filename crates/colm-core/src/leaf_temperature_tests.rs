@@ -129,10 +129,29 @@ fn a_negative_net_interception_rate_enters_the_precipitation_heat() {
 }
 
 #[test]
-fn leaf_temperature_rejects_missing_leaf_area() {
+fn leaf_temperature_rejects_negative_leaf_area() {
     let mut input = sample_input();
-    input.leaf_area_index = 0.001;
+    input.leaf_area_index = -0.001;
     assert!(leaf_temperature(input, &mut sample_state()).is_err());
+}
+
+/// `lai <= 0.001`（BGC LAI 反馈下落叶 PFT 的常态）：上游不调 `stomata`，
+/// 光合置 0、`rst = 2e4`、`gssun/gssha = 0`，其余能量平衡照常迭代。
+#[test]
+fn leaf_temperature_without_leaves_skips_the_stomata() {
+    for lai in [0.0, 0.001] {
+        let mut input = sample_input();
+        input.leaf_area_index = lai;
+        input.sunlit_fraction = if lai == 0.0 { 0.0 } else { 1.0 };
+        let mut state = sample_state();
+        let output = leaf_temperature(input, &mut state).expect("stems alone are a valid canopy");
+        assert_eq!(output.assimilation_mol_m2_s, 0.0);
+        assert_eq!(output.respiration_mol_m2_s, 0.0);
+        assert_eq!(output.canopy_stomatal_resistance_s_m, 2.0e4);
+        assert_eq!(output.sunlit_stomatal_conductance_mol_m2_s, 0.0);
+        assert_eq!(output.shaded_stomatal_conductance_mol_m2_s, 0.0);
+        assert!(state.leaf_temperature_k.is_finite());
+    }
 }
 
 #[test]

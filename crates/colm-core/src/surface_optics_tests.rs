@@ -63,6 +63,7 @@ fn noon_input() -> SurfaceOpticsInput {
         // `.false.`），所以 `twostream` 里植被上的雪那一支是打开的：实测把它关掉，
         // `alb` 的四个数都对不上（`alb` 差 2.6e-4，`ssun` 差 3e-4）。
         vegetation_snow: true,
+        lai_feedback: false,
     }
 }
 

@@ -563,7 +563,11 @@ def try_fma_inner(e, ctx):
     op, a, b = e
     t = "f64"
     # neg(product) used in +/-  ->  FNMA
+    # `y**2` 在 gimplify 时就展开成 `y*y`，和普通乘积一样可被收缩
+    # （CNVegStructUpdate 的 `(natlaimx+slatop*leafc)**2 - 4*theta*…` 是 `.FMS (_75, _75, _26)`）。
     def prod(x):
+        if x[0] == "**" and x[2][0] == "num" and is_int_lit(x[2][1]) and int(x[2][1]) == 2:
+            return ("*", x[1], x[1])
         return x if is_mult(x) else None
 
     def negprod(x):
@@ -571,7 +575,7 @@ def try_fma_inner(e, ctx):
 
     # left operand is evaluated (defined) first
     if prod(a):
-        x, y = a[1], a[2]
+        x, y = prod(a)[1], prod(a)[2]
         addend = emit(b, ctx, t)
         if op == "+":
             return f"{wrap_recv(emit(x, ctx, t), x)}.mul_add({arg(y, ctx, t)}, {addend})"
@@ -584,7 +588,7 @@ def try_fma_inner(e, ctx):
             return f"(-{wrap_m(emit(x, ctx, t), x)}).mul_add({arg(y, ctx, t)}, {addend})"
         return f"(-{wrap_m(emit(x, ctx, t), x)}).mul_add({arg(y, ctx, t)}, -{wrap(addend, b)})"
     if prod(b):
-        x, y = b[1], b[2]
+        x, y = prod(b)[1], prod(b)[2]
         addend = emit(a, ctx, t)
         if op == "+":
             return f"{wrap_recv(emit(x, ctx, t), x)}.mul_add({arg(y, ctx, t)}, {addend})"

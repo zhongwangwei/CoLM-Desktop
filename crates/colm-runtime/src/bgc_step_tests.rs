@@ -17,6 +17,12 @@ fn the_containing_source_cell_is_the_nearest_center() {
 #[test]
 fn unverified_branches_are_refused() {
     assert!(refuse_unported(BgcSwitches::default()).is_ok());
+    // LAI 反馈已在 AT-Neu 全年上逐位验证（第 419 轮）。
+    assert!(refuse_unported(BgcSwitches {
+        laifeedback: true,
+        ..BgcSwitches::default()
+    })
+    .is_ok());
     for switches in [
         BgcSwitches {
             fire: true,
@@ -27,7 +33,7 @@ fn unverified_branches_are_refused() {
             ..BgcSwitches::default()
         },
         BgcSwitches {
-            laifeedback: true,
+            crop: true,
             ..BgcSwitches::default()
         },
     ] {

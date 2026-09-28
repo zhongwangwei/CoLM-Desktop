@@ -59,6 +59,9 @@ pub struct SurfaceOpticsInput {
     pub use_lct: bool,
     pub usgs_land_cover: bool,
     pub vegetation_snow: bool,
+    /// `DEF_USE_LAIFEEDBACK`（PFT/PC）：`lai_p` 由 BGC 维护，准备段不再用 `tlai_p` 重置它，
+    /// patch `lai = sum(lai_p·pftfrac)`（`CoLMMAIN.F90:2116-2117`）。
+    pub lai_feedback: bool,
 }
 
 /// 「下一步」的冠层几何与雪盖。
@@ -299,14 +302,16 @@ pub fn prepare_pft_surface_optics(
         input.vegetation_snow,
     )?;
     for column in &mut patch.columns {
-        column.leaf_area_index = if input.vegetation_snow {
-            column.temporal_leaf_area_index * column.vegetation_free_fraction
-        } else {
-            column.temporal_leaf_area_index
-        };
+        if !input.lai_feedback {
+            column.leaf_area_index = if input.vegetation_snow {
+                column.temporal_leaf_area_index * column.vegetation_free_fraction
+            } else {
+                column.temporal_leaf_area_index
+            };
+        }
         column.stem_area_index = column.temporal_stem_area_index * column.vegetation_free_fraction;
     }
-    let leaf_area_index = if input.vegetation_snow {
+    let leaf_area_index = if input.vegetation_snow || input.lai_feedback {
         patch.sum(|column| column.leaf_area_index)
     } else {
         input.temporal_leaf_area_index

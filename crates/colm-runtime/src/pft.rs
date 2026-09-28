@@ -216,11 +216,15 @@ impl PftTemplate {
     /// `tlai = sum(SITE_LAI_pfts_monthly(:,time,iyear)*SITE_pctpfts)` 是按站点顺序的
     /// 标量 FMA 链（`MOD_LAIReadin.F90:175-176` 的 GIMPLE），份额为 0 的项
     /// `FMA(x, 0, acc) = acc`，所以只对打包后的 PFT 求和与之逐位相同。
+    ///
+    /// `DEF_USE_LAIFEEDBACK`（`lai_feedback`）时 `tlai_p`/`tlai` 由 BGC 的 `CNVegStructUpdate`
+    /// 负责，这里只换 `tsai_p`，返回的 patch `tlai` 为 `None`（`MOD_LAIReadin.F90:170-186`）。
     pub fn refresh_monthly_leaf_area_index(
         &self,
         time: colm_core::CalendarTime,
         patch: &mut PftPatch,
-    ) -> Result<Option<(f64, f64)>> {
+        lai_feedback: bool,
+    ) -> Result<Option<(Option<f64>, f64)>> {
         let Some(monthly) = &self.monthly else {
             return Ok(None);
         };
@@ -242,11 +246,13 @@ impl PftTemplate {
             "the monthly PFT LAI does not match the PFT count"
         );
         for (column, (lai, sai)) in patch.columns.iter_mut().zip(lai.iter().zip(&sai)) {
-            column.temporal_leaf_area_index = *lai;
+            if !lai_feedback {
+                column.temporal_leaf_area_index = *lai;
+            }
             column.temporal_stem_area_index = *sai;
         }
         Ok(Some((
-            patch.sum(|column| column.temporal_leaf_area_index),
+            (!lai_feedback).then(|| patch.sum(|column| column.temporal_leaf_area_index)),
             patch.sum(|column| column.temporal_stem_area_index),
         )))
     }

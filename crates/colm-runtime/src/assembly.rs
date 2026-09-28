@@ -1420,9 +1420,12 @@ impl StandardLctRestartTemplate {
         // PFT 段（`MOD_LAIReadin.F90:166-185`）：逐 PFT 换 `tlai_p`/`tsai_p`，
         // patch 的 `tlai`/`tsai` 取聚合，没有 LCT 那一段 `fveg0` 后处理。
         if let (Some(template), Some(patch)) = (&self.pft, state.energy.pft.as_mut()) {
-            if let Some((tlai, tsai)) = template.refresh_monthly_leaf_area_index(time, patch)? {
+            let feedback = self.physics.bgc.is_some_and(|bgc| bgc.laifeedback);
+            if let Some((tlai, tsai)) =
+                template.refresh_monthly_leaf_area_index(time, patch, feedback)?
+            {
                 state.energy.temporal_canopy = colm_core::TemporalCanopy {
-                    leaf_area_index: tlai,
+                    leaf_area_index: tlai.unwrap_or(state.energy.temporal_canopy.leaf_area_index),
                     stem_area_index: tsai,
                 };
                 return Ok(true);
@@ -1888,6 +1891,7 @@ impl StandardLctRestartTemplate {
             use_lct: true,
             usgs_land_cover: self.physics.land_cover_scheme == LandCoverScheme::Usgs,
             vegetation_snow: self.physics.vegetation_snow,
+            lai_feedback: self.physics.bgc.is_some_and(|bgc| bgc.laifeedback),
         };
         let optics = match state.energy.pft.as_mut() {
             Some(pft) => {
