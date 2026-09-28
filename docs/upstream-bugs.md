@@ -88,6 +88,19 @@
 - **处理**：`vendor/` 未改；Rust 照内核的实际行为复现（`vic.rs::partition_ice`），以保持两个引擎可比。
   建议上游在循环前 `vic_ice = 0`，并重写这一支的拆分。
 
+### 19. `adjust_lake_layer` 对零深度读未初始化数组、对极薄湖层跳过重映射
+
+- **位置**：`main/MOD_Lake.F90` 的 `adjust_lake_layer`（上游 `3c799bae` 的 `:2102-2130`、`:2176-2182`）。
+- **原因**：`dz_lake_new`/`t_lake_new`/`lake_icefrac_new` 只在总深度为正时赋值，总深度为 0 时
+  整层读回未初始化的值；重叠循环用固定的 `DO WHILE (resi > 1.e-8)`，当新层厚度本身小于 `1e-8`
+  （实测总深 `1e-20`）时一次都不进，新层的温度与冰量没有来源。负厚度与 NaN 也不拒绝。
+  只有 `DEF_USE_Dynamic_Lake` 会走到这里（定深湖不调它）。
+- **处理**：`vendor/` 已改（`:2084-2136`）：拒绝非有限与负厚度，总深为 0 时原样返回，
+  循环条件改成 `resi > 0._r8`（`olp = min(resi, resj)` 必然耗尽 `resi` 或推进 `j`，精确 0 就是终点）。
+  正深度的重映射结果不变。Rust `lake.rs::adjust_lake_layers` 同样处理。
+  验证见 `docs/audit-2026-09-08-physics.md` 与 `oracle/scripts/test_physics_audit.py:291-403`。
+  建议上游采纳同样的三处改动。
+
 ## 二、TRACER 编译开关改变了物理（需要上游确认哪一边是对的）
 
 这一版上游在很多地方给 TRACER 构建和非 TRACER 构建写了**不同的物理**，不只是记账不同。
