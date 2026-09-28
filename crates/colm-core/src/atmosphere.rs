@@ -4,6 +4,7 @@
 //! MOD_OrbCoszen.F90, and MOD_OrbCosazi.F90. No caller-specific state or I/O
 //! is kept here.
 
+use crate::LibmPow;
 use anyhow::{ensure, Result};
 
 /// CoLM's freezing temperature in kelvin.
@@ -261,7 +262,7 @@ pub fn new_snow_bulk_density(
         WARM_BULK_DENSITY
     } else if air_temperature_k > FREEZING_K - 15.0 {
         (air_temperature_k - FREEZING_K + f77(15.0))
-            .powf(f77(1.5))
+            .lpow(f77(1.5))
             .mul_add(f77(1.7), f77(50.0))
     } else if air_temperature_k > FREEZING_K - 57.55 {
         let temperature_c = air_temperature_k - FREEZING_K;
@@ -274,7 +275,7 @@ pub fn new_snow_bulk_density(
         .mul_add(eastward_wind_m_s, northward_wind_m_s * northward_wind_m_s)
         .sqrt();
     if wind > f77(0.1) {
-        density += f77(266.861) * ((f77(1.0) + (wind / f77(5.0)).tanh()) / f77(2.0)).powf(f77(8.8));
+        density += f77(266.861) * ((f77(1.0) + (wind / f77(5.0)).tanh()) / f77(2.0)).lpow(f77(8.8));
     }
     Ok(density)
 }
@@ -297,7 +298,7 @@ pub fn hydrometeor_temperature(
         temperature_k > 0.0,
         "air temperature must exceed absolute zero"
     );
-    let diffusivity = f77(2.063e-5) * (temperature_k / f77(273.15)).powf(f77(1.75));
+    let diffusivity = f77(2.063e-5) * (temperature_k / f77(273.15)).lpow(f77(1.75));
     let conductivity = f77(0.000_063) * temperature_k + f77(0.006_73);
     let latent_heat = if air_temperature_c < 0.0 {
         f77(1000.0)
@@ -382,7 +383,7 @@ pub fn partition_precipitation(input: PrecipitationInput) -> Result<Precipitatio
             if temperature_c > f77(3.0) {
                 1.0
             } else if temperature_c >= f77(-3.0) {
-                (f77(1.0) / (f77(1.0) + f77(2.50286) * f77(0.125006).powf(temperature_c)))
+                (f77(1.0) / (f77(1.0) + f77(2.50286) * f77(0.125006).lpow(temperature_c)))
                     .max(f77(0.0))
             } else {
                 0.0

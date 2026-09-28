@@ -4,6 +4,7 @@
 //! soil layers.  This keeps the numerical kernel independent of Fortran's
 //! negative snow-layer indices while preserving its branch conditions.
 
+use crate::LibmPow;
 use anyhow::{ensure, Result};
 
 use crate::{soil_vliq_from_psi, SoilHydraulicModel, FREEZING_K};
@@ -547,7 +548,7 @@ fn supercool_limit(input: PhaseChangeInput<'_>, temperature: &[f64]) -> Result<V
         let water = match input.soil_hydraulic_model[soil] {
             SoilHydraulicModel::Campbell { bsw } => {
                 input.soil_porosity[soil]
-                    * (potential_mm / input.soil_suction_mm[soil]).powf(-1.0 / bsw)
+                    * (potential_mm / input.soil_suction_mm[soil]).lpow(-1.0 / bsw)
             }
             model => soil_vliq_from_psi(
                 potential_mm,

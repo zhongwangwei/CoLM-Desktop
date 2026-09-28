@@ -5,6 +5,7 @@
 //! runoff solve gives the Rust driver one callable kernel instead of a second
 //! implementation in the initializer.
 
+use crate::LibmPow;
 use anyhow::{ensure, Result};
 
 const COLM_LAYERS: usize = 10;
@@ -280,7 +281,7 @@ fn compute_vic_runoff(
                 .mul_add(
                     ((relative_moisture - soil.baseflow_threshold)
                         / (1.0 - soil.baseflow_threshold))
-                        .powf(soil.baseflow_exponent),
+                        .lpow(soil.baseflow_exponent),
                     baseflow_step,
                 );
         }
@@ -382,13 +383,13 @@ fn runoff_and_saturation(soil: VicSoil, moisture: [f64; VIC_LAYERS], inflow: f64
         (moisture[0] + moisture[1]).min(soil.max_moisture_mm[0] + soil.max_moisture_mm[1]);
     let top_capacity = soil.max_moisture_mm[0] + soil.max_moisture_mm[1];
     let exponent = soil.infiltration_shape / (1.0 + soil.infiltration_shape);
-    let saturation = 1.0 - (1.0 - top_moisture / top_capacity).powf(exponent);
+    let saturation = 1.0 - (1.0 - top_moisture / top_capacity).lpow(exponent);
     let maximum_infiltration = (1.0 + soil.infiltration_shape) * top_capacity;
     // GIMPLE（`MOD_Hydro_VIC.F90:453/459`）：`i_0` 被内联，`i_0 + inflow` 是
     // `.FMA (max_infil, 1-(1-A)**(1/b), inflow)`，`basis` 复用它；
     // `runoff = .FMA (basis**(1+b), top_max_moist, (inflow-top_max_moist)+top_moist)`。
     let infiltration_plus_inflow = maximum_infiltration.mul_add(
-        1.0 - (1.0 - saturation).powf(1.0 / soil.infiltration_shape),
+        1.0 - (1.0 - saturation).lpow(1.0 / soil.infiltration_shape),
         inflow,
     );
     let runoff = if inflow == 0.0 {
@@ -400,7 +401,7 @@ fn runoff_and_saturation(soil: VicSoil, moisture: [f64; VIC_LAYERS], inflow: f64
     } else {
         let basis = 1.0 - infiltration_plus_inflow / maximum_infiltration;
         basis
-            .powf(1.0 + soil.infiltration_shape)
+            .lpow(1.0 + soil.infiltration_shape)
             .mul_add(top_capacity, inflow - top_capacity + top_moisture)
     }
     .max(0.0);
@@ -417,7 +418,7 @@ fn q12(conductivity: f64, moisture: f64, residual: f64, maximum: f64, exponent: 
     use crate::extended::DoubleDouble as Dd;
     let one_minus_exponent = Dd::new(1.0) - Dd::new(exponent);
     let first = Dd::new(moisture - residual).powf(one_minus_exponent);
-    let scaled = conductivity / (maximum - residual).powf(exponent);
+    let scaled = conductivity / (maximum - residual).lpow(exponent);
     let second = one_minus_exponent * Dd::new(scaled);
     let root = (first - second).powf(Dd::new(1.0) / one_minus_exponent);
     (Dd::new(moisture) - root - Dd::new(residual)).to_f64()

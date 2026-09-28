@@ -10,6 +10,20 @@
 //!
 //! 各模块的重导出在 Task 3/5/6/7 里加上，那时它们指向的东西才存在。
 
+/// `x.lpow(y)`：一定走 libm `pow` 的 `x**y`。与 `colm_core::LibmPow` 同一个理由
+/// （LLVM 在 release 下把常数参与的 `pow` 改写成 `sqrt`/`x*x`/`exp2`，macOS libm 上不保值），
+/// 本 crate 不依赖 `colm-core`，所以留一份同样的实现。
+pub(crate) trait LibmPow {
+    fn lpow(self, exponent: f64) -> f64;
+}
+
+impl LibmPow for f64 {
+    #[inline]
+    fn lpow(self, exponent: f64) -> f64 {
+        std::hint::black_box(self).powf(std::hint::black_box(exponent))
+    }
+}
+
 pub mod albedo;
 pub mod derive;
 pub mod diagnostics;

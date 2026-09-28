@@ -4,6 +4,7 @@
 //! They are deliberately independent of restart and forcing I/O so the Rust
 //! time-step driver can feed their output straight into [`crate::soil_water`].
 
+use crate::LibmPow;
 use anyhow::{ensure, Result};
 
 use crate::{soil_vliq_from_psi, SoilHydraulicModel};
@@ -99,7 +100,7 @@ pub fn topmodel_surface_runoff(input: TopmodelSurfaceInput<'_>) -> Result<Topmod
     let maximum_infiltration = input.saturated_hydraulic_conductivity_mm_s[..layers.min(3)]
         .iter()
         .zip(&input.ice_fraction[..layers.min(3)])
-        .map(|(&conductivity, &ice)| 10_f64.powf(-6.0 * ice) * conductivity)
+        .map(|(&conductivity, &ice)| 10_f64.lpow(-6.0 * ice) * conductivity)
         .fold(f64::INFINITY, f64::min);
     let maximum_infiltration = if input.effective_porosity[0] < input.impermeable_porosity {
         0.0
@@ -182,7 +183,7 @@ pub fn xinanjiang_runoff(
     let shape = ((elevation_standard_deviation_m - 100.0)
         / (elevation_standard_deviation_m + 1000.0))
         .clamp(0.01, 0.5);
-    let saturated_fraction = 1.0 - (1.0 - water / capacity).powf(shape / (1.0 + shape));
+    let saturated_fraction = 1.0 - (1.0 - water / capacity).lpow(shape / (1.0 + shape));
     let input_depth = input.water_input_mm_s * input.time_step_seconds / 1000.0;
     if input_depth <= 0.0 {
         return Ok(StorageRunoffState {
@@ -193,12 +194,12 @@ pub fn xinanjiang_runoff(
     }
     let shape_plus_one = shape + 1.0;
     // `wtmp = (1-w_int/wsat_int)**(1/(btopo+1)) - watin/((btopo+1)*wsat_int)`
-    let wtmp = (1.0 - water / capacity).powf(1.0 / shape_plus_one)
+    let wtmp = (1.0 - water / capacity).lpow(1.0 / shape_plus_one)
         - input_depth / (shape_plus_one * capacity);
     // `infil = wsat_int - w_int - wsat_int*max(0,wtmp)**(btopo+1)`：
     // 乘积被吸收成 `FNMS(ws, pow, ws-w)` —— 就是上面那 0% → 100% 的那一处。
     let infiltration = (-capacity)
-        .mul_add(wtmp.max(0.0).powf(shape_plus_one), capacity - water)
+        .mul_add(wtmp.max(0.0).lpow(shape_plus_one), capacity - water)
         .min(input_depth);
     Ok(StorageRunoffState {
         surface_runoff_mm_s: (input_depth - infiltration) * 1000.0 / input.time_step_seconds,
@@ -250,7 +251,7 @@ pub fn simple_vic_subsurface_runoff(input: SimpleVicSubsurfaceInput<'_>) -> Resu
                 input.hydraulic_model[layer],
             );
         let ice_fraction = ice_volume / input.porosity[layer];
-        let conductivity = 10_f64.powf(-input.soil_ice_impedance * ice_fraction)
+        let conductivity = 10_f64.lpow(-input.soil_ice_impedance * ice_fraction)
             * input.saturated_hydraulic_conductivity_mm_s[layer];
         maximum_flow = maximum_flow.max(conductivity);
     }
@@ -278,7 +279,7 @@ fn storage_distribution_runoff(
     capacity: f64,
     bvic: f64,
 ) -> Result<StorageRunoffState> {
-    let saturated_fraction = 1.0 - (1.0 - water / capacity).powf(bvic / (1.0 + bvic));
+    let saturated_fraction = 1.0 - (1.0 - water / capacity).lpow(bvic / (1.0 + bvic));
     let input_depth = input.water_input_mm_s * input.time_step_seconds / 1000.0;
     if input_depth <= 0.0 {
         return Ok(StorageRunoffState {
@@ -294,7 +295,7 @@ fn storage_distribution_runoff(
     // 这一个 ULP 同时进 `ELSEIF ((WaterDepthInit+watin) > WaterDepthMax)` 的**分支判定**
     // 与 `InfilVarTmp` 的分子 ⇒ 湿季（`watin > 0`、土壤接近饱和）能把整支翻掉，
     // 而干季根本走不到这里（`watin <= 0` 直接返回）。
-    let depth_factor = 1.0 - (1.0 - saturated_fraction).powf(1.0 / bvic);
+    let depth_factor = 1.0 - (1.0 - saturated_fraction).lpow(1.0 / bvic);
     let depth_with_input = depth_factor.mul_add(maximum_depth, input_depth);
     let surface_depth = if depth_with_input > maximum_depth {
         input_depth - capacity + water
@@ -303,7 +304,7 @@ fn storage_distribution_runoff(
         // `RunoffSurface = watin - wsat_int + w_int + wsat_int*(InfilVarTmp**(1+BVIC))`：
         // 最后一个乘积被吸收（`FMA`）。实测 18185 组随机输入：不收缩 2/18185，
         // 收缩后 **18185/18185**。
-        capacity.mul_add(remaining.powf(1.0 + bvic), input_depth - capacity + water)
+        capacity.mul_add(remaining.lpow(1.0 + bvic), input_depth - capacity + water)
     }
     .clamp(0.0, input_depth);
     Ok(StorageRunoffState {

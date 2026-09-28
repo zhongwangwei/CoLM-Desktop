@@ -3,6 +3,7 @@
 //! It composes the already shared Monin-Obukhov kernels and only owns the
 //! urban-specific impervious/pervious weighting and roughness iteration.
 
+use crate::LibmPow;
 use anyhow::{ensure, Result};
 
 use crate::{initialize_monin_obukhov, monin_obukhov, MoninObukhovInitialInput, MoninObukhovInput};
@@ -73,7 +74,7 @@ pub fn urban_ground_flux(input: UrbanGroundFluxInput) -> Result<UrbanGroundFluxS
     } else {
         ((input.impervious_surface_liquid_water_kg_m2 + input.impervious_surface_ice_kg_m2)
             .max(0.0))
-        .powf(f77(2.0 / 3.0))
+        .lpow(f77(2.0 / 3.0))
         .min(1.0)
     };
     if input.reference_specific_humidity > input.impervious_specific_humidity {
@@ -124,7 +125,7 @@ pub fn urban_ground_flux(input: UrbanGroundFluxInput) -> Result<UrbanGroundFluxS
         heat_roughness_m = momentum_roughness_m
             / (f77(0.13)
                 * (profile.friction_velocity_m_s * momentum_roughness_m / f77(1.5e-5))
-                    .powf(f77(0.45)))
+                    .lpow(f77(0.45)))
             .exp();
         let virtual_temperature_scale = temperature_scale_k
             * (1.0 + f77(0.61) * input.reference_specific_humidity)
@@ -145,7 +146,7 @@ pub fn urban_ground_flux(input: UrbanGroundFluxInput) -> Result<UrbanGroundFluxS
                 * virtual_temperature_scale
                 * 1000.0
                 / input.virtual_potential_temperature_k)
-                .powf(f77(1.0 / 3.0));
+                .lpow(f77(1.0 / 3.0));
             (input.reference_wind_m_s.powi(2) + convective_velocity.powi(2)).sqrt()
         };
         if previous_obukhov_length_m * stability.obukhov_length_m < 0.0 {

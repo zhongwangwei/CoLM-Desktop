@@ -1,5 +1,6 @@
 //! Time-varying cold-start kernels from `MOD_IniTimeVariable.F90`.
 
+use crate::LibmPow;
 use crate::{
     equilibrium_water_state, soil_hydraulic_conductivity, soil_psi_from_vliq, soil_vliq_from_psi,
     SoilHydraulicModel,
@@ -599,7 +600,7 @@ pub fn derive_snow_cover(
             "snow-covered ground requires positive soil roughness"
         );
         let melt_factor =
-            (snow_water_equivalent_kg_m2 / snow_depth_m / 100.0).powf(snow_cover_exponent);
+            (snow_water_equivalent_kg_m2 / snow_depth_m / 100.0).lpow(snow_cover_exponent);
         ensure!(
             melt_factor.is_finite() && melt_factor != 0.0,
             "snow cover melt factor must be finite and nonzero"

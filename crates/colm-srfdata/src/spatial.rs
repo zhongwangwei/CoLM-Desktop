@@ -5,6 +5,7 @@
 //! `landelm`, and `landpatch` artifacts that the Fortran initializer loads.
 //! Scientific rawdata aggregation deliberately stays outside this module.
 
+use crate::LibmPow;
 use std::collections::{btree_map::Entry, BTreeMap};
 use std::path::{Path, PathBuf};
 
@@ -1448,7 +1449,7 @@ pub fn read_methane_ph_patch_selection(
                 if !(20..=100).contains(&encoded) {
                     continue;
                 }
-                activity += 10_f64.powf(-0.1 * f64::from(encoded)) * layer_weight;
+                activity += 10_f64.lpow(-0.1 * f64::from(encoded)) * layer_weight;
                 weight += layer_weight;
             }
             if weight > 0.0 {

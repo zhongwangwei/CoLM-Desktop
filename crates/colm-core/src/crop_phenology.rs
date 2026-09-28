@@ -4,6 +4,7 @@
 //! state transition used after initialization, allowing a Rust `colm` driver
 //! to evolve exactly the same daily extremes and growing-degree diagnostics.
 
+use crate::LibmPow;
 use anyhow::{ensure, Result};
 
 use crate::{is_leap_year, month_day, CalendarTime, MISSING};
@@ -471,9 +472,9 @@ fn update_vernalization(
     let temperature_c = reference_temperature_k - KELVIN_TO_CELSIUS;
     if (MINIMUM_C..=MAXIMUM_C).contains(&temperature_c) {
         let numerator =
-            2.0 * (temperature_c - MINIMUM_C).powf(alpha) * (OPTIMUM_C - MINIMUM_C).powf(alpha)
-                - (temperature_c - MINIMUM_C).powf(2.0 * alpha);
-        *cumulative_days += numerator / (OPTIMUM_C - MINIMUM_C).powf(2.0 * alpha)
+            2.0 * (temperature_c - MINIMUM_C).lpow(alpha) * (OPTIMUM_C - MINIMUM_C).lpow(alpha)
+                - (temperature_c - MINIMUM_C).lpow(2.0 * alpha);
+        *cumulative_days += numerator / (OPTIMUM_C - MINIMUM_C).lpow(2.0 * alpha)
             * (time_step_seconds / 3600.0 / 24.0);
     }
     *factor = cumulative_days.powi(5) / (22.5_f64.powi(5) + cumulative_days.powi(5));

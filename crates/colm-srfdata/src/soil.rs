@@ -4,6 +4,7 @@
 //! owns only the per-layer numerical contract; raster streaming and NetCDF
 //! serialization remain in the spatial command layer.
 
+use crate::LibmPow;
 use anyhow::{ensure, Result};
 use rayon::prelude::*;
 
@@ -440,16 +441,16 @@ impl VgmProblem {
         // Upstream builds ydatv/ydatvks once, not on every LM iteration.
         for pressure in VGM_PRESSURES {
             for cell in 0..cells {
-                let theta = (1.0 + (input.alpha[cell] * pressure).powf(input.n[cell]))
-                    .powf(1.0 / input.n[cell] - 1.0);
+                let theta = (1.0 + (input.alpha[cell] * pressure).lpow(input.n[cell]))
+                    .lpow(1.0 / input.n[cell] - 1.0);
                 // The original array expression contracts this final product.
                 let observed =
                     (input.theta_s[cell] - input.theta_r[cell]).mul_add(theta, input.theta_r[cell]);
                 let observed_k = input.k_s[cell]
-                    * theta.powf(input.l[cell])
+                    * theta.lpow(input.l[cell])
                     * (1.0
-                        - (1.0 - theta.powf(input.n[cell] / (input.n[cell] - 1.0)))
-                            .powf(1.0 - 1.0 / input.n[cell]))
+                        - (1.0 - theta.lpow(input.n[cell] / (input.n[cell] - 1.0)))
+                            .lpow(1.0 - 1.0 / input.n[cell]))
                     .powi(2);
                 samples.push([observed, observed_k.log10()]);
             }
@@ -474,11 +475,11 @@ impl LeastSquaresProblem for VgmProblem {
             let mut retention = 0.0;
             let mut conductivity = 0.0;
             let fitted = (self.phi - x[0]).mul_add(
-                (1.0 + (x[1] * pressure).powf(x[2])).powf(1.0 / x[2] - 1.0),
+                (1.0 + (x[1] * pressure).lpow(x[2])).lpow(1.0 / x[2] - 1.0),
                 x[0],
             );
-            let base = 1.0 + (x[1] * pressure).powf(x[2]);
-            let term = 1.0 - (1.0 - 1.0 / base).powf(1.0 - 1.0 / x[2]);
+            let base = 1.0 + (x[1] * pressure).lpow(x[2]);
+            let term = 1.0 - (1.0 - 1.0 / base).lpow(1.0 - 1.0 / x[2]);
             let fitted_log = ((1.0 / x[2] - 1.0) * self.l_patch)
                 .mul_add(base.log10(), x[3].log10())
                 + term.powi(2).log10();
@@ -503,20 +504,20 @@ impl LeastSquaresProblem for VgmProblem {
         let log_conductivity = self.conductivity.log10();
         for (row, pressure) in VGM_PRESSURES.iter().copied().enumerate() {
             let z = x[1] * pressure;
-            let z_to_n = z.powf(x[2]);
+            let z_to_n = z.lpow(x[2]);
             let base = 1.0 + z_to_n;
-            let q = base.powf(1.0 / x[2] - 1.0);
+            let q = base.lpow(1.0 / x[2] - 1.0);
             // Retain SW_VG_dist's powers and multiplication order. Equivalent
             // chain-rule rearrangements perturb this poorly conditioned fit.
-            let alpha_power = x[1].powf(x[2] - 1.0);
-            let pressure_power = pressure.powf(x[2]);
-            let q_alpha_power = base.powf(1.0 / x[2] - 2.0);
+            let alpha_power = x[1].lpow(x[2] - 1.0);
+            let pressure_power = pressure.lpow(x[2]);
+            let q_alpha_power = base.lpow(1.0 / x[2] - 2.0);
             let q_n_factor =
                 (1.0 - x[2]) * z_to_n * z.ln() / (x[2] * base) - base.ln() / x[2].powi(2);
             let fitted_theta = (self.phi - x[0]).mul_add(q, x[0]);
             let u = 1.0 - 1.0 / base;
             let power = 1.0 - 1.0 / x[2];
-            let u_power = u.powf(power);
+            let u_power = u.lpow(power);
             let term = 1.0 - u_power;
             let fitted_log = ((1.0 / x[2] - 1.0) * self.l_patch)
                 .mul_add(base.log10(), x[3].log10())
@@ -525,7 +526,7 @@ impl LeastSquaresProblem for VgmProblem {
                 / (base * std::f64::consts::LN_10)
                 + 2.0
                     * (1.0 - x[2])
-                    * u.powf(-1.0 / x[2])
+                    * u.lpow(-1.0 / x[2])
                     * alpha_power
                     * pressure_power
                     * base.powi(-2)
@@ -585,9 +586,9 @@ impl CampbellProblem {
         for pressure in CAMPBELL_PRESSURES {
             for cell in 0..cells {
                 let ratio = -pressure / input.psi_s[cell];
-                let observed = ratio.powf(-input.lambda[cell]) * input.theta_s[cell];
+                let observed = ratio.lpow(-input.lambda[cell]) * input.theta_s[cell];
                 let observed_k_exponent = (-3.0_f64).mul_add(input.lambda[cell], -2.0);
-                let observed_k = ratio.powf(observed_k_exponent) * input.k_s[cell];
+                let observed_k = ratio.lpow(observed_k_exponent) * input.k_s[cell];
                 samples.push([observed, observed_k.log10()]);
             }
         }
@@ -610,7 +611,7 @@ impl LeastSquaresProblem for CampbellProblem {
             let mut retention = 0.0;
             let mut conductivity = 0.0;
             let ratio = -pressure / x[0];
-            let fitted = ratio.powf(-x[1]) * self.phi;
+            let fitted = ratio.lpow(-x[1]) * self.phi;
             let fitted_log_slope = (-3.0_f64).mul_add(x[1], -2.0);
             let fitted_log = ratio.log10().mul_add(fitted_log_slope, x[2].log10());
             for &[observed, observed_log_k] in
@@ -634,12 +635,12 @@ impl LeastSquaresProblem for CampbellProblem {
         let log_conductivity = self.conductivity.log10();
         for (row, pressure) in CAMPBELL_PRESSURES.iter().copied().enumerate() {
             let ratio = -pressure / x[0];
-            let fitted_theta = ratio.powf(-x[1]) * self.phi;
+            let fitted_theta = ratio.lpow(-x[1]) * self.phi;
             let log_ratio = ratio.log10();
             let fitted_log_slope = (-3.0_f64).mul_add(x[1], -2.0);
             let fitted_log = log_ratio.mul_add(fitted_log_slope, x[2].log10());
             let conductivity_psi_slope = 3.0_f64.mul_add(x[1], 2.0);
-            let theta = ratio.powf(-x[1]);
+            let theta = ratio.lpow(-x[1]);
             let mut retention = [0.0; 2];
             let mut conductivity = [0.0; 3];
             for &[observed_theta, observed_log_k] in
@@ -743,7 +744,7 @@ fn statistic(values: &[f64], cells: &[usize], area: &[f64], method: SoilStatisti
             values
                 .iter()
                 .zip(cells)
-                .map(|(value, cell)| value.powf(area[*cell] / total))
+                .map(|(value, cell)| value.lpow(area[*cell] / total))
                 .product()
         }
         SoilStatistic::Median => {
@@ -1039,8 +1040,8 @@ mod tests {
         let mut vgm_samples = Vec::with_capacity(VGM_PRESSURES.len() * observed.len());
         for pressure in VGM_PRESSURES {
             let x = [1.0, 1.0, 2.0, 1.0];
-            let base = 1.0 + (x[1] * pressure).powf(x[2]);
-            let term = 1.0 - (1.0 - 1.0 / base).powf(1.0 - 1.0 / x[2]);
+            let base = 1.0 + (x[1] * pressure).lpow(x[2]);
+            let term = 1.0 - (1.0 - 1.0 / base).lpow(1.0 - 1.0 / x[2]);
             let fitted_log =
                 x[3].log10() + (1.0 / x[2] - 1.0) * 0.5 * base.log10() + term.powi(2).log10();
             vgm_samples.extend(observed.iter().map(|sample| [sample[0], fitted_log]));

@@ -10,6 +10,7 @@
 //! and rank scheduling stay at the outer layer; the numerical part can then be
 //! tested against the corresponding Fortran routines without a rawdata mount.
 
+use crate::LibmPow;
 use std::collections::BTreeMap;
 
 use anyhow::{bail, ensure, Context, Result};
@@ -324,7 +325,7 @@ impl FlatPatches {
                     continue;
                 }
                 let area_depth = intersection * weight;
-                activity_area += 10_f64.powf(-ph_value) * area_depth;
+                activity_area += 10_f64.lpow(-ph_value) * area_depth;
                 valid_area_depth += area_depth;
             }
             if valid_area_depth > 0.0 {

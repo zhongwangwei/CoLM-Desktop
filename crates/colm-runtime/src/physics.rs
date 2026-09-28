@@ -91,6 +91,14 @@ pub fn land_physics_parameters(
              wetland bucket (patchtype 2), not the dynamic soil-ground wetland branch"
         );
     }
+    // `DEF_USE_Dynamic_Lake`：湖深随水量变、`dz_lake` 进时间重启、`wdsrf` 记湖水。
+    // 运行期只移植了定深湖（`newsnow_lake`/`snowwater_lake` 的动态支路没接进湖一步）。
+    if logical(document, "DEF_USE_Dynamic_Lake")? {
+        bail!(
+            "DEF_USE_Dynamic_Lake is on, but the Rust runtime ports only the fixed-depth \
+             lake (patchtype 4), not the dynamic lake water balance"
+        );
+    }
     if logical(document, "DEF_USE_SNICAR")? {
         // `DEF_USE_SNICAR` 与 `DEF_SPLIT_SOILSNOW` 同属"最坏的一类"：它此前**根本
         // 没被读过**，而 `assembly.rs` 把 `snow_layer_absorption_w_m2` 硬写成 `None`

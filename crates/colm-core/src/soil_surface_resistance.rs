@@ -1,5 +1,6 @@
 //! Soil evaporation resistance from `MOD_SoilSurfaceResistance.F90`.
 
+use crate::LibmPow;
 use anyhow::{ensure, Result};
 
 use crate::{
@@ -45,11 +46,11 @@ pub fn soil_surface_resistance(input: SoilSurfaceResistanceInput) -> Result<f64>
     .max(0.01);
     let (matric_potential_m, conductivity_m_s, air_dry_water) = match input.hydraulic_model {
         SoilHydraulicModel::Campbell { bsw } => (
-            input.saturated_soil_suction_mm / 1000.0 * saturation.powf(-bsw),
+            input.saturated_soil_suction_mm / 1000.0 * saturation.lpow(-bsw),
             input.saturated_hydraulic_conductivity_mm_s / 1000.0
                 // `:143` 的指数是 `.FMA (bsw, 2, 3)`。
-                * (liquid_volume / input.porosity).powf(bsw.mul_add(2.0, 3.0)),
-            input.porosity * (input.saturated_soil_suction_mm / -f77(1.0e7)).powf(1.0 / bsw),
+                * (liquid_volume / input.porosity).lpow(bsw.mul_add(2.0, 3.0)),
+            input.porosity * (input.saturated_soil_suction_mm / -f77(1.0e7)).lpow(1.0 / bsw),
         ),
         model => {
             let matric_potential_mm = soil_psi_from_vliq(
@@ -77,7 +78,7 @@ pub fn soil_surface_resistance(input: SoilSurfaceResistanceInput) -> Result<f64>
             )
         }
     };
-    let open_air_diffusivity = f77(2.12e-5) * (input.temperature_k / f77(273.15)).powf(f77(1.75));
+    let open_air_diffusivity = f77(2.12e-5) * (input.temperature_k / f77(273.15)).lpow(f77(1.75));
     let air_filled_porosity = input.porosity - air_dry_water;
     ensure!(
         air_filled_porosity > 0.0,
@@ -86,7 +87,7 @@ pub fn soil_surface_resistance(input: SoilSurfaceResistanceInput) -> Result<f64>
     let tortuosity = match input.hydraulic_model {
         SoilHydraulicModel::Campbell { bsw } => {
             air_filled_porosity.powi(2)
-                * (air_filled_porosity / input.porosity).powf(3.0 / 3.0_f64.max(bsw))
+                * (air_filled_porosity / input.porosity).lpow(3.0 / 3.0_f64.max(bsw))
         }
         model => {
             let air_at_1000 = input.porosity
@@ -103,7 +104,7 @@ pub fn soil_surface_resistance(input: SoilSurfaceResistanceInput) -> Result<f64>
             );
             input.porosity.powi(2)
                 * (air_filled_porosity / input.porosity)
-                    .powf(2.0 + (air_at_1000.powf(0.25)).ln() / (air_at_1000 / input.porosity).ln())
+                    .lpow(2.0 + (air_at_1000.lpow(0.25)).ln() / (air_at_1000 / input.porosity).ln())
         }
     };
     let gas_diffusivity = open_air_diffusivity * tortuosity;
@@ -186,11 +187,11 @@ fn aqueous_diffusivity(
             alpha_vgm, n_vgm, ..
         } => {
             let m = 1.0 - 1.0 / n_vgm;
-            let saturation = (1.0 + (-alpha_vgm * matric_potential_m).powf(n_vgm)).powf(-m);
+            let saturation = (1.0 + (-alpha_vgm * matric_potential_m).lpow(n_vgm)).lpow(-m);
             -conductivity_m_s * (m - 1.0)
                 / (alpha_vgm * m * (input.porosity - input.residual_water))
-                * saturation.powf(-1.0 / m)
-                * (1.0 - saturation.powf(1.0 / m)).powf(-m)
+                * saturation.lpow(-1.0 / m)
+                * (1.0 - saturation.lpow(1.0 / m)).lpow(-m)
         }
     }
 }
@@ -204,14 +205,14 @@ fn lp92_beta(input: SoilSurfaceResistanceInput) -> f64 {
         SoilHydraulicModel::Campbell { bsw } => {
             input.porosity
                 * (f77(0.1) / (86400.0 * input.saturated_hydraulic_conductivity_mm_s))
-                    .powf(1.0 / (2.0 * bsw + 3.0))
+                    .lpow(1.0 / (2.0 * bsw + 3.0))
         }
         SoilHydraulicModel::VanGenuchten {
             alpha_vgm, n_vgm, ..
         } => {
             input.residual_water
                 + (input.porosity - input.residual_water)
-                    * (1.0 + (alpha_vgm * f77(339.9)).powf(n_vgm)).powf(1.0 / n_vgm - 1.0)
+                    * (1.0 + (alpha_vgm * f77(339.9)).lpow(n_vgm)).lpow(1.0 / n_vgm - 1.0)
         }
     };
     if water_ice_volume < field_capacity {

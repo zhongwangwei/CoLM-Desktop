@@ -110,7 +110,13 @@ pub fn net_solar(
             ground_absorbed_w_m2 =
                 absorbed_without_vegetation - sunlit_absorbed_w_m2 - shaded_absorbed_w_m2;
         } else {
-            ground_absorbed_w_m2 = absorbed_by_surface(forcing, radiation.albedo);
+            // 湖/海（`MOD_NetSolar.F90:199-201`）另有一种项序：`sols, soll, solsd, solld`，
+            // 而且四个乘积与陆地支共享（PRE 提到分支前），所以**一个都不融合**，纯左结合相加。
+            let albedo = radiation.albedo;
+            ground_absorbed_w_m2 = ((forcing.direct_visible_w_m2 * (1.0 - albedo[0][0])
+                + forcing.direct_near_infrared_w_m2 * (1.0 - albedo[1][0]))
+                + forcing.diffuse_visible_w_m2 * (1.0 - albedo[0][1]))
+                + forcing.diffuse_near_infrared_w_m2 * (1.0 - albedo[1][1]);
         }
 
         soil_absorbed_w_m2 =

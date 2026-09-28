@@ -340,13 +340,9 @@ pub const DECLARED_ONLY: [&str; 9] = [
     "rsur_ie",
     "rsur_se",
     // 湖泊与湿地六个量：上游只在**对应的 patch 类型**上写它们
-    // （湖 `patchtype == 1`、湿地 `DEF_USE_WETLAND` 且 `patchtype == 2`），
-    // 本仓库支持的是植被 patch，所以它们在本算例里 264 条**一个真值都没有**
-    // （三维那两个是 2640 个全填充）。声明 + 留空才是与上游一致的那一列。
-    //
-    // **这不等于"本仓库算不出"** —— 声明的意义是让文件 schema 与上游一致；
-    // 真要在湖/湿地 patch 上给出数值，得先有那两支的运行时驱动（现在没有，
-    // `assembly.rs` 只装配植被 patch）。
+    // （湖 `patchtype == 4`，`MOD_Hist.F90:4499`；湿地 `patchtype == 2`），
+    // 所以在植被 patch 上它们整列是填充值 —— 声明 + 留空才是与上游一致的那一列。
+    // 湖/湿地 patch 上由 `push_lake`/`push_lct_snow` 各自填值。
     "t_lake",
     "lake_icefrac",
     "lake_deficit",
@@ -772,6 +768,38 @@ pub fn set_lct_surface_diagnostics(
 /// `MOD_Hist.F90:4396-4405` 的 `filter = patchtype <= 2`：这一组只在土壤/城市/湿地
 /// patch 上写出，其余 patch 留 `spval`。
 const VEGETATED_ONLY_VARIABLES: [&str; 5] = ["h2osoi", "qlayer", "rootr", "vegwp", "zwt"];
+
+/// 湖上再多滤掉三根雪 + 土柱：`MOD_Hist.F90:4160` 的 `filter = patchtype <= 3`。
+const LAKE_FILTERED_VARIABLES: [&str; 8] = [
+    "h2osoi",
+    "qlayer",
+    "rootr",
+    "vegwp",
+    "zwt",
+    "t_soisno",
+    "wliq_soisno",
+    "wice_soisno",
+];
+
+/// 冰川/湖共用的一步输出视图。
+struct NonSoilStep<'a> {
+    precipitation: &'a colm_core::PrecipitationState,
+    shortwave: &'a colm_core::NetSolarFluxes,
+    thermal: colm_core::GlacierThermalFluxes,
+    surface_runoff_mm_s: f64,
+    total_runoff_mm_s: f64,
+    /// 已按上游规则取好的 `xerr`（冰川非 VSF、非动态湖都是 0）。
+    water_balance_error_mm_s: f64,
+    /// 这一支写不写 `rsur_se`/`rsur_ie`：冰川只在 VSF 下写（`CoLMMAIN.F90:1720-1740`），
+    /// 湖分支无条件写 `rsur_se = rsur`、`rsur_ie = 0`（`:1937-1940`）。
+    writes_runoff_split: bool,
+}
+
+/// 只在湖 patch 上写的量。
+enum LakeLayers<'a> {
+    Scalar(&'static str, f64),
+    Layers(&'static str, &'a [f64]),
+}
 
 /// 丢掉按 `patchtype` 过滤掉的变量，其余原样转交。
 struct PatchFilteredSink<'a, S: HistorySink> {
@@ -1718,6 +1746,117 @@ impl HistorySession {
         output: &colm_core::GlacierStepOutput,
         reference: HistoryReferenceState,
     ) -> Result<Option<PathBuf>> {
+        let water_balance_error = if template.physics.variably_saturated_flow {
+            output.water_balance_error_mm_s
+        } else {
+            0.0
+        };
+        self.push_non_soil(
+            end,
+            template,
+            state,
+            NonSoilStep {
+                precipitation: &output.precipitation,
+                shortwave: &output.shortwave,
+                thermal: output.thermal,
+                surface_runoff_mm_s: output.surface_runoff_mm_s,
+                total_runoff_mm_s: output.total_runoff_mm_s,
+                water_balance_error_mm_s: water_balance_error,
+                writes_runoff_split: template.physics.variably_saturated_flow,
+            },
+            reference,
+            &VEGETATED_ONLY_VARIABLES,
+            &[],
+        )
+    }
+
+    /// 湖 patch 的一步 history：与冰川同一套"非土壤"写法（植被量清零、`frcsat = 1`），
+    /// 另加 `MOD_Hist.F90:4497-4537` 只在 `patchtype == 4` 上写的 `t_lake`/`lake_icefrac`/
+    /// `lake_deficit`。非动态湖 `xerr = 0`（`CoLMMAIN.F90:1978-1982`）。
+    pub fn push_lake(
+        &mut self,
+        end: CalendarTime,
+        template: &StandardLctRestartTemplate,
+        state: &StandardLctSnowSoilState,
+        output: &colm_core::LakeStepOutput,
+        reference: HistoryReferenceState,
+    ) -> Result<Option<PathBuf>> {
+        let lake = state
+            .lake
+            .as_ref()
+            .context("a lake history record needs the lake state")?;
+        let thermal = output.thermal;
+        self.push_non_soil(
+            end,
+            template,
+            state,
+            NonSoilStep {
+                precipitation: &output.precipitation,
+                shortwave: &output.shortwave,
+                thermal: colm_core::GlacierThermalFluxes {
+                    taux: thermal.taux,
+                    tauy: thermal.tauy,
+                    fsena: thermal.fsena,
+                    fevpa: thermal.fevpa,
+                    lfevpa: thermal.lfevpa,
+                    fseng: thermal.fseng,
+                    fevpg: thermal.fevpg,
+                    olrg: thermal.olrg,
+                    fgrnd: thermal.fgrnd,
+                    qseva: thermal.qseva,
+                    qsdew: thermal.qsdew,
+                    qsubl: thermal.qsubl,
+                    qfros: thermal.qfros,
+                    sm: thermal.sm,
+                    tref: thermal.tref,
+                    qref: thermal.qref,
+                    trad: thermal.trad,
+                    errore: 0.0,
+                    emis: thermal.emis,
+                    z0m: thermal.z0m,
+                    zol: thermal.zol,
+                    rib: thermal.rib,
+                    ustar: thermal.ustar,
+                    qstar: thermal.qstar,
+                    tstar: thermal.tstar,
+                    fm: thermal.fm,
+                    fh: thermal.fh,
+                    fq: thermal.fq,
+                    xmf: 0.0,
+                },
+                surface_runoff_mm_s: output.surface_runoff_mm_s,
+                total_runoff_mm_s: output.total_runoff_mm_s,
+                water_balance_error_mm_s: 0.0,
+                writes_runoff_split: true,
+            },
+            reference,
+            &LAKE_FILTERED_VARIABLES,
+            &[
+                LakeLayers::Scalar("lake_deficit", output.lake_deficit_mm_s),
+                LakeLayers::Layers("t_lake", &lake.column.temperature_k),
+                LakeLayers::Layers("lake_icefrac", &lake.column.ice_fraction),
+            ],
+        )
+    }
+
+    /// 冰川与湖共用的"非土壤" patch 写法。
+    ///
+    /// 上游的 `accumulate_fluxes` 对所有 patch 读同一组全局量：冰川/湖分支写各自的
+    /// 通量，植被那一组在 `CoLMMAIN.F90:2178-2230` 被清零
+    /// （`etr`/`fsenl`/`fevpl`/`assim`/`respc`/`rstfac*`/`gs*`/`laisun`/`laisha`/`green`/
+    /// `qintr`/`qinfl`/`qlayer`/`rootr`/`qcharge` = 0，`frcsat = 1`，
+    /// `qdrip = forc_rain + forc_snow`）。`rss` 不重算，沿用重启里的值。
+    #[allow(clippy::too_many_arguments)]
+    fn push_non_soil(
+        &mut self,
+        end: CalendarTime,
+        template: &StandardLctRestartTemplate,
+        state: &StandardLctSnowSoilState,
+        output: NonSoilStep<'_>,
+        reference: HistoryReferenceState,
+        skipped: &'static [&'static str],
+        extra: &[LakeLayers<'_>],
+    ) -> Result<Option<PathBuf>> {
         let ground = state.surface_temperature_k();
         self.plant_hydraulics = template.plant_hydraulics();
         self.variably_saturated = template.physics.variably_saturated_flow;
@@ -1727,7 +1866,7 @@ impl HistorySession {
         self.push(end, |accumulator| {
             let accumulator = &mut PatchFilteredSink {
                 inner: accumulator,
-                skipped: &VEGETATED_ONLY_VARIABLES,
+                skipped,
             };
             set_lct_snow_state(accumulator, 0, template, state, ground)?;
             // `frcsat = 1` 由末尾 `patchtype > 2` 那一节无条件写，与 VSF 无关。
@@ -1738,12 +1877,13 @@ impl HistorySession {
                 ("rsur", output.surface_runoff_mm_s),
                 ("frcsat", 1.0),
             ];
-            if variably_saturated {
+            if output.writes_runoff_split {
                 fluxes.extend_from_slice(&[
                     ("rsur_se", output.surface_runoff_mm_s),
                     ("rsur_ie", 0.0),
                 ]);
-            } else {
+            }
+            if !variably_saturated {
                 fluxes.push(("qcharge", 0.0));
             }
             // `rnet = sabg + sabvsun + sabvsha - olrg + forc_frl`（`MOD_Vars_1DAccFluxes.F90:2093`）
@@ -1752,11 +1892,7 @@ impl HistorySession {
                 + shortwave.shaded_absorbed_w_m2
                 - thermal.olrg
                 + reference.downward_longwave_w_m2;
-            let water_balance_error = if variably_saturated {
-                output.water_balance_error_mm_s
-            } else {
-                0.0
-            };
+            let water_balance_error = output.water_balance_error_mm_s;
             for (name, value) in fluxes.into_iter().chain([
                 ("fsena", thermal.fsena),
                 ("fevpa", thermal.fevpa),
@@ -1806,12 +1942,12 @@ impl HistorySession {
             ]) {
                 ensure!(
                     value.is_finite(),
-                    "the glacier history value for {name} is not finite"
+                    "the non-soil history value for {name} is not finite"
                 );
                 accumulator.scalar(name, 0, value)?;
             }
             set_glacier_surface_diagnostics(accumulator, &thermal, reference, &template.physics)?;
-            set_shortwave_bands(accumulator, 0, &shortwave)?;
+            set_shortwave_bands(accumulator, 0, shortwave)?;
             set_lct_water_storage(
                 accumulator,
                 0,
@@ -1826,7 +1962,14 @@ impl HistorySession {
                 &state.energy,
                 reference.surface_cosine_zenith,
             )?;
-            set_lct_forcing_mirrors(accumulator, 0, reference, &output.precipitation)
+            set_lct_forcing_mirrors(accumulator, 0, reference, output.precipitation)?;
+            for entry in extra {
+                match entry {
+                    LakeLayers::Scalar(name, value) => accumulator.scalar(name, 0, *value)?,
+                    LakeLayers::Layers(name, values) => accumulator.layer(name, 0, values)?,
+                }
+            }
+            Ok(())
         })
     }
 

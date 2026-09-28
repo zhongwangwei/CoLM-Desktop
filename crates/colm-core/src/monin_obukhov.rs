@@ -3,6 +3,7 @@
 //! Ground, lake, urban, and canopy fluxes call these pure kernels rather than
 //! carrying separate translations of the Monin-Obukhov profile equations.
 
+use crate::LibmPow;
 use anyhow::{ensure, Context, Result};
 
 // CoLM's physical constants are unsuffixed Fortran literals assigned to r8.
@@ -383,7 +384,7 @@ impl MomentumScheme {
                     let log_chain = (transition * obukhov_length_m / roughness_m).ln()
                         - psi(1, transition)
                         + psi(1, roughness_m / obukhov_length_m);
-                    let delta = (-zeta).powf(-0.5) - (-transition).powf(-0.5);
+                    let delta = (-zeta).lpow(-0.5) - (-transition).lpow(-0.5);
                     (-(2.0 * coefficient)).mul_add(delta, log_chain)
                 } else if zeta < 0.0 {
                     (distance_m / roughness_m).ln() - psi(1, zeta)
@@ -409,7 +410,7 @@ fn momentum_integral(distance_m: f64, roughness_m: f64, obukhov_length_m: f64) -
     if zeta < -f77(1.574) {
         let log_chain = (-f77(1.574) * obukhov_length_m / roughness_m).ln() - psi(1, -f77(1.574))
             + psi(1, roughness_m / obukhov_length_m);
-        let delta = (-zeta).powf(f77(0.333)) - f77(1.574).powf(f77(0.333));
+        let delta = (-zeta).lpow(f77(0.333)) - ZETAM_POW_0333;
         f77(1.14).mul_add(delta, log_chain)
     } else if zeta < 0.0 {
         (distance_m / roughness_m).ln() - psi(1, zeta) + psi(1, roughness_m / obukhov_length_m)
@@ -428,7 +429,7 @@ fn heat_integral(distance_m: f64, roughness_m: f64, obukhov_length_m: f64) -> f6
     if zeta < -f77(0.465) {
         let log_chain = (-f77(0.465) * obukhov_length_m / roughness_m).ln() - psi(2, -f77(0.465))
             + psi(2, roughness_m / obukhov_length_m);
-        let delta = f77(0.465).powf(-f77(0.333)) - (-zeta).powf(-f77(0.333));
+        let delta = ZETAT_POW_M0333 - (-zeta).lpow(-f77(0.333));
         f77(0.8).mul_add(delta, log_chain)
     } else if zeta < 0.0 {
         (distance_m / roughness_m).ln() - psi(2, zeta) + psi(2, roughness_m / obukhov_length_m)
@@ -452,12 +453,18 @@ fn heat_integral(distance_m: f64, roughness_m: f64, obukhov_length_m: f64) -> f6
 /// 376 组里错 **375** 组；改成 `0.26533129572968783` 之后 **0/20000**。
 const UNSTABLE_HEAT_COEFFICIENT: f64 = 0.26533129572968783;
 
+/// `zetam**0.333` 与 `zetat**(-0.333)`：gfortran 在编译期折好的两个常量
+/// （`moninobuk` 的 GIMPLE：`1.163061217758141641…e+0`、`1.290441040549192175…e+0`）。
+/// 运行期 libm 恰好给出同一个值，但不该依赖这一点。
+const ZETAM_POW_0333: f64 = 1.163_061_217_758_141_6;
+const ZETAT_POW_M0333: f64 = 1.290_441_040_549_192_2;
+
 /// GIMPLE（`kmoninobuk`）：`FNMA(zeta,16,1)` 得 `1-16ζ`、`FMA(zeta,5,1)` 得 `1+5ζ`。
 fn heat_similarity(zeta: f64) -> f64 {
     if zeta < -f77(0.465) {
-        UNSTABLE_HEAT_COEFFICIENT * (-zeta).powf(-f77(0.333))
+        UNSTABLE_HEAT_COEFFICIENT * (-zeta).lpow(-f77(0.333))
     } else if zeta < 0.0 {
-        (-f77(16.0)).mul_add(zeta, 1.0).powf(-0.5)
+        (-f77(16.0)).mul_add(zeta, 1.0).lpow(-0.5)
     } else if zeta <= 1.0 {
         5.0_f64.mul_add(zeta, 1.0)
     } else {
@@ -469,7 +476,7 @@ fn heat_similarity(zeta: f64) -> f64 {
 /// `1+chik²`；`k==1` 那一支再两级 `FMA(log((1+chik)/2), 2, ·)`、
 /// `FNMA(atan(chik), 2, ·)`（`2*atan(1)` 被 GCC 折成常量 `π/2`）。
 fn psi(kind: i32, zeta: f64) -> f64 {
-    let chik = (-f77(16.0)).mul_add(zeta, 1.0).powf(0.25);
+    let chik = (-f77(16.0)).mul_add(zeta, 1.0).lpow(0.25);
     let log_half = (chik.mul_add(chik, 1.0) * 0.5).ln();
     if kind == 1 {
         let sum = ((1.0 + chik) * 0.5).ln().mul_add(2.0, log_half);

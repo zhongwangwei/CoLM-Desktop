@@ -369,6 +369,31 @@ impl SurfaceDiagnosticsRow {
             gs0sha: None,
         }
     }
+
+    /// 湖分支：`laketem` 给出相似函数与 2 m 诊断，其余同冰川。
+    pub fn from_lake(thermal: &colm_core::LakeThermalFluxes, cosine_zenith: f64) -> Self {
+        Self {
+            cosine_zenith,
+            wet_snow_fraction: 0.0,
+            tref: thermal.tref,
+            qref: thermal.qref,
+            stomatal_resistance: None,
+            soil_surface_resistance: None,
+            trad: thermal.trad,
+            emis: thermal.emis,
+            z0m: thermal.z0m,
+            zol: thermal.zol,
+            rib: thermal.rib,
+            ustar: thermal.ustar,
+            qstar: thermal.qstar,
+            tstar: thermal.tstar,
+            fm: thermal.fm,
+            fh: thermal.fh,
+            fq: thermal.fq,
+            gs0sun: None,
+            gs0sha: None,
+        }
+    }
 }
 
 /// 一次「准备下一步表面光学」需要从步输出里取的量。
@@ -693,6 +718,8 @@ pub struct StandardLctRestartTemplate {
     pub baseflow_scale: f64,
     /// 逐波段辐射量的整变量缓冲，同上。
     radiation_fields: RadiationFields,
+    /// 湖 patch 的湖层、`savedtke1`、`t_grnd` 与时不变量；其余 patch 为 `None`。
+    pub lake: Option<LakeTemplate>,
     /// 雪 + 土的模板列（`soilsnow`），积雪分支的 `GroundTemperatureInput` 需要这个形状。
     ///
     /// 雪段在前、土段在后，与时间重启里的数组同序；无雪时它就是土列本身。
@@ -807,10 +834,11 @@ fn assemble(
     let patch_type = integer_scalar(&constant, "patchtype", patch)?;
     // 冰川（3）共用这份模板：层几何、强迫与常数相同，冰层放在"土壤"那一段；
     // 物理由 `colm_core::glacier_snow_step` 分派（见 `crate::advance_patch`）。
+    // 湖（4）同理：湖底土层放在"土壤"那一段，湖层另存（见 [`LakeTemplate`]）。
     ensure!(
-        matches!(patch_type, 0 | 2 | 3),
-        "standard LCT assembly supports patchtype 0 (soil), 2 (wetland) and 3 (glacier), \
-         got {patch_type}"
+        matches!(patch_type, 0 | 2 | 3 | 4),
+        "standard LCT assembly supports patchtype 0 (soil), 2 (wetland), 3 (glacier) and \
+         4 (lake), got {patch_type}"
     );
 
     let soil = soil_state(&constant, soil_layers, patches, physics.hydraulic_model)?;
@@ -1101,8 +1129,9 @@ fn assemble(
     // 生化参数整份来自地类表。冠层积分因子不在这里：内核每步从 `lai`/`extkb`/`extkd`
     // 现算 `cintsun`/`cintsha`（模板已经把这三样都供上了）。
     let biochemistry = class.biochemistry();
+    // 冰川/湖（`patchtype > 2`）不走植被能量链，冠层在每步末尾被清零，允许为 0。
     ensure!(
-        leaf_area_index + stem_area_index > 0.0,
+        patch_type > 2 || leaf_area_index + stem_area_index > 0.0,
         "the standard LCT energy step needs a vegetated canopy"
     );
 
@@ -1136,7 +1165,13 @@ fn assemble(
         "the snow-plus-soil template column does not match its layer count"
     );
 
+    let lake = if patch_type == 4 {
+        Some(LakeTemplate::read(&constant, &time, patch)?)
+    } else {
+        None
+    };
     Ok(StandardLctRestartTemplate {
+        lake,
         patch,
         patch_type: i32::try_from(patch_type).context("patchtype is outside the kernel's range")?,
         // 入参重启里没有 `rss` 时按 `spval` 处理 —— 与上游"起跑时是缺测值"一致。
@@ -1233,6 +1268,19 @@ impl StandardLctRestartTemplate {
             return Ok(false);
         };
         let (tlai, tsai) = lai.for_time(time)?;
+        // `MOD_LAIReadin.F90:136-157`：读进来之后按地类再处理一遍 —— 水体（与地类 0）清零，
+        // 否则除以 `fveg0`（`DEF_LAI_MONTHLY` 下 `tsai` 也除），`fveg0 <= 0` 清零。
+        // 两张表的 `fveg0` 都是 1.0，所以除法对植被地类是恒等的；水体那一条才有实效。
+        let fveg0 = ClassConstants::new(self.physics.land_cover_scheme, self.land_class)?
+            .maximum_vegetation_fraction();
+        let (tlai, tsai) = if self.land_class
+            == colm_core::waterbody_class(self.physics.land_cover_scheme)
+            || fveg0 <= 0.0
+        {
+            (0.0, 0.0)
+        } else {
+            (tlai / fveg0, tsai / fveg0)
+        };
         state.energy.temporal_canopy = colm_core::TemporalCanopy {
             leaf_area_index: tlai,
             stem_area_index: tsai,
@@ -1611,6 +1659,7 @@ impl StandardLctRestartTemplate {
             snow: self.snow.clone(),
             soil_temperature_k: self.temperature_k.clone(),
             soil_water: self.water.clone(),
+            lake: self.lake.as_ref().map(|lake| lake.initial.clone()),
         }
     }
 
@@ -2077,6 +2126,9 @@ impl StandardLctRestartTemplate {
             column[self.patch] = value;
             overrides.push(RestartOverride::new(name, column));
         }
+        if let (Some(template), Some(lake)) = (&self.lake, &state.lake) {
+            overrides.extend(template.overrides(self.patch, lake)?);
+        }
         Ok(overrides)
     }
 
@@ -2284,3 +2336,73 @@ fn soil_column(
 #[cfg(test)]
 #[path = "assembly_tests.rs"]
 mod assembly_tests;
+
+/// 湖 patch 的装配结果：初始湖状态、时不变量，以及续跑写回用的整变量缓冲。
+///
+/// 重启里湖量的名字与形状：时间重启 `t_lake(patch, lake)`、`lake_icefrc(patch, lake)`
+/// （注意不是 `lake_icefrac`）、`savedtke1(patch)`；常数重启 `dz_lake(patch, lake)`、
+/// `lakedepth(patch)`、`patchlatr(patch)`。非动态湖的 `dz_lake` 是时不变量。
+#[derive(Debug, Clone, PartialEq)]
+pub struct LakeTemplate {
+    pub site: colm_core::LakeSite,
+    pub initial: colm_core::RuntimeLakeState,
+    restart_temperature_k: Vec<f64>,
+    restart_ice_fraction: Vec<f64>,
+    restart_saved_tke: Vec<f64>,
+}
+
+impl LakeTemplate {
+    fn read(constant: &RestartFile, time: &RestartFile, patch: usize) -> Result<Self> {
+        let layers = constant.dimension("lake")?;
+        ensure!(
+            time.dimension("lake")? == layers,
+            "the two restarts disagree on the lake layer count"
+        );
+        let column = colm_core::LakeColumn {
+            thickness_m: constant.layer_column("dz_lake", patch, layers)?,
+            temperature_k: time.layer_column("t_lake", patch, layers)?,
+            ice_fraction: time.layer_column("lake_icefrc", patch, layers)?,
+        };
+        Ok(Self {
+            site: colm_core::LakeSite {
+                latitude_radians: scalar(constant, "patchlatr", patch)?,
+                depth_m: scalar(constant, "lakedepth", patch)?,
+            },
+            initial: colm_core::RuntimeLakeState {
+                column,
+                saved_tke: scalar(time, "savedtke1", patch)?,
+                ground_temperature_k: scalar(time, "t_grnd", patch)?,
+            },
+            restart_temperature_k: time.floats("t_lake")?.to_vec(),
+            restart_ice_fraction: time.floats("lake_icefrc")?.to_vec(),
+            restart_saved_tke: time.floats("savedtke1")?.to_vec(),
+        })
+    }
+
+    /// 以原文件为底，只换本 patch 的 `t_lake`/`lake_icefrc`/`savedtke1`。
+    fn overrides(
+        &self,
+        patch: usize,
+        lake: &colm_core::RuntimeLakeState,
+    ) -> Result<Vec<RestartOverride>> {
+        let layers = lake.column.temperature_k.len();
+        let base = patch * layers;
+        let mut temperature = self.restart_temperature_k.clone();
+        let mut ice_fraction = self.restart_ice_fraction.clone();
+        let mut saved_tke = self.restart_saved_tke.clone();
+        ensure!(
+            base + layers <= temperature.len()
+                && base + layers <= ice_fraction.len()
+                && patch < saved_tke.len(),
+            "the restart's lake columns are too short for patch {patch}"
+        );
+        temperature[base..base + layers].copy_from_slice(&lake.column.temperature_k);
+        ice_fraction[base..base + layers].copy_from_slice(&lake.column.ice_fraction);
+        saved_tke[patch] = lake.saved_tke;
+        Ok(vec![
+            RestartOverride::new("t_lake", temperature),
+            RestartOverride::new("lake_icefrc", ice_fraction),
+            RestartOverride::new("savedtke1", saved_tke),
+        ])
+    }
+}

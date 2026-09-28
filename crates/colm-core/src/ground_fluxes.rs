@@ -4,6 +4,7 @@
 //! and surface humidity; the result feeds `ground_temperature` without
 //! duplicating either Monin-Obukhov or energy-flux iteration logic.
 
+use crate::LibmPow;
 use anyhow::{ensure, Context, Result};
 
 use crate::{
@@ -145,7 +146,7 @@ pub fn ground_fluxes(input: GroundFluxInput) -> Result<GroundFluxState> {
         heat_roughness = momentum_roughness
             / (ROUGHNESS_REYNOLDS_COEFFICIENT
                 * (current.friction_velocity_m_s * momentum_roughness / MOLECULAR_VISCOSITY_M2_S)
-                    .powf(ROUGHNESS_EXPONENT))
+                    .lpow(ROUGHNESS_EXPONENT))
             .exp();
         moisture_roughness = heat_roughness;
         let virtual_scale =
@@ -169,7 +170,7 @@ pub fn ground_fluxes(input: GroundFluxInput) -> Result<GroundFluxState> {
             let convective_velocity =
                 (-GRAVITY_M_S2 * current.friction_velocity_m_s * virtual_scale * boundary_height
                     / input.virtual_potential_temperature_k)
-                    .powf(ONE_THIRD);
+                    .lpow(ONE_THIRD);
             adjusted_wind = input
                 .reference_wind_m_s
                 .mul_add(input.reference_wind_m_s, convective_velocity.powi(2))

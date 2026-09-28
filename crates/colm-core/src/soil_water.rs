@@ -4,6 +4,7 @@
 //! forcing I/O, so the initializer and the eventual Rust `colm` driver share
 //! the same tridiagonal solve.
 
+use crate::LibmPow;
 use anyhow::{ensure, Context, Result};
 
 use crate::f77;
@@ -94,7 +95,7 @@ pub fn solve_campbell_soil_water(
                 let saturation =
                     (input.liquid_water[layer] / input.porosity[layer]).clamp(0.01, 1.0);
                 let potential = input.saturated_potential_mm[layer]
-                    * saturation.powf(-input.clapp_hornberger_b[layer]);
+                    * saturation.lpow(-input.clapp_hornberger_b[layer]);
                 matric_potential_mm[layer] = potential.max(input.minimum_potential_mm);
                 potential_derivative[layer] = -input.clapp_hornberger_b[layer]
                     * matric_potential_mm[layer]
@@ -142,12 +143,12 @@ pub fn solve_campbell_soil_water(
         let exponent = f77(2.0).mul_add(input.clapp_hornberger_b[source], 3.0);
         let exponent_lower = f77(2.0).mul_add(input.clapp_hornberger_b[source], 2.0);
         let conductivity =
-            input.saturated_hydraulic_conductivity_mm_s[source] * saturation.powf(exponent);
+            input.saturated_hydraulic_conductivity_mm_s[source] * saturation.lpow(exponent);
         let derivative = input.saturated_hydraulic_conductivity_mm_s[source]
             * exponent
-            * saturation.powf(exponent_lower)
+            * saturation.lpow(exponent_lower)
             / input.porosity[source];
-        let impedance = 10_f64.powf(
+        let impedance = 10_f64.lpow(
             -input.soil_ice_impedance
                 * 0.5
                 * (input.ice_fraction[layer] + input.ice_fraction[(layer + 1).min(layers - 1)]),
@@ -568,7 +569,7 @@ fn water_table_layer(water_table_depth_m: f64, interfaces: &[f64]) -> usize {
 }
 
 fn specific_yield(porosity: f64, water_table_depth_m: f64, psi0_mm: f64, bsw: f64) -> f64 {
-    (porosity * (1.0 - (1.0 - 1.0e3 * water_table_depth_m / psi0_mm).powf(-1.0 / bsw))).max(0.02)
+    (porosity * (1.0 - (1.0 - 1.0e3 * water_table_depth_m / psi0_mm).lpow(-1.0 / bsw))).max(0.02)
 }
 
 fn validate_groundwater(input: GroundwaterInput<'_>) -> Result<usize> {

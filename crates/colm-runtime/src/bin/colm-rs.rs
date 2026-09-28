@@ -321,6 +321,12 @@ impl RestartSnapshot {
                 hydraulic_conductivity_mm_s: state.soil_water.hydraulic_conductivity_mm_s.clone(),
                 diagnostics: SurfaceDiagnosticsRow::from_glacier(&output.thermal, cosine_zenith),
             },
+            // 湖同样不调 `soilwater`。
+            PatchStepOutput::Lake(output) => Self {
+                matric_potential_mm: state.soil_water.matric_potential_mm.clone(),
+                hydraulic_conductivity_mm_s: state.soil_water.hydraulic_conductivity_mm_s.clone(),
+                diagnostics: SurfaceDiagnosticsRow::from_lake(&output.thermal, cosine_zenith),
+            },
         })
     }
 }

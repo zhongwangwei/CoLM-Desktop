@@ -5,6 +5,7 @@
 //! root-to-leaf network in [`crate::plant_hydraulics`]; ozone remains a
 //! separate upstream feature branch and is not silently approximated here.
 
+use crate::LibmPow;
 use anyhow::{ensure, Context, Result};
 
 use crate::{
@@ -328,8 +329,9 @@ pub fn leaf_temperature(
         input.snow_cover_fraction * input.snow_roughness_m,
     );
     let frontal_area = 1.0 - (-0.5 * lsai).exp();
-    // `:639 sqrtdragc = min((0.003+0.3*fai)**0.5, 0.3)` 的 GIMPLE 是 `.FMA(fai, 0.3, 0.003)`。
-    let sqrt_drag = 0.3_f64.mul_add(frontal_area, 0.003).sqrt().min(0.3);
+    // `:553 sqrtdragc = min((0.003+0.3*fai)**0.5, 0.3)` 的 GIMPLE 是
+    // `__builtin_pow (.FMA(fai, 0.3, 0.003), 0.5)` —— libm `pow`，不是 `sqrt`。
+    let sqrt_drag = 0.3_f64.mul_add(frontal_area, 0.003).lpow(0.5).min(0.3);
     let attenuation = input.canopy_top_height_m
         / (input.canopy_top_height_m - displacement)
         / (VON_KARMAN / sqrt_drag);
@@ -439,7 +441,7 @@ pub fn leaf_temperature(
         let raw = 1.0
             / (VON_KARMAN / (surface.moisture - profile.moisture_at_top_layer)
                 * surface.friction_velocity_m_s);
-        let z0hg = z0mg / (0.13 * (surface.friction_velocity_m_s * z0mg / 1.5e-5).powf(0.45)).exp();
+        let z0hg = z0mg / (0.13 * (surface.friction_velocity_m_s * z0mg / 1.5e-5).lpow(0.45)).exp();
         let z0qg = z0hg;
         let wind_at_top =
             surface.friction_velocity_m_s / VON_KARMAN * profile.momentum_at_canopy_top;
@@ -993,7 +995,7 @@ pub fn leaf_temperature(
                 * virtual_temperature_scale
                 * boundary_height
                 / input.virtual_potential_temperature_k)
-                .powf(1.0 / 3.0);
+                .lpow(1.0 / 3.0);
             // 上游 `:1272-1273` 是 `wc2 = beta*beta*(wc*wc)`、`um = sqrt(ur*ur+wc2)`，
             // 内核编出来是（`.loc 1 1273`）：
             //   `_613 = wc*wc`（`fmul`）
@@ -1733,7 +1735,7 @@ fn update_canopy_water(
     let lsai = input.leaf_area_index + input.stem_area_index;
     let mut wet_snow_fraction = if water.snow_mm > 0.0 {
         ((10.0 / (48.0 * lsai)) * water.snow_mm)
-            .powf(crate::f77(0.666_666_666_666))
+            .lpow(crate::f77(0.666_666_666_666))
             .min(1.0)
     } else {
         0.0

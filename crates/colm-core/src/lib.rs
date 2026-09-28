@@ -23,6 +23,38 @@ pub(crate) const fn f77(value: f64) -> f64 {
     value
 }
 
+/// Fortran 的 `x**0.5`：gfortran `-O2` 保留成 libm `pow(x, 0.5)`（不带
+/// `-funsafe-math-optimizations` 不会改写成 `sqrt`），而 LLVM 会把常数指数的
+/// `x.powf(0.5)` 无条件换成 `sqrt` —— 两者不是一回事：macOS 的 `pow` 不是正确舍入，
+/// 实测 `[0.1, 1e4)` 上约 0.1% 的输入与 `sqrt` 差 1 ULP（93078 个点里 105 个）。
+/// 用 `black_box` 把底数和指数都藏起来，逼它真的去调 libm。调用方一律经 [`LibmPow`]。
+/// Fortran 写的是 `sqrt(x)` 的地方照旧用 `sqrt`。
+#[inline]
+pub(crate) fn libm_pow(base: f64, exponent: f64) -> f64 {
+    std::hint::black_box(base).powf(std::hint::black_box(exponent))
+}
+
+/// `x.lpow(y)`：一定走 libm `pow` 的 `x**y`（见 [`libm_pow`]）。
+///
+/// **为什么全仓都用它而不用 `powf`**：LLVM 在 release 下把常数参与的 `pow` 改写掉 ——
+/// `pow(x, 0.5)` → `sqrt`、`pow(x, 2.0)` → `x*x`、`pow(x, -1.0)` → `1/x`、
+/// `pow(2.0|4.0|0.5|10.0, x)` → `exp2`/`exp10`。这些改写在 macOS libm 上**不保值**：
+/// 实测每一种在 8.4 万个点上都有 0.14%~0.2% 差 1 ULP。debug 构建不做改写、
+/// 真调 libm（与 gfortran 一致），所以此前所有逐位验证都是在 debug 下成立的；
+/// release 的 `colm-rs` 在 AT-Neu 上 respc（`2.0**((T-298)/10)`）第 68 条记录就开始漂。
+/// 全部常数（两个操作数都是字面量）的 `**` 由 gfortran 用 MPFR 在编译期折叠，
+/// 那种地方写成折好的字面量或正确舍入的 `sqrt`，不走这里。
+pub trait LibmPow {
+    fn lpow(self, exponent: f64) -> f64;
+}
+
+impl LibmPow for f64 {
+    #[inline]
+    fn lpow(self, exponent: f64) -> f64 {
+        libm_pow(self, exponent)
+    }
+}
+
 pub mod albedo;
 pub mod atmosphere;
 pub mod bgc;
@@ -47,6 +79,8 @@ pub mod hydrology;
 pub mod interception;
 pub mod irrigation;
 pub mod lake;
+pub mod lake_step;
+pub mod lake_temperature;
 pub mod land_cover;
 pub mod land_cover_generated;
 pub mod leaf_temperature;
@@ -185,6 +219,11 @@ pub use lake::{
     lake_thermal_conductivity, LakeColumn, LakeConductivity, LakeConductivityInput,
     LakeNewSnowInput, LakeNewSnowOutcome, LakeRoughness, LakeRoughnessInput, LakeSnowWaterFluxes,
     LakeSnowWaterInput, LakeSnowWaterOutcome, LakeSnowWaterSoil,
+};
+pub use lake_step::{lake_snow_step, LakeSite, LakeStepOutput, RuntimeLakeState};
+pub use lake_temperature::{
+    lake_temperature, LakeTemperatureInput, LakeTemperatureOutput, LakeTemperatureState,
+    LakeThermalFluxes, LAKE_EMISSIVITY,
 };
 pub use land_cover::{
     land_cover_classes, land_cover_tables, root_fraction, waterbody_class, ClassConstants,

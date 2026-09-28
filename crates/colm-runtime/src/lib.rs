@@ -475,6 +475,9 @@ impl PointRuntime {
                         output,
                         reference,
                     )?,
+                    PatchOutput::Lake(output) => {
+                        session.push_lake(step.clock.end_time, template, next, output, reference)?
+                    }
                 };
                 if let Some(path) = pushed {
                     files.push(path);
@@ -700,6 +703,7 @@ fn lct_binding(
 pub enum PatchStepOutput<'a> {
     Soil(&'a StandardLctSnowSoilOutput),
     Glacier(&'a colm_core::GlacierStepOutput),
+    Lake(&'a colm_core::LakeStepOutput),
 }
 
 impl PatchStepOutput<'_> {
@@ -708,6 +712,7 @@ impl PatchStepOutput<'_> {
         match self {
             Self::Soil(output) => output.energy.total_evaporation_kg_m2_s,
             Self::Glacier(output) => output.thermal.fevpa,
+            Self::Lake(output) => output.thermal.fevpa,
         }
     }
 
@@ -716,6 +721,7 @@ impl PatchStepOutput<'_> {
         match self {
             Self::Soil(output) => output.water.soil.surface_runoff_mm_s,
             Self::Glacier(output) => output.surface_runoff_mm_s,
+            Self::Lake(output) => output.surface_runoff_mm_s,
         }
     }
 
@@ -723,7 +729,7 @@ impl PatchStepOutput<'_> {
     pub fn subsurface_runoff_mm_s(self) -> f64 {
         match self {
             Self::Soil(output) => output.water.soil.subsurface_runoff_mm_s,
-            Self::Glacier(_) => 0.0,
+            Self::Glacier(_) | Self::Lake(_) => 0.0,
         }
     }
 }
@@ -733,6 +739,7 @@ impl PatchStepOutput<'_> {
 pub enum PatchOutput {
     Soil(Box<StandardLctSnowSoilOutput>),
     Glacier(Box<colm_core::GlacierStepOutput>),
+    Lake(Box<colm_core::LakeStepOutput>),
 }
 
 impl PatchOutput {
@@ -740,6 +747,7 @@ impl PatchOutput {
         match self {
             Self::Soil(output) => PatchStepOutput::Soil(output),
             Self::Glacier(output) => PatchStepOutput::Glacier(output),
+            Self::Lake(output) => PatchStepOutput::Lake(output),
         }
     }
 }
@@ -777,6 +785,27 @@ fn advance_patch(
             template.physics.variably_saturated_flow,
         );
         return Ok(PatchOutput::Glacier(Box::new(output)));
+    }
+    if let Some(lake) = &template.lake {
+        let output = colm_core::lake_snow_step(input, lake.site, state)?;
+        // 湖面反照率只看 `t_grnd`（`albland` 的 `patchtype >= 4` 支）；`t_soisno_(1)` 换成
+        // `t_lake(1)` 那一句只在 SNICAR 下有读者。
+        template.prepare_surface_optics(
+            state,
+            SurfaceOpticsStep {
+                cosine_zenith: step.surface_cosine_zenith,
+                ground_temperature_k: state.surface_temperature_k(),
+                momentum_roughness_m: output.thermal.z0m,
+                wet_snow_fraction: 0.0,
+                previous_snow_water_equivalent_mm,
+            },
+        )?;
+        colm_core::clear_non_soil_patch(
+            state,
+            step.forcing.air_temperature_k,
+            template.physics.variably_saturated_flow,
+        );
+        return Ok(PatchOutput::Lake(Box::new(output)));
     }
     let output = colm_core::standard_lct_snow_soil_step(input, state)?;
     // 顺序不能反：上游 `hist_out`（`CoLM.F90:537`）在 `CoLMDRIVER`（`:512`）

@@ -24841,3 +24841,78 @@ cargo test core/runtime/hist 363/76/50，colm-init 156；clippy 无告警；fmt 
 回归（tmp/regress.sh）：规则土壤全部窗口、split、VIC、方案 8/1、预热 + 优化器、冰川全部逐位相同
 cargo test core 364 / runtime 76 / hist 50；clippy 无告警
 ```
+
+## 第 409 轮：定深湖（patchtype 4）接进 Rust 主循环；release 构建的 `pow` 被 LLVM 改写
+
+### 一、湖分支
+
+`CoLMMAIN.F90:1788-1998`（非动态湖）整支移植：`newsnow_lake` → `laketem` → `snowwater_lake` →
+`rsur = max(0, pg_rain+pg_snow-aa-a)`、`lake_deficit = -min(0, ·)` → `endwb = .FNMA (lake_deficit, deltim, ·)`，
+`xerr = 0`；末尾 `patchtype > 2` 的植被清零与冰川共用。新模块 `lake_temperature.rs`（`laketem`，
+含迭代、钳制、联合列三对角、相变、对流混合、能量闭合修正）与 `lake_step.rs`（CoLMMAIN 那一支）。
+湖状态 `RuntimeLakeState { column, saved_tke, ground_temperature_k }` 挂在 `StandardLctSnowSoilState.lake`：
+湖上的 `t_grnd` 由 `laketem` 自己的表面能量平衡解出，**不是任何一层的温度**，必须随状态保存，
+`surface_temperature_k()` 在湖上返回它（history、步末 `albland`、续跑都读这一个）。
+续跑写回 `t_lake`/`lake_icefrc`（重启里的名字不是 `lake_icefrac`）/`savedtke1`/`t_grnd`；
+`dz_lake`/`lakedepth`/`patchlatr` 取常数重启。`DEF_USE_Dynamic_Lake` 运行期明确拒绝。
+
+`MOD_Lake.F90` 原有移植（`newsnow_lake`/`snowwater_lake`/`roughness_lake`/`hConductivity_lake`）
+此前没有对过 GIMPLE，这一轮逐句重写：`newsnow_lake` 的八个能量项是左结合纯乘积，`a+b` 收成
+`.FMA (deltim*pg_rain, hfus, a)`，各分支温度分子的最后一个乘积进 FMA；`snowwater_lake` 的
+`heatsum` 两条 FMA、湖面融雪分子 `.FMS (.FMA (dz*1000, t, (liq+ice)*tfrz), cpliq, heatsum)`、
+湖底土层 `.FNMA (dz, (a-porsl)*1000, wliq)`；`roughness_lake` 的 `cur*u*u` 左结合、`4*sqre0-3.2`
+收成 FMA；`hConductivity_lake` 的 `kme = .FMA (pow(n2,-0.43), 1.039e-8, km+ke)`、
+`1+37ri² = .FMA (ri, 37ri, 1)`、冰下导热率分母 `.FMA (1-f, tkice_eff, (kme*cwat)*f)`。
+
+逐步探针（两引擎在同一处打印 `ocvts/ncvts/errsoi`、逐层 `t/f/cv`、三对角系数）定位到的四处：
+
+1. **湖层界面导热率** `tkix = (tk_j*tk_{j+1}*(dz_j+dz_{j+1})) / (tk_j*dz_{j+1} + tk_{j+1}*dz_j)`：
+   `.FMA (tk_j, dz_{j+1}, tk_{j+1}*dz_j)`。GIMPLE 里两个 `pretmp` 是跨迭代提出来的载入，只看 SSA
+   名字会把哪一个乘积被融合读反；等厚湖层下两种读法都"看起来对"，第 0 步就差 1 ULP。
+2. **`netsolar` 的湖/海支**（`MOD_NetSolar.F90:199-201`）项序是 `sols, soll, solsd, solld`，
+   而且四个乘积与陆地支共享（PRE 提到分支之前），**一个都不融合**；Rust 沿用了陆地支的
+   四级 FMA。
+3. **`LAI_readin` 的地类后处理**（`MOD_LAIReadin.F90:136-157`）：读进 `SITE_LAI_monthly` 之后，
+   水体与地类 0 清零、否则除以 `fveg0`。Rust 的月度刷新只取原值 —— 植被地类 `fveg0 = 1.0` 除了等于
+   没除，水体上 `tlai/tsai` 却成了站点值（重启 `tlai = 0.4`，Fortran 是 0）。
+4. **history 过滤**：`t_soisno/wliq_soisno/wice_soisno` 受 `MOD_Hist.F90:4160` 的 `patchtype <= 3`
+   过滤，湖上留填充值；`rsur_se = rsur`、`rsur_ie = 0` 在湖分支里**无条件**赋值（冰川只在 VSF 下），
+   所以 Campbell/非 VSF 的湖也要写。`t_lake/lake_icefrac/lake_deficit` 只在 `patchtype == 4` 上写。
+
+另：模板对"植被冠层必须非空"的断言只对 `patchtype <= 2` 成立，冰川/湖的重启 `lai = sai = 0`。
+
+### 二、release 构建的 `pow` 被 LLVM 改写（此前全部逐位验证都只在 debug 下成立）
+
+深湖（`lakedepth = 30`）四月一步 `rah` 差 1 ULP、`raw` 不差 —— 追到 `roughness_lake` 的
+`sqre0 = (…)**0.5`：gfortran 保留 libm `pow(x, 0.5)`（生产 `.o` 里 `MOD_Lake` 有 17 处 `_pow` 重定位、
+`MOD_LeafTemperature` 9 处、`MOD_CanopyLayerProfile` 5 处），而 Rust 常数指数的 `powf(0.5)`
+被 LLVM 换成 `sqrt`。macOS 的 `pow` 不是正确舍入，二者在 `[0.1, 1e4)` 上 93078 个点里差 105 个。
+
+顺着查下去，**release 的 LLVM 对 `pow` 做了一整类不保值的改写**（debug 不做，真调 libm）：
+`pow(x, 0.5)` → `sqrt`、`pow(x, 2.0)` → `x*x`、`pow(x, -1.0)` → `1/x`、
+`pow(2.0|4.0|0.5|10.0, x)` → `exp2`/`exp10`，每一种在 8.4 万点上都有 0.14%~0.2% 差 1 ULP；
+`0.25/-0.5/1.5/0.45/1.68/1/3` 次方与非特殊底数不改写。于是 release 的 `colm-rs` 在 CN-Cng 第 68 条
+记录就漂（`respc` 用 `2.0**((T-298)/10)`），AT-Neu 全年 12 个月全部不再逐位 —— 而此前的
+`tmp/regress.sh` 一直调的是 debug 的 `colm-cli`，所以从没暴露。
+
+修法：`colm_core::LibmPow`（`x.lpow(y)`）用 `black_box` 把底数与指数都藏起来，`colm-core` 131 处、
+`colm-srfdata` 26 处 `powf` 全部换过去（`colm-srfdata` 不依赖 `colm-core`，留了一份同样的实现）；
+两个操作数都是字面量的地方 gfortran 用 MPFR 在编译期折叠，写成折好的字面量
+（`zetam**0.333`、`zetat**(-0.333)`）或正确舍入的 `sqrt`（`0.0031**0.5`），不走 libm。
+`DoubleDouble::powf`（VIC 的四精度 Q12）不受影响。顺带把 `leaf_temperature`/`canopy_roughness`
+里三处写成 `sqrt` 的 `**0.5` 改回 libm `pow`（GIMPLE 为据；此前没暴露是因为 `fai` 只随月度 LAI 变，
+一年只有十几个不同的输入）。
+
+### 三、实测
+
+```text
+湖（AT-Neu 强迫，SITE_landtype = 17，冷启动两引擎逐位相同）：
+  lakedepth = 1，2010 全年小时 history + 13 份月末续跑：逐位相同（tmp/ly；含封冻、冰上积雪层、化冰、夏季混合）
+  lakedepth = 30（深湖 ×5 涡扩散、fetch = 25*z_nl、za(2)），全年：逐位相同（tmp/ld）
+  Campbell + 非 VSF，2010-01..04：逐位相同（tmp/lc）
+回归（tmp/regress.sh，PROFILE=release 与 debug 都跑）：CN-Cng、AT-Neu 各窗口与全年、split、VIC、
+  方案 8/1、TOPMODEL 全年、预热 + 优化器、冰川全年/Campbell、Campbell 四种径流、湿地全年/Campbell/TOPMODEL、
+  湖四例 —— 全部逐位相同（sp/ts/tc 只剩运行窗口之外的旧续跑目录，与此前相同）
+cargo test core 367 / runtime 76 / hist 50 / init 156 / srfdata 270+49（后两个需 --test-threads=1）；
+clippy 无告警；fmt 通过
+```

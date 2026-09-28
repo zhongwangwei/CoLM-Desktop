@@ -1,5 +1,6 @@
 //! Ground humidity from `MOD_Thermal.F90` section 2 (non-split and `DEF_SPLIT_SOILSNOW`).
 
+use crate::LibmPow;
 use anyhow::{ensure, Result};
 
 use crate::{saturation_specific_humidity, soil_psi_from_vliq, SoilHydraulicModel};
@@ -163,7 +164,7 @@ fn relative_humidity(input: GroundHumidityInput) -> f64 {
     };
     let soil_potential_mm = match input.hydraulic_model {
         SoilHydraulicModel::Campbell { bsw } => {
-            input.saturated_soil_suction_mm * saturation_fraction.powf(-bsw)
+            input.saturated_soil_suction_mm * saturation_fraction.lpow(-bsw)
         }
         model => soil_psi_from_vliq(
             // `MOD_Thermal…:579` 的 GIMPLE 是 `_86 = .FMA(porsl(1)-theta_r(1), fac, theta_r(1))`

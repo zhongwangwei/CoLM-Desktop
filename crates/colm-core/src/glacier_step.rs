@@ -9,6 +9,7 @@
 //! 收缩形状逐句对照 `MOD_Glacier.F90` 与 `CoLMMAIN.F90` 的
 //! `-fdump-tree-optimized-lineno`（`-O2 -ffp-contract=fast`）；每处 `mul_add` 旁注了行号。
 
+use crate::LibmPow;
 use anyhow::{ensure, Result};
 
 use crate::standard_lct_step::packed_snow_soil_state;
@@ -526,7 +527,7 @@ pub fn glacier_temperature(
     let reference_temperature =
         crate::reference_height_temperature_k(input.air_temperature_k, input.temperature_height_m);
     let potential_temperature =
-        input.air_temperature_k * (100_000.0 / input.surface_pressure_pa).powf(RGAS / CPAIR);
+        input.air_temperature_k * (100_000.0 / input.surface_pressure_pa).lpow(RGAS / CPAIR);
     // `:221` `.FMA (forc_q, 0.61, 1.0)`，与 `groundfluxes_glacier` 的 `(1.+0.61*qm)` 同一项。
     let one_plus_061_humidity = input.specific_humidity.mul_add(0.61, 1.0);
     let virtual_potential_temperature = potential_temperature * one_plus_061_humidity;
@@ -610,7 +611,7 @@ pub fn glacier_temperature(
             (t0_squared * t0_squared) * emissive,
         ),
     );
-    let radiative_temperature = (longwave_up / STEFNC).powf(0.25);
+    let radiative_temperature = (longwave_up / STEFNC).lpow(0.25);
     // `:321`
     let mut energy_error = input.absorbed_shortwave_w_m2 + input.downward_longwave_w_m2
         - longwave_up
@@ -737,7 +738,7 @@ fn glacier_ground_fluxes(
         temperature_scale = temperature_difference * (VONKAR / profile.heat);
         humidity_scale = humidity_difference * (VONKAR / profile.moisture);
         heat_roughness =
-            momentum_roughness / ((momentum_roughness * ustar / 1.5e-5).powf(0.45) * 0.13).exp();
+            momentum_roughness / ((momentum_roughness * ustar / 1.5e-5).lpow(0.45) * 0.13).exp();
         // `:506` `.FMA (1+0.61*qm, tstar, (th*0.61)*qstar)`
         let virtual_scale =
             one_plus_061_humidity.mul_add(temperature_scale, potential_061 * humidity_scale);
@@ -762,7 +763,7 @@ fn glacier_ground_fluxes(
             }
             let convective = (-((ustar * GRAV) * virtual_scale * boundary_height
                 / virtual_potential_temperature))
-                .powf(1.0 / 3.0);
+                .lpow(1.0 / 3.0);
             // `:523` `sqrt(.FMA (ur, ur, wc*wc))`
             reference_wind
                 .mul_add(reference_wind, convective * convective)

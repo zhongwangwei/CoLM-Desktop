@@ -4,6 +4,7 @@
 //! this module owns only the biochemistry/CO₂ iteration so it is reusable by the
 //! ordinary and plant-hydraulic canopy paths.
 
+use crate::LibmPow;
 use anyhow::{ensure, Result};
 
 use crate::f77;
@@ -129,10 +130,10 @@ pub fn photosynthesis_parameters(
     let c3_fraction = if b.c3c4 == 1 { 1.0 } else { 0.0 };
     let c4_fraction = 1.0 - c3_fraction;
     let temperature_factor = f77(0.1) * (input.leaf_temperature_k - b.optimum_temperature_k);
-    let kc = f77(30.0) * f77(2.1).powf(temperature_factor);
-    let ko = f77(30_000.0) * f77(1.2).powf(temperature_factor);
+    let kc = f77(30.0) * f77(2.1).lpow(temperature_factor);
+    let ko = f77(30_000.0) * f77(1.2).lpow(temperature_factor);
     let co2_compensation_pa = f77(0.5) * input.oxygen_partial_pressure_pa
-        / (f77(2600.0) * f77(0.57).powf(temperature_factor))
+        / (f77(2600.0) * f77(0.57).lpow(temperature_factor))
         * c3_fraction;
     let rubisco_co2_constant_pa = kc * (1.0 + input.oxygen_partial_pressure_pa / ko) * c3_fraction;
     let low_inhibition = 1.0
@@ -140,7 +141,7 @@ pub fn photosynthesis_parameters(
     let high_inhibition = 1.0
         + (b.high_temperature_slope * (input.leaf_temperature_k - b.high_temperature_half_k)).exp();
     let mut maximum_carboxylation =
-        b.maximum_carboxylation_25c_mol_m2_s * f77(2.1).powf(temperature_factor);
+        b.maximum_carboxylation_25c_mol_m2_s * f77(2.1).lpow(temperature_factor);
     // `:570 vm = vm/temph*rstfac*c3 + vm/(templ*temph)*rstfac*c4` 的 GIMPLE 是
     // `.FMA(vm/temph*rstfac, c3, vm/(templ*temph)*rstfac*c4)` —— `c4` 那条链整体
     // 独立舍入当加数，`c3` 那一乘收进 FMA。
@@ -177,7 +178,7 @@ pub fn photosynthesis_parameters(
     let respiration_fraction = f77(0.015) * c3_fraction + f77(0.025) * c4_fraction;
     let respiration = respiration_fraction
         * b.maximum_carboxylation_25c_mol_m2_s
-        * f77(2.0).powf(temperature_factor)
+        * f77(2.0).lpow(temperature_factor)
         / (1.0
             + (b.respiration_temperature_slope
                 * (input.leaf_temperature_k - b.respiration_temperature_half_k))
@@ -187,11 +188,11 @@ pub fn photosynthesis_parameters(
     // `:597-598 omss = (vmax25/2)*1.8**qt/templ*rstfac*c3 + (vmax25/5)*1.8**qt*rstfac*c4`
     // 与 `:570` 同形（`.FMA(_118, cstore_128, _124)`）。
     let low_sink = (b.maximum_carboxylation_25c_mol_m2_s / f77(2.0))
-        * f77(1.8).powf(temperature_factor)
+        * f77(1.8).lpow(temperature_factor)
         / low_inhibition
         * input.soil_water_stress;
     let high_sink = (b.maximum_carboxylation_25c_mol_m2_s / f77(5.0))
-        * f77(1.8).powf(temperature_factor)
+        * f77(1.8).lpow(temperature_factor)
         * input.soil_water_stress
         * c4_fraction;
     let sink_limit = low_sink.mul_add(c3_fraction, high_sink) * input.canopy_integration[0];

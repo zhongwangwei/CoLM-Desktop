@@ -18,6 +18,7 @@
 //! `temperature_scale_k`、`r_qstar`→`humidity_scale`、`r_zol`→`zol`、
 //! `r_rib`→`bulk_richardson`、`r_fm`/`r_fh`/`r_fq`→三个相似函数积分。
 
+use crate::LibmPow;
 use anyhow::{ensure, Context, Result};
 
 use crate::{monin_obukhov_with_scheme, MoninObukhovInput, SurfaceLayerScheme};
@@ -156,7 +157,7 @@ pub fn history_diagnostics(input: HistoryDiagnosticsInput) -> Result<HistoryDiag
     let humidity_scale = -input.evaporation_kg_m2_s / (air_density * friction_velocity);
 
     let potential_temperature = temperature
-        * (100_000.0 / pressure).powf(AIR_GAS_CONSTANT_J_KG_K / AIR_HEAT_CAPACITY_J_KG_K);
+        * (100_000.0 / pressure).lpow(AIR_GAS_CONSTANT_J_KG_K / AIR_HEAT_CAPACITY_J_KG_K);
     // `MOD_Vars_1DAccFluxes.F90:2749` 的 `(1.+0.61*qm)` 在出货汇编里是
     // `fmadd d29,d13,d31,d29`（`d29=1.0`、`d31=0.61`）—— `0.61*qm` 被收进 `1.0`。
     let one_plus_061_humidity = 0.61f64.mul_add(humidity, 1.0);
@@ -272,7 +273,7 @@ fn stability_adjusted_wind(
     let convective_velocity = (-GRAVITY_M_S2 * friction_velocity * virtual_scale * zii
         / virtual_potential_temperature)
         .max(0.0)
-        .powf(1.0 / 3.0);
+        .lpow(1.0 / 3.0);
     let convective_squared = CONVECTIVE_BETA.powi(2) * convective_velocity.powi(2);
     // 上游 `um = max(0.1, sqrt(ur*ur+wc2))`。**本**例程里的出货汇编是
     // `fmadd d9,d9,d9,d0`（`d9=ur`、`d0=wc2`）⇒ `ur*ur` 被收进 `wc2`。

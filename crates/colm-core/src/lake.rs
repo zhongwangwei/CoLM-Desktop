@@ -1,5 +1,6 @@
 //! Runtime lake-column adjustment from `MOD_Lake.F90`.
 
+use crate::LibmPow;
 use anyhow::{ensure, Result};
 
 use crate::snow::{snow_interface_slot, snow_layer_slot, validate_runtime_snow_column};
@@ -15,6 +16,10 @@ use crate::FREEZING_K;
 const LIQUID_HEAT_CAPACITY_J_KG_K: f64 = 4188.0;
 const ICE_HEAT_CAPACITY_J_KG_K: f64 = 2117.27;
 const FUSION_HEAT_J_KG: f64 = 0.3336e6;
+/// `cwat = cpliq*denh2o`
+const LAKE_WATER_HEAT_CAPACITY: f64 = LIQUID_HEAT_CAPACITY_J_KG_K * 1000.0;
+/// `tkice_eff = tkice*denice/denh2o`
+const EFFECTIVE_ICE_CONDUCTIVITY: f64 = 2.29 * 917.0 / 1000.0;
 
 /// Mutable ten-layer lake state in top-to-bottom order.
 #[derive(Debug, Clone, PartialEq)]
@@ -160,18 +165,23 @@ pub fn add_lake_new_snow(
 
     let mut rainfall = input.rainfall_kg_m2_s;
     let mut snowfall = input.snowfall_kg_m2_s;
+    let dt = input.time_step_seconds;
+    // `MOD_Lake.F90:109-111`：`snowdp + deltim*dz_snowf`、`scv + pg_snow*deltim`，都不融合。
     let snowfall_depth_rate = snowfall / input.new_snow_bulk_density_kg_m3;
-    snow.depth_m += snowfall_depth_rate * input.time_step_seconds;
-    snow.water_equivalent_kg_m2 += snowfall * input.time_step_seconds;
+    let snowfall_depth = dt * snowfall_depth_rate;
+    let snowfall_mass = snowfall * dt;
+    snow.depth_m += snowfall_depth;
+    snow.water_equivalent_kg_m2 += snowfall_mass;
     snow.interface_depth_m[snow_interface_slot(0)] = 0.0;
     let mut new_node = false;
 
     if snow.layer_count == 0 && snow.depth_m < 0.01 {
         snow.age = 0.0;
         exchange_precipitation_with_lake(
-            input.time_step_seconds,
+            dt,
             input.precipitation_temperature_k,
             input.new_snow_bulk_density_kg_m3,
+            snowfall_depth,
             &mut rainfall,
             &mut snowfall,
             snow,
@@ -182,8 +192,9 @@ pub fn add_lake_new_snow(
             new_node = true;
         }
         if input.use_dynamic_lake && snow.layer_count == 0 {
-            let liquid_depth = lake.thickness_m[0] * (1.0 - lake.ice_fraction[0])
-                + rainfall * input.time_step_seconds * 1.0e-3;
+            // `:232-235`：`.FMA (dz, 1-fi, (deltim*pg_rain)*1e-3)`。
+            let liquid_depth =
+                lake.thickness_m[0].mul_add(1.0 - lake.ice_fraction[0], (dt * rainfall) * 1.0e-3);
             let ice_depth = lake.thickness_m[0] * lake.ice_fraction[0];
             lake.thickness_m[0] = liquid_depth + ice_depth;
             lake.ice_fraction[0] = ice_depth / lake.thickness_m[0];
@@ -197,22 +208,37 @@ pub fn add_lake_new_snow(
     if snow.layer_count < 0 && !new_node {
         let top_layer = snow.layer_count + 1;
         let top = snow_layer_slot(top_layer);
-        let old_heat_capacity = snow.ice_water_kg_m2[top] * ICE_HEAT_CAPACITY_J_KG_K
-            + snow.liquid_water_kg_m2[top] * LIQUID_HEAT_CAPACITY_J_KG_K;
-        let precipitation_heat_capacity = input.time_step_seconds
-            * (rainfall * LIQUID_HEAT_CAPACITY_J_KG_K + snowfall * ICE_HEAT_CAPACITY_J_KG_K);
+        let ice = snow.ice_water_kg_m2[top];
+        let liquid = snow.liquid_water_kg_m2[top];
+        // `:259-262` 的 GIMPLE：热容 `.FMA (wice, cpice, wliq*cpliq)`；降水热
+        // `deltim*.FMA (pg_rain, cpliq, pg_snow*cpice)`；分母把两项降水各自收进 FMA。
+        let old_heat_capacity = ice.mul_add(
+            ICE_HEAT_CAPACITY_J_KG_K,
+            liquid * LIQUID_HEAT_CAPACITY_J_KG_K,
+        );
+        let precipitation_heat = dt
+            * rainfall.mul_add(
+                LIQUID_HEAT_CAPACITY_J_KG_K,
+                snowfall * ICE_HEAT_CAPACITY_J_KG_K,
+            );
+        let numerator = old_heat_capacity.mul_add(
+            snow.temperature_k[top],
+            precipitation_heat * input.precipitation_temperature_k,
+        );
+        let denominator = snowfall_mass.mul_add(
+            ICE_HEAT_CAPACITY_J_KG_K,
+            (dt * rainfall).mul_add(LIQUID_HEAT_CAPACITY_J_KG_K, old_heat_capacity),
+        );
         ensure!(
-            old_heat_capacity + precipitation_heat_capacity > 0.0,
+            denominator > 0.0,
             "lake snow top layer has no heat capacity"
         );
-        snow.temperature_k[top] = ((old_heat_capacity * snow.temperature_k[top])
-            + precipitation_heat_capacity * input.precipitation_temperature_k)
-            / (old_heat_capacity + precipitation_heat_capacity);
-        snow.temperature_k[top] = snow.temperature_k[top].min(FREEZING_K);
-        snow.ice_water_kg_m2[top] += input.time_step_seconds * snowfall;
-        snow.thickness_m[top] += snowfall_depth_rate * input.time_step_seconds;
-        snow.node_depth_m[top] =
-            snow.interface_depth_m[snow_interface_slot(top_layer)] - 0.5 * snow.thickness_m[top];
+        snow.temperature_k[top] = (numerator / denominator).min(FREEZING_K);
+        snow.ice_water_kg_m2[top] = snowfall_mass + ice;
+        snow.thickness_m[top] += snowfall_depth;
+        // `:267` `.FNMA (dz, 0.5, zi(lb))`
+        snow.node_depth_m[top] = (-snow.thickness_m[top])
+            .mul_add(0.5, snow.interface_depth_m[snow_interface_slot(top_layer)]);
         snow.interface_depth_m[snow_interface_slot(top_layer - 1)] =
             snow.interface_depth_m[snow_interface_slot(top_layer)] - snow.thickness_m[top];
     }
@@ -227,7 +253,7 @@ fn new_lake_snow_node(snow: &mut RuntimeSnowColumn, temperature_k: f64) {
     snow.layer_count = -1;
     let top = snow_layer_slot(0);
     snow.thickness_m[top] = snow.depth_m;
-    snow.node_depth_m[top] = -0.5 * snow.thickness_m[top];
+    snow.node_depth_m[top] = -(snow.thickness_m[top] * 0.5);
     snow.interface_depth_m[snow_interface_slot(-1)] = -snow.thickness_m[top];
     snow.age = 0.0;
     snow.temperature_k[top] = temperature_k;
@@ -236,166 +262,137 @@ fn new_lake_snow_node(snow: &mut RuntimeSnowColumn, temperature_k: f64) {
     snow.previous_ice_fraction[top] = 1.0;
 }
 
+/// `newsnow_lake` 无雪层且新雪不足 1 cm 时的降水—湖面能量交换（`MOD_Lake.F90:118-228`）。
+///
+/// 每个式子的收缩形状都对着 `-fdump-tree-optimized-lineno` 抄：`a`..`h` 八个能量项
+/// 全是左结合的纯乘积（`dt*(pg_rain*cpliq)` 这类重排不改值），`a+b` 被收成
+/// `.FMA (deltim*pg_rain, hfus, a)`；各分支的温度分子里，最后一个乘积收进 FMA。
+#[allow(clippy::too_many_arguments)]
 fn exchange_precipitation_with_lake(
-    time_step_seconds: f64,
+    dt: f64,
     precipitation_temperature_k: f64,
     new_snow_bulk_density_kg_m3: f64,
+    snowfall_depth: f64,
     rainfall: &mut f64,
     snowfall: &mut f64,
     snow: &mut RuntimeSnowColumn,
     lake: &mut LakeColumn,
 ) {
-    let a = LIQUID_HEAT_CAPACITY_J_KG_K
-        * *rainfall
-        * time_step_seconds
-        * (precipitation_temperature_k - FREEZING_K);
-    let b = *rainfall * time_step_seconds * FUSION_HEAT_J_KG;
-    let c = ICE_HEAT_CAPACITY_J_KG_K
-        * 1000.0
-        * lake.thickness_m[0]
-        * lake.ice_fraction[0]
-        * (FREEZING_K - lake.temperature_k[0]);
-    let d = 1000.0 * lake.thickness_m[0] * lake.ice_fraction[0] * FUSION_HEAT_J_KG;
-    let e = ICE_HEAT_CAPACITY_J_KG_K
-        * *snowfall
-        * time_step_seconds
-        * (FREEZING_K - precipitation_temperature_k);
-    let f = *snowfall * time_step_seconds * FUSION_HEAT_J_KG;
-    let g = LIQUID_HEAT_CAPACITY_J_KG_K
-        * 1000.0
-        * lake.thickness_m[0]
-        * (1.0 - lake.ice_fraction[0])
-        * (lake.temperature_k[0] - FREEZING_K);
-    let h = 1000.0 * lake.thickness_m[0] * (1.0 - lake.ice_fraction[0]) * FUSION_HEAT_J_KG;
+    let tp = precipitation_temperature_k;
+    let dz = lake.thickness_m[0];
+    let fi = lake.ice_fraction[0];
+    let tl = lake.temperature_k[0];
+    let pr = *rainfall;
+    let ps = *snowfall;
+    let rain_heat = dt * (pr * LIQUID_HEAT_CAPACITY_J_KG_K);
+    let snow_heat = dt * (ps * ICE_HEAT_CAPACITY_J_KG_K);
+    let rain_mass = dt * pr;
+    let snow_mass = ps * dt;
+    let ice_heat_column = dz * (ICE_HEAT_CAPACITY_J_KG_K * 1000.0);
+    let liquid_heat_column = dz * (LIQUID_HEAT_CAPACITY_J_KG_K * 1000.0);
+    let water_column = dz * 1000.0;
+    let a = rain_heat * (tp - FREEZING_K);
+    let c = (ice_heat_column * fi) * (FREEZING_K - tl);
+    let d = (fi * water_column) * FUSION_HEAT_J_KG;
+    let e = snow_heat * (FREEZING_K - tp);
+    let f = snow_mass * FUSION_HEAT_J_KG;
+    let g = (liquid_heat_column * (1.0 - fi)) * (tl - FREEZING_K);
+    let h = (water_column * (1.0 - fi)) * FUSION_HEAT_J_KG;
+    // `:130` 与 `:133` 共用 `.FMA (deltim*pg_rain, hfus, a)`。
+    let a_plus_b = rain_mass.mul_add(FUSION_HEAT_J_KG, a);
 
-    if lake.ice_fraction[0] > 0.999 {
-        if a + b <= c {
-            let precipitation_temperature = FREEZING_K.min(precipitation_temperature_k);
-            lake.temperature_k[0] = (a
-                + b
-                + ICE_HEAT_CAPACITY_J_KG_K
-                    * (*rainfall + *snowfall)
-                    * time_step_seconds
-                    * precipitation_temperature
-                + ICE_HEAT_CAPACITY_J_KG_K
-                    * 1000.0
-                    * lake.thickness_m[0]
-                    * lake.temperature_k[0]
-                    * lake.ice_fraction[0])
-                / (ICE_HEAT_CAPACITY_J_KG_K * 1000.0 * lake.thickness_m[0] * lake.ice_fraction[0]
-                    + ICE_HEAT_CAPACITY_J_KG_K * (*rainfall + *snowfall) * time_step_seconds);
-            snow.water_equivalent_kg_m2 += *rainfall * time_step_seconds;
-            snow.depth_m += *rainfall * time_step_seconds / new_snow_bulk_density_kg_m3;
-            *snowfall += *rainfall;
+    if fi > 0.999 {
+        if a_plus_b <= c {
+            let tw = FREEZING_K.min(tp);
+            let precipitation_heat = dt * ((pr + ps) * ICE_HEAT_CAPACITY_J_KG_K);
+            // `:133` `.FMA (fi, dz*cice*1000*t, .FMA (dt*(..)*cpice, tw, a+b))`
+            lake.temperature_k[0] = fi.mul_add(
+                ice_heat_column * tl,
+                precipitation_heat.mul_add(tw, a_plus_b),
+            ) / (ice_heat_column * fi + precipitation_heat);
+            snow.water_equivalent_kg_m2 += rain_mass;
+            snow.depth_m += rain_mass / new_snow_bulk_density_kg_m3;
+            *snowfall = ps + pr;
             *rainfall = 0.0;
         } else if a <= c {
             lake.temperature_k[0] = FREEZING_K;
-            let frozen_rain = (c - a) / FUSION_HEAT_J_KG;
-            snow.water_equivalent_kg_m2 += frozen_rain;
-            snow.depth_m += frozen_rain / new_snow_bulk_density_kg_m3;
-            *snowfall += (*rainfall).min(frozen_rain / time_step_seconds);
-            *rainfall = 0.0_f64.max(*rainfall - frozen_rain / time_step_seconds);
+            let heat = c - a;
+            snow.water_equivalent_kg_m2 += heat / FUSION_HEAT_J_KG;
+            snow.depth_m += heat / (new_snow_bulk_density_kg_m3 * FUSION_HEAT_J_KG);
+            let frozen_rate = heat / (dt * FUSION_HEAT_J_KG);
+            *snowfall = ps + pr.min(frozen_rate);
+            *rainfall = (pr - frozen_rate).max(0.0);
         } else if a <= c + d {
             lake.temperature_k[0] = FREEZING_K;
-            let ice_mass = 1000.0 * lake.thickness_m[0] - (a - c) / FUSION_HEAT_J_KG;
-            lake.ice_fraction[0] = ice_mass / (ice_mass + (a - c) / FUSION_HEAT_J_KG);
+            let liquid = (a - c) / FUSION_HEAT_J_KG;
+            let ice = water_column - liquid;
+            lake.ice_fraction[0] = ice / (liquid + ice);
         } else {
-            lake.temperature_k[0] = (LIQUID_HEAT_CAPACITY_J_KG_K
-                * *rainfall
-                * time_step_seconds
-                * precipitation_temperature_k
-                + LIQUID_HEAT_CAPACITY_J_KG_K * 1000.0 * lake.thickness_m[0] * FREEZING_K
-                - c
-                - d)
-                / (LIQUID_HEAT_CAPACITY_J_KG_K * 1000.0 * lake.thickness_m[0]
-                    + LIQUID_HEAT_CAPACITY_J_KG_K * *rainfall * time_step_seconds);
+            // `:154` `(.FMA (dt*pr*cpliq, tp, dz*cwat*tfrz) - c - d) / (…+…)`
+            lake.temperature_k[0] =
+                (rain_heat.mul_add(tp, liquid_heat_column * FREEZING_K) - c - d)
+                    / (rain_heat + liquid_heat_column);
             lake.ice_fraction[0] = 0.0;
         }
-    } else if lake.ice_fraction[0] >= 0.001 {
-        if *rainfall > 0.0 && *snowfall > 0.0 {
+    } else if fi >= 0.001 {
+        if pr > 0.0 && ps > 0.0 {
             lake.temperature_k[0] = FREEZING_K;
-        } else if *rainfall > 0.0 {
+        } else if pr > 0.0 {
             if a >= d {
-                lake.temperature_k[0] = (LIQUID_HEAT_CAPACITY_J_KG_K
-                    * *rainfall
-                    * time_step_seconds
-                    * precipitation_temperature_k
-                    + LIQUID_HEAT_CAPACITY_J_KG_K * 1000.0 * lake.thickness_m[0] * FREEZING_K
+                lake.temperature_k[0] = (rain_heat.mul_add(tp, liquid_heat_column * FREEZING_K)
                     - d)
-                    / (LIQUID_HEAT_CAPACITY_J_KG_K * 1000.0 * lake.thickness_m[0]
-                        + LIQUID_HEAT_CAPACITY_J_KG_K * *rainfall * time_step_seconds);
+                    / (rain_heat + liquid_heat_column);
                 lake.ice_fraction[0] = 0.0;
             } else {
                 lake.temperature_k[0] = FREEZING_K;
-                let ice_mass =
-                    1000.0 * lake.thickness_m[0] * lake.ice_fraction[0] - a / FUSION_HEAT_J_KG;
-                let liquid_mass = 1000.0 * lake.thickness_m[0] * (1.0 - lake.ice_fraction[0])
-                    + a / FUSION_HEAT_J_KG;
-                lake.ice_fraction[0] = ice_mass / (ice_mass + liquid_mass);
+                let melted = a / FUSION_HEAT_J_KG;
+                let ice = fi * water_column - melted;
+                let liquid = water_column * (1.0 - fi) + melted;
+                lake.ice_fraction[0] = ice / (ice + liquid);
             }
-        } else if *snowfall > 0.0 {
+        } else if ps > 0.0 {
             if e >= h {
-                lake.temperature_k[0] = (h
-                    + ICE_HEAT_CAPACITY_J_KG_K * 1000.0 * lake.thickness_m[0] * FREEZING_K
-                    + ICE_HEAT_CAPACITY_J_KG_K
-                        * *snowfall
-                        * time_step_seconds
-                        * precipitation_temperature_k)
-                    / (ICE_HEAT_CAPACITY_J_KG_K * *snowfall * time_step_seconds
-                        + ICE_HEAT_CAPACITY_J_KG_K * 1000.0 * lake.thickness_m[0]);
+                // `:189` `.FMA (dt*ps*cpice, tp, .FMA (dz*cice*1000, tfrz, h)) / (…+…)`
+                lake.temperature_k[0] = snow_heat
+                    .mul_add(tp, ice_heat_column.mul_add(FREEZING_K, h))
+                    / (ice_heat_column + snow_heat);
                 lake.ice_fraction[0] = 1.0;
             } else {
                 lake.temperature_k[0] = FREEZING_K;
-                let ice_mass =
-                    1000.0 * lake.thickness_m[0] * lake.ice_fraction[0] + e / FUSION_HEAT_J_KG;
-                let liquid_mass = 1000.0 * lake.thickness_m[0] * (1.0 - lake.ice_fraction[0])
-                    - e / FUSION_HEAT_J_KG;
-                lake.ice_fraction[0] = ice_mass / (ice_mass + liquid_mass);
+                let frozen = e / FUSION_HEAT_J_KG;
+                let ice = fi * water_column + frozen;
+                let liquid = water_column * (1.0 - fi) - frozen;
+                lake.ice_fraction[0] = ice / (ice + liquid);
             }
         }
     } else if e + f <= g {
-        let precipitation_temperature = FREEZING_K.max(precipitation_temperature_k);
-        lake.temperature_k[0] = (LIQUID_HEAT_CAPACITY_J_KG_K
-            * 1000.0
-            * lake.thickness_m[0]
-            * lake.temperature_k[0]
-            * (1.0 - lake.ice_fraction[0])
-            + LIQUID_HEAT_CAPACITY_J_KG_K
-                * (*rainfall + *snowfall)
-                * time_step_seconds
-                * precipitation_temperature
-            - e
-            - f)
-            / (LIQUID_HEAT_CAPACITY_J_KG_K * (*rainfall + *snowfall) * time_step_seconds
-                + LIQUID_HEAT_CAPACITY_J_KG_K
-                    * 1000.0
-                    * lake.thickness_m[0]
-                    * (1.0 - lake.ice_fraction[0]));
-        snow.water_equivalent_kg_m2 -= *snowfall * time_step_seconds;
-        snow.depth_m -= *snowfall * time_step_seconds / new_snow_bulk_density_kg_m3;
-        *rainfall += *snowfall;
+        let tw = FREEZING_K.max(tp);
+        let precipitation_heat = dt * ((ps + pr) * LIQUID_HEAT_CAPACITY_J_KG_K);
+        let liquid_heat = liquid_heat_column * (1.0 - fi);
+        // `:204` `(.FMA (1-fi, t*dz*cwat, dt*(..)*cpliq*tw) - e - f) / (…+…)`
+        lake.temperature_k[0] =
+            ((1.0 - fi).mul_add(tl * liquid_heat_column, precipitation_heat * tw) - e - f)
+                / (liquid_heat + precipitation_heat);
+        snow.water_equivalent_kg_m2 -= snow_mass;
+        snow.depth_m -= snowfall_depth;
+        *rainfall = pr + ps;
         *snowfall = 0.0;
     } else if e <= g {
         lake.temperature_k[0] = FREEZING_K;
-        let melted_snow = (g - e) / FUSION_HEAT_J_KG;
-        snow.water_equivalent_kg_m2 -= melted_snow;
-        snow.depth_m -= melted_snow / new_snow_bulk_density_kg_m3;
-        *rainfall += (*snowfall).min(melted_snow / time_step_seconds);
-        *snowfall = 0.0_f64.max(*snowfall - melted_snow / time_step_seconds);
+        let heat = g - e;
+        snow.water_equivalent_kg_m2 -= heat / FUSION_HEAT_J_KG;
+        snow.depth_m -= heat / (new_snow_bulk_density_kg_m3 * FUSION_HEAT_J_KG);
+        let melted_rate = heat / (dt * FUSION_HEAT_J_KG);
+        *rainfall = pr + ps.min(melted_rate);
+        *snowfall = (ps - melted_rate).max(0.0);
     } else if e <= g + h {
         lake.temperature_k[0] = FREEZING_K;
-        let ice_mass = (e - g) / FUSION_HEAT_J_KG;
-        lake.ice_fraction[0] = ice_mass / (ice_mass + 1000.0 * lake.thickness_m[0] - ice_mass);
+        let ice = (e - g) / FUSION_HEAT_J_KG;
+        let liquid = water_column - ice;
+        lake.ice_fraction[0] = ice / (ice + liquid);
     } else {
-        lake.temperature_k[0] = (g
-            + h
-            + ICE_HEAT_CAPACITY_J_KG_K * 1000.0 * lake.thickness_m[0] * FREEZING_K
-            + ICE_HEAT_CAPACITY_J_KG_K
-                * *snowfall
-                * time_step_seconds
-                * precipitation_temperature_k)
-            / (ICE_HEAT_CAPACITY_J_KG_K * *snowfall * time_step_seconds
-                + ICE_HEAT_CAPACITY_J_KG_K * 1000.0 * lake.thickness_m[0]);
+        lake.temperature_k[0] = snow_heat.mul_add(tp, ice_heat_column.mul_add(FREEZING_K, g + h))
+            / (ice_heat_column + snow_heat);
         lake.ice_fraction[0] = 1.0;
     }
 }
@@ -537,39 +534,43 @@ fn melt_snow_into_unfrozen_lake(
     }
     let mut ice = 0.0;
     let mut liquid = 0.0;
-    let mut cooling = 0.0;
+    let mut heat = 0.0;
     for layer in snow.layer_count + 1..=0 {
         let slot = snow_layer_slot(layer);
-        ice += snow.ice_water_kg_m2[slot];
-        liquid += snow.liquid_water_kg_m2[slot];
-        cooling += snow.ice_water_kg_m2[slot]
-            * ICE_HEAT_CAPACITY_J_KG_K
-            * (FREEZING_K - snow.temperature_k[slot])
-            + snow.liquid_water_kg_m2[slot]
-                * LIQUID_HEAT_CAPACITY_J_KG_K
-                * (FREEZING_K - snow.temperature_k[slot]);
+        let layer_ice = snow.ice_water_kg_m2[slot];
+        let layer_liquid = snow.liquid_water_kg_m2[slot];
+        ice += layer_ice;
+        liquid += layer_liquid;
+        // `MOD_Lake.F90:1789` 两个乘积各收一条 FMA：
+        // `.FMA (tfrz-t, wliq*cpliq, .FMA (wice*cpice, tfrz-t, heatsum))`。
+        let deficit = FREEZING_K - snow.temperature_k[slot];
+        heat = (layer_ice * ICE_HEAT_CAPACITY_J_KG_K).mul_add(deficit, heat);
+        heat = deficit.mul_add(layer_liquid * LIQUID_HEAT_CAPACITY_J_KG_K, heat);
     }
-    let melt_energy = cooling + ice * FUSION_HEAT_J_KG;
-    let lake_warming = (lake.temperature_k[0] - FREEZING_K)
-        * LIQUID_HEAT_CAPACITY_J_KG_K
-        * 1000.0
-        * lake.thickness_m[0];
-    let lake_freezing = 1000.0 * lake.thickness_m[0] * FUSION_HEAT_J_KG;
-    if lake_warming < melt_energy && lake_warming + lake_freezing < melt_energy {
+    let fusion = ice * FUSION_HEAT_J_KG;
+    let a_plus_b = fusion + heat;
+    let lake_t = lake.temperature_k[0];
+    let water_column = lake.thickness_m[0] * 1000.0;
+    // `:1802` `((t-tfrz)*cpliq*1000)*dz`，`:1803` `(dz*1000)*hfus`。
+    let c = (lake_t - FREEZING_K) * LIQUID_HEAT_CAPACITY_J_KG_K * 1000.0 * lake.thickness_m[0];
+    let d = water_column * FUSION_HEAT_J_KG;
+    if c >= a_plus_b {
+        // `:1807` `(.FMS (.FMA (dz*1000, t, (liq+ice)*tfrz), cpliq, heatsum) - b) /
+        // (((dz*1000 + ice) + liq)*cpliq)`
+        lake.temperature_k[0] = (water_column
+            .mul_add(lake_t, (liquid + ice) * FREEZING_K)
+            .mul_add(LIQUID_HEAT_CAPACITY_J_KG_K, -heat)
+            - fusion)
+            / (((water_column + ice) + liquid) * LIQUID_HEAT_CAPACITY_J_KG_K);
+    } else if c + d >= a_plus_b {
+        lake.temperature_k[0] = FREEZING_K;
+        lake.ice_fraction[0] = (a_plus_b - c) / d;
+    } else {
         return;
     }
-    if lake_warming >= melt_energy {
-        lake.temperature_k[0] = (LIQUID_HEAT_CAPACITY_J_KG_K
-            * (1000.0 * lake.thickness_m[0] * lake.temperature_k[0] + (ice + liquid) * FREEZING_K)
-            - cooling
-            - ice * FUSION_HEAT_J_KG)
-            / (LIQUID_HEAT_CAPACITY_J_KG_K * (1000.0 * lake.thickness_m[0] + ice + liquid));
-    } else {
-        lake.temperature_k[0] = FREEZING_K;
-        lake.ice_fraction[0] = (melt_energy - lake_warming) / lake_freezing;
-    }
-    fluxes.snow_melt_kg_m2_s += snow.water_equivalent_kg_m2 / time_step_seconds;
-    *bottom_drainage += snow.water_equivalent_kg_m2 / time_step_seconds;
+    let melt_rate = snow.water_equivalent_kg_m2 / time_step_seconds;
+    fluxes.snow_melt_kg_m2_s += melt_rate;
+    *bottom_drainage += melt_rate;
     snow.layer_count = 0;
     snow.water_equivalent_kg_m2 = 0.0;
     snow.depth_m = 0.0;
@@ -606,31 +607,33 @@ fn saturate_lake_soil(soil: &mut LakeSnowWaterSoil) -> f64 {
     let mut water_change = 0.0;
     for layer in 0..soil.thickness_m.len() {
         let thickness = soil.thickness_m[layer];
-        let before = soil.liquid_water_kg_m2[layer] + soil.ice_water_kg_m2[layer];
+        let porosity = soil.porosity[layer];
+        water_change =
+            (soil.liquid_water_kg_m2[layer] + water_change) + soil.ice_water_kg_m2[layer];
         let saturation = soil.liquid_water_kg_m2[layer] / (thickness * 1000.0)
             + soil.ice_water_kg_m2[layer] / (thickness * 917.0);
-        if saturation < soil.porosity[layer] {
+        let pore_volume = thickness * porosity;
+        if saturation < porosity {
             soil.liquid_water_kg_m2[layer] =
-                (soil.porosity[layer] * thickness - soil.ice_water_kg_m2[layer] / 917.0).max(0.0)
-                    * 1000.0;
-            soil.ice_water_kg_m2[layer] = (soil.porosity[layer] * thickness
-                - soil.liquid_water_kg_m2[layer] / 1000.0)
-                .max(0.0)
-                * 917.0;
+                ((pore_volume - soil.ice_water_kg_m2[layer] / 917.0) * 1000.0).max(0.0);
         } else {
-            soil.liquid_water_kg_m2[layer] = (soil.liquid_water_kg_m2[layer]
-                - (saturation - soil.porosity[layer]) * 1000.0 * thickness)
+            // `MOD_Lake.F90:1851` `.FNMA (dz, (a-porsl)*1000, wliq)`
+            soil.liquid_water_kg_m2[layer] = (-thickness)
+                .mul_add(
+                    (saturation - porosity) * 1000.0,
+                    soil.liquid_water_kg_m2[layer],
+                )
                 .max(0.0);
-            soil.ice_water_kg_m2[layer] = (soil.porosity[layer] * thickness
-                - soil.liquid_water_kg_m2[layer] / 1000.0)
-                .max(0.0)
-                * 917.0;
         }
-        if soil.liquid_water_kg_m2[layer] > soil.porosity[layer] * 1000.0 * thickness {
-            soil.liquid_water_kg_m2[layer] = soil.porosity[layer] * 1000.0 * thickness;
+        soil.ice_water_kg_m2[layer] =
+            ((pore_volume - soil.liquid_water_kg_m2[layer] / 1000.0) * 917.0).max(0.0);
+        let limit = thickness * (porosity * 1000.0);
+        if soil.liquid_water_kg_m2[layer] > limit {
+            soil.liquid_water_kg_m2[layer] = limit;
             soil.ice_water_kg_m2[layer] = 0.0;
         }
-        water_change += before - soil.liquid_water_kg_m2[layer] - soil.ice_water_kg_m2[layer];
+        water_change =
+            (water_change - soil.liquid_water_kg_m2[layer]) - soil.ice_water_kg_m2[layer];
     }
     water_change
 }
@@ -705,21 +708,22 @@ pub fn lake_roughness(input: LakeRoughnessInput) -> Result<LakeRoughness> {
         && input.lake_surface_temperature_k > FREEZING_K
         && input.snow_layer_count == 0
     {
-        let viscosity = 1.51e-5 * (input.ground_temperature_k / 293.15).powf(1.5) * 1.013e5
+        // `MOD_Lake.F90:1948-1955` 的 GIMPLE：`cur*ustar*ustar` 左结合；`sqre0` 走 `pow(·, 0.5)`；
+        // `4*sqre0 - 3.2` 收成 `.FMA (sqre0, 4, -3.2)`。
+        let ustar = input.friction_velocity_m_s;
+        let viscosity = (input.ground_temperature_k / 293.15).lpow(1.5) * 1.51e-5 * 1.013e5
             / input.surface_pressure_pa;
-        let momentum_m = (0.1 * viscosity / input.friction_velocity_m_s.max(1.0e-4))
-            .max(input.charnock_parameter * input.friction_velocity_m_s.powi(2) / 9.80616)
+        let momentum_m = ((viscosity * 0.1) / ustar.max(1.0e-4))
+            .max(((input.charnock_parameter * ustar) * ustar) / 9.80616)
             .max(1.0e-5);
-        let roughness_reynolds_sqrt = (momentum_m * input.friction_velocity_m_s / viscosity)
-            .max(0.1)
-            .sqrt();
+        let roughness_reynolds_sqrt = ((momentum_m * ustar) / viscosity).max(0.1).lpow(0.5);
         return Ok(LakeRoughness {
             momentum_m,
             sensible_heat_m: (momentum_m
-                * (-0.4 / 0.713 * (4.0 * roughness_reynolds_sqrt - 3.2)).exp())
+                * (-(roughness_reynolds_sqrt.mul_add(4.0, -3.2) * (0.4 / 0.713))).exp())
             .max(1.0e-5),
             latent_heat_m: (momentum_m
-                * (-0.4 / 0.66 * (4.0 * roughness_reynolds_sqrt - 4.2)).exp())
+                * (-(roughness_reynolds_sqrt.mul_add(4.0, -4.2) * (0.4 / 0.66))).exp())
             .max(1.0e-5),
         });
     }
@@ -729,7 +733,7 @@ pub fn lake_roughness(input: LakeRoughnessInput) -> Result<LakeRoughness> {
         0.0024
     };
     let heat =
-        momentum_m / (0.13 * (input.friction_velocity_m_s * momentum_m / 1.5e-5).powf(0.45)).exp();
+        momentum_m / (0.13 * (input.friction_velocity_m_s * momentum_m / 1.5e-5).lpow(0.45)).exp();
     Ok(LakeRoughness {
         momentum_m,
         sensible_heat_m: heat,
@@ -770,13 +774,14 @@ pub fn lake_thermal_conductivity(
         .zip(&column.ice_fraction)
         .map(|(&temperature, &ice_fraction)| lake_water_density(temperature, ice_fraction))
         .collect::<Vec<_>>();
-    let water_heat_capacity = 4188.0 * 1000.0;
-    let effective_ice_conductivity = 2.29 * 917.0 / 1000.0;
-    let molecular_diffusivity = 0.6 / water_heat_capacity;
+    let z = input.node_depth_m;
+    let molecular_diffusivity = 0.6 / LAKE_WATER_HEAT_CAPACITY;
+    // `MOD_Lake.F90:2031-2033`：`u2m = max(ustar/vonkar*log(2/z0mg), 0.1)`，
+    // `ks = sqrt(|sin lat|)*6.6*u2m**(-1.84)`，全部不融合。
     let wind_2m =
         (input.friction_velocity_m_s / 0.4 * (2.0 / input.momentum_roughness_m).ln()).max(0.1);
-    let surface_water_velocity = 1.2e-3 * wind_2m;
-    let decay = 6.6 * input.latitude_radians.sin().abs().sqrt() * wind_2m.powf(-1.84);
+    let surface_water_velocity = wind_2m * 1.2e-3;
+    let decay = input.latitude_radians.sin().abs().sqrt() * 6.6 * wind_2m.lpow(-1.84);
     let deep_lake = input.lake_depth_m >= input.deep_lake_threshold_m;
     let open_water = input.ground_temperature_k > FREEZING_K
         && column.temperature_k[0] > FREEZING_K
@@ -785,37 +790,34 @@ pub fn lake_thermal_conductivity(
     let mut thermal_conductivity_w_m_k = [0.0; LAKE_LAYERS];
 
     for layer in 0..LAKE_LAYERS - 1 {
-        let density_gradient = (water_density[layer + 1] - water_density[layer])
-            / (input.node_depth_m[layer + 1] - input.node_depth_m[layer]);
-        let buoyancy_frequency = (9.80616 / water_density[layer] * density_gradient).max(7.5e-5);
-        let numerator = 40.0 * buoyancy_frequency * (0.4 * input.node_depth_m[layer]).powi(2);
-        let denominator = (surface_water_velocity.powi(2)
-            * (-2.0 * decay * input.node_depth_m[layer]).max(-40.0).exp())
-        .max(1.0e-10);
-        let richardson = (-1.0 + (1.0 + numerator / denominator).max(0.0).sqrt()) / 20.0;
-        let fang_stefan = 1.039e-8 * buoyancy_frequency.powf(-0.43);
-        let mut diffusivity = molecular_diffusivity + fang_stefan;
-        if open_water {
-            let eddy = 0.4
-                * surface_water_velocity
-                * input.node_depth_m[layer]
-                * (-decay * input.node_depth_m[layer]).max(-40.0).exp()
-                / (1.0 + 37.0 * richardson.powi(2));
-            diffusivity += eddy;
-        }
+        let density_gradient =
+            (water_density[layer + 1] - water_density[layer]) / (z[layer + 1] - z[layer]);
+        let buoyancy_frequency = (density_gradient * (9.80616 / water_density[layer])).max(7.5e-5);
+        let scaled_depth = z[layer] * 0.4;
+        let numerator = (scaled_depth * scaled_depth) * (buoyancy_frequency * 40.0);
+        let decay_exponent = (-(z[layer] * (decay * 2.0))).max(-40.0);
+        let denominator =
+            ((surface_water_velocity * surface_water_velocity) * decay_exponent.exp()).max(1.0e-10);
+        let richardson = ((numerator / denominator + 1.0).max(0.0).sqrt() - 1.0) / 20.0;
+        // `:2050` `.FMA (pow(n2, -0.43), 1.039e-8, km + ke)`
+        let fang_stefan = buoyancy_frequency.lpow(-0.43);
+        let mut diffusivity = if open_water {
+            let exponent = (-(z[layer] * decay)).max(-40.0);
+            // `:2047` `ke = ((z*(ws*0.4))*exp)/.FMA (ri, 37*ri, 1)`
+            let eddy = (z[layer] * (surface_water_velocity * 0.4)) * exponent.exp()
+                / richardson.mul_add(richardson * 37.0, 1.0);
+            fang_stefan.mul_add(1.039e-8, eddy + molecular_diffusivity)
+        } else {
+            fang_stefan.mul_add(1.039e-8, molecular_diffusivity)
+        };
         if deep_lake {
             diffusivity *= 5.0;
         }
         eddy_diffusivity[layer] = diffusivity;
         thermal_conductivity_w_m_k[layer] = if open_water {
-            diffusivity * water_heat_capacity
+            diffusivity * LAKE_WATER_HEAT_CAPACITY
         } else {
-            frozen_thermal_conductivity(
-                diffusivity,
-                water_heat_capacity,
-                effective_ice_conductivity,
-                column.ice_fraction[layer],
-            )
+            frozen_thermal_conductivity(diffusivity, column.ice_fraction[layer])
         };
     }
     eddy_diffusivity[LAKE_LAYERS - 1] = eddy_diffusivity[LAKE_LAYERS - 2];
@@ -824,31 +826,30 @@ pub fn lake_thermal_conductivity(
     } else {
         frozen_thermal_conductivity(
             eddy_diffusivity[LAKE_LAYERS - 1],
-            water_heat_capacity,
-            effective_ice_conductivity,
             column.ice_fraction[LAKE_LAYERS - 1],
         )
     };
     Ok(LakeConductivity {
         thermal_conductivity_w_m_k: thermal_conductivity_w_m_k.to_vec(),
-        top_eddy_conductivity_w_m_k: eddy_diffusivity[0] * water_heat_capacity,
+        top_eddy_conductivity_w_m_k: eddy_diffusivity[0] * LAKE_WATER_HEAT_CAPACITY,
     })
 }
 
-fn lake_water_density(temperature_k: f64, ice_fraction: f64) -> f64 {
-    (1.0 - ice_fraction) * 1000.0 * (1.0 - 1.9549e-5 * (temperature_k - 277.0).abs().powf(1.68))
-        + ice_fraction * 917.0
+/// `rhow = (1-f)*1000*(1 - 1.9549e-5*|t-277|**1.68) + f*917`：
+/// GIMPLE（`MOD_Lake.F90:952/1451/1510`）是 `.FMA ((1-f)*1000, .FNMA (pow, 1.9549e-5, 1), f*917)`。
+pub(crate) fn lake_water_density(temperature_k: f64, ice_fraction: f64) -> f64 {
+    ((1.0 - ice_fraction) * 1000.0).mul_add(
+        (-(temperature_k - 277.0).abs().lpow(1.68)).mul_add(1.9549e-5, 1.0),
+        ice_fraction * 917.0,
+    )
 }
 
-fn frozen_thermal_conductivity(
-    diffusivity: f64,
-    water_heat_capacity: f64,
-    effective_ice_conductivity: f64,
-    ice_fraction: f64,
-) -> f64 {
-    diffusivity * water_heat_capacity * effective_ice_conductivity
-        / ((1.0 - ice_fraction) * effective_ice_conductivity
-            + diffusivity * water_heat_capacity * ice_fraction)
+/// 冰盖下的等效导热率：`kme*cwat*tkice_eff / ((1-f)*tkice_eff + kme*cwat*f)`，
+/// 分母收成 `.FMA (1-f, tkice_eff, (kme*cwat)*f)`（`MOD_Lake.F90:2065/2076`）。
+fn frozen_thermal_conductivity(diffusivity: f64, ice_fraction: f64) -> f64 {
+    let conductivity = diffusivity * LAKE_WATER_HEAT_CAPACITY;
+    (conductivity * EFFECTIVE_ICE_CONDUCTIVITY)
+        / (1.0 - ice_fraction).mul_add(EFFECTIVE_ICE_CONDUCTIVITY, conductivity * ice_fraction)
 }
 
 /// Remaps a lake column to CoLM's depth-scaled standard ten-layer geometry.

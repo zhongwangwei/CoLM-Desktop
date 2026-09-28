@@ -1,5 +1,6 @@
 //! Per-layer soil thermal properties from MOD_SoilThermalParameters.F90.
 
+use crate::LibmPow;
 use anyhow::{ensure, Result};
 
 use crate::FREEZING_K;
@@ -123,8 +124,8 @@ fn conductivity_for_saturated_soil(
                 .mul_add(f77(0.303), -(f77(0.201) * input.sand_mass_fraction))
                 + f77(1.532);
             let kersten = if input.liquid_volume_fraction > f77(0.01) {
-                (1.0 + (input.pore_volume_fraction / beta).powf(-beta))
-                    / (1.0 + (input.liquid_volume_fraction / beta).powf(-beta))
+                (1.0 + (input.pore_volume_fraction / beta).lpow(-beta))
+                    / (1.0 + (input.liquid_volume_fraction / beta).lpow(-beta))
             } else {
                 0.0
             }
@@ -212,10 +213,10 @@ fn kersten_number(
                     wet_cube_base * wet_cube_base,
                     -(dry_cube_base * dry_cube_base * dry_cube_base),
                 );
-                saturation.powf(f77(0.5) * exponent_sum)
-                    * cube_difference.powf(1.0 - input.organic_volume_fraction_of_solids)
+                saturation.lpow(f77(0.5) * exponent_sum)
+                    * cube_difference.lpow(1.0 - input.organic_volume_fraction_of_solids)
             } else {
-                saturation.powf(1.0 + input.organic_volume_fraction_of_solids)
+                saturation.lpow(1.0 + input.organic_volume_fraction_of_solids)
             }
         }
         ThermalConductivityScheme::Lu => {
@@ -225,7 +226,7 @@ fn kersten_number(
                 (f77(0.37), f77(1.29))
             };
             if unfrozen {
-                (alpha * (1.0 - saturation.powf(alpha - beta))).exp()
+                (alpha * (1.0 - saturation.lpow(alpha - beta))).exp()
             } else {
                 saturation
             }
@@ -249,7 +250,7 @@ fn tarnawski_leong(input: SoilThermalInput, saturation: f64, unfrozen: bool) -> 
     let wet_micro_pores = if saturation < f77(1.0e-6) {
         0.0
     } else {
-        (1.0 - saturation.powf(negated_exponent)).exp()
+        (1.0 - saturation.lpow(negated_exponent)).exp()
     };
     let fluid_conductivity = if unfrozen { f77(0.57) } else { f77(2.29) };
     let air_conductivity = f77(0.024);

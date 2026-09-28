@@ -1,5 +1,6 @@
 //! Runtime snow-column updates from MOD_NewSnow.F90.
 
+use crate::LibmPow;
 use anyhow::{ensure, Result};
 
 use crate::FREEZING_K;
@@ -301,7 +302,7 @@ pub fn snow_fraction(
         };
 
     let ground_snow_fraction = if snow_depth_m > 0.0 {
-        let melting_factor = (snow_water_equivalent_mm / snow_depth_m / 100.0).powf(cover_exponent);
+        let melting_factor = (snow_water_equivalent_mm / snow_depth_m / 100.0).lpow(cover_exponent);
         (snow_depth_m / (2.5 * soil_roughness_m * melting_factor)).tanh()
     } else {
         0.0

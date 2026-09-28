@@ -4,6 +4,7 @@
 //! the normal LCT leaf solver and a future PFT runtime use the same hydraulic
 //! root-to-leaf network.
 
+use crate::LibmPow;
 use anyhow::{ensure, Context, Result};
 
 use crate::solve_tridiagonal;
@@ -896,14 +897,14 @@ fn conductance_conversion(surface_pressure_pa: f64, leaf_temperature_k: f64) -> 
 
 /// CoLM's Weibull vulnerability curve (`plc`).
 pub fn vulnerability(potential_mm: f64, psi50_mm: f64, shape: f64) -> f64 {
-    let exponent = (-(potential_mm / psi50_mm).powf(shape)).max(-500.0);
-    2.0_f64.powf(exponent).max(1.0e-5)
+    let exponent = (-(potential_mm / psi50_mm).lpow(shape)).max(-500.0);
+    2.0_f64.lpow(exponent).max(1.0e-5)
 }
 
 /// First derivative of [`vulnerability`] (`d1plc`).
 pub fn vulnerability_derivative(potential_mm: f64, psi50_mm: f64, shape: f64) -> f64 {
-    let exponent = (-(potential_mm / psi50_mm).powf(shape)).max(-500.0);
-    shape * 2.0_f64.ln() * 2.0_f64.powf(exponent) * exponent / potential_mm
+    let exponent = (-(potential_mm / psi50_mm).lpow(shape)).max(-500.0);
+    shape * 2.0_f64.ln() * 2.0_f64.lpow(exponent) * exponent / potential_mm
 }
 
 fn validate(input: PlantHydraulicInput<'_>, state: PlantHydraulicState) -> Result<usize> {

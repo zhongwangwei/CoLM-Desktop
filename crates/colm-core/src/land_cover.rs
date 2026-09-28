@@ -7,6 +7,7 @@
 //! 上游把这些写在 `Init_LC_Const` 里；本模块逐条照做，不自作聪明地"简化"。
 //! `ROOTFR_SCHEME` 的两支公式在 `MOD_Const_LC.F90` 里各自成段，取值必须一起看。
 
+use crate::LibmPow;
 use anyhow::{ensure, Result};
 
 use crate::land_cover_generated::{LandCoverTables, IGBP, IGBP_CLASSES, USGS, USGS_CLASSES};
@@ -370,7 +371,7 @@ pub fn root_fraction(
                 d50 > 0.0,
                 "land class {land_class} has a non-positive d50, so its root distribution is undefined"
             );
-            let cumulative = |nsl: usize| 1.0 / (1.0 + (zi(nsl) * 100.0 / d50).powf(beta));
+            let cumulative = |nsl: usize| 1.0 / (1.0 + (zi(nsl) * 100.0 / d50).lpow(beta));
             fractions[0] = cumulative(1);
             fractions[layers - 1] = 1.0 - cumulative(layers - 1);
             for nsl in 2..layers {

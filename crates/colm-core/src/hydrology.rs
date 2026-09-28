@@ -1,5 +1,7 @@
 //! Soil hydraulic functions from `main/HYDRO/MOD_Hydro_SoilFunction.F90`.
 
+use crate::LibmPow;
+
 /// CoLM's lower bound for soil matric potential (mm).
 pub const MIN_SOIL_PSI: f64 = -1.0e8;
 
@@ -146,7 +148,7 @@ pub fn soil_psi_from_vliq(
         return MIN_SOIL_PSI;
     }
     let psi = match model {
-        SoilHydraulicModel::Campbell { bsw } => psi_s * (vliq / porosity).powf(-bsw),
+        SoilHydraulicModel::Campbell { bsw } => psi_s * (vliq / porosity).lpow(-bsw),
         SoilHydraulicModel::VanGenuchten {
             alpha_vgm,
             n_vgm,
@@ -155,7 +157,7 @@ pub fn soil_psi_from_vliq(
         } => {
             let m_vgm = 1.0 - 1.0 / n_vgm;
             let esat = (vliq - residual_water) / (porosity - residual_water);
-            -((esat * sc_vgm).powf(-1.0 / m_vgm) - 1.0).powf(1.0 / n_vgm) / alpha_vgm
+            -((esat * sc_vgm).lpow(-1.0 / m_vgm) - 1.0).lpow(1.0 / n_vgm) / alpha_vgm
         }
     };
     psi.max(MIN_SOIL_PSI)
@@ -173,7 +175,7 @@ pub fn soil_vliq_from_psi(
         return porosity;
     }
     match model {
-        SoilHydraulicModel::Campbell { bsw } => porosity * (psi / psi_s).powf(-1.0 / bsw),
+        SoilHydraulicModel::Campbell { bsw } => porosity * (psi / psi_s).lpow(-1.0 / bsw),
         SoilHydraulicModel::VanGenuchten {
             alpha_vgm,
             n_vgm,
@@ -181,7 +183,7 @@ pub fn soil_vliq_from_psi(
             ..
         } => {
             let m_vgm = 1.0 - 1.0 / n_vgm;
-            let esat = (1.0 + (psi * -alpha_vgm).powf(n_vgm)).powf(-m_vgm) / sc_vgm;
+            let esat = (1.0 + (psi * -alpha_vgm).lpow(n_vgm)).lpow(-m_vgm) / sc_vgm;
             // GIMPLE（`MOD_Hydro_SoilFunction.F90` 的 `soil_vliq_from_psi`）：
             // 全模块只有这一处收缩 —— `FMA(porsl-vl_r, esat, vl_r)`。
             (porosity - residual_water).mul_add(esat, residual_water)
@@ -201,7 +203,7 @@ pub fn soil_hydraulic_conductivity(
     }
     match model {
         SoilHydraulicModel::Campbell { bsw } => {
-            saturated_conductivity * (psi / psi_s).powf(-3.0 / bsw - 2.0)
+            saturated_conductivity * (psi / psi_s).lpow(-3.0 / bsw - 2.0)
         }
         SoilHydraulicModel::VanGenuchten {
             alpha_vgm,
@@ -211,10 +213,10 @@ pub fn soil_hydraulic_conductivity(
             fc_vgm,
         } => {
             let m_vgm = 1.0 - 1.0 / n_vgm;
-            let esat = (1.0 + (-alpha_vgm * psi).powf(n_vgm)).powf(-m_vgm) / sc_vgm;
+            let esat = (1.0 + (-alpha_vgm * psi).lpow(n_vgm)).lpow(-m_vgm) / sc_vgm;
             saturated_conductivity
-                * esat.powf(l_vgm)
-                * ((1.0 - (1.0 - (esat * sc_vgm).powf(1.0 / m_vgm)).powf(m_vgm)) / fc_vgm).powi(2)
+                * esat.lpow(l_vgm)
+                * ((1.0 - (1.0 - (esat * sc_vgm).lpow(1.0 / m_vgm)).lpow(m_vgm)) / fc_vgm).powi(2)
         }
     }
 }

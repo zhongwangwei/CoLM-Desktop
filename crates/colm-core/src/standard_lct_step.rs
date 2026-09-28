@@ -6,6 +6,7 @@
 //! stops before the separate soil/snow water-transport stage; that stage owns the
 //! removal and redistribution of the returned evaporation and transpiration.
 
+use crate::LibmPow;
 use anyhow::{ensure, Result};
 
 use crate::{
@@ -144,6 +145,8 @@ pub struct StandardLctSnowSoilState {
     pub snow: RuntimeSnowColumn,
     pub soil_temperature_k: Vec<f64>,
     pub soil_water: Water2014SoilState,
+    /// 湖 patch（`patchtype == 4`）的湖层与湖面温度；其余 patch 为 `None`。
+    pub lake: Option<crate::RuntimeLakeState>,
 }
 
 impl StandardLctSnowSoilState {
@@ -154,7 +157,12 @@ impl StandardLctSnowSoilState {
     /// 第 0 层顶替：那一层在同一步里可能已被合并掉 —— AT-Neu 1 月第 140 步
     /// `snowdp` 跌破 0.01 m、唯一的雪层并进土壤，Fortran 写的是土层 1 的 270.91 K，
     /// 顶替值是那片已消失的雪 266.18 K。
+    ///
+    /// 湖上 `t_grnd` 由 `laketem` 的表面能量平衡单独解出，不是任何一层的温度，取湖状态里存的那个。
     pub fn surface_temperature_k(&self) -> f64 {
+        if let Some(lake) = &self.lake {
+            return lake.ground_temperature_k;
+        }
         if self.snow.layer_count < 0 {
             self.snow.temperature_k[crate::snow::snow_layer_slot(self.snow.layer_count + 1)]
         } else {
@@ -1112,7 +1120,7 @@ fn ground_flux_input(
 ) -> GroundFluxInput {
     let potential_temperature_k = forcing.air_temperature_k
         * (100_000.0 / forcing.surface_pressure_pa)
-            .powf(AIR_GAS_CONSTANT_J_KG_K / AIR_HEAT_CAPACITY_J_KG_K);
+            .lpow(AIR_GAS_CONSTANT_J_KG_K / AIR_HEAT_CAPACITY_J_KG_K);
     GroundFluxInput {
         eastward_wind_m_s: forcing.eastward_wind_m_s,
         northward_wind_m_s: forcing.northward_wind_m_s,

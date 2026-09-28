@@ -1,5 +1,6 @@
 //! Canopy precipitation interception from MOD_LeafInterception.F90.
 
+use crate::LibmPow;
 use anyhow::{ensure, Result};
 
 use crate::FREEZING_K;
@@ -96,7 +97,7 @@ pub fn canopy_wetness(
     let coverage = |capacity_scale: f64, depth_mm: f64| {
         if depth_mm > 0.0 {
             (((1.0 / maximum_dew_mm) / (capacity_scale * leaf_stem_area)) * depth_mm)
-                .powf(f77(0.666_666_666_666))
+                .lpow(f77(0.666_666_666_666))
                 .min(1.0)
         } else {
             0.0

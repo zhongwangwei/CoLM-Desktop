@@ -5,6 +5,7 @@
 //! `MOD_HighRes_Parameters.F90`.  It returns the 211 CoLM wavelengths
 //! (400--2500 nm, every 10 nm) while retaining the supplied dead-stem spectrum.
 
+use crate::LibmPow;
 use anyhow::{ensure, Result};
 
 use crate::{HighResolutionLeafOptics, HIGH_RES_WAVELENGTHS};
@@ -151,7 +152,7 @@ fn prospect_spectrum(
         );
         let a = (1.0 + rq - tq + d) / (2.0 * r);
         let b = (1.0 - rq + tq + d) / (2.0 * t);
-        let b_nm1 = b.powf(n - 1.0);
+        let b_nm1 = b.lpow(n - 1.0);
         let b_n2 = b_nm1 * b_nm1;
         let a2 = a * a;
         let denominator = a2 * b_n2 - 1.0;

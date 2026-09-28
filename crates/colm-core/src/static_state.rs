@@ -6,6 +6,7 @@
 //! `layer * patches + patch`, matching the Fortran `(layer, patch)` arrays
 //! without its column descriptors.
 
+use crate::LibmPow;
 use anyhow::{ensure, Result};
 
 use crate::MISSING;
@@ -395,11 +396,11 @@ pub fn derive_soil_parameters(
             let index = layer * patches + patch;
             let field_capacity = match hydraulic_model {
                 HydraulicModel::Campbell => {
-                    (-339.9 / input.psi_s_cm).powf(-input.lambda) * input.theta_s
+                    (-339.9 / input.psi_s_cm).lpow(-input.lambda) * input.theta_s
                 }
                 HydraulicModel::VanGenuchten => {
-                    let saturation = (1.0 + (input.alpha_vgm * 339.9).powf(input.n_vgm))
-                        .powf(1.0 / input.n_vgm - 1.0);
+                    let saturation = (1.0 + (input.alpha_vgm * 339.9).lpow(input.n_vgm))
+                        .lpow(1.0 / input.n_vgm - 1.0);
                     (input.theta_s - input.theta_r).mul_add(saturation, input.theta_r)
                 }
             };
@@ -415,8 +416,8 @@ pub fn derive_soil_parameters(
                 HydraulicModel::Campbell => (MISSING, MISSING),
                 HydraulicModel::VanGenuchten => {
                     let m_vgm = 1.0 - 1.0 / input.n_vgm;
-                    let sc_vgm = (1.0 + (-input.alpha_vgm * psi0).powf(input.n_vgm)).powf(-m_vgm);
-                    let fc_vgm = 1.0 - (1.0 - sc_vgm.powf(1.0 / m_vgm)).powf(m_vgm);
+                    let sc_vgm = (1.0 + (-input.alpha_vgm * psi0).lpow(input.n_vgm)).lpow(-m_vgm);
+                    let fc_vgm = 1.0 - (1.0 - sc_vgm.lpow(1.0 / m_vgm)).lpow(m_vgm);
                     (sc_vgm, fc_vgm)
                 }
             };

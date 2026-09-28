@@ -1,5 +1,6 @@
 //! Roof turbulent exchange from `MOD_Urban_RoofFlux.F90`.
 
+use crate::LibmPow;
 use anyhow::{ensure, Result};
 
 use crate::{initialize_monin_obukhov, monin_obukhov, MoninObukhovInitialInput, MoninObukhovInput};
@@ -65,7 +66,7 @@ pub fn urban_roof_flux(input: UrbanRoofFluxInput) -> Result<UrbanRoofFluxState> 
         input.roof_snow_fraction
     } else {
         ((input.roof_surface_liquid_water_kg_m2 + input.roof_surface_ice_kg_m2).max(0.0))
-            .powf(f77(2.0 / 3.0))
+            .lpow(f77(2.0 / 3.0))
             .min(1.0)
     };
     if input.reference_specific_humidity > input.roof_specific_humidity {
@@ -113,7 +114,7 @@ pub fn urban_roof_flux(input: UrbanRoofFluxInput) -> Result<UrbanRoofFluxState> 
         heat_roughness_m = momentum_roughness_m
             / (f77(0.13)
                 * (current.friction_velocity_m_s * momentum_roughness_m / f77(1.5e-5))
-                    .powf(f77(0.45)))
+                    .lpow(f77(0.45)))
             .exp();
         let virtual_temperature_scale = temperature_scale_k
             * (1.0 + f77(0.61) * input.reference_specific_humidity)
@@ -134,7 +135,7 @@ pub fn urban_roof_flux(input: UrbanRoofFluxInput) -> Result<UrbanRoofFluxState> 
                 * virtual_temperature_scale
                 * 1000.0
                 / input.virtual_potential_temperature_k)
-                .powf(f77(1.0 / 3.0));
+                .lpow(f77(1.0 / 3.0));
             (input.reference_wind_m_s.powi(2) + convective_velocity.powi(2)).sqrt()
         };
         if previous_obukhov_length_m * stability.obukhov_length_m < 0.0 {

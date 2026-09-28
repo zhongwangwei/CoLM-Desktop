@@ -4,6 +4,7 @@
 //! namelist or NetCDF dependency: drivers map their configured values into
 //! [`ForcingDownscalingConfig`] and use the same kernel for every column.
 
+use crate::LibmPow;
 use anyhow::{ensure, Result};
 
 use crate::f77;
@@ -198,7 +199,7 @@ pub fn grid_forcing_from_runtime(
         air_temperature_k: forcing.air_temperature_k,
         potential_temperature_k: forcing.air_temperature_k
             * (100_000.0 / forcing.bottom_pressure_pa)
-                .powf(dry_air_gas_constant() / DRY_AIR_HEAT_CAPACITY_J_KG_K),
+                .lpow(dry_air_gas_constant() / DRY_AIR_HEAT_CAPACITY_J_KG_K),
         specific_humidity: forcing.specific_humidity,
         bottom_pressure_pa: forcing.bottom_pressure_pa,
         density_kg_m3,
@@ -508,11 +509,11 @@ fn downscale_longwave(
                 / 100.0;
             // `0.23 + 0.43*X**（1/5.7)` ⇒ `FMA(X, 0.43, 0.23)`。
             let clear_sky_emissivity_grid = f77(0.43).mul_add(
-                (vapor_pressure_grid_hpa / grid.air_temperature_k).powf(1.0 / 5.7),
+                (vapor_pressure_grid_hpa / grid.air_temperature_k).lpow(1.0 / 5.7),
                 0.23,
             );
             let clear_sky_emissivity_column = f77(0.43).mul_add(
-                (vapor_pressure_column_hpa / column_temperature_k).powf(1.0 / 5.7),
+                (vapor_pressure_column_hpa / column_temperature_k).lpow(1.0 / 5.7),
                 0.23,
             );
             let all_sky_emissivity_grid = grid.downward_longwave_w_m2

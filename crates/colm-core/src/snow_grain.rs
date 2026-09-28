@@ -4,6 +4,7 @@
 //! five-layer configuration. Tables use native C `(temperature, gradient,
 //! density)` order, equivalent to the original Fortran `(density,gradient,T)`.
 
+use crate::LibmPow;
 use anyhow::{ensure, Result};
 
 use crate::snow::SNOW_AGE_FREEZING_K;
@@ -223,7 +224,7 @@ pub fn age_snow_grains(
         let tau = table.tau[index];
         let dr_fresh = *radius - FRESH_SNOW_RADIUS_MIN_UM;
         let mut growth = (table.initial_growth[index]
-            * (tau / (dr_fresh + tau)).powf(1.0 / table.kappa[index]))
+            * (tau / (dr_fresh + tau)).lpow(1.0 / table.kappa[index]))
             * (dt / 3600.0);
         let liquid_fraction = (input.liquid_water_kg_m2[i] / mass).min(0.1);
         growth += 1e18

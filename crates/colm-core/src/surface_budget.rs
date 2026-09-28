@@ -9,6 +9,7 @@
 //! 放在 `colm-core` 是因为它只依赖内核输出，且**必须**只有一份实现：分成两份
 //! 就会出现"同一份文件里的 `f_zerr` 与 `f_olrg` 互相矛盾"这种只在拼错时才暴露的坑。
 
+use crate::LibmPow;
 use anyhow::{ensure, Result};
 
 use crate::StandardLctEnergyOutput;
@@ -82,7 +83,7 @@ pub fn surface_budget(energy: &StandardLctEnergyOutput) -> Result<SurfaceBudget>
         outgoing_longwave_coefficient.mul_add(temperature_change_k, upward_longwave);
     let bulk_emissivity = emissivity.mul_add(blackbody_change, upward_longwave)
         / (upward_longwave + blackbody_change);
-    let radiative_temperature_k = (outgoing_longwave / STEFAN_BOLTZMANN_W_M2_K4).powf(0.25);
+    let radiative_temperature_k = (outgoing_longwave / STEFAN_BOLTZMANN_W_M2_K4).lpow(0.25);
 
     // 上游的 `htvp`（`MOD_Thermal.F90:539-540`）由内核按**表层是否纯冰**定好，
     // 随步输出带出来；这里照抄，不再自己判一次。写成无条件的 `hvap + hfus`

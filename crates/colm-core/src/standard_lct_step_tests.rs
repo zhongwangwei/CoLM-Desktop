@@ -270,6 +270,7 @@ fn standard_lct_snow_soil_step_carries_active_snow_and_soil_columns() {
             matric_potential_mm: vec![-10_000.0; 2],
             hydraulic_conductivity_mm_s: vec![0.0; 2],
         },
+        lake: None,
     };
     let input = StandardLctSnowSoilInput {
         energy,
@@ -391,6 +392,7 @@ fn standard_lct_snow_soil_step_credits_the_thermal_condensation_to_the_soil() {
             matric_potential_mm: vec![-10_000.0; 2],
             hydraulic_conductivity_mm_s: vec![0.0; 2],
         },
+        lake: None,
     };
 
     let output = standard_lct_snow_soil_step(
@@ -501,6 +503,7 @@ fn standard_lct_snow_soil_step_rereads_the_layer_count_after_newsnow() {
             matric_potential_mm: vec![-10_000.0; 2],
             hydraulic_conductivity_mm_s: vec![0.0; 2],
         },
+        lake: None,
     };
 
     let output = standard_lct_snow_soil_step(
@@ -929,6 +932,7 @@ fn the_step_end_surface_temperature_follows_the_combined_snow_layer_count() {
             matric_potential_mm: vec![-10_000.0; 2],
             hydraulic_conductivity_mm_s: vec![0.0; 2],
         },
+        lake: None,
     };
     assert_eq!(state.surface_temperature_k(), 262.0);
 

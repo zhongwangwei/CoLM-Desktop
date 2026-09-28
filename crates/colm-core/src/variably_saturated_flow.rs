@@ -4,6 +4,7 @@
 //! VSF Richards solve. The future column solver uses them directly rather than
 //! reproducing their state transitions in a runtime driver.
 
+use crate::LibmPow;
 use anyhow::{bail, ensure, Result};
 
 use crate::{
@@ -1650,25 +1651,25 @@ pub fn flux_inside_variable_saturated_soil(
             input.saturated_hydraulic_conductivity_mm_s,
             input.hydraulic_model,
         );
-        input.upper_hydraulic_conductivity_mm_s.powf(exponent)
-            * middle_hydraulic_conductivity_mm_s.powf(1.0 - exponent)
+        input.upper_hydraulic_conductivity_mm_s.lpow(exponent)
+            * middle_hydraulic_conductivity_mm_s.lpow(1.0 - exponent)
             * gradient
     } else if gradient == 0.0 {
         0.0
     } else if gradient < 1.0 {
         let weight =
             (1.0 + exponent * input.lower_pressure_head_mm / input.distance_mm).max(1.0 - exponent);
-        input.upper_hydraulic_conductivity_mm_s.powf(weight)
-            * input.lower_hydraulic_conductivity_mm_s.powf(1.0 - weight)
+        input.upper_hydraulic_conductivity_mm_s.lpow(weight)
+            * input.lower_hydraulic_conductivity_mm_s.lpow(1.0 - weight)
             * gradient
     } else if gradient == 1.0 {
         input.upper_hydraulic_conductivity_mm_s
     } else {
         let weighted = (input.upper_pressure_head_mm - input.lower_pressure_head_mm)
             / input.distance_mm
-            * input.upper_hydraulic_conductivity_mm_s.powf(1.0 - exponent);
+            * input.upper_hydraulic_conductivity_mm_s.lpow(1.0 - exponent);
         weighted.mul_add(
-            input.lower_hydraulic_conductivity_mm_s.powf(exponent),
+            input.lower_hydraulic_conductivity_mm_s.lpow(exponent),
             input.upper_hydraulic_conductivity_mm_s,
         )
     };
@@ -4592,7 +4593,7 @@ pub fn variably_saturated_flow_step(
             let ice = (state.ice_water_kg_m2[level]
                 / layer_water_capacity_kg_m2(input.layer_thickness_m[level], ICE_DENSITY_KG_M3))
             .clamp(0.0, input.porosity[level]);
-            let impedance = 10_f64.powf(-input.soil_ice_impedance * (ice / input.porosity[level]));
+            let impedance = 10_f64.lpow(-input.soil_ice_impedance * (ice / input.porosity[level]));
             *conductivity_mm_s *= impedance;
         }
     }

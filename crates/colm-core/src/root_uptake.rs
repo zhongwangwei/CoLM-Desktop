@@ -1,5 +1,6 @@
 //! Root water-stress and transpiration limits from `MOD_Eroot.F90`.
 
+use crate::LibmPow;
 use anyhow::{ensure, Result};
 
 use crate::{soil_psi_from_vliq, soil_vliq_from_psi, SoilHydraulicModel, FREEZING_K};
@@ -69,7 +70,7 @@ fn potential_stress(input: RootUptakeInput<'_>, layer: usize) -> f64 {
         .clamp(0.001, 1.0);
     let potential = match input.hydraulic_model[layer] {
         SoilHydraulicModel::Campbell { bsw } => {
-            input.saturated_soil_suction_mm[layer] * saturation.powf(-bsw)
+            input.saturated_soil_suction_mm[layer] * saturation.lpow(-bsw)
         }
         // `MOD_Eroot.F90:96/98` 的 GIMPLE 是 `_26 = .FMA(porsl-theta_r, s_node, theta_r)`
         // （`s_node` 是已夹取的 `M.32`）—— 与 `MOD_Thermal…:579`、`MOD_Hydro_SoilWater:579`
@@ -95,12 +96,12 @@ fn capacity_stress(input: RootUptakeInput<'_>, layer: usize) -> f64 {
             WATER_DENSITY_KG_M3
                 * input.layer_thickness_m[layer]
                 * input.porosity[layer]
-                * (WILTING_POTENTIAL_MM / input.saturated_soil_suction_mm[layer]).powf(-1.0 / bsw),
+                * (WILTING_POTENTIAL_MM / input.saturated_soil_suction_mm[layer]).lpow(-1.0 / bsw),
             WATER_DENSITY_KG_M3
                 * input.layer_thickness_m[layer]
                 * input.porosity[layer]
                 * (FIELD_CAPACITY_POTENTIAL_MM / input.saturated_soil_suction_mm[layer])
-                    .powf(-1.0 / bsw),
+                    .lpow(-1.0 / bsw),
         ),
         model => (
             WATER_DENSITY_KG_M3
