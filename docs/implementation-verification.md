@@ -25302,3 +25302,42 @@ cargo test -p colm-core --lib 376 / -p colm-runtime --lib --bins 80；clippy 无
 
 未验证：NITRIF、FIRE、SASU/DiagMatrix、作物分支（代码照抄或已生成，但 bm 不经过）；driver 尚未接入 runtime，
 端到端（重启、历史、`tsai_p` 回流物理）还没跑。
+
+## 第 416 轮：BGC 接入 Rust 引擎，端到端逐位
+
+### 一、接法
+
+`advance_patch` 的土壤分支在物理步与"为下一步准备"的表面光学之后调 `bgc_step::BgcRuntime::step`（上游
+`CoLMDRIVER.F90:238` 的顺序）：必要时更新氮沉降 → 由 Rust 状态与步输出组装 `BgcPhysics` → `bgc_driver` →
+把 `tsai_p`/`tlai_p`/`lai_p` 与 patch 的 `lai`/`tlai` 写回。`CNVegStructUpdate` 每步改写 `tsai_p`，它从下一步末尾的
+准备段（`sai_p = tsai_p·sigf_p`、雪盖比例）才生效，所以不能放进只读状态的 `on_step` 回调。BGC 状态放在
+`StandardLctSnowSoilState::bgc`，续跑时写进 BGC 时间重启，BGC 的 PFT 变量与物理 PFT 变量一起写进 PFT 重启。
+
+- `PftColumn` 新增 `laisun_p`/`laisha_p`/`assim_p`/`respc_p`：上游是 module 数组，BGC 在 `CoLMMAIN` 之后读；
+  Rust 原先只在聚合时的临时记录里有。
+- 全局标量 `smpmax_hr`/`smpmin_hr` 在不带 `_w180_s90` 的全局常数重启里，patch 量（`BD_all`、`patchclass`…）在带后缀的那份。
+- 氮沉降（`MOD_NdepData`）：启动按 `adj2end` 后的起始年读一次（00:00 的 1 月 1 日起步算上一年）；此后只在结束于
+  12 月 31 日 24:00 的那一步重读，`TICKTIME` 不越过 24:00，所以读的是**刚结束的那一年**——实际滞后一年。年份钳在
+  1849–2006。单点 patch 的面积加权映射退化为包含站点的源网格（边界 = 相邻中心的中点）。
+- `COLM_BGC_TRACE`（`_FROM`/`_EVERY`/`_CALLS`）让 Rust 引擎写与插桩 Fortran 内核相同格式的逐阶段追踪。
+- LAI 反馈、NITRIF、FIRE、SASU/DiagMatrix、作物仍当场拒绝；`DEF_USE_BGC` 配 LCT 按上游报错。
+
+### 二、实测（AT-Neu 3-PFT，NITRIF 关，2010 全年，纯 Rust 对纯 Fortran）
+
+```
+bgc_trace_cmp.py by-fortran/trace.bin by-rust/trace.bin      → 1536 records identical（48 次采样调用）
+bgc_trace_cmp.py bt-fortran/trace.bin bt-rust/trace.bin      → 96 records identical（前 3 次调用）
+13 个重启日期 × 主/BGC/PFT = 39 个重启文件：release diff 0 = 39，debug diff 0 = 39
+历史：共有变量全部逐位；Fortran 另有 143 个 BGC 历史变量（f_gpp、f_leafc…），Rust 尚未输出（C5）
+```
+
+一处排查记录：第一次 debug 全年运行在冷启动 BGC 重启的 `totvegn` 上差 1 ULP。追下去不是 debug/release 的数值差，
+而是 debug 版 `colm-preprocess-rs` 没有重建、还停在第 414 轮修正之前；`cargo build --workspace --bins` 后一致。
+**比较 debug 与 release 之前，两个 profile 的全部 sidecar 都要重建。**
+
+### 三、回归
+
+`regress.sh` 的 31 个标准算例（LCT/城市）与 PFT pf/pm/py/pb、PC qm/qy/qb：本次运行新写出的重启与历史全部逐位。
+脚本报出的 `hp`/`sp`/`tc`/`ts` "失败"是旧运行留下的、当前配置不会再写的重启日期（两边都是更早的时间戳）。
+`an-new`/`an-old`/`fx`/`vn` 不在标准集内，它们的差异用本次改动之前的 HEAD 二进制只重跑 `colm` 阶段后完全相同，
+是早已存在的问题，与 BGC 无关。
