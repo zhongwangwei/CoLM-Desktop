@@ -2,6 +2,7 @@
 
 use anyhow::{ensure, Result};
 
+use crate::extended::DoubleDouble;
 use crate::{
     radiation::{generic_snow_albedo, mix_ground_albedo},
     ColdStartGroundAlbedo, ColdStartRadiation, LeafOptics, SoilReflectance, MISSING,
@@ -140,17 +141,8 @@ pub fn cold_start_pc_broadband_radiation_from_ground(
         .iter()
         .map(|pft| pft.fraction / fraction_sum)
         .collect::<Vec<_>>();
-    let core = three_d_canopy(pfts, &fractions, cosine_zenith, ground)?;
-    let pft = (0..pfts.len())
-        .map(|index| PcPftRadiation {
-            sunlit_absorption: core.sunlit[index],
-            shaded_absorption: core.shaded[index],
-            thermal_gap_fraction: core.thermal_gap[index],
-            shade_fraction: core.shade[index],
-            direct_extinction: core.direct_extinction[index],
-            diffuse_extinction: 0.719,
-        })
-        .collect::<Vec<_>>();
+    let core = three_d_canopy_wrap(pfts, &fractions, cosine_zenith, ground, true);
+    let pft = core.pft;
     let weighted = |select: fn(&PcPftRadiation) -> [[f64; RTYPES]; BANDS]| {
         std::array::from_fn(|band| {
             std::array::from_fn(|rtyp| {
@@ -197,831 +189,705 @@ pub fn cold_start_pc_broadband_radiation_from_ground(
     })
 }
 
-struct CoreRadiation {
-    albedo: [[f64; RTYPES]; BANDS],
-    transmission: [[f64; 3]; BANDS],
-    sunlit: Vec<[[f64; RTYPES]; BANDS]>,
-    shaded: Vec<[[f64; RTYPES]; BANDS]>,
-    thermal_gap: Vec<f64>,
-    shade: Vec<f64>,
-    direct_extinction: Vec<f64>,
+/// `ThreeDCanopy_wrap`（`MOD_3DCanopyRadiation.F90:42-283`）的结果。
+///
+/// 列量（`albv`/`tran`）取自第一个 PFT —— `ThreeDCanopy` 末尾给每个 PFT 写的是同一组列值。
+pub(crate) struct ThreeDCanopyOutput {
+    pub(crate) albedo: [[f64; RTYPES]; BANDS],
+    pub(crate) transmission: [[f64; 3]; BANDS],
+    pub(crate) pft: Vec<PcPftRadiation>,
 }
 
-fn three_d_canopy(
+/// `ThreeDCanopy_wrap`：由 PFT 参数拼出逐 PFT 的冠层尺寸与光学，调 `ThreeDCanopy`，
+/// 再按 `fsun3D = .false.` 那一支把吸收拆成阳叶/阴叶。
+///
+/// `fractions` 是 `fcover = pftfrac/sum(pftfrac)`（只含走三维模型的自然 PFT）。
+/// 每条语句的舍入形状取自 `main/` 的 GIMPLE（行号见注释）。
+pub(crate) fn three_d_canopy_wrap(
     pfts: &[PcPftInput],
     fractions: &[f64],
     cosine_zenith: f64,
     ground: [[f64; RTYPES]; BANDS],
-) -> Result<CoreRadiation> {
-    const GEE: f64 = 0.5;
-    // `cos(60/180*pi)` in the original is one ULP above mathematical 0.5.
-    const COSINE_DIFFUSE: f64 = f64::from_bits(0x3fe0_0000_0000_0001);
-    const EPSILON: f64 = 1.0e-6;
-    ensure!(
-        pfts.len() == fractions.len(),
-        "PC PFT fractions do not match inputs"
-    );
-
+    vegetation_snow: bool,
+) -> ThreeDCanopyOutput {
+    const RHO_SNOW: [f64; BANDS] = [0.5, 0.2];
+    const TAU_SNOW: [f64; BANDS] = [0.3, 0.2];
     let count = pfts.len();
-    let mut active = vec![false; count];
     let mut canopy = vec![0usize; count];
-    let mut leaf_stem_area = vec![0.0; count];
+    let mut size = vec![0.0; count];
+    let mut height = vec![0.0; count];
+    let mut chil = vec![0.0; count];
+    let mut lsai = vec![0.0; count];
     let mut rho = vec![[0.0; BANDS]; count];
     let mut tau = vec![[0.0; BANDS]; count];
-    let cosz = vec![cosine_zenith; count];
-    let cosd = vec![COSINE_DIFFUSE; count];
-    let mut gdir = vec![0.0; count];
-    let mut gdif = vec![0.0; count];
-    let mut direct_extinction = vec![1.0; count];
-    let mut cover = [[0.0; LAYERS]; 1];
-    let mut crown_size = [0.0; LAYERS];
-    let mut crown_height = [0.0; LAYERS];
-    let mut layer_lsai = [0.0; LAYERS];
-    let mut layer_cosz = [0.0; LAYERS];
-    let mut layer_cosd = [0.0; LAYERS];
-    let mut layer_gdir = [0.0; LAYERS];
-    let mut layer_gdif = [0.0; LAYERS];
-    let mut layer_rho = [[0.0; BANDS]; LAYERS];
-    let mut layer_tau = [[0.0; BANDS]; LAYERS];
-    let mut layer_omega = [[0.0; BANDS]; LAYERS];
-
-    for (index, (pft, &fraction)) in pfts.iter().zip(fractions).enumerate() {
-        let lsai = pft.lai + pft.sai;
-        leaf_stem_area[index] = lsai;
-        let phi1 = 0.5 - 0.633 * pft.optics.chil - 0.33 * pft.optics.chil * pft.optics.chil;
-        let phi2 = 0.877 * (1.0 - 2.0 * phi1);
-        gdir[index] = phi1 + phi2 * cosz[index];
-        gdif[index] = phi1 + phi2 * cosd[index];
-        direct_extinction[index] = gdir[index] / cosz[index];
-        if lsai <= EPSILON || fraction <= 0.0 {
-            continue;
-        }
-        active[index] = true;
-        canopy[index] = pft.canopy_layer - 1;
-        let layer = canopy[index];
-        cover[0][layer] += fraction;
-        let size = (pft.canopy_top_m - pft.canopy_bottom_m) * 0.5;
-        let height = (pft.canopy_top_m + pft.canopy_bottom_m) * 0.5;
-        crown_size[layer] += fraction * size;
-        crown_height[layer] += fraction * height;
-        layer_lsai[layer] += fraction * lsai;
-        layer_cosz[layer] += fraction * cosz[index];
-        layer_cosd[layer] += fraction * cosd[index];
-        layer_gdir[layer] += fraction * gdir[index];
-        layer_gdif[layer] += fraction * gdif[index];
+    for (index, pft) in pfts.iter().enumerate() {
+        // `:156-157`：`(htop-hbot)/2` 与 `(htop+hbot)/2` 都是乘 0.5。
+        size[index] = (pft.canopy_top_m - pft.canopy_bottom_m) * 0.5;
+        height[index] = (pft.canopy_top_m + pft.canopy_bottom_m) * 0.5;
+        lsai[index] = pft.lai + pft.sai;
+        canopy[index] = pft.canopy_layer;
+        chil[index] = pft.optics.chil;
         for band in 0..BANDS {
-            let leaf_weight = pft.lai / lsai;
-            let stem_weight = pft.sai / lsai;
-            rho[index][band] = leaf_weight * pft.optics.reflectance[band][0]
-                + stem_weight * pft.optics.reflectance[band][1];
-            tau[index][band] = leaf_weight * pft.optics.transmittance[band][0]
-                + stem_weight * pft.optics.transmittance[band][1];
-            rho[index][band] = (1.0 - pft.wet_snow_fraction) * rho[index][band]
-                + pft.wet_snow_fraction * if band == 0 { 0.5 } else { 0.2 };
-            tau[index][band] = (1.0 - pft.wet_snow_fraction) * tau[index][band]
-                + pft.wet_snow_fraction * if band == 0 { 0.3 } else { 0.2 };
-            layer_rho[layer][band] += fraction * rho[index][band];
-            layer_tau[layer][band] += fraction * tau[index][band];
-            layer_omega[layer][band] += fraction * (rho[index][band] + tau[index][band]);
-        }
-    }
-    if !active.iter().any(|&value| value) {
-        return Ok(CoreRadiation {
-            albedo: ground,
-            transmission: [[0.0, 1.0, 1.0]; BANDS],
-            sunlit: vec![[[0.0; RTYPES]; BANDS]; count],
-            shaded: vec![[[0.0; RTYPES]; BANDS]; count],
-            thermal_gap: vec![1.0; count],
-            shade: vec![0.0; count],
-            direct_extinction,
-        });
-    }
-    let mut bottom = [0.0; LAYERS];
-    for layer in 0..LAYERS {
-        if cover[0][layer] > 0.0 {
-            let inverse_cover = 1.0 / cover[0][layer];
-            crown_size[layer] = (crown_size[layer] * inverse_cover).max(0.0);
-            crown_height[layer] = (crown_height[layer] * inverse_cover).max(0.0);
-            bottom[layer] = crown_height[layer] - crown_size[layer];
-            layer_lsai[layer] = (layer_lsai[layer] * inverse_cover).max(0.0);
-            layer_cosz[layer] = (layer_cosz[layer] * inverse_cover).max(0.0);
-            layer_cosd[layer] = (layer_cosd[layer] * inverse_cover).max(0.0);
-            layer_gdir[layer] = (layer_gdir[layer] * inverse_cover).max(0.0);
-            layer_gdif[layer] = (layer_gdif[layer] * inverse_cover).max(0.0);
-            for band in 0..BANDS {
-                layer_rho[layer][band] = (layer_rho[layer][band] * inverse_cover).max(0.0);
-                layer_tau[layer][band] = (layer_tau[layer][band] * inverse_cover).max(0.0);
-                layer_omega[layer][band] = (layer_omega[layer][band] * inverse_cover).max(0.0);
+            if lsai[index] > 0.0 {
+                // `:173/175`：两项各自 `x*lai/lsai`，再相加。
+                rho[index][band] = pft.optics.reflectance[band][0] * pft.lai / lsai[index]
+                    + pft.optics.reflectance[band][1] * pft.sai / lsai[index];
+                tau[index][band] = pft.optics.transmittance[band][0] * pft.lai / lsai[index]
+                    + pft.optics.transmittance[band][1] * pft.sai / lsai[index];
+            }
+            if vegetation_snow {
+                // `:181-182`：`FMA(rho, 1-fwet, fwet*rho_sno)`。
+                let dry = 1.0 - pft.wet_snow_fraction;
+                rho[index][band] =
+                    rho[index][band].mul_add(dry, pft.wet_snow_fraction * RHO_SNOW[band]);
+                tau[index][band] =
+                    tau[index][band].mul_add(dry, pft.wet_snow_fraction * TAU_SNOW[band]);
             }
         }
     }
-
-    let mut shadow_direct = [0.0; LAYERS];
-    let mut shadow_diffuse = [0.0; LAYERS];
-    let mut direct_depth = [0.0; LAYERS];
-    let mut diffuse_depth = [0.0; LAYERS];
-    let mut direct_unscattered = [0.0; LAYERS];
-    let mut diffuse_unscattered = [0.0; LAYERS];
-    let mut direct_unscattered_original = [0.0; LAYERS];
-    let mut diffuse_unscattered_original = [0.0; LAYERS];
-    let mut direct_calibration = [1.0; LAYERS];
-    let mut diffuse_calibration = [1.0; LAYERS];
-    let mut sunlit_direct_weight = [0.0; LAYERS];
-    let mut sunlit_downward_weight = [0.0; LAYERS];
-    let mut sunlit_upward_weight = [0.0; LAYERS];
-    for layer in 0..LAYERS {
-        if cover[0][layer] <= 0.0 || layer_cosz[layer] <= 0.0 {
-            continue;
-        }
-        shadow_direct[layer] = (1.0 - (-cover[0][layer] / layer_cosz[layer]).exp())
-            / (1.0 - cover[0][layer] * (-1.0 / layer_cosz[layer]).exp());
-        shadow_direct[layer] = shadow_direct[layer].max(cover[0][layer]);
-        shadow_diffuse[layer] = (1.0 - (-cover[0][layer] / layer_cosd[layer]).exp())
-            / (1.0 - cover[0][layer] * (-1.0 / layer_cosd[layer]).exp());
-        shadow_diffuse[layer] = shadow_diffuse[layer].max(cover[0][layer]);
-        if layer_lsai[layer] <= 0.0 {
-            continue;
-        }
-        direct_depth[layer] = 0.75 * GEE * cover[0][layer] * layer_lsai[layer]
-            / (layer_cosz[layer] * shadow_direct[layer]);
-        diffuse_depth[layer] = 0.75 * GEE * cover[0][layer] * layer_lsai[layer]
-            / (layer_cosd[layer] * shadow_diffuse[layer]);
-        direct_unscattered_original[layer] = canopy_transmittance(direct_depth[layer]);
-        diffuse_unscattered_original[layer] = canopy_transmittance(diffuse_depth[layer]);
-        direct_unscattered[layer] =
-            canopy_transmittance(direct_depth[layer] / GEE * layer_gdir[layer]);
-        diffuse_unscattered[layer] =
-            canopy_transmittance(diffuse_depth[layer] / GEE * layer_gdif[layer]);
-        direct_calibration[layer] =
-            (1.0 - direct_unscattered[layer]) / (1.0 - direct_unscattered_original[layer]);
-        diffuse_calibration[layer] =
-            (1.0 - diffuse_unscattered[layer]) / (1.0 - diffuse_unscattered_original[layer]);
-        let forward = 0.5 * (1.0 - canopy_transmittance(2.0 * direct_depth[layer]))
-            / (1.0 - canopy_transmittance(direct_depth[layer]));
-        let backward = 2.0
-            * (canopy_transmittance(direct_depth[layer]) - (-2.0 * direct_depth[layer]).exp())
-            / (1.0 - canopy_transmittance(direct_depth[layer]));
-        let average = 0.5 * (forward + backward);
-        let difference = 0.5 * (forward - backward);
-        sunlit_direct_weight[layer] = forward;
-        sunlit_downward_weight[layer] = average + 0.5 * layer_cosz[layer] * difference;
-        sunlit_upward_weight[layer] = average - 0.5 * layer_cosz[layer] * difference;
-    }
-
-    let mut overlap = [[0.0; LAYERS]; LAYERS];
-    overlap[2][1] = cover[0][2]
-        * overlap_area(
-            crown_size[2],
-            crown_height[2] - bottom[1],
-            layer_cosz[2].acos(),
-        );
-    overlap[2][0] = cover[0][2]
-        * overlap_area(
-            crown_size[2],
-            crown_height[2] - bottom[0],
-            layer_cosz[2].acos(),
-        );
-    overlap[1][0] = cover[0][1]
-        * overlap_area(
-            crown_size[1],
-            crown_height[1] - bottom[0],
-            layer_cosz[1].acos(),
-        );
-    let mut tt = [[0.0; 5]; 5];
-    let clamp_between = |value: f64, low: f64, high: f64| value.max(low).min(high);
-    tt[4][3] = clamp_between(shadow_direct[2], 0.0, 1.0);
-    tt[4][2] = clamp_between(
-        shadow_direct[1] * (1.0 - shadow_direct[2] + overlap[2][1]),
-        0.0,
-        1.0 - tt[4][3],
+    let core = three_d_canopy(
+        &canopy,
+        fractions,
+        &size,
+        &height,
+        &chil,
+        cosine_zenith,
+        &lsai,
+        &rho,
+        &tau,
+        ground,
     );
-    tt[4][1] = clamp_between(
-        shadow_direct[0]
-            * (1.0 - (shadow_direct[1] - overlap[1][0]) - (shadow_direct[2] - overlap[2][0])
-                + (shadow_direct[1] - overlap[1][0]) * (shadow_direct[2] - overlap[2][1])),
-        0.0,
-        1.0 - tt[4][3] - tt[4][2],
-    );
-    tt[4][0] = clamp_between(
-        1.0 - (shadow_direct[0] + shadow_direct[1] + shadow_direct[2]
-            - (shadow_direct[1] - overlap[1][0]) * shadow_direct[0]
-            - (shadow_direct[2] - overlap[2][1]) * shadow_direct[1]
-            - (shadow_direct[2] - overlap[2][0]) * shadow_direct[0]
-            + (shadow_direct[1] - overlap[1][0])
-                * (shadow_direct[2] - overlap[2][1])
-                * shadow_direct[0]),
-        0.0,
-        1.0 - tt[4][3] - tt[4][2] - tt[4][1],
-    );
-    if shadow_direct[2] > 0.0 {
-        tt[3][2] = clamp_between(
-            shadow_direct[1] * (shadow_direct[2] - overlap[2][1]),
-            0.0,
-            shadow_direct[2],
-        );
-        tt[3][1] = clamp_between(
-            shadow_direct[0]
-                * (shadow_direct[2]
-                    - overlap[2][0]
-                    - (shadow_direct[2] - overlap[2][1]) * (shadow_direct[1] - overlap[1][0])),
-            0.0,
-            shadow_direct[2] - tt[3][2],
-        );
-        tt[3][0] = shadow_direct[2] - tt[3][2] - tt[3][1];
-        tt[3][2] *= direct_unscattered[2];
-        tt[3][1] *= direct_unscattered[2];
-        tt[3][0] *= direct_unscattered[2];
-    }
-    if shadow_direct[1] > 0.0 {
-        tt[2][1] = clamp_between(
-            shadow_direct[0] * (shadow_direct[1] - overlap[1][0]),
-            0.0,
-            shadow_direct[1],
-        );
-        tt[2][0] = shadow_direct[1] - tt[2][1];
-        tt[2][1] *= direct_unscattered[1] * (tt[4][2] + tt[3][2]) / shadow_direct[1];
-        tt[2][0] *= direct_unscattered[1] * (tt[4][2] + tt[3][2]) / shadow_direct[1];
-    }
-    if shadow_direct[0] > 0.0 {
-        tt[1][0] = direct_unscattered[0] * (tt[4][1] + tt[3][1] + tt[2][1]);
-    }
-    tt[3][2] += tt[4][2];
-    tt[2][1] += tt[4][1] + tt[3][1];
-    tt[1][0] += tt[4][0] + tt[3][0] + tt[2][0];
-    let direct_column_transmission = tt[1][0];
-    let direct_path = [tt[4][3], tt[3][2], tt[2][1], tt[1][0]];
-    tt = [[0.0; 5]; 5];
-    tt[4][3] = direct_path[0];
-    tt[3][2] = direct_path[1];
-    tt[2][1] = direct_path[2];
-    tt[1][0] = direct_path[3];
-
-    let mut albedo = [[0.0; RTYPES]; BANDS];
-    let mut transmission = [[0.0; 3]; BANDS];
-    let mut sunlit = vec![[[0.0; RTYPES]; BANDS]; count];
-    let mut shaded = vec![[[0.0; RTYPES]; BANDS]; count];
-    let mut thermal_gap = vec![1.0; count];
-    let mut shade = vec![0.0; count];
-    let mut psun_layer = [0.0; LAYERS];
-    let mut fsun_id_layer = [0.0; LAYERS];
-    let mut fsun_ii_layer = [0.0; LAYERS];
-    for band in 0..BANDS {
-        let mut pft_direct_depth = vec![0.0; count];
-        let mut pft_diffuse_depth = vec![0.0; count];
-        let mut pft_shadow_direct = vec![0.0; count];
-        let mut pft_shadow_diffuse = vec![0.0; count];
-        let mut pft_direct_original = vec![0.0; count];
-        let mut pft_diffuse_original = vec![0.0; count];
-        let mut pft_direct = vec![0.0; count];
-        let mut pft_diffuse = vec![1.0; count];
-        let mut pft_direct_calibration = vec![1.0; count];
-        let mut pft_diffuse_calibration = vec![1.0; count];
-        for index in 0..count {
-            if !active[index] {
-                continue;
+    let pft = (0..count)
+        .map(|index| {
+            // `:200-206`：wrap 自己的 `phi1/phi2`，`gdir = FMA(phi2, czen, phi1)`，未经 `cosz` 修正。
+            let (phi1, phi2) = leaf_projection(chil[index]);
+            let direct_extinction = phi2.mul_add(cosine_zenith, phi1) / cosine_zenith;
+            let area = lsai[index];
+            let psun = core.psun[index];
+            let (fsun_id, fsun_ii) = if area > 0.0 {
+                // `:217/221`
+                let two = (-(area * (direct_extinction * 2.0))).exp();
+                let one = -(area * direct_extinction);
+                (
+                    (1.0 - two) / (1.0 - one.exp()) * 0.5 * psun,
+                    psun * ((1.0 - (one - area).exp())
+                        / (1.0 - (-area).exp())
+                        / (direct_extinction + 1.0)),
+                )
+            } else {
+                (0.0, 0.0)
+            };
+            let fabd = core.fabd[index];
+            let fabi = core.fabi[index];
+            let fadd = core.fadd[index];
+            // `:231-238`：`ssun(:,1) = FMA(fabd-fadd, fsun_id, fadd)`，其余三项是单次乘法。
+            PcPftRadiation {
+                sunlit_absorption: std::array::from_fn(|band| {
+                    [
+                        (fabd[band] - fadd[band]).mul_add(fsun_id, fadd[band]),
+                        fabi[band] * fsun_ii,
+                    ]
+                }),
+                shaded_absorption: std::array::from_fn(|band| {
+                    [
+                        (fabd[band] - fadd[band]) * (1.0 - fsun_id),
+                        fabi[band] * (1.0 - fsun_ii),
+                    ]
+                }),
+                thermal_gap_fraction: core.thermal_gap[index],
+                shade_fraction: core.shade[index],
+                direct_extinction,
+                diffuse_extinction: 0.719,
             }
-            let layer = canopy[index];
-            let portion = (fractions[index] / cover[0][layer]).min(1.0);
-            pft_shadow_direct[index] = portion * shadow_direct[layer];
-            pft_shadow_diffuse[index] = portion * shadow_diffuse[layer];
-            pft_direct_depth[index] = 0.75 * GEE * fractions[index] * leaf_stem_area[index]
-                / (cosz[index] * pft_shadow_direct[index]);
-            pft_diffuse_depth[index] = 0.75 * GEE * fractions[index] * leaf_stem_area[index]
-                / (cosd[index] * pft_shadow_diffuse[index]);
-            pft_direct_original[index] = canopy_transmittance(pft_direct_depth[index]);
-            pft_diffuse_original[index] = canopy_transmittance(pft_diffuse_depth[index]);
-            pft_direct[index] = canopy_transmittance(pft_direct_depth[index] / GEE * gdir[index]);
-            pft_diffuse[index] = canopy_transmittance(pft_diffuse_depth[index] / GEE * gdif[index]);
-            pft_direct_calibration[index] =
-                (1.0 - pft_direct[index]) / (1.0 - pft_direct_original[index]);
-            pft_diffuse_calibration[index] =
-                (1.0 - pft_diffuse[index]) / (1.0 - pft_diffuse_original[index]);
-        }
-
-        let mut layer_direct_scattered = [0.0; LAYERS];
-        let mut layer_diffuse_transmission = [1.0; LAYERS];
-        let mut layer_direct_reflection = [0.0; LAYERS];
-        let mut layer_diffuse_reflection = [0.0; LAYERS];
-        let mut layer_direct_absorption = [0.0; LAYERS];
-        let mut layer_diffuse_absorption = [0.0; LAYERS];
-        for layer in 0..LAYERS {
-            if shadow_direct[layer] <= 0.0 {
-                continue;
-            }
-            let mut canopy_radiation = canopy_radiation(
-                direct_depth[layer],
-                diffuse_depth[layer],
-                direct_unscattered_original[layer],
-                diffuse_unscattered_original[layer],
-                layer_cosz[layer],
-                layer_cosd[layer],
-                shadow_direct[layer],
-                shadow_diffuse[layer],
-                cover[0][layer],
-                layer_omega[layer][band],
-                layer_lsai[layer],
-                layer_tau[layer][band],
-                layer_rho[layer][band],
-            );
-            canopy_radiation.direct_scattered *= direct_calibration[layer];
-            canopy_radiation.diffuse_transmission = diffuse_calibration[layer]
-                * (canopy_radiation.diffuse_transmission - diffuse_unscattered_original[layer])
-                + diffuse_unscattered[layer];
-            canopy_radiation.direct_reflection *= direct_calibration[layer];
-            canopy_radiation.diffuse_reflection *= diffuse_calibration[layer];
-            canopy_radiation.direct_absorption *= direct_calibration[layer];
-            canopy_radiation.diffuse_absorption *= diffuse_calibration[layer];
-            layer_direct_scattered[layer] = canopy_radiation.direct_scattered;
-            layer_diffuse_transmission[layer] = canopy_radiation.diffuse_transmission;
-            layer_direct_reflection[layer] = canopy_radiation.direct_reflection;
-            layer_diffuse_reflection[layer] = canopy_radiation.diffuse_reflection;
-            layer_direct_absorption[layer] = canopy_radiation.direct_absorption;
-            layer_diffuse_absorption[layer] = canopy_radiation.diffuse_absorption;
-        }
-        let mut layer_direct_sunlit = [0.0; LAYERS];
-        for layer in 0..LAYERS {
-            if cover[0][layer] > 0.0 && layer_lsai[layer] > 0.0 {
-                layer_direct_sunlit[layer] = tt[layer + 2][layer + 1]
-                    * (1.0 - direct_unscattered[layer])
-                    * (1.0 - layer_omega[layer][band]);
-            }
-        }
-        let matrix = radiation_matrix(
-            shadow_diffuse,
-            layer_diffuse_transmission,
-            layer_direct_reflection,
-            layer_diffuse_reflection,
-            ground[band][0],
-            ground[band][1],
-            tt,
-            layer_direct_scattered,
-        );
-        let solution = solve_six(matrix.0, matrix.1)?;
-        let mut layer_direct_total = [0.0; LAYERS];
-        let mut layer_diffuse_total = [0.0; LAYERS];
-        layer_direct_total[2] = tt[4][3] * layer_direct_absorption[2]
-            + solution[2][0] * shadow_diffuse[2] * layer_diffuse_absorption[2];
-        layer_direct_total[1] = tt[3][2] * layer_direct_absorption[1]
-            + (solution[1][0] + solution[4][0]) * shadow_diffuse[1] * layer_diffuse_absorption[1];
-        layer_direct_total[0] = tt[2][1] * layer_direct_absorption[0]
-            + (solution[3][0] + solution[5][0] * ground[band][1] + tt[1][0] * ground[band][0])
-                * shadow_diffuse[0]
-                * layer_diffuse_absorption[0];
-        layer_diffuse_total[2] =
-            (1.0 + solution[2][1]) * shadow_diffuse[2] * layer_diffuse_absorption[2];
-        layer_diffuse_total[1] =
-            (solution[1][1] + solution[4][1]) * shadow_diffuse[1] * layer_diffuse_absorption[1];
-        layer_diffuse_total[0] = (solution[3][1] + solution[5][1] * ground[band][1])
-            * shadow_diffuse[0]
-            * layer_diffuse_absorption[0];
-        let direct_absorption: f64 = layer_direct_total.iter().sum();
-        let diffuse_absorption: f64 = layer_diffuse_total.iter().sum();
-        albedo[band] = [solution[0][0], solution[0][1]];
-        transmission[band] = [
-            (1.0 - albedo[band][0]
-                - direct_absorption
-                - direct_column_transmission * (1.0 - ground[band][0]))
-                / (1.0 - ground[band][1]),
-            (1.0 - albedo[band][1] - diffuse_absorption) / (1.0 - ground[band][1]),
-            direct_column_transmission,
-        ];
-        if band == 0 {
-            if cover[0][2] > 0.0 && layer_lsai[2] > 0.0 {
-                psun_layer[2] = tt[4][3] / shadow_direct[2];
-                fsun_id_layer[2] = (psun_layer[2] * sunlit_direct_weight[2]
-                    + solution[2][0] * sunlit_upward_weight[2])
-                    / (psun_layer[2] + solution[2][0]);
-                fsun_ii_layer[2] = (sunlit_downward_weight[2]
-                    + solution[2][1] * sunlit_upward_weight[2])
-                    / (1.0 + solution[2][1]);
-            }
-            if cover[0][1] > 0.0 && layer_lsai[1] > 0.0 {
-                psun_layer[1] = tt[3][2] / shadow_direct[1];
-                fsun_id_layer[1] = (psun_layer[1] * sunlit_direct_weight[1]
-                    + solution[1][0] * sunlit_downward_weight[1]
-                    + solution[4][0] * sunlit_upward_weight[1])
-                    / (psun_layer[1] + solution[1][0] + solution[4][0]);
-                fsun_ii_layer[1] = (solution[1][1] * sunlit_downward_weight[1]
-                    + solution[4][1] * sunlit_upward_weight[1])
-                    / (solution[1][1] + solution[4][1]);
-            }
-            if cover[0][0] > 0.0 && layer_lsai[0] > 0.0 {
-                psun_layer[0] = tt[2][1] / shadow_direct[0];
-                fsun_id_layer[0] = (psun_layer[0] * sunlit_direct_weight[0]
-                    + solution[3][0] * sunlit_downward_weight[0]
-                    + (solution[5][0] * ground[band][1] + tt[1][0] * ground[band][0])
-                        * sunlit_upward_weight[0])
-                    / (psun_layer[0]
-                        + solution[3][0]
-                        + solution[5][0] * ground[band][1]
-                        + tt[1][0] * ground[band][0]);
-                fsun_ii_layer[0] = (solution[3][1] * sunlit_downward_weight[0]
-                    + solution[5][1] * ground[band][1] * sunlit_upward_weight[0])
-                    / (solution[3][1] + solution[5][1] * ground[band][1]);
-            }
-        }
-
-        let mut sum_direct = [0.0; LAYERS];
-        let mut sum_diffuse = [0.0; LAYERS];
-        let mut sum_sunlit = [0.0; LAYERS];
-        let mut pft_direct_absorption = vec![0.0; count];
-        let mut pft_diffuse_absorption = vec![0.0; count];
-        let mut pft_sunlit_absorption = vec![0.0; count];
-        for index in 0..count {
-            if !active[index] {
-                continue;
-            }
-            let layer = canopy[index];
-            let mut values = canopy_radiation(
-                pft_direct_depth[index],
-                pft_diffuse_depth[index],
-                pft_direct_original[index],
-                pft_diffuse_original[index],
-                cosz[index],
-                cosd[index],
-                pft_shadow_direct[index],
-                pft_shadow_diffuse[index],
-                fractions[index],
-                rho[index][band] + tau[index][band],
-                leaf_stem_area[index],
-                tau[index][band],
-                rho[index][band],
-            );
-            values.direct_scattered *= pft_direct_calibration[index];
-            values.diffuse_transmission = pft_diffuse_calibration[index]
-                * (values.diffuse_transmission - pft_diffuse_original[index])
-                + pft_diffuse[index];
-            values.direct_reflection *= pft_direct_calibration[index];
-            values.diffuse_reflection *= pft_diffuse_calibration[index];
-            values.direct_absorption *= pft_direct_calibration[index];
-            values.diffuse_absorption *= pft_diffuse_calibration[index];
-            let sky = pft_shadow_diffuse[index];
-            let probability = values.diffuse_reflection * sky * ground[band][1];
-            let direct_ground = (1.0 - pft_shadow_direct[index]
-                + pft_shadow_direct[index] * pft_direct[index])
-                * ground[band][0]
-                + pft_shadow_direct[index] * values.direct_scattered * ground[band][1];
-            pft_direct_absorption[index] = pft_shadow_direct[index] * values.direct_absorption
-                + direct_ground * values.diffuse_absorption * sky / (1.0 - probability);
-            let diffuse_ground =
-                1.0 - pft_shadow_diffuse[index] * (1.0 - values.diffuse_transmission);
-            pft_diffuse_absorption[index] = pft_shadow_diffuse[index] * values.diffuse_absorption
-                + diffuse_ground * ground[band][1] * values.diffuse_absorption * sky
-                    / (1.0 - probability);
-            pft_sunlit_absorption[index] = pft_shadow_direct[index]
-                * (1.0 - pft_direct[index])
-                * (1.0 - rho[index][band] - tau[index][band]);
-            sum_direct[layer] += pft_direct_absorption[index];
-            sum_diffuse[layer] += pft_diffuse_absorption[index];
-            sum_sunlit[layer] += pft_sunlit_absorption[index];
-        }
-        for index in 0..count {
-            if !active[index] {
-                continue;
-            }
-            let layer = canopy[index];
-            let direct = pft_direct_absorption[index] * layer_direct_total[layer]
-                / sum_direct[layer]
-                / fractions[index];
-            let diffuse = pft_diffuse_absorption[index] * layer_diffuse_total[layer]
-                / sum_diffuse[layer]
-                / fractions[index];
-            let direct_sunlit = (pft_sunlit_absorption[index] * layer_direct_sunlit[layer]
-                / sum_sunlit[layer]
-                / fractions[index])
-                .min(direct);
-            // `ThreeDCanopy_wrap` keeps the source's `fsun3D = .false.`
-            // default: 3D geometry supplies `psun`, while leaf-level diffuse
-            // partitioning uses its 1D expression below.
-            let psun = psun_layer[layer];
-            let extinction = direct_extinction[index];
-            let lsai = leaf_stem_area[index];
-            let fsun_id =
-                (1.0 - (-2.0 * extinction * lsai).exp()) / (1.0 - (-extinction * lsai).exp()) / 2.0
-                    * psun;
-            let fsun_ii = (1.0 - (-extinction * lsai - lsai).exp())
-                / (1.0 - (-lsai).exp())
-                / (1.0 + extinction)
-                * psun;
-            sunlit[index][band][0] = (direct - direct_sunlit) * fsun_id + direct_sunlit;
-            shaded[index][band][0] = (direct - direct_sunlit) * (1.0 - fsun_id);
-            sunlit[index][band][1] = diffuse * fsun_ii;
-            shaded[index][band][1] = diffuse * (1.0 - fsun_ii);
-            thermal_gap[index] = pft_diffuse[index];
-            shade[index] = pft_shadow_diffuse[index];
-        }
-    }
-    Ok(CoreRadiation {
-        albedo,
-        transmission,
-        sunlit,
-        shaded,
-        thermal_gap,
-        shade,
-        direct_extinction,
-    })
-}
-
-struct CanopyRadiation {
-    direct_scattered: f64,
-    diffuse_transmission: f64,
-    direct_reflection: f64,
-    diffuse_reflection: f64,
-    direct_absorption: f64,
-    diffuse_absorption: f64,
-}
-
-#[allow(clippy::too_many_arguments)]
-fn canopy_radiation(
-    direct_depth: f64,
-    diffuse_depth: f64,
-    direct_unscattered: f64,
-    diffuse_unscattered: f64,
-    cosine_direct: f64,
-    cosine_diffuse: f64,
-    shadow_direct: f64,
-    shadow_diffuse: f64,
-    cover: f64,
-    omega: f64,
-    leaf_stem_area: f64,
-    transmittance: f64,
-    reflectance: f64,
-) -> CanopyRadiation {
-    let (total_direct, difference_direct, _) =
-        canopy_scattering(direct_depth, omega, transmittance, reflectance);
-    let (total_diffuse, difference_diffuse, _) =
-        canopy_scattering(diffuse_depth, omega, transmittance, reflectance);
-    let sphere_depth = 0.75 * 0.5 * leaf_stem_area;
-    let (total_sphere, difference_sphere, absorption_probability) =
-        canopy_scattering(sphere_depth, omega, transmittance, reflectance);
-    let forward_sphere = (0.5 * (total_sphere - 0.5 * difference_sphere)).clamp(0.0, 1.0);
-    let forward_shape = 3.0
-        * (1.0 - (1.0 - 3.0_f64.sqrt() * cover / (2.0 * std::f64::consts::PI)).sqrt())
-        + 3.0 * (1.0 - (1.0 - 3.0_f64.sqrt() * cover / (6.0 * std::f64::consts::PI)).sqrt());
-    let wb = (2.0 * reflectance + transmittance) / 3.0;
-    let alpha = (1.0 - omega).sqrt() * (1.0 - omega + 2.0 * wb).sqrt();
-    let direct_factor = (1.0 + 2.0 * alpha) / (1.0 + 2.0 * alpha * cosine_direct);
-    let diffuse_factor = (1.0 + 2.0 * alpha) / (1.0 + 2.0 * alpha * cosine_diffuse);
-    let correction =
-        total_sphere * forward_shape * (1.0 - canopy_transmittance(sphere_depth)) * (1.0 - omega)
-            / (1.0 - omega * absorption_probability);
-    let direct_lateral = (direct_factor - 1.0)
-        * forward_sphere
-        * cover
-        * (1.0 / shadow_direct - cosine_direct / cover);
-    let diffuse_lateral = (diffuse_factor - 1.0)
-        * forward_sphere
-        * cover
-        * (1.0 / shadow_diffuse - cosine_diffuse / cover);
-    let mut direct_reflection = 0.5 * (total_direct - 0.5 * cosine_direct * difference_direct)
-        + direct_lateral
-        - 0.5 * correction;
-    let mut diffuse_reflection = 0.5 * (total_diffuse - 0.5 * cosine_diffuse * difference_diffuse)
-        + diffuse_lateral
-        - 0.5 * correction;
-    let mut direct_scattered = 0.5 * (total_direct + 0.5 * cosine_direct * difference_direct)
-        - 0.5 * direct_lateral
-        - 0.5 * correction;
-    let mut diffuse_transmission =
-        0.5 * (total_diffuse + 0.5 * cosine_diffuse * difference_diffuse) + diffuse_unscattered
-            - 0.5 * diffuse_lateral
-            - 0.5 * correction;
-    direct_reflection = direct_reflection.clamp(0.0, 1.0);
-    diffuse_reflection = diffuse_reflection.clamp(0.0, 1.0);
-    direct_scattered = direct_scattered.clamp(0.0, 1.0);
-    diffuse_transmission = diffuse_transmission.clamp(0.0, 1.0);
-    let mut direct_absorption =
-        (1.0 - direct_unscattered - direct_reflection - direct_scattered).clamp(0.0, 1.0);
-    let mut diffuse_absorption = (1.0 - diffuse_reflection - diffuse_transmission).clamp(0.0, 1.0);
-    if shadow_direct == 0.0 {
-        direct_scattered = 0.0;
-        direct_reflection = 0.0;
-        direct_absorption = 0.0;
-    }
-    if shadow_diffuse == 0.0 {
-        diffuse_transmission = 1.0;
-        diffuse_reflection = 0.0;
-        diffuse_absorption = 0.0;
-    }
-    CanopyRadiation {
-        direct_scattered,
-        diffuse_transmission,
-        direct_reflection,
-        diffuse_reflection,
-        direct_absorption,
-        diffuse_absorption,
+        })
+        .collect();
+    ThreeDCanopyOutput {
+        albedo: std::array::from_fn(|band| [core.albd[band], core.albi[band]]),
+        transmission: std::array::from_fn(|band| [core.ftid[band], core.ftii[band], core.ftdd]),
+        pft,
     }
 }
 
-/// Shared spherical-canopy multiple-scattering approximation from
-/// `MOD_3DCanopyRadiation::phi` with its calibrated (`runmode=.true.`) branch.
-pub(crate) fn canopy_scattering(
-    depth: f64,
-    omega: f64,
-    transmittance: f64,
-    reflectance: f64,
-) -> (f64, f64, f64) {
-    let forward_first = canopy_forward_scattering(depth);
-    let backward_first = 0.5 * (1.0 - canopy_transmittance(2.0 * depth));
-    let aa = 0.70;
-    let bb = 1.74;
-    let backward_second = aa
-        * (1.0 / (bb + 1.0) - canopy_transmittance(2.0 * depth) / (bb - 1.0)
-            + 2.0 * canopy_transmittance((bb + 1.0) * depth) / ((bb + 1.0) * (bb - 1.0)));
-    let forward_second = aa
-        * (2.0 * bb * forward_first / (bb * bb - 1.0)
-            - (1.0 / (bb + 1.0).powi(2) + 1.0 / (bb - 1.0).powi(2)) * canopy_transmittance(depth)
-            + canopy_transmittance(depth * bb) / (bb - 1.0).powi(2)
-            + canopy_transmittance((bb + 2.0) * depth) / (bb + 1.0).powi(2));
-    let average_second = 0.5 * (backward_second + forward_second);
-    let absorption_probability = (1.0
-        - average_second
-            / (1.0
-                - canopy_transmittance(depth)
-                - (reflectance * backward_first + transmittance * forward_first)
-                    / (transmittance + reflectance)))
-        .clamp(0.0, 1.0);
-    let forward_multiple = forward_second
-        + omega * absorption_probability * average_second / (1.0 - omega * absorption_probability);
-    let backward_multiple = backward_second
-        + omega * absorption_probability * average_second / (1.0 - omega * absorption_probability);
-    let forward = transmittance * forward_first + 0.5 * omega * omega * forward_multiple;
-    let backward = reflectance * backward_first + 0.5 * omega * omega * backward_multiple;
-    (
-        forward + backward,
-        forward - backward,
-        absorption_probability,
+/// `phi1 = 0.5 - 0.633*chil - 0.33*chil*chil`、`phi2 = 0.877*(1-2*phi1)`：
+/// GIMPLE（`:200-201`、`:481-482`）是 `FNMA(chil, chil*0.33, FNMA(chil, 0.633, 0.5))` 与
+/// `FNMA(phi1, 2, 1)*0.877`。
+fn leaf_projection(chil: f64) -> (f64, f64) {
+    let phi1 = (-chil).mul_add(chil * 0.33, (-chil).mul_add(0.633, 0.5));
+    (phi1, (-phi1).mul_add(2.0, 1.0) * 0.877)
+}
+
+struct ThreeDCore {
+    albd: [f64; BANDS],
+    albi: [f64; BANDS],
+    ftdd: f64,
+    ftid: [f64; BANDS],
+    ftii: [f64; BANDS],
+    fabd: Vec<[f64; BANDS]>,
+    fabi: Vec<[f64; BANDS]>,
+    fadd: Vec<[f64; BANDS]>,
+    psun: Vec<f64>,
+    thermal_gap: Vec<f64>,
+    shade: Vec<f64>,
+}
+
+fn quad_tee(depth: f64) -> f64 {
+    crate::extended::tee(DoubleDouble::new(depth))
+}
+
+/// `tee(DD1*depth/gee*g)`：`/gee` 折成 `*2`，整条在四精度里（`:605`、`:785` 的 GIMPLE）。
+fn quad_tee_projected(depth: f64, projection: f64) -> f64 {
+    crate::extended::tee(
+        DoubleDouble::new(projection) * (DoubleDouble::new(depth) * DoubleDouble::new(2.0)),
     )
 }
 
-fn canopy_forward_scattering(depth: f64) -> f64 {
-    if depth.abs() <= 0.05 {
-        const SERIES: [f64; 11] = [
-            0.0,
-            4.0 / 3.0,
-            -2.0,
-            8.0 / 5.0,
-            -8.0 / 9.0,
-            8.0 / 21.0,
-            -2.0 / 15.0,
-            16.0 / 405.0,
-            -16.0 / 1_575.0,
-            8.0 / 3_465.0,
-            -4.0 / 8_505.0,
-        ];
-        return SERIES
-            .iter()
-            .rev()
-            .fold(0.0, |sum, &coefficient| sum.mul_add(depth, coefficient));
+/// `ThreeDCanopy`（`MOD_3DCanopyRadiation.F90:284-1106`），逐句按 GIMPLE。
+///
+/// `max(·,0)` 后再 `min(·,上界)` 保留两步写法：`clamp` 在上界小于 0 时会 panic，上游不会。
+#[allow(
+    clippy::too_many_arguments,
+    clippy::needless_range_loop,
+    clippy::manual_clamp
+)]
+fn three_d_canopy(
+    canopy_layer: &[usize],
+    fcover: &[f64],
+    size: &[f64],
+    height: &[f64],
+    chil: &[f64],
+    coszen: f64,
+    lsai: &[f64],
+    rho: &[[f64; BANDS]],
+    tau: &[[f64; BANDS]],
+    ground: [[f64; RTYPES]; BANDS],
+) -> ThreeDCore {
+    let count = canopy_layer.len();
+    // `:486-491`：`cosz = coszen*sqrt(1/(cdcw²·sin²(zenith) + cos²(zenith)))`，`cdcw = 1`；
+    // `cosd` 的两个三角函数值在编译期折成常数，`FMA(1, 0.75-ε, 0.25+ε)` 恰为 1。
+    let zenith = coszen.acos();
+    let (sine, cosine) = zenith.sin_cos();
+    let cosz = coszen * (1.0 / (sine * sine).mul_add(1.0, cosine * cosine)).sqrt();
+    let cosd = f64::from_bits(0x3fe0_0000_0000_0001);
+    let mut gdir = vec![0.0; count];
+    let mut gdif = vec![0.0; count];
+    for index in 0..count {
+        let (phi1, phi2) = leaf_projection(chil[index]);
+        gdir[index] = phi2.mul_add(cosz, phi1);
+        gdif[index] = phi2.mul_add(cosd, phi1);
     }
-    1.0 / depth.powi(2) - (1.0 / depth.powi(2) + 2.0 / depth + 2.0) * (-2.0 * depth).exp()
-}
 
-/// Mean direct transmission through a spherical canopy (`tee` in CoLM).
-pub(crate) fn canopy_transmittance(depth: f64) -> f64 {
-    if depth.abs() <= 1.0 {
-        // `tee` evaluates this cancellation-prone expression in real(r16).
-        let mut term = (1.0, 0.0);
-        let mut sum = term;
-        for index in 0..64 {
-            term = double_multiply(term, depth);
-            term = double_multiply(term, -2.0 * (index as f64 + 2.0));
-            term = double_divide(term, (index as f64 + 1.0) * (index as f64 + 3.0));
-            sum = double_add(sum, term);
-            if term.0.abs() + term.1.abs() < 1.0e-34 {
-                break;
+    // `:506-535`：层聚合。`fc0` 是普通加法，其余都是 `FMA(fcover, x, acc)`。
+    let mut active = vec![false; count];
+    let mut fc0 = [0.0; LAYERS];
+    let mut csiz_lay = [0.0; LAYERS];
+    let mut chgt_lay = [0.0; LAYERS];
+    let mut lsai_lay = [0.0; LAYERS];
+    let mut cosz_lay = [0.0; LAYERS];
+    let mut cosd_lay = [0.0; LAYERS];
+    let mut gdir_lay = [0.0; LAYERS];
+    let mut gdif_lay = [0.0; LAYERS];
+    let mut rho_lay = [[0.0; BANDS]; LAYERS];
+    let mut tau_lay = [[0.0; BANDS]; LAYERS];
+    let mut omg_lay = [[0.0; BANDS]; LAYERS];
+    let mut omega = vec![[0.0; BANDS]; count];
+    for index in 0..count {
+        if !(lsai[index] > 1.0e-6 && fcover[index] > 0.0) {
+            continue;
+        }
+        active[index] = true;
+        let lev = canopy_layer[index] - 1;
+        let f = fcover[index];
+        fc0[lev] += f;
+        csiz_lay[lev] = f.mul_add(size[index], csiz_lay[lev]);
+        chgt_lay[lev] = f.mul_add(height[index], chgt_lay[lev]);
+        lsai_lay[lev] = lsai[index].mul_add(f, lsai_lay[lev]);
+        cosz_lay[lev] = f.mul_add(cosz, cosz_lay[lev]);
+        cosd_lay[lev] = f.mul_add(cosd, cosd_lay[lev]);
+        gdir_lay[lev] = f.mul_add(gdir[index], gdir_lay[lev]);
+        gdif_lay[lev] = f.mul_add(gdif[index], gdif_lay[lev]);
+        for band in 0..BANDS {
+            omega[index][band] = rho[index][band] + tau[index][band];
+            tau_lay[lev][band] = f.mul_add(tau[index][band], tau_lay[lev][band]);
+            rho_lay[lev][band] = f.mul_add(rho[index][band], rho_lay[lev][band]);
+            omg_lay[lev][band] = f.mul_add(omega[index][band], omg_lay[lev][band]);
+        }
+    }
+    // `:546-563`：除以 `fc0`（不是乘倒数），再 `max(·, 0)`。
+    let mut hbot_lay = [0.0; LAYERS];
+    for lev in 0..LAYERS {
+        if fc0[lev] > 0.0 {
+            let c = fc0[lev];
+            csiz_lay[lev] = (csiz_lay[lev] / c).max(0.0);
+            chgt_lay[lev] = (chgt_lay[lev] / c).max(0.0);
+            hbot_lay[lev] = chgt_lay[lev] - csiz_lay[lev];
+            lsai_lay[lev] = (lsai_lay[lev] / c).max(0.0);
+            cosz_lay[lev] = (cosz_lay[lev] / c).max(0.0);
+            cosd_lay[lev] = (cosd_lay[lev] / c).max(0.0);
+            for band in 0..BANDS {
+                tau_lay[lev][band] = (tau_lay[lev][band] / c).max(0.0);
+                rho_lay[lev][band] = (rho_lay[lev][band] / c).max(0.0);
+                omg_lay[lev][band] = (omg_lay[lev][band] / c).max(0.0);
+            }
+            gdir_lay[lev] = (gdir_lay[lev] / c).max(0.0);
+            gdif_lay[lev] = (gdif_lay[lev] / c).max(0.0);
+        }
+    }
+
+    // `:571-580`：分母是 `FNMA(fc0, exp(-1/cos), 1)`。
+    let mut shadow_d = [0.0; LAYERS];
+    let mut shadow_i = [0.0; LAYERS];
+    let shadow = |fc: f64, cos: f64| {
+        let value = (1.0 - (-(fc / cos)).exp()) / (-fc).mul_add((-(1.0 / cos)).exp(), 1.0);
+        fc.max(value)
+    };
+    for lev in 0..LAYERS {
+        if fc0[lev] > 0.0 && cosz_lay[lev] > 0.0 {
+            shadow_d[lev] = shadow(fc0[lev], cosz_lay[lev]);
+            shadow_i[lev] = shadow(fc0[lev], cosd_lay[lev]);
+        }
+    }
+
+    // `:592-613`：`taud = (fc0*0.375)*lsai/(cosz*shadow)`。
+    let mut taud_lay = [0.0; LAYERS];
+    let mut taui_lay = [0.0; LAYERS];
+    let mut ftdd_lay = [0.0; LAYERS];
+    let mut ftdi_lay = [0.0; LAYERS];
+    let mut fcad_lay = [1.0; LAYERS];
+    let mut fcai_lay = [1.0; LAYERS];
+    let mut ftdd_lay_orig = [0.0; LAYERS];
+    let mut ftdi_lay_orig = [0.0; LAYERS];
+    for lev in 0..LAYERS {
+        if !(fc0[lev] > 0.0 && lsai_lay[lev] > 0.0) {
+            continue;
+        }
+        let numerator = fc0[lev] * 0.375 * lsai_lay[lev];
+        taud_lay[lev] = numerator / (cosz_lay[lev] * shadow_d[lev]);
+        taui_lay[lev] = numerator / (cosd_lay[lev] * shadow_i[lev]);
+        ftdd_lay_orig[lev] = quad_tee(taud_lay[lev]);
+        ftdi_lay_orig[lev] = quad_tee(taui_lay[lev]);
+        ftdd_lay[lev] = quad_tee_projected(taud_lay[lev], gdir_lay[lev]);
+        ftdi_lay[lev] = quad_tee_projected(taui_lay[lev], gdif_lay[lev]);
+        fcad_lay[lev] = (1.0 - ftdd_lay[lev]) / (1.0 - ftdd_lay_orig[lev]);
+        fcai_lay[lev] = (1.0 - ftdi_lay[lev]) / (1.0 - ftdi_lay_orig[lev]);
+        // `:628-639`
+    }
+
+    // `:655-661`：`shad_oa = fc0*OverlapArea(...)` 不单独舍入，下面直接熔进 FMA。
+    let zenith3 = cosz_lay[2].acos();
+    let oa32 = overlap_area(csiz_lay[2], chgt_lay[2] - hbot_lay[1], zenith3);
+    let oa31 = overlap_area(csiz_lay[2], chgt_lay[2] - hbot_lay[0], zenith3);
+    let zenith2 = cosz_lay[1].acos();
+    let oa21 = overlap_area(csiz_lay[1], chgt_lay[1] - hbot_lay[0], zenith2);
+    let (sd1, sd2, sd3) = (shadow_d[0], shadow_d[1], shadow_d[2]);
+    let s21 = (-oa21).mul_add(fc0[1], sd2); // sd2 - shad_oa(2,1)
+    let s31 = (-oa31).mul_add(fc0[2], sd3); // sd3 - shad_oa(3,1)
+    let s32 = (-oa32).mul_add(fc0[2], sd3); // sd3 - shad_oa(3,2)
+    let mut tt = [[0.0; 5]; 5];
+    // `:670-686`
+    tt[4][3] = sd3.max(0.0).min(1.0);
+    tt[4][2] = (sd2 * oa32.mul_add(fc0[2], 1.0 - sd3))
+        .max(0.0)
+        .min(1.0 - tt[4][3]);
+    let s21_s32 = s21 * s32;
+    tt[4][1] = (sd1 * (((1.0 - s21) - s31) + s21_s32))
+        .max(0.0)
+        .min(1.0 - tt[4][3] - tt[4][2]);
+    let sd1_s21 = sd1 * s21;
+    let sd2_s32 = sd2 * s32;
+    let open = (-sd1).mul_add(s31, (sd3 + (sd2 + sd1)) - sd1_s21 - sd2_s32);
+    tt[4][0] = (1.0 - sd1.mul_add(s21_s32, open))
+        .max(0.0)
+        .min(1.0 - tt[4][3] - tt[4][2] - tt[4][1]);
+    if sd3 > 0.0 {
+        // `:693-702`
+        tt[3][2] = sd3.min(sd2_s32.max(0.0));
+        tt[3][1] = (sd1 * (s31 - s21_s32)).max(0.0).min(sd3 - tt[3][2]);
+        tt[3][0] = sd3 - tt[3][2] - tt[3][1];
+        tt[3][2] *= ftdd_lay[2];
+        tt[3][1] *= ftdd_lay[2];
+        tt[3][0] *= ftdd_lay[2];
+    }
+    let tt32 = tt[4][2] + tt[3][2];
+    if sd2 > 0.0 {
+        // `:707-712`
+        tt[2][1] = sd2.min(sd1_s21.max(0.0));
+        tt[2][0] = sd2 - tt[2][1];
+        tt[2][1] = ftdd_lay[1] * tt[2][1] * tt32 / sd2;
+        tt[2][0] = tt32 * (tt[2][0] * ftdd_lay[1]) / sd2;
+    }
+    let tt21 = tt[2][1] + (tt[3][1] + tt[4][1]);
+    if sd1 > 0.0 {
+        tt[1][0] = ftdd_lay[0] * tt21;
+    }
+    let tt43 = tt[4][3];
+    let tt10 = tt[4][0] + tt[3][0] + tt[2][0] + tt[1][0];
+    let ftdd_col = tt10;
+
+    let mut out = ThreeDCore {
+        albd: [0.0; BANDS],
+        albi: [0.0; BANDS],
+        ftdd: ftdd_col,
+        ftid: [0.0; BANDS],
+        ftii: [0.0; BANDS],
+        fabd: vec![[0.0; BANDS]; count],
+        fabi: vec![[0.0; BANDS]; count],
+        fadd: vec![[0.0; BANDS]; count],
+        psun: vec![0.0; count],
+        thermal_gap: vec![1.0; count],
+        shade: vec![0.0; count],
+    };
+    let mut psun_lay = [0.0; LAYERS];
+    for band in 0..BANDS {
+        let albgrd = ground[band][0];
+        let albgri = ground[band][1];
+        // `:752-796`：逐 PFT 的光学深度与未散射透过率。
+        let mut ftdi = vec![1.0; count];
+        let mut taud = vec![0.0; count];
+        let mut taui = vec![0.0; count];
+        let mut shadow_pd = vec![0.0; count];
+        let mut shadow_pi = vec![0.0; count];
+        let mut ftdd = vec![0.0; count];
+        let mut ftdd_orig = vec![0.0; count];
+        let mut ftdi_orig = vec![0.0; count];
+        let mut fcad = vec![0.0; count];
+        let mut fcai = vec![0.0; count];
+        for index in 0..count {
+            if !active[index] {
+                continue;
+            }
+            let lev = canopy_layer[index] - 1;
+            let pfc = (fcover[index] / fc0[lev]).min(1.0);
+            shadow_pd[index] = shadow_d[lev] * pfc;
+            shadow_pi[index] = shadow_i[lev] * pfc;
+            let numerator = fcover[index] * 0.375 * lsai[index];
+            taud[index] = numerator / (shadow_pd[index] * cosz);
+            taui[index] = numerator / (shadow_pi[index] * cosd);
+            ftdd_orig[index] = quad_tee(taud[index]);
+            ftdi_orig[index] = quad_tee(taui[index]);
+            ftdd[index] = quad_tee_projected(taud[index], gdir[index]);
+            ftdi[index] = quad_tee_projected(taui[index], gdif[index]);
+            fcad[index] = (1.0 - ftdd[index]) / (1.0 - ftdd_orig[index]);
+            fcai[index] = (1.0 - ftdi[index]) / (1.0 - ftdi_orig[index]);
+        }
+
+        // `:801-823`：层的 `CanopyRad`，再按 `fcad`/`fcai` 校正。
+        let mut layer = [CanopyRadOutput::default(); LAYERS];
+        for lev in 0..LAYERS {
+            layer[lev].ftii = 1.0;
+            if shadow_d[lev] > 0.0 {
+                layer[lev] = canopy_rad(
+                    taud_lay[lev],
+                    taui_lay[lev],
+                    ftdd_lay_orig[lev],
+                    ftdi_lay_orig[lev],
+                    cosz_lay[lev],
+                    cosd_lay[lev],
+                    shadow_d[lev],
+                    shadow_i[lev],
+                    fc0[lev],
+                    omg_lay[lev][band],
+                    lsai_lay[lev],
+                    tau_lay[lev][band],
+                    rho_lay[lev][band],
+                );
+            }
+            let l = &mut layer[lev];
+            l.ftid *= fcad_lay[lev];
+            l.ftii = fcai_lay[lev].mul_add(l.ftii - ftdi_lay_orig[lev], ftdi_lay[lev]);
+            l.frid *= fcad_lay[lev];
+            l.frii *= fcai_lay[lev];
+            l.faid *= fcad_lay[lev];
+            l.faii *= fcai_lay[lev];
+        }
+        // `:829-836`
+        let tt_down = [tt21, tt32, tt43];
+        let mut fadd_lay = [0.0; LAYERS];
+        for lev in 0..LAYERS {
+            if fc0[lev] > 0.0 && lsai_lay[lev] > 0.0 {
+                fadd_lay[lev] = tt_down[lev] * (1.0 - ftdd_lay[lev]) * (1.0 - omg_lay[lev][band]);
             }
         }
-        return sum.0 + sum.1;
+
+        // `:838-866`：六元方程组。
+        let (si1, si2, si3) = (shadow_i[0], shadow_i[1], shadow_i[2]);
+        let (l1, l2, l3) = (layer[0], layer[1], layer[2]);
+        let mut a = [[0.0; 6]; 6];
+        let mut b = [[0.0; 2]; 6];
+        a[0][0] = 1.0;
+        a[0][2] = (-si3).mul_add(l3.ftii, si3) - 1.0;
+        a[1][1] = 1.0;
+        a[1][2] = -(si3 * l3.frii);
+        a[2][2] = 1.0;
+        a[2][1] = -(si2 * l2.frii);
+        let open2 = (-si2).mul_add(l2.ftii, si2) - 1.0;
+        a[2][4] = open2;
+        a[3][3] = 1.0;
+        a[3][4] = a[2][1];
+        a[3][1] = open2;
+        a[4][4] = 1.0;
+        a[4][3] = -(si1 * l1.frii);
+        let open1 = (-l1.ftii).mul_add(si1, si1) - 1.0;
+        a[4][5] = open1 * albgri;
+        a[5][5] = (-(albgri * si1)).mul_add(l1.frii, 1.0);
+        a[5][3] = open1;
+        b[0][0] = tt43 * l3.frid;
+        b[0][1] = si3 * l3.frii;
+        b[1][0] = tt43 * l3.ftid;
+        b[1][1] = si3.mul_add(l3.ftii, -si3) + 1.0;
+        b[2][0] = l2.frid * tt32;
+        b[3][0] = l2.ftid * tt32;
+        let direct_ground = tt10 * albgrd;
+        b[4][0] = l1
+            .frid
+            .mul_add(tt21, direct_ground * (l1.ftii.mul_add(si1, -si1) + 1.0));
+        b[5][0] = l1.ftid.mul_add(tt21, direct_ground * si1 * l1.frii);
+        let x = gauss(a, b);
+
+        // `:877-909`
+        let f31 = tt43.mul_add(l3.faid, x[2][0] * si3 * l3.faii);
+        let f21 = l2.faid.mul_add(tt32, si2 * (x[1][0] + x[4][0]) * l2.faii);
+        let ground_bounce = direct_ground + (x[3][0] + albgri * x[5][0]);
+        let f11 = l1.faid.mul_add(tt21, ground_bounce * si1 * l1.faii);
+        let (one_minus_albgrd, one_minus_albgri) = (1.0 - albgrd, 1.0 - albgri);
+        let f32 = (x[2][1] + 1.0) * si3 * l3.faii;
+        let f22 = si2 * (x[1][1] + x[4][1]) * l2.faii;
+        let f12 = (x[3][1] + albgri * x[5][1]) * si1 * l1.faii;
+        let fabd_lay = [f11, f21, f31];
+        let fabi_lay = [f12, f22, f32];
+        let fabd_col = f31 + (f21 + f11);
+        let fabi_col = f32 + (f22 + f12);
+        let albd_col = x[0][0];
+        let albi_col = x[0][1];
+
+        if band == 0 {
+            // `:916-956`：只保留 `psun`。同一段算的 `fsun_id_lay`/`fsun_ii_lay` 在
+            // `fsun3D = .false.` 时被 wrap 整个丢弃（`:210-223` 重算），没有读者。
+            psun_lay = [0.0; LAYERS];
+            if fc0[2] > 0.0 && lsai_lay[2] > 0.0 {
+                psun_lay[2] = tt43 / sd3;
+            }
+            if fc0[1] > 0.0 && lsai_lay[1] > 0.0 {
+                psun_lay[1] = tt32 / sd2;
+            }
+            if fc0[0] > 0.0 && lsai_lay[0] > 0.0 {
+                psun_lay[0] = tt21 / sd1;
+            }
+        }
+
+        // `:973-1035`：逐 PFT 的 `CanopyRad`，按层归一化前的原始份额。
+        let mut sum_fabd = [0.0; LAYERS];
+        let mut sum_fabi = [0.0; LAYERS];
+        let mut sum_fadd = [0.0; LAYERS];
+        for index in 0..count {
+            if canopy_layer[index] == 0 {
+                continue;
+            }
+            let lev = canopy_layer[index] - 1;
+            if !(shadow_d[lev] > 0.0 && active[index]) {
+                continue;
+            }
+            let sky = shadow_pi[index];
+            let pd = shadow_pd[index];
+            let r = canopy_rad(
+                taud[index],
+                taui[index],
+                ftdd_orig[index],
+                ftdi_orig[index],
+                cosz,
+                cosd,
+                pd,
+                sky,
+                fcover[index],
+                omega[index][band],
+                lsai[index],
+                tau[index][band],
+                rho[index][band],
+            );
+            let ftid = fcad[index] * r.ftid;
+            let ftii = fcai[index].mul_add(r.ftii - ftdi_orig[index], ftdi[index]);
+            let albi = fcai[index] * r.frii;
+            let faid = fcad[index] * r.faid;
+            let faii = fcai[index] * r.faii;
+            let one_minus_probm = (-albgri).mul_add(sky * albi, 1.0);
+            let ftran = albgrd.mul_add(pd.mul_add(ftdd[index], 1.0 - pd), albgri * (ftid * pd));
+            let fabsm = sky * (faii * ftran) / one_minus_probm;
+            let fabd = faid.mul_add(pd, fabsm);
+            let ftran = (-sky).mul_add(1.0 - ftii, 1.0);
+            let fabsm = sky * (faii * (albgri * ftran)) / one_minus_probm;
+            let fabi = sky.mul_add(faii, fabsm);
+            sum_fabd[lev] += fabd;
+            sum_fabi[lev] += fabi;
+            let fadd = pd * (1.0 - ftdd[index]) * (1.0 - omega[index][band]);
+            sum_fadd[lev] += fadd;
+            out.fabd[index][band] = fabd;
+            out.fabi[index][band] = fabi;
+            out.fadd[index][band] = fadd;
+        }
+        // `:1040-1086`
+        for index in 0..count {
+            if active[index] {
+                let lev = canopy_layer[index] - 1;
+                let f = fcover[index];
+                let fabd = out.fabd[index][band] * fabd_lay[lev] / sum_fabd[lev] / f;
+                let fabi = out.fabi[index][band] * fabi_lay[lev] / sum_fabi[lev] / f;
+                let fadd = out.fadd[index][band] * fadd_lay[lev] / sum_fadd[lev] / f;
+                out.fabd[index][band] = fabd;
+                out.fabi[index][band] = fabi;
+                out.fadd[index][band] = fabd.min(fadd);
+                out.psun[index] = psun_lay[lev];
+            } else {
+                out.fabd[index][band] = 0.0;
+                out.fabi[index][band] = 0.0;
+                out.fadd[index][band] = 0.0;
+                out.psun[index] = 0.0;
+            }
+        }
+        out.albd[band] = albd_col;
+        out.albi[band] = albi_col;
+        out.ftid[band] =
+            (((1.0 - albd_col) - fabd_col) - ftdd_col * one_minus_albgrd) / one_minus_albgri;
+        out.ftii[band] = ((1.0 - albi_col) - fabi_col) / one_minus_albgri;
+        if band == 0 {
+            out.thermal_gap = ftdi.clone();
+        }
+        out.shade = shadow_pi;
     }
-    (-(1.0 + 2.0 * depth)).mul_add((-2.0 * depth).exp(), 1.0) / (2.0 * depth * depth)
+    out
 }
 
-fn double_add(left: (f64, f64), right: (f64, f64)) -> (f64, f64) {
-    let sum = left.0 + right.0;
-    let shifted = sum - left.0;
-    let error = (left.0 - (sum - shifted)) + (right.0 - shifted);
-    let tail = left.1 + right.1 + error;
-    let value = sum + tail;
-    (value, tail - (value - sum))
+#[derive(Debug, Clone, Copy, Default)]
+struct CanopyRadOutput {
+    ftid: f64,
+    ftii: f64,
+    frid: f64,
+    frii: f64,
+    faid: f64,
+    faii: f64,
 }
 
-fn double_multiply(value: (f64, f64), factor: f64) -> (f64, f64) {
-    let product = value.0 * factor;
-    let error = value.0.mul_add(factor, -product) + value.1 * factor;
-    let result = product + error;
-    (result, error - (result - product))
+/// `CanopyRad`（`:1161-1302`，`runmode = .true.`），按 GIMPLE。
+#[allow(clippy::too_many_arguments, clippy::manual_clamp)]
+fn canopy_rad(
+    tau_d: f64,
+    tau_i: f64,
+    ftdd: f64,
+    ftdi: f64,
+    cosz: f64,
+    cosd: f64,
+    shadow_d: f64,
+    shadow_i: f64,
+    fc: f64,
+    omg: f64,
+    lsai: f64,
+    tau_p: f64,
+    rho_p: f64,
+) -> CanopyRadOutput {
+    use crate::extended::canopy_scattering_runmode as phi;
+    let tau = lsai * 0.375;
+    let (tot_d, dif_d, _) = phi(tau_d, omg, tau_p, rho_p);
+    let (tot_i, dif_i, _) = phi(tau_i, omg, tau_p, rho_p);
+    let (tot_o, dif_o, pa2) = phi(tau, omg, tau_p, rho_p);
+    let frio = ((-dif_o).mul_add(0.5, tot_o) * 0.5).min(1.0).max(0.0);
+    let spread = fc * 1.732_050_807_568_877_2;
+    let near = 1.0 - (1.0 - spread / std::f64::consts::TAU).sqrt();
+    let far = 1.0 - (1.0 - spread / (3.0 * std::f64::consts::TAU)).sqrt();
+    let muv = near.mul_add(3.0, far * 3.0);
+    let wb = rho_p.mul_add(2.0 / 3.0, tau_p * (1.0 / 3.0));
+    let dry = 1.0 - omg;
+    let alpha = dry.sqrt() * wb.mul_add(2.0, dry).sqrt();
+    let two_alpha = alpha * 2.0;
+    let nd = (two_alpha + 1.0) / two_alpha.mul_add(cosz, 1.0);
+    let ni = (two_alpha + 1.0) / two_alpha.mul_add(cosd, 1.0);
+    let ac = tot_o * muv * (1.0 - quad_tee(tau)) * dry / (-omg).mul_add(pa2, 1.0);
+    let ald = fc * ((nd - 1.0) * frio) * (1.0 / shadow_d - cosz / fc);
+    let ali = fc * ((ni - 1.0) * frio) * (1.0 / shadow_i - cosd / fc);
+    let spread_d = cosz * 0.5 * dif_d;
+    let spread_i = cosd * 0.5 * dif_i;
+    let mut frid = (-ac)
+        .mul_add(0.5, (tot_d - spread_d).mul_add(0.5, ald))
+        .min(1.0)
+        .max(0.0);
+    let mut frii = (-ac)
+        .mul_add(0.5, (tot_i - spread_i).mul_add(0.5, ali))
+        .min(1.0)
+        .max(0.0);
+    let mut ftid = (-ac)
+        .mul_add(0.5, (-ald).mul_add(0.5, (spread_d + tot_d) * 0.5))
+        .min(1.0)
+        .max(0.0);
+    let mut ftii = (-ac)
+        .mul_add(
+            0.5,
+            (-ali).mul_add(0.5, (spread_i + tot_i).mul_add(0.5, ftdi)),
+        )
+        .min(1.0)
+        .max(0.0);
+    let mut faid = (((1.0 - ftdd) - frid) - ftid).min(1.0).max(0.0);
+    let mut faii = ((1.0 - frii) - ftii).min(1.0).max(0.0);
+    if shadow_d == 0.0 {
+        ftid = 0.0;
+        frid = 0.0;
+        faid = 0.0;
+    }
+    if shadow_i == 0.0 {
+        ftii = 1.0;
+        frii = 0.0;
+        faii = 0.0;
+    }
+    CanopyRadOutput {
+        ftid,
+        ftii,
+        frid,
+        frii,
+        faid,
+        faii,
+    }
 }
 
-fn double_divide(value: (f64, f64), divisor: f64) -> (f64, f64) {
-    let quotient = value.0 / divisor;
-    let product = double_multiply((quotient, 0.0), divisor);
-    let remainder = double_add(value, (-product.0, -product.1));
-    let correction = (remainder.0 + remainder.1) / divisor;
-    double_add((quotient, 0.0), (correction, 0.0))
-}
-
+/// `OverlapArea`（`:1128-1155`）：`(1/cos+1)*FNMA(sin θ, cost, θ)/π`。
 fn overlap_area(radius: f64, height: f64, zenith: f64) -> f64 {
     if radius == 0.0 {
         return 0.0;
     }
-    let cosine = height * zenith.tan() / radius / (1.0 + 1.0 / zenith.cos());
-    if cosine >= 1.0 {
+    let secant = 1.0 / zenith.cos() + 1.0;
+    let cost = height * zenith.tan() / radius / secant;
+    if cost >= 1.0 {
         return 0.0;
     }
-    let angle = cosine.acos();
-    (angle - cosine * angle.sin()) * (1.0 + 1.0 / zenith.cos()) / std::f64::consts::PI
+    let theta = cost.acos();
+    secant * (-theta.sin()).mul_add(cost, theta) / std::f64::consts::PI
 }
 
-#[allow(clippy::too_many_arguments)]
-fn radiation_matrix(
-    shadow: [f64; LAYERS],
-    transmission: [f64; LAYERS],
-    direct_reflection: [f64; LAYERS],
-    diffuse_reflection: [f64; LAYERS],
-    ground_direct: f64,
-    ground_diffuse: f64,
-    tt: [[f64; 5]; 5],
-    direct_scattered: [f64; LAYERS],
-) -> ([[f64; 6]; 6], [[f64; 2]; 6]) {
-    let mut a = [[0.0; 6]; 6];
-    let mut b = [[0.0; 2]; 6];
-    a[0][0] = 1.0;
-    a[0][2] = -shadow[2] * transmission[2] + shadow[2] - 1.0;
-    a[1][1] = 1.0;
-    a[1][2] = -shadow[2] * diffuse_reflection[2];
-    a[2][2] = 1.0;
-    a[2][1] = -shadow[1] * diffuse_reflection[1];
-    a[2][4] = -shadow[1] * transmission[1] + shadow[1] - 1.0;
-    a[3][3] = 1.0;
-    a[3][4] = -shadow[1] * diffuse_reflection[1];
-    a[3][1] = -shadow[1] * transmission[1] + shadow[1] - 1.0;
-    a[4][4] = 1.0;
-    a[4][3] = -shadow[0] * diffuse_reflection[0];
-    a[4][5] = (-shadow[0] * transmission[0] + shadow[0] - 1.0) * ground_diffuse;
-    a[5][5] = 1.0 - ground_diffuse * shadow[0] * diffuse_reflection[0];
-    a[5][3] = -shadow[0] * transmission[0] + shadow[0] - 1.0;
-    b[0] = [
-        tt[4][3] * diffuse_reflection[2],
-        shadow[2] * diffuse_reflection[2],
-    ];
-    b[1] = [
-        tt[4][3] * direct_scattered[2],
-        shadow[2] * transmission[2] - shadow[2] + 1.0,
-    ];
-    b[2] = [tt[3][2] * direct_reflection[1], 0.0];
-    b[3] = [tt[3][2] * direct_scattered[1], 0.0];
-    b[4] = [
-        tt[2][1] * direct_reflection[0]
-            + tt[1][0] * ground_direct * (shadow[0] * transmission[0] - shadow[0] + 1.0),
-        0.0,
-    ];
-    b[5] = [
-        tt[2][1] * direct_scattered[0]
-            + tt[1][0] * ground_direct * shadow[0] * diffuse_reflection[0],
-        0.0,
-    ];
-    (a, b)
-}
-
-fn solve_six(mut a: [[f64; 6]; 6], mut b: [[f64; 2]; 6]) -> Result<[[f64; 2]; 6]> {
-    for (row, span) in [0usize, 2, 1, 2, 1].into_iter().enumerate() {
-        for target in row + 1..=row + span {
-            ensure!(
-                a[row][row].abs() >= 1.0e-10,
-                "singular PC canopy radiation matrix"
-            );
-            let factor = -a[target][row] / a[row][row];
-            let pivot_a = a[row];
-            for (target_value, pivot_value) in a[target].iter_mut().zip(pivot_a) {
-                *target_value += factor * pivot_value;
+/// `mGauss`（`:1416-1450`）：消元是 `FNMA(A(j,i)/A(i,i), A(i,k), A(j,k))`，
+/// 回代的 `sum(A(i,i+1:6)*X(i+1:6))` 是从 0 起的 FMA 链。
+#[allow(clippy::needless_range_loop)]
+fn gauss(mut a: [[f64; 6]; 6], mut b: [[f64; 2]; 6]) -> [[f64; 2]; 6] {
+    const STEPS: [usize; 5] = [0, 2, 1, 2, 1];
+    for i in 0..5 {
+        for j in i + 1..=i + STEPS[i] {
+            let ratio = a[j][i] / a[i][i];
+            for k in 0..6 {
+                a[j][k] = (-ratio).mul_add(a[i][k], a[j][k]);
             }
-            let pivot_b = b[row];
-            for (target_value, pivot_value) in b[target].iter_mut().zip(pivot_b) {
-                *target_value += factor * pivot_value;
+            for k in 0..2 {
+                b[j][k] = (-ratio).mul_add(b[i][k], b[j][k]);
             }
         }
     }
-    ensure!(
-        a[5][5].abs() >= 1.0e-10,
-        "singular PC canopy radiation matrix"
-    );
     let mut x = [[0.0; 2]; 6];
-    for beam in 0..2 {
-        x[5][beam] = b[5][beam] / a[5][5];
+    for k in 0..2 {
+        x[5][k] = b[5][k] / a[5][5];
     }
-    for row in (0..5).rev() {
-        for beam in 0..2 {
-            let upper: f64 = (row + 1..6)
-                .map(|column| a[row][column] * x[column][beam])
-                .sum();
-            x[row][beam] = (b[row][beam] - upper) / a[row][row];
+    for i in (0..5).rev() {
+        for k in 0..2 {
+            let sum = (i + 1..6).fold(0.0, |sum, m| a[i][m].mul_add(x[m][k], sum));
+            x[i][k] = (b[i][k] - sum) / a[i][i];
         }
     }
-    Ok(x)
+    x
 }
 
-#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+#[allow(clippy::type_complexity)]
 fn ground_albedos(
     soil: SoilReflectance,
     liquid_water: f64,
@@ -1150,13 +1016,7 @@ mod tests {
             (5.535_032_188_353_261e-3, 0x3fef_c3ca_fd13_258e),
             (8.204_479_852_876_279e-3, 0x3fef_a6ef_299e_9485),
         ] {
-            assert_eq!(canopy_transmittance(depth).to_bits(), expected);
-        }
-        for (depth, expected) in [
-            (5.535_032_188_353_261e-3, 0x3f7d_fa91_e7a3_18e3),
-            (8.204_479_852_876_279e-3, 0x3f86_2139_980c_14c6),
-        ] {
-            assert_eq!(canopy_forward_scattering(depth).to_bits(), expected);
+            assert_eq!(quad_tee(depth).to_bits(), expected);
         }
     }
 
