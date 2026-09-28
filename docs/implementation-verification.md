@@ -25637,3 +25637,16 @@ vn/c1/vc/r0v0/an-new 的 debug 构建同样逐位。
 大豆变体曾打开 `DEF_USE_CNSOYFIXN` 试验：Rust 同样逐位，但把它关掉重跑结果**完全不变**——本算例里固氮量恒为 0
 （土壤矿质氮高于阈值时 `fxn = 0`），`CNSoyfix` 的数值路径没有被检验。因此仍拒绝 `DEF_USE_CNSOYFIXN`，回归用的 `cs`
 关掉它。要验证固氮，需要一个矿质氮偏低的大豆站点。
+
+## 第 427 轮：历史累加器续跑旁车（对齐的区间）
+
+上游每写一份续跑文件，同时写 `<case>_restart_hist_<date>_<block>.nc`（`write_history_acc_restart` +
+`complete_history_acc_restart`），并在主重启**最后**追加 `history_sidecar_required = 1`（`mark_history_acc_restart`）。
+区间与重启对齐（`nac = 0`）时旁车只有 `history_schema = 1`、`history_freq`（none 0/TIMESTEP 1/HOURLY 2/DAILY 3/MONTHLY 4/YEARLY 5）、
+`history_nac = 0`、`history_complete = 1`。冷启动重启（mkinidata）没有标记，也没有旁车。
+
+Rust 现在照写：`HistorySession` 暴露一个共享的"本区间已累加步数"计数（会话在运行循环里被独占，写重启的回调读不到它），
+`colm-rs` 每写一份周期或终点重启后，`nac = 0` 时写旁车并追加标记。`nac > 0`（历史区间跨过重启，如 MONTHLY 历史配 DAILY 重启）
+时上游还要转存约 700 个 `a_*` 累加数组，尚未移植：不写旁车与标记并在 stderr 警告，续跑方按"旧式重启"处理。
+
+对比脚本改为不再豁免缺失变量、并把旁车文件纳入比较后：60/60 个算例（含作物 cr/cs/cw）的历史、主重启与旁车全部逐位一致（release）。

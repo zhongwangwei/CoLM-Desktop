@@ -276,6 +276,10 @@ fn run() -> Result<()> {
     // 会话从**配置**开（窗口、站点、步长、频率都在里面），要在 `open` 消费掉
     // 配置之前建好 —— 而它自己不带 forcing，所以先后没有别的影响。
     let session = history_session(&config, &outputs)?;
+    let history_restart = HistoryRestart {
+        frequency_code: history_frequency_code(config.history_frequency),
+        pending_steps: session.as_ref().map(HistorySession::pending_steps_handle),
+    };
     // 主循环的 `coszen`/`cosazi`/本地时间都读常数重启的 `patchlonr`/`patchlatr`（上游
     // `MOD_Vars_TimeInvariants`），不从度数现算 —— 两者差 1 ULP 时只有读重启才与内核同源。
     let config = {
@@ -306,6 +310,7 @@ fn run() -> Result<()> {
         &outputs.restart_out,
         outputs.periodic.as_ref(),
         session,
+        &history_restart,
     )?;
     println!(
         "colm-rs: {} step(s) on patch {}; wrote {}",
@@ -426,6 +431,7 @@ fn run_snow(
     restart_out: &Path,
     periodic: Option<&PeriodicRestarts>,
     session: Option<HistorySession>,
+    history_restart: &HistoryRestart,
 ) -> Result<RunSummary> {
     let mut state = template.snow_state();
     // `smp`/`hk` 与表面诊断量只出现在步输出里（`intent(out)`），而续跑要写它们。
@@ -442,6 +448,7 @@ fn run_snow(
                 let path = periodic.path(step.clock.end_time);
                 if path != restart_out {
                     write_evolved_restart(template, state, &snapshot, restart_in, &path)?;
+                    mark_history_restart(&path, history_restart)?;
                 }
             }
         }
@@ -465,10 +472,78 @@ fn run_snow(
     };
     let last = last.context(NO_STEP)?;
     write_evolved_restart(template, &state, &last, restart_in, restart_out)?;
+    mark_history_restart(restart_out, history_restart)?;
     Ok(RunSummary {
         steps,
         history_files,
     })
+}
+
+/// 写续跑文件时要附带的历史累加器信息（`land_history_restart.inc`）。
+struct HistoryRestart {
+    /// `history_acc_freq()`：`DEF_HIST_FREQ` 的代码（none 0、TIMESTEP 1 … YEARLY 5）。
+    frequency_code: u8,
+    /// 当前历史区间已累加的步数（上游的 `nac`）；没开 history 时为 `None`（恒为 0）。
+    pending_steps: Option<std::sync::Arc<std::sync::atomic::AtomicUsize>>,
+}
+
+fn history_frequency_code(frequency: colm_hist::schedule::HistoryFrequency) -> u8 {
+    use colm_hist::schedule::HistoryFrequency as F;
+    match frequency {
+        F::None => 0,
+        F::Timestep => 1,
+        F::Hourly => 2,
+        F::Daily => 3,
+        F::Monthly => 4,
+        F::Yearly => 5,
+    }
+}
+
+/// 上游每写一份续跑文件，都同时写历史累加器旁车 `<case>_restart_hist_<date>_<block>.nc`
+/// （`write_history_acc_restart` + `complete_history_acc_restart`），并在主重启末尾写
+/// `history_sidecar_required = 1`（`mark_history_acc_restart`）。区间与重启对齐（`nac = 0`）时
+/// 旁车只有 `history_schema = 1`、`history_freq`、`history_nac = 0`、`history_complete = 1` 四个量，
+/// 这里逐位照写。区间跨过重启（`nac > 0`）时上游还要转存约 700 个 `a_*` 累加数组，尚未移植：
+/// 不写旁车与标记，续跑方（含 Fortran）会按"旧式重启、区间内历史可能不完整"处理。
+fn mark_history_restart(restart: &Path, history: &HistoryRestart) -> Result<()> {
+    let nac = history
+        .pending_steps
+        .as_ref()
+        .map_or(0, |steps| steps.load(std::sync::atomic::Ordering::Relaxed));
+    if nac != 0 {
+        eprintln!(
+            "colm-rs: warning: the history window spans the restart {} ({nac} steps accumulated); \
+             the accumulator sidecar is not written, so a continuation starts that window afresh",
+            restart.display()
+        );
+        return Ok(());
+    }
+    let name = restart
+        .file_name()
+        .and_then(|name| name.to_str())
+        .context("a restart path has no file name")?;
+    let sidecar_name = colm_runtime::history::history_sidecar_name(name)?;
+    let patches = colm_init::RestartFile::open(restart)?.dimension("patch")?;
+    let sidecar = restart.with_file_name(sidecar_name);
+    let mut file =
+        netcdf::create(&sidecar).with_context(|| format!("cannot create {}", sidecar.display()))?;
+    file.add_dimension("patch", patches)?;
+    for (field, value) in [
+        ("history_schema", 1.0),
+        ("history_freq", f64::from(history.frequency_code)),
+        ("history_nac", 0.0),
+        ("history_complete", 1.0),
+    ] {
+        file.add_variable::<f64>(field, &["patch"])?
+            .put_values(&vec![value; patches], ..)?;
+    }
+    file.close()?;
+    let mut primary =
+        netcdf::append(restart).with_context(|| format!("cannot reopen {}", restart.display()))?;
+    primary
+        .add_variable::<f64>("history_sidecar_required", &["patch"])?
+        .put_values(&vec![1.0; patches], ..)?;
+    Ok(())
 }
 
 /// 续跑写出要的、状态里没有的那部分步输出。

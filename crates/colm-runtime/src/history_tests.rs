@@ -1135,3 +1135,13 @@ fn bgc_history_variables_follow_the_fortran_file() {
     assert_eq!(crop.len(), 143 + 64);
     assert!(crop.contains(&"grainc") && crop.contains(&"plantdate_rainfed_temp_corn"));
 }
+
+/// 旁车文件名去掉 `_lc<year>`、插入 `_hist`，块后缀保留。
+#[test]
+fn history_sidecar_names_follow_upstream() {
+    assert_eq!(
+        history_sidecar_name("at_restart_2010-032-00000_lc2005_w180_s90.nc").unwrap(),
+        "at_restart_hist_2010-032-00000_w180_s90.nc"
+    );
+    assert!(history_sidecar_name("at_restart_2010-032-00000.nc").is_err());
+}

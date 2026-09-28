@@ -427,6 +427,20 @@ pub fn bgc_history_variables(switches: colm_core::bgc_driver::BgcSwitches) -> Ve
 /// `f_hr` 累加的是 `decomp_hr`，`f_retrasn`（上游拼写）累加 `retransn`；`*_vr` 分池廓线是
 /// `decomp_cpools_vr`/`decomp_npools_vr` 按池切片的 `1:nl_soil`；`BD_all`/`OM_density`/`wfc`
 /// 是常数重启里的土壤参数；`lai_*` 是 `CNDriverSummarizeStates` 写的分 PFT 类型 LAI。
+/// 历史累加器旁车的文件名：`<case>_restart_<date>_lc<year>_<block>.nc` →
+/// `<case>_restart_hist_<date>_<block>.nc`（上游 `history_acc_file` 不带 `_lc<year>`，块后缀由向量 I/O 追加）。
+pub fn history_sidecar_name(restart: &str) -> Result<String> {
+    let hist = restart.replacen("_restart_", "_restart_hist_", 1);
+    let lc = hist
+        .find("_lc")
+        .filter(|&at| {
+            hist.get(at + 3..at + 7)
+                .is_some_and(|year| year.bytes().all(|b| b.is_ascii_digit()))
+        })
+        .context("the restart name has no _lc<year> part")?;
+    Ok(format!("{}{}", &hist[..lc], &hist[lc + 7..]))
+}
+
 /// 按作物类型分列的 CROP 历史量（`MOD_Hist.F90` 作物段）：`(历史名, 累加的 patch 量, 作物类别)`。
 /// 只在 `patchclass == 12` 且 patch 的首个 PFT 类别在列表里时写出，否则是填充值。
 const CROP_TYPE_HISTORY: &[(&str, &str, &[i32])] = &[
@@ -1955,9 +1969,17 @@ pub struct HistorySession {
     urban: bool,
     /// `DEF_USE_BGC`：按 BGC 开关多声明 [`bgc_history_variables`]。
     bgc: Option<colm_core::bgc_driver::BgcSwitches>,
+    /// 每步推进后当前区间已累加的步数（上游的 `nac`）。续跑写出方要知道它（`nac = 0` 时
+    /// 才能写出与上游一致的累加器旁车文件），但那时会话正被运行循环独占，所以共享一个计数。
+    pending_steps: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl HistorySession {
+    /// 当前区间已累加步数的共享句柄（见 `pending_steps` 字段）。
+    pub fn pending_steps_handle(&self) -> std::sync::Arc<std::sync::atomic::AtomicUsize> {
+        std::sync::Arc::clone(&self.pending_steps)
+    }
+
     /// 开一个会话。文件名按上游约定拼成 `<stem>_hist_<后缀>.nc`。
     pub fn new(
         dimensions: HistoryDimensions,
@@ -1986,6 +2008,7 @@ impl HistorySession {
             variably_saturated: false,
             urban: false,
             bgc: None,
+            pending_steps: std::sync::Arc::default(),
         })
     }
 
@@ -2555,6 +2578,17 @@ impl HistorySession {
     /// 顺序与上游一致：`MOD_Hist.F90:227` 每步 `accumulate_fluxes`（写出的那一步也算），
     /// 写出时 `acc_vec = acc_vec / nac`，写完后 `CALL FLUSH_acc_fluxes ()`（`:4746`）。
     fn push(
+        &mut self,
+        end: CalendarTime,
+        accumulate: impl FnOnce(&mut HistoryAccumulator) -> Result<()>,
+    ) -> Result<Option<PathBuf>> {
+        let pushed = self.push_inner(end, accumulate);
+        self.pending_steps
+            .store(self.accumulator.steps, std::sync::atomic::Ordering::Relaxed);
+        pushed
+    }
+
+    fn push_inner(
         &mut self,
         end: CalendarTime,
         accumulate: impl FnOnce(&mut HistoryAccumulator) -> Result<()>,
