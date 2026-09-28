@@ -25650,3 +25650,9 @@ Rust 现在照写：`HistorySession` 暴露一个共享的"本区间已累加步
 时上游还要转存约 700 个 `a_*` 累加数组，尚未移植：不写旁车与标记并在 stderr 警告，续跑方按"旧式重启"处理。
 
 对比脚本改为不再豁免缺失变量、并把旁车文件纳入比较后：60/60 个算例（含作物 cr/cs/cw）的历史、主重启与旁车全部逐位一致（release）。
+
+## 第 428 轮：PC 子网格 + BGC
+
+以 `bn`（AT-Neu 3-PFT，NITRIF 开，2010 全年）为底改成 `DEF_USE_PC = .true.`（`bp`），对 `kernels/default` 纯 Fortran：
+12/12 历史、51/51 重启与旁车逐位一致，release 与 debug 相同。BGC 驱动本身与子网格无关（逐 PFT），PC 的差别只在冠层
+（`LeafTemperaturePC`/`ThreeDCanopy`）与汇总的 PFT 份额，二者此前已分别验证，这里第一次在同一算例里联跑。
