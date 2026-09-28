@@ -6,8 +6,14 @@
 
 // 逐层循环的 `j` 同时索引若干按列主序展平的数组，保留下标写法以便与上游逐行对照。
 #![allow(clippy::needless_range_loop)]
-// 嵌套 IF 按上游结构保留，便于逐行对照。
-#![allow(clippy::collapsible_if, clippy::collapsible_else_if)]
+// 嵌套 IF 与"先声明、分支里赋值"都按上游结构保留，便于逐行对照。
+#![allow(
+    clippy::collapsible_if,
+    clippy::collapsible_else_if,
+    clippy::needless_late_init
+)]
+// `a >= lo .and. a <= hi`、`max(lo, min(hi, x))` 照抄：改成 `contains`/`clamp` 会改变 NaN 的行为。
+#![allow(clippy::manual_range_contains, clippy::manual_clamp)]
 
 use crate::bgc_driver::{BgcPftConstants, BgcPhysics, BgcSwitches};
 use crate::bgc_state::BgcState;
@@ -23,7 +29,7 @@ pub fn soil_biogeochem_n_leaching(
     let mut disn_conc: f64;
     let mut tot_water: f64;
     let mut surface_water: f64;
-    let depth_runoff_nloss = 0.05;
+    let depth_runoff_nloss: f64 = 0.05;
     tot_water = 0.0;
     for j in 0..d.nl_soil {
         tot_water += p.wliq_soisno[j];
@@ -39,7 +45,7 @@ pub fn soil_biogeochem_n_leaching(
             );
         }
     }
-    let drain_tot = p.rnof[0] - p.rsur[0];
+    let drain_tot: f64 = p.rnof[0] - p.rsur[0];
     if !sw.nitrif {
         for j in 0..d.nl_soil {
             disn_conc = 0.0;

@@ -23,8 +23,10 @@ GENERATED = """//!
 
 // 逐层循环的 `j` 同时索引若干按列主序展平的数组，保留下标写法以便与上游逐行对照。
 #![allow(clippy::needless_range_loop)]
-// 嵌套 IF 按上游结构保留，便于逐行对照。
-#![allow(clippy::collapsible_if, clippy::collapsible_else_if)]
+// 嵌套 IF 与"先声明、分支里赋值"都按上游结构保留，便于逐行对照。
+#![allow(clippy::collapsible_if, clippy::collapsible_else_if, clippy::needless_late_init)]
+// `a >= lo .and. a <= hi`、`max(lo, min(hi, x))` 照抄：改成 `contains`/`clamp` 会改变 NaN 的行为。
+#![allow(clippy::manual_range_contains, clippy::manual_clamp)]
 """
 
 # (输出文件, 模块说明, 额外 use, [(Fortran 模块, 子程序, Rust 函数名, 文档)])
@@ -95,6 +97,32 @@ MODULES = [
         ("MOD_BGC_Soil_BiogeochemCompetition", "SoilBiogeochemCompetition", "soil_biogeochem_competition",
          "`SoilBiogeochemCompetition`（NITRIF 开时 NH₄/NO₃ 分开竞争，关时合并为矿质 N）。"),
     ]),
+    ("bgc_cn_phenology.rs", "`MOD_BGC_Veg_CNPhenology.F90`：物候（常绿/季节落叶/胁迫落叶/作物）与凋落物。",
+     "use crate::calendar::is_leap_year;", [
+         ("MOD_BGC_Veg_CNPhenology", "CNPhenology", "cn_phenology",
+          "`CNPhenology`：`phase` 1 为气候统计与各类物候判定，2 为转移、凋落与落入土壤。"),
+         ("MOD_BGC_Veg_CNPhenology", "CNPhenologyClimate", "_cn_phenology_climate", "气候统计（积温、降水滑动平均）。"),
+         ("MOD_BGC_Veg_CNPhenology", "CNEvergreenPhenology", "_cn_evergreen_phenology", "常绿物候。"),
+         ("MOD_BGC_Veg_CNPhenology", "CNSeasonDecidPhenology", "_cn_season_decid_phenology", "季节性落叶物候。"),
+         ("MOD_BGC_Veg_CNPhenology", "CNStressDecidPhenology", "_cn_stress_decid_phenology", "胁迫落叶物候。"),
+         ("MOD_BGC_Veg_CNPhenology", "CropPhenology", "_crop_phenology", "作物物候（`#ifdef CROP`）：播种、成熟与收获。"),
+         ("MOD_BGC_Veg_CNPhenology", "CNOnsetGrowth", "_cn_onset_growth", "展叶期转移。"),
+         ("MOD_BGC_Veg_CNPhenology", "CNOffsetLitterfall", "_cn_offset_litterfall", "落叶期凋落。"),
+         ("MOD_BGC_Veg_CNPhenology", "CNBackgroundLitterfall", "_cn_background_litterfall", "背景凋落。"),
+         ("MOD_BGC_Veg_CNPhenology", "CNLivewoodTurnover", "_cn_livewood_turnover", "活木转死木。"),
+         ("MOD_BGC_Veg_CNPhenology", "CNLitterToColumn", "_cn_litter_to_column", "凋落物按廓线进入土层。"),
+     ], {"vernalization": "crate::bgc_crop::vernalization"}),
+    ("bgc_nutrient_competition.rs",
+     "`MOD_BGC_Veg_NutrientCompetition.F90`：植物养分需求与竞争后的分配（含 `#ifdef CROP` 的作物分配）。", "", [
+         ("MOD_BGC_Veg_NutrientCompetition", "calc_plant_nutrient_demand_CLM45_default",
+          "calc_plant_nutrient_demand", "`calc_plant_nutrient_demand_CLM45_default`：分配系数与 N 需求。"),
+         ("MOD_BGC_Veg_NutrientCompetition", "calc_plant_nutrient_competition_CLM45_default",
+          "calc_plant_nutrient_competition", "`calc_plant_nutrient_competition_CLM45_default`：按 `fpg` 分配新生长。"),
+     ]),
+    ("bgc_crop_n_dynamics.rs", "`MOD_BGC_Veg_CNNDynamics.F90` 的作物部分：施肥与大豆固氮（`#ifdef CROP`）。", "", [
+         ("MOD_BGC_Veg_CNNDynamics", "CNNFert", "cn_n_fert", "`CNNFert`：施肥进入土壤矿质 N。"),
+         ("MOD_BGC_Veg_CNNDynamics", "CNSoyfix", "cn_soyfix", "`CNSoyfix`：大豆共生固氮（`DEF_USE_CNSOYFIXN`）。"),
+     ]),
     ("bgc_veg_struct.rs", "`MOD_BGC_Veg_CNVegStructUpdate.F90`：由 C 池更新 LAI/SAI。", "", [
         ("MOD_BGC_Veg_CNVegStructUpdate", "CNVegStructUpdate", "cn_veg_struct_update",
          "`CNVegStructUpdate`：更新 `tsai_p`（每步）与 LAI 反馈下的 `tlai_p`/`lai_p`，再汇总 patch LAI。"),
@@ -102,11 +130,21 @@ MODULES = [
 ]
 
 
+# 局部标量在上游每条读取路径上都已赋值，但 Rust 的流分析看不出来（if/else-if 链无末尾 else、
+# 或赋值与使用分处两个同条件的块），需要一个零初值才能通过编译。逐个登记、写明理由。
+ZERO_INIT = {
+    # `IF (sminn > t1) … ELSE IF (t2 < sminn <= t1) … ELSE IF (sminn <= t2)`：只有 NaN 会漏掉。
+    "CNSoyfix": ["fxn"],
+    # 赋值在 `#ifdef CROP` 的作物块里，使用在同一 `ivt >= npcropmin` 条件下的后一个块里。
+    "calc_plant_nutrient_competition_CLM45_default": ["f5"],
+}
+
+
 def main():
     gimple = Path(os.environ["GIMPLE"])
     only = set(sys.argv[1:])
     with tempfile.TemporaryDirectory() as tmp:
-        for out, title, extra_use, subs in MODULES:
+        for out, title, extra_use, subs, *external in MODULES:
             if only and out not in only:
                 continue
             header = Path(tmp) / "header.txt"
@@ -115,12 +153,15 @@ def main():
                 "use crate::bgc_driver::{BgcPftConstants, BgcPhysics, BgcSwitches, NPCROPMIN};\n"
                 "use crate::bgc_state::BgcState;\nuse crate::MISSING;\n")
             args = []
-            names = ",".join(f"{sub}={rust}" for _, sub, rust, _ in subs)
+            names = ",".join([f"{sub}={rust}" for _, sub, rust, _ in subs]
+                             + [f"{sub}={rust}" for sub, rust in (external[0] if external else {}).items()])
             for module, sub, rust, doc in subs:
                 draft = Path(tmp) / f"{rust}.rs"
                 with open(draft, "w") as fh:
+                    extra = ["--zero-init", ",".join(ZERO_INIT[sub])] if sub in ZERO_INIT else []
                     subprocess.run([sys.executable, HERE / "f2rs.py", BGC / f"{module}.F90", sub,
-                                    "--gimple", gimple / f"{module}.F90.273t.optimized", "--names", names],
+                                    "--gimple", gimple / f"{module}.F90.273t.optimized", "--names", names,
+                                    *extra],
                                    check=True, stdout=fh)
                 args += [str(draft), rust, doc]
             subprocess.run([sys.executable, HERE / "mkmod.py", SRC / out, header, *args], check=True)

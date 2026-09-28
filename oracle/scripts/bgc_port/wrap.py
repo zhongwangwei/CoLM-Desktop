@@ -64,6 +64,35 @@ while True:
 ASSIGN = r"^\s*{v}(\[[^\]]*\])?\s*(=|\+=|-=|\*=|/=)\s"
 
 
+def block_paths(lines):
+    """每行所在的块路径：[(块号, if/else 链号)]。`} else … {` 开的块与前一块同链。"""
+    paths, stack, counter = [], [], [0]
+
+    def new():
+        counter[0] += 1
+        return counter[0]
+    for l in lines:
+        c = code(l).strip()
+        paths.append(list(stack))
+        if c.startswith("}") and c.endswith("{"):
+            chain = stack.pop()[1] if stack else new()
+            stack.append((new(), chain))
+        elif c.startswith("}"):
+            if stack:
+                stack.pop()
+        elif c.endswith("{"):
+            stack.append((new(), new()))
+    return paths
+
+
+def exclusive(pa, pb):
+    """两处赋值是否位于同一 if/else 链的不同分支（至多执行其一）。"""
+    for (ba, ca), (bb, cb) in zip(pa, pb):
+        if ba != bb:
+            return ca == cb
+    return False
+
+
 def code(line):
     return line.split("//")[0]
 
@@ -72,7 +101,7 @@ def tidy(body):
     """转写产物的清理（不改变任何算式）：删掉只写不读的局部变量及其赋值、多余的 `mut`、
     循环里没用到的 `class`、只剩注释的循环。草稿一行一条语句，逐行处理即可。"""
     lines = body.split("\n")
-    for decl in [l for l in lines if re.match(r"^\s*let mut \w+(: \w+|\s*=.*);$", l)]:
+    for decl in [l for l in lines if re.match(r"^\s*let mut \w+(: \w+)?(\s*=.*)?;$", l)]:
         v = re.match(r"^\s*let mut (\w+)", decl).group(1)
         assigns = [k for k, l in enumerate(lines) if re.match(ASSIGN.format(v=v), code(l))]
         reads = 0
@@ -103,7 +132,14 @@ def tidy(body):
                 stack.append("for" if c.startswith("for ") or ".fold(" in c else "block")
         compound = any(re.match(rf"^\s*{v}(\[|\s*(\+=|-=|\*=|/=))", code(lines[k])) for k in assigns)
         init = "=" in decl.split(":")[0] if ":" in decl else True
-        count = len(assigns) + (1 if re.match(rf"^\s*let mut {v}\s*=", decl) else 0)
+        count = len(assigns) + (1 if re.match(rf"^\s*let mut {v}(: \w+)?\s*=", decl) else 0)
+        # 只在同一 if/else 链的不同分支里各赋值一次：延迟初始化，不需要 `mut`。
+        if (not in_loop and not compound and len(assigns) > 1
+                and re.match(r"^\s*let mut \w+: \w+;$", decl)):
+            paths = block_paths(lines)
+            if all(exclusive(paths[a], paths[b]) for i, a in enumerate(assigns) for b in assigns[i + 1:]):
+                lines[lines.index(decl)] = decl.replace("let mut ", "let ", 1)
+                continue
         if count <= 1 and not in_loop and not compound:
             k = lines.index(decl)
             indent = len(decl) - len(decl.lstrip())
@@ -111,11 +147,27 @@ def tidy(body):
                 a = assigns[0]
                 line = lines[a]
                 if len(line) - len(line.lstrip()) == indent and re.match(rf"^\s*{v} = ", line):
-                    # 声明与唯一一次同层赋值合并
-                    lines[a] = line.replace(f"{v} = ", f"let {v} = ", 1)
+                    # 声明与唯一一次同层赋值合并；保留类型标注，否则 `let x = 20.0;` 是不定浮点类型。
+                    ty = re.match(r"^\s*let mut \w+: (\w+);$", decl).group(1)
+                    lines[a] = line.replace(f"{v} = ", f"let {v}: {ty} = ", 1)
                     del lines[k]
                     continue
             lines[k] = decl.replace("let mut ", "let ", 1)
+    # `(month, mday) = …` 里从不被读的量：换成 `_`，并删掉它的声明。
+    for k, l in enumerate(lines):
+        m = re.match(r"^(\s*)\((\w+), (\w+)\) = (.*)$", code(l))
+        if not m:
+            continue
+        names = [m.group(2), m.group(3)]
+        for v in list(names):
+            uses = sum(len(re.findall(rf"\b{v}\b", code(x))) for j, x in enumerate(lines) if j != k)
+            decls = [j for j, x in enumerate(lines) if re.match(rf"^\s*let (mut )?{v}: \w+;$", x)]
+            if uses == len(decls):
+                names[names.index(v)] = "_"
+                for j in decls:
+                    lines[j] = None
+        lines[k] = f"{m.group(1)}({names[0]}, {names[1]}) = {m.group(4)}"
+    lines = [l for l in lines if l is not None]
     # 循环体里没用到的 `let class = ivt as usize;`
     k = 0
     while k < len(lines):
@@ -124,6 +176,23 @@ def tidy(body):
             while j < len(lines):
                 c = code(lines[j])
                 if re.search(r"\bclass\b", c):
+                    used = True
+                depth += c.count("{") - c.count("}")
+                if depth < 0:
+                    break
+                j += 1
+            if not used:
+                del lines[k]
+                continue
+        k += 1
+    # 没用到的 `let ivt = p.pftclass[m];`（`class` 已在上面删掉时）
+    k = 0
+    while k < len(lines):
+        if lines[k].strip() == "let ivt = p.pftclass[m];":
+            depth, used, j = 0, False, k + 1
+            while j < len(lines):
+                c = code(lines[j])
+                if re.search(r"\bivt\b", c):
                     used = True
                 depth += c.count("{") - c.count("}")
                 if depth < 0:
@@ -158,7 +227,7 @@ body = tidy(body)
 scan = re.sub(r"\bs\.constants\.", "", body)
 uses_c = re.search(r"(?<![\w.])c[.,)]", scan)
 uses_sw = re.search(r"(?<![\w.])sw\b", scan)
-uses_p = re.search(r"(?<![\w.])p[.,)]", scan)
+uses_p = re.search(r"(?<![\w.])p[.,)]", scan) or "npft" in body
 pre = []
 if re.search(r"\bd\.", body):
     pre.append("    let d = s.dims;")
@@ -173,6 +242,12 @@ sig_c = "c" if uses_c else "_c"
 sig_sw = "sw" if uses_sw else "_sw"
 print(f"/// {doc}")
 sig_p = "p" if uses_p else "_p"
+if extra:
+    def mark(arg):
+        n, ty = arg.split(":")
+        n = n.strip()
+        return f"{n}:{ty}" if re.search(rf"\b{n}\b", body) else f"_{n}:{ty}"
+    extra = ", " + ", ".join(mark(a) for a in extra[2:].split(", "))
 print(f"{vis} {name}(s: &mut BgcState, {sig_p}: {p_ty}, {sig_c}: &BgcPftConstants, "
       f"{sig_sw}: BgcSwitches{extra}){ret} {{")
 if pre:

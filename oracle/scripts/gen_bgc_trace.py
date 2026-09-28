@@ -101,14 +101,14 @@ EXTRAS = [
     ("lai_c3arcgrass", "MOD_Vars_TimeVariables", "patch"),
     ("lai_c3grass", "MOD_Vars_TimeVariables", "patch"),
     ("lai_c4grass", "MOD_Vars_TimeVariables", "patch"),
-    ("irrig_method_corn", "MOD_Vars_TimeVariables", "patch"),
-    ("irrig_method_swheat", "MOD_Vars_TimeVariables", "patch"),
-    ("irrig_method_wwheat", "MOD_Vars_TimeVariables", "patch"),
-    ("irrig_method_soybean", "MOD_Vars_TimeVariables", "patch"),
-    ("irrig_method_cotton", "MOD_Vars_TimeVariables", "patch"),
-    ("irrig_method_rice1", "MOD_Vars_TimeVariables", "patch"),
-    ("irrig_method_rice2", "MOD_Vars_TimeVariables", "patch"),
-    ("irrig_method_sugarcane", "MOD_Vars_TimeVariables", "patch"),
+    ("irrig_method_corn", "MOD_Vars_TimeVariables", "raw:real(irrig_method_corn(i:i),r8)"),
+    ("irrig_method_swheat", "MOD_Vars_TimeVariables", "raw:real(irrig_method_swheat(i:i),r8)"),
+    ("irrig_method_wwheat", "MOD_Vars_TimeVariables", "raw:real(irrig_method_wwheat(i:i),r8)"),
+    ("irrig_method_soybean", "MOD_Vars_TimeVariables", "raw:real(irrig_method_soybean(i:i),r8)"),
+    ("irrig_method_cotton", "MOD_Vars_TimeVariables", "raw:real(irrig_method_cotton(i:i),r8)"),
+    ("irrig_method_rice1", "MOD_Vars_TimeVariables", "raw:real(irrig_method_rice1(i:i),r8)"),
+    ("irrig_method_rice2", "MOD_Vars_TimeVariables", "raw:real(irrig_method_rice2(i:i),r8)"),
+    ("irrig_method_sugarcane", "MOD_Vars_TimeVariables", "raw:real(irrig_method_sugarcane(i:i),r8)"),
     ("irrig_method_p", "MOD_Vars_PFTimeVariables", "raw:real(irrig_method_p(ps:pe),r8)"),
 ]
 
@@ -269,7 +269,9 @@ def instrument(driver):
 
 def main():
     driver = Path(sys.argv[1]).read_text()
-    lines = trace_module() + instrument(driver)
+    # `define.h` 必须在追踪模块之前：模块里按 `#ifdef CROP` 选择写出作物字段，放在它之后的话
+    # 宏永远未定义，CROP 内核的追踪里作物字段全是空数组（第 423 轮）。
+    lines = ["#include <define.h>", ""] + trace_module() + instrument(driver)
     Path(sys.argv[2]).write_text("\n".join(lines) + "\n")
 
 

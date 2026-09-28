@@ -6,8 +6,14 @@
 
 // 逐层循环的 `j` 同时索引若干按列主序展平的数组，保留下标写法以便与上游逐行对照。
 #![allow(clippy::needless_range_loop)]
-// 嵌套 IF 按上游结构保留，便于逐行对照。
-#![allow(clippy::collapsible_if, clippy::collapsible_else_if)]
+// 嵌套 IF 与"先声明、分支里赋值"都按上游结构保留，便于逐行对照。
+#![allow(
+    clippy::collapsible_if,
+    clippy::collapsible_else_if,
+    clippy::needless_late_init
+)]
+// `a >= lo .and. a <= hi`、`max(lo, min(hi, x))` 照抄：改成 `contains`/`clamp` 会改变 NaN 的行为。
+#![allow(clippy::manual_range_contains, clippy::manual_clamp)]
 
 use crate::bgc_driver::{BgcPftConstants, BgcPhysics, BgcSwitches, NPCROPMIN};
 use crate::bgc_state::BgcState;
@@ -24,9 +30,9 @@ pub fn cn_veg_struct_update(
     let mut tsai_old: f64;
     let mut tsai_min: f64;
     let mut tsai_alpha: f64;
-    let dtsmonth = 2592000.0;
-    let natlaimx = 8.0;
-    let theta = 0.8;
+    let dtsmonth: f64 = 2592000.0;
+    let natlaimx: f64 = 8.0;
+    let theta: f64 = 0.8;
     p.lai[0] = 0.0;
     for m in 0..npft {
         let ivt = p.pftclass[m];

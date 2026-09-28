@@ -6,8 +6,14 @@
 
 // 逐层循环的 `j` 同时索引若干按列主序展平的数组，保留下标写法以便与上游逐行对照。
 #![allow(clippy::needless_range_loop)]
-// 嵌套 IF 按上游结构保留，便于逐行对照。
-#![allow(clippy::collapsible_if, clippy::collapsible_else_if)]
+// 嵌套 IF 与"先声明、分支里赋值"都按上游结构保留，便于逐行对照。
+#![allow(
+    clippy::collapsible_if,
+    clippy::collapsible_else_if,
+    clippy::needless_late_init
+)]
+// `a >= lo .and. a <= hi`、`max(lo, min(hi, x))` 照抄：改成 `contains`/`clamp` 会改变 NaN 的行为。
+#![allow(clippy::manual_range_contains, clippy::manual_clamp)]
 
 use crate::bgc_driver::{BgcPftConstants, BgcPhysics, BgcSwitches};
 use crate::bgc_state::BgcState;
@@ -32,19 +38,19 @@ pub fn c_balance_check(
     _c: &BgcPftConstants,
     _sw: BgcSwitches,
 ) -> anyhow::Result<()> {
-    let cerror = 1.0e-7;
+    let cerror: f64 = 1.0e-7;
     s.patch.col_endcb[0] = s.patch.totcolc[0];
     s.patch.col_vegendcb[0] = s.patch.totvegc[0] + s.patch.ctrunc_veg[0];
     s.patch.col_soilendcb[0] =
         s.patch.totsomc[0] + s.patch.totlitc[0] + s.patch.totcwdc[0] + s.patch.ctrunc_soil[0];
-    let col_cinputs = s.patch_flux.gpp[0];
-    let col_coutputs = s.patch_flux.er[0]
+    let col_cinputs: f64 = s.patch_flux.gpp[0];
+    let col_coutputs: f64 = s.patch_flux.er[0]
         + s.patch_flux.fire_closs[0]
         + s.patch_flux.hrv_xsmrpool_to_atm[0]
         + s.patch_flux.wood_harvestc[0]
         + s.patch_flux.grainc_to_cropprodc[0]
         - s.patch_flux.som_c_leached[0];
-    let col_errcb = (col_cinputs - col_coutputs)
+    let col_errcb: f64 = (col_cinputs - col_coutputs)
         .mul_add(p.deltim, -(s.patch.col_endcb[0] - s.patch.col_begcb[0]));
     if col_errcb.abs() > cerror {
         // write(*,*)'column cbalance error    = ', col_errcb, i, p_iam_glb
@@ -94,7 +100,7 @@ pub fn n_balance_check(
     _c: &BgcPftConstants,
     sw: BgcSwitches,
 ) -> anyhow::Result<()> {
-    let nerror = 1.0e-7;
+    let nerror: f64 = 1.0e-7;
     let mut col_ninputs: f64;
     let mut col_noutputs: f64;
     s.patch.col_endnb[0] = s.patch.totcoln[0];
@@ -119,7 +125,7 @@ pub fn n_balance_check(
         col_noutputs += s.patch_flux.sminn_leached[0];
     }
     col_noutputs -= s.patch_flux.som_n_leached[0];
-    let col_errnb =
+    let col_errnb: f64 =
         (col_ninputs - col_noutputs) * p.deltim - (s.patch.col_endnb[0] - s.patch.col_begnb[0]); // 无 FMA（上游第 236 行，乘积被 CSE 共享）
     if col_errnb.abs() > nerror {
         // write(*,*)'column nbalance error    = ',col_errnb, i, p_iam_glb

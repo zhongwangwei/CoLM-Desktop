@@ -161,8 +161,20 @@ pft_constants!(
     dsladlai, declfact, allconsl, cc_dstem, cc_leaf, cc_lstem, cc_other, croot_stem, deadwdcn,
     fcur2, fd_pft, flivewd, fm_droot, fm_leaf, fm_lroot, fm_lstem, fm_other, fm_root, fr_fcel,
     fr_flab, fr_flig, froot_leaf, frootcn, fsr_pft, graincn, grperc, grpnow, laimx, leaf_long,
-    leafcn, lf_fcel, lf_flab, lf_flig, lflitcn, livewdcn, slatop, stem_leaf,
+    leafcn, lf_fcel, lf_flab, lf_flig, lflitcn, livewdcn, slatop, stem_leaf, lfemerg, grnfill,
+    mxmat, baset, allconss, arootf, arooti, astemf, bfact, ffrootcn, fleafcn, fleafi, fstemcn,
 );
+
+/// `julian2monthday(year, jday, month, mday)`：年内第 `jday` 天所在的月与日。
+pub fn julian_month_day(year: i32, julian_day: i32) -> (i32, i32) {
+    let (month, day) = crate::calendar::month_day(crate::calendar::CalendarTime {
+        year,
+        julian_day: julian_day as u16,
+        seconds: 0,
+    })
+    .expect("the BGC driver only runs on valid model dates");
+    (i32::from(month), i32::from(day))
+}
 
 /// `MOD_Vars_Global` 的 `npcropmin`：第一个作物 PFT 类别。
 pub const NPCROPMIN: i32 = 17;
@@ -290,7 +302,7 @@ pub fn run_stage(stage: &str, step: &mut BgcStep<'_>) -> Result<()> {
             crate::bgc_vertical_profile::soil_biogeochem_vertical_profile(step.state, step.physics)?
         }
         "calc_plant_nutrient_demand_CLM45" => {
-            crate::bgc_nutrient::plant_nutrient_demand(step.state, step.physics, step.pft)
+            gen!(crate::bgc_nutrient_competition::calc_plant_nutrient_demand)
         }
         "SoilBiogeochemCompetition" => {
             // driver 在需求与竞争之间内联了 patch 级需求的求和。
@@ -301,16 +313,18 @@ pub fn run_stage(stage: &str, step: &mut BgcStep<'_>) -> Result<()> {
             crate::bgc_nitrif::soil_biogeochem_nitrif_denitrif(step.state, step.physics)
         }
         "calc_plant_nutrient_competition_" => {
-            crate::bgc_nutrient::plant_nutrient_competition(step.state, step.physics, step.pft)
+            gen!(crate::bgc_nutrient_competition::calc_plant_nutrient_competition)
         }
+        "CNNFert" => gen!(crate::bgc_crop_n_dynamics::cn_n_fert),
+        "CNSoyfix" => gen!(crate::bgc_crop_n_dynamics::cn_soyfix),
         "SoilBiogeochemDecomp" => {
             crate::bgc_decomp::soil_biogeochem_decomp(step.state, step.physics, switches)
         }
         "CNPhenology1" => {
-            crate::bgc_phenology::cn_phenology_phase1(step.state, step.physics, step.pft)
+            crate::bgc_cn_phenology::cn_phenology(step.state, step.physics, step.pft, switches, 1)
         }
         "CNPhenology2" => {
-            crate::bgc_phenology::cn_phenology_phase2(step.state, step.physics, step.pft)
+            crate::bgc_cn_phenology::cn_phenology(step.state, step.physics, step.pft, switches, 2)
         }
         "CNGResp" => crate::bgc_resp::cn_g_resp(step.state, step.physics, step.pft),
 

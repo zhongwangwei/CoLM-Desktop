@@ -34,7 +34,8 @@ PHYS_CASE = {"l_vgm": "L_vgm", "bd_all": "BD_all", "om_density": "OM_density"}
 PFTC = set("""woody isevg issed isstd isbare iscrop isnatveg isshrub isgrass isbetr isbdtr dsladlai declfact allconsl
 cc_dstem cc_leaf cc_lstem cc_other croot_stem deadwdcn fcur2 fd_pft flivewd fm_droot fm_leaf fm_lroot fm_lstem fm_other fm_root
 fr_fcel fr_flab fr_flig froot_leaf frootcn fsr_pft graincn grperc grpnow laimx leaf_long leafcn lf_fcel lf_flab lf_flig lflitcn
-livewdcn slatop stem_leaf""".split())
+livewdcn slatop stem_leaf lfemerg grnfill mxmat baset allconss arootf arooti astemf bfact ffrootcn fleafcn fleafi
+fstemcn""".split())
 PFTC_LOGICAL = set("isevg issed isstd isbare iscrop isnatveg isshrub isgrass isbetr isbdtr".split())
 
 DIMS = {"nl_soil": "d.nl_soil", "nl_soil_full": "d.nl_soil_full", "ndecomp_pools": "d.ndecomp_pools",
@@ -272,7 +273,7 @@ def typeof(e, ctx):
         if n in ("max", "min"):
             ts = [typeof(a, ctx) for a in e[2]]
             return "f64" if "f64" in ts else "i32"
-        if n in ("pftclass", "patchclass"):
+        if n in ("pftclass", "patchclass", "idate"):
             return "i32"
         if n in ("isleapyear", "isendofyear", "any", "all"):
             return "bool"
@@ -383,12 +384,18 @@ def emit(e, ctx, want="f64", fma_ok=True):
                 b = wrap_recv(emit(base, ctx), base)
                 return f"{b} * {b}"
             return f"{wrap_recv(emit(base, ctx), base)}.powi({n})"
-        return f"{wrap_recv(emit(base, ctx), base)}.lpow({emit(ex, ctx)})"
+        return f"{wrap_recv(emit(base, ctx), base)}.lpow({strip_parens(emit(ex, ctx))})"
     if k == "cmp":
         ta, tb = typeof(e[2], ctx), typeof(e[3], ctx)
         t = "f64" if "f64" in (ta, tb) else "i32"
         op = {"/=": "!="}.get(e[1], e[1])
-        return f"{emit(e[2], ctx, t)} {op} {emit(e[3], ctx, t)}"
+        # 整型与实型比较时整型一侧提升为实型（Fortran 的混合运算规则）。
+        def side(x, tx):
+            text = emit(x, ctx, t)
+            if t == "f64" and tx == "i32" and x[0] != "num":
+                return f"f64::from({strip_parens(text)})"
+            return text
+        return f"{side(e[2], ta)} {op} {side(e[3], tb)}"
     if k in ("&&", "||"):
         def side(x):
             r = emit(x, ctx)
@@ -446,7 +453,7 @@ def emit(e, ctx, want="f64", fma_ok=True):
             t = typeof(e, ctx)
             out = wrap_recv(emit(args[0], ctx, t), args[0])
             for a in args[1:]:
-                out = f"{out}.{fn}({emit(a, ctx, t)})"
+                out = f"{out}.{fn}({strip_parens(emit(a, ctx, t))})"
             return out
         if n in ("exp", "log", "sqrt", "abs", "sin", "cos", "log10"):
             fn = {"log": "ln"}.get(n, n)
@@ -455,6 +462,11 @@ def emit(e, ctx, want="f64", fma_ok=True):
             return f"f64::from({emit(args[0], ctx, 'i32')})"
         if n in ("int",):
             return f"({emit(args[0], ctx)}) as i32"
+        if n == "nint":
+            # Fortran `nint` 四舍五入、半数远离零，与 `f64::round` 相同。
+            return f"({emit(args[0], ctx)}).round() as i32"
+        if n == "daylength":
+            return f"crate::bgc_phenology::daylength({emit(args[0], ctx)}, {emit(args[1], ctx, 'i32')})"
         if n == "sum" and var_line_vectorized() and args[0][0] == "*" and len(args) == 1:
             var, bound = section_var(args[0])
             ctx2 = Ctx(ctx.locals, ctx.loops | {var})
@@ -549,6 +561,14 @@ def is_mult(e):
     return e[0] == "*"
 
 
+def neg_recv(x, ctx, t):
+    """取负后作 `mul_add` 的接收者：负的数字字面量要带 `_f64`，否则是不定浮点类型。"""
+    text = emit(x, ctx, t)
+    if x[0] == "num":
+        return f"(-{text}_f64)" if "_f64" not in text else f"(-{text})"
+    return f"(-{wrap_m(text, x)})"
+
+
 def try_fma(e, ctx):
     """GCC convert_mult_to_fma on a +/- node."""
     if NOFUSE[0]:
@@ -585,14 +605,14 @@ def try_fma_inner(e, ctx):
         x, y = pa[1], pa[2]
         addend = emit(b, ctx, t)
         if op == "+":
-            return f"(-{wrap_m(emit(x, ctx, t), x)}).mul_add({arg(y, ctx, t)}, {addend})"
-        return f"(-{wrap_m(emit(x, ctx, t), x)}).mul_add({arg(y, ctx, t)}, -{wrap(addend, b)})"
+            return f"{neg_recv(x, ctx, t)}.mul_add({arg(y, ctx, t)}, {addend})"
+        return f"{neg_recv(x, ctx, t)}.mul_add({arg(y, ctx, t)}, -{wrap(addend, b)})"
     if prod(b):
         x, y = prod(b)[1], prod(b)[2]
         addend = emit(a, ctx, t)
         if op == "+":
             return f"{wrap_recv(emit(x, ctx, t), x)}.mul_add({arg(y, ctx, t)}, {addend})"
-        return f"(-{wrap_m(emit(x, ctx, t), x)}).mul_add({arg(y, ctx, t)}, {addend})"
+        return f"{neg_recv(x, ctx, t)}.mul_add({arg(y, ctx, t)}, {addend})"
     return None
 
 
@@ -710,6 +730,22 @@ RESULT = [False]
 RUST_NAMES = {}
 
 
+def strip_parens(text):
+    """实参位置的外层括号是多余的（仅当最外一对括号互相匹配时去掉）。"""
+    while text.startswith("(") and text.endswith(")"):
+        depth = 0
+        for k, ch in enumerate(text):
+            depth += ch == "("
+            depth -= ch == ")"
+            if depth == 0 and k < len(text) - 1:
+                return text
+        text = text[1:-1]
+    return text
+
+
+ZERO_INIT = set()
+
+
 def snake(name):
     """内部子程序的 Rust 名由 `--names fortran=rust,...` 给出（regen.py 的表）。"""
     return RUST_NAMES.get(name.lower(), name.lower())
@@ -749,12 +785,17 @@ def main():
     end = next(i for i in range(start, len(lines)) if re.match(rf"\s*END\s+SUBROUTINE", lines[i], re.I))
     body = join_continuations(lines[start + 1:end], start + 2)
     SUBS.update(subroutines(lines))
+    # 模块自己的整型参数（`NOT_Harvested = 999` 之类），仅在转写本模块时可见。
+    for _m in re.finditer(r"integer\s*,\s*parameter\s*::\s*(\w+)\s*=\s*(\d+)", "\n".join(lines), re.I):
+        INTCONST.setdefault(_m.group(1).lower(), _m.group(2))
     extras = [a for a in SUBS[sub] if a not in STANDARD]
     global GIMPLE_FMA
     if "--names" in sys.argv:
         for pair in sys.argv[sys.argv.index("--names") + 1].split(","):
             f, r = pair.split("=")
             RUST_NAMES[f.lower()] = r.lstrip("_")
+    if "--zero-init" in sys.argv:
+        ZERO_INIT.update(n.lower() for n in sys.argv[sys.argv.index("--zero-init") + 1].split(","))
     if "--gimple" in sys.argv:
         GIMPLE_FMA = gimple_fma(sys.argv[sys.argv.index("--gimple") + 1])
     locals_ = {}
@@ -795,7 +836,10 @@ def main():
                 if name in ("m", "j", "k", "l", "ivt", "i", "ps", "pe", "fc", "fp", "p", "c", "g", "s", "d", "sw"):
                     continue
                 if nm.group(4):
-                    w(f"let mut {name} = {emit(parse_expr(nm.group(4)), Ctx(locals_, set(loops)), kind)};")
+                    w(f"let mut {name}: {kind} = {emit(parse_expr(nm.group(4)), Ctx(locals_, set(loops)), kind)};")
+                elif not nm.group(2) and name in ZERO_INIT:
+                    # regen.py 登记的：上游每条会读到它的路径都先赋值，但 Rust 的流分析看不出来。
+                    w(f"let mut {name}: {kind} = {'0.0' if kind == 'f64' else '0'};")
                 elif not nm.group(2):
                     w(f"let mut {name}: {kind};")
                 else:
@@ -903,9 +947,16 @@ def main():
             callee = m.group(1).lower()
             actual = [a.strip() for a in re.split(r",(?![^(]*\))", m.group(2))]
             dummies = SUBS[callee]
-            extra = [emit(parse_expr(a), ctx, locals_.get(d, "f64")) for d, a in zip(dummies, actual) if d not in STANDARD]
+            extra = [strip_parens(emit(parse_expr(a), ctx, locals_.get(d, "f64")))
+                     for d, a in zip(dummies, actual) if d not in STANDARD]
             args = ", ".join(["s", "p", "c", "sw"] + extra)
             w(f"{snake(m.group(1))}({args});")
+            continue
+        m = re.match(r"call\s+julian2monthday\s*\((.*)\)$", s, re.I)
+        if m:
+            y, dd, mo, da = [a.strip() for a in m.group(1).split(",")]
+            w(f"({mo.lower()}, {da.lower()}) = crate::bgc_driver::julian_month_day("
+              f"{emit(parse_expr(y), ctx, 'i32')}, {emit(parse_expr(dd), ctx, 'i32')});")
             continue
         if low.startswith("call "):
             w(f"/*?*/ // {s}")
@@ -980,13 +1031,15 @@ def assign(s, ctx, w):
             note = f" /*FMA? gimple={want} rust={FUSED[0]} L{lo}*/"
     if t == "bool" and typeof(rhs_e, ctx) == "f64":
         rhs_r = f"{rhs_r} != 0.0"
+    # 整型右值赋给实型左值：Fortran 隐式转换（`harvdate_p(m) = jday`）。
+    if t == "f64" and typeof(rhs_e, ctx) == "i32":
+        rhs_r = f"{float(rhs_e[1])!r}" if rhs_e[0] == "num" else f"f64::from({strip_parens(rhs_r)})"
     if (rhs_e[0] in ("+", "-", "*", "/") and rhs_e[1] == le and " = " not in rhs_r
             and not rhs_r.lstrip("(").startswith("-") and ".mul_add(" not in rhs_r.split(" ", 1)[0]):
         top = emit(rhs_e[1], ctx, t) + f" {rhs_e[0]} "
         if rhs_r.startswith(top):
             rest = rhs_r[len(top):]
-            if rest.startswith("(") and rest.endswith(")") and rhs_e[2][0] != "paren":
-                rest = rest[1:-1]
+            rest = strip_parens(rest)
             w(f"{lhs_r} {rhs_e[0]}= {rest};{note}")
             return
     w(f"{lhs_r} = {rhs_r};{note}")

@@ -16,7 +16,10 @@ use colm_core::bgc_state::{BgcDims, BgcState};
 use colm_core::bgc_trace::{read_trace, TraceRecord};
 
 fn main() -> Result<()> {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let args: Vec<String> = std::env::args()
+        .skip(1)
+        .filter(|arg| arg != "--crop")
+        .collect();
     anyhow::ensure!(
         args.len() >= 3,
         "usage: bgc_replay <trace.bin> <case.nml> <bgc const restart> [stage]"
@@ -30,15 +33,17 @@ fn main() -> Result<()> {
         Some(colm_namelist::Value::Bool(value)) => *value,
         _ => default,
     };
+    // `CROP` 是内核宏，namelist 里没有，两类内核的追踪字段也完全相同：由调用者按内核给 `--crop`。
+    let crop = std::env::args().any(|arg| arg == "--crop");
     let switches = BgcSwitches {
-        crop: false,
+        crop,
         nitrif: flag("DEF_USE_NITRIF", true),
         fire: flag("DEF_USE_FIRE", false),
         sasu: flag("DEF_USE_SASU", false),
         diag_matrix: flag("DEF_USE_DiagMatrix", false),
-        cnsoyfixn: false,
-        fert: false,
-        irrigation: false,
+        cnsoyfixn: crop && flag("DEF_USE_CNSOYFIXN", true),
+        fert: crop && flag("DEF_USE_FERT", true),
+        irrigation: crop && flag("DEF_USE_IRRIGATION", false),
         laifeedback: flag("DEF_USE_LAIFEEDBACK", false),
         nostressnitrogen: flag("DEF_USE_NOSTRESSNITROGEN", false),
     };

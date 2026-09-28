@@ -25529,3 +25529,35 @@ SASU（bu）在新累加器下复查：45/45、14/14
 
 回归（release）：bn/bl/bu、pf/pb、qb/qy、gl/ly、c0/c3、uo/up、wy、sy-at 历史与重启逐位；`cargo test`（含 colm-cli 集成测试）、clippy 通过。
 作物 BGC 本体（`CNPhenology` 作物支、`CNNFert`、`CNSoyfix`、灌溉、作物收获与 `cropprod`、64 个作物历史量）仍待移植。
+
+## 第 423 轮：作物 BGC 各阶段逐位对齐（C6，回放口径）
+
+**一、CROP 追踪内核。** 复制已插桩的构建树为 `bldc`，`define.h` 打开 `#define CROP` 全量重编。追踪开着与关着相比、
+与 `kernels/crop` 相比，US-Ne3 全年 39/39 重启、12/12 历史逐位一致，追踪不改变结果。途中修了插桩脚本两处缺陷：
+- 追踪模块 `MOD_BGC_Trace` 被放在 `#include <define.h>` 之前，模块里的 `#ifdef CROP` 永远不成立，作物字段一律写成空数组
+  （default 内核没有 CROP，所以此前看不出）。现把 `define.h` 放在文件最前。
+- 后加的 `irrig_method_*` 是整型数组，被原样写出 4 字节整数，破坏了"每个字段都是 f64"的记录格式；现在按 `real(…, r8)` 写出。
+回放工具的作物开关改为显式 `--crop`：两类内核的追踪字段集合完全相同，无法从追踪自身判断。
+
+**二、改用转写器生成三块原先手写或缺失的代码。** CROP 构建下的 GIMPLE 放在 `gd/crop`；用它重新生成已有的 10 个模块，
+与用 default GIMPLE 生成的逐字节相同（作物支的 FMA 判定在两种构建下一致）。
+- `bgc_cn_phenology.rs`：整个 `MOD_BGC_Veg_CNPhenology`（气候统计、三类物候、`CropPhenology`、展叶/落叶/凋落/落入土壤）。
+  手写的 `bgc_phenology.rs` 只剩 `daylength`。
+- `bgc_nutrient_competition.rs`：养分需求与竞争（含作物分配）。手写的 `bgc_nutrient.rs` 只剩驱动里内联的 patch 级求和。
+- `bgc_crop_n_dynamics.rs`：`CNNFert`、`CNSoyfix`。
+- `vernalization` 手写（`bgc_crop.rs`）：`alpha`、`(vtopt−vtmin)**alpha`、`(vtopt−vtmin)**(2α)`、`22.5**5` 都被编译期（MPFR）
+  折叠成常数，只有依赖 `tc` 的幂与 `cumvd**5` 在运行期调 libm `pow`；转写器不做常量折叠，所以直接写 GIMPLE 里的常数。
+
+转写器相应补了：`nint`、模块自己的整型参数（`NOT_Harvested`）、`daylength`、`CALL julian2monthday`、13 个作物 PFT 参数、
+整型与实型混合比较/赋值的提升、带初值局部量的类型、`y**2`（第 419 轮）；显式零初值清单 `ZERO_INIT`（`fxn`、`f5`：上游每条读路径都已赋值，
+Rust 的流分析看不出来），以及若干让生成代码通过 clippy 的整理规则（互斥分支各赋值一次不需要 `mut`、未用的附加参数加 `_`）。
+`manual_range_contains`/`manual_clamp` 在生成模块里显式允许：改写成 `contains`/`clamp` 会改变 NaN 的行为。
+
+**三、实测。**
+```
+CROP=1 bgc_replay crt-fortran（US-Ne3 玉米 2002，每 97 步采 2 步，覆盖播种、生长与收获） → 5824 identical, 0 differing, 0 not ported
+非作物回放（生成模块替换手写后）：bn 1488、by 1440、bl 1488、bu 126、bd 128、bt 90，全部 identical
+端到端回归（release）：bn/by/bl/bu/bd、pf、qb、gl 历史与重启逐位
+```
+未覆盖：`vernalization`（只作用于冬小麦）、`CNSoyfix`（本算例 `DEF_USE_CNSOYFIXN = .false.`）、灌溉。运行时仍拒绝 CROP 内核：
+端到端还缺作物的物理耦合（`CoLMMAIN` 的 `#ifdef CROP`）、作物重启字段的读写与 64 个作物历史量。

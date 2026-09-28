@@ -6,8 +6,14 @@
 
 // 逐层循环的 `j` 同时索引若干按列主序展平的数组，保留下标写法以便与上游逐行对照。
 #![allow(clippy::needless_range_loop)]
-// 嵌套 IF 按上游结构保留，便于逐行对照。
-#![allow(clippy::collapsible_if, clippy::collapsible_else_if)]
+// 嵌套 IF 与"先声明、分支里赋值"都按上游结构保留，便于逐行对照。
+#![allow(
+    clippy::collapsible_if,
+    clippy::collapsible_else_if,
+    clippy::needless_late_init
+)]
+// `a >= lo .and. a <= hi`、`max(lo, min(hi, x))` 照抄：改成 `contains`/`clamp` 会改变 NaN 的行为。
+#![allow(clippy::manual_range_contains, clippy::manual_clamp)]
 
 use crate::bgc_driver::{vectorized_dot, BgcPftConstants, BgcPhysics, BgcSwitches};
 use crate::bgc_state::BgcState;
@@ -946,7 +952,7 @@ fn cnveg_carbonflux_summary(
     s.patch_flux.hrv_xsmrpool_to_atm[0] = (0..npft).fold(0.0, |acc, m| {
         s.pft_flux.hrv_xsmrpool_to_atm_p[m].mul_add(p.pftfrac[m], acc)
     });
-    let nfixlags = s.constants.nfix_timeconst * 86400.0;
+    let nfixlags: f64 = s.constants.nfix_timeconst * 86400.0;
     if nfixlags > 0.0 && s.patch.lag_npp[0] != MISSING {
         s.patch.lag_npp[0] = s.patch.lag_npp[0].mul_add(
             (-(p.deltim / nfixlags)).exp(),
