@@ -25369,3 +25369,22 @@ bgc_trace_cmp.py bn-fortran bn-rust              → 1584 records identical
 39 个重启文件：release diff 0 = 39，debug diff 0 = 39
 NITRIF 关（by）复查：1440/1440 回放、39/39 重启；PFT/PC 与抽查的 LCT 回归逐位
 ```
+
+## 第 418 轮：BGC 历史输出
+
+`DEF_USE_BGC` 算例的历史文件原先比 Fortran 少 143 个变量。变量集合取 colm-hist 闸门表中运行时条件为
+`DEF_USE_BGC`（NITRIF 开时再加 `(DEF_USE_BGC) .and. (DEF_USE_NITRIF)` 的两个）、且不带编译期宏的全部名字——
+正好是 Fortran 文件里 BGC 专属的那 143（+2）个。每个值按 `MOD_Vars_1DAccFluxes` 里 `acc1d/acc2d` 的来源取：
+
+| 历史名 | 来源 |
+|---|---|
+| 绝大多数 | 同名 BGC patch 变量（112 个） |
+| `f_hr` / `f_retrasn` | `decomp_hr` / `retransn`（`retrasn` 是上游拼写） |
+| `f_{litr1,litr2,litr3,soil1,soil2,soil3,cwd}{c,n}_vr` | `decomp_{c,n}pools_vr(1:nl_soil, 池)` |
+| `f_BD_all` / `f_OM_density` / `f_wfc` | 常数重启的土壤参数（每步累加再平均，所以同样要走累加器） |
+| `f_lai_*`（14 个） | `CNDriverSummarizeStates` 写的分 PFT 类型 LAI；不是重启变量，随 `BgcState` 跨步保存 |
+| `f_CONC_O2_UNSAT` / `f_O2_DECOMP_DEPTH_UNSAT` | `tconc_o2_unsat` / `to2_decomp_depth_unsat`（NITRIF） |
+
+实测（AT-Neu 3-PFT，2010 全年，纯 Rust 对纯 Fortran）：NITRIF 开/关各 12 个月度历史文件，变量集合完全相同、
+全部变量逐位一致（3264 / 3240 个变量×文件）；39/39 重启 `diff 0`；release 与 debug 相同。
+至此 `DEF_USE_BGC`（NITRIF 开或关、FIRE/SASU/LAI 反馈/作物之外）的单点算例，重启与历史都与参考内核逐位一致。
