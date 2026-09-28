@@ -627,10 +627,7 @@ fn previous_step_start(
 pub fn refuse_unported(switches: BgcSwitches) -> Result<()> {
     let unported = [
         (switches.fire, "DEF_USE_FIRE"),
-        (
-            switches.sasu || switches.diag_matrix,
-            "DEF_USE_SASU / DEF_USE_DiagMatrix",
-        ),
+        (switches.diag_matrix, "DEF_USE_DiagMatrix"),
         (switches.crop, "CROP"),
     ];
     for (on, name) in unported {

@@ -60,6 +60,11 @@ fn main() -> Result<()> {
         state.constants = constants.clone();
         state.load_trace_fields(&before.state)?;
         let mut physics = BgcPhysics::from_trace(before)?;
+        // 跳过收支检查的那一步，驱动在两个被追踪的阶段之间把 `skip_balance_check` 复位
+        // （`MOD_BGC_driver.F90:157-159`），回放要补上这一句。
+        if record.tag == "CNVegStructUpdate" && before.tag != "NBalanceCheck" {
+            state.patch.skip_balance_check[0] = false;
+        }
         let mut step = BgcStep {
             state: &mut state,
             physics: &mut physics,

@@ -336,6 +336,7 @@ pub fn run_stage(stage: &str, step: &mut BgcStep<'_>) -> Result<()> {
         "CNAnnualUpdate" => gen!(crate::bgc_annual_update::cn_annual_update),
         "SoilBiogeochemNLeaching" => gen!(crate::bgc_n_leaching::soil_biogeochem_n_leaching),
         "NstateUpdate3" => gen!(crate::bgc_n_state_update::n_state_update3),
+        "CNSASU" => crate::bgc_sasu::cn_sasu(step.state, step.physics, switches)?,
         // driver 以 init=.false. 调用
         "CNDriverSummarizeStates" => crate::bgc_summary::cn_driver_summarize_states(
             step.state,

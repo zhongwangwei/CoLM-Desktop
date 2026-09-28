@@ -125,8 +125,66 @@ pub struct BgcTimeRestartInput<'a> {
     pub climate: BgcClimateFields<'a>,
     pub nitrification: Option<BgcNitrificationFields<'a>>,
     pub crop: Option<BgcCropFields<'a>>,
+    /// `DEF_USE_SASU .or. DEF_USE_DiagMatrix`：写出 [`SASU_PATCH_VARIABLES`]（冷启动全为 0）。
+    pub sasu: bool,
     pub compression_level: u8,
 }
+
+/// `WRITE_BGCTimeVariables` 在 `DEF_USE_SASU .or. DEF_USE_DiagMatrix` 下多写的 patch 级累加量，
+/// 按文件中的顺序（紧接 `accumnstep`、在 `skip_balance_check` 之前）；`true` 表示 `(soil, ndecomp_pools)` 两维。
+/// `MOD_IniTimeVariable` 把它们全置 0。
+pub const SASU_PATCH_VARIABLES: &[(&str, bool)] = &[
+    ("decomp0_cpools_vr", true),
+    ("I_met_c_vr_acc", false),
+    ("I_cel_c_vr_acc", false),
+    ("I_lig_c_vr_acc", false),
+    ("I_cwd_c_vr_acc", false),
+    ("AKX_met_to_soil1_c_vr_acc", false),
+    ("AKX_cel_to_soil1_c_vr_acc", false),
+    ("AKX_lig_to_soil2_c_vr_acc", false),
+    ("AKX_soil1_to_soil2_c_vr_acc", false),
+    ("AKX_cwd_to_cel_c_vr_acc", false),
+    ("AKX_cwd_to_lig_c_vr_acc", false),
+    ("AKX_soil1_to_soil3_c_vr_acc", false),
+    ("AKX_soil2_to_soil1_c_vr_acc", false),
+    ("AKX_soil2_to_soil3_c_vr_acc", false),
+    ("AKX_soil3_to_soil1_c_vr_acc", false),
+    ("AKX_met_exit_c_vr_acc", false),
+    ("AKX_cel_exit_c_vr_acc", false),
+    ("AKX_lig_exit_c_vr_acc", false),
+    ("AKX_cwd_exit_c_vr_acc", false),
+    ("AKX_soil1_exit_c_vr_acc", false),
+    ("AKX_soil2_exit_c_vr_acc", false),
+    ("AKX_soil3_exit_c_vr_acc", false),
+    ("decomp0_npools_vr", true),
+    ("I_met_n_vr_acc", false),
+    ("I_cel_n_vr_acc", false),
+    ("I_lig_n_vr_acc", false),
+    ("I_cwd_n_vr_acc", false),
+    ("AKX_met_to_soil1_n_vr_acc", false),
+    ("AKX_cel_to_soil1_n_vr_acc", false),
+    ("AKX_lig_to_soil2_n_vr_acc", false),
+    ("AKX_soil1_to_soil2_n_vr_acc", false),
+    ("AKX_cwd_to_cel_n_vr_acc", false),
+    ("AKX_cwd_to_lig_n_vr_acc", false),
+    ("AKX_soil1_to_soil3_n_vr_acc", false),
+    ("AKX_soil2_to_soil1_n_vr_acc", false),
+    ("AKX_soil2_to_soil3_n_vr_acc", false),
+    ("AKX_soil3_to_soil1_n_vr_acc", false),
+    ("AKX_met_exit_n_vr_acc", false),
+    ("AKX_cel_exit_n_vr_acc", false),
+    ("AKX_lig_exit_n_vr_acc", false),
+    ("AKX_cwd_exit_n_vr_acc", false),
+    ("AKX_soil1_exit_n_vr_acc", false),
+    ("AKX_soil2_exit_n_vr_acc", false),
+    ("AKX_soil3_exit_n_vr_acc", false),
+    ("diagVX_c_vr_acc", true),
+    ("upperVX_c_vr_acc", true),
+    ("lowerVX_c_vr_acc", true),
+    ("diagVX_n_vr_acc", true),
+    ("upperVX_n_vr_acc", true),
+    ("lowerVX_n_vr_acc", true),
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BgcTimeRestartFile {
@@ -290,6 +348,25 @@ pub fn write_bgc_time_restart_block(
     )?;
     for (name, values) in climate_entries(input.climate) {
         put_f64_1d(&mut file, name, "patch", values)?;
+    }
+    if input.sasu {
+        for &(name, pooled) in SASU_PATCH_VARIABLES {
+            if pooled {
+                let zeros =
+                    vec![0.0; patches * dimensions.decomposition_pools * dimensions.soil_layers];
+                file.add_variable::<f64>(name, &["patch", "ndecomp_pools", "soil"])?
+                    .put_values(&zeros, (.., .., ..))?;
+            } else {
+                put_f64_axis_major(
+                    &mut file,
+                    name,
+                    "soil",
+                    dimensions.soil_layers,
+                    patches,
+                    &vec![0.0; patches * dimensions.soil_layers],
+                )?;
+            }
+        }
     }
     file.add_variable::<i8>("skip_balance_check", &["patch"])?
         .put_values(input.climate.skip_balance_check, ..)?;

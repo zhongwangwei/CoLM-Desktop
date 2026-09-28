@@ -15,6 +15,7 @@ pub fn bgc_time_restart_input(
 ) -> BgcTimeRestartInput<'_> {
     BgcTimeRestartInput {
         compression_level,
+        sasu: false,
         dimensions: BgcTimeRestartDimensions {
             soil_layers: BGC_SOIL_LAYERS,
             full_soil_layers: BGC_FULL_SOIL_LAYERS,

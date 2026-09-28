@@ -384,6 +384,12 @@ pub fn write_spatial_pft_cold_time_restarts(
         );
     }
     let use_nitrification = optional_bool_or(&document, "DEF_USE_NITRIF", true)?;
+    // SASU/DiagMatrix 的冷启动字段只在单点路径上按 Fortran 核对过。
+    ensure!(
+        !optional_bool_or(&document, "DEF_USE_SASU", false)?
+            && !optional_bool_or(&document, "DEF_USE_DiagMatrix", false)?,
+        "spatial DEF_USE_SASU / DEF_USE_DiagMatrix cold starts are not ported"
+    );
     let subgrid = spatial_pft_subgrid(&document, config.static_config.subgrid_fallback)?;
     if use_crop {
         ensure!(
@@ -1132,6 +1138,7 @@ pub fn write_spatial_pft_cold_time_restarts(
                         |(state, values)| PftBgcFields {
                             values,
                             active_crop_years: &state.active_crop_years,
+                            sasu: false,
                         },
                     ),
                     crop: crop.as_ref().map(crate::CropColdStartState::pft_fields),

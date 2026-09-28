@@ -85,6 +85,7 @@ pub mod bgc_nitrif;
 pub mod bgc_nutrient;
 pub mod bgc_phenology;
 pub mod bgc_resp;
+pub mod bgc_sasu;
 pub mod bgc_soil_competition;
 pub mod bgc_soil_n_state_update;
 pub mod bgc_state;

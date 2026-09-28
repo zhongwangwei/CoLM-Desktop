@@ -25428,3 +25428,38 @@ bgc_trace_cmp.py bl（全年抽样）               → 1584 records identical
 （历史逐位）；`pn/qr` 的分歧用 HEAD 二进制复跑，新旧输出 4/4 重启逐位相同，属既有问题，与本轮无关。
 叶温新分支只在旧代码会报错退出的输入上生效，冷启动与转写器改动只作用于 LAI 反馈，这与实测一致。
 至此 BGC 单点算例只剩 FIRE、SASU/DiagMatrix 与作物三条分支在运行时拒绝。
+
+## 第 420 轮：SASU（`DEF_USE_SASU`）
+
+**一、冷启动。** `DEF_USE_SASU .or. DEF_USE_DiagMatrix` 时 Fortran 在 BGC 时间重启里多写 50 个 patch 级累加量
+（紧接 `accumnstep`、在 `skip_balance_check` 之前；42 个 `(patch, soil)`、8 个 `(patch, ndecomp_pools, soil)`），
+在 PFT 重启的 BGC 段末尾多写 164 个 PFT 级量（年初池 `*0_p` 与 `I_*`/`AKX_*_p_acc`），`MOD_IniTimeVariable` 全置 0。
+`colm-init` 照此写出（`SASU_PATCH_VARIABLES` / `SASU_PFT_VARIABLES`）。运行期的重启写出以输入重启为模板覆盖，
+所以只要冷启动文件里有这些名字，后续读写自动接上。DiagMatrix 的 `*Cap` 冷启动和空间路径的 SASU 暂未移植，当场拒绝。
+
+**二、`CNSASU`（`bgc_sasu.rs`，手写、表驱动）。** 年初第一步（`idate(2)==1 .and. idate(3)==deltim`）存 `*0 = max(池, 1e-8)`；
+年末最后一步用累加通量/年初池拼速率矩阵 `A`、累加输入拼 `I`，容量 `X = −A⁻¹I`，SASU 用它替换死茎/死粗根与土壤池，
+并置 `skip_balance_check`。只有两处要对齐舍入：
+- `inverse`（Doolittle LU，不选主元）的消元、前代、回代三处都是 `.FNMA`；
+- `matmul` 被内联成"外层列 j、内层行 i、`res(i) = FMA(A(i,j), b(j), res(i))`"，从 0 开始累加（行方向向量化不改变单元素顺序）。
+土壤矩阵是 70 阶块三对角，深层年初池被夹到 1e-8，条件数约 4e9；没有选主元，任何一处结构差异都会被放大几个量级。
+
+**三、上游缺陷：最底层 N 输入恒为 0。** C 的输入 `I_soil_acc` 写在 `DO j = 1, nl_soil` 里，而 N 的输入四行
+（`MOD_BGC_CNSASU.F90:640-644`）被放进了后面的 `DO j = 1, nl_soil-1`（三对角项那一循环）。最底层 `j = nl_soil` 的
+`I_soil_nacc` 从未赋值、保持 0，底层四个凋落物/CWD 池的 N 容量因此比真解小几个量级（met 池 9.4e-12 对 numpy 真解 1.2e-7，
+CWD 池得 −0）。第一版按"C/N 对称"写，回放 18/105 个 `decomp_npools_vr` 不一致、越深越大；用 numpy 与照抄的 Python LU
+解同一系统都得真解、唯独 Fortran 不同，逐行对照 C/N 两段才发现循环边界不同。Rust 照样复现，注释标明。
+
+**四、回放工具。** 跳过收支检查的那一步，驱动在 `CNDriverSummarizeFluxes` 与 `CNVegStructUpdate` 两个被追踪的阶段之间复位
+`skip_balance_check`；`bgc_replay` 回放 `CNVegStructUpdate` 时补上这一句。
+
+实测（AT-Neu 3-PFT，NITRIF 开 + SASU，2010-01-01 至 2011-02-28，采样第 1–2 步与跨年的第 17520–17521 步）：
+
+```
+Rust 冷启动 + Fortran 引擎（混合）             → 45/45 重启 diff 0
+bgc_replay bu-fortran                           → 126 identical, 0 differing, 0 not ported
+bgc_trace_cmp.py bu-fortran bu-rust             → 134 records identical
+纯 Rust 对纯 Fortran：45/45 重启、14/14 历史文件逐位一致（release 与 debug）
+回归（release）：bn/by/bl/bc/bf/bs/bt、pf/pb、qb/qy、gl/ly 历史与重启逐位
+```
+BGC 单点现在只剩 FIRE（本机没有 `fire/` 运行时数据，无法端到端核对）、DiagMatrix 与作物在运行时拒绝。

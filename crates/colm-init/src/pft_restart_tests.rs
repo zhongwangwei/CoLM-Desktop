@@ -180,6 +180,7 @@ fn pft_bgc_restart_writes_every_upstream_carbon_nitrogen_field_in_order() {
     input.bgc = Some(PftBgcFields {
         values: &values,
         active_crop_years: &[2, 3],
+        sasu: false,
     });
     let root = temp_dir("bgc");
     let path = write_pft_time_restart(
@@ -241,6 +242,7 @@ fn pft_crop_restart_writes_the_exact_fortran_tail_schema() {
     input.bgc = Some(PftBgcFields {
         values: &values,
         active_crop_years: &[2, 3],
+        sasu: false,
     });
     input.crop = Some(crop_fields(&fixture));
     let path = temp_dir("crop").join("restart.nc");
@@ -545,6 +547,7 @@ fn pft_bgc_restart_matches_the_upstream_fortran_reference() {
             bgc: Some(PftBgcFields {
                 values: &bgc_refs,
                 active_crop_years: &active_crop_years,
+                sasu: false,
             }),
             crop: None,
             ozone: None,
@@ -590,6 +593,7 @@ fn pft_restart_rejects_invalid_feature_shapes_before_creating_a_file() {
     invalid_bgc.bgc = Some(PftBgcFields {
         values: &[],
         active_crop_years: &[1, 2],
+        sasu: false,
     });
     assert!(write_pft_time_restart_block(&path, invalid_bgc).is_err());
     assert!(!path.exists());

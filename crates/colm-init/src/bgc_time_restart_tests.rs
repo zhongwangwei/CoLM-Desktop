@@ -472,6 +472,7 @@ fn bgc_time_restart_matches_the_upstream_fortran_reference() {
         },
         nitrification,
         crop: None,
+        sasu: false,
         compression_level: 1,
     };
     let native = write_bgc_time_restart(
@@ -551,6 +552,7 @@ fn sample_input() -> BgcTimeRestartInput<'static> {
             oxygen_decomposition_depth_unsaturated: &SOIL,
         }),
         crop: None,
+        sasu: false,
         compression_level: 1,
     }
 }
