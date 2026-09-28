@@ -6,7 +6,7 @@
 
 use anyhow::{ensure, Result};
 
-use crate::{pc_radiation::canopy_scattering, LeafOptics};
+use crate::LeafOptics;
 
 const BANDS: usize = 2;
 const RADIATION_TYPES: usize = 2;
@@ -291,8 +291,9 @@ fn urban_vegetated_shortwave(
     let tree_transmission = crate::extended::tee(
         crate::extended::DoubleDouble::new(tree_depth) * crate::extended::DoubleDouble::new(0.375),
     );
-    let (tree_albedo, _, _) = canopy_scattering(
-        3.0 / 8.0 * tree_depth,
+    // `:423` `CALL phi(.true., 3/8.*lsai, tau+rho, tau, rho, phi_tot, …)`：实参 `lsai*0.375` 是 real(8)
+    let (tree_albedo, _, _) = crate::extended::canopy_scattering_runmode(
+        tree_depth * 0.375,
         transmittance + reflectance,
         transmittance,
         reflectance,

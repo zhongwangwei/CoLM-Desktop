@@ -356,7 +356,9 @@ pub fn single_point_surface_run_from_namelist_with_subgrid(
         .and_then(namelist_string)
         .filter(|value| !value.trim().is_empty() && !value.eq_ignore_ascii_case("null"))
         .map(PathBuf::from);
-    let urban_canyon_hwr = namelist_bool(&document, "DEF_USE_CANYON_HWR", false)?;
+    // 上游 `MOD_Namelist.F90:261` 默认 `.true.`（schema 同此）；原先这里给 `false`，
+    // AU-Preston 的 `BUILDING_HLR` 因此取了 `wall_to_plan_area_ratio` 那一支（0.2247 对 0.2096）。
+    let urban_canyon_hwr = namelist_bool(&document, "DEF_USE_CANYON_HWR", true)?;
     let urban_lai_year_window = urban_lai_year_window(&document, urban)?;
     let lai_frequency = if !urban
         && subgrid == SurfaceSubgrid::Lct

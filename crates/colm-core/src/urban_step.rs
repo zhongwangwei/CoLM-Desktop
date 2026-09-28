@@ -67,6 +67,10 @@ pub struct UrbanPatchState {
     pub fhah: f64,
     pub vehc: f64,
     pub meta: f64,
+    /// 树冠感热/潜热（`fsen_urbl`/`lfevp_urbl`）：上游是初值 `spval` 的持久通量，只在有树的步里
+    /// 更新；不进重启，续跑后重新从 `spval` 开始。`None` 即 `spval`。
+    pub fsen_urbl: Option<f64>,
+    pub lfevp_urbl: Option<f64>,
 }
 
 /// 城市 patch 的时不变量（城市常数重启与主常数重启里的城市字段）。
@@ -510,6 +514,10 @@ pub fn urban_step(
     unpack(&mut urban.pervious, &pervious, swe[2], depth[2]);
     unpack(&mut urban.lake_bed, &lake_bed, swe[3], depth[3]);
     urban.t_roof = thermal.troof;
+    if thermal.fsen_urbl.is_some() {
+        urban.fsen_urbl = thermal.fsen_urbl;
+        urban.lfevp_urbl = thermal.lfevp_urbl;
+    }
     urban.t_wall = thermal.twall;
     state.energy.leaf.leaf_temperature_k = tree.tl;
     state.energy.leaf.canopy_water.total_mm = tree.ldew;

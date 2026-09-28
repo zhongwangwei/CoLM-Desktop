@@ -2705,6 +2705,8 @@ impl UrbanTemplate {
             fhah: scalar_u(&time, "Fhah")?,
             vehc: scalar_u(&time, "vehc")?,
             meta: scalar_u(&time, "meta")?,
+            fsen_urbl: None,
+            lfevp_urbl: None,
         };
         let mut restart_values = std::collections::BTreeMap::new();
         for name in time.float_names() {

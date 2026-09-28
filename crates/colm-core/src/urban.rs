@@ -332,8 +332,9 @@ fn fill_uniform_layers(
     layer_thickness_m: &mut [f64],
 ) {
     for layer in 0..layers {
+        // `MOD_UrbanReadin.F90:252` `z(l) = (l-0.5)*(thick/nl)`：先除层数再乘
         node_depth_m[layer * item_count + item] =
-            (layer as f64 + 0.5) * total_thickness_m / layers as f64;
+            (layer as f64 + 0.5) * (total_thickness_m / layers as f64);
     }
     layer_thickness_m[item] = 0.5 * (node_depth_m[item] + node_depth_m[item_count + item]);
     for layer in 1..layers - 1 {

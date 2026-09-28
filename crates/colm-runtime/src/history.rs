@@ -2125,11 +2125,9 @@ impl HistorySession {
                 ("fsenwsha", thermal.fsen_wsha),
                 ("fsengimp", thermal.fsen_gimp),
                 ("fsengper", thermal.fsen_gper),
-                ("fsenurbl", thermal.fsen_urbl),
                 ("lfevproof", thermal.lfevp_roof),
                 ("lfevpgimp", thermal.lfevp_gimp),
                 ("lfevpgper", thermal.lfevp_gper),
-                ("lfevpurbl", thermal.lfevp_urbl),
                 ("t_roof", urban.t_roof),
                 ("t_wall", urban.t_wall),
             ]) {
@@ -2138,6 +2136,15 @@ impl HistorySession {
                     "the urban history value for {name} is not finite"
                 );
                 accumulator.scalar(name, 0, value)?;
+            }
+            // `fsen_urbl`/`lfevp_urbl` 是 `spval` 时 `acc1d` 跳过，文件里留填充值
+            for (name, value) in [
+                ("fsenurbl", urban.fsen_urbl),
+                ("lfevpurbl", urban.lfevp_urbl),
+            ] {
+                if let Some(value) = value {
+                    accumulator.scalar(name, 0, value)?;
+                }
             }
             let surface = colm_core::GlacierThermalFluxes {
                 taux: thermal.taux,

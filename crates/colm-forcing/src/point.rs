@@ -220,6 +220,7 @@ impl PointForcingSeries {
         greenwich: bool,
         longitude_degrees: f64,
         latitude_degrees: f64,
+        site_radians: (f64, f64),
     ) -> Result<RuntimeForcing> {
         ensure!(
             longitude_degrees.is_finite() && latitude_degrees.is_finite(),
@@ -240,10 +241,12 @@ impl PointForcingSeries {
         self.runtime_at_seconds(
             source_seconds,
             orbital_calendar_day(time, greenwich, longitude_degrees)?,
-            longitude_degrees.to_radians(),
-            latitude_degrees.to_radians(),
-            grid_longitude.to_radians(),
-            grid_latitude.to_radians(),
+            // 站点 `coszen` 用 `patchlonr`（调用方从常数重启读），短波拆分用网格中心
+            // `gforc%rlon`（`deg/180*pi`，`MOD_Grid.F90:708/731`）
+            site_radians.0,
+            site_radians.1,
+            colm_core::grid_radians(grid_longitude),
+            colm_core::grid_radians(grid_latitude),
         )
     }
 }

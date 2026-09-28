@@ -163,6 +163,77 @@ pub fn tee(tau: DoubleDouble) -> f64 {
     .to_f64()
 }
 
+/// 编译期折好的四精度常数（`bb = 1.74_r8` 提升为 real(16) 后的 `1/(bb+1)` 等），
+/// 取自 `MOD_3DCanopyRadiation.F90:1374/1379` 的 GIMPLE，拆成 `hi + lo`（与四精度相差 ~1e-33）。
+const fn dd(hi: u64, lo: u64) -> DoubleDouble {
+    DoubleDouble {
+        hi: f64::from_bits(hi),
+        lo: f64::from_bits(lo),
+    }
+}
+const INV_BB_PLUS_1: DoubleDouble = dd(0x3fd7_5b8f_e21a_291c, 0x3c49_dc4a_b0a1_b5c6);
+const INV_BB_MINUS_1: DoubleDouble = dd(0x3ff5_9f22_9837_59f2, 0x3c8e_1b4d_3ae7_80d7);
+const TWO_INV_BB2_MINUS_1: DoubleDouble = dd(0x3fef_907d_3f61_9f56, 0x3c8c_7d88_8fdd_657b);
+const TWO_BB_INV_BB2_MINUS_1: DoubleDouble = dd(0x3ffb_7606_90bd_e439, 0xbc80_fda1_ec67_7961);
+const INV_SQ_SUM: DoubleDouble = dd(0x3fff_597e_29a9_b528, 0x3c77_929d_cbe0_0dc0);
+const INV_BB_MINUS_1_SQ: DoubleDouble = dd(0x3ffd_37e9_8f6d_64cb, 0xbc78_d1f6_91ba_1542);
+const INV_BB_PLUS_1_SQ: DoubleDouble = dd(0x3fc1_0ca4_d1e2_82ea, 0xbc6f_36d7_44cb_b9fd);
+/// `DD1 + bb` 与 `bb + DD2`（`1.74_r8` 在四精度里加整数，结果不是 f64 能表示的）
+const BB_PLUS_1: DoubleDouble = dd(0x4005_eb85_1eb8_51ec, 0xbcb0_0000_0000_0000);
+const BB_PLUS_2: DoubleDouble = dd(0x400d_eb85_1eb8_51ec, 0xbcb0_0000_0000_0000);
+
+/// `MOD_3DCanopyRadiation:phi(.true., tau, omg, tau_p, rho_p, phi_tot, phi_dif, pa2)`：
+/// 返回 `(phi_tot, phi_dif, pa2)`。
+///
+/// 每条语句按 GIMPLE（`:1350-1412`）分精度：凡是碰到 `DD*`（real(16)）常数的运算在四精度里做，
+/// 赋给 real(8) 变量时舍入；`tee` 返回 real(8)。纯 real(8) 的子式照写，而且**没有 FMA**
+/// （`(rho_p*phi_1b + tau_p*phi_1f)/(tau_p+rho_p)`、`omg*pac*phi_2a` 都是分开舍入）。
+pub fn canopy_scattering_runmode(tau: f64, omg: f64, tau_p: f64, rho_p: f64) -> (f64, f64, f64) {
+    let q = DoubleDouble::new;
+    let t = q(tau);
+    // `:1350` `phi_1f = DD1/tau/tau - (DD1/tau/tau + DD2/tau + DD2)*exp(-DD2*tau)`
+    let inv2 = q(1.0) / t / t;
+    let phi_1f = (inv2 - ((inv2 + q(2.0) / t) + q(2.0)) * (-(t * q(2.0))).exp()).to_f64();
+    // `tee` 的实参都是四精度
+    let tee_2 = tee(t * q(2.0));
+    let tee_1 = tee(t);
+    let tee_b1 = tee(t * BB_PLUS_1);
+    let tee_bb = tee(t * q(1.74));
+    let tee_b2 = tee(t * BB_PLUS_2);
+    // `:1353` `phi_1b = DDH*(DD1 - tee(DD2*tau))`
+    let phi_1b = ((q(1.0) - q(tee_2)) * q(0.5)).to_f64();
+    // `:1374` `phi_2b = aa*(1/(bb+1) - 1/(bb-1)*tee(2τ) + 2/(bb+1)/(bb-1)*tee((1+bb)τ))`
+    let phi_2b = (((INV_BB_PLUS_1 - q(tee_2) * INV_BB_MINUS_1) + q(tee_b1) * TWO_INV_BB2_MINUS_1)
+        * q(0.7))
+    .to_f64();
+    // `:1379`
+    let phi_2f = ((((q(phi_1f) * TWO_BB_INV_BB2_MINUS_1) - q(tee_1) * INV_SQ_SUM)
+        + q(tee_bb) * INV_BB_MINUS_1_SQ)
+        + q(tee_b2) * INV_BB_PLUS_1_SQ)
+        * q(0.7);
+    let phi_2f = phi_2f.to_f64();
+    // `:1383` real(8)：`(phi_2b + phi_2f)*0.5`
+    let phi_2a = (phi_2b + phi_2f) * 0.5;
+    // `:1392` `pac = DD1 - phi_2a/(DD1 - tee(tau) - (rho_p*phi_1b + tau_p*phi_1f)/(tau_p+rho_p))`
+    let backward = rho_p * phi_1b;
+    let forward = tau_p * phi_1f;
+    let ratio = (backward + forward) / (rho_p + tau_p);
+    let pac = (q(1.0) - q(phi_2a) / ((q(1.0) - q(tee_1)) - q(ratio))).to_f64();
+    // `max(min(pac, D1), D0)`：保留两步的写法（`clamp` 在 NaN 上语义不同）
+    #[allow(clippy::manual_clamp)]
+    let pac = pac.min(1.0).max(0.0);
+    // `:1401-1402`：`omg*pac`、`*phi_2a` 在 real(8)，除法与加法在四精度
+    let scattered = omg * pac;
+    let multiple = q(scattered * phi_2a) / (q(1.0) - q(scattered));
+    let phi_mf = (q(phi_2f) + multiple).to_f64();
+    let phi_mb = (multiple + q(phi_2b)).to_f64();
+    // `:1408-1409` `tau_p*phi_1f + DDH*omg*omg*phi_mf`：`omg*(omg*0.5)` 在四精度
+    let half_omega_sq = q(omg) * (q(omg) * q(0.5));
+    let phi_tf = (q(forward) + half_omega_sq * q(phi_mf)).to_f64();
+    let phi_tb = (q(backward) + half_omega_sq * q(phi_mb)).to_f64();
+    (phi_tf + phi_tb, phi_tf - phi_tb, pac)
+}
+
 #[cfg(test)]
 #[path = "extended_tests.rs"]
 mod extended_tests;

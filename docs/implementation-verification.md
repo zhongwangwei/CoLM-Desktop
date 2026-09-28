@@ -25013,3 +25013,58 @@ cargo test core 367 / runtime 76 / hist 50 / init 156 / lapack 6；clippy -D war
 未验证：`UrbanOnlyFlux`（`DEF_URBAN_TREE = .false.`）、城市积雪（雪层路径的向量体/尾部划分按
 运行期次数成对推断）、Windows/Linux 上的参考 LAPACK 后端（本机没有参考 LAPACK 可对照）、
 干旱站点下标准土壤 patch 的 `rootr` 修正。
+
+## 第 411 轮：城市端到端（三段都对纯 Fortran）；无树与全年；站点弧度的三种写法
+
+### 一、此前的"逐位"只覆盖了主循环
+
+`colm-cli run` 的 `--preprocessors` 默认是 `rust`，与 `--engine` 无关。所以 `*-fortran` 目录的
+表面数据与冷启动**也是 Rust 写的**，回归只比了 `colm` 主循环。这一轮用
+`--preprocessors fortran --engine fortran` 做纯 Fortran 参照（`tmp/ui-fortran`），发现 Rust
+预处理在城市上有五处不同，其中两处也影响非城市站点：
+
+1. **站点弧度**：SinglePoint 的 `patchlonr(:) = SITE_lon_location * pi/180.`（`MOD_Initialize.F90:323`）
+   是 `(deg*pi)/180`；colm-init 用 `f64::to_radians()` 即 `deg*(pi/180)`。AU-Preston 与 AT-Neu
+   上都差 1 ULP（CN-Cng 碰巧相同）。主循环里 `coszen`/`cosazi`/本地时间都读**常数重启**的
+   `patchlonr`/`patchlatr`，而 Rust 运行时原先从度数现算 —— 两边都用 `to_radians()` 时自洽，
+   对纯 Fortran 冷启动就错一位。修法：colm-init 改成 `(deg*pi)/180`（`colm_core::site_radians`），
+   运行时改为**读常数重启的这两个值**（`PointRuntimeConfig::site_radians`，colm-rs 装配时填）；
+   强迫网格中心另按 `MOD_Grid` 的 `lon/180*pi`（`colm_core::grid_radians`）。
+   31 例回归参照用新预处理重新生成（`tmp/pair.sh` 全部从头跑），28 例逐位、3 例同前（窗口外旧续跑）；
+   AT-Neu 与 CN-Cng 的 Rust 冷启动对纯 Fortran `mkinidata` 三份重启 `diff 0`。
+2. **`DEF_USE_CANYON_HWR` 缺省值**：上游 `.true.`（`MOD_Namelist.F90:261`，schema 同），colm-srfdata
+   `site.rs` 写成了 `false`，`BUILDING_HLR` 取了 `wall_to_plan_area_ratio/4/froof`（0.2247）而不是
+   街谷高宽比换算（0.2096）。
+3. **城市层几何**：`z(l) = (l-0.5)*(thick/nl)`（`MOD_UrbanReadin.F90:252`），Rust 写成 `((l+0.5)*thick)/nl`。
+4. **`t_roof`/`t_wall` 冷启动值**：上游从不赋值（上游缺陷第 22 条），实测写出 0；Rust 写 283。
+5. **城市树 LAI 年份**：`site.nc` 带 `colm_desktop_generated_urban_lai = "true"` 时 colm-srfdata 有意
+   只写模拟窗口的年份，Fortran 原样写全部 23 年。模型只读当年那一行（两边相同），**未改**，记在此。
+
+### 二、主循环里新暴露的形状
+
+新几何（HLR 0.2096）与全年季节让此前碰巧同值的地方分叉，逐位探针定位：
+
+- **`phi`（`MOD_3DCanopyRadiation`，树冠单次散射反照率）**：此前没有 dump，这一轮单独编译取得。
+  每条语句按操作数精度分段 —— 碰到 `DD*`（real(16)）常数就在四精度里算、赋值时舍入；
+  `tee` 返回 real(8)；纯 real(8) 子式**不融合**。常数（`1/(bb+1)` 等，`bb = 1.74_r8` 提升后）
+  编译期折成四精度，按 `hi+lo` 写进 `extended.rs`（与四精度差 ~1e-33）。新函数
+  `extended::canopy_scattering_runmode`；3 月换 LAI 后第一步就差（1、2 月碰巧同值）。
+- **`UrbanOnlyFlux` 迭代内的 `qg`**（`:741`）是普通加法，初值（`:436`）与树冠版（`:2199`）是 FMA。
+- **`fsen_urbl`/`lfevp_urbl`** 是初值 `spval` 的持久通量，只在有树的步里更新，无树时 history 留填充值。
+
+### 三、实测
+
+```text
+AU-Preston 2004-01-01 .. 2004-11-27（强迫只到第 333 天），树冠开，小时输出：
+  纯 Fortran（mksrfdata + mkinidata + colm）对 纯 Rust（colm-srfdata + colm-init + colm-rs）：
+    release 与 debug：history 11 个月全部逐位；重启 27 份（含常数重启、冷启动、11 个月末）diff 0
+    srfdata.nc 只差 LAI_year/TREE_LAI/TREE_SAI 的年份范围（见一·5）
+  主循环配对（两侧同一份预处理）：有树 1 月、无树 1 月（DEF_URBAN_TREE = .false.）、全年 —— 逐位
+回归（PROFILE=release，参照重新生成）：31 例同前（28 逐位 + sp/ts/tc 窗口外旧目录）
+AT-Neu / CN-Cng 冷启动：Rust 对纯 Fortran mkinidata，常数与初始重启 diff 0
+cargo test core 367 / runtime 76 / hist 50 / init 156 / lapack 6 / forcing 148 / srfdata 257+49
+（跳过 raster/real_sites）；clippy -D warnings 无告警；fmt 通过
+```
+
+未验证：城市积雪（这一年 AU-Preston 没有雪）、Windows/Linux 参考 LAPACK 后端、全局网格模式下
+`get_lonlat_radian` 的面积加权经纬度（SinglePoint 走不到）。

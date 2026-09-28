@@ -34,6 +34,19 @@ pub(crate) fn libm_pow(base: f64, exponent: f64) -> f64 {
     std::hint::black_box(base).powf(std::hint::black_box(exponent))
 }
 
+/// patch 坐标的弧度：`patchlonr(:) = SITE_lon_location * pi/180.`（`MOD_Initialize.F90:323`）
+/// 是左结合的 `(deg*pi)/180`。`f64::to_radians` 是 `deg*(pi/180)`，AU-Preston 上差 1 ULP。
+/// 主循环里 `coszen`/`cosazi`/本地时间用的都是 `patchlonr`/`patchlatr`。
+pub fn site_radians(degrees: f64) -> f64 {
+    degrees * std::f64::consts::PI / 180.0
+}
+
+/// 强迫网格中心的弧度：`MOD_Grid:grid_set_rlon/rlat` 的 `lon / 180.0_r8 * pi`，
+/// 与 [`site_radians`] 的结合方式又不同。
+pub fn grid_radians(degrees: f64) -> f64 {
+    degrees / 180.0 * std::f64::consts::PI
+}
+
 /// `x.lpow(y)`：一定走 libm `pow` 的 `x**y`（见 [`libm_pow`]）。
 ///
 /// **为什么全仓都用它而不用 `powf`**：LLVM 在 release 下把常数参与的 `pow` 改写掉 ——

@@ -44,6 +44,10 @@ pub struct PointRuntimeConfig {
     pub greenwich: bool,
     pub longitude_degrees: f64,
     pub latitude_degrees: f64,
+    /// 常数重启里的 `patchlonr`/`patchlatr`。上游主循环的 `coszen`/`cosazi`/本地时间都读它，
+    /// 而它的值取决于冷启动是谁写的（Fortran `mkinidata` 是 `(deg*pi)/180`，旧的 Rust
+    /// 冷启动是 `deg*(pi/180)`，差 1 ULP）；`None` 时按 [`colm_core::site_radians`] 现算。
+    pub site_radians: Option<(f64, f64)>,
     pub forcing_file: PathBuf,
     /// `forc_hgt_u/t/q`：风、温、湿的参考高度。
     ///
@@ -193,6 +197,8 @@ pub struct PointRuntime {
     greenwich: bool,
     longitude_degrees: f64,
     latitude_degrees: f64,
+    /// `(patchlonr, patchlatr)`
+    site_radians: (f64, f64),
     co2_scenario: Co2Scenario,
     /// `DEF_Optimize_Baseflow`：打开时由它给出每步的 `scale_baseflow`，并在预热期逐年改写。
     baseflow_optimizer: Option<baseflow_optimizer::BaseflowOptimizer>,
@@ -219,6 +225,10 @@ impl PointRuntime {
             greenwich: config.greenwich,
             longitude_degrees: config.longitude_degrees,
             latitude_degrees: config.latitude_degrees,
+            site_radians: config.site_radians.unwrap_or((
+                colm_core::site_radians(config.longitude_degrees),
+                colm_core::site_radians(config.latitude_degrees),
+            )),
             co2_scenario: config.co2_scenario,
             baseflow_optimizer: None,
         })
@@ -342,10 +352,10 @@ impl PointRuntime {
     where
         F: FnMut(PointRuntimeStep, &StandardLctSoilOutput) -> Result<()>,
     {
-        let (greenwich_time, longitude_degrees, co2_scenario) =
-            (self.greenwich, self.longitude_degrees, self.co2_scenario);
+        let (greenwich_time, longitude_radians, co2_scenario) =
+            (self.greenwich, self.site_radians.0, self.co2_scenario);
         self.run_with_state(state, |step, next| {
-            let binding = lct_binding(step, greenwich_time, longitude_degrees, co2_scenario)?;
+            let binding = lct_binding(step, greenwich_time, longitude_radians, co2_scenario)?;
             let output = standard_lct_soil_step(template.input(&binding), next)?;
             on_step(step, &output)
         })
@@ -368,8 +378,8 @@ impl PointRuntime {
     where
         F: FnMut(PointRuntimeStep, &StandardLctSoilOutput) -> Result<()>,
     {
-        let (greenwich_time, longitude_degrees, co2_scenario) =
-            (self.greenwich, self.longitude_degrees, self.co2_scenario);
+        let (greenwich_time, longitude_radians, co2_scenario) =
+            (self.greenwich, self.site_radians.0, self.co2_scenario);
         // `deltim` 与 `totwb` 都必须在**闭包外/内核前**取好：前者在 `PointRuntime` 上，
         // 后者是步首的状态（内核会把 `next` 就地改成步末值）。
         let time_step_seconds = self.clock.timestep_seconds();
@@ -377,7 +387,7 @@ impl PointRuntime {
         // `outcome.files` 少列文件（实测过：跨月运行只报了二月那一个）。
         let mut files = Vec::new();
         let steps = self.run_with_state(state, |step, next| {
-            let binding = lct_binding(step, greenwich_time, longitude_degrees, co2_scenario)?;
+            let binding = lct_binding(step, greenwich_time, longitude_radians, co2_scenario)?;
             // 步首总量用 `totwb` 的**结合顺序**（与步末的 `endwb` 不同，见
             // `colm_core::initial_total_water_storage_mm` 的注释）——
             // `xerr` 就是这两份相减，顺序混用会凭空多出/少掉那一位残差。
@@ -431,13 +441,13 @@ impl PointRuntime {
     where
         F: FnMut(PointRuntimeStep, &StandardLctSnowSoilState, PatchStepOutput<'_>) -> Result<()>,
     {
-        let (greenwich_time, longitude_degrees, co2_scenario) =
-            (self.greenwich, self.longitude_degrees, self.co2_scenario);
+        let (greenwich_time, longitude_radians, co2_scenario) =
+            (self.greenwich, self.site_radians.0, self.co2_scenario);
         let time_step_seconds = self.clock.timestep_seconds();
         let mut files = Vec::new();
         let mut optimizer = self.baseflow_optimizer.take();
         let steps = self.run_with_state(state, |step, next| {
-            let binding = lct_binding(step, greenwich_time, longitude_degrees, co2_scenario)?;
+            let binding = lct_binding(step, greenwich_time, longitude_radians, co2_scenario)?;
             // `totwb`：上游在 `snl` 重算之后、任何物理步之前取步首总蓄量
             // （`CoLMMAIN.F90:831`），`xerr` 要靠它和步末的 `endwb` 相减。
             let mut initial_total_water_mm = colm_core::initial_total_water_storage_mm(
@@ -526,12 +536,12 @@ impl PointRuntime {
     where
         F: FnMut(PointRuntimeStep, &StandardLctSnowSoilState, PatchStepOutput<'_>) -> Result<()>,
     {
-        let (greenwich_time, longitude_degrees, co2_scenario) =
-            (self.greenwich, self.longitude_degrees, self.co2_scenario);
+        let (greenwich_time, longitude_radians, co2_scenario) =
+            (self.greenwich, self.site_radians.0, self.co2_scenario);
         let time_step_seconds = self.clock.timestep_seconds();
         let mut optimizer = self.baseflow_optimizer.take();
         let steps = self.run_with_state(state, |step, next| {
-            let binding = lct_binding(step, greenwich_time, longitude_degrees, co2_scenario)?;
+            let binding = lct_binding(step, greenwich_time, longitude_radians, co2_scenario)?;
             let output = advance_patch(step, template, &binding, next, optimizer.as_ref())?;
             refresh_lai(step, template, next)?;
             optimize_baseflow(
@@ -653,6 +663,7 @@ impl PointRuntime {
             self.greenwich,
             self.longitude_degrees,
             self.latitude_degrees,
+            self.site_radians,
         )?;
         let calendar_day =
             orbital_calendar_day(clock.forcing_time, self.greenwich, self.longitude_degrees)?;
@@ -665,14 +676,14 @@ impl PointRuntime {
                 clock,
                 cosine_azimuth: orbital_cosine_azimuth(
                     calendar_day,
-                    self.longitude_degrees.to_radians(),
-                    self.latitude_degrees.to_radians(),
+                    self.site_radians.0,
+                    self.site_radians.1,
                     forcing.cosine_zenith,
                 ),
                 surface_cosine_zenith: orbital_cosine_zenith(
                     surface_calendar_day,
-                    self.longitude_degrees.to_radians(),
-                    self.latitude_degrees.to_radians(),
+                    self.site_radians.0,
+                    self.site_radians.1,
                 ),
                 forcing,
             },
@@ -686,7 +697,7 @@ impl PointRuntime {
 fn lct_binding(
     step: PointRuntimeStep,
     greenwich_time: bool,
-    longitude_degrees: f64,
+    longitude_radians: f64,
     co2_scenario: Co2Scenario,
 ) -> Result<StandardLctStepBinding> {
     let (month, _) = colm_core::month_day(step.clock.forcing_time)?;
@@ -695,7 +706,7 @@ fn lct_binding(
         // `MOD_NetSolar.F90:292` 的 `local_secs = idate(3)`，`idate` 同样是步末。
         seconds_of_day: seconds_of_day(step.clock.end_time)?,
         greenwich_time,
-        longitude_radians: longitude_degrees.to_radians(),
+        longitude_radians,
         // `MOD_Forcing` 每步按年月查 Mauna Loa 月表，再乘 1e-6 转成体积分数。
         co2_volume_fraction: colm_core::monthly_co2_ppm(
             co2_scenario,
@@ -1056,6 +1067,8 @@ pub fn read_point_runtime_config(case_namelist: impl AsRef<Path>) -> Result<Poin
         // 其余物理量一个也没动（见 docs/implementation-verification.md 该节）。
         longitude_degrees: site_coordinate_degrees(required_real(&case, "SITE_lon_location")?),
         latitude_degrees: site_coordinate_degrees(required_real(&case, "SITE_lat_location")?),
+        // 由装配方从常数重启读入（`patchlonr`/`patchlatr`），见 [`PointRuntimeConfig::site_radians`]
+        site_radians: None,
         forcing_file,
         wind_height_m,
         temperature_height_m,
@@ -2049,8 +2062,8 @@ mod tests {
         let step = runtime.next_step().unwrap().unwrap();
         let expected = orbital_cosine_zenith(
             orbital_calendar_day(step.clock.end_time, greenwich, longitude_degrees).unwrap(),
-            longitude_degrees.to_radians(),
-            latitude_degrees.to_radians(),
+            colm_core::site_radians(longitude_degrees),
+            colm_core::site_radians(latitude_degrees),
         );
         assert!((step.surface_cosine_zenith - expected).abs() < 1.0e-15);
         // 两个时刻确实不同：一个 1800 秒的窗口里两者就不会相等。

@@ -867,8 +867,8 @@ fn write_single_point_constant_restart_from_surface(
         .iter()
         .map(|&texture| BVIC_USDA[texture as usize])
         .collect::<Vec<_>>();
-    let longitude_radians = vec![surface.longitude_degrees.to_radians(); patches];
-    let latitude_radians = vec![surface.latitude_degrees.to_radians(); patches];
+    let longitude_radians = vec![colm_core::site_radians(surface.longitude_degrees); patches];
+    let latitude_radians = vec![colm_core::site_radians(surface.latitude_degrees); patches];
     let albedo = vec![surface.albedo; patches];
     let albedo_saturated_visible = albedo
         .iter()
@@ -1255,8 +1255,8 @@ fn write_single_point_scalar_cold_time_restarts(
     )?;
     let cosine_zenith = orbital_cosine_zenith(
         calendar_day,
-        surface.longitude_degrees.to_radians(),
-        surface.latitude_degrees.to_radians(),
+        colm_core::site_radians(surface.longitude_degrees),
+        colm_core::site_radians(surface.latitude_degrees),
     );
     let mut snicar_state = None;
     let (radiation, high_resolution_albedo) = if let Some(inputs) = hyperspectral {
@@ -1553,8 +1553,8 @@ fn write_single_point_urban_cold_time_restarts(
     )?;
     let cosine_zenith = orbital_cosine_zenith(
         calendar_day,
-        surface.longitude_degrees.to_radians(),
-        surface.latitude_degrees.to_radians(),
+        colm_core::site_radians(surface.longitude_degrees),
+        colm_core::site_radians(surface.latitude_degrees),
     );
     let ground = cold_start_ground_albedo(
         kind,
@@ -1904,8 +1904,8 @@ fn write_single_point_pft_cold_time_restarts(
     )?;
     let cosine_zenith = orbital_cosine_zenith(
         calendar_day,
-        surface.longitude_degrees.to_radians(),
-        surface.latitude_degrees.to_radians(),
+        colm_core::site_radians(surface.longitude_degrees),
+        colm_core::site_radians(surface.latitude_degrees),
     );
     let snow = initialize_snow_layers(kind, snow_depth_m, dimensions.snow_layers)?;
     let base_broadband_ground = cold_start_ground_albedo(

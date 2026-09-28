@@ -201,6 +201,7 @@ fn point_runtime_adapter_accepts_the_shared_model_clock_timestamp() {
             true,
             0.0,
             0.7,
+            (colm_core::site_radians(0.0), colm_core::site_radians(0.7)),
         )
         .unwrap();
     assert_eq!(forcing.air_temperature_k, 273.65);
@@ -215,6 +216,7 @@ fn point_runtime_adapter_accepts_the_shared_model_clock_timestamp() {
             true,
             0.0,
             0.7,
+            (colm_core::site_radians(0.0), colm_core::site_radians(0.7)),
         )
         .is_err());
 }

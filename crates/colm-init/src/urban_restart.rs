@@ -550,8 +550,10 @@ pub(crate) fn write_cold_urban_time_restart(
         ("snowdp_gper", vec![0.0; urban]),
         ("snowdp_lake", vec![0.0; urban]),
         ("t_room", vec![283.0; urban]),
-        ("t_roof", vec![283.0; urban]),
-        ("t_wall", vec![283.0; urban]),
+        // 上游初始化从不给 `t_roof`/`t_wall` 赋值，`allocate` 后直接写出（上游缺陷第 22 条），
+        // 实测写出的是 0。
+        ("t_roof", vec![0.0; urban]),
+        ("t_wall", vec![0.0; urban]),
         ("tafu", vec![0.0; urban]),
         ("Fhac", vec![0.0; urban]),
         ("Fwst", vec![0.0; urban]),

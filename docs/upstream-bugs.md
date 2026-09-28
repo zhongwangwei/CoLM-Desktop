@@ -124,6 +124,14 @@
 - **处理**：`vendor/` 未改；Rust 取 0（`urban_thermal.rs`）。建议上游赋 `dT(5) = 0.`（叶温已在
   `UrbanVegFlux` 里闭合，长波增量不应再计一次）。
 
+### 22. 城市冷启动把未初始化的 `t_roof`/`t_wall` 写进重启
+
+- **位置**：`main/URBAN/MOD_Urban_Vars_TimeVariables.F90:204`（`allocate (t_roof(numurban))`）、`:396`
+  （`ncio_write_vector (…, 't_roof', …)`）；`mkinidata/` 里没有任何地方给它们赋值。
+- **原因**：`t_roof`/`t_wall` 是诊断量，只在 `UrbanTHERMAL` 里算；冷启动 `allocate` 后直接写出。
+- **影响**：只有冷启动重启里的这两个值（实测 macOS 上是 0）；第一步 `UrbanTHERMAL` 会覆盖它们。
+- **处理**：`vendor/` 未改；colm-init 照实测写 0（`urban_restart.rs`）。建议上游初始化为 `tref` 或 0。
+
 ## 二、TRACER 编译开关改变了物理（需要上游确认哪一边是对的）
 
 这一版上游在很多地方给 TRACER 构建和非 TRACER 构建写了**不同的物理**，不只是记账不同。

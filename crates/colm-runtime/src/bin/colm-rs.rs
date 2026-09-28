@@ -229,6 +229,23 @@ fn run() -> Result<()> {
     // 会话从**配置**开（窗口、站点、步长、频率都在里面），要在 `open` 消费掉
     // 配置之前建好 —— 而它自己不带 forcing，所以先后没有别的影响。
     let session = history_session(&config, &outputs)?;
+    // 主循环的 `coszen`/`cosazi`/本地时间都读常数重启的 `patchlonr`/`patchlatr`（上游
+    // `MOD_Vars_TimeInvariants`），不从度数现算 —— 两者差 1 ULP 时只有读重启才与内核同源。
+    let config = {
+        let constant = colm_init::RestartFile::open(&files.constant)
+            .context("cannot open the constant restart for patchlonr/patchlatr")?;
+        let pick = |name: &str| -> Result<f64> {
+            constant
+                .floats(name)?
+                .get(arguments.patch)
+                .copied()
+                .with_context(|| format!("the constant restart has no {name} for this patch"))
+        };
+        PointRuntimeConfig {
+            site_radians: Some((pick("patchlonr")?, pick("patchlatr")?)),
+            ..config
+        }
+    };
     let mut runtime = PointRuntime::open(config)?;
     if let Some(optimizer) = baseflow_optimizer {
         runtime = runtime.with_baseflow_optimizer(optimizer);

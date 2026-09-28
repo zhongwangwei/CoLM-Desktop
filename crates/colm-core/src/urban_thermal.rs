@@ -198,13 +198,15 @@ pub struct UrbanThermalOutput {
     pub fsen_wsha: f64,
     pub fsen_gimp: f64,
     pub fsen_gper: f64,
-    pub fsen_urbl: f64,
+    /// `fsen_urbl`：只在有树（`doveg`）时赋值，否则保持调用前的值（上游 `intent(out)` 不赋值，
+    /// 实际是 `MOD_Urban_Vars_1DFluxes` 里初值 `spval` 的持久变量）。
+    pub fsen_urbl: Option<f64>,
     pub troof: f64,
     pub twall: f64,
     pub lfevp_roof: f64,
     pub lfevp_gimp: f64,
     pub lfevp_gper: f64,
-    pub lfevp_urbl: f64,
+    pub lfevp_urbl: Option<f64>,
     pub qseva_roof: f64,
     pub qseva_gimp: f64,
     pub qseva_gper: f64,
@@ -943,9 +945,10 @@ pub fn urban_thermal(
         out.etr *= ctx.fveg;
         fsena = fseng + out.fsenl;
         fevpa = fevpg + out.fevpl;
-        out.lfevp_urbl = out.fevpl * HVAP;
-        lfevpa += out.lfevp_urbl;
-        out.fsen_urbl = out.fsenl;
+        let lfevp_urbl = out.fevpl * HVAP;
+        lfevpa += lfevp_urbl;
+        out.lfevp_urbl = Some(lfevp_urbl);
+        out.fsen_urbl = Some(out.fsenl);
         out.etr_deficit *= ctx.fveg;
     } else {
         fsena = fseng;

@@ -598,7 +598,11 @@ pub fn urban_bare_flux(input: UrbanFluxInput) -> Result<UrbanFluxOutput> {
         } else {
             s.fwet_gimp_
         };
-        qg = mixed_ground_humidity(&input, s.fgimp, s.fgper, fwet_gimp);
+        // `:741`（`UrbanOnlyFlux` 迭代内）与初值 `:436`、树冠版 `:2199` 不同：
+        // `(qgimp*fgimp)*fwet` 被 PRE 提出去单独舍入，分子是**普通加法**
+        // `qgper*fgper + (qgimp*fgimp)*fwet`，没有 FMA。
+        qg = (input.qgper * s.fgper + (input.qgimp * s.fgimp) * fwet_gimp)
+            / (s.fgper + fwet_gimp * s.fgimp);
         let updated = stability(&input, zldis, ur, t.ustar, t.fh, t.fq, taf2, qaf2);
         tstar = updated.0;
         qstar = updated.1;
