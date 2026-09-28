@@ -169,7 +169,7 @@ pub fn canopy_monin_obukhov_with_scheme(
     ensure!(
         input.top_layer_displacement_m.is_finite()
             && input.top_layer_roughness_m.is_finite()
-            && input.top_layer_roughness_m > 0.0
+            && input.top_layer_roughness_m >= 0.0
             && input.canopy_top_height_m.is_finite()
             && input.canopy_top_height_m > input.surface.displacement_height_m
             && input.top_layer_displacement_m + input.top_layer_roughness_m

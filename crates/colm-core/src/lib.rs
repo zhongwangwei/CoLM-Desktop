@@ -111,6 +111,7 @@ pub mod thermal_water;
 pub mod time_state;
 pub mod urban;
 pub mod urban_bem;
+pub mod urban_flux;
 pub mod urban_flux_diagnostics;
 pub mod urban_ground_flux;
 pub mod urban_impervious;
@@ -121,8 +122,10 @@ pub mod urban_pervious;
 pub mod urban_radiation;
 pub mod urban_roof_flux;
 pub mod urban_sealed_hydrology;
+pub mod urban_step;
 pub mod urban_surface_exchange;
 pub mod urban_temperature;
+pub mod urban_thermal;
 pub mod variably_saturated_flow;
 pub mod vegetation;
 pub mod vic;
@@ -203,7 +206,17 @@ pub use hydrology::{
 };
 pub use linear::solve_tridiagonal;
 pub use urban_bem::{urban_bem, UrbanBemInput, UrbanBemState};
+pub use urban_flux::{
+    urban_bare_flux, urban_vegetated_flux, UrbanFluxInput, UrbanFluxOutput, UrbanTreeInput,
+    UrbanTreeOutput, UrbanTreeState,
+};
 pub use urban_flux_diagnostics::UrbanFluxDiagnostics;
+pub use urban_step::{
+    urban_step, UrbanClock, UrbanPatchState, UrbanSite, UrbanStepOutput, UrbanSurface,
+};
+pub use urban_thermal::{
+    urban_thermal, UrbanSurfaceRef, UrbanThermalContext, UrbanThermalOutput, UrbanThermalState,
+};
 
 pub use interception::{
     canopy_storage_capacity_colm2024, canopy_wetness, intercept_canopy, CanopyInterceptionFluxes,

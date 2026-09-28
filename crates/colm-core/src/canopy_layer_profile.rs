@@ -548,7 +548,9 @@ fn validate_wind_profile(input: CanopyWindProfileInput, height_m: f64) -> Result
             && input.ground_momentum_roughness_m > 0.0
             && input.attenuation_coefficient > 0.0
             && input.canopy_top_height_m > input.canopy_bottom_height_m
-            && input.canopy_bottom_height_m >= input.ground_momentum_roughness_m
+            // 城市街谷把"冠层"底定在地面（`hbot = 0`，`MOD_Urban_Flux.F90:625`），
+            // 所以底只要求非负，不要求高过地表粗糙度。
+            && input.canopy_bottom_height_m >= 0.0
             && height_m >= input.ground_momentum_roughness_m,
         "canopy wind profile inputs are invalid"
     );
@@ -587,7 +589,7 @@ fn validate_diffusivity_profile(input: CanopyDiffusivityProfileInput, height_m: 
         .all(|value| value.is_finite())
             && input.diffusivity_at_canopy_top_m2_s > 0.0
             && input.canopy_top_height_m > input.canopy_bottom_height_m
-            && input.canopy_bottom_height_m > 0.0
+            && input.canopy_bottom_height_m >= 0.0
             && input.obukhov_length_m != 0.0
             && input.friction_velocity_m_s > 0.0
             && height_m > 0.0,
