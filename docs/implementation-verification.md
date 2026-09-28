@@ -25235,3 +25235,70 @@ Fortran 名，形状与初值（`spval`/`spval_i4`/`.false.`）取自 `allocate`
 （`altmax_lastyear_indx`、`skip_balance_check`），改为允许、但要求替换值是精确整数、类型按盘上原样还原。
 
 运行期原先**根本不读** `DEF_USE_BGC`：BGC 算例会只跑物理、把 BGC 状态原样写回且不报错。driver 移植完之前改为当场拒绝。
+
+## 第 415 轮：BGC driver 全部 30 个阶段逐过程回放逐位（C2–C4）
+
+### 一、验证方法：逐阶段追踪 + 逐过程回放
+
+BGC driver 一步串起约 30 个过程、改写约 1000 个数组，只看端到端重启只能知道"错了"。做法：
+
+- `oracle/scripts/gen_bgc_trace.py` 给调试构建树里的 `MOD_BGC_driver.F90` 插桩：每个 `CALL` 之后把 driver 实参、
+  BGC 读写的物理量（`EXTRAS`）与全部 `MOD_BGC_Vars_*` 数组写成自描述的二进制记录。`COLM_BGC_TRACE`/
+  `_CALLS`/`_FROM`/`_EVERY` 控制采样窗口（全年 bm 算例 `FROM=20 EVERY=731 CALLS=2` → 48 次调用，125 MB）。
+- `colm_core::bgc_trace` 读写同一格式；`crates/colm-runtime/examples/bgc_replay.rs` 拿 Fortran 某阶段**之前**的
+  记录当输入、只跑这一个阶段，再与**之后**的记录逐位比。每个过程因此脱离上游误差单独验证。
+- `oracle/scripts/bgc_trace_cmp.py` 比两份追踪，报第一个分叉的（调用，阶段，字段，下标）。
+
+结果：bm（AT-Neu 3-PFT：C3 草/温带落叶阔叶/常绿针叶，NITRIF/FIRE/SASU 关）全年 48 次调用 × 30 阶段 =
+**1440/1440 逐位**，release 与 debug 两种构建都一样。
+
+### 二、转写工具（`oracle/scripts/bgc_port/`）与编译器行为
+
+状态更新类模块（约 5000 行 `x = x ± flux·Δt`）用 `f2rs.py` 转写，`regen.py` 生成最终文件（文件头注明勿手改）。
+`gx.py` 把 GIMPLE 还原成按源码行的表达式，是逐行核对的主要工具。实测需要复现的 gfortran 16.1 `-O2` 行为：
+
+1. **FMA 收缩**：`a ± b·c` 融合；两边都是乘积时融合左边（先定义的）那个；负乘积参与加减变 `FNMA`；
+   Fortran 括号包住的乘积不融合。
+2. **CSE 阻止收缩**：同一个乘积（如 `leafn_xfer_to_leafn_p·deltim`）被多条语句共享、其中一个使用点在别的基本块
+   （SASU 累加器的 `IF` 里）时，`convert_mult_to_fma` 整个放弃。源码看不出来，只能逐行对 GIMPLE：该行在 GIMPLE 中出现、
+   却没有 FMA，就不收缩（`CStateUpdate1` 36 处、`NStateUpdate1` 24 处）。这类路径的通量平时常为 0，采样回放未必能暴露，
+   所以以 GIMPLE 为准。
+3. **按行统计要跨函数**：`CNGap_VegToLitter` 被内联进 `CNGapMortality`，按函数名找不到它，曾把整段误判为"无 FMA"
+   （48/48 末位差）。改为全文件按行号统计。
+4. **向量化的保序归约**：`CNDriverSummarizeFluxes` 里 29 项相加再乘 `pftfrac` 的 `ar = sum(...)` 被向量化
+   （fold-left，GIMPLE 有 `vect_`/`BIT_FIELD_REF`）：两个 PFT 一组先向量乘、再按 lane 顺序加（**不融合**），
+   `ps == pe` 或奇数尾部走标量并融合。`bgc_driver::vectorized_dot` 按此求值。全 BGC 的 GIMPLE 里这种归约只有两处
+   （另一处在火模块）。
+5. **`sin`/`cos` 合并**：`daylength` 里同一角度的 `sin`/`cos` 被合成 `cexpi`，macOS 上落到 `_cexp`。实测
+   `cexp(i·y)` 与独立 `sin`/`cos` 在 2000 万个 |y| ≤ π/2 样本上全部逐位相同，而 `__sincos_stret` 的 sin 有 178952 个
+   差 1 ULP——所以 Rust 走不内联的 `fortran_sin`/`fortran_cos`，不用 `sin_cos()`，也不需要 FFI。
+
+### 三、上游缺陷（按参考内核行为复现，未修）
+
+- **`SoilBiogeochemLittVertTransp` 越界读。** driver 传入的全局 `z_soi`/`zi_soi` 只有 `1:nl_soil`，本过程把
+  `zi_soi` 声明成 `0:nl_soil_full`（序列关联，形参 `zi_soi(k)` = 全局 `zi_soi(k+1)`），且在 `nl_soil+1` 层读
+  `z_soi(nl_soil+1)`。`nm kernels/default/colm.x` 看 `MOD_Vars_Global` 布局为 `zi_soi`、`z_soi`、`N_URB`（4 字节 +
+  4 字节零填充）、`dz_soi` 相接：形参 `zi_soi(10)`/`zi_soi(11)` 读到 `z_soi(1)`/`z_soi(2)`，`z_soi(11)` 读到 `N_URB`
+  的位模式（次正规数，只出现在 `z − x` 里被完全吸收，等价 +0）。换一个链接布局的平台，Fortran 自己的结果也会变。
+- `SoilBiogeochemPotential` 用 `floating_cn_ratio(receiver_pool(k))` 判断，接收池是大气（`i_atm = 0`）时越界；现行级联
+  没有这种转化，Rust 归到"100% 呼吸"分支。
+- `CNGResp` 的 `respfact_*` 是恒为 1 的占位；`CNVegStructUpdate` 在关闭 LAI 反馈时也**每步改写 `tsai_p`**，
+  所以 BGC 不是纯单向耦合，接入 runtime 时必须带上。
+
+### 四、vendor 与上游的关系
+
+上游 `CoLM-SYSU-integration` HEAD 仍是 3c799bae。vendor 与它逐字节不同的 168 个文件，差异是本仓库有意的改造：
+编译期 `#ifdef BGC/PFT/…` 改运行时 `DEF_USE_*`、`DEF_PFT_*` 参数覆盖、tracer 运行时化，以及少数本地修复
+（`CNSummary` 的 `nfixlags > 0` 守卫、`CNSASU` 改用 `isendofyear`、`mpi_abort` 参数个数）。BGC 数值代码在默认开关下与
+上游一致；验收基准 `kernels/default` 由 vendor 构建，移植以 vendor 为准。
+
+### 五、实测
+
+```
+tmp/replay.sh tmp/by-fortran                    → 1440 identical, 0 differing, 0 not ported
+target/debug/examples/bgc_replay …（debug）      → 1440 identical, 0 differing, 0 not ported
+cargo test -p colm-core --lib 376 / -p colm-runtime --lib --bins 80；clippy 无告警；fmt 通过
+```
+
+未验证：NITRIF、FIRE、SASU/DiagMatrix、作物分支（代码照抄或已生成，但 bm 不经过）；driver 尚未接入 runtime，
+端到端（重启、历史、`tsai_p` 回流物理）还没跑。
