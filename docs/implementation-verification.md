@@ -25624,3 +25624,16 @@ namelist 的值，读到的不是同一个文件；vn/c1/vc 的纯 Fortran 参�
 
 实测（release，全部对照纯 Fortran 参考）：58/58 个算例历史与重启逐位一致（含 LCT/城市/湖泊/PFT/PC/BGC 各分支与作物 `cr`）；
 vn/c1/vc/r0v0/an-new 的 debug 构建同样逐位。
+
+## 第 426 轮：作物覆盖扩展——大豆与冬小麦
+
+以 US-Ne3 为底，只改站点文件的 `croptyp`（`pftclass = croptyp + 14`）与播种日，做两个变体（验证的是算法，不代表农学合理）：
+- `cs`：大豆（类别 23），播种日 140。
+- `cw`：冬小麦（类别 21），播种日 280（秋播），用于覆盖春化 `vernalization`（`f_vf` 最大 0.963，确实被触发）。
+
+两者对 `kernels/crop` 纯 Fortran 参考：39/39 重启、12/12 历史逐位一致（release）。至此手写的 `vernalization`
+（编译期折叠常数）得到了逐位验证。
+
+大豆变体曾打开 `DEF_USE_CNSOYFIXN` 试验：Rust 同样逐位，但把它关掉重跑结果**完全不变**——本算例里固氮量恒为 0
+（土壤矿质氮高于阈值时 `fxn = 0`），`CNSoyfix` 的数值路径没有被检验。因此仍拒绝 `DEF_USE_CNSOYFIXN`，回归用的 `cs`
+关掉它。要验证固氮，需要一个矿质氮偏低的大豆站点。
