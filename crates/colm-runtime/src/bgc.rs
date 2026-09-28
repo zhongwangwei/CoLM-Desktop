@@ -13,7 +13,8 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{ensure, Context, Result};
-use colm_core::bgc_state::{BgcDims, BgcState};
+use colm_core::bgc_driver::BgcPftConstants;
+use colm_core::bgc_state::{BgcConstants, BgcDims, BgcState};
 use colm_init::{RestartFile, RestartOverride};
 
 /// 一个 patch 的 BGC 初始状态。
@@ -84,6 +85,38 @@ impl BgcTemplate {
         }
         overrides
     }
+}
+
+/// 只读全局 BGC 常数重启里的模块级标量（`Q10`、池下标等）。
+pub fn read_bgc_constants(global: &Path) -> Result<BgcConstants> {
+    let mut state = BgcState::new(0, BgcDims::default());
+    load_constants(&RestartFile::open(global)?, &mut state)?;
+    Ok(state.constants)
+}
+
+/// `MOD_Const_PFT` 里 BGC 用的按类别参数：写死的类别标志取 [`colm_case::pft::fixed_value`]，
+/// 其余经 `DEF_PFT_*` 覆盖后取值（与物理 PFT 参数同一路径，[`colm_init::pft_parameter`]）。
+pub fn bgc_pft_constants(document: &colm_namelist::Document) -> Result<BgcPftConstants> {
+    let classes = colm_case::pft::PFT_NAMES.len();
+    let mut table = BgcPftConstants::default();
+    for name in BgcPftConstants::NAMES {
+        let values = (0..classes)
+            .map(|class| {
+                let class = u8::try_from(class).expect("PFT classes fit u8");
+                if colm_case::pft::FIXED_PARAMETERS.contains(name) {
+                    colm_case::pft::fixed_value(name, class)
+                } else {
+                    let meta = colm_case::pft::all_parameters()
+                        .iter()
+                        .find(|meta| meta.source == *name)
+                        .with_context(|| format!("{name} has no DEF_PFT_* entry"))?;
+                    colm_init::pft_parameter(document, meta.name, i32::from(class), false, false)
+                }
+            })
+            .collect::<Result<Vec<_>>>()?;
+        *table.field_mut(name).expect("listed name") = values;
+    }
+    Ok(table)
 }
 
 fn load_constants(file: &RestartFile, state: &mut BgcState) -> Result<()> {

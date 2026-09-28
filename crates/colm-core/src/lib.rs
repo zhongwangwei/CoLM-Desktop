@@ -71,8 +71,17 @@ impl LibmPow for f64 {
 pub mod albedo;
 pub mod atmosphere;
 pub mod bgc;
+pub mod bgc_balance;
+pub mod bgc_decomp;
+pub mod bgc_driver;
+pub mod bgc_n_dynamics;
+pub mod bgc_nutrient;
+pub mod bgc_resp;
+pub mod bgc_soil_competition;
 pub mod bgc_state;
 pub mod bgc_state_generated;
+pub mod bgc_trace;
+pub mod bgc_vertical_profile;
 pub mod bgc_zero_fluxes_generated;
 pub mod calendar;
 pub mod canopy_layer_profile;
