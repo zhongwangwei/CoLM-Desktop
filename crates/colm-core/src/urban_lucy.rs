@@ -46,14 +46,23 @@ pub fn urban_lucy_flux(input: UrbanLucyFluxInput<'_>) -> Result<UrbanLucyFluxes>
     };
     let metabolic_heat =
         input.population_density_per_km2 * input.human_metabolic_profile[hour_index] / 1_000_000.0;
-    let vehicle_factor = input.population_density_per_km2 / 1000.0 * traffic * 3975.0 * 50_000.0
-        / 1_000_000.0
-        / 3600.0;
+    // `MOD_Urban_LUCY.F90:145-174`：三类车各自
+    // `((((traf*((pop_den*cells)/1000))*EC)*(car_sp*1000))/1e6)/3600`，车数为 0 时那一项取 0，
+    // 最后 `(car + mot) + fre`（先把公共因子乘好再乘车数，舍入不同）
     let vehicle_heat = input
         .vehicles_per_thousand
         .iter()
-        .map(|vehicles| vehicles * vehicle_factor)
-        .sum();
+        .map(|&vehicles| {
+            if vehicles > 0.0 {
+                ((((traffic * ((input.population_density_per_km2 * vehicles) / 1000.0)) * 3975.0)
+                    * 50_000.0)
+                    / 1_000_000.0)
+                    / 3600.0
+            } else {
+                0.0
+            }
+        })
+        .fold(0.0, |sum, flux| sum + flux);
     Ok(UrbanLucyFluxes {
         anthropogenic_heat: metabolic_heat + vehicle_heat,
         vehicle_heat,

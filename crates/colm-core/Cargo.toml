@@ -9,6 +9,7 @@ publish.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+colm-lapack = { path = "../colm-lapack" }
 
 [lints]
 workspace = true

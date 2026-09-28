@@ -1,15 +1,20 @@
 //! Urban pervious-road temperature adapter from `MOD_Urban_PerviousTemperature.F90`.
 //!
-//! Its column physics is CoLM soil/snow physics. The urban branch changes the
-//! already-computed surface radiative and turbulent fluxes, so it deliberately
-//! calls `ground_temperature` instead of maintaining a second temperature or
-//! phase-change implementation.
+//! 导热求解与 `UrbanImperviousTem` 逐句相同（两份 GIMPLE 收缩形状一致），共用
+//! [`crate::urban_impervious::solve_urban_ground_column`]；相变调土壤的 `meltf`
+//! （[`crate::phase_change`]），传入的三个热通量都是同一个 `hs`、雪盖为 0。
+//!
+//! **不能**借道 `ground_temperature`：那是 `MOD_GroundTemperature` 的移植，`hs` 的拼法
+//! （`dlrad*emg`、降水热项）和顶层 `fact`、`brr` 的收缩形状都与城市模块不同，
+//! AU-Preston 第 66 步透水地面第 5 层温度因此差 1 ULP。
 
 use anyhow::{ensure, Result};
 
 use crate::{
-    ground_temperature, GroundTemperatureInput, GroundTemperatureState, SoilHydraulicModel,
-    SoilThermalInput, ThermalConductivityScheme,
+    phase_change,
+    urban_impervious::{solve_urban_ground_column, UrbanColumnSolve, UrbanGroundKind},
+    GroundTemperatureState, PhaseChangeInput, SoilHydraulicModel, SoilThermalInput,
+    ThermalConductivityScheme, UrbanImperviousTemperatureInput,
 };
 
 /// Inputs to `UrbanPerviousTem`, with snow layers packed before soil layers.
@@ -54,19 +59,17 @@ pub fn urban_pervious_temperature(
         !input.temperature_k.is_empty(),
         "urban pervious temperature needs at least one packed layer"
     );
-    let surface_temperature_k = input.temperature_k[0];
-    ground_temperature(GroundTemperatureInput {
-        patch_type: input.patch_type,
-        is_dry_lake: false,
+    let layers = input.temperature_k.len();
+    let soil_layers = layers - input.snow_layers;
+    let no_override = vec![0.0; soil_layers];
+    let column = UrbanImperviousTemperatureInput {
         time_step_seconds: input.time_step_seconds,
         surface_temperature_factor: input.surface_temperature_factor,
         crank_nicolson_factor: input.crank_nicolson_factor,
         thermal_conductivity_scheme: input.thermal_conductivity_scheme,
         soil_thermal_inputs: input.soil_thermal_inputs,
-        soil_porosity: input.soil_porosity,
-        soil_residual_water: input.soil_residual_water,
-        soil_suction_mm: input.soil_suction_mm,
-        soil_hydraulic_model: input.soil_hydraulic_model,
+        impervious_heat_capacity_j_m3_k: &no_override,
+        impervious_interface_conductivity_w_m_k: &no_override,
         snow_layers: input.snow_layers,
         layer_thickness_m: input.layer_thickness_m,
         node_depth_m: input.node_depth_m,
@@ -76,32 +79,65 @@ pub fn urban_pervious_temperature(
         ice_water_kg_m2: input.ice_water_kg_m2,
         snow_water_equivalent_kg_m2: input.snow_water_equivalent_kg_m2,
         snow_depth_m: input.snow_depth_m,
-        snow_cover_fraction: 0.0,
-        use_split_soil_snow: false,
-        snow_layer_absorption_w_m2: None,
-        absorbed_ground_shortwave_w_m2: input.absorbed_shortwave_w_m2
-            + input.absorbed_longwave_w_m2,
-        absorbed_soil_shortwave_w_m2: 0.0,
-        absorbed_snow_shortwave_w_m2: 0.0,
-        downward_longwave_w_m2: 0.0,
-        sensible_ground_w_m2: input.sensible_heat_w_m2,
-        sensible_soil_w_m2: 0.0,
-        sensible_snow_w_m2: 0.0,
-        evaporation_ground_kg_m2_s: input.evaporation_kg_m2_s,
-        evaporation_soil_kg_m2_s: 0.0,
-        evaporation_snow_kg_m2_s: 0.0,
-        ground_flux_temperature_derivative_w_m2_k: input.surface_energy_temperature_slope_w_m2_k
-            - input.longwave_temperature_slope_w_m2_k,
+        absorbed_longwave_w_m2: input.absorbed_longwave_w_m2,
+        longwave_temperature_slope_w_m2_k: input.longwave_temperature_slope_w_m2_k,
+        absorbed_shortwave_w_m2: input.absorbed_shortwave_w_m2,
+        sensible_heat_w_m2: input.sensible_heat_w_m2,
+        evaporation_kg_m2_s: input.evaporation_kg_m2_s,
+        surface_energy_temperature_slope_w_m2_k: input.surface_energy_temperature_slope_w_m2_k,
         vaporization_heat_j_kg: input.vaporization_heat_j_kg,
-        ground_emissivity: 0.0,
-        rain_on_ground_kg_m2_s: 0.0,
-        snow_on_ground_kg_m2_s: 0.0,
-        precipitation_temperature_k: surface_temperature_k,
-        ground_temperature_k: surface_temperature_k,
-        soil_surface_temperature_k: surface_temperature_k,
-        snow_surface_temperature_k: surface_temperature_k,
+    };
+    let UrbanColumnSolve {
+        temperature,
+        factor,
+        conductivity,
+        residual,
+        surface_flux,
+        surface_flux_slope,
+    } = solve_urban_ground_column(
+        column,
+        input.liquid_water_kg_m2,
+        input.ice_water_kg_m2,
+        UrbanGroundKind::Pervious,
+        layers,
+    )?;
+    let snow_ice_before = input.ice_water_kg_m2[..input.snow_layers].to_vec();
+    // `CALL meltf (patchtype, .false., lb, nl_soil, deltim, fact, brr, hs, hs, hs, 0., dhsdT, …)`
+    let phase = phase_change(PhaseChangeInput {
+        patch_type: input.patch_type,
+        is_dry_lake: false,
+        time_step_seconds: input.time_step_seconds,
+        fact_seconds_per_j_m2_k: &factor,
+        residual_heat_flux_w_m2: &residual,
+        snow_layer_absorption_w_m2: None,
+        surface_heat_flux_w_m2: surface_flux,
+        soil_heat_flux_w_m2: surface_flux,
+        snow_heat_flux_w_m2: surface_flux,
+        snow_cover_fraction: 0.0,
+        surface_heat_flux_temperature_derivative_w_m2_k: surface_flux_slope,
+        previous_temperature_k: input.temperature_k,
+        temperature_k: &temperature,
+        liquid_water_kg_m2: input.liquid_water_kg_m2,
+        ice_water_kg_m2: input.ice_water_kg_m2,
+        snow_water_equivalent_kg_m2: input.snow_water_equivalent_kg_m2,
+        snow_depth_m: input.snow_depth_m,
+        snow_layers: input.snow_layers,
+        split_soil_snow: false,
         supercool_water: input.supercool_water,
-    })
+        soil_layer_thickness_m: &input.layer_thickness_m[input.snow_layers..],
+        soil_porosity: input.soil_porosity,
+        soil_residual_water: input.soil_residual_water,
+        soil_suction_mm: input.soil_suction_mm,
+        soil_hydraulic_model: input.soil_hydraulic_model,
+    })?;
+    Ok(crate::ground_temperature::state_from_phase(
+        phase,
+        snow_ice_before,
+        input.time_step_seconds,
+        input.temperature_k.to_vec(),
+        factor,
+        conductivity,
+    ))
 }
 
 #[cfg(test)]

@@ -3,7 +3,7 @@
 use anyhow::{ensure, Result};
 
 use crate::{
-    net_solar::{absorption, local_noon_shortwave, visible_absorption},
+    net_solar::{local_noon_shortwave, visible_absorption},
     LocalNoonShortwave, ShortwaveForcing, UrbanRadiationState,
 };
 
@@ -46,7 +46,7 @@ pub fn urban_net_solar(
     let active = forcing.total() > 0.0;
     let flux = |coefficient| {
         if active {
-            absorption(forcing, coefficient)
+            urban_absorption(forcing, coefficient)
         } else {
             0.0
         }
@@ -62,7 +62,11 @@ pub fn urban_net_solar(
             + reflected_diffuse_visible_w_m2
             + reflected_direct_near_infrared_w_m2
             + reflected_diffuse_near_infrared_w_m2,
-        vegetation_absorbed_w_m2: flux(radiation.sunlit_tree_absorption),
+        vegetation_absorbed_w_m2: if active {
+            tree_absorption(forcing, radiation.sunlit_tree_absorption)
+        } else {
+            0.0
+        },
         vegetation_par_w_m2: if active {
             visible_absorption(forcing, radiation.sunlit_tree_absorption)
         } else {
@@ -87,6 +91,35 @@ pub fn urban_net_solar(
             radiation.albedo,
         ),
     })
+}
+
+/// `sols*s(1,1) + soll*s(2,1) + solsd*s(1,2) + solld*s(2,2)`（`MOD_Urban_NetSolar.F90:110-138`）：
+/// GIMPLE 从 `soll*s(2,1)` 起，依次 `.FMA` 吸收 `sols`、`solsd`、`solld` 三项 ——
+/// 与陆地 `netsolar` 的配对（`MOD_NetSolar.F90:178`）不同，不能共用 `absorption`。
+fn urban_absorption(forcing: ShortwaveForcing, coefficient: [[f64; 2]; 2]) -> f64 {
+    let first = forcing.direct_visible_w_m2.mul_add(
+        coefficient[0][0],
+        forcing.direct_near_infrared_w_m2 * coefficient[1][0],
+    );
+    forcing.diffuse_near_infrared_w_m2.mul_add(
+        coefficient[1][1],
+        forcing
+            .diffuse_visible_w_m2
+            .mul_add(coefficient[0][1], first),
+    )
+}
+
+/// `sabv`（`:125`）：同样的四项，但 `solsd*ssun(1,2)` 与下一行 `par` 共享，
+/// 被单独舍入后再**相加**（`_85 = _82 + _84`），只有最后一项进 FMA。
+fn tree_absorption(forcing: ShortwaveForcing, coefficient: [[f64; 2]; 2]) -> f64 {
+    let first = forcing.direct_visible_w_m2.mul_add(
+        coefficient[0][0],
+        forcing.direct_near_infrared_w_m2 * coefficient[1][0],
+    );
+    forcing.diffuse_near_infrared_w_m2.mul_add(
+        coefficient[1][1],
+        first + forcing.diffuse_visible_w_m2 * coefficient[0][1],
+    )
 }
 
 fn validate(input: UrbanNetSolarInput, radiation: &UrbanRadiationState) -> Result<()> {

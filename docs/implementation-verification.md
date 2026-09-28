@@ -24917,65 +24917,99 @@ cargo test core 367 / runtime 76 / hist 50 / init 156 / srfdata 270+49（后两�
 clippy 无告警；fmt 通过
 ```
 
-## 第 410 轮：城市（patchtype 1）接进 Rust 主循环（未逐位，卡在 LAPACK 求逆）
+## 第 410 轮：城市（patchtype 1）接进 Rust 主循环，AU-Preston 逐位相同
 
 ### 一、接线
 
 `CoLMMAIN_Urban` 整支接进 `advance_patch`：`urban_step`（`urban_flux.rs` / `urban_thermal.rs` /
-`urban_step.rs`，上一个提交 078900c）+ `UrbanTemplate`（读 `_restart_urban_` 时间重启与
-`_restart_urb_const_` 常数重启，城市变量按 `urban` 维而非 `patch` 维索引，墙体层在 15 层数组里
-偏移 5）+ `push_urban` history + 续跑写回 `_restart_urban_`。`DEF_URBAN_RUN` 下 `split`/PHS/
-`supercool`/WUE 强制关（`physics.rs`，与 `MOD_Namelist` 的强制一致）。
+`urban_step.rs`）+ `UrbanTemplate`（读 `_restart_urban_` 时间重启与 `_restart_urb_const_` 常数重启，
+城市变量按 `urban` 维而非 `patch` 维索引，墙体层在 15 层数组里偏移 5）+ `push_urban` history +
+续跑写回 `_restart_urban_`。`DEF_URBAN_RUN` 下 `split`/PHS/`supercool`/WUE 强制关（`physics.rs`，
+与 `MOD_Namelist` 的强制一致）。
 
-AU-Preston（2004-01，小时输出）跑通后逐项对照 Fortran，修掉四处：
+### 二、语义问题（不是舍入）
 
 1. **透水地面永远走 `WATER_2014`**：`UrbanHydrology`（`MOD_Urban_Hydrology.F90:271`）无条件
-   `CALL WATER_2014`，不看 `DEF_USE_VariablySaturatedFlow`；Rust 的 `water_2014_snow_soil_step`
-   在 VSF 打开时会切到 VSF 那一支。第 1 步 `zwt` 从 3.43 m 掉到 0.014 m、`wa` 为 0。现在城市
-   调用处显式 `variably_saturated: false`。
+   `CALL WATER_2014`，不看 `DEF_USE_VariablySaturatedFlow`。第 1 步 `zwt` 从 3.43 m 掉到 0.014 m。
+   注意这是 **vG 土壤 + 非 VSF** 的组合，正常土壤 patch 上被 `MOD_Namelist` 强制 VSF 而走不到。
 2. **月度 LAI**：城市单点下 `LAI_readin` 什么都不写（`.not. DEF_URBAN_RUN` 守卫），换 `tlai/tsai` 的是
-   `UrbanLAI_readin`：读 `srfdata.nc` 的 `TREE_LAI`/`TREE_SAI`（`MOD_SingleSrfdata.F90:1806-1809`
-   读进同一对 `SITE_LAI_monthly`），年份按 `findloc_ud` **精确匹配夹到 `DEF_LAI_START/END_YEAR`
-   之后的年**（不是 `USE_SITE_LAI` 的最近年），不除 `fveg0`。城市单点里的非城市 patch 则保持重启值。
-3. **`wat`/`wat_inst`**：上游两者都直接取 `CoLMMAIN_Urban.F90:1323-1324` 的 `wat`（三类地表按面积
-   加权 + `wa*(1-froof)*fgper`），不能按土壤 patch 的公式从聚合后的 `wliq_soisno` 重算 ——
-   差的正好是 `wa*(1-froof)*fgper = 2.385*0.38 = 0.906 mm`。`rstfacsun` 取城市 `rstfac`
-   （`CoLMDRIVER.F90:354`），`rstfacsha` 城市分支不写。
-4. **`fwsha` 不重算**：见 `docs/upstream-bugs.md` 第 20 条（GIMPLE 为据）。
+   `UrbanLAI_readin`：读 `srfdata.nc` 的 `TREE_LAI`/`TREE_SAI`，年份按 `findloc_ud` **精确匹配夹到
+   `DEF_LAI_START/END_YEAR` 之后的年**，不除 `fveg0`；同时写 `urb_lai`，所以重启里的
+   `tree_lai/tree_sai` 就是当前 `tlai/tsai`。
+3. **`wat`/`wat_inst`** 直接取 `CoLMMAIN_Urban.F90:1323-1324` 的 `wat`（含 `wa*(1-froof)*fgper`）；
+   `rstfacsun` 取城市 `rstfac`（`CoLMDRIVER.F90:354`）。
+4. **`fwsha` 不重算**（上游缺陷第 20 条）；**`alburban` 不改 `fwsun`**（只输出 `dfwsun`，更新在
+   下一步 `UrbanTHERMAL:621`）—— Rust 原先在这里就换成了新值，于是每步多加一次 `dfwsun`。
+5. **`rootr`**：`soilwater` 的 `etr*rootr(j)` 用的是本步 `eroot` 的输出，而 Rust 城市与**标准土壤
+   patch** 都传了装配期的静态 `rootfr`。各层吸水阻力都为 1 时二者逐位相同，所以此前的湿润站点
+   回归看不出来；AU-Preston 第 2 层 `rootr ≠ rootfr`，第 0 步末 `wliq(1:2)` 就差。标准步两个分支
+   （非 split 与 split）一并改成 `energy.root_uptake.layer_fraction`；31 例回归不变。
+   城市的 `rootflux = rootr*etr` 里 `etr` 是哑元，实参是 `etrgper`。
+6. **透水地面不能借道 `ground_temperature`**：`UrbanPerviousTem` 是单独的模块，`hs` 拼法与
+   `fact`/`brr` 的收缩形状都与 `MOD_GroundTemperature` 不同；现在与 `UrbanImperviousTem` 共用
+   `solve_urban_ground_column`（两份 GIMPLE 相变之前逐句同形），相变接土壤的 `phase_change`。
 
-修完后第 1 条记录的相对差从 1e0（`zwt`/`wa`）降到 1e-5（`t_wall`）以下，但仍非逐位。
+### 三、`MatrixInverse` 必须是内核链的同一份 LAPACK
 
-### 二、分歧点：`MatrixInverse` 是系统 LAPACK，自写消元对不上
-
-十六进制位探针（两引擎在 `:621`、`UrbanVegLongwave` 之后、`UrbanVegFlux` 之后、`:1002` 打印）：
-第 0 步墙体重分配后全等，`UrbanVegLongwave` 输出的 `Ainv` 25 个元素里 16 个差 1~3 ULP，
-`B/B1/dBdT/SkyVF/VegVF/fcover/ev` 全等。上游 `MOD_Urban_Shortwave:MatrixInverse` 是
-`DGETRF` + `DGETRI(lwork = n)`，短波、长波、BEM 三处共用；Fortran 内核按 `Makeoptions` 的
-`-llapack -lblas` 链到 **Accelerate**（`otool -L colm.x` → `vecLib.framework/.../libLAPACK.dylib`）。
-Rust 这三处用的是自写的部分主元高斯消元（`urban_radiation.rs::solve`，长波再按列组逆）。
-
-能否用纯 Rust 复刻 Accelerate？实验（`gfortran` 调 Accelerate 对 4000 个 4×4/5×5 随机矩阵求逆，
-对角占优与一般矩阵各半，导出位模式；独立 Rust 程序按 netlib 源码展开参考算法逐位比）：
-
-```text
-DGETRF：参考 dgetrf2（递归）与 dgetf2 结果相同；FMA + 倒数缩放（dscal 1/pivot）→ 4000/4000 逐位
-        不融合 → 1101/4000；除法缩放 → 773/4000（FMA）/ 285/4000
-DTRTRI（在逐位相同的 LU 上）：参考 dtrti2 不融合 2857/4000、融合 1943/4000；
-        分块 nb = 1..4 与不分块完全相同；行向点积（顺/逆序、对角项先/后）≤ 2857；
-        U·X = I 回代（乘倒数/除法、顺/逆序）≤ 226；trmm/trsm/trti2 各自融合与否 8 种组合 ≤ 2857
-错位位置有结构（n=4 只错 (0,2)(0,3)，n=5 集中在第 4 列前三行），但以上变体都解释不了
-```
-
-结论：LU 分解能逐位复刻，`DTRTRI`/`DGETRI` 是 Accelerate 的闭源实现，逆推不出来；而且 Windows
-内核链的是 MSYS2 的参考 LAPACK（x86-64 不带 FMA），两平台本来就要不同的算法。唯一可验证的办法是
-Rust 也调**同一个**系统 LAPACK —— 但工作区 `unsafe_code = "forbid"`（`Cargo.toml:33`），且
-Windows CI / GUI 打包是 MSVC、没有 LAPACK，属架构决定，**待定**。
-
-### 三、实测
+上游短波、长波、BEM 三处都是 `MatrixInverse`（`DGETRF` + `DGETRI(lwork = n)`）后接内联 `matmul`
+（按列 `x(i) = .FMA (Ainv(i,j), b(j), x(i))`）。Fortran 内核按 `Makeoptions` 的 `-llapack -lblas`
+在 macOS 上链到 **Accelerate**。能否纯 Rust 复刻？实验（gfortran 调 Accelerate 对 4000 个 4×4/5×5
+随机矩阵求逆，导出位模式，与按 netlib 源码展开的 Rust 参考实现逐位比）：
 
 ```text
-AU-Preston 2004-01：Rust 跑通；history 第 1 条最大相对差 t_wall 9e-6、fsenwsun 2e-6，其余 ≤ 1e-6
-  （xerr/zerr 是 1e-15 量级的残差，相对差无意义）；逐位未达成（见上）
-回归（PROFILE=release）：31 个算例与第 409 轮完全相同（sp/ts/tc 仍只剩窗口外旧续跑目录）
-cargo test core 367 / runtime 76 / hist 50 / init 156
+DGETRF：参考 dgetrf2（递归）与 dgetf2 结果相同；FMA + 倒数缩放 → 4000/4000 逐位
+DTRTRI：参考 dtrti2 不融合 2857/4000、融合 1943/4000；分块 nb = 1..4 与不分块完全相同；
+        行向点积、U·X = I 回代、trmm/trsm/trti2 各自融合与否的 8 种组合都 ≤ 2857
 ```
+
+结论：Accelerate 的 `DGETRI` 闭源、逆推不出。按选定方案新增成员 crate **`colm-lapack`**：
+工作区 `unsafe_code = "forbid"` 不继承（该 crate 降为 `deny`，只有 `accelerate` 模块放行）；
+macOS 通过 FFI 调 Accelerate framework（显式 `kind = "framework"`，免得被 Homebrew 的 `lapack`/
+`openblas` 抢走）；其它平台用逐句移植的 netlib 参考 `DGETRF2`/`DGETRI`/`DTRTI2`（x86-64 不融合、
+aarch64 融合，与 gfortran 默认编译参考库一致），MSVC 与 GUI 打包都不需要系统 LAPACK。
+单元测试含 4 个 Accelerate 生成的位模式样例（macOS 上逐位断言）。
+
+### 四、GIMPLE 逐句对照改写的模块
+
+十六进制位探针（两引擎在同一处打印 `Z16.16` / `{:016X}`）逐段推进，下列模块此前都没对过 GIMPLE：
+
+- **长波**（`UrbanVegLongwave`/`UrbanOnlyLongwave`）：`cos(PI/3)` 是编译期折叠的 `0x3FE0000000000001`；
+  `Td = tee(DD1*3/8.*lsai)` 的 `DD1` 是 `real(r16)`，`lsai*0.375` 与整个 `tee` 在四精度里求值
+  （`extended::tee`，DoubleDouble）；`fv_ = .FNMA (fv, Sw_, fv)`；七个 `F_ = .FMA (Fv, Td, F-Fv)`；
+  `fwsun` 分子 `.FMA (fg, Sw, fb)`、分母 `.FMA ((fb*(4/π))*HL, tan, fb)`；`B = .FMA (1-e, I, B1)`，
+  墙面 `ewall*(((fb*(HL*(fw*4)))/fg)*stefnc)*t⁴`（`fb*(HL*(fw*4))` 同时是 `fcover`），
+  `dBdT(5) = ev*((max*4)*stefnc)`。
+- **短波**（`alburban`/`UrbanVegShortwave`/`UrbanOnlyShortwave`）：`erho` 是两个商相加；叶面雪、
+  雪反照率（`dfalbs = .FNMA (age, cons, 1)*snal`、`dralbs = .FMA (1-dfalbs, 0.4*cff, dfalbs)`）、
+  雪盖混合 `.FMA (fsno, albsno, alb*(1-fsno))`、湖面混合；`Eg = .FMA (Sv-Svw, Td, (1-Sw)-Sv)`；
+  `albu` 的 FMA 链与 `.FMA (fb, aroof, fg*albu)`；墙面归一化先除后乘 `fg`。`ShadowTree` 分母
+  `.FNMA (exp(-1/μ), f, 1)`。
+- **`netsolar_urban`**：从 `soll*s(2,1)` 起依次 FMA 吸收 `sols`、`solsd`、`solld`（与陆地配对不同）；
+  `sabv` 的第三项与 `par` 共享，单独舍入后**相加**。
+- **墙体导热**：`nl_wall = 10` 的界面导热率循环 9 次，前 8 次走 2 路向量体融合 `k(j+1)*(zi-z(j))`，
+  第 9 次标量尾部融合 `k(j)*(z(j+1)-zi)` —— 同一行源码两种形状。屋顶 `1..nl_roof-1` 同此。
+- **屋顶 / 不透水 / 透水导热**：顶层 `rt = .FMA (.FNMA (dhsdT, t, hs) + cnfac*fn, fact, t)`
+  （`cnfac*fn` 后面 `brr` 要用，单独舍入）；`brr` 两式各一个 FMA；屋顶顶层补水热容是**普通加法**、
+  不透水是 FMA 链。
+- **`UrbanGroundFlux`**：`tg`/`qg`/`dthv`/`thvstar` 的 FMA，`um = sqrt(.FMA (ur, ur, wc²))`，
+  `tref = .FMA (tstar, fh2m/κ - fh/κ, thm)`。
+- **`SimpleBEM`**：`0.5*hcv` 折成 2.02/1.538；`B(i) = .FMA (½k, t_nl, .FMS (½k, t_nl_bef - t_in, …))`；
+  `Constant_AC` 分支的 `.FNMA (troom, A(i,4), B(i))/A(i,i)` 与三段 `Fhac`。
+- **LUCY**：三类车各自 `((((traf*((pop*cells)/1000))*EC)*(car_sp*1000))/1e6)/3600`，车数为 0 取 0。
+
+另发现上游 `dT(5)` 从不赋值却进 `dX = matmul(Ainv, dBdT*dT(1:))`（上游缺陷第 21 条）。实测 1488 步
+Fortran 读到的都是 0，Rust 取 0。
+
+### 五、实测
+
+```text
+AU-Preston（城市单点，AU-Preston 强迫，2004-01 小时输出，树冠开）：
+  release 与 debug：history 31 天 744 条逐位相同；主重启与 _restart_urban_ 逐位相同（diff 0）
+  逐位探针：52995 行（每步 30+ 处）全部相同
+回归（PROFILE=release）：31 个算例与第 409 轮完全相同
+cargo test core 367 / runtime 76 / hist 50 / init 156 / lapack 6；clippy -D warnings 无告警；fmt 通过
+```
+
+未验证：`UrbanOnlyFlux`（`DEF_URBAN_TREE = .false.`）、城市积雪（雪层路径的向量体/尾部划分按
+运行期次数成对推断）、Windows/Linux 上的参考 LAPACK 后端（本机没有参考 LAPACK 可对照）、
+干旱站点下标准土壤 patch 的 `rootr` 修正。

@@ -113,6 +113,17 @@
 - **处理**：`vendor/` 未改（改了会改变输出）；Rust 照内核的实际行为，**不**在更新后重算 `fwsha`
   （`urban_thermal.rs`）。建议上游在 `:621` 之后补 `fwsha = 1. - fwsun`。
 
+### 21. `UrbanTHERMAL` 读未初始化的 `dT(5)`
+
+- **位置**：`main/URBAN/MOD_Urban_Thermal.F90:749`（`allocate (dT(0:5))`）、`:1048-1052`（只给 `dT(0:4)` 赋值）、
+  `:1235`（`dX = matmul(Ainv, dBdT*dT(1:))`）。
+- **原因**：有树时 `dT` 有 6 个元素，但 `dT(5)`（树冠温度变化）从不赋值；`allocate` 不清零，读到的是堆上残值。
+- **影响**：`dX` 的每个分量都含 `Ainv(i,5)*dBdT(5)*dT(5)`，进而进 `dlw*`、`lout`、`olrg`。
+  实测 AU-Preston 1488 步 Fortran 读到的全是 0（macOS 的新分配页），所以结果恰好等于 `dT(5) = 0`；
+  换平台或换分配器可能不同。
+- **处理**：`vendor/` 未改；Rust 取 0（`urban_thermal.rs`）。建议上游赋 `dT(5) = 0.`（叶温已在
+  `UrbanVegFlux` 里闭合，长波增量不应再计一次）。
+
 ## 二、TRACER 编译开关改变了物理（需要上游确认哪一边是对的）
 
 这一版上游在很多地方给 TRACER 构建和非 TRACER 构建写了**不同的物理**，不只是记账不同。

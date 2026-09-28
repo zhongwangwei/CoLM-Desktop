@@ -531,7 +531,7 @@ fn residual_heat_fluxes(cnfac: f64, before: &[f64], after: &[f64]) -> Vec<f64> {
     residual
 }
 
-fn state_from_phase(
+pub(crate) fn state_from_phase(
     phase: PhaseChangeState,
     snow_ice_before: Vec<f64>,
     time_step_seconds: f64,

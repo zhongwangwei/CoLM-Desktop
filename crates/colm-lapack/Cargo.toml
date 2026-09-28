@@ -1,0 +1,17 @@
+[package]
+name = "colm-lapack"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+
+# 不继承工作区的 `unsafe_code = "forbid"`：本 crate 存在的唯一理由就是 macOS 上
+# FFI 调 Accelerate 的 `DGETRF`/`DGETRI`（见 `src/lib.rs`）。这里降为 deny，
+# 只有 `accelerate` 模块局部放行；其余代码仍然不许 unsafe。
+[lints.rust]
+unsafe_code = "deny"

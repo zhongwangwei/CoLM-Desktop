@@ -71,68 +71,27 @@ pub fn urban_impervious_temperature(
 ) -> Result<UrbanImperviousTemperatureState> {
     let layers = validate(input)?;
     let road_offset = input.snow_layers;
-    let road_layers = layers - road_offset;
     let mut liquid = input.liquid_water_kg_m2.to_vec();
     let mut ice = input.ice_water_kg_m2.to_vec();
     for layer in road_offset + 1..layers {
         liquid[layer] = 0.0;
         ice[layer] = 0.0;
     }
-    let (mut capacity, material_conductivity) = road_properties(input, &liquid, &ice)?;
-    if input.snow_layers == 0 && input.snow_water_equivalent_kg_m2 > 0.0 {
-        capacity[0] += ICE_HEAT_CAPACITY_J_KG_K * input.snow_water_equivalent_kg_m2;
-    }
-    for road in 0..road_layers {
-        let layer = road_offset + road;
-        if input.impervious_heat_capacity_j_m3_k[road] > 0.0 {
-            capacity[layer] =
-                input.impervious_heat_capacity_j_m3_k[road] * input.layer_thickness_m[layer];
-        }
-    }
-    // The source applies this shallow-snow addition after its `WHERE` capacity
-    // override, so retain that exact order even when an override is absent.
-    if input.snow_layers == 0 && input.snow_water_equivalent_kg_m2 > 0.0 {
-        capacity[0] += ICE_HEAT_CAPACITY_J_KG_K * input.snow_water_equivalent_kg_m2;
-    }
-    capacity[road_offset] += WATER_HEAT_CAPACITY_J_KG_K * liquid[road_offset]
-        + ICE_HEAT_CAPACITY_J_KG_K * ice[road_offset];
-
-    let mut conductivity = interface_conductivity(
-        &material_conductivity,
-        input.node_depth_m,
-        input.interface_depth_m,
-        input.snow_layers,
-    );
-    for road in 0..road_layers {
-        let layer = road_offset + road;
-        if input.impervious_interface_conductivity_w_m_k[road] > 0.0 {
-            conductivity[layer] = input.impervious_interface_conductivity_w_m_k[road];
-        }
-    }
-    let factor = column_factor(input, &capacity)?;
-    let surface_flux = input.absorbed_shortwave_w_m2 + input.absorbed_longwave_w_m2
-        - (input.sensible_heat_w_m2 + input.evaporation_kg_m2_s * input.vaporization_heat_j_kg);
-    let surface_flux_slope =
-        -input.surface_energy_temperature_slope_w_m2_k + input.longwave_temperature_slope_w_m2_k;
-    let before_flux = zero_bottom_fluxes(&conductivity, input.node_depth_m, input.temperature_k);
-    let (subdiagonal, diagonal, superdiagonal, rhs) = column_system(
-        input,
-        &factor,
-        &conductivity,
-        &before_flux,
+    let phase_layers = road_offset + 1;
+    let UrbanColumnSolve {
+        mut temperature,
+        factor,
+        conductivity,
+        residual,
         surface_flux,
         surface_flux_slope,
-    );
-    let mut temperature = solve_tridiagonal(&subdiagonal, &diagonal, &superdiagonal, &rhs)
-        .map_err(anyhow::Error::msg)?;
-    let after_flux = zero_bottom_fluxes(&conductivity, input.node_depth_m, &temperature);
-    let phase_layers = road_offset + 1;
-    let residual = residual_fluxes(
-        input.crank_nicolson_factor,
-        &before_flux,
-        &after_flux,
+    } = solve_urban_ground_column(
+        input,
+        &liquid,
+        &ice,
+        UrbanGroundKind::Impervious,
         phase_layers,
-    );
+    )?;
     let phase = urban_phase_change(UrbanPhaseChangeInput {
         time_step_seconds: input.time_step_seconds,
         fact_seconds_per_j_m2_k: &factor[..phase_layers],
@@ -166,6 +125,113 @@ pub fn urban_impervious_temperature(
     })
 }
 
+/// 不透水 / 透水地面共用的导热求解（`UrbanImperviousTem` 与 `UrbanPerviousTem` 在
+/// 相变之前逐句相同，两份 GIMPLE 的收缩形状也一致），差别只在 [`UrbanGroundKind`]。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum UrbanGroundKind {
+    Impervious,
+    Pervious,
+}
+
+pub(crate) struct UrbanColumnSolve {
+    pub temperature: Vec<f64>,
+    pub factor: Vec<f64>,
+    pub conductivity: Vec<f64>,
+    /// `brr(lb:lb+residual_layers-1)`
+    pub residual: Vec<f64>,
+    pub surface_flux: f64,
+    pub surface_flux_slope: f64,
+}
+
+pub(crate) fn solve_urban_ground_column(
+    input: UrbanImperviousTemperatureInput<'_>,
+    liquid: &[f64],
+    ice: &[f64],
+    kind: UrbanGroundKind,
+    residual_layers: usize,
+) -> Result<UrbanColumnSolve> {
+    let road_offset = input.snow_layers;
+    let road_layers = input.temperature_k.len() - road_offset;
+    let impervious = kind == UrbanGroundKind::Impervious;
+    let (mut capacity, material_conductivity) = road_properties(input, liquid, ice)?;
+    // `:171/225` `cv(1) = .FMA (scv, cpice, cv(1))`
+    if input.snow_layers == 0 && input.snow_water_equivalent_kg_m2 > 0.0 {
+        capacity[0] = input
+            .snow_water_equivalent_kg_m2
+            .mul_add(ICE_HEAT_CAPACITY_J_KG_K, capacity[0]);
+    }
+    // 以下三步只有不透水地面有（`UrbanPerviousTem` 没有材料覆盖、没有第二次加雪、
+    // 也没有顶层补水与冰的热容）
+    if impervious {
+        for road in 0..road_layers {
+            let layer = road_offset + road;
+            if input.impervious_heat_capacity_j_m3_k[road] > 0.0 {
+                capacity[layer] =
+                    input.impervious_heat_capacity_j_m3_k[road] * input.layer_thickness_m[layer];
+            }
+        }
+        // The source applies this shallow-snow addition after its `WHERE` capacity
+        // override, so retain that exact order even when an override is absent.
+        if input.snow_layers == 0 && input.snow_water_equivalent_kg_m2 > 0.0 {
+            capacity[0] = input
+                .snow_water_equivalent_kg_m2
+                .mul_add(ICE_HEAT_CAPACITY_J_KG_K, capacity[0]);
+        }
+        // `:229` `.FMA (wice, cpice, .FMA (wliq, cpliq, cv(1)))`
+        capacity[road_offset] = ice[road_offset].mul_add(
+            ICE_HEAT_CAPACITY_J_KG_K,
+            liquid[road_offset].mul_add(WATER_HEAT_CAPACITY_J_KG_K, capacity[road_offset]),
+        );
+    }
+
+    let mut conductivity = interface_conductivity(
+        &material_conductivity,
+        input.node_depth_m,
+        input.interface_depth_m,
+        input.snow_layers,
+    );
+    for road in 0..road_layers {
+        let layer = road_offset + road;
+        if impervious && input.impervious_interface_conductivity_w_m_k[road] > 0.0 {
+            conductivity[layer] = input.impervious_interface_conductivity_w_m_k[road];
+        }
+    }
+    let factor = column_factor(input, &capacity)?;
+    // `:232` `hs = (sab + l) - .FMA (fevp, htvp, fsen)`
+    let surface_flux = (input.absorbed_shortwave_w_m2 + input.absorbed_longwave_w_m2)
+        - input
+            .evaporation_kg_m2_s
+            .mul_add(input.vaporization_heat_j_kg, input.sensible_heat_w_m2);
+    let surface_flux_slope =
+        input.longwave_temperature_slope_w_m2_k - input.surface_energy_temperature_slope_w_m2_k;
+    let before_flux = zero_bottom_fluxes(&conductivity, input.node_depth_m, input.temperature_k);
+    let (subdiagonal, diagonal, superdiagonal, rhs) = column_system(
+        input,
+        &factor,
+        &conductivity,
+        &before_flux,
+        surface_flux,
+        surface_flux_slope,
+    );
+    let temperature = solve_tridiagonal(&subdiagonal, &diagonal, &superdiagonal, &rhs)
+        .map_err(anyhow::Error::msg)?;
+    let after_flux = zero_bottom_fluxes(&conductivity, input.node_depth_m, &temperature);
+    let residual = residual_fluxes(
+        input.crank_nicolson_factor,
+        &before_flux,
+        &after_flux,
+        residual_layers,
+    );
+    Ok(UrbanColumnSolve {
+        temperature,
+        factor,
+        conductivity,
+        residual,
+        surface_flux,
+        surface_flux_slope,
+    })
+}
+
 fn road_properties(
     input: UrbanImperviousTemperatureInput<'_>,
     liquid: &[f64],
@@ -175,12 +241,20 @@ fn road_properties(
     let mut capacity = vec![0.0; layers];
     let mut conductivity = vec![0.0; layers];
     for snow in 0..input.snow_layers {
-        capacity[snow] =
-            WATER_HEAT_CAPACITY_J_KG_K * liquid[snow] + ICE_HEAT_CAPACITY_J_KG_K * ice[snow];
-        let density = (liquid[snow] + ice[snow]) / input.layer_thickness_m[snow];
-        conductivity[snow] = AIR_THERMAL_CONDUCTIVITY_W_M_K
-            + (7.75e-5 * density + 1.105e-6 * density * density)
-                * (ICE_THERMAL_CONDUCTIVITY_W_M_K - AIR_THERMAL_CONDUCTIVITY_W_M_K);
+        // `:175` `.FMA (wliq, cpliq, wice*cpice)`
+        capacity[snow] = liquid[snow].mul_add(
+            WATER_HEAT_CAPACITY_J_KG_K,
+            ice[snow] * ICE_HEAT_CAPACITY_J_KG_K,
+        );
+        // `:181/185` `rho = (wice+wliq)/dz`；
+        // `.FMA (.FMA (rho, 7.75e-5, (rho*1.105e-6)*rho), tkice-tkair, tkair)`
+        let density = (ice[snow] + liquid[snow]) / input.layer_thickness_m[snow];
+        conductivity[snow] = density
+            .mul_add(7.75e-5, (density * 1.105e-6) * density)
+            .mul_add(
+                ICE_THERMAL_CONDUCTIVITY_W_M_K - AIR_THERMAL_CONDUCTIVITY_W_M_K,
+                AIR_THERMAL_CONDUCTIVITY_W_M_K,
+            );
     }
     for (soil, thermal_input) in input.soil_thermal_inputs.iter().enumerate() {
         let layer = input.snow_layers + soil;
@@ -214,9 +288,13 @@ fn interface_conductivity(
             (2.0 * material[layer] * material[layer + 1] / (material[layer] + material[layer + 1]))
                 .max(0.5 * material[layer + 1])
         } else {
-            material[layer] * material[layer + 1] * (node_depth_m[layer + 1] - node_depth_m[layer])
-                / (material[layer] * (node_depth_m[layer + 1] - interface_depth_m[interface])
-                    + material[layer + 1] * (interface_depth_m[interface] - node_depth_m[layer]))
+            // `:215`（标量循环）`.FMA (k(i), z(i+1)-zi(i), k(i+1)*(zi(i)-z(i)))`
+            ((material[layer] * material[layer + 1])
+                * (node_depth_m[layer + 1] - node_depth_m[layer]))
+                / material[layer].mul_add(
+                    node_depth_m[layer + 1] - interface_depth_m[interface],
+                    material[layer + 1] * (interface_depth_m[interface] - node_depth_m[layer]),
+                )
         };
     }
     conductivity
@@ -224,11 +302,12 @@ fn interface_conductivity(
 
 fn column_factor(input: UrbanImperviousTemperatureInput<'_>, capacity: &[f64]) -> Result<Vec<f64>> {
     let mut factor = vec![0.0; capacity.len()];
-    factor[0] = input.time_step_seconds / capacity[0] * input.layer_thickness_m[0]
-        / (0.5
-            * (input.node_depth_m[0] - input.interface_depth_m[0]
-                + input.surface_temperature_factor
-                    * (input.node_depth_m[1] - input.interface_depth_m[0])));
+    // `:239` `((deltim/cv)*dz) / (.FMA (capr, z(2)-zi(0), z(1)-zi(0))*0.5)`
+    factor[0] = ((input.time_step_seconds / capacity[0]) * input.layer_thickness_m[0])
+        / (input.surface_temperature_factor.mul_add(
+            input.node_depth_m[1] - input.interface_depth_m[0],
+            input.node_depth_m[0] - input.interface_depth_m[0],
+        ) * 0.5);
     for layer in 1..capacity.len() {
         factor[layer] = input.time_step_seconds / capacity[layer];
     }
@@ -242,7 +321,7 @@ fn column_factor(input: UrbanImperviousTemperatureInput<'_>, capacity: &[f64]) -
 fn zero_bottom_fluxes(conductivity: &[f64], depth: &[f64], temperature: &[f64]) -> Vec<f64> {
     let mut flux = vec![0.0; temperature.len()];
     for (layer, value) in flux.iter_mut().enumerate().take(temperature.len() - 1) {
-        *value = conductivity[layer] * (temperature[layer + 1] - temperature[layer])
+        *value = ((temperature[layer + 1] - temperature[layer]) * conductivity[layer])
             / (depth[layer + 1] - depth[layer]);
     }
     flux
@@ -263,41 +342,46 @@ fn column_system(
     let mut diagonal = vec![0.0; layers];
     let mut superdiagonal = vec![0.0; layers];
     let mut rhs = vec![0.0; layers];
-    let top_distance = input.node_depth_m[1] - input.node_depth_m[0];
-    diagonal[0] = 1.0 + implicit * factor[0] * conductivity[0] / top_distance
-        - factor[0] * surface_flux_slope;
-    superdiagonal[0] = -implicit * factor[0] * conductivity[0] / top_distance;
-    rhs[0] = input.temperature_k[0]
-        + factor[0]
-            * (surface_flux - surface_flux_slope * input.temperature_k[0]
-                + input.crank_nicolson_factor * flux[0]);
+    let cnfac = input.crank_nicolson_factor;
+    let z = input.node_depth_m;
+    let t = input.temperature_k;
+    // 顶层（`:252-256`）：`bt = .FNMA (dhsdT, fact, a + 1)`；
+    // `rt = .FMA (.FNMA (dhsdT, t, hs) + cnfac*fn, fact, t)` —— `cnfac*fn(lb)` 后面 `brr`
+    // 还要用，单独舍入，所以这一处是普通加法
+    let top_distance = z[1] - z[0];
+    let top = ((implicit * factor[0]) * conductivity[0]) / top_distance;
+    diagonal[0] = (-surface_flux_slope).mul_add(factor[0], top + 1.0);
+    superdiagonal[0] = -top;
+    rhs[0] = ((-surface_flux_slope).mul_add(t[0], surface_flux) + cnfac * flux[0])
+        .mul_add(factor[0], t[0]);
+    // 中间层（`:259-265`，向量体与标量体同形）
     for layer in 1..bottom {
-        let above = input.node_depth_m[layer] - input.node_depth_m[layer - 1];
-        let below = input.node_depth_m[layer + 1] - input.node_depth_m[layer];
-        subdiagonal[layer] = -implicit * factor[layer] * conductivity[layer - 1] / above;
-        diagonal[layer] = 1.0
-            + implicit
-                * factor[layer]
-                * (conductivity[layer] / below + conductivity[layer - 1] / above);
-        superdiagonal[layer] = -implicit * factor[layer] * conductivity[layer] / below;
-        rhs[layer] = input.temperature_k[layer]
-            + input.crank_nicolson_factor * factor[layer] * (flux[layer] - flux[layer - 1]);
+        let above = z[layer] - z[layer - 1];
+        let below = z[layer + 1] - z[layer];
+        let scaled = implicit * factor[layer];
+        subdiagonal[layer] = -((conductivity[layer - 1] * scaled) / above);
+        diagonal[layer] =
+            (conductivity[layer - 1] / above + conductivity[layer] / below).mul_add(scaled, 1.0);
+        superdiagonal[layer] = -((conductivity[layer] * scaled) / below);
+        rhs[layer] = (flux[layer] - flux[layer - 1]).mul_add(cnfac * factor[layer], t[layer]);
     }
-    let above = input.node_depth_m[bottom] - input.node_depth_m[bottom - 1];
-    subdiagonal[bottom] = -implicit * factor[bottom] * conductivity[bottom - 1] / above;
-    diagonal[bottom] = 1.0 + implicit * factor[bottom] * conductivity[bottom - 1] / above;
-    rhs[bottom] = input.temperature_k[bottom]
-        - input.crank_nicolson_factor * factor[bottom] * flux[bottom - 1];
+    // 底层（`:269-273`）：`bt = a + 1`、`rt = .FNMA (cnfac*fact, fn(j-1), t)`
+    let above = z[bottom] - z[bottom - 1];
+    let bottom_term = ((implicit * factor[bottom]) * conductivity[bottom - 1]) / above;
+    subdiagonal[bottom] = -bottom_term;
+    diagonal[bottom] = bottom_term + 1.0;
+    rhs[bottom] = (-(cnfac * factor[bottom])).mul_add(flux[bottom - 1], t[bottom]);
     (subdiagonal, diagonal, superdiagonal, rhs)
 }
 
 fn residual_fluxes(cnfac: f64, before: &[f64], after: &[f64], layers: usize) -> Vec<f64> {
-    let mut residual = vec![cnfac * before[0] + (1.0 - cnfac) * after[0]];
+    // `:289` `.FMA (1-cnfac, fn1, cnfac*fn)`；`:292` `.FMA (cnfac, dfn, (1-cnfac)*dfn1)`
+    let mut residual = vec![(1.0 - cnfac).mul_add(after[0], cnfac * before[0])];
     for layer in 1..layers {
-        residual.push(
-            cnfac * (before[layer] - before[layer - 1])
-                + (1.0 - cnfac) * (after[layer] - after[layer - 1]),
-        );
+        residual.push(cnfac.mul_add(
+            before[layer] - before[layer - 1],
+            (1.0 - cnfac) * (after[layer] - after[layer - 1]),
+        ));
     }
     residual
 }

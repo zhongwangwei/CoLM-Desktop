@@ -389,7 +389,19 @@ fn write_evolved_restart(
                 .context("a restart path has no file name")?;
             Ok(path.with_file_name(name.replacen("_restart_", "_restart_urban_", 1)))
         };
-        let overrides = urban_template.overrides(urban)?;
+        // `UrbanLAI_readin` 同时写 `urb_lai(u)` 与 `tlai(npatch)`（两者恒等），所以装了城市月度
+        // LAI 时 `tree_lai`/`tree_sai` 就是当前的 `tlai`/`tsai`；没装时二者都停在重启值。
+        let tree = template
+            .monthly_leaf_area_index
+            .as_ref()
+            .filter(|lai| lai.is_urban())
+            .map(|_| {
+                (
+                    state.energy.temporal_canopy.leaf_area_index,
+                    state.energy.temporal_canopy.stem_area_index,
+                )
+            });
+        let overrides = urban_template.overrides(urban, tree)?;
         write_restart(
             &urban_path(restart_in)?,
             &urban_path(restart_out)?,

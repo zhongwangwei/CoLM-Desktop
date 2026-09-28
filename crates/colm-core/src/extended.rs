@@ -149,6 +149,20 @@ impl Div for DoubleDouble {
     }
 }
 
+/// `MOD_3DCanopyRadiation:tee`：`DDH*(DD1/tau/tau-(DD1/tau/tau+DD2/tau)*exp(-DD2*tau))`，
+/// 参数与全部常数都是 `real(r16)`，整条在四精度里求值，返回时舍入到 real(8)。
+///
+/// 小 `tau` 时两项相消（`tau = 1e-3` 吃掉约 20 位），106 位仍远多于 53 位。
+/// 调用方要把 `tau` 本身也按四精度给：城市的 `tee(DD1*3/8.*lsai)` 里 `lsai*0.375`
+/// 在 f64 下不一定精确，在四精度下是（GIMPLE：`(real(kind=16)) lsai * 3.75e-1`）。
+pub fn tee(tau: DoubleDouble) -> f64 {
+    let one_over_square = DoubleDouble::new(1.0) / tau / tau;
+    let two = DoubleDouble::new(2.0);
+    (DoubleDouble::new(0.5)
+        * (one_over_square - (one_over_square + two / tau) * (-(two * tau)).exp()))
+    .to_f64()
+}
+
 #[cfg(test)]
 #[path = "extended_tests.rs"]
 mod extended_tests;

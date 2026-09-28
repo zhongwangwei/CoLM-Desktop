@@ -6,7 +6,7 @@
 
 use anyhow::{ensure, Result};
 
-use crate::{pc_radiation::canopy_scattering, pc_radiation::canopy_transmittance, LeafOptics};
+use crate::{pc_radiation::canopy_scattering, LeafOptics};
 
 const BANDS: usize = 2;
 const RADIATION_TYPES: usize = 2;
@@ -117,6 +117,7 @@ pub fn cold_start_urban_radiation(input: UrbanRadiationInput) -> Result<UrbanRad
     let leaf_area = input.lai + input.sai;
     let effective_optics = effective_optics(input, leaf_area);
     let theta = czen.acos();
+    let mut new_sunlit_wall_fraction = input.previous_sunlit_wall_fraction;
     for band in 0..BANDS {
         let result = if leaf_area > 1.0e-6 && input.vegetation_fraction > 0.0 {
             urban_vegetated_shortwave(
@@ -139,7 +140,7 @@ pub fn cold_start_urban_radiation(input: UrbanRadiationInput) -> Result<UrbanRad
                 pervious[band][0],
             )?
         };
-        state.sunlit_wall_fraction = result.sunlit_wall_fraction;
+        new_sunlit_wall_fraction = result.sunlit_wall_fraction;
         state.roof_absorption[band] = result.roof;
         state.sunlit_wall_absorption[band] = result.sunlit_wall;
         state.shaded_wall_absorption[band] = result.shaded_wall;
@@ -148,11 +149,16 @@ pub fn cold_start_urban_radiation(input: UrbanRadiationInput) -> Result<UrbanRad
         state.sunlit_tree_absorption[band] = result.tree;
         state.albedo[band] = result.albedo;
     }
+    // `:364` `dfwsun = fwsun_ - fwsun`：`alburban` **不改** `fwsun`，
+    // 更新 `fwsun = fwsun + dfwsun` 在下一步的 `UrbanTHERMAL:621`。
     state.change_in_sunlit_wall_fraction =
-        state.sunlit_wall_fraction - input.previous_sunlit_wall_fraction;
+        new_sunlit_wall_fraction - input.previous_sunlit_wall_fraction;
     for (albedo, lake) in state.albedo.iter_mut().zip(lake) {
         for (albedo, lake) in albedo.iter_mut().zip(lake) {
-            *albedo = (1.0 - input.water_fraction) * *albedo + input.water_fraction * lake;
+            // `:366` `.FMA (flake, alblake, alb*(1-flake))`
+            *albedo = input
+                .water_fraction
+                .mul_add(lake, *albedo * (1.0 - input.water_fraction));
         }
     }
     Ok(state)
@@ -189,9 +195,13 @@ fn urban_only_shortwave(
         sky_to_wall * ground / building / (2.0 * input.building_height_to_length) * 0.25;
     let wall_to_wall = 1.0 - wall_to_sky - wall_to_ground;
     let shadow = wall_shadow_direct(building / ground, input.building_height_to_length, theta);
-    let sunlit = 0.5 * (shadow * ground + building)
-        / (4.0 / std::f64::consts::PI * building * input.building_height_to_length * theta.tan()
-            + building);
+    let sunlit = sunlit_wall_fraction(
+        building,
+        ground,
+        input.building_height_to_length,
+        theta,
+        shadow,
+    );
     let shaded = 1.0 - sunlit;
     let matrix = [
         [
@@ -219,24 +229,28 @@ fn urban_only_shortwave(
             1.0,
         ],
     ];
-    let direct = solve(
-        matrix,
-        [
+    // `Ainv = MatrixInverse(A)` 一次，直射与散射共用；`X = matmul(Ainv, B)`
+    let inverse = colm_lapack::matrix_inverse(&matrix, matrix.len())?;
+    let direct = colm_lapack::matmul(
+        &inverse,
+        &[
             shadow * wall,
             0.0,
             (1.0 - shadow) * impervious_fraction * impervious,
             (1.0 - shadow) * input.pervious_ground_fraction * pervious,
         ],
-    )?;
-    let diffuse = solve(
-        matrix,
-        [
+        matrix.len(),
+    );
+    let diffuse = colm_lapack::matmul(
+        &inverse,
+        &[
             sky_to_wall * sunlit * wall,
             sky_to_wall * shaded * wall,
             sky_to_ground * impervious_fraction * impervious,
             sky_to_ground * input.pervious_ground_fraction * pervious,
         ],
-    )?;
+        matrix.len(),
+    );
     Ok(band_result(
         sunlit,
         roof,
@@ -270,10 +284,13 @@ fn urban_vegetated_shortwave(
     let impervious_fraction = 1.0 - input.pervious_ground_fraction;
     let length = input.roof_height_m / input.building_height_to_length;
     let canopy_area = input.lai + input.sai;
+    // `:421` `cos(PI/3)` 是编译期折叠的 `0.5000000000000001`；`:422` `tee(DD1*3/8.*lsai)` 整条四精度
     let tree_depth = canopy_area * input.vegetation_fraction
-        / (std::f64::consts::PI / 3.0).cos()
+        / f64::from_bits(0x3FE0_0000_0000_0001)
         / tree_shadow(input.vegetation_fraction, std::f64::consts::PI / 3.0);
-    let tree_transmission = canopy_transmittance(3.0 / 8.0 * tree_depth);
+    let tree_transmission = crate::extended::tee(
+        crate::extended::DoubleDouble::new(tree_depth) * crate::extended::DoubleDouble::new(0.375),
+    );
     let (tree_albedo, _, _) = canopy_scattering(
         3.0 / 8.0 * tree_depth,
         transmittance + reflectance,
@@ -294,7 +311,9 @@ fn urban_vegetated_shortwave(
         building / ground,
         (input.roof_height_m - input.vegetation_center_height_m) / length,
     );
-    let mut tree_fraction = input.vegetation_fraction - input.vegetation_fraction * upper_shadow;
+    // `:453/478/552` `fv_ = fv - fv*Sw_`：`.FNMA (fv, Sw_, fv)`
+    let mut tree_fraction =
+        (-input.vegetation_fraction).mul_add(upper_shadow, input.vegetation_fraction);
     let mut tree_shadow_factor = tree_shadow(tree_fraction, std::f64::consts::PI / 3.0);
     let mut overlap = tree_shadow_factor * (first_shadow - upper_shadow);
     tree_shadow_factor = (tree_shadow_factor / ground).min(1.0);
@@ -308,7 +327,7 @@ fn urban_vegetated_shortwave(
 
     let lower_shadow =
         wall_shadow_diffuse(building / ground, input.vegetation_center_height_m / length);
-    tree_fraction = input.vegetation_fraction - input.vegetation_fraction * lower_shadow;
+    tree_fraction = (-input.vegetation_fraction).mul_add(lower_shadow, input.vegetation_fraction);
     tree_shadow_factor = tree_shadow(tree_fraction, std::f64::consts::PI / 3.0);
     overlap = tree_shadow_factor * (first_shadow - lower_shadow);
     tree_shadow_factor = (tree_shadow_factor / ground).min(1.0);
@@ -340,17 +359,15 @@ fn urban_vegetated_shortwave(
     wall_tree_ground = wall_tree_ground.min(wall_to_ground);
     wall_to_tree = wall_tree_wall + wall_tree_sky + wall_tree_ground;
 
-    let sky_to_wall_adjusted = sky_to_wall - sky_tree_wall + sky_tree_wall * tree_transmission;
-    let sky_to_ground_adjusted =
-        sky_to_ground - sky_tree_ground + sky_tree_ground * tree_transmission;
-    let ground_to_wall_adjusted =
-        sky_to_wall - ground_tree_wall + ground_tree_wall * tree_transmission;
-    let ground_to_sky_adjusted =
-        sky_to_ground - ground_tree_sky + ground_tree_sky * tree_transmission;
-    let wall_to_ground_adjusted =
-        wall_to_ground - wall_tree_ground + wall_tree_ground * tree_transmission;
-    let wall_to_wall_adjusted = wall_to_wall - wall_tree_wall + wall_tree_wall * tree_transmission;
-    let wall_to_sky_adjusted = wall_to_sky - wall_tree_sky + wall_tree_sky * tree_transmission;
+    // `:535-541` `F_ = F - Fv + Fv*Td`：`.FMA (Fv, Td, F - Fv)`
+    let through = |total: f64, blocked: f64| blocked.mul_add(tree_transmission, total - blocked);
+    let sky_to_wall_adjusted = through(sky_to_wall, sky_tree_wall);
+    let sky_to_ground_adjusted = through(sky_to_ground, sky_tree_ground);
+    let ground_to_wall_adjusted = through(sky_to_wall, ground_tree_wall);
+    let ground_to_sky_adjusted = through(sky_to_ground, ground_tree_sky);
+    let wall_to_ground_adjusted = through(wall_to_ground, wall_tree_ground);
+    let wall_to_wall_adjusted = through(wall_to_wall, wall_tree_wall);
+    let wall_to_sky_adjusted = through(wall_to_sky, wall_tree_sky);
 
     let initial_shadow =
         wall_shadow_direct(building / ground, input.building_height_to_length, theta);
@@ -360,7 +377,7 @@ fn urban_vegetated_shortwave(
         theta,
     );
     let direct_tree_fraction =
-        input.vegetation_fraction - input.vegetation_fraction * lower_direct_shadow;
+        (-input.vegetation_fraction).mul_add(lower_direct_shadow, input.vegetation_fraction);
     let mut direct_tree_shadow = tree_shadow(direct_tree_fraction, theta);
     let mut direct_overlap = (initial_shadow - lower_direct_shadow) * direct_tree_shadow;
     direct_tree_shadow = (direct_tree_shadow / ground).min(1.0);
@@ -368,9 +385,13 @@ fn urban_vegetated_shortwave(
         direct_overlap = direct_tree_shadow + initial_shadow - 1.0;
     }
     let direct_wall_shadow = initial_shadow - direct_overlap;
-    let sunlit = 0.5 * (direct_wall_shadow * ground + building)
-        / (4.0 / std::f64::consts::PI * building * input.building_height_to_length * theta.tan()
-            + building);
+    let sunlit = sunlit_wall_fraction(
+        building,
+        ground,
+        input.building_height_to_length,
+        theta,
+        direct_wall_shadow,
+    );
     let shaded = 1.0 - sunlit;
     let matrix = [
         [
@@ -409,28 +430,35 @@ fn urban_vegetated_shortwave(
             1.0,
         ],
     ];
-    let direct_ground = 1.0 - direct_wall_shadow - direct_tree_shadow
-        + (direct_tree_shadow - direct_overlap) * tree_transmission;
-    let direct = solve(
-        matrix,
-        [
+    // `:604` `Eg = 1-Sw-Sv+(Sv-Svw)*Td`：`.FMA (Sv-Svw, Td, (1-Sw)-Sv)`
+    let direct_ground = (direct_tree_shadow - direct_overlap).mul_add(
+        tree_transmission,
+        (1.0 - direct_wall_shadow) - direct_tree_shadow,
+    );
+    // `Ainv = MatrixInverse(A)` 一次，直射与散射共用；`X = matmul(Ainv, B)`
+    let inverse = colm_lapack::matrix_inverse(&matrix, matrix.len())?;
+    let direct = colm_lapack::matmul(
+        &inverse,
+        &[
             direct_wall_shadow * wall,
             direct_overlap * tree_transmission * wall,
             direct_ground * impervious_fraction * impervious,
             direct_ground * input.pervious_ground_fraction * pervious,
             direct_tree_shadow * tree_albedo,
         ],
-    )?;
-    let diffuse = solve(
-        matrix,
-        [
+        matrix.len(),
+    );
+    let diffuse = colm_lapack::matmul(
+        &inverse,
+        &[
             sky_to_wall_adjusted * sunlit * wall,
             sky_to_wall_adjusted * shaded * wall,
             sky_to_ground_adjusted * impervious_fraction * impervious,
             sky_to_ground_adjusted * input.pervious_ground_fraction * pervious,
             sky_to_tree * tree_albedo,
         ],
-    )?;
+        matrix.len(),
+    );
     Ok(band_result(
         sunlit,
         roof,
@@ -477,7 +505,7 @@ fn band_result<const N: usize>(
                 direct[4] / albedo * (1.0 - albedo - transmission) / fraction * ground,
                 diffuse[4] / albedo * (1.0 - albedo - transmission) / fraction * ground,
             ],
-            [direct[4] * tree_to_sky, diffuse[4] * tree_to_sky],
+            [tree_to_sky, tree_to_sky],
         ),
         None => ([0.0; RADIATION_TYPES], [0.0; RADIATION_TYPES]),
     };
@@ -501,30 +529,30 @@ fn band_result<const N: usize>(
             diffuse[3] / pervious * (1.0 - pervious),
         ],
         tree: tree_absorption,
+        // `albu = X1*Fws + X2*Fws + X3*Fgs + X4*Fgs (+ X5*Fvs)`：左结合的 FMA 链
+        // （`MOD_Urban_Shortwave.F90:204/629`），再 `aroof*fb + albu*fg` →
+        // `.FMA (fb, aroof, fg*albu)`（`:258/686`）
         albedo: [
-            roof * building
-                + ground
-                    * (direct[0] * wall_to_sky
-                        + direct[1] * wall_to_sky
-                        + direct[2] * ground_to_sky
-                        + direct[3] * ground_to_sky
-                        + tree_albedo[0]),
-            roof * building
-                + ground
-                    * (diffuse[0] * wall_to_sky
-                        + diffuse[1] * wall_to_sky
-                        + diffuse[2] * ground_to_sky
-                        + diffuse[3] * ground_to_sky
-                        + tree_albedo[1]),
+            building.mul_add(
+                roof,
+                ground * sky_albedo(&direct, wall_to_sky, ground_to_sky, tree_albedo[0]),
+            ),
+            building.mul_add(
+                roof,
+                ground * sky_albedo(&diffuse, wall_to_sky, ground_to_sky, tree_albedo[1]),
+            ),
         ],
     };
     if building > 0.0 {
-        let scale = ground / (4.0 * sunlit_wall_fraction * height_to_length * building);
-        result.sunlit_wall[0] *= scale;
-        result.sunlit_wall[1] *= scale;
-        let shaded_scale = ground / (4.0 * shaded * height_to_length * building);
-        result.shaded_wall[0] *= shaded_scale;
-        result.shaded_wall[1] *= shaded_scale;
+        // `swsun/(4*fwsun*HL*fb)*fg`：分母是 `fb*(HL*(fwsun*4))`，先除后乘 `fg`
+        let sunlit_cover = building * (height_to_length * (sunlit_wall_fraction * 4.0));
+        let shaded_cover = building * (height_to_length * (shaded * 4.0));
+        for value in &mut result.sunlit_wall {
+            *value = ground * (*value / sunlit_cover);
+        }
+        for value in &mut result.shaded_wall {
+            *value = ground * (*value / shaded_cover);
+        }
     }
     if impervious_ground > 0.0 {
         result.impervious[0] /= impervious_ground;
@@ -537,27 +565,65 @@ fn band_result<const N: usize>(
     result
 }
 
+/// `fwsun = 0.5*(Sw*fg + fb) / (4/PI*fb*HL*tan(theta) + fb)`（`:157/573`）：
+/// 分子 `.FMA (fg, Sw, fb)`，分母 `.FMA ((fb*(4/PI))*HL, tan, fb)`。
+fn sunlit_wall_fraction(
+    building: f64,
+    ground: f64,
+    height_to_length: f64,
+    theta: f64,
+    shadow: f64,
+) -> f64 {
+    let numerator = ground.mul_add(shadow, building) * 0.5;
+    let slope = building * (4.0 / std::f64::consts::PI) * height_to_length;
+    numerator / slope.mul_add(theta.tan(), building)
+}
+
+/// `X1*Fws + X2*Fws + X3*Fgs + X4*Fgs + X5*Fvs`：首项 `.FMA (Fws, X1, X2*Fws)`，
+/// 其余逐项 `.FMA`；无树时没有第五项（`tree_to_sky` 传 0 也不行 —— 那会多一次
+/// 加零以外的 FMA，所以按 `N` 区分）。
+fn sky_albedo<const N: usize>(
+    x: &[f64; N],
+    wall_to_sky: f64,
+    ground_to_sky: f64,
+    tree_to_sky: f64,
+) -> f64 {
+    let mut sum = wall_to_sky.mul_add(x[0], x[1] * wall_to_sky);
+    sum = x[2].mul_add(ground_to_sky, sum);
+    sum = x[3].mul_add(ground_to_sky, sum);
+    if N > 4 {
+        sum = x[4].mul_add(tree_to_sky, sum);
+    }
+    sum
+}
+
 fn effective_optics(input: UrbanRadiationInput, area: f64) -> ([f64; BANDS], [f64; BANDS]) {
     let mut reflectance = [0.0; BANDS];
     let mut transmittance = [0.0; BANDS];
     if area > 1.0e-6 && input.vegetation_fraction > 0.0 {
         for band in 0..BANDS {
-            reflectance[band] = (input.leaf_optics.reflectance[band][0] * input.lai
-                + input.leaf_optics.reflectance[band][1] * input.sai)
-                / area;
-            transmittance[band] = (input.leaf_optics.transmittance[band][0] * input.lai
-                + input.leaf_optics.transmittance[band][1] * input.sai)
-                / area;
+            // `MOD_Urban_Albedo.F90:200-201`：`rho1*lai/(lai+sai) + rho2*sai/(lai+sai)`，
+            // 两个商各自舍入再相加（不是先加再除）
+            reflectance[band] = (input.lai * input.leaf_optics.reflectance[band][0]) / area
+                + (input.sai * input.leaf_optics.reflectance[band][1]) / area;
+            transmittance[band] = (input.lai * input.leaf_optics.transmittance[band][0]) / area
+                + (input.sai * input.leaf_optics.transmittance[band][1]) / area;
         }
     }
     if input.vegetation_snow {
         for band in 0..BANDS {
             let (snow_reflectance, snow_transmittance) =
                 if band == 0 { (0.5, 0.3) } else { (0.2, 0.2) };
-            reflectance[band] = (1.0 - input.wet_snow_fraction) * reflectance[band]
-                + input.wet_snow_fraction * snow_reflectance;
-            transmittance[band] = (1.0 - input.wet_snow_fraction) * transmittance[band]
-                + input.wet_snow_fraction * snow_transmittance;
+            // `:207-208` `.FMA (1-fwet, e, fwet*e_sno)`
+            let dry = 1.0 - input.wet_snow_fraction;
+            reflectance[band] = dry.mul_add(
+                reflectance[band],
+                input.wet_snow_fraction * snow_reflectance,
+            );
+            transmittance[band] = dry.mul_add(
+                transmittance[band],
+                input.wet_snow_fraction * snow_transmittance,
+            );
         }
     }
     (reflectance, transmittance)
@@ -568,16 +634,18 @@ fn snow_albedo(czen: f64, snow_water_mm: f64, snow_age: f64) -> [[f64; RADIATION
         return [[0.0; RADIATION_TYPES]; BANDS];
     }
     let age = 1.0 - 1.0 / (1.0 + snow_age);
-    let diffuse_visible = 0.85 * (1.0 - 0.2 * age);
-    let diffuse_near_infrared = 0.65 * (1.0 - 0.5 * age);
+    // `:229-261`：`dfalbs = .FNMA (age, cons, 1)*snal0`；`1+czen*2*sl` 里 `czen*4` 是精确缩放，
+    // 融合与否同值；`dralbs = .FMA (1-dfalbs, 0.4*cff, dfalbs)`
+    let diffuse_visible = (-age).mul_add(0.2, 1.0) * 0.85;
+    let diffuse_near_infrared = (-age).mul_add(0.5, 1.0) * 0.65;
     let correction = ((1.0 + 0.5) / (1.0 + czen * 4.0) - 0.5).max(0.0) * 0.4;
     [
         [
-            diffuse_visible + correction * (1.0 - diffuse_visible),
+            (1.0 - diffuse_visible).mul_add(correction, diffuse_visible),
             diffuse_visible,
         ],
         [
-            diffuse_near_infrared + correction * (1.0 - diffuse_near_infrared),
+            (1.0 - diffuse_near_infrared).mul_add(correction, diffuse_near_infrared),
             diffuse_near_infrared,
         ],
     ]
@@ -598,7 +666,11 @@ fn mix_snow(
 ) -> [[f64; RADIATION_TYPES]; BANDS] {
     std::array::from_fn(|band| {
         std::array::from_fn(|radiation_type| {
-            (1.0 - fraction) * surface[band][radiation_type] + fraction * snow[band][radiation_type]
+            // `:247` `.FMA (fsno, albsno, alb*(1-fsno))`
+            fraction.mul_add(
+                snow[band][radiation_type],
+                surface[band][radiation_type] * (1.0 - fraction),
+            )
         })
     })
 }
@@ -621,47 +693,9 @@ pub(crate) fn wall_shadow_diffuse(fraction: f64, height_to_length: f64) -> f64 {
 
 pub(crate) fn tree_shadow(fraction: f64, theta: f64) -> f64 {
     let cosine = theta.cos();
-    fraction.max((1.0 - (-fraction / cosine).exp()) / (1.0 - fraction * (-1.0 / cosine).exp()))
-}
-
-pub(crate) fn solve<const N: usize>(
-    mut matrix: [[f64; N]; N],
-    mut rhs: [f64; N],
-) -> Result<[f64; N]> {
-    for pivot in 0..N {
-        let row = (pivot..N)
-            .max_by(|&left, &right| {
-                matrix[left][pivot]
-                    .abs()
-                    .total_cmp(&matrix[right][pivot].abs())
-            })
-            .expect("nonempty pivot range");
-        ensure!(
-            matrix[row][pivot].abs() > 1.0e-14,
-            "urban radiation matrix is singular"
-        );
-        if row != pivot {
-            matrix.swap(row, pivot);
-            rhs.swap(row, pivot);
-        }
-        let pivot_row = matrix[pivot];
-        for lower in (pivot + 1)..N {
-            let factor = matrix[lower][pivot] / pivot_row[pivot];
-            for (column, value) in matrix[lower].iter_mut().enumerate().skip(pivot) {
-                *value -= factor * pivot_row[column];
-            }
-            rhs[lower] -= factor * rhs[pivot];
-        }
-    }
-    let mut result = [0.0; N];
-    for row in (0..N).rev() {
-        result[row] = (rhs[row]
-            - ((row + 1)..N)
-                .map(|column| matrix[row][column] * result[column])
-                .sum::<f64>())
-            / matrix[row][row];
-    }
-    Ok(result)
+    // `MOD_Urban_Shortwave.F90:734` 分母 `.FNMA (exp(-1/mu), f, 1)`
+    fraction
+        .max((1.0 - (-fraction / cosine).exp()) / (-fraction).mul_add((-1.0 / cosine).exp(), 1.0))
 }
 
 fn validate(input: UrbanRadiationInput) -> Result<()> {

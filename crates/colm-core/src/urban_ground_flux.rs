@@ -67,8 +67,11 @@ pub fn urban_ground_flux(input: UrbanGroundFluxInput) -> Result<UrbanGroundFluxS
     let ground_fraction = 1.0 - input.cover_fraction[0];
     let impervious_fraction = input.cover_fraction[3] / ground_fraction;
     let pervious_fraction = input.cover_fraction[4] / ground_fraction;
-    let ground_temperature_k = input.impervious_temperature_k * impervious_fraction
-        + input.pervious_temperature_k * pervious_fraction;
+    // `MOD_Urban_GroundFlux.F90:141` `.FMA (tgimp, fgimp, tgper*fgper)`
+    let ground_temperature_k = input.impervious_temperature_k.mul_add(
+        impervious_fraction,
+        input.pervious_temperature_k * pervious_fraction,
+    );
     let mut impervious_wet_fraction = if input.impervious_has_snow_layers {
         input.impervious_snow_fraction
     } else {
@@ -80,16 +83,20 @@ pub fn urban_ground_flux(input: UrbanGroundFluxInput) -> Result<UrbanGroundFluxS
     if input.reference_specific_humidity > input.impervious_specific_humidity {
         impervious_wet_fraction = 1.0;
     }
-    let wet_fraction = impervious_fraction * impervious_wet_fraction + pervious_fraction;
+    let wet_fraction = pervious_fraction + impervious_wet_fraction * impervious_fraction;
+    // `:160` `.FMA (qgimp*fgimp, fwet, qgper*fgper) / fwetfac`
     let ground_specific_humidity =
-        (input.impervious_specific_humidity * impervious_fraction * impervious_wet_fraction
-            + input.pervious_specific_humidity * pervious_fraction)
-            / wet_fraction;
+        (input.impervious_specific_humidity * impervious_fraction).mul_add(
+            impervious_wet_fraction,
+            input.pervious_specific_humidity * pervious_fraction,
+        ) / wet_fraction;
     let temperature_difference_k = input.reference_temperature_k - ground_temperature_k;
     let humidity_difference_kg_kg = input.reference_specific_humidity - ground_specific_humidity;
+    // `:172` `.FMA (dth, .FMA (qm, 0.61, 1), dqh*(th*0.61))`
+    let moist_factor = input.reference_specific_humidity.mul_add(f77(0.61), 1.0);
+    let potential_factor = input.potential_temperature_k * f77(0.61);
     let virtual_temperature_difference_k = temperature_difference_k
-        * (1.0 + f77(0.61) * input.reference_specific_humidity)
-        + f77(0.61) * input.potential_temperature_k * humidity_difference_kg_kg;
+        .mul_add(moist_factor, humidity_difference_kg_kg * potential_factor);
     let mut stability = initialize_monin_obukhov(MoninObukhovInitialInput {
         reference_wind_m_s: input.reference_wind_m_s,
         potential_temperature_k: input.potential_temperature_k,
@@ -127,9 +134,9 @@ pub fn urban_ground_flux(input: UrbanGroundFluxInput) -> Result<UrbanGroundFluxS
                 * (profile.friction_velocity_m_s * momentum_roughness_m / f77(1.5e-5))
                     .lpow(f77(0.45)))
             .exp();
-        let virtual_temperature_scale = temperature_scale_k
-            * (1.0 + f77(0.61) * input.reference_specific_humidity)
-            + f77(0.61) * input.potential_temperature_k * moisture_scale;
+        // `:193` `.FMA (1+0.61*qm, tstar, (th*0.61)*qstar)`
+        let virtual_temperature_scale =
+            moist_factor.mul_add(temperature_scale_k, potential_factor * moisture_scale);
         let raw_zeta = input.wind_height_m * VON_KARMAN * GRAVITY_M_S2 * virtual_temperature_scale
             / (profile.friction_velocity_m_s.powi(2) * input.virtual_potential_temperature_k);
         dimensionless_height = if raw_zeta >= 0.0 {
@@ -147,7 +154,14 @@ pub fn urban_ground_flux(input: UrbanGroundFluxInput) -> Result<UrbanGroundFluxS
                 * 1000.0
                 / input.virtual_potential_temperature_k)
                 .lpow(f77(1.0 / 3.0));
-            (input.reference_wind_m_s.powi(2) + convective_velocity.powi(2)).sqrt()
+            // `:207` `sqrt(.FMA (ur, ur, wc*wc))`
+            input
+                .reference_wind_m_s
+                .mul_add(
+                    input.reference_wind_m_s,
+                    convective_velocity * convective_velocity,
+                )
+                .sqrt()
         };
         if previous_obukhov_length_m * stability.obukhov_length_m < 0.0 {
             sign_changes += 1;
@@ -161,10 +175,15 @@ pub fn urban_ground_flux(input: UrbanGroundFluxInput) -> Result<UrbanGroundFluxS
     let (profile, temperature_scale_k, moisture_scale) =
         surface.expect("urban ground-flux loop always performs at least one iteration");
     Ok(UrbanGroundFluxState {
-        reference_temperature_k: input.reference_temperature_k
-            + temperature_scale_k / VON_KARMAN * (profile.heat_at_2m - profile.heat),
-        reference_specific_humidity: input.reference_specific_humidity
-            + moisture_scale / VON_KARMAN * (profile.moisture_at_2m - profile.moisture),
+        // `:223-224` `.FMA (tstar, fh2m/vonkar - fh/vonkar, thm)`
+        reference_temperature_k: temperature_scale_k.mul_add(
+            profile.heat_at_2m / VON_KARMAN - profile.heat / VON_KARMAN,
+            input.reference_temperature_k,
+        ),
+        reference_specific_humidity: moisture_scale.mul_add(
+            profile.moisture_at_2m / VON_KARMAN - profile.moisture / VON_KARMAN,
+            input.reference_specific_humidity,
+        ),
         momentum_roughness_m,
         heat_roughness_m,
         dimensionless_height,

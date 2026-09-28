@@ -531,10 +531,12 @@ pub fn urban_step(
 
     // ---- UrbanHydrology ----
     // [1] 透水地面：与土壤同一个 `WATER_2014`
+    // `rootflux = rootr*etr`（`MOD_Urban_Hydrology.F90:269`）里的 `etr` 是**哑元**，
+    // `CoLMMAIN_Urban.F90:1070` 传进去的实参是 `etrgper`，不是树冠总蒸腾 `etr`
     let root_flux = thermal
         .rootr
         .iter()
-        .map(|root| root * thermal.etr)
+        .map(|root| root * etrgper)
         .collect::<Vec<_>>();
     let mut soil = Water2014SoilState {
         liquid_water_kg_m2: urban.pervious.liquid_water_kg_m2.clone(),
@@ -572,6 +574,8 @@ pub fn urban_step(
                         - thermal.qfros_gper,
                 },
                 temperature_k: &urban.pervious.temperature_k,
+                // `soilwater` 的 `etr*rootr(j)` 用的是本步 `eroot` 的输出，不是静态 `rootfr`
+                root_fraction: &thermal.rootr,
                 root_flux_mm_s: &root_flux,
                 snow_layers: snow_layers(&urban.pervious),
                 ..input.soil_water

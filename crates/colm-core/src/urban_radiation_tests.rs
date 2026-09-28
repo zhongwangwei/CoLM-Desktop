@@ -4,7 +4,9 @@ use crate::{leaf_optics_from_land_cover_one_based, LandCoverScheme};
 #[test]
 fn au_preston_cold_start_matches_fortran_urban_shortwave() {
     let state = cold_start_urban_radiation(au_preston_input()).unwrap();
-    close(state.sunlit_wall_fraction, 0.4811002822645794);
+    // `alburban` 不改 `fwsun`，只输出 `dfwsun = fwsun_ - fwsun`（`MOD_Urban_Albedo.F90:364`）；
+    // 更新在下一步 `UrbanTHERMAL:621`。
+    assert_eq!(state.sunlit_wall_fraction, 0.5);
     close(state.change_in_sunlit_wall_fraction, -0.0188997177354206);
     close_matrix(
         state.albedo,

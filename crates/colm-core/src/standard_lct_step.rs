@@ -598,6 +598,10 @@ pub fn standard_lct_soil_step(
                 total_ground_evaporation_kg_m2_s: energy.corrected_ground_evaporation_kg_m2_s,
             },
             temperature_k: &state.temperature_k,
+            // `soilwater` 的 `etr*rootr(j)`（`MOD_SoilSnowHydrology.F90:2391`）用的是本步
+            // `eroot` 的输出 `rootr`（`CoLMMAIN.F90:1166`），不是装配期的静态 `rootfr`。
+            // 各层吸水阻力都为 1 时二者逐位相同，所以湿润站点看不出来。
+            root_fraction: &energy.root_uptake.layer_fraction,
             root_flux_mm_s,
             ..input.water
         },
@@ -806,6 +810,8 @@ pub fn standard_lct_snow_soil_step(
                     ..input.soil_water.fluxes
                 },
                 temperature_k: &state.soil_temperature_k,
+                // 同非 split 分支：`rootr` 取本步 `eroot` 的输出
+                root_fraction: &energy.root_uptake.layer_fraction,
                 root_flux_mm_s,
                 // 水量闭合诊断里 `lb >= 1` 那一个分支要看的是**本步**的雪层数。
                 snow_layers: state.snow.layer_count.unsigned_abs() as usize,

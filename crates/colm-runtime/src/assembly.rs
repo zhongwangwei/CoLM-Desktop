@@ -2726,8 +2726,16 @@ impl UrbanTemplate {
     }
 
     /// 城市时间重启要换的变量（以原文件为底，只换本城市单元那一段）。
-    pub fn overrides(&self, urban: &colm_core::UrbanPatchState) -> Result<Vec<RestartOverride>> {
+    pub fn overrides(
+        &self,
+        urban: &colm_core::UrbanPatchState,
+        tree_area_index: Option<(f64, f64)>,
+    ) -> Result<Vec<RestartOverride>> {
         let mut values: Vec<(&str, Vec<f64>)> = Vec::new();
+        if let Some((lai, sai)) = tree_area_index {
+            values.push(("tree_lai", vec![lai]));
+            values.push(("tree_sai", vec![sai]));
+        }
         let radiation = &urban.radiation;
         let flatten = |m: [[f64; 2]; 2]| vec![m[0][0], m[1][0], m[0][1], m[1][1]];
         let snow_slots = SNOW_SLOTS;

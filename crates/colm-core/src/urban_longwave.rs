@@ -2,15 +2,12 @@
 //!
 //! The transfer matrix is intentionally separate from the thermal iteration:
 //! geometry is built once per urban step, while canopy leaf temperature changes
-//! repeatedly.  Both paths use the same small solver and shadow functions as the
-//! Rust urban shortwave kernel.
+//! repeatedly.  Both paths share the shadow functions with the urban shortwave
+//! kernel; the inverse is `colm_lapack::matrix_inverse` (upstream `MatrixInverse`).
 
 use anyhow::{ensure, Context, Result};
 
-use crate::{
-    pc_radiation::canopy_transmittance,
-    urban_radiation::{solve, tree_shadow, wall_shadow_diffuse, wall_shadow_direct},
-};
+use crate::urban_radiation::{tree_shadow, wall_shadow_diffuse, wall_shadow_direct};
 
 const SURFACES: usize = 5;
 const STEFAN_BOLTZMANN: f64 = 5.67e-8;
@@ -166,12 +163,7 @@ fn bare_transfer(input: UrbanLongwaveInput) -> Result<UrbanLongwaveTransfer> {
         input.building_height_to_length,
         input.zenith_angle_radians,
     );
-    let sunlit = 0.5 * (shadow * base.ground_fraction + base.roof_fraction)
-        / (4.0 / std::f64::consts::PI
-            * base.roof_fraction
-            * input.building_height_to_length
-            * input.zenith_angle_radians.tan()
-            + base.roof_fraction);
+    let sunlit = sunlit_wall_fraction(input, &base, shadow);
     let shaded = 1.0 - sunlit;
     let mut matrix = identity();
     let wall_reflection = 1.0 - input.wall_emissivity;
@@ -227,10 +219,15 @@ fn vegetated_transfer(
     let base = Base::new(input);
     let length = input.roof_height_m / input.building_height_to_length;
     let leaf_stem_area = vegetation.leaf_area_index + vegetation.stem_area_index;
+    // `:396` `cos(PI/3)` 由 gfortran 在编译期折成 `0.5000000000000001`（MPFR 正确舍入）
     let optical_depth = leaf_stem_area * vegetation.cover_fraction
-        / (std::f64::consts::PI / 3.0).cos()
+        / COS_PI_OVER_3
         / tree_shadow(vegetation.cover_fraction, std::f64::consts::PI / 3.0);
-    let transmission = canopy_transmittance(3.0 / 8.0 * optical_depth);
+    // `:397` `tee(DD1*3/8.*lsai)`：`DD1` 是 real(r16)，`lsai*0.375` 与整个 `tee` 都在四精度里
+    let transmission = crate::extended::tee(
+        crate::extended::DoubleDouble::new(optical_depth)
+            * crate::extended::DoubleDouble::new(0.375),
+    );
     let vegetation_emissivity = 1.0 - transmission;
 
     let upper_shadow = wall_shadow_diffuse(
@@ -283,13 +280,15 @@ fn vegetated_transfer(
     wall_tree_ground = wall_tree_ground.min(base.wall_to_ground);
     wall_to_tree = wall_tree_wall + wall_tree_sky + wall_tree_ground;
 
-    let sky_to_wall = base.diffuse_wall_shadow - sky.wall + sky.wall * transmission;
-    let sky_to_ground = base.sky_to_ground - sky.ground + sky.ground * transmission;
-    let ground_to_wall = base.ground_to_wall - ground.wall + ground.wall * transmission;
-    let ground_to_sky = base.ground_to_sky - ground.sky + ground.sky * transmission;
-    let wall_to_ground = base.wall_to_ground - wall_tree_ground + wall_tree_ground * transmission;
-    let wall_to_wall = base.wall_to_wall - wall_tree_wall + wall_tree_wall * transmission;
-    let wall_to_sky = base.wall_to_sky - wall_tree_sky + wall_tree_sky * transmission;
+    // `:500-506` `F_ = F - Fv + Fv*Td`：`.FMA (Fv, Td, F - Fv)`
+    let through = |total: f64, blocked: f64| blocked.mul_add(transmission, total - blocked);
+    let sky_to_wall = through(base.diffuse_wall_shadow, sky.wall);
+    let sky_to_ground = through(base.sky_to_ground, sky.ground);
+    let ground_to_wall = through(base.ground_to_wall, ground.wall);
+    let ground_to_sky = through(base.ground_to_sky, ground.sky);
+    let wall_to_ground = through(base.wall_to_ground, wall_tree_ground);
+    let wall_to_wall = through(base.wall_to_wall, wall_tree_wall);
+    let wall_to_sky = through(base.wall_to_sky, wall_tree_sky);
 
     let direct_shadow = wall_shadow_direct(
         base.roof_fraction / base.ground_fraction,
@@ -309,12 +308,7 @@ fn vegetated_transfer(
         input.zenith_angle_radians,
     );
     let direct_wall_shadow = direct_shadow - direct_tree.wall;
-    let sunlit = 0.5 * (direct_wall_shadow * base.ground_fraction + base.roof_fraction)
-        / (4.0 / std::f64::consts::PI
-            * base.roof_fraction
-            * input.building_height_to_length
-            * input.zenith_angle_radians.tan()
-            + base.roof_fraction);
+    let sunlit = sunlit_wall_fraction(input, &base, direct_wall_shadow);
     let shaded = 1.0 - sunlit;
 
     let wall_reflection = 1.0 - input.wall_emissivity;
@@ -349,10 +343,9 @@ fn vegetated_transfer(
         1.0,
         -tree_to_ground * input.pervious_ground_fraction * per_reflection,
     ];
-    let tree_coefficient = (2.0 * vegetation.cover_fraction / base.ground_fraction)
-        .max(sky.cover + ground.cover)
-        * STEFAN_BOLTZMANN
-        * vegetation_emissivity;
+    // `:582` `max(2*fv/fg, Fsv+Fgv)`：`MAX_EXPR <Fsv+Fgv, (fv*2)/fg>`
+    let tree_view_sum =
+        (sky.cover + ground.cover).max((vegetation.cover_fraction * 2.0) / base.ground_fraction);
     build_transfer(
         SURFACES,
         matrix,
@@ -369,9 +362,20 @@ fn vegetated_transfer(
         ],
         tree_to_sky,
         vegetation_emissivity,
-        tree_coefficient,
+        tree_view_sum,
         vegetation.cover_fraction,
     )
+}
+
+/// `cos(PI/3)` 的编译期折叠值（`:396` GIMPLE 的除数 `5.0000000000000011102e-1`）。
+const COS_PI_OVER_3: f64 = f64::from_bits(0x3FE0_0000_0000_0001);
+
+/// `fwsun = 0.5*(Sw*fg+fb) / (4/PI*fb*HL*tan(theta) + fb)`（`:538`）：
+/// 分子 `.FMA (fg, Sw, fb)`，分母 `.FMA ((fb*(4/PI))*HL, tan, fb)`。
+fn sunlit_wall_fraction(input: UrbanLongwaveInput, base: &Base, shadow: f64) -> f64 {
+    let numerator = base.ground_fraction.mul_add(shadow, base.roof_fraction) * 0.5;
+    let slope = base.roof_fraction * (4.0 / std::f64::consts::PI) * input.building_height_to_length;
+    numerator / slope.mul_add(input.zenith_angle_radians.tan(), base.roof_fraction)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -430,7 +434,8 @@ fn tree_view(
     ground_fraction: f64,
     zenith_angle_radians: f64,
 ) -> TreeView {
-    let tree_fraction = cover_fraction - cover_fraction * partial_shadow;
+    // `:426` `fv_ = fv - fv*Sw_`：`.FNMA (fv, Sw_, fv)`
+    let tree_fraction = (-cover_fraction).mul_add(partial_shadow, cover_fraction);
     let shadow = tree_shadow(tree_fraction, zenith_angle_radians);
     let cover = (shadow / ground_fraction).min(1.0);
     let mut wall = (full_shadow - partial_shadow) * shadow;
@@ -460,86 +465,99 @@ fn build_transfer(
     vegetation_view_factor: [f64; SURFACES],
     vegetation_sky_view_factor: f64,
     vegetation_emissivity: f64,
-    tree_coefficient: f64,
+    tree_view_sum: f64,
     vegetation_cover: f64,
 ) -> Result<UrbanLongwaveTransfer> {
     let base = Base::new(input);
     let impervious_ground = base.impervious_fraction;
     let pervious_ground = input.pervious_ground_fraction;
+    let roof = input.roof_fraction;
+    let hl = input.building_height_to_length;
+    let fg = base.ground_fraction;
+    // GIMPLE（`:564-613`，无树 `:182-219` 同形）：`t**4 = (t*t)*(t*t)`、`t**3 = (t*t)*t`；
+    // 墙面 `4*fw*HL*fb/fg*stefnc*ewall*t**4` 收成 `ewall*(((fb*(HL*(fw*4)))/fg)*stefnc)*t⁴`，
+    // `fb*(HL*(fw*4))` 同时就是 `fcover`；地面 `egimp*(fgimp*stefnc)*t⁴`；
+    // `B = .FMA (1-e, I, B1)`，`I` 是 `(LW*Fsw_)*fw` 与 `fgimp*(LW*Fsg_)`。
+    let fourth = |t: f64| {
+        let square = t * t;
+        square * square
+    };
+    let cube = |t: f64| (t * t) * t;
+    let wall_cover = |fraction: f64| roof * (hl * (fraction * 4.0));
+    let wall_emitted = |fraction: f64, t: f64| {
+        input.wall_emissivity * ((wall_cover(fraction) / fg) * STEFAN_BOLTZMANN) * fourth(t)
+    };
+    let wall_derivative = |fraction: f64, t: f64| {
+        input.wall_emissivity
+            * (((roof * (hl * (fraction * 16.0))) / fg) * STEFAN_BOLTZMANN)
+            * cube(t)
+    };
+    let ground_emitted =
+        |fraction: f64, e: f64, t: f64| e * (fraction * STEFAN_BOLTZMANN) * fourth(t);
+    let ground_derivative =
+        |fraction: f64, e: f64, t: f64| e * ((fraction * 4.0) * STEFAN_BOLTZMANN) * cube(t);
+    let tree = surface_count == SURFACES;
+    let emitted = [
+        wall_emitted(wall_fraction[0], input.sunlit_wall_temperature_k),
+        wall_emitted(wall_fraction[1], input.shaded_wall_temperature_k),
+        ground_emitted(
+            impervious_ground,
+            input.impervious_emissivity,
+            input.impervious_temperature_k,
+        ),
+        ground_emitted(
+            pervious_ground,
+            input.pervious_emissivity,
+            input.pervious_temperature_k,
+        ),
+        // `:582` `max(2*fv/fg, Fsv+Fgv)*stefnc*ev`
+        if tree {
+            (tree_view_sum * STEFAN_BOLTZMANN) * vegetation_emissivity
+        } else {
+            0.0
+        },
+    ];
     let incident_wall = input.downward_longwave_w_m2 * incident_view_factor[0];
     let incident_ground = input.downward_longwave_w_m2 * incident_view_factor[1];
-    let wall_scale =
-        4.0 * input.building_height_to_length * input.roof_fraction / base.ground_fraction;
-    let source = [
-        incident_wall * wall_fraction[0] * (1.0 - input.wall_emissivity)
-            + wall_scale
-                * wall_fraction[0]
-                * STEFAN_BOLTZMANN
-                * input.wall_emissivity
-                * input.sunlit_wall_temperature_k.powi(4),
-        incident_wall * wall_fraction[1] * (1.0 - input.wall_emissivity)
-            + wall_scale
-                * wall_fraction[1]
-                * STEFAN_BOLTZMANN
-                * input.wall_emissivity
-                * input.shaded_wall_temperature_k.powi(4),
-        incident_ground * impervious_ground * (1.0 - input.impervious_emissivity)
-            + impervious_ground
-                * STEFAN_BOLTZMANN
-                * input.impervious_emissivity
-                * input.impervious_temperature_k.powi(4),
-        incident_ground * pervious_ground * (1.0 - input.pervious_emissivity)
-            + pervious_ground
-                * STEFAN_BOLTZMANN
-                * input.pervious_emissivity
-                * input.pervious_temperature_k.powi(4),
-        tree_coefficient,
+    let incident = [
+        incident_wall * wall_fraction[0],
+        incident_wall * wall_fraction[1],
+        impervious_ground * incident_ground,
+        pervious_ground * incident_ground,
     ];
-    let emitted = [
-        wall_scale
-            * wall_fraction[0]
-            * STEFAN_BOLTZMANN
-            * input.wall_emissivity
-            * input.sunlit_wall_temperature_k.powi(4),
-        wall_scale
-            * wall_fraction[1]
-            * STEFAN_BOLTZMANN
-            * input.wall_emissivity
-            * input.shaded_wall_temperature_k.powi(4),
-        impervious_ground
-            * STEFAN_BOLTZMANN
-            * input.impervious_emissivity
-            * input.impervious_temperature_k.powi(4),
-        pervious_ground
-            * STEFAN_BOLTZMANN
-            * input.pervious_emissivity
-            * input.pervious_temperature_k.powi(4),
-        tree_coefficient,
+    let reflectance = [
+        1.0 - input.wall_emissivity,
+        1.0 - input.wall_emissivity,
+        1.0 - input.impervious_emissivity,
+        1.0 - input.pervious_emissivity,
     ];
+    let mut source = emitted;
+    for i in 0..4 {
+        source[i] = reflectance[i].mul_add(incident[i], emitted[i]);
+    }
     let temperature_derivative = [
-        4.0 * wall_scale
-            * wall_fraction[0]
-            * STEFAN_BOLTZMANN
-            * input.wall_emissivity
-            * input.sunlit_wall_temperature_k.powi(3),
-        4.0 * wall_scale
-            * wall_fraction[1]
-            * STEFAN_BOLTZMANN
-            * input.wall_emissivity
-            * input.shaded_wall_temperature_k.powi(3),
-        4.0 * impervious_ground
-            * STEFAN_BOLTZMANN
-            * input.impervious_emissivity
-            * input.impervious_temperature_k.powi(3),
-        4.0 * pervious_ground
-            * STEFAN_BOLTZMANN
-            * input.pervious_emissivity
-            * input.pervious_temperature_k.powi(3),
-        4.0 * tree_coefficient,
+        wall_derivative(wall_fraction[0], input.sunlit_wall_temperature_k),
+        wall_derivative(wall_fraction[1], input.shaded_wall_temperature_k),
+        ground_derivative(
+            impervious_ground,
+            input.impervious_emissivity,
+            input.impervious_temperature_k,
+        ),
+        ground_derivative(
+            pervious_ground,
+            input.pervious_emissivity,
+            input.pervious_temperature_k,
+        ),
+        // `:598` `4*max(…)*stefnc*ev` → `ev*((max*4)*stefnc)`
+        if tree {
+            vegetation_emissivity * ((tree_view_sum * 4.0) * STEFAN_BOLTZMANN)
+        } else {
+            0.0
+        },
     ];
     Ok(UrbanLongwaveTransfer {
         surface_count,
-        inverse: inverse(matrix)?,
+        inverse: colm_lapack::matrix_inverse(&matrix, surface_count)?,
         source,
         emitted,
         temperature_derivative,
@@ -557,8 +575,8 @@ fn build_transfer(
         vegetation_view_factor,
         cover_fraction: [
             input.roof_fraction,
-            wall_scale * wall_fraction[0] * base.ground_fraction,
-            wall_scale * wall_fraction[1] * base.ground_fraction,
+            wall_cover(wall_fraction[0]),
+            wall_cover(wall_fraction[1]),
             base.ground_fraction * impervious_ground,
             base.ground_fraction * pervious_ground,
             vegetation_cover,
@@ -578,19 +596,6 @@ fn build_transfer(
 
 fn identity() -> [[f64; SURFACES]; SURFACES] {
     std::array::from_fn(|row| std::array::from_fn(|column| f64::from(row == column)))
-}
-
-fn inverse(matrix: [[f64; SURFACES]; SURFACES]) -> Result<[[f64; SURFACES]; SURFACES]> {
-    let mut inverse = [[0.0; SURFACES]; SURFACES];
-    for column in 0..SURFACES {
-        let mut rhs = [0.0; SURFACES];
-        rhs[column] = 1.0;
-        let solution = solve(matrix, rhs)?;
-        for row in 0..SURFACES {
-            inverse[row][column] = solution[row];
-        }
-    }
-    Ok(inverse)
 }
 
 fn matrix_vector(matrix: [[f64; SURFACES]; SURFACES], vector: [f64; SURFACES]) -> [f64; SURFACES] {
