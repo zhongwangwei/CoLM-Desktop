@@ -963,6 +963,7 @@ fn an_evolved_state_writes_back_a_readable_continuation_restart() {
                     binding().forcing.cosine_zenith,
                 )
                 .unwrap(),
+                lai_refreshed: false,
             },
         )
         .unwrap();
@@ -1004,9 +1005,9 @@ fn an_evolved_state_writes_back_a_readable_continuation_restart() {
                 .is_ok_and(|dims| dims == ["patch", "rtyp", "band"])
         })
         .count();
-    // 14 项土壤/标量（含 `wetwat`）+ 8 项冠层几何与冠层光学（`lai`/`sai`/`sigf`/`tlai`/`tsai` +
-    // `thermk`/`extkb`/`extkd`）。
-    assert_eq!(overrides.len(), 22 + diagnostics + radiation);
+    // 16 项土壤/标量（含 `wetwat`、`fveg`/`green`）+ 8 项冠层几何与冠层光学（`lai`/`sai`/`sigf`/
+    // `tlai`/`tsai` + `thermk`/`extkb`/`extkd`）。
+    assert_eq!(overrides.len(), 24 + diagnostics + radiation);
     source.write_with(&written, &overrides).unwrap();
 
     let restart = colm_init::RestartFile::open(&written).unwrap();
@@ -1140,13 +1141,14 @@ fn an_evolved_snow_state_writes_back_a_readable_continuation_restart() {
                     binding().forcing.cosine_zenith,
                 )
                 .unwrap(),
+                lai_refreshed: false,
             },
         )
         .unwrap();
-    // 土壤/标量（含 `wetwat`）+ 八项冠层几何/光学 + z_sno + dz_sno + snowdp/scv/fsno/sag。
+    // 土壤/标量（含 `wetwat`、`fveg`/`green`）+ 八项冠层几何/光学 + z_sno + dz_sno + snowdp/scv/fsno/sag。
     assert_eq!(
         overrides.len(),
-        28 + ["alb", "ssun", "ssha", "ssoi", "ssno"]
+        30 + ["alb", "ssun", "ssha", "ssoi", "ssno"]
             .iter()
             .filter(|name| source
                 .variable_dimensions(name)

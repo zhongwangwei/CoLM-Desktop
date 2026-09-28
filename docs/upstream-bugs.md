@@ -132,6 +132,18 @@
 - **影响**：只有冷启动重启里的这两个值（实测 macOS 上是 0）；第一步 `UrbanTHERMAL` 会覆盖它们。
 - **处理**：`vendor/` 未改；colm-init 照实测写 0（`urban_restart.rs`）。建议上游初始化为 `tref` 或 0。
 
+### 23. 单点历史写回模式下 `DEF_HIST_FREQ = 'none'` 读未初始化的 `secs_write`（SIGILL）
+
+- **位置**：`main/MOD_HistSingle.F90:59-72`（`hist_single_init`）。
+- **原因**：`USE_SITE_HistWriteBack` 为真时按 `DEF_HIST_FREQ` 选 `secs_write`，`SELECT CASE` 没有 `CASE DEFAULT`；
+  `'none'`（声明默认值）走不到任何分支，随即 `ntime_mem = ceiling(secs_group / secs_write) + 2` 读未初始化的
+  `secs_write`。gfortran -O2 把这条路径当未定义行为，编出陷阱指令。
+- **影响**：单点、`USE_SITE_HistWriteBack = .true.`、`DEF_HIST_FREQ = 'none'` 时 `colm.x` 一启动就 SIGILL。
+  回溯（按 ASLR 偏移 `0x980000` 符号化）：`hist_single_init + 175` ← `hist_init + 227` ← `MAIN__`。
+  关掉写回（`USE_SITE_HistWriteBack = .false.`）即可正常跑，历史累加照常进行、只是不写文件。
+- **处理**：`vendor/` 未改；Rust 引擎不走写回缓冲，`'none'` 下照上游语义只累加、不写历史，续跑旁车存整段原始窗口
+  （与关掉写回的 Fortran 逐位一致，第 431 轮）。建议上游补 `CASE DEFAULT`（或 `'none'` 时不建写回缓冲）。
+
 ## 二、TRACER 编译开关改变了物理（需要上游确认哪一边是对的）
 
 这一版上游在很多地方给 TRACER 构建和非 TRACER 构建写了**不同的物理**，不只是记账不同。

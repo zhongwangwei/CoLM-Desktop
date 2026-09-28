@@ -10,6 +10,8 @@ pub mod baseflow_optimizer;
 pub mod bgc;
 pub mod bgc_step;
 pub mod history;
+mod history_manifest;
+pub mod history_sidecar;
 pub mod pft;
 pub mod physics;
 

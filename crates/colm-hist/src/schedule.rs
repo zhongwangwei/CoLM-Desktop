@@ -124,6 +124,9 @@ pub struct ScheduledRecord {
     pub write_at_tick: i64,
     /// 该记录的 `time` 变量取值（minutes since 1900，写入时刻截断后减固定位移）。
     pub label_minutes: i64,
+    /// 写入时刻是不是频率的自然边界（`hist_out` 的 `natural_boundary`）。不是的只有运行终点那条
+    /// 不满整周期的记录：上游在写它**之前**先把原始累加窗口存进续跑旁车（`MOD_Hist.F90:265-274`）。
+    pub natural_boundary: bool,
 }
 
 /// 把窗口按频率与分组展开成逐条记录 —— **唯一的实现**，`schedule` 由它派生。
@@ -158,8 +161,9 @@ pub fn schedule_records(
         let next = (cursor + step).min(end);
         // 上游的判据是 `isendof*(idate, deltim) .or. (.not. (itstamp < etstamp))`：
         // **运行结束一定写**，所以最后一个不满整周期的区间不会丢。
-        let due =
-            next == end || frequency == HistoryFrequency::Timestep || period_ends(next, frequency);
+        let natural_boundary =
+            frequency == HistoryFrequency::Timestep || period_ends(next, frequency);
+        let due = next == end || natural_boundary;
         if due {
             // 分组用的是**步末的 end-style 日期**，不是写入时刻本身。
             //
@@ -188,6 +192,7 @@ pub fn schedule_records(
                 record,
                 write_at_tick: next,
                 label_minutes: label,
+                natural_boundary,
             });
         }
         cursor = next;

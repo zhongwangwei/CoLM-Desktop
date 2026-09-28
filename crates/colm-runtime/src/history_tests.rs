@@ -266,6 +266,18 @@ fn the_bridge_writes_the_state_variables_it_declares() {
     )
     .unwrap();
     set_lct_canopy_water(&mut buffer, 0, &state.energy, &output.energy).unwrap();
+    // `qcharge` 与旁车专用量同走 `set_sidecar_only`（每个分支都调它）。
+    set_sidecar_only(
+        &mut buffer,
+        &template,
+        &state.water,
+        None,
+        output.energy.leaf.air_temperature_2m_k,
+        state.energy.leaf.canopy_water.rain_mm,
+        state.energy.leaf.canopy_water.snow_mm,
+        Some(output.water.recharge_mm_s),
+    )
+    .unwrap();
     set_lct_soil_resistance(&mut buffer, 0, &output.energy).unwrap();
     set_lct_balance_errors(
         &mut buffer,
@@ -884,12 +896,11 @@ fn the_session_writes_one_record_per_scheduled_hour() {
 /// 反例（全局步数当除数）会安静地写出**一半**的值：每个变量都"有限"，不报错。
 #[test]
 fn the_accumulator_skips_missing_samples_and_counts_only_valid_ones() {
-    let mut accumulator = HistoryAccumulator {
-        sums: std::collections::BTreeMap::new(),
-        steps: 0,
-    };
     // 两个物理步：第一步"本地正午"有值，第二步不是。
-    accumulator.steps = 2;
+    let mut accumulator = HistoryAccumulator {
+        steps: 2,
+        ..Default::default()
+    };
     accumulator
         .scalar("solvdln", 0, 64.0)
         .expect("a valid sample accumulates");
@@ -1069,10 +1080,9 @@ fn the_derived_soil_moisture_uses_both_phase_densities() {
 #[test]
 fn the_instantaneous_water_variables_take_the_last_step_not_the_mean() {
     let mut accumulator = HistoryAccumulator {
-        sums: std::collections::BTreeMap::new(),
-        steps: 0,
+        steps: 2,
+        ..Default::default()
     };
-    accumulator.steps = 2;
     for value in [100.0, 200.0] {
         accumulator.scalar("wat_inst", 0, value).unwrap();
         accumulator.scalar("wat", 0, value).unwrap();
@@ -1144,4 +1154,68 @@ fn history_sidecar_names_follow_upstream() {
         "at_restart_hist_2010-032-00000_w180_s90.nc"
     );
     assert!(history_sidecar_name("at_restart_2010-032-00000.nc").is_err());
+}
+
+/// 续跑：区间中途导出窗口、由窗口重建再接着累加，写出的平均与不中断的累加逐位相同 ——
+/// 包括用自己计数器的量（本地正午 `solvdln` 用 `nac_ln`、`alb` 用 `nac_dt`）。
+#[test]
+fn a_restored_window_continues_to_the_same_means() {
+    let feed = |accumulator: &mut HistoryAccumulator, step: usize| {
+        accumulator.steps += 1;
+        let x = step as f64;
+        accumulator.scalar("fsena", 0, 0.1 * x + 1.0 / 3.0).unwrap();
+        // 只有第 1 步是本地正午，只有第 0、2 步是白天。
+        let noon = if step == 1 {
+            7.0 / 3.0
+        } else {
+            colm_core::MISSING
+        };
+        accumulator.scalar("solvdln", 0, noon).unwrap();
+        let albedo = if step == 1 {
+            [colm_core::MISSING; 4]
+        } else {
+            [0.1 + x, 0.2, 0.3, 0.4 / 3.0]
+        };
+        accumulator.layer("alb", 0, &albedo).unwrap();
+    };
+    let means = |accumulator: &HistoryAccumulator| {
+        let mut buffer = HistoryBuffers::new(dimensions(), site(), 1);
+        buffer.declare(&["fsena", "solvdln", "alb"]).unwrap();
+        accumulator.write_means(&mut buffer, 0).unwrap();
+        let directory = std::env::temp_dir().join(format!(
+            "colm-history-window-{}-{}",
+            std::process::id(),
+            accumulator.steps
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("h.nc");
+        buffer.write(&path).unwrap();
+        let file = netcdf::open(&path).unwrap();
+        ["f_fsena", "f_solvdln", "f_alb"]
+            .iter()
+            .flat_map(|name| {
+                file.variable(name)
+                    .unwrap()
+                    .get_values::<f64, _>(..)
+                    .unwrap()
+            })
+            .map(f64::to_bits)
+            .collect::<Vec<_>>()
+    };
+    let mut whole = HistoryAccumulator::default();
+    for step in 0..3 {
+        feed(&mut whole, step);
+    }
+    let mut first = HistoryAccumulator::default();
+    for step in 0..2 {
+        feed(&mut first, step);
+    }
+    let window = first.window();
+    assert_eq!(
+        (window.steps, window.local_noon_steps, window.daytime_steps),
+        (2, 1, 1)
+    );
+    let mut resumed = HistoryAccumulator::from_window(&window);
+    feed(&mut resumed, 2);
+    assert_eq!(means(&resumed), means(&whole));
 }

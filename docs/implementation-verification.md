@@ -24743,6 +24743,9 @@ split 算例可从前处理起全程用 Rust 引擎。
 未改动的 `kernels/default` 在 AT-Neu 上 `DEF_HIST_FREQ = 'none'` 首步前后即 SIGILL（`'MONTHLY'` 正常），可复现
 （`tmp/hn-fortran`）。本机 lldb 挂不上进程，回溯未符号化，尚未定位到源码行，故暂不记入 upstream-bugs。
 
+（第 431 轮补记：已定位。按 ASLR 偏移符号化后是 `hist_single_init` 读未初始化的 `secs_write`，见
+upstream-bugs 第 23 条；关掉 `USE_SITE_HistWriteBack` 即可得到 `'none'` 的 Fortran 参考。）
+
 ### 五、实测
 
 ```text
@@ -25696,3 +25699,74 @@ GCC 把局部乘积 `watdry` 前向代入到两处使用点，与那里的减法
 - 整段运行 `cs3on`：历史 24/24、重启与旁车 99/99 逐位一致，release 与 debug 相同。
 
 运行时不再拒绝 `DEF_USE_CNSOYFIXN`；仍拒绝的只剩 `DEF_USE_FIRE` 与 `DEF_USE_IRRIGATION`（缺 `crop/*.nc` 灌溉数据无法对照）。
+
+## 第 431 轮：历史累加器续跑旁车——区间跨过重启（`nac > 0`）
+
+第 427 轮只移植了对齐的情形（`nac = 0`，旁车只有四个标记）。本轮补齐上游 `land_history_restart.inc` 的完整语义：
+区间跨过重启时，旁车按上游清单顺序转存全部**已分配**的累加器（`nac_ln`、`nac_dt` 与 `a_*` 原始累加和，从未累加过的
+是 `spval`）；续跑时读回、接着累加，区间平均与不中断的运行逐位相同。
+
+### 一、清单由生成器从上游取
+
+`oracle/scripts/gen_hist_manifest.py` → `crates/colm-runtime/src/history_manifest.rs`（420 项）：
+- 名字、秩、是否城市量取自 `history_acc_manifest`；分配条件与形状取自 `allocate_acc_fluxes`。两处各带一层
+  `#ifdef`/`IF`，脚本用同一个条件栈解析并逐项核对，不一致即失败。条件归为 `Always`（126）/`Bgc`（193）/
+  `BgcCrop`（48）/`Urban`（21，`numurban > 0`）/`PftOrPc`（14）/`Unsupported`（18，Rust 拒绝的宏）。
+- 每项的历史名取自 `MOD_Hist.F90` 的 `write_history_variable_*(…, a_X, file_hist, 'f_Y', …)`（Fortran 名不分大小写，
+  按小写配对）：Rust 累加器以历史名为键（`a_us` → `xy_us`、`a_retransn` → `retrasn`），不写历史的以去掉 `a_` 的名字为键。
+- 旁车读写与校验在 `history_sidecar.rs`：写出按清单顺序、`(patch, d2, d1)` 布局；读回照上游逐项校验（主重启要求而旁车
+  缺失、标记不全、未提交、历史频率变了、`nac` 非负整数、缺累加器、形状不符都报错；旧式重启返回 `None`）。
+
+### 二、累加语义要与上游 `a_*` 逐项一致（原先只保证了"平均"一致）
+
+1. **过滤发生在写出时，不在累加时。** 上游对每个 patch 都 `acc1d`，按 `patchtype`/作物类别的过滤只在
+   `write_history_variable_2d` 里做。Rust 原来的 `PatchFilteredSink` 在累加时就丢值——历史平均一样，`a_*` 却不同。
+   改为：累加器收下原值、记入 `filtered`，写平均时跳过；直写缓冲的一方仍丢弃（`HistorySink::keep_filtered`）。
+   同样改的还有 BGC 按类型分列的自然植被量（农田上）与作物分列量（非对应作物类别）。湿地 `xerr` 那处"先丢再写 0"
+   是另一回事，换成 `DroppedSink`。
+2. **只进旁车的量**（`set_sidecar_only`，每个分支都调）：`t2m_wmo`（单点恒等于 `tref`）、`ldew_rain`/`ldew_snow`、
+   `qcharge`、常数重启里的 `BD_all`/`wfc`/`OM_density`、非湖 patch 的 `t_lake`/`lake_icefrac`（城市取其水体的演化值，
+   其余取重启值）、各 patch 的 `wetwat`/`wetzwt`（非湿地按过滤标记）。`qcharge`：土壤/湿地在 VSF 下上游从不赋值
+   （一直 `spval`），冰川/湖清零，城市每步有值。冰川/湖另补 `h2osoi`（按液/冰重算）与清零的 `qlayer`/`rootr`
+   （`CoLMMAIN.F90:2233-2260`）。城市补 `fahe`（累加但不写出）。
+3. **BGC 只进旁车的量**：`set_bgc_history` 的遍历扩为"历史变量 ∪ 本配置分配的 BGC 清单键"，按上游的累加条件取舍：
+   植被 `*Cap` 只在 DiagMatrix 下累加、O2 两项只在 NITRIF 下累加、土壤 `*Cap_vr` 与 `t_scalar`/`w_scalar` 无条件累加；
+   `irrig_method_*` 取持久化的灌溉诊断；灌溉账目与 FIRE 五项在运行期被拒绝，保持 `spval`（关掉时上游也是）。
+4. **计数器**：`nac_ln` 取 `solvdln` 的有效步数、`nac_dt` 取 `alb` 的有效步数；读回时这两组用各自计数、其余用 `nac`。
+   同一个累加器被 Rust 记在几个键下的（`wetzwt` ← `zwt`、`plantdate_*` ← `plantdate`、`huiswheat` ← `hui`），读回时照抄。
+5. **运行终点不在自然边界上时**，上游在写那条不满周期的记录**之前**先存原始窗口（`MOD_Hist.F90:265-274`）。
+   调度记录多了 `natural_boundary`，会话在那一步发布写出前的窗口。
+6. **`DEF_HIST_FREQ = 'none'`**：上游照样累加、从不写、从不清零，旁车存整段原始窗口。Rust 改为建一个只累加的会话。
+   Fortran 参考要关掉 `USE_SITE_HistWriteBack`（否则 SIGILL，定位见 upstream-bugs 第 23 条）。
+
+### 三、顺带暴露的真实缺陷：冰川/湖续跑文件里的 `fveg`/`green`
+
+`CoLMMAIN.F90:2203-2210` 对 `patchtype > 2` 每步把 `fveg`/`green` 清零，`LAI_readin` 在写续跑之前再设回
+（LCT：`fveg = fveg0`、`green = fveg0 > 0`；PFT/PC：`green = 1`；水体都是 0）。Rust 原来照抄输入重启的值。
+回归集里的冰川算例都只在月初写续跑（那一步刚重读 LAI），所以一直一致；日续跑（`hs`，1 月 2–4 日）才暴露：
+Fortran 0、Rust 1。修法：模板记下 `LAI_readin` 的取值，续跑写出按"这一步是否重读 LAI"取它或 0。
+
+### 四、结果（对纯 Fortran，月历史 + 日续跑，2010-01-01～01-03）
+
+| 算例 | 类型 | 旁车 `nac` | 历史 | 重启+旁车 | release | debug |
+|---|---|---|---|---|---|---|
+| `hs` | 冰川 | 48/96/144 | 1/1 | 7/7 | ✓ | ✓ |
+| `ns` | 土壤，VSF 关 | 同上 | 1/1 | 7/7 | ✓ | ✓ |
+| `nv` | 土壤，VSF 开 + PHS | 同上 | 1/1 | 7/7 | ✓ | ✓ |
+| `nb` | BGC + PFT + NITRIF | 同上 | 1/1 | 15/15 | ✓ | ✓ |
+| `nc` | 作物（`kernels/crop`，2002） | 同上 | 1/1 | 15/15 | ✓ | ✓ |
+| `nu` | 城市（AU-Preston，2004） | 同上 | 1/1 | 11/11 | ✓ | ✓ |
+| `nl` | 湖 | 同上 | 1/1 | 7/7 | ✓ | ✓ |
+| `nw` | 湿地 | 同上 | 1/1 | 7/7 | ✓ | ✓ |
+| `nn` | `'none'`（关写回） | 同上 | 0/0 | 7/7 | ✓ | ✓ |
+
+续跑（各自从 01-04 的续跑文件起步，只跑 colm 阶段，到 01-31；`'none'` 到 01-10）——跨过重启的 1 月月历史与全部
+日续跑、旁车逐位一致（release）：`hsc` 1/63、`nsc` 1/63、`nvc` 1/63、`nbc` 1/127、`ncc` 1/127、`nuc` 1/95、
+`nlc` 1/63、`nwc` 1/63、`nnc` 0/21（旁车 `nac` = 144 + 7×48 = 480）。区间若没被正确恢复，1 月平均必然不同。
+
+工具：`tmp/variant.py`（由已有算例派生变体）、`tmp/cont.py` + `tmp/contrun.sh`（复制跑完的算例、改起止日期、只跑 colm）。
+
+全量回归（release，`tmp/regress_all.sh`）：74 个算例的历史、主重启与旁车全部逐位（含上面 9 个非对齐算例；
+`nn`/`pni` 不写历史）。其中 `nc` 一度被误放进默认内核那一组：`mksrfdata` 拒绝后目录里留的是上一次的输出，
+对比照样"一致"。`regress.sh` 已改为任一阶段失败即报 FAILED，`nc` 按 CROP 内核重跑确认逐位；续跑目录（`*c`）
+与调试残留 `crd` 已排除出全量回归（前者只能用 `contrun.sh` 跑，`--force 1` 会从冷启动重做）。

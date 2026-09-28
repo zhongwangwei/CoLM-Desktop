@@ -275,10 +275,31 @@ fn run() -> Result<()> {
 
     // 会话从**配置**开（窗口、站点、步长、频率都在里面），要在 `open` 消费掉
     // 配置之前建好 —— 而它自己不带 forcing，所以先后没有别的影响。
-    let session = history_session(&config, &outputs)?;
-    let history_restart = HistoryRestart {
+    let mut session = history_session(&config, &outputs)?;
+    let sidecar_config = colm_runtime::history_sidecar::SidecarConfig {
         frequency_code: history_frequency_code(config.history_frequency),
-        pending_steps: session.as_ref().map(HistorySession::pending_steps_handle),
+        urban_run: logical_field(&document, "DEF_URBAN_RUN")?,
+        urban_patches: usize::from(template.urban.is_some()),
+        pft_or_pc: logical_field(&document, "DEF_USE_PFT")?
+            || logical_field(&document, "DEF_USE_PC")?,
+        bgc: template.physics.bgc.is_some(),
+        crop: template.physics.bgc.is_some_and(|switches| switches.crop),
+    };
+    // `read_history_acc_restart`（`CoLM.F90:376`）：续跑重启带着未写完的历史区间时接着累加。
+    let initial_window = colm_runtime::history_sidecar::read_sidecar(
+        &restarts.initial,
+        &history_sidecar_path(&restarts.initial)?,
+        &sidecar_config,
+    )?;
+    if let Some(window) = initial_window.filter(|window| window.steps > 0) {
+        let session = session.as_mut().context(
+            "the restart carries an open history window, but this run writes no history",
+        )?;
+        session.restore(window)?;
+    }
+    let history_restart = HistoryRestart {
+        config: sidecar_config,
+        window: session.as_ref().map(HistorySession::window_handle),
     };
     // 主循环的 `coszen`/`cosazi`/本地时间都读常数重启的 `patchlonr`/`patchlatr`（上游
     // `MOD_Vars_TimeInvariants`），不从度数现算 —— 两者差 1 ULP 时只有读重启才与内核同源。
@@ -440,7 +461,8 @@ fn run_snow(
                        state: &StandardLctSnowSoilState,
                        output: PatchStepOutput<'_>|
      -> Result<()> {
-        let snapshot = RestartSnapshot::new(state, output, step.surface_cosine_zenith)?;
+        let mut snapshot = RestartSnapshot::new(state, output, step.surface_cosine_zenith)?;
+        snapshot.lai_refreshed = step.clock.update_lai;
         // `save_to_restart`（`CoLM.F90:664`）：每个 `DEF_WRST_FREQ` 周期末、以及预热期
         // 每年末写一次 `WRITE_TimeVariables`。窗口终点那一次由循环结束后的写出负责。
         if let Some(periodic) = periodic {
@@ -481,10 +503,18 @@ fn run_snow(
 
 /// 写续跑文件时要附带的历史累加器信息（`land_history_restart.inc`）。
 struct HistoryRestart {
-    /// `history_acc_freq()`：`DEF_HIST_FREQ` 的代码（none 0、TIMESTEP 1 … YEARLY 5）。
-    frequency_code: u8,
-    /// 当前历史区间已累加的步数（上游的 `nac`）；没开 history 时为 `None`（恒为 0）。
-    pending_steps: Option<std::sync::Arc<std::sync::atomic::AtomicUsize>>,
+    config: colm_runtime::history_sidecar::SidecarConfig,
+    /// 当前历史区间的原始累加状态；没开 history 时为 `None`（恒为空窗口）。
+    window: Option<std::sync::Arc<std::sync::Mutex<colm_runtime::history_sidecar::HistoryWindow>>>,
+}
+
+/// 续跑文件 → 同目录的旁车路径。
+fn history_sidecar_path(restart: &Path) -> Result<PathBuf> {
+    let name = restart
+        .file_name()
+        .and_then(|name| name.to_str())
+        .context("a restart path has no file name")?;
+    Ok(restart.with_file_name(colm_runtime::history::history_sidecar_name(name)?))
 }
 
 fn history_frequency_code(frequency: colm_hist::schedule::HistoryFrequency) -> u8 {
@@ -501,48 +531,30 @@ fn history_frequency_code(frequency: colm_hist::schedule::HistoryFrequency) -> u
 
 /// 上游每写一份续跑文件，都同时写历史累加器旁车 `<case>_restart_hist_<date>_<block>.nc`
 /// （`write_history_acc_restart` + `complete_history_acc_restart`），并在主重启末尾写
-/// `history_sidecar_required = 1`（`mark_history_acc_restart`）。区间与重启对齐（`nac = 0`）时
-/// 旁车只有 `history_schema = 1`、`history_freq`、`history_nac = 0`、`history_complete = 1` 四个量，
-/// 这里逐位照写。区间跨过重启（`nac > 0`）时上游还要转存约 700 个 `a_*` 累加数组，尚未移植：
-/// 不写旁车与标记，续跑方（含 Fortran）会按"旧式重启、区间内历史可能不完整"处理。
+/// `history_sidecar_required = 1`（`mark_history_acc_restart`）。区间跨过重启时旁车带全部
+/// 已分配的累加器（[`colm_runtime::history_sidecar`]）。
 fn mark_history_restart(restart: &Path, history: &HistoryRestart) -> Result<()> {
-    let nac = history
-        .pending_steps
+    let window = history
+        .window
         .as_ref()
-        .map_or(0, |steps| steps.load(std::sync::atomic::Ordering::Relaxed));
-    if nac != 0 {
-        eprintln!(
-            "colm-rs: warning: the history window spans the restart {} ({nac} steps accumulated); \
-             the accumulator sidecar is not written, so a continuation starts that window afresh",
-            restart.display()
-        );
-        return Ok(());
-    }
-    let name = restart
-        .file_name()
-        .and_then(|name| name.to_str())
-        .context("a restart path has no file name")?;
-    let sidecar_name = colm_runtime::history::history_sidecar_name(name)?;
+        .map(|window| window.lock().expect("history window lock").clone())
+        .unwrap_or_default();
     let patches = colm_init::RestartFile::open(restart)?.dimension("patch")?;
-    let sidecar = restart.with_file_name(sidecar_name);
-    let mut file =
-        netcdf::create(&sidecar).with_context(|| format!("cannot create {}", sidecar.display()))?;
-    file.add_dimension("patch", patches)?;
-    for (field, value) in [
-        ("history_schema", 1.0),
-        ("history_freq", f64::from(history.frequency_code)),
-        ("history_nac", 0.0),
-        ("history_complete", 1.0),
-    ] {
-        file.add_variable::<f64>(field, &["patch"])?
-            .put_values(&vec![value; patches], ..)?;
-    }
-    file.close()?;
+    colm_runtime::history_sidecar::write_sidecar(
+        &history_sidecar_path(restart)?,
+        patches,
+        &history.config,
+        &window,
+    )?;
     let mut primary =
         netcdf::append(restart).with_context(|| format!("cannot reopen {}", restart.display()))?;
-    primary
-        .add_variable::<f64>("history_sidecar_required", &["patch"])?
-        .put_values(&vec![1.0; patches], ..)?;
+    // 续跑起点本身就是带标记的续跑文件时，写出是从它复制来的，标记已经在了。
+    match primary.variable_mut("history_sidecar_required") {
+        Some(mut marker) => marker.put_values(&vec![1.0; patches], ..)?,
+        None => primary
+            .add_variable::<f64>("history_sidecar_required", &["patch"])?
+            .put_values(&vec![1.0; patches], ..)?,
+    }
     Ok(())
 }
 
@@ -551,6 +563,8 @@ struct RestartSnapshot {
     matric_potential_mm: Vec<f64>,
     hydraulic_conductivity_mm_s: Vec<f64>,
     diagnostics: SurfaceDiagnosticsRow,
+    /// 这一步末尾是否重读了 LAI（见 `EvolvedStepOutput::lai_refreshed`）。
+    lai_refreshed: bool,
 }
 
 impl RestartSnapshot {
@@ -564,12 +578,14 @@ impl RestartSnapshot {
                 matric_potential_mm: output.water.soil.matric_potential_mm.clone(),
                 hydraulic_conductivity_mm_s: output.water.soil.hydraulic_conductivity_mm_s.clone(),
                 diagnostics: SurfaceDiagnosticsRow::from_lct(&output.energy, cosine_zenith)?,
+                lai_refreshed: false,
             },
             // 冰川分支不调 `soilwater`：`smp`/`hk` 保持重启里的值。
             PatchStepOutput::Glacier(output) => Self {
                 matric_potential_mm: state.soil_water.matric_potential_mm.clone(),
                 hydraulic_conductivity_mm_s: state.soil_water.hydraulic_conductivity_mm_s.clone(),
                 diagnostics: SurfaceDiagnosticsRow::from_glacier(&output.thermal, cosine_zenith),
+                lai_refreshed: false,
             },
             // 湖同样不调 `soilwater`。
             // 城市：透水地面的 `WATER_2014` 已把 `smp`/`hk` 写进状态。
@@ -577,11 +593,13 @@ impl RestartSnapshot {
                 matric_potential_mm: state.soil_water.matric_potential_mm.clone(),
                 hydraulic_conductivity_mm_s: state.soil_water.hydraulic_conductivity_mm_s.clone(),
                 diagnostics: SurfaceDiagnosticsRow::from_urban(output, cosine_zenith),
+                lai_refreshed: false,
             },
             PatchStepOutput::Lake(output) => Self {
                 matric_potential_mm: state.soil_water.matric_potential_mm.clone(),
                 hydraulic_conductivity_mm_s: state.soil_water.hydraulic_conductivity_mm_s.clone(),
                 diagnostics: SurfaceDiagnosticsRow::from_lake(&output.thermal, cosine_zenith),
+                lai_refreshed: false,
             },
         })
     }
@@ -603,6 +621,7 @@ fn write_evolved_restart(
             matric_potential_mm: &snapshot.matric_potential_mm,
             hydraulic_conductivity_mm_s: &snapshot.hydraulic_conductivity_mm_s,
             diagnostics: snapshot.diagnostics,
+            lai_refreshed: snapshot.lai_refreshed,
         },
     )?;
     if let Some(parent) = restart_out.parent() {
@@ -714,11 +733,8 @@ fn history_session(
     let Some(directory) = &outputs.history_directory else {
         return Ok(None);
     };
-    // `DEF_HIST_FREQ = 'none'`（声明默认值）：上游 `hist_out` 走 `CASE default`，
-    // 从不写文件。建一个空调度会被当成"窗口与频率对不上"报错。
-    if config.history_frequency == colm_hist::schedule::HistoryFrequency::None {
-        return Ok(None);
-    }
+    // `DEF_HIST_FREQ = 'none'`（声明默认值）：上游 `hist_out` 走 `CASE default`，从不写文件，
+    // 但照样累加 —— 续跑旁车要这个窗口，所以仍建一个只累加的会话（空调度）。
     config
         .history_session(directory, outputs.history_stem.clone())
         .map(Some)

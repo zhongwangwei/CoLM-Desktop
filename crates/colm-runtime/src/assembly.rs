@@ -241,6 +241,9 @@ struct RestartColumns {
     canopy_water_mm: Vec<f64>,
     canopy_rain_mm: Vec<f64>,
     canopy_snow_mm: Vec<f64>,
+    /// `fveg`/`green`：冰川、湖泊等 patch 每步被清零、`LAI_readin` 时重设，续跑要写回当时的值。
+    vegetation_fraction: Vec<f64>,
+    greenness: Vec<f64>,
     /// `smp`：`(patch, soil)`，**没有雪槽**，所以步长与 `t_soisno` 不同。
     matric_potential_mm: Vec<f64>,
     /// `hk`：同 `smp` 的形状。
@@ -282,6 +285,8 @@ pub struct EvolvedStepOutput<'a> {
     /// 本步的表面诊断量（相似函数、2 m 气温湿度、粗糙度……）：它们都是
     /// `intent(out)`，状态里没有，由各 patch 分支的步输出给出。
     pub diagnostics: SurfaceDiagnosticsRow,
+    /// 这一步末尾是否重读了 LAI（`LAI_readin`，在写续跑文件之前）。
+    pub lai_refreshed: bool,
 }
 
 /// 续跑文件里逐步重写的 `(patch,)` 表面诊断量。
@@ -762,6 +767,12 @@ pub struct StandardLctRestartTemplate {
     /// 它由静态配置（地类号与 `fveg0`）定，所以装配期算一次就够；
     /// history 的 `f_green` 直接取它。
     pub vegetation_greenness: f64,
+    /// `LAI_readin` 写给本 patch 的 `(fveg, green)`（`MOD_LAIReadin.F90:130-160` 的 LCT 段、
+    /// `:236-256` 的 PFT/PC 段）。冰川、湖泊（`patchtype > 2`）在 `CoLMMAIN` 里每步清零
+    /// （`CoLMMAIN.F90:2203-2210`），所以续跑文件里的值取决于那一步有没有重读 LAI。
+    pub lai_readin_vegetation: (f64, f64),
+    /// 只为续跑旁车累加的静态量（`BD_all`/`wfc`/`OM_density`、非湖 patch 的 `t_lake`/`lake_icefrc`）。
+    pub sidecar_statics: crate::history::SidecarStatics,
     /// 重启里的雪列。无雪分支下 `layer_count == 0`；留着是因为上游每步都要按它
     /// 判断走不走积雪路径，而雪分支的装配要直接用它。
     pub snow: RuntimeSnowColumn,
@@ -988,6 +999,8 @@ fn assemble(
         canopy_water_mm: time.floats("ldew")?.to_vec(),
         canopy_rain_mm: time.floats("ldew_rain")?.to_vec(),
         canopy_snow_mm: time.floats("ldew_snow")?.to_vec(),
+        vegetation_fraction: time.floats("fveg")?.to_vec(),
+        greenness: time.floats("green")?.to_vec(),
         // `smp`/`hk` 的维度是 `(patch, soil)` —— 与 `t_soisno` 的 `soilsnow`
         // **不同**，没有雪槽。上游把它们写进重启并在续跑时读回
         // （`MOD_Vars_TimeVariables.F90:1154-1155` 写、`:1363-1364` 读），
@@ -1157,6 +1170,16 @@ fn assemble(
     } else {
         1.0
     };
+    // LCT 段：水体（与地类 0）两者都是 0，否则 `fveg = fveg0`、`green = fveg0 > 0`；
+    // PFT/PC 段不看 `fveg0`，除水体外 `green` 一律是 1。
+    let waterbody = land_class == colm_core::waterbody_class(physics.land_cover_scheme);
+    let lai_readin_vegetation = if waterbody {
+        (0.0, 0.0)
+    } else if physics.use_pft {
+        (class.maximum_vegetation_fraction(), 1.0)
+    } else {
+        (class.maximum_vegetation_fraction(), vegetation_greenness)
+    };
     // 两份 patchtype 必须一致：一份来自地类表，一份来自重启。不一致说明这个 patch
     // 的类别与它被写进重启时用的地类表不是同一套 —— 那会让下面每一项都不可信。
     ensure!(
@@ -1305,6 +1328,8 @@ fn assemble(
         inverse_sqrt_leaf_dimension_m_neg_half,
         biochemistry,
         vegetation_greenness,
+        lai_readin_vegetation,
+        sidecar_statics: crate::history::SidecarStatics::read(&constant, &time, patch)?,
         snow,
         restart_columns,
         surface_diagnostics,
@@ -2072,7 +2097,22 @@ impl StandardLctRestartTemplate {
         canopy[self.patch] = state.energy.leaf.canopy_water.total_mm;
         canopy_rain[self.patch] = state.energy.leaf.canopy_water.rain_mm;
         canopy_snow[self.patch] = state.energy.leaf.canopy_water.snow_mm;
+        // `patchtype > 2`：`CoLMMAIN` 每步把 `fveg`/`green` 清零，只有刚重读过 LAI 的那一步
+        // 才是 `LAI_readin` 的值。只在月初写续跑的算例看不出区别（实测冰川日续跑才暴露）。
+        let mut vegetation_fraction = scalars(&self.restart_columns.vegetation_fraction)?;
+        let mut greenness = scalars(&self.restart_columns.greenness)?;
+        if self.patch_type > 2 {
+            let (fveg, green) = if step.lai_refreshed {
+                self.lai_readin_vegetation
+            } else {
+                (0.0, 0.0)
+            };
+            vegetation_fraction[self.patch] = fveg;
+            greenness[self.patch] = green;
+        }
         let mut overrides = vec![
+            RestartOverride::new("fveg", vegetation_fraction),
+            RestartOverride::new("green", greenness),
             RestartOverride::new("t_soisno", temperature),
             RestartOverride::new("wliq_soisno", liquid),
             RestartOverride::new("wice_soisno", ice),

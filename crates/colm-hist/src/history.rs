@@ -166,6 +166,11 @@ impl HistoryBuffers {
         Ok(())
     }
 
+    /// 这个变量是否已声明（只累加、不进历史文件的量写出时据此跳过）。
+    pub fn declares(&self, name: &str) -> bool {
+        self.layers.contains_key(name)
+    }
+
     pub fn set_time(&mut self, record: usize, minutes_since_1900: i32) -> Result<()> {
         ensure!(
             record < self.records,

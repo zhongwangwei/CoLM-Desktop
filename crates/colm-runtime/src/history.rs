@@ -532,11 +532,33 @@ fn set_bgc_history(
     let full = s.dims.nl_soil_full;
     let c = &s.constants;
     let switches = runtime.switches;
-    for name in bgc_history_variables(switches) {
+    // 历史里写的量，外加只为旁车累加的：上游在 `IF (DEF_USE_BGC)` 段无条件 `acc1d`，历史却按
+    // `DEF_hist_vars`/开关才写（如 `t_scalar` 只在 DiagMatrix 下写、`pd*` 与 `irrig_method_*` 从不写）。
+    // 植被 `*Cap` 只在 DiagMatrix 下累加（`:2442`），O2 两项只在 NITRIF 下累加（`:2380`）。
+    let mut names = bgc_history_variables(switches);
+    for entry in crate::history_manifest::MANIFEST.iter() {
+        use crate::history_sidecar::Requires;
+        let key = entry.window_key();
+        let allocated = match entry.requires {
+            Requires::Bgc => true,
+            Requires::BgcCrop => switches.crop,
+            _ => false,
+        };
+        let accumulated = !BGC_UNACCUMULATED.contains(&key)
+            && (switches.diag_matrix || !(entry.rank == 1 && key.ends_with("Cap")))
+            && (switches.nitrif || !matches!(key, "CONC_O2_UNSAT" | "O2_DECOMP_DEPTH_UNSAT"));
+        if allocated && accumulated && !names.contains(&key) {
+            names.push(key);
+        }
+    }
+    for name in names {
         let (name, source) = match CROP_TYPE_HISTORY.iter().find(|(field, ..)| *field == name) {
             Some((field, source, classes)) => {
+                // 上游对每个 patch 都 `acc1d` 这些量，写历史时才按作物类别过滤（`filter_crop`）。
                 let cropland = runtime.statics.patchclass == 12;
-                if !(cropland && first_pft_class.is_some_and(|class| classes.contains(&class))) {
+                let matching =
+                    cropland && first_pft_class.is_some_and(|class| classes.contains(&class));
+                if !matching && !sink.keep_filtered(field) {
                     continue;
                 }
                 (*field, *source)
@@ -555,7 +577,19 @@ fn set_bgc_history(
                         .any(|lai| lai.strip_prefix("lai_") == Some(kind))
                 })
             });
-        if natural_type && runtime.statics.patchclass == 12 {
+        // 同样照累加、写出时过滤。
+        if natural_type && runtime.statics.patchclass == 12 && !sink.keep_filtered(name) {
+            continue;
+        }
+        // `BD_all`/`wfc`/`OM_density` 每个算例都累加，统一由 `set_sidecar_only` 写。
+        if SOIL_STATICS.contains(&name) {
+            continue;
+        }
+        if let Some(k) = colm_core::bgc_state::IRRIGATION_DIAGNOSTICS
+            .iter()
+            .position(|n| *n == name)
+        {
+            sink.scalar(name, record, s.irrigation_diagnostics[k])?;
             continue;
         }
         if let Some((_, values)) = runtime
@@ -685,15 +719,31 @@ pub trait HistorySink {
         value: f64,
         counts_as_step: bool,
     ) -> Result<()>;
+
+    /// 一个按 `patchtype` 过滤掉的量：返回 `true` 表示仍要收下它的值。
+    ///
+    /// 上游对每个 patch 都照样 `acc1d`，过滤只发生在写历史时（`write_history_variable_2d`
+    /// 的 `filter`）。累加器因此收下原值、写平均时再跳过 —— 续跑旁车里的 `a_*` 才对得上；
+    /// 直接写缓冲的一方没有"写出时"这一步，默认丢弃。
+    fn keep_filtered(&mut self, _name: &str) -> bool {
+        false
+    }
 }
 
 impl HistorySink for HistoryBuffers {
     fn scalar(&mut self, name: &str, record: usize, value: f64) -> Result<()> {
+        // 只为旁车累加、本文件没声明的量：直写没有旁车可去，丢弃。
+        if !self.declares(name) && crate::history_sidecar::is_window_key(name) {
+            return Ok(());
+        }
         self.set_patch_scalar(name, record, value)
             .with_context(|| format!("cannot write {name} into the history buffers"))
     }
 
     fn layer(&mut self, name: &str, record: usize, values: &[f64]) -> Result<()> {
+        if !self.declares(name) && crate::history_sidecar::is_window_key(name) {
+            return Ok(());
+        }
         self.set_layered(name, record, values)
             .with_context(|| format!("cannot write {name} into the history buffers"))
     }
@@ -719,6 +769,8 @@ impl HistorySink for HistoryBuffers {
 struct HistoryAccumulator {
     sums: std::collections::BTreeMap<String, Accumulated>,
     steps: usize,
+    /// 本区间里按 `patchtype` 过滤、写平均时留作填充值的量（见 [`HistorySink::keep_filtered`]）。
+    filtered: std::collections::BTreeSet<String>,
 }
 
 #[derive(Debug)]
@@ -758,6 +810,13 @@ impl HistoryAccumulator {
             "the history accumulator reached a write step without accumulating anything"
         );
         for (name, accumulated) in &self.sums {
+            // 只为旁车累加、本算例历史文件里没有的量（上游照样 `acc1d`，只是不写出）。
+            if !buffer.declares(name) && crate::history_sidecar::is_window_key(name) {
+                continue;
+            }
+            if self.filtered.contains(name) {
+                continue;
+            }
             match accumulated {
                 Accumulated::Scalar { sum, count } => {
                     // 整条记录里一次有效值都没有的变量沿用缓冲区的填充值，
@@ -806,9 +865,243 @@ impl HistoryAccumulator {
     }
 }
 
+/// 常数重启里的三个土壤参数：每个算例都累加（`MOD_Vars_1DAccFluxes.F90:2496-2498`），
+/// 由 [`set_sidecar_only`] 统一写；BGC 历史里声明了它们，`set_bgc_history` 不再重复写。
+const SOIL_STATICS: [&str; 3] = ["BD_all", "wfc", "OM_density"];
+
+/// BGC 下分配、但 Rust 不累加的量：灌溉账目（`sum_irrig`…`runoff_supply`，灌溉在运行期被拒绝，
+/// 关掉时上游数组一直是 `spval`）与 FIRE 的五项（只在 `DEF_USE_FIRE` 下累加，同样被拒绝）。
+const BGC_UNACCUMULATED: [&str; 16] = [
+    "sum_irrig",
+    "sum_deficit_irrig",
+    "sum_irrig_count",
+    "waterstorage",
+    "groundwater_demand",
+    "groundwater_supply",
+    "reservoirriver_demand",
+    "reservoirriver_supply",
+    "reservoir_supply",
+    "river_supply",
+    "runoff_supply",
+    "abm",
+    "gdp",
+    "peatf",
+    "hdm",
+    "lnfm",
+];
+
+/// 只为续跑旁车累加、Rust 的步输出里没有的量：上游 `accumulate_fluxes` 对每个 patch 每步都
+/// `acc2d` 它们（`MOD_Vars_1DAccFluxes.F90:2496-2506`），而它们在一次运行里不变。
+///
+/// 旧的重启里可能没有这些变量：缺哪个就不累加哪个（旁车里是 `spval`）。
+#[derive(Debug, Clone, Default)]
+pub struct SidecarStatics {
+    pub bulk_density: Option<Vec<f64>>,
+    pub field_capacity: Option<Vec<f64>>,
+    pub organic_matter_density: Option<Vec<f64>>,
+    /// 非湖 patch 的 `t_lake`/`lake_icefrac`：没有湖过程改它们，一直是重启值。
+    pub lake_temperature_k: Option<Vec<f64>>,
+    pub lake_ice_fraction: Option<Vec<f64>>,
+}
+
+impl SidecarStatics {
+    pub fn read(
+        constant: &colm_init::RestartFile,
+        time: &colm_init::RestartFile,
+        patch: usize,
+    ) -> Result<Self> {
+        let column = |file: &colm_init::RestartFile, name: &str| -> Result<Option<Vec<f64>>> {
+            let Ok(dims) = file.variable_dimensions(name) else {
+                return Ok(None);
+            };
+            let layers = file.dimension(&dims[dims.len() - 1])?;
+            file.layer_column(name, patch, layers).map(Some)
+        };
+        Ok(Self {
+            bulk_density: column(constant, "BD_all")?,
+            field_capacity: column(constant, "wfc")?,
+            organic_matter_density: column(constant, "OM_density")?,
+            lake_temperature_k: column(time, "t_lake")?,
+            lake_ice_fraction: column(time, "lake_icefrc")?,
+        })
+    }
+}
+
+/// 各 patch 分支共用：只进续跑旁车的那几项（见 [`ACCUMULATED_ONLY`] 与 [`SidecarStatics`]）。
+///
+/// 湖 patch 的 `t_lake`/`lake_icefrac` 由湖分支自己写；其余 patch 写重启值并按 `patchtype == 4`
+/// 的历史过滤标记。`t2m_wmo`：单点只有一个 patch、没有 WMO patch，恒等于 `tref`
+/// （`MOD_Vars_1DAccFluxes.F90:2186-2196`）。
+#[allow(clippy::too_many_arguments)]
+fn set_sidecar_only(
+    sink: &mut impl HistorySink,
+    template: &StandardLctRestartTemplate,
+    water: &colm_core::Water2014SoilState,
+    lake_state: Option<&colm_core::RuntimeLakeState>,
+    tref: f64,
+    canopy_rain_mm: f64,
+    canopy_snow_mm: f64,
+    recharge_mm_s: Option<f64>,
+) -> Result<()> {
+    let statics = &template.sidecar_statics;
+    let lake = template.patch_type == 4;
+    // `wetwat` 每个 patch 都累加（`:2127`）；`f_wetwat*`/`f_wetzwt`（写的是 `a_zwt`）只在
+    // 湿地上写（`MOD_Hist.F90` 的 `filter = patchtype == 2`）。
+    {
+        let wetland_filter: &'static [&'static str] = if template.patch_type == 2 {
+            &[]
+        } else {
+            &["wetwat", "wetwat_inst", "wetzwt"]
+        };
+        let sink = &mut PatchFilteredSink {
+            inner: &mut *sink,
+            skipped: wetland_filter,
+        };
+        for (name, value) in [
+            ("wetwat", water.wetland_water_mm),
+            ("wetwat_inst", water.wetland_water_mm),
+            ("wetzwt", water.water_table_depth_m),
+        ] {
+            sink.scalar(name, 0, value)?;
+        }
+    }
+    // `qcharge`：`WATER_VSF` 从不给土壤/湿地赋值，那里一直是分配时的 `spval`，`acc1d` 跳过它；
+    // 冰川/湖在 `patchtype > 2` 那一节清零（`CoLMMAIN.F90:2254`）。
+    for (name, value) in [
+        ("t2m_wmo", Some(tref)),
+        ("ldew_rain", Some(canopy_rain_mm)),
+        ("ldew_snow", Some(canopy_snow_mm)),
+        ("qcharge", recharge_mm_s),
+    ]
+    .into_iter()
+    .filter_map(|(name, value)| value.map(|value| (name, value)))
+    {
+        ensure!(
+            value.is_finite(),
+            "the history value for {name} is not finite"
+        );
+        sink.scalar(name, 0, value)?;
+    }
+    for (name, values) in [
+        ("BD_all", &statics.bulk_density),
+        ("wfc", &statics.field_capacity),
+        ("OM_density", &statics.organic_matter_density),
+    ] {
+        if let Some(values) = values {
+            sink.layer(name, 0, values)?;
+        }
+    }
+    if !lake {
+        let sink = &mut PatchFilteredSink {
+            inner: sink,
+            skipped: &["t_lake", "lake_icefrac"],
+        };
+        // 城市 patch 自带的水体每步演化（`CoLMMAIN_Urban` 的 `t_lake`/`lake_icefrac`）；
+        // 其余非湖 patch 没有湖过程，一直是重启值。
+        let (temperature, ice) = match lake_state {
+            Some(lake) => (
+                Some(&lake.column.temperature_k),
+                Some(&lake.column.ice_fraction),
+            ),
+            None => (
+                statics.lake_temperature_k.as_ref(),
+                statics.lake_ice_fraction.as_ref(),
+            ),
+        };
+        if let Some(values) = temperature {
+            sink.layer("t_lake", 0, values)?;
+        }
+        if let Some(values) = ice {
+            sink.layer("lake_icefrac", 0, values)?;
+        }
+    }
+    Ok(())
+}
+
+impl HistoryAccumulator {
+    /// 导出当前区间的原始状态。本地正午量共用 `nac_ln`、`alb` 用 `nac_dt`：取它们自己的步数。
+    fn window(&self) -> crate::history_sidecar::HistoryWindow {
+        use crate::history_sidecar::WindowValue;
+        let count_of = |name: &str| match self.sums.get(name) {
+            Some(Accumulated::Scalar { count, .. } | Accumulated::Column { count, .. }) => *count,
+            None => 0,
+        };
+        let sums = self
+            .sums
+            .iter()
+            .filter(|(name, _)| !INSTANTANEOUS_VARIABLES.contains(&name.as_str()))
+            .map(|(name, accumulated)| {
+                let value = match accumulated {
+                    Accumulated::Scalar { sum, .. } => WindowValue::Scalar(*sum),
+                    Accumulated::Column { sum, .. } => WindowValue::Column(sum.clone()),
+                };
+                (name.clone(), value)
+            })
+            .collect();
+        crate::history_sidecar::HistoryWindow {
+            steps: self.steps,
+            local_noon_steps: count_of("solvdln"),
+            daytime_steps: count_of("alb"),
+            sums,
+        }
+    }
+
+    /// 由旁车窗口重建。计数只影响两件事：[`OWN_COUNT_VARIABLES`] 的除数（取 `nac_ln`/`nac_dt`），
+    /// 以及"一次都没有效就不写出"（读回的量都有效过，取 `nac`）。
+    fn from_window(window: &crate::history_sidecar::HistoryWindow) -> Self {
+        use crate::history_sidecar::WindowValue;
+        let count_for = |name: &str| {
+            if name == "alb" {
+                window.daytime_steps
+            } else if OWN_COUNT_VARIABLES.contains(&name) {
+                window.local_noon_steps
+            } else {
+                window.steps
+            }
+        };
+        // 同一个上游累加器被 Rust 记在几个键下：`f_wetzwt` 写的就是 `a_zwt`，按作物类型分列的
+        // `plantdate_*`/`huiswheat` 写的是 `a_plantdate`/`a_hui`。旁车只存累加器本身，读回时照抄。
+        let aliases = std::iter::once(("wetzwt", "zwt"))
+            .chain(
+                CROP_TYPE_HISTORY
+                    .iter()
+                    .filter(|(field, source, _)| field != source)
+                    .map(|(field, source, _)| (*field, *source)),
+            )
+            .filter_map(|(alias, source)| window.sums.get(source).map(|value| (alias, value)));
+        let sums = window
+            .sums
+            .iter()
+            .map(|(name, value)| (name.as_str(), value))
+            .chain(aliases)
+            .map(|(name, value)| {
+                let count = count_for(name);
+                let accumulated = match value {
+                    WindowValue::Scalar(sum) => Accumulated::Scalar { sum: *sum, count },
+                    WindowValue::Column(sum) => Accumulated::Column {
+                        sum: sum.clone(),
+                        count,
+                    },
+                };
+                (name.to_owned(), accumulated)
+            })
+            .collect();
+        Self {
+            sums,
+            steps: window.steps,
+            filtered: std::collections::BTreeSet::new(),
+        }
+    }
+}
+
 impl HistorySink for HistoryAccumulator {
     fn scalar(&mut self, name: &str, _record: usize, value: f64) -> Result<()> {
         self.accumulate(name, 0, value, true)
+    }
+
+    fn keep_filtered(&mut self, name: &str) -> bool {
+        self.filtered.insert(name.to_owned());
+        true
     }
 
     fn accumulate(
@@ -1094,22 +1387,22 @@ enum LakeLayers<'a> {
     Layers(&'static str, &'a [f64]),
 }
 
-/// 丢掉按 `patchtype` 过滤掉的变量，其余原样转交。
-struct PatchFilteredSink<'a, S: HistorySink> {
+/// 整个丢掉列出的变量（不累加），其余原样转交：用于"同一个量改由调用方另写"的场合。
+struct DroppedSink<'a, S: HistorySink> {
     inner: &'a mut S,
-    skipped: &'static [&'static str],
+    dropped: &'static [&'static str],
 }
 
-impl<S: HistorySink> HistorySink for PatchFilteredSink<'_, S> {
+impl<S: HistorySink> HistorySink for DroppedSink<'_, S> {
     fn scalar(&mut self, name: &str, record: usize, value: f64) -> Result<()> {
-        if self.skipped.contains(&name) {
+        if self.dropped.contains(&name) {
             return Ok(());
         }
         self.inner.scalar(name, record, value)
     }
 
     fn layer(&mut self, name: &str, record: usize, values: &[f64]) -> Result<()> {
-        if self.skipped.contains(&name) {
+        if self.dropped.contains(&name) {
             return Ok(());
         }
         self.inner.layer(name, record, values)
@@ -1122,10 +1415,60 @@ impl<S: HistorySink> HistorySink for PatchFilteredSink<'_, S> {
         value: f64,
         counts_as_step: bool,
     ) -> Result<()> {
-        if self.skipped.contains(&name) {
+        if self.dropped.contains(&name) {
             return Ok(());
         }
         self.inner.accumulate(name, record, value, counts_as_step)
+    }
+
+    fn keep_filtered(&mut self, name: &str) -> bool {
+        self.inner.keep_filtered(name)
+    }
+}
+
+/// 按 `patchtype` 过滤的变量：累加器收下原值、写平均时跳过；直接写缓冲的丢弃。
+struct PatchFilteredSink<'a, S: HistorySink> {
+    inner: &'a mut S,
+    skipped: &'static [&'static str],
+}
+
+impl<S: HistorySink> PatchFilteredSink<'_, S> {
+    /// 过滤掉的量交给内层决定：累加器收下原值（写出时再跳过），直接写缓冲的丢弃。
+    fn passes(&mut self, name: &str) -> bool {
+        !self.skipped.contains(&name) || self.inner.keep_filtered(name)
+    }
+}
+
+impl<S: HistorySink> HistorySink for PatchFilteredSink<'_, S> {
+    fn scalar(&mut self, name: &str, record: usize, value: f64) -> Result<()> {
+        if !self.passes(name) {
+            return Ok(());
+        }
+        self.inner.scalar(name, record, value)
+    }
+
+    fn layer(&mut self, name: &str, record: usize, values: &[f64]) -> Result<()> {
+        if !self.passes(name) {
+            return Ok(());
+        }
+        self.inner.layer(name, record, values)
+    }
+
+    fn accumulate(
+        &mut self,
+        name: &str,
+        record: usize,
+        value: f64,
+        counts_as_step: bool,
+    ) -> Result<()> {
+        if !self.passes(name) {
+            return Ok(());
+        }
+        self.inner.accumulate(name, record, value, counts_as_step)
+    }
+
+    fn keep_filtered(&mut self, name: &str) -> bool {
+        self.inner.keep_filtered(name)
     }
 }
 
@@ -1758,9 +2101,8 @@ pub fn set_lct_fluxes(
             ("rsur_ie", water.infiltration_excess_runoff_mm_s),
             ("frcsat", water.saturated_fraction),
         ]);
-    } else {
-        scalars.push(("qcharge", water.recharge_mm_s));
     }
+    // `qcharge` 每步都累加（VSF 与否），由 `set_sidecar_only` 写；历史里只在 VSF 关掉时声明。
     // **`frcsat` 在 VSF 关掉时刻意不填。** 上游只有 `WATER_VSF` 走 `Runoff_*` 并传
     // `frcsat`（`MOD_SoilSnowHydrology.F90:880-925`，在 `WATER_VSF` 里），
     // `WATER_2014` 从不设它 —— 实测对齐算例 264 条记录**全是** `spval`，
@@ -1969,15 +2311,31 @@ pub struct HistorySession {
     urban: bool,
     /// `DEF_USE_BGC`：按 BGC 开关多声明 [`bgc_history_variables`]。
     bgc: Option<colm_core::bgc_driver::BgcSwitches>,
-    /// 每步推进后当前区间已累加的步数（上游的 `nac`）。续跑写出方要知道它（`nac = 0` 时
-    /// 才能写出与上游一致的累加器旁车文件），但那时会话正被运行循环独占，所以共享一个计数。
-    pending_steps: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    /// 每步推进后当前区间的原始累加状态（上游的 `nac`、`nac_ln`、`nac_dt` 与 `a_*`）。
+    /// 写续跑文件的一方要把它存进旁车，但那时会话正被运行循环独占，所以共享一份快照。
+    window: std::sync::Arc<std::sync::Mutex<crate::history_sidecar::HistoryWindow>>,
+    /// 运行终点那条不在自然边界上的记录写出**之前**的窗口：上游此时先存原始窗口
+    /// （`MOD_Hist.F90:265-274`），写完历史、清零之后的重启不再重存。
+    raw_at_end: Option<crate::history_sidecar::HistoryWindow>,
 }
 
 impl HistorySession {
-    /// 当前区间已累加步数的共享句柄（见 `pending_steps` 字段）。
-    pub fn pending_steps_handle(&self) -> std::sync::Arc<std::sync::atomic::AtomicUsize> {
-        std::sync::Arc::clone(&self.pending_steps)
+    /// 当前区间原始累加状态的共享句柄（见 `window` 字段）。
+    pub fn window_handle(
+        &self,
+    ) -> std::sync::Arc<std::sync::Mutex<crate::history_sidecar::HistoryWindow>> {
+        std::sync::Arc::clone(&self.window)
+    }
+
+    /// 续跑：从旁车读回的窗口接着累加（`read_history_acc_restart`）。
+    pub fn restore(&mut self, window: crate::history_sidecar::HistoryWindow) -> Result<()> {
+        ensure!(
+            self.accumulator.steps == 0,
+            "the history window can only be restored before the first step"
+        );
+        self.accumulator = HistoryAccumulator::from_window(&window);
+        *self.window.lock().expect("history window lock") = window;
+        Ok(())
     }
 
     /// 开一个会话。文件名按上游约定拼成 `<stem>_hist_<后缀>.nc`。
@@ -1991,8 +2349,10 @@ impl HistorySession {
         stem: impl Into<String>,
     ) -> Result<Self> {
         let records = schedule_records(window, frequency, grouping)?;
+        // `DEF_HIST_FREQ = 'none'`：上游照样每步 `accumulate_fluxes`、从不写历史，区间一直不清零，
+        // 续跑旁车存的是整段运行的原始累加（实测 `nac` = 48/96/144）。会话只累加、不调度。
         ensure!(
-            !records.is_empty(),
+            !records.is_empty() || frequency == colm_hist::schedule::HistoryFrequency::None,
             "the history schedule produced no records; check DEF_HIST_FREQ against the window"
         );
         Ok(Self {
@@ -2008,7 +2368,8 @@ impl HistorySession {
             variably_saturated: false,
             urban: false,
             bgc: None,
-            pending_steps: std::sync::Arc::default(),
+            window: std::sync::Arc::default(),
+            raw_at_end: None,
         })
     }
 
@@ -2069,6 +2430,16 @@ impl HistorySession {
                 reference.surface_cosine_zenith,
             )?;
             set_lct_forcing_mirrors(accumulator, 0, reference, &output.energy.precipitation)?;
+            set_sidecar_only(
+                accumulator,
+                template,
+                &state.water,
+                None,
+                output.energy.leaf.air_temperature_2m_k,
+                state.energy.leaf.canopy_water.rain_mm,
+                state.energy.leaf.canopy_water.snow_mm,
+                (!variably_saturated).then_some(output.water.recharge_mm_s),
+            )?;
             set_lct_balance_errors(
                 accumulator,
                 0,
@@ -2213,7 +2584,6 @@ impl HistorySession {
         let ground = state.surface_temperature_k();
         self.plant_hydraulics = template.plant_hydraulics();
         self.variably_saturated = template.physics.variably_saturated_flow;
-        let variably_saturated = self.variably_saturated;
         let thermal = output.thermal;
         let shortwave = output.shortwave;
         self.push(end, |accumulator| {
@@ -2236,9 +2606,7 @@ impl HistorySession {
                     ("rsur_ie", 0.0),
                 ]);
             }
-            if !variably_saturated {
-                fluxes.push(("qcharge", 0.0));
-            }
+            // `qcharge = 0`（`CoLMMAIN.F90:2254`）由 `set_sidecar_only` 写。
             // `rnet = sabg + sabvsun + sabvsha - olrg + forc_frl`（`MOD_Vars_1DAccFluxes.F90:2093`）
             let net_radiation = shortwave.ground_absorbed_w_m2
                 + shortwave.sunlit_absorbed_w_m2
@@ -2300,6 +2668,28 @@ impl HistorySession {
                 accumulator.scalar(name, 0, value)?;
             }
             set_glacier_surface_diagnostics(accumulator, &thermal, reference, &template.physics)?;
+            // `h2osoi` 对每个 patch 都按液/冰重算（`CoLMMAIN.F90:2260`），`qlayer`/`rootr` 在
+            // `patchtype > 2` 那一节清零（`:2233`、`:2246`）；历史按 `patchtype` 过滤掉它们。
+            set_lct_derived_soil(
+                accumulator,
+                0,
+                template.soil_layer_thickness_m(),
+                &state.soil_water,
+            )?;
+            let layers = template.soil_layer_thickness_m().len();
+            accumulator.layer("qlayer", 0, &vec![0.0; layers + 1])?;
+            accumulator.layer("rootr", 0, &vec![0.0; layers])?;
+            // 冰川/湖：`ldew_rain = ldew_snow = qcharge = 0`（`CoLMMAIN.F90:2218-2254`）。
+            set_sidecar_only(
+                accumulator,
+                template,
+                &state.soil_water,
+                state.lake.as_ref(),
+                thermal.tref,
+                0.0,
+                0.0,
+                Some(0.0),
+            )?;
             set_shortwave_bands(accumulator, 0, shortwave)?;
             set_lct_water_storage(
                 accumulator,
@@ -2344,12 +2734,11 @@ impl HistorySession {
         self.plant_hydraulics = false;
         self.variably_saturated = template.physics.variably_saturated_flow;
         self.urban = true;
-        let variably_saturated = self.variably_saturated;
         let thermal = &output.thermal;
         let shortwave = &output.shortwave;
         self.push(end, |accumulator| {
             set_lct_snow_state(accumulator, 0, template, state, ground)?;
-            let mut fluxes = vec![
+            let fluxes = vec![
                 ("rsur", output.rsur),
                 ("rnof", output.rnof),
                 ("rsub", output.rnof - output.rsur),
@@ -2357,9 +2746,17 @@ impl HistorySession {
                 ("qintr", output.qintr),
                 ("qdrip", output.qdrip),
             ];
-            if !variably_saturated {
-                fluxes.push(("qcharge", output.qcharge));
-            }
+            set_sidecar_only(
+                accumulator,
+                template,
+                &state.soil_water,
+                state.lake.as_ref(),
+                thermal.tref,
+                state.energy.leaf.canopy_water.rain_mm,
+                state.energy.leaf.canopy_water.snow_mm,
+                // 城市水文不走 `WATER_VSF`，`qcharge` 每步都有值（实测 VSF 打开时也是）。
+                Some(output.qcharge),
+            )?;
             // `rnet = sabg + sabvsun + sabvsha - olrg + forc_frl`
             let net_radiation = thermal.sabg + output.sabvsun + 0.0 - thermal.olrg
                 + reference.downward_longwave_w_m2;
@@ -2399,6 +2796,8 @@ impl HistorySession {
                 ("fwst", urban.fwst),
                 ("fach", urban.fach),
                 ("fhah", urban.fhah),
+                // `a_fahe` 每步累加（`MOD_Vars_1DAccFluxes.F90:2225`）但不写出历史，只进旁车。
+                ("fahe", urban.fahe),
                 ("fvehc", urban.vehc),
                 ("fmeta", urban.meta),
                 ("fsenroof", thermal.fsen_roof),
@@ -2528,15 +2927,16 @@ impl HistorySession {
             // 非 VSF 时 `errorw = 0`（`:1532`）；`f_wetwat*`/`f_wetzwt` 只在湿地上写
             // （`MOD_Hist.F90` 的 `filter = patchtype == 2`）。
             let wetland = template.patch_type == 2;
-            if wetland {
-                for (name, value) in [
-                    ("wetwat", state.soil_water.wetland_water_mm),
-                    ("wetwat_inst", state.soil_water.wetland_water_mm),
-                    ("wetzwt", state.soil_water.water_table_depth_m),
-                ] {
-                    accumulator.scalar(name, 0, value)?;
-                }
-            }
+            set_sidecar_only(
+                accumulator,
+                template,
+                &state.soil_water,
+                state.lake.as_ref(),
+                output.energy.leaf.air_temperature_2m_k,
+                state.energy.leaf.canopy_water.rain_mm,
+                state.energy.leaf.canopy_water.snow_mm,
+                (!variably_saturated).then_some(output.water.soil.recharge_mm_s),
+            )?;
             let mut end_water = colm_core::total_water_storage_mm(
                 &state.soil_water,
                 state.energy.leaf.canopy_water.total_mm,
@@ -2547,9 +2947,9 @@ impl HistorySession {
             }
             if wetland && !variably_saturated {
                 set_lct_balance_errors(
-                    &mut PatchFilteredSink {
+                    &mut DroppedSink {
                         inner: &mut *accumulator,
-                        skipped: &["xerr"],
+                        dropped: &["xerr"],
                     },
                     0,
                     &as_soil,
@@ -2583,8 +2983,11 @@ impl HistorySession {
         accumulate: impl FnOnce(&mut HistoryAccumulator) -> Result<()>,
     ) -> Result<Option<PathBuf>> {
         let pushed = self.push_inner(end, accumulate);
-        self.pending_steps
-            .store(self.accumulator.steps, std::sync::atomic::Ordering::Relaxed);
+        let window = self
+            .raw_at_end
+            .take()
+            .unwrap_or_else(|| self.accumulator.window());
+        *self.window.lock().expect("history window lock") = window;
         pushed
     }
 
@@ -2618,6 +3021,10 @@ impl HistorySession {
         }
 
         // 3. 到期：取平均、写记录、把累加器清零（`mem::take` 就是清零）。
+        //    运行终点不在自然边界上时，上游先把原始窗口存进旁车再写这一条。
+        if !record.natural_boundary {
+            self.raw_at_end = Some(self.accumulator.window());
+        }
         let means = std::mem::take(&mut self.accumulator);
         let mut written = None;
         if self.open.as_ref().map(|(suffix, _)| suffix) != Some(&record.suffix) {
