@@ -90,23 +90,16 @@ fn snicar_single_point_preprocessing_runs_in_unchanged_fortran_runtime() {
 #[test]
 #[ignore = "requires local default kernel, generated CN-Cng case, and PLUMBER2 forcing"]
 fn inactive_runoff_preprocessors_run_in_the_unchanged_fortran_runtime() {
-    let vic = std::env::temp_dir().join(format!(
-        "colm-inactive-runoff-vic-{}.txt",
-        std::process::id()
-    ));
-    std::fs::write(&vic, "VIC parameters\n0.3 1.5 0.2 0.8 2.0\n").unwrap();
+    // `DEF_Runoff_SCHEME == 1` 时上游固定读 `DEF_dir_runtime/vic/vic_para.txt`（namelist 里的
+    // `DEF_file_VIC_para` 被忽略），所以这里不再另给参数文件。
     for scheme in 0..=2 {
         rust_preprocess_runs_in_fortran_runtime(
             &format!("runoff{scheme}"),
             Some(SiteMode::Igbp),
             "default",
-            &format!(
-                "DEF_Runoff_SCHEME = {scheme}\nDEF_file_VIC_para = '{}'",
-                vic.display()
-            ),
+            &format!("DEF_Runoff_SCHEME = {scheme}"),
         );
     }
-    std::fs::remove_file(vic).unwrap();
 }
 
 #[test]

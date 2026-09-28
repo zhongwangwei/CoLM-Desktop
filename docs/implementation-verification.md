@@ -25600,3 +25600,27 @@ US-Ne3 玉米 2002 全年（PFT + BGC + LAI 反馈，播种日 120，施肥/灌�
 回归（release，54 个算例）：48 个逐位（含 cr），hp/sp/tc/ts 过期重启、pn/qr 既有分歧，与此前相同
 ```
 未覆盖：冬小麦春化、大豆固氮、灌溉、施肥（`DEF_USE_FERT` 要读 `crop/*.nc`）、多作物 PFT 站点、PC + 作物。
+
+## 第 425 轮：清理"既有分歧"——陈旧参考与三处冷启动差异
+
+回归里长期挂着的 hp/sp/tc/ts（过期重启）、pn/qr（第 0 小时即分叉）、an-new/an-old/fx/vn（此前另开任务）逐一查明：
+
+**一、陈旧或不纯的 Fortran 参考。** pn/qr 的"Fortran 起始重启"是演化过的状态（叶温 282.99、土壤水 6.14），而同配置
+Fortran `mkinidata` 与 Rust 冷启动逐位相同（9.21）——参考是改 `case.nml` 之前用别的配置跑的。另有 32 个算例的 Fortran
+参考，冷启动其实由 Rust 前处理写出（`mkinidata.log` 是 `mkinidata-rs` 的 `wrote …`），只检验了引擎、没检验前处理。
+全部改用 `--preprocessors fortran --engine fortran` 重跑。
+
+**二、VIC 参数文件路径（`colm-init`）。** 上游在 `DEF_Runoff_SCHEME == 1` 时**无条件**改写
+`DEF_file_VIC_para = trim(DEF_dir_runtime)//'/vic/vic_para.txt'`、`DEF_file_VIC_OPT = trim(DEF_dir_runtime)//'vic/vic_para.nc'`
+（`MOD_Namelist.F90:1801-1805`，最新上游同样如此；后者少一个斜杠，照抄），namelist 里给的值被忽略。Rust 原先优先用
+namelist 的值，读到的不是同一个文件；vn/c1/vc 的纯 Fortran 参考也因此在 `mkinidata` 找不到文件而崩溃。
+
+**三、van Genuchten 土壤下强制 VSF（`colm-init`）。** 上游 `DEF_USE_Campbell_SOIL_MODEL = .false.` 时把
+`DEF_USE_VariablySaturatedFlow` 强制置真（`MOD_Namelist.F90:1766-1771`），冷启动因此走 `wa = 0, zwt = zi(nl)`；Rust 运行时
+早已这样取（`physics.rs:190`），冷启动却照 namelist 的 `.false.` 写了 `wa = 4800, zwt = zi(nl)+1`。
+
+**四、`BVIC`。** 上游只在 `DEF_Runoff_SCHEME == 3` 时按土壤质地赋值，其余写的是分配后未初始化的数组（参考内核写出 0）；
+它在非 SimpleVIC 下不参与计算。Rust 的非活跃占位值由 1.0 改为 0。
+
+实测（release，全部对照纯 Fortran 参考）：58/58 个算例历史与重启逐位一致（含 LCT/城市/湖泊/PFT/PC/BGC 各分支与作物 `cr`）；
+vn/c1/vc/r0v0/an-new 的 debug 构建同样逐位。

@@ -1263,13 +1263,18 @@ fn single_point_runoff_texture_mapping_preserves_active_values_and_ignores_inact
         std::env::temp_dir().join(format!("colm-init-runoff-texture-{}", std::process::id()));
     std::fs::create_dir_all(&root).unwrap();
     let surface = single_point_restart_surface();
-    let vic = root.join("vic.txt");
-    std::fs::write(&vic, "VIC parameters\n0.3 1.5 0.2 0.8 2.0\n").unwrap();
+    // 上游在 `DEF_Runoff_SCHEME == 1` 时固定读 `DEF_dir_runtime/vic/vic_para.txt`。
+    std::fs::create_dir_all(root.join("vic")).unwrap();
+    std::fs::write(
+        root.join("vic").join("vic_para.txt"),
+        "VIC parameters\n0.3 1.5 0.2 0.8 2.0\n",
+    )
+    .unwrap();
     let namelist = root.join("case.nml");
     for scheme in 0..=3 {
         std::fs::write(&namelist, format!(
-            "&nl_colm\nDEF_CASE_NAME='site'\nDEF_dir_output='{}'\nDEF_Runoff_SCHEME={scheme}\nDEF_file_VIC_para='{}'\n/\n",
-            root.display(), vic.display(),
+            "&nl_colm\nDEF_CASE_NAME='site'\nDEF_dir_output='{}'\nDEF_Runoff_SCHEME={scheme}\nDEF_dir_runtime='{}'\n/\n",
+            root.display(), root.display(),
         )).unwrap();
         let run =
             single_point_static_run_from_namelist(&namelist, Some(LandCoverScheme::Igbp), None)
@@ -1286,14 +1291,15 @@ fn single_point_runoff_texture_mapping_preserves_active_values_and_ignores_inact
         .unwrap()
         .block;
         let file = netcdf::open(path).unwrap();
-        // Inactive values are defined by Rust, not by original uninitialized memory.
+        // Inactive values are defined by Rust, not by original uninitialized memory:
+        // soiltext 0, and BVIC 0 as the reference kernel writes (never read off Simple VIC).
         assert_eq!(
             values_i32(&file, "soiltext"),
             [if scheme == 3 { 8 } else { 0 }]
         );
         assert_eq!(
             values_f64(&file, "BVIC"),
-            [if scheme == 3 { 0.1 } else { 1.0 }]
+            [if scheme == 3 { 0.1 } else { 0.0 }]
         );
     }
     let config = SinglePointStaticConfig::new(
@@ -1365,9 +1371,14 @@ fn single_point_runoff_namelist_forces_topmodel_method_zero_and_resolves_vic_pat
     )
     .unwrap();
     let run = single_point_cold_start_run_from_namelist(&namelist, None, None).unwrap();
+    // 上游是字符串拼接 `trim(DEF_dir_runtime)//'vic/vic_para.nc'`（少一个斜杠）：目录不以 `/` 结尾时
+    // 得到 `…runtimevic/vic_para.nc`。照抄，namelist 里通常给的是带结尾斜杠的目录。
     assert_eq!(
         run.static_run.vic_grid_file,
-        Some(runtime.join("vic/vic_para.nc"))
+        Some(std::path::PathBuf::from(format!(
+            "{}vic/vic_para.nc",
+            runtime.display()
+        )))
     );
     crate::remove_test_tree(directory);
 }

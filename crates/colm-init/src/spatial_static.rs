@@ -106,31 +106,34 @@ pub enum VicParameterSource<'a> {
     GridFile(&'a Path),
 }
 
+/// VIC 参数文件的路径。上游在 `DEF_Runoff_SCHEME == 1` 时**无条件**改写这两个键
+/// （`MOD_Namelist.F90:1801-1805`）：`DEF_file_VIC_para = trim(DEF_dir_runtime)//'/vic/vic_para.txt'`、
+/// `DEF_file_VIC_OPT = trim(DEF_dir_runtime)//'vic/vic_para.nc'`（后者少一个斜杠，照抄），namelist 里给的值被忽略。
+/// 此前这里优先用 namelist 的值，与上游读到的不是同一个文件（第 425 轮）。
 pub fn resolve_vic_parameter_file(
     document: &colm_namelist::Document,
     use_grid: bool,
 ) -> Result<PathBuf> {
-    let (field, suffix) = if use_grid {
-        ("DEF_file_VIC_OPT", "vic/vic_para.nc")
+    let field = if use_grid {
+        "DEF_file_VIC_OPT"
     } else {
-        ("DEF_file_VIC_para", "vic/vic_para.txt")
+        "DEF_file_VIC_para"
     };
-    if let Some(colm_namelist::Value::Str(value)) = document.get(field) {
-        let value = value.trim();
-        if !value.is_empty() && !value.eq_ignore_ascii_case("null") {
-            return Ok(PathBuf::from(value));
-        }
-    } else if document.get(field).is_some() {
-        anyhow::bail!("{field} must be a quoted string");
-    }
     match document.get("DEF_dir_runtime") {
         Some(colm_namelist::Value::Str(value))
             if !value.trim().is_empty() && !value.trim().eq_ignore_ascii_case("null") =>
         {
-            Ok(PathBuf::from(value.trim()).join(suffix))
+            let directory = value.trim();
+            Ok(PathBuf::from(if use_grid {
+                format!("{directory}vic/vic_para.nc")
+            } else {
+                format!("{directory}/vic/vic_para.txt")
+            }))
         }
         Some(colm_namelist::Value::Str(_)) | None => {
-            anyhow::bail!("{field} or DEF_dir_runtime must be set for DEF_Runoff_SCHEME=1")
+            anyhow::bail!(
+                "DEF_dir_runtime must be set for DEF_Runoff_SCHEME=1 ({field} is derived from it)"
+            )
         }
         Some(_) => anyhow::bail!("DEF_dir_runtime must be a quoted string"),
     }

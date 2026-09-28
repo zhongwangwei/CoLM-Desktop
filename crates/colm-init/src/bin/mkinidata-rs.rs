@@ -1584,7 +1584,14 @@ mod tests {
         )
         .unwrap();
         let run = spatial_namelist_run(&namelist).unwrap();
-        assert_eq!(run.vic_grid_file, Some(runtime.join("vic/vic_para.nc")));
+        // 上游 `trim(DEF_dir_runtime)//'vic/vic_para.nc'` 少一个斜杠，照抄。
+        assert_eq!(
+            run.vic_grid_file,
+            Some(PathBuf::from(format!(
+                "{}vic/vic_para.nc",
+                runtime.display()
+            )))
+        );
         assert_eq!(run.vic_parameter_file, None);
         std::fs::remove_dir_all(root).unwrap();
     }

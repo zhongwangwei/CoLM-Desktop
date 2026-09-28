@@ -437,10 +437,16 @@ pub fn single_point_cold_start_run_from_namelist_with_subgrid(
             "DEF_USE_WaterTableInit",
             "DEF_file_WaterTable",
         )?,
+        // 上游在 van Genuchten 土壤下强制 VSF 为真（`MOD_Namelist.F90:1766-1771`），与运行时
+        // `physics.rs` 的取法一致；冷启动据此选 `wa = 0, zwt = zi(nl)` 那一支（第 425 轮）。
         variably_saturated_flow: optional_bool_or(
             &document,
             "DEF_USE_VariablySaturatedFlow",
             true,
+        )? || !optional_bool_or(
+            &document,
+            "DEF_USE_Campbell_SOIL_MODEL",
+            false,
         )?,
         snow_cover_exponent: optional_f64_or(&document, "DEF_TUNING_SNOW_COVER_EXPONENT", 1.0)?,
         vegetation_snow: optional_bool_or(&document, "DEF_VEG_SNOW", true)?,
@@ -864,7 +870,10 @@ fn write_single_point_constant_restart_from_surface(
         canopy.patch_bottom_m.clone_from_slice(bottom);
     }
     // Inactive runoff keeps the unconditional restart schema, but does not
-    // consume texture. Class 0 and BVIC_USDA[0] are Rust-defined placeholders.
+    // consume texture. Class 0 is a Rust-defined placeholder. Upstream only
+    // assigns BVIC when `DEF_Runoff_SCHEME == 3` (`MOD_Initialize.F90:410-425`) and
+    // otherwise writes the never-initialised allocation, which the reference
+    // kernel writes as 0; BVIC is unused off Simple VIC, so 0 is kept here.
     let mut texture = vec![
         if config.use_soil_texture {
             surface.soil_texture
@@ -876,7 +885,13 @@ fn write_single_point_constant_restart_from_surface(
     normalize_soil_texture(&mut texture);
     let bvic = texture
         .iter()
-        .map(|&texture| BVIC_USDA[texture as usize])
+        .map(|&texture| {
+            if config.use_soil_texture {
+                BVIC_USDA[texture as usize]
+            } else {
+                0.0
+            }
+        })
         .collect::<Vec<_>>();
     let longitude_radians = vec![colm_core::site_radians(surface.longitude_degrees); patches];
     let latitude_radians = vec![colm_core::site_radians(surface.latitude_degrees); patches];
