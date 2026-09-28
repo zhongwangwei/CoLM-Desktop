@@ -1890,6 +1890,16 @@ fn rust_model_land_cover(kernel: &Kernel) -> Result<&'static str> {
     }
 }
 
+/// `CROP` 内核：`DEF_USE_CROP` 在上游是这个宏的只读映射、不在 namelist 里，
+/// 所以要像 `--land-cover` 一样由内核告诉 `colm-rs`，否则作物算例会被当成非作物 BGC 静默跑完。
+fn rust_model_crop_arguments(kernel: &Kernel) -> Vec<String> {
+    if kernel.manifest.macros.iter().any(|item| item == "CROP") {
+        vec!["--crop".to_owned()]
+    } else {
+        Vec::new()
+    }
+}
+
 fn sidecar_executable(name: &str) -> Result<PathBuf> {
     let name = if cfg!(windows) {
         format!("{name}.exe")
@@ -1933,6 +1943,7 @@ fn preflight_rust_model(case_nml: &Path, kernel: &Kernel, ranks: usize) -> Resul
     let output = std::process::Command::new(&executable)
         .arg(case_nml)
         .args(["--land-cover", land_cover, "--preflight"])
+        .args(rust_model_crop_arguments(kernel))
         .output()
         .with_context(|| format!("cannot start {}", executable.display()))?;
     if !output.status.success() {
@@ -2046,6 +2057,19 @@ fn rust_preprocessor_arguments(
             lct,
             highres_params,
         )?);
+    }
+    // `CROP` 内核：mksrfdata 要按 `croptyp`/`pctcrop` 物化作物站点（上游 `#ifdef CROP` 时
+    // `SITE_pfttyp = croptyp + N_PFT - 1`），不给 `--crop` 会按自然 PFT 审核并拒绝 `pfttyp = 17`。
+    // mkinidata 从地表文件里有无作物份额自行判断，不需要这个开关。
+    if stage == Stage::MkSrfData
+        && !lct
+        && kernel
+            .manifest
+            .macros
+            .iter()
+            .any(|macro_name| macro_name == "CROP")
+    {
+        arguments.push("--crop".to_owned());
     }
     if stage == Stage::MkIniData
         && kernel
@@ -2625,10 +2649,14 @@ fn run_case(
                 case,
                 artifacts,
                 &[
-                    "--land-cover".to_owned(),
-                    land_cover.to_owned(),
-                    "--case-outputs".to_owned(),
-                ],
+                    vec![
+                        "--land-cover".to_owned(),
+                        land_cover.to_owned(),
+                        "--case-outputs".to_owned(),
+                    ],
+                    rust_model_crop_arguments(&kernel),
+                ]
+                .concat(),
                 &mut forward,
             )?
         } else if preprocessors == PreprocessorMode::Rust

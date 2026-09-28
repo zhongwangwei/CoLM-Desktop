@@ -92,6 +92,17 @@ fn run() -> Result<()> {
             humidity_m: config.humidity_height_m,
         },
     )?;
+    // `CROP` 内核：BGC 的作物分支尚未移植。在这里拒绝，而不是按非作物 BGC 静默跑完
+    // （实测 US-Ne3 那样跑会得出 36/39 份重启不同、历史少 64 个作物变量）。
+    if arguments.crop {
+        let switches = physics
+            .bgc
+            .context("CROP kernels need DEF_USE_BGC (the crop state lives in the BGC restarts)")?;
+        colm_runtime::bgc_step::refuse_unported(colm_core::bgc_driver::BgcSwitches {
+            crop: true,
+            ..switches
+        })?;
+    }
     // 本仓库没有实现的分支：**一次列全**，并且默认拒绝。
     //
     // 每一项在上游都是默认打开的，所以"只写了几行"的算例几乎必然会撞上其中一条。
@@ -857,6 +868,8 @@ struct Arguments {
     preflight: bool,
     /// 显式允许跑"本仓库没实现的那些分支"。默认关。
     allow_unported_branches: bool,
+    /// 内核带 `CROP` 宏（`DEF_USE_CROP` 是它的只读映射，namelist 里没有）。
+    crop: bool,
 }
 
 impl Arguments {
@@ -871,6 +884,7 @@ impl Arguments {
         let mut allow_unported_branches = false;
         let mut case_outputs = false;
         let mut preflight = false;
+        let mut crop = false;
         while let Some(flag) = values.next() {
             let mut value = |name: &str| -> Result<String> {
                 values
@@ -898,6 +912,7 @@ impl Arguments {
                 "--allow-unported-branches" => allow_unported_branches = true,
                 "--case-outputs" => case_outputs = true,
                 "--preflight" => preflight = true,
+                "--crop" => crop = true,
                 other if other.starts_with("--") => {
                     bail!("unknown option {other}; the accepted set is documented in this binary's module docs")
                 }
@@ -961,6 +976,7 @@ impl Arguments {
             outputs,
             preflight,
             allow_unported_branches,
+            crop,
         })
     }
 }

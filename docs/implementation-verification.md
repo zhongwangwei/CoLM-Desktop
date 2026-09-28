@@ -25502,3 +25502,30 @@ SASU（bu）在新累加器下复查：45/45、14/14
 ```
 回归（release，47 个算例）：46 个历史与重启逐位，余下 hp/sp/tc/ts 为过期重启日期、pn/qr 为既有分歧，与第 419 轮完全相同——
 累加器改动没有改变任何既有算例的输出（它们一条记录内部从不出现部分 spval）。debug 构建 `bd` 同样 45/45、14/14。
+
+## 第 422 轮：作物（C6）起步——前处理对齐，并堵住 CROP 内核被静默当成非作物跑的漏洞
+
+算例：`colm-cli new --site examples/Sitedata/US-Ne3_2002-2003_FLUXNET2015_CROP_site.nc --mode pft --crop 1`
+（2002 全年，PFT + BGC + LAI 反馈，玉米 `croptyp = 3` → `pftclass 17`，播种日 120），参考内核 `kernels/crop`。
+
+**一、Rust 前处理三处缺陷。**
+- `colm-cli` 从不给 `mksrfdata-rs` 传 `--crop`：内核的 `CROP` 宏丢失，站点按自然 PFT 审核，`pfttyp = 17` 被判"超出 0..=15"。
+  现按内核宏补传（只在 mksrfdata；mkinidata 由地表文件里有无作物份额自行判断）。
+- 站点文件带 `SITE_landtype` 时 `requires_landtype_update` 恒为真，即使站点已自给自足也走 `fill()`；而 `colm-cli new`
+  已把回落值写进 site.nc，`fill()` 再 `add_variable` 同名量即报 "already exists"。改为站点里已有的量优先
+  （Fortran mksrfdata 就是直接读站点文件），报告里记为站点来源；补测试 `filling_an_already_filled_site_keeps_its_values`。
+- 冷启动：上一轮对"作物 + LAI 反馈"的拒绝放开。上游作物段（`MOD_Initialize.F90:1290-1305`）先把作物的
+  `leafc_p`/`tlai`/`tlai_p`/`tsai`/`tsai_p` 清零，反馈块再算 `tlai_p = max(0, slatop·leafc_p)`，作物仍为 0；
+  作物 patch 的 `tlai` 因此是 0 而不是 spval，其余 patch 仍是 spval。
+
+结果：地表 `srfdata.nc` 与冷启动三份重启（主/PFT/BGC）与 Fortran 逐位一致，双向无缺失变量。
+
+**二、CROP 内核被静默当成非作物 BGC 跑完（严重）。** `DEF_USE_CROP` 是内核宏的只读映射，namelist 里没有；
+运行时把 `BgcSwitches.crop` 写死为 `false`，注释说"打开时已在上面被拒绝"，但并没有对应的检查。模板装配里
+"patch 级冠层必须非零"的检查碰巧挡住了它；放开这道检查（PFT 冠层逐 PFT 判断，播种前作物 LAI/SAI 为 0 是合法的，
+`MOD_Thermal.F90:856`）后，US-Ne3 在 Rust 引擎上**不报错地跑完**，39 份重启里 36 份不同、历史少 64 个作物变量。
+现在 `colm-cli` 按内核宏给 `colm-rs` 传 `--crop`（预检与正式调用都传），`colm-rs` 以 `crop = true` 交给
+`refuse_unported`，预检阶段即拒绝，提示改用 `--engine fortran`。
+
+回归（release）：bn/bl/bu、pf/pb、qb/qy、gl/ly、c0/c3、uo/up、wy、sy-at 历史与重启逐位；`cargo test`（含 colm-cli 集成测试）、clippy 通过。
+作物 BGC 本体（`CNPhenology` 作物支、`CNNFert`、`CNSoyfix`、灌溉、作物收获与 `cropprod`、64 个作物历史量）仍待移植。

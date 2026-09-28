@@ -1846,10 +1846,11 @@ fn write_single_point_pft_cold_time_restarts(
     // patch `tlai` 一直是 spval 写进重启。反照率在其后按这组 LAI 算（`MOD_Initialize.F90:1518`）。
     let feedback_lai = if run.lai_feedback {
         // 雪初值那一支在反馈块之前就用 spval 的 `tlai`/`tlai_p` 算雪盖（`:527-545`），
-        // 上游这条路径本身不自洽；作物段把 `tlai_p` 清零的顺序也另有讲究，暂不移植。
+        // 上游这条路径本身不自洽，暂不移植。作物段（`MOD_Initialize.F90:1290-1305`）先于
+        // 反馈块把作物的 `leafc_p`/`tlai_p` 清零，反馈块再按 `slatop·leafc_p` 重算，作物仍得 0。
         ensure!(
-            snow_depth_m == 0.0 && crop.is_none(),
-            "DEF_USE_LAIFEEDBACK cold starts with initial snow or DEF_USE_CROP are not ported"
+            snow_depth_m == 0.0,
+            "DEF_USE_LAIFEEDBACK cold starts with initial snow are not ported"
         );
         let state = bgc_state
             .as_ref()
@@ -2307,8 +2308,13 @@ fn write_single_point_pft_cold_time_restarts(
         pft.class
             .iter()
             .enumerate()
-            .map(|(index, _)| ColdPatchFields {
-                total_lai: total_lai_p[index],
+            .map(|(index, &class)| ColdPatchFields {
+                // LAI 反馈：作物段把作物 patch 的 `tlai` 置 0，其余 patch 的 `tlai` 停在 spval。
+                total_lai: match (feedback_lai, class >= 15) {
+                    (None, _) => total_lai_p[index],
+                    (Some(_), true) => 0.0,
+                    (Some(_), false) => MISSING,
+                },
                 total_sai: total_sai_p[index],
                 vegetation_fraction: 1.0,
                 greenness: 1.0,

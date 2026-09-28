@@ -1698,6 +1698,12 @@ pub fn fill(
         ("soil_s_n_alb", a.map_or(SURFACE_MISSING, |value| value.s_n)),
         ("soil_d_n_alb", a.map_or(SURFACE_MISSING, |value| value.d_n)),
     ] {
+        // 站点文件已经带了这个量（例如 `colm-cli new` 物化过的 site.nc）就保留它：
+        // Fortran mksrfdata 直接读站点文件里的值，这里再合成一遍只会重名报错或覆盖掉它。
+        if f.variable(name).is_some() {
+            report.record(name, Source::Site);
+            continue;
+        }
         put_scalar(&mut f, name, v, &alb_note)?;
         report.record(name, isc_src);
     }
@@ -1745,6 +1751,10 @@ pub fn fill(
             "MOD_SingleSrfdata.F90:81 module default",
         ),
     ] {
+        if f.variable(name).is_some() {
+            report.record(name, Source::Site);
+            continue;
+        }
         let (v, src) = resolve(site, raster, Some(fallback)).expect("has a fallback");
         let note = match src {
             Source::Site => site_note.to_string(),
@@ -1786,7 +1796,13 @@ pub fn fill(
     // 维度取自它们各自的来源变量，而不是按长度去猜：站点文件里
     // LAI_year=2 / month=12 / pft=2 / soil=10 / year=21，按长度找只是碰巧
     // 不重复，而 dimensions() 的迭代顺序并无保证。
-    if let Some((d, _)) = &derived {
+    let clay_and_om = ["soil_vf_clay", "soil_wf_clay", "soil_wf_om"];
+    if clay_and_om.iter().all(|name| f.variable(name).is_some()) {
+        // 站点文件已带这三个（同上：站点的值优先，Fortran 直接读它们）。
+        for name in clay_and_om {
+            report.record(name, Source::Site);
+        }
+    } else if let Some((d, _)) = &derived {
         let dim = soil_dim
             .as_deref()
             .expect("derived is only Some when read_inputs found a profile, which always came with a dimension");
@@ -1831,8 +1847,12 @@ pub fn fill(
             texture, report.texture_name, report.bvic
         ),
     };
-    put_int(&mut f, "soil_texture", texture as i32, &texture_note)?;
-    report.record("soil_texture", texture_src);
+    if f.variable("soil_texture").is_some() {
+        report.record("soil_texture", Source::Site);
+    } else {
+        put_int(&mut f, "soil_texture", texture as i32, &texture_note)?;
+        report.record("soil_texture", texture_src);
+    }
 
     Ok(report)
 }

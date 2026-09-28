@@ -3481,3 +3481,33 @@ fn ambiguous_or_non_logical_subgrid_declarations_are_refused() {
     let not_logical = parse("&nl_colm\n DEF_USE_PC=1\n /\n").unwrap();
     assert!(surface_subgrid_from_document(&not_logical, None).is_err());
 }
+
+/// 已经物化过的站点文件（`colm-cli new` 写过回落值）再走一遍 `fill()` 时，站点里的量优先：
+/// 不重名报错，也不被重新合成的值覆盖。Fortran mksrfdata 直接读站点文件里的这些量。
+#[test]
+fn filling_an_already_filled_site_keeps_its_values() {
+    let src = plumber_fixture("refill-src");
+    let once = src.with_file_name("refill-once.nc");
+    fill(&src, &once, None, None).expect("first fill");
+    {
+        let mut f = netcdf::append(&once).expect("append");
+        f.variable_mut("lakedepth")
+            .expect("lakedepth")
+            .put_values(&[7.5], netcdf::Extents::All)
+            .expect("edit");
+    }
+    let twice = src.with_file_name("refill-twice.nc");
+    let r = fill(&once, &twice, None, None).expect("second fill must not fail on existing fields");
+    assert!(
+        r.from_site.contains(&"lakedepth".to_string()),
+        "{:?}",
+        r.from_site
+    );
+    let f = netcdf::open(&twice).expect("open");
+    let x: Vec<f64> = f
+        .variable("lakedepth")
+        .expect("lakedepth")
+        .get_values(netcdf::Extents::All)
+        .expect("values");
+    assert_eq!(x[0], 7.5, "the site value must survive the second fill");
+}

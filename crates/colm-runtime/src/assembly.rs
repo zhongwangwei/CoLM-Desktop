@@ -1201,8 +1201,10 @@ fn assemble(
     // 现算 `cintsun`/`cintsha`（模板已经把这三样都供上了）。
     let biochemistry = class.biochemistry();
     // 冰川/湖（`patchtype > 2`）不走植被能量链，冠层在每步末尾被清零，允许为 0。
+    // PFT/PC 子网格的冠层逐 PFT 判断（`lai_p+sai_p > 1e-6`，`MOD_Thermal.F90:856`），
+    // patch 级为 0 是合法的：播种前的作物（`croplive_p = .false.`）LAI 与 SAI 都是 0。
     ensure!(
-        patch_type > 2 || leaf_area_index + stem_area_index > 0.0,
+        patch_type > 2 || physics.use_pft || leaf_area_index + stem_area_index > 0.0,
         "the standard LCT energy step needs a vegetated canopy"
     );
 

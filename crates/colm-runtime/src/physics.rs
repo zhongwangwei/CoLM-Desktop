@@ -163,7 +163,7 @@ pub fn land_physics_parameters(
             "DEF_USE_BGC requires DEF_USE_PFT or DEF_USE_PC (MOD_Namelist.F90:1900 stops the model)"
         );
         let switches = colm_core::bgc_driver::BgcSwitches {
-            // 内核没有 `#ifdef CROP`（`DEF_USE_CROP` 打开时已在上面被拒绝）。
+            // `DEF_USE_CROP` 是内核宏的只读映射、namelist 里没有：由 `colm-rs --crop` 置位（见那里）。
             crop: false,
             nitrif: logical(document, "DEF_USE_NITRIF")?,
             fire: logical(document, "DEF_USE_FIRE")?,
