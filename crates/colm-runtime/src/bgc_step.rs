@@ -699,7 +699,6 @@ pub fn crop_readin(
 pub fn refuse_unported(switches: BgcSwitches) -> Result<()> {
     let unported = [
         (switches.fire, "DEF_USE_FIRE"),
-        (switches.cnsoyfixn, "DEF_USE_CNSOYFIXN (CROP)"),
         (switches.irrigation, "DEF_USE_IRRIGATION (CROP)"),
     ];
     for (on, name) in unported {

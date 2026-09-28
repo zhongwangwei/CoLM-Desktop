@@ -139,6 +139,13 @@ ZERO_INIT = {
     "calc_plant_nutrient_competition_CLM45_default": ["f5"],
 }
 
+# 前向代入的局部变量（见 f2rs.py `FORWARD`），每个都由 GIMPLE 核实。
+FORWARD = {
+    # `watdry = porsl*pow(…)`（115 行）在 GIMPLE 里没有乘法：116/117 行是
+    # `.FNMA (porsl, pow, h2osoi)` 与 `.FNMA (porsl, pow, porsl)`。
+    "CNSoyfix": ["watdry"],
+}
+
 
 def main():
     gimple = Path(os.environ["GIMPLE"])
@@ -159,6 +166,8 @@ def main():
                 draft = Path(tmp) / f"{rust}.rs"
                 with open(draft, "w") as fh:
                     extra = ["--zero-init", ",".join(ZERO_INIT[sub])] if sub in ZERO_INIT else []
+                    if sub in FORWARD:
+                        extra += ["--forward", ",".join(FORWARD[sub])]
                     subprocess.run([sys.executable, HERE / "f2rs.py", BGC / f"{module}.F90", sub,
                                     "--gimple", gimple / f"{module}.F90.273t.optimized", "--names", names,
                                     *extra],

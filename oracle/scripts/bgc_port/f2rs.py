@@ -404,6 +404,8 @@ def emit(e, ctx, want="f64", fma_ok=True):
     if k == "!":
         inner = emit(e[1], ctx)
         return f"!{inner}" if e[1][0] in ("name", "call", "paren", "bool") else f"!({inner})"
+    if k == "name" and e[1] in FORWARD_EXPR:
+        return emit(FORWARD_EXPR[e[1]], ctx, want, fma_ok)
     if k == "name":
         n = e[1]
         if n in ctx.loops:
@@ -581,6 +583,7 @@ def try_fma(e, ctx):
 
 def try_fma_inner(e, ctx):
     op, a, b = e
+    a, b = resolve(a), resolve(b)
     t = "f64"
     # neg(product) used in +/-  ->  FNMA
     # `y**2` 在 gimplify 时就展开成 `y*y`，和普通乘积一样可被收缩
@@ -744,6 +747,14 @@ def strip_parens(text):
 
 
 ZERO_INIT = set()
+# regen.py 登记的前向代入：GCC 把这些局部乘积代入使用点并与那里的加减收缩成 FMA 族，
+# 赋值行本身不再有乘法。不发射赋值，使用处换成右侧表达式树。
+FORWARD = set()
+FORWARD_EXPR = {}
+
+
+def resolve(x):
+    return FORWARD_EXPR[x[1]][1] if x[0] == "name" and x[1] in FORWARD_EXPR else x
 
 
 def snake(name):
@@ -796,6 +807,8 @@ def main():
             RUST_NAMES[f.lower()] = r.lstrip("_")
     if "--zero-init" in sys.argv:
         ZERO_INIT.update(n.lower() for n in sys.argv[sys.argv.index("--zero-init") + 1].split(","))
+    if "--forward" in sys.argv:
+        FORWARD.update(n.lower() for n in sys.argv[sys.argv.index("--forward") + 1].split(","))
     if "--gimple" in sys.argv:
         GIMPLE_FMA = gimple_fma(sys.argv[sys.argv.index("--gimple") + 1])
     locals_ = {}
@@ -834,6 +847,8 @@ def main():
                     lower = re.match(r"\s*\(\s*(-?\d+)\s*:", nm.group(2))
                     LOCAL_ARRAYS[name] = int(lower.group(1)) if lower else 1
                 if name in ("m", "j", "k", "l", "ivt", "i", "ps", "pe", "fc", "fp", "p", "c", "g", "s", "d", "sw"):
+                    continue
+                if name in FORWARD:
                     continue
                 if nm.group(4):
                     w(f"let mut {name}: {kind} = {emit(parse_expr(nm.group(4)), Ctx(locals_, set(loops)), kind)};")
@@ -997,6 +1012,9 @@ def assign(s, ctx, w):
         w(f"/*?assign*/ // {s}")
         return
     le = parse_expr(lhs)
+    if le[0] == "name" and le[1] in FORWARD:
+        FORWARD_EXPR[le[1]] = ("paren", parse_expr(rhs))
+        return
     t = typeof(le, ctx)
     if le[0] == "call" and any(a[0] == "colon" for a in le[2]):
         w(f"/*?slice*/ // {s}")

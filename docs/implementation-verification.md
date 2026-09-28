@@ -25672,3 +25672,27 @@ CoLM-SYSU-integration 的 `origin/master` 仍是 `3c799bae`，与 vendor 对齐�
 `a_*` 原始累加和（多维的带 `d1_a_*`/`d2_a_*` 维），清单共 420 项、按是否分配取舍。其中若干有真实累加值却不进历史文件
 （`t2m_wmo`、`rain`/`snow`、`BD_all`/`wfc`/`OM_density`、`qcharge`、`ldew_rain/snow`），Rust 目前不累加它们；`*_inst`
 类只在写出时派生，不进旁车。这是移植 `nac > 0` 转存要补的范围。
+
+## 第 430 轮：大豆固氮 `CNSoyfix`（低氮站点）与转写器的前向代入
+
+第 426 轮的大豆算例里固氮恒为 0，`CNSoyfix` 的数值路径没被检验。新变体 `cs3`：仍是 US-Ne3 大豆（`croptyp = 9`），
+2002–2003 两年，只把大豆的 `DEF_PFT_LEAFCN(24)` 调到 5.0（叶片 C:N 极低 → 氮需求大 → 土壤矿质氮压到阈值以下）。
+Fortran 对照：`DEF_USE_CNSOYFIXN` 开（`cs3on`）/关（`cs3off`）的历史 6/24、重启 18/99 份不同，固氮确实生效。
+
+Rust 第一次跑 `cs3on` 在第 37 次 `CNSoyfix` 调用出现 1 ULP 差（`soyfixn_p` 3.7265587316461057e-6 vs 3.726558731646107e-6）。
+根因在 GIMPLE：
+```
+watdry = porsl(j,i) * (316230._r8/(-psi0(j,i))) ** (-1._r8/bsw(j,i))   ! 115 行：GIMPLE 里只有 pow，没有乘法
+rwat = rwat + (h2osoi(j,i)-watdry) * dz_soi(j)                          ! .FMA (dz, .FNMA (porsl, pow, h2osoi), rwat)
+swat = swat + (porsl (j,i)-watdry) * dz_soi(j)                          ! .FMA (dz, .FNMA (porsl, pow, porsl), swat)
+```
+GCC 把局部乘积 `watdry` 前向代入到两处使用点，与那里的减法收缩成 FNMA，`watdry` 本身从未舍入。转写器原来逐语句发射，
+先把 `watdry` 舍入再相减。修法在工具里：`f2rs.py` 新增 `--forward`（`regen.py` 的 `FORWARD` 表逐项登记并写明 GIMPLE 证据），
+被登记的局部变量不发射声明与赋值，使用处换成右侧表达式树，`try_fma` 因而能看见乘积。重新生成后只有
+`bgc_crop_n_dynamics.rs` 变化，其余 12 个生成模块逐字不变。
+
+结果（`kernels/crop`，对纯 Fortran）：
+- 逐过程回放 `CROP=1 bash tmp/replay.sh tmp/cs3on-fortran CNSoyfix`：`60 identical, 0 differing`；
+- 整段运行 `cs3on`：历史 24/24、重启与旁车 99/99 逐位一致，release 与 debug 相同。
+
+运行时不再拒绝 `DEF_USE_CNSOYFIXN`；仍拒绝的只剩 `DEF_USE_FIRE` 与 `DEF_USE_IRRIGATION`（缺 `crop/*.nc` 灌溉数据无法对照）。

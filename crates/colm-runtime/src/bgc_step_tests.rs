@@ -36,17 +36,18 @@ fn unverified_branches_are_refused() {
             diag_matrix: true,
             ..BgcSwitches::default()
         },
+        // 大豆固氮已在低氮站点逐位验证（第 430 轮）。
+        BgcSwitches {
+            crop: true,
+            cnsoyfixn: true,
+            ..BgcSwitches::default()
+        },
     ] {
         assert!(refuse_unported(switches).is_ok(), "{switches:?}");
     }
     for switches in [
         BgcSwitches {
             fire: true,
-            ..BgcSwitches::default()
-        },
-        BgcSwitches {
-            crop: true,
-            cnsoyfixn: true,
             ..BgcSwitches::default()
         },
         BgcSwitches {

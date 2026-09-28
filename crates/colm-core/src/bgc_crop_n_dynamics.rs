@@ -37,7 +37,6 @@ pub fn cn_soyfix(s: &mut BgcState, p: &BgcPhysics, _c: &BgcPftConstants, _sw: Bg
     let mut rwat: f64;
     let mut swat: f64;
     let mut rz: f64;
-    let mut watdry: f64;
     let wf: f64;
     let sminnthreshold1: f64 = 30.0;
     let sminnthreshold2: f64 = 10.0;
@@ -50,9 +49,16 @@ pub fn cn_soyfix(s: &mut BgcState, p: &BgcPhysics, _c: &BgcPftConstants, _sw: Bg
     rz = 0.0;
     for j in 0..d.nl_soil {
         if 0.5_f64.mul_add(p.dz_soi[j], p.z_soi[j]) <= 0.05 {
-            watdry = p.porsl[j] * (316230.0 / (-p.psi0[j])).lpow(-(1.0 / p.bsw[j]));
-            rwat = (p.h2osoi[j] - watdry).mul_add(p.dz_soi[j], rwat);
-            swat = (p.porsl[j] - watdry).mul_add(p.dz_soi[j], swat);
+            rwat = ((-p.porsl[j]).mul_add(
+                (316230.0 / (-p.psi0[j])).lpow(-(1.0 / p.bsw[j])),
+                p.h2osoi[j],
+            ))
+            .mul_add(p.dz_soi[j], rwat);
+            swat = ((-p.porsl[j]).mul_add(
+                (316230.0 / (-p.psi0[j])).lpow(-(1.0 / p.bsw[j])),
+                p.porsl[j],
+            ))
+            .mul_add(p.dz_soi[j], swat);
             rz += p.dz_soi[j];
         }
     }
