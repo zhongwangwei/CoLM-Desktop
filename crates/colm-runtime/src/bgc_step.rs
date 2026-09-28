@@ -625,11 +625,7 @@ fn previous_step_start(
 
 /// 未移植的 BGC 分支：遇到就拒绝，而不是静默跑成另一个模式。
 pub fn refuse_unported(switches: BgcSwitches) -> Result<()> {
-    let unported = [
-        (switches.fire, "DEF_USE_FIRE"),
-        (switches.diag_matrix, "DEF_USE_DiagMatrix"),
-        (switches.crop, "CROP"),
-    ];
+    let unported = [(switches.fire, "DEF_USE_FIRE"), (switches.crop, "CROP")];
     for (on, name) in unported {
         if on {
             bail!("{name} is on, but the Rust BGC driver has not been verified on that branch yet");

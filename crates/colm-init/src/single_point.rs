@@ -213,8 +213,10 @@ pub struct SinglePointColdStartRun {
     pub nitrification: bool,
     /// `DEF_USE_LAIFEEDBACK`：BGC 关闭时上游强制置假（`MOD_Namelist.F90:1915`）。
     pub lai_feedback: bool,
-    /// `DEF_USE_SASU`：BGC 重启多写 SASU 累加量（`DEF_USE_DiagMatrix` 尚未移植，当场拒绝）。
+    /// `DEF_USE_SASU .or. DEF_USE_DiagMatrix`：BGC 重启多写 SASU 累加量。
     pub sasu: bool,
+    /// `DEF_USE_DiagMatrix`：BGC 重启多写 `*Cap` 容量。
+    pub diag_matrix: bool,
     pub soil_initial_state: Option<PathBuf>,
     pub snow_initial_state: Option<PathBuf>,
     pub water_table_initial_state: Option<PathBuf>,
@@ -416,14 +418,10 @@ pub fn single_point_cold_start_run_from_namelist_with_subgrid(
         cn_initial_state: enabled_existing_path(&document, "DEF_USE_CN_INIT", "DEF_file_cn_init")?,
         nitrification: optional_bool_or(&document, "DEF_USE_NITRIF", true)?,
         lai_feedback: bgc && optional_bool_or(&document, "DEF_USE_LAIFEEDBACK", false)?,
-        sasu: {
-            let diag_matrix = bgc && optional_bool_or(&document, "DEF_USE_DiagMatrix", false)?;
-            ensure!(
-                !diag_matrix,
-                "DEF_USE_DiagMatrix cold starts are not ported"
-            );
-            bgc && optional_bool_or(&document, "DEF_USE_SASU", false)?
-        },
+        sasu: bgc
+            && (optional_bool_or(&document, "DEF_USE_SASU", false)?
+                || optional_bool_or(&document, "DEF_USE_DiagMatrix", false)?),
+        diag_matrix: bgc && optional_bool_or(&document, "DEF_USE_DiagMatrix", false)?,
         soil_initial_state: enabled_existing_path(
             &document,
             "DEF_USE_SoilInit",
@@ -1427,6 +1425,7 @@ fn write_single_point_scalar_cold_time_restarts(
                     &run.static_run.block_label,
                     crate::BgcTimeRestartInput {
                         sasu: run.sasu,
+                        diag_matrix: run.diag_matrix,
                         ..bgc_time_restart_input(state, run.static_run.compression_level)
                     },
                 )
@@ -2421,6 +2420,7 @@ fn write_single_point_pft_cold_time_restarts(
                     values,
                     active_crop_years: &state.active_crop_years,
                     sasu: run.sasu,
+                    diag_matrix: run.diag_matrix,
                 }),
             crop: crop.as_ref().map(CropColdStartState::pft_fields),
             ozone: run.ozone_stress.then_some(PftOzoneFields {
@@ -2442,6 +2442,7 @@ fn write_single_point_pft_cold_time_restarts(
         .map(|state| {
             let mut input = bgc_time_restart_input(state, run.static_run.compression_level);
             input.sasu = run.sasu;
+            input.diag_matrix = run.diag_matrix;
             input.crop = crop.as_ref().map(CropColdStartState::bgc_fields);
             write_bgc_time_restart(
                 &run.static_run.restart_dir,

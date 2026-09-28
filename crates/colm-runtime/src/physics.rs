@@ -275,7 +275,7 @@ pub fn land_physics_parameters(
     // 那些**不列**在这里 —— 它们在 Golden 内核里同样不生效，忽略是对的。
     // 列的是"设了就会改变物理、而本仓库不会照做"的那些，其中 `DEF_TUNING_SIMPLE_VIC_*`
     // 尤其要紧：黄金配置的产流方案正是 SimpleVIC。
-    const UNREAD_PHYSICS_SWITCHES: [&str; 16] = [
+    const UNREAD_PHYSICS_SWITCHES: [&str; 15] = [
         "DEF_TUNING_CSOILC",
         "DEF_TUNING_SMPMAX",
         "DEF_TUNING_SMPMAX_HR",
@@ -286,7 +286,6 @@ pub fn land_physics_parameters(
         "DEF_SOIL_REFL_SCHEME",
         "DEF_TOPMOD_method",
         "DEF_USE_BEDROCK",
-        "DEF_USE_DiagMatrix",
         "DEF_USE_SOILPAR_UPS_FIT",
         "DEF_LANDONLY",
         "DEF_USE_DOMINANT_PATCHTYPE",

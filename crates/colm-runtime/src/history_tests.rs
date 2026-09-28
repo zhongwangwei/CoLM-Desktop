@@ -1107,11 +1107,15 @@ fn the_instantaneous_water_variables_take_the_last_step_not_the_mean() {
 /// 多出 `CONC_O2_UNSAT`/`O2_DECOMP_DEPTH_UNSAT`；`#ifdef CROP` 的一批不在其中。
 #[test]
 fn bgc_history_variables_follow_the_fortran_file() {
-    let off = bgc_history_variables(false);
+    let off = bgc_history_variables(false, false);
     assert_eq!(off.len(), 143);
     assert!(off.contains(&"leafc") && off.contains(&"hr") && off.contains(&"retrasn"));
     assert!(!off.iter().any(|name| name.starts_with("cropprod")));
-    let on = bgc_history_variables(true);
+    let on = bgc_history_variables(true, false);
     assert_eq!(on.len(), 145);
     assert!(on.contains(&"CONC_O2_UNSAT") && on.contains(&"O2_DECOMP_DEPTH_UNSAT"));
+    // DiagMatrix 多 52 个容量（36 个植被、14 个土壤廓线，另 2 个 CWD 廓线）。
+    let diag = bgc_history_variables(false, true);
+    assert_eq!(diag.len(), 143 + 52);
+    assert!(diag.contains(&"leafnCap") && diag.contains(&"cwdcCap_vr"));
 }

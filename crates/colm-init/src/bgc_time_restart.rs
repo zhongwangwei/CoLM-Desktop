@@ -127,6 +127,8 @@ pub struct BgcTimeRestartInput<'a> {
     pub crop: Option<BgcCropFields<'a>>,
     /// `DEF_USE_SASU .or. DEF_USE_DiagMatrix`：写出 [`SASU_PATCH_VARIABLES`]（冷启动全为 0）。
     pub sasu: bool,
+    /// `DEF_USE_DiagMatrix`：写出 `decomp_{c,n}pools_vr_Cap`（冷启动为 spval）。
+    pub diag_matrix: bool,
     pub compression_level: u8,
 }
 
@@ -247,6 +249,20 @@ pub fn write_bgc_time_restart_block(
         patches,
         input.pools.carbon,
     )?;
+    let missing_pools = vec![
+        colm_core::MISSING;
+        dimensions.full_soil_layers * dimensions.decomposition_pools * patches
+    ];
+    if input.diag_matrix {
+        put_pool_major(
+            &mut file,
+            "decomp_cpools_vr_Cap",
+            dimensions.full_soil_layers,
+            dimensions.decomposition_pools,
+            patches,
+            &missing_pools,
+        )?;
+    }
     put_f64_axis_major(
         &mut file,
         "ctrunc_vr",
@@ -280,19 +296,32 @@ pub fn write_bgc_time_restart_block(
         patches,
         input.pools.nitrogen,
     )?;
-    for (name, values) in [
-        ("totsoiln_vr", input.pools.total_soil_nitrogen),
-        ("ntrunc_vr", input.truncation.nitrogen_profile),
-    ] {
-        put_f64_axis_major(
+    put_f64_axis_major(
+        &mut file,
+        "totsoiln_vr",
+        "soil",
+        dimensions.soil_layers,
+        patches,
+        input.pools.total_soil_nitrogen,
+    )?;
+    if input.diag_matrix {
+        put_pool_major(
             &mut file,
-            name,
-            "soil",
-            dimensions.soil_layers,
+            "decomp_npools_vr_Cap",
+            dimensions.full_soil_layers,
+            dimensions.decomposition_pools,
             patches,
-            values,
+            &missing_pools,
         )?;
     }
+    put_f64_axis_major(
+        &mut file,
+        "ntrunc_vr",
+        "soil",
+        dimensions.soil_layers,
+        patches,
+        input.truncation.nitrogen_profile,
+    )?;
     for (name, values) in [
         ("ntrunc_veg", input.truncation.nitrogen_vegetation),
         ("ntrunc_soil", input.truncation.nitrogen_soil),

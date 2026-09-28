@@ -105,7 +105,49 @@ pub struct PftBgcFields<'a> {
     pub active_crop_years: &'a [i32],
     /// `DEF_USE_SASU .or. DEF_USE_DiagMatrix`：在 BGC 段之后写出 [`SASU_PFT_VARIABLES`]（冷启动全为 0）。
     pub sasu: bool,
+    /// `DEF_USE_DiagMatrix`：在 SASU 段之前写出 [`DIAG_MATRIX_PFT_VARIABLES`]（冷启动为 spval）。
+    pub diag_matrix: bool,
 }
+
+/// `WRITE_BGCPFTimeVariables` 在 `DEF_USE_DiagMatrix` 下写的植被容量，紧接 `npool_p`；冷启动保持分配时的 spval。
+pub const DIAG_MATRIX_PFT_VARIABLES: &[&str] = &[
+    "leafcCap_p",
+    "leafc_storageCap_p",
+    "leafc_xferCap_p",
+    "frootcCap_p",
+    "frootc_storageCap_p",
+    "frootc_xferCap_p",
+    "livestemcCap_p",
+    "livestemc_storageCap_p",
+    "livestemc_xferCap_p",
+    "deadstemcCap_p",
+    "deadstemc_storageCap_p",
+    "deadstemc_xferCap_p",
+    "livecrootcCap_p",
+    "livecrootc_storageCap_p",
+    "livecrootc_xferCap_p",
+    "deadcrootcCap_p",
+    "deadcrootc_storageCap_p",
+    "deadcrootc_xferCap_p",
+    "leafnCap_p",
+    "leafn_storageCap_p",
+    "leafn_xferCap_p",
+    "frootnCap_p",
+    "frootn_storageCap_p",
+    "frootn_xferCap_p",
+    "livestemnCap_p",
+    "livestemn_storageCap_p",
+    "livestemn_xferCap_p",
+    "deadstemnCap_p",
+    "deadstemn_storageCap_p",
+    "deadstemn_xferCap_p",
+    "livecrootnCap_p",
+    "livecrootn_storageCap_p",
+    "livecrootn_xferCap_p",
+    "deadcrootnCap_p",
+    "deadcrootn_storageCap_p",
+    "deadcrootn_xferCap_p",
+];
 
 /// `WRITE_BGCPFTimeVariables` 在 `DEF_USE_SASU .or. DEF_USE_DiagMatrix` 下多写的 PFT 级量（年初池与年累加通量），
 /// 按文件中的顺序；`MOD_IniTimeVariable` 把它们全置 0。
@@ -534,6 +576,12 @@ pub fn write_pft_time_restart_block(
                 variable.put_values(bgc.active_crop_years, ..)?;
             }
             put_f64_1d(&mut file, name, "pft", values, compression)?;
+        }
+        if bgc.diag_matrix {
+            let missing = vec![colm_core::MISSING; bgc.active_crop_years.len()];
+            for name in DIAG_MATRIX_PFT_VARIABLES {
+                put_f64_1d(&mut file, name, "pft", &missing, compression)?;
+            }
         }
         if bgc.sasu {
             let zeros = vec![0.0; bgc.active_crop_years.len()];

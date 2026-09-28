@@ -1552,6 +1552,7 @@ fn crop_common_restart_keeps_each_cft_on_its_own_patch_axis() {
         nitrification: false,
         lai_feedback: false,
         sasu: false,
+        diag_matrix: false,
         soil_initial_state: None,
         snow_initial_state: None,
         water_table_initial_state: None,

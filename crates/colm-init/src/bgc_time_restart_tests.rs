@@ -473,6 +473,7 @@ fn bgc_time_restart_matches_the_upstream_fortran_reference() {
         nitrification,
         crop: None,
         sasu: false,
+        diag_matrix: false,
         compression_level: 1,
     };
     let native = write_bgc_time_restart(
@@ -553,6 +554,7 @@ fn sample_input() -> BgcTimeRestartInput<'static> {
         }),
         crop: None,
         sasu: false,
+        diag_matrix: false,
         compression_level: 1,
     }
 }

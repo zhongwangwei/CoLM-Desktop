@@ -398,12 +398,13 @@ pub const URBAN_VARIABLES: [&str; 20] = [
 /// （NITRIF 打开时再加 `(DEF_USE_BGC) .and. (DEF_USE_NITRIF)` 那两个）、且不带编译期宏
 /// （`#ifdef CROP` 那批）的全部名字，按表中顺序去重。FIRE/DiagMatrix/臭氧的组合条件对应的
 /// 分支在运行期被拒绝，这里不必列。
-pub fn bgc_history_variables(nitrif: bool) -> Vec<&'static str> {
+pub fn bgc_history_variables(nitrif: bool, diag_matrix: bool) -> Vec<&'static str> {
     let mut names: Vec<&'static str> = Vec::new();
     for var in colm_hist::generated::VARS {
         let wanted = match var.runtime {
             Some("DEF_USE_BGC") => true,
             Some("(DEF_USE_BGC) .and. (DEF_USE_NITRIF)") => nitrif,
+            Some("(DEF_USE_BGC) .and. (DEF_USE_DiagMatrix)") => diag_matrix,
             _ => false,
         };
         if wanted && var.macros.is_empty() && !names.contains(&var.name) {
@@ -428,7 +429,8 @@ fn set_bgc_history(
     let nl = s.dims.nl_soil;
     let full = s.dims.nl_soil_full;
     let c = &s.constants;
-    for name in bgc_history_variables(runtime.switches.nitrif) {
+    let switches = runtime.switches;
+    for name in bgc_history_variables(switches.nitrif, switches.diag_matrix) {
         if let Some((_, values)) = runtime
             .statics
             .soil
@@ -457,13 +459,19 @@ fn set_bgc_history(
                 _ => return None,
             })
         };
-        if let Some(stem) = name.strip_suffix("_vr") {
+        // `*Cap_vr`（DiagMatrix）取 `decomp_{c,n}pools_vr_Cap` 的同一切片。
+        let (stem, capacity) = match name.strip_suffix("Cap_vr") {
+            Some(stem) => (Some(stem), true),
+            None => (name.strip_suffix("_vr"), false),
+        };
+        if let Some(stem) = stem {
             let (prefix, element) = stem.split_at(stem.len() - 1);
             if let (Some(index), "c" | "n") = (pool(prefix), element) {
-                let values = if element == "c" {
-                    &s.patch.decomp_cpools_vr
-                } else {
-                    &s.patch.decomp_npools_vr
+                let values = match (element, capacity) {
+                    ("c", false) => &s.patch.decomp_cpools_vr,
+                    ("c", true) => &s.patch.decomp_cpools_vr_Cap,
+                    (_, false) => &s.patch.decomp_npools_vr,
+                    (_, true) => &s.patch.decomp_npools_vr_Cap,
                 };
                 let start = full * usize::try_from(index - 1).context("pool index")?;
                 sink.layer(name, record, &values[start..start + nl])?;
@@ -592,17 +600,31 @@ enum Accumulated {
     Column { sum: Vec<f64>, count: usize },
 }
 
+/// 按自身有效步数平均的历史量：`f_alb`（`nac_dt`）与本地正午的 8 个短波量（`nac_ln`）。
+const OWN_COUNT_VARIABLES: [&str; 9] = [
+    "alb", "solvdln", "solviln", "solndln", "solniln", "srvdln", "srviln", "srndln", "srniln",
+];
+
 impl HistoryAccumulator {
-    /// 按**每个变量自己的**有效步数取平均后写进第 `record` 条。标量/列由**累加时**
+    /// 一个变量的平均除数：[`OWN_COUNT_VARIABLES`] 用自己的有效步数，其余用全局步数 `nac`。
+    fn divisor(&self, name: &str, count: usize) -> f64 {
+        if OWN_COUNT_VARIABLES.contains(&name) {
+            count as f64
+        } else {
+            self.steps as f64
+        }
+    }
+
+    /// 按变量所属的计数器取平均后写进第 `record` 条。标量/列由**累加时**
     /// 的形态决定，不在这里猜 —— 猜错会把一根土柱按标量写出去。
     ///
-    /// **除数不是全局步数是刻意的。** 上游 `acc1d` 会跳过 `spval`
-    /// （`MOD_Vars_1DAccFluxes.F90:2895` `IF (var(i) /= spval)`），而除数按变量分组
-    /// 各有一个计数器：`nac`（每步 +1）、`nac_dt`（只数白天）、
-    /// `nac_ln`（只数 `solvdln /= spval` 的步，`:2041`）。
-    /// 于是"局部有效"的量写出来是**它自己的平均**而不是被无效步稀释的值 ——
-    /// 逐位实测：`f_solvdln` 在 264 条里有 11 条是本地正午的真值、其余 253 条是 spval，
-    /// 而那 11 条的值约等于同一小时的 `f_solvd`（比值 1.02），不是它的一半。
+    /// **除数按变量分组。** 上游 `acc1d` 会跳过 `spval`
+    /// （`MOD_Vars_1DAccFluxes.F90:2895` `IF (var(i) /= spval)`），而除数各组一个计数器：
+    /// `nac_dt`（只数白天，只用于 `f_alb`）、`nac_ln`（只数 `solvdln /= spval` 的步，`:2041`，
+    /// 8 个本地正午量）——这两组写出的是**它自己的平均**（[`OWN_COUNT_VARIABLES`]）；
+    /// 逐位实测 `f_solvdln` 在 264 条里 11 条真值、253 条 spval，真值约等于同小时的 `f_solvd`。
+    /// **其余变量一律除以全局 `nac`**，即使某些步是 spval 被跳过：DiagMatrix 的 `*Cap` 在年末
+    /// 那一小时里前一步还是 spval、后一步才有值，上游写出的是值的一半（第 421 轮）。
     fn write_means(&self, buffer: &mut HistoryBuffers, record: usize) -> Result<()> {
         ensure!(
             self.steps > 0,
@@ -625,7 +647,7 @@ impl HistoryAccumulator {
                         let steps = self.steps as f64;
                         sum * steps / steps
                     } else {
-                        sum / *count as f64
+                        sum / self.divisor(name, *count)
                     };
                     buffer
                         .set_patch_scalar(name, record, mean)
@@ -635,8 +657,18 @@ impl HistoryAccumulator {
                     if *count == 0 {
                         continue;
                     }
-                    let steps = *count as f64;
-                    let mean = sum.iter().map(|value| value / steps).collect::<Vec<_>>();
+                    let steps = self.divisor(name, *count);
+                    // `WHERE (acc /= spval) acc = acc / nac`：从未有效的元素保持 spval。
+                    let mean = sum
+                        .iter()
+                        .map(|&value| {
+                            if value == colm_core::MISSING {
+                                value
+                            } else {
+                                value / steps
+                            }
+                        })
+                        .collect::<Vec<_>>();
                     buffer
                         .set_layered(name, record, &mean)
                         .with_context(|| format!("cannot write {name} into the history buffers"))?;
@@ -670,18 +702,26 @@ impl HistorySink for HistoryAccumulator {
             return Ok(());
         }
         let instantaneous = INSTANTANEOUS_VARIABLES.contains(&name);
+        // 累加器从 spval 起步、首个有效值直接赋值（`acc1d` 的 `IF (s /= spval) … ELSE s = var`），
+        // 不是从 `+0.0` 起加：`0.0 + (-0.0)` 会把上游保留的 `-0.0` 变成 `+0.0`。
         match self
             .sums
             .entry(name.to_owned())
-            .or_insert(Accumulated::Scalar { sum: 0.0, count: 0 })
-        {
+            .or_insert(Accumulated::Scalar {
+                sum: colm_core::MISSING,
+                count: 0,
+            }) {
             Accumulated::Scalar { sum, count } => {
                 if instantaneous {
                     // "最后一次覆盖"：`count` 保持 1，于是除数为 1、写出的是末步的值。
                     *sum = value;
                     *count = 1;
                 } else {
-                    *sum += value;
+                    *sum = if *sum == colm_core::MISSING {
+                        value
+                    } else {
+                        *sum + value
+                    };
                     // 一步里的多次 `acc1d`（短波四波段）只记一次步数。
                     if counts_as_step {
                         *count += 1;
@@ -709,7 +749,7 @@ impl HistorySink for HistoryAccumulator {
             .sums
             .entry(name.to_owned())
             .or_insert_with(|| Accumulated::Column {
-                sum: vec![0.0; values.len()],
+                sum: vec![colm_core::MISSING; values.len()],
                 count: 0,
             });
         match entry {
@@ -718,8 +758,15 @@ impl HistorySink for HistoryAccumulator {
                     sum.len() == values.len(),
                     "{name} changed width between steps"
                 );
-                for (sum, value) in sum.iter_mut().zip(values) {
-                    *sum += value;
+                // 逐元素照 `acc2d`：spval 元素不入和，和为 spval 的元素首次直接赋值。
+                for (sum, &value) in sum.iter_mut().zip(values) {
+                    if value != colm_core::MISSING {
+                        *sum = if *sum == colm_core::MISSING {
+                            value
+                        } else {
+                            *sum + value
+                        };
+                    }
                 }
                 *count += 1;
             }
@@ -1793,8 +1840,8 @@ pub struct HistorySession {
     variably_saturated: bool,
     /// 城市 patch：多声明 [`URBAN_VARIABLES`]。
     urban: bool,
-    /// `DEF_USE_BGC`（与 NITRIF 开关）：多声明 [`bgc_history_variables`]。
-    bgc: Option<bool>,
+    /// `DEF_USE_BGC`（NITRIF 与 DiagMatrix 开关）：多声明 [`bgc_history_variables`]。
+    bgc: Option<(bool, bool)>,
 }
 
 impl HistorySession {
@@ -2284,7 +2331,10 @@ impl HistorySession {
         let ground = state.surface_temperature_k();
         self.plant_hydraulics = template.plant_hydraulics();
         self.variably_saturated = template.physics.variably_saturated_flow;
-        self.bgc = template.bgc.as_ref().map(|bgc| bgc.switches.nitrif);
+        self.bgc = template
+            .bgc
+            .as_ref()
+            .map(|bgc| (bgc.switches.nitrif, bgc.switches.diag_matrix));
         let variably_saturated = self.variably_saturated;
         self.push(end, |accumulator| {
             if let (Some(runtime), Some(bgc)) = (&template.bgc, &state.bgc) {
@@ -2432,8 +2482,8 @@ impl HistorySession {
             if self.urban {
                 buffer.declare(&URBAN_VARIABLES)?;
             }
-            if let Some(nitrif) = self.bgc {
-                buffer.declare(&bgc_history_variables(nitrif))?;
+            if let Some((nitrif, diag_matrix)) = self.bgc {
+                buffer.declare(&bgc_history_variables(nitrif, diag_matrix))?;
             }
             self.open = Some((record.suffix.clone(), buffer));
         }

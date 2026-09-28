@@ -1139,6 +1139,7 @@ pub fn write_spatial_pft_cold_time_restarts(
                             values,
                             active_crop_years: &state.active_crop_years,
                             sasu: false,
+                            diag_matrix: false,
                         },
                     ),
                     crop: crop.as_ref().map(crate::CropColdStartState::pft_fields),

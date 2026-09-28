@@ -25463,3 +25463,42 @@ bgc_trace_cmp.py bu-fortran bu-rust             → 134 records identical
 回归（release）：bn/by/bl/bc/bf/bs/bt、pf/pb、qb/qy、gl/ly 历史与重启逐位
 ```
 BGC 单点现在只剩 FIRE（本机没有 `fire/` 运行时数据，无法端到端核对）、DiagMatrix 与作物在运行时拒绝。
+
+## 第 421 轮：DiagMatrix（`DEF_USE_DiagMatrix`）与历史累加器的 spval 语义
+
+DiagMatrix 与 SASU 共用 `CNSASU`，只把容量写进 `*Cap`（植被 36 个 PFT 量、土壤 `decomp_{c,n}pools_vr_Cap`），
+不替换池。四处与 Fortran 对齐：
+
+**一、冷启动。** BGC 时间重启里 `decomp_cpools_vr_Cap` 紧跟 `decomp_cpools_vr`、`decomp_npools_vr_Cap` 紧跟 `totsoiln_vr`
+（`(patch, ndecomp_pools, soil_full)`），PFT 重启里 36 个 `*Cap_p` 紧跟 `npool_p`、在 SASU 段之前；全是分配时的 spval。
+
+**二、上游写出缺陷：6 个 N 容量写的是 C 数组。** `WRITE_BGCPFTimeVariables`（`MOD_BGC_Vars_PFTimeVariables.F90:1554-1565`）
+在 `leafnCap_p`、`leafn_storageCap_p`、`leafn_xferCap_p`、`frootnCap_p`、`frootn_storageCap_p`、`frootn_xferCap_p`
+这 6 个名字下写的是对应的 `leafc*`/`frootc*` 数组（其余 12 个 N 名字是对的）。内存里的 N 容量正确，只是落盘错了；
+表现为重启里 `leafnCap_p` 与 `leafcCap_p` 三个 PFT 逐位相等。`BgcTemplate::overrides` 按同一张错位表写出。
+
+**三、历史变量。** 条件 `(DEF_USE_BGC) .and. (DEF_USE_DiagMatrix)` 下多 52 个：36 个 patch 级容量（`CNDriverSummarizeStates`
+按 PFT 份额汇总）与 14 个 `*Cap_vr`（`decomp_*pools_vr_Cap` 按池切片 `1:nl_soil`）。
+
+**四、历史累加器的 spval 语义（影响所有算例，但此前没有触发条件）。** 两处原来与上游不同：
+- **除数。** 上游除数按组：`f_alb` 用 `nac_dt`、8 个本地正午量用 `nac_ln`，**其余一律除以全局 `nac`**，即使某些步是 spval
+  被 `acc1d` 跳过。Rust 原先对所有变量都按"自身有效步数"平均——对那 9 个是对的，对其余变量只在"一条记录内部部分步是
+  spval"时才露馅。DiagMatrix 的容量正好如此：年末那一小时两个子步，前一步还是 spval、后一步才有值，上游写出值的一半，
+  Rust 写出全值。现改为只有 `OWN_COUNT_VARIABLES` 按自身计数。
+- **起步值。** `acc1d/acc2d` 的累加器每条记录从 spval 起步，首个有效值**直接赋值**（`s = var`），之后才相加。Rust 原先从
+  `+0.0` 起加，`0.0 + (-0.0) = +0.0`，于是上游保留的 `-0.0`（底层 CWD 的 N 容量）在 Rust 里变成 `+0.0`。列量也改成逐元素判断
+  （上游 `acc2d` 逐元素跳过 spval），从未有效的元素保持 spval。
+
+另记：本轮把重启对比脚本改成也检查"缺失变量"（`tmp/cmpcase.sh`），随即看到 Fortran 每份主重启都有 `history_sidecar_required`
+而 Rust 没有——这是第 4xx 轮已记录的既有缺口（历史累加器续跑旁车 `*_restart_hist_*.nc` 未实现；重启与历史周期对齐时
+累加器为空，不影响数值；Fortran 读 Rust 重启时标记缺失即不要求旁车）。
+
+实测（AT-Neu 3-PFT，NITRIF 开 + DiagMatrix，2010-01-01 至 2011-02-28）：
+
+```
+bgc_replay bd-fortran                            → 128 identical, 0 differing, 0 not ported
+纯 Rust 对纯 Fortran：45/45 重启（含缺失变量检查，豁免 history_sidecar_required）、14/14 历史文件全部变量逐位一致
+SASU（bu）在新累加器下复查：45/45、14/14
+```
+回归（release，47 个算例）：46 个历史与重启逐位，余下 hp/sp/tc/ts 为过期重启日期、pn/qr 为既有分歧，与第 419 轮完全相同——
+累加器改动没有改变任何既有算例的输出（它们一条记录内部从不出现部分 spval）。debug 构建 `bd` 同样 45/45、14/14。

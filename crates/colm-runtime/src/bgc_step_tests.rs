@@ -17,7 +17,7 @@ fn the_containing_source_cell_is_the_nearest_center() {
 #[test]
 fn unverified_branches_are_refused() {
     assert!(refuse_unported(BgcSwitches::default()).is_ok());
-    // LAI 反馈（第 419 轮）与 SASU（第 420 轮）已在 AT-Neu 上逐位验证。
+    // LAI 反馈（第 419 轮）、SASU（第 420 轮）与 DiagMatrix（第 421 轮）已在 AT-Neu 上逐位验证。
     for switches in [
         BgcSwitches {
             laifeedback: true,
@@ -27,16 +27,16 @@ fn unverified_branches_are_refused() {
             sasu: true,
             ..BgcSwitches::default()
         },
+        BgcSwitches {
+            diag_matrix: true,
+            ..BgcSwitches::default()
+        },
     ] {
         assert!(refuse_unported(switches).is_ok(), "{switches:?}");
     }
     for switches in [
         BgcSwitches {
             fire: true,
-            ..BgcSwitches::default()
-        },
-        BgcSwitches {
-            diag_matrix: true,
             ..BgcSwitches::default()
         },
         BgcSwitches {

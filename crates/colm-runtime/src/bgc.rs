@@ -63,7 +63,13 @@ impl BgcTemplate {
     pub fn overrides(state: &BgcState, source: &RestartFile) -> Vec<RestartOverride> {
         let mut overrides = Vec::new();
         for name in source.float_names() {
-            if let Some(values) = state.f64_field(&name) {
+            // 上游 `WRITE_BGCPFTimeVariables`（`MOD_BGC_Vars_PFTimeVariables.F90:1554-1565`）在这 6 个
+            // N 容量的名字下写的是对应的 C 数组；内存里的 N 容量是对的，只是落盘错了。照样写。
+            let written = DIAG_MATRIX_WRITTEN_AS
+                .iter()
+                .find(|(file_name, _)| *file_name == name)
+                .map_or(name.as_str(), |(_, field)| field);
+            if let Some(values) = state.f64_field(written) {
                 overrides.push(RestartOverride::new(name, values.clone()));
             }
         }
@@ -86,6 +92,16 @@ impl BgcTemplate {
         overrides
     }
 }
+
+/// DiagMatrix 重启里"名字 → 实际写出的数组"的错位（上游缺陷，见 [`BgcTemplate::overrides`]）。
+const DIAG_MATRIX_WRITTEN_AS: [(&str, &str); 6] = [
+    ("leafnCap_p", "leafcCap_p"),
+    ("leafn_storageCap_p", "leafc_storageCap_p"),
+    ("leafn_xferCap_p", "leafc_xferCap_p"),
+    ("frootnCap_p", "frootcCap_p"),
+    ("frootn_storageCap_p", "frootc_storageCap_p"),
+    ("frootn_xferCap_p", "frootc_xferCap_p"),
+];
 
 /// 只读全局 BGC 常数重启里的模块级标量（`Q10`、池下标等）。
 pub fn read_bgc_constants(global: &Path) -> Result<BgcConstants> {
