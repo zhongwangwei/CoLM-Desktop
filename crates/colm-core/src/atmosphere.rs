@@ -13,12 +13,12 @@ const CP_AIR: f64 = 1004.64;
 const LATENT_HEAT_VAPORIZATION: f64 = 2.5104e6;
 
 #[inline(never)]
-fn fortran_sin(value: f64) -> f64 {
+pub(crate) fn fortran_sin(value: f64) -> f64 {
     value.sin()
 }
 
 #[inline(never)]
-fn fortran_cos(value: f64) -> f64 {
+pub(crate) fn fortran_cos(value: f64) -> f64 {
     value.cos()
 }
 

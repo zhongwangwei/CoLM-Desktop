@@ -1503,6 +1503,7 @@ mod tests {
     fn land_physics() -> crate::assembly::LandPhysicsParameters {
         crate::assembly::LandPhysicsParameters {
             use_pft: false,
+            use_pc: false,
             hydraulic_model: colm_core::HydraulicModel::VanGenuchten,
             variably_saturated_flow: false,
             plant_hydraulics: false,

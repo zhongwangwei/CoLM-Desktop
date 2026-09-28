@@ -56,6 +56,7 @@ fn parameters(class: i32, fraction: f64) -> PftParameters {
         inverse_sqrt_leaf_dimension_m_neg_half: 5.0,
         wue_lambda: 1000.0,
         root_fraction: vec![0.5, 0.5],
+        canopy_layer: 1,
         plant_hydraulic_traits: crate::ClassConstants::new(crate::LandCoverScheme::Igbp, 1)
             .unwrap()
             .plant_hydraulic_traits(crate::PlantHydraulicOverrides::default()),

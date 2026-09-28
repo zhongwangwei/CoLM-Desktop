@@ -75,6 +75,7 @@ impl PftTemplate {
             "the PFT constant restart vectors disagree on the PFT count"
         );
         let campbell = physics.hydraulic_model == HydraulicModel::Campbell;
+        let pc = physics.use_pc;
         let parameters = classes
             .iter()
             .enumerate()
@@ -83,6 +84,7 @@ impl PftTemplate {
                     document,
                     class,
                     campbell,
+                    pc,
                     fraction[index],
                     top[index],
                     bottom[index],
@@ -155,8 +157,10 @@ impl PftTemplate {
                 maximum_shaded_leaf_conductance: gs0sha[p],
             })
             .collect();
+        let mut initial = PftPatch::new(parameters, columns, interface_depth_m.len() - 1)?;
+        initial.plant_community = pc;
         Ok(Self {
-            initial: PftPatch::new(parameters, columns, interface_depth_m.len() - 1)?,
+            initial,
             plant_hydraulics,
             monthly: None,
         })
@@ -344,16 +348,19 @@ fn flatten_absorption(matrix: [[f64; 2]; 2]) -> [f64; 4] {
 }
 
 /// 一个 PFT 的 `MOD_Const_PFT` 参数（默认值 + `DEF_PFT_*` 覆盖）。
+#[allow(clippy::too_many_arguments)]
 fn pft_parameters(
     document: &Document,
     class: i32,
     campbell: bool,
+    pc: bool,
     fraction: f64,
     canopy_top_m: f64,
     canopy_bottom_m: f64,
     interface_depth_m: &[f64],
 ) -> Result<PftParameters> {
-    let value = |name: &str| colm_init::pft_parameter(document, name, class, campbell, false);
+    // PC 用另一组叶片光学（`rhol_*_p_pc`/`taul_*_p_pc`，`MOD_Const_PFT.F90:1833-1843`）。
+    let value = |name: &str| colm_init::pft_parameter(document, name, class, campbell, pc);
     Ok(PftParameters {
         class,
         fraction,
@@ -406,6 +413,12 @@ fn pft_parameters(
             xylem_psi50_mm: value("DEF_PFT_PSI50_XYL")?,
             root_psi50_mm: value("DEF_PFT_PSI50_ROOT")?,
             vulnerability_shape: value("DEF_PFT_CK")?,
+        },
+        // `canlay_p`（`MOD_Const_PFT`）：乔木（1..=8）在第 2 层，其余在第 1 层，裸地 0。
+        canopy_layer: match class {
+            0 => 0,
+            1..=8 => 2,
+            _ => 1,
         },
     })
 }

@@ -25144,3 +25144,70 @@ clippy --all-targets -D warnings 无告警；fmt 通过
 遇到即报错）、`DEF_USE_LAIFEEDBACK`、`DEF_SPLIT_SOILSNOW` 下的裸地 `ulrad` 分支（代码按 GIMPLE 写了，
 算例没开）、PFT 与作物（CFT ≥ 15）和 BGC 的组合、多 patch 的 PFT 重启（单点只有一个 patch，
 没读 `patch_pft_s/e`）。PC（`DEF_USE_PC`）仍在运行期入口报错。
+
+## 第 413 轮：PC 子网格（`DEF_USE_PC`）——三维冠层辐射与 `LeafTemperaturePC`
+
+### 一、`ThreeDCanopy` 按 GIMPLE 重写（PC 冷启动随之逐位）
+
+PC 冷启动的 Rust 前处理对纯 Fortran `mkinidata` 原先差 1 ULP（`alb`/`ssun`/`ssha`/`ssoi` 与
+`ssun_p`/`ssha_p`/`thermk_p`）。旧的 `three_d_canopy` 是平铺转写，与 `main/` 的 GIMPLE 有四类不同：
+
+1. 层聚合后**除以** `fc0`（旧版乘 `1/fc0`）；
+2. `cosz = coszen*sqrt(1/(cdcw²·sin²(acos coszen) + cos²(acos coszen)))` 的回代被省略了；
+3. `shad_oa = fc0*OverlapArea(...)` 在上游**不单独舍入**，直接熔进 `tt(4,2)`/`tt(4,1)` 等的 FMA；
+4. 层聚合是 `FMA(fcover, x, acc)`，`tt`/`A`/`B`/`fabs_leq` 各有自己的收缩形状。
+
+`ThreeDCanopy_wrap`/`ThreeDCanopy`/`CanopyRad`/`OverlapArea`/`mGauss` 逐句按 GIMPLE 重写，四精度的
+`tee` 与 `phi(runmode)` 复用第 411 轮验证过的 `extended.rs`。`fsun_id_lay`/`fsun_ii_lay` 在
+`fsun3D = .false.` 下被 wrap 丢弃，删掉。PC 的 `albland` 在三维求解之后**照样调 `twostream_wrap`**：
+自然 PFT 在里面 `CYCLE`、取三维的 `albv`/`tran`，再按 `pftfrac` 做一遍 FMA 聚合 —— patch 的
+`alb`/`tran` 与三维原值差的正是这一步的舍入（冷启动那边 colm-init 早已这样聚合）。
+
+### 二、`LeafTemperaturePC`（`crates/colm-core/src/leaf_temperature_pc.rs`）
+
+三层冠层：PFT 按 `canlay_p` 分层（乔木第 2 层、其余第 1 层），各层有自己的 `taf`/`qaf`，层间阻力由
+`frd` 廓线积分给出，长波按逐层遮蔽比例经 `tdn`/`tup` 矩阵传递，所有 PFT 在同一个牛顿迭代里解叶温。
+2245 行 Fortran 的 GIMPLE 逐句解码后写成 Rust；几处不看源码就会写错的：
+
+- `fcover_lays` 在 712 行算完就被**清零**，层间 `uprofile`/`kprofile`/`frd` 收到的覆盖度是 0、
+  `alpha` 也是 0 —— Rust 的风速廓线校验原先要求 `alpha > 0`，放宽为 `>= 0`；
+- `matmul(Ld, tdn)` 是按行号升序的 FMA 链（零元素 `FMA(x,0,acc)=acc`）；
+- PHS 支路把 `gssun` 先乘 `laisun*1e-6` 折成 mol 再交给 `update_photosyn`，边界层阻力传 `rb`
+  （不是 `rbsun`）；`PlantHydraulicStress_twoleaf` 收的是 `rbsun` 与 `sum(rd(1:clev))`；
+- 能量循环里 `etr` 总是按湿度梯度重算，PHS 解出的 `etrsun+etrsha` 不直接当蒸腾；
+- `THERMAL` 的 PC 段每步先把 `vegwp_p` 重置为 -2.5e4 再解；第一个 PFT 循环（`eroot`、`fsun_p`、
+  `laisun_p`）对 PC 照常执行，随后 `vendor/` 的本地修补（FIX 2026-08-16）把 `rootr_p`/`etrc_p`/
+  `rstfac_p` 覆盖成 0/0/1 —— 所以**关掉 PHS 时 `etr >= etrc = 0` 恒成立、PC 的蒸腾被截成 0**。
+  这是那次修补的副作用（原先是未初始化内存），Rust 照样复现，此处记账。
+
+运行期：`DEF_USE_PC` 与 `DEF_USE_PFT` 共用 PFT 子网格装配（`PftPatch::plant_community`），叶片光学取
+`rhol_*_p_pc`/`taul_*_p_pc`，`canlay_p` 按类别给出；`DEF_RSS_SCHEME` 在 PC 下同 PFT 保留 namelist 值。
+`DEF_PC_CROP_SPLIT` 的作物 PFT（走一维两流）还没有，遇到即报错。
+
+### 三、`sin_cos` 被合并成 `__sincos_stret`
+
+全年算例在三个孤立的白天小时留下 1 ULP 的辐射差（`sabvsun`/`sabg`/`alb`），而所有月末重启仍逐位。
+两侧在 `ThreeDCanopy_wrap` 出口与 `tt` 算完处逐调用打探针：1213 次日间调用里有 2 次 `cosz` 本身差 1 ULP，
+来源是 `cosz = coszen*sqrt(1/(sin²(acos c)+cos²(acos c)))`。
+
+gfortran 把这对 `sin`/`cos` 合成 libm `sincos`，结果与分开调用逐位相同；Rust 的 `sin_cos()` 在 release 下
+被 LLVM 并成 `__sincos_stret`，这个输入上 `sin` 大 1 ULP（独立小程序实测 `3FE26E1A781BEB7A` 对 `…79`）。
+改用 `atmosphere::fortran_sin`/`fortran_cos`（`#[inline(never)]`，挡住合并）——仓库里之前两处绕开过同一个坑，
+这是全仓唯一一处 `sin_cos()`。
+
+### 四、实测
+
+```text
+AT-Neu（DEF_USE_PC = .true.，VG 土壤 + VSF，DEF_VEG_SNOW 开），纯 Fortran 对纯 Rust：
+  qm  3 PFT（13/7/1 → 第 1/2/2 层），1-2 月，PHS 开           history 2 + 主/PFT 重启  逐位
+  qy  同 qm，全年                                              history 12 + 主/PFT 重启 逐位
+  qb  4 PFT（0 裸地/14/4/13），全年，PHS 关                     history 12 + 主/PFT 重启 逐位
+  以上 release 与 debug 两种构建都逐位
+  PC 冷启动（Rust colm-srfdata + colm-init 对 Fortran mksrfdata + mkinidata）：常数、初始与 PFT 重启 diff 0
+回归（PROFILE=release）：LCT/城市 31 例 + PFT pf/pm/py/pb 全部逐位
+cargo test core 372 / runtime 78 / init 156；clippy -D warnings 无告警；fmt 通过
+```
+
+未验证：DEF_PC_CROP_SPLIT 的作物 PFT（遇到即报错）、DEF_USE_OZONESTRESS（系数固定为 1）、PC 下的 split
+土/雪（代码按 GIMPLE 写了，算例没开）、只有三层冠层（numlay = 3）才会走到的廓线分支——这些算例的 PFT 类别
+至多分在第 1/2 层，numlay = 3 的公式还没对 Fortran 跑过。

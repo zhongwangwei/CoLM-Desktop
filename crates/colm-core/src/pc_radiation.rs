@@ -192,10 +192,10 @@ pub fn cold_start_pc_broadband_radiation_from_ground(
 /// `ThreeDCanopy_wrap`（`MOD_3DCanopyRadiation.F90:42-283`）的结果。
 ///
 /// 列量（`albv`/`tran`）取自第一个 PFT —— `ThreeDCanopy` 末尾给每个 PFT 写的是同一组列值。
-pub(crate) struct ThreeDCanopyOutput {
-    pub(crate) albedo: [[f64; RTYPES]; BANDS],
-    pub(crate) transmission: [[f64; 3]; BANDS],
-    pub(crate) pft: Vec<PcPftRadiation>,
+pub struct ThreeDCanopyOutput {
+    pub albedo: [[f64; RTYPES]; BANDS],
+    pub transmission: [[f64; 3]; BANDS],
+    pub pft: Vec<PcPftRadiation>,
 }
 
 /// `ThreeDCanopy_wrap`：由 PFT 参数拼出逐 PFT 的冠层尺寸与光学，调 `ThreeDCanopy`，
@@ -203,7 +203,7 @@ pub(crate) struct ThreeDCanopyOutput {
 ///
 /// `fractions` 是 `fcover = pftfrac/sum(pftfrac)`（只含走三维模型的自然 PFT）。
 /// 每条语句的舍入形状取自 `main/` 的 GIMPLE（行号见注释）。
-pub(crate) fn three_d_canopy_wrap(
+pub fn three_d_canopy_wrap(
     pfts: &[PcPftInput],
     fractions: &[f64],
     cosine_zenith: f64,
@@ -365,7 +365,14 @@ fn three_d_canopy(
     // `:486-491`：`cosz = coszen*sqrt(1/(cdcw²·sin²(zenith) + cos²(zenith)))`，`cdcw = 1`；
     // `cosd` 的两个三角函数值在编译期折成常数，`FMA(1, 0.75-ε, 0.25+ε)` 恰为 1。
     let zenith = coszen.acos();
-    let (sine, cosine) = zenith.sin_cos();
+    // gfortran 把这对 `sin`/`cos` 合成 libm `sincos`，结果与分开调用逐位相同；Rust 的
+    // `sin_cos()` 在 release 下被 LLVM 并成 `__sincos_stret`，**不**同 —— AT-Neu PC 全年
+    // 1213 次日间调用里有 2 次 `sin` 差 1 ULP，`cosz` 随之差，`tt(1,0)` 与 history 的
+    // `sabvsun`/`alb` 差一位。用不内联的分开调用挡住合并。
+    let (sine, cosine) = (
+        crate::atmosphere::fortran_sin(zenith),
+        crate::atmosphere::fortran_cos(zenith),
+    );
     let cosz = coszen * (1.0 / (sine * sine).mul_add(1.0, cosine * cosine)).sqrt();
     let cosd = f64::from_bits(0x3fe0_0000_0000_0001);
     let mut gdir = vec![0.0; count];

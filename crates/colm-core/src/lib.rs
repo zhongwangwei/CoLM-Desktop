@@ -97,6 +97,7 @@ pub mod lake_temperature;
 pub mod land_cover;
 pub mod land_cover_generated;
 pub mod leaf_temperature;
+pub mod leaf_temperature_pc;
 pub mod linear;
 pub mod monin_obukhov;
 pub mod net_solar;

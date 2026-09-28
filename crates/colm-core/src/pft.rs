@@ -44,6 +44,8 @@ pub struct PftParameters {
     pub root_fraction: Vec<f64>,
     /// `kmax_*_p`/`psi50_*_p`/`ck_p`：只在 `DEF_USE_PLANTHYDRAULICS` 下读。
     pub plant_hydraulic_traits: PlantHydraulicTraits,
+    /// `canlay_p`（PC 的三层冠层分层：0 裸地、1 草本与灌木及作物、2 乔木）；PFT 不读。
+    pub canopy_layer: usize,
 }
 
 impl PftParameters {
@@ -93,6 +95,8 @@ pub struct PftPatch {
     pub columns: Vec<PftColumn>,
     /// 土壤层数（`rootr`/`rootflux` 的长度）。
     pub layers: usize,
+    /// `DEF_USE_PC`：冠层能量走 `LeafTemperaturePC`、反照率走 `ThreeDCanopy_wrap`。
+    pub plant_community: bool,
 }
 
 impl PftPatch {
@@ -115,6 +119,7 @@ impl PftPatch {
             parameters,
             columns,
             layers,
+            plant_community: false,
         })
     }
 
@@ -416,6 +421,16 @@ pub(crate) fn pft_canopy_radiation(
     vegetation_snow: bool,
     radiation: &mut ColdStartRadiation,
 ) -> Result<()> {
+    if patch.plant_community {
+        return pc_canopy_radiation(
+            patch,
+            ground,
+            cosine_zenith,
+            patch_leaf_stem_area,
+            vegetation_snow,
+            radiation,
+        );
+    }
     let mut states = Vec::with_capacity(patch.columns.len());
     for (parameters, column) in patch.parameters.iter().zip(patch.columns.iter_mut()) {
         let state = broadband_radiation_from_ground_using(
@@ -443,6 +458,75 @@ pub(crate) fn pft_canopy_radiation(
     let previous_thermal_gap_fraction = radiation.thermal_gap_fraction;
     *radiation = aggregate_pft_radiation(&states, &fractions, patch_leaf_stem_area, Some(&ground))?;
     // patch 的 `thermk` 只在 `lai+sai <= 1e-6` 时被 `albland` 置 1，其余时候原样保留。
+    if patch_leaf_stem_area > 1.0e-6 {
+        radiation.thermal_gap_fraction = previous_thermal_gap_fraction;
+    }
+    Ok(())
+}
+
+/// PC 的 `albland`（`MOD_Albedo.F90:432-440`）：`ThreeDCanopy_wrap` 解自然 PFT，随后照旧调
+/// `twostream_wrap` —— 自然 PFT 在里面 `CYCLE`、`albv_p`/`tran_p` 取三维结果，再按 `pftfrac`
+/// 做一遍 FMA 聚合，所以 patch 的 `alb`/`tran` 与三维原值差在这一步的舍入上。
+fn pc_canopy_radiation(
+    patch: &mut PftPatch,
+    ground: ColdStartGroundAlbedo,
+    cosine_zenith: f64,
+    patch_leaf_stem_area: f64,
+    vegetation_snow: bool,
+    radiation: &mut ColdStartRadiation,
+) -> Result<()> {
+    ensure!(
+        patch.parameters.iter().all(|pft| pft.class < 15),
+        "PC patches with crop PFTs (DEF_PC_CROP_SPLIT) are not ported"
+    );
+    let inputs: Vec<crate::PcPftInput> = patch
+        .parameters
+        .iter()
+        .zip(&patch.columns)
+        .map(|(parameters, column)| crate::PcPftInput {
+            canopy_layer: parameters.canopy_layer,
+            fraction: parameters.fraction,
+            canopy_top_m: parameters.canopy_top_m,
+            canopy_bottom_m: parameters.canopy_bottom_m,
+            optics: parameters.optics,
+            lai: column.leaf_area_index,
+            sai: column.stem_area_index,
+            wet_snow_fraction: column.wet_snow_fraction,
+        })
+        .collect();
+    let total = patch.fractions().fold(0.0, |sum, value| value + sum);
+    let fcover: Vec<f64> = patch.fractions().map(|value| value / total).collect();
+    let three_d = crate::pc_radiation::three_d_canopy_wrap(
+        &inputs,
+        &fcover,
+        cosine_zenith,
+        ground.ground,
+        vegetation_snow,
+    );
+    let mut states = Vec::with_capacity(patch.columns.len());
+    for (column, pft) in patch.columns.iter_mut().zip(&three_d.pft) {
+        column.sunlit_absorption = pft.sunlit_absorption;
+        column.shaded_absorption = pft.shaded_absorption;
+        column.thermal_gap_fraction = pft.thermal_gap_fraction;
+        column.shade_fraction = pft.shade_fraction;
+        column.direct_extinction = pft.direct_extinction;
+        column.diffuse_extinction = pft.diffuse_extinction;
+        states.push(ColdStartRadiation {
+            albedo: three_d.albedo,
+            sunlit_absorption: pft.sunlit_absorption,
+            shaded_absorption: pft.shaded_absorption,
+            soil_absorption: [[0.0; 2]; 2],
+            snow_absorption: [[0.0; 2]; 2],
+            transmission: Some(three_d.transmission),
+            snow_age: ground.snow_age,
+            thermal_gap_fraction: pft.thermal_gap_fraction,
+            direct_extinction: pft.direct_extinction,
+            diffuse_extinction: pft.diffuse_extinction,
+        });
+    }
+    let fractions = patch.fractions().collect::<Vec<_>>();
+    let previous_thermal_gap_fraction = radiation.thermal_gap_fraction;
+    *radiation = aggregate_pft_radiation(&states, &fractions, patch_leaf_stem_area, Some(&ground))?;
     if patch_leaf_stem_area > 1.0e-6 {
         radiation.thermal_gap_fraction = previous_thermal_gap_fraction;
     }
@@ -536,12 +620,17 @@ pub(crate) fn pft_canopy_energy(
     let layers = patch.layers;
     let preliminary = context.preliminary_ground_flux;
     let ground = context.ground_flux;
+    let patch_is_pc = patch.plant_community;
     let mut records = Vec::with_capacity(patch.columns.len());
+    if patch.plant_community {
+        records = pc_records(&context, patch)?;
+    }
     for (index, (parameters, column)) in patch
         .parameters
         .iter()
         .zip(patch.columns.iter_mut())
         .enumerate()
+        .filter(|_| !patch_is_pc)
     {
         if !has_canopy(column.leaf_area_index, column.stem_area_index) {
             // `:876-887` 与 `:1004-1031`。
@@ -796,6 +885,168 @@ pub(crate) fn pft_canopy_energy(
         soil_water_stress: output.sunlit_soil_water_stress,
     };
     Ok((output, root_uptake))
+}
+
+/// `THERMAL` 的 PC 段（`MOD_Thermal.F90:1052-1150`）：自然 PFT 在第一个 PFT 循环里被 `CYCLE`
+/// 掉，改由 `LeafTemperaturePC` 一次解完；随后 patch 级的湍流量抄进每个 PFT 的 `_p`。
+///
+/// 第一个 PFT 循环（`eroot`、`fsun_p`、`laisun_p`）对 PC 照常执行；它算出的 `rootr_p`/`etrc_p`/
+/// `rstfac_p` 随后被 PC 段的初始化（`vendor/` 本地修补 FIX 2026-08-16）覆盖成 0/0/1，
+/// 所以关掉 PHS 时 `etr >= etrc = 0` 恒成立、蒸腾被截成 0 —— 照样复现。
+fn pc_records(context: &PftCanopyContext<'_>, patch: &mut PftPatch) -> Result<Vec<PftLeafRecord>> {
+    let input = context.input;
+    let forcing = input.forcing;
+    let layers = patch.layers;
+    let preliminary = context.preliminary_ground_flux;
+    // `:1088`：`fcover = pftfrac/sum(pftfrac)`，求和是普通加法。
+    let total = patch.fractions().fold(0.0, |sum, value| value + sum);
+    let drive: Vec<crate::leaf_temperature_pc::PcPftDrive> = patch
+        .parameters
+        .iter()
+        .zip(&patch.columns)
+        .enumerate()
+        .map(|(index, (parameters, column))| {
+            let shortwave = context.shortwave[index];
+            let interception = context.interception[index];
+            let absorbed = shortwave.sunlit_absorbed_w_m2 + shortwave.shaded_absorbed_w_m2;
+            // `:1081-1086`
+            let depth = (column.direct_extinction * column.leaf_area_index).min(40.0);
+            let sunlit_fraction = if forcing.cosine_zenith <= 0.0 || absorbed < 1.0 {
+                0.5
+            } else {
+                (1.0 - (-depth).exp()) / depth.max(1.0e-6)
+            };
+            crate::leaf_temperature_pc::PcPftDrive {
+                canopy_layer: parameters.canopy_layer,
+                fcover: parameters.fraction / total,
+                par_sunlit_w_m2: shortwave.par_sunlit_w_m2,
+                par_shaded_w_m2: shortwave.par_shaded_w_m2,
+                sunlit_fraction,
+                absorbed_solar_w_m2: absorbed,
+                retained_rain_kg_m2_s: interception.retained_rain_kg_m2_s,
+                retained_snow_kg_m2_s: interception.retained_snow_kg_m2_s,
+            }
+        })
+        .collect();
+    // 第一个 PFT 循环对无冠层 PFT 的清零（`:876-887`）。
+    for column in &mut patch.columns {
+        if !has_canopy(column.leaf_area_index, column.stem_area_index) {
+            column.leaf.canopy_water = CanopyWater {
+                total_mm: 0.0,
+                rain_mm: 0.0,
+                snow_mm: 0.0,
+            };
+            column.wet_snow_fraction = 0.0;
+        }
+    }
+    // `:1092-1094`：PHS 下每步先把 `vegwp_p` 重置成 -2.5e4 再解。
+    for column in &mut patch.columns {
+        if let Some(state) = column.leaf.plant_hydraulics.as_mut() {
+            state.vegetation_water_potential_mm =
+                [BARE_PFT_WATER_POTENTIAL_MM; crate::VEGETATION_SEGMENTS];
+        }
+    }
+    let template = crate::standard_lct_step::leaf_input(
+        input.leaf_temperature,
+        forcing,
+        crate::standard_lct_step::CanopyDrive {
+            direct_extinction: 1.0,
+            diffuse_extinction: 1.0,
+            thermal_gap_fraction: 1.0,
+            par_sunlit_w_m2: 0.0,
+            par_shaded_w_m2: 0.0,
+            sunlit_absorbed_w_m2: 0.0,
+            shaded_absorbed_w_m2: 0.0,
+            retained_rain_kg_m2_s: 0.0,
+            retained_snow_kg_m2_s: 0.0,
+        },
+        1.0,
+        0.0,
+        context.precipitation_temperature_k,
+        context.soil_surface_resistance_s_m,
+        context.ground_flux,
+        preliminary,
+    );
+    let (shared, fluxes) = crate::leaf_temperature_pc::leaf_temperature_pc(
+        template,
+        forcing.air_temperature_k,
+        preliminary.heat_roughness_m,
+        preliminary.friction_velocity_m_s,
+        &patch.parameters,
+        &mut patch.columns,
+        &drive,
+    )?;
+    let mut records = Vec::with_capacity(fluxes.len());
+    for ((column, flux), pft) in patch.columns.iter_mut().zip(fluxes).zip(&drive) {
+        // 第一个 PFT 循环（`:853-889`）：有冠层时 `laisun_p = lai_p*fsun_p`，否则清零。
+        let (laisun, laisha) = if has_canopy(column.leaf_area_index, column.stem_area_index) {
+            (
+                column.leaf_area_index * pft.sunlit_fraction,
+                column.leaf_area_index * (1.0 - pft.sunlit_fraction),
+            )
+        } else {
+            (0.0, 0.0)
+        };
+        // `:1129-1150`：patch 值抄进 `_p`。
+        column.reference_temperature_k = shared.tref;
+        column.reference_humidity = shared.qref;
+        column.momentum_roughness_m = shared.z0m;
+        column.stomatal_resistance_s_m = flux.rst;
+        if let Some(value) = flux.gs0sun {
+            column.maximum_sunlit_leaf_conductance = value;
+        }
+        if let Some(value) = flux.gs0sha {
+            column.maximum_shaded_leaf_conductance = value;
+        }
+        records.push(PftLeafRecord {
+            laisun,
+            laisha,
+            rst: flux.rst,
+            assim: flux.assim,
+            respc: flux.respc,
+            fsenl: flux.fsenl,
+            fevpl: flux.fevpl,
+            etr: flux.etr,
+            dlrad: shared.dlrad,
+            ulrad: shared.ulrad,
+            taux: shared.taux,
+            tauy: shared.tauy,
+            fseng: shared.fseng,
+            fseng_soil: shared.fseng_soil,
+            fseng_snow: shared.fseng_snow,
+            fevpg: shared.fevpg,
+            fevpg_soil: shared.fevpg_soil,
+            fevpg_snow: shared.fevpg_snow,
+            cgrnd: shared.cgrnd,
+            cgrndl: shared.cgrndl,
+            cgrnds: shared.cgrnds,
+            zol: shared.zol,
+            rib: shared.rib,
+            ustar: shared.ustar,
+            qstar: shared.qstar,
+            tstar: shared.tstar,
+            fm: shared.fm,
+            fh: shared.fh,
+            fq: shared.fq,
+            rstfacsun: flux.rstfacsun,
+            rstfacsha: flux.rstfacsha,
+            gssun: flux.gssun,
+            gssha: flux.gssha,
+            assimsun: flux.assimsun,
+            etrsun: flux.etrsun,
+            assimsha: flux.assimsha,
+            etrsha: flux.etrsha,
+            hprl: flux.hprl,
+            dheatl: flux.dheatl,
+            rootr: vec![0.0; layers],
+            rootflux: if flux.rootflux.is_empty() {
+                vec![0.0; layers]
+            } else {
+                flux.rootflux
+            },
+        });
+    }
+    Ok(records)
 }
 
 /// 无冠层 PFT 的记录：湍流量取前置 `GroundFluxes`，长波按裸地（`:1004-1026`）。

@@ -152,16 +152,10 @@ pub fn land_physics_parameters(
              (MOD_Namelist.F90:1942 stops the model otherwise), got {selected:?}"
         );
     }
-    // PFT 已移植（逐 PFT 截留/短波/叶温/雪盖/反照率，聚合后复用 LCT 的地面与水分路径）；
-    // PC 的三维冠层辐射与 `LeafTemperaturePC` 还没有。
-    if selected[0] == "DEF_USE_PC" {
-        bail!(
-            "DEF_USE_PC selects the plant-community subgrid (3D canopy radiation and \
-             LeafTemperaturePC), which the Rust runtime has not ported; use DEF_USE_LCT or \
-             DEF_USE_PFT"
-        );
-    }
-    let use_pft = selected[0] == "DEF_USE_PFT";
+    // PFT 与 PC 都已移植：PFT 逐 PFT 解单冠层，PC 走 `LeafTemperaturePC` 与 `ThreeDCanopy`；
+    // 二者都在聚合后复用 LCT 的地面与水分路径。
+    let use_pc = selected[0] == "DEF_USE_PC";
+    let use_pft = selected[0] == "DEF_USE_PFT" || use_pc;
 
     // 上游 `MOD_Namelist.F90:1767-1772`：选了 van Genuchten 就把
     // `DEF_USE_VariablySaturatedFlow` 强制置真。它的声明默认值也是真，所以**默认
@@ -304,6 +298,7 @@ pub fn land_physics_parameters(
     };
     Ok(LandPhysicsParameters {
         use_pft,
+        use_pc,
         hydraulic_model: if campbell {
             HydraulicModel::Campbell
         } else {

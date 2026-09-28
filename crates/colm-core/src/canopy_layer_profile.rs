@@ -546,7 +546,9 @@ fn validate_wind_profile(input: CanopyWindProfileInput, height_m: f64) -> Result
         .iter()
         .all(|value| value.is_finite())
             && input.ground_momentum_roughness_m > 0.0
-            && input.attenuation_coefficient > 0.0
+            // PC 的层间廓线（`uprofile(…, 0., …)`，`MOD_LeafTemperaturePC.F90:1080`）传 `alpha = 0`，
+            // 那时 `uexp = utop` 恒定，式子照样成立。
+            && input.attenuation_coefficient >= 0.0
             && input.canopy_top_height_m > input.canopy_bottom_height_m
             // 城市街谷把"冠层"底定在地面（`hbot = 0`，`MOD_Urban_Flux.F90:625`），
             // 所以底只要求非负，不要求高过地表粗糙度。

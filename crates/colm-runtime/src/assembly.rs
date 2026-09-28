@@ -68,8 +68,10 @@ pub struct RestartStateFiles {
 /// 再翻译一遍。
 #[derive(Debug, Clone)]
 pub struct LandPhysicsParameters {
-    /// `DEF_USE_PFT`：土壤 patch 按 PFT 子网格算（见 [`crate::pft`]）；否则是 LCT。
+    /// `DEF_USE_PFT` 或 `DEF_USE_PC`：土壤 patch 按 PFT 子网格算（见 [`crate::pft`]）；否则是 LCT。
     pub use_pft: bool,
+    /// `DEF_USE_PC`：PFT 子网格的冠层用三层 PC 模型（`LeafTemperaturePC`、`ThreeDCanopy`）。
+    pub use_pc: bool,
     /// namelist 选的土壤水力关系；决定常数重启里读 `bsw` 还是五个 van Genuchten 场。
     pub hydraulic_model: HydraulicModel,
     /// `DEF_USE_VariablySaturatedFlow` **生效后**的取值。
