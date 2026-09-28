@@ -101,6 +101,18 @@
   验证见 `docs/audit-2026-09-08-physics.md` 与 `oracle/scripts/test_physics_audit.py:291-403`。
   建议上游采纳同样的三处改动。
 
+### 20. `UrbanTHERMAL` 更新 `fwsun` 之后仍用旧的 `fwsha` 求 `twall`
+
+- **位置**：`main/URBAN/MOD_Urban_Thermal.F90:605`（`fwsha = 1. - fwsun`）、`:621`（`fwsun = fwsun + dfwsun`）、
+  `:1002`（`twall = (twsun*fwsun + twsha*fwsha)/(fwsun + fwsha)`）。
+- **原因**：`fwsha` 只在 `fwsun` 更新之前算一次（GIMPLE 里 `:605` 到 `:1002` 全程是同一个 `fwsha_1091`）。
+  墙温在 `:607-617` 已经按**新**面积重分配过，`twall` 却用"新阳面 + 旧阴面"的权重；`dfwsun > 0` 时
+  阴面权重偏大 `dfwsun`，反之偏小。分母做了归一，所以结果仍是加权平均，只是权重错了。
+- **影响**：只有诊断量 `twall`（history `f_t_wall`）。`:621` 之后 `fwsha` 再无别的有效用处
+  （`:798/956/1258` 里只出现在注释中）。AU-Preston 第 1 步差 1.4e-3 K。
+- **处理**：`vendor/` 未改（改了会改变输出）；Rust 照内核的实际行为，**不**在更新后重算 `fwsha`
+  （`urban_thermal.rs`）。建议上游在 `:621` 之后补 `fwsha = 1. - fwsun`。
+
 ## 二、TRACER 编译开关改变了物理（需要上游确认哪一边是对的）
 
 这一版上游在很多地方给 TRACER 构建和非 TRACER 构建写了**不同的物理**，不只是记账不同。

@@ -147,6 +147,9 @@ pub struct StandardLctSnowSoilState {
     pub soil_water: Water2014SoilState,
     /// 湖 patch（`patchtype == 4`）的湖层与湖面温度；其余 patch 为 `None`。
     pub lake: Option<crate::RuntimeLakeState>,
+    /// 城市 patch（`patchtype == 1`）的各面雪列、墙、建筑与城市辐射量；其余 patch 为 `None`。
+    /// 城市上 `snow`/`soil_*` 存的是写进主重启的面积加权聚合量。
+    pub urban: Option<Box<crate::UrbanPatchState>>,
 }
 
 impl StandardLctSnowSoilState {

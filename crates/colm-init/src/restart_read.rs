@@ -182,6 +182,11 @@ impl RestartFile {
         bail!("the restart has no variable named {name}")
     }
 
+    /// 文件里全部浮点变量的名字（按名字排序）。
+    pub fn float_names(&self) -> Vec<String> {
+        self.floats.keys().cloned().collect()
+    }
+
     pub fn floats(&self, name: &str) -> Result<&[f64]> {
         self.floats
             .get(name)

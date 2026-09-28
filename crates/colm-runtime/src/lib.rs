@@ -478,6 +478,13 @@ impl PointRuntime {
                     PatchOutput::Lake(output) => {
                         session.push_lake(step.clock.end_time, template, next, output, reference)?
                     }
+                    PatchOutput::Urban(output) => session.push_urban(
+                        step.clock.end_time,
+                        template,
+                        next,
+                        output,
+                        reference,
+                    )?,
                 };
                 if let Some(path) = pushed {
                     files.push(path);
@@ -704,6 +711,7 @@ pub enum PatchStepOutput<'a> {
     Soil(&'a StandardLctSnowSoilOutput),
     Glacier(&'a colm_core::GlacierStepOutput),
     Lake(&'a colm_core::LakeStepOutput),
+    Urban(&'a colm_core::UrbanStepOutput),
 }
 
 impl PatchStepOutput<'_> {
@@ -713,6 +721,7 @@ impl PatchStepOutput<'_> {
             Self::Soil(output) => output.energy.total_evaporation_kg_m2_s,
             Self::Glacier(output) => output.thermal.fevpa,
             Self::Lake(output) => output.thermal.fevpa,
+            Self::Urban(output) => output.thermal.fevpa,
         }
     }
 
@@ -722,6 +731,7 @@ impl PatchStepOutput<'_> {
             Self::Soil(output) => output.water.soil.surface_runoff_mm_s,
             Self::Glacier(output) => output.surface_runoff_mm_s,
             Self::Lake(output) => output.surface_runoff_mm_s,
+            Self::Urban(output) => output.rsur,
         }
     }
 
@@ -730,6 +740,7 @@ impl PatchStepOutput<'_> {
         match self {
             Self::Soil(output) => output.water.soil.subsurface_runoff_mm_s,
             Self::Glacier(_) | Self::Lake(_) => 0.0,
+            Self::Urban(output) => output.rnof - output.rsur,
         }
     }
 }
@@ -740,6 +751,7 @@ pub enum PatchOutput {
     Soil(Box<StandardLctSnowSoilOutput>),
     Glacier(Box<colm_core::GlacierStepOutput>),
     Lake(Box<colm_core::LakeStepOutput>),
+    Urban(Box<colm_core::UrbanStepOutput>),
 }
 
 impl PatchOutput {
@@ -748,6 +760,7 @@ impl PatchOutput {
             Self::Soil(output) => PatchStepOutput::Soil(output),
             Self::Glacier(output) => PatchStepOutput::Glacier(output),
             Self::Lake(output) => PatchStepOutput::Lake(output),
+            Self::Urban(output) => PatchStepOutput::Urban(output),
         }
     }
 }
@@ -785,6 +798,33 @@ fn advance_patch(
             template.physics.variably_saturated_flow,
         );
         return Ok(PatchOutput::Glacier(Box::new(output)));
+    }
+    if let Some(urban_template) = &template.urban {
+        let mut urban = state
+            .urban
+            .take()
+            .context("an urban patch needs its urban state")?;
+        let output = colm_core::urban_step(
+            input,
+            &urban_template.site,
+            colm_core::UrbanClock {
+                time: step.clock.end_time,
+                greenwich: binding.greenwich_time,
+                longitude_radians: binding.longitude_radians,
+                cosine_zenith: step.forcing.cosine_zenith,
+                surface_cosine_zenith: step.surface_cosine_zenith,
+            },
+            state,
+            &mut urban,
+        )?;
+        // 末尾 `alburban` 的结果也是主重启与 history 里的 `alb`/`ssun`/`ssha`/`extkd`。
+        let radiation = &mut state.energy.radiation;
+        radiation.albedo = urban.radiation.albedo;
+        radiation.sunlit_absorption = urban.radiation.sunlit_tree_absorption;
+        radiation.shaded_absorption = urban.radiation.shaded_tree_absorption;
+        radiation.diffuse_extinction = urban.radiation.diffuse_extinction;
+        state.urban = Some(urban);
+        return Ok(PatchOutput::Urban(Box::new(output)));
     }
     if let Some(lake) = &template.lake {
         let output = colm_core::lake_snow_step(input, lake.site, state)?;
@@ -1451,6 +1491,7 @@ mod tests {
             hydraulic_model: colm_core::HydraulicModel::VanGenuchten,
             variably_saturated_flow: false,
             plant_hydraulics: false,
+            urban_run: false,
             plant_hydraulic_parameters: colm_core::PlantHydraulicParameters::default(),
             plant_hydraulic_overrides: colm_core::PlantHydraulicOverrides::default(),
             vegetation_snow: false,

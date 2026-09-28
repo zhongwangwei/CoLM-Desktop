@@ -158,6 +158,8 @@ pub struct LandPhysicsParameters {
     pub soil_roughness_m: f64,
     /// `DEF_USE_SUPERCOOL_WATER`：超冷土壤水（默认开）。
     pub supercool_water: bool,
+    /// `DEF_URBAN_RUN`：城市模型开关（打开时上游关掉 WUEST/超冷水/PHS/split）。
+    pub urban_run: bool,
     /// `DEF_TUNING_SNOW_COVER_EXPONENT`：`snowfraction` 的雪密度指数。
     pub snow_cover_exponent: f64,
     pub snow_roughness_m: f64,
@@ -354,6 +356,33 @@ impl SurfaceDiagnosticsRow {
             qref: thermal.qref,
             stomatal_resistance: None,
             soil_surface_resistance: None,
+            trad: thermal.trad,
+            emis: thermal.emis,
+            z0m: thermal.z0m,
+            zol: thermal.zol,
+            rib: thermal.rib,
+            ustar: thermal.ustar,
+            qstar: thermal.qstar,
+            tstar: thermal.tstar,
+            fm: thermal.fm,
+            fh: thermal.fh,
+            fq: thermal.fq,
+            gs0sun: None,
+            gs0sha: None,
+        }
+    }
+
+    /// 城市分支：`UrbanTHERMAL` 的相似函数与 2 m 诊断；`rst`/`rss` 由城市分支写下，
+    /// `emis` 上游恒为 0。
+    pub fn from_urban(output: &colm_core::UrbanStepOutput, cosine_zenith: f64) -> Self {
+        let thermal = &output.thermal;
+        Self {
+            cosine_zenith,
+            wet_snow_fraction: 0.0,
+            tref: thermal.tref,
+            qref: output.qref,
+            stomatal_resistance: Some(thermal.rst),
+            soil_surface_resistance: Some(thermal.rss),
             trad: thermal.trad,
             emis: thermal.emis,
             z0m: thermal.z0m,
@@ -587,9 +616,31 @@ pub struct MonthlyLeafAreaIndex {
     /// `DEF_LAI_CHANGE_YEARLY`：为真按**当前年**取，否则按 `DEF_LC_YEAR`。
     change_yearly: bool,
     land_cover_year: i32,
+    /// `UrbanLAI_readin` 那一支：`Some((DEF_LAI_START_YEAR, DEF_LAI_END_YEAR))`。
+    ///
+    /// 城市单点下 `LAI_readin` 什么都不写（`MOD_LAIReadin.F90` 的 `.not. DEF_URBAN_RUN`
+    /// 守卫），真正换 `tlai`/`tsai` 的是 `UrbanLAI_readin`：年份按 `findloc_ud` 精确匹配
+    /// **夹到配置年界之后**的年（不是 `USE_SITE_LAI` 的最近年），且不除 `fveg0`。
+    urban_year_bounds: Option<(i32, i32)>,
 }
 
 impl MonthlyLeafAreaIndex {
+    /// 城市 patch 的树冠 LAI/SAI（`MOD_Urban_LAIReadin.F90`）。
+    pub fn read_urban(
+        path: impl AsRef<std::path::Path>,
+        change_yearly: bool,
+        land_cover_year: i32,
+        start_year: i32,
+        end_year: i32,
+    ) -> Result<Self> {
+        Ok(Self {
+            vegetation: colm_init::read_single_point_urban_monthly_vegetation(path)?,
+            change_yearly,
+            land_cover_year,
+            urban_year_bounds: Some((start_year, end_year)),
+        })
+    }
+
     pub fn read(
         path: impl AsRef<std::path::Path>,
         use_site_lai: bool,
@@ -606,7 +657,12 @@ impl MonthlyLeafAreaIndex {
             vegetation: colm_init::read_single_point_monthly_vegetation(path)?,
             change_yearly,
             land_cover_year,
+            urban_year_bounds: None,
         })
+    }
+
+    pub fn is_urban(&self) -> bool {
+        self.urban_year_bounds.is_some()
     }
 
     /// `LAI_readin(lai_year, month, ...)`：`lai_year` 按 `DEF_LAI_CHANGE_YEARLY` 选。
@@ -620,7 +676,10 @@ impl MonthlyLeafAreaIndex {
         } else {
             self.land_cover_year
         };
-        self.vegetation.for_year(year, month, true, 0, 0)
+        match self.urban_year_bounds {
+            Some((start, end)) => self.vegetation.for_year(year, month, false, start, end),
+            None => self.vegetation.for_year(year, month, true, 0, 0),
+        }
     }
 }
 
@@ -720,6 +779,8 @@ pub struct StandardLctRestartTemplate {
     radiation_fields: RadiationFields,
     /// 湖 patch 的湖层、`savedtke1`、`t_grnd` 与时不变量；其余 patch 为 `None`。
     pub lake: Option<LakeTemplate>,
+    /// 城市 patch 的城市常数与初始城市状态；其余 patch 为 `None`。
+    pub urban: Option<UrbanTemplate>,
     /// 雪 + 土的模板列（`soilsnow`），积雪分支的 `GroundTemperatureInput` 需要这个形状。
     ///
     /// 雪段在前、土段在后，与时间重启里的数组同序；无雪时它就是土列本身。
@@ -836,9 +897,9 @@ fn assemble(
     // 物理由 `colm_core::glacier_snow_step` 分派（见 `crate::advance_patch`）。
     // 湖（4）同理：湖底土层放在"土壤"那一段，湖层另存（见 [`LakeTemplate`]）。
     ensure!(
-        matches!(patch_type, 0 | 2 | 3 | 4),
-        "standard LCT assembly supports patchtype 0 (soil), 2 (wetland), 3 (glacier) and \
-         4 (lake), got {patch_type}"
+        matches!(patch_type, 0..=4),
+        "standard LCT assembly supports patchtype 0 (soil), 1 (urban), 2 (wetland), \
+         3 (glacier) and 4 (lake), got {patch_type}"
     );
 
     let soil = soil_state(&constant, soil_layers, patches, physics.hydraulic_model)?;
@@ -1165,13 +1226,29 @@ fn assemble(
         "the snow-plus-soil template column does not match its layer count"
     );
 
-    let lake = if patch_type == 4 {
+    // 城市 patch 也带一片水体（`t_lake`/`dz_lake` 在主重启里），所以同样读湖模板。
+    let lake = if patch_type == 4 || patch_type == 1 {
         Some(LakeTemplate::read(&constant, &time, patch)?)
+    } else {
+        None
+    };
+    let urban = if patch_type == 1 {
+        Some(UrbanTemplate::read(
+            files,
+            &physics,
+            patch,
+            land_class,
+            (&node_depth_m, &layer_thickness_m, &interface_depth_m),
+            lake.as_ref().expect("read above"),
+            &time,
+            &constant,
+        )?)
     } else {
         None
     };
     Ok(StandardLctRestartTemplate {
         lake,
+        urban,
         patch,
         patch_type: i32::try_from(patch_type).context("patchtype is outside the kernel's range")?,
         // 入参重启里没有 `rss` 时按 `spval` 处理 —— 与上游"起跑时是缺测值"一致。
@@ -1268,6 +1345,14 @@ impl StandardLctRestartTemplate {
             return Ok(false);
         };
         let (tlai, tsai) = lai.for_time(time)?;
+        if lai.is_urban() {
+            // `UrbanLAI_readin`：直接赋值，`LAI_readin` 的地类后处理对 URBAN 是 `CYCLE`。
+            state.energy.temporal_canopy = colm_core::TemporalCanopy {
+                leaf_area_index: tlai,
+                stem_area_index: tsai,
+            };
+            return Ok(true);
+        }
         // `MOD_LAIReadin.F90:136-157`：读进来之后按地类再处理一遍 —— 水体（与地类 0）清零，
         // 否则除以 `fveg0`（`DEF_LAI_MONTHLY` 下 `tsai` 也除），`fveg0 <= 0` 清零。
         // 两张表的 `fveg0` 都是 1.0，所以除法对植被地类是恒等的；水体那一条才有实效。
@@ -1584,7 +1669,7 @@ impl StandardLctRestartTemplate {
             },
             water: colm_core::Water2014SoilInput {
                 patch_type: self.patch_type,
-                urban_run: false,
+                urban_run: self.physics.urban_run,
                 // 打开时 `soilwater` 用**叶温内核给的分层根通量**替换
                 // 「蒸腾 × rootfr」那一支（`MOD_SoilSnowHydrology.F90` 的
                 // `IF (input%plant_hydraulics)`）；两个内核必须同时打开，
@@ -1660,6 +1745,10 @@ impl StandardLctRestartTemplate {
             soil_temperature_k: self.temperature_k.clone(),
             soil_water: self.water.clone(),
             lake: self.lake.as_ref().map(|lake| lake.initial.clone()),
+            urban: self
+                .urban
+                .as_ref()
+                .map(|urban| Box::new(urban.initial.clone())),
         }
     }
 
@@ -2405,4 +2494,360 @@ impl LakeTemplate {
             RestartOverride::new("savedtke1", saved_tke),
         ])
     }
+}
+
+/// 城市 patch 的装配结果：`UrbanSite`（城市常数重启 + 主常数重启里的城市字段）、
+/// 初始 `UrbanPatchState`（城市时间重启 + 主时间重启里的辐射量），以及续跑写回
+/// 城市时间重启用的整变量缓冲。
+///
+/// 文件名：城市时间重启 `<case>_restart_urban_<date>_lc<year>_w180_s90.nc`（与主重启同目录），
+/// 城市常数重启 `<case>_restart_urb_const_lc<year>_w180_s90.nc`。城市变量的第一维是 `urban`
+/// （`landurban` 下标），不是 `patch`；单点算例只有一个城市单元。
+#[derive(Debug, Clone, PartialEq)]
+pub struct UrbanTemplate {
+    pub site: colm_core::UrbanSite,
+    pub initial: colm_core::UrbanPatchState,
+    pub urban_index: usize,
+    /// 城市时间重启的全部 `double` 变量（写回时以它们为底）。
+    restart_values: std::collections::BTreeMap<String, (usize, Vec<f64>)>,
+}
+
+impl UrbanTemplate {
+    /// 由主重启的两个路径推出城市重启的路径并读取。
+    #[allow(clippy::too_many_arguments)]
+    pub fn read(
+        files: &RestartStateFiles,
+        physics: &LandPhysicsParameters,
+        patch: usize,
+        land_class: usize,
+        soil_grid: (&[f64], &[f64], &[f64]),
+        lake: &LakeTemplate,
+        main_time: &RestartFile,
+        main_constant: &RestartFile,
+    ) -> Result<Self> {
+        let rename = |path: &std::path::Path, from: &str, to: &str| -> Result<PathBuf> {
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .context("a restart path has no file name")?;
+            ensure!(
+                name.contains(from),
+                "{name} does not look like a CoLM restart"
+            );
+            Ok(path.with_file_name(name.replacen(from, to, 1)))
+        };
+        let constant_path = rename(&files.constant, "_restart_const_", "_restart_urb_const_")?;
+        let time_path = rename(&files.time, "_restart_", "_restart_urban_")?;
+        let constant = RestartFile::open(&constant_path)
+            .with_context(|| format!("cannot open {}", constant_path.display()))?;
+        let time = RestartFile::open(&time_path)
+            .with_context(|| format!("cannot open {}", time_path.display()))?;
+        let urban_count = constant.dimension("urban")?;
+        ensure!(
+            urban_count == 1,
+            "the Rust urban runtime runs one urban unit, the restart has {urban_count}"
+        );
+        let index = 0;
+        let scalar_u = |file: &RestartFile, name: &str| -> Result<f64> {
+            file.floats(name)?
+                .get(index)
+                .copied()
+                .with_context(|| format!("{name} has no urban unit {index}"))
+        };
+        let column_u = |file: &RestartFile, name: &str, width: usize| -> Result<Vec<f64>> {
+            let values = file.floats(name)?;
+            ensure!(
+                values.len() >= (index + 1) * width,
+                "{name} is shorter than {width} values per urban unit"
+            );
+            Ok(values[index * width..(index + 1) * width].to_vec())
+        };
+        // `(urban, rtyp, band)` 或 `(urban, numrad, numsolar)`：盘上 band 最快，
+        // `[band][type] = flat[type*2 + band]`。
+        let matrix_u = |file: &RestartFile, name: &str| -> Result<[[f64; 2]; 2]> {
+            let flat = column_u(file, name, 4)?;
+            Ok([[flat[0], flat[2]], [flat[1], flat[3]]])
+        };
+        let ulev = constant.dimension("ulev")?;
+        let snow_slots = time.dimension("snow")?;
+        let soil_layers = time.dimension("soil")?;
+        let roof_layers = time.dimension("roof")?;
+        let wall_layers = time.dimension("wall")?;
+        ensure!(
+            snow_slots == SNOW_SLOTS && ulev == roof_layers,
+            "the urban restart geometry does not match the compiled kernel"
+        );
+        let site = colm_core::UrbanSite {
+            froof: scalar_u(&constant, "WT_ROOF")?,
+            flake: scalar_u(&constant, "PCT_Water")?,
+            hroof: scalar_u(&constant, "HT_ROOF")?,
+            hlr: scalar_u(&constant, "BUILDING_HLR")?,
+            fgper: scalar_u(&constant, "WTROAD_PERV")?,
+            fveg: scalar(main_time, "fveg", patch)?,
+            htop: scalar(main_constant, "htop", patch)?,
+            hbot: scalar(main_constant, "hbot", patch)?,
+            em_roof: scalar_u(&constant, "EM_ROOF")?,
+            em_wall: scalar_u(&constant, "EM_WALL")?,
+            em_gimp: scalar_u(&constant, "EM_IMPROAD")?,
+            em_gper: scalar_u(&constant, "EM_PERROAD")?,
+            cv_roof: column_u(&constant, "CV_ROOF", ulev)?,
+            tk_roof: column_u(&constant, "TK_ROOF", ulev)?,
+            cv_wall: column_u(&constant, "CV_WALL", ulev)?,
+            tk_wall: column_u(&constant, "TK_WALL", ulev)?,
+            cv_gimp: column_u(&constant, "CV_IMPROAD", ulev)?,
+            tk_gimp: column_u(&constant, "TK_IMPROAD", ulev)?,
+            z_roof: column_u(&constant, "ROOF_DEPTH_L", ulev)?,
+            dz_roof: column_u(&constant, "ROOF_THICK_L", ulev)?,
+            z_wall: column_u(&constant, "WALL_DEPTH_L", ulev)?,
+            dz_wall: column_u(&constant, "WALL_THICK_L", ulev)?,
+            alb_roof: matrix_u(&constant, "ALB_ROOF")?,
+            alb_wall: matrix_u(&constant, "ALB_WALL")?,
+            alb_gimp: matrix_u(&constant, "ALB_IMPROAD")?,
+            alb_gper: matrix_u(&constant, "ALB_PERROAD")?,
+            t_roommax: scalar_u(&constant, "T_BUILDING_MAX")?,
+            t_roommin: scalar_u(&constant, "T_BUILDING_MIN")?,
+            pop_den: scalar_u(&constant, "POP_DEN")?,
+            vehicle: column_u(&constant, "VEHC_NUM", 3)?,
+            week_holiday: column_u(&constant, "week_holiday", 7)?,
+            weh_prof: column_u(&constant, "weekendhour", 24)?,
+            wdh_prof: column_u(&constant, "weekdayhour", 24)?,
+            hum_prof: column_u(&constant, "metabolism", 24)?,
+            fix_holiday: column_u(&constant, "holiday", 365)?,
+            lake_depth_m: lake.site.depth_m,
+            latitude_radians: lake.site.latitude_radians,
+            leaf_optics: colm_core::leaf_optics_from_land_cover_one_based(
+                physics.land_cover_scheme,
+                i32::try_from(land_class)?,
+            )?,
+            soil_node_depth_m: soil_grid.0.to_vec(),
+            soil_layer_thickness_m: soil_grid.1.to_vec(),
+            soil_interface_depth_m: soil_grid.2.to_vec(),
+            campbell: matches!(physics.hydraulic_model, HydraulicModel::Campbell),
+            absolute_heights: physics.observation_height_mode
+                == colm_core::ObservationHeightMode::Absolute,
+            snow_cover_exponent: physics.snow_cover_exponent,
+        };
+
+        let surface = |suffix: &str, layers: usize| -> Result<colm_core::UrbanSurface> {
+            let width = snow_slots + layers;
+            let t = column_u(&time, &format!("t_{suffix}sno"), width)?;
+            let liquid = column_u(&time, &format!("wliq_{suffix}sno"), width)?;
+            let ice = column_u(&time, &format!("wice_{suffix}sno"), width)?;
+            let slots = |values: &[f64]| -> [f64; SNOW_SLOTS] {
+                values[..snow_slots].try_into().expect("checked width")
+            };
+            let snow = colm_core::RuntimeSnowColumn::from_restart(
+                1,
+                colm_core::RestartSnowSlots {
+                    node_depth_m: &slots(&column_u(&time, &format!("z_sno_{suffix}"), snow_slots)?),
+                    thickness_m: &slots(&column_u(&time, &format!("dz_sno_{suffix}"), snow_slots)?),
+                    temperature_k: &slots(&t),
+                    liquid_water_kg_m2: &slots(&liquid),
+                    ice_water_kg_m2: &slots(&ice),
+                    water_equivalent_kg_m2: scalar_u(&time, &format!("scv_{suffix}"))?,
+                    depth_m: scalar_u(&time, &format!("snowdp_{suffix}"))?,
+                    ground_snow_fraction: scalar_u(&time, &format!("fsno_{suffix}"))?,
+                    age: scalar_u(&time, &format!("sag_{suffix}"))?,
+                },
+            )
+            .with_context(|| format!("the {suffix} snow column"))?;
+            Ok(colm_core::UrbanSurface {
+                snow,
+                temperature_k: t[snow_slots..].to_vec(),
+                liquid_water_kg_m2: liquid[snow_slots..].to_vec(),
+                ice_water_kg_m2: ice[snow_slots..].to_vec(),
+            })
+        };
+        let main_matrix = |name: &str| -> Result<[[f64; 2]; 2]> {
+            let flat = main_time.patch_matrix(name, patch, 2, 2)?;
+            Ok([[flat[0], flat[1]], [flat[2], flat[3]]])
+        };
+        let wall = |name: &str| -> Result<Vec<f64>> {
+            Ok(column_u(&time, name, snow_slots + wall_layers)?[snow_slots..].to_vec())
+        };
+        let initial = colm_core::UrbanPatchState {
+            roof: surface("roof", roof_layers)?,
+            impervious: surface("gimp", soil_layers)?,
+            pervious: surface("gper", soil_layers)?,
+            lake_bed: surface("lake", soil_layers)?,
+            t_wallsun: wall("t_wallsun")?,
+            t_wallsha: wall("t_wallsha")?,
+            radiation: colm_core::UrbanRadiationState {
+                sunlit_wall_fraction: scalar_u(&time, "fwsun")?,
+                change_in_sunlit_wall_fraction: scalar_u(&time, "dfwsun")?,
+                diffuse_extinction: scalar(main_time, "extkd", patch)?,
+                albedo: main_matrix("alb")?,
+                sunlit_tree_absorption: main_matrix("ssun")?,
+                shaded_tree_absorption: main_matrix("ssha")?,
+                roof_absorption: matrix_u(&time, "sroof")?,
+                sunlit_wall_absorption: matrix_u(&time, "swsun")?,
+                shaded_wall_absorption: matrix_u(&time, "swsha")?,
+                impervious_absorption: matrix_u(&time, "sgimp")?,
+                pervious_absorption: matrix_u(&time, "sgper")?,
+                lake_absorption: matrix_u(&time, "slake")?,
+            },
+            lwsun: scalar_u(&time, "lwsun")?,
+            lwsha: scalar_u(&time, "lwsha")?,
+            lgimp: scalar_u(&time, "lgimp")?,
+            lgper: scalar_u(&time, "lgper")?,
+            lveg: scalar_u(&time, "lveg")?,
+            troof_inner: scalar_u(&time, "troof_inner")?,
+            twsun_inner: scalar_u(&time, "twsun_inner")?,
+            twsha_inner: scalar_u(&time, "twsha_inner")?,
+            t_room: scalar_u(&time, "t_room")?,
+            t_roof: scalar_u(&time, "t_roof")?,
+            t_wall: scalar_u(&time, "t_wall")?,
+            tafu: scalar_u(&time, "tafu")?,
+            fhac: scalar_u(&time, "Fhac")?,
+            fwst: scalar_u(&time, "Fwst")?,
+            fach: scalar_u(&time, "Fach")?,
+            fahe: scalar_u(&time, "Fahe")?,
+            fhah: scalar_u(&time, "Fhah")?,
+            vehc: scalar_u(&time, "vehc")?,
+            meta: scalar_u(&time, "meta")?,
+        };
+        let mut restart_values = std::collections::BTreeMap::new();
+        for name in time.float_names() {
+            let dims = time.variable_dimensions(&name)?;
+            let width = dims[1..]
+                .iter()
+                .map(|dim| time.dimension(dim))
+                .collect::<Result<Vec<_>>>()?
+                .into_iter()
+                .product::<usize>();
+            restart_values.insert(name.clone(), (width, time.floats(&name)?.to_vec()));
+        }
+        Ok(Self {
+            site,
+            initial,
+            urban_index: index,
+            restart_values,
+        })
+    }
+
+    /// 城市时间重启要换的变量（以原文件为底，只换本城市单元那一段）。
+    pub fn overrides(&self, urban: &colm_core::UrbanPatchState) -> Result<Vec<RestartOverride>> {
+        let mut values: Vec<(&str, Vec<f64>)> = Vec::new();
+        let radiation = &urban.radiation;
+        let flatten = |m: [[f64; 2]; 2]| vec![m[0][0], m[1][0], m[0][1], m[1][1]];
+        let snow_slots = SNOW_SLOTS;
+        let column = |surface: &colm_core::UrbanSurface,
+                      pick: fn(&colm_core::UrbanSurface, usize) -> f64,
+                      layers: &[f64]| {
+            let mut out = (0..snow_slots)
+                .map(|slot| pick(surface, slot))
+                .collect::<Vec<_>>();
+            out.extend_from_slice(layers);
+            out
+        };
+        for (suffix, surface) in [
+            ("roof", &urban.roof),
+            ("gimp", &urban.impervious),
+            ("gper", &urban.pervious),
+            ("lake", &urban.lake_bed),
+        ] {
+            let snow = &surface.snow;
+            values.push((
+                leak(format!("t_{suffix}sno")),
+                column(
+                    surface,
+                    |s, i| s.snow.temperature_k[i],
+                    &surface.temperature_k,
+                ),
+            ));
+            values.push((
+                leak(format!("wliq_{suffix}sno")),
+                column(
+                    surface,
+                    |s, i| s.snow.liquid_water_kg_m2[i],
+                    &surface.liquid_water_kg_m2,
+                ),
+            ));
+            values.push((
+                leak(format!("wice_{suffix}sno")),
+                column(
+                    surface,
+                    |s, i| s.snow.ice_water_kg_m2[i],
+                    &surface.ice_water_kg_m2,
+                ),
+            ));
+            values.push((leak(format!("z_sno_{suffix}")), snow.node_depth_m.clone()));
+            values.push((leak(format!("dz_sno_{suffix}")), snow.thickness_m.clone()));
+            values.push((
+                leak(format!("scv_{suffix}")),
+                vec![snow.water_equivalent_kg_m2],
+            ));
+            values.push((leak(format!("snowdp_{suffix}")), vec![snow.depth_m]));
+            values.push((
+                leak(format!("fsno_{suffix}")),
+                vec![snow.ground_snow_fraction],
+            ));
+            values.push((leak(format!("sag_{suffix}")), vec![snow.age]));
+        }
+        let mut wall = |name: &'static str, layers: &[f64]| {
+            let mut out = self.restart_values[name].1
+                [self.urban_index * (snow_slots + layers.len())..][..snow_slots]
+                .to_vec();
+            out.extend_from_slice(layers);
+            values.push((name, out));
+        };
+        wall("t_wallsun", &urban.t_wallsun);
+        wall("t_wallsha", &urban.t_wallsha);
+        for (name, value) in [
+            ("fwsun", radiation.sunlit_wall_fraction),
+            ("dfwsun", radiation.change_in_sunlit_wall_fraction),
+            ("lwsun", urban.lwsun),
+            ("lwsha", urban.lwsha),
+            ("lgimp", urban.lgimp),
+            ("lgper", urban.lgper),
+            ("lveg", urban.lveg),
+            ("troof_inner", urban.troof_inner),
+            ("twsun_inner", urban.twsun_inner),
+            ("twsha_inner", urban.twsha_inner),
+            ("t_room", urban.t_room),
+            ("t_roof", urban.t_roof),
+            ("t_wall", urban.t_wall),
+            ("tafu", urban.tafu),
+            ("Fhac", urban.fhac),
+            ("Fwst", urban.fwst),
+            ("Fach", urban.fach),
+            ("Fahe", urban.fahe),
+            ("Fhah", urban.fhah),
+            ("vehc", urban.vehc),
+            ("meta", urban.meta),
+        ] {
+            values.push((name, vec![value]));
+        }
+        for (name, matrix) in [
+            ("sroof", radiation.roof_absorption),
+            ("swsun", radiation.sunlit_wall_absorption),
+            ("swsha", radiation.shaded_wall_absorption),
+            ("sgimp", radiation.impervious_absorption),
+            ("sgper", radiation.pervious_absorption),
+            ("slake", radiation.lake_absorption),
+        ] {
+            values.push((name, flatten(matrix)));
+        }
+        let mut overrides = Vec::with_capacity(values.len());
+        for (name, slice) in values {
+            let (width, base) = self
+                .restart_values
+                .get(name)
+                .with_context(|| format!("the urban restart has no {name}"))?;
+            ensure!(
+                slice.len() == *width,
+                "{name}: {} values for a width of {width}",
+                slice.len()
+            );
+            let mut full = base.clone();
+            full[self.urban_index * width..(self.urban_index + 1) * width].copy_from_slice(&slice);
+            overrides.push(RestartOverride::new(name, full));
+        }
+        Ok(overrides)
+    }
+}
+
+/// 覆盖名要 `&'static str`；这些名字只有几十个、只在写出时生成一次。
+fn leak(name: String) -> &'static str {
+    Box::leak(name.into_boxed_str())
 }

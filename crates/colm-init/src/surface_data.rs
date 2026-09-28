@@ -233,6 +233,22 @@ pub fn read_single_point_monthly_vegetation(
     Ok(SinglePointMonthlyVegetation { years, lai, sai })
 }
 
+/// 城市单点的树冠月度 LAI/SAI：`read_urban_surface_data_single` 把 `TREE_LAI`/`TREE_SAI`
+/// 读进同一对 `SITE_LAI_monthly`/`SITE_SAI_monthly`（`MOD_SingleSrfdata.F90:1806-1809`），
+/// 形状与 `LAI_monthly` 相同，所以复用同一个结构。
+pub fn read_single_point_urban_monthly_vegetation(
+    path: impl AsRef<Path>,
+) -> Result<SinglePointMonthlyVegetation> {
+    let path = path.as_ref();
+    let file = netcdf::open(path)
+        .with_context(|| format!("cannot open single-point surface data {}", path.display()))?;
+    let years = vector_i32(&file, "LAI_year")?;
+    validate_lai_years(&years)?;
+    let lai = monthly_vector(&file, "TREE_LAI", years.len())?;
+    let sai = monthly_vector(&file, "TREE_SAI", years.len())?;
+    Ok(SinglePointMonthlyVegetation { years, lai, sai })
+}
+
 /// Reads the `LAI_year` and `LAI_8day` LCT single-point contract.
 pub fn read_single_point_eight_day_vegetation(
     path: impl AsRef<Path>,

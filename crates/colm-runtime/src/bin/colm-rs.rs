@@ -164,13 +164,33 @@ fn run() -> Result<()> {
             "{} is missing; run mksrfdata for this case before a DEF_LAI_MONTHLY run",
             path.display()
         );
-        template = template.with_monthly_leaf_area_index(MonthlyLeafAreaIndex::read(
-            &path,
-            logical_field(&document, "USE_SITE_LAI")?,
-            logical_field(&document, "DEF_LAI_CHANGE_YEARLY")?,
-            i32::try_from(integer_field(&document, "DEF_LC_YEAR")?)
-                .context("DEF_LC_YEAR does not fit an i32")?,
-        )?);
+        let change_yearly = logical_field(&document, "DEF_LAI_CHANGE_YEARLY")?;
+        let land_cover_year = i32::try_from(integer_field(&document, "DEF_LC_YEAR")?)
+            .context("DEF_LC_YEAR does not fit an i32")?;
+        if template.urban.is_some() {
+            // 城市 patch 走 `UrbanLAI_readin`（读 `TREE_LAI`/`TREE_SAI`）。
+            let year = |key: &str| -> Result<i32> {
+                i32::try_from(integer_field(&document, key)?)
+                    .with_context(|| format!("{key} does not fit an i32"))
+            };
+            template = template.with_monthly_leaf_area_index(MonthlyLeafAreaIndex::read_urban(
+                &path,
+                change_yearly,
+                land_cover_year,
+                year("DEF_LAI_START_YEAR")?,
+                year("DEF_LAI_END_YEAR")?,
+            )?);
+        } else if logical_field(&document, "DEF_URBAN_RUN")? {
+            // 城市单点里的非城市 patch：`LAI_readin` 的单点分支被 `.not. DEF_URBAN_RUN`
+            // 整个跳过，`tlai`/`tsai` 保持重启值 —— 不装读取器就是这个行为。
+        } else {
+            template = template.with_monthly_leaf_area_index(MonthlyLeafAreaIndex::read(
+                &path,
+                logical_field(&document, "USE_SITE_LAI")?,
+                change_yearly,
+                land_cover_year,
+            )?);
+        }
     }
 
     // `scale_baseflow`：上游 `Opt_Baseflow_init` 从
@@ -322,6 +342,12 @@ impl RestartSnapshot {
                 diagnostics: SurfaceDiagnosticsRow::from_glacier(&output.thermal, cosine_zenith),
             },
             // 湖同样不调 `soilwater`。
+            // 城市：透水地面的 `WATER_2014` 已把 `smp`/`hk` 写进状态。
+            PatchStepOutput::Urban(output) => Self {
+                matric_potential_mm: state.soil_water.matric_potential_mm.clone(),
+                hydraulic_conductivity_mm_s: state.soil_water.hydraulic_conductivity_mm_s.clone(),
+                diagnostics: SurfaceDiagnosticsRow::from_urban(output, cosine_zenith),
+            },
             PatchStepOutput::Lake(output) => Self {
                 matric_potential_mm: state.soil_water.matric_potential_mm.clone(),
                 hydraulic_conductivity_mm_s: state.soil_water.hydraulic_conductivity_mm_s.clone(),
@@ -353,7 +379,24 @@ fn write_evolved_restart(
         std::fs::create_dir_all(parent)
             .with_context(|| format!("cannot create {}", parent.display()))?;
     }
-    write_restart(restart_in, restart_out, overrides.as_slice())
+    write_restart(restart_in, restart_out, overrides.as_slice())?;
+    // 城市单元另有一份时间重启（`<case>_restart_urban_<date>_…nc`），与主重启同目录。
+    if let (Some(urban_template), Some(urban)) = (&template.urban, &state.urban) {
+        let urban_path = |path: &Path| -> Result<std::path::PathBuf> {
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .context("a restart path has no file name")?;
+            Ok(path.with_file_name(name.replacen("_restart_", "_restart_urban_", 1)))
+        };
+        let overrides = urban_template.overrides(urban)?;
+        write_restart(
+            &urban_path(restart_in)?,
+            &urban_path(restart_out)?,
+            overrides.as_slice(),
+        )?;
+    }
+    Ok(())
 }
 
 /// 周期续跑文件的落点：与窗口终点那份同一套命名，`cdate` 取该步的 `jdate`

@@ -7,6 +7,9 @@
 //!
 //! 收缩形状对照 `MOD_Urban_Thermal.F90` 的 `-fdump-tree-optimized-lineno`。
 
+// 循环照 Fortran 的下标逐句对照 GIMPLE，改成迭代器会让行号对照失去意义；
+// `min(1).max(0.001)` 与 `clamp` 在 NaN 上语义不同（后者边界反转时还会 panic）。
+#![allow(clippy::needless_range_loop, clippy::manual_clamp)]
 use anyhow::{Context, Result};
 
 use crate::{
@@ -320,7 +323,9 @@ pub fn urban_thermal(
     }
     let fwsun = fwsun + dfwsun;
     *st.fwsun = fwsun;
-    let fwsha = 1.0 - fwsun;
+    // **不**重算 `fwsha`：上游 `:605` 只在更新 `fwsun` 之前算一次，之后全程
+    // （长波、墙体导热、`:1002` 的 `twall`）用的都是旧值 `fwsha_1091`，
+    // 所以更新后 `fwsun + fwsha ≠ 1`。
 
     let twsun0 = st.t_wallsun[0];
     let twsha0 = st.t_wallsha[0];

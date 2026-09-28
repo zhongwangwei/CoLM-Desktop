@@ -67,7 +67,10 @@ pub fn land_physics_parameters(
     let runoff_scheme = runoff_scheme(integer(document, "DEF_Runoff_SCHEME")?)?;
     // `DEF_SPLIT_SOILSNOW`：能量侧（比湿、`t_grnd`、凝结拆分、`fgrnd`）与水分侧
     // （`snowwater` 只拿雪面那份、土面走 `pg_rain*(1-fsno) - qseva_soil`）都已接上。
-    let split_soil_snow = logical(document, "DEF_SPLIT_SOILSNOW")?;
+    // `DEF_URBAN_RUN`（`MOD_Namelist.F90:2248-2257`）：打开城市模型时上游把 WUEST、
+    // SUPERCOOL_WATER、PLANTHYDRAULICS、OZONESTRESS、SPLIT_SOILSNOW 一律关掉。
+    let urban_run = logical(document, "DEF_URBAN_RUN")?;
+    let split_soil_snow = logical(document, "DEF_SPLIT_SOILSNOW")? && !urban_run;
     // `DEF_Interception_scheme`：`main/` 的 `LEAF_interception_wrap` 只接受 1（CoLM2014）
     // 与 8（CoLM2024，CoLM2014 外加按冠层结构算的雨容量），其余档位在非扩展构建里
     // `CALL abort`（`MOD_LeafInterception.F90:614-617`）。这里照样拒绝。
@@ -165,7 +168,7 @@ pub fn land_physics_parameters(
     let variably_saturated_flow = logical(document, "DEF_USE_VariablySaturatedFlow")? || !campbell;
     // `DEF_USE_PLANTHYDRAULICS` 的声明默认值是 `.true.`，所以**默认配置开着 PHS**，
     // 本仓库的 standard-LCT 分支则是硬关的。调用方要能看出这个不匹配。
-    let plant_hydraulics = logical(document, "DEF_USE_PLANTHYDRAULICS")?;
+    let plant_hydraulics = logical(document, "DEF_USE_PLANTHYDRAULICS")? && !urban_run;
     // `DEF_VEG_SNOW` 的声明默认值也是 `.true.`。**这一支已经移植并可运行**：
     // 冠层雨/雪分开记（`CanopyWater::rain_mm`/`snow_mm`）、`fwet_rain`/`fwet_snow`、
     // 以及 `radiation.rs`/`high_res_radiation.rs` 里按月-雪的两套反照率，
@@ -332,7 +335,7 @@ pub fn land_physics_parameters(
             document,
             "DEF_forcing%HEIGHT_mode",
         )?)?,
-        stomata: stomata(document)?,
+        stomata: stomata(document, urban_run)?,
         soil_ice_impedance: real(document, "DEF_TUNING_SOIL_ICE_IMPEDANCE")?,
         snow_irreducible_saturation: real(document, "DEF_TUNING_SSI")?,
         impermeable_porosity: real(document, "DEF_TUNING_WIMP")?,
@@ -348,7 +351,8 @@ pub fn land_physics_parameters(
         // 只有 `DEF_URBAN_RUN` 会把它强关（`:2337`）。它决定冰点以下土层的
         // 液相保留量 —— 关掉会让表层土壤在冰点以下全部结冰，`ssw` 归零，
         // 地面反照率顶到上限。
-        supercool_water: logical(document, "DEF_USE_SUPERCOOL_WATER")?,
+        supercool_water: logical(document, "DEF_USE_SUPERCOOL_WATER")? && !urban_run,
+        urban_run,
         // `snowfraction` 的指数（`MOD_Namelist.F90:618`，默认 1）。
         snow_cover_exponent: real(document, "DEF_TUNING_SNOW_COVER_EXPONENT")?,
         snow_roughness_m: real(document, "DEF_TUNING_ZSNO")?,
@@ -445,7 +449,7 @@ fn observation_height_mode(name: &str) -> Result<ObservationHeightMode> {
 ///
 /// 阈值判定在内核里（`selected_parameters`），这里**原样**把 namelist 的值带过去，
 /// 不重复实现一遍 `>= 0.0` / `> 1.6` 的分界 —— 两份阈值迟早会分叉。
-fn stomata(document: &Document) -> Result<StomataOptions> {
+fn stomata(document: &Document, urban_run: bool) -> Result<StomataOptions> {
     let mut use_medlyn = logical(document, "DEF_USE_MEDLYNST")?;
     let mut use_wue = logical(document, "DEF_USE_WUEST")?;
     // 两个都开时上游**不报错**：`MOD_Namelist.F90:2080-2088` 把两者都置为
@@ -456,6 +460,10 @@ fn stomata(document: &Document) -> Result<StomataOptions> {
     // 就是 `.true.`，所以任何只写 `DEF_USE_MEDLYNST = .true.` 的算例都会落进这里。
     if use_medlyn && use_wue {
         use_medlyn = false;
+        use_wue = false;
+    }
+    // 城市模型在冲突处理之后再把 WUEST 关掉（`MOD_Namelist.F90:2252`）。
+    if urban_run {
         use_wue = false;
     }
     Ok(StomataOptions {

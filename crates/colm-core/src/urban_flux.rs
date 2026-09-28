@@ -7,6 +7,9 @@
 //! 收缩形状逐句对照 `MOD_Urban_Flux.F90` 的 `-fdump-tree-optimized-lineno`
 //! （`-O2 -ffp-contract=fast`）；每处 `mul_add` 旁注了行号。
 
+// 循环照 Fortran 的下标逐句对照 GIMPLE，改成迭代器会让行号对照失去意义；
+// `min(1).max(0.001)` 与 `clamp` 在 NaN 上语义不同（后者边界反转时还会 panic）。
+#![allow(clippy::needless_range_loop, clippy::too_many_arguments)]
 use anyhow::{ensure, Result};
 
 use crate::{

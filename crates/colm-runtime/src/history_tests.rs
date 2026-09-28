@@ -34,6 +34,7 @@ fn physics() -> LandPhysicsParameters {
         hydraulic_model: HydraulicModel::VanGenuchten,
         variably_saturated_flow: false,
         plant_hydraulics: false,
+        urban_run: false,
         plant_hydraulic_parameters: PlantHydraulicParameters::default(),
         plant_hydraulic_overrides: colm_core::PlantHydraulicOverrides::default(),
         vegetation_snow: false,

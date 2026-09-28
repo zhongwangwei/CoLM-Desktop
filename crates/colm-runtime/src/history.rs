@@ -368,6 +368,30 @@ pub const NOT_IN_GOLDEN: [&str; 1] = ["qcharge"];
 /// 要动这个清单之前，先数一遍黄金文件里那一列的真值个数。
 pub const UNFILLED: [&str; 0] = [];
 
+/// 只在城市上累加的量（`MOD_Vars_1DAccFluxes.F90:2219-2243`；`fahe` 上游不写出）。
+pub const URBAN_VARIABLES: [&str; 20] = [
+    "t_room",
+    "tafu",
+    "fhac",
+    "fwst",
+    "fach",
+    "fhah",
+    "fvehc",
+    "fmeta",
+    "fsenroof",
+    "fsenwsun",
+    "fsenwsha",
+    "fsengimp",
+    "fsengper",
+    "fsenurbl",
+    "lfevproof",
+    "lfevpgimp",
+    "lfevpgper",
+    "lfevpurbl",
+    "t_roof",
+    "t_wall",
+];
+
 /// 声明本层能填的全部变量：见 [`LCT_STATE_VARIABLES`] 起的一组常量，
 /// 外加 [`DECLARED_ONLY`]（上游在本算例里也留空的那几个槽位）。
 pub fn declare_lct_variables(
@@ -1177,6 +1201,19 @@ pub fn set_lct_water_storage(
         .map(|(wliq, wice)| wliq + wice)
         .sum();
     let total = soil + canopy_water_mm + snow_water_equivalent_kg_m2 + storage_tail_mm;
+    set_water_storage_with_total(sink, record, water, total)
+}
+
+/// [`set_lct_water_storage`] 的后半：`wat` 已由 patch 自己算好时直接写。
+///
+/// 城市 patch 的 `wat` 是 `CoLMMAIN_Urban.F90:1323-1324` 按屋顶/透水/不透水加权后
+/// 再加 `wa*(1-froof)*fgper`，不能按土壤 patch 的公式从聚合后的 `wliq_soisno` 重算。
+pub fn set_water_storage_with_total(
+    sink: &mut impl HistorySink,
+    record: usize,
+    water: &colm_core::Water2014SoilState,
+    total: f64,
+) -> Result<()> {
     for (name, value) in [
         ("wa_inst", water.aquifer_water_mm),
         ("wdsrf_inst", water.surface_water_mm),
@@ -1315,6 +1352,38 @@ fn set_shortwave_bands(
         ("solvi", shortwave.diffuse_visible_w_m2),
         ("solnd", shortwave.direct_near_infrared_w_m2),
         ("solni", shortwave.diffuse_near_infrared_w_m2),
+        ("srvd", shortwave.reflected_direct_visible_w_m2),
+        ("srvi", shortwave.reflected_diffuse_visible_w_m2),
+        ("srnd", shortwave.reflected_direct_near_infrared_w_m2),
+        ("srni", shortwave.reflected_diffuse_near_infrared_w_m2),
+        ("solvdln", noon.direct_visible_w_m2),
+        ("solviln", noon.diffuse_visible_w_m2),
+        ("solndln", noon.direct_near_infrared_w_m2),
+        ("solniln", noon.diffuse_near_infrared_w_m2),
+        ("srvdln", noon.reflected_direct_visible_w_m2),
+        ("srviln", noon.reflected_diffuse_visible_w_m2),
+        ("srndln", noon.reflected_direct_near_infrared_w_m2),
+        ("srniln", noon.reflected_diffuse_near_infrared_w_m2),
+    ] {
+        sink.scalar(name, record, value)?;
+    }
+    Ok(())
+}
+
+/// 城市的短波诊断：入射四个波段取强迫场，反射量与当地正午量取 `netsolar_urban`。
+fn set_urban_shortwave_bands(
+    sink: &mut impl HistorySink,
+    record: usize,
+    shortwave: &colm_core::UrbanNetSolarFluxes,
+    reference: HistoryReferenceState,
+) -> Result<()> {
+    let noon = &shortwave.local_noon;
+    for (name, value) in [
+        ("sr", shortwave.reflected_w_m2),
+        ("solvd", reference.direct_visible_w_m2),
+        ("solvi", reference.diffuse_visible_w_m2),
+        ("solnd", reference.direct_near_infrared_w_m2),
+        ("solni", reference.diffuse_near_infrared_w_m2),
         ("srvd", shortwave.reflected_direct_visible_w_m2),
         ("srvi", shortwave.reflected_diffuse_visible_w_m2),
         ("srnd", shortwave.reflected_direct_near_infrared_w_m2),
@@ -1627,6 +1696,8 @@ pub struct HistorySession {
     plant_hydraulics: bool,
     /// `DEF_USE_VariablySaturatedFlow`：决定 `f_qcharge` 与 `f_qlayer` 谁在文件里。
     variably_saturated: bool,
+    /// 城市 patch：多声明 [`URBAN_VARIABLES`]。
+    urban: bool,
 }
 
 impl HistorySession {
@@ -1656,6 +1727,7 @@ impl HistorySession {
             accumulator: HistoryAccumulator::default(),
             plant_hydraulics: false,
             variably_saturated: false,
+            urban: false,
         })
     }
 
@@ -1973,6 +2045,129 @@ impl HistorySession {
         })
     }
 
+    /// 城市 patch 的一步 history（`CoLMMAIN_Urban` 写下的全局量，外加
+    /// `MOD_Vars_1DAccFluxes.F90:2219-2243` 只在城市上累加的 20 个量）。
+    pub fn push_urban(
+        &mut self,
+        end: CalendarTime,
+        template: &StandardLctRestartTemplate,
+        state: &StandardLctSnowSoilState,
+        output: &colm_core::UrbanStepOutput,
+        reference: HistoryReferenceState,
+    ) -> Result<Option<PathBuf>> {
+        let urban = state
+            .urban
+            .as_ref()
+            .context("an urban history record needs the urban state")?;
+        let ground = state.surface_temperature_k();
+        self.plant_hydraulics = false;
+        self.variably_saturated = template.physics.variably_saturated_flow;
+        self.urban = true;
+        let variably_saturated = self.variably_saturated;
+        let thermal = &output.thermal;
+        let shortwave = &output.shortwave;
+        self.push(end, |accumulator| {
+            set_lct_snow_state(accumulator, 0, template, state, ground)?;
+            let mut fluxes = vec![
+                ("rsur", output.rsur),
+                ("rnof", output.rnof),
+                ("rsub", output.rnof - output.rsur),
+                ("qinfl", output.qinfl),
+                ("qintr", output.qintr),
+                ("qdrip", output.qdrip),
+            ];
+            if !variably_saturated {
+                fluxes.push(("qcharge", output.qcharge));
+            }
+            // `rnet = sabg + sabvsun + sabvsha - olrg + forc_frl`
+            let net_radiation = thermal.sabg + output.sabvsun + 0.0 - thermal.olrg
+                + reference.downward_longwave_w_m2;
+            for (name, value) in fluxes.into_iter().chain([
+                ("fsena", thermal.fsena),
+                ("fevpa", thermal.fevpa),
+                ("lfevpa", thermal.lfevpa),
+                ("fsenl", thermal.fsenl),
+                ("fevpl", thermal.fevpl),
+                ("etr", thermal.etr),
+                ("fseng", thermal.fseng),
+                ("fevpg", thermal.fevpg),
+                ("fgrnd", thermal.fgrnd),
+                ("sabvsun", output.sabvsun),
+                ("sabvsha", 0.0),
+                ("sabg", thermal.sabg),
+                ("olrg", thermal.olrg),
+                ("rnet", net_radiation),
+                ("emis", thermal.emis),
+                ("trad", thermal.trad),
+                ("xerr", output.xerr),
+                ("zerr", output.zerr),
+                ("assim", thermal.assim),
+                ("respc", thermal.respc),
+                ("rss", thermal.rss),
+                // `CoLMDRIVER.F90:354` 把城市的 `rstfac` 接到 `rstfacsun_out`；
+                // `rstfacsha_out` 城市分支不碰，保持 `spval`。
+                ("rstfacsun", thermal.rstfac),
+                ("ldew", state.energy.leaf.canopy_water.total_mm),
+                ("sigf", state.energy.canopy.vegetation_free_fraction),
+                ("green", 1.0),
+                ("laisun", state.energy.canopy.leaf_area_index),
+                ("laisha", 0.0),
+                ("t_room", urban.t_room),
+                ("tafu", urban.tafu),
+                ("fhac", urban.fhac),
+                ("fwst", urban.fwst),
+                ("fach", urban.fach),
+                ("fhah", urban.fhah),
+                ("fvehc", urban.vehc),
+                ("fmeta", urban.meta),
+                ("fsenroof", thermal.fsen_roof),
+                ("fsenwsun", thermal.fsen_wsun),
+                ("fsenwsha", thermal.fsen_wsha),
+                ("fsengimp", thermal.fsen_gimp),
+                ("fsengper", thermal.fsen_gper),
+                ("fsenurbl", thermal.fsen_urbl),
+                ("lfevproof", thermal.lfevp_roof),
+                ("lfevpgimp", thermal.lfevp_gimp),
+                ("lfevpgper", thermal.lfevp_gper),
+                ("lfevpurbl", thermal.lfevp_urbl),
+                ("t_roof", urban.t_roof),
+                ("t_wall", urban.t_wall),
+            ]) {
+                ensure!(
+                    value.is_finite(),
+                    "the urban history value for {name} is not finite"
+                );
+                accumulator.scalar(name, 0, value)?;
+            }
+            let surface = colm_core::GlacierThermalFluxes {
+                taux: thermal.taux,
+                tauy: thermal.tauy,
+                fsena: thermal.fsena,
+                fevpa: thermal.fevpa,
+                tref: thermal.tref,
+                qref: output.qref,
+                z0m: thermal.z0m,
+                ..Default::default()
+            };
+            set_glacier_surface_diagnostics(accumulator, &surface, reference, &template.physics)?;
+            set_urban_shortwave_bands(accumulator, 0, shortwave, reference)?;
+            set_lct_derived_soil(
+                accumulator,
+                0,
+                template.soil_layer_thickness_m(),
+                &state.soil_water,
+            )?;
+            set_water_storage_with_total(accumulator, 0, &state.soil_water, output.wat)?;
+            set_lct_albedo(
+                accumulator,
+                0,
+                &state.energy,
+                reference.surface_cosine_zenith,
+            )?;
+            set_lct_forcing_mirrors(accumulator, 0, reference, &output.precipitation)
+        })
+    }
+
     pub fn push_lct_snow(
         &mut self,
         end: CalendarTime,
@@ -2125,6 +2320,9 @@ impl HistorySession {
             );
             // 声明本层能负责的变量；写出的文件因此只包含它们。
             declare_lct_variables(&mut buffer, self.plant_hydraulics, self.variably_saturated)?;
+            if self.urban {
+                buffer.declare(&URBAN_VARIABLES)?;
+            }
             self.open = Some((record.suffix.clone(), buffer));
         }
         let (_, buffer) = self.open.as_mut().expect("just opened");

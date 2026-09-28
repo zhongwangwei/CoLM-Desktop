@@ -24916,3 +24916,66 @@ cargo test core 364 / runtime 76 / hist 50；clippy 无告警
 cargo test core 367 / runtime 76 / hist 50 / init 156 / srfdata 270+49（后两个需 --test-threads=1）；
 clippy 无告警；fmt 通过
 ```
+
+## 第 410 轮：城市（patchtype 1）接进 Rust 主循环（未逐位，卡在 LAPACK 求逆）
+
+### 一、接线
+
+`CoLMMAIN_Urban` 整支接进 `advance_patch`：`urban_step`（`urban_flux.rs` / `urban_thermal.rs` /
+`urban_step.rs`，上一个提交 078900c）+ `UrbanTemplate`（读 `_restart_urban_` 时间重启与
+`_restart_urb_const_` 常数重启，城市变量按 `urban` 维而非 `patch` 维索引，墙体层在 15 层数组里
+偏移 5）+ `push_urban` history + 续跑写回 `_restart_urban_`。`DEF_URBAN_RUN` 下 `split`/PHS/
+`supercool`/WUE 强制关（`physics.rs`，与 `MOD_Namelist` 的强制一致）。
+
+AU-Preston（2004-01，小时输出）跑通后逐项对照 Fortran，修掉四处：
+
+1. **透水地面永远走 `WATER_2014`**：`UrbanHydrology`（`MOD_Urban_Hydrology.F90:271`）无条件
+   `CALL WATER_2014`，不看 `DEF_USE_VariablySaturatedFlow`；Rust 的 `water_2014_snow_soil_step`
+   在 VSF 打开时会切到 VSF 那一支。第 1 步 `zwt` 从 3.43 m 掉到 0.014 m、`wa` 为 0。现在城市
+   调用处显式 `variably_saturated: false`。
+2. **月度 LAI**：城市单点下 `LAI_readin` 什么都不写（`.not. DEF_URBAN_RUN` 守卫），换 `tlai/tsai` 的是
+   `UrbanLAI_readin`：读 `srfdata.nc` 的 `TREE_LAI`/`TREE_SAI`（`MOD_SingleSrfdata.F90:1806-1809`
+   读进同一对 `SITE_LAI_monthly`），年份按 `findloc_ud` **精确匹配夹到 `DEF_LAI_START/END_YEAR`
+   之后的年**（不是 `USE_SITE_LAI` 的最近年），不除 `fveg0`。城市单点里的非城市 patch 则保持重启值。
+3. **`wat`/`wat_inst`**：上游两者都直接取 `CoLMMAIN_Urban.F90:1323-1324` 的 `wat`（三类地表按面积
+   加权 + `wa*(1-froof)*fgper`），不能按土壤 patch 的公式从聚合后的 `wliq_soisno` 重算 ——
+   差的正好是 `wa*(1-froof)*fgper = 2.385*0.38 = 0.906 mm`。`rstfacsun` 取城市 `rstfac`
+   （`CoLMDRIVER.F90:354`），`rstfacsha` 城市分支不写。
+4. **`fwsha` 不重算**：见 `docs/upstream-bugs.md` 第 20 条（GIMPLE 为据）。
+
+修完后第 1 条记录的相对差从 1e0（`zwt`/`wa`）降到 1e-5（`t_wall`）以下，但仍非逐位。
+
+### 二、分歧点：`MatrixInverse` 是系统 LAPACK，自写消元对不上
+
+十六进制位探针（两引擎在 `:621`、`UrbanVegLongwave` 之后、`UrbanVegFlux` 之后、`:1002` 打印）：
+第 0 步墙体重分配后全等，`UrbanVegLongwave` 输出的 `Ainv` 25 个元素里 16 个差 1~3 ULP，
+`B/B1/dBdT/SkyVF/VegVF/fcover/ev` 全等。上游 `MOD_Urban_Shortwave:MatrixInverse` 是
+`DGETRF` + `DGETRI(lwork = n)`，短波、长波、BEM 三处共用；Fortran 内核按 `Makeoptions` 的
+`-llapack -lblas` 链到 **Accelerate**（`otool -L colm.x` → `vecLib.framework/.../libLAPACK.dylib`）。
+Rust 这三处用的是自写的部分主元高斯消元（`urban_radiation.rs::solve`，长波再按列组逆）。
+
+能否用纯 Rust 复刻 Accelerate？实验（`gfortran` 调 Accelerate 对 4000 个 4×4/5×5 随机矩阵求逆，
+对角占优与一般矩阵各半，导出位模式；独立 Rust 程序按 netlib 源码展开参考算法逐位比）：
+
+```text
+DGETRF：参考 dgetrf2（递归）与 dgetf2 结果相同；FMA + 倒数缩放（dscal 1/pivot）→ 4000/4000 逐位
+        不融合 → 1101/4000；除法缩放 → 773/4000（FMA）/ 285/4000
+DTRTRI（在逐位相同的 LU 上）：参考 dtrti2 不融合 2857/4000、融合 1943/4000；
+        分块 nb = 1..4 与不分块完全相同；行向点积（顺/逆序、对角项先/后）≤ 2857；
+        U·X = I 回代（乘倒数/除法、顺/逆序）≤ 226；trmm/trsm/trti2 各自融合与否 8 种组合 ≤ 2857
+错位位置有结构（n=4 只错 (0,2)(0,3)，n=5 集中在第 4 列前三行），但以上变体都解释不了
+```
+
+结论：LU 分解能逐位复刻，`DTRTRI`/`DGETRI` 是 Accelerate 的闭源实现，逆推不出来；而且 Windows
+内核链的是 MSYS2 的参考 LAPACK（x86-64 不带 FMA），两平台本来就要不同的算法。唯一可验证的办法是
+Rust 也调**同一个**系统 LAPACK —— 但工作区 `unsafe_code = "forbid"`（`Cargo.toml:33`），且
+Windows CI / GUI 打包是 MSVC、没有 LAPACK，属架构决定，**待定**。
+
+### 三、实测
+
+```text
+AU-Preston 2004-01：Rust 跑通；history 第 1 条最大相对差 t_wall 9e-6、fsenwsun 2e-6，其余 ≤ 1e-6
+  （xerr/zerr 是 1e-15 量级的残差，相对差无意义）；逐位未达成（见上）
+回归（PROFILE=release）：31 个算例与第 409 轮完全相同（sp/ts/tc 仍只剩窗口外旧续跑目录）
+cargo test core 367 / runtime 76 / hist 50 / init 156
+```

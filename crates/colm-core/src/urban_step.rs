@@ -555,6 +555,9 @@ pub fn urban_step(
             soil: Water2014SoilInput {
                 patch_type: 1,
                 urban_run: true,
+                // `UrbanHydrology` 无条件 `CALL WATER_2014`（`MOD_Urban_Hydrology.F90:271`），
+                // 不看 `DEF_USE_VariablySaturatedFlow` —— 城市透水面永远是 Campbell/2014 那一支。
+                variably_saturated: false,
                 time_step_seconds: dt,
                 fluxes: Water2014SoilFluxes {
                     ground_rain_kg_m2_s: pgper_rain,
