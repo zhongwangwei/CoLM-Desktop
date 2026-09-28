@@ -24812,3 +24812,32 @@ history：`accumulate_fluxes` 对所有 patch 读同一组全局量，冰川上�
 回归（tmp/regress.sh）：CN-Cng、AT-Neu 各窗口与全年、split、VIC、方案 8/1、预热 + 优化器，全部逐位相同
 cargo test core/runtime/hist 363/76/50，colm-init 156；clippy 无告警；fmt 通过
 ```
+
+## 第 408 轮：非动态湿地（patchtype 2）接进 Rust 主循环
+
+湿地走规则土壤的同一条 THERMAL/叶温链，差别只在四处，全部照 `main/` 源码与 GIMPLE：
+
+1. **地面湿度**：`MOD_Thermal.F90:598-602` 对非动态湿地不进"土壤地面"分支，`qred = hr = 1` 原样保留。
+   新增 `saturated_ground_humidity`：`qred` 必须**恰好**是 1（`(1-fsno)*1 + fsno` 算出来不一定等于 1）。
+2. **`newsnow`**：暖地面（`t_grnd > tfrz`、无雪层）上的新雪在 VSF 下整份并进 `wetwat`（`MOD_NewSnow.F90:79-81`）。
+   Rust 原先把 `patch_type` 与 VSF 开关写死成 0/false，现在从输入取。
+3. **水桶**（`WATER_VSF` 第 [6] 节）：土壤水分方程整段跳过；
+   `wetwat = .FMA (((qsdew+(gwat-etr))+qfros)-qsubl, deltim, (wdsrf+wa)+wetwat)`；
+   融化层 `wresi = max(.FNMA (porsl*dz, 1000, wliq), 0)` 并入桶；按 `wetwatmax`（`DEF_TUNING_WETWATMAX`）
+   溢出成 `wdsrf`、或负值记进 `wa`；`wdsrf > pondmx` 的部分成地表径流；`zwt = 0`、`qinfl = 0`、`frcsat = 1`。
+   `rsub`（`rsubst` 实参）与 `qlayer` 在这一支里从未赋值，保持 `spval` —— history 留填充值，
+   基流优化器的 `add_spv` 同样跳过它。非 VSF（`WATER_2014` 第 [6] 节）：融化层充满液水、冰清零，
+   `rsur = max(0, gwat)`、`rnof = 0`、`rsub = -rsur`、`wa = 4800`。
+4. **水量闭合与 history**：VSF 下 `totwb`/`endwb` 再加 `wetwat`，非 VSF 下 `errorw = 0`；
+   `f_wetwat`/`f_wetwat_inst`（瞬时量，`x*nac/nac`）/`f_wetzwt` 只在湿地上写。
+
+`wetwat` 进了 `Water2014SoilState`（从重启读、写回重启），原先挂在模板上的常量随之删除。
+`DEF_USE_Dynamic_Wetland`（湿地改走完整土壤分支）尚未移植，运行期明确拒绝。
+
+实测（AT-Neu 强迫，`SITE_landtype = 11`，冷启动两引擎逐位相同）：
+```text
+2010 全年小时 history + 13 份月末续跑，VSF：逐位相同（tmp/wy）
+2010-01..02，Campbell + 非 VSF：逐位相同（tmp/wc）
+回归（tmp/regress.sh）：规则土壤全部窗口、split、VIC、方案 8/1、预热 + 优化器、冰川全部逐位相同
+cargo test core 364 / runtime 76 / hist 50；clippy 无告警
+```

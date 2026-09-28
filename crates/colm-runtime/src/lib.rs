@@ -440,11 +440,15 @@ impl PointRuntime {
             let binding = lct_binding(step, greenwich_time, longitude_degrees, co2_scenario)?;
             // `totwb`：上游在 `snl` 重算之后、任何物理步之前取步首总蓄量
             // （`CoLMMAIN.F90:831`），`xerr` 要靠它和步末的 `endwb` 相减。
-            let initial_total_water_mm = colm_core::initial_total_water_storage_mm(
+            let mut initial_total_water_mm = colm_core::initial_total_water_storage_mm(
                 &next.soil_water,
                 next.energy.leaf.canopy_water.total_mm,
                 next.snow.water_equivalent_kg_m2,
             );
+            // `totwb = totwb + wetwat`：VSF 下的湿地（`CoLMMAIN.F90:828-831`）。
+            if template.patch_type == 2 && template.physics.variably_saturated_flow {
+                initial_total_water_mm += next.soil_water.wetland_water_mm;
+            }
             let output = advance_patch(step, template, &binding, next, optimizer.as_ref())?;
             // `hist_out` 在 `itstamp <= ptstamp` 时直接返回（`MOD_Hist.F90:225`），连累加都不做：
             // 预热期（含每一轮重复）不产生 history。步末 `itstamp <= ptstamp` 与本步
@@ -1445,6 +1449,7 @@ mod tests {
             snow_irreducible_saturation: 0.033,
             impermeable_porosity: 0.05,
             ponding_limit_mm: 5.0,
+            wetland_water_capacity_mm: 200.0,
             minimum_soil_potential_mm: -1.0e8,
             maximum_dew_mm: 0.1,
             maximum_transpiration_mm_s: 0.001,

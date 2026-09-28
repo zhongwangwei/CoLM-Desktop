@@ -1479,6 +1479,7 @@ fn variable_saturated_flow_state(volumetric_water: f64) -> Water2014SoilState {
         water_table_depth_m: 1.0,
         aquifer_water_mm: 0.0,
         surface_water_mm: 0.0,
+        wetland_water_mm: 0.0,
         matric_potential_mm: vec![0.0; layers],
         hydraulic_conductivity_mm_s: vec![0.0; layers],
     }

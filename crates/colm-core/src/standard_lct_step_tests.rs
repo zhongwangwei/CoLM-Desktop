@@ -165,6 +165,7 @@ fn standard_lct_soil_step_carries_one_rust_column_between_energy_and_water() {
             water_table_depth_m: 1.0,
             aquifer_water_mm: 100.0,
             surface_water_mm: 0.0,
+            wetland_water_mm: 0.0,
             matric_potential_mm: vec![
                 -10_000.0;
                 energy.ground_temperature.liquid_water_kg_m2.len()
@@ -265,6 +266,7 @@ fn standard_lct_snow_soil_step_carries_active_snow_and_soil_columns() {
             water_table_depth_m: 1.0,
             aquifer_water_mm: 100.0,
             surface_water_mm: 0.0,
+            wetland_water_mm: 0.0,
             matric_potential_mm: vec![-10_000.0; 2],
             hydraulic_conductivity_mm_s: vec![0.0; 2],
         },
@@ -385,6 +387,7 @@ fn standard_lct_snow_soil_step_credits_the_thermal_condensation_to_the_soil() {
             water_table_depth_m: 1.0,
             aquifer_water_mm: 100.0,
             surface_water_mm: 0.0,
+            wetland_water_mm: 0.0,
             matric_potential_mm: vec![-10_000.0; 2],
             hydraulic_conductivity_mm_s: vec![0.0; 2],
         },
@@ -494,6 +497,7 @@ fn standard_lct_snow_soil_step_rereads_the_layer_count_after_newsnow() {
             water_table_depth_m: 1.0,
             aquifer_water_mm: 100.0,
             surface_water_mm: 0.0,
+            wetland_water_mm: 0.0,
             matric_potential_mm: vec![-10_000.0; 2],
             hydraulic_conductivity_mm_s: vec![0.0; 2],
         },
@@ -592,6 +596,7 @@ fn water_input() -> Water2014SoilInput<'static> {
         time_step_seconds: 1800.0,
         impermeable_porosity: 0.05,
         ponding_limit_mm: 5.0,
+        wetland_water_capacity_mm: 200.0,
         minimum_soil_potential_mm: -1.0e8,
         soil_ice_impedance: 6.0,
         // Campbell 分支不读 `hydraulic_model`；置空切片即可，
@@ -920,6 +925,7 @@ fn the_step_end_surface_temperature_follows_the_combined_snow_layer_count() {
             water_table_depth_m: 1.0,
             aquifer_water_mm: 100.0,
             surface_water_mm: 0.0,
+            wetland_water_mm: 0.0,
             matric_potential_mm: vec![-10_000.0; 2],
             hydraulic_conductivity_mm_s: vec![0.0; 2],
         },

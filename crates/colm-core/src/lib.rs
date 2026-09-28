@@ -142,7 +142,8 @@ pub use glacier_step::{
 };
 pub use ground_fluxes::{ground_fluxes, GroundFluxInput, GroundFluxState};
 pub use ground_humidity::{
-    non_split_ground_humidity, split_ground_humidity, GroundHumidityInput, GroundHumidityState,
+    non_split_ground_humidity, saturated_ground_humidity, split_ground_humidity,
+    GroundHumidityInput, GroundHumidityState,
 };
 pub use ground_temperature::{
     ground_emissivity, ground_temperature, GroundTemperatureInput, GroundTemperatureState,

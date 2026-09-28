@@ -145,6 +145,8 @@ pub struct LandPhysicsParameters {
     pub impermeable_porosity: f64,
     /// `DEF_TUNING_PONDMX`。
     pub ponding_limit_mm: f64,
+    /// `wetwatmax`（`DEF_TUNING_WETWATMAX`）：非动态湿地水桶的容量 [mm]。
+    pub wetland_water_capacity_mm: f64,
     /// `DEF_TUNING_SMPMIN`。
     pub minimum_soil_potential_mm: f64,
     /// `DEF_TUNING_DEWMX`。
@@ -219,6 +221,7 @@ struct RestartColumns {
     water_table_depth_m: Vec<f64>,
     aquifer_water_mm: Vec<f64>,
     surface_water_mm: Vec<f64>,
+    wetland_water_mm: Vec<f64>,
     snow_node_depth_m: Vec<f64>,
     snow_layer_thickness_m: Vec<f64>,
     snow_depth_m: Vec<f64>,
@@ -688,10 +691,6 @@ pub struct StandardLctRestartTemplate {
     /// `rsubst`/`rsub` 上（`WATER_VSF`/`WATER_2014`）。装配期默认 1.0，
     /// 由 `colm-rs` 用 [`Self::with_baseflow_scale`] 覆盖成文件里的值。
     pub baseflow_scale: f64,
-    /// `wetwat`：湿地蓄水。只有湿地分支改它，本分支的 patch 上它就是重启里的值
-    /// （冷启动写 0），但 VSF 打开时 history 的 `wat` 加的是它而不是 `wa`
-    /// （`CoLMMAIN.F90:2262-2266`）。
-    pub wetland_water_mm: f64,
     /// 逐波段辐射量的整变量缓冲，同上。
     radiation_fields: RadiationFields,
     /// 雪 + 土的模板列（`soilsnow`），积雪分支的 `GroundTemperatureInput` 需要这个形状。
@@ -809,8 +808,9 @@ fn assemble(
     // 冰川（3）共用这份模板：层几何、强迫与常数相同，冰层放在"土壤"那一段；
     // 物理由 `colm_core::glacier_snow_step` 分派（见 `crate::advance_patch`）。
     ensure!(
-        patch_type == 0 || patch_type == 3,
-        "standard LCT assembly supports patchtype 0 (soil) and 3 (glacier), got {patch_type}"
+        matches!(patch_type, 0 | 2 | 3),
+        "standard LCT assembly supports patchtype 0 (soil), 2 (wetland) and 3 (glacier), \
+         got {patch_type}"
     );
 
     let soil = soil_state(&constant, soil_layers, patches, physics.hydraulic_model)?;
@@ -877,6 +877,7 @@ fn assemble(
         water_table_depth_m: time.floats("zwt")?.to_vec(),
         aquifer_water_mm: time.floats("wa")?.to_vec(),
         surface_water_mm: time.floats("wdsrf")?.to_vec(),
+        wetland_water_mm: time.floats("wetwat")?.to_vec(),
         snow_node_depth_m: time.floats("z_sno")?.to_vec(),
         snow_layer_thickness_m: time.floats("dz_sno")?.to_vec(),
         snow_depth_m: time.floats("snowdp")?.to_vec(),
@@ -992,6 +993,7 @@ fn assemble(
         water_table_depth_m: scalar(&time, "zwt", patch)?,
         aquifer_water_mm: scalar(&time, "wa", patch)?,
         surface_water_mm: scalar(&time, "wdsrf", patch)?,
+        wetland_water_mm: scalar(&time, "wetwat", patch)?,
         // `smp`/`hk` 是**时间变量**：上游从重启读回来，下一步的 THERMAL 与
         // 植物水力都读它。装配期填的是重启那一份，之后每步由水分步覆写。
         // 注意形状：`smp`/`hk` 是 `(patch, soil)`，**没有雪槽**，所以直接用
@@ -1143,7 +1145,6 @@ fn assemble(
             .unwrap_or(colm_core::MISSING),
         // 默认 1.0；调用方（`colm-rs`）读过 `ParaOpt/*_baseflow.nc` 之后覆盖。
         baseflow_scale: 1.0,
-        wetland_water_mm: scalar(&time, "wetwat", patch)?,
         soil,
         soil_thermal_inputs,
         soil_hydraulic_model,
@@ -1213,7 +1214,7 @@ impl StandardLctRestartTemplate {
     /// （`CoLMMAIN.F90:2262-2266`）。
     pub fn water_storage_tail_mm(&self, water: &Water2014SoilState) -> f64 {
         if self.physics.variably_saturated_flow {
-            self.wetland_water_mm
+            water.wetland_water_mm
         } else {
             water.aquifer_water_mm
         }
@@ -1544,6 +1545,7 @@ impl StandardLctRestartTemplate {
                 time_step_seconds,
                 impermeable_porosity: physics.impermeable_porosity,
                 ponding_limit_mm: physics.ponding_limit_mm,
+                wetland_water_capacity_mm: physics.wetland_water_capacity_mm,
                 minimum_soil_potential_mm: physics.minimum_soil_potential_mm,
                 soil_ice_impedance: physics.soil_ice_impedance,
                 // `DEF_USE_VariablySaturatedFlow`：打开时 `water_2014_soil_step`
@@ -1801,6 +1803,7 @@ impl StandardLctRestartTemplate {
         let mut water_table = scalars(&self.restart_columns.water_table_depth_m)?;
         let mut aquifer = scalars(&self.restart_columns.aquifer_water_mm)?;
         let mut surface = scalars(&self.restart_columns.surface_water_mm)?;
+        let mut wetland = scalars(&self.restart_columns.wetland_water_mm)?;
         let mut ground = scalars(&self.restart_columns.ground_temperature_k)?;
         let mut leaf = scalars(&self.restart_columns.leaf_temperature_k)?;
         let mut canopy = scalars(&self.restart_columns.canopy_water_mm)?;
@@ -1825,6 +1828,7 @@ impl StandardLctRestartTemplate {
         water_table[self.patch] = state.water.water_table_depth_m;
         aquifer[self.patch] = state.water.aquifer_water_mm;
         surface[self.patch] = state.water.surface_water_mm;
+        wetland[self.patch] = state.water.wetland_water_mm;
         // 叶温与冠层水量在状态里（`energy.leaf`）；地表温度只有步输出有，所以由调用方给。
         ground[self.patch] = ground_temperature_k;
         leaf[self.patch] = state.energy.leaf.leaf_temperature_k;
@@ -1838,6 +1842,7 @@ impl StandardLctRestartTemplate {
             RestartOverride::new("zwt", water_table),
             RestartOverride::new("wa", aquifer),
             RestartOverride::new("wdsrf", surface),
+            RestartOverride::new("wetwat", wetland),
             RestartOverride::new("t_grnd", ground),
             RestartOverride::new("tleaf", leaf),
             RestartOverride::new("ldew", canopy),

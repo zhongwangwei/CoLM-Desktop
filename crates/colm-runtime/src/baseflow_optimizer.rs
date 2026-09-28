@@ -140,6 +140,10 @@ impl BaseflowOptimizer {
 
 /// `add_spv (var, s, dt)`：`s` 是 `spval` 时直接取 `var*dt`，否则累加。
 fn add_spv(sum: &mut Option<f64>, value: f64, time_step_seconds: f64) {
+    // `IF (var(i) /= spval)`：湿地上的 `rsub` 就是 `spval`。
+    if value == colm_core::MISSING {
+        return;
+    }
     let increment = value * time_step_seconds;
     *sum = Some(match *sum {
         Some(previous) => previous + increment,

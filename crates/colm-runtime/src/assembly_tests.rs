@@ -51,6 +51,7 @@ fn physics(timestep_seconds: f64) -> LandPhysicsParameters {
         snow_irreducible_saturation: 0.033,
         impermeable_porosity: 0.05,
         ponding_limit_mm: 5.0,
+        wetland_water_capacity_mm: 200.0,
         minimum_soil_potential_mm: -1.0e8,
         maximum_dew_mm: 0.1,
         maximum_transpiration_mm_s: 0.001,
@@ -999,8 +1000,9 @@ fn an_evolved_state_writes_back_a_readable_continuation_restart() {
                 .is_ok_and(|dims| dims == ["patch", "rtyp", "band"])
         })
         .count();
-    // 13 项土壤/标量 + 8 项冠层几何与冠层光学（`lai`/`sai`/`sigf`/`tlai`/`tsai` + `thermk`/`extkb`/`extkd`）。
-    assert_eq!(overrides.len(), 21 + diagnostics + radiation);
+    // 14 项土壤/标量（含 `wetwat`）+ 8 项冠层几何与冠层光学（`lai`/`sai`/`sigf`/`tlai`/`tsai` +
+    // `thermk`/`extkb`/`extkd`）。
+    assert_eq!(overrides.len(), 22 + diagnostics + radiation);
     source.write_with(&written, &overrides).unwrap();
 
     let restart = colm_init::RestartFile::open(&written).unwrap();
@@ -1137,10 +1139,10 @@ fn an_evolved_snow_state_writes_back_a_readable_continuation_restart() {
             },
         )
         .unwrap();
-    // 十一项土壤/标量 + 八项冠层几何/光学 + z_sno + dz_sno + snowdp/scv/fsno/sag。
+    // 土壤/标量（含 `wetwat`）+ 八项冠层几何/光学 + z_sno + dz_sno + snowdp/scv/fsno/sag。
     assert_eq!(
         overrides.len(),
-        27 + ["alb", "ssun", "ssha", "ssoi", "ssno"]
+        28 + ["alb", "ssun", "ssha", "ssoi", "ssno"]
             .iter()
             .filter(|name| source
                 .variable_dimensions(name)

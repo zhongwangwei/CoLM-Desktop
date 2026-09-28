@@ -82,6 +82,15 @@ pub fn land_physics_parameters(
     };
     // `DEF_Optimize_Baseflow` 不在这里：它不改物理参数，而是在主循环里逐年改写
     // `scale_baseflow`，由 `colm-rs` 装一个 `BaseflowOptimizer` 给运行时（`MOD_Opt_Baseflow`）。
+    // `DEF_USE_Dynamic_Wetland`：湿地改走土壤地面的完整水热分支（`MOD_Thermal.F90:602`、
+    // `MOD_SoilSnowHydrology.F90:947/1072`）。运行期只移植了非动态湿地的水桶模型，
+    // 打开它会让湿地静默按水桶算，所以拒绝。
+    if logical(document, "DEF_USE_Dynamic_Wetland")? {
+        bail!(
+            "DEF_USE_Dynamic_Wetland is on, but the Rust runtime ports only the static \
+             wetland bucket (patchtype 2), not the dynamic soil-ground wetland branch"
+        );
+    }
     if logical(document, "DEF_USE_SNICAR")? {
         // `DEF_USE_SNICAR` 与 `DEF_SPLIT_SOILSNOW` 同属"最坏的一类"：它此前**根本
         // 没被读过**，而 `assembly.rs` 把 `snow_layer_absorption_w_m2` 硬写成 `None`
@@ -320,6 +329,7 @@ pub fn land_physics_parameters(
         snow_irreducible_saturation: real(document, "DEF_TUNING_SSI")?,
         impermeable_porosity: real(document, "DEF_TUNING_WIMP")?,
         ponding_limit_mm: real(document, "DEF_TUNING_PONDMX")?,
+        wetland_water_capacity_mm: real(document, "DEF_TUNING_WETWATMAX")?,
         minimum_soil_potential_mm: real(document, "DEF_TUNING_SMPMIN")?,
         maximum_dew_mm: real(document, "DEF_TUNING_DEWMX")?,
         maximum_transpiration_mm_s: real(document, "DEF_TUNING_TRSMX0")?,

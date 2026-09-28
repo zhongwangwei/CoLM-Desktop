@@ -203,7 +203,7 @@ pub const LCT_CANOPY_WATER_VARIABLES: [&str; 3] = ["ldew", "qintr", "qdrip"];
 /// 上游写的是**瞬时值**（乘 `nac` 再被除 `nac`）而不是区间平均的那些变量。
 ///
 /// 累加器对它们走"最后一次覆盖"，`write_means` 的除数因此恒为 1。
-pub const INSTANTANEOUS_VARIABLES: [&str; 3] = ["wa_inst", "wdsrf_inst", "wat_inst"];
+pub const INSTANTANEOUS_VARIABLES: [&str; 4] = ["wa_inst", "wdsrf_inst", "wat_inst", "wetwat_inst"];
 
 /// 本层能填的**宽带反照率**，一项。
 ///
@@ -1888,17 +1888,42 @@ impl HistorySession {
                 reference.surface_cosine_zenith,
             )?;
             set_lct_forcing_mirrors(accumulator, 0, reference, &output.energy.precipitation)?;
-            set_lct_balance_errors(
-                accumulator,
-                0,
-                &as_soil,
-                colm_core::total_water_storage_mm(
-                    &state.soil_water,
-                    state.energy.leaf.canopy_water.total_mm,
-                    state.snow.water_equivalent_kg_m2,
-                ),
-                reference,
-            )
+            // 湿地（patchtype 2）：`endwb` 在 VSF 时再加 `wetwat`（`CoLMMAIN.F90:1485-1489`），
+            // 非 VSF 时 `errorw = 0`（`:1532`）；`f_wetwat*`/`f_wetzwt` 只在湿地上写
+            // （`MOD_Hist.F90` 的 `filter = patchtype == 2`）。
+            let wetland = template.patch_type == 2;
+            if wetland {
+                for (name, value) in [
+                    ("wetwat", state.soil_water.wetland_water_mm),
+                    ("wetwat_inst", state.soil_water.wetland_water_mm),
+                    ("wetzwt", state.soil_water.water_table_depth_m),
+                ] {
+                    accumulator.scalar(name, 0, value)?;
+                }
+            }
+            let mut end_water = colm_core::total_water_storage_mm(
+                &state.soil_water,
+                state.energy.leaf.canopy_water.total_mm,
+                state.snow.water_equivalent_kg_m2,
+            );
+            if wetland && variably_saturated {
+                end_water += state.soil_water.wetland_water_mm;
+            }
+            if wetland && !variably_saturated {
+                set_lct_balance_errors(
+                    &mut PatchFilteredSink {
+                        inner: &mut *accumulator,
+                        skipped: &["xerr"],
+                    },
+                    0,
+                    &as_soil,
+                    end_water,
+                    reference,
+                )?;
+                accumulator.scalar("xerr", 0, 0.0)
+            } else {
+                set_lct_balance_errors(accumulator, 0, &as_soil, end_water, reference)
+            }
         })
     }
 

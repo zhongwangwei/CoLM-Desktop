@@ -66,6 +66,8 @@ pub struct Water2014SoilInput<'a> {
     pub time_step_seconds: f64,
     pub impermeable_porosity: f64,
     pub ponding_limit_mm: f64,
+    /// `wetwatmax`：非动态湿地水桶的容量 [mm]（只有 patchtype 2 读）。
+    pub wetland_water_capacity_mm: f64,
     pub minimum_soil_potential_mm: f64,
     pub soil_ice_impedance: f64,
     /// `DEF_USE_VariablySaturatedFlow`：打开时这一层走
@@ -106,6 +108,9 @@ pub struct Water2014SoilState {
     pub water_table_depth_m: f64,
     pub aquifer_water_mm: f64,
     pub surface_water_mm: f64,
+    /// `wetwat`：湿地蓄水 [mm]。只有湿地（patchtype 2）的水桶模型与 `newsnow` 改它，
+    /// 其余 patch 上保持重启里的值。
+    pub wetland_water_mm: f64,
     /// `smp`：上一层水分步算出的逐层基质势 [mm]。
     ///
     /// 上游是 `MOD_Vars_TimeVariables` 的**时间变量**（`WATER_2014` 的
@@ -230,6 +235,9 @@ pub fn water_2014_soil_step(
     input: Water2014SoilInput<'_>,
     state: &mut Water2014SoilState,
 ) -> Result<Water2014SoilOutput> {
+    if input.patch_type == 2 {
+        return wetland_soil_step(input, state);
+    }
     if input.variably_saturated {
         return variably_saturated_soil_step(input, state);
     }
@@ -504,6 +512,116 @@ fn split_snow_soil_step(
         soil_state,
     )?;
     Ok(Water2014SnowSoilOutput { snow, soil })
+}
+
+/// 非动态湿地（patchtype 2）：土壤水分方程整段跳过，只有"水桶"。
+///
+/// * VSF（`WATER_VSF` 第 [6] 节，`MOD_SoilSnowHydrology.F90:1452-1518`）：
+///   `wetwat = (wdsrf+wa+wetwat) + (gwat-etr+qsdew+qfros-qsubl)*deltim`（`.FMA`，括号内按
+///   `((qsdew + (gwat-etr)) + qfros) - qsubl` 结合），融化层超出孔隙的水 `wresi` 并入桶，
+///   再按 `wetwatmax` 溢出成 `wdsrf` 或以负值记进 `wa`，`wdsrf > pondmx` 的部分成地表径流。
+///   有雪层时凝结三项在上游被省略；这里它们已被积雪分支置 0，`(0 + x) + 0 - 0` 与省略逐位相同。
+/// * 非 VSF（`WATER_2014` 第 [6] 节，`:566-598`）：`rsur = max(0, gwat)`、`rnof = 0`，
+///   融化层整层充满液水、冰清零，`wa = 4800`、`zwt = 0`。`CoLMMAIN` 随后 `rsub = rnof - rsur`
+///   （`:1188`），即 `-rsur`。
+///
+/// 两支都不改 `smp`/`hk`（非 TRACER 构建）。
+fn wetland_soil_step(
+    input: Water2014SoilInput<'_>,
+    state: &mut Water2014SoilState,
+) -> Result<Water2014SoilOutput> {
+    let layers = state.liquid_water_kg_m2.len();
+    ensure!(
+        layers == input.temperature_k.len()
+            && layers == input.porosity.len()
+            && layers == input.layer_thickness_m.len()
+            && layers == state.ice_water_kg_m2.len(),
+        "the wetland water step needs matching soil columns"
+    );
+    let dt = input.time_step_seconds;
+    let water_input = input.fluxes.ground_rain_kg_m2_s + input.fluxes.snowmelt_kg_m2_s
+        - input.fluxes.ground_evaporation_kg_m2_s;
+    let (surface_runoff, total_runoff, subsurface_runoff) = if input.variably_saturated {
+        let net = ((input.fluxes.soil_dew_kg_m2_s
+            + (water_input - input.fluxes.transpiration_kg_m2_s))
+            + input.fluxes.soil_frost_kg_m2_s)
+            - input.fluxes.soil_sublimation_kg_m2_s;
+        let mut wetland = net.mul_add(
+            dt,
+            (state.surface_water_mm + state.aquifer_water_mm) + state.wetland_water_mm,
+        );
+        let mut residual_sum = 0.0;
+        for layer in 0..layers {
+            if input.temperature_k[layer] > crate::FREEZING_K {
+                // `:1470` `max(.FNMA (porsl*dz, 1000, wliq), 0)`
+                let residual = (-(input.porosity[layer] * input.layer_thickness_m[layer]))
+                    .mul_add(1000.0, state.liquid_water_kg_m2[layer])
+                    .max(0.0);
+                state.liquid_water_kg_m2[layer] -= residual;
+                residual_sum += residual;
+            }
+        }
+        wetland += residual_sum;
+        let capacity = input.wetland_water_capacity_mm;
+        if wetland > capacity {
+            state.surface_water_mm = wetland - capacity;
+            wetland = capacity;
+            state.aquifer_water_mm = 0.0;
+        } else if wetland < 0.0 {
+            state.aquifer_water_mm = wetland;
+            state.surface_water_mm = 0.0;
+            wetland = 0.0;
+        } else {
+            state.surface_water_mm = 0.0;
+            state.aquifer_water_mm = 0.0;
+        }
+        state.wetland_water_mm = wetland;
+        let runoff = if state.surface_water_mm > input.ponding_limit_mm {
+            let runoff = (state.surface_water_mm - input.ponding_limit_mm) / dt;
+            state.surface_water_mm = input.ponding_limit_mm;
+            runoff
+        } else {
+            0.0
+        };
+        // `rsubst`（调用方的 `rsub`）在湿地分支里从未赋值，保持 1D 通量初始化的 `spval`；
+        // `qlayer` 同理。history 的 `acc1d` 跳过 `spval`，两者都留填充值。
+        (runoff, runoff, crate::MISSING)
+    } else {
+        for layer in 0..layers {
+            if input.temperature_k[layer] > crate::FREEZING_K {
+                state.ice_water_kg_m2[layer] = 0.0;
+                state.liquid_water_kg_m2[layer] =
+                    input.porosity[layer] * input.layer_thickness_m[layer] * 1000.0;
+            }
+        }
+        state.aquifer_water_mm = 4800.0;
+        let runoff = water_input.max(0.0);
+        (runoff, 0.0, 0.0 - runoff)
+    };
+    state.water_table_depth_m = 0.0;
+    Ok(Water2014SoilOutput {
+        water_input_mm_s: water_input,
+        infiltration_mm_s: 0.0,
+        surface_runoff_mm_s: surface_runoff,
+        saturation_excess_runoff_mm_s: surface_runoff,
+        infiltration_excess_runoff_mm_s: 0.0,
+        subsurface_runoff_mm_s: subsurface_runoff,
+        total_runoff_mm_s: total_runoff,
+        saturated_fraction: 1.0,
+        recharge_mm_s: 0.0,
+        soil_interface_flux_mm_s: vec![
+            if input.variably_saturated {
+                crate::MISSING
+            } else {
+                0.0
+            };
+            layers + 1
+        ],
+        root_uptake_mm_s: vec![0.0; layers],
+        root_uptake_amount_mm: vec![0.0; layers],
+        matric_potential_mm: state.matric_potential_mm.clone(),
+        hydraulic_conductivity_mm_s: state.hydraulic_conductivity_mm_s.clone(),
+    })
 }
 
 /// 把 [`Water2014SoilInput`] 翻成 [`crate::variably_saturated_flow_step`] 的输入并调用它。

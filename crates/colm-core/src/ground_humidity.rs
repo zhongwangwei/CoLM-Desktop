@@ -55,6 +55,29 @@ pub fn non_split_ground_humidity(input: GroundHumidityInput) -> Result<GroundHum
     // `MOD_Thermal…:583` 的 GIMPLE 是 `qred = .FMA(1-fsno, hr, fsno)`。
     let humidity_reduction =
         (1.0 - input.snow_cover_fraction).mul_add(relative_humidity, input.snow_cover_fraction);
+    non_split_with(input, relative_humidity, humidity_reduction)
+}
+
+/// 非土壤地面（非动态湿地）：`MOD_Thermal.F90:598-599` 的 `qred = 1.`、`hr = 1.` 原样保留，
+/// 不进 `:601` 那段按表层土壤水势求 `hr` 的分支。`qred` 必须是**恰好** 1 ——
+/// 用 `(1-fsno)*1 + fsno` 算出来不一定等于 1。
+pub fn saturated_ground_humidity(
+    input: GroundHumidityInput,
+    split: bool,
+) -> Result<GroundHumidityState> {
+    validate(input)?;
+    if split {
+        split_with(input, 1.0)
+    } else {
+        non_split_with(input, 1.0, 1.0)
+    }
+}
+
+fn non_split_with(
+    input: GroundHumidityInput,
+    relative_humidity: f64,
+    humidity_reduction: f64,
+) -> Result<GroundHumidityState> {
     let saturation =
         saturation_specific_humidity(input.ground_temperature_k, input.surface_pressure_pa)?;
     let reduced_humidity = humidity_reduction * saturation.specific_humidity;
@@ -88,7 +111,10 @@ pub fn non_split_ground_humidity(input: GroundHumidityInput) -> Result<GroundHum
 /// 随后雪面那一份再加回来）—— 顺序照抄，不能提前合并。
 pub fn split_ground_humidity(input: GroundHumidityInput) -> Result<GroundHumidityState> {
     validate(input)?;
-    let relative_humidity = relative_humidity(input);
+    split_with(input, relative_humidity(input))
+}
+
+fn split_with(input: GroundHumidityInput, relative_humidity: f64) -> Result<GroundHumidityState> {
     let humidity_reduction =
         (1.0 - input.snow_cover_fraction).mul_add(relative_humidity, input.snow_cover_fraction);
     let soil = saturation_specific_humidity(input.soil_temperature_k, input.surface_pressure_pa)?;

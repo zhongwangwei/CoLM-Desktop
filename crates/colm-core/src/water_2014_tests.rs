@@ -8,6 +8,7 @@ fn input() -> Water2014SoilInput<'static> {
         time_step_seconds: 1800.0,
         impermeable_porosity: 0.05,
         ponding_limit_mm: 5.0,
+        wetland_water_capacity_mm: 200.0,
         minimum_soil_potential_mm: -1.0e8,
         soil_ice_impedance: 6.0,
         // Campbell 分支不读 `hydraulic_model`；置空切片即可，
@@ -53,6 +54,7 @@ fn state() -> Water2014SoilState {
         water_table_depth_m: 1.0,
         aquifer_water_mm: 100.0,
         surface_water_mm: 0.0,
+        wetland_water_mm: 0.0,
         matric_potential_mm: vec![-10_000.0; 3],
         hydraulic_conductivity_mm_s: vec![0.0; 3],
     }
@@ -106,8 +108,35 @@ fn water_2014_soil_calls_the_shared_runoff_richards_and_groundwater_kernels() {
 #[test]
 fn water_2014_soil_refuses_non_soil_branches() {
     let mut input = input();
-    input.patch_type = 2;
+    input.patch_type = 4;
     assert!(water_2014_soil_step(input, &mut state()).is_err());
+}
+
+/// 非 VSF 湿地（`WATER_2014` 第 [6] 节）：融化层整层充满液水、冰清零，
+/// `rsur = max(0, gwat)`、`rnof = 0`、`rsub = rnof - rsur`，`wa = 4800`、`zwt = 0`。
+#[test]
+fn a_static_wetland_without_vsf_fills_thawed_layers() {
+    let mut input = input();
+    input.patch_type = 2;
+    input.variably_saturated = false;
+    let mut state = state();
+    let output = water_2014_soil_step(input, &mut state).unwrap();
+    let water_input = input.fluxes.ground_rain_kg_m2_s + input.fluxes.snowmelt_kg_m2_s
+        - input.fluxes.ground_evaporation_kg_m2_s;
+    assert_eq!(output.surface_runoff_mm_s, water_input.max(0.0));
+    assert_eq!(output.total_runoff_mm_s, 0.0);
+    assert_eq!(output.subsurface_runoff_mm_s, -output.surface_runoff_mm_s);
+    assert_eq!(state.aquifer_water_mm, 4800.0);
+    assert_eq!(state.water_table_depth_m, 0.0);
+    for layer in 0..3 {
+        if input.temperature_k[layer] > crate::FREEZING_K {
+            assert_eq!(state.ice_water_kg_m2[layer], 0.0);
+            assert_eq!(
+                state.liquid_water_kg_m2[layer],
+                input.porosity[layer] * input.layer_thickness_m[layer] * 1000.0
+            );
+        }
+    }
 }
 
 /// `qsdew`/`qfros`/`qsubl` 的无雪层归属。

@@ -628,9 +628,9 @@ pub fn standard_lct_snow_soil_step(
     // 按这个雪盖拆分 —— AT-Neu 1 月第 159 步（第一个有雪层又有日照的步）用新雪盖拆出
     // `sabg_soil` 0.2807 对 Fortran 0.2828。
     let net_solar_snow_fraction = state.snow.ground_snow_fraction;
-    add_new_snow(
+    let new_snow = add_new_snow(
         NewSnowInput {
-            patch_type: 0,
+            patch_type: input.energy.ground_temperature.patch_type,
             time_step_seconds: input.energy.interception.time_step_seconds,
             // 雪层下面那一层的温度：有雪时是雪列最后一层，无雪时就是**第一个土层**
             // —— 没有雪槽可索引（`snow_layer_slot(1)` 会越界）。
@@ -642,10 +642,12 @@ pub fn standard_lct_snow_soil_step(
             ground_snowfall_kg_m2_s: prepared.interception.ground_snow_kg_m2_s,
             new_snow_bulk_density_kg_m3: prepared.precipitation.new_snow_bulk_density_kg_m3,
             precipitation_temperature_k: prepared.precipitation.precipitation_temperature_k,
-            variably_saturated_flow: false,
+            variably_saturated_flow: input.soil_water.variably_saturated,
         },
         &mut state.snow,
     )?;
+    // 湿地暖地面上的新雪直接并进 `wetwat`（`MOD_NewSnow.F90:79-81`，仅 VSF）。
+    state.soil_water.wetland_water_mm += new_snow.wetland_water_added_mm;
     // `add_new_snow` 可能刚建出一层雪，所以雪层数必须在这里**重新读一次**。
     // 上游 `newsnow` 在 `THERMAL` 之前跑，而 `snl` 是在它之后才重算的
     // （`CoLMMAIN.F90:831` 的 `totwb` 取的就是重算后的值）。
@@ -882,8 +884,8 @@ fn validate_snow_soil_step(
     let template_snow_layers = ground.snow_layers;
     let packed_layers = template_snow_layers + state.soil_temperature_k.len();
     ensure!(
-        ground.patch_type == 0
-            && input.soil_water.patch_type == 0
+        matches!(ground.patch_type, 0 | 2)
+            && input.soil_water.patch_type == ground.patch_type
             && (-5..=0).contains(&state.snow.layer_count)
             && !input.soil_water.urban_run
             && same(
@@ -1002,10 +1004,16 @@ fn ground_humidity_input(input: StandardLctEnergyInput<'_>) -> Result<Option<Gro
     let soil = ground.snow_layers;
     let (ground_temperature_k, soil_temperature_k, snow_temperature_k) =
         surface_temperatures(ground);
-    let humidity = if ground.use_split_soil_snow {
-        crate::split_ground_humidity
-    } else {
-        crate::non_split_ground_humidity
+    let split = ground.use_split_soil_snow;
+    let humidity = move |humidity_input: GroundHumidityInput| {
+        if ground.patch_type == 2 {
+            // 非动态湿地不走 `:601` 的土壤地面分支（`DEF_USE_Dynamic_Wetland` 由运行期拒绝）。
+            crate::saturated_ground_humidity(humidity_input, split)
+        } else if split {
+            crate::split_ground_humidity(humidity_input)
+        } else {
+            crate::non_split_ground_humidity(humidity_input)
+        }
     };
     Ok(Some(humidity(GroundHumidityInput {
         ground_temperature_k,
@@ -1267,8 +1275,8 @@ fn validate(input: StandardLctEnergyInput<'_>) -> Result<()> {
     let ground_flux = input.ground_flux;
     let ground = input.ground_temperature;
     ensure!(
-        input.solar.patch_type == 0
-            && ground.patch_type == 0
+        matches!(ground.patch_type, 0 | 2)
+            && input.solar.patch_type == ground.patch_type
             && input.interception.time_step_seconds > 0.0
             && input.solar.time_step_seconds > 0
             && same(

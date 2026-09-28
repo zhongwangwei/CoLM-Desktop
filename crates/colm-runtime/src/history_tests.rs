@@ -61,6 +61,7 @@ fn physics() -> LandPhysicsParameters {
         snow_irreducible_saturation: 0.033,
         impermeable_porosity: 0.05,
         ponding_limit_mm: 5.0,
+        wetland_water_capacity_mm: 200.0,
         minimum_soil_potential_mm: -1.0e8,
         maximum_dew_mm: 0.1,
         maximum_transpiration_mm_s: 0.001,
@@ -1023,6 +1024,7 @@ fn the_derived_soil_moisture_uses_both_phase_densities() {
         water_table_depth_m: 0.0,
         aquifer_water_mm: 0.0,
         surface_water_mm: 0.0,
+        wetland_water_mm: 0.0,
         matric_potential_mm: vec![-10_000.0; 10],
         hydraulic_conductivity_mm_s: vec![0.0; 10],
     };
