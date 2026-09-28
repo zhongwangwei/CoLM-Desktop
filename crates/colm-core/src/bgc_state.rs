@@ -8,6 +8,25 @@ pub use crate::bgc_state_generated::{
     BgcPftFluxes, BgcPftTimeVariables,
 };
 
+/// `CNDriverSummarizeStates` 写的分 PFT 类型叶面积（`MOD_Vars_TimeVariables` 的 `lai_*`），
+/// 只进 BGC 历史，不进重启。
+pub const LAI_DIAGNOSTICS: [&str; 14] = [
+    "lai_enftemp",
+    "lai_enfboreal",
+    "lai_dnfboreal",
+    "lai_ebftrop",
+    "lai_ebftemp",
+    "lai_dbftrop",
+    "lai_dbftemp",
+    "lai_dbfboreal",
+    "lai_ebstemp",
+    "lai_dbstemp",
+    "lai_dbsboreal",
+    "lai_c3arcgrass",
+    "lai_c3grass",
+    "lai_c4grass",
+];
+
 /// `MOD_BGC_Vars_*` 在一个 patch 上的全部取值。
 #[derive(Debug, Clone, PartialEq)]
 pub struct BgcState {
@@ -18,6 +37,8 @@ pub struct BgcState {
     pub patch_flux: BgcPatchFluxes,
     pub pft: BgcPftTimeVariables,
     pub pft_flux: BgcPftFluxes,
+    /// [`LAI_DIAGNOSTICS`] 的当前值（初值 `spval`）。
+    pub lai_diagnostics: [f64; 14],
 }
 
 /// 五组结构全部字段的 Fortran 名（声明顺序）。
@@ -52,6 +73,7 @@ impl BgcState {
             patch_flux: BgcPatchFluxes::new(dims),
             pft: BgcPftTimeVariables::new(npft, dims),
             pft_flux: BgcPftFluxes::new(npft, dims),
+            lai_diagnostics: [crate::MISSING; 14],
         }
     }
 

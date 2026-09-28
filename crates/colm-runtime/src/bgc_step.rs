@@ -445,6 +445,17 @@ impl BgcRuntime {
             bgc_driver(&mut step, &mut record)?;
         }
         self.write_back(&physics, state)?;
+        // 汇总写的分 PFT 类型 LAI 只供历史，跟着 BGC 状态走。
+        let inputs = physics.trace_inputs();
+        for (slot, name) in bgc
+            .lai_diagnostics
+            .iter_mut()
+            .zip(colm_core::bgc_state::LAI_DIAGNOSTICS)
+        {
+            if let Some((_, values)) = inputs.iter().find(|(field, _)| *field == name) {
+                *slot = values[0];
+            }
+        }
         state.bgc = Some(bgc);
         Ok(())
     }

@@ -394,6 +394,101 @@ pub const URBAN_VARIABLES: [&str; 20] = [
 
 /// 声明本层能填的全部变量：见 [`LCT_STATE_VARIABLES`] 起的一组常量，
 /// 外加 [`DECLARED_ONLY`]（上游在本算例里也留空的那几个槽位）。
+/// `DEF_USE_BGC` 下 `MOD_Hist.F90` 写出的变量：闸门表里运行时条件为 `DEF_USE_BGC`
+/// （NITRIF 打开时再加 `(DEF_USE_BGC) .and. (DEF_USE_NITRIF)` 那两个）、且不带编译期宏
+/// （`#ifdef CROP` 那批）的全部名字，按表中顺序去重。FIRE/DiagMatrix/臭氧的组合条件对应的
+/// 分支在运行期被拒绝，这里不必列。
+pub fn bgc_history_variables(nitrif: bool) -> Vec<&'static str> {
+    let mut names: Vec<&'static str> = Vec::new();
+    for var in colm_hist::generated::VARS {
+        let wanted = match var.runtime {
+            Some("DEF_USE_BGC") => true,
+            Some("(DEF_USE_BGC) .and. (DEF_USE_NITRIF)") => nitrif,
+            _ => false,
+        };
+        if wanted && var.macros.is_empty() && !names.contains(&var.name) {
+            names.push(var.name);
+        }
+    }
+    names
+}
+
+/// 一步的 BGC 历史量（上游 `accumulate_fluxes` 的 `IF (DEF_USE_BGC)` 段）。
+///
+/// 值与上游 `acc1d`/`acc2d` 的来源一一对应：绝大多数就是同名的 BGC patch 变量；
+/// `f_hr` 累加的是 `decomp_hr`，`f_retrasn`（上游拼写）累加 `retransn`；`*_vr` 分池廓线是
+/// `decomp_cpools_vr`/`decomp_npools_vr` 按池切片的 `1:nl_soil`；`BD_all`/`OM_density`/`wfc`
+/// 是常数重启里的土壤参数；`lai_*` 是 `CNDriverSummarizeStates` 写的分 PFT 类型 LAI。
+fn set_bgc_history(
+    sink: &mut impl HistorySink,
+    record: usize,
+    runtime: &crate::bgc_step::BgcRuntime,
+    s: &colm_core::bgc_state::BgcState,
+) -> Result<()> {
+    let nl = s.dims.nl_soil;
+    let full = s.dims.nl_soil_full;
+    let c = &s.constants;
+    for name in bgc_history_variables(runtime.switches.nitrif) {
+        if let Some((_, values)) = runtime
+            .statics
+            .soil
+            .iter()
+            .find(|(field, _)| *field == name)
+        {
+            sink.layer(name, record, values)?;
+            continue;
+        }
+        if let Some(k) = colm_core::bgc_state::LAI_DIAGNOSTICS
+            .iter()
+            .position(|n| *n == name)
+        {
+            sink.scalar(name, record, s.lai_diagnostics[k])?;
+            continue;
+        }
+        let pool = |prefix: &str| -> Option<i32> {
+            Some(match prefix {
+                "litr1" => c.i_met_lit,
+                "litr2" => c.i_cel_lit,
+                "litr3" => c.i_lig_lit,
+                "soil1" => c.i_soil1,
+                "soil2" => c.i_soil2,
+                "soil3" => c.i_soil3,
+                "cwd" => c.i_cwd,
+                _ => return None,
+            })
+        };
+        if let Some(stem) = name.strip_suffix("_vr") {
+            let (prefix, element) = stem.split_at(stem.len() - 1);
+            if let (Some(index), "c" | "n") = (pool(prefix), element) {
+                let values = if element == "c" {
+                    &s.patch.decomp_cpools_vr
+                } else {
+                    &s.patch.decomp_npools_vr
+                };
+                let start = full * usize::try_from(index - 1).context("pool index")?;
+                sink.layer(name, record, &values[start..start + nl])?;
+                continue;
+            }
+        }
+        let source = match name {
+            "hr" => "decomp_hr",
+            "retrasn" => "retransn",
+            "CONC_O2_UNSAT" => "tconc_o2_unsat",
+            "O2_DECOMP_DEPTH_UNSAT" => "to2_decomp_depth_unsat",
+            other => other,
+        };
+        let values = s
+            .f64_field(source)
+            .with_context(|| format!("BGC history variable {name} has no source {source}"))?;
+        if values.len() == 1 {
+            sink.scalar(name, record, values[0])?;
+        } else {
+            sink.layer(name, record, &values[..nl])?;
+        }
+    }
+    Ok(())
+}
+
 pub fn declare_lct_variables(
     buffer: &mut HistoryBuffers,
     plant_hydraulics: bool,
@@ -1698,6 +1793,8 @@ pub struct HistorySession {
     variably_saturated: bool,
     /// 城市 patch：多声明 [`URBAN_VARIABLES`]。
     urban: bool,
+    /// `DEF_USE_BGC`（与 NITRIF 开关）：多声明 [`bgc_history_variables`]。
+    bgc: Option<bool>,
 }
 
 impl HistorySession {
@@ -1728,6 +1825,7 @@ impl HistorySession {
             plant_hydraulics: false,
             variably_saturated: false,
             urban: false,
+            bgc: None,
         })
     }
 
@@ -2186,8 +2284,12 @@ impl HistorySession {
         let ground = state.surface_temperature_k();
         self.plant_hydraulics = template.plant_hydraulics();
         self.variably_saturated = template.physics.variably_saturated_flow;
+        self.bgc = template.bgc.as_ref().map(|bgc| bgc.switches.nitrif);
         let variably_saturated = self.variably_saturated;
         self.push(end, |accumulator| {
+            if let (Some(runtime), Some(bgc)) = (&template.bgc, &state.bgc) {
+                set_bgc_history(accumulator, 0, runtime, bgc)?;
+            }
             set_lct_snow_state(accumulator, 0, template, state, ground)?;
             set_lct_fluxes(accumulator, 0, &output.water.soil, variably_saturated)?;
             let as_soil = StandardLctSoilOutput {
@@ -2329,6 +2431,9 @@ impl HistorySession {
             declare_lct_variables(&mut buffer, self.plant_hydraulics, self.variably_saturated)?;
             if self.urban {
                 buffer.declare(&URBAN_VARIABLES)?;
+            }
+            if let Some(nitrif) = self.bgc {
+                buffer.declare(&bgc_history_variables(nitrif))?;
             }
             self.open = Some((record.suffix.clone(), buffer));
         }
