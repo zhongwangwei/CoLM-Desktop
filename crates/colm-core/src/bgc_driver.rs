@@ -117,6 +117,22 @@ physics_fields!(
     optional_pft: [irrig_method_p],
 );
 
+impl BgcPhysics {
+    /// 形参声明成 `zi_soi(0:…)` 时的 `zi_soi(k)`（`SoilBiogeochemNLeaching`、`LittVertTransp`）。
+    ///
+    /// driver 传的是全局 `zi_soi(1:nl_soil)`，按序列关联形参 `zi_soi(k)` = 全局 `zi_soi(k+1)`；
+    /// `k ≥ nl_soil` 越界，参考内核里 `MOD_Vars_Global` 的布局是 `zi_soi` 之后紧接 `z_soi`，
+    /// 所以读到的是 `z_soi(k − nl_soil + 1)`。
+    pub fn zi_soi_from_zero(&self, k: usize) -> f64 {
+        let nl = self.zi_soi.len();
+        if k < nl {
+            self.zi_soi[k]
+        } else {
+            self.z_soi[k - nl]
+        }
+    }
+}
+
 macro_rules! pft_constants {
     ($($name:ident),* $(,)?) => {
         /// `MOD_Const_PFT` 里 BGC 用到的按类别参数，下标是 PFT 类别（0 起）。
@@ -279,11 +295,10 @@ pub fn run_stage(stage: &str, step: &mut BgcStep<'_>) -> Result<()> {
         "SoilBiogeochemCompetition" => {
             // driver 在需求与竞争之间内联了 patch 级需求的求和。
             crate::bgc_nutrient::patch_plant_ndemand(step.state, step.physics);
-            crate::bgc_soil_competition::soil_biogeochem_competition(
-                step.state,
-                step.physics,
-                switches,
-            )?
+            gen!(crate::bgc_soil_competition::soil_biogeochem_competition)
+        }
+        "SoilBiogeochemNitrifDenitrif" => {
+            crate::bgc_nitrif::soil_biogeochem_nitrif_denitrif(step.state, step.physics)
         }
         "calc_plant_nutrient_competition_" => {
             crate::bgc_nutrient::plant_nutrient_competition(step.state, step.physics, step.pft)

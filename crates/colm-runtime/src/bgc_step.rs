@@ -157,6 +157,79 @@ impl NdepSource {
     }
 }
 
+/// `MOD_NitrifData`：`DEF_USE_NITRIF` 的月度土壤 O₂ 浓度与分解深度（逐层文件）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct NitrifSource {
+    dir: PathBuf,
+    lat: usize,
+    lon: usize,
+    layers: usize,
+}
+
+impl NitrifSource {
+    /// 网格取自 `nitrif/CONC_O2_UNSAT/CONC_O2_UNSAT_l01.nc`（`init_nitrif_data`）。
+    pub fn open(
+        runtime_dir: &Path,
+        latitude_deg: f64,
+        longitude_deg: f64,
+        layers: usize,
+    ) -> Result<Self> {
+        let dir = runtime_dir.join("nitrif");
+        let path = dir.join("CONC_O2_UNSAT/CONC_O2_UNSAT_l01.nc");
+        let file = netcdf::open(&path)
+            .with_context(|| format!("cannot open the nitrification data {}", path.display()))?;
+        let axis = |name: &str| -> Result<Vec<f64>> {
+            // 坐标是 float，`ncio_read_bcast_serial` 读进 real(r8)：逐个精确扩成双精度。
+            Ok(file
+                .variable(name)
+                .with_context(|| format!("{} has no {name}", path.display()))?
+                .get_values::<f32, _>(..)
+                .with_context(|| format!("cannot read {name} from {}", path.display()))?
+                .into_iter()
+                .map(f64::from)
+                .collect())
+        };
+        let lat = containing_cell(&axis("lat")?, latitude_deg, false)?;
+        let lon = containing_cell(&axis("lon")?, longitude_deg, true)?;
+        Ok(Self {
+            dir,
+            lat,
+            lon,
+            layers,
+        })
+    }
+
+    /// `update_nitrif_data(month)`：返回 `(tCONC_O2_UNSAT, tO2_DECOMP_DEPTH_UNSAT)` 两列。
+    pub fn monthly(&self, month: u8, patchclass: i32) -> Result<(Vec<f64>, Vec<f64>)> {
+        let read = |variable: &str| -> Result<Vec<f64>> {
+            (1..=self.layers)
+                .map(|layer| {
+                    let path = self
+                        .dir
+                        .join(format!("{variable}/{variable}_l{layer:02}.nc"));
+                    let file = netcdf::open(&path)
+                        .with_context(|| format!("cannot open {}", path.display()))?;
+                    let value: f32 = file
+                        .variable(variable)
+                        .with_context(|| format!("{} has no {variable}", path.display()))?
+                        .get_value([usize::from(month) - 1, self.lat, self.lon])
+                        .with_context(|| {
+                            format!("cannot read {variable} from {}", path.display())
+                        })?;
+                    // 非土壤 patch 清零；`< 1E-10` 也清零（`MOD_NitrifData.F90`）。
+                    let value = if patchclass == 0 {
+                        0.0
+                    } else {
+                        f64::from(value)
+                    };
+                    Ok(if value < 1.0e-10 { 0.0 } else { value })
+                })
+                .collect()
+        };
+        Ok((read("CONC_O2_UNSAT")?, read("O2_DECOMP_DEPTH_UNSAT")?))
+    }
+}
+
 /// `grid%define_by_center`：网格边界取相邻中心的中点，返回包含 `x` 的格子。
 fn containing_cell(centers: &[f64], x: f64, periodic: bool) -> Result<usize> {
     ensure!(!centers.is_empty(), "an empty coordinate axis");
@@ -232,6 +305,14 @@ impl TraceWriter {
     }
 }
 
+/// BGC 的外部数据源：氮沉降（总在）与硝化 O₂（`DEF_USE_NITRIF`，附起始月份）。
+pub struct BgcDataSources {
+    pub ndep: NdepSource,
+    /// 启动时读氮沉降用的年份：`adj2end` 之后的起始年（00:00 1 月 1 日起步时是上一年）。
+    pub ndep_start_year: i32,
+    pub nitrif: Option<(NitrifSource, u8)>,
+}
+
 /// 一个 BGC 土壤 patch 的运行期设置。
 pub struct BgcRuntime {
     pub initial: BgcState,
@@ -239,6 +320,8 @@ pub struct BgcRuntime {
     pub switches: BgcSwitches,
     pub statics: BgcStatics,
     pub ndep: NdepSource,
+    /// `DEF_USE_NITRIF` 打开时的 O₂ 数据。
+    pub nitrif: Option<NitrifSource>,
     /// 启动时读氮沉降用的年份：`adj2end` 之后的起始年（00:00 1 月 1 日起步时是上一年）。
     pub ndep_start_year: i32,
     /// `deltim`（秒）。
@@ -264,6 +347,7 @@ impl Clone for BgcRuntime {
             switches: self.switches,
             statics: self.statics.clone(),
             ndep: self.ndep.clone(),
+            nitrif: self.nitrif.clone(),
             ndep_start_year: self.ndep_start_year,
             deltim: self.deltim,
             // 追踪文件只属于第一个实例。
@@ -278,20 +362,32 @@ impl BgcRuntime {
         pft: BgcPftConstants,
         switches: BgcSwitches,
         statics: BgcStatics,
-        ndep: NdepSource,
-        ndep_start_year: i32,
+        sources: BgcDataSources,
         deltim: f64,
     ) -> Result<Self> {
+        let BgcDataSources {
+            ndep,
+            ndep_start_year,
+            nitrif,
+        } = sources;
         // `init_ndep_data_annually`：步进之前就写好 `ndep`/`ndep_to_sminn`。
         let (ndep_value, to_sminn) = ndep.annual(ndep_start_year, statics.patchclass)?;
         initial.patch.ndep[0] = ndep_value;
         initial.patch_flux.ndep_to_sminn[0] = to_sminn;
+        // `init_nitrif_data(ststamp)`：起始时刻所在的月。
+        if let Some((source, month)) = &nitrif {
+            let (conc, depth) = source.monthly(*month, statics.patchclass)?;
+            initial.patch.tconc_o2_unsat.copy_from_slice(&conc);
+            initial.patch.to2_decomp_depth_unsat.copy_from_slice(&depth);
+        }
+        let nitrif = nitrif.map(|(source, _)| source);
         Ok(Self {
             initial,
             pft,
             switches,
             statics,
             ndep,
+            nitrif,
             ndep_start_year,
             deltim,
             trace: Mutex::new(TraceWriter::from_env()?),
@@ -301,6 +397,7 @@ impl BgcRuntime {
     /// 一步：（必要时）更新氮沉降 → `bgc_driver` → 写回物理量。
     pub fn step(
         &self,
+        begin: colm_core::calendar::CalendarTime,
         idate: [i32; 3],
         forcing: &colm_core::RuntimeForcing,
         state: &mut StandardLctSnowSoilState,
@@ -311,6 +408,18 @@ impl BgcRuntime {
             .bgc
             .take()
             .context("a BGC patch needs its BGC state")?;
+        // `update_nitrif_data`：步首所在月与上一步步首所在月不同时（`CoLM.F90:495-501`）。
+        if let Some(source) = &self.nitrif {
+            let month = |time: colm_core::calendar::CalendarTime| {
+                colm_core::calendar::month_day(time).map(|(month, _)| month)
+            };
+            let previous = previous_step_start(begin, deltim);
+            if month(begin)? != month(previous)? {
+                let (conc, depth) = source.monthly(month(begin)?, self.statics.patchclass)?;
+                bgc.patch.tconc_o2_unsat.copy_from_slice(&conc);
+                bgc.patch.to2_decomp_depth_unsat.copy_from_slice(&depth);
+            }
+        }
         if colm_core::bgc_driver::is_end_of_year(idate, deltim) {
             let (ndep, to_sminn) = self.ndep.annual(idate[0], self.statics.patchclass)?;
             bgc.patch.ndep[0] = ndep;
@@ -476,13 +585,36 @@ impl BgcRuntime {
     }
 }
 
+/// `itstamp + int(-deltim)`：上一步的步首。
+fn previous_step_start(
+    begin: colm_core::calendar::CalendarTime,
+    deltim: f64,
+) -> colm_core::calendar::CalendarTime {
+    let step = deltim as i64;
+    let mut seconds = i64::from(begin.seconds) - step;
+    let (mut year, mut day) = (begin.year, i64::from(begin.julian_day));
+    while seconds < 0 {
+        seconds += 86400;
+        day -= 1;
+        if day < 1 {
+            year -= 1;
+            day = if colm_core::calendar::is_leap_year(year) {
+                366
+            } else {
+                365
+            };
+        }
+    }
+    colm_core::calendar::CalendarTime {
+        year,
+        julian_day: u16::try_from(day).expect("julian day"),
+        seconds: u32::try_from(seconds).expect("seconds of day"),
+    }
+}
+
 /// 未移植的 BGC 分支：遇到就拒绝，而不是静默跑成另一个模式。
 pub fn refuse_unported(switches: BgcSwitches) -> Result<()> {
     let unported = [
-        (
-            switches.nitrif,
-            "DEF_USE_NITRIF (nitrification/denitrification and its nitrif data)",
-        ),
         (switches.fire, "DEF_USE_FIRE"),
         (
             switches.sasu || switches.diag_matrix,

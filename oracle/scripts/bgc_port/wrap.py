@@ -61,7 +61,7 @@ while True:
     ls = body.rfind("\n", 0, i) + 1
     body = body[:ls] + body[e + 2:]
 
-ASSIGN = r"^\s*{v}\s*(=|\+=|-=|\*=|/=)\s"
+ASSIGN = r"^\s*{v}(\[[^\]]*\])?\s*(=|\+=|-=|\*=|/=)\s"
 
 
 def code(line):
@@ -101,7 +101,7 @@ def tidy(body):
                     stack.pop()
             if c.endswith("{"):
                 stack.append("for" if c.startswith("for ") or ".fold(" in c else "block")
-        compound = any(re.match(rf"^\s*{v}\s*(\+=|-=|\*=|/=)", code(lines[k])) for k in assigns)
+        compound = any(re.match(rf"^\s*{v}(\[|\s*(\+=|-=|\*=|/=))", code(lines[k])) for k in assigns)
         init = "=" in decl.split(":")[0] if ":" in decl else True
         count = len(assigns) + (1 if re.match(rf"^\s*let mut {v}\s*=", decl) else 0)
         if count <= 1 and not in_loop and not compound:

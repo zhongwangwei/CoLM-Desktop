@@ -19,10 +19,6 @@ fn unverified_branches_are_refused() {
     assert!(refuse_unported(BgcSwitches::default()).is_ok());
     for switches in [
         BgcSwitches {
-            nitrif: true,
-            ..BgcSwitches::default()
-        },
-        BgcSwitches {
             fire: true,
             ..BgcSwitches::default()
         },
@@ -37,4 +33,26 @@ fn unverified_branches_are_refused() {
     ] {
         assert!(refuse_unported(switches).is_err(), "{switches:?}");
     }
+}
+
+/// `itstamp + int(-deltim)`：跨日、跨年回退。
+#[test]
+fn the_previous_step_start_crosses_day_and_year() {
+    let time = |year, julian_day, seconds| colm_core::calendar::CalendarTime {
+        year,
+        julian_day,
+        seconds,
+    };
+    assert_eq!(
+        previous_step_start(time(2010, 32, 1800), 1800.0),
+        time(2010, 32, 0)
+    );
+    assert_eq!(
+        previous_step_start(time(2010, 32, 0), 1800.0),
+        time(2010, 31, 84600)
+    );
+    assert_eq!(
+        previous_step_start(time(2013, 1, 0), 1800.0),
+        time(2012, 366, 84600)
+    );
 }

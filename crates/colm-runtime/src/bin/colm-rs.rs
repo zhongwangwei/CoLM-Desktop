@@ -350,13 +350,30 @@ fn assemble_bgc(
         year
     };
     let deltim = real_field(document, "DEF_simulation_time%timestep")?;
+    // `init_nitrif_data(ststamp)`：起始时刻（未经 adj2end）所在的月。
+    let nitrif = if switches.nitrif {
+        Some((
+            colm_runtime::bgc_step::NitrifSource::open(
+                &runtime_dir,
+                degrees(statics.patchlatr),
+                degrees(statics.patchlonr),
+                layers,
+            )?,
+            u8::try_from(month).context("DEF_simulation_time%start_month is not a month")?,
+        ))
+    } else {
+        None
+    };
     colm_runtime::bgc_step::BgcRuntime::new(
         initial,
         colm_runtime::bgc::bgc_pft_constants(document)?,
         switches,
         statics,
-        ndep,
-        ndep_start_year,
+        colm_runtime::bgc_step::BgcDataSources {
+            ndep,
+            ndep_start_year,
+            nitrif,
+        },
         deltim,
     )
 }

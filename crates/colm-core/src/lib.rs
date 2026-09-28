@@ -81,6 +81,7 @@ pub mod bgc_litt_vert_transp;
 pub mod bgc_n_dynamics;
 pub mod bgc_n_leaching;
 pub mod bgc_n_state_update;
+pub mod bgc_nitrif;
 pub mod bgc_nutrient;
 pub mod bgc_phenology;
 pub mod bgc_resp;

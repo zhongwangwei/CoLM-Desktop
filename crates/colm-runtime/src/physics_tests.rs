@@ -474,14 +474,23 @@ fn bgc_switches_follow_the_namelist_and_unverified_branches_are_refused() {
     let switches = ported.bgc.expect("BGC switches");
     assert!(!switches.nitrif && !switches.fire && !switches.crop);
 
-    // `DEF_USE_NITRIF` 的声明默认值是 .true.，那条分支还没有逐位验证。
+    // `DEF_USE_NITRIF` 的声明默认值是 .true.：默认 BGC 配置走硝化分支。
     let nitrif = land_physics_parameters(
         &case_with("DEF_USE_LCT=.false.\nDEF_USE_PFT=.true.\nDEF_USE_BGC=.true."),
         LandCoverScheme::Igbp,
         HEIGHTS,
     )
-    .expect_err("the nitrification branch is not verified");
-    assert!(nitrif.to_string().contains("DEF_USE_NITRIF"), "{nitrif}");
+    .unwrap();
+    assert!(nitrif.bgc.expect("BGC switches").nitrif);
+    let fire = land_physics_parameters(
+        &case_with(
+            "DEF_USE_LCT=.false.\nDEF_USE_PFT=.true.\nDEF_USE_BGC=.true.\nDEF_USE_FIRE=.true.",
+        ),
+        LandCoverScheme::Igbp,
+        HEIGHTS,
+    )
+    .expect_err("the fire branch is not verified");
+    assert!(fire.to_string().contains("DEF_USE_FIRE"), "{fire}");
 
     let off = land_physics_parameters(&case_with(""), LandCoverScheme::Igbp, HEIGHTS).unwrap();
     assert!(off.bgc.is_none());

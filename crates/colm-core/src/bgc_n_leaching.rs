@@ -30,11 +30,11 @@ pub fn soil_biogeochem_n_leaching(
     }
     surface_water = 0.0;
     for j in 0..d.nl_soil {
-        if p.zi_soi[j] <= depth_runoff_nloss {
+        if p.zi_soi_from_zero(j + 1) <= depth_runoff_nloss {
             surface_water += p.wliq_soisno[j];
-        } else if p.zi_soi[j - 1] < depth_runoff_nloss {
+        } else if p.zi_soi_from_zero(j) < depth_runoff_nloss {
             surface_water = p.wliq_soisno[j].mul_add(
-                (depth_runoff_nloss - p.zi_soi[j - 1]) / p.dz_soi[j],
+                (depth_runoff_nloss - p.zi_soi_from_zero(j)) / p.dz_soi[j],
                 surface_water,
             );
         }
@@ -73,20 +73,20 @@ pub fn soil_biogeochem_n_leaching(
             s.patch_flux.smin_no3_leached_vr[j] =
                 s.patch_flux.smin_no3_leached_vr[j].min(s.patch.smin_no3_vr[j] / p.deltim);
             s.patch_flux.smin_no3_leached_vr[j] = s.patch_flux.smin_no3_leached_vr[j].max(0.0);
-            if p.zi_soi[j] <= depth_runoff_nloss {
+            if p.zi_soi_from_zero(j + 1) <= depth_runoff_nloss {
                 if surface_water > 0.0 {
                     s.patch_flux.smin_no3_runoff_vr[j] =
                         disn_conc * p.rsur[0] * p.wliq_soisno[j] / (surface_water * p.dz_soi[j]);
                 } else {
                     s.patch_flux.smin_no3_runoff_vr[j] = 0.0;
                 }
-            } else if p.zi_soi[j - 1] < depth_runoff_nloss {
+            } else if p.zi_soi_from_zero(j) < depth_runoff_nloss {
                 if surface_water > 0.0 {
                     s.patch_flux.smin_no3_runoff_vr[j] = disn_conc
                         * p.rsur[0]
                         * p.wliq_soisno[j]
-                        * ((depth_runoff_nloss - p.zi_soi[j - 1]) / p.dz_soi[j])
-                        / (surface_water * (depth_runoff_nloss - p.zi_soi[j - 1]));
+                        * ((depth_runoff_nloss - p.zi_soi_from_zero(j)) / p.dz_soi[j])
+                        / (surface_water * (depth_runoff_nloss - p.zi_soi_from_zero(j)));
                 } else {
                     s.patch_flux.smin_no3_runoff_vr[j] = 0.0;
                 }

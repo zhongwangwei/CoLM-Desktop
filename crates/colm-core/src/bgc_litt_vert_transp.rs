@@ -56,7 +56,7 @@ pub fn soil_biogeochem_litt_vert_transp(
 
     // 见模块文档：越界读按参考内核的布局取值。
     let z = |k: usize| if k <= nl { p.z_soi[k - 1] } else { 0.0 };
-    let zi = |k: usize| if k < nl { p.zi_soi[k] } else { p.z_soi[k - nl] };
+    let zi = |k: usize| p.zi_soi_from_zero(k);
     let dz = |k: usize| p.dz_soi[k - 1];
 
     let altmax = s.patch.altmax[0].max(s.patch.altmax_lastyear[0]);

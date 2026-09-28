@@ -1,129 +1,404 @@
 //! `MOD_BGC_Soil_BiogeochemCompetition.F90`：植物与微生物分配土壤矿质 N。
 //!
-//! 逐层积分都被收缩成 FMA 链；剩余矿质 N 是 `max(FNMA(Δt, immob + plant, sminn), 0)`。
+//! **生成文件，勿手改**：由 `oracle/scripts/bgc_port/regen.py` 从上游 Fortran 与其 GIMPLE 转写
+//! （`a ± b·c` 按 GCC 的规则收缩成 FMA，乘积被 CSE 共享到别的基本块的行不收缩），再由逐过程回放
+//! 与 Fortran 追踪逐位核对。`DEF_USE_SASU`/`DiagMatrix`、作物分支照抄，尚无回放覆盖。
 
 // 逐层循环的 `j` 同时索引若干按列主序展平的数组，保留下标写法以便与上游逐行对照。
 #![allow(clippy::needless_range_loop)]
+// 嵌套 IF 按上游结构保留，便于逐行对照。
+#![allow(clippy::collapsible_if, clippy::collapsible_else_if)]
 
-use anyhow::{bail, Result};
-
-use crate::bgc_driver::{BgcPhysics, BgcSwitches, NPCROPMIN};
+use crate::bgc_driver::{BgcPftConstants, BgcPhysics, BgcSwitches, NPCROPMIN};
 use crate::bgc_state::BgcState;
 
-/// `SoilBiogeochemCompetition`。
+/// `SoilBiogeochemCompetition`（NITRIF 开时 NH₄/NO₃ 分开竞争，关时合并为矿质 N）。
 pub fn soil_biogeochem_competition(
     s: &mut BgcState,
     p: &BgcPhysics,
-    switches: BgcSwitches,
-) -> Result<()> {
-    if switches.nitrif {
-        bail!("SoilBiogeochemCompetition with DEF_USE_NITRIF is not ported yet");
-    }
-    let nl = s.dims.nl_soil;
-    let dz = &p.dz_soi[..nl];
-    let deltim = p.deltim;
-    let bdnr = s.constants.bdnr;
-    let v = &mut s.patch;
-    let f = &mut s.patch_flux;
-    let plant_ndemand = f.plant_ndemand[0];
-
-    let sminn_tot = (0..nl).fold(0.0, |acc, j| v.sminn_vr[j].mul_add(dz[j], acc));
-    let nuptake_prof: Vec<f64> = (0..nl)
-        .map(|j| {
+    _c: &BgcPftConstants,
+    sw: BgcSwitches,
+) {
+    let d = s.dims;
+    let npft = p.pftclass.len();
+    let mut fpi_no3_vr = vec![0.0; d.nl_soil_full + 2];
+    let mut fpi_nh4_vr = vec![0.0; d.nl_soil_full + 2];
+    let mut sum_nh4_demand = vec![0.0; d.nl_soil_full + 2];
+    let mut sum_nh4_demand_scaled = vec![0.0; d.nl_soil_full + 2];
+    let mut sum_no3_demand = vec![0.0; d.nl_soil_full + 2];
+    let mut sum_no3_demand_scaled = vec![0.0; d.nl_soil_full + 2];
+    let mut sum_ndemand_vr = vec![0.0; d.nl_soil_full + 2];
+    let mut nuptake_prof = vec![0.0; d.nl_soil_full + 2];
+    let mut sminn_tot: f64;
+    let mut nlimit = vec![0; d.nl_soil_full + 2];
+    let mut nlimit_no3 = vec![0; d.nl_soil_full + 2];
+    let mut nlimit_nh4 = vec![0; d.nl_soil_full + 2];
+    let mut residual_sminn_vr = vec![0.0; d.nl_soil_full + 2];
+    let mut residual_sminn: f64;
+    let mut residual_smin_nh4_vr = vec![0.0; d.nl_soil_full + 2];
+    let mut residual_smin_no3_vr = vec![0.0; d.nl_soil_full + 2];
+    let mut residual_smin_nh4: f64;
+    let mut residual_smin_no3: f64;
+    let mut residual_plant_ndemand: f64;
+    let mut actual_immob: f64;
+    let mut potential_immob: f64;
+    if !sw.nitrif {
+        sminn_tot = 0.0;
+        for j in 0..d.nl_soil {
+            sminn_tot = s.patch.sminn_vr[j].mul_add(p.dz_soi[j], sminn_tot);
+        }
+        for j in 0..d.nl_soil {
             if sminn_tot > 0.0 {
-                v.sminn_vr[j] / sminn_tot
+                nuptake_prof[j] = s.patch.sminn_vr[j] / sminn_tot;
             } else {
-                v.nfixation_prof[j]
+                nuptake_prof[j] = s.patch.nfixation_prof[j];
             }
-        })
-        .collect();
-    let mut sum_ndemand_vr: Vec<f64> = (0..nl)
-        .map(|j| plant_ndemand.mul_add(nuptake_prof[j], f.potential_immob_vr[j]))
-        .collect();
-    let mut nlimit = vec![0; nl];
-    for j in 0..nl {
-        if sum_ndemand_vr[j] * deltim < v.sminn_vr[j] {
-            nlimit[j] = 0;
-            v.fpi_vr[j] = 1.0;
-            f.actual_immob_vr[j] = f.potential_immob_vr[j];
-            f.sminn_to_plant_vr[j] = plant_ndemand * nuptake_prof[j];
-        } else {
-            nlimit[j] = 1;
-            f.actual_immob_vr[j] = if sum_ndemand_vr[j] > 0.0 {
-                (v.sminn_vr[j] / deltim) * (f.potential_immob_vr[j] / sum_ndemand_vr[j])
-            } else {
-                0.0
-            };
-            v.fpi_vr[j] = if f.potential_immob_vr[j] > 0.0 {
-                f.actual_immob_vr[j] / f.potential_immob_vr[j]
-            } else {
-                0.0
-            };
-            f.sminn_to_plant_vr[j] = v.sminn_vr[j] / deltim - f.actual_immob_vr[j];
         }
-        if switches.nostressnitrogen && p.pftclass.iter().any(|ivt| *ivt >= NPCROPMIN) {
-            nlimit[j] = 1;
-            v.fpi_vr[j] = 1.0;
-            f.actual_immob_vr[j] = f.potential_immob_vr[j];
-            f.sminn_to_plant_vr[j] = plant_ndemand * nuptake_prof[j];
-            f.supplement_to_sminn_vr[j] = sum_ndemand_vr[j] - v.sminn_vr[j] / deltim;
+        for j in 0..d.nl_soil {
+            sum_ndemand_vr[j] = s.patch_flux.plant_ndemand[0]
+                .mul_add(nuptake_prof[j], s.patch_flux.potential_immob_vr[j]);
         }
-    }
-
-    // 第一次积分从模块变量的现值（CNZeroFluxes 清过零）累加。
-    for j in 0..nl {
-        f.sminn_to_plant[0] = f.sminn_to_plant_vr[j].mul_add(dz[j], f.sminn_to_plant[0]);
-    }
-    let residual_plant_ndemand = plant_ndemand - f.sminn_to_plant[0];
-    let mut residual_sminn = 0.0;
-    let mut residual_sminn_vr = vec![0.0; nl];
-    for j in 0..nl {
-        if residual_plant_ndemand > 0.0 {
-            if nlimit[j] == 0 {
-                residual_sminn_vr[j] = (-deltim)
-                    .mul_add(f.actual_immob_vr[j] + f.sminn_to_plant_vr[j], v.sminn_vr[j])
+        for j in 0..d.nl_soil {
+            if sum_ndemand_vr[j] * p.deltim < s.patch.sminn_vr[j] {
+                nlimit[j] = 0;
+                s.patch.fpi_vr[j] = 1.0;
+                s.patch_flux.actual_immob_vr[j] = s.patch_flux.potential_immob_vr[j];
+                s.patch_flux.sminn_to_plant_vr[j] = s.patch_flux.plant_ndemand[0] * nuptake_prof[j];
+            } else {
+                nlimit[j] = 1;
+                if sum_ndemand_vr[j] > 0.0 {
+                    s.patch_flux.actual_immob_vr[j] = (s.patch.sminn_vr[j] / p.deltim)
+                        * (s.patch_flux.potential_immob_vr[j] / sum_ndemand_vr[j]);
+                } else {
+                    s.patch_flux.actual_immob_vr[j] = 0.0;
+                }
+                if s.patch_flux.potential_immob_vr[j] > 0.0 {
+                    s.patch.fpi_vr[j] =
+                        s.patch_flux.actual_immob_vr[j] / s.patch_flux.potential_immob_vr[j];
+                } else {
+                    s.patch.fpi_vr[j] = 0.0;
+                }
+                s.patch_flux.sminn_to_plant_vr[j] =
+                    (s.patch.sminn_vr[j] / p.deltim) - s.patch_flux.actual_immob_vr[j];
+            }
+            if sw.nostressnitrogen {
+                for m in 0..npft {
+                    let ivt = p.pftclass[m];
+                    if ivt >= NPCROPMIN {
+                        nlimit[j] = 1;
+                        s.patch.fpi_vr[j] = 1.0;
+                        s.patch_flux.actual_immob_vr[j] = s.patch_flux.potential_immob_vr[j];
+                        s.patch_flux.sminn_to_plant_vr[j] =
+                            s.patch_flux.plant_ndemand[0] * nuptake_prof[j];
+                        s.patch_flux.supplement_to_sminn_vr[j] =
+                            sum_ndemand_vr[j] - (s.patch.sminn_vr[j] / p.deltim);
+                    }
+                }
+            }
+        }
+        for j in 0..d.nl_soil {
+            s.patch_flux.sminn_to_plant[0] = s.patch_flux.sminn_to_plant_vr[j]
+                .mul_add(p.dz_soi[j], s.patch_flux.sminn_to_plant[0]);
+        }
+        residual_sminn = 0.0;
+        residual_plant_ndemand = s.patch_flux.plant_ndemand[0] - s.patch_flux.sminn_to_plant[0];
+        for j in 0..d.nl_soil {
+            if residual_plant_ndemand > 0.0 {
+                if nlimit[j] == 0 {
+                    residual_sminn_vr[j] = ((-(s.patch_flux.actual_immob_vr[j]
+                        + s.patch_flux.sminn_to_plant_vr[j]))
+                        .mul_add(p.deltim, s.patch.sminn_vr[j]))
                     .max(0.0);
-                residual_sminn = residual_sminn_vr[j].mul_add(dz[j], residual_sminn);
-            } else {
-                residual_sminn_vr[j] = 0.0;
+                    residual_sminn = residual_sminn_vr[j].mul_add(p.dz_soi[j], residual_sminn);
+                } else {
+                    residual_sminn_vr[j] = 0.0;
+                }
             }
         }
-    }
-    for j in 0..nl {
-        if residual_plant_ndemand > 0.0 && residual_sminn > 0.0 && nlimit[j] == 0 {
-            f.sminn_to_plant_vr[j] += residual_sminn_vr[j]
-                * ((residual_plant_ndemand * deltim) / residual_sminn).min(1.0)
-                / deltim;
+        for j in 0..d.nl_soil {
+            if residual_plant_ndemand > 0.0 && residual_sminn > 0.0 && nlimit[j] == 0 {
+                s.patch_flux.sminn_to_plant_vr[j] += residual_sminn_vr[j]
+                    * ((residual_plant_ndemand * p.deltim) / residual_sminn).min(1.0)
+                    / p.deltim;
+            }
+        }
+        s.patch_flux.sminn_to_plant[0] = 0.0;
+        for j in 0..d.nl_soil {
+            s.patch_flux.sminn_to_plant[0] = s.patch_flux.sminn_to_plant_vr[j]
+                .mul_add(p.dz_soi[j], s.patch_flux.sminn_to_plant[0]);
+            sum_ndemand_vr[j] =
+                s.patch_flux.potential_immob_vr[j] + s.patch_flux.sminn_to_plant_vr[j];
+        }
+        for j in 0..d.nl_soil {
+            if (s.patch_flux.sminn_to_plant_vr[j] + s.patch_flux.actual_immob_vr[j]) * p.deltim
+                < s.patch.sminn_vr[j]
+            {
+                s.patch_flux.sminn_to_denit_excess_vr[j] = (s.constants.bdnr * p.deltim / 86400.0
+                    * ((s.patch.sminn_vr[j] / p.deltim) - sum_ndemand_vr[j]))
+                    .max(0.0);
+            } else {
+                s.patch_flux.sminn_to_denit_excess_vr[j] = 0.0;
+            }
+        }
+        actual_immob = 0.0;
+        potential_immob = 0.0;
+        for j in 0..d.nl_soil {
+            actual_immob = s.patch_flux.actual_immob_vr[j].mul_add(p.dz_soi[j], actual_immob);
+            potential_immob =
+                s.patch_flux.potential_immob_vr[j].mul_add(p.dz_soi[j], potential_immob);
+        }
+        if s.patch_flux.plant_ndemand[0] > 0.0 {
+            s.patch.fpg[0] = s.patch_flux.sminn_to_plant[0] / s.patch_flux.plant_ndemand[0];
+        } else {
+            s.patch.fpg[0] = 1.0;
+        }
+        if potential_immob > 0.0 {
+            s.patch.fpi[0] = actual_immob / potential_immob;
+        } else {
+            s.patch.fpi[0] = 1.0;
+        }
+    } else {
+        sminn_tot = 0.0;
+        for j in 0..d.nl_soil {
+            sminn_tot =
+                (s.patch.smin_no3_vr[j] + s.patch.smin_nh4_vr[j]).mul_add(p.dz_soi[j], sminn_tot);
+        }
+        for j in 0..d.nl_soil {
+            if sminn_tot > 0.0 {
+                nuptake_prof[j] = s.patch.sminn_vr[j] / sminn_tot;
+            } else {
+                nuptake_prof[j] = s.patch.nfixation_prof[j];
+            }
+        }
+        for j in 0..d.nl_soil {
+            sum_nh4_demand[j] = s.patch_flux.plant_ndemand[0] * nuptake_prof[j]
+                + s.patch_flux.potential_immob_vr[j]
+                + s.patch_flux.pot_f_nit_vr[j]; // 无 FMA（上游第 232 行，乘积被 CSE 共享）
+            sum_nh4_demand_scaled[j] =
+                s.patch_flux.plant_ndemand[0] * nuptake_prof[j] * s.constants.compet_plant_nh4
+                    + s.patch_flux.potential_immob_vr[j] * s.constants.compet_decomp_nh4
+                    + s.patch_flux.pot_f_nit_vr[j] * s.constants.compet_nit; // 无 FMA（上游第 233 行，乘积被 CSE 共享）
+            if sum_nh4_demand[j] * p.deltim < s.patch.smin_nh4_vr[j] {
+                nlimit_nh4[j] = 0;
+                fpi_nh4_vr[j] = 1.0;
+                s.patch_flux.actual_immob_nh4_vr[j] = s.patch_flux.potential_immob_vr[j];
+                s.patch_flux.f_nit_vr[j] = s.patch_flux.pot_f_nit_vr[j];
+                s.patch_flux.smin_nh4_to_plant_vr[j] =
+                    s.patch_flux.plant_ndemand[0] * nuptake_prof[j];
+            } else {
+                nlimit_nh4[j] = 1;
+                if sum_nh4_demand[j] > 0.0 {
+                    s.patch_flux.actual_immob_nh4_vr[j] = ((s.patch.smin_nh4_vr[j] / p.deltim)
+                        * (s.patch_flux.potential_immob_vr[j] * s.constants.compet_decomp_nh4
+                            / sum_nh4_demand_scaled[j]))
+                        .min(s.patch_flux.potential_immob_vr[j]);
+                    s.patch_flux.f_nit_vr[j] = ((s.patch.smin_nh4_vr[j] / p.deltim)
+                        * (s.patch_flux.pot_f_nit_vr[j] * s.constants.compet_nit
+                            / sum_nh4_demand_scaled[j]))
+                        .min(s.patch_flux.pot_f_nit_vr[j]);
+                    s.patch_flux.smin_nh4_to_plant_vr[j] = ((s.patch.smin_nh4_vr[j] / p.deltim)
+                        * (s.patch_flux.plant_ndemand[0]
+                            * nuptake_prof[j]
+                            * s.constants.compet_plant_nh4
+                            / sum_nh4_demand_scaled[j]))
+                        .min(s.patch_flux.plant_ndemand[0] * nuptake_prof[j]);
+                } else {
+                    s.patch_flux.actual_immob_nh4_vr[j] = 0.0;
+                    s.patch_flux.smin_nh4_to_plant_vr[j] = 0.0;
+                    s.patch_flux.f_nit_vr[j] = 0.0;
+                }
+                if s.patch_flux.potential_immob_vr[j] > 0.0 {
+                    fpi_nh4_vr[j] =
+                        s.patch_flux.actual_immob_nh4_vr[j] / s.patch_flux.potential_immob_vr[j];
+                } else {
+                    fpi_nh4_vr[j] = 0.0;
+                }
+            }
+            sum_no3_demand[j] = (s.patch_flux.plant_ndemand[0] * nuptake_prof[j]
+                - s.patch_flux.smin_nh4_to_plant_vr[j])
+                + (s.patch_flux.potential_immob_vr[j] - s.patch_flux.actual_immob_nh4_vr[j])
+                + s.patch_flux.pot_f_denit_vr[j]; // 无 FMA（上游第 279 行，乘积被 CSE 共享）
+            sum_no3_demand_scaled[j] = (s.patch_flux.plant_ndemand[0] * nuptake_prof[j]
+                - s.patch_flux.smin_nh4_to_plant_vr[j])
+                * s.constants.compet_plant_no3
+                + (s.patch_flux.potential_immob_vr[j] - s.patch_flux.actual_immob_nh4_vr[j])
+                    * s.constants.compet_decomp_no3
+                + s.patch_flux.pot_f_denit_vr[j] * s.constants.compet_denit; // 无 FMA（上游第 281 行，乘积被 CSE 共享）
+            if sum_no3_demand[j] * p.deltim < s.patch.smin_no3_vr[j] {
+                nlimit_no3[j] = 0;
+                fpi_no3_vr[j] = 1.0 - fpi_nh4_vr[j];
+                s.patch_flux.actual_immob_no3_vr[j] =
+                    s.patch_flux.potential_immob_vr[j] - s.patch_flux.actual_immob_nh4_vr[j];
+                s.patch_flux.f_denit_vr[j] = s.patch_flux.pot_f_denit_vr[j];
+                s.patch_flux.smin_no3_to_plant_vr[j] = s.patch_flux.plant_ndemand[0]
+                    * nuptake_prof[j]
+                    - s.patch_flux.smin_nh4_to_plant_vr[j]; // 无 FMA（上游第 295 行，乘积被 CSE 共享）
+            } else {
+                nlimit_no3[j] = 1;
+                if sum_no3_demand[j] > 0.0 {
+                    s.patch_flux.actual_immob_no3_vr[j] = ((s.patch.smin_no3_vr[j] / p.deltim)
+                        * ((s.patch_flux.potential_immob_vr[j]
+                            - s.patch_flux.actual_immob_nh4_vr[j])
+                            * s.constants.compet_decomp_no3
+                            / sum_no3_demand_scaled[j]))
+                        .min(
+                            s.patch_flux.potential_immob_vr[j]
+                                - s.patch_flux.actual_immob_nh4_vr[j],
+                        );
+                    s.patch_flux.smin_no3_to_plant_vr[j] = ((s.patch.smin_no3_vr[j] / p.deltim)
+                        * ((s.patch_flux.plant_ndemand[0] * nuptake_prof[j]
+                            - s.patch_flux.smin_nh4_to_plant_vr[j])
+                            * s.constants.compet_plant_no3
+                            / sum_no3_demand_scaled[j]))
+                        .min(
+                            s.patch_flux.plant_ndemand[0] * nuptake_prof[j]
+                                - s.patch_flux.smin_nh4_to_plant_vr[j],
+                        ); // 无 FMA（上游第 308 行，乘积被 CSE 共享）
+                    s.patch_flux.f_denit_vr[j] = ((s.patch.smin_no3_vr[j] / p.deltim)
+                        * (s.patch_flux.pot_f_denit_vr[j] * s.constants.compet_denit
+                            / sum_no3_demand_scaled[j]))
+                        .min(s.patch_flux.pot_f_denit_vr[j]);
+                } else {
+                    s.patch_flux.actual_immob_no3_vr[j] = 0.0;
+                    s.patch_flux.smin_no3_to_plant_vr[j] = 0.0;
+                    s.patch_flux.f_denit_vr[j] = 0.0;
+                }
+                if s.patch_flux.potential_immob_vr[j] > 0.0 {
+                    fpi_no3_vr[j] =
+                        s.patch_flux.actual_immob_no3_vr[j] / s.patch_flux.potential_immob_vr[j];
+                } else {
+                    fpi_no3_vr[j] = 0.0;
+                }
+            }
+            s.patch_flux.f_n2o_nit_vr[j] =
+                s.patch_flux.f_nit_vr[j] * s.constants.nitrif_n2o_loss_frac;
+            s.patch_flux.f_n2o_denit_vr[j] =
+                s.patch_flux.f_denit_vr[j] / (1.0 + s.patch_flux.n2_n2o_ratio_denit_vr[j]);
+            if sw.nostressnitrogen {
+                for m in 0..npft {
+                    let ivt = p.pftclass[m];
+                    if ivt >= NPCROPMIN {
+                        if fpi_no3_vr[j] + fpi_nh4_vr[j] < 1.0 {
+                            fpi_nh4_vr[j] = 1.0 - fpi_no3_vr[j];
+                            s.patch_flux.supplement_to_sminn_vr[j] =
+                                (s.patch_flux.potential_immob_vr[j]
+                                    - s.patch_flux.actual_immob_no3_vr[j])
+                                    - s.patch_flux.actual_immob_nh4_vr[j];
+                            s.patch_flux.actual_immob_nh4_vr[j] = s.patch_flux.potential_immob_vr
+                                [j]
+                                - s.patch_flux.actual_immob_no3_vr[j];
+                        }
+                        if s.patch_flux.smin_no3_to_plant_vr[j]
+                            + s.patch_flux.smin_nh4_to_plant_vr[j]
+                            < s.patch_flux.plant_ndemand[0] * nuptake_prof[j]
+                        {
+                            s.patch_flux.supplement_to_sminn_vr[j] =
+                                s.patch_flux.supplement_to_sminn_vr[j]
+                                    + (s.patch_flux.plant_ndemand[0] * nuptake_prof[j]
+                                        - s.patch_flux.smin_no3_to_plant_vr[j])
+                                    - s.patch_flux.smin_nh4_to_plant_vr[j]; // 无 FMA（上游第 355 行，乘积被 CSE 共享）
+                            s.patch_flux.smin_nh4_to_plant_vr[j] = s.patch_flux.plant_ndemand[0]
+                                * nuptake_prof[j]
+                                - s.patch_flux.smin_no3_to_plant_vr[j]; // 无 FMA（上游第 357 行，乘积被 CSE 共享）
+                        }
+                        s.patch_flux.sminn_to_plant_vr[j] = s.patch_flux.smin_no3_to_plant_vr[j]
+                            + s.patch_flux.smin_nh4_to_plant_vr[j];
+                    }
+                }
+            }
+            s.patch.fpi_vr[j] = fpi_no3_vr[j] + fpi_nh4_vr[j];
+            s.patch_flux.sminn_to_plant_vr[j] =
+                s.patch_flux.smin_no3_to_plant_vr[j] + s.patch_flux.smin_nh4_to_plant_vr[j];
+            s.patch_flux.actual_immob_vr[j] =
+                s.patch_flux.actual_immob_no3_vr[j] + s.patch_flux.actual_immob_nh4_vr[j];
+        }
+        s.patch_flux.sminn_to_plant[0] = 0.0;
+        for j in 0..d.nl_soil {
+            s.patch_flux.sminn_to_plant[0] = s.patch_flux.sminn_to_plant_vr[j]
+                .mul_add(p.dz_soi[j], s.patch_flux.sminn_to_plant[0]);
+        }
+        residual_plant_ndemand = s.patch_flux.plant_ndemand[0] - s.patch_flux.sminn_to_plant[0];
+        residual_smin_nh4 = 0.0;
+        for j in 0..d.nl_soil {
+            if residual_plant_ndemand > 0.0 {
+                if nlimit_nh4[j] == 0 {
+                    residual_smin_nh4_vr[j] = ((-(s.patch_flux.actual_immob_nh4_vr[j]
+                        + s.patch_flux.smin_nh4_to_plant_vr[j]
+                        + s.patch_flux.f_nit_vr[j]))
+                        .mul_add(p.deltim, s.patch.smin_nh4_vr[j]))
+                    .max(0.0);
+                    residual_smin_nh4 =
+                        residual_smin_nh4_vr[j].mul_add(p.dz_soi[j], residual_smin_nh4);
+                } else {
+                    residual_smin_nh4_vr[j] = 0.0;
+                }
+            }
+        }
+        for j in 0..d.nl_soil {
+            if residual_plant_ndemand > 0.0 {
+                if residual_smin_nh4 > 0.0 && nlimit_nh4[j] == 0 {
+                    s.patch_flux.smin_nh4_to_plant_vr[j] += residual_smin_nh4_vr[j]
+                        * ((residual_plant_ndemand * p.deltim) / residual_smin_nh4).min(1.0)
+                        / p.deltim;
+                }
+            }
+        }
+        s.patch_flux.sminn_to_plant[0] = 0.0;
+        for j in 0..d.nl_soil {
+            s.patch_flux.sminn_to_plant_vr[j] =
+                s.patch_flux.smin_nh4_to_plant_vr[j] + s.patch_flux.smin_no3_to_plant_vr[j];
+            s.patch_flux.sminn_to_plant[0] = (s.patch_flux.sminn_to_plant_vr[j])
+                .mul_add(p.dz_soi[j], s.patch_flux.sminn_to_plant[0]);
+        }
+        residual_plant_ndemand = s.patch_flux.plant_ndemand[0] - s.patch_flux.sminn_to_plant[0];
+        residual_smin_no3 = 0.0;
+        for j in 0..d.nl_soil {
+            if residual_plant_ndemand > 0.0 {
+                if nlimit_no3[j] == 0 {
+                    residual_smin_no3_vr[j] = ((-(s.patch_flux.actual_immob_no3_vr[j]
+                        + s.patch_flux.smin_no3_to_plant_vr[j]
+                        + s.patch_flux.f_denit_vr[j]))
+                        .mul_add(p.deltim, s.patch.smin_no3_vr[j]))
+                    .max(0.0);
+                    residual_smin_no3 =
+                        residual_smin_no3_vr[j].mul_add(p.dz_soi[j], residual_smin_no3);
+                } else {
+                    residual_smin_no3_vr[j] = 0.0;
+                }
+            }
+        }
+        for j in 0..d.nl_soil {
+            if residual_plant_ndemand > 0.0 {
+                if residual_smin_no3 > 0.0 && nlimit_no3[j] == 0 {
+                    s.patch_flux.smin_no3_to_plant_vr[j] += residual_smin_no3_vr[j]
+                        * ((residual_plant_ndemand * p.deltim) / residual_smin_no3).min(1.0)
+                        / p.deltim;
+                }
+            }
+        }
+        s.patch_flux.sminn_to_plant[0] = 0.0;
+        for j in 0..d.nl_soil {
+            s.patch_flux.sminn_to_plant_vr[j] =
+                s.patch_flux.smin_nh4_to_plant_vr[j] + s.patch_flux.smin_no3_to_plant_vr[j];
+            s.patch_flux.sminn_to_plant[0] = (s.patch_flux.sminn_to_plant_vr[j])
+                .mul_add(p.dz_soi[j], s.patch_flux.sminn_to_plant[0]);
+        }
+        actual_immob = 0.0;
+        potential_immob = 0.0;
+        for j in 0..d.nl_soil {
+            actual_immob = s.patch_flux.actual_immob_vr[j].mul_add(p.dz_soi[j], actual_immob);
+            potential_immob =
+                s.patch_flux.potential_immob_vr[j].mul_add(p.dz_soi[j], potential_immob);
+        }
+        if s.patch_flux.plant_ndemand[0] > 0.0 {
+            s.patch.fpg[0] = s.patch_flux.sminn_to_plant[0] / s.patch_flux.plant_ndemand[0];
+        } else {
+            s.patch.fpg[0] = 1.0;
+        }
+        if potential_immob > 0.0 {
+            s.patch.fpi[0] = actual_immob / potential_immob;
+        } else {
+            s.patch.fpi[0] = 1.0;
         }
     }
-    f.sminn_to_plant[0] = 0.0;
-    for j in 0..nl {
-        f.sminn_to_plant[0] = f.sminn_to_plant_vr[j].mul_add(dz[j], f.sminn_to_plant[0]);
-        sum_ndemand_vr[j] = f.potential_immob_vr[j] + f.sminn_to_plant_vr[j];
-    }
-    for j in 0..nl {
-        f.sminn_to_denit_excess_vr[j] =
-            if (f.sminn_to_plant_vr[j] + f.actual_immob_vr[j]) * deltim < v.sminn_vr[j] {
-                (bdnr * deltim / 86400.0 * (v.sminn_vr[j] / deltim - sum_ndemand_vr[j])).max(0.0)
-            } else {
-                0.0
-            };
-    }
-    let mut actual_immob = 0.0;
-    let mut potential_immob = 0.0;
-    for j in 0..nl {
-        actual_immob = f.actual_immob_vr[j].mul_add(dz[j], actual_immob);
-        potential_immob = f.potential_immob_vr[j].mul_add(dz[j], potential_immob);
-    }
-    v.fpg[0] = if plant_ndemand > 0.0 {
-        f.sminn_to_plant[0] / plant_ndemand
-    } else {
-        1.0
-    };
-    v.fpi[0] = if potential_immob > 0.0 {
-        actual_immob / potential_immob
-    } else {
-        1.0
-    };
-    Ok(())
 }

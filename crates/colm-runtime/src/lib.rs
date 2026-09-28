@@ -876,6 +876,7 @@ fn advance_patch(
     if let Some(bgc) = &template.bgc {
         let end = step.clock.end_time;
         bgc.step(
+            step.clock.forcing_time,
             [
                 end.year,
                 i32::from(end.julian_day),

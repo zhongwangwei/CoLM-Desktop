@@ -91,6 +91,10 @@ MODULES = [
         ("MOD_BGC_CNBalanceCheck", "NBalanceCheck", "n_balance_check",
          "`NBalanceCheck`：N 收支检查（失败时上游 abort，这里返回错误）。"),
     ]),
+    ("bgc_soil_competition.rs", "`MOD_BGC_Soil_BiogeochemCompetition.F90`：植物与微生物分配土壤矿质 N。", "", [
+        ("MOD_BGC_Soil_BiogeochemCompetition", "SoilBiogeochemCompetition", "soil_biogeochem_competition",
+         "`SoilBiogeochemCompetition`（NITRIF 开时 NH₄/NO₃ 分开竞争，关时合并为矿质 N）。"),
+    ]),
     ("bgc_veg_struct.rs", "`MOD_BGC_Veg_CNVegStructUpdate.F90`：由 C 池更新 LAI/SAI。", "", [
         ("MOD_BGC_Veg_CNVegStructUpdate", "CNVegStructUpdate", "cn_veg_struct_update",
          "`CNVegStructUpdate`：更新 `tsai_p`（每步）与 LAI 反馈下的 `tlai_p`/`lai_p`，再汇总 patch LAI。"),

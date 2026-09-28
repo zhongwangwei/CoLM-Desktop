@@ -261,6 +261,8 @@ def typeof(e, ctx):
         n = e[1]
         if n in FIELDS:
             return FIELDS[n][2]
+        if n in ctx.locals and ctx.locals[n].endswith("[]"):
+            return ctx.locals[n][:-2]
         if n in PFTC_LOGICAL:
             return "bool"
         if n in ("int", "nint", "floor"):
@@ -335,6 +337,10 @@ def phys_ref(name, args, ctx):
         return f"p.{rust}[{index(args[0], ctx)}]"
     if name in PHYS_PATCH:
         return f"p.{rust}[0]"
+    if name == "zi_soi" and ZI_FROM_ZERO[0]:
+        k = index(args[0], ctx)
+        k = k[:-4] if k.endswith(" - 1") else f"{k} + 1"
+        return f"p.zi_soi_from_zero({k})"
     if name in PHYS_GRID:
         return f"p.{rust}[{index(args[0], ctx)}]"
     if name == "rootfr_p":
@@ -421,6 +427,13 @@ def emit(e, ctx, want="f64", fma_ok=True):
         if n in FIELDS:
             ref = field_ref(n, args, ctx)
             return ref
+        if n in LOCAL_ARRAYS and len(args) == 1:
+            k = index(args[0], ctx)
+            lower = LOCAL_ARRAYS[n]
+            if lower != 1:
+                shift = 1 - lower
+                k = k[:-4] if (shift == 1 and k.endswith(" - 1")) else f"{k} + {shift}"
+            return f"{n}[{k}]"
         pr = phys_ref(n, args, ctx)
         if pr:
             return pr
@@ -630,13 +643,26 @@ VECT = set()   # 被向量化成保序归约的行
 def gimple_fma(path):
     """按源码行统计整个 dump 里的 FMA 族运算（被内联的子程序也算在自己的行号上）。
 
-    返回 (FMA 计数, 出现过浮点运算的行)。"""
+    返回 (FMA 计数, 出现过浮点运算的行)。只有一条存储、值是别处算好后被 CSE 复用的行，
+    按被存储 SSA 值的定义语句判断（同一函数内）：定义是 FMA 族就算融合，否则算"出现但不融合"。
+    """
     counts, seen = {}, set()
+    defs, stores = {}, []
+    loc = re.compile(r"\s*\[[^\]]*\.F90:(\d+):\d+(?: discrim \d+)?\]\s*(.*)$")
+    func = None
     for l in open(path):
-        m = re.match(r"\s*\[[^\]]*\.F90:(\d+):\d+(?: discrim \d+)?\]\s*(.*)$", l)
+        if l.startswith(";; Function "):
+            func = l.split()[2]
+            continue
+        m = loc.match(l)
+        stmt = m.group(2) if m else l.strip()
+        stmt = re.sub(r"\[[^\]]*\.F90:\d+:\d+(?: discrim \d+)?\]\s*", "", stmt)
+        d = re.match(r"([\w.]+)\s*=\s*(.*);$", stmt)
+        if d:
+            defs[(func, d.group(1))] = d.group(2)
         if not m:
             continue
-        line, stmt = int(m.group(1)), m.group(2)
+        line = int(m.group(1))
         if re.search(r"\bvect_", stmt):
             VECT.add(line)
         if re.search(r"\.(FMA|FNMA|FMS|FNMS)\b", stmt):
@@ -644,10 +670,31 @@ def gimple_fma(path):
             seen.add(line)
         elif re.search(r"=\s*\S+\s[-+*]\s\S+;", stmt):
             seen.add(line)
+        else:
+            s = re.match(r"MEM.*\]\s*=\s*([\w.]+);$", stmt)
+            if s:
+                stores.append((line, func, s.group(1)))
+    for line, fn, name in stores:
+        if line in seen:
+            continue
+        rhs = defs.get((fn, name), "")
+        for _ in range(8):
+            # 沿 `((x))`（PAREN_EXPR）与纯复制追到真正的运算
+            m = re.match(r"^\(*([\w.]+)\)*$", rhs)
+            if not m or (fn, m.group(1)) not in defs:
+                break
+            rhs = defs[(fn, m.group(1))]
+        if re.search(r"\.(FMA|FNMA|FMS|FNMS)\b", rhs):
+            counts[line] = counts.get(line, 0) + 1
+            seen.add(line)
+        elif re.search(r"^\S+\s[-+*]\s\S+$", rhs):
+            seen.add(line)
     return counts, seen
 
 
 FUSED = [0]
+LOCAL_ARRAYS = {}   # 局部数组名 -> Fortran 下界
+ZI_FROM_ZERO = [False]   # 形参 `zi_soi(0:…)`：见 BgcPhysics::zi_soi_from_zero
 # driver 统一传的实参；其余的哑元成为 Rust 函数的额外参数
 STANDARD = {"i", "ps", "pe", "nl_soil", "nl_soil_full", "dz_soi", "z_soi", "zi_soi", "ndecomp_pools",
             "ndecomp_transitions", "ndecomp_pools_vr", "deltim", "npcropmin", "idate", "dlat", "dlon",
@@ -725,6 +772,8 @@ def main():
             re.match(r"(real\(r8\)|integer|logical)\s+([A-Za-z].*)", s, re.I)
         if m:
             kind = {"real(r8)": "f64", "integer": "i32", "logical": "bool"}[m.group(1).lower()]
+            if "intent" in s.lower() and re.search(r"\bzi_soi\s*\(\s*0\s*:", s, re.I):
+                ZI_FROM_ZERO[0] = True
             if "intent" in s.lower():
                 for part in re.split(r",(?![^(]*\))", m.group(2)):
                     nm = re.match(r"(\w+)", part.strip())
@@ -736,6 +785,9 @@ def main():
                 nm = re.match(r"(\w+)(\s*\([^)]*\))?\s*(=\s*(.*))?", part)
                 name = nm.group(1).lower()
                 locals_[name] = kind if not nm.group(2) else kind + "[]"
+                if nm.group(2):
+                    lower = re.match(r"\s*\(\s*(-?\d+)\s*:", nm.group(2))
+                    LOCAL_ARRAYS[name] = int(lower.group(1)) if lower else 1
                 if name in ("m", "j", "k", "l", "ivt", "i", "ps", "pe", "fc", "fp", "p", "c", "g", "s", "d", "sw"):
                     continue
                 if nm.group(4):
@@ -743,7 +795,9 @@ def main():
                 elif not nm.group(2):
                     w(f"let mut {name}: {kind};")
                 else:
-                    w(f"let mut {name} = vec![0.0; d.nl_soil_full]; // {part}")
+                    zero = {"f64": "0.0", "i32": "0", "bool": "false"}[kind]
+                    # 上界都不超过 nl_soil_full+1，统一开到 nl_soil_full+2（下标按下界平移）。
+                    w(f"let mut {name} = vec![{zero}; d.nl_soil_full + 2];")
             continue
         if low.startswith(("use ", "implicit")):
             continue
@@ -869,6 +923,8 @@ def main():
 
 
 def assign(s, ctx, w):
+    if re.match(r"(ps|pe)\s*=\s*patch_pft_[se]\s*\(\s*i\s*\)$", s, re.I):
+        return   # 单 patch：PFT 范围就是 0..npft
     if re.match(r"ivt\s*=\s*pftclass\s*\(\s*m\s*\)$", s, re.I):
         w("let ivt = p.pftclass[m];")
         w("let class = ivt as usize;")

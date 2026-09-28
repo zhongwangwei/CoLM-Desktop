@@ -20,6 +20,27 @@ pub struct BgcState {
     pub pft_flux: BgcPftFluxes,
 }
 
+/// 五组结构全部字段的 Fortran 名（声明顺序）。
+fn all_fields() -> impl Iterator<Item = &'static str> {
+    [
+        BgcPftTimeVariables::FIELDS,
+        BgcPftFluxes::FIELDS,
+        BgcPatchTimeVariables::FIELDS,
+        BgcPatchFluxes::FIELDS,
+        BgcPatchTimeInvariants::FIELDS,
+    ]
+    .into_iter()
+    .flatten()
+    .map(|(name, _)| *name)
+}
+
+/// Fortran 名字不分大小写：重启里写的是 `tCONC_O2_UNSAT`，声明是 `tconc_o2_unsat`。
+fn canonical(name: &str) -> &str {
+    all_fields()
+        .find(|field| field.eq_ignore_ascii_case(name))
+        .unwrap_or(name)
+}
+
 impl BgcState {
     /// 按上游 `allocate_*` 的初值（`spval`/`spval_i4`/`.false.`）建一个空状态。
     pub fn new(npft: usize, dims: BgcDims) -> Self {
@@ -36,6 +57,7 @@ impl BgcState {
 
     /// 按 Fortran 名找 `real(r8)` 数组（patch 级在前、PFT 级在后，与重启文件的归属一致）。
     pub fn f64_field_mut(&mut self, name: &str) -> Option<&mut Vec<f64>> {
+        let name = canonical(name);
         if self.invariants.f64_field(name).is_some() {
             return self.invariants.f64_field_mut(name);
         }
@@ -52,6 +74,7 @@ impl BgcState {
     }
 
     pub fn f64_field(&self, name: &str) -> Option<&Vec<f64>> {
+        let name = canonical(name);
         self.invariants
             .f64_field(name)
             .or_else(|| self.patch.f64_field(name))
@@ -61,6 +84,7 @@ impl BgcState {
     }
 
     pub fn i32_field_mut(&mut self, name: &str) -> Option<&mut Vec<i32>> {
+        let name = canonical(name);
         if self.invariants.i32_field(name).is_some() {
             return self.invariants.i32_field_mut(name);
         }
@@ -77,6 +101,7 @@ impl BgcState {
     }
 
     pub fn i32_field(&self, name: &str) -> Option<&Vec<i32>> {
+        let name = canonical(name);
         self.invariants
             .i32_field(name)
             .or_else(|| self.patch.i32_field(name))
@@ -86,6 +111,7 @@ impl BgcState {
     }
 
     pub fn bool_field_mut(&mut self, name: &str) -> Option<&mut Vec<bool>> {
+        let name = canonical(name);
         if self.invariants.bool_field(name).is_some() {
             return self.invariants.bool_field_mut(name);
         }
@@ -102,6 +128,7 @@ impl BgcState {
     }
 
     pub fn bool_field(&self, name: &str) -> Option<&Vec<bool>> {
+        let name = canonical(name);
         self.invariants
             .bool_field(name)
             .or_else(|| self.patch.bool_field(name))
