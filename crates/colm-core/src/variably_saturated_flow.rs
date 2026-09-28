@@ -4525,9 +4525,12 @@ pub fn variably_saturated_flow_step(
     state.water_table_depth_m = water_table_depth_mm / 1000.0;
 
     // 凝结：露/霜/升华按上游的符号约定加回表层。
-    state.liquid_water_kg_m2[0] = dt
-        .mul_add(input.fluxes.soil_dew_kg_m2_s, state.liquid_water_kg_m2[0])
-        .max(0.0);
+    // 液态那一句**不收缩**：`deltim*qsdew` 被提到分支之前，与 TRACER 构建的
+    // `dew_input = max(qsdew*deltim, 0)` 共用（GIMPLE `_1760 = deltim*qsdew`，
+    // 随后 `_1039 = wliq + _1760`）；冰那一句没有共用者，照样是 `.FMA`。
+    // 写成 FMA 时 AT-Neu 2010-03-08 起表层液水差 1 ulp（第 406 轮）。
+    state.liquid_water_kg_m2[0] =
+        (state.liquid_water_kg_m2[0] + dt * input.fluxes.soil_dew_kg_m2_s).max(0.0);
     state.ice_water_kg_m2[0] = dt
         .mul_add(
             input.fluxes.soil_frost_kg_m2_s - input.fluxes.soil_sublimation_kg_m2_s,

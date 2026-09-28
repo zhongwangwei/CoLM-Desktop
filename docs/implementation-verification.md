@@ -24691,3 +24691,67 @@ AT-Neu 2010-01，站点地类改成 IGBP 6（郁闭灌木，SITE_landtype = 6）
 回归：CN-Cng 2008-01、AT-Neu 2010-01..02、split 2010-01..02、VIC 2010-01 仍全部逐位相同
 cargo test（全 workspace）、clippy -D warnings、fmt --check 全过
 ```
+
+## 第 406 轮：`DEF_Optimize_Baseflow` 接进主循环；整年与两年预热逐位相同暴露的六处 Rust 缺陷
+
+### 一、基流优化器
+
+`MOD_Opt_Baseflow`（`ParameterOptimization`，`CoLM.F90:709`）照搬进 `colm-runtime::baseflow_optimizer`：
+预热期每步 `add_spv` 累加 `forc_prc + forc_prl - fevpa - rsur` 与 `rsub`（乘 `deltim`，GIMPLE 里乘积被
+`s = var*dt` 那一支共用，**不**收缩），`isendofyear(idate, INT(deltim))` 那一步先写
+`ParaOpt/cNNNN/<case>_baseflow_w180_s90.nc`（`zwt`/`zwt_init`/`scale_baseflow`/两个年总量，空累加器写 `spval`），
+再按两个独立 `IF` 缩放、`max(1e-8)`，写回 `ParaOpt/<case>_baseflow_w180_s90.nc`。新比例**下一步**就乘在
+`rsubst` 上，所以它在主循环里、不是离线标定。`colm-rs` 在多 patch 重启上拒绝打开它（上游整向量写回，单 patch
+写出会抹掉其余 patch）。`ParaOpt/` 目录照上游无条件创建。
+
+注意：默认 `DEF_Runoff_SCHEME = 3`（Simple VIC）下 `rsubst` 恒 0，优化器只会套下限、比例永远是 1；
+本轮用 `DEF_Runoff_SCHEME = 0`（TOPMODEL）做验证才有非零基流。AT-Neu 两年的年补给均为负，缩放分支本身
+由单元测试覆盖。
+
+### 二、整年 / 预热暴露的 Rust 缺陷（全部有 GIMPLE 或源码为据）
+
+此前只验到 1–2 月。把 AT-Neu 跑满 2010 全年（TOPMODEL + 默认 VSF/PHS）后依次抓到：
+
+1. **露水加到表层液水不收缩**（`WATER_VSF` 与 `WATER_2014` 同形）：`main/` 把 `deltim*qsdew` 提到分支前与
+   TRACER 构建的 `dew_input` 共用，于是 `wliq(1) + _1760` 是独立乘积再相加；冰那一句仍是 `.FMA`。
+   3 月 8 日表层液水差 1 ulp。
+2. **`calc_photo_params` 的 `jmax`**：上游两句 `jmax*rstfac` 再 `*cint(2)`，Rust 写成 `jmax *= rstfac*cint(2)`。
+   `rstfac = 1` 时相同，只在 PHS 回写的 `update_photosyn`（`rstfac` 是 PHS 胁迫）且 `epar` 被 `jmax` 限制时露出：
+   7 月 8 日正午 `ome` 差 1 ulp。
+3. **`thv = th*(1+0.61*forc_q)`**：全内核 dump 里 `MOD_Thermal` 是 `th * .FMA(forc_q, 0.61, 1.0)`。此前该模块
+   无 dump、保留平铺；12 月 12 日 `thv` 差 1 ulp，经 `moninobukini` 的 `obu` 传满整条叶温链。
+4. **雪层合并后的 `scv`**：上游逐层 `scv = scv + wice(j) + wliq(j)`，Rust 分别求和冰、液再相加；而且合并相邻层
+   之后上游**不重算** `scv`/`snowdp`，Rust 重算了。第二轮预热 1 月 14 日 `scv` 差 1 ulp。
+5. **history 均值**：上游 `acc_vec / nac`，Rust 乘 `1/nac`。小时记录（两子步）无差别，日记录（48 步）差 1 ulp。
+   瞬时量上游写 `(x*nac)/nac`，往返不一定精确，也照做。
+6. **history `wat`**：VSF 打开时上游加的是 `wetwat` 而非 `wa`（`CoLMMAIN.F90:2262-2266`）。`wa = 0` 的算例看不出。
+
+### 三、两处行为缺口
+
+* **预热期的 history**：`hist_out` 在 `itstamp <= ptstamp` 时直接返回、连累加都不做。Rust 原先照常累加：
+  第一轮写出 2010 年文件；第二轮时钟倒回，调度不写却继续累加，**预热后第一条记录平均进了整整一年**。
+  现在预热步不入 history，调度窗口从预热结束处起算。
+* **周期续跑文件**：时钟早已算出 `save_to_restart`，但 `colm-rs` 只写窗口终点那一份。现在每个
+  `DEF_WRST_FREQ` 周期末（及预热每年末）都按 `jdate` 命名写出。尚缺上游同目录的 history 累加器旁车
+  `*_restart_hist_*.nc` 与重启里的 `history_sidecar_required` 标记（周期对齐时累加器为空，不影响数值）。
+
+另：`colm-init` 对 `DEF_SPLIT_SOILSNOW` 的拒绝已过时 —— 上游 mkinidata 不读它，两份 Fortran 冷启动逐位相同；删掉后
+split 算例可从前处理起全程用 Rust 引擎。
+
+### 四、未结：`DEF_HIST_FREQ = 'none'` 时 Fortran 内核 SIGILL
+
+未改动的 `kernels/default` 在 AT-Neu 上 `DEF_HIST_FREQ = 'none'` 首步前后即 SIGILL（`'MONTHLY'` 正常），可复现
+（`tmp/hn-fortran`）。本机 lldb 挂不上进程，回溯未符号化，尚未定位到源码行，故暂不记入 upstream-bugs。
+
+### 五、实测
+
+```text
+AT-Neu 2010 全年，DEF_Runoff_SCHEME=0（tmp/ty-*）：12 个月小时 history 逐位相同；13 份月末续跑文件逐变量逐位相同
+AT-Neu 2010-01..04，默认 Simple VIC（tmp/t3-*）：逐位相同
+两轮整年预热 + DEF_Optimize_Baseflow + 2011-01 正式期（tmp/bf-*）：
+  ParaOpt c0001/c0002 与最终比例文件逐位相同；2011-001、2011-032 续跑逐位相同；2011-01 日 history 逐位相同
+两轮单月预热（tmp/bs-*）：同上
+回归（tmp/regress.sh）：CN-Cng 2008-01、AT-Neu 2010-01..02、split（两引擎各自从 mkinidata 起）、VIC、
+  方案 8/1 全部逐位相同
+cargo test -p colm-core/-runtime/-hist --lib --bins：362/76/50 通过；colm-init --test-threads=1：156 通过；clippy 无告警
+```

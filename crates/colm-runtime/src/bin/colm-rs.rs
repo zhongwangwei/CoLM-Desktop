@@ -35,12 +35,13 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use anyhow::{bail, ensure, Context, Result};
-use colm_core::{CalendarTime, LandCoverScheme};
+use colm_core::{CalendarTime, LandCoverScheme, StandardLctSnowSoilState};
 use colm_namelist::{parse, Document, Value};
 use colm_runtime::assembly::{
     assemble_standard_lct_snow_template, assemble_standard_lct_template, restart_has_snow_column,
     EvolvedStepOutput, MonthlyLeafAreaIndex, RestartStateFiles, StandardLctRestartTemplate,
 };
+use colm_runtime::baseflow_optimizer::BaseflowOptimizer;
 use colm_runtime::history::HistorySession;
 use colm_runtime::physics::land_physics_parameters;
 use colm_runtime::{read_point_runtime_config, PointRuntime, PointRuntimeConfig};
@@ -175,12 +176,42 @@ fn run() -> Result<()> {
     // `DEF_dir_restart/ParaOpt/<case>_baseflow.nc` 读一个长度 `landpatch` 的向量，
     // 文件或变量缺失时取 `defval = 1.`（`MOD_Opt_Baseflow.F90:37-38`）。
     // 它直接乘在 `rsubst`/`rsub` 上，参数标定过的算例差别是物理量级的。
-    template = template.with_baseflow_scale(read_baseflow_scale(&layout, &name, arguments.patch)?);
+    let baseflow_scale = read_baseflow_scale(&layout, &name, arguments.patch)?;
+    template = template.with_baseflow_scale(baseflow_scale);
+    // `Opt_Baseflow_init` 无论开不开优化都先建 `ParaOpt/`（`MOD_Opt_Baseflow.F90:40-42`）。
+    let para_opt = layout.out().join(&name).join("restart/ParaOpt");
+    std::fs::create_dir_all(&para_opt)
+        .with_context(|| format!("cannot create {}", para_opt.display()))?;
+    let baseflow_optimizer = if logical_field(&document, "DEF_Optimize_Baseflow")? {
+        // 上游对**所有** patch 一起迭代并整向量写回；本程序只跑一个 patch，
+        // 多 patch 的重启若照写单元素文件，会把其余 patch 的标定值抹掉。
+        let patches = colm_init::RestartFile::open(&restarts.initial)?
+            .floats("zwt")?
+            .len();
+        ensure!(
+            patches == 1,
+            "DEF_Optimize_Baseflow rewrites `scale_baseflow` for every patch, but colm-rs runs \
+             one patch of the {patches} in {}",
+            restarts.initial.display()
+        );
+        Some(BaseflowOptimizer::new(
+            baseflow_scale,
+            template.snow_state().soil_water.water_table_depth_m,
+            template.patch_type,
+            para_opt,
+            &name,
+        ))
+    } else {
+        None
+    };
 
     // 会话从**配置**开（窗口、站点、步长、频率都在里面），要在 `open` 消费掉
     // 配置之前建好 —— 而它自己不带 forcing，所以先后没有别的影响。
     let session = history_session(&config, &outputs)?;
     let mut runtime = PointRuntime::open(config)?;
+    if let Some(optimizer) = baseflow_optimizer {
+        runtime = runtime.with_baseflow_optimizer(optimizer);
+    }
     // **一个入口跑到底。** 上游每步无条件先 `newsnow`（`CoLMMAIN.F90:976`）再造打包列，
     // 所以"这一步有没有雪"是状态、不是配置；这里同理 —— 从无雪起步的运行也必须能长雪。
     let summary = run_snow(
@@ -188,6 +219,7 @@ fn run() -> Result<()> {
         &template,
         &restarts.initial,
         &outputs.restart_out,
+        outputs.periodic.as_ref(),
         session,
     )?;
     println!(
@@ -216,6 +248,7 @@ fn run_snow(
     template: &StandardLctRestartTemplate,
     restart_in: &Path,
     restart_out: &Path,
+    periodic: Option<&PeriodicRestarts>,
     session: Option<HistorySession>,
 ) -> Result<RunSummary> {
     let mut state = template.snow_state();
@@ -223,50 +256,109 @@ fn run_snow(
     let mut last_water = None;
     let mut last_energy = None;
     let mut last_cosine_zenith = 0.0;
+    let mut on_step = |step: colm_runtime::PointRuntimeStep,
+                       state: &StandardLctSnowSoilState,
+                       output: &colm_core::StandardLctSnowSoilOutput|
+     -> Result<()> {
+        // `save_to_restart`（`CoLM.F90:664`）：每个 `DEF_WRST_FREQ` 周期末、以及预热期
+        // 每年末写一次 `WRITE_TimeVariables`。窗口终点那一次由循环结束后的写出负责。
+        if let Some(periodic) = periodic {
+            if step.clock.write_restart {
+                let path = periodic.path(step.clock.end_time);
+                if path != restart_out {
+                    write_evolved_restart(
+                        template,
+                        state,
+                        &output.water,
+                        &output.energy,
+                        step.surface_cosine_zenith,
+                        restart_in,
+                        &path,
+                    )?;
+                }
+            }
+        }
+        last_water = Some(output.water.clone());
+        last_energy = Some(output.energy.clone());
+        last_cosine_zenith = step.surface_cosine_zenith;
+        Ok(())
+    };
     let (steps, history_files) = match session {
         Some(mut session) => {
             let outcome = runtime.run_restart_standard_lct_snow_with_history(
                 template,
                 &mut state,
                 &mut session,
-                |step, output| {
-                    last_water = Some(output.water.clone());
-                    last_energy = Some(output.energy.clone());
-                    last_cosine_zenith = step.surface_cosine_zenith;
-                    Ok(())
-                },
+                &mut on_step,
             )?;
             (outcome.steps, Some(outcome.files.len()))
         }
         None => (
-            runtime.run_restart_standard_lct_snow(template, &mut state, |step, output| {
-                last_water = Some(output.water.clone());
-                last_energy = Some(output.energy.clone());
-                last_cosine_zenith = step.surface_cosine_zenith;
-                Ok(())
-            })?,
+            runtime.run_restart_standard_lct_snow(template, &mut state, &mut on_step)?,
             None,
         ),
     };
     let last_water = last_water.context(NO_STEP)?;
-    // 重启里的 `t_grnd` 是雪层合并之后重取的那个（`CoLMMAIN.F90:1452`）。
-    let ground_temperature_k = state.surface_temperature_k();
     let last_energy = last_energy.context(NO_STEP)?;
-    let overrides = template.evolved_snow_overrides(
+    write_evolved_restart(
+        template,
         &state,
-        EvolvedStepOutput {
-            ground_temperature_k,
-            matric_potential_mm: &last_water.soil.matric_potential_mm,
-            hydraulic_conductivity_mm_s: &last_water.soil.hydraulic_conductivity_mm_s,
-            cosine_zenith: last_cosine_zenith,
-            energy: &last_energy,
-        },
+        &last_water,
+        &last_energy,
+        last_cosine_zenith,
+        restart_in,
+        restart_out,
     )?;
-    write_restart(restart_in, restart_out, &overrides)?;
     Ok(RunSummary {
         steps,
         history_files,
     })
+}
+
+/// 把步末状态写成一份续跑文件（以输入重启为底，只替换推进过的变量）。
+fn write_evolved_restart(
+    template: &StandardLctRestartTemplate,
+    state: &StandardLctSnowSoilState,
+    water: &colm_core::Water2014SnowSoilOutput,
+    energy: &colm_core::StandardLctEnergyOutput,
+    cosine_zenith: f64,
+    restart_in: &Path,
+    restart_out: &Path,
+) -> Result<()> {
+    // 重启里的 `t_grnd` 是雪层合并之后重取的那个（`CoLMMAIN.F90:1452`）。
+    let overrides = template.evolved_snow_overrides(
+        state,
+        EvolvedStepOutput {
+            ground_temperature_k: state.surface_temperature_k(),
+            matric_potential_mm: &water.soil.matric_potential_mm,
+            hydraulic_conductivity_mm_s: &water.soil.hydraulic_conductivity_mm_s,
+            cosine_zenith,
+            energy,
+        },
+    )?;
+    if let Some(parent) = restart_out.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("cannot create {}", parent.display()))?;
+    }
+    write_restart(restart_in, restart_out, overrides.as_slice())
+}
+
+/// 周期续跑文件的落点：与窗口终点那份同一套命名，`cdate` 取该步的 `jdate`
+/// （步末 `idate` 经 `adj2begin`，即 86400 秒写成次日 0 秒）。
+struct PeriodicRestarts {
+    directory: PathBuf,
+    name: String,
+    land_cover_year: i64,
+}
+
+impl PeriodicRestarts {
+    fn path(&self, end_time: CalendarTime) -> PathBuf {
+        let label = date_label(normalized_day_end(end_time));
+        self.directory.join(&label).join(format!(
+            "{}_restart_{label}_lc{:04}_w180_s90.nc",
+            self.name, self.land_cover_year
+        ))
+    }
 }
 
 const NO_STEP: &str = "the window produced no step, so there is no evolved state to write back; \
@@ -313,6 +405,8 @@ enum OutputSpec {
 
 struct ResolvedOutputs {
     restart_out: PathBuf,
+    /// 按算例目录约定落盘时才写周期续跑；命令行逐项指定输出时只写终点那一份。
+    periodic: Option<PeriodicRestarts>,
     history_directory: Option<PathBuf>,
     history_stem: String,
 }
@@ -339,6 +433,7 @@ impl OutputSpec {
                 history_stem,
             } => Ok(ResolvedOutputs {
                 restart_out: restart_out.clone(),
+                periodic: None,
                 history_directory: history_directory.clone(),
                 history_stem: history_stem.clone(),
             }),
@@ -351,6 +446,11 @@ impl OutputSpec {
                         .join("restart")
                         .join(&label)
                         .join(format!("{name}_restart_{label}_lc{year:04}_w180_s90.nc")),
+                    periodic: Some(PeriodicRestarts {
+                        directory: out.join("restart"),
+                        name: name.to_owned(),
+                        land_cover_year: year,
+                    }),
                     history_directory: Some(out.join("history")),
                     history_stem: name.to_owned(),
                 })

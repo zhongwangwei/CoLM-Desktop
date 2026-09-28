@@ -257,22 +257,15 @@ fn snicar_is_refused_rather_than_run_with_standard_snow_optics() {
     assert!(message.contains("snow_layer_absorption_w_m2"), "{message}");
 }
 
+/// 优化器由运行时承担（`baseflow_optimizer`），物理参数映射不再拦它。
 #[test]
-fn baseflow_optimization_is_refused_rather_than_run_unoptimized() {
-    let error = land_physics_parameters(
+fn baseflow_optimization_is_accepted_by_the_physics_mapping() {
+    land_physics_parameters(
         &case_with("DEF_Optimize_Baseflow = .true."),
         LandCoverScheme::Igbp,
         HEIGHTS,
     )
-    .expect_err("the baseflow optimizer is not ported");
-    let message = error.to_string();
-    assert!(message.contains("DEF_Optimize_Baseflow"), "{message}");
-    assert!(message.contains("scale_baseflow"), "{message}");
-    // 拒绝的是**优化过程**，不是"不读那个文件"（读取在 `colm-rs` 里）。
-    assert!(
-        message.contains("only the optimizer is missing"),
-        "{message}"
-    );
+    .expect("the baseflow optimizer runs in the runtime loop");
 }
 
 /// 金标准算例用的是 `DEF_Runoff_SCHEME = 3`，也就是 Simple VIC。

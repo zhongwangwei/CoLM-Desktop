@@ -1133,18 +1133,12 @@ fn ground_flux_input(
             input.temperature_height_m,
         ),
         potential_temperature_k,
-        // `MOD_Thermal.F90:546` 的 `thv = th*(1.+0.61*forc_q)`。
-        //
-        // **这里刻意不融合内层**：`MOD_Thermal.F90` 单文件编不出来（`:1036` 的
-        // `smp` INTENT 冲突），这个模块**没有自己的 dump**，形状无从证实。
-        // 实测把这一处与 `MOD_LeafTemperature` 的 `dthv`/`thvstar`（那两处有 dump
-        // 支持）一起融合之后，干窗 tier2 变量数 17 → **18**（`f_frcsat` 新越界）；
-        // 只回退这一处仍是 18，说明主导项是那两处，这一处没有被单独验证过。
-        // 没有 dump 又拿不到正号，就按原位保留 —— 见
-        // docs/implementation-verification.md 的"负结果：dump 支持的融合也可能让
-        // 窗口变差"。
+        // `MOD_Thermal.F90:590` 的 `thv = th*(1.+0.61*forc_q)`：全内核 GIMPLE
+        // （`MOD_Thermal.F90.273t.optimized`）是 `thv = th * .FMA(forc_q, 0.61, 1.0)`，
+        // 内层融合。此前这个模块没有 dump、按平铺保留；不融合时 AT-Neu 2010-12-12
+        // 的 `thv` 差 1 ulp，经 `moninobukini` 的 `obu` 传到整条叶温链（第 406 轮）。
         virtual_potential_temperature_k: potential_temperature_k
-            * (1.0 + 0.61 * forcing.specific_humidity),
+            * forcing.specific_humidity.mul_add(0.61, 1.0),
         soil_surface_resistance_s_m,
         ..input
     }

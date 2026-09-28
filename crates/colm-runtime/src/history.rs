@@ -501,17 +501,27 @@ impl HistoryAccumulator {
                     if *count == 0 {
                         continue;
                     }
-                    let scale = 1.0 / *count as f64;
+                    // 上游 `acc_vec = acc_vec / nac`（`MOD_HistSingle.F90:272`）是**除法**；
+                    // 乘倒数只在 `nac` 为 2 的幂时相同 —— 小时记录（两子步）看不出来，
+                    // 日记录（48 步）就差 1 ulp（第 406 轮）。
+                    // 瞬时量上游写的是 `vecacc = x*nac`、再按均值那条路 `/nac`
+                    // （`MOD_Hist.F90:741-743`）：往返在 `nac` 不是 2 的幂时不一定精确。
+                    let mean = if INSTANTANEOUS_VARIABLES.contains(&name.as_str()) {
+                        let steps = self.steps as f64;
+                        sum * steps / steps
+                    } else {
+                        sum / *count as f64
+                    };
                     buffer
-                        .set_patch_scalar(name, record, sum * scale)
+                        .set_patch_scalar(name, record, mean)
                         .with_context(|| format!("cannot write {name} into the history buffers"))?;
                 }
                 Accumulated::Column { sum, count } => {
                     if *count == 0 {
                         continue;
                     }
-                    let scale = 1.0 / *count as f64;
-                    let mean = sum.iter().map(|value| value * scale).collect::<Vec<_>>();
+                    let steps = *count as f64;
+                    let mean = sum.iter().map(|value| value / steps).collect::<Vec<_>>();
                     buffer
                         .set_layered(name, record, &mean)
                         .with_context(|| format!("cannot write {name} into the history buffers"))?;
@@ -1022,8 +1032,9 @@ pub fn set_lct_canopy_water(
 
 /// 把一步的瞬时水量诊断写进第 `record` 条记录。
 ///
-/// `wat` 的算式见 [`LCT_WATER_STORAGE_VARIABLES`]（非 VSF 分支：
-/// `sum(wliq+wice) + ldew + scv + wa`）。液体与冰分开求和再相加，
+/// `wat` 的算式见 [`LCT_WATER_STORAGE_VARIABLES`]：`sum(wliq+wice) + ldew + scv + 末项`，
+/// 末项在 VSF 打开时是 `wetwat`、关着时是 `wa`（`CoLMMAIN.F90:2262-2266`），由调用方
+/// 按分支传入 `storage_tail_mm`。液体与冰分开求和再相加，
 /// 与上游 `sum(wice_soisno(1:)+wliq_soisno(1:))` 的元素级相加**不是**
 /// 同一个结合顺序，所以这里也按元素级累加，别改成两个 `sum()` 相减。
 pub fn set_lct_water_storage(
@@ -1032,6 +1043,7 @@ pub fn set_lct_water_storage(
     water: &colm_core::Water2014SoilState,
     canopy_water_mm: f64,
     snow_water_equivalent_kg_m2: f64,
+    storage_tail_mm: f64,
 ) -> Result<()> {
     ensure!(
         water.liquid_water_kg_m2.len() == water.ice_water_kg_m2.len(),
@@ -1043,7 +1055,7 @@ pub fn set_lct_water_storage(
         .zip(&water.ice_water_kg_m2)
         .map(|(wliq, wice)| wliq + wice)
         .sum();
-    let total = soil + canopy_water_mm + snow_water_equivalent_kg_m2 + water.aquifer_water_mm;
+    let total = soil + canopy_water_mm + snow_water_equivalent_kg_m2 + storage_tail_mm;
     for (name, value) in [
         ("wa_inst", water.aquifer_water_mm),
         ("wdsrf_inst", water.surface_water_mm),
@@ -1564,6 +1576,7 @@ impl HistorySession {
                 &state.water,
                 state.energy.leaf.canopy_water.total_mm,
                 0.0,
+                template.water_storage_tail_mm(&state.water),
             )?;
             set_lct_canopy_water(accumulator, 0, &state.energy, &output.energy)?;
             set_lct_soil_resistance(accumulator, 0, &output.energy)?;
@@ -1636,6 +1649,7 @@ impl HistorySession {
                 &state.soil_water,
                 state.energy.leaf.canopy_water.total_mm,
                 state.snow.water_equivalent_kg_m2,
+                template.water_storage_tail_mm(&state.soil_water),
             )?;
             set_lct_canopy_water(accumulator, 0, &state.energy, &output.energy)?;
             set_lct_soil_resistance(accumulator, 0, &output.energy)?;

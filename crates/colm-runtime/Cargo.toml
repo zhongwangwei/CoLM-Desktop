@@ -24,12 +24,13 @@ colm-init = { path = "../colm-init" }
 # history 写出：闸门表 + `HistoryBuffers::write`。它默认不带 netcdf（GUI 那条链
 # 只要闸门表），这里显式开 `io` —— 运行时本来就要链接 netcdf。
 colm-hist = { path = "../colm-hist", features = ["io"] }
+# `DEF_Optimize_Baseflow` 逐年写 `ParaOpt/*_baseflow.nc`（`MOD_Opt_Baseflow.F90`）。
+# 已经经 colm-hist/colm-init 静态链接进来，这里只是直接用它的 API。
+netcdf = { workspace = true, features = ["static"] }
 
 [dev-dependencies]
 # 合成 restart 算例只在测试构建里需要，所以 feature 也只开在 dev 依赖上。
 colm-init = { path = "../colm-init", features = ["fixtures"] }
-# 测试要把写出的 history 文件读回来看 schema 与取值。
-netcdf = { workspace = true, features = ["static"] }
 
 [lints]
 workspace = true

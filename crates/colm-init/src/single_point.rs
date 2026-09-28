@@ -3248,14 +3248,9 @@ fn reject_unsupported_cold_start_features(
         !optional_bool_or(document, "DEF_URBAN_RUN", false)? || subgrid == SinglePointSubgrid::Lct,
         "DEF_URBAN_RUN requires DEF_USE_LCT = .true."
     );
-    // 运行期（`colm-runtime::physics`）也会拒绝它：`assembly.rs` 把
-    // `use_split_soil_snow` 钉死为 false，水分侧只做了非 split，
-    // 所以冷启动这里同样不能为它生成一份"看起来能用"的重启。
-    ensure!(
-        !optional_bool_or(document, "DEF_SPLIT_SOILSNOW", false)?,
-        "DEF_SPLIT_SOILSNOW is on, but the Rust single-point initializer only builds the \
-         non-split soil/snow column (the runtime refuses the same case)"
-    );
+    // `DEF_SPLIT_SOILSNOW` 不在这里拦：上游 `mkinidata` 根本不读它（`IniTimeVar` 与
+    // 它调用的 `snowfraction`/`snow_ini`/`albland` 都不分支），实测 AT-Neu 打开与关闭
+    // 两份 Fortran 冷启动重启逐位相同；分裂的土/雪只在运行期起作用（第 406 轮）。
     Ok(())
 }
 

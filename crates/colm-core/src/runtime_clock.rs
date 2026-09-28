@@ -237,7 +237,10 @@ fn restart_due(
         || !before(elapsed_time, end)
 }
 
-fn is_end_of_year(time: CalendarTime, seconds: u32) -> bool {
+/// 上游 `isendofyear(idate, sec)`（`MOD_TimeManager.F90:384`）：`idate + int(sec)` 跨年。
+///
+/// `time` 取步末（end-style）日期、`seconds` 取 `INT(deltim)`，与主循环里的调用一致。
+pub fn is_end_of_year(time: CalendarTime, seconds: u32) -> bool {
     tick(time, seconds).year != time.year
 }
 

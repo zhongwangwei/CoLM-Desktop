@@ -256,6 +256,7 @@ fn the_bridge_writes_the_state_variables_it_declares() {
         &state.water,
         state.energy.leaf.canopy_water.total_mm,
         0.0,
+        state.water.aquifer_water_mm,
     )
     .unwrap();
     set_lct_canopy_water(&mut buffer, 0, &state.energy, &output.energy).unwrap();

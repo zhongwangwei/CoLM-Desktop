@@ -166,7 +166,12 @@ pub fn photosynthesis_parameters(
             + (f77(710.0).mul_add(input.leaf_temperature_k, -f77(220.0e3))
                 / (gas_constant * input.leaf_temperature_k))
                 .exp());
-    jmax *= input.soil_water_stress * input.canopy_integration[1];
+    // `:583-584` 是两句：`jmax = jmax*rstfac` 再 `jmax = jmax*cint(2)`，两次舍入
+    // （GIMPLE `jmax_85 = jmax_84*rstfac; jmax_87 = jmax_85*cint2`）。写成
+    // `jmax *= rstfac*cint2` 在 `rstfac = 1` 时恰好相同，所以只在 PHS 回写的
+    // `update_photosyn`（`rstfac` 是 PHS 胁迫）且 `epar` 被 `jmax` 限制时才露出来：
+    // AT-Neu 2010-07-08 正午 `ome` 差 1 ulp（第 406 轮）。
+    jmax = jmax * input.soil_water_stress * input.canopy_integration[1];
     let electron_transport =
         (f77(4.6e-6) * input.absorbed_par_w_m2 * b.quantum_efficiency).min(jmax);
     let respiration_fraction = f77(0.015) * c3_fraction + f77(0.025) * c4_fraction;

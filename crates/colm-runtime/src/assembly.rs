@@ -598,6 +598,10 @@ pub struct StandardLctRestartTemplate {
     /// `rsubst`/`rsub` 上（`WATER_VSF`/`WATER_2014`）。装配期默认 1.0，
     /// 由 `colm-rs` 用 [`Self::with_baseflow_scale`] 覆盖成文件里的值。
     pub baseflow_scale: f64,
+    /// `wetwat`：湿地蓄水。只有湿地分支改它，本分支的 patch 上它就是重启里的值
+    /// （冷启动写 0），但 VSF 打开时 history 的 `wat` 加的是它而不是 `wa`
+    /// （`CoLMMAIN.F90:2262-2266`）。
+    pub wetland_water_mm: f64,
     /// 逐波段辐射量的整变量缓冲，同上。
     radiation_fields: RadiationFields,
     /// 雪 + 土的模板列（`soilsnow`），积雪分支的 `GroundTemperatureInput` 需要这个形状。
@@ -1047,6 +1051,7 @@ fn assemble(
             .unwrap_or(colm_core::MISSING),
         // 默认 1.0；调用方（`colm-rs`）读过 `ParaOpt/*_baseflow.nc` 之后覆盖。
         baseflow_scale: 1.0,
+        wetland_water_mm: scalar(&time, "wetwat", patch)?,
         soil,
         soil_thermal_inputs,
         soil_hydraulic_model,
@@ -1105,11 +1110,21 @@ impl StandardLctRestartTemplate {
     /// `scale_baseflow`：把装配期的默认 1.0 换成 `ParaOpt/*_baseflow.nc` 里的值。
     ///
     /// 上游（`MOD_Opt_Baseflow.F90:37-38`）在 `Opt_Baseflow_init` 里读一次，
-    /// 之后只用于 `rsubst = rsubst*scale_baseflow(ipatch)`；本仓库不做那套优化，
-    /// 但**必须读同一个数** —— 标定过的算例差别是物理量级的。
+    /// 之后乘在 `rsubst` 上；`DEF_Optimize_Baseflow` 打开时预热期逐年改写它
+    /// （见 [`crate::baseflow_optimizer`]，那时每步用优化器的值覆盖这里的初值）。
     pub fn with_baseflow_scale(mut self, scale: f64) -> Self {
         self.baseflow_scale = scale;
         self
+    }
+
+    /// history `wat` 的末项：VSF 打开时是 `wetwat`，关着时是 `wa`
+    /// （`CoLMMAIN.F90:2262-2266`）。
+    pub fn water_storage_tail_mm(&self, water: &Water2014SoilState) -> f64 {
+        if self.physics.variably_saturated_flow {
+            self.wetland_water_mm
+        } else {
+            water.aquifer_water_mm
+        }
     }
 
     /// `LAI_readin` 那一步：月份变了就把 `tlai`/`tsai` 换成新一个月的。

@@ -620,10 +620,10 @@ pub fn combine_snow_layers(
         }
     }
 
+    // 合并相邻层之后上游**不**重算 `scv`/`snowdp`（`MOD_SnowLayersCombineDivide.F90`
+    // 只重建节点/界面深度）：两者停在合并之前那次累加的值。合并本身守恒质量与厚度，
+    // 但重新累加的舍入顺序不同 —— 实测第二轮预热 1 月 14 日 `scv` 差 1 ulp（第 406 轮）。
     rebuild_snow_geometry(state);
-    let (snow_mass, snow_depth, _, _) = snow_totals(state);
-    state.water_equivalent_kg_m2 = snow_mass;
-    state.depth_m = snow_depth;
     Ok(())
 }
 
@@ -745,17 +745,21 @@ fn rebuild_snow_geometry(state: &mut RuntimeSnowColumn) {
     }
 }
 
+/// `scv = scv + wice(j) + wliq(j)`：逐层、按这个结合顺序累加（`:384`），
+/// 不是分别求和冰与液再相加 —— 两种写法在多层时舍入不同。
 fn snow_totals(state: &RuntimeSnowColumn) -> (f64, f64, f64, f64) {
+    let mut snow_mass = 0.0;
     let mut ice_mass = 0.0;
     let mut liquid_mass = 0.0;
     let mut depth = 0.0;
     for fortran_layer in state.layer_count + 1..=0 {
         let slot = layer_slot(fortran_layer);
+        snow_mass = snow_mass + state.ice_water_kg_m2[slot] + state.liquid_water_kg_m2[slot];
         ice_mass += state.ice_water_kg_m2[slot];
         liquid_mass += state.liquid_water_kg_m2[slot];
         depth += state.thickness_m[slot];
     }
-    (ice_mass + liquid_mass, depth, ice_mass, liquid_mass)
+    (snow_mass, depth, ice_mass, liquid_mass)
 }
 
 fn clear_snow_layers(state: &mut RuntimeSnowColumn) {

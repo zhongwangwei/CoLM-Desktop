@@ -234,7 +234,8 @@ pub use runoff::{
     TopmodelSurfaceState,
 };
 pub use runtime_clock::{
-    end_of_step_calendar_time, LaiUpdateSchedule, RestartFrequency, RuntimeClock, RuntimeStep,
+    end_of_step_calendar_time, is_end_of_year, LaiUpdateSchedule, RestartFrequency, RuntimeClock,
+    RuntimeStep,
 };
 pub use runtime_forcing::{
     forcing_grid_center_degrees, prepare_runtime_forcing, RuntimeForcing, RuntimeForcingInput,

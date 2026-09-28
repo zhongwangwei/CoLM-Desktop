@@ -80,21 +80,8 @@ pub fn land_physics_parameters(
              schemes 1 (CoLM2014) and 8 (CoLM2024) and aborts on any other value"
         ),
     };
-    if logical(document, "DEF_Optimize_Baseflow")? {
-        // `MOD_ParameterOptimization`/`MOD_Opt_Baseflow`：预热期逐次迭代
-        // `scale_baseflow(ipatch)`（`MOD_Opt_Baseflow.F90:82` 只在 `is_spinup` 时动手），
-        // 并把它写回 `ParaOpt/<case>_baseflow_w<..>_s<..>.nc`。
-        //
-        // **读那个文件**这件事已经做了（`colm-rs` 的 `read_baseflow_scale`），
-        // 所以这条拒绝只针对**优化过程本身**：本仓库不会在预热中反解 `scale_baseflow`，
-        // 开着它跑等于静默地不优化。声明默认值是 `.false.`，按纪律 #3 直接报错。
-        bail!(
-            "DEF_Optimize_Baseflow is on, but the Rust runtime does not implement \
-             `MOD_Opt_Baseflow`'s spinup iteration of `scale_baseflow`, so the case would \
-             silently run with an unoptimized baseflow scale (the calibrated value in \
-             `ParaOpt/*_baseflow_*.nc` *is* read; only the optimizer is missing)"
-        );
-    }
+    // `DEF_Optimize_Baseflow` 不在这里：它不改物理参数，而是在主循环里逐年改写
+    // `scale_baseflow`，由 `colm-rs` 装一个 `BaseflowOptimizer` 给运行时（`MOD_Opt_Baseflow`）。
     if logical(document, "DEF_USE_SNICAR")? {
         // `DEF_USE_SNICAR` 与 `DEF_SPLIT_SOILSNOW` 同属"最坏的一类"：它此前**根本
         // 没被读过**，而 `assembly.rs` 把 `snow_layer_absorption_w_m2` 硬写成 `None`
