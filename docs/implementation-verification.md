@@ -25341,3 +25341,31 @@ bgc_trace_cmp.py bt-fortran/trace.bin bt-rust/trace.bin      → 96 records iden
 脚本报出的 `hp`/`sp`/`tc`/`ts` "失败"是旧运行留下的、当前配置不会再写的重启日期（两边都是更早的时间戳）。
 `an-new`/`an-old`/`fx`/`vn` 不在标准集内，它们的差异用本次改动之前的 HEAD 二进制只重跑 `colm` 阶段后完全相同，
 是早已存在的问题，与 BGC 无关。
+
+## 第 417 轮：NITRIF 分支（默认 BGC 配置）
+
+`DEF_USE_NITRIF` 的声明默认值是 `.true.`，默认 BGC 算例走的是这一支。`SoilBiogeochemNitrifDenitrif` 按 GIMPLE 手写：
+`pH = 6.5` 常数使 `0.56 + atan(π·0.45·(pH−5))/π` 被编译期折成 0.9197379545722362；`ratio_no3_co2 = 100` 分支的
+`exp(−80)` 由 MPFR 折成正确舍入的常数，不能在运行期调 libm；`ρ_w·9.80616` 折成 9806.16；`g21 + g22·T` 等是 FMA，
+`38.4 − 350·diffus` 是 FNMA，`0.015·wfps − 0.32` 是 FMS。`SoilBiogeochemCompetition` 两个分支都改由 `regen.py` 生成。
+
+两个上游问题/编译器行为：
+
+- `SoilBiogeochemNLeaching` 同样把 `zi_soi` 声明成 `0:nl_soil`（形参下标整体偏移，`zi_soi(nl_soil)` 越界读到 `z_soi(1)`），
+  只在 NITRIF 分支的 `smin_no3_runoff` 里用到，所以 NITRIF 关时回放看不到。统一由 `BgcPhysics::zi_soi_from_zero` 复现。
+- `smin_no3_to_plant_vr = plant_ndemand·nuptake − smin_nh4_to_plant` 在 GIMPLE 里那一行只有一次存储：差值在上面
+  `sum_no3_demand` 那行算好后被 CSE 复用，而乘积另有一个在 `MIN` 里的使用，于是整条链都不融合。转写器改为：
+  只有存储的行，沿括号/复制追到被存储 SSA 值的定义语句，按它是否 FMA 族判断。
+
+`MOD_NitrifData`：启动按起始月读一次；每步在 `TICKTIME` 之前比较"本步步首的月"与"上一步步首的月"，不同则重读。
+逐层文件、`float` 数据精确扩成双精度，非土壤 patch 与 `< 1e-10` 清零。重启里的名字是 `tCONC_O2_UNSAT`，声明是小写，
+`BgcState` 的按名查找改为不分大小写（Fortran 语义）。
+
+实测（AT-Neu 3-PFT，2010 全年，NITRIF 开，纯 Rust 对纯 Fortran）：
+
+```
+bgc_replay bn-fortran/trace.bin                  → 1488 identical, 0 differing, 0 not ported
+bgc_trace_cmp.py bn-fortran bn-rust              → 1584 records identical
+39 个重启文件：release diff 0 = 39，debug diff 0 = 39
+NITRIF 关（by）复查：1440/1440 回放、39/39 重启；PFT/PC 与抽查的 LCT 回归逐位
+```
