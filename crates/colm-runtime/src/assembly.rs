@@ -72,6 +72,8 @@ pub struct LandPhysicsParameters {
     pub use_pft: bool,
     /// `DEF_USE_PC`：PFT 子网格的冠层用三层 PC 模型（`LeafTemperaturePC`、`ThreeDCanopy`）。
     pub use_pc: bool,
+    /// `DEF_USE_BGC` 的开关；BGC 关闭时为 `None`。
+    pub bgc: Option<colm_core::bgc_driver::BgcSwitches>,
     /// namelist 选的土壤水力关系；决定常数重启里读 `bsw` 还是五个 van Genuchten 场。
     pub hydraulic_model: HydraulicModel,
     /// `DEF_USE_VariablySaturatedFlow` **生效后**的取值。
@@ -787,6 +789,8 @@ pub struct StandardLctRestartTemplate {
     pub urban: Option<UrbanTemplate>,
     /// `DEF_USE_PFT` 下土壤 patch 的逐 PFT 参数与初始状态（[`Self::with_pft`] 装上）。
     pub pft: Option<crate::pft::PftTemplate>,
+    /// `DEF_USE_BGC` 下土壤 patch 的 BGC 状态与运行期设置（[`Self::with_bgc`] 装上）。
+    pub bgc: Option<crate::bgc_step::BgcRuntime>,
     /// 雪 + 土的模板列（`soilsnow`），积雪分支的 `GroundTemperatureInput` 需要这个形状。
     ///
     /// 雪段在前、土段在后，与时间重启里的数组同序；无雪时它就是土列本身。
@@ -1256,6 +1260,7 @@ fn assemble(
         lake,
         urban,
         pft: None,
+        bgc: None,
         patch,
         patch_type: i32::try_from(patch_type).context("patchtype is outside the kernel's range")?,
         // 入参重启里没有 `rss` 时按 `spval` 处理 —— 与上游"起跑时是缺测值"一致。
@@ -1340,6 +1345,22 @@ impl StandardLctRestartTemplate {
             &self.physics,
             &self.interface_depth_m,
         )?);
+        Ok(self)
+    }
+
+    /// 装上 `DEF_USE_BGC` 的运行期（要求已经装好 PFT 子网格）。
+    pub fn with_bgc(mut self, bgc: crate::bgc_step::BgcRuntime) -> Result<Self> {
+        let pft = self
+            .pft
+            .as_ref()
+            .context("DEF_USE_BGC needs the PFT subgrid first")?;
+        ensure!(
+            pft.initial.columns.len() == bgc.initial.pft.leafc_p.len(),
+            "the BGC restart has {} PFTs, the PFT subgrid {}",
+            bgc.initial.pft.leafc_p.len(),
+            pft.initial.columns.len()
+        );
+        self.bgc = Some(bgc);
         Ok(self)
     }
 
@@ -1817,6 +1838,7 @@ impl StandardLctRestartTemplate {
                 .urban
                 .as_ref()
                 .map(|urban| Box::new(urban.initial.clone())),
+            bgc: self.bgc.as_ref().map(|bgc| Box::new(bgc.initial.clone())),
         }
     }
 

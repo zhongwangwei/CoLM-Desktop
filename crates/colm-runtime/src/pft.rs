@@ -155,6 +155,10 @@ impl PftTemplate {
                 momentum_roughness_m: z0m[p],
                 maximum_sunlit_leaf_conductance: gs0sun[p],
                 maximum_shaded_leaf_conductance: gs0sha[p],
+                sunlit_leaf_area_index: 0.0,
+                shaded_leaf_area_index: 0.0,
+                assimilation_mol_m2_s: 0.0,
+                respiration_mol_m2_s: 0.0,
             })
             .collect();
         let mut initial = PftPatch::new(parameters, columns, interface_depth_m.len() - 1)?;

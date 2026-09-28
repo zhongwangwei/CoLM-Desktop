@@ -272,6 +272,7 @@ fn standard_lct_snow_soil_step_carries_active_snow_and_soil_columns() {
         },
         lake: None,
         urban: None,
+        bgc: None,
     };
     let input = StandardLctSnowSoilInput {
         energy,
@@ -395,6 +396,7 @@ fn standard_lct_snow_soil_step_credits_the_thermal_condensation_to_the_soil() {
         },
         lake: None,
         urban: None,
+        bgc: None,
     };
 
     let output = standard_lct_snow_soil_step(
@@ -507,6 +509,7 @@ fn standard_lct_snow_soil_step_rereads_the_layer_count_after_newsnow() {
         },
         lake: None,
         urban: None,
+        bgc: None,
     };
 
     let output = standard_lct_snow_soil_step(
@@ -938,6 +941,7 @@ fn the_step_end_surface_temperature_follows_the_combined_snow_layer_count() {
         },
         lake: None,
         urban: None,
+        bgc: None,
     };
     assert_eq!(state.surface_temperature_k(), 262.0);
 

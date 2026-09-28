@@ -33,6 +33,7 @@ fn physics() -> LandPhysicsParameters {
     LandPhysicsParameters {
         use_pft: false,
         use_pc: false,
+        bgc: None,
         hydraulic_model: HydraulicModel::VanGenuchten,
         variably_saturated_flow: false,
         plant_hydraulics: false,

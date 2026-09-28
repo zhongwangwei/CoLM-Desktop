@@ -36,6 +36,10 @@ fn column(lai: f64, sai: f64) -> PftColumn {
         momentum_roughness_m: 0.1,
         maximum_sunlit_leaf_conductance: 0.0,
         maximum_shaded_leaf_conductance: 0.0,
+        sunlit_leaf_area_index: 0.0,
+        shaded_leaf_area_index: 0.0,
+        assimilation_mol_m2_s: 0.0,
+        respiration_mol_m2_s: 0.0,
     }
 }
 

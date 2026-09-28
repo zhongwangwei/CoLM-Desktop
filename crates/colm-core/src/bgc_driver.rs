@@ -153,7 +153,7 @@ pub const NPCROPMIN: i32 = 17;
 
 /// `MOD_TimeManager:isendofyear(idate, sec)`：`idate + int(sec)` 是否跨年（秒数进位条件是
 /// 严格大于 86400）。
-pub(crate) fn is_end_of_year(idate: [i32; 3], seconds: f64) -> bool {
+pub fn is_end_of_year(idate: [i32; 3], seconds: f64) -> bool {
     let (mut year, mut day, mut sec) = (idate[0], idate[1], idate[2] + seconds as i32);
     while sec > 86400 {
         sec -= 86400;

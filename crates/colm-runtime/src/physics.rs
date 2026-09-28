@@ -14,7 +14,7 @@
 //! 3. **上游有、本仓库没移植的分支一律报错。** 目前两处：`DEF_Runoff_SCHEME=1`
 //!    （VIC 产流）与 `DEF_USE_IRRIGATION`（喷灌）。
 
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, ensure, Context, Result};
 use colm_core::{
     HydraulicModel, LandCoverScheme, ObservationHeightMode, PlantHydraulicOverrides,
     PlantHydraulicParameters, PrecipitationPhaseScheme, RootFractionScheme, StomataOptions,
@@ -154,15 +154,32 @@ pub fn land_physics_parameters(
     }
     // PFT 与 PC 都已移植：PFT 逐 PFT 解单冠层，PC 走 `LeafTemperaturePC` 与 `ThreeDCanopy`；
     // 二者都在聚合后复用 LCT 的地面与水分路径。
-    // `DEF_USE_BGC`：`CoLMDRIVER.F90:238` 每步在 `CoLMMAIN` 之后调 `bgc_driver`。BGC 状态的
-    // 读写（`crate::bgc`）已就位，driver 本身还在移植（C2-C4）；不读这个开关的话 BGC 算例会
-    // 只跑物理、把 BGC 状态原样写回，而且不报错。
-    if logical(document, "DEF_USE_BGC")? {
-        bail!(
-            "DEF_USE_BGC is on, but the Rust runtime has not ported bgc_driver yet; \
-             running it would advance only the physics and write the BGC state back unchanged"
+    // `DEF_USE_BGC`：`CoLMDRIVER.F90:238` 每步在 `CoLMMAIN` 之后调 `bgc_driver`（`crate::bgc_step`）。
+    // 上游 `MOD_Namelist.F90:1900` 要求 PFT 或 PC 子网格；BGC 关闭时 `LAIFEEDBACK`/`SASU`/
+    // `DiagMatrix`/`NITRIF`/`FIRE` 被强制关掉，`CROP` 关闭时 `FERT`/`CNSOYFIXN` 同理。
+    let bgc = if logical(document, "DEF_USE_BGC")? {
+        ensure!(
+            selected[0] != "DEF_USE_LCT",
+            "DEF_USE_BGC requires DEF_USE_PFT or DEF_USE_PC (MOD_Namelist.F90:1900 stops the model)"
         );
-    }
+        let switches = colm_core::bgc_driver::BgcSwitches {
+            // 内核没有 `#ifdef CROP`（`DEF_USE_CROP` 打开时已在上面被拒绝）。
+            crop: false,
+            nitrif: logical(document, "DEF_USE_NITRIF")?,
+            fire: logical(document, "DEF_USE_FIRE")?,
+            sasu: logical(document, "DEF_USE_SASU")?,
+            diag_matrix: logical(document, "DEF_USE_DiagMatrix")?,
+            cnsoyfixn: false,
+            fert: false,
+            irrigation: false,
+            laifeedback: logical(document, "DEF_USE_LAIFEEDBACK")?,
+            nostressnitrogen: logical(document, "DEF_USE_NOSTRESSNITROGEN")?,
+        };
+        crate::bgc_step::refuse_unported(switches)?;
+        Some(switches)
+    } else {
+        None
+    };
     let use_pc = selected[0] == "DEF_USE_PC";
     let use_pft = selected[0] == "DEF_USE_PFT" || use_pc;
 
@@ -308,6 +325,7 @@ pub fn land_physics_parameters(
     Ok(LandPhysicsParameters {
         use_pft,
         use_pc,
+        bgc,
         hydraulic_model: if campbell {
             HydraulicModel::Campbell
         } else {

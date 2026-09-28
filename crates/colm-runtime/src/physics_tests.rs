@@ -448,14 +448,41 @@ fn interception_scheme_eight_is_read_and_other_schemes_are_refused() {
     assert!(error.to_string().contains("schemes 1"), "{error}");
 }
 
-/// BGC 的 driver 移植完之前必须当场拒绝，不能只跑物理。
+/// BGC 需要 PFT/PC 子网格；已验证的分支（NITRIF 关）读出开关，未验证的分支当场拒绝，
+/// 不能静默跑成另一个模式。
 #[test]
-fn a_bgc_case_is_refused_until_the_driver_is_ported() {
-    let error = land_physics_parameters(
+fn bgc_switches_follow_the_namelist_and_unverified_branches_are_refused() {
+    let lct = land_physics_parameters(
+        &case_with("DEF_USE_BGC=.true."),
+        LandCoverScheme::Igbp,
+        HEIGHTS,
+    )
+    .expect_err("BGC on LCT stops the model");
+    assert!(
+        lct.to_string().contains("DEF_USE_PFT or DEF_USE_PC"),
+        "{lct}"
+    );
+
+    let ported = land_physics_parameters(
+        &case_with(
+            "DEF_USE_LCT=.false.\nDEF_USE_PFT=.true.\nDEF_USE_BGC=.true.\nDEF_USE_NITRIF=.false.",
+        ),
+        LandCoverScheme::Igbp,
+        HEIGHTS,
+    )
+    .unwrap();
+    let switches = ported.bgc.expect("BGC switches");
+    assert!(!switches.nitrif && !switches.fire && !switches.crop);
+
+    // `DEF_USE_NITRIF` 的声明默认值是 .true.，那条分支还没有逐位验证。
+    let nitrif = land_physics_parameters(
         &case_with("DEF_USE_LCT=.false.\nDEF_USE_PFT=.true.\nDEF_USE_BGC=.true."),
         LandCoverScheme::Igbp,
         HEIGHTS,
     )
-    .expect_err("a BGC case must be refused");
-    assert!(error.to_string().contains("DEF_USE_BGC"), "{error}");
+    .expect_err("the nitrification branch is not verified");
+    assert!(nitrif.to_string().contains("DEF_USE_NITRIF"), "{nitrif}");
+
+    let off = land_physics_parameters(&case_with(""), LandCoverScheme::Igbp, HEIGHTS).unwrap();
+    assert!(off.bgc.is_none());
 }

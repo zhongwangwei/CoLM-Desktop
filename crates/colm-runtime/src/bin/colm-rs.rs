@@ -165,6 +165,12 @@ fn run() -> Result<()> {
             )
             .context("cannot assemble the PFT subgrid")?;
     }
+    // `DEF_USE_BGC`：BGC 状态来自四份 BGC 重启，氮沉降来自 `DEF_dir_runtime/ndep`。
+    if let Some(switches) = template.physics.bgc {
+        template = template
+            .with_bgc(assemble_bgc(&document, &files, arguments.patch, switches)?)
+            .context("cannot assemble the BGC state")?;
+    }
     // `DEF_LAI_MONTHLY` 打开时每月重读 LAI（`CoLM.F90:595-605`）。**不装就等于关门**：
     // 跨月的运行会从第二个月起一直用第一天的叶面积，而且不会报错。
     if logical_field(&document, "DEF_LAI_MONTHLY")? {
@@ -296,6 +302,65 @@ fn run() -> Result<()> {
     Ok(())
 }
 
+/// `DEF_USE_BGC` 的运行期：BGC 重启、PFT 常数、BGC 用的静态量与氮沉降。
+fn assemble_bgc(
+    document: &Document,
+    files: &RestartStateFiles,
+    patch: usize,
+    switches: colm_core::bgc_driver::BgcSwitches,
+) -> Result<colm_runtime::bgc_step::BgcRuntime> {
+    // BGC 重启按"整列就是这个 patch"读（`crate::bgc` 的约定），多 patch 文件会串到别的 patch。
+    let patches = colm_init::RestartFile::open(&files.constant)?
+        .floats("patchlatr")?
+        .len();
+    ensure!(
+        patches == 1 && patch == 0,
+        "DEF_USE_BGC: colm-rs reads the BGC restarts as one patch, but {} holds {patches}",
+        files.constant.display()
+    );
+    let pft_time = colm_runtime::pft::pft_restart_path(&files.time)?;
+    let npft = colm_init::RestartFile::open(&pft_time)?
+        .floats("tlai_p")?
+        .len();
+    let initial =
+        colm_runtime::bgc::BgcTemplate::read(&files.constant, &files.time, &pft_time, npft)?
+            .initial;
+    let layers = initial.dims.nl_soil;
+    let statics = colm_runtime::bgc_step::BgcStatics::read(&files.constant, patch, layers)?;
+    ensure!(
+        integer_field(document, "DEF_NDEP_FREQUENCY")? == 1,
+        "DEF_USE_BGC: only the annual N deposition (DEF_NDEP_FREQUENCY = 1) is ported"
+    );
+    let runtime_dir = std::path::PathBuf::from(string_field(document, "DEF_dir_runtime")?);
+    let degrees = |radians: f64| radians * 180.0 / std::f64::consts::PI;
+    let ndep = colm_runtime::bgc_step::NdepSource::open(
+        &runtime_dir,
+        degrees(statics.patchlatr),
+        degrees(statics.patchlonr),
+        logical_field(document, "DEF_USE_PN")?,
+    )?;
+    // `init_ndep_data_annually(sdate(1))`：`sdate` 经过 `adj2end`，00:00 的 1 月 1 日起步算上一年。
+    let year = i32::try_from(integer_field(document, "DEF_simulation_time%start_year")?)?;
+    let month = integer_field(document, "DEF_simulation_time%start_month")?;
+    let day = integer_field(document, "DEF_simulation_time%start_day")?;
+    let second = integer_field(document, "DEF_simulation_time%start_sec")?;
+    let ndep_start_year = if month == 1 && day == 1 && second == 0 {
+        year - 1
+    } else {
+        year
+    };
+    let deltim = real_field(document, "DEF_simulation_time%timestep")?;
+    colm_runtime::bgc_step::BgcRuntime::new(
+        initial,
+        colm_runtime::bgc::bgc_pft_constants(document)?,
+        switches,
+        statics,
+        ndep,
+        ndep_start_year,
+        deltim,
+    )
+}
+
 struct RunSummary {
     steps: usize,
     /// `None` 表示这份算例没开 history（`DEF_HIST_FREQ = 'none'`）。
@@ -422,10 +487,30 @@ fn write_evolved_restart(
     write_restart(restart_in, restart_out, overrides.as_slice())?;
     // PFT 子网格另有一份时间重启（`<case>_restart_pft_<date>_…nc`），与主重启同目录。
     if let (Some(pft_template), Some(pft)) = (&template.pft, &state.energy.pft) {
+        let pft_in = colm_runtime::pft::pft_restart_path(restart_in)?;
+        let mut overrides = pft_template.overrides(pft);
+        // `WRITE_PFTimeVariables` 在 BGC 下把 `WRITE_BGCPFTimeVariables` 写进同一份文件。
+        if let Some(bgc) = &state.bgc {
+            overrides.extend(colm_runtime::bgc::BgcTemplate::overrides(
+                bgc,
+                &colm_init::RestartFile::open(&pft_in)?,
+            ));
+        }
         write_restart(
-            &colm_runtime::pft::pft_restart_path(restart_in)?,
+            &pft_in,
             &colm_runtime::pft::pft_restart_path(restart_out)?,
-            &pft_template.overrides(pft),
+            &overrides,
+        )?;
+    }
+    // BGC 的 patch 级时间变量另有一份（`<case>_restart_bgc_<date>_…nc`）。
+    if let Some(bgc) = &state.bgc {
+        let bgc_in = colm_runtime::bgc::bgc_time_path(restart_in)?;
+        let overrides =
+            colm_runtime::bgc::BgcTemplate::overrides(bgc, &colm_init::RestartFile::open(&bgc_in)?);
+        write_restart(
+            &bgc_in,
+            &colm_runtime::bgc::bgc_time_path(restart_out)?,
+            &overrides,
         )?;
     }
     // 城市单元另有一份时间重启（`<case>_restart_urban_<date>_…nc`），与主重启同目录。
@@ -713,6 +798,36 @@ fn integer_field(document: &Document, field: &str) -> Result<i64> {
     match colm_schema::find(field).map(|field| &field.default) {
         Some(colm_schema::Default::Integer(value)) => Ok(*value),
         _ => bail!("{field} is missing from the case namelist and has no integer default"),
+    }
+}
+
+/// 取一个实数字段：算例里写了就用算例的，否则用 schema 的声明默认值。
+fn real_field(document: &Document, field: &str) -> Result<f64> {
+    if let Some(value) = document.get(field) {
+        return value
+            .as_f64()
+            .with_context(|| format!("{field} must be a real value, got {value:?}"));
+    }
+    match colm_schema::find(field).map(|field| &field.default) {
+        Some(colm_schema::Default::Real(text)) => text
+            .replace(['d', 'D'], "e")
+            .parse()
+            .with_context(|| format!("{field} has an unreadable default {text}")),
+        _ => bail!("{field} is missing from the case namelist and has no real default"),
+    }
+}
+
+/// 取一个字符字段：算例里写了就用算例的，否则用 schema 的声明默认值。
+fn string_field(document: &Document, field: &str) -> Result<String> {
+    if let Some(value) = document.get(field) {
+        return match value {
+            Value::Str(value) => Ok(value.clone()),
+            other => bail!("{field} must be a character value, got {other:?}"),
+        };
+    }
+    match colm_schema::find(field).map(|field| &field.default) {
+        Some(colm_schema::Default::Str(value)) => Ok((*value).to_owned()),
+        _ => bail!("{field} is missing from the case namelist and has no character default"),
     }
 }
 

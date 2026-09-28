@@ -86,6 +86,12 @@ pub struct PftColumn {
     /// `gs0sun_p`/`gs0sha_p`：PHS 的最大叶导度；PHS 关掉时上游不赋值。
     pub maximum_sunlit_leaf_conductance: f64,
     pub maximum_shaded_leaf_conductance: f64,
+    /// `laisun_p`/`laisha_p`/`assim_p`/`respc_p`：本步冠层能量求解的结果。上游是 module 数组，
+    /// `bgc_driver` 在 `CoLMMAIN` 之后读它们（维持呼吸、光合产物）；不进重启。
+    pub sunlit_leaf_area_index: f64,
+    pub shaded_leaf_area_index: f64,
+    pub assimilation_mol_m2_s: f64,
+    pub respiration_mol_m2_s: f64,
 }
 
 /// 一个 PFT patch 的全部子网格状态。
@@ -768,6 +774,12 @@ pub(crate) fn pft_canopy_energy(
         });
     }
 
+    for (column, record) in patch.columns.iter_mut().zip(&records) {
+        column.sunlit_leaf_area_index = record.laisun;
+        column.shaded_leaf_area_index = record.laisha;
+        column.assimilation_mol_m2_s = record.assim;
+        column.respiration_mol_m2_s = record.respc;
+    }
     let fractions = patch.fractions().collect::<Vec<_>>();
     let sum = |select: fn(&PftLeafRecord) -> f64| {
         pft_sum(records.iter().map(select).zip(fractions.iter().copied()))

@@ -8,6 +8,7 @@
 pub mod assembly;
 pub mod baseflow_optimizer;
 pub mod bgc;
+pub mod bgc_step;
 pub mod history;
 pub mod pft;
 pub mod physics;
@@ -871,6 +872,20 @@ fn advance_patch(
         &output,
     );
     template.prepare_surface_optics(state, optics)?;
+    // `CoLMDRIVER.F90:238-244`：土壤 patch 在 `CoLMMAIN`（含末尾的光学准备）之后跑 `bgc_driver`。
+    if let Some(bgc) = &template.bgc {
+        let end = step.clock.end_time;
+        bgc.step(
+            [
+                end.year,
+                i32::from(end.julian_day),
+                i32::try_from(end.seconds)?,
+            ],
+            &step.forcing,
+            state,
+            &output,
+        )?;
+    }
     Ok(PatchOutput::Soil(Box::new(output)))
 }
 
@@ -1505,6 +1520,7 @@ mod tests {
         crate::assembly::LandPhysicsParameters {
             use_pft: false,
             use_pc: false,
+            bgc: None,
             hydraulic_model: colm_core::HydraulicModel::VanGenuchten,
             variably_saturated_flow: false,
             plant_hydraulics: false,

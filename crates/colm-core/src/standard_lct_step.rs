@@ -155,6 +155,8 @@ pub struct StandardLctSnowSoilState {
     /// 城市 patch（`patchtype == 1`）的各面雪列、墙、建筑与城市辐射量；其余 patch 为 `None`。
     /// 城市上 `snow`/`soil_*` 存的是写进主重启的面积加权聚合量。
     pub urban: Option<Box<crate::UrbanPatchState>>,
+    /// `DEF_USE_BGC` 的土壤 patch：`MOD_BGC_Vars_*` 全部状态；`bgc_driver` 在每步物理之后推进它。
+    pub bgc: Option<Box<crate::bgc_state::BgcState>>,
 }
 
 impl StandardLctSnowSoilState {
