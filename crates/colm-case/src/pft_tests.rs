@@ -183,3 +183,20 @@ fn exposes_first_and_last_pft_names() {
     assert_eq!(pft_name(78).unwrap().en, "irrigated tropical soybean");
     assert!(pft_name(79).is_none());
 }
+
+/// 写死的类别标志逐位对上 `MOD_Const_PFT`：包括 `#ifdef CROP` 段之后的 CFT。
+#[test]
+fn fixed_pft_flags_follow_mod_const_pft() {
+    use super::pft::fixed_value;
+    // 类别 1（温带常绿针叶林）是乔木、常绿；13（C3 草）不是乔木。
+    assert_eq!(fixed_value("woody", 1).unwrap(), 1.0);
+    assert_eq!(fixed_value("isevg", 1).unwrap(), 1.0);
+    assert_eq!(fixed_value("woody", 13).unwrap(), 0.0);
+    assert_eq!(fixed_value("isevg", 3).unwrap(), 0.0);
+    // 裸地
+    assert_eq!(fixed_value("isbare", 0).unwrap(), 1.0);
+    // 最后一个 CFT 能取到，说明 CROP 段没有被丢掉。
+    assert!(fixed_value("iscrop", 78).is_ok());
+    assert!(fixed_value("dsladlai", 7).unwrap().is_finite());
+    assert!(fixed_value("vmax25", 1).is_err());
+}

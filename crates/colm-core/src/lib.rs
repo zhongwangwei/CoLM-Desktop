@@ -73,6 +73,7 @@ pub mod atmosphere;
 pub mod bgc;
 pub mod bgc_state;
 pub mod bgc_state_generated;
+pub mod bgc_zero_fluxes_generated;
 pub mod calendar;
 pub mod canopy_layer_profile;
 pub mod canopy_roughness;

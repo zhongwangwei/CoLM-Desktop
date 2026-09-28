@@ -1254,6 +1254,41 @@ pub fn default_value(name: &str, pft_type: u8, campbell: bool, pc: bool) -> Resu
     table().value(meta.source, index, campbell, pc).map(Some)
 }
 
+/// `MOD_Const_PFT` 里写死的 `parameter` 数组（不能被 `DEF_PFT_*` 覆盖）：BGC 用的类别标志
+/// （`woody`、`isevg`…，逻辑值读成 1/0）与 `dsladlai`/`allconsl` 等。
+pub const FIXED_PARAMETERS: &[&str] = &[
+    "woody", "isevg", "issed", "isstd", "isbare", "iscrop", "isnatveg", "isshrub", "isgrass",
+    "isbetr", "isbdtr", "dsladlai", "declfact", "allconsl",
+];
+
+/// 某个写死的 PFT 参数在 `pft_type`（0..=78）上的取值。
+pub fn fixed_value(name: &str, pft_type: u8) -> Result<f64> {
+    if !FIXED_PARAMETERS.contains(&name) {
+        bail!("{name} is not a fixed MOD_Const_PFT parameter");
+    }
+    fixed_table()
+        .0
+        .get(name)
+        .and_then(|values| values.get(usize::from(pft_type)).copied())
+        .ok_or_else(|| anyhow!("{name} has no value for PFT type {pft_type}"))
+}
+
+fn fixed_table() -> &'static Table {
+    static TABLE: OnceLock<Table> = OnceLock::new();
+    TABLE.get_or_init(|| {
+        let clean: Vec<String> = SOURCE.lines().map(clean_line).collect();
+        let mut map = BTreeMap::new();
+        for name in FIXED_PARAMETERS {
+            map.insert(
+                *name,
+                parse_assignment(&clean, name, PFT_LEN)
+                    .unwrap_or_else(|error| panic!("MOD_Const_PFT {name}: {error}")),
+            );
+        }
+        Table(map)
+    })
+}
+
 pub fn validate_override(name: &str, value: f64) -> Result<()> {
     let Some(meta) = parameter(name) else {
         bail!("{name} is not a PFT parameter");
