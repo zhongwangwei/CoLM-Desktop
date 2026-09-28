@@ -25211,3 +25211,13 @@ cargo test core 372 / runtime 78 / init 156；clippy -D warnings 无告警；fmt
 未验证：DEF_PC_CROP_SPLIT 的作物 PFT（遇到即报错）、DEF_USE_OZONESTRESS（系数固定为 1）、PC 下的 split
 土/雪（代码按 GIMPLE 写了，算例没开）、只有三层冠层（numlay = 3）才会走到的廓线分支——这些算例的 PFT 类别
 至多分在第 1/2 层，numlay = 3 的公式还没对 Fortran 跑过。
+
+## 第 414 轮：BGC 冷启动逐位（C1 之一）
+
+`DEF_USE_BGC = .true.`（AT-Neu 3-PFT，`tmp/bm-*`）的 Rust 冷启动对纯 Fortran `mkinidata`：常数重启 5 份、
+主/PFT 时间重启 `diff 0`，只有 BGC 时间重启的 `totvegn` 差 1 ULP。追下去是 `summarize_bgc_state` 的结构与上游
+`CNDriverSummarizeStates` 不同：上游先逐 PFT 按源码顺序平铺求 `totvegc_p`/`totvegn_p`，再做
+`sum(totveg*_p*pftfrac)` 的 FMA 链；Rust 是逐字段加权后再求和，其余量逐位只是巧合。同时对齐了
+`MOD_BGC_CNSummary.F90` 的 GIMPLE：层积分 `FMA(vr, dz, acc)`、`totsoiln_vr` 池外层层内层的
+`FMA(vr/(BD*1000), 100, acc)`、按池类型的平铺累加。改后 BGC 时间重启 `diff 0`；`bgc_tests` 里三处按旧舍入
+写死的期望值随之更新（313.5、0.00038、0.021500000000000002）。

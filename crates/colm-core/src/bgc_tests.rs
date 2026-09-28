@@ -64,8 +64,8 @@ fn cold_bgc_maps_runtime_profiles_in_fortran_pool_order_and_preserves_full_depth
     assert_eq!(pft_values(&state, "leafc_storage_p"), [0.0, 600.0, 600.0]);
     assert_eq!(pft_values(&state, "deadstemc_p"), [15.0, 15.0, 0.0]);
     assert_eq!(pft_values(&state, "leafn_p")[0], 12.0);
-    assert_eq!(state.totals.litter_carbon[0], 313.50000000000006);
-    assert_eq!(state.pools.total_soil_nitrogen[0], 0.0215);
+    assert_eq!(state.totals.litter_carbon[0], 313.5);
+    assert_eq!(state.pools.total_soil_nitrogen[0], 0.021500000000000002);
 }
 
 #[test]
@@ -421,7 +421,7 @@ fn state_summary_matches_the_cn_driver_pool_and_truncation_totals() {
         summary.nitrogen_pool_totals,
         [38.5, 77.0, 115.5, 154.0, 192.5, 231.0, 269.5]
     );
-    assert_eq!(summary.total_soil_nitrogen[0], 0.00037999999999999997);
+    assert_eq!(summary.total_soil_nitrogen[0], 0.00038);
     assert_eq!(summary.vegetation_carbon, 9.5);
     assert_eq!(summary.vegetation_nitrogen, 11.5);
     assert_eq!(summary.carbon_truncation_vegetation, 17.5);

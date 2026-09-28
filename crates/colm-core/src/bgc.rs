@@ -284,32 +284,45 @@ pub struct BgcStateSummary {
 /// and vegetation-truncation totals, while retaining its soil BGC state.
 pub fn summarize_bgc_state(input: BgcStateSummaryInput<'_>) -> Result<BgcStateSummary> {
     validate_summary_input(input)?;
+    // `soilbiogeochem_*state_summary`（`MOD_BGC_CNSummary.F90:224-326`）：层积分是
+    // `FMA(vr, dz, acc)`；`totsoiln_vr` 池在外层、层在内层，每项 `FMA(vr/(BD*1000), 100, acc)`，
+    // 矿质氮最后按层再加一次。
     let carbon_pool_totals = integrated_pool_totals(input.carbon_g_m3, input.soil_thickness_m);
     let nitrogen_pool_totals = integrated_pool_totals(input.nitrogen_g_m3, input.soil_thickness_m);
-    let total_soil_nitrogen = (0..BGC_SOIL_LAYERS)
-        .map(|soil| {
+    let mut total_soil_nitrogen = vec![0.0; BGC_SOIL_LAYERS];
+    for pool in 0..BGC_DECOMPOSITION_POOLS {
+        for (soil, total) in total_soil_nitrogen.iter_mut().enumerate() {
             let density = input.soil_bulk_density_kg_m3[soil];
-            let mut total = 0.0;
-            for pool in 0..BGC_DECOMPOSITION_POOLS {
-                total += input.nitrogen_g_m3[soil * BGC_DECOMPOSITION_POOLS + pool]
-                    / (density * 1000.0)
-                    * 100.0;
-            }
-            total + input.mineral_nitrogen_g_m3[soil] / (density * 1000.0) * 100.0
-        })
-        .collect::<Vec<_>>();
-    let litter_carbon = carbon_pool_totals[..3].iter().sum();
+            *total = (input.nitrogen_g_m3[soil * BGC_DECOMPOSITION_POOLS + pool]
+                / (density * 1000.0))
+                .mul_add(100.0, *total);
+        }
+    }
+    let mut mineral_nitrogen = 0.0;
+    for (soil, total) in total_soil_nitrogen.iter_mut().enumerate() {
+        mineral_nitrogen = input.mineral_nitrogen_g_m3[soil]
+            .mul_add(input.soil_thickness_m[soil], mineral_nitrogen);
+        let density = input.soil_bulk_density_kg_m3[soil];
+        *total = (input.mineral_nitrogen_g_m3[soil] / (density * 1000.0)).mul_add(100.0, *total);
+    }
+    // 按池类型平铺累加（凋落物 1..3、粗木质残体 4、土壤有机质 5..7）。
+    let plain = |values: &[f64]| values.iter().fold(0.0, |sum, value| sum + value);
+    let litter_carbon = plain(&carbon_pool_totals[..3]);
     let coarse_woody_carbon = carbon_pool_totals[3];
-    let soil_carbon = carbon_pool_totals[4..].iter().sum();
-    let litter_nitrogen = nitrogen_pool_totals[..3].iter().sum();
+    let soil_carbon = plain(&carbon_pool_totals[4..]);
+    let litter_nitrogen = plain(&nitrogen_pool_totals[..3]);
     let coarse_woody_nitrogen = nitrogen_pool_totals[3];
-    let soil_nitrogen = nitrogen_pool_totals[4..].iter().sum();
-    let mineral_nitrogen = input
-        .mineral_nitrogen_g_m3
-        .iter()
-        .zip(input.soil_thickness_m)
-        .map(|(value, thickness)| value * thickness)
-        .sum::<f64>();
+    let soil_nitrogen = plain(&nitrogen_pool_totals[4..]);
+    let layer_integral = |values: &[f64]| {
+        values
+            .iter()
+            .zip(input.soil_thickness_m)
+            .fold(0.0, |sum, (value, thickness)| {
+                value.mul_add(*thickness, sum)
+            })
+    };
+    // `cnveg_*state_summary`（`:328-616`）：`totvegc_p` 逐 PFT 按源码顺序平铺相加，
+    // patch 值是 `sum(totvegc_p*pftfrac)` 的 FMA 链。
     let vegetation_carbon =
         weighted_pft_total(input.pft_values, input.pft_fraction, CARBON_TOTAL_FIELDS);
     let vegetation_nitrogen =
@@ -318,18 +331,9 @@ pub fn summarize_bgc_state(input: BgcStateSummaryInput<'_>) -> Result<BgcStateSu
         weighted_pft_total(input.pft_values, input.pft_fraction, &["ctrunc_p"]);
     let nitrogen_truncation_vegetation =
         weighted_pft_total(input.pft_values, input.pft_fraction, &["ntrunc_p"]);
-    let carbon_truncation_soil = input
-        .carbon_truncation_g_m3
-        .iter()
-        .zip(input.soil_thickness_m)
-        .map(|(value, thickness)| value * thickness)
-        .sum();
-    let nitrogen_truncation_soil = input
-        .nitrogen_truncation_g_m3
-        .iter()
-        .zip(input.soil_thickness_m)
-        .map(|(value, thickness)| value * thickness)
-        .sum();
+    let carbon_truncation_soil = layer_integral(&input.carbon_truncation_g_m3[..BGC_SOIL_LAYERS]);
+    let nitrogen_truncation_soil =
+        layer_integral(&input.nitrogen_truncation_g_m3[..BGC_SOIL_LAYERS]);
 
     Ok(BgcStateSummary {
         carbon_pool_totals,
@@ -1040,9 +1044,9 @@ fn validate_summary_input(input: BgcStateSummaryInput<'_>) -> Result<()> {
 fn integrated_pool_totals(values: &[f64], thicknesses: &[f64]) -> Vec<f64> {
     (0..BGC_DECOMPOSITION_POOLS)
         .map(|pool| {
-            (0..BGC_SOIL_LAYERS)
-                .map(|soil| values[soil * BGC_DECOMPOSITION_POOLS + pool] * thicknesses[soil])
-                .sum()
+            (0..BGC_SOIL_LAYERS).fold(0.0, |sum, soil| {
+                values[soil * BGC_DECOMPOSITION_POOLS + pool].mul_add(thicknesses[soil], sum)
+            })
         })
         .collect()
 }
@@ -1196,16 +1200,17 @@ fn set_pft(values: &mut [Vec<f64>], name: &str, pft: usize, value: f64) {
 }
 
 fn weighted_pft_total(values: &[Vec<f64>], fractions: &[f64], fields: &[&str]) -> f64 {
-    fields
+    fractions
         .iter()
-        .map(|name| {
-            pft_field(values, name)
+        .enumerate()
+        .fold(0.0, |sum, (pft, fraction)| {
+            let total = fields
                 .iter()
-                .zip(fractions)
-                .map(|(value, fraction)| value * fraction)
-                .sum::<f64>()
+                .map(|name| pft_field(values, name)[pft])
+                .reduce(|acc, value| acc + value)
+                .unwrap_or(0.0);
+            total.mul_add(*fraction, sum)
         })
-        .sum()
 }
 
 fn pft_field<'a>(values: &'a [Vec<f64>], name: &str) -> &'a [f64] {
