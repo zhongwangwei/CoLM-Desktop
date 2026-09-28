@@ -25656,3 +25656,19 @@ Rust 现在照写：`HistorySession` 暴露一个共享的"本区间已累加步
 以 `bn`（AT-Neu 3-PFT，NITRIF 开，2010 全年）为底改成 `DEF_USE_PC = .true.`（`bp`），对 `kernels/default` 纯 Fortran：
 12/12 历史、51/51 重启与旁车逐位一致，release 与 debug 相同。BGC 驱动本身与子网格无关（逐 PFT），PC 的差别只在冠层
 （`LeafTemperaturePC`/`ThreeDCanopy`）与汇总的 PFT 份额，二者此前已分别验证，这里第一次在同一算例里联跑。
+
+## 第 429 轮：上游复核（2026-09-28 `git fetch`）
+
+CoLM-SYSU-integration 的 `origin/master` 仍是 `3c799bae`，与 vendor 对齐。远端新增一个**未合入**的分支
+`fix/tracer-impermeable-exchange`（9 个提交，均为 9 月 28 日），改动 8 个文件：
+- `CoLMMAIN.F90`、`HYDRO/MOD_Grid_RiverLakeFlow.F90`：洪泛反馈的示踪物记账容差，位于 `DEF_USE_TRACER`/`GridRiverLakeFlow` 块内；
+- `HYDRO/MOD_Hydro_SoilWater.F90`：水位交换诊断只计可透水层，位于 `IF (DEF_USE_TRACER .and. DEF_USE_PLANTHYDRAULICS …)` 内；
+- `TRACER/*`（4 个）：同位素/甲烷；
+- `share/MOD_SPMD_Task.F90`：非 MPI 下 `CoLM_stop` 改为 `STOP 1`（非零退出码）。
+全部只影响示踪物构建（Rust 引擎拒绝 `DEF_USE_TRACER`）或出错时的退出码，不影响本仓库任何已移植路径；分支合入 master
+后再同步 vendor。
+
+另测"月历史 + 日重启"（`hs`，GL 草地 1 月 1–3 日）：区间跨重启时上游旁车有 130 个量——`nac_ln`、`nac_dt` 与 122 个
+`a_*` 原始累加和（多维的带 `d1_a_*`/`d2_a_*` 维），清单共 420 项、按是否分配取舍。其中若干有真实累加值却不进历史文件
+（`t2m_wmo`、`rain`/`snow`、`BD_all`/`wfc`/`OM_density`、`qcharge`、`ldew_rain/snow`），Rust 目前不累加它们；`*_inst`
+类只在写出时派生，不进旁车。这是移植 `nac > 0` 转存要补的范围。
