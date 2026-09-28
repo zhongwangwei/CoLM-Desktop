@@ -1,7 +1,8 @@
 //! `MOD_BGC_Soil_BiogeochemNStateUpdate1.F90`：土壤矿质 N 与分解池 N 的推进。
 //!
-//! **生成文件，勿手改**：由 `oracle/scripts/bgc_port/regen.sh` 从上游 Fortran 与其 GIMPLE 转写，
-//! 再由逐过程回放与 Fortran 追踪逐位核对。
+//! **生成文件，勿手改**：由 `oracle/scripts/bgc_port/regen.py` 从上游 Fortran 与其 GIMPLE 转写
+//! （`a ± b·c` 按 GCC 的规则收缩成 FMA，乘积被 CSE 共享到别的基本块的行不收缩），再由逐过程回放
+//! 与 Fortran 追踪逐位核对。`DEF_USE_SASU`/`DiagMatrix`、作物分支照抄，尚无回放覆盖。
 
 // 逐层循环的 `j` 同时索引若干按列主序展平的数组，保留下标写法以便与上游逐行对照。
 #![allow(clippy::needless_range_loop)]
@@ -37,28 +38,24 @@ pub fn soil_biogeochem_n_state_update1(
     if sw.crop {
         if !sw.nitrif {
             for j in 0..d.nl_soil {
-                s.patch.sminn_vr[j] +=
-                    s.patch_flux.fert_to_sminn[0] * p.deltim * s.patch.ndep_prof[j];
-                // 无 FMA（上游第 86 行，乘积被 CSE 共享）
+                s.patch.sminn_vr[j] = (s.patch_flux.fert_to_sminn[0] * p.deltim)
+                    .mul_add(s.patch.ndep_prof[j], s.patch.sminn_vr[j]);
             }
             if sw.cnsoyfixn {
                 for j in 0..d.nl_soil {
-                    s.patch.sminn_vr[j] +=
-                        s.patch_flux.soyfixn_to_sminn[0] * p.deltim * s.patch.nfixation_prof[j];
-                    // 无 FMA（上游第 91 行，乘积被 CSE 共享）
+                    s.patch.sminn_vr[j] = (s.patch_flux.soyfixn_to_sminn[0] * p.deltim)
+                        .mul_add(s.patch.nfixation_prof[j], s.patch.sminn_vr[j]);
                 }
             }
         } else {
             for j in 0..d.nl_soil {
-                s.patch.smin_nh4_vr[j] +=
-                    s.patch_flux.fert_to_sminn[0] * p.deltim * s.patch.ndep_prof[j];
-                // 无 FMA（上游第 98 行，乘积被 CSE 共享）
+                s.patch.smin_nh4_vr[j] = (s.patch_flux.fert_to_sminn[0] * p.deltim)
+                    .mul_add(s.patch.ndep_prof[j], s.patch.smin_nh4_vr[j]);
             }
             if sw.cnsoyfixn {
                 for j in 0..d.nl_soil {
-                    s.patch.smin_nh4_vr[j] +=
-                        s.patch_flux.soyfixn_to_sminn[0] * p.deltim * s.patch.nfixation_prof[j];
-                    // 无 FMA（上游第 103 行，乘积被 CSE 共享）
+                    s.patch.smin_nh4_vr[j] = (s.patch_flux.soyfixn_to_sminn[0] * p.deltim)
+                        .mul_add(s.patch.nfixation_prof[j], s.patch.smin_nh4_vr[j]);
                 }
             }
         }

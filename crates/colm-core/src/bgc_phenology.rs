@@ -8,7 +8,7 @@
 #![allow(clippy::needless_range_loop)]
 
 use crate::atmosphere::{fortran_cos, fortran_sin};
-use crate::bgc_driver::{BgcPftConstants, BgcPhysics, NPCROPMIN};
+use crate::bgc_driver::{is_end_of_year, BgcPftConstants, BgcPhysics, NPCROPMIN};
 use crate::bgc_state::{BgcPftFluxes, BgcPftTimeVariables, BgcState};
 use crate::calendar::{is_leap_year, month_day, CalendarTime};
 
@@ -38,21 +38,6 @@ pub fn daylength(dlat: f64, idate2: i32) -> f64 {
     let (sin_lat, cos_lat) = (fortran_sin(my_lat), fortran_cos(my_lat));
     let temp = -((sin_lat * fortran_sin(decl)) / (cos_lat * fortran_cos(decl_abs)));
     temp.clamp(-1.0, 1.0).acos() * 2.750_197_42e4
-}
-
-/// `MOD_TimeManager:isendofyear(idate, sec)`：`idate + int(sec)` 是否跨年（秒数进位条件是
-/// 严格大于 86400）。
-fn is_end_of_year(idate: [i32; 3], seconds: f64) -> bool {
-    let (mut year, mut day, mut sec) = (idate[0], idate[1], idate[2] + seconds as i32);
-    while sec > 86400 {
-        sec -= 86400;
-        day += 1;
-        if day > if is_leap_year(year) { 366 } else { 365 } {
-            year += 1;
-            day = 1;
-        }
-    }
-    year != idate[0]
 }
 
 fn woody(c: &BgcPftConstants, class: usize) -> bool {
