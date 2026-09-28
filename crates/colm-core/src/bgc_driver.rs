@@ -229,6 +229,37 @@ pub fn run_stage(stage: &str, step: &mut BgcStep<'_>) -> Result<()> {
         "calc_plant_nutrient_competition_" => {
             crate::bgc_nutrient::plant_nutrient_competition(step.state, step.physics, step.pft)
         }
+        "SoilBiogeochemDecomp" => {
+            crate::bgc_decomp::soil_biogeochem_decomp(step.state, step.physics, switches)
+        }
+        "CNPhenology1" => {
+            crate::bgc_phenology::cn_phenology_phase1(step.state, step.physics, step.pft)
+        }
+        "CNPhenology2" => {
+            crate::bgc_phenology::cn_phenology_phase2(step.state, step.physics, step.pft)
+        }
+        "CNGResp" => crate::bgc_resp::cn_g_resp(step.state, step.physics, step.pft),
+        "CStateUpdate1" => {
+            crate::bgc_c_state_update::c_state_update1(step.state, step.physics, step.pft, switches)
+        }
+        "NStateUpdate1" => {
+            crate::bgc_n_state_update::n_state_update1(step.state, step.physics, step.pft, switches)
+        }
+        "SoilBiogeochemNStateUpdate1" => {
+            crate::bgc_soil_n_state_update::soil_biogeochem_n_state_update1(
+                step.state,
+                step.physics,
+                step.pft,
+                switches,
+            )
+        }
+        "SoilBiogeochemLittVertTransp" => {
+            crate::bgc_litt_vert_transp::soil_biogeochem_litt_vert_transp(
+                step.state,
+                step.physics,
+                switches,
+            )?
+        }
         _ => bail!("BGC stage {stage} is not ported yet"),
     }
     Ok(())

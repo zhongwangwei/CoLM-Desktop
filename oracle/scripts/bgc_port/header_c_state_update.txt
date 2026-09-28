@@ -1,0 +1,13 @@
+//! `MOD_BGC_CNCStateUpdate1/2/3.F90`：植被与土壤 C 池按通量推进一步。
+//!
+//! **生成文件，勿手改**：由 `oracle/scripts/bgc_port/regen.sh` 从上游 Fortran 与其 GIMPLE 转写
+//! （`x = x ± flux·Δt` 按 GCC 的规则收缩成 FMA，乘积被 CSE 共享的行不收缩），再由逐过程回放与
+//! Fortran 追踪逐位核对。`DEF_USE_SASU`/`DiagMatrix` 分支照抄，尚无回放覆盖。
+
+// 逐层循环的 `j` 同时索引若干按列主序展平的数组，保留下标写法以便与上游逐行对照。
+#![allow(clippy::needless_range_loop)]
+// 嵌套 IF 按上游结构保留，便于逐行对照。
+#![allow(clippy::collapsible_if, clippy::collapsible_else_if)]
+
+use crate::bgc_driver::{BgcPftConstants, BgcPhysics, BgcSwitches, NPCROPMIN};
+use crate::bgc_state::BgcState;
