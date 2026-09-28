@@ -81,7 +81,7 @@ fn run() -> Result<()> {
 
     let config = read_point_runtime_config(&case_nml)?;
     let document = read_document(&case_nml)?;
-    let physics = land_physics_parameters(
+    let mut physics = land_physics_parameters(
         &document,
         arguments.land_cover,
         // 三级优先级已在 `read_point_runtime_config` 里解出来（文件 > forcing namelist
@@ -92,16 +92,23 @@ fn run() -> Result<()> {
             humidity_m: config.humidity_height_m,
         },
     )?;
-    // `CROP` 内核：BGC 的作物分支尚未移植。在这里拒绝，而不是按非作物 BGC 静默跑完
-    // （实测 US-Ne3 那样跑会得出 36/39 份重启不同、历史少 64 个作物变量）。
+    // `CROP` 内核：`DEF_USE_CROP` 是宏的只读映射，由 `--crop` 告知。只有它打开时
+    // `DEF_USE_FERT`/`DEF_USE_CNSOYFIXN`/`DEF_USE_IRRIGATION` 才生效（`MOD_Namelist.F90` 在 CROP
+    // 关闭时把它们强制关掉）。未验证的作物子分支（大豆固氮、灌溉）仍由 `refuse_unported` 拒绝。
+    // 不置位而直接跑会把作物当成非作物 BGC 静默跑完（第 422 轮实测 36/39 份重启不同）。
     if arguments.crop {
         let switches = physics
             .bgc
             .context("CROP kernels need DEF_USE_BGC (the crop state lives in the BGC restarts)")?;
-        colm_runtime::bgc_step::refuse_unported(colm_core::bgc_driver::BgcSwitches {
+        let switches = colm_core::bgc_driver::BgcSwitches {
             crop: true,
+            fert: logical_field(&document, "DEF_USE_FERT")?,
+            cnsoyfixn: logical_field(&document, "DEF_USE_CNSOYFIXN")?,
+            irrigation: logical_field(&document, "DEF_USE_IRRIGATION")?,
             ..switches
-        })?;
+        };
+        colm_runtime::bgc_step::refuse_unported(switches)?;
+        physics.bgc = Some(switches);
     }
     // 本仓库没有实现的分支：**一次列全**，并且默认拒绝。
     //
@@ -333,9 +340,24 @@ fn assemble_bgc(
     let npft = colm_init::RestartFile::open(&pft_time)?
         .floats("tlai_p")?
         .len();
-    let initial =
+    let mut initial =
         colm_runtime::bgc::BgcTemplate::read(&files.constant, &files.time, &pft_time, npft)?
             .initial;
+    // `CROP_readin`（`CoLM.F90:441`）：启动时覆盖作物的播种日与施肥量。
+    if switches.crop {
+        let classes =
+            colm_init::RestartFile::open(&colm_runtime::pft::pft_restart_path(&files.constant)?)?
+                .integers("pftclass")?
+                .iter()
+                .map(|&class| i32::try_from(class))
+                .collect::<Result<Vec<_>, _>>()?;
+        colm_runtime::bgc_step::crop_readin(
+            &mut initial,
+            &classes,
+            real_field(document, "DEF_TUNING_CROP_PLANTING_DAY")?,
+            switches,
+        )?;
+    }
     let layers = initial.dims.nl_soil;
     let statics = colm_runtime::bgc_step::BgcStatics::read(&files.constant, patch, layers)?;
     ensure!(

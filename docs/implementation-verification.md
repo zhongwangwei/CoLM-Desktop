@@ -25561,3 +25561,42 @@ CROP=1 bgc_replay crt-fortran（US-Ne3 玉米 2002，每 97 步采 2 步，覆�
 ```
 未覆盖：`vernalization`（只作用于冬小麦）、`CNSoyfix`（本算例 `DEF_USE_CNSOYFIXN = .false.`）、灌溉。运行时仍拒绝 CROP 内核：
 端到端还缺作物的物理耦合（`CoLMMAIN` 的 `#ifdef CROP`）、作物重启字段的读写与 64 个作物历史量。
+
+## 第 424 轮：作物（C6）端到端逐位——US-Ne3 玉米全年
+
+Rust 引擎在 CROP 内核上不再拒绝：`colm-cli` 按内核宏传 `--crop`，`colm-rs` 置 `BgcSwitches.crop`，并按 namelist 取
+`DEF_USE_FERT`/`DEF_USE_CNSOYFIXN`/`DEF_USE_IRRIGATION`（上游只在 CROP 打开时它们才生效）。大豆固氮与灌溉未验证，
+仍由 `refuse_unported` 拒绝。接通过程中逐一对齐的地方：
+
+**一、`CROP_readin` 快速路径。** 设了 `DEF_TUNING_CROP_PLANTING_DAY > 0` 且施肥、灌溉都关时，上游启动时令作物类别
+（15..=78）的 `plantdate_p` 取播种日、其余 −99999999，`fertnitro_p = manunitro_p = 0`，不读 `crop/*.nc`。冷启动写进
+重启的 `manunitro_p = manure·1000` 因此在运行期被清零。其余路径要读运行时数据，尚未移植，当场拒绝。
+
+**二、跨步保留的诊断量。** Rust 每步重建 BGC 的物理输入，上游这些是模块变量：
+- 分 PFT 类型 LAI：LAI 反馈关闭时 `MOD_Thermal.F90:891-935` 每步清零再按类别 1..=14 填 `lai_p`，打开时沿用上一步汇总写的值
+  （此前一律给 spval，只因汇总随即覆盖、历史又取汇总后的值，所以看不出来）。
+- 灌溉方式诊断量 `irrig_method_*`：CROP 内核分配为整型 spval（−9999），作物汇总把 `irrig_method_p` 写进来并跨步保留；
+  `irrig_method_p` 在 `CROP_readin` 后为 −99999999。新增 `BgcState::irrigation_diagnostics`。
+
+**三、上游 `LeafTemperature` 改写哑元 `sai`（影响所有 PHS 算例）。** `sai` 是 `intent(inout)`，PHS 分支里
+`sai = amax1(sai, 0.1)`（`MOD_LeafTemperature.F90:749`）在迭代循环内执行：此后同一轮的 `cfh`、`cfw` 干叶项、`evplwet`，
+之后各轮，以及循环后的 `fwet_snow` 都用改写后的值（循环前算好的 `clai`、粗糙度、`fai` 不受影响；第 682 行的 `w`
+只进 `rd`，随即被解析解覆盖）。Rust 原先只把 `max(0.1)` 传给 PHS。自然 PFT 的 SAI 表值都 ≥ 0.1，从未触发；
+作物出苗第一步 SAI = 0.0149 立即触发：5 月第 332 小时（冠层第一次出现、PHS 第一次求解）叶温、`vegwp`、蒸腾同时分叉，
+随后在 PHS 根系水量平衡检查处中止。现把"改写后的 `sai`"作为迭代状态带到循环后。
+
+**四、历史输出。**
+- 64 个 `#ifdef CROP` 历史量：17 个直接取同名 patch 量；47 个按作物类别过滤（`patchclass == 12` 且首个 PFT 类别在
+  指定列表里，否则填充值），来源与类别表由脚本从 `MOD_Hist.F90` 逐个解析而来（`CROP_TYPE_HISTORY`）。
+- `f_manunitro` 声明默认为关，只有 `DEF_USE_FERT` 时 `sync_hist_vars` 才把它同步为"默认输出"。
+- 按 14 类自然 PFT 分列的 `gpp_*`/`leafc_*`/`lai_*`/`npp_*`/`npptoleafc_*`（70 个）只写 `patchclass /= 12` 的 patch：
+  农田上是填充值。这条过滤不在 `#ifdef CROP` 里，对所有内核成立，只是此前的算例都不是 12 类。
+
+**五、实测。**
+```
+US-Ne3 玉米 2002 全年（PFT + BGC + LAI 反馈，播种日 120，施肥/灌溉/大豆固氮关，kernels/crop）：
+  追踪（每 97 步采 2 步）6188/6188 条一致
+  39/39 重启、12/12 历史文件全部变量逐位一致（缺失变量检查开，豁免 history_sidecar_required），release 与 debug
+回归（release，54 个算例）：48 个逐位（含 cr），hp/sp/tc/ts 过期重启、pn/qr 既有分歧，与此前相同
+```
+未覆盖：冬小麦春化、大豆固氮、灌溉、施肥（`DEF_USE_FERT` 要读 `crop/*.nc`）、多作物 PFT 站点、PC + 作物。

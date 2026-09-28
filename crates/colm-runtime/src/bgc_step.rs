@@ -425,7 +425,7 @@ impl BgcRuntime {
             bgc.patch.ndep[0] = ndep;
             bgc.patch_flux.ndep_to_sminn[0] = to_sminn;
         }
-        let mut physics = self.physics(idate, deltim, forcing, state, output)?;
+        let mut physics = self.physics(idate, deltim, forcing, state, output, &bgc)?;
         {
             let mut trace = self.trace.lock().expect("trace lock");
             let mut record = |tag: &str, s: &BgcState, p: &BgcPhysics| {
@@ -456,6 +456,17 @@ impl BgcRuntime {
                 *slot = values[0];
             }
         }
+        if self.switches.crop {
+            for (slot, name) in bgc
+                .irrigation_diagnostics
+                .iter_mut()
+                .zip(colm_core::bgc_state::IRRIGATION_DIAGNOSTICS)
+            {
+                if let Some((_, values)) = inputs.iter().find(|(field, _)| *field == name) {
+                    *slot = values[0];
+                }
+            }
+        }
         state.bgc = Some(bgc);
         Ok(())
     }
@@ -467,6 +478,7 @@ impl BgcRuntime {
         forcing: &colm_core::RuntimeForcing,
         state: &StandardLctSnowSoilState,
         output: &StandardLctSnowSoilOutput,
+        previous: &BgcState,
     ) -> Result<BgcPhysics> {
         let pft = state
             .energy
@@ -494,7 +506,28 @@ impl BgcRuntime {
             .collect();
         let degrees = |radians: f64| radians * 180.0 / std::f64::consts::PI;
         let npft = columns.len();
-        let optional_patch = || vec![MISSING];
+        // 分 PFT 类型 LAI（`MOD_Thermal.F90:891-935`）：LAI 反馈关闭时 Thermal 每步先清零，再按 PFT
+        // 类别 1..=14 填 `lai_p`（同类多个 PFT 时后者覆盖前者）；打开时不碰，沿用上一步汇总写的值。
+        let lai_diagnostics = if self.switches.laifeedback {
+            previous.lai_diagnostics
+        } else {
+            let mut values = [0.0; 14];
+            for (parameters, column) in pft.parameters.iter().zip(columns) {
+                if (1..=14).contains(&parameters.class) {
+                    values[parameters.class as usize - 1] = column.leaf_area_index;
+                }
+            }
+            values
+        };
+        // CROP 内核里灌溉诊断量分配为整型 spval（`spval_i4 = -9999`），`CROP_readin` 把
+        // `irrig_method_p` 置为 −99999999；灌溉关闭时二者都不再变。非 CROP 内核没有这些量。
+        let irrigation = |k: usize| {
+            vec![if self.switches.crop {
+                previous.irrigation_diagnostics[k]
+            } else {
+                MISSING
+            }]
+        };
         Ok(BgcPhysics {
             idate,
             pftclass: pft.parameters.iter().map(|p| p.class).collect(),
@@ -552,29 +585,36 @@ impl BgcRuntime {
             dlon: degrees(self.statics.patchlonr),
             smpmax_hr: self.statics.smpmax_hr,
             smpmin_hr: self.statics.smpmin_hr,
-            lai_enftemp: optional_patch(),
-            lai_enfboreal: optional_patch(),
-            lai_dnfboreal: optional_patch(),
-            lai_ebftrop: optional_patch(),
-            lai_ebftemp: optional_patch(),
-            lai_dbftrop: optional_patch(),
-            lai_dbftemp: optional_patch(),
-            lai_dbfboreal: optional_patch(),
-            lai_ebstemp: optional_patch(),
-            lai_dbstemp: optional_patch(),
-            lai_dbsboreal: optional_patch(),
-            lai_c3arcgrass: optional_patch(),
-            lai_c3grass: optional_patch(),
-            lai_c4grass: optional_patch(),
-            irrig_method_corn: optional_patch(),
-            irrig_method_swheat: optional_patch(),
-            irrig_method_wwheat: optional_patch(),
-            irrig_method_soybean: optional_patch(),
-            irrig_method_cotton: optional_patch(),
-            irrig_method_rice1: optional_patch(),
-            irrig_method_rice2: optional_patch(),
-            irrig_method_sugarcane: optional_patch(),
-            irrig_method_p: vec![MISSING; npft],
+            lai_enftemp: vec![lai_diagnostics[0]],
+            lai_enfboreal: vec![lai_diagnostics[1]],
+            lai_dnfboreal: vec![lai_diagnostics[2]],
+            lai_ebftrop: vec![lai_diagnostics[3]],
+            lai_ebftemp: vec![lai_diagnostics[4]],
+            lai_dbftrop: vec![lai_diagnostics[5]],
+            lai_dbftemp: vec![lai_diagnostics[6]],
+            lai_dbfboreal: vec![lai_diagnostics[7]],
+            lai_ebstemp: vec![lai_diagnostics[8]],
+            lai_dbstemp: vec![lai_diagnostics[9]],
+            lai_dbsboreal: vec![lai_diagnostics[10]],
+            lai_c3arcgrass: vec![lai_diagnostics[11]],
+            lai_c3grass: vec![lai_diagnostics[12]],
+            lai_c4grass: vec![lai_diagnostics[13]],
+            irrig_method_corn: irrigation(0),
+            irrig_method_swheat: irrigation(1),
+            irrig_method_wwheat: irrigation(2),
+            irrig_method_soybean: irrigation(3),
+            irrig_method_cotton: irrigation(4),
+            irrig_method_rice1: irrigation(5),
+            irrig_method_rice2: irrigation(6),
+            irrig_method_sugarcane: irrigation(7),
+            irrig_method_p: vec![
+                if self.switches.crop {
+                    -99_999_999.0
+                } else {
+                    MISSING
+                };
+                npft
+            ],
         })
     }
 
@@ -624,8 +664,44 @@ fn previous_step_start(
 }
 
 /// 未移植的 BGC 分支：遇到就拒绝，而不是静默跑成另一个模式。
+/// `CROP_readin`（`MOD_CropReadin.F90:65-78`）在启动时覆盖作物参数。只移植不读运行时数据的那一支：
+/// 设了播种日（`DEF_TUNING_CROP_PLANTING_DAY > 0`）且施肥、灌溉都关时，作物 PFT（类别 15..=78）的
+/// `plantdate_p` 取播种日、其余为 −99999999，`fertnitro_p = manunitro_p = 0`。否则要读
+/// `DEF_dir_runtime/crop/*.nc`，尚未移植，当场拒绝。冷启动写进重启的 `manunitro_p = manure·1000`
+/// 因此在运行期被清零（第 424 轮）。
+pub fn crop_readin(
+    state: &mut BgcState,
+    classes: &[i32],
+    planting_day: f64,
+    switches: BgcSwitches,
+) -> Result<()> {
+    ensure!(
+        planting_day > 0.0 && !switches.fert && !switches.irrigation,
+        "CROP_readin reads DEF_dir_runtime/crop/*.nc unless DEF_TUNING_CROP_PLANTING_DAY > 0 with \
+         DEF_USE_FERT and DEF_USE_IRRIGATION off; that path is not ported"
+    );
+    ensure!(
+        classes.len() == state.pft.plantdate_p.len(),
+        "the PFT class list does not match the BGC PFT state"
+    );
+    for (m, &class) in classes.iter().enumerate() {
+        state.pft.plantdate_p[m] = if (15..=78).contains(&class) {
+            planting_day
+        } else {
+            -99_999_999.0
+        };
+        state.pft.fertnitro_p[m] = 0.0;
+        state.pft.manunitro_p[m] = 0.0;
+    }
+    Ok(())
+}
+
 pub fn refuse_unported(switches: BgcSwitches) -> Result<()> {
-    let unported = [(switches.fire, "DEF_USE_FIRE"), (switches.crop, "CROP")];
+    let unported = [
+        (switches.fire, "DEF_USE_FIRE"),
+        (switches.cnsoyfixn, "DEF_USE_CNSOYFIXN (CROP)"),
+        (switches.irrigation, "DEF_USE_IRRIGATION (CROP)"),
+    ];
     for (on, name) in unported {
         if on {
             bail!("{name} is on, but the Rust BGC driver has not been verified on that branch yet");

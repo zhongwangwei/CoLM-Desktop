@@ -8,6 +8,7 @@ use crate::assembly::{
     assemble_standard_lct_snow_template, assemble_standard_lct_template, LandPhysicsParameters,
     RestartStateFiles, StandardLctRunoffScheme, StandardLctStepBinding,
 };
+use colm_core::bgc_driver::BgcSwitches;
 use colm_core::PlantHydraulicParameters;
 use colm_core::{
     prepare_runtime_forcing, HydraulicModel, LandCoverScheme, ObservationHeightMode,
@@ -1107,15 +1108,30 @@ fn the_instantaneous_water_variables_take_the_last_step_not_the_mean() {
 /// 多出 `CONC_O2_UNSAT`/`O2_DECOMP_DEPTH_UNSAT`；`#ifdef CROP` 的一批不在其中。
 #[test]
 fn bgc_history_variables_follow_the_fortran_file() {
-    let off = bgc_history_variables(false, false);
+    let off = bgc_history_variables(BgcSwitches {
+        ..BgcSwitches::default()
+    });
     assert_eq!(off.len(), 143);
     assert!(off.contains(&"leafc") && off.contains(&"hr") && off.contains(&"retrasn"));
     assert!(!off.iter().any(|name| name.starts_with("cropprod")));
-    let on = bgc_history_variables(true, false);
+    let on = bgc_history_variables(BgcSwitches {
+        nitrif: true,
+        ..BgcSwitches::default()
+    });
     assert_eq!(on.len(), 145);
     assert!(on.contains(&"CONC_O2_UNSAT") && on.contains(&"O2_DECOMP_DEPTH_UNSAT"));
     // DiagMatrix 多 52 个容量（36 个植被、14 个土壤廓线，另 2 个 CWD 廓线）。
-    let diag = bgc_history_variables(false, true);
+    let diag = bgc_history_variables(BgcSwitches {
+        diag_matrix: true,
+        ..BgcSwitches::default()
+    });
     assert_eq!(diag.len(), 143 + 52);
     assert!(diag.contains(&"leafnCap") && diag.contains(&"cwdcCap_vr"));
+    // CROP 内核多 64 个（`#ifdef CROP`）。
+    let crop = bgc_history_variables(BgcSwitches {
+        crop: true,
+        ..BgcSwitches::default()
+    });
+    assert_eq!(crop.len(), 143 + 64);
+    assert!(crop.contains(&"grainc") && crop.contains(&"plantdate_rainfed_temp_corn"));
 }

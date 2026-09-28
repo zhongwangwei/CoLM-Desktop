@@ -398,7 +398,8 @@ pub const URBAN_VARIABLES: [&str; 20] = [
 /// （NITRIF 打开时再加 `(DEF_USE_BGC) .and. (DEF_USE_NITRIF)` 那两个）、且不带编译期宏
 /// （`#ifdef CROP` 那批）的全部名字，按表中顺序去重。FIRE/DiagMatrix/臭氧的组合条件对应的
 /// 分支在运行期被拒绝，这里不必列。
-pub fn bgc_history_variables(nitrif: bool, diag_matrix: bool) -> Vec<&'static str> {
+pub fn bgc_history_variables(switches: colm_core::bgc_driver::BgcSwitches) -> Vec<&'static str> {
+    let (nitrif, diag_matrix, crop) = (switches.nitrif, switches.diag_matrix, switches.crop);
     let mut names: Vec<&'static str> = Vec::new();
     for var in colm_hist::generated::VARS {
         let wanted = match var.runtime {
@@ -407,7 +408,13 @@ pub fn bgc_history_variables(nitrif: bool, diag_matrix: bool) -> Vec<&'static st
             Some("(DEF_USE_BGC) .and. (DEF_USE_DiagMatrix)") => diag_matrix,
             _ => false,
         };
-        if wanted && var.macros.is_empty() && !names.contains(&var.name) {
+        // `#ifdef CROP` 的一批（64 个）只在 CROP 内核里存在。
+        let compiled =
+            var.macros.is_empty() || (crop && var.macros == [colm_hist::Cond::AnyOf(&["CROP"])]);
+        // `manunitro` 声明默认为关，只有 `DEF_USE_FERT` 时 `sync_hist_vars` 才把它同步成
+        // `DEF_HIST_vars_out_default`（`MOD_Namelist.F90:3315-3326`）；`fertnitro_*` 声明默认即为开。
+        let enabled = var.name != "manunitro" || switches.fert;
+        if wanted && compiled && enabled && !names.contains(&var.name) {
             names.push(var.name);
         }
     }
@@ -420,17 +427,123 @@ pub fn bgc_history_variables(nitrif: bool, diag_matrix: bool) -> Vec<&'static st
 /// `f_hr` 累加的是 `decomp_hr`，`f_retrasn`（上游拼写）累加 `retransn`；`*_vr` 分池廓线是
 /// `decomp_cpools_vr`/`decomp_npools_vr` 按池切片的 `1:nl_soil`；`BD_all`/`OM_density`/`wfc`
 /// 是常数重启里的土壤参数；`lai_*` 是 `CNDriverSummarizeStates` 写的分 PFT 类型 LAI。
+/// 按作物类型分列的 CROP 历史量（`MOD_Hist.F90` 作物段）：`(历史名, 累加的 patch 量, 作物类别)`。
+/// 只在 `patchclass == 12` 且 patch 的首个 PFT 类别在列表里时写出，否则是填充值。
+const CROP_TYPE_HISTORY: &[(&str, &str, &[i32])] = &[
+    ("huiswheat", "hui", &[19, 20]),
+    ("fertnitro_corn", "fertnitro_corn", &[17, 18, 75, 76]),
+    ("fertnitro_swheat", "fertnitro_swheat", &[19, 20]),
+    ("fertnitro_wwheat", "fertnitro_wwheat", &[21, 22]),
+    ("fertnitro_soybean", "fertnitro_soybean", &[23, 24, 77, 78]),
+    ("fertnitro_cotton", "fertnitro_cotton", &[41, 42]),
+    ("fertnitro_rice1", "fertnitro_rice1", &[61, 62]),
+    ("fertnitro_rice2", "fertnitro_rice2", &[61, 62]),
+    ("fertnitro_sugarcane", "fertnitro_sugarcane", &[67, 68]),
+    ("plantdate_rainfed_temp_corn", "plantdate", &[17]),
+    ("plantdate_irrigated_temp_corn", "plantdate", &[18]),
+    ("plantdate_rainfed_spwheat", "plantdate", &[19]),
+    ("plantdate_irrigated_spwheat", "plantdate", &[20]),
+    ("plantdate_rainfed_wtwheat", "plantdate", &[21]),
+    ("plantdate_irrigated_wtwheat", "plantdate", &[22]),
+    ("plantdate_rainfed_temp_soybean", "plantdate", &[23]),
+    ("plantdate_irrigated_temp_soybean", "plantdate", &[24]),
+    ("plantdate_rainfed_cotton", "plantdate", &[41]),
+    ("plantdate_irrigated_cotton", "plantdate", &[42]),
+    ("plantdate_rainfed_rice", "plantdate", &[61]),
+    ("plantdate_irrigated_rice", "plantdate", &[62]),
+    ("plantdate_rainfed_sugarcane", "plantdate", &[67]),
+    ("plantdate_irrigated_sugarcane", "plantdate", &[68]),
+    ("plantdate_rainfed_trop_corn", "plantdate", &[75]),
+    ("plantdate_irrigated_trop_corn", "plantdate", &[76]),
+    ("plantdate_rainfed_trop_soybean", "plantdate", &[77]),
+    ("plantdate_irrigated_trop_soybean", "plantdate", &[78]),
+    ("plantdate_unmanagedcrop", "plantdate", &[15]),
+    ("cropprodc_rainfed_temp_corn", "grainc_to_cropprodc", &[17]),
+    (
+        "cropprodc_irrigated_temp_corn",
+        "grainc_to_cropprodc",
+        &[18],
+    ),
+    ("cropprodc_rainfed_spwheat", "grainc_to_cropprodc", &[19]),
+    ("cropprodc_irrigated_spwheat", "grainc_to_cropprodc", &[20]),
+    ("cropprodc_rainfed_wtwheat", "grainc_to_cropprodc", &[21]),
+    ("cropprodc_irrigated_wtwheat", "grainc_to_cropprodc", &[22]),
+    (
+        "cropprodc_rainfed_temp_soybean",
+        "grainc_to_cropprodc",
+        &[23],
+    ),
+    (
+        "cropprodc_irrigated_temp_soybean",
+        "grainc_to_cropprodc",
+        &[24],
+    ),
+    ("cropprodc_rainfed_cotton", "grainc_to_cropprodc", &[41]),
+    ("cropprodc_irrigated_cotton", "grainc_to_cropprodc", &[42]),
+    ("cropprodc_rainfed_rice", "grainc_to_cropprodc", &[61]),
+    ("cropprodc_irrigated_rice", "grainc_to_cropprodc", &[62]),
+    ("cropprodc_rainfed_sugarcane", "grainc_to_cropprodc", &[67]),
+    (
+        "cropprodc_irrigated_sugarcane",
+        "grainc_to_cropprodc",
+        &[68],
+    ),
+    ("cropprodc_rainfed_trop_corn", "grainc_to_cropprodc", &[75]),
+    (
+        "cropprodc_irrigated_trop_corn",
+        "grainc_to_cropprodc",
+        &[76],
+    ),
+    (
+        "cropprodc_rainfed_trop_soybean",
+        "grainc_to_cropprodc",
+        &[77],
+    ),
+    (
+        "cropprodc_irrigated_trop_soybean",
+        "grainc_to_cropprodc",
+        &[78],
+    ),
+    ("cropprodc_unmanagedcrop", "grainc_to_cropprodc", &[15]),
+];
+
 fn set_bgc_history(
     sink: &mut impl HistorySink,
     record: usize,
     runtime: &crate::bgc_step::BgcRuntime,
     s: &colm_core::bgc_state::BgcState,
+    first_pft_class: Option<i32>,
 ) -> Result<()> {
     let nl = s.dims.nl_soil;
     let full = s.dims.nl_soil_full;
     let c = &s.constants;
     let switches = runtime.switches;
-    for name in bgc_history_variables(switches.nitrif, switches.diag_matrix) {
+    for name in bgc_history_variables(switches) {
+        let (name, source) = match CROP_TYPE_HISTORY.iter().find(|(field, ..)| *field == name) {
+            Some((field, source, classes)) => {
+                let cropland = runtime.statics.patchclass == 12;
+                if !(cropland && first_pft_class.is_some_and(|class| classes.contains(&class))) {
+                    continue;
+                }
+                (*field, *source)
+            }
+            None => (name, name),
+        };
+        // 按 14 类自然 PFT 分列的 `gpp_*`/`leafc_*`/`lai_*`/`npp_*`/`npptoleafc_*`
+        // （`MOD_Hist.F90` 里紧接 `w_scalar` 的那段）只写 `patchclass /= 12 .and. patchtype == 0`
+        // 的 patch：农田 patch 上是填充值。BGC patch 恒为 `patchtype == 0`。
+        let natural_type = ["gpp_", "leafc_", "lai_", "npp_", "npptoleafc_"]
+            .iter()
+            .any(|prefix| {
+                name.strip_prefix(prefix).is_some_and(|kind| {
+                    colm_core::bgc_state::LAI_DIAGNOSTICS
+                        .iter()
+                        .any(|lai| lai.strip_prefix("lai_") == Some(kind))
+                })
+            });
+        if natural_type && runtime.statics.patchclass == 12 {
+            continue;
+        }
         if let Some((_, values)) = runtime
             .statics
             .soil
@@ -478,7 +591,7 @@ fn set_bgc_history(
                 continue;
             }
         }
-        let source = match name {
+        let source = match source {
             "hr" => "decomp_hr",
             "retrasn" => "retransn",
             "CONC_O2_UNSAT" => "tconc_o2_unsat",
@@ -1840,8 +1953,8 @@ pub struct HistorySession {
     variably_saturated: bool,
     /// 城市 patch：多声明 [`URBAN_VARIABLES`]。
     urban: bool,
-    /// `DEF_USE_BGC`（NITRIF 与 DiagMatrix 开关）：多声明 [`bgc_history_variables`]。
-    bgc: Option<(bool, bool)>,
+    /// `DEF_USE_BGC`：按 BGC 开关多声明 [`bgc_history_variables`]。
+    bgc: Option<colm_core::bgc_driver::BgcSwitches>,
 }
 
 impl HistorySession {
@@ -2331,14 +2444,17 @@ impl HistorySession {
         let ground = state.surface_temperature_k();
         self.plant_hydraulics = template.plant_hydraulics();
         self.variably_saturated = template.physics.variably_saturated_flow;
-        self.bgc = template
-            .bgc
-            .as_ref()
-            .map(|bgc| (bgc.switches.nitrif, bgc.switches.diag_matrix));
+        self.bgc = template.bgc.as_ref().map(|bgc| bgc.switches);
         let variably_saturated = self.variably_saturated;
         self.push(end, |accumulator| {
             if let (Some(runtime), Some(bgc)) = (&template.bgc, &state.bgc) {
-                set_bgc_history(accumulator, 0, runtime, bgc)?;
+                let first_pft_class = state
+                    .energy
+                    .pft
+                    .as_ref()
+                    .and_then(|pft| pft.parameters.first())
+                    .map(|parameters| parameters.class);
+                set_bgc_history(accumulator, 0, runtime, bgc, first_pft_class)?;
             }
             set_lct_snow_state(accumulator, 0, template, state, ground)?;
             set_lct_fluxes(accumulator, 0, &output.water.soil, variably_saturated)?;
@@ -2482,8 +2598,8 @@ impl HistorySession {
             if self.urban {
                 buffer.declare(&URBAN_VARIABLES)?;
             }
-            if let Some((nitrif, diag_matrix)) = self.bgc {
-                buffer.declare(&bgc_history_variables(nitrif, diag_matrix))?;
+            if let Some(switches) = self.bgc {
+                buffer.declare(&bgc_history_variables(switches))?;
             }
             self.open = Some((record.suffix.clone(), buffer));
         }

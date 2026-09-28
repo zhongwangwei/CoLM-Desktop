@@ -39,7 +39,22 @@ pub struct BgcState {
     pub pft_flux: BgcPftFluxes,
     /// [`LAI_DIAGNOSTICS`] 的当前值（初值 `spval`）。
     pub lai_diagnostics: [f64; 14],
+    /// [`IRRIGATION_DIAGNOSTICS`] 的当前值：CROP 内核分配为整型 spval（−9999），作物汇总
+    /// （`MOD_BGC_CNSummary.F90:429` 起）把 `irrig_method_p` 写进来，跨步保留。
+    pub irrigation_diagnostics: [f64; 8],
 }
+
+/// patch 级的灌溉方式诊断量（`MOD_Vars_TimeVariables`，`#ifdef CROP`），与 `BgcPhysics` 同名。
+pub const IRRIGATION_DIAGNOSTICS: [&str; 8] = [
+    "irrig_method_corn",
+    "irrig_method_swheat",
+    "irrig_method_wwheat",
+    "irrig_method_soybean",
+    "irrig_method_cotton",
+    "irrig_method_rice1",
+    "irrig_method_rice2",
+    "irrig_method_sugarcane",
+];
 
 /// 五组结构全部字段的 Fortran 名（声明顺序）。
 fn all_fields() -> impl Iterator<Item = &'static str> {
@@ -74,6 +89,7 @@ impl BgcState {
             pft: BgcPftTimeVariables::new(npft, dims),
             pft_flux: BgcPftFluxes::new(npft, dims),
             lai_diagnostics: [crate::MISSING; 14],
+            irrigation_diagnostics: [-9999.0; 8],
         }
     }
 

@@ -17,8 +17,13 @@ fn the_containing_source_cell_is_the_nearest_center() {
 #[test]
 fn unverified_branches_are_refused() {
     assert!(refuse_unported(BgcSwitches::default()).is_ok());
-    // LAI 反馈（第 419 轮）、SASU（第 420 轮）与 DiagMatrix（第 421 轮）已在 AT-Neu 上逐位验证。
+    // LAI 反馈（第 419 轮）、SASU（第 420 轮）、DiagMatrix（第 421 轮）已在 AT-Neu 上、
+    // 作物（第 424 轮，施肥关）已在 US-Ne3 上逐位验证。
     for switches in [
+        BgcSwitches {
+            crop: true,
+            ..BgcSwitches::default()
+        },
         BgcSwitches {
             laifeedback: true,
             ..BgcSwitches::default()
@@ -41,6 +46,12 @@ fn unverified_branches_are_refused() {
         },
         BgcSwitches {
             crop: true,
+            cnsoyfixn: true,
+            ..BgcSwitches::default()
+        },
+        BgcSwitches {
+            crop: true,
+            irrigation: true,
             ..BgcSwitches::default()
         },
     ] {
@@ -68,4 +79,32 @@ fn the_previous_step_start_crosses_day_and_year() {
         previous_step_start(time(2013, 1, 0), 1800.0),
         time(2012, 366, 84600)
     );
+}
+
+/// `CROP_readin` 的快速路径：作物类别取播种日，其余 −99999999；施肥量清零。
+#[test]
+fn crop_readin_sets_planting_dates_and_clears_fertilizer() {
+    let mut state = BgcState::new(3, colm_core::bgc_state::BgcDims::default());
+    state.pft.manunitro_p.fill(2.0);
+    let switches = BgcSwitches {
+        crop: true,
+        ..BgcSwitches::default()
+    };
+    crop_readin(&mut state, &[1, 17, 78], 120.0, switches).unwrap();
+    assert_eq!(state.pft.plantdate_p, vec![-99_999_999.0, 120.0, 120.0]);
+    assert_eq!(state.pft.manunitro_p, vec![0.0; 3]);
+    assert_eq!(state.pft.fertnitro_p, vec![0.0; 3]);
+}
+
+/// 施肥打开、或没给播种日时要读 `crop/*.nc`，尚未移植：拒绝。
+#[test]
+fn crop_readin_refuses_the_runtime_data_path() {
+    let mut state = BgcState::new(1, colm_core::bgc_state::BgcDims::default());
+    let crop = BgcSwitches {
+        crop: true,
+        ..BgcSwitches::default()
+    };
+    assert!(crop_readin(&mut state, &[17], 0.0, crop).is_err());
+    let fert = BgcSwitches { fert: true, ..crop };
+    assert!(crop_readin(&mut state, &[17], 120.0, fert).is_err());
 }

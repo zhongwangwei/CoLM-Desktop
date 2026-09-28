@@ -405,6 +405,12 @@ pub fn leaf_temperature(
     let mut dtl = [0.0; MAX_ITERATIONS + 2];
     let mut iteration = 1;
     let mut last = Iteration::default();
+    // `sai` 是 `LeafTemperature` 的 `intent(inout)` 哑元：PHS 分支里 `sai = amax1(sai,0.1)`
+    // （`MOD_LeafTemperature.F90:749`）在迭代循环内执行，此后同一轮的 `cfh`/`cfw`/`evplwet`、
+    // 之后各轮与循环后的 `fwet_snow` 都用改写后的值；循环前算好的 `clai`、粗糙度、`fai` 不变。
+    // 自然 PFT 的 SAI 表值都 ≥ 0.1 看不出来；作物刚出苗时 SAI ≈ 0.015 就会触发（第 424 轮）。
+    let mut stem_area_index = sai;
+    let mut iteration_lsai = lsai;
 
     // `main/MOD_LeafTemperature.F90` 直接用净截留率 `qintr_rain/qintr_snow`，不取 `max(0,·)`
     // —— 那个夹取是扩展版（`MOD_LeafTemperature_Extended.F90:1174-1177`）才有的。
@@ -564,6 +570,8 @@ pub fn leaf_temperature(
             root_flux_kg_m2_s = vec![0.0; hydraulic.root_fraction.len()];
         }
         if let Some(hydraulic) = input.plant_hydraulics.filter(|_| stomata_active) {
+            stem_area_index = stem_area_index.max(0.1);
+            iteration_lsai = lai + stem_area_index;
             let pressure_conversion = 44.6 * 273.16 * input.surface_pressure_pa / 1.013e5;
             let maximum_sunlit_leaf_conductance_umol_m2_s = (1.0
                 / (sunlit_resistance.stomatal_resistance_s_m * state.leaf_temperature_k
@@ -605,7 +613,7 @@ pub fn leaf_temperature(
                     wet_canopy_fraction: fwet,
                     sunlit_leaf_area_index: laisun,
                     shaded_leaf_area_index: laisha,
-                    stem_area_index: sai.max(0.1),
+                    stem_area_index,
                     canopy_top_height_m: input.canopy_top_height_m,
                     maximum_sunlit_leaf_conductance_umol_m2_s,
                     maximum_shaded_leaf_conductance_umol_m2_s,
@@ -676,7 +684,7 @@ pub fn leaf_temperature(
         };
         let canopy_air_heat_conductance = 1.0 / rah;
         let ground_heat_conductance = 1.0 / ground_to_canopy_resistance;
-        let leaf_heat_conductance = lsai / leaf_boundary_resistance;
+        let leaf_heat_conductance = iteration_lsai / leaf_boundary_resistance;
         let canopy_air_moisture_conductance = 1.0 / raw;
         let ground_moisture_conductance = if input.ground_specific_humidity < canopy_air_humidity {
             1.0 / ground_to_canopy_resistance
@@ -700,7 +708,7 @@ pub fn leaf_temperature(
             + laisha / (leaf_boundary_resistance + leaf_shaded_resistance);
         let leaf_moisture_conductance = dry_share.mul_add(
             leaf_moisture_transfer_sum,
-            lsai * evaporation_weight / leaf_boundary_resistance,
+            iteration_lsai * evaporation_weight / leaf_boundary_resistance,
         );
         let heat_weight =
             1.0 / (canopy_air_heat_conductance + ground_heat_conductance + leaf_heat_conductance);
@@ -830,8 +838,8 @@ pub fn leaf_temperature(
         //   `_392 = w*rhoair ; _396 = _392*(lai+sai) ; _397 = _396/rb`
         //   `evplwet = X*_397` ； `evplwet_dtl = qsatlDT*((wtaq0+wtgq0)*_397)`
         // —— 公共因子 `_397` 先算好，`(wtaq0+wtgq0)` 先乘它、最后才乘 `qsatlDT`。
-        let wet_factor =
-            evaporation_weight * input.air_density_kg_m3 * lsai / leaf_boundary_resistance;
+        let wet_factor = evaporation_weight * input.air_density_kg_m3 * iteration_lsai
+            / leaf_boundary_resistance;
         let mut wet_evaporation = humidity_gradient * wet_factor;
         let mut wet_evaporation_temperature_slope = leaf_saturation
             .specific_humidity_temperature_slope_k
@@ -1080,6 +1088,7 @@ pub fn leaf_temperature(
             shaded_soil_water_stress,
             maximum_sunlit_leaf_conductance_umol_m2_s: gs0sun,
             maximum_shaded_leaf_conductance_umol_m2_s: gs0sha,
+            stem_area_index,
         };
         iteration += 1;
         if iteration > MIN_ITERATIONS {
@@ -1192,7 +1201,14 @@ pub fn leaf_temperature(
     // `main/` 在冠层水更新与相变（Niu 2004 把 `tl` 拉向冰点）**之前**就算好了
     // `fseng*`/`fevpg*`（`wtl0*tl`、`wtlq0*qsatl`），所以下面这几项用的是相变前的叶温。
     let leaf_temperature_before_phase_change_k = state.leaf_temperature_k;
-    let wet_snow_fraction = update_canopy_water(input, state, wet_evaporation)?;
+    let wet_snow_fraction = update_canopy_water(
+        LeafTemperatureInput {
+            stem_area_index: last.stem_area_index,
+            ..input
+        },
+        state,
+        wet_evaporation,
+    )?;
     let ground_sensible_heat = AIR_HEAT_CAPACITY_J_KG_K
         * input.air_density_kg_m3
         * last.ground_heat_conductance
@@ -1384,6 +1400,8 @@ pub fn leaf_temperature(
 
 #[derive(Debug, Clone)]
 struct Iteration {
+    /// 本轮结束时的 `sai`（PHS 可能已把它改成 `max(sai, 0.1)`）。
+    stem_area_index: f64,
     ram: f64,
     raw: f64,
     surface: crate::MoninObukhovState,
@@ -1487,6 +1505,7 @@ impl Default for Iteration {
             shaded_soil_water_stress: 0.0,
             maximum_sunlit_leaf_conductance_umol_m2_s: None,
             maximum_shaded_leaf_conductance_umol_m2_s: None,
+            stem_area_index: 0.0,
         }
     }
 }
