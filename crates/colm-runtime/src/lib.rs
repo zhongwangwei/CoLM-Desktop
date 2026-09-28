@@ -7,6 +7,7 @@
 
 pub mod assembly;
 pub mod baseflow_optimizer;
+pub mod bgc;
 pub mod history;
 pub mod pft;
 pub mod physics;

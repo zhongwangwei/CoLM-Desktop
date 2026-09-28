@@ -268,15 +268,15 @@ fn a_continuation_write_refuses_a_bad_override() {
         format!("{error:#}").contains("no such variable"),
         "{error:#}"
     );
-    // 整型变量不由续跑替换。
+    // 整型变量可以替换（BGC 的整型/逻辑型状态会被推进），但值必须是精确整数。
     let error = source
         .write_with(
             &written,
-            &[RestartOverride::new("patchclass", vec![1.0, 2.0])],
+            &[RestartOverride::new("patchclass", vec![1.5, 2.0])],
         )
         .unwrap_err();
     assert!(
-        format!("{error:#}").contains("integer variables"),
+        format!("{error:#}").contains("non-integer value"),
         "{error:#}"
     );
     // 失败的写出不该留下一个能被读的残缺文件。

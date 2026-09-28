@@ -25221,3 +25221,17 @@ cargo test core 372 / runtime 78 / init 156；clippy -D warnings 无告警；fmt
 `MOD_BGC_CNSummary.F90` 的 GIMPLE：层积分 `FMA(vr, dz, acc)`、`totsoiln_vr` 池外层层内层的
 `FMA(vr/(BD*1000), 100, acc)`、按池类型的平铺累加。改后 BGC 时间重启 `diff 0`；`bgc_tests` 里三处按旧舍入
 写死的期望值随之更新（313.5、0.00038、0.021500000000000002）。
+
+### C1 之二：BGC 状态容器与重启读写
+
+`MOD_BGC_Vars_*` 五个模块共 1004 个 module 数组、78 个模块级标量，手抄既慢又会漏，改为由
+`oracle/scripts/gen_bgc_state.py` 从上游声明生成 `crates/colm-core/src/bgc_state_generated.rs`：字段名沿用
+Fortran 名，形状与初值（`spval`/`spval_i4`/`.false.`）取自 `allocate` 行，去掉 `numpatch` 维后按 Fortran 列主序
+展平。脚本自检：五个模块的 `allocate` 全部解析到（329/261/250/150/14）。`colm_core::bgc_state::BgcState` 把六组拼在一起，
+`colm_runtime::bgc::BgcTemplate` 读四份 BGC 重启（全局常数、patch 常数、patch 时间、PFT 时间）。
+
+往返实测（`tmp/bm-fortran` 的 2010-060 重启 → `BgcState` → 以原文件为底写回）：BGC 时间重启 37 个变量、PFT 重启里
+90 个 BGC 变量全部映射，写回 `diff 0`。续跑写出器原先拒绝替换整型变量，BGC 有整型/逻辑型状态
+（`altmax_lastyear_indx`、`skip_balance_check`），改为允许、但要求替换值是精确整数、类型按盘上原样还原。
+
+运行期原先**根本不读** `DEF_USE_BGC`：BGC 算例会只跑物理、把 BGC 状态原样写回且不报错。driver 移植完之前改为当场拒绝。

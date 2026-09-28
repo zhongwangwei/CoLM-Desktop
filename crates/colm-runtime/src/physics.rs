@@ -154,6 +154,15 @@ pub fn land_physics_parameters(
     }
     // PFT 与 PC 都已移植：PFT 逐 PFT 解单冠层，PC 走 `LeafTemperaturePC` 与 `ThreeDCanopy`；
     // 二者都在聚合后复用 LCT 的地面与水分路径。
+    // `DEF_USE_BGC`：`CoLMDRIVER.F90:238` 每步在 `CoLMMAIN` 之后调 `bgc_driver`。BGC 状态的
+    // 读写（`crate::bgc`）已就位，driver 本身还在移植（C2-C4）；不读这个开关的话 BGC 算例会
+    // 只跑物理、把 BGC 状态原样写回，而且不报错。
+    if logical(document, "DEF_USE_BGC")? {
+        bail!(
+            "DEF_USE_BGC is on, but the Rust runtime has not ported bgc_driver yet; \
+             running it would advance only the physics and write the BGC state back unchanged"
+        );
+    }
     let use_pc = selected[0] == "DEF_USE_PC";
     let use_pft = selected[0] == "DEF_USE_PFT" || use_pc;
 

@@ -187,6 +187,11 @@ impl RestartFile {
         self.floats.keys().cloned().collect()
     }
 
+    /// 全部整型变量名（含 `byte` 存的逻辑型）。
+    pub fn integer_names(&self) -> Vec<String> {
+        self.integers.keys().cloned().collect()
+    }
+
     pub fn floats(&self, name: &str) -> Result<&[f64]> {
         self.floats
             .get(name)
@@ -295,11 +300,24 @@ impl RestartFile {
                     .put_values(values, ..)?,
             }
         }
-        for (name, (dims, source)) in &self.integers {
-            ensure!(
-                replacement(name).is_none(),
-                "the continuation writer does not replace integer variables, but {name} was offered"
-            );
+        for (name, (dims, original)) in &self.integers {
+            // 整型状态（BGC 的 `altmax_lastyear_indx`、逻辑型 `skip_balance_check` 等）也会被
+            // 推进；替换值按 f64 传进来，必须是精确整数，类型仍按盘上原样还原。
+            let replaced = replacement(name)
+                .map(|values| {
+                    values
+                        .iter()
+                        .map(|value| {
+                            ensure!(
+                                value.fract() == 0.0 && value.abs() <= 2f64.powi(53),
+                                "override {name} carries a non-integer value {value}"
+                            );
+                            Ok(*value as i64)
+                        })
+                        .collect::<Result<Vec<_>>>()
+                })
+                .transpose()?;
+            let source = replaced.as_ref().unwrap_or(original);
             let reference = dims.iter().map(String::as_str).collect::<Vec<_>>();
             // 类型按盘上原样还原；`patchmask` 是 i8，写成 i64 会改变文件 schema。
             match self.types[name] {

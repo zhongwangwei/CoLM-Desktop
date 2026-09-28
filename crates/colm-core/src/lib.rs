@@ -71,6 +71,8 @@ impl LibmPow for f64 {
 pub mod albedo;
 pub mod atmosphere;
 pub mod bgc;
+pub mod bgc_state;
+pub mod bgc_state_generated;
 pub mod calendar;
 pub mod canopy_layer_profile;
 pub mod canopy_roughness;

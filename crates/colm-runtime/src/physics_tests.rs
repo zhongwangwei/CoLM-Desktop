@@ -447,3 +447,15 @@ fn interception_scheme_eight_is_read_and_other_schemes_are_refused() {
     .expect_err("scheme 5 aborts in the kernel");
     assert!(error.to_string().contains("schemes 1"), "{error}");
 }
+
+/// BGC 的 driver 移植完之前必须当场拒绝，不能只跑物理。
+#[test]
+fn a_bgc_case_is_refused_until_the_driver_is_ported() {
+    let error = land_physics_parameters(
+        &case_with("DEF_USE_LCT=.false.\nDEF_USE_PFT=.true.\nDEF_USE_BGC=.true."),
+        LandCoverScheme::Igbp,
+        HEIGHTS,
+    )
+    .expect_err("a BGC case must be refused");
+    assert!(error.to_string().contains("DEF_USE_BGC"), "{error}");
+}
