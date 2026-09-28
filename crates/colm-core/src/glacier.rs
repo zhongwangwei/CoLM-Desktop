@@ -68,10 +68,14 @@ pub fn glacier_water(
         "glacier-water melt flags do not match the snow column"
     );
     if !had_snow {
-        surface.liquid_water_kg_m2 =
-            (surface.liquid_water_kg_m2 + input.dew_kg_m2_s * input.time_step_seconds).max(1.0e-8);
-        surface.ice_water_kg_m2 = (surface.ice_water_kg_m2
-            + (input.frost_kg_m2_s - input.sublimation_kg_m2_s) * input.time_step_seconds)
+        // `MOD_Glacier.F90:982-983`：两句都是 `.FMA (通量, deltim, 水量)`（第 406 轮：原先平铺，
+        // 9 月某步首冰层满时经 `a = wdsrf + wliq(1) + gwat*deltim` 让 `wdsrf` 差 1 ulp）。
+        surface.liquid_water_kg_m2 = input
+            .dew_kg_m2_s
+            .mul_add(input.time_step_seconds, surface.liquid_water_kg_m2)
+            .max(1.0e-8);
+        surface.ice_water_kg_m2 = (input.frost_kg_m2_s - input.sublimation_kg_m2_s)
+            .mul_add(input.time_step_seconds, surface.ice_water_kg_m2)
             .max(1.0e-8);
         return Ok(input.rainfall_kg_m2_s + input.snow_melt_kg_m2_s - input.evaporation_kg_m2_s);
     }

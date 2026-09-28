@@ -269,9 +269,13 @@ pub fn water_2014_soil_step(
         urban_run: input.urban_run,
         soil_ice_impedance: input.soil_ice_impedance,
     })?;
+    // `:474 wliq = wliq + dwat*dzmm`，`dzmm = dz*1000` 预先算好（`:462`）；GIMPLE 是
+    // `.FMA (dwat, dzmm, wliq)`（第 406 轮：原先 `(dwat*dz)*1000` 再相加，Campbell 首步后差 1 ulp）。
     for layer in 0..layers {
-        state.liquid_water_kg_m2[layer] +=
-            soil.liquid_water_change[layer] * input.layer_thickness_m[layer] * WATER_DENSITY_KG_M3;
+        state.liquid_water_kg_m2[layer] = soil.liquid_water_change[layer].mul_add(
+            input.layer_thickness_m[layer] * WATER_DENSITY_KG_M3,
+            state.liquid_water_kg_m2[layer],
+        );
     }
     let groundwater_input = GroundwaterInput {
         time_step_seconds: input.time_step_seconds,
@@ -339,7 +343,10 @@ pub fn water_2014_soil_step(
         // 由 history 层留在填充值上。
         saturation_excess_runoff_mm_s: 0.0,
         infiltration_excess_runoff_mm_s: 0.0,
-        subsurface_runoff_mm_s: groundwater.subsurface_runoff_mm_s,
+        // `CoLMMAIN.F90:1188`：`WATER_2014` 返回后 `rsub = rnof - rsur`（`rnof = rsubst + rsur`），
+        // 不是直接取 `rsubst` —— 两者可差 1 ulp（第 406 轮，Campbell TOPMODEL/VIC）。
+        subsurface_runoff_mm_s: (surface_runoff_mm_s + groundwater.subsurface_runoff_mm_s)
+            - surface_runoff_mm_s,
         total_runoff_mm_s: surface_runoff_mm_s + groundwater.subsurface_runoff_mm_s,
         saturated_fraction,
         recharge_mm_s: soil.recharge_mm_s,

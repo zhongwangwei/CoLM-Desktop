@@ -268,14 +268,104 @@ pub struct EvolvedStepOutput<'a> {
     pub matric_potential_mm: &'a [f64],
     /// 本 patch 的逐层导水率，长度等于土层数。
     pub hydraulic_conductivity_mm_s: &'a [f64],
+    /// 本步的表面诊断量（相似函数、2 m 气温湿度、粗糙度……）：它们都是
+    /// `intent(out)`，状态里没有，由各 patch 分支的步输出给出。
+    pub diagnostics: SurfaceDiagnosticsRow,
+}
+
+/// 续跑文件里逐步重写的 `(patch,)` 表面诊断量。
+///
+/// `None` 表示该分支上游不给这个变量赋值（保持重启里的原值），例如冰川上的
+/// `rst`/`rss`/`gs0sun`/`gs0sha`。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SurfaceDiagnosticsRow {
     /// `coszen`：上游 `CoLMMAIN.F90:2076` 的 `orb_coszen(calendarday(idate))`，
     /// `idate` 是**步末**（`CoLM.F90:480` 的 `TICKTIME` 在 `CoLMDRIVER` 之前）。
     /// 取 [`crate::PointRuntimeStep::surface_cosine_zenith`]，**不是**
     /// `forcing.cosine_zenith`（那是 `MOD_Forcing` 按步首算的另一个量）。
     pub cosine_zenith: f64,
-    /// 本步的能量链输出。表面诊断量（相似函数、2 m 气温湿度、粗糙度……）都在里面，
-    /// 它们都是 `intent(out)`，状态里没有。
-    pub energy: &'a colm_core::StandardLctEnergyOutput,
+    pub wet_snow_fraction: f64,
+    pub tref: f64,
+    pub qref: f64,
+    pub stomatal_resistance: Option<f64>,
+    pub soil_surface_resistance: Option<f64>,
+    pub trad: f64,
+    pub emis: f64,
+    pub z0m: f64,
+    pub zol: f64,
+    pub rib: f64,
+    pub ustar: f64,
+    pub qstar: f64,
+    pub tstar: f64,
+    pub fm: f64,
+    pub fh: f64,
+    pub fq: f64,
+    pub gs0sun: Option<f64>,
+    pub gs0sha: Option<f64>,
+}
+
+impl SurfaceDiagnosticsRow {
+    /// 规则土壤（植被）分支：取 THERMAL/叶温链的输出。
+    pub fn from_lct(
+        energy: &colm_core::StandardLctEnergyOutput,
+        cosine_zenith: f64,
+    ) -> Result<Self> {
+        let leaf = &energy.leaf;
+        // `olrg`/`emis`/`trad`/`fgrnd`/`lfevpa` 的公共中间量：history 与续跑写回共用
+        // 同一份实现，免得"同一份文件里的两个量互相矛盾"。
+        let budget = colm_core::surface_budget(energy)?;
+        Ok(Self {
+            cosine_zenith,
+            wet_snow_fraction: leaf.wet_snow_fraction,
+            tref: leaf.air_temperature_2m_k,
+            qref: leaf.air_specific_humidity_2m,
+            stomatal_resistance: Some(leaf.canopy_stomatal_resistance_s_m),
+            // `rss` 是 `SoilSurfaceResistance` 的 `intent(out)`，每步重算。
+            // 原先漏写时 `--restart-out` 写出一列 `spval`，上游同一时刻是 0.033373。
+            soil_surface_resistance: Some(energy.soil_surface_resistance_s_m),
+            trad: budget.radiative_temperature_k,
+            emis: budget.bulk_emissivity,
+            z0m: leaf.momentum_roughness_m,
+            zol: leaf.zol,
+            rib: leaf.bulk_richardson,
+            ustar: leaf.friction_velocity_m_s,
+            qstar: leaf.humidity_scale,
+            tstar: leaf.temperature_scale_k,
+            fm: leaf.momentum_similarity,
+            fh: leaf.heat_similarity,
+            fq: leaf.moisture_similarity,
+            // `gs0sun`/`gs0sha` 是**最大**叶导度（µmol m-2 s-1），不是 `f_gssun`；
+            // PHS 关掉时上游从不赋值 —— `None` 即保持原值。
+            gs0sun: leaf.maximum_sunlit_leaf_conductance_umol_m2_s,
+            gs0sha: leaf.maximum_shaded_leaf_conductance_umol_m2_s,
+        })
+    }
+
+    /// 冰川分支：`GLACIER_TEMP` 给出相似函数与 2 m 诊断；`fwet_snow` 在
+    /// `CoLMMAIN` 末尾被清零；`rst`/`rss`/`gs0*` 上游不碰。
+    pub fn from_glacier(thermal: &colm_core::GlacierThermalFluxes, cosine_zenith: f64) -> Self {
+        Self {
+            cosine_zenith,
+            wet_snow_fraction: 0.0,
+            tref: thermal.tref,
+            qref: thermal.qref,
+            stomatal_resistance: None,
+            soil_surface_resistance: None,
+            trad: thermal.trad,
+            emis: thermal.emis,
+            z0m: thermal.z0m,
+            zol: thermal.zol,
+            rib: thermal.rib,
+            ustar: thermal.ustar,
+            qstar: thermal.qstar,
+            tstar: thermal.tstar,
+            fm: thermal.fm,
+            fh: thermal.fh,
+            fq: thermal.fq,
+            gs0sun: None,
+            gs0sha: None,
+        }
+    }
 }
 
 /// 一次「准备下一步表面光学」需要从步输出里取的量。
@@ -716,9 +806,11 @@ fn assemble(
     // 本分支的前提：规则土壤 patch。上游 `patchtype` 非 0 会走城市/湿地/湖分支，
     // 那些分支这里没有装配，宁可报错也不要拿土壤模板跑出来。
     let patch_type = integer_scalar(&constant, "patchtype", patch)?;
+    // 冰川（3）共用这份模板：层几何、强迫与常数相同，冰层放在"土壤"那一段；
+    // 物理由 `colm_core::glacier_snow_step` 分派（见 `crate::advance_patch`）。
     ensure!(
-        patch_type == 0,
-        "standard LCT soil assembly needs patchtype 0 (soil), got {patch_type}"
+        patch_type == 0 || patch_type == 3,
+        "standard LCT assembly supports patchtype 0 (soil) and 3 (glacier), got {patch_type}"
     );
 
     let soil = soil_state(&constant, soil_layers, patches, physics.hydraulic_model)?;
@@ -1212,7 +1304,7 @@ impl StandardLctRestartTemplate {
                     colm2024: self.colm2024_canopy,
                 },
                 solar: colm_core::NetSolarInput {
-                    patch_type: 0,
+                    patch_type: self.patch_type,
                     // 内核覆盖：`finish_energy_step` 用 `input.forcing.shortwave`。
                     forcing: forcing.shortwave,
                     leaf_area_index: self.leaf_area_index,
@@ -1375,7 +1467,7 @@ impl StandardLctRestartTemplate {
                     },
                 },
                 ground_temperature: colm_core::GroundTemperatureInput {
-                    patch_type: 0,
+                    patch_type: self.patch_type,
                     is_dry_lake: false,
                     time_step_seconds,
                     surface_temperature_factor: physics.surface_temperature_factor,
@@ -1442,7 +1534,7 @@ impl StandardLctRestartTemplate {
                 plant_hydraulics: self.plant_hydraulic_settings,
             },
             water: colm_core::Water2014SoilInput {
-                patch_type: 0,
+                patch_type: self.patch_type,
                 urban_run: false,
                 // 打开时 `soilwater` 用**叶温内核给的分层根通量**替换
                 // 「蒸腾 × rootfr」那一支（`MOD_SoilSnowHydrology.F90` 的
@@ -1664,7 +1756,6 @@ impl StandardLctRestartTemplate {
         state: &StandardLctSoilState,
         step: EvolvedStepOutput<'_>,
     ) -> Result<Vec<RestartOverride>> {
-        let leaf_output = &step.energy.leaf;
         let ground_temperature_k = step.ground_temperature_k;
         ensure!(
             ground_temperature_k.is_finite() && ground_temperature_k > 0.0,
@@ -1866,56 +1957,27 @@ impl StandardLctRestartTemplate {
         ] {
             overrides.push(RadiationFields::splice(source, self.patch, name, matrix)?);
         }
-        // `olrg`/`emis`/`trad`/`fgrnd`/`lfevpa` 的公共中间量：history 与续跑写回共用
-        // 同一份实现，免得"同一份文件里的两个量互相矛盾"。
-        let budget = colm_core::surface_budget(step.energy)?;
-        // 表面诊断量：`(patch,)` 形状，只换本 patch 的那一项，其余保持重启里的原值。
+        let row = step.diagnostics;
         for (name, value) in [
-            ("coszen", step.cosine_zenith),
-            ("fwet_snow", leaf_output.wet_snow_fraction),
-            ("tref", leaf_output.air_temperature_2m_k),
-            ("qref", leaf_output.air_specific_humidity_2m),
-            ("rst", leaf_output.canopy_stomatal_resistance_s_m),
-            // `rss` 是 `SoilSurfaceResistance` 的 `intent(out)`，每步重算。
-            // **原先漏在这里**：写出的重启里 `rss` 一直是**入参那份** ——
-            // 而算例的入参重启里它是 `spval`（`-1e36`），于是 `--restart-out`
-            // 写出一列全填充值，上游同一时刻写的是 0.033373。
-            ("rss", step.energy.soil_surface_resistance_s_m),
-            // `trad`/`emis` 同样是 `MOD_Thermal` 收尾处的逐步输出，上游一并写回。
-            // 它们的算式与 history 的 `f_trad`/`f_emis`/`f_olrg` **必须**只有一份，
-            // 所以用刚提到 `colm_core::surface_budget` 的那一份 ——
-            // 原先只有 history 在算，重启写回拿不到，于是写的是入参那份（283 / 1.0）。
-            ("trad", budget.radiative_temperature_k),
-            ("emis", budget.bulk_emissivity),
-            // `gs0sun`/`gs0sha` 是 `gs0` 那一对（**最大**叶导度，µmol m-2 s-1），
-            // 不是上面 `f_gssun` 的 `gssun`（实际叶导度，mol m-2 s-1）。
-            // 原先这两个槽位填的是 `gssun`：单位差 1e6、物理量还是另一个，
-            // 于是 `--restart-out` 写出过 4.8e-5 而上游是 481.34 µmol。
-            // PHS 关掉时内核给 `None`，上游那时从不给这两个变量赋值 ——
-            // 保持原值，不写回。
-            ("z0m", leaf_output.momentum_roughness_m),
-            ("zol", leaf_output.zol),
-            ("rib", leaf_output.bulk_richardson),
-            ("ustar", leaf_output.friction_velocity_m_s),
-            ("qstar", leaf_output.humidity_scale),
-            ("tstar", leaf_output.temperature_scale_k),
-            ("fm", leaf_output.momentum_similarity),
-            ("fh", leaf_output.heat_similarity),
-            ("fq", leaf_output.moisture_similarity),
-        ] {
-            if let Some(override_) = self.surface_diagnostics.splice(name, self.patch, value)? {
-                overrides.push(override_);
-            }
-        }
-        for (name, value) in [
-            (
-                "gs0sun",
-                leaf_output.maximum_sunlit_leaf_conductance_umol_m2_s,
-            ),
-            (
-                "gs0sha",
-                leaf_output.maximum_shaded_leaf_conductance_umol_m2_s,
-            ),
+            ("coszen", Some(row.cosine_zenith)),
+            ("fwet_snow", Some(row.wet_snow_fraction)),
+            ("tref", Some(row.tref)),
+            ("qref", Some(row.qref)),
+            ("rst", row.stomatal_resistance),
+            ("rss", row.soil_surface_resistance),
+            ("trad", Some(row.trad)),
+            ("emis", Some(row.emis)),
+            ("z0m", Some(row.z0m)),
+            ("zol", Some(row.zol)),
+            ("rib", Some(row.rib)),
+            ("ustar", Some(row.ustar)),
+            ("qstar", Some(row.qstar)),
+            ("tstar", Some(row.tstar)),
+            ("fm", Some(row.fm)),
+            ("fh", Some(row.fh)),
+            ("fq", Some(row.fq)),
+            ("gs0sun", row.gs0sun),
+            ("gs0sha", row.gs0sha),
         ] {
             let Some(value) = value else {
                 continue;

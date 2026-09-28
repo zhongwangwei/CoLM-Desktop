@@ -769,6 +769,99 @@ pub fn set_lct_surface_diagnostics(
 /// 把一步的能量侧诊断写进第 `record` 条记录。
 ///
 /// 两支共用：积雪分支传整个输出，`leaf`/`shortwave`/总通量都在里面。
+/// `MOD_Hist.F90:4396-4405` 的 `filter = patchtype <= 2`：这一组只在土壤/城市/湿地
+/// patch 上写出，其余 patch 留 `spval`。
+const VEGETATED_ONLY_VARIABLES: [&str; 5] = ["h2osoi", "qlayer", "rootr", "vegwp", "zwt"];
+
+/// 丢掉按 `patchtype` 过滤掉的变量，其余原样转交。
+struct PatchFilteredSink<'a, S: HistorySink> {
+    inner: &'a mut S,
+    skipped: &'static [&'static str],
+}
+
+impl<S: HistorySink> HistorySink for PatchFilteredSink<'_, S> {
+    fn scalar(&mut self, name: &str, record: usize, value: f64) -> Result<()> {
+        if self.skipped.contains(&name) {
+            return Ok(());
+        }
+        self.inner.scalar(name, record, value)
+    }
+
+    fn layer(&mut self, name: &str, record: usize, values: &[f64]) -> Result<()> {
+        if self.skipped.contains(&name) {
+            return Ok(());
+        }
+        self.inner.layer(name, record, values)
+    }
+
+    fn accumulate(
+        &mut self,
+        name: &str,
+        record: usize,
+        value: f64,
+        counts_as_step: bool,
+    ) -> Result<()> {
+        if self.skipped.contains(&name) {
+            return Ok(());
+        }
+        self.inner.accumulate(name, record, value, counts_as_step)
+    }
+}
+
+/// 冰川的近地层诊断：`taux`/`tauy`/`tref`/`qref`/`z0m` 取 `GLACIER_TEMP`，其余与植被
+/// 分支一样由 `accumulate_fluxes` 从 `taux`/`tauy`/`fsena`/`fevpa`/`z0m` 重算。
+fn set_glacier_surface_diagnostics(
+    sink: &mut impl HistorySink,
+    thermal: &colm_core::GlacierThermalFluxes,
+    reference: HistoryReferenceState,
+    physics: &LandPhysicsParameters,
+) -> Result<()> {
+    let recomputed = colm_core::history_diagnostics(colm_core::HistoryDiagnosticsInput {
+        wind_height_m: physics.wind_height_m,
+        temperature_height_m: physics.temperature_height_m,
+        humidity_height_m: physics.humidity_height_m,
+        wind_speed_eastward_m_s: reference.wind_speed_eastward_m_s,
+        wind_speed_northward_m_s: reference.wind_speed_northward_m_s,
+        air_temperature_k: reference.air_temperature_k,
+        specific_humidity_kg_kg: reference.specific_humidity_kg_kg,
+        surface_pressure_pa: reference.surface_pressure_pa,
+        eastward_stress_kg_m_s2: thermal.taux,
+        northward_stress_kg_m_s2: thermal.tauy,
+        sensible_heat_w_m2: thermal.fsena,
+        evaporation_kg_m2_s: thermal.fevpa,
+        momentum_roughness_m: thermal.z0m,
+        surface_layer_scheme: physics.surface_layer_scheme,
+        boundary_layer_height_m: reference.boundary_layer_height_m,
+    })
+    .context("cannot recompute the glacier history near-surface diagnostics")?;
+    for (name, value) in [
+        ("taux", thermal.taux),
+        ("tauy", thermal.tauy),
+        ("tref", thermal.tref),
+        ("qref", thermal.qref),
+        ("z0m", thermal.z0m),
+        ("zol", recomputed.zol),
+        ("rib", recomputed.bulk_richardson),
+        ("ustar", recomputed.friction_velocity_m_s),
+        ("qstar", recomputed.humidity_scale),
+        ("tstar", recomputed.temperature_scale_k),
+        ("fm", recomputed.momentum_similarity),
+        ("fh", recomputed.heat_similarity),
+        ("fq", recomputed.moisture_similarity),
+        ("us10m", recomputed.wind_10m_eastward_m_s),
+        ("vs10m", recomputed.wind_10m_northward_m_s),
+        ("fm10m", recomputed.momentum_at_10m),
+        ("ustar2", recomputed.similarity_friction_velocity_m_s),
+    ] {
+        ensure!(
+            value.is_finite(),
+            "the glacier history value for {name} is not finite"
+        );
+        sink.scalar(name, 0, value)?;
+    }
+    Ok(())
+}
+
 pub fn set_lct_energy_fluxes(
     sink: &mut impl HistorySink,
     record: usize,
@@ -1178,7 +1271,15 @@ pub fn set_lct_radiation_bands(
     record: usize,
     energy: &colm_core::StandardLctEnergyOutput,
 ) -> Result<()> {
-    let shortwave = &energy.shortwave;
+    set_shortwave_bands(sink, record, &energy.shortwave)
+}
+
+/// `netsolar` 的反射/入射分波段诊断（植被与冰川共用）。
+fn set_shortwave_bands(
+    sink: &mut impl HistorySink,
+    record: usize,
+    shortwave: &colm_core::NetSolarFluxes,
+) -> Result<()> {
     let noon = &shortwave.local_noon;
     for (name, value) in [
         ("sr", shortwave.reflected_w_m2),
@@ -1602,6 +1703,133 @@ impl HistorySession {
     }
 
     /// 积雪分支：与 [`Self::push_lct`] 同构，走雪入口并把 `soil` 那一半当土壤诊断。
+    /// 冰川 patch 的一步 history。
+    ///
+    /// 上游的 `accumulate_fluxes` 对所有 patch 读同一组全局量：冰川分支写
+    /// `GLACIER_TEMP` 的通量，植被那一组在 `CoLMMAIN.F90:2178-2230` 被清零
+    /// （`etr`/`fsenl`/`fevpl`/`assim`/`respc`/`rstfac*`/`gs*`/`laisun`/`laisha`/`green`/
+    /// `qintr`/`qinfl`/`qlayer`/`rootr`/`qcharge` = 0，`frcsat = 1`，
+    /// `qdrip = forc_rain + forc_snow`）。`rss` 冰川不重算，沿用重启里的值。
+    pub fn push_glacier(
+        &mut self,
+        end: CalendarTime,
+        template: &StandardLctRestartTemplate,
+        state: &StandardLctSnowSoilState,
+        output: &colm_core::GlacierStepOutput,
+        reference: HistoryReferenceState,
+    ) -> Result<Option<PathBuf>> {
+        let ground = state.surface_temperature_k();
+        self.plant_hydraulics = template.plant_hydraulics();
+        self.variably_saturated = template.physics.variably_saturated_flow;
+        let variably_saturated = self.variably_saturated;
+        let thermal = output.thermal;
+        let shortwave = output.shortwave;
+        self.push(end, |accumulator| {
+            let accumulator = &mut PatchFilteredSink {
+                inner: accumulator,
+                skipped: &VEGETATED_ONLY_VARIABLES,
+            };
+            set_lct_snow_state(accumulator, 0, template, state, ground)?;
+            // `frcsat = 1` 由末尾 `patchtype > 2` 那一节无条件写，与 VSF 无关。
+            let mut fluxes = vec![
+                ("qinfl", 0.0),
+                ("rnof", output.total_runoff_mm_s),
+                ("rsub", 0.0),
+                ("rsur", output.surface_runoff_mm_s),
+                ("frcsat", 1.0),
+            ];
+            if variably_saturated {
+                fluxes.extend_from_slice(&[
+                    ("rsur_se", output.surface_runoff_mm_s),
+                    ("rsur_ie", 0.0),
+                ]);
+            } else {
+                fluxes.push(("qcharge", 0.0));
+            }
+            // `rnet = sabg + sabvsun + sabvsha - olrg + forc_frl`（`MOD_Vars_1DAccFluxes.F90:2093`）
+            let net_radiation = shortwave.ground_absorbed_w_m2
+                + shortwave.sunlit_absorbed_w_m2
+                + shortwave.shaded_absorbed_w_m2
+                - thermal.olrg
+                + reference.downward_longwave_w_m2;
+            let water_balance_error = if variably_saturated {
+                output.water_balance_error_mm_s
+            } else {
+                0.0
+            };
+            for (name, value) in fluxes.into_iter().chain([
+                ("fsena", thermal.fsena),
+                ("fevpa", thermal.fevpa),
+                ("etr", 0.0),
+                ("sabg", shortwave.ground_absorbed_w_m2),
+                ("fsenl", 0.0),
+                ("fseng", thermal.fseng),
+                ("fevpl", 0.0),
+                ("fevpg", thermal.fevpg),
+                ("sabvsun", shortwave.sunlit_absorbed_w_m2),
+                ("sabvsha", shortwave.shaded_absorbed_w_m2),
+                ("rnet", net_radiation),
+                ("olrg", thermal.olrg),
+                ("emis", thermal.emis),
+                // `r_trad = (olrg/stefnc)**0.25`，与 `GLACIER_TEMP` 的 `trad` 同式。
+                ("trad", thermal.trad),
+                ("fgrnd", thermal.fgrnd),
+                ("lfevpa", thermal.lfevpa),
+                ("xerr", water_balance_error),
+                // 分支里 `zerr = errore`（`CoLMMAIN.F90:1751`），但末尾 `patchtype > 2` 那一节
+                // 又把它清成 0（`:2230`），history 读到的是后者。
+                ("zerr", 0.0),
+                ("assim", 0.0),
+                ("assimsun", 0.0),
+                ("assimsha", 0.0),
+                ("respc", 0.0),
+                ("etrsun", 0.0),
+                ("etrsha", 0.0),
+                ("gssun", 0.0),
+                ("gssha", 0.0),
+                ("rstfacsun", 0.0),
+                ("rstfacsha", 0.0),
+                ("rss", template.soil_surface_resistance_s_m),
+                ("ldew", 0.0),
+                ("qintr", 0.0),
+                (
+                    "qdrip",
+                    output.precipitation.convective_rain_kg_m2_s
+                        + output.precipitation.large_scale_rain_kg_m2_s
+                        + (output.precipitation.convective_snow_kg_m2_s
+                            + output.precipitation.large_scale_snow_kg_m2_s),
+                ),
+                ("sigf", 0.0),
+                ("green", 0.0),
+                ("laisun", 0.0),
+                ("laisha", 0.0),
+            ]) {
+                ensure!(
+                    value.is_finite(),
+                    "the glacier history value for {name} is not finite"
+                );
+                accumulator.scalar(name, 0, value)?;
+            }
+            set_glacier_surface_diagnostics(accumulator, &thermal, reference, &template.physics)?;
+            set_shortwave_bands(accumulator, 0, &shortwave)?;
+            set_lct_water_storage(
+                accumulator,
+                0,
+                &state.soil_water,
+                0.0,
+                state.snow.water_equivalent_kg_m2,
+                template.water_storage_tail_mm(&state.soil_water),
+            )?;
+            set_lct_albedo(
+                accumulator,
+                0,
+                &state.energy,
+                reference.surface_cosine_zenith,
+            )?;
+            set_lct_forcing_mirrors(accumulator, 0, reference, &output.precipitation)
+        })
+    }
+
     pub fn push_lct_snow(
         &mut self,
         end: CalendarTime,

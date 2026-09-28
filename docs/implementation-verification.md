@@ -24755,3 +24755,60 @@ AT-Neu 2010-01..04，默认 Simple VIC（tmp/t3-*）：逐位相同
   方案 8/1 全部逐位相同
 cargo test -p colm-core/-runtime/-hist --lib --bins：362/76/50 通过；colm-init --test-threads=1：156 通过；clippy 无告警
 ```
+
+## 第 407 轮：冰川（patchtype 3）接进 Rust 主循环；"VSF 关闭"的真实验证与七处 Rust 缺陷
+
+### 一、先更正一个错误的"已验证"
+
+第 406 轮之后我用 `DEF_USE_VariablySaturatedFlow = .false.` 做过一轮径流方案扫描并报告"VSF 关闭逐位相同"。
+**那一轮没有测到非 VSF 路径**：`MOD_Namelist.F90:1766-1771` 在 `DEF_USE_Campbell_SOIL_MODEL = .false.`
+（声明默认，即 van Genuchten）时把 VSF **强制置真**，Rust 运行期照做，两边跑的都是 VSF。实测
+`gl-fortran` 与 `gn-fortran`（仅差这一个开关）的续跑文件逐变量相同，证实了这一点。
+真正的非 VSF 路径要同时打开 `DEF_USE_Campbell_SOIL_MODEL`；本轮按此重做（`tmp/c0..c3`、`tmp/gc`）。
+
+### 二、冰川分支
+
+`colm-core::glacier_step` 照 `CoLMMAIN.F90:1595-1770` 逐句移植：首冰层溢出并入降水 → `newsnow`
+→ `GLACIER_TEMP`（新写的 `groundfluxes_glacier`：粗糙度按 Brock 2006 取 0.002/0.001、6 次稳定度迭代；
+`groundtem_glacier`：冰导热 `9.828*exp(-0.0057 t)`、雪层导热、Crank–Nicolson 三对角、`meltf` 以
+`patchtype = 3` 调用）→ `GLACIER_WATER`（已有）→ VSF/非 VSF 两种地表径流收尾 → 水量闭合。
+所有收缩形状对照 `MOD_Glacier.F90`/`CoLMMAIN.F90` 的 `-fdump-tree-optimized-lineno`。
+
+运行期不另造一套：冰川与规则土壤共用同一份模板与状态（冰层放在"土壤"段），`advance_patch` 按
+`patchtype` 分派。续跑写出里原来直接读土壤能量输出的那组表面诊断量抽成 `SurfaceDiagnosticsRow`，
+冰川给 `GLACIER_TEMP` 的值、`rst`/`rss`/`gs0*` 保持重启原值（上游不碰）。`CoLMMAIN` 末尾
+`patchtype > 2` 那一节（`lai/sai/sigf/green = 0`、`tleaf = forc_t`、`ldew* = 0`、`zwt = 0`、非 VSF 时
+`wa = 4800`、PHS 时 `vegwp = -2.5e4`）在表面光学之后执行（`albland` 用的是 `tlai/tsai`）。
+
+history：`accumulate_fluxes` 对所有 patch 读同一组全局量，冰川上植被量为 0、`qdrip = forc_rain + forc_snow`、
+`frcsat = 1`（与 VSF 无关）、`zerr` 在末尾被清成 0（分支里的 `zerr = errore` 被覆盖）；
+`h2osoi/qlayer/rootr/vegwp/zwt` 受 `MOD_Hist.F90:4396` 的 `patchtype <= 2` 过滤、留 `spval`。
+
+### 三、非 VSF 与冰川暴露的 Rust 缺陷（均有 GIMPLE 为据，`main/` 内核）
+
+1. `soilwater` 的 `den = zmm(j+1) - zmm(j)`，`zmm = z*1000` 先换算：Rust 写成 `(z(j+1)-z(j))*1000`。
+2. `soilwater` 的 `rmx = qin - qout - etr*rootr`：乘积进 `.FNMA`，Rust 先乘好再减。
+3. `WATER_2014` 的 `wliq = wliq + dwat*dzmm`：`.FMA (dwat, dzmm, wliq)`，Rust 先 `(dwat*dz)*1000` 再加。
+4. `groundwater` 的 `wa = wa + qcharge*deltim`、`wa = wa - drainage*deltim`：`main/` 里乘积被共用，**不**收缩
+   （Rust 按扩展版写成 FMA）；而 `rsubst < 0` 时的 `wa = wa + rsubst*deltim` 反而是 `.FMA`。
+5. `CoLMMAIN.F90:1188` 在 `WATER_2014` 后 `rsub = rnof - rsur`，不是直接取 `rsubst`（可差 1 ulp）。
+6. `SoilSurfaceResistance`（Campbell + 方案 1，此前默认配置下被强制为方案 0、从未跑到）：
+   `eff_porosity = max(0.01, porsl - min(porsl, wice/(dz*denice)))`（Rust 截的是 `wice`）；
+   `hk` 指数 `.FMA (bsw, 2, 3)`；`dsl` 分子分母两处 `.FMS (x, 0.8, y)`；雪盖混合分母 `.FMA (fsno, rss, 1-fsno)`。
+7. `GLACIER_WATER` 无雪层时的 `wliq(1) + qsdew*deltim`、`wice(1) + (qfros-qsubl)*deltim` 都是 `.FMA`
+   （Rust 平铺；9 月某步首冰层满时经 `a = wdsrf + wliq(1) + gwat*deltim` 让 `wdsrf` 差 1 ulp）。
+
+另：`DEF_HIST_FREQ = 'none'` 时 `colm-rs` 不再建 history 会话（原先建一个空调度然后报错）。
+
+### 四、实测
+
+```text
+冰川（AT-Neu 强迫，SITE_landtype = 15）：
+  冷启动两份重启两引擎逐位相同
+  2010 全年、VSF（默认 van Genuchten）：13 份月末续跑 + 12 个月小时 history 逐位相同（tmp/gy）
+  2010-01..02、Campbell + 非 VSF：续跑 + 小时 history 逐位相同（tmp/gc）
+规则土壤、Campbell + 非 VSF，2010-01..02 小时 history + 续跑逐位相同：
+  TOPMODEL（c0）、VIC（c1）、XinAnJiang（c2）、Simple VIC（c3）
+回归（tmp/regress.sh）：CN-Cng、AT-Neu 各窗口与全年、split、VIC、方案 8/1、预热 + 优化器，全部逐位相同
+cargo test core/runtime/hist 363/76/50，colm-init 156；clippy 无告警；fmt 通过
+```

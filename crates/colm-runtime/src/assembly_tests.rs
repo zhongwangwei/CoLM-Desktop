@@ -953,8 +953,11 @@ fn an_evolved_state_writes_back_a_readable_continuation_restart() {
                 ground_temperature_k: second.energy.ground.temperature_k[0],
                 matric_potential_mm: &second.water.matric_potential_mm,
                 hydraulic_conductivity_mm_s: &second.water.hydraulic_conductivity_mm_s,
-                cosine_zenith: binding().forcing.cosine_zenith,
-                energy: &second.energy,
+                diagnostics: SurfaceDiagnosticsRow::from_lct(
+                    &second.energy,
+                    binding().forcing.cosine_zenith,
+                )
+                .unwrap(),
             },
         )
         .unwrap();
@@ -1126,8 +1129,11 @@ fn an_evolved_snow_state_writes_back_a_readable_continuation_restart() {
                 ground_temperature_k: second.energy.ground.temperature_k[0],
                 matric_potential_mm: &second.water.soil.matric_potential_mm,
                 hydraulic_conductivity_mm_s: &second.water.soil.hydraulic_conductivity_mm_s,
-                cosine_zenith: binding().forcing.cosine_zenith,
-                energy: &second.energy,
+                diagnostics: SurfaceDiagnosticsRow::from_lct(
+                    &second.energy,
+                    binding().forcing.cosine_zenith,
+                )
+                .unwrap(),
             },
         )
         .unwrap();

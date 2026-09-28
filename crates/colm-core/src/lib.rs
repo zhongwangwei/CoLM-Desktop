@@ -35,6 +35,7 @@ pub mod crop_phenology;
 pub mod extended;
 pub mod forcing_downscaling;
 pub mod glacier;
+pub mod glacier_step;
 pub mod ground_fluxes;
 pub mod ground_humidity;
 pub mod ground_temperature;
@@ -135,6 +136,10 @@ pub use forcing_downscaling::{
     ASPECT_TYPES, AZIMUTH_BINS, SHADOW_CURVE_PARAMETERS, SLOPE_TYPES, ZENITH_BINS,
 };
 pub use glacier::{glacier_water, GlacierSurfaceWater, GlacierWaterInput};
+pub use glacier_step::{
+    clear_non_soil_patch, glacier_snow_step, glacier_temperature, GlacierColumn, GlacierStepOutput,
+    GlacierTemperatureInput, GlacierTemperatureOutput, GlacierThermalFluxes,
+};
 pub use ground_fluxes::{ground_fluxes, GroundFluxInput, GroundFluxState};
 pub use ground_humidity::{
     non_split_ground_humidity, split_ground_humidity, GroundHumidityInput, GroundHumidityState,

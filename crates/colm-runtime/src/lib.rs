@@ -429,11 +429,7 @@ impl PointRuntime {
         mut on_step: F,
     ) -> Result<HistoryRunOutcome>
     where
-        F: FnMut(
-            PointRuntimeStep,
-            &StandardLctSnowSoilState,
-            &StandardLctSnowSoilOutput,
-        ) -> Result<()>,
+        F: FnMut(PointRuntimeStep, &StandardLctSnowSoilState, PatchStepOutput<'_>) -> Result<()>,
     {
         let (greenwich_time, longitude_degrees, co2_scenario) =
             (self.greenwich, self.longitude_degrees, self.co2_scenario);
@@ -442,52 +438,53 @@ impl PointRuntime {
         let mut optimizer = self.baseflow_optimizer.take();
         let steps = self.run_with_state(state, |step, next| {
             let binding = lct_binding(step, greenwich_time, longitude_degrees, co2_scenario)?;
-            // `scvold`：上游在 `newsnow` **之前**把 `scv` 抄一份（`CoLMMAIN.F90:814`），
-            // 所以要在内核动手之前读。
-            let previous_snow_water_equivalent_mm = next.snow.water_equivalent_kg_m2;
-            // `totwb` 同理：上游在 `snl` 重算之后、任何物理步之前取步首总蓄量
+            // `totwb`：上游在 `snl` 重算之后、任何物理步之前取步首总蓄量
             // （`CoLMMAIN.F90:831`），`xerr` 要靠它和步末的 `endwb` 相减。
             let initial_total_water_mm = colm_core::initial_total_water_storage_mm(
                 &next.soil_water,
                 next.energy.leaf.canopy_water.total_mm,
                 next.snow.water_equivalent_kg_m2,
             );
-            let output = colm_core::standard_lct_snow_soil_step(
-                baseflow_scaled(template.snow_input(&binding), optimizer.as_ref()),
-                next,
-            )?;
-            // 顺序不能反：上游 `hist_out`（`CoLM.F90:537`）在 `CoLMDRIVER`（`:512`）
-            // **之后**跑，而末尾那一节在 `CoLMDRIVER` 里面。所以 history 记下的
-            // `fsno`/`lai`/`sai` 是**下一步**的值，不是这一步用掉的那一组。
-            let optics = surface_optics_step(
-                step,
-                previous_snow_water_equivalent_mm,
-                next.surface_temperature_k(),
-                &output,
-            );
-            template.prepare_surface_optics(next, optics)?;
+            let output = advance_patch(step, template, &binding, next, optimizer.as_ref())?;
             // `hist_out` 在 `itstamp <= ptstamp` 时直接返回（`MOD_Hist.F90:225`），连累加都不做：
             // 预热期（含每一轮重复）不产生 history。步末 `itstamp <= ptstamp` 与本步
             // `is_spinup` 在步长整除预热区间时是同一件事。
             if !step.clock.is_spinup {
-                if let Some(path) = session.push_lct_snow(
-                    step.clock.end_time,
-                    template,
-                    next,
-                    &output,
-                    crate::history::HistoryReferenceState::from_forcing(
-                        &step.forcing,
-                        step.surface_cosine_zenith,
-                        time_step_seconds,
-                        initial_total_water_mm,
-                    ),
-                )? {
+                let reference = crate::history::HistoryReferenceState::from_forcing(
+                    &step.forcing,
+                    step.surface_cosine_zenith,
+                    time_step_seconds,
+                    initial_total_water_mm,
+                );
+                let pushed = match &output {
+                    PatchOutput::Soil(output) => session.push_lct_snow(
+                        step.clock.end_time,
+                        template,
+                        next,
+                        output,
+                        reference,
+                    )?,
+                    PatchOutput::Glacier(output) => session.push_glacier(
+                        step.clock.end_time,
+                        template,
+                        next,
+                        output,
+                        reference,
+                    )?,
+                };
+                if let Some(path) = pushed {
                     files.push(path);
                 }
             }
             refresh_lai(step, template, next)?;
-            optimize_baseflow(optimizer.as_mut(), step, next, &output, time_step_seconds)?;
-            on_step(step, next, &output)
+            optimize_baseflow(
+                optimizer.as_mut(),
+                step,
+                next,
+                output.view(),
+                time_step_seconds,
+            )?;
+            on_step(step, next, output.view())
         });
         self.baseflow_optimizer = optimizer;
         let steps = steps?;
@@ -513,11 +510,7 @@ impl PointRuntime {
         mut on_step: F,
     ) -> Result<usize>
     where
-        F: FnMut(
-            PointRuntimeStep,
-            &StandardLctSnowSoilState,
-            &StandardLctSnowSoilOutput,
-        ) -> Result<()>,
+        F: FnMut(PointRuntimeStep, &StandardLctSnowSoilState, PatchStepOutput<'_>) -> Result<()>,
     {
         let (greenwich_time, longitude_degrees, co2_scenario) =
             (self.greenwich, self.longitude_degrees, self.co2_scenario);
@@ -525,22 +518,16 @@ impl PointRuntime {
         let mut optimizer = self.baseflow_optimizer.take();
         let steps = self.run_with_state(state, |step, next| {
             let binding = lct_binding(step, greenwich_time, longitude_degrees, co2_scenario)?;
-            // 同带 history 的那一支：`scvold` 必须在 `newsnow` 之前读。
-            let previous_snow_water_equivalent_mm = next.snow.water_equivalent_kg_m2;
-            let output = colm_core::standard_lct_snow_soil_step(
-                baseflow_scaled(template.snow_input(&binding), optimizer.as_ref()),
-                next,
-            )?;
-            let optics = surface_optics_step(
-                step,
-                previous_snow_water_equivalent_mm,
-                next.surface_temperature_k(),
-                &output,
-            );
-            template.prepare_surface_optics(next, optics)?;
+            let output = advance_patch(step, template, &binding, next, optimizer.as_ref())?;
             refresh_lai(step, template, next)?;
-            optimize_baseflow(optimizer.as_mut(), step, next, &output, time_step_seconds)?;
-            on_step(step, next, &output)
+            optimize_baseflow(
+                optimizer.as_mut(),
+                step,
+                next,
+                output.view(),
+                time_step_seconds,
+            )?;
+            on_step(step, next, output.view())
         });
         self.baseflow_optimizer = optimizer;
         steps
@@ -704,16 +691,103 @@ fn lct_binding(
     })
 }
 
-/// `LAI_readin` 那一步（`CoLM.F90:595-605`）。
+/// 一步的 patch 分支输出：规则土壤（植被）或冰川。回调与续跑写出按它分派。
+#[derive(Debug, Clone, Copy)]
+pub enum PatchStepOutput<'a> {
+    Soil(&'a StandardLctSnowSoilOutput),
+    Glacier(&'a colm_core::GlacierStepOutput),
+}
+
+impl PatchStepOutput<'_> {
+    /// `fevpa`
+    pub fn total_evaporation_kg_m2_s(self) -> f64 {
+        match self {
+            Self::Soil(output) => output.energy.total_evaporation_kg_m2_s,
+            Self::Glacier(output) => output.thermal.fevpa,
+        }
+    }
+
+    /// `rsur`
+    pub fn surface_runoff_mm_s(self) -> f64 {
+        match self {
+            Self::Soil(output) => output.water.soil.surface_runoff_mm_s,
+            Self::Glacier(output) => output.surface_runoff_mm_s,
+        }
+    }
+
+    /// `rsub`：冰川分支恒为 0（`CoLMMAIN.F90:1720/1738`）。
+    pub fn subsurface_runoff_mm_s(self) -> f64 {
+        match self {
+            Self::Soil(output) => output.water.soil.subsurface_runoff_mm_s,
+            Self::Glacier(_) => 0.0,
+        }
+    }
+}
+
+/// [`PatchStepOutput`] 的自有版本：一步之内先算、后按引用交出去。
+#[derive(Debug, Clone, PartialEq)]
+pub enum PatchOutput {
+    Soil(Box<StandardLctSnowSoilOutput>),
+    Glacier(Box<colm_core::GlacierStepOutput>),
+}
+
+impl PatchOutput {
+    pub fn view(&self) -> PatchStepOutput<'_> {
+        match self {
+            Self::Soil(output) => PatchStepOutput::Soil(output),
+            Self::Glacier(output) => PatchStepOutput::Glacier(output),
+        }
+    }
+}
+
+/// 按 `patchtype` 跑一步 `CoLMMAIN`，并做完末尾「为下一步准备」的表面光学。
 ///
-/// **位置很讲究**：上游在 `CoLMDRIVER`（含末尾那一节）与 `hist_out` **之后**、
-/// `WRITE_TimeVariables` **之前**调它。所以这一步写出的 history 记的还是旧
-/// `tlai`/`tsai` 折算出的 `lai`/`sai`，而重启里的 `tlai`/`tsai` 已经是新一个月的
-/// —— 本仓库保持同一顺序，`refresh_monthly_leaf_area_index` 只改 `temporal_canopy`，
-/// 不动本步已经算好的 `canopy`。
-///
-/// 月份取**步末**（`CoLM.F90:484` 在 `TICKTIME` 之后算 `month`），所以先把
-/// `86400` 的写法退位。
+/// 冰川（3）：`GLACIER_TEMP/WATER`；之后 `albland` 用的是 `tlai`/`tsai` 折算的冠层，
+/// 所以先做光学、再按 `CoLMMAIN.F90:2178-2230` 把植被量清零。
+fn advance_patch(
+    step: PointRuntimeStep,
+    template: &StandardLctRestartTemplate,
+    binding: &StandardLctStepBinding,
+    state: &mut StandardLctSnowSoilState,
+    optimizer: Option<&baseflow_optimizer::BaseflowOptimizer>,
+) -> Result<PatchOutput> {
+    // `scvold`：上游在 `newsnow` **之前**把 `scv` 抄一份（`CoLMMAIN.F90:814`）。
+    let previous_snow_water_equivalent_mm = state.snow.water_equivalent_kg_m2;
+    let input = baseflow_scaled(template.snow_input(binding), optimizer);
+    if template.patch_type == 3 {
+        let output = colm_core::glacier_snow_step(input, state)?;
+        template.prepare_surface_optics(
+            state,
+            SurfaceOpticsStep {
+                cosine_zenith: step.surface_cosine_zenith,
+                ground_temperature_k: state.surface_temperature_k(),
+                momentum_roughness_m: output.thermal.z0m,
+                // 冰川上 `fwet_snow` 在上一步末已被清零，本分支不再算它。
+                wet_snow_fraction: 0.0,
+                previous_snow_water_equivalent_mm,
+            },
+        )?;
+        colm_core::clear_non_soil_patch(
+            state,
+            step.forcing.air_temperature_k,
+            template.physics.variably_saturated_flow,
+        );
+        return Ok(PatchOutput::Glacier(Box::new(output)));
+    }
+    let output = colm_core::standard_lct_snow_soil_step(input, state)?;
+    // 顺序不能反：上游 `hist_out`（`CoLM.F90:537`）在 `CoLMDRIVER`（`:512`）
+    // **之后**跑，而末尾那一节在 `CoLMDRIVER` 里面。所以 history 记下的
+    // `fsno`/`lai`/`sai` 是**下一步**的值，不是这一步用掉的那一组。
+    let optics = surface_optics_step(
+        step,
+        previous_snow_water_equivalent_mm,
+        state.surface_temperature_k(),
+        &output,
+    );
+    template.prepare_surface_optics(state, optics)?;
+    Ok(PatchOutput::Soil(Box::new(output)))
+}
+
 /// 优化器在场时，本步的 `scale_baseflow` 取它的当前值（上一年末更新过的那个）。
 fn baseflow_scaled<'a>(
     mut input: colm_core::StandardLctSnowSoilInput<'a>,
@@ -735,7 +809,7 @@ fn optimize_baseflow(
     optimizer: Option<&mut baseflow_optimizer::BaseflowOptimizer>,
     step: PointRuntimeStep,
     state: &StandardLctSnowSoilState,
-    output: &StandardLctSnowSoilOutput,
+    output: PatchStepOutput<'_>,
     time_step_seconds: f64,
 ) -> Result<()> {
     let Some(optimizer) = optimizer else {
@@ -747,9 +821,9 @@ fn optimize_baseflow(
     optimizer.accumulate(baseflow_optimizer::BaseflowStep {
         convective_precipitation_kg_m2_s: step.forcing.convective_precipitation_kg_m2_s,
         large_scale_precipitation_kg_m2_s: step.forcing.large_scale_precipitation_kg_m2_s,
-        total_evaporation_kg_m2_s: output.energy.total_evaporation_kg_m2_s,
-        surface_runoff_mm_s: output.water.soil.surface_runoff_mm_s,
-        subsurface_runoff_mm_s: output.water.soil.subsurface_runoff_mm_s,
+        total_evaporation_kg_m2_s: output.total_evaporation_kg_m2_s(),
+        surface_runoff_mm_s: output.surface_runoff_mm_s(),
+        subsurface_runoff_mm_s: output.subsurface_runoff_mm_s(),
         time_step_seconds,
     });
     if colm_core::is_end_of_year(step.clock.end_time, time_step_seconds as u32) {
@@ -758,6 +832,16 @@ fn optimize_baseflow(
     Ok(())
 }
 
+/// `LAI_readin` 那一步（`CoLM.F90:595-605`）。
+///
+/// **位置很讲究**：上游在 `CoLMDRIVER`（含末尾那一节）与 `hist_out` **之后**、
+/// `WRITE_TimeVariables` **之前**调它。所以这一步写出的 history 记的还是旧
+/// `tlai`/`tsai` 折算出的 `lai`/`sai`，而重启里的 `tlai`/`tsai` 已经是新一个月的
+/// —— 本仓库保持同一顺序，`refresh_monthly_leaf_area_index` 只改 `temporal_canopy`，
+/// 不动本步已经算好的 `canopy`。
+///
+/// 月份取**步末**（`CoLM.F90:484` 在 `TICKTIME` 之后算 `month`），所以先把
+/// `86400` 的写法退位。
 fn refresh_lai(
     step: PointRuntimeStep,
     template: &StandardLctRestartTemplate,
@@ -1519,6 +1603,9 @@ mod tests {
             .run_restart_standard_lct_snow(&template, &mut state, |step, _, output| {
                 layers.push(step.clock.index);
                 // 积雪分支的出水在 `soil` 那一半里；雪那一半给的是底部排水。
+                let PatchStepOutput::Soil(output) = output else {
+                    panic!("a soil patch must take the soil branch");
+                };
                 assert!(output.water.soil.total_runoff_mm_s.is_finite());
                 assert!(output.water.snow.bottom_drainage_kg_m2_s.is_finite());
                 Ok(())

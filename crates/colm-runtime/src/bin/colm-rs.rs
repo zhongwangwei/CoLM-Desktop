@@ -40,11 +40,12 @@ use colm_namelist::{parse, Document, Value};
 use colm_runtime::assembly::{
     assemble_standard_lct_snow_template, assemble_standard_lct_template, restart_has_snow_column,
     EvolvedStepOutput, MonthlyLeafAreaIndex, RestartStateFiles, StandardLctRestartTemplate,
+    SurfaceDiagnosticsRow,
 };
 use colm_runtime::baseflow_optimizer::BaseflowOptimizer;
 use colm_runtime::history::HistorySession;
 use colm_runtime::physics::land_physics_parameters;
-use colm_runtime::{read_point_runtime_config, PointRuntime, PointRuntimeConfig};
+use colm_runtime::{read_point_runtime_config, PatchStepOutput, PointRuntime, PointRuntimeConfig};
 
 fn main() -> ExitCode {
     match run() {
@@ -252,35 +253,24 @@ fn run_snow(
     session: Option<HistorySession>,
 ) -> Result<RunSummary> {
     let mut state = template.snow_state();
-    // `smp`/`hk` 只出现在步输出里（`soilwater` 的 `intent(out)`），而续跑要写它们。
-    let mut last_water = None;
-    let mut last_energy = None;
-    let mut last_cosine_zenith = 0.0;
+    // `smp`/`hk` 与表面诊断量只出现在步输出里（`intent(out)`），而续跑要写它们。
+    let mut last: Option<RestartSnapshot> = None;
     let mut on_step = |step: colm_runtime::PointRuntimeStep,
                        state: &StandardLctSnowSoilState,
-                       output: &colm_core::StandardLctSnowSoilOutput|
+                       output: PatchStepOutput<'_>|
      -> Result<()> {
+        let snapshot = RestartSnapshot::new(state, output, step.surface_cosine_zenith)?;
         // `save_to_restart`（`CoLM.F90:664`）：每个 `DEF_WRST_FREQ` 周期末、以及预热期
         // 每年末写一次 `WRITE_TimeVariables`。窗口终点那一次由循环结束后的写出负责。
         if let Some(periodic) = periodic {
             if step.clock.write_restart {
                 let path = periodic.path(step.clock.end_time);
                 if path != restart_out {
-                    write_evolved_restart(
-                        template,
-                        state,
-                        &output.water,
-                        &output.energy,
-                        step.surface_cosine_zenith,
-                        restart_in,
-                        &path,
-                    )?;
+                    write_evolved_restart(template, state, &snapshot, restart_in, &path)?;
                 }
             }
         }
-        last_water = Some(output.water.clone());
-        last_energy = Some(output.energy.clone());
-        last_cosine_zenith = step.surface_cosine_zenith;
+        last = Some(snapshot);
         Ok(())
     };
     let (steps, history_files) = match session {
@@ -298,30 +288,48 @@ fn run_snow(
             None,
         ),
     };
-    let last_water = last_water.context(NO_STEP)?;
-    let last_energy = last_energy.context(NO_STEP)?;
-    write_evolved_restart(
-        template,
-        &state,
-        &last_water,
-        &last_energy,
-        last_cosine_zenith,
-        restart_in,
-        restart_out,
-    )?;
+    let last = last.context(NO_STEP)?;
+    write_evolved_restart(template, &state, &last, restart_in, restart_out)?;
     Ok(RunSummary {
         steps,
         history_files,
     })
 }
 
+/// 续跑写出要的、状态里没有的那部分步输出。
+struct RestartSnapshot {
+    matric_potential_mm: Vec<f64>,
+    hydraulic_conductivity_mm_s: Vec<f64>,
+    diagnostics: SurfaceDiagnosticsRow,
+}
+
+impl RestartSnapshot {
+    fn new(
+        state: &StandardLctSnowSoilState,
+        output: PatchStepOutput<'_>,
+        cosine_zenith: f64,
+    ) -> Result<Self> {
+        Ok(match output {
+            PatchStepOutput::Soil(output) => Self {
+                matric_potential_mm: output.water.soil.matric_potential_mm.clone(),
+                hydraulic_conductivity_mm_s: output.water.soil.hydraulic_conductivity_mm_s.clone(),
+                diagnostics: SurfaceDiagnosticsRow::from_lct(&output.energy, cosine_zenith)?,
+            },
+            // 冰川分支不调 `soilwater`：`smp`/`hk` 保持重启里的值。
+            PatchStepOutput::Glacier(output) => Self {
+                matric_potential_mm: state.soil_water.matric_potential_mm.clone(),
+                hydraulic_conductivity_mm_s: state.soil_water.hydraulic_conductivity_mm_s.clone(),
+                diagnostics: SurfaceDiagnosticsRow::from_glacier(&output.thermal, cosine_zenith),
+            },
+        })
+    }
+}
+
 /// 把步末状态写成一份续跑文件（以输入重启为底，只替换推进过的变量）。
 fn write_evolved_restart(
     template: &StandardLctRestartTemplate,
     state: &StandardLctSnowSoilState,
-    water: &colm_core::Water2014SnowSoilOutput,
-    energy: &colm_core::StandardLctEnergyOutput,
-    cosine_zenith: f64,
+    snapshot: &RestartSnapshot,
     restart_in: &Path,
     restart_out: &Path,
 ) -> Result<()> {
@@ -330,10 +338,9 @@ fn write_evolved_restart(
         state,
         EvolvedStepOutput {
             ground_temperature_k: state.surface_temperature_k(),
-            matric_potential_mm: &water.soil.matric_potential_mm,
-            hydraulic_conductivity_mm_s: &water.soil.hydraulic_conductivity_mm_s,
-            cosine_zenith,
-            energy,
+            matric_potential_mm: &snapshot.matric_potential_mm,
+            hydraulic_conductivity_mm_s: &snapshot.hydraulic_conductivity_mm_s,
+            diagnostics: snapshot.diagnostics,
         },
     )?;
     if let Some(parent) = restart_out.parent() {
@@ -388,6 +395,11 @@ fn history_session(
     let Some(directory) = &outputs.history_directory else {
         return Ok(None);
     };
+    // `DEF_HIST_FREQ = 'none'`（声明默认值）：上游 `hist_out` 走 `CASE default`，
+    // 从不写文件。建一个空调度会被当成"窗口与频率对不上"报错。
+    if config.history_frequency == colm_hist::schedule::HistoryFrequency::None {
+        return Ok(None);
+    }
     config
         .history_session(directory, outputs.history_stem.clone())
         .map(Some)

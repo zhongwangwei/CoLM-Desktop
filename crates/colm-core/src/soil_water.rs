@@ -59,8 +59,18 @@ pub fn solve_campbell_soil_water(
     input: CampbellSoilWaterInput<'_>,
 ) -> Result<CampbellSoilWaterState> {
     let layers = validate(input)?;
-    let root_uptake_mm_s = if input.plant_hydraulics && (input.patch_type != 1 || !input.urban_run)
-    {
+    let plant_hydraulic_uptake =
+        input.plant_hydraulics && (input.patch_type != 1 || !input.urban_run);
+    // `rmx = qin - qout - etr*rootr`（`:2391/:2411/:2438`）：非 PHS 时 `etr*rootr` 收进
+    // `.FNMA (etr, rootr, qin - qout)`；PHS 时减的是 `rootflux`，没有乘积。
+    let source_term = |net_inflow: f64, layer: usize| -> f64 {
+        if plant_hydraulic_uptake {
+            net_inflow - input.root_flux_mm_s[layer]
+        } else {
+            (-input.transpiration_mm_s).mul_add(input.root_fraction[layer], net_inflow)
+        }
+    };
+    let root_uptake_mm_s = if plant_hydraulic_uptake {
         input.root_flux_mm_s.to_vec()
     } else {
         input
@@ -105,8 +115,10 @@ pub fn solve_campbell_soil_water(
     let mut conductivity_upper_derivative = vec![0.0; layers];
     for layer in 0..layers {
         if layer + 1 < layers {
+            // `den = zmm(j+1) - zmm(j)`，`zmm(j) = z_soisno(j)*1000`（`:2263`）：先各自换算
+            // 成毫米再相减。写成 `(z(j+1)-z(j))*1000` 舍入不同，Campbell 首步就差 1 ulp（第 406 轮）。
             separation_mm[layer] =
-                (input.node_depth_m[layer + 1] - input.node_depth_m[layer]) * 1000.0;
+                input.node_depth_m[layer + 1] * 1000.0 - input.node_depth_m[layer] * 1000.0;
             gradient[layer] = (matric_potential_mm[layer + 1] - matric_potential_mm[layer])
                 / separation_mm[layer]
                 - 1.0;
@@ -175,7 +187,7 @@ pub fn solve_campbell_soil_water(
     );
     diagonal[0] = thickness_mm[0] / input.time_step_seconds + outflow_lower_derivative[0];
     upper[0] = outflow_upper_derivative[0];
-    rhs[0] = input.infiltration_mm_s - outflow[0] - root_uptake_mm_s[0];
+    rhs[0] = source_term(input.infiltration_mm_s - outflow[0], 0);
 
     for layer in 1..layers - 1 {
         let inflow = -hydraulic_conductivity_mm_s[layer - 1] * gradient[layer - 1];
@@ -204,7 +216,7 @@ pub fn solve_campbell_soil_water(
         diagonal[layer] = thickness_mm[layer] / input.time_step_seconds - inflow_upper_derivative
             + outflow_lower_derivative[layer];
         upper[layer] = outflow_upper_derivative[layer];
-        rhs[layer] = inflow - outflow[layer] - root_uptake_mm_s[layer];
+        rhs[layer] = source_term(inflow - outflow[layer], layer);
     }
 
     let last = layers - 1;
@@ -224,7 +236,7 @@ pub fn solve_campbell_soil_water(
     lower[last] = -inflow_lower_derivative;
     diagonal[last] = thickness_mm[last] / input.time_step_seconds - inflow_upper_derivative
         + outflow_lower_derivative[last];
-    rhs[last] = inflow - outflow[last] - root_uptake_mm_s[last];
+    rhs[last] = source_term(inflow - outflow[last], last);
 
     let liquid_water_change = solve_tridiagonal(&lower, &diagonal, &upper, &rhs)
         .map_err(anyhow::Error::msg)
@@ -402,10 +414,9 @@ fn update_groundwater_with_resolver(
         input.clapp_hornberger_b[layers - 1],
     );
 
-    // `wa = wa + qcharge*deltim`（`groundwater:2403`）⇒ `FMA(deltim, qcharge, wa)`。
-    aquifer_water_mm = input
-        .time_step_seconds
-        .mul_add(input.recharge_mm_s, aquifer_water_mm);
+    // `wa = wa + qcharge*deltim`（`:2561`）：`main/` 里 `deltim*qcharge` 与 `:2566`/
+    // `qcharge_tot` 共用，于是**不**收缩（扩展版内核是 FMA；第 406 轮按 `main/` 改回）。
+    aquifer_water_mm += input.time_step_seconds * input.recharge_mm_s;
     if initial_water_table_layer == layers {
         water_table_depth_m = (water_table_depth_m
             - input.recharge_mm_s * input.time_step_seconds / 1000.0 / lower_specific_yield)
@@ -466,8 +477,8 @@ fn update_groundwater_with_resolver(
         "groundwater subsurface runoff must be finite"
     );
     if initial_water_table_layer == layers {
-        // `wa = wa - drainage*deltim`（`groundwater:2470`）⇒ `FNMA(deltim, drainage, wa)`。
-        aquifer_water_mm = (-input.time_step_seconds).mul_add(drainage_mm_s, aquifer_water_mm);
+        // `wa = wa - drainage*deltim`（`:2628`）：乘积与 `:2629` 共用，不收缩。
+        aquifer_water_mm -= input.time_step_seconds * drainage_mm_s;
         water_table_depth_m = (water_table_depth_m
             + drainage_mm_s * input.time_step_seconds / 1000.0 / lower_specific_yield)
             .max(0.0);
@@ -529,7 +540,10 @@ fn update_groundwater_with_resolver(
     }
     subsurface_runoff_mm_s += deficit / input.time_step_seconds;
     if subsurface_runoff_mm_s < 0.0 {
-        aquifer_water_mm += subsurface_runoff_mm_s * input.time_step_seconds;
+        // `:2719 wa = wa + rsubst*deltim` 是 `.FMA (deltim, rsubst, wa)`。
+        aquifer_water_mm = input
+            .time_step_seconds
+            .mul_add(subsurface_runoff_mm_s, aquifer_water_mm);
         subsurface_runoff_mm_s = 0.0;
     }
     ensure!(

@@ -36,17 +36,19 @@ pub fn soil_surface_resistance(input: SoilSurfaceResistanceInput) -> Result<f64>
     let liquid_volume =
         input.liquid_water_kg_m2.max(f77(1.0e-6)) / (WATER_DENSITY_KG_M3 * input.layer_thickness_m);
     let saturation = (liquid_volume / input.porosity).min(1.0);
+    // `:138 eff_porosity = max(0.01, porsl - min(porsl, wice/(dz*denice)))`：先换算成体积
+    // 再与 `porsl` 取小（原先是先把 `wice` 截到 `porsl*dz*denice` 再除，舍入不同）。
     let effective_porosity = (input.porosity
         - input
-            .ice_water_kg_m2
-            .min(input.porosity * input.layer_thickness_m * ICE_DENSITY_KG_M3)
-            / (input.layer_thickness_m * ICE_DENSITY_KG_M3))
-        .max(0.01);
+            .porosity
+            .min(input.ice_water_kg_m2 / (input.layer_thickness_m * ICE_DENSITY_KG_M3)))
+    .max(0.01);
     let (matric_potential_m, conductivity_m_s, air_dry_water) = match input.hydraulic_model {
         SoilHydraulicModel::Campbell { bsw } => (
             input.saturated_soil_suction_mm / 1000.0 * saturation.powf(-bsw),
             input.saturated_hydraulic_conductivity_mm_s / 1000.0
-                * (liquid_volume / input.porosity).powf(2.0 * bsw + 3.0),
+                // `:143` 的指数是 `.FMA (bsw, 2, 3)`。
+                * (liquid_volume / input.porosity).powf(bsw.mul_add(2.0, 3.0)),
             input.porosity * (input.saturated_soil_suction_mm / -f77(1.0e7)).powf(1.0 / bsw),
         ),
         model => {
@@ -113,9 +115,16 @@ pub fn soil_surface_resistance(input: SoilSurfaceResistanceInput) -> Result<f64>
         aqueous_diffusivity(input, matric_potential_m, conductivity_m_s, liquid_volume);
     let mut resistance = match input.scheme {
         1 => {
-            let dry_layer = (input.layer_thickness_m
-                * (f77(0.8) * effective_porosity - liquid_volume).max(f77(1.0e-6))
-                / (f77(0.8) * input.porosity - air_dry_water).max(f77(1.0e-6)))
+            // `:231-232`：分子分母两处 `0.8*x - y` 都是 `.FMS (x, 0.8, y)`；
+            // `max(…)*dz` 再除（第 406 轮，Campbell 算例的 `rss` 差 1 ulp）。
+            let dry_layer = (effective_porosity
+                .mul_add(f77(0.8), -liquid_volume)
+                .max(f77(1.0e-6))
+                * input.layer_thickness_m
+                / input
+                    .porosity
+                    .mul_add(f77(0.8), -air_dry_water)
+                    .max(f77(1.0e-6)))
             .clamp(0.0, 0.2);
             dry_layer / gas_diffusivity
         }
@@ -149,7 +158,10 @@ pub fn soil_surface_resistance(input: SoilSurfaceResistanceInput) -> Result<f64>
     if input.scheme == 4 {
         resistance = (1.0 - input.snow_cover_fraction) * resistance + input.snow_cover_fraction;
     } else {
-        let denominator = 1.0 - input.snow_cover_fraction + input.snow_cover_fraction * resistance;
+        // `:299` `.FMA (fsno, rss, 1-fsno)`
+        let denominator = input
+            .snow_cover_fraction
+            .mul_add(resistance, 1.0 - input.snow_cover_fraction);
         resistance = if denominator > 0.0 {
             resistance / denominator
         } else {

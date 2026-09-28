@@ -918,16 +918,16 @@ fn validate_snow_soil_step(
 }
 
 #[derive(Debug)]
-struct PackedSnowSoilState {
-    layer_thickness_m: Vec<f64>,
-    node_depth_m: Vec<f64>,
-    interface_depth_m: Vec<f64>,
-    temperature_k: Vec<f64>,
-    liquid_water_kg_m2: Vec<f64>,
-    ice_water_kg_m2: Vec<f64>,
+pub(crate) struct PackedSnowSoilState {
+    pub(crate) layer_thickness_m: Vec<f64>,
+    pub(crate) node_depth_m: Vec<f64>,
+    pub(crate) interface_depth_m: Vec<f64>,
+    pub(crate) temperature_k: Vec<f64>,
+    pub(crate) liquid_water_kg_m2: Vec<f64>,
+    pub(crate) ice_water_kg_m2: Vec<f64>,
 }
 
-fn packed_snow_soil_state(
+pub(crate) fn packed_snow_soil_state(
     ground: GroundTemperatureInput<'_>,
     state: &StandardLctSnowSoilState,
     snow_layers: usize,
