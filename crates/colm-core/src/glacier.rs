@@ -3,8 +3,7 @@
 use anyhow::{ensure, Result};
 
 use crate::{
-    combine_snow_layers, compact_snow_layers, divide_snow_layers, snow_water, RuntimeSnowColumn,
-    SnowToSoilTransfer, SnowWaterInput,
+    compact_snow_layers, snow_water, RuntimeSnowColumn, SnowToSoilTransfer, SnowWaterInput,
 };
 
 /// Liquid and ice water held at the glacier surface node (Fortran index `1`).
@@ -37,6 +36,10 @@ pub fn glacier_water(
     input: GlacierWaterInput<'_>,
     snow: &mut RuntimeSnowColumn,
     surface: &mut GlacierSurfaceWater,
+    mut snicar: Option<(
+        &mut crate::SnicarColumnState,
+        &[f64; crate::AEROSOL_DEPOSITION_FIELDS],
+    )>,
 ) -> Result<f64> {
     ensure!(
         input.time_step_seconds.is_finite()
@@ -80,7 +83,7 @@ pub fn glacier_water(
         return Ok(input.rainfall_kg_m2_s + input.snow_melt_kg_m2_s - input.evaporation_kg_m2_s);
     }
 
-    let drainage = snow_water(
+    let outcome = snow_water(
         SnowWaterInput {
             time_step_seconds: input.time_step_seconds,
             irreducible_saturation: input.irreducible_saturation,
@@ -92,8 +95,20 @@ pub fn glacier_water(
             frost_kg_m2_s: input.frost_kg_m2_s,
         },
         snow,
-    )?
-    .bottom_drainage_kg_m2_s;
+    )?;
+    let drainage = outcome.bottom_drainage_kg_m2_s;
+    // `GLACIER_WATER_snicar`：`SnowWater_snicar` 的气溶胶部分，合并/分裂随层搬气溶胶。
+    if let Some((state, deposition)) = snicar.as_mut() {
+        crate::snicar_snow_water_aerosols(
+            state,
+            snow.layer_count.unsigned_abs() as usize,
+            &snow.liquid_water_kg_m2,
+            &snow.ice_water_kg_m2,
+            &outcome.layer_drainage_kg_m2,
+            deposition,
+            input.time_step_seconds,
+        )?;
+    }
     compact_snow_layers(
         snow,
         input.time_step_seconds,
@@ -105,11 +120,12 @@ pub fn glacier_water(
         liquid_water_kg_m2: surface.liquid_water_kg_m2,
         ice_water_kg_m2: surface.ice_water_kg_m2,
     };
-    combine_snow_layers(snow, &mut glacier_surface)?;
+    let mut aerosols = snicar.map(|(state, _)| &mut state.aerosol_mass_kg_m2);
+    crate::combine_snow_layers_with_aerosols(snow, &mut glacier_surface, aerosols.as_deref_mut())?;
     surface.liquid_water_kg_m2 = glacier_surface.liquid_water_kg_m2;
     surface.ice_water_kg_m2 = glacier_surface.ice_water_kg_m2;
     if snow.layer_count < 0 {
-        divide_snow_layers(snow)?;
+        crate::divide_snow_layers_with_aerosols(snow, aerosols)?;
     }
     Ok(drainage)
 }

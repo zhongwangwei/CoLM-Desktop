@@ -56,6 +56,7 @@ fn a_bare_ice_column_closes_its_energy_budget() {
             soil_residual_water: &residual,
             soil_suction_mm: &suction,
             soil_hydraulic_model: &model,
+            snow_layer_absorption_w_m2: None,
         },
         column,
     )

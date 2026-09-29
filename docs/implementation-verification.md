@@ -26229,3 +26229,23 @@ SNICAR 分支（`MOD_Glacier`/`MOD_Lake` 各自的 `_snicar` 支）。拒绝信�
 
 另：第 444 轮提交时 `colm-runtime` 的 `snicar_is_refused_rather_than_run_with_standard_snow_optics` 已经失败（它断言的
 拒绝文本随那一轮消失），当时漏看了；本轮改写为检验新行为的 `snicar_switches_follow_read_namelist`。
+
+## 第 446 轮：冰川上的 SNICAR（`patchtype = 3`）
+
+`groundtem_glacier`（被内联进 `GLACIER_TEMP`）与 `GLACIER_WATER_snicar` 用的都是第 444/445 轮已验证的构件：
+- `netsolar` 末段的分层吸收（冰川的 `netsolar` 在新雪之前，用上一步末的 `fsno`），步首 `snofrz = 0`；
+- 地表 `hs` 在 SNICAR 下**总是**用 `sabg_snow_lyr(lb)`（没有雪层时就是冰层 1 的吸收），GIMPLE 形状与 `sabg` 那一支相同；
+- 第 `lb+1` 层到冰层 1 的右端项 `rt = t + fact*sabg_snow_lyr + cnfac*fact*Δfn`：上游**不分是否 SNICAR** 都这么写
+  （非 SNICAR 时吸收为 0），GIMPLE 是 `.FMA (Δfn, cnfac*fact, .FMA (sabg, fact, t))`；
+- `meltf_snicar` 对 `patchtype == 3` 的冰层 1 也计入吸收（`phase_change.rs` 早已支持）；`snofrz` 同土壤分支；
+- 雪水的气溶胶搬运与带气溶胶的合并/分裂，顺序与 `GLACIER_WATER` 相同；
+- 步末 `albland` 的 SNICAR 钩子：冰川下垫面是冰面反照率（0.8/0.55）；`pg_snow` 取冰川分支里并入了首冰层多余冰量之后的
+  那个值（上游 `albland` 收到的就是它）。
+
+| 算例 | 设置 | 历史 | 重启 | release | debug |
+|---|---|---|---|---|---|
+| `sg1` | `gl`（AT-Neu 冰川，全年月输出）+ SNICAR | 12/12 | ✓ | ✓ | ✓ |
+| `sg2` | `sg1` + 气候态气溶胶沉降 | 12/12 | ✓ | ✓ | ✓ |
+
+雪层粒径 2 月末长到 617 µm（`sg1`）、雪中粉尘 4 最多 7.9e-4 kg/m²（`sg2`），`gl` 的粒径一直是 54.5。
+非 SNICAR 的冰川算例 `gl`/`gc`/`gh`/`gn`/`gy` 复跑仍逐位。

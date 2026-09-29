@@ -25,6 +25,7 @@ fn glacier_water_matches_the_snow_free_fortran_branch() {
         },
         &mut snow,
         &mut surface,
+        None,
     )
     .unwrap();
     assert!((drainage - 0.0026).abs() < 1.0e-15);

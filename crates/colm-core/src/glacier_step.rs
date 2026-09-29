@@ -124,15 +124,40 @@ pub fn glacier_snow_step(
 
     // `netsolar`（`CoLMMAIN.F90:772`）用上一步末的 `fsno` 与 `lai/sai`：冰川上后两者
     // 在上一步末已被清零（冷启动重启同样是 0）。
-    let shortwave = net_solar(
+    ensure!(
+        input.snicar.is_some() == state.snicar.is_some(),
+        "the SNICAR tables and the SNICAR snow state must be present together"
+    );
+    let net_solar_snow_fraction = state.snow.ground_snow_fraction;
+    let mut shortwave = net_solar(
         NetSolarInput {
-            snow_fraction: state.snow.ground_snow_fraction,
+            snow_fraction: net_solar_snow_fraction,
             leaf_area_index: state.energy.canopy.leaf_area_index,
             stem_area_index: state.energy.canopy.stem_area_index,
             ..input.energy.solar
         },
         &mut state.energy.radiation,
     )?;
+    // SNICAR：`snofrz = 0`（`CoLMMAIN.F90:743`）与 `netsolar` 末段的分层吸收（有入射短波时）。
+    let snicar_absorbed = match state.snicar.as_mut() {
+        Some(snicar) => {
+            snicar.refreezing_kg_m2_s = [0.0; 5];
+            let forcing = input.energy.solar.forcing;
+            Some(if forcing.total() > 0.0 {
+                crate::snicar_net_solar(
+                    &mut snicar.layer_absorption,
+                    state.energy.radiation.snow_absorption,
+                    forcing,
+                    net_solar_snow_fraction,
+                    &mut shortwave.soil_absorbed_w_m2,
+                    &mut shortwave.snow_absorbed_w_m2,
+                )
+            } else {
+                [0.0; 6]
+            })
+        }
+        None => None,
+    };
     // `rain_snow_temp (patchtype, ...)`：`patchtype == 3` 打开冰川那一支。
     let precipitation = forcing.partition_precipitation(3, input.energy.precipitation_scheme)?;
 
@@ -197,6 +222,13 @@ pub fn glacier_snow_step(
     // ---- GLACIER_TEMP ----
     let snow_layers = state.snow.layer_count.unsigned_abs() as usize;
     let packed = packed_snow_soil_state(ground, state, snow_layers, ground.snow_layers);
+    let snow_layer_absorption = snicar_absorbed.map(|absorbed| {
+        let mut values = vec![0.0; packed.temperature_k.len()];
+        values[..snow_layers].copy_from_slice(&absorbed[5 - snow_layers..5]);
+        values[snow_layers] = absorbed[5];
+        values
+    });
+    let ice_before = packed.ice_water_kg_m2.clone();
     let column = GlacierColumn {
         thickness_m: packed.layer_thickness_m,
         node_depth_m: packed.node_depth_m,
@@ -237,6 +269,7 @@ pub fn glacier_snow_step(
             soil_residual_water: ground.soil_residual_water,
             soil_suction_mm: ground.soil_suction_mm,
             soil_hydraulic_model: ground.soil_hydraulic_model,
+            snow_layer_absorption_w_m2: snow_layer_absorption.as_deref(),
         },
         column,
     )?;
@@ -252,6 +285,16 @@ pub fn glacier_snow_step(
         state.snow.temperature_k[slot] = column.temperature_k[relative];
         state.snow.liquid_water_kg_m2[slot] = column.liquid_water_kg_m2[relative];
         state.snow.ice_water_kg_m2[slot] = column.ice_water_kg_m2[relative];
+    }
+    if let Some(snicar) = state.snicar.as_mut() {
+        crate::snow_refreezing_rate(
+            snicar,
+            snow_layers,
+            &ice_before,
+            &column.ice_water_kg_m2,
+            &phase_flag,
+            dt,
+        );
     }
     state.snow.water_equivalent_kg_m2 = snow_water_equivalent_kg_m2;
     state.snow.depth_m = snow_depth_m;
@@ -285,6 +328,10 @@ pub fn glacier_snow_step(
         },
         &mut state.snow,
         &mut surface,
+        match (state.snicar.as_deref_mut(), input.snicar.as_ref()) {
+            (Some(snicar), Some(step)) => Some((snicar, &step.aerosol_deposition_kg_m2_s)),
+            _ => None,
+        },
     )?;
     state.soil_water.liquid_water_kg_m2[0] = surface.liquid_water_kg_m2;
     state.soil_water.ice_water_kg_m2[0] = surface.ice_water_kg_m2;
@@ -465,6 +512,8 @@ pub struct GlacierTemperatureInput<'a> {
     pub soil_residual_water: &'a [f64],
     pub soil_suction_mm: &'a [f64],
     pub soil_hydraulic_model: &'a [crate::SoilHydraulicModel],
+    /// SNICAR 的 `sabg_snow_lyr`，按打包列（雪层在前、冰层 1 紧随）；`None` 为非 SNICAR（全 0）。
+    pub snow_layer_absorption_w_m2: Option<&'a [f64]>,
 }
 
 /// `GLACIER_TEMP` 的结果。
@@ -909,8 +958,11 @@ fn glacier_ground_temperature(
     let rain_heat = input.rainfall_kg_m2_s * CPLIQ;
     let snow_heat = input.snowfall_kg_m2_s * CPICE;
     let precipitation_gap = input.precipitation_temperature_k - t0;
-    let surface_flux = input.absorbed_shortwave_w_m2
-        + input.downward_longwave_w_m2 * GLACIER_EMISSIVITY
+    // SNICAR：`hs` 的短波项换成 `sabg_snow_lyr(lb)`（`MOD_Glacier.F90:740-743`），其余同形。
+    let absorbed_shortwave = input
+        .snow_layer_absorption_w_m2
+        .map_or(input.absorbed_shortwave_w_m2, |values| values[0]);
+    let surface_flux = absorbed_shortwave + input.downward_longwave_w_m2 * GLACIER_EMISSIVITY
         - (t0_squared * t0_squared) * emissive
         - latent_heat.mul_add(fevpg, fseng)
         + rain_heat * precipitation_gap
@@ -965,7 +1017,12 @@ fn glacier_ground_temperature(
             + interface_conductivity[layer] / dzp)
             .mul_add(implicit_fact, 1.0);
         upper[layer] = -(interface_conductivity[layer] * implicit_fact / dzp);
-        rhs[layer] = (flux[layer] - flux[layer - 1]).mul_add(cnfac * fact[layer], t[layer]);
+        // 第 `lb+1` 层到冰层 1：`rt = .FMA (Δfn, cnfac*fact, .FMA (sabg_snow_lyr, fact, t))`（`:782`）。
+        let base = match input.snow_layer_absorption_w_m2 {
+            Some(values) if layer <= snow => values[layer].mul_add(fact[layer], t[layer]),
+            _ => t[layer],
+        };
+        rhs[layer] = (flux[layer] - flux[layer - 1]).mul_add(cnfac * fact[layer], base);
     }
     {
         let layer = n - 1;
@@ -1001,7 +1058,7 @@ fn glacier_ground_temperature(
         time_step_seconds: dt,
         fact_seconds_per_j_m2_k: &fact,
         residual_heat_flux_w_m2: &residual,
-        snow_layer_absorption_w_m2: None,
+        snow_layer_absorption_w_m2: input.snow_layer_absorption_w_m2,
         surface_heat_flux_w_m2: surface_flux,
         soil_heat_flux_w_m2: surface_flux,
         snow_heat_flux_w_m2: surface_flux,

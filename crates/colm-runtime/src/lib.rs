@@ -917,7 +917,7 @@ fn advance_patch(
                 // 冰川上 `fwet_snow` 在上一步末已被清零，本分支不再算它。
                 wet_snow_fraction: 0.0,
                 previous_snow_water_equivalent_mm,
-                ground_snowfall_kg_m2_s: 0.0,
+                ground_snowfall_kg_m2_s: output.snowfall_kg_m2_s,
                 air_temperature_k: step.forcing.air_temperature_k,
             },
         )?;
