@@ -684,7 +684,10 @@ fn adjust_dynamic_lake_water(
     let liquid_before = lake.thickness_m[0] * (1.0 - lake.ice_fraction[0]);
     let ice_before = lake.thickness_m[0] * lake.ice_fraction[0];
     let (mut liquid_depth, mut ice_depth) = if had_snow {
-        ((bottom_drainage * dt).mul_add(1.0e-3, liquid_before), ice_before)
+        (
+            (bottom_drainage * dt).mul_add(1.0e-3, liquid_before),
+            ice_before,
+        )
     } else {
         (
             (((fluxes.snow_melt_kg_m2_s + input.dew_kg_m2_s) - input.evaporation_kg_m2_s) * dt)

@@ -464,15 +464,17 @@ impl PointRuntime {
         let mut files = Vec::new();
         let mut optimizer = self.baseflow_optimizer.take();
         ensure!(
-            optimizer.is_none() || templates.len() == 1,
-            "the baseflow optimizer runs on single-patch sites only"
+            optimizer
+                .as_ref()
+                .is_none_or(|optimizer| optimizer.patch_count() == templates.len()),
+            "the baseflow optimizer needs one entry per patch"
         );
         let steps = self.run_with_state(states, |step, states| {
             let binding = lct_binding(step, greenwich_time, longitude_radians, co2_scenario)?;
             // `CoLMDRIVER` 先推进全部 patch，`hist_out` 再逐 patch 累加（`CoLM.F90:512-537`）。
             let mut outputs = Vec::with_capacity(templates.len());
             let mut initial_totals = Vec::with_capacity(templates.len());
-            for (template, next) in templates.iter().zip(states.iter_mut()) {
+            for (index, (template, next)) in templates.iter().zip(states.iter_mut()).enumerate() {
                 // `totwb`：上游在 `snl` 重算之后、任何物理步之前取步首总蓄量
                 // （`CoLMMAIN.F90:831`），`xerr` 要靠它和步末的 `endwb` 相减。
                 let mut initial_total_water_mm = colm_core::initial_total_water_storage_mm(
@@ -494,7 +496,7 @@ impl PointRuntime {
                     template,
                     &binding,
                     next,
-                    optimizer.as_ref(),
+                    optimizer.as_ref().map(|optimizer| optimizer.scale(index)),
                 )?);
             }
             // `hist_out` 在 `itstamp <= ptstamp` 时直接返回（`MOD_Hist.F90:225`），连累加都不做：
@@ -586,15 +588,13 @@ impl PointRuntime {
             for (template, next) in templates.iter().zip(states.iter_mut()) {
                 refresh_lai(step, template, next)?;
             }
-            if let Some(output) = outputs.first() {
-                optimize_baseflow(
-                    optimizer.as_mut(),
-                    step,
-                    &states[0],
-                    output.view(),
-                    time_step_seconds,
-                )?;
-            }
+            optimize_baseflow(
+                optimizer.as_mut(),
+                step,
+                states,
+                &outputs,
+                time_step_seconds,
+            )?;
             let views = outputs.iter().map(PatchOutput::view).collect::<Vec<_>>();
             on_step(step, states, &views)
         });
@@ -643,26 +643,27 @@ impl PointRuntime {
         let time_step_seconds = self.clock.timestep_seconds();
         let mut optimizer = self.baseflow_optimizer.take();
         ensure!(
-            optimizer.is_none() || templates.len() == 1,
-            "the baseflow optimizer runs on single-patch sites only"
+            optimizer
+                .as_ref()
+                .is_none_or(|optimizer| optimizer.patch_count() == templates.len()),
+            "the baseflow optimizer needs one entry per patch"
         );
         let steps = self.run_with_state(states, |step, states| {
             let binding = lct_binding(step, greenwich_time, longitude_radians, co2_scenario)?;
             let mut outputs = Vec::with_capacity(templates.len());
-            for (template, next) in templates.iter().zip(states.iter_mut()) {
-                let output = advance_patch(step, template, &binding, next, optimizer.as_ref())?;
+            for (index, (template, next)) in templates.iter().zip(states.iter_mut()).enumerate() {
+                let scale = optimizer.as_ref().map(|optimizer| optimizer.scale(index));
+                let output = advance_patch(step, template, &binding, next, scale)?;
                 refresh_lai(step, template, next)?;
                 outputs.push(output);
             }
-            if let Some(output) = outputs.first() {
-                optimize_baseflow(
-                    optimizer.as_mut(),
-                    step,
-                    &states[0],
-                    output.view(),
-                    time_step_seconds,
-                )?;
-            }
+            optimize_baseflow(
+                optimizer.as_mut(),
+                step,
+                states,
+                &outputs,
+                time_step_seconds,
+            )?;
             let views = outputs.iter().map(PatchOutput::view).collect::<Vec<_>>();
             on_step(step, states, &views)
         });
@@ -898,11 +899,12 @@ fn advance_patch(
     template: &StandardLctRestartTemplate,
     binding: &StandardLctStepBinding,
     state: &mut StandardLctSnowSoilState,
-    optimizer: Option<&baseflow_optimizer::BaseflowOptimizer>,
+    // 优化器在场时本 patch 的 `scale_baseflow(ipatch)`。
+    baseflow_scale: Option<f64>,
 ) -> Result<PatchOutput> {
     // `scvold`：上游在 `newsnow` **之前**把 `scv` 抄一份（`CoLMMAIN.F90:814`）。
     let previous_snow_water_equivalent_mm = state.snow.water_equivalent_kg_m2;
-    let mut input = baseflow_scaled(template.snow_input(binding), optimizer);
+    let mut input = baseflow_scaled(template.snow_input(binding), baseflow_scale);
     if let Some(snicar) = input.snicar.as_mut() {
         snicar.aerosol_deposition_kg_m2_s = template.aerosol_deposition(step.clock.forcing_time)?;
     }
@@ -1033,12 +1035,12 @@ fn advance_patch(
 }
 
 /// 优化器在场时，本步的 `scale_baseflow` 取它的当前值（上一年末更新过的那个）。
-fn baseflow_scaled<'a>(
-    mut input: colm_core::StandardLctSnowSoilInput<'a>,
-    optimizer: Option<&baseflow_optimizer::BaseflowOptimizer>,
-) -> colm_core::StandardLctSnowSoilInput<'a> {
-    if let Some(optimizer) = optimizer {
-        input.soil_water.baseflow_scale = optimizer.scale();
+fn baseflow_scaled(
+    mut input: colm_core::StandardLctSnowSoilInput<'_>,
+    scale: Option<f64>,
+) -> colm_core::StandardLctSnowSoilInput<'_> {
+    if let Some(scale) = scale {
+        input.soil_water.baseflow_scale = scale;
     }
     input
 }
@@ -1052,8 +1054,8 @@ fn baseflow_scaled<'a>(
 fn optimize_baseflow(
     optimizer: Option<&mut baseflow_optimizer::BaseflowOptimizer>,
     step: PointRuntimeStep,
-    state: &StandardLctSnowSoilState,
-    output: PatchStepOutput<'_>,
+    states: &[StandardLctSnowSoilState],
+    outputs: &[PatchOutput],
     time_step_seconds: f64,
 ) -> Result<()> {
     let Some(optimizer) = optimizer else {
@@ -1062,16 +1064,27 @@ fn optimize_baseflow(
     if !step.clock.is_spinup {
         return Ok(());
     }
-    optimizer.accumulate(baseflow_optimizer::BaseflowStep {
-        convective_precipitation_kg_m2_s: step.forcing.convective_precipitation_kg_m2_s,
-        large_scale_precipitation_kg_m2_s: step.forcing.large_scale_precipitation_kg_m2_s,
-        total_evaporation_kg_m2_s: output.total_evaporation_kg_m2_s(),
-        surface_runoff_mm_s: output.surface_runoff_mm_s(),
-        subsurface_runoff_mm_s: output.subsurface_runoff_mm_s(),
-        time_step_seconds,
-    });
+    // 所有 patch 的强迫都是同一个网格元的 `forc_prc`/`forc_prl`（单点只有一个元）。
+    for (index, output) in outputs.iter().enumerate() {
+        let output = output.view();
+        optimizer.accumulate(
+            index,
+            baseflow_optimizer::BaseflowStep {
+                convective_precipitation_kg_m2_s: step.forcing.convective_precipitation_kg_m2_s,
+                large_scale_precipitation_kg_m2_s: step.forcing.large_scale_precipitation_kg_m2_s,
+                total_evaporation_kg_m2_s: output.total_evaporation_kg_m2_s(),
+                surface_runoff_mm_s: output.surface_runoff_mm_s(),
+                subsurface_runoff_mm_s: output.subsurface_runoff_mm_s(),
+                time_step_seconds,
+            },
+        );
+    }
     if colm_core::is_end_of_year(step.clock.end_time, time_step_seconds as u32) {
-        optimizer.close_year(state.soil_water.water_table_depth_m)?;
+        let water_tables = states
+            .iter()
+            .map(|state| state.soil_water.water_table_depth_m)
+            .collect::<Vec<_>>();
+        optimizer.close_year(&water_tables)?;
     }
     Ok(())
 }

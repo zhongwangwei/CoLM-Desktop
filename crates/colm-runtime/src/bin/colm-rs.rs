@@ -42,7 +42,7 @@ use colm_runtime::assembly::{
     EvolvedStepOutput, MonthlyLeafAreaIndex, RestartStateFiles, StandardLctRestartTemplate,
     SurfaceDiagnosticsRow,
 };
-use colm_runtime::baseflow_optimizer::BaseflowOptimizer;
+use colm_runtime::baseflow_optimizer::{BaseflowOptimizer, BaseflowPatchInit};
 use colm_runtime::history::HistorySession;
 use colm_runtime::physics::land_physics_parameters;
 use colm_runtime::{read_point_runtime_config, PatchStepOutput, PointRuntime, PointRuntimeConfig};
@@ -188,34 +188,32 @@ fn run() -> Result<()> {
                 .context("cropfrac is shorter than the patch count")?;
         }
     }
-    let template = &templates[0];
-    let baseflow_scale = template.baseflow_scale;
     // `Opt_Baseflow_init` 无论开不开优化都先建 `ParaOpt/`（`MOD_Opt_Baseflow.F90:40-42`）。
     let para_opt = layout.out().join(&name).join("restart/ParaOpt");
     std::fs::create_dir_all(&para_opt)
         .with_context(|| format!("cannot create {}", para_opt.display()))?;
     let baseflow_optimizer = if logical_field(&document, "DEF_Optimize_Baseflow")? {
-        // 上游对**所有** patch 一起迭代并整向量写回；本程序只跑一个 patch，
-        // 多 patch 的重启若照写单元素文件，会把其余 patch 的标定值抹掉。
-        let patches = colm_init::RestartFile::open(&restarts.initial)?
-            .floats("zwt")?
-            .len();
+        // 上游对**所有** patch 一起迭代并整向量写回 `ParaOpt/<case>_baseflow.nc`；`--patch` 只跑其中
+        // 一个时照写会把其余 patch 的标定值抹掉，所以只接受整站点。
         ensure!(
-            patches == 1 && templates.len() == 1,
-            "DEF_Optimize_Baseflow over {patches} patches is not ported: upstream iterates the \
-             whole `scale_baseflow` vector ({})",
-            restarts.initial.display()
+            templates.len() == patch_count,
+            "DEF_Optimize_Baseflow needs every patch of the site ({patch_count}), but --patch \
+             selected {}: upstream rewrites the whole `scale_baseflow` vector",
+            templates.len()
         );
-        Some(BaseflowOptimizer::new(
-            baseflow_scale,
-            template.snow_state().soil_water.water_table_depth_m,
-            template.patch_type,
-            para_opt,
-            &name,
-        ))
+        let patches = templates
+            .iter()
+            .map(|template| BaseflowPatchInit {
+                scale: template.baseflow_scale,
+                water_table_depth_m: template.snow_state().soil_water.water_table_depth_m,
+                patch_type: template.patch_type,
+            })
+            .collect::<Vec<_>>();
+        Some(BaseflowOptimizer::new(&patches, para_opt, &name))
     } else {
         None
     };
+    let template = &templates[0];
 
     // 会话从**配置**开（窗口、站点、步长、频率都在里面），要在 `open` 消费掉
     // 配置之前建好 —— 而它自己不带 forcing，所以先后没有别的影响。

@@ -17,27 +17,47 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{ensure, Context, Result};
 
 /// 上游的 `spval`：累加器"还没有值"的标记，也是写进文件的值。
 const SPVAL: f64 = -1.0e36;
 
-/// 单个 patch 的优化器状态（`scale_baseflow`/`zwt_init`/`rchg_year`/`rsub_year`/`iter_bf_opt`）。
+/// 一个 patch 的优化器状态（上游各向量在 `ipatch` 处的元素）。
 #[derive(Debug, Clone, PartialEq)]
-pub struct BaseflowOptimizer {
+struct PatchBaseflow {
+    /// `scale_baseflow(ipatch)`
     scale: f64,
+    /// `zwt_init(ipatch)`
     initial_water_table_depth_m: f64,
-    /// `rchg_year`：`None` 即上游的 `spval`。
+    /// `rchg_year(ipatch)`：`None` 即上游的 `spval`。
     recharge_mm: Option<f64>,
-    /// `rsub_year`，同上。
+    /// `rsub_year(ipatch)`，同上。
     subsurface_runoff_mm: Option<f64>,
-    iteration: u32,
     /// `patchtype <= 1`：只有土壤与城市 patch 会被改写 `scale_baseflow`。
     adjustable: bool,
+}
+
+/// 整个站点的优化器（`scale_baseflow`/`zwt_init`/`rchg_year`/`rsub_year` 四个长度 `numpatch`
+/// 的向量加一个 `iter_bf_opt`）。上游逐 patch 独立累加、独立更新，跨年时整向量写文件；
+/// 单点的多 patch 就是多作物站点，向量顺序即 patch 下标。
+#[derive(Debug, Clone, PartialEq)]
+pub struct BaseflowOptimizer {
+    patches: Vec<PatchBaseflow>,
+    iteration: u32,
     /// `DEF_dir_restart/ParaOpt`。
     directory: PathBuf,
     /// `<case>_baseflow_w180_s90.nc`：`ncio_create_file_vector` 与读取同一套块后缀。
     file_name: String,
+}
+
+/// `Opt_Baseflow_init` 对一个 patch 的输入。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BaseflowPatchInit {
+    /// 刚从 `ParaOpt/<case>_baseflow.nc` 读到的 `scale_baseflow`（缺省 1）。
+    pub scale: f64,
+    /// 启动时刻的 `zwt`。
+    pub water_table_depth_m: f64,
+    pub patch_type: i32,
 }
 
 /// 一步里优化器要的量，全部取**步末**的值（与上游在 `CoLMDRIVER` 之后读全局数组一致）。
@@ -52,30 +72,36 @@ pub struct BaseflowStep {
 }
 
 impl BaseflowOptimizer {
-    /// `Opt_Baseflow_init`：`scale` 是刚从 `ParaOpt/<case>_baseflow.nc` 读到的值（缺省 1），
-    /// `zwt_init` 取启动时刻的 `zwt`。
+    /// `Opt_Baseflow_init`，`patches` 按 patch 下标排列。
     pub fn new(
-        scale: f64,
-        initial_water_table_depth_m: f64,
-        patch_type: i32,
+        patches: &[BaseflowPatchInit],
         directory: impl Into<PathBuf>,
         case_name: &str,
     ) -> Self {
         Self {
-            scale,
-            initial_water_table_depth_m,
-            recharge_mm: None,
-            subsurface_runoff_mm: None,
+            patches: patches
+                .iter()
+                .map(|patch| PatchBaseflow {
+                    scale: patch.scale,
+                    initial_water_table_depth_m: patch.water_table_depth_m,
+                    recharge_mm: None,
+                    subsurface_runoff_mm: None,
+                    adjustable: patch.patch_type <= 1,
+                })
+                .collect(),
             iteration: 0,
-            adjustable: patch_type <= 1,
             directory: directory.into(),
             file_name: format!("{case_name}_baseflow_w180_s90.nc"),
         }
     }
 
-    /// 下一步 `rsubst` 要乘的 `scale_baseflow(ipatch)`。
-    pub fn scale(&self) -> f64 {
-        self.scale
+    pub fn patch_count(&self) -> usize {
+        self.patches.len()
+    }
+
+    /// 下一步 `rsubst` 要乘的 `scale_baseflow(patch)`。
+    pub fn scale(&self, patch: usize) -> f64 {
+        self.patches[patch].scale
     }
 
     /// 已经完成的年数（上游 `iter_bf_opt`）。
@@ -85,55 +111,87 @@ impl BaseflowOptimizer {
 
     /// `BaseFlow_Optimize` 里每步的两次 `add_spv`。
     ///
-    /// 单点强迫与通量都不会是 `spval`，所以上游的 `WHERE` 掩码在这里恒真。
+    /// `recharge` 带 `WHERE` 掩码：四个输入任一是 `spval` 就保持 `spval`、不累加。
     /// 累加写成 `s + var*dt`：GIMPLE 里乘积被 `s = var*dt` 那一支共用，没有收缩成 FMA。
-    pub fn accumulate(&mut self, step: BaseflowStep) {
-        let recharge = step.convective_precipitation_kg_m2_s
-            + step.large_scale_precipitation_kg_m2_s
-            - step.total_evaporation_kg_m2_s
-            - step.surface_runoff_mm_s;
-        add_spv(&mut self.recharge_mm, recharge, step.time_step_seconds);
+    pub fn accumulate(&mut self, patch: usize, step: BaseflowStep) {
+        let state = &mut self.patches[patch];
+        let inputs = [
+            step.convective_precipitation_kg_m2_s,
+            step.large_scale_precipitation_kg_m2_s,
+            step.total_evaporation_kg_m2_s,
+            step.surface_runoff_mm_s,
+        ];
+        let recharge = if inputs.contains(&colm_core::MISSING) {
+            colm_core::MISSING
+        } else {
+            step.convective_precipitation_kg_m2_s + step.large_scale_precipitation_kg_m2_s
+                - step.total_evaporation_kg_m2_s
+                - step.surface_runoff_mm_s
+        };
+        add_spv(&mut state.recharge_mm, recharge, step.time_step_seconds);
         add_spv(
-            &mut self.subsurface_runoff_mm,
+            &mut state.subsurface_runoff_mm,
             step.subsurface_runoff_mm_s,
             step.time_step_seconds,
         );
     }
 
-    /// 跨年那一步：写本轮记录、更新 `scale_baseflow`、写回、复位累加器。
-    pub fn close_year(&mut self, water_table_depth_m: f64) -> Result<()> {
+    /// 跨年那一步：写本轮记录、逐 patch 更新 `scale_baseflow`、整向量写回、复位累加器。
+    /// `water_table_depth_m` 是各 patch 步末的 `zwt`。
+    pub fn close_year(&mut self, water_table_depth_m: &[f64]) -> Result<()> {
+        ensure!(
+            water_table_depth_m.len() == self.patches.len(),
+            "the baseflow optimizer has {} patches but got {} water tables",
+            self.patches.len(),
+            water_table_depth_m.len()
+        );
         self.iteration += 1;
         let cycle_directory = self.directory.join(format!("c{:04}", self.iteration));
         std::fs::create_dir_all(&cycle_directory)
             .with_context(|| format!("cannot create {}", cycle_directory.display()))?;
-        let recharge = self.recharge_mm.unwrap_or(SPVAL);
-        let subsurface = self.subsurface_runoff_mm.unwrap_or(SPVAL);
+        let column = |patches: &[PatchBaseflow], value: fn(&PatchBaseflow) -> f64| -> Vec<f64> {
+            patches.iter().map(value).collect()
+        };
+        let patches = &self.patches;
         write_vector_file(
             &cycle_directory.join(&self.file_name),
             &[
-                ("zwt", water_table_depth_m),
-                ("zwt_init", self.initial_water_table_depth_m),
-                ("scale_baseflow", self.scale),
-                ("total_recharge", recharge),
-                ("total_subsurface_runoff", subsurface),
+                ("zwt", water_table_depth_m.to_vec()),
+                (
+                    "zwt_init",
+                    column(patches, |p| p.initial_water_table_depth_m),
+                ),
+                ("scale_baseflow", column(patches, |p| p.scale)),
+                (
+                    "total_recharge",
+                    column(patches, |p| p.recharge_mm.unwrap_or(SPVAL)),
+                ),
+                (
+                    "total_subsurface_runoff",
+                    column(patches, |p| p.subsurface_runoff_mm.unwrap_or(SPVAL)),
+                ),
             ],
         )?;
 
-        self.scale = adjusted_scale(
-            self.scale,
-            self.adjustable,
-            water_table_depth_m,
-            self.initial_water_table_depth_m,
-            recharge,
-            subsurface,
-        );
+        for (state, &zwt) in self.patches.iter_mut().zip(water_table_depth_m) {
+            state.scale = adjusted_scale(
+                state.scale,
+                state.adjustable,
+                zwt,
+                state.initial_water_table_depth_m,
+                state.recharge_mm.unwrap_or(SPVAL),
+                state.subsurface_runoff_mm.unwrap_or(SPVAL),
+            );
+        }
 
         write_vector_file(
             &self.directory.join(&self.file_name),
-            &[("scale_baseflow", self.scale)],
+            &[("scale_baseflow", column(&self.patches, |p| p.scale))],
         )?;
-        self.recharge_mm = None;
-        self.subsurface_runoff_mm = None;
+        for state in &mut self.patches {
+            state.recharge_mm = None;
+            state.subsurface_runoff_mm = None;
+        }
         Ok(())
     }
 }
@@ -178,15 +236,16 @@ fn adjusted_scale(
 }
 
 /// `ncio_create_file_vector` + `ncio_define_dimension_vector(..., 'patch')` +
-/// 若干 `ncio_write_vector`：单点只有一个 patch。
-fn write_vector_file(path: &Path, variables: &[(&str, f64)]) -> Result<()> {
+/// 若干 `ncio_write_vector`：维度 `patch` 的长度就是站点的 patch 数。
+fn write_vector_file(path: &Path, variables: &[(&str, Vec<f64>)]) -> Result<()> {
     let mut file =
         netcdf::create(path).with_context(|| format!("cannot create {}", path.display()))?;
-    file.add_dimension("patch", 1)?;
-    for (name, value) in variables {
+    let length = variables.first().map_or(0, |(_, values)| values.len());
+    file.add_dimension("patch", length)?;
+    for (name, values) in variables {
         let mut variable = file.add_variable::<f64>(name, &["patch"])?;
         variable
-            .put_values(&[*value], netcdf::Extents::All)
+            .put_values(values, netcdf::Extents::All)
             .with_context(|| format!("cannot write {name} to {}", path.display()))?;
     }
     Ok(())

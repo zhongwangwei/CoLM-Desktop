@@ -26371,3 +26371,26 @@ AU-Preston 从不结冰，城市算例此前没有一步走过屋顶/道路的�
 参照为纯 Fortran（`--preprocessors fortran --engine fortran`）。既有城市算例 `uo`/`up`/`uy`/`hp`/`nu` 复跑逐位。
 
 全量回归（release）：131 个算例中 129 个逐位；`nn`/`pni` 照旧不比历史。
+
+## 第 451 轮：多 patch 的 `DEF_Optimize_Baseflow`
+
+上游 `MOD_Opt_Baseflow` 的 `scale_baseflow`/`zwt_init`/`rchg_year`/`rsub_year` 都是长度 `numpatch` 的向量：逐 patch 独立累加、
+跨年时逐 patch 判断（只改 `patchtype <= 1`），`ParaOpt/cNNNN/` 与 `ParaOpt/<case>_baseflow.nc` 都按整向量写。原先 Rust 只接受单 patch。
+
+改动：`BaseflowOptimizer` 改成按 patch 的向量状态（`accumulate(patch, …)`、`close_year(&[zwt])`，文件的 `patch` 维长度即 patch 数）；
+`advance_patch` 取本 patch 的 `scale_baseflow(ipatch)`；步末对全部 patch 累加、跨年一次性更新。顺带补上 `recharge` 的 `WHERE` 掩码
+（四个输入任一为 `spval` 就不累加；原先只掩了 `rsub`）。`--patch` 只跑子集时仍拒绝：整向量写回会抹掉其余 patch 的标定值。
+
+验证（多作物站点 US-Ne3：玉米 + 大豆两个 patch，CROP 内核，`DEF_Runoff_SCHEME = 0`，降水 ×6 的冷强迫；参照为纯 Fortran）：
+
+| 算例 | 设置 | history | 重启 | `ParaOpt` 文件 | 比例的变化 |
+|---|---|---|---|---|---|
+| `bm1` | `mp1` + 优化器，预热 2 轮，常规强迫 | 1/1 | 11/11 | 3/3 | 不变（该站年基流为 0、年补给为负） |
+| `bm3` | + 冷强迫 + `DEF_Runoff_SCHEME = 0` | 1/1 | 11/11 | 3/3 | 第 2 轮末 1 → 1.2325 / 1.1428 |
+| `bm4` | `bm3` 预热 4 轮 | 1/1 | 11/11 | 5/5 | 第 4 轮末只有第 2 个 patch 再更新（→ 1.14315） |
+| `bm3` 复跑 | 不清 `ParaOpt/`，接着上次的标定 | 1/1 | 11/11 | 3/3 | 1.2325/1.1428 → 1.5574/1.3086 |
+
+release 与 debug 都逐位。单 patch 优化器算例 `bc`/`bf`/`bs`/`bsx`/`lc1`/`tr2` 与多作物 `mp1`/`mp2` 复跑不变。
+
+一个踩坑：上游 `Opt_Baseflow_init` 在启动时读上次留下的 `ParaOpt/<case>_baseflow.nc`，复跑会接着上次的标定继续迭代。
+Rust 行为相同。所以两侧比较前要么都清 `ParaOpt/`，要么都不清；只重跑一侧会得到假的不一致。

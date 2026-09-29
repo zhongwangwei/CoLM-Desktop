@@ -10,15 +10,26 @@ fn scratch_directory(tag: &str) -> PathBuf {
     directory
 }
 
-fn read_scalar(path: &Path, name: &str) -> f64 {
+fn read_vector(path: &Path, name: &str) -> Vec<f64> {
     let file = netcdf::open(path).unwrap();
-    let values: Vec<f64> = file
-        .variable(name)
+    file.variable(name)
         .unwrap()
         .get_values(netcdf::Extents::All)
-        .unwrap();
+        .unwrap()
+}
+
+fn read_scalar(path: &Path, name: &str) -> f64 {
+    let values = read_vector(path, name);
     assert_eq!(values.len(), 1, "{name} should be a one-patch vector");
     values[0]
+}
+
+fn init(scale: f64, water_table_depth_m: f64, patch_type: i32) -> BaseflowPatchInit {
+    BaseflowPatchInit {
+        scale,
+        water_table_depth_m,
+        patch_type,
+    }
 }
 
 fn step(recharge_mm_s: f64, subsurface_mm_s: f64) -> BaseflowStep {
@@ -60,10 +71,10 @@ fn scale_moves_only_when_the_water_table_trend_and_the_budget_agree() {
 #[test]
 fn a_year_writes_the_cycle_record_then_the_updated_scale() {
     let directory = scratch_directory("year");
-    let mut optimizer = BaseflowOptimizer::new(1.0, 3.0, 0, &directory, "site");
-    optimizer.accumulate(step(2.0e-5, 4.0e-5));
-    optimizer.accumulate(step(1.0e-5, 4.0e-5));
-    optimizer.close_year(3.5).unwrap();
+    let mut optimizer = BaseflowOptimizer::new(&[init(1.0, 3.0, 0)], &directory, "site");
+    optimizer.accumulate(0, step(2.0e-5, 4.0e-5));
+    optimizer.accumulate(0, step(1.0e-5, 4.0e-5));
+    optimizer.close_year(&[3.5]).unwrap();
 
     let recharge = 2.0e-5 * 1800.0 + 1.0e-5 * 1800.0;
     let subsurface = 4.0e-5 * 1800.0 + 4.0e-5 * 1800.0;
@@ -76,17 +87,65 @@ fn a_year_writes_the_cycle_record_then_the_updated_scale() {
 
     // 水位变深、补给不及基流 ⇒ 缩放。
     let expected = recharge / subsurface * 1.0;
-    assert_eq!(optimizer.scale(), expected);
+    assert_eq!(optimizer.scale(0), expected);
     let main = directory.join("site_baseflow_w180_s90.nc");
     assert_eq!(read_scalar(&main, "scale_baseflow"), expected);
     assert_eq!(optimizer.iteration(), 1);
 
     // 复位后的一年没有累加任何一步：两个总量写成 `spval`，比例不动。
-    optimizer.close_year(3.5).unwrap();
+    optimizer.close_year(&[3.5]).unwrap();
     let second = directory.join("c0002").join("site_baseflow_w180_s90.nc");
     assert_eq!(read_scalar(&second, "total_recharge"), SPVAL);
     assert_eq!(read_scalar(&second, "total_subsurface_runoff"), SPVAL);
     assert_eq!(read_scalar(&second, "scale_baseflow"), expected);
-    assert_eq!(optimizer.scale(), expected);
+    assert_eq!(optimizer.scale(0), expected);
+    std::fs::remove_dir_all(&directory).unwrap();
+}
+
+/// 多 patch（多作物站点）：各 patch 独立累加、独立更新，文件是整向量；
+/// `patchtype > 1` 的 patch 照样累加、写记录，但比例不动；`recharge` 任一输入是 `spval` 时不累加。
+#[test]
+fn patches_are_optimized_independently_and_written_as_one_vector() {
+    let directory = scratch_directory("vector");
+    let mut optimizer = BaseflowOptimizer::new(
+        &[init(1.0, 3.0, 0), init(0.5, 2.0, 0), init(1.0, 3.0, 2)],
+        &directory,
+        "site",
+    );
+    assert_eq!(optimizer.patch_count(), 3);
+    optimizer.accumulate(0, step(1.0e-5, 4.0e-5));
+    optimizer.accumulate(1, step(4.0e-5, 1.0e-5));
+    optimizer.accumulate(2, step(1.0e-5, 4.0e-5));
+    // `rsur = spval`：这一步的补给不进年总量，基流照累加。
+    optimizer.accumulate(
+        1,
+        BaseflowStep {
+            surface_runoff_mm_s: colm_core::MISSING,
+            ..step(9.0, 1.0e-5)
+        },
+    );
+    // 第 0 个水位变深、第 1 个变浅，第 2 个是湿地。
+    optimizer.close_year(&[3.5, 1.5, 3.5]).unwrap();
+
+    let cycle = directory.join("c0001").join("site_baseflow_w180_s90.nc");
+    assert_eq!(read_vector(&cycle, "zwt"), vec![3.5, 1.5, 3.5]);
+    assert_eq!(read_vector(&cycle, "zwt_init"), vec![3.0, 2.0, 3.0]);
+    assert_eq!(read_vector(&cycle, "scale_baseflow"), vec![1.0, 0.5, 1.0]);
+    let recharge = read_vector(&cycle, "total_recharge");
+    assert_eq!(recharge[1], 4.0e-5 * 1800.0);
+    let subsurface = read_vector(&cycle, "total_subsurface_runoff");
+    assert_eq!(subsurface[1], 1.0e-5 * 1800.0 + 1.0e-5 * 1800.0);
+
+    let expected = [
+        (1.0e-5 * 1800.0) / (4.0e-5 * 1800.0) * 1.0,
+        0.5 * (recharge[1] / subsurface[1]),
+        1.0,
+    ];
+    for (patch, value) in expected.iter().enumerate() {
+        assert_eq!(optimizer.scale(patch), *value, "patch {patch}");
+    }
+    let main = directory.join("site_baseflow_w180_s90.nc");
+    assert_eq!(read_vector(&main, "scale_baseflow"), expected.to_vec());
+    assert!(optimizer.close_year(&[3.5]).is_err());
     std::fs::remove_dir_all(&directory).unwrap();
 }
