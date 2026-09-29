@@ -1409,11 +1409,21 @@ pub fn set_lct_surface_diagnostics(
     reference: HistoryReferenceState,
     physics: &LandPhysicsParameters,
 ) -> Result<()> {
-    // `fsena`/`fevpa` 的重算输入是**总量**（`fsenl + fseng`、`fevpl + fevpg`），
-    // 其中地面那一半必须是订正后的值 —— 用叶温求解前的初步值会让 `f_ustar`
-    // 这类量跟着偏（见 `CORRECTED_GROUND` 那条注释）。
+    set_lct_surface_diagnostics_with(sink, record, energy, reference, physics, None)
+}
+
+/// 一个 patch 的近地面诊断重算输入（[`set_lct_surface_diagnostics`] 用的那一份）。
+///
+/// `fsena`/`fevpa` 的重算输入是**总量**（`fsenl + fseng`、`fevpl + fevpg`），
+/// 其中地面那一半必须是订正后的值 —— 用叶温求解前的初步值会让 `f_ustar`
+/// 这类量跟着偏（见 `CORRECTED_GROUND` 那条注释）。
+pub fn lct_surface_input(
+    energy: &colm_core::StandardLctEnergyOutput,
+    reference: HistoryReferenceState,
+    physics: &LandPhysicsParameters,
+) -> colm_core::HistoryDiagnosticsInput {
     let leaf = &energy.leaf;
-    let recomputed = colm_core::history_diagnostics(colm_core::HistoryDiagnosticsInput {
+    colm_core::HistoryDiagnosticsInput {
         wind_height_m: physics.wind_height_m,
         temperature_height_m: physics.temperature_height_m,
         humidity_height_m: physics.humidity_height_m,
@@ -1429,8 +1439,59 @@ pub fn set_lct_surface_diagnostics(
         momentum_roughness_m: leaf.momentum_roughness_m,
         surface_layer_scheme: physics.surface_layer_scheme,
         boundary_layer_height_m: reference.boundary_layer_height_m,
+    }
+}
+
+/// 多 patch 单点的网格元聚合（`MOD_Vars_1DAccFluxes.F90:2698-2720`）：各输入按 patch 面积份额
+/// `subfrc` 加权——GIMPLE 是从 0 起的 `FMA(x, subfrc, acc)` 链——再除以 `sumwt`（从 0 起逐项相加）。
+/// 相同的强迫量也照样聚合：链与除法之后未必逐位回到原值。
+pub fn element_surface_input(
+    patches: &[(colm_core::HistoryDiagnosticsInput, f64)],
+) -> Result<colm_core::HistoryDiagnosticsInput> {
+    let (first, _) = patches.first().context("an element needs at least one patch")?;
+    let weight: f64 = patches.iter().fold(0.0, |sum, (_, fraction)| sum + fraction);
+    let mean = |value: fn(&colm_core::HistoryDiagnosticsInput) -> f64| {
+        patches
+            .iter()
+            .fold(0.0, |sum, (input, fraction)| value(input).mul_add(*fraction, sum))
+            / weight
+    };
+    Ok(colm_core::HistoryDiagnosticsInput {
+        wind_height_m: mean(|input| input.wind_height_m),
+        temperature_height_m: mean(|input| input.temperature_height_m),
+        humidity_height_m: mean(|input| input.humidity_height_m),
+        wind_speed_eastward_m_s: mean(|input| input.wind_speed_eastward_m_s),
+        wind_speed_northward_m_s: mean(|input| input.wind_speed_northward_m_s),
+        air_temperature_k: mean(|input| input.air_temperature_k),
+        specific_humidity_kg_kg: mean(|input| input.specific_humidity_kg_kg),
+        surface_pressure_pa: mean(|input| input.surface_pressure_pa),
+        eastward_stress_kg_m_s2: mean(|input| input.eastward_stress_kg_m_s2),
+        northward_stress_kg_m_s2: mean(|input| input.northward_stress_kg_m_s2),
+        sensible_heat_w_m2: mean(|input| input.sensible_heat_w_m2),
+        evaporation_kg_m2_s: mean(|input| input.evaporation_kg_m2_s),
+        momentum_roughness_m: mean(|input| input.momentum_roughness_m),
+        surface_layer_scheme: first.surface_layer_scheme,
+        boundary_layer_height_m: first
+            .boundary_layer_height_m
+            .map(|_| mean(|input| input.boundary_layer_height_m.unwrap_or(0.0))),
     })
-    .context("cannot recompute the history near-surface diagnostics")?;
+}
+
+/// [`set_lct_surface_diagnostics`]；`element` 给了就用网格元那一份重算结果（多 patch 单点）。
+pub fn set_lct_surface_diagnostics_with(
+    sink: &mut impl HistorySink,
+    record: usize,
+    energy: &colm_core::StandardLctEnergyOutput,
+    reference: HistoryReferenceState,
+    physics: &LandPhysicsParameters,
+    element: Option<&colm_core::HistoryDiagnostics>,
+) -> Result<()> {
+    let leaf = &energy.leaf;
+    let recomputed = match element {
+        Some(element) => *element,
+        None => colm_core::history_diagnostics(lct_surface_input(energy, reference, physics))
+            .context("cannot recompute the history near-surface diagnostics")?,
+    };
     for (name, value) in [
         ("taux", leaf.eastward_stress_kg_m_s2),
         ("tauy", leaf.northward_stress_kg_m_s2),
@@ -2424,8 +2485,10 @@ pub struct HistorySession {
     directory: PathBuf,
     stem: String,
     open: Option<(String, HistoryBuffers)>,
-    /// 当前输出区间的累加器（上游的 `a_*` 与 `nac`）。
-    accumulator: HistoryAccumulator,
+    /// 当前输出区间的累加器（上游的 `a_*` 与 `nac`），每个 patch 一份。
+    accumulators: Vec<HistoryAccumulator>,
+    /// 本步下一个要累加的 patch：多 patch 单点每步按 0..N 依次 `push_*`，最后一个才计步写出。
+    patch_cursor: usize,
     /// `DEF_USE_PLANTHYDRAULICS`：决定新开的文件里要不要声明 `f_vegwp`。
     ///
     /// 由第一次 `push_lct*` 的模板现场给出（`new` 收不到模板）。默认 `false`
@@ -2440,28 +2503,56 @@ pub struct HistorySession {
     bgc: Option<colm_core::bgc_driver::BgcSwitches>,
     /// 每步推进后当前区间的原始累加状态（上游的 `nac`、`nac_ln`、`nac_dt` 与 `a_*`）。
     /// 写续跑文件的一方要把它存进旁车，但那时会话正被运行循环独占，所以共享一份快照。
-    window: std::sync::Arc<std::sync::Mutex<crate::history_sidecar::HistoryWindow>>,
+    window: std::sync::Arc<std::sync::Mutex<Vec<crate::history_sidecar::HistoryWindow>>>,
     /// 运行终点那条不在自然边界上的记录写出**之前**的窗口：上游此时先存原始窗口
     /// （`MOD_Hist.F90:265-274`），写完历史、清零之后的重启不再重存。
-    raw_at_end: Option<crate::history_sidecar::HistoryWindow>,
+    raw_at_end: Option<Vec<crate::history_sidecar::HistoryWindow>>,
+    /// 多 patch 单点本步的网格元近地面诊断（见 [`element_surface_input`]）；单 patch 为 `None`。
+    element_surface: Option<colm_core::HistoryDiagnostics>,
 }
 
 impl HistorySession {
     /// 当前区间原始累加状态的共享句柄（见 `window` 字段）。
     pub fn window_handle(
         &self,
-    ) -> std::sync::Arc<std::sync::Mutex<crate::history_sidecar::HistoryWindow>> {
+    ) -> std::sync::Arc<std::sync::Mutex<Vec<crate::history_sidecar::HistoryWindow>>> {
         std::sync::Arc::clone(&self.window)
     }
 
-    /// 续跑：从旁车读回的窗口接着累加（`read_history_acc_restart`）。
-    pub fn restore(&mut self, window: crate::history_sidecar::HistoryWindow) -> Result<()> {
+    /// 本步各 patch 共用的网格元近地面诊断（多 patch 单点）；`None` 时逐 patch 重算。
+    pub fn set_element_surface(&mut self, element: Option<colm_core::HistoryDiagnostics>) {
+        self.element_surface = element;
+    }
+
+    /// 多 patch 单点：历史文件的 `patch` 维与累加器份数（上游单点历史逐 patch 写，不做面积聚合，
+    /// `MOD_HistSingle.F90:single_write_2d`）。要在第一步之前调。
+    pub fn with_patches(mut self, patches: usize) -> Result<Self> {
+        ensure!(patches > 0, "a history session needs at least one patch");
         ensure!(
-            self.accumulator.steps == 0,
+            self.accumulators.iter().all(|accumulator| accumulator.steps == 0),
+            "the history patch count can only change before the first step"
+        );
+        self.dimensions.patch = patches;
+        self.accumulators = (0..patches).map(|_| HistoryAccumulator::default()).collect();
+        *self.window.lock().expect("history window lock") =
+            vec![crate::history_sidecar::HistoryWindow::default(); patches];
+        Ok(self)
+    }
+
+    /// 续跑：从旁车读回的窗口接着累加（`read_history_acc_restart`），每个 patch 一份。
+    pub fn restore(&mut self, windows: Vec<crate::history_sidecar::HistoryWindow>) -> Result<()> {
+        ensure!(
+            self.accumulators.iter().all(|accumulator| accumulator.steps == 0),
             "the history window can only be restored before the first step"
         );
-        self.accumulator = HistoryAccumulator::from_window(&window);
-        *self.window.lock().expect("history window lock") = window;
+        ensure!(
+            windows.len() == self.accumulators.len(),
+            "the history sidecar holds {} patches, the run {}",
+            windows.len(),
+            self.accumulators.len()
+        );
+        self.accumulators = windows.iter().map(HistoryAccumulator::from_window).collect();
+        *self.window.lock().expect("history window lock") = windows;
         Ok(())
     }
 
@@ -2490,13 +2581,20 @@ impl HistorySession {
             directory: directory.as_ref().to_path_buf(),
             stem: stem.into(),
             open: None,
-            accumulator: HistoryAccumulator::default(),
+            accumulators: (0..dimensions.patch)
+                .map(|_| HistoryAccumulator::default())
+                .collect(),
+            patch_cursor: 0,
             plant_hydraulics: false,
             variably_saturated: false,
             urban: false,
             bgc: None,
-            window: std::sync::Arc::default(),
+            window: std::sync::Arc::new(std::sync::Mutex::new(vec![
+                crate::history_sidecar::HistoryWindow::default();
+                dimensions.patch
+            ])),
             raw_at_end: None,
+            element_surface: None,
         })
     }
 
@@ -2996,6 +3094,7 @@ impl HistorySession {
         self.variably_saturated = template.physics.variably_saturated_flow;
         self.bgc = template.bgc.as_ref().map(|bgc| bgc.switches);
         let variably_saturated = self.variably_saturated;
+        let element_surface = self.element_surface;
         self.push(end, |accumulator| {
             if let (Some(runtime), Some(bgc)) = (&template.bgc, &state.bgc) {
                 let first_pft_class = state
@@ -3025,12 +3124,13 @@ impl HistorySession {
             // 却从来没有被填过，写出来的 `f_taux`/`f_tauy`/`f_z0m`/`f_zol` … 一直是
             // NetCDF 的填充值。实测 CN-Cng 的积雪分支 history 里这三个是 NaN，
             // 而 Fortran 有值 —— "声明了但没人写"不会报错，只会静默留下一列空洞。
-            set_lct_surface_diagnostics(
+            set_lct_surface_diagnostics_with(
                 accumulator,
                 0,
                 &output.energy,
                 reference,
                 &template.physics,
+                element_surface.as_ref(),
             )?;
             set_lct_stomatal_diagnostics(accumulator, 0, &output.energy)?;
             set_lct_radiation_bands(accumulator, 0, &output.energy)?;
@@ -3130,11 +3230,16 @@ impl HistorySession {
         accumulate: impl FnOnce(&mut HistoryAccumulator) -> Result<()>,
     ) -> Result<Option<PathBuf>> {
         let pushed = self.push_inner(end, accumulate);
-        let window = self
-            .raw_at_end
-            .take()
-            .unwrap_or_else(|| self.accumulator.window());
-        *self.window.lock().expect("history window lock") = window;
+        // 一步的全部 patch 都累加完才更新共享快照（写续跑文件在步末）。
+        if self.patch_cursor == 0 {
+            let windows = self.raw_at_end.take().unwrap_or_else(|| {
+                self.accumulators
+                    .iter()
+                    .map(HistoryAccumulator::window)
+                    .collect()
+            });
+            *self.window.lock().expect("history window lock") = windows;
+        }
         pushed
     }
 
@@ -3145,11 +3250,21 @@ impl HistorySession {
     ) -> Result<Option<PathBuf>> {
         // 1. 每步累加。失败也要把累加器放回去，否则下一次调用从零开始，
         //    会静默丢掉这一段。
-        let mut accumulator = std::mem::take(&mut self.accumulator);
+        let patch = self.patch_cursor;
+        let mut accumulator = std::mem::take(&mut self.accumulators[patch]);
         accumulator.steps += 1;
         let filled = accumulate(&mut accumulator);
-        self.accumulator = accumulator;
+        self.accumulators[patch] = accumulator;
+        if filled.is_err() {
+            self.patch_cursor = 0;
+        }
         filled?;
+        // 多 patch：这一步还有 patch 没累加，写出等最后一个。
+        if patch + 1 < self.accumulators.len() {
+            self.patch_cursor = patch + 1;
+            return Ok(None);
+        }
+        self.patch_cursor = 0;
 
         // 2. 没到期就到此为止。
         let Some(record) = self.records.get(self.cursor).cloned() else {
@@ -3170,9 +3285,15 @@ impl HistorySession {
         // 3. 到期：取平均、写记录、把累加器清零（`mem::take` 就是清零）。
         //    运行终点不在自然边界上时，上游先把原始窗口存进旁车再写这一条。
         if !record.natural_boundary {
-            self.raw_at_end = Some(self.accumulator.window());
+            self.raw_at_end = Some(
+                self.accumulators
+                    .iter()
+                    .map(HistoryAccumulator::window)
+                    .collect(),
+            );
         }
-        let means = std::mem::take(&mut self.accumulator);
+        let means: Vec<HistoryAccumulator> =
+            self.accumulators.iter_mut().map(std::mem::take).collect();
         let mut written = None;
         if self.open.as_ref().map(|(suffix, _)| suffix) != Some(&record.suffix) {
             written = self.finish()?.pop();
@@ -3201,7 +3322,15 @@ impl HistorySession {
                 )
             })?,
         )?;
-        means.write_means(buffer, record.record)?;
+        if means.len() == 1 {
+            means[0].write_means(buffer, record.record)?;
+        } else {
+            for (patch, means) in means.iter().enumerate() {
+                buffer.select_patch(Some(patch))?;
+                means.write_means(buffer, record.record)?;
+            }
+            buffer.select_patch(None)?;
+        }
         self.cursor += 1;
         // 分组的最后一条写完就落盘（上游写回模式在这一刻把内存里的整组写出）；开着的缓冲区因此
         // 只会是写了一半的组，中途 abort 时由 [`Self::abandon`] 留下只有文件头的文件。

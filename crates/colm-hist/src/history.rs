@@ -103,6 +103,8 @@ pub struct HistoryBuffers {
     values: BTreeMap<&'static str, Vec<f64>>,
     /// 变量名 → 每个 patch 的层数（1 表示只有 `(time, patch)`）。
     layers: BTreeMap<&'static str, usize>,
+    /// 选中的 patch：写入只落到这一格，值只给一个 patch 的（见 [`Self::select_patch`]）。
+    selected: Option<usize>,
 }
 
 impl HistoryBuffers {
@@ -115,6 +117,29 @@ impl HistoryBuffers {
             times: vec![0; records],
             values: BTreeMap::new(),
             layers: BTreeMap::new(),
+            selected: None,
+        }
+    }
+
+    /// 之后的写入只落到第 `patch` 个 patch，调用方按**一个** patch 给值（多 patch 单点：每个 patch
+    /// 的累加器各自写自己那一格）。`None` 恢复为一次写全部 patch。
+    pub fn select_patch(&mut self, patch: Option<usize>) -> Result<()> {
+        if let Some(patch) = patch {
+            ensure!(
+                patch < self.dims.patch,
+                "patch {patch} is outside the {} history patches",
+                self.dims.patch
+            );
+        }
+        self.selected = patch;
+        Ok(())
+    }
+
+    /// 本次写入覆盖的 patch 区间与份数。
+    fn patch_span(&self) -> (usize, usize) {
+        match self.selected {
+            Some(patch) => (patch, 1),
+            None => (0, self.dims.patch),
         }
     }
 
@@ -194,10 +219,11 @@ impl HistoryBuffers {
     /// 写一个带层维的变量：`values` 按 `(patch, layer)` 行主序给出。
     pub fn set_layered(&mut self, name: &str, record: usize, values: &[f64]) -> Result<()> {
         let layers = self.layers_of(name)?;
+        let (first, count) = self.patch_span();
         ensure!(
-            values.len() == self.dims.patch * layers,
+            values.len() == count * layers,
             "{name} needs {} values (patch × layers), got {}",
-            self.dims.patch * layers,
+            count * layers,
             values.len()
         );
         ensure!(
@@ -205,7 +231,7 @@ impl HistoryBuffers {
             "record {record} is outside the {}-record group",
             self.records
         );
-        let start = record * self.dims.patch * layers;
+        let start = (record * self.dims.patch + first) * layers;
         let target = self
             .values
             .get_mut(name)
@@ -243,12 +269,13 @@ impl HistoryBuffers {
             delta.is_finite(),
             "the contribution for {name} is not finite"
         );
-        let start = record * self.dims.patch;
+        let (first, count) = self.patch_span();
+        let start = record * self.dims.patch + first;
         let target = self
             .values
             .get_mut(name)
             .expect("layers_of checked the name");
-        for slot in &mut target[start..start + self.dims.patch] {
+        for slot in &mut target[start..start + count] {
             ensure!(
                 *slot != MISSING_VALUE,
                 "{name} was not written before adding a contribution"

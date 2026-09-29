@@ -246,6 +246,61 @@ impl RestartFile {
     /// 一次续跑不可能悄悄少写一个状态量（初始化器的打字输入只能保证它自己那张表）。
     ///
     /// 替换值的形状必须与源变量一致，名字也必须在源文件里；不一致就报错，不新造变量。
+    /// 单点多 patch（CROP 多作物站点）里**一个 patch 的视图**：最外层维是 `patch` 的变量取第
+    /// `patch` 块、是 `pft` 的取该 patch 的 PFT 区间 `pfts`，其余变量原样。按 patch 读的代码
+    /// （PFT、BGC 模板）因此照旧把"整列"当作本 patch。
+    ///
+    /// NetCDF 里 `patch`/`pft` 是 Fortran 数组的最后一维，也就是 C 序的最外层；出现在内层的
+    /// 不认，报错而不是切错。
+    pub fn select_patch(&self, patch: usize, pfts: std::ops::Range<usize>) -> Result<Self> {
+        let patches = self.dimensions.get("patch").copied();
+        let npft = self.dimensions.get("pft").copied();
+        if let Some(patches) = patches {
+            ensure!(patch < patches, "patch {patch} is outside the {patches} restart patches");
+        }
+        if let Some(npft) = npft {
+            ensure!(
+                pfts.start <= pfts.end && pfts.end <= npft,
+                "PFT range {pfts:?} is outside the {npft} restart PFTs"
+            );
+        }
+        let pick = |name: &str, dims: &[String], total: usize| -> Result<Option<std::ops::Range<usize>>> {
+            for (position, dim) in dims.iter().enumerate() {
+                let (outer, count) = match dim.as_str() {
+                    "patch" => (patch..patch + 1, patches.unwrap_or(0)),
+                    "pft" => (pfts.clone(), npft.unwrap_or(0)),
+                    _ => continue,
+                };
+                ensure!(
+                    position == 0,
+                    "{name} has its {dim} dimension inside ({dims:?}); only the outermost can be selected"
+                );
+                ensure!(count > 0 && total % count == 0, "{name} does not divide by its {dim} dimension");
+                let chunk = total / count;
+                return Ok(Some(outer.start * chunk..outer.end * chunk));
+            }
+            Ok(None)
+        };
+        let mut view = self.clone();
+        for (name, (dims, values)) in view.floats.iter_mut() {
+            if let Some(range) = pick(name, dims, values.len())? {
+                *values = values[range].to_vec();
+            }
+        }
+        for (name, (dims, values)) in view.integers.iter_mut() {
+            if let Some(range) = pick(name, dims, values.len())? {
+                *values = values[range].to_vec();
+            }
+        }
+        if patches.is_some() {
+            view.dimensions.insert("patch".to_owned(), 1);
+        }
+        if npft.is_some() {
+            view.dimensions.insert("pft".to_owned(), pfts.len());
+        }
+        Ok(view)
+    }
+
     pub fn write_with(&self, path: impl AsRef<Path>, overrides: &[RestartOverride]) -> Result<()> {
         let path = path.as_ref();
         // 失败时把半成品删掉：它**读得出来**（维度齐全、部分变量有值），留着比不存在

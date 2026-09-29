@@ -128,7 +128,7 @@ fn a_written_sidecar_reads_back_the_same_window() {
         .add_dimension("patch", 1)
         .unwrap();
     let sidecar = directory.join("case_restart_hist_2010-002-00000_w180_s90.nc");
-    write_sidecar(&sidecar, 1, &config(), &window()).unwrap();
+    write_sidecar(&sidecar, 1, &config(), &[window()]).unwrap();
 
     let file = netcdf::open(&sidecar).unwrap();
     let value = |name: &str| {
@@ -151,7 +151,7 @@ fn a_written_sidecar_reads_back_the_same_window() {
     let read = read_sidecar(&primary, &sidecar, &config())
         .unwrap()
         .unwrap();
-    assert_eq!(read, window());
+    assert_eq!(read, vec![window()]);
 }
 
 /// 区间与重启对齐时旁车只有四个标记，读回是空窗口。
@@ -164,7 +164,7 @@ fn an_aligned_sidecar_holds_only_the_markers() {
         .add_dimension("patch", 1)
         .unwrap();
     let sidecar = directory.join("s.nc");
-    write_sidecar(&sidecar, 1, &config(), &HistoryWindow::default()).unwrap();
+    write_sidecar(&sidecar, 1, &config(), &[HistoryWindow::default()]).unwrap();
     let names: Vec<String> = netcdf::open(&sidecar)
         .unwrap()
         .variables()
@@ -182,7 +182,7 @@ fn an_aligned_sidecar_holds_only_the_markers() {
     let read = read_sidecar(&primary, &sidecar, &config())
         .unwrap()
         .unwrap();
-    assert_eq!(read, HistoryWindow::default());
+    assert_eq!(read, vec![HistoryWindow::default()]);
 }
 
 /// 上游的几道校验：缺旁车而主重启要求它、历史频率变了、缺累加器，都报错；
@@ -209,7 +209,7 @@ fn inconsistent_sidecars_are_refused() {
     }
     assert!(read_sidecar(&primary, &sidecar, &config()).is_err());
 
-    write_sidecar(&sidecar, 1, &config(), &window()).unwrap();
+    write_sidecar(&sidecar, 1, &config(), &[window()]).unwrap();
     let daily = SidecarConfig {
         frequency_code: 3,
         ..config()

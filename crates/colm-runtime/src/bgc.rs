@@ -46,16 +46,26 @@ pub fn bgc_time_path(time: &Path) -> Result<PathBuf> {
 }
 
 impl BgcTemplate {
-    /// `npft` 是该 patch 的 PFT 数（PFT 时间重启里的 `pft` 维）。
-    pub fn read(constant: &Path, time: &Path, pft_time: &Path, npft: usize) -> Result<Self> {
+    /// 第 `patch` 个 patch（共 `patches` 个、全站 `pfts` 个 PFT）的 BGC 状态：各份重启切出本 patch
+    /// 与它的 PFT 区间（[`crate::pft::open_patch`]）。
+    pub fn read(
+        constant: &Path,
+        time: &Path,
+        pft_time: &Path,
+        patch: usize,
+        patches: usize,
+        pfts: usize,
+    ) -> Result<Self> {
+        let npft = crate::pft::patch_pft_range(patches, pfts, patch)?.len();
         let mut state = BgcState::new(npft, BgcDims::default());
         let (global, patch_constant) = bgc_constant_paths(constant)?;
+        let open = |path: &Path| crate::pft::open_patch(path, patch, patches, pfts);
         load_constants(&RestartFile::open(&global)?, &mut state)?;
         load_arrays(&RestartFile::open(&global)?, &mut state, false)?;
-        load_arrays(&RestartFile::open(&patch_constant)?, &mut state, false)?;
-        load_arrays(&RestartFile::open(bgc_time_path(time)?)?, &mut state, false)?;
+        load_arrays(&open(&patch_constant)?, &mut state, false)?;
+        load_arrays(&open(&bgc_time_path(time)?)?, &mut state, false)?;
         // PFT 文件里还有物理 PFT 变量（`tleaf_p` 等），由 `crate::pft` 管，这里跳过。
-        load_arrays(&RestartFile::open(pft_time)?, &mut state, true)?;
+        load_arrays(&open(pft_time)?, &mut state, true)?;
         Ok(Self { initial: state })
     }
 

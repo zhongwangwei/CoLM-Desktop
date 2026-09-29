@@ -808,6 +808,9 @@ pub struct StandardLctRestartTemplate {
     pub bgc: Option<crate::bgc_step::BgcRuntime>,
     /// `DEF_USE_IRRIGATION` 的起跑灌溉状态（[`Self::with_irrigation`] 装上）。
     pub irrigation: Option<colm_core::IrrigationState>,
+    /// 本 patch 在网格元里的面积份额 `elm_patch%subfrc`：单 patch 为 1，多作物单点是归一化的
+    /// `pctcrop`（`MOD_SingleSrfdata.F90:1490-1493`）。只用于网格元的近地面诊断聚合。
+    pub patch_fraction: f64,
     /// 雪 + 土的模板列（`soilsnow`），积雪分支的 `GroundTemperatureInput` 需要这个形状。
     ///
     /// 雪段在前、土段在后，与时间重启里的数组同序；无雪时它就是土列本身。
@@ -1295,6 +1298,7 @@ fn assemble(
         pft: None,
         bgc: None,
         irrigation: None,
+        patch_fraction: 1.0,
         patch,
         patch_type: i32::try_from(patch_type).context("patchtype is outside the kernel's range")?,
         // 入参重启里没有 `rss` 时按 `spval` 处理 —— 与上游"起跑时是缺测值"一致。
@@ -1380,6 +1384,7 @@ impl StandardLctRestartTemplate {
             document,
             &self.physics,
             &self.interface_depth_m,
+            self.patch,
         )?);
         Ok(self)
     }

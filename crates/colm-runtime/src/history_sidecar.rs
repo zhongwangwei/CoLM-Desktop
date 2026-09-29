@@ -124,13 +124,15 @@ pub fn allocated_fields(
 
 /// 写旁车（`write_history_acc_restart` + `complete_history_acc_restart`）。
 ///
-/// `patches` 是主重启的 `patch` 维长度；区间非空时只支持单 patch（Rust 引擎一次跑一个 patch）。
+/// `patches` 是主重启的 `patch` 维长度；`windows` 每个 patch 一份（多作物单点），区间为空时可以只给
+/// 一份（各 patch 的 `nac` 相同）。累加器按 patch 拼接：`patch` 是最外层维，每个 patch 的值连续。
 pub fn write_sidecar(
     path: &Path,
     patches: usize,
     config: &SidecarConfig,
-    window: &HistoryWindow,
+    windows: &[HistoryWindow],
 ) -> Result<()> {
+    let window = windows.first().context("the history sidecar needs at least one window")?;
     let mut file =
         netcdf::create(path).with_context(|| format!("cannot create {}", path.display()))?;
     file.add_dimension("patch", patches)?;
@@ -148,13 +150,25 @@ pub fn write_sidecar(
     }
     if window.steps > 0 {
         ensure!(
-            patches == 1,
+            windows.len() == patches,
             "the history window spans the restart, but {} holds {patches} patches and colm-rs \
-             accumulates one",
-            path.display()
+             accumulated {}",
+            path.display(),
+            windows.len()
+        );
+        ensure!(
+            windows.iter().all(|other| other.steps == window.steps),
+            "the patches disagree on the history sample count"
         );
         for entry in allocated_fields(config) {
-            let values = field_values(entry, window)?;
+            ensure!(
+                !entry.urban || patches == 1,
+                "urban accumulators are written for single-patch urban sites only"
+            );
+            let mut values = Vec::new();
+            for window in windows {
+                values.extend(field_values(entry, window)?);
+            }
             let vector = if entry.urban { "urban" } else { "patch" };
             let d1 = format!("d1_{}", entry.name);
             let d2 = format!("d2_{}", entry.name);
@@ -227,7 +241,7 @@ pub fn read_sidecar(
     primary: &Path,
     sidecar: &Path,
     config: &SidecarConfig,
-) -> Result<Option<HistoryWindow>> {
+) -> Result<Option<Vec<HistoryWindow>>> {
     let required = {
         let file =
             netcdf::open(primary).with_context(|| format!("cannot open {}", primary.display()))?;
@@ -299,19 +313,17 @@ pub fn read_sidecar(
         "invalid or inconsistent land-history sample counts in {}",
         sidecar.display()
     );
-    let mut window = HistoryWindow {
-        steps: nac as usize,
-        ..HistoryWindow::default()
-    };
-    if window.steps == 0 {
-        return Ok(Some(window));
+    let patches = counts.len();
+    let mut windows = vec![
+        HistoryWindow {
+            steps: nac as usize,
+            ..HistoryWindow::default()
+        };
+        patches
+    ];
+    if nac == 0.0 {
+        return Ok(Some(windows));
     }
-    ensure!(
-        counts.len() == 1,
-        "{} carries an open history window for {} patches; colm-rs accumulates one",
-        sidecar.display(),
-        counts.len()
-    );
     for entry in allocated_fields(config) {
         let variable = file.variable(entry.name).with_context(|| {
             format!(
@@ -324,7 +336,7 @@ pub fn read_sidecar(
             .get_values(..)
             .with_context(|| format!("cannot read {} from {}", entry.name, sidecar.display()))?;
         ensure!(
-            values.len() == entry.width(),
+            values.len() == entry.width() * patches,
             "incompatible land-history sidecar shape for {} in {}",
             entry.name,
             sidecar.display()
@@ -338,24 +350,26 @@ pub fn read_sidecar(
             );
             Ok(value as usize)
         };
-        match entry.name {
-            "nac_ln" => window.local_noon_steps = count(values[0])?,
-            "nac_dt" => window.daytime_steps = count(values[0])?,
-            _ => {
-                // 从未累加过（整项 spval）的量不进窗口：与不中断的运行里"没有条目"同态。
-                if values.iter().all(|&value| value == colm_core::MISSING) {
-                    continue;
+        for (window, values) in windows.iter_mut().zip(values.chunks(entry.width())) {
+            match entry.name {
+                "nac_ln" => window.local_noon_steps = count(values[0])?,
+                "nac_dt" => window.daytime_steps = count(values[0])?,
+                _ => {
+                    // 从未累加过（整项 spval）的量不进窗口：与不中断的运行里"没有条目"同态。
+                    if values.iter().all(|&value| value == colm_core::MISSING) {
+                        continue;
+                    }
+                    let value = if entry.rank == 1 {
+                        WindowValue::Scalar(values[0])
+                    } else {
+                        WindowValue::Column(values.to_vec())
+                    };
+                    window.sums.insert(entry.window_key().to_owned(), value);
                 }
-                let value = if entry.rank == 1 {
-                    WindowValue::Scalar(values[0])
-                } else {
-                    WindowValue::Column(values)
-                };
-                window.sums.insert(entry.window_key().to_owned(), value);
             }
         }
     }
-    Ok(Some(window))
+    Ok(Some(windows))
 }
 
 #[cfg(test)]

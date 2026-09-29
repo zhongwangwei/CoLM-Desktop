@@ -283,3 +283,63 @@ fn a_continuation_write_refuses_a_bad_override() {
     assert!(RestartFile::open(&written).is_err());
     crate::remove_test_tree(root);
 }
+
+/// 多 patch 视图：最外层 `patch` 维取一块、`pft` 维取区间，其余原样；`patch` 在内层时报错。
+#[test]
+fn a_patch_view_selects_the_outer_patch_and_pft_blocks() {
+    let root = temp_dir("select-patch");
+    let path = root.join("restart.nc");
+    {
+        let mut file = netcdf::create(&path).unwrap();
+        file.add_dimension("patch", 2).unwrap();
+        file.add_dimension("pft", 3).unwrap();
+        file.add_dimension("soil", 2).unwrap();
+        file.add_variable::<f64>("wliq", &["patch", "soil"])
+            .unwrap()
+            .put_values(&[1.0, 2.0, 3.0, 4.0], ..)
+            .unwrap();
+        file.add_variable::<i32>("pftclass", &["pft"])
+            .unwrap()
+            .put_values(&[17, 23, 25], ..)
+            .unwrap();
+        file.add_variable::<f64>("zi", &["soil"])
+            .unwrap()
+            .put_values(&[0.1, 0.3], ..)
+            .unwrap();
+        file.add_variable::<f64>("inner", &["soil", "patch"])
+            .unwrap()
+            .put_values(&[1.0, 2.0, 3.0, 4.0], ..)
+            .unwrap();
+    }
+    let restart = RestartFile::open(&path).unwrap();
+    assert!(restart.select_patch(1, 1..3).is_err());
+    std::fs::remove_file(&path).unwrap();
+    {
+        let mut file = netcdf::create(&path).unwrap();
+        file.add_dimension("patch", 2).unwrap();
+        file.add_dimension("pft", 3).unwrap();
+        file.add_dimension("soil", 2).unwrap();
+        file.add_variable::<f64>("wliq", &["patch", "soil"])
+            .unwrap()
+            .put_values(&[1.0, 2.0, 3.0, 4.0], ..)
+            .unwrap();
+        file.add_variable::<i32>("pftclass", &["pft"])
+            .unwrap()
+            .put_values(&[17, 23, 25], ..)
+            .unwrap();
+        file.add_variable::<f64>("zi", &["soil"])
+            .unwrap()
+            .put_values(&[0.1, 0.3], ..)
+            .unwrap();
+    }
+    let view = RestartFile::open(&path)
+        .unwrap()
+        .select_patch(1, 1..3)
+        .unwrap();
+    assert_eq!(view.floats("wliq").unwrap(), [3.0, 4.0]);
+    assert_eq!(view.integers("pftclass").unwrap(), [23, 25]);
+    assert_eq!(view.floats("zi").unwrap(), [0.1, 0.3]);
+    assert_eq!(view.dimension("patch").unwrap(), 1);
+    assert_eq!(view.dimension("pft").unwrap(), 2);
+    crate::remove_test_tree(root);
+}

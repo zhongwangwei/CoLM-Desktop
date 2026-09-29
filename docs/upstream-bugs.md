@@ -232,6 +232,15 @@
 - **影响**：设了 `DEF_LC_RESPCP` 也不改变任何结果。
 - **处理**：Rust 照样解析、保存，不使用。
 
+### 33. 多作物单点每个 patch 的 `tlai`/`tsai` 是各作物之和
+
+- **位置**：`main/MOD_LAIReadin.F90:171-175`（单点 PFT 段）、`mksrfdata/MOD_SingleSrfdata.F90:405-411`。
+- **原因**：`tlai(:) = sum(SITE_LAI_pfts_monthly(:,time,iyear) * SITE_pctpfts)` 给所有 patch 赋同一个全站和；
+  农田站点 `SITE_pctpfts = 1.`（不是 `pctcrop`），于是是各作物 LAI 直接相加。
+- **影响**：只有一种作物时无害；多作物站点每个 patch 的 `tlai`/`tsai`（以及由它们折算的 `lai`/`sai`、辐射、
+  冠层）都偏大，且所有 patch 相同，与各自的 `tlai_p` 不一致。`DEF_USE_LAIFEEDBACK` 下 `tlai` 不走这里，`tsai` 仍然。
+- **处理**：`vendor/` 未改；Rust 照写（`colm-runtime/src/pft.rs` 的 `refresh_monthly_leaf_area_index`）。
+
 ## 二、TRACER 编译开关改变了物理（需要上游确认哪一边是对的）
 
 这一版上游在很多地方给 TRACER 构建和非 TRACER 构建写了**不同的物理**，不只是记账不同。

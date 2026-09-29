@@ -124,17 +124,11 @@ pub fn time_overrides(
     Ok(overrides)
 }
 
-/// PFT 时间重启的 `irrig_method_p`（单 patch：整列就是本 patch 的 PFT）。
-pub fn pft_override(state: &IrrigationState, source: &RestartFile) -> Result<RestartOverride> {
-    let stored = source.integers("irrig_method_p")?;
-    ensure!(
-        stored.len() == state.methods.len(),
-        "the PFT restart holds {} irrig_method_p values, the patch {}",
-        stored.len(),
-        state.methods.len()
-    );
-    Ok(RestartOverride::new(
+/// PFT 时间重启的 `irrig_method_p`：本 patch 那几个 PFT 的值（多 patch 时由
+/// [`crate::multi_patch::merge_overrides`] 放回各自的 PFT 区间）。
+pub fn pft_override(state: &IrrigationState) -> RestartOverride {
+    RestartOverride::new(
         "irrig_method_p",
         state.methods.iter().map(|&m| f64::from(m)).collect(),
-    ))
+    )
 }

@@ -24,12 +24,18 @@ pub struct PftTemplate {
     /// PHS 打开时时间重启里才有 `vegwp_p`/`gs0sun_p`/`gs0sha_p`。
     plant_hydraulics: bool,
     monthly: Option<PftMonthlyLeafAreaIndex>,
+    /// 本 patch 在全站 PFT 里的区间（多作物单点每个 patch 一个 PFT；单 patch 时是全部）。
+    site_pfts: std::ops::Range<usize>,
+    /// 全站 PFT 数。
+    site_pft_count: usize,
 }
 
 /// `LAI_readin` 的 PFT 段（`MOD_LAIReadin.F90:166-185`，单点）。
 #[derive(Debug, Clone)]
 struct PftMonthlyLeafAreaIndex {
     vegetation: colm_init::SinglePointPftMonthlyVegetation,
+    /// 全站 PFT 的站点份额 `SITE_pctpfts`（作物站点恒为 1）。
+    site_fraction: Vec<f64>,
     use_site_lai: bool,
     change_yearly: bool,
     land_cover_year: i32,
@@ -47,6 +53,41 @@ pub fn pft_restart_path(path: &Path) -> Result<PathBuf> {
     Ok(path.with_file_name(name.replacen("_restart_", "_restart_pft_", 1)))
 }
 
+/// 单点第 `patch` 个 patch 的 PFT 区间（0 基、半开）。
+///
+/// 上游单点只有一种多 patch 情形：CROP 内核、站点是农田、有多种作物（`MOD_SingleSrfdata.F90:348`），
+/// 每个作物 patch 恰好一个 PFT。单 patch 时它拥有全部 PFT；其它组合没有来源，报错。
+pub fn patch_pft_range(patches: usize, pfts: usize, patch: usize) -> Result<std::ops::Range<usize>> {
+    ensure!(patch < patches, "patch {patch} is outside the {patches} patches");
+    if patches == 1 {
+        Ok(0..pfts)
+    } else {
+        ensure!(
+            pfts == patches,
+            "{patches} single-point patches with {pfts} PFTs: only one PFT per crop patch is supported"
+        );
+        Ok(patch..patch + 1)
+    }
+}
+
+/// PFT 重启里的 `(patch 数, PFT 数)`。非 CROP 的 PFT 重启没有 `patch` 维，那时就是一个 patch。
+pub fn patch_and_pft_counts(file: &RestartFile) -> Result<(usize, usize)> {
+    Ok((
+        file.dimensions().get("patch").copied().unwrap_or(1),
+        file.dimension("pft")?,
+    ))
+}
+
+/// 打开一份重启并切出第 `patch` 个 patch（见 [`RestartFile::select_patch`]）。
+///
+/// 没有 `pft` 维的文件（主重启、BGC 重启）只切 `patch`；PFT 区间按 `pfts` 推。
+pub fn open_patch(path: &Path, patch: usize, patches: usize, pfts: usize) -> Result<RestartFile> {
+    let file = RestartFile::open(path)?;
+    let range = patch_pft_range(patches, pfts, patch)?;
+    file.select_patch(patch, range)
+        .with_context(|| format!("cannot select patch {patch} of {}", path.display()))
+}
+
 impl PftTemplate {
     /// 读 PFT 常数与时间重启，按 `physics` 与 namelist 组出逐 PFT 参数。
     ///
@@ -57,9 +98,13 @@ impl PftTemplate {
         document: &Document,
         physics: &LandPhysicsParameters,
         interface_depth_m: &[f64],
+        patch: usize,
     ) -> Result<Self> {
-        let constant = RestartFile::open(constant_path)?;
-        let time = RestartFile::open(time_path)?;
+        let whole = RestartFile::open(constant_path)?;
+        let (patches, site_pft_count) = patch_and_pft_counts(&whole)?;
+        let site_pfts = patch_pft_range(patches, site_pft_count, patch)?;
+        let constant = open_patch(constant_path, patch, patches, site_pft_count)?;
+        let time = open_patch(time_path, patch, patches, site_pft_count)?;
         let classes = constant
             .integers("pftclass")?
             .iter()
@@ -167,6 +212,8 @@ impl PftTemplate {
             initial,
             plant_hydraulics,
             monthly: None,
+            site_pfts,
+            site_pft_count,
         })
     }
 
@@ -182,22 +229,24 @@ impl PftTemplate {
     ) -> Result<Self> {
         let data = colm_init::read_single_point_pft_data(path)?;
         ensure!(
-            data.class.len() == self.initial.parameters.len()
-                && data
-                    .class
+            data.class.len() == self.site_pft_count
+                && data.class[self.site_pfts.clone()]
                     .iter()
                     .zip(&self.initial.parameters)
                     .all(|(class, pft)| *class == pft.class),
-            "srfdata.nc lists PFT classes {:?}, but the PFT restart has {:?}",
+            "srfdata.nc lists PFT classes {:?}, but the PFT restart has {:?} (site PFTs {:?} of {})",
             data.class,
             self.initial
                 .parameters
                 .iter()
                 .map(|pft| pft.class)
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>(),
+            self.site_pfts,
+            self.site_pft_count
         );
         self.monthly = Some(PftMonthlyLeafAreaIndex {
             vegetation: data.monthly,
+            site_fraction: data.fraction,
             use_site_lai,
             change_yearly,
             land_cover_year,
@@ -242,19 +291,37 @@ impl PftTemplate {
             monthly.end_year,
         )?;
         ensure!(
-            lai.len() == patch.columns.len() && sai.len() == patch.columns.len(),
-            "the monthly PFT LAI does not match the PFT count"
+            lai.len() == self.site_pft_count && sai.len() == self.site_pft_count,
+            "the monthly PFT LAI does not match the site PFT count"
         );
-        for (column, (lai, sai)) in patch.columns.iter_mut().zip(lai.iter().zip(&sai)) {
+        let range = self.site_pfts.clone();
+        ensure!(
+            range.len() == patch.columns.len(),
+            "the patch PFT range does not match its PFT columns"
+        );
+        for (column, (lai, sai)) in patch
+            .columns
+            .iter_mut()
+            .zip(lai[range.clone()].iter().zip(&sai[range.clone()]))
+        {
             if !lai_feedback {
                 column.temporal_leaf_area_index = *lai;
             }
             column.temporal_stem_area_index = *sai;
         }
-        Ok(Some((
-            (!lai_feedback).then(|| patch.sum(|column| column.temporal_leaf_area_index)),
-            patch.sum(|column| column.temporal_stem_area_index),
-        )))
+        if range.len() == self.site_pft_count {
+            return Ok(Some((
+                (!lai_feedback).then(|| patch.sum(|column| column.temporal_leaf_area_index)),
+                patch.sum(|column| column.temporal_stem_area_index),
+            )));
+        }
+        // 多作物单点：上游给**每个** patch 赋同一个全站和 `sum(SITE_LAI_pfts_monthly*SITE_pctpfts)`
+        // （`MOD_LAIReadin.F90:174-175`），作物站点 `SITE_pctpfts = 1`，于是是各作物 LAI 之和
+        // （upstream-bugs 第 33 条）。照写。
+        let site_sum = |values: &[f64]| {
+            colm_core::pft_sum(values.iter().copied().zip(monthly.site_fraction.iter().copied()))
+        };
+        Ok(Some(((!lai_feedback).then(|| site_sum(&lai)), site_sum(&sai))))
     }
 
     /// PFT 时间重启里被主循环推进过的全部变量。

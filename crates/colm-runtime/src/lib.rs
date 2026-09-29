@@ -13,6 +13,7 @@ pub mod history;
 mod history_manifest;
 pub mod history_sidecar;
 pub mod irrigation;
+pub mod multi_patch;
 pub mod pft;
 pub mod physics;
 
@@ -440,84 +441,149 @@ impl PointRuntime {
     /// The snow sibling of [`Self::run_restart_standard_lct_with_history`].
     pub fn run_restart_standard_lct_snow_with_history<F>(
         &mut self,
-        template: &StandardLctRestartTemplate,
-        state: &mut StandardLctSnowSoilState,
+        templates: &[StandardLctRestartTemplate],
+        states: &mut Vec<StandardLctSnowSoilState>,
         session: &mut crate::history::HistorySession,
         mut on_step: F,
     ) -> Result<HistoryRunOutcome>
     where
-        F: FnMut(PointRuntimeStep, &StandardLctSnowSoilState, PatchStepOutput<'_>) -> Result<()>,
+        F: FnMut(PointRuntimeStep, &[StandardLctSnowSoilState], &[PatchStepOutput<'_>]) -> Result<()>,
     {
+        ensure!(
+            templates.len() == states.len() && !templates.is_empty(),
+            "every patch needs one template and one state"
+        );
         let (greenwich_time, longitude_radians, co2_scenario) =
             (self.greenwich, self.site_radians.0, self.co2_scenario);
         let time_step_seconds = self.clock.timestep_seconds();
         let mut files = Vec::new();
         let mut optimizer = self.baseflow_optimizer.take();
-        let steps = self.run_with_state(state, |step, next| {
+        ensure!(
+            optimizer.is_none() || templates.len() == 1,
+            "the baseflow optimizer runs on single-patch sites only"
+        );
+        let steps = self.run_with_state(states, |step, states| {
             let binding = lct_binding(step, greenwich_time, longitude_radians, co2_scenario)?;
-            // `totwb`：上游在 `snl` 重算之后、任何物理步之前取步首总蓄量
-            // （`CoLMMAIN.F90:831`），`xerr` 要靠它和步末的 `endwb` 相减。
-            let mut initial_total_water_mm = colm_core::initial_total_water_storage_mm(
-                &next.soil_water,
-                next.energy.leaf.canopy_water.total_mm,
-                next.snow.water_equivalent_kg_m2,
-                // `totwb = totwb + waterstorage`（`CoLMMAIN.F90:825`）：施灌之前的库存。
-                next.irrigation.as_ref().map(|irrigation| irrigation.water_storage_mm),
-            );
-            // `totwb = totwb + wetwat`：VSF 下的湿地（`CoLMMAIN.F90:828-831`）。
-            if template.patch_type == 2 && template.physics.variably_saturated_flow {
-                initial_total_water_mm += next.soil_water.wetland_water_mm;
+            // `CoLMDRIVER` 先推进全部 patch，`hist_out` 再逐 patch 累加（`CoLM.F90:512-537`）。
+            let mut outputs = Vec::with_capacity(templates.len());
+            let mut initial_totals = Vec::with_capacity(templates.len());
+            for (template, next) in templates.iter().zip(states.iter_mut()) {
+                // `totwb`：上游在 `snl` 重算之后、任何物理步之前取步首总蓄量
+                // （`CoLMMAIN.F90:831`），`xerr` 要靠它和步末的 `endwb` 相减。
+                let mut initial_total_water_mm = colm_core::initial_total_water_storage_mm(
+                    &next.soil_water,
+                    next.energy.leaf.canopy_water.total_mm,
+                    next.snow.water_equivalent_kg_m2,
+                    // `totwb = totwb + waterstorage`（`CoLMMAIN.F90:825`）：施灌之前的库存。
+                    next.irrigation.as_ref().map(|irrigation| irrigation.water_storage_mm),
+                );
+                // `totwb = totwb + wetwat`：VSF 下的湿地（`CoLMMAIN.F90:828-831`）。
+                if template.patch_type == 2 && template.physics.variably_saturated_flow {
+                    initial_total_water_mm += next.soil_water.wetland_water_mm;
+                }
+                initial_totals.push(initial_total_water_mm);
+                outputs.push(advance_patch(step, template, &binding, next, optimizer.as_ref())?);
             }
-            let output = advance_patch(step, template, &binding, next, optimizer.as_ref())?;
             // `hist_out` 在 `itstamp <= ptstamp` 时直接返回（`MOD_Hist.F90:225`），连累加都不做：
             // 预热期（含每一轮重复）不产生 history。步末 `itstamp <= ptstamp` 与本步
             // `is_spinup` 在步长整除预热区间时是同一件事。
             if !step.clock.is_spinup {
-                let reference = crate::history::HistoryReferenceState::from_forcing(
-                    &step.forcing,
-                    step.surface_cosine_zenith,
-                    time_step_seconds,
-                    initial_total_water_mm,
-                );
-                let pushed = match &output {
-                    PatchOutput::Soil(output) => session.push_lct_snow(
-                        step.clock.end_time,
-                        template,
-                        next,
-                        output,
-                        reference,
-                    )?,
-                    PatchOutput::Glacier(output) => session.push_glacier(
-                        step.clock.end_time,
-                        template,
-                        next,
-                        output,
-                        reference,
-                    )?,
-                    PatchOutput::Lake(output) => {
-                        session.push_lake(step.clock.end_time, template, next, output, reference)?
-                    }
-                    PatchOutput::Urban(output) => session.push_urban(
-                        step.clock.end_time,
-                        template,
-                        next,
-                        output,
-                        reference,
-                    )?,
+                let reference = |total| {
+                    crate::history::HistoryReferenceState::from_forcing(
+                        &step.forcing,
+                        step.surface_cosine_zenith,
+                        time_step_seconds,
+                        total,
+                    )
                 };
-                if let Some(path) = pushed {
-                    files.push(path);
+                // 多 patch：近地面诊断按网格元聚合一次、写给所有 patch（`MOD_Vars_1DAccFluxes.F90:2657-2805`）。
+                let element = if templates.len() > 1 {
+                    let inputs = templates
+                        .iter()
+                        .zip(&outputs)
+                        .zip(&initial_totals)
+                        .map(|((template, output), total)| match output {
+                            PatchOutput::Soil(output) => Ok((
+                                crate::history::lct_surface_input(
+                                    &output.energy,
+                                    reference(*total),
+                                    &template.physics,
+                                ),
+                                template.patch_fraction,
+                            )),
+                            _ => anyhow::bail!(
+                                "multi-patch single points are crop sites; patch {} is not soil",
+                                template.patch
+                            ),
+                        })
+                        .collect::<Result<Vec<_>>>()?;
+                    Some(
+                        colm_core::history_diagnostics(crate::history::element_surface_input(
+                            &inputs,
+                        )?)
+                        .context("cannot recompute the element near-surface diagnostics")?,
+                    )
+                } else {
+                    None
+                };
+                session.set_element_surface(element);
+                for (((template, next), output), total) in templates
+                    .iter()
+                    .zip(states.iter())
+                    .zip(&outputs)
+                    .zip(&initial_totals)
+                {
+                    let reference = reference(*total);
+                    let pushed = match output {
+                        PatchOutput::Soil(output) => session.push_lct_snow(
+                            step.clock.end_time,
+                            template,
+                            next,
+                            output,
+                            reference,
+                        )?,
+                        PatchOutput::Glacier(output) => session.push_glacier(
+                            step.clock.end_time,
+                            template,
+                            next,
+                            output,
+                            reference,
+                        )?,
+                        PatchOutput::Lake(output) => session.push_lake(
+                            step.clock.end_time,
+                            template,
+                            next,
+                            output,
+                            reference,
+                        )?,
+                        PatchOutput::Urban(output) => session.push_urban(
+                            step.clock.end_time,
+                            template,
+                            next,
+                            output,
+                            reference,
+                        )?,
+                    };
+                    if let Some(path) = pushed {
+                        files.push(path);
+                    }
                 }
+                session.set_element_surface(None);
             }
-            refresh_lai(step, template, next)?;
-            optimize_baseflow(
-                optimizer.as_mut(),
-                step,
-                next,
-                output.view(),
-                time_step_seconds,
-            )?;
-            on_step(step, next, output.view())
+            for (template, next) in templates.iter().zip(states.iter_mut()) {
+                refresh_lai(step, template, next)?;
+            }
+            if let Some(output) = outputs.first() {
+                optimize_baseflow(
+                    optimizer.as_mut(),
+                    step,
+                    &states[0],
+                    output.view(),
+                    time_step_seconds,
+                )?;
+            }
+            let views = outputs.iter().map(PatchOutput::view).collect::<Vec<_>>();
+            on_step(step, states, &views)
         });
         self.baseflow_optimizer = optimizer;
         let steps = match steps {
@@ -538,36 +604,50 @@ impl PointRuntime {
         Ok(HistoryRunOutcome { steps, files })
     }
 
-    /// Runs an assembled snow-bearing restart template through the POINT window.
+    /// Runs assembled snow-bearing restart templates (one per patch) through the POINT window.
     ///
-    /// The snow sibling of [`Self::run_restart_standard_lct`]: same clock, same binding,
-    /// same transaction — only the kernel and the state type differ. Both share
-    /// [`Self::lct_binding`] so the per-step fields cannot drift between the branches.
+    /// The no-history sibling of [`Self::run_restart_standard_lct_snow_with_history`]: same clock,
+    /// same binding, same transaction.
     pub fn run_restart_standard_lct_snow<F>(
         &mut self,
-        template: &StandardLctRestartTemplate,
-        state: &mut StandardLctSnowSoilState,
+        templates: &[StandardLctRestartTemplate],
+        states: &mut Vec<StandardLctSnowSoilState>,
         mut on_step: F,
     ) -> Result<usize>
     where
-        F: FnMut(PointRuntimeStep, &StandardLctSnowSoilState, PatchStepOutput<'_>) -> Result<()>,
+        F: FnMut(PointRuntimeStep, &[StandardLctSnowSoilState], &[PatchStepOutput<'_>]) -> Result<()>,
     {
+        ensure!(
+            templates.len() == states.len() && !templates.is_empty(),
+            "every patch needs one template and one state"
+        );
         let (greenwich_time, longitude_radians, co2_scenario) =
             (self.greenwich, self.site_radians.0, self.co2_scenario);
         let time_step_seconds = self.clock.timestep_seconds();
         let mut optimizer = self.baseflow_optimizer.take();
-        let steps = self.run_with_state(state, |step, next| {
+        ensure!(
+            optimizer.is_none() || templates.len() == 1,
+            "the baseflow optimizer runs on single-patch sites only"
+        );
+        let steps = self.run_with_state(states, |step, states| {
             let binding = lct_binding(step, greenwich_time, longitude_radians, co2_scenario)?;
-            let output = advance_patch(step, template, &binding, next, optimizer.as_ref())?;
-            refresh_lai(step, template, next)?;
-            optimize_baseflow(
-                optimizer.as_mut(),
-                step,
-                next,
-                output.view(),
-                time_step_seconds,
-            )?;
-            on_step(step, next, output.view())
+            let mut outputs = Vec::with_capacity(templates.len());
+            for (template, next) in templates.iter().zip(states.iter_mut()) {
+                let output = advance_patch(step, template, &binding, next, optimizer.as_ref())?;
+                refresh_lai(step, template, next)?;
+                outputs.push(output);
+            }
+            if let Some(output) = outputs.first() {
+                optimize_baseflow(
+                    optimizer.as_mut(),
+                    step,
+                    &states[0],
+                    output.view(),
+                    time_step_seconds,
+                )?;
+            }
+            let views = outputs.iter().map(PatchOutput::view).collect::<Vec<_>>();
+            on_step(step, states, &views)
         });
         self.baseflow_optimizer = optimizer;
         steps
@@ -1719,15 +1799,15 @@ mod tests {
         )
         .unwrap();
         let mut runtime = PointRuntime::open(read_point_runtime_config(&case).unwrap()).unwrap();
-        let mut state = template.snow_state();
-        let initial = state.snow.water_equivalent_kg_m2;
+        let mut states = vec![template.snow_state()];
+        let initial = states[0].snow.water_equivalent_kg_m2;
         let mut layers = Vec::new();
-        // `state` 正被这次调用可变借用，所以雪层数从 output 里取。
+        // `states` 正被这次调用可变借用，所以雪层数从 output 里取。
         let steps = runtime
-            .run_restart_standard_lct_snow(&template, &mut state, |step, _, output| {
+            .run_restart_standard_lct_snow(std::slice::from_ref(&template), &mut states, |step, _, outputs| {
                 layers.push(step.clock.index);
                 // 积雪分支的出水在 `soil` 那一半里；雪那一半给的是底部排水。
-                let PatchStepOutput::Soil(output) = output else {
+                let PatchStepOutput::Soil(output) = outputs[0] else {
                     panic!("a soil patch must take the soil branch");
                 };
                 assert!(output.water.soil.total_runoff_mm_s.is_finite());
@@ -1737,6 +1817,7 @@ mod tests {
             .unwrap();
         assert_eq!(steps, 3);
         assert_eq!(layers, vec![1, 2, 3]);
+        let state = &states[0];
         // 雪列在三步之后仍然存在，且水量推进过。
         assert!(state.snow.layer_count <= -1);
         assert_ne!(state.snow.water_equivalent_kg_m2, initial);

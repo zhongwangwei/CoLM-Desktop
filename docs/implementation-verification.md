@@ -25986,3 +25986,31 @@ mksrfdata 判为失败（实测 `ci6x`：日志末行 "Successful in surface dat
 | `bsx` | 同一站点不设覆盖，纯 Fortran 预处理 | — | 1/1 | ✓ | ✓ | — |
 
 全量回归（release）91 例逐位（另 `ci6x` 是临时副本、`nn`/`pni` 不写历史）；`topoweti` 改动后复跑 `lc1 bsx bs bl cr` 逐位。
+
+## 第 440 轮：多 patch 单点（CROP 多作物站点）
+
+用户选的"多 patch BGC"，方案选"进程内多 patch"。单点只有一种多 patch 情形：CROP 内核、站点是农田、`pctcrop > 0` 的
+作物有多种（`MOD_SingleSrfdata.F90:348`），每个 patch 一种作物、一个 PFT。上游单点历史**逐 patch** 写（`patch` 维，
+`MOD_HistSingle.F90:single_write_2d`），patch 之间只共用强迫。冷启动 8 份重启原本就逐位，缺的全在 `colm-rs`：
+
+- 重启读：`RestartFile::select_patch` 切出最外层 `patch` 维的一块与 `pft` 维的区间；PFT/BGC 模板、`CROP_readin` 的作物
+  类别经它读本 patch（`colm_runtime::pft::open_patch`，区间规则：单 patch 拥有全部 PFT，多 patch 一 patch 一 PFT）。
+- 运行：`colm-rs` 默认装配全部 patch（`--patch` 只跑一个）；每步先推进全部 patch（`CoLMDRIVER`），再逐 patch 累加
+  （`hist_out`），最后 `LAI_readin`。
+- 历史：会话每个 patch 一个累加器，按 0..N 依次 `push_*`，最后一个才计步、按时间表写出；缓冲区 `select_patch` 让每个
+  累加器只写自己那一格；旁车逐 patch 拼接/拆分。
+- **近地面诊断按网格元聚合**（`MOD_Vars_1DAccFluxes.F90:2657-2805`）：`taux/tauy/fsena/fevpa/z0m` 与强迫量按
+  `elm_patch%subfrc`（归一化 `pctcrop`，即 PFT 常数重启的 `cropfrac`）加权——GIMPLE 为从 0 起的 FMA 链再除以逐项相加的
+  `sumwt`——算一次 `ustar/rib/fm/fh/fq/qstar/fm10m…`，写给所有 patch。第一版逐 patch 算，这 6 个量从作物出苗起不同。
+- 续跑写出：各 patch 的覆盖量按 `patch`/`pft` 维拼回整变量（`colm_runtime::multi_patch::merge_overrides`）。
+- `LAI_readin` 单点 PFT 段给每个 patch 赋全站和（upstream-bugs 第 33 条），照写。
+- 限制：`DEF_Optimize_Baseflow` 与城市仍只支持单 patch（报错）。
+
+| 算例 | 设置 | 历史 | 重启+旁车 | release | debug |
+|---|---|---|---|---|---|
+| `mp1` | US-Ne3，玉米 17（0.6）+ 大豆 23（0.4），2002 全年，日输出 | 12/12 | ✓ | ✓ | ✓ |
+| `mp1c` | `mp1` 从 7 月 1 日续跑 | 6/6 | 51/51 | ✓ | — |
+| `mp2` | 同站 6–7 月，月输出、每日续跑（旁车窗口非空，`nac = 360`） | 2/2 | ✓ | ✓ | — |
+| `mp2c` | `mp2` 从 6 月 16 日续跑（窗口跨重启） | 2/2 | 247/247 | ✓ | — |
+
+原有单 patch 算例不变：全量回归（release，含 `mp1`/`mp2`）92 例历史、重启与旁车全部逐位（`nn`/`pni` 不写历史）。

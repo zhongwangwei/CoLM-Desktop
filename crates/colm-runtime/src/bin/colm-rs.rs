@@ -161,106 +161,36 @@ fn run() -> Result<()> {
         time: restarts.initial.clone(),
     };
 
-    // 两支装配的**断言**不同（一支要求启动时有雪、另一支要求没有），但返回的是同一个
-    // 模板类型；运行时只走通用入口（能长雪的那一支），所以这里按启动时的雪列选断言。
-    let has_snow = restart_has_snow_column(&files, arguments.patch)
-        .context("cannot tell whether the initial restart carries an active snow column")?;
-    let mut template = if has_snow {
-        assemble_standard_lct_snow_template(&files, arguments.patch, physics)
-            .context("cannot assemble the snow-bearing standard LCT template")?
-    } else {
-        assemble_standard_lct_template(&files, arguments.patch, physics)
-            .context("cannot assemble the snow-free standard LCT template")?
+    // 多作物单点有多个 patch（每个一种作物、一个 PFT），逐个装配；`--patch` 只跑其中一个。
+    let patch_count = colm_init::RestartFile::open(&files.constant)?.dimension("patch")?;
+    let patches: Vec<usize> = match arguments.patch {
+        Some(patch) => vec![patch],
+        None => (0..patch_count).collect(),
     };
-    // `DEF_USE_PFT`：土壤 patch 的 PFT 子网格来自同目录的 `*_restart_pft_*` 两份重启。
-    if template.physics.use_pft {
-        template = template
-            .with_pft(
-                &colm_runtime::pft::pft_restart_path(&files.constant)?,
-                &colm_runtime::pft::pft_restart_path(&files.time)?,
-                &document,
-            )
-            .context("cannot assemble the PFT subgrid")?;
-    }
-    // `DEF_USE_BGC`：BGC 状态来自四份 BGC 重启，氮沉降来自 `DEF_dir_runtime/ndep`。
-    if let Some(switches) = template.physics.bgc {
-        let (bgc, irrigation) = assemble_bgc(&document, &files, arguments.patch, switches)?;
-        template = template
-            .with_bgc(bgc)
-            .context("cannot assemble the BGC state")?;
-        // `DEF_USE_IRRIGATION`：时间重启里的灌溉量，叠上 `CROP_readin` 读的灌溉方式（与配水比例）。
-        if let Some(readin) = irrigation {
-            let state = colm_runtime::irrigation::initial_state(
-                &colm_init::RestartFile::open(&files.time)?,
-                arguments.patch,
-                readin,
-            )?;
-            template = template
-                .with_irrigation(state)
-                .context("cannot assemble the irrigation state")?;
+    let mut templates = patches
+        .iter()
+        .map(|&patch| {
+            assemble_patch(&document, &layout, &name, &files, physics.clone(), patch)
+                .with_context(|| format!("cannot assemble patch {patch}"))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    // 网格元里各 patch 的面积份额 `elm_patch%subfrc`：多作物单点是归一化的 `pctcrop`，与 PFT 常数重启的
+    // `cropfrac` 同值（`MOD_SingleSrfdata.F90:1493`）。单 patch 为 1。
+    if patch_count > 1 {
+        let fractions = colm_init::RestartFile::open(colm_runtime::pft::pft_restart_path(
+            &files.constant,
+        )?)?
+        .floats("cropfrac")
+        .context("a multi-patch single point is a crop site and needs cropfrac")?
+        .to_vec();
+        for template in &mut templates {
+            template.patch_fraction = *fractions
+                .get(template.patch)
+                .context("cropfrac is shorter than the patch count")?;
         }
     }
-    ensure!(
-        template.physics.irrigation.is_none() || template.irrigation.is_some(),
-        "DEF_USE_IRRIGATION is verified only on CROP BGC soil patches"
-    );
-    // `DEF_LAI_MONTHLY` 打开时每月重读 LAI（`CoLM.F90:595-605`）。**不装就等于关门**：
-    // 跨月的运行会从第二个月起一直用第一天的叶面积，而且不会报错。
-    if logical_field(&document, "DEF_LAI_MONTHLY")? {
-        let path = layout.out().join(&name).join("landdata/srfdata.nc");
-        ensure!(
-            path.is_file(),
-            "{} is missing; run mksrfdata for this case before a DEF_LAI_MONTHLY run",
-            path.display()
-        );
-        let change_yearly = logical_field(&document, "DEF_LAI_CHANGE_YEARLY")?;
-        let land_cover_year = i32::try_from(integer_field(&document, "DEF_LC_YEAR")?)
-            .context("DEF_LC_YEAR does not fit an i32")?;
-        if template.urban.is_some() {
-            // 城市 patch 走 `UrbanLAI_readin`（读 `TREE_LAI`/`TREE_SAI`）。
-            let year = |key: &str| -> Result<i32> {
-                i32::try_from(integer_field(&document, key)?)
-                    .with_context(|| format!("{key} does not fit an i32"))
-            };
-            template = template.with_monthly_leaf_area_index(MonthlyLeafAreaIndex::read_urban(
-                &path,
-                change_yearly,
-                land_cover_year,
-                year("DEF_LAI_START_YEAR")?,
-                year("DEF_LAI_END_YEAR")?,
-            )?);
-        } else if template.pft.is_some() {
-            // `LAI_readin` 的 PFT 段：逐 PFT 读 `LAI_pfts_monthly`，patch 值取聚合。
-            let year = |key: &str| -> Result<i32> {
-                i32::try_from(integer_field(&document, key)?)
-                    .with_context(|| format!("{key} does not fit an i32"))
-            };
-            template = template.with_pft_monthly_leaf_area_index(
-                &path,
-                logical_field(&document, "USE_SITE_LAI")?,
-                change_yearly,
-                land_cover_year,
-                (year("DEF_LAI_START_YEAR")?, year("DEF_LAI_END_YEAR")?),
-            )?;
-        } else if logical_field(&document, "DEF_URBAN_RUN")? {
-            // 城市单点里的非城市 patch：`LAI_readin` 的单点分支被 `.not. DEF_URBAN_RUN`
-            // 整个跳过，`tlai`/`tsai` 保持重启值 —— 不装读取器就是这个行为。
-        } else {
-            template = template.with_monthly_leaf_area_index(MonthlyLeafAreaIndex::read(
-                &path,
-                logical_field(&document, "USE_SITE_LAI")?,
-                change_yearly,
-                land_cover_year,
-            )?);
-        }
-    }
-
-    // `scale_baseflow`：上游 `Opt_Baseflow_init` 从
-    // `DEF_dir_restart/ParaOpt/<case>_baseflow.nc` 读一个长度 `landpatch` 的向量，
-    // 文件或变量缺失时取 `defval = 1.`（`MOD_Opt_Baseflow.F90:37-38`）。
-    // 它直接乘在 `rsubst`/`rsub` 上，参数标定过的算例差别是物理量级的。
-    let baseflow_scale = read_baseflow_scale(&layout, &name, arguments.patch)?;
-    template = template.with_baseflow_scale(baseflow_scale);
+    let template = &templates[0];
+    let baseflow_scale = template.baseflow_scale;
     // `Opt_Baseflow_init` 无论开不开优化都先建 `ParaOpt/`（`MOD_Opt_Baseflow.F90:40-42`）。
     let para_opt = layout.out().join(&name).join("restart/ParaOpt");
     std::fs::create_dir_all(&para_opt)
@@ -272,9 +202,9 @@ fn run() -> Result<()> {
             .floats("zwt")?
             .len();
         ensure!(
-            patches == 1,
-            "DEF_Optimize_Baseflow rewrites `scale_baseflow` for every patch, but colm-rs runs \
-             one patch of the {patches} in {}",
+            patches == 1 && templates.len() == 1,
+            "DEF_Optimize_Baseflow over {patches} patches is not ported: upstream iterates the \
+             whole `scale_baseflow` vector ({})",
             restarts.initial.display()
         );
         Some(BaseflowOptimizer::new(
@@ -290,11 +220,16 @@ fn run() -> Result<()> {
 
     // 会话从**配置**开（窗口、站点、步长、频率都在里面），要在 `open` 消费掉
     // 配置之前建好 —— 而它自己不带 forcing，所以先后没有别的影响。
-    let mut session = history_session(&config, &outputs)?;
+    let mut session = history_session(&config, &outputs)?
+        .map(|session| session.with_patches(templates.len()))
+        .transpose()?;
     let sidecar_config = colm_runtime::history_sidecar::SidecarConfig {
         frequency_code: history_frequency_code(config.history_frequency),
         urban_run: logical_field(&document, "DEF_URBAN_RUN")?,
-        urban_patches: usize::from(template.urban.is_some()),
+        urban_patches: templates
+            .iter()
+            .filter(|template| template.urban.is_some())
+            .count(),
         pft_or_pc: logical_field(&document, "DEF_USE_PFT")?
             || logical_field(&document, "DEF_USE_PC")?,
         bgc: template.physics.bgc.is_some(),
@@ -306,7 +241,9 @@ fn run() -> Result<()> {
         &history_sidecar_path(&restarts.initial)?,
         &sidecar_config,
     )?;
-    if let Some(window) = initial_window.filter(|window| window.steps > 0) {
+    if let Some(window) =
+        initial_window.filter(|windows| windows.first().is_some_and(|window| window.steps > 0))
+    {
         let session = session.as_mut().context(
             "the restart carries an open history window, but this run writes no history",
         )?;
@@ -324,7 +261,7 @@ fn run() -> Result<()> {
         let pick = |name: &str| -> Result<f64> {
             constant
                 .floats(name)?
-                .get(arguments.patch)
+                .get(patches[0])
                 .copied()
                 .with_context(|| format!("the constant restart has no {name} for this patch"))
         };
@@ -341,7 +278,7 @@ fn run() -> Result<()> {
     // 所以"这一步有没有雪"是状态、不是配置；这里同理 —— 从无雪起步的运行也必须能长雪。
     let summary = run_snow(
         &mut runtime,
-        &template,
+        &templates,
         &restarts.initial,
         &outputs.restart_out,
         outputs.periodic.as_ref(),
@@ -349,9 +286,9 @@ fn run() -> Result<()> {
         &history_restart,
     )?;
     println!(
-        "colm-rs: {} step(s) on patch {}; wrote {}",
+        "colm-rs: {} step(s) on patch(es) {:?}; wrote {}",
         summary.steps,
-        arguments.patch,
+        patches,
         outputs.restart_out.display()
     );
     if let Some(files) = summary.history_files {
@@ -359,6 +296,120 @@ fn run() -> Result<()> {
     }
     println!("{SUCCESS_MARKER}");
     Ok(())
+}
+
+/// 第 `patch` 个 patch 的模板：主/常数重启、PFT 子网格、BGC 与灌溉、月度 LAI、`scale_baseflow`。
+///
+/// 多作物单点（`MOD_SingleSrfdata.F90:348`）每个 patch 各装一份；patch 之间除强迫外不共享任何东西。
+fn assemble_patch(
+    document: &Document,
+    layout: &colm_case::Layout,
+    name: &str,
+    files: &RestartStateFiles,
+    physics: colm_runtime::assembly::LandPhysicsParameters,
+    patch: usize,
+) -> Result<StandardLctRestartTemplate> {
+    // 两支装配的**断言**不同（一支要求启动时有雪、另一支要求没有），但返回的是同一个
+    // 模板类型；运行时只走通用入口（能长雪的那一支），所以这里按启动时的雪列选断言。
+    let has_snow = restart_has_snow_column(files, patch)
+        .context("cannot tell whether the initial restart carries an active snow column")?;
+    let mut template = if has_snow {
+        assemble_standard_lct_snow_template(files, patch, physics)
+            .context("cannot assemble the snow-bearing standard LCT template")?
+    } else {
+        assemble_standard_lct_template(files, patch, physics)
+            .context("cannot assemble the snow-free standard LCT template")?
+    };
+    // `DEF_USE_PFT`：土壤 patch 的 PFT 子网格来自同目录的 `*_restart_pft_*` 两份重启。
+    if template.physics.use_pft {
+        template = template
+            .with_pft(
+                &colm_runtime::pft::pft_restart_path(&files.constant)?,
+                &colm_runtime::pft::pft_restart_path(&files.time)?,
+                document,
+            )
+            .context("cannot assemble the PFT subgrid")?;
+    }
+    // `DEF_USE_BGC`：BGC 状态来自四份 BGC 重启，氮沉降来自 `DEF_dir_runtime/ndep`。
+    if let Some(switches) = template.physics.bgc {
+        let (bgc, irrigation) = assemble_bgc(document, files, patch, switches)?;
+        template = template
+            .with_bgc(bgc)
+            .context("cannot assemble the BGC state")?;
+        // `DEF_USE_IRRIGATION`：时间重启里的灌溉量，叠上 `CROP_readin` 读的灌溉方式（与配水比例）。
+        if let Some(readin) = irrigation {
+            let state = colm_runtime::irrigation::initial_state(
+                &colm_init::RestartFile::open(&files.time)?,
+                patch,
+                readin,
+            )?;
+            template = template
+                .with_irrigation(state)
+                .context("cannot assemble the irrigation state")?;
+        }
+    }
+    ensure!(
+        template.physics.irrigation.is_none() || template.irrigation.is_some(),
+        "DEF_USE_IRRIGATION is verified only on CROP BGC soil patches"
+    );
+    // `DEF_LAI_MONTHLY` 打开时每月重读 LAI（`CoLM.F90:595-605`）。**不装就等于关门**：
+    // 跨月的运行会从第二个月起一直用第一天的叶面积，而且不会报错。
+    if logical_field(document, "DEF_LAI_MONTHLY")? {
+        let path = layout.out().join(name).join("landdata/srfdata.nc");
+        ensure!(
+            path.is_file(),
+            "{} is missing; run mksrfdata for this case before a DEF_LAI_MONTHLY run",
+            path.display()
+        );
+        let change_yearly = logical_field(document, "DEF_LAI_CHANGE_YEARLY")?;
+        let land_cover_year = i32::try_from(integer_field(document, "DEF_LC_YEAR")?)
+            .context("DEF_LC_YEAR does not fit an i32")?;
+        if template.urban.is_some() {
+            // 城市 patch 走 `UrbanLAI_readin`（读 `TREE_LAI`/`TREE_SAI`）。
+            let year = |key: &str| -> Result<i32> {
+                i32::try_from(integer_field(document, key)?)
+                    .with_context(|| format!("{key} does not fit an i32"))
+            };
+            template = template.with_monthly_leaf_area_index(MonthlyLeafAreaIndex::read_urban(
+                &path,
+                change_yearly,
+                land_cover_year,
+                year("DEF_LAI_START_YEAR")?,
+                year("DEF_LAI_END_YEAR")?,
+            )?);
+        } else if template.pft.is_some() {
+            // `LAI_readin` 的 PFT 段：逐 PFT 读 `LAI_pfts_monthly`，patch 值取聚合。
+            let year = |key: &str| -> Result<i32> {
+                i32::try_from(integer_field(document, key)?)
+                    .with_context(|| format!("{key} does not fit an i32"))
+            };
+            template = template.with_pft_monthly_leaf_area_index(
+                &path,
+                logical_field(document, "USE_SITE_LAI")?,
+                change_yearly,
+                land_cover_year,
+                (year("DEF_LAI_START_YEAR")?, year("DEF_LAI_END_YEAR")?),
+            )?;
+        } else if logical_field(document, "DEF_URBAN_RUN")? {
+            // 城市单点里的非城市 patch：`LAI_readin` 的单点分支被 `.not. DEF_URBAN_RUN`
+            // 整个跳过，`tlai`/`tsai` 保持重启值 —— 不装读取器就是这个行为。
+        } else {
+            template = template.with_monthly_leaf_area_index(MonthlyLeafAreaIndex::read(
+                &path,
+                logical_field(document, "USE_SITE_LAI")?,
+                change_yearly,
+                land_cover_year,
+            )?);
+        }
+    }
+
+    // `scale_baseflow`：上游 `Opt_Baseflow_init` 从
+    // `DEF_dir_restart/ParaOpt/<case>_baseflow.nc` 读一个长度 `landpatch` 的向量，
+    // 文件或变量缺失时取 `defval = 1.`（`MOD_Opt_Baseflow.F90:37-38`）。
+    // 它直接乘在 `rsubst`/`rsub` 上，参数标定过的算例差别是物理量级的。
+    let baseflow_scale = read_baseflow_scale(layout, name, patch)?;
+    template = template.with_baseflow_scale(baseflow_scale);
+    Ok(template)
 }
 
 /// `DEF_USE_BGC` 的运行期：BGC 重启、PFT 常数、BGC 用的静态量与氮沉降。
@@ -371,22 +422,21 @@ fn assemble_bgc(
     colm_runtime::bgc_step::BgcRuntime,
     Option<colm_runtime::irrigation::IrrigationReadin>,
 )> {
-    // BGC 重启按"整列就是这个 patch"读（`crate::bgc` 的约定），多 patch 文件会串到别的 patch。
-    let patches = colm_init::RestartFile::open(&files.constant)?
-        .floats("patchlatr")?
-        .len();
-    ensure!(
-        patches == 1 && patch == 0,
-        "DEF_USE_BGC: colm-rs reads the BGC restarts as one patch, but {} holds {patches}",
-        files.constant.display()
-    );
+    // 各份 BGC 重启切出本 patch 与它的 PFT 区间（`colm_runtime::pft::open_patch`）。
+    let pft_constant = colm_runtime::pft::pft_restart_path(&files.constant)?;
+    let (patches, pfts) = {
+        colm_runtime::pft::patch_and_pft_counts(&colm_init::RestartFile::open(&pft_constant)?)?
+    };
     let pft_time = colm_runtime::pft::pft_restart_path(&files.time)?;
-    let npft = colm_init::RestartFile::open(&pft_time)?
-        .floats("tlai_p")?
-        .len();
-    let mut initial =
-        colm_runtime::bgc::BgcTemplate::read(&files.constant, &files.time, &pft_time, npft)?
-            .initial;
+    let mut initial = colm_runtime::bgc::BgcTemplate::read(
+        &files.constant,
+        &files.time,
+        &pft_time,
+        patch,
+        patches,
+        pfts,
+    )?
+    .initial;
     let layers = initial.dims.nl_soil;
     let statics = colm_runtime::bgc_step::BgcStatics::read(&files.constant, patch, layers)?;
     let runtime_dir = std::path::PathBuf::from(string_field(document, "DEF_dir_runtime")?);
@@ -394,8 +444,7 @@ fn assemble_bgc(
     // `CROP_readin`（`CoLM.F90:442`）：启动时覆盖作物的播种日与施肥量（与灌溉方式）。
     let mut irrigation = None;
     if switches.crop {
-        let classes =
-            colm_init::RestartFile::open(&colm_runtime::pft::pft_restart_path(&files.constant)?)?
+        let classes = colm_runtime::pft::open_patch(&pft_constant, patch, patches, pfts)?
                 .integers("pftclass")?
                 .iter()
                 .map(|&class| i32::try_from(class))
@@ -493,53 +542,61 @@ struct RunSummary {
 /// 续跑写出多带雪段与四个雪标量。
 fn run_snow(
     runtime: &mut PointRuntime,
-    template: &StandardLctRestartTemplate,
+    templates: &[StandardLctRestartTemplate],
     restart_in: &Path,
     restart_out: &Path,
     periodic: Option<&PeriodicRestarts>,
     session: Option<HistorySession>,
     history_restart: &HistoryRestart,
 ) -> Result<RunSummary> {
-    let mut state = template.snow_state();
+    let mut states: Vec<StandardLctSnowSoilState> =
+        templates.iter().map(StandardLctRestartTemplate::snow_state).collect();
     // `smp`/`hk` 与表面诊断量只出现在步输出里（`intent(out)`），而续跑要写它们。
-    let mut last: Option<RestartSnapshot> = None;
+    let mut last: Option<Vec<RestartSnapshot>> = None;
     let mut on_step = |step: colm_runtime::PointRuntimeStep,
-                       state: &StandardLctSnowSoilState,
-                       output: PatchStepOutput<'_>|
+                       states: &[StandardLctSnowSoilState],
+                       outputs: &[PatchStepOutput<'_>]|
      -> Result<()> {
-        let mut snapshot = RestartSnapshot::new(state, output, step.surface_cosine_zenith)?;
-        snapshot.lai_refreshed = step.clock.update_lai;
+        let snapshots = states
+            .iter()
+            .zip(outputs)
+            .map(|(state, output)| {
+                let mut snapshot = RestartSnapshot::new(state, *output, step.surface_cosine_zenith)?;
+                snapshot.lai_refreshed = step.clock.update_lai;
+                Ok(snapshot)
+            })
+            .collect::<Result<Vec<_>>>()?;
         // `save_to_restart`（`CoLM.F90:664`）：每个 `DEF_WRST_FREQ` 周期末、以及预热期
         // 每年末写一次 `WRITE_TimeVariables`。窗口终点那一次由循环结束后的写出负责。
         if let Some(periodic) = periodic {
             if step.clock.write_restart {
                 let path = periodic.path(step.clock.end_time);
                 if path != restart_out {
-                    write_evolved_restart(template, state, &snapshot, restart_in, &path)?;
+                    write_evolved_restart(templates, states, &snapshots, restart_in, &path)?;
                     mark_history_restart(&path, history_restart)?;
                 }
             }
         }
-        last = Some(snapshot);
+        last = Some(snapshots);
         Ok(())
     };
     let (steps, history_files) = match session {
         Some(mut session) => {
             let outcome = runtime.run_restart_standard_lct_snow_with_history(
-                template,
-                &mut state,
+                templates,
+                &mut states,
                 &mut session,
                 &mut on_step,
             )?;
             (outcome.steps, Some(outcome.files.len()))
         }
         None => (
-            runtime.run_restart_standard_lct_snow(template, &mut state, &mut on_step)?,
+            runtime.run_restart_standard_lct_snow(templates, &mut states, &mut on_step)?,
             None,
         ),
     };
     let last = last.context(NO_STEP)?;
-    write_evolved_restart(template, &state, &last, restart_in, restart_out)?;
+    write_evolved_restart(templates, &states, &last, restart_in, restart_out)?;
     mark_history_restart(restart_out, history_restart)?;
     Ok(RunSummary {
         steps,
@@ -551,7 +608,8 @@ fn run_snow(
 struct HistoryRestart {
     config: colm_runtime::history_sidecar::SidecarConfig,
     /// 当前历史区间的原始累加状态；没开 history 时为 `None`（恒为空窗口）。
-    window: Option<std::sync::Arc<std::sync::Mutex<colm_runtime::history_sidecar::HistoryWindow>>>,
+    window:
+        Option<std::sync::Arc<std::sync::Mutex<Vec<colm_runtime::history_sidecar::HistoryWindow>>>>,
 }
 
 /// 续跑文件 → 同目录的旁车路径。
@@ -580,17 +638,17 @@ fn history_frequency_code(frequency: colm_hist::schedule::HistoryFrequency) -> u
 /// `history_sidecar_required = 1`（`mark_history_acc_restart`）。区间跨过重启时旁车带全部
 /// 已分配的累加器（[`colm_runtime::history_sidecar`]）。
 fn mark_history_restart(restart: &Path, history: &HistoryRestart) -> Result<()> {
-    let window = history
+    let windows = history
         .window
         .as_ref()
         .map(|window| window.lock().expect("history window lock").clone())
-        .unwrap_or_default();
+        .unwrap_or_else(|| vec![colm_runtime::history_sidecar::HistoryWindow::default()]);
     let patches = colm_init::RestartFile::open(restart)?.dimension("patch")?;
     colm_runtime::history_sidecar::write_sidecar(
         &history_sidecar_path(restart)?,
         patches,
         &history.config,
-        &window,
+        &windows,
     )?;
     let mut primary =
         netcdf::append(restart).with_context(|| format!("cannot reopen {}", restart.display()))?;
@@ -652,61 +710,103 @@ impl RestartSnapshot {
 }
 
 /// 把步末状态写成一份续跑文件（以输入重启为底，只替换推进过的变量）。
+///
+/// 每个 patch 的模板各出一份覆盖量，再按 `patch`/`pft` 维拼成整变量
+/// （[`colm_runtime::multi_patch::merge_overrides`]）。
 fn write_evolved_restart(
-    template: &StandardLctRestartTemplate,
-    state: &StandardLctSnowSoilState,
-    snapshot: &RestartSnapshot,
+    templates: &[StandardLctRestartTemplate],
+    states: &[StandardLctSnowSoilState],
+    snapshots: &[RestartSnapshot],
     restart_in: &Path,
     restart_out: &Path,
 ) -> Result<()> {
-    // 重启里的 `t_grnd` 是雪层合并之后重取的那个（`CoLMMAIN.F90:1452`）。
-    let overrides = template.evolved_snow_overrides(
-        state,
-        EvolvedStepOutput {
-            ground_temperature_k: state.surface_temperature_k(),
-            matric_potential_mm: &snapshot.matric_potential_mm,
-            hydraulic_conductivity_mm_s: &snapshot.hydraulic_conductivity_mm_s,
-            diagnostics: snapshot.diagnostics,
-            lai_refreshed: snapshot.lai_refreshed,
-        },
-    )?;
-    let mut overrides = overrides;
-    // `DEF_USE_IRRIGATION`：灌溉量与 `irrig_method_*`（后者是作物汇总写的 patch 量）。
-    if let Some(irrigation) = &state.irrigation {
-        let diagnostics = state
-            .bgc
-            .as_ref()
-            .context("the irrigation state needs the CROP BGC state")?
-            .irrigation_diagnostics;
-        overrides.extend(colm_runtime::irrigation::time_overrides(
-            irrigation,
-            &diagnostics,
-            &colm_init::RestartFile::open(restart_in)?,
-            template.patch,
-        )?);
+    ensure!(
+        templates.len() == states.len() && templates.len() == snapshots.len(),
+        "every written patch needs a template, a state, and a snapshot"
+    );
+    let source = colm_init::RestartFile::open(restart_in)?;
+    let pft_in = colm_runtime::pft::pft_restart_path(restart_in)?;
+    let pft_source = templates[0]
+        .pft
+        .as_ref()
+        .map(|_| colm_init::RestartFile::open(&pft_in))
+        .transpose()?;
+    let slots = templates
+        .iter()
+        .map(|template| {
+            let pfts = match &pft_source {
+                // PFT 时间重启没有 `patch` 维：patch 数取主重启的。
+                Some(file) => colm_runtime::pft::patch_pft_range(
+                    source.dimension("patch")?,
+                    file.dimension("pft")?,
+                    template.patch,
+                )?,
+                None => 0..0,
+            };
+            Ok(colm_runtime::multi_patch::PatchSlot {
+                patch: template.patch,
+                pfts,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let merge = |file: &colm_init::RestartFile, lists: Vec<Vec<colm_init::RestartOverride>>| {
+        colm_runtime::multi_patch::merge_overrides(file, &slots, lists)
+    };
+
+    // 主重启。`t_grnd` 是雪层合并之后重取的那个（`CoLMMAIN.F90:1452`）。
+    let mut lists = Vec::with_capacity(templates.len());
+    for ((template, state), snapshot) in templates.iter().zip(states).zip(snapshots) {
+        let mut overrides = template.evolved_snow_overrides(
+            state,
+            EvolvedStepOutput {
+                ground_temperature_k: state.surface_temperature_k(),
+                matric_potential_mm: &snapshot.matric_potential_mm,
+                hydraulic_conductivity_mm_s: &snapshot.hydraulic_conductivity_mm_s,
+                diagnostics: snapshot.diagnostics,
+                lai_refreshed: snapshot.lai_refreshed,
+            },
+        )?;
+        // `DEF_USE_IRRIGATION`：灌溉量与 `irrig_method_*`（后者是作物汇总写的 patch 量）。
+        if let Some(irrigation) = &state.irrigation {
+            let diagnostics = state
+                .bgc
+                .as_ref()
+                .context("the irrigation state needs the CROP BGC state")?
+                .irrigation_diagnostics;
+            overrides.extend(colm_runtime::irrigation::time_overrides(
+                irrigation,
+                &diagnostics,
+                &source,
+                template.patch,
+            )?);
+        }
+        lists.push(overrides);
     }
+    let overrides = merge(&source, lists)?;
     if let Some(parent) = restart_out.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("cannot create {}", parent.display()))?;
     }
     write_restart(restart_in, restart_out, overrides.as_slice())?;
+
     // PFT 子网格另有一份时间重启（`<case>_restart_pft_<date>_…nc`），与主重启同目录。
-    if let (Some(pft_template), Some(pft)) = (&template.pft, &state.energy.pft) {
-        let pft_in = colm_runtime::pft::pft_restart_path(restart_in)?;
-        let mut overrides = pft_template.overrides(pft);
-        // `WRITE_PFTimeVariables` 在 BGC 下把 `WRITE_BGCPFTimeVariables` 写进同一份文件。
-        if let Some(bgc) = &state.bgc {
-            overrides.extend(colm_runtime::bgc::BgcTemplate::overrides(
-                bgc,
-                &colm_init::RestartFile::open(&pft_in)?,
-            ));
+    if let Some(pft_source) = &pft_source {
+        let mut lists = Vec::with_capacity(templates.len());
+        for (template, state) in templates.iter().zip(states) {
+            let (Some(pft_template), Some(pft)) = (&template.pft, &state.energy.pft) else {
+                anyhow::bail!("patch {} has no PFT subgrid to write back", template.patch);
+            };
+            let mut overrides = pft_template.overrides(pft);
+            // `WRITE_PFTimeVariables` 在 BGC 下把 `WRITE_BGCPFTimeVariables` 写进同一份文件。
+            if let Some(bgc) = &state.bgc {
+                overrides.extend(colm_runtime::bgc::BgcTemplate::overrides(bgc, pft_source));
+            }
+            if let Some(irrigation) = &state.irrigation {
+                overrides.push(colm_runtime::irrigation::pft_override(irrigation));
+            }
+            lists.push(overrides);
         }
-        if let Some(irrigation) = &state.irrigation {
-            overrides.push(colm_runtime::irrigation::pft_override(
-                irrigation,
-                &colm_init::RestartFile::open(&pft_in)?,
-            )?);
-        }
+        let overrides = merge(pft_source, lists)?;
         write_restart(
             &pft_in,
             &colm_runtime::pft::pft_restart_path(restart_out)?,
@@ -714,10 +814,17 @@ fn write_evolved_restart(
         )?;
     }
     // BGC 的 patch 级时间变量另有一份（`<case>_restart_bgc_<date>_…nc`）。
-    if let Some(bgc) = &state.bgc {
+    if states[0].bgc.is_some() {
         let bgc_in = colm_runtime::bgc::bgc_time_path(restart_in)?;
-        let overrides =
-            colm_runtime::bgc::BgcTemplate::overrides(bgc, &colm_init::RestartFile::open(&bgc_in)?);
+        let bgc_source = colm_init::RestartFile::open(&bgc_in)?;
+        let lists = states
+            .iter()
+            .map(|state| {
+                let bgc = state.bgc.as_ref().context("every BGC patch needs its BGC state")?;
+                Ok(colm_runtime::bgc::BgcTemplate::overrides(bgc, &bgc_source))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let overrides = merge(&bgc_source, lists)?;
         write_restart(
             &bgc_in,
             &colm_runtime::bgc::bgc_time_path(restart_out)?,
@@ -725,7 +832,14 @@ fn write_evolved_restart(
         )?;
     }
     // 城市单元另有一份时间重启（`<case>_restart_urban_<date>_…nc`），与主重启同目录。
-    if let (Some(urban_template), Some(urban)) = (&template.urban, &state.urban) {
+    if let (Some(urban_template), Some(urban)) = (&templates[0].urban, &states[0].urban) {
+        ensure!(
+            templates.len() == 1,
+            "urban sites are single-patch; {} patches were run",
+            templates.len()
+        );
+        let template = &templates[0];
+        let state = &states[0];
         let urban_path = |path: &Path| -> Result<std::path::PathBuf> {
             let name = path
                 .file_name()
@@ -1041,7 +1155,8 @@ fn string_field(document: &Document, field: &str) -> Result<String> {
 
 struct Arguments {
     case_directory: PathBuf,
-    patch: usize,
+    /// 只跑这一个 patch；缺省跑全部（多作物单点）。
+    patch: Option<usize>,
     land_cover: LandCoverScheme,
     outputs: OutputSpec,
     /// 只做能力检查就退出，不读重启、不推进。
@@ -1056,7 +1171,7 @@ impl Arguments {
     fn parse(arguments: impl Iterator<Item = String>) -> Result<Self> {
         let mut values = arguments.peekable();
         let mut case_directory = None;
-        let mut patch = 0usize;
+        let mut patch = None;
         let mut land_cover = None;
         let mut restart_out = None;
         let mut history_directory = None;
@@ -1073,9 +1188,11 @@ impl Arguments {
             };
             match flag.as_str() {
                 "--patch" => {
-                    patch = value("--patch")?
-                        .parse()
-                        .context("--patch must be a nonnegative integer")?;
+                    patch = Some(
+                        value("--patch")?
+                            .parse()
+                            .context("--patch must be a nonnegative integer")?,
+                    );
                 }
                 "--land-cover" => {
                     land_cover = Some(match value("--land-cover")?.to_ascii_lowercase().as_str() {
