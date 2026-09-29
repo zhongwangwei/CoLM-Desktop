@@ -472,6 +472,9 @@ pub struct SurfaceOpticsStep {
     pub ground_snowfall_kg_m2_s: f64,
     /// 本步的 `forc_t` [K]（SNICAR 的新雪粒径读它）。
     pub air_temperature_k: f64,
+    /// 非干湖的湖 patch：`dz_soisno_(1) = dz_lake(1)`、`t_soisno_(1) = t_lake(1)`
+    /// （`CoLMMAIN.F90:2158-2161`），只有 SNICAR 读。
+    pub lake_top_layer: Option<(f64, f64)>,
 }
 
 /// 表面诊断量的**整变量缓冲**（长度 = patch 数），从时间重启读进来。
@@ -1323,9 +1326,9 @@ fn assemble(
     };
     let snicar = if physics.snicar {
         ensure!(
-            matches!(patch_type, 0 | 2 | 3),
-            "DEF_USE_SNICAR is ported for soil, wetland and glacier patches; patchtype \
-             {patch_type} needs the lake SNICAR branches"
+            matches!(patch_type, 0 | 2 | 3 | 4),
+            "DEF_USE_SNICAR is ported for soil, wetland, glacier and lake patches; patchtype \
+             {patch_type} needs the urban SNICAR branches"
         );
         Some(SnicarTemplate::read(&time, patch)?)
     } else {
@@ -2077,10 +2080,11 @@ impl StandardLctRestartTemplate {
                 let snow = &state.snow;
                 let mut thickness = [0.0; 6];
                 thickness[..5].copy_from_slice(&snow.thickness_m);
-                thickness[5] = self.layer_thickness_m[0];
                 let mut temperature = [0.0; 6];
                 temperature[..5].copy_from_slice(&snow.temperature_k);
-                temperature[5] = state.soil_temperature_k[0];
+                (thickness[5], temperature[5]) = step
+                    .lake_top_layer
+                    .unwrap_or((self.layer_thickness_m[0], state.soil_temperature_k[0]));
                 let mut liquid = [0.0; 5];
                 liquid.copy_from_slice(&snow.liquid_water_kg_m2);
                 let mut ice = [0.0; 5];

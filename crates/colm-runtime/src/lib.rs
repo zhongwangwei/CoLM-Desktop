@@ -919,6 +919,7 @@ fn advance_patch(
                 previous_snow_water_equivalent_mm,
                 ground_snowfall_kg_m2_s: output.snowfall_kg_m2_s,
                 air_temperature_k: step.forcing.air_temperature_k,
+                lake_top_layer: None,
             },
         )?;
         colm_core::clear_non_soil_patch(
@@ -977,6 +978,10 @@ fn advance_patch(
         let output = colm_core::lake_snow_step(input, lake.site, state)?;
         // 湖面反照率只看 `t_grnd`（`albland` 的 `patchtype >= 4` 支）；`t_soisno_(1)` 换成
         // `t_lake(1)` 那一句只在 SNICAR 下有读者。
+        let lake_top_layer = state
+            .lake
+            .as_ref()
+            .map(|lake| (lake.column.thickness_m[0], lake.column.temperature_k[0]));
         template.prepare_surface_optics(
             state,
             SurfaceOpticsStep {
@@ -985,8 +990,10 @@ fn advance_patch(
                 momentum_roughness_m: output.thermal.z0m,
                 wet_snow_fraction: 0.0,
                 previous_snow_water_equivalent_mm,
-                ground_snowfall_kg_m2_s: 0.0,
+                // `newsnow_lake` 改写过的 `pg_snow`（`intent(inout)`）。
+                ground_snowfall_kg_m2_s: output.snowfall_kg_m2_s,
                 air_temperature_k: step.forcing.air_temperature_k,
+                lake_top_layer,
             },
         )?;
         colm_core::clear_non_soil_patch(
@@ -1115,6 +1122,8 @@ fn surface_optics_step(
         previous_snow_water_equivalent_mm,
         ground_snowfall_kg_m2_s: output.energy.interception.ground_snow_kg_m2_s,
         air_temperature_k: step.forcing.air_temperature_k,
+        // 干湖也走这里：`is_dry_lake` 时 `t_soisno_(1)` 仍是土温。
+        lake_top_layer: None,
     }
 }
 

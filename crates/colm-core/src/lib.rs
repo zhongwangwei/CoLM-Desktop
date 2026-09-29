@@ -275,9 +275,9 @@ pub use irrigation::{
 };
 pub use lake::{
     add_lake_new_snow, adjust_lake_layers, lake_roughness, lake_snow_water,
-    lake_thermal_conductivity, LakeColumn, LakeConductivity, LakeConductivityInput,
-    LakeNewSnowInput, LakeNewSnowOutcome, LakeRoughness, LakeRoughnessInput, LakeSnowWaterFluxes,
-    LakeSnowWaterInput, LakeSnowWaterOutcome, LakeSnowWaterSoil,
+    lake_snow_water_with_snicar, lake_thermal_conductivity, LakeColumn, LakeConductivity,
+    LakeConductivityInput, LakeNewSnowInput, LakeNewSnowOutcome, LakeRoughness, LakeRoughnessInput,
+    LakeSnowWaterFluxes, LakeSnowWaterInput, LakeSnowWaterOutcome, LakeSnowWaterSoil,
 };
 pub use lake_step::{lake_snow_step, refill_dry_lake, LakeSite, LakeStepOutput, RuntimeLakeState};
 pub use lake_temperature::{

@@ -70,6 +70,9 @@ pub struct LakeTemperatureInput<'a> {
     /// 湖底土层的 `soil_hcap_cond` 静态参数；温度与体积含水率由本函数按当前列填。
     pub soil_thermal_inputs: &'a [SoilThermalInput],
     pub snow_layers: usize,
+    /// `DEF_USE_SNICAR`：`netsolar` 算出的 `sabg_snow_lyr(-4:1)`（五个雪槽加湖顶那一格）。
+    /// 打开时 `betaprime` 不再因积雪取 1，湖层吸收用 `sabg_snow_lyr(1)`，雪层逐层吸收。
+    pub snow_layer_absorption_w_m2: Option<[f64; 6]>,
 }
 
 /// `laketem` 在步内改写的湖量。
@@ -127,7 +130,7 @@ pub struct LakeTemperatureOutput {
     pub phase_flag: Vec<i32>,
 }
 
-/// Port of `MOD_Lake:laketem`（`DEF_USE_SNICAR = .false.`）。
+/// Port of `MOD_Lake:laketem`（含 `DEF_USE_SNICAR` 的分层吸收分支）。
 pub fn lake_temperature(
     input: LakeTemperatureInput<'_>,
     state: LakeTemperatureState<'_>,
@@ -180,7 +183,9 @@ pub fn lake_temperature(
     let za = [0.5, 0.6];
 
     // `betaprime`（`:706-715`）：近红外占比；`+ (1-b)*betavis` 被收成 `.FMA (1-b, 0, b)`，恒等于 `b`。
-    let betaprime = if snow == 0 {
+    // SNICAR（`:724-732`）：不论有没有雪都按短波算。
+    let snicar = input.snow_layer_absorption_w_m2;
+    let betaprime = if snow == 0 || snicar.is_some() {
         let sw = input.shortwave;
         (sw.direct_near_infrared_w_m2 + sw.diffuse_near_infrared_w_m2)
             / (((sw.direct_visible_w_m2 + sw.direct_near_infrared_w_m2) + sw.diffuse_visible_w_m2)
@@ -404,6 +409,9 @@ pub fn lake_temperature(
     );
     htvp = if t_grnd > TFRZ { HVAP } else { HSUB };
     let fgrnd1 = (((sabg * betaprime + frl) - olrg) - fseng) - htvp * fevpg;
+    // SNICAR（`:936-939`）：雪顶的净热通量只收最上层雪的吸收，`dhsdT = 0`。
+    // GIMPLE：`(((lyr(lb) + frl) - olrg) - fseng) - htvp*fevpg`，与 `fgrnd1` 共用 `htvp*fevpg`。
+    let hs = snicar.map(|lyr| (((lyr[5 - snow] + frl) - olrg) - fseng) - htvp * fevpg);
 
     // ---- 热容与导热率（`:949-1015`）----
     let mut cv_lake = (0..n_lake)
@@ -473,7 +481,21 @@ pub fn lake_temperature(
     // ---- 湖层吸收的短波（`:1040-1066`）----
     let mut phi = vec![0.0; n_lake];
     let mut phi_soil = 0.0;
-    if t_grnd > TFRZ && lake.temperature_k[0] > TFRZ && snow == 0 {
+    if let Some(lyr) = snicar {
+        // SNICAR（`:1073-1091`）：不看冰雪，一律按消光分到各湖层，入射取 `sabg_snow_lyr(1)`。
+        let eta = input.lake_depth_m.max(1.0).lpow(-0.424) * 1.1925;
+        let top = lyr[5];
+        for j in 0..n_lake {
+            let zin = (-dz[j]).mul_add(0.5, z_lake[j]);
+            let zout = dz[j].mul_add(0.5, z_lake[j]);
+            let rsfin = (-(eta * (zin - za[idlak]).max(0.0))).exp();
+            let rsfout = (-(eta * (zout - za[idlak]).max(0.0))).exp();
+            phi[j] = ((rsfin - rsfout) * top) * (1.0 - betaprime);
+            if j == n_lake - 1 {
+                phi_soil = (1.0 - betaprime) * (top * rsfout);
+            }
+        }
+    } else if t_grnd > TFRZ && lake.temperature_k[0] > TFRZ && snow == 0 {
         let eta = input.lake_depth_m.max(1.0).lpow(-0.424) * 1.1925;
         for j in 0..n_lake {
             let zin = (-dz[j]).mul_add(0.5, z_lake[j]);
@@ -559,15 +581,28 @@ pub fn lake_temperature(
             let coupling = (half * tkix[0]) / dzp;
             diagonal[0] = coupling + 1.0;
             upper[0] = -coupling;
-            // `.FMA (factx, .FMA (fnx, cnfac, phix) + fgrnd1, tx)`
-            rhs[0] = factx[0].mul_add(fnx[0].mul_add(CNFAC, phix[0]) + fgrnd1, tx[0]);
+            rhs[0] = match hs {
+                // SNICAR 雪顶（`:1170-1176`）：`.FMA (factx, .FMA (fnx, 0.5, .FNMA (tx, 0, hs)), tx)`
+                Some(hs) if snow > 0 => {
+                    factx[0].mul_add(fnx[0].mul_add(CNFAC, (-tx[0]).mul_add(0.0, hs)), tx[0])
+                }
+                // `.FMA (factx, .FMA (fnx, cnfac, phix) + fgrnd1, tx)`
+                _ => factx[0].mul_add(fnx[0].mul_add(CNFAC, phix[0]) + fgrnd1, tx[0]),
+            };
         } else if k < total - 1 {
             let dzm = zx[k] - zx[k - 1];
             let dzp = zx[k + 1] - zx[k];
             lower[k] = -((half * tkix[k - 1]) / dzm);
             diagonal[k] = (tkix[k] / dzp + tkix[k - 1] / dzm).mul_add(half, 1.0);
             upper[k] = -((tkix[k] * half) / dzp);
-            rhs[k] = phix[k].mul_add(factx[k], (fnx[k] - fnx[k - 1]).mul_add(half, tx[k]));
+            // SNICAR（`:1177-1190`）：非顶雪层的源项是本层吸收；雪下的湖顶层是
+            // `.FMA (lyr(1), betaprime, phix)`。
+            let source = match snicar {
+                Some(lyr) if k < snow => lyr[5 - snow + k],
+                Some(lyr) if k == snow => lyr[5].mul_add(betaprime, phix[k]),
+                _ => phix[k],
+            };
+            rhs[k] = source.mul_add(factx[k], (fnx[k] - fnx[k - 1]).mul_add(half, tx[k]));
         } else {
             let dzm = zx[k] - zx[k - 1];
             let coupling = (half * tkix[k - 1]) / dzm;

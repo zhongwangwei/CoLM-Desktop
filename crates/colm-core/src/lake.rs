@@ -5,8 +5,7 @@ use anyhow::{ensure, Result};
 
 use crate::snow::{snow_interface_slot, snow_layer_slot, validate_runtime_snow_column};
 use crate::{
-    combine_snow_layers, compact_snow_layers, divide_snow_layers, snow_water, RuntimeSnowColumn,
-    SnowToSoilTransfer, SnowWaterInput,
+    compact_snow_layers, snow_water, RuntimeSnowColumn, SnowToSoilTransfer, SnowWaterInput,
 };
 
 const LAKE_LAYERS: usize = 10;
@@ -408,6 +407,24 @@ pub fn lake_snow_water(
     soil: &mut LakeSnowWaterSoil,
     fluxes: &mut LakeSnowWaterFluxes,
 ) -> Result<LakeSnowWaterOutcome> {
+    lake_snow_water_with_snicar(input, snow, lake, soil, fluxes, None)
+}
+
+/// [`lake_snow_water`] 带 `DEF_USE_SNICAR`：`snowwater_SNICAR` 随融水搬气溶胶并把本步沉降
+/// 加到最上层，合并/分裂雪层时气溶胶跟着走（`MOD_Lake.F90:1697-1740`）。
+/// 之后单层全液雪的移除与落进未冻湖的融雪不碰 `mss_*` —— 空出来的槽由步末
+/// `AerosolMasses` 清零。
+pub fn lake_snow_water_with_snicar(
+    input: LakeSnowWaterInput<'_>,
+    snow: &mut RuntimeSnowColumn,
+    lake: &mut LakeColumn,
+    soil: &mut LakeSnowWaterSoil,
+    fluxes: &mut LakeSnowWaterFluxes,
+    mut snicar: Option<(
+        &mut crate::SnicarColumnState,
+        &[f64; crate::AEROSOL_DEPOSITION_FIELDS],
+    )>,
+) -> Result<LakeSnowWaterOutcome> {
     validate(lake)?;
     validate_lake_soil(soil)?;
     ensure!(
@@ -442,7 +459,7 @@ pub fn lake_snow_water(
     let mut bottom_drainage = 0.0;
 
     if had_snow {
-        bottom_drainage = snow_water(
+        let outcome = snow_water(
             SnowWaterInput {
                 time_step_seconds: input.time_step_seconds,
                 irreducible_saturation: input.irreducible_saturation,
@@ -454,8 +471,19 @@ pub fn lake_snow_water(
                 frost_kg_m2_s: input.frost_kg_m2_s,
             },
             snow,
-        )?
-        .bottom_drainage_kg_m2_s;
+        )?;
+        bottom_drainage = outcome.bottom_drainage_kg_m2_s;
+        if let Some((state, deposition)) = snicar.as_mut() {
+            crate::snicar_snow_water_aerosols(
+                state,
+                snow.layer_count.unsigned_abs() as usize,
+                &snow.liquid_water_kg_m2,
+                &snow.ice_water_kg_m2,
+                &outcome.layer_drainage_kg_m2,
+                deposition,
+                input.time_step_seconds,
+            )?;
+        }
         compact_snow_layers(
             snow,
             input.time_step_seconds,
@@ -467,11 +495,14 @@ pub fn lake_snow_water(
             liquid_water_kg_m2: soil.liquid_water_kg_m2[0],
             ice_water_kg_m2: soil.ice_water_kg_m2[0],
         };
-        combine_snow_layers(snow, &mut lake_surface)?;
+        let mut aerosols = snicar
+            .as_mut()
+            .map(|(state, _)| &mut state.aerosol_mass_kg_m2);
+        crate::combine_snow_layers_with_aerosols(snow, &mut lake_surface, aerosols.as_deref_mut())?;
         soil.liquid_water_kg_m2[0] = lake_surface.liquid_water_kg_m2;
         soil.ice_water_kg_m2[0] = lake_surface.ice_water_kg_m2;
         if snow.layer_count < 0 {
-            divide_snow_layers(snow)?;
+            crate::divide_snow_layers_with_aerosols(snow, aerosols)?;
         }
         remove_all_liquid_snow(snow, fluxes, input.time_step_seconds, &mut bottom_drainage);
     }

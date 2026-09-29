@@ -80,6 +80,7 @@ fn input(
         thermal_conductivity_scheme: ThermalConductivityScheme::Johansen,
         soil_thermal_inputs: soil,
         snow_layers: 0,
+        snow_layer_absorption_w_m2: None,
     }
 }
 

@@ -12,8 +12,8 @@ use anyhow::{ensure, Context, Result};
 
 use crate::standard_lct_step::packed_snow_soil_state;
 use crate::{
-    add_lake_new_snow, lake_snow_water, lake_temperature, net_solar, GlacierColumn, LakeColumn,
-    LakeNewSnowInput, LakeSnowWaterFluxes, LakeSnowWaterInput, LakeSnowWaterSoil,
+    add_lake_new_snow, lake_snow_water_with_snicar, lake_temperature, net_solar, GlacierColumn,
+    LakeColumn, LakeNewSnowInput, LakeSnowWaterFluxes, LakeSnowWaterInput, LakeSnowWaterSoil,
     LakeTemperatureInput, LakeTemperatureState, LakeThermalFluxes, NetSolarFluxes, NetSolarInput,
     PrecipitationState, StandardLctSnowSoilInput, StandardLctSnowSoilState,
 };
@@ -142,8 +142,16 @@ pub fn lake_snow_step(
         "the lake-bed soil columns disagree on their layer count"
     );
 
+    ensure!(
+        input.snicar.is_some() == state.snicar.is_some(),
+        "the SNICAR step input and the SNICAR snow state disagree"
+    );
+    // `snofrz(:) = 0`（`CoLMMAIN.F90:743`）。
+    if let Some(snicar) = state.snicar.as_mut() {
+        snicar.refreezing_kg_m2_s = [0.0; 5];
+    }
     // `netsolar`（`CoLMMAIN.F90:772`）：`lai/sai` 在上一步末已被清零。
-    let shortwave = net_solar(
+    let mut shortwave = net_solar(
         NetSolarInput {
             snow_fraction: state.snow.ground_snow_fraction,
             leaf_area_index: state.energy.canopy.leaf_area_index,
@@ -152,6 +160,21 @@ pub fn lake_snow_step(
         },
         &mut state.energy.radiation,
     )?;
+    // SNICAR：`netsolar` 末段的分层吸收（夜间全 0，`ssno_lyr` 不动）。
+    let snow_layer_absorption = state.snicar.as_mut().map(|snicar| {
+        if input.energy.solar.forcing.total() > 0.0 {
+            crate::snicar_net_solar(
+                &mut snicar.layer_absorption,
+                state.energy.radiation.snow_absorption,
+                input.energy.solar.forcing,
+                state.snow.ground_snow_fraction,
+                &mut shortwave.soil_absorbed_w_m2,
+                &mut shortwave.snow_absorbed_w_m2,
+            )
+        } else {
+            [0.0; 6]
+        }
+    });
     let precipitation = forcing.partition_precipitation(4, input.energy.precipitation_scheme)?;
 
     // 步首（`:1793-1822`）：`totwb = scv + sum(wice+wliq) + wa`，逐层先加冰液再累加；
@@ -187,6 +210,8 @@ pub fn lake_snow_step(
     // ---- laketem ----
     let snow_layers = state.snow.layer_count.unsigned_abs() as usize;
     let packed = packed_snow_soil_state(ground, state, snow_layers, ground.snow_layers);
+    // SNICAR 的 `wice_soisno_bef(lb:0)`。
+    let snow_ice_before = packed.ice_water_kg_m2[..snow_layers].to_vec();
     let mut column = GlacierColumn {
         thickness_m: packed.layer_thickness_m,
         node_depth_m: packed.node_depth_m,
@@ -221,6 +246,7 @@ pub fn lake_snow_step(
             thermal_conductivity_scheme: ground.thermal_conductivity_scheme,
             soil_thermal_inputs: ground.soil_thermal_inputs,
             snow_layers,
+            snow_layer_absorption_w_m2: snow_layer_absorption,
         },
         LakeTemperatureState {
             lake: &mut lake.column,
@@ -233,6 +259,18 @@ pub fn lake_snow_step(
     )?;
     let mut thermal = temperature.fluxes;
     let phase_flag = temperature.phase_flag;
+    // SNICAR（`MOD_Lake.F90:1335-1416`）：相变前后雪层冰量之差给出 `snofrz`。`laketem` 在相变
+    // 之前不改雪层冰量，所以"相变前"就是进 `laketem` 时的量。
+    if let Some(snicar) = state.snicar.as_mut() {
+        crate::snow_refreezing_rate(
+            snicar,
+            snow_layers,
+            &snow_ice_before,
+            &column.ice_water_kg_m2[..snow_layers],
+            &phase_flag,
+            dt,
+        );
+    }
     state.snow.water_equivalent_kg_m2 = snow_water_equivalent;
     state.snow.depth_m = snow_depth;
     for (relative, index) in (state.snow.layer_count + 1..=0).enumerate() {
@@ -260,7 +298,12 @@ pub fn lake_snow_step(
         snow_melt_kg_m2_s: thermal.sm,
     };
     let lake = state.lake.as_mut().expect("checked above");
-    lake_snow_water(
+    let deposition = input
+        .snicar
+        .as_ref()
+        .map(|step| step.aerosol_deposition_kg_m2_s);
+    let snicar = state.snicar.as_deref_mut().zip(deposition.as_ref());
+    lake_snow_water_with_snicar(
         LakeSnowWaterInput {
             use_dynamic_lake: site.dynamic,
             time_step_seconds: dt,
@@ -279,6 +322,7 @@ pub fn lake_snow_step(
         &mut lake.column,
         &mut soil,
         &mut fluxes,
+        snicar,
     )?;
     // `snowwater_lake` 只改 `fseng`/`fgrnd`/`sm`，`fsena` 仍是 `laketem` 写下的值。
     thermal.fseng = fluxes.sensible_heat_w_m2;

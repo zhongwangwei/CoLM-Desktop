@@ -866,6 +866,8 @@ pub fn urban_thermal(
             thermal_conductivity_scheme: ctx.thermal_conductivity_scheme,
             soil_thermal_inputs: ctx.soil_thermal_inputs,
             snow_layers: st.lake_bed.snow_layers,
+            // 城市水体带 `urban_call`，SNICAR 分支全部不走。
+            snow_layer_absorption_w_m2: None,
         },
         LakeTemperatureState {
             lake: st.lake,

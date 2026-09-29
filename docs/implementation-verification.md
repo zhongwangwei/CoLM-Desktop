@@ -26262,3 +26262,29 @@ SNICAR 分支（`MOD_Glacier`/`MOD_Lake` 各自的 `_snicar` 支）。拒绝信�
 | `sw_dw4c` | `sw_dw4` 1–4 月，US-Ne3 强迫降 8 K、降水 ×6（粒径长到 556 µm） | 4/4 | ✓ | ✓ |
 
 SNICAR 仍拒绝的只剩湖（含城市里的水体）与城市雪面。
+
+## 第 447 轮：湖上的 SNICAR（`patchtype = 4`）
+
+`laketem` 与 `snowwater_lake` 各有 SNICAR 分支（城市水体带 `urban_call`，一律不走）：
+- `betaprime`：SNICAR 下**不因积雪取 1**，始终按近红外占比算（`MOD_Lake.F90:724-732`）；
+- 湖层吸收 `phi`：SNICAR 下不看冰、雪，一律按消光分层，入射用 `sabg_snow_lyr(1)`（`:1073-1091`）。注意无雪时
+  `sabg_snow_lyr(1) = sabg_soil`，是 `netsolar` 按 `fsno` 拆分再重标之后的值，与 `sabg` 未必逐位相同；
+- 雪顶净通量 `hs = (((lyr(lb)+frl)-olrg)-fseng) - htvp*fevpg`、`dhsdT = 0`；三对角里雪顶行
+  `.FMA (factx, .FMA (fnx, 0.5, .FNMA (tx, 0, hs)), tx)`，非顶雪层 `.FMA (factx, lyr(j), .FMA (0.5*factx, Δfnx, tx))`，
+  雪下湖顶层的源项是 `.FMA (lyr(1), betaprime, phix)`；无雪时第一行仍用 `fgrnd1`（`betaprime*sabg`），与非 SNICAR 同形；
+- `snofrz`：`laketem` 在相变之前不改雪层冰量，进 `laketem` 时的冰量就是 `wice_soisno_bef`；
+- `snowwater_lake`：`snowwater_SNICAR` 与带气溶胶的合并/分裂复用土壤分支的构件；之后"单层全液雪移除""雪落进未冻湖"
+  两处不碰 `mss_*`，空槽由步末 `AerosolMasses` 清零；
+- 步末 `albland`：非干湖时 `dz_soisno_(1)/t_soisno_(1)` 换成 `dz_lake(1)/t_lake(1)`；`pg_snow` 取 `newsnow_lake`
+  改写过的值（`intent(inout)`，雪落进未冻湖时为 0）。干湖整步走土壤分支，那里的 SNICAR 早已就位。
+
+| 算例 | 设置 | 历史 | 重启 | release | debug |
+|---|---|---|---|---|---|
+| `sl1` | `lk`（AT-Neu 定深湖，1–2 月逐时）+ SNICAR + 气候态沉降 | 2/2 | 5/5 | ✓ | ✓ |
+| `sl2` | `sl1` 全年日输出，AT-Cold 强迫（降 8 K、降水 ×6），逐年沉降 | 12/12 | 25/25 | ✓ | ✓ |
+
+参照为纯 Fortran（`--preprocessors fortran --engine fortran`）。`sl2` 湖面封冻，12 月起 5 层雪、年末雪水当量 359 mm，
+粒径最大 953 µm，BC/粉尘随融水下移。`lk`、`dl1/2/3/5`、`sn2`/`sn5`/`sg1`/`sw_dw4c` 复跑仍逐位（release 与 debug）。
+
+动态湖 + AT-Cold 强迫（`sl3`/`sl5`）不一致，但**不开 SNICAR 的对照 `dc3`/`dc5` 同样不一致**（`dc5` 首差在 3 月 18 日的
+`fgrnd`/`xerr`），是动态湖在冷强迫下暴露的既有缺陷，另行追查。
