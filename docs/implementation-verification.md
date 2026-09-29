@@ -26328,3 +26328,20 @@ SNICAR 仍拒绝的只剩湖（含城市里的水体）与城市雪面。
 
 全量回归（release，`tmp/regress_all.sh`）：127 个算例中 125 个的历史、主重启与旁车全部逐位；`nn`/`pni` 照旧不比历史
 （`nn` 关了 history，`pni` 的参照只跑到 mkinidata）。`rst`/`rss` 的顺延没有改变任何既有算例的续跑文件。
+
+## 第 449 轮：城市跑法下的 SNICAR（`DEF_URBAN_RUN`）
+
+结论：城市 patch 上 SNICAR **不起作用**，不需要移植任何物理。`CoLMMAIN_Urban` 与 `URBAN/` 各模块里没有一处读
+`DEF_USE_SNICAR`；透水面的 `WATER_2014` 对 `patchtype == 1 .and. DEF_URBAN_RUN` 显式走普通 `snowwater`
+（`MOD_SoilSnowHydrology.F90:254`），屋顶/不透水面用普通 `snowlayerscombine/divide`，城市水体带 `urban_call`，
+`alburban` 不做雪粒老化。城市 patch 的 `snw_rds`/`mss_*`/`ssno_lyr` 原样留在重启里。
+
+所以只放开两道拒绝：`physics.rs` 不再拦 `DEF_USE_SNICAR + DEF_URBAN_RUN`；模板对城市 patch 不挂 SNICAR 状态
+（非城市 patch 照常）。
+
+验证用 `uy`（AU-Preston 城市，1–11 月）换 AU-Preston 冷强迫（`Tair` 降 15 K、降水 ×4，`make_cold_forcing.py`
+新增 `PSurf`/`Rainf` 别名）：`su1` 开 SNICAR + 气候态沉降，`uc1` 不开。两侧各自的 `su1` 与 `uc1` history 11/11 逐位相同，
+`su1` 两侧主重启里的 SNICAR 量 12/12 逐位相同 —— 即 SNICAR 在城市上两边都无作用。
+
+但 `su1`/`uc1` 的 Rust 与 Fortran **互相**不一致（1 月第 3 天 `t_roof` 起），不开 SNICAR 同样如此：城市雪面在冷强迫下暴露的
+既有缺陷，另行追查（第 450 轮）。

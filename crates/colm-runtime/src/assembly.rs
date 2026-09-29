@@ -1335,11 +1335,11 @@ fn assemble(
     } else {
         None
     };
-    let snicar = if physics.snicar {
+    // 城市 patch（1）的 SNICAR 量上游从不改写（见 `physics.rs`），不挂 SNICAR 状态，续跑写出时原样保留。
+    let snicar = if physics.snicar && patch_type != 1 {
         ensure!(
             matches!(patch_type, 0 | 2 | 3 | 4),
-            "DEF_USE_SNICAR is ported for soil, wetland, glacier and lake patches; patchtype \
-             {patch_type} needs the urban SNICAR branches"
+            "DEF_USE_SNICAR is not defined for patchtype {patch_type}"
         );
         Some(SnicarTemplate::read(&time, patch)?)
     } else {

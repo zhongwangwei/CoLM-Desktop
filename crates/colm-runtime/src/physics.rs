@@ -95,11 +95,9 @@ pub fn land_physics_parameters(
     // 关闭时 `forc_aer = 0`（`CoLMMAIN.F90:745-750`）。
     let aerosol_readin = snicar && logical(document, "DEF_Aerosol_Readin")?;
     let aerosol_climatology = logical(document, "DEF_Aerosol_Clim")?;
-    ensure!(
-        !(snicar && urban_run),
-        "DEF_USE_SNICAR with DEF_URBAN_RUN is not ported: the urban snow surfaces keep the \
-         non-SNICAR albedo"
-    );
+    // 城市 patch 上 SNICAR 不起作用：`CoLMMAIN_Urban` 与城市各模块里没有一处读 `DEF_USE_SNICAR`，
+    // `WATER_2014` 对 `patchtype == 1 .and. DEF_URBAN_RUN` 显式走普通 `snowwater`，城市水体带
+    // `urban_call`，`alburban` 不做雪粒老化。城市 patch 的 `snw_rds`/`mss_*`/`ssno_lyr` 原样保留。
     // 上游 `MOD_Namelist.F90:1932-1944`：`DEF_USE_LCT`/`DEF_USE_PFT`/`DEF_USE_PC`
     // **恰好一个**必须为真，否则 `CoLM_stop`；三者的声明默认值是
     // `.true.`/`.false.`/`.false.`，也就是默认走 LCT。

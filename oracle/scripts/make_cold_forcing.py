@@ -22,12 +22,21 @@ def qsat(t, p):
     return 0.622 * e / (p - 0.378 * e)
 
 
+def pick(nc, *names):
+    """PLUMBER2 的 FLUXNET 类文件叫 `Psurf`/`Precip`，城市站（如 AU-Preston）叫 `PSurf`/`Rainf`。"""
+    for name in names:
+        if name in nc.variables:
+            return name
+    raise SystemExit(f"none of {names} in {source}")
+
+
 with Dataset(target, "a") as nc:
+    precip = pick(nc, "Precip", "Rainf")
     t = nc["Tair"][:].astype(float)
-    p = nc["Psurf"][:].astype(float)
+    p = nc[pick(nc, "Psurf", "PSurf")][:].astype(float)
     q = nc["Qair"][:].astype(float)
     cold = t - delta
     nc["Tair"][:] = cold
     nc["Qair"][:] = q * qsat(cold, p) / qsat(t, p)
-    nc["Precip"][:] = nc["Precip"][:].astype(float) * factor
-print(f"wrote {target} (Tair - {delta} K, Precip x {factor})")
+    nc[precip][:] = nc[precip][:].astype(float) * factor
+print(f"wrote {target} (Tair - {delta} K, {precip} x {factor})")

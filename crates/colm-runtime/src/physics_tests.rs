@@ -276,14 +276,14 @@ fn snicar_switches_follow_read_namelist() {
     )
     .unwrap();
     assert!(!physics.snicar && !physics.aerosol_readin);
-    // 城市的雪面没有 SNICAR 分支。
-    let error = land_physics_parameters(
+    // 城市跑法可以开 SNICAR：城市 patch 上它不起作用，其余 patch 照常。
+    let physics = land_physics_parameters(
         &case_with("DEF_USE_SNICAR = .true.\n   DEF_URBAN_RUN = .true."),
         LandCoverScheme::Igbp,
         HEIGHTS,
     )
-    .expect_err("urban SNICAR is not ported");
-    assert!(error.to_string().contains("DEF_URBAN_RUN"), "{error}");
+    .expect("SNICAR is accepted in an urban run");
+    assert!(physics.snicar && physics.urban_run);
 }
 
 /// 优化器由运行时承担（`baseflow_optimizer`），物理参数映射不再拦它。
