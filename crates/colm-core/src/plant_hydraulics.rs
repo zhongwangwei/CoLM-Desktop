@@ -725,7 +725,6 @@ fn spac_change(
     let dfroot = vulnerability_derivative(x[ROOT], input.root_psi50_mm, input.vulnerability_shape);
     let xylem = input.stem_area_index * input.maximum_xylem_hydraulic_conductance
         / input.canopy_top_height_m;
-    let gravity = input.canopy_top_height_m * 1000.0;
     // 下面四个矩阵元的**分组**必须与上游逐字一致（`MOD_PlantHydraulic.F90:472-489`）。
     // 上游写的是 `A13 = laisun*kmax_sun*dfx*(x(xyl)-x(leafsun)) + laisun*kmax_sun*fx`，
     // 本仓库原先提成 `laisun*kmax_sun*(dfx*Δ + fx)` —— 代数等价、**舍入不等价**：
@@ -737,7 +736,9 @@ fn spac_change(
         input.shaded_leaf_area_index * input.maximum_shaded_leaf_hydraulic_conductance;
     let sunlit_gradient = x[XYLEM] - x[SUNLIT];
     let shaded_gradient = x[XYLEM] - x[SHADED];
-    let root_gradient = x[ROOT] - x[XYLEM] - gravity;
+    // GIMPLE：`_44 = FNMA(htop, 1000, x(root)-x(xyl))`——`grav1 = htop*1000` 被收进减法。
+    // `htop = 0.5` 时 500 是精确值看不出差别，`DEF_LC_HTOP0 = 0.8` 时 `f_vegwp` 差 1 ULP（第 439 轮）。
+    let root_gradient = (-input.canopy_top_height_m).mul_add(1000.0, x[ROOT] - x[XYLEM]);
     // `A`/`f` 的收缩点**直接读 GIMPLE 定下来的**（`gfortran -fdump-tree-all`，
     // 见 docs 里那一节的说明）。逐条对应：
     // * `A11 = FNMS(qflx_sun, dfsto1, P)` —— 左边是 `-P`（NEG 节点）不是乘积，

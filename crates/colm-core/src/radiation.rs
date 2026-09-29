@@ -75,44 +75,20 @@ impl ColdStartGroundAlbedo {
 ///
 /// 取值来自 `land_cover_generated.rs`（由 `xtask gen-landcover` 从上游源码生成），
 /// 那里是**唯一的**一份地类常量表。
+///
+/// `overrides` 是单点 LCT 本站的 `DEF_LC_*`（`rho`/`tau`/`chil` 那九列）；其余情形给默认（全空）。
 pub fn leaf_optics_from_land_cover_one_based(
     scheme: LandCoverScheme,
     fortran_class_index: i32,
+    overrides: crate::LandClassOverrides,
 ) -> Result<LeafOptics> {
     let land_class = fortran_class_index;
     let index = usize::try_from(land_class)
-        .map_err(|_| anyhow::anyhow!("land class {land_class} is negative"))?
-        .checked_sub(1)
-        .ok_or_else(|| anyhow::anyhow!("land class must start at one"))?;
-    let table = crate::land_cover::land_cover_tables(scheme);
-    let optics = |column: fn(&crate::land_cover_generated::LandCoverTables) -> &'static [f64]| {
-        column(table).get(index).copied().ok_or_else(|| {
-            anyhow::anyhow!("land class {land_class} is outside the selected CoLM optical table")
-        })
-    };
-    Ok(LeafOptics {
-        chil: optics(|table| table.chil)?,
-        reflectance: [
-            [
-                optics(|table| table.rhol_vis)?,
-                optics(|table| table.rhos_vis)?,
-            ],
-            [
-                optics(|table| table.rhol_nir)?,
-                optics(|table| table.rhos_nir)?,
-            ],
-        ],
-        transmittance: [
-            [
-                optics(|table| table.taul_vis)?,
-                optics(|table| table.taus_vis)?,
-            ],
-            [
-                optics(|table| table.taul_nir)?,
-                optics(|table| table.taus_nir)?,
-            ],
-        ],
-    })
+        .map_err(|_| anyhow::anyhow!("land class {land_class} is negative"))?;
+    ensure!(index >= 1, "land class must start at one");
+    Ok(crate::ClassConstants::new(scheme, index)?
+        .with_overrides(overrides)
+        .leaf_optics())
 }
 
 /// Broadband arrays produced by CoLM's cold-start `albland` path.

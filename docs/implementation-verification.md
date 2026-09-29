@@ -25957,3 +25957,32 @@ mksrfdata 判为失败（实测 `ci6x`：日志末行 "Successful in surface dat
 | `nd1c` | `nd1` 从 7 月 1 日续跑 | 8/8 | 59/59 | ✓ | — |
 
 `f_ndep_to_sminn` 逐月变化且比年度文件（`bu`）大一个量级，确认走到了月度数据。年度路径回归 `bu bl by2 cr cf1 ci6` 逐位不变。
+
+## 第 439 轮：`DEF_LC_*` 地类表逐列覆盖（单点 LCT）
+
+你选的那一项包含"再接 `DEF_LC_C3C4`"。实际缺的是一整张表：除已移植的 PHS 九列外，另有 28 个实数列加 `C3C4`，运行期
+一律拒绝，而预处理（colm-init）**完全不读**，设了也会静默用表值。
+
+- 上游 `apply_lc_scalar_overrides`（`MOD_Const_LC.F90:879-930`）只在单点、`DEF_USE_LCT` 时对 `SITE_landtype` 生效，
+  在 `Init_LC_Const` 里、根系分布之前——mksrfdata、mkinidata、colm 三处都调。
+- colm-core：`LandClassOverrides`，`ClassConstants::with_overrides`，各访问器先看覆盖；`root_fraction` 与
+  `leaf_optics_from_land_cover_one_based` 带覆盖参数。
+- colm-runtime：`physics.rs` 解析（LCT 才生效，`C3C4` 只许 -1/0/1）；城市单点混有别的地类 patch，与覆盖同用时拒绝。
+- colm-init：覆盖随 `RestartTuning` 走；单点冷启动去掉三处硬编码——
+  - `fveg = green = 1` 改为照 `LAI_readin` 除以 `fveg0`（非月度 LAI 时 `tsai = sai0`）；
+  - `htop0`/`hbot0` 表叠上覆盖；
+  - `z0m = htop*0.1` 改为 `htop*z0mr`。
+- `DEF_LC_RESPCP` 覆盖了也无效（upstream-bugs 第 32 条）。
+
+**暴露的旧缺陷**：
+- `spacAF_twoleaf` 的 `x(root) - x(xyl) - htop*1000`，GIMPLE 是 `FNMA(htop, 1000, x(root)-x(xyl))`，Rust 原先把
+  `htop*1000` 单独舍入。`htop = 0.5` 时 500 是精确值看不出差别，`DEF_LC_HTOP0 = 0.8` 时 `f_vegwp` 第 3 天起差 1 ULP。已修。
+- 冷启动 TOPMODEL 方法 0 的四个未赋值量，Rust 写的是自拟占位值，纯 Fortran 写 0（upstream-bugs 第 31 条），改为 0。
+  不设覆盖的 `bsx`（纯 Fortran 预处理）先验证过这四个量不影响结果。
+
+| 算例 | 设置 | 冷启动（常数+时间重启） | 历史 | 重启+旁车 | release | debug |
+|---|---|---|---|---|---|---|
+| `lc1` | AT-Neu IGBP 草地，28 列 + `C3C4 = 0`（C3→C4）全部覆盖，PHS 开 | 逐位 | 1/1 | ✓ | ✓ | ✓ |
+| `bsx` | 同一站点不设覆盖，纯 Fortran 预处理 | — | 1/1 | ✓ | ✓ | — |
+
+全量回归（release）91 例逐位（另 `ci6x` 是临时副本、`nn`/`pni` 不写历史）；`topoweti` 改动后复跑 `lc1 bsx bs bl cr` 逐位。

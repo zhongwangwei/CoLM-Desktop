@@ -102,6 +102,9 @@ pub struct RestartTuning {
     pub trsmx0: f64,
     pub tcrit: f64,
     pub wetwatmax: f64,
+    /// 单点 LCT 本站地类的 `DEF_LC_*` 逐列覆盖（`apply_lc_scalar_overrides`，`Init_LC_Const` 在
+    /// mksrfdata/mkinidata/colm 三处都调）。PFT/PC 下为空；只有单点路径读它。
+    pub land_class: colm_core::LandClassOverrides,
 }
 
 impl Default for RestartTuning {
@@ -125,6 +128,7 @@ impl Default for RestartTuning {
             trsmx0: 2.0e-4,
             tcrit: 2.5,
             wetwatmax: 200.0,
+            land_class: colm_core::LandClassOverrides::default(),
         }
     }
 }
@@ -171,6 +175,27 @@ impl RestartTuning {
             "DEF_TUNING_SMPMIN_HR must be smaller than DEF_TUNING_SMPMAX_HR"
         );
         // tcrit is a fixed 2.5 K in MOD_Initialize, not a namelist option.
+        if crate::single_point::single_point_subgrid(document, None)?
+            == crate::single_point::SinglePointSubgrid::Lct
+        {
+            for name in colm_core::LandClassOverrides::REAL_NAMES {
+                if let Some(value) = document.get(name) {
+                    let value = value
+                        .as_f64()
+                        .with_context(|| format!("{name} must be a real value"))?;
+                    // `LC_OVERRIDE_UNSET = -1.e36`：显式写成哨兵也算没设。
+                    if value != -1.0e36 {
+                        tuning.land_class.set_real(name, value)?;
+                    }
+                }
+            }
+            tuning.land_class.c3c4 = match document.get("DEF_LC_C3C4") {
+                None => None,
+                Some(colm_namelist::Value::Int(-1)) => None,
+                Some(colm_namelist::Value::Int(value @ (0 | 1))) => Some(i32::try_from(*value)?),
+                Some(other) => bail!("DEF_LC_C3C4 must be the integer -1, 0, or 1, got {other:?}"),
+            };
+        }
         Ok(tuning)
     }
 }

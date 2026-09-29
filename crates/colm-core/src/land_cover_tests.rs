@@ -64,7 +64,7 @@ fn class_optics_match_the_land_cover_lookup() {
         let class = ClassConstants::new(scheme, fortran_index).unwrap();
         assert_eq!(
             class.leaf_optics(),
-            crate::leaf_optics_from_land_cover_one_based(scheme, fortran_index as i32).unwrap(),
+            crate::leaf_optics_from_land_cover_one_based(scheme, fortran_index as i32, crate::LandClassOverrides::default()).unwrap(),
             "{scheme:?} class {fortran_index}"
         );
     }
@@ -94,6 +94,7 @@ fn schenk_jackson_root_fractions_match_the_upstream_expression() {
         1,
         RootFractionScheme::SchenkJackson,
         &depths,
+        crate::LandClassOverrides::default(),
     )
     .unwrap();
     for (layer, (actual, expected)) in fractions
@@ -122,6 +123,7 @@ fn schenk_jackson_fractions_sum_to_one_for_every_class() {
                 fortran_index as i32,
                 RootFractionScheme::SchenkJackson,
                 &depths,
+                crate::LandClassOverrides::default(),
             )
             .unwrap();
             assert_eq!(fractions.len(), 10);
@@ -152,6 +154,7 @@ fn the_exponential_scheme_does_not_conserve_the_total() {
                 fortran_index as i32,
                 RootFractionScheme::Exponential,
                 &depths,
+                crate::LandClassOverrides::default(),
             )
             .unwrap();
             let class = ClassConstants::new(scheme, fortran_index).unwrap();

@@ -990,6 +990,7 @@ pub fn write_spatial_pft_cold_time_restarts(
                     crate::leaf_optics_from_land_cover_one_based(
                         LandCoverScheme::Igbp,
                         patches.class[patch],
+                        colm_core::LandClassOverrides::default(),
                     )?,
                     common_state.lai[patch],
                     common_state.sai[patch],

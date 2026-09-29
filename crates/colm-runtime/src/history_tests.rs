@@ -36,6 +36,7 @@ fn physics() -> LandPhysicsParameters {
         use_pc: false,
         bgc: None,
         irrigation: None,
+        land_class_overrides: colm_core::LandClassOverrides::default(),
         hydraulic_model: HydraulicModel::VanGenuchten,
         variably_saturated_flow: false,
         plant_hydraulics: false,

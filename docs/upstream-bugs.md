@@ -218,6 +218,20 @@
 - **影响**：每次成功的单点 mksrfdata 都以退出码 1 结束，调用方（`colm-cli`）按失败处理，后续阶段不跑。
 - **处理**：本地把这一处改回 `STOP`（`vendor/PROVENANCE.md`），应当报给上游。
 
+### 31. TOPMODEL 方法 0 把未赋值的 `topoweti`/`alp_twi`/`chi_twi`/`mu_twi` 写进常数重启
+
+- **位置**：`mkinidata/MOD_Initialize.F90:513-564`。
+- **原因**：`DEF_TOPMOD_method == 0` 只赋 `fsatmax`/`fsatdcf`，另外四个量只在方法 1、2 读文件；分配后没有初值。
+- **影响**：写进常数重启的是未定义内存（单点纯 Fortran 实测为 0）。方法 0 下它们不参与计算，结果不受影响。
+- **处理**：`vendor/` 未改；Rust 写 0（原先写的是自拟占位值 9.27/1.34/1.61/6.95），与实测一致。
+
+### 32. `DEF_LC_RESPCP` 不起作用
+
+- **位置**：`main/MOD_Const_LC.F90:902`（覆盖）、`main/MOD_AssimStomataConductance.F90:592`。
+- **原因**：`stomata` 里的 `respcp` 是局部量，每次按 `0.015*c3 + 0.025*c4` 重算，地类表的 `respcp` 从未传进去。
+- **影响**：设了 `DEF_LC_RESPCP` 也不改变任何结果。
+- **处理**：Rust 照样解析、保存，不使用。
+
 ## 二、TRACER 编译开关改变了物理（需要上游确认哪一边是对的）
 
 这一版上游在很多地方给 TRACER 构建和非 TRACER 构建写了**不同的物理**，不只是记账不同。

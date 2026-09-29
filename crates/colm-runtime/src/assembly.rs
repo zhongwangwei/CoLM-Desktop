@@ -76,6 +76,8 @@ pub struct LandPhysicsParameters {
     pub bgc: Option<colm_core::bgc_driver::BgcSwitches>,
     /// `DEF_USE_IRRIGATION`（只在 CROP 内核生效，`colm-rs --crop` 之外清成 `None`）。
     pub irrigation: Option<colm_core::IrrigationSettings>,
+    /// 单点 LCT 的 `DEF_LC_*` 地类表逐列覆盖（PHS 九列在 `plant_hydraulic_overrides`）；PFT/PC 下为空。
+    pub land_class_overrides: colm_core::LandClassOverrides,
     /// namelist 选的土壤水力关系；决定常数重启里读 `bsw` 还是五个 van Genuchten 场。
     pub hydraulic_model: HydraulicModel,
     /// `DEF_USE_VariablySaturatedFlow` **生效后**的取值。
@@ -1163,7 +1165,8 @@ fn assemble(
                 physics.land_cover_scheme
             )
         })?;
-    let class = ClassConstants::new(physics.land_cover_scheme, land_class)?;
+    let class = ClassConstants::new(physics.land_cover_scheme, land_class)?
+        .with_overrides(physics.land_class_overrides);
     // `MOD_LAIReadin.F90:128-145`（`USE_SITE_LAI` 那条）：水体与地类 0 是 0，
     // 否则看 `fveg0`。地类 0 在上面的校验里已经被拒，所以只剩水体那一条。
     let vegetation_greenness = if land_class
@@ -1198,6 +1201,7 @@ fn assemble(
         land_class as i32,
         physics.root_fraction_scheme,
         &interface_depth_m,
+        physics.land_class_overrides,
     )?;
     // `eroot` 把 `soil_water_stress` 直接定义成 sum(rootfr * resistance)，而每一步
     // 都要求胁迫落在 [0, 1]；所以**求和不得超过 1**。这里只守上限，不要求等于 1：
@@ -1506,8 +1510,9 @@ impl StandardLctRestartTemplate {
         }
         // `MOD_LAIReadin.F90:136-157`：读进来之后按地类再处理一遍 —— 水体（与地类 0）清零，
         // 否则除以 `fveg0`（`DEF_LAI_MONTHLY` 下 `tsai` 也除），`fveg0 <= 0` 清零。
-        // 两张表的 `fveg0` 都是 1.0，所以除法对植被地类是恒等的；水体那一条才有实效。
+        // 两张表的 `fveg0` 都是 1.0，没有 `DEF_LC_FVEG0` 时除法对植被地类是恒等的。
         let fveg0 = ClassConstants::new(self.physics.land_cover_scheme, self.land_class)?
+            .with_overrides(self.physics.land_class_overrides)
             .maximum_vegetation_fraction();
         let (tlai, tsai) = if self.land_class
             == colm_core::waterbody_class(self.physics.land_cover_scheme)
@@ -1950,6 +1955,7 @@ impl StandardLctRestartTemplate {
             optics: colm_core::leaf_optics_from_land_cover_one_based(
                 self.physics.land_cover_scheme,
                 i32::try_from(self.land_class)?,
+                self.physics.land_class_overrides,
             )?,
             wet_snow_fraction: step.wet_snow_fraction,
             snow_water_equivalent_mm: state.snow.water_equivalent_kg_m2,
@@ -2800,6 +2806,7 @@ impl UrbanTemplate {
             leaf_optics: colm_core::leaf_optics_from_land_cover_one_based(
                 physics.land_cover_scheme,
                 i32::try_from(land_class)?,
+                physics.land_class_overrides,
             )?,
             soil_node_depth_m: soil_grid.0.to_vec(),
             soil_layer_thickness_m: soil_grid.1.to_vec(),

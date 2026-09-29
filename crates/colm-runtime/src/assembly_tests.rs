@@ -24,6 +24,7 @@ fn physics(timestep_seconds: f64) -> LandPhysicsParameters {
         use_pc: false,
         bgc: None,
         irrigation: None,
+        land_class_overrides: colm_core::LandClassOverrides::default(),
         hydraulic_model: HydraulicModel::VanGenuchten,
         // 夹具跑的是经典 Richards 路径；VSF 的编排还没移植。
         variably_saturated_flow: false,
@@ -763,6 +764,7 @@ fn the_land_cover_tables_supply_the_root_fraction_and_leaf_geometry() {
         &colm_core::colm_soil_grid(SOIL_LAYERS)
             .unwrap()
             .interface_depth_m,
+        colm_core::LandClassOverrides::default(),
     )
     .unwrap();
     assert_eq!(template.root_fraction, expected);

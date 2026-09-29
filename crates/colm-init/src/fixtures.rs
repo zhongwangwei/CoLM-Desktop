@@ -208,6 +208,7 @@ impl SyntheticRestart {
             trsmx0: 2.0e-4,
             tcrit: 2.5,
             wetwatmax: 0.4,
+            land_class: colm_core::LandClassOverrides::default(),
         };
         let mut temperature_k = column(280.0, 0.5, 1.0);
         let mut liquid_water_kg_m2 = soil_water_column(0.4 * 0.5, 1000.0, 2.0);

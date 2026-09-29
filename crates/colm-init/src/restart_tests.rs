@@ -532,6 +532,7 @@ fn input<'a>(
             trsmx0: 14.0,
             tcrit: 15.0,
             wetwatmax: 16.0,
+            land_class: colm_core::LandClassOverrides::default(),
         },
         uses_van_genuchten: true,
         bedrock: None,

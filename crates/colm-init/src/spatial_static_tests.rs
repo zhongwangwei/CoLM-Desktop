@@ -541,7 +541,7 @@ fn spatial_lct_writes_enabled_topmodel_and_simple_terrain_fields() {
     let block = netcdf::open(files.block).unwrap();
     assert_eq!(values_f64(&block, "topoweti").unwrap(), [9.0]);
     assert_eq!(values_f64(&block, "fsatmax").unwrap(), [0.4]);
-    assert_eq!(values_f64(&block, "mu_twi").unwrap(), [6.95]);
+    assert_eq!(values_f64(&block, "mu_twi").unwrap(), [0.0]);
     assert_eq!(values_f64(&block, "cur_patches").unwrap(), [0.25]);
     assert_eq!(
         values_f64(&block, "slp_type_patches").unwrap(),
@@ -574,7 +574,8 @@ fn spatial_runoff_topmodel_methods_read_only_their_selected_sources() {
     let block = netcdf::open(write_spatial_lct_constant_restart(method0).unwrap().block).unwrap();
     assert_eq!(values_f64(&block, "fsatmax").unwrap(), [0.38]);
     assert_eq!(values_f64(&block, "fsatdcf").unwrap(), [0.125]);
-    assert_eq!(values_f64(&block, "topoweti").unwrap(), [9.27]);
+    // 方法 0 上游不给 `topoweti` 赋值，纯 Fortran 单点写出 0。
+    assert_eq!(values_f64(&block, "topoweti").unwrap(), [0.0]);
     drop(block);
 
     for (name, value) in [
@@ -592,7 +593,7 @@ fn spatial_runoff_topmodel_methods_read_only_their_selected_sources() {
     assert_eq!(values_f64(&block, "topoweti").unwrap(), [9.0]);
     assert_eq!(values_f64(&block, "fsatmax").unwrap(), [0.4]);
     assert_eq!(values_f64(&block, "fsatdcf").unwrap(), [0.3]);
-    assert_eq!(values_f64(&block, "alp_twi").unwrap(), [1.34]);
+    assert_eq!(values_f64(&block, "alp_twi").unwrap(), [0.0]);
     drop(block);
 
     for (name, value) in [

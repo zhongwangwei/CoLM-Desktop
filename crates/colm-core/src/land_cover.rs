@@ -98,9 +98,123 @@ pub struct PlantHydraulicOverrides {
     pub vulnerability_shape: Option<f64>,
 }
 
+/// `apply_lc_scalar_overrides`（`MOD_Const_LC.F90:879-930`）里 PHS 之外的地类表逐列覆盖。
+///
+/// 上游只在单点、`DEF_USE_LCT` 时对本站地类（`SITE_landtype`）生效，在 `Init_LC_Const` 里、根系分布
+/// 之前覆盖——所以 `d50`/`beta` 的覆盖也改 `rootfr`。`vmax25` 以 µmol/m²/s 给出，与表值一样再乘 1e-6。
+/// `respcp` 覆盖了也不起作用：`stomata` 把同名局部量按 `0.015*c3 + 0.025*c4` 重算
+/// （`MOD_AssimStomataConductance.F90:592`），这里只为不丢设置而保留。
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct LandClassOverrides {
+    pub htop0: Option<f64>,
+    pub hbot0: Option<f64>,
+    pub fveg0: Option<f64>,
+    pub sai0: Option<f64>,
+    pub z0mr: Option<f64>,
+    pub displar: Option<f64>,
+    pub sqrtdi: Option<f64>,
+    pub chil: Option<f64>,
+    pub rhol_vis: Option<f64>,
+    pub rhol_nir: Option<f64>,
+    pub rhos_vis: Option<f64>,
+    pub rhos_nir: Option<f64>,
+    pub taul_vis: Option<f64>,
+    pub taul_nir: Option<f64>,
+    pub taus_vis: Option<f64>,
+    pub taus_nir: Option<f64>,
+    pub vmax25_umol: Option<f64>,
+    pub effcon: Option<f64>,
+    pub c3c4: Option<i32>,
+    pub respcp: Option<f64>,
+    pub shti: Option<f64>,
+    pub slti: Option<f64>,
+    pub trda: Option<f64>,
+    pub trdm: Option<f64>,
+    pub trop: Option<f64>,
+    pub hhti: Option<f64>,
+    pub hlti: Option<f64>,
+    pub extkn: Option<f64>,
+    pub d50: Option<f64>,
+    pub beta: Option<f64>,
+}
+
+impl LandClassOverrides {
+    /// namelist 名（`DEF_LC_*`，不含 PHS 九列与 `C3C4`）→ 字段。
+    pub const REAL_NAMES: [&'static str; 29] = [
+        "DEF_LC_HTOP0",
+        "DEF_LC_HBOT0",
+        "DEF_LC_FVEG0",
+        "DEF_LC_SAI0",
+        "DEF_LC_Z0MR",
+        "DEF_LC_DISPLAR",
+        "DEF_LC_SQRTDI",
+        "DEF_LC_CHIL",
+        "DEF_LC_RHOL_VIS",
+        "DEF_LC_RHOL_NIR",
+        "DEF_LC_RHOS_VIS",
+        "DEF_LC_RHOS_NIR",
+        "DEF_LC_TAUL_VIS",
+        "DEF_LC_TAUL_NIR",
+        "DEF_LC_TAUS_VIS",
+        "DEF_LC_TAUS_NIR",
+        "DEF_LC_VMAX25",
+        "DEF_LC_EFFCON",
+        "DEF_LC_RESPCP",
+        "DEF_LC_SHTI",
+        "DEF_LC_SLTI",
+        "DEF_LC_TRDA",
+        "DEF_LC_TRDM",
+        "DEF_LC_TROP",
+        "DEF_LC_HHTI",
+        "DEF_LC_HLTI",
+        "DEF_LC_EXTKN",
+        "DEF_LC_D50",
+        "DEF_LC_BETA",
+    ];
+
+    /// 按 [`Self::REAL_NAMES`] 的名字设一列；名字不认识时报错。
+    pub fn set_real(&mut self, name: &str, value: f64) -> Result<()> {
+        let slot = match name {
+            "DEF_LC_HTOP0" => &mut self.htop0,
+            "DEF_LC_HBOT0" => &mut self.hbot0,
+            "DEF_LC_FVEG0" => &mut self.fveg0,
+            "DEF_LC_SAI0" => &mut self.sai0,
+            "DEF_LC_Z0MR" => &mut self.z0mr,
+            "DEF_LC_DISPLAR" => &mut self.displar,
+            "DEF_LC_SQRTDI" => &mut self.sqrtdi,
+            "DEF_LC_CHIL" => &mut self.chil,
+            "DEF_LC_RHOL_VIS" => &mut self.rhol_vis,
+            "DEF_LC_RHOL_NIR" => &mut self.rhol_nir,
+            "DEF_LC_RHOS_VIS" => &mut self.rhos_vis,
+            "DEF_LC_RHOS_NIR" => &mut self.rhos_nir,
+            "DEF_LC_TAUL_VIS" => &mut self.taul_vis,
+            "DEF_LC_TAUL_NIR" => &mut self.taul_nir,
+            "DEF_LC_TAUS_VIS" => &mut self.taus_vis,
+            "DEF_LC_TAUS_NIR" => &mut self.taus_nir,
+            "DEF_LC_VMAX25" => &mut self.vmax25_umol,
+            "DEF_LC_EFFCON" => &mut self.effcon,
+            "DEF_LC_RESPCP" => &mut self.respcp,
+            "DEF_LC_SHTI" => &mut self.shti,
+            "DEF_LC_SLTI" => &mut self.slti,
+            "DEF_LC_TRDA" => &mut self.trda,
+            "DEF_LC_TRDM" => &mut self.trdm,
+            "DEF_LC_TROP" => &mut self.trop,
+            "DEF_LC_HHTI" => &mut self.hhti,
+            "DEF_LC_HLTI" => &mut self.hlti,
+            "DEF_LC_EXTKN" => &mut self.extkn,
+            "DEF_LC_D50" => &mut self.d50,
+            "DEF_LC_BETA" => &mut self.beta,
+            other => anyhow::bail!("{other} is not a land-class scalar override"),
+        };
+        *slot = Some(value);
+        Ok(())
+    }
+}
+
 pub struct ClassConstants {
     scheme: LandCoverScheme,
     class: usize,
+    overrides: LandClassOverrides,
 }
 
 impl ClassConstants {
@@ -115,7 +229,23 @@ impl ClassConstants {
         Ok(Self {
             scheme,
             class: class_number,
+            overrides: LandClassOverrides::default(),
         })
+    }
+
+    /// 叠上本站的 `DEF_LC_*` 覆盖（只该用于单点 LCT 的本站地类）。
+    pub fn with_overrides(mut self, overrides: LandClassOverrides) -> Self {
+        self.overrides = overrides;
+        self
+    }
+
+    /// 表值，有覆盖时取覆盖。
+    fn column(
+        &self,
+        column: fn(&'static LandCoverTables) -> &'static [f64],
+        over: fn(&LandClassOverrides) -> Option<f64>,
+    ) -> f64 {
+        over(&self.overrides).unwrap_or_else(|| self.value(column))
     }
 
     fn tables(&self) -> &'static LandCoverTables {
@@ -146,11 +276,11 @@ impl ClassConstants {
 
     /// `Init_LC_Const` 把植被最大羧化速率从 `umol/m2/s` 折成 `mol/m2/s`。
     pub fn maximum_carboxylation_25c_mol_m2_s(&self) -> f64 {
-        self.value(|table| table.vmax25) * 1.0e-6
+        self.column(|table| table.vmax25, |o| o.vmax25_umol) * 1.0e-6
     }
 
     pub fn canopy_top_m(&self) -> f64 {
-        self.value(|table| table.htop0)
+        self.column(|table| table.htop0, |o| o.htop0)
     }
 
     /// `lambda`：WUE 气孔模型的边际耗水成本**基准值**。
@@ -163,46 +293,46 @@ impl ClassConstants {
     }
 
     pub fn canopy_bottom_m(&self) -> f64 {
-        self.value(|table| table.hbot0)
+        self.column(|table| table.hbot0, |o| o.hbot0)
     }
 
     pub fn vegetation_fraction(&self) -> f64 {
-        self.value(|table| table.fveg0)
+        self.column(|table| table.fveg0, |o| o.fveg0)
     }
 
     pub fn stem_area_index(&self) -> f64 {
-        self.value(|table| table.sai0)
+        self.column(|table| table.sai0, |o| o.sai0)
     }
 
     /// `z0mr`：粗糙度长与冠层高度之比。
     pub fn roughness_to_height_ratio(&self) -> f64 {
-        self.value(|table| table.z0mr)
+        self.column(|table| table.z0mr, |o| o.z0mr)
     }
 
     /// `displar`：零平面位移与冠层高度之比。
     pub fn displacement_to_height_ratio(&self) -> f64 {
-        self.value(|table| table.displar)
+        self.column(|table| table.displar, |o| o.displar)
     }
 
     /// `sqrtdi`：叶片尺度的 `m**-0.5`。
     pub fn inverse_sqrt_leaf_dimension_m_neg_half(&self) -> f64 {
-        self.value(|table| table.sqrtdi)
+        self.column(|table| table.sqrtdi, |o| o.sqrtdi)
     }
 
     /// `fveg0`：该地类的最大植被覆盖度。
     ///
     /// `MOD_LAIReadin.F90:132-143` 用它判 `green`：`fveg0(m) > 0` 才是绿叶。
     pub fn maximum_vegetation_fraction(&self) -> f64 {
-        self.value(|table| table.fveg0)
+        self.column(|table| table.fveg0, |o| o.fveg0)
     }
 
     /// `chil`：叶倾角分布参数，即内核里的 `leaf_angle_distribution`。
     pub fn leaf_angle_distribution(&self) -> f64 {
-        self.value(|table| table.chil)
+        self.column(|table| table.chil, |o| o.chil)
     }
 
     pub fn extinction_coefficient(&self) -> f64 {
-        self.value(|table| table.extkn)
+        self.column(|table| table.extkn, |o| o.extkn)
     }
 
     /// 地类表里的九个植物水力性状，再按 `DEF_LC_*` 覆盖。
@@ -256,12 +386,12 @@ impl ClassConstants {
 
     /// `d50`：根系分布的特征深度。
     pub fn root_d50(&self) -> f64 {
-        self.value(|table| table.d50)
+        self.column(|table| table.d50, |o| o.d50)
     }
 
     /// `beta`：根系分布的形参。
     pub fn root_beta(&self) -> f64 {
-        self.value(|table| table.beta)
+        self.column(|table| table.beta, |o| o.beta)
     }
 
     /// `roota` / `rootb`：双指数根系分布的两个衰减率。
@@ -279,16 +409,16 @@ impl ClassConstants {
     /// `LeafPhotosynthesisInput::canopy_integration` 逐群体传入。
     pub fn biochemistry(&self) -> crate::LeafBiochemistry {
         crate::LeafBiochemistry {
-            quantum_efficiency: self.value(|table| table.effcon),
+            quantum_efficiency: self.column(|table| table.effcon, |o| o.effcon),
             maximum_carboxylation_25c_mol_m2_s: self.maximum_carboxylation_25c_mol_m2_s(),
             c3c4: self.c3c4(),
-            low_temperature_slope: self.value(|table| table.slti),
-            low_temperature_half_k: self.value(|table| table.hlti),
-            high_temperature_slope: self.value(|table| table.shti),
-            high_temperature_half_k: self.value(|table| table.hhti),
-            respiration_temperature_slope: self.value(|table| table.trda),
-            respiration_temperature_half_k: self.value(|table| table.trdm),
-            optimum_temperature_k: self.value(|table| table.trop),
+            low_temperature_slope: self.column(|table| table.slti, |o| o.slti),
+            low_temperature_half_k: self.column(|table| table.hlti, |o| o.hlti),
+            high_temperature_slope: self.column(|table| table.shti, |o| o.shti),
+            high_temperature_half_k: self.column(|table| table.hhti, |o| o.hhti),
+            respiration_temperature_slope: self.column(|table| table.trda, |o| o.trda),
+            respiration_temperature_half_k: self.column(|table| table.trdm, |o| o.trdm),
+            optimum_temperature_k: self.column(|table| table.trop, |o| o.trop),
             medlyn_g1: self.value(|table| table.g1),
             medlyn_g0: self.value(|table| table.g0),
             ball_berry_slope: self.value(|table| table.gradm),
@@ -298,31 +428,33 @@ impl ClassConstants {
 
     /// `c3c4`：1 = C3，0 = C4。
     pub fn c3c4(&self) -> i32 {
-        self.tables().c3c4[self.class - 1]
+        self.overrides
+            .c3c4
+            .unwrap_or(self.tables().c3c4[self.class - 1])
     }
 
     /// `Init_LC_Const` 的 `rho(1,1,:)=rhol_vis` 那一组赋值。
     pub fn leaf_optics(&self) -> LeafOptics {
         LeafOptics {
-            chil: self.value(|table| table.chil),
+            chil: self.column(|table| table.chil, |o| o.chil),
             reflectance: [
                 [
-                    self.value(|table| table.rhol_vis),
-                    self.value(|table| table.rhos_vis),
+                    self.column(|table| table.rhol_vis, |o| o.rhol_vis),
+                    self.column(|table| table.rhos_vis, |o| o.rhos_vis),
                 ],
                 [
-                    self.value(|table| table.rhol_nir),
-                    self.value(|table| table.rhos_nir),
+                    self.column(|table| table.rhol_nir, |o| o.rhol_nir),
+                    self.column(|table| table.rhos_nir, |o| o.rhos_nir),
                 ],
             ],
             transmittance: [
                 [
-                    self.value(|table| table.taul_vis),
-                    self.value(|table| table.taus_vis),
+                    self.column(|table| table.taul_vis, |o| o.taul_vis),
+                    self.column(|table| table.taus_vis, |o| o.taus_vis),
                 ],
                 [
-                    self.value(|table| table.taul_nir),
-                    self.value(|table| table.taus_nir),
+                    self.column(|table| table.taul_nir, |o| o.taul_nir),
+                    self.column(|table| table.taus_nir, |o| o.taus_nir),
                 ],
             ],
         }
@@ -342,6 +474,7 @@ pub fn root_fraction(
     land_class: i32,
     root_scheme: RootFractionScheme,
     interface_depth_m: &[f64],
+    overrides: LandClassOverrides,
 ) -> Result<Vec<f64>> {
     let classes = land_cover_classes(scheme);
     let index = usize::try_from(land_class)
@@ -361,7 +494,7 @@ pub fn root_fraction(
     // `zi_soi(nsl)`，`nsl` 自 1 起。
     let zi = |nsl: usize| interface_depth_m[nsl];
     // 上游的 `i` 是 1 基地类下标。
-    let class = ClassConstants::new(scheme, index)?;
+    let class = ClassConstants::new(scheme, index)?.with_overrides(overrides);
     let mut fractions = vec![0.0; layers];
     match root_scheme {
         RootFractionScheme::SchenkJackson => {

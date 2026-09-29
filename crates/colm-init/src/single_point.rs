@@ -859,11 +859,18 @@ fn write_single_point_constant_restart_from_surface(
             .collect::<Vec<_>>()
     });
     let observed_top = vec![surface.canopy_height_m; patches];
+    let (top_table, bottom_table) =
+        canopy_tables(config.land_cover, surface.land_class, config.tuning.land_class);
     let mut canopy = match config.land_cover {
-        LandCoverScheme::Igbp => {
-            derive_igbp_canopy(&class, &kind, &observed_top, &IGBP_TOP, &IGBP_BOTTOM, None)?
-        }
-        LandCoverScheme::Usgs => derive_usgs_canopy(&class, &USGS_TOP, &USGS_BOTTOM)?,
+        LandCoverScheme::Igbp => derive_igbp_canopy(
+            &class,
+            &kind,
+            &observed_top,
+            &top_table,
+            &bottom_table,
+            None,
+        )?,
+        LandCoverScheme::Usgs => derive_usgs_canopy(&class, &top_table, &bottom_table)?,
     };
     if let Some((top, bottom)) = canopy_override {
         canopy.patch_top_m.clone_from_slice(top);
@@ -1239,20 +1246,45 @@ fn write_single_point_scalar_cold_time_restarts(
         )
     };
     let water = is_water_class(config.land_cover, surface.land_class);
+    let site_class = colm_core::ClassConstants::new(
+        config.land_cover,
+        usize::try_from(surface.land_class).context("the site land class is negative")?,
+    )?
+    .with_overrides(config.tuning.land_class);
+    // `MOD_LAIReadin.F90:130-157`：水体清零；否则 `fveg = fveg0`，`fveg0 > 0` 时 `tlai/fveg0`、
+    // 月度 LAI 时 `tsai/fveg0`（8 天 LAI 时 `tsai = sai0`）。表里植被地类的 `fveg0` 都是 1，
+    // 只有 `DEF_LC_FVEG0` 会让除法起作用。城市单点里的城市 patch 被上游跳过，保持原样。
     let (fveg, green) = if water {
         total_lai = 0.0;
         total_sai = 0.0;
         (0.0, 0.0)
-    } else {
+    } else if kind == 1 {
         (1.0, 1.0)
+    } else {
+        let fveg0 = site_class.maximum_vegetation_fraction();
+        if fveg0 > 0.0 {
+            total_lai /= fveg0;
+            total_sai = if run.lai_monthly {
+                total_sai / fveg0
+            } else {
+                site_class.stem_area_index()
+            };
+            (fveg0, 1.0)
+        } else {
+            total_lai = 0.0;
+            total_sai = 0.0;
+            (fveg0, 0.0)
+        }
     };
     let snow_depth_m = initial_snow_depth(run, surface, month)?;
     let snow_water_equivalent_mm = snow_depth_m * 250.0;
+    // `z0m = htop * z0mr`（`MOD_IniTimeVariable.F90:508`）。
     let roughness = canopy_top(
         run.static_run.land_cover,
         surface.land_class,
         surface.canopy_height_m,
-    )? * 0.1;
+        config.tuning.land_class,
+    )? * site_class.roughness_to_height_ratio();
     let snow_cover = derive_snow_cover(
         total_lai,
         total_sai,
@@ -1323,7 +1355,11 @@ fn write_single_point_scalar_cold_time_restarts(
             kind,
             &ground,
             &fractions,
-            leaf_optics_from_land_cover_one_based(config.land_cover, surface.land_class)?,
+            leaf_optics_from_land_cover_one_based(
+                config.land_cover,
+                surface.land_class,
+                config.tuning.land_class,
+            )?,
             lai,
             sai,
             cosine_zenith.max(0.001),
@@ -1357,7 +1393,11 @@ fn write_single_point_scalar_cold_time_restarts(
             cold_start_broadband_radiation_from_ground(
                 kind,
                 ground,
-                leaf_optics_from_land_cover_one_based(config.land_cover, surface.land_class)?,
+                leaf_optics_from_land_cover_one_based(
+                config.land_cover,
+                surface.land_class,
+                config.tuning.land_class,
+            )?,
                 lai,
                 sai,
                 0.0,
@@ -1610,7 +1650,11 @@ fn write_single_point_urban_cold_time_restarts(
     let mut radiation = cold_start_broadband_radiation_from_ground(
         kind,
         ground,
-        leaf_optics_from_land_cover_one_based(config.land_cover, surface.land_class)?,
+        leaf_optics_from_land_cover_one_based(
+                config.land_cover,
+                surface.land_class,
+                config.tuning.land_class,
+            )?,
         lai,
         sai,
         0.0,
@@ -1629,7 +1673,11 @@ fn write_single_point_urban_cold_time_restarts(
         wall_albedo: urban_albedo_matrix(&initialized.data.wall_albedo, "ALB_WALL")?,
         impervious_albedo: urban_albedo_matrix(&initialized.data.impervious_albedo, "ALB_IMPROAD")?,
         pervious_albedo: urban_albedo_matrix(&initialized.data.pervious_albedo, "ALB_PERROAD")?,
-        leaf_optics: leaf_optics_from_land_cover_one_based(config.land_cover, surface.land_class)?,
+        leaf_optics: leaf_optics_from_land_cover_one_based(
+                config.land_cover,
+                surface.land_class,
+                config.tuning.land_class,
+            )?,
         vegetation_fraction: fveg,
         vegetation_center_height_m: initialized.state.roof_height_m[0]
             .min((initialized.state.tree_top_m[0] + initialized.state.tree_bottom_m[0]) / 2.0),
@@ -3194,7 +3242,7 @@ pub(crate) fn patch_type(land_cover: LandCoverScheme, class: i32) -> Result<i32>
     Ok(types[index])
 }
 
-fn single_point_subgrid(
+pub(crate) fn single_point_subgrid(
     document: &colm_namelist::Document,
     fallback: Option<SinglePointSubgrid>,
 ) -> Result<SinglePointSubgrid> {
@@ -3366,20 +3414,50 @@ fn urban_albedo_matrix(values: &[f64], name: &str) -> Result<[[f64; 2]; 2]> {
     Ok([[values[0], values[1]], [values[2], values[3]]])
 }
 
-fn canopy_top(land_cover: LandCoverScheme, class: i32, observed_top: f64) -> Result<f64> {
+fn canopy_top(
+    land_cover: LandCoverScheme,
+    class: i32,
+    observed_top: f64,
+    overrides: colm_core::LandClassOverrides,
+) -> Result<f64> {
     let kind = patch_type(land_cover, class)?;
+    let (top_table, bottom_table) = canopy_tables(land_cover, class, overrides);
     let canopy = match land_cover {
         LandCoverScheme::Igbp => derive_igbp_canopy(
             &[class],
             &[kind],
             &[observed_top],
-            &IGBP_TOP,
-            &IGBP_BOTTOM,
+            &top_table,
+            &bottom_table,
             None,
         )?,
-        LandCoverScheme::Usgs => derive_usgs_canopy(&[class], &USGS_TOP, &USGS_BOTTOM)?,
+        LandCoverScheme::Usgs => derive_usgs_canopy(&[class], &top_table, &bottom_table)?,
     };
     Ok(canopy.patch_top_m[0])
+}
+
+/// `htop0`/`hbot0` 表（下标即 1 基地类号）叠上本站地类的 `DEF_LC_HTOP0`/`DEF_LC_HBOT0`
+/// （`apply_lc_scalar_overrides`，`MOD_HtopReadin` 读的是覆盖后的表）。
+fn canopy_tables(
+    land_cover: LandCoverScheme,
+    site_class: i32,
+    overrides: colm_core::LandClassOverrides,
+) -> (Vec<f64>, Vec<f64>) {
+    let (mut top, mut bottom) = match land_cover {
+        LandCoverScheme::Igbp => (IGBP_TOP.to_vec(), IGBP_BOTTOM.to_vec()),
+        LandCoverScheme::Usgs => (USGS_TOP.to_vec(), USGS_BOTTOM.to_vec()),
+    };
+    if let Ok(index) = usize::try_from(site_class) {
+        if index >= 1 && index < top.len() {
+            if let Some(value) = overrides.htop0 {
+                top[index] = value;
+            }
+            if let Some(value) = overrides.hbot0 {
+                bottom[index] = value;
+            }
+        }
+    }
+    (top, bottom)
 }
 
 fn is_water_class(land_cover: LandCoverScheme, class: i32) -> bool {

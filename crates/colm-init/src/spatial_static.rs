@@ -571,15 +571,16 @@ fn read_topmodel(
 }
 
 pub(crate) fn topmodel_defaults(patches: usize) -> TopmodelSurfaceFields {
-    // ponytail: deterministic inactive TOPMODEL slots; upstream mkinidata leaves
-    // some method-inactive arrays unassigned before writing them.
+    // `DEF_TOPMOD_method == 0`（`MOD_Initialize.F90:515-524`）只赋 `fsatmax = 0.38`、`fsatdcf = 0.125`；
+    // `topoweti`/`alp_twi`/`chi_twi`/`mu_twi` 只在方法 1、2 读文件，这里上游**不赋值**就写进常数重启
+    // （upstream-bugs 第 31 条）。纯 Fortran 单点实测写出的是 0，照写 0；这四个量在方法 0 下不参与计算。
     TopmodelSurfaceFields {
-        topographic_index: vec![9.27; patches],
+        topographic_index: vec![0.0; patches],
         saturated_fraction_max: vec![0.38; patches],
         saturated_fraction_decay: vec![0.125; patches],
-        alpha_twi: vec![1.34; patches],
-        chi_twi: vec![1.61; patches],
-        mu_twi: vec![6.95; patches],
+        alpha_twi: vec![0.0; patches],
+        chi_twi: vec![0.0; patches],
+        mu_twi: vec![0.0; patches],
     }
 }
 
