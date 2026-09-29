@@ -408,6 +408,12 @@ fn assemble_patch(
     // 它直接乘在 `rsubst`/`rsub` 上，参数标定过的算例差别是物理量级的。
     let baseflow_scale = read_baseflow_scale(layout, name, patch)?;
     template = template.with_baseflow_scale(baseflow_scale);
+    // `DEF_USE_SNICAR`：`SnowOptics_init`/`SnowAge_init` 读 `DEF_dir_runtime/snicar/` 下的两张表。
+    if template.physics.snicar {
+        let tables = colm_init::SnicarInitialization::from_document(document)?
+            .context("DEF_USE_SNICAR is on but its tables were not loaded")?;
+        template = template.with_snicar_tables(std::sync::Arc::new(tables));
+    }
     Ok(template)
 }
 

@@ -86,6 +86,15 @@ pub fn prepare_surface_optics(
     input: SurfaceOpticsInput,
     radiation: &mut ColdStartRadiation,
 ) -> Result<SurfaceOptics> {
+    prepare_surface_optics_with_snicar(input, radiation, None)
+}
+
+/// [`prepare_surface_optics`] 带 `DEF_USE_SNICAR` 的雪反照率（见 [`crate::SnicarAlbedoHook`]）。
+pub fn prepare_surface_optics_with_snicar(
+    input: SurfaceOpticsInput,
+    radiation: &mut ColdStartRadiation,
+    snicar: Option<&mut crate::SnicarAlbedoHook<'_>>,
+) -> Result<SurfaceOptics> {
     ensure!(
         input.patch_type >= 0
             && input.time_step_seconds.is_finite()
@@ -143,6 +152,7 @@ pub fn prepare_surface_optics(
         leaf_area_index,
         stem_area_index,
         radiation,
+        snicar,
     )?;
     Ok(SurfaceOptics {
         leaf_area_index,
@@ -164,6 +174,7 @@ fn albland(
     leaf_area_index: f64,
     stem_area_index: f64,
     radiation: &mut ColdStartRadiation,
+    snicar: Option<&mut crate::SnicarAlbedoHook<'_>>,
 ) -> Result<f64> {
     let Some((ground, previous_thermal_gap_fraction, czen)) = albland_ground(
         input,
@@ -171,6 +182,7 @@ fn albland(
         surface_wetness,
         leaf_area_index + stem_area_index,
         radiation,
+        snicar,
     )?
     else {
         return Ok(input.snow_age);
@@ -204,6 +216,7 @@ fn albland_ground(
     surface_wetness: f64,
     leaf_stem_area: f64,
     radiation: &mut ColdStartRadiation,
+    mut snicar: Option<&mut crate::SnicarAlbedoHook<'_>>,
 ) -> Result<Option<(ColdStartGroundAlbedo, f64, f64)>> {
     // 第 1 节：`thermk` 只在无冠层时被重置为 1（`MOD_Albedo.F90:225-228`，注释写明
     // "夜间长波用上一步的值"）；有冠层时它保留上一次调用的结果。
@@ -213,6 +226,11 @@ fn albland_ground(
         radiation.thermal_gap_fraction
     };
 
+    // SNICAR（`MOD_Albedo.F90:266-292`）：`AerosolMasses` 与 `SnowAge_grain` 在夜间返回**之前**，
+    // 每步都跑；`ssno_lyr` 在入口清零。
+    if let Some(hook) = snicar.as_deref_mut() {
+        hook.before_night_return(ground_snow_fraction)?;
+    }
     // 夜间：上游在算任何物理量之前就返回，但 module 变量已经被写成默认值。
     // 实测对齐算例 2008-01-12 00:00（`coszen = -0.922`）的重启里 `alb = 1`、
     // `ssun`/`ssha`/`ssoi`/`ssno` 全 0、`extkb = 1`、`extkd = 0.718`，
@@ -242,23 +260,30 @@ fn albland_ground(
 
     // 第 3 节：非 SNICAR 的雪面反照率。`snl == 0` 时上游先把雪龄清零再老化一步
     // —— 没有雪层就没有承载雪龄的地方；`scv <= 0` 时 `albsno` 保持初值 1、`sag` 不动。
-    let (snow, snow_age) = if input.snow_water_equivalent_mm > 0.0 {
-        let previous_age = if input.snow_layers == 0 {
-            0.0
+    let (snow, snow_age) =
+        if let (true, Some(hook)) = (input.snow_water_equivalent_mm > 0.0, snicar.as_mut()) {
+            // SNICAR 那一支不调 `snowage`，`sag` 原样保留（`:338-373`）；下垫面是土壤漫射反照率。
+            (
+                hook.snow_albedo(czen, [soil[0][1], soil[1][1]])?,
+                input.snow_age,
+            )
+        } else if input.snow_water_equivalent_mm > 0.0 {
+            let previous_age = if input.snow_layers == 0 {
+                0.0
+            } else {
+                input.snow_age
+            };
+            aged_snow_albedo(
+                input.snow_water_equivalent_mm,
+                input.previous_snow_water_equivalent_mm,
+                input.ground_temperature_k,
+                czen,
+                input.time_step_seconds,
+                previous_age,
+            )?
         } else {
-            input.snow_age
+            ([[1.0; 2]; 2], input.snow_age)
         };
-        aged_snow_albedo(
-            input.snow_water_equivalent_mm,
-            input.previous_snow_water_equivalent_mm,
-            input.ground_temperature_k,
-            czen,
-            input.time_step_seconds,
-            previous_age,
-        )?
-    } else {
-        ([[1.0; 2]; 2], input.snow_age)
-    };
 
     // 第 3.1 节：按雪盖比例混合。
     let ground = crate::mix_ground_albedo(soil, snow, ground_snow_fraction);
@@ -284,6 +309,16 @@ pub fn prepare_pft_surface_optics(
     input: SurfaceOpticsInput,
     patch: &mut crate::PftPatch,
     radiation: &mut ColdStartRadiation,
+) -> Result<SurfaceOptics> {
+    prepare_pft_surface_optics_with_snicar(input, patch, radiation, None)
+}
+
+/// [`prepare_pft_surface_optics`] 带 `DEF_USE_SNICAR` 的雪反照率。
+pub fn prepare_pft_surface_optics_with_snicar(
+    input: SurfaceOpticsInput,
+    patch: &mut crate::PftPatch,
+    radiation: &mut ColdStartRadiation,
+    snicar: Option<&mut crate::SnicarAlbedoHook<'_>>,
 ) -> Result<SurfaceOptics> {
     ensure!(
         input.patch_type == 0
@@ -328,6 +363,7 @@ pub fn prepare_pft_surface_optics(
         surface_wetness,
         leaf_area_index + stem_area_index,
         radiation,
+        snicar,
     )? {
         None => input.snow_age,
         Some((ground, previous_thermal_gap_fraction, czen)) => {

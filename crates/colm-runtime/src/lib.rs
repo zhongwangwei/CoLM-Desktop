@@ -913,6 +913,8 @@ fn advance_patch(
                 // 冰川上 `fwet_snow` 在上一步末已被清零，本分支不再算它。
                 wet_snow_fraction: 0.0,
                 previous_snow_water_equivalent_mm,
+                ground_snowfall_kg_m2_s: 0.0,
+                air_temperature_k: step.forcing.air_temperature_k,
             },
         )?;
         colm_core::clear_non_soil_patch(
@@ -979,6 +981,8 @@ fn advance_patch(
                 momentum_roughness_m: output.thermal.z0m,
                 wet_snow_fraction: 0.0,
                 previous_snow_water_equivalent_mm,
+                ground_snowfall_kg_m2_s: 0.0,
+                air_temperature_k: step.forcing.air_temperature_k,
             },
         )?;
         colm_core::clear_non_soil_patch(
@@ -1105,6 +1109,8 @@ fn surface_optics_step(
         momentum_roughness_m: output.energy.leaf.momentum_roughness_m,
         wet_snow_fraction: output.energy.leaf.wet_snow_fraction,
         previous_snow_water_equivalent_mm,
+        ground_snowfall_kg_m2_s: output.energy.interception.ground_snow_kg_m2_s,
+        air_temperature_k: step.forcing.air_temperature_k,
     }
 }
 
@@ -1653,6 +1659,7 @@ mod tests {
             land_class_overrides: colm_core::LandClassOverrides::default(),
             dynamic_wetland: false,
             dynamic_lake: false,
+            snicar: false,
             hydraulic_model: colm_core::HydraulicModel::VanGenuchten,
             variably_saturated_flow: false,
             plant_hydraulics: false,

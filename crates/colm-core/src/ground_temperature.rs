@@ -471,16 +471,20 @@ fn temperature_system(
         // （雪层／`j==1 && split`／其它）里共用，GCC 把它 CSE 成一个临时量
         // （GIMPLE 的 `_462`）再与 `t` 相加。**相邻两条语句的结论可以相反**，
         // 只能逐条看 dump：`bt` 收了，`rt` 没收。
-        let transient = input.temperature_k[layer]
-            + input.crank_nicolson_factor * factor[layer] * (flux[layer] - flux[layer - 1]);
+        let conduction =
+            input.crank_nicolson_factor * factor[layer] * (flux[layer] - flux[layer - 1]);
+        let transient = input.temperature_k[layer] + conduction;
         if fortran_layer < 1 {
             diagonal[layer] = diagonal_sum;
-            rhs[layer] = transient
-                + if use_snicar {
-                    input.snow_layer_absorption_w_m2.unwrap()[layer] * factor[layer]
-                } else {
-                    0.0
-                };
+            // SNICAR：`rt = t + fact*sabg_snow_lyr + cnfac*fact*(fn-fn1)`，GIMPLE 是
+            // `.FMA (sabg_snow_lyr, fact, t) + (cnfac项)`（`MOD_GroundTemperature.F90:347-349`）。
+            rhs[layer] = if use_snicar {
+                input.snow_layer_absorption_w_m2.unwrap()[layer]
+                    .mul_add(factor[layer], input.temperature_k[layer])
+                    + conduction
+            } else {
+                transient
+            };
         } else if fortran_layer == 1 && input.use_split_soil_snow {
             // `bt = 1+P - (1-fsno)*dhsdT*fact` ⇒ 末项吸收（`FNMA((1-fsno)*dhsdT, fact, 1+P)`）。
             diagonal[layer] = (-((1.0 - input.snow_cover_fraction) * derivative))

@@ -26134,3 +26134,67 @@ Exponential 就是 method 0。于是拒绝表清空，连同 `sets_non_default` 
 |---|---|---|---|---|---|---|
 | `tt1` | `bl` 1–6 月，`DEF_Runoff_SCHEME = 0`、`DEF_TOPMOD_method = 2` | Fortran 日志确认强制置 0 | 6/6 | ✓ | ✓ | ✓ |
 | `tt2` | `bl` 1–6 月，默认方案 3，`DEF_TOPMOD_method = 1` | 纯 Fortran 与 `bl` 的 6 月末重启逐位相同 | 6/6 | ✓ | ✓ | ✓ |
+
+## 第 444 轮：SNICAR 接进时间循环（土壤分支，`DEF_Aerosol_Readin = .false.`）
+
+`DEF_USE_SNICAR` 以前在运行期整体拒绝：`colm-core` 里有 `SNICAR_AD_RT`、`SnowAge_grain`、`AerosolMasses` 的移植，
+冷启动（colm-init）也用它们，但时间循环从没接上，地温/相变里的分层吸收钩子永远是 `None`。本轮按上游执行顺序
+把土壤分支接通（`crates/colm-core/src/snicar_column.rs`）：
+
+1. 状态：`StandardLctSnowSoilState::snicar` 带 `snw_rds(-4:0)`、8 种 `mss_*`、`ssno_lyr(2,2,-4:1)` 与本步 `snofrz`；
+   时间重启读写这三类量（`ssno_lyr` 是 C 序 `(patch, snowp1, rtyp, band)`）。
+2. `netsolar` 末段：按调整过的 `ssno` 重标 `ssno_lyr`，算 `sabg_snow_lyr` 并把土层那一格并进 `sabg_soil`；只在有入射
+   短波时算（夜间为 0）。交给地温的是打包列的 `sabg_snow_lyr(lb:1)`。
+3. 地温相变后 `snofrz = max(0, Δwice)/dt`（`imelt == 2` 的雪层），按槽位存，合并/分裂时不搬（上游传整根数组）。
+4. `SnowWater_snicar` 的气溶胶部分：水分部分与 `snowwater` 相同；气溶胶在出流循环里只读本层出流后的液冰量与上一层带下的
+   量，所以用 `snow_water` 的逐层出流事后补算等价；最后把沉降加到最上层（bulk 气溶胶的 14 → 8 映射）。
+5. `SnowLayersCombine_snicar`/`SnowLayersDivide_snicar`：气溶胶随层下移、平移、合并相加、按冰量比例拆分；雪全没了时
+   整列清零；空槽残留留给步末 `AerosolMasses`。
+6. 步末 `albland`：`ssno_lyr = 0 → AerosolMasses → SnowAge_grain` 在夜间返回**之前**每步都跑；白天 `scv > 0` 时
+   `SnowAlbedo` 只做反馈那两次 `SNICAR_AD_RT`（`use_snicar_frc = .false.`），下垫面用土壤漫射反照率，`DO_SNO_OC =
+   .false.` 时 OC 浓度保持 0；`sag` 在这一支里不更新。LCT 与 PFT 两条光学准备都挂了这个钩子。
+
+### 一、对齐 gfortran 的几处（冷启动只在零雪层时跑过这些内核，从没被逐位检验）
+
+- `SnowAge_grain`：两个界面温度 `.FMA (t(i±1), dz(i), t(i)*dz(i±1))/(dz(i)+dz(i±1))`；`dr = .FMA (pow(...)*drdt0,
+  dtime/3600, dr_wet)`；新粒径 `.FMA (frc_refrz, 1000, .FMA (rds+dr, frc_old, frc_new*fresh))`；`FreshSnowRadius`
+  `.FMA ((tmax-t)/30, 54.526, ((t-tmin)/30)*204.526)`。
+- `SNICAR_AD_RT`：层参数先累加气溶胶、冰那一项最后加，`omega = (1/tau)*(...)`、`g = (1/(tau*omega))*(...)`；层内
+  `1-ws*gs`、`ue²-1`、`1-lm²μ²` 等全是融合形式，`apg/amg = .FMA/.FMS`，`rdir/tdir/rdr/tdr`、高斯求和、层间与向上递推、
+  通量都有各自的 FMA 链；近红外归并 `flx_sum = .FMA (w, a, flx_sum)`；天顶角修正系数是 FMA 链、吸收修正是 FNMA。
+- **delta 缩放被 gfortran 两层一组向量化**：成对的层 `den = .FNMA (omega, g², 1)`，落单的最后一层（层数为奇数；只有一层时
+  整段走标量）在标量尾循环里是**不融合**的 `1 - omega*g²`。症状：前 28 次 `SnowAlbedo`（都是 2 层雪）逐位，第一次出现
+  3 层雪的那次开始差。
+- `exp_min = exp(-argmax)`：gfortran 折叠成 `4.5399929762484854e-05`，Rust 原常量写成 `4.539992976248485e-5`，
+  取到的是相邻的 double。只有吸收极强、`exp` 被截断的第 5 波段用到它，所以只在某个界面通量上差 1 ULP。
+- 地温雪层 `rt = t + fact*sabg_snow_lyr + cnfac项`：GIMPLE 是 `.FMA (sabg_snow_lyr, fact, t) + cnfac项`，Rust 原先是
+  `(t + cnfac项) + sabg*fact`。
+
+定位方法：在 Fortran 的 `albland`（`SnowAlbedo` 前后）与 `SNICAR_AD_RT`（逐波段 `dftmp`/递推量）插临时探针，构建后
+即还原 vendor；Rust 用环境变量开同样的探针（提交前已删）。
+
+### 二、合成数据
+
+本机没有 CESM 的 SNICAR 表，`oracle/scripts/make_snicar_tables.py` 按原文件的维度与变量名合成一份物理上合理的表
+（写到 `DEF_dir_runtime/snicar/`，**不入库**，以免被当成原始数据）。AT-Neu 2010 冬季积雪太薄（日均最大 2 mm，雪层几乎
+不成形），`oracle/scripts/make_cold_forcing.py` 把强迫降温 8 K（按饱和比湿之比缩放 `Qair`）并把降水乘 6，得到最深
+0.5 m、4 层、粒径 54.5→621 µm、4 月融完的雪盖。
+
+### 三、结果（对纯 Fortran，`--preprocessors fortran --engine fortran`）
+
+| 算例 | 设置 | 历史 | 重启 | release | debug |
+|---|---|---|---|---|---|
+| `sn1` | `c0`（LCT）1–4 月，真实强迫（薄雪） | 4/4 | ✓ | ✓ | ✓ |
+| `sn2` | 同 `sn1`，降温强迫（深雪，逐小时输出） | 4/4 | 9/9 | ✓ | ✓ |
+| `sn3` | `bl`（PFT+BGC）1–3 月，降温强迫 | 3/3 | ✓ | ✓ | ✓ |
+
+冷启动（colm-init 的 SNICAR 状态）三份重启与 Fortran 逐位相同。
+
+### 四、仍然拒绝
+
+`DEF_Aerosol_Readin = .true.`（SNICAR 打开时的默认值，要读 `MOD_Aerosol` 的月度沉降文件）、冰川/湖/湿地/城市上的
+SNICAR 分支（`MOD_Glacier`/`MOD_Lake` 各自的 `_snicar` 支）。拒绝信息给出原因与替代设置。
+
+既有算例不受影响：全量回归 113 例逐位（含上表三例与第 443 轮的 `ta1`/`tb1`/`tr1-3`/`tt1-2`；`nn`/`pni` 不写历史）。
+另：本机 `PLUMBER2_ROOT` 默认目录 `/Users/zhongwangwei/Desktop/colm-rust/PLUMBER2s` 已不存在，`colm-forcing` 的三个
+`tests/met.rs` 集成测试因此失败（与本轮无关）。

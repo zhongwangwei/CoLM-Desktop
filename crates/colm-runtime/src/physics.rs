@@ -88,22 +88,20 @@ pub fn land_physics_parameters(
     // `DEF_USE_Dynamic_Wetland`：湿地按土壤地面算地面湿度（`MOD_Thermal.F90:601-602`），VSF 下走土壤水分支
     // （`MOD_SoilSnowHydrology.F90:946-947`、`:1384-1392`）。
     let dynamic_wetland = logical(document, "DEF_USE_Dynamic_Wetland")?;
-    if logical(document, "DEF_USE_SNICAR")? {
-        // `DEF_USE_SNICAR` 与 `DEF_SPLIT_SOILSNOW` 同属"最坏的一类"：它此前**根本
-        // 没被读过**，而 `assembly.rs` 把 `snow_layer_absorption_w_m2` 硬写成 `None`
-        // —— 也就是说 `ground_temperature.rs`/`phase_change.rs` 里那套 SNICAR 分支
-        // 永远不会被选中，写 `.true.` 的算例会**静默按标准雪算完**
-        // （雪粒径增长、分层吸收、融化能量都会与上游的 `SNICAR_AD_RT` 不同）。
-        //
-        // 冷启动那边（`colm-init`）**不拦**：它确实能按 SNICAR 生成重启，
-        // 只是运行期还没有把那条支路接上；拦在运行期才是"接不上就不跑"。
-        bail!(
-            "DEF_USE_SNICAR is on, but the Rust runtime assembles only the standard snow \
-             branch: `assembly.rs` pins `snow_layer_absorption_w_m2` to None and the SNICAR \
-             cold start is not carried into the time loop, so the case would silently run \
-             with the non-SNICAR snow albedo and layer absorption"
-        );
-    }
+    // `DEF_USE_SNICAR`：雪反照率与分层吸收走 SNICAR（`SnowAlbedo`/`SNICAR_AD_RT`），雪层携带粒径与
+    // 气溶胶。`read_namelist` 在 SNICAR 关闭时把 `DEF_Aerosol_Readin` 强制置假（`MOD_Namelist.F90:2229-2235`）。
+    let snicar = logical(document, "DEF_USE_SNICAR")?;
+    ensure!(
+        !(snicar && logical(document, "DEF_Aerosol_Readin")?),
+        "DEF_USE_SNICAR with DEF_Aerosol_Readin = .true. (its default) needs the monthly aerosol \
+         deposition file (MOD_Aerosol), which the Rust runtime does not read yet; set \
+         DEF_Aerosol_Readin = .false. for zero deposition"
+    );
+    ensure!(
+        !(snicar && urban_run),
+        "DEF_USE_SNICAR with DEF_URBAN_RUN is not ported: the urban snow surfaces keep the \
+         non-SNICAR albedo"
+    );
     // 上游 `MOD_Namelist.F90:1932-1944`：`DEF_USE_LCT`/`DEF_USE_PFT`/`DEF_USE_PC`
     // **恰好一个**必须为真，否则 `CoLM_stop`；三者的声明默认值是
     // `.true.`/`.false.`/`.false.`，也就是默认走 LCT。
@@ -280,6 +278,7 @@ pub fn land_physics_parameters(
         land_class_overrides,
         dynamic_wetland,
         dynamic_lake,
+        snicar,
         hydraulic_model: if campbell {
             HydraulicModel::Campbell
         } else {

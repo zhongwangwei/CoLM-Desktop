@@ -492,3 +492,29 @@ fn a_restart_snow_column_rejects_impossible_values() {
     assert_eq!(empty.layer_count, 0);
     assert_eq!(empty.interface_depth_m[snow_interface_slot(0)], 0.0);
 }
+
+#[test]
+fn aerosol_masses_are_conserved_through_snow_layer_divide_and_combine() {
+    // `SnowLayersDivide_snicar`/`SnowLayersCombine_snicar`：气溶胶随冰量比例拆分、随层合并，总量守恒。
+    let mut snow = RuntimeSnowColumn::empty();
+    snow.layer_count = -1;
+    let top = snow_layer_slot(0);
+    snow.thickness_m[top] = 0.2;
+    snow.temperature_k[top] = 265.0;
+    snow.ice_water_kg_m2[top] = 40.0;
+    snow.liquid_water_kg_m2[top] = 0.0;
+    snow.water_equivalent_kg_m2 = 40.0;
+    snow.depth_m = 0.2;
+    let mut aerosols: SnowAerosolMasses = [[0.0; 8]; 5];
+    aerosols[top] = [8.0e-6; 8];
+    divide_snow_layers_with_aerosols(&mut snow, Some(&mut aerosols)).unwrap();
+    assert!(snow.layer_count < -1);
+    let total: f64 = aerosols.iter().map(|slot| slot[0]).sum();
+    assert!((total - 8.0e-6).abs() < 1.0e-18, "total {total}");
+    let mut soil = SnowToSoilTransfer::default();
+    combine_snow_layers_with_aerosols(&mut snow, &mut soil, Some(&mut aerosols)).unwrap();
+    let total: f64 = (snow.layer_count + 1..=0)
+        .map(|layer| aerosols[snow_layer_slot(layer)][0])
+        .sum();
+    assert!((total - 8.0e-6).abs() < 1.0e-18, "total {total}");
+}

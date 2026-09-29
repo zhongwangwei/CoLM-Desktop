@@ -21,7 +21,9 @@ pub const SNICAR_TEMPORARY_SNOW_RADIUS_MICRONS: i32 = 55;
 const PI: f64 = std::f64::consts::PI;
 const MIN_SNOW_MASS: f64 = 1.0e-30;
 const TRMIN: f64 = 0.001;
-const EXP_MIN: f64 = 4.539_992_976_248_485e-5; // exp(-10)
+/// `exp_min = exp(-argmax)`（`argmax = 10`）：gfortran 折叠成正确舍入的 `4.5399929762484854e-05`。
+/// 写成 `4.539992976248485e-5` 会取到相邻的另一个 double（差 1 ULP），强吸收波段被截断时就不再逐位。
+const EXP_MIN: f64 = 4.539_992_976_248_485_4e-5;
 const PUNY: f64 = 1.0e-11;
 const MU_75: f64 = 0.2588;
 const SZA_A0: f64 = 0.085730;
@@ -227,13 +229,16 @@ pub fn snicar_ad_rt(optics: &SnicarOptics, input: &SnicarInput) -> Result<Snicar
     let mu_not = input.cosine_zenith.max(0.01);
     if matches!(input.incident, SnicarIncident::Direct) && mu_not < MU_75 {
         let top_radius = f64::from(snow.radius_microns[0]);
-        let c1 = SZA_A0 + SZA_A1 * mu_not + SZA_A2 * mu_not.powi(2);
-        let c0 = SZA_B0 + SZA_B1 * mu_not + SZA_B2 * mu_not.powi(2);
-        let factor = c1 * (top_radius.log10() - 6.0) + c0;
-        let nir_weight: f64 = weights[1..].iter().sum();
-        let adjustment = albedo_broadband[1] * (factor - 1.0) * nir_weight;
+        // GIMPLE：`c1 = .FMA (mu², a2, .FMA (mu, a1, a0))`（`c0` 同形）、
+        // `factor = .FMA (log10(rds)-6, c1, c0)`、`flx_abs -= (alb*(factor-1))*Σw` 融合成 FNMA。
+        let mu2 = mu_not * mu_not;
+        let c1 = mu2.mul_add(SZA_A2, mu_not.mul_add(SZA_A1, SZA_A0));
+        let c0 = mu2.mul_add(SZA_B2, mu_not.mul_add(SZA_B1, SZA_B0));
+        let factor = (top_radius.log10() - 6.0).mul_add(c1, c0);
+        let nir_weight: f64 = weights[1..].iter().fold(0.0, |sum, weight| sum + weight);
+        let adjustment = albedo_broadband[1] * (factor - 1.0);
         albedo_broadband[1] *= factor;
-        absorbed_broadband[0][1] -= adjustment;
+        absorbed_broadband[0][1] = (-adjustment).mul_add(nir_weight, absorbed_broadband[0][1]);
     }
 
     Ok(SnicarResult {
@@ -354,6 +359,9 @@ fn solve_band(
         SnicarIncident::Diffuse => &optics.diffuse_ice,
     };
 
+    // GIMPLE（`MOD_SnowSnicar.F90` 的层参数段）：气溶胶先累加（`omega_sum + τa*ssa` 不融合，
+    // `g_sum = (τa*ssa)*asm + g_sum`），冰那一项最后加；`omega = (1/tau)*(τs*ssa + omega_sum)`、
+    // `g = (1/(tau*omega))*(τs*(ssa*asm) + g_sum)`。高吸收的两个近红外波段气溶胶浓度清零（照样参与求和）。
     for layer in 0..layers {
         let (snow_ssa, mut snow_g, snow_ext) = table.get(band, snow.radius_microns[layer]);
         if snow_g > 0.99 {
@@ -361,40 +369,51 @@ fn solve_band(
         }
         let snow_mass = snow.ice_water_kg_m2[layer] + snow.liquid_water_kg_m2[layer];
         let tau_snow = snow_mass * snow_ext;
-        let mut tau_sum = tau_snow;
-        let mut omega_sum = snow_ssa * tau_snow;
-        let mut g_sum = snow_g * snow_ssa * tau_snow;
-        // CoLM zeros aerosol in the highly absorbing upper NIR bands.
-        if band < 3 {
-            for species in 0..SNICAR_AEROSOLS {
-                let tau_aer = snow_mass
-                    * snow.aerosol_mass_concentration[layer][species]
-                    * optics.aerosol_mass_extinction_coefficient[species][band];
-                tau_sum += tau_aer;
-                omega_sum += tau_aer * optics.aerosol_single_scatter_albedo[species][band];
-                g_sum += tau_aer
-                    * optics.aerosol_single_scatter_albedo[species][band]
-                    * optics.aerosol_asymmetry_parameter[species][band];
-            }
+        let mut tau_sum = 0.0;
+        let mut omega_sum = 0.0;
+        let mut g_sum = 0.0;
+        for species in 0..SNICAR_AEROSOLS {
+            let concentration = if band < 3 {
+                snow.aerosol_mass_concentration[layer][species]
+            } else {
+                0.0
+            };
+            let tau_aer = (snow_mass * concentration)
+                * optics.aerosol_mass_extinction_coefficient[species][band];
+            tau_sum += tau_aer;
+            let scattering = tau_aer * optics.aerosol_single_scatter_albedo[species][band];
+            omega_sum += scattering;
+            g_sum += scattering * optics.aerosol_asymmetry_parameter[species][band];
         }
-        ensure!(tau_sum > 0.0, "SNICAR layer optical depth is zero");
-        tau[layer] = tau_sum;
-        omega[layer] = omega_sum / tau_sum;
+        let tau_layer = tau_snow + tau_sum;
+        ensure!(tau_layer > 0.0, "SNICAR layer optical depth is zero");
+        tau[layer] = tau_layer;
+        omega[layer] = (1.0 / tau_layer) * (tau_snow * snow_ssa + omega_sum);
         ensure!(
             omega[layer] > 0.0,
             "SNICAR layer single-scatter albedo is zero"
         );
-        asymmetry[layer] = g_sum / (tau_sum * omega[layer]);
+        asymmetry[layer] =
+            (1.0 / (tau_layer * omega[layer])) * (tau_snow * (snow_ssa * snow_g) + g_sum);
     }
 
+    // delta 缩放：`omega* = omega*(1-g²)/den`，`tau* = tau*den`。gfortran 把这个循环两层一组向量化：
+    // 成对的层 `den = .FNMA (omega, g², 1)`；落单的最后一层（层数为奇数，含只有一层时整段走标量）
+    // 在标量尾循环里是**不融合**的 `1 - omega*g²`。
     let mut tau_star = [0.0; SNICAR_MAX_LAYERS];
     let mut omega_star = [0.0; SNICAR_MAX_LAYERS];
     let mut g_star = [0.0; SNICAR_MAX_LAYERS];
+    let vectorized = if layers >= 2 { layers / 2 * 2 } else { 0 };
     for layer in 0..layers {
         let g2 = asymmetry[layer] * asymmetry[layer];
-        g_star[layer] = asymmetry[layer] / (1.0 + asymmetry[layer]);
-        omega_star[layer] = ((1.0 - g2) * omega[layer]) / (1.0 - omega[layer] * g2);
-        tau_star[layer] = (1.0 - omega[layer] * g2) * tau[layer];
+        let denominator = if layer < vectorized {
+            (-omega[layer]).mul_add(g2, 1.0)
+        } else {
+            1.0 - omega[layer] * g2
+        };
+        g_star[layer] = asymmetry[layer] / (asymmetry[layer] + 1.0);
+        omega_star[layer] = (omega[layer] * (1.0 - g2)) / denominator;
+        tau_star[layer] = tau[layer] * denominator;
     }
 
     adding_doubling(input, band, layers, &tau_star, &omega_star, &g_star)
@@ -412,7 +431,7 @@ fn adding_doubling(
     let mut trndir = [0.0; SNICAR_MAX_LAYERS + 1];
     let mut trntdr = [0.0; SNICAR_MAX_LAYERS + 1];
     let mut trndif = [0.0; SNICAR_MAX_LAYERS + 1];
-    let mut rdndif = [0.0; SNICAR_MAX_LAYERS + 1];
+    let mut rdndif = [0.0_f64; SNICAR_MAX_LAYERS + 1];
     let mut rupdir = [0.0; SNICAR_MAX_LAYERS + 1];
     let mut rupdif = [0.0; SNICAR_MAX_LAYERS + 1];
     let mut dfdir = [0.0; SNICAR_MAX_LAYERS + 1];
@@ -435,18 +454,27 @@ fn adding_doubling(
             let ts = tau_star[layer];
             let ws = omega_star[layer];
             let gs = g_star[layer];
-            let lm = (3.0 * (1.0 - ws) * (1.0 - ws * gs)).sqrt();
-            let ue = 1.5 * (1.0 - ws * gs) / lm;
-            let extins = (-lm * ts).exp().max(EXP_MIN);
-            let ne = ((ue + 1.0).powi(2) / extins) - ((ue - 1.0).powi(2) * extins);
-            rdif_a[layer] = (ue.powi(2) - 1.0) * (1.0 / extins - extins) / ne;
-            tdif_a[layer] = 4.0 * ue / ne;
-            trnlay[layer] = (-ts / mu_not).exp().max(EXP_MIN);
-            let (alp, gam) = alpha_gamma(ws, mu_not, gs, lm);
-            let apg = alp + gam;
-            let amg = alp - gam;
-            rdir[layer] = apg * rdif_a[layer] + amg * (tdif_a[layer] * trnlay[layer] - 1.0);
-            tdir[layer] = apg * tdif_a[layer] + (amg * rdif_a[layer] - apg + 1.0) * trnlay[layer];
+            let one_minus_ws = 1.0 - ws;
+            let one_minus_wg = (-ws).mul_add(gs, 1.0);
+            let lm = ((one_minus_ws * 3.0) * one_minus_wg).sqrt();
+            let ue = (one_minus_wg * 1.5) / lm;
+            let extins = (-(ts * lm)).exp().max(EXP_MIN);
+            let ne = ((ue + 1.0) * (ue + 1.0)) / extins - ((ue - 1.0) * (ue - 1.0)) * extins;
+            rdif_a[layer] = (ue.mul_add(ue, -1.0) * (1.0 / extins - extins)) / ne;
+            tdif_a[layer] = (ue * 4.0) / ne;
+            trnlay[layer] = (-(ts / mu_not)).exp().max(EXP_MIN);
+            let lm2 = lm * lm;
+            let alpha_numerator = one_minus_ws.mul_add(gs, 1.0);
+            let gamma_factor = one_minus_ws * (gs * 3.0);
+            let (apg, amg) = apg_amg(ws, mu_not, lm2, alpha_numerator, gamma_factor);
+            // `rdir = .FMA (rdif, apg, amg*.FMA (tdif, trnlay, -1))`；
+            // `tdir = .FMA (tdif, apg, (.FMS (rdif, amg, apg) + 1)*trnlay)`。
+            rdir[layer] =
+                rdif_a[layer].mul_add(apg, tdif_a[layer].mul_add(trnlay[layer], -1.0) * amg);
+            tdir[layer] = tdif_a[layer].mul_add(
+                apg,
+                (rdif_a[layer].mul_add(amg, -apg) + 1.0) * trnlay[layer],
+            );
 
             let r1 = rdif_a[layer];
             let t1 = tdif_a[layer];
@@ -454,15 +482,15 @@ fn adding_doubling(
             let mut smr = 0.0;
             let mut smt = 0.0;
             for (&mu, &gwt) in GAUSS_POINT.iter().zip(&GAUSS_WEIGHT) {
-                swt += mu * gwt;
-                let trn = (-ts / mu).exp().max(EXP_MIN);
-                let (alp, gam) = alpha_gamma(ws, mu, gs, lm);
-                let apg = alp + gam;
-                let amg = alp - gam;
-                let rdr = apg * r1 + amg * t1 * trn - amg;
-                let tdr = apg * t1 + amg * r1 * trn - apg * trn + trn;
-                smr += mu * rdr * gwt;
-                smt += mu * tdr * gwt;
+                swt = mu.mul_add(gwt, swt);
+                let trn = (-(ts / mu)).exp().max(EXP_MIN);
+                let (apg, amg) = apg_amg(ws, mu, lm2, alpha_numerator, gamma_factor);
+                // `rdr = .FMA (R1, apg, (T1*amg)*trn) - amg`；
+                // `tdr = .FNMA (trn, apg, .FMA (T1, apg, (R1*amg)*trn)) + trn`。
+                let rdr = r1.mul_add(apg, (t1 * amg) * trn) - amg;
+                let tdr = (-trn).mul_add(apg, t1.mul_add(apg, (r1 * amg) * trn)) + trn;
+                smr = (mu * rdr).mul_add(gwt, smr);
+                smt = (mu * tdr).mul_add(gwt, smt);
             }
             rdif_a[layer] = smr / swt;
             tdif_a[layer] = smt / swt;
@@ -471,36 +499,41 @@ fn adding_doubling(
         }
 
         trndir[layer + 1] = trndir[layer] * trnlay[layer];
-        let refkm1 = 1.0 / (1.0 - rdndif[layer] * rdif_a[layer]);
+        let refkm1 = 1.0 / (-rdndif[layer]).mul_add(rdif_a[layer], 1.0);
         let tdrrdir = trndir[layer] * rdir[layer];
         let tdndif = trntdr[layer] - trndir[layer];
-        trntdr[layer + 1] = trndir[layer] * tdir[layer]
-            + (tdndif + tdrrdir * rdndif[layer]) * refkm1 * tdif_a[layer];
-        rdndif[layer + 1] = rdif_b[layer] + tdif_b[layer] * rdndif[layer] * refkm1 * tdif_a[layer];
-        trndif[layer + 1] = trndif[layer] * refkm1 * tdif_a[layer];
+        trntdr[layer + 1] = trndir[layer].mul_add(
+            tdir[layer],
+            (rdndif[layer].mul_add(tdrrdir, tdndif) * refkm1) * tdif_a[layer],
+        );
+        rdndif[layer + 1] =
+            rdif_b[layer] + ((tdif_b[layer] * rdndif[layer]) * refkm1) * tdif_a[layer];
+        trndif[layer + 1] = (trndif[layer] * refkm1) * tdif_a[layer];
     }
 
     rupdir[layers] = input.underlying_albedo_5band[band];
     rupdif[layers] = input.underlying_albedo_5band[band];
     for layer in (0..layers).rev() {
-        let refkp1 = 1.0 / (1.0 - rdif_b[layer] * rupdif[layer + 1]);
-        rupdir[layer] = rdir[layer]
-            + (trnlay[layer] * rupdir[layer + 1]
-                + (tdir[layer] - trnlay[layer]) * rupdif[layer + 1])
-                * refkp1
-                * tdif_b[layer];
-        rupdif[layer] = rdif_a[layer] + tdif_a[layer] * rupdif[layer + 1] * refkp1 * tdif_b[layer];
+        let refkp1 = 1.0 / (-rdif_b[layer]).mul_add(rupdif[layer + 1], 1.0);
+        let sum = rupdir[layer + 1].mul_add(
+            trnlay[layer],
+            (tdir[layer] - trnlay[layer]) * rupdif[layer + 1],
+        );
+        rupdir[layer] = (sum * refkp1).mul_add(tdif_b[layer], rdir[layer]);
+        rupdif[layer] =
+            tdif_b[layer].mul_add((tdif_a[layer] * rupdif[layer + 1]) * refkp1, rdif_a[layer]);
     }
 
     for interface in 0..interfaces {
-        let refk = 1.0 / (1.0 - rdndif[interface] * rupdif[interface]);
-        dfdir[interface] = trndir[interface]
-            + (trntdr[interface] - trndir[interface]) * (1.0 - rupdif[interface]) * refk
-            - trndir[interface] * rupdir[interface] * (1.0 - rdndif[interface]) * refk;
+        let refk = 1.0 / (-rdndif[interface]).mul_add(rupdif[interface], 1.0);
+        let diffuse_part = (trntdr[interface] - trndir[interface]) * (1.0 - rupdif[interface]);
+        let reflected_part = (1.0 - rdndif[interface]) * (rupdir[interface] * trndir[interface]);
+        dfdir[interface] =
+            (-reflected_part).mul_add(refk, refk.mul_add(diffuse_part, trndir[interface]));
         if dfdir[interface] < PUNY {
             dfdir[interface] = 0.0;
         }
-        dfdif[interface] = trndif[interface] * (1.0 - rupdif[interface]) * refk;
+        dfdif[interface] = (trndif[interface] * (1.0 - rupdif[interface])) * refk;
         if dfdif[interface] < PUNY {
             dfdif[interface] = 0.0;
         }
@@ -508,13 +541,14 @@ fn adding_doubling(
 
     let (albedo, dftmp, reflected_top) = match input.incident {
         SnicarIncident::Direct => {
-            let refk = 1.0 / (1.0 - rdndif[0] * rupdif[0]);
-            let reflected = (trndir[0] * rupdir[0] + (trntdr[0] - trndir[0]) * rupdif[0]) * refk;
+            let refk = 1.0 / (-rdndif[0]).mul_add(rupdif[0], 1.0);
+            let reflected =
+                trndir[0].mul_add(rupdir[0], (trntdr[0] - trndir[0]) * rupdif[0]) * refk;
             (rupdir[0], dfdir, reflected)
         }
         SnicarIncident::Diffuse => {
-            let refk = 1.0 / (1.0 - rdndif[0] * rupdif[0]);
-            let reflected = trndif[0] * rupdif[0] * refk;
+            let refk = 1.0 / (-rdndif[0]).mul_add(rupdif[0], 1.0);
+            let reflected = (trndif[0] * rupdif[0]) * refk;
             (rupdif[0], dfdif, reflected)
         }
     };
@@ -551,20 +585,28 @@ fn adding_doubling(
     })
 }
 
-fn alpha_gamma(ws: f64, mu: f64, gs: f64, lm: f64) -> (f64, f64) {
-    let denom = 1.0 - lm * lm * mu * mu;
-    let alpha = 0.75 * ws * mu * ((1.0 + gs * (1.0 - ws)) / denom);
-    let gamma = 0.5 * ws * ((1.0 + 3.0 * gs * (1.0 - ws) * mu * mu) / denom);
-    (alpha, gamma)
+/// `alp`/`gam` 与 `apg = alp+gam`、`amg = alp-gam`。GIMPLE：分母 `.FNMA ((lm*lm)*mu, mu, 1)`，
+/// `gam = (0.5*ws)*(.FMA (((1-ws)*(3gs))*mu, mu, 1)/分母)`，`alp` 不单独舍入：
+/// `apg = .FMA ((0.75*ws)*mu, (1+(1-ws)gs)/分母, gam)`、`amg = .FMS (同上, gam)`。
+fn apg_amg(ws: f64, mu: f64, lm2: f64, alpha_numerator: f64, gamma_factor: f64) -> (f64, f64) {
+    let denominator = (-(lm2 * mu)).mul_add(mu, 1.0);
+    let gamma = (ws * 0.5) * ((gamma_factor * mu).mul_add(mu, 1.0) / denominator);
+    let alpha_factor = (ws * 0.75) * mu;
+    let alpha_ratio = alpha_numerator / denominator;
+    (
+        alpha_factor.mul_add(alpha_ratio, gamma),
+        alpha_factor.mul_add(alpha_ratio, -gamma),
+    )
+}
+
+/// 近红外归并：`flx_sum = .FMA (w, a, flx_sum)` 从 0 起，除以 `sum(flx_wgt(2:5))`。
+fn weighted_nir(values: [f64; SNICAR_BANDS], weights: [f64; SNICAR_BANDS]) -> f64 {
+    let nir_weight: f64 = weights[1..].iter().fold(0.0, |sum, weight| sum + weight);
+    (1..SNICAR_BANDS).fold(0.0, |sum, band| weights[band].mul_add(values[band], sum)) / nir_weight
 }
 
 fn reduce_albedo(albedo_5band: [f64; SNICAR_BANDS], weights: [f64; SNICAR_BANDS]) -> [f64; 2] {
-    let nir_weight: f64 = weights[1..].iter().sum();
-    let nir = (1..SNICAR_BANDS)
-        .map(|band| weights[band] * albedo_5band[band])
-        .sum::<f64>()
-        / nir_weight;
-    [albedo_5band[0], nir]
+    [albedo_5band[0], weighted_nir(albedo_5band, weights)]
 }
 
 fn reduce_absorption(
@@ -572,14 +614,12 @@ fn reduce_absorption(
     rows: usize,
     weights: [f64; SNICAR_BANDS],
 ) -> [[f64; 2]; SNICAR_MAX_LAYERS + 1] {
-    let nir_weight: f64 = weights[1..].iter().sum();
     let mut absorbed_broadband = [[0.0; 2]; SNICAR_MAX_LAYERS + 1];
     for row in 0..rows {
-        let nir = (1..SNICAR_BANDS)
-            .map(|band| weights[band] * absorbed_5band[row][band])
-            .sum::<f64>()
-            / nir_weight;
-        absorbed_broadband[row] = [absorbed_5band[row][0], nir];
+        absorbed_broadband[row] = [
+            absorbed_5band[row][0],
+            weighted_nir(absorbed_5band[row], weights),
+        ];
     }
     absorbed_broadband
 }

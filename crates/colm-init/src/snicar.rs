@@ -53,6 +53,14 @@ impl SnicarInitialization {
         Ok(Some(Self { optics, aging }))
     }
 
+    /// 运行期每步用同一份表（`SnowOptics_init`/`SnowAge_init` 只读一次）。
+    pub fn tables(&self) -> colm_core::SnicarTables<'_> {
+        colm_core::SnicarTables {
+            optics: &self.optics,
+            aging: &self.aging,
+        }
+    }
+
     /// Follow IniTimeVar -> AerosolMasses -> SnowAge_grain -> SnowAlbedo.
     /// Initial aerosol masses, snowfall and refreezing are zero in the source;
     /// no observational aerosol field is substituted or synthesized here.

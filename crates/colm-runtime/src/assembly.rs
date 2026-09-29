@@ -82,6 +82,8 @@ pub struct LandPhysicsParameters {
     pub dynamic_wetland: bool,
     /// `DEF_USE_Dynamic_Lake`（VSF 下才生效）：湖层厚随水量变、`dz_lake` 进时间重启。
     pub dynamic_lake: bool,
+    /// `DEF_USE_SNICAR`（`DEF_Aerosol_Readin = .false.`，沉降为 0）。
+    pub snicar: bool,
     /// namelist 选的土壤水力关系；决定常数重启里读 `bsw` 还是五个 van Genuchten 场。
     pub hydraulic_model: HydraulicModel,
     /// `DEF_USE_VariablySaturatedFlow` **生效后**的取值。
@@ -462,6 +464,10 @@ pub struct SurfaceOpticsStep {
     pub wet_snow_fraction: f64,
     /// 本步开始时的 `scv` [mm]。
     pub previous_snow_water_equivalent_mm: f64,
+    /// 本步落到地面的雪 `pg_snow` [kg m-2 s-1]（SNICAR 的雪粒老化读它）。
+    pub ground_snowfall_kg_m2_s: f64,
+    /// 本步的 `forc_t` [K]（SNICAR 的新雪粒径读它）。
+    pub air_temperature_k: f64,
 }
 
 /// 表面诊断量的**整变量缓冲**（长度 = patch 数），从时间重启读进来。
@@ -804,6 +810,8 @@ pub struct StandardLctRestartTemplate {
     radiation_fields: RadiationFields,
     /// 湖 patch 的湖层、`savedtke1`、`t_grnd` 与时不变量；其余 patch 为 `None`。
     pub lake: Option<LakeTemplate>,
+    /// `DEF_USE_SNICAR`：时间重启里的 SNICAR 状态与（colm-rs 加载后挂上的）光学/老化表。
+    pub snicar: Option<SnicarTemplate>,
     /// 城市 patch 的城市常数与初始城市状态；其余 patch 为 `None`。
     pub urban: Option<UrbanTemplate>,
     /// `DEF_USE_PFT` 下土壤 patch 的逐 PFT 参数与初始状态（[`Self::with_pft`] 装上）。
@@ -1309,8 +1317,19 @@ fn assemble(
     } else {
         None
     };
+    let snicar = if physics.snicar {
+        ensure!(
+            patch_type == 0,
+            "DEF_USE_SNICAR is ported for soil patches only; patchtype {patch_type} needs the \
+             glacier/lake/wetland SNICAR branches"
+        );
+        Some(SnicarTemplate::read(&time, patch)?)
+    } else {
+        None
+    };
     Ok(StandardLctRestartTemplate {
         lake,
+        snicar,
         urban,
         pft: None,
         bgc: None,
@@ -1943,7 +1962,35 @@ impl StandardLctRestartTemplate {
                 .map(|urban| Box::new(urban.initial.clone())),
             bgc: self.bgc.as_ref().map(|bgc| Box::new(bgc.initial.clone())),
             irrigation: self.irrigation.clone().map(Box::new),
+            snicar: self
+                .snicar
+                .as_ref()
+                .map(|snicar| Box::new(snicar.initial.clone())),
         }
+    }
+
+    /// 挂上 colm-rs 读好的 SNICAR 表（同一份给所有 patch）。
+    pub fn with_snicar_tables(
+        mut self,
+        tables: std::sync::Arc<colm_init::SnicarInitialization>,
+    ) -> Self {
+        if let Some(snicar) = self.snicar.as_mut() {
+            snicar.tables = Some(tables);
+        }
+        self
+    }
+
+    /// 本步的 SNICAR 输入（`DEF_Aerosol_Readin = .false.`：沉降为 0）。
+    fn snicar_step_input(&self) -> Option<colm_core::SnicarStepInput<'_>> {
+        let snicar = self.snicar.as_ref()?;
+        let tables = snicar
+            .tables
+            .as_ref()
+            .expect("colm-rs attaches the SNICAR tables before the time loop");
+        Some(colm_core::SnicarStepInput {
+            tables: tables.tables(),
+            aerosol_deposition_kg_m2_s: [0.0; colm_core::AEROSOL_DEPOSITION_FIELDS],
+        })
     }
 
     /// 上游 `CoLMMAIN` 每步末尾的「Preparation for the next time step」
@@ -1995,11 +2042,55 @@ impl StandardLctRestartTemplate {
             vegetation_snow: self.physics.vegetation_snow,
             lai_feedback: self.physics.bgc.is_some_and(|bgc| bgc.laifeedback),
         };
-        let optics = match state.energy.pft.as_mut() {
-            Some(pft) => {
-                colm_core::prepare_pft_surface_optics(input, pft, &mut state.energy.radiation)?
+        // SNICAR：步末 `albland` 的 `AerosolMasses → SnowAge_grain → SnowAlbedo`。雪柱取合并/分裂
+        // 并清空槽之后的状态（`dz_soisno(:1)`/`t_soisno(:1)` 连同第一层土）。
+        let mut hook = match (&self.snicar, state.snicar.as_deref_mut()) {
+            (Some(template), Some(snicar)) => {
+                let tables = template
+                    .tables
+                    .as_ref()
+                    .context("colm-rs attaches the SNICAR tables before the time loop")?;
+                let snow = &state.snow;
+                let mut thickness = [0.0; 6];
+                thickness[..5].copy_from_slice(&snow.thickness_m);
+                thickness[5] = self.layer_thickness_m[0];
+                let mut temperature = [0.0; 6];
+                temperature[..5].copy_from_slice(&snow.temperature_k);
+                temperature[5] = state.soil_temperature_k[0];
+                let mut liquid = [0.0; 5];
+                liquid.copy_from_slice(&snow.liquid_water_kg_m2);
+                let mut ice = [0.0; 5];
+                ice.copy_from_slice(&snow.ice_water_kg_m2);
+                Some(colm_core::SnicarAlbedoHook::new(
+                    tables.tables(),
+                    snicar,
+                    self.physics.timestep_seconds,
+                    snow.layer_count.unsigned_abs() as usize,
+                    thickness,
+                    temperature,
+                    liquid,
+                    ice,
+                    snow.water_equivalent_kg_m2,
+                    step.ground_snowfall_kg_m2_s,
+                    step.ground_temperature_k,
+                    step.air_temperature_k,
+                ))
             }
-            None => colm_core::prepare_surface_optics(input, &mut state.energy.radiation)?,
+            (None, None) => None,
+            _ => anyhow::bail!("the SNICAR template and the SNICAR snow state disagree"),
+        };
+        let optics = match state.energy.pft.as_mut() {
+            Some(pft) => colm_core::prepare_pft_surface_optics_with_snicar(
+                input,
+                pft,
+                &mut state.energy.radiation,
+                hook.as_mut(),
+            )?,
+            None => colm_core::prepare_surface_optics_with_snicar(
+                input,
+                &mut state.energy.radiation,
+                hook.as_mut(),
+            )?,
         };
         state.snow.ground_snow_fraction = optics.ground_snow_fraction;
         state.snow.age = optics.snow_age;
@@ -2068,6 +2159,7 @@ impl StandardLctRestartTemplate {
                 frost_kg_m2_s: 0.0,
             },
             soil_water: self.input(binding).water,
+            snicar: self.snicar_step_input(),
         }
     }
 
@@ -2432,6 +2524,9 @@ impl StandardLctRestartTemplate {
         if let (Some(template), Some(lake)) = (&self.lake, &state.lake) {
             overrides.extend(template.overrides(self.patch, lake)?);
         }
+        if let (Some(template), Some(snicar)) = (&self.snicar, &state.snicar) {
+            overrides.extend(template.overrides(self.patch, snicar));
+        }
         Ok(overrides)
     }
 
@@ -2634,6 +2729,110 @@ fn soil_column(
 ) -> Result<Vec<f64>> {
     let column = time.layer_column(name, patch, snow_layers + layers)?;
     Ok(column[snow_layers..].to_vec())
+}
+
+/// 时间重启里的 SNICAR 状态（`MOD_Vars_TimeVariables.F90` 的 `snw_rds`、`mss_*`、`ssno_lyr`）。
+///
+/// 形状：`snw_rds(patch, snow)`、`mss_*(patch, snow)`、`ssno_lyr(patch, snowp1, rtyp, band)`（C 序）。
+#[derive(Debug, Clone)]
+pub struct SnicarTemplate {
+    pub initial: colm_core::SnicarColumnState,
+    pub tables: Option<std::sync::Arc<colm_init::SnicarInitialization>>,
+    restart_grain_radius_um: Vec<f64>,
+    restart_aerosol_mass: [Vec<f64>; 8],
+    restart_layer_absorption: Vec<f64>,
+}
+
+/// 物种顺序（与 `SnicarColumnState::aerosol_mass_kg_m2` 同）对应的重启变量名。
+const SNICAR_AEROSOL_NAMES: [&str; 8] = [
+    "mss_bcphi",
+    "mss_bcpho",
+    "mss_ocphi",
+    "mss_ocpho",
+    "mss_dst1",
+    "mss_dst2",
+    "mss_dst3",
+    "mss_dst4",
+];
+
+impl SnicarTemplate {
+    fn read(time: &colm_init::RestartFile, patch: usize) -> Result<Self> {
+        let grain = time.floats("snw_rds")?.to_vec();
+        ensure!(
+            grain.len() >= (patch + 1) * 5,
+            "the time restart's snw_rds is too short for patch {patch}"
+        );
+        let mut initial = colm_core::SnicarColumnState {
+            grain_radius_um: [0.0; 5],
+            aerosol_mass_kg_m2: [[0.0; 8]; 5],
+            layer_absorption: [[[0.0; 6]; 2]; 2],
+            refreezing_kg_m2_s: [0.0; 5],
+        };
+        initial
+            .grain_radius_um
+            .copy_from_slice(&grain[patch * 5..patch * 5 + 5]);
+        let mut restart_aerosol_mass: [Vec<f64>; 8] = Default::default();
+        for (species, name) in SNICAR_AEROSOL_NAMES.iter().enumerate() {
+            let values = time.floats(name)?.to_vec();
+            ensure!(
+                values.len() >= (patch + 1) * 5,
+                "the time restart's {name} is too short for patch {patch}"
+            );
+            for slot in 0..5 {
+                initial.aerosol_mass_kg_m2[slot][species] = values[patch * 5 + slot];
+            }
+            restart_aerosol_mass[species] = values;
+        }
+        let layers = time.floats("ssno_lyr")?.to_vec();
+        ensure!(
+            layers.len() >= (patch + 1) * 24,
+            "the time restart's ssno_lyr is too short for patch {patch}"
+        );
+        for slot in 0..6 {
+            for kind in 0..2 {
+                for band in 0..2 {
+                    initial.layer_absorption[band][kind][slot] =
+                        layers[patch * 24 + slot * 4 + kind * 2 + band];
+                }
+            }
+        }
+        Ok(Self {
+            initial,
+            tables: None,
+            restart_grain_radius_um: grain,
+            restart_aerosol_mass,
+            restart_layer_absorption: layers,
+        })
+    }
+
+    /// 以原文件为底，只换本 patch 的 SNICAR 状态。
+    fn overrides(
+        &self,
+        patch: usize,
+        state: &colm_core::SnicarColumnState,
+    ) -> Vec<RestartOverride> {
+        let mut grain = self.restart_grain_radius_um.clone();
+        grain[patch * 5..patch * 5 + 5].copy_from_slice(&state.grain_radius_um);
+        let mut overrides = vec![RestartOverride::new("snw_rds", grain)];
+        for (species, name) in SNICAR_AEROSOL_NAMES.iter().enumerate() {
+            let mut values = self.restart_aerosol_mass[species].clone();
+            for slot in 0..5 {
+                values[patch * 5 + slot] = state.aerosol_mass_kg_m2[slot][species];
+            }
+            overrides.push(RestartOverride::new(*name, values));
+        }
+        let mut layers = self.restart_layer_absorption.clone();
+        for slot in 0..6 {
+            for kind in 0..2 {
+                for band in 0..2 {
+                    layers[patch * 24 + slot * 4 + kind * 2 + band] =
+                        state.layer_absorption[band][kind][slot];
+                }
+            }
+        }
+        overrides.push(RestartOverride::new("ssno_lyr", layers));
+        overrides
+    }
 }
 
 #[cfg(test)]

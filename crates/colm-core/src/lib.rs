@@ -143,6 +143,7 @@ pub mod runoff;
 pub mod runtime_clock;
 pub mod runtime_forcing;
 pub mod snicar;
+pub mod snicar_column;
 pub mod snow;
 pub mod snow_grain;
 pub mod soil_surface_resistance;
@@ -345,9 +346,10 @@ pub use runtime_forcing::{
     forcing_grid_center_degrees, prepare_runtime_forcing, RuntimeForcing, RuntimeForcingInput,
 };
 pub use snow::{
-    add_new_snow, combine_snow_layers, compact_snow_layers, divide_snow_layers, snow_fraction,
-    snow_water, update_snow_age, NewSnowInput, NewSnowOutcome, RestartSnowSlots, RuntimeSnowColumn,
-    SnowFraction, SnowToSoilTransfer, SnowWaterInput, SnowWaterOutcome,
+    add_new_snow, combine_snow_layers, combine_snow_layers_with_aerosols, compact_snow_layers,
+    divide_snow_layers, divide_snow_layers_with_aerosols, snow_fraction, snow_water,
+    update_snow_age, NewSnowInput, NewSnowOutcome, RestartSnowSlots, RuntimeSnowColumn,
+    SnowAerosolMasses, SnowFraction, SnowToSoilTransfer, SnowWaterInput, SnowWaterOutcome,
 };
 pub use soil_surface_resistance::{soil_surface_resistance, SoilSurfaceResistanceInput};
 pub use soil_water::{
@@ -355,7 +357,8 @@ pub use soil_water::{
     CampbellSoilWaterInput, CampbellSoilWaterState, GroundwaterInput, GroundwaterState,
 };
 pub use surface_optics::{
-    prepare_pft_surface_optics, prepare_surface_optics, SurfaceOptics, SurfaceOpticsInput,
+    prepare_pft_surface_optics, prepare_pft_surface_optics_with_snicar, prepare_surface_optics,
+    prepare_surface_optics_with_snicar, SurfaceOptics, SurfaceOpticsInput,
 };
 
 pub use pft::{
@@ -458,6 +461,11 @@ pub use water_2014::{
     Water2014SoilState,
 };
 
+pub use snicar_column::{
+    snicar_net_solar, snicar_snow_water_aerosols, snow_refreezing_rate, SnicarAlbedoHook,
+    SnicarColumnState, SnicarStepInput, SnicarTables, AEROSOL_DEPOSITION_FIELDS,
+    SNICAR_AEROSOL_SPECIES,
+};
 pub use snow_grain::{
     age_snow_grains, fresh_snow_radius, snow_aerosol_concentrations, SnicarAgingTable,
     SnowGrainAgingInput, FRESH_SNOW_RADIUS_MAX_UM, FRESH_SNOW_RADIUS_MIN_UM,

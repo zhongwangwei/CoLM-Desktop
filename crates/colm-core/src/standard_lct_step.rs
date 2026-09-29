@@ -10,16 +10,16 @@ use crate::LibmPow;
 use anyhow::{ensure, Result};
 
 use crate::{
-    add_new_snow, combine_snow_layers, compact_snow_layers, divide_snow_layers, ground_fluxes,
-    ground_temperature, intercept_canopy, net_solar, root_uptake, soil_surface_resistance,
-    CanopyInterceptionFluxes, CanopyInterceptionInput, ColdStartRadiation, GroundFluxInput,
-    GroundFluxState, GroundHumidityInput, GroundHumidityState, GroundTemperatureInput,
-    GroundTemperatureState, LeafPlantHydraulicInput, LeafTemperatureInput, LeafTemperatureOutput,
-    LeafTemperatureState, NetSolarFluxes, NetSolarInput, NewSnowInput, PrecipitationPhaseScheme,
-    PrecipitationState, RootUptakeInput, RootUptakeState, RuntimeForcing, RuntimeSnowColumn,
-    SnowToSoilTransfer, SnowWaterInput, SoilSurfaceResistanceInput, SplitThermalWaterFluxes,
-    SplitThermalWaterInput, ThermalWaterFluxes, ThermalWaterInput, Water2014SnowSoilInput,
-    Water2014SnowSoilOutput, Water2014SoilInput, Water2014SoilOutput, Water2014SoilState, MISSING,
+    add_new_snow, compact_snow_layers, ground_fluxes, ground_temperature, intercept_canopy,
+    net_solar, root_uptake, soil_surface_resistance, CanopyInterceptionFluxes,
+    CanopyInterceptionInput, ColdStartRadiation, GroundFluxInput, GroundFluxState,
+    GroundHumidityInput, GroundHumidityState, GroundTemperatureInput, GroundTemperatureState,
+    LeafPlantHydraulicInput, LeafTemperatureInput, LeafTemperatureOutput, LeafTemperatureState,
+    NetSolarFluxes, NetSolarInput, NewSnowInput, PrecipitationPhaseScheme, PrecipitationState,
+    RootUptakeInput, RootUptakeState, RuntimeForcing, RuntimeSnowColumn, SnowToSoilTransfer,
+    SnowWaterInput, SoilSurfaceResistanceInput, SplitThermalWaterFluxes, SplitThermalWaterInput,
+    ThermalWaterFluxes, ThermalWaterInput, Water2014SnowSoilInput, Water2014SnowSoilOutput,
+    Water2014SoilInput, Water2014SoilOutput, Water2014SoilState, MISSING,
 };
 
 const AIR_GAS_CONSTANT_J_KG_K: f64 = 287.04;
@@ -161,6 +161,8 @@ pub struct StandardLctSnowSoilState {
     pub bgc: Option<Box<crate::bgc_state::BgcState>>,
     /// `DEF_USE_IRRIGATION`（CROP）的 patch 灌溉状态；关闭时 `None`。
     pub irrigation: Option<Box<crate::IrrigationState>>,
+    /// `DEF_USE_SNICAR`：雪粒径、雪中气溶胶与分层吸收；关闭时 `None`。
+    pub snicar: Option<Box<crate::SnicarColumnState>>,
 }
 
 impl StandardLctSnowSoilState {
@@ -273,6 +275,8 @@ pub struct StandardLctSnowSoilInput<'a> {
     pub energy: StandardLctEnergyInput<'a>,
     pub snow_water: SnowWaterInput,
     pub soil_water: Water2014SoilInput<'a>,
+    /// `DEF_USE_SNICAR` 打开时的表与本步气溶胶沉降；与状态里的 `snicar` 同有同无。
+    pub snicar: Option<crate::SnicarStepInput<'a>>,
 }
 
 /// Results from one linked active-snow energy and water step.
@@ -312,7 +316,7 @@ pub fn standard_lct_energy_step(
     let input = with_state_canopy(input, state.canopy);
     validate(input)?;
     let prepared = prepare_energy(input, state)?;
-    finish_energy_step(input, state, prepared)
+    finish_energy_step(input, state, prepared, None)
 }
 
 fn prepare_energy(
@@ -344,10 +348,12 @@ fn prepare_energy(
     })
 }
 
+/// `snicar_layers`：SNICAR 打开时的 `ssno_lyr`（`netsolar` 就地重标它）。
 fn finish_energy_step(
     input: StandardLctEnergyInput<'_>,
     state: &mut StandardLctEnergyState,
     prepared: PreparedEnergy,
+    snicar_layers: Option<&mut [[[f64; 6]; 2]; 2]>,
 ) -> Result<StandardLctEnergyOutput> {
     let PreparedEnergy {
         precipitation,
@@ -357,13 +363,34 @@ fn finish_energy_step(
     if let Some(pft) = state.pft.as_mut() {
         crate::pft::aggregate_pft_absorption(pft, &mut state.radiation);
     }
-    let shortwave = net_solar(
+    let mut shortwave = net_solar(
         NetSolarInput {
             forcing: input.forcing.shortwave,
             ..input.solar
         },
         &mut state.radiation,
     )?;
+    // SNICAR：`netsolar` 末段的分层吸收（只在有入射短波时算，否则全 0），交给地温的是
+    // 打包列（雪层在前）的 `sabg_snow_lyr(lb:0)` 加土层 1 那一格，其余土层为 0。
+    let snow_layer_absorption = snicar_layers.map(|layers| {
+        let absorbed = if input.forcing.shortwave.total() > 0.0 {
+            crate::snicar_net_solar(
+                layers,
+                state.radiation.snow_absorption,
+                input.forcing.shortwave,
+                input.solar.snow_fraction,
+                &mut shortwave.soil_absorbed_w_m2,
+                &mut shortwave.snow_absorbed_w_m2,
+            )
+        } else {
+            [0.0; 6]
+        };
+        let snow_layers = input.ground_temperature.snow_layers;
+        let mut packed = vec![0.0; input.ground_temperature.temperature_k.len()];
+        packed[..snow_layers].copy_from_slice(&absorbed[5 - snow_layers..5]);
+        packed[snow_layers] = absorbed[5];
+        packed
+    });
     let ground_humidity = ground_humidity_input(input)?;
     let soil_surface_resistance_s_m =
         soil_surface_resistance_input(input, ground_humidity, state.soil_surface_resistance_s_m)?;
@@ -453,6 +480,7 @@ fn finish_energy_step(
         ground_temperature_k,
         soil_surface_temperature_k: soil_temperature_k,
         snow_surface_temperature_k: snow_temperature_k,
+        snow_layer_absorption_w_m2: snow_layer_absorption.as_deref(),
         ..input.ground_temperature
     })?;
     let surface_temperature_k = current_ground_temperature(input.ground_temperature, &ground)?;
@@ -827,6 +855,14 @@ pub fn standard_lct_snow_soil_step(
     }
     let (_, template_snow_layers) = validate_snow_soil_step(input, state)?;
     validate(input.energy)?;
+    ensure!(
+        input.snicar.is_some() == state.snicar.is_some(),
+        "the SNICAR tables and the SNICAR snow state must be present together"
+    );
+    // `snofrz(:) = 0`（`CoLMMAIN.F90:743`）。
+    if let Some(snicar) = state.snicar.as_mut() {
+        snicar.refreezing_kg_m2_s = [0.0; 5];
+    }
     remember_snow_ice_fraction(&mut state.snow);
     let prepared = prepare_energy(input.energy, &mut state.energy)?;
     // `CoLMMAIN.F90:772` 的 `netsolar` 在 `:959` 的 `newsnow` **之前**：NetSolar 用的是
@@ -934,7 +970,25 @@ pub fn standard_lct_snow_soil_step(
             &state.soil_water.hydraulic_conductivity_mm_s,
         ));
     }
-    let energy = finish_energy_step(energy_input, &mut state.energy, prepared)?;
+    let energy = finish_energy_step(
+        energy_input,
+        &mut state.energy,
+        prepared,
+        state
+            .snicar
+            .as_mut()
+            .map(|snicar| &mut snicar.layer_absorption),
+    )?;
+    if let Some(snicar) = state.snicar.as_mut() {
+        crate::snow_refreezing_rate(
+            snicar,
+            snow_layers,
+            &packed.ice_water_kg_m2,
+            &energy.ground.ice_water_kg_m2,
+            &energy.ground.phase_flag,
+            input.energy.interception.time_step_seconds,
+        );
+    }
     sync_snow_soil_state(&energy.ground, snow_layers, state);
     let melted = energy.ground.phase_flag[..snow_layers]
         .iter()
@@ -1013,6 +1067,19 @@ pub fn standard_lct_snow_soil_step(
         &mut state.snow,
         &mut state.soil_water,
     )?;
+    if let (Some(snicar), Some(step)) = (state.snicar.as_mut(), input.snicar) {
+        if !water.snow.layer_drainage_kg_m2.is_empty() {
+            crate::snicar_snow_water_aerosols(
+                snicar,
+                state.snow.layer_count.unsigned_abs() as usize,
+                &state.snow.liquid_water_kg_m2,
+                &state.snow.ice_water_kg_m2,
+                &water.snow.layer_drainage_kg_m2,
+                &step.aerosol_deposition_kg_m2_s,
+                input.energy.interception.time_step_seconds,
+            )?;
+        }
+    }
     compact_snow_layers(
         &mut state.snow,
         input.energy.interception.time_step_seconds,
@@ -1024,11 +1091,19 @@ pub fn standard_lct_snow_soil_step(
         liquid_water_kg_m2: state.soil_water.liquid_water_kg_m2[0],
         ice_water_kg_m2: state.soil_water.ice_water_kg_m2[0],
     };
-    combine_snow_layers(&mut state.snow, &mut soil_surface)?;
+    let mut aerosols = state
+        .snicar
+        .as_mut()
+        .map(|snicar| &mut snicar.aerosol_mass_kg_m2);
+    crate::combine_snow_layers_with_aerosols(
+        &mut state.snow,
+        &mut soil_surface,
+        aerosols.as_deref_mut(),
+    )?;
     state.soil_water.liquid_water_kg_m2[0] = soil_surface.liquid_water_kg_m2;
     state.soil_water.ice_water_kg_m2[0] = soil_surface.ice_water_kg_m2;
     if state.snow.layer_count < 0 {
-        divide_snow_layers(&mut state.snow)?;
+        crate::divide_snow_layers_with_aerosols(&mut state.snow, aerosols)?;
     }
     // `CoLMMAIN.F90:1442-1449`：`snl > maxsnl` 时把空出来的雪槽 `maxsnl+1:snl` 的
     // `wice/wliq/t/z/dz` 清零。不清的话合并后的空槽留着旧值 —— 物理上不再被读，但写进

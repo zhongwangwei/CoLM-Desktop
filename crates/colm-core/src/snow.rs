@@ -541,6 +541,22 @@ pub fn combine_snow_layers(
     state: &mut RuntimeSnowColumn,
     soil_surface: &mut SnowToSoilTransfer,
 ) -> Result<()> {
+    combine_snow_layers_with_aerosols(state, soil_surface, None)
+}
+
+/// 雪层每槽八种气溶胶质量 `[slot][species]`（Fortran `-4:0`）。
+pub type SnowAerosolMasses = [[f64; 8]; 5];
+
+/// `SnowLayersCombine_snicar`：水热部分与 [`combine_snow_layers`] 相同，另把气溶胶质量随层
+/// 搬运（下移并入 `j<0` 时加到下一层、平移复制、相邻层合并相加；雪全没了时整列清零）。
+/// 空出来的槽里的气溶胶上游不清，留给步末 `AerosolMasses`。
+pub fn combine_snow_layers_with_aerosols(
+    state: &mut RuntimeSnowColumn,
+    soil_surface: &mut SnowToSoilTransfer,
+    aerosols: Option<&mut SnowAerosolMasses>,
+) -> Result<()> {
+    let mut unused = [[0.0; 8]; 5];
+    let aerosols = aerosols.unwrap_or(&mut unused);
     validate_snow_topology(state, soil_surface)?;
     if state.layer_count == 0 {
         return Ok(());
@@ -553,9 +569,14 @@ pub fn combine_snow_layers(
             continue;
         }
         transfer_layer_down(state, soil_surface, fortran_layer);
+        if fortran_layer < 0 {
+            let upper = aerosols[layer_slot(fortran_layer)];
+            add_masses(&mut aerosols[layer_slot(fortran_layer + 1)], &upper);
+        }
         if fortran_layer > layer_count + 1 && layer_count < -1 {
             for destination in (layer_count + 2..=fortran_layer).rev() {
                 copy_layer(state, destination - 1, destination);
+                aerosols[layer_slot(destination)] = aerosols[layer_slot(destination - 1)];
             }
         }
         layer_count += 1;
@@ -565,6 +586,7 @@ pub fn combine_snow_layers(
         state.water_equivalent_kg_m2 = 0.0;
         state.depth_m = 0.0;
         clear_snow_layers(state);
+        *aerosols = [[0.0; 8]; 5];
         return Ok(());
     }
 
@@ -577,6 +599,7 @@ pub fn combine_snow_layers(
         state.depth_m = if ice_mass <= 0.0 { 0.0 } else { snow_depth };
         soil_surface.liquid_water_kg_m2 += liquid_mass;
         clear_snow_layers(state);
+        *aerosols = [[0.0; 8]; 5];
         return Ok(());
     }
 
@@ -608,9 +631,12 @@ pub fn combine_snow_layers(
                 (fortran_layer, neighbor)
             };
             combine_layer_pair(state, target, other);
+            let other_masses = aerosols[layer_slot(other)];
+            add_masses(&mut aerosols[layer_slot(target)], &other_masses);
             if target - 1 > layer_count + 1 {
                 for destination in (layer_count + 2..=target - 1).rev() {
                     copy_layer(state, destination - 1, destination);
+                    aerosols[layer_slot(destination)] = aerosols[layer_slot(destination - 1)];
                 }
             }
             layer_count += 1;
@@ -785,6 +811,17 @@ fn clear_snow_layers(state: &mut RuntimeSnowColumn) {
 
 /// Applies MOD_SnowLayersCombineDivide:snowlayersdivide without SNICAR or tracers.
 pub fn divide_snow_layers(state: &mut RuntimeSnowColumn) -> Result<()> {
+    divide_snow_layers_with_aerosols(state, None)
+}
+
+/// `SnowLayersDivide_snicar`：气溶胶按冰量同样的比例随层拆分（对半、`propor` 拆出、
+/// `z_mss + mss(next)` 并入下一层），最后写回活动槽。
+pub fn divide_snow_layers_with_aerosols(
+    state: &mut RuntimeSnowColumn,
+    aerosols: Option<&mut SnowAerosolMasses>,
+) -> Result<()> {
+    let mut unused = [[0.0; 8]; 5];
+    let aerosols = aerosols.unwrap_or(&mut unused);
     validate_snow_topology(state, &SnowToSoilTransfer::default())?;
     if state.layer_count == 0 {
         return Ok(());
@@ -792,8 +829,10 @@ pub fn divide_snow_layers(state: &mut RuntimeSnowColumn) -> Result<()> {
 
     let mut layer_count = state.layer_count.unsigned_abs() as usize;
     let mut layers = [SnowLayer::default(); MAX_SNOW_LAYERS];
+    let mut masses = [[0.0; 8]; MAX_SNOW_LAYERS];
     for (position, layer) in layers.iter_mut().enumerate().take(layer_count) {
         let slot = layer_slot(position as i32 + state.layer_count + 1);
+        masses[position] = aerosols[slot];
         *layer = SnowLayer {
             thickness_m: state.thickness_m[slot],
             temperature_k: state.temperature_k[slot],
@@ -805,18 +844,25 @@ pub fn divide_snow_layers(state: &mut RuntimeSnowColumn) -> Result<()> {
     if layer_count == 1 && layers[0].thickness_m > f77(0.03) {
         layer_count = 2;
         halve_layer(&mut layers[0]);
+        halve_masses(&mut masses[0]);
         layers[1] = layers[0];
+        masses[1] = masses[0];
     }
-    split_and_combine(&mut layers, &mut layer_count, 0, f77(0.02), f77(0.07), 1);
-    split_and_combine(&mut layers, &mut layer_count, 1, f77(0.05), f77(0.18), 2);
-    split_and_combine(&mut layers, &mut layer_count, 2, f77(0.11), f77(0.41), 3);
-    if layer_count > 4 && layers[3].thickness_m > f77(0.23) {
-        move_excess_to_next(&mut layers, 3, f77(0.23));
+    let mut stack = LayerStack {
+        layers: &mut layers,
+        masses: &mut masses,
+    };
+    split_and_combine(&mut stack, &mut layer_count, 0, f77(0.02), f77(0.07), 1);
+    split_and_combine(&mut stack, &mut layer_count, 1, f77(0.05), f77(0.18), 2);
+    split_and_combine(&mut stack, &mut layer_count, 2, f77(0.11), f77(0.41), 3);
+    if layer_count > 4 && stack.layers[3].thickness_m > f77(0.23) {
+        move_excess_to_next(&mut stack, 3, f77(0.23));
     }
 
     state.layer_count = -(layer_count as i32);
     for (position, layer) in layers.iter().enumerate().take(layer_count) {
         let slot = layer_slot(position as i32 + state.layer_count + 1);
+        aerosols[slot] = masses[position];
         state.thickness_m[slot] = layer.thickness_m;
         state.temperature_k[slot] = layer.temperature_k;
         state.liquid_water_kg_m2[slot] = layer.liquid_water_kg_m2;
@@ -826,30 +872,37 @@ pub fn divide_snow_layers(state: &mut RuntimeSnowColumn) -> Result<()> {
     Ok(())
 }
 
+/// 分裂时的工作列：水热量与气溶胶质量同步变换。
+struct LayerStack<'a> {
+    layers: &'a mut [SnowLayer; MAX_SNOW_LAYERS],
+    masses: &'a mut [[f64; 8]; MAX_SNOW_LAYERS],
+}
+
 fn split_and_combine(
-    layers: &mut [SnowLayer; MAX_SNOW_LAYERS],
+    stack: &mut LayerStack<'_>,
     layer_count: &mut usize,
     position: usize,
     retained_thickness_m: f64,
     split_threshold_m: f64,
     next_position: usize,
 ) {
-    if *layer_count <= position + 1 || layers[position].thickness_m <= retained_thickness_m {
+    if *layer_count <= position + 1 || stack.layers[position].thickness_m <= retained_thickness_m {
         return;
     }
-    move_excess_to_next(layers, position, retained_thickness_m);
-    if *layer_count <= next_position + 1 && layers[next_position].thickness_m > split_threshold_m {
+    move_excess_to_next(stack, position, retained_thickness_m);
+    if *layer_count <= next_position + 1
+        && stack.layers[next_position].thickness_m > split_threshold_m
+    {
         *layer_count += 1;
-        halve_layer(&mut layers[next_position]);
-        layers[next_position + 1] = layers[next_position];
+        halve_layer(&mut stack.layers[next_position]);
+        halve_masses(&mut stack.masses[next_position]);
+        stack.layers[next_position + 1] = stack.layers[next_position];
+        stack.masses[next_position + 1] = stack.masses[next_position];
     }
 }
 
-fn move_excess_to_next(
-    layers: &mut [SnowLayer; MAX_SNOW_LAYERS],
-    position: usize,
-    retained_thickness_m: f64,
-) {
+fn move_excess_to_next(stack: &mut LayerStack<'_>, position: usize, retained_thickness_m: f64) {
+    let layers = &mut *stack.layers;
     let fraction =
         (layers[position].thickness_m - retained_thickness_m) / layers[position].thickness_m;
     let excess = SnowLayer {
@@ -863,6 +916,26 @@ fn move_excess_to_next(
     layers[position].liquid_water_kg_m2 *= retained_fraction;
     layers[position].ice_water_kg_m2 *= retained_fraction;
     layers[position + 1] = combine_snow_values(layers[position + 1], excess);
+    // `z_mss = propor*mss(pos)`；`mss(pos) = propor'*mss(pos)`；`mss(next) = z_mss + mss(next)`。
+    let (retained, next) = stack.masses.split_at_mut(position + 1);
+    for (mass, next_mass) in retained[position].iter_mut().zip(next[0].iter_mut()) {
+        let moved = fraction * *mass;
+        *mass *= retained_fraction;
+        *next_mass += moved;
+    }
+}
+
+/// `mss(j) = mss(j) + mss(l)`，逐物种。
+fn add_masses(target: &mut [f64; 8], source: &[f64; 8]) {
+    for (mass, added) in target.iter_mut().zip(source) {
+        *mass += added;
+    }
+}
+
+fn halve_masses(masses: &mut [f64; 8]) {
+    for mass in masses {
+        *mass /= f77(2.0);
+    }
 }
 
 fn halve_layer(layer: &mut SnowLayer) {

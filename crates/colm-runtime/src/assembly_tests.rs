@@ -27,6 +27,7 @@ fn physics(timestep_seconds: f64) -> LandPhysicsParameters {
         land_class_overrides: colm_core::LandClassOverrides::default(),
         dynamic_wetland: false,
         dynamic_lake: false,
+        snicar: false,
         hydraulic_model: HydraulicModel::VanGenuchten,
         // 夹具跑的是经典 Richards 路径；VSF 的编排还没移植。
         variably_saturated_flow: false,
