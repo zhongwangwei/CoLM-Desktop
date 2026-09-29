@@ -25832,3 +25832,30 @@ CoLM-SYSU-integration 的 `origin/master` 仍是 `3c799bae`，与 vendor 对齐�
 `fix/tracer-impermeable-exchange` 增至 14 个提交（最新 `91ac30a0`，09-29 02:07），仍是那 8 个文件：`MOD_Hydro_SoilWater.F90`
 的 5 处 `is_permeable(ilev) .and.` 全在 `#ifdef TRACER` 块内（375–439、446–465 行），`CoLMMAIN.F90` 改的是网格洪泛反馈的
 示踪物记账，其余是 `TRACER/*` 与出错退出码。只影响示踪物构建（Rust 引擎拒绝），合入 master 后再同步 vendor。
+
+## 第 434 轮：施肥（`DEF_USE_FERT`，合成 `crop/` 数据）
+
+用户决定：施肥与灌溉照 FIRE 的办法用合成数据验证。`oracle/scripts/make_crop_data.py <runtime>` 写出上游 `CROP_readin`
+读的五个文件（种植日、施肥来源 1/2、灌溉方式、灌溉配水），文件名与变量名照上游；按 `ncio_read_block_time` 读的变量带
+前导维（`time` 或 `cft`）。每个格点取值不同；US-Ne3 格点上玉米（17）有值、冬小麦（21）为负、大豆（23）缺测。
+
+**参考必须是纯 Fortran。** `--engine fortran` 只换主循环，冷启动仍是 Rust 的；这一轮验证的正是冷启动与运行期两次
+`CROP_readin`，所以参考一律 `--preprocessors fortran --engine fortran`。
+
+- 冷启动（colm-init）：已有的读取只认二维 `(lat, lon)`，改为也接受长度 1 的前导维。两种来源的常数与初始重启逐位——
+  来源 1 的 `manunitro_p = manure(17)·1000 = 2`（`IniTimeVariable` 在 `CROP_readin` 之后又写一次），来源 2 取文件的
+  `manure`（`float` 的 1.1 扩成 1.100000023841858）。
+- 运行期（`bgc_step::crop_readin`）：原先只移植了不读文件的快速路径、其余拒绝；现在照 `MOD_CropReadin.F90` 读：`pdrice2`
+  （缺测为 0，否则向零截断）、`PLANTDATE_CFT_xx`（非正或缺测为 −99999999，再按播种日覆盖作物 PFT）；施肥来源 1 用**种植日
+  文件的网格与 `pdrice2` 的 `missing_value`** 读 `CONST_FERTNITRO_CFT_xx`（非正为 0，非作物 PFT 留 −99999999），来源 2 按
+  自己的网格读 `manure`/`fertilizer`（负值为 0）。运行期重读后来源 1 的 `manunitro_p` 回到 0。快速路径补上 `pdrice2 = 0`。
+
+| 算例 | 设置 | 历史 | 重启+旁车 | release | debug |
+|---|---|---|---|---|---|
+| `cf1` | 玉米，来源 1，播种日取自文件（209.25） | 12/12 | 51/51 | ✓ | ✓ |
+| `cf2` | 玉米，来源 2，播种日覆盖 120 | 12/12 | 51/51 | ✓ | ✓ |
+| `cf3` | 大豆，来源 1（格点缺测 → 不播种、不施肥） | 12/12 | 51/51 | ✓ | — |
+| `cf4` | 冬小麦，来源 1（格点负值 → 同上） | 12/12 | 51/51 | ✓ | — |
+
+`cf1`/`cf2` 全年各有 21 天 `f_fert_to_sminn > 0`，施肥路径确实走到。原有作物回归 `cr/cs/cw/cs2/cs3on/nc` 不变。
+灌溉仍拒绝（下一步）。

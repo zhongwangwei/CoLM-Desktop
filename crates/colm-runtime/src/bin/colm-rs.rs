@@ -366,7 +366,11 @@ fn assemble_bgc(
     let mut initial =
         colm_runtime::bgc::BgcTemplate::read(&files.constant, &files.time, &pft_time, npft)?
             .initial;
-    // `CROP_readin`（`CoLM.F90:441`）：启动时覆盖作物的播种日与施肥量。
+    let layers = initial.dims.nl_soil;
+    let statics = colm_runtime::bgc_step::BgcStatics::read(&files.constant, patch, layers)?;
+    let runtime_dir = std::path::PathBuf::from(string_field(document, "DEF_dir_runtime")?);
+    let degrees = |radians: f64| radians * 180.0 / std::f64::consts::PI;
+    // `CROP_readin`（`CoLM.F90:442`）：启动时覆盖作物的播种日与施肥量。
     if switches.crop {
         let classes =
             colm_init::RestartFile::open(&colm_runtime::pft::pft_restart_path(&files.constant)?)?
@@ -379,16 +383,18 @@ fn assemble_bgc(
             &classes,
             real_field(document, "DEF_TUNING_CROP_PLANTING_DAY")?,
             switches,
+            colm_runtime::bgc_step::CropReadinData {
+                runtime_dir: &runtime_dir,
+                latitude_deg: degrees(statics.patchlatr),
+                longitude_deg: degrees(statics.patchlonr),
+                fert_source: integer_field(document, "DEF_FERT_SOURCE")?,
+            },
         )?;
     }
-    let layers = initial.dims.nl_soil;
-    let statics = colm_runtime::bgc_step::BgcStatics::read(&files.constant, patch, layers)?;
     ensure!(
         integer_field(document, "DEF_NDEP_FREQUENCY")? == 1,
         "DEF_USE_BGC: only the annual N deposition (DEF_NDEP_FREQUENCY = 1) is ported"
     );
-    let runtime_dir = std::path::PathBuf::from(string_field(document, "DEF_dir_runtime")?);
-    let degrees = |radians: f64| radians * 180.0 / std::f64::consts::PI;
     let ndep = colm_runtime::bgc_step::NdepSource::open(
         &runtime_dir,
         degrees(statics.patchlatr),

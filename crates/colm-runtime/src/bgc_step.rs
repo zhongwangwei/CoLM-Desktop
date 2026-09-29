@@ -820,34 +820,180 @@ fn previous_step_start(
 }
 
 /// 未移植的 BGC 分支：遇到就拒绝，而不是静默跑成另一个模式。
-/// `CROP_readin`（`MOD_CropReadin.F90:65-78`）在启动时覆盖作物参数。只移植不读运行时数据的那一支：
-/// 设了播种日（`DEF_TUNING_CROP_PLANTING_DAY > 0`）且施肥、灌溉都关时，作物 PFT（类别 15..=78）的
-/// `plantdate_p` 取播种日、其余为 −99999999，`fertnitro_p = manunitro_p = 0`。否则要读
-/// `DEF_dir_runtime/crop/*.nc`，尚未移植，当场拒绝。冷启动写进重启的 `manunitro_p = manure·1000`
-/// 因此在运行期被清零（第 424 轮）。
+/// `CROP_readin` 读数据时需要的站点与目录（`DEF_dir_runtime/crop/`）。
+#[derive(Debug, Clone, Copy)]
+pub struct CropReadinData<'a> {
+    pub runtime_dir: &'a Path,
+    pub latitude_deg: f64,
+    pub longitude_deg: f64,
+    /// `DEF_FERT_SOURCE`（1 或 2）。
+    pub fert_source: i64,
+}
+
+const CROP_PLANTING: &str = "crop/plantdt-colm-64cfts-rice2_fillcoast.nc";
+const CROP_FERT_ONE: &str = "crop/fertnitro_fillcoast.nc";
+const CROP_FERT_TWO: &str = "crop/fertilizer_2015soc.nc";
+const CROP_ABSENT: f64 = -99_999_999.0;
+
+/// 作物数据文件里单点所在格点的读取（`define_by_center` + 面积加权，单点即包含站点的那一格）。
+struct CropGrid {
+    path: PathBuf,
+    cell: (usize, usize),
+    /// 上游 `set_missing_value`：种植日文件用 `pdrice2` 的 `missing_value`，并把它设给整张映射
+    /// （之后按同一映射读的施肥来源 1 也用它）；来源 2 的映射没有缺测值。
+    missing: Option<f64>,
+}
+
+impl CropGrid {
+    fn open(path: PathBuf, lat: f64, lon: f64) -> Result<Self> {
+        let file =
+            netcdf::open(&path).with_context(|| format!("cannot open {}", path.display()))?;
+        let axis = |name: &str| -> Result<Vec<f64>> {
+            file.variable(name)
+                .with_context(|| format!("{} has no {name}", path.display()))?
+                .get_values::<f64, _>(..)
+                .with_context(|| format!("cannot read {name} from {}", path.display()))
+        };
+        let cell = (
+            containing_cell(&axis("lat")?, lat, false)?,
+            containing_cell(&axis("lon")?, lon, true)?,
+        );
+        Ok(Self {
+            path,
+            cell,
+            missing: None,
+        })
+    }
+
+    /// 第 `index` 个前导切片（二维变量为 `None`）在站点格点上的值；等于缺测值时是 `spval`。
+    fn read(&self, path: &Path, name: &str, index: Option<usize>) -> Result<f64> {
+        let file = netcdf::open(path).with_context(|| format!("cannot open {}", path.display()))?;
+        let variable = file
+            .variable(name)
+            .with_context(|| format!("{} has no {name}", path.display()))?;
+        let (lat, lon) = self.cell;
+        let value = match index {
+            Some(k) => variable.get_value::<f64, _>([k, lat, lon]),
+            None => variable.get_value::<f64, _>([lat, lon]),
+        }
+        .with_context(|| format!("cannot read {name} from {}", path.display()))?;
+        Ok(if self.missing == Some(value) {
+            MISSING
+        } else {
+            value
+        })
+    }
+}
+
+/// `CROP_readin`（`MOD_CropReadin.F90`，`CoLM.F90:442` 启动时调用）：覆盖作物的播种日与施肥量。
+///
+/// - 设了播种日（`DEF_TUNING_CROP_PLANTING_DAY > 0`）且施肥、灌溉都关：作物 PFT（类别 15..=78）的
+///   `plantdate_p` 取播种日、其余 −99999999，`fertnitro_p = manunitro_p = 0`，`pdrice2 = 0`，不读文件。
+/// - 否则读 `crop/` 的种植日文件：`pdrice2`（缺测为 0，否则截断取整）、`PLANTDATE_CFT_xx`（非正或缺测为
+///   −99999999），再按播种日覆盖；`DEF_USE_FERT` 时来源 1 读 `CONST_FERTNITRO_CFT_xx`（种植日文件的网格与缺测值，
+///   非正为 0，非作物 PFT 保持 −99999999），来源 2 读 `fertilizer_2015soc.nc` 的 `manure` 与 `fertilizer`（负值为 0）。
+///
+/// 冷启动（mkinidata）也调同一个过程，但之后 `IniTimeVariable` 还会写 `manunitro_p = manure·1000`；运行期
+/// 这里重读，所以来源 1 下重启里的 `manunitro_p` 在运行期被清零（第 424 轮）。
 pub fn crop_readin(
     state: &mut BgcState,
     classes: &[i32],
     planting_day: f64,
     switches: BgcSwitches,
+    data: CropReadinData<'_>,
 ) -> Result<()> {
-    ensure!(
-        planting_day > 0.0 && !switches.fert && !switches.irrigation,
-        "CROP_readin reads DEF_dir_runtime/crop/*.nc unless DEF_TUNING_CROP_PLANTING_DAY > 0 with \
-         DEF_USE_FERT and DEF_USE_IRRIGATION off; that path is not ported"
-    );
     ensure!(
         classes.len() == state.pft.plantdate_p.len(),
         "the PFT class list does not match the BGC PFT state"
     );
+    ensure!(
+        !switches.irrigation,
+        "CROP_readin: the irrigation method maps are not ported yet"
+    );
+    let crop = |class: i32| (15..=78).contains(&class);
+    if planting_day > 0.0 && !switches.fert && !switches.irrigation {
+        state.patch.pdrice2[0] = 0.0;
+        for (m, &class) in classes.iter().enumerate() {
+            state.pft.plantdate_p[m] = if crop(class) {
+                planting_day
+            } else {
+                CROP_ABSENT
+            };
+            state.pft.fertnitro_p[m] = 0.0;
+            state.pft.manunitro_p[m] = 0.0;
+        }
+        return Ok(());
+    }
+    let planting_path = data.runtime_dir.join(CROP_PLANTING);
+    let mut grid = CropGrid::open(planting_path.clone(), data.latitude_deg, data.longitude_deg)?;
+    grid.missing = {
+        let file = netcdf::open(&planting_path)
+            .with_context(|| format!("cannot open {}", planting_path.display()))?;
+        let variable = file
+            .variable("pdrice2")
+            .with_context(|| format!("{} has no pdrice2", planting_path.display()))?;
+        match variable.attribute_value("missing_value").transpose()? {
+            Some(netcdf::AttributeValue::Double(value)) => Some(value),
+            Some(netcdf::AttributeValue::Float(value)) => Some(f64::from(value)),
+            Some(other) => bail!("unsupported pdrice2 missing_value {other:?}"),
+            None => None,
+        }
+    };
+    let rice2 = grid.read(&planting_path, "pdrice2", None)?;
+    // `int(pdrice2_tmp)`：向零截断。
+    state.patch.pdrice2[0] = if rice2 == MISSING { 0.0 } else { rice2.trunc() };
     for (m, &class) in classes.iter().enumerate() {
-        state.pft.plantdate_p[m] = if (15..=78).contains(&class) {
-            planting_day
-        } else {
-            -99_999_999.0
-        };
-        state.pft.fertnitro_p[m] = 0.0;
-        state.pft.manunitro_p[m] = 0.0;
+        state.pft.plantdate_p[m] = CROP_ABSENT;
+        if crop(class) {
+            let day = grid.read(
+                &planting_path,
+                &format!("PLANTDATE_CFT_{class:02}"),
+                Some(0),
+            )?;
+            state.pft.plantdate_p[m] = if day <= 0.0 { CROP_ABSENT } else { day };
+        }
+    }
+    if planting_day > 0.0 {
+        for (m, &class) in classes.iter().enumerate() {
+            if crop(class) {
+                state.pft.plantdate_p[m] = planting_day;
+            }
+        }
+    }
+    state.pft.fertnitro_p.fill(0.0);
+    state.pft.manunitro_p.fill(0.0);
+    if switches.fert {
+        match data.fert_source {
+            1 => {
+                let path = data.runtime_dir.join(CROP_FERT_ONE);
+                state.pft.fertnitro_p.fill(CROP_ABSENT);
+                for (m, &class) in classes.iter().enumerate() {
+                    if crop(class) {
+                        let fert =
+                            grid.read(&path, &format!("CONST_FERTNITRO_CFT_{class:02}"), Some(0))?;
+                        state.pft.fertnitro_p[m] = if fert <= 0.0 { 0.0 } else { fert };
+                    }
+                }
+            }
+            2 => {
+                let path = data.runtime_dir.join(CROP_FERT_TWO);
+                let grid_two = CropGrid::open(path.clone(), data.latitude_deg, data.longitude_deg)?;
+                state.pft.fertnitro_p.fill(CROP_ABSENT);
+                state.pft.manunitro_p.fill(CROP_ABSENT);
+                let manure = grid_two.read(&path, "manure", None)?;
+                for (m, &class) in classes.iter().enumerate() {
+                    if class >= 15 {
+                        state.pft.manunitro_p[m] = manure.max(0.0);
+                    }
+                    if crop(class) {
+                        let index = usize::try_from(class - 15).expect("crop class");
+                        let fert = grid_two.read(&path, "fertilizer", Some(index))?;
+                        state.pft.fertnitro_p[m] = fert.max(0.0);
+                    }
+                }
+            }
+            source => bail!("DEF_FERT_SOURCE must be 1 or 2, got {source}"),
+        }
     }
     Ok(())
 }

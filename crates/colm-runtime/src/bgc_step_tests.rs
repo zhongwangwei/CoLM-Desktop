@@ -89,23 +89,87 @@ fn crop_readin_sets_planting_dates_and_clears_fertilizer() {
         crop: true,
         ..BgcSwitches::default()
     };
-    crop_readin(&mut state, &[1, 17, 78], 120.0, switches).unwrap();
+    let unused = std::path::PathBuf::from("/nonexistent");
+    crop_readin(&mut state, &[1, 17, 78], 120.0, switches, data(&unused)).unwrap();
     assert_eq!(state.pft.plantdate_p, vec![-99_999_999.0, 120.0, 120.0]);
     assert_eq!(state.pft.manunitro_p, vec![0.0; 3]);
     assert_eq!(state.pft.fertnitro_p, vec![0.0; 3]);
 }
 
-/// 施肥打开、或没给播种日时要读 `crop/*.nc`，尚未移植：拒绝。
+fn data(dir: &std::path::Path) -> CropReadinData<'_> {
+    CropReadinData {
+        runtime_dir: dir,
+        latitude_deg: 10.0,
+        longitude_deg: 100.0,
+        fert_source: 1,
+    }
+}
+
+/// 读数据的一支：`pdrice2` 截断取整，缺测（`pdrice2` 的 `missing_value`，也用于施肥来源 1）的种植日为
+/// −99999999、施肥为 0，非作物 PFT 的施肥保持 −99999999。灌溉仍拒绝。
 #[test]
-fn crop_readin_refuses_the_runtime_data_path() {
-    let mut state = BgcState::new(1, colm_core::bgc_state::BgcDims::default());
-    let crop = BgcSwitches {
+fn crop_readin_reads_planting_and_fertilizer_maps() {
+    let dir = std::env::temp_dir().join(format!("colm-crop-readin-{}", std::process::id()));
+    std::fs::create_dir_all(dir.join("crop")).unwrap();
+    let write = |name: &str, variables: &[(&str, bool, f64)]| {
+        let mut file = netcdf::create(dir.join("crop").join(name)).unwrap();
+        file.add_dimension("lat", 2).unwrap();
+        file.add_dimension("lon", 2).unwrap();
+        file.add_dimension("time", 1).unwrap();
+        file.add_variable::<f64>("lat", &["lat"])
+            .unwrap()
+            .put_values(&[-45.0, 45.0], ..)
+            .unwrap();
+        file.add_variable::<f64>("lon", &["lon"])
+            .unwrap()
+            .put_values(&[90.0, 270.0], ..)
+            .unwrap();
+        for &(variable, timed, value) in variables {
+            let dims: &[&str] = if timed {
+                &["time", "lat", "lon"]
+            } else {
+                &["lat", "lon"]
+            };
+            let mut v = file.add_variable::<f64>(variable, dims).unwrap();
+            v.put_attribute("missing_value", -9999.0).unwrap();
+            v.put_values(&[value; 4], ..).unwrap();
+        }
+    };
+    write(
+        "plantdt-colm-64cfts-rice2_fillcoast.nc",
+        &[
+            ("pdrice2", false, 214.7),
+            ("PLANTDATE_CFT_17", true, 209.25),
+            ("PLANTDATE_CFT_23", true, -9999.0),
+        ],
+    );
+    write(
+        "fertnitro_fillcoast.nc",
+        &[
+            ("CONST_FERTNITRO_CFT_17", true, 7.125),
+            ("CONST_FERTNITRO_CFT_23", true, -9999.0),
+        ],
+    );
+    let mut state = BgcState::new(3, colm_core::bgc_state::BgcDims::default());
+    let fert = BgcSwitches {
         crop: true,
+        fert: true,
         ..BgcSwitches::default()
     };
-    assert!(crop_readin(&mut state, &[17], 0.0, crop).is_err());
-    let fert = BgcSwitches { fert: true, ..crop };
-    assert!(crop_readin(&mut state, &[17], 120.0, fert).is_err());
+    crop_readin(&mut state, &[17, 23, 1], 0.0, fert, data(&dir)).unwrap();
+    assert_eq!(state.patch.pdrice2[0], 214.0);
+    assert_eq!(
+        state.pft.plantdate_p,
+        vec![209.25, -99_999_999.0, -99_999_999.0]
+    );
+    assert_eq!(state.pft.fertnitro_p, vec![7.125, 0.0, -99_999_999.0]);
+    assert_eq!(state.pft.manunitro_p, vec![0.0; 3]);
+    let irrigation = BgcSwitches {
+        irrigation: true,
+        ..fert
+    };
+    assert!(crop_readin(&mut state, &[17, 23, 1], 0.0, irrigation, data(&dir)).is_err());
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// `update_lightning_data`：步首/步末跨 3 小时档才换档；步末按上游 `addsec` 取（23:30 起步的步末是

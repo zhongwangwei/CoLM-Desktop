@@ -1518,11 +1518,20 @@ fn sample_f64_2d(
     (latitude, longitude): (usize, usize),
 ) -> Result<Option<f64>> {
     let variable = required_variable(file, name)?;
-    require_dimensions(&variable, name, &["lat", "lon"])?;
-    let value = first_value(
-        variable.get_values::<f64, _>((latitude..latitude + 1, longitude..longitude + 1))?,
-        name,
-    )?;
+    // 上游 `PLANTDATE_CFT_xx`/`CONST_FERTNITRO_CFT_xx` 用 `ncio_read_block_time(…, 1, …)` 读第 1 个时次，
+    // 所以文件里可以带一个前导维；只有一个时次时取它，否则按二维读。
+    let dims = variable
+        .dimensions()
+        .iter()
+        .map(|dimension| (dimension.name(), dimension.len()))
+        .collect::<Vec<_>>();
+    let values = if dims.len() == 3 && dims[1].0 == "lat" && dims[2].0 == "lon" {
+        variable.get_values::<f64, _>((0..1, latitude..latitude + 1, longitude..longitude + 1))?
+    } else {
+        require_dimensions(&variable, name, &["lat", "lon"])?;
+        variable.get_values::<f64, _>((latitude..latitude + 1, longitude..longitude + 1))?
+    };
+    let value = first_value(values, name)?;
     Ok(valid_value(&variable, value).then_some(value))
 }
 
