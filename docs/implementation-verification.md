@@ -26394,3 +26394,7 @@ release 与 debug 都逐位。单 patch 优化器算例 `bc`/`bf`/`bs`/`bsx`/`lc
 
 一个踩坑：上游 `Opt_Baseflow_init` 在启动时读上次留下的 `ParaOpt/<case>_baseflow.nc`，复跑会接着上次的标定继续迭代。
 Rust 行为相同。所以两侧比较前要么都清 `ParaOpt/`，要么都不清；只重跑一侧会得到假的不一致。
+
+全量回归（release）：140 个算例，默认组 129 个逐位；`bm1–4` 与对照 `mpc/mpf/mpr/mps/mpsc` 起初被按默认内核跑、在 mksrfdata 失败
+（脚本分组漏了，它们需要 CROP 内核），补进 CROP 组后 9/9 逐位；`nn`/`pni` 照旧不比历史。回归脚本改为重跑前清掉 Rust 侧的
+`ParaOpt/`（参照一律从干净状态生成）：否则比例会变的算例（`bm3`/`bm4`）每次回归都在"接着上次的标定"跑。连跑两遍稳定逐位。
