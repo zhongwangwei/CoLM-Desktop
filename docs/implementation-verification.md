@@ -26084,3 +26084,22 @@ mksrfdata 判为失败（实测 `ci6x`：日志末行 "Successful in surface dat
 延长版积水最高 94 mm，同一站点造不出来；这一支与湿湖共用同一个已逐位验证的 `adjust_lake_layer`，单元测试覆盖重建与重排。
 
 既有算例不受影响：全量回归 103 例逐位（含上表四例；`nn`/`pni` 不写历史）。
+
+## 第 443 轮：拒绝名单里的 14 个开关（A 类：过时的拒绝）
+
+`physics.rs` 的 `UNREAD_PHYSICS_SWITCHES` 对"设了非默认值"的 14 个开关直接报错。逐个核对上游后分三类：A 类运行期
+本来就忠实（本轮），B 类只影响前处理，C 类是真正的运行期物理（`DEF_TOPMOD_method`）。A 类八个：
+
+| 开关 | 上游事实 |
+|---|---|
+| `DEF_TUNING_CSOILC` | 只进 `csoilcn → rd`，但 `rd_opt` 是常量 3（`MOD_LeafTemperature.F90:438`；PC `:574` 走 `rd_opt == 1` 之外），`rd` 随即被垂直廓线解覆盖——运行期死参数 |
+| `DEF_TUNING_SMPMAX` | 唯一读者 `SubsurfaceRunoff_SimpleVIC` 的调用是注释（`MOD_SoilSnowHydrology.F90:1031`）；`eroot` 用局部 `smpmax = -1.5e5`；传进 `CoLMMAIN` 后无人读 |
+| `DEF_TUNING_SIMPLE_VIC_DS/WS` | 同上，只在被注释掉的那个函数里 |
+| `DEF_TUNING_SMPMAX_HR/SMPMIN_HR` | 早已接通：colm-init 写常数重启，BGC 分解（`w_scalar`）从重启读 |
+| `DEF_LAI_START/END_YEAR` | 城市 LAI 在运行期已读；非城市 `USE_SITE_LAI` 取最近年、不看它们（`MOD_LAIReadin.F90:71`），`.false.` 那支另有拒绝 |
+| `DEF_LANDONLY` | 只在 `GRIDBASED/UNSTRUCTURED` 下编译（`MKSRFDATA.F90:365`） |
+
+验证 `ta1`：`bl`（BGC+PFT，AT-Neu 2010）截到 1–6 月，八个开关全部设为非默认值（`CSOILC = 0.007`、`SMPMAX = -1.2e5`、
+`SIMPLE_VIC_DS/WS = 0.1/0.5`、`SMPMAX_HR/SMPMIN_HR = -5e2/-1e5`、LAI 年界 2005–2008、`LANDONLY = .false.`），对纯 Fortran
+历史 6/6、重启全部逐位，release 与 debug 均过。对照：纯 Fortran 的 `ta1` 与 `bl` 在 6 月末的主重启**逐位相同**
+（死参数的直接证据），而 BGC 历史有 50 个量不同（`f_gpp`、`f_totlitc`…，即 `*_HR` 生效），Rust 两边都跟上。

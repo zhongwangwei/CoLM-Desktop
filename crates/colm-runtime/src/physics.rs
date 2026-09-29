@@ -218,23 +218,23 @@ pub fn land_physics_parameters(
     // （`oracle/nml-unread.snapshot`）：里面还有一大批本来就与 SinglePoint/LCT 无关的
     // 开关（CaMa 河网、湿地、DA、TRACER、crop/urban、以及调试/输出类），
     // 那些**不列**在这里 —— 它们在 Golden 内核里同样不生效，忽略是对的。
-    // 列的是"设了就会改变物理、而本仓库不会照做"的那些，其中 `DEF_TUNING_SIMPLE_VIC_*`
-    // 尤其要紧：黄金配置的产流方案正是 SimpleVIC。
-    const UNREAD_PHYSICS_SWITCHES: [&str; 14] = [
-        "DEF_TUNING_CSOILC",
-        "DEF_TUNING_SMPMAX",
-        "DEF_TUNING_SMPMAX_HR",
-        "DEF_TUNING_SMPMIN_HR",
-        "DEF_TUNING_SIMPLE_VIC_DS",
-        "DEF_TUNING_SIMPLE_VIC_WS",
+    // 列的是"设了就会改变物理、而本仓库不会照做"的那些。
+    //
+    // 曾经在表里、核对上游后移出的（第 443 轮）：
+    // - `DEF_TUNING_CSOILC`：只进 `csoilcn → rd`，而 `rd_opt` 是常量 3，`rd` 随即被垂直廓线解覆盖
+    //   （`MOD_LeafTemperature.F90:438,683-688`，PC 同理 `:574,1174`），运行期是死参数；
+    // - `DEF_TUNING_SMPMAX`、`DEF_TUNING_SIMPLE_VIC_DS/WS`：唯一读者 `SubsurfaceRunoff_SimpleVIC`
+    //   的调用在上游是注释（`MOD_SoilSnowHydrology.F90:1031`），`eroot` 用自己的局部 `smpmax`；
+    // - `DEF_TUNING_SMPMAX_HR/SMPMIN_HR`：colm-init 写进常数重启，BGC 分解从重启读；
+    // - `DEF_LAI_START/END_YEAR`：城市 LAI 读它们；`USE_SITE_LAI` 按最近年取、不看它们，
+    //   `USE_SITE_LAI = .false.` 另有拒绝；
+    // - `DEF_LANDONLY`：只在 `GRIDBASED/UNSTRUCTURED` 下编译（`MKSRFDATA.F90:365-366`）。
+    const UNREAD_PHYSICS_SWITCHES: [&str; 5] = [
         "DEF_SOIL_REFL_SCHEME",
         "DEF_TOPMOD_method",
         "DEF_USE_BEDROCK",
         "DEF_USE_SOILPAR_UPS_FIT",
-        "DEF_LANDONLY",
         "DEF_USE_DOMINANT_PATCHTYPE",
-        "DEF_LAI_START_YEAR",
-        "DEF_LAI_END_YEAR",
     ];
     for name in UNREAD_PHYSICS_SWITCHES {
         if sets_non_default(document, name) {
