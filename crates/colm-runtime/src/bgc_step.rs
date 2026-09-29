@@ -100,7 +100,7 @@ impl BgcStatics {
     }
 }
 
-/// `MOD_NdepData` 的年度氮沉降（`DEF_NDEP_FREQUENCY = 1`）。
+/// `MOD_NdepData` 的氮沉降：年度（`DEF_NDEP_FREQUENCY = 1`）或月度（`= 2`）文件。
 #[derive(Debug, Clone, PartialEq)]
 pub struct NdepSource {
     path: PathBuf,
@@ -108,17 +108,25 @@ pub struct NdepSource {
     lon: usize,
     /// `DEF_USE_PN`：沉降乘 5（加速 spin-up）。
     punctuated: bool,
+    /// 月度文件 `fndep_colm_monthly.nc` 的 `NDEP_month`。
+    monthly: bool,
 }
 
 impl NdepSource {
-    /// `DEF_dir_runtime/ndep/fndep_colm_hist_simyr1849-2006_1.9x2.5_c100428.nc`。
+    /// 年度 `DEF_dir_runtime/ndep/fndep_colm_hist_simyr1849-2006_1.9x2.5_c100428.nc`，
+    /// 月度 `DEF_dir_runtime/ndep/fndep_colm_monthly.nc`（`init_ndep_data_*`）。
     pub fn open(
         runtime_dir: &Path,
         latitude_deg: f64,
         longitude_deg: f64,
         punctuated: bool,
+        monthly: bool,
     ) -> Result<Self> {
-        let path = runtime_dir.join("ndep/fndep_colm_hist_simyr1849-2006_1.9x2.5_c100428.nc");
+        let path = runtime_dir.join(if monthly {
+            "ndep/fndep_colm_monthly.nc"
+        } else {
+            "ndep/fndep_colm_hist_simyr1849-2006_1.9x2.5_c100428.nc"
+        });
         let file = netcdf::open(&path)
             .with_context(|| format!("cannot open the N deposition file {}", path.display()))?;
         let axis = |name: &str| -> Result<Vec<f64>> {
@@ -134,19 +142,38 @@ impl NdepSource {
             lat,
             lon,
             punctuated,
+            monthly,
         })
     }
 
-    /// `ndep` 与 `ndep_to_sminn`（gN/m²/s）。
+    pub fn is_monthly(&self) -> bool {
+        self.monthly
+    }
+
+    /// `update_ndep_data_annually(year)`：`ndep` 与 `ndep_to_sminn`（gN/m²/s）。
     pub fn annual(&self, year: i32, patchclass: i32) -> Result<(f64, f64)> {
+        ensure!(!self.monthly, "the monthly N deposition file has no NDEP_year");
         let itime = usize::try_from(year.clamp(1849, 2006) - 1849).expect("clamped");
+        self.read("NDEP_year", itime, patchclass)
+    }
+
+    /// `update_ndep_data_monthly(year, month)`：`itime = (clamp(year) - 1849)*12 + month`。
+    pub fn month(&self, year: i32, month: u8, patchclass: i32) -> Result<(f64, f64)> {
+        ensure!(self.monthly, "the annual N deposition file has no NDEP_month");
+        ensure!((1..=12).contains(&month), "N deposition month {month} is not 1..=12");
+        let itime = usize::try_from((year.clamp(1849, 2006) - 1849) * 12).expect("clamped")
+            + usize::from(month - 1);
+        self.read("NDEP_month", itime, patchclass)
+    }
+
+    fn read(&self, variable: &str, itime: usize, patchclass: i32) -> Result<(f64, f64)> {
         let file = netcdf::open(&self.path)
             .with_context(|| format!("cannot open {}", self.path.display()))?;
         let ndep: f64 = file
-            .variable("NDEP_year")
-            .context("the N deposition file has no NDEP_year")?
+            .variable(variable)
+            .with_context(|| format!("the N deposition file has no {variable}"))?
             .get_value([itime, self.lat, self.lon])
-            .context("cannot read NDEP_year")?;
+            .with_context(|| format!("cannot read {variable}"))?;
         // `ndep / 3600. / 365. / 24.`：依次相除，不合并成一个常数。
         let to_sminn = if patchclass == 0 {
             0.0
@@ -441,6 +468,9 @@ pub struct BgcDataSources {
     pub ndep: NdepSource,
     /// 启动时读氮沉降用的年份：`adj2end` 之后的起始年（00:00 1 月 1 日起步时是上一年）。
     pub ndep_start_year: i32,
+    /// 月度氮沉降起步读的月：namelist 的 `start_month`，**不**经 `adj2end`
+    /// （`init_ndep_data_monthly(sdate(1), s_month)`，年与月可能不在同一个时刻上）。
+    pub ndep_start_month: u8,
     pub nitrif: Option<(NitrifSource, u8)>,
     /// `DEF_USE_FIRE` 打开时的火灾数据。
     pub fire: Option<FireSource>,
@@ -507,11 +537,16 @@ impl BgcRuntime {
         let BgcDataSources {
             ndep,
             ndep_start_year,
+            ndep_start_month,
             nitrif,
             fire,
         } = sources;
-        // `init_ndep_data_annually`：步进之前就写好 `ndep`/`ndep_to_sminn`。
-        let (ndep_value, to_sminn) = ndep.annual(ndep_start_year, statics.patchclass)?;
+        // `init_ndep_data_annually`/`init_ndep_data_monthly`：步进之前就写好 `ndep`/`ndep_to_sminn`。
+        let (ndep_value, to_sminn) = if ndep.is_monthly() {
+            ndep.month(ndep_start_year, ndep_start_month, statics.patchclass)?
+        } else {
+            ndep.annual(ndep_start_year, statics.patchclass)?
+        };
         initial.patch.ndep[0] = ndep_value;
         initial.patch_flux.ndep_to_sminn[0] = to_sminn;
         // `init_nitrif_data(ststamp)`：起始时刻所在的月。
@@ -578,10 +613,22 @@ impl BgcRuntime {
                 bgc.patch.lnfm[0] = fire.lightning(itime)?;
             }
         }
+        // `CoLM.F90:523-531`：`TICKTIME` 之后、`CoLMDRIVER` 之前。月度按步末（`adj2begin`）与步首
+        // 的年月比，读步末那个月；年度见下（读的是 `idate(1)`，跨年那一步仍是旧年）。
+        if self.ndep.is_monthly() {
+            let (year, month) = year_month(step_end_begin_form(idate)?)?;
+            if (year, month) != year_month(begin)? {
+                let (ndep, to_sminn) = self.ndep.month(year, month, self.statics.patchclass)?;
+                bgc.patch.ndep[0] = ndep;
+                bgc.patch_flux.ndep_to_sminn[0] = to_sminn;
+            }
+        }
         if colm_core::bgc_driver::is_end_of_year(idate, deltim) {
-            let (ndep, to_sminn) = self.ndep.annual(idate[0], self.statics.patchclass)?;
-            bgc.patch.ndep[0] = ndep;
-            bgc.patch_flux.ndep_to_sminn[0] = to_sminn;
+            if !self.ndep.is_monthly() {
+                let (ndep, to_sminn) = self.ndep.annual(idate[0], self.statics.patchclass)?;
+                bgc.patch.ndep[0] = ndep;
+                bgc.patch_flux.ndep_to_sminn[0] = to_sminn;
+            }
             // `update_hdm_data(idate(1))`：与年度 ndep 同一个条件、同一个年份（`CoLM.F90:537-541`）。
             if let Some(fire) = &self.fire {
                 bgc.patch.hdm_lf[0] = fire.hdm(idate[0])?;
@@ -816,6 +863,29 @@ impl BgcRuntime {
         }
         Ok(())
     }
+}
+
+/// 日历时刻所在的 `(年, 月)`。
+fn year_month(time: colm_core::calendar::CalendarTime) -> Result<(i32, u8)> {
+    Ok((time.year, colm_core::calendar::month_day(time)?.0))
+}
+
+/// 步末 `idate` 按 `adj2begin` 换写：一天的末尾（86400 秒）写成次日 0 秒。
+fn step_end_begin_form(idate: [i32; 3]) -> Result<colm_core::calendar::CalendarTime> {
+    let (mut year, mut day, mut seconds) = (idate[0], idate[1], idate[2]);
+    if seconds >= 86_400 {
+        seconds -= 86_400;
+        day += 1;
+        if day > if colm_core::calendar::is_leap_year(year) { 366 } else { 365 } {
+            year += 1;
+            day = 1;
+        }
+    }
+    Ok(colm_core::calendar::CalendarTime {
+        year,
+        julian_day: u16::try_from(day)?,
+        seconds: u32::try_from(seconds)?,
+    })
 }
 
 /// `itstamp + int(-deltim)`：上一步的步首。

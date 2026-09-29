@@ -186,3 +186,27 @@ fn the_lightning_record_follows_the_three_hour_bins() {
     };
     assert_eq!(lightning_record_due(leap, 1800.0).unwrap(), Some(2920));
 }
+
+/// 月度氮沉降的换档判据：步末按 `adj2begin` 写（86400 秒进位到次日 0 秒，跨年亦然）后与步首比年月。
+#[test]
+fn the_monthly_ndep_switch_uses_the_begin_form_of_the_step_end() {
+    let time = |year, julian_day, seconds| colm_core::calendar::CalendarTime {
+        year,
+        julian_day,
+        seconds,
+    };
+    assert_eq!(
+        step_end_begin_form([2010, 31, 86_400]).unwrap(),
+        time(2010, 32, 0)
+    );
+    assert_eq!(
+        step_end_begin_form([2010, 365, 86_400]).unwrap(),
+        time(2011, 1, 0)
+    );
+    assert_eq!(
+        step_end_begin_form([2012, 365, 86_400]).unwrap(),
+        time(2012, 366, 0)
+    );
+    assert_eq!(year_month(time(2010, 32, 0)).unwrap(), (2010, 2));
+    assert_eq!(year_month(time(2010, 31, 82_800)).unwrap(), (2010, 1));
+}

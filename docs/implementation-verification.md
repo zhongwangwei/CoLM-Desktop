@@ -25937,3 +25937,23 @@ mksrfdata 判为失败（实测 `ci6x`：日志末行 "Successful in surface dat
 复验：两套内核重编通过；用新内核重跑纯 Fortran 的 `ci6`（CROP，Campbell + 灌溉取地下水）与 `bl`（默认内核），
 与同步前的 Fortran 输出逐位相同（`tmp/cmpcase.sh`：历史 12/12、重启 51/51 各两例）。Rust 侧不需要改动。
 `test_upstream_f48_sync.py` 加了本次同步的静态检查。
+
+## 第 438 轮：月度氮沉降（`DEF_NDEP_FREQUENCY = 2`，合成数据）
+
+用户选的下一项。本机没有 `fndep_colm_monthly.nc`，`oracle/scripts/make_ndep_monthly.py <runtime>` 按上游变量名写一份
+（10° 网格、1849-01…2006-12 共 1896 条，每格每月不同）。参考为纯 Fortran（默认内核）。
+
+- 换档时刻（`CoLM.F90:518-531`）：`TICKTIME` 之后、`CoLMDRIVER` 之前，步末按 `adj2begin` 换写（86400 秒进位到次日
+  0 秒）后的年月与步首不同，就读**步末**那个月，本步 BGC 已用新值。`itime = (clamp(年,1849,2006)-1849)*12 + 月`。
+- 起步：`init_ndep_data_monthly(sdate(1), s_month)` —— 年是 `adj2end` 之后的 `sdate(1)`（1 月 1 日 0 时起步即上一年），
+  月却是 namelist 的 `start_month`。所以 1 月 1 日起步的整个 1 月用的是**上一年 1 月**的沉降，直到 2 月才换档。照写。
+- 年度路径不变（`update_ndep_data_annually(idate(1))`，跨年那一步读的仍是旧年）；`DEF_NDEP_FREQUENCY` 取 1、2 以外的值时
+  照上游报错。
+
+| 算例 | 设置 | 历史 | 重启+旁车 | release | debug |
+|---|---|---|---|---|---|
+| `nd1` | AT-Neu BGC，2010-01 → 2011-02（跨年；2011 被夹到 2006） | 14/14 | ✓ | ✓ | — |
+| `nd2` | 同上，3 月 15 日起步到 6 月底 | 4/4 | ✓ | ✓ | ✓ |
+| `nd1c` | `nd1` 从 7 月 1 日续跑 | 8/8 | 59/59 | ✓ | — |
+
+`f_ndep_to_sminn` 逐月变化且比年度文件（`bu`）大一个量级，确认走到了月度数据。年度路径回归 `bu bl by2 cr cf1 ci6` 逐位不变。

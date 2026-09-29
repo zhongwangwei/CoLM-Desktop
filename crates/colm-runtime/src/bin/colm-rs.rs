@@ -417,17 +417,20 @@ fn assemble_bgc(
             },
         )?;
     }
-    ensure!(
-        integer_field(document, "DEF_NDEP_FREQUENCY")? == 1,
-        "DEF_USE_BGC: only the annual N deposition (DEF_NDEP_FREQUENCY = 1) is ported"
-    );
+    // `DEF_NDEP_FREQUENCY`：1 年度、2 月度；其余值上游 `CoLM_stop`（`CoLM.F90:425-428`）。
+    let monthly_ndep = match integer_field(document, "DEF_NDEP_FREQUENCY")? {
+        1 => false,
+        2 => true,
+        other => bail!("DEF_NDEP_FREQUENCY should be only 1-2, got {other} (upstream stops)"),
+    };
     let ndep = colm_runtime::bgc_step::NdepSource::open(
         &runtime_dir,
         degrees(statics.patchlatr),
         degrees(statics.patchlonr),
         logical_field(document, "DEF_USE_PN")?,
+        monthly_ndep,
     )?;
-    // `init_ndep_data_annually(sdate(1))`：`sdate` 经过 `adj2end`，00:00 的 1 月 1 日起步算上一年。
+    // `init_ndep_data_*(sdate(1), …)`：`sdate` 经过 `adj2end`，00:00 的 1 月 1 日起步算上一年。
     let year = i32::try_from(integer_field(document, "DEF_simulation_time%start_year")?)?;
     let month = integer_field(document, "DEF_simulation_time%start_month")?;
     let day = integer_field(document, "DEF_simulation_time%start_day")?;
@@ -470,6 +473,8 @@ fn assemble_bgc(
         colm_runtime::bgc_step::BgcDataSources {
             ndep,
             ndep_start_year,
+            ndep_start_month: u8::try_from(month)
+                .context("DEF_simulation_time%start_month is not a month")?,
             nitrif,
             fire,
         },
