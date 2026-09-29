@@ -25825,3 +25825,10 @@ GIMPLE 里 `ivt` 是未定义值 `ivt_858(D)`，不是常数；决定性的证�
 
 逐过程回放（`tmp/kbgc` 追踪 `bx`：全程每 500 步取 2 次调用 + abort 前 30 次调用，共 2307 条记录）全部逐位。
 全量回归（release）76 个算例逐位。
+
+## 第 433 轮：上游复核（2026-09-29 `git fetch`）
+
+CoLM-SYSU-integration 的 `origin/master` 仍是 `3c799bae`，与 vendor 对齐（`test_upstream_f48_sync.py`：PASS）。未合入分支
+`fix/tracer-impermeable-exchange` 增至 14 个提交（最新 `91ac30a0`，09-29 02:07），仍是那 8 个文件：`MOD_Hydro_SoilWater.F90`
+的 5 处 `is_permeable(ilev) .and.` 全在 `#ifdef TRACER` 块内（375–439、446–465 行），`CoLMMAIN.F90` 改的是网格洪泛反馈的
+示踪物记账，其余是 `TRACER/*` 与出错退出码。只影响示踪物构建（Rust 引擎拒绝），合入 master 后再同步 vendor。
