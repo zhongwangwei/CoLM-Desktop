@@ -66,8 +66,11 @@ pub struct Water2014SoilInput<'a> {
     pub time_step_seconds: f64,
     pub impermeable_porosity: f64,
     pub ponding_limit_mm: f64,
-    /// `wetwatmax`：非动态湿地水桶的容量 [mm]（只有 patchtype 2 读）。
+    /// `wetwatmax`：湿地水桶（或动态湿地积水）的容量 [mm]（只有 patchtype 2 读）。
     pub wetland_water_capacity_mm: f64,
+    /// `DEF_USE_Dynamic_Wetland`：VSF 下湿地走土壤分支（`MOD_SoilSnowHydrology.F90:946-947`）。
+    /// `WATER_2014`（非 VSF）不看它，湿地仍是水桶。
+    pub dynamic_wetland: bool,
     pub minimum_soil_potential_mm: f64,
     pub soil_ice_impedance: f64,
     /// `DEF_USE_VariablySaturatedFlow`：打开时这一层走
@@ -261,7 +264,7 @@ pub fn water_2014_soil_step(
     input: Water2014SoilInput<'_>,
     state: &mut Water2014SoilState,
 ) -> Result<Water2014SoilOutput> {
-    if input.patch_type == 2 {
+    if input.patch_type == 2 && !(input.variably_saturated && input.dynamic_wetland) {
         return wetland_soil_step(input, state);
     }
     if input.variably_saturated {
@@ -684,6 +687,7 @@ fn variably_saturated_soil_step(
             plant_hydraulics: input.plant_hydraulics,
             impermeable_porosity: input.impermeable_porosity,
             ponding_limit_mm: input.ponding_limit_mm,
+            wetland_water_capacity_mm: input.wetland_water_capacity_mm,
             soil_ice_impedance: input.soil_ice_impedance,
             baseflow_scale: input.baseflow_scale,
             runoff: input.runoff,

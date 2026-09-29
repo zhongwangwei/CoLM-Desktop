@@ -78,6 +78,8 @@ pub struct LandPhysicsParameters {
     pub irrigation: Option<colm_core::IrrigationSettings>,
     /// 单点 LCT 的 `DEF_LC_*` 地类表逐列覆盖（PHS 九列在 `plant_hydraulic_overrides`）；PFT/PC 下为空。
     pub land_class_overrides: colm_core::LandClassOverrides,
+    /// `DEF_USE_Dynamic_Wetland`：湿地按土壤地面算地面湿度，VSF 下走土壤水分支。
+    pub dynamic_wetland: bool,
     /// namelist 选的土壤水力关系；决定常数重启里读 `bsw` 还是五个 van Genuchten 场。
     pub hydraulic_model: HydraulicModel,
     /// `DEF_USE_VariablySaturatedFlow` **生效后**的取值。
@@ -899,6 +901,14 @@ fn assemble(
     physics: LandPhysicsParameters,
 ) -> Result<StandardLctRestartTemplate> {
     let constant = RestartFile::open(&files.constant)?;
+    // `wetwatmax`：上游运行期从常数重启读（`MOD_Vars_TimeInvariants.F90:602`），mkinidata 按
+    // `DEF_TUNING_WETWATMAX` 写入。旧重启没有这个变量时沿用 namelist 的值。
+    let mut physics = physics;
+    if let Ok(values) = constant.floats("wetwatmax") {
+        if let Some(&value) = values.first() {
+            physics.wetland_water_capacity_mm = value;
+        }
+    }
     let time = RestartFile::open(&files.time)?;
     let soil_layers = constant.dimension("soil")?;
     let patches = constant.dimension("patch")?;
@@ -1578,6 +1588,7 @@ impl StandardLctRestartTemplate {
         let hydraulic = &self.soil_hydraulic_model;
         StandardLctSoilInput {
             energy: colm_core::StandardLctEnergyInput {
+                dynamic_wetland: physics.dynamic_wetland,
                 forcing,
                 precipitation_scheme: physics.precipitation_scheme,
                 interception: colm_core::CanopyInterceptionInput {
@@ -1830,6 +1841,7 @@ impl StandardLctRestartTemplate {
                 plant_hydraulics: self.plant_hydraulic_settings,
             },
             water: colm_core::Water2014SoilInput {
+                dynamic_wetland: physics.dynamic_wetland,
                 // 灌溉的开关与水田积水上限；本步的通量与方式由 `standard_lct_snow_soil_step` 从状态填。
                 irrigation: physics.irrigation.map(|settings| colm_core::SoilIrrigation {
                     drip_mm_s: 0.0,

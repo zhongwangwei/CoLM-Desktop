@@ -61,6 +61,8 @@ pub struct StandardLctEnergyInput<'a> {
     /// `DEF_USE_PLANTHYDRAULICS` 打开时的静态参数；关掉时是 `None`，
     /// 于是叶温内核走 `plant_hydraulics: None` 那一支。
     pub plant_hydraulics: Option<PlantHydraulicSettings>,
+    /// `DEF_USE_Dynamic_Wetland`：湿地按土壤地面算地面湿度（`MOD_Thermal.F90:601-602`）。
+    pub dynamic_wetland: bool,
 }
 
 /// 上游的 `lai`/`sai` 时间变量（`CoLMMAIN.F90:2097-2102`）。
@@ -1108,8 +1110,8 @@ fn ground_humidity_input(input: StandardLctEnergyInput<'_>) -> Result<Option<Gro
         surface_temperatures(ground);
     let split = ground.use_split_soil_snow;
     let humidity = move |humidity_input: GroundHumidityInput| {
-        if ground.patch_type == 2 {
-            // 非动态湿地不走 `:601` 的土壤地面分支（`DEF_USE_Dynamic_Wetland` 由运行期拒绝）。
+        if ground.patch_type == 2 && !input.dynamic_wetland {
+            // 非动态湿地不走 `:601` 的土壤地面分支，地面是饱和的。
             crate::saturated_ground_humidity(humidity_input, split)
         } else if split {
             crate::split_ground_humidity(humidity_input)

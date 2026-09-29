@@ -839,6 +839,21 @@ impl HistoryAccumulator {
         self.write_fire_history(buffer, record)
     }
 
+    /// `DEF_USE_Dynamic_Wetland`：`f_wetwat` 写的是 `a_wdsrf / nac`（`MOD_Hist.F90:893-898`），
+    /// 与 `f_wdsrf` 同一次除法；`a_wetwat` 照常累加进旁车。只在湿地上写（过滤同 `f_wetwat`）。
+    fn write_dynamic_wetland_storage(&self, buffer: &mut HistoryBuffers, record: usize) -> Result<()> {
+        if !buffer.declares("wetwat") || self.filtered.contains("wetwat") {
+            return Ok(());
+        }
+        let value = match self.sums.get("wdsrf") {
+            Some(Accumulated::Scalar { sum, count }) if *count > 0 => sum / self.steps as f64,
+            _ => colm_core::MISSING,
+        };
+        buffer
+            .set_patch_scalar("wetwat", record, value)
+            .context("cannot write the dynamic wetland storage")
+    }
+
     /// 五个火灾历史量：复现上游传残留 `vecacc` 的写法（见 [`FIRE_HISTORY`]）。
     fn write_fire_history(&self, buffer: &mut HistoryBuffers, record: usize) -> Result<()> {
         if !buffer.declares("abm") {
@@ -2509,6 +2524,13 @@ pub struct HistorySession {
     raw_at_end: Option<Vec<crate::history_sidecar::HistoryWindow>>,
     /// 多 patch 单点本步的网格元近地面诊断（见 [`element_surface_input`]）；单 patch 为 `None`。
     element_surface: Option<colm_core::HistoryDiagnostics>,
+    /// `DEF_USE_Dynamic_Wetland`：`f_wetwat` 改写 `wdsrf` 的平均（由 `push_lct_snow` 现场给出）。
+    dynamic_wetland: bool,
+}
+
+/// 多 patch 时每个累加器只写自己那一格；单 patch 一次写全部（缓冲区只有一格）。
+fn means_are_split(patches: usize) -> bool {
+    patches > 1
 }
 
 impl HistorySession {
@@ -2595,6 +2617,7 @@ impl HistorySession {
             ])),
             raw_at_end: None,
             element_surface: None,
+            dynamic_wetland: false,
         })
     }
 
@@ -3093,6 +3116,7 @@ impl HistorySession {
         self.plant_hydraulics = template.plant_hydraulics();
         self.variably_saturated = template.physics.variably_saturated_flow;
         self.bgc = template.bgc.as_ref().map(|bgc| bgc.switches);
+        self.dynamic_wetland = template.physics.dynamic_wetland;
         let variably_saturated = self.variably_saturated;
         let element_surface = self.element_surface;
         self.push(end, |accumulator| {
@@ -3322,15 +3346,16 @@ impl HistorySession {
                 )
             })?,
         )?;
-        if means.len() == 1 {
-            means[0].write_means(buffer, record.record)?;
-        } else {
-            for (patch, means) in means.iter().enumerate() {
+        for (patch, means) in means.iter().enumerate() {
+            if means_are_split(self.accumulators.len()) {
                 buffer.select_patch(Some(patch))?;
-                means.write_means(buffer, record.record)?;
             }
-            buffer.select_patch(None)?;
+            means.write_means(buffer, record.record)?;
+            if self.dynamic_wetland {
+                means.write_dynamic_wetland_storage(buffer, record.record)?;
+            }
         }
+        buffer.select_patch(None)?;
         self.cursor += 1;
         // 分组的最后一条写完就落盘（上游写回模式在这一刻把内存里的整组写出）；开着的缓冲区因此
         // 只会是写了一半的组，中途 abort 时由 [`Self::abandon`] 留下只有文件头的文件。

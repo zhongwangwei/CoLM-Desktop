@@ -1491,6 +1491,7 @@ fn variable_saturated_flow_input<'a>(
     transpiration_mm_s: f64,
 ) -> VariableSaturatedFlowInput<'a> {
     VariableSaturatedFlowInput {
+        wetland_water_capacity_mm: 200.0,
         paddy: None,
         time_step_seconds: 1800.0,
         patch_type: 0,
@@ -1605,11 +1606,11 @@ fn variable_saturated_flow_refuses_unported_branches_and_bad_widths() {
     let mut state = variable_saturated_flow_state(0.30);
 
     let input = VariableSaturatedFlowInput {
-        patch_type: 2,
+        patch_type: 3,
         ..variable_saturated_flow_input(&fixture, 0.0, 0.0)
     };
     let error = variably_saturated_flow_step(input, &mut state).unwrap_err();
-    assert!(error.to_string().contains("soil (0) and urban (1)"));
+    assert!(error.to_string().contains("dry-lake or glacier branch"));
 
     let input = VariableSaturatedFlowInput {
         interface_depth_m: &fixture.interface_depth_m[..2],

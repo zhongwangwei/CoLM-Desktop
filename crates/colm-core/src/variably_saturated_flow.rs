@@ -4118,6 +4118,8 @@ pub struct VariableSaturatedFlowInput<'a> {
     pub impermeable_porosity: f64,
     /// `pondmx`。
     pub ponding_limit_mm: f64,
+    /// `wetwatmax`：动态湿地（patchtype 2）的积水上限。
+    pub wetland_water_capacity_mm: f64,
     /// `DEF_TUNING_SOIL_ICE_IMPEDANCE`。
     pub soil_ice_impedance: f64,
     /// `scale_baseflow(ipatch)`：本仓库没有 `ParaOpt/*_baseflow.nc`，装配期给 1.0。
@@ -4606,10 +4608,18 @@ pub fn variably_saturated_flow_step(
         }
         subsurface_runoff_mm_s + surface_runoff_mm_s
     } else if input.patch_type == 2 {
-        bail!(
-            "WATER_VSF's wetland branch is not ported; patchtype 2 needs the \
-             DEF_USE_Dynamic_Wetland column, which this runtime does not assemble"
-        );
+        // `DEF_USE_Dynamic_Wetland`（`MOD_SoilSnowHydrology.F90:1384-1392`）：湿地走完土壤分支，
+        // 但产流方案只对 `patchtype <= 1` 算（`rsur = rsubst = 0`），积水超过 `wetwatmax` 的部分才是
+        // 饱和地表径流，也就是全部径流。
+        if state.surface_water_mm > input.wetland_water_capacity_mm {
+            saturation_excess_runoff_mm_s =
+                (state.surface_water_mm - input.wetland_water_capacity_mm) / dt;
+            state.surface_water_mm = input.wetland_water_capacity_mm;
+        }
+        surface_runoff_mm_s = saturation_excess_runoff_mm_s;
+        // 产流方案没跑，`frcsat` 是 `intent(out)` 未赋值：历史留填充值（同 VIC 那一支）。
+        saturated_fraction = f64::NAN;
+        surface_runoff_mm_s
     } else {
         0.0
     };
@@ -4676,10 +4686,11 @@ fn validate_variable_saturated_flow(
     input: VariableSaturatedFlowInput<'_>,
     state: &Water2014SoilState,
 ) -> Result<usize> {
+    // patchtype 2 只在 `DEF_USE_Dynamic_Wetland` 时进这里（调用方按开关分派）。
     ensure!(
-        matches!(input.patch_type, 0 | 1),
-        "WATER_VSF is ported only for soil (0) and urban (1) patches; patchtype {} \
-         needs the wetland, dry-lake or glacier branch",
+        matches!(input.patch_type, 0..=2),
+        "WATER_VSF is ported for soil (0), urban (1) and dynamic wetland (2) patches; patchtype {} \
+         needs the dry-lake or glacier branch",
         input.patch_type
     );
     ensure!(

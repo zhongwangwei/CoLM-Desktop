@@ -26014,3 +26014,23 @@ mksrfdata 判为失败（实测 `ci6x`：日志末行 "Successful in surface dat
 | `mp2c` | `mp2` 从 6 月 16 日续跑（窗口跨重启） | 2/2 | 247/247 | ✓ | — |
 
 原有单 patch 算例不变：全量回归（release，含 `mp1`/`mp2`）92 例历史、重启与旁车全部逐位（`nn`/`pni` 不写历史）。
+
+## 第 441 轮：动态湿地（`DEF_USE_Dynamic_Wetland`）
+
+用户选的下一项（动态湿地/动态湖，先做湿地）。上游改动面小：湿地（patchtype 2）按土壤地面算地面湿度
+（`MOD_Thermal.F90:601-602`），VSF 下走 `WATER_VSF` 的土壤支（`MOD_SoilSnowHydrology.F90:946-947`）——产流方案只对
+`patchtype <= 1` 算，所以 `rsur = rsubst = 0`，Richards 照解；积水超过 `wetwatmax` 的部分是饱和地表径流，也是全部径流
+（`:1384-1392`）；`frcsat` 未赋值（历史为填充值）；`f_wetwat` 写的是 `a_wdsrf/nac`（`MOD_Hist.F90:893-898`），`a_wetwat`
+照常进旁车。`qgtop` 的容差分支在 `IF (DEF_USE_TRACER)` 里，非示踪物构建碰不到。`WATER_2014`（非 VSF）不看这个开关。
+
+顺带：`wetwatmax` 上游运行期取自常数重启（`MOD_Vars_TimeInvariants.F90:602`），Rust 原先读 namelist 并把
+`DEF_TUNING_WETWATMAX` 列在"从不读"的拒绝名单里——两处都改为与上游同源（重启），名单去掉这一项。
+
+| 算例 | 设置 | 历史 | 重启+旁车 | release | debug |
+|---|---|---|---|---|---|
+| `dw1`/`dw2` | AT-Neu 湿地（`wt`），1–2 月 | 2/2 | ✓ | ✓ | — |
+| `dw3` | AT-Neu 湿地（`wy`），全年 | 12/12 | ✓ | ✓ | — |
+| `dw4` | US-Ne3 改湿地（LCT），全年，积水最高 4.7 mm | 12/12 | ✓ | ✓ | — |
+| `dw5` | 同 `dw4`，`DEF_TUNING_WETWATMAX = 1`（溢出分支，`rsur` 最大 3.7e-4 mm/s） | 12/12 | ✓ | ✓ | ✓ |
+
+非动态湿地 `wt`/`wy` 不变；全量回归 97 例逐位（`nn`/`pni` 不写历史）。

@@ -85,15 +85,9 @@ pub fn land_physics_parameters(
     };
     // `DEF_Optimize_Baseflow` 不在这里：它不改物理参数，而是在主循环里逐年改写
     // `scale_baseflow`，由 `colm-rs` 装一个 `BaseflowOptimizer` 给运行时（`MOD_Opt_Baseflow`）。
-    // `DEF_USE_Dynamic_Wetland`：湿地改走土壤地面的完整水热分支（`MOD_Thermal.F90:602`、
-    // `MOD_SoilSnowHydrology.F90:947/1072`）。运行期只移植了非动态湿地的水桶模型，
-    // 打开它会让湿地静默按水桶算，所以拒绝。
-    if logical(document, "DEF_USE_Dynamic_Wetland")? {
-        bail!(
-            "DEF_USE_Dynamic_Wetland is on, but the Rust runtime ports only the static \
-             wetland bucket (patchtype 2), not the dynamic soil-ground wetland branch"
-        );
-    }
+    // `DEF_USE_Dynamic_Wetland`：湿地按土壤地面算地面湿度（`MOD_Thermal.F90:601-602`），VSF 下走土壤水分支
+    // （`MOD_SoilSnowHydrology.F90:946-947`、`:1384-1392`）。
+    let dynamic_wetland = logical(document, "DEF_USE_Dynamic_Wetland")?;
     // `DEF_USE_Dynamic_Lake`：湖深随水量变、`dz_lake` 进时间重启、`wdsrf` 记湖水。
     // 运行期只移植了定深湖（`newsnow_lake`/`snowwater_lake` 的动态支路没接进湖一步）。
     if logical(document, "DEF_USE_Dynamic_Lake")? {
@@ -234,12 +228,11 @@ pub fn land_physics_parameters(
     // 那些**不列**在这里 —— 它们在 Golden 内核里同样不生效，忽略是对的。
     // 列的是"设了就会改变物理、而本仓库不会照做"的那些，其中 `DEF_TUNING_SIMPLE_VIC_*`
     // 尤其要紧：黄金配置的产流方案正是 SimpleVIC。
-    const UNREAD_PHYSICS_SWITCHES: [&str; 15] = [
+    const UNREAD_PHYSICS_SWITCHES: [&str; 14] = [
         "DEF_TUNING_CSOILC",
         "DEF_TUNING_SMPMAX",
         "DEF_TUNING_SMPMAX_HR",
         "DEF_TUNING_SMPMIN_HR",
-        "DEF_TUNING_WETWATMAX",
         "DEF_TUNING_SIMPLE_VIC_DS",
         "DEF_TUNING_SIMPLE_VIC_WS",
         "DEF_SOIL_REFL_SCHEME",
@@ -306,6 +299,7 @@ pub fn land_physics_parameters(
         bgc,
         irrigation,
         land_class_overrides,
+        dynamic_wetland,
         hydraulic_model: if campbell {
             HydraulicModel::Campbell
         } else {
