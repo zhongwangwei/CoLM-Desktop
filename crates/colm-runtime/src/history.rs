@@ -2861,7 +2861,7 @@ impl HistorySession {
     /// 通量，植被那一组在 `CoLMMAIN.F90:2178-2230` 被清零
     /// （`etr`/`fsenl`/`fevpl`/`assim`/`respc`/`rstfac*`/`gs*`/`laisun`/`laisha`/`green`/
     /// `qintr`/`qinfl`/`qlayer`/`rootr`/`qcharge` = 0，`frcsat = 1`，
-    /// `qdrip = forc_rain + forc_snow`）。`rss` 不重算，沿用重启里的值。
+    /// `qdrip = forc_rain + forc_snow`）。`rss` 不重算，沿用状态里最近一次的值。
     #[allow(clippy::too_many_arguments)]
     fn push_non_soil(
         &mut self,
@@ -2938,7 +2938,9 @@ impl HistorySession {
                 ("gssha", 0.0),
                 ("rstfacsun", 0.0),
                 ("rstfacsha", 0.0),
-                ("rss", template.soil_surface_resistance_s_m),
+                // 不重算，但它是 module 变量：动态湖的干湖步（走土壤分支）会改写它，之后的湿湖步
+                // 读到的是那个值，不是起跑重启里的。
+                ("rss", state.energy.soil_surface_resistance_s_m),
                 ("ldew", 0.0),
                 ("qintr", 0.0),
                 (

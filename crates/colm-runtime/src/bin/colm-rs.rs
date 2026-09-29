@@ -590,6 +590,12 @@ fn run_snow(
                 Ok(snapshot)
             })
             .collect::<Result<Vec<_>>>()?;
+        let mut snapshots = snapshots;
+        if let Some(previous) = &last {
+            for (snapshot, previous) in snapshots.iter_mut().zip(previous) {
+                snapshot.diagnostics.carry_forward(&previous.diagnostics);
+            }
+        }
         // `save_to_restart`（`CoLM.F90:664`）：每个 `DEF_WRST_FREQ` 周期末、以及预热期
         // 每年末写一次 `WRITE_TimeVariables`。窗口终点那一次由循环结束后的写出负责。
         if let Some(periodic) = periodic {

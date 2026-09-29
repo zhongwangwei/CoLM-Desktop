@@ -677,22 +677,19 @@ fn adjust_dynamic_lake_water(
     lake: &mut LakeColumn,
     fluxes: &LakeSnowWaterFluxes,
 ) -> Result<()> {
+    // GIMPLE（`MOD_Lake.F90:1865-1873`）：通量项先乘 `deltim`，再收成 `.FMA (flux*deltim, 1e-3, dz*(1-fi))`
+    // 与 `.FMA (flux*deltim, 1e-3, dz*fi)`。这些项比 `dz` 小几个量级，不融合时绝大多数步舍入结果
+    // 碰巧相同，只在个别步差 1 ULP（dc5：AT-Cold 强迫 3 月 19 日）。
+    let dt = input.time_step_seconds;
+    let liquid_before = lake.thickness_m[0] * (1.0 - lake.ice_fraction[0]);
+    let ice_before = lake.thickness_m[0] * lake.ice_fraction[0];
     let (mut liquid_depth, mut ice_depth) = if had_snow {
-        (
-            lake.thickness_m[0] * (1.0 - lake.ice_fraction[0])
-                + bottom_drainage * input.time_step_seconds * 1.0e-3,
-            lake.thickness_m[0] * lake.ice_fraction[0],
-        )
+        ((bottom_drainage * dt).mul_add(1.0e-3, liquid_before), ice_before)
     } else {
         (
-            lake.thickness_m[0] * (1.0 - lake.ice_fraction[0])
-                + (fluxes.snow_melt_kg_m2_s + input.dew_kg_m2_s - input.evaporation_kg_m2_s)
-                    * input.time_step_seconds
-                    * 1.0e-3,
-            lake.thickness_m[0] * lake.ice_fraction[0]
-                + (input.frost_kg_m2_s - input.sublimation_kg_m2_s)
-                    * input.time_step_seconds
-                    * 1.0e-3,
+            (((fluxes.snow_melt_kg_m2_s + input.dew_kg_m2_s) - input.evaporation_kg_m2_s) * dt)
+                .mul_add(1.0e-3, liquid_before),
+            ((input.frost_kg_m2_s - input.sublimation_kg_m2_s) * dt).mul_add(1.0e-3, ice_before),
         )
     };
     if liquid_depth < 0.0 {
@@ -706,7 +703,8 @@ fn adjust_dynamic_lake_water(
     lake.thickness_m[0] = (liquid_depth + ice_depth).max(1.0e-6);
     lake.ice_fraction[0] = (ice_depth / lake.thickness_m[0]).clamp(0.0, 1.0);
     let bottom = lake.thickness_m.len() - 1;
-    lake.thickness_m[bottom] += soil_water_change * 1.0e-3;
+    // `dz_lake(nl_lake) + dw_soil/1.e3`：是除法，不能换成乘 1e-3。
+    lake.thickness_m[bottom] += soil_water_change / 1.0e3;
     let mut layer = bottom;
     while lake.thickness_m[layer] < 0.0 {
         if layer > 0 {

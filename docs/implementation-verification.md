@@ -26286,5 +26286,45 @@ SNICAR 仍拒绝的只剩湖（含城市里的水体）与城市雪面。
 参照为纯 Fortran（`--preprocessors fortran --engine fortran`）。`sl2` 湖面封冻，12 月起 5 层雪、年末雪水当量 359 mm，
 粒径最大 953 µm，BC/粉尘随融水下移。`lk`、`dl1/2/3/5`、`sn2`/`sn5`/`sg1`/`sw_dw4c` 复跑仍逐位（release 与 debug）。
 
-动态湖 + AT-Cold 强迫（`sl3`/`sl5`）不一致，但**不开 SNICAR 的对照 `dc3`/`dc5` 同样不一致**（`dc5` 首差在 3 月 18 日的
-`fgrnd`/`xerr`），是动态湖在冷强迫下暴露的既有缺陷，另行追查。
+动态湖 + AT-Cold 强迫（`sl3`/`sl5`）起初不一致，但**不开 SNICAR 的对照 `dc3`/`dc5` 同样不一致**，是动态湖的既有缺陷，
+见第 448 轮。
+
+## 第 448 轮：动态湖冷强迫下暴露的两处既有缺陷
+
+`dl3`/`dl5`（动态湖）换成 AT-Cold 强迫（`dc3`/`dc5`，不开 SNICAR）后不再逐位。两处独立的问题：
+
+### 一、`rss`/`rst` 在湿湖步被"回滚"成起跑重启里的值
+
+动态湖干湖那一步整步走土壤分支，`THERMAL` 写下 `rss`（首次为 0）与 `rst`（20000）；之后的湿湖步 `laketem` 不碰它们。
+上游它们是 module 时间变量，保留**最近一次**写下的值。Rust 这边：
+- history 的湖/冰川记录写的是模板（起跑重启）里的 `rss`（spval → NaN），`dc5` 1 月第 272 个时次起 Fortran 0、Rust 缺测；
+- 续跑文件里 `SurfaceDiagnosticsRow` 的 `None` 意为"保持输入重启的原值"，干湖步之后同样错（`sl5` 2 月末重启 `rss` 0 对 spval、
+  `rst` 20000 对 spval）。
+
+修正：history 取状态里的 `rss`（土壤分支每步更新它）；续跑写出时本步没赋值的 `rst`/`rss`/`gs0sun`/`gs0sha` 从上一步的快照顺延
+（`SurfaceDiagnosticsRow::carry_forward`）。定深湖与冰川上两者从未被写过，顺延的结果仍是起跑值，行为不变。
+
+### 二、`snowwater_lake` 动态湖水量更新的收缩形状
+
+`dh5`（`dc5` 截到 3 月 20 日、逐时）在 Fortran/Rust 两侧各插三处探针（求解后、相变后、对流混合后按位打印 `t_lake`）：前 54 次
+`laketem` 调用全同，第 55 次**进 `laketem` 时** `t_lake(5)` 就差 2 ULP —— 前一步对流混合把 1–4 层抹成同温，随后
+`snowwater_lake` 末尾按新水量调层厚、`adjust_lake_layer` 重分层，新第 5 层取旧第 4/5 层的加权平均。重分层本身与 GIMPLE 相同，
+差在进重分层之前的单层厚度（总和相同，所以 `f_dz_lake` 这一步看不出来）。GIMPLE：
+- `wliq_lake(1) = .FMA (qout_snowb*deltim, 1e-3, dz*(1-fi))`；无雪时 `.FMA (((sm+qsdew)-qseva)*deltim, 1e-3, dz*(1-fi))`、
+  `wice_lake(1) = .FMA ((qfros-qsubl)*deltim, 1e-3, dz*fi)`；Rust 原先不融合；
+- `dz_lake(nl_lake) + dw_soil/1.e3` 是**除法**，Rust 原先写成乘 `1.0e-3`。
+
+这几项比 `dz` 小三四个量级，不融合的乘积舍入误差远小于 `ulp(dz)`，绝大多数步结果碰巧相同 —— AT-Neu 的 `dl1/2/3/5` 全年都没触发，
+冷强迫下积雪/融雪/冻土变化剧烈才撞上。土壤饱和修正那一段逐句对过，形状本来就对。
+
+| 算例 | 设置 | 历史 | 重启 | release | debug |
+|---|---|---|---|---|---|
+| `dc3` | `dl3`（湖深 0.12 m，全年，3 月转干湖）+ AT-Cold | 12/12 | 25/25 | ✓ | ✓ |
+| `dc5` | `dl5`（湖深 0.10 m，1–6 月，反复干湿切换）+ AT-Cold | 6/6 | 13/13 | ✓ | ✓ |
+| `sl3` | `dc3` + SNICAR + 气候态沉降 | 12/12 | 25/25 | ✓ | ✓ |
+| `sl5` | `dc5` + SNICAR + 气候态沉降 | 6/6 | 13/13 | ✓ | ✓ |
+
+参照为纯 Fortran（`--preprocessors fortran --engine fortran`）。探针内核建完即 `git checkout` 还原 `vendor/`。
+
+全量回归（release，`tmp/regress_all.sh`）：127 个算例中 125 个的历史、主重启与旁车全部逐位；`nn`/`pni` 照旧不比历史
+（`nn` 关了 history，`pni` 的参照只跑到 mkinidata）。`rst`/`rss` 的顺延没有改变任何既有算例的续跑文件。

@@ -305,8 +305,8 @@ pub struct EvolvedStepOutput<'a> {
 
 /// 续跑文件里逐步重写的 `(patch,)` 表面诊断量。
 ///
-/// `None` 表示该分支上游不给这个变量赋值（保持重启里的原值），例如冰川上的
-/// `rst`/`rss`/`gs0sun`/`gs0sha`。
+/// `None` 表示该分支上游不给这个变量赋值（保持最近一次被写的值，见
+/// [`SurfaceDiagnosticsRow::carry_forward`]），例如冰川上的 `rst`/`rss`/`gs0sun`/`gs0sha`。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SurfaceDiagnosticsRow {
     /// `coszen`：上游 `CoLMMAIN.F90:2076` 的 `orb_coszen(calendarday(idate))`，
@@ -369,6 +369,17 @@ impl SurfaceDiagnosticsRow {
             gs0sun: leaf.maximum_sunlit_leaf_conductance_umol_m2_s,
             gs0sha: leaf.maximum_shaded_leaf_conductance_umol_m2_s,
         })
+    }
+
+    /// 本步没赋值的量取上一步的：它们是 module 时间变量，动态湖在干湖步（土壤分支）写下
+    /// `rst`/`rss` 之后，湿湖步不碰，续跑文件里是干湖步的值而不是起跑重启里的。
+    pub fn carry_forward(&mut self, previous: &Self) {
+        self.stomatal_resistance = self.stomatal_resistance.or(previous.stomatal_resistance);
+        self.soil_surface_resistance = self
+            .soil_surface_resistance
+            .or(previous.soil_surface_resistance);
+        self.gs0sun = self.gs0sun.or(previous.gs0sun);
+        self.gs0sha = self.gs0sha.or(previous.gs0sha);
     }
 
     /// 冰川分支：`GLACIER_TEMP` 给出相似函数与 2 m 诊断；`fwet_snow` 在
