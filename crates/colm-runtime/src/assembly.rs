@@ -1323,9 +1323,9 @@ fn assemble(
     };
     let snicar = if physics.snicar {
         ensure!(
-            patch_type == 0 || patch_type == 3,
-            "DEF_USE_SNICAR is ported for soil and glacier patches; patchtype {patch_type} needs \
-             the lake/wetland SNICAR branches"
+            matches!(patch_type, 0 | 2 | 3),
+            "DEF_USE_SNICAR is ported for soil, wetland and glacier patches; patchtype \
+             {patch_type} needs the lake SNICAR branches"
         );
         Some(SnicarTemplate::read(&time, patch)?)
     } else {
