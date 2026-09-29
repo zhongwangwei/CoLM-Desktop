@@ -414,7 +414,7 @@ impl SurfaceDiagnosticsRow {
         let thermal = &output.thermal;
         Self {
             cosine_zenith,
-            wet_snow_fraction: 0.0,
+            wet_snow_fraction: output.fwet_snow,
             tref: thermal.tref,
             qref: output.qref,
             stomatal_resistance: Some(thermal.rst),

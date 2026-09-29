@@ -26344,4 +26344,30 @@ SNICAR 仍拒绝的只剩湖（含城市里的水体）与城市雪面。
 `su1` 两侧主重启里的 SNICAR 量 12/12 逐位相同 —— 即 SNICAR 在城市上两边都无作用。
 
 但 `su1`/`uc1` 的 Rust 与 Fortran **互相**不一致（1 月第 3 天 `t_roof` 起），不开 SNICAR 同样如此：城市雪面在冷强迫下暴露的
-既有缺陷，另行追查（第 450 轮）。
+既有缺陷，见第 450 轮。
+
+## 第 450 轮：城市雪面的三处既有缺陷（冷强迫才暴露）
+
+AU-Preston 从不结冰，城市算例此前没有一步走过屋顶/道路的相变与积雪。`uc1`（`uy` + AU-Preston 冷强迫，不开 SNICAR）
+逐时截短成 `uh1`/`uh2` 逐个定位：
+
+1. **history 的 `t_roof` 取错了那一次赋值。** `CoLMMAIN_Urban` 给 `troof` 赋两次：热力学之后（`:929`）与屋顶雪层压实/合并之后
+   （`:1141`），history 读后者。Rust 取的是前者 —— 屋顶薄雪在本步化完、雪层被并掉的那两个时次，上游写的是屋顶第一层温度
+   （279.30 K），Rust 写的是雪温 273.16 K；状态本身没分叉（下一时次又逐位相同）。改成合并之后的 `t_roofsno(lbr)`。
+2. **`meltf_urban` 从未对过 GIMPLE。** 探针（`MOD_Urban_Hydrology` 里逐步打印三路产流、`gwat` 及其输入）把首差追到
+   `sm_roof` 差 1 ULP。GIMPLE：
+   - 顶层 `hm = (.FMA (dhsdT, tinc, hs) + brr) - tinc/fact`；Rust 原先是 `(brr - tinc/fact) + (hs + dhsdT*tinc)`；
+   - 顶层温度修正 `t + (heatr*fact) / .FNMA (dhsdT, fact, 1)`；Rust 原先分母不融合。
+   其余（`xm`、薄雪融化、`wice`/`wliq` 更新、`xmf`、`sm` 累加）形状本来就对。
+3. **续跑文件里城市的 `fwet_snow` 恒为 0。** 城市树冠截留写下 `fwet_snow`（`MOD_Urban_Flux.F90:893`），下一步 `alburban`
+   与重启都读它；Rust 内部已经在用（反照率逐位），但 `SurfaceDiagnosticsRow::from_urban` 写死了 0。
+
+| 算例 | 设置 | 历史 | 重启 | release | debug |
+|---|---|---|---|---|---|
+| `uc1` | `uy`（AU-Preston 城市，1–11 月日输出）+ 冷强迫（降 15 K、降水 ×4） | 11/11 | 35/35 | ✓ | ✓ |
+| `su1` | `uc1` + SNICAR + 气候态沉降 | 11/11 | 35/35 | ✓ | ✓ |
+| `uh2` | `uc1` 1 月 1–9 日逐时 | 1/1 | ✓ | ✓ | ✓ |
+
+参照为纯 Fortran（`--preprocessors fortran --engine fortran`）。既有城市算例 `uo`/`up`/`uy`/`hp`/`nu` 复跑逐位。
+
+全量回归（release）：131 个算例中 129 个逐位；`nn`/`pni` 照旧不比历史。

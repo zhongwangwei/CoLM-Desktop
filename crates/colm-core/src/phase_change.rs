@@ -432,12 +432,17 @@ pub fn urban_phase_change(input: UrbanPhaseChangeInput<'_>) -> Result<UrbanPhase
             continue;
         }
         let temperature_change = temperature[layer] - input.previous_temperature_k[layer];
-        heat_residual[layer] = input.residual_heat_flux_w_m2[layer]
-            - temperature_change / input.fact_seconds_per_j_m2_k[layer];
-        if layer == 0 {
-            heat_residual[layer] += input.surface_heat_flux_w_m2
-                + input.surface_heat_flux_temperature_derivative_w_m2_k * temperature_change;
-        }
+        let storage = temperature_change / input.fact_seconds_per_j_m2_k[layer];
+        // GIMPLE（`meltf_urban`）：顶层 `(.FMA (dhsdT, tinc, hs) + brr) - tinc/fact`，其余 `brr - tinc/fact`。
+        heat_residual[layer] = if layer == 0 {
+            (input
+                .surface_heat_flux_temperature_derivative_w_m2_k
+                .mul_add(temperature_change, input.surface_heat_flux_w_m2)
+                + input.residual_heat_flux_w_m2[layer])
+                - storage
+        } else {
+            input.residual_heat_flux_w_m2[layer] - storage
+        };
         if (phase_flag[layer] == 1 && heat_residual[layer] < 0.0)
             || (phase_flag[layer] == 2 && heat_residual[layer] > 0.0)
         {
@@ -486,9 +491,10 @@ pub fn urban_phase_change(input: UrbanPhaseChangeInput<'_>) -> Result<UrbanPhase
         };
         liquid[layer] = (total_water[layer] - ice[layer]).max(0.0);
         if heat_left != 0.0 {
+            // 顶层分母 `.FNMA (dhsdT, fact, 1)`；其余层 `t + heatr*fact`（除以 1 是精确的）。
             let correction = if layer == 0 {
-                1.0 - input.fact_seconds_per_j_m2_k[layer]
-                    * input.surface_heat_flux_temperature_derivative_w_m2_k
+                (-input.surface_heat_flux_temperature_derivative_w_m2_k)
+                    .mul_add(input.fact_seconds_per_j_m2_k[layer], 1.0)
             } else {
                 1.0
             };
@@ -496,7 +502,7 @@ pub fn urban_phase_change(input: UrbanPhaseChangeInput<'_>) -> Result<UrbanPhase
                 correction != 0.0,
                 "urban phase-change temperature correction is singular"
             );
-            temperature[layer] += input.fact_seconds_per_j_m2_k[layer] * heat_left / correction;
+            temperature[layer] += (heat_left * input.fact_seconds_per_j_m2_k[layer]) / correction;
             if liquid[layer] * ice[layer] > 0.0 {
                 temperature[layer] = FREEZING_K;
             }

@@ -158,6 +158,8 @@ pub struct UrbanStepOutput {
     pub h2osoi: Vec<f64>,
     pub wat: f64,
     pub initial_total_water_mm: f64,
+    /// 城市树冠的 `fwet_snow`（`UrbanTHERMAL` 的截留写下，下一步 `alburban` 与重启读它）。
+    pub fwet_snow: f64,
 }
 
 /// Port of `CoLMMAIN_Urban`（非 SNICAR、非动态湖、非 CaMa）。
@@ -513,7 +515,6 @@ pub fn urban_step(
     unpack(&mut urban.impervious, &impervious, swe[1], depth[1]);
     unpack(&mut urban.pervious, &pervious, swe[2], depth[2]);
     unpack(&mut urban.lake_bed, &lake_bed, swe[3], depth[3]);
-    urban.t_roof = thermal.troof;
     if thermal.fsen_urbl.is_some() {
         urban.fsen_urbl = thermal.fsen_urbl;
         urban.lfevp_urbl = thermal.lfevp_urbl;
@@ -751,6 +752,9 @@ pub fn urban_step(
         clear_empty_snow_slots(&mut surface.snow);
     }
     let troof = surface_temperature(&urban.roof);
+    // `troof` 在 `CoLMMAIN_Urban` 里被赋两次：热力学之后（`:929`）与屋顶雪层合并之后（`:1141`）。history 的
+    // `t_roof` 读的是后者 —— 屋顶薄雪在本步化完、雪层被并掉时，它是屋顶第一层的温度而不是雪温。
+    urban.t_roof = troof;
     let tgimp = surface_temperature(&urban.impervious);
     let tgper = surface_temperature(&urban.pervious);
     let lake = state.lake.as_mut().expect("checked above");
@@ -946,6 +950,7 @@ pub fn urban_step(
         h2osoi,
         wat,
         initial_total_water_mm: total_water_before,
+        fwet_snow: tree.fwet_snow,
         thermal: UrbanThermalOutput {
             fseng,
             fgrnd,
