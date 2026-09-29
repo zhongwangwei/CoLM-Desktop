@@ -1540,6 +1540,7 @@ fn crop_common_restart_keeps_each_cft_on_its_own_patch_axis() {
             tuning: RestartTuning::default(),
             runoff_scheme: 3,
             topmodel_method: 0,
+            soil_reflectance_scheme: 2,
             vic_parameter_file: None,
             vic_grid_file: None,
         },
@@ -2342,4 +2343,37 @@ fn assert_bgc_pft_restart_equal(actual_path: &std::path::Path, expected_path: &s
         values_i32(&actual, "nyrs_crop_active_p"),
         values_i32(&expected, "nyrs_crop_active_p")
     );
+}
+
+#[test]
+fn soil_reflectance_scheme_defaults_to_site_values_and_rejects_urban_colour_tables() {
+    let root = std::env::temp_dir().join(format!("colm-init-soil-refl-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let namelist = root.join("case.nml");
+    for (fields, expected) in [
+        ("", Ok(2)),
+        ("DEF_SOIL_REFL_SCHEME=2", Ok(2)),
+        ("DEF_SOIL_REFL_SCHEME=1", Ok(1)),
+        ("DEF_SOIL_REFL_SCHEME=3", Err("must be 1")),
+        (
+            "DEF_SOIL_REFL_SCHEME=1\nDEF_URBAN_RUN=.true.",
+            Err("DEF_URBAN_RUN"),
+        ),
+    ] {
+        std::fs::write(
+            &namelist,
+            format!(
+                "&nl_colm\nDEF_CASE_NAME='site'\nDEF_dir_output='{}'\n{fields}\n/\n",
+                root.join("out").display()
+            ),
+        )
+        .unwrap();
+        let run =
+            single_point_static_run_from_namelist(&namelist, Some(LandCoverScheme::Igbp), None);
+        match expected {
+            Ok(scheme) => assert_eq!(run.unwrap().static_config().soil_reflectance_scheme, scheme),
+            Err(message) => assert!(run.unwrap_err().to_string().contains(message)),
+        }
+    }
+    crate::remove_test_tree(root);
 }

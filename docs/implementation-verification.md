@@ -26103,3 +26103,20 @@ mksrfdata 判为失败（实测 `ci6x`：日志末行 "Successful in surface dat
 `SIMPLE_VIC_DS/WS = 0.1/0.5`、`SMPMAX_HR/SMPMIN_HR = -5e2/-1e5`、LAI 年界 2005–2008、`LANDONLY = .false.`），对纯 Fortran
 历史 6/6、重启全部逐位，release 与 debug 均过。对照：纯 Fortran 的 `ta1` 与 `bl` 在 6 月末的主重启**逐位相同**
 （死参数的直接证据），而 BGC 历史有 50 个量不同（`f_gpp`、`f_totlitc`…，即 `*_HR` 生效），Rust 两边都跟上。
+
+### B 类：只影响前处理的四个
+
+| 开关 | 上游事实 | Rust |
+|---|---|---|
+| `DEF_USE_BEDROCK` | mkinidata 读站点 `depth_to_bedrock`（cm），写常数重启 `debdrock`（上游拼写）与 `ibedrock`；运行期没有读者 | colm-init 早已实现，只是运行期仍拒绝 |
+| `DEF_SOIL_REFL_SCHEME` | 1：`soil_color_refl` 按 `landpatch%settyp` 查色表；2（默认）：单点读站点文件 | 本轮给 colm-init 接上方案 1（`SinglePointStaticConfig::read_surface`）；城市单点混有多地类 patch，方案 1 与 `DEF_URBAN_RUN` 同开时拒绝 |
+| `DEF_USE_DOMINANT_PATCHTYPE`、`DEF_USE_SOILPAR_UPS_FIT` | 只在栅格聚合里；单点 mksrfdata 在走到那里之前就 `STOP`（`MKSRFDATA.F90:121-146`），单点构建里不可达 | colm-srfdata 栅格路径已实现两者 |
+
+| 算例 | 设置 | 对照 | 历史 | 重启 | release | debug |
+|---|---|---|---|---|---|---|
+| `tb1` | `bl` 1–6 月，`DEF_USE_BEDROCK`，站点补 `depth_to_bedrock = 150` | 两边常数重启都是 `debdrock = 1.5`、`ibedrock = 9`；与 `bl` 的物理状态逐位相同 | 6/6 | ✓ | ✓ | ✓ |
+| `tr1` | `bl`（PFT）1–6 月，`DEF_SOIL_REFL_SCHEME = 1` | 土壤反照率 0.24/0.35/0.48/0.59（站点值 0.14/0.25/0.28/0.39） | 6/6 | ✓ | ✓ | ✓ |
+| `tr2` | `lc1`（LCT）延到 2011-06，同上 | | 6/6 | ✓ | ✓ | ✓ |
+| `tr3` | `bl` 1–3 月，`DOMINANT_PATCHTYPE = .true.`、`SOILPAR_UPS_FIT = .false.` | | 3/3 | ✓ | ✓ | ✓ |
+
+运行期拒绝名单只剩 `DEF_TOPMOD_method`（C 类，下一步）。

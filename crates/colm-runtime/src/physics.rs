@@ -228,14 +228,12 @@ pub fn land_physics_parameters(
     // - `DEF_TUNING_SMPMAX_HR/SMPMIN_HR`：colm-init 写进常数重启，BGC 分解从重启读；
     // - `DEF_LAI_START/END_YEAR`：城市 LAI 读它们；`USE_SITE_LAI` 按最近年取、不看它们，
     //   `USE_SITE_LAI = .false.` 另有拒绝；
-    // - `DEF_LANDONLY`：只在 `GRIDBASED/UNSTRUCTURED` 下编译（`MKSRFDATA.F90:365-366`）。
-    const UNREAD_PHYSICS_SWITCHES: [&str; 5] = [
-        "DEF_SOIL_REFL_SCHEME",
-        "DEF_TOPMOD_method",
-        "DEF_USE_BEDROCK",
-        "DEF_USE_SOILPAR_UPS_FIT",
-        "DEF_USE_DOMINANT_PATCHTYPE",
-    ];
+    // - `DEF_LANDONLY`：只在 `GRIDBASED/UNSTRUCTURED` 下编译（`MKSRFDATA.F90:365-366`）；
+    // - `DEF_USE_DOMINANT_PATCHTYPE`、`DEF_USE_SOILPAR_UPS_FIT`：只在栅格聚合里（单点 mksrfdata 在那之前
+    //   `STOP`，`MKSRFDATA.F90:121-146`），colm-srfdata 的栅格路径已实现；
+    // - `DEF_USE_BEDROCK`：只进 mkinidata 的 `debdrock/ibedrock`（运行期无读者），colm-init 已实现；
+    // - `DEF_SOIL_REFL_SCHEME`：mkinidata 的土壤反照率来源，colm-init 已实现（方案 1 查地类色表）。
+    const UNREAD_PHYSICS_SWITCHES: [&str; 1] = ["DEF_TOPMOD_method"];
     for name in UNREAD_PHYSICS_SWITCHES {
         if sets_non_default(document, name) {
             bail!(

@@ -77,6 +77,8 @@ pub struct SinglePointStaticConfig<'a> {
     /// Mask non-urban patches without removing their initialized restart rows.
     pub urban_only: bool,
     pub topmodel_method: i32,
+    /// `DEF_SOIL_REFL_SCHEME`：1 按地类取土壤色表（`soil_color_refl`），2 读站点文件。
+    pub soil_reflectance_scheme: i32,
     pub vic_parameters: VicParameterSource<'a>,
 }
 
@@ -103,8 +105,27 @@ impl<'a> SinglePointStaticConfig<'a> {
             use_soil_texture: true,
             urban_only: false,
             topmodel_method: 0,
+            soil_reflectance_scheme: 2,
             vic_parameters: VicParameterSource::None,
         }
+    }
+
+    /// 读站点地表数据，再按 `DEF_SOIL_REFL_SCHEME` 定土壤反照率。
+    ///
+    /// 方案 1（`MOD_SoilParametersReadin.F90:490-497`）对每个 patch 按 `landpatch%settyp` 查
+    /// `soil_color_refl`；单点（非城市）所有 patch 的 `settyp` 都是站点地类，站点文件里的四个值被整体顶掉。
+    pub fn read_surface(&self, path: impl AsRef<Path>) -> Result<crate::SinglePointSurfaceData> {
+        let mut surface = read_single_point_surface(
+            path,
+            self.land_cover,
+            self.hydraulic_model,
+            self.use_soil_texture,
+        )?;
+        if self.soil_reflectance_scheme == 1 {
+            surface.albedo =
+                crate::land_cover_soil_reflectance(self.land_cover, surface.land_class)?;
+        }
+        Ok(surface)
     }
 }
 
@@ -129,6 +150,7 @@ pub struct SinglePointStaticRun {
     pub tuning: RestartTuning,
     pub runoff_scheme: i32,
     pub topmodel_method: i32,
+    pub soil_reflectance_scheme: i32,
     pub vic_parameter_file: Option<PathBuf>,
     pub vic_grid_file: Option<PathBuf>,
 }
@@ -245,6 +267,7 @@ impl SinglePointStaticRun {
         config.use_soil_texture = self.runoff_scheme == 3;
         config.urban_only = self.urban_only;
         config.topmodel_method = self.topmodel_method;
+        config.soil_reflectance_scheme = self.soil_reflectance_scheme;
         config.vic_parameters = if self.runoff_scheme == 1 {
             self.vic_grid_file
                 .as_deref()
@@ -288,6 +311,18 @@ pub fn single_point_static_run_from_namelist(
         false => HydraulicModel::VanGenuchten,
     };
     let use_bedrock = optional_bool_or(&document, "DEF_USE_BEDROCK", false)?;
+    let soil_reflectance_scheme = optional_i32(&document, "DEF_SOIL_REFL_SCHEME")?.unwrap_or(2);
+    ensure!(
+        matches!(soil_reflectance_scheme, 1 | 2),
+        "DEF_SOIL_REFL_SCHEME must be 1 (land-cover soil colour) or 2 (site soil albedo), got \
+         {soil_reflectance_scheme}"
+    );
+    // 城市单点混有别的地类的 patch，方案 1 要逐 patch 查色表，城市冷启动那条路径没接。
+    ensure!(
+        soil_reflectance_scheme == 2 || !optional_bool_or(&document, "DEF_URBAN_RUN", false)?,
+        "DEF_SOIL_REFL_SCHEME = 1 with DEF_URBAN_RUN is not ported: the urban cold start keeps \
+         the site soil albedo for every patch"
+    );
     let case_dir = output.join(&case_name);
     let surface = case_dir.join("landdata/srfdata.nc");
     let urban = optional_bool_or(&document, "DEF_URBAN_RUN", false)?;
@@ -319,6 +354,7 @@ pub fn single_point_static_run_from_namelist(
         tuning: RestartTuning::from_document(&document)?,
         runoff_scheme: optional_i32(&document, "DEF_Runoff_SCHEME")?.unwrap_or(3),
         topmodel_method: optional_i32(&document, "DEF_TOPMOD_method")?.unwrap_or(0),
+        soil_reflectance_scheme,
         vic_parameter_file: if optional_i32(&document, "DEF_Runoff_SCHEME")?.unwrap_or(3) == 1
             && !optional_bool_or(&document, "DEF_VIC_OPT", false)?
         {
@@ -684,12 +720,7 @@ fn write_single_point_constant_restarts_with_hyperspectral(
     }
 
     let document = read_run_namelist(run)?;
-    let surface = read_single_point_surface(
-        &run.static_run.surface,
-        run.static_run.land_cover,
-        run.static_run.hydraulic_model,
-        static_config.use_soil_texture,
-    )?;
+    let surface = static_config.read_surface(&run.static_run.surface)?;
     if patch_type(run.static_run.land_cover, surface.land_class)? != 0 {
         return Ok(SinglePointConstantRestartFiles {
             common: write_single_point_constant_restart_from_surface(
@@ -795,12 +826,7 @@ fn write_single_point_constant_restart_with_canopy(
     canopy_override: Option<(&[f64], &[f64])>,
     hyperspectral_albedo: Option<&[f64]>,
 ) -> Result<ConstantRestartFiles> {
-    let surface = read_single_point_surface(
-        surface,
-        config.land_cover,
-        config.hydraulic_model,
-        config.use_soil_texture,
-    )?;
+    let surface = config.read_surface(surface)?;
     write_single_point_constant_restart_from_surface(
         &surface,
         restart_dir,
@@ -1128,12 +1154,7 @@ pub fn write_single_point_cold_time_restarts(
         return write_single_point_urban_cold_time_restarts(run, urban);
     }
     let config = run.static_run.static_config();
-    let surface = read_single_point_surface(
-        &run.static_run.surface,
-        config.land_cover,
-        config.hydraulic_model,
-        config.use_soil_texture,
-    )?;
+    let surface = config.read_surface(&run.static_run.surface)?;
     let kind = patch_type(config.land_cover, surface.land_class)?;
     if kind == 0
         && matches!(
@@ -1507,12 +1528,7 @@ pub fn write_single_point_hyperspectral_cold_time_restarts(
         "HYPERSPECTRAL single-point cold starts require PFT/PC subgrid without the urban model"
     );
     let config = run.static_run.static_config();
-    let surface = read_single_point_surface(
-        &run.static_run.surface,
-        config.land_cover,
-        config.hydraulic_model,
-        config.use_soil_texture,
-    )?;
+    let surface = config.read_surface(&run.static_run.surface)?;
     let kind = patch_type(config.land_cover, surface.land_class)?;
     if kind == 0 {
         write_single_point_pft_cold_time_restarts(run, Some(hyperspectral), surface)
