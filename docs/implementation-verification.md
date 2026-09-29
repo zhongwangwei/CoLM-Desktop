@@ -25923,3 +25923,17 @@ CoLM-SYSU-integration 的 `origin/master` 仍是 `3c799bae`，与 vendor 对齐�
 
 全量回归（release，`tmp/regress_all.sh`，含 `ci1`–`ci8`）：86 个算例的历史、主重启与旁车全部逐位；`nn`/`pni`
 不写历史（`pni` 的参考只跑到 mkinidata，比的是冷启动重启）。原有算例在加了"缺变量也报"之后仍无缺变量。
+
+## 第 437 轮：上游复核与增量同步（2026-09-29，`CoLM-SYSU-integration@85cf2328`）
+
+`git fetch` 后上游 master 从 `3c799bae` 前进到 `85cf2328`（PR #17，示踪物分支合入，8 个文件）。非 TRACER
+构建里唯一的改动是 `CoLM_stop` 的 `STOP` → `STOP 1`；`MOD_Hydro_SoilWater.F90` 的 5 处都在 TRACER 分支内，
+`CoLMMAIN.F90` 那段在 TRACER/GridRiverLakeFlow 宏内。按补丁同步到 vendor（`SoilWater` 手工套用，见 PROVENANCE）。
+
+**同步暴露上游新缺陷**：单点 mksrfdata 以 `CoLM_stop()` 正常结束，改成 `STOP 1` 后 `colm-cli` 把每次成功的
+mksrfdata 判为失败（实测 `ci6x`：日志末行 "Successful in surface data making."，状态 `NonZeroExit { status: 1 }`）。
+本地改回 `STOP`（upstream-bugs 第 30 条）。
+
+复验：两套内核重编通过；用新内核重跑纯 Fortran 的 `ci6`（CROP，Campbell + 灌溉取地下水）与 `bl`（默认内核），
+与同步前的 Fortran 输出逐位相同（`tmp/cmpcase.sh`：历史 12/12、重启 51/51 各两例）。Rust 侧不需要改动。
+`test_upstream_f48_sync.py` 加了本次同步的静态检查。

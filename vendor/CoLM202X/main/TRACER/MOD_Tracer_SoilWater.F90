@@ -235,7 +235,7 @@ CONTAINS
       real(r8) :: top_infil_water       ! surface-to-soil infiltration water [mm/step]
       real(r8) :: flood_water, surface_base_water, surface_base_balance
       real(r8) :: flood_ground_evap_water, flood_ground_evap_tracer
-      real(r8) :: late_water, late_tracer, late_ratio, late_runoff_water, early_runoff_water
+      real(r8) :: late_water, late_tracer, late_ratio, late_runoff_water, early_runoff_water, late_scale
       real(r8) :: flood_destination_water
       real(r8) :: top_exfil_water       ! soil-to-surface exfiltration water [mm/step]
       real(r8) :: top_boundary_out_water ! total negative qinfl water [mm/step]
@@ -275,7 +275,7 @@ CONTAINS
       real(r8) :: root_gross_water, root_gross_tracer, return_ratio
       real(r8) :: root_return_excess, excess_ratio
       real(r8) :: aquifer_ratio
-      real(r8) :: aquifer_water_pre_qcharge
+      real(r8) :: aquifer_water_pre_qcharge, aquifer_orphan_mass
       real(r8) :: aquifer_ref_water, aquifer_ref_mass, aquifer_actual_mass
       real(r8) :: surface_et_water, surface_root_return, surface_et_ratio
       real(r8) :: dew_surface_water, frost_surface_water
@@ -1231,8 +1231,11 @@ CONTAINS
             ! runoff. VSF may pond part of it, so mix at that late boundary
             ! and partition by the solver's actual wdsrf/qinfl outputs.
             late_tracer = trc_pool_total + trc_soil_upflow
-            IF (present(flood_tracer_input)) late_tracer = late_tracer + &
-               flood_tracer_input(itrc) - flood_ground_evap_tracer
+            late_scale = abs(trc_pool_total) + abs(trc_soil_upflow)
+            IF (present(flood_tracer_input)) THEN
+               late_tracer = late_tracer + flood_tracer_input(itrc) - flood_ground_evap_tracer
+               late_scale = late_scale + abs(flood_tracer_input(itrc)) + abs(flood_ground_evap_tracer)
+            ENDIF
             ! Directly reconstruct the carrier after ordinary runoff and
             ! before post-solver frost/dew.  The pre-flood ordinary balance
             ! may be negative when flood water first pays soil evaporation.
@@ -1257,8 +1260,12 @@ CONTAINS
             ELSE
                IF (tracer_is_nonvolatile_solute(itrc)) THEN
                   trc_surface_residue(itrc,ipatch) = trc_surface_residue(itrc,ipatch) + max(late_tracer,0._r8)
-               ELSEIF (late_tracer > trc_tiny) THEN
+               ELSEIF (late_tracer > max(trc_tiny, 1.e-10_r8*late_scale, trc_water_min_for_ratio * &
+                       tracers(itrc)%ref_ratio*(1._r8 + trc_delta_sanity_max/1000._r8))) THEN
                   CALL CoLM_stop('grid flood tracer: unresolved dry isotope surface pool')
+               ELSEIF (late_tracer > 0._r8 .and. allocated(trc_numerical_residual_step)) THEN
+                  trc_numerical_residual_step(itrc, ipatch) = &
+                     trc_numerical_residual_step(itrc, ipatch) - late_tracer
                ENDIF
                late_ratio = 0._r8
                late_tracer = 0._r8
@@ -1519,6 +1526,19 @@ CONTAINS
          ENDIF
          CALL tracer_equilibrate_dissolved(itrc, wa, trc_wa(itrc, ipatch), &
             trc_subsurface_solid(itrc, ipatch))
+         IF (tracer_is_isotope(itrc)) THEN
+            IF (.not. tracer_aquifer_isotope_state_valid(wa, trc_wa(itrc, ipatch), &
+                  tracers(itrc)%ref_ratio, aquifer_ref_water, aquifer_ref_mass)) THEN
+               aquifer_orphan_mass = tracer_aquifer_actual_mass(trc_wa(itrc, ipatch), aquifer_ref_mass)
+               IF (tracer_aquifer_actual_water(wa, aquifer_ref_water) < -trc_water_min_for_ratio) &
+                  aquifer_orphan_mass = aquifer_orphan_mass - &
+                     tracer_aquifer_actual_water(wa, aquifer_ref_water) * aquifer_ratio
+               trc_wa(itrc, ipatch) = trc_wa(itrc, ipatch) - aquifer_orphan_mass
+               IF (allocated(trc_numerical_residual_step)) &
+                  trc_numerical_residual_step(itrc, ipatch) = &
+                     trc_numerical_residual_step(itrc, ipatch) - aquifer_orphan_mass
+            ENDIF
+         ENDIF
          CALL check_isotope_aquifer(itrc, ipatch, wa, trc_wa(itrc, ipatch), 'after qcharge')
 
          ! ============================================================

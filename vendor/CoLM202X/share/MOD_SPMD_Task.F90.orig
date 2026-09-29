@@ -433,7 +433,7 @@ CONTAINS
 #ifdef USEMPI
       CALL mpi_abort (p_comm_glb, 1, p_err)
 #else
-      STOP 1
+      STOP
 #endif
 
    END SUBROUTINE CoLM_stop

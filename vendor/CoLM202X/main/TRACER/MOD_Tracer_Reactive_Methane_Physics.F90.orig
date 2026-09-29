@@ -589,7 +589,7 @@ contains
 
 		real(r8) :: err
 		real(r8) :: vliq, vice, vtot, pore_volume, vliq_sat_alloc, vice_sat_alloc
-		real(r8) :: host_water_tol
+		real(r8) :: host_water_tol, host_water_excess_tol
 		real(r8) :: host_water_resid, host_water_scale
 		real(r8) :: vol_liq_init, vol_ice_init, vol_gas_init
 		real(r8) :: wtd_arg
@@ -1115,11 +1115,26 @@ contains
 				! disagreement between two independently computed quantities, and
 				! the capped allocation below reproduces the host exactly: the
 				! inundated column is simply not fully saturated.
+				!
+				! Excess (vtot > pore_volume) says the host holds more water than
+				! the pore space can contain. No partition into two columns each
+				! bounded by pore_volume can reproduce that: at finundated = 1 the
+				! surplus is silently discarded, and as finundated -> 1 the
+				! unsaturated column blows up past porosity (17x pore_volume at
+				! finundated = 0.999) and is clamped downstream instead. So the
+				! excess side keeps a round-off-only tolerance -- it is a host
+				! state violation, not numerical drift, and tolerating it cannot
+				! conserve.
+				host_water_excess_tol = 1.e-9_r8 * pore_volume
 
-				if (vtot > pore_volume) then
-					vliq = vliq * pore_volume / vtot
-					vice = vice * pore_volume / vtot
-					vtot = pore_volume
+				if (vtot > pore_volume + host_water_excess_tol) then
+					write(6,*) 'ERROR: host soil water exceeds pore volume in methane partition: ', &
+						ipatch, j, vtot, pore_volume, &
+						' excess/pore =', (vtot - pore_volume) / pore_volume, &
+						' tolerance =', host_water_excess_tol / pore_volume, &
+						' (excess side is round-off only and NOT host_water_tolerance,', &
+						'  because vtot > pore_volume cannot be partitioned conservatively)'
+					CALL CoLM_stop ('invalid host soil water for methane columns')
 				endif
 				if (vtot < finundated * pore_volume - host_water_tol) then
 					write(6,*) 'ERROR: methane inundation exceeds host soil water: ', &

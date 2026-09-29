@@ -63,6 +63,15 @@ def main() -> None:
     assert "\n      pn = ps - 1\n" in thermal                     # 无条件，不在 TRACER 分支里
     defineh = read(".github/workflows/create_defineh.bash")
     assert "#define  CatchLateralFlow" in defineh and "LATERAL_FLOW" not in defineh.replace("CatchLateralFlow", "")
+    # 2026-09-29 同步 CoLM-SYSU-integration@85cf2328：示踪物含水层交换只计透水层；
+    # 单点 mksrfdata 的正常结束保持退出码 0（上游改 `STOP 1` 后的本地修复）。
+    soil_water = read("main/HYDRO/MOD_Hydro_SoilWater.F90")
+    assert soil_water.count("IF (is_permeable(ilev) .and. exchange_zwt_before < sp_zi(ilev))") == 2
+    assert soil_water.count("IF (is_permeable(ilev) .and. zwt < sp_zi(ilev))") == 3
+    assert "      STOP 1\n" in read("share/MOD_SPMD_Task.F90")
+    mksrfdata = read("mksrfdata/MKSRFDATA.F90")
+    assert "'Successful in surface data making.'\n" in mksrfdata
+    assert "CALL CoLM_stop()\n#endif" not in mksrfdata
     # 8 个维度是运行时开关：上游新代码里的这些宏必须在同步时转换掉，不能漏进源码。
     import re
     converted = r"\b(TRACER|BGC|LULC_IGBP_PFT|LULC_IGBP_PC|LULCC|CoLMDEBUG|RangeCheck|SrfdataDiag|Campbell_SOIL_MODEL|vanGenuchten_Mualem_SOIL_MODEL)\b"

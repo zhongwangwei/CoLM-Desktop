@@ -141,7 +141,9 @@ ENDIF
 
       CALL single_srfdata_final ()
       write(*,*)  'Successful in surface data making.'
-      CALL CoLM_stop()
+      ! 本地修复（vendor/PROVENANCE.md）：单点这里是**正常结束**。上游 85cf2328 把 CoLM_stop 改成
+      ! STOP 1 之后，照旧调 CoLM_stop 会让每次成功的 mksrfdata 都以退出码 1 结束。
+      STOP
 #endif
 
       IF (USE_srfdata_from_larger_region) THEN

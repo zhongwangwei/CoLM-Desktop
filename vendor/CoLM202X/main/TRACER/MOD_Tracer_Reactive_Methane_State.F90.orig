@@ -2157,15 +2157,9 @@ CONTAINS
 	         WHERE (invalid_restart_value(annavg_somhr_component(component,:)))
 	            annavg_somhr_component(component,:) = annavg_somhr
 	         END WHERE
-	         IF (component_state_present) THEN
-	            WHERE (invalid_restart_fraction_or_sentinel(annavg_finrw_component(component,:)))
-	               annavg_finrw_component(component,:) = annavg_finrw
-	            END WHERE
-	         ELSE
-	            WHERE (invalid_restart_value(annavg_finrw_component(component,:)))
-	               annavg_finrw_component(component,:) = annavg_finrw
-	            END WHERE
-	         ENDIF
+	         WHERE (invalid_restart_value(annavg_finrw_component(component,:)))
+	            annavg_finrw_component(component,:) = annavg_finrw
+	         END WHERE
 	         WHERE (invalid_restart_value(tempavg_agnpp_component(component,:)))
 	            tempavg_agnpp_component(component,:) = tempavg_agnpp
 	         END WHERE

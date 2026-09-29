@@ -352,7 +352,7 @@ CONTAINS
          exchange_zwt_before = zwt
          DO ilev = 1, nlev
             exchange_layer_before(ilev) = ss_vliq(ilev) * sp_dz(ilev)
-            IF (exchange_zwt_before < sp_zi(ilev)) THEN
+            IF (is_permeable(ilev) .and. exchange_zwt_before < sp_zi(ilev)) THEN
                exchange_layer_before(ilev) = ss_vliq(ilev) * &
                   max(exchange_zwt_before-sp_zi(ilev-1), 0._r8) + &
                   porsl(ilev) * min(sp_zi(ilev)-exchange_zwt_before, sp_dz(ilev))
@@ -365,7 +365,7 @@ CONTAINS
          etroot_aquifer_out = exchange_wa_before - wa
          DO ilev = 1, nlev
             exchange_layer_after = ss_vliq(ilev) * sp_dz(ilev)
-            IF (zwt < sp_zi(ilev)) THEN
+            IF (is_permeable(ilev) .and. zwt < sp_zi(ilev)) THEN
                exchange_layer_after = ss_vliq(ilev) * max(zwt-sp_zi(ilev-1), 0._r8) + &
                   porsl(ilev) * min(sp_zi(ilev)-zwt, sp_dz(ilev))
             ENDIF
@@ -383,7 +383,7 @@ CONTAINS
             rsub_aquifer_out = max(exchange_wa_before-wa, 0._r8)
             DO ilev = 1, nlev
                exchange_layer_after = ss_vliq(ilev) * sp_dz(ilev)
-               IF (zwt < sp_zi(ilev)) THEN
+               IF (is_permeable(ilev) .and. zwt < sp_zi(ilev)) THEN
                   exchange_layer_after = ss_vliq(ilev) * max(zwt-sp_zi(ilev-1), 0._r8) + &
                      porsl(ilev) * min(sp_zi(ilev)-zwt, sp_dz(ilev))
                ENDIF
@@ -399,7 +399,7 @@ CONTAINS
          exchange_zwt_before = zwt
          DO ilev = 1, nlev
             exchange_layer_before(ilev) = ss_vliq(ilev) * sp_dz(ilev)
-            IF (exchange_zwt_before < sp_zi(ilev)) THEN
+            IF (is_permeable(ilev) .and. exchange_zwt_before < sp_zi(ilev)) THEN
                exchange_layer_before(ilev) = ss_vliq(ilev) * &
                   max(exchange_zwt_before-sp_zi(ilev-1), 0._r8) + &
                   porsl(ilev) * min(sp_zi(ilev)-exchange_zwt_before, sp_dz(ilev))
@@ -418,7 +418,7 @@ CONTAINS
          rsub_aquifer_out = max(exchange_wa_before-wa, 0._r8) * rsub_fraction
          DO ilev = 1, nlev
             exchange_layer_after = ss_vliq(ilev) * sp_dz(ilev)
-            IF (zwt < sp_zi(ilev)) THEN
+            IF (is_permeable(ilev) .and. zwt < sp_zi(ilev)) THEN
                exchange_layer_after = ss_vliq(ilev) * max(zwt-sp_zi(ilev-1), 0._r8) + &
                   porsl(ilev) * min(sp_zi(ilev)-zwt, sp_dz(ilev))
             ENDIF

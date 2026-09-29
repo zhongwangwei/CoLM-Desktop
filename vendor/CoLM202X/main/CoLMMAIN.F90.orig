@@ -1244,19 +1244,16 @@ SUBROUTINE CoLMMAIN ( &
             flood_input_tracer = 0._r8
             IF (LWINFILT .and. patchtype == 0 .and. qinfl_fld > 0._r8 .and. &
                 allocated(flood_tracer_credit_patch)) THEN
-               IF (flood_credit_patch(ipatch)*1000._r8 <= fevpg_fld*deltim) THEN
-                  IF (qinfl_fld*deltim > 1.e-12_r8*max(flood_credit_patch(ipatch)*1000._r8, 1._r8)) &
-                     CALL CoLM_stop('grid flood feedback: infiltration without published tracer credit')
-               ELSE
-                  flood_input_tracer = (flood_tracer_credit_patch(:,ipatch) - &
-                     flood_tracer_evap_patch(:,ipatch)) * &
-                     (qinfl_fld*deltim/(flood_credit_patch(ipatch)*1000._r8-fevpg_fld*deltim))
-                  DO itrc_loc = 1, ntracers
-                     IF (.not. tracer_has_dissolved_limit(itrc_loc)) CYCLE
-                     flood_input_tracer(itrc_loc) = min(max(flood_input_tracer(itrc_loc),0._r8), &
-                        tracers(itrc_loc)%max_dissolved_conc*qinfl_fld*deltim)
-                  ENDDO
-               ENDIF
+               IF (flood_credit_patch(ipatch)*1000._r8 <= fevpg_fld*deltim) &
+                  CALL CoLM_stop('grid flood feedback: infiltration without published tracer credit')
+               flood_input_tracer = (flood_tracer_credit_patch(:,ipatch) - &
+                  flood_tracer_evap_patch(:,ipatch)) * &
+                  (qinfl_fld*deltim/(flood_credit_patch(ipatch)*1000._r8-fevpg_fld*deltim))
+               DO itrc_loc = 1, ntracers
+                  IF (.not. tracer_has_dissolved_limit(itrc_loc)) CYCLE
+                  flood_input_tracer(itrc_loc) = min(max(flood_input_tracer(itrc_loc),0._r8), &
+                     tracers(itrc_loc)%max_dissolved_conc*qinfl_fld*deltim)
+               ENDDO
             ENDIF
 #endif
 #endif

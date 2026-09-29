@@ -250,3 +250,20 @@ PLUMBER2 盘挂载后需重生成。
 **黄金未重生成**（PLUMBER2 盘未挂载）。
 
 上游缺陷与"TRACER 改变物理"的完整清单（含行号与处理方式）见 `docs/upstream-bugs.md`，以后新发现的也记在那里。
+
+## 2026-09-29：增量同步到 `CoLM-SYSU-integration@85cf2328`
+
+上游 master 只前进了一个提交（PR #17，`fix/tracer-impermeable-exchange` 合入），8 个文件 +71/−52，
+把 `3c799bae..85cf2328` 的差异作为补丁打到本副本上：
+
+- 7 个文件原样打上：`CoLMMAIN.F90`（TRACER/GridRiverLakeFlow 宏内的洪泛示踪物记账）、
+  `HYDRO/MOD_Grid_RiverLakeFlow.F90`、`TRACER/*` 四个、`share/MOD_SPMD_Task.F90`（`CoLM_stop` 改为 `STOP 1`）。
+- `HYDRO/MOD_Hydro_SoilWater.F90` 的 5 处（含水层交换只计透水层）上下文对不上——本副本已把
+  `#ifdef TRACER` 转成 `IF (DEF_USE_TRACER)`——逐行手工套上，都在 `DEF_USE_TRACER` 分支里。
+
+**本地修复**：上游单点 `mksrfdata/MKSRFDATA.F90` 用 `CALL CoLM_stop()` 作为**正常结束**，`STOP 1`
+之后每次成功的单点 mksrfdata 都返回 1（`colm-cli` 因此判为失败）。这一处改回普通 `STOP`，与同步前
+`CoLM_stop` 在非 MPI 构建下的行为相同（`docs/upstream-bugs.md` 第 30 条）。
+
+非 TRACER 构建的物理没有变化：两套内核重编后重跑纯 Fortran 的 `ci6`（CROP）与 `bl`（默认），
+历史 12/12、重启 51/51 与同步前逐位相同（第 437 轮）。

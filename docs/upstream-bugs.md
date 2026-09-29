@@ -210,6 +210,14 @@
 - **影响**：灌溉玉米（18）patch 上 `f_irrig_method_corn` 是缺测，而这正是唯一会灌溉的玉米。
 - **处理**：`vendor/` 未改；Rust 照写（`CROP_TYPE_HISTORY` 的 `irrig_method_corn` 只认 17）。
 
+### 30. 单点 mksrfdata 正常结束时退出码为 1（`85cf2328` 引入）
+
+- **位置**：`mksrfdata/MKSRFDATA.F90:150`（单点分支）、`share/MOD_SPMD_Task.F90:339`。
+- **原因**：单点分支写完 `'Successful in surface data making.'` 后调 `CoLM_stop()` 结束；PR #17 把
+  `CoLM_stop` 的非 MPI 实现从 `STOP` 改成 `STOP 1`，以区分出错退出。
+- **影响**：每次成功的单点 mksrfdata 都以退出码 1 结束，调用方（`colm-cli`）按失败处理，后续阶段不跑。
+- **处理**：本地把这一处改回 `STOP`（`vendor/PROVENANCE.md`），应当报给上游。
+
 ## 二、TRACER 编译开关改变了物理（需要上游确认哪一边是对的）
 
 这一版上游在很多地方给 TRACER 构建和非 TRACER 构建写了**不同的物理**，不只是记账不同。
