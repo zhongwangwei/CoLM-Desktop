@@ -25859,3 +25859,18 @@ CoLM-SYSU-integration 的 `origin/master` 仍是 `3c799bae`，与 vendor 对齐�
 
 `cf1`/`cf2` 全年各有 21 天 `f_fert_to_sminn > 0`，施肥路径确实走到。原有作物回归 `cr/cs/cw/cs2/cs3on/nc` 不变。
 灌溉仍拒绝（下一步）。
+
+## 第 435 轮：冷启动的三处作物管理偏差（灌溉纯 Fortran 参考暴露）
+
+做灌溉参考（`ci1`–`ci4`，纯 Fortran 冷启动）时对出 colm-init 三处与上游不符，都只在作物管理开关组合下出现，原有算例没覆盖到：
+
+1. **施肥关时仍读施肥图。** `CROP_readin` 只有 `DEF_USE_FERT` 为真才读 `CONST_FERTNITRO_CFT_xx`/`fertilizer`，否则
+   `fertnitro_p` 留初值。Rust 注释写的是"无论开关都读"，是错的——纯 Fortran 在施肥关、灌溉开时 `fertnitro_p` 为 0。
+   现在 `CropManagementConfig.use_fertilizer` 为假时不读，来源 1 只设 `manure`。
+2. **快速路径要求来源 = 1。** 上游快速路径（施肥与灌溉都关、有播种日覆盖）与施肥来源无关，来源只决定之后
+   `IniTimeVariable` 写不写 `manunitro_p = manure·1000`。改为任何来源都走快速路径，`manure·1000` 只在来源 1 写。
+3. **`zwt_stand`。** `MOD_Initialize.F90` 写 `zwt_stand = min(80, max(0, zwt+1))`，但单点在这一行时 `zwt` 只有读了初始
+   土壤才有值，否则仍是分配时的 `spval`（−1e36），夹出来是 0。Rust 一律写 `zwt+1`；现在无初始土壤时写 0。
+
+复验（release，`KERNEL=kernels/crop`）：`cr cs cs2 cs3on cw nc cf1 cf2 cf3 cf4` 历史与重启全部逐位；colm-init 单测 156 通过。
+`ci1`/`ci2` 冷启动的初始重启对纯 Fortran 逐位（运行期灌溉仍拒绝，下一轮）。

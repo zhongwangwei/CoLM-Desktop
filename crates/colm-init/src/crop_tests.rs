@@ -10,9 +10,15 @@ fn crop_state_keeps_pft_and_patch_phase_axes_distinct() {
 
 #[test]
 fn spatial_tuning_keeps_crop_pft_and_bgc_patch_axes_aligned() {
-    let state =
-        spatial_crop_cold_start_from_tuning(&[1, 15, 16], &[0, 0, 1], &[0.25, 0.75, 1.0], 2, 120.0)
-            .unwrap();
+    let state = spatial_crop_cold_start_from_tuning(
+        &[1, 15, 16],
+        &[0, 0, 1],
+        &[0.25, 0.75, 1.0],
+        2,
+        120.0,
+        1,
+    )
+    .unwrap();
 
     assert_eq!(
         state.pft_fields().planting_date,
@@ -25,19 +31,19 @@ fn spatial_tuning_keeps_crop_pft_and_bgc_patch_axes_aligned() {
 
 #[test]
 fn spatial_tuning_allows_empty_pft_axis_and_keeps_patch_defaults() {
-    let state = spatial_crop_cold_start_from_tuning(&[], &[], &[], 2, 120.0).unwrap();
+    let state = spatial_crop_cold_start_from_tuning(&[], &[], &[], 2, 120.0, 1).unwrap();
 
     assert!(state.pft_fields().planting_date.is_empty());
     assert!(state.pft_fields().crop_phase.is_empty());
     assert_eq!(state.bgc_fields().crop_phase, [MISSING, MISSING]);
     assert_eq!(state.bgc_fields().planting_day_rice2, [0.0, 0.0]);
 
-    assert!(spatial_crop_cold_start_from_tuning(&[], &[0], &[], 2, 120.0).is_err());
+    assert!(spatial_crop_cold_start_from_tuning(&[], &[0], &[], 2, 120.0, 1).is_err());
 }
 
 #[test]
 fn explicit_planting_day_keeps_source_one_manure_without_management_maps() {
-    let state = crop_cold_start_from_tuning(&[17], &[1.0], 120.0).unwrap();
+    let state = crop_cold_start_from_tuning(&[17], &[1.0], 120.0, 1).unwrap();
     let pft = state.pft_fields();
     let patch = state.bgc_fields();
     assert_eq!(pft.planting_date, [120.0]);
@@ -76,6 +82,7 @@ fn management_maps_keep_restart_inputs_independent_of_runtime_application() {
             runtime_dir: &root,
             planting_day_override: None,
             fertilizer_source: 1,
+            use_fertilizer: true,
             use_irrigation: false,
             use_irrigation_allocation: false,
         },
@@ -97,6 +104,7 @@ fn management_maps_keep_restart_inputs_independent_of_runtime_application() {
             runtime_dir: &root,
             planting_day_override: Some(99.0),
             fertilizer_source: 2,
+            use_fertilizer: true,
             use_irrigation: true,
             use_irrigation_allocation: true,
         },
@@ -144,6 +152,7 @@ fn spatial_management_maps_are_areal_and_irrigation_uses_the_largest_overlap() {
             runtime_dir: &root,
             planting_day_override: None,
             fertilizer_source: 1,
+            use_fertilizer: true,
             use_irrigation: true,
             use_irrigation_allocation: false,
         },
@@ -172,6 +181,7 @@ fn spatial_management_maps_are_areal_and_irrigation_uses_the_largest_overlap() {
             runtime_dir: &root,
             planting_day_override: None,
             fertilizer_source: 2,
+            use_fertilizer: true,
             use_irrigation: true,
             use_irrigation_allocation: true,
         },
@@ -220,6 +230,7 @@ fn spatial_management_allows_empty_pft_axis_but_keeps_patch_crop_maps() {
             runtime_dir: &root,
             planting_day_override: Some(99.0),
             fertilizer_source: 2,
+            use_fertilizer: true,
             use_irrigation: true,
             use_irrigation_allocation: true,
         },
@@ -259,6 +270,7 @@ fn spatial_management_allows_empty_pft_axis_but_keeps_patch_crop_maps() {
             runtime_dir: &root,
             planting_day_override: None,
             fertilizer_source: 1,
+            use_fertilizer: true,
             use_irrigation: false,
             use_irrigation_allocation: false,
         },

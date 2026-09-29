@@ -34,8 +34,11 @@ pub struct CropManagementConfig<'a> {
     pub runtime_dir: &'a Path,
     /// Desktop override: positive values replace raster planting days.
     pub planting_day_override: Option<f64>,
-    /// CoLM's `DEF_FERT_SOURCE`; read even when runtime fertilization is disabled.
+    /// CoLM's `DEF_FERT_SOURCE`.
     pub fertilizer_source: i32,
+    /// `DEF_USE_FERT`：`CROP_readin` 只在它打开时读施肥图（关掉时 `fertnitro_p = 0`）；来源 1 的
+    /// `manunitro_p = manure·1000` 由其后的 `IniTimeVariable` 写，与它无关。
+    pub use_fertilizer: bool,
     pub use_irrigation: bool,
     /// Read `surfdata_irrigation_allocation.nc` for allocation mode three.
     pub use_irrigation_allocation: bool,
@@ -116,6 +119,7 @@ pub fn crop_cold_start_from_tuning(
     classes: &[i32],
     crop_fraction: &[f64],
     planting_day: f64,
+    fertilizer_source: i32,
 ) -> Result<CropColdStartState> {
     validate_crop_tiles(classes, crop_fraction)?;
     ensure!(
@@ -123,7 +127,10 @@ pub fn crop_cold_start_from_tuning(
         "DEF_TUNING_CROP_PLANTING_DAY must be finite and positive"
     );
     let mut state = empty_crop_state(classes.len(), crop_fraction.len());
-    state.set_source_one_manure(classes);
+    // `IniTimeVariable` 只在来源 1 时写 `manure·1000`；来源 2 的快速路径保持 `CROP_readin` 清的 0。
+    if fertilizer_source == 1 {
+        state.set_source_one_manure(classes);
+    }
     state.planting_date.fill(planting_day);
     state.planting_day_rice2.fill(0.0);
     state.patch_phase.fill(4.0);
@@ -141,6 +148,7 @@ pub(crate) fn spatial_crop_cold_start_from_tuning(
     pft_fraction: &[f64],
     patches: usize,
     planting_day: f64,
+    fertilizer_source: i32,
 ) -> Result<CropColdStartState> {
     ensure!(
         classes.len() == pft_to_patch.len() && classes.len() == pft_fraction.len() && patches > 0,
@@ -162,7 +170,9 @@ pub(crate) fn spatial_crop_cold_start_from_tuning(
     );
 
     let mut state = empty_crop_state(classes.len(), patches);
-    state.set_source_one_manure(classes);
+    if fertilizer_source == 1 {
+        state.set_source_one_manure(classes);
+    }
     let mut phase_weight = vec![0.0; patches];
     let mut phase_sum = vec![0.0; patches];
     for (pft, &class) in classes.iter().enumerate() {
@@ -262,21 +272,28 @@ pub(crate) fn spatial_crop_cold_start_from_management(
     }
 
     // CROP_readin populates restart inputs regardless of DEF_USE_FERT.
-    match config.fertilizer_source {
-        1 => read_spatial_fertilizer_source_one(
-            &mut state,
-            classes,
-            &crop_pft,
-            &crop_grid,
-            crop_dir.join(FERTILIZER_SOURCE_ONE_FILE),
-        )?,
-        2 => read_spatial_fertilizer_source_two(
-            &mut state,
-            classes,
-            pft_pixels,
-            crop_dir.join(FERTILIZER_SOURCE_TWO_FILE),
-        )?,
-        source => bail!("DEF_FERT_SOURCE must be 1 or 2, got {source}"),
+    if !config.use_fertilizer {
+        // `CROP_readin` 不读施肥图；来源 1 的 `manure·1000` 仍由 `IniTimeVariable` 写。
+        if config.fertilizer_source == 1 {
+            state.set_source_one_manure(classes);
+        }
+    } else {
+        match config.fertilizer_source {
+            1 => read_spatial_fertilizer_source_one(
+                &mut state,
+                classes,
+                &crop_pft,
+                &crop_grid,
+                crop_dir.join(FERTILIZER_SOURCE_ONE_FILE),
+            )?,
+            2 => read_spatial_fertilizer_source_two(
+                &mut state,
+                classes,
+                pft_pixels,
+                crop_dir.join(FERTILIZER_SOURCE_TWO_FILE),
+            )?,
+            source => bail!("DEF_FERT_SOURCE must be 1 or 2, got {source}"),
+        }
     }
     if config.use_irrigation {
         state.irrigation_method = Some(read_spatial_irrigation_methods(
@@ -339,22 +356,29 @@ pub fn crop_cold_start_from_management(
     }
 
     // CROP_readin populates restart inputs regardless of DEF_USE_FERT.
-    match config.fertilizer_source {
-        1 => read_fertilizer_source_one(
-            &mut state,
-            classes,
-            crop_dir.join(FERTILIZER_SOURCE_ONE_FILE),
-            latitude_degrees,
-            longitude_degrees,
-        )?,
-        2 => read_fertilizer_source_two(
-            &mut state,
-            classes,
-            crop_dir.join(FERTILIZER_SOURCE_TWO_FILE),
-            latitude_degrees,
-            longitude_degrees,
-        )?,
-        source => bail!("DEF_FERT_SOURCE must be 1 or 2, got {source}"),
+    if !config.use_fertilizer {
+        // `CROP_readin` 不读施肥图；来源 1 的 `manure·1000` 仍由 `IniTimeVariable` 写。
+        if config.fertilizer_source == 1 {
+            state.set_source_one_manure(classes);
+        }
+    } else {
+        match config.fertilizer_source {
+            1 => read_fertilizer_source_one(
+                &mut state,
+                classes,
+                crop_dir.join(FERTILIZER_SOURCE_ONE_FILE),
+                latitude_degrees,
+                longitude_degrees,
+            )?,
+            2 => read_fertilizer_source_two(
+                &mut state,
+                classes,
+                crop_dir.join(FERTILIZER_SOURCE_TWO_FILE),
+                latitude_degrees,
+                longitude_degrees,
+            )?,
+            source => bail!("DEF_FERT_SOURCE must be 1 or 2, got {source}"),
+        }
     }
     if config.use_irrigation {
         state.irrigation_method = Some(read_irrigation_methods(

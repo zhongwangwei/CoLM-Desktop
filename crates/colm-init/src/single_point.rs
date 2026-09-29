@@ -2621,10 +2621,16 @@ fn single_point_crop_state(
     let planting_day_override = planting_day.filter(|day| *day > 0.0);
     let use_fertilizer = optional_bool_or(document, "DEF_USE_FERT", true)?;
     let fertilizer_source = optional_i32(document, "DEF_FERT_SOURCE")?.unwrap_or(1);
-    if !use_fertilizer && !use_irrigation && fertilizer_source == 1 {
+    // `CROP_readin` 的快速路径不看施肥来源（来源只决定其后 `IniTimeVariable` 写不写 `manure·1000`）。
+    if !use_fertilizer && !use_irrigation {
         if let Some(planting_day) = planting_day_override {
-            return crate::crop_cold_start_from_tuning(&pft.class, crop_fraction, planting_day)
-                .map(Some);
+            return crate::crop_cold_start_from_tuning(
+                &pft.class,
+                crop_fraction,
+                planting_day,
+                fertilizer_source,
+            )
+            .map(Some);
         }
     }
     let runtime_dir = PathBuf::from(required_string(document, "DEF_dir_runtime")?);
@@ -2637,6 +2643,7 @@ fn single_point_crop_state(
             runtime_dir: &runtime_dir,
             planting_day_override,
             fertilizer_source,
+            use_fertilizer,
             use_irrigation,
             use_irrigation_allocation: use_irrigation
                 && optional_i32(document, "DEF_IRRIGATION_ALLOCATION")? == Some(3),
@@ -3050,8 +3057,13 @@ fn write_cold_time_restart(
         .map(|patch| patch.roughness)
         .collect::<Vec<_>>();
     let plant_water = vec![-25_000.0; 4 * patch_count];
-    let standard_water_table_depth =
-        vec![(water_table_depth_m + 1.0).clamp(0.0, 80.0); patch_count];
+    // `MOD_Initialize.F90:1315-1318`：`zwt_stand = min(80, max(0, zwt + 1))`，但单点在这一行时 `zwt`
+    // 只有读了初始土壤（或地下水位）才有值，否则还是分配时的 `spval`，夹出来是 0（纯 Fortran 实测）。
+    let standard_water_table_depth = if run.soil_initial_state.is_some() {
+        vec![(water_table_depth_m + 1.0).clamp(0.0, 80.0); patch_count]
+    } else {
+        vec![0.0; patch_count]
+    };
     let irrigation = crop.and_then(|state| state.irrigation_fields(&standard_water_table_depth));
 
     write_time_restart(

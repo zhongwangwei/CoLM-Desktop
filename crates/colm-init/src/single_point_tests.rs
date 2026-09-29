@@ -1631,7 +1631,7 @@ fn crop_common_restart_keeps_each_cft_on_its_own_patch_axis() {
             roughness: 0.2,
         },
     ];
-    let crop = crop_cold_start_from_tuning(&[17, 19], &[0.4, 0.6], 120.0).unwrap();
+    let crop = crop_cold_start_from_tuning(&[17, 19], &[0.4, 0.6], 120.0, 1).unwrap();
     let output = write_cold_time_restart(
         &run,
         0,

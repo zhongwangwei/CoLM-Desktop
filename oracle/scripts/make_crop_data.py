@@ -9,7 +9,8 @@
 - `fertnitro_fillcoast.nc`：`CONST_FERTNITRO_CFT_15..78(time,lat,lon)`——`DEF_FERT_SOURCE = 1` 时按**种植日文件的网格**读，
   两个文件网格必须相同；
 - `fertilizer_2015soc.nc`：自己的网格，`manure(lat,lon)` 与 `fertilizer(cft=64,lat,lon)`，`float`；
-- `surfdata_irrigation_method_96x144.nc`：`irrigation_method(cft=64,lat,lon)`，`int`（上游取众数映射）；
+- `surfdata_irrigation_method_96x144.nc`：`irrigation_method(cft=64,lat,lon)`，`int`（上游取众数映射）；取值 1–4
+  （滴灌/喷灌/漫灌/水田），US-Ne3 格点上灌溉型作物 18/20/22/24 依次是水田/滴灌/喷灌/漫灌；
 - `surfdata_irrigation_allocation.nc`：`irrig_gw_alloc`/`irrig_sw_alloc(lat,lon)`。
 
 数值只为走遍分支：每个格点不同（取错格点会暴露），缺测值、非正值散布在别的格点上。
@@ -95,7 +96,8 @@ def main():
         grid(f, LAT, LON)
         f.createDimension("cft", 64)
         f.createVariable("irrigation_method", "i4", ("cft", "lat", "lon"))[:] = np.stack(
-            [np.where((k % 19.0) == 4.0, -1, ((k + c) % 4.0)).astype(np.int32) for c in range(64)])
+            [np.where((k % 19.0) == 4.0, -1, 1.0 + ((k + c // 2) % 4.0)).astype(np.int32)
+             for c in range(64)])
 
     with nc.Dataset(crop / "surfdata_irrigation_allocation.nc", "w") as f:
         grid(f, LAT, LON)

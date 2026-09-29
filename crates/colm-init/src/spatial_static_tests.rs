@@ -1441,13 +1441,13 @@ fn spatial_crop_management_maps_reach_the_shared_restart_writers() {
     write_pft_monthly_vegetation(&landdata, 2005, "w180_s90", 2.5, 0.4);
     write_crop_runtime(&runtime);
     let namelist = root.join("case.nml");
-    // Disabled application still reads both input sources. Source two must also
-    // read its manure map when Desktop's planting-day override is enabled.
+    // `DEF_USE_FERT` 打开时两种来源的施肥图都要传到重启写出（关掉时 `CROP_readin` 不读施肥图，
+    // 纯 Fortran 实测 `fertnitro_p = 0`，第 435 轮）。播种日覆盖时来源 2 仍按自己的网格读 `manure`。
     for (source, planting_day) in [(1, -9999.0), (2, -9999.0), (2, 99.0)] {
         std::fs::write(
             &namelist,
             format!(
-                "&nl_colm\n DEF_USE_PFT = .true.\n DEF_USE_BGC = .true.\n DEF_USE_CROP = .true.\n DEF_USE_FERT = .false.\n DEF_USE_IRRIGATION = .false.\n DEF_dir_runtime = '{}'\n DEF_FERT_SOURCE = {source}\n DEF_TUNING_CROP_PLANTING_DAY = {planting_day}\n/\n",
+                "&nl_colm\n DEF_USE_PFT = .true.\n DEF_USE_BGC = .true.\n DEF_USE_CROP = .true.\n DEF_USE_FERT = .true.\n DEF_USE_IRRIGATION = .false.\n DEF_dir_runtime = '{}'\n DEF_FERT_SOURCE = {source}\n DEF_TUNING_CROP_PLANTING_DAY = {planting_day}\n/\n",
                 runtime.display()
             ),
         )

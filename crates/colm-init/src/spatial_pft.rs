@@ -1235,7 +1235,8 @@ fn spatial_crop_state(
     let use_fertilizer = optional_bool_or(document, "DEF_USE_FERT", true)?;
     let fertilizer_source = optional_i32(document, "DEF_FERT_SOURCE")?.unwrap_or(1);
     let use_irrigation = optional_bool_or(document, "DEF_USE_IRRIGATION", false)?;
-    if !use_fertilizer && !use_irrigation && fertilizer_source == 1 {
+    // `CROP_readin` 的快速路径不看施肥来源（来源只决定其后 `IniTimeVariable` 写不写 `manure·1000`）。
+    if !use_fertilizer && !use_irrigation {
         if let Some(planting_day) = planting_day {
             return crate::crop::spatial_crop_cold_start_from_tuning(
                 &pfts.class,
@@ -1243,6 +1244,7 @@ fn spatial_crop_state(
                 &pfts.fraction,
                 patches.class.len(),
                 planting_day,
+                fertilizer_source,
             );
         }
     }
@@ -1278,6 +1280,7 @@ fn spatial_crop_state(
             runtime_dir: &runtime_dir,
             planting_day_override: planting_day,
             fertilizer_source,
+            use_fertilizer,
             use_irrigation,
             use_irrigation_allocation: use_irrigation
                 && optional_i32(document, "DEF_IRRIGATION_ALLOCATION")? == Some(3),
