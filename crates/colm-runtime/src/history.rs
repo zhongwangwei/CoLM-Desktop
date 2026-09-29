@@ -451,11 +451,19 @@ const CROP_TYPE_HISTORY: &[(&str, &str, &[i32])] = &[
     ("irrig_method_corn", "irrig_method_corn", &[17]),
     ("irrig_method_swheat", "irrig_method_swheat", &[19, 20]),
     ("irrig_method_wwheat", "irrig_method_wwheat", &[21, 22]),
-    ("irrig_method_soybean", "irrig_method_soybean", &[23, 24, 77, 78]),
+    (
+        "irrig_method_soybean",
+        "irrig_method_soybean",
+        &[23, 24, 77, 78],
+    ),
     ("irrig_method_cotton", "irrig_method_cotton", &[41, 42]),
     ("irrig_method_rice1", "irrig_method_rice1", &[61, 62]),
     ("irrig_method_rice2", "irrig_method_rice2", &[61, 62]),
-    ("irrig_method_sugarcane", "irrig_method_sugarcane", &[67, 68]),
+    (
+        "irrig_method_sugarcane",
+        "irrig_method_sugarcane",
+        &[67, 68],
+    ),
     ("fertnitro_corn", "fertnitro_corn", &[17, 18, 75, 76]),
     ("fertnitro_swheat", "fertnitro_swheat", &[19, 20]),
     ("fertnitro_wwheat", "fertnitro_wwheat", &[21, 22]),
@@ -841,7 +849,11 @@ impl HistoryAccumulator {
 
     /// `DEF_USE_Dynamic_Wetland`：`f_wetwat` 写的是 `a_wdsrf / nac`（`MOD_Hist.F90:893-898`），
     /// 与 `f_wdsrf` 同一次除法；`a_wetwat` 照常累加进旁车。只在湿地上写（过滤同 `f_wetwat`）。
-    fn write_dynamic_wetland_storage(&self, buffer: &mut HistoryBuffers, record: usize) -> Result<()> {
+    fn write_dynamic_wetland_storage(
+        &self,
+        buffer: &mut HistoryBuffers,
+        record: usize,
+    ) -> Result<()> {
         if !buffer.declares("wetwat") || self.filtered.contains("wetwat") {
             return Ok(());
         }
@@ -1463,13 +1475,16 @@ pub fn lct_surface_input(
 pub fn element_surface_input(
     patches: &[(colm_core::HistoryDiagnosticsInput, f64)],
 ) -> Result<colm_core::HistoryDiagnosticsInput> {
-    let (first, _) = patches.first().context("an element needs at least one patch")?;
-    let weight: f64 = patches.iter().fold(0.0, |sum, (_, fraction)| sum + fraction);
+    let (first, _) = patches
+        .first()
+        .context("an element needs at least one patch")?;
+    let weight: f64 = patches
+        .iter()
+        .fold(0.0, |sum, (_, fraction)| sum + fraction);
     let mean = |value: fn(&colm_core::HistoryDiagnosticsInput) -> f64| {
-        patches
-            .iter()
-            .fold(0.0, |sum, (input, fraction)| value(input).mul_add(*fraction, sum))
-            / weight
+        patches.iter().fold(0.0, |sum, (input, fraction)| {
+            value(input).mul_add(*fraction, sum)
+        }) / weight
     };
     Ok(colm_core::HistoryDiagnosticsInput {
         wind_height_m: mean(|input| input.wind_height_m),
@@ -2551,11 +2566,15 @@ impl HistorySession {
     pub fn with_patches(mut self, patches: usize) -> Result<Self> {
         ensure!(patches > 0, "a history session needs at least one patch");
         ensure!(
-            self.accumulators.iter().all(|accumulator| accumulator.steps == 0),
+            self.accumulators
+                .iter()
+                .all(|accumulator| accumulator.steps == 0),
             "the history patch count can only change before the first step"
         );
         self.dimensions.patch = patches;
-        self.accumulators = (0..patches).map(|_| HistoryAccumulator::default()).collect();
+        self.accumulators = (0..patches)
+            .map(|_| HistoryAccumulator::default())
+            .collect();
         *self.window.lock().expect("history window lock") =
             vec![crate::history_sidecar::HistoryWindow::default(); patches];
         Ok(self)
@@ -2564,7 +2583,9 @@ impl HistorySession {
     /// 续跑：从旁车读回的窗口接着累加（`read_history_acc_restart`），每个 patch 一份。
     pub fn restore(&mut self, windows: Vec<crate::history_sidecar::HistoryWindow>) -> Result<()> {
         ensure!(
-            self.accumulators.iter().all(|accumulator| accumulator.steps == 0),
+            self.accumulators
+                .iter()
+                .all(|accumulator| accumulator.steps == 0),
             "the history window can only be restored before the first step"
         );
         ensure!(
@@ -2573,7 +2594,10 @@ impl HistorySession {
             windows.len(),
             self.accumulators.len()
         );
-        self.accumulators = windows.iter().map(HistoryAccumulator::from_window).collect();
+        self.accumulators = windows
+            .iter()
+            .map(HistoryAccumulator::from_window)
+            .collect();
         *self.window.lock().expect("history window lock") = windows;
         Ok(())
     }

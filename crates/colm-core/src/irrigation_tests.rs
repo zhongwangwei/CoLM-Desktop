@@ -97,7 +97,14 @@ fn run(
 #[test]
 fn a_dry_column_schedules_the_field_capacity_deficit_over_the_duration() {
     let (mut wliq, mut zwt, mut wa) = ([5.0, 10.0, 15.0], 2.0, 4000.0);
-    let state = run(vec![IRRIGATION_DRIP], &[18], settings(), &mut wliq, &mut zwt, &mut wa);
+    let state = run(
+        vec![IRRIGATION_DRIP],
+        &[18],
+        settings(),
+        &mut wliq,
+        &mut zwt,
+        &mut wa,
+    );
     assert!(state.deficit_mm > 0.0);
     assert_eq!(state.actual_mm, state.deficit_mm);
     assert_eq!(state.water_storage_mm, state.deficit_mm);
@@ -109,13 +116,34 @@ fn a_dry_column_schedules_the_field_capacity_deficit_over_the_duration() {
 #[test]
 fn rainfed_classes_and_other_hours_are_not_irrigated_but_rice_flood_becomes_paddy() {
     let (mut wliq, mut zwt, mut wa) = ([5.0, 10.0, 15.0], 2.0, 4000.0);
-    let rainfed = run(vec![IRRIGATION_DRIP], &[17], settings(), &mut wliq, &mut zwt, &mut wa);
+    let rainfed = run(
+        vec![IRRIGATION_DRIP],
+        &[17],
+        settings(),
+        &mut wliq,
+        &mut zwt,
+        &mut wa,
+    );
     assert_eq!((rainfed.deficit_mm, rainfed.steps_left), (0.0, 0));
     let mut later = settings();
     later.start_seconds = 25_200.0;
-    let off_hour = run(vec![IRRIGATION_DRIP], &[18], later, &mut wliq, &mut zwt, &mut wa);
+    let off_hour = run(
+        vec![IRRIGATION_DRIP],
+        &[18],
+        later,
+        &mut wliq,
+        &mut zwt,
+        &mut wa,
+    );
     assert_eq!(off_hour.steps_left, 0);
-    let rice = run(vec![IRRIGATION_FLOOD], &[62], settings(), &mut wliq, &mut zwt, &mut wa);
+    let rice = run(
+        vec![IRRIGATION_FLOOD],
+        &[62],
+        settings(),
+        &mut wliq,
+        &mut zwt,
+        &mut wa,
+    );
     assert_eq!(rice.methods, vec![IRRIGATION_PADDY]);
 }
 
@@ -126,7 +154,14 @@ fn campbell_groundwater_withdrawal_keeps_the_column_water_balance() {
     allocation.variably_saturated_flow = false;
     let (mut wliq, mut zwt, mut wa) = ([5.0, 10.0, 15.0], 0.4, 4000.0);
     let before = wliq.iter().sum::<f64>() + wa;
-    let state = run(vec![IRRIGATION_DRIP], &[18], allocation, &mut wliq, &mut zwt, &mut wa);
+    let state = run(
+        vec![IRRIGATION_DRIP],
+        &[18],
+        allocation,
+        &mut wliq,
+        &mut zwt,
+        &mut wa,
+    );
     assert!(state.groundwater_supply_mm > 0.0);
     assert_eq!(state.actual_mm, state.groundwater_supply_mm);
     let after = wliq.iter().sum::<f64>() + wa;

@@ -256,7 +256,10 @@ impl RestartFile {
         let patches = self.dimensions.get("patch").copied();
         let npft = self.dimensions.get("pft").copied();
         if let Some(patches) = patches {
-            ensure!(patch < patches, "patch {patch} is outside the {patches} restart patches");
+            ensure!(
+                patch < patches,
+                "patch {patch} is outside the {patches} restart patches"
+            );
         }
         if let Some(npft) = npft {
             ensure!(
@@ -264,7 +267,10 @@ impl RestartFile {
                 "PFT range {pfts:?} is outside the {npft} restart PFTs"
             );
         }
-        let pick = |name: &str, dims: &[String], total: usize| -> Result<Option<std::ops::Range<usize>>> {
+        let pick = |name: &str,
+                    dims: &[String],
+                    total: usize|
+         -> Result<Option<std::ops::Range<usize>>> {
             for (position, dim) in dims.iter().enumerate() {
                 let (outer, count) = match dim.as_str() {
                     "patch" => (patch..patch + 1, patches.unwrap_or(0)),
@@ -275,7 +281,10 @@ impl RestartFile {
                     position == 0,
                     "{name} has its {dim} dimension inside ({dims:?}); only the outermost can be selected"
                 );
-                ensure!(count > 0 && total % count == 0, "{name} does not divide by its {dim} dimension");
+                ensure!(
+                    count > 0 && total % count == 0,
+                    "{name} does not divide by its {dim} dimension"
+                );
                 let chunk = total / count;
                 return Ok(Some(outer.start * chunk..outer.end * chunk));
             }

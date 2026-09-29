@@ -137,7 +137,15 @@ fn crop_readin_reads_planting_and_fertilizer_maps() {
             .unwrap();
         // 类别 17 → 下标 2（漫灌），类别 23 → 下标 8（负值）。
         let values: Vec<i32> = (0..64)
-            .flat_map(|c| [if c == 2 { 3 } else if c == 8 { -1 } else { 1 }; 4])
+            .flat_map(|c| {
+                [if c == 2 {
+                    3
+                } else if c == 8 {
+                    -1
+                } else {
+                    1
+                }; 4]
+            })
             .collect();
         file.add_variable::<i32>("irrigation_method", &["cft", "lat", "lon"])
             .unwrap()

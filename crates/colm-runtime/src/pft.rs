@@ -57,8 +57,15 @@ pub fn pft_restart_path(path: &Path) -> Result<PathBuf> {
 ///
 /// 上游单点只有一种多 patch 情形：CROP 内核、站点是农田、有多种作物（`MOD_SingleSrfdata.F90:348`），
 /// 每个作物 patch 恰好一个 PFT。单 patch 时它拥有全部 PFT；其它组合没有来源，报错。
-pub fn patch_pft_range(patches: usize, pfts: usize, patch: usize) -> Result<std::ops::Range<usize>> {
-    ensure!(patch < patches, "patch {patch} is outside the {patches} patches");
+pub fn patch_pft_range(
+    patches: usize,
+    pfts: usize,
+    patch: usize,
+) -> Result<std::ops::Range<usize>> {
+    ensure!(
+        patch < patches,
+        "patch {patch} is outside the {patches} patches"
+    );
     if patches == 1 {
         Ok(0..pfts)
     } else {
@@ -319,9 +326,17 @@ impl PftTemplate {
         // （`MOD_LAIReadin.F90:174-175`），作物站点 `SITE_pctpfts = 1`，于是是各作物 LAI 之和
         // （upstream-bugs 第 33 条）。照写。
         let site_sum = |values: &[f64]| {
-            colm_core::pft_sum(values.iter().copied().zip(monthly.site_fraction.iter().copied()))
+            colm_core::pft_sum(
+                values
+                    .iter()
+                    .copied()
+                    .zip(monthly.site_fraction.iter().copied()),
+            )
         };
-        Ok(Some(((!lai_feedback).then(|| site_sum(&lai)), site_sum(&sai))))
+        Ok(Some((
+            (!lai_feedback).then(|| site_sum(&lai)),
+            site_sum(&sai),
+        )))
     }
 
     /// PFT 时间重启里被主循环推进过的全部变量。

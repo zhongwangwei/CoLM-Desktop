@@ -1843,13 +1843,15 @@ impl StandardLctRestartTemplate {
             water: colm_core::Water2014SoilInput {
                 dynamic_wetland: physics.dynamic_wetland,
                 // 灌溉的开关与水田积水上限；本步的通量与方式由 `standard_lct_snow_soil_step` 从状态填。
-                irrigation: physics.irrigation.map(|settings| colm_core::SoilIrrigation {
-                    drip_mm_s: 0.0,
-                    flood_mm_s: 0.0,
-                    paddy_mm_s: 0.0,
-                    methods: &[],
-                    paddy_ponding_limit_mm: settings.paddy_ponding_limit_mm,
-                }),
+                irrigation: physics
+                    .irrigation
+                    .map(|settings| colm_core::SoilIrrigation {
+                        drip_mm_s: 0.0,
+                        flood_mm_s: 0.0,
+                        paddy_mm_s: 0.0,
+                        methods: &[],
+                        paddy_ponding_limit_mm: settings.paddy_ponding_limit_mm,
+                    }),
                 patch_type: self.patch_type,
                 urban_run: self.physics.urban_run,
                 // 打开时 `soilwater` 用**叶温内核给的分层根通量**替换

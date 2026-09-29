@@ -859,8 +859,11 @@ fn write_single_point_constant_restart_from_surface(
             .collect::<Vec<_>>()
     });
     let observed_top = vec![surface.canopy_height_m; patches];
-    let (top_table, bottom_table) =
-        canopy_tables(config.land_cover, surface.land_class, config.tuning.land_class);
+    let (top_table, bottom_table) = canopy_tables(
+        config.land_cover,
+        surface.land_class,
+        config.tuning.land_class,
+    );
     let mut canopy = match config.land_cover {
         LandCoverScheme::Igbp => derive_igbp_canopy(
             &class,
@@ -1394,10 +1397,10 @@ fn write_single_point_scalar_cold_time_restarts(
                 kind,
                 ground,
                 leaf_optics_from_land_cover_one_based(
-                config.land_cover,
-                surface.land_class,
-                config.tuning.land_class,
-            )?,
+                    config.land_cover,
+                    surface.land_class,
+                    config.tuning.land_class,
+                )?,
                 lai,
                 sai,
                 0.0,
@@ -1651,10 +1654,10 @@ fn write_single_point_urban_cold_time_restarts(
         kind,
         ground,
         leaf_optics_from_land_cover_one_based(
-                config.land_cover,
-                surface.land_class,
-                config.tuning.land_class,
-            )?,
+            config.land_cover,
+            surface.land_class,
+            config.tuning.land_class,
+        )?,
         lai,
         sai,
         0.0,
@@ -1674,10 +1677,10 @@ fn write_single_point_urban_cold_time_restarts(
         impervious_albedo: urban_albedo_matrix(&initialized.data.impervious_albedo, "ALB_IMPROAD")?,
         pervious_albedo: urban_albedo_matrix(&initialized.data.pervious_albedo, "ALB_PERROAD")?,
         leaf_optics: leaf_optics_from_land_cover_one_based(
-                config.land_cover,
-                surface.land_class,
-                config.tuning.land_class,
-            )?,
+            config.land_cover,
+            surface.land_class,
+            config.tuning.land_class,
+        )?,
         vegetation_fraction: fveg,
         vegetation_center_height_m: initialized.state.roof_height_m[0]
             .min((initialized.state.tree_top_m[0] + initialized.state.tree_bottom_m[0]) / 2.0),

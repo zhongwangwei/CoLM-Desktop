@@ -519,10 +519,10 @@ pub(crate) fn write_spatial_lct_cold_time_restart_with_urban(
                 impervious_albedo: urban_albedo(&data.impervious_albedo, urban_count, urban),
                 pervious_albedo: urban_albedo(&data.pervious_albedo, urban_count, urban),
                 leaf_optics: leaf_optics_from_land_cover_one_based(
-                config.land_cover,
-                class,
-                colm_core::LandClassOverrides::default(),
-            )?,
+                    config.land_cover,
+                    class,
+                    colm_core::LandClassOverrides::default(),
+                )?,
                 vegetation_fraction: fveg[patch],
                 vegetation_center_height_m: data.state.roof_height_m[urban]
                     .min((data.state.tree_top_m[urban] + data.state.tree_bottom_m[urban]) / 2.0),

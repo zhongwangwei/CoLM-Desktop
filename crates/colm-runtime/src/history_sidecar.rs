@@ -132,7 +132,9 @@ pub fn write_sidecar(
     config: &SidecarConfig,
     windows: &[HistoryWindow],
 ) -> Result<()> {
-    let window = windows.first().context("the history sidecar needs at least one window")?;
+    let window = windows
+        .first()
+        .context("the history sidecar needs at least one window")?;
     let mut file =
         netcdf::create(path).with_context(|| format!("cannot create {}", path.display()))?;
     file.add_dimension("patch", patches)?;

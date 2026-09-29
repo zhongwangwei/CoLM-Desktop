@@ -177,12 +177,11 @@ fn run() -> Result<()> {
     // 网格元里各 patch 的面积份额 `elm_patch%subfrc`：多作物单点是归一化的 `pctcrop`，与 PFT 常数重启的
     // `cropfrac` 同值（`MOD_SingleSrfdata.F90:1493`）。单 patch 为 1。
     if patch_count > 1 {
-        let fractions = colm_init::RestartFile::open(colm_runtime::pft::pft_restart_path(
-            &files.constant,
-        )?)?
-        .floats("cropfrac")
-        .context("a multi-patch single point is a crop site and needs cropfrac")?
-        .to_vec();
+        let fractions =
+            colm_init::RestartFile::open(colm_runtime::pft::pft_restart_path(&files.constant)?)?
+                .floats("cropfrac")
+                .context("a multi-patch single point is a crop site and needs cropfrac")?
+                .to_vec();
         for template in &mut templates {
             template.patch_fraction = *fractions
                 .get(template.patch)
@@ -424,9 +423,8 @@ fn assemble_bgc(
 )> {
     // 各份 BGC 重启切出本 patch 与它的 PFT 区间（`colm_runtime::pft::open_patch`）。
     let pft_constant = colm_runtime::pft::pft_restart_path(&files.constant)?;
-    let (patches, pfts) = {
-        colm_runtime::pft::patch_and_pft_counts(&colm_init::RestartFile::open(&pft_constant)?)?
-    };
+    let (patches, pfts) =
+        { colm_runtime::pft::patch_and_pft_counts(&colm_init::RestartFile::open(&pft_constant)?)? };
     let pft_time = colm_runtime::pft::pft_restart_path(&files.time)?;
     let mut initial = colm_runtime::bgc::BgcTemplate::read(
         &files.constant,
@@ -445,10 +443,10 @@ fn assemble_bgc(
     let mut irrigation = None;
     if switches.crop {
         let classes = colm_runtime::pft::open_patch(&pft_constant, patch, patches, pfts)?
-                .integers("pftclass")?
-                .iter()
-                .map(|&class| i32::try_from(class))
-                .collect::<Result<Vec<_>, _>>()?;
+            .integers("pftclass")?
+            .iter()
+            .map(|&class| i32::try_from(class))
+            .collect::<Result<Vec<_>, _>>()?;
         irrigation = colm_runtime::bgc_step::crop_readin(
             &mut initial,
             &classes,
@@ -549,8 +547,10 @@ fn run_snow(
     session: Option<HistorySession>,
     history_restart: &HistoryRestart,
 ) -> Result<RunSummary> {
-    let mut states: Vec<StandardLctSnowSoilState> =
-        templates.iter().map(StandardLctRestartTemplate::snow_state).collect();
+    let mut states: Vec<StandardLctSnowSoilState> = templates
+        .iter()
+        .map(StandardLctRestartTemplate::snow_state)
+        .collect();
     // `smp`/`hk` 与表面诊断量只出现在步输出里（`intent(out)`），而续跑要写它们。
     let mut last: Option<Vec<RestartSnapshot>> = None;
     let mut on_step = |step: colm_runtime::PointRuntimeStep,
@@ -561,7 +561,8 @@ fn run_snow(
             .iter()
             .zip(outputs)
             .map(|(state, output)| {
-                let mut snapshot = RestartSnapshot::new(state, *output, step.surface_cosine_zenith)?;
+                let mut snapshot =
+                    RestartSnapshot::new(state, *output, step.surface_cosine_zenith)?;
                 snapshot.lai_refreshed = step.clock.update_lai;
                 Ok(snapshot)
             })
@@ -820,7 +821,10 @@ fn write_evolved_restart(
         let lists = states
             .iter()
             .map(|state| {
-                let bgc = state.bgc.as_ref().context("every BGC patch needs its BGC state")?;
+                let bgc = state
+                    .bgc
+                    .as_ref()
+                    .context("every BGC patch needs its BGC state")?;
                 Ok(colm_runtime::bgc::BgcTemplate::overrides(bgc, &bgc_source))
             })
             .collect::<Result<Vec<_>>>()?;

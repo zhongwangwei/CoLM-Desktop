@@ -447,7 +447,11 @@ impl PointRuntime {
         mut on_step: F,
     ) -> Result<HistoryRunOutcome>
     where
-        F: FnMut(PointRuntimeStep, &[StandardLctSnowSoilState], &[PatchStepOutput<'_>]) -> Result<()>,
+        F: FnMut(
+            PointRuntimeStep,
+            &[StandardLctSnowSoilState],
+            &[PatchStepOutput<'_>],
+        ) -> Result<()>,
     {
         ensure!(
             templates.len() == states.len() && !templates.is_empty(),
@@ -475,14 +479,22 @@ impl PointRuntime {
                     next.energy.leaf.canopy_water.total_mm,
                     next.snow.water_equivalent_kg_m2,
                     // `totwb = totwb + waterstorage`（`CoLMMAIN.F90:825`）：施灌之前的库存。
-                    next.irrigation.as_ref().map(|irrigation| irrigation.water_storage_mm),
+                    next.irrigation
+                        .as_ref()
+                        .map(|irrigation| irrigation.water_storage_mm),
                 );
                 // `totwb = totwb + wetwat`：VSF 下的湿地（`CoLMMAIN.F90:828-831`）。
                 if template.patch_type == 2 && template.physics.variably_saturated_flow {
                     initial_total_water_mm += next.soil_water.wetland_water_mm;
                 }
                 initial_totals.push(initial_total_water_mm);
-                outputs.push(advance_patch(step, template, &binding, next, optimizer.as_ref())?);
+                outputs.push(advance_patch(
+                    step,
+                    template,
+                    &binding,
+                    next,
+                    optimizer.as_ref(),
+                )?);
             }
             // `hist_out` 在 `itstamp <= ptstamp` 时直接返回（`MOD_Hist.F90:225`），连累加都不做：
             // 预热期（含每一轮重复）不产生 history。步末 `itstamp <= ptstamp` 与本步
@@ -615,7 +627,11 @@ impl PointRuntime {
         mut on_step: F,
     ) -> Result<usize>
     where
-        F: FnMut(PointRuntimeStep, &[StandardLctSnowSoilState], &[PatchStepOutput<'_>]) -> Result<()>,
+        F: FnMut(
+            PointRuntimeStep,
+            &[StandardLctSnowSoilState],
+            &[PatchStepOutput<'_>],
+        ) -> Result<()>,
     {
         ensure!(
             templates.len() == states.len() && !templates.is_empty(),
@@ -1805,16 +1821,20 @@ mod tests {
         let mut layers = Vec::new();
         // `states` 正被这次调用可变借用，所以雪层数从 output 里取。
         let steps = runtime
-            .run_restart_standard_lct_snow(std::slice::from_ref(&template), &mut states, |step, _, outputs| {
-                layers.push(step.clock.index);
-                // 积雪分支的出水在 `soil` 那一半里；雪那一半给的是底部排水。
-                let PatchStepOutput::Soil(output) = outputs[0] else {
-                    panic!("a soil patch must take the soil branch");
-                };
-                assert!(output.water.soil.total_runoff_mm_s.is_finite());
-                assert!(output.water.snow.bottom_drainage_kg_m2_s.is_finite());
-                Ok(())
-            })
+            .run_restart_standard_lct_snow(
+                std::slice::from_ref(&template),
+                &mut states,
+                |step, _, outputs| {
+                    layers.push(step.clock.index);
+                    // 积雪分支的出水在 `soil` 那一半里；雪那一半给的是底部排水。
+                    let PatchStepOutput::Soil(output) = outputs[0] else {
+                        panic!("a soil patch must take the soil branch");
+                    };
+                    assert!(output.water.soil.total_runoff_mm_s.is_finite());
+                    assert!(output.water.snow.bottom_drainage_kg_m2_s.is_finite());
+                    Ok(())
+                },
+            )
             .unwrap();
         assert_eq!(steps, 3);
         assert_eq!(layers, vec![1, 2, 3]);

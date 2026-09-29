@@ -152,15 +152,24 @@ impl NdepSource {
 
     /// `update_ndep_data_annually(year)`：`ndep` 与 `ndep_to_sminn`（gN/m²/s）。
     pub fn annual(&self, year: i32, patchclass: i32) -> Result<(f64, f64)> {
-        ensure!(!self.monthly, "the monthly N deposition file has no NDEP_year");
+        ensure!(
+            !self.monthly,
+            "the monthly N deposition file has no NDEP_year"
+        );
         let itime = usize::try_from(year.clamp(1849, 2006) - 1849).expect("clamped");
         self.read("NDEP_year", itime, patchclass)
     }
 
     /// `update_ndep_data_monthly(year, month)`：`itime = (clamp(year) - 1849)*12 + month`。
     pub fn month(&self, year: i32, month: u8, patchclass: i32) -> Result<(f64, f64)> {
-        ensure!(self.monthly, "the annual N deposition file has no NDEP_month");
-        ensure!((1..=12).contains(&month), "N deposition month {month} is not 1..=12");
+        ensure!(
+            self.monthly,
+            "the annual N deposition file has no NDEP_month"
+        );
+        ensure!(
+            (1..=12).contains(&month),
+            "N deposition month {month} is not 1..=12"
+        );
         let itime = usize::try_from((year.clamp(1849, 2006) - 1849) * 12).expect("clamped")
             + usize::from(month - 1);
         self.read("NDEP_month", itime, patchclass)
@@ -876,7 +885,13 @@ fn step_end_begin_form(idate: [i32; 3]) -> Result<colm_core::calendar::CalendarT
     if seconds >= 86_400 {
         seconds -= 86_400;
         day += 1;
-        if day > if colm_core::calendar::is_leap_year(year) { 366 } else { 365 } {
+        if day
+            > if colm_core::calendar::is_leap_year(year) {
+                366
+            } else {
+                365
+            }
+        {
             year += 1;
             day = 1;
         }
@@ -945,8 +960,7 @@ struct CropGrid {
 
 impl CropGrid {
     fn open(path: &Path, lat: f64, lon: f64) -> Result<Self> {
-        let file =
-            netcdf::open(path).with_context(|| format!("cannot open {}", path.display()))?;
+        let file = netcdf::open(path).with_context(|| format!("cannot open {}", path.display()))?;
         let axis = |name: &str| -> Result<Vec<f64>> {
             file.variable(name)
                 .with_context(|| format!("{} has no {name}", path.display()))?

@@ -230,7 +230,10 @@ fn irrigation_settings_are_read_from_the_namelist() {
     .irrigation
     .expect("irrigation on");
     assert_eq!(on.allocation, 3);
-    assert_eq!((on.start_seconds, on.duration_seconds), (21_600.0, 14_400.0));
+    assert_eq!(
+        (on.start_seconds, on.duration_seconds),
+        (21_600.0, 14_400.0)
+    );
     assert_eq!(on.paddy_ponding_limit_mm, 100.0);
     let off = land_physics_parameters(&case_with(""), LandCoverScheme::Igbp, HEIGHTS).unwrap();
     assert!(off.irrigation.is_none());
