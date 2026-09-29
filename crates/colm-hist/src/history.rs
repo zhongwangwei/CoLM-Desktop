@@ -192,6 +192,12 @@ impl HistoryBuffers {
     }
 
     /// 这个变量是否已声明（只累加、不进历史文件的量写出时据此跳过）。
+    /// 撤掉一个已声明的变量（上游按运行期开关不写它时）；没声明过就什么也不做。
+    pub fn undeclare(&mut self, name: &str) {
+        self.values.remove(name);
+        self.layers.remove(name);
+    }
+
     pub fn declares(&self, name: &str) -> bool {
         self.layers.contains_key(name)
     }

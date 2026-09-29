@@ -88,14 +88,6 @@ pub fn land_physics_parameters(
     // `DEF_USE_Dynamic_Wetland`：湿地按土壤地面算地面湿度（`MOD_Thermal.F90:601-602`），VSF 下走土壤水分支
     // （`MOD_SoilSnowHydrology.F90:946-947`、`:1384-1392`）。
     let dynamic_wetland = logical(document, "DEF_USE_Dynamic_Wetland")?;
-    // `DEF_USE_Dynamic_Lake`：湖深随水量变、`dz_lake` 进时间重启、`wdsrf` 记湖水。
-    // 运行期只移植了定深湖（`newsnow_lake`/`snowwater_lake` 的动态支路没接进湖一步）。
-    if logical(document, "DEF_USE_Dynamic_Lake")? {
-        bail!(
-            "DEF_USE_Dynamic_Lake is on, but the Rust runtime ports only the fixed-depth \
-             lake (patchtype 4), not the dynamic lake water balance"
-        );
-    }
     if logical(document, "DEF_USE_SNICAR")? {
         // `DEF_USE_SNICAR` 与 `DEF_SPLIT_SOILSNOW` 同属"最坏的一类"：它此前**根本
         // 没被读过**，而 `assembly.rs` 把 `snow_layer_absorption_w_m2` 硬写成 `None`
@@ -275,6 +267,14 @@ pub fn land_physics_parameters(
     };
     // `DEF_USE_IRRIGATION`：上游 CROP 关闭时强制关掉（`MOD_Namelist.F90:1973`）；是否 CROP 内核只有
     // `colm-rs --crop` 知道，所以这里先读，由调用方在非 CROP 时清掉。
+    // `DEF_USE_Dynamic_Lake`：湖深随水量变、`dz_lake` 进时间重启、`wdsrf` 记湖水。上游非 VSF 时强制关掉
+    // （`MOD_Namelist.F90:2339-2342`，单点没有 CATCHMENT）。
+    let dynamic_lake = logical(document, "DEF_USE_Dynamic_Lake")? && variably_saturated_flow;
+    ensure!(
+        !(dynamic_lake && urban_run),
+        "DEF_USE_Dynamic_Lake together with DEF_URBAN_RUN is not verified: the urban water body \
+         calls the lake snow routines with the dynamic switch, which the Rust urban step does not pass"
+    );
     let irrigation = if logical(document, "DEF_USE_IRRIGATION")? {
         Some(colm_core::IrrigationSettings {
             start_seconds: real(document, "DEF_TUNING_IRRIGATION_START_SEC")?,
@@ -300,6 +300,7 @@ pub fn land_physics_parameters(
         irrigation,
         land_class_overrides,
         dynamic_wetland,
+        dynamic_lake,
         hydraulic_model: if campbell {
             HydraulicModel::Campbell
         } else {

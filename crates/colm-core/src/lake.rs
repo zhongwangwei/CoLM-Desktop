@@ -891,10 +891,15 @@ pub fn adjust_lake_layers(column: &mut LakeColumn) -> Result<()> {
             let overlap_m = target_remaining_m.min(source_remaining_m);
             let source_ice = column.ice_fraction[source_layer];
             let source_temperature = column.temperature_k[source_layer];
-            ice_temperature_sum += overlap_m * source_ice * source_temperature;
-            ice_mass += overlap_m * source_ice;
-            liquid_temperature_sum += overlap_m * (1.0 - source_ice) * source_temperature;
-            liquid_mass += overlap_m * (1.0 - source_ice);
+            // GIMPLE：`ticesum = .FMA (olp*fi, t, ticesum)`、`tliqsum = .FMA (t, (1-fi)*olp, tliqsum)`，
+            // 两个质量和各自是普通加法（乘积被温度和复用，不收缩）。
+            let ice_part = overlap_m * source_ice;
+            let liquid_part = (1.0 - source_ice) * overlap_m;
+            ice_temperature_sum = ice_part.mul_add(source_temperature, ice_temperature_sum);
+            ice_mass += ice_part;
+            liquid_temperature_sum =
+                source_temperature.mul_add(liquid_part, liquid_temperature_sum);
+            liquid_mass += liquid_part;
             target_remaining_m -= overlap_m;
             source_remaining_m -= overlap_m;
         }
@@ -928,11 +933,13 @@ fn validate(column: &LakeColumn) -> Result<()> {
             .iter()
             .all(|value| value.is_finite() && *value >= 0.0)
             && column.temperature_k.iter().all(|value| value.is_finite())
-            && column
-                .ice_fraction
-                .iter()
-                .all(|value| value.is_finite() && (0.0..=1.0).contains(value)),
-        "lake column is physically invalid"
+            // 冰比只要求有限：动态湖的质量换算会让它差 1 ULP 地越过 1（实测 1.0000000000000002），
+            // 上游照样带着算。
+            && column.ice_fraction.iter().all(|value| value.is_finite()),
+        "lake column is physically invalid: dz {:?}, t {:?}, icefrac {:?}",
+        column.thickness_m,
+        column.temperature_k,
+        column.ice_fraction
     );
     Ok(())
 }
@@ -947,7 +954,11 @@ fn target_thickness(total_depth_m: f64) -> Vec<f64> {
         .map(|value| value * depth_ratio)
         .collect::<Vec<_>>();
     thickness[0] = DEFAULT_THICKNESS_M[0];
-    thickness[LAKE_LAYERS - 1] -= thickness[0] - DEFAULT_THICKNESS_M[0] * depth_ratio;
+    // `dzlak(nl)*dr - (dz_new(1) - dzlak(1)*dr)` 在 GIMPLE 里是
+    // `.FMS (dzlak(nl), dr, .FNMA (dr, 0.1, 0.1))`。
+    let top_excess = (-depth_ratio).mul_add(DEFAULT_THICKNESS_M[0], DEFAULT_THICKNESS_M[0]);
+    thickness[LAKE_LAYERS - 1] =
+        DEFAULT_THICKNESS_M[LAKE_LAYERS - 1].mul_add(depth_ratio, -top_excess);
     thickness
 }
 
@@ -958,10 +969,12 @@ fn reconcile_phase(
     mut ice_mass: f64,
     mut liquid_mass: f64,
 ) -> (f64, f64) {
-    if ice_mass == 0.0 {
+    // 上游按 `wicesum > 0`、`wliqsum > 0` 分支：冰比差 1 ULP 越过 1 时 `wliqsum` 是极小的负数，
+    // 这一层按纯冰处理。两者都不为正时上游不写 `t_lake_new`（未定义）。
+    if ice_mass <= 0.0 {
         return (liquid_temperature_sum / liquid_mass, ice_mass);
     }
-    if liquid_mass == 0.0 {
+    if liquid_mass <= 0.0 {
         return (ice_temperature_sum / ice_mass, ice_mass);
     }
     let ice_temperature_k = ice_temperature_sum / ice_mass;

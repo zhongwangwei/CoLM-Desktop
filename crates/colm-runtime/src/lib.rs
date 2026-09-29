@@ -950,6 +950,24 @@ fn advance_patch(
         return Ok(PatchOutput::Urban(Box::new(output)));
     }
     if let Some(lake) = &template.lake {
+        if lake.site.is_dry(state) {
+            // 干湖（`CoLMMAIN.F90:794-799`）：整步走土壤分支（patchtype 仍是 4，THERMAL 的地面湿度、
+            // `meltf` 的过冷水、WATER_VSF 的产流都按 `is_dry_lake` 分支），步末由积水重建湖层；
+            // 末尾 `patchtype > 2 .and. .not. is_dry_lake` 那一节清零不做，也没有 BGC。
+            let mut input = input;
+            input.energy.ground_temperature.is_dry_lake = true;
+            let output = colm_core::standard_lct_snow_soil_step(input, state)?;
+            colm_core::refill_dry_lake(state)?;
+            // `albland` 仍按 patchtype 4 取湖面反照率，`t_soisno_(1)` 这时是土温（只有 SNICAR 读）。
+            let optics = surface_optics_step(
+                step,
+                previous_snow_water_equivalent_mm,
+                state.surface_temperature_k(),
+                &output,
+            );
+            template.prepare_surface_optics(state, optics)?;
+            return Ok(PatchOutput::Soil(Box::new(output)));
+        }
         let output = colm_core::lake_snow_step(input, lake.site, state)?;
         // 湖面反照率只看 `t_grnd`（`albland` 的 `patchtype >= 4` 支）；`t_soisno_(1)` 换成
         // `t_lake(1)` 那一句只在 SNICAR 下有读者。
@@ -1634,6 +1652,7 @@ mod tests {
             irrigation: None,
             land_class_overrides: colm_core::LandClassOverrides::default(),
             dynamic_wetland: false,
+            dynamic_lake: false,
             hydraulic_model: colm_core::HydraulicModel::VanGenuchten,
             variably_saturated_flow: false,
             plant_hydraulics: false,

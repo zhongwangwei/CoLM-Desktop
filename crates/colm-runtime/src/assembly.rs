@@ -80,6 +80,8 @@ pub struct LandPhysicsParameters {
     pub land_class_overrides: colm_core::LandClassOverrides,
     /// `DEF_USE_Dynamic_Wetland`：湿地按土壤地面算地面湿度，VSF 下走土壤水分支。
     pub dynamic_wetland: bool,
+    /// `DEF_USE_Dynamic_Lake`（VSF 下才生效）：湖层厚随水量变、`dz_lake` 进时间重启。
+    pub dynamic_lake: bool,
     /// namelist 选的土壤水力关系；决定常数重启里读 `bsw` 还是五个 van Genuchten 场。
     pub hydraulic_model: HydraulicModel,
     /// `DEF_USE_VariablySaturatedFlow` **生效后**的取值。
@@ -1284,7 +1286,12 @@ fn assemble(
 
     // 城市 patch 也带一片水体（`t_lake`/`dz_lake` 在主重启里），所以同样读湖模板。
     let lake = if patch_type == 4 || patch_type == 1 {
-        Some(LakeTemplate::read(&constant, &time, patch)?)
+        Some(LakeTemplate::read(
+            &constant,
+            &time,
+            patch,
+            physics.dynamic_lake,
+        )?)
     } else {
         None
     };
@@ -2645,17 +2652,27 @@ pub struct LakeTemplate {
     restart_temperature_k: Vec<f64>,
     restart_ice_fraction: Vec<f64>,
     restart_saved_tke: Vec<f64>,
+    /// 动态湖时间重启里的 `dz_lake`（整变量缓冲）；定深湖为 `None`。
+    restart_thickness_m: Option<Vec<f64>>,
 }
 
 impl LakeTemplate {
-    fn read(constant: &RestartFile, time: &RestartFile, patch: usize) -> Result<Self> {
+    fn read(
+        constant: &RestartFile,
+        time: &RestartFile,
+        patch: usize,
+        dynamic: bool,
+    ) -> Result<Self> {
         let layers = constant.dimension("lake")?;
         ensure!(
             time.dimension("lake")? == layers,
             "the two restarts disagree on the lake layer count"
         );
+        // 动态湖的 `dz_lake` 是时间变量：`READ_TimeVariables` 从时间重启覆盖常数重启里的那份
+        // （`MOD_Vars_TimeVariables.F90:1456-1458`）。
+        let thickness_source = if dynamic { time } else { constant };
         let column = colm_core::LakeColumn {
-            thickness_m: constant.layer_column("dz_lake", patch, layers)?,
+            thickness_m: thickness_source.layer_column("dz_lake", patch, layers)?,
             temperature_k: time.layer_column("t_lake", patch, layers)?,
             ice_fraction: time.layer_column("lake_icefrc", patch, layers)?,
         };
@@ -2663,6 +2680,7 @@ impl LakeTemplate {
             site: colm_core::LakeSite {
                 latitude_radians: scalar(constant, "patchlatr", patch)?,
                 depth_m: scalar(constant, "lakedepth", patch)?,
+                dynamic,
             },
             initial: colm_core::RuntimeLakeState {
                 column,
@@ -2672,6 +2690,11 @@ impl LakeTemplate {
             restart_temperature_k: time.floats("t_lake")?.to_vec(),
             restart_ice_fraction: time.floats("lake_icefrc")?.to_vec(),
             restart_saved_tke: time.floats("savedtke1")?.to_vec(),
+            restart_thickness_m: if dynamic {
+                Some(time.floats("dz_lake")?.to_vec())
+            } else {
+                None
+            },
         })
     }
 
@@ -2695,11 +2718,21 @@ impl LakeTemplate {
         temperature[base..base + layers].copy_from_slice(&lake.column.temperature_k);
         ice_fraction[base..base + layers].copy_from_slice(&lake.column.ice_fraction);
         saved_tke[patch] = lake.saved_tke;
-        Ok(vec![
+        let mut overrides = vec![
             RestartOverride::new("t_lake", temperature),
             RestartOverride::new("lake_icefrc", ice_fraction),
             RestartOverride::new("savedtke1", saved_tke),
-        ])
+        ];
+        if let Some(source) = &self.restart_thickness_m {
+            let mut thickness = source.clone();
+            ensure!(
+                base + layers <= thickness.len(),
+                "the restart's dz_lake column is too short for patch {patch}"
+            );
+            thickness[base..base + layers].copy_from_slice(&lake.column.thickness_m);
+            overrides.push(RestartOverride::new("dz_lake", thickness));
+        }
+        Ok(overrides)
     }
 }
 

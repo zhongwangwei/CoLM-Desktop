@@ -4193,9 +4193,8 @@ fn layer_water_capacity_kg_m2(layer_thickness_m: f64, density_kg_m3: f64) -> f64
 
 /// Port of `MOD_SoilSnowHydrology:WATER_VSF`.
 ///
-/// 只有 `patchtype ∈ {0, 1}`（土壤/城市）与 `!is_dry_lake` 这一支被移植；
-/// 湿地、干湖、SNICAR、拆分雪土、灌溉、CaMa 洪水、示踪物与 `Runoff_VIC`
-/// 一律显式拒绝，与 `WATER_2014` 的既有拒绝保持一致。
+/// 移植了土壤/城市（0、1）、动态湿地（2）与干湖（4，`is_dry_lake`）四支；
+/// 冰川、SNICAR、CaMa 洪水与示踪物一律显式拒绝。
 ///
 /// 步骤顺序照抄上游：体积分数与冰 → 地表/地下产流 → 水位一致性修正 →
 /// [`soil_water_vertical_movement`] → 回填 `wliq_soisno` → 凝结 → 冰汇 →
@@ -4621,6 +4620,8 @@ pub fn variably_saturated_flow_step(
         saturated_fraction = f64::NAN;
         surface_runoff_mm_s
     } else {
+        // 干湖（`:1393-1395`）：不产流，`rnof = 0`；`frcsat` 由 `CoLMMAIN.F90:1228` 置 `spval`。
+        saturated_fraction = f64::NAN;
         0.0
     };
 
@@ -4686,11 +4687,12 @@ fn validate_variable_saturated_flow(
     input: VariableSaturatedFlowInput<'_>,
     state: &Water2014SoilState,
 ) -> Result<usize> {
-    // patchtype 2 只在 `DEF_USE_Dynamic_Wetland` 时进这里（调用方按开关分派）。
+    // patchtype 2 只在 `DEF_USE_Dynamic_Wetland` 时进这里，patchtype 4 只在干湖（`is_dry_lake`）时进这里
+    // （调用方按开关与湖水量分派）。
     ensure!(
-        matches!(input.patch_type, 0..=2),
-        "WATER_VSF is ported for soil (0), urban (1) and dynamic wetland (2) patches; patchtype {} \
-         needs the dry-lake or glacier branch",
+        matches!(input.patch_type, 0..=2 | 4),
+        "WATER_VSF is ported for soil (0), urban (1), dynamic wetland (2) and dry lake (4) patches; \
+         patchtype {} needs the glacier branch",
         input.patch_type
     );
     ensure!(

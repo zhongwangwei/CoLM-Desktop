@@ -278,7 +278,7 @@ pub use lake::{
     LakeNewSnowInput, LakeNewSnowOutcome, LakeRoughness, LakeRoughnessInput, LakeSnowWaterFluxes,
     LakeSnowWaterInput, LakeSnowWaterOutcome, LakeSnowWaterSoil,
 };
-pub use lake_step::{lake_snow_step, LakeSite, LakeStepOutput, RuntimeLakeState};
+pub use lake_step::{lake_snow_step, refill_dry_lake, LakeSite, LakeStepOutput, RuntimeLakeState};
 pub use lake_temperature::{
     lake_temperature, LakeTemperatureInput, LakeTemperatureOutput, LakeTemperatureState,
     LakeThermalFluxes, LAKE_EMISSIVITY,

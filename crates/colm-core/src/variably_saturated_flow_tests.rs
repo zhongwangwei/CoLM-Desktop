@@ -1599,6 +1599,26 @@ fn variable_saturated_flow_applies_ice_impedance_only_to_frozen_layers() {
     assert!(output.hydraulic_conductivity_mm_s[0] <= 0.01 * impedance + 1.0e-12);
 }
 
+/// 干湖（patchtype 4，`MOD_SoilSnowHydrology.F90:1393-1395`）：不跑产流方案、不封顶积水，
+/// `rnof = 0`；`frcsat` 未赋值（`CoLMMAIN` 随后置 `spval`）。
+#[test]
+fn variable_saturated_flow_dry_lake_keeps_all_ponding() {
+    let fixture = variable_saturated_flow_fixture();
+    let mut state = variable_saturated_flow_state(0.30);
+    state.surface_water_mm = 500.0;
+    let input = VariableSaturatedFlowInput {
+        patch_type: 4,
+        ..variable_saturated_flow_input(&fixture, 0.0, 0.0)
+    };
+    let output = variably_saturated_flow_step(input, &mut state).unwrap();
+    assert_eq!(output.total_runoff_mm_s, 0.0);
+    assert_eq!(output.surface_runoff_mm_s, 0.0);
+    assert_eq!(output.subsurface_runoff_mm_s, 0.0);
+    assert!(output.saturated_fraction.is_nan());
+    // 同样的积水在湿地上会被 `wetwatmax = 200` 截走；干湖上只有下渗能带走它。
+    assert!(state.surface_water_mm > 200.0);
+}
+
 /// 被拒绝的分支与宽度校验。
 #[test]
 fn variable_saturated_flow_refuses_unported_branches_and_bad_widths() {
@@ -1610,7 +1630,7 @@ fn variable_saturated_flow_refuses_unported_branches_and_bad_widths() {
         ..variable_saturated_flow_input(&fixture, 0.0, 0.0)
     };
     let error = variably_saturated_flow_step(input, &mut state).unwrap_err();
-    assert!(error.to_string().contains("dry-lake or glacier branch"));
+    assert!(error.to_string().contains("glacier branch"));
 
     let input = VariableSaturatedFlowInput {
         interface_depth_m: &fixture.interface_depth_m[..2],

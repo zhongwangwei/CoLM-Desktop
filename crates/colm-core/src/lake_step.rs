@@ -8,7 +8,7 @@
 //!
 //! 收缩形状逐句对照 `CoLMMAIN.F90` 的 `-fdump-tree-optimized-lineno`。
 
-use anyhow::{ensure, Result};
+use anyhow::{ensure, Context, Result};
 
 use crate::standard_lct_step::packed_snow_soil_state;
 use crate::{
@@ -34,6 +34,65 @@ pub struct RuntimeLakeState {
 pub struct LakeSite {
     pub latitude_radians: f64,
     pub depth_m: f64,
+    /// `DEF_USE_Dynamic_Lake`：湖层厚随水量变，`wdsrf` 记湖水、超出湖深的部分溢出。
+    pub dynamic: bool,
+}
+
+impl LakeSite {
+    /// `is_dry_lake = DEF_USE_Dynamic_Lake .and. patchtype == 4 .and. (wdsrf < 100 .or. zwt > 0)`
+    /// （`CoLMMAIN.F90:794-795`）：步首判定，整步走土壤分支。
+    pub fn is_dry(&self, state: &StandardLctSnowSoilState) -> bool {
+        self.dynamic
+            && (state.soil_water.surface_water_mm < 100.0
+                || state.soil_water.water_table_depth_m > 0.0)
+    }
+}
+
+/// 干湖步末（`CoLMMAIN.F90:1455-1469`）：`t_grnd = t_soisno(lb)`，湖层由地表积水重建 ——
+/// 等分 `wdsrf`、温度取第一层土温、冰比按冰点取 0/1，积水够 100 mm 时再按标准分层重排。
+pub fn refill_dry_lake(state: &mut StandardLctSnowSoilState) -> Result<()> {
+    let surface_water_mm = state.soil_water.surface_water_mm;
+    let top_soil_temperature_k = state.soil_temperature_k[0];
+    let surface_temperature_k = if state.snow.layer_count < 0 {
+        state.snow.temperature_k[crate::snow::snow_layer_slot(state.snow.layer_count + 1)]
+    } else {
+        top_soil_temperature_k
+    };
+    let lake = state
+        .lake
+        .as_mut()
+        .context("a dry lake step needs the lake state")?;
+    refill_lake_column(
+        lake,
+        surface_water_mm,
+        top_soil_temperature_k,
+        surface_temperature_k,
+    )
+}
+
+fn refill_lake_column(
+    lake: &mut RuntimeLakeState,
+    surface_water_mm: f64,
+    top_soil_temperature_k: f64,
+    surface_temperature_k: f64,
+) -> Result<()> {
+    // 湖 patch 的 `t_grnd` 存在湖状态里。
+    lake.ground_temperature_k = surface_temperature_k;
+    let layers = lake.column.thickness_m.len();
+    // `dz_lake = wdsrf*1.e-3/nl_lake`：GIMPLE 是 `(wdsrf*1e-3)/10`。
+    let thickness_m = surface_water_mm * 1.0e-3 / layers as f64;
+    lake.column.thickness_m.fill(thickness_m);
+    lake.column.temperature_k.fill(top_soil_temperature_k);
+    let ice_fraction = if top_soil_temperature_k >= crate::FREEZING_K {
+        0.0
+    } else {
+        1.0
+    };
+    lake.column.ice_fraction.fill(ice_fraction);
+    if surface_water_mm >= 100.0 {
+        crate::adjust_lake_layers(&mut lake.column)?;
+    }
+    Ok(())
 }
 
 /// 一步湖分支的诊断。
@@ -97,8 +156,12 @@ pub fn lake_snow_step(
 
     // 步首（`:1793-1822`）：`totwb = scv + sum(wice+wliq) + wa`，逐层先加冰液再累加；
     // `w_old = sum(wliq) + sum(wice)` 是两个独立的和。
-    let total_water_before = (state.snow.water_equivalent_kg_m2 + soil_water_sum(state))
+    let mut total_water_before = (state.snow.water_equivalent_kg_m2 + soil_water_sum(state))
         + state.soil_water.aquifer_water_mm;
+    // `totwb = totwb + wdsrf`（动态湖，`CoLMMAIN.F90:1800-1802`）。
+    if site.dynamic {
+        total_water_before += state.soil_water.surface_water_mm;
+    }
     remember_snow_ice_fraction(state);
     let water_before = liquid_sum(state) + ice_sum(state);
     let snow_before = state.snow.water_equivalent_kg_m2;
@@ -106,7 +169,7 @@ pub fn lake_snow_step(
     let lake = state.lake.as_mut().expect("checked above");
     let new_snow = add_lake_new_snow(
         LakeNewSnowInput {
-            use_dynamic_lake: false,
+            use_dynamic_lake: site.dynamic,
             time_step_seconds: dt,
             rainfall_kg_m2_s: precipitation.convective_rain_kg_m2_s
                 + precipitation.large_scale_rain_kg_m2_s,
@@ -199,7 +262,7 @@ pub fn lake_snow_step(
     let lake = state.lake.as_mut().expect("checked above");
     lake_snow_water(
         LakeSnowWaterInput {
-            use_dynamic_lake: false,
+            use_dynamic_lake: site.dynamic,
             time_step_seconds: dt,
             irreducible_saturation: input.snow_water.irreducible_saturation,
             impermeable_porosity: input.snow_water.impermeable_porosity,
@@ -230,16 +293,42 @@ pub fn lake_snow_step(
         - water_before)
         - snow_before)
         / dt;
-    let evaporation = ((thermal.qseva + thermal.qsubl) - thermal.qsdew) - thermal.qfros;
-    let excess = ((rainfall + snowfall) - evaporation) - storage_change;
-    let runoff = excess.max(0.0);
-    let lake_deficit = -excess.min(0.0);
+    let (runoff, lake_deficit) = if site.dynamic {
+        // 动态湖（`CoLMMAIN.F90:1942-1957`）：湖水就是 `wdsrf = sum(dz_lake)*1000`，超出湖深的部分
+        // 这一步全部溢出，湖层按比例缩回湖深再重分层。GIMPLE 这里没有收缩。
+        let lake = state.lake.as_mut().expect("checked above");
+        let depth_mm = lake.column.thickness_m.iter().fold(0.0, |sum, dz| sum + dz) * 1.0e3;
+        state.soil_water.surface_water_mm = depth_mm;
+        let limit_mm = site.depth_m * 1.0e3;
+        let runoff = if depth_mm > limit_mm {
+            let runoff = (depth_mm - limit_mm) / dt;
+            state.soil_water.surface_water_mm = limit_mm;
+            let total = lake.column.thickness_m.iter().fold(0.0, |sum, dz| sum + dz);
+            for dz in &mut lake.column.thickness_m {
+                *dz = *dz * site.depth_m / total;
+            }
+            crate::adjust_lake_layers(&mut lake.column)?;
+            runoff
+        } else {
+            0.0
+        };
+        (runoff, 0.0)
+    } else {
+        let evaporation = ((thermal.qseva + thermal.qsubl) - thermal.qsdew) - thermal.qfros;
+        let excess = ((rainfall + snowfall) - evaporation) - storage_change;
+        (excess.max(0.0), -excess.min(0.0))
+    };
 
     // ---- 水量闭合（`:1962-1971`）----
     let total_water_after = (state.snow.water_equivalent_kg_m2 + soil_water_sum(state))
         + state.soil_water.aquifer_water_mm;
-    // `:1966` `.FNMA (lake_deficit, deltim, endwb)`
-    let total_water_after = (-lake_deficit).mul_add(dt, total_water_after);
+    let total_water_after = if site.dynamic {
+        // `endwb = endwb + wdsrf`
+        total_water_after + state.soil_water.surface_water_mm
+    } else {
+        // `:1966` `.FNMA (lake_deficit, deltim, endwb)`
+        (-lake_deficit).mul_add(dt, total_water_after)
+    };
     // `:1969-1971` `.FMA (rnof, dt, .FNMA (prc+prl-fevpa, dt, endwb-totwb))`
     let water_balance_error_mm = runoff.mul_add(
         dt,
@@ -308,3 +397,7 @@ fn remember_snow_ice_fraction(state: &mut StandardLctSnowSoilState) {
             / (snow.liquid_water_kg_m2[slot] + snow.ice_water_kg_m2[slot]);
     }
 }
+
+#[cfg(test)]
+#[path = "lake_step_tests.rs"]
+mod lake_step_tests;

@@ -363,3 +363,38 @@ fn lake_snow_water_matches_dynamic_bed_saturation_and_surface_budget() {
     close(lake.thickness_m[9], 1.989_469_7);
     close(lake.temperature_k[9], 280.0);
 }
+
+#[test]
+fn lake_adjustment_fuses_the_bottom_layer_like_gfortran() {
+    // `dz_new(nl) = dzlak(nl)*dr - (dz_new(1) - dzlak(1)*dr)` 在 GIMPLE 里是
+    // `.FMS (dzlak(nl), dr, .FNMA (dr, 0.1, 0.1))`。
+    let mut column = LakeColumn {
+        thickness_m: vec![3.3; 10],
+        temperature_k: vec![280.0; 10],
+        ice_fraction: vec![0.0; 10],
+    };
+    let total: f64 = column.thickness_m.iter().sum();
+    adjust_lake_layers(&mut column).unwrap();
+    let standard: f64 = DEFAULT_THICKNESS_M.iter().sum();
+    let ratio = total / standard;
+    let top_excess = (-ratio).mul_add(0.1, 0.1);
+    assert_eq!(column.thickness_m[0], 0.1);
+    assert_eq!(column.thickness_m[9], 10.45f64.mul_add(ratio, -top_excess));
+}
+
+#[test]
+fn lake_adjustment_treats_an_overfull_ice_fraction_as_ice() {
+    // 动态湖的质量换算会让冰比差 1 ULP 地越过 1；上游按 `wliqsum > 0` 判，
+    // 这时液态份额是极小的负数，这一层按纯冰取 `tice`。
+    let overfull = 1.0 + f64::EPSILON;
+    let mut column = LakeColumn {
+        thickness_m: vec![0.05; 10],
+        temperature_k: vec![265.0; 10],
+        ice_fraction: vec![overfull; 10],
+    };
+    adjust_lake_layers(&mut column).unwrap();
+    for (temperature, ice) in column.temperature_k.iter().zip(&column.ice_fraction) {
+        close(*temperature, 265.0);
+        close(*ice, overfull);
+    }
+}

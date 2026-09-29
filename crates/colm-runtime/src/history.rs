@@ -2541,6 +2541,8 @@ pub struct HistorySession {
     element_surface: Option<colm_core::HistoryDiagnostics>,
     /// `DEF_USE_Dynamic_Wetland`：`f_wetwat` 改写 `wdsrf` 的平均（由 `push_lct_snow` 现场给出）。
     dynamic_wetland: bool,
+    /// `DEF_USE_Dynamic_Lake`：多写 `f_dz_lake`、不写 `f_lake_deficit`（由 `push_lake` 现场给出）。
+    dynamic_lake: bool,
 }
 
 /// 多 patch 时每个累加器只写自己那一格；单 patch 一次写全部（缓冲区只有一格）。
@@ -2642,6 +2644,7 @@ impl HistorySession {
             raw_at_end: None,
             element_surface: None,
             dynamic_wetland: false,
+            dynamic_lake: false,
         })
     }
 
@@ -2783,6 +2786,26 @@ impl HistorySession {
             .as_ref()
             .context("a lake history record needs the lake state")?;
         let thermal = output.thermal;
+        let dynamic = template.physics.dynamic_lake;
+        self.dynamic_lake = dynamic;
+        // 动态湖：`xerr = errorw/deltim`（`CoLMMAIN.F90:1984-1988`），定深湖恒为 0；`a_lake_deficit` 不累加、
+        // `a_dz_lake` 累加（`MOD_Vars_1DAccFluxes.F90:2485`、`:2502`）。
+        let water_balance_error = if dynamic {
+            output.water_balance_error_mm / template.physics.timestep_seconds
+        } else {
+            0.0
+        };
+        let deficit = [LakeLayers::Scalar("lake_deficit", output.lake_deficit_mm_s)];
+        let thickness = [LakeLayers::Layers("dz_lake", &lake.column.thickness_m)];
+        let layers = [
+            LakeLayers::Layers("t_lake", &lake.column.temperature_k),
+            LakeLayers::Layers("lake_icefrac", &lake.column.ice_fraction),
+        ];
+        let extra: Vec<LakeLayers<'_>> = if dynamic {
+            thickness.into_iter().chain(layers).collect()
+        } else {
+            deficit.into_iter().chain(layers).collect()
+        };
         self.push_non_soil(
             end,
             template,
@@ -2823,16 +2846,12 @@ impl HistorySession {
                 },
                 surface_runoff_mm_s: output.surface_runoff_mm_s,
                 total_runoff_mm_s: output.total_runoff_mm_s,
-                water_balance_error_mm_s: 0.0,
+                water_balance_error_mm_s: water_balance_error,
                 writes_runoff_split: true,
             },
             reference,
             &LAKE_FILTERED_VARIABLES,
-            &[
-                LakeLayers::Scalar("lake_deficit", output.lake_deficit_mm_s),
-                LakeLayers::Layers("t_lake", &lake.column.temperature_k),
-                LakeLayers::Layers("lake_icefrac", &lake.column.ice_fraction),
-            ],
+            &extra,
         )
     }
 
@@ -3141,9 +3160,29 @@ impl HistorySession {
         self.variably_saturated = template.physics.variably_saturated_flow;
         self.bgc = template.bgc.as_ref().map(|bgc| bgc.switches);
         self.dynamic_wetland = template.physics.dynamic_wetland;
+        // 干湖步（`is_dry_lake`）也走这里：patchtype 仍是 4，历史的 `patchtype` 过滤照湖来。
+        let dry_lake = template.patch_type == 4;
+        if dry_lake {
+            self.dynamic_lake = template.physics.dynamic_lake;
+        }
         let variably_saturated = self.variably_saturated;
         let element_surface = self.element_surface;
         self.push(end, |accumulator| {
+            let lake_filter: &'static [&'static str] = if dry_lake {
+                &LAKE_FILTERED_VARIABLES
+            } else {
+                &[]
+            };
+            let accumulator = &mut PatchFilteredSink {
+                inner: accumulator,
+                skipped: lake_filter,
+            };
+            if let Some(lake) = state.lake.as_ref().filter(|_| dry_lake) {
+                // 步末重建过的湖层（`CoLMMAIN.F90:1457-1469`）；动态湖不写 `lake_deficit`。
+                accumulator.layer("dz_lake", 0, &lake.column.thickness_m)?;
+                accumulator.layer("t_lake", 0, &lake.column.temperature_k)?;
+                accumulator.layer("lake_icefrac", 0, &lake.column.ice_fraction)?;
+            }
             if let (Some(runtime), Some(bgc)) = (&template.bgc, &state.bgc) {
                 let first_pft_class = state
                     .energy
@@ -3357,6 +3396,11 @@ impl HistorySession {
             }
             if let Some(switches) = self.bgc {
                 buffer.declare(&bgc_history_variables(switches))?;
+            }
+            // `MOD_Hist.F90:4518`/`:4533`：动态湖写 `f_dz_lake`、不写 `f_lake_deficit`。
+            if self.dynamic_lake {
+                buffer.declare(&["dz_lake"])?;
+                buffer.undeclare("lake_deficit");
             }
             self.open = Some((record.suffix.clone(), buffer));
         }

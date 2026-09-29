@@ -26034,3 +26034,53 @@ mksrfdata 判为失败（实测 `ci6x`：日志末行 "Successful in surface dat
 | `dw5` | 同 `dw4`，`DEF_TUNING_WETWATMAX = 1`（溢出分支，`rsur` 最大 3.7e-4 mm/s） | 12/12 | ✓ | ✓ | ✓ |
 
 非动态湿地 `wt`/`wy` 不变；全量回归 97 例逐位（`nn`/`pni` 不写历史）。
+
+## 第 442 轮：动态湖（`DEF_USE_Dynamic_Lake`）
+
+接第 441 轮（用户选的"动态湿地/动态湖"）。上游的动态湖只在 VSF 下生效（非 VSF 时 Rust 强制关掉，与
+`MOD_Namelist` 的判定一致），与城市 run 同开时拒绝。分两支：
+
+- **湿湖**（`wdsrf >= 100` 且 `zwt <= 0`）：仍走湖分支。`totwb`/`endwb` 各加 `wdsrf`；`newsnow_lake`/`snowwater_lake`
+  走 `USE_Dynamic_Lake` 支（降雨进湖顶层、`adjust_lake_layer` 重排）；步末 `wdsrf = sum(dz_lake)*1e3`，超出湖深的部分
+  这一步全部溢出（`rsur = rnof`），湖层按比例缩回湖深再重排；`lake_deficit = 0`，`xerr = errorw/deltim`。`dz_lake`
+  变成时间变量（时间重启覆盖常数重启），历史声明 `f_dz_lake`、不声明 `f_lake_deficit`。
+- **干湖**（`is_dry_lake`，`CoLMMAIN.F90:794-799`）：整步走土壤分支，patchtype 仍是 4——THERMAL 的地面湿度按土壤地面、
+  `meltf` 的过冷水判据、`WATER_VSF` 的土壤支（不跑产流方案、不封顶积水、`rnof = 0`，`frcsat = spval`）；末尾
+  `patchtype > 2` 的清零那一节不做，也没有 BGC。步末 `t_grnd = t_soisno(lb)`，湖层由积水重建：`dz_lake = wdsrf*1e-3/10`
+  （GIMPLE 是先乘后除）、`t_lake = t_soisno(1)`、冰比按冰点取 0/1，`wdsrf >= 100` 时再 `adjust_lake_layer`。
+  `albland` 仍按 patchtype 4 取湖面反照率。历史照湖 patch 的 `patchtype` 过滤，另写重建后的 `dz_lake`/`t_lake`/`lake_icefrac`。
+
+### 一、定位到的三处不一致
+
+1. **`adjust_lake_layer` 从未对过 GIMPLE。** 定深湖用不到它，这次才第一次进逐位对比。`dl2` 第 16 步 `laketem` 的
+   `fseng` 差 6.6e-11（历史第 7 条起），而第 15 步末全状态（10 层 `dz/t/icefrac`、`savedtke1`、土壤三列、`t_grnd`、`scv`、
+   `wdsrf`、`rnof`）两边逐位相同——在 Fortran 里临时插探针（`CoLMMAIN` 步末全状态、`laketem` 的 `ocvts/ncvts/errsoi`，
+   构建后即还原 vendor）才看到是 `ocvts` 差 1 ULP：输入它的湖层在同一步的 `newsnow_lake` 里被 `adjust_lake_layer` 改过。
+   GIMPLE 的形状：`ticesum = .FMA (olp*fi, t, ticesum)`、`tliqsum = .FMA (t, (1-fi)*olp, tliqsum)`（两个质量和是普通加法，
+   乘积被复用）；末层厚度 `dzlak(nl)*dr - (dz_new(1) - dzlak(1)*dr)` 是 `.FMS (dzlak(nl), dr, .FNMA (dr, 0.1, 0.1))`。
+   Rust 原先全部分步舍入。
+2. **相态判据。** 上游按 `wicesum > 0`、`wliqsum > 0` 分支；动态湖的质量换算会让冰比差 1 ULP 地越过 1（实测
+   `1.0000000000000002`），这时 `wliqsum` 是极小的负数，上游按纯冰取 `tice`。Rust 原先判 `== 0`，会把这一层送进相变调和。
+   同一原因，湖层校验对冰比只要求有限。
+3. **LCT 无冠层。** 湖 patch 的 LAI/SAI 为 0，干湖一进土壤分支就撞上能量步的 `lai+sai > 1e-6` 校验——Rust 的 LCT 路径
+   从来没有 THERMAL 的 `ELSE` 支（`MOD_Thermal.F90:764-783`，此前只有 PFT 路径逐 PFT 处理裸地）。补上：不调
+   `eroot`/`LeafTemperature`，地面湍流量取前置 `GroundFluxes`，冠层量取 THERMAL 入口初值（`rst = 2e4`、`dlrad = frl`、
+   `ulrad` 的 GIMPLE 是 `.FMA (emg*stefnc, t_grnd^4, frl*(1-emg))`），`tleaf = forc_t`、叶面水清零、PHS 下 `vegwp = -2.5e4`，
+   末尾 `ustar…fq`/`z0m` 取地面值（`:1519-1529`）。这条路径对任何 LAI+SAI 为 0 的 LCT 土壤 patch 都成立。
+
+另有一处运行期状态：湖 patch 的 `t_grnd` 存在湖状态里（`surface_temperature_k` 对湖 patch 读它），干湖步末要按
+`t_soisno(lb)` 回写，否则重启 `t_grnd`、反照率（湖面反照率只看 `t_grnd`）和下一步 `newsnow` 的新雪温度都会停在最后一个湿湖步。
+
+### 二、结果（对纯 Fortran，`--preprocessors fortran --engine fortran`，AT-Neu 改湖）
+
+| 算例 | 设置 | 覆盖 | 历史 | 重启+旁车 | release | debug |
+|---|---|---|---|---|---|---|
+| `dl1` | 湖深 1 m，全年（17520 步） | 溢流（`rsur` 最大 1.6e-4 mm/s）、湖上积雪、全冻（冰比 1）、水位 0.908–1.0 m | 12/12 | 25/25 | ✓ | ✓ |
+| `dl2` | 同 `dl1`，1–2 月 | 首个出错算例（第 16 步） | 2/2 | 5/5 | ✓ | ✓ |
+| `dl3` | 湖深 0.12 m，全年 | 3 月转干湖并一直干；干湖上积雪、冻结、土壤饱和积水（zwt = 0，年末 16 mm） | 12/12 | 25/25 | ✓ | ✓ |
+| `dl5` | 湖深 0.10 m，1–6 月 | 湿→干→湿→干三次切换（第 2、52、54 步起） | 6/6 | 13/13 | ✓ | ✓ |
+
+没覆盖到的一支：干湖且 `wdsrf >= 100`（只在 `zwt > 0` 时出现）的 `adjust_lake_layer`。三年（2010–2012）的 `dl3`
+延长版积水最高 94 mm，同一站点造不出来；这一支与湿湖共用同一个已逐位验证的 `adjust_lake_layer`，单元测试覆盖重建与重排。
+
+既有算例不受影响：全量回归 103 例逐位（含上表四例；`nn`/`pni` 不写历史）。
