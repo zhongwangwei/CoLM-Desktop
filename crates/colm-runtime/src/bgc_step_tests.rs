@@ -36,6 +36,11 @@ fn unverified_branches_are_refused() {
             diag_matrix: true,
             ..BgcSwitches::default()
         },
+        // FIRE 已用合成数据逐位验证（第 432 轮）。
+        BgcSwitches {
+            fire: true,
+            ..BgcSwitches::default()
+        },
         // 大豆固氮已在低氮站点逐位验证（第 430 轮）。
         BgcSwitches {
             crop: true,
@@ -45,19 +50,12 @@ fn unverified_branches_are_refused() {
     ] {
         assert!(refuse_unported(switches).is_ok(), "{switches:?}");
     }
-    for switches in [
-        BgcSwitches {
-            fire: true,
-            ..BgcSwitches::default()
-        },
-        BgcSwitches {
-            crop: true,
-            irrigation: true,
-            ..BgcSwitches::default()
-        },
-    ] {
-        assert!(refuse_unported(switches).is_err(), "{switches:?}");
-    }
+    let irrigation = BgcSwitches {
+        crop: true,
+        irrigation: true,
+        ..BgcSwitches::default()
+    };
+    assert!(refuse_unported(irrigation).is_err(), "{irrigation:?}");
 }
 
 /// `itstamp + int(-deltim)`：跨日、跨年回退。
@@ -108,4 +106,35 @@ fn crop_readin_refuses_the_runtime_data_path() {
     assert!(crop_readin(&mut state, &[17], 0.0, crop).is_err());
     let fert = BgcSwitches { fert: true, ..crop };
     assert!(crop_readin(&mut state, &[17], 120.0, fert).is_err());
+}
+
+/// `update_lightning_data`：步首/步末跨 3 小时档才换档；步末按上游 `addsec` 取（23:30 起步的步末是
+/// "当天 86400 秒"，与步首同档、不换），一天的第一步读当天第一档。
+#[test]
+fn the_lightning_record_follows_the_three_hour_bins() {
+    let time = |julian_day, seconds| colm_core::calendar::CalendarTime {
+        year: 2010,
+        julian_day,
+        seconds,
+    };
+    // 00:00 起步：步首算上一档（边界上减 1），步末落第 1 档 → 读第 1 档。
+    assert_eq!(lightning_record_due(time(1, 0), 1800.0).unwrap(), Some(1));
+    // 档内：不换。
+    assert_eq!(lightning_record_due(time(1, 1800), 1800.0).unwrap(), None);
+    // 03:00 起步：进入第 2 档。
+    assert_eq!(
+        lightning_record_due(time(1, 10800), 1800.0).unwrap(),
+        Some(2)
+    );
+    // 23:30 起步：步末是第 1 天 86400 秒，仍在第 8 档，不换。
+    assert_eq!(lightning_record_due(time(1, 84600), 1800.0).unwrap(), None);
+    // 第二天 00:00 起步：读第 9 档。
+    assert_eq!(lightning_record_due(time(2, 0), 1800.0).unwrap(), Some(9));
+    // 闰年最后一天不超过 2920。
+    let leap = colm_core::calendar::CalendarTime {
+        year: 2012,
+        julian_day: 366,
+        seconds: 0,
+    };
+    assert_eq!(lightning_record_due(leap, 1800.0).unwrap(), Some(2920));
 }

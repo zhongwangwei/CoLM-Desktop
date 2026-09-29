@@ -79,6 +79,8 @@ pub mod bgc_crop;
 pub mod bgc_crop_n_dynamics;
 pub mod bgc_decomp;
 pub mod bgc_driver;
+pub mod bgc_fire;
+pub mod bgc_fire_support;
 pub mod bgc_gap_mortality;
 pub mod bgc_litt_vert_transp;
 pub mod bgc_n_dynamics;

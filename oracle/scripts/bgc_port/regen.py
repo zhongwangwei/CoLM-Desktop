@@ -123,6 +123,12 @@ MODULES = [
          ("MOD_BGC_Veg_CNNDynamics", "CNNFert", "cn_n_fert", "`CNNFert`：施肥进入土壤矿质 N。"),
          ("MOD_BGC_Veg_CNNDynamics", "CNSoyfix", "cn_soyfix", "`CNSoyfix`：大豆共生固氮（`DEF_USE_CNSOYFIXN`）。"),
      ]),
+    ("bgc_fire.rs", "`MOD_BGC_Veg_CNFireLi2016.F90`/`MOD_BGC_Veg_CNFireBase.F90`：火烧面积与火烧通量（`DEF_USE_FIRE`）。", "", [
+        ("MOD_BGC_Veg_CNFireLi2016", "CNFireArea", "cn_fire_area",
+         "`CNFireArea`：Li et al. (2012–2017) 的火烧面积（农田、泥炭与其他火）。"),
+        ("MOD_BGC_Veg_CNFireBase", "CNFireFluxes", "cn_fire_fluxes",
+         "`CNFireFluxes`：按火烧面积算植被与凋落物/粗木质残体的燃烧与致死通量。"),
+    ]),
     ("bgc_veg_struct.rs", "`MOD_BGC_Veg_CNVegStructUpdate.F90`：由 C 池更新 LAI/SAI。", "", [
         ("MOD_BGC_Veg_CNVegStructUpdate", "CNVegStructUpdate", "cn_veg_struct_update",
          "`CNVegStructUpdate`：更新 `tsai_p`（每步）与 LAI 反馈下的 `tlai_p`/`lai_p`，再汇总 patch LAI。"),
@@ -137,6 +143,12 @@ ZERO_INIT = {
     "CNSoyfix": ["fxn"],
     # 赋值在 `#ifdef CROP` 的作物块里，使用在同一 `ivt >= npcropmin` 条件下的后一个块里。
     "calc_plant_nutrient_competition_CLM45_default": ["f5"],
+    # 上游声明了 `ivt` 却从不赋值；两个内核的反汇编都按常数表第 0 项取（upstream-bugs 第 24 条）。
+    # `btran2` 只在 PFT 循环里赋值，没有 PFT 时上游读的是未定义值（GIMPLE `btran2_824(D)`）；
+    # 实际运行至少有一个 PFT。
+    "CNFireArea": ["ivt", "btran2"],
+    # `f` 在 PFT 循环里赋值（与 `m` 无关），循环之后的分解池燃烧还用它。
+    "CNFireFluxes": ["ivt", "f"],
 }
 
 # 前向代入的局部变量（见 f2rs.py `FORWARD`），每个都由 GIMPLE 核实。

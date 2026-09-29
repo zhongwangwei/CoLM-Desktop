@@ -38,7 +38,8 @@ while changed:
                     funcs[k] = g
 body = "\n".join(funcs)
 # 逻辑型 PFT 常数单独作 `if` 条件时去掉外层括号（clippy/rustc 的 unused_parens）。
-body = re.sub(r"\bif \((c\.\w+\[[^\]]+\] != 0\.0)\) \{", r"if \1 {", body)
+# 下标里可以再套一层方括号（`c.iscrop[p.pftclass[m] as usize]`）。
+body = re.sub(r"\bif \((c\.\w+\[(?:[^\[\]]|\[[^\]]*\])+\] != 0\.0)\) \{", r"if \1 {", body)
 if "is_end_of_year(" in body and "is_end_of_year" not in header:
     header = header.replace("use crate::bgc_driver::{", "use crate::bgc_driver::{is_end_of_year, ", 1)
 if ".lpow(" in body and "LibmPow" not in header:

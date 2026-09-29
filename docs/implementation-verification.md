@@ -25770,3 +25770,58 @@ Fortran 0、Rust 1。修法：模板记下 `LAI_readin` 的取值，续跑写出
 `nn`/`pni` 不写历史）。其中 `nc` 一度被误放进默认内核那一组：`mksrfdata` 拒绝后目录里留的是上一次的输出，
 对比照样"一致"。`regress.sh` 已改为任一阶段失败即报 FAILED，`nc` 按 CROP 内核重跑确认逐位；续跑目录（`*c`）
 与调试残留 `crd` 已排除出全量回归（前者只能用 `contrun.sh` 跑，`--force 1` 会从冷启动重做）。
+
+## 第 432 轮：FIRE（合成数据）与顺带暴露的两处缺陷
+
+用户决定：本机没有真实的 `fire/` 数据，用合成数据做 Fortran/Rust 对照；上游未赋值的 `ivt` 按编译产物的行为取 0。
+
+### 一、合成数据
+
+`oracle/scripts/make_fire_data.py <runtime> [泥炭地比例缩放]` 在 `<runtime>/fire/` 写出上游读的五个文件（文件名、变量、
+维度照上游）：静态 `abm`/`peatf`/`gdp`、逐年 `hdm`（1850–2016）、3 小时气候态闪电 `lnfm`（2920 条），全球 10° 网格。
+每个格点取值不同（取错格点会暴露）；`hdm` 逐年增长，AT-Neu 格点 2010 年 ≤ 0.1、2011 年 > 0.1，两支都走到。
+`tmp/runtime_fire`（缩放 1）与 `tmp/runtime_fire_low`（0.01）另以符号链接带上 `ndep`/`nitrif`。
+
+### 二、`ivt` 按 0 是编译产物的真实行为
+
+GIMPLE 里 `ivt` 是未定义值 `ivt_858(D)`，不是常数；决定性的证据在反汇编：两份内核（default、crop）的 `cnfirearea`
+读 `isnatveg`/`isbare`/`isbetr`/`isbdtr`、`cnfirefluxes` 读 `cc_leaf` 等，都是符号基址、没有下标偏移，即第 0 项。
+`regen.py` 以 `ZERO_INIT`（`ivt`，另有只在循环里赋值的 `btran2`、`f`）复现。
+
+### 三、移植
+
+- `bgc_fire.rs` 由 `regen.py` 生成（`CNFireArea`、`CNFireFluxes`）。转写器补了：`CALL eroot` → `bgc_fire_support::eroot_rstfac`
+  （`eroot` 是一次真调用、与叶温里同一段目标代码，复用 `root_uptake`）、`CALL qsadv` → `saturation_specific_humidity`、
+  整数组赋值 → `.fill`、patch 号 `i` 在下标之外取 1、循环变量进实数运算时提升、数组段隐式下标与外层循环变量同名时改名
+  （`sum(btran2_p(ps:pe) * pftfrac(m))` 里的 `m` 是外层的；GIMPLE 是一串顺序 FMA）、`atan`、`ivt` 零初值落到 `class`。
+  其余 13 个生成模块逐字不变。`BgcSwitches` 加 `campbell`/`rstfac`（`eroot` 的水力曲线与胁迫方案）。
+- 数据（`bgc_step::FireSource`）：启动时 `abm`/`gdp`/`peatf` 与起始年（`adj2end` 之后，同 ndep）的 `hdm`，`lnfm` 置 `spval`
+  （不在重启里，`init_lightning_data` 读了却没映射到 patch）；每步开头按 `update_lightning_data` 的 3 小时档换闪电——步末
+  时刻照上游 `addsec` 只在秒数**超过** 86400 时进位（23:30 起步的步末是"当天 86400 秒"，与步首同档、不换）；跨年那一步与
+  ndep 同条件更新 `hdm`。
+- 历史：FIRE 的五个量写的是残留的 `vecacc`（upstream-bugs 第 26 条），照写；`a_abm` 等照常累加进旁车。
+- 上游 FIRE 本身的缺陷（第 24、25 条）照转写：泥炭火烧掉的凋落物不计入碳收支，误差累积到阈值就 abort；
+  CROP 内核打开 FIRE 第一步就除零（浮点陷阱）。Rust 在 `CNFireArea` 之后检查输出是否有限，同样终止。
+- 中途 abort 的输出与上游一致：一个历史文件在它的最后一条记录写完时就落盘（上游写回模式此刻把内存里的整组写出），
+  写到一半的那组在失败时只留文件头（`HistoryBuffers::write_header`，无 `time`/`sensor`）；终点续跑目录改为写出时再建。
+
+### 四、顺带暴露：雪层合并的 `combo` 收缩与结合顺序（与 FIRE 无关）
+
+两年的 `by2`（有火）与 `bz2`（无火）都在 2011-12-31 第 26 步分叉：从 12-01 续跑、逐步写续跑定位到 13:00→13:30 这一步，
+再给 `GroundTemperature` 插桩（`tmp/kprobe`，源码当场还原）——系数矩阵、三对角解、相变后的温度与水冰两边逐位相同，
+分叉在其后的 `snowlayersdivide`：顶层超出 0.02 m 的部分并入第二层，第二层温度经 `combo` 合并。`combo` 不被内联，GIMPLE 是
+热容 `.FMA (wice, cpice, wliq*cpliq)`、`h = .FMA (热容, t-tfrz, wliq*hfus)`、两层各算再 `hc = h + h2`；Rust 原来平铺且四项
+连加。没有液水时每个 FMA 的加数都是 0、两种写法逐位相同，所以一年期的算例从未暴露；这一步两层都有少量液水。
+修正 `snow::combine_snow_values` 后两年算例逐位。
+
+### 五、结果（对纯 Fortran）
+
+| 算例 | 内容 | 结果 | release | debug |
+|---|---|---|---|---|
+| `bx` | AT-Neu BGC+PFT+NITRIF，FIRE（泥炭 ×1），2010–2011 | 两边都在第 10885 步（2010-08-15）以同样的碳收支误差 abort；历史 8/8（8 月只有文件头）、重启与旁车 31/31；终止前 26 次调用的 906 条追踪逐位 | ✓ | ✓ |
+| `by2` | 同上，泥炭 ×0.01，跑满两年 | 历史 24/24、重启与旁车 99/99 | ✓ | ✓ |
+| `bz2` | 同 `by2`，FIRE 关 | 24/24、99/99 | ✓ | — |
+| `cx` | US-Ne3 玉米（`kernels/crop`），FIRE | 两边第一步即因除零终止，落盘内容相同（只有初始重启，逐位） | ✓ | ✓ |
+
+逐过程回放（`tmp/kbgc` 追踪 `bx`：全程每 500 步取 2 次调用 + abort 前 30 次调用，共 2307 条记录）全部逐位。
+全量回归（release）76 个算例逐位。

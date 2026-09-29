@@ -28,6 +28,10 @@ pub struct BgcSwitches {
     pub irrigation: bool,
     pub laifeedback: bool,
     pub nostressnitrogen: bool,
+    /// `DEF_USE_Campbell_SOIL_MODEL`：`CNFireArea` 调 `eroot` 时用的水力曲线（默认 VG）。
+    pub campbell: bool,
+    /// `DEF_RSTFAC`（1 或 2）：`CNFireArea` 调 `eroot` 时的水分胁迫方案。
+    pub rstfac: i32,
 }
 
 macro_rules! physics_fields {
@@ -346,6 +350,11 @@ pub fn run_stage(stage: &str, step: &mut BgcStep<'_>) -> Result<()> {
         "CNGapMortality" => gen!(crate::bgc_gap_mortality::cn_gap_mortality),
         "CStateUpdate2" => gen!(crate::bgc_c_state_update::c_state_update2),
         "NStateUpdate2" => gen!(crate::bgc_n_state_update::n_state_update2),
+        "CNFireArea" => {
+            gen!(crate::bgc_fire::cn_fire_area)?;
+            crate::bgc_fire_support::ensure_no_fp_trap(step.state)?;
+        }
+        "CNFireFluxes" => gen!(crate::bgc_fire::cn_fire_fluxes),
         "CStateUpdate3" => gen!(crate::bgc_c_state_update::c_state_update3),
         "CNAnnualUpdate" => gen!(crate::bgc_annual_update::cn_annual_update),
         "SoilBiogeochemNLeaching" => gen!(crate::bgc_n_leaching::soil_biogeochem_n_leaching),

@@ -230,6 +230,135 @@ impl NitrifSource {
     }
 }
 
+/// `MOD_FireData` 与 `MOD_LightningData`：`DEF_USE_FIRE` 的火灾驱动数据（`DEF_dir_runtime/fire/`）。
+///
+/// 上游用 `abm` 文件的经纬度建一张网格，`peatf`/`gdp`/`hdm` 都按这张网格读块（假定同网格）；闪电另有
+/// 一张网格。单点的面积加权映射就是取包含站点的那一格（与 [`NdepSource`] 同）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct FireSource {
+    dir: PathBuf,
+    cell: (usize, usize),
+    lightning_cell: (usize, usize),
+    /// `abm_lf`（作物火高峰月）、`peatf_lf`（泥炭地比例）、`gdp_lf`：启动时读一次。
+    pub abm: f64,
+    pub peatf: f64,
+    pub gdp: f64,
+}
+
+const FIRE_ABM: &str = "abm_colm_double_fillcoast.nc";
+const FIRE_PEATF: &str = "peatf_colm_360x720_c100428.nc";
+const FIRE_GDP: &str = "gdp_colm_360x720_c100428.nc";
+const FIRE_HDM: &str =
+    "colmforc.Li_2017_HYDEv3.2_CMIP6_hdm_0.5x0.5_AVHRR_simyr1850-2016_c180202.nc";
+const FIRE_LIGHTNING: &str = "clmforc.Li_2012_climo1995-2011.T62.lnfm_Total_c140423.nc";
+
+impl FireSource {
+    /// `init_fire_data` 的静态部分：`abm`/`peatf`/`gdp`。
+    pub fn open(runtime_dir: &Path, latitude_deg: f64, longitude_deg: f64) -> Result<Self> {
+        let dir = runtime_dir.join("fire");
+        let cell = |file: &str| -> Result<(usize, usize)> {
+            let path = dir.join(file);
+            let nc = netcdf::open(&path)
+                .with_context(|| format!("cannot open the fire data {}", path.display()))?;
+            let axis = |name: &str| -> Result<Vec<f64>> {
+                nc.variable(name)
+                    .with_context(|| format!("{} has no {name}", path.display()))?
+                    .get_values::<f64, _>(..)
+                    .with_context(|| format!("cannot read {name} from {}", path.display()))
+            };
+            Ok((
+                containing_cell(&axis("lat")?, latitude_deg, false)?,
+                containing_cell(&axis("lon")?, longitude_deg, true)?,
+            ))
+        };
+        let grid = cell(FIRE_ABM)?;
+        let lightning_cell = cell(FIRE_LIGHTNING)?;
+        let mut source = Self {
+            dir,
+            cell: grid,
+            lightning_cell,
+            abm: 0.0,
+            peatf: 0.0,
+            gdp: 0.0,
+        };
+        source.abm = source.read(FIRE_ABM, "abm", None, grid)?;
+        source.peatf = source.read(FIRE_PEATF, "peatf", None, grid)?;
+        source.gdp = source.read(FIRE_GDP, "gdp", None, grid)?;
+        Ok(source)
+    }
+
+    fn read(
+        &self,
+        file: &str,
+        variable: &str,
+        time: Option<usize>,
+        (lat, lon): (usize, usize),
+    ) -> Result<f64> {
+        let path = self.dir.join(file);
+        let nc = netcdf::open(&path).with_context(|| format!("cannot open {}", path.display()))?;
+        let variable_ref = nc
+            .variable(variable)
+            .with_context(|| format!("{} has no {variable}", path.display()))?;
+        let value = match time {
+            Some(t) => variable_ref.get_value::<f64, _>([t, lat, lon]),
+            None => variable_ref.get_value::<f64, _>([lat, lon]),
+        };
+        value.with_context(|| format!("cannot read {variable} from {}", path.display()))
+    }
+
+    /// `update_hdm_data(YY)`：`itime = max(1850, min(YY, 2016)) - 1849`（1 起）。
+    pub fn hdm(&self, year: i32) -> Result<f64> {
+        let itime = usize::try_from(year.clamp(1850, 2016) - 1850).expect("clamped");
+        self.read(FIRE_HDM, "hdm", Some(itime), self.cell)
+    }
+
+    /// 闪电气候态的第 `itime` 条（1 起，3 小时一条，一年 2920 条）。
+    pub fn lightning(&self, itime: usize) -> Result<f64> {
+        ensure!(itime >= 1, "the lightning record index starts at 1");
+        self.read(FIRE_LIGHTNING, "lnfm", Some(itime - 1), self.lightning_cell)
+    }
+}
+
+/// `update_lightning_data(itstamp, deltim)`：步首与步末落在不同的 3 小时档时返回要读的那一档（1 起）。
+///
+/// 步首档：`(day-1)*8 + min(sec/10800+1, 8)`，恰在档边界上时减 1（算作上一档）；步末档：
+/// `(day'-1)*8 + max(0, sec'-1)/10800 + 1`，不超过 2920（闰年最后一天沿用前一天的档）。
+pub fn lightning_record_due(
+    begin: colm_core::calendar::CalendarTime,
+    deltim: f64,
+) -> Result<Option<usize>> {
+    let day = i64::from(begin.julian_day);
+    let sec = i64::from(begin.seconds);
+    let mut itime = (day - 1) * 8 + (sec / 10800 + 1).min(8);
+    if sec % 10800 == 0 {
+        itime -= 1;
+    }
+    // `time_next = time + int(deltim)`：上游 `addsec` 只在秒数**超过** 86400 时进位，23:30 起步的步末是
+    // "当天 86400 秒"而不是"次日 0 秒"——前者与步首同档、不换，后者会提前读下一档。
+    let (mut next_year, mut next_day, mut next_sec) =
+        (begin.year, i64::from(begin.julian_day), sec + deltim as i64);
+    while next_sec > 86400 {
+        next_sec -= 86400;
+        next_day += 1;
+        let days = if colm_core::calendar::is_leap_year(next_year) {
+            366
+        } else {
+            365
+        };
+        if next_day > days {
+            next_year += 1;
+            next_day = 1;
+        }
+    }
+    let itime_next = (next_day - 1) * 8 + (next_sec - 1).max(0) / 10800 + 1;
+    if itime_next == itime {
+        return Ok(None);
+    }
+    Ok(Some(
+        usize::try_from(itime_next.min(2920)).context("a negative lightning index")?,
+    ))
+}
+
 /// `grid%define_by_center`：网格边界取相邻中心的中点，返回包含 `x` 的格子。
 fn containing_cell(centers: &[f64], x: f64, periodic: bool) -> Result<usize> {
     ensure!(!centers.is_empty(), "an empty coordinate axis");
@@ -311,6 +440,8 @@ pub struct BgcDataSources {
     /// 启动时读氮沉降用的年份：`adj2end` 之后的起始年（00:00 1 月 1 日起步时是上一年）。
     pub ndep_start_year: i32,
     pub nitrif: Option<(NitrifSource, u8)>,
+    /// `DEF_USE_FIRE` 打开时的火灾数据。
+    pub fire: Option<FireSource>,
 }
 
 /// 一个 BGC 土壤 patch 的运行期设置。
@@ -322,6 +453,8 @@ pub struct BgcRuntime {
     pub ndep: NdepSource,
     /// `DEF_USE_NITRIF` 打开时的 O₂ 数据。
     pub nitrif: Option<NitrifSource>,
+    /// `DEF_USE_FIRE` 打开时的火灾数据。
+    pub fire: Option<FireSource>,
     /// 启动时读氮沉降用的年份：`adj2end` 之后的起始年（00:00 1 月 1 日起步时是上一年）。
     pub ndep_start_year: i32,
     /// `deltim`（秒）。
@@ -348,6 +481,7 @@ impl Clone for BgcRuntime {
             statics: self.statics.clone(),
             ndep: self.ndep.clone(),
             nitrif: self.nitrif.clone(),
+            fire: self.fire.clone(),
             ndep_start_year: self.ndep_start_year,
             deltim: self.deltim,
             // 追踪文件只属于第一个实例。
@@ -369,6 +503,7 @@ impl BgcRuntime {
             ndep,
             ndep_start_year,
             nitrif,
+            fire,
         } = sources;
         // `init_ndep_data_annually`：步进之前就写好 `ndep`/`ndep_to_sminn`。
         let (ndep_value, to_sminn) = ndep.annual(ndep_start_year, statics.patchclass)?;
@@ -381,6 +516,16 @@ impl BgcRuntime {
             initial.patch.to2_decomp_depth_unsat.copy_from_slice(&depth);
         }
         let nitrif = nitrif.map(|(source, _)| source);
+        // `init_fire_data(sdate(1))`：`abm`/`gdp`/`peatf` 与起始年（`adj2end` 之后，同 ndep）的 `hdm`。
+        // `lnfm` 不在重启里、分配时是 `spval`；`init_lightning_data` 读了闪电却没映射到 patch，要等
+        // 第一次 `update_lightning_data` 换档才有值。
+        if let Some(source) = &fire {
+            initial.invariants.abm_lf[0] = source.abm;
+            initial.invariants.gdp_lf[0] = source.gdp;
+            initial.invariants.peatf_lf[0] = source.peatf;
+            initial.patch.hdm_lf[0] = source.hdm(ndep_start_year)?;
+            initial.patch.lnfm[0] = MISSING;
+        }
         Ok(Self {
             initial,
             pft,
@@ -388,6 +533,7 @@ impl BgcRuntime {
             statics,
             ndep,
             nitrif,
+            fire,
             ndep_start_year,
             deltim,
             trace: Mutex::new(TraceWriter::from_env()?),
@@ -420,10 +566,20 @@ impl BgcRuntime {
                 bgc.patch.to2_decomp_depth_unsat.copy_from_slice(&depth);
             }
         }
+        // `update_lightning_data(itstamp, deltim)`（`CoLM.F90:503-505`）：步首与步末跨了 3 小时档就换。
+        if let Some(fire) = &self.fire {
+            if let Some(itime) = lightning_record_due(begin, deltim)? {
+                bgc.patch.lnfm[0] = fire.lightning(itime)?;
+            }
+        }
         if colm_core::bgc_driver::is_end_of_year(idate, deltim) {
             let (ndep, to_sminn) = self.ndep.annual(idate[0], self.statics.patchclass)?;
             bgc.patch.ndep[0] = ndep;
             bgc.patch_flux.ndep_to_sminn[0] = to_sminn;
+            // `update_hdm_data(idate(1))`：与年度 ndep 同一个条件、同一个年份（`CoLM.F90:537-541`）。
+            if let Some(fire) = &self.fire {
+                bgc.patch.hdm_lf[0] = fire.hdm(idate[0])?;
+            }
         }
         let mut physics = self.physics(idate, deltim, forcing, state, output, &bgc)?;
         {
@@ -697,10 +853,7 @@ pub fn crop_readin(
 }
 
 pub fn refuse_unported(switches: BgcSwitches) -> Result<()> {
-    let unported = [
-        (switches.fire, "DEF_USE_FIRE"),
-        (switches.irrigation, "DEF_USE_IRRIGATION (CROP)"),
-    ];
+    let unported = [(switches.irrigation, "DEF_USE_IRRIGATION (CROP)")];
     for (on, name) in unported {
         if on {
             bail!("{name} is on, but the Rust BGC driver has not been verified on that branch yet");

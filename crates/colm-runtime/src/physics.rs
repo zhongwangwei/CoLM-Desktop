@@ -174,6 +174,8 @@ pub fn land_physics_parameters(
             irrigation: false,
             laifeedback: logical(document, "DEF_USE_LAIFEEDBACK")?,
             nostressnitrogen: logical(document, "DEF_USE_NOSTRESSNITROGEN")?,
+            campbell: logical(document, "DEF_USE_Campbell_SOIL_MODEL")?,
+            rstfac: scheme_index(document, "DEF_RSTFAC", 1, 2)?,
         };
         crate::bgc_step::refuse_unported(switches)?;
         Some(switches)

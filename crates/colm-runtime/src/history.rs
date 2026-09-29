@@ -406,6 +406,7 @@ pub fn bgc_history_variables(switches: colm_core::bgc_driver::BgcSwitches) -> Ve
             Some("DEF_USE_BGC") => true,
             Some("(DEF_USE_BGC) .and. (DEF_USE_NITRIF)") => nitrif,
             Some("(DEF_USE_BGC) .and. (DEF_USE_DiagMatrix)") => diag_matrix,
+            Some("(DEF_USE_BGC) .and. (DEF_USE_FIRE)") => switches.fire,
             _ => false,
         };
         // `#ifdef CROP` 的一批（64 个）只在 CROP 内核里存在。
@@ -544,7 +545,9 @@ fn set_bgc_history(
             Requires::BgcCrop => switches.crop,
             _ => false,
         };
+        let fire_only = FIRE_HISTORY.iter().any(|(name, _)| *name == key);
         let accumulated = !BGC_UNACCUMULATED.contains(&key)
+            && (switches.fire || !fire_only)
             && (switches.diag_matrix || !(entry.rank == 1 && key.ends_with("Cap")))
             && (switches.nitrif || !matches!(key, "CONC_O2_UNSAT" | "O2_DECOMP_DEPTH_UNSAT"));
         if allocated && accumulated && !names.contains(&key) {
@@ -639,6 +642,10 @@ fn set_bgc_history(
                 continue;
             }
         }
+        let source = match FIRE_HISTORY.iter().find(|(field, _)| *field == source) {
+            Some((_, state)) => state,
+            None => source,
+        };
         let source = match source {
             "hr" => "decomp_hr",
             "retrasn" => "retransn",
@@ -805,6 +812,39 @@ impl HistoryAccumulator {
     /// **其余变量一律除以全局 `nac`**，即使某些步是 spval 被跳过：DiagMatrix 的 `*Cap` 在年末
     /// 那一小时里前一步还是 spval、后一步才有值，上游写出的是值的一半（第 421 轮）。
     fn write_means(&self, buffer: &mut HistoryBuffers, record: usize) -> Result<()> {
+        self.write_plain_means(buffer, record)?;
+        self.write_fire_history(buffer, record)
+    }
+
+    /// 五个火灾历史量：复现上游传残留 `vecacc` 的写法（见 [`FIRE_HISTORY`]）。
+    fn write_fire_history(&self, buffer: &mut HistoryBuffers, record: usize) -> Result<()> {
+        if !buffer.declares("abm") {
+            return Ok(());
+        }
+        let steps = self.steps as f64;
+        // CROP 内核（声明了 `grainc_to_cropprodc`）：`vecacc` 残留的是 `a_grainc_to_cropprodc / nac`；
+        // 默认内核：`f_wetzwt` 把非湿地 patch 置成了 `spval`。
+        let mut value = match self.sums.get("grainc_to_cropprodc") {
+            Some(Accumulated::Scalar { sum, count })
+                if buffer.declares("grainc_to_cropprodc") && *count > 0 =>
+            {
+                sum / steps
+            }
+            _ => colm_core::MISSING,
+        };
+        for (name, _) in FIRE_HISTORY {
+            if value == colm_core::MISSING {
+                continue;
+            }
+            value /= steps;
+            buffer
+                .set_patch_scalar(name, record, value)
+                .with_context(|| format!("cannot write {name} into the history buffers"))?;
+        }
+        Ok(())
+    }
+
+    fn write_plain_means(&self, buffer: &mut HistoryBuffers, record: usize) -> Result<()> {
         ensure!(
             self.steps > 0,
             "the history accumulator reached a write step without accumulating anything"
@@ -815,6 +855,9 @@ impl HistoryAccumulator {
                 continue;
             }
             if self.filtered.contains(name) {
+                continue;
+            }
+            if FIRE_HISTORY.iter().any(|(fire, _)| fire == name) {
                 continue;
             }
             match accumulated {
@@ -870,8 +913,8 @@ impl HistoryAccumulator {
 const SOIL_STATICS: [&str; 3] = ["BD_all", "wfc", "OM_density"];
 
 /// BGC 下分配、但 Rust 不累加的量：灌溉账目（`sum_irrig`…`runoff_supply`，灌溉在运行期被拒绝，
-/// 关掉时上游数组一直是 `spval`）与 FIRE 的五项（只在 `DEF_USE_FIRE` 下累加，同样被拒绝）。
-const BGC_UNACCUMULATED: [&str; 16] = [
+/// 关掉时上游数组一直是 `spval`）。FIRE 的五项见 [`FIRE_HISTORY`]。
+const BGC_UNACCUMULATED: [&str; 11] = [
     "sum_irrig",
     "sum_deficit_irrig",
     "sum_irrig_count",
@@ -883,11 +926,21 @@ const BGC_UNACCUMULATED: [&str; 16] = [
     "reservoir_supply",
     "river_supply",
     "runoff_supply",
-    "abm",
-    "gdp",
-    "peatf",
-    "hdm",
-    "lnfm",
+];
+
+/// `DEF_USE_FIRE` 的五个历史量与各自的累加来源（`acc1d(abm_lf, a_abm)` 等，`MOD_Vars_1DAccFluxes.F90:2435`）。
+///
+/// **写出的不是它们的平均。** 上游 `MOD_Hist.F90:1937-1957` 五次都把临时数组 `vecacc` 传给
+/// `write_history_variable_2d`，而后者原地 `vecacc = vecacc/nac`（非 `spval` 处）并把过滤掉的 patch 置
+/// `spval`。所以写出的是上一次用 `vecacc` 写历史后的残留、每写一个再除一次 `nac`：默认内核里上一次是
+/// `f_wetzwt`（湿地过滤，BGC patch 恒为土壤 → 全是 `spval`），CROP 内核里是 `f_grainc_to_cropprodc`
+/// （灌溉关闭时）。见 [`HistoryAccumulator::write_fire_history`]。
+const FIRE_HISTORY: [(&str, &str); 5] = [
+    ("abm", "abm_lf"),
+    ("gdp", "gdp_lf"),
+    ("peatf", "peatf_lf"),
+    ("hdm", "hdm_lf"),
+    ("lnfm", "lnfm"),
 ];
 
 /// 只为续跑旁车累加、Rust 的步输出里没有的量：上游 `accumulate_fluxes` 对每个 patch 每步都
@@ -3056,7 +3109,28 @@ impl HistorySession {
         )?;
         means.write_means(buffer, record.record)?;
         self.cursor += 1;
+        // 分组的最后一条写完就落盘（上游写回模式在这一刻把内存里的整组写出）；开着的缓冲区因此
+        // 只会是写了一半的组，中途 abort 时由 [`Self::abandon`] 留下只有文件头的文件。
+        if record.record + 1 == self.record_count(&record.suffix) {
+            if let Some(path) = self.finish()?.pop() {
+                written = Some(path);
+            }
+        }
         Ok(written)
+    }
+
+    /// 运行中途失败：写到一半的那组留下只有文件头的文件（与上游 abort 后磁盘上的状态一致）。
+    pub fn abandon(&mut self) -> Result<Option<PathBuf>> {
+        let Some((suffix, buffer)) = self.open.take() else {
+            return Ok(None);
+        };
+        std::fs::create_dir_all(&self.directory)
+            .with_context(|| format!("cannot create {}", self.directory.display()))?;
+        let path = self
+            .directory
+            .join(format!("{}_hist_{suffix}.nc", self.stem));
+        buffer.write_header(&path)?;
+        Ok(Some(path))
     }
 
     /// 某个后缀有多少条记录。

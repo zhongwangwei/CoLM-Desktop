@@ -149,10 +149,7 @@ fn run() -> Result<()> {
          DEF_simulation_time%end must be after %start",
         restarts.initial.display()
     );
-    if let Some(parent) = outputs.restart_out.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("cannot create {}", parent.display()))?;
-    }
+    // 终点续跑文件的目录由写出时再建（`write_evolved_restart`）：中途失败的运行不留空目录，与上游一致。
     if let Some(directory) = &outputs.history_directory {
         std::fs::create_dir_all(directory)
             .with_context(|| format!("cannot create {}", directory.display()))?;
@@ -423,6 +420,16 @@ fn assemble_bgc(
     } else {
         None
     };
+    // `init_fire_data`：`DEF_dir_runtime/fire/` 的静态场与逐年人口密度、3 小时闪电。
+    let fire = if switches.fire {
+        Some(colm_runtime::bgc_step::FireSource::open(
+            &runtime_dir,
+            degrees(statics.patchlatr),
+            degrees(statics.patchlonr),
+        )?)
+    } else {
+        None
+    };
     colm_runtime::bgc_step::BgcRuntime::new(
         initial,
         colm_runtime::bgc::bgc_pft_constants(document)?,
@@ -432,6 +439,7 @@ fn assemble_bgc(
             ndep,
             ndep_start_year,
             nitrif,
+            fire,
         },
         deltim,
     )

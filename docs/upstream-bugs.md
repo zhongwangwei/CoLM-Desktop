@@ -144,6 +144,42 @@
 - **处理**：`vendor/` 未改；Rust 引擎不走写回缓冲，`'none'` 下照上游语义只累加、不写历史，续跑旁车存整段原始窗口
   （与关掉写回的 Fortran 逐位一致，第 431 轮）。建议上游补 `CASE DEFAULT`（或 `'none'` 时不建写回缓冲）。
 
+### 24. `CNFireArea`/`CNFireFluxes` 的 `ivt` 从不赋值
+
+- **位置**：`main/BGC/MOD_BGC_Veg_CNFireLi2016.F90:66`（声明，`:159` 有注释 "Warning : ivt is not initialized."）起
+  `isnatveg(ivt)`/`isbare(ivt)`/`fsr_pft(ivt)`/`fd_pft(ivt)`/`iscrop(ivt)`；`MOD_BGC_Veg_CNFireBase.F90:101` 起
+  `cc_*(ivt)`/`fm_*(ivt)`/`lf_*(ivt)`/`fr_*(ivt)`。
+- **原因**：两个过程都声明了局部 `ivt` 却从不赋值（应当是逐 PFT 的 `pftclass(m)`）。GIMPLE 里是未定义值
+  `ivt_858(D)`；两份内核（default、crop）的反汇编都直接读各常数表的**第 0 项**（`isbare`、`isnatveg`、`cc_leaf`… 的
+  基址、无下标偏移），即按裸土处理。
+- **影响**：火烧面积只剩泥炭火（`fsr_pft(0) = fd_pft(0) = 0`），植被燃烧系数 `cc_*(0) = 0`；纯作物 patch
+  （`cropf = 1`）也走自然植被那一支，`1/(1-cropf)`、`fd_pft(0)*3600/(1-cropf)` 必然除零——内核带
+  `-ffpe-trap=invalid,zero,overflow`，CROP 内核打开 FIRE 第一步即 SIGILL（lldb：`cnfirearea+33892` 的 `fdiv`）。
+- **处理**：`vendor/` 未改；Rust 照编译产物按 0（`regen.py` 的 `ZERO_INIT`），并在 `CNFireArea` 之后检查输出是否
+  有限、不有限就同样终止（`bgc_fire_support::ensure_no_fp_trap`）。建议上游在 PFT 循环里取 `ivt = pftclass(m)`。
+
+### 25. FIRE 的其他记账错误（`CNFireFluxes`）
+
+- **位置**：`main/BGC/MOD_BGC_Veg_CNFireBase.F90`。
+- **原因与影响**：
+  - `m_deadstemc_to_litter_fire_p = deadstemc_p(m) * f * m * …`（及 `deadcrootc`/`deadstemn` 同式）：乘的是 PFT 下标 `m`，
+    应当是 `mort`；
+  - `fire_mortality_to_cel_n`/`lig_n` 用 `lf_fcel(i)`/`fr_flig(i)`：下标是 patch 号而不是 PFT 类别；
+  - 每步只清零 `fire_mortality_to_cwdc/cwdn/met_c` 三项，`cel_c`/`lig_c`/`met_n`/`cel_n`/`lig_n` 靠别处清零；
+  - 凋落物与粗木质残体的燃烧（`m_decomp_cpools_to_fire_vr`）从池里扣掉，却不计入 `CBalanceCheck` 的输出项
+    （`fire_closs` 恒为 0），收支误差随火烧面积累积：合成数据下 AT-Neu 2010-08-15 第 10885 步
+    `column cbalance error = 1.0002e-7` 超限 abort。
+- **处理**：`vendor/` 未改；Rust 照转写（生成代码逐字复现），在同一步以同样的收支误差终止。
+
+### 26. FIRE 的五个历史量写的是临时数组 `vecacc`
+
+- **位置**：`main/MOD_Hist.F90:1937-1957`（`f_abm`/`f_gdp`/`f_peatf`/`f_hdm`/`f_lnfm`）。
+- **原因**：五次都把 `vecacc` 传给 `write_history_variable_2d`，而不是 `a_abm` 等累加器；后者还会原地
+  `vecacc = vecacc/nac`（非 `spval` 处）并把过滤掉的 patch 置 `spval`。
+- **影响**：写出的是上一次用 `vecacc` 写历史后的残留、每个量再多除一次 `nac`：默认内核里上一次是 `f_wetzwt`
+  （湿地过滤，BGC patch 恒为土壤 → 五个量全是缺测），CROP 内核（灌溉关）里是 `f_grainc_to_cropprodc`。
+- **处理**：`vendor/` 未改；Rust 照写（`history.rs` 的 `FIRE_HISTORY` 与 `write_fire_history`），`a_abm` 等照常累加进旁车。
+
 ## 二、TRACER 编译开关改变了物理（需要上游确认哪一边是对的）
 
 这一版上游在很多地方给 TRACER 构建和非 TRACER 构建写了**不同的物理**，不只是记账不同。

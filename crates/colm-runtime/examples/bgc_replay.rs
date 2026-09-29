@@ -46,6 +46,11 @@ fn main() -> Result<()> {
         irrigation: crop && flag("DEF_USE_IRRIGATION", false),
         laifeedback: flag("DEF_USE_LAIFEEDBACK", false),
         nostressnitrogen: flag("DEF_USE_NOSTRESSNITROGEN", false),
+        campbell: flag("DEF_USE_Campbell_SOIL_MODEL", false),
+        rstfac: match document.get("DEF_RSTFAC") {
+            Some(colm_namelist::Value::Int(value)) => i32::try_from(*value)?,
+            _ => 1,
+        },
     };
     let only = args.get(3);
     let mut call = 0;

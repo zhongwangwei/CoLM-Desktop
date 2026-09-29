@@ -409,6 +409,9 @@ def emit(e, ctx, want="f64", fma_ok=True):
     if k == "name":
         n = e[1]
         if n in ctx.loops:
+            # 循环变量进实数运算时按 Fortran 的混合运算规则提升（`CNFireFluxes` 的 `… * f * m`）。
+            if want == "f64":
+                return f"f64::from({n} as i32 + 1)"
             return f"({n} as i32 + 1)"
         if n in ctx.locals or n == "ivt":
             return n
@@ -430,6 +433,9 @@ def emit(e, ctx, want="f64", fma_ok=True):
             return f"s.constants.{SCALARS[n][0]}"
         if n in FIELDS:
             return f"s.{FIELDS[n][1]}.{FIELDS[n][0]}"
+        if n == "i":
+            # 在下标之外用到 patch 号本身（`CNFireFluxes` 的 `lf_fcel(i)`）：单 patch 引擎里恒为 1。
+            return "1"
         return f"/*?{n}*/{n}"
     if k == "call":
         n, args = e[1], e[2]
@@ -447,7 +453,12 @@ def emit(e, ctx, want="f64", fma_ok=True):
         if pr:
             return pr
         if n in PFTC:
-            ix = "class" if args[0] == ("name", "ivt") else f"{emit(args[0], ctx, 'i32')} as usize"
+            if args[0] == ("name", "ivt"):
+                ix = "class"
+            else:
+                ix = emit(args[0], ctx, 'i32')
+                # 常数下标（单 patch 引擎里的 patch 号 `i` 恒为 1）不必再转 `usize`。
+                ix = ix if ix.isdigit() else f"{ix} as usize"
             ref = f"c.{n}[{ix}]"
             return f"({ref} != 0.0)" if n in PFTC_LOGICAL else ref
         if n in ("max", "min", "amax1", "amin1"):
@@ -457,7 +468,7 @@ def emit(e, ctx, want="f64", fma_ok=True):
             for a in args[1:]:
                 out = f"{out}.{fn}({strip_parens(emit(a, ctx, t))})"
             return out
-        if n in ("exp", "log", "sqrt", "abs", "sin", "cos", "log10"):
+        if n in ("exp", "log", "sqrt", "abs", "sin", "cos", "log10", "atan"):
             fn = {"log": "ln"}.get(n, n)
             return f"{wrap_recv(emit(args[0], ctx), args[0])}.{fn}()"
         if n in ("real", "dble"):
@@ -471,13 +482,15 @@ def emit(e, ctx, want="f64", fma_ok=True):
             return f"crate::bgc_phenology::daylength({emit(args[0], ctx)}, {emit(args[1], ctx, 'i32')})"
         if n == "sum" and var_line_vectorized() and args[0][0] == "*" and len(args) == 1:
             var, bound = section_var(args[0])
+            n_expr = "npft" if var == "m" else bound.split("..")[1]
+            var = fresh_section_var(var, ctx)
             ctx2 = Ctx(ctx.locals, ctx.loops | {var})
             inner = replace_ranges(args[0], var)
             a, b = (arg(x, ctx2) for x in inner[1:])
-            n_expr = "npft" if var == "m" else bound.split("..")[1]
             return f"vectorized_dot({n_expr}, |{var}| ({a}, {b}))"
         if n == "sum":
             var, bound = section_var(args[0])
+            var = fresh_section_var(var, ctx)
             inner = replace_ranges(args[0], var)
             ctx2 = Ctx(dict(ctx.locals, acc="f64"), ctx.loops | {var})
             body = emit(("+", ("name", "acc"), inner), ctx2)
@@ -496,6 +509,12 @@ def emit(e, ctx, want="f64", fma_ok=True):
             return f"is_leap_year({emit(args[0], ctx, 'i32')})"
         return f"/*?call {n}*/{n}({', '.join(emit(a, ctx) for a in args)})"
     raise SystemExit(f"cannot emit {e}")
+
+
+def fresh_section_var(var, ctx):
+    """数组段的隐式下标与外层循环变量同名时改名：`DO m … sum(btran2_p(ps:pe) * pftfrac(m))` 里
+    `pftfrac(m)` 是外层的 `m`，求和变量若也叫 `m` 会把它遮住（`CNFireArea` 的 `btran2`）。"""
+    return f"{var}_s" if var in ctx.loops else var
 
 
 def var_line_vectorized():
@@ -846,6 +865,11 @@ def main():
                 if nm.group(2):
                     lower = re.match(r"\s*\(\s*(-?\d+)\s*:", nm.group(2))
                     LOCAL_ARRAYS[name] = int(lower.group(1)) if lower else 1
+                if name == "ivt" and name in ZERO_INIT:
+                    # 上游声明了 `ivt` 却从不赋值（`CNFireArea`/`CNFireFluxes`）；编译产物读的是
+                    # 各常数表的第 0 项（反汇编核实，见 upstream-bugs），即按 0 处理。
+                    w("let class: usize = 0;")
+                    continue
                 if name in ("m", "j", "k", "l", "ivt", "i", "ps", "pe", "fc", "fp", "p", "c", "g", "s", "d", "sw"):
                     continue
                 if name in FORWARD:
@@ -967,6 +991,24 @@ def main():
             args = ", ".join(["s", "p", "c", "sw"] + extra)
             w(f"{snake(m.group(1))}({args});")
             continue
+        m = re.match(r"call\s+qsadv\s*\((.*)\)$", s, re.I)
+        if m:
+            # `MOD_Qsadv:qsadv(T, p, es, esdT, qs, qsdT)` → `atmosphere::saturation_specific_humidity`。
+            a = [x.strip() for x in re.split(r",(?![^(]*\))", m.group(1))]
+            RESULT[0] = True
+            w(f"let sat = crate::atmosphere::saturation_specific_humidity("
+              f"{emit(parse_expr(a[0]), ctx)}, {emit(parse_expr(a[1]), ctx)})?;")
+            for target, field in zip(a[2:], ["vapor_pressure_pa", "vapor_pressure_temperature_slope_pa_k",
+                                             "specific_humidity", "specific_humidity_temperature_slope_k"]):
+                w(f"{emit(parse_expr(target), ctx)} = sat.{field};")
+            continue
+        m = re.match(r"call\s+eroot\s*\((.*)\)$", s, re.I)
+        if m:
+            # `CNFireArea` 里唯一的一次：只用最后一个输出 `rstfac`（`btran2_p(m)`），见 `bgc_fire_support`。
+            a = [x.strip() for x in re.split(r",(?![^(]*\))", m.group(1))]
+            RESULT[0] = True
+            w(f"{emit(parse_expr(a[-1]), ctx)} = crate::bgc_fire_support::eroot_rstfac(p, sw, m)?;")
+            continue
         m = re.match(r"call\s+julian2monthday\s*\((.*)\)$", s, re.I)
         if m:
             y, dd, mo, da = [a.strip() for a in m.group(1).split(",")]
@@ -1026,6 +1068,10 @@ def assign(s, ctx, w):
         rhs_e = replace_ranges(parse_expr(rhs), var)
         w(f"    {emit(replace_ranges(le, var), ctx2, t)} = {emit(rhs_e, ctx2, t)};")
         w("}")
+        return
+    if le[0] == "name" and le[1] in FIELDS:
+        # 不带下标的整数组赋值（`tsoi17 = forc_t(i)`）：每个元素都是同一个值。
+        w(f"s.{FIELDS[le[1]][1]}.{FIELDS[le[1]][0]}.fill({strip_parens(emit(parse_expr(rhs), ctx, t))});")
         return
     lhs_r = emit(le, ctx, t)
     rhs_e = parse_expr(rhs)

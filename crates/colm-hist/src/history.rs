@@ -259,6 +259,46 @@ impl HistoryBuffers {
     }
 
     /// 落盘：维度、坐标、变量定义与数据。
+    /// 只有文件头的历史文件：上游单点写回模式（`USE_SITE_HistWriteBack`）在一个文件的第一条记录时
+    /// 建文件、写维度与坐标（`hist_single_write_time` → `ncio_write_colm_dimension`），数据攒在内存里、
+    /// 该文件最后一条记录时才落盘。运行中途 abort 时磁盘上留下的就是这样一个文件（无 `time`、无 `sensor`）。
+    pub fn write_header(&self, path: impl AsRef<Path>) -> Result<()> {
+        let path = path.as_ref();
+        let mut file =
+            netcdf::create(path).with_context(|| format!("cannot create {}", path.display()))?;
+        file.add_dimension("patch", self.dims.patch)?;
+        for (name, _, values) in self.dims.index_variables() {
+            file.add_dimension(name, values.len())?;
+        }
+        for (name, long_name, units) in [
+            ("lat", "latitude", "degrees_north"),
+            ("lon", "longitude", "degrees_east"),
+        ] {
+            let mut variable = file.add_variable::<f64>(name, &[])?;
+            variable.put_attribute("long_name", long_name)?;
+            variable.put_attribute("units", units)?;
+        }
+        for (name, long_name, _) in self.dims.index_variables() {
+            let mut variable = file.add_variable::<i32>(name, &[name])?;
+            variable.put_attribute("long_name", long_name)?;
+        }
+        for (name, value) in [
+            ("lat", self.site.latitude_degrees),
+            ("lon", self.site.longitude_degrees),
+        ] {
+            file.variable_mut(name)
+                .with_context(|| format!("{name} disappeared after definition"))?
+                .put_values(&[value], netcdf::Extents::All)?;
+        }
+        for (name, _, values) in self.dims.index_variables() {
+            file.variable_mut(name)
+                .with_context(|| format!("{name} disappeared after definition"))?
+                .put_values(&values, netcdf::Extents::All)?;
+        }
+        file.close()?;
+        Ok(())
+    }
+
     pub fn write(&self, path: impl AsRef<Path>) -> Result<()> {
         let path = path.as_ref();
         let mut file =

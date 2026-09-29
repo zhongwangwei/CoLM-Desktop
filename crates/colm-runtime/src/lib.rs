@@ -516,7 +516,14 @@ impl PointRuntime {
             on_step(step, next, output.view())
         });
         self.baseflow_optimizer = optimizer;
-        let steps = steps?;
+        let steps = match steps {
+            Ok(steps) => steps,
+            Err(error) => {
+                // 上游 abort 时已开始的历史文件只剩文件头；尽力照写，写不出也不掩盖原错误。
+                let _ = session.abandon();
+                return Err(error);
+            }
+        };
         files.extend(session.finish()?);
         ensure!(
             session.remaining() == 0,

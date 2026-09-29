@@ -489,8 +489,8 @@ fn bgc_switches_follow_the_namelist_and_unverified_branches_are_refused() {
         LandCoverScheme::Igbp,
         HEIGHTS,
     )
-    .expect_err("the fire branch is not verified");
-    assert!(fire.to_string().contains("DEF_USE_FIRE"), "{fire}");
+    .unwrap();
+    assert!(fire.bgc.expect("BGC switches").fire);
 
     let off = land_physics_parameters(&case_with(""), LandCoverScheme::Igbp, HEIGHTS).unwrap();
     assert!(off.bgc.is_none());
