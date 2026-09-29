@@ -1491,6 +1491,7 @@ fn variable_saturated_flow_input<'a>(
     transpiration_mm_s: f64,
 ) -> VariableSaturatedFlowInput<'a> {
     VariableSaturatedFlowInput {
+        paddy: None,
         time_step_seconds: 1800.0,
         patch_type: 0,
         urban_run: false,

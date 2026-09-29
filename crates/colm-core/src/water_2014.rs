@@ -98,6 +98,30 @@ pub struct Water2014SoilInput<'a> {
     pub saturated_potential_mm: &'a [f64],
     pub root_fraction: &'a [f64],
     pub root_flux_mm_s: &'a [f64],
+    /// `DEF_USE_IRRIGATION`（CROP）：灌溉进 `gwat` 与水田积水规则；关闭时 `None`。
+    pub irrigation: Option<crate::SoilIrrigation<'a>>,
+}
+
+impl Water2014SoilInput<'_> {
+    /// 第 [1] 节末的 `gwat`：`pg_rain + sm - qseva`，灌溉打开时再加灌溉通量（与非 VSF 的 `wdsrf/deltim`）。
+    fn ground_water_input(&self, state: &Water2014SoilState) -> f64 {
+        let gwat = self.fluxes.ground_rain_kg_m2_s + self.fluxes.snowmelt_kg_m2_s
+            - self.fluxes.ground_evaporation_kg_m2_s;
+        match self.irrigation {
+            Some(irrigation) => irrigation.ground_water_input(
+                gwat,
+                state.surface_water_mm,
+                self.time_step_seconds,
+                self.variably_saturated,
+            ),
+            None => gwat,
+        }
+    }
+
+    /// 本 patch 的水田灌溉（`patchtype == 0` 且有 PFT 用水田方式）。
+    pub(crate) fn paddy_methods(&self) -> Option<crate::SoilIrrigation<'_>> {
+        self.irrigation.filter(|_| self.patch_type == 0)
+    }
 }
 
 /// Persistent regular-soil water state shared by every native time step.
@@ -138,10 +162,13 @@ pub struct Water2014SoilState {
 /// **不能拿 history 的 `wat` 顶替**：`wat` 是 `MOD_Vars_TimeVariables` 里的时间变量，
 /// 不含 `wdsrf`，而收支残差要含。`wat` 的写法见
 /// `colm_runtime::history::set_lct_water_storage`，两处刻意各写一份。
+///
+/// 灌溉打开时 `endwb = endwb + waterstorage` 插在 `wa` 与 `wdsrf` 之间（`CoLMMAIN.F90:1483`）。
 pub fn total_water_storage_mm(
     water: &Water2014SoilState,
     canopy_water_mm: f64,
     snow_water_equivalent_kg_m2: f64,
+    irrigation_storage_mm: Option<f64>,
 ) -> f64 {
     let soil: f64 = water
         .liquid_water_kg_m2
@@ -149,10 +176,8 @@ pub fn total_water_storage_mm(
         .zip(&water.ice_water_kg_m2)
         .map(|(wliq, wice)| wliq + wice)
         .sum();
-    soil + canopy_water_mm
-        + snow_water_equivalent_kg_m2
-        + water.aquifer_water_mm
-        + water.surface_water_mm
+    let total = soil + canopy_water_mm + snow_water_equivalent_kg_m2 + water.aquifer_water_mm;
+    irrigation_storage_mm.map_or(total, |storage| total + storage) + water.surface_water_mm
 }
 
 /// 上游的 `totwb`：**步首**总蓄水量，给 `xerr` 当被减数（`CoLMMAIN.F90:831`、`:835`）。
@@ -161,10 +186,13 @@ pub fn total_water_storage_mm(
 /// 上游步首写 `ldew + scv + Σ(wice+wliq) + wa + wdsrf`，步末写
 /// `Σ(wice+wliq) + ldew + scv + wa + wdsrf`。两者相差 1 ULP，正是 `xerr`
 /// 残差里那一位的来源；把两份合并成一个顺序会让残差凭空变干净（或变脏）。
+///
+/// 灌溉打开时 `totwb = totwb + waterstorage` 同样插在 `wa` 与 `wdsrf` 之间（`CoLMMAIN.F90:825`）。
 pub fn initial_total_water_storage_mm(
     water: &Water2014SoilState,
     canopy_water_mm: f64,
     snow_water_equivalent_kg_m2: f64,
+    irrigation_storage_mm: Option<f64>,
 ) -> f64 {
     let soil: f64 = water
         .liquid_water_kg_m2
@@ -172,10 +200,8 @@ pub fn initial_total_water_storage_mm(
         .zip(&water.ice_water_kg_m2)
         .map(|(wliq, wice)| wliq + wice)
         .sum();
-    (canopy_water_mm + snow_water_equivalent_kg_m2)
-        + soil
-        + water.aquifer_water_mm
-        + water.surface_water_mm
+    let total = (canopy_water_mm + snow_water_equivalent_kg_m2) + soil + water.aquifer_water_mm;
+    irrigation_storage_mm.map_or(total, |storage| total + storage) + water.surface_water_mm
 }
 
 /// Diagnostics from one no-snow regular-soil `WATER_2014` call.
@@ -243,15 +269,31 @@ pub fn water_2014_soil_step(
     }
     let layers = validate(input, state)?;
     let (effective_porosity, ice_fraction, liquid_volume_fraction) = soil_volumes(input, state);
-    let water_input_mm_s = input.fluxes.ground_rain_kg_m2_s + input.fluxes.snowmelt_kg_m2_s
-        - input.fluxes.ground_evaporation_kg_m2_s;
-    let (surface_runoff_mm_s, initial_subsurface_runoff_mm_s, saturated_fraction) = runoff(
+    let water_input_mm_s = input.ground_water_input(state);
+    let (mut surface_runoff_mm_s, initial_subsurface_runoff_mm_s, saturated_fraction) = runoff(
         input,
         state,
+        water_input_mm_s,
         &effective_porosity,
         &ice_fraction,
         &liquid_volume_fraction,
     )?;
+    // 水田（`MOD_SoilSnowHydrology.F90:374-390`）：产流先全部留作积水，超过
+    // `DEF_TUNING_IRRIGATION_PONDMX` 的部分才是地表径流。
+    if let Some(irrigation) = input.paddy_methods() {
+        for &method in irrigation.methods {
+            if method == crate::IRRIGATION_PADDY {
+                state.surface_water_mm = surface_runoff_mm_s * input.time_step_seconds;
+                surface_runoff_mm_s = 0.0;
+                if state.surface_water_mm > irrigation.paddy_ponding_limit_mm {
+                    surface_runoff_mm_s += (state.surface_water_mm
+                        - irrigation.paddy_ponding_limit_mm)
+                        / input.time_step_seconds;
+                    state.surface_water_mm = irrigation.paddy_ponding_limit_mm;
+                }
+            }
+        }
+    }
     let infiltration_mm_s =
         water_input_mm_s - surface_runoff_mm_s - state.surface_water_mm / input.time_step_seconds;
     let soil = solve_campbell_soil_water(CampbellSoilWaterInput {
@@ -539,8 +581,7 @@ fn wetland_soil_step(
         "the wetland water step needs matching soil columns"
     );
     let dt = input.time_step_seconds;
-    let water_input = input.fluxes.ground_rain_kg_m2_s + input.fluxes.snowmelt_kg_m2_s
-        - input.fluxes.ground_evaporation_kg_m2_s;
+    let water_input = input.ground_water_input(state);
     let (surface_runoff, total_runoff, subsurface_runoff) = if input.variably_saturated {
         let net = ((input.fluxes.soil_dew_kg_m2_s
             + (water_input - input.fluxes.transpiration_kg_m2_s))
@@ -634,8 +675,7 @@ fn variably_saturated_soil_step(
     input: Water2014SoilInput<'_>,
     state: &mut Water2014SoilState,
 ) -> Result<Water2014SoilOutput> {
-    let ground_water_flux_mm_s = input.fluxes.ground_rain_kg_m2_s + input.fluxes.snowmelt_kg_m2_s
-        - input.fluxes.ground_evaporation_kg_m2_s;
+    let ground_water_flux_mm_s = input.ground_water_input(state);
     let vsf = crate::variably_saturated_flow_step(
         crate::VariableSaturatedFlowInput {
             time_step_seconds: input.time_step_seconds,
@@ -662,6 +702,7 @@ fn variably_saturated_soil_step(
             clapp_hornberger_b: input.clapp_hornberger_b,
             root_fraction: input.root_fraction,
             root_flux_mm_s: input.root_flux_mm_s,
+            paddy: input.paddy_methods(),
         },
         state,
     )?;
@@ -688,6 +729,7 @@ fn variably_saturated_soil_step(
 fn runoff(
     input: Water2014SoilInput<'_>,
     state: &Water2014SoilState,
+    water_input_mm_s: f64,
     effective_porosity: &[f64],
     ice_fraction: &[f64],
     liquid_volume_fraction: &[f64],
@@ -696,8 +738,7 @@ fn runoff(
         layer_thickness_m: input.layer_thickness_m,
         effective_porosity,
         liquid_volume_fraction,
-        water_input_mm_s: input.fluxes.ground_rain_kg_m2_s + input.fluxes.snowmelt_kg_m2_s
-            - input.fluxes.ground_evaporation_kg_m2_s,
+        water_input_mm_s,
         time_step_seconds: input.time_step_seconds,
     };
     match input.runoff {

@@ -4145,6 +4145,9 @@ pub struct VariableSaturatedFlowInput<'a> {
     pub clapp_hornberger_b: &'a [f64],
     pub root_fraction: &'a [f64],
     pub root_flux_mm_s: &'a [f64],
+    /// `patchtype == 0` 且 `DEF_USE_IRRIGATION`：水田规则（`MOD_SoilSnowHydrology.F90:1049-1059`、
+    /// `:1346-1365`）。灌溉通量本身已在 `ground_water_flux_mm_s` 里。
+    pub paddy: Option<crate::SoilIrrigation<'a>>,
 }
 
 /// `WATER_VSF` 的诊断输出。
@@ -4348,6 +4351,10 @@ pub fn variably_saturated_flow_step(
             }
         }
         subsurface_runoff_mm_s *= input.baseflow_scale;
+        // 水田：地表产流先全部留下（`rsur = 0`，`rsur_se` 不动），积水上限在后面单独处理。
+        if input.paddy.is_some_and(|paddy| paddy.has_paddy()) {
+            surface_runoff_mm_s = 0.0;
+        }
     }
 
     // 渗入表层的通量。
@@ -4565,7 +4572,28 @@ pub fn variably_saturated_flow_step(
     // `needless_late_init` 会为此报警（本机 1.97.1 不报 ⇒ 这是 CI 才能发现的
     // 版本差）。两者语义相同 —— 分支里对 `surface_runoff_mm_s` 等的修改仍在取值
     // 之前发生，浮点结果逐位不变。
-    let total_runoff_mm_s = if input.patch_type <= 1 {
+    let total_runoff_mm_s = if let Some(paddy) = input.paddy {
+        // 灌溉打开的土壤 patch：逐 PFT 按各自方式的积水上限溢出（水田 `DEF_TUNING_IRRIGATION_PONDMX`，
+        // 其余 `pondmx`）。
+        for &method in paddy.methods {
+            let limit = if method == crate::IRRIGATION_PADDY {
+                paddy.paddy_ponding_limit_mm
+            } else {
+                input.ponding_limit_mm
+            };
+            if state.surface_water_mm > limit {
+                let excess_mm = state.surface_water_mm - limit;
+                surface_runoff_mm_s += excess_mm / dt;
+                infiltration_excess_runoff_mm_s += excess_mm / dt;
+                state.surface_water_mm = limit;
+            }
+        }
+        if state.water_table_depth_m <= 0.0 {
+            infiltration_excess_runoff_mm_s = 0.0;
+            saturation_excess_runoff_mm_s = surface_runoff_mm_s;
+        }
+        subsurface_runoff_mm_s + surface_runoff_mm_s
+    } else if input.patch_type <= 1 {
         if state.surface_water_mm > input.ponding_limit_mm {
             let excess_mm = state.surface_water_mm - input.ponding_limit_mm;
             surface_runoff_mm_s += excess_mm / dt;

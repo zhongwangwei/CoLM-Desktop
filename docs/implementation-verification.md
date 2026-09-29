@@ -25874,3 +25874,52 @@ CoLM-SYSU-integration 的 `origin/master` 仍是 `3c799bae`，与 vendor 对齐�
 
 复验（release，`KERNEL=kernels/crop`）：`cr cs cs2 cs3on cw nc cf1 cf2 cf3 cf4` 历史与重启全部逐位；colm-init 单测 156 通过。
 `ci1`/`ci2` 冷启动的初始重启对纯 Fortran 逐位（运行期灌溉仍拒绝，下一轮）。
+
+## 第 436 轮：灌溉（`DEF_USE_IRRIGATION`，合成 `crop/` 数据）
+
+用户决定照 FIRE 的办法用合成数据验证（第 434 轮的 `make_crop_data.py`，本轮加第二个参数把灌溉方式整体轮换，
+让真正会灌溉的类别走到别的方式）。参考一律纯 Fortran（`--preprocessors fortran --engine fortran`，CROP 内核）。
+
+### 一、移植范围与耦合点
+
+- `colm-core/src/irrigation.rs`：`CalIrrigationNeeded` 全链（`PointNeedsCheckForIrrig`、`CalIrrigationPotentialNeeded`、
+  `CalIrrigationLimitedSupply` 的三种配水、`CalWithdrawalWATER`）与 `CalIrrigationApplicationFluxes`。GIMPLE
+  （`MOD_Irrigation.F90.273t.optimized`）里只有三处收缩：施灌的两处 `waterstorage - irrig_rate*deltim`（FNMA）与阈值
+  `wilt + THRESHOLD*(target - wilt)`（FMA）；`denh2o*dz*x` 取成 `x*(dz*1000)`。
+- 步首（`CoLMMAIN.F90:840-859`，只有 `patchtype == 0`）：喷灌进冠层截留（逐 PFT 截留同一个量），滴灌/漫灌/水田进
+  `gwat = ((gwat+drip)+flood)+paddy`。`WATER_2014`（非 VSF、非示踪物）再加 `wdsrf/deltim` 且不清零 `wdsrf`；
+  水田在 `WATER_2014` 里 `wdsrf = rsur*deltim`、`rsur = 0`、超 `DEF_TUNING_IRRIGATION_PONDMX` 才产流，在 `WATER_VSF`
+  里 `rsur = 0`（`rsur_se` 不动）并按方式分别用 `PONDMX`/`pondmx` 溢出。
+- BGC driver 在 `CNGResp` 之后调 `CalIrrigationNeeded`：`BgcStep.irrigation` 带灌溉状态与 `zwt`/`wa`，土壤液态水走
+  `physics.wliq_soisno` 并写回；水稻漫灌改水田后同步 `irrig_method_p`（作物汇总写 `irrig_method_*` 用它）。
+- 水量闭合：`totwb`/`endwb` 在 `wa` 与 `wdsrf` 之间加 `waterstorage`。**`endwb` 在 `bgc_driver` 之前**，而
+  `CalIrrigationNeeded` 会改 `waterstorage`（非 VSF 时还有 `wliq`/`zwt`/`wa`），所以步输出带一份 BGC 之前的土壤水与库存
+  （`StandardLctSnowSoilOutput::irrigation_balance`）。同理 `h2osoi`/`wat` 是 `CoLMMAIN` 末尾的时间变量，取 BGC 之前；
+  `wa_inst`/`wdsrf_inst` 与其余状态量取写历史时（BGC 之后）。首次跑 Campbell 取水算例时只有这两项不同，正是这个原因。
+- 运行期 `CROP_readin` 读 `irrigation_method(cft, lat, lon)`（自己的网格、`grid2pset_dominant`，负值为 −99999999）
+  与分配方式 3 的 `irrig_gw_alloc`/`irrig_sw_alloc`；灌溉量从时间重启读、续跑写回，`irrig_method_p` 写回 PFT 重启。
+- 历史：`sum_irrig`/`sum_irrig_count`/`waterstorage` 是逐步赋值、写出仍 `/nac`；`sum_deficit_irrig` 从不赋值
+  （恒缺测）；其余七项 `acc1d`；按 `filter_irrig` 与各作物类别过滤（upstream-bugs 第 27、29 条）。灌溉打开时 FIRE
+  残留的 `vecacc` 改为 `f_runoff_supply`。
+- 只接了 CROP BGC 的土壤 patch：其它 patch（城市透水面仍加 `wdsrf/deltim`、`totwb` 含 `waterstorage`）上游也带灌溉
+  状态，Rust 遇到就拒绝。`refuse_unported` 已无被拒分支，删掉。
+
+### 二、结果（对纯 Fortran，US-Ne3 2002 全年，日输出）
+
+| 算例 | 类别/方式 | 土壤 | 配水 | 历史 | 重启+旁车 | release | debug |
+|---|---|---|---|---|---|---|---|
+| `ci1` | 18 水田 | VG/VSF | 1 | 12/12 | ✓ | ✓ | ✓ |
+| `ci2` | 20 滴灌 | VG/VSF | 1 | 12/12 | ✓ | ✓ | — |
+| `ci3` | 22 喷灌（冬小麦：物候期到过 1–3，但需水判据全年未触发，灌溉量为 0；喷灌由 `ci5` 覆盖） | VG/VSF | 1 | 12/12 | ✓ | ✓ | — |
+| `ci4` | 24 漫灌 | VG/VSF | 1 | 12/12 | ✓ | ✓ | — |
+| `ci5` | 20 喷灌（方式轮换 1） | VG/VSF | 1 | 12/12 | ✓ | ✓ | ✓ |
+| `ci6` | 20 滴灌 | Campbell | 2（地下水 `CalWithdrawalWATER`，供给 < 需求） | 12/12 | ✓ | ✓ | ✓ |
+| `ci7` | 18 水田 | Campbell | 3（配比图） | 12/12 | ✓ | ✓ | — |
+| `ci8` | 18 水田 | VG/VSF | 2（VSF 供给 = 需求） | 12/12 | ✓ | ✓ | — |
+| `ci6c`/`ci1c` | 7 月 1 日续跑到年底 | | | 6/6 | 51/51 | ✓ | — |
+
+每例确认走到了分支：`ci1` 积水最深 21.0 mm、`ci5` 灌溉量 > 0、`ci6`/`ci7` 地下水需求 2.83/1.16 对供给 0.92/0.46 mm。
+`tmp/bitfirst.py` 原先跳过 Rust 缺的变量（第一次对比 `ci2` 因此"全过"而其实缺 19 个灌溉历史量），现在把缺变量也报出来。
+
+全量回归（release，`tmp/regress_all.sh`，含 `ci1`–`ci8`）：86 个算例的历史、主重启与旁车全部逐位；`nn`/`pni`
+不写历史（`pni` 的参考只跑到 mkinidata，比的是冷启动重启）。原有算例在加了"缺变量也报"之后仍无缺变量。

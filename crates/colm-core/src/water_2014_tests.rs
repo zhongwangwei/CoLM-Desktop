@@ -2,6 +2,7 @@ use super::*;
 
 fn input() -> Water2014SoilInput<'static> {
     Water2014SoilInput {
+        irrigation: None,
         patch_type: 0,
         urban_run: false,
         plant_hydraulics: false,

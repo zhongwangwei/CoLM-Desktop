@@ -94,8 +94,11 @@ fn run() -> Result<()> {
     )?;
     // `CROP` 内核：`DEF_USE_CROP` 是宏的只读映射，由 `--crop` 告知。只有它打开时
     // `DEF_USE_FERT`/`DEF_USE_CNSOYFIXN`/`DEF_USE_IRRIGATION` 才生效（`MOD_Namelist.F90` 在 CROP
-    // 关闭时把它们强制关掉）。未验证的作物子分支（大豆固氮、灌溉）仍由 `refuse_unported` 拒绝。
+    // 关闭时把它们强制关掉）。
     // 不置位而直接跑会把作物当成非作物 BGC 静默跑完（第 422 轮实测 36/39 份重启不同）。
+    if !arguments.crop {
+        physics.irrigation = None;
+    }
     if arguments.crop {
         let switches = physics
             .bgc
@@ -104,10 +107,9 @@ fn run() -> Result<()> {
             crop: true,
             fert: logical_field(&document, "DEF_USE_FERT")?,
             cnsoyfixn: logical_field(&document, "DEF_USE_CNSOYFIXN")?,
-            irrigation: logical_field(&document, "DEF_USE_IRRIGATION")?,
+            irrigation: physics.irrigation.is_some(),
             ..switches
         };
-        colm_runtime::bgc_step::refuse_unported(switches)?;
         physics.bgc = Some(switches);
     }
     // 本仓库没有实现的分支：**一次列全**，并且默认拒绝。
@@ -182,10 +184,26 @@ fn run() -> Result<()> {
     }
     // `DEF_USE_BGC`：BGC 状态来自四份 BGC 重启，氮沉降来自 `DEF_dir_runtime/ndep`。
     if let Some(switches) = template.physics.bgc {
+        let (bgc, irrigation) = assemble_bgc(&document, &files, arguments.patch, switches)?;
         template = template
-            .with_bgc(assemble_bgc(&document, &files, arguments.patch, switches)?)
+            .with_bgc(bgc)
             .context("cannot assemble the BGC state")?;
+        // `DEF_USE_IRRIGATION`：时间重启里的灌溉量，叠上 `CROP_readin` 读的灌溉方式（与配水比例）。
+        if let Some(readin) = irrigation {
+            let state = colm_runtime::irrigation::initial_state(
+                &colm_init::RestartFile::open(&files.time)?,
+                arguments.patch,
+                readin,
+            )?;
+            template = template
+                .with_irrigation(state)
+                .context("cannot assemble the irrigation state")?;
+        }
     }
+    ensure!(
+        template.physics.irrigation.is_none() || template.irrigation.is_some(),
+        "DEF_USE_IRRIGATION is verified only on CROP BGC soil patches"
+    );
     // `DEF_LAI_MONTHLY` 打开时每月重读 LAI（`CoLM.F90:595-605`）。**不装就等于关门**：
     // 跨月的运行会从第二个月起一直用第一天的叶面积，而且不会报错。
     if logical_field(&document, "DEF_LAI_MONTHLY")? {
@@ -349,7 +367,10 @@ fn assemble_bgc(
     files: &RestartStateFiles,
     patch: usize,
     switches: colm_core::bgc_driver::BgcSwitches,
-) -> Result<colm_runtime::bgc_step::BgcRuntime> {
+) -> Result<(
+    colm_runtime::bgc_step::BgcRuntime,
+    Option<colm_runtime::irrigation::IrrigationReadin>,
+)> {
     // BGC 重启按"整列就是这个 patch"读（`crate::bgc` 的约定），多 patch 文件会串到别的 patch。
     let patches = colm_init::RestartFile::open(&files.constant)?
         .floats("patchlatr")?
@@ -370,7 +391,8 @@ fn assemble_bgc(
     let statics = colm_runtime::bgc_step::BgcStatics::read(&files.constant, patch, layers)?;
     let runtime_dir = std::path::PathBuf::from(string_field(document, "DEF_dir_runtime")?);
     let degrees = |radians: f64| radians * 180.0 / std::f64::consts::PI;
-    // `CROP_readin`（`CoLM.F90:442`）：启动时覆盖作物的播种日与施肥量。
+    // `CROP_readin`（`CoLM.F90:442`）：启动时覆盖作物的播种日与施肥量（与灌溉方式）。
+    let mut irrigation = None;
     if switches.crop {
         let classes =
             colm_init::RestartFile::open(&colm_runtime::pft::pft_restart_path(&files.constant)?)?
@@ -378,7 +400,7 @@ fn assemble_bgc(
                 .iter()
                 .map(|&class| i32::try_from(class))
                 .collect::<Result<Vec<_>, _>>()?;
-        colm_runtime::bgc_step::crop_readin(
+        irrigation = colm_runtime::bgc_step::crop_readin(
             &mut initial,
             &classes,
             real_field(document, "DEF_TUNING_CROP_PLANTING_DAY")?,
@@ -388,6 +410,10 @@ fn assemble_bgc(
                 latitude_deg: degrees(statics.patchlatr),
                 longitude_deg: degrees(statics.patchlonr),
                 fert_source: integer_field(document, "DEF_FERT_SOURCE")?,
+                irrigation_allocation: i32::try_from(integer_field(
+                    document,
+                    "DEF_IRRIGATION_ALLOCATION",
+                )?)?,
             },
         )?;
     }
@@ -449,6 +475,7 @@ fn assemble_bgc(
         },
         deltim,
     )
+    .map(|runtime| (runtime, irrigation))
 }
 
 struct RunSummary {
@@ -638,6 +665,21 @@ fn write_evolved_restart(
             lai_refreshed: snapshot.lai_refreshed,
         },
     )?;
+    let mut overrides = overrides;
+    // `DEF_USE_IRRIGATION`：灌溉量与 `irrig_method_*`（后者是作物汇总写的 patch 量）。
+    if let Some(irrigation) = &state.irrigation {
+        let diagnostics = state
+            .bgc
+            .as_ref()
+            .context("the irrigation state needs the CROP BGC state")?
+            .irrigation_diagnostics;
+        overrides.extend(colm_runtime::irrigation::time_overrides(
+            irrigation,
+            &diagnostics,
+            &colm_init::RestartFile::open(restart_in)?,
+            template.patch,
+        )?);
+    }
     if let Some(parent) = restart_out.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("cannot create {}", parent.display()))?;
@@ -653,6 +695,12 @@ fn write_evolved_restart(
                 bgc,
                 &colm_init::RestartFile::open(&pft_in)?,
             ));
+        }
+        if let Some(irrigation) = &state.irrigation {
+            overrides.push(colm_runtime::irrigation::pft_override(
+                irrigation,
+                &colm_init::RestartFile::open(&pft_in)?,
+            )?);
         }
         write_restart(
             &pft_in,

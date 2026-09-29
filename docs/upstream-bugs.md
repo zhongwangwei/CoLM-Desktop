@@ -177,8 +177,38 @@
 - **原因**：五次都把 `vecacc` 传给 `write_history_variable_2d`，而不是 `a_abm` 等累加器；后者还会原地
   `vecacc = vecacc/nac`（非 `spval` 处）并把过滤掉的 patch 置 `spval`。
 - **影响**：写出的是上一次用 `vecacc` 写历史后的残留、每个量再多除一次 `nac`：默认内核里上一次是 `f_wetzwt`
-  （湿地过滤，BGC patch 恒为土壤 → 五个量全是缺测），CROP 内核（灌溉关）里是 `f_grainc_to_cropprodc`。
+  （湿地过滤，BGC patch 恒为土壤 → 五个量全是缺测），CROP 内核里灌溉关时是 `f_grainc_to_cropprodc`、
+  灌溉开时是 `f_runoff_supply`（`filter_irrig`）。
 - **处理**：`vendor/` 未改；Rust 照写（`history.rs` 的 `FIRE_HISTORY` 与 `write_fire_history`），`a_abm` 等照常累加进旁车。
+
+### 27. 灌溉历史量：`f_sum_deficit_irrig` 恒缺测，三个"年累计"量被除以 `nac`
+
+- **位置**：`main/MOD_Vars_1DAccFluxes.F90:2423-2432`、`main/MOD_Hist.F90:1507-1530`。
+- **原因**：`accumulate_fluxes` 的灌溉段写 `a_sum_irrig = sum_irrig`、`a_sum_irrig_count = sum_irrig_count`、
+  `a_waterstorage = waterstorage`（**赋值**，不是 `acc1d`），却漏了 `a_sum_deficit_irrig`；写历史时四个量照样按
+  `write_history_variable_2d` 的 `/nac` 处理。
+- **影响**：`f_sum_deficit_irrig` 永远是缺测；`f_sum_irrig`/`f_sum_irrig_count`/`f_waterstorage` 写出的是
+  "窗口末步的年累计值 / 窗口步数"（日输出时是 /24），既不是累计也不是平均。
+- **处理**：`vendor/` 未改；Rust 照写（`history.rs` 的 `ASSIGNED_VARIABLES` 与 `irrigation_history_value`），
+  旁车里存末值，与上游 `a_*` 一致。
+
+### 28. 灌溉的逐 PFT 循环不适合多 PFT patch（潜在）
+
+- **位置**：`main/MOD_Irrigation.F90:188-240`（`CalIrrigationPotentialNeeded`）、`:262-281`
+  （`CalIrrigationApplicationFluxes`）、`:308-327`（`PointNeedsCheckForIrrig`）。
+- **原因**：需水量的 PFT 循环不重置 `reached_max_depth` 与各总量，第二个 PFT 起只在第一个没碰到深度上限时再累加
+  一遍；`deficit_irrig`/`check_for_irrig` 都取最后一个 PFT 的结果；施灌时每个 PFT 各减一次
+  `n_irrig_steps_left`、各从 `waterstorage` 扣一次。
+- **影响**：CROP 构建里作物 patch 只有一个 PFT，碰不到；若 patch 内有多个 PFT，灌溉量与持续步数都不对。
+- **处理**：`vendor/` 未改；Rust 逐字照搬（`colm-core/src/irrigation.rs`）。
+
+### 29. `f_irrig_method_corn` 只写雨养玉米
+
+- **位置**：`main/MOD_Hist.F90:2803-2826`。
+- **原因**：玉米的过滤条件是 `pftclass == 17`（雨养温带玉米），其余七种作物都是"雨养 + 灌溉"两个类别
+  （如春小麦 19/20）。
+- **影响**：灌溉玉米（18）patch 上 `f_irrig_method_corn` 是缺测，而这正是唯一会灌溉的玉米。
+- **处理**：`vendor/` 未改；Rust 照写（`CROP_TYPE_HISTORY` 的 `irrig_method_corn` 只认 17）。
 
 ## 二、TRACER 编译开关改变了物理（需要上游确认哪一边是对的）
 

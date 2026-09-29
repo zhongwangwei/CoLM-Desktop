@@ -218,15 +218,22 @@ fn runoff_scheme_one_selects_vic() {
     assert_eq!(parameters.runoff_scheme, StandardLctRunoffScheme::Vic);
 }
 
+/// `DEF_USE_IRRIGATION` 读进灌溉设置（`DEF_TUNING_IRRIGATION_*` 取声明默认值），关闭时为 `None`。
 #[test]
-fn irrigation_is_refused_rather_than_run_dry() {
-    let error = land_physics_parameters(
-        &case_with("DEF_USE_IRRIGATION = .true."),
+fn irrigation_settings_are_read_from_the_namelist() {
+    let on = land_physics_parameters(
+        &case_with("DEF_USE_IRRIGATION = .true.\n   DEF_IRRIGATION_ALLOCATION = 3"),
         LandCoverScheme::Igbp,
         HEIGHTS,
     )
-    .expect_err("the sprinkler schedule is not ported");
-    assert!(error.to_string().contains("DEF_USE_IRRIGATION"));
+    .unwrap()
+    .irrigation
+    .expect("irrigation on");
+    assert_eq!(on.allocation, 3);
+    assert_eq!((on.start_seconds, on.duration_seconds), (21_600.0, 14_400.0));
+    assert_eq!(on.paddy_ponding_limit_mm, 100.0);
+    let off = land_physics_parameters(&case_with(""), LandCoverScheme::Igbp, HEIGHTS).unwrap();
+    assert!(off.irrigation.is_none());
 }
 
 /// `DEF_SPLIT_SOILSNOW` 现在真的接上了：它必须被读进 `split_soil_snow`，

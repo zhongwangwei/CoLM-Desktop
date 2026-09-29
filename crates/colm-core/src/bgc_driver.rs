@@ -222,6 +222,17 @@ pub struct BgcStep<'a> {
     pub physics: &'a mut BgcPhysics,
     pub pft: &'a BgcPftConstants,
     pub switches: BgcSwitches,
+    /// `DEF_USE_IRRIGATION`（CROP）：`CalIrrigationNeeded` 读写的灌溉状态与地下水；关闭时 `None`。
+    pub irrigation: Option<BgcIrrigation<'a>>,
+}
+
+/// `CalIrrigationNeeded` 要的、不在 [`BgcPhysics`] 里的量。土壤液态水走 `physics.wliq_soisno`
+/// （非 VSF 的取水会改它，由调用方写回）。
+pub struct BgcIrrigation<'a> {
+    pub state: &'a mut crate::IrrigationState,
+    pub settings: crate::IrrigationSettings,
+    pub water_table_depth_m: &'a mut f64,
+    pub aquifer_water_mm: &'a mut f64,
 }
 
 /// 上游 driver 的阶段序列（不含依状态而定的平衡检查，见 [`bgc_driver`]）。
@@ -331,6 +342,44 @@ pub fn run_stage(stage: &str, step: &mut BgcStep<'_>) -> Result<()> {
             crate::bgc_cn_phenology::cn_phenology(step.state, step.physics, step.pft, switches, 2)
         }
         "CNGResp" => crate::bgc_resp::cn_g_resp(step.state, step.physics, step.pft),
+        "CalIrrigationNeeded" => {
+            let irrigation = step
+                .irrigation
+                .as_mut()
+                .context("CalIrrigationNeeded needs the patch irrigation state")?;
+            let p = &mut *step.physics;
+            crate::irrigation_needed(
+                irrigation.state,
+                irrigation.settings,
+                crate::IrrigationColumn {
+                    idate: p.idate,
+                    time_step_seconds: p.deltim,
+                    longitude_deg: p.dlon,
+                    pft_class: &p.pftclass,
+                    crop_phase: &step.state.pft.cphase_p,
+                    node_depth_m: &p.z_soi,
+                    layer_thickness_m: &p.dz_soi,
+                    interface_depth_m: &p.zi_soi,
+                    temperature_k: &p.t_soisno,
+                    porosity: &p.porsl,
+                    residual_water: &p.theta_r,
+                    saturated_potential_mm: &p.psi0,
+                    clapp_hornberger_b: &p.bsw,
+                    alpha_vgm: &p.alpha_vgm,
+                    n_vgm: &p.n_vgm,
+                    l_vgm: &p.L_vgm,
+                    sc_vgm: &p.sc_vgm,
+                    fc_vgm: &p.fc_vgm,
+                    liquid_water_kg_m2: &mut p.wliq_soisno,
+                    water_table_depth_m: irrigation.water_table_depth_m,
+                    aquifer_water_mm: irrigation.aquifer_water_mm,
+                },
+            )?;
+            // 水稻漫灌改水田后，`CNDriverSummarizeStates` 写的 `irrig_method_*` 用新值。
+            for (slot, method) in p.irrig_method_p.iter_mut().zip(&irrigation.state.methods) {
+                *slot = f64::from(*method);
+            }
+        }
 
         "SoilBiogeochemLittVertTransp" => {
             crate::bgc_litt_vert_transp::soil_biogeochem_litt_vert_transp(

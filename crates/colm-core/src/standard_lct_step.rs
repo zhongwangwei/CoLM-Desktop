@@ -157,6 +157,8 @@ pub struct StandardLctSnowSoilState {
     pub urban: Option<Box<crate::UrbanPatchState>>,
     /// `DEF_USE_BGC` 的土壤 patch：`MOD_BGC_Vars_*` 全部状态；`bgc_driver` 在每步物理之后推进它。
     pub bgc: Option<Box<crate::bgc_state::BgcState>>,
+    /// `DEF_USE_IRRIGATION`（CROP）的 patch 灌溉状态；关闭时 `None`。
+    pub irrigation: Option<Box<crate::IrrigationState>>,
 }
 
 impl StandardLctSnowSoilState {
@@ -276,6 +278,16 @@ pub struct StandardLctSnowSoilInput<'a> {
 pub struct StandardLctSnowSoilOutput {
     pub energy: StandardLctEnergyOutput,
     pub water: Water2014SnowSoilOutput,
+    /// 灌溉打开时 `CoLMMAIN` 末尾的土壤水与 `waterstorage`：`endwb` 在 `bgc_driver` 之前取，而
+    /// `CalIrrigationNeeded` 会改 `waterstorage`（非 VSF 时还有 `wliq`/`zwt`/`wa`）。
+    pub irrigation_balance: Option<Box<IrrigationBalance>>,
+}
+
+/// `endwb` 用的、BGC 之前的水量（见 [`StandardLctSnowSoilOutput::irrigation_balance`]）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct IrrigationBalance {
+    pub soil_water: Water2014SoilState,
+    pub storage_mm: f64,
 }
 
 struct PreparedEnergy {
@@ -670,10 +682,33 @@ pub fn standard_lct_snow_soil_step(
     input: StandardLctSnowSoilInput<'_>,
     state: &mut StandardLctSnowSoilState,
 ) -> Result<StandardLctSnowSoilOutput> {
-    let input = StandardLctSnowSoilInput {
+    let mut input = StandardLctSnowSoilInput {
         energy: with_state_canopy(input.energy, state.energy.canopy),
         ..input
     };
+    // `CoLMMAIN.F90:840-859`：灌溉通量在截留之前算（只有 `patchtype == 0`）；喷灌落到冠层上，
+    // 其余三种进土壤水的 `gwat`。`methods` 要借给土壤步，所以先复制一份。
+    let irrigation_methods = state
+        .irrigation
+        .as_ref()
+        .map(|irrigation| irrigation.methods.clone())
+        .unwrap_or_default();
+    if let Some(template) = input.soil_water.irrigation {
+        let fluxes = match state.irrigation.as_mut() {
+            Some(irrigation) if input.soil_water.patch_type == 0 => {
+                irrigation.application_fluxes(input.energy.interception.time_step_seconds)
+            }
+            _ => crate::IrrigationApplicationFluxes::default(),
+        };
+        input.energy.interception.sprinkler_irrigation_kg_m2_s = fluxes.sprinkler_mm_s;
+        input.soil_water.irrigation = Some(crate::SoilIrrigation {
+            drip_mm_s: fluxes.drip_mm_s,
+            flood_mm_s: fluxes.flood_mm_s,
+            paddy_mm_s: fluxes.paddy_mm_s,
+            methods: &irrigation_methods,
+            ..template
+        });
+    }
     let (_, template_snow_layers) = validate_snow_soil_step(input, state)?;
     validate(input.energy, state.energy.pft.is_some())?;
     remember_snow_ice_fraction(&mut state.snow);
@@ -891,7 +926,17 @@ pub fn standard_lct_snow_soil_step(
         state.snow.node_depth_m[slot] = 0.0;
         state.snow.thickness_m[slot] = 0.0;
     }
-    Ok(StandardLctSnowSoilOutput { energy, water })
+    let irrigation_balance = state.irrigation.as_ref().map(|irrigation| {
+        Box::new(IrrigationBalance {
+            soil_water: state.soil_water.clone(),
+            storage_mm: irrigation.water_storage_mm,
+        })
+    });
+    Ok(StandardLctSnowSoilOutput {
+        energy,
+        water,
+        irrigation_balance,
+    })
 }
 
 fn remember_snow_ice_fraction(snow: &mut RuntimeSnowColumn) {

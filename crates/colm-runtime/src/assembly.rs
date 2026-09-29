@@ -74,6 +74,8 @@ pub struct LandPhysicsParameters {
     pub use_pc: bool,
     /// `DEF_USE_BGC` 的开关；BGC 关闭时为 `None`。
     pub bgc: Option<colm_core::bgc_driver::BgcSwitches>,
+    /// `DEF_USE_IRRIGATION`（只在 CROP 内核生效，`colm-rs --crop` 之外清成 `None`）。
+    pub irrigation: Option<colm_core::IrrigationSettings>,
     /// namelist 选的土壤水力关系；决定常数重启里读 `bsw` 还是五个 van Genuchten 场。
     pub hydraulic_model: HydraulicModel,
     /// `DEF_USE_VariablySaturatedFlow` **生效后**的取值。
@@ -802,6 +804,8 @@ pub struct StandardLctRestartTemplate {
     pub pft: Option<crate::pft::PftTemplate>,
     /// `DEF_USE_BGC` 下土壤 patch 的 BGC 状态与运行期设置（[`Self::with_bgc`] 装上）。
     pub bgc: Option<crate::bgc_step::BgcRuntime>,
+    /// `DEF_USE_IRRIGATION` 的起跑灌溉状态（[`Self::with_irrigation`] 装上）。
+    pub irrigation: Option<colm_core::IrrigationState>,
     /// 雪 + 土的模板列（`soilsnow`），积雪分支的 `GroundTemperatureInput` 需要这个形状。
     ///
     /// 雪段在前、土段在后，与时间重启里的数组同序；无雪时它就是土列本身。
@@ -1286,6 +1290,7 @@ fn assemble(
         urban,
         pft: None,
         bgc: None,
+        irrigation: None,
         patch,
         patch_type: i32::try_from(patch_type).context("patchtype is outside the kernel's range")?,
         // 入参重启里没有 `rss` 时按 `spval` 处理 —— 与上游"起跑时是缺测值"一致。
@@ -1388,6 +1393,35 @@ impl StandardLctRestartTemplate {
             pft.initial.columns.len()
         );
         self.bgc = Some(bgc);
+        Ok(self)
+    }
+
+    /// 装上灌溉：起跑状态（重启 + `CROP_readin`），并把设置交给 BGC 运行期的 `CalIrrigationNeeded`。
+    ///
+    /// 只验证了 BGC 作物土壤 patch（`patchtype == 0`）。其它 patch 上游也带灌溉状态（`totwb` 含
+    /// `waterstorage`、城市透水面的 `WATER_2014` 仍加 `wdsrf/deltim`），Rust 没接这些分支，拒绝。
+    pub fn with_irrigation(mut self, state: colm_core::IrrigationState) -> Result<Self> {
+        let settings = self
+            .physics
+            .irrigation
+            .context("with_irrigation needs DEF_USE_IRRIGATION")?;
+        ensure!(
+            self.patch_type == 0,
+            "DEF_USE_IRRIGATION is verified only on soil patches, this one has patchtype {}",
+            self.patch_type
+        );
+        let bgc = self
+            .bgc
+            .as_mut()
+            .context("DEF_USE_IRRIGATION needs the CROP BGC state first")?;
+        ensure!(
+            bgc.initial.pft.cphase_p.len() == state.methods.len(),
+            "the irrigation methods cover {} PFTs, the BGC state {}",
+            state.methods.len(),
+            bgc.initial.pft.cphase_p.len()
+        );
+        bgc.irrigation = Some(settings);
+        self.irrigation = Some(state);
         Ok(self)
     }
 
@@ -1786,6 +1820,14 @@ impl StandardLctRestartTemplate {
                 plant_hydraulics: self.plant_hydraulic_settings,
             },
             water: colm_core::Water2014SoilInput {
+                // 灌溉的开关与水田积水上限；本步的通量与方式由 `standard_lct_snow_soil_step` 从状态填。
+                irrigation: physics.irrigation.map(|settings| colm_core::SoilIrrigation {
+                    drip_mm_s: 0.0,
+                    flood_mm_s: 0.0,
+                    paddy_mm_s: 0.0,
+                    methods: &[],
+                    paddy_ponding_limit_mm: settings.paddy_ponding_limit_mm,
+                }),
                 patch_type: self.patch_type,
                 urban_run: self.physics.urban_run,
                 // 打开时 `soilwater` 用**叶温内核给的分层根通量**替换
@@ -1869,6 +1911,7 @@ impl StandardLctRestartTemplate {
                 .as_ref()
                 .map(|urban| Box::new(urban.initial.clone())),
             bgc: self.bgc.as_ref().map(|bgc| Box::new(bgc.initial.clone())),
+            irrigation: self.irrigation.clone().map(Box::new),
         }
     }
 

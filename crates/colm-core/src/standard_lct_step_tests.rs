@@ -257,6 +257,7 @@ fn standard_lct_snow_soil_step_carries_active_snow_and_soil_columns() {
     snow.liquid_water_kg_m2[top] = 1.0;
     snow.ice_water_kg_m2[top] = 30.0;
     let mut state = StandardLctSnowSoilState {
+        irrigation: None,
         energy: energy_state(forcing),
         snow,
         soil_temperature_k: vec![289.0, 288.0],
@@ -381,6 +382,7 @@ fn standard_lct_snow_soil_step_credits_the_thermal_condensation_to_the_soil() {
         ..energy.ground_temperature
     };
     let mut state = StandardLctSnowSoilState {
+        irrigation: None,
         energy: energy_state(forcing),
         snow: RuntimeSnowColumn::empty(),
         soil_temperature_k: vec![268.0, 288.0],
@@ -494,6 +496,7 @@ fn standard_lct_snow_soil_step_rereads_the_layer_count_after_newsnow() {
         ..energy.ground_temperature
     };
     let mut state = StandardLctSnowSoilState {
+        irrigation: None,
         energy: energy_state(forcing),
         snow: RuntimeSnowColumn::empty(),
         soil_temperature_k: vec![289.0, 288.0],
@@ -600,6 +603,7 @@ fn energy_state(forcing: crate::RuntimeForcing) -> StandardLctEnergyState {
 
 fn water_input() -> Water2014SoilInput<'static> {
     Water2014SoilInput {
+        irrigation: None,
         patch_type: 0,
         urban_run: false,
         plant_hydraulics: false,
@@ -926,6 +930,7 @@ fn the_step_end_surface_temperature_follows_the_combined_snow_layer_count() {
     snow.temperature_k[crate::snow::snow_layer_slot(-1)] = 262.0;
     snow.temperature_k[crate::snow::snow_layer_slot(0)] = 266.0;
     let mut state = StandardLctSnowSoilState {
+        irrigation: None,
         energy: energy_state(forcing),
         snow,
         soil_temperature_k: vec![271.0, 272.0],

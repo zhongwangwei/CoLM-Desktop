@@ -35,6 +35,7 @@ fn physics() -> LandPhysicsParameters {
         use_pft: false,
         use_pc: false,
         bgc: None,
+        irrigation: None,
         hydraulic_model: HydraulicModel::VanGenuchten,
         variably_saturated_flow: false,
         plant_hydraulics: false,
@@ -287,6 +288,7 @@ fn the_bridge_writes_the_state_variables_it_declares() {
             &state.water,
             state.energy.leaf.canopy_water.total_mm,
             0.0,
+            None,
         ),
         reference(),
     )
@@ -970,6 +972,7 @@ fn the_balance_residuals_close_on_one_step() {
         &state.water,
         state.energy.leaf.canopy_water.total_mm,
         0.0,
+        None,
     );
     let output = colm_core::standard_lct_soil_step(template.input(&binding()), &mut state)
         .expect("one step");
@@ -977,6 +980,7 @@ fn the_balance_residuals_close_on_one_step() {
         &state.water,
         state.energy.leaf.canopy_water.total_mm,
         0.0,
+        None,
     );
 
     let mut buffer = HistoryBuffers::new(dimensions(), site(), 1);

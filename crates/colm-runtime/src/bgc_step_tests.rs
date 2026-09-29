@@ -13,51 +13,6 @@ fn the_containing_source_cell_is_the_nearest_center() {
     assert_eq!(containing_cell(&lon, 358.9, true).unwrap(), 0);
 }
 
-/// 未逐位验证的 BGC 分支当场拒绝。
-#[test]
-fn unverified_branches_are_refused() {
-    assert!(refuse_unported(BgcSwitches::default()).is_ok());
-    // LAI 反馈（第 419 轮）、SASU（第 420 轮）、DiagMatrix（第 421 轮）已在 AT-Neu 上、
-    // 作物（第 424 轮，施肥关）已在 US-Ne3 上逐位验证。
-    for switches in [
-        BgcSwitches {
-            crop: true,
-            ..BgcSwitches::default()
-        },
-        BgcSwitches {
-            laifeedback: true,
-            ..BgcSwitches::default()
-        },
-        BgcSwitches {
-            sasu: true,
-            ..BgcSwitches::default()
-        },
-        BgcSwitches {
-            diag_matrix: true,
-            ..BgcSwitches::default()
-        },
-        // FIRE 已用合成数据逐位验证（第 432 轮）。
-        BgcSwitches {
-            fire: true,
-            ..BgcSwitches::default()
-        },
-        // 大豆固氮已在低氮站点逐位验证（第 430 轮）。
-        BgcSwitches {
-            crop: true,
-            cnsoyfixn: true,
-            ..BgcSwitches::default()
-        },
-    ] {
-        assert!(refuse_unported(switches).is_ok(), "{switches:?}");
-    }
-    let irrigation = BgcSwitches {
-        crop: true,
-        irrigation: true,
-        ..BgcSwitches::default()
-    };
-    assert!(refuse_unported(irrigation).is_err(), "{irrigation:?}");
-}
-
 /// `itstamp + int(-deltim)`：跨日、跨年回退。
 #[test]
 fn the_previous_step_start_crosses_day_and_year() {
@@ -102,11 +57,13 @@ fn data(dir: &std::path::Path) -> CropReadinData<'_> {
         latitude_deg: 10.0,
         longitude_deg: 100.0,
         fert_source: 1,
+        irrigation_allocation: 1,
     }
 }
 
 /// 读数据的一支：`pdrice2` 截断取整，缺测（`pdrice2` 的 `missing_value`，也用于施肥来源 1）的种植日为
-/// −99999999、施肥为 0，非作物 PFT 的施肥保持 −99999999。灌溉仍拒绝。
+/// −99999999、施肥为 0，非作物 PFT 的施肥保持 −99999999。灌溉方式按自己的 `cft` 维取作物 PFT 的值
+/// （负值与非作物为 −99999999）。
 #[test]
 fn crop_readin_reads_planting_and_fertilizer_maps() {
     let dir = std::env::temp_dir().join(format!("colm-crop-readin-{}", std::process::id()));
@@ -164,11 +121,38 @@ fn crop_readin_reads_planting_and_fertilizer_maps() {
     );
     assert_eq!(state.pft.fertnitro_p, vec![7.125, 0.0, -99_999_999.0]);
     assert_eq!(state.pft.manunitro_p, vec![0.0; 3]);
+    {
+        let mut file =
+            netcdf::create(dir.join("crop/surfdata_irrigation_method_96x144.nc")).unwrap();
+        file.add_dimension("cft", 64).unwrap();
+        file.add_dimension("lat", 2).unwrap();
+        file.add_dimension("lon", 2).unwrap();
+        file.add_variable::<f64>("lat", &["lat"])
+            .unwrap()
+            .put_values(&[-45.0, 45.0], ..)
+            .unwrap();
+        file.add_variable::<f64>("lon", &["lon"])
+            .unwrap()
+            .put_values(&[90.0, 270.0], ..)
+            .unwrap();
+        // 类别 17 → 下标 2（漫灌），类别 23 → 下标 8（负值）。
+        let values: Vec<i32> = (0..64)
+            .flat_map(|c| [if c == 2 { 3 } else if c == 8 { -1 } else { 1 }; 4])
+            .collect();
+        file.add_variable::<i32>("irrigation_method", &["cft", "lat", "lon"])
+            .unwrap()
+            .put_values(&values, ..)
+            .unwrap();
+    }
     let irrigation = BgcSwitches {
         irrigation: true,
         ..fert
     };
-    assert!(crop_readin(&mut state, &[17, 23, 1], 0.0, irrigation, data(&dir)).is_err());
+    let readin = crop_readin(&mut state, &[17, 23, 1], 0.0, irrigation, data(&dir))
+        .unwrap()
+        .unwrap();
+    assert_eq!(readin.methods, vec![3, -99_999_999, -99_999_999]);
+    assert_eq!(readin.allocation, None);
     let _ = std::fs::remove_dir_all(&dir);
 }
 

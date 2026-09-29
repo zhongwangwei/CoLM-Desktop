@@ -407,6 +407,7 @@ pub fn bgc_history_variables(switches: colm_core::bgc_driver::BgcSwitches) -> Ve
             Some("(DEF_USE_BGC) .and. (DEF_USE_NITRIF)") => nitrif,
             Some("(DEF_USE_BGC) .and. (DEF_USE_DiagMatrix)") => diag_matrix,
             Some("(DEF_USE_BGC) .and. (DEF_USE_FIRE)") => switches.fire,
+            Some("(DEF_USE_BGC) .and. (DEF_USE_IRRIGATION)") => switches.irrigation,
             _ => false,
         };
         // `#ifdef CROP` 的一批（64 个）只在 CROP 内核里存在。
@@ -446,6 +447,15 @@ pub fn history_sidecar_name(restart: &str) -> Result<String> {
 /// 只在 `patchclass == 12` 且 patch 的首个 PFT 类别在列表里时写出，否则是填充值。
 const CROP_TYPE_HISTORY: &[(&str, &str, &[i32])] = &[
     ("huiswheat", "hui", &[19, 20]),
+    // `irrig_method_*`（`MOD_Hist.F90:2803-2995`）：玉米只认雨养类别 17（上游如此）。
+    ("irrig_method_corn", "irrig_method_corn", &[17]),
+    ("irrig_method_swheat", "irrig_method_swheat", &[19, 20]),
+    ("irrig_method_wwheat", "irrig_method_wwheat", &[21, 22]),
+    ("irrig_method_soybean", "irrig_method_soybean", &[23, 24, 77, 78]),
+    ("irrig_method_cotton", "irrig_method_cotton", &[41, 42]),
+    ("irrig_method_rice1", "irrig_method_rice1", &[61, 62]),
+    ("irrig_method_rice2", "irrig_method_rice2", &[61, 62]),
+    ("irrig_method_sugarcane", "irrig_method_sugarcane", &[67, 68]),
     ("fertnitro_corn", "fertnitro_corn", &[17, 18, 75, 76]),
     ("fertnitro_swheat", "fertnitro_swheat", &[19, 20]),
     ("fertnitro_wwheat", "fertnitro_wwheat", &[21, 22]),
@@ -528,6 +538,7 @@ fn set_bgc_history(
     runtime: &crate::bgc_step::BgcRuntime,
     s: &colm_core::bgc_state::BgcState,
     first_pft_class: Option<i32>,
+    irrigation: Option<&colm_core::IrrigationState>,
 ) -> Result<()> {
     let nl = s.dims.nl_soil;
     let full = s.dims.nl_soil_full;
@@ -546,7 +557,9 @@ fn set_bgc_history(
             _ => false,
         };
         let fire_only = FIRE_HISTORY.iter().any(|(name, _)| *name == key);
-        let accumulated = !BGC_UNACCUMULATED.contains(&key)
+        let unaccumulated = BGC_UNACCUMULATED.contains(&key)
+            && (irrigation.is_none() || key == "sum_deficit_irrig");
+        let accumulated = !unaccumulated
             && (switches.fire || !fire_only)
             && (switches.diag_matrix || !(entry.rank == 1 && key.ends_with("Cap")))
             && (switches.nitrif || !matches!(key, "CONC_O2_UNSAT" | "O2_DECOMP_DEPTH_UNSAT"));
@@ -586,6 +599,16 @@ fn set_bgc_history(
         }
         // `BD_all`/`wfc`/`OM_density` 每个算例都累加，统一由 `set_sidecar_only` 写。
         if SOIL_STATICS.contains(&name) {
+            continue;
+        }
+        if let Some(value) = irrigation.and_then(|state| irrigation_history_value(name, state)) {
+            // `filter_irrig`（`MOD_Hist.F90:1482-1500`）：农田 patch、首个 PFT 是灌溉作物（≥ 17 的偶数类别）。
+            let irrigated = runtime.statics.patchclass == 12
+                && first_pft_class.is_some_and(|class| class >= 17 && class % 2 == 0);
+            if !irrigated && !sink.keep_filtered(name) {
+                continue;
+            }
+            sink.scalar(name, record, value)?;
             continue;
         }
         if let Some(k) = colm_core::bgc_state::IRRIGATION_DIAGNOSTICS
@@ -823,10 +846,16 @@ impl HistoryAccumulator {
         }
         let steps = self.steps as f64;
         // CROP 内核（声明了 `grainc_to_cropprodc`）：`vecacc` 残留的是 `a_grainc_to_cropprodc / nac`；
+        // 灌溉打开时其后还有灌溉段，最后一个是 `f_runoff_supply`（按 `filter_irrig` 置 `spval`）。
         // 默认内核：`f_wetzwt` 把非湿地 patch 置成了 `spval`。
-        let mut value = match self.sums.get("grainc_to_cropprodc") {
+        let residual = if buffer.declares("runoff_supply") {
+            "runoff_supply"
+        } else {
+            "grainc_to_cropprodc"
+        };
+        let mut value = match self.sums.get(residual) {
             Some(Accumulated::Scalar { sum, count })
-                if buffer.declares("grainc_to_cropprodc") && *count > 0 =>
+                if buffer.declares(residual) && !self.filtered.contains(residual) && *count > 0 =>
             {
                 sum / steps
             }
@@ -912,8 +941,9 @@ impl HistoryAccumulator {
 /// 由 [`set_sidecar_only`] 统一写；BGC 历史里声明了它们，`set_bgc_history` 不再重复写。
 const SOIL_STATICS: [&str; 3] = ["BD_all", "wfc", "OM_density"];
 
-/// BGC 下分配、但 Rust 不累加的量：灌溉账目（`sum_irrig`…`runoff_supply`，灌溉在运行期被拒绝，
-/// 关掉时上游数组一直是 `spval`）。FIRE 的五项见 [`FIRE_HISTORY`]。
+/// CROP 下分配的灌溉账目：灌溉关掉时上游数组一直是 `spval`，不累加；打开时见
+/// [`irrigation_history_value`]（`sum_deficit_irrig` 例外，上游从不给 `a_sum_deficit_irrig` 赋值）。
+/// FIRE 的五项见 [`FIRE_HISTORY`]。
 const BGC_UNACCUMULATED: [&str; 11] = [
     "sum_irrig",
     "sum_deficit_irrig",
@@ -927,6 +957,30 @@ const BGC_UNACCUMULATED: [&str; 11] = [
     "river_supply",
     "runoff_supply",
 ];
+
+/// 灌溉打开时 `accumulate_fluxes` 的灌溉段（`MOD_Vars_1DAccFluxes.F90:2423-2432`）交给累加器的值。
+/// `sum_irrig`/`sum_irrig_count`/`waterstorage` 是**赋值**（见 [`ASSIGNED_VARIABLES`]），其余 `acc1d`。
+fn irrigation_history_value(name: &str, state: &colm_core::IrrigationState) -> Option<f64> {
+    Some(match name {
+        "sum_irrig" => state.sum_mm,
+        "sum_irrig_count" => state.sum_count,
+        "waterstorage" => state.water_storage_mm,
+        // 上游从不给 `a_sum_deficit_irrig` 赋值：分配与每次写出后都是 `spval`，历史里是填充值。
+        "sum_deficit_irrig" => colm_core::MISSING,
+        "groundwater_demand" => state.groundwater_demand_mm,
+        "groundwater_supply" => state.groundwater_supply_mm,
+        "reservoirriver_demand" => state.reservoirriver_demand_mm,
+        "reservoirriver_supply" => state.reservoirriver_supply_mm,
+        "reservoir_supply" => state.reservoir_supply_mm,
+        "river_supply" => state.river_supply_mm,
+        "runoff_supply" => state.runoff_supply_mm,
+        _ => return None,
+    })
+}
+
+/// 每步**赋值**而不是 `acc1d` 的量（`a_sum_irrig = sum_irrig` 等）：累加器里只留末步的值，
+/// 写出时照样除以 `nac`（写出器不区分），所以历史里是"末值 / nac"；旁车里就是末值。
+const ASSIGNED_VARIABLES: [&str; 3] = ["sum_irrig", "sum_irrig_count", "waterstorage"];
 
 /// `DEF_USE_FIRE` 的五个历史量与各自的累加来源（`acc1d(abm_lf, a_abm)` 等，`MOD_Vars_1DAccFluxes.F90:2435`）。
 ///
@@ -1171,10 +1225,15 @@ impl HistorySink for HistoryAccumulator {
         // `spval` 步不计入：既不进和，也不进计数（上游 `acc1d` 的 `IF (var(i) /= spval)`）。
         // 一步都不有效的变量因此**不会**在 `sums` 里建条目，也就不会被写出，
         // 缓冲区留给它的是填充值 —— 与上游一致。
+        let assigned = ASSIGNED_VARIABLES.contains(&name);
         if value == colm_core::MISSING {
+            // 赋值的量照样被 `spval` 覆盖：写出时是填充值。
+            if assigned {
+                self.sums.remove(name);
+            }
             return Ok(());
         }
-        let instantaneous = INSTANTANEOUS_VARIABLES.contains(&name);
+        let instantaneous = INSTANTANEOUS_VARIABLES.contains(&name) || assigned;
         // 累加器从 spval 起步、首个有效值直接赋值（`acc1d` 的 `IF (s /= spval) … ELSE s = var`），
         // 不是从 `+0.0` 起加：`0.0 + (-0.0)` 会把上游保留的 `-0.0` 变成 `+0.0`。
         match self
@@ -1855,6 +1914,22 @@ pub fn set_lct_water_storage(
     snow_water_equivalent_kg_m2: f64,
     storage_tail_mm: f64,
 ) -> Result<()> {
+    let total = lct_water_total(
+        water,
+        canopy_water_mm,
+        snow_water_equivalent_kg_m2,
+        storage_tail_mm,
+    )?;
+    set_water_storage_with_total(sink, record, water, total)
+}
+
+/// [`set_lct_water_storage`] 的 `wat`。
+fn lct_water_total(
+    water: &colm_core::Water2014SoilState,
+    canopy_water_mm: f64,
+    snow_water_equivalent_kg_m2: f64,
+    storage_tail_mm: f64,
+) -> Result<f64> {
     ensure!(
         water.liquid_water_kg_m2.len() == water.ice_water_kg_m2.len(),
         "the soil water columns disagree on depth"
@@ -1865,8 +1940,7 @@ pub fn set_lct_water_storage(
         .zip(&water.ice_water_kg_m2)
         .map(|(wliq, wice)| wliq + wice)
         .sum();
-    let total = soil + canopy_water_mm + snow_water_equivalent_kg_m2 + storage_tail_mm;
-    set_water_storage_with_total(sink, record, water, total)
+    Ok(soil + canopy_water_mm + snow_water_equivalent_kg_m2 + storage_tail_mm)
 }
 
 /// [`set_lct_water_storage`] 的后半：`wat` 已由 patch 自己算好时直接写。
@@ -2501,6 +2575,7 @@ impl HistorySession {
                     &state.water,
                     state.energy.leaf.canopy_water.total_mm,
                     0.0,
+                    None,
                 ),
                 reference,
             )
@@ -2929,7 +3004,14 @@ impl HistorySession {
                     .as_ref()
                     .and_then(|pft| pft.parameters.first())
                     .map(|parameters| parameters.class);
-                set_bgc_history(accumulator, 0, runtime, bgc, first_pft_class)?;
+                set_bgc_history(
+                    accumulator,
+                    0,
+                    runtime,
+                    bgc,
+                    first_pft_class,
+                    state.irrigation.as_deref(),
+                )?;
             }
             set_lct_snow_state(accumulator, 0, template, state, ground)?;
             set_lct_fluxes(accumulator, 0, &output.water.soil, variably_saturated)?;
@@ -2953,20 +3035,25 @@ impl HistorySession {
             set_lct_stomatal_diagnostics(accumulator, 0, &output.energy)?;
             set_lct_radiation_bands(accumulator, 0, &output.energy)?;
             set_lct_canopy_geometry(accumulator, 0, &state.energy, &output.energy, template)?;
+            // `h2osoi`/`wat` 是 `CoLMMAIN` 末尾算的时间变量，在 `bgc_driver` 之前：灌溉的地下水取水
+            // （非 VSF）改过的土壤水不进它们；`wa_inst`/`wdsrf_inst` 则是写历史时的状态。
+            let main_water = output
+                .irrigation_balance
+                .as_ref()
+                .map_or(&state.soil_water, |balance| &balance.soil_water);
             set_lct_derived_soil(
                 accumulator,
                 0,
                 template.soil_layer_thickness_m(),
-                &state.soil_water,
+                main_water,
             )?;
-            set_lct_water_storage(
-                accumulator,
-                0,
-                &state.soil_water,
+            let total = lct_water_total(
+                main_water,
                 state.energy.leaf.canopy_water.total_mm,
                 state.snow.water_equivalent_kg_m2,
-                template.water_storage_tail_mm(&state.soil_water),
+                template.water_storage_tail_mm(main_water),
             )?;
+            set_water_storage_with_total(accumulator, 0, &state.soil_water, total)?;
             set_lct_canopy_water(accumulator, 0, &state.energy, &output.energy)?;
             set_lct_soil_resistance(accumulator, 0, &output.energy)?;
             set_lct_albedo(
@@ -2990,10 +3077,17 @@ impl HistorySession {
                 state.energy.leaf.canopy_water.snow_mm,
                 (!variably_saturated).then_some(output.water.soil.recharge_mm_s),
             )?;
+            // 灌溉打开时 `endwb` 取 `bgc_driver` 之前的土壤水与 `waterstorage`（见
+            // `StandardLctSnowSoilOutput::irrigation_balance`）；其余历史量是 BGC 之后的状态。
+            let (balance_water, irrigation_storage) = match &output.irrigation_balance {
+                Some(balance) => (&balance.soil_water, Some(balance.storage_mm)),
+                None => (&state.soil_water, None),
+            };
             let mut end_water = colm_core::total_water_storage_mm(
-                &state.soil_water,
+                balance_water,
                 state.energy.leaf.canopy_water.total_mm,
                 state.snow.water_equivalent_kg_m2,
+                irrigation_storage,
             );
             if wetland && variably_saturated {
                 end_water += state.soil_water.wetland_water_mm;

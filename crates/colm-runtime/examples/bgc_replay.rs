@@ -80,6 +80,7 @@ fn main() -> Result<()> {
             physics: &mut physics,
             pft: &pft,
             switches,
+            irrigation: None,
         };
         if let Err(error) = run_stage(&record.tag, &mut step) {
             println!("call {} {:<34} skipped: {error}", call + 1, record.tag);

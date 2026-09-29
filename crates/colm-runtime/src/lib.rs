@@ -12,6 +12,7 @@ pub mod bgc_step;
 pub mod history;
 mod history_manifest;
 pub mod history_sidecar;
+pub mod irrigation;
 pub mod pft;
 pub mod physics;
 
@@ -400,6 +401,7 @@ impl PointRuntime {
                 &next.water,
                 next.energy.leaf.canopy_water.total_mm,
                 0.0,
+                None,
             );
             let output = standard_lct_soil_step(template.input(&binding), next)?;
             // `hist_out` 在 `itstamp <= ptstamp` 时直接返回（`MOD_Hist.F90:225`），连累加都不做：
@@ -459,6 +461,8 @@ impl PointRuntime {
                 &next.soil_water,
                 next.energy.leaf.canopy_water.total_mm,
                 next.snow.water_equivalent_kg_m2,
+                // `totwb = totwb + waterstorage`（`CoLMMAIN.F90:825`）：施灌之前的库存。
+                next.irrigation.as_ref().map(|irrigation| irrigation.water_storage_mm),
             );
             // `totwb = totwb + wetwat`：VSF 下的湿地（`CoLMMAIN.F90:828-831`）。
             if template.patch_type == 2 && template.physics.variably_saturated_flow {
@@ -1531,6 +1535,7 @@ mod tests {
             use_pft: false,
             use_pc: false,
             bgc: None,
+            irrigation: None,
             hydraulic_model: colm_core::HydraulicModel::VanGenuchten,
             variably_saturated_flow: false,
             plant_hydraulics: false,

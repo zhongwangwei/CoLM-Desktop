@@ -268,9 +268,9 @@ pub use interception::{
     CanopyInterceptionInput, CanopyWater, CanopyWetness, Colm2024Canopy,
 };
 pub use irrigation::{
-    irrigation_application_fluxes, irrigation_is_scheduled, IrrigationApplicationFluxes,
-    IrrigationApplicationState, IrrigationScheduleInput, IRRIGATION_DRIP, IRRIGATION_FLOOD,
-    IRRIGATION_PADDY, IRRIGATION_SPRINKLER,
+    irrigation_needed, IrrigationApplicationFluxes, IrrigationColumn, IrrigationSettings,
+    IrrigationState, SoilIrrigation, IRRIGATION_DRIP, IRRIGATION_FLOOD, IRRIGATION_PADDY,
+    IRRIGATION_SPRINKLER,
 };
 pub use lake::{
     add_lake_new_snow, adjust_lake_layers, lake_roughness, lake_snow_water,
@@ -364,7 +364,7 @@ pub use pft::{
 };
 pub use standard_lct_step::{
     standard_lct_energy_step, standard_lct_snow_soil_step, standard_lct_soil_step, CanopyGeometry,
-    PlantHydraulicSettings, SplitSurface, StandardLctEnergyInput, StandardLctEnergyOutput,
+    IrrigationBalance, PlantHydraulicSettings, SplitSurface, StandardLctEnergyInput, StandardLctEnergyOutput,
     StandardLctEnergyState, StandardLctSnowSoilInput, StandardLctSnowSoilOutput,
     StandardLctSnowSoilState, StandardLctSoilInput, StandardLctSoilOutput, StandardLctSoilState,
     TemporalCanopy,

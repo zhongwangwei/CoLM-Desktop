@@ -14,7 +14,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use anyhow::{bail, ensure, Context, Result};
-use colm_core::bgc_driver::{bgc_driver, BgcPftConstants, BgcPhysics, BgcStep, BgcSwitches};
+use colm_core::bgc_driver::{
+    bgc_driver, BgcIrrigation, BgcPftConstants, BgcPhysics, BgcStep, BgcSwitches,
+};
 use colm_core::bgc_state::BgcState;
 use colm_core::{StandardLctSnowSoilOutput, StandardLctSnowSoilState, MISSING};
 use colm_init::RestartFile;
@@ -459,6 +461,8 @@ pub struct BgcRuntime {
     pub ndep_start_year: i32,
     /// `deltim`（秒）。
     pub deltim: f64,
+    /// `DEF_USE_IRRIGATION`（CROP）的设置；灌溉状态本身在 patch 状态上。
+    pub irrigation: Option<colm_core::IrrigationSettings>,
     trace: Mutex<Option<TraceWriter>>,
 }
 
@@ -484,6 +488,7 @@ impl Clone for BgcRuntime {
             fire: self.fire.clone(),
             ndep_start_year: self.ndep_start_year,
             deltim: self.deltim,
+            irrigation: self.irrigation,
             // 追踪文件只属于第一个实例。
             trace: Mutex::new(None),
         }
@@ -536,6 +541,7 @@ impl BgcRuntime {
             fire,
             ndep_start_year,
             deltim,
+            irrigation: None,
             trace: Mutex::new(TraceWriter::from_env()?),
         })
     }
@@ -592,11 +598,22 @@ impl BgcRuntime {
                     }
                 }
             };
+            let irrigation = match (self.irrigation, state.irrigation.as_deref_mut()) {
+                (Some(settings), Some(irrigation)) => Some(BgcIrrigation {
+                    state: irrigation,
+                    settings,
+                    water_table_depth_m: &mut state.soil_water.water_table_depth_m,
+                    aquifer_water_mm: &mut state.soil_water.aquifer_water_mm,
+                }),
+                (None, None) => None,
+                _ => bail!("DEF_USE_IRRIGATION needs both the irrigation settings and state"),
+            };
             let mut step = BgcStep {
                 state: &mut bgc,
                 physics: &mut physics,
                 pft: &self.pft,
                 switches: self.switches,
+                irrigation,
             };
             bgc_driver(&mut step, &mut record)?;
         }
@@ -763,14 +780,18 @@ impl BgcRuntime {
             irrig_method_rice1: irrigation(5),
             irrig_method_rice2: irrigation(6),
             irrig_method_sugarcane: irrigation(7),
-            irrig_method_p: vec![
-                if self.switches.crop {
-                    -99_999_999.0
-                } else {
-                    MISSING
-                };
-                npft
-            ],
+            // 灌溉打开时是 `CROP_readin` 读进、`PointNeedsCheckForIrrig` 可能改过的 `irrig_method_p`。
+            irrig_method_p: match &state.irrigation {
+                Some(irrigation) => irrigation.methods.iter().map(|&m| f64::from(m)).collect(),
+                None => vec![
+                    if self.switches.crop {
+                        -99_999_999.0
+                    } else {
+                        MISSING
+                    };
+                    npft
+                ],
+            },
         })
     }
 
@@ -788,6 +809,11 @@ impl BgcRuntime {
         }
         state.energy.canopy.leaf_area_index = physics.lai[0];
         state.energy.temporal_canopy.leaf_area_index = physics.tlai[0];
+        // 非 VSF 的灌溉取水（`CalWithdrawalWATER`）改土壤液态水；`zwt`/`wa` 已就地改过。
+        if state.irrigation.is_some() {
+            let nl = physics.wliq_soisno.len();
+            state.soil_water.liquid_water_kg_m2[..nl].copy_from_slice(&physics.wliq_soisno);
+        }
         Ok(())
     }
 }
@@ -828,16 +854,19 @@ pub struct CropReadinData<'a> {
     pub longitude_deg: f64,
     /// `DEF_FERT_SOURCE`（1 或 2）。
     pub fert_source: i64,
+    /// `DEF_IRRIGATION_ALLOCATION`（灌溉打开时才用；3 才读配水比例图）。
+    pub irrigation_allocation: i32,
 }
 
 const CROP_PLANTING: &str = "crop/plantdt-colm-64cfts-rice2_fillcoast.nc";
 const CROP_FERT_ONE: &str = "crop/fertnitro_fillcoast.nc";
 const CROP_FERT_TWO: &str = "crop/fertilizer_2015soc.nc";
+const CROP_IRRIGATION_METHOD: &str = "crop/surfdata_irrigation_method_96x144.nc";
+const CROP_IRRIGATION_ALLOCATION: &str = "crop/surfdata_irrigation_allocation.nc";
 const CROP_ABSENT: f64 = -99_999_999.0;
 
 /// 作物数据文件里单点所在格点的读取（`define_by_center` + 面积加权，单点即包含站点的那一格）。
 struct CropGrid {
-    path: PathBuf,
     cell: (usize, usize),
     /// 上游 `set_missing_value`：种植日文件用 `pdrice2` 的 `missing_value`，并把它设给整张映射
     /// （之后按同一映射读的施肥来源 1 也用它）；来源 2 的映射没有缺测值。
@@ -845,9 +874,9 @@ struct CropGrid {
 }
 
 impl CropGrid {
-    fn open(path: PathBuf, lat: f64, lon: f64) -> Result<Self> {
+    fn open(path: &Path, lat: f64, lon: f64) -> Result<Self> {
         let file =
-            netcdf::open(&path).with_context(|| format!("cannot open {}", path.display()))?;
+            netcdf::open(path).with_context(|| format!("cannot open {}", path.display()))?;
         let axis = |name: &str| -> Result<Vec<f64>> {
             file.variable(name)
                 .with_context(|| format!("{} has no {name}", path.display()))?
@@ -859,7 +888,6 @@ impl CropGrid {
             containing_cell(&axis("lon")?, lon, true)?,
         );
         Ok(Self {
-            path,
             cell,
             missing: None,
         })
@@ -893,6 +921,10 @@ impl CropGrid {
 ///   −99999999），再按播种日覆盖；`DEF_USE_FERT` 时来源 1 读 `CONST_FERTNITRO_CFT_xx`（种植日文件的网格与缺测值，
 ///   非正为 0，非作物 PFT 保持 −99999999），来源 2 读 `fertilizer_2015soc.nc` 的 `manure` 与 `fertilizer`（负值为 0）。
 ///
+/// - `DEF_USE_IRRIGATION`：`irrigation_method(cft, lat, lon)` 按自己的网格取作物 PFT 的灌溉方式（负值为
+///   −99999999，其余 PFT 也是 −99999999）；`DEF_IRRIGATION_ALLOCATION = 3` 时再读地下水/地表水配比。
+///   这些不在 BGC 状态里，以返回值交给调用方（[`crate::irrigation::initial_state`]）。
+///
 /// 冷启动（mkinidata）也调同一个过程，但之后 `IniTimeVariable` 还会写 `manunitro_p = manure·1000`；运行期
 /// 这里重读，所以来源 1 下重启里的 `manunitro_p` 在运行期被清零（第 424 轮）。
 pub fn crop_readin(
@@ -901,14 +933,10 @@ pub fn crop_readin(
     planting_day: f64,
     switches: BgcSwitches,
     data: CropReadinData<'_>,
-) -> Result<()> {
+) -> Result<Option<crate::irrigation::IrrigationReadin>> {
     ensure!(
         classes.len() == state.pft.plantdate_p.len(),
         "the PFT class list does not match the BGC PFT state"
-    );
-    ensure!(
-        !switches.irrigation,
-        "CROP_readin: the irrigation method maps are not ported yet"
     );
     let crop = |class: i32| (15..=78).contains(&class);
     if planting_day > 0.0 && !switches.fert && !switches.irrigation {
@@ -922,10 +950,10 @@ pub fn crop_readin(
             state.pft.fertnitro_p[m] = 0.0;
             state.pft.manunitro_p[m] = 0.0;
         }
-        return Ok(());
+        return Ok(None);
     }
     let planting_path = data.runtime_dir.join(CROP_PLANTING);
-    let mut grid = CropGrid::open(planting_path.clone(), data.latitude_deg, data.longitude_deg)?;
+    let mut grid = CropGrid::open(&planting_path, data.latitude_deg, data.longitude_deg)?;
     grid.missing = {
         let file = netcdf::open(&planting_path)
             .with_context(|| format!("cannot open {}", planting_path.display()))?;
@@ -977,7 +1005,7 @@ pub fn crop_readin(
             }
             2 => {
                 let path = data.runtime_dir.join(CROP_FERT_TWO);
-                let grid_two = CropGrid::open(path.clone(), data.latitude_deg, data.longitude_deg)?;
+                let grid_two = CropGrid::open(&path, data.latitude_deg, data.longitude_deg)?;
                 state.pft.fertnitro_p.fill(CROP_ABSENT);
                 state.pft.manunitro_p.fill(CROP_ABSENT);
                 let manure = grid_two.read(&path, "manure", None)?;
@@ -995,17 +1023,38 @@ pub fn crop_readin(
             source => bail!("DEF_FERT_SOURCE must be 1 or 2, got {source}"),
         }
     }
-    Ok(())
-}
-
-pub fn refuse_unported(switches: BgcSwitches) -> Result<()> {
-    let unported = [(switches.irrigation, "DEF_USE_IRRIGATION (CROP)")];
-    for (on, name) in unported {
-        if on {
-            bail!("{name} is on, but the Rust BGC driver has not been verified on that branch yet");
+    if !switches.irrigation {
+        return Ok(None);
+    }
+    let path = data.runtime_dir.join(CROP_IRRIGATION_METHOD);
+    let grid = CropGrid::open(&path, data.latitude_deg, data.longitude_deg)?;
+    let mut methods = vec![-99_999_999; classes.len()];
+    for (m, &class) in classes.iter().enumerate() {
+        if crop(class) {
+            let index = usize::try_from(class - 15).expect("crop class");
+            // `grid2pset_dominant`：单点就是所在格点的整数值。
+            let method = grid.read(&path, "irrigation_method", Some(index))?;
+            methods[m] = if method < 0.0 {
+                -99_999_999
+            } else {
+                method as i32
+            };
         }
     }
-    Ok(())
+    let allocation = if data.irrigation_allocation == 3 {
+        let path = data.runtime_dir.join(CROP_IRRIGATION_ALLOCATION);
+        let grid = CropGrid::open(&path, data.latitude_deg, data.longitude_deg)?;
+        Some((
+            grid.read(&path, "irrig_gw_alloc", None)?,
+            grid.read(&path, "irrig_sw_alloc", None)?,
+        ))
+    } else {
+        None
+    };
+    Ok(Some(crate::irrigation::IrrigationReadin {
+        methods,
+        allocation,
+    }))
 }
 
 #[cfg(test)]

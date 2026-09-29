@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """为 `DEF_USE_FERT`/`DEF_USE_IRRIGATION` 的 Fortran/Rust 对照生成合成作物管理数据（本机没有真实的 `crop/`）。
 
-    python3 oracle/scripts/make_crop_data.py <runtime 目录>
+    python3 oracle/scripts/make_crop_data.py <runtime 目录> [灌溉方式轮换，默认 0]
 
 在 `<runtime>/crop/` 下写出上游 `CROP_readin`（`main/MOD_CropReadin.F90`）读的五个文件，文件名与变量名照上游：
 - `plantdt-colm-64cfts-rice2_fillcoast.nc`：`pdrice2(lat,lon)`（带 `missing_value`，上游把它设给整张映射）与
@@ -10,7 +10,8 @@
   两个文件网格必须相同；
 - `fertilizer_2015soc.nc`：自己的网格，`manure(lat,lon)` 与 `fertilizer(cft=64,lat,lon)`，`float`；
 - `surfdata_irrigation_method_96x144.nc`：`irrigation_method(cft=64,lat,lon)`，`int`（上游取众数映射）；取值 1–4
-  （滴灌/喷灌/漫灌/水田），US-Ne3 格点上灌溉型作物 18/20/22/24 依次是水田/滴灌/喷灌/漫灌；
+  （滴灌/喷灌/漫灌/水田），US-Ne3 格点上灌溉型作物 18/20/22/24 依次是水田/滴灌/喷灌/漫灌；第二个参数把
+  方式整体轮换（1 时依次是滴灌/喷灌/漫灌/水田），用来让真正会灌溉的类别走到别的方式；
 - `surfdata_irrigation_allocation.nc`：`irrig_gw_alloc`/`irrig_sw_alloc(lat,lon)`。
 
 数值只为走遍分支：每个格点不同（取错格点会暴露），缺测值、非正值散布在别的格点上。
@@ -54,6 +55,7 @@ def grid(f, lat, lon):
 
 def main():
     crop = Path(sys.argv[1]) / "crop"
+    shift = int(sys.argv[2]) if len(sys.argv) > 2 else 0
     crop.mkdir(parents=True, exist_ok=True)
     k = cells(LAT, LON)
     # 每 17 个格点一个缺测，每 23 个格点一个非正值
@@ -96,7 +98,7 @@ def main():
         grid(f, LAT, LON)
         f.createDimension("cft", 64)
         f.createVariable("irrigation_method", "i4", ("cft", "lat", "lon"))[:] = np.stack(
-            [np.where((k % 19.0) == 4.0, -1, 1.0 + ((k + c // 2) % 4.0)).astype(np.int32)
+            [np.where((k % 19.0) == 4.0, -1, 1.0 + ((k + c // 2 + shift) % 4.0)).astype(np.int32)
              for c in range(64)])
 
     with nc.Dataset(crop / "surfdata_irrigation_allocation.nc", "w") as f:

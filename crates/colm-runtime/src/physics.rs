@@ -118,15 +118,6 @@ pub fn land_physics_parameters(
              with the non-SNICAR snow albedo and layer absorption"
         );
     }
-    if logical(document, "DEF_USE_IRRIGATION")? {
-        // 上游的喷灌率由 `DEF_TUNING_IRRIGATION_*` 与作物物候逐步算出，
-        // 不是 namelist 里的一个常数。这里给 0 会让开启喷灌的算例静默变成不灌溉。
-        bail!(
-            "DEF_USE_IRRIGATION is on, but the Rust runtime has no sprinkler schedule yet; \
-             the rate is derived per step from DEF_TUNING_IRRIGATION_* and the crop phenology, \
-             so substituting zero would silently run the case unirrigated"
-        );
-    }
     // 上游 `MOD_Namelist.F90:1932-1944`：`DEF_USE_LCT`/`DEF_USE_PFT`/`DEF_USE_PC`
     // **恰好一个**必须为真，否则 `CoLM_stop`；三者的声明默认值是
     // `.true.`/`.false.`/`.false.`，也就是默认走 LCT。
@@ -177,7 +168,6 @@ pub fn land_physics_parameters(
             campbell: logical(document, "DEF_USE_Campbell_SOIL_MODEL")?,
             rstfac: scheme_index(document, "DEF_RSTFAC", 1, 2)?,
         };
-        crate::bgc_step::refuse_unported(switches)?;
         Some(switches)
     } else {
         None
@@ -323,10 +313,31 @@ pub fn land_physics_parameters(
         fine_root_to_leaf_area: real(document, "DEF_PH_FROOT_LEAF")?,
         maximum_radial_root_conductance: real(document, "DEF_PH_KRMAX")?,
     };
+    // `DEF_USE_IRRIGATION`：上游 CROP 关闭时强制关掉（`MOD_Namelist.F90:1973`）；是否 CROP 内核只有
+    // `colm-rs --crop` 知道，所以这里先读，由调用方在非 CROP 时清掉。
+    let irrigation = if logical(document, "DEF_USE_IRRIGATION")? {
+        Some(colm_core::IrrigationSettings {
+            start_seconds: real(document, "DEF_TUNING_IRRIGATION_START_SEC")?,
+            duration_seconds: real(document, "DEF_TUNING_IRRIGATION_DURATION_SEC")?,
+            max_depth_m: real(document, "DEF_TUNING_IRRIGATION_MAX_DEPTH")?,
+            threshold_fraction: real(document, "DEF_TUNING_IRRIGATION_THRESHOLD_FRACTION")?,
+            supply_fraction: real(document, "DEF_TUNING_IRRIGATION_SUPPLY_FRACTION")?,
+            min_crop_phase: real(document, "DEF_TUNING_IRRIGATION_MIN_CPHASE")?,
+            max_crop_phase: real(document, "DEF_TUNING_IRRIGATION_MAX_CPHASE")?,
+            paddy_ponding_limit_mm: real(document, "DEF_TUNING_IRRIGATION_PONDMX")?,
+            allocation: scheme_index(document, "DEF_IRRIGATION_ALLOCATION", 1, 3)?,
+            variably_saturated_flow,
+            campbell,
+            greenwich: logical(document, "DEF_simulation_time%greenwich")?,
+        })
+    } else {
+        None
+    };
     Ok(LandPhysicsParameters {
         use_pft,
         use_pc,
         bgc,
+        irrigation,
         hydraulic_model: if campbell {
             HydraulicModel::Campbell
         } else {
