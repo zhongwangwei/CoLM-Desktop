@@ -91,12 +91,10 @@ pub fn land_physics_parameters(
     // `DEF_USE_SNICAR`：雪反照率与分层吸收走 SNICAR（`SnowAlbedo`/`SNICAR_AD_RT`），雪层携带粒径与
     // 气溶胶。`read_namelist` 在 SNICAR 关闭时把 `DEF_Aerosol_Readin` 强制置假（`MOD_Namelist.F90:2229-2235`）。
     let snicar = logical(document, "DEF_USE_SNICAR")?;
-    ensure!(
-        !(snicar && logical(document, "DEF_Aerosol_Readin")?),
-        "DEF_USE_SNICAR with DEF_Aerosol_Readin = .true. (its default) needs the monthly aerosol \
-         deposition file (MOD_Aerosol), which the Rust runtime does not read yet; set \
-         DEF_Aerosol_Readin = .false. for zero deposition"
-    );
+    // `DEF_Aerosol_Readin`：读 `DEF_dir_runtime/aerosol/` 的月度沉降（`DEF_Aerosol_Clim` 选气候态）；
+    // 关闭时 `forc_aer = 0`（`CoLMMAIN.F90:745-750`）。
+    let aerosol_readin = snicar && logical(document, "DEF_Aerosol_Readin")?;
+    let aerosol_climatology = logical(document, "DEF_Aerosol_Clim")?;
     ensure!(
         !(snicar && urban_run),
         "DEF_USE_SNICAR with DEF_URBAN_RUN is not ported: the urban snow surfaces keep the \
@@ -279,6 +277,8 @@ pub fn land_physics_parameters(
         dynamic_wetland,
         dynamic_lake,
         snicar,
+        aerosol_readin,
+        aerosol_climatology,
         hydraulic_model: if campbell {
             HydraulicModel::Campbell
         } else {

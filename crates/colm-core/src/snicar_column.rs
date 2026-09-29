@@ -168,10 +168,12 @@ pub fn snicar_snow_water_aerosols(
     masses[1] += f[1] * dt;
     masses[2] += (f[3] + f[5]) * dt;
     masses[3] += f[4] * dt;
-    masses[4] += (f[7] + f[6]) * dt;
-    masses[5] += (f[9] + f[8]) * dt;
-    masses[6] += (f[11] + f[10]) * dt;
-    masses[7] += (f[13] + f[12]) * dt;
+    // 粉尘 `mss + (dry+wet)*deltim` 的乘积没有括号，GIMPLE 融合成 `.FMA (deltim, dry+wet, mss)`；
+    // BC/OC 的 `mss + (flx*deltim)` 带括号，不融合。
+    masses[4] = dt.mul_add(f[7] + f[6], masses[4]);
+    masses[5] = dt.mul_add(f[9] + f[8], masses[5]);
+    masses[6] = dt.mul_add(f[11] + f[10], masses[6]);
+    masses[7] = dt.mul_add(f[13] + f[12], masses[7]);
     Ok(())
 }
 
@@ -296,16 +298,13 @@ impl<'a> SnicarAlbedoHook<'a> {
                 soil_diffuse_albedo[1],
             ],
         };
-        // `snw_rds_in = nint(snw_rds)` 取全部五个槽；`mss_cnc_aer_in_fdb` 只放 BC 与粉尘
-        // （`DO_SNO_OC = .false.`，OC 两列保持 0）。
+        // `snw_rds_in = nint(snw_rds)` 取全部五个槽；`mss_cnc_aer_in_fdb` 放全部八种：`SnowAlbedo` 所在的
+        // `MOD_Albedo` 自己声明了 `DO_SNO_OC = .true.`（`:1384`），遮蔽了 `MOD_SnowSnicar` 的 `.false.`。
         for (row, slot) in (top..5).enumerate() {
             input.liquid_water_kg_m2[row] = self.liquid_water_kg_m2[slot];
             input.ice_water_kg_m2[row] = self.ice_water_kg_m2[slot];
             input.snow_radius_microns[row] = self.state.grain_radius_um[slot].round() as i32;
-            let mut concentration = self.concentration[slot];
-            concentration[2] = 0.0;
-            concentration[3] = 0.0;
-            input.aerosol_mass_concentration[row] = concentration;
+            input.aerosol_mass_concentration[row] = self.concentration[slot];
         }
         if layers == 0 {
             // 无雪层时 SNICAR 用第 0 槽做临时层。

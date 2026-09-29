@@ -259,16 +259,31 @@ fn split_soil_snow_is_read_into_the_physics_parameters() {
 /// `DEF_USE_SNICAR` 此前同样没被读过，而 `assembly.rs` 把 `snow_layer_absorption_w_m2`
 /// 钉成 `None` —— 开着它跑会静默用非 SNICAR 的雪光学。
 #[test]
-fn snicar_is_refused_rather_than_run_with_standard_snow_optics() {
-    let error = land_physics_parameters(
-        &case_with("DEF_USE_SNICAR = .true."),
+fn snicar_switches_follow_read_namelist() {
+    // SNICAR 打开：`DEF_Aerosol_Readin` 的声明默认值 `.true.` 生效，`DEF_Aerosol_Clim` 原样读。
+    let physics = land_physics_parameters(
+        &case_with("DEF_USE_SNICAR = .true.\n   DEF_Aerosol_Clim = .true."),
         LandCoverScheme::Igbp,
         HEIGHTS,
     )
-    .expect_err("the SNICAR snow branch is not carried into the time loop");
-    let message = error.to_string();
-    assert!(message.contains("DEF_USE_SNICAR"), "{message}");
-    assert!(message.contains("snow_layer_absorption_w_m2"), "{message}");
+    .expect("SNICAR runs in the time loop");
+    assert!(physics.snicar && physics.aerosol_readin && physics.aerosol_climatology);
+    // SNICAR 关闭：`read_namelist` 把 `DEF_Aerosol_Readin` 强制置假（`MOD_Namelist.F90:2229-2235`）。
+    let physics = land_physics_parameters(
+        &case_with("DEF_Aerosol_Readin = .true."),
+        LandCoverScheme::Igbp,
+        HEIGHTS,
+    )
+    .unwrap();
+    assert!(!physics.snicar && !physics.aerosol_readin);
+    // 城市的雪面没有 SNICAR 分支。
+    let error = land_physics_parameters(
+        &case_with("DEF_USE_SNICAR = .true.\n   DEF_URBAN_RUN = .true."),
+        LandCoverScheme::Igbp,
+        HEIGHTS,
+    )
+    .expect_err("urban SNICAR is not ported");
+    assert!(error.to_string().contains("DEF_URBAN_RUN"), "{error}");
 }
 
 /// 优化器由运行时承担（`baseflow_optimizer`），物理参数映射不再拦它。

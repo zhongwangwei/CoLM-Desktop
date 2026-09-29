@@ -40,6 +40,8 @@ fn physics() -> LandPhysicsParameters {
         dynamic_wetland: false,
         dynamic_lake: false,
         snicar: false,
+        aerosol_readin: false,
+        aerosol_climatology: false,
         hydraulic_model: HydraulicModel::VanGenuchten,
         variably_saturated_flow: false,
         plant_hydraulics: false,

@@ -26198,3 +26198,34 @@ SNICAR 分支（`MOD_Glacier`/`MOD_Lake` 各自的 `_snicar` 支）。拒绝信�
 既有算例不受影响：全量回归 113 例逐位（含上表三例与第 443 轮的 `ta1`/`tb1`/`tr1-3`/`tt1-2`；`nn`/`pni` 不写历史）。
 另：本机 `PLUMBER2_ROOT` 默认目录 `/Users/zhongwangwei/Desktop/colm-rust/PLUMBER2s` 已不存在，`colm-forcing` 的三个
 `tests/met.rs` 集成测试因此失败（与本轮无关）。
+
+## 第 445 轮：气溶胶沉降（`DEF_Aerosol_Readin`/`DEF_Aerosol_Clim`）
+
+`crates/colm-runtime/src/aerosol.rs`：`AerosolDepInit` 按文件自带的 `lat`/`lon` 定网格，单点取含站点的那一格；
+`AerosolDepReadin(jdate)` 在每步开始（`TICKTIME` 之前）用步首日期读、换月才重读，这里按 `(年, 月)` 缓存，等价。
+逐年文件 `itime = (clamp(year, 1849, 2001) - 1849)*12 + month`，气候态 `itime = month`；14 个量的顺序照
+`MOD_Aerosol.F90:369-411`。`read_namelist` 在 SNICAR 关闭时把 `DEF_Aerosol_Readin` 强制置假。
+
+### 一、两处只有在沉降非零时才暴露的不一致
+
+1. **`DO_SNO_OC` 被同名局部参数遮蔽。** `MOD_SnowSnicar` 声明 `DO_SNO_OC = .false.`，但 `SnowAlbedo` 所在的
+   `MOD_Albedo` 自己又声明了一个 `DO_SNO_OC = .true.`（`MOD_Albedo.F90:1384`），反馈调用里 OC 两种浓度照样进
+   `SNICAR_AD_RT`。第 444 轮按 `MOD_SnowSnicar` 的值把 OC 置零（那一轮的算例沉降为 0，碰不到），本轮更正。
+   定位：`SNICAR_AD_RT` 里打印各波段 `tau/omega/g`、气溶胶光学参数与浓度，Fortran 的第 3、4 种浓度非零。
+2. **粉尘沉降融合。** `mss_dst* + (dry+wet)*deltim` 的乘积没有括号，GIMPLE 是 `.FMA (deltim, dry+wet, mss)`；
+   BC/OC 的 `mss + (flx*deltim)` 带括号，不融合。
+
+### 二、合成数据与结果
+
+`oracle/scripts/make_aerosol_deposition.py` 按原文件名写 10°×10° 的合成网格（气候态 12 个月；逐年 1836 个月，
+随时间递增），不入库。对纯 Fortran：
+
+| 算例 | 设置 | 历史 | 重启 | release | debug |
+|---|---|---|---|---|---|
+| `sn4` | `sn2` + `DEF_Aerosol_Readin`、`DEF_Aerosol_Clim = .true.` | 4/4 | 9/9 | ✓ | ✓ |
+| `sn5` | `sn2` + `DEF_Aerosol_Readin`（逐年） | 4/4 | 9/9 | ✓ | ✓ |
+
+`sn1`–`sn3` 复跑仍逐位。2 月 1 日 `sn4` 雪层 BC 亲水质量 5.7e-5 kg/m²、粉尘 4 质量 1.1e-3 kg/m²（`sn2` 为 0）。
+
+另：第 444 轮提交时 `colm-runtime` 的 `snicar_is_refused_rather_than_run_with_standard_snow_optics` 已经失败（它断言的
+拒绝文本随那一轮消失），当时漏看了；本轮改写为检验新行为的 `snicar_switches_follow_read_namelist`。

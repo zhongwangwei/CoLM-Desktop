@@ -412,7 +412,24 @@ fn assemble_patch(
     if template.physics.snicar {
         let tables = colm_init::SnicarInitialization::from_document(document)?
             .context("DEF_USE_SNICAR is on but its tables were not loaded")?;
-        template = template.with_snicar_tables(std::sync::Arc::new(tables));
+        // `AerosolDepInit`：本 patch 所在网格（单点就是含站点的那一格）。
+        let aerosol = if template.physics.aerosol_readin {
+            let constant = colm_init::RestartFile::open(&files.constant)?;
+            let pick = |name: &str| -> Result<f64> {
+                constant.floats(name)?.get(patch).copied().with_context(|| {
+                    format!("the constant restart has no {name} for patch {patch}")
+                })
+            };
+            Some(colm_runtime::aerosol::AerosolSource::open(
+                std::path::Path::new(&string_field(document, "DEF_dir_runtime")?),
+                pick("patchlatr")?.to_degrees(),
+                pick("patchlonr")?.to_degrees(),
+                template.physics.aerosol_climatology,
+            )?)
+        } else {
+            None
+        };
+        template = template.with_snicar_tables(std::sync::Arc::new(tables), aerosol);
     }
     Ok(template)
 }

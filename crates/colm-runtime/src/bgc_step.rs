@@ -398,7 +398,7 @@ pub fn lightning_record_due(
 }
 
 /// `grid%define_by_center`：网格边界取相邻中心的中点，返回包含 `x` 的格子。
-fn containing_cell(centers: &[f64], x: f64, periodic: bool) -> Result<usize> {
+pub(crate) fn containing_cell(centers: &[f64], x: f64, periodic: bool) -> Result<usize> {
     ensure!(!centers.is_empty(), "an empty coordinate axis");
     let x = if periodic { x.rem_euclid(360.0) } else { x };
     let distance = |c: f64| {

@@ -5,6 +5,7 @@
 //! serialization stays in `colm-init`; that keeps `colm-init` from becoming a
 //! second copy of `colm.x`.
 
+pub mod aerosol;
 pub mod assembly;
 pub mod baseflow_optimizer;
 pub mod bgc;
@@ -901,7 +902,10 @@ fn advance_patch(
 ) -> Result<PatchOutput> {
     // `scvold`：上游在 `newsnow` **之前**把 `scv` 抄一份（`CoLMMAIN.F90:814`）。
     let previous_snow_water_equivalent_mm = state.snow.water_equivalent_kg_m2;
-    let input = baseflow_scaled(template.snow_input(binding), optimizer);
+    let mut input = baseflow_scaled(template.snow_input(binding), optimizer);
+    if let Some(snicar) = input.snicar.as_mut() {
+        snicar.aerosol_deposition_kg_m2_s = template.aerosol_deposition(step.clock.forcing_time)?;
+    }
     if template.patch_type == 3 {
         let output = colm_core::glacier_snow_step(input, state)?;
         template.prepare_surface_optics(
@@ -1660,6 +1664,8 @@ mod tests {
             dynamic_wetland: false,
             dynamic_lake: false,
             snicar: false,
+            aerosol_readin: false,
+            aerosol_climatology: false,
             hydraulic_model: colm_core::HydraulicModel::VanGenuchten,
             variably_saturated_flow: false,
             plant_hydraulics: false,

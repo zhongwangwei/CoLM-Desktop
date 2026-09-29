@@ -82,8 +82,12 @@ pub struct LandPhysicsParameters {
     pub dynamic_wetland: bool,
     /// `DEF_USE_Dynamic_Lake`（VSF 下才生效）：湖层厚随水量变、`dz_lake` 进时间重启。
     pub dynamic_lake: bool,
-    /// `DEF_USE_SNICAR`（`DEF_Aerosol_Readin = .false.`，沉降为 0）。
+    /// `DEF_USE_SNICAR`。
     pub snicar: bool,
+    /// `DEF_Aerosol_Readin`（只在 SNICAR 打开时为真）：读月度气溶胶沉降，否则沉降为 0。
+    pub aerosol_readin: bool,
+    /// `DEF_Aerosol_Clim`：沉降取 2000 年均气候态。
+    pub aerosol_climatology: bool,
     /// namelist 选的土壤水力关系；决定常数重启里读 `bsw` 还是五个 van Genuchten 场。
     pub hydraulic_model: HydraulicModel,
     /// `DEF_USE_VariablySaturatedFlow` **生效后**的取值。
@@ -1973,14 +1977,34 @@ impl StandardLctRestartTemplate {
     pub fn with_snicar_tables(
         mut self,
         tables: std::sync::Arc<colm_init::SnicarInitialization>,
+        aerosol: Option<crate::aerosol::AerosolSource>,
     ) -> Self {
         if let Some(snicar) = self.snicar.as_mut() {
             snicar.tables = Some(tables);
+            snicar.aerosol = aerosol.map(std::sync::Arc::new);
         }
         self
     }
 
-    /// 本步的 SNICAR 输入（`DEF_Aerosol_Readin = .false.`：沉降为 0）。
+    /// 本步的气溶胶沉降（`AerosolDepReadin(jdate)`：步首日期所在月）；没有沉降源时为 0。
+    pub fn aerosol_deposition(
+        &self,
+        forcing_time: colm_core::CalendarTime,
+    ) -> Result<[f64; colm_core::AEROSOL_DEPOSITION_FIELDS]> {
+        match self
+            .snicar
+            .as_ref()
+            .and_then(|snicar| snicar.aerosol.as_ref())
+        {
+            Some(source) => {
+                let (month, _) = colm_core::month_day(forcing_time)?;
+                source.deposition(forcing_time.year, month)
+            }
+            None => Ok([0.0; colm_core::AEROSOL_DEPOSITION_FIELDS]),
+        }
+    }
+
+    /// 本步的 SNICAR 输入；沉降先填 0，`advance_patch` 按步首日期换成 [`Self::aerosol_deposition`]。
     fn snicar_step_input(&self) -> Option<colm_core::SnicarStepInput<'_>> {
         let snicar = self.snicar.as_ref()?;
         let tables = snicar
@@ -2738,6 +2762,8 @@ fn soil_column(
 pub struct SnicarTemplate {
     pub initial: colm_core::SnicarColumnState,
     pub tables: Option<std::sync::Arc<colm_init::SnicarInitialization>>,
+    /// `DEF_Aerosol_Readin` 的月度沉降源（colm-rs 挂上）。
+    pub aerosol: Option<std::sync::Arc<crate::aerosol::AerosolSource>>,
     restart_grain_radius_um: Vec<f64>,
     restart_aerosol_mass: [Vec<f64>; 8],
     restart_layer_absorption: Vec<f64>,
@@ -2799,6 +2825,7 @@ impl SnicarTemplate {
         Ok(Self {
             initial,
             tables: None,
+            aerosol: None,
             restart_grain_radius_um: grain,
             restart_aerosol_mass,
             restart_layer_absorption: layers,
