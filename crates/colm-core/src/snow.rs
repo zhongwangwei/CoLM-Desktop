@@ -712,20 +712,26 @@ fn combine_snow_values(target: SnowLayer, other: SnowLayer) -> SnowLayer {
     let thickness_m = target.thickness_m + other.thickness_m;
     let ice_water_kg_m2 = target.ice_water_kg_m2 + other.ice_water_kg_m2;
     let liquid_water_kg_m2 = target.liquid_water_kg_m2 + other.liquid_water_kg_m2;
-    let enthalpy = (f77(2117.27) * target.ice_water_kg_m2
-        + f77(4188.0) * target.liquid_water_kg_m2)
-        * (target.temperature_k - FREEZING_K)
-        + f77(0.3336e6) * target.liquid_water_kg_m2
-        + (f77(2117.27) * other.ice_water_kg_m2 + f77(4188.0) * other.liquid_water_kg_m2)
-            * (other.temperature_k - FREEZING_K)
-        + f77(0.3336e6) * other.liquid_water_kg_m2;
-    let heat_capacity = f77(2117.27) * ice_water_kg_m2 + f77(4188.0) * liquid_water_kg_m2;
+    // `combo`（`MOD_SnowLayersCombineDivide.F90:900-916`）不被内联，GIMPLE 是：
+    //   热容 `.FMA (wice, cpice, wliq*cpliq)`，`h = .FMA (热容, t-tfrz, wliq*hfus)`，两层各算一个 `h`
+    //   再相加 `hc = h + h2`；合并后的热容同样 `.FMA (wicec, cpice, wliqc*cpliq)`。
+    // 没有液水时每个 FMA 的加数都是 0，与平铺写法逐位相同；有液水时平铺（且四项连加）差 1 ULP
+    // （AT-Neu 第二年 12 月 31 日雪层分裂，第 432 轮）。
+    let capacity = |ice: f64, liquid: f64| ice.mul_add(f77(2117.27), liquid * f77(4188.0));
+    let layer_enthalpy = |layer: SnowLayer| {
+        capacity(layer.ice_water_kg_m2, layer.liquid_water_kg_m2).mul_add(
+            layer.temperature_k - FREEZING_K,
+            layer.liquid_water_kg_m2 * f77(0.3336e6),
+        )
+    };
+    let enthalpy = layer_enthalpy(target) + layer_enthalpy(other);
+    let heat_capacity = capacity(ice_water_kg_m2, liquid_water_kg_m2);
     let temperature_k = if enthalpy < 0.0 {
-        FREEZING_K + enthalpy / heat_capacity
-    } else if enthalpy <= f77(0.3336e6) * liquid_water_kg_m2 {
+        enthalpy / heat_capacity + FREEZING_K
+    } else if enthalpy <= liquid_water_kg_m2 * f77(0.3336e6) {
         FREEZING_K
     } else {
-        FREEZING_K + (enthalpy - f77(0.3336e6) * liquid_water_kg_m2) / heat_capacity
+        (enthalpy - liquid_water_kg_m2 * f77(0.3336e6)) / heat_capacity + FREEZING_K
     };
     SnowLayer {
         thickness_m,
