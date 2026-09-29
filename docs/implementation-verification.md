@@ -26120,3 +26120,17 @@ mksrfdata 判为失败（实测 `ci6x`：日志末行 "Successful in surface dat
 | `tr3` | `bl` 1–3 月，`DOMINANT_PATCHTYPE = .true.`、`SOILPAR_UPS_FIT = .false.` | | 3/3 | ✓ | ✓ | ✓ |
 
 运行期拒绝名单只剩 `DEF_TOPMOD_method`（C 类，下一步）。
+
+### C 类：`DEF_TOPMOD_method`——单点里同样不起作用
+
+方案里原以为要移植 method 1/2（含 `GRATIO`）。核对调用链后发现：`SurfaceRunoff_TOPMOD`/`SubsurfaceRunoff_TOPMOD`
+只在 `DEF_Runoff_SCHEME == 0` 时调用（`MOD_SoilSnowHydrology.F90:336,408,990,1099,2609`），而单点构建的
+`read_namelist` 在方案 0 时把 `DEF_TOPMOD_method` 强制为 0（`MOD_Namelist.F90:1794-1798`，日志有
+"Note: DEF_TOPMOD_method is set to 0 in SinglePoint."）；其它产流方案根本不看它。colm-rs 只跑单点，运行期写死的
+Exponential 就是 method 0。于是拒绝表清空，连同 `sets_non_default` 一起删掉，理由写在 `physics.rs` 原位的注释里。
+**空间主循环（B1）接进来时要重新打开 method 1/2**（`MOD_Runoff.F90:90-128,212-219`、`share/MOD_IncompleteGamma.F90`）。
+
+| 算例 | 设置 | 对照 | 历史 | 重启 | release | debug |
+|---|---|---|---|---|---|---|
+| `tt1` | `bl` 1–6 月，`DEF_Runoff_SCHEME = 0`、`DEF_TOPMOD_method = 2` | Fortran 日志确认强制置 0 | 6/6 | ✓ | ✓ | ✓ |
+| `tt2` | `bl` 1–6 月，默认方案 3，`DEF_TOPMOD_method = 1` | 纯 Fortran 与 `bl` 的 6 月末重启逐位相同 | 6/6 | ✓ | ✓ | ✓ |

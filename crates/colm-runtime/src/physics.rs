@@ -212,37 +212,18 @@ pub fn land_physics_parameters(
              overrides only SITE_landtype, and an urban site mixes land classes"
         );
     }
-    // 声明里有、本仓库**不读**的物理开关（默认值取自 schema 的声明）。判据是
-    // "算例把它设成了非声明默认值" —— 只写默认值不算设过（那正是黄金窗口验证过的路径）。
-    // 这张表来自 `oracle/scripts/audit_namelist_reads.sh` 的快照
-    // （`oracle/nml-unread.snapshot`）：里面还有一大批本来就与 SinglePoint/LCT 无关的
-    // 开关（CaMa 河网、湿地、DA、TRACER、crop/urban、以及调试/输出类），
-    // 那些**不列**在这里 —— 它们在 Golden 内核里同样不生效，忽略是对的。
-    // 列的是"设了就会改变物理、而本仓库不会照做"的那些。
-    //
-    // 曾经在表里、核对上游后移出的（第 443 轮）：
-    // - `DEF_TUNING_CSOILC`：只进 `csoilcn → rd`，而 `rd_opt` 是常量 3，`rd` 随即被垂直廓线解覆盖
-    //   （`MOD_LeafTemperature.F90:438,683-688`，PC 同理 `:574,1174`），运行期是死参数；
-    // - `DEF_TUNING_SMPMAX`、`DEF_TUNING_SIMPLE_VIC_DS/WS`：唯一读者 `SubsurfaceRunoff_SimpleVIC`
-    //   的调用在上游是注释（`MOD_SoilSnowHydrology.F90:1031`），`eroot` 用自己的局部 `smpmax`；
-    // - `DEF_TUNING_SMPMAX_HR/SMPMIN_HR`：colm-init 写进常数重启，BGC 分解从重启读；
-    // - `DEF_LAI_START/END_YEAR`：城市 LAI 读它们；`USE_SITE_LAI` 按最近年取、不看它们，
-    //   `USE_SITE_LAI = .false.` 另有拒绝；
-    // - `DEF_LANDONLY`：只在 `GRIDBASED/UNSTRUCTURED` 下编译（`MKSRFDATA.F90:365-366`）；
-    // - `DEF_USE_DOMINANT_PATCHTYPE`、`DEF_USE_SOILPAR_UPS_FIT`：只在栅格聚合里（单点 mksrfdata 在那之前
-    //   `STOP`，`MKSRFDATA.F90:121-146`），colm-srfdata 的栅格路径已实现；
-    // - `DEF_USE_BEDROCK`：只进 mkinidata 的 `debdrock/ibedrock`（运行期无读者），colm-init 已实现；
-    // - `DEF_SOIL_REFL_SCHEME`：mkinidata 的土壤反照率来源，colm-init 已实现（方案 1 查地类色表）。
-    const UNREAD_PHYSICS_SWITCHES: [&str; 1] = ["DEF_TOPMOD_method"];
-    for name in UNREAD_PHYSICS_SWITCHES {
-        if sets_non_default(document, name) {
-            bail!(
-                "{name} is set to a non-default value, but the Rust runtime never reads it, so \
-                 the case would silently run with the runtime's own hard-coded behaviour \
-                 instead (see oracle/nml-unread.snapshot)"
-            );
-        }
-    }
+    // 这里曾有一张"设了非默认值就拒绝"的表（`oracle/nml-unread.snapshot` 里会改变物理、而运行期不读的
+    // 开关）。第 443 轮逐个核对上游后全部清空，理由记在 `docs/implementation-verification.md`：
+    // - 运行期死参数：`DEF_TUNING_CSOILC`（`rd_opt` 恒为 3，`MOD_LeafTemperature.F90:438`）、
+    //   `DEF_TUNING_SMPMAX`/`DEF_TUNING_SIMPLE_VIC_DS/WS`（唯一读者的调用是注释，
+    //   `MOD_SoilSnowHydrology.F90:1031`）；
+    // - 已由重启或别处接通：`DEF_TUNING_SMPMAX_HR/SMPMIN_HR`（常数重启 → BGC）、`DEF_LAI_START/END_YEAR`
+    //   （城市 LAI；`USE_SITE_LAI` 不看它们）；
+    // - 只影响前处理（colm-init / colm-srfdata 已实现）：`DEF_USE_BEDROCK`、`DEF_SOIL_REFL_SCHEME`、
+    //   `DEF_USE_DOMINANT_PATCHTYPE`、`DEF_USE_SOILPAR_UPS_FIT`、`DEF_LANDONLY`；
+    // - `DEF_TOPMOD_method`：TOPMODEL 只在 `DEF_Runoff_SCHEME == 0` 时调用，而单点构建在那时把它强制为 0
+    //   （`MOD_Namelist.F90:1794-1798`），与这里写死的 Exponential 一致。空间主循环接进来时要重新打开
+    //   method 1/2（`MOD_Runoff.F90:90-128,212-219`，含 `GRATIO`）。
     let plant_hydraulic_overrides = PlantHydraulicOverrides {
         maximum_sunlit_leaf_conductance: land_cover_override(document, "DEF_LC_KMAX_SUN")?,
         maximum_shaded_leaf_conductance: land_cover_override(document, "DEF_LC_KMAX_SHA")?,
@@ -559,32 +540,6 @@ fn land_cover_override(document: &Document, path: &str) -> Result<Option<f64>> {
         return Ok(None);
     }
     Ok(Some(value))
-}
-
-/// 算例是否把 `name` 设成了**非声明默认值**（`colm-schema` 里那份声明就是判据）。
-///
-/// 只写默认值不算"设过" —— 那正是黄金窗口验证过的路径；写别的值才是"要一份
-/// 本仓库不会照做的行为"。实数按**解析后的 `f64` 比**（namelist 里的 `0.004` 与声明里的
-/// `"0.004_r8"` 是同一个值），类型对不上或解析不了就按"设过"处理（宁可报错，别静默丢）。
-fn sets_non_default(document: &Document, name: &str) -> bool {
-    let (Ok(field), Some(value)) = (field(name), document.get(name)) else {
-        return false;
-    };
-    match (&field.default, value) {
-        (SchemaDefault::Logical(declared), Value::Bool(actual)) => declared != actual,
-        (SchemaDefault::Integer(declared), Value::Int(actual)) => declared != actual,
-        (SchemaDefault::Real(declared), Value::Real { text }) => {
-            match (
-                declared.trim_end_matches("_r8").parse::<f64>(),
-                text.trim_end_matches("_r8").parse::<f64>(),
-            ) {
-                (Ok(declared), Ok(actual)) => declared != actual,
-                _ => true,
-            }
-        }
-        (SchemaDefault::Str(declared), Value::Str(actual)) => declared != actual,
-        _ => true,
-    }
 }
 
 fn logical(document: &Document, path: &str) -> Result<bool> {
