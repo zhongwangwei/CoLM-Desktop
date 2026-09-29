@@ -418,8 +418,8 @@ pub fn land_physics_parameters(
 pub fn unported_branches(_physics: &LandPhysicsParameters) -> Vec<&'static str> {
     // **现在是空的。** 最后一对是 VSF（`DEF_USE_VariablySaturatedFlow`）：
     // `variably_saturated_flow_step` 接上之后，上游有、本仓库没有的编排分支
-    // 只剩下面这些**在别处**拒绝的（`physics.rs` 里的 runoff scheme 1、
-    // 灌溉；`assembly.rs` 里的 PFT/PC 子网格），它们各自在装配期就报错，
+    // 只剩**在别处**按 patch 拒绝的（如灌溉只接了 CROP BGC 土壤 patch，见
+    // `StandardLctRestartTemplate::with_irrigation`），它们各自在装配期就报错，
     // 不需要在这里再列一遍。
     Vec::new()
 }
