@@ -127,5 +127,130 @@ fn the_kernel_creates_directories_without_cmd_expansion() {
     assert!(module.contains("Refusing to copy file onto itself"));
     let makefile = read("vendor/CoLM202X/Makefile");
     assert!(makefile.contains("CoLM_Mkdir.o: share/CoLM_Mkdir.c"));
-    assert!(makefile.contains("MOD_Namelist.o: MOD_SPMD_Task.o MOD_Filesystem.o"));
+    // C 助手得进 OBJS_SHARED，否则三个可执行文件都链接不上 colm_make_directory。
+    assert!(
+        make_list(&makefile, "OBJS_SHARED").contains(&"CoLM_Mkdir.o".to_string()),
+        "CoLM_Mkdir.o 不在 OBJS_SHARED 里"
+    );
+    // 要守的是编译顺序：谁 USE 了 MOD_Filesystem、MOD_Filesystem 又 USE 了谁，
+    // 对应的 .mod 就得先生成。不锁依赖行的原文 —— 上游把
+    // `MOD_Namelist.o: MOD_SPMD_Task.o MOD_Filesystem.o` 拆成了
+    // `MOD_Filesystem.o: MOD_SPMD_Task.o` + `MOD_Namelist.o: MOD_Filesystem.o`，
+    // 对 make 来说是一回事（传递前置照样先建），逐字比对却会红。
+    let graph = make_prerequisites(&makefile);
+    assert!(
+        fortran_uses(&read("vendor/CoLM202X/share/MOD_Namelist.F90")).contains("MOD_Filesystem"),
+        "MOD_Namelist 不再 USE MOD_Filesystem —— 建目录换了路子，这条测试要跟着重看"
+    );
+    let mut edges = vec![("MOD_Namelist", "MOD_Filesystem".to_string())];
+    edges.extend(
+        fortran_uses(&module)
+            .into_iter()
+            .filter(|m| m.starts_with("MOD_"))
+            .map(|m| ("MOD_Filesystem", m)),
+    );
+    assert!(edges
+        .iter()
+        .any(|(a, b)| *a == "MOD_Filesystem" && b == "MOD_SPMD_Task"));
+    for (from, to) in edges {
+        assert!(
+            reaches(&graph, &format!("{from}.o"), &format!("{to}.o")),
+            "Makefile 里 {from}.o 够不着 {to}.o —— 并行构建时 {to}.mod 可能还没生成"
+        );
+    }
+}
+
+/// Fortran 源里 `USE` 的模块名（去掉 `, ONLY: ...`）。
+fn fortran_uses(src: &str) -> std::collections::BTreeSet<String> {
+    src.lines()
+        .filter_map(|l| {
+            let mut w = l
+                .trim_start()
+                .split(|c: char| c.is_whitespace() || c == ',');
+            w.next()
+                .filter(|k| k.eq_ignore_ascii_case("use"))
+                .and_then(|_| w.find(|t| !t.is_empty()))
+                .map(str::to_string)
+        })
+        .collect()
+}
+
+/// 把 `\` 续行拼回一行。
+fn logical_lines(makefile: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    for l in makefile.lines() {
+        match l.strip_suffix('\\') {
+            Some(head) => {
+                cur.push_str(head);
+                cur.push(' ');
+            }
+            None => {
+                cur.push_str(l);
+                out.push(std::mem::take(&mut cur));
+            }
+        }
+    }
+    out
+}
+
+/// `NAME = a b c` 这种变量的取值。
+fn make_list(makefile: &str, name: &str) -> Vec<String> {
+    logical_lines(makefile)
+        .iter()
+        .find_map(|l| {
+            let (lhs, rhs) = l.split_once('=')?;
+            (lhs.trim() == name).then(|| rhs.split_whitespace().map(str::to_string).collect())
+        })
+        .unwrap_or_else(|| panic!("Makefile 里没有 {name}"))
+}
+
+/// 显式规则的前置依赖图。同一目标写在多行上时按 make 的规矩取并集；
+/// 模式规则、变量赋值、命令行都跳过；order-only（`|` 之后）也算顺序。
+fn make_prerequisites(
+    makefile: &str,
+) -> std::collections::HashMap<String, std::collections::BTreeSet<String>> {
+    let mut g: std::collections::HashMap<String, std::collections::BTreeSet<String>> =
+        Default::default();
+    for l in logical_lines(makefile) {
+        if l.starts_with('\t') || l.trim_start().starts_with('#') {
+            continue;
+        }
+        let Some((lhs, rhs)) = l.split_once(':') else {
+            continue;
+        };
+        if lhs.contains(['=', '%', '$']) || rhs.starts_with('=') || rhs.contains('%') {
+            continue;
+        }
+        let rhs = rhs.split(';').next().unwrap_or("");
+        let deps: Vec<String> = rhs
+            .split_whitespace()
+            .filter(|d| *d != "|")
+            .map(str::to_string)
+            .collect();
+        for t in lhs.split_whitespace() {
+            g.entry(t.to_string())
+                .or_default()
+                .extend(deps.iter().cloned());
+        }
+    }
+    g
+}
+
+fn reaches(
+    g: &std::collections::HashMap<String, std::collections::BTreeSet<String>>,
+    from: &str,
+    to: &str,
+) -> bool {
+    let mut seen = std::collections::HashSet::new();
+    let mut stack = vec![from.to_string()];
+    while let Some(n) = stack.pop() {
+        if n == to {
+            return true;
+        }
+        if seen.insert(n.clone()) {
+            stack.extend(g.get(&n).into_iter().flatten().cloned());
+        }
+    }
+    false
 }

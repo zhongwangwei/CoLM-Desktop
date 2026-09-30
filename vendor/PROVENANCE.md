@@ -59,6 +59,12 @@ diff -ru /tmp/colm-upstream vendor/CoLM202X | less
 **逐处判断**，因为我们这边会有大量有意的改动。上面那个 commit 号是
 分叉点 —— 上游从那之后的改动才需要看。
 
+**同步之后重跑 `python3 oracle/scripts/gen_fortran_deps.py`。** `Makefile` 末尾那段
+「同阶段 MODULE/USE 前置」与 `$(VAR): | mkdir_build` 是生成的：上游只靠对象在阶段变量里的
+排列顺序保证模块先编译，`make -j` 不安全。整体换上游的 `Makefile` 会把这段冲掉 ——
+`1deb5ee2` 就这样丢过一次 251 行（仓库里当时没有生成脚本，无从重建）。
+`cargo test -p xtask --test fortran_deps` 用 `--check` 守住漂移。
+
 ## 编译时真正被读的是哪份 `define.h`
 
 **不是 `include/define.h`。** `oracle/scripts/build_kernel.sh` 调用
