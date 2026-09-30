@@ -530,6 +530,9 @@ CONTAINS
    USE MOD_NetCDFVector
    USE MOD_Mesh
    USE MOD_Pixelset
+#ifdef FLAT_SPMD
+   USE MOD_Utils, only: quicksort, find_in_sorted_list1
+#endif
    IMPLICIT NONE
 
    integer         ,    intent(in) :: lc_year
@@ -546,6 +549,10 @@ CONTAINS
    integer,   allocatable :: iworker(:)
    logical,   allocatable :: msk(:)
    logical :: fexists, fexists_any
+#ifdef FLAT_SPMD
+   integer*8, allocatable :: elmsorted(:)
+   integer,   allocatable :: elmorder(:)
+#endif
 
       write(cyear,'(i4.4)') lc_year
 #ifdef USEMPI
@@ -641,18 +648,23 @@ CONTAINS
 
 #ifdef FLAT_SPMD
       IF (pixelset%nset > 0) THEN
+         ! Keep the sets whose element this rank owns.  The mesh is in load order (block by block),
+         ! and element indices of neighbouring blocks interleave, so test membership against a
+         ! sorted copy instead of walking the mesh; the sets keep their block-by-block order.
          allocate(msk(pixelset%nset))
          msk = .false.
-         ie = 1
-         DO iset = 1, pixelset%nset
-            DO WHILE (ie <= numelm)
-               IF (mesh(ie)%indx >= pixelset%eindex(iset)) EXIT
-               ie = ie + 1
+         IF (numelm > 0) THEN
+            allocate(elmsorted(numelm), elmorder(numelm))
+            DO ie = 1, numelm
+               elmsorted(ie) = mesh(ie)%indx
+               elmorder(ie)  = ie
             ENDDO
-            IF (ie <= numelm) THEN
-               IF (mesh(ie)%indx == pixelset%eindex(iset)) msk(iset) = .true.
-            ENDIF
-         ENDDO
+            CALL quicksort (numelm, elmsorted, elmorder)
+            DO iset = 1, pixelset%nset
+               msk(iset) = find_in_sorted_list1(pixelset%eindex(iset), numelm, elmsorted) > 0
+            ENDDO
+            deallocate(elmsorted, elmorder)
+         ENDIF
          nset = count(msk)
          allocate(sbuff(nset))
          IF (nset > 0) sbuff = pack(pixelset%eindex, msk)

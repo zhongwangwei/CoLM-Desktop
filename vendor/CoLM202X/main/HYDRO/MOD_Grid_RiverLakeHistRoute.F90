@@ -42,6 +42,9 @@ MODULE MOD_Grid_RiverLakeHistRoute
    USE MOD_Grid_RiverLakeHistShard
    USE MOD_Grid_RiverLakeNetwork, only: numucat, totalnumucat, ucat_data_address, &
       ucat_ucid, x_ucat, y_ucat, griducat
+#ifdef FLAT_SPMD
+   USE MOD_Grid_RiverLakeNetwork, only: x_ucat_all, y_ucat_all
+#endif
    USE MOD_Grid_Reservoir, only: numresv, totalnumresv, resv_global_id, &
       resv_data_address, dam_GRAND_ID
 
@@ -360,6 +363,21 @@ CONTAINS
             ENDIF
          ENDIF
       ELSE
+         ! The master maps the gathered (global) vector with the global coordinates; on FLAT_SPMD
+         ! it also computes, so x_ucat/y_ucat are only its local slice there.
+#ifdef FLAT_SPMD
+         IF (with_time) THEN
+            CALL vector_gather_map2grid_and_write (vector, numucat, totalnumucat, &
+               ucat_data_address, griducat%nlon, x_ucat_all, griducat%nlat, y_ucat_all, &
+               trim(rh_file_one), varname, 'lon_ucat', 'lat_ucat', rh_itime,      &
+               longname, units)
+         ELSE
+            CALL vector_gather_map2grid_and_write (vector, numucat, totalnumucat, &
+               ucat_data_address, griducat%nlon, x_ucat_all, griducat%nlat, y_ucat_all, &
+               trim(rh_file_one), varname, 'lon_ucat', 'lat_ucat',                &
+               longname=longname, units=units)
+         ENDIF
+#else
          IF (with_time) THEN
             CALL vector_gather_map2grid_and_write (vector, numucat, totalnumucat, &
                ucat_data_address, griducat%nlon, x_ucat, griducat%nlat, y_ucat,   &
@@ -371,6 +389,7 @@ CONTAINS
                trim(rh_file_one), varname, 'lon_ucat', 'lat_ucat',                &
                longname=longname, units=units)
          ENDIF
+#endif
       ENDIF
 
    END SUBROUTINE route_hist_write_ucat

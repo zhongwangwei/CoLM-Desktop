@@ -26766,3 +26766,30 @@ Rust 整月 2 分 51 秒（`g1`），纯 Fortran 约 32 分钟。
 - `e110` 常数重启与时间重启；
 - 不带块后缀的常数重启；
 - 河道冷启动重启。
+
+## 第 462 轮：修 `FLAT_SPMD` 多分块 —— 单进程与双进程都能跑、且逐位一致
+
+`FLAT_SPMD` 是本仓库自己加的并行路径（11258846 起，上游 CoLM-SYSU-integration 里没有这个宏），第 456 轮记下的两个多分块缺陷都在这里。
+
+**根因。** 相邻分块的网格元编号是交错的（g2：`e110_n20` 为 `1 2 5 6 9 10 13 14`，`e115_n20` 为 `3 4 7 8 11 12 15 16`）。三处代码却各自假定了不同的次序：
+
+1. **单进程：只模拟第一块。** `mesh_load_from_file` 按块读入网格元（块内升序、块间拼接），单进程时 `mesh_partition_spmd` 直接返回。但 `pixelset_load_from_file` 的 FLAT_SPMD 过滤用单指针沿 mesh 前进，假定编号全局升序；走完第一块指针停在 14，第二块的集合全被丢掉。
+2. **双进程：mkinidata 找不到数据中止。** `mesh_partition_spmd` 先按编号全局排序再切片，每个 rank 的网格元跨块交错。同一过滤照样丢集合，`vec_gather_scatter_set` 又要求每块的集合在 rank 内连续（`vstt/vend`）。结果所有 rank 都读不到 → `not found` → `MPI_ABORT`。
+3. **双进程：主循环写河道 history 越界。** FLAT_SPMD 的 master 也参与计算，全局 `x_ucat/y_ucat` 散发后只剩本地一段。一文件河道 history（`vector_gather_map2grid_and_write`）仍按全局长度去索引，debug 内核报 `y_vec` 下标 126192 超出上界 126191，生产内核则在第一天末段错误。
+
+**修法（5 个文件）：**
+- `mesh_partition_spmd` 不再全局排序，按装入次序（逐块、块内升序）切连续区间。
+- 过滤改用排序副本加二分查找判定成员，与次序无关，集合保持逐块次序。
+- `vec_gather_scatter_set` 的逐块 `mpi_allgather`（72×36 = 2592 次调用）合成一次整块数组的 allgather。原循环在 debug 内核里也段错误，根因没有完全查清；合并之后 debug 内核跑通。
+- 散发前在 master 上留一份全局 `x_ucat_all/y_ucat_all`（其余 rank 为零长）。一文件河道 history 在 FLAT_SPMD 下用它；分片输出本来就自己读 `seq_x/seq_y`，不动。
+
+**实测**（g2：两块共 159 个 patch，跑 2 天，全球 25 万单元流域河网；内核用临时副本构建，与入库的补丁相同）：
+
+| 对照 | 结果 |
+|---|---|
+| mksrfdata：1 进程 vs 2 进程 vs 旧参照 | 493 项全同 |
+| mkinidata + 主循环：1 进程 vs 2 进程 | 511 项全同（两块的重启、河道重启、旁车、gd_hist、unitcat） |
+| 修后 Fortran vs Rust `g2`（第 456 轮逐块验证过） | 所有数值逐位；余下只是 g2-rust 旧冷启动文件里今天两轮已删掉的多余变量 |
+| debug 内核（越界检查 + 浮点陷阱）2 进程 | 跑完无运行期错误；与生产内核只差 1e-16 量级（编译选项不同，收缩与常量折叠不同） |
+
+单点内核不定义 `FLAT_SPMD`，单点回归不受影响。仓库的 latlon 内核已重编。

@@ -27,6 +27,12 @@ MODULE MOD_Grid_RiverLakeNetwork
    integer, allocatable :: ucat_ucid (:)   ! index in unit catchment numbering
    integer, allocatable :: x_ucat    (:)   !
    integer, allocatable :: y_ucat    (:)   !
+#ifdef FLAT_SPMD
+   ! Global seq_x/seq_y kept on the master (zero-length elsewhere).  The master computes too, so
+   ! x_ucat/y_ucat are its local slice; one-file history maps gathered vectors with these.
+   integer, allocatable :: x_ucat_all (:)
+   integer, allocatable :: y_ucat_all (:)
+#endif
    integer, allocatable :: ucat_gdid (:)   !
 
    integer, allocatable :: numucat_wrk (:)
@@ -545,6 +551,15 @@ CONTAINS
       IF (p_is_master) CALL move_alloc (ucat_ucid, idata1d)
       CALL scatter_ucat_integer_fields (idata1d, 1, idata_recv)
       CALL move_alloc (idata_recv, ucat_ucid)
+
+      IF (allocated(x_ucat_all)) deallocate (x_ucat_all)
+      IF (allocated(y_ucat_all)) deallocate (y_ucat_all)
+      IF (p_is_master) THEN
+         x_ucat_all = x_ucat
+         y_ucat_all = y_ucat
+      ELSE
+         allocate (x_ucat_all (0), y_ucat_all (0))
+      ENDIF
 
       IF (p_is_master) CALL move_alloc (x_ucat, idata1d)
       CALL scatter_ucat_integer_fields (idata1d, 1, idata_recv)
@@ -1628,6 +1643,10 @@ CONTAINS
       CALL grid_free_mem (griducat)
 
       IF (allocated(x_ucat           )) deallocate(x_ucat           )
+#ifdef FLAT_SPMD
+      IF (allocated(x_ucat_all       )) deallocate(x_ucat_all       )
+      IF (allocated(y_ucat_all       )) deallocate(y_ucat_all       )
+#endif
       IF (allocated(y_ucat           )) deallocate(y_ucat           )
 
       IF (allocated(ucat_ucid        )) deallocate(ucat_ucid        )

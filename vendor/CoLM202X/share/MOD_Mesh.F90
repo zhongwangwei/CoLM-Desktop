@@ -1045,33 +1045,26 @@ CONTAINS
    SUBROUTINE mesh_partition_spmd ()
 
    USE MOD_SPMD_Task
-   USE MOD_Utils
    IMPLICIT NONE
 
    integer :: ie, ifirst, ilast, nlocal
-   integer, allocatable :: order(:)
-   integer*8, allocatable :: elmindx(:)
    type(irregular_elm_type), allocatable :: mesh_local(:)
 
       IF (p_np_glb <= 1) RETURN
 
+      ! Keep the load order (block by block, ascending element index within a block) and give each
+      ! rank a contiguous slice of it.  Pixel sets are read block by block and vec_gather_scatter_set
+      ! needs every block's sets to be contiguous; element indices of neighbouring blocks interleave,
+      ! so a global sort by index would scatter a block across ranks and within a rank.
       CALL spmd_partition_range (numelm, ifirst, ilast)
       nlocal = ilast - ifirst + 1
 
       allocate (mesh_local(nlocal))
       IF (numelm > 0) THEN
-         allocate (elmindx(numelm), order(numelm))
-         DO ie = 1, numelm
-            elmindx(ie) = mesh(ie)%indx
-            order(ie) = ie
-         ENDDO
-         CALL quicksort (numelm, elmindx, order)
-
          DO ie = ifirst, ilast
-            CALL copy_elm (mesh(order(ie)), mesh_local(ie-ifirst+1))
+            CALL copy_elm (mesh(ie), mesh_local(ie-ifirst+1))
          ENDDO
 
-         deallocate (elmindx, order)
          DO ie = 1, numelm
             IF (allocated(mesh(ie)%ilon)) deallocate (mesh(ie)%ilon)
             IF (allocated(mesh(ie)%ilat)) deallocate (mesh(ie)%ilat)
