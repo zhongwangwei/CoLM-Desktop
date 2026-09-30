@@ -17,6 +17,7 @@ pub mod irrigation;
 pub mod multi_patch;
 pub mod pft;
 pub mod physics;
+pub mod spatial;
 
 use std::path::{Path, PathBuf};
 

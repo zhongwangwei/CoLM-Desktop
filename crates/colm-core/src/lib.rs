@@ -343,7 +343,8 @@ pub use runtime_clock::{
     RuntimeStep,
 };
 pub use runtime_forcing::{
-    forcing_grid_center_degrees, prepare_runtime_forcing, RuntimeForcing, RuntimeForcingInput,
+    air_density_kg_m3, forcing_grid_center_degrees, prepare_runtime_forcing,
+    split_broadband_shortwave, RuntimeForcing, RuntimeForcingInput,
 };
 pub use snow::{
     add_new_snow, combine_snow_layers, combine_snow_layers_with_aerosols, compact_snow_layers,

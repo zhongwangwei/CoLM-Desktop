@@ -26398,3 +26398,30 @@ Rust 行为相同。所以两侧比较前要么都清 `ParaOpt/`，要么都不�
 全量回归（release）：140 个算例，默认组 129 个逐位；`bm1–4` 与对照 `mpc/mpf/mpr/mps/mpsc` 起初被按默认内核跑、在 mksrfdata 失败
 （脚本分组漏了，它们需要 CROP 内核），补进 CROP 组后 9/9 逐位；`nn`/`pni` 照旧不比历史。回归脚本改为重跑前清掉 Rust 侧的
 `ParaOpt/`（参照一律从干净状态生成）：否则比例会变的算例（`bm3`/`bm4`）每次回归都在"接着上次的标定"跑。连跑两遍稳定逐位。
+
+## 第 452 轮：B1 空间主循环起步 —— 网格强迫与面积加权映射
+
+参照算例 `g1`：广东 113–115°E、23–25°N，0.5° 经纬网格 16 格、175 个 patch，真实 rawdata/runtime（`/Volumes/Data`），
+JRA3Q 强迫（N240 高斯格，逐时），2010 年 1 月，步长 1800 s。纯 Fortran 用 `kernels/latlon`（单进程）跑，约 32 分钟一个月，
+瓶颈在从外接盘读强迫。
+
+两个背景事实：
+- 上游 GRID/UNSTRUCTURED 构建**总是**编进 `GridRiverLakeFlow`（`build_kernel.sh` 的自检也要求它）。陆面与河湖流的耦合只有漫滩
+  项（`fevpg_fld`/`qinfl_fld`），`DEF_GridRiverLake_FloodFeedback = .false.`（默认）时为 0，所以 B1 先验陆面 history/重启，
+  `*_hist_unitcat_*` 与 `*_restart_gridriver_*` 留给 B2。
+- 非单点构建强制格林尼治时间（`MOD_TimeManager:initimetype`），空间运行时的轨道日历一律按 greenwich。
+
+新增 `colm-runtime::spatial`：
+- `grid`：`grid_define_by_center` + `grid_normalize` + `set_rlon/rlat`，以及 `find_nearest_*`、`lon_between_*`、`areaquad`；
+- `mapping`：`spatial_mapping_build_arealweighted` 与 `grid2pset`。GIMPLE（latlon 内核重新生成）：累加是
+  `.FMA (areapart, value, pdata)`，`areapset = sum(areapart)` 顺序相加；
+- `forcing`：`metreadLBUB`/`setstampLB`/`setstampUB`（按月分组）、`calavgcos`、`tintalgo` 的 `linear`/`nearest`/`uniform`/
+  `coszen`、JRA3Q 的 `metpreprocess`（比湿截到饱和）与格上派生量；`map_to_patches` 逐量映射（`pco2m` 是先在格上乘 CO2 再映射，
+  高度常数也要过一遍映射）后截断 `forc_t` 并算 `forc_rhoair`；
+- `topology`：读 `landpatch_<block>.nc` 与像元集合（复用 `colm-init` 的读取器，改为对外可见）。目前只接单块。
+
+`block_data_linear_interp` 的 GIMPLE 是 `.FMA (from1, alp1, from2*alp2)`（单点与 latlon 内核相同）。
+
+验证：Fortran 在 `read_forcing` 末尾按位打印前 4 步每个 patch 的 17 个强迫量（`t q psrf pbot prc prl us vs sols soll solsd solld frl
+rhoair pco2m po2m hgt_u`），Rust 诊断程序走"拓扑 → 映射 → 网格强迫 → 逐量映射"：**700 行 × 17 列全部逐位一致**，
+含 0.5 权重的线性插值、`tprate`/`dlwrf` 的 1800 s 偏移（月初回退到上月最后一条）与 `coszen` 短波插值。

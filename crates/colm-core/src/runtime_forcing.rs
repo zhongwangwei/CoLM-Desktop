@@ -206,7 +206,7 @@ pub fn prepare_runtime_forcing(input: RuntimeForcingInput) -> Result<RuntimeForc
 /// air temperature the reader is still allowed to clamp; applying it here keeps
 /// that clamp with the formula instead of leaking a corrected temperature into
 /// the rest of `RuntimeForcing`.
-pub(crate) fn air_density_kg_m3(
+pub fn air_density_kg_m3(
     surface_pressure_pa: f64,
     specific_humidity: f64,
     air_temperature_k: f64,
@@ -277,7 +277,7 @@ fn validate(input: RuntimeForcingInput) -> Result<()> {
 ///
 /// 写成 `(580.0 - cloud * 464.0)` 会各差 1 ULP，进而让 `f_xy_solarin`
 /// （四个波段之和）差 1 ULP。
-pub(crate) fn split_broadband_shortwave(total_w_m2: f64, cosine_zenith: f64) -> ShortwaveForcing {
+pub fn split_broadband_shortwave(total_w_m2: f64, cosine_zenith: f64) -> ShortwaveForcing {
     let mut cloud = if cosine_zenith == 0.0 {
         0.0
     } else {

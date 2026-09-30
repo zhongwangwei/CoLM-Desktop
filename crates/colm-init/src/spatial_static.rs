@@ -1093,13 +1093,7 @@ fn read_patch_last_3d_f64(
     Ok(result)
 }
 
-pub(crate) fn block_path(
-    landdata: &Path,
-    directory: &str,
-    stem: &str,
-    year: i32,
-    block: &str,
-) -> PathBuf {
+pub fn block_path(landdata: &Path, directory: &str, stem: &str, year: i32, block: &str) -> PathBuf {
     landdata
         .join(directory)
         .join(format!("{year:04}"))
@@ -1138,17 +1132,17 @@ pub(crate) fn patch_coordinates(
 /// `pctshared` is retained because CoLM's areal mapper applies it before a
 /// `landpatch` or `landpft` result is normalized.
 #[derive(Debug, Clone)]
-pub(crate) struct SpatialPixelSets {
-    pub(crate) lon_w: Vec<f64>,
-    pub(crate) lon_e: Vec<f64>,
-    pub(crate) lat_s: Vec<f64>,
-    pub(crate) lat_n: Vec<f64>,
-    pub(crate) cells: Vec<Vec<(i32, i32)>>,
-    pub(crate) shared_fraction: Vec<f64>,
+pub struct SpatialPixelSets {
+    pub lon_w: Vec<f64>,
+    pub lon_e: Vec<f64>,
+    pub lat_s: Vec<f64>,
+    pub lat_n: Vec<f64>,
+    pub cells: Vec<Vec<(i32, i32)>>,
+    pub shared_fraction: Vec<f64>,
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn read_spatial_pixel_sets(
+pub fn read_spatial_pixel_sets(
     landdata: &Path,
     year: i32,
     block: &str,
