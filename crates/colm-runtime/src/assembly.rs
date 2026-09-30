@@ -1343,12 +1343,11 @@ fn assemble(
     // 生化参数整份来自地类表。冠层积分因子不在这里：内核每步从 `lai`/`extkb`/`extkd`
     // 现算 `cintsun`/`cintsha`（模板已经把这三样都供上了）。
     let biochemistry = class.biochemistry();
-    // 冰川/湖（`patchtype > 2`）不走植被能量链，冠层在每步末尾被清零，允许为 0。
-    // PFT/PC 子网格的冠层逐 PFT 判断（`lai_p+sai_p > 1e-6`，`MOD_Thermal.F90:856`），
-    // patch 级为 0 是合法的：播种前的作物（`croplive_p = .false.`）LAI 与 SAI 都是 0。
+    // 冠层可以为 0：`lai+sai <= 1e-6` 时内核走 `MOD_Thermal.F90:706` 的无冠层支
+    // （`colm_core` 的 `bare_lct_canopy`）。空间算例里 IGBP 湿地（第 11 类）的 LAI/SAI 常年是 0。
     ensure!(
-        patch_type > 2 || physics.use_pft || leaf_area_index + stem_area_index > 0.0,
-        "the standard LCT energy step needs a vegetated canopy"
+        leaf_area_index >= 0.0 && stem_area_index >= 0.0,
+        "the standard LCT energy step needs a nonnegative canopy"
     );
 
     // 雪 + 土模板列：上游的 `z_soisno`/`dz_soisno`/`zi_soisno` 是从雪顶一直排到土壤底，

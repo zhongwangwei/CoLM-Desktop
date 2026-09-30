@@ -358,63 +358,81 @@ fn run_spatial(
     let year = integer_field(&document, "DEF_LC_YEAR")?;
     let out = layout.out().join(name);
     let topology = SpatialTopology::read(&out.join("landdata"), i32::try_from(year)?)?;
-    let block = topology.block.clone();
     let start_label = date_label(config.start);
-    let files = RestartStateFiles {
-        constant: out
-            .join("restart/const")
-            .join(format!("{name}_restart_const_lc{year:04}_{block}.nc")),
-        time: out.join("restart").join(&start_label).join(format!(
-            "{name}_restart_{start_label}_lc{year:04}_{block}.nc"
-        )),
-    };
-    for path in [&files.constant, &files.time] {
-        ensure!(
-            path.is_file(),
-            "{} is missing; run mksrfdata and mkinidata for this case first",
-            path.display()
-        );
-    }
-    let patch_count = colm_init::RestartFile::open(&files.constant)?.dimension("patch")?;
-    ensure!(
-        patch_count == topology.patch_count(),
-        "the constant restart has {patch_count} patches but landpatch has {}",
-        topology.patch_count()
-    );
-    let mut templates = (0..patch_count)
-        .map(|patch| {
-            assemble_patch(
-                &document,
-                layout,
-                name,
-                &files,
-                physics.clone(),
-                patch,
-                &block,
-                true,
-            )
-            .with_context(|| format!("cannot assemble patch {patch}"))
+    // 每个分块一份常数重启、一份时间重启；patch 在块内的下标就是它在那两份文件里的行。
+    let block_files = topology
+        .blocks
+        .iter()
+        .map(|(block, patches)| {
+            let files = RestartStateFiles {
+                constant: out
+                    .join("restart/const")
+                    .join(format!("{name}_restart_const_lc{year:04}_{block}.nc")),
+                time: out.join("restart").join(&start_label).join(format!(
+                    "{name}_restart_{start_label}_lc{year:04}_{block}.nc"
+                )),
+            };
+            for path in [&files.constant, &files.time] {
+                ensure!(
+                    path.is_file(),
+                    "{} is missing; run mksrfdata and mkinidata for this case first",
+                    path.display()
+                );
+            }
+            let count = colm_init::RestartFile::open(&files.constant)?.dimension("patch")?;
+            ensure!(
+                count == patches.len(),
+                "the constant restart of block {block} has {count} patches but landpatch has {}",
+                patches.len()
+            );
+            Ok(files)
         })
         .collect::<Result<Vec<_>>>()?;
-    let constant = colm_init::RestartFile::open(&files.constant)?;
-    let longitudes = constant.floats("patchlonr")?.to_vec();
-    let latitudes = constant.floats("patchlatr")?.to_vec();
-    let coordinates = longitudes.into_iter().zip(latitudes).collect::<Vec<_>>();
+    let patch_count = topology.patch_count();
+    let mut templates = Vec::with_capacity(patch_count);
+    let mut coordinates = Vec::with_capacity(patch_count);
+    let mut patch_mask = Vec::with_capacity(patch_count);
+    for ((block, patches), files) in topology.blocks.iter().zip(&block_files) {
+        for patch in 0..patches.len() {
+            templates.push(
+                assemble_patch(
+                    &document,
+                    layout,
+                    name,
+                    files,
+                    physics.clone(),
+                    patch,
+                    block,
+                    true,
+                )
+                .with_context(|| format!("cannot assemble patch {patch} of block {block}"))?,
+            );
+        }
+        let constant = colm_init::RestartFile::open(&files.constant)?;
+        coordinates.extend(
+            constant
+                .floats("patchlonr")?
+                .iter()
+                .copied()
+                .zip(constant.floats("patchlatr")?.iter().copied()),
+        );
+        if constant.contains("patchmask") {
+            patch_mask.extend(
+                constant
+                    .integers("patchmask")?
+                    .iter()
+                    .map(|&mask| mask != 0),
+            );
+        } else {
+            patch_mask.extend(std::iter::repeat_n(true, patches.len()));
+        }
+    }
     let grid = GriddedForcing::open_grid(&config.forcing, config.start)?;
     let history_grid = if config.history_frequency != colm_hist::schedule::HistoryFrequency::None {
         let patch_types = templates
             .iter()
             .map(|template| template.patch_type)
             .collect::<Vec<_>>();
-        let patch_mask = if constant.contains("patchmask") {
-            constant
-                .integers("patchmask")?
-                .iter()
-                .map(|&mask| mask != 0)
-                .collect()
-        } else {
-            vec![true; patch_count]
-        };
         Some(build_history_grid(
             &HistoryGridConfig::read(&document)?,
             &grid,
@@ -455,6 +473,11 @@ fn run_spatial(
     std::fs::create_dir_all(&para_opt)
         .with_context(|| format!("cannot create {}", para_opt.display()))?;
     if logical_field(&document, "DEF_Optimize_Baseflow")? {
+        // 上游的 `ParaOpt/<case>_baseflow.nc` 是分块的向量文件；单块时与单点同形，多块还没接。
+        ensure!(
+            topology.blocks.len() == 1,
+            "DEF_Optimize_Baseflow is ported for single-block spatial domains only"
+        );
         let patches = templates
             .iter()
             .map(|template| BaseflowPatchInit {
@@ -486,17 +509,17 @@ fn run_spatial(
         }),
         None => None,
     };
-    let end_label = date_label(normalized_day_end(config.end));
-    let restart_out = out
-        .join("restart")
-        .join(&end_label)
-        .join(format!("{name}_restart_{end_label}_lc{year:04}_{block}.nc"));
-    let periodic = PeriodicRestarts {
-        directory: out.join("restart"),
-        name: name.to_owned(),
-        land_cover_year: year,
-        block: block.clone(),
-    };
+    let periodic = topology
+        .blocks
+        .iter()
+        .map(|(block, _)| PeriodicRestarts {
+            directory: out.join("restart"),
+            name: name.to_owned(),
+            land_cover_year: year,
+            block: block.clone(),
+        })
+        .collect::<Vec<_>>();
+    let end_time = normalized_day_end(config.end);
     // 每份续跑文件旁都写历史累加器旁车（`write_history_acc_restart`），空间构建是 schema 2。
     let history_restart = HistoryRestart {
         config: colm_runtime::history_sidecar::SidecarConfig {
@@ -543,23 +566,41 @@ fn run_spatial(
                 }
             }
             let step = steps[0];
-            if step.clock.write_restart {
-                let path = periodic.path(step.clock.end_time);
-                if path != restart_out {
-                    write_evolved_restart(&templates, states, &snapshots, &files.time, &path)?;
-                    mark_history_restart(&path, &history_restart)?;
-                }
+            if step.clock.write_restart && normalized_day_end(step.clock.end_time) != end_time {
+                write_block_restarts(
+                    &topology.blocks,
+                    &block_files,
+                    &periodic,
+                    step.clock.end_time,
+                    &templates,
+                    states,
+                    &snapshots,
+                    &history_restart,
+                )?;
             }
             last = Some(snapshots);
             Ok(())
         },
     )?;
     let last = last.context(NO_STEP)?;
-    write_evolved_restart(&templates, &states, &last, &files.time, &restart_out)?;
-    mark_history_restart(&restart_out, &history_restart)?;
+    let written = write_block_restarts(
+        &topology.blocks,
+        &block_files,
+        &periodic,
+        config.end,
+        &templates,
+        &states,
+        &last,
+        &history_restart,
+    )?;
     println!(
-        "colm-rs: {steps} step(s) on {patch_count} spatial patch(es); wrote {}",
-        restart_out.display()
+        "colm-rs: {steps} step(s) on {patch_count} spatial patch(es) in {} block(s); wrote {}",
+        topology.blocks.len(),
+        written
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
     );
     if let Some(mut history) = history {
         history.files.extend(history.session.finish()?);
@@ -572,6 +613,34 @@ fn run_spatial(
     }
     println!("{SUCCESS_MARKER}");
     Ok(())
+}
+
+/// 每个分块各写一份续跑文件（从本块的时间重启复制结构）和它的历史累加器旁车。
+#[allow(clippy::too_many_arguments)]
+fn write_block_restarts(
+    blocks: &[(String, std::ops::Range<usize>)],
+    files: &[RestartStateFiles],
+    periodic: &[PeriodicRestarts],
+    end_time: CalendarTime,
+    templates: &[StandardLctRestartTemplate],
+    states: &[StandardLctSnowSoilState],
+    snapshots: &[RestartSnapshot],
+    history: &HistoryRestart,
+) -> Result<Vec<PathBuf>> {
+    let mut written = Vec::with_capacity(blocks.len());
+    for (((_, patches), files), periodic) in blocks.iter().zip(files).zip(periodic) {
+        let path = periodic.path(end_time);
+        write_evolved_restart(
+            &templates[patches.clone()],
+            &states[patches.clone()],
+            &snapshots[patches.clone()],
+            &files.time,
+            &path,
+        )?;
+        mark_history_restart(&path, history)?;
+        written.push(path);
+    }
+    Ok(written)
 }
 
 /// 第 `patch` 个 patch 的模板：主/常数重启、PFT 子网格、BGC 与灌溉、月度 LAI、`scale_baseflow`。

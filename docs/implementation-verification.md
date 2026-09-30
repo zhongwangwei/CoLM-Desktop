@@ -26546,3 +26546,32 @@ Rust 整条链 2 分 14 秒（期间全量回归在并行跑），纯 Fortran �
 全量回归（release，带本轮改动）：138 个算例逐位，`nn`/`pni` 照旧不比 history。`derive_lake_layers` 的融合改动没有改变任何既有单点算例。
 
 附带发现：`cargo test -p colm-init` 并行跑时约 32 个测试报 `Netcdf(-101)`（HDF5 错误），单线程 158 个全过，逐个单跑也都通过。colm-init 本轮没有改动，是既有的并发问题，已另开任务。
+
+## 第 456 轮：B1 多分块 —— 两块 159 个 patch 逐块逐位
+
+**算例 `g2`**：114–116°E、23–25°N，跨 5° 分块边界（东经 115°），分成 `e110_n20` 的 84 个 patch 和 `e115_n20` 的 75 个 patch。跑 2 天，每日写续跑与 history。
+
+**上游 latlon 内核（`FLAT_SPMD`）在多分块上没有可用的整体参照：**
+- 单进程：mksrfdata 写出了两块的 landpatch，但 mkinidata 与主循环只处理第一块。重启只有 `e110_n20`（84 个 patch），history 里 115–116°E 两列的 `landarea = 0`、全是缺测。
+- `--ranks 2`：mkinidata 去读不带块后缀的 `landpatch/2005/landpatch.nc`，然后 `MPI_ABORT`。
+- 根因在 `FLAT_SPMD` 的网格元分发（`MOD_Mesh.F90` 的 `#ifdef FLAT_SPMD` 各支），本轮没追下去。
+
+**验证方式：逐块对照单块参照。** patch 之间只经强迫耦合（逐 patch 独立映射）；0.5° 的 history 格子整格落在某一个 5° 块里；河湖流的耦合属于 B2。所以两块一起跑的结果应该逐块等于"区域只覆盖那一块"的单块运行：
+- `e110_n20` 对 `g2-fortran`（它事实上只模拟了这一块）；
+- `e115_n20` 对 `g2b-fortran`（区域 115–116°E）。
+- 两者的 landpatch 只差 `eindex`：网格元编号取决于网格文件窗口的起点，不进物理。
+
+**改动：**
+1. `SpatialTopology` 读全部分块，按 `block_set_local_blocks` 的顺序拼接：外层经度块、内层纬度块，都自西南向东北。块名 `e110_n20` 解出西界与南界后排序，并记下每块的 patch 区间。
+2. `run_spatial` 按块装模板（块内下标对应本块重启里的行）、读 `patchlonr/patchlatr/patchmask`，续跑与旁车也按块各写一份。强迫映射、history、网格元分组都在拼接后的全部 patch 上做。
+3. `DEF_Optimize_Baseflow` 暂时只接单块：`ParaOpt` 的向量文件是分块的，多块的写法没核对。
+4. **无冠层 LCT patch。** IGBP 湿地（第 11 类）LAI/SAI 常年为 0，装配时的旧检查"需要植被冠层"把它挡住了。内核早已有 `MOD_Thermal.F90:706` 的无冠层支（`bare_lct_canopy`），检查改为只要求非负。这个 patch 就在 `e115_n20` 里，本轮逐位验到。
+
+| 对象 | 结果 |
+|---|---|
+| Rust 前处理的两块 const/时间重启 vs 各自的单块 Fortran | 全部 `diff 0` |
+| 第 2、3 天两块的续跑文件与 history 旁车（共 8 个文件） | 全部 `diff 0` |
+| 网格 history：西两列对 `g2`、东两列对 `g2b` | 带 `lon` 维的 124 个变量逐位 |
+| 单块回归 `g1p` | 135 个变量逐位，续跑、旁车 `diff 0` |
+
+无冠层检查的放开只去掉了一个报错分支，不改变任何原本能跑的单点算例，所以这轮没有重跑单点全量回归。
