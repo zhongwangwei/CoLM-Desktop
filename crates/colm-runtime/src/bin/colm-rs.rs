@@ -305,23 +305,18 @@ fn run() -> Result<()> {
 
 /// 空间算例（`GRIDBASED`）：patch 拓扑来自 `landdata`，强迫是网格强迫经面积加权映射到每个 patch。
 ///
-/// 物理与单点完全相同（同一个 `advance_patch`）；history 写成经纬网格（`HistForm = 'Gridded'`）。
-/// 目前还没有：多分块、河湖流（`GridRiverLakeFlow` 的河道量与河道旁车）、城市/PFT 的网格 LAI；
-/// 遇到就拒绝或明说。
+/// 物理与单点完全相同（同一个 `advance_patch`）；history 写成经纬网格（`HistForm = 'Gridded'`），
+/// 河湖流走 `GridRiverLakeFlow` 的默认汇流。还没有城市/PFT 的网格 LAI，遇到就拒绝或明说。
+///
+/// `DEF_USE_LULCC`：运行在每个年末切段，段间按新一年的土地覆盖冷启动、用 SAT 接回旧状态
+/// （上游 `LulccDriver`），下一段从合并出来的续跑接着跑。
 fn run_spatial(
     arguments: &Arguments,
     layout: &colm_case::Layout,
     name: &str,
     case_nml: &Path,
 ) -> Result<()> {
-    use colm_runtime::spatial::{
-        forcing::GriddedForcing,
-        history::{build_history_grid, ElementGroups, HistoryGridConfig, SpatialHistory},
-        mapping::AreaWeightedMapping,
-        runtime::SpatialRuntime,
-        runtime::SpatialRuntimeConfig,
-        topology::SpatialTopology,
-    };
+    use colm_runtime::spatial::runtime::SpatialRuntimeConfig;
     ensure!(
         arguments.patch.is_none(),
         "--patch selects a patch of a single point; spatial cases run every patch"
@@ -388,12 +383,141 @@ fn run_spatial(
             "{field} is not ported to the Rust river model; run this case with --engine fortran"
         );
     }
+    let lulcc = logical_field(&document, "DEF_USE_LULCC")?;
+    if lulcc {
+        check_spatial_lulcc(&document, &config, arguments.land_cover)?;
+    }
     if arguments.preflight {
         println!("colm-rs preflight: ok");
         return Ok(());
     }
-    let year = integer_field(&document, "DEF_LC_YEAR")?;
     let out = layout.out().join(name);
+    // 上游 `CoLM.F90`：开了 LULCC 时土地覆盖年份取起始年，不看 `DEF_LC_YEAR`。
+    let mut year = if lulcc {
+        i64::from(config.start.year)
+    } else {
+        integer_field(&document, "DEF_LC_YEAR")?
+    };
+    let case = SpatialCase {
+        layout,
+        name,
+        document: &document,
+        physics: &physics,
+        out: &out,
+    };
+    let restart_root = out.join("restart");
+    let scratch = restart_root.join(LULCC_SCRATCH);
+    let run_end = normalized_day_end(config.end);
+    let mut segment = SpatialSegment {
+        config: config.clone(),
+        year,
+        input: restart_root.clone(),
+        lulcc_boundary: false,
+    };
+    loop {
+        // LULCC 在一年最后一步之后做（`isendofyear`），运行在那里切段。
+        let boundary = lulcc
+            .then(|| year_end(segment.config.start))
+            .filter(|boundary| {
+                calendar_key(normalized_day_end(*boundary)) <= calendar_key(run_end)
+            });
+        if let Some(boundary) = boundary {
+            segment.config.end = boundary;
+            segment.lulcc_boundary = true;
+        }
+        let river = run_spatial_segment(&case, &segment)?;
+        let Some(boundary) = boundary else {
+            break;
+        };
+        let next_start = normalized_day_end(boundary);
+        // 合并出来的续跑落在哪：这一步本该写续跑（或运行就停在这里）时写进 `restart/`，
+        // 否则放进临时目录，只供下一段起跑。
+        let target = if config.restart_frequency != colm_core::RestartFrequency::Never
+            || next_start == run_end
+        {
+            restart_root.clone()
+        } else {
+            scratch.join("new")
+        };
+        lulcc_transition(
+            &case,
+            LulccYears {
+                old: year,
+                new: year + 1,
+                history_frequency: config.history_frequency,
+            },
+            boundary,
+            &scratch.join("old"),
+            &target,
+            river,
+        )?;
+        year += 1;
+        if next_start == run_end {
+            break;
+        }
+        segment = SpatialSegment {
+            config: colm_runtime::spatial::runtime::SpatialRuntimeConfig {
+                start: next_start,
+                spinup_until: next_start,
+                ..config.clone()
+            },
+            year,
+            input: target,
+            lulcc_boundary: false,
+        };
+    }
+    if scratch.exists() {
+        std::fs::remove_dir_all(&scratch)
+            .with_context(|| format!("cannot remove {}", scratch.display()))?;
+    }
+    println!("{SUCCESS_MARKER}");
+    Ok(())
+}
+
+/// 空间算例里各段共用的东西。
+struct SpatialCase<'a> {
+    layout: &'a colm_case::Layout,
+    name: &'a str,
+    document: &'a Document,
+    physics: &'a colm_runtime::assembly::LandPhysicsParameters,
+    out: &'a Path,
+}
+
+/// 一段连续的运行（没有 LULCC 时就是整个运行）。
+struct SpatialSegment {
+    config: colm_runtime::spatial::runtime::SpatialRuntimeConfig,
+    /// 这一段的土地覆盖年份（重启文件名里的 `lc<year>`、`landdata` 的年份目录）。
+    year: i64,
+    /// 起跑重启所在的目录（其下是 `<date>/`）：通常是 `restart/`，LULCC 合并出的临时续跑在别处。
+    input: PathBuf,
+    /// 这一段停在 LULCC 年末：终点的旧年份状态写进临时目录，交给 [`lulcc_transition`]。
+    lulcc_boundary: bool,
+}
+
+/// LULCC 临时文件（`restart/` 下）：旧年份的终态、不该留在 `restart/` 里的合并续跑、冷启动 namelist。
+const LULCC_SCRATCH: &str = "lulcc-scratch";
+
+/// 跑一段，返回终点的河道状态（LULCC 过渡要接着用）。
+fn run_spatial_segment(
+    case: &SpatialCase<'_>,
+    segment: &SpatialSegment,
+) -> Result<Option<colm_runtime::river::RiverState>> {
+    use colm_runtime::spatial::{
+        forcing::GriddedForcing,
+        history::{build_history_grid, ElementGroups, HistoryGridConfig, SpatialHistory},
+        mapping::AreaWeightedMapping,
+        runtime::SpatialRuntime,
+        topology::SpatialTopology,
+    };
+    let SpatialCase {
+        layout,
+        name,
+        document,
+        physics,
+        out,
+    } = *case;
+    let config = &segment.config;
+    let year = segment.year;
     let topology = SpatialTopology::read(&out.join("landdata"), i32::try_from(year)?)?;
     let start_label = date_label(config.start);
     // 每个分块一份常数重启、一份时间重启；patch 在块内的下标就是它在那两份文件里的行。
@@ -405,7 +529,7 @@ fn run_spatial(
                 constant: out
                     .join("restart/const")
                     .join(format!("{name}_restart_const_lc{year:04}_{block}.nc")),
-                time: out.join("restart").join(&start_label).join(format!(
+                time: segment.input.join(&start_label).join(format!(
                     "{name}_restart_{start_label}_lc{year:04}_{block}.nc"
                 )),
             };
@@ -433,7 +557,7 @@ fn run_spatial(
         for patch in 0..patches.len() {
             templates.push(
                 assemble_patch(
-                    &document,
+                    document,
                     layout,
                     name,
                     files,
@@ -472,7 +596,7 @@ fn run_spatial(
                 .map(|template| template.patch_type)
                 .collect::<Vec<_>>();
             Some(build_history_grid(
-                &HistoryGridConfig::read(&document)?,
+                &HistoryGridConfig::read(document)?,
                 &grid,
                 &topology,
                 &patch_types,
@@ -507,8 +631,11 @@ fn run_spatial(
         config.co2_scenario,
     )?;
     runtime.apply_mapped_heights(&mut templates)?;
+    if segment.lulcc_boundary {
+        runtime = runtime.defer_lai_refresh_at(config.end);
+    }
     let network = colm_runtime::river::network::RiverNetwork::read(Path::new(&string_field(
-        &document,
+        document,
         "DEF_UnitCatchment_file",
     )?))?;
     let routing = colm_runtime::river::network::RunoffRouting::build(&network, &topology)?;
@@ -545,7 +672,7 @@ fn run_spatial(
             )
         })
         .transpose()?;
-    let river_start = river_restart_path(&out, name, &start_label, year);
+    let river_start = river_restart_path(&segment.input, name, &start_label, year);
     let river_state = colm_runtime::river::restart::read_river_state(&river_start, &network)?;
     // `restore_river_history_acc_restart`：陆面旁车标记 `history_river_required = 1` 时读回河道累加。
     let river_history = {
@@ -560,8 +687,8 @@ fn run_spatial(
                 .transpose()?
                 .is_some_and(|marker| marker.contains(&1.0));
         if required {
-            let river_file = out
-                .join("restart")
+            let river_file = segment
+                .input
                 .join(&start_label)
                 .join(format!("{name}_restart_hist_{start_label}.nc.river"));
             ensure!(
@@ -582,18 +709,18 @@ fn run_spatial(
         network,
         routing,
         river_state,
-        real_field(&document, "DEF_GRIDBASED_ROUTING_MAX_DT")?,
+        real_field(document, "DEF_GRIDBASED_ROUTING_MAX_DT")?,
     )?;
     if let Some(history) = river_history {
         river.history = history;
     }
     runtime = runtime.with_river(river, runoff_filter)?;
-    let rest_compression = u8::try_from(integer_field(&document, "DEF_REST_CompressLevel")?)
+    let rest_compression = u8::try_from(integer_field(document, "DEF_REST_CompressLevel")?)
         .context("DEF_REST_CompressLevel must fit 0..=9")?;
     let para_opt = out.join("restart/ParaOpt");
     std::fs::create_dir_all(&para_opt)
         .with_context(|| format!("cannot create {}", para_opt.display()))?;
-    if logical_field(&document, "DEF_Optimize_Baseflow")? {
+    if logical_field(document, "DEF_Optimize_Baseflow")? {
         // 上游的 `ParaOpt/<case>_baseflow.nc` 是分块的向量文件；单块时与单点同形，多块还没接。
         ensure!(
             topology.blocks.len() == 1,
@@ -647,13 +774,13 @@ fn run_spatial(
     let history_restart = HistoryRestart {
         config: colm_runtime::history_sidecar::SidecarConfig {
             frequency_code: history_frequency_code(config.history_frequency),
-            urban_run: logical_field(&document, "DEF_URBAN_RUN")?,
+            urban_run: logical_field(document, "DEF_URBAN_RUN")?,
             urban_patches: templates
                 .iter()
                 .filter(|template| template.urban.is_some())
                 .count(),
-            pft_or_pc: logical_field(&document, "DEF_USE_PFT")?
-                || logical_field(&document, "DEF_USE_PC")?,
+            pft_or_pc: logical_field(document, "DEF_USE_PFT")?
+                || logical_field(document, "DEF_USE_PC")?,
             bgc: false,
             crop: false,
             river_lake_flow: true,
@@ -712,7 +839,9 @@ fn run_spatial(
                 .map(|((state, output), step)| {
                     let mut snapshot =
                         RestartSnapshot::new(state, *output, step.surface_cosine_zenith)?;
-                    snapshot.lai_refreshed = step.clock.update_lai;
+                    // LULCC 年末那一步没重读 LAI（`defer_lai_refresh_at`）。
+                    snapshot.lai_refreshed = step.clock.update_lai
+                        && !(segment.lulcc_boundary && step.clock.end_time == config.end);
                     Ok(snapshot)
                 })
                 .collect::<Result<Vec<_>>>()?;
@@ -737,7 +866,7 @@ fn run_spatial(
                 if let Some(river) = river {
                     let label = date_label(normalized_day_end(step.clock.end_time));
                     colm_runtime::river::restart::write_river_state(
-                        &river_restart_path(&out, name, &label, year),
+                        &river_restart_path(&out.join("restart"), name, &label, year),
                         &river.network,
                         &river.state,
                         rest_compression,
@@ -749,10 +878,25 @@ fn run_spatial(
         },
     )?;
     let last = last.context(NO_STEP)?;
+    // 停在 LULCC 年末的一段：旧年份的终态只是合并的输入，写进临时目录。
+    let finals = if segment.lulcc_boundary {
+        topology
+            .blocks
+            .iter()
+            .map(|(block, _)| PeriodicRestarts {
+                directory: out.join("restart").join(LULCC_SCRATCH).join("old"),
+                name: name.to_owned(),
+                land_cover_year: year,
+                block: block.clone(),
+            })
+            .collect()
+    } else {
+        periodic
+    };
     let written = write_block_restarts(
         &topology.blocks,
         &block_files,
-        &periodic,
+        &finals,
         config.end,
         &templates,
         &states,
@@ -760,10 +904,10 @@ fn run_spatial(
         &history_restart,
         runtime.river(),
     )?;
-    if let Some(river) = runtime.river() {
+    if let (Some(river), false) = (runtime.river(), segment.lulcc_boundary) {
         let label = date_label(normalized_day_end(config.end));
         colm_runtime::river::restart::write_river_state(
-            &river_restart_path(&out, name, &label, year),
+            &river_restart_path(&out.join("restart"), name, &label, year),
             &river.network,
             &river.state,
             rest_compression,
@@ -778,6 +922,22 @@ fn run_spatial(
             .collect::<Vec<_>>()
             .join(", ")
     );
+    if segment.lulcc_boundary {
+        // 上游在 LULCC 时 `hist_final` 再 `hist_init`：没写完的区间就丢了。年末之前的区间
+        // 都在这一步关上，跨年的区间不会出现；真出现就拒绝，而不是写一条上游没有的记录。
+        let open = history_restart.window.as_ref().is_some_and(|window| {
+            window
+                .lock()
+                .expect("history window lock")
+                .iter()
+                .any(|window| window.steps > 0)
+        });
+        ensure!(
+            !open,
+            "a history window stays open across the LULCC year end at {}; the Rust runtime does not carry it over",
+            date_label(normalized_day_end(config.end))
+        );
+    }
     if let Some(mut history) = history {
         history.files.extend(history.session.finish()?);
         ensure!(
@@ -787,13 +947,266 @@ fn run_spatial(
         );
         println!("colm-rs: {} history file(s)", history.files.len());
     }
-    println!("{SUCCESS_MARKER}");
+    Ok(runtime.river().map(|river| river.state.clone()))
+}
+
+/// Rust 这边 LULCC 只接上游的 SAT 默认路径：LCT、IGBP、不 spinup、2000 年以后。
+fn check_spatial_lulcc(
+    document: &Document,
+    config: &colm_runtime::spatial::runtime::SpatialRuntimeConfig,
+    land_cover: LandCoverScheme,
+) -> Result<()> {
+    ensure!(
+        integer_field(document, "DEF_LULCC_SCHEME")? == 1,
+        "only DEF_LULCC_SCHEME = 1 (same type assignment) is ported to the Rust runtime; run MEC with --engine fortran"
+    );
+    ensure!(
+        land_cover == LandCoverScheme::Igbp,
+        "upstream LULCC supports IGBP land cover only"
+    );
+    for field in [
+        "DEF_USE_PFT",
+        "DEF_USE_PC",
+        "DEF_URBAN_RUN",
+        "DEF_USE_IRRIGATION",
+        "DEF_Optimize_Baseflow",
+    ] {
+        ensure!(
+            !logical_field(document, field)?,
+            "{field} with DEF_USE_LULCC is not ported to the Rust runtime; run it with --engine fortran"
+        );
+    }
+    // `MOD_Namelist` 在 LULCC 时强制月度 LAI、逐年换 LAI；Rust 不替 namelist 改，直接要求。
+    for field in ["DEF_LAI_MONTHLY", "DEF_LAI_CHANGE_YEARLY"] {
+        ensure!(
+            logical_field(document, field)?,
+            "DEF_USE_LULCC forces {field} = .true. upstream; set it in the namelist"
+        );
+    }
+    ensure!(
+        config.spinup_until == config.start,
+        "DEF_USE_LULCC with a spinup interval is not ported to the Rust runtime"
+    );
+    // 2000 年以前上游每 5 年才换一次土地覆盖，重启年份也按 5 年取整；只接逐年的那段。
+    ensure!(
+        config.start.year >= 2000,
+        "DEF_USE_LULCC before 2000 (five-yearly land cover) is not ported to the Rust runtime"
+    );
     Ok(())
 }
 
-/// 河道续跑文件（不分块）：`restart/<date>/<case>_restart_gridriver_<date>_lc<year>.nc`。
-fn river_restart_path(out: &Path, name: &str, label: &str, year: i64) -> PathBuf {
-    out.join("restart")
+/// `start` 所在年份的最后一步的终点，按 CoLM 的写法 `(year, 365|366, 86400)`。
+fn year_end(start: CalendarTime) -> CalendarTime {
+    CalendarTime {
+        year: start.year,
+        julian_day: if colm_core::is_leap_year(start.year) {
+            366
+        } else {
+            365
+        },
+        seconds: 86_400,
+    }
+}
+
+fn calendar_key(time: CalendarTime) -> (i32, u16, u32) {
+    (time.year, time.julian_day, time.seconds)
+}
+
+struct LulccYears {
+    old: i64,
+    new: i64,
+    /// 过渡这一步写的历史旁车要记下 history 频率。
+    history_frequency: colm_hist::schedule::HistoryFrequency,
+}
+
+/// 上游 `LulccDriver`（SAT）在两段之间做的事：
+///
+/// 1. `LulccInitialize`：按新一年的 landdata 整套冷启动（写新年份的常数重启）。这里调同目录的
+///    `mkinidata-rs`，namelist 的起始日期改成新年第一天；它顺带写出的冷时间重启只作合并的底本。
+/// 2. `REST_LulccTimeVariables`：同单元同类型的 patch 抄回旧状态，写成新年份的续跑。
+/// 3. `grid_riverlake_flow_lulcc`：河道状态照旧，只补 `volwater_ucat`。
+fn lulcc_transition(
+    case: &SpatialCase<'_>,
+    years: LulccYears,
+    boundary: CalendarTime,
+    old_dir: &Path,
+    target: &Path,
+    river: Option<colm_runtime::river::RiverState>,
+) -> Result<()> {
+    use colm_runtime::spatial::topology::SpatialTopology;
+    let SpatialCase {
+        name,
+        document,
+        out,
+        ..
+    } = *case;
+    let label = date_label(normalized_day_end(boundary));
+    let landdata = out.join("landdata");
+    let old_topology = SpatialTopology::read(&landdata, i32::try_from(years.old)?)?;
+    let new_topology = SpatialTopology::read(&landdata, i32::try_from(years.new)?).with_context(
+        || {
+            format!(
+                "DEF_USE_LULCC needs the {} landdata; run mksrfdata with DEF_LC_YEAR = {} first",
+                years.new, years.new
+            )
+        },
+    )?;
+    let restart_root = out.join("restart");
+    let scratch = restart_root.join(LULCC_SCRATCH);
+    // 1. 新一年的冷启动。
+    let mut cold_document = document.clone();
+    for (field, value) in [
+        ("DEF_simulation_time%start_year", years.new),
+        ("DEF_simulation_time%start_month", 1),
+        ("DEF_simulation_time%start_day", 1),
+        ("DEF_simulation_time%start_sec", 0),
+        ("DEF_LC_YEAR", years.new),
+    ] {
+        if cold_document.get(field).is_some() {
+            cold_document.set(field, Value::Int(value))?;
+        } else {
+            cold_document.insert(field, Value::Int(value), "nl_colm")?;
+        }
+    }
+    std::fs::create_dir_all(&scratch)
+        .with_context(|| format!("cannot create {}", scratch.display()))?;
+    let namelist = scratch.join(format!("mkinidata_lc{:04}.nml", years.new));
+    std::fs::write(&namelist, cold_document.to_string())
+        .with_context(|| format!("cannot write {}", namelist.display()))?;
+    let executable = sibling_executable("mkinidata-rs")?;
+    let output = std::process::Command::new(&executable)
+        .arg(&namelist)
+        .args(["--land-cover", "igbp"])
+        .output()
+        .with_context(|| format!("cannot start {}", executable.display()))?;
+    ensure!(
+        output.status.success(),
+        "the LULCC cold start for {} failed:\n{}{}",
+        years.new,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // 2. SAT，逐块（单元不跨块，按块配对与上游按 worker 配对等价）。
+    let options = colm_init::lulcc::SatOptions {
+        plant_hydraulics: logical_field(document, "DEF_USE_PLANTHYDRAULICS")?,
+        ozone_stress: logical_field(document, "DEF_USE_OZONESTRESS")?,
+        irrigation: false,
+    };
+    let const_path = |year: i64, block: &str| {
+        restart_root
+            .join("const")
+            .join(format!("{name}_restart_const_lc{year:04}_{block}.nc"))
+    };
+    let time_name =
+        |year: i64, block: &str| format!("{name}_restart_{label}_lc{year:04}_{block}.nc");
+    // 过渡这一步的历史区间已关（`run_spatial_segment` 核对过），旁车是空窗口。
+    let history_restart = HistoryRestart {
+        config: colm_runtime::history_sidecar::SidecarConfig {
+            frequency_code: history_frequency_code(years.history_frequency),
+            urban_run: false,
+            urban_patches: 0,
+            pft_or_pc: false,
+            bgc: false,
+            crop: false,
+            river_lake_flow: true,
+        },
+        window: None,
+    };
+    let mut written = Vec::with_capacity(new_topology.blocks.len());
+    for (block, patches) in &new_topology.blocks {
+        let cold_path = restart_root.join(&label).join(time_name(years.new, block));
+        let cold = colm_init::RestartFile::open(&cold_path)?;
+        std::fs::remove_file(&cold_path)
+            .with_context(|| format!("cannot remove {}", cold_path.display()))?;
+        let new_const = colm_init::RestartFile::open(const_path(years.new, block))?;
+        let overrides = match old_topology.blocks.iter().find(|(old, _)| old == block) {
+            Some((_, old_patches)) => {
+                let old_const = colm_init::RestartFile::open(const_path(years.old, block))?;
+                let old_time = colm_init::RestartFile::open(
+                    old_dir.join(&label).join(time_name(years.old, block)),
+                )?;
+                colm_init::lulcc::same_type_assignment(
+                    &colm_init::lulcc::SatSide {
+                        time: &cold,
+                        patch_class: new_const.integers("patchclass")?,
+                        element: &new_topology.element[patches.clone()],
+                    },
+                    &colm_init::lulcc::SatSide {
+                        time: &old_time,
+                        patch_class: old_const.integers("patchclass")?,
+                        element: &old_topology.element[old_patches.clone()],
+                    },
+                    options,
+                )
+                .with_context(|| format!("cannot carry the {} state of block {block} over", years.old))?
+            }
+            None => Vec::new(),
+        };
+        let path = target.join(&label).join(time_name(years.new, block));
+        std::fs::create_dir_all(path.parent().expect("a restart path has a parent"))?;
+        cold.write_with(&path, &overrides)?;
+        mark_history_restart_with_river(&path, &history_restart, None, false)?;
+        written.push(path);
+    }
+    // 合并续跑不留在 `restart/` 时，冷启动建的日期目录空了就收掉。
+    if target != restart_root.as_path() {
+        let _ = std::fs::remove_dir(restart_root.join(&label));
+    }
+    // 3. 河道：网络不变，状态接着用。
+    if let Some(mut state) = river {
+        let network = colm_runtime::river::network::RiverNetwork::read(Path::new(&string_field(
+            document,
+            "DEF_UnitCatchment_file",
+        )?))?;
+        colm_runtime::river::rebuild_volwater(&network, &mut state);
+        let path = river_restart_path(target, name, &label, years.new);
+        colm_runtime::river::restart::write_river_state(
+            &path,
+            &network,
+            &state,
+            u8::try_from(integer_field(document, "DEF_REST_CompressLevel")?)
+                .context("DEF_REST_CompressLevel must fit 0..=9")?,
+        )?;
+        written.push(path);
+    }
+    println!(
+        "colm-rs: LULCC {} -> {} ({} -> {} patches); wrote {}",
+        years.old,
+        years.new,
+        old_topology.patch_count(),
+        new_topology.patch_count(),
+        written
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    Ok(())
+}
+
+/// 与本程序同目录的另一个 Rust 工具（`colm-cli` 找 sidecar 的同一条规则）。
+fn sibling_executable(name: &str) -> Result<PathBuf> {
+    let file = if cfg!(windows) {
+        format!("{name}.exe")
+    } else {
+        name.to_owned()
+    };
+    let path = std::env::current_exe()
+        .context("cannot locate the running colm-rs executable")?
+        .parent()
+        .context("colm-rs has no parent directory")?
+        .join(file);
+    ensure!(
+        path.is_file(),
+        "{} is missing beside colm-rs; DEF_USE_LULCC runs it for each new land-cover year",
+        path.display()
+    );
+    Ok(path)
+}
+
+/// 河道续跑文件（不分块）：`<restart>/<date>/<case>_restart_gridriver_<date>_lc<year>.nc`。
+fn river_restart_path(restart: &Path, name: &str, label: &str, year: i64) -> PathBuf {
+    restart
         .join(label)
         .join(format!("{name}_restart_gridriver_{label}_lc{year:04}.nc"))
 }

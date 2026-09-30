@@ -30,6 +30,7 @@ pub mod ground_thermal_step {
     pub use colm_core::ground_thermal_step::*;
 }
 pub mod gridriver;
+pub mod lulcc;
 pub mod linear {
     pub use colm_core::linear::*;
 }

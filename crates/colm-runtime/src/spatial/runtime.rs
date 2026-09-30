@@ -26,6 +26,8 @@ pub struct SpatialRuntime {
     baseflow_optimizer: Option<crate::baseflow_optimizer::BaseflowOptimizer>,
     /// 网格河湖汇流与每个 patch 是否进入 `filter_rnof`（`patchtype < 99 .and. patchmask`）。
     river: Option<(crate::river::RiverModel, Vec<bool>)>,
+    /// LULCC 年末那一步的终点：这一步不重读 LAI（见 [`SpatialRuntime::defer_lai_refresh_at`]）。
+    deferred_lai_refresh: Option<colm_core::CalendarTime>,
 }
 
 impl SpatialRuntime {
@@ -54,6 +56,7 @@ impl SpatialRuntime {
             co2_scenario,
             baseflow_optimizer: None,
             river: None,
+            deferred_lai_refresh: None,
         })
     }
 
@@ -82,6 +85,13 @@ impl SpatialRuntime {
         optimizer: crate::baseflow_optimizer::BaseflowOptimizer,
     ) -> Self {
         self.baseflow_optimizer = Some(optimizer);
+        self
+    }
+
+    /// LULCC 年末（`CoLM.F90`）：`LAI_readin` 排在 `LulccDriver` 之后，读的是新一年的 patch。
+    /// 旧 patch 在这一步不重读 LAI；新 patch 的 LAI 由新年份的冷启动读进来。
+    pub fn defer_lai_refresh_at(mut self, end_time: colm_core::CalendarTime) -> Self {
+        self.deferred_lai_refresh = Some(end_time);
         self
     }
 
@@ -231,10 +241,12 @@ impl SpatialRuntime {
                         )?;
                     }
                 }
-                for ((template, state), step) in
-                    templates.iter().zip(next_states.iter_mut()).zip(&steps)
-                {
-                    crate::refresh_lai(*step, template, state)?;
+                if self.deferred_lai_refresh != Some(steps[0].clock.end_time) {
+                    for ((template, state), step) in
+                        templates.iter().zip(next_states.iter_mut()).zip(&steps)
+                    {
+                        crate::refresh_lai(*step, template, state)?;
+                    }
                 }
                 let forcings = steps.iter().map(|step| step.forcing).collect::<Vec<_>>();
                 crate::optimize_baseflow(

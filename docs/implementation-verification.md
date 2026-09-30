@@ -26699,3 +26699,37 @@ Rust 整月 2 分 51 秒（`g1`），纯 Fortran 约 32 分钟。
 | 改后 | 3 次全部成功 |
 
 同一个检查器在改后各阶段的缺口都是 0；`cargo test -p xtask --test fortran_deps --test windows_console` 通过。
+
+## 第 459 轮：LULCC（SAT）进入 Rust 空间运行时，并修上游 LULCC 丢河道状态
+
+**上游语义**（`CoLM.F90` 的 LULCC 分支、`MOD_Lulcc_*`）：
+- 触发：`isendofyear(idate, deltim)`，即 `idate = (Y, 365|366, 86400)` 那一步（`addsec` 只在 `sec > 86400` 时进位），新年份 ≥ 2000 每年一次。
+- 顺序：`CoLMDRIVER` → 汇流 → `hist_out` → `LulccDriver` → `grid_riverlake_flow_lulcc` → `LAI_readin`（新 patch）→ 写续跑（`lc<Y+1>`）。
+- `LulccInitialize` 按新一年 landdata 整套 `initialize(lulcc_call)`，只写常数重启，不写时间重启。
+- SAT（`REST_LulccTimeVariables`）：单元内按 `patchclass` 双指针配对，抄一组时间变量；`sigf` 抄完若为 0 且新 patch `lai + sai > 0` 置 1；`ssno_lyr` 只抄 `(band=2, rtyp=2)` 那一列。重启里没有 `snl`，不存在「雪层抄了、层数没抄」的问题。
+- 开了 LULCC 时土地覆盖年份取起始年（`lc_year = s_year`），不看 `DEF_LC_YEAR`；mksrfdata 每次只做一个年份，各年 landdata 要事先备好。
+
+**Rust 做法：** 运行在年末切段。
+- 第一段跑到年末那一步；这一步不重读 LAI（`SpatialRuntime::defer_lai_refresh_at`，旧 patch 上不做，新 patch 的 LAI 由冷启动读入）；旧年份终态写进 `restart/lulcc-scratch/old`。
+- 过渡：调同目录的 `mkinidata-rs`，namelist 起始日改成新年第一天，做新年份冷启动（写常数重启 `lc<Y+1>`）；它写的冷时间重启读入内存后删掉，作合并底本。`colm_init::lulcc::same_type_assignment` 按块配对（单元不跨块，与上游按 worker 配对等价），写出 `lc<Y+1>` 续跑与空窗口旁车。河道网络不变，`rebuild_volwater` 只补「无蓄量有水深」的单元后写河道续跑。
+- 年末本不写续跑（`DEF_WRST_FREQ = 'NONE'`）时合并续跑放在 `lulcc-scratch/new`，只供第二段起跑，跑完删掉。
+- 第二段按新拓扑从合并续跑起跑（强迫映射、history 网格、径流到单元流域的映射都重建）。
+- 只接 SAT + LCT + IGBP、无 spinup、2000 年以后；MEC、PFT/PC、城市、灌溉、2000 年前五年一换都显式拒绝。跨过年末仍开着的 history 区间也拒绝（上游 `hist_final` 会丢掉它）。
+
+**上游缺陷（已在 vendor 修）：** `LulccInitialize` 调 `deallocate_TimeVariables`，连带 `deallocate_GridRiverLakeTimeVars`，河道状态被释放，`initialize` 再分配。
+- 原上游：先是 `build_riverlake_network` 重复分配崩溃（`ucat_ucid` already allocated）；绕过之后，`initialize` 把整张河网冷启动成 `topo_rivhgt` —— 每年一次，河道水量不守恒。
+- 第一次修法（只跳过冷启动赋值）不对：数组已被重分配，写出的是未初始化内存（`wdsrf_ucat` 为 0 与 5e-309 这类非规格数）。
+- 最终修法：`MOD_Grid_RiverLakeTimeVars` 新增 `hold_/restore_GridRiverLakeTimeVars_lulcc`，在 `LulccInitialize` 里 `deallocate_TimeVariables` 之前用 `move_alloc` 挪走状态与标志，`initialize` 之后挪回；保留 `initialize` 里 LULCC 调用先 `riverlake_network_final` 再重建网络。`grid_riverlake_flow_lulcc` 本来就只按 `volwater_ucat_valid` 补蓄量，说明上游的意图就是保留河道状态。
+
+**实测**（`g3`：2005-12-31 起跑 2 天，daily 续跑与 history，landpatch 175 → 172，GRIDBASED 内核重编后纯 Fortran 作参照）：
+
+| 对象 | 结果 |
+|---|---|
+| `2006-001` `lc2006` 合并续跑、河道续跑、旁车 | 逐位 |
+| `2006-002` 续跑、河道续跑、旁车 | 逐位 |
+| `gd_hist_2005-12`、`gd_hist_2006-01`、两个 unitcat | 全部变量逐位 |
+| 合计 | 545 项 0 差 |
+| `DEF_WRST_FREQ = 'NONE'` 变体 | history 与 `2006-002` 续跑逐位，临时目录清干净 |
+| g1p、g2 用新二进制重跑 | 与重构前输出逐位 |
+
+唯一的结构差异：Rust `mkinidata-rs` 的常数重启总写 `ncd/ncw/bcw`，上游只在 `DEF_Interception_scheme == 8` 时写；不影响数值，另立任务修。

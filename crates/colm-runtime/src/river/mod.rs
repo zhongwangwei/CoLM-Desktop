@@ -21,6 +21,18 @@ const RIVERMIN: f64 = 1.0e-5;
 /// `MOD_Const_Physical` 的 `grav`。
 const GRAV: f64 = 9.80616;
 
+/// `rebuild_volwater_ucat`（`volwater_ucat_valid` 为真时的那一支）：只补「没有蓄量却有水深」的单元。
+///
+/// 读回续跑与 LULCC（`grid_riverlake_flow_lulcc`）都走这一步；漫滩曲线的深度与体积不互逆，
+/// 所以已有的蓄量不能从水深重算。
+pub fn rebuild_volwater(network: &RiverNetwork, state: &mut RiverState) {
+    for i in 0..network.len() {
+        if state.volwater[i] <= 0.0 && state.wdsrf[i] > RIVERMIN {
+            state.volwater[i] = network.curves[i].volume(state.wdsrf[i]);
+        }
+    }
+}
+
 /// 河道状态（`MOD_Grid_RiverLakeTimeVars` 的基本量）。
 #[derive(Debug, Clone, PartialEq)]
 pub struct RiverState {
@@ -104,11 +116,7 @@ impl RiverModel {
             max_dt.is_finite() && max_dt > 0.0,
             "DEF_GRIDBASED_ROUTING_MAX_DT must be finite and positive"
         );
-        for i in 0..n {
-            if state.volwater[i] <= 0.0 && state.wdsrf[i] > RIVERMIN {
-                state.volwater[i] = network.curves[i].volume(state.wdsrf[i]);
-            }
-        }
+        rebuild_volwater(&network, &mut state);
         Ok(Self {
             momen: vec![0.0; n],
             history: RiverHistory::zeros(n),
