@@ -27,6 +27,9 @@ colm-hist = { path = "../colm-hist", features = ["io"] }
 # `DEF_Optimize_Baseflow` 逐年写 `ParaOpt/*_baseflow.nc`（`MOD_Opt_Baseflow.F90`）。
 # 已经经 colm-hist/colm-init 静态链接进来，这里只是直接用它的 API。
 netcdf = { workspace = true, features = ["static"] }
+# 河道汇流在全球 25 万个单元流域上逐子步推进：每个阶段逐单元流域独立（河系内取最小子步长的
+# `min` 归约与顺序无关），并行不改变任何一位结果。
+rayon.workspace = true
 
 [dev-dependencies]
 # 合成 restart 算例只在测试构建里需要，所以 feature 也只开在 dev 依赖上。

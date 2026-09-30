@@ -291,6 +291,7 @@ fn gridded_history_aggregates_by_area_and_filter() {
         lon_w: vec![0.0, 0.5],
         lon_e: vec![0.5, 1.0],
         parts: vec![vec![(0, 3.0)], vec![(0, 1.0)], vec![(1, 2.0)]],
+        patch_area: vec![3.0, 1.0, 2.0],
         statics: vec![(
             "landarea".to_owned(),
             "land area".to_owned(),

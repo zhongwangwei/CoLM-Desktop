@@ -351,6 +351,43 @@ fn run_spatial(
         missing.len(),
         missing.join("\n  - ")
     );
+    // GRID 内核总是编进 `GridRiverLakeFlow`：汇流默认路径（单向耦合），其余选项还没移植。
+    for (field, unported) in [
+        (
+            "DEF_GridRiverLake_FloodFeedback",
+            logical_field(&document, "DEF_GridRiverLake_FloodFeedback")?,
+        ),
+        (
+            "DEF_GridRiverLake_FloodplainStorageFix",
+            logical_field(&document, "DEF_GridRiverLake_FloodplainStorageFix")?,
+        ),
+        ("DEF_USE_LEVEE", logical_field(&document, "DEF_USE_LEVEE")?),
+        (
+            "DEF_USE_BIFURCATION",
+            logical_field(&document, "DEF_USE_BIFURCATION")?,
+        ),
+        (
+            "DEF_Reservoir_Method > 0",
+            integer_field(&document, "DEF_Reservoir_Method")? > 0,
+        ),
+        (
+            "DEF_USE_TRACER",
+            logical_field(&document, "DEF_USE_TRACER")?,
+        ),
+        (
+            "DEF_GRIDBASED_ROUTING_MOMENTUM_DT_LIMIT",
+            logical_field(&document, "DEF_GRIDBASED_ROUTING_MOMENTUM_DT_LIMIT")?,
+        ),
+        (
+            "DEF_UnitCatchment_regional",
+            logical_field(&document, "DEF_UnitCatchment_regional")?,
+        ),
+    ] {
+        ensure!(
+            !unported,
+            "{field} is not ported to the Rust river model; run this case with --engine fortran"
+        );
+    }
     if arguments.preflight {
         println!("colm-rs preflight: ok");
         return Ok(());
@@ -428,21 +465,22 @@ fn run_spatial(
         }
     }
     let grid = GriddedForcing::open_grid(&config.forcing, config.start)?;
-    let history_grid = if config.history_frequency != colm_hist::schedule::HistoryFrequency::None {
-        let patch_types = templates
-            .iter()
-            .map(|template| template.patch_type)
-            .collect::<Vec<_>>();
-        Some(build_history_grid(
-            &HistoryGridConfig::read(&document)?,
-            &grid,
-            &topology,
-            &patch_types,
-            &patch_mask,
-        )?)
-    } else {
-        None
-    };
+    let mut history_grid =
+        if config.history_frequency != colm_hist::schedule::HistoryFrequency::None {
+            let patch_types = templates
+                .iter()
+                .map(|template| template.patch_type)
+                .collect::<Vec<_>>();
+            Some(build_history_grid(
+                &HistoryGridConfig::read(&document)?,
+                &grid,
+                &topology,
+                &patch_types,
+                &patch_mask,
+            )?)
+        } else {
+            None
+        };
     let mapping = AreaWeightedMapping::build(
         &grid,
         &topology.pixel,
@@ -469,6 +507,89 @@ fn run_spatial(
         config.co2_scenario,
     )?;
     runtime.apply_mapped_heights(&mut templates)?;
+    let network = colm_runtime::river::network::RiverNetwork::read(Path::new(&string_field(
+        &document,
+        "DEF_UnitCatchment_file",
+    )?))?;
+    let routing = colm_runtime::river::network::RunoffRouting::build(&network, &topology)?;
+    let runoff_filter = templates
+        .iter()
+        .zip(&patch_mask)
+        .map(|(template, &mask)| template.patch_type < 99 && mask)
+        .collect::<Vec<_>>();
+    // 网格 history 多一个静态场与 6 个河道量（`MOD_Hist.F90:4749-4790`）。
+    let history_grid = history_grid.take().map(|mut grid| {
+        grid.statics.push((
+            "mask_complete_upstream_regird".to_owned(),
+            "Mask of grids with all upstream located in simulation region".to_owned(),
+            "100%".to_owned(),
+            colm_runtime::river::history::RiverHistoryWriter::upstream_mask_static(
+                &network,
+                &routing,
+                &grid,
+                &runoff_filter,
+            ),
+        ));
+        std::sync::Arc::new(grid)
+    });
+    let river_writer = history_grid
+        .as_ref()
+        .map(|grid| {
+            colm_runtime::river::history::RiverHistoryWriter::new(
+                &network,
+                &routing,
+                std::sync::Arc::clone(grid),
+                &runoff_filter,
+                out.join("history"),
+                name,
+            )
+        })
+        .transpose()?;
+    let river_start = river_restart_path(&out, name, &start_label, year);
+    let river_state = colm_runtime::river::restart::read_river_state(&river_start, &network)?;
+    // `restore_river_history_acc_restart`：陆面旁车标记 `history_river_required = 1` 时读回河道累加。
+    let river_history = {
+        let sidecar = history_sidecar_path(&block_files[0].time)?;
+        let required = sidecar.is_file()
+            && netcdf::open(&sidecar)
+                .ok()
+                .and_then(|file| {
+                    file.variable("history_river_required")
+                        .map(|v| v.get_values::<f64, _>(..))
+                })
+                .transpose()?
+                .is_some_and(|marker| marker.contains(&1.0));
+        if required {
+            let river_file = out
+                .join("restart")
+                .join(&start_label)
+                .join(format!("{name}_restart_hist_{start_label}.nc.river"));
+            ensure!(
+                river_file.is_file(),
+                "{} marks an open river-history window, but {} is missing",
+                sidecar.display(),
+                river_file.display()
+            );
+            Some(colm_runtime::river::restart::read_river_history(
+                &river_file,
+                network.len(),
+            )?)
+        } else {
+            None
+        }
+    };
+    let mut river = colm_runtime::river::RiverModel::new(
+        network,
+        routing,
+        river_state,
+        real_field(&document, "DEF_GRIDBASED_ROUTING_MAX_DT")?,
+    )?;
+    if let Some(history) = river_history {
+        river.history = history;
+    }
+    runtime = runtime.with_river(river, runoff_filter)?;
+    let rest_compression = u8::try_from(integer_field(&document, "DEF_REST_CompressLevel")?)
+        .context("DEF_REST_CompressLevel must fit 0..=9")?;
     let para_opt = out.join("restart/ParaOpt");
     std::fs::create_dir_all(&para_opt)
         .with_context(|| format!("cannot create {}", para_opt.display()))?;
@@ -503,7 +624,9 @@ fn run_spatial(
                 name,
             )?
             .with_patches(patch_count)?
-            .with_grid(grid),
+            .with_grid(grid)
+            .with_gridded(&colm_runtime::river::history::GRIDDED_RIVER_VARIABLES),
+            river: river_writer,
             elements: ElementGroups::from_topology(&topology)?,
             files: Vec::new(),
         }),
@@ -539,6 +662,39 @@ fn run_spatial(
             .as_ref()
             .map(|history| history.session.window_handle()),
     };
+    // `read_history_acc_restart`：续跑重启带着未写完的历史区间时接着累加（每块一份旁车，按块拼接）。
+    let mut restored = Vec::with_capacity(patch_count);
+    let mut open_window = false;
+    for ((_, patches), files) in topology.blocks.iter().zip(&block_files) {
+        match colm_runtime::history_sidecar::read_sidecar(
+            &files.time,
+            &history_sidecar_path(&files.time)?,
+            &history_restart.config,
+        )? {
+            Some(windows) if windows.first().is_some_and(|window| window.steps > 0) => {
+                ensure!(
+                    windows.len() == patches.len(),
+                    "the history sidecar of {} holds {} patches for a block of {}",
+                    files.time.display(),
+                    windows.len(),
+                    patches.len()
+                );
+                open_window = true;
+                restored.extend(windows);
+            }
+            _ => restored.extend(std::iter::repeat_n(
+                colm_runtime::history_sidecar::HistoryWindow::default(),
+                patches.len(),
+            )),
+        }
+    }
+    if open_window {
+        history
+            .as_mut()
+            .context("the restart carries an open history window, but this run writes no history")?
+            .session
+            .restore(restored)?;
+    }
     let mut states: Vec<StandardLctSnowSoilState> = templates
         .iter()
         .map(StandardLctRestartTemplate::snow_state)
@@ -548,7 +704,7 @@ fn run_spatial(
         &templates,
         &mut states,
         history.as_mut(),
-        |steps, states, outputs| {
+        |steps, states, outputs, river| {
             let mut snapshots = states
                 .iter()
                 .zip(outputs)
@@ -576,7 +732,17 @@ fn run_spatial(
                     states,
                     &snapshots,
                     &history_restart,
+                    river,
                 )?;
+                if let Some(river) = river {
+                    let label = date_label(normalized_day_end(step.clock.end_time));
+                    colm_runtime::river::restart::write_river_state(
+                        &river_restart_path(&out, name, &label, year),
+                        &river.network,
+                        &river.state,
+                        rest_compression,
+                    )?;
+                }
             }
             last = Some(snapshots);
             Ok(())
@@ -592,7 +758,17 @@ fn run_spatial(
         &states,
         &last,
         &history_restart,
+        runtime.river(),
     )?;
+    if let Some(river) = runtime.river() {
+        let label = date_label(normalized_day_end(config.end));
+        colm_runtime::river::restart::write_river_state(
+            &river_restart_path(&out, name, &label, year),
+            &river.network,
+            &river.state,
+            rest_compression,
+        )?;
+    }
     println!(
         "colm-rs: {steps} step(s) on {patch_count} spatial patch(es) in {} block(s); wrote {}",
         topology.blocks.len(),
@@ -615,6 +791,13 @@ fn run_spatial(
     Ok(())
 }
 
+/// 河道续跑文件（不分块）：`restart/<date>/<case>_restart_gridriver_<date>_lc<year>.nc`。
+fn river_restart_path(out: &Path, name: &str, label: &str, year: i64) -> PathBuf {
+    out.join("restart")
+        .join(label)
+        .join(format!("{name}_restart_gridriver_{label}_lc{year:04}.nc"))
+}
+
 /// 每个分块各写一份续跑文件（从本块的时间重启复制结构）和它的历史累加器旁车。
 #[allow(clippy::too_many_arguments)]
 fn write_block_restarts(
@@ -626,7 +809,12 @@ fn write_block_restarts(
     states: &[StandardLctSnowSoilState],
     snapshots: &[RestartSnapshot],
     history: &HistoryRestart,
+    river: Option<&colm_runtime::river::RiverModel>,
 ) -> Result<Vec<PathBuf>> {
+    // `river_active`：河道 history 累加器（`acctime_ucat`）有值。
+    let river_history = river.map(colm_runtime::river::RiverModel::history_for_restart);
+    let river_required =
+        river_history.is_some_and(|history| history.acctime.iter().any(|&t| t > 0.0));
     let mut written = Vec::with_capacity(blocks.len());
     for (((_, patches), files), periodic) in blocks.iter().zip(files).zip(periodic) {
         let path = periodic.path(end_time);
@@ -637,8 +825,22 @@ fn write_block_restarts(
             &files.time,
             &path,
         )?;
-        mark_history_restart(&path, history)?;
+        mark_history_restart_with_river(&path, history, Some(patches.clone()), river_required)?;
         written.push(path);
+    }
+    if let (Some(history), true) = (river_history, river_required) {
+        // `history_river_acc_file`：陆面旁车的基名（不带块后缀）加 `.river`。
+        let label = date_label(normalized_day_end(end_time));
+        let base = periodic
+            .first()
+            .context("a spatial run has at least one block")?
+            .directory
+            .join(&label)
+            .join(format!(
+                "{}_restart_hist_{label}.nc.river",
+                periodic[0].name
+            ));
+        colm_runtime::river::restart::write_river_history(&base, history)?;
     }
     Ok(written)
 }
@@ -1036,17 +1238,34 @@ fn history_frequency_code(frequency: colm_hist::schedule::HistoryFrequency) -> u
 /// `history_sidecar_required = 1`（`mark_history_acc_restart`）。区间跨过重启时旁车带全部
 /// 已分配的累加器（[`colm_runtime::history_sidecar`]）。
 fn mark_history_restart(restart: &Path, history: &HistoryRestart) -> Result<()> {
-    let windows = history
+    mark_history_restart_with_river(restart, history, None, false)
+}
+
+/// [`mark_history_restart`]；空间构建另带 `history_river_required`。
+/// `block` 是这个续跑文件在全部 patch 里的区间（多分块空间算例）；`None` 为整份窗口。
+fn mark_history_restart_with_river(
+    restart: &Path,
+    history: &HistoryRestart,
+    block: Option<std::ops::Range<usize>>,
+    river_required: bool,
+) -> Result<()> {
+    let mut windows = history
         .window
         .as_ref()
         .map(|window| window.lock().expect("history window lock").clone())
         .unwrap_or_else(|| vec![colm_runtime::history_sidecar::HistoryWindow::default()]);
+    if let Some(block) = block {
+        if windows.len() > 1 {
+            windows = windows[block].to_vec();
+        }
+    }
     let patches = colm_init::RestartFile::open(restart)?.dimension("patch")?;
-    colm_runtime::history_sidecar::write_sidecar(
+    colm_runtime::history_sidecar::write_sidecar_with_river(
         &history_sidecar_path(restart)?,
         patches,
         &history.config,
         &windows,
+        river_required,
     )?;
     let mut primary =
         netcdf::append(restart).with_context(|| format!("cannot reopen {}", restart.display()))?;

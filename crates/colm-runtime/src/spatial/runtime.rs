@@ -24,6 +24,8 @@ pub struct SpatialRuntime {
     coordinates: Vec<(f64, f64)>,
     co2_scenario: Co2Scenario,
     baseflow_optimizer: Option<crate::baseflow_optimizer::BaseflowOptimizer>,
+    /// 网格河湖汇流与每个 patch 是否进入 `filter_rnof`（`patchtype < 99 .and. patchmask`）。
+    river: Option<(crate::river::RiverModel, Vec<bool>)>,
 }
 
 impl SpatialRuntime {
@@ -51,7 +53,27 @@ impl SpatialRuntime {
             coordinates,
             co2_scenario,
             baseflow_optimizer: None,
+            river: None,
         })
+    }
+
+    /// 当前的河道模型（写续跑用）。
+    pub fn river(&self) -> Option<&crate::river::RiverModel> {
+        self.river.as_ref().map(|(river, _)| river)
+    }
+
+    /// 接上网格河湖汇流（`GridRiverLakeFlow`）。`included` 是 `filter_rnof`。
+    pub fn with_river(
+        mut self,
+        river: crate::river::RiverModel,
+        included: Vec<bool>,
+    ) -> Result<Self> {
+        ensure!(
+            included.len() == self.coordinates.len(),
+            "the river runoff filter needs one entry per patch"
+        );
+        self.river = Some((river, included));
+        Ok(self)
     }
 
     #[must_use]
@@ -93,6 +115,7 @@ impl SpatialRuntime {
             &[PointRuntimeStep],
             &[StandardLctSnowSoilState],
             &[PatchStepOutput<'_>],
+            Option<&crate::river::RiverModel>,
         ) -> Result<()>,
     {
         ensure!(
@@ -161,6 +184,40 @@ impl SpatialRuntime {
                             .with_context(|| format!("patch {index}"))?,
                     );
                 }
+                // `CoLM.F90:559-563`：陆面步之后、`hist_out` 之前汇流；预热期不汇流。
+                if !clock.is_spinup {
+                    if let Some((river, included)) = self.river.as_mut() {
+                        let runoff = outputs
+                            .iter()
+                            .map(|output| output.view().total_runoff_mm_s())
+                            .collect::<Vec<_>>();
+                        river.step(&runoff, included, time_step_seconds)?;
+                    }
+                }
+                // `hist_out` 在写记录的那一步先写河道部分（`hist_grid_riverlake_out`），它把河道量
+                // 交给会话，随本步的记录一起落进网格文件。
+                if let (Some(history), Some((river, _))) =
+                    (history.as_deref_mut(), self.river.as_mut())
+                {
+                    if !clock.is_spinup {
+                        if let (Some(writer), Some(record)) = (
+                            history.river.as_ref(),
+                            history.session.pending_record(clock.end_time)?,
+                        ) {
+                            if !record.natural_boundary {
+                                river.raw_history_at_end = Some(river.history.clone());
+                            }
+                            writer.write_record(
+                                &river.network,
+                                &river.routing,
+                                &mut river.history,
+                                &record,
+                                clock.end_time,
+                                &mut history.session,
+                            )?;
+                        }
+                    }
+                }
                 if let Some(history) = history.as_deref_mut() {
                     if !clock.is_spinup {
                         push_history(
@@ -189,7 +246,12 @@ impl SpatialRuntime {
                     time_step_seconds,
                 )?;
                 let views = outputs.iter().map(PatchOutput::view).collect::<Vec<_>>();
-                on_step(&steps, &next_states, &views)?;
+                on_step(
+                    &steps,
+                    &next_states,
+                    &views,
+                    self.river.as_ref().map(|(river, _)| river),
+                )?;
                 *states = next_states;
                 self.clock = next_clock;
                 completed += 1;

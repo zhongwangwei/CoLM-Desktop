@@ -196,7 +196,7 @@ pub fn extract_at_least(text: &str, minimum: usize) -> Result<Vec<Var>> {
                     .filter_map(|frame| frame.current.clone())
                     .chain(inline_runtime(&buf)),
             );
-            let lits = raw_literals(&buf);
+            let lits = raw_literals(&keyword_literals_removed(&buf));
             let (long_name, units) = call_metadata(&lits);
             let dims = call_dimensions(&lits);
             for name in literals(&buf) {
@@ -383,6 +383,39 @@ fn raw_literals(s: &str) -> Vec<String> {
         out.push(s[st..st + e].to_string());
         i = st + e + 1;
     }
+    out
+}
+
+/// 去掉关键字实参的字面量（`input_mode = 'total'`）：它们在 long_name/units **之后**，
+/// 留着会把「最后两个字面量」的规则错位（`f_discharge` 曾被读成 long_name `m^3/s`、units `total`）。
+fn keyword_literals_removed(call: &str) -> String {
+    let mut out = String::with_capacity(call.len());
+    let mut rest = call;
+    while let Some(quote) = rest.find('\'') {
+        let before = &rest[..quote];
+        let trimmed = before.trim_end();
+        let keyword = trimmed.strip_suffix('=').is_some_and(|head| {
+            let head = head.trim_end();
+            head.chars()
+                .rev()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                .count()
+                > 0
+                && !head.ends_with(['=', '<', '>', '/'])
+        });
+        let Some(end) = rest[quote + 1..].find('\'') else {
+            out.push_str(rest);
+            return out;
+        };
+        let after = quote + 1 + end + 1;
+        if keyword {
+            out.push_str(before);
+        } else {
+            out.push_str(&rest[..after]);
+        }
+        rest = &rest[after..];
+    }
+    out.push_str(rest);
     out
 }
 
@@ -608,6 +641,19 @@ mod tests {
 
     /// 描述与单位取调用里**最后两个字面量**；维度名（`'soil'`/`'band'`/`'rtyp'`）
     /// 与 `mhist_on('f_…')` 的开关都在它们之前，不能串位。
+    #[test]
+    fn keyword_arguments_do_not_shift_the_metadata() {
+        let body = "         CALL write_history_variable_2d ( DEF_hist_vars%discharge, a_discharge_pch,     &\n            file_hist, 'f_discharge', itime_in_file, sumarea_one, filter_ucat,          &\n            'regridded discharge in river and flood plain', 'm^3/s',                    &\n            nac_one, input_mode = 'total')\n";
+        let vars = extract_at_least(&corpus(body), 1).unwrap();
+        let var = vars.iter().find(|var| var.name == "discharge").unwrap();
+        assert_eq!(
+            var.long_name.as_deref(),
+            Some("regridded discharge in river and flood plain")
+        );
+        assert_eq!(var.units.as_deref(), Some("m^3/s"));
+        assert!(var.dims.is_empty(), "{:?}", var.dims);
+    }
+
     #[test]
     fn write_call_metadata_comes_from_the_last_two_literals() {
         let vars = extract(&corpus(

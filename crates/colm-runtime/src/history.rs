@@ -2636,6 +2636,10 @@ pub struct HistorySession {
     dynamic_lake: bool,
     /// 空间算例：写文件时按面积聚合到经纬网格（`HistForm = 'Gridded'`）。
     grid: Option<std::sync::Arc<colm_hist::history::HistoryGrid>>,
+    /// 由调用方聚合好的网格量（河道量）：每个新文件都声明它们。
+    gridded_names: Vec<&'static str>,
+    /// 本步要写的那条记录的预聚合值（[`Self::stage_gridded`]），写记录时放进缓冲。
+    staged: Vec<(&'static str, Vec<f64>)>,
 }
 
 /// 多 patch 时每个累加器只写自己那一格；单 patch 一次写全部（缓冲区只有一格）。
@@ -2739,7 +2743,33 @@ impl HistorySession {
             dynamic_wetland: false,
             dynamic_lake: false,
             grid: None,
+            gridded_names: Vec::new(),
+            staged: Vec::new(),
         })
+    }
+
+    /// 每个 history 文件都多声明这些由调用方聚合好的网格量（见 [`Self::stage_gridded`]）。
+    pub fn with_gridded(mut self, names: &[&'static str]) -> Self {
+        self.gridded_names = names.to_vec();
+        self
+    }
+
+    /// 这一步（结束于 `end`）是不是某条记录的写入时刻：是就返回它（上游 `hist_out` 此时写出）。
+    pub fn pending_record(&self, end: CalendarTime) -> Result<Option<ScheduledRecord>> {
+        let Some(record) = self.records.get(self.cursor) else {
+            return Ok(None);
+        };
+        Ok((tick_of(end)? == record.write_at_tick).then(|| record.clone()))
+    }
+
+    /// 本步那条记录里一个预聚合网格量的值；随本步的记录一起写进缓冲。
+    pub fn stage_gridded(&mut self, name: &'static str, values: Vec<f64>) -> Result<()> {
+        ensure!(
+            self.gridded_names.contains(&name),
+            "{name} was not declared with with_gridded()"
+        );
+        self.staged.push((name, values));
+        Ok(())
     }
 
     /// 空间算例：history 写成经纬网格（每个 patch 的份面积见 [`colm_hist::history::HistoryGrid`]）。
@@ -3498,6 +3528,9 @@ impl HistorySession {
             );
             if let Some(grid) = &self.grid {
                 buffer = buffer.with_grid(std::sync::Arc::clone(grid))?;
+                if !self.gridded_names.is_empty() {
+                    buffer.declare_gridded(&self.gridded_names)?;
+                }
             }
             // 声明本层能负责的变量；写出的文件因此只包含它们。
             declare_lct_variables(&mut buffer, self.plant_hydraulics, self.variably_saturated)?;
@@ -3534,6 +3567,9 @@ impl HistorySession {
             }
         }
         buffer.select_patch(None)?;
+        for (name, values) in self.staged.drain(..) {
+            buffer.set_gridded(name, record.record, &values)?;
+        }
         self.cursor += 1;
         // 分组的最后一条写完就落盘（上游写回模式在这一刻把内存里的整组写出）；开着的缓冲区因此
         // 只会是写了一半的组，中途 abort 时由 [`Self::abandon`] 留下只有文件头的文件。

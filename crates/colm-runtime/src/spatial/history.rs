@@ -5,7 +5,6 @@
 //! 近地面诊断先在每个网格元里按 patch 面积份额聚合一次（`MOD_Vars_1DAccFluxes.F90:2696-2805`）。
 
 use std::ops::Range;
-use std::sync::Arc;
 
 use anyhow::{ensure, Context, Result};
 use colm_hist::history::HistoryGrid;
@@ -52,7 +51,7 @@ pub fn build_history_grid(
     topology: &SpatialTopology,
     patch_types: &[i32],
     patch_mask: &[bool],
-) -> Result<Arc<HistoryGrid>> {
+) -> Result<HistoryGrid> {
     let patches = topology.patch_count();
     ensure!(
         patch_types.len() == patches && patch_mask.len() == patches,
@@ -146,7 +145,7 @@ pub fn build_history_grid(
         lon.push(center);
     }
     let text = |value: &str| value.to_owned();
-    Ok(Arc::new(HistoryGrid {
+    Ok(HistoryGrid {
         lat: rows
             .iter()
             .map(|&ilat| (grid.lat_s[ilat] + grid.lat_n[ilat]) * 0.5)
@@ -156,6 +155,11 @@ pub fn build_history_grid(
         lat_n: rows.iter().map(|&ilat| grid.lat_n[ilat]).collect(),
         lon_w: columns.iter().map(|&ilon| grid.lon_w[ilon]).collect(),
         lon_e: columns.iter().map(|&ilon| grid.lon_e[ilon]).collect(),
+        patch_area: mapping
+            .parts
+            .iter()
+            .map(|parts| parts.iter().fold(0.0, |sum, part| sum + part.area))
+            .collect(),
         parts,
         statics: vec![
             (text("landarea"), text("land area"), text("km2"), landarea),
@@ -178,7 +182,7 @@ pub fn build_history_grid(
                 area_lake,
             ),
         ],
-    }))
+    })
 }
 
 /// 网格元与其 patch：`elm_patch%substt/subend` 与面积份额 `subfrc`（`MOD_Pixelset.F90:subset_build`）。
@@ -238,6 +242,8 @@ impl ElementGroups {
 /// 空间主循环的 history：会话加网格元分组。
 pub struct SpatialHistory {
     pub session: crate::history::HistorySession,
+    /// 河道 history（`GridRiverLakeFlow`）：记录时刻写 unitcat 文件与网格里的河道量。
+    pub river: Option<crate::river::history::RiverHistoryWriter>,
     pub elements: ElementGroups,
     /// 已写出的 history 文件。
     pub files: Vec<std::path::PathBuf>,

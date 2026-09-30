@@ -232,7 +232,7 @@ fn inconsistent_sidecars_are_refused() {
 }
 
 /// 空间构建（编进 `GridRiverLakeFlow`）：`history_schema = 2`、多一个 `history_river_required = 0`；
-/// 区间跨过重启时要写河道旁车，还没移植，拒绝而不是写一份残缺的旁车。
+/// 区间跨过重启时，河道累加器有值就把标记写成 1。
 #[test]
 fn river_lake_builds_write_schema_two() {
     let directory = scratch_directory("river");
@@ -268,8 +268,15 @@ fn river_lake_builds_write_schema_two() {
     assert_eq!(values("history_river_required"), vec![0.0, 0.0]);
     drop(file);
 
+    // 区间跨过重启：河道累加器有值时标记为 1（河道旁车由调用方另写）。
     let open = sidecar.with_file_name("open.nc");
-    let error = write_sidecar(&open, 1, &river, &[window()]).unwrap_err();
-    assert!(error.to_string().contains("river-lake"), "{error}");
+    write_sidecar_with_river(&open, 1, &river, &[window()], true).unwrap();
+    let file = netcdf::open(&open).unwrap();
+    let required = file
+        .variable("history_river_required")
+        .unwrap()
+        .get_values::<f64, _>(..)
+        .unwrap();
+    assert_eq!(required, vec![1.0]);
     let _ = std::fs::remove_dir_all(&directory);
 }

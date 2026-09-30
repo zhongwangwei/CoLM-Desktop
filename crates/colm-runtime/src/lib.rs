@@ -17,6 +17,7 @@ pub mod irrigation;
 pub mod multi_patch;
 pub mod pft;
 pub mod physics;
+pub mod river;
 pub mod spatial;
 
 use std::path::{Path, PathBuf};
@@ -851,6 +852,16 @@ impl PatchStepOutput<'_> {
             Self::Glacier(output) => output.thermal.fevpa,
             Self::Lake(output) => output.thermal.fevpa,
             Self::Urban(output) => output.thermal.fevpa,
+        }
+    }
+
+    /// `rnof`：交给河道汇流的总径流（与 history 的 `f_rnof` 同源）。
+    pub fn total_runoff_mm_s(self) -> f64 {
+        match self {
+            Self::Soil(output) => output.water.soil.total_runoff_mm_s,
+            Self::Glacier(output) => output.total_runoff_mm_s,
+            Self::Lake(output) => output.total_runoff_mm_s,
+            Self::Urban(output) => output.rnof,
         }
     }
 

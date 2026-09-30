@@ -129,18 +129,24 @@ impl LatLonGrid {
         Ok(grid)
     }
 
-    /// `grid_define_by_res`（`nint(360/lon_res)` × `nint(180/lat_res)`）+ `grid_define_by_ndims`：
-    /// 自北向南、自 -180° 向东；`180.0 / n` 与 `360.0 / n` 是**单精度**常数除以整数。
+    /// `grid_define_by_res`：`nint(360/lon_res)` × `nint(180/lat_res)` 个格子。
     pub fn define_by_res(lon_res: f64, lat_res: f64) -> Result<Self> {
         ensure!(
             lon_res > 0.0 && lat_res > 0.0,
-            "history grid resolutions must be positive"
+            "grid resolutions must be positive"
         );
-        let nlon = (360.0 / lon_res).round() as usize;
-        let nlat = (180.0 / lat_res).round() as usize;
-        ensure!(nlon > 0 && nlat > 0, "the history grid has no cells");
-        let del_lat = f64::from(180.0_f32 / nlat as f32);
-        let del_lon = f64::from(360.0_f32 / nlon as f32);
+        Self::define_by_ndims(
+            (360.0 / lon_res).round() as usize,
+            (180.0 / lat_res).round() as usize,
+        )
+    }
+
+    /// `grid_define_by_ndims`：自北向南、自 -180° 向东。内核以 `-fdefault-real-8` 编译，
+    /// `180.0 / n` 是双精度。
+    pub fn define_by_ndims(nlon: usize, nlat: usize) -> Result<Self> {
+        ensure!(nlon > 0 && nlat > 0, "a grid needs cells");
+        let del_lat = 180.0 / nlat as f64;
+        let del_lon = 360.0 / nlon as f64;
         let lat_s = (1..=nlat).map(|i| 90.0 - del_lat * i as f64).collect();
         let lat_n = (1..=nlat)
             .map(|i| 90.0 - del_lat * (i - 1) as f64)

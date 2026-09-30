@@ -108,6 +108,8 @@ pub struct HistoryGrid {
     pub lon_e: Vec<f64>,
     /// 每个 patch 覆盖的格子：`(ilat*nlon + ilon, 份面积)`，按映射的份顺序。
     pub parts: Vec<Vec<(usize, f64)>>,
+    /// 每个 patch 全部份面积之和（含窗口外的份，从 0 起逐份相加）：`input_mode = 'total'` 的 `sumwt`。
+    pub patch_area: Vec<f64>,
     /// 只在建文件时写一次的二维量（`landarea`、`landfraction`、`area_wetland`、`area_lake`）：
     /// `(名字, long_name, units, 值)`。
     pub statics: Vec<(String, String, String, Vec<f64>)>,
@@ -136,6 +138,8 @@ pub struct HistoryBuffers {
     grid: Option<std::sync::Arc<HistoryGrid>>,
     /// 变量名 → `(record, patch)` 是否计入上游的 `filter`（网格聚合的分母）。
     included: BTreeMap<&'static str, Vec<bool>>,
+    /// 调用方已经聚合到网格窗口的量（河道量各有自己的过滤、分母与写法）：`(record, cell)`。
+    gridded: BTreeMap<&'static str, Vec<f64>>,
 }
 
 impl HistoryBuffers {
@@ -151,7 +155,53 @@ impl HistoryBuffers {
             selected: None,
             grid: None,
             included: BTreeMap::new(),
+            gridded: BTreeMap::new(),
         }
+    }
+
+    /// 声明一组由调用方聚合好的网格量（只在网格写出时可用，须是闸门表里的二维量）。
+    pub fn declare_gridded(&mut self, names: &[&str]) -> Result<()> {
+        let cells = self
+            .grid
+            .as_ref()
+            .context("pre-gridded history variables need a history grid")?
+            .cells();
+        for name in names {
+            let entry = VARS
+                .iter()
+                .find(|entry| entry.name == *name)
+                .with_context(|| format!("{name} is not in the history gate table"))?;
+            ensure!(
+                entry.dims.is_empty(),
+                "pre-gridded history variable {name} must be two-dimensional"
+            );
+            self.gridded
+                .insert(entry.name, vec![MISSING_VALUE; self.records * cells]);
+        }
+        Ok(())
+    }
+
+    /// 第 `record` 条记录里某个预聚合量在窗口格子上的值（`ilat*nlon + ilon`）。
+    pub fn set_gridded(&mut self, name: &str, record: usize, values: &[f64]) -> Result<()> {
+        let cells = self
+            .grid
+            .as_ref()
+            .context("pre-gridded history variables need a history grid")?
+            .cells();
+        ensure!(
+            record < self.records,
+            "record {record} is outside the group"
+        );
+        ensure!(
+            values.len() == cells,
+            "{name} does not cover the history window"
+        );
+        let slot = self
+            .gridded
+            .get_mut(name)
+            .with_context(|| format!("{name} was not declared with declare_gridded()"))?;
+        slot[record * cells..(record + 1) * cells].copy_from_slice(values);
+        Ok(())
     }
 
     /// 改成网格写出（空间算例）。`grid.parts` 的份数必须等于 patch 数。
@@ -596,6 +646,21 @@ impl HistoryBuffers {
             }
             variable.put_attribute("missing_value", MISSING_VALUE)?;
         }
+        for name in self.gridded.keys() {
+            let entry = VARS
+                .iter()
+                .find(|entry| entry.name == *name)
+                .expect("declare_gridded() only stores names found in the gate table");
+            let mut variable =
+                file.add_variable::<f64>(&file_variable_name(entry.name), &["time", "lat", "lon"])?;
+            if let Some(long_name) = entry.long_name {
+                variable.put_attribute("long_name", long_name)?;
+            }
+            if let Some(units) = entry.units {
+                variable.put_attribute("units", units)?;
+            }
+            variable.put_attribute("missing_value", MISSING_VALUE)?;
+        }
         self.put_grid_coordinates(&mut file, grid)?;
         file.variable_mut("time")
             .context("time disappeared after definition")?
@@ -656,6 +721,13 @@ impl HistoryBuffers {
             file.variable_mut(&file_name)
                 .with_context(|| format!("{file_name} disappeared after definition"))?
                 .put_values(&out, netcdf::Extents::All)?;
+        }
+        // 时间是无限维：要在 `time` 写出之后再写这些量。
+        for (name, values) in &self.gridded {
+            let file_name = file_variable_name(name);
+            file.variable_mut(&file_name)
+                .with_context(|| format!("{file_name} disappeared after definition"))?
+                .put_values(values, netcdf::Extents::All)?;
         }
         file.close()?;
         Ok(())

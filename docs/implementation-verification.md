@@ -26575,3 +26575,127 @@ Rust 整条链 2 分 14 秒（期间全量回归在并行跑），纯 Fortran �
 | 单块回归 `g1p` | 135 个变量逐位，续跑、旁车 `diff 0` |
 
 无冠层检查的放开只去掉了一个报错分支，不改变任何原本能跑的单点算例，所以这轮没有重跑单点全量回归。
+
+## 第 457 轮：B2 网格河湖汇流 —— 全球 25 万个单元流域整月逐位
+
+GRID 内核总是编进 `GridRiverLakeFlow`。默认配置是单向耦合：不开漫滩回馈、堤防、分汊、水库与示踪物。本轮把这条默认路径完整移植到 `colm-runtime/src/river/`。
+
+**模块。**
+- `network.rs`
+  - 读 `DEF_UnitCatchment_file`（全球网络，`seq_next` 只有河口 -9 与洼地 -10 两种非正码）。
+  - 漫滩的水位—蓄量—面积曲线、出口宽度、下游河床高程、按河口分组的河系。
+  - patch → 单元流域网格（`griducat`，1440×720）的面积映射（`remap_patch2inpm`），以及 `inpmat` 汇集表。
+- `mod.rs`
+  - 每个陆面步把 patch 的 `rnof` 汇进 `acc_rnof_uc`：`pset2grid` 跳过 0 值，除以 `push_ucat2inpm%sum_area`；再做 `push_inpm2ucat`，然后 `FMA(rnof_uc*1e-3, dt, acc)`。
+  - 累计满 `DEF_GRIDBASED_ROUTING_MAX_DT`（3600 s）汇流一次。每个河系按 CFL（×0.8）与蓄量两道限制取子步（≤ 60 s），用 HLL 求出口面的质量、动量通量，更新蓄量与水深，动量摩擦隐式处理。
+  - 预热期不汇流（`CoLM.F90:559`）。
+- `restart.rs`：`<case>_restart_gridriver_<date>_lc<year>.nc`（schema 2），校验单元流域标识。续跑时与陆面重启一起写。
+- `history.rs`：见下。
+
+**收缩形状**，全部取自 latlon 内核 GIMPLE：
+- HLL 通量：
+  - `veloct = FMA(v+vn, 0.5, c_up) - c_dn`
+  - `height_fc = FMA(c_up+c_dn, 0.5, (v-vn)*0.25)^2 * (1/g)`
+  - `mflux = FMA(h, v*v, h*h*0.5g)`
+  - 分子为 `FMA(vdn*vup, Δ, FMS(vdn, up, vup*dn))`，先乘出口宽度再除以 `vdn-vup`
+  - `sum_zgrad = FMA(owth*0.5*g, h², 0)`
+- 蓄量更新：`FNMA(hflux, dt, vol)`。
+- 动量：`FNMA((sm-sz)/rivare, dt, mom) / FMA(dt, friction, 1)`，其中 `friction = (man²·g / pow(h, 7/3))·|mom|`，走 libm `pow`。
+- 漫滩曲线：
+  - `depth` 中间层 `FMA(sqrt(FMA(a, a, 2(v0-s)/g)) - a, g, rivhgt + h)`
+  - `volume` 为 `FMA(FMA(d/h, A, 2a)·d, 0.5, stomax + s)`
+  - `area` 为 `FMA(d/h, A, a)`
+  - `flpstomax(j) = FMA(Δh, (A_j+A_{j-1})·0.5, s_{j-1})`
+- history 累加都是 `FMA(x, dt, a)`，**唯独 `a_discharge` 不融合**：乘积 `hflux*dt` 与调试用的 `totaldis` 共用（`_7820`）。第一版按 FMA 写，unitcat 的 `f_discharge` 在约 6.5 万个格子上差到相对 2.5e-11。
+- `push`、`pset2grid`、`grid2pset` 原语本身都是先乘后加。
+
+**上游行为照抄。** `DEF_GridRiverLake_FloodplainStorageFix = .false.`（默认）时，`flpstomax` 用单层面积而不是累积面积，与 `volume` 的梯形公式不一致：第一层以上 `depth(volume(h)) ≠ h`。测试把这个行为钉住了。
+
+**并行。** 河系之间没有任何耦合：上下游都在同一河系，子步长也在河系内取最小。所以每个河系在自己的局部数组上把整次汇流推进完，河系之间用 rayon 并行；河系内部与上游逐单元流域的循环顺序相同。
+- 按阶段、按单元流域并行的写法也逐位，但每个子步都要全局同步：单次汇流约 90–108 个子步、每步 15–18 万个活动单元流域，一天要 33 秒。
+- 改成按河系并行后一天 15 秒。
+
+**河道 history**（`MOD_Grid_RiverLakeHist`，`DEF_HIST_mode = 'one'`）：
+- **初始化**时建三个 patch 过滤：
+  - `filter_ucat`：patch 覆盖的网格里有单元流域格心；
+  - `filter_rivmth`：其中是河口；
+  - `filter_inpm`：patch 覆盖的网格落在某个单元流域的 `inpmat` 里。
+  同时建 `sum_grid_area`/`sum_rmth_area`、`sumarea_ucat`/`sumarea_inpm`，以及 `allups_mask_ucat`：区域里有份面积、且全部上游都完整。
+- **每条记录**时，`HistorySession::pending_record` 先告诉主循环这一步要写记录。
+  - 河道写出器写一条 `gd_hist_unitcat_*`：12 个量铺在单元流域的 `(seq_x, seq_y)` 上，外加 `time`、`history_window_seconds`、`history_window_end_minutes`。
+  - 把网格 history 的 6 个量聚合好交给会话（`HistoryBuffers::declare_gridded`/`set_gridded`）。各量的分母：
+    - `f_wdpth_ucat_regrid`、`f_veloc_riv_regrid`：`sumarea_ucat`；
+    - `f_discharge`、`f_discharge_rivermouth_regrid`：常数 1，且 `input_mode = 'total'`，除以 patch 全部份面积；
+    - `f_floodfrc`：`sumarea_inpm`；
+    - `f_floodarea`：常数 1。
+  - 静态场 `mask_complete_upstream_regird` 的阈值是 `sumarea > 0`（不是 `1e-5`），缺测也照除。
+- `gen-histmap` 的修正：写出调用末尾的关键字实参 `input_mode = 'total'` 会让"最后两个字面量是 long_name/units"的规则错位，`f_discharge` 曾被读成 long_name `m^3/s`、units `total`。现在先剔除关键字实参再取；重新生成后只有这两条变了。
+
+**CLI。** `colm-cli` 放开 Rust 引擎跑 GRIDBASED 算例，非结构网格和流域网格仍然拒绝。以下未移植的河道选项由 `colm-rs --preflight` 挡住：
+- `DEF_GridRiverLake_FloodFeedback`、`DEF_GridRiverLake_FloodplainStorageFix`；
+- `DEF_USE_LEVEE`、`DEF_USE_BIFURCATION`、`DEF_Reservoir_Method > 0`；
+- `DEF_USE_TRACER`、`DEF_GRIDBASED_ROUTING_MOMENTUM_DT_LIMIT`、`DEF_UnitCatchment_regional`。
+
+| 算例 | 对象 | 结果 |
+|---|---|---|
+| `g1p`（1 天，24 次汇流） | 河道重启（252383 个单元流域）、陆面重启、history 旁车 | 全部 `diff 0` |
+| | `gd_hist`（含 6 个河道量与上游掩码） | 142 个变量逐位，两边没有多出或缺少的变量 |
+| | `gd_hist_unitcat` | 17 个变量逐位 |
+| `g1`（整个 1 月，744 次汇流，31 条记录） | 同上全部 | 全部逐位 / `diff 0` |
+| `g1e`：`colm-cli run --kernel kernels/latlon`（前处理 + 主循环默认都走 Rust），1 天 | 与纯 Fortran 比全部输出 | 全部逐位 |
+
+Rust 整月 2 分 51 秒（`g1`），纯 Fortran 约 32 分钟。
+
+**区间跨过重启**（`write_history_acc_restart` 的河道部分）。
+- 陆面旁车在河道 `acctime_ucat` 有值时写 `history_river_required = 1`。
+- 同时另写 `<case>_restart_hist_<date>.nc.river`：陆面旁车基名，不带块后缀；内容是 10 个 `hist_*`。
+- 运行终点那条不满周期的记录，写之前先存原始累加（河道与陆面同一机制）。
+- 多分块时，陆面窗口按块切片后各写一份。
+- 续跑时按块读回陆面旁车并拼接窗口；标记为 1 就读回 `.river`，缺了就报错。
+- 起跑时读回旁车，这条空间入口原先没有。
+
+| 算例 | 对象 | 结果 |
+|---|---|---|
+| `g1w`（1 天，history MONTHLY、续跑 DAILY：写续跑时月度区间未关） | 陆面重启、河道重启、陆面旁车（含开放区间的 126 个累加器）、`.river` 旁车 | 全部 `diff 0` |
+| | `gd_hist`（终点那条不满月的记录）、unitcat | 142 / 17 个变量逐位 |
+| `g1wc`：从各自第 2 天的续跑接着跑 1 天（Fortran 读自己的、Rust 读自己的） | 第 3 天的四个续跑文件 | 全部 `diff 0` |
+| | `gd_hist`、unitcat | 142 / 17 个变量逐位 |
+
+全量单点回归（`tmp/regress_all.sh`，最终 B2 代码）：140 个算例里 138 个 `hist ok rst ok`；另外 2 个（`nn`、`pni`）本身不出 history 文件，`rst: ok`，与前两轮回归的记录相同。
+
+尚未做：
+- 漫滩回馈、堤防、分汊、水库、示踪物；
+- 非结构网格与流域网格；
+- `DEF_HIST_mode = 'block'` 的分片输出。
+
+## 第 458 轮：vendor Makefile 的同阶段模块依赖 —— 恢复 `make -j` 安全
+
+`main` 上 `vendor/CoLM202X/Makefile` 末尾原有一块本地依赖段（`acfb5965` 入库，约 251 行）：按源码 `MODULE`/`USE` 列出同一阶段内的 `.o → .o` 前置。`1deb5ee2` 把 Makefile 整体换成上游时，这一段整段丢了；仓库里没有生成脚本，同步时无从重建。
+
+后果：用到了某模块、依赖图里却走不到的边，按阶段统计：
+- `OBJS_SHARED` 299 条，`OBJS_BASIC` 136 条，`OBJS_MAIN` 174 条，`OBJS_MKSRFDATA` 1 条；
+- 统计口径为独立检查器 `deps.py`，逐条判定可达性。
+
+所有缺口在变量里的排列顺序都正确，所以串行 `make`（`build_kernel.sh`）编得过，并行则不行。
+
+**修法：** 新增 `oracle/scripts/gen_fortran_deps.py`。
+- 阶段取每条 `$(VAR) : %.o : %.F90` 模式规则的目标列表。
+- 变量值交给 `make` 自己展开（含 `+=`、嵌套变量与 `$(addprefix …)`），不在脚本里重写 make 的语义。
+- 对每个对象读它 `.F90` 的 `MODULE`/`USE`（大小写不敏感，`#ifdef` 两支都算），只输出同阶段的边。跨阶段的顺序由模式规则的 `${OBJS_SHARED}` 等前置保证。
+- 另给每个阶段加 `$(VAR): | mkdir_build`：对象都写进 `.bld/`，上游只把 `mkdir_build` 当作最终目标的普通前置，并行时目录可能还没建好。
+- 结果写进 Makefile 末尾带起止标记的块，按字典序输出，重跑结果不变；`--check` 只比对，不一致时返回 1。
+- 原有 5 条手写边保留在手写区。
+
+**守卫：**
+- `xtask/tests/fortran_deps.rs` 调用 `--check`。
+- `xtask/tests/windows_console.rs` 改为检查可达性，不再逐字比对依赖行（上游把那一行拆成了两条，逐字比对会误报）。
+- `vendor/PROVENANCE.md` 的同步步骤写明"同步后重跑生成脚本"。
+
+**实测**（临时副本，`Makeoptions.Mac-arm`，SinglePoint 宏，`make -j8 mksrfdata.x mkinidata.x colm.x`）：
+
+| Makefile | 3 次结果 |
+|---|---|
+| 改前（HEAD） | 3 次全部失败：`Fatal Error: Cannot open module file 'mod_namelist.mod'`（`MOD_Vars_Global.o`） |
+| 改后 | 3 次全部成功 |
+
+同一个检查器在改后各阶段的缺口都是 0；`cargo test -p xtask --test fortran_deps --test windows_console` 通过。

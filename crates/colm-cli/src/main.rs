@@ -1934,10 +1934,15 @@ fn preflight_rust_model(case_nml: &Path, kernel: &Kernel, ranks: usize) -> Resul
         ranks == 1,
         "the Rust model engine runs one process; --ranks {ranks} needs --engine fortran"
     );
-    ensure!(
-        !colm_case::is_spatial_case(case_nml)?,
-        "the Rust model engine only runs SinglePoint cases; rerun this spatial case with --engine fortran"
-    );
+    // 空间算例：Rust 主循环接 GRIDBASED 内核（经纬网格 + `GridRiverLakeFlow` 默认汇流）；
+    // 非结构网格与流域网格还没移植。河道的未移植选项由 `colm-rs --preflight` 挡。
+    if colm_case::is_spatial_case(case_nml)? {
+        ensure!(
+            kernel_grid_kind(kernel) == Some("latlon"),
+            "the Rust model engine runs SinglePoint and GRIDBASED cases; rerun this {} case with --engine fortran",
+            kernel_grid_kind(kernel).unwrap_or("spatial")
+        );
+    }
     let land_cover = rust_model_land_cover(kernel)?;
     let executable = rust_model_executable()?;
     let output = std::process::Command::new(&executable)

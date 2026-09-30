@@ -163,6 +163,7 @@ dependencies = [
  "colm-namelist",
  "colm-schema",
  "netcdf",
+ "rayon",
 ]
 
 [[package]]

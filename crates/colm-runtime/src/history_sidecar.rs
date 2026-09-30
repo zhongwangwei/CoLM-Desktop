@@ -135,6 +135,18 @@ pub fn write_sidecar(
     config: &SidecarConfig,
     windows: &[HistoryWindow],
 ) -> Result<()> {
+    write_sidecar_with_river(path, patches, config, windows, false)
+}
+
+/// [`write_sidecar`]；空间构建（`river_lake_flow`）另写 `history_river_required`：河道累加器
+/// （`acctime_ucat`）有值时为 1，调用方同时写河道旁车（`<sidecar 基名>.river`）。
+pub fn write_sidecar_with_river(
+    path: &Path,
+    patches: usize,
+    config: &SidecarConfig,
+    windows: &[HistoryWindow],
+    river_required: bool,
+) -> Result<()> {
     let window = windows
         .first()
         .context("the history sidecar needs at least one window")?;
@@ -195,16 +207,15 @@ pub fn write_sidecar(
                 .with_context(|| format!("cannot write {}", entry.name))?;
         }
     }
-    // `river_active`：河道累加器（`acctime_ucat`）有值才为 1。河道还没移植，区间跨过重启时
-    // 那份河道旁车写不出来，只好拒绝；区间已经关上时河道累加器也已清零，标记就是 0。
+    // `river_active`：河道累加器（`acctime_ucat`）有值才为 1。
     if config.river_lake_flow {
-        ensure!(
-            window.steps == 0,
-            "the history window spans this restart, but the river-lake history sidecar is not \
-             ported yet; choose a restart frequency that closes the history window"
-        );
         file.add_variable::<f64>("history_river_required", &["patch"])?
-            .put_values(&per_patch(0.0), ..)?;
+            .put_values(&per_patch(if river_required { 1.0 } else { 0.0 }), ..)?;
+    } else {
+        ensure!(
+            !river_required,
+            "only river-lake builds carry river history"
+        );
     }
     // 上游先写 0、全部转存完再改成 1（`complete_history_acc_restart`）；落盘结果只有 1。
     file.add_variable::<f64>("history_complete", &["patch"])?
