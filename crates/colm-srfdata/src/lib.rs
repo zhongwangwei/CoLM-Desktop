@@ -90,9 +90,10 @@ pub use spatial::{
     write_landpatch_layered_vector, write_landpatch_scalar, write_landpatch_vector,
     write_spatial_hru_patch_fractions, write_spatial_hru_topology, write_spatial_pft_topology,
     write_spatial_pft_topology_with_shared, write_spatial_topology,
-    write_spatial_topology_with_shared, write_spatial_urban_material, write_spatial_urban_topology,
-    write_spatial_urban_vector, BlockLayout, CoordinatePatchSelection, MeshFilter,
-    MethanePhSamples, PixelAxes, SpatialGrid, SpatialInputKind, SpatialTopology, TiledRasterFiles,
+    write_spatial_topology_selecting_fractions, write_spatial_topology_with_shared,
+    write_spatial_urban_material, write_spatial_urban_topology, write_spatial_urban_vector,
+    BlockLayout, CoordinatePatchSelection, MeshFilter, MethanePhSamples, PixelAxes, SpatialGrid,
+    SpatialInputKind, SpatialTopology, TiledRasterFiles,
 };
 pub use surface::{
     derive_topographic_wetness, CanopyStructure, FlatPatches, RegularTopographyFactors,

@@ -289,9 +289,11 @@ pub fn derive_lake_layers(depth_m: &[f64], lake_layers: usize) -> Result<LakeSta
                 thickness_m[layer * depth_m.len() + patch] =
                     DEFAULT_LAKE_THICKNESS_M[layer] * ratio;
             }
+            // `dzlak(nl)*dr - (dz_lake(1) - dzlak(1)*dr)`：GIMPLE（单点与 latlon 内核相同）是
+            // `.FMS (dr, dzlak(nl), .FNMA (dr, dzlak(1), dz_lake(1)))`。
+            let top_excess = (-ratio).mul_add(DEFAULT_LAKE_THICKNESS_M[0], thickness_m[patch]);
             thickness_m[(lake_layers - 1) * depth_m.len() + patch] =
-                DEFAULT_LAKE_THICKNESS_M[lake_layers - 1] * ratio
-                    - (thickness_m[patch] - DEFAULT_LAKE_THICKNESS_M[0] * ratio);
+                ratio.mul_add(DEFAULT_LAKE_THICKNESS_M[lake_layers - 1], -top_excess);
             output_depth.push(depth);
         } else if depth > 0.0 && depth <= 1.0 {
             for layer in 0..lake_layers {

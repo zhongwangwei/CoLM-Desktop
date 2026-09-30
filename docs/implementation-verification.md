@@ -26515,3 +26515,34 @@ history 续跑旁车、多分块、Rust 前处理对空间算例的逐位、城�
 - 空间算例 `g1`/`g1p` 不进单点回归（`regress_all.sh` 的 SKIP），单独对比。
 - CLI 仍拒绝用 Rust 引擎跑空间算例：河湖流在所有 GRID 构建里都编进内核，B2 之前放开会漏掉河道输出。
 - 另外试了 Rust 前处理跑 `g1`：mksrfdata-rs 只凭 namelist 里有没有 `DEF_GRIDBASED_lon_res/lat_res` 判断网格类型，缺了就当 UNSTRUCTURED 找 `elmindex`。上游是按内核宏 `GRIDBASED` 走 `init_gridbased_mesh_grid`，所以这个判断需要改成跟内核走，待办。
+
+## 第 455 轮：Rust 前处理跑空间算例 —— landdata 248 个文件、初始重启全部逐位
+
+用 Rust 的 mksrfdata/mkinidata 在 `g1` 的副本 `g1rp` 上重做前处理，逐文件对照纯 Fortran（`kernels/latlon`）的产物。依次修了四处：
+
+1. **网格类型要跟内核走。**
+   - 上游按内核宏选网格：`GRIDBASED` 走 `init_gridbased_mesh_grid`，`DEF_file_mesh` 是 landmask 文件（`MKSRFDATA.F90:203-213`）。
+   - mksrfdata-rs 原先只凭 namelist 里有没有 `DEF_GRIDBASED_lon_res/lat_res` 判断，landmask 网格文件的 GRIDBASED 算例因此被当成 UNSTRUCTURED 去找 `elmindex`，第一步就报错。
+   - 现在 colm-cli 按内核宏传 `--grid-kind latlon|unstructured|catchment`，以它为准。没给这个参数时（直接调用工具）才沿用原来的猜法。
+   - 空间内核却没给网格文件时显式拒绝：按 `DEF_GRIDBASED_*_res` 现造网格那条路没移植，退回单点物化只会产出一份错的地表。
+2. **默认分块。**
+   - 没给 `--blocks` 时 Rust 用的是全球 1×1 分块（后缀 `w180_s90`）；上游 `block_set` 取 `DEF_nx_blocks`/`DEF_ny_blocks`，默认 72×36（本例是 `e110_n20`）。
+   - 分块决定文件名和 patch 顺序，现在按 namelist 取。`DEF_BlockInfoFile`、`DEF_AverageElementSize` 两条分支没移植，遇到就拒绝。
+3. **多写了两类文件。**
+   - `landpatch/<year>/patchfrac_elm`：上游 `landpatch_build` 里那一处包在 `#if (!defined(URBAN_MODEL) && !defined(CROP))` 里，而 `URBAN_MODEL` 现在恒定义，是死代码。实际写它的只有三处：城市跑法（非 CROP）、CROP 内核、`DEF_Output_2mWMO`。spatial-lct/pft 为此新增 `--patch-fractions`，namelist 模式按这个规则关掉。
+   - `cstructure/*`：`Aggregation_CanopyStructure` 只在 `DEF_Interception_scheme == 8` 时调用，Rust 原先只要 `canopy_data` 目录存在就写。
+4. **`dz_lake` 最后一层 1 ULP**（`lakedepth > 1` 的湖 patch）。
+   - `dzlak(nl)*dr - (dz_lake(1) - dzlak(1)*dr)` 的 GIMPLE 是 `.FMS (dr, dzlak(nl), .FNMA (dr, dzlak(1), dz_lake(1)))`，单点与 latlon 内核相同；`colm_core::derive_lake_layers` 原先没有融合。
+   - 单点的湖站点原先深度都不超过 1 m 或取默认，走不到这一支，所以一直没暴露。
+
+| 对象 | 结果 |
+|---|---|
+| `landdata/`（mesh、landelm、landpatch、block、pixel、LAI/SAI 24 个月文件、土壤 200 余个、地形、湖深、htop） | 248 个文件逐变量逐位，两边没有多出或缺少的文件 |
+| `restart/const` 两份、`2010-001` 主重启、`gridriver` 冷启动重启 | 全部 `diff 0` |
+| 前处理 + 主循环全用 Rust 跑 1 月（`g1rp`） vs 纯 Fortran（`g1`） | 网格 history 135 个变量逐位；月末主重启、history 旁车 `diff 0` |
+
+Rust 整条链 2 分 14 秒（期间全量回归在并行跑），纯 Fortran 约 32 分钟。
+
+全量回归（release，带本轮改动）：138 个算例逐位，`nn`/`pni` 照旧不比 history。`derive_lake_layers` 的融合改动没有改变任何既有单点算例。
+
+附带发现：`cargo test -p colm-init` 并行跑时约 32 个测试报 `Netcdf(-101)`（HDF5 错误），单线程 158 个全过，逐个单跑也都通过。colm-init 本轮没有改动，是既有的并发问题，已另开任务。

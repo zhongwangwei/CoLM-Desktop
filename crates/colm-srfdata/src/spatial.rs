@@ -3736,6 +3736,31 @@ pub fn write_spatial_topology_with_shared(
     blocks: &BlockLayout,
     compression_level: u8,
 ) -> Result<()> {
+    write_spatial_topology_selecting_fractions(
+        landdata,
+        land_cover_year,
+        topology,
+        land_patches,
+        pctshared,
+        blocks,
+        compression_level,
+        true,
+    )
+}
+
+/// [`write_spatial_topology_with_shared`]，`patch_fractions` 决定写不写 `patchfrac_elm`：上游只在
+/// 城市跑法、CROP 内核与 2m WMO 时写（`write_patchfrac` 的三个调用点）。
+#[allow(clippy::too_many_arguments)]
+pub fn write_spatial_topology_selecting_fractions(
+    landdata: impl AsRef<Path>,
+    land_cover_year: i32,
+    topology: &SpatialTopology,
+    land_patches: &FlatLandPatches,
+    pctshared: Option<&[f64]>,
+    blocks: &BlockLayout,
+    compression_level: u8,
+    patch_fractions: bool,
+) -> Result<()> {
     validate_compression_level(compression_level)?;
     let landdata = landdata.as_ref();
     ensure!(land_cover_year >= 0, "land-cover year must be non-negative");
@@ -3786,17 +3811,19 @@ pub fn write_spatial_topology_with_shared(
         &assignments,
         compression_level,
     )?;
-    write_landpatch_scalar(
-        landdata,
-        land_cover_year,
-        topology,
-        land_patches,
-        blocks,
-        compression_level,
-        "landpatch",
-        "patchfrac_elm",
-        &fractions,
-    )?;
+    if patch_fractions {
+        write_landpatch_scalar(
+            landdata,
+            land_cover_year,
+            topology,
+            land_patches,
+            blocks,
+            compression_level,
+            "landpatch",
+            "patchfrac_elm",
+            &fractions,
+        )?;
+    }
     Ok(())
 }
 

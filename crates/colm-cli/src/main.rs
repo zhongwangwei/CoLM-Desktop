@@ -2071,6 +2071,13 @@ fn rust_preprocessor_arguments(
     {
         arguments.push("--crop".to_owned());
     }
+    // 网格类型由内核宏决定（上游 `MKSRFDATA.F90` 的 `#ifdef GRIDBASED/UNSTRUCTURED/CATCHMENT`），
+    // namelist 里不一定写 `DEF_GRIDBASED_*_res`：landmask 网格文件的 GRIDBASED 算例就没有。
+    if stage == Stage::MkSrfData {
+        if let Some(grid_kind) = kernel_grid_kind(kernel) {
+            arguments.extend(["--grid-kind".to_owned(), grid_kind.to_owned()]);
+        }
+    }
     if stage == Stage::MkIniData
         && kernel
             .manifest
@@ -2733,21 +2740,26 @@ fn run_case(
     Ok(())
 }
 
+/// 内核的空间网格宏：`GRIDBASED` → `latlon`、`UNSTRUCTURED`、`CATCHMENT`；单点内核为 `None`。
+fn kernel_grid_kind(kernel: &Kernel) -> Option<&'static str> {
+    let has = |name: &str| kernel.manifest.macros.iter().any(|m| m == name);
+    if has("GRIDBASED") {
+        Some("latlon")
+    } else if has("UNSTRUCTURED") {
+        Some("unstructured")
+    } else if has("CATCHMENT") {
+        Some("catchment")
+    } else {
+        None
+    }
+}
+
 fn preflight_spatial_case(
     case_nml: &Path,
     kernel: &Kernel,
     only_stage: Option<Stage>,
 ) -> Result<()> {
-    let grid_kind = if kernel.manifest.macros.iter().any(|m| m == "GRIDBASED") {
-        Some("latlon")
-    } else if kernel.manifest.macros.iter().any(|m| m == "UNSTRUCTURED") {
-        Some("unstructured")
-    } else if kernel.manifest.macros.iter().any(|m| m == "CATCHMENT") {
-        Some("catchment")
-    } else {
-        None
-    };
-    let Some(grid_kind) = grid_kind else {
+    let Some(grid_kind) = kernel_grid_kind(kernel) else {
         return Ok(());
     };
     eprintln!("warning: {SPATIAL_WARNING}");

@@ -34,14 +34,14 @@ use colm_srfdata::{
     write_landpatch_layered_vector, write_landpatch_scalar, write_landpatch_vector,
     write_patch_diagnostic, write_patch_diagnostic_dimension, write_patch_diagnostic_time,
     write_spatial_hru_patch_fractions, write_spatial_hru_topology,
-    write_spatial_pft_topology_with_shared, write_spatial_topology,
-    write_spatial_topology_with_shared, write_spatial_urban_material, write_spatial_urban_topology,
-    write_spatial_urban_vector, BlockLayout, CanopyStructure, CropLandPatchTopology,
-    DiagnosticStatistic, FlatLandElements, FlatLandPatches, FlatMesh, Grid, LczUrbanRawFields,
-    MeshFilter, NcarUrbanProperties, NcarUrbanRawFields, PftFractionInput, PftIndexInput,
-    PftPatchMode, PftTopology, PixelAxes, SiteMode, SpatialBounds, SpatialInputKind,
-    SpatialTopology, SurfaceSubgrid, TiledRasterFiles, TopographicWetness, UrbanMaterialParameters,
-    COLM_1KM, COLM_500M, COLM_5KM, DIAGNOSTIC_MISSING, MERIT_90M,
+    write_spatial_pft_topology_with_shared, write_spatial_topology_selecting_fractions,
+    write_spatial_urban_material, write_spatial_urban_topology, write_spatial_urban_vector,
+    BlockLayout, CanopyStructure, CropLandPatchTopology, DiagnosticStatistic, FlatLandElements,
+    FlatLandPatches, FlatMesh, Grid, LczUrbanRawFields, MeshFilter, NcarUrbanProperties,
+    NcarUrbanRawFields, PftFractionInput, PftIndexInput, PftPatchMode, PftTopology, PixelAxes,
+    SiteMode, SpatialBounds, SpatialInputKind, SpatialTopology, SurfaceSubgrid, TiledRasterFiles,
+    TopographicWetness, UrbanMaterialParameters, COLM_1KM, COLM_500M, COLM_5KM, DIAGNOSTIC_MISSING,
+    MERIT_90M,
 };
 
 const LAKE_SOIL_LAYERS: usize = 10;
@@ -79,6 +79,9 @@ struct SpatialLctArgs {
     blocks: BlockLayout,
     bounds: Option<SpatialBounds>,
     land_only: bool,
+    /// 写 `landpatch/<year>/patchfrac_elm`：上游只在城市跑法、CROP 内核与 2m WMO 时写（见
+    /// [`spatial_patch_fractions`]）。直接调用子命令时默认写。
+    patch_fractions: bool,
     zip_aggregation: bool,
     dominant: bool,
     srfdata_compression: u8,
@@ -176,6 +179,9 @@ struct SpatialPftArgs {
     blocks: BlockLayout,
     bounds: Option<SpatialBounds>,
     land_only: bool,
+    /// 写 `landpatch/<year>/patchfrac_elm`：上游只在城市跑法、CROP 内核与 2m WMO 时写（见
+    /// [`spatial_patch_fractions`]）。直接调用子命令时默认写。
+    patch_fractions: bool,
     zip_aggregation: bool,
     dominant: bool,
     srfdata_compression: u8,
@@ -413,7 +419,7 @@ fn materialize_spatial_pft(args: &[String]) -> Result<()> {
     };
     if args.lulcc_lai_only {
         if let Some(pctshared) = crop.as_ref().map(|crop| crop.pctshared.as_slice()) {
-            write_spatial_topology_with_shared(
+            write_spatial_topology_selecting_fractions(
                 &args.landdata,
                 args.year,
                 &topology,
@@ -421,15 +427,18 @@ fn materialize_spatial_pft(args: &[String]) -> Result<()> {
                 Some(pctshared),
                 &args.blocks,
                 args.srfdata_compression,
+                args.patch_fractions,
             )?;
         } else {
-            write_spatial_topology(
+            write_spatial_topology_selecting_fractions(
                 &args.landdata,
                 args.year,
                 &topology,
                 patches,
+                None,
                 &args.blocks,
                 args.srfdata_compression,
+                args.patch_fractions,
             )?;
         }
         if let Some(land_hrus) = land_hrus {
@@ -540,6 +549,7 @@ fn materialize_spatial_pft(args: &[String]) -> Result<()> {
         blocks: args.blocks.clone(),
         bounds: args.bounds,
         land_only: args.land_only,
+        patch_fractions: args.patch_fractions,
         zip_aggregation: args.zip_aggregation,
         dominant: args.dominant,
         srfdata_compression: args.srfdata_compression,
@@ -2451,7 +2461,7 @@ fn materialize_spatial_common_fields(
     let patch_type_indices = (0..=land_classification_count(args.land_cover)).collect::<Vec<_>>();
     if args.lulcc_lai_only {
         if let Some(pctshared) = patch_pctshared {
-            write_spatial_topology_with_shared(
+            write_spatial_topology_selecting_fractions(
                 &args.landdata,
                 args.year,
                 topology,
@@ -2459,15 +2469,18 @@ fn materialize_spatial_common_fields(
                 Some(pctshared),
                 &args.blocks,
                 args.srfdata_compression,
+                args.patch_fractions,
             )?;
         } else {
-            write_spatial_topology(
+            write_spatial_topology_selecting_fractions(
                 &args.landdata,
                 args.year,
                 topology,
                 patches,
+                None,
                 &args.blocks,
                 args.srfdata_compression,
+                args.patch_fractions,
             )?;
         }
         materialize_lct_monthly_vegetation(
@@ -2633,7 +2646,7 @@ fn materialize_spatial_common_fields(
         None
     };
     if let Some(pctshared) = patch_pctshared {
-        write_spatial_topology_with_shared(
+        write_spatial_topology_selecting_fractions(
             &args.landdata,
             args.year,
             topology,
@@ -2641,15 +2654,18 @@ fn materialize_spatial_common_fields(
             Some(pctshared),
             &args.blocks,
             args.srfdata_compression,
+            args.patch_fractions,
         )?;
     } else {
-        write_spatial_topology(
+        write_spatial_topology_selecting_fractions(
             &args.landdata,
             args.year,
             topology,
             patches,
+            None,
             &args.blocks,
             args.srfdata_compression,
+            args.patch_fractions,
         )?;
     }
     if let Some(directory) = &args.soil_dir {
@@ -3513,6 +3529,7 @@ fn parse_spatial_lct(args: &[String]) -> Result<SpatialLctArgs> {
     let mut blocks = BlockLayout::regular(1, 1)?;
     let mut bounds = None;
     let mut land_only = true;
+    let mut patch_fractions = true;
     let mut mesh_filter = None;
     let mut zip_aggregation = true;
     let mut dominant = false;
@@ -3582,6 +3599,14 @@ fn parse_spatial_lct(args: &[String]) -> Result<SpatialLctArgs> {
                     .context("--land-only needs true or false")?
                     .parse::<bool>()
                     .context("--land-only needs true or false")?;
+                index += 2;
+            }
+            "--patch-fractions" => {
+                patch_fractions = args
+                    .get(index + 1)
+                    .context("--patch-fractions needs true or false")?
+                    .parse::<bool>()
+                    .context("--patch-fractions needs true or false")?;
                 index += 2;
             }
             "--domain" => {
@@ -3859,6 +3884,7 @@ fn parse_spatial_lct(args: &[String]) -> Result<SpatialLctArgs> {
         blocks,
         bounds,
         land_only,
+        patch_fractions,
         zip_aggregation,
         dominant,
         srfdata_compression,
@@ -3913,6 +3939,7 @@ fn parse_spatial_pft(args: &[String]) -> Result<SpatialPftArgs> {
     let mut blocks = BlockLayout::regular(1, 1)?;
     let mut bounds = None;
     let mut land_only = true;
+    let mut patch_fractions = true;
     let mut mesh_filter = None;
     let mut zip_aggregation = true;
     let mut dominant = false;
@@ -3994,6 +4021,14 @@ fn parse_spatial_pft(args: &[String]) -> Result<SpatialPftArgs> {
                     .context("--land-only needs true or false")?
                     .parse::<bool>()
                     .context("--land-only needs true or false")?;
+                index += 2;
+            }
+            "--patch-fractions" => {
+                patch_fractions = args
+                    .get(index + 1)
+                    .context("--patch-fractions needs true or false")?
+                    .parse::<bool>()
+                    .context("--patch-fractions needs true or false")?;
                 index += 2;
             }
             "--domain" => {
@@ -4191,6 +4226,7 @@ fn parse_spatial_pft(args: &[String]) -> Result<SpatialPftArgs> {
         blocks,
         bounds,
         land_only,
+        patch_fractions,
         zip_aggregation,
         dominant,
         srfdata_compression,
@@ -4228,6 +4264,7 @@ fn materialize_case(args: &[String]) -> Result<()> {
     let mut spatial_blocks = None;
     let mut soil_hyper_albedo_dir = None;
     let mut subgrid = None;
+    let mut grid_kind = None;
     let mut index = 1;
     while index < args.len() {
         match args[index].as_str() {
@@ -4241,6 +4278,13 @@ fn materialize_case(args: &[String]) -> Result<()> {
             "--crop" => {
                 crop = true;
                 index += 1;
+            }
+            "--grid-kind" => {
+                grid_kind = Some(parse_grid_kind(
+                    args.get(index + 1)
+                        .context("--grid-kind needs latlon, unstructured, or catchment")?,
+                )?);
+                index += 2;
             }
             "--subgrid" => {
                 subgrid = Some(parse_subgrid(
@@ -4291,6 +4335,7 @@ fn materialize_case(args: &[String]) -> Result<()> {
         crop,
         observation.as_deref(),
         spatial_blocks.as_ref(),
+        grid_kind,
     )? {
         ensure!(
             soil_hyper_albedo_dir.is_none(),
@@ -4308,6 +4353,7 @@ fn materialize_case(args: &[String]) -> Result<()> {
         observation.as_deref(),
         spatial_blocks.as_ref(),
         subgrid,
+        grid_kind,
     )? {
         if let Some(directory) = soil_hyper_albedo_dir {
             command.required_directories.push(directory.clone());
@@ -4367,12 +4413,13 @@ fn spatial_existing_surface_command(
     crop_override: bool,
     observation: Option<&Path>,
     blocks: Option<&[String; 2]>,
+    grid_kind: Option<SpatialInputKind>,
 ) -> Result<Option<SpatialExistingSurfaceCommand>> {
     let text = std::fs::read_to_string(namelist)
         .with_context(|| format!("cannot read case namelist {}", namelist.display()))?;
     let document = parse(&text)
         .with_context(|| format!("cannot parse case namelist {}", namelist.display()))?;
-    if spatial_mesh(&document)?.is_none() {
+    if spatial_mesh(&document, grid_kind)?.is_none() {
         return Ok(None);
     }
     if case_bool(&document, "USE_srfdata_from_3D_gridded_data", false)? {
@@ -4435,7 +4482,15 @@ fn spatial_case_command(
     observation: Option<&Path>,
     blocks: Option<&[String; 2]>,
 ) -> Result<Option<SpatialCaseCommand>> {
-    spatial_case_command_with_subgrid(namelist, lct_mode, crop_override, observation, blocks, None)
+    spatial_case_command_with_subgrid(
+        namelist,
+        lct_mode,
+        crop_override,
+        observation,
+        blocks,
+        None,
+        None,
+    )
 }
 
 /// 期望值的拼法必须与生产一致：生产把 `--rawdata`（namelist 里写作
@@ -4499,13 +4554,22 @@ fn spatial_case_command_with_subgrid(
     observation: Option<&Path>,
     blocks: Option<&[String; 2]>,
     subgrid_fallback: Option<SurfaceSubgrid>,
+    grid_kind: Option<SpatialInputKind>,
 ) -> Result<Option<SpatialCaseCommand>> {
     let text = std::fs::read_to_string(namelist)
         .with_context(|| format!("cannot read case namelist {}", namelist.display()))?;
     let document = parse(&text)
         .with_context(|| format!("cannot parse case namelist {}", namelist.display()))?;
-    let Some((kind, mesh)) = spatial_mesh(&document)? else {
+    let Some((kind, mesh)) = spatial_mesh(&document, grid_kind)? else {
         return Ok(None);
+    };
+    let namelist_blocks;
+    let blocks = match blocks {
+        Some(blocks) => Some(blocks),
+        None => {
+            namelist_blocks = namelist_block_counts(&document)?;
+            Some(&namelist_blocks)
+        }
     };
     ensure!(
         observation.is_none(),
@@ -4608,6 +4672,8 @@ fn spatial_case_command_with_subgrid(
     let bedrock = rawdata.join("bedrock.nc");
     let plant_tiles = rawdata.join("plant_15s");
     let canopy_tiles = rawdata.join("canopy_data");
+    // `Aggregation_CanopyStructure` 只在 `DEF_Interception_scheme == 8` 时调（`MKSRFDATA.F90:491`）。
+    let interception_scheme = case_i32(&document, "DEF_Interception_scheme", 1)?;
     let mut required_files = vec![mesh.clone()];
     let mut required_directories = Vec::new();
     let mut args = Vec::new();
@@ -4740,7 +4806,11 @@ fn spatial_case_command_with_subgrid(
                 forest_height.display().to_string(),
             ]);
         }
-        if !lulcc_lai_only && land_cover == SiteMode::Igbp && canopy_tiles.is_dir() {
+        if !lulcc_lai_only
+            && land_cover == SiteMode::Igbp
+            && interception_scheme == 8
+            && canopy_tiles.is_dir()
+        {
             args.extend([
                 "--canopy-structure-dir".to_owned(),
                 canopy_tiles.display().to_string(),
@@ -4836,7 +4906,7 @@ fn spatial_case_command_with_subgrid(
             "--plant-tiles".to_owned(),
             plant_tiles.display().to_string(),
         ]);
-        if !lulcc_lai_only && canopy_tiles.is_dir() {
+        if !lulcc_lai_only && interception_scheme == 8 && canopy_tiles.is_dir() {
             args.extend([
                 "--canopy-structure-dir".to_owned(),
                 canopy_tiles.display().to_string(),
@@ -4974,6 +5044,10 @@ fn spatial_case_command_with_subgrid(
         }
     }
 
+    if !spatial_patch_fractions(urban, crop, args.iter().any(|arg| arg == "--output-2m-wmo")) {
+        args.extend(["--patch-fractions".to_owned(), "false".to_owned()]);
+    }
+
     if let Some(filter) = case_path(&document, "DEF_file_mesh_filter")? {
         args.extend(["--mesh-filter".to_owned(), filter.display().to_string()]);
     }
@@ -5002,13 +5076,52 @@ fn spatial_case_command_with_subgrid(
     }))
 }
 
-fn spatial_mesh(document: &colm_namelist::Document) -> Result<Option<(SpatialInputKind, PathBuf)>> {
+/// `--grid-kind`：内核的网格宏（`GRIDBASED`/`UNSTRUCTURED`/`CATCHMENT`）。
+fn parse_grid_kind(value: &str) -> Result<SpatialInputKind> {
+    match value {
+        "latlon" => Ok(SpatialInputKind::GridBased),
+        "unstructured" => Ok(SpatialInputKind::Unstructured),
+        "catchment" => Ok(SpatialInputKind::Catchment),
+        other => bail!("--grid-kind must be latlon, unstructured, or catchment, got {other:?}"),
+    }
+}
+
+/// 算例的网格类型与网格文件。
+///
+/// 上游按**内核宏**选：`GRIDBASED` 走 `init_gridbased_mesh_grid`（`DEF_file_mesh` 是 landmask 文件），
+/// `UNSTRUCTURED` 读 `DEF_file_mesh` 的 `elmindex`，`CATCHMENT` 读 `DEF_CatchmentMesh_data`
+/// （`MKSRFDATA.F90:203-213`）。`colm-cli` 用 `--grid-kind` 把内核的选择传进来；没给时（直接调用
+/// 本工具）才退回按 namelist 猜：写了 `DEF_GRIDBASED_*_res` 就是 GRIDBASED，否则当 UNSTRUCTURED。
+fn spatial_mesh(
+    document: &colm_namelist::Document,
+    grid_kind: Option<SpatialInputKind>,
+) -> Result<Option<(SpatialInputKind, PathBuf)>> {
     let mesh = case_path(document, "DEF_file_mesh")?;
     let catchment = case_path(document, "DEF_CatchmentMesh_data")?;
     ensure!(
         mesh.is_none() || catchment.is_none(),
         "spatial case cannot set both DEF_file_mesh and DEF_CatchmentMesh_data"
     );
+    if let Some(kind) = grid_kind {
+        return match (kind, mesh, catchment) {
+            // 空间内核却没给网格文件：上游 GRIDBASED 会按 `DEF_GRIDBASED_*_res` 现造网格，这条没移植；
+            // 退回单点物化只会产出一份错的地表。
+            (_, None, None) => bail!(
+                "a spatial kernel needs DEF_file_mesh (or DEF_CatchmentMesh_data); building the \
+                 GRIDBASED mesh from DEF_GRIDBASED_lon_res/lat_res is not ported"
+            ),
+            (SpatialInputKind::Catchment, None, Some(path)) => Ok(Some((kind, path))),
+            (SpatialInputKind::GridBased | SpatialInputKind::Unstructured, Some(path), None) => {
+                Ok(Some((kind, path)))
+            }
+            (SpatialInputKind::Catchment, Some(_), _) => {
+                bail!("a CATCHMENT kernel reads DEF_CatchmentMesh_data, but the case sets DEF_file_mesh")
+            }
+            (_, _, Some(_)) => {
+                bail!("DEF_CatchmentMesh_data needs a CATCHMENT kernel")
+            }
+        };
+    }
     match (mesh, catchment) {
         (None, None) => Ok(None),
         (None, Some(path)) => Ok(Some((SpatialInputKind::Catchment, path))),
@@ -5047,6 +5160,49 @@ fn case_string(document: &colm_namelist::Document, field: &str) -> Result<String
         Some(Value::Str(_)) | None => bail!("case namelist is missing required field {field}"),
         Some(_) => bail!("{field} must be a character value"),
     }
+}
+
+/// 上游写 `patchfrac_elm` 的三处：`landurban_build`（`DEF_URBAN_RUN` 且非 CROP 内核）、
+/// `landcrop_build`（CROP 内核）、`land2mwmo_build`（`DEF_Output_2mWMO`）。`landpatch_build` 里那一处
+/// 包在 `#if (!defined(URBAN_MODEL) && !defined(CROP))` 里，而 `URBAN_MODEL` 现在恒定义，是死代码。
+fn spatial_patch_fractions(urban: bool, crop: bool, output_2m_wmo: bool) -> bool {
+    urban || crop || output_2m_wmo
+}
+
+/// 没给 `--blocks` 时的分块数：上游 `block_set`（`MOD_Block.F90:104-145`）在没有
+/// `DEF_BlockInfoFile`、`DEF_AverageElementSize <= 0` 时取 `DEF_nx_blocks`/`DEF_ny_blocks`（默认 72×36）。
+/// 分块决定文件名后缀与 patch 顺序，默认值不能自己另定。另两条分支没移植，遇到就拒绝。
+fn namelist_block_counts(document: &colm_namelist::Document) -> Result<[String; 2]> {
+    let info = match document.get("DEF_BlockInfoFile") {
+        None => None,
+        Some(Value::Str(path)) => {
+            let path = path.trim();
+            (!path.is_empty() && !path.eq_ignore_ascii_case("null")).then(|| path.to_owned())
+        }
+        Some(_) => bail!("DEF_BlockInfoFile must be a path string"),
+    };
+    ensure!(
+        info.as_deref().is_none_or(|path| !Path::new(path).exists()),
+        "DEF_BlockInfoFile block layouts are not ported to Rust mksrfdata; use --preprocessors fortran"
+    );
+    let average = match document.get("DEF_AverageElementSize") {
+        None => 0.0,
+        Some(value) => value
+            .as_f64()
+            .context("DEF_AverageElementSize must be numeric")?,
+    };
+    ensure!(
+        average <= 0.0,
+        "DEF_AverageElementSize block layouts are not ported to Rust mksrfdata; use --preprocessors fortran"
+    );
+    let nx = case_i32(document, "DEF_nx_blocks", 72)?;
+    let ny = case_i32(document, "DEF_ny_blocks", 36)?;
+    ensure!(
+        nx > 0 && ny > 0,
+        "DEF_nx_blocks and DEF_ny_blocks must be positive"
+    );
+    BlockLayout::regular(nx as usize, ny as usize)?;
+    Ok([nx.to_string(), ny.to_string()])
 }
 
 fn case_bool(document: &colm_namelist::Document, field: &str, default: bool) -> Result<bool> {
@@ -5338,7 +5494,7 @@ fn monthly_pft_vegetation_source(prefix: &str, year: i32) -> Result<(String, Str
 
 fn usage() -> &'static str {
     "usage:
-  mksrfdata-rs <case.nml> [--subgrid lct|pft|pc] [--land-cover igbp|usgs] [--crop] [--blocks nx ny] [--observation observation.nc] [--soil-hyper-albedo-dir colm_input_ghsad]
+  mksrfdata-rs <case.nml> [--grid-kind latlon|unstructured|catchment] [--subgrid lct|pft|pc] [--land-cover igbp|usgs] [--crop] [--blocks nx ny] [--observation observation.nc] [--soil-hyper-albedo-dir colm_input_ghsad]
   mksrfdata-rs <site.nc> <landdata-dir> [rawdata] [observation.nc]
   mksrfdata-rs spatial-lct <latlon|unstructured|catchment> <mesh.nc> <landtype.nc> <landdata-dir> <lc-year> --land-cover <igbp|usgs> [--srfdata-compress-level 0..9] [--blocks nx ny] [--land-only true|false] [--mesh-filter filter.nc] [--dominant] [--diagnostics] [--lake-depth lake_depth.nc] [--lake-soil-carbon lake_soilc.nc] [--methane-ph PHH2O1.nc] [--soil-texture soiltexture_0cm-60cm_mean.nc] [--soil-dir soil] [--soil-model vgm|campbell] [--soil-fit true|false] [--soil-brightness soil_brightness.nc] [--soil-hyper-albedo-dir colm_input_ghsad] [--topography topography.nc] [--topographic-wetness TWI.nc] [--simple-topography-factors directory] [--regular-topography-factors directory] [--bedrock bedrock.nc] [--plant-tiles plant_15s] [--canopy-structure-dir canopy_data] [--usgs-forest-height Forest_Height.nc] [--lulcc] [--monthly-vegetation-year year]... [--lai-8day-dir lai_15s_8day --lai-8day-year year]... [--urban-rawdata rawdata --urban-scheme ncar|lcz --urban-geometry ghsl|li --urban-canyon-hwr true|false]
   mksrfdata-rs spatial-pft <latlon|unstructured|catchment> <mesh.nc> <landtype.nc> <landdata-dir> <lc-year> --plant-tiles plant_15s [--canopy-structure-dir canopy_data] [--srfdata-compress-level 0..9] [--lulcc] [--patch-mode merged|separate|fast-pc] [--output-2m-wmo true|false] [--crop-surface global_CFT_surface_data.nc] [--blocks nx ny] [--land-only true|false] [--mesh-filter filter.nc] [--dominant] [--diagnostics] [--lake-depth lake_depth.nc] [--lake-soil-carbon lake_soilc.nc] [--methane-ph PHH2O1.nc] [--soil-texture soiltexture_0cm-60cm_mean.nc] [--soil-dir soil] [--soil-model vgm|campbell] [--soil-fit true|false] [--soil-brightness soil_brightness.nc] [--soil-hyper-albedo-dir colm_input_ghsad] [--topography topography.nc] [--topographic-wetness TWI.nc] [--simple-topography-factors directory] [--regular-topography-factors directory] [--bedrock bedrock.nc] [--monthly-vegetation-year year]..."
@@ -7639,7 +7795,7 @@ mod tests {
 ",
         );
 
-        let command = spatial_existing_surface_command(&namelist, None, false, None, None)
+        let command = spatial_existing_surface_command(&namelist, None, false, None, None, None)
             .unwrap()
             .unwrap();
         assert_eq!(command.source, root.join("larger-landdata"));
