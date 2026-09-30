@@ -26425,3 +26425,93 @@ JRA3Q 强迫（N240 高斯格，逐时），2010 年 1 月，步长 1800 s。纯
 验证：Fortran 在 `read_forcing` 末尾按位打印前 4 步每个 patch 的 17 个强迫量（`t q psrf pbot prc prl us vs sols soll solsd solld frl
 rhoair pco2m po2m hgt_u`），Rust 诊断程序走"拓扑 → 映射 → 网格强迫 → 逐量映射"：**700 行 × 17 列全部逐位一致**，
 含 0.5 权重的线性插值、`tprate`/`dlwrf` 的 1800 s 偏移（月初回退到上月最后一条）与 `coszen` 短波插值。
+
+## 第 453 轮：B1 空间主循环跑通 —— 175 个 patch 整月逐位
+
+`colm-rs` 新增空间入口 `run_spatial`（`GRIDBASED`）：patch 拓扑来自 `landdata/landpatch`，模板照单点的装配流程从分块重启
+（`*_lc2005_<block>.nc`）逐 patch 建；`spatial::runtime::SpatialRuntime` 用同一个 `RuntimeClock`，每步在强迫格上算好强迫、逐量
+映射到 patch，再为每个 patch 组装自己的 `PointRuntimeStep`（天顶角/方位角按 `patchlonr/patchlatr`、格林尼治时间），调用与单点
+相同的 `advance_patch`。续跑写出沿用 `write_evolved_restart`。开发时直接吃 Fortran 前处理的产物，把"主循环"与"前处理是否逐位"
+两件事分开验。
+
+途中的修正（都经探针逐步定位）：
+1. **观测高度也要映射。** `forc_hgt_u/t/q` 由 namelist 常数经 `grid2pset` 得到，各 patch 上与常数差 ±2 ULP；每个模板用自己
+   映射得到的高度。
+2. **非城市跑法里的城市地类（patchtype 1）走普通 `CoLMMAIN` 的土壤分支**（`CoLMDRIVER.F90:253` 只在 `DEF_URBAN_RUN` 时调
+   `CoLMMAIN_Urban`）。Rust 装配原先见 patchtype 1 就按城市算例读城市重启；改为只有城市跑法才装城市/水体模板，土壤分支的
+   类型校验放开到 `0..=2`。
+3. **多 patch 续跑合并取变量并集。** 原先以第一个 patch 的覆盖变量为准、要求其余 patch 同名覆盖；土壤、冰川、湖混在一起时不成立。
+   改为并集，某个 patch 没覆盖的变量保留输入重启里它那一块。
+4. **带河湖流的空间内核与单点内核收缩形状不同。** 逐步探针（每步每 patch 按位打印 `t_grnd/tleaf/t_soisno(1)/wliq(1)/...`）
+   先定位到 48 个 patch 在第 4 步 `wliq(1)` 分叉，往前追到 `WATER_VSF` 入口的 `gwat`、再到 `THERMAL` 的 `qseva` 差 1 ULP。原因：
+   `fevpg = fevpg + tinc*cgrndl`（及 `_soil/_snow`）在单点内核里乘积被复用、不融合，而 latlon 内核因为编进了
+   `#if (defined CaMa_Flood) || (defined GridRiverLakeFlow)` 的漫滩代码，同一句变成 `.FMA (cgrndl, tinc, fevpg)`。
+   为此重新生成了 latlon 内核的 GIMPLE，逐函数对比两份 FMA 序列：只有 `thermal`、`water_vsf`、`water_2014`、`colmmain`
+   （以及空间才用的 `lai_readin`）不同。逐句核对后，**影响状态的只有上面这一处**；`water_*` 与 `colmmain` 多出的收缩都在漫滩分支
+   或诊断量（`err_solver`、`errorw - fevpg_fld*deltim`）上，`fevpg_fld = 0` 时是恒等；`THERMAL` 收尾的 `lfevpa`/`fgrnd` 形状也不同，
+   只进 history（留到网格 history 阶段）。新增 `LandPhysicsParameters::river_lake_flow_build` / `StandardLctEnergyInput::river_lake_flow_build`，
+   空间入口置真。
+5. **网格逐月 LAI。** `MonthlyLeafAreaIndex` 增加网格来源：`landdata/LAI/<min(END,max(START,year))>/LAI_patches<MM>_<block>.nc` 与
+   `SAI_patches...` 里本 patch 的值，读入后的地类处理与单点相同。
+
+| 算例 | 设置 | 结果 |
+|---|---|---|
+| `g1p` | 广东 16 格 175 patch，2010-01-01 一天（48 步） | 逐步探针 8400 行 × 8 量逐位；一天末主重启 `diff 0` |
+| `g1` | 同上，整个 1 月（1488 步，末步触发 2 月 LAI 更新） | 月末主重启 `diff 0` |
+
+参照为纯 Fortran（`kernels/latlon`，单进程）。Rust 整月 1.5 分钟，Fortran 约 32 分钟。尚未做：网格 history（上游 `gd_hist_*`）与
+history 续跑旁车、多分块、Rust 前处理对空间算例的逐位、城市/PFT 的网格 LAI、其它强迫数据集。
+
+## 第 454 轮：B1 网格 history —— 135 个变量整月逐位
+
+空间算例的 history 按上游 `HistForm = 'Gridded'` 写出。会话、累加、区间平均与单点是同一套（`HistorySession`），只在两处分开：
+
+1. **写文件时聚合到 `ghist`**（`colm_hist::history::HistoryGrid`，`HistoryBuffers::with_grid`）。
+   - 每格的值是 `Σ (v/1)*areapart / sumarea`。分子逐 patch、逐份按映射顺序普通相加，值为 `spval` 的 patch 跳过，第一份直接赋值（`pset2grid`）。
+   - 分母 `sumarea` 是该变量**计入 filter** 的 patch 份面积之和（`get_sumarea`）。
+   - `sumarea <= 1e-5` 的格子写 `spval`。
+   - 维度排成 `(time, 层…, lat, lon)`。`lat/lon` 是 float，`lat_s/lat_n/lon_w/lon_e` 是 double。
+   - 另有四个只写一次的静态场：
+     - `landarea`：`patchtype<99 .and. patchmask`；
+     - `landfraction`：不过滤，再除以 `areaquad`；
+     - `area_wetland`：`patchtype==2 .and. patchmask`；
+     - `area_lake`：`patchtype==4`，`:4499` 没有 `.and. patchmask`。
+2. **近地面诊断先按网格元聚合**（`MOD_Vars_1DAccFluxes.F90:2696-2805`）。
+   - 这一步在空间算例的每个网格元上都做，不只在多 patch 单点上做。
+   - `subfrc` = patch 各像元 `areaquad` 之和，除以本网格元的总和。
+   - 这次把聚合输入扩展到冰川、湖、城市 patch（`patch_surface_input`）；单 patch 网格元上 `FMA(x,1,0)/1 = x`，是恒等。
+
+**history 网格与窗口。**
+- `define_by_res` → `define_by_ndims`：自北向南、自 -180° 向东。`180.0/n` 与 `360.0/n` 是**单精度**常数除以整数。
+- 文件只写 `grid_set_blocks` 落在 `DEF_domain` 里的那一窗（`set_grid_concat`）。
+- 格心经度跨日界线时往东接着数。
+
+**"计入"要和"有效"分开。** 上游每个 patch 都有 `a_*`，filter 只看 `patchtype`；一个累加值整段都是 `spval` 的 patch，照样占分母。
+- 第一版按"累加器里有有效值"判定计入，`f_qlayer` 在 15 个格子上偏大，相对差 3e-2。
+- 相对差正好等于湿地面积占比：VSF 下湿地的 `a_qlayer` 一直是 `spval`（`qlayer` 初值 `spval`，湿地不经过 `WATER_VSF` 的层间通量），但 `filter = patchtype <= 2` 把它算进 `sumarea`。
+- 改为：累加器另记一份"交过值的量"（含只交过 `spval` 的），计入 = 交过值且没被过滤。`f_alb`（`filter_dt`）与本地正午量（`nac_ln > 0`）另外要求自己的计数非零。
+
+**带河湖流构建的 `lfevpa`/`fgrnd`**（第 453 轮留下的两处，只进 history）。latlon 内核 GIMPLE（`gimpleL`，bb 502/483/484）：
+- `lfevpa = fevpg*htvp + fevpl*2.5104e6`，不融合；
+- `fgrnd` 的 `4*tinc` 项以及两项降水显热都是先乘、再平铺加减（默认内核是 FNMA/FMA）；
+- `errore`（`f_zerr`）那条链在两种构建里形状相同，但它读 `lfevpa`，所以 `f_zerr` 跟着 `lfevpa` 才对上；
+- `StandardLctEnergyOutput` 带上 `river_lake_flow_build`，`surface_budget` 按它选形状。
+
+**续跑旁车。**
+- 空间构建写 `history_schema = 2`，并多一个 `history_river_required`（`#ifdef GridRiverLakeFlow`）。
+- 区间在重启时刻已关上时，河道累加器也已清零，标记为 0，旁车现在就能逐位写出。
+- 区间跨过重启时要另写河道旁车，属于 B2，`write_sidecar` 在那时显式拒绝。
+
+| 算例 | 设置 | 结果 |
+|---|---|---|
+| `g1p` | 广东 16 格 175 patch，DAILY，2010-01-01 一天 | 网格 history 共有的 135 个变量逐位；主重启、`*_restart_hist_*` 旁车 `diff 0` |
+| `g1` | 同上，整个 1 月（31 条日记录，含月末 LAI 刷新） | 135 个变量逐位；月末主重启 `diff 0` |
+
+参照为纯 Fortran（`kernels/latlon`，单进程）。
+- 上游文件里多出的 7 个量是河湖流的：`f_discharge`、`f_discharge_rivermouth_regrid`、`f_floodarea`、`f_floodfrc`、`f_veloc_riv_regrid`、`f_wdpth_ucat_regrid`、`mask_complete_upstream_regird`。
+- 同样属于河湖流的还有 `gd_hist_unitcat_*` 与 `gd_restart_gridriver_*`，都留给 B2。
+- 整月 `g1` 用加了旁车的二进制重跑一遍：history 135 个变量逐位，月末主重启与 `gd_restart_hist_2010-032-00000_e110_n20.nc` 都是 `diff 0`。
+- 单点方面，全量回归（release）跑了两次，结果相同：138 个算例逐位，`nn`/`pni` 照旧不比 history。第一次是 B1 主循环那一版，第二次带上本轮的 history 改动。
+- 空间算例 `g1`/`g1p` 不进单点回归（`regress_all.sh` 的 SKIP），单独对比。
+- CLI 仍拒绝用 Rust 引擎跑空间算例：河湖流在所有 GRID 构建里都编进内核，B2 之前放开会漏掉河道输出。
+- 另外试了 Rust 前处理跑 `g1`：mksrfdata-rs 只凭 namelist 里有没有 `DEF_GRIDBASED_lon_res/lat_res` 判断网格类型，缺了就当 UNSTRUCTURED 找 `elmindex`。上游是按内核宏 `GRIDBASED` 走 `init_gridbased_mesh_grid`，所以这个判断需要改成跟内核走，待办。

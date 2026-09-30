@@ -63,6 +63,12 @@ pub struct StandardLctEnergyInput<'a> {
     pub plant_hydraulics: Option<PlantHydraulicSettings>,
     /// `DEF_USE_Dynamic_Wetland`：湿地按土壤地面算地面湿度（`MOD_Thermal.F90:601-602`）。
     pub dynamic_wetland: bool,
+    /// 对照的内核是否编进了 `GridRiverLakeFlow`（GRID/UNSTRUCTURED 构建总是编进）。
+    ///
+    /// 漫滩那几段代码不启用时不改变数值，但改变了 gfortran 的收缩形状：`THERMAL` 里
+    /// `fevpg(+_soil/_snow) = fevpg + tinc*cgrndl` 在单点内核里乘积被复用、不融合，在带河湖流的
+    /// 空间内核里是 `.FMA (cgrndl, tinc, fevpg)`（两份 GIMPLE 对照见实现记录第 453 轮）。
+    pub river_lake_flow_build: bool,
 }
 
 /// 上游的 `lai`/`sai` 时间变量（`CoLMMAIN.F90:2097-2102`）。
@@ -198,6 +204,9 @@ pub struct SplitSurface {
 /// The component results of one standard LCT energy update.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StandardLctEnergyOutput {
+    /// 带河湖流的空间内核（见 [`StandardLctEnergyInput::river_lake_flow_build`]）：
+    /// [`crate::surface_budget`] 的 `lfevpa`/`fgrnd` 在这种构建里少几次收缩。
+    pub river_lake_flow_build: bool,
     pub precipitation: PrecipitationState,
     pub interception: CanopyInterceptionFluxes,
     pub shortwave: NetSolarFluxes,
@@ -493,11 +502,20 @@ fn finish_energy_step(
         leaf.ground_latent_temperature_slope_kg_m2_s_k * ground_temperature_change;
     let corrected_soil_sensible_heat_w_m2 = leaf.soil_sensible_heat_w_m2 + sensible_change;
     let corrected_snow_sensible_heat_w_m2 = leaf.snow_sensible_heat_w_m2 + sensible_change;
-    let corrected_soil_evaporation_kg_m2_s = leaf.soil_evaporation_kg_m2_s + evaporation_change;
-    let corrected_snow_evaporation_kg_m2_s = leaf.snow_evaporation_kg_m2_s + evaporation_change;
+    // 带河湖流的空间内核：三条蒸发修正是 `.FMA (cgrndl, tinc, fevpg*)`（见 `river_lake_flow_build`）。
+    let evaporation_slope = leaf.ground_latent_temperature_slope_kg_m2_s_k;
+    let evaporation_corrected = |value: f64| {
+        if input.river_lake_flow_build {
+            evaporation_slope.mul_add(ground_temperature_change, value)
+        } else {
+            value + evaporation_change
+        }
+    };
+    let corrected_soil_evaporation_kg_m2_s = evaporation_corrected(leaf.soil_evaporation_kg_m2_s);
+    let corrected_snow_evaporation_kg_m2_s = evaporation_corrected(leaf.snow_evaporation_kg_m2_s);
     let mut corrected_ground_sensible_heat_w_m2 = leaf.ground_sensible_heat_w_m2 + sensible_change;
     let mut corrected_ground_evaporation_kg_m2_s =
-        leaf.ground_evaporation_kg_m2_s + evaporation_change;
+        evaporation_corrected(leaf.ground_evaporation_kg_m2_s);
     let (thermal_water, split_thermal_water) = if input.ground_temperature.use_split_soil_snow {
         let snow_layers = input.ground_temperature.snow_layers;
         let snow_layer_exists = snow_layers > 0;
@@ -554,6 +572,7 @@ fn finish_energy_step(
         leaf.leaf_evaporation_kg_m2_s + corrected_ground_evaporation_kg_m2_s;
 
     Ok(StandardLctEnergyOutput {
+        river_lake_flow_build: input.river_lake_flow_build,
         precipitation,
         interception,
         shortwave,
@@ -1176,9 +1195,10 @@ fn validate_snow_soil_step(
     let snow_layers = state.snow.layer_count.unsigned_abs() as usize;
     let template_snow_layers = ground.snow_layers;
     let packed_layers = template_snow_layers + state.soil_temperature_k.len();
-    // 干湖（`is_dry_lake`，`CoLMMAIN.F90:794-799`）整步走土壤分支，patchtype 仍是 4。
+    // `CoLMMAIN.F90:799`：`patchtype <= 2` 与干湖（`is_dry_lake`，patchtype 仍是 4）整步走土壤分支。
+    // patchtype 1 只在非城市跑法里到这里（城市跑法走 `CoLMMAIN_Urban`，由下面的 `urban_run` 挡住）。
     ensure!(
-        (matches!(ground.patch_type, 0 | 2) || (ground.patch_type == 4 && ground.is_dry_lake))
+        (matches!(ground.patch_type, 0..=2) || (ground.patch_type == 4 && ground.is_dry_lake))
             && input.soil_water.patch_type == ground.patch_type
             && (-5..=0).contains(&state.snow.layer_count)
             && !input.soil_water.urban_run
@@ -1608,7 +1628,7 @@ fn validate(input: StandardLctEnergyInput<'_>) -> Result<()> {
     let ground_flux = input.ground_flux;
     let ground = input.ground_temperature;
     ensure!(
-        (matches!(ground.patch_type, 0 | 2) || (ground.patch_type == 4 && ground.is_dry_lake))
+        (matches!(ground.patch_type, 0..=2) || (ground.patch_type == 4 && ground.is_dry_lake))
             && input.solar.patch_type == ground.patch_type
             && input.interception.time_step_seconds > 0.0
             && input.solar.time_step_seconds > 0

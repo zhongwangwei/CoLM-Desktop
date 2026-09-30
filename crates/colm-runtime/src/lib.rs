@@ -129,54 +129,92 @@ impl PointRuntimeConfig {
         directory: impl AsRef<Path>,
         stem: impl Into<String>,
     ) -> Result<crate::history::HistorySession> {
-        ensure!(
-            self.timestep_seconds.fract() == 0.0,
-            "the history schedule needs whole-second timesteps"
-        );
-        let timestep_seconds = i32::try_from(self.timestep_seconds as i64)
-            .context("the timestep does not fit the history schedule")?;
-        let field = |time: CalendarTime| -> Result<(i32, i32, i32)> {
-            Ok((
-                time.year,
-                i32::from(time.julian_day),
-                i32::try_from(time.seconds).context("seconds do not fit an i32")?,
-            ))
-        };
-        // 预热期不写 history（见 `hist_out` 的 `itstamp <= ptstamp`），所以记录表从预热
-        // 结束处开始；否则调度会等一段永远不会来的记录。
-        let history_start = if (self.start.year, self.start.julian_day, self.start.seconds)
-            < (
-                self.spinup_until.year,
-                self.spinup_until.julian_day,
-                self.spinup_until.seconds,
-            ) {
-            begin_style_time(self.spinup_until)
-        } else {
-            self.start
-        };
-        let (start_year, start_julian_day, start_seconds) = field(history_start)?;
-        let (end_year, end_julian_day, end_seconds) = field(self.end)?;
-        crate::history::HistorySession::new(
+        open_history_session(
+            HistoryWindowSpec {
+                start: self.start,
+                spinup_until: self.spinup_until,
+                end: self.end,
+                timestep_seconds: self.timestep_seconds,
+                frequency: self.history_frequency,
+                grouping: self.history_grouping,
+            },
             crate::history::point_dimensions(),
             colm_hist::history::HistorySite {
                 latitude_degrees: site_coordinate_degrees(self.latitude_degrees),
                 longitude_degrees: site_coordinate_degrees(self.longitude_degrees),
             },
-            colm_hist::schedule::SimulationWindow {
-                start_year,
-                start_julian_day,
-                start_seconds,
-                end_year,
-                end_julian_day,
-                end_seconds,
-                timestep_seconds,
-            },
-            self.history_frequency,
-            self.history_grouping,
             directory,
             stem,
         )
     }
+}
+
+/// 开 history 会话要的时间窗口与调度（单点与空间共用）。
+#[derive(Debug, Clone, Copy)]
+pub struct HistoryWindowSpec {
+    pub start: CalendarTime,
+    pub spinup_until: CalendarTime,
+    pub end: CalendarTime,
+    pub timestep_seconds: f64,
+    pub frequency: colm_hist::schedule::HistoryFrequency,
+    pub grouping: colm_hist::schedule::HistoryGrouping,
+}
+
+/// 按窗口、频率与分组开一个 history 会话。
+///
+/// 窗口与步长都来自同一份配置，所以调用方不必自己拼 `SimulationWindow` ——
+/// 拼错一个字段（例如把结束时刻写成时长）只会让记录数悄悄不对。
+pub fn open_history_session(
+    spec: HistoryWindowSpec,
+    dimensions: colm_hist::history::HistoryDimensions,
+    site: colm_hist::history::HistorySite,
+    directory: impl AsRef<Path>,
+    stem: impl Into<String>,
+) -> Result<crate::history::HistorySession> {
+    ensure!(
+        spec.timestep_seconds.fract() == 0.0,
+        "the history schedule needs whole-second timesteps"
+    );
+    let timestep_seconds = i32::try_from(spec.timestep_seconds as i64)
+        .context("the timestep does not fit the history schedule")?;
+    let field = |time: CalendarTime| -> Result<(i32, i32, i32)> {
+        Ok((
+            time.year,
+            i32::from(time.julian_day),
+            i32::try_from(time.seconds).context("seconds do not fit an i32")?,
+        ))
+    };
+    // 预热期不写 history（见 `hist_out` 的 `itstamp <= ptstamp`），所以记录表从预热
+    // 结束处开始；否则调度会等一段永远不会来的记录。
+    let history_start = if (spec.start.year, spec.start.julian_day, spec.start.seconds)
+        < (
+            spec.spinup_until.year,
+            spec.spinup_until.julian_day,
+            spec.spinup_until.seconds,
+        ) {
+        begin_style_time(spec.spinup_until)
+    } else {
+        spec.start
+    };
+    let (start_year, start_julian_day, start_seconds) = field(history_start)?;
+    let (end_year, end_julian_day, end_seconds) = field(spec.end)?;
+    crate::history::HistorySession::new(
+        dimensions,
+        site,
+        colm_hist::schedule::SimulationWindow {
+            start_year,
+            start_julian_day,
+            start_seconds,
+            end_year,
+            end_julian_day,
+            end_seconds,
+            timestep_seconds,
+        },
+        spec.frequency,
+        spec.grouping,
+        directory,
+        stem,
+    )
 }
 
 /// 一次带 history 的运行的产出：走了多少步、写了哪些文件。
@@ -476,22 +514,7 @@ impl PointRuntime {
             let mut outputs = Vec::with_capacity(templates.len());
             let mut initial_totals = Vec::with_capacity(templates.len());
             for (index, (template, next)) in templates.iter().zip(states.iter_mut()).enumerate() {
-                // `totwb`：上游在 `snl` 重算之后、任何物理步之前取步首总蓄量
-                // （`CoLMMAIN.F90:831`），`xerr` 要靠它和步末的 `endwb` 相减。
-                let mut initial_total_water_mm = colm_core::initial_total_water_storage_mm(
-                    &next.soil_water,
-                    next.energy.leaf.canopy_water.total_mm,
-                    next.snow.water_equivalent_kg_m2,
-                    // `totwb = totwb + waterstorage`（`CoLMMAIN.F90:825`）：施灌之前的库存。
-                    next.irrigation
-                        .as_ref()
-                        .map(|irrigation| irrigation.water_storage_mm),
-                );
-                // `totwb = totwb + wetwat`：VSF 下的湿地（`CoLMMAIN.F90:828-831`）。
-                if template.patch_type == 2 && template.physics.variably_saturated_flow {
-                    initial_total_water_mm += next.soil_water.wetland_water_mm;
-                }
-                initial_totals.push(initial_total_water_mm);
+                initial_totals.push(initial_total_water_mm(template, next));
                 outputs.push(advance_patch(
                     step,
                     template,
@@ -549,37 +572,14 @@ impl PointRuntime {
                     .zip(&outputs)
                     .zip(&initial_totals)
                 {
-                    let reference = reference(*total);
-                    let pushed = match output {
-                        PatchOutput::Soil(output) => session.push_lct_snow(
-                            step.clock.end_time,
-                            template,
-                            next,
-                            output,
-                            reference,
-                        )?,
-                        PatchOutput::Glacier(output) => session.push_glacier(
-                            step.clock.end_time,
-                            template,
-                            next,
-                            output,
-                            reference,
-                        )?,
-                        PatchOutput::Lake(output) => session.push_lake(
-                            step.clock.end_time,
-                            template,
-                            next,
-                            output,
-                            reference,
-                        )?,
-                        PatchOutput::Urban(output) => session.push_urban(
-                            step.clock.end_time,
-                            template,
-                            next,
-                            output,
-                            reference,
-                        )?,
-                    };
+                    let pushed = push_patch_history(
+                        session,
+                        step.clock.end_time,
+                        template,
+                        next,
+                        output,
+                        reference(*total),
+                    )?;
                     if let Some(path) = pushed {
                         files.push(path);
                     }
@@ -592,6 +592,7 @@ impl PointRuntime {
             optimize_baseflow(
                 optimizer.as_mut(),
                 step,
+                std::slice::from_ref(&step.forcing),
                 states,
                 &outputs,
                 time_step_seconds,
@@ -661,6 +662,7 @@ impl PointRuntime {
             optimize_baseflow(
                 optimizer.as_mut(),
                 step,
+                std::slice::from_ref(&step.forcing),
                 states,
                 &outputs,
                 time_step_seconds,
@@ -828,6 +830,7 @@ fn lct_binding(
             step.clock.forcing_time.year,
             month,
         )? * 1.0e-6,
+        partial_pressures_pa: None,
     })
 }
 
@@ -895,6 +898,48 @@ impl PatchOutput {
 ///
 /// 冰川（3）：`GLACIER_TEMP/WATER`；之后 `albland` 用的是 `tlai`/`tsai` 折算的冠层，
 /// 所以先做光学、再按 `CoLMMAIN.F90:2178-2230` 把植被量清零。
+/// 一个 patch 这一步的 history 累加：按分支分派到会话的 `push_*`。
+fn push_patch_history(
+    session: &mut crate::history::HistorySession,
+    end: CalendarTime,
+    template: &StandardLctRestartTemplate,
+    state: &StandardLctSnowSoilState,
+    output: &PatchOutput,
+    reference: crate::history::HistoryReferenceState,
+) -> Result<Option<PathBuf>> {
+    match output {
+        PatchOutput::Soil(output) => session.push_lct_snow(end, template, state, output, reference),
+        PatchOutput::Glacier(output) => {
+            session.push_glacier(end, template, state, output, reference)
+        }
+        PatchOutput::Lake(output) => session.push_lake(end, template, state, output, reference),
+        PatchOutput::Urban(output) => session.push_urban(end, template, state, output, reference),
+    }
+}
+
+/// `totwb`：上游在 `snl` 重算之后、任何物理步之前取步首总蓄量（`CoLMMAIN.F90:831`），
+/// `xerr` 要靠它和步末的 `endwb` 相减。
+fn initial_total_water_mm(
+    template: &StandardLctRestartTemplate,
+    state: &StandardLctSnowSoilState,
+) -> f64 {
+    let mut total = colm_core::initial_total_water_storage_mm(
+        &state.soil_water,
+        state.energy.leaf.canopy_water.total_mm,
+        state.snow.water_equivalent_kg_m2,
+        // `totwb = totwb + waterstorage`（`CoLMMAIN.F90:825`）：施灌之前的库存。
+        state
+            .irrigation
+            .as_ref()
+            .map(|irrigation| irrigation.water_storage_mm),
+    );
+    // `totwb = totwb + wetwat`：VSF 下的湿地（`CoLMMAIN.F90:828-831`）。
+    if template.patch_type == 2 && template.physics.variably_saturated_flow {
+        total += state.soil_water.wetland_water_mm;
+    }
+    total
+}
+
 fn advance_patch(
     step: PointRuntimeStep,
     template: &StandardLctRestartTemplate,
@@ -1055,6 +1100,8 @@ fn baseflow_scaled(
 fn optimize_baseflow(
     optimizer: Option<&mut baseflow_optimizer::BaseflowOptimizer>,
     step: PointRuntimeStep,
+    // 每个 patch 的强迫：单点只有一份（所有 patch 共用），空间算例每个 patch 一份。
+    forcings: &[RuntimeForcing],
     states: &[StandardLctSnowSoilState],
     outputs: &[PatchOutput],
     time_step_seconds: f64,
@@ -1065,14 +1112,14 @@ fn optimize_baseflow(
     if !step.clock.is_spinup {
         return Ok(());
     }
-    // 所有 patch 的强迫都是同一个网格元的 `forc_prc`/`forc_prl`（单点只有一个元）。
     for (index, output) in outputs.iter().enumerate() {
         let output = output.view();
+        let forcing = forcings[index.min(forcings.len() - 1)];
         optimizer.accumulate(
             index,
             baseflow_optimizer::BaseflowStep {
-                convective_precipitation_kg_m2_s: step.forcing.convective_precipitation_kg_m2_s,
-                large_scale_precipitation_kg_m2_s: step.forcing.large_scale_precipitation_kg_m2_s,
+                convective_precipitation_kg_m2_s: forcing.convective_precipitation_kg_m2_s,
+                large_scale_precipitation_kg_m2_s: forcing.large_scale_precipitation_kg_m2_s,
                 total_evaporation_kg_m2_s: output.total_evaporation_kg_m2_s(),
                 surface_runoff_mm_s: output.surface_runoff_mm_s(),
                 subsurface_runoff_mm_s: output.subsurface_runoff_mm_s(),
@@ -1693,6 +1740,7 @@ mod tests {
             variably_saturated_flow: false,
             plant_hydraulics: false,
             urban_run: false,
+            river_lake_flow_build: false,
             plant_hydraulic_parameters: colm_core::PlantHydraulicParameters::default(),
             plant_hydraulic_overrides: colm_core::PlantHydraulicOverrides::default(),
             vegetation_snow: false,

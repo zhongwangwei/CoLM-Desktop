@@ -809,6 +809,9 @@ struct HistoryAccumulator {
     steps: usize,
     /// 本区间里按 `patchtype` 过滤、写平均时留作填充值的量（见 [`HistorySink::keep_filtered`]）。
     filtered: std::collections::BTreeSet<String>,
+    /// 本区间里交过值的量，含只交过 `spval` 的（上游每个 patch 都有 `a_*`，过滤只看 `patchtype`）：
+    /// 网格聚合的分母按它算——湿地的 `a_qlayer` 一直是 `spval`，却照样占 `sumarea`。
+    offered: std::collections::BTreeSet<String>,
 }
 
 #[derive(Debug)]
@@ -861,6 +864,7 @@ impl HistoryAccumulator {
             Some(Accumulated::Scalar { sum, count }) if *count > 0 => sum / self.steps as f64,
             _ => colm_core::MISSING,
         };
+        buffer.include("wetwat", record)?;
         buffer
             .set_patch_scalar("wetwat", record, value)
             .context("cannot write the dynamic wetland storage")
@@ -889,6 +893,7 @@ impl HistoryAccumulator {
             _ => colm_core::MISSING,
         };
         for (name, _) in FIRE_HISTORY {
+            buffer.include(name, record)?;
             if value == colm_core::MISSING {
                 continue;
             }
@@ -905,6 +910,22 @@ impl HistoryAccumulator {
             self.steps > 0,
             "the history accumulator reached a write step without accumulating anything"
         );
+        // 网格聚合的分母（上游的 `filter`）：交过值、没被过滤就计入，哪怕整段都是 `spval`；
+        // 只有 `f_alb`（`filter_dt`）与本地正午量（`nac_ln > 0`）还要求自己的计数非零。
+        for name in &self.offered {
+            if !buffer.declares(name) || self.filtered.contains(name) {
+                continue;
+            }
+            let count = match self.sums.get(name) {
+                Some(Accumulated::Scalar { count, .. } | Accumulated::Column { count, .. }) => {
+                    *count
+                }
+                None => 0,
+            };
+            if count > 0 || !OWN_COUNT_VARIABLES.contains(&name.as_str()) {
+                buffer.include(name, record)?;
+            }
+        }
         for (name, accumulated) in &self.sums {
             // 只为旁车累加、本算例历史文件里没有的量（上游照样 `acc1d`，只是不写出）。
             if !buffer.declares(name) && crate::history_sidecar::is_window_key(name) {
@@ -1203,7 +1224,7 @@ impl HistoryAccumulator {
                     .map(|(field, source, _)| (*field, *source)),
             )
             .filter_map(|(alias, source)| window.sums.get(source).map(|value| (alias, value)));
-        let sums = window
+        let sums: std::collections::BTreeMap<String, Accumulated> = window
             .sums
             .iter()
             .map(|(name, value)| (name.as_str(), value))
@@ -1221,6 +1242,7 @@ impl HistoryAccumulator {
             })
             .collect();
         Self {
+            offered: sums.keys().cloned().collect(),
             sums,
             steps: window.steps,
             filtered: std::collections::BTreeSet::new(),
@@ -1249,6 +1271,7 @@ impl HistorySink for HistoryAccumulator {
             value.is_finite(),
             "the history value for {name} is not finite"
         );
+        self.offered.insert(name.to_owned());
         // `spval` 步不计入：既不进和，也不进计数（上游 `acc1d` 的 `IF (var(i) /= spval)`）。
         // 一步都不有效的变量因此**不会**在 `sums` 里建条目，也就不会被写出，
         // 缓冲区留给它的是填充值 —— 与上游一致。
@@ -1299,6 +1322,7 @@ impl HistorySink for HistoryAccumulator {
             values.iter().all(|value| value.is_finite()),
             "the history value for {name} is not finite"
         );
+        self.offered.insert(name.to_owned());
         // 分层量按**整列**是否有效来算（上游的计数器是每 patch 一个，
         // `nac_ln(i)`，不是每层一个）。整列全无效就整列跳过。
         if values.iter().all(|value| *value == colm_core::MISSING) {
@@ -1507,6 +1531,51 @@ pub fn element_surface_input(
     })
 }
 
+/// 城市 patch 交给近地面诊断的那组通量（`qref` 取城市出口）。
+fn urban_surface_fluxes(output: &colm_core::UrbanStepOutput) -> colm_core::GlacierThermalFluxes {
+    let thermal = &output.thermal;
+    colm_core::GlacierThermalFluxes {
+        taux: thermal.taux,
+        tauy: thermal.tauy,
+        fsena: thermal.fsena,
+        fevpa: thermal.fevpa,
+        tref: thermal.tref,
+        qref: output.qref,
+        z0m: thermal.z0m,
+        ..Default::default()
+    }
+}
+
+/// 任一种 patch 交给网格元聚合的近地面诊断输入（[`element_surface_input`] 的一项）。
+pub fn patch_surface_input(
+    template: &StandardLctRestartTemplate,
+    output: &crate::PatchOutput,
+    reference: HistoryReferenceState,
+) -> colm_core::HistoryDiagnosticsInput {
+    let physics = &template.physics;
+    match output {
+        crate::PatchOutput::Soil(output) => lct_surface_input(&output.energy, reference, physics),
+        crate::PatchOutput::Glacier(output) => {
+            glacier_surface_input(&output.thermal, reference, physics)
+        }
+        crate::PatchOutput::Lake(output) => {
+            let thermal = &output.thermal;
+            let surface = colm_core::GlacierThermalFluxes {
+                taux: thermal.taux,
+                tauy: thermal.tauy,
+                fsena: thermal.fsena,
+                fevpa: thermal.fevpa,
+                z0m: thermal.z0m,
+                ..Default::default()
+            };
+            glacier_surface_input(&surface, reference, physics)
+        }
+        crate::PatchOutput::Urban(output) => {
+            glacier_surface_input(&urban_surface_fluxes(output), reference, physics)
+        }
+    }
+}
+
 /// [`set_lct_surface_diagnostics`]；`element` 给了就用网格元那一份重算结果（多 patch 单点）。
 pub fn set_lct_surface_diagnostics_with(
     sink: &mut impl HistorySink,
@@ -1682,8 +1751,24 @@ fn set_glacier_surface_diagnostics(
     thermal: &colm_core::GlacierThermalFluxes,
     reference: HistoryReferenceState,
     physics: &LandPhysicsParameters,
+    element: Option<&colm_core::HistoryDiagnostics>,
 ) -> Result<()> {
-    let recomputed = colm_core::history_diagnostics(colm_core::HistoryDiagnosticsInput {
+    let recomputed = match element {
+        Some(element) => *element,
+        None => colm_core::history_diagnostics(glacier_surface_input(thermal, reference, physics))
+            .context("cannot recompute the glacier history near-surface diagnostics")?,
+    };
+    set_glacier_surface_values(sink, thermal, &recomputed)
+}
+
+/// 非土壤 patch（冰川、湖、城市）的近地面诊断重算输入：`taux`/`tauy`/`fsena`/`fevpa`/`z0m` 取
+/// 各自热通量的出口值。
+fn glacier_surface_input(
+    thermal: &colm_core::GlacierThermalFluxes,
+    reference: HistoryReferenceState,
+    physics: &LandPhysicsParameters,
+) -> colm_core::HistoryDiagnosticsInput {
+    colm_core::HistoryDiagnosticsInput {
         wind_height_m: physics.wind_height_m,
         temperature_height_m: physics.temperature_height_m,
         humidity_height_m: physics.humidity_height_m,
@@ -1699,8 +1784,14 @@ fn set_glacier_surface_diagnostics(
         momentum_roughness_m: thermal.z0m,
         surface_layer_scheme: physics.surface_layer_scheme,
         boundary_layer_height_m: reference.boundary_layer_height_m,
-    })
-    .context("cannot recompute the glacier history near-surface diagnostics")?;
+    }
+}
+
+fn set_glacier_surface_values(
+    sink: &mut impl HistorySink,
+    thermal: &colm_core::GlacierThermalFluxes,
+    recomputed: &colm_core::HistoryDiagnostics,
+) -> Result<()> {
     for (name, value) in [
         ("taux", thermal.taux),
         ("tauy", thermal.tauy),
@@ -2543,6 +2634,8 @@ pub struct HistorySession {
     dynamic_wetland: bool,
     /// `DEF_USE_Dynamic_Lake`：多写 `f_dz_lake`、不写 `f_lake_deficit`（由 `push_lake` 现场给出）。
     dynamic_lake: bool,
+    /// 空间算例：写文件时按面积聚合到经纬网格（`HistForm = 'Gridded'`）。
+    grid: Option<std::sync::Arc<colm_hist::history::HistoryGrid>>,
 }
 
 /// 多 patch 时每个累加器只写自己那一格；单 patch 一次写全部（缓冲区只有一格）。
@@ -2645,7 +2738,14 @@ impl HistorySession {
             element_surface: None,
             dynamic_wetland: false,
             dynamic_lake: false,
+            grid: None,
         })
+    }
+
+    /// 空间算例：history 写成经纬网格（每个 patch 的份面积见 [`colm_hist::history::HistoryGrid`]）。
+    pub fn with_grid(mut self, grid: std::sync::Arc<colm_hist::history::HistoryGrid>) -> Self {
+        self.grid = Some(grid);
+        self
     }
 
     /// 还有多少条记录没写（运行结束时应当为 0）。
@@ -2878,6 +2978,7 @@ impl HistorySession {
         self.variably_saturated = template.physics.variably_saturated_flow;
         let thermal = output.thermal;
         let shortwave = output.shortwave;
+        let element_surface = self.element_surface;
         self.push(end, |accumulator| {
             let accumulator = &mut PatchFilteredSink {
                 inner: accumulator,
@@ -2961,7 +3062,13 @@ impl HistorySession {
                 );
                 accumulator.scalar(name, 0, value)?;
             }
-            set_glacier_surface_diagnostics(accumulator, &thermal, reference, &template.physics)?;
+            set_glacier_surface_diagnostics(
+                accumulator,
+                &thermal,
+                reference,
+                &template.physics,
+                element_surface.as_ref(),
+            )?;
             // `h2osoi` 对每个 patch 都按液/冰重算（`CoLMMAIN.F90:2260`），`qlayer`/`rootr` 在
             // `patchtype > 2` 那一节清零（`:2233`、`:2246`）；历史按 `patchtype` 过滤掉它们。
             set_lct_derived_soil(
@@ -3030,6 +3137,7 @@ impl HistorySession {
         self.urban = true;
         let thermal = &output.thermal;
         let shortwave = &output.shortwave;
+        let element_surface = self.element_surface;
         self.push(end, |accumulator| {
             set_lct_snow_state(accumulator, 0, template, state, ground)?;
             let fluxes = vec![
@@ -3120,17 +3228,14 @@ impl HistorySession {
                     accumulator.scalar(name, 0, value)?;
                 }
             }
-            let surface = colm_core::GlacierThermalFluxes {
-                taux: thermal.taux,
-                tauy: thermal.tauy,
-                fsena: thermal.fsena,
-                fevpa: thermal.fevpa,
-                tref: thermal.tref,
-                qref: output.qref,
-                z0m: thermal.z0m,
-                ..Default::default()
-            };
-            set_glacier_surface_diagnostics(accumulator, &surface, reference, &template.physics)?;
+            let surface = urban_surface_fluxes(output);
+            set_glacier_surface_diagnostics(
+                accumulator,
+                &surface,
+                reference,
+                &template.physics,
+                element_surface.as_ref(),
+            )?;
             set_urban_shortwave_bands(accumulator, 0, shortwave, reference)?;
             set_lct_derived_soil(
                 accumulator,
@@ -3391,6 +3496,9 @@ impl HistorySession {
                 self.site,
                 self.record_count(&record.suffix),
             );
+            if let Some(grid) = &self.grid {
+                buffer = buffer.with_grid(std::sync::Arc::clone(grid))?;
+            }
             // 声明本层能负责的变量；写出的文件因此只包含它们。
             declare_lct_variables(&mut buffer, self.plant_hydraulics, self.variably_saturated)?;
             if self.urban {

@@ -756,6 +756,7 @@ fn input(forcing: crate::RuntimeForcing) -> StandardLctEnergyInput<'static> {
     };
     StandardLctEnergyInput {
         dynamic_wetland: false,
+        river_lake_flow_build: false,
         forcing,
         precipitation_scheme: crate::PrecipitationPhaseScheme::AirTemperature,
         interception: CanopyInterceptionInput {

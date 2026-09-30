@@ -72,12 +72,10 @@ fn run() -> Result<()> {
         "{} has no case.nml; point the first argument at a prepared case directory",
         arguments.case_directory.display()
     );
-    ensure!(
-        !colm_case::is_spatial_case(&case_nml)?,
-        "colm-rs only runs the SinglePoint chain; {} is a spatial case",
-        arguments.case_directory.display()
-    );
     let name = colm_case::case_name(&case_nml)?;
+    if colm_case::is_spatial_case(&case_nml)? {
+        return run_spatial(&arguments, &layout, &name, &case_nml);
+    }
 
     let config = read_point_runtime_config(&case_nml)?;
     let document = read_document(&case_nml)?;
@@ -170,8 +168,17 @@ fn run() -> Result<()> {
     let mut templates = patches
         .iter()
         .map(|&patch| {
-            assemble_patch(&document, &layout, &name, &files, physics.clone(), patch)
-                .with_context(|| format!("cannot assemble patch {patch}"))
+            assemble_patch(
+                &document,
+                &layout,
+                &name,
+                &files,
+                physics.clone(),
+                patch,
+                SINGLE_POINT_BLOCK,
+                false,
+            )
+            .with_context(|| format!("cannot assemble patch {patch}"))
         })
         .collect::<Result<Vec<_>>>()?;
     // 网格元里各 patch 的面积份额 `elm_patch%subfrc`：多作物单点是归一化的 `pctcrop`，与 PFT 常数重启的
@@ -231,6 +238,7 @@ fn run() -> Result<()> {
             || logical_field(&document, "DEF_USE_PC")?,
         bgc: template.physics.bgc.is_some(),
         crop: template.physics.bgc.is_some_and(|switches| switches.crop),
+        river_lake_flow: false,
     };
     // `read_history_acc_restart`（`CoLM.F90:376`）：续跑重启带着未写完的历史区间时接着累加。
     let initial_window = colm_runtime::history_sidecar::read_sidecar(
@@ -295,9 +303,281 @@ fn run() -> Result<()> {
     Ok(())
 }
 
+/// 空间算例（`GRIDBASED`）：patch 拓扑来自 `landdata`，强迫是网格强迫经面积加权映射到每个 patch。
+///
+/// 物理与单点完全相同（同一个 `advance_patch`）；history 写成经纬网格（`HistForm = 'Gridded'`）。
+/// 目前还没有：多分块、河湖流（`GridRiverLakeFlow` 的河道量与河道旁车）、城市/PFT 的网格 LAI；
+/// 遇到就拒绝或明说。
+fn run_spatial(
+    arguments: &Arguments,
+    layout: &colm_case::Layout,
+    name: &str,
+    case_nml: &Path,
+) -> Result<()> {
+    use colm_runtime::spatial::{
+        forcing::GriddedForcing,
+        history::{build_history_grid, ElementGroups, HistoryGridConfig, SpatialHistory},
+        mapping::AreaWeightedMapping,
+        runtime::SpatialRuntime,
+        runtime::SpatialRuntimeConfig,
+        topology::SpatialTopology,
+    };
+    ensure!(
+        arguments.patch.is_none(),
+        "--patch selects a patch of a single point; spatial cases run every patch"
+    );
+    ensure!(
+        !arguments.crop,
+        "CROP kernels are not ported to the Rust spatial runtime yet"
+    );
+    let document = read_document(case_nml)?;
+    let config = SpatialRuntimeConfig::read(case_nml)?;
+    let mut physics = land_physics_parameters(
+        &document,
+        arguments.land_cover,
+        colm_runtime::physics::ObservationHeights {
+            wind_m: config.forcing.height_wind_m,
+            temperature_m: config.forcing.height_temperature_m,
+            humidity_m: config.forcing.height_humidity_m,
+        },
+    )?;
+    physics.irrigation = None;
+    // GRID/UNSTRUCTURED 内核总是编进 `GridRiverLakeFlow`，它改变了几处收缩形状。
+    physics.river_lake_flow_build = true;
+    let missing = colm_runtime::physics::unported_branches(&physics);
+    ensure!(
+        missing.is_empty() || arguments.allow_unported_branches,
+        "this case needs {} branch(es) the Rust runtime does not implement:\n  - {}",
+        missing.len(),
+        missing.join("\n  - ")
+    );
+    if arguments.preflight {
+        println!("colm-rs preflight: ok");
+        return Ok(());
+    }
+    let year = integer_field(&document, "DEF_LC_YEAR")?;
+    let out = layout.out().join(name);
+    let topology = SpatialTopology::read(&out.join("landdata"), i32::try_from(year)?)?;
+    let block = topology.block.clone();
+    let start_label = date_label(config.start);
+    let files = RestartStateFiles {
+        constant: out
+            .join("restart/const")
+            .join(format!("{name}_restart_const_lc{year:04}_{block}.nc")),
+        time: out.join("restart").join(&start_label).join(format!(
+            "{name}_restart_{start_label}_lc{year:04}_{block}.nc"
+        )),
+    };
+    for path in [&files.constant, &files.time] {
+        ensure!(
+            path.is_file(),
+            "{} is missing; run mksrfdata and mkinidata for this case first",
+            path.display()
+        );
+    }
+    let patch_count = colm_init::RestartFile::open(&files.constant)?.dimension("patch")?;
+    ensure!(
+        patch_count == topology.patch_count(),
+        "the constant restart has {patch_count} patches but landpatch has {}",
+        topology.patch_count()
+    );
+    let mut templates = (0..patch_count)
+        .map(|patch| {
+            assemble_patch(
+                &document,
+                layout,
+                name,
+                &files,
+                physics.clone(),
+                patch,
+                &block,
+                true,
+            )
+            .with_context(|| format!("cannot assemble patch {patch}"))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let constant = colm_init::RestartFile::open(&files.constant)?;
+    let longitudes = constant.floats("patchlonr")?.to_vec();
+    let latitudes = constant.floats("patchlatr")?.to_vec();
+    let coordinates = longitudes.into_iter().zip(latitudes).collect::<Vec<_>>();
+    let grid = GriddedForcing::open_grid(&config.forcing, config.start)?;
+    let history_grid = if config.history_frequency != colm_hist::schedule::HistoryFrequency::None {
+        let patch_types = templates
+            .iter()
+            .map(|template| template.patch_type)
+            .collect::<Vec<_>>();
+        let patch_mask = if constant.contains("patchmask") {
+            constant
+                .integers("patchmask")?
+                .iter()
+                .map(|&mask| mask != 0)
+                .collect()
+        } else {
+            vec![true; patch_count]
+        };
+        Some(build_history_grid(
+            &HistoryGridConfig::read(&document)?,
+            &grid,
+            &topology,
+            &patch_types,
+            &patch_mask,
+        )?)
+    } else {
+        None
+    };
+    let mapping = AreaWeightedMapping::build(
+        &grid,
+        &topology.pixel,
+        &topology.cells,
+        &topology.shared_fraction,
+    )?;
+    let cells = mapping
+        .parts
+        .iter()
+        .flatten()
+        .map(|part| (part.ilon, part.ilat))
+        .collect::<Vec<_>>();
+    let forcing = GriddedForcing::new(
+        config.forcing.clone(),
+        grid,
+        cells,
+        config.timestep_seconds as i32,
+    )?;
+    let mut runtime = SpatialRuntime::new(
+        config.clock()?,
+        forcing,
+        mapping,
+        coordinates,
+        config.co2_scenario,
+    )?;
+    runtime.apply_mapped_heights(&mut templates)?;
+    let para_opt = out.join("restart/ParaOpt");
+    std::fs::create_dir_all(&para_opt)
+        .with_context(|| format!("cannot create {}", para_opt.display()))?;
+    if logical_field(&document, "DEF_Optimize_Baseflow")? {
+        let patches = templates
+            .iter()
+            .map(|template| BaseflowPatchInit {
+                scale: template.baseflow_scale,
+                water_table_depth_m: template.snow_state().soil_water.water_table_depth_m,
+                patch_type: template.patch_type,
+            })
+            .collect::<Vec<_>>();
+        runtime = runtime.with_baseflow_optimizer(BaseflowOptimizer::new(&patches, para_opt, name));
+    }
+    // 网格 history（`HistForm = 'Gridded'`）：会话与单点同一套，写文件时聚合到 `ghist`。
+    // 区间跨过重启时的续跑旁车要带河道累加器，还没移植：`write_sidecar` 在那时拒绝。
+    let mut history = match history_grid {
+        Some(grid) => Some(SpatialHistory {
+            session: colm_runtime::open_history_session(
+                config.history_window(),
+                colm_runtime::history::point_dimensions(),
+                colm_hist::history::HistorySite {
+                    latitude_degrees: 0.0,
+                    longitude_degrees: 0.0,
+                },
+                out.join("history"),
+                name,
+            )?
+            .with_patches(patch_count)?
+            .with_grid(grid),
+            elements: ElementGroups::from_topology(&topology)?,
+            files: Vec::new(),
+        }),
+        None => None,
+    };
+    let end_label = date_label(normalized_day_end(config.end));
+    let restart_out = out
+        .join("restart")
+        .join(&end_label)
+        .join(format!("{name}_restart_{end_label}_lc{year:04}_{block}.nc"));
+    let periodic = PeriodicRestarts {
+        directory: out.join("restart"),
+        name: name.to_owned(),
+        land_cover_year: year,
+        block: block.clone(),
+    };
+    // 每份续跑文件旁都写历史累加器旁车（`write_history_acc_restart`），空间构建是 schema 2。
+    let history_restart = HistoryRestart {
+        config: colm_runtime::history_sidecar::SidecarConfig {
+            frequency_code: history_frequency_code(config.history_frequency),
+            urban_run: logical_field(&document, "DEF_URBAN_RUN")?,
+            urban_patches: templates
+                .iter()
+                .filter(|template| template.urban.is_some())
+                .count(),
+            pft_or_pc: logical_field(&document, "DEF_USE_PFT")?
+                || logical_field(&document, "DEF_USE_PC")?,
+            bgc: false,
+            crop: false,
+            river_lake_flow: true,
+        },
+        window: history
+            .as_ref()
+            .map(|history| history.session.window_handle()),
+    };
+    let mut states: Vec<StandardLctSnowSoilState> = templates
+        .iter()
+        .map(StandardLctRestartTemplate::snow_state)
+        .collect();
+    let mut last: Option<Vec<RestartSnapshot>> = None;
+    let steps = runtime.run(
+        &templates,
+        &mut states,
+        history.as_mut(),
+        |steps, states, outputs| {
+            let mut snapshots = states
+                .iter()
+                .zip(outputs)
+                .zip(steps)
+                .map(|((state, output), step)| {
+                    let mut snapshot =
+                        RestartSnapshot::new(state, *output, step.surface_cosine_zenith)?;
+                    snapshot.lai_refreshed = step.clock.update_lai;
+                    Ok(snapshot)
+                })
+                .collect::<Result<Vec<_>>>()?;
+            if let Some(previous) = &last {
+                for (snapshot, previous) in snapshots.iter_mut().zip(previous) {
+                    snapshot.diagnostics.carry_forward(&previous.diagnostics);
+                }
+            }
+            let step = steps[0];
+            if step.clock.write_restart {
+                let path = periodic.path(step.clock.end_time);
+                if path != restart_out {
+                    write_evolved_restart(&templates, states, &snapshots, &files.time, &path)?;
+                    mark_history_restart(&path, &history_restart)?;
+                }
+            }
+            last = Some(snapshots);
+            Ok(())
+        },
+    )?;
+    let last = last.context(NO_STEP)?;
+    write_evolved_restart(&templates, &states, &last, &files.time, &restart_out)?;
+    mark_history_restart(&restart_out, &history_restart)?;
+    println!(
+        "colm-rs: {steps} step(s) on {patch_count} spatial patch(es); wrote {}",
+        restart_out.display()
+    );
+    if let Some(mut history) = history {
+        history.files.extend(history.session.finish()?);
+        ensure!(
+            history.session.remaining() == 0,
+            "the run ended with {} history record(s) still unwritten",
+            history.session.remaining()
+        );
+        println!("colm-rs: {} history file(s)", history.files.len());
+    }
+    println!("{SUCCESS_MARKER}");
+    Ok(())
+}
+
 /// 第 `patch` 个 patch 的模板：主/常数重启、PFT 子网格、BGC 与灌溉、月度 LAI、`scale_baseflow`。
 ///
 /// 多作物单点（`MOD_SingleSrfdata.F90:348`）每个 patch 各装一份；patch 之间除强迫外不共享任何东西。
+#[allow(clippy::too_many_arguments)] // 单点与空间共用；分块名与 `spatial` 只决定文件名与 LAI 来源
 fn assemble_patch(
     document: &Document,
     layout: &colm_case::Layout,
@@ -305,6 +585,8 @@ fn assemble_patch(
     files: &RestartStateFiles,
     physics: colm_runtime::assembly::LandPhysicsParameters,
     patch: usize,
+    block: &str,
+    spatial: bool,
 ) -> Result<StandardLctRestartTemplate> {
     // 两支装配的**断言**不同（一支要求启动时有雪、另一支要求没有），但返回的是同一个
     // 模板类型；运行时只走通用入口（能长雪的那一支），所以这里按启动时的雪列选断言。
@@ -351,7 +633,26 @@ fn assemble_patch(
     );
     // `DEF_LAI_MONTHLY` 打开时每月重读 LAI（`CoLM.F90:595-605`）。**不装就等于关门**：
     // 跨月的运行会从第二个月起一直用第一天的叶面积，而且不会报错。
-    if logical_field(document, "DEF_LAI_MONTHLY")? {
+    // 空间算例的逐月 LAI 读 `landdata/LAI/<year>/` 的分块向量（`LAI_readin` 的非单点支）。
+    if logical_field(document, "DEF_LAI_MONTHLY")? && spatial {
+        ensure!(
+            template.urban.is_none() && template.pft.is_none(),
+            "the Rust spatial runtime reads LCT LAI only; urban and PFT/PC LAI are not ported"
+        );
+        let year = |key: &str| -> Result<i32> {
+            i32::try_from(integer_field(document, key)?)
+                .with_context(|| format!("{key} does not fit an i32"))
+        };
+        template = template.with_monthly_leaf_area_index(MonthlyLeafAreaIndex::read_grid(
+            layout.out().join(name).join("landdata"),
+            block,
+            patch,
+            logical_field(document, "DEF_LAI_CHANGE_YEARLY")?,
+            year("DEF_LC_YEAR")?,
+            (year("DEF_LAI_START_YEAR")?, year("DEF_LAI_END_YEAR")?),
+        ));
+    }
+    if logical_field(document, "DEF_LAI_MONTHLY")? && !spatial {
         let path = layout.out().join(name).join("landdata/srfdata.nc");
         ensure!(
             path.is_file(),
@@ -404,7 +705,7 @@ fn assemble_patch(
     // `DEF_dir_restart/ParaOpt/<case>_baseflow.nc` 读一个长度 `landpatch` 的向量，
     // 文件或变量缺失时取 `defval = 1.`（`MOD_Opt_Baseflow.F90:37-38`）。
     // 它直接乘在 `rsubst`/`rsub` 上，参数标定过的算例差别是物理量级的。
-    let baseflow_scale = read_baseflow_scale(layout, name, patch)?;
+    let baseflow_scale = read_baseflow_scale(layout, name, patch, block)?;
     template = template.with_baseflow_scale(baseflow_scale);
     // `DEF_USE_SNICAR`：`SnowOptics_init`/`SnowAge_init` 读 `DEF_dir_runtime/snicar/` 下的两张表。
     if template.physics.snicar {
@@ -906,17 +1207,22 @@ struct PeriodicRestarts {
     directory: PathBuf,
     name: String,
     land_cover_year: i64,
+    /// 分块后缀：单点是 `w180_s90`，空间算例是 `e110_n20` 这样的块名。
+    block: String,
 }
 
 impl PeriodicRestarts {
     fn path(&self, end_time: CalendarTime) -> PathBuf {
         let label = date_label(normalized_day_end(end_time));
         self.directory.join(&label).join(format!(
-            "{}_restart_{label}_lc{:04}_w180_s90.nc",
-            self.name, self.land_cover_year
+            "{}_restart_{label}_lc{:04}_{}.nc",
+            self.name, self.land_cover_year, self.block
         ))
     }
 }
+
+/// 单点算例的分块后缀（`get_filename_block` 对单点给的块名）。
+const SINGLE_POINT_BLOCK: &str = "w180_s90";
 
 const NO_STEP: &str = "the window produced no step, so there is no evolved state to write back; \
                        check that DEF_simulation_time%end is after %start";
@@ -1009,6 +1315,7 @@ impl OutputSpec {
                         directory: out.join("restart"),
                         name: name.to_owned(),
                         land_cover_year: year,
+                        block: SINGLE_POINT_BLOCK.to_owned(),
                     }),
                     history_directory: Some(out.join("history")),
                     history_stem: name.to_owned(),
@@ -1061,7 +1368,12 @@ fn restart_files(
 /// （`MOD_Opt_Baseflow.F90:37-38`）：**文件不在、或文件里没有这个变量**，都取 1.0。
 /// 本机三个黄金算例都属于前者（内核日志会打 "default value is used"），
 /// 所以这道读取对它们没有影响；被标定过的算例则从此与内核一致。
-fn read_baseflow_scale(layout: &colm_case::Layout, name: &str, patch: usize) -> Result<f64> {
+fn read_baseflow_scale(
+    layout: &colm_case::Layout,
+    name: &str,
+    patch: usize,
+    block: &str,
+) -> Result<f64> {
     // 文件名与重启同一套块后缀约定：`MOD_Block.F90:641-645` 的
     // `get_filename_block` 把 `_<block>` 插在 `.nc` 之前，单点算例是 `w180_s90`。
     // 写成不带后缀的 `..._baseflow.nc` 内核根本不会读（会打 "not found" 走默认值）。
@@ -1069,7 +1381,7 @@ fn read_baseflow_scale(layout: &colm_case::Layout, name: &str, patch: usize) -> 
         .out()
         .join(name)
         .join("restart/ParaOpt")
-        .join(format!("{name}_baseflow_w180_s90.nc"));
+        .join(format!("{name}_baseflow_{block}.nc"));
     if !path.is_file() {
         return Ok(1.0);
     }

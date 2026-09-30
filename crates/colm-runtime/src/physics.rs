@@ -329,6 +329,8 @@ pub fn land_physics_parameters(
         // 地面反照率顶到上限。
         supercool_water: logical(document, "DEF_USE_SUPERCOOL_WATER")? && !urban_run,
         urban_run,
+        // 单点构建没有 `GridRiverLakeFlow`；空间入口在装配前置真。
+        river_lake_flow_build: false,
         // `snowfraction` 的指数（`MOD_Namelist.F90:618`，默认 1）。
         snow_cover_exponent: real(document, "DEF_TUNING_SNOW_COVER_EXPONENT")?,
         snow_roughness_m: real(document, "DEF_TUNING_ZSNO")?,

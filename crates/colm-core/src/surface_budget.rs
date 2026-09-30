@@ -105,7 +105,12 @@ pub fn surface_budget(energy: &StandardLctEnergyOutput) -> Result<SurfaceBudget>
     // （扩展截获那一版是 `lfevpl + htvp*fevpg`，熔的是地面项；同步到 `main/` 后方向反了。）
     // `_272` 随后在 `fgrnd` 里被原样复用，见下。
     let ground_latent_heat = ground_evaporation * sublimation_heat;
-    let latent_heat = leaf_evaporation.mul_add(leaf_latent_heat, ground_latent_heat);
+    // 带河湖流的空间内核（`gimpleL`，bb 502）：`_2187 = fevpg*htvp; _2186 = _2187 + fevpl*2.5104e6`，不融合。
+    let latent_heat = if energy.river_lake_flow_build {
+        ground_latent_heat + leaf_evaporation * leaf_latent_heat
+    } else {
+        leaf_evaporation.mul_add(leaf_latent_heat, ground_latent_heat)
+    };
 
     // `main/MOD_Thermal.F90:1475-1489` 的 `fgrnd` 是一条累加链，GIMPLE（非 split，bb 487）：
     //   _1778 = .FMA (dlrad, emg, sabg)
@@ -131,14 +136,31 @@ pub fn surface_budget(energy: &StandardLctEnergyOutput) -> Result<SurfaceBudget>
                 .mul_add(split.soil_temperature_k_before.powi(4), snow)
         }
     };
-    let ground_heat =
-        (-(emissivity * STEFAN_BOLTZMANN_W_M2_K4 * previous_surface_temperature_k.powi(3)))
-            .mul_add(4.0 * temperature_change_k, ground_heat);
-    let ground_heat =
-        ground_heat - (ground_latent_heat + energy.corrected_ground_sensible_heat_w_m2);
-    // 降水显热两项：内核把**每一项**熔进累加器（`_1768`/`_1772`），不是先求和再加。
-    // 这里与 `zerr` 共用 [`add_precipitation_heat`]，别再写第二套。
-    let ground_heat = add_precipitation_heat(energy, ground_heat);
+    let longwave_change_coefficient =
+        emissivity * STEFAN_BOLTZMANN_W_M2_K4 * previous_surface_temperature_k.powi(3);
+    // 带河湖流的空间内核（`gimpleL`，bb 483/484）：`4*tinc` 项与两项降水显热都是先乘、再平铺加减：
+    //   _1844 = _1838 - (emg*stefnc*t^3)*(tinc*4) ; _1847 = _1844 - (fevpg*htvp + fseng)
+    //   _1855 = _1847 + (pg_rain*cpliq)*dT ; _1859 = _1855 + dT*(pg_snow*cpice)
+    // `errore`（`f_zerr`）那条链在两种构建里都熔，仍走 [`add_precipitation_heat`]。
+    let ground_heat = if energy.river_lake_flow_build {
+        let ground_heat = ground_heat - longwave_change_coefficient * (4.0 * temperature_change_k);
+        let ground_heat =
+            ground_heat - (ground_latent_heat + energy.corrected_ground_sensible_heat_w_m2);
+        let difference =
+            energy.precipitation.precipitation_temperature_k - energy.surface_temperature_k;
+        let ground_heat = ground_heat
+            + WATER_HEAT_CAPACITY_J_KG_K * energy.interception.ground_rain_kg_m2_s * difference;
+        ground_heat
+            + difference * (ICE_HEAT_CAPACITY_J_KG_K * energy.interception.ground_snow_kg_m2_s)
+    } else {
+        let ground_heat =
+            (-longwave_change_coefficient).mul_add(4.0 * temperature_change_k, ground_heat);
+        let ground_heat =
+            ground_heat - (ground_latent_heat + energy.corrected_ground_sensible_heat_w_m2);
+        // 降水显热两项：内核把**每一项**熔进累加器（`_1768`/`_1772`），不是先求和再加。
+        // 这里与 `zerr` 共用 [`add_precipitation_heat`]，别再写第二套。
+        add_precipitation_heat(energy, ground_heat)
+    };
     // `MOD_Vars_1DAccFluxes.F90:2087`：`rnet = sabg + sabvsun + sabvsha - olrg + forc_frl`。
     //
     // **曾经写成 `fsena + lfevpa + fgrnd`**，理由是"与辐射式恒等"。那个恒等只在

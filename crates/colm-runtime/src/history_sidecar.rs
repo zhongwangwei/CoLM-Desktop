@@ -88,6 +88,9 @@ pub struct SidecarConfig {
     pub pft_or_pc: bool,
     pub bgc: bool,
     pub crop: bool,
+    /// 内核编进了 `GridRiverLakeFlow`（空间构建）：`history_schema = 2`，并多一个
+    /// `history_river_required`（河道累加器有值时为 1，另写河道旁车）。
+    pub river_lake_flow: bool,
 }
 
 /// 一个累加器的原始和。
@@ -142,8 +145,9 @@ pub fn write_sidecar(
         file.add_dimension("urban", config.urban_patches)?;
     }
     let per_patch = |value: f64| vec![value; patches];
+    let schema = if config.river_lake_flow { 2.0 } else { 1.0 };
     for (field, value) in [
-        ("history_schema", 1.0),
+        ("history_schema", schema),
         ("history_freq", f64::from(config.frequency_code)),
         ("history_nac", window.steps as f64),
     ] {
@@ -190,6 +194,17 @@ pub fn write_sidecar(
                 .put_values(&values, ..)
                 .with_context(|| format!("cannot write {}", entry.name))?;
         }
+    }
+    // `river_active`：河道累加器（`acctime_ucat`）有值才为 1。河道还没移植，区间跨过重启时
+    // 那份河道旁车写不出来，只好拒绝；区间已经关上时河道累加器也已清零，标记就是 0。
+    if config.river_lake_flow {
+        ensure!(
+            window.steps == 0,
+            "the history window spans this restart, but the river-lake history sidecar is not \
+             ported yet; choose a restart frequency that closes the history window"
+        );
+        file.add_variable::<f64>("history_river_required", &["patch"])?
+            .put_values(&per_patch(0.0), ..)?;
     }
     // 上游先写 0、全部转存完再改成 1（`complete_history_acc_restart`）；落盘结果只有 1。
     file.add_variable::<f64>("history_complete", &["patch"])?
@@ -286,7 +301,9 @@ pub fn read_sidecar(
         Ok(values)
     };
     ensure!(
-        marker("history_schema")?.iter().all(|&value| value == 1.0),
+        marker("history_schema")?
+            .iter()
+            .all(|&value| value == if config.river_lake_flow { 2.0 } else { 1.0 }),
         "unsupported land-history sidecar schema in {}",
         sidecar.display()
     );

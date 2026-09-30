@@ -230,3 +230,46 @@ fn inconsistent_sidecars_are_refused() {
         "{error}"
     );
 }
+
+/// 空间构建（编进 `GridRiverLakeFlow`）：`history_schema = 2`、多一个 `history_river_required = 0`；
+/// 区间跨过重启时要写河道旁车，还没移植，拒绝而不是写一份残缺的旁车。
+#[test]
+fn river_lake_builds_write_schema_two() {
+    let directory = scratch_directory("river");
+    let sidecar = directory.join("s.nc");
+    let river = SidecarConfig {
+        frequency_code: 3,
+        river_lake_flow: true,
+        ..SidecarConfig::default()
+    };
+    write_sidecar(&sidecar, 2, &river, &[HistoryWindow::default()]).unwrap();
+    let file = netcdf::open(&sidecar).unwrap();
+    let names = file
+        .variables()
+        .map(|variable| variable.name())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        names,
+        vec![
+            "history_schema",
+            "history_freq",
+            "history_nac",
+            "history_river_required",
+            "history_complete"
+        ]
+    );
+    let values = |name: &str| {
+        file.variable(name)
+            .unwrap()
+            .get_values::<f64, _>(..)
+            .unwrap()
+    };
+    assert_eq!(values("history_schema"), vec![2.0, 2.0]);
+    assert_eq!(values("history_river_required"), vec![0.0, 0.0]);
+    drop(file);
+
+    let open = sidecar.with_file_name("open.nc");
+    let error = write_sidecar(&open, 1, &river, &[window()]).unwrap_err();
+    assert!(error.to_string().contains("river-lake"), "{error}");
+    let _ = std::fs::remove_dir_all(&directory);
+}

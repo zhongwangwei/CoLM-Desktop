@@ -2,7 +2,7 @@
 //!
 //! 每个 patch 的模板只知道自己：它给出的覆盖量要么是"以输入重启为底、只换了自己那一块"的整变量
 //! （主重启的写法），要么只有自己那一块（BGC/PFT 状态直接导出的写法）。这里按变量最外层的
-//! `patch`/`pft` 维把各 patch 的那一块拼回去；没有这两维的变量取第一个 patch 的值。
+//! `patch`/`pft` 维把各 patch 的那一块拼回去；没有这两维的变量取第一个给出它的 patch 的值；某个 patch 没覆盖的变量保留输入重启里它那一块。
 
 use std::ops::Range;
 
@@ -17,6 +17,9 @@ pub struct PatchSlot {
 }
 
 /// 把各 patch 的覆盖量（与 `slots` 一一对应）合成对 `source` 整变量的覆盖。
+///
+/// 变量取所有 patch 覆盖量的并集（按首次出现的顺序）：空间算例里土壤、冰川、湖混在一起，各自改写的
+/// 变量不同；某个 patch 没有覆盖的变量保留输入重启里它那一块 —— 与上游"模块变量没被改写就原样写回"一致。
 pub fn merge_overrides(
     source: &RestartFile,
     slots: &[PatchSlot],
@@ -28,12 +31,16 @@ pub fn merge_overrides(
     );
     let patches = source.dimensions().get("patch").copied();
     let pfts = source.dimensions().get("pft").copied();
-    let mut per_patch = per_patch.into_iter();
-    let first = per_patch.next().context("checked above")?;
-    let others: Vec<Vec<RestartOverride>> = per_patch.collect();
-    let mut merged = Vec::with_capacity(first.len());
-    for (index, head) in first.into_iter().enumerate() {
-        let name = head.name.clone();
+    let mut names: Vec<String> = Vec::new();
+    for list in &per_patch {
+        for given in list {
+            if !names.contains(&given.name) {
+                names.push(given.name.clone());
+            }
+        }
+    }
+    let mut merged = Vec::with_capacity(names.len());
+    for name in names {
         let dims = source
             .variable_dimensions(&name)
             .with_context(|| format!("the restart has no variable {name} to override"))?;
@@ -44,7 +51,14 @@ pub fn merge_overrides(
             _ => None,
         };
         let Some((count, dim)) = block else {
-            merged.push(head);
+            // 没有 patch/pft 维：取第一个给出它的 patch。
+            let first = per_patch
+                .iter()
+                .flatten()
+                .find(|given| given.name == name)
+                .expect("the name came from one of the lists")
+                .clone();
+            merged.push(first);
             continue;
         };
         let whole = whole_values(source, &name)?;
@@ -54,14 +68,17 @@ pub fn merge_overrides(
         );
         let chunk = whole.len() / count;
         let mut values = whole;
-        let mut place = |slot: &PatchSlot, given: &RestartOverride| -> Result<()> {
+        for (slot, list) in slots.iter().zip(&per_patch) {
+            let Some(given) = list.iter().find(|given| given.name == name) else {
+                continue;
+            };
             let range = if dim == "patch" {
                 slot.patch * chunk..(slot.patch + 1) * chunk
             } else {
                 slot.pfts.start * chunk..slot.pfts.end * chunk
             };
             let own = if given.values.len() == values.len() {
-                &given.values[range.clone()]
+                given.values[range.clone()].to_vec()
             } else {
                 ensure!(
                     given.values.len() == range.len(),
@@ -72,19 +89,9 @@ pub fn merge_overrides(
                     values.len(),
                     range.len()
                 );
-                &given.values[..]
+                given.values.clone()
             };
-            values[range].copy_from_slice(own);
-            Ok(())
-        };
-        place(&slots[0], &head)?;
-        for (slot, list) in slots[1..].iter().zip(&others) {
-            let given = list
-                .get(index)
-                .filter(|given| given.name == name)
-                .or_else(|| list.iter().find(|given| given.name == name))
-                .with_context(|| format!("patch {} did not override {name}", slot.patch))?;
-            place(slot, given)?;
+            values[range].copy_from_slice(&own);
         }
         merged.push(RestartOverride::new(name, values));
     }

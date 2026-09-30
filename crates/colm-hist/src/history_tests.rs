@@ -263,3 +263,80 @@ fn a_dimension_without_a_declared_size_is_refused() {
     let error = buffers.declare(&[unsupported.name]).unwrap_err();
     assert!(error.to_string().contains("ens"), "{error}");
 }
+
+/// 网格写出（`flux_map_and_write_2d`）：计入但缺测的 patch 只进分母；未计入的两边都不进；
+/// 分母不超过 `1e-5` 的格子写 `spval`；静态场原样写出。
+#[test]
+fn gridded_history_aggregates_by_area_and_filter() {
+    let dims = HistoryDimensions {
+        patch: 3,
+        soil: 10,
+        lake: 10,
+        snow_layers: 5,
+        vegnodes: 4,
+        band: 2,
+        radiation_types: 2,
+        sensor: 1,
+    };
+    let site = HistorySite {
+        latitude_degrees: 0.0,
+        longitude_degrees: 0.0,
+    };
+    // 两格：格子 0 由 patch 0、1 共享，格子 1 只有 patch 2。
+    let grid = std::sync::Arc::new(HistoryGrid {
+        lat: vec![0.25],
+        lon: vec![0.25, 0.75],
+        lat_s: vec![0.0],
+        lat_n: vec![0.5],
+        lon_w: vec![0.0, 0.5],
+        lon_e: vec![0.5, 1.0],
+        parts: vec![vec![(0, 3.0)], vec![(0, 1.0)], vec![(1, 2.0)]],
+        statics: vec![(
+            "landarea".to_owned(),
+            "land area".to_owned(),
+            "km2".to_owned(),
+            vec![4.0, 2.0],
+        )],
+    });
+    let mut buffers = HistoryBuffers::new(dims, site, 1).with_grid(grid).unwrap();
+    buffers.declare(&["t_grnd", "fsena"]).unwrap();
+    buffers.set_time(0, 60).unwrap();
+    // t_grnd：patch 0 = 10、patch 1 计入但缺测、patch 2 未计入。
+    buffers.select_patch(Some(0)).unwrap();
+    buffers.set_patch_scalar("t_grnd", 0, 10.0).unwrap();
+    buffers.include("t_grnd", 0).unwrap();
+    buffers.include("fsena", 0).unwrap();
+    buffers.set_patch_scalar("fsena", 0, 1.0).unwrap();
+    buffers.select_patch(Some(1)).unwrap();
+    buffers.include("t_grnd", 0).unwrap();
+    buffers.include("fsena", 0).unwrap();
+    buffers.set_patch_scalar("fsena", 0, 5.0).unwrap();
+    buffers.select_patch(Some(2)).unwrap();
+    buffers.set_patch_scalar("t_grnd", 0, 99.0).unwrap();
+    buffers.select_patch(None).unwrap();
+    let path = scratch("gridded");
+    buffers.write(&path).unwrap();
+    let file = netcdf::open(&path).unwrap();
+    let values = |name: &str| {
+        file.variable(name)
+            .unwrap()
+            .get_values::<f64, _>(..)
+            .unwrap()
+    };
+    // 格子 0：(10*3)/(3+1)；格子 1 没有计入的 patch → spval。
+    assert_eq!(values("f_t_grnd"), vec![30.0 / 4.0, MISSING_VALUE]);
+    assert_eq!(
+        values("f_fsena"),
+        vec![(1.0 * 3.0 + 5.0 * 1.0) / 4.0, MISSING_VALUE]
+    );
+    assert_eq!(values("landarea"), vec![4.0, 2.0]);
+    let t_grnd = file.variable("f_t_grnd").unwrap();
+    let dimensions = t_grnd
+        .dimensions()
+        .iter()
+        .map(|dimension| dimension.name())
+        .collect::<Vec<_>>();
+    assert_eq!(dimensions, vec!["time", "lat", "lon"]);
+    drop(file);
+    let _ = std::fs::remove_file(&path);
+}

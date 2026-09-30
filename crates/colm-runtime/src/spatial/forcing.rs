@@ -487,6 +487,23 @@ impl GriddedForcing {
         &self.grid
     }
 
+    /// `forc_hgt_u/t/q`：namelist 常数经 `grid2pset` 映射到每个 patch 的值（不随时间变）。
+    pub fn mapped_heights(
+        &self,
+        mapping: &super::mapping::AreaWeightedMapping,
+    ) -> Vec<(f64, f64, f64)> {
+        (0..mapping.parts.len())
+            .map(|iset| {
+                let constant = |value: f64| mapping.grid_to_set(iset, |_, _| value);
+                (
+                    constant(self.config.height_wind_m),
+                    constant(self.config.height_temperature_m),
+                    constant(self.config.height_humidity_m),
+                )
+            })
+            .collect()
+    }
+
     /// `read_forcing` 在格上的那一半。`now` 是 `jdate`（步首），`co2` 是 `pco2m` 的体积分数。
     pub fn step(&mut self, now: CalendarTime, co2_volume_fraction: f64) -> Result<CellForcing> {
         let now = Stamp::from_calendar(now);

@@ -92,6 +92,33 @@ pub struct HistorySite {
     pub longitude_degrees: f64,
 }
 
+/// 空间算例的 history 网格（`MOD_HistGridded`）：写文件时把 patch 维按面积加权聚合到 lat/lon 窗口。
+///
+/// 每个格子的值是 `Σ (v/1)*areapart / sumarea`：分子逐 patch、逐份按顺序普通相加（`pset2grid`，
+/// 值为 `spval` 的 patch 跳过，第一份直接赋值），分母 `sumarea` 是该变量"计入"的 patch 的份面积和
+/// （`get_sumarea`，同样的顺序）；`sumarea <= 1e-5` 的格子写 `spval`。
+#[derive(Debug, Clone, PartialEq)]
+pub struct HistoryGrid {
+    /// 格心（文件里是 `float lat(lat)`/`float lon(lon)`），按文件顺序。
+    pub lat: Vec<f64>,
+    pub lon: Vec<f64>,
+    pub lat_s: Vec<f64>,
+    pub lat_n: Vec<f64>,
+    pub lon_w: Vec<f64>,
+    pub lon_e: Vec<f64>,
+    /// 每个 patch 覆盖的格子：`(ilat*nlon + ilon, 份面积)`，按映射的份顺序。
+    pub parts: Vec<Vec<(usize, f64)>>,
+    /// 只在建文件时写一次的二维量（`landarea`、`landfraction`、`area_wetland`、`area_lake`）：
+    /// `(名字, long_name, units, 值)`。
+    pub statics: Vec<(String, String, String, Vec<f64>)>,
+}
+
+impl HistoryGrid {
+    fn cells(&self) -> usize {
+        self.lat.len() * self.lon.len()
+    }
+}
+
 /// 内存里累积的一个 history 分组。
 #[derive(Debug, Clone)]
 pub struct HistoryBuffers {
@@ -105,6 +132,10 @@ pub struct HistoryBuffers {
     layers: BTreeMap<&'static str, usize>,
     /// 选中的 patch：写入只落到这一格，值只给一个 patch 的（见 [`Self::select_patch`]）。
     selected: Option<usize>,
+    /// 网格写出（空间算例）；`None` 为单点的 `patch` 维写法。
+    grid: Option<std::sync::Arc<HistoryGrid>>,
+    /// 变量名 → `(record, patch)` 是否计入上游的 `filter`（网格聚合的分母）。
+    included: BTreeMap<&'static str, Vec<bool>>,
 }
 
 impl HistoryBuffers {
@@ -118,7 +149,46 @@ impl HistoryBuffers {
             values: BTreeMap::new(),
             layers: BTreeMap::new(),
             selected: None,
+            grid: None,
+            included: BTreeMap::new(),
         }
+    }
+
+    /// 改成网格写出（空间算例）。`grid.parts` 的份数必须等于 patch 数。
+    pub fn with_grid(mut self, grid: std::sync::Arc<HistoryGrid>) -> Result<Self> {
+        ensure!(
+            grid.parts.len() == self.dims.patch,
+            "the history grid maps {} patches but the buffers hold {}",
+            grid.parts.len(),
+            self.dims.patch
+        );
+        ensure!(
+            grid.statics
+                .iter()
+                .all(|(_, _, _, values)| values.len() == grid.cells()),
+            "a static history field does not cover the grid window"
+        );
+        self.grid = Some(grid);
+        Ok(self)
+    }
+
+    /// 选中的 patch 在第 `record` 条记录里计入 `name` 的 `filter`（网格聚合的分母要它）。
+    pub fn include(&mut self, name: &str, record: usize) -> Result<()> {
+        ensure!(
+            record < self.records,
+            "record {record} is outside the {}-record group",
+            self.records
+        );
+        let (first, count) = self.patch_span();
+        let patches = self.dims.patch;
+        let slots = self
+            .included
+            .get_mut(name)
+            .with_context(|| format!("{name} was not declared with declare()"))?;
+        for slot in &mut slots[record * patches + first..record * patches + first + count] {
+            *slot = true;
+        }
+        Ok(())
     }
 
     /// 之后的写入只落到第 `patch` 个 patch，调用方按**一个** patch 给值（多 patch 单点：每个 patch
@@ -187,6 +257,8 @@ impl HistoryBuffers {
                 entry.name,
                 vec![MISSING_VALUE; self.records * self.dims.patch * layers],
             );
+            self.included
+                .insert(entry.name, vec![false; self.records * self.dims.patch]);
         }
         Ok(())
     }
@@ -196,6 +268,7 @@ impl HistoryBuffers {
     pub fn undeclare(&mut self, name: &str) {
         self.values.remove(name);
         self.layers.remove(name);
+        self.included.remove(name);
     }
 
     pub fn declares(&self, name: &str) -> bool {
@@ -297,6 +370,15 @@ impl HistoryBuffers {
     /// 该文件最后一条记录时才落盘。运行中途 abort 时磁盘上留下的就是这样一个文件（无 `time`、无 `sensor`）。
     pub fn write_header(&self, path: impl AsRef<Path>) -> Result<()> {
         let path = path.as_ref();
+        if let Some(grid) = &self.grid {
+            let mut file = netcdf::create(path)
+                .with_context(|| format!("cannot create {}", path.display()))?;
+            file.add_unlimited_dimension("time")?;
+            self.define_grid(&mut file, grid)?;
+            self.put_grid_coordinates(&mut file, grid)?;
+            file.close()?;
+            return Ok(());
+        }
         let mut file =
             netcdf::create(path).with_context(|| format!("cannot create {}", path.display()))?;
         file.add_dimension("patch", self.dims.patch)?;
@@ -334,6 +416,9 @@ impl HistoryBuffers {
 
     pub fn write(&self, path: impl AsRef<Path>) -> Result<()> {
         let path = path.as_ref();
+        if let Some(grid) = self.grid.clone() {
+            return self.write_gridded(path, &grid);
+        }
         let mut file =
             netcdf::create(path).with_context(|| format!("cannot create {}", path.display()))?;
 
@@ -410,6 +495,167 @@ impl HistoryBuffers {
             file.variable_mut(&file_name)
                 .with_context(|| format!("{file_name} disappeared after definition"))?
                 .put_values(values, netcdf::Extents::All)?;
+        }
+        file.close()?;
+        Ok(())
+    }
+}
+
+impl HistoryBuffers {
+    /// 网格文件的维度与坐标（`hist_gridded_write_time` + `ncio_write_colm_dimension`）。
+    fn define_grid(&self, file: &mut netcdf::FileMut, grid: &HistoryGrid) -> Result<()> {
+        file.add_dimension("lat", grid.lat.len())?;
+        file.add_dimension("lon", grid.lon.len())?;
+        for (name, long_name, units) in [
+            ("lat", "latitude", "degrees_north"),
+            ("lon", "longitude", "degrees_east"),
+        ] {
+            let mut variable = file.add_variable::<f32>(name, &[name])?;
+            variable.put_attribute("long_name", long_name)?;
+            variable.put_attribute("units", units)?;
+        }
+        for (name, dimension) in [
+            ("lat_s", "lat"),
+            ("lat_n", "lat"),
+            ("lon_w", "lon"),
+            ("lon_e", "lon"),
+        ] {
+            file.add_variable::<f64>(name, &[dimension])?;
+        }
+        for (name, _, values) in self.dims.index_variables() {
+            file.add_dimension(name, values.len())?;
+        }
+        for (name, long_name, _) in self.dims.index_variables() {
+            let mut variable = file.add_variable::<i32>(name, &[name])?;
+            variable.put_attribute("long_name", long_name)?;
+        }
+        Ok(())
+    }
+
+    fn put_grid_coordinates(&self, file: &mut netcdf::FileMut, grid: &HistoryGrid) -> Result<()> {
+        let as_f32 = |values: &[f64]| values.iter().map(|&v| v as f32).collect::<Vec<_>>();
+        file.variable_mut("lat")
+            .context("lat disappeared")?
+            .put_values(&as_f32(&grid.lat), netcdf::Extents::All)?;
+        file.variable_mut("lon")
+            .context("lon disappeared")?
+            .put_values(&as_f32(&grid.lon), netcdf::Extents::All)?;
+        for (name, values) in [
+            ("lat_s", &grid.lat_s),
+            ("lat_n", &grid.lat_n),
+            ("lon_w", &grid.lon_w),
+            ("lon_e", &grid.lon_e),
+        ] {
+            file.variable_mut(name)
+                .with_context(|| format!("{name} disappeared"))?
+                .put_values(values, netcdf::Extents::All)?;
+        }
+        for (name, _, values) in self.dims.index_variables() {
+            file.variable_mut(name)
+                .with_context(|| format!("{name} disappeared after definition"))?
+                .put_values(&values, netcdf::Extents::All)?;
+        }
+        Ok(())
+    }
+
+    /// `flux_map_and_write_*`：逐变量、逐记录、逐层按映射聚合后写出。
+    fn write_gridded(&self, path: &Path, grid: &HistoryGrid) -> Result<()> {
+        let mut file =
+            netcdf::create(path).with_context(|| format!("cannot create {}", path.display()))?;
+        file.add_dimension("sensor", self.dims.sensor)?;
+        file.add_unlimited_dimension("time")?;
+        self.define_grid(&mut file, grid)?;
+        {
+            let mut time = file.add_variable::<i32>("time", &["time"])?;
+            time.put_attribute("long_name", "time")?;
+            time.put_attribute("units", TIME_UNITS)?;
+        }
+        for (name, long_name, units, _) in &grid.statics {
+            let mut variable = file.add_variable::<f64>(name, &["lat", "lon"])?;
+            variable.put_attribute("long_name", long_name.as_str())?;
+            variable.put_attribute("units", units.as_str())?;
+            variable.put_attribute("missing_value", MISSING_VALUE)?;
+        }
+        for name in self.values.keys() {
+            let entry = VARS
+                .iter()
+                .find(|entry| entry.name == *name)
+                .expect("declare() only stores names found in the gate table");
+            let mut dimensions = Vec::with_capacity(3 + entry.dims.len());
+            dimensions.push("time");
+            dimensions.extend_from_slice(entry.dims);
+            dimensions.push("lat");
+            dimensions.push("lon");
+            let mut variable =
+                file.add_variable::<f64>(&file_variable_name(entry.name), &dimensions)?;
+            if let Some(long_name) = entry.long_name {
+                variable.put_attribute("long_name", long_name)?;
+            }
+            if let Some(units) = entry.units {
+                variable.put_attribute("units", units)?;
+            }
+            variable.put_attribute("missing_value", MISSING_VALUE)?;
+        }
+        self.put_grid_coordinates(&mut file, grid)?;
+        file.variable_mut("time")
+            .context("time disappeared after definition")?
+            .put_values(&self.times, netcdf::Extents::All)?;
+        for (name, _, _, values) in &grid.statics {
+            file.variable_mut(name)
+                .with_context(|| format!("{name} disappeared after definition"))?
+                .put_values(values, netcdf::Extents::All)?;
+        }
+        let cells = grid.cells();
+        let patches = self.dims.patch;
+        for (name, values) in &self.values {
+            let layers = self.layers[name];
+            let included = &self.included[name];
+            let mut out = vec![MISSING_VALUE; self.records * layers * cells];
+            for record in 0..self.records {
+                // `get_sumarea (sumarea, filter)`：计入的 patch 逐份相加。
+                let mut area = vec![0.0; cells];
+                for patch in 0..patches {
+                    if !included[record * patches + patch] {
+                        continue;
+                    }
+                    for &(cell, part) in &grid.parts[patch] {
+                        area[cell] += part;
+                    }
+                }
+                for layer in 0..layers {
+                    let mut sum = vec![MISSING_VALUE; cells];
+                    for patch in 0..patches {
+                        if !included[record * patches + patch] {
+                            continue;
+                        }
+                        let value = values[(record * patches + patch) * layers + layer];
+                        if value == MISSING_VALUE {
+                            continue;
+                        }
+                        for &(cell, part) in &grid.parts[patch] {
+                            // `pdata/sumwt*areapart`（`sumwt = 1`），再普通相加。
+                            let term = value / 1.0 * part;
+                            sum[cell] = if sum[cell] == MISSING_VALUE {
+                                term
+                            } else {
+                                sum[cell] + term
+                            };
+                        }
+                    }
+                    let base = (record * layers + layer) * cells;
+                    for cell in 0..cells {
+                        out[base + cell] = if area[cell] > 0.00001 && sum[cell] != MISSING_VALUE {
+                            sum[cell] / area[cell]
+                        } else {
+                            MISSING_VALUE
+                        };
+                    }
+                }
+            }
+            let file_name = file_variable_name(name);
+            file.variable_mut(&file_name)
+                .with_context(|| format!("{file_name} disappeared after definition"))?
+                .put_values(&out, netcdf::Extents::All)?;
         }
         file.close()?;
         Ok(())

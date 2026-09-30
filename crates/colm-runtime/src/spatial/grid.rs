@@ -129,6 +129,90 @@ impl LatLonGrid {
         Ok(grid)
     }
 
+    /// `grid_define_by_res`（`nint(360/lon_res)` × `nint(180/lat_res)`）+ `grid_define_by_ndims`：
+    /// 自北向南、自 -180° 向东；`180.0 / n` 与 `360.0 / n` 是**单精度**常数除以整数。
+    pub fn define_by_res(lon_res: f64, lat_res: f64) -> Result<Self> {
+        ensure!(
+            lon_res > 0.0 && lat_res > 0.0,
+            "history grid resolutions must be positive"
+        );
+        let nlon = (360.0 / lon_res).round() as usize;
+        let nlat = (180.0 / lat_res).round() as usize;
+        ensure!(nlon > 0 && nlat > 0, "the history grid has no cells");
+        let del_lat = f64::from(180.0_f32 / nlat as f32);
+        let del_lon = f64::from(360.0_f32 / nlon as f32);
+        let lat_s = (1..=nlat).map(|i| 90.0 - del_lat * i as f64).collect();
+        let lat_n = (1..=nlat)
+            .map(|i| 90.0 - del_lat * (i - 1) as f64)
+            .collect();
+        let lon_w = (1..=nlon)
+            .map(|i| -180.0 + del_lon * (i - 1) as f64)
+            .collect();
+        let mut lon_e: Vec<f64> = (1..=nlon).map(|i| -180.0 + del_lon * i as f64).collect();
+        lon_e[nlon - 1] = -180.0;
+        let mut grid = Self {
+            lat_s,
+            lat_n,
+            lon_w,
+            lon_e,
+            yinc: 1,
+            rlon: Vec::new(),
+            rlat: Vec::new(),
+        };
+        grid.normalize()?;
+        grid.set_centers()?;
+        Ok(grid)
+    }
+
+    /// `grid_set_blocks` 选出的、落在 `DEF_domain` 里的行与列（0 起，按文件顺序）；
+    /// history 文件只写这一窗（`set_grid_concat`）。
+    pub fn domain_window(&self, bounds: GridBounds) -> Result<(Vec<usize>, Vec<usize>)> {
+        let west = normalize_longitude(bounds.west)?;
+        let east = normalize_longitude(bounds.east)?;
+        let nlat = self.nlat();
+        let nlon = self.nlon();
+        let mut rows = Vec::new();
+        if self.yinc == 1 {
+            let mut ilat = if bounds.south < self.lat_s[0] {
+                0
+            } else {
+                find_nearest_south(bounds.south, &self.lat_s)
+            };
+            while ilat < nlat && self.lat_s[ilat] < bounds.north {
+                rows.push(ilat);
+                ilat += 1;
+            }
+        } else {
+            let mut ilat = if bounds.north > self.lat_n[0] {
+                0
+            } else {
+                find_nearest_north(bounds.north, &self.lat_n)
+            };
+            while ilat < nlat && self.lat_n[ilat] > bounds.south {
+                rows.push(ilat);
+                ilat += 1;
+            }
+        }
+        let first = if self.lon_w[0] != self.lon_e[nlon - 1]
+            && lon_between_floor(west, self.lon_e[nlon - 1], self.lon_w[0])
+        {
+            0
+        } else {
+            find_nearest_west(west, &self.lon_w)
+        };
+        let mut columns = vec![first];
+        let mut ilon = (first + 1) % nlon;
+        while ilon != first && lon_between_floor(self.lon_w[ilon], west, east) {
+            columns.push(ilon);
+            ilon = (ilon + 1) % nlon;
+        }
+        ensure!(
+            !rows.is_empty(),
+            "the history grid has no row inside the domain"
+        );
+        Ok((rows, columns))
+    }
+
     /// `grid_normalize`。
     fn normalize(&mut self) -> Result<()> {
         for lon in self.lon_w.iter_mut().chain(self.lon_e.iter_mut()) {

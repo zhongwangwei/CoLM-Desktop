@@ -180,6 +180,9 @@ pub struct LandPhysicsParameters {
     pub supercool_water: bool,
     /// `DEF_URBAN_RUN`：城市模型开关（打开时上游关掉 WUEST/超冷水/PHS/split）。
     pub urban_run: bool,
+    /// 对照内核编进了 `GridRiverLakeFlow`（空间构建）。只改变几处收缩形状，见
+    /// [`colm_core::StandardLctEnergyInput::river_lake_flow_build`]。
+    pub river_lake_flow_build: bool,
     /// `DEF_TUNING_SNOW_COVER_EXPONENT`：`snowfraction` 的雪密度指数。
     pub snow_cover_exponent: f64,
     pub snow_roughness_m: f64,
@@ -232,6 +235,9 @@ pub struct StandardLctStepBinding {
     /// 分压是**每步**量：上游 `MOD_Forcing` 把 `forc_pbot` 乘上这个分数
     /// （CO2）与常数 0.209（O2），所以海拔一变化分压就跟着变。
     pub co2_volume_fraction: f64,
+    /// 空间算例：`(forc_pco2m, forc_po2m)` 已由 `grid2pset` 逐量映射好（格上先乘分数再映射，
+    /// 与在 patch 上用 `forc_pbot` 相乘舍入不同）。单点为 `None`，按 `pbot × 分数` 算。
+    pub partial_pressures_pa: Option<(f64, f64)>,
 }
 
 /// 原时间重启里续跑需要用到的整变量（所有 patch）。
@@ -655,7 +661,7 @@ struct SnowSoilTemplate {
 /// 所以这里**只支持 `USE_SITE_LAI`**，其余情况显式报错而不是静默用旧值。
 #[derive(Debug, Clone)]
 pub struct MonthlyLeafAreaIndex {
-    vegetation: colm_init::SinglePointMonthlyVegetation,
+    vegetation: LeafAreaSource,
     /// `DEF_LAI_CHANGE_YEARLY`：为真按**当前年**取，否则按 `DEF_LC_YEAR`。
     change_yearly: bool,
     land_cover_year: i32,
@@ -667,7 +673,45 @@ pub struct MonthlyLeafAreaIndex {
     urban_year_bounds: Option<(i32, i32)>,
 }
 
+/// 逐月 LAI/SAI 的来源：单点的站点表，或空间算例 `landdata/LAI/<year>/` 的分块向量。
+#[derive(Debug, Clone)]
+enum LeafAreaSource {
+    SinglePoint(colm_init::SinglePointMonthlyVegetation),
+    /// `LAI_readin` 的非单点支（`MOD_LAIReadin.F90:94-114`）：`LAI_patches<MM>_<block>.nc` 与
+    /// `SAI_patches<MM>_<block>.nc` 里第 `patch` 个值；年份夹到 `[DEF_LAI_START_YEAR, DEF_LAI_END_YEAR]`。
+    Grid {
+        directory: std::path::PathBuf,
+        block: String,
+        patch: usize,
+        start_year: i32,
+        end_year: i32,
+    },
+}
+
 impl MonthlyLeafAreaIndex {
+    /// 空间算例的逐月 LAI（`landdata/LAI`）。
+    pub fn read_grid(
+        landdata: impl AsRef<std::path::Path>,
+        block: &str,
+        patch: usize,
+        change_yearly: bool,
+        land_cover_year: i32,
+        (start_year, end_year): (i32, i32),
+    ) -> Self {
+        Self {
+            vegetation: LeafAreaSource::Grid {
+                directory: landdata.as_ref().join("LAI"),
+                block: block.to_string(),
+                patch,
+                start_year,
+                end_year,
+            },
+            change_yearly,
+            land_cover_year,
+            urban_year_bounds: None,
+        }
+    }
+
     /// 城市 patch 的树冠 LAI/SAI（`MOD_Urban_LAIReadin.F90`）。
     pub fn read_urban(
         path: impl AsRef<std::path::Path>,
@@ -677,7 +721,9 @@ impl MonthlyLeafAreaIndex {
         end_year: i32,
     ) -> Result<Self> {
         Ok(Self {
-            vegetation: colm_init::read_single_point_urban_monthly_vegetation(path)?,
+            vegetation: LeafAreaSource::SinglePoint(
+                colm_init::read_single_point_urban_monthly_vegetation(path)?,
+            ),
             change_yearly,
             land_cover_year,
             urban_year_bounds: Some((start_year, end_year)),
@@ -697,7 +743,9 @@ impl MonthlyLeafAreaIndex {
              DEF_LAI_MONTHLY = .false."
         );
         Ok(Self {
-            vegetation: colm_init::read_single_point_monthly_vegetation(path)?,
+            vegetation: LeafAreaSource::SinglePoint(
+                colm_init::read_single_point_monthly_vegetation(path)?,
+            ),
             change_yearly,
             land_cover_year,
             urban_year_bounds: None,
@@ -719,9 +767,32 @@ impl MonthlyLeafAreaIndex {
         } else {
             self.land_cover_year
         };
+        let vegetation = match &self.vegetation {
+            LeafAreaSource::SinglePoint(vegetation) => vegetation,
+            LeafAreaSource::Grid {
+                directory,
+                block,
+                patch,
+                start_year,
+                end_year,
+            } => {
+                let year = year.max(*start_year).min(*end_year);
+                let read = |stem: &str| -> Result<f64> {
+                    let path = directory
+                        .join(format!("{year:04}"))
+                        .join(format!("{stem}{month:02}_{block}.nc"));
+                    let file = colm_init::RestartFile::open(&path)
+                        .with_context(|| format!("cannot open {}", path.display()))?;
+                    file.floats(stem)?.get(*patch).copied().with_context(|| {
+                        format!("{} has no {stem} value for patch {patch}", path.display())
+                    })
+                };
+                return Ok((read("LAI_patches")?, read("SAI_patches")?));
+            }
+        };
         match self.urban_year_bounds {
-            Some((start, end)) => self.vegetation.for_year(year, month, false, start, end),
-            None => self.vegetation.for_year(year, month, true, 0, 0),
+            Some((start, end)) => vegetation.for_year(year, month, false, start, end),
+            None => vegetation.for_year(year, month, true, 0, 0),
         }
     }
 }
@@ -1310,8 +1381,11 @@ fn assemble(
         "the snow-plus-soil template column does not match its layer count"
     );
 
-    // 城市 patch 也带一片水体（`t_lake`/`dz_lake` 在主重启里），所以同样读湖模板。
-    let lake = if patch_type == 4 || patch_type == 1 {
+    // 城市跑法（`DEF_URBAN_RUN`）下 patchtype 1 走 `CoLMMAIN_Urban`，它带一片水体（`t_lake`/`dz_lake`
+    // 在主重启里），所以同样读湖模板。非城市跑法里城市地类走普通 `CoLMMAIN` 的土壤分支
+    // （`CoLMDRIVER.F90:253`：`IF (DEF_URBAN_RUN .and. m == URBAN)`），不装城市/湖模板。
+    let urban_patch = patch_type == 1 && physics.urban_run;
+    let lake = if patch_type == 4 || urban_patch {
         Some(LakeTemplate::read(
             &constant,
             &time,
@@ -1321,7 +1395,7 @@ fn assemble(
     } else {
         None
     };
-    let urban = if patch_type == 1 {
+    let urban = if urban_patch {
         Some(UrbanTemplate::read(
             files,
             &physics,
@@ -1336,9 +1410,9 @@ fn assemble(
         None
     };
     // 城市 patch（1）的 SNICAR 量上游从不改写（见 `physics.rs`），不挂 SNICAR 状态，续跑写出时原样保留。
-    let snicar = if physics.snicar && patch_type != 1 {
+    let snicar = if physics.snicar && !urban_patch {
         ensure!(
-            matches!(patch_type, 0 | 2 | 3 | 4),
+            matches!(patch_type, 0..=4),
             "DEF_USE_SNICAR is not defined for patchtype {patch_type}"
         );
         Some(SnicarTemplate::read(&time, patch)?)
@@ -1633,6 +1707,7 @@ impl StandardLctRestartTemplate {
         StandardLctSoilInput {
             energy: colm_core::StandardLctEnergyInput {
                 dynamic_wetland: physics.dynamic_wetland,
+                river_lake_flow_build: physics.river_lake_flow_build,
                 forcing,
                 precipitation_scheme: physics.precipitation_scheme,
                 interception: colm_core::CanopyInterceptionInput {
@@ -1776,8 +1851,13 @@ impl StandardLctRestartTemplate {
                     // 逐层大气分压：`MOD_Forcing` 用 `forc_pbot` 乘体积分数
                     // （CO2 逐月、O2 恒为 0.209）。写成常数会让高原算例的 O2 偏高
                     // 约一成，而这一点在任何海平面测试里都看不出来。
-                    oxygen_partial_pressure_pa: forcing.bottom_pressure_pa * OXYGEN_VOLUME_FRACTION,
-                    atmospheric_co2_pa: forcing.bottom_pressure_pa * binding.co2_volume_fraction,
+                    oxygen_partial_pressure_pa: binding
+                        .partial_pressures_pa
+                        .map_or(forcing.bottom_pressure_pa * OXYGEN_VOLUME_FRACTION, |p| p.1),
+                    atmospheric_co2_pa: binding.partial_pressures_pa.map_or(
+                        forcing.bottom_pressure_pa * binding.co2_volume_fraction,
+                        |p| p.0,
+                    ),
                     soil_roughness_m: physics.soil_roughness_m,
                     snow_roughness_m: physics.snow_roughness_m,
                     // 同 `GroundFluxInput`：LES 分支读逐步骤的 `hpbl`。

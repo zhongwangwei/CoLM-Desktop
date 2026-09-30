@@ -35,6 +35,7 @@ fn physics(timestep_seconds: f64) -> LandPhysicsParameters {
         variably_saturated_flow: false,
         plant_hydraulics: false,
         urban_run: false,
+        river_lake_flow_build: false,
         plant_hydraulic_parameters: PlantHydraulicParameters::default(),
         plant_hydraulic_overrides: colm_core::PlantHydraulicOverrides::default(),
         vegetation_snow: false,
@@ -107,6 +108,7 @@ fn binding() -> StandardLctStepBinding {
         longitude_radians: 0.0,
         // 2008 年附近约 385 ppm。
         co2_volume_fraction: 385.04e-6,
+        partial_pressures_pa: None,
     }
 }
 
