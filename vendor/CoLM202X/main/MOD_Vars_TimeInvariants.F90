@@ -399,6 +399,12 @@ ENDIF
             allocate (vic_Ds               (numpatch))
             allocate (vic_Ws               (numpatch))
             allocate (vic_c                (numpatch))
+            ! These are only assigned for some runoff/TOPMODEL schemes but always written to the
+            ! constant restart: start from zero instead of whatever the allocator returned.
+            BVIC = 0._r8
+            fsatmax = 0._r8; fsatdcf = 0._r8; topoweti = 0._r8
+            alp_twi = 0._r8; chi_twi = 0._r8; mu_twi  = 0._r8
+            vic_b_infilt = 0._r8; vic_Dsmax = 0._r8; vic_Ds = 0._r8; vic_Ws = 0._r8; vic_c = 0._r8
 
             allocate (hksati       (nl_soil,numpatch))
             allocate (csol         (nl_soil,numpatch))
