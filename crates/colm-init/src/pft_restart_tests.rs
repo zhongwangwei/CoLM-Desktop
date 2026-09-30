@@ -88,7 +88,8 @@ fn pftless_single_point_keeps_an_empty_constant_vector() {
         file.variables()
             .map(|variable| variable.name())
             .collect::<Vec<_>>(),
-        ["pftclass", "pftfrac", "htop_p", "hbot_p", "ncd_p", "ncw_p", "bcw_p"]
+        // 没有树冠结构（截获方案不是 8）时不写 `ncd_p/ncw_p/bcw_p`。
+        ["pftclass", "pftfrac", "htop_p", "hbot_p"]
     );
     for variable in file.variables() {
         assert_eq!(variable.len(), 0);
@@ -339,7 +340,7 @@ fn pft_restart_applies_def_rest_compression_to_constant_and_time_variables() {
     )
     .unwrap();
     let header = ncdump_header(&const_path);
-    for name in ["pftclass", "pftfrac", "ncd_p", "cropfrac"] {
+    for name in ["pftclass", "pftfrac", "cropfrac"] {
         assert_eq!(deflate_level(&header, name), Some(1), "{name}");
     }
 

@@ -469,24 +469,16 @@ pub fn write_constant_restart_block(
     }
     put_f64_1d(&mut file, "htop", &input.canopy.patch_top_m, None)?;
     put_f64_1d(&mut file, "hbot", &input.canopy.patch_bottom_m, None)?;
-    let missing_structure;
-    let structure = match input.canopy_structure {
-        Some(structure) => structure,
-        None => {
-            missing_structure = vec![-1.0e36; patches];
-            CanopyStructureFields {
-                needleleaf_crown_depth_m: &missing_structure,
-                needleleaf_crown_width_m: &missing_structure,
-                broadleaf_crown_width_m: &missing_structure,
-            }
+    // `MOD_Vars_TimeInvariants.F90:791`：只有 `DEF_Interception_scheme == 8` 才写树冠结构；
+    // 调用方只在那时给 `Some`。
+    if let Some(structure) = input.canopy_structure {
+        for (name, values) in [
+            ("ncd", structure.needleleaf_crown_depth_m),
+            ("ncw", structure.needleleaf_crown_width_m),
+            ("bcw", structure.broadleaf_crown_width_m),
+        ] {
+            put_f64_1d(&mut file, name, values, compression)?;
         }
-    };
-    for (name, values) in [
-        ("ncd", structure.needleleaf_crown_depth_m),
-        ("ncw", structure.needleleaf_crown_width_m),
-        ("bcw", structure.broadleaf_crown_width_m),
-    ] {
-        put_f64_1d(&mut file, name, values, compression)?;
     }
 
     if let Some(bedrock) = input.bedrock {

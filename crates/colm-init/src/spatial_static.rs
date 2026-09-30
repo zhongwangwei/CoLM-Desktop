@@ -54,6 +54,8 @@ pub struct SpatialLctStaticConfig<'a> {
     pub use_simple_terrain: bool,
     /// Write the four slope-type and shadow-curve vectors required by regular forcing downscaling.
     pub use_regular_terrain: bool,
+    /// `DEF_Interception_scheme == 8`：读 `cstructure` 并写 `ncd/ncw/bcw`（`MOD_Vars_TimeInvariants.F90:791`）。
+    pub canopy_structure: bool,
 }
 
 impl<'a> SpatialLctStaticConfig<'a> {
@@ -86,6 +88,7 @@ impl<'a> SpatialLctStaticConfig<'a> {
             vic_parameters: VicParameterSource::None,
             use_simple_terrain: false,
             use_regular_terrain: false,
+            canopy_structure: false,
         }
     }
 }
@@ -393,36 +396,43 @@ pub(crate) fn write_spatial_lct_constant_restart_with_canopy(
             )
         })
         .transpose()?;
-    let ncd = read_optional_f64(
-        config.landdata,
-        "cstructure",
-        "ncd_patches",
-        "ncd_patches",
-        config.land_cover_year,
-        config.block_label,
-        patch_count,
-        -1.0e36,
-    )?;
-    let ncw = read_optional_f64(
-        config.landdata,
-        "cstructure",
-        "ncw_patches",
-        "ncw_patches",
-        config.land_cover_year,
-        config.block_label,
-        patch_count,
-        -1.0e36,
-    )?;
-    let bcw = read_optional_f64(
-        config.landdata,
-        "cstructure",
-        "bcw_patches",
-        "bcw_patches",
-        config.land_cover_year,
-        config.block_label,
-        patch_count,
-        -1.0e36,
-    )?;
+    // 树冠结构只在截获方案 8 时读、写（`MOD_Vars_TimeInvariants.F90:791`）。
+    let canopy_structure = if config.canopy_structure {
+        Some([
+            read_optional_f64(
+                config.landdata,
+                "cstructure",
+                "ncd_patches",
+                "ncd_patches",
+                config.land_cover_year,
+                config.block_label,
+                patch_count,
+                -1.0e36,
+            )?,
+            read_optional_f64(
+                config.landdata,
+                "cstructure",
+                "ncw_patches",
+                "ncw_patches",
+                config.land_cover_year,
+                config.block_label,
+                patch_count,
+                -1.0e36,
+            )?,
+            read_optional_f64(
+                config.landdata,
+                "cstructure",
+                "bcw_patches",
+                "bcw_patches",
+                config.land_cover_year,
+                config.block_label,
+                patch_count,
+                -1.0e36,
+            )?,
+        ])
+    } else {
+        None
+    };
 
     write_constant_restart(
         config.restart_dir,
@@ -458,10 +468,12 @@ pub(crate) fn write_spatial_lct_constant_restart_with_canopy(
             lake_soil_carbon: lake_soil_carbon.as_deref(),
             soil: &soil,
             canopy: &canopy,
-            canopy_structure: Some(CanopyStructureFields {
-                needleleaf_crown_depth_m: &ncd,
-                needleleaf_crown_width_m: &ncw,
-                broadleaf_crown_width_m: &bcw,
+            canopy_structure: canopy_structure.as_ref().map(|[ncd, ncw, bcw]| {
+                CanopyStructureFields {
+                    needleleaf_crown_depth_m: ncd,
+                    needleleaf_crown_width_m: ncw,
+                    broadleaf_crown_width_m: bcw,
+                }
             }),
             tuning: config.tuning,
             uses_van_genuchten: config.hydraulic_model == HydraulicModel::VanGenuchten,

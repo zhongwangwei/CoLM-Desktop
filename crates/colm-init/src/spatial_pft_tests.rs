@@ -48,7 +48,7 @@ fn spatial_pft_writes_the_separate_constant_restart_and_honors_overrides() {
     let namelist = root.join("case.nml");
     std::fs::write(
         &namelist,
-        "&nl_colm\n DEF_USE_Campbell_SOIL_MODEL = .false.\n DEF_PFT_HTOP0(14) = 3.\n/\n",
+        "&nl_colm\n DEF_USE_Campbell_SOIL_MODEL = .false.\n DEF_PFT_HTOP0(14) = 3.\n DEF_Interception_scheme = 8\n/\n",
     )
     .unwrap();
     let restart = root.join("restart");

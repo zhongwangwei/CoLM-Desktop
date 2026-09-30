@@ -209,9 +209,16 @@ pub fn write_spatial_pft_constant_restart(
         );
     }
     let canopy = pft_canopy(&document, &class, &observed_height_m)?;
-    let ncd = read_optional_pft_f64(config, "ncd_pfts", class.len(), -1.0e36)?;
-    let ncw = read_optional_pft_f64(config, "ncw_pfts", class.len(), -1.0e36)?;
-    let bcw = read_optional_pft_f64(config, "bcw_pfts", class.len(), -1.0e36)?;
+    // PFT 树冠结构只在截获方案 8 时读、写（`WRITE_PFTimeInvariants`）。
+    let canopy_structure = if interception_scheme_8(&document)? {
+        Some([
+            read_optional_pft_f64(config, "ncd_pfts", class.len(), -1.0e36)?,
+            read_optional_pft_f64(config, "ncw_pfts", class.len(), -1.0e36)?,
+            read_optional_pft_f64(config, "bcw_pfts", class.len(), -1.0e36)?,
+        ])
+    } else {
+        None
+    };
     if class.is_empty() && crop_fraction.is_none() {
         return Ok(None);
     }
@@ -226,11 +233,13 @@ pub fn write_spatial_pft_constant_restart(
             fraction: &fraction,
             canopy_top_m: &canopy.top_m,
             canopy_bottom_m: &canopy.bottom_m,
-            canopy_structure: Some(PftCanopyStructure {
-                needleleaf_crown_depth_m: &ncd,
-                needleleaf_crown_width_m: &ncw,
-                broadleaf_crown_width_m: &bcw,
-            }),
+            canopy_structure: canopy_structure
+                .as_ref()
+                .map(|[ncd, ncw, bcw]| PftCanopyStructure {
+                    needleleaf_crown_depth_m: ncd,
+                    needleleaf_crown_width_m: ncw,
+                    broadleaf_crown_width_m: bcw,
+                }),
             crop_fraction: crop_fraction.as_deref(),
         },
     )
@@ -286,6 +295,7 @@ pub fn write_spatial_pft_constant_restarts(
     common.use_simple_terrain =
         optional_bool_or(&document, "DEF_USE_Forcing_Downscaling_Simple", false)?;
     common.use_regular_terrain = optional_bool_or(&document, "DEF_USE_Forcing_Downscaling", false)?;
+    common.canopy_structure = interception_scheme_8(&document)?;
     let patches = read_patches(config.landdata, config.land_cover_year, config.block_label)?;
     let patch_kind = patches
         .class
@@ -2272,3 +2282,8 @@ fn read_f64(
 #[cfg(test)]
 #[path = "spatial_pft_tests.rs"]
 mod spatial_pft_tests;
+
+/// `DEF_Interception_scheme == 8`（缺省为 1）。
+fn interception_scheme_8(document: &colm_namelist::Document) -> Result<bool> {
+    Ok(optional_i32(document, "DEF_Interception_scheme")?.unwrap_or(1) == 8)
+}

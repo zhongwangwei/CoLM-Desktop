@@ -226,6 +226,8 @@ struct SpatialNamelistRun {
     vic_grid_file: Option<PathBuf>,
     use_simple_terrain: bool,
     use_regular_terrain: bool,
+    /// `DEF_Interception_scheme == 8`：常数重启带树冠结构 `ncd/ncw/bcw`。
+    canopy_structure: bool,
     greenwich: bool,
     dynamic_lake: bool,
     plant_hydraulics: bool,
@@ -402,6 +404,7 @@ fn write_spatial_urban_namelist_block(
     static_config.vic_parameters = spatial_run_vic_source(run);
     static_config.use_simple_terrain = run.use_simple_terrain;
     static_config.use_regular_terrain = run.use_regular_terrain;
+    static_config.canopy_structure = run.canopy_structure;
     let files = write_spatial_urban_constant_restarts(SpatialUrbanStaticConfig {
         common: static_config,
         runtime_dir: urban.runtime_dir.as_deref(),
@@ -492,6 +495,7 @@ fn write_spatial_lct_namelist_block(
     static_config.vic_parameters = spatial_run_vic_source(run);
     static_config.use_simple_terrain = run.use_simple_terrain;
     static_config.use_regular_terrain = run.use_regular_terrain;
+    static_config.canopy_structure = run.canopy_structure;
     let files = write_spatial_lct_constant_restart(static_config)?;
     let mut time = SpatialLctTimeConfig::new(
         &run.landdata,
@@ -750,6 +754,7 @@ fn spatial_namelist_run_with_subgrid(
         },
         use_simple_terrain,
         use_regular_terrain,
+        canopy_structure: namelist_i32(&document, "DEF_Interception_scheme", 1)? == 8,
         greenwich: namelist_bool(&document, "DEF_simulation_time%greenwich", true)?,
         dynamic_lake,
         plant_hydraulics: namelist_bool(&document, "DEF_USE_PLANTHYDRAULICS", true)?,
@@ -1046,6 +1051,7 @@ fn run_spatial_lct(mut args: impl Iterator<Item = String>) -> Result<()> {
             }
             "--simple-terrain" => config.use_simple_terrain = true,
             "--regular-terrain" => config.use_regular_terrain = true,
+            "--canopy-structure" => config.canopy_structure = true,
             "--cold-time" => {
                 cold_time = Some(parse_restart_date(
                     &args.next().context("--cold-time needs YYYY-JJJ-SSSSS")?,
@@ -1266,7 +1272,7 @@ fn parse_hydraulic_model(value: Option<&str>) -> Result<HydraulicModel> {
     }
 }
 
-const USAGE: &str = "usage: mkinidata-rs <case.nml> [--subgrid lct|pft|pc] [--land-cover igbp|usgs] [--block label] [--grid-river] [--catch-lateral] [--data-assimilation] [--hyperspectral --highres-urban-albedo PATH --highres-radiation PATH [--highres-leaf-optics PATH] [--highres-water-optics PATH]] (spatial cases discover every landpatch block unless --block is supplied)\n       mkinidata-rs <srfdata.nc> <restart-dir> <case> <lc-year> <block> <igbp|usgs> <campbell|vg> [--urban-only]\n       mkinidata-rs spatial-lct <landdata-dir> <restart-dir> <case> <lc-year> <block> <igbp|usgs> <campbell|vg> [--urban-only] [--bedrock] [--hyperspectral (static only)] [--topmodel] [--simple-terrain|--regular-terrain] [--cold-time YYYY-JJJ-SSSSS] [--lai-year YYYY] [--lai-8day] [--greenwich] [--dynamic-lake] [--no-plant-hydraulics] [--ozone-stress] [--variably-saturated-flow] [--no-vegetation-snow]\n       mkinidata-rs spatial-pft <case.nml> <landdata-dir> <restart-dir> <case> <lc-year> <block> [--bedrock] [--hyperspectral --highres-urban-albedo PATH --highres-radiation PATH [--highres-leaf-optics PATH] [--highres-water-optics PATH]] [--cold-time YYYY-JJJ-SSSSS] [--lai-year YYYY] [--greenwich] [--dynamic-lake] [--no-plant-hydraulics] [--ozone-stress] [--variably-saturated-flow] [--no-vegetation-snow]";
+const USAGE: &str = "usage: mkinidata-rs <case.nml> [--subgrid lct|pft|pc] [--land-cover igbp|usgs] [--block label] [--grid-river] [--catch-lateral] [--data-assimilation] [--hyperspectral --highres-urban-albedo PATH --highres-radiation PATH [--highres-leaf-optics PATH] [--highres-water-optics PATH]] (spatial cases discover every landpatch block unless --block is supplied)\n       mkinidata-rs <srfdata.nc> <restart-dir> <case> <lc-year> <block> <igbp|usgs> <campbell|vg> [--urban-only]\n       mkinidata-rs spatial-lct <landdata-dir> <restart-dir> <case> <lc-year> <block> <igbp|usgs> <campbell|vg> [--urban-only] [--bedrock] [--hyperspectral (static only)] [--topmodel] [--simple-terrain|--regular-terrain] [--canopy-structure] [--cold-time YYYY-JJJ-SSSSS] [--lai-year YYYY] [--lai-8day] [--greenwich] [--dynamic-lake] [--no-plant-hydraulics] [--ozone-stress] [--variably-saturated-flow] [--no-vegetation-snow]\n       mkinidata-rs spatial-pft <case.nml> <landdata-dir> <restart-dir> <case> <lc-year> <block> [--bedrock] [--hyperspectral --highres-urban-albedo PATH --highres-radiation PATH [--highres-leaf-optics PATH] [--highres-water-optics PATH]] [--cold-time YYYY-JJJ-SSSSS] [--lai-year YYYY] [--greenwich] [--dynamic-lake] [--no-plant-hydraulics] [--ozone-stress] [--variably-saturated-flow] [--no-vegetation-snow]";
 
 fn parse_restart_date(value: &str) -> Result<RestartDate> {
     let mut fields = value.split('-');

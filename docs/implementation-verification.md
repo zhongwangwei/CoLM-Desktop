@@ -26745,3 +26745,24 @@ Rust 整月 2 分 51 秒（`g1`），纯 Fortran 约 32 分钟。
 改动：删掉这些字段。测试改为断言它们不存在。
 
 实测（g2 的 landdata）：`mkinidata-rs --grid-river` 写出的 `gd_restart_gridriver_2010-001-00000_lc2005.nc` 与纯 Fortran 冷启动的变量集合、数值都一致；`cargo test -p colm-init --lib gridriver` 6 个全过。
+
+## 第 461 轮：树冠结构只在截获方案 8 时进常数重启
+
+上游 `WRITE_TimeInvariants`（`MOD_Vars_TimeInvariants.F90:791`）与 `WRITE_PFTimeInvariants`（同文件 `:128`）只在 `DEF_Interception_scheme == 8` 时写 `ncd/ncw/bcw`（PFT 为 `ncd_p/ncw_p/bcw_p`）。Rust 的两个写出器原先在没有树冠结构时填 `-1e36` 照写，空间 LCT/PFT 的调用方又总是给值，所以缺省方案下常数重启多出三个变量。
+
+改动：
+- 写出器拿到 `None` 就不写。
+- 空间 LCT 通过 `SpatialLctStaticConfig::canopy_structure`（缺省关）控制；mkinidata-rs 的 namelist 路径按 `DEF_Interception_scheme` 置位，`spatial-lct` 显式模式加 `--canopy-structure`。
+- 空间 PFT 两处直接读 namelist。
+- 单点照旧：看 srfdata 里有没有这三个量，而 srfdata 只在方案 8 时带（`MOD_SingleSrfdata.F90:2997-3000`）。
+- 运行时只在 `colm2024_interception`（方案 8）时读这三个量，缺失无影响。
+
+测试：
+- 缺省方案断言不写。
+- 两个空间用例的 namelist 改成方案 8，继续核对读、写的值。
+- `cargo test -p colm-init --release -- --test-threads=1`：161 个全过。
+
+实测（g2 的 landdata，缺省方案）：`mkinidata-rs --grid-river` 与纯 Fortran 冷启动重合的 4 个文件完全一致，变量集合也一致：
+- `e110` 常数重启与时间重启；
+- 不带块后缀的常数重启；
+- 河道冷启动重启。

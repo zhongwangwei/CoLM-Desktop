@@ -95,6 +95,10 @@ fn lct_spatial_block_becomes_a_constant_restart() {
     assert_eq!(values_f64(&block, "vf_quartz").unwrap()[0], 0.3);
     assert!(block.variable("debdrock").is_none());
     assert!(block.variable("soil_alb").is_none());
+    // 缺省截获方案（1）不写树冠结构。
+    for name in ["ncd", "ncw", "bcw"] {
+        assert!(block.variable(name).is_none(), "{name}");
+    }
     crate::remove_test_tree(root);
 }
 
@@ -787,7 +791,7 @@ fn spatial_pft_cold_start_writes_common_and_pft_constant_restarts() {
     let namelist = root.join("case.nml");
     std::fs::write(
         &namelist,
-        "&nl_colm\n DEF_USE_Campbell_SOIL_MODEL = .true.\n DEF_USE_BGC = .true.\n DEF_Runoff_SCHEME = 0\n DEF_TOPMOD_method = 1\n DEF_USE_Forcing_Downscaling_Simple = .true.\n/\n",
+        "&nl_colm\n DEF_USE_Campbell_SOIL_MODEL = .true.\n DEF_USE_BGC = .true.\n DEF_Runoff_SCHEME = 0\n DEF_TOPMOD_method = 1\n DEF_USE_Forcing_Downscaling_Simple = .true.\n DEF_Interception_scheme = 8\n/\n",
     )
     .unwrap();
 

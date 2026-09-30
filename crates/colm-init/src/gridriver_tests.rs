@@ -317,16 +317,13 @@ fn cold_restart_carries_zero_levee_state() {
     for name in ["hist_levsto", "hist_levdph"] {
         assert!(file.variable(name).is_none(), "{name}");
     }
-    for name in ["levsto"] {
-        assert_eq!(
-            file.variable(name)
-                .unwrap()
-                .get_values::<f64, _>(..)
-                .unwrap(),
-            [0.0, 0.0],
-            "{name}"
-        );
-    }
+    assert_eq!(
+        file.variable("levsto")
+            .unwrap()
+            .get_values::<f64, _>(..)
+            .unwrap(),
+        [0.0, 0.0]
+    );
     drop(file);
     crate::remove_test_tree(root);
 }

@@ -416,24 +416,15 @@ pub fn write_pft_constant_restart_block(
     ] {
         put_f64_1d(&mut file, name, "pft", values, input.compression_level)?;
     }
-    let missing_structure;
-    let structure = match input.canopy_structure {
-        Some(structure) => structure,
-        None => {
-            missing_structure = vec![-1.0e36; pfts];
-            PftCanopyStructure {
-                needleleaf_crown_depth_m: &missing_structure,
-                needleleaf_crown_width_m: &missing_structure,
-                broadleaf_crown_width_m: &missing_structure,
-            }
+    // `MOD_Vars_TimeInvariants.F90:128`（`WRITE_PFTimeInvariants`）：只有 `DEF_Interception_scheme == 8` 才写 PFT 树冠结构。
+    if let Some(structure) = input.canopy_structure {
+        for (name, values) in [
+            ("ncd_p", structure.needleleaf_crown_depth_m),
+            ("ncw_p", structure.needleleaf_crown_width_m),
+            ("bcw_p", structure.broadleaf_crown_width_m),
+        ] {
+            put_f64_1d(&mut file, name, "pft", values, input.compression_level)?;
         }
-    };
-    for (name, values) in [
-        ("ncd_p", structure.needleleaf_crown_depth_m),
-        ("ncw_p", structure.needleleaf_crown_width_m),
-        ("bcw_p", structure.broadleaf_crown_width_m),
-    ] {
-        put_f64_1d(&mut file, name, "pft", values, input.compression_level)?;
     }
     if let Some(crop_fraction) = input.crop_fraction {
         put_f64_1d(
