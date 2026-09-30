@@ -26733,3 +26733,15 @@ Rust 整月 2 分 51 秒（`g1`），纯 Fortran 约 32 分钟。
 | g1p、g2 用新二进制重跑 | 与重构前输出逐位 |
 
 唯一的结构差异：Rust `mkinidata-rs` 的常数重启总写 `ncd/ncw/bcw`，上游只在 `DEF_Interception_scheme == 8` 时写；不影响数值，另立任务修。
+
+## 第 460 轮：河道冷启动不再写 `hist_*`
+
+`mkinidata-rs --grid-river` 的冷启动河道重启原先多写 17 个全零的 `hist_*`：默认路径 10 个，另有 `hist_bifout`、`hist_levsto/levdph` 和水库的 4 个。13518986 起标记为「待复核的 Rust schema 扩展」。
+
+复核结论：
+- 上游冷启动时河道 history 累加器未分配，`write_gridriverlake_hist_restart` 在分配守卫处直接返回，而且这条路径上没有调用点。原版冷输出里一个 `hist_*` 都没有。
+- 读的一侧都容忍缺失：Fortran 读前先查 `restart_var_exists`；colm-rs 从 `.river` 旁车读河道累加器，不读河道重启里的 `hist_*`。
+
+改动：删掉这些字段。测试改为断言它们不存在。
+
+实测（g2 的 landdata）：`mkinidata-rs --grid-river` 写出的 `gd_restart_gridriver_2010-001-00000_lc2005.nc` 与纯 Fortran 冷启动的变量集合、数值都一致；`cargo test -p colm-init --lib gridriver` 6 个全过。

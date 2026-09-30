@@ -357,10 +357,11 @@ Source contract and independent approval:
 GridRiver `hist_bifflw_lev/hist_bifflw_acctime` belong to runtime history restarts,
 not original `mkinidata`: the cold path never initializes history and its writer
 returns at the allocation guard. They are not missing cold-start functionality.
-Rust currently emits some other zero-valued `hist_*` convenience fields absent
-from original cold output; this existing schema extension is not exact cold-file
-parity and still needs review. Do not add the missing runtime history names as
-synthetic cold fields. Trace: `/tmp/colm-gridriver-bif-history-contract.md`.
+The zero-valued `hist_*` convenience fields Rust used to emit (10 default-path
+fields plus `hist_bifout`, `hist_levsto/levdph` and the four reservoir ones) were
+removed after review (2026-09-30): original cold output has none of them, and both
+readers tolerate their absence (Fortran `restart_var_exists`, colm-rs reads the
+`.river` sidecar). Do not add runtime history names as synthetic cold fields. Trace: `/tmp/colm-gridriver-bif-history-contract.md`.
 
 A **pre-edit** frozen executable ignored default `1` and explicit `4` (both
 produced uncompressed scientific arrays); the saved RED is

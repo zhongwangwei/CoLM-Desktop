@@ -104,21 +104,7 @@ fn cold_restart_matches_gridriver_schema_two_base_state() {
             .unwrap(),
         [1.5, 2.5]
     );
-    for name in [
-        "veloc_riv",
-        "acc_rnof_uc",
-        "volwater_ucat",
-        "hist_acctime_ucat",
-        "hist_wdsrf_ucat",
-        "hist_veloc_riv",
-        "hist_discharge",
-        "hist_floodarea",
-        "hist_rivsto",
-        "hist_fldsto",
-        "hist_flddph",
-        "hist_storge",
-        "hist_sfcelv",
-    ] {
+    for name in ["veloc_riv", "acc_rnof_uc", "volwater_ucat"] {
         assert_eq!(
             file.variable(name)
                 .unwrap()
@@ -135,6 +121,10 @@ fn cold_restart_matches_gridriver_schema_two_base_state() {
             .unwrap(),
         [0.0]
     );
+    // 上游冷启动不写河道 history 累加器（`hist_*`）。
+    assert!(file
+        .variables()
+        .all(|variable| !variable.name().starts_with("hist_")));
     assert!(file.variable("wdsrf_ucat_prev").is_none());
     drop(file);
     crate::remove_test_tree(root);
@@ -164,7 +154,7 @@ fn gridriver_restart_compresses_vectors_but_not_transaction_scalars() {
     .unwrap();
     assert_deflate(&restart.path, "gridriver_ucatch_identity", 4);
     assert_deflate(&restart.path, "wdsrf_ucat", 4);
-    assert_deflate(&restart.path, "hist_acctime_ucat", 4);
+    assert_deflate(&restart.path, "volwater_ucat", 4);
     assert_no_deflate(&restart.path, "gridriver_restart_schema");
     assert_no_deflate(&restart.path, "gridriver_restart_complete");
     assert_no_deflate(&restart.path, "acctime_rnof");
@@ -287,13 +277,8 @@ fn cold_restart_carries_native_zero_bifurcation_state() {
             "{name}"
         );
     }
-    assert_eq!(
-        file.variable("hist_bifout")
-            .unwrap()
-            .get_values::<f64, _>(..)
-            .unwrap(),
-        [0.0, 0.0]
-    );
+    // 上游冷启动不写河道 history 累加器。
+    assert!(file.variable("hist_bifout").is_none());
     drop(file);
     crate::remove_test_tree(root);
 }
@@ -329,7 +314,10 @@ fn cold_restart_carries_zero_levee_state() {
             .unwrap(),
         [1]
     );
-    for name in ["levsto", "hist_levsto", "hist_levdph"] {
+    for name in ["hist_levsto", "hist_levdph"] {
+        assert!(file.variable(name).is_none(), "{name}");
+    }
+    for name in ["levsto"] {
         assert_eq!(
             file.variable(name)
                 .unwrap()
@@ -395,14 +383,7 @@ fn cold_restart_carries_native_reservoir_identity_and_volume() {
         "hist_qresv_in",
         "hist_qresv_out",
     ] {
-        assert_eq!(
-            file.variable(name)
-                .unwrap()
-                .get_values::<f64, _>(..)
-                .unwrap(),
-            [0.0, 0.0],
-            "{name}"
-        );
+        assert!(file.variable(name).is_none(), "{name}");
     }
     drop(file);
     crate::remove_test_tree(root);

@@ -219,13 +219,6 @@ pub fn write_gridriver_cold_restart(
         config.compression_level,
     )?;
     if let Some(bifurcation) = &bifurcation {
-        put_f64_compressed(
-            &mut file,
-            "hist_bifout",
-            &["ucatch"],
-            &zeros,
-            config.compression_level,
-        )?;
         if bifurcation.active() {
             put_f64_compressed(
                 &mut file,
@@ -249,45 +242,9 @@ pub fn write_gridriver_cold_restart(
     if let Some(reservoir) = &reservoir {
         write_reservoir_cold_state(&mut file, reservoir, config.compression_level)?;
     }
-    // Native mkinidata leaves history unallocated and omits these fields.
-    // These explicit zeros are a Rust schema extension, equivalent to the
-    // runtime's absent-history fallback, not original cold-output inventory.
-    for name in [
-        "hist_acctime_ucat",
-        "hist_wdsrf_ucat",
-        "hist_veloc_riv",
-        "hist_discharge",
-        "hist_floodarea",
-        "hist_rivsto",
-        "hist_fldsto",
-        "hist_flddph",
-        "hist_storge",
-        "hist_sfcelv",
-    ] {
-        put_f64_compressed(
-            &mut file,
-            name,
-            &["ucatch"],
-            &zeros,
-            config.compression_level,
-        )?;
-    }
-    if config.levee {
-        put_f64_compressed(
-            &mut file,
-            "hist_levsto",
-            &["ucatch"],
-            &zeros,
-            config.compression_level,
-        )?;
-        put_f64_compressed(
-            &mut file,
-            "hist_levdph",
-            &["ucatch"],
-            &zeros,
-            config.compression_level,
-        )?;
-    }
+    // 冷启动不写 `hist_*`：上游 mkinidata 时河道 history 累加器没分配，
+    // `write_gridriverlake_hist_restart` 直接返回（它在这条路径上也没有调用点）。
+    // 读的一侧（Fortran `restart_var_exists`、colm-rs 读 `.river` 旁车）都容忍缺失。
     file.variable_mut("gridriver_restart_complete")
         .expect("the GridRiverLake completion marker was just written")
         .put_values(&[1], ..)?;
@@ -558,15 +515,6 @@ fn write_reservoir_cold_state(
         &state.volume,
         compression_level,
     )?;
-    let zeros = vec![0.0; reservoirs];
-    for name in [
-        "hist_acctime_resv",
-        "hist_volresv",
-        "hist_qresv_in",
-        "hist_qresv_out",
-    ] {
-        put_f64_compressed(file, name, &["reservoir"], &zeros, compression_level)?;
-    }
     Ok(())
 }
 

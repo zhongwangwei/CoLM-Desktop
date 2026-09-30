@@ -146,7 +146,10 @@ fn row_length(new: &RestartFile, old: &RestartFile, name: &str) -> Result<usize>
     let mut length = 1;
     for dimension in &dims[1..] {
         let (a, b) = (new.dimension(dimension)?, old.dimension(dimension)?);
-        ensure!(a == b, "dimension {dimension} is {a} in the new restart but {b} in the old one");
+        ensure!(
+            a == b,
+            "dimension {dimension} is {a} in the new restart but {b} in the old one"
+        );
         length *= a;
     }
     Ok(length)
