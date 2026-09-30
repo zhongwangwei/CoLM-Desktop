@@ -26825,3 +26825,16 @@ Rust 整月 2 分 51 秒（`g1`），纯 Fortran 约 32 分钟。
 | 改动后重跑 SAT 的 `g3` | 仍是 546 项逐位 |
 
 单元测试 3 个：份额加权与热容加权、来源类型缺失时拒绝、份额不变时原样保留 SAT。
+
+## 第 464 轮：`DEF_GridRiverLake_FloodplainStorageFix = .true.`
+
+上游这个开关只改一处（`MOD_Grid_RiverLakeNetwork.F90:1191`）：漫滩蓄量上限 `flpstomax` 的梯形累加里，面积由逐层的 `flparea` 换成累积的 `flpaccare`。GIMPLE 两支同形，都是 `FMA(dh, (A_j + A_{j-1})*0.5, s_{j-1})`。它是漫滩回馈（`FloodFeedback`）的前置条件：上游要求回馈时必须打开它。
+
+Rust：`FloodplainCurve::new` 与 `RiverNetwork::read` 加 `storage_fix` 参数，colm-rs 从 namelist 取值，并把它移出未移植清单。
+
+实测（`g1p` 加 `FloodplainStorageFix = .true.`，全球 25 万单元流域，跑 1 天）：
+
+| 对照 | 结果 |
+|---|---|
+| Rust vs 纯 Fortran | 257 项逐位（陆面与河道重启、旁车、`gd_hist`、unitcat） |
+| 同一算例的默认曲线 vs 修正曲线（Fortran） | 约 4.6 万个单元流域的 `wdsrf/volwater/veloc` 不同，开关确实生效 |

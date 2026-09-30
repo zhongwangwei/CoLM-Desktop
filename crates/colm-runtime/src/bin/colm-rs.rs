@@ -346,15 +346,11 @@ fn run_spatial(
         missing.len(),
         missing.join("\n  - ")
     );
-    // GRID 内核总是编进 `GridRiverLakeFlow`：汇流默认路径（单向耦合），其余选项还没移植。
+    // GRID 内核总是编进 `GridRiverLakeFlow`：汇流默认路径（单向耦合，`FloodplainStorageFix` 两种曲线都行），其余选项还没移植。
     for (field, unported) in [
         (
             "DEF_GridRiverLake_FloodFeedback",
             logical_field(&document, "DEF_GridRiverLake_FloodFeedback")?,
-        ),
-        (
-            "DEF_GridRiverLake_FloodplainStorageFix",
-            logical_field(&document, "DEF_GridRiverLake_FloodplainStorageFix")?,
         ),
         ("DEF_USE_LEVEE", logical_field(&document, "DEF_USE_LEVEE")?),
         (
@@ -634,10 +630,10 @@ fn run_spatial_segment(
     if segment.lulcc_boundary {
         runtime = runtime.defer_lai_refresh_at(config.end);
     }
-    let network = colm_runtime::river::network::RiverNetwork::read(Path::new(&string_field(
-        document,
-        "DEF_UnitCatchment_file",
-    )?))?;
+    let network = colm_runtime::river::network::RiverNetwork::read(
+        Path::new(&string_field(document, "DEF_UnitCatchment_file")?),
+        logical_field(document, "DEF_GridRiverLake_FloodplainStorageFix")?,
+    )?;
     let routing = colm_runtime::river::network::RunoffRouting::build(&network, &topology)?;
     let runoff_filter = templates
         .iter()
@@ -1194,10 +1190,10 @@ fn lulcc_transition(
     }
     // 3. 河道：网络不变，状态接着用。
     if let Some(mut state) = river {
-        let network = colm_runtime::river::network::RiverNetwork::read(Path::new(&string_field(
-            document,
-            "DEF_UnitCatchment_file",
-        )?))?;
+        let network = colm_runtime::river::network::RiverNetwork::read(
+            Path::new(&string_field(document, "DEF_UnitCatchment_file")?),
+            logical_field(document, "DEF_GridRiverLake_FloodplainStorageFix")?,
+        )?;
         colm_runtime::river::rebuild_volwater(&network, &mut state);
         let path = river_restart_path(target, name, &label, years.new);
         colm_runtime::river::restart::write_river_state(

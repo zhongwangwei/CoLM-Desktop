@@ -2,7 +2,7 @@ use super::*;
 
 fn curve() -> FloodplainCurve {
     // 河槽 2 m 深、蓄量 2000 m³；漫滩 4 层共 400 m²，每层抬高 1 m。
-    FloodplainCurve::new(2.0, 2000.0, 400.0, &[1.0, 2.0, 3.0, 4.0])
+    FloodplainCurve::new(2.0, 2000.0, 400.0, &[1.0, 2.0, 3.0, 4.0], false)
 }
 
 #[test]

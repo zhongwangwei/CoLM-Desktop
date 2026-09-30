@@ -30,11 +30,12 @@ pub struct FloodplainCurve {
 }
 
 impl FloodplainCurve {
-    /// `build_riverlake_network` 里的曲线构造（`DEF_GridRiverLake_FloodplainStorageFix = .false.`）。
+    /// `build_riverlake_network` 里的曲线构造。
     ///
     /// `flpstomax(j) = FMA(h(j)-h(j-1), (A(j)+A(j-1))*0.5, s(j-1))`；`flparea(0) = 0`，其余层是
-    /// `topo_area/nlfp`；累积面积从 0 起逐层相加。
-    pub fn new(rivhgt: f64, rivstomax: f64, area: f64, fldhgt: &[f64]) -> Self {
+    /// `topo_area/nlfp`；累积面积从 0 起逐层相加。`A` 在 `DEF_GridRiverLake_FloodplainStorageFix`
+    /// 为假时是逐层面积 `flparea`（上游默认，深度与体积不互逆），为真时是累积面积 `flpaccare`。
+    pub fn new(rivhgt: f64, rivstomax: f64, area: f64, fldhgt: &[f64], storage_fix: bool) -> Self {
         let nlfp = fldhgt.len();
         let rivare = rivstomax / rivhgt;
         let mut flphgt = Vec::with_capacity(nlfp + 1);
@@ -47,10 +48,11 @@ impl FloodplainCurve {
         for j in 1..=nlfp {
             flpaccare[j] = flparea[j] + flpaccare[j - 1];
         }
+        let trapezoid = if storage_fix { &flpaccare } else { &flparea };
         let mut flpstomax = vec![0.0; nlfp + 1];
         for j in 1..=nlfp {
             flpstomax[j] = (flphgt[j] - flphgt[j - 1])
-                .mul_add((flparea[j] + flparea[j - 1]) * 0.5, flpstomax[j - 1]);
+                .mul_add((trapezoid[j] + trapezoid[j - 1]) * 0.5, flpstomax[j - 1]);
         }
         Self {
             rivhgt,
@@ -184,7 +186,7 @@ fn read<T: netcdf::NcTypeDescriptor + Copy>(file: &netcdf::File, name: &str) -> 
 
 impl RiverNetwork {
     /// 读 `DEF_UnitCatchment_file`（全球网络，`DEF_UnitCatchment_regional = .false.`）。
-    pub fn read(path: &Path) -> Result<Self> {
+    pub fn read(path: &Path, storage_fix: bool) -> Result<Self> {
         let file = netcdf::open(path)
             .with_context(|| format!("cannot open unit-catchment file {}", path.display()))?;
         let x = read::<i32>(&file, "seq_x")?;
@@ -314,6 +316,7 @@ impl RiverNetwork {
                     rivstomax[i],
                     area[i],
                     &fldhgt[i * nlfp..(i + 1) * nlfp],
+                    storage_fix,
                 )
             })
             .collect::<Vec<_>>();
