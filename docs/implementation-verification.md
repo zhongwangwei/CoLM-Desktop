@@ -26838,3 +26838,18 @@ Rust：`FloodplainCurve::new` 与 `RiverNetwork::read` 加 `storage_fix` 参数�
 |---|---|
 | Rust vs 纯 Fortran | 257 项逐位（陆面与河道重启、旁车、`gd_hist`、unitcat） |
 | 同一算例的默认曲线 vs 修正曲线（Fortran） | 约 4.6 万个单元流域的 `wdsrf/volwater/veloc` 不同，开关确实生效 |
+
+## 第 465 轮：上游 mksrfdata 在 TOPMODEL 湿度指数聚合处段错误
+
+`DEF_Runoff_SCHEME = 0` 时，GRIDBASED 的 latlon 内核（宏里有 `URBAN_MODEL`）的 mksrfdata 在 `Aggregate topographic wetness index ...` 之后段错误。崩溃报告：`aggregation_topowetness_`，`KERN_INVALID_ADDRESS at 0x4`。
+
+根因：
+- 这个聚合在逐单元循环里用 `elm_patch%substt/subend`。
+- `landpatch_build` 只在 `#if (!defined(URBAN_MODEL) && !defined(CROP))` 下建 `elm_patch`；URBAN_MODEL 内核把它留给 `landurban_build`，后者只在 `DEF_URBAN_RUN` 时调用。
+- 城市关、无 CROP、无 2m WMO 时 `elm_patch` 从没建过，而别的聚合都不用它，所以只有这里暴露。上游 CoLM-SYSU-integration 同样如此。
+
+修法（单文件）：`Aggregation_TopoWetness` 在用之前 `elm_patch` 还没建就自己建。不动 `landpatch_build`，这样 `patchfrac_elm` 的写出条件不变，Rust mksrfdata-rs 的产物对照也不受影响。
+
+附带发现：崩溃那一次 mkinidata 在缺少湿度指数文件时照样成功（读取落到缺省值）。拿那次的 landdata 跑出来的洪泛回馈蒸发量比修后大两个数量级，是无效的参照。
+
+实测：修后 `g1ff`（方案 0 + 修正曲线 + 洪泛回馈）纯 Fortran 三段都成功，`topography/2005` 下 6 个 TWI 参数文件齐全。

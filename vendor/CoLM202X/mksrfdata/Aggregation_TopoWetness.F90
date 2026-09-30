@@ -87,6 +87,13 @@ SUBROUTINE Aggregation_TopoWetness ( &
 #endif
       ENDIF
 
+      ! The element loop below indexes elm_patch, which landpatch_build only builds in kernels
+      ! without URBAN_MODEL/CROP; with URBAN_MODEL it is left to landurban_build, which runs only
+      ! when DEF_URBAN_RUN is on.  Build it here when nothing else has.
+      IF (.not. allocated(elm_patch%substt)) THEN
+         CALL elm_patch%build (landelm, landpatch, use_frac = .true.)
+      ENDIF
+
       IF (p_is_worker) THEN
 
          allocate (mean_twi_patches (numpatch));  mean_twi_patches(:) = spval
