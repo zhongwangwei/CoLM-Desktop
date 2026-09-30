@@ -40,9 +40,19 @@ MODULE MOD_Grid_RiverLakeTimeVars
    ! -- restart file path (saved for deferred sediment restart read) --
    character(len=512) :: gridriver_restart_file = ''
 
+   ! -- running state set aside while LULCC re-initializes (see hold_GridRiverLakeTimeVars_lulcc) --
+   real(r8), allocatable :: held_wdsrf_ucat (:), held_wdsrf_ucat_prev (:), held_veloc_riv (:)
+   real(r8), allocatable :: held_momen_riv (:), held_volresv (:), held_volwater_ucat (:)
+   real(r8), allocatable :: held_acc_rnof_uc (:)
+   real(r8)              :: held_acctime_rnof
+   logical               :: held_flags (7)
+   character(len=512)    :: held_restart_file
+
    ! PUBLIC MEMBER FUNCTIONS:
    PUBLIC :: allocate_GridRiverLakeTimeVars
    PUBLIC :: deallocate_GridRiverLakeTimeVars
+   PUBLIC :: hold_GridRiverLakeTimeVars_lulcc
+   PUBLIC :: restore_GridRiverLakeTimeVars_lulcc
 
    PUBLIC :: read_GridRiverLakeTimeVars
    PUBLIC :: write_GridRiverLakeTimeVars
@@ -698,6 +708,58 @@ CONTAINS
       gridriver_restart_file = ''
 
    END SUBROUTINE deallocate_GridRiverLakeTimeVars
+
+   ! LULCC re-runs the whole initialization (deallocate_TimeVariables, then initialize), which
+   ! frees and reallocates the river state.  The unit catchments do not change with land cover,
+   ! so the running state is moved aside here and moved back by restore_GridRiverLakeTimeVars_lulcc.
+   SUBROUTINE hold_GridRiverLakeTimeVars_lulcc ()
+
+   IMPLICIT NONE
+
+      CALL move_alloc (wdsrf_ucat     , held_wdsrf_ucat     )
+      CALL move_alloc (wdsrf_ucat_prev, held_wdsrf_ucat_prev)
+      CALL move_alloc (veloc_riv      , held_veloc_riv      )
+      CALL move_alloc (momen_riv      , held_momen_riv      )
+      CALL move_alloc (volresv        , held_volresv        )
+      CALL move_alloc (volwater_ucat  , held_volwater_ucat  )
+      CALL move_alloc (acc_rnof_uc    , held_acc_rnof_uc    )
+      held_acctime_rnof = acctime_rnof
+      held_flags = (/ wdsrf_ucat_prev_valid, wdsrf_ucat_prev_restart_found, &
+         restart_transaction_validated, restart_feature_manifest_present, &
+         restart_bifurcation_enabled, restart_levee_enabled, volwater_ucat_valid /)
+      held_restart_file = gridriver_restart_file
+
+   END SUBROUTINE hold_GridRiverLakeTimeVars_lulcc
+
+   SUBROUTINE restore_GridRiverLakeTimeVars_lulcc ()
+
+   IMPLICIT NONE
+
+      IF (allocated (wdsrf_ucat     )) deallocate (wdsrf_ucat     )
+      IF (allocated (wdsrf_ucat_prev)) deallocate (wdsrf_ucat_prev)
+      IF (allocated (veloc_riv      )) deallocate (veloc_riv      )
+      IF (allocated (momen_riv      )) deallocate (momen_riv      )
+      IF (allocated (volresv        )) deallocate (volresv        )
+      IF (allocated (volwater_ucat  )) deallocate (volwater_ucat  )
+      IF (allocated (acc_rnof_uc    )) deallocate (acc_rnof_uc    )
+      CALL move_alloc (held_wdsrf_ucat     , wdsrf_ucat     )
+      CALL move_alloc (held_wdsrf_ucat_prev, wdsrf_ucat_prev)
+      CALL move_alloc (held_veloc_riv      , veloc_riv      )
+      CALL move_alloc (held_momen_riv      , momen_riv      )
+      CALL move_alloc (held_volresv        , volresv        )
+      CALL move_alloc (held_volwater_ucat  , volwater_ucat  )
+      CALL move_alloc (held_acc_rnof_uc    , acc_rnof_uc    )
+      acctime_rnof                     = held_acctime_rnof
+      wdsrf_ucat_prev_valid            = held_flags(1)
+      wdsrf_ucat_prev_restart_found    = held_flags(2)
+      restart_transaction_validated    = held_flags(3)
+      restart_feature_manifest_present = held_flags(4)
+      restart_bifurcation_enabled      = held_flags(5)
+      restart_levee_enabled            = held_flags(6)
+      volwater_ucat_valid              = held_flags(7)
+      gridriver_restart_file           = held_restart_file
+
+   END SUBROUTINE restore_GridRiverLakeTimeVars_lulcc
 
 END MODULE MOD_Grid_RiverLakeTimeVars
 #endif

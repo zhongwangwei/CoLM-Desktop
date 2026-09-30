@@ -268,6 +268,9 @@ CONTAINS
 #endif
 
 #ifdef GridRiverLakeFlow
+      ! LULCC re-runs the initialization with the network already built: release it first.
+      ! The unit catchments do not change, but the patch-to-grid runoff mapping does.
+      IF (present(lulcc_call)) CALL riverlake_network_final ()
       CALL build_riverlake_network ()
 
       IF (DEF_Reservoir_Method > 0) THEN
