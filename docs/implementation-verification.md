@@ -26793,3 +26793,35 @@ Rust 整月 2 分 51 秒（`g1`），纯 Fortran 约 32 分钟。
 | debug 内核（越界检查 + 浮点陷阱）2 进程 | 跑完无运行期错误；与生产内核只差 1e-16 量级（编译选项不同，收缩与常量折叠不同） |
 
 单点内核不定义 `FLAT_SPMD`，单点回归不受影响。仓库的 latlon 内核已重编。
+
+## 第 463 轮：LULCC 的质量与能量守恒方案（MEC，`DEF_LULCC_SCHEME = 2`）
+
+**上游**（`LulccMassEnergyConserve`）在 SAT 之后执行。对每个非冰川新 patch：
+- 取 `lccpct_np = lccpct_patches(np, 1:17)`，来源是 `landdata/lulcc/<新年份>/lccpct_patches_lcXX_<块>.nc`。
+- 若 `sum - lccpct(自身类型) > 0`，在同一单元的旧 patch 里按类型号从小到大找来源（找不到即中止），先把新 patch 的状态清零，再按份额混合：
+  - 土壤热容 `cvsoil = (csol + vf_w·c_w + vf_i·c_i)·dz`；表层无雪层而有 `scv` 时加 `cpice·scv`；有雪层时雪层热容与焓另算。
+  - 温度按 `热容 × 份额` 加权。
+  - 水、冰与其余诊断量按份额平均。
+  - 雪层数取份额最大的来源；多出来的层并进最上层；雪层温度由焓反推，雪厚由混合密度反推。
+- 之后重算 `scv/snowdp`、`snowfraction`（`sigf/fsno`）、`sai`（与 `DEF_VEG_SNOW` 下的 `lai`）、`t_grnd`；变饱和流下再由土壤含水重定 `zwt`。
+
+**数值形状**（latlon 内核的 GIMPLE，这个模块只有 25 个 FMA）：
+- `x + x_*lcc/sum` 与 `t + t_*cv*lcc/wgt` 都不收缩：末尾是除法。
+- `hcap`（两级 FMA）、`wgt += cv*lcc`、雪层 `cpliq*wliq + cpice*wice`、焓 `A*(t-tfrz) + hfus*wliq`、`rhosnow += ((wliq+wice)/dz)*(lcc/sum)`、温度分母 `cpice*wice + cpliq*wliq` 是 FMA。
+- `z_sno = zi - 0.5*dz` 是 FNMA。
+- 其余 FMA 属于 PFT（`sum(ldew_p*pftfrac)`）与城市分支，不在本轮范围。
+
+**Rust：** `colm_init::lulcc_mec::mass_energy_conserve` 接在 SAT 的替换值之上，colm-rs 的 LULCC 过渡在方案 2 时读转移份额并调用它。
+- 变饱和流与 `DEF_VEG_SNOW` 用运行时解析好的生效值：上游在 van Genuchten 下强开变饱和流。
+- `snowfraction` 的指数也用解析值（schema 缺省是字面量 `1.0_r8`，直接按 namelist 实数读会失败）。
+- 显式拒绝：PFT/PC/城市分支；地下水位落到土柱以下（`get_zwt_from_wa`，未移植）。
+
+**实测**（`g3m` = `g3` 改成方案 2；纯 Fortran 参照用修过河道的 latlon 内核）：
+
+| 对照 | 结果 |
+|---|---|
+| Fortran MEC vs Fortran SAT 的 `2006-001` 续跑 | 172 个 patch 里 131 个不同：MEC 确实改了状态 |
+| Rust MEC vs Fortran MEC | 546 项逐位（`lc2006` 合并续跑、`2006-002`、河道续跑、旁车、两个月的 `gd_hist` 与 unitcat、常数重启） |
+| 改动后重跑 SAT 的 `g3` | 仍是 546 项逐位 |
+
+单元测试 3 个：份额加权与热容加权、来源类型缺失时拒绝、份额不变时原样保留 SAT。

@@ -957,8 +957,8 @@ fn check_spatial_lulcc(
     land_cover: LandCoverScheme,
 ) -> Result<()> {
     ensure!(
-        integer_field(document, "DEF_LULCC_SCHEME")? == 1,
-        "only DEF_LULCC_SCHEME = 1 (same type assignment) is ported to the Rust runtime; run MEC with --engine fortran"
+        matches!(integer_field(document, "DEF_LULCC_SCHEME")?, 1 | 2),
+        "DEF_LULCC_SCHEME must be 1 (same type assignment) or 2 (mass and energy conserving)"
     );
     ensure!(
         land_cover == LandCoverScheme::Igbp,
@@ -1043,14 +1043,13 @@ fn lulcc_transition(
     let label = date_label(normalized_day_end(boundary));
     let landdata = out.join("landdata");
     let old_topology = SpatialTopology::read(&landdata, i32::try_from(years.old)?)?;
-    let new_topology = SpatialTopology::read(&landdata, i32::try_from(years.new)?).with_context(
-        || {
+    let new_topology =
+        SpatialTopology::read(&landdata, i32::try_from(years.new)?).with_context(|| {
             format!(
                 "DEF_USE_LULCC needs the {} landdata; run mksrfdata with DEF_LC_YEAR = {} first",
                 years.new, years.new
             )
-        },
-    )?;
+        })?;
     let restart_root = out.join("restart");
     let scratch = restart_root.join(LULCC_SCRATCH);
     // 1. 新一年的冷启动。
@@ -1087,6 +1086,19 @@ fn lulcc_transition(
         String::from_utf8_lossy(&output.stderr)
     );
     // 2. SAT，逐块（单元不跨块，按块配对与上游按 worker 配对等价）。
+    let mec = (integer_field(document, "DEF_LULCC_SCHEME")? == 2)
+        .then(|| -> Result<_> {
+            Ok(colm_init::lulcc_mec::MecOptions {
+                plant_hydraulics: logical_field(document, "DEF_USE_PLANTHYDRAULICS")?,
+                ozone_stress: logical_field(document, "DEF_USE_OZONESTRESS")?,
+                // `MOD_Namelist` 在 van Genuchten 下强开变饱和流，用生效值。
+                variably_saturated_flow: case.physics.variably_saturated_flow,
+                vegetation_snow: case.physics.vegetation_snow,
+                // 用已按 schema 解析好的值（缺省是 Fortran 字面量 `1.0_r8`）。
+                snow_cover_exponent: case.physics.snow_cover_exponent,
+            })
+        })
+        .transpose()?;
     let options = colm_init::lulcc::SatOptions {
         plant_hydraulics: logical_field(document, "DEF_USE_PLANTHYDRAULICS")?,
         ozone_stress: logical_field(document, "DEF_USE_OZONESTRESS")?,
@@ -1125,20 +1137,48 @@ fn lulcc_transition(
                 let old_time = colm_init::RestartFile::open(
                     old_dir.join(&label).join(time_name(years.old, block)),
                 )?;
-                colm_init::lulcc::same_type_assignment(
+                let new_element = &new_topology.element[patches.clone()];
+                let old_element = &old_topology.element[old_patches.clone()];
+                let sat = colm_init::lulcc::same_type_assignment(
                     &colm_init::lulcc::SatSide {
                         time: &cold,
                         patch_class: new_const.integers("patchclass")?,
-                        element: &new_topology.element[patches.clone()],
+                        element: new_element,
                     },
                     &colm_init::lulcc::SatSide {
                         time: &old_time,
                         patch_class: old_const.integers("patchclass")?,
-                        element: &old_topology.element[old_patches.clone()],
+                        element: old_element,
                     },
                     options,
                 )
-                .with_context(|| format!("cannot carry the {} state of block {block} over", years.old))?
+                .with_context(|| {
+                    format!("cannot carry the {} state of block {block} over", years.old)
+                })?;
+                // MEC（`DEF_LULCC_SCHEME = 2`）：SAT 之后按转移份额混合份额有变化的 patch。
+                match mec {
+                    Some(mec_options) => {
+                        let lccpct =
+                            read_lulcc_transfer_trace(&landdata, years.new, block, patches.len())?;
+                        colm_init::lulcc_mec::mass_energy_conserve(
+                            &colm_init::lulcc_mec::MecInputs {
+                                new_time: &cold,
+                                new_const: &new_const,
+                                new_element,
+                                old_time: &old_time,
+                                old_const: &old_const,
+                                old_element,
+                                lccpct: &lccpct,
+                            },
+                            sat,
+                            mec_options,
+                        )
+                        .with_context(|| {
+                            format!("cannot conserve mass and energy in block {block}")
+                        })?
+                    }
+                    None => sat,
+                }
             }
             None => Vec::new(),
         };
@@ -1182,6 +1222,44 @@ fn lulcc_transition(
             .join(", ")
     );
     Ok(())
+}
+
+/// `LulccTransferTraceReadin`：`landdata/lulcc/<year>/lccpct_patches_lcXX_<block>.nc`，
+/// `XX = 00..=17`（IGBP），返回每个新 patch 的 `lccpct[ilc]`。
+fn read_lulcc_transfer_trace(
+    landdata: &Path,
+    year: i64,
+    block: &str,
+    patches: usize,
+) -> Result<Vec<Vec<f64>>> {
+    const IGBP_CLASSES: usize = 17;
+    let mut lccpct = vec![vec![0.0; IGBP_CLASSES + 1]; patches];
+    for ilc in 0..=IGBP_CLASSES {
+        let path = landdata
+            .join("lulcc")
+            .join(format!("{year:04}"))
+            .join(format!("lccpct_patches_lc{ilc:02}_{block}.nc"));
+        let values = netcdf::open(&path)
+            .with_context(|| {
+                format!(
+                    "cannot open {}; DEF_LULCC_SCHEME = 2 needs the transfer trace from mksrfdata",
+                    path.display()
+                )
+            })?
+            .variable("lccpct_patches")
+            .with_context(|| format!("{} has no lccpct_patches", path.display()))?
+            .get_values::<f64, _>(..)?;
+        ensure!(
+            values.len() == patches,
+            "{} has {} patches for a block of {patches}",
+            path.display(),
+            values.len()
+        );
+        for (row, value) in lccpct.iter_mut().zip(values) {
+            row[ilc] = value;
+        }
+    }
+    Ok(lccpct)
 }
 
 /// 与本程序同目录的另一个 Rust 工具（`colm-cli` 找 sidecar 的同一条规则）。
