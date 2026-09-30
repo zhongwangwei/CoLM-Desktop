@@ -256,9 +256,17 @@ pub(crate) fn write_spatial_lct_constant_restart_with_canopy(
         vec![0; patch_count]
     };
     normalize_soil_texture(&mut texture);
+    // 上游只在读了土壤质地（简化 VIC 或 CatchLateral）时给 `BVIC` 赋值，否则是分配时的 0
+    // （vendor 已把分配改成清零），与单点一致。
     let bvic = texture
         .iter()
-        .map(|&value| BVIC_USDA[value as usize])
+        .map(|&value| {
+            if config.use_soil_texture {
+                BVIC_USDA[value as usize]
+            } else {
+                0.0
+            }
+        })
         .collect::<Vec<_>>();
     let canopy = match canopy_override {
         Some(canopy) => canopy,

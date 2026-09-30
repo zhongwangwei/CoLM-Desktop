@@ -927,6 +927,16 @@ pub fn read_mesh_raster_layers_f64(
         .map(|element| mesh.pixel_count(element))
         .sum::<Result<usize>>()?;
     let mut output = Vec::with_capacity(layers * mesh_pixels);
+    // 层维在最内（`TWI.nc` 的 `twi(lat, lon, pixel)`，块 1200×1200×25）时，逐层逐行读会把
+    // 同一个大块反复解压上万次；改为按块对齐的瓦片一次读出所有层。
+    if axes.latitude == 0 && axes.longitude == 1 && axes.layer == 2 {
+        let region =
+            read_region_layers_innermost(&source, layers, &latitude, &longitude, raw_grid.nlon)?;
+        for layer_pixels in &region {
+            output.extend(mesh_order(mesh, pixel.lon_w.len(), layer_pixels)?);
+        }
+        return Ok(output);
+    }
     for layer in 0..layers {
         let mut pixels = Vec::with_capacity(pixel.lon_w.len() * pixel.lat_s.len());
         for global_y in &latitude {
@@ -2764,8 +2774,9 @@ fn raster_layer_axes(
             .iter()
             .position(|dimension| labels.contains(&dimension.name().to_ascii_lowercase().as_str()))
     };
-    let layer = axis(&["soil", "layer", "depth"])
-        .context("layered raster has no soil/layer/depth dimension")?;
+    // `pixel`：TWI.nc 把每个 15″ 格点的 25 个子像元放在最后一维（`twi(lat, lon, pixel)`）。
+    let layer = axis(&["soil", "layer", "depth", "pixel"])
+        .context("layered raster has no soil/layer/depth/pixel dimension")?;
     let latitude =
         axis(&["lat", "latitude"]).context("layered raster has no latitude dimension")?;
     let longitude =
@@ -2838,6 +2849,106 @@ fn raster_time_axes(
         latitude,
         longitude,
     })
+}
+
+/// `(lat, lon, layer)` 布局的分层栅格：按存储块对齐切瓦片，每块只解压一次，一次读出前
+/// `layers` 层。返回 `region[layer][row * longitude.len() + column]`，与逐行读的次序相同
+/// （`latitude`、`longitude` 都是一起算的全局下标，从 1 起；经度可跨日界线）。
+fn read_region_layers_innermost(
+    source: &netcdf::Variable<'_>,
+    layers: usize,
+    latitude: &[usize],
+    longitude: &[usize],
+    nlon: usize,
+) -> Result<Vec<Vec<f64>>> {
+    // 经度：与 `projected_raster_row` 相同的展开，得到连续的全局区间 `first..first+width`。
+    let first = *longitude
+        .first()
+        .context("spatial pixel longitude is empty")?;
+    let mut unwrapped = Vec::with_capacity(longitude.len());
+    let mut previous = first;
+    for &index in longitude {
+        ensure!(
+            index > 0 && index <= nlon,
+            "raw longitude is outside its grid"
+        );
+        let mut index = index;
+        while index < previous {
+            index += nlon;
+        }
+        ensure!(
+            index - first < nlon,
+            "spatial pixel longitudes span more than one raw-grid revolution"
+        );
+        unwrapped.push(index);
+        previous = index;
+    }
+    let width = unwrapped.last().expect("nonempty longitudes") - first + 1;
+    let (chunk_lat, chunk_lon) = match source.chunking()? {
+        Some(chunks) if chunks.len() == 3 => (chunks[0].max(1), chunks[1].max(1)),
+        _ => (1200, 1200),
+    };
+    // 需要的纬度行（0 起），去重排序后按块分段。
+    let mut rows: Vec<usize> = latitude
+        .iter()
+        .map(|&y| {
+            ensure!(y > 0, "raw raster latitude indices are one-based");
+            Ok(y - 1)
+        })
+        .collect::<Result<_>>()?;
+    rows.sort_unstable();
+    rows.dedup();
+    let row_position = |row: usize| rows.binary_search(&row).expect("row was collected");
+    // 区域缓冲：`[行位置][经度偏移][层]`。
+    let mut buffer = vec![0.0f64; rows.len() * width * layers];
+    let mut r = 0;
+    while r < rows.len() {
+        let band_chunk = rows[r] / chunk_lat;
+        let mut end = r + 1;
+        while end < rows.len()
+            && rows[end] == rows[end - 1] + 1
+            && rows[end] / chunk_lat == band_chunk
+        {
+            end += 1;
+        }
+        let (row0, row_count) = (rows[r], end - r);
+        // 经度按块边界切段；全局列 `c % nlon` 处理跨日界线。
+        let mut offset = 0;
+        while offset < width {
+            let column = (first - 1 + offset) % nlon;
+            let count = (chunk_lon - column % chunk_lon)
+                .min(nlon - column)
+                .min(width - offset);
+            let values = source.get_values::<f64, _>((
+                row0..row0 + row_count,
+                column..column + count,
+                0..layers,
+            ))?;
+            ensure!(
+                values.len() == row_count * count * layers,
+                "raw raster tile returned an unexpected length"
+            );
+            for i in 0..row_count {
+                let base = (r + i) * width * layers + offset * layers;
+                let tile = i * count * layers;
+                buffer[base..base + count * layers]
+                    .copy_from_slice(&values[tile..tile + count * layers]);
+            }
+            offset += count;
+        }
+        r = end;
+    }
+    let mut region = vec![Vec::with_capacity(latitude.len() * longitude.len()); layers];
+    for &y in latitude {
+        let row = row_position(y - 1);
+        for &index in &unwrapped {
+            let at = (row * width + (index - first)) * layers;
+            for (layer, values) in region.iter_mut().enumerate() {
+                values.push(buffer[at + layer]);
+            }
+        }
+    }
+    Ok(region)
 }
 
 fn read_layer_raster_row(

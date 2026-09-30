@@ -107,7 +107,10 @@ const REGULAR_CURVE_PARAMETERS: usize = 3;
 /// Callers gather all 25 raw TWI depths for one patch or element first.  A
 /// return value of `None` is the Fortran routine's `npxl < 25` condition and
 /// must be filled from the owning element's result by the topology adapter.
-pub fn derive_topographic_wetness(raw_twi: &[f64]) -> Result<Option<TopographicWetness>> {
+pub fn derive_topographic_wetness(
+    raw_twi: &[f64],
+    skew_fallback: [f64; 3],
+) -> Result<Option<TopographicWetness>> {
     let mut values = raw_twi
         .iter()
         .copied()
@@ -129,45 +132,47 @@ pub fn derive_topographic_wetness(raw_twi: &[f64]) -> Result<Option<TopographicW
         mean_index += 1;
     }
     let fsatmax = 1.0 - mean_index as f64 / count_f;
-    let mut xx_yy_sum = 0.0;
-    let mut xx_squared_sum = 0.0;
+    // `sum(xx*yy)`、`sum(xx**2)` 都是顺序的 FMA 累加（`Aggregation_TopoWetness` 的 GIMPLE）。
+    let mut xx_yy_sum = 0.0f64;
+    let mut xx_squared_sum = 0.0f64;
     for (index, &value) in values[mean_index..count - 1].iter().enumerate() {
         let rank = mean_index + index + 1;
         let xx = -(value - mean_twi);
         let yy = ((1.0 - rank as f64 / count_f) / fsatmax).ln();
-        xx_yy_sum += xx * yy;
-        xx_squared_sum += xx * xx;
+        xx_yy_sum = xx.mul_add(yy, xx_yy_sum);
+        xx_squared_sum = xx.mul_add(xx, xx_squared_sum);
     }
     ensure!(
         xx_squared_sum > 0.0 && xx_squared_sum.is_finite(),
         "topographic-wetness samples cannot fit fsatdcf"
     );
     let fsatdcf = xx_yy_sum / xx_squared_sum;
-    let variance = values
-        .iter()
-        .map(|value| (value - mean_twi).powi(2))
-        .sum::<f64>()
-        / (count_f - 1.0);
-    let sigma_twi = variance.sqrt();
-    let (alp_twi, chi_twi, mu_twi) = if sigma_twi > 0.0 {
-        let skew_twi = count_f / ((count_f - 1.0) * (count_f - 2.0))
-            * values
-                .iter()
-                .map(|value| (value - mean_twi).powi(3))
-                .sum::<f64>()
-            / sigma_twi.powi(3);
-        if skew_twi > 0.0 {
-            (
-                (2.0 / skew_twi).powi(2),
-                sigma_twi * skew_twi / 2.0,
-                mean_twi - 2.0 * sigma_twi / skew_twi,
-            )
-        } else {
-            (0.1, 0.01, 0.0)
+    let mut squares = 0.0f64;
+    for value in &values {
+        let d = value - mean_twi;
+        squares = d.mul_add(d, squares);
+    }
+    let sigma_twi = (squares / (count_f - 1.0)).sqrt();
+    // 偏度不可用（`sigma <= 0` 或偏度不为正）时上游不改这三个量：patch 留着 `spval = -1e36`（夹紧后为
+    // 下界），单元留着缺省值。由调用方给回退值。
+    let (mut alp_twi, mut chi_twi, mut mu_twi) =
+        (skew_fallback[0], skew_fallback[1], skew_fallback[2]);
+    if sigma_twi > 0.0 {
+        let mut cubes = 0.0f64;
+        for value in &values {
+            let d = value - mean_twi;
+            cubes = (d * d).mul_add(d, cubes);
         }
-    } else {
-        (0.1, 0.01, 0.0)
-    };
+        // `real(npxl)/(real(npxl-1)*real(npxl-2))`：vendor 修掉了上游的 32 位整数溢出。
+        let skew_twi = count_f / ((count_f - 1.0) * (count_f - 2.0)) * cubes
+            / (sigma_twi * sigma_twi * sigma_twi);
+        if skew_twi > 0.0 {
+            let ratio = 2.0 / skew_twi;
+            alp_twi = ratio * ratio;
+            chi_twi = sigma_twi * skew_twi * 0.5;
+            mu_twi = mean_twi - sigma_twi * 2.0 / skew_twi;
+        }
+    }
     Ok(Some(TopographicWetness {
         mean_twi,
         fsatmax: fsatmax.clamp(0.1, 1.0),
@@ -402,6 +407,7 @@ impl FlatPatches {
         &self,
         raw_twi: &[f64],
         layers: usize,
+        skew_fallback: [f64; 3],
     ) -> Result<Vec<Option<TopographicWetness>>> {
         ensure!(
             layers > 0,
@@ -429,7 +435,7 @@ impl FlatPatches {
                     })?);
                 }
             }
-            result[patch] = derive_topographic_wetness(&gathered)?;
+            result[patch] = derive_topographic_wetness(&gathered, skew_fallback)?;
         }
         Ok(result)
     }

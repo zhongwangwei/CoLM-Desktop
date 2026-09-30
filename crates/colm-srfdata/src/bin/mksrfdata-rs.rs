@@ -2115,7 +2115,9 @@ fn materialize_topographic_wetness(
         gather_patch_raster(&topology.mesh, &topology.pixel, patches, COLM_500M, zip)?;
     let raw =
         read_mesh_raster_layers_f64(path, "twi", TWI_LAYERS, &mesh, &topology.pixel, COLM_500M)?;
-    let patch_values = patch_layout.aggregate_topographic_wetness(&raw, TWI_LAYERS)?;
+    // 上游 patch 数组初值是 `spval = -1e36`，偏度不可用时就这样留到夹紧（得下界 0.1/0.01/0）。
+    let patch_values =
+        patch_layout.aggregate_topographic_wetness(&raw, TWI_LAYERS, [-1.0e36; 3])?;
     let elements = FlatLandPatches {
         element_ids: topology.land_elements.element_ids.clone(),
         pixel_start: topology.land_elements.pixel_start.clone(),
@@ -2127,7 +2129,9 @@ fn materialize_topographic_wetness(
         gather_patch_raster(&topology.mesh, &topology.pixel, &elements, COLM_500M, zip)?;
     let raw =
         read_mesh_raster_layers_f64(path, "twi", TWI_LAYERS, &mesh, &topology.pixel, COLM_500M)?;
-    let element_values = element_layout.aggregate_topographic_wetness(&raw, TWI_LAYERS)?;
+    // 单元的循环每次先置缺省值（`alp/chi/mu = 1.34/1.61/6.95`），偏度不可用时保留它们。
+    let element_values =
+        element_layout.aggregate_topographic_wetness(&raw, TWI_LAYERS, [1.34, 1.61, 6.95])?;
     let fallback = TopographicWetness {
         mean_twi: 9.27,
         fsatmax: 0.38,

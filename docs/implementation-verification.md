@@ -26853,3 +26853,28 @@ Rust：`FloodplainCurve::new` 与 `RiverNetwork::read` 加 `storage_fix` 参数�
 附带发现：崩溃那一次 mkinidata 在缺少湿度指数文件时照样成功（读取落到缺省值）。拿那次的 landdata 跑出来的洪泛回馈蒸发量比修后大两个数量级，是无效的参照。
 
 实测：修后 `g1ff`（方案 0 + 修正曲线 + 洪泛回馈）纯 Fortran 三段都成功，`topography/2005` 下 6 个 TWI 参数文件齐全。
+
+## 第 466 轮：空间 TOPMODEL 产流（`DEF_Runoff_SCHEME = 0`）三段全 Rust 逐位
+
+这是洪泛回馈的前置：上游开回馈时把产流方案强制成 0。算例 `g1t`：g1 区域、方案 0、修正漫滩曲线、不开回馈；Rust 走 colm-cli 三段，Fortran 三段纯 Fortran。
+
+**上游缺陷（vendor 已修）：**
+1. **偏度的 32 位整数溢出**（`Aggregation_TopoWetness`，patch 与单元两处）。`real(npxl)/((npxl-1)*(npxl-2))` 的分母是整数乘法，`npxl` 过 46341（大 patch 的子像元数 × 25）就溢出回绕。偏度变得极大，`alp/chi/mu_twi` 被夹到界上（`0.1/4.0/≈均值`）。改成 `real(npxl-1)*real(npxl-2)`。
+2. **未赋值的数组写进常数重启**（`MOD_Vars_TimeInvariants`）：
+   - `BVIC` 只在读土壤质地时赋值（简化 VIC 或 CatchLateral）；
+   - `alp/chi/mu_twi` 只在 `DEF_TOPMOD_method = 2` 时读；
+   - `fsat*/topoweti` 只在方案 0 时读；`vic_*` 只在方案 1 时读。
+   - 其余情况写出的是分配器给的内存：实测 `chi_twi` 在 2 个 patch 上是 14.155，其余是 0。
+   - 改为分配时清零。以前凡是碰巧为 0 的输出不变，所以既有对照也不变。
+
+**Rust 改动：**
+1. 分层栅格的层维名接受 `pixel`（`TWI.nc` 是 `twi(lat, lon, pixel=25)`）。
+2. **层维在最内时按存储块对齐切瓦片一次读所有层。** `TWI.nc` 的块是 1200×1200×25（解压后约 144 MB），HDF5 默认块缓存只有 1 MB。原来逐层逐行读，一个块要解压上万次，mksrfdata 51 分钟还没跑完；改后三段合计 48 秒。
+3. `derive_topographic_wetness` 对齐 GIMPLE：
+   - `sum(xx*yy)`、`sum(xx**2)`、`sum(d**2)` 是顺序 FMA 累加；`sum(d**3)` 是 `FMA(d*d, d, acc)`；`sigma**3 = (s*s)*s`。原来用普通加法，`fsatdcf` 差 1 ULP。
+   - 偏度不可用时的回退由调用方给：patch 是 `spval = -1e36`（夹到下界），单元是缺省的 `1.34/1.61/6.95`。原来单元也按下界处理，是错的。
+4. 空间常数重启在不读土壤质地时 `BVIC = 0`，与单点和上游一致；原来是 `BVIC_USDA[0] = 1`。
+
+**实测**（修后内核）：`g1t` landdata 254 项、重启 7 个文件、history 2 个文件全部逐位。
+- `cargo test -p colm-init`（单线程）164 个全过；`colm-srfdata`（单线程）271 + 49 个全过。
+- `COLM_RAWDATA=/Volumes/Data/CoLMrawdata` 下 `tests/raster.rs` 5 个全过。

@@ -150,7 +150,8 @@ fn spatial_pft_soil_texture_gate_tracks_scheme_and_explicit_catch_force() {
     .unwrap();
     let common = netcdf::open(files.common.block).unwrap();
     assert_eq!(values_i32(&common, "soiltext").unwrap(), [0]);
-    assert_eq!(values_f64(&common, "BVIC").unwrap(), [1.0]);
+    // 没读土壤质地时上游不给 `BVIC` 赋值，保持分配时的 0。
+    assert_eq!(values_f64(&common, "BVIC").unwrap(), [0.0]);
 
     let restart_catch = root.join("restart-catch");
     let mut config = SpatialPftStaticConfig::new(

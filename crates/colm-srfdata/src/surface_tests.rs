@@ -247,21 +247,31 @@ fn hyper_albedo_scales_before_median_and_marks_water_and_ice_missing() {
 
 #[test]
 fn topographic_wetness_matches_threshold_fit_and_short_sample_fallback() {
-    assert_eq!(derive_topographic_wetness(&[1.0; 24]).unwrap(), None);
+    const PATCH: [f64; 3] = [-1.0e36; 3];
+    assert_eq!(derive_topographic_wetness(&[1.0; 24], PATCH).unwrap(), None);
     let values = (0..25).map(f64::from).collect::<Vec<_>>();
-    let output = derive_topographic_wetness(&values).unwrap().unwrap();
+    // 对称样本偏度为 0：patch 留着 `spval = -1e36`，夹紧到下界。
+    let output = derive_topographic_wetness(&values, PATCH).unwrap().unwrap();
     assert_eq!(output.mean_twi, 12.0);
     assert_eq!(output.fsatmax, 0.52);
     assert_eq!(output.alp_twi, 0.1);
     assert_eq!(output.chi_twi, 0.01);
     assert_eq!(output.mu_twi, 0.0);
     assert_eq!(output.fsatdcf, 0.2);
+    // 单元留着自己的缺省值（`Aggregation_TopoWetness` 的单元循环）。
+    let element = derive_topographic_wetness(&values, [1.34, 1.61, 6.95])
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (element.alp_twi, element.chi_twi, element.mu_twi),
+        (1.34, 1.61, 6.95)
+    );
 
     let skewed = (0..24)
         .map(f64::from)
         .chain(std::iter::once(100.0))
         .collect::<Vec<_>>();
-    let skewed = derive_topographic_wetness(&skewed).unwrap().unwrap();
+    let skewed = derive_topographic_wetness(&skewed, PATCH).unwrap().unwrap();
     assert!(skewed.alp_twi > 0.1);
     assert!(skewed.chi_twi > 0.01);
     assert!(skewed.mu_twi > 0.0);
@@ -275,10 +285,14 @@ fn topographic_wetness_is_layer_major_and_reuses_wmo_sources() {
     for value in 0..25 {
         raw.extend([f64::from(value), 99.0]);
     }
-    let output = layout.aggregate_topographic_wetness(&raw, 25).unwrap();
+    let output = layout
+        .aggregate_topographic_wetness(&raw, 25, [-1.0e36; 3])
+        .unwrap();
     assert_eq!(output[0].unwrap().mean_twi, 12.0);
     assert_eq!(output[1], output[0]);
-    assert!(layout.aggregate_topographic_wetness(&raw, 24).is_err());
+    assert!(layout
+        .aggregate_topographic_wetness(&raw, 24, [-1.0e36; 3])
+        .is_err());
 }
 
 #[test]

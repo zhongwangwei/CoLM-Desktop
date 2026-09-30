@@ -211,7 +211,8 @@ fn spatial_lct_inactive_soil_texture_skips_missing_source_with_deterministic_pla
 
     let block = netcdf::open(files.block).unwrap();
     assert_eq!(values_i32(&block, "soiltext").unwrap(), [0]);
-    assert_eq!(values_f64(&block, "BVIC").unwrap(), [BVIC_USDA[0]]);
+    // 没读土壤质地时上游不给 `BVIC` 赋值，保持分配时的 0。
+    assert_eq!(values_f64(&block, "BVIC").unwrap(), [0.0]);
     crate::remove_test_tree(root);
 }
 
