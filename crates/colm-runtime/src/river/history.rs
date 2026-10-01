@@ -318,7 +318,32 @@ impl RiverHistoryWriter {
                 mean_or_zero(levdph),
             ));
         }
-        self.write_unitcat(network, record, end, window_seconds, &unitcat)?;
+        // `DEF_USE_BIFURCATION`：`f_bifout` 与路径层矩阵 `f_bifflw_lev`（逐路径按自己的累加时长平均）。
+        let mut bifflw = None;
+        if let (Some(bifout), Some(lev), Some(acctime)) = (
+            &history.bifout,
+            &history.bifflw_lev,
+            &history.bifflw_acctime,
+        ) {
+            unitcat.push((
+                "f_bifout",
+                "net bifurcation outflow",
+                "m^3/s",
+                bifout
+                    .iter()
+                    .zip(&history.acctime)
+                    .map(|(&v, &t)| if t > 0.0 { v / t } else { 0.0 })
+                    .collect(),
+            ));
+            let levels = lev.len() / acctime.len().max(1);
+            let mean = lev
+                .chunks(levels.max(1))
+                .zip(acctime)
+                .flat_map(|(row, &t)| row.iter().map(move |&v| if t > 0.0 { v / t } else { 0.0 }))
+                .collect::<Vec<_>>();
+            bifflw = Some((levels, mean));
+        }
+        self.write_unitcat(network, record, end, window_seconds, &unitcat, bifflw)?;
 
         // 回到 patch（`*_pch`），再按各自的过滤与分母聚合到 history 网格。
         let per_area = |values: &[f64], area: &[f64]| {
@@ -390,7 +415,7 @@ impl RiverHistoryWriter {
             session.stage_gridded(name, values)?;
         }
         debug_assert_eq!(history.acctime.len(), n);
-        *history = RiverHistory::zeros_with_levee(n, history.levsto.is_some());
+        history.reset();
         Ok(())
     }
 
@@ -401,6 +426,7 @@ impl RiverHistoryWriter {
         end: colm_core::CalendarTime,
         window_seconds: f64,
         fields: &[(&str, &str, &str, Vec<f64>)],
+        bifflw: Option<(usize, Vec<f64>)>,
     ) -> Result<()> {
         std::fs::create_dir_all(&self.directory)
             .with_context(|| format!("cannot create {}", self.directory.display()))?;
@@ -478,6 +504,23 @@ impl RiverHistoryWriter {
             file.variable_mut(name)
                 .with_context(|| format!("{name} disappeared"))?
                 .put_values(&to_grid(values), (t..t + 1, .., ..))?;
+        }
+        // `route_hist_write_bif_matrix`（单文件）：`ncio_write_serial_time`，属性只在第一条记录写。
+        if let Some((levels, values)) = bifflw {
+            let paths = values.len() / levels.max(1);
+            if first {
+                file.add_dimension("bifurcation_level", levels)?;
+                file.add_dimension("bifurcation_pathway", paths)?;
+                let mut variable = file.add_variable::<f64>(
+                    "f_bifflw_lev",
+                    &["time", "bifurcation_pathway", "bifurcation_level"],
+                )?;
+                variable.put_attribute("long_name", "effective bifurcation pathway-layer flow")?;
+                variable.put_attribute("units", "m^3/s")?;
+            }
+            file.variable_mut("f_bifflw_lev")
+                .context("f_bifflw_lev disappeared")?
+                .put_values(&values, (t..t + 1, .., ..))?;
         }
         Ok(())
     }

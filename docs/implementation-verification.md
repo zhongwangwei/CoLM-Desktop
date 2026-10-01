@@ -26967,3 +26967,67 @@ Rust：`FloodplainCurve::new` 与 `RiverNetwork::read` 加 `storage_fix` 参数�
 - `cargo test --release -p colm-runtime` 全过（含 `levee_tests.rs` 3 个）；`clippy --workspace --all-targets` 无告警。
 - 顺带把上一轮留下的几个 rustfmt 差异格式化了。
 - 回归脚本的 SKIP 加 `g1lv/g1lw/g1lwc`。
+
+## 第 470 轮：分汊（`DEF_USE_BIFURCATION`）
+
+**结构上的差别**：开分汊时上游不再让各河系各自推进。每个子步依次做下面几件事：
+1. 按河系求子步长（CFL、蓄量两道限制）；
+2. 普通出流限制：
+   - 顺流的出口通量记给自己，逆流的推到下游求和，合起来得到 `normal_outgoing_rate`；
+   - `ordinary_scale = min(1, max(volwater,0)/(rate*dt_河系))`；
+   - 出口通量按上游侧（逆流时取下游）的比例缩放，再重新求 `sum_hflux/sum_mflux`；
+3. `sync_global_routing_dt`：所有河系同步到全局最小子步长；无效的河系子步长退回 `min(10, dt_res)`；
+4. `bifurcation_calc` 算出路径通量，加进 `sum_hflux_riv`；
+5. `wdsrf_ucat_prev = wdsrf_ucat`。
+
+分汊路径可以跨河系，所以 Rust 开分汊时把全网当成一个河系（`RiverSystem`，单元流域按全局序号）单线程推进；默认与堤防路径照旧按河系并行，代码共用 `route_system`。
+
+**`river/bifurcation.rs`**（单进程、无堤防、无水库）：
+- 读 `bifurcation_upst/down/distance/elevation/width/manning`，做与上游相同的校验，建立逐单元流域的入流路径表（按路径号递增）。
+- 局部惯性更新逐层核对了 GIMPLE：
+  - 界面水深是 `max(sqrt(当前*上一子步), sqrt(当前*0.01))`；
+  - `friction = (man²·g / h^(7/3))·|m|`；
+  - `mflux = dst·(((w·g)·h)·slope)`；
+  - 动量为 `FNMA(mflux/area, dt, m) / FMA(dt, friction, 1)`；
+  - 流速夹在 ±20，动量 = `h·v`。
+- 三道限流：
+  - 路径 5% 端点蓄量；
+  - 逐层按供水方可见蓄量；
+  - 单元流域总出流扣掉普通出流后的余量；
+  - 限流后对净通量再做一次 5% 限制，缩放后的净通量用从 0 起的顺序和。
+- `push_bif_influx` 把净通量推到下游（值为 0 的不参与，首项直接赋值），再逐路径减掉本地已算的部分。单进程下两者相消只剩舍入残差，上游照样加进 `bif_hflux_sum`，Rust 也照做。
+- 可用蓄量 `available_storage_ucat`：有蓄量或水深 ≤ 1e-5 时用蓄量（`+0`）；否则用河槽棱柱补算，即 `FMA(rivare, w-rivhgt, V(w))`。
+- 累加：`a_bifout = FMA(bif_hflux_sum, dt, ·)`，`a_bifflw_lev = FMA(hflux_lev, dt, ·)`，`a_bifflw_acctime += dt`（只对本子步有效的路径）。
+
+**开分汊时状态改用蓄量**：与堤防相同，所有单元流域都以 `volwater_ucat` 为状态（上游 `IF (DEF_USE_BIFURCATION .or. DEF_USE_LEVEE)`）。
+
+**续跑与 history：**
+- 河道续跑：
+  - 标记 `feature_bifurcation = 1`；
+  - `wdsrf_ucat` 之后写 `wdsrf_ucat_prev`；
+  - 末尾写 `bif_path_signature`、`pth_veloc`、`pth_momen`，维度为 `(bifurcation_pathway, ·)`。
+- 读回时核对签名，不同就报错。路径状态越界（|v|>50、|m|>1e4）时报错。续跑与当前的堤防开关不同时，路径状态冷启动，上一子步水深取当前水深。
+- unitcat 多两项：
+  - `f_bifout`：`acctime > 0` 时取均值，否则为 0；
+  - `f_bifflw_lev`：按路径自己的累加时长平均，维度 `(time, pathway, level)`。
+- `.river` 旁车加 `hist_bifout`、`hist_bifflw_lev`、`hist_bifflw_acctime`。
+
+**顺带修的 Rust 缺陷**：mkinidata-rs 的分汊冷启动要求有效层连续，比上游严。上游只要求有效层之间高程不降，中间可以夹无效层。真实 15 弧分数据里 17242 条路径中有 15637 条首层宽度为 0，所以这道校验此前一直报错，从没在真实数据上跑通过。现按上游改，`gridriver_tests` 加了首层无效的用例。
+
+**调试记录**：第一次对比时几乎所有单元流域都差。原因是逐河系子步长的初值错用了全网的累计最小值，使普通出流限制的 `dt` 偏小。上游是 `dt_this = dt_all(irivsys(i))`，按河系起算。修正后逐位一致。
+
+**拒绝**：分汊与堤防、漫滩回馈、LULCC 的组合在 colm-rs 入口拒绝。
+
+**实测**（g1 区域 + `DEF_USE_BIFURCATION`，Data01 的单元流域文件；全 Rust 三段 vs 纯 Fortran 三段）：
+
+| 算例 | 内容 | 结果 |
+|---|---|---|
+| `g1bf`（1 天，history DAILY） | 续跑 5 个，history 2 个（含 `f_bifout`、`f_bifflw_lev`） | 全部 `diff 0` |
+| `g1bw`（history MONTHLY、续跑 DAILY） | 续跑 5 个；`.river` 旁车（含三项分汊累加）`diff 0` | 全部 `diff 0` |
+| `g1bwc`（各自从第 2 天续跑接着跑 1 天） | 续跑 8 个，history 2 个 | 全部 `diff 0` |
+| 改动后重跑 `g1t`（默认）、`g1lv`（堤防）、`g1ff`（漫滩回馈） | 只跑 colm 段 | 仍然逐位 |
+
+- 分汊确实生效：第 2 天末 2306 条路径有流量，`f_bifout` 非零的单元流域 7163 个。
+- 全 Rust colm 段一天约 87 s：全网同步子步，只能单线程推进。
+- `cargo test --release -p colm-runtime -p colm-init -- --test-threads=1` 全过。多线程跑 colm-init 会有 39 个 HDF5 并发失败，与本轮无关。
+- `clippy --workspace --all-targets` 无告警。回归脚本的 SKIP 加 `g1bf/g1bw/g1bwc`。

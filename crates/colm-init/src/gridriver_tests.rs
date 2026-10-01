@@ -283,6 +283,41 @@ fn cold_restart_carries_native_zero_bifurcation_state() {
     crate::remove_test_tree(root);
 }
 
+/// 上游只要求有效层（宽度 > 0）之间高程不降；首层无效的路径（真实 15 弧分数据里多数如此）要接受。
+#[test]
+fn cold_restart_accepts_inactive_levels_before_active_ones() {
+    let root = temp_dir("bifurcation-gap");
+    let unit_catchment = root.join("unitcatchment.nc");
+    write_unit_catchment_with_width(&unit_catchment, [0.0, 4.0]);
+    let restart = write_gridriver_cold_restart(GridRiverColdStartConfig {
+        unit_catchment: &unit_catchment,
+        restart_dir: &root.join("restart"),
+        case_name: "case",
+        land_cover_year: 2005,
+        date: RestartDate {
+            year: 2008,
+            julian_day: 1,
+            seconds: 0,
+        },
+        bifurcation: true,
+        levee: false,
+        reservoir_method: 0,
+        reservoir_parameters: None,
+        compression_level: 1,
+    })
+    .unwrap();
+    let file = netcdf::open(&restart.path).unwrap();
+    assert_eq!(
+        file.variable("bif_path_signature")
+            .unwrap()
+            .get_values::<f64, _>(..)
+            .unwrap(),
+        [1.0, 1.0, 2.0, 100.0, 7.0, 8.0, 0.0, 4.0, 0.03, 0.04]
+    );
+    drop(file);
+    crate::remove_test_tree(root);
+}
+
 #[test]
 fn cold_restart_carries_zero_levee_state() {
     let root = temp_dir("levee");
@@ -387,6 +422,10 @@ fn cold_restart_carries_native_reservoir_identity_and_volume() {
 }
 
 fn write_unit_catchment(path: &std::path::Path) {
+    write_unit_catchment_with_width(path, [3.0, 4.0]);
+}
+
+fn write_unit_catchment_with_width(path: &std::path::Path, width: [f64; 2]) {
     let mut file = netcdf::create(path).unwrap();
     file.add_dimension("ucatch", 2).unwrap();
     for (name, values) in [("seq_x", [3, 4]), ("seq_y", [5, 6]), ("seq_next", [2, 0])] {
@@ -413,7 +452,7 @@ fn write_unit_catchment(path: &std::path::Path) {
         .unwrap();
     for (name, values) in [
         ("bifurcation_elevation", [7.0, 8.0]),
-        ("bifurcation_width", [3.0, 4.0]),
+        ("bifurcation_width", width),
     ] {
         file.add_variable::<f64>(name, &["bifurcation_pathway", "bifurcation_level"])
             .unwrap()

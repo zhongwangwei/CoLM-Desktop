@@ -6,6 +6,7 @@
 //!
 //! 收缩形状取自 latlon 内核的 GIMPLE（`gimpleL/MOD_Grid_RiverLakeFlow.F90`），逐句注明。
 
+pub mod bifurcation;
 pub mod flood;
 pub mod history;
 pub mod levee;
@@ -58,6 +59,22 @@ pub struct RiverState {
     pub levsto: Option<Vec<f64>>,
     /// 堤内水深（m）：不进续跑，汇流开头的重新分区会重算它。
     pub levdph: Option<Vec<f64>>,
+    /// `DEF_USE_BIFURCATION`：上一子步水深与路径状态；没开分汊时是 `None`。
+    pub bifurcation: Option<BifurcationState>,
+}
+
+/// 分汊的续跑状态（`wdsrf_ucat_prev`、`pth_veloc`、`pth_momen`、`bif_path_signature`）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct BifurcationState {
+    /// `npthlev_bif`。
+    pub levels: usize,
+    /// `wdsrf_ucat_prev`：上一个分汊子步开头的水深。
+    pub wdsrf_prev: Vec<f64>,
+    /// `pth_veloc`、`pth_momen`：逐路径逐层，`[p*levels + l]`。
+    pub veloc: Vec<f64>,
+    pub momen: Vec<f64>,
+    /// 路径签名：读回时是续跑里的，构造模型时与当前网络核对。
+    pub signature: Vec<f64>,
 }
 
 /// 河道 history 累加量（`MOD_Grid_RiverLakeHist` 的 `a_*`，按 `dt` 加权）。
@@ -76,15 +93,53 @@ pub struct RiverHistory {
     /// `a_levsto`、`a_levdph`：只在 `DEF_USE_LEVEE` 时有。
     pub levsto: Option<Vec<f64>>,
     pub levdph: Option<Vec<f64>>,
+    /// `a_bifout`（逐单元流域）、`a_bifflw_lev`（逐路径逐层）、`a_bifflw_acctime`（逐路径）：
+    /// 只在 `DEF_USE_BIFURCATION` 时有。
+    pub bifout: Option<Vec<f64>>,
+    pub bifflw_lev: Option<Vec<f64>>,
+    pub bifflw_acctime: Option<Vec<f64>>,
 }
 
 impl RiverHistory {
-    /// 全零的累加量；`levee` 决定有没有堤防那两项。
-    pub fn zeros_with_levee(n: usize, levee: bool) -> Self {
+    /// 全零的累加量；`levee` 决定有没有堤防那两项，`bifurcation = (路径数, 层数)` 决定分汊那三项。
+    pub fn zeros_for(n: usize, levee: bool, bifurcation: Option<(usize, usize)>) -> Self {
         Self {
             levsto: levee.then(|| vec![0.0; n]),
             levdph: levee.then(|| vec![0.0; n]),
+            bifout: bifurcation.map(|_| vec![0.0; n]),
+            bifflw_lev: bifurcation.map(|(paths, levels)| vec![0.0; paths * levels]),
+            bifflw_acctime: bifurcation.map(|(paths, _)| vec![0.0; paths]),
             ..Self::zeros(n)
+        }
+    }
+
+    /// 写完一条记录后清零（`MOD_Grid_RiverLakeHist` 末尾的 `a_* = 0`），保留各项是否存在。
+    pub fn reset(&mut self) {
+        for v in [
+            &mut self.acctime,
+            &mut self.wdsrf,
+            &mut self.veloc,
+            &mut self.discharge,
+            &mut self.floodarea,
+            &mut self.rivsto,
+            &mut self.fldsto,
+            &mut self.flddph,
+            &mut self.storge,
+            &mut self.sfcelv,
+        ] {
+            v.fill(0.0);
+        }
+        for v in [
+            &mut self.levsto,
+            &mut self.levdph,
+            &mut self.bifout,
+            &mut self.bifflw_lev,
+            &mut self.bifflw_acctime,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            v.fill(0.0);
         }
     }
 
@@ -103,6 +158,9 @@ impl RiverHistory {
             sfcelv: z,
             levsto: None,
             levdph: None,
+            bifout: None,
+            bifflw_lev: None,
+            bifflw_acctime: None,
         }
     }
 }
@@ -128,6 +186,9 @@ pub struct RiverModel {
     pub flood: Option<flood::FloodFeedback>,
     /// `DEF_USE_LEVEE`：每个单元流域的堤防几何。
     pub levee: Option<levee::Levee>,
+    /// `DEF_USE_BIFURCATION`：分汊路径，以及把全网当成一个河系的拓扑（分汊跨河系，
+    /// 上游这时把所有河系同步到同一子步长）。
+    pub bifurcation: Option<(bifurcation::Bifurcation, network::RiverSystem)>,
     momen: Vec<f64>,
 }
 
@@ -139,6 +200,7 @@ impl RiverModel {
         mut state: RiverState,
         max_dt: f64,
         levee: Option<levee::Levee>,
+        bifurcation: Option<bifurcation::Bifurcation>,
     ) -> Result<Self> {
         let n = network.len();
         ensure!(
@@ -154,6 +216,7 @@ impl RiverModel {
         );
         // `read_levee_restart`：续跑没带 `levsto` 时堤内蓄量从 0 起；当前配置在某单元流域没有堤
         // （或整体关了堤防）时，堤内蓄量并回堤外可见蓄量。
+        let restart_levee = state.levsto.is_some();
         let levsto = state.levsto.take();
         if let Some(levsto) = &levsto {
             ensure!(
@@ -181,24 +244,89 @@ impl RiverModel {
                         *visible += protected;
                     }
                 }
-                // 关了堤防却读到带堤防的续跑：水深按并回后的可见蓄量重算。
-                for ((w, &visible), curve) in state
-                    .wdsrf
-                    .iter_mut()
-                    .zip(&state.volwater)
-                    .zip(&network.curves)
-                {
-                    *w = curve.depth(visible);
+                // 关了堤防却读到带堤防的续跑：水深按并回后的可见蓄量重算（开分汊时状态本就是蓄量，
+                // 上游不重算）。
+                if bifurcation.is_none() {
+                    for ((w, &visible), curve) in state
+                        .wdsrf
+                        .iter_mut()
+                        .zip(&state.volwater)
+                        .zip(&network.curves)
+                    {
+                        *w = curve.depth(visible);
+                    }
                 }
                 state.levdph = None;
             }
             (None, None) => state.levdph = None,
         }
+        // `read_bifurcation_restart`：续跑带分汊状态时核对路径签名；状态越界或堤防开关变了就冷启动
+        // 路径状态，这时上一子步水深取当前水深。没开分汊时丢掉续跑里的分汊状态。
+        let restart_bifurcation = state.bifurcation.take();
+        if let Some(bif) = bifurcation.as_ref() {
+            let cells = bif.paths() * bif.levels;
+            let signature = bif.signature();
+            let cold = || BifurcationState {
+                levels: bif.levels,
+                wdsrf_prev: state.wdsrf.clone(),
+                veloc: vec![0.0; cells],
+                momen: vec![0.0; cells],
+                signature: signature.clone(),
+            };
+            let resumed = match restart_bifurcation {
+                Some(restart) => {
+                    ensure!(
+                        restart.signature == signature,
+                        "Refusing to load bifurcation momentum for a different pathway network"
+                    );
+                    ensure!(
+                        restart.wdsrf_prev.len() == n
+                            && restart.veloc.len() == cells
+                            && restart.momen.len() == cells,
+                        "the bifurcation restart does not match the pathway network"
+                    );
+                    let valid = restart.veloc.iter().zip(&restart.momen).all(|(v, m)| {
+                        v.is_finite() && v.abs() <= 50.0 && m.is_finite() && m.abs() <= 1.0e4
+                    });
+                    ensure!(
+                        valid,
+                        "GridRiverLake restart declares bifurcation enabled but pathway state is invalid"
+                    );
+                    // 续跑与当前的堤防开关不同：路径状态冷启动。
+                    if restart_levee != levee.is_some() {
+                        cold()
+                    } else {
+                        BifurcationState {
+                            levels: bif.levels,
+                            signature: signature.clone(),
+                            ..restart
+                        }
+                    }
+                }
+                None => cold(),
+            };
+            state.bifurcation = Some(resumed);
+        }
         rebuild_volwater(&network, &mut state, levee.as_ref());
+        let history = RiverHistory::zeros_for(
+            n,
+            levee.is_some(),
+            bifurcation.as_ref().map(|bif| (bif.paths(), bif.levels)),
+        );
+        let bifurcation = bifurcation.map(|bif| {
+            // 全网当成一个河系：单元流域按全局序号，上下游关系不变。
+            let system = network::RiverSystem {
+                cells: (0..n).collect(),
+                next: network.next.clone(),
+                upstream: network.upstream.clone(),
+            };
+            (bif, system)
+        });
         Ok(Self {
             momen: vec![0.0; n],
-            history: RiverHistory::zeros_with_levee(n, levee.is_some()),
+            history,
             levee,
+            bifurcation,
             network,
             routing,
             state,
@@ -281,17 +409,52 @@ impl RiverModel {
     /// 河系之间没有耦合（上下游都在同一河系，子步长在河系内取最小），所以逐河系独立推进、
     /// 河系之间并行；河系内部的顺序与上游逐单元流域的循环相同。
     fn route(&mut self) {
+        // 分汊：把路径状态与累加量搬进这次汇流，全网一个河系推进，结束后放回。
+        let bif_run = self.bifurcation.as_ref().map(|(bif, _)| BifurcationRun {
+            bif,
+            state: self.state.bifurcation.take().expect("bifurcation state"),
+            bifout: self.history.bifout.take().expect("bifurcation history"),
+            bifflw_lev: self.history.bifflw_lev.take().expect("bifurcation history"),
+            bifflw_acctime: self
+                .history
+                .bifflw_acctime
+                .take()
+                .expect("bifurcation history"),
+        });
         let net = &self.network;
         let state = &self.state;
         let history = &self.history;
         let levee = self.levee.as_ref();
         let acctime = state.acctime_rnof;
-        let results = net
-            .systems
-            .par_iter()
-            .map(|system| route_system(net, system, state, history, levee, acctime))
-            .collect::<Vec<_>>();
-        for (system, result) in net.systems.iter().zip(results) {
+        let (systems, results): (Vec<&network::RiverSystem>, Vec<SystemResult<'_>>) =
+            match (bif_run, self.bifurcation.as_ref()) {
+                (Some(run), Some((_, global))) => (
+                    vec![global],
+                    vec![route_system(
+                        net,
+                        global,
+                        state,
+                        history,
+                        levee,
+                        Some(run),
+                        acctime,
+                    )],
+                ),
+                _ => (
+                    net.systems.iter().collect(),
+                    net.systems
+                        .par_iter()
+                        .map(|system| {
+                            route_system(net, system, state, history, levee, None, acctime)
+                        })
+                        .collect(),
+                ),
+            };
+        let mut bif_back = None;
+        for (system, mut result) in systems.into_iter().zip(results) {
+            if let Some(run) = result.bifurcation.take() {
+                bif_back = Some((run.state, run.bifout, run.bifflw_lev, run.bifflw_acctime));
+            }
             for (k, &i) in system.cells.iter().enumerate() {
                 self.state.wdsrf[i] = result.wdsrf[k];
                 self.state.veloc[i] = result.veloc[k];
@@ -316,13 +479,19 @@ impl RiverModel {
                 }
             }
         }
+        if let Some((state, bifout, bifflw_lev, bifflw_acctime)) = bif_back {
+            self.state.bifurcation = Some(state);
+            self.history.bifout = Some(bifout);
+            self.history.bifflw_lev = Some(bifflw_lev);
+            self.history.bifflw_acctime = Some(bifflw_acctime);
+        }
         self.state.acctime_rnof = 0.0;
         self.state.acc_rnof.fill(0.0);
     }
 }
 
 /// 一个河系汇流后的局部结果（按 `RiverSystem::cells` 次序）。
-struct SystemResult {
+struct SystemResult<'a> {
     wdsrf: Vec<f64>,
     veloc: Vec<f64>,
     volwater: Vec<f64>,
@@ -330,21 +499,39 @@ struct SystemResult {
     history: Vec<[f64; 10]>,
     /// 开堤防时每个单元流域的 `(levsto, levdph, a_levsto, a_levdph)`。
     levee: Option<Vec<(f64, f64, f64, f64)>>,
+    bifurcation: Option<BifurcationRun<'a>>,
+}
+
+/// 一次汇流里分汊要带进带出的东西（全网一个河系，单元流域下标即全局序号）。
+struct BifurcationRun<'a> {
+    bif: &'a bifurcation::Bifurcation,
+    state: BifurcationState,
+    bifout: Vec<f64>,
+    bifflw_lev: Vec<f64>,
+    bifflw_acctime: Vec<f64>,
 }
 
 // 阶段循环按单元流域下标写多组数组（与上游逐单元流域的 DO 循环一一对应），用下标更清楚。
 #[allow(clippy::needless_range_loop, clippy::manual_clamp)]
 /// 一个河系把 `acctime` 秒推进完（`grid_riverlake_flow` 的 `DO WHILE` 循环限于这一河系）。
-fn route_system(
+///
+/// 开分汊时（`bif` 非空）`system` 是全网：每个子步先按河系求各自的子步长，再做普通出流限制
+/// （`normal_outgoing_rate`/`ordinary_scale`），然后同步到全局最小子步长
+/// （`sync_global_routing_dt`），算分汊通量并加进 `sum_hflux_riv`。
+fn route_system<'a>(
     net: &RiverNetwork,
     system: &network::RiverSystem,
     state: &RiverState,
     history: &RiverHistory,
     levee: Option<&levee::Levee>,
+    mut bif: Option<BifurcationRun<'a>>,
     acctime: f64,
-) -> SystemResult {
+) -> SystemResult<'a> {
     let cells = &system.cells;
     let n = cells.len();
+    // 开堤防或分汊时所有单元流域都以 `volwater_ucat` 为状态，而不是由水深反算
+    // （上游 `IF (DEF_USE_BIFURCATION .or. DEF_USE_LEVEE)`）。
+    let volume_state = levee.is_some() || bif.is_some();
     let mut wdsrf = Vec::with_capacity(n);
     let mut veloc = Vec::with_capacity(n);
     let mut volwater_ucat = Vec::with_capacity(n);
@@ -373,8 +560,7 @@ fn route_system(
     };
     for (k, &i) in cells.iter().enumerate() {
         let mom = state.wdsrf[i] * state.veloc[i];
-        // 开堤防时所有单元流域都以 `volwater_ucat` 为状态，而不是由水深反算。
-        let mut volwater = if levee.is_some() {
+        let mut volwater = if volume_state {
             state.volwater[i]
         } else {
             net.curves[i].volume(state.wdsrf[i])
@@ -412,8 +598,12 @@ fn route_system(
     let mut faces = vec![Face::default(); n];
     let mut sums = vec![(0.0, 0.0, 0.0); n];
     let mut dt_res = acctime;
+    // 分汊：逐河系的子步长与这一子步的净分汊出流。
+    let mut bif_sum = vec![0.0; if bif.is_some() { n } else { 0 }];
     while dt_res > 0.0 {
         let mut dt_all = dt_res.min(60.0);
+        // 所有河系的剩余时间相同（每个子步都同步成同一 `dt`），起始子步长也相同。
+        let mut dt_sys = bif.is_some().then(|| vec![dt_all; net.river_systems]);
         for k in 0..n {
             faces[k] = face_of(net, system, &wdsrf, &veloc, k, faces[k].zgrad_dn);
         }
@@ -444,14 +634,18 @@ fn route_system(
         // 子步长：CFL 与蓄量两道限制，逐单元流域取最小。
         for k in 0..n {
             let i = cells[k];
-            let mut dt_this = dt_all;
+            // 开分汊时每个河系从自己的子步长起算（`dt_this = dt_all(irivsys(i))`）。
+            let mut dt_this = match dt_sys.as_ref() {
+                Some(dt_sys) => dt_sys[net.river_system[i]],
+                None => dt_all,
+            };
             let (w, v) = (wdsrf[k], veloc[k]);
             if v != 0.0 || w > 0.0 {
                 let wave = v.abs() + (w * GRAV).sqrt();
                 dt_this = dt_this.min(net.rivlen[i] / wave * 0.8);
             }
             if sums[k].0 > 0.0 {
-                let volwater = if levee.is_some() {
+                let volwater = if volume_state {
                     volwater_ucat[k]
                 } else {
                     net.curves[i].volume(w)
@@ -459,15 +653,33 @@ fn route_system(
                 dt_this = dt_this.min(volwater / sums[k].0);
             }
             dt_all = dt_this.min(dt_all);
+            if let Some(dt_sys) = dt_sys.as_mut() {
+                let s = net.river_system[i];
+                dt_sys[s] = dt_this.min(dt_sys[s]);
+            }
         }
-        let dt = dt_all;
+        let dt = match (bif.as_mut(), dt_sys.as_mut()) {
+            (Some(run), Some(dt_sys)) => bifurcation_substep(
+                net,
+                system,
+                run,
+                dt_sys,
+                dt_res,
+                &wdsrf,
+                &volwater_ucat,
+                &mut faces,
+                &mut sums,
+                &mut bif_sum,
+            ),
+            _ => dt_all,
+        };
         // 蓄量、水深与动量。
         for k in 0..n {
             let i = cells[k];
             let curve = &net.curves[i];
             let (sum_h, sum_m, sum_z) = sums[k];
             // `volwater = FNMA(visible_hflux, dt, volwater)`。
-            let start = if levee.is_some() {
+            let start = if volume_state {
                 volwater_ucat[k]
             } else {
                 curve.volume(wdsrf[k])
@@ -512,7 +724,7 @@ fn route_system(
             let i = cells[k];
             let curve = &net.curves[i];
             let w = wdsrf[k];
-            let volwater = if levee.is_some() {
+            let volwater = if volume_state {
                 volwater_ucat[k]
             } else {
                 curve.volume(w)
@@ -543,6 +755,9 @@ fn route_system(
                 _ => a[8] = volwater.mul_add(dt, a[8]),
             }
             a[9] = (net.rivelv[i] + w).mul_add(dt, a[9]);
+            if let Some(run) = bif.as_mut() {
+                run.bifout[k] = bif_sum[k].mul_add(dt, run.bifout[k]);
+            }
         }
         dt_res -= dt;
     }
@@ -553,7 +768,121 @@ fn route_system(
         momen,
         history: hist,
         levee: lev,
+        bifurcation: bif,
     }
+}
+
+/// 开分汊时一个子步在求出逐河系子步长之后的那一段（`grid_riverlake_flow` 的
+/// `IF (DEF_USE_BIFURCATION)` 分支）：普通出流限制、全局子步长同步、分汊通量。返回同步后的子步长，
+/// 并把分汊净出流加进 `sums`、记进 `bif_sum`。单元流域下标即全局序号。
+#[allow(clippy::too_many_arguments, clippy::needless_range_loop)]
+fn bifurcation_substep(
+    net: &RiverNetwork,
+    system: &network::RiverSystem,
+    run: &mut BifurcationRun<'_>,
+    dt_sys: &mut [f64],
+    dt_res: f64,
+    wdsrf: &[f64],
+    volwater: &[f64],
+    faces: &mut [Face],
+    sums: &mut [(f64, f64, f64)],
+    bif_sum: &mut [f64],
+) -> f64 {
+    let n = faces.len();
+    let push = |faces: &[Face], k: usize, value: fn(&Face) -> f64| {
+        let mut total = 0.0;
+        for &u in &system.upstream[k] {
+            let value = value(&faces[u]);
+            if value == 0.0 {
+                continue;
+            }
+            total = if total == 0.0 {
+                value * 1.0
+            } else {
+                total + value * 1.0
+            };
+        }
+        total
+    };
+    // 普通出流：顺流时是自己的出口通量，逆流时由下游计（推到下游求和）。
+    let mut normal = vec![0.0; n];
+    let mut reverse = vec![Face::default(); n];
+    for k in 0..n {
+        let h = faces[k].hflux;
+        if h >= 0.0 {
+            normal[k] = h;
+        } else {
+            reverse[k].hflux = -h;
+        }
+    }
+    for k in 0..n {
+        normal[k] += push(&reverse, k, |face| face.hflux);
+    }
+    // `ordinary_scale`：本河系子步长内出流不超过蓄量。
+    let mut scale = vec![1.0; n];
+    for k in 0..n {
+        if normal[k] <= 0.0 {
+            continue;
+        }
+        let dt = dt_sys[net.river_system[k]];
+        scale[k] = if !dt.is_finite() || dt <= 0.0 {
+            0.0
+        } else {
+            (volwater[k].max(0.0) / (normal[k] * dt)).min(1.0)
+        };
+        normal[k] *= scale[k];
+    }
+    for k in 0..n {
+        let factor = if faces[k].hflux >= 0.0 {
+            scale[k]
+        } else {
+            let next = system.next[k];
+            if next >= 0 {
+                scale[next as usize]
+            } else {
+                1.0
+            }
+        };
+        faces[k].hflux *= factor;
+        faces[k].mflux *= factor;
+    }
+    for k in 0..n {
+        sums[k].0 = faces[k].hflux - push(faces, k, |face| face.hflux);
+        sums[k].1 = faces[k].mflux - push(faces, k, |face| face.mflux);
+    }
+    // `sync_global_routing_dt`：无效的河系子步长退回 `min(10, dt_res)`，再取全局最小。
+    for dt in dt_sys.iter_mut() {
+        if !dt.is_finite() || *dt <= 0.0 {
+            *dt = 10.0f64.min(dt_res);
+        }
+    }
+    let dt = dt_sys.iter().fold(f64::INFINITY, |a, &b| a.min(b));
+    let flux = run.bif.calc(
+        net,
+        wdsrf,
+        &run.state.wdsrf_prev,
+        volwater,
+        dt,
+        &normal,
+        &mut run.state.veloc,
+        &mut run.state.momen,
+    );
+    run.state.wdsrf_prev.copy_from_slice(wdsrf);
+    let levels = run.bif.levels;
+    for (p, &active) in flux.active.iter().enumerate() {
+        if !active {
+            continue;
+        }
+        for k in p * levels..(p + 1) * levels {
+            run.bifflw_lev[k] = flux.hflux_lev[k].mul_add(dt, run.bifflw_lev[k]);
+        }
+        run.bifflw_acctime[p] += dt;
+    }
+    for k in 0..n {
+        sums[k].0 += flux.hflux_sum[k];
+    }
+    bif_sum.copy_from_slice(&flux.hflux_sum);
+    dt
 }
 
 /// 一个单元流域出口面本子步的通量与它自己的收支初值。

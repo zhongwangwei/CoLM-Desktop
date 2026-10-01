@@ -1,15 +1,17 @@
 //! 河道续跑文件 `<case>_restart_gridriver_<date>_lc<year>.nc`（`READ/WRITE_GridRiverLakeTimeVars`）。
 //!
-//! schema 2（无分汊、水库、示踪物）：标记、`gridriver_ucatch_identity`、
-//! `wdsrf_ucat`、`veloc_riv`、`acctime_rnof`、`acc_rnof_uc`、`volwater_ucat`，
-//! 开堤防时再加 `levsto`（`gridriver_restart_feature_levee = 1`）。
+//! schema 2（无水库、示踪物）：标记、`gridriver_ucatch_identity`、
+//! `wdsrf_ucat`、`veloc_riv`、`acctime_rnof`、`acc_rnof_uc`、`volwater_ucat`；
+//! 开堤防时再加 `levsto`（`gridriver_restart_feature_levee = 1`），开分汊时再加
+//! `wdsrf_ucat_prev` 与路径的 `bif_path_signature`、`pth_veloc`、`pth_momen`
+//! （`gridriver_restart_feature_bifurcation = 1`）。
 
 use std::path::Path;
 
 use anyhow::{ensure, Context, Result};
 
 use super::network::RiverNetwork;
-use super::{RiverHistory, RiverState};
+use super::{BifurcationState, RiverHistory, RiverState};
 
 const SCHEMA: i32 = 2;
 const IDENTITY_VERSION: f64 = 1.0;
@@ -53,9 +55,10 @@ pub fn read_river_state(path: &Path, network: &RiverNetwork) -> Result<RiverStat
         "{} is an uncommitted GridRiverLake restart",
         path.display()
     );
+    let bifurcation_flag = scalar_i32("gridriver_restart_feature_bifurcation")?;
     ensure!(
-        scalar_i32("gridriver_restart_feature_bifurcation")? == 0,
-        "{} was written with bifurcation, which the Rust river model does not run yet",
+        bifurcation_flag == 0 || bifurcation_flag == 1,
+        "{} has an invalid bifurcation feature flag",
         path.display()
     );
     let levee_flag = scalar_i32("gridriver_restart_feature_levee")?;
@@ -106,6 +109,38 @@ pub fn read_river_state(path: &Path, network: &RiverNetwork) -> Result<RiverStat
             None
         },
         levdph: None,
+        // 标记为 1 时上一子步水深与路径状态都必须在；签名由构造模型时核对。
+        bifurcation: if bifurcation_flag == 1 {
+            let matrix = |name: &str| -> Result<Vec<f64>> {
+                file.variable(name)
+                    .with_context(|| {
+                        format!(
+                            "{} declares bifurcation enabled but has no {name}",
+                            path.display()
+                        )
+                    })?
+                    .get_values::<f64, _>(..)
+                    .with_context(|| format!("cannot read {name} from {}", path.display()))
+            };
+            let wdsrf_prev = read_vector(&file, "wdsrf_ucat_prev", n, path)?;
+            ensure!(
+                wdsrf_prev.iter().all(|w| w.is_finite() && *w >= 0.0),
+                "GridRiverLake restart has invalid wdsrf_ucat_prev"
+            );
+            let levels = file
+                .dimension("bifurcation_level")
+                .with_context(|| format!("{} has no bifurcation_level", path.display()))?
+                .len();
+            Some(BifurcationState {
+                levels,
+                wdsrf_prev,
+                veloc: matrix("pth_veloc")?,
+                momen: matrix("pth_momen")?,
+                signature: matrix("bif_path_signature")?,
+            })
+        } else {
+            None
+        },
     };
     if let Some(levsto) = &state.levsto {
         ensure!(
@@ -145,7 +180,10 @@ pub fn write_river_state(
     for (name, value) in [
         ("gridriver_restart_schema", SCHEMA),
         ("gridriver_restart_complete", 0),
-        ("gridriver_restart_feature_bifurcation", 0),
+        (
+            "gridriver_restart_feature_bifurcation",
+            i32::from(state.bifurcation.is_some()),
+        ),
         (
             "gridriver_restart_feature_levee",
             i32::from(state.levsto.is_some()),
@@ -189,6 +227,15 @@ pub fn write_river_state(
         false,
     )?;
     vector(&mut file, "wdsrf_ucat", &["ucatch"], &state.wdsrf, true)?;
+    if let Some(bif) = &state.bifurcation {
+        vector(
+            &mut file,
+            "wdsrf_ucat_prev",
+            &["ucatch"],
+            &bif.wdsrf_prev,
+            true,
+        )?;
+    }
     vector(&mut file, "veloc_riv", &["ucatch"], &state.veloc, true)?;
     file.add_variable::<f64>("acctime_rnof", &[])?
         .put_values(&[state.acctime_rnof], ..)?;
@@ -202,6 +249,33 @@ pub fn write_river_state(
     )?;
     if let Some(levsto) = &state.levsto {
         vector(&mut file, "levsto", &["ucatch"], levsto, true)?;
+    }
+    // `write_bifurcation_restart`：二维量用 `ncio_write_serial`（压缩、不带缺测属性）。
+    if let Some(bif) = &state.bifurcation {
+        let levels = bif.levels;
+        let paths = bif.veloc.len() / levels.max(1);
+        file.add_dimension("bifurcation_signature_field", 4 + 3 * levels)?;
+        file.add_dimension("bifurcation_level", levels)?;
+        file.add_dimension("bifurcation_pathway", paths)?;
+        for (name, dims, values) in [
+            (
+                "bif_path_signature",
+                ["bifurcation_pathway", "bifurcation_signature_field"],
+                &bif.signature,
+            ),
+            (
+                "pth_veloc",
+                ["bifurcation_pathway", "bifurcation_level"],
+                &bif.veloc,
+            ),
+            (
+                "pth_momen",
+                ["bifurcation_pathway", "bifurcation_level"],
+                &bif.momen,
+            ),
+        ] {
+            vector(&mut file, name, &dims, values, false)?;
+        }
     }
     file.variable_mut("gridriver_restart_complete")
         .context("the completion marker disappeared")?
@@ -250,23 +324,48 @@ pub fn write_river_history(path: &Path, history: &RiverHistory) -> Result<()> {
         .iter()
         .zip(&history.levdph)
         .flat_map(|(s, d)| [("hist_levsto", s), ("hist_levdph", d)]);
+    let bifout = history.bifout.iter().map(|b| ("hist_bifout", b));
     let fields = HISTORY_FIELDS
         .iter()
         .copied()
         .zip(history_fields(history))
-        .chain(levee);
+        .chain(levee)
+        .chain(bifout);
     for (name, values) in fields {
         let mut variable = file.add_variable::<f64>(name, &["ucatch"])?;
         variable.put_attribute("missing_value", colm_core::MISSING)?;
         variable.put_values(values, ..)?;
+    }
+    // 分汊路径的累加（`ncio_write_serial` 的二维量，不带缺测属性）。
+    if let (Some(lev), Some(acctime)) = (&history.bifflw_lev, &history.bifflw_acctime) {
+        let paths = acctime.len();
+        file.add_dimension("bifurcation_level", lev.len() / paths.max(1))?;
+        file.add_dimension("bifurcation_pathway", paths)?;
+        file.add_dimension("bifurcation_history_scalar", 1)?;
+        file.add_variable::<f64>(
+            "hist_bifflw_lev",
+            &["bifurcation_pathway", "bifurcation_level"],
+        )?
+        .put_values(lev, ..)?;
+        file.add_variable::<f64>(
+            "hist_bifflw_acctime",
+            &["bifurcation_pathway", "bifurcation_history_scalar"],
+        )?
+        .put_values(acctime, ..)?;
     }
     file.close()?;
     Ok(())
 }
 
 /// 读回河道 history 旁车（`read_gridriverlake_hist_restart`，`strict`：十个量都必须在，
-/// 开堤防时 `hist_levsto/levdph` 也必须在）。
-pub fn read_river_history(path: &Path, n: usize, levee: bool) -> Result<RiverHistory> {
+/// 开堤防时 `hist_levsto/levdph` 也必须在，开分汊时 `hist_bifout/bifflw_lev/bifflw_acctime`
+/// 也必须在；`bifurcation = (路径数, 层数)`）。
+pub fn read_river_history(
+    path: &Path,
+    n: usize,
+    levee: bool,
+    bifurcation: Option<(usize, usize)>,
+) -> Result<RiverHistory> {
     let file = netcdf::open(path).with_context(|| format!("cannot open {}", path.display()))?;
     let mut fields = HISTORY_FIELDS
         .iter()
@@ -290,6 +389,15 @@ pub fn read_river_history(path: &Path, n: usize, levee: bool) -> Result<RiverHis
             .transpose()?,
         levdph: levee
             .then(|| read_vector(&file, "hist_levdph", n, path))
+            .transpose()?,
+        bifout: bifurcation
+            .map(|_| read_vector(&file, "hist_bifout", n, path))
+            .transpose()?,
+        bifflw_lev: bifurcation
+            .map(|(paths, levels)| read_vector(&file, "hist_bifflw_lev", paths * levels, path))
+            .transpose()?,
+        bifflw_acctime: bifurcation
+            .map(|(paths, _)| read_vector(&file, "hist_bifflw_acctime", paths, path))
             .transpose()?,
     })
 }

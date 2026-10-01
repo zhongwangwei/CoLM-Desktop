@@ -388,11 +388,24 @@ fn run_spatial(
             );
         }
     }
+    if logical_field(&document, "DEF_USE_BIFURCATION")? {
+        // 分汊只接了单独打开的路径：与堤防（堤内受保护通量）、漫滩回馈、LULCC 的组合都还没对过。
+        for (field, on) in [
+            ("DEF_USE_LEVEE", logical_field(&document, "DEF_USE_LEVEE")?),
+            (
+                "DEF_GridRiverLake_FloodFeedback",
+                logical_field(&document, "DEF_GridRiverLake_FloodFeedback")?,
+            ),
+            ("DEF_USE_LULCC", logical_field(&document, "DEF_USE_LULCC")?),
+        ] {
+            ensure!(
+                !on,
+                "DEF_USE_BIFURCATION together with {field} is not ported to the Rust river model; \
+                 run this case with --engine fortran"
+            );
+        }
+    }
     for (field, unported) in [
-        (
-            "DEF_USE_BIFURCATION",
-            logical_field(&document, "DEF_USE_BIFURCATION")?,
-        ),
         (
             "DEF_Reservoir_Method > 0",
             integer_field(&document, "DEF_Reservoir_Method")? > 0,
@@ -712,6 +725,14 @@ fn run_spatial_segment(
     } else {
         None
     };
+    let bifurcation = if logical_field(document, "DEF_USE_BIFURCATION")? {
+        Some(colm_runtime::river::bifurcation::Bifurcation::read(
+            Path::new(&string_field(document, "DEF_UnitCatchment_file")?),
+            &network,
+        )?)
+    } else {
+        None
+    };
     let river_start = river_restart_path(&segment.input, name, &start_label, year);
     let river_state = colm_runtime::river::restart::read_river_state(&river_start, &network)?;
     // `restore_river_history_acc_restart`：陆面旁车标记 `history_river_required = 1` 时读回河道累加。
@@ -741,6 +762,7 @@ fn run_spatial_segment(
                 &river_file,
                 network.len(),
                 levee.is_some(),
+                bifurcation.as_ref().map(|bif| (bif.paths(), bif.levels)),
             )?)
         } else {
             None
@@ -752,6 +774,7 @@ fn run_spatial_segment(
         river_state,
         real_field(document, "DEF_GRIDBASED_ROUTING_MAX_DT")?,
         levee,
+        bifurcation,
     )?;
     if let Some(history) = river_history {
         river.history = history;

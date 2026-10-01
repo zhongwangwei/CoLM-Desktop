@@ -357,20 +357,23 @@ fn read_bifurcation_cold_state(
             "GridRiverLake bifurcation path {} has no active level",
             path + 1
         );
+        // `read_bifurcation_global_arrays`：有效层（宽度 > 0）之间高程不降；中间夹着无效层也可以。
+        let mut previous_active: Option<usize> = None;
         for level in 0..levels {
-            if width[first + level] > 0.0 {
+            if width[first + level] <= 0.0 {
+                continue;
+            }
+            ensure!(
+                manning[level] > 0.0,
+                "GridRiverLake bifurcation active level requires positive Manning coefficient"
+            );
+            if let Some(previous) = previous_active {
                 ensure!(
-                    manning[level] > 0.0,
-                    "GridRiverLake bifurcation active level requires positive Manning coefficient"
+                    elevation[first + level] >= elevation[first + previous],
+                    "GridRiverLake bifurcation active level elevation must be non-decreasing"
                 );
             }
-            if level > 0 && width[first + level] > 0.0 {
-                ensure!(
-                    width[first + level - 1] > 0.0
-                        && elevation[first + level] >= elevation[first + level - 1],
-                    "GridRiverLake bifurcation active levels must be contiguous with non-decreasing elevation"
-                );
-            }
+            previous_active = Some(level);
         }
     }
 
