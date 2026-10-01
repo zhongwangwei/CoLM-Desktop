@@ -27409,3 +27409,11 @@ colm-rs: DEF_HIST_vars_out_default = .false. (per-variable history selection) is
 ```
 
 回归算例里没有设这两项的（`grep` 计数 0），`tsa`、`bc` 重跑 `ok rst: ok`。真正支持要改主/BGC/示踪物 history 的所有写出点，另出方案。示踪物表里每项的开关键（`hist_keys`）已按 `MOD_Tracer_Hist.F90` 填好，接上时直接用 `enabled()`。
+
+## 第 484 轮：示踪物 T1b（四）—— 简单城市；上游对完整城市模型本来就停机
+
+`CoLMMAIN_Urban.F90` 里没有任何示踪物调用；上游在 `CoLMDRIVER.F90:90-93` 对 `DEF_URBAN_RUN` 的城市 patch 直接 `CoLM_stop('TRACER does not yet support full urban patches ...')`。所以"城市示踪物"只剩简单城市：`DEF_URBAN_RUN = .false.` 时 patchtype 1 走 `CoLMMAIN` 的土壤分支，与土壤 patch 同一套示踪物调用。`with_tracer` 放开到 patchtype 0–4（仍拒绝装了城市模型或 PFT/PC 的模板）。
+
+`tsu`（`tsa` 改 `SITE_landtype = 13`，AT-Neu 站点文件）：patchtype 1，`f_trc_conc_soisno` 1→2.17、积雪 2→2.07、冠层 0.49–5.89；`PROFILE=release bash tmp/regress.sh tsu` → `tsu [colm ok] hist(2): ok rst: ok`。
+
+同时核对了 `CoLMDRIVER` 的驱动级示踪物钩子：`tracer_resolve_step`/`tracer_lake_step`/`tracer_wetland_decomp`/`tracer_soil_step` 只转发给生命周期注册（甲烷 T4、泥沙 T5），solute 下为空；`tracer_report` 每步在**所有 patch 之后**调一次（`:392-393`），Rust 现在逐 patch 报告 —— 单 patch 等价，多 patch（PFT/PC 之外的多 patch 单点也一样）要挪到步末，随 PFT/PC 一起做。

@@ -1550,9 +1550,9 @@ impl StandardLctRestartTemplate {
         initial: colm_core::tracer::PatchTracerState,
     ) -> Result<Self> {
         ensure!(
-            matches!(self.patch_type, 0 | 2 | 3 | 4) && self.pft.is_none() && self.urban.is_none(),
-            "tracer bookkeeping is wired only for LCT soil, wetland, glacier and lake patches \
-             (patchtype 0/2/3/4); this one has patchtype {}",
+            matches!(self.patch_type, 0..=4) && self.pft.is_none() && self.urban.is_none(),
+            "tracer bookkeeping is wired only for LCT patches without the urban model \
+             (patchtype 0-4; upstream stops on full urban too); this one has patchtype {}",
             self.patch_type
         );
         ensure!(
