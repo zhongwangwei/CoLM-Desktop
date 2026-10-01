@@ -398,10 +398,6 @@ fn run_spatial(
             logical_field(&document, "DEF_USE_TRACER")?,
         ),
         (
-            "DEF_GRIDBASED_ROUTING_MOMENTUM_DT_LIMIT",
-            logical_field(&document, "DEF_GRIDBASED_ROUTING_MOMENTUM_DT_LIMIT")?,
-        ),
-        (
             "DEF_UnitCatchment_regional",
             logical_field(&document, "DEF_UnitCatchment_regional")?,
         ),
@@ -784,6 +780,7 @@ fn run_spatial_segment(
     if let Some(history) = river_history {
         river.history = history;
     }
+    river.momentum_dt_limit = logical_field(document, "DEF_GRIDBASED_ROUTING_MOMENTUM_DT_LIMIT")?;
     // `grid_riverlake_flow_init`：回馈打开时立刻按读回的状态发布一次（Rust 不在 spinup 里汇流）。
     if logical_field(document, "DEF_GridRiverLake_FloodFeedback")? {
         let infiltration_max_mm_day = match document.get("DEF_GridRiverLake_FloodInfiltMax") {

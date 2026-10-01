@@ -27156,3 +27156,21 @@ Rust：`FloodplainCurve::new` 与 `RiverNetwork::read` 加 `storage_fix` 参数�
 | `g1allwc`（各自从第 2 天续跑接着跑 1 天） | 续跑 8 个、history 2 个全部 `diff 0` | |
 
 - `cargo test --release -p colm-runtime` 全过；`clippy --workspace --all-targets` 无告警；单点回归 138/140（nn/pni 没有 history，与以前相同）。回归脚本的 SKIP 加上这些新算例。
+
+## 第 474 轮：动量子步长限制（`DEF_GRIDBASED_ROUTING_MOMENTUM_DT_LIMIT`）
+
+上游有两处：
+- 求子步长的循环里，已建成水库以外的单元流域：若 `|v| > 0.1` 且 `v·(sum_mflux − sum_zgrad) > 0`，子步长不超过 `|(momen·rivare)/(sum_mflux − sum_zgrad)|`，也就是让动量归零的时间。GIMPLE 中为先乘后除再取绝对值，不收缩。
+- 开分汊时，普通出流限制缩放、重新求和之后，用新的动量收支再做一次同样的限制，然后才同步全局子步长。
+
+Rust 在 `route_system` 的子步长循环与 `bifurcation_substep` 里各加一处，由 `RiverModel::momentum_dt_limit` 控制。colm-rs 的未移植表去掉这一项。
+
+**实测**（全 Rust 三段 vs 纯 Fortran 三段，1 天）：
+
+| 算例 | 结果 | 生效情况 |
+|---|---|---|
+| `g1mt`（默认路径 + 限制） | 续跑 5 个、history 2 个全部 `diff 0` | 与不加限制的 `g1t` 有 82121 个单元流域水深不同 |
+| `g1mbf`（分汊 + 限制） | 全部 `diff 0` | 与 `g1bf` 有 237001 个单元流域水深不同 |
+| 重跑 `g1t`、`g1all` | 仍然逐位 | |
+
+`cargo test --release -p colm-runtime` 全过；clippy 无告警。

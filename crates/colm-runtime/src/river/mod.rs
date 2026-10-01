@@ -217,6 +217,8 @@ pub struct RiverModel {
     pub bifurcation: Option<(bifurcation::Bifurcation, network::RiverSystem)>,
     /// `DEF_Reservoir_Method = 1`：网络里的水库参数。
     pub reservoir: Option<reservoir::Reservoir>,
+    /// `DEF_GRIDBASED_ROUTING_MOMENTUM_DT_LIMIT`：子步长再加一道「不让流向反转」的限制。
+    pub momentum_dt_limit: bool,
     momen: Vec<f64>,
 }
 
@@ -385,6 +387,7 @@ impl RiverModel {
             levee,
             bifurcation,
             reservoir,
+            momentum_dt_limit: false,
             network,
             routing,
             state,
@@ -507,6 +510,7 @@ impl RiverModel {
         let history = &self.history;
         let levee = self.levee.as_ref();
         let resv = self.reservoir.as_ref().map(|reservoir| (reservoir, year));
+        let momentum_limit = self.momentum_dt_limit;
         let acctime = state.acctime_rnof;
         let (systems, results): (Vec<&network::RiverSystem>, Vec<SystemResult<'_>>) =
             match (bif_run, self.bifurcation.as_ref()) {
@@ -520,6 +524,7 @@ impl RiverModel {
                         levee,
                         resv,
                         Some(run),
+                        momentum_limit,
                         acctime,
                     )],
                 ),
@@ -528,7 +533,17 @@ impl RiverModel {
                     net.systems
                         .par_iter()
                         .map(|system| {
-                            route_system(net, system, state, history, levee, resv, None, acctime)
+                            route_system(
+                                net,
+                                system,
+                                state,
+                                history,
+                                levee,
+                                resv,
+                                None,
+                                momentum_limit,
+                                acctime,
+                            )
                         })
                         .collect(),
                 ),
@@ -609,6 +624,13 @@ struct ReservoirView<'r> {
     q: &'r mut [(f64, f64)],
 }
 
+/// `DEF_GRIDBASED_ROUTING_MOMENTUM_DT_LIMIT` 在分汊子步里要看的动量与流速。
+struct MomentumLimit<'m> {
+    on: bool,
+    momen: &'m [f64],
+    veloc: &'m [f64],
+}
+
 /// 一次汇流里分汊要带进带出的东西（全网一个河系，单元流域下标即全局序号）。
 struct BifurcationRun<'a> {
     bif: &'a bifurcation::Bifurcation,
@@ -637,6 +659,7 @@ fn route_system<'a>(
     levee: Option<&levee::Levee>,
     resv: Option<(&reservoir::Reservoir, i32)>,
     mut bif: Option<BifurcationRun<'a>>,
+    momentum_limit: bool,
     acctime: f64,
 ) -> SystemResult<'a> {
     let cells = &system.cells;
@@ -863,6 +886,13 @@ fn route_system<'a>(
                 };
                 dt_this = dt_this.min(volwater / sums[k].0);
             }
+            // 动量限制：流速超过 0.1 m/s 且动量收支要把它推向反向时，子步长不超过让动量归零的时间。
+            if momentum_limit && built[k].is_none() {
+                let gradient = sums[k].1 - sums[k].2;
+                if v.abs() > 0.1 && v * gradient > 0.0 {
+                    dt_this = dt_this.min(((momen[k] * net.rivare[i]) / gradient).abs());
+                }
+            }
             dt_all = dt_this.min(dt_all);
             if let Some(dt_sys) = dt_sys.as_mut() {
                 let s = net.river_system[i];
@@ -885,6 +915,11 @@ fn route_system<'a>(
                     built: &built,
                     reservoirs: &reservoirs,
                     q: &mut qresv,
+                },
+                MomentumLimit {
+                    on: momentum_limit,
+                    momen: &momen,
+                    veloc: &veloc,
                 },
                 lev.as_ref().map(|lev| {
                     (
@@ -1063,6 +1098,7 @@ fn bifurcation_substep(
     sums: &mut [(f64, f64, f64)],
     bif_sum: &mut [f64],
     resv: ReservoirView<'_>,
+    momentum: MomentumLimit<'_>,
     levee: Option<(&levee::Levee, Vec<f64>, Vec<f64>)>,
     lev_sum: &mut Vec<f64>,
 ) -> f64 {
@@ -1139,6 +1175,21 @@ fn bifurcation_substep(
         // 水库入流取缩放后上游推来的出口通量（`qresv_in = hflux_sumups`）。
         if let Some(j) = resv.built[k] {
             resv.q[j].0 = inflow;
+        }
+    }
+    // 缩放后再做一次动量限制（同步全局子步长之前）。
+    if momentum.on {
+        for k in 0..n {
+            if resv.built[k].is_some() {
+                continue;
+            }
+            let v = momentum.veloc[k];
+            let gradient = sums[k].1 - sums[k].2;
+            if v.abs() > 0.1 && v * gradient > 0.0 {
+                let limit = ((momentum.momen[k] * net.rivare[k]) / gradient).abs();
+                let s = net.river_system[k];
+                dt_sys[s] = dt_sys[s].min(limit);
+            }
         }
     }
     // `sync_global_routing_dt`：无效的河系子步长退回 `min(10, dt_res)`，再取全局最小。
