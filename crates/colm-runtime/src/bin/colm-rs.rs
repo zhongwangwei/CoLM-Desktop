@@ -395,15 +395,7 @@ fn run_spatial(
     // 示踪物：开关本身（`DEF_TRACER_NUM = 0`）已移植 —— 宿主物理不变，只多写 history 窗口变量、
     // 示踪物 history 文件与重启里的空示踪物事务；注册了示踪物的输运尚未移植。
     let tracers = logical_field(&document, "DEF_USE_TRACER")?;
-    // 陆面示踪物（第 487 轮）已接；河道示踪物（`MOD_Tracer_RiverLake`）还没有，放开会写出缺了
-    // 河道示踪物的 unitcat history。开发期间用 `COLM_RS_LAND_TRACERS_ONLY=1` 只比陆面文件。
-    ensure!(
-        !tracers
-            || integer_field(&document, "DEF_TRACER_NUM")? == 0
-            || std::env::var_os("COLM_RS_LAND_TRACERS_ONLY").is_some(),
-        "spatial DEF_USE_TRACER with DEF_TRACER_NUM > 0 needs the river tracers, which are not \
-         ported yet; run this case with --engine fortran"
-    );
+    let _ = tracers;
     ensure!(
         !logical_field(&document, "DEF_UnitCatchment_regional")?,
         "DEF_UnitCatchment_regional is not ported to the Rust river model; run this case with \
@@ -813,6 +805,32 @@ fn run_spatial_segment(
         // `grid_riverlake_flow_init(s_year, …)`：本次运行的起始年份。
         river = river.with_flood_feedback(infiltration_max_mm_day, config.start.year);
     }
+    // `river_lake_tracer_init` + `read_tracer_restart`/`tracer_init_from_water`
+    // （`grid_riverlake_flow_init`）：有输运示踪物时河道示踪物与陆面一起开。
+    if let Some(tracer) = tracer_runtime.as_ref().filter(|tracer| tracer.has_transport()) {
+        let mut tracers =
+            colm_runtime::river::tracer::RiverTracers::new(tracer.set.clone(), river.network.len());
+        let loaded = colm_runtime::river::restart::read_river_tracers(&river_start, &river.network, &mut tracers)?;
+        if !loaded {
+            // `is_built_resv_init`：起始年份下已建成的水库。
+            let built = (0..river.network.len())
+                .map(|i| {
+                    river.reservoir.as_ref().is_some_and(|reservoir| {
+                        reservoir.of_catchment[i]
+                            .is_some_and(|r| reservoir.is_built(r, config.start.year))
+                    })
+                })
+                .collect::<Vec<_>>();
+            tracers.cold_start(
+                &river.network,
+                river.levee.as_ref(),
+                &river.state,
+                river.reservoir.as_ref(),
+                &built,
+            );
+        }
+        river = river.with_tracers(tracers)?;
+    }
     runtime = runtime.with_river(river, runoff_filter)?;
     let rest_compression = u8::try_from(integer_field(document, "DEF_REST_CompressLevel")?)
         .context("DEF_REST_CompressLevel must fit 0..=9")?;
@@ -977,13 +995,22 @@ fn run_spatial_segment(
                 )?;
                 if let Some(river) = river {
                     let label = date_label(normalized_day_end(step.clock.end_time));
+                    let path = river_restart_path(&out.join("restart"), name, &label, year);
                     colm_runtime::river::restart::write_river_state(
-                        &river_restart_path(&out.join("restart"), name, &label, year),
+                        &path,
                         &river.network,
                         &river.state,
                         river.reservoir.as_ref().map(|r| r.identity()).as_deref(),
                         rest_compression,
                     )?;
+                    if let Some(tracers) = river.tracers.as_ref() {
+                        colm_runtime::river::restart::write_river_tracers(
+                            &path,
+                            &river.network,
+                            &mut tracers.clone(),
+                            rest_compression,
+                        )?;
+                    }
                 }
             }
             last = Some(snapshots);
@@ -1019,13 +1046,22 @@ fn run_spatial_segment(
     )?;
     if let (Some(river), false) = (runtime.river(), segment.lulcc_boundary) {
         let label = date_label(normalized_day_end(config.end));
+        let path = river_restart_path(&out.join("restart"), name, &label, year);
         colm_runtime::river::restart::write_river_state(
-            &river_restart_path(&out.join("restart"), name, &label, year),
+            &path,
             &river.network,
             &river.state,
             river.reservoir.as_ref().map(|r| r.identity()).as_deref(),
             rest_compression,
         )?;
+        if let Some(tracers) = river.tracers.as_ref() {
+            colm_runtime::river::restart::write_river_tracers(
+                &path,
+                &river.network,
+                &mut tracers.clone(),
+                rest_compression,
+            )?;
+        }
     }
     println!(
         "colm-rs: {steps} step(s) on {patch_count} spatial patch(es) in {} block(s); wrote {}",

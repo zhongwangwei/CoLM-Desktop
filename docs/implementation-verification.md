@@ -27485,3 +27485,22 @@ colm-rs: DEF_HIST_vars_out_default = .false. (per-variable history selection) is
 | `gd_hist_unitcat`、河道续跑 | 只缺河道示踪物变量（T3） |
 
 `g1`、`g1tr0` 重跑 history/restarts 全部 bad 0。
+
+## 第 488 轮：示踪物 T3 —— 河湖示踪物输运（默认配置）逐位
+
+**结构决定**：Rust 的水汇流逐河系并行推进，上游是所有河系按子步序号锁步推进（走完的河系 `dt_all = 0`、`ucatfilter` 为假，`hflux_fc` 留着上一子步的旧值）。示踪物的供体限幅不动点按**全局**最大残差收敛，迭代次数（因而速率的低位）取决于同一子步里所有河系。所以水的汇流不动，`route_system` 在开示踪物时按子步记一份磁带（子步长、出口面通量、子步首末的水深/`volwater_ucat`/水库库容/堤内蓄量、洼地溢流、汇流开始与每子步末的堤防重新分区），汇流结束后 `RiverTracers::replay` 按全局子步重放：`tracer_substep`（第 1–9 节）→ 逐单元流域的洼地溢流与堤防重新分区 → `tracer_diag_accumulate_substep`。示踪物不回馈水（没开漫滩回馈），两者等价。否决：把水汇流改成全局锁步 —— 会动已经逐位的水汇流、丢掉并行。
+
+**接入**：每个陆面步把 patch 的 `trc_rnof_step` 用与水同一套映射（`pset2grid` 跳过 0、除以格面积、`push_inpm2ucat`）汇到单元流域，`tracer_input_from_runoff(rnof_uc*1e-3*deltime, trc_rnof_uc*1e-3)`（调用方先把 `(rnof*1e-3)*deltime` 舍入成临时量，带陆面示踪物这支是普通相加）；汇流开始 `trc_inp_buf += acc_trc_inp`，第一个子步释放正的缓冲；汇流结束 `acc_rnof_ref`、`trc_dry_drain` 清零。冷启动 `tracer_init_from_water`（起始年份下已建成的水库用库容）。unitcat history 在分汊矩阵之后、水库之前写 `f_trc_conc_*`（`Σmass·dt / Σvol·dt`，水量不超过 `1·acctime` 写缺测）、同位素 `f_trc_delta_*`（要 `allups_mask`）、`f_trc_flux_*`，开堤防另有 `f_trc_levsto_*`/`f_trc_levdelta_*`；输出端 `|x| < 1e-12` 清成 0。河道续跑追加示踪物事务（`complete=0` → 网络元数据 → 逐示踪物质量/缓冲/累计输入/堤内池 → `acc_rnof_ref` → history 累加行 → 描述符 → `complete=1`）。
+
+GIMPLE：质量更新 `FMA(dt, (flux_ups - trc_flux) - bif_net, mass)`，第 487 轮的容差 `FMA(dt, (|trc_flux|+|flux_ups|)+|bif_net|, |mass|)`，不动点里逆流与上游实际入量 `FMA(dt, max(·,0), in_mass)`，诊断累加 `FMA(x, dt, a)`。
+
+**对照**（`g1ts`：2003-01-01 起 2 天、IsoGSM 主驱动、1 个溶质、GRID + 河道，全球单元流域网络 252383 个）：
+
+| 文件 | 结果 |
+|---|---|
+| 主 history、网格示踪物 history、unitcat history | history 3 bad 0 |
+| 陆面续跑、河道续跑（含示踪物事务） | restarts 5 bad 0 |
+
+第一次对照只差河道续跑的 `acc_rnof_ref`（上游在汇流周期末清零）。`g1`、`g1tr0` 不变。空间示踪物的 `COLM_RS_LAND_TRACERS_ONLY` 开发开关已去掉。
+
+**仍拒绝**：分汊（`DEF_USE_BIFURCATION`）+ 示踪物；读带完整示踪物事务的河道续跑（续跑接着跑）。堤防、水库的示踪物路径已写，待算例验证。

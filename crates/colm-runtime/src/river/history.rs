@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use colm_core::tracer::TRC_TINY;
 use colm_hist::history::HistoryGrid;
 use colm_hist::schedule::ScheduledRecord;
 
@@ -199,16 +200,22 @@ impl RiverHistoryWriter {
     }
 
     /// 一条记录（`hist_grid_riverlake_out`）：写 unitcat 文件，把 6 个网格量交给会话，然后清零累加。
+    #[allow(clippy::too_many_arguments)]
     pub fn write_record(
         &self,
         network: &RiverNetwork,
         routing: &RunoffRouting,
         history: &mut RiverHistory,
+        tracers: Option<&mut super::tracer::RiverTracers>,
         record: &ScheduledRecord,
         end: colm_core::CalendarTime,
         session: &mut crate::history::HistorySession,
     ) -> Result<()> {
         let n = network.len();
+        let tracer_fields = tracers
+            .as_deref()
+            .map(|tracers| self.tracer_fields(tracers, history.levsto.is_some()))
+            .unwrap_or_default();
         let window_seconds = history
             .acctime
             .iter()
@@ -376,6 +383,7 @@ impl RiverHistoryWriter {
             window_seconds,
             &unitcat,
             bifflw,
+            &tracer_fields,
             &reservoirs,
         )?;
 
@@ -450,6 +458,10 @@ impl RiverHistoryWriter {
         }
         debug_assert_eq!(history.acctime.len(), n);
         history.reset();
+        // `flush_acc_fluxes_riverlake` 同时清零示踪物累加（`tracer_flush_acc`）。
+        if let Some(tracers) = tracers {
+            tracers.history.reset();
+        }
         Ok(())
     }
 
@@ -462,6 +474,7 @@ impl RiverHistoryWriter {
         window_seconds: f64,
         fields: &[(&str, &str, &str, Vec<f64>)],
         bifflw: Option<(usize, Vec<f64>)>,
+        tracer_fields: &[(String, String, String, Vec<f64>)],
         reservoirs: &[(&str, &str, &str, Vec<f64>)],
     ) -> Result<()> {
         std::fs::create_dir_all(&self.directory)
@@ -565,6 +578,19 @@ impl RiverHistoryWriter {
                 .context("f_bifflw_lev disappeared")?
                 .put_values(&values, (t..t + 1, .., ..))?;
         }
+        // `write_tracer_history`：二维 unitcat 量（属性同主量），在分汊矩阵之后、水库之前定义。
+        for (name, long_name, units, values) in tracer_fields {
+            if first {
+                let mut variable =
+                    file.add_variable::<f64>(name, &["time", "lat_ucat", "lon_ucat"])?;
+                variable.put_attribute("missing_value", SPVAL)?;
+                variable.put_attribute("long_name", long_name.as_str())?;
+                variable.put_attribute("units", units.as_str())?;
+            }
+            file.variable_mut(name)
+                .with_context(|| format!("{name} disappeared"))?
+                .put_values(&to_grid(values), (t..t + 1, .., ..))?;
+        }
         // `route_hist_write_resv`（单文件）：`vector_gather_and_write` 到 `(time, reservoir)`。
         for (name, long_name, units, values) in reservoirs {
             if first {
@@ -581,6 +607,114 @@ impl RiverHistoryWriter {
                 .put_values(values, (t..t + 1, ..))?;
         }
         Ok(())
+    }
+}
+
+impl RiverHistoryWriter {
+    /// `write_tracer_history`：每个输运示踪物的浓度（水量加权）、同位素 δ、出流，开堤防时
+    /// 堤内储量与其 δ（`trc_hist_fp_dust = 1e-12` 的显示清理只作用于输出）。
+    fn tracer_fields(
+        &self,
+        tracers: &super::tracer::RiverTracers,
+        levee: bool,
+    ) -> Vec<(String, String, String, Vec<f64>)> {
+        const DUST: f64 = 1.0e-12;
+        const DELTA_VMIN: f64 = 1.0;
+        const SANITY: f64 = 2.0e3;
+        let dust = |v: Vec<f64>| -> Vec<f64> {
+            v.into_iter().map(|x| if x.abs() < DUST { 0.0 } else { x }).collect()
+        };
+        let h = &tracers.history;
+        let n = h.acctime.len();
+        let mut out = Vec::new();
+        for itrc in tracers.set.transport_indices() {
+            let tracer = &tracers.set.tracers[itrc];
+            let name = tracer.name.trim();
+            let delta = tracer.is_isotope();
+            let (word, conc_units, mass_units, flux_units) = if delta {
+                ("ratio", "R".to_owned(), "R*m3", "R*m3/s")
+            } else {
+                (
+                    "concentration",
+                    colm_core::tracer::hist::concentration_units(tracer).to_owned(),
+                    "tracer",
+                    "tracer/s",
+                )
+            };
+            let ratio_delta = |mass: &[f64], water: &[f64]| -> Vec<f64> {
+                (0..n)
+                    .map(|i| {
+                        if self.allups_mask[i] < 0.5 || h.acctime[i] <= 0.0 {
+                            return SPVAL;
+                        }
+                        if water[i] <= DELTA_VMIN * h.acctime[i] || tracer.ref_ratio <= TRC_TINY {
+                            return SPVAL;
+                        }
+                        let ratio = mass[i] / water[i];
+                        if ratio <= TRC_TINY {
+                            return SPVAL;
+                        }
+                        let delta = (ratio / tracer.ref_ratio - 1.0) * 1000.0;
+                        if delta.abs() <= SANITY {
+                            delta
+                        } else {
+                            SPVAL
+                        }
+                    })
+                    .collect()
+            };
+            let conc = (0..n)
+                .map(|i| {
+                    if h.acctime[i] <= 0.0 || h.water_storage[i] <= DELTA_VMIN * h.acctime[i] {
+                        SPVAL
+                    } else {
+                        h.storage_mass[itrc][i] / h.water_storage[i]
+                    }
+                })
+                .collect();
+            out.push((
+                format!("f_trc_conc_{name}"),
+                format!("tracer {word} ({name})"),
+                conc_units,
+                dust(conc),
+            ));
+            if delta {
+                out.push((
+                    format!("f_trc_delta_{name}"),
+                    format!("tracer delta ({name})"),
+                    "permil".to_owned(),
+                    ratio_delta(&h.storage_mass[itrc], &h.water_storage),
+                ));
+            }
+            let per_time = |values: &[f64]| -> Vec<f64> {
+                (0..n)
+                    .map(|i| if h.acctime[i] > 0.0 { values[i] / h.acctime[i] } else { SPVAL })
+                    .collect()
+            };
+            out.push((
+                format!("f_trc_flux_{name}"),
+                format!("tracer outflux ({name})"),
+                flux_units.to_owned(),
+                dust(per_time(&h.out[itrc])),
+            ));
+            if levee {
+                out.push((
+                    format!("f_trc_levsto_{name}"),
+                    format!("protected-side levee tracer storage ({name})"),
+                    mass_units.to_owned(),
+                    dust(per_time(&h.levsto_mass[itrc])),
+                ));
+                if delta {
+                    out.push((
+                        format!("f_trc_levdelta_{name}"),
+                        format!("protected-side levee tracer delta ({name})"),
+                        "permil".to_owned(),
+                        ratio_delta(&h.levsto_mass[itrc], &h.levsto_water),
+                    ));
+                }
+            }
+        }
+        out
     }
 }
 

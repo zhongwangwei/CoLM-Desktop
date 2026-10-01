@@ -224,7 +224,28 @@ impl SpatialRuntime {
                             }
                         }
                         // `grid_riverlake_flow(idate(1), …)`：`TICKTIME` 之后的年份，即本步末。
-                        river.step(&runoff, included, time_step_seconds, clock.end_time.year)?;
+                        // `trc_rnof_step(itrc, ipatch)`：本步每个 patch 的径流示踪物 [R*mm]。
+                        let tracer_runoff = river.tracers.as_ref().map(|tracers| {
+                            (0..tracers.set.len())
+                                .map(|itrc| {
+                                    next_states
+                                        .iter()
+                                        .map(|state| {
+                                            state.tracer.as_deref().map_or(0.0, |track| {
+                                                track.state.step[itrc].rnof_step
+                                            })
+                                        })
+                                        .collect::<Vec<_>>()
+                                })
+                                .collect::<Vec<_>>()
+                        });
+                        river.step(
+                            &runoff,
+                            tracer_runoff.as_deref(),
+                            included,
+                            time_step_seconds,
+                            clock.end_time.year,
+                        )?;
                     }
                 }
                 // `hist_out` 在写记录的那一步先写河道部分（`hist_grid_riverlake_out`），它把河道量
@@ -244,6 +265,7 @@ impl SpatialRuntime {
                                 &river.network,
                                 &river.routing,
                                 &mut river.history,
+                                river.tracers.as_mut(),
                                 &record,
                                 clock.end_time,
                                 &mut history.session,

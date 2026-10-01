@@ -8,7 +8,7 @@
 
 use std::path::Path;
 
-use anyhow::{ensure, Context, Result};
+use anyhow::{bail, ensure, Context, Result};
 
 use super::network::RiverNetwork;
 use super::reservoir::Reservoir;
@@ -469,4 +469,143 @@ pub fn read_river_history(
         qresv_in: read_resv("hist_qresv_in")?,
         qresv_out: read_resv("hist_qresv_out")?,
     })
+}
+
+/// `RIVER_TRACER_RESTART_SCHEMA_VERSION`。
+const RIVER_TRACER_SCHEMA: i32 = 2;
+
+/// `write_tracer_restart`：在河道续跑文件末尾追加示踪物事务（先 `complete = 0`，网络元数据、
+/// 逐示踪物的质量/待释放/累计输入/堤内池（有溶解度上限的另带固相），共享的 `acc_rnof_ref`，
+/// history 累加行，最后写描述符并 `complete = 1`）。没有输运示踪物时写空事务。
+pub fn write_river_tracers(
+    path: &Path,
+    network: &RiverNetwork,
+    tracers: &mut super::tracer::RiverTracers,
+    compression_level: u8,
+) -> Result<()> {
+    let identity = tracers.set.descriptor_identity();
+    let mut file = netcdf::append(path).with_context(|| format!("cannot reopen {}", path.display()))?;
+    let scalar = |file: &mut netcdf::FileMut, name: &str, value: i32| -> Result<()> {
+        match file.variable_mut(name) {
+            Some(mut variable) => variable.put_values(&[value], ..)?,
+            None => file.add_variable::<i32>(name, &[])?.put_values(&[value], ..)?,
+        }
+        Ok(())
+    };
+    if identity.is_empty() {
+        scalar(&mut file, "trc_river_restart_complete", 0)?;
+        scalar(&mut file, "trc_river_descriptor_count", 0)?;
+        scalar(&mut file, "trc_river_restart_schema", RIVER_TRACER_SCHEMA)?;
+        scalar(&mut file, "trc_river_restart_complete", 1)?;
+        file.close()?;
+        return Ok(());
+    }
+    tracers.validate_for_restart()?;
+    scalar(&mut file, "trc_river_restart_complete", 0)?;
+    let vector = |file: &mut netcdf::FileMut, name: &str, values: &[f64]| -> Result<()> {
+        let mut variable = file.add_variable::<f64>(name, &["ucatch"])?;
+        if compression_level > 0 {
+            variable.set_compression(i32::from(compression_level), false)?;
+        }
+        variable.put_attribute("missing_value", colm_core::MISSING)?;
+        variable.put_values(values, ..)?;
+        Ok(())
+    };
+    let n = network.len();
+    vector(&mut file, "trc_numucat_meta", &vec![n as f64; n])?;
+    let gdid = (0..n)
+        .map(|i| f64::from((network.y[i] - 1) * network.nlon as i32 + network.x[i]))
+        .collect::<Vec<_>>();
+    vector(&mut file, "trc_ucat_gdid_meta", &gdid)?;
+    let next = network
+        .next
+        .iter()
+        .map(|&next| f64::from(if next >= 0 { next + 1 } else { next }))
+        .collect::<Vec<_>>();
+    vector(&mut file, "trc_ucat_next_meta", &next)?;
+    let transport = tracers.set.transport_indices().collect::<Vec<_>>();
+    for &itrc in &transport {
+        let tracer = &tracers.set.tracers[itrc];
+        let name = tracer.name.trim();
+        vector(&mut file, &format!("trc_mass_{name}"), &tracers.mass[itrc])?;
+        vector(&mut file, &format!("trc_inpbuf_{name}"), &tracers.inp_buf[itrc])?;
+        vector(&mut file, &format!("trc_accinp_{name}"), &tracers.acc_inp[itrc])?;
+        vector(&mut file, &format!("trc_levsto_{name}"), &tracers.levsto[itrc])?;
+        if tracer.has_dissolved_limit() {
+            let (solid, levsto_solid) = tracers.solid.as_ref().context("solid pools")?;
+            vector(&mut file, &format!("trc_solid_{name}"), &solid[itrc])?;
+            vector(&mut file, &format!("trc_levsto_solid_{name}"), &levsto_solid[itrc])?;
+        }
+    }
+    vector(&mut file, "acc_rnof_ref", &tracers.acc_rnof_ref)?;
+    let h = &tracers.history;
+    for &itrc in &transport {
+        let name = tracers.set.tracers[itrc].name.trim().to_owned();
+        vector(&mut file, &format!("trc_hist_stor_{name}"), &h.storage_mass[itrc])?;
+        vector(&mut file, &format!("trc_hist_levsto_{name}"), &h.levsto_mass[itrc])?;
+        vector(&mut file, &format!("trc_hist_out_{name}"), &h.out[itrc])?;
+        vector(&mut file, &format!("trc_hist_bifout_{name}"), &h.bifout[itrc])?;
+    }
+    vector(&mut file, "trc_hist_water_storage", &h.water_storage)?;
+    vector(&mut file, "trc_hist_levsto_water", &h.levsto_water)?;
+    vector(&mut file, "trc_hist_acctime", &h.acctime)?;
+    file.add_dimension(
+        "trc_river_descriptor_field",
+        colm_core::tracer::DESCRIPTOR_IDENTITY_WIDTH,
+    )?;
+    file.add_dimension("trc_river_transport_tracer", identity.len())?;
+    scalar(&mut file, "trc_river_descriptor_count", identity.len() as i32)?;
+    let flat = identity.iter().flatten().copied().collect::<Vec<i32>>();
+    file.add_variable::<i32>(
+        "trc_river_descriptor_identity",
+        &["trc_river_transport_tracer", "trc_river_descriptor_field"],
+    )?
+    .put_values(&flat, ..)?;
+    scalar(&mut file, "trc_river_restart_schema", RIVER_TRACER_SCHEMA)?;
+    scalar(&mut file, "trc_river_restart_complete", 1)?;
+    file.close()?;
+    Ok(())
+}
+
+/// `read_tracer_restart`：续跑里有完整、描述符相符的河道示踪物事务就读回并返回真；没有提交标记
+/// （旧格式或 mkinidata 写的初始续跑）、描述符不符时返回假（调用方按水量冷启动）。
+pub fn read_river_tracers(
+    path: &Path,
+    network: &RiverNetwork,
+    tracers: &mut super::tracer::RiverTracers,
+) -> Result<bool> {
+    let file = netcdf::open(path).with_context(|| format!("cannot open {}", path.display()))?;
+    let Some(complete) = file.variable("trc_river_restart_complete") else {
+        return Ok(false);
+    };
+    let complete: i32 = complete.get_value(..)?;
+    ensure!(complete == 1, "malformed/incomplete river tracer restart descriptor metadata");
+    let schema: i32 = file
+        .variable("trc_river_restart_schema")
+        .context("malformed/incomplete river tracer restart descriptor metadata")?
+        .get_value(..)?;
+    let count: i32 = file
+        .variable("trc_river_descriptor_count")
+        .context("malformed/incomplete river tracer restart descriptor metadata")?
+        .get_value(..)?;
+    let expected = tracers.set.descriptor_identity();
+    if schema != 1 && schema != RIVER_TRACER_SCHEMA {
+        return Ok(false);
+    }
+    if count == 0 {
+        return Ok(expected.is_empty());
+    }
+    let identity = file
+        .variable("trc_river_descriptor_identity")
+        .context("malformed/incomplete river tracer restart descriptor metadata")?
+        .get_values::<i32, _>(..)?;
+    let flat = expected.iter().flatten().copied().collect::<Vec<i32>>();
+    if count as usize != expected.len() || identity != flat {
+        return Ok(false);
+    }
+    let _ = network;
+    bail!(
+        "reading a committed river tracer restart ({}) is not ported yet; run this case with --engine fortran",
+        path.display()
+    )
 }

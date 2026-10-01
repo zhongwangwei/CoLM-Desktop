@@ -14,8 +14,9 @@ pub mod network;
 pub mod remap;
 pub mod reservoir;
 pub mod restart;
+pub mod tracer;
 
-use anyhow::{ensure, Result};
+use anyhow::{ensure, Context, Result};
 use colm_core::LibmPow;
 use rayon::prelude::*;
 
@@ -219,6 +220,8 @@ pub struct RiverModel {
     pub reservoir: Option<reservoir::Reservoir>,
     /// `DEF_GRIDBASED_ROUTING_MOMENTUM_DT_LIMIT`：子步长再加一道「不让流向反转」的限制。
     pub momentum_dt_limit: bool,
+    /// `DEF_USE_TRACER`（有走通用输运的示踪物）：河湖示踪物（[`tracer`]）。
+    pub tracers: Option<tracer::RiverTracers>,
     momen: Vec<f64>,
 }
 
@@ -394,7 +397,18 @@ impl RiverModel {
             max_dt,
             raw_history_at_end: None,
             flood: None,
+            tracers: None,
         })
+    }
+
+    /// 挂上河湖示踪物（`river_lake_tracer_init`）。
+    pub fn with_tracers(mut self, tracers: tracer::RiverTracers) -> Result<Self> {
+        ensure!(
+            self.bifurcation.is_none(),
+            "river tracers with DEF_USE_BIFURCATION are not ported yet; run this case with --engine fortran"
+        );
+        self.tracers = Some(tracers);
+        Ok(self)
     }
 
     /// 打开漫滩回馈：`grid_riverlake_flow_init` 末尾立刻发布一次（非 spinup）。
@@ -421,6 +435,7 @@ impl RiverModel {
     pub fn step(
         &mut self,
         runoff_mm_s: &[f64],
+        tracer_runoff: Option<&[Vec<f64>]>,
         included: &[bool],
         deltime: f64,
         year: i32,
@@ -430,38 +445,28 @@ impl RiverModel {
             runoff_mm_s.len() == routing.patch_parts.len() && included.len() == runoff_mm_s.len(),
             "one runoff value per patch is needed"
         );
-        // `worker_remap_data_pset2grid`：填充值 0，值为 0 的 patch 不参与；首份直接赋值。
-        let mut grid = vec![0.0; routing.grids.len()];
-        for ((parts, &value), &keep) in routing.patch_parts.iter().zip(runoff_mm_s).zip(included) {
-            if !keep || value == 0.0 {
-                continue;
-            }
-            for &(k, area) in parts {
-                let term = value * area;
-                grid[k] = if grid[k] == 0.0 { term } else { grid[k] + term };
-            }
+        let rnof_uc = remap_to_catchments(routing, runoff_mm_s, included, self.network.len());
+        // `acc = FMA(rnof_uc*1e-3, deltime, acc)`。
+        for (i, _) in &routing.catchments {
+            self.state.acc_rnof[*i] = (rnof_uc[*i] * 1.0e-3).mul_add(deltime, self.state.acc_rnof[*i]);
         }
-        for (value, &area) in grid.iter_mut().zip(&routing.grid_area) {
-            if area > 0.0 {
-                *value /= area;
-            }
-        }
-        // `push_inpm2ucat`（sum）：同样跳过 0；随后 `acc = FMA(rnof_uc*1e-3, deltime, acc)`。
-        for (i, entries) in &routing.catchments {
-            let mut sum = 0.0;
-            for &(k, area) in entries {
-                let Some(k) = k else { continue };
-                let value = grid[k];
-                if value == 0.0 {
-                    continue;
+        // 示踪物径流同一套映射（`trc_rnof_step` → `trc_rnof_uc`），再
+        // `tracer_input_from_runoff(rnof_uc*1e-3*deltime, numucat, trc_rnof_uc*1e-3)`。
+        if let Some(tracers) = self.tracers.as_mut() {
+            let tracer_runoff =
+                tracer_runoff.context("river tracers need the patch runoff tracer (trc_rnof_step)")?;
+            let mut trc = vec![vec![0.0; self.network.len()]; tracers.set.len()];
+            for itrc in tracers.set.transport_indices().collect::<Vec<_>>() {
+                let uc = remap_to_catchments(routing, &tracer_runoff[itrc], included, self.network.len());
+                for (i, _) in &routing.catchments {
+                    trc[itrc][*i] = uc[*i] * 1.0e-3;
                 }
-                sum = if sum == 0.0 {
-                    value * area
-                } else {
-                    sum + value * area
-                };
             }
-            self.state.acc_rnof[*i] = (sum * 1.0e-3).mul_add(deltime, self.state.acc_rnof[*i]);
+            let mut depth = vec![0.0; self.network.len()];
+            for (i, _) in &routing.catchments {
+                depth[*i] = (rnof_uc[*i] * 1.0e-3) * deltime;
+            }
+            tracers.input_from_runoff(&depth, &trc);
         }
         // 漫滩回馈：每个陆面步都扣账、再发布（`grid_riverlake_flow` 里汇流判定之前）。
         if let Some(flood) = self.flood.as_mut() {
@@ -512,6 +517,7 @@ impl RiverModel {
         let resv = self.reservoir.as_ref().map(|reservoir| (reservoir, year));
         let momentum_limit = self.momentum_dt_limit;
         let acctime = state.acctime_rnof;
+        let record = self.tracers.is_some();
         let (systems, results): (Vec<&network::RiverSystem>, Vec<SystemResult<'_>>) =
             match (bif_run, self.bifurcation.as_ref()) {
                 (Some(run), Some((_, global))) => (
@@ -526,6 +532,7 @@ impl RiverModel {
                         Some(run),
                         momentum_limit,
                         acctime,
+                        record,
                     )],
                 ),
                 _ => (
@@ -543,12 +550,14 @@ impl RiverModel {
                                 None,
                                 momentum_limit,
                                 acctime,
+                                record,
                             )
                         })
                         .collect(),
                 ),
             };
         let mut bif_back = None;
+        let mut tapes = Vec::new();
         ensure!(
             results.iter().all(|result| !result.protected_failed),
             "BIF protected-side limiter failed"
@@ -564,6 +573,9 @@ impl RiverModel {
             }
             if let Some(run) = result.bifurcation.take() {
                 bif_back = Some((run.state, run.bifout, run.bifflw_lev, run.bifflw_acctime));
+            }
+            if let Some(tape) = result.tape.take() {
+                tapes.push(tape);
             }
             for (k, &i) in system.cells.iter().enumerate() {
                 self.state.wdsrf[i] = result.wdsrf[k];
@@ -595,9 +607,69 @@ impl RiverModel {
             self.history.bifflw_lev = Some(bifflw_lev);
             self.history.bifflw_acctime = Some(bifflw_acctime);
         }
+        // 示踪物按全局子步重放这次汇流（见 [`tracer`]）。
+        if let Some(tracers) = self.tracers.as_mut() {
+            tracers.replay(&self.network, self.levee.as_ref(), &tapes)?;
+        }
         self.state.acctime_rnof = 0.0;
         self.state.acc_rnof.fill(0.0);
         Ok(())
+    }
+}
+
+/// patch → 输入网格 → 单元流域（`worker_remap_data_pset2grid` + `push_inpm2ucat`，填充 0，
+/// 值为 0 的 patch/格子不参与，首份直接赋值）；返回每个单元流域的值（不在区域里的为 0）。
+fn remap_to_catchments(
+    routing: &RunoffRouting,
+    values: &[f64],
+    included: &[bool],
+    n: usize,
+) -> Vec<f64> {
+    let mut grid = vec![0.0; routing.grids.len()];
+    for ((parts, &value), &keep) in routing.patch_parts.iter().zip(values).zip(included) {
+        if !keep || value == 0.0 {
+            continue;
+        }
+        for &(k, area) in parts {
+            let term = value * area;
+            grid[k] = if grid[k] == 0.0 { term } else { grid[k] + term };
+        }
+    }
+    for (value, &area) in grid.iter_mut().zip(&routing.grid_area) {
+        if area > 0.0 {
+            *value /= area;
+        }
+    }
+    let mut out = vec![0.0; n];
+    for (i, entries) in &routing.catchments {
+        let mut sum = 0.0;
+        for &(k, area) in entries {
+            let Some(k) = k else { continue };
+            let value = grid[k];
+            if value == 0.0 {
+                continue;
+            }
+            sum = if sum == 0.0 { value * area } else { sum + value * area };
+        }
+        out[*i] = sum;
+    }
+    out
+}
+
+/// 磁带里一个单元流域的水（水库取 `volresv`，有堤带堤内蓄量）。
+fn cell_water(
+    k: usize,
+    wdsrf: &[f64],
+    volwater_ucat: &[f64],
+    lev: &Option<Vec<(f64, f64, f64, f64)>>,
+    built: &[Option<usize>],
+    reservoirs: &[(usize, f64, [f64; 4])],
+) -> tracer::CellWater {
+    tracer::CellWater {
+        wdsrf: wdsrf[k],
+        volwater_ucat: volwater_ucat[k],
+        volresv: built[k].map(|j| reservoirs[j].1),
+        levsto: lev.as_ref().map(|lev| lev[k].0),
     }
 }
 
@@ -615,6 +687,8 @@ struct SystemResult<'a> {
     reservoirs: Vec<(usize, f64, [f64; 4])>,
     /// 堤内一侧的分汊出流扣穿了堤内蓄量（上游 `BIF protected-side limiter failed`）。
     protected_failed: bool,
+    /// 开示踪物时这一河系的磁带。
+    tape: Option<tracer::SystemTape>,
 }
 
 /// 分汊子步里看到的水库：哪些单元流域是已建成的水库、它们的库容，以及要改写的出入流。
@@ -661,6 +735,7 @@ fn route_system<'a>(
     mut bif: Option<BifurcationRun<'a>>,
     momentum_limit: bool,
     acctime: f64,
+    record: bool,
 ) -> SystemResult<'a> {
     let cells = &system.cells;
     let n = cells.len();
@@ -683,6 +758,12 @@ fn route_system<'a>(
             .collect::<Vec<_>>()
     });
     let mut levee_floodarea = vec![0.0; n];
+    let mut tape = record.then(|| tracer::SystemTape {
+        cells: cells.clone(),
+        pre_levee: vec![None; n],
+        initial: Vec::with_capacity(n),
+        substeps: Vec::new(),
+    });
     // `levee_repartition_storage`：可见 + 堤内重新分区，返回新的可见蓄量与水深。
     let repartition = |lev: &mut (f64, f64, f64, f64), i: usize, visible: f64, area: &mut f64| {
         let levee = levee.expect("levee");
@@ -736,6 +817,14 @@ fn route_system<'a>(
             volwater_ucat.push(state.volwater[i]);
             wdsrf.push(w);
             veloc.push(0.0);
+            if let Some(tape) = tape.as_mut() {
+                tape.initial.push(tracer::CellWater {
+                    wdsrf: w,
+                    volwater_ucat: state.volwater[i],
+                    volresv: Some(*volresv),
+                    levsto: lev.as_ref().map(|lev| lev[k].0),
+                });
+            }
             continue;
         }
         let mom = state.wdsrf[i] * state.veloc[i];
@@ -746,8 +835,12 @@ fn route_system<'a>(
         } + state.acc_rnof[i];
         let w = match (levee, lev.as_mut()) {
             (Some(levee), Some(lev)) if levee.has[i] => {
+                let (vis_bef, lev_bef) = (volwater, lev[k].0);
                 let (visible, w) = repartition(&mut lev[k], i, volwater, &mut levee_floodarea[k]);
                 volwater = visible;
+                if let Some(tape) = tape.as_mut() {
+                    tape.pre_levee[k] = Some([vis_bef, lev_bef, visible, lev[k].0]);
+                }
                 w
             }
             _ => net.curves[i].depth(volwater),
@@ -756,6 +849,14 @@ fn route_system<'a>(
         volwater_ucat.push(volwater);
         wdsrf.push(w);
         veloc.push(if w > RIVERMIN { mom / w } else { 0.0 });
+        if let Some(tape) = tape.as_mut() {
+            tape.initial.push(tracer::CellWater {
+                wdsrf: w,
+                volwater_ucat: volwater,
+                volresv: None,
+                levsto: lev.as_ref().map(|lev| lev[k].0),
+            });
+        }
     }
     let mut hist = cells
         .iter()
@@ -932,6 +1033,16 @@ fn route_system<'a>(
             ),
             _ => dt_all,
         };
+        let mut cells_tape = tape.as_ref().map(|_| {
+            (0..n)
+                .map(|k| tracer::CellSubstep {
+                    start: cell_water(k, &wdsrf, &volwater_ucat, &lev, &built, &reservoirs),
+                    hflux: faces[k].hflux,
+                    sum_hflux: sums[k].0,
+                    ..Default::default()
+                })
+                .collect::<Vec<_>>()
+        });
         // 蓄量、水深与动量。
         for k in 0..n {
             let i = cells[k];
@@ -976,6 +1087,9 @@ fn route_system<'a>(
             }
             volwater = volwater.max(0.0);
             if system.next[k] == INLAND_DEPRESSION && volwater > net.rivstomax[i] {
+                if let Some(cells_tape) = cells_tape.as_mut() {
+                    cells_tape[k].overflow = Some((volwater, net.rivstomax[i]));
+                }
                 faces[k].hflux = (volwater - net.rivstomax[i]) / dt;
                 if let Some(j) = built[k] {
                     qresv[j].1 = faces[k].hflux;
@@ -992,9 +1106,13 @@ fn route_system<'a>(
             }
             let w = match (levee, lev.as_mut()) {
                 (Some(levee), Some(lev)) if levee.has[i] => {
+                    let (vis_bef, lev_bef) = (volwater, lev[k].0);
                     let (visible, w) =
                         repartition(&mut lev[k], i, volwater, &mut levee_floodarea[k]);
                     volwater = visible;
+                    if let Some(cells_tape) = cells_tape.as_mut() {
+                        cells_tape[k].levee = Some([vis_bef, lev_bef, visible, lev[k].0]);
+                    }
                     w
                 }
                 _ => curve.depth(volwater),
@@ -1020,6 +1138,12 @@ fn route_system<'a>(
             if w >= RIVERMIN {
                 momen[k] = veloc[k] * w;
             }
+        }
+        if let (Some(tape), Some(mut cells_tape)) = (tape.as_mut(), cells_tape.take()) {
+            for k in 0..n {
+                cells_tape[k].end = cell_water(k, &wdsrf, &volwater_ucat, &lev, &built, &reservoirs);
+            }
+            tape.substeps.push((dt, cells_tape));
         }
         // history 累加：`a_x = FMA(x, dt, a_x)`，`acctime` 平铺相加。
         for k in 0..n {
@@ -1083,6 +1207,7 @@ fn route_system<'a>(
         bifurcation: bif,
         reservoirs,
         protected_failed,
+        tape,
     }
 }
 
