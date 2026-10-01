@@ -30,7 +30,7 @@ MODULE MOD_LeafInterception
    ! 2002.08.31  Yongjiu Dai
    USE MOD_Precision
    USE MOD_Const_Physical, only: tfrz, denh2o, denice, cpliq, cpice, hfus
-   USE MOD_Namelist, only: DEF_Interception_scheme, DEF_VEG_SNOW, DEF_USE_TRACER
+   USE MOD_Namelist, only: DEF_Interception_scheme, DEF_VEG_SNOW
    USE, INTRINSIC :: ieee_arithmetic, only: ieee_is_finite
 
    IMPLICIT NONE
@@ -275,9 +275,9 @@ CONTAINS
       xsc_rain = 0._r8
       xsc_snow = 0._r8
 
-      ! Upstream repairs an inconsistent ldew/ldew_rain/ldew_snow state here only
-      ! in TRACER builds.
-      IF (DEF_USE_TRACER .and. DEF_VEG_SNOW) THEN
+      ! Repair an inconsistent ldew/ldew_rain/ldew_snow state (formerly only in TRACER
+      ! builds; decoupled from the tracer switch).
+      IF (DEF_VEG_SNOW) THEN
          total_valid = ieee_is_finite(ldew) .and. ldew >= 0._r8
          phases_valid = ieee_is_finite(ldew_rain) .and. ldew_rain >= 0._r8 .and. &
                         ieee_is_finite(ldew_snow) .and. ldew_snow >= 0._r8
@@ -310,12 +310,9 @@ CONTAINS
             satcap_rain = max(0._r8, satcap_rain_override)
             IF (.not. DEF_VEG_SNOW) satcap = satcap_rain
          ENDIF
-      IF (DEF_USE_TRACER) THEN
+         ! Niu et al. (2004) would be 6.6*(0.27+46./bifall)*vegt; the simple form without
+         ! snow density input is used.
          satcap_snow = 48._r8*satcap
-      ELSE
-         satcap_snow = 6.6*(0.27+46./bifall)*vegt  ! Niu et al., 2004
-         satcap_snow = 48.*satcap                  ! Simple one without snow density input
-      ENDIF
 
          p0  = (prc_rain + prc_snow + prl_rain + prl_snow + qflx_irrig_sprinkler)*deltim
          ppc = (prc_rain + prc_snow)*deltim
@@ -416,16 +413,13 @@ CONTAINS
 
                ! snow unloading rate
 
-      IF (DEF_USE_TRACER) THEN
+               ! Unloading rate = storage [mm] * (FT+FV) [1/s] (Niu & Yang 2004), capped by
+               ! what the canopy holds.  The former form divided the storage by deltim once
+               ! more, understating unloading by a factor deltim.
                FT = max(0._r8, (tleaf - tfrz) / 1.87e5_r8)
                FV = sqrt(forc_us*forc_us + forc_vs*forc_vs) / 1.56e5_r8
                tex_snow = max(0._r8, ldew_snow) * (FV+FT)
                tex_snow = min(tex_snow, max(0._r8,ldew_snow)/deltim + qintr_snow)
-      ELSE
-               FT = max(0.0, (tleaf - tfrz) / 1.87e5)
-               FV = sqrt(forc_us*forc_us + forc_vs*forc_vs) / 1.56e5
-               tex_snow = max(0., ldew_snow/deltim) * (FV+FT)
-      ENDIF
                tti_snow = (1.0-fvegc)*(prc_snow+prl_snow) + (fvegc*(prc_snow+prl_snow) - qintr_snow)
 
                ! rate -> mass
@@ -491,15 +485,11 @@ CONTAINS
          !NOTE: this bug should exist in other interception schemes @Zhongwang.
          IF (ldew > 0.) THEN
             IF (tleaf > tfrz) THEN
-      IF (DEF_USE_TRACER) THEN
                xsc_rain = max(0._r8, ldew)
-      ENDIF
                pg_rain = prc_rain + prl_rain + qflx_irrig_sprinkler + ldew/deltim
                pg_snow = prc_snow + prl_snow
             ELSE
-      IF (DEF_USE_TRACER) THEN
                xsc_snow = max(0._r8, ldew)
-      ENDIF
                pg_rain = prc_rain + prl_rain + qflx_irrig_sprinkler
                pg_snow = prc_snow + prl_snow + ldew/deltim
             ENDIF
@@ -517,7 +507,6 @@ CONTAINS
 
       ENDIF
 
-      IF (DEF_USE_TRACER) THEN
       IF (present(gross_intr_rain))       gross_intr_rain       = max(0._r8, qintr_rain)
       IF (present(gross_intr_snow))       gross_intr_snow       = max(0._r8, qintr_snow)
       IF (present(xsc_rain_out))          xsc_rain_out          = xsc_rain / deltim
@@ -526,7 +515,6 @@ CONTAINS
       IF (present(ldew_frzc_out))         ldew_frzc_out         = 0._r8
       IF (present(canopy_phase_heat_out)) canopy_phase_heat_out = 0._r8
 
-      ENDIF
    END SUBROUTINE LEAF_interception_CoLM2014
 
    SUBROUTINE LEAF_interception_CoLM2024 (deltim,dewmx,forc_us,forc_vs,chil,sigf,lai,sai,tair,tleaf,&

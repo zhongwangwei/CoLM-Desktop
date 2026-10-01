@@ -3,7 +3,7 @@
 MODULE MOD_LeafTemperature
 
 !-----------------------------------------------------------------------
-   USE MOD_Namelist, only: DEF_USE_PC, DEF_USE_PFT, DEF_USE_TRACER
+   USE MOD_Namelist, only: DEF_USE_PC, DEF_USE_PFT
    USE MOD_Precision
    USE MOD_Namelist, only: DEF_USE_CBL_HEIGHT, DEF_USE_PLANTHYDRAULICS, DEF_USE_OZONESTRESS, &
                            DEF_RSS_SCHEME, DEF_Interception_scheme, DEF_SPLIT_SOILSNOW, &
@@ -500,12 +500,10 @@ CONTAINS
          clai = 0.2*(lai+sai)*cpliq + ldew_rain*cpliq + ldew_snow*cpice
       ENDIF
 
-      IF (DEF_USE_TRACER) THEN
+      ! The wetted fraction uses the rain storage capacity of the active interception
+      ! scheme (CoLM2024 under scheme 8, dewmx*(lai+sai) otherwise).
       CALL dewfraction (sigf,lai,sai,dewmx,ldew,ldew_rain,ldew_snow,fwet,fdry, &
                         colm2024_rain_capacity_for_fwet(ipatch,ivt,ipft_index,dewmx,lai,sai,us,vs,htop))
-      ELSE
-      CALL dewfraction (sigf,lai,sai,dewmx,ldew,ldew_rain,ldew_snow,fwet,fdry)
-      ENDIF
 
       CALL qsadv(tl,psrf,ei,deiDT,qsatl,qsatlDT)
 
@@ -1103,15 +1101,14 @@ ENDIF
       evplwet = evplwet + evplwet_dtl*dtl(it-1)
       fevpl   = fevpl_noadj
       fevpl   = fevpl   +   fevpl_dtl*dtl(it-1)
-      IF (DEF_USE_TRACER) THEN
-
+      ! Negative transpiration (vapour flux into the stomata) is dew onto the wet leaf,
+      ! not reverse sap flow: move it to the wet-leaf evaporation.
       IF (etr < 0._r8) THEN
          evplwet = evplwet + etr
          etr = 0._r8
          etrsun = 0._r8
          etrsha = 0._r8
          IF (DEF_USE_PLANTHYDRAULICS) rootflux = 0._r8
-      ENDIF
       ENDIF
 
       elwmax  = ldew/deltim
@@ -1194,10 +1191,9 @@ ENDIF
 !-----------------------------------------------------------------------
 ! Update dew accumulation (kg/m2)
 !-----------------------------------------------------------------------
-      ! Upstream non-TRACER builds branch on DEF_Interception_scheme here, but the
-      ! eight branches are identical; only an unknown scheme aborts there.
-      IF (.not. DEF_USE_TRACER .and. (DEF_Interception_scheme < 1 .or. DEF_Interception_scheme > 8)) &
-         CALL abort
+      ! Upstream used to branch on DEF_Interception_scheme here, but the eight branches
+      ! are identical; only an unknown scheme aborts.
+      IF (DEF_Interception_scheme < 1 .or. DEF_Interception_scheme > 8) CALL abort
          ldew = max(0., ldew-evplwet*deltim)
 
          ! account for vegetation snow and update ldew_rain, ldew_snow, ldew
@@ -1358,18 +1354,12 @@ ENDIF
       dewmxi = 1.0/dewmx
       ! 06/2018, yuan: remove sigf, to compatible with PFT
       vegt   =  lsai
-      IF (DEF_USE_TRACER) THEN
       satcap_rain = dewmx * vegt
       IF (present(satcap_rain_override)) satcap_rain = max(0._r8, satcap_rain_override)
-      ENDIF
 
       fwet = 0
       IF (ldew > 0.) THEN
-      IF (DEF_USE_TRACER) THEN
          fwet = (ldew/max(satcap_rain,1.e-10_r8))**.666666666666
-      ELSE
-         fwet = ((dewmxi/vegt)*ldew)**.666666666666
-      ENDIF
          ! Check for maximum limit of fwet
          fwet = min(fwet,1.0)
       ENDIF
@@ -1380,11 +1370,7 @@ ENDIF
 
          fwet_rain = 0
          IF(ldew_rain > 0.) THEN
-      IF (DEF_USE_TRACER) THEN
             fwet_rain = (ldew_rain/max(satcap_rain,1.e-10_r8))**.666666666666
-      ELSE
-            fwet_rain = ((dewmxi/vegt)*ldew_rain)**.666666666666
-      ENDIF
             ! Check for maximum limit of fwet_rain
             fwet_rain = min(fwet_rain,1.0)
          ENDIF

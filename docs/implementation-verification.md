@@ -27224,3 +27224,34 @@ Rust 在 `route_system` 的子步长循环与 `bifurcation_substep` 里各加一
 | `g1iy`（2003-12-31 → 2004-01-01，跨年换文件） | 续跑 8 个、history 4 个全部 `diff 0` |
 
 `cargo test --release -p colm-runtime` 全过；clippy 无告警。
+
+## 第 477 轮：在 vendor 里把宿主物理与示踪物开关解耦
+
+**动机**：`DEF_USE_TRACER` 改变宿主物理本身。g1 区域、IsoGSM 驱动、变饱和流跑 2 天，只把开关从关改成开、示踪物 0 个，history 的 123 个量里 68 个变了：
+- 多数相对差约 1e-4；
+- 土壤层间水流、入渗相对差约 1e-3 到 1e-2；
+- 水量平衡误差 `f_xerr` 从约 1e-9 降到 1e-16。
+
+示踪物应当被动，只记账不改宿主。按维护者的决定：被示踪物开关挡着的宿主修改**覆盖原有写法、对所有算例生效**；纯示踪物记账（调用示踪物模块、示踪物状态与输出）仍由开关控制；`extends/` 下的不管。
+
+**改成无条件生效的**（原来只在开示踪物时成立）：
+
+| 文件 | 内容 |
+|---|---|
+| `MOD_LeafInterception`（CoLM2014 方案） | 开 `DEF_VEG_SNOW` 时修复不一致的 `ldew/ldew_rain/ldew_snow`；积雪截留容量直接取 `48·satcap`（原写法先算 Niu 式又被覆盖，数值相同）；**冠层卸雪速率改为积雪量 ×（FT+FV）并不超过现有积雪**（原写法多除了一次步长，卸雪偏小 `deltim` 倍）；`xsc_*` 与可选输出照常赋值 |
+| `MOD_LeafTemperature`、`MOD_LeafTemperaturePC` | `fwet` 用当前截留方案的雨水容量（scheme 8 用 CoLM2024 容量，其余为 `dewmx·(lai+sai)`，后者与原式代数相同、仅舍入不同）；**负蒸腾记为叶面凝露**（`evplwet += etr`，蒸腾与根系吸水置 0）；未知截留方案报错的判断不再看开关；PC 版对所有截留方案都用 colm2014 的露水更新（原来按方案分支），关 `DEF_VEG_SNOW` 时保持雨/雪分量与 `ldew` 一致 |
+| `MOD_Thermal` | 漫滩相关量的完整初始化；PFT 路径关 `DEF_VEG_SNOW` 时按叶温把冠层水归成雨或雪 |
+| `MOD_NewSnow` | 湿地上暖地面的降雪并入湿地水，**只在没有雪层时**（有雪层时清 `scv` 会破坏雪层质量） |
+| `MOD_GroundFluxes` | `raw_out` 可选输出 |
+| `MOD_SoilSnowHydrology`（`WATER_2014`、`WATER_VSF`） | 土壤 patch 的地表积水并入入渗通量；露水受顶层孔隙容量限制，冻结挤出的液水与露水溢出转为地表水与晚到径流；冻结冰超出整个孔隙时报错（土壤 patch 延后交给 `relocate_soil_frost_ice`）；动态湿地与干涸湖泊的微小入渗/蒸发与地表水抵消；不透水表层的蒸发亏缺按冰/液分配；变饱和流下冻土的 `smp/hk` 按冻结势与阻抗重算；`permeable_soil_out`、`qgtop_out` |
+| `HYDRO/MOD_Hydro_SoilWater` | 植物水力的根系回水与基流分两次与含水层交换；入渗 `qinfl` 计入积水交换；根系吸水微小负值清零；**Richards 方程的质量收支投影**（`project_richards_liquid_water`）——水量平衡误差 1e-9 → 1e-16 来自这里 |
+| BGC（`CNCStateUpdate1`、`Soil_BiogeochemNStateUpdate1`） | 分解的碳、氮源汇改由 `CDecompStateUpdate`/`SoilBiogeochemNDecompStateUpdate` 计算（碳为原代码抽成例程；氮的末端转化与矿化/固持合并成一项计算，算式有变化） |
+| `CoLMMAIN` | 关 `DEF_VEG_SNOW` 时按叶温把冠层水归成雨或雪；土壤 patch 调用 `relocate_soil_frost_ice` 把超出孔隙的新冻结冰挪进雪；水量平衡误差把漫滩入渗/蒸发写成显式的输入/输出项（不再改 `endwb`） |
+| `CoLM.F90` | 氮沉降与火的初始化读起始年 `s_year`（原 `sdate(1)` 在 1 月 1 日 0 时起跑时被 `adj2end` 挪到前一年） |
+| `MOD_Hist` | 累加次数为 0 的格点输出缺测值，而不是未平均的累加值 |
+| `MOD_Vars_1DAccFluxes` | 变饱和流下不累加 `qcharge`（输出缺测） |
+| `HYDRO/MOD_Grid_RiverLakeFlow` | 流速截在 ±20 m/s 后，动量按截断后的流速 × 水深重新对齐 |
+
+**仍由开关控制的**：示踪物的初始化、驱动、记账、守恒检查、续跑与输出；雪层合并/拆分传示踪物数组的调用（宿主计算相同）；城市 patch 的拒绝；甲烷用的湿地土壤碳氮库初始化（`MOD_Initialize`，无甲烷时湿地不跑分解，初始化了也用不上）；河道示踪物输运。城市模块里 `fwet` 的旧写法不在示踪物开关下，不在本轮范围。
+
+三个内核（default、latlon、crop）重编通过。**这会改变所有既有算例的结果**：下一步重生成全部 Fortran 参照，Rust 按新语义跟进。

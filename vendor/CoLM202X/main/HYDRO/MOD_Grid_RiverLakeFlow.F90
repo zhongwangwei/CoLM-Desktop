@@ -1153,10 +1153,8 @@ CONTAINS
 
                veloc_riv(i) = min(veloc_riv(i),  20.)
                veloc_riv(i) = max(veloc_riv(i), -20.)
-      IF (DEF_USE_TRACER) THEN
                IF ((.not. is_built_resv(i)) .and. (wdsrf_ucat(i) >= RIVERMIN)) &
                   momen_riv(i) = veloc_riv(i) * wdsrf_ucat(i)
-      ENDIF
 
             ENDDO
 

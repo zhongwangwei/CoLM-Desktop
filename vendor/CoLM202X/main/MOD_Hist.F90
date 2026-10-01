@@ -4853,7 +4853,6 @@ ENDIF
          IF (p_is_worker) &
             WHERE (acc_vec /= spval) acc_vec = acc_vec / nac
       ELSE
-      IF (DEF_USE_TRACER) THEN
          IF (p_is_worker) THEN
             WHERE (acc_vec/=spval .and. acc_num>0)
                acc_vec = acc_vec / acc_num
@@ -4861,24 +4860,16 @@ ENDIF
                acc_vec = spval
             END WHERE
          ENDIF
-      ELSE
-         IF (p_is_worker)  &
-            WHERE (acc_vec/=spval .and. acc_num>0) acc_vec = acc_vec / acc_num
-      ENDIF
       ENDIF
 #else
       IF ( .not. present(acc_num) ) THEN
          WHERE (acc_vec /= spval)  acc_vec = acc_vec / nac
       ELSE
-      IF (DEF_USE_TRACER) THEN
          WHERE (acc_vec/=spval .and. acc_num>0)
                acc_vec = acc_vec / acc_num
             ELSEWHERE (acc_vec/=spval .and. acc_num<=0)
                acc_vec = spval
             END WHERE
-      ELSE
-         WHERE (acc_vec/=spval .and. acc_num>0) acc_vec = acc_vec / acc_num
-      ENDIF
       ENDIF
 #endif
 
@@ -5034,16 +5025,11 @@ ENDIF
          IF (p_is_worker) THEN
             DO i1 = lbound(acc_vec,1), ubound(acc_vec,1)
                DO i2 = lbound(acc_vec,2), ubound(acc_vec,2)
-      IF (DEF_USE_TRACER) THEN
                   WHERE (acc_vec(i1,i2,:)/=spval .and. acc_num>0)
                         acc_vec(i1,i2,:) = acc_vec(i1,i2,:) / acc_num
                   ELSEWHERE (acc_vec(i1,i2,:)/=spval .and. acc_num<=0)
                         acc_vec(i1,i2,:) = spval
                   END WHERE
-      ELSE
-                  WHERE (acc_vec(i1,i2,:)/=spval .and. acc_num>0) &
-                        acc_vec(i1,i2,:) = acc_vec(i1,i2,:) / acc_num
-      ENDIF
                ENDDO
             ENDDO
          ENDIF
@@ -5054,16 +5040,11 @@ ENDIF
       ELSE
          DO i1 = lbound(acc_vec,1), ubound(acc_vec,1)
             DO i2 = lbound(acc_vec,2), ubound(acc_vec,2)
-      IF (DEF_USE_TRACER) THEN
                WHERE (acc_vec(i1,i2,:)/=spval .and. acc_num>0)
                      acc_vec(i1,i2,:) = acc_vec(i1,i2,:) / acc_num
                ELSEWHERE (acc_vec(i1,i2,:)/=spval .and. acc_num<=0)
                      acc_vec(i1,i2,:) = spval
                END WHERE
-      ELSE
-               WHERE (acc_vec(i1,i2,:)/=spval .and. acc_num>0) &
-                     acc_vec(i1,i2,:) = acc_vec(i1,i2,:) / acc_num
-      ENDIF
             ENDDO
          ENDDO
       ENDIF

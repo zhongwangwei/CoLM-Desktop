@@ -408,20 +408,12 @@ PROGRAM CoLM
          CALL init_nitrif_data (ststamp)
       ENDIF
 
-      ! Upstream TRACER builds read the start year; other builds read sdate(1),
-      ! which adj2end moves to the previous year for a 00:00 Jan-1 start.
+      ! Read the start year: sdate(1) is moved to the previous year by adj2end for a
+      ! 00:00 Jan-1 start (formerly only TRACER builds read s_year).
       IF (DEF_NDEP_FREQUENCY==1)THEN ! Initial annual ndep data readin
-         IF (DEF_USE_TRACER) THEN
             CALL init_ndep_data_annually (s_year)
-         ELSE
-            CALL init_ndep_data_annually (sdate(1))
-         ENDIF
       ELSEIF(DEF_NDEP_FREQUENCY==2)THEN ! Initial monthly ndep data readin
-         IF (DEF_USE_TRACER) THEN
             CALL init_ndep_data_monthly (s_year,s_month)
-         ELSE
-            CALL init_ndep_data_monthly (sdate(1),s_month)
-         ENDIF
       ELSE
          write(6,*) 'ERROR: DEF_NDEP_FREQUENCY should be only 1-2, Current is:', &
                      DEF_NDEP_FREQUENCY
@@ -429,11 +421,7 @@ PROGRAM CoLM
       ENDIF
 
       IF (DEF_USE_FIRE) THEN
-      IF (DEF_USE_TRACER) THEN
          CALL init_fire_data (s_year)
-      ELSE
-         CALL init_fire_data (sdate(1))
-      ENDIF
          CALL init_lightning_data (sdate)
       ENDIF
       ENDIF

@@ -17,7 +17,7 @@ MODULE MOD_Hydro_SoilWater
 
    USE MOD_Precision
    USE MOD_Hydro_SoilFunction
-   USE MOD_Namelist, only: DEF_USE_PLANTHYDRAULICS, DEF_USE_Campbell_SOIL_MODEL, DEF_USE_TRACER
+   USE MOD_Namelist, only: DEF_USE_PLANTHYDRAULICS, DEF_USE_Campbell_SOIL_MODEL
    USE MOD_SPMD_Task, only: CoLM_stop
    USE, INTRINSIC :: ieee_arithmetic, only: ieee_is_finite
    USE MOD_UserDefFun, only: findloc_ud
@@ -345,9 +345,9 @@ CONTAINS
       wexchange = rsubst * dt + deficit
       exchange_dp_before = ss_dp
       pond_exchange = 0._r8
-      ! Upstream TRACER builds exchange a PHS net root return and the baseflow in two
-      ! separate aquifer exchanges; other builds apply their sum in one exchange.
-      IF (DEF_USE_TRACER .and. DEF_USE_PLANTHYDRAULICS .and. deficit < 0._r8) THEN
+      ! A PHS net root return and the baseflow are exchanged with the aquifer in two
+      ! separate steps (formerly only in TRACER builds; others applied their sum once).
+      IF (DEF_USE_PLANTHYDRAULICS .and. deficit < 0._r8) THEN
          exchange_wa_before = wa
          exchange_zwt_before = zwt
          DO ilev = 1, nlev
@@ -392,7 +392,7 @@ CONTAINS
          ENDIF
          pond_exchange = dp_before-ss_dp
       ELSE
-      IF (DEF_USE_TRACER .and. wexchange > 0._r8) THEN
+      IF (wexchange > 0._r8) THEN
          et_fraction = min(max(deficit, 0._r8) / wexchange, 1._r8)
          rsub_fraction = 1._r8 - et_fraction
          exchange_wa_before = wa
@@ -409,7 +409,6 @@ CONTAINS
       CALL soilwater_aquifer_exchange ( &
          nlev, wexchange, sp_zi, is_permeable, porsl, vl_r, psi_s, hksat, &
          nprm, prms, porsl_wa, ss_dp, ss_vliq, zwt, wa, izwt)
-      IF (DEF_USE_TRACER) THEN
       IF (wexchange > 0._r8) pond_exchange = max(exchange_dp_before-ss_dp, 0._r8)
       IF (wexchange > 0._r8) THEN
          etroot_surface_out = pond_exchange * et_fraction
@@ -426,7 +425,6 @@ CONTAINS
             etroot_actual_out(ilev) = etroot_actual_out(ilev) + layer_debit * et_fraction
             rsub_layer_out(ilev) = layer_debit * rsub_fraction
          ENDDO
-      ENDIF
       ENDIF
       ENDIF
 
@@ -525,11 +523,7 @@ CONTAINS
          ENDIF
       ENDDO
 
-      IF (DEF_USE_TRACER) THEN
       qinfl = qgtop - (ss_dp - dp_m1 + pond_exchange)/dt
-      ELSE
-      qinfl = qgtop - (ss_dp - dp_m1)/dt
-      ENDIF
 
       ! total water mass
       w_sum_after = ss_dp
@@ -579,7 +573,6 @@ CONTAINS
          ENDIF
       ENDDO
 
-      IF (DEF_USE_TRACER) THEN
       IF (DEF_USE_PLANTHYDRAULICS .and. &
           .not. any(etroot_actual_out > 0._r8) .and. &
           etroot_aquifer_out <= 0._r8 .and. etroot_surface_out <= 0._r8) THEN
@@ -591,7 +584,6 @@ CONTAINS
             etroot_aquifer_out = 0._r8
             etroot_surface_out = 0._r8
          ENDIF
-      ENDIF
       ENDIF
 
    END SUBROUTINE soil_water_vertical_movement
@@ -853,11 +845,9 @@ CONTAINS
       DO ilev = lb, ub
          sp_dz(ilev) = sp_zi(ilev) - sp_zi(ilev-1)
       ENDDO
-      IF (DEF_USE_TRACER) THEN
 
       mass_budget = 256._r8 * epsilon(1._r8) * &
          max(1._r8, sum(abs(sp_dz * vl_s)))
-      ENDIF
 
       dt_explicit = dt / max_iters_richards
 
@@ -945,7 +935,6 @@ CONTAINS
 
                ! Defined in every build: the convergence test below reads it.
                projection_ok = .true.
-      IF (DEF_USE_TRACER) THEN
                IF ((f2_norm(iter) < tol_richards * dt_this) .and. &
                    (dt_this >= dt_explicit) .and. (iter < max_iters_richards) .and. &
                    is_solvable .and. (.not. wet2dry) .and. &
@@ -957,7 +946,6 @@ CONTAINS
                      wf_m1, vl_m1, wt_m1, mass_budget, projection_ok)
                ENDIF
 
-      ENDIF
                IF ((dt_this < dt_explicit) &
                   .or. (iter >= max_iters_richards) &
                   .or. (.not. is_solvable) &

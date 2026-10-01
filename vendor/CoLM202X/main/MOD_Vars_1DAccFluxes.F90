@@ -2132,11 +2132,7 @@ ENDIF
             CALL acc1d (etrsun_out    , a_etrsun         )
             CALL acc1d (etrsha_out    , a_etrsha         )
 
-      IF (DEF_USE_TRACER) THEN
             IF (.not. DEF_USE_VariablySaturatedFlow) CALL acc1d (qcharge, a_qcharge)
-      ELSE
-            CALL acc1d (qcharge       , a_qcharge        )
-      ENDIF
 
             CALL acc1d (t_grnd        , a_t_grnd         )
             CALL acc1d (tleaf         , a_tleaf          )

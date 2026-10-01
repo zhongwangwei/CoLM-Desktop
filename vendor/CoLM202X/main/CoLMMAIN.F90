@@ -1003,8 +1003,6 @@ SUBROUTINE CoLMMAIN ( &
                         + trc_ldew_snow(itrc_loc, ipatch)
                      trc_ldew_snow(itrc_loc, ipatch) = 0._r8
                   ENDDO
-                  ldew_rain = ldew
-                  ldew_snow = 0._r8
                ELSE
                   DO itrc_loc = 1, ntracers
                      IF (.not. tracer_uses_land_water_transport(itrc_loc)) CYCLE
@@ -1012,10 +1010,21 @@ SUBROUTINE CoLMMAIN ( &
                         + trc_ldew_rain(itrc_loc, ipatch)
                      trc_ldew_rain(itrc_loc, ipatch) = 0._r8
                   ENDDO
-                  ldew_rain = 0._r8
-                  ldew_snow = ldew
                ENDIF
             ENDIF
+      ENDIF
+      ! With DEF_VEG_SNOW off the canopy water is all rain above freezing and all snow
+      ! below (formerly only set in TRACER builds).
+      IF (.not. DEF_VEG_SNOW) THEN
+         IF (tleaf > tfrz) THEN
+            ldew_rain = ldew
+            ldew_snow = 0._r8
+         ELSE
+            ldew_rain = 0._r8
+            ldew_snow = ldew
+         ENDIF
+      ENDIF
+      IF (DEF_USE_TRACER) THEN
             ldew_rain_bef_th = ldew_rain
             ldew_snow_bef_th = ldew_snow
       ENDIF
@@ -1416,8 +1425,9 @@ SUBROUTINE CoLMMAIN ( &
             ENDIF
          ENDIF
 
-         ! Upstream calls this frost-ice relocation only in TRACER builds.
-         IF (DEF_USE_TRACER .and. patchtype == 0) THEN
+         ! New frost that exceeds the top soil pore volume is moved into the snow pack
+         ! (formerly only in TRACER builds; WATER_* defer the overflow for soil patches).
+         IF (patchtype == 0) THEN
             IF (ntracers > 0) THEN
                CALL relocate_soil_frost_ice(maxsnl, porsl(1), snl, &
                  zi_soisno(maxsnl:0), z_soisno(maxsnl+1:1), dz_soisno(maxsnl+1:1), &
@@ -1492,7 +1502,8 @@ SUBROUTINE CoLMMAIN ( &
                endwb = endwb + wetwat
             ENDIF
          ENDIF
-      IF (DEF_USE_TRACER) THEN
+      ! Water balance with the flood exchange as explicit input/output terms (formerly
+      ! only in TRACER builds; the other form folded them into endwb and errorw).
          flood_input_wb = 0._r8
 #if (defined CaMa_Flood) || (defined GridRiverLakeFlow)
          IF (LWINFILT .and. patchtype == 0) flood_input_wb = qinfl_fld
@@ -1508,28 +1519,6 @@ SUBROUTINE CoLMMAIN ( &
          ! for lateral flow, "rsur" is considered in HYDRO/MOD_Hydro_SurfaceFlow.F90
          errorw=(endwb-totwb)-(forc_prc+forc_prl+flood_input_wb-fevpa_wb)*deltim
 #endif
-      ELSE
-#if (defined CaMa_Flood) || (defined GridRiverLakeFlow)
-         IF (LWINFILT) THEN
-            IF (patchtype == 0) THEN
-               endwb=endwb - qinfl_fld*deltim
-            ENDIF
-         ENDIF
-#endif
-
-#ifndef CatchLateralFlow
-         errorw=(endwb-totwb)-(forc_prc+forc_prl-fevpa-rnof)*deltim
-#else
-         ! for lateral flow, "rsur" is considered in HYDRO/MOD_Hydro_SurfaceFlow.F90
-         errorw=(endwb-totwb)-(forc_prc+forc_prl-fevpa)*deltim
-#endif
-#ifdef CaMa_Flood
-         IF (CSETFILE == 'NONE' .and. patchtype == 0) errorw=errorw-fevpg_fld*deltim
-#endif
-#ifdef GridRiverLakeFlow
-         IF (patchtype == 0) errorw=errorw-fevpg_fld*deltim
-#endif
-      ENDIF
 
          IF (.not. DEF_USE_VariablySaturatedFlow) THEN
             IF (patchtype==2) errorw=0.    !wetland

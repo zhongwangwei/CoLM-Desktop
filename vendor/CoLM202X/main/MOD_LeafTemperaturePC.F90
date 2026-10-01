@@ -21,7 +21,6 @@ MODULE MOD_LeafTemperaturePC
 ! /////////////////////////////////////////////////////////////////////
 !
 !-----------------------------------------------------------------------
-   USE MOD_Namelist, only: DEF_USE_TRACER
    USE MOD_Precision
    USE MOD_LeafInterception, only: canopy_storage_capacity_colm2024
    USE MOD_Namelist, only: DEF_USE_CBL_HEIGHT, DEF_USE_PLANTHYDRAULICS, DEF_USE_OZONESTRESS, &
@@ -652,16 +651,13 @@ CONTAINS
          ENDIF
 
          IF (fcover(i)>0 .and. lsai(i)>1.e-6) THEN
-            IF (DEF_USE_TRACER) THEN
+            ! The wetted fraction uses the rain storage capacity of the active
+            ! interception scheme (CoLM2024 under scheme 8, dewmx*(lai+sai) otherwise).
             CALL dewfraction (sigf(i),lai(i),sai(i),dewmx,&
                               ldew(i),ldew_rain(i),ldew_snow(i),fwet(i),fdry(i) &
                               ,colm2024_rain_capacity_for_fwet(dewmx,lai(i),sai(i), &
                               us,vs,htop(i),pftclass(i),.true.,ncd_p(i),ncw_p(i),bcw_p(i)) &
                               )
-            ELSE
-            CALL dewfraction (sigf(i),lai(i),sai(i),dewmx,&
-                              ldew(i),ldew_rain(i),ldew_snow(i),fwet(i),fdry(i))
-            ENDIF
             CALL qsadv(tl(i),psrf,ei(i),deiDT(i),qsatl(i),qsatlDT(i))
          ENDIF
       ENDDO
@@ -1865,7 +1861,7 @@ ENDIF
             fevpl  (i) = fevpl_noadj(i)
             fevpl  (i) = fevpl(i)   +   fevpl_dtl(i)*dtl(it-1,i)
 
-      IF (DEF_USE_TRACER) THEN
+            ! Negative transpiration is dew onto the wet leaf, not reverse sap flow.
             IF (etr(i) < 0._r8) THEN
                evplwet(i) = evplwet(i) + etr(i)
                etr(i) = 0._r8
@@ -1874,7 +1870,6 @@ ENDIF
                IF (DEF_USE_PLANTHYDRAULICS) rootflux(:,i) = 0._r8
             ENDIF
 
-      ENDIF
             elwmax = ldew(i)/deltim
 
             ! 03/02/2018, yuan: convert fc to whole area
@@ -1896,9 +1891,10 @@ ENDIF
 !-----------------------------------------------------------------------
 ! Update dew accumulation (kg/m2)
 !-----------------------------------------------------------------------
-            ! Upstream TRACER builds use the colm2014 update for every scheme (plus the
-            ! VEG_SNOW-off component split below); other builds branch per scheme.
-            IF (DEF_USE_TRACER .or. DEF_Interception_scheme .eq. 1 .or. DEF_Interception_scheme .eq. 8) THEN !colm2014
+            ! The colm2014 update is used for every interception scheme (formerly only in
+            ! TRACER builds; the per-scheme branches of other builds are retired), with the
+            ! rain/snow component split kept consistent when DEF_VEG_SNOW is off.
+            IF (DEF_Interception_scheme < 1 .or. DEF_Interception_scheme > 8) CALL abort
 
                ldew(i) = max(0., ldew(i)-evplwet(i)*deltim)
 
@@ -1932,7 +1928,6 @@ ENDIF
                   ldew(i) = ldew_rain(i) + ldew_snow(i)
                ENDIF
 
-               IF (DEF_USE_TRACER) THEN
                IF (.not. DEF_VEG_SNOW) THEN
                   IF (ldew_rain(i) + ldew_snow(i) > 1.e-10_r8) THEN
                      ldew_rain(i) = ldew(i) * (ldew_rain(i) / (ldew_rain(i) + ldew_snow(i)))
@@ -1945,62 +1940,6 @@ ENDIF
                      ldew_snow(i) = ldew(i)
                   ENDIF
                ENDIF
-               ENDIF
-            ELSEIF (DEF_Interception_scheme .eq. 2) THEN!CLM4.5
-               ldew(i) = max(0., ldew(i)-evplwet(i)*deltim)
-            ELSEIF (DEF_Interception_scheme .eq. 3) THEN !CLM5
-               IF (ldew_rain(i) .gt. evplwet(i)*deltim) THEN
-                  ldew_rain(i) = ldew_rain(i)-evplwet(i)*deltim
-                  ldew_snow(i) = ldew_snow(i)
-                  ldew(i)=ldew_rain(i)+ldew_snow(i)
-               ELSE
-                  ldew_rain(i) = 0.0
-                  ldew_snow(i) = max(0., ldew(i)-evplwet(i)*deltim)
-                  ldew (i)     = ldew_snow(i)
-               ENDIF
-            ELSEIF (DEF_Interception_scheme .eq. 4) THEN !Noah-MP
-               IF (ldew_rain(i) .gt. evplwet(i)*deltim) THEN
-                  ldew_rain(i) = ldew_rain(i)-evplwet(i)*deltim
-                  ldew_snow(i) = ldew_snow(i)
-                  ldew(i)=ldew_rain(i)+ldew_snow(i)
-               ELSE
-                  ldew_rain(i) = 0.0
-                  ldew_snow(i) = max(0., ldew(i)-evplwet(i)*deltim)
-                  ldew (i)     = ldew_snow(i)
-               ENDIF
-            ELSEIF (DEF_Interception_scheme .eq. 5) THEN !MATSIRO
-               IF (ldew_rain(i) .gt. evplwet(i)*deltim) THEN
-                  ldew_rain(i) = ldew_rain(i)-evplwet(i)*deltim
-                  ldew_snow(i) = ldew_snow(i)
-                  ldew(i)=ldew_rain(i)+ldew_snow(i)
-               ELSE
-                  ldew_rain(i) = 0.0
-                  ldew_snow(i) = max(0., ldew(i)-evplwet(i)*deltim)
-                  ldew (i)     = ldew_snow(i)
-               ENDIF
-            ELSEIF (DEF_Interception_scheme .eq. 6) THEN !VIC
-               IF (ldew_rain(i) .gt. evplwet(i)*deltim) THEN
-                  ldew_rain(i) = ldew_rain(i)-evplwet(i)*deltim
-                  ldew_snow(i) = ldew_snow(i)
-                  ldew(i)=ldew_rain(i)+ldew_snow(i)
-               ELSE
-                  ldew_rain(i) = 0.0
-                  ldew_snow(i) = max(0., ldew(i)-evplwet(i)*deltim)
-                  ldew (i)     = ldew_snow(i)
-               ENDIF
-            ELSEIF (DEF_Interception_scheme .eq. 7) THEN !JULES
-               IF (ldew_rain(i) .gt. evplwet(i)*deltim) THEN
-                  ldew_rain(i) = ldew_rain(i)-evplwet(i)*deltim
-                  ldew_snow(i) = ldew_snow(i)
-                  ldew(i)=ldew_rain(i)+ldew_snow(i)
-               ELSE
-                  ldew_rain(i) = 0.0
-                  ldew_snow(i) = max(0., ldew(i)-evplwet(i)*deltim)
-                  ldew (i)     = ldew_snow(i)
-               ENDIF
-            ELSE
-               CALL abort
-            ENDIF
 
             IF ( DEF_VEG_SNOW ) THEN
                ! update fwet_snow
@@ -2175,18 +2114,12 @@ ENDIF
       dewmxi = 1.0/dewmx
       ! 06/2018, yuan: remove sigf, to compatible with PFT
       vegt   =  lsai
-      IF (DEF_USE_TRACER) THEN
       satcap_rain = dewmx * vegt
       IF (present(satcap_rain_override)) satcap_rain = max(0._r8, satcap_rain_override)
-      ENDIF
 
       fwet = 0
       IF (ldew > 0.) THEN
-      IF (DEF_USE_TRACER) THEN
          fwet = (ldew/max(satcap_rain,1.e-10_r8))**.666666666666
-      ELSE
-         fwet = ((dewmxi/vegt)*ldew)**.666666666666
-      ENDIF
          ! Check for maximum limit of fwet
          fwet = min(fwet,1.0)
       ENDIF
@@ -2197,11 +2130,7 @@ ENDIF
 
          fwet_rain = 0
          IF(ldew_rain > 0.) THEN
-      IF (DEF_USE_TRACER) THEN
             fwet_rain = (ldew_rain/max(satcap_rain,1.e-10_r8))**.666666666666
-      ELSE
-            fwet_rain = ((dewmxi/vegt)*ldew_rain)**.666666666666
-      ENDIF
             ! Check for maximum limit of fwet_rain
             fwet_rain = min(fwet_rain,1.0)
          ENDIF

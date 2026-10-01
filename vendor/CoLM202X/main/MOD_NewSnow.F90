@@ -29,7 +29,7 @@ CONTAINS
 !=======================================================================
 
    USE MOD_Precision
-   USE MOD_Namelist, only: DEF_USE_VariablySaturatedFlow, DEF_USE_TRACER
+   USE MOD_Namelist, only: DEF_USE_VariablySaturatedFlow
    USE MOD_Const_Physical, only: tfrz, cpliq, cpice
 
    IMPLICIT NONE
@@ -75,8 +75,10 @@ CONTAINS
       snowdp = snowdp + dz_snowf*deltim
       scv = scv + pg_snow*deltim              ! snow water equivalent (mm)
 
-      ! snowfall on warmer wetland; upstream TRACER builds also require no snow layer
-      IF(patchtype==2 .and. t_grnd>tfrz .and. (snl==0 .or. .not. DEF_USE_TRACER))THEN
+      ! snowfall on warmer wetland melts into the wetland water, but only while there is
+      ! no snow layer: with layers, scv is the layers' sum and clearing it alone would
+      ! break the snow mass (formerly enforced only in TRACER builds).
+      IF(patchtype==2 .and. t_grnd>tfrz .and. snl==0)THEN
          IF (present(wetwat) .and. DEF_USE_VariablySaturatedFlow) THEN
             wetwat = wetwat + scv
          ENDIF

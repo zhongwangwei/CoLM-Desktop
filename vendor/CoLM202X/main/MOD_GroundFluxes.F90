@@ -3,7 +3,6 @@
 MODULE MOD_GroundFluxes
 
 !-----------------------------------------------------------------------
-   USE MOD_Namelist, only: DEF_USE_TRACER
    USE MOD_Precision
    IMPLICIT NONE
    SAVE
@@ -226,9 +225,7 @@ CONTAINS
       ram  = 1./(ustar*ustar/um)
       rah  = 1./(vonkar/fh*ustar)
       raw  = 1./(vonkar/fq*ustar)
-      IF (DEF_USE_TRACER) THEN
       IF (present(raw_out)) raw_out = raw
-      ENDIF
 
       raih = rhoair*cpair/rah
 

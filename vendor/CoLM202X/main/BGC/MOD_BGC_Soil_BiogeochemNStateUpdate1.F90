@@ -17,7 +17,6 @@ MODULE MOD_BGC_Soil_BiogeochemNStateUpdate1
 ! Xingjie Lu, 2022, 1) modify original CLM5 to be compatible with CoLM code structure.
 !                   2) Record accumulated nitrogen transfer network for semi-analytic spinup
 
-   USE MOD_Namelist, only: DEF_USE_TRACER
    USE MOD_Precision
    USE MOD_Namelist, only: DEF_USE_SASU, DEF_USE_DiagMatrix, DEF_USE_NITRIF, DEF_USE_CNSOYFIXN
    USE MOD_BGC_Vars_TimeInvariants, only: &
@@ -107,92 +106,13 @@ CONTAINS
       ENDIF
 #endif
 
-      IF (DEF_USE_TRACER) THEN
       CALL SoilBiogeochemNDecompStateUpdate(i, deltim, nl_soil, ndecomp_transitions)
-      ELSE
-    ! decomposition fluxes
-      DO k = 1, ndecomp_transitions
-         DO j = 1, nl_soil
-            decomp_npools_sourcesink(j,donor_pool(k),i) = &
-                      decomp_npools_sourcesink(j,donor_pool(k),i) - &
-                      decomp_ntransfer_vr(j,k,i) * deltim
-         ENDDO
-      ENDDO
-
-
-      DO k = 1, ndecomp_transitions
-         IF ( receiver_pool(k) /= 0 ) THEN  ! skip terminal transitions
-            DO j = 1, nl_soil
-               decomp_npools_sourcesink(j,receiver_pool(k),i) = &
-                      decomp_npools_sourcesink(j,receiver_pool(k),i) + &
-                         (decomp_ntransfer_vr(j,k,i) + &
-                          decomp_sminn_flux_vr(j,k,i)) * deltim
-            ENDDO
-         ELSE  ! terminal transitions
-            DO j = 1, nl_soil
-               decomp_npools_sourcesink(j,donor_pool(k),i) = &
-                      decomp_npools_sourcesink(j,donor_pool(k),i) - &
-                         decomp_sminn_flux_vr(j,k,i) * deltim
-            ENDDO
-         ENDIF
-      ENDDO
-
-      IF(DEF_USE_SASU .or. DEF_USE_DiagMatrix)THEN
-         DO j = 1, nl_soil
-            AKX_met_to_soil1_n_vr_acc  (j,i) = AKX_met_to_soil1_n_vr_acc  (j,i) + (decomp_ntransfer_vr(j, 1,i) + decomp_sminn_flux_vr(j, 1,i)) * deltim
-            AKX_cel_to_soil1_n_vr_acc  (j,i) = AKX_cel_to_soil1_n_vr_acc  (j,i) + (decomp_ntransfer_vr(j, 2,i) + decomp_sminn_flux_vr(j, 2,i)) * deltim
-            AKX_lig_to_soil2_n_vr_acc  (j,i) = AKX_lig_to_soil2_n_vr_acc  (j,i) + (decomp_ntransfer_vr(j, 3,i) + decomp_sminn_flux_vr(j, 3,i)) * deltim
-            AKX_soil1_to_soil2_n_vr_acc(j,i) = AKX_soil1_to_soil2_n_vr_acc(j,i) + (decomp_ntransfer_vr(j, 4,i) + decomp_sminn_flux_vr(j, 4,i)) * deltim
-            AKX_cwd_to_cel_n_vr_acc    (j,i) = AKX_cwd_to_cel_n_vr_acc    (j,i) + (decomp_ntransfer_vr(j, 5,i) + decomp_sminn_flux_vr(j, 5,i)) * deltim
-            AKX_cwd_to_lig_n_vr_acc    (j,i) = AKX_cwd_to_lig_n_vr_acc    (j,i) + (decomp_ntransfer_vr(j, 6,i) + decomp_sminn_flux_vr(j, 6,i)) * deltim
-            AKX_soil1_to_soil3_n_vr_acc(j,i) = AKX_soil1_to_soil3_n_vr_acc(j,i) + (decomp_ntransfer_vr(j, 7,i) + decomp_sminn_flux_vr(j, 7,i)) * deltim
-            AKX_soil2_to_soil1_n_vr_acc(j,i) = AKX_soil2_to_soil1_n_vr_acc(j,i) + (decomp_ntransfer_vr(j, 8,i) + decomp_sminn_flux_vr(j, 8,i)) * deltim
-            AKX_soil2_to_soil3_n_vr_acc(j,i) = AKX_soil2_to_soil3_n_vr_acc(j,i) + (decomp_ntransfer_vr(j, 9,i) + decomp_sminn_flux_vr(j, 9,i)) * deltim
-            AKX_soil3_to_soil1_n_vr_acc(j,i) = AKX_soil3_to_soil1_n_vr_acc(j,i) + (decomp_ntransfer_vr(j,10,i) + decomp_sminn_flux_vr(j,10,i)) * deltim
-
-            AKX_met_exit_n_vr_acc      (j,i) = AKX_met_exit_n_vr_acc      (j,i) + decomp_ntransfer_vr(j, 1,i) * deltim
-            AKX_cel_exit_n_vr_acc      (j,i) = AKX_cel_exit_n_vr_acc      (j,i) + decomp_ntransfer_vr(j, 2,i) * deltim
-            AKX_lig_exit_n_vr_acc      (j,i) = AKX_lig_exit_n_vr_acc      (j,i) + decomp_ntransfer_vr(j, 3,i) * deltim
-            AKX_soil1_exit_n_vr_acc    (j,i) = AKX_soil1_exit_n_vr_acc    (j,i) + decomp_ntransfer_vr(j, 4,i) * deltim
-            AKX_cwd_exit_n_vr_acc      (j,i) = AKX_cwd_exit_n_vr_acc      (j,i) + decomp_ntransfer_vr(j, 5,i) * deltim
-            AKX_cwd_exit_n_vr_acc      (j,i) = AKX_cwd_exit_n_vr_acc      (j,i) + decomp_ntransfer_vr(j, 6,i) * deltim
-            AKX_soil1_exit_n_vr_acc    (j,i) = AKX_soil1_exit_n_vr_acc    (j,i) + decomp_ntransfer_vr(j, 7,i) * deltim
-            AKX_soil2_exit_n_vr_acc    (j,i) = AKX_soil2_exit_n_vr_acc    (j,i) + decomp_ntransfer_vr(j, 8,i) * deltim
-            AKX_soil2_exit_n_vr_acc    (j,i) = AKX_soil2_exit_n_vr_acc    (j,i) + decomp_ntransfer_vr(j, 9,i) * deltim
-            AKX_soil3_exit_n_vr_acc    (j,i) = AKX_soil3_exit_n_vr_acc    (j,i) + decomp_ntransfer_vr(j,10,i) * deltim
-         ENDDO
-      ENDIF
-      ENDIF
 
       IF(.not. DEF_USE_NITRIF)THEN
 
            !--------------------------------------------------------
            !-------------    NITRIF_DENITRIF OFF -------------------
            !--------------------------------------------------------
-      IF (DEF_USE_TRACER) THEN
-      ELSE
-
-           ! immobilization/mineralization in litter-to-SOM and SOM-to-SOM fluxes and denitrification fluxes
-         DO k = 1, ndecomp_transitions
-            IF ( receiver_pool(k) /= 0 ) THEN  ! skip terminal transitions
-               DO j = 1, nl_soil
-                  sminn_vr(j,i)  = sminn_vr(j,i) - &
-                                  (sminn_to_denit_decomp_vr(j,k,i) + &
-                                  decomp_sminn_flux_vr(j,k,i))* deltim
-               ENDDO
-            ELSE
-               DO j = 1, nl_soil
-                  sminn_vr(j,i)  = sminn_vr(j,i) - &
-                                  sminn_to_denit_decomp_vr(j,k,i)* deltim
-
-                  sminn_vr(j,i)  = sminn_vr(j,i) + &
-                                  decomp_sminn_flux_vr(j,k,i)* deltim
-
-               ENDDO
-            ENDIF
-         ENDDO
-
-      ENDIF
 
          DO j = 1, nl_soil
             ! "bulk denitrification"
@@ -211,17 +131,6 @@ CONTAINS
            !--------------------------------------------------------
 
          DO j = 1, nl_soil
-      IF (DEF_USE_TRACER) THEN
-      ELSE
-
-            ! mineralization fluxes (divert a fraction of this stream to nitrification flux, add the rest to NH4 pool)
-            smin_nh4_vr(j,i) = smin_nh4_vr(j,i) + gross_nmin_vr(j,i)*deltim
-
-            ! immobilization fluxes
-            smin_nh4_vr(j,i) = smin_nh4_vr(j,i) - actual_immob_nh4_vr(j,i)*deltim
-
-            smin_no3_vr(j,i) = smin_no3_vr(j,i) - actual_immob_no3_vr(j,i)*deltim
-      ENDIF
 
             ! plant uptake fluxes
             smin_nh4_vr(j,i) = smin_nh4_vr(j,i) - smin_nh4_to_plant_vr(j,i)*deltim

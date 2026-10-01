@@ -131,7 +131,7 @@ CONTAINS
    USE MOD_Namelist, only: DEF_USE_PLANTHYDRAULICS, DEF_RSS_SCHEME, DEF_SPLIT_SOILSNOW, &
                            DEF_USE_LCT,DEF_USE_PFT,DEF_USE_PC,DEF_PC_CROP_SPLIT, &
                            DEF_USE_Campbell_SOIL_MODEL
-   USE MOD_Namelist, only: DEF_VEG_SNOW, DEF_USE_TRACER
+   USE MOD_Namelist, only: DEF_VEG_SNOW
 #if (defined CaMa_Flood) || (defined GridRiverLakeFlow)
    USE MOD_CaMa_colmCaMa, only: get_fldevp
 #ifdef CaMa_Flood
@@ -518,7 +518,6 @@ CONTAINS
       lfevpa = 0.;  fsenl  = 0.
       fevpl  = 0.;  etr    = 0.
       fseng  = 0.;  fevpg  = 0.
-      IF (DEF_USE_TRACER) THEN
 #if (defined CaMa_Flood) || (defined GridRiverLakeFlow)
       fevpg_fld = 0._r8
       flood_evap_active = .FALSE.
@@ -529,12 +528,6 @@ CONTAINS
       fevpg_land = 0._r8; fevpg_soil_land = 0._r8; fevpg_snow_land = 0._r8
       cgrnd_land = 0._r8; cgrndl_land = 0._r8; cgrnds_land = 0._r8
 #endif
-      ELSE
-#if (defined CaMa_Flood) || (defined GridRiverLakeFlow)
-      fevpg_fld = 0._r8
-      flood_evap_active = .FALSE.
-#endif
-      ENDIF
 
       cgrnds = 0.;  cgrndl = 0.
       cgrnd  = 0.;  tref   = 0.
@@ -834,8 +827,8 @@ IF (patchtype==0 .and. (DEF_USE_PFT .or. DEF_USE_PC)) THEN
       canopy_smelt_mass_p_local(:) = 0._r8
       canopy_frzc_mass_p_local (:) = 0._r8
       raw_trc_p(:) = 0._r8
-      ! Upstream runs this split only in TRACER builds; kept behind the runtime switch.
-      IF (DEF_USE_TRACER) THEN
+      ! Keep the per-PFT rain/snow split of canopy water consistent when DEF_VEG_SNOW
+      ! is off (formerly only in TRACER builds).
       IF (.not. DEF_VEG_SNOW) THEN
          IF (tleaf > tfrz) THEN
             ldew_rain_p(ps:pe) = ldew_p(ps:pe)
@@ -844,7 +837,6 @@ IF (patchtype==0 .and. (DEF_USE_PFT .or. DEF_USE_PC)) THEN
             ldew_rain_p(ps:pe) = 0._r8
             ldew_snow_p(ps:pe) = ldew_p(ps:pe)
          ENDIF
-      ENDIF
       ENDIF
 
       sabv_p(ps:pe) = sabvsun_p(ps:pe) + sabvsha_p(ps:pe)

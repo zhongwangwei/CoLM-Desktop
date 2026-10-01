@@ -3,7 +3,6 @@
 MODULE MOD_SoilSnowHydrology
 
 !-----------------------------------------------------------------------
-   USE MOD_Namelist, only: DEF_USE_TRACER
    USE MOD_Precision
    USE MOD_SPMD_Task, only: CoLM_stop
    USE MOD_Namelist, only: DEF_USE_PLANTHYDRAULICS, DEF_USE_SNICAR,        &
@@ -290,20 +289,14 @@ ELSE
       ENDIF
 ENDIF
 
-      IF (DEF_USE_TRACER) THEN
       IF (patchtype <= 1) THEN
          gwat = gwat + wdsrf/deltim
          wdsrf = 0._r8
       ENDIF
 
-      ENDIF
 #ifdef CROP
       IF(DEF_USE_IRRIGATION)THEN
          gwat = gwat + qflx_irrig_drip + qflx_irrig_flood + qflx_irrig_paddy
-      IF (DEF_USE_TRACER) THEN
-      ELSE
-         gwat = gwat + wdsrf/deltim
-      ENDIF
       ENDIF
 #endif
 
@@ -488,31 +481,22 @@ IF(patchtype<=1)THEN   ! soil ground only
       ! total runoff (mm/s)
       rnof = rsubst + rsur
       ! Renew the ice and liquid mass due to condensation.
-      ! Upstream TRACER builds cap dew by the top-layer pore capacity and move
-      ! frost-displaced liquid and dew overflow to the surface; other builds add
-      ! dew straight into the top layer.
+      ! Dew is capped by the top-layer pore capacity, and frost-displaced liquid and
+      ! dew overflow move to the surface (formerly only in TRACER builds; others added
+      ! dew straight into the top layer).
       dew_input = 0._r8
       ice_before_frost = wice_soisno(1)
 IF ((.not.DEF_SPLIT_SOILSNOW) .or. (patchtype==1 .and. DEF_URBAN_RUN)) THEN
       IF(lb >= 1)THEN
          ! make consistent with how evap_grnd removed in infiltration
-         IF (DEF_USE_TRACER) THEN
             dew_input = max(qsdew*deltim, 0._r8)
-         ELSE
-            wliq_soisno(1) = max(0., wliq_soisno(1) + qsdew * deltim)
-         ENDIF
          wice_soisno(1) = max(0., wice_soisno(1) + (qfros-qsubl) * deltim)
       ENDIF
 ELSE
-      IF (DEF_USE_TRACER) THEN
          dew_input = max(qsdew_soil*deltim, 0._r8)
-      ELSE
-         wliq_soisno(1) = max(0., wliq_soisno(1) + qsdew_soil * deltim)
-      ENDIF
       wice_soisno(1) = max(0., wice_soisno(1) + (qfros_soil-qsubl_soil) * deltim)
 ENDIF
 
-      IF (DEF_USE_TRACER) THEN
       IF (patchtype == 0 .and. wice_soisno(1) > ice_before_frost + 1.e-12_r8 .and. &
           wice_soisno(1)/denice > porsl(1)*dz_soisno(1) + 1.e-10_r8) THEN
          IF (.not. present(defer_surface_ice_overflow)) THEN
@@ -534,7 +518,6 @@ ENDIF
          rsur = rsur + (wdsrf-pondmx)/deltim
          rnof = rnof + (wdsrf-pondmx)/deltim
          wdsrf = pondmx
-      ENDIF
       ENDIF
 
       err_solver = (sum(wliq_soisno(1:))+sum(wice_soisno(1:))+wa+wdsrf) - w_sum &
@@ -973,9 +956,7 @@ IF((patchtype<=1) .or. is_dry_lake &
             vol_liq(j) = 0.
          ENDIF
       ENDDO
-      IF (DEF_USE_TRACER) THEN
       IF (present(permeable_soil_out)) permeable_soil_out = is_permeable
-      ENDIF
 
       ! surface runoff including water table and surface saturated area
 
@@ -1067,7 +1048,6 @@ IF((patchtype<=1) .or. is_dry_lake &
 
       ! infiltration into surface soil layer
       qgtop = gwat - rsur
-      IF (DEF_USE_TRACER) THEN
 
       IF (((patchtype == 2 .AND. DEF_USE_Dynamic_Wetland) .OR. &
            (patchtype == 4 .AND. is_dry_lake)) .AND. &
@@ -1080,7 +1060,6 @@ IF((patchtype<=1) .or. is_dry_lake &
               qgtop > 0._r8 .AND. qgtop*deltim < richards_water_tolerance .AND. wdsrf > 0._r8) THEN
          wdsrf = wdsrf + qgtop*deltim
          qgtop = 0._r8
-      ENDIF
       ENDIF
 
 #if (defined CaMa_Flood) || (defined GridRiverLakeFlow)
@@ -1195,7 +1174,6 @@ IF((patchtype<=1) .or. is_dry_lake &
       wdsrf = max(0., wdsrf)
 
       IF ((.not. is_permeable(1)) .and. (qgtop < 0.)) THEN
-      IF (DEF_USE_TRACER) THEN
          qgtop_deficit = -qgtop * deltim
 
          imperv_surface_loss = min(max(wdsrf, 0._r8), qgtop_deficit)
@@ -1224,27 +1202,12 @@ IF((patchtype<=1) .or. is_dry_lake &
             imperv_evap_soil = imperv_evap_soil + imperv_liq_loss
             imperv_subl_soil = imperv_subl_soil + imperv_ice_loss
          ENDIF
-      ELSE
-         ! Upstream restored the historical liquid-only update for non-TRACER
-         ! builds; TRACER builds keep the ice/liquid partition above.
-         IF (wdsrf > 0) THEN
-            wdsrf = wdsrf + qgtop * deltim
-            IF (wdsrf < 0) THEN
-               wliq_soisno(1) = max(0., wliq_soisno(1) + wdsrf)
-               wdsrf = 0
-            ENDIF
-         ELSE
-            wliq_soisno(1) = max(0., wliq_soisno(1) + qgtop * deltim)
-         ENDIF
-      ENDIF
 
          qgtop = 0.
 
       ENDIF
 
-      IF (DEF_USE_TRACER) THEN
       qgtop_out = qgtop
-      ENDIF
       CALL soil_water_vertical_movement ( &
          nl_soil,                 deltim,                   sp_zc(1:nl_soil),    sp_zi(0:nl_soil), &
          is_permeable(1:nl_soil), eff_porosity(1:nl_soil),  theta_r(1:nl_soil),  psi0(1:nl_soil),  &
@@ -1283,24 +1246,15 @@ IF((patchtype<=1) .or. is_dry_lake &
 IF ((.not.DEF_SPLIT_SOILSNOW) .or. (patchtype==1 .and. DEF_URBAN_RUN)) THEN
       IF(lb >= 1)THEN
          ! make consistent with how evap_grnd removed in infiltration
-      IF (DEF_USE_TRACER) THEN
          dew_input = max(qsdew*deltim, 0._r8)
-      ELSE
-         wliq_soisno(1) = max(0., wliq_soisno(1) + qsdew * deltim)
-      ENDIF
          wice_soisno(1) = max(0., wice_soisno(1) + (qfros-qsubl) * deltim)
       ENDIF
 ELSE
-      IF (DEF_USE_TRACER) THEN
          dew_input = max(qsdew_soil*deltim, 0._r8)
-      ELSE
-         wliq_soisno(1) = max(0., wliq_soisno(1) + qsdew_soil * deltim)
-      ENDIF
       wice_soisno(1) = max(0., wice_soisno(1) + (qfros_soil-qsubl_soil) * deltim)
 ENDIF
-      ! Upstream TRACER builds cap dew by the top-layer pore capacity and move
-      ! frost-displaced liquid and dew overflow to the surface.
-      IF (DEF_USE_TRACER) THEN
+      ! Dew is capped by the top-layer pore capacity, and frost-displaced liquid and
+      ! dew overflow move to the surface (formerly only in TRACER builds).
       IF (patchtype == 0 .and. wice_soisno(1) > ice_before_frost + 1.e-12_r8 .and. &
           wice_soisno(1)/denice > porsl(1)*dz_soisno(1) + 1.e-10_r8) THEN
          IF (.not. present(defer_surface_ice_overflow)) THEN
@@ -1323,7 +1277,6 @@ ENDIF
          wliq_soisno(1) = wliq_soisno(1) + dew_retained
          wdsrf = wdsrf + dew_input - dew_retained
          dew_overflow = dew_input - dew_retained
-      ENDIF
       ENDIF
 
       ! water imbalance mainly due to insufficient liquid water for evapotranspiration
@@ -1398,10 +1351,8 @@ ENDIF
 #endif
 #endif
 
-      IF (DEF_USE_TRACER) THEN
       IF (frost_excess+dew_input-dew_retained > 0._r8) &
          late_runoff = max(rsur-rsur_before_late,0._r8)*deltim
-      ENDIF
       DO j = 1, nl_soil
          IF(t_soisno(j) <= tfrz) THEN
             ! consider impedance factor
@@ -1474,7 +1425,6 @@ ELSE
 
          wetwat = wetwat + sum(wresi)
 
-      IF (DEF_USE_TRACER) THEN
          DO j = 1, nl_soil
             IF (t_soisno(j) > tfrz) THEN
                smp(j) = psi0(j)
@@ -1489,7 +1439,6 @@ ELSE
             ENDIF
          ENDDO
 
-      ENDIF
          IF (wetwat > wetwatmax) THEN
             wdsrf  = wetwat - wetwatmax
             wetwat = wetwatmax
