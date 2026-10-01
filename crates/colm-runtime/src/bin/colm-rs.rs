@@ -73,6 +73,7 @@ fn run() -> Result<()> {
         arguments.case_directory.display()
     );
     let name = colm_case::case_name(&case_nml)?;
+    reject_history_selection(&read_document(&case_nml)?)?;
     if colm_case::is_spatial_case(&case_nml)? {
         return run_spatial(&arguments, &layout, &name, &case_nml);
     }
@@ -2390,6 +2391,30 @@ fn read_document(path: &Path) -> Result<Document> {
 }
 
 /// 取一个逻辑字段：算例里写了就用算例的，否则用 schema 的声明默认值。
+/// `DEF_hist_vars` 的逐变量开关尚未移植：Rust 的 history 按默认（全开）写。上游
+/// `sync_hist_vars(set_defaults=.true.)` 先把所有开关置成 `DEF_HIST_vars_out_default`，再在
+/// `DEF_HIST_vars_namelist` 文件存在时读 `&nl_colm_history` 覆盖（文件不存在只打印一行、
+/// 保留默认，`MOD_Namelist.F90:2788-2805`）。两者任一会改变写出的变量集，就拒绝，
+/// 免得悄悄写出与 Fortran 不同的文件。
+fn reject_history_selection(document: &Document) -> Result<()> {
+    ensure!(
+        logical_field(document, "DEF_HIST_vars_out_default")?,
+        "DEF_HIST_vars_out_default = .false. (per-variable history selection) is not ported yet; \
+         run this case with --engine fortran"
+    );
+    let selection = string_field(document, "DEF_HIST_vars_namelist")?;
+    let path = std::path::Path::new(selection.trim());
+    // 相对路径按 Fortran 进程的工作目录解析，这里判断不了，一并拒绝（`null` 是默认值）。
+    let inert = selection.trim() == "null" || (path.is_absolute() && !path.is_file());
+    ensure!(
+        inert,
+        "DEF_HIST_vars_namelist ({}) selects history variables, which is not ported yet; run this \
+         case with --engine fortran",
+        selection.trim()
+    );
+    Ok(())
+}
+
 fn logical_field(document: &Document, field: &str) -> Result<bool> {
     if let Some(value) = document.get(field) {
         return match value {

@@ -27396,3 +27396,16 @@ Rust 在 `route_system` 的子步长循环与 `bifurcation_substep` 里各加一
 宿主不变：`gl gc lc dc3 dh5 dl3 sl3` 重跑全部 `ok rst: ok`；`cargo test`（colm-core 462、colm-runtime 131）与 `clippy` 无告警。
 
 **剩余**：城市（`CoLMMAIN_Urban` 另一套示踪物调用）、PFT/PC、`DEF_hist_vars` 开关、空间网格示踪物 history（等 T3）；示踪物强迫文件归 T2。
+
+## 第 483 轮：`DEF_hist_vars` 逐变量开关 —— 先拒绝，不再静默全写
+
+排查示踪物 history 的 `DEF_hist_vars` 开关时发现：Rust 运行时从未读 `DEF_HIST_vars_namelist`/`DEF_HIST_vars_out_default`（只有 CLI 的 study 模块提到），主 history、BGC history、示踪物 history 都按默认全开写。上游 `sync_hist_vars(set_defaults=.true.)` 先把全部开关置成 `DEF_HIST_vars_out_default`，文件存在时再读 `&nl_colm_history` 覆盖；文件不存在只打一行提示、保留默认（`MOD_Namelist.F90:2788-2805`）。于是用户给了变量表时，Rust 写出的文件与 Fortran 不同且不报错。
+
+先在 `colm-rs` 入口（单点与空间共用）拒绝：`out_default = .false.`，或 `DEF_HIST_vars_namelist` 既不是 `null`、也不是"不存在的绝对路径"（相对路径按 Fortran 进程的工作目录解析，Rust 这边判断不了，一并拒绝）。实测：
+
+```
+colm-rs: DEF_HIST_vars_namelist (…/hv/hist.nml) selects history variables, which is not ported yet; run this case with --engine fortran
+colm-rs: DEF_HIST_vars_out_default = .false. (per-variable history selection) is not ported yet; run this case with --engine fortran
+```
+
+回归算例里没有设这两项的（`grep` 计数 0），`tsa`、`bc` 重跑 `ok rst: ok`。真正支持要改主/BGC/示踪物 history 的所有写出点，另出方案。示踪物表里每项的开关键（`hist_keys`）已按 `MOD_Tracer_Hist.F90` 填好，接上时直接用 `enabled()`。
