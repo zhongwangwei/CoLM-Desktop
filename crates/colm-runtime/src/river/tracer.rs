@@ -21,6 +21,7 @@
 use anyhow::{bail, ensure, Result};
 use colm_core::tracer::{TracerSet, TRC_TINY};
 
+use super::bifurcation::{accumulate, Bifurcation};
 use super::levee::Levee;
 use super::network::RiverNetwork;
 
@@ -149,6 +150,8 @@ pub struct SystemTape {
     pub initial: Vec<CellWater>,
     /// 每个子步：`(dt, 逐单元流域)`。
     pub substeps: Vec<(f64, Vec<CellSubstep>)>,
+    /// 开分汊时每个子步的 `bif_hflux_lev`（`[p*levels + l]`），与 `substeps` 一一对应；不开为空。
+    pub bif_hflux_lev: Vec<Vec<f64>>,
 }
 
 impl RiverTracers {
@@ -402,11 +405,13 @@ fn push_next(net: &RiverNetwork, values: &[f64], fill: f64, out: &mut [f64]) {
 }
 
 /// 一个全局子步里每个单元流域看到的水（走完的河系停在最后状态、`dt = 0`）。
-struct GlobalSubstep {
+struct GlobalSubstep<'a> {
     dt: Vec<f64>,
     active: Vec<bool>,
     hflux: Vec<f64>,
     start: Vec<CellWater>,
+    /// 分汊路径与本子步的 `bif_hflux_lev`（`do_bif = .true.`）。
+    bif: Option<(&'a Bifurcation, &'a [f64])>,
 }
 
 impl RiverTracers {
@@ -416,6 +421,7 @@ impl RiverTracers {
         &mut self,
         net: &RiverNetwork,
         levee: Option<&Levee>,
+        bif: Option<&Bifurcation>,
         tapes: &[SystemTape],
     ) -> Result<()> {
         let n = net.len();
@@ -443,11 +449,23 @@ impl RiverTracers {
             }
         }
         for s in 0..rounds {
+            // 开分汊时全网一个河系（只有一盘磁带），路径通量取它这一子步的记录。
+            let bif_step = match bif {
+                Some(bif) => {
+                    let layers = tapes
+                        .first()
+                        .and_then(|tape| tape.bif_hflux_lev.get(s))
+                        .ok_or_else(|| anyhow::anyhow!("the bifurcation tape misses substep {s}"))?;
+                    Some((bif, layers.as_slice()))
+                }
+                None => None,
+            };
             let mut global = GlobalSubstep {
                 dt: vec![0.0; n],
                 active: vec![false; n],
                 hflux: hflux_stale.clone(),
                 start: current.clone(),
+                bif: bif_step,
             };
             for tape in tapes {
                 let Some((dt, cells)) = tape.substeps.get(s) else {
@@ -489,19 +507,43 @@ impl RiverTracers {
         Ok(())
     }
 
-    /// `tracer_substep`（不开分汊）。
-    fn substep(&mut self, net: &RiverNetwork, levee: Option<&Levee>, step: &GlobalSubstep) -> Result<()> {
+    /// `tracer_substep`（`do_bif` 由 `step.bif` 决定）。
+    fn substep(&mut self, net: &RiverNetwork, levee: Option<&Levee>, step: &GlobalSubstep<'_>) -> Result<()> {
         let n = net.len();
         let limiter_max_iter = 2 * n + 1;
         let mut conc_flux = vec![0.0; n];
+        let mut prot_conc_flux = vec![0.0; n];
         let mut conc_next = vec![0.0; n];
         let mut trc_flux = vec![0.0; n];
         let mut flux_ups = vec![0.0; n];
         let mut out_mass = vec![0.0; n];
+        let mut out_mass_lev = vec![0.0; n];
         let mut rate_cell = vec![0.0; n];
+        let mut rate_cell_lev = vec![1.0; n];
         let mut rate_next = vec![0.0; n];
         let mut in_mass = vec![0.0; n];
+        let mut in_mass_lev = vec![0.0; n];
         let mut inp_step = vec![0.0; n];
+        let mut bif_net = vec![0.0; n];
+        let mut bif_lev_net = vec![0.0; n];
+        let (paths, levels) = step.bif.map_or((0, 0), |(bif, _)| (bif.paths(), bif.levels));
+        let mut pth_levtrc = vec![0.0; paths * levels];
+        // `tracer_bif_path_levee_sides`：下游不在网络里时 `has_levee_dn_pth` 的填充值是 0。
+        let sides = |i_up: usize, i_dn: Option<usize>| -> (bool, bool) {
+            match levee {
+                Some(levee) => (levee.has[i_up], i_dn.is_some_and(|d| levee.has[d])),
+                None => (false, false),
+            }
+        };
+        // `push_bif_influx`（`mode = 'sum'`）：把路径值推给它的下游单元流域。
+        let push_influx = |bif: &Bifurcation, values: &[f64], out: &mut [f64]| {
+            for (slot, paths_in) in out.iter_mut().zip(&bif.incoming) {
+                *slot = 0.0;
+                for &p in paths_in {
+                    accumulate(slot, values[p]);
+                }
+            }
+        };
         for itrc in self.transport() {
             let tracer = &self.set.tracers[itrc];
             let mut r_fill = tracer.init_water_ratio();
@@ -539,7 +581,9 @@ impl RiverTracers {
                 let release = self.inp_buf[itrc][i].max(0.0);
                 self.inp_buf[itrc][i] -= release;
                 self.mass[itrc][i] += release;
-                if let (Some((solid, _)), true) =
+                // 有堤单元流域的堤内水（子步首）。
+                let leveed = levee.filter(|levee| levee.has[i]).map(|_| step.start[i].levsto.unwrap_or(0.0));
+                if let (Some((solid, levsto_solid)), true) =
                     (self.solid.as_mut(), tracer.has_dissolved_limit())
                 {
                     tracer.equilibrate_dissolved(
@@ -547,6 +591,13 @@ impl RiverTracers {
                         &mut self.mass[itrc][i],
                         &mut solid[itrc][i],
                     );
+                    if let Some(levsto) = leveed {
+                        tracer.equilibrate_dissolved(
+                            levsto,
+                            &mut self.levsto[itrc][i],
+                            &mut levsto_solid[itrc][i],
+                        );
+                    }
                 }
                 self.conc[itrc][i] = if volwater <= V_DRY_OFF {
                     0.0
@@ -563,6 +614,20 @@ impl RiverTracers {
                         self.mass[itrc][i] / volflux
                     }
                 };
+                prot_conc_flux[i] = conc_flux[i];
+                if let Some(levsto) = leveed {
+                    ensure!(
+                        levsto.is_finite() && levsto >= 0.0,
+                        "invalid protected water storage before tracer transport"
+                    );
+                    prot_conc_flux[i] = if levsto > 0.0 {
+                        let conc = self.levsto[itrc][i] / levsto;
+                        ensure!(conc.is_finite(), "non-finite protected tracer concentration");
+                        conc
+                    } else {
+                        0.0
+                    };
+                }
             }
             // 3–5. 下游浓度、迎风通量、上游汇总。
             push_next(net, &conc_flux, r_fill, &mut conc_next);
@@ -575,7 +640,52 @@ impl RiverTracers {
                     conc_next[i] * step.hflux[i]
                 };
             }
-            // 7a. 每个供体的总出量（顺流出口 + 下游对上游的逆流）。
+            // 6. 分汊路径的逐层示踪物通量（上游一侧的符号），并入两侧的净通量。
+            bif_net.fill(0.0);
+            bif_lev_net.fill(0.0);
+            if let Some((bif, layers)) = step.bif {
+                pth_levtrc.fill(0.0);
+                for p in 0..paths {
+                    let i_up = bif.upst[p];
+                    if !step.active[i_up] {
+                        continue;
+                    }
+                    let i_dn = bif.down[p];
+                    let (up_lev, dn_lev) = sides(i_up, i_dn);
+                    for l in 0..levels {
+                        let w = layers[p * levels + l];
+                        if w.abs() <= TRC_TINY {
+                            continue;
+                        }
+                        let fl = if w >= 0.0 {
+                            if l > 0 && up_lev {
+                                prot_conc_flux[i_up] * w
+                            } else {
+                                conc_flux[i_up] * w
+                            }
+                        } else if l > 0 && dn_lev {
+                            i_dn.map_or(0.0, |d| prot_conc_flux[d]) * w
+                        } else {
+                            i_dn.map_or(0.0, |d| conc_flux[d]) * w
+                        };
+                        pth_levtrc[p * levels + l] = fl;
+                        if l > 0 && up_lev {
+                            bif_lev_net[i_up] += fl;
+                        } else {
+                            bif_net[i_up] += fl;
+                        }
+                        // 下游在网络里就地扣；不在网络里的那份推给 `push_bif_influx`，单进程下没有接收方。
+                        if let Some(d) = i_dn {
+                            if l > 0 && dn_lev {
+                                bif_lev_net[d] -= fl;
+                            } else {
+                                bif_net[d] -= fl;
+                            }
+                        }
+                    }
+                }
+            }
+            // 7a. 每个供体的总出量（顺流出口 + 下游对上游的逆流 + 分汊路径的发送方）。
             for i in 0..n {
                 out_mass[i] = if step.hflux[i] >= 0.0 {
                     trc_flux[i].abs() * step.dt[i]
@@ -591,13 +701,58 @@ impl RiverTracers {
             push_ups(net, &rate_cell, &mut rate_next);
             for i in 0..n {
                 out_mass[i] += rate_next[i];
+                out_mass_lev[i] = 0.0;
+            }
+            if let Some((bif, layers)) = step.bif {
+                let mut dn_out_vis = vec![0.0; paths];
+                let mut dn_out_lev = vec![0.0; paths];
+                for p in 0..paths {
+                    let i_up = bif.upst[p];
+                    let dt_i = step.dt[i_up];
+                    let i_dn = bif.down[p];
+                    let (up_lev, dn_lev) = sides(i_up, i_dn);
+                    for l in 0..levels {
+                        let w = layers[p * levels + l];
+                        if w.abs() <= TRC_TINY {
+                            continue;
+                        }
+                        let fl = pth_levtrc[p * levels + l];
+                        if w >= 0.0 {
+                            if l > 0 && up_lev {
+                                out_mass_lev[i_up] += fl.abs() * dt_i;
+                            } else {
+                                out_mass[i_up] += fl.abs() * dt_i;
+                            }
+                        } else {
+                            // 下游供体的子步长（`dt_dn_pth` 的填充值 0）。
+                            let dt_donor = i_dn.map_or(0.0, |d| step.dt[d]);
+                            if dt_donor <= 0.0 {
+                                continue;
+                            }
+                            if l > 0 && dn_lev {
+                                dn_out_lev[p] += fl.abs() * dt_donor;
+                            } else {
+                                dn_out_vis[p] += fl.abs() * dt_donor;
+                            }
+                        }
+                    }
+                }
+                let mut recv = vec![0.0; n];
+                push_influx(bif, &dn_out_vis, &mut recv);
+                for i in 0..n {
+                    out_mass[i] += recv[i];
+                }
+                push_influx(bif, &dn_out_lev, &mut recv);
+                for i in 0..n {
+                    out_mass_lev[i] += recv[i];
+                }
             }
             // 7b. 供体速率的单调不动点，从 T(0) 起。
             let mut delta = 0.0f64;
             for i in 0..n {
                 let mass = self.mass[itrc][i];
                 ensure!(
-                    mass.is_finite() && out_mass[i].is_finite(),
+                    mass.is_finite() && out_mass[i].is_finite() && out_mass_lev[i].is_finite(),
                     "non-finite river tracer donor limiter state"
                 );
                 ensure!(
@@ -605,7 +760,7 @@ impl RiverTracers {
                     "negative river tracer mass entered donor limiter"
                 );
                 ensure!(
-                    out_mass[i] >= 0.0,
+                    out_mass[i] >= 0.0 && out_mass_lev[i] >= 0.0,
                     "negative river tracer gross outflow demand"
                 );
                 rate_cell[i] = if out_mass[i] > LIMITER_OUT_TINY {
@@ -613,8 +768,21 @@ impl RiverTracers {
                 } else {
                     1.0
                 };
-                // 保护池没有出量（不开分汊）：速率恒为 1，`1 - rate_lev = 0` 不改变 `delta`。
-                delta = delta.max(1.0 - rate_cell[i]);
+                rate_cell_lev[i] = if out_mass_lev[i] > LIMITER_OUT_TINY {
+                    let held = self.levsto[itrc][i];
+                    ensure!(
+                        held.is_finite(),
+                        "non-finite protected tracer donor limiter state"
+                    );
+                    ensure!(
+                        held >= -NEGATIVE_DUST,
+                        "negative protected tracer mass entered donor limiter"
+                    );
+                    (held.max(0.0) / out_mass_lev[i]).min(1.0)
+                } else {
+                    1.0
+                };
+                delta = delta.max(1.0 - rate_cell[i]).max(1.0 - rate_cell_lev[i]);
             }
             ensure!(
                 delta.is_finite(),
@@ -622,6 +790,7 @@ impl RiverTracers {
             );
             let mut converged = delta <= LIMITER_RATE_TOL;
             let mut iters_used = 0;
+            let mut recv: Vec<f64> = vec![0.0; n];
             for iter in 1..=limiter_max_iter {
                 if converged {
                     break;
@@ -632,6 +801,7 @@ impl RiverTracers {
                 }
                 push_next(net, &rate_cell, 1.0, &mut rate_next);
                 in_mass.fill(0.0);
+                in_mass_lev.fill(0.0);
                 inp_step.fill(0.0);
                 for i in 0..n {
                     let dt_i = step.dt[i];
@@ -652,10 +822,73 @@ impl RiverTracers {
                         in_mass[i] = dt_i.mul_add(flux_ups[i].max(0.0), in_mass[i]);
                     }
                 }
+                // 分汊路径实际送达的量：逐路径重建（净通量会掩盖同一单元流域的同时进出）。
+                if let Some((bif, layers)) = step.bif {
+                    for p in 0..paths {
+                        let i_up = bif.upst[p];
+                        let dt_i = step.dt[i_up];
+                        if dt_i <= 0.0 {
+                            continue;
+                        }
+                        let i_dn = bif.down[p];
+                        let (up_lev, dn_lev) = sides(i_up, i_dn);
+                        for l in 0..levels {
+                            let w = layers[p * levels + l];
+                            let fl = pth_levtrc[p * levels + l];
+                            if w.abs() <= TRC_TINY || fl.abs() <= TRC_TINY {
+                                continue;
+                            }
+                            if w >= 0.0 {
+                                let rate = if l > 0 && up_lev {
+                                    rate_cell_lev[i_up]
+                                } else {
+                                    rate_cell[i_up]
+                                };
+                                let fl = fl * rate;
+                                // 上游 → 下游：接收方是 `i_dn`（不在网络里的推给 `push_bif_influx`，无人接收）。
+                                if let Some(d) = i_dn {
+                                    let dt_donor = step.dt[d];
+                                    if dt_donor <= 0.0 {
+                                        continue;
+                                    }
+                                    let gained = dt_donor * fl.max(0.0);
+                                    if l > 0 && dn_lev {
+                                        in_mass_lev[d] += gained;
+                                    } else {
+                                        in_mass[d] += gained;
+                                    }
+                                }
+                            } else {
+                                let rate = match i_dn {
+                                    Some(d) if l > 0 && dn_lev => rate_cell_lev[d],
+                                    Some(d) => rate_cell[d],
+                                    None => 1.0,
+                                };
+                                let fl = fl * rate;
+                                // 下游 → 上游：接收方是本地的 `i_up`。
+                                if l > 0 && up_lev {
+                                    in_mass_lev[i_up] =
+                                        dt_i.mul_add((-fl).max(0.0), in_mass_lev[i_up]);
+                                } else {
+                                    in_mass[i_up] = dt_i.mul_add((-fl).max(0.0), in_mass[i_up]);
+                                }
+                            }
+                        }
+                    }
+                    // `trc_in_mass + max(bif_recv, 0)`：单进程下 `bif_recv` 恒为 0（见上）。
+                    recv.fill(0.0);
+                    for i in 0..n {
+                        in_mass[i] += f64::max(recv[i], 0.0);
+                        in_mass_lev[i] += f64::max(recv[i], 0.0);
+                    }
+                }
                 delta = 0.0;
                 for i in 0..n {
                     ensure!(
-                        in_mass[i].is_finite() && in_mass[i] >= 0.0,
+                        in_mass[i].is_finite()
+                            && in_mass_lev[i].is_finite()
+                            && in_mass[i] >= 0.0
+                            && in_mass_lev[i] >= 0.0,
                         "invalid actual incoming mass in river tracer donor limiter"
                     );
                     if out_mass[i] > LIMITER_OUT_TINY {
@@ -673,6 +906,22 @@ impl RiverTracers {
                         delta = delta.max(new - rate_cell[i]);
                         rate_cell[i] = new;
                     }
+                    if out_mass_lev[i] > LIMITER_OUT_TINY {
+                        let new = ((self.levsto[itrc][i].max(0.0) + in_mass_lev[i])
+                            / out_mass_lev[i])
+                            .min(1.0);
+                        ensure!(
+                            new.is_finite(),
+                            "non-finite protected river tracer donor rate"
+                        );
+                        ensure!(
+                            new + LIMITER_RATE_TOL >= rate_cell_lev[i],
+                            "protected tracer donor limiter lost monotonicity"
+                        );
+                        let new = rate_cell_lev[i].max(new);
+                        delta = delta.max(new - rate_cell_lev[i]);
+                        rate_cell_lev[i] = new;
+                    }
                 }
                 ensure!(
                     delta.is_finite(),
@@ -686,7 +935,7 @@ impl RiverTracers {
             if !converged {
                 bail!("river tracer donor limiter did not converge");
             }
-            // 7c–7d. 按供体速率缩放，再汇总上游。
+            // 7c–7d. 按供体速率缩放主河道通量。
             push_next(net, &rate_cell, 1.0, &mut rate_next);
             for i in 0..n {
                 trc_flux[i] *= if step.hflux[i] >= 0.0 {
@@ -695,8 +944,61 @@ impl RiverTracers {
                     rate_next[i]
                 };
             }
+            // 7e. 按供体速率缩放路径通量，再重建两侧净通量。
+            if let Some((bif, layers)) = step.bif {
+                for p in 0..paths {
+                    let i_up = bif.upst[p];
+                    let i_dn = bif.down[p];
+                    let (up_lev, dn_lev) = sides(i_up, i_dn);
+                    for l in 0..levels {
+                        let w = layers[p * levels + l];
+                        if w.abs() <= TRC_TINY {
+                            continue;
+                        }
+                        let rate = if w >= 0.0 {
+                            if l > 0 && up_lev {
+                                rate_cell_lev[i_up]
+                            } else {
+                                rate_cell[i_up]
+                            }
+                        } else {
+                            match i_dn {
+                                Some(d) if l > 0 && dn_lev => rate_cell_lev[d],
+                                Some(d) => rate_cell[d],
+                                None => 1.0,
+                            }
+                        };
+                        pth_levtrc[p * levels + l] *= rate;
+                    }
+                }
+                bif_net.fill(0.0);
+                bif_lev_net.fill(0.0);
+                for p in 0..paths {
+                    let i_up = bif.upst[p];
+                    let i_dn = bif.down[p];
+                    let (up_lev, dn_lev) = sides(i_up, i_dn);
+                    for l in 0..levels {
+                        let fl = pth_levtrc[p * levels + l];
+                        if fl.abs() <= TRC_TINY {
+                            continue;
+                        }
+                        if l > 0 && up_lev {
+                            bif_lev_net[i_up] += fl;
+                        } else {
+                            bif_net[i_up] += fl;
+                        }
+                        if let Some(d) = i_dn {
+                            if l > 0 && dn_lev {
+                                bif_lev_net[d] -= fl;
+                            } else {
+                                bif_net[d] -= fl;
+                            }
+                        }
+                    }
+                }
+            }
             push_ups(net, &trc_flux, &mut flux_ups);
-            // 8. 更新质量（不开分汊：`bif_net = trc_bif_lev_net = 0`）。
+            // 8. 更新质量。
             for i in 0..n {
                 if !step.active[i] {
                     continue;
@@ -706,22 +1008,30 @@ impl RiverTracers {
                     continue;
                 }
                 let mass = self.mass[itrc][i];
-                let new = dt_i.mul_add((flux_ups[i] - trc_flux[i]) - 0.0, mass);
+                let new = dt_i.mul_add((flux_ups[i] - trc_flux[i]) - bif_net[i], mass);
                 ensure!(
                     new.is_finite(),
                     "non-finite river tracer mass after coupled donor limiter"
                 );
-                let scale = dt_i.mul_add((trc_flux[i].abs() + flux_ups[i].abs()) + 0.0, mass.abs());
+                let scale = dt_i.mul_add(
+                    (trc_flux[i].abs() + flux_ups[i].abs()) + bif_net[i].abs(),
+                    mass.abs(),
+                );
                 ensure!(
                     new >= -(scale * UPDATE_ROUNDOFF).max(NEGATIVE_DUST),
                     "negative river tracer mass after coupled donor limiter"
                 );
                 self.mass[itrc][i] = new.max(0.0);
                 let held = self.levsto[itrc][i];
-                let new_held = (-dt_i).mul_add(0.0, held);
+                let new_held = (-dt_i).mul_add(bif_lev_net[i], held);
                 ensure!(
                     new_held.is_finite(),
                     "non-finite protected tracer mass after coupled donor limiter"
+                );
+                let held_scale = dt_i.mul_add(bif_lev_net[i].abs(), held.abs());
+                ensure!(
+                    new_held >= -(held_scale * UPDATE_ROUNDOFF).max(NEGATIVE_DUST),
+                    "negative protected tracer mass after coupled donor limiter"
                 );
                 self.levsto[itrc][i] = new_held.max(0.0);
                 let fraction = tracer.reactive_decay_fraction(dt_i);
@@ -738,11 +1048,11 @@ impl RiverTracers {
                     decay_pool(&mut self.levsto[itrc][i], fraction, &mut source);
                 }
             }
-            // 9. 本子步的出流（诊断）。
+            // 9. 本子步的出流与分汊净通量（诊断）。
             for i in 0..n {
                 if step.active[i] {
                     self.flux_out[itrc][i] = trc_flux[i];
-                    self.bif_net_saved[itrc][i] = 0.0 + 0.0;
+                    self.bif_net_saved[itrc][i] = bif_net[i] + bif_lev_net[i];
                 }
             }
         }

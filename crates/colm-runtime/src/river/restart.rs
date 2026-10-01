@@ -568,26 +568,30 @@ pub fn write_river_tracers(
 }
 
 /// `read_tracer_restart`：续跑里有完整、描述符相符的河道示踪物事务就读回并返回真；没有提交标记
-/// （旧格式或 mkinidata 写的初始续跑）、描述符不符时返回假（调用方按水量冷启动）。
+/// （旧格式或 mkinidata 写的初始续跑）、描述符不符时返回假（调用方按水量冷启动）。读回后
+/// 当前配置下没有堤的单元流域把堤内池并回可见池。
 pub fn read_river_tracers(
     path: &Path,
     network: &RiverNetwork,
+    levee: Option<&super::levee::Levee>,
     tracers: &mut super::tracer::RiverTracers,
 ) -> Result<bool> {
+    let malformed = "malformed/incomplete river tracer restart descriptor metadata";
     let file = netcdf::open(path).with_context(|| format!("cannot open {}", path.display()))?;
     let Some(complete) = file.variable("trc_river_restart_complete") else {
         return Ok(false);
     };
     let complete: i32 = complete.get_value(..)?;
-    ensure!(complete == 1, "malformed/incomplete river tracer restart descriptor metadata");
+    ensure!(complete == 1, "{malformed}");
     let schema: i32 = file
         .variable("trc_river_restart_schema")
-        .context("malformed/incomplete river tracer restart descriptor metadata")?
+        .context(malformed)?
         .get_value(..)?;
     let count: i32 = file
         .variable("trc_river_descriptor_count")
-        .context("malformed/incomplete river tracer restart descriptor metadata")?
+        .context(malformed)?
         .get_value(..)?;
+    ensure!((0..=1000).contains(&count), "{malformed}");
     let expected = tracers.set.descriptor_identity();
     if schema != 1 && schema != RIVER_TRACER_SCHEMA {
         return Ok(false);
@@ -597,15 +601,109 @@ pub fn read_river_tracers(
     }
     let identity = file
         .variable("trc_river_descriptor_identity")
-        .context("malformed/incomplete river tracer restart descriptor metadata")?
+        .context(malformed)?
         .get_values::<i32, _>(..)?;
+    ensure!(
+        identity.len() == count as usize * colm_core::tracer::DESCRIPTOR_IDENTITY_WIDTH,
+        "{malformed}"
+    );
     let flat = expected.iter().flatten().copied().collect::<Vec<i32>>();
     if count as usize != expected.len() || identity != flat {
         return Ok(false);
     }
-    let _ = network;
-    bail!(
-        "reading a committed river tracer restart ({}) is not ported yet; run this case with --engine fortran",
-        path.display()
-    )
+    let n = network.len();
+    let vector = |name: &str, required: bool| -> Result<Option<Vec<f64>>> {
+        match file.variable(name) {
+            Some(variable) => {
+                let values = variable.get_values::<f64, _>(..)?;
+                ensure!(
+                    values.len() == n,
+                    "incomplete or malformed committed river tracer restart ({name})"
+                );
+                Ok(Some(values))
+            }
+            None if required => bail!("incomplete or malformed committed river tracer restart ({name})"),
+            None => Ok(None),
+        }
+    };
+    let gdid = vector("trc_ucat_gdid_meta", true)?.expect("required");
+    let next = vector("trc_ucat_next_meta", true)?.expect("required");
+    let matches = (0..n).all(|i| {
+        let expect_gdid = (network.y[i] - 1) * network.nlon as i32 + network.x[i];
+        let expect_next = if network.next[i] >= 0 { network.next[i] + 1 } else { network.next[i] };
+        gdid[i].round() as i32 == expect_gdid && next[i].round() as i32 == expect_next
+    });
+    ensure!(matches, "river/lake tracer restart belongs to a different catchment network");
+    let numucat = vector("trc_numucat_meta", true)?.expect("required");
+    ensure!(
+        numucat.iter().all(|&v| v.round() as usize == n),
+        "river/lake tracer restart catchment-count metadata is inconsistent"
+    );
+    let transport = tracers.set.transport_indices().collect::<Vec<_>>();
+    for &itrc in &transport {
+        let tracer = tracers.set.tracers[itrc].clone();
+        let name = tracer.name.trim().to_owned();
+        tracers.mass[itrc] = vector(&format!("trc_mass_{name}"), true)?.expect("required");
+        tracers.inp_buf[itrc] = vector(&format!("trc_inpbuf_{name}"), true)?.expect("required");
+        tracers.levsto[itrc] = vector(&format!("trc_levsto_{name}"), true)?.expect("required");
+        if schema >= 2 && tracer.has_dissolved_limit() {
+            let (solid, levsto_solid) = tracers.solid.as_mut().context("solid pools")?;
+            solid[itrc] = vector(&format!("trc_solid_{name}"), true)?.expect("required");
+            levsto_solid[itrc] = vector(&format!("trc_levsto_solid_{name}"), true)?.expect("required");
+        }
+        tracers.acc_inp[itrc] = vector(&format!("trc_accinp_{name}"), true)?.expect("required");
+    }
+    tracers.acc_rnof_ref = vector("acc_rnof_ref", true)?.expect("required");
+    // history 累加行：全在才读（不是有限数的清成 0），否则从续跑起新开一个窗口。
+    tracers.history.reset();
+    let mut names = Vec::new();
+    for &itrc in &transport {
+        let name = tracers.set.tracers[itrc].name.trim().to_owned();
+        for prefix in ["trc_hist_stor_", "trc_hist_levsto_", "trc_hist_out_", "trc_hist_bifout_"] {
+            names.push(format!("{prefix}{name}"));
+        }
+    }
+    names.push("trc_hist_water_storage".to_owned());
+    names.push("trc_hist_levsto_water".to_owned());
+    let complete_history = names.iter().all(|name| file.variable(name).is_some());
+    if complete_history {
+        let finite = |values: Vec<f64>| -> Vec<f64> {
+            values.into_iter().map(|v| if v.is_finite() { v } else { 0.0 }).collect()
+        };
+        for &itrc in &transport {
+            let name = tracers.set.tracers[itrc].name.trim().to_owned();
+            let h = &mut tracers.history;
+            h.storage_mass[itrc] = finite(vector(&format!("trc_hist_stor_{name}"), true)?.expect("required"));
+            h.levsto_mass[itrc] = finite(vector(&format!("trc_hist_levsto_{name}"), true)?.expect("required"));
+            h.out[itrc] = finite(vector(&format!("trc_hist_out_{name}"), true)?.expect("required"));
+            h.bifout[itrc] = finite(vector(&format!("trc_hist_bifout_{name}"), true)?.expect("required"));
+        }
+        let h = &mut tracers.history;
+        h.water_storage = finite(vector("trc_hist_water_storage", true)?.expect("required"));
+        h.levsto_water = finite(vector("trc_hist_levsto_water", true)?.expect("required"));
+        if let Some(acctime) = vector("trc_hist_acctime", false)? {
+            h.acctime = finite(acctime);
+        }
+    }
+    tracers.validate_for_restart()?;
+    // 当前配置下没有堤的单元流域：堤内池并回可见池（开了堤防才有 `has_levee`）。
+    if let Some(levee) = levee {
+        for i in 0..n {
+            if levee.has[i] {
+                continue;
+            }
+            for &itrc in &transport {
+                tracers.mass[itrc][i] += tracers.levsto[itrc][i];
+                tracers.levsto[itrc][i] = 0.0;
+                if tracers.set.tracers[itrc].has_dissolved_limit() {
+                    if let Some((solid, levsto_solid)) = tracers.solid.as_mut() {
+                        solid[itrc][i] += levsto_solid[itrc][i];
+                        levsto_solid[itrc][i] = 0.0;
+                    }
+                }
+            }
+        }
+    }
+    tracers.validate_for_restart()?;
+    Ok(true)
 }

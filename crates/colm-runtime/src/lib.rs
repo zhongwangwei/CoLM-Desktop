@@ -826,7 +826,7 @@ fn lct_binding(
     greenwich_time: bool,
     longitude_radians: f64,
     co2_scenario: Co2Scenario,
-) -> Result<StandardLctStepBinding> {
+) -> Result<StandardLctStepBinding<'static>> {
     let (month, _) = colm_core::month_day(step.clock.forcing_time)?;
     Ok(StandardLctStepBinding {
         forcing: step.forcing,
@@ -842,6 +842,7 @@ fn lct_binding(
         )? * 1.0e-6,
         partial_pressures_pa: None,
         flood: None,
+        tracer_ratios: None,
     })
 }
 
@@ -979,7 +980,7 @@ fn initial_total_water_mm(
 fn advance_patch(
     step: PointRuntimeStep,
     template: &StandardLctRestartTemplate,
-    binding: &StandardLctStepBinding,
+    binding: &StandardLctStepBinding<'_>,
     state: &mut StandardLctSnowSoilState,
     // 优化器在场时本 patch 的 `scale_baseflow(ipatch)`。
     baseflow_scale: Option<f64>,
@@ -999,7 +1000,14 @@ fn advance_patch(
     if template.patch_type == 3 {
         let output = colm_core::glacier_snow_step(input, state)?;
         if let Some((tracer, _)) = &template.tracer {
-            crate::tracer::glacier_end_of_step(tracer, state, &output, deltim, &step.forcing)?;
+            crate::tracer::glacier_end_of_step(
+                tracer,
+                state,
+                &output,
+                deltim,
+                &step.forcing,
+                binding.tracer_ratios,
+            )?;
         }
         template.prepare_surface_optics(
             state,
@@ -1089,6 +1097,7 @@ fn advance_patch(
                 deltim,
                 &step.forcing,
                 lake.site.dynamic,
+                binding.tracer_ratios,
             )?;
         }
         // 湖面反照率只看 `t_grnd`（`albland` 的 `patchtype >= 4` 支）；`t_soisno_(1)` 换成

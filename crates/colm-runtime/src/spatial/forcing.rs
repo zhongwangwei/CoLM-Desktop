@@ -134,14 +134,14 @@ fn cumulative_days(year: i32) -> [i32; 13] {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum GroupBy {
+pub(super) enum GroupBy {
     Year,
     Month,
     Day,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Interpolation {
+pub(super) enum Interpolation {
     Linear,
     Nearest,
     Uniform,
@@ -151,13 +151,13 @@ enum Interpolation {
 
 /// 一个强迫变量的配置（`DEF_forcing%...(ivar)`）。
 #[derive(Debug, Clone, PartialEq)]
-struct Variable {
-    prefix: String,
-    name: String,
-    forward: bool,
-    interpolation: Interpolation,
-    dtime: i32,
-    offset: i32,
+pub(super) struct Variable {
+    pub(super) prefix: String,
+    pub(super) name: String,
+    pub(super) forward: bool,
+    pub(super) interpolation: Interpolation,
+    pub(super) dtime: i32,
+    pub(super) offset: i32,
 }
 
 /// `DEF_forcing` 的网格部分。
@@ -165,11 +165,15 @@ struct Variable {
 pub struct GriddedForcingConfig {
     pub dataset: String,
     pub directory: PathBuf,
-    variables: Vec<Variable>,
-    groupby: GroupBy,
-    start_year: i32,
-    start_month: i32,
-    leapyear: bool,
+    pub(super) variables: Vec<Variable>,
+    pub(super) groupby: GroupBy,
+    /// `DEF_forcing%groupby`、`timelog`、`tintalgo` 的原文（示踪物强迫的重启指纹逐字符记它们）。
+    pub(super) groupby_text: String,
+    pub(super) timelog_text: Vec<String>,
+    pub(super) tintalgo_text: Vec<String>,
+    pub(super) start_year: i32,
+    pub(super) start_month: i32,
+    pub(super) leapyear: bool,
     latname: String,
     lonname: String,
     regional: Option<GridBounds>,
@@ -238,7 +242,8 @@ impl GriddedForcingConfig {
             variables.iter().all(|v| v.name.trim() != "NULL"),
             "forcing layouts with NULL variables are not ported"
         );
-        let groupby = match string(forcing, "DEF_forcing%groupby")?.trim() {
+        let groupby_text = string(forcing, "DEF_forcing%groupby")?;
+        let groupby = match groupby_text.trim() {
             "year" => GroupBy::Year,
             "month" => GroupBy::Month,
             "day" => GroupBy::Day,
@@ -260,6 +265,9 @@ impl GriddedForcingConfig {
             directory: PathBuf::from(string(forcing, "DEF_dir_forcing")?),
             variables,
             groupby,
+            groupby_text,
+            timelog_text: timelog,
+            tintalgo_text: tintalgo,
             start_year: i32::try_from(integer(forcing, "DEF_forcing%startyr")?)?,
             start_month: i32::try_from(integer(forcing, "DEF_forcing%startmo")?)?,
             leapyear: boolean(forcing, "DEF_forcing%leapyear", true)?,
@@ -274,7 +282,7 @@ impl GriddedForcingConfig {
 
     /// `trim(dir_forcing)//metfilename(...)`：JRA3Q 是 `'/'//prefix//'_'//YYYY//'_'//MM//'.nc'`，
     /// IsoGSM 是 `'/'//prefix//'_'//YYYY//'.nc'`。
-    fn file_name(&self, year: i32, month: i32, variable: usize) -> PathBuf {
+    pub(super) fn file_name(&self, year: i32, month: i32, variable: usize) -> PathBuf {
         let directory = self.directory.to_string_lossy();
         let prefix = self.variables[variable].prefix.trim();
         PathBuf::from(match self.dataset.trim() {
@@ -285,7 +293,15 @@ impl GriddedForcingConfig {
 
     /// `setstampLB`：返回文件年、月与记录号（1 起），并给出下界时间戳。
     fn lower_record(&self, now: Stamp, variable: usize) -> Result<(i32, i32, usize, Stamp)> {
-        let v = &self.variables[variable];
+        self.lower_record_for(now, &self.variables[variable])
+    }
+
+    /// `setstampLB` 对任意一个变量配置（示踪物强迫的 `tracer_forcing_setstamp_LB` 同式）。
+    pub(super) fn lower_record_for(
+        &self,
+        now: Stamp,
+        v: &Variable,
+    ) -> Result<(i32, i32, usize, Stamp)> {
         let (mut year, day, mut sec) = (now.year, now.day, now.sec);
         let mut lower = Stamp { year, day, sec };
         let time_index;
@@ -373,7 +389,11 @@ impl GriddedForcingConfig {
 
     /// `setstampUB`：推进上界，返回文件年、月、记录号。
     fn upper_record(&self, upper: Stamp, variable: usize) -> Result<(i32, i32, usize)> {
-        let v = &self.variables[variable];
+        self.upper_record_for(upper, &self.variables[variable])
+    }
+
+    /// `setstampUB` 对任意一个变量配置（`tracer_forcing_setstamp_UB` 同式）。
+    pub(super) fn upper_record_for(&self, upper: Stamp, v: &Variable) -> Result<(i32, i32, usize)> {
         let (mut year, day, mut sec) = (upper.year, upper.day, upper.sec);
         match self.groupby {
             GroupBy::Month => {
@@ -755,8 +775,12 @@ impl GriddedForcing {
     /// `ncio_read_block_time`：读第 `record` 条（1 起）在用到的格子上的值。
     fn read_record(&self, year: i32, month: i32, ivar: usize, record: usize) -> Result<Vec<f64>> {
         let path = self.config.file_name(year, month, ivar);
-        let name = self.config.variables[ivar].name.trim();
-        let file = netcdf::open(&path)
+        self.read_cells(&path, self.config.variables[ivar].name.trim(), record)
+    }
+
+    /// 从 `path` 的变量 `name` 读第 `record` 条（1 起）在用到的格子上的值。
+    pub(super) fn read_cells(&self, path: &Path, name: &str, record: usize) -> Result<Vec<f64>> {
+        let file = netcdf::open(path)
             .with_context(|| format!("cannot open the forcing file {}", path.display()))?;
         let variable = file
             .variable(name)
@@ -774,6 +798,10 @@ impl GriddedForcing {
             .iter()
             .map(|&(ilon, ilat)| block[(ilat - lat0) * width + (ilon - lon0)])
             .collect())
+    }
+
+    pub fn config(&self) -> &GriddedForcingConfig {
+        &self.config
     }
 }
 

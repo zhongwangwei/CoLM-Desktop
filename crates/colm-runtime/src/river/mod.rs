@@ -403,10 +403,6 @@ impl RiverModel {
 
     /// 挂上河湖示踪物（`river_lake_tracer_init`）。
     pub fn with_tracers(mut self, tracers: tracer::RiverTracers) -> Result<Self> {
-        ensure!(
-            self.bifurcation.is_none(),
-            "river tracers with DEF_USE_BIFURCATION are not ported yet; run this case with --engine fortran"
-        );
         self.tracers = Some(tracers);
         Ok(self)
     }
@@ -509,6 +505,7 @@ impl RiverModel {
                 .bifflw_acctime
                 .take()
                 .expect("bifurcation history"),
+            layer_flux: Vec::new(),
         });
         let net = &self.network;
         let state = &self.state;
@@ -609,7 +606,12 @@ impl RiverModel {
         }
         // 示踪物按全局子步重放这次汇流（见 [`tracer`]）。
         if let Some(tracers) = self.tracers.as_mut() {
-            tracers.replay(&self.network, self.levee.as_ref(), &tapes)?;
+            tracers.replay(
+                &self.network,
+                self.levee.as_ref(),
+                self.bifurcation.as_ref().map(|(bif, _)| bif),
+                &tapes,
+            )?;
         }
         self.state.acctime_rnof = 0.0;
         self.state.acc_rnof.fill(0.0);
@@ -712,6 +714,8 @@ struct BifurcationRun<'a> {
     bifout: Vec<f64>,
     bifflw_lev: Vec<f64>,
     bifflw_acctime: Vec<f64>,
+    /// 最近一个子步的 `bif_hflux_lev`（示踪物磁带要记它，`[p*levels + l]`）。
+    layer_flux: Vec<f64>,
 }
 
 // 阶段循环按单元流域下标写多组数组（与上游逐单元流域的 DO 循环一一对应），用下标更清楚。
@@ -763,6 +767,7 @@ fn route_system<'a>(
         pre_levee: vec![None; n],
         initial: Vec::with_capacity(n),
         substeps: Vec::new(),
+        bif_hflux_lev: Vec::new(),
     });
     // `levee_repartition_storage`：可见 + 堤内重新分区，返回新的可见蓄量与水深。
     let repartition = |lev: &mut (f64, f64, f64, f64), i: usize, visible: f64, area: &mut f64| {
@@ -1144,6 +1149,9 @@ fn route_system<'a>(
                 cells_tape[k].end = cell_water(k, &wdsrf, &volwater_ucat, &lev, &built, &reservoirs);
             }
             tape.substeps.push((dt, cells_tape));
+            if let Some(run) = bif.as_ref() {
+                tape.bif_hflux_lev.push(run.layer_flux.clone());
+            }
         }
         // history 累加：`a_x = FMA(x, dt, a_x)`，`acctime` 平铺相加。
         for k in 0..n {
@@ -1367,6 +1375,7 @@ fn bifurcation_substep(
     }
     bif_sum.copy_from_slice(&flux.hflux_sum);
     *lev_sum = flux.lev_hflux_sum;
+    run.layer_flux = flux.hflux_lev;
     dt
 }
 

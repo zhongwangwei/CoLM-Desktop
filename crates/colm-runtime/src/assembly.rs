@@ -224,7 +224,7 @@ pub enum StandardLctRunoffScheme {
 /// `input.forcing` 重算一部分，但风、秒偏移与经度是**透传**的（见
 /// `prepare_energy` 与 `net_solar` 的 `..input`），必须每步刷新。
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct StandardLctStepBinding {
+pub struct StandardLctStepBinding<'a> {
     pub forcing: colm_core::RuntimeForcing,
     /// `solar.seconds_of_day`。
     pub seconds_of_day: i32,
@@ -240,6 +240,8 @@ pub struct StandardLctStepBinding {
     pub partial_pressures_pa: Option<(f64, f64)>,
     /// 漫滩回馈发布给这个土壤 patch 的淹没水深与比例（只有空间算例开了回馈时才有）。
     pub flood: Option<colm_core::flood_evaporation::FloodPatchInput>,
+    /// 网格示踪物强迫给这个 patch 的 `(precip, vapor)` 比值（逐示踪物）；`None` 用运行时的默认比值。
+    pub tracer_ratios: Option<(&'a [f64], &'a [f64])>,
 }
 
 /// 原时间重启里续跑需要用到的整变量（所有 patch）。
@@ -1724,7 +1726,7 @@ impl StandardLctRestartTemplate {
     /// （`prepare_energy`、`ground_flux_input`、`finish_energy_step`、`leaf_input`
     /// 里的 `..input` 更新），这里给的是这一步之前的占位；它们不参与本步结果，
     /// 但仍然是显式写出的，不是靠 `Default`。
-    pub fn input(&self, binding: &StandardLctStepBinding) -> StandardLctSoilInput<'_> {
+    pub fn input(&self, binding: &StandardLctStepBinding<'_>) -> StandardLctSoilInput<'_> {
         let physics = &self.physics;
         let forcing = binding.forcing;
         let time_step_seconds = physics.timestep_seconds;
@@ -2260,7 +2262,10 @@ impl StandardLctRestartTemplate {
     /// **雪 + 土**模板列、`snow_layers` 与三个雪标量来自重启，以及多一个
     /// [`SnowWaterInput`]。`snowwater` 那四个通量由本步能量链重建，这里给的是
     /// 这一步之前的占位。
-    pub fn snow_input(&self, binding: &StandardLctStepBinding) -> StandardLctSnowSoilInput<'_> {
+    pub fn snow_input<'s>(
+        &'s self,
+        binding: &StandardLctStepBinding<'s>,
+    ) -> StandardLctSnowSoilInput<'s> {
         let snow_layers = self.snow.layer_count.unsigned_abs() as usize;
         let ground = self.input(binding).energy.ground_temperature;
         StandardLctSnowSoilInput {
@@ -2312,7 +2317,14 @@ impl StandardLctRestartTemplate {
             },
             soil_water: self.input(binding).water,
             snicar: self.snicar_step_input(),
-            tracer: self.tracer.as_ref().map(|(runtime, _)| runtime.context()),
+            tracer: self.tracer.as_ref().map(|(runtime, _)| {
+                let mut context = runtime.context();
+                if let Some((precip, vapor)) = binding.tracer_ratios {
+                    context.precip_ratio = precip;
+                    context.vapor_ratio = vapor;
+                }
+                context
+            }),
         }
     }
 

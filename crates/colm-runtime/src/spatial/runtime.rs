@@ -28,6 +28,8 @@ pub struct SpatialRuntime {
     river: Option<(crate::river::RiverModel, Vec<bool>)>,
     /// LULCC 年末那一步的终点：这一步不重读 LAI（见 [`SpatialRuntime::defer_lai_refresh_at`]）。
     deferred_lai_refresh: Option<colm_core::CalendarTime>,
+    /// 网格示踪物强迫（`read_tracer_forcing`）。
+    tracer_forcing: Option<super::tracer_forcing::GriddedTracerForcing>,
 }
 
 impl SpatialRuntime {
@@ -57,7 +59,27 @@ impl SpatialRuntime {
             baseflow_optimizer: None,
             river: None,
             deferred_lai_refresh: None,
+            tracer_forcing: None,
         })
+    }
+
+    /// 接上网格示踪物强迫（只在配置了示踪物强迫变量时）。
+    pub fn with_tracer_forcing(
+        mut self,
+        forcing: super::tracer_forcing::GriddedTracerForcing,
+    ) -> Self {
+        self.tracer_forcing = Some(forcing);
+        self
+    }
+
+    /// 网格示踪物强迫的运行态（写续跑用）。
+    pub fn tracer_forcing(&self) -> Option<&super::tracer_forcing::GriddedTracerForcing> {
+        self.tracer_forcing.as_ref()
+    }
+
+    /// 主强迫配置（示踪物强迫的重启指纹要用）。
+    pub fn forcing_config(&self) -> &super::forcing::GriddedForcingConfig {
+        self.forcing.config()
     }
 
     /// 当前的河道模型（写续跑用）。
@@ -126,6 +148,7 @@ impl SpatialRuntime {
             &[StandardLctSnowSoilState],
             &[PatchStepOutput<'_>],
             Option<&crate::river::RiverModel>,
+            Option<&crate::tracer::ForcingCache<'_>>,
         ) -> Result<()>,
     {
         ensure!(
@@ -147,6 +170,10 @@ impl SpatialRuntime {
                         * 1.0e-6;
                 let cells = self.forcing.step(clock.forcing_time, co2)?;
                 let patch_forcing = map_to_patches(&self.mapping, &self.forcing, &cells);
+                // `read_tracer_forcing (jdate, dir_forcing)`：紧跟 `read_forcing`。
+                if let Some(tracer_forcing) = self.tracer_forcing.as_mut() {
+                    tracer_forcing.step(clock.forcing_time, &self.forcing, &self.mapping)?;
+                }
                 let calendar_day = orbital_calendar_day(clock.forcing_time, true, 0.0)?;
                 let surface_calendar_day = orbital_calendar_day(clock.end_time, true, 0.0)?;
                 let seconds_of_day = crate::seconds_of_day(clock.end_time)?;
@@ -198,6 +225,10 @@ impl SpatialRuntime {
                                 fraction: flood.fraction[index],
                                 infiltration_max_mm_day: flood.infiltration_max_mm_day,
                             }),
+                        tracer_ratios: self
+                            .tracer_forcing
+                            .as_ref()
+                            .map(|forcing| forcing.ratios(index)),
                     };
                     let scale = optimizer.as_ref().map(|optimizer| optimizer.scale(index));
                     outputs.push(
@@ -311,11 +342,13 @@ impl SpatialRuntime {
                     time_step_seconds,
                 )?;
                 let views = outputs.iter().map(PatchOutput::view).collect::<Vec<_>>();
+                let cache = self.tracer_forcing.as_ref().map(|forcing| forcing.cache());
                 on_step(
                     &steps,
                     &next_states,
                     &views,
                     self.river.as_ref().map(|(river, _)| river),
+                    cache.as_ref(),
                 )?;
                 *states = next_states;
                 self.clock = next_clock;

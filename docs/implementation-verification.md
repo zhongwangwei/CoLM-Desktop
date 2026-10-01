@@ -27504,3 +27504,63 @@ GIMPLE：质量更新 `FMA(dt, (flux_ups - trc_flux) - bif_net, mass)`，第 487
 第一次对照只差河道续跑的 `acc_rnof_ref`（上游在汇流周期末清零）。`g1`、`g1tr0` 不变。空间示踪物的 `COLM_RS_LAND_TRACERS_ONLY` 开发开关已去掉。
 
 **仍拒绝**：分汊（`DEF_USE_BIFURCATION`）+ 示踪物；读带完整示踪物事务的河道续跑（续跑接着跑）。堤防、水库的示踪物路径已写，待算例验证。
+
+## 第 489 轮：示踪物 T3 —— 堤防、水库与续跑接着跑
+
+**堤防、水库**：第 488 轮已写好的两条路径用 g1ts 派生算例验证（`tmp/mkspat.sh`，只改 namelist 开关）：
+
+| 算例 | 开关 | 结果 |
+|---|---|---|
+| `g1tl` | `DEF_USE_LEVEE` | history 3 bad 0，restarts 5 bad 0 |
+| `g1tv` | `DEF_Reservoir_Method = 1` | history 3 bad 0，restarts 5 bad 0 |
+| `g1tlv` | 堤防 + 水库 | history 3 bad 0，restarts 5 bad 0 |
+
+**续跑接着跑**：`read_river_tracers` 补全（事务提交标志、网络元数据、描述符核对、逐示踪物质量/缓冲/累计输入/堤内池、history 累加行；开关从无堤防变成有堤防时按上游把堤内池折回可见池）。空间陆面示踪物续跑逐块读。`g1tsc` 用 Fortran、Rust 各自 `g1ts` 第 3 天的续跑接着跑到第 4 天（`tmp/contrun.sh`）：history 3 bad 0，restarts 8 bad 0（两边都写出 2003-005 的陆面、河道、history 旁车）。
+
+**保护池溶解平衡**：对照上游 `tracer_substep` 第 1 节时发现，Rust 漏了有堤单元流域堤内池的 `tracer_equilibrate_dissolved(levsto, trc_levsto, trc_levsto_solid)`。只影响有溶解上限（`max_dissolved_conc`）的示踪物，g1tl 的溶质没有上限，所以对照碰不到。已补。
+
+## 第 490 轮：示踪物 T2c —— 网格示踪物强迫（IsoGSM 全套驱动）与多块空间示踪物
+
+**移植**：`MOD_Tracer_ForcingInput` + `MOD_Tracer_Forcing` 的网格路径，新模块 `spatial/tracer_forcing.rs`。
+- **配置**：逐示踪物读参数文件里的 `&nl_colm_tracer_forcing`。按 Fortran namelist 语义还原数组：整列赋值从 1 号元素起填，带下标的赋值只改一个元素。校验 `forcing_num`、`dtime`、`tintalgo`、`input_mode`、`role`（只认 `precip`/`vapor`，且只对陆面输运示踪物），同一 role 重复即报错。
+- **变量表**：`tracer_forcing_configure`。`*_over_total` 模式先登记主强迫的总降水（4 号）或总比湿（2 号），再登记示踪物变量，这个顺序决定重启指纹。时间配置（`dtime`/`offset`/`tintalgo`）必须与总量变量相同。开了分馏的示踪物没有 `role='vapor'` 就停机（与上游一致；单点测试框架用 `COLM_RS_ALLOW_UNFORCED_FRACTIONATION` 对应 kiso 内核放宽的那一处）。
+- **每步**：紧跟 `read_forcing`。逐变量维护上下界：`forcing.rs` 的 `setstampLB/UB` 改成按 `&Variable` 工作，主强迫与示踪物强迫共用。在强迫格上插值（线性是 `FMA(lb, alp1, ub*alp2)`），`grid2pset` 用主强迫同一套面积权重，然后解码：`raw/total*ref_ratio`；近干（总降水 ≤ 1e-7、总比湿 ≤ 1e-12）、填充值（`|x| ≥ 1e10`）、δ 超过 ±2000‰ 时保留上一次有效值，起点是描述符默认比值。总量变量直接读文件，不经 `metpreprocess`。
+- **下游**：逐 patch 的比值经 `StandardLctStepBinding::tracer_ratios`（binding 加了生命周期）进 `TracerStepContext`。`has_vapor` = 配置了 vapor 强迫（`tracer_forcing_has_vapor` 里 `OR` 的那一半恒真）。`trc_runtime_forced` 接通守恒检查。
+- **续跑**：陆面示踪物事务里写 `trc_forcing_cache_schema/count`、`(n+1, 1544)` 的整数指纹（数据集、groupby、插值方法、主强迫 2/4 号前缀、`DEF_dir_forcing`，逐变量的 stream/示踪物/模式/总量号/dtime/offset 与前缀/变量名/插值/timelog 逐字符 `iachar`）、`trc_forcing_precip_last/vapor_last`。续跑读到示踪物事务时核对指纹并读回；配置变了就停机。
+- **拒绝**：POINT（与上游相同）、`bilinear`、LULCC（`tracer_forcing_lulcc_remap` 未移植）。
+
+**排查**：g1ti 第一次对照只差湖 patch（13 个全部）。湖、冰川的示踪物步（`lake_end_of_step`/`glacier_end_of_step`）直接拿运行时的默认比值，没走 binding 的逐 patch 比值。单点没有示踪物强迫，比值处处等于默认值，所以单点对照碰不到。已改成优先用 binding 的比值。
+
+**对照**（`kernels/latlon`，vendor 原样，不用 kiso 测试内核）：
+
+| 算例 | 内容 | 结果 |
+|---|---|---|
+| `g1ti` | g1ts + H2_18O/HDO，开分馏，`o18f.nml`/`hdof.nml` 带 IsoGSM `prate1sfc`/`spfh12m`、`prate2sfc`/`spfh22m`（`normalized_over_total`），主驱动也是 IsoGSM | history 3 bad 0，restarts 5 bad 0 |
+| `g2ts` | g2（2 块、JRA3Q）+ 溶质 | history 3 bad 0，restarts 13 bad 0 |
+
+**另补的拒绝**：有输运示踪物时拒绝 `DEF_USE_LULCC`（`save/remap_land_tracer_lulcc_state` 未移植）与 `DEF_GridRiverLake_FloodFeedback`（漫滩回馈的示踪物账 `flood_tracer_credit_patch` 等未移植）。两者此前不报错，会悄悄丢账。
+
+## 第 491 轮：示踪物 T3 —— 分汊（BIF）河道示踪物
+
+**移植**：`tracer_substep` 的 `do_bif` 分支，河道示踪物不再拒绝 `DEF_USE_BIFURCATION`。开分汊时全网是一个河系、天然锁步，`route_system` 的磁带逐子步多记一份 `bif_hflux_lev`（`[p*levels + l]`），`replay` 把路径参数与这份逐层通量交给 `substep`。按上游各节补齐：
+- **第 1 节**：保护池浓度 `trc_prot_conc_flux = trc_levsto/levsto`（有堤且 `levsto > 0`，否则 0），并补上漏掉的堤内池溶解平衡（见第 489 轮）。
+- **第 6 节**：逐路径逐层的示踪物通量。正向用上游侧浓度，逆向用下游侧浓度；第 2 层及以上、且该侧有堤时走保护池；`|w| ≤ trc_tiny` 跳过。并入 `bif_net`/`trc_bif_lev_net`。下游不在网络里的路径（`pth_down_local = -1`）推给 `push_bif_influx`，单进程下没有接收方，`has_levee_dn_pth`、`conc_dn_pth`、`dt_dn_pth` 用填充值 0，`rate_dn_pth` 用 1。
+- **第 7a 节**：发送方出量。上游侧直接加；下游侧供体的那份经 `push_bif_influx`（按 `bif_incoming_pths` 求和，零项跳过、第一项直接赋值）送到下游单元流域，单独累加保护池出量 `trc_out_mass_lev`。
+- **第 7b 节**：保护池供体速率 `rate_cell_lev` 与可见池一起进单调不动点，残差取两者最大。
+- **第 7e 节**：逐层按供体速率缩放，再按缩放后的逐层通量（`|fl| ≤ trc_tiny` 跳过）重建两侧净通量。
+- **第 8、9 节**：质量 `FMA(dt, (flux_ups - trc_flux) - bif_net, mass)`；堤内池 `FNMA(dt, trc_bif_lev_net, levsto)`，负值容差 `FMA(dt, |trc_bif_lev_net|, |levsto_old|)`；`trc_bif_net_saved = bif_net + trc_bif_lev_net`。
+
+GIMPLE：路径部分只有逆向接收方是 `FMA(dt_i, max(-fl,0), in_mass)`。正向接收方是先算 `dt_donor*max(fl,0)` 再相加（乘积被提到堤防分支之前），发送方出量 `|fl|*dt` 也是先乘后加。
+
+unitcat history 开分汊时逐示踪物多写 `f_trc_bifout_*`（`a_trc_bifout/a_trc_acctime`，`|x| < 1e-12` 清 0）。
+
+**对照**（g1ts 派生，`kernels/latlon`）：
+
+| 算例 | 开关 | 结果 |
+|---|---|---|
+| `g1tb` | 分汊 | history 3 bad 0，restarts 5 bad 0 |
+| `g1tlb` | 堤防 + 分汊 | history 3 bad 0，restarts 5 bad 0 |
+
+第一次对照只缺 `f_trc_bifout_sol1`（二进制编在补这个变量之前），续跑全一致；补上后只重跑 Rust 侧即全一致。
+
+**T3 结论**：河湖示踪物的默认、堤防、水库、堤防 + 水库、分汊、堤防 + 分汊、续跑接着跑、多块，全部逐位。仍拒绝：漫滩回馈 + 示踪物、LULCC + 示踪物。

@@ -95,7 +95,7 @@ fn limiter_fraction(available: f64, transfer: f64) -> f64 {
 }
 
 /// `push` 的 `sum` 模式：值为 0 的项不参与，第一项直接赋值。
-fn accumulate(slot: &mut f64, term: f64) {
+pub(super) fn accumulate(slot: &mut f64, term: f64) {
     if term == 0.0 {
         return;
     }

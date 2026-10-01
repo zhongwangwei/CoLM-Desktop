@@ -94,7 +94,7 @@ fn physics() -> LandPhysicsParameters {
     }
 }
 
-fn binding() -> StandardLctStepBinding {
+fn binding() -> StandardLctStepBinding<'static> {
     StandardLctStepBinding {
         forcing: prepare_runtime_forcing(RuntimeForcingInput {
             air_temperature_k: 290.0,
@@ -120,6 +120,7 @@ fn binding() -> StandardLctStepBinding {
         co2_volume_fraction: 385.04e-6,
         partial_pressures_pa: None,
         flood: None,
+        tracer_ratios: None,
     }
 }
 

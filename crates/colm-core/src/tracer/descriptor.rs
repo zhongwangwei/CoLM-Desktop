@@ -503,7 +503,7 @@ fn apply_overrides(tracer: &mut TracerDescriptor, overrides: &TracerParameterOve
 
 /// `tracer_param_file_for_index`：`,`/`;` 分隔；`key:path` 按名字匹配（大小写不敏感），
 /// 无冒号的项按位置。第一个匹配生效；`null` 表示不读。
-fn param_file_for_index(
+pub fn param_file_for_index(
     raw: &str,
     tracers: &[TracerDescriptor],
     index: usize,

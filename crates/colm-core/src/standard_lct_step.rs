@@ -2142,7 +2142,7 @@ fn tracer_after_water(host: TracerAfterWater<'_, '_>) -> Result<()> {
                 ra: Some(moisture_resistance_s_m),
                 dz_sno: Some(&dz_sno),
                 vapor_ratio: ctx.vapor_ratio,
-                has_vapor: None,
+                has_vapor: Some(ctx.has_vapor),
             },
         );
     }
@@ -2245,7 +2245,7 @@ fn tracer_after_water(host: TracerAfterWater<'_, '_>) -> Result<()> {
             permeable_soil: Some(&permeable),
             precip_ratio: ctx.precip_ratio,
             vapor_ratio: ctx.vapor_ratio,
-            has_vapor: None,
+            has_vapor: Some(ctx.has_vapor),
         },
     )
 }

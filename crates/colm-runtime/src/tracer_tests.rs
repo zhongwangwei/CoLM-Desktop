@@ -59,7 +59,7 @@ fn land_tracer_restart_round_trips() {
         state.aquifer_ref_water = 2.0;
     }
     let refs: Vec<&PatchTracerState> = states.iter().collect();
-    write_land_tracer_restart(&path, &set, &refs, -1.0).unwrap();
+    write_land_tracer_restart(&path, &set, &refs, -1.0, None).unwrap();
     let restart = colm_init::RestartFile::open(&path).unwrap();
     let read = read_land_tracer_restart(&restart, &set, 2).unwrap().unwrap();
     for (a, b) in read.iter().zip(&states) {
@@ -80,4 +80,44 @@ fn an_empty_transaction_is_not_a_compatible_restart() {
     colm_init::write_empty_land_tracer_transaction(&path, -1.0).unwrap();
     let restart = colm_init::RestartFile::open(&path).unwrap();
     assert!(read_land_tracer_restart(&restart, &set, 1).unwrap().is_none());
+}
+
+#[test]
+fn the_forcing_cache_round_trips_and_checks_its_identity() {
+    let dir = temp_dir("forcing-cache");
+    let set = solute_set(&dir);
+    let path = dir.join("restart.nc");
+    {
+        let mut file = netcdf::create(&path).unwrap();
+        file.add_dimension("patch", 2).unwrap();
+        file.add_dimension("soilsnow", SOISNO_LAYERS).unwrap();
+    }
+    let states = vec![PatchTracerState::allocated(&set); 2];
+    let refs: Vec<&PatchTracerState> = states.iter().collect();
+    let identity = std::sync::Arc::new(vec![7; crate::spatial::tracer_forcing::ID_WIDTH * 2]);
+    let precip = [0.5, 0.25];
+    let vapor = [0.125, 0.0625];
+    let cache = ForcingCache {
+        nvars: 1,
+        ntracers: 1,
+        identity: std::sync::Arc::clone(&identity),
+        precip: &precip,
+        vapor: &vapor,
+    };
+    write_land_tracer_restart(&path, &set, &refs, -1.0, Some(&cache)).unwrap();
+    let restart = colm_init::RestartFile::open(&path).unwrap();
+    let loadable = land_tracer_restart_loadable(&restart, &set);
+    assert!(loadable);
+    let (p, v) = read_forcing_cache(&restart, loadable, 1, &identity)
+        .unwrap()
+        .unwrap();
+    assert_eq!(p, precip);
+    assert_eq!(v, vapor);
+    // 配置变了（变量数或指纹不同）就停机，与上游一致。
+    assert!(read_forcing_cache(&restart, loadable, 2, &identity).is_err());
+    let mut other = (*identity).clone();
+    other[3] = 8;
+    assert!(read_forcing_cache(&restart, loadable, 1, &other).is_err());
+    // 没读到示踪物事务（冷启动）时不读缓存。
+    assert!(read_forcing_cache(&restart, false, 1, &identity).unwrap().is_none());
 }

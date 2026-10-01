@@ -214,7 +214,9 @@ impl RiverHistoryWriter {
         let n = network.len();
         let tracer_fields = tracers
             .as_deref()
-            .map(|tracers| self.tracer_fields(tracers, history.levsto.is_some()))
+            .map(|tracers| {
+                self.tracer_fields(tracers, history.levsto.is_some(), history.bifout.is_some())
+            })
             .unwrap_or_default();
         let window_seconds = history
             .acctime
@@ -617,6 +619,7 @@ impl RiverHistoryWriter {
         &self,
         tracers: &super::tracer::RiverTracers,
         levee: bool,
+        bifurcation: bool,
     ) -> Vec<(String, String, String, Vec<f64>)> {
         const DUST: f64 = 1.0e-12;
         const DELTA_VMIN: f64 = 1.0;
@@ -712,6 +715,14 @@ impl RiverHistoryWriter {
                         ratio_delta(&h.levsto_mass[itrc], &h.levsto_water),
                     ));
                 }
+            }
+            if bifurcation {
+                out.push((
+                    format!("f_trc_bifout_{name}"),
+                    format!("tracer net bifurcation outflux ({name})"),
+                    flux_units.to_owned(),
+                    dust(per_time(&h.bifout[itrc])),
+                ));
             }
         }
         out

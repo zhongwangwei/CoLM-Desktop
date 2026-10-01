@@ -198,8 +198,13 @@ fn run() -> Result<()> {
     }
     // `land_tracer_init`（`CoLM.F90:339`）：注册示踪物；有输运示踪物时读续跑里的示踪物事务，
     // 读不到（冷启动重启只有空事务）就按水量冷启动。
-    let tracer_runtime =
-        colm_runtime::tracer::TracerRuntime::from_document(&document)?.map(std::sync::Arc::new);
+    // `tracer_forcing_init`：POINT 不支持示踪物强迫变量（`MOD_Tracer_Forcing.F90`）。
+    let tracer_runtime = colm_runtime::tracer::TracerRuntime::from_document(&document)?
+        .map(|mut tracer| -> Result<_> {
+            tracer.configure_forcing(None)?;
+            Ok(std::sync::Arc::new(tracer))
+        })
+        .transpose()?;
     if let Some(tracer) = tracer_runtime.as_ref().filter(|tracer| tracer.has_transport()) {
         let restart = colm_init::RestartFile::open(&files.time)?;
         templates = attach_land_tracers(tracer, templates, &restart, patch_count)?;
@@ -392,10 +397,23 @@ fn run_spatial(
     );
     // 堤防、分汊、水库与漫滩回馈之间可以任意组合，也都可以与 LULCC 同开（漫滩回馈除外，
     // 上游自己拒绝，见上）。
-    // 示踪物：开关本身（`DEF_TRACER_NUM = 0`）已移植 —— 宿主物理不变，只多写 history 窗口变量、
-    // 示踪物 history 文件与重启里的空示踪物事务；注册了示踪物的输运尚未移植。
-    let tracers = logical_field(&document, "DEF_USE_TRACER")?;
-    let _ = tracers;
+    // 示踪物：陆面输运、河湖输运、网格示踪物强迫都已移植。还没接的是 LULCC 的示踪物状态迁移
+    // （`save/remap_land_tracer_lulcc_state`、`tracer_forcing_lulcc_remap`）与漫滩回馈的示踪物账
+    // （`flood_tracer_credit_patch` 等）—— 这两种组合明确拒绝，免得悄悄丢账。
+    let transport_tracers = colm_runtime::tracer::tracer_set_from_document(&document)?
+        .is_some_and(|set| set.transport_indices().next().is_some());
+    if transport_tracers {
+        ensure!(
+            !logical_field(&document, "DEF_USE_LULCC")?,
+            "land tracers with DEF_USE_LULCC (save/remap_land_tracer_lulcc_state) are not ported; \
+             run this case with --engine fortran"
+        );
+        ensure!(
+            !logical_field(&document, "DEF_GridRiverLake_FloodFeedback")?,
+            "land tracers with DEF_GridRiverLake_FloodFeedback (flood tracer ledger) are not ported; \
+             run this case with --engine fortran"
+        );
+    }
     ensure!(
         !logical_field(&document, "DEF_UnitCatchment_regional")?,
         "DEF_UnitCatchment_regional is not ported to the Rust river model; run this case with \
@@ -607,8 +625,16 @@ fn run_spatial_segment(
         }
     }
     // `land_tracer_init`：逐块读续跑里的示踪物事务（或按水量冷启动）。
-    let tracer_runtime =
-        colm_runtime::tracer::TracerRuntime::from_document(document)?.map(std::sync::Arc::new);
+    // `tracer_forcing_init`：网格主强迫给出总降水/总比湿的配置。
+    let mut tracer_forcing_config = None;
+    let tracer_runtime = colm_runtime::tracer::TracerRuntime::from_document(document)?
+        .map(|mut tracer| -> Result<_> {
+            let totals =
+                colm_runtime::spatial::tracer_forcing::MainTotals::from_config(&config.forcing);
+            tracer_forcing_config = Some(tracer.configure_forcing(Some(&totals))?);
+            Ok(std::sync::Arc::new(tracer))
+        })
+        .transpose()?;
     if let Some(tracer) = tracer_runtime.as_ref().filter(|tracer| tracer.has_transport()) {
         let mut attached = Vec::with_capacity(templates.len());
         let mut rest = templates.into_iter();
@@ -662,6 +688,39 @@ fn run_spatial_segment(
         config.co2_scenario,
     )?;
     runtime.apply_mapped_heights(&mut templates)?;
+    if let (Some(tracer), Some(forcing_config)) = (tracer_runtime.as_ref(), tracer_forcing_config)
+    {
+        if forcing_config.enabled() {
+            ensure!(
+                !logical_field(document, "DEF_USE_LULCC")?,
+                "tracer runtime forcing with LULCC (tracer_forcing_lulcc_remap) is not ported"
+            );
+            let mut forcing = colm_runtime::spatial::tracer_forcing::GriddedTracerForcing::new(
+                forcing_config,
+                &tracer.set,
+                patch_count,
+                string_field(document, "DEF_Forcing_Interp_Method")?,
+                runtime.forcing_config(),
+            )?;
+            // `tracer_forcing_read_restart`：续跑读到示踪物事务时一并读回最近一次有效比值。
+            let mut first = 0;
+            for ((_, patches), files) in topology.blocks.iter().zip(&block_files) {
+                let restart = colm_init::RestartFile::open(&files.time)?;
+                let loadable =
+                    colm_runtime::tracer::land_tracer_restart_loadable(&restart, &tracer.set);
+                if let Some((precip, vapor)) = colm_runtime::tracer::read_forcing_cache(
+                    &restart,
+                    loadable,
+                    forcing.config().vars.len(),
+                    forcing.identity(),
+                )? {
+                    forcing.restore(first, &precip, &vapor)?;
+                }
+                first += patches.len();
+            }
+            runtime = runtime.with_tracer_forcing(forcing);
+        }
+    }
     if segment.lulcc_boundary {
         runtime = runtime.defer_lai_refresh_at(config.end);
     }
@@ -810,7 +869,7 @@ fn run_spatial_segment(
     if let Some(tracer) = tracer_runtime.as_ref().filter(|tracer| tracer.has_transport()) {
         let mut tracers =
             colm_runtime::river::tracer::RiverTracers::new(tracer.set.clone(), river.network.len());
-        let loaded = colm_runtime::river::restart::read_river_tracers(&river_start, &river.network, &mut tracers)?;
+        let loaded = colm_runtime::river::restart::read_river_tracers(&river_start, &river.network, river.levee.as_ref(), &mut tracers)?;
         if !loaded {
             // `is_built_resv_init`：起始年份下已建成的水库。
             let built = (0..river.network.len())
@@ -961,7 +1020,7 @@ fn run_spatial_segment(
         &templates,
         &mut states,
         history.as_mut(),
-        |steps, states, outputs, river| {
+        |steps, states, outputs, river, tracer_cache| {
             let mut snapshots = states
                 .iter()
                 .zip(outputs)
@@ -992,6 +1051,7 @@ fn run_spatial_segment(
                     &snapshots,
                     &history_restart,
                     river,
+                    tracer_cache,
                 )?;
                 if let Some(river) = river {
                     let label = date_label(normalized_day_end(step.clock.end_time));
@@ -1043,6 +1103,10 @@ fn run_spatial_segment(
         &last,
         &history_restart,
         runtime.river(),
+        runtime
+            .tracer_forcing()
+            .map(|forcing| forcing.cache())
+            .as_ref(),
     )?;
     if let (Some(river), false) = (runtime.river(), segment.lulcc_boundary) {
         let label = date_label(normalized_day_end(config.end));
@@ -1480,6 +1544,7 @@ fn write_block_restarts(
     snapshots: &[RestartSnapshot],
     history: &HistoryRestart,
     river: Option<&colm_runtime::river::RiverModel>,
+    tracer_cache: Option<&colm_runtime::tracer::ForcingCache<'_>>,
 ) -> Result<Vec<PathBuf>> {
     // `river_active`：河道 history 累加器（`acctime_ucat`）有值。
     let river_history = river.map(colm_runtime::river::RiverModel::history_for_restart);
@@ -1495,7 +1560,12 @@ fn write_block_restarts(
             &files.time,
             &path,
         )?;
-        append_tracer_restart(&templates[patches.clone()], &states[patches.clone()], &path)?;
+        append_tracer_restart(
+            &templates[patches.clone()],
+            &states[patches.clone()],
+            &path,
+            tracer_cache.map(|cache| cache.block(patches.clone())).as_ref(),
+        )?;
         mark_history_restart_with_river(&path, history, Some(patches.clone()), river_required)?;
         written.push(path);
     }
@@ -1840,7 +1910,7 @@ fn run_snow(
                 let path = periodic.path(step.clock.end_time);
                 if path != restart_out {
                     write_evolved_restart(templates, states, &snapshots, restart_in, &path)?;
-                    append_tracer_restart(templates, states, &path)?;
+                    append_tracer_restart(templates, states, &path, None)?;
                     mark_history_restart(&path, history_restart)?;
                 }
             }
@@ -1865,7 +1935,7 @@ fn run_snow(
     };
     let last = last.context(NO_STEP)?;
     write_evolved_restart(templates, &states, &last, restart_in, restart_out)?;
-    append_tracer_restart(templates, &states, restart_out)?;
+    append_tracer_restart(templates, &states, restart_out, None)?;
     mark_history_restart(restart_out, history_restart)?;
     Ok(RunSummary {
         steps,
@@ -1920,6 +1990,7 @@ fn append_tracer_restart(
     templates: &[StandardLctRestartTemplate],
     states: &[StandardLctSnowSoilState],
     path: &Path,
+    cache: Option<&colm_runtime::tracer::ForcingCache<'_>>,
 ) -> Result<()> {
     let Some((tracer, _)) = templates.first().and_then(|template| template.tracer.as_ref()) else {
         return Ok(());
@@ -1939,6 +2010,7 @@ fn append_tracer_restart(
         &tracer.set,
         &tracks,
         tracer.aquifer_mixing_water_mm,
+        cache,
     )
 }
 

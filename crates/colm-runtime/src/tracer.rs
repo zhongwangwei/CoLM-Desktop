@@ -104,6 +104,10 @@ pub struct TracerRuntime {
     pub precip_ratio: Vec<f64>,
     pub vapor_ratio: Vec<f64>,
     pub runtime_forced: Vec<bool>,
+    /// `tracer_forcing_has_vapor`：配置了 vapor 强迫的示踪物（见 [`TracerRuntime::configure_forcing`]）。
+    pub has_vapor: Vec<bool>,
+    /// 参数文件里的 `&nl_colm_tracer_forcing`（`tracer_forcing_input_load`）。
+    pub forcing_specs: Vec<Vec<crate::spatial::tracer_forcing::ForcingSpec>>,
     pub debug: bool,
     pub vegetation_snow: bool,
     pub variably_saturated_flow: bool,
@@ -151,8 +155,8 @@ fn soil_kinetic_resistance(document: &Document) -> Result<bool> {
 }
 
 impl TracerRuntime {
-    /// 由算例文档建立；`DEF_USE_TRACER` 关着返回 `None`。示踪物强迫文件
-    /// （`&nl_colm_tracer_forcing`）尚未移植：有输运示踪物时一律用默认比值。
+    /// 由算例文档建立；`DEF_USE_TRACER` 关着返回 `None`。比值先取描述符默认值，
+    /// 强迫配置由 [`TracerRuntime::configure_forcing`] 落定。
     pub fn from_document(document: &Document) -> Result<Option<Self>> {
         let Some(set) = tracer_set_from_document(document)? else {
             return Ok(None);
@@ -161,7 +165,13 @@ impl TracerRuntime {
         let precip_ratio = set.tracers.iter().map(|t| t.precip_default_ratio()).collect();
         let vapor_ratio = set.tracers.iter().map(|t| t.vapor_default_ratio()).collect();
         let runtime_forced = vec![false; set.len()];
+        let forcing_specs = crate::spatial::tracer_forcing::load_specs(
+            &set,
+            &text(document, "DEF_TRACER_PARAM_FILES")?,
+        )?;
         Ok(Some(Self {
+            has_vapor: vec![false; set.len()],
+            forcing_specs,
             physics,
             soil_options: colm_core::tracer::soil_water::SoilWaterOptions {
                 subl_skin_mm: real(document, "DEF_TRACER_SUBL_SKIN_MM")?,
@@ -186,6 +196,29 @@ impl TracerRuntime {
         }))
     }
 
+    /// `tracer_forcing_configure`：设定 `trc_runtime_forced` 与 `has_vapor`，返回强迫变量表。
+    /// `totals` 是网格主强迫的总降水/总比湿配置；单点（POINT）给 `None`，此时只要配置了
+    /// 任何示踪物强迫就按上游报错。
+    pub fn configure_forcing(
+        &mut self,
+        totals: Option<&crate::spatial::tracer_forcing::MainTotals>,
+    ) -> Result<crate::spatial::tracer_forcing::ForcingConfig> {
+        let config = crate::spatial::tracer_forcing::configure(
+            &self.set,
+            &self.physics,
+            &self.forcing_specs,
+            totals,
+        )?;
+        anyhow::ensure!(
+            totals.is_some() || !config.enabled(),
+            "tracer runtime forcing does not support DEF_forcing%dataset=POINT. \
+             Disable tracer forcing variables or use gridded forcing for tracer fields."
+        );
+        self.runtime_forced.clone_from(&config.runtime_forced);
+        self.has_vapor.clone_from(&config.vapor_configured);
+        Ok(config)
+    }
+
     /// 有没有要逐 patch 记账的输运示踪物。
     pub fn has_transport(&self) -> bool {
         self.set.transport_indices().next().is_some()
@@ -199,6 +232,7 @@ impl TracerRuntime {
             canopy_equilibration: self.canopy_equilibration,
             precip_ratio: &self.precip_ratio,
             vapor_ratio: &self.vapor_ratio,
+            has_vapor: &self.has_vapor,
             runtime_forced: &self.runtime_forced,
             debug: self.debug,
             vegetation_snow: self.vegetation_snow,
@@ -350,8 +384,11 @@ pub fn glacier_end_of_step(
     output: &colm_core::GlacierStepOutput,
     deltim: f64,
     forcing: &colm_core::RuntimeForcing,
+    ratios: Option<(&[f64], &[f64])>,
 ) -> Result<()> {
     use colm_core::tracer::{special_patches, step::pack_soisno};
+    let (precip_ratio, vapor_ratio) =
+        ratios.unwrap_or((&runtime.precip_ratio, &runtime.vapor_ratio));
     let t_grnd = state.surface_temperature_k();
     let Some(track) = state.tracer.as_deref_mut() else {
         return Ok(());
@@ -395,8 +432,8 @@ pub fn glacier_end_of_step(
                 wliq_soisno: &wliq,
                 wice_soisno: &wice,
                 subl_skin_mm: runtime.soil_options.subl_skin_mm,
-                precip_ratio: &runtime.precip_ratio,
-                vapor_ratio: &runtime.vapor_ratio,
+                precip_ratio,
+                vapor_ratio,
                 runtime_forced: &runtime.runtime_forced,
                 catch_lateral_flow: false,
             },
@@ -414,8 +451,11 @@ pub fn lake_end_of_step(
     deltim: f64,
     forcing: &colm_core::RuntimeForcing,
     dynamic_lake: bool,
+    ratios: Option<(&[f64], &[f64])>,
 ) -> Result<()> {
     use colm_core::tracer::{special_patches, step::pack_soisno};
+    let (precip_ratio, vapor_ratio) =
+        ratios.unwrap_or((&runtime.precip_ratio, &runtime.vapor_ratio));
     let t_grnd = state.surface_temperature_k();
     let Some(track) = state.tracer.as_deref_mut() else {
         return Ok(());
@@ -465,8 +505,8 @@ pub fn lake_end_of_step(
                 use_dynamic_lake: dynamic_lake,
                 subl_skin_mm: runtime.soil_options.subl_skin_mm,
                 hist_sample: true,
-                precip_ratio: &runtime.precip_ratio,
-                vapor_ratio: &runtime.vapor_ratio,
+                precip_ratio,
+                vapor_ratio,
                 runtime_forced: &runtime.runtime_forced,
                 catch_lateral_flow: false,
             },
@@ -512,6 +552,30 @@ const TAIL_FIELDS: [(&str, PatchField); 15] = [
     ("trc_leaf_iso_storage", |p| p.leaf_iso_storage),
 ];
 
+/// `tracer_forcing_write_restart` 要写的一段缓存：指纹与这些 patch 的最近一次有效比值
+/// （`[patch * ntracers + itrc]`）。没有示踪物强迫变量时 `nvars = 0`，只写计数。
+#[derive(Debug, Clone)]
+pub struct ForcingCache<'a> {
+    pub nvars: usize,
+    pub ntracers: usize,
+    pub identity: std::sync::Arc<Vec<i32>>,
+    pub precip: &'a [f64],
+    pub vapor: &'a [f64],
+}
+
+impl<'a> ForcingCache<'a> {
+    /// 一个分块（`patches` 是全局 patch 下标区间）的那一段。
+    pub fn block(&self, patches: std::ops::Range<usize>) -> ForcingCache<'a> {
+        let range = patches.start * self.ntracers..patches.end * self.ntracers;
+        ForcingCache {
+            precip: &self.precip[range.clone()],
+            vapor: &self.vapor[range],
+            identity: std::sync::Arc::clone(&self.identity),
+            ..*self
+        }
+    }
+}
+
 /// `write_land_tracer_restart`（含 `tracer_forcing_write_restart` 的计数）：把示踪物
 /// 预报量追加进一个已写好的陆面时间重启（`patch`/`soilsnow` 维已在）。没有输运示踪物时
 /// 只写空事务（见 `colm_init::write_empty_land_tracer_transaction`）。
@@ -520,6 +584,7 @@ pub fn write_land_tracer_restart(
     set: &TracerSet,
     states: &[&PatchTracerState],
     aquifer_mixing_water_mm: f64,
+    cache: Option<&ForcingCache<'_>>,
 ) -> Result<()> {
     let transport: Vec<usize> = set.transport_indices().collect();
     if transport.is_empty() {
@@ -610,20 +675,51 @@ pub fn write_land_tracer_restart(
             )?;
         }
         put_scalar_i32(&mut file, "trc_forcing_cache_schema", FORCING_CACHE_SCHEMA)?;
-        put_scalar_i32(&mut file, "trc_forcing_cache_count", 0)?;
+        let nvars = cache.map_or(0, |cache| cache.nvars);
+        put_scalar_i32(&mut file, "trc_forcing_cache_count", i32::try_from(nvars)?)?;
+        if let Some(cache) = cache.filter(|cache| cache.nvars > 0) {
+            anyhow::ensure!(
+                cache.precip.len() == states.len() * cache.ntracers,
+                "tracer forcing cache shape mismatch at restart write"
+            );
+            anyhow::ensure!(
+                cache.precip.iter().chain(cache.vapor).all(|v| v.is_finite()),
+                "non-finite tracer forcing cache at restart write"
+            );
+            ensure_dimension(
+                &mut file,
+                "trc_forcing_id_field",
+                crate::spatial::tracer_forcing::ID_WIDTH,
+            )?;
+            ensure_dimension(&mut file, "trc_forcing_id_var", cache.nvars + 1)?;
+            ensure_dimension(&mut file, "trc_forcing_species", cache.ntracers)?;
+            put_array_i32(
+                &mut file,
+                "trc_forcing_cache_identity",
+                &["trc_forcing_id_var", "trc_forcing_id_field"],
+                &cache.identity,
+            )?;
+            put_array_f64(
+                &mut file,
+                "trc_forcing_precip_last",
+                &["patch", "trc_forcing_species"],
+                cache.precip,
+            )?;
+            put_array_f64(
+                &mut file,
+                "trc_forcing_vapor_last",
+                &["patch", "trc_forcing_species"],
+                cache.vapor,
+            )?;
+        }
         put_scalar_i32(&mut file, "trc_land_restart_complete", 1)?;
     }
     Ok(())
 }
 
-/// `read_land_tracer_restart` 的判定与读入：已提交（`complete = 1`）、schema 5、
-/// 输运示踪物个数与描述符指纹都一致才读；否则返回 `None`，由调用方从水量冷启动
-/// （上游打印 "Generic land tracer restart is legacy/incompatible"）。
-pub fn read_land_tracer_restart(
-    restart: &colm_init::RestartFile,
-    set: &TracerSet,
-    patches: usize,
-) -> Result<Option<Vec<PatchTracerState>>> {
+/// `read_land_tracer_restart` 的判定（`loaded_restart`）：已提交、schema 一致、输运示踪物个数与
+/// 描述符指纹都一致。
+pub fn land_tracer_restart_loadable(restart: &colm_init::RestartFile, set: &TracerSet) -> bool {
     let transport: Vec<usize> = set.transport_indices().collect();
     let scalar = |name: &str| -> Option<i64> {
         restart
@@ -643,10 +739,80 @@ pub fn read_land_tracer_restart(
             .collect();
         stored == expected.as_slice()
     };
-    let matches = scalar("trc_land_restart_complete") == Some(1)
+    scalar("trc_land_restart_complete") == Some(1)
         && scalar("trc_land_restart_schema") == Some(i64::from(LAND_TRACER_RESTART_SCHEMA))
         && scalar("trc_land_transport_count") == Some(transport.len() as i64)
-        && (transport.is_empty() || identity_matches());
+        && (transport.is_empty() || identity_matches())
+}
+
+/// `tracer_forcing_read_restart`：续跑读到了示踪物事务（`loadable`）时，校验强迫缓存的
+/// schema、计数与指纹，返回这些 patch 的 `(precip, vapor)` 最近一次有效比值（`[patch * ntracers + itrc]`）；
+/// 没有强迫变量时返回 `None`。
+pub fn read_forcing_cache(
+    restart: &colm_init::RestartFile,
+    loadable: bool,
+    nvars: usize,
+    identity: &[i32],
+) -> Result<Option<(Vec<f64>, Vec<f64>)>> {
+    if !loadable {
+        return Ok(None);
+    }
+    let scalar = |name: &str| -> Option<i64> {
+        restart
+            .integers(name)
+            .ok()
+            .and_then(|values| values.first().copied())
+    };
+    let (schema, count) = (
+        scalar("trc_forcing_cache_schema"),
+        scalar("trc_forcing_cache_count"),
+    );
+    match (schema, count) {
+        (None, None) => {
+            anyhow::ensure!(
+                nvars == 0,
+                "old tracer restart lacks last-valid forcing cache; cannot reconstruct it"
+            );
+            return Ok(None);
+        }
+        (Some(schema), Some(count)) => anyhow::ensure!(
+            schema == i64::from(FORCING_CACHE_SCHEMA) && count == nvars as i64,
+            "tracer forcing cache configuration differs from restart"
+        ),
+        _ => anyhow::bail!("incomplete or malformed tracer forcing cache restart"),
+    }
+    if nvars == 0 {
+        return Ok(None);
+    }
+    let stored = restart
+        .integers("trc_forcing_cache_identity")
+        .context("incomplete or malformed tracer forcing cache restart")?;
+    anyhow::ensure!(
+        stored.len() == identity.len()
+            && stored.iter().zip(identity).all(|(&a, &b)| a == i64::from(b)),
+        "tracer forcing cache configuration differs from restart"
+    );
+    let precip = restart
+        .floats("trc_forcing_precip_last")
+        .context("incomplete or malformed tracer forcing cache restart")?
+        .to_vec();
+    let vapor = restart
+        .floats("trc_forcing_vapor_last")
+        .context("incomplete or malformed tracer forcing cache restart")?
+        .to_vec();
+    Ok(Some((precip, vapor)))
+}
+
+/// `read_land_tracer_restart` 的判定与读入：已提交（`complete = 1`）、schema 5、
+/// 输运示踪物个数与描述符指纹都一致才读；否则返回 `None`，由调用方从水量冷启动
+/// （上游打印 "Generic land tracer restart is legacy/incompatible"）。
+pub fn read_land_tracer_restart(
+    restart: &colm_init::RestartFile,
+    set: &TracerSet,
+    patches: usize,
+) -> Result<Option<Vec<PatchTracerState>>> {
+    let transport: Vec<usize> = set.transport_indices().collect();
+    let matches = land_tracer_restart_loadable(restart, set);
     if !matches {
         return Ok(None);
     }

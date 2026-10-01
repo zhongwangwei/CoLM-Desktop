@@ -28,6 +28,8 @@ pub struct TracerStepContext<'a> {
     /// 逐示踪物的 `tracer_forcing_precip_value`/`tracer_forcing_vapor_value`。
     pub precip_ratio: &'a [f64],
     pub vapor_ratio: &'a [f64],
+    /// 逐示踪物的 `tracer_forcing_has_vapor`（配置了 vapor 强迫即为真）。
+    pub has_vapor: &'a [bool],
     /// `trc_runtime_forced`。
     pub runtime_forced: &'a [bool],
     /// `DEF_USE_CoLMDEBUG`。
