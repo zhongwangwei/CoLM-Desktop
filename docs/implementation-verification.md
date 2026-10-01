@@ -27323,3 +27323,27 @@ Rust 在 `route_system` 的子步长循环与 `bifurcation_substep` 里各加一
 `cargo test --release -p colm-hist -p colm-runtime` 全过；`-p colm-init` 串行 165 个全过（并行时 9 个河道/BGC 重启测试因 HDF5 不支持线程并发偶发 `HDF error`，与本轮无关）；clippy 无告警。
 
 下一步 T1b：注册了陆面输运示踪物（solute/isotope，不带分馏）的通用记账 —— 描述符与注册表、`trc_*` 状态与续跑、降水/蒸发/土壤水/雪/特殊 patch 的输运、守恒检查与示踪物 history 变量。
+
+## 第 480 轮：示踪物 T1b（一）—— 陆面示踪物各过程移植到 colm-core（未接入）
+
+`crates/colm-core/src/tracer/` 现有：`descriptor`（注册与描述符指纹）、`state`（逐 patch 状态与冷启动）、`precip`、`evap_limit`、`evapo`、`snow`、`soil_water`（含湿地）、`special_patches`、`conservation`、`hist`；`colm-runtime/src/tracer.rs` 负责 namelist/参数文件与陆面示踪物重启读写。示踪物测试 63 个、运行时 3 个全过，clippy 无告警。各过程都按 GIMPLE 定了收缩形状；守恒检查、waterbody 混合箱、含水层重同步与叶片伪质量另用按内核选项编出的 gfortran 驱动逐位对过。**尚未接入宿主步进**，逐位对照留给下一轮（单点参考 tsa：AT 站、1 个 solute，初始浓度 1、降水 2、水汽 0.5，VSF + PHS，日 history）。
+
+**参考算例的事实**：
+- 空间算例开示踪物后，Fortran 自己在第 2 步停在 `negative river tracer mass after coupled donor limiter`（`MOD_Tracer_RiverLake.F90:1667`）——河道示踪物输运（T3）的缺陷，陆面部分因此先在单点上验证（单点内核不编河道）。
+- tsa 的 `f_trc_conc_soisno` 土层有值（约 1.0–1.6），雪层只在有雪那天有值；`conc_wa`/`conc_wa_debt`（VSF 下 `wa` 在土柱内为 0，过不了 ±1 mm 门槛）、`conc_wdsrf`（无积水，0/0）、`conc_wetwat`（只对湿地 patch）是缺测，属于阈值设计而非缺陷。
+
+**宿主需要补出的量**（第 478 轮只移植了改变状态的部分，示踪物记账要的诊断还没有）：
+- 冠层相变质量 `canopy_smelt/frzc_mass_th`（叶温内部算了 `qmelt*dt`/`qfrz*dt`，未导出）；逐层相变 `qphs_thaw/frzc_lay`（可由相变前后的冰量差得到）；THERMAL 前的 `ldew_*`、`wliq/wice` 与 `scv` 快照。
+- `soil_water_vertical_movement` 的 `etroot_actual_out`（含交换的层扣减）、`etroot_aquifer_out`（现返回 `max(deficit,0)`，与上游现行写法不同）、`etroot_surface_out`、`rsub_source_layer/surface/aquifer`；`WATER_VSF` 的 `dew_overflow`、`frost_displaced`、`late_runoff`、`imperv_evap_wdsrf/soil`、`imperv_subl_soil`、`qgtop_out`、`permeable_soil_out`；雪水的逐层下渗映射到 `snow_qout_layer`。
+- 雪层合并/分裂、冻结重分配、新雪只需在宿主调用前取快照（层数、冰量、层厚、雪深）；示踪物侧按同样的判定重放。
+- 冰川/湖：溢出质量、`endwb/totwb/errorw` 等收支项与湖的 `lake_deficit`。
+
+**移植中发现的上游问题**（照写，未修，待决定）：
+1. 暖湿地新雪：水侧只在 VSF、`t_grnd>tfrz`、`snl==0` 时把 `scv` 并入 `wetwat`；示踪物侧（`MOD_Tracer_Snow`）只看 `patchtype==2 .and. scv<trc_tiny` 就搬 `trc_scv`，两边不一致。
+2. 非挥发溶质经气相扩散：未登记的示踪物扩散系数比与分馏系数都回落为 1，于是默认打开的 `DEF_TRACER_SOIL_VAPOR_DIFFUSION` 让溶质在土壤与雪的孔隙气中扩散（`MOD_Tracer_SoilWater.F90:1371-1384`、`:1423-1471`、湿地 `:2476-2524`）。
+3. 地表池蒸发的分母已含灌溉水（`:1113`），示踪物却在其后才加（`:1149-1166`），开灌溉时地表比值漂移；灌溉回落比值土壤水用 `R_precip`、湿地用 `R_atm`。
+4. 不分馏时 `trc_leaf_water_moles` 恒为 0，`release_leaf_iso_storage` 每步把 `leaf_delta_e/b` 重置为 0（写进重启）。
+5. 冠层或第 1 层水量在 `trc_tiny` 以下时蒸发不记入 `tracer_book_evap_loss`，`a_water_evap_gross` 等少计；深层几乎空的层取得水时按初始比值"凭空"生成示踪物（记入数值残差）。
+6. 雪层合并第一轮不复查刚下移的层；塌缩分支 `trc_scv` 被覆盖（与水侧 `scv = zwice` 同样覆盖）。
+7. history：`write_history_variable_2d` 原地把模块累加器除以 `nac`（目前靠写出顺序才无害）；单点分层量写 `((m/w)*nac)/nac`；`leaf_delta_b` 的门槛把 mol m-2 与 kg m-2 比较。
+8. `tracer_fractionation_active` 上游还要求同位素在 O18/HDO 注册表里；Rust 暂按"同位素即生效"处理，分馏属 T2。
