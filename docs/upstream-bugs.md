@@ -250,6 +250,19 @@
 - **影响**：没有雪层合并/分裂的算例碰不到；有雪时可能崩溃或读到垃圾。
 - **处理**：`vendor/` 已修（第 479 轮）：四处条件改为 `DEF_USE_TRACER .and. ntracers > 0`。
 
+### 35. 河道示踪物供体限幅后的"负质量"判据是绝对量，恰好排空的单元因 1 ulp 舍入停机
+
+- **位置**：`main/TRACER/MOD_Tracer_RiverLake.F90` 的 `tracer_substep` 第 8 节（可见池与防洪堤保护池两处更新后的检查）。
+- **原因**：判据是 `trc_mass_new < -TRC_RESTART_NEGATIVE_DUST`（`1e-12`，**绝对**量）。供体限幅把恰好排空的单元的速率定成
+  `(mass+inflow)/outflow`，更新后的质量在数学上是 0、数值上落在这次更新各项量级的几个 ulp 之内；河道单元的示踪物
+  质量是"体积×浓度"，量级 1e4–1e8，ulp 远大于 1e-12。
+- **证据**：`g1ts`（2003 年 1 月、IsoGSM 驱动、1 个溶质、GRID + 河道）第 2 步停在
+  `negative river tracer mass after coupled donor limiter`；调试打印：单元 4458，`mass = 3.48749877929687500E+04`，
+  `trc_out_mass` 与之相等（rate = 1），`trc_mass_new = -3.4955E-12`，相对 `-1.0E-16`（1 ulp）。
+- **影响**：任何开示踪物的 GRID 空间算例都会在第一次有单元被排空时停机（上游 `Amazon_*` 示例同样会碰到）。
+- **处理**：`vendor/` 已修（第 487 轮）：两处判据改成 `-max(DUST, 1e-12 × (|旧质量| + (|flux|+|flux_ups|+|bif_net|)·dt))`，
+  其余不变（仍 `max(·,0)` 夹到 0）；`g1ts` 此后跑完 2 天。
+
 ## 二、TRACER 编译开关改变了物理（需要上游确认哪一边是对的）
 
 这一版上游在很多地方给 TRACER 构建和非 TRACER 构建写了**不同的物理**，不只是记账不同。

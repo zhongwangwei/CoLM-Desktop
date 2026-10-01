@@ -205,6 +205,8 @@ impl SpatialRuntime {
                             .with_context(|| format!("patch {index}"))?,
                     );
                 }
+                // `tracer_report`：一步里所有 patch 推进完之后（`CoLMDRIVER.F90:392-393`）。
+                crate::tracer::report_after_patches(templates)?;
                 // `CoLM.F90:559-563`：陆面步之后、`hist_out` 之前汇流；预热期不汇流。
                 if !clock.is_spinup {
                     if let Some((river, included)) = self.river.as_mut() {
@@ -260,6 +262,14 @@ impl SpatialRuntime {
                             &initial_totals,
                             time_step_seconds,
                         )?;
+                    }
+                    // `tracer_hist_out`：主 history 之后；预热期不计步也不清零（会话里处理）。
+                    if let Some(path) = history.session.push_tracer(
+                        clock.end_time,
+                        clock.is_spinup,
+                        &mut next_states,
+                    )? {
+                        history.files.push(path);
                     }
                 }
                 if self.deferred_lai_refresh != Some(steps[0].clock.end_time) {

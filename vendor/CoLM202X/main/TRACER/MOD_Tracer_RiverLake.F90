@@ -40,6 +40,12 @@ MODULE MOD_Tracer_RiverLake
    integer, parameter :: RIVER_TRACER_RESTART_SCHEMA_VERSION = 2
    integer, save :: river_restart_schema_loaded = 0
    real(r8), parameter :: TRC_RESTART_NEGATIVE_DUST = 1.0e-12_r8
+   ! Relative roundoff admitted after a donor-limited update.  A cell drained
+   ! exactly (rate = (mass + inflow)/outflow) lands within a few ulp of the
+   ! gross terms of that update, which for a river cell (mass ~ volume*conc)
+   ! is far above the absolute dust above: the first spatial run stopped at
+   ! step 2 on a cell of 3.5e4 that ended at -3.5e-12 (one ulp).
+   real(r8), parameter :: TRC_UPDATE_ROUNDOFF = 1.0e-12_r8
    ! The coupled donor limiter iterates dimensionless rates in [0,1] through a
    ! monotone non-decreasing map (rate_new = max(rate_old, feasible)): every
    ! iterate is feasible, so a cell can never export more tracer than it holds.
@@ -994,7 +1000,7 @@ CONTAINS
    logical  :: upstream_has_levee, downstream_has_levee, can_use_levee_tracer
    logical  :: limiter_converged
    real(r8) :: release, R_fill
-   real(r8) :: trc_mass_new
+   real(r8) :: trc_mass_new, levsto_old
    real(r8) :: decay_fraction, reactive_src
    logical  :: bif_workspace_active
    integer  :: npth_bif, nlev_bif
@@ -1663,7 +1669,8 @@ CONTAINS
                + (- trc_flux(i) + flux_ups(i) - bif_net(i)) * dt_i
             IF (.not. ieee_is_finite(trc_mass_new)) &
                CALL CoLM_stop('non-finite river tracer mass after coupled donor limiter')
-            IF (trc_mass_new < -TRC_RESTART_NEGATIVE_DUST) &
+            IF (trc_mass_new < -max(TRC_RESTART_NEGATIVE_DUST, TRC_UPDATE_ROUNDOFF * &
+                (abs(trc_mass(itrc, i)) + (abs(trc_flux(i)) + abs(flux_ups(i)) + abs(bif_net(i))) * dt_i))) &
                CALL CoLM_stop('negative river tracer mass after coupled donor limiter')
 
             ! Transport owns only conservative edge transfers.  Never snap the
@@ -1672,10 +1679,12 @@ CONTAINS
             trc_mass(itrc, i) = max(trc_mass_new, 0._r8)
             IF (allocated(trc_levsto)) THEN
                IF (i <= size(trc_levsto, 2)) THEN
+                  levsto_old = trc_levsto(itrc, i)
                   trc_levsto(itrc, i) = trc_levsto(itrc, i) - trc_bif_lev_net(i) * dt_i
                   IF (.not. ieee_is_finite(trc_levsto(itrc, i))) &
                      CALL CoLM_stop('non-finite protected tracer mass after coupled donor limiter')
-                  IF (trc_levsto(itrc, i) < -TRC_RESTART_NEGATIVE_DUST) &
+                  IF (trc_levsto(itrc, i) < -max(TRC_RESTART_NEGATIVE_DUST, TRC_UPDATE_ROUNDOFF * &
+                      (abs(levsto_old) + abs(trc_bif_lev_net(i)) * dt_i))) &
                      CALL CoLM_stop('negative protected tracer mass after coupled donor limiter')
                   trc_levsto(itrc, i) = max(trc_levsto(itrc, i), 0._r8)
                ENDIF

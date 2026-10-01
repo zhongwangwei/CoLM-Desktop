@@ -202,38 +202,7 @@ fn run() -> Result<()> {
         colm_runtime::tracer::TracerRuntime::from_document(&document)?.map(std::sync::Arc::new);
     if let Some(tracer) = tracer_runtime.as_ref().filter(|tracer| tracer.has_transport()) {
         let restart = colm_init::RestartFile::open(&files.time)?;
-        templates = templates
-            .into_iter()
-            .map(|template| {
-                let state = template.snow_state();
-                let wliq = colm_core::tracer::step::pack_soisno(
-                    &state.snow.liquid_water_kg_m2,
-                    &state.soil_water.liquid_water_kg_m2,
-                );
-                let wice = colm_core::tracer::step::pack_soisno(
-                    &state.snow.ice_water_kg_m2,
-                    &state.soil_water.ice_water_kg_m2,
-                );
-                let initial = tracer.initial_state(
-                    &restart,
-                    template.patch,
-                    patch_count,
-                    colm_core::tracer::WaterInventory {
-                        patch_type: template.patch_type,
-                        ldew_rain: state.energy.leaf.canopy_water.rain_mm,
-                        ldew_snow: state.energy.leaf.canopy_water.snow_mm,
-                        wliq_soisno: &wliq,
-                        wice_soisno: &wice,
-                        wa: state.soil_water.aquifer_water_mm,
-                        wdsrf: state.soil_water.surface_water_mm,
-                        wetwat: state.soil_water.wetland_water_mm,
-                        scv: state.snow.water_equivalent_kg_m2,
-                        waterstorage: None,
-                    },
-                )?;
-                template.with_tracer(std::sync::Arc::clone(tracer), initial)
-            })
-            .collect::<Result<Vec<_>>>()?;
+        templates = attach_land_tracers(tracer, templates, &restart, patch_count)?;
     }
     // `Opt_Baseflow_init` 无论开不开优化都先建 `ParaOpt/`（`MOD_Opt_Baseflow.F90:40-42`）。
     let para_opt = layout.out().join(&name).join("restart/ParaOpt");
@@ -426,9 +395,14 @@ fn run_spatial(
     // 示踪物：开关本身（`DEF_TRACER_NUM = 0`）已移植 —— 宿主物理不变，只多写 history 窗口变量、
     // 示踪物 history 文件与重启里的空示踪物事务；注册了示踪物的输运尚未移植。
     let tracers = logical_field(&document, "DEF_USE_TRACER")?;
+    // 陆面示踪物（第 487 轮）已接；河道示踪物（`MOD_Tracer_RiverLake`）还没有，放开会写出缺了
+    // 河道示踪物的 unitcat history。开发期间用 `COLM_RS_LAND_TRACERS_ONLY=1` 只比陆面文件。
     ensure!(
-        !tracers || integer_field(&document, "DEF_TRACER_NUM")? == 0,
-        "DEF_USE_TRACER with DEF_TRACER_NUM > 0 is not ported yet; run this case with --engine fortran"
+        !tracers
+            || integer_field(&document, "DEF_TRACER_NUM")? == 0
+            || std::env::var_os("COLM_RS_LAND_TRACERS_ONLY").is_some(),
+        "spatial DEF_USE_TRACER with DEF_TRACER_NUM > 0 needs the river tracers, which are not \
+         ported yet; run this case with --engine fortran"
     );
     ensure!(
         !logical_field(&document, "DEF_UnitCatchment_regional")?,
@@ -639,6 +613,19 @@ fn run_spatial_segment(
         } else {
             patch_mask.extend(std::iter::repeat_n(true, patches.len()));
         }
+    }
+    // `land_tracer_init`：逐块读续跑里的示踪物事务（或按水量冷启动）。
+    let tracer_runtime =
+        colm_runtime::tracer::TracerRuntime::from_document(document)?.map(std::sync::Arc::new);
+    if let Some(tracer) = tracer_runtime.as_ref().filter(|tracer| tracer.has_transport()) {
+        let mut attached = Vec::with_capacity(templates.len());
+        let mut rest = templates.into_iter();
+        for ((_, patches), files) in topology.blocks.iter().zip(&block_files) {
+            let block: Vec<_> = rest.by_ref().take(patches.len()).collect();
+            let restart = colm_init::RestartFile::open(&files.time)?;
+            attached.extend(attach_land_tracers(tracer, block, &restart, patches.len())?);
+        }
+        templates = attached;
     }
     let grid = GriddedForcing::open_grid(&config.forcing, config.start)?;
     let mut history_grid =
@@ -869,13 +856,21 @@ fn run_spatial_segment(
                 logical_field(document, "DEF_USE_TRACER")?
                     .then(|| real_field(document, "DEF_simulation_time%timestep"))
                     .transpose()?,
-            )?,
+            )
+            .map(|session| match tracer_runtime.as_ref().filter(|t| t.has_transport()) {
+                Some(tracer) => session.with_tracer_variables(
+                    tracer.set.clone(),
+                    templates.iter().map(|template| template.patch_type).collect(),
+                ),
+                None => session,
+            })?,
             river: river_writer,
             elements: ElementGroups::from_topology(&topology)?,
             files: Vec::new(),
         }),
         None => None,
     };
+
     let periodic = topology
         .blocks
         .iter()
@@ -1464,6 +1459,7 @@ fn write_block_restarts(
             &files.time,
             &path,
         )?;
+        append_tracer_restart(&templates[patches.clone()], &states[patches.clone()], &path)?;
         mark_history_restart_with_river(&path, history, Some(patches.clone()), river_required)?;
         written.push(path);
     }
@@ -1842,6 +1838,48 @@ fn run_snow(
 }
 
 /// `write_tracer_restart_all`：有输运示踪物时把示踪物事务追加进刚写好的陆面续跑文件。
+/// `land_tracer_init`：给一份续跑文件里的各 patch 挂上示踪物状态。续跑里的示踪物事务可用就读
+/// （`template.patch` 是该文件里的行，`count` 是行数），否则按水量冷启动。
+fn attach_land_tracers(
+    tracer: &std::sync::Arc<colm_runtime::tracer::TracerRuntime>,
+    templates: Vec<StandardLctRestartTemplate>,
+    restart: &colm_init::RestartFile,
+    count: usize,
+) -> Result<Vec<StandardLctRestartTemplate>> {
+    templates
+        .into_iter()
+        .map(|template| {
+            let state = template.snow_state();
+            let wliq = colm_core::tracer::step::pack_soisno(
+                &state.snow.liquid_water_kg_m2,
+                &state.soil_water.liquid_water_kg_m2,
+            );
+            let wice = colm_core::tracer::step::pack_soisno(
+                &state.snow.ice_water_kg_m2,
+                &state.soil_water.ice_water_kg_m2,
+            );
+            let initial = tracer.initial_state(
+                restart,
+                template.patch,
+                count,
+                colm_core::tracer::WaterInventory {
+                    patch_type: template.patch_type,
+                    ldew_rain: state.energy.leaf.canopy_water.rain_mm,
+                    ldew_snow: state.energy.leaf.canopy_water.snow_mm,
+                    wliq_soisno: &wliq,
+                    wice_soisno: &wice,
+                    wa: state.soil_water.aquifer_water_mm,
+                    wdsrf: state.soil_water.surface_water_mm,
+                    wetwat: state.soil_water.wetland_water_mm,
+                    scv: state.snow.water_equivalent_kg_m2,
+                    waterstorage: None,
+                },
+            )?;
+            template.with_tracer(std::sync::Arc::clone(tracer), initial)
+        })
+        .collect()
+}
+
 fn append_tracer_restart(
     templates: &[StandardLctRestartTemplate],
     states: &[StandardLctSnowSoilState],

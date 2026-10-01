@@ -187,7 +187,13 @@ impl HistoryBuffers {
     /// 变量。示踪物为 0 个时上游写出的就是这些（`MOD_Hist.F90:341-358`，`tracer_hist_out`
     /// 对每个输运示踪物才加变量）。
     pub fn write_tracer_skeleton(&self, path: impl AsRef<Path>) -> Result<()> {
-        let path = path.as_ref();
+        self.write_tracer_gridded(path.as_ref(), &[])
+    }
+
+    /// 网格示踪物文件（`tracer_hist_out` 的 `Gridded` 支）：骨架同主文件，变量是调用方已聚合到
+    /// 网格窗口的值，二维 `(time, lat, lon)`、分层 `(time, soilsnow, lat, lon)`；`values` 按
+    /// `(record, [layer,] cell)` 行主序，`cell = ilat*nlon + ilon`。
+    fn write_tracer_gridded(&self, path: &Path, variables: &[TracerFileVariable]) -> Result<()> {
         let grid = self
             .grid
             .as_ref()
@@ -202,11 +208,35 @@ impl HistoryBuffers {
             time.put_attribute("units", TIME_UNITS)?;
         }
         self.define_windows(&mut file)?;
+        let cells = grid.cells();
+        for variable in variables {
+            let (dims, width): (&[&str], usize) = if variable.layered {
+                (&["time", "soilsnow", "lat", "lon"], self.dims.soilsnow())
+            } else {
+                (&["time", "lat", "lon"], 1)
+            };
+            ensure!(
+                variable.values.len() == self.records * width * cells,
+                "{} has {} values for {} records x {width} layers x {cells} cells",
+                variable.name,
+                variable.values.len(),
+                self.records
+            );
+            let mut nc = file.add_variable::<f64>(&variable.name, dims)?;
+            nc.put_attribute("long_name", variable.long_name.as_str())?;
+            nc.put_attribute("units", variable.units.as_str())?;
+            nc.put_attribute("missing_value", MISSING_VALUE)?;
+        }
         self.put_grid_coordinates(&mut file, grid)?;
         file.variable_mut("time")
             .context("time disappeared after definition")?
             .put_values(&self.times, netcdf::Extents::All)?;
         self.put_windows(&mut file)?;
+        for variable in variables {
+            file.variable_mut(&variable.name)
+                .with_context(|| format!("{} disappeared after definition", variable.name))?
+                .put_values(&variable.values, netcdf::Extents::All)?;
+        }
         Ok(())
     }
 
@@ -655,11 +685,7 @@ impl HistoryBuffers {
     ) -> Result<()> {
         let path = path.as_ref();
         if self.grid.is_some() {
-            ensure!(
-                variables.is_empty(),
-                "gridded tracer history variables are not ported yet"
-            );
-            return self.write_tracer_skeleton(path);
+            return self.write_tracer_gridded(path, variables);
         }
         let mut file =
             netcdf::create(path).with_context(|| format!("cannot create {}", path.display()))?;

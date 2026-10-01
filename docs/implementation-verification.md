@@ -27462,3 +27462,26 @@ colm-rs: DEF_HIST_vars_out_default = .false. (per-variable history selection) is
 宿主与溶质示踪物不变：`tsa tsat tsw tsg tsl tsd1 tsd2 tsp tsq tsu bc pf qm gl dh5` 重跑全部 `ok rst: ok`；`cargo test`（colm-core 466）通过，clippy 无告警。
 
 **还没做**：`tracer_forcing_has_vapor` 恒为否（`has_vapor: None`）——接 T2c 的强迫后由运行时传入；空间示踪物运行时（T2b）。
+
+## 第 487 轮：上游缺陷 35（河道示踪物"负质量"判据）与空间陆面示踪物
+
+**顺序调整**：GRID 构建里河道汇流是无条件的（`CoLM.F90:437/549` 直接调 `grid_riverlake_flow`），所以任何空间示踪物算例都走河道示踪物 —— T2b（空间示踪物运行时）与 T3（河道示踪物）必须连着做，先修上游的崩溃。
+
+**缺陷 35 的根因**（`docs/upstream-bugs.md`）：在 scratchpad 的 latlon dump 构建里给崩溃点加打印，`g1ts`（IsoGSM 驱动、1 个溶质、2003-01-01 起 2 天）第 2 步：单元 4458，`mass = 3.48749877929687500E+04`，外流需求与之相等（rate = 1，恰好排空），`trc_mass_new = -3.4955E-12`，相对 `-1.0E-16`。判据 `< -1e-12` 是绝对量，而河道示踪物质量是"体积×浓度"。vendor 改成相对舍入容差（更新各项量级的 1e-12），两处（可见池、防洪堤保护池）。修后 `g1ts` 跑完，`kernels/latlon` 已按 vendor 重编（`ebbc1feb`）。
+
+**空间陆面示踪物（第一段）**
+- `colm-rs` 空间支：逐块读续跑里的示踪物事务（或按水量冷启动），单点的挂载抽成 `attach_land_tracers` 两边共用；每块续跑写完后追加示踪物向量。
+- 空间运行时：一步所有 patch 之后 `tracer_report`；主 history 之后 `push_tracer`。
+- 网格示踪物 history：`tracer_hist_out` 的 `Gridded` 支 —— 比值/δ 是"质量与水量各自 `pset2grid`（不合格的 patch 以 0 入图）再相除"，`Mean`/`AreaState` 除以陆面 `filter` 的 `sumarea`，分层的 `f_trc_conc_soisno` 不合格的层不入图；聚合用 colm-core 现成的 `GridCell`，按 `HistoryGrid.parts` 的 patch 序、份序累加。文件骨架同主文件，变量 `(time, lat, lon)` / `(time, soilsnow, lat, lon)`，另带窗口变量。
+- 河道示踪物还没移植：空间 `DEF_TRACER_NUM > 0` 仍拒绝，开发期用 `COLM_RS_LAND_TRACERS_ONLY=1` 只比陆面文件（T3 完成后连同环境变量一起去掉）。
+
+**逐位对照**（`g1ts`，`kernels/latlon` 重生成参照）：
+
+| 文件 | 结果 |
+|---|---|
+| `gd_hist_2003-01.nc`（主） | `[]` |
+| `gd_hist_tracer_2003-01.nc` | `[]`（全部 `f_trc_*` 与两个窗口变量） |
+| 陆面续跑 `2003-001`/`2003-003` | `diff 0`（含示踪物事务） |
+| `gd_hist_unitcat`、河道续跑 | 只缺河道示踪物变量（T3） |
+
+`g1`、`g1tr0` 重跑 history/restarts 全部 bad 0。

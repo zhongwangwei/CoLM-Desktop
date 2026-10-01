@@ -3542,13 +3542,25 @@ impl HistorySession {
             let mut buffer = HistoryBuffers::new(self.dimensions, self.site, records_in_group);
             if let Some(grid) = &self.grid {
                 buffer = buffer.with_grid(std::sync::Arc::clone(grid))?;
+                // 网格的示踪物文件与主文件一样带窗口变量（`MOD_Hist.F90:319-361`）。
+                if self.tracer_time_step_seconds.is_some() {
+                    buffer.enable_windows();
+                }
             }
             tracer.open = Some((record.suffix.clone(), buffer, Vec::new()));
         }
         let nac = tracer.steps as f64;
         let patches = states.len();
+        let grid = self.grid.clone();
         let (_, buffer, variables) = tracer.open.as_mut().expect("just opened");
         buffer.set_time(record.record, i32::try_from(record.label_minutes)?)?;
+        if let (Some(deltim), true) = (self.tracer_time_step_seconds, grid.is_some()) {
+            let minutes = colm_hist::time::minutes_from_1900(end.year)
+                + (i64::from(end.julian_day) - 1) * 1440
+                + i64::from(end.seconds / 60);
+            let end_minutes = minutes as f64 + f64::from(end.seconds % 60) / 60.0;
+            buffer.set_window(record.record, nac * deltim, end_minutes)?;
+        }
         // 文件里的变量：逐示踪物、逐表项（同 `tracer_hist_out` 的写出顺序）。
         let mut index = 0;
         for itrc in tracer.set.transport_indices() {
@@ -3564,21 +3576,66 @@ impl HistorySession {
                     continue;
                 }
                 let layered = matches!(variable.dims, hist::TracerHistDims::SoilSnow);
+                let width = if layered {
+                    colm_core::tracer::SOISNO_LAYERS
+                } else {
+                    1
+                };
+                // 网格写出时第二维是格子（`lat*lon`），单点是 patch。
+                let columns = grid
+                    .as_ref()
+                    .map_or(patches, |grid| grid.lat.len() * grid.lon.len());
                 if variables.len() == index {
-                    let width = if layered {
-                        colm_core::tracer::SOISNO_LAYERS
-                    } else {
-                        1
-                    };
                     variables.push(colm_hist::history::TracerFileVariable {
                         name: variable.variable_name(descriptor),
                         long_name: variable.long_name(descriptor),
                         units: variable.units(descriptor).to_owned(),
                         layered,
-                        values: vec![colm_core::MISSING; records_in_group * patches * width],
+                        values: vec![colm_core::MISSING; records_in_group * columns * width],
                     });
                 }
                 let file_variable = &mut variables[index];
+                if let Some(grid) = grid.as_ref() {
+                    // `tracer_hist_out` 的网格支：`sumarea` 用陆面 `filter`（`patchtype < 99`，
+                    // `patchmask` 在 Rust 空间运行里恒真），分子按各变量自己的 `filter`，
+                    // `pset2grid` 按 patch 序、再按份序累加。
+                    let mut cells = vec![hist::GridCell::default(); columns * width];
+                    for (patch, state) in states.iter().enumerate() {
+                        let track = state
+                            .tracer
+                            .as_deref()
+                            .context("a tracer history needs every patch to carry tracer state")?;
+                        let patch_type = tracer.patch_types[patch];
+                        let land = hist::PatchFilter::Land.admits(patch_type, true, true);
+                        let patch_ok = variable.patch_filter.admits(patch_type, true, true);
+                        let pairs = layered.then(|| hist::soisno_layer_pairs(itrc, &track.state));
+                        let term = (!layered)
+                            .then(|| hist::patch_term(variable, descriptor, itrc, &track.state, nac));
+                        for &(cell, area) in &grid.parts[patch] {
+                            for layer in 0..width {
+                                let target = &mut cells[layer * columns + cell];
+                                if land {
+                                    target.add_area(area);
+                                }
+                                match (&pairs, term) {
+                                    (Some(pairs), _) => {
+                                        let (mass, water) = pairs[layer];
+                                        target.add_layer(mass, water, area, patch_ok);
+                                    }
+                                    (None, Some(term)) => target.add(variable, term, area, patch_ok),
+                                    (None, None) => unreachable!("a 2-D variable always has a term"),
+                                }
+                            }
+                        }
+                    }
+                    let base = record.record * columns * width;
+                    for (offset, cell) in cells.iter().enumerate() {
+                        file_variable.values[base + offset] =
+                            cell.finish(variable, descriptor.ref_ratio);
+                    }
+                    index += 1;
+                    continue;
+                }
                 for (patch, state) in states.iter().enumerate() {
                     let track = state
                         .tracer
