@@ -189,8 +189,89 @@ pub fn host_inputs<'a>(
         rootr: &arrays.rootr,
         frcsat: output.water.soil.saturated_fraction,
         pft,
+        lake: None,
         dynamic_wetland,
     }
+}
+
+impl HostArrays {
+    /// 湖泊 patch：根吸水廓线只进通气组织，湖的饱和相不跑它，取 0。
+    pub fn from_lake_state(state: &colm_core::StandardLctSnowSoilState) -> Result<Self> {
+        use colm_core::tracer::step::pack_soisno;
+        let nl = colm_core::methane::physics::NL_SOIL;
+        let fixed = |values: &[f64], name: &str| -> Result<[f64; 10]> {
+            values
+                .get(..nl)
+                .and_then(|slice| <[f64; 10]>::try_from(slice).ok())
+                .with_context(|| format!("{name} has fewer than {nl} soil layers"))
+        };
+        Ok(Self {
+            t_soisno: pack_soisno(&state.snow.temperature_k, &state.soil_temperature_k),
+            wliq_soisno: pack_soisno(
+                &state.snow.liquid_water_kg_m2,
+                &state.soil_water.liquid_water_kg_m2,
+            ),
+            wice_soisno: pack_soisno(
+                &state.snow.ice_water_kg_m2,
+                &state.soil_water.ice_water_kg_m2,
+            ),
+            smp: fixed(&state.soil_water.matric_potential_mm, "smp")?,
+            rootr: [0.0; 10],
+        })
+    }
+}
+
+/// 湖泊 patch 的 [`HostInputs`]（`ch4_impl_lake_step`，在 `CoLMMAIN` 末尾的非土壤清零之后）。
+#[allow(clippy::too_many_arguments)]
+pub fn lake_host_inputs<'a>(
+    arrays: &'a HostArrays,
+    idate: [i32; 3],
+    deltim: f64,
+    state: &'a colm_core::StandardLctSnowSoilState,
+    output: &colm_core::LakeStepOutput,
+    forcing: &colm_core::RuntimeForcing,
+    partial_pressures_pa: (f64, f64),
+    lakedepth: f64,
+    dynamic_wetland: bool,
+) -> Result<HostInputs<'a>> {
+    let lake = state
+        .lake
+        .as_ref()
+        .context("a lake methane patch needs the lake state")?;
+    Ok(HostInputs {
+        idate,
+        deltim,
+        t_soisno: &arrays.t_soisno,
+        wliq_soisno: &arrays.wliq_soisno,
+        wice_soisno: &arrays.wice_soisno,
+        t_grnd: state.surface_temperature_k(),
+        forc_t: forcing.air_temperature_k,
+        forc_pbot: forcing.bottom_pressure_pa,
+        forc_po2m: partial_pressures_pa.1,
+        forc_pco2m: partial_pressures_pa.0,
+        ustar: output.thermal.ustar,
+        fq: output.thermal.fq,
+        zwt: state.soil_water.water_table_depth_m,
+        snowdp: state.snow.depth_m,
+        etr: 0.0,
+        wdsrf: state.soil_water.surface_water_mm,
+        wetwat: state.soil_water.wetland_water_mm,
+        smp: &arrays.smp,
+        lai: state.energy.canopy.leaf_area_index,
+        sai: state.energy.canopy.stem_area_index,
+        rootr: &arrays.rootr,
+        frcsat: 1.0,
+        pft: colm_core::methane::bgc_link::PftInputs::default(),
+        lake: Some(colm_core::methane::column::LakeHost {
+            dz_lake: &lake.column.thickness_m,
+            t_lake: &lake.column.temperature_k,
+            lake_icefrac: &lake.column.ice_fraction,
+            lakedepth,
+            forc_us: forcing.eastward_wind_m_s,
+            forc_vs: forcing.northward_wind_m_s,
+        }),
+        dynamic_wetland,
+    })
 }
 
 /// patch 的静态量（`MethaneSite`）。`root_fraction` 是地类根分布 `rootfr_lc(:, patchclass)`。
@@ -288,7 +369,7 @@ pub fn write_restart(
 ) -> Result<()> {
     use crate::tracer::{ensure_dimension, put_array_f64};
     use colm_core::methane::config::{COMP_RICE, COMP_SOIL};
-    use colm_core::methane::physics::{NL_SOIL, SPVAL};
+    use colm_core::methane::physics::NL_SOIL;
     let mut file =
         netcdf::append(path).with_context(|| format!("cannot reopen {}", path.display()))?;
     let n = patches.len();
@@ -374,19 +455,26 @@ pub fn write_restart(
     scalar(&mut file, "ch4_grnd_methane_cond_sat", &|i| {
         p(i).last.map_or(default_cond, |r| r.sat.grnd_cond)
     })?;
-    layered(&mut file, "ch4_conc_o2_lake", &|_| [1.0; NL_SOIL])?;
-    layered(&mut file, "ch4_conc_ch4_lake", &|_| [0.0; NL_SOIL])?;
-    scalar(&mut file, "ch4_totcol_lake", &|_| 0.0)?;
-    scalar(&mut file, "ch4_grnd_methane_cond_lake", &|_| default_cond)?;
-    for name in [
-        "ch4_lake_water_ch4_stock",
-        "ch4_lake_water_o2_stock",
-        "ch4_lake_frozen_ch4_stock",
-        "ch4_lake_frozen_o2_stock",
-    ] {
-        scalar(&mut file, name, &|_| 0.0)?;
-    }
-    scalar(&mut file, "ch4_lake_liquid_fraction_prev", &|_| SPVAL)?;
+    let lake = |i: usize| &p(i).lake;
+    layered(&mut file, "ch4_conc_o2_lake", &|i| lake(i).conc_o2)?;
+    layered(&mut file, "ch4_conc_ch4_lake", &|i| lake(i).conc_methane)?;
+    scalar(&mut file, "ch4_totcol_lake", &|i| lake(i).totcol)?;
+    scalar(&mut file, "ch4_grnd_methane_cond_lake", &|i| {
+        lake(i).grnd_cond
+    })?;
+    scalar(&mut file, "ch4_lake_water_ch4_stock", &|i| {
+        lake(i).water.ch4
+    })?;
+    scalar(&mut file, "ch4_lake_water_o2_stock", &|i| lake(i).water.o2)?;
+    scalar(&mut file, "ch4_lake_frozen_ch4_stock", &|i| {
+        lake(i).frozen_ch4
+    })?;
+    scalar(&mut file, "ch4_lake_frozen_o2_stock", &|i| {
+        lake(i).frozen_o2
+    })?;
+    scalar(&mut file, "ch4_lake_liquid_fraction_prev", &|i| {
+        lake(i).liquid_fraction_prev
+    })?;
     layered(&mut file, "ch4_layer_sat_lag", &|i| agg(i).layer_sat_lag)?;
     layered(&mut file, "ch4_layer_sat_lag_soil", &|i| {
         soil(i).layer_sat_lag
@@ -486,6 +574,7 @@ pub struct RestartedPatch {
 pub fn read_restart(
     time: &colm_init::RestartFile,
     patch: usize,
+    patch_type: i32,
     setup: &MethaneSetup,
 ) -> Result<Option<RestartedPatch>> {
     use anyhow::ensure;
@@ -624,7 +713,7 @@ pub fn read_restart(
         check(&[scalar(name)?], &unit);
     }
     check(&[scalar("ch4_f_inund_flood_depth_patch")?], &nonneg);
-    // 湖库存（schema 2+/4+ 一定在）：本移植只跑土壤 patch，它们停在冷启动值，只校验。
+    // 湖库存（schema 2+/4+ 一定在）：严格读时允许 -1e-18 以内的负零头，读回后截到 0。
     let floor = |x: f64| invalid(x) || x < -1.0e-18;
     for name in [
         "ch4_lake_water_ch4_stock",
@@ -703,6 +792,35 @@ pub fn read_restart(
         n.tempavg_finrw = scalar("ch4_tempavg_finrw")?;
         a.fsat_bef = scalar("ch4_fsat_bef")?;
         a.finundated_lag = scalar("ch4_finundated_lag")?;
+    }
+    // 湖泊状态（`*_lake`、水柱的液态与冻结库存）。
+    {
+        let l = &mut restarted.lake;
+        l.conc_o2 = layers("ch4_conc_o2_lake")?;
+        l.conc_methane = layers("ch4_conc_ch4_lake")?;
+        l.totcol = scalar("ch4_totcol_lake")?;
+        let cond = scalar("ch4_grnd_methane_cond_lake")?;
+        l.grnd_cond = if cond <= 0.0 {
+            setup.params.methane.grnd_methane_cond_default
+        } else {
+            cond
+        };
+        let nonnegative = |x: f64| if x < 0.0 { 0.0 } else { x };
+        l.water.ch4 = nonnegative(scalar("ch4_lake_water_ch4_stock")?);
+        l.water.o2 = nonnegative(scalar("ch4_lake_water_o2_stock")?);
+        l.frozen_ch4 = nonnegative(scalar("ch4_lake_frozen_ch4_stock")?);
+        l.frozen_o2 = nonnegative(scalar("ch4_lake_frozen_o2_stock")?);
+        l.liquid_fraction_prev = scalar("ch4_lake_liquid_fraction_prev")?;
+        // 湖的列总量是首步收支的参照：已提交的 schema 必须满足 总量 = 沉积层 + 水柱（含冻结）。
+        if patch_type == 4 {
+            let components = (l.totcol + l.water.ch4) + l.frozen_ch4;
+            let tolerance = 1.0e-12 + 1.0e-10 * totcol.abs().max(components.abs());
+            ensure!(
+                (totcol - components).abs() <= tolerance,
+                "methane restart lake inventory violates total = sediment + water; refusing \
+                 corrupt checkpoint"
+            );
+        }
     }
     restarted.rice_fraction_prev = scalar("ch4_rice_fraction_prev")?;
     check(&[restarted.rice_fraction_prev], &unit);

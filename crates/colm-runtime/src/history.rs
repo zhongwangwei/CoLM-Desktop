@@ -3056,6 +3056,8 @@ impl HistorySession {
         let ground = state.surface_temperature_k();
         self.plant_hydraulics = template.plant_hydraulics();
         self.variably_saturated = template.physics.variably_saturated_flow;
+        // BGC 状态随所有 patch 存（`accumulate_fluxes` 对湖、冰川也累加 BGC 量）。
+        self.bgc = template.bgc.as_ref().map(|bgc| bgc.switches);
         let thermal = output.thermal;
         let shortwave = output.shortwave;
         let element_surface = self.element_surface;
@@ -3065,6 +3067,9 @@ impl HistorySession {
                 skipped,
             };
             set_lct_snow_state(accumulator, 0, template, state, ground)?;
+            if let (Some(runtime), Some(bgc)) = (&template.bgc, &state.bgc) {
+                set_bgc_history(accumulator, 0, runtime, bgc, None, state.irrigation.as_deref())?;
+            }
             // `frcsat = 1` 由末尾 `patchtype > 2` 那一节无条件写，与 VSF 无关。
             let mut fluxes = vec![
                 ("qinfl", 0.0),
@@ -3683,7 +3688,7 @@ impl HistorySession {
             .any(|state| state.bgc.as_deref().is_some_and(|bgc| bgc.methane.is_some()));
         if has_methane {
             ensure!(grid.is_none(), "gridded methane history is not ported to the Rust runtime yet");
-            let template = colm_core::methane::driver::CoreAccumulator::default().core_values(false, false);
+            let template = colm_core::methane::driver::CoreAccumulator::default().core_values(false, false, false);
             for (k, (name, long_name, units, _)) in template.iter().enumerate() {
                 if variables.len() == index + k {
                     variables.push(colm_hist::history::TracerFileVariable {
@@ -3704,7 +3709,16 @@ impl HistorySession {
                     .as_deref()
                     .map(|bgc| bgc.methane_acc)
                     .unwrap_or_default();
-                for (k, (_, _, _, value)) in acc.core_values(active, land).into_iter().enumerate() {
+                // 湖只有开了 `allowlakeprod` 才跑甲烷（跑过就有 `last`）。
+                let lake = patch_type == 4
+                    && state
+                        .bgc
+                        .as_deref()
+                        .and_then(|bgc| bgc.methane.as_deref())
+                        .is_some_and(|methane| methane.last.is_some());
+                for (k, (_, _, _, value)) in
+                    acc.core_values(active, land, lake).into_iter().enumerate()
+                {
                     variables[index + k].values[record.record * patches + patch] = value;
                 }
             }

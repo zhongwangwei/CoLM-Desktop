@@ -8,7 +8,7 @@
 use anyhow::{ensure, Result};
 
 use super::bgc_link::{self, BgcInputs};
-use super::column::{self, ColumnInput, ColumnResult, ComponentState};
+use super::column::{self, ColumnInput, ColumnResult, ComponentState, LakeHost, LakeState};
 use super::config::{MethaneParameters, COMP_RICE, COMP_SOIL};
 use super::physics::{self, sn, MAXSNL, NL_SOIL, SOISNO, SPVAL};
 use crate::bgc_state::BgcState;
@@ -29,6 +29,8 @@ pub struct MethanePatch {
     pub last: Option<ColumnResult>,
     /// `methane_soil_zwt`（history 用）。
     pub soil_zwt: f64,
+    /// 湖泊 patch 的沉积层与水柱状态（其余 patch 停在冷启动值）。
+    pub lake: LakeState,
 }
 
 impl MethanePatch {
@@ -44,6 +46,7 @@ impl MethanePatch {
             grnd_methane_cond: params.methane.grnd_methane_cond_default,
             last: None,
             soil_zwt: SPVAL,
+            lake: LakeState::cold(params.methane.grnd_methane_cond_default),
         }
     }
 }
@@ -96,6 +99,8 @@ pub struct HostInputs<'a> {
     pub frcsat: f64,
     /// 逐 PFT 的类别、面积份额、`lai_p`（`bgc_driver` 之后）与 `irrig_method_p`；湿地为空。
     pub pft: bgc_link::PftInputs<'a>,
+    /// 湖泊 patch 的湖层与风；其余 patch 为 `None`。
+    pub lake: Option<LakeHost<'a>>,
     pub dynamic_wetland: bool,
 }
 
@@ -170,10 +175,18 @@ pub fn soil_step(
 ) -> Result<()> {
     let m = &params.methane;
     ensure!(
-        site.patchtype == 0 || site.patchtype == 2,
-        "only soil and wetland methane are ported to the Rust runtime yet"
+        matches!(site.patchtype, 0 | 2 | 4),
+        "methane on patchtype {} is not ported to the Rust runtime yet",
+        site.patchtype
     );
+    // 湖泊 patch（`ch4_impl_lake_step`）：只在 `allowlakeprod` 下跑，否则状态与诊断都不动。
+    let lake = site.patchtype == 4;
+    if lake && !m.allowlakeprod {
+        return Ok(());
+    }
+    // 湿地与湖都不分分量，直接推进 patch 级聚合状态。
     let wetland = site.patchtype == 2;
+    let direct = wetland || lake;
     // `ch4_impl_soil_step`：稻田模式下土壤 patch 的稻田 PFT 份额超过 `PADDY_RICE_FRAC_MIN` 才算稻田，
     // 那时即使 `only_wetland` 也要跑。
     let rice_pft_frac = if m.enable_rice_paddy && site.patchtype == 0 {
@@ -182,11 +195,12 @@ pub fn soil_step(
         0.0
     };
     let is_rice_paddy = rice_pft_frac > bgc_link::PADDY_RICE_FRAC_MIN;
-    let run = if m.only_wetland {
-        site.patchtype == 2 || is_rice_paddy
-    } else {
-        site.patchtype == 2 || site.patchtype == 0
-    };
+    let run = lake
+        || if m.only_wetland {
+            site.patchtype == 2 || is_rice_paddy
+        } else {
+            site.patchtype == 2 || site.patchtype == 0
+        };
     if !run {
         return Ok(());
     }
@@ -228,7 +242,7 @@ pub fn soil_step(
     // 土壤 patch 的两个分量：按稻田份额整 patch 划给水稻或土壤分量。
     let mut component = COMP_SOIL;
     let mut veg = None;
-    if !wetland {
+    if !direct {
         let mut rice_weight = if is_rice_paddy { rice_pft_frac } else { 0.0 };
         rice_weight = rice_weight.max(0.0).min(1.0);
         if rice_weight <= 1.0e-14 {
@@ -268,7 +282,7 @@ pub fn soil_step(
         inputs.bgnpp = v.bgnpp[component];
         inputs.annsum_npp = v.annsum_npp[component];
     }
-    if !wetland {
+    if !direct {
         aere_override = (rice_column && rice_live).then(|| bgc_link::rice_veg_proxy(lai, 1.0));
     }
     let rice = bgc_link::RiceWeight {
@@ -282,7 +296,7 @@ pub fn soil_step(
     // 湿地：上一步的 `totcol_methane(i)` 就是步首列总量；土壤（`run_methane_component`）：由本分量
     // 的两相浓度与 `fsat_bef` 拼出（只给收支检查用）。
     let previous_totcol = patch.totcol_methane;
-    let comp = if wetland {
+    let comp = if direct {
         &mut patch.aggregate
     } else {
         &mut patch.components[component]
@@ -293,14 +307,14 @@ pub fn soil_step(
     };
     let totcol_unsat = col_sum(&comp.conc_methane_unsat);
     let totcol_sat = col_sum(&comp.conc_methane_sat);
-    let totcol_before = if wetland {
+    let totcol_before = if direct {
         previous_totcol
     } else if (0.0..=1.0).contains(&fsat) {
         fsat.mul_add(totcol_sat, (1.0 - fsat) * totcol_unsat)
     } else {
         0.5 * (totcol_sat + totcol_unsat)
     };
-    let result = column::methane(
+    let mut result = column::methane(
         m,
         &ColumnInput {
             idate: host.idate,
@@ -360,13 +374,23 @@ pub fn soil_step(
             wetwatmax: site.wetwatmax,
             totcol_before,
             lake_soilc: &patch.lake_soilc,
+            lake: host.lake,
         },
         comp,
+        lake.then_some(&mut patch.lake),
     )?;
     bgc_link::finalize(bgc, site.patchtype, result.merged.net, &site.dz_soi)?;
     patch.totcol_methane = result.merged.totcol;
     patch.grnd_methane_cond = result.merged.grnd_cond;
-    if !wetland {
+    if lake {
+        // 湖跳过非饱和相时 `grnd_methane_cond_unsat(i)` 不被改写，沿用上一步（或冷启动默认）的值。
+        result.unsat.grnd_cond = patch
+            .last
+            .map_or(m.grnd_methane_cond_default, |last| last.unsat.grnd_cond);
+        if let Some(soilc) = result.lake_soilc {
+            patch.lake_soilc = soilc;
+        }
+    } else if !wetland {
         // `aggregate_methane_columns`：份额 0/1 时聚合逐位等于跑过的那个分量。
         patch.soil_zwt = host.zwt;
         patch.aggregate = patch.components[component];
@@ -457,29 +481,37 @@ impl CoreAccumulator {
         };
         // 土壤 patch 按 `aggregate_methane_columns` 分到土壤/水稻两类：`ws·flux` 与 `wr·flux`。
         let wr = patch.rice_fraction_prev;
-        let (wetland, soil, rice) = if patch_type == 2 {
-            (stepped, 0.0, 0.0)
+        let lake = patch_type == 4;
+        let (wetland, soil, rice) = if patch_type == 2 || lake {
+            (if lake { 0.0 } else { stepped }, 0.0, 0.0)
         } else {
             (0.0, (1.0 - wr) * stepped, wr * stepped)
         };
+        // 湖（只在 `allowlakeprod` 下跑过）：`methane_surf_flux_lake = methane_surf_flux_tot_lake`。
+        let lake_flux = if lake { r.surf_flux_tot_lake } else { 0.0 };
         acc(&mut self.surf_flux_wetland, wetland);
         acc(&mut self.surf_flux_soil, soil);
-        acc(&mut self.surf_flux_lake, 0.0);
+        acc(&mut self.surf_flux_lake, lake_flux);
         acc(&mut self.surf_flux_rice, rice);
-        acc(&mut self.surf_flux_tot_lake, 0.0);
+        acc(&mut self.surf_flux_tot_lake, lake_flux);
         let valid = |x: f64| !x.is_nan() && x.abs() < 0.5 * SPVAL.abs();
         if active && valid(patch.totcol_methane) {
             self.acc_num += 1.0;
         }
-        // 湖的计数掩码只认开了 `allowlakeprod` 的湖 patch；土壤 patch 从不计数。
+        // 湖的计数掩码只认开了 `allowlakeprod` 的湖 patch（跑过甲烷的湖），按湖沉积层的列总量计数。
+        if lake && patch.last.is_some() && valid(patch.lake.totcol) {
+            self.acc_num_lake += 1.0;
+        }
     }
 
     /// 写出的 18 个 `core` 变量：`(名字, long_name, units, 值)`。单点 patch 维的值；
     /// `active` 是 `filter`（活跃甲烷 patch），`land` 是 `filter_all_land`（`patchtype < 99`）。
+    /// `lake` 是开了 `allowlakeprod` 的湖 patch：它的地面合计量与"含湖"全局量按 `acc_num_lake` 平均。
     pub fn core_values(
         &self,
         active: bool,
         land: bool,
+        lake: bool,
     ) -> Vec<(&'static str, &'static str, &'static str, f64)> {
         let per = |sum: f64, num: f64| {
             if sum != SPVAL && num > 0.0 {
@@ -497,6 +529,15 @@ impl CoreAccumulator {
                 0.0
             };
             with_filter(value / 1.0, land)
+        };
+        // 湖（`MOD_Tracer_Reactive_Methane_Hist.F90`）：`patchtype == 4 .and. allowlakeprod` 且有湖计数时
+        // 用 `acc_num_lake` 覆盖；湿地/土壤/水稻三类保持 0。
+        let lake_or = |lake_sum: f64, derived_value: f64| {
+            if lake && land && self.acc_num_lake > 0.0 {
+                lake_sum / self.acc_num_lake
+            } else {
+                derived_value
+            }
         };
         let mean = |sum: f64| with_filter(per(sum, self.acc_num), active);
         vec![
@@ -543,7 +584,7 @@ impl CoreAccumulator {
                 "f_methane_surf_flux_tot",
                 "CH4 total surface flux including wetland/soil/rice/lake; land-area mean",
                 "mol/m2/s",
-                derived(self.surf_flux_tot),
+                lake_or(self.surf_flux_tot_lake, derived(self.surf_flux_tot)),
             ),
             (
                 "f_methane_surf_flux_wetland",
@@ -561,7 +602,7 @@ impl CoreAccumulator {
                 "f_methane_surf_flux_lake",
                 "lake contribution to CH4 surface flux; land-area mean; multiply by landarea for global total",
                 "mol/m2/s",
-                derived(self.surf_flux_lake),
+                lake_or(self.surf_flux_lake, derived(self.surf_flux_lake)),
             ),
             (
                 "f_methane_surf_flux_rice",
@@ -573,25 +614,25 @@ impl CoreAccumulator {
                 "f_methane_surf_flux_global_total_with_lake",
                 "global CH4 total surface flux including lake; land-area mean contribution",
                 "mol/m2/s",
-                derived(self.surf_flux_tot),
+                lake_or(self.surf_flux_tot_lake, derived(self.surf_flux_tot)),
             ),
             (
                 "f_methane_surf_flux_global_phys_with_lake",
                 "physical CH4 surface flux including lake; land-area mean contribution",
                 "mol/m2/s",
-                derived(self.surf_flux_tot_phys),
+                lake_or(self.surf_flux_tot_phys, derived(self.surf_flux_tot_phys)),
             ),
             (
                 "f_methane_balance_residual_global_with_lake",
                 "CH4 column balance residual including lake; land-area mean contribution",
                 "mol/m2/s",
-                derived(self.balance_residual),
+                lake_or(self.balance_residual, derived(self.balance_residual)),
             ),
             (
                 "f_methane_ch4_clip_credit_global_with_lake",
                 "CH4 nonnegative-storage correction including lake; land-area mean contribution",
                 "mol/m2/s",
-                derived(self.ch4_clip_credit),
+                lake_or(self.ch4_clip_credit, derived(self.ch4_clip_credit)),
             ),
         ]
     }

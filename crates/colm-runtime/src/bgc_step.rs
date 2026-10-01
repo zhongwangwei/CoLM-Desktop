@@ -599,21 +599,15 @@ impl BgcRuntime {
         })
     }
 
-    /// 一步：（必要时）更新氮沉降 → `bgc_driver` → 写回物理量。
-    pub fn step(
+    /// 步首的数据更新（`CoLM.F90:495-541`，对所有 patch 都做）：硝化 O2、闪电、月度/年度氮沉降与
+    /// 人口密度。湖泊、冰川 patch 只走这一段（[`Self::update_non_soil`]）。
+    fn update_data(
         &self,
         begin: colm_core::calendar::CalendarTime,
         idate: [i32; 3],
-        forcing: &colm_core::RuntimeForcing,
-        partial_pressures_pa: (f64, f64),
-        state: &mut StandardLctSnowSoilState,
-        output: &StandardLctSnowSoilOutput,
+        bgc: &mut BgcState,
     ) -> Result<()> {
         let deltim = self.deltim;
-        let mut bgc = state
-            .bgc
-            .take()
-            .context("a BGC patch needs its BGC state")?;
         // `update_nitrif_data`：步首所在月与上一步步首所在月不同时（`CoLM.F90:495-501`）。
         if let Some(source) = &self.nitrif {
             let month = |time: colm_core::calendar::CalendarTime| {
@@ -653,6 +647,100 @@ impl BgcRuntime {
                 bgc.patch.hdm_lf[0] = fire.hdm(idate[0])?;
             }
         }
+        Ok(())
+    }
+
+    /// 湖泊、冰川 patch（`CoLMDRIVER` 里 `bgc_driver` 与 CH4 都不跑）：只做步首的数据更新。
+    pub fn update_non_soil(
+        &self,
+        begin: colm_core::calendar::CalendarTime,
+        idate: [i32; 3],
+        state: &mut StandardLctSnowSoilState,
+    ) -> Result<()> {
+        let bgc = state
+            .bgc
+            .as_deref_mut()
+            .context("a BGC patch needs its BGC state")?;
+        self.update_data(begin, idate, bgc)
+    }
+
+    /// 湖泊 patch 的甲烷（`tracer_lake_step` → `ch4_impl_lake_step`）：`CoLMMAIN` 之后、在水体子步里跑。
+    /// 只移植了一个水体子步（`deltim <= 1800`，子步诊断累加此时不起作用）与定深湖。
+    #[allow(clippy::too_many_arguments)]
+    pub fn lake_methane(
+        &self,
+        idate: [i32; 3],
+        forcing: &colm_core::RuntimeForcing,
+        partial_pressures_pa: (f64, f64),
+        state: &mut StandardLctSnowSoilState,
+        output: &colm_core::LakeStepOutput,
+        lakedepth: f64,
+        dynamic_lake: bool,
+    ) -> Result<()> {
+        let Some((setup, site)) = &self.methane else {
+            return Ok(());
+        };
+        if !setup.params.methane.allowlakeprod {
+            return Ok(());
+        }
+        anyhow::ensure!(
+            self.deltim <= 1800.0,
+            "lake methane with more than one WATERBODY substep (deltim {} s) is not ported to the \
+             Rust runtime yet",
+            self.deltim
+        );
+        anyhow::ensure!(
+            !dynamic_lake,
+            "lake methane with DEF_USE_Dynamic_Lake is not ported to the Rust runtime yet"
+        );
+        let mut bgc = state.bgc.take().context("a BGC patch needs its BGC state")?;
+        let mut patch = bgc
+            .methane
+            .take()
+            .context("a methane patch needs its methane state")?;
+        let outcome = (|| {
+            let arrays = crate::methane::HostArrays::from_lake_state(state)?;
+            let host = crate::methane::lake_host_inputs(
+                &arrays,
+                idate,
+                self.deltim,
+                state,
+                output,
+                forcing,
+                partial_pressures_pa,
+                lakedepth,
+                setup.dynamic_wetland,
+            )?;
+            colm_core::methane::driver::soil_step(
+                &setup.params,
+                setup.scheme,
+                site,
+                &host,
+                &mut bgc,
+                &mut patch,
+            )
+        })();
+        bgc.methane = Some(patch);
+        state.bgc = Some(bgc);
+        outcome
+    }
+
+    /// 一步：（必要时）更新氮沉降 → `bgc_driver` → 写回物理量。
+    pub fn step(
+        &self,
+        begin: colm_core::calendar::CalendarTime,
+        idate: [i32; 3],
+        forcing: &colm_core::RuntimeForcing,
+        partial_pressures_pa: (f64, f64),
+        state: &mut StandardLctSnowSoilState,
+        output: &StandardLctSnowSoilOutput,
+    ) -> Result<()> {
+        let deltim = self.deltim;
+        let mut bgc = state
+            .bgc
+            .take()
+            .context("a BGC patch needs its BGC state")?;
+        self.update_data(begin, idate, &mut bgc)?;
         if self.patch_type != 0 {
             // 湿地 CH4（`CoLMDRIVER.F90:245-247`）：`tracer_wetland_decomp` 借土壤分解级联算逐层
             // 异养呼吸，`tracer_soil_step` 跑甲烷，finalize 按这一步的分解通量直接推进分解池。

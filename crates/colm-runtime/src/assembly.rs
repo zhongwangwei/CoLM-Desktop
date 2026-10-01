@@ -1677,13 +1677,23 @@ impl StandardLctRestartTemplate {
         // 直接取站点逐月值、不做 `fveg0` 后处理；LAI 反馈开着时只换 `tsai`。
         if (self.physics.use_pft || self.physics.use_pc) && self.pft.is_none() && !lai.is_urban() {
             let feedback = self.physics.bgc.is_some_and(|bgc| bgc.laifeedback);
-            state.energy.temporal_canopy = colm_core::TemporalCanopy {
-                leaf_area_index: if feedback {
-                    state.energy.temporal_canopy.leaf_area_index
-                } else {
-                    tlai
-                },
-                stem_area_index: tsai,
+            // PFT 段末尾（`MOD_LAIReadin.F90:248-253`）：水体不论反馈与否都清零。
+            let waterbody =
+                self.land_class == colm_core::waterbody_class(self.physics.land_cover_scheme);
+            state.energy.temporal_canopy = if waterbody {
+                colm_core::TemporalCanopy {
+                    leaf_area_index: 0.0,
+                    stem_area_index: 0.0,
+                }
+            } else {
+                colm_core::TemporalCanopy {
+                    leaf_area_index: if feedback {
+                        state.energy.temporal_canopy.leaf_area_index
+                    } else {
+                        tlai
+                    },
+                    stem_area_index: tsai,
+                }
             };
             return Ok(true);
         }

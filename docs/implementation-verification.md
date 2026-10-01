@@ -27671,3 +27671,50 @@ unitcat history 开分汊时逐示踪物多写 `f_trc_bifout_*`（`a_trc_bifout/
 **回归**：单点全量 `regress_all` 176 项，除下列预期项外全部一致：`nn`（history 为 `none`）；`tc4wlc/tc4wly/tc4wlyc` 起始重启手工改过池，全流程重跑会被 mkinidata 覆盖，不能进全量回归（已移进 SKIP）；`thw` 是两边本该都失败的同位素算例（已删）。最终二进制上再验 `tc4/tc4f/tc4y/tc4w/tc4wl/bwl/tsh/rc4` 与续跑 `tc4c/tshc/tc4wc/tc4wlc/tc4wly/tc4wlyc/rc4c`，全部一致。`cargo test -p colm-runtime` 141 项通过。
 
 **教训**：续跑算例（`*c`）一旦被全流程回归跑过，Rust 侧的起跑重启就被 mkinidata 的冷启动文件覆盖了，之后的 contrun 全红，看上去像代码回归。判断方法是先比两边起跑重启是否相同。新建续跑算例时要同步加进 `regress_all.sh` 的 SKIP，湿地链用 `tmp/mkwl.sh` 重建。排查中还收紧了第 494 轮的 LAI 分支：条件必须是"没有 PFT 子网格"。PFT 土壤 patch 在月份没变时，`refresh_monthly_leaf_area_index` 返回 `None` 后会落到后面的分支。
+
+## 第 496 轮：宿主 —— BGC 站点上的湖泊、冰川 patch
+
+第 494 轮放开了非土壤 patch 的 BGC 装配，但只验了湿地（它走土壤步，会调 `bgc.step`）。湖泊（含干湖）、冰川、城市分支在 Rust 里提前返回，查出三处缺陷：
+1. **BGC 数据更新漏做**：`CoLM.F90:495-541` 的月度硝化 O2、闪电、氮沉降/人口密度更新对所有 patch 都做，Rust 的这几类 patch 从不调用 `bgc.step`。跨月后 `f_CONC_O2_UNSAT`/`f_O2_DECOMP_DEPTH_UNSAT` 与 BGC 重启不一致。改法：把步首更新拆成 `BgcRuntime::update_data`，非土壤分支调用 `update_non_soil`。
+2. **BGC history 缺变量**：`push_non_soil` 不设 `self.bgc`、不累加 BGC 量，湖泊/冰川站点的 history 少了全部 BGC 变量。上游 `accumulate_fluxes` 对所有 patch 累加。
+3. **水体 LAI**：PFT 段末尾（`MOD_LAIReadin.F90:248-253`）对 `WATERBODY` 一律 `tlai = tsai = 0`（不论 LAI 反馈），Rust 取了站点 SAI（1.45）。
+
+**对照**（AT-Neu，BGC + PFT + NITRIF，无示踪物）：
+
+| 算例 | 内容 | 结果 |
+|---|---|---|
+| `blk` | 湖泊（`SITE_landtype = 17`），2010-01 → 2011-01-10 | history 13 ok，restart ok |
+| `bgl` | 冰川（15），同上 | history 13 ok，restart ok |
+
+## 第 497 轮：示踪物 T4b —— 湖泊甲烷（`allowlakeprod`）
+
+**上游结构**（`ch4_impl_lake_step` → `methane_driver` 的直接调用路径 → `methane()` 的湖分支）：
+- 湖在 `CoLMMAIN` 返回之后（步末非土壤清零之后）、在水体子步里跑；finalize 对 patchtype 4 直接返回，不碰 BGC。
+- `finundated` 强制为 1（积雪覆盖之后再强制一次），非饱和相整段跳过（`conc_methane_unsat = 0`，`grnd_methane_cond_unsat` 不被改写），饱和相从湖底沉积层浓度起步，孔隙按液/冰比例填满（`((porsl·dz)·ρ·v)/vtot`），不跑通气组织。
+- **水柱节点**：`methane_tran` 的 0 层换成溶解库存（`lake_water_*_stock`），Michaelis-Menten + Q10 的水体氧化先扣库存；水气交换用 Cole & Caraco k600 与淡水 Schmidt 数；沉积物↔水导度 `2·diffus(1)/dz(1)`。冰量变化时库存在液态与冻结之间转移。冷启动按大气平衡溶解量初始化。
+- **列总量** = 沉积层 + 水柱液态 + 冻结。沉积碳按产甲烷与分解 CO2 消耗（`replenishlakec` 关时）。
+- **冷启动沉积碳**：没有甲烷事务的重启时，湖泊 patch 从常数重启的 `lake_soilc_srf`（mkinidata 按有机质密度算）起步，不合法就停（`initialize_methane_lake_soilc_from_surface`）。第一次对照只差这一处：Rust 冷启动为 0，Fortran 为 27808。
+- **history**：湖泊 patch 的 `f_methane_surf_flux_lake/tot`、`*_global_*_with_lake` 按 `acc_num_lake` 平均（只有 `allowlakeprod` 的湖计数），湿地/土壤/水稻三类为 0。
+- **restart**：湖状态全部读写；严格读时检查 总量 = 沉积层 + 水柱 + 冻结。
+
+GIMPLE 要点（默认内核另建一份 `-fdump-tree-optimized-lineno`）：
+- 湖层求和：总深是 `max(dz,0)` 的顺序和，液深 `FMA(max(dz,0), 1−冰, ·)`。
+- 风速 `sqrt(FMA(us,us,vs·vs))`；`k600 = FMA(w^1.7, 0.215, 2.07)·1e-2/3600`；Schmidt 是 FMA 链 `FMA(s4, t·t², FMA(t², s3, FMA(t, s2, s1)))`。
+- 0 层：`bt = (sed + 储量/dt) + exch`，`rt = FMA(k_h·exch, c_atm, old/dt)`。湖下各层 `at = −(dm1/dz)`、`bt = e + (dp1+dm1)/dz`，与非湖的向后欧拉 `(−1/dz)·dm1` 舍入次序不同。
+- 求解后：`surf_diff = FNMA(k_h, c_atm, rel0)·exch`；收支修正 `FMA(oxid, dt, (err + 储量) − 步首储量)`。
+- 相变第一支没有物化转移量：`FNMA(stock, frac, stock)`、`FMA(stock, frac, frozen)`。
+- 沉积碳 `max(FNMA((prod+co2)·dt, CATOMW, soilc), 0)`。
+
+**范围**：只移植了一个水体子步（`deltim ≤ 1800`；多子步时上游另有子步诊断累加）与定深湖；动态湖与多子步显式拒绝。
+
+**对照**（AT-Neu，`SITE_landtype = 17`，BGC + CH4 标准参数）：
+
+| 算例 | 内容 | 结果 |
+|---|---|---|
+| `tc4lk` | 01-01 → 01-05（冰封） | history 2 ok，restart ok |
+| `tc4lky` | 2010-01 → 2011-01-10（冻融、夏季开放水面交换） | history 26 ok，restart ok |
+| `tc4lkyc` | 从 07-01 续跑到 09-30 | history 6 bad 0，restarts 41 bad 0 |
+
+**回归**：单点全量 `regress_all` 171 项，除 `nn`（history 为 `none`）外全部一致。最终二进制上复验以下算例，全部一致：
+- 整段：`tc4/tc4y/tc4wl/bwl/blk/bgl/tc4lk/tc4lky/tsh/rc4`；
+- 续跑：`tc4c/tshc/tc4wc/tc4lkyc/rc4c`，以及 `tmp/mkwl.sh` 重建的湿地链。

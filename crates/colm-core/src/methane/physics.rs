@@ -740,6 +740,26 @@ pub struct TranInput<'a> {
     pub vol_ch4_storage: &'a [f64; NL_SOIL],
     pub vol_gas: &'a [f64; NL_SOIL],
     pub grnd_methane_cond_base: f64,
+    /// 湖泊甲烷（`patchtype == 4` 且 `allowlakeprod`）：湖层几何、温度、冰与风。
+    pub lake: Option<TranLake<'a>>,
+}
+
+/// `methane_tran` 湖水柱节点要的宿主量。
+#[derive(Debug, Clone, Copy)]
+pub struct TranLake<'a> {
+    pub dz_lake: &'a [f64],
+    pub t_lake: &'a [f64],
+    pub lake_icefrac: &'a [f64],
+    pub lakedepth: f64,
+    pub forc_us: f64,
+    pub forc_vs: f64,
+}
+
+/// 湖水柱里溶解的 CH4、O2 库存（mol/m2，`lake_water_*_stock`），`methane_tran` 就地推进。
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct LakeWater {
+    pub ch4: f64,
+    pub o2: f64,
 }
 
 /// `methane_tran` 改写的逐层速率与浓度（进来是本相的源汇，出去是限幅后的值）。
@@ -770,6 +790,11 @@ pub struct TranOutput {
     pub o2_cap_loss: f64,
     pub o2_cap_gain: f64,
     pub grnd_methane_cond_effective: f64,
+    /// 湖：水柱里的 CH4 氧化、沉积物↔水与水↔大气的交换（mol/m2/s）。
+    pub lake_water_ch4_oxid: f64,
+    pub lake_sed_ch4_flux: f64,
+    pub lake_sed_o2_flux: f64,
+    pub lake_air_o2_flux: f64,
 }
 
 /// 水中扩散系数多项式 `d1 + d2*t + d3*t**2`（×1e-9 m2/s 未乘）：GIMPLE `FMA(t², d3, FMA(t, d2, d1))`。
@@ -787,19 +812,87 @@ pub fn tran(
     m: &super::config::MethaneConfig,
     i: &TranInput<'_>,
     layers: &mut TranLayers,
+    lake_water: &mut LakeWater,
 ) -> anyhow::Result<TranOutput> {
-    use super::config::D_CON_G;
+    use super::config::{D_CON_G, S_CON};
     use crate::LibmPow;
     const SMALL: f64 = 1.0e-12;
-    anyhow::ensure!(
-        !(i.patchtype == 4 && m.allowlakeprod),
-        "lake methane transport (allowlakeprod) is not ported to the Rust runtime yet"
-    );
     let n = NL_SOIL;
     let dt = i.deltim;
     let dz = |k: usize| i.dz_soisno[sn(k as i32 + 1)];
     let mut out = TranOutput::default();
     let l = layers;
+    // 湖水柱（`is_lake_water`）：先按水体温度、Michaelis-Menten 与 Q10 氧化掉一部分溶解 CH4。
+    // GIMPLE：总深是 `max(dz,0)` 的顺序和，液深是 `FMA(max(dz,0), 1-冰, ·)`，温度权和用 FMA；
+    // 库存扣减是 `FNMA(dt, oxid, stock)`。
+    let is_lake_water = i.patchtype == 4 && m.allowlakeprod;
+    anyhow::ensure!(
+        !is_lake_water || i.lake.is_some(),
+        "lake methane needs the lake layers"
+    );
+    let mut lake_total_depth = 0.0f64;
+    let mut lake_liquid_depth = 0.0f64;
+    let mut lake_storage = 0.0f64;
+    let lake_ch4_stock_bef = lake_water.ch4;
+    if let (true, Some(lake)) = (is_lake_water, &i.lake) {
+        let unfrozen = |x: f64| 1.0 - x.max(0.0).min(1.0);
+        for &d in lake.dz_lake {
+            lake_total_depth += d.max(0.0);
+        }
+        for (&d, &ice) in lake.dz_lake.iter().zip(lake.lake_icefrac) {
+            lake_liquid_depth = d.max(0.0).mul_add(unfrozen(ice), lake_liquid_depth);
+        }
+        let mut temp = 0.0f64;
+        let mut weight_sum = 0.0f64;
+        for ((&d, &ice), &t) in lake.dz_lake.iter().zip(lake.lake_icefrac).zip(lake.t_lake) {
+            let weight = d.max(0.0) * unfrozen(ice);
+            if !t.is_nan() && t > 150.0 && t < 350.0 {
+                temp = weight.mul_add(t, temp);
+                weight_sum += weight;
+            }
+        }
+        let temp = if weight_sum > SMALL {
+            temp / weight_sum
+        } else {
+            i.t_h2osfc
+        };
+        if lake_total_depth <= SMALL && lake.lakedepth > 0.0 {
+            lake_total_depth = lake.lakedepth;
+            lake_liquid_depth = lake.lakedepth * unfrozen(lake.lake_icefrac[0]);
+        }
+        lake_storage = lake_liquid_depth.max(SMALL);
+        let ch4_conc = lake_water.ch4.max(0.0) / lake_storage;
+        let o2_conc = lake_water.o2.max(0.0) / lake_storage;
+        let vmax = if m.lake_vmax_methane_oxid >= 0.0 {
+            m.lake_vmax_methane_oxid
+        } else {
+            m.vmax_methane_oxid
+        };
+        let k_m_o2 = if m.lake_k_m_o2 > 0.0 {
+            m.lake_k_m_o2
+        } else {
+            m.k_m_o2
+        };
+        let mut potential = 0.0;
+        if lake_liquid_depth > SMALL && temp > TFRZ {
+            potential = lake_liquid_depth
+                * ((o2_conc * (ch4_conc * (m.lake_oxid_scale * vmax) / (ch4_conc + m.k_m))
+                    / (o2_conc + k_m_o2))
+                    * m.q10_methane_oxid.lpow((temp - (TFRZ + 12.0)) / 10.0));
+        }
+        if dt > 0.0 {
+            out.lake_water_ch4_oxid = potential
+                .max(0.0)
+                .min(lake_water.ch4.max(0.0) / dt)
+                .min(lake_water.o2.max(0.0) / (dt * 2.0));
+        }
+        lake_water.ch4 = (-dt)
+            .mul_add(out.lake_water_ch4_oxid, lake_water.ch4)
+            .max(0.0);
+        lake_water.o2 = (-dt)
+            .mul_add(out.lake_water_ch4_oxid * 2.0, lake_water.o2)
+            .max(0.0);
+    }
     if !m.use_aereoxid_prog {
         for k in 0..n {
             if l.methane_aere_depth[k] > 0.0 {
@@ -891,8 +984,13 @@ pub fn tran(
     // `epsilon_t`、`conc_*_rel(0:nl_soil)`。
     let mut eps = [[0.0f64; 2]; NL_SOIL];
     let mut rel = [[0.0f64; NL_SOIL + 1]; 2];
-    rel[0][0] = i.c_atm[0];
-    rel[1][0] = i.c_atm[1];
+    if is_lake_water {
+        rel[0][0] = lake_water.ch4 / lake_storage;
+        rel[1][0] = lake_water.o2 / lake_storage;
+    } else {
+        rel[0][0] = i.c_atm[0];
+        rel[1][0] = i.c_atm[1];
+    }
     for k in 0..n {
         let j = k as i32 + 1;
         let kh = &i.k_h_cc[k + 1];
@@ -914,6 +1012,7 @@ pub fn tran(
     }
     let mut spec_grnd_cond = [0.0f64; 2];
     for s in 0..2 {
+        let mut lake_exchange_vel = 0.0f64;
         // 积雪阻力（`maxsnl+1..0` 里 `snl+1` 以下的雪层）。
         let mut snow_resis = 0.0;
         for j in (MAXSNL + 1)..=0 {
@@ -964,8 +1063,35 @@ pub fn tran(
                 pond_resis += 1.0 / SMALL;
             }
         }
+        // 湖面气体交换：Cole & Caraco 的 k600 与淡水 Schmidt 数（GIMPLE：`sqrt(FMA(us,us,vs·vs))`、
+        // `FMA(w^1.7, 0.215, 2.07)·1e-2/3600`，Schmidt 多项式是 FMA 链）。
+        if let (true, Some(lake)) = (is_lake_water, &i.lake) {
+            anyhow::ensure!(
+                !(lake_total_depth <= SMALL && m.lake_zero_depth_fatal),
+                "lake methane enabled but current dz_lake/lakedepth are non-positive"
+            );
+            if lake_liquid_depth > SMALL && i.t_h2osfc >= TFRZ && lake.lake_icefrac[0] <= 0.1 {
+                let (us, vs) = (lake.forc_us, lake.forc_vs);
+                let wind = if us.is_nan() || vs.is_nan() || us.abs() > 1.0e30 || vs.abs() > 1.0e30 {
+                    0.0
+                } else {
+                    us.mul_add(us, vs * vs).max(0.0).sqrt()
+                };
+                let k600 = wind.max(0.0).lpow(1.7).mul_add(0.215, 2.07);
+                let t_c = 0.0f64.max(30.0f64.min(i.t_h2osfc - TFRZ));
+                let t2 = t_c * t_c;
+                let c = &S_CON[s];
+                let schmidt = c[3]
+                    .mul_add(t_c * t2, t2.mul_add(c[2], t_c.mul_add(c[1], c[0])))
+                    .max(300.0);
+                lake_exchange_vel = (schmidt / 600.0).lpow(-2.0 / 3.0) * (k600 * 1.0e-2 / 3600.0);
+            }
+        }
         spec_grnd_cond[s] =
             1.0 / ((1.0 / i.grnd_methane_cond_base.max(SMALL) + snow_resis) + pond_resis);
+        if is_lake_water {
+            spec_grnd_cond[s] = i.k_h_cc[0][s] * lake_exchange_vel;
+        }
         // 逐层扩散系数。
         let mut diffus = [0.0f64; NL_SOIL];
         for k in 0..n {
@@ -999,8 +1125,20 @@ pub fn tran(
                     * 1.0e-9
                     * m.scale_factor_liqdiff
             };
+            if i.patchtype == 4 && m.allowlakeprod && j > i.jwt {
+                diffus[k] *= if s == 0 {
+                    m.lake_liqdiff_scale
+                } else {
+                    m.lake_o2_liqdiff_scale
+                };
+            }
             diffus[k] = diffus[k].max(SMALL);
         }
+        let lake_sed_water_cond = if is_lake_water && lake_liquid_depth > SMALL {
+            (diffus[0] * 2.0) / dz(0).max(SMALL)
+        } else {
+            0.0
+        };
         // 层间导度 `dm1_zm1`、`dp1_zp1`。
         let mut dm1 = [0.0f64; NL_SOIL];
         let mut dp1 = [0.0f64; NL_SOIL];
@@ -1011,7 +1149,12 @@ pub fn tran(
             let a = dz(k) / diffus[k];
             let below = |k: usize| dz(k + 1) / diffus[k + 1];
             let above = |k: usize| dz(k - 1) / diffus[k - 1];
-            if j == 1 && j != jwt && j != jwt + 1 {
+            if is_lake_water && j == 1 {
+                dm1[k] = lake_sed_water_cond;
+                if j < NL_SOIL as i32 {
+                    dp1[k] = 2.0 / (a + below(k));
+                }
+            } else if j == 1 && j != jwt && j != jwt + 1 {
                 dm1[k] = 1.0 / (1.0 / spec_grnd_cond[s] + dz(k) / (diffus[k] * 2.0));
                 dp1[k] = 2.0 / (a + below(k));
             } else if j == 1 && j == jwt {
@@ -1040,13 +1183,35 @@ pub fn tran(
         let mut bt = [0.0f64; NL_SOIL + 1];
         let mut ct = [0.0f64; NL_SOIL + 1];
         let mut rt = [0.0f64; NL_SOIL + 1];
-        bt[0] = 1.0;
-        rt[0] = i.c_atm[s];
+        if is_lake_water {
+            // 湖水节点：储量项 + 沉积物导度 + 水气交换；`rt0 = FMA(k_h·exch, c_atm, old/dt)`。
+            let old = if s == 0 {
+                lake_water.ch4
+            } else {
+                lake_water.o2
+            };
+            bt[0] = (lake_sed_water_cond + lake_storage / dt) + lake_exchange_vel;
+            ct[0] = -lake_sed_water_cond;
+            rt[0] = (i.k_h_cc[0][s] * lake_exchange_vel).mul_add(i.c_atm[s], old / dt);
+        } else {
+            bt[0] = 1.0;
+            rt[0] = i.c_atm[s];
+        }
         for k in 0..n {
             let j = k as i32 + 1;
             let e = eps[k][s] / dt;
             let r = 1.0 / dz(k);
-            if j < NL_SOIL as i32 {
+            if is_lake_water {
+                // 湖下沉积层：`-(dm1/dz)`、`e + (dp1+dm1)/dz`，与非湖的 `(-1/dz)·dm1` 舍入次序不同。
+                at[j as usize] = -(dm1[k] / dz(k));
+                if j < NL_SOIL as i32 {
+                    bt[j as usize] = e + (dp1[k] + dm1[k]) / dz(k);
+                    ct[j as usize] = -(dp1[k] / dz(k));
+                } else {
+                    bt[j as usize] = e + dm1[k] / dz(k);
+                    ct[j as usize] = 0.0;
+                }
+            } else if j < NL_SOIL as i32 {
                 let a = r * dm1[k];
                 ct[j as usize] = -(r * dp1[k]);
                 if j == jwt {
@@ -1067,7 +1232,11 @@ pub fn tran(
         tridiagonal(0, NL_SOIL as i32, 0, &at, &bt, &ct, &rt, &mut u);
         rel[s] = u;
         if s == 0 {
-            out.methane_surf_diff = if jwt != 0 {
+            out.methane_surf_diff = if is_lake_water {
+                lake_water.ch4 = lake_storage * rel[0][0];
+                out.lake_sed_ch4_flux = lake_sed_water_cond * (rel[0][1] - rel[0][0]);
+                (-i.k_h_cc[0][0]).mul_add(i.c_atm[0], rel[0][0]) * lake_exchange_vel
+            } else if jwt != 0 {
                 dm1[0] * (rel[0][1] - i.c_atm[0])
             } else {
                 dm1[0] * (-i.k_h_cc[0][0]).mul_add(i.c_atm[0], rel[0][1])
@@ -1090,6 +1259,12 @@ pub fn tran(
                 "CH4 nonnegative column clip exceeds fatal threshold"
             );
         } else {
+            if is_lake_water {
+                lake_water.o2 = lake_storage * rel[1][0];
+                out.lake_sed_o2_flux = lake_sed_water_cond * (rel[1][1] - rel[1][0]);
+                out.lake_air_o2_flux =
+                    (-i.k_h_cc[0][1]).mul_add(i.c_atm[1], rel[1][0]) * lake_exchange_vel;
+            }
             let mut gain = 0.0;
             for k in 0..n {
                 let before = rel[1][k + 1];
@@ -1119,6 +1294,11 @@ pub fn tran(
         err = (-(dz(k) * i.methane_prod_depth[k])).mul_add(dt, err);
         err = (dz(k) * l.methane_oxid_depth[k]).mul_add(dt, err);
         err = (dz(k) * l.methane_tran_depth[k]).mul_add(dt, err);
+    }
+    if is_lake_water {
+        err = out
+            .lake_water_ch4_oxid
+            .mul_add(dt, (err + lake_water.ch4) - lake_ch4_stock_bef);
     }
     out.grnd_methane_cond_effective = spec_grnd_cond[0];
     err =

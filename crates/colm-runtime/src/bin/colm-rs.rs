@@ -1690,7 +1690,7 @@ fn assemble_patch(
             )?;
             // `ch4_reactive_read_restart`：时间重启里有甲烷事务就续跑，否则冷启动。
             let time = colm_init::RestartFile::open(&files.time)?;
-            match colm_runtime::methane::read_restart(&time, patch, &setup)
+            match colm_runtime::methane::read_restart(&time, patch, template.patch_type, &setup)
                 .with_context(|| format!("cannot read the methane state of {}", files.time.display()))?
             {
                 Some(restarted) => {
@@ -1698,9 +1698,25 @@ fn assemble_patch(
                     bgc.initial.methane_acc = restarted.accumulator;
                 }
                 None => {
-                    bgc.initial.methane = Some(Box::new(
-                        colm_core::methane::driver::MethanePatch::cold(&setup.params),
-                    ));
+                    let mut cold = colm_core::methane::driver::MethanePatch::cold(&setup.params);
+                    // `initialize_methane_lake_soilc_from_surface`：冷启动的湖泊 patch 从常数重启的
+                    // `lake_soilc_srf`（mkinidata 按有机质密度算的沉积碳）起步，缺了就停。
+                    if template.patch_type == 4 && setup.params.methane.allowlakeprod {
+                        let nl = colm_core::methane::physics::NL_SOIL;
+                        let srf = constant
+                            .layer_column("lake_soilc_srf", patch, nl)
+                            .context("lake CH4 initialization requires lake_soilc surface data")?;
+                        let invalid = |x: &f64| x.is_nan() || x.abs() >= 0.5e36 || *x < 0.0;
+                        ensure!(
+                            !srf.iter().any(invalid) && srf.iter().sum::<f64>() > 1.0e-12,
+                            "lake CH4 production requires positive finite lake_soilc for every \
+                             initialized lake patch"
+                        );
+                        for (target, value) in cold.lake_soilc.iter_mut().zip(&srf) {
+                            *target = value.max(0.0);
+                        }
+                    }
+                    bgc.initial.methane = Some(Box::new(cold));
                 }
             }
             bgc.methane = Some((setup, site));

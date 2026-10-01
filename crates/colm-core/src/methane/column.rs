@@ -9,7 +9,7 @@ use anyhow::{bail, ensure, Result};
 use super::config::{MethaneConfig, RGASM, SECSPDAY};
 use super::physics::{
     self, sn, AereInput, AereOverride, AnnualAccumulators, ProdInput, TranInput, TranLayers,
-    DENH2O, DENICE, MAXSNL, NL_SOIL, SOISNO, SPVAL, VONKAR,
+    DENH2O, DENICE, MAXSNL, NL_SOIL, SOISNO, SPVAL, TFRZ, VONKAR,
 };
 
 /// 一个分量（土壤或水稻）跨步保留的状态（`*_component`）。
@@ -49,6 +49,48 @@ impl ComponentState {
             finundated_lag: SPVAL,
         }
     }
+}
+
+/// 湖泊 patch（`allowlakeprod`）跨步保留的湖底沉积层与水柱状态。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LakeState {
+    pub conc_o2: [f64; NL_SOIL],
+    pub conc_methane: [f64; NL_SOIL],
+    pub totcol: f64,
+    pub grnd_cond: f64,
+    /// 水柱里液态部分与冻结部分的溶解库存（mol/m2）。
+    pub water: physics::LakeWater,
+    pub frozen_ch4: f64,
+    pub frozen_o2: f64,
+    /// 上一步的液态水比例（冷启动为 spval）。
+    pub liquid_fraction_prev: f64,
+}
+
+impl LakeState {
+    /// `allocate_methane_state` 的冷启动值。
+    pub fn cold(grnd_cond_default: f64) -> Self {
+        Self {
+            conc_o2: [1.0; NL_SOIL],
+            conc_methane: [0.0; NL_SOIL],
+            totcol: 0.0,
+            grnd_cond: grnd_cond_default,
+            water: physics::LakeWater::default(),
+            frozen_ch4: 0.0,
+            frozen_o2: 0.0,
+            liquid_fraction_prev: SPVAL,
+        }
+    }
+}
+
+/// 湖泊 patch 的宿主湖层与风（`dz_lake`、`t_lake`、`lake_icefrac`、`lakedepth`、`forc_us/vs`）。
+#[derive(Debug, Clone, Copy)]
+pub struct LakeHost<'a> {
+    pub dz_lake: &'a [f64],
+    pub t_lake: &'a [f64],
+    pub lake_icefrac: &'a [f64],
+    pub lakedepth: f64,
+    pub forc_us: f64,
+    pub forc_vs: f64,
 }
 
 /// 一相（非饱和或饱和）的逐层结果。
@@ -141,6 +183,9 @@ pub struct ColumnResult {
     pub forc_pmethanem: f64,
     pub finundated: f64,
     pub finundated_default: f64,
+    /// 湖：`methane_surf_flux_tot_lake` 与这一步之后的沉积碳（`replenishlakec` 关时被产甲烷消耗）。
+    pub surf_flux_tot_lake: f64,
+    pub lake_soilc: Option<[f64; NL_SOIL]>,
 }
 
 /// `methane` 的逐步输入（宿主状态与 BGC 量）。
@@ -208,6 +253,8 @@ pub struct ColumnInput<'a> {
     /// 列收支检查用的步首总量（`totcol_methane` 进来的值）。
     pub totcol_before: f64,
     pub lake_soilc: &'a [f64; NL_SOIL],
+    /// 湖泊 patch 的湖层（`allowlakeprod` 时必有）。
+    pub lake: Option<LakeHost<'a>>,
 }
 
 /// `methane` 的非湖路径。`comp` 是本分量的跨步状态（就地推进）。
@@ -215,12 +262,27 @@ pub fn methane(
     m: &MethaneConfig,
     i: &ColumnInput<'_>,
     comp: &mut ComponentState,
+    mut lake_state: Option<&mut LakeState>,
 ) -> Result<ColumnResult> {
+    let lake_on = i.patchtype == 4 && m.allowlakeprod;
     ensure!(
-        !(i.patchtype == 4 && m.allowlakeprod),
-        "lake methane (allowlakeprod) is not ported to the Rust runtime yet"
+        !lake_on || (lake_state.is_some() && i.lake.is_some()),
+        "lake methane needs the lake state and the lake layers"
     );
     let deltim = i.deltim;
+    // `lake_depth_current`：湖层厚的顺序和，退化时取 `lakedepth`（给冒泡算静水压）。
+    let lake_depth_current = match &i.lake {
+        Some(lake) => {
+            let depth = lake.dz_lake.iter().fold(0.0f64, |acc, &d| d.max(0.0) + acc);
+            if depth <= 1.0e-12 {
+                lake.lakedepth.max(0.0)
+            } else {
+                depth
+            }
+        }
+        None => 0.0,
+    };
+    let lake_icefrac_top = i.lake.map_or(0.0, |lake| lake.lake_icefrac[0]);
     let zi = |j: i32| i.zi_soisno[(j - MAXSNL) as usize];
     let dz = |k: usize| i.dz_soisno[sn(k as i32 + 1)];
     let mut r = ColumnResult::default();
@@ -269,6 +331,9 @@ pub fn methane(
         }
         other => bail!("methane inundation scheme {other} is not ported to the Rust runtime yet"),
     };
+    if lake_on {
+        finundated = 1.0;
+    }
     if finundated.is_nan() || finundated.abs() >= 0.5 * SPVAL.abs() {
         finundated = 0.0;
     }
@@ -304,6 +369,10 @@ pub fn methane(
     }
     if i.snowdp > 0.0 {
         finundated = comp.fsat_bef;
+    }
+    // 积雪覆盖之后再强制一次：湖要留在饱和的沉积层分支上。
+    if lake_on {
+        finundated = 1.0;
     }
     let finundated_default = finundated;
     let fsat_bef = comp.fsat_bef;
@@ -347,6 +416,63 @@ pub fn methane(
         );
     }
     let k_h_cc = physics::henry_law(i.t_grnd, i.t_soisno);
+    // 湖水柱库存：冷启动按大气平衡溶解量初始化；冰量变化时在液态与冻结库存之间转移。
+    // GIMPLE：第一支没有物化转移量（`FNMA(stock, frac, stock)`、`FMA(stock, frac, frozen)`），
+    // 后两支是普通的 `min`/加减。
+    if let (true, Some(lake), Some(state)) = (lake_on, &i.lake, lake_state.as_deref_mut()) {
+        let unfrozen = |x: f64| 1.0 - x.max(0.0).min(1.0);
+        let mut total = lake.dz_lake.iter().fold(0.0f64, |acc, &d| d.max(0.0) + acc);
+        let mut liquid = lake
+            .dz_lake
+            .iter()
+            .zip(lake.lake_icefrac)
+            .fold(0.0f64, |acc, (&d, &ice)| {
+                unfrozen(ice).mul_add(d.max(0.0), acc)
+            });
+        if total <= 1.0e-12 && lake.lakedepth > 0.0 {
+            total = lake.lakedepth;
+            liquid = lake.lakedepth * unfrozen(lake.lake_icefrac[0]);
+        }
+        let current = if total > 1.0e-12 {
+            (liquid / total).max(0.0).min(1.0)
+        } else {
+            0.0
+        };
+        let prev = state.liquid_fraction_prev;
+        let w = &mut state.water;
+        if cold {
+            w.ch4 = k_h_cc[0][0] * liquid.max(0.0) * r.c_atm[0];
+            w.o2 = k_h_cc[0][1] * liquid.max(0.0) * r.c_atm[1];
+            state.frozen_ch4 = 0.0;
+            state.frozen_o2 = 0.0;
+        } else if prev.is_nan() || prev.abs() >= 0.5 * SPVAL.abs() {
+            let frac = 1.0 - current;
+            state.frozen_ch4 = w.ch4.mul_add(frac, state.frozen_ch4);
+            w.ch4 = (-w.ch4).mul_add(frac, w.ch4);
+            state.frozen_o2 = w.o2.mul_add(frac, state.frozen_o2);
+            w.o2 = (-w.o2).mul_add(frac, w.o2);
+        } else if current < prev {
+            let frac = (prev - current) / prev;
+            let t = w.ch4.min(frac * w.ch4);
+            w.ch4 -= t;
+            state.frozen_ch4 += t;
+            let t = w.o2.min(frac * w.o2);
+            w.o2 -= t;
+            state.frozen_o2 += t;
+        } else if current > prev {
+            let frac = (current - prev) / (1.0 - prev);
+            let t = state.frozen_ch4.min(frac * state.frozen_ch4);
+            state.frozen_ch4 -= t;
+            w.ch4 += t;
+            let t = state.frozen_o2.min(frac * state.frozen_o2);
+            state.frozen_o2 -= t;
+            w.o2 += t;
+        }
+        state.liquid_fraction_prev = current;
+        // 饱和相从湖底沉积层浓度起步。
+        comp.conc_o2_sat = state.conc_o2;
+        comp.conc_methane_sat = state.conc_methane;
+    }
     // 宿主水量拆到饱和/非饱和两部分。
     let mut wliq_unsat = *i.wliq_soisno;
     let mut wice_unsat = *i.wice_soisno;
@@ -386,7 +512,37 @@ pub fn methane(
         }
     }
     let microbial_zero = [0.0; NL_SOIL];
+    let mut lake_water = lake_state
+        .as_deref()
+        .map_or_else(physics::LakeWater::default, |l| l.water);
+    let mut lake_water_ch4_oxid = 0.0f64;
     for sat in 0..2 {
+        if lake_on && sat == 0 {
+            // 湖只有饱和的沉积层：非饱和相的过程量清零，`conc_methane_unsat = 0`。
+            r.unsat = PhaseResult::default();
+            comp.conc_methane_unsat = [0.0; NL_SOIL];
+            continue;
+        }
+        if lake_on {
+            // 湖底沉积层被上覆湖水饱和：按液/冰比例把孔隙填满（`((porsl·dz)·ρ·v)/vtot`）。
+            for k in 0..NL_SOIL {
+                let j = k as i32 + 1;
+                let vliq = i.wliq_soisno[sn(j)].max(0.0) / DENH2O;
+                let vice = i.wice_soisno[sn(j)].max(0.0) / DENICE;
+                let vtot = vliq + vice;
+                let pore = i.porsl[k] * dz(k);
+                if vtot > 1.0e-12 {
+                    wliq_sat[sn(j)] = pore * DENH2O * vliq / vtot;
+                    wice_sat[sn(j)] = pore * DENICE * vice / vtot;
+                } else if i.t_soisno[sn(j)] > TFRZ {
+                    wliq_sat[sn(j)] = pore * DENH2O;
+                    wice_sat[sn(j)] = 0.0;
+                } else {
+                    wliq_sat[sn(j)] = 0.0;
+                    wice_sat[sn(j)] = pore * DENICE;
+                }
+            }
+        }
         let (wliq, wice) = if sat == 0 {
             (&wliq_unsat, &wice_unsat)
         } else {
@@ -501,38 +657,48 @@ pub fn methane(
             i.z_soisno,
             i.zi_soisno,
             i.forc_pbot,
-            0.0,
-            0.0,
+            lake_depth_current,
+            lake_icefrac_top,
             i.t_soisno,
             wdsrf_phase,
             conc_ch4,
             &phases.conc_ch4_gas_porsl,
         );
-        let aere = physics::aere(
-            m,
-            &AereInput {
-                year: i.idate[0],
-                jwt,
-                sat,
-                patchclass: i.patchclass,
-                lai: i.lai,
-                z_soisno: i.z_soisno,
-                dz_soisno: i.dz_soisno,
-                t_soisno: i.t_soisno,
-                rootfr: i.rootfr,
-                rootr: i.rootr,
-                etr: i.etr,
-                grnd_methane_cond_base: grnd_cond_base,
-                c_atm: r.c_atm,
-                annsum_npp: i.annsum_npp,
-                annavg_agnpp: comp.annual.annavg_agnpp,
-                annavg_bgnpp: comp.annual.annavg_bgnpp,
-                conc_ch4_aqu_porsl: &phases.conc_ch4_aqu_porsl,
-                conc_ch4_gas_porsl: &phases.conc_ch4_gas_porsl,
-                conc_o2_gas_porsl: &phases.conc_o2_gas_porsl,
-                overrides: i.aere_override,
-            },
-        );
+        // 湖的饱和相不跑通气组织（`methane_aere_depth_sat = 0` 等）。
+        let skip_aere = lake_on && sat == 1;
+        let aere = if skip_aere {
+            physics::AereOutput {
+                methane_aere_depth: [0.0; NL_SOIL],
+                methane_tran_depth: [0.0; NL_SOIL],
+                o2_aere_depth: [0.0; NL_SOIL],
+            }
+        } else {
+            physics::aere(
+                m,
+                &AereInput {
+                    year: i.idate[0],
+                    jwt,
+                    sat,
+                    patchclass: i.patchclass,
+                    lai: i.lai,
+                    z_soisno: i.z_soisno,
+                    dz_soisno: i.dz_soisno,
+                    t_soisno: i.t_soisno,
+                    rootfr: i.rootfr,
+                    rootr: i.rootr,
+                    etr: i.etr,
+                    grnd_methane_cond_base: grnd_cond_base,
+                    c_atm: r.c_atm,
+                    annsum_npp: i.annsum_npp,
+                    annavg_agnpp: comp.annual.annavg_agnpp,
+                    annavg_bgnpp: comp.annual.annavg_bgnpp,
+                    conc_ch4_aqu_porsl: &phases.conc_ch4_aqu_porsl,
+                    conc_ch4_gas_porsl: &phases.conc_ch4_gas_porsl,
+                    conc_o2_gas_porsl: &phases.conc_o2_gas_porsl,
+                    overrides: i.aere_override,
+                },
+            )
+        };
         let mut layers = TranLayers {
             methane_oxid_depth: oxid,
             methane_aere_depth: aere.methane_aere_depth,
@@ -571,9 +737,19 @@ pub fn methane(
                 vol_ch4_storage: &phases.vol_ch4_storage,
                 vol_gas: &phases.vol_gas,
                 grnd_methane_cond_base: grnd_cond_base,
+                lake: i.lake.filter(|_| lake_on).map(|lake| physics::TranLake {
+                    dz_lake: lake.dz_lake,
+                    t_lake: lake.t_lake,
+                    lake_icefrac: lake.lake_icefrac,
+                    lakedepth: lake.lakedepth,
+                    forc_us: lake.forc_us,
+                    forc_vs: lake.forc_vs,
+                }),
             },
             &mut layers,
+            &mut lake_water,
         )?;
+        lake_water_ch4_oxid = tran.lake_water_ch4_oxid;
         *conc_o2 = layers.conc_o2;
         *conc_ch4 = layers.conc_methane;
         let p = if sat == 0 { &mut r.unsat } else { &mut r.sat };
@@ -613,6 +789,10 @@ pub fn methane(
         p.prod_tot = col_sum(&p.prod);
         p.co2_decomp_tot = col_sum(&p.co2_decomp);
         p.co2_oxid_tot = col_sum(&p.co2_oxid);
+        if lake_on && sat == 1 {
+            p.oxid_tot += lake_water_ch4_oxid;
+            p.co2_oxid_tot += lake_water_ch4_oxid;
+        }
         p.co2_net_tot = p.co2_decomp_tot + p.co2_oxid_tot;
         p.net = p.oxid_tot - p.prod_tot;
         p.surf_flux = ((p.surf_diff + p.surf_aere) + p.surf_ebul) + col_sum(&p.tran);
@@ -662,6 +842,51 @@ pub fn methane(
     g.ebul_tot = 0.0;
     r.conc_methane = mix_arr(&comp.conc_methane_sat, &comp.conc_methane_unsat);
     r.conc_o2 = mix_arr(&comp.conc_o2_sat, &comp.conc_o2_unsat);
+    // 湖：整列就是饱和的沉积层加水柱，合并量逐项换成湖的量，列总量加上水柱的液态与冻结库存。
+    if let (true, Some(state)) = (lake_on, lake_state) {
+        let s = r.sat;
+        g.prod = s.prod;
+        g.oxid = s.oxid;
+        g.ebul = s.ebul;
+        g.co2_decomp = s.co2_decomp;
+        g.co2_oxid = s.oxid;
+        g.surf_ebul = s.surf_ebul;
+        g.surf_diff = s.surf_diff;
+        g.surf_aere = 0.0;
+        g.surf_flux = s.surf_diff + s.surf_ebul;
+        r.surf_flux_tot_lake = g.surf_flux;
+        r.surf_flux_phys = g.surf_ebul + g.surf_diff_phys;
+        g.prod_tot = s.prod_tot;
+        g.oxid_tot = s.oxid_tot;
+        g.ebul_tot = s.ebul_tot;
+        g.co2_decomp_tot = s.co2_decomp_tot;
+        g.co2_oxid_tot = s.co2_oxid_tot;
+        g.co2_net_tot = s.co2_net_tot;
+        g.grnd_cond = s.grnd_cond;
+        g.net = s.net;
+        g.balance_residual = s.balance_residual;
+        g.ch4_clip_credit = s.ch4_clip_credit;
+        g.o2_cap_loss = s.o2_cap_loss;
+        g.o2_cap_gain = s.o2_cap_gain;
+        state.water = lake_water;
+        g.totcol = (s.totcol + state.water.ch4) + state.frozen_ch4;
+        state.totcol = s.totcol;
+        state.grnd_cond = s.grnd_cond;
+        state.conc_o2 = comp.conc_o2_sat;
+        state.conc_methane = comp.conc_methane_sat;
+        r.conc_o2 = comp.conc_o2_sat;
+        r.conc_methane = comp.conc_methane_sat;
+        // 沉积碳按产甲烷与分解 CO2 消耗（GIMPLE：`max(FNMA((prod+co2)·dt, CATOMW, soilc), 0)`）。
+        if !m.replenishlakec {
+            let mut soilc = *i.lake_soilc;
+            for k in 0..NL_SOIL {
+                soilc[k] = (-((s.prod[k] + s.co2_decomp[k]) * deltim))
+                    .mul_add(super::config::CATOMW, soilc[k])
+                    .max(0.0);
+            }
+            r.lake_soilc = Some(soilc);
+        }
+    }
     if !cold {
         let err = (-deltim).mul_add(
             (g.prod_tot - g.oxid_tot) - g.surf_flux,

@@ -999,8 +999,22 @@ fn advance_patch(
     if let Some(snicar) = input.snicar.as_mut() {
         snicar.aerosol_deposition_kg_m2_s = template.aerosol_deposition(step.clock.forcing_time)?;
     }
+    // `CoLM.F90:495-541` 的 BGC 数据更新对所有 patch 都做；非土壤 patch 不跑 `bgc_driver`。
+    let end = step.clock.end_time;
+    let idate = [
+        end.year,
+        i32::from(end.julian_day),
+        i32::try_from(end.seconds)?,
+    ];
+    let update_non_soil_bgc = |state: &mut colm_core::StandardLctSnowSoilState| -> Result<()> {
+        if let Some(bgc) = &template.bgc {
+            bgc.update_non_soil(step.clock.forcing_time, idate, state)?;
+        }
+        Ok(())
+    };
     if template.patch_type == 3 {
         let output = colm_core::glacier_snow_step(input, state)?;
+        update_non_soil_bgc(state)?;
         if let Some((tracer, _)) = &template.tracer {
             crate::tracer::glacier_end_of_step(
                 tracer,
@@ -1050,6 +1064,7 @@ fn advance_patch(
             state,
             &mut urban,
         )?;
+        update_non_soil_bgc(state)?;
         // 末尾 `alburban` 的结果也是主重启与 history 里的 `alb`/`ssun`/`ssha`/`extkd`。
         let radiation = &mut state.energy.radiation;
         radiation.albedo = urban.radiation.albedo;
@@ -1067,6 +1082,7 @@ fn advance_patch(
             let mut input = input;
             input.energy.ground_temperature.is_dry_lake = true;
             let output = colm_core::standard_lct_snow_soil_step(input, state)?;
+            update_non_soil_bgc(state)?;
             if let (Some((tracer, _)), Some(total)) = (&template.tracer, tracer_initial_total) {
                 crate::tracer::end_of_step(
                     tracer,
@@ -1091,6 +1107,7 @@ fn advance_patch(
             return Ok(PatchOutput::Soil(Box::new(output)));
         }
         let output = colm_core::lake_snow_step(input, lake.site, state)?;
+        update_non_soil_bgc(state)?;
         if let Some((tracer, _)) = &template.tracer {
             crate::tracer::lake_end_of_step(
                 tracer,
@@ -1127,6 +1144,21 @@ fn advance_patch(
             step.forcing.air_temperature_k,
             template.physics.variably_saturated_flow,
         );
+        // `tracer_lake_step`（`CoLMDRIVER.F90:231-232`）：`CoLMMAIN` 返回之后（非土壤清零之后）跑湖泊甲烷。
+        if let Some(bgc) = &template.bgc {
+            bgc.lake_methane(
+                idate,
+                &step.forcing,
+                binding.partial_pressures_pa.unwrap_or((
+                    step.forcing.bottom_pressure_pa * binding.co2_volume_fraction,
+                    step.forcing.bottom_pressure_pa * 0.209,
+                )),
+                state,
+                &output,
+                lake.site.depth_m,
+                lake.site.dynamic,
+            )?;
+        }
         return Ok(PatchOutput::Lake(Box::new(output)));
     }
     let output = colm_core::standard_lct_snow_soil_step(input, state)?;
@@ -1153,14 +1185,9 @@ fn advance_patch(
     template.prepare_surface_optics(state, optics)?;
     // `CoLMDRIVER.F90:238-244`：土壤 patch 在 `CoLMMAIN`（含末尾的光学准备）之后跑 `bgc_driver`。
     if let Some(bgc) = &template.bgc {
-        let end = step.clock.end_time;
         bgc.step(
             step.clock.forcing_time,
-            [
-                end.year,
-                i32::from(end.julian_day),
-                i32::try_from(end.seconds)?,
-            ],
+            idate,
             &step.forcing,
             binding.partial_pressures_pa.unwrap_or((
                 step.forcing.bottom_pressure_pa * binding.co2_volume_fraction,
