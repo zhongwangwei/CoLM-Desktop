@@ -449,6 +449,7 @@ pub use variably_saturated_flow::{
     VariableSaturatedBoundary, VariableSaturatedBoundaryKind,
     VariableSaturatedDrainagePerturbation, VariableSaturatedExplicitInput,
     VariableSaturatedExplicitState, VariableSaturatedFlowInput, VariableSaturatedFlowOutput,
+    VariableSaturatedTracerDiagnostics,
     VariableSaturatedFluxAllInput, VariableSaturatedHomogeneousFluxInput,
     VariableSaturatedInterfaceFlux, VariableSaturatedInterfaceFluxInput,
     VariableSaturatedLevelCoordinate, VariableSaturatedLevelPerturbation,

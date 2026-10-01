@@ -189,6 +189,10 @@ pub struct LeafTemperatureState {
 #[derive(Debug, Clone, PartialEq)]
 pub struct LeafTemperatureOutput {
     pub wet_snow_fraction: f64,
+    /// `canopy_smelt_mass_out`/`canopy_frzc_mass_out`：冠层雪→雨、雨→雪的相变质量 [mm]
+    /// （`qmelt*deltim`、`qfrz*deltim`，只在 `DEF_VEG_SNOW` 时非零；示踪物记账用）。
+    pub canopy_melt_mass_mm: f64,
+    pub canopy_freeze_mass_mm: f64,
     pub eastward_stress_kg_m_s2: f64,
     pub northward_stress_kg_m_s2: f64,
     pub ground_sensible_heat_w_m2: f64,
@@ -1227,7 +1231,7 @@ pub fn leaf_temperature(
     // `main/` 在冠层水更新与相变（Niu 2004 把 `tl` 拉向冰点）**之前**就算好了
     // `fseng*`/`fevpg*`（`wtl0*tl`、`wtlq0*qsatl`），所以下面这几项用的是相变前的叶温。
     let leaf_temperature_before_phase_change_k = state.leaf_temperature_k;
-    let wet_snow_fraction = update_canopy_water(
+    let (wet_snow_fraction, canopy_melt_mass_mm, canopy_freeze_mass_mm) = update_canopy_water(
         LeafTemperatureInput {
             stem_area_index: last.stem_area_index,
             ..input
@@ -1346,6 +1350,8 @@ pub fn leaf_temperature(
     // 为很小的负数（只有 TRACER 构建在 `:1107-1113` 把负值并进 `evplwet` 再置 0）。早先这里有
     // 一句 `max(0)`，AT-Neu 灌木地类 1 月第 647 条 Fortran `f_etr = -1.7e-14` 而 Rust 为 0。
     Ok(LeafTemperatureOutput {
+        canopy_melt_mass_mm,
+        canopy_freeze_mass_mm,
         ground_latent_heat_j_kg: input.ground_latent_heat_j_kg,
         leaf_latent_heat_j_kg,
         sunlit_leaf_area_index: laisun,
@@ -1765,7 +1771,7 @@ fn update_canopy_water(
     input: LeafTemperatureInput<'_>,
     state: &mut LeafTemperatureState,
     wet_evaporation_kg_m2_s: f64,
-) -> Result<f64> {
+) -> Result<(f64, f64, f64)> {
     let dt = input.time_step_seconds;
     let water = &mut state.canopy_water;
     if !input.options.vegetation_snow {
@@ -1786,7 +1792,7 @@ fn update_canopy_water(
             water.snow_mm = 0.0;
         }
         // `fwet_snow` 在这一支从未赋值（模块变量，初值 0），相变块也不跑。
-        return Ok(0.0);
+        return Ok((0.0, 0.0, 0.0));
     }
     let evaporation = wet_evaporation_kg_m2_s.max(0.0);
     // `qdewl/qfrol = abs(min(evplwet, 0))`
@@ -1822,6 +1828,7 @@ fn update_canopy_water(
     } else {
         0.0
     };
+    let (mut melt_mass, mut freeze_mass) = (0.0, 0.0);
     if water.snow_mm > 1.0e-6 && state.leaf_temperature_k > FREEZING_K {
         let melt = (water.snow_mm / dt).min(
             (state.leaf_temperature_k - FREEZING_K) * ICE_HEAT_CAPACITY_J_KG_K * water.snow_mm
@@ -1829,6 +1836,7 @@ fn update_canopy_water(
         );
         water.snow_mm = (water.snow_mm - melt * dt).max(0.0);
         water.rain_mm = (water.rain_mm + melt * dt).max(0.0);
+        melt_mass = melt * dt;
         // Niu et al. (2004)
         // `tl = fwet_snow*tfrz + (1.-fwet_snow)*tl`：GIMPLE 是
         // `.FMA (fwet_snow, tfrz, tl*(1-fwet_snow))`（`main/MOD_LeafTemperature.F90:1280/1290`）。
@@ -1844,6 +1852,7 @@ fn update_canopy_water(
         );
         water.rain_mm = (water.rain_mm - freeze * dt).max(0.0);
         water.snow_mm = (water.snow_mm + freeze * dt).max(0.0);
+        freeze_mass = freeze * dt;
         // `tl = fwet_snow*tfrz + (1.-fwet_snow)*tl`：GIMPLE 是
         // `.FMA (fwet_snow, tfrz, tl*(1-fwet_snow))`（`main/MOD_LeafTemperature.F90:1280/1290`）。
         state.leaf_temperature_k = wet_snow_fraction.mul_add(
@@ -1852,7 +1861,7 @@ fn update_canopy_water(
         );
     }
     wet_snow_fraction = wet_snow_fraction.min(1.0);
-    Ok(wet_snow_fraction)
+    Ok((wet_snow_fraction, melt_mass, freeze_mass))
 }
 
 fn validate(input: LeafTemperatureInput<'_>, state: LeafTemperatureState) -> Result<()> {

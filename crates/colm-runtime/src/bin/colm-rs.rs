@@ -195,6 +195,45 @@ fn run() -> Result<()> {
                 .context("cropfrac is shorter than the patch count")?;
         }
     }
+    // `land_tracer_init`（`CoLM.F90:339`）：注册示踪物；有输运示踪物时读续跑里的示踪物事务，
+    // 读不到（冷启动重启只有空事务）就按水量冷启动。
+    let tracer_runtime =
+        colm_runtime::tracer::TracerRuntime::from_document(&document)?.map(std::sync::Arc::new);
+    if let Some(tracer) = tracer_runtime.as_ref().filter(|tracer| tracer.has_transport()) {
+        let restart = colm_init::RestartFile::open(&files.time)?;
+        templates = templates
+            .into_iter()
+            .map(|template| {
+                let state = template.snow_state();
+                let wliq = colm_core::tracer::step::pack_soisno(
+                    &state.snow.liquid_water_kg_m2,
+                    &state.soil_water.liquid_water_kg_m2,
+                );
+                let wice = colm_core::tracer::step::pack_soisno(
+                    &state.snow.ice_water_kg_m2,
+                    &state.soil_water.ice_water_kg_m2,
+                );
+                let initial = tracer.initial_state(
+                    &restart,
+                    template.patch,
+                    patch_count,
+                    colm_core::tracer::WaterInventory {
+                        patch_type: template.patch_type,
+                        ldew_rain: state.energy.leaf.canopy_water.rain_mm,
+                        ldew_snow: state.energy.leaf.canopy_water.snow_mm,
+                        wliq_soisno: &wliq,
+                        wice_soisno: &wice,
+                        wa: state.soil_water.aquifer_water_mm,
+                        wdsrf: state.soil_water.surface_water_mm,
+                        wetwat: state.soil_water.wetland_water_mm,
+                        scv: state.snow.water_equivalent_kg_m2,
+                        waterstorage: None,
+                    },
+                )?;
+                template.with_tracer(std::sync::Arc::clone(tracer), initial)
+            })
+            .collect::<Result<Vec<_>>>()?;
+    }
     // `Opt_Baseflow_init` 无论开不开优化都先建 `ParaOpt/`（`MOD_Opt_Baseflow.F90:40-42`）。
     let para_opt = layout.out().join(&name).join("restart/ParaOpt");
     std::fs::create_dir_all(&para_opt)
@@ -227,6 +266,11 @@ fn run() -> Result<()> {
     let mut session = history_session(&config, &outputs)?
         .map(|session| session.with_patches(templates.len()))
         .transpose()?;
+    // 开示踪物时另写 `<case>_hist_tracer_<cdate>.nc`（没有输运示踪物时只有文件骨架）。
+    if let Some(tracer) = &tracer_runtime {
+        let patch_types = templates.iter().map(|template| template.patch_type).collect();
+        session = session.map(|session| session.with_tracer_variables(tracer.set.clone(), patch_types));
+    }
     let sidecar_config = colm_runtime::history_sidecar::SidecarConfig {
         frequency_code: history_frequency_code(config.history_frequency),
         urban_run: logical_field(&document, "DEF_URBAN_RUN")?,
@@ -1763,6 +1807,7 @@ fn run_snow(
                 let path = periodic.path(step.clock.end_time);
                 if path != restart_out {
                     write_evolved_restart(templates, states, &snapshots, restart_in, &path)?;
+                    append_tracer_restart(templates, states, &path)?;
                     mark_history_restart(&path, history_restart)?;
                 }
             }
@@ -1787,11 +1832,39 @@ fn run_snow(
     };
     let last = last.context(NO_STEP)?;
     write_evolved_restart(templates, &states, &last, restart_in, restart_out)?;
+    append_tracer_restart(templates, &states, restart_out)?;
     mark_history_restart(restart_out, history_restart)?;
     Ok(RunSummary {
         steps,
         history_files,
     })
+}
+
+/// `write_tracer_restart_all`：有输运示踪物时把示踪物事务追加进刚写好的陆面续跑文件。
+fn append_tracer_restart(
+    templates: &[StandardLctRestartTemplate],
+    states: &[StandardLctSnowSoilState],
+    path: &Path,
+) -> Result<()> {
+    let Some((tracer, _)) = templates.first().and_then(|template| template.tracer.as_ref()) else {
+        return Ok(());
+    };
+    let tracks = states
+        .iter()
+        .map(|state| {
+            state
+                .tracer
+                .as_deref()
+                .map(|track| &track.state)
+                .context("every patch of a tracer run carries tracer state")
+        })
+        .collect::<Result<Vec<_>>>()?;
+    colm_runtime::tracer::write_land_tracer_restart(
+        path,
+        &tracer.set,
+        &tracks,
+        tracer.aquifer_mixing_water_mm,
+    )
 }
 
 /// 写续跑文件时要附带的历史累加器信息（`land_history_restart.inc`）。

@@ -168,7 +168,7 @@ pub fn tracer_precip(
             rain_old,
             xsc_rain_water,
             input.gross_intr_rain,
-            rain_total * dt,
+            rain_total,
             input.pg_rain,
             r_rain_input,
             dt,
@@ -181,7 +181,7 @@ pub fn tracer_precip(
             snow_old,
             xsc_snow_water,
             input.gross_intr_snow,
-            input.forc_snow * dt,
+            input.forc_snow,
             input.pg_snow,
             r_input,
             dt,
@@ -226,7 +226,7 @@ pub fn tracer_precip(
     }
 }
 
-/// 滴落量的上限：雨按截留量，雪按混合后的冠层水。
+/// 两相的差别：滴落上限（雨按截留量，雪按混合后的冠层水）与穿透/滴落的收缩形状。
 #[derive(Clone, Copy)]
 enum DripCap {
     Intercepted,
@@ -240,7 +240,7 @@ fn canopy_phase(
     old_water: f64,
     xsc_water: f64,
     gross_intr: f64,
-    arriving_water: f64,
+    arriving_rate: f64,
     pg: f64,
     r_input: f64,
     dt: f64,
@@ -262,8 +262,18 @@ fn canopy_phase(
     } else {
         r_input
     };
-    let throughfall = (arriving_water - intercepted).max(0.0);
-    let drip = ((pg.max(0.0) * dt - xsc_mass) - throughfall).max(0.0);
+    // 雨支 `dt*rain_total`、`dt*max(pg_rain,0)` 另有他用，独立舍入；雪支两处都收成
+    // `FMS(deltim, x, y)`（GIMPLE `_456`、`_233`）。
+    let (throughfall, drip) = match cap {
+        DripCap::Intercepted => {
+            let throughfall = (dt * arriving_rate - intercepted).max(0.0);
+            (throughfall, ((dt * pg.max(0.0) - xsc_mass) - throughfall).max(0.0))
+        }
+        DripCap::Mixed => {
+            let throughfall = dt.mul_add(arriving_rate, -intercepted).max(0.0);
+            (throughfall, (dt.mul_add(pg.max(0.0), -xsc_mass) - throughfall).max(0.0))
+        }
+    };
     let drip = match cap {
         DripCap::Intercepted => drip.min(intercepted.max(0.0)),
         DripCap::Mixed => drip.min(water_mixed.max(0.0)),

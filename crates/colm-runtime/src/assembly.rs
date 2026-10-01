@@ -911,6 +911,9 @@ pub struct StandardLctRestartTemplate {
     pub bgc: Option<crate::bgc_step::BgcRuntime>,
     /// `DEF_USE_IRRIGATION` 的起跑灌溉状态（[`Self::with_irrigation`] 装上）。
     pub irrigation: Option<colm_core::IrrigationState>,
+    /// `DEF_USE_TRACER` 且有输运示踪物：共享配置与本 patch 的起跑示踪物状态
+    /// （[`Self::with_tracer`] 装上）。
+    pub tracer: Option<(std::sync::Arc<crate::tracer::TracerRuntime>, colm_core::tracer::PatchTracerState)>,
     /// 本 patch 在网格元里的面积份额 `elm_patch%subfrc`：单 patch 为 1，多作物单点是归一化的
     /// `pctcrop`（`MOD_SingleSrfdata.F90:1490-1493`）。只用于网格元的近地面诊断聚合。
     pub patch_fraction: f64,
@@ -1427,6 +1430,7 @@ fn assemble(
         pft: None,
         bgc: None,
         irrigation: None,
+        tracer: None,
         patch_fraction: 1.0,
         patch,
         patch_type: i32::try_from(patch_type).context("patchtype is outside the kernel's range")?,
@@ -1538,6 +1542,30 @@ impl StandardLctRestartTemplate {
     ///
     /// 只验证了 BGC 作物土壤 patch（`patchtype == 0`）。其它 patch 上游也带灌溉状态（`totwb` 含
     /// `waterstorage`、城市透水面的 `WATER_2014` 仍加 `wdsrf/deltim`），Rust 没接这些分支，拒绝。
+    /// 挂上示踪物（`land_tracer_init`）。只验证了土壤 patch：湿地、城市、湖、冰川与 PFT/PC
+    /// 的示踪物分支尚未接入，拒绝。
+    pub fn with_tracer(
+        mut self,
+        runtime: std::sync::Arc<crate::tracer::TracerRuntime>,
+        initial: colm_core::tracer::PatchTracerState,
+    ) -> Result<Self> {
+        ensure!(
+            matches!(self.patch_type, 0 | 2)
+                && self.pft.is_none()
+                && self.urban.is_none()
+                && self.lake.is_none(),
+            "tracer bookkeeping is wired only for LCT soil and wetland patches (patchtype 0/2); \
+             this one has patchtype {}",
+            self.patch_type
+        );
+        ensure!(
+            runtime.variably_saturated_flow,
+            "upstream requires DEF_USE_VariablySaturatedFlow for DEF_USE_TRACER"
+        );
+        self.tracer = Some((runtime, initial));
+        Ok(self)
+    }
+
     pub fn with_irrigation(mut self, state: colm_core::IrrigationState) -> Result<Self> {
         let settings = self
             .physics
@@ -2069,6 +2097,9 @@ impl StandardLctRestartTemplate {
                 .snicar
                 .as_ref()
                 .map(|snicar| Box::new(snicar.initial.clone())),
+            tracer: self.tracer.as_ref().map(|(_, initial)| {
+                Box::new(colm_core::tracer::step::PatchTracerTrack::new(initial.clone()))
+            }),
         }
     }
 
@@ -2284,6 +2315,7 @@ impl StandardLctRestartTemplate {
             },
             soil_water: self.input(binding).water,
             snicar: self.snicar_step_input(),
+            tracer: self.tracer.as_ref().map(|(runtime, _)| runtime.context()),
         }
     }
 

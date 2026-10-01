@@ -232,6 +232,8 @@ pub struct Water2014SoilOutput {
     pub root_uptake_amount_mm: Vec<f64>,
     pub matric_potential_mm: Vec<f64>,
     pub hydraulic_conductivity_mm_s: Vec<f64>,
+    /// `WATER_VSF` 只为示踪物导出的量；`WATER_2014` 与非动态湿地为 `None`。
+    pub tracer: Option<crate::VariableSaturatedTracerDiagnostics>,
 }
 
 /// Inputs to the active-snow `WATER_2014`/`WATER_VSF` hand-off.
@@ -423,6 +425,7 @@ pub fn water_2014_soil_step(
         root_uptake_amount_mm: soil.root_uptake_amount_mm,
         matric_potential_mm: soil.matric_potential_mm,
         hydraulic_conductivity_mm_s: soil.hydraulic_conductivity_mm_s,
+        tracer: None,
     })
 }
 
@@ -707,6 +710,7 @@ fn wetland_soil_step(
         root_uptake_amount_mm: vec![0.0; layers],
         matric_potential_mm: state.matric_potential_mm.clone(),
         hydraulic_conductivity_mm_s: state.hydraulic_conductivity_mm_s.clone(),
+        tracer: None,
     })
 }
 
@@ -771,6 +775,7 @@ fn variably_saturated_soil_step(
         root_uptake_amount_mm: vsf.transpiration_actual_mm,
         matric_potential_mm: vsf.matric_potential_mm,
         hydraulic_conductivity_mm_s: vsf.hydraulic_conductivity_mm_s,
+        tracer: Some(vsf.tracer),
     })
 }
 

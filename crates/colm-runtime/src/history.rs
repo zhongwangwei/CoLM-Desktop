@@ -2649,6 +2649,20 @@ pub struct HistorySession {
     /// `DEF_USE_TRACER`（网格写出）：步长 [s]。打开时每条记录多写窗口变量，并另写
     /// 示踪物 history 文件（见 [`Self::with_tracer_history`]）。
     tracer_time_step_seconds: Option<f64>,
+    /// 有输运示踪物时的示踪物 history（`tracer_hist_out`），见 [`Self::with_tracer_variables`]。
+    tracer_variables: Option<TracerHistoryState>,
+}
+
+/// 示踪物 history 的调度与当前文件（与主 history 同一份记录表，自己计步）。
+#[derive(Debug)]
+struct TracerHistoryState {
+    set: colm_core::tracer::TracerSet,
+    /// 各 patch 的 `patchtype`（`filter`）。
+    patch_types: Vec<i32>,
+    cursor: usize,
+    /// 上次写出以来的非预热步数（主 history 的 `nac`）。
+    steps: usize,
+    open: Option<(String, HistoryBuffers, Vec<colm_hist::history::TracerFileVariable>)>,
 }
 
 /// 多 patch 时每个累加器只写自己那一格；单 patch 一次写全部（缓冲区只有一格）。
@@ -2755,6 +2769,7 @@ impl HistorySession {
             gridded_names: Vec::new(),
             staged: Vec::new(),
             tracer_time_step_seconds: None,
+            tracer_variables: None,
         })
     }
 
@@ -3463,11 +3478,154 @@ impl HistorySession {
     /// 收尾：把还开着的那个分组落盘。调度已经保证运行结束那一刻会写一条，所以正常
     /// 情况下这里只是把缓冲区写出。
     pub fn finish(&mut self) -> Result<Vec<PathBuf>> {
+        let mut written = self.finish_main()?;
+        if let Some(path) = self.finish_tracer()? {
+            written.push(path);
+        }
+        Ok(written)
+    }
+
+    /// 只落盘主 history 当前的分组（推进过程中换组、组满时用；示踪物文件由 [`Self::push_tracer`]
+    /// 自己在组满时写）。
+    fn finish_main(&mut self) -> Result<Vec<PathBuf>> {
         let mut written = Vec::new();
         if let Some((suffix, buffer)) = self.open.take() {
             written.push(self.write(&suffix, &buffer)?);
         }
         Ok(written)
+    }
+
+    /// 打开示踪物 history（有输运示踪物时；`tracer_hist_out`）。
+    pub fn with_tracer_variables(
+        mut self,
+        set: colm_core::tracer::TracerSet,
+        patch_types: Vec<i32>,
+    ) -> Self {
+        self.tracer_variables = Some(TracerHistoryState {
+            set,
+            patch_types,
+            cursor: 0,
+            steps: 0,
+            open: None,
+        });
+        self
+    }
+
+    /// 一步结束、主 history 已推进之后调用（`hist_out` 里的 `tracer_hist_out` 与
+    /// `flush_Tracer_Acc`）。预热期直接返回，既不计步也不清零（上游 `hist_out` 提前返回）。
+    pub fn push_tracer(
+        &mut self,
+        end: CalendarTime,
+        is_spinup: bool,
+        states: &mut [colm_core::StandardLctSnowSoilState],
+    ) -> Result<Option<PathBuf>> {
+        use colm_core::tracer::hist;
+        let Some(tracer) = self.tracer_variables.as_mut() else {
+            return Ok(None);
+        };
+        if is_spinup {
+            return Ok(None);
+        }
+        tracer.steps += 1;
+        let Some(record) = self.records.get(tracer.cursor).cloned() else {
+            return Ok(None);
+        };
+        if tick_of(end)? != record.write_at_tick {
+            return Ok(None);
+        }
+        let records_in_group = self
+            .records
+            .iter()
+            .filter(|scheduled| scheduled.suffix == record.suffix)
+            .count();
+        if tracer.open.as_ref().map(|(suffix, _, _)| suffix) != Some(&record.suffix) {
+            let mut buffer = HistoryBuffers::new(self.dimensions, self.site, records_in_group);
+            if let Some(grid) = &self.grid {
+                buffer = buffer.with_grid(std::sync::Arc::clone(grid))?;
+            }
+            tracer.open = Some((record.suffix.clone(), buffer, Vec::new()));
+        }
+        let nac = tracer.steps as f64;
+        let patches = states.len();
+        let (_, buffer, variables) = tracer.open.as_mut().expect("just opened");
+        buffer.set_time(record.record, i32::try_from(record.label_minutes)?)?;
+        // 文件里的变量：逐示踪物、逐表项（同 `tracer_hist_out` 的写出顺序）。
+        let mut index = 0;
+        for itrc in tracer.set.transport_indices() {
+            let descriptor = &tracer.set.tracers[itrc];
+            for variable in hist::TRACER_HISTORY_VARIABLES.iter() {
+                let applies = match variable.scope {
+                    hist::TracerScope::Isotope => descriptor.is_isotope(),
+                    hist::TracerScope::NonIsotope => !descriptor.is_isotope(),
+                    hist::TracerScope::NonvolatileSolute => descriptor.is_nonvolatile_solute(),
+                    hist::TracerScope::Transport => true,
+                };
+                if !applies {
+                    continue;
+                }
+                let layered = matches!(variable.dims, hist::TracerHistDims::SoilSnow);
+                if variables.len() == index {
+                    let width = if layered {
+                        colm_core::tracer::SOISNO_LAYERS
+                    } else {
+                        1
+                    };
+                    variables.push(colm_hist::history::TracerFileVariable {
+                        name: variable.variable_name(descriptor),
+                        long_name: variable.long_name(descriptor),
+                        units: variable.units(descriptor).to_owned(),
+                        layered,
+                        values: vec![colm_core::MISSING; records_in_group * patches * width],
+                    });
+                }
+                let file_variable = &mut variables[index];
+                for (patch, state) in states.iter().enumerate() {
+                    let track = state
+                        .tracer
+                        .as_deref()
+                        .context("a tracer history needs every patch to carry tracer state")?;
+                    let patch_ok = variable.patch_filter.admits(tracer.patch_types[patch], true, true);
+                    if layered {
+                        let values =
+                            hist::single_point_soisno(itrc, &track.state, nac, patch_ok);
+                        let base = (record.record * patches + patch) * colm_core::tracer::SOISNO_LAYERS;
+                        file_variable.values[base..base + colm_core::tracer::SOISNO_LAYERS]
+                            .copy_from_slice(&values);
+                    } else {
+                        file_variable.values[record.record * patches + patch] =
+                            hist::single_point_value(variable, descriptor, itrc, &track.state, nac, patch_ok);
+                    }
+                }
+                index += 1;
+            }
+        }
+        for state in states.iter_mut() {
+            if let Some(track) = state.tracer.as_deref_mut() {
+                track.state.flush_accumulators();
+            }
+        }
+        tracer.cursor += 1;
+        tracer.steps = 0;
+        if record.record + 1 == records_in_group {
+            return self.finish_tracer();
+        }
+        Ok(None)
+    }
+
+    fn finish_tracer(&mut self) -> Result<Option<PathBuf>> {
+        let Some(tracer) = self.tracer_variables.as_mut() else {
+            return Ok(None);
+        };
+        let Some((suffix, buffer, variables)) = tracer.open.take() else {
+            return Ok(None);
+        };
+        std::fs::create_dir_all(&self.directory)
+            .with_context(|| format!("cannot create {}", self.directory.display()))?;
+        let path = self
+            .directory
+            .join(format!("{}_hist_tracer_{suffix}.nc", self.stem));
+        buffer.write_tracer_file(&path, &variables)?;
+        Ok(Some(path))
     }
 
     /// 收下一步：**先累加**，到调度命中的那一步再写区间平均并清零。
@@ -3546,7 +3704,7 @@ impl HistorySession {
             self.accumulators.iter_mut().map(std::mem::take).collect();
         let mut written = None;
         if self.open.as_ref().map(|(suffix, _)| suffix) != Some(&record.suffix) {
-            written = self.finish()?.pop();
+            written = self.finish_main()?.pop();
             let mut buffer = HistoryBuffers::new(
                 self.dimensions,
                 self.site,
@@ -3613,7 +3771,7 @@ impl HistorySession {
         // 分组的最后一条写完就落盘（上游写回模式在这一刻把内存里的整组写出）；开着的缓冲区因此
         // 只会是写了一半的组，中途 abort 时由 [`Self::abandon`] 留下只有文件头的文件。
         if record.record + 1 == self.record_count(&record.suffix) {
-            if let Some(path) = self.finish()?.pop() {
+            if let Some(path) = self.finish_main()?.pop() {
                 written = Some(path);
             }
         }
@@ -3649,7 +3807,7 @@ impl HistorySession {
             .directory
             .join(format!("{}_hist_{suffix}.nc", self.stem));
         buffer.write(&path)?;
-        if self.tracer_time_step_seconds.is_some() {
+        if self.tracer_time_step_seconds.is_some() && self.tracer_variables.is_none() {
             buffer.write_tracer_skeleton(
                 self.directory
                     .join(format!("{}_hist_tracer_{suffix}.nc", self.stem)),

@@ -588,6 +588,12 @@ impl PointRuntime {
                 }
                 session.set_element_surface(None);
             }
+            // `tracer_hist_out` 与 `flush_Tracer_Acc`：同一 `hist_out` 里、主 history 之后。
+            if let Some(path) =
+                session.push_tracer(step.clock.end_time, step.clock.is_spinup, states)?
+            {
+                files.push(path);
+            }
             for (template, next) in templates.iter().zip(states.iter_mut()) {
                 refresh_lai(step, template, next)?;
             }
@@ -978,7 +984,13 @@ fn advance_patch(
 ) -> Result<PatchOutput> {
     // `scvold`：上游在 `newsnow` **之前**把 `scv` 抄一份（`CoLMMAIN.F90:814`）。
     let previous_snow_water_equivalent_mm = state.snow.water_equivalent_kg_m2;
+    // 示踪物收支检查要的 `totwb`（与 history 的步首总水量同一个式子）。
+    let tracer_initial_total = template
+        .tracer
+        .as_ref()
+        .map(|_| initial_total_water_mm(template, state));
     let mut input = baseflow_scaled(template.snow_input(binding), baseflow_scale);
+    let deltim = input.energy.interception.time_step_seconds;
     if let Some(snicar) = input.snicar.as_mut() {
         snicar.aerosol_deposition_kg_m2_s = template.aerosol_deposition(step.clock.forcing_time)?;
     }
@@ -1080,6 +1092,17 @@ fn advance_patch(
         return Ok(PatchOutput::Lake(Box::new(output)));
     }
     let output = colm_core::standard_lct_snow_soil_step(input, state)?;
+    if let (Some((tracer, _)), Some(total)) = (&template.tracer, tracer_initial_total) {
+        crate::tracer::end_of_step(
+            tracer,
+            template.patch_type,
+            state,
+            &output,
+            &step.forcing,
+            deltim,
+            total,
+        )?;
+    }
     // 顺序不能反：上游 `hist_out`（`CoLM.F90:537`）在 `CoLMDRIVER`（`:512`）
     // **之后**跑，而末尾那一节在 `CoLMDRIVER` 里面。所以 history 记下的
     // `fsno`/`lai`/`sai` 是**下一步**的值，不是这一步用掉的那一组。

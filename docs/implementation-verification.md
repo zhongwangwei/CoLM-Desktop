@@ -27347,3 +27347,29 @@ Rust 在 `route_system` 的子步长循环与 `bifurcation_substep` 里各加一
 6. 雪层合并第一轮不复查刚下移的层；塌缩分支 `trc_scv` 被覆盖（与水侧 `scv = zwice` 同样覆盖）。
 7. history：`write_history_variable_2d` 原地把模块累加器除以 `nac`（目前靠写出顺序才无害）；单点分层量写 `((m/w)*nac)/nac`；`leaf_delta_b` 的门槛把 mol m-2 与 kg m-2 比较。
 8. `tracer_fractionation_active` 上游还要求同位素在 O18/HDO 注册表里；Rust 暂按"同位素即生效"处理，分馏属 T2。
+
+## 第 481 轮：示踪物 T1b（二）—— 单点陆面示踪物接入并逐位一致
+
+**接入**（按 `CoLMMAIN.F90` 的 `DEF_USE_TRACER` 段排序，`colm-core/src/tracer/step.rs` 收口）：截留之前取 `ldew_*_old` → 截留之后 `tracer_save_storage` + `tracer_precip` → 新雪 `tracer_newsnow` → THERMAL 前（冠层雨/雪归相之后）快照水量，关 `DEF_VEG_SNOW` 时冠层示踪物按叶温归相 → THERMAL 后 `tracer_evapo` 与雪融携带 → WATER 后 `tracer_soil_water` → 雪层合并/分裂、冻结重分配按宿主调用前的快照重放（重放出的 `snl` 与水侧核对）。步末一阶衰减、`tracer_balance_check` 与 `tracer_hist_accumulate` 在运行时层（要用 `endwb/totwb/errorw`，与 `xerr` 同一套式子）。
+
+**宿主补出的量**：叶温导出冠层 `qmelt*deltim`/`qfrz*deltim`；逐层相变 = THERMAL 前后冰量差；`soil_water_vertical_movement` 补齐 `etroot_actual`（含交换层扣减）、`etroot_aquifer`（上游现行写法：PHS 回水为交换前后 `wa` 之差，否则 `max(Δwa,0)*et_fraction`）、`etroot_surface`、`rsub_layer/surface/aquifer` 与 PHS 舍入级负值清零；`WATER_VSF` 补齐 `permeable`、`qgtop_out`、不透水层三项、`dew_overflow`、`frost_displaced`、`late_runoff`；GIMPLE：分层可见水量 `FMA(vliq, max(zwt-zi(l-1),0), porsl*min(dz, zi(l)-zwt))`、`et_fraction` 一处 `FMA`、清零阈值 `max((Σ|etroot|·√ε)·dt, maxval|vliq·dz|·8ε)`。冠层雨/雪按叶温归相从 `finish_energy_step` 里抽出（示踪物要拿归相之后、THERMAL 之前的冠层水），宿主结果不变。
+
+**运行时**：`TracerRuntime`（描述符、默认降水/水汽比值、开关、`Mutex` 里的收支跟踪器）挂在模板上；起跑时续跑文件里的示踪物事务完整（`complete=1`、schema 5、个数与描述符指纹一致）就读，否则按水量冷启动；续跑写出后追加示踪物向量；history 会话另写 `<case>_hist_tracer_<cdate>.nc`（单点 `(time, patch[, soilsnow])`，无 `sensor` 维），与主 history 同一份记录表，预热期不计步也不清零（上游 `hist_out` 提前返回，而 `tracer_hist_accumulate` 在 `CoLMMAIN` 里每步都做）。
+
+**逐位对照**（单点 AT、1 个 solute，初始 1、降水 2、水汽 0.5，VSF + PHS，2010-01-01 起 3 天，有雪）：
+
+| 算例 | 结果 |
+|---|---|
+| `tsa`（日 history，日续跑） | history 2 个（含 `_hist_tracer_`）、续跑 7 个全部 `diff 0` |
+| `tsat`（逐步 history） | history 2 个、续跑 7 个全部 `diff 0` |
+| `tsw`（同 `tsa`，`SITE_landtype = 11` → patchtype 2，走 `tracer_wetland`） | history 2 个、续跑 7 个全部 `diff 0`；`f_trc_conc_wetwat` 1.003→1.029，积雪、冠层浓度都在变 |
+
+**两处修正**（定位方法：保留构建目录的 dump 内核里给 `tracer_precip`/`tracer_evapo` 加十六进制打印，与 Rust 同位置逐行比）：
+1. 冠层雪支的穿透与滴落 GIMPLE 是两条 `FMS`：`throughfall = FMS(dt, forc_snow, intercepted)`、`drip = FMS(dt, max(pg_snow,0), xsc) - throughfall`；雨支两条都独立舍入（`dt*rain_total`、`dt*max(pg_rain,0)` 另有用途）。按雨支写会在第 47 步（第一次有冠层雪的降水步）差 1–3 ulp。
+2. 主 history 组满时调用的 `finish()` 顺带把示踪物文件提前落盘，导致示踪物最后一条记录另开缓冲、覆盖文件；改为内部只落盘主文件。
+
+湿地：非动态湿地在 WATER 之后改走 `tracer_wetland`（`etr`、`forc_us/vs`、整列 `dz_soisno` 另传，不需要 VSF 诊断），`with_tracer` 放开到 patchtype 0/2。
+
+**尚未接入/尚未移植**：城市、湖、冰川（`tracer_glacier_patch`/`tracer_waterbody_patch` 已移植未接入）、PFT/PC（冠层相变质量未按 PFT 聚合）、示踪物强迫文件（`&nl_colm_tracer_forcing`）、`DEF_hist_vars` 对示踪物变量的开关、空间网格的示踪物 history 聚合（被河道示踪物的上游缺陷挡住）、同位素分馏（T2）。`with_tracer` 对这些情形直接拒绝。
+
+**宿主无回退**：`PROFILE=release bash tmp/regress_all.sh`（默认/CROP 内核单点全量）145 行中 143 个 `ok rst: ok`；其余为 `nn`（本来就不出 history）与误入的 3 个空间算例 `g1iv/g1tr0/g1ts`（已加进 SKIP，空间算例单独用 latlon 内核比）。空间：`g1` history 2 bad 0、restarts 5 bad 0；`g1tr0` history 3 bad 0、restarts 5 bad 0。湿地接入与 `tracer_balance_check` 改传真实 patchtype（只进报告文字）之后重编，`tsa/tsat/tsw` 再跑全部 `ok rst: ok`。

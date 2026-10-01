@@ -13,6 +13,7 @@ pub mod snow;
 pub mod soil_water;
 pub mod special_patches;
 pub mod state;
+pub mod step;
 
 pub use descriptor::{
     delta_to_ratio, ReactionMode, StateOwner, TracerDescriptor, TracerFamily, TracerNamelist,

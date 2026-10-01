@@ -632,6 +632,102 @@ impl HistoryBuffers {
     }
 }
 
+/// 示踪物 history 文件里的一个变量（`tracer_hist_out` 写的 `f_trc_*_<name>`）：调用方已算好
+/// 每条记录、每个 patch（分层量再乘 15 层）的值。
+#[derive(Debug, Clone, PartialEq)]
+pub struct TracerFileVariable {
+    pub name: String,
+    pub long_name: String,
+    pub units: String,
+    /// `true` 时维度是 `(time, patch, soilsnow)`，否则 `(time, patch)`。
+    pub layered: bool,
+    /// 行主序 `(record, patch[, layer])`。
+    pub values: Vec<f64>,
+}
+
+impl HistoryBuffers {
+    /// 单点示踪物 history 文件（`<case>_hist_tracer_<cdate>.nc`）：与主文件同样的维度与坐标，
+    /// 但没有 `sensor` 维，变量只有示踪物量。网格写出走 [`Self::write_tracer_skeleton`]。
+    pub fn write_tracer_file(
+        &self,
+        path: impl AsRef<Path>,
+        variables: &[TracerFileVariable],
+    ) -> Result<()> {
+        let path = path.as_ref();
+        if self.grid.is_some() {
+            ensure!(
+                variables.is_empty(),
+                "gridded tracer history variables are not ported yet"
+            );
+            return self.write_tracer_skeleton(path);
+        }
+        let mut file =
+            netcdf::create(path).with_context(|| format!("cannot create {}", path.display()))?;
+        file.redef()?;
+        file.add_dimension("patch", self.dims.patch)?;
+        file.add_dimension("soil", self.dims.soil)?;
+        file.add_dimension("soilinterface", self.dims.soilinterface())?;
+        file.add_dimension("soilsnow", self.dims.soilsnow())?;
+        file.add_dimension("lake", self.dims.lake)?;
+        file.add_dimension("vegnodes", self.dims.vegnodes)?;
+        file.add_dimension("band", self.dims.band)?;
+        file.add_dimension("rtyp", self.dims.radiation_types)?;
+        file.add_unlimited_dimension("time")?;
+        for (name, long_name, units) in [
+            ("lat", "latitude", "degrees_north"),
+            ("lon", "longitude", "degrees_east"),
+        ] {
+            let mut variable = file.add_variable::<f64>(name, &[])?;
+            variable.put_attribute("long_name", long_name)?;
+            variable.put_attribute("units", units)?;
+        }
+        for (name, long_name, _) in self.dims.index_variables() {
+            let mut variable = file.add_variable::<i32>(name, &[name])?;
+            variable.put_attribute("long_name", long_name)?;
+        }
+        {
+            let mut time = file.add_variable::<i32>("time", &["time"])?;
+            time.put_attribute("long_name", "time")?;
+            time.put_attribute("units", TIME_UNITS)?;
+        }
+        for variable in variables {
+            let dims: &[&str] = if variable.layered {
+                &["time", "patch", "soilsnow"]
+            } else {
+                &["time", "patch"]
+            };
+            let mut nc = file.add_variable::<f64>(&variable.name, dims)?;
+            nc.put_attribute("long_name", variable.long_name.as_str())?;
+            nc.put_attribute("units", variable.units.as_str())?;
+            nc.put_attribute("missing_value", MISSING_VALUE)?;
+        }
+        file.enddef()?;
+        for (name, _, values) in self.dims.index_variables() {
+            file.variable_mut(name)
+                .with_context(|| format!("{name} disappeared after definition"))?
+                .put_values(&values, netcdf::Extents::All)?;
+        }
+        for (name, value) in [
+            ("lat", self.site.latitude_degrees),
+            ("lon", self.site.longitude_degrees),
+        ] {
+            file.variable_mut(name)
+                .with_context(|| format!("{name} disappeared after definition"))?
+                .put_values(&[value], netcdf::Extents::All)?;
+        }
+        file.variable_mut("time")
+            .context("time disappeared after definition")?
+            .put_values(&self.times, netcdf::Extents::All)?;
+        for variable in variables {
+            file.variable_mut(&variable.name)
+                .with_context(|| format!("{} disappeared after definition", variable.name))?
+                .put_values(&variable.values, netcdf::Extents::All)?;
+        }
+        file.close()?;
+        Ok(())
+    }
+}
+
 impl HistoryBuffers {
     /// 网格文件的维度与坐标（`hist_gridded_write_time` + `ncio_write_colm_dimension`）。
     fn define_grid(&self, file: &mut netcdf::FileMut, grid: &HistoryGrid) -> Result<()> {

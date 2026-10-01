@@ -846,6 +846,10 @@ pub(crate) fn pft_canopy_energy(
     };
     let output = crate::LeafTemperatureOutput {
         wet_snow_fraction: patch.sum(|column| column.wet_snow_fraction),
+        // 上游按 `sum(canopy_*_mass_p*pftfrac)` 聚合；PFT/PC 的示踪物尚未接入（运行时拒绝），
+        // 这里不聚合。
+        canopy_melt_mass_mm: 0.0,
+        canopy_freeze_mass_mm: 0.0,
         eastward_stress_kg_m_s2: sum(|r| r.taux),
         northward_stress_kg_m_s2: sum(|r| r.tauy),
         ground_sensible_heat_w_m2: sum(|r| r.fseng),

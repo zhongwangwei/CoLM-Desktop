@@ -4354,6 +4354,10 @@ pub struct VariableSaturatedTracerDiagnostics {
     pub dew_overflow_mm: f64,
     pub frost_displaced_mm: f64,
     pub late_runoff_mm: f64,
+    /// `etroot_actual`、`etroot_aquifer` [mm] 与 `wblc_ice_sink` [kg/m²]（同主输出，便于一起传递）。
+    pub transpiration_actual_mm: Vec<f64>,
+    pub transpiration_aquifer_mm: f64,
+    pub ice_sink_kg_m2: Vec<f64>,
 }
 
 /// 水量的"体积分数 ↔ 质量"换算系数：`dz[m] * 密度` 得到 kg/m² per 单位体积分数。
@@ -4936,6 +4940,16 @@ pub fn variably_saturated_flow_step(
     state.matric_potential_mm = soil_state.matric_potential_mm.clone();
     state.hydraulic_conductivity_mm_s = hydraulic_conductivity_mm_s.clone();
 
+    let tracer = VariableSaturatedTracerDiagnostics {
+        transpiration_actual_mm: soil.transpiration_actual_mm.clone(),
+        transpiration_aquifer_mm: soil.transpiration_aquifer_mm,
+        ice_sink_kg_m2: ice_sink_kg_m2.clone(),
+        transpiration_surface_mm: soil.transpiration_surface_mm,
+        subsurface_source_layer_mm: soil.subsurface_source_layer_mm.clone(),
+        subsurface_source_surface_mm: soil.subsurface_source_surface_mm,
+        subsurface_source_aquifer_mm: soil.subsurface_source_aquifer_mm,
+        ..tracer
+    };
     Ok(VariableSaturatedFlowOutput {
         water_input_mm_s: input.ground_water_flux_mm_s,
         infiltration_mm_s: soil.infiltration_mm_s,
@@ -4954,13 +4968,7 @@ pub fn variably_saturated_flow_step(
         hydraulic_conductivity_mm_s,
         balance_error_mm: solver_balance_error_mm,
         flood_infiltration_mm_s,
-        tracer: VariableSaturatedTracerDiagnostics {
-            transpiration_surface_mm: soil.transpiration_surface_mm,
-            subsurface_source_layer_mm: soil.subsurface_source_layer_mm,
-            subsurface_source_surface_mm: soil.subsurface_source_surface_mm,
-            subsurface_source_aquifer_mm: soil.subsurface_source_aquifer_mm,
-            ..tracer
-        },
+        tracer,
     })
 }
 

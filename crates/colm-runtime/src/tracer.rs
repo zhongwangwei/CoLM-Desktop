@@ -92,6 +92,198 @@ fn read_tracer_parameter_file(path: &str) -> Result<Option<TracerParameterOverri
     }))
 }
 
+/// 一次运行里共享的示踪物配置（所有 patch 同一份）。
+#[derive(Debug)]
+pub struct TracerRuntime {
+    pub set: TracerSet,
+    pub physics: colm_core::tracer::TracerPhysics,
+    pub soil_options: colm_core::tracer::soil_water::SoilWaterOptions,
+    pub canopy_equilibration: f64,
+    /// 逐示踪物的降水/水汽比值。没有示踪物强迫文件时就是描述符的默认比值
+    /// （`tracer_forcing_precip_value` 回落到 `tracer_precip_default_ratio`）。
+    pub precip_ratio: Vec<f64>,
+    pub vapor_ratio: Vec<f64>,
+    pub runtime_forced: Vec<bool>,
+    pub debug: bool,
+    pub vegetation_snow: bool,
+    pub variably_saturated_flow: bool,
+    pub aquifer_mixing_water_mm: f64,
+    /// `DEF_TRACER_BALANCE_ABORT_NBAD`、`DEF_TRACER_RESID_ABORT_NBAD`。
+    pub balance_abort_nbad: i32,
+    pub resid_abort_nbad: i32,
+    /// `MOD_Tracer_Conservation` 的模块级"最差/计数"跟踪（整次运行共享）。
+    pub tracker: std::sync::Mutex<colm_core::tracer::conservation::BalanceTracker>,
+}
+
+impl TracerRuntime {
+    /// 由算例文档建立；`DEF_USE_TRACER` 关着返回 `None`。示踪物强迫文件
+    /// （`&nl_colm_tracer_forcing`）尚未移植：有输运示踪物时一律用默认比值。
+    pub fn from_document(document: &Document) -> Result<Option<Self>> {
+        let Some(set) = tracer_set_from_document(document)? else {
+            return Ok(None);
+        };
+        let physics = colm_core::tracer::TracerPhysics {
+            fractionation: logical(document, "DEF_TRACER_USE_FRACTIONATION")?,
+        };
+        let precip_ratio = set.tracers.iter().map(|t| t.precip_default_ratio()).collect();
+        let vapor_ratio = set.tracers.iter().map(|t| t.vapor_default_ratio()).collect();
+        let runtime_forced = vec![false; set.len()];
+        Ok(Some(Self {
+            physics,
+            soil_options: colm_core::tracer::soil_water::SoilWaterOptions {
+                subl_skin_mm: real(document, "DEF_TRACER_SUBL_SKIN_MM")?,
+                soil_diffusion: logical(document, "DEF_TRACER_SOIL_DIFFUSION")?,
+                soil_vapor_diffusion: logical(document, "DEF_TRACER_SOIL_VAPOR_DIFFUSION")?,
+                colm_debug: logical(document, "DEF_USE_CoLMDEBUG")?,
+            },
+            canopy_equilibration: real(document, "DEF_TRACER_CANOPY_EQUILIBRATION")?,
+            precip_ratio,
+            vapor_ratio,
+            runtime_forced,
+            debug: logical(document, "DEF_USE_CoLMDEBUG")?,
+            vegetation_snow: logical(document, "DEF_VEG_SNOW")?,
+            variably_saturated_flow: logical(document, "DEF_USE_VariablySaturatedFlow")?,
+            aquifer_mixing_water_mm: real(document, "DEF_TRACER_AQUIFER_MIXING_WATER_MM")?,
+            balance_abort_nbad: i32::try_from(integer(document, "DEF_TRACER_BALANCE_ABORT_NBAD")?)?,
+            resid_abort_nbad: i32::try_from(integer(document, "DEF_TRACER_RESID_ABORT_NBAD")?)?,
+            tracker: Default::default(),
+            set,
+        }))
+    }
+
+    /// 有没有要逐 patch 记账的输运示踪物。
+    pub fn has_transport(&self) -> bool {
+        self.set.transport_indices().next().is_some()
+    }
+
+    pub fn context(&self) -> colm_core::tracer::step::TracerStepContext<'_> {
+        colm_core::tracer::step::TracerStepContext {
+            set: &self.set,
+            physics: self.physics,
+            soil_options: self.soil_options,
+            canopy_equilibration: self.canopy_equilibration,
+            precip_ratio: &self.precip_ratio,
+            vapor_ratio: &self.vapor_ratio,
+            runtime_forced: &self.runtime_forced,
+            debug: self.debug,
+            vegetation_snow: self.vegetation_snow,
+        }
+    }
+
+    /// 起跑时的示踪物状态：续跑文件里有可用的示踪物事务就读，否则按水量冷启动
+    /// （`tracer_init_from_arrays`）。
+    pub fn initial_state(
+        &self,
+        restart: &colm_init::RestartFile,
+        patch: usize,
+        patches: usize,
+        water: colm_core::tracer::WaterInventory<'_>,
+    ) -> Result<PatchTracerState> {
+        if let Some(mut states) = read_land_tracer_restart(restart, &self.set, patches)? {
+            return Ok(states.swap_remove(patch));
+        }
+        let mut state = PatchTracerState::allocated(&self.set);
+        state.init_from_water(
+            &self.set,
+            water,
+            colm_core::tracer::TracerColdStart {
+                variably_saturated_flow: self.variably_saturated_flow,
+                aquifer_mixing_water_mm: self.aquifer_mixing_water_mm,
+            },
+        )?;
+        Ok(state)
+    }
+}
+
+/// 一个土壤/湿地 patch 步末的示踪物记账（`CoLMMAIN.F90:1528-1561` 与 `tracer_report`）：一阶衰减、
+/// 收支检查、history 累加，再按 `DEF_TRACER_*_ABORT_NBAD` 决定是否中止。
+pub fn end_of_step(
+    runtime: &TracerRuntime,
+    patch_type: i32,
+    state: &mut colm_core::StandardLctSnowSoilState,
+    output: &colm_core::StandardLctSnowSoilOutput,
+    forcing: &colm_core::RuntimeForcing,
+    deltim: f64,
+    initial_total_water_mm: f64,
+) -> Result<()> {
+    use colm_core::tracer::{conservation, hist, step::pack_soisno};
+    let Some(track) = state.tracer.as_deref_mut() else {
+        return Ok(());
+    };
+    let snl = state.snow.layer_count;
+    conservation::tracer_apply_reactive_processes(&runtime.set, &mut track.state, snl, deltim);
+    // `endwb`（`CoLMMAIN.F90:1496-1504`）与 `errorw`：与 history 的 `xerr` 同一套式子。
+    let end_total = colm_core::total_water_storage_mm(
+        &state.soil_water,
+        state.energy.leaf.canopy_water.total_mm,
+        state.snow.water_equivalent_kg_m2,
+        None,
+    );
+    let precipitation =
+        forcing.convective_precipitation_kg_m2_s + forcing.large_scale_precipitation_kg_m2_s;
+    let evaporation_wb = output.energy.total_evaporation_kg_m2_s;
+    let runoff = output.water.soil.total_runoff_mm_s;
+    let errorw = (-(((precipitation + 0.0) - evaporation_wb) - runoff))
+        .mul_add(deltim, end_total - initial_total_water_mm);
+    {
+        let mut tracker = runtime
+            .tracker
+            .lock()
+            .map_err(|_| anyhow::anyhow!("the tracer balance tracker lock is poisoned"))?;
+        conservation::tracer_balance_check(
+            &runtime.set,
+            runtime.physics,
+            &mut track.state,
+            &track.snapshot,
+            &mut tracker,
+            &conservation::BalanceCheckInput {
+                ipatch: 1,
+                snl,
+                deltim,
+                patchtype: Some(patch_type),
+                water_err: Some(errorw),
+                water_ds: Some(end_total - initial_total_water_mm),
+                water_input: Some((precipitation + 0.0) * deltim),
+                water_output: Some((evaporation_wb + runoff) * deltim),
+                water_evap: Some(evaporation_wb * deltim),
+                water_rnof: Some(runoff * deltim),
+                flood_heterogeneous: None,
+                catch_lateral_flow: false,
+                runtime_forced: &runtime.runtime_forced,
+            },
+        );
+    }
+    let wliq = pack_soisno(&state.snow.liquid_water_kg_m2, &state.soil_water.liquid_water_kg_m2);
+    let wice = pack_soisno(&state.snow.ice_water_kg_m2, &state.soil_water.ice_water_kg_m2);
+    hist::tracer_hist_accumulate(
+        &runtime.set,
+        &mut track.state,
+        &hist::HistAccumulateInput {
+            snl,
+            ldew_rain: state.energy.leaf.canopy_water.rain_mm,
+            ldew_snow: state.energy.leaf.canopy_water.snow_mm,
+            wliq_soisno: &wliq,
+            wice_soisno: &wice,
+            wa: state.soil_water.aquifer_water_mm,
+            wdsrf: state.soil_water.surface_water_mm,
+            wetwat: state.soil_water.wetland_water_mm,
+            scv: state.snow.water_equivalent_kg_m2,
+        },
+    );
+    let report = runtime
+        .tracker
+        .lock()
+        .map_err(|_| anyhow::anyhow!("the tracer balance tracker lock is poisoned"))?
+        .report(runtime.set.len(), runtime.balance_abort_nbad, runtime.resid_abort_nbad);
+    for line in &report.lines {
+        println!("{line}");
+    }
+    if let Some(message) = report.abort {
+        anyhow::bail!("{message}");
+    }
+    Ok(())
+}
+
 /// 每个输运示踪物逐 patch 的一个量（重启里的 `(patch, trc_land_transport)`）。
 type PatchField = fn(&TracerPools) -> f64;
 /// 逐层的量（`(patch, soilsnow, trc_land_transport)`）。
