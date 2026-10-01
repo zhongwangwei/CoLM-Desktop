@@ -373,6 +373,15 @@ fn finish_energy_step(
         interception,
         pft_interception,
     } = prepared;
+    // `CoLMMAIN.F90:1016-1025`：不分冠层雪时，THERMAL 之前按叶温把冠层水整体划成雨或雪。
+    if !input.leaf_temperature.options.vegetation_snow {
+        let water = &mut state.leaf.canopy_water;
+        (water.rain_mm, water.snow_mm) = if state.leaf.leaf_temperature_k > crate::FREEZING_K {
+            (water.total_mm, 0.0)
+        } else {
+            (0.0, water.total_mm)
+        };
+    }
     if let Some(pft) = state.pft.as_mut() {
         crate::pft::aggregate_pft_absorption(pft, &mut state.radiation);
     }
@@ -1205,6 +1214,18 @@ pub fn standard_lct_snow_soil_step(
     state.soil_water.ice_water_kg_m2[0] = soil_surface.ice_water_kg_m2;
     if state.snow.layer_count < 0 {
         crate::divide_snow_layers_with_aerosols(&mut state.snow, aerosols)?;
+    }
+    // `CoLMMAIN.F90:1428-1452`：土壤 patch 上超出表层孔隙的新霜挪进雪（`WATER_*` 对
+    // 土壤 patch 推迟了这一溢出）。
+    if input.soil_water.patch_type == 0 {
+        let mut top = crate::snow::SoilFrostTop {
+            porosity: input.soil_water.porosity[0],
+            thickness_m: input.soil_water.layer_thickness_m[0],
+            temperature_k: state.soil_temperature_k[0],
+            ice_water_kg_m2: state.soil_water.ice_water_kg_m2[0],
+        };
+        crate::snow::relocate_soil_frost_ice(&mut state.snow, &mut top, state.snicar.as_deref_mut());
+        state.soil_water.ice_water_kg_m2[0] = top.ice_water_kg_m2;
     }
     // `CoLMMAIN.F90:1442-1449`：`snl > maxsnl` 时把空出来的雪槽 `maxsnl+1:snl` 的
     // `wice/wliq/t/z/dz` 清零。不清的话合并后的空槽留着旧值 —— 物理上不再被读，但写进

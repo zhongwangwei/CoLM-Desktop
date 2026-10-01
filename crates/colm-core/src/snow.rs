@@ -659,12 +659,16 @@ fn validate_snow_topology(
     soil_surface: &SnowToSoilTransfer,
 ) -> Result<()> {
     validate_active_snow_layers(state)?;
+    // 表层液水允许舍入级的负值：新霜挤出 `wliq - min(max(wliq-cap,0), max(wliq,0))` 在
+    // 容量接近 0 时会留下 -1 ulp 量级的残差（实测 bc 算例 -9e-54），上游不夹也不检查。
     ensure!(
         soil_surface.liquid_water_kg_m2.is_finite()
-            && soil_surface.liquid_water_kg_m2 >= 0.0
+            && soil_surface.liquid_water_kg_m2 >= -crate::SOIL_WATER_ROUNDOFF_KG_M2
             && soil_surface.ice_water_kg_m2.is_finite()
             && soil_surface.ice_water_kg_m2 >= 0.0,
-        "soil-surface transfer state is invalid"
+        "soil-surface transfer state is invalid (wliq {}, wice {})",
+        soil_surface.liquid_water_kg_m2,
+        soil_surface.ice_water_kg_m2
     );
     Ok(())
 }
@@ -1172,6 +1176,82 @@ pub(crate) fn snow_interface_slot(index: i32) -> usize {
 
 fn layer_slot(index: i32) -> usize {
     snow_layer_slot(index)
+}
+
+/// 表层土的新霜：`relocate_soil_frost_ice` 的土壤侧输入/输出。
+#[derive(Debug, Clone, Copy)]
+pub struct SoilFrostTop {
+    pub porosity: f64,
+    pub thickness_m: f64,
+    pub temperature_k: f64,
+    pub ice_water_kg_m2: f64,
+}
+
+/// `relocate_soil_frost_ice`（`MOD_NewSnow.F90:130-213`，土壤 patch 每步雪层合并/分裂之后）。
+///
+/// 表层土冰超过孔隙 `denice*porsl*dz` 的部分（`max(FNMA(denice*porsl, dz, wice), 0)`）挪进雪：
+/// 无雪层时加到 `scv`/`snowdp`，雪深够 1 cm 就建一层（与新雪建层同式，温度取土层 1，SNICAR
+/// 打开时粒径与气溶胶重置）；有雪层时并进最上层，温度按热容加权
+/// `FMA(t_top, hc, (excess*cpice)*t1) / (excess*cpice + hc)`，`hc = FMA(wice, cpice, wliq*cpliq)`。
+pub fn relocate_soil_frost_ice(
+    state: &mut RuntimeSnowColumn,
+    soil: &mut SoilFrostTop,
+    snicar: Option<&mut crate::SnicarColumnState>,
+) {
+    const ICE_DENSITY_KG_M3: f64 = 917.0;
+    const ICE_HEAT_CAPACITY_J_KG_K: f64 = 2117.27;
+    const WATER_HEAT_CAPACITY_J_KG_K: f64 = 4188.0;
+    let excess = (-(ICE_DENSITY_KG_M3 * soil.porosity))
+        .mul_add(soil.thickness_m, soil.ice_water_kg_m2)
+        .max(0.0);
+    if excess <= 0.0 {
+        return;
+    }
+    let added_depth = excess / ICE_DENSITY_KG_M3;
+    if state.layer_count == 0 {
+        state.water_equivalent_kg_m2 += excess;
+        state.depth_m += added_depth;
+        if state.depth_m >= f77(0.01) {
+            state.layer_count = -1;
+            let top = layer_slot(0);
+            state.interface_depth_m[interface_slot(0)] = 0.0;
+            state.thickness_m[top] = state.depth_m;
+            state.node_depth_m[top] = -(state.depth_m * 0.5);
+            state.interface_depth_m[interface_slot(-1)] = -state.depth_m;
+            state.temperature_k[top] = soil.temperature_k;
+            state.ice_water_kg_m2[top] = state.water_equivalent_kg_m2;
+            state.liquid_water_kg_m2[top] = 0.0;
+            state.previous_ice_fraction[top] = 1.0;
+            if let Some(snicar) = snicar {
+                snicar.refreezing_kg_m2_s[top] = 0.0;
+                snicar.grain_radius_um[top] = 54.526;
+                snicar.aerosol_mass_kg_m2[top] = [0.0; crate::SNICAR_AEROSOL_SPECIES];
+            }
+        }
+    } else {
+        let top_index = state.layer_count + 1;
+        let top = layer_slot(top_index);
+        let ice = state.ice_water_kg_m2[top];
+        let liquid = state.liquid_water_kg_m2[top];
+        let heat_capacity =
+            ice.mul_add(ICE_HEAT_CAPACITY_J_KG_K, liquid * WATER_HEAT_CAPACITY_J_KG_K);
+        let excess_heat_capacity = excess * ICE_HEAT_CAPACITY_J_KG_K;
+        state.temperature_k[top] = state.temperature_k[top].mul_add(
+            heat_capacity,
+            excess_heat_capacity * soil.temperature_k,
+        ) / (excess_heat_capacity + heat_capacity);
+        state.ice_water_kg_m2[top] = ice + excess;
+        state.thickness_m[top] += added_depth;
+        let interface_top = state.interface_depth_m[interface_slot(top_index)];
+        state.node_depth_m[top] = (-state.thickness_m[top]).mul_add(0.5, interface_top);
+        state.interface_depth_m[interface_slot(top_index - 1)] =
+            interface_top - state.thickness_m[top];
+        state.previous_ice_fraction[top] =
+            state.ice_water_kg_m2[top] / (liquid + state.ice_water_kg_m2[top]);
+        state.water_equivalent_kg_m2 += excess;
+        state.depth_m += added_depth;
+    }
+    soil.ice_water_kg_m2 -= excess;
 }
 
 fn interface_slot(index: i32) -> usize {

@@ -246,7 +246,7 @@ fn validate(input: SoilSurfaceResistanceInput) -> Result<()> {
             && input.residual_water >= 0.0
             && input.layer_thickness_m > 0.0
             && input.temperature_k > 0.0
-            && input.liquid_water_kg_m2 >= 0.0
+            && input.liquid_water_kg_m2 >= -crate::SOIL_WATER_ROUNDOFF_KG_M2
             && input.ice_water_kg_m2 >= 0.0
             && input.ground_specific_humidity > 0.0
             && (0.0..=1.0).contains(&input.snow_cover_fraction)

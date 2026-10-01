@@ -1981,20 +1981,21 @@ pub fn set_lct_balance_errors(
         zerr -= (now - before) / factor;
     }
 
-    // 漫滩回馈（`CoLMMAIN.F90:1512-1531`，土壤 patch）：再入渗的水不是降水带来的，先从 `endwb`
-    // 里扣掉（`FNMA(qinfl_fld, deltim, endwb)`），蒸发里那份漫滩蒸发最后再扣（`FNMA(fevpg_fld, deltim, ·)`）。
-    // 没开回馈时两项都是 0，`FNMA(0, dt, x)` 恰好是 `x`，不影响既有算例。
+    // 漫滩回馈（`CoLMMAIN.F90:1505-1521`，土壤 patch）：再入渗 `qinfl_fld` 作为显式输入项、
+    // 漫滩蒸发 `fevpg_fld` 从 `fevpa` 里扣掉。GIMPLE（GridRiverLakeFlow 内核）：
+    // `FNMA(deltim, (((prc+prl) + flood_input_wb) - fevpa_wb) - rnof, endwb-totwb)`，
+    // `fevpa_wb = fevpa - fevpg_fld`。没开回馈时两项都是 0，与默认内核的
+    // `((prc+prl)+0.0) - fevpa - rnof` 逐位相同。
     let flood_infiltration = output.water.flood_infiltration_mm_s;
     let flood_evaporation = energy.flood.map_or(0.0, |flood| flood.evaporation_mm_s);
     let dt = reference.time_step_seconds;
-    let end_water_storage_mm = (-flood_infiltration).mul_add(dt, end_water_storage_mm);
-    // `CoLMMAIN.F90:1518`：GIMPLE 是 `.FNMA (通量和, deltim, endwb-totwb)` —— 乘积熔进减法。
-    let errorw = (-(reference.convective_precipitation_kg_m2_s
-        + reference.large_scale_precipitation_kg_m2_s
-        - energy.total_evaporation_kg_m2_s
+    let evaporation_wb = energy.total_evaporation_kg_m2_s - flood_evaporation;
+    let errorw = (-((((reference.convective_precipitation_kg_m2_s
+        + reference.large_scale_precipitation_kg_m2_s)
+        + flood_infiltration)
+        - evaporation_wb)
         - output.water.total_runoff_mm_s))
         .mul_add(dt, end_water_storage_mm - reference.initial_total_water_mm);
-    let errorw = (-flood_evaporation).mul_add(dt, errorw);
     let xerr = errorw / reference.time_step_seconds;
 
     for (name, value) in [("xerr", xerr), ("zerr", zerr)] {
@@ -3115,7 +3116,8 @@ impl HistorySession {
             let layers = template.soil_layer_thickness_m().len();
             accumulator.layer("qlayer", 0, &vec![0.0; layers + 1])?;
             accumulator.layer("rootr", 0, &vec![0.0; layers])?;
-            // 冰川/湖：`ldew_rain = ldew_snow = qcharge = 0`（`CoLMMAIN.F90:2218-2254`）。
+            // 冰川/湖：`ldew_rain = ldew_snow = qcharge = 0`（`CoLMMAIN.F90:2218-2254`）；
+            // VSF 打开时 `acc1d(qcharge)` 整个不调（`MOD_Vars_1DAccFluxes.F90:2135`）。
             set_sidecar_only(
                 accumulator,
                 template,
@@ -3124,7 +3126,7 @@ impl HistorySession {
                 thermal.tref,
                 0.0,
                 0.0,
-                Some(0.0),
+                (!template.physics.variably_saturated_flow).then_some(0.0),
             )?;
             set_shortwave_bands(accumulator, 0, shortwave)?;
             set_lct_water_storage(
@@ -3191,8 +3193,9 @@ impl HistorySession {
                 thermal.tref,
                 state.energy.leaf.canopy_water.rain_mm,
                 state.energy.leaf.canopy_water.snow_mm,
-                // 城市水文不走 `WATER_VSF`，`qcharge` 每步都有值（实测 VSF 打开时也是）。
-                Some(output.qcharge),
+                // 城市水文不走 `WATER_VSF`，`qcharge` 每步都有值；但 VSF 打开时
+                // `acc1d(qcharge)` 整个不调（`MOD_Vars_1DAccFluxes.F90:2135`）。
+                (!template.physics.variably_saturated_flow).then_some(output.qcharge),
             )?;
             // `rnet = sabg + sabvsun + sabvsha - olrg + forc_frl`
             let net_radiation = thermal.sabg + output.sabvsun + 0.0 - thermal.olrg

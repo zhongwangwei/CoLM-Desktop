@@ -66,7 +66,7 @@ pub fn soil_biogeochem_n_state_update1(
             }
         }
     }
-    // DEF_USE_TRACER 的示踪物分解分支未移植（运行时拒绝 DEF_USE_TRACER）。
+    // 分解转移（上游已抽成 `CDecompStateUpdate`/`SoilBiogeochemNDecompStateUpdate`，算式不变）。
     {
         for k in 0..d.ndecomp_transitions {
             for j in 0..d.nl_soil {
@@ -178,7 +178,8 @@ pub fn soil_biogeochem_n_state_update1(
         }
     }
     if !sw.nitrif {
-        // DEF_USE_TRACER 的示踪物分解分支未移植（运行时拒绝 DEF_USE_TRACER）。
+        // `SoilBiogeochemNDecompStateUpdate`（`:216-229`）：终端转移按
+        // `FMA(flux - denit, dt, sminn)` 一次更新。
         {
             for k in 0..d.ndecomp_transitions {
                 if s.invariants.receiver_pool[k] != 0 {
@@ -190,11 +191,9 @@ pub fn soil_biogeochem_n_state_update1(
                     }
                 } else {
                     for j in 0..d.nl_soil {
-                        s.patch.sminn_vr[j] = (-s.patch_flux.sminn_to_denit_decomp_vr
-                            [j + d.nl_soil_full * k])
-                            .mul_add(p.deltim, s.patch.sminn_vr[j]);
-                        s.patch.sminn_vr[j] = s.patch_flux.decomp_sminn_flux_vr
-                            [j + d.nl_soil_full * k]
+                        let index = j + d.nl_soil_full * k;
+                        s.patch.sminn_vr[j] = (s.patch_flux.decomp_sminn_flux_vr[index]
+                            - s.patch_flux.sminn_to_denit_decomp_vr[index])
                             .mul_add(p.deltim, s.patch.sminn_vr[j]);
                     }
                 }
@@ -210,14 +209,15 @@ pub fn soil_biogeochem_n_state_update1(
         }
     } else {
         for j in 0..d.nl_soil {
-            // DEF_USE_TRACER 的示踪物分解分支未移植（运行时拒绝 DEF_USE_TRACER）。
+            // `SoilBiogeochemNDecompStateUpdate`（`:231-237`）：矿化减固持一次进 NH4，
+            // 随后 `sminn = nh4 + no3`（下面植物吸收之后还会再算一次）。
             {
-                s.patch.smin_nh4_vr[j] =
-                    s.patch_flux.gross_nmin_vr[j].mul_add(p.deltim, s.patch.smin_nh4_vr[j]);
-                s.patch.smin_nh4_vr[j] = (-s.patch_flux.actual_immob_nh4_vr[j])
+                s.patch.smin_nh4_vr[j] = (s.patch_flux.gross_nmin_vr[j]
+                    - s.patch_flux.actual_immob_nh4_vr[j])
                     .mul_add(p.deltim, s.patch.smin_nh4_vr[j]);
                 s.patch.smin_no3_vr[j] = (-s.patch_flux.actual_immob_no3_vr[j])
                     .mul_add(p.deltim, s.patch.smin_no3_vr[j]);
+                s.patch.sminn_vr[j] = s.patch.smin_nh4_vr[j] + s.patch.smin_no3_vr[j];
             }
             s.patch.smin_nh4_vr[j] =
                 (-s.patch_flux.smin_nh4_to_plant_vr[j]).mul_add(p.deltim, s.patch.smin_nh4_vr[j]);

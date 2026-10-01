@@ -627,6 +627,18 @@ pub(crate) fn pft_canopy_energy(
     let preliminary = context.preliminary_ground_flux;
     let ground = context.ground_flux;
     let patch_is_pc = patch.plant_community;
+    // `:830-840`：不分冠层雪时，按 patch 叶温把各 PFT 的冠层水整体划成雨或雪。
+    if !input.leaf_temperature.options.vegetation_snow {
+        let warm = patch_leaf.leaf_temperature_k > crate::FREEZING_K;
+        for column in &mut patch.columns {
+            let water = &mut column.leaf.canopy_water;
+            (water.rain_mm, water.snow_mm) = if warm {
+                (water.total_mm, 0.0)
+            } else {
+                (0.0, water.total_mm)
+            };
+        }
+    }
     let mut records = Vec::with_capacity(patch.columns.len());
     if patch.plant_community {
         records = pc_records(&context, patch)?;

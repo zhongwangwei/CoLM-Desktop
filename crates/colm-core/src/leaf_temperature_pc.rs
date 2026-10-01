@@ -11,7 +11,7 @@ use anyhow::{bail, ensure, Result};
 
 use crate::{
     canopy_diffusivity, canopy_diffusivity_resistance_analytic, canopy_monin_obukhov_with_scheme,
-    canopy_roughness, canopy_wetness, canopy_wind_speed, effective_canopy_wind,
+    canopy_roughness, canopy_wind_speed, effective_canopy_wind,
     initialize_monin_obukhov, saturation_specific_humidity, stomata, update_photosynthesis,
     CanopyDiffusivityProfileInput, CanopyMoninObukhovInput, CanopyWater, CanopyWindProfileInput,
     LeafPhotosynthesisInput, LeafTemperatureInput, MoninObukhovInitialInput, MoninObukhovInput,
@@ -231,8 +231,18 @@ pub(crate) fn leaf_temperature_pc(
             );
         }
         if vegetated[i] {
-            fwet[i] = canopy_wetness(lai[i], sai[i], leaf.maximum_dew_mm, water, vegetation_snow)?
-                .wet_fraction;
+            // `dewfraction(..., colm2024_rain_capacity_for_fwet(...))`：PC 不走截留方案 8，
+            // 雨水容量是 `dewmx·max(0, lai+sai)`。
+            let capacity = leaf.maximum_dew_mm * (lai[i] + sai[i]).max(0.0);
+            fwet[i] = crate::interception::canopy_wetness_with_capacity(
+                lai[i],
+                sai[i],
+                leaf.maximum_dew_mm,
+                water,
+                vegetation_snow,
+                capacity,
+            )?
+            .wet_fraction;
             sat[i] = Some(saturation_specific_humidity(tl[i], psrf)?);
         }
     }
@@ -1290,6 +1300,16 @@ pub(crate) fn leaf_temperature_pc(
         }
         evplwet[i] = d.mul_add(evplwet_dtl[i], evplwet[i]);
         let mut fevpl = d.mul_add(fevpl_dtl[i], fevpl_noadj[i]);
+        // `:1864-1871`：负蒸腾记作湿叶结露，不是倒流的液流。
+        if fluxes[i].etr < 0.0 {
+            evplwet[i] += fluxes[i].etr;
+            fluxes[i].etr = 0.0;
+            fluxes[i].etrsun = 0.0;
+            fluxes[i].etrsha = 0.0;
+            if plant_hydraulics.is_some() {
+                fluxes[i].rootflux.fill(0.0);
+            }
+        }
         let ldew = columns[i].leaf.canopy_water.total_mm;
         let elwmax = ldew / deltim;
         let elwdif = (evplwet[i] - elwmax).max(0.0);
@@ -1465,6 +1485,18 @@ fn update_pc_canopy_water(
     // `:1903`：`max(FNMA(deltim, evplwet, ldew), 0)`
     water.total_mm = (-deltim).mul_add(evplwet, water.total_mm).max(0.0);
     if !vegetation_snow {
+        // `:1931-1941`：不分冠层雪时也让雨/雪两分量与总量一致。
+        let parts = water.rain_mm + water.snow_mm;
+        if parts > 1.0e-10 {
+            water.rain_mm = water.total_mm * (water.rain_mm / parts);
+            water.snow_mm = water.total_mm - water.rain_mm;
+        } else if *tl > FREEZING_K {
+            water.rain_mm = water.total_mm;
+            water.snow_mm = 0.0;
+        } else {
+            water.rain_mm = 0.0;
+            water.snow_mm = water.total_mm;
+        }
         return;
     }
     let (mut qevpl, qdewl, mut qsubl, qfrol);

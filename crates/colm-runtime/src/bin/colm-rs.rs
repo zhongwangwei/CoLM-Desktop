@@ -1662,16 +1662,12 @@ fn assemble_bgc(
         logical_field(document, "DEF_USE_PN")?,
         monthly_ndep,
     )?;
-    // `init_ndep_data_*(sdate(1), …)`：`sdate` 经过 `adj2end`，00:00 的 1 月 1 日起步算上一年。
-    let year = i32::try_from(integer_field(document, "DEF_simulation_time%start_year")?)?;
+    // `init_ndep_data_*(s_year, …)`、`init_fire_data(s_year)`：namelist 的起始年。上游原来用
+    // `sdate(1)`（经过 `adj2end`，00:00 的 1 月 1 日起步算上一年），只有开示踪物时读 `s_year`；
+    // vendor 已解耦成一律读 `s_year`。
+    let ndep_start_year =
+        i32::try_from(integer_field(document, "DEF_simulation_time%start_year")?)?;
     let month = integer_field(document, "DEF_simulation_time%start_month")?;
-    let day = integer_field(document, "DEF_simulation_time%start_day")?;
-    let second = integer_field(document, "DEF_simulation_time%start_sec")?;
-    let ndep_start_year = if month == 1 && day == 1 && second == 0 {
-        year - 1
-    } else {
-        year
-    };
     let deltim = real_field(document, "DEF_simulation_time%timestep")?;
     // `init_nitrif_data(ststamp)`：起始时刻（未经 adj2end）所在的月。
     let nitrif = if switches.nitrif {

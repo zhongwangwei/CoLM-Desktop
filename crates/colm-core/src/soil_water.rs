@@ -316,7 +316,7 @@ fn validate(input: CampbellSoilWaterInput<'_>) -> Result<usize> {
                 && input.porosity[layer] >= 0.0
                 && input.effective_porosity[layer] >= 0.0
                 && input.effective_porosity[layer] <= input.porosity[layer]
-                && input.liquid_water[layer] >= 0.0
+                && input.liquid_water[layer] >= -crate::SOIL_WATER_ROUNDOFF_KG_M2
                 && (0.0..=1.0).contains(&input.ice_fraction[layer])
                 && input.saturated_hydraulic_conductivity_mm_s[layer] >= 0.0
                 && input.clapp_hornberger_b[layer] > 0.0

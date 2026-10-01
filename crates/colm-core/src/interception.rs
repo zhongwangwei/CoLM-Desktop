@@ -118,6 +118,100 @@ pub fn canopy_wetness(
     })
 }
 
+/// `MOD_LeafTemperature:dewfraction`（带 `satcap_rain_override`，叶温各处一律这样调用）。
+///
+/// 雨（与总量）覆盖度改为 `(depth/max(satcap_rain, 1e-10))**.666666666666`，`satcap_rain` 由调用方
+/// 给出（[`fwet_rain_capacity`]）；雪覆盖度不变，仍是 `((dewmxi/(48·vegt))·depth)**.666666666666`。
+/// 原来只在开示踪物时这样算，vendor 已解耦成无条件。城市模块仍用 [`canopy_wetness`]。
+pub fn canopy_wetness_with_capacity(
+    leaf_area_index: f64,
+    stem_area_index: f64,
+    maximum_dew_mm: f64,
+    water: CanopyWater,
+    vegetation_snow: bool,
+    rain_capacity_mm: f64,
+) -> Result<CanopyWetness> {
+    let leaf_stem_area = leaf_area_index + stem_area_index;
+    ensure!(
+        [
+            leaf_area_index,
+            stem_area_index,
+            maximum_dew_mm,
+            rain_capacity_mm,
+            water.total_mm,
+            water.rain_mm,
+            water.snow_mm,
+        ]
+        .iter()
+        .all(|value| value.is_finite())
+            && leaf_area_index >= 0.0
+            && stem_area_index >= 0.0
+            && leaf_stem_area > 0.0
+            && maximum_dew_mm > 0.0
+            && water.total_mm >= -CANOPY_WATER_ROUNDOFF_MM
+            && water.rain_mm >= -CANOPY_WATER_ROUNDOFF_MM
+            && water.snow_mm >= -CANOPY_WATER_ROUNDOFF_MM,
+        "canopy wetness inputs are invalid"
+    );
+    let satcap_rain = rain_capacity_mm.max(0.0).max(1.0e-10);
+    let rain_coverage = |depth_mm: f64| {
+        if depth_mm > 0.0 {
+            (depth_mm / satcap_rain).lpow(f77(0.666_666_666_666)).min(1.0)
+        } else {
+            0.0
+        }
+    };
+    let wet_fraction = if vegetation_snow {
+        let rain = rain_coverage(water.rain_mm);
+        let snow = if water.snow_mm > 0.0 {
+            (((1.0 / maximum_dew_mm) / (48.0 * leaf_stem_area)) * water.snow_mm)
+                .lpow(f77(0.666_666_666_666))
+                .min(1.0)
+        } else {
+            0.0
+        };
+        (-rain).mul_add(snow, rain + snow).min(1.0)
+    } else {
+        rain_coverage(water.total_mm)
+    };
+    Ok(CanopyWetness {
+        wet_fraction,
+        dry_leaf_fraction: (1.0 - wet_fraction) * leaf_area_index / leaf_stem_area,
+    })
+}
+
+/// `colm2024_rain_capacity_for_fwet`：`dewmx·max(0, lai+sai)`；截留方案 8 且 `lai+sai > 1e-6`
+/// 时用 [`canopy_storage_capacity_colm2024`]。
+pub fn fwet_rain_capacity(
+    maximum_dew_mm: f64,
+    leaf_area_index: f64,
+    stem_area_index: f64,
+    eastward_wind_m_s: f64,
+    northward_wind_m_s: f64,
+    colm2024: Option<Colm2024Canopy>,
+) -> f64 {
+    let fallback = maximum_dew_mm * (leaf_area_index + stem_area_index).max(0.0);
+    match colm2024 {
+        Some(canopy) if leaf_area_index + stem_area_index > 1.0e-6 => {
+            canopy_storage_capacity_colm2024(
+                maximum_dew_mm,
+                leaf_area_index,
+                stem_area_index,
+                eastward_wind_m_s,
+                northward_wind_m_s,
+                canopy.canopy_top_m,
+                canopy.needleleaf_crown_depth_m,
+                canopy.needleleaf_crown_width_m,
+                canopy.broadleaf_crown_width_m,
+                canopy.vegetation_class,
+                canopy.is_pft,
+                canopy.land_cover,
+            )
+        }
+        _ => fallback,
+    }
+}
+
 /// 方案 8（`LEAF_interception_CoLM2024`）的静态冠层参数（常数重启里的 `htop`/`ncd`/`ncw`/`bcw`
 /// 与地类号）。
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -223,6 +317,9 @@ pub fn intercept_canopy(
     input: CanopyInterceptionInput,
     water: &mut CanopyWater,
 ) -> Result<CanopyInterceptionFluxes> {
+    if input.vegetation_snow {
+        repair_canopy_phases(water, input.leaf_temperature_k);
+    }
     validate(input, water)?;
     let leaf_stem_area = input.leaf_area_index + input.stem_area_index;
     let rain_rate = input.convective_rain_kg_m2_s
@@ -410,9 +507,12 @@ pub fn intercept_canopy(
                     )
                     .sqrt()
                     / f77(1.56e5);
-            drainage_snow_mm = (water.snow_mm / input.time_step_seconds).max(0.0)
-                * (wind_unloading + temperature_unloading)
-                * input.time_step_seconds;
+            // 卸雪速率 = 积雪量 [mm] ×（FV+FT）[1/s]（Niu & Yang 2004），不超过冠层现有积雪。
+            // 原写法把积雪量先除以步长，卸雪偏小一个步长的倍数；vendor 已改成示踪物那一支的写法。
+            let snow_store = water.snow_mm.max(0.0);
+            let unloading_rate = (snow_store * (wind_unloading + temperature_unloading))
+                .min(snow_store / input.time_step_seconds + intercepted_snow_rate);
+            drainage_snow_mm = unloading_rate * input.time_step_seconds;
             // `:295 tti_snow = (1-fvegc)*rate + (fvegc*rate - qintr_snow)` 的出货汇编是
             // `fmadd d30,d23,d19,d30`（第一个乘积进 FMA），`.loc 1 299`。
             direct_snow_mm = (f77(1.0) - vegetation_fraction).mul_add(
@@ -457,6 +557,38 @@ pub fn intercept_canopy(
         released_rain_kg_m2_s: released_rain_mm / input.time_step_seconds,
         released_snow_kg_m2_s: released_snow_mm / input.time_step_seconds,
     })
+}
+
+/// `LEAF_interception_CoLM2014` 开头（`DEF_VEG_SNOW`）：总量非法时由分量重建（分量也非法就清零）；
+/// 分量非法或与总量不一致（超过 `1e-10·max(1, ldew)`）时按叶温整体归成雨或雪。
+fn repair_canopy_phases(water: &mut CanopyWater, leaf_temperature_k: f64) {
+    let total_valid = water.total_mm.is_finite() && water.total_mm >= 0.0;
+    let phases_valid = water.rain_mm.is_finite()
+        && water.rain_mm >= 0.0
+        && water.snow_mm.is_finite()
+        && water.snow_mm >= 0.0;
+    if !total_valid {
+        if phases_valid {
+            water.total_mm = water.rain_mm + water.snow_mm;
+        } else {
+            *water = CanopyWater {
+                total_mm: 0.0,
+                rain_mm: 0.0,
+                snow_mm: 0.0,
+            };
+        }
+    } else if !phases_valid
+        || ((water.rain_mm + water.snow_mm) - water.total_mm).abs()
+            > 1.0e-10 * water.total_mm.max(1.0)
+    {
+        if leaf_temperature_k > FREEZING_K {
+            water.rain_mm = water.total_mm;
+            water.snow_mm = 0.0;
+        } else {
+            water.rain_mm = 0.0;
+            water.snow_mm = water.total_mm;
+        }
+    }
 }
 
 fn saturated_fraction(

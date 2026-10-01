@@ -5,7 +5,7 @@
 //! 顺序与上游一致：`advance_patch` 里物理步与"为下一步准备"的表面光学都做完之后才调这里，
 //! 所以 BGC 改写的 `tsai_p` 从下一步末尾的准备段才生效（`sai_p = tsai_p·sigf_p`）。
 //!
-//! 氮沉降（`MOD_NdepData`）：启动时按 `adj2end` 后的起始年读一次；此后只在结束于
+//! 氮沉降（`MOD_NdepData`）：启动时按 namelist 的起始年读一次；此后只在结束于
 //! 12 月 31 日 24:00 的那一步重读，读的是刚结束的那一年（上游的时序，实际滞后一年），
 //! 年份钳在 1849–2006。单点 patch 的面积加权映射退化为取包含站点的那个源网格。
 
@@ -475,7 +475,7 @@ impl TraceWriter {
 /// BGC 的外部数据源：氮沉降（总在）与硝化 O₂（`DEF_USE_NITRIF`，附起始月份）。
 pub struct BgcDataSources {
     pub ndep: NdepSource,
-    /// 启动时读氮沉降用的年份：`adj2end` 之后的起始年（00:00 1 月 1 日起步时是上一年）。
+    /// 启动时读氮沉降（与火的人口密度）用的年份：namelist 的起始年 `s_year`。
     pub ndep_start_year: i32,
     /// 月度氮沉降起步读的月：namelist 的 `start_month`，**不**经 `adj2end`
     /// （`init_ndep_data_monthly(sdate(1), s_month)`，年与月可能不在同一个时刻上）。
@@ -496,7 +496,7 @@ pub struct BgcRuntime {
     pub nitrif: Option<NitrifSource>,
     /// `DEF_USE_FIRE` 打开时的火灾数据。
     pub fire: Option<FireSource>,
-    /// 启动时读氮沉降用的年份：`adj2end` 之后的起始年（00:00 1 月 1 日起步时是上一年）。
+    /// 启动时读氮沉降（与火的人口密度）用的年份：namelist 的起始年 `s_year`。
     pub ndep_start_year: i32,
     /// `deltim`（秒）。
     pub deltim: f64,
@@ -565,7 +565,7 @@ impl BgcRuntime {
             initial.patch.to2_decomp_depth_unsat.copy_from_slice(&depth);
         }
         let nitrif = nitrif.map(|(source, _)| source);
-        // `init_fire_data(sdate(1))`：`abm`/`gdp`/`peatf` 与起始年（`adj2end` 之后，同 ndep）的 `hdm`。
+        // `init_fire_data(s_year)`：`abm`/`gdp`/`peatf` 与起始年（同 ndep）的 `hdm`。
         // `lnfm` 不在重启里、分配时是 `spval`；`init_lightning_data` 读了闪电却没映射到 patch，要等
         // 第一次 `update_lightning_data` 换档才有值。
         if let Some(source) = &fire {

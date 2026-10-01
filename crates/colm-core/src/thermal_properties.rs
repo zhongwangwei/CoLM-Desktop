@@ -353,7 +353,7 @@ fn validate(input: SoilThermalInput) -> Result<()> {
             && input.dry_conductivity_w_m_k >= 0.0
             && input.saturated_unfrozen_conductivity_w_m_k >= 0.0
             && input.saturated_frozen_conductivity_w_m_k >= 0.0
-            && input.liquid_volume_fraction >= 0.0
+            && input.liquid_volume_fraction >= -crate::SOIL_WATER_ROUNDOFF_KG_M2
             && input.ice_volume_fraction >= 0.0,
         "soil thermal inputs are physically invalid"
     );

@@ -108,17 +108,18 @@ pub struct Water2014SoilInput<'a> {
 }
 
 impl Water2014SoilInput<'_> {
-    /// 第 [1] 节末的 `gwat`：`pg_rain + sm - qseva`，灌溉打开时再加灌溉通量（与非 VSF 的 `wdsrf/deltim`）。
-    fn ground_water_input(&self, state: &Water2014SoilState) -> f64 {
-        let gwat = self.fluxes.ground_rain_kg_m2_s + self.fluxes.snowmelt_kg_m2_s
+    /// 第 [1] 节末的 `gwat`：`pg_rain + sm - qseva`；非 VSF 的土壤/城市 patch 先把
+    /// 积水 `wdsrf/deltim` 并进来并清零 `wdsrf`（`MOD_SoilSnowHydrology.F90:292-295`），
+    /// 灌溉打开时再加灌溉通量。
+    fn ground_water_input(&self, state: &mut Water2014SoilState) -> f64 {
+        let mut gwat = self.fluxes.ground_rain_kg_m2_s + self.fluxes.snowmelt_kg_m2_s
             - self.fluxes.ground_evaporation_kg_m2_s;
+        if !self.variably_saturated && self.patch_type <= 1 {
+            gwat += state.surface_water_mm / self.time_step_seconds;
+            state.surface_water_mm = 0.0;
+        }
         match self.irrigation {
-            Some(irrigation) => irrigation.ground_water_input(
-                gwat,
-                state.surface_water_mm,
-                self.time_step_seconds,
-                self.variably_saturated,
-            ),
+            Some(irrigation) => irrigation.ground_water_input(gwat),
             None => gwat,
         }
     }
@@ -378,20 +379,26 @@ pub fn water_2014_soil_step(
     state.liquid_water_kg_m2 = groundwater.liquid_water_kg_m2;
     state.water_table_depth_m = groundwater.water_table_depth_m;
     state.aquifer_water_mm = groundwater.aquifer_water_mm;
-    // `wliq(1) = max(0., wliq(1) + qsdew*deltim)`（`wice` 同理，用 `qfros-qsubl`）。
-    // `main/` 的 GIMPLE 里只有冰那一句是 `FMA(deltim, qfros-qsubl, wice)`：液态的
-    // `deltim*qsdew` 被提到分支之前，与 TRACER 构建的 `dew_input = max(qsdew*deltim, 0)`
-    // 共用，于是是独立舍入的乘积再相加（与 `WATER_VSF` 同一处，第 406 轮）。
-    state.liquid_water_kg_m2[0] = (state.liquid_water_kg_m2[0]
-        + input.time_step_seconds * input.fluxes.soil_dew_kg_m2_s)
-        .max(0.0);
-    state.ice_water_kg_m2[0] = input
-        .time_step_seconds
-        .mul_add(
-            input.fluxes.soil_frost_kg_m2_s - input.fluxes.soil_sublimation_kg_m2_s,
-            state.ice_water_kg_m2[0],
-        )
-        .max(0.0);
+    // `:484-522`：凝结更新表层冰；露水受表层孔隙容量限制，新霜挤出的液态水与
+    // 装不下的露水进积水，积水超过 `pondmx` 的部分记作地表径流。
+    let mut total_runoff_mm_s = surface_runoff_mm_s + groundwater.subsurface_runoff_mm_s;
+    absorb_condensation(
+        CondensationInput {
+            time_step_seconds: input.time_step_seconds,
+            dew_kg_m2_s: input.fluxes.soil_dew_kg_m2_s,
+            frost_minus_sublimation_kg_m2_s: input.fluxes.soil_frost_kg_m2_s
+                - input.fluxes.soil_sublimation_kg_m2_s,
+            top_porosity: input.porosity[0],
+            top_thickness_m: input.layer_thickness_m[0],
+        },
+        state,
+    );
+    if state.surface_water_mm > input.ponding_limit_mm {
+        let overflow = (state.surface_water_mm - input.ponding_limit_mm) / input.time_step_seconds;
+        surface_runoff_mm_s += overflow;
+        total_runoff_mm_s += overflow;
+        state.surface_water_mm = input.ponding_limit_mm;
+    }
     // `smp`/`hk` 是 `soilwater` 的 `intent(out)`，上游存进时间变量供**下一步**用。
     state.matric_potential_mm = soil.matric_potential_mm.clone();
     state.hydraulic_conductivity_mm_s = soil.hydraulic_conductivity_mm_s.clone();
@@ -407,9 +414,8 @@ pub fn water_2014_soil_step(
         infiltration_excess_runoff_mm_s: 0.0,
         // `CoLMMAIN.F90:1188`：`WATER_2014` 返回后 `rsub = rnof - rsur`（`rnof = rsubst + rsur`），
         // 不是直接取 `rsubst` —— 两者可差 1 ulp（第 406 轮，Campbell TOPMODEL/VIC）。
-        subsurface_runoff_mm_s: (surface_runoff_mm_s + groundwater.subsurface_runoff_mm_s)
-            - surface_runoff_mm_s,
-        total_runoff_mm_s: surface_runoff_mm_s + groundwater.subsurface_runoff_mm_s,
+        subsurface_runoff_mm_s: total_runoff_mm_s - surface_runoff_mm_s,
+        total_runoff_mm_s,
         saturated_fraction,
         recharge_mm_s: soil.recharge_mm_s,
         soil_interface_flux_mm_s: soil.interface_flux_mm_s,
@@ -579,7 +585,7 @@ fn split_snow_soil_step(
 ///   融化层整层充满液水、冰清零，`wa = 4800`、`zwt = 0`。`CoLMMAIN` 随后 `rsub = rnof - rsur`
 ///   （`:1188`），即 `-rsur`。
 ///
-/// 两支都不改 `smp`/`hk`（非 TRACER 构建）。
+/// VSF 那一支按层温重设 `smp`/`hk`；非 VSF 那一支不改。
 fn wetland_soil_step(
     input: Water2014SoilInput<'_>,
     state: &mut Water2014SoilState,
@@ -615,6 +621,32 @@ fn wetland_soil_step(
             }
         }
         wetland += residual_sum;
+        // `:1428-1440`：融化层 `smp = psi0`、`hk = hksati`；冻结层按冻结点降低的吸力
+        // `max(smpmin, 1e3*0.3336e6/9.80616*(t-tfrz)/t)`（常数已折叠），`hk` 乘冰阻抗。
+        for layer in 0..layers {
+            let t = input.temperature_k[layer];
+            if t > crate::FREEZING_K {
+                state.matric_potential_mm[layer] = input.saturated_potential_mm[layer];
+                state.hydraulic_conductivity_mm_s[layer] =
+                    input.saturated_hydraulic_conductivity_mm_s[layer];
+            } else {
+                state.matric_potential_mm[layer] = ((t - crate::FREEZING_K)
+                    * 34_019_432.683_129_79
+                    / t)
+                    .max(input.minimum_soil_potential_mm);
+                let porosity = input.porosity[layer];
+                let ice_volume = (state.ice_water_kg_m2[layer]
+                    / (input.layer_thickness_m[layer] * ICE_DENSITY_KG_M3))
+                    .min(porosity)
+                    .max(0.0);
+                let impedance = crate::LibmPow::lpow(
+                    10.0,
+                    -(ice_volume / porosity * input.soil_ice_impedance),
+                );
+                state.hydraulic_conductivity_mm_s[layer] =
+                    impedance * input.saturated_hydraulic_conductivity_mm_s[layer];
+            }
+        }
         let capacity = input.wetland_water_capacity_mm;
         if wetland > capacity {
             state.surface_water_mm = wetland - capacity;
@@ -740,6 +772,51 @@ fn variably_saturated_soil_step(
         matric_potential_mm: vsf.matric_potential_mm,
         hydraulic_conductivity_mm_s: vsf.hydraulic_conductivity_mm_s,
     })
+}
+
+/// 表层凝结的输入（`WATER_2014`；`WATER_VSF` 的结合顺序不同，单独写在 VSF 里）。
+#[derive(Clone, Copy)]
+pub(crate) struct CondensationInput {
+    pub time_step_seconds: f64,
+    /// `qsdew`（或 split 的 `qsdew_soil`；有雪层且非 split 时为 0）。
+    pub dew_kg_m2_s: f64,
+    /// `qfros - qsubl`（同上）。
+    pub frost_minus_sublimation_kg_m2_s: f64,
+    pub top_porosity: f64,
+    pub top_thickness_m: f64,
+}
+
+/// `MOD_SoilSnowHydrology.F90:484-516`。
+///
+/// `wice(1) = max(0, FMA(deltim, qfros-qsubl, wice(1)))`；露水 `dew_input = max(deltim*qsdew, 0)`
+/// 只填到表层孔隙剩余容量 `max((porsl*dz - wice/denice)*denh2o, 0)` 为止；新霜（冰增加超过
+/// 1e-12）把超过容量的液态水挤出。挤出的水与装不下的露水按 `(wdsrf + frost) + dew_excess`
+/// 进积水。新霜超过整个孔隙的情形由 `relocate_soil_frost_ice` 在雪层合并后处理（土壤 patch
+/// 的 `defer_surface_ice_overflow`）。
+pub(crate) fn absorb_condensation(
+    input: CondensationInput,
+    state: &mut Water2014SoilState,
+) {
+    let dt = input.time_step_seconds;
+    let ice_before_frost = state.ice_water_kg_m2[0];
+    let dew_input_mm = (dt * input.dew_kg_m2_s).max(0.0);
+    state.ice_water_kg_m2[0] = dt
+        .mul_add(input.frost_minus_sublimation_kg_m2_s, ice_before_frost)
+        .max(0.0);
+    let ice = state.ice_water_kg_m2[0];
+    let dew_capacity = ((input.top_porosity * input.top_thickness_m - ice / ICE_DENSITY_KG_M3)
+        * WATER_DENSITY_KG_M3)
+        .max(0.0);
+    let mut liquid = state.liquid_water_kg_m2[0];
+    let mut frost_excess_mm = 0.0;
+    if ice > ice_before_frost + 1.0e-12 {
+        frost_excess_mm = (liquid - dew_capacity).max(0.0).min(liquid.max(0.0));
+        liquid -= frost_excess_mm;
+    }
+    let dew_retained_mm = (dew_capacity - liquid).max(0.0).min(dew_input_mm);
+    state.liquid_water_kg_m2[0] = dew_retained_mm + liquid;
+    let dew_excess = dew_input_mm - dew_retained_mm;
+    state.surface_water_mm = (state.surface_water_mm + frost_excess_mm) + dew_excess;
 }
 
 fn runoff(
@@ -939,7 +1016,7 @@ fn validate(input: Water2014SoilInput<'_>, state: &Water2014SoilState) -> Result
                 .liquid_water_kg_m2
                 .iter()
                 .chain(&state.ice_water_kg_m2)
-                .all(|value| value.is_finite() && *value >= 0.0),
+                .all(|value| value.is_finite() && *value >= -crate::SOIL_WATER_ROUNDOFF_KG_M2),
         "water_2014_soil_step state layers are invalid"
     );
     ensure!(

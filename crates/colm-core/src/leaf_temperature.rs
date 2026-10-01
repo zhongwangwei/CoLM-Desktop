@@ -10,7 +10,7 @@ use anyhow::{ensure, Context, Result};
 
 use crate::{
     canopy_diffusivity_resistance_analytic, canopy_monin_obukhov_with_scheme, canopy_roughness,
-    canopy_wetness, effective_canopy_wind, initialize_monin_obukhov, plant_hydraulic_stress,
+    effective_canopy_wind, initialize_monin_obukhov, plant_hydraulic_stress,
     saturation_specific_humidity, stomata, update_photosynthesis, CanopyDiffusivityProfileInput,
     CanopyMoninObukhovInput, CanopyWater, CanopyWindProfileInput, LeafBiochemistry,
     LeafPhotosynthesisInput, MoninObukhovInitialInput, MoninObukhovInput,
@@ -119,6 +119,8 @@ pub struct LeafPlantHydraulicInput<'a> {
 pub struct LeafTemperatureInput<'a> {
     pub time_step_seconds: f64,
     pub maximum_dew_mm: f64,
+    /// 截留方案 8（CoLM2024）的冠层结构：`fwet` 用该方案的雨水容量；其余方案为 `None`。
+    pub colm2024: Option<crate::Colm2024Canopy>,
     pub leaf_area_index: f64,
     pub stem_area_index: f64,
     pub canopy_top_height_m: f64,
@@ -314,12 +316,21 @@ pub fn leaf_temperature(
     } else {
         0.0
     };
-    let wetness = canopy_wetness(
+    // `dewfraction(..., colm2024_rain_capacity_for_fwet(...))`：雨水容量取截留方案的值。
+    let wetness = crate::interception::canopy_wetness_with_capacity(
         lai,
         sai,
         input.maximum_dew_mm,
         state.canopy_water,
         input.options.vegetation_snow,
+        crate::interception::fwet_rain_capacity(
+            input.maximum_dew_mm,
+            lai,
+            sai,
+            input.eastward_wind_m_s,
+            input.northward_wind_m_s,
+            input.colm2024,
+        ),
     )?;
     let fwet = wetness.wet_fraction;
     let roughness = canopy_roughness(lsai, input.canopy_top_height_m, 1.0)?;
@@ -1126,12 +1137,21 @@ pub fn leaf_temperature(
             .mul_add(bracket, slope_applied);
         leaf_latent_heat_j_kg.mul_add(last.evaporation_imbalance, bracket_applied)
     };
-    let transpiration = last
+    let updated_transpiration = last
         .transpiration_temperature_slope
         .mul_add(final_temperature_change, last.transpiration);
     let mut wet_evaporation = last
         .wet_evaporation_temperature_slope
         .mul_add(final_temperature_change, last.wet_evaporation);
+    // 负蒸腾（水汽进气孔）是叶面凝露，不是倒流的蒸腾：并入湿叶蒸发，蒸腾与根系吸水清零
+    // （`MOD_LeafTemperature.F90`，原来只在开示踪物时做，vendor 已解耦成无条件）。
+    let dew_from_transpiration = updated_transpiration < 0.0;
+    let transpiration = if dew_from_transpiration {
+        wet_evaporation += updated_transpiration;
+        0.0
+    } else {
+        updated_transpiration
+    };
     let leaf_evaporation = last
         .leaf_evaporation_temperature_slope
         .mul_add(final_temperature_change, last.leaf_evaporation_unadjusted);
@@ -1164,8 +1184,11 @@ pub fn leaf_temperature(
         - leaf_latent_heat_j_kg * leaf_evaporation
         + precipitation_heat
         - canopy_heat_storage;
-    let sunlit_transpiration = last.sunlit_transpiration;
-    let shaded_transpiration = last.shaded_transpiration;
+    let (sunlit_transpiration, shaded_transpiration) = if dew_from_transpiration {
+        (0.0, 0.0)
+    } else {
+        (last.sunlit_transpiration, last.shaded_transpiration)
+    };
     let mut root_flux_kg_m2_s = last.root_flux_kg_m2_s;
     if let Some(hydraulic) = input.plant_hydraulics {
         if last.transpiration.abs() >= 1.0e-15 {
@@ -1176,7 +1199,7 @@ pub fn leaf_temperature(
             // `soil_water_vertical_movement` 入场时 `etroot` 只有这两层差 1 ULP，
             // 其和 `deficit` 跟着差，第 12 步水位才翻出去）。
             for flux in &mut root_flux_kg_m2_s {
-                *flux = *flux * transpiration / last.transpiration;
+                *flux = *flux * updated_transpiration / last.transpiration;
             }
         } else {
             let total_depth = hydraulic.layer_thickness_m.iter().sum::<f64>();
@@ -1194,6 +1217,9 @@ pub fn leaf_temperature(
                 let rate = depth / total_depth * last.transpiration_temperature_slope;
                 *flux = rate.mul_add(final_temperature_change, *flux);
             }
+        }
+        if dew_from_transpiration {
+            root_flux_kg_m2_s.iter_mut().for_each(|flux| *flux = 0.0);
         }
     }
     state.canopy_water.total_mm =

@@ -27255,3 +27255,43 @@ Rust 在 `route_system` 的子步长循环与 `bifurcation_substep` 里各加一
 **仍由开关控制的**：示踪物的初始化、驱动、记账、守恒检查、续跑与输出；雪层合并/拆分传示踪物数组的调用（宿主计算相同）；城市 patch 的拒绝；甲烷用的湿地土壤碳氮库初始化（`MOD_Initialize`，无甲烷时湿地不跑分解，初始化了也用不上）；河道示踪物输运。城市模块里 `fwet` 的旧写法不在示踪物开关下，不在本轮范围。
 
 三个内核（default、latlon、crop）重编通过。**这会改变所有既有算例的结果**：下一步重生成全部 Fortran 参照，Rust 按新语义跟进。
+
+## 第 478 轮：Rust 跟进解耦后的宿主物理
+
+第 477 轮把示踪物开关挡着的宿主修改在 vendor 里改为无条件生效，本轮 Rust 按新语义逐处移植；每处的运算形状都对照重编的 GIMPLE（`-fdump-tree-optimized`）。
+
+| 位置 | Rust 改动 | GIMPLE 要点 |
+|---|---|---|
+| 冠层截留（`interception.rs`） | 开 `DEF_VEG_SNOW` 时先修复 `ldew/ldew_rain/ldew_snow`；卸雪 `min(max(0,snow)*(FV+FT), max(0,snow)/dt + qintr_snow)*dt` | `(FV+FT)*max(0,snow)` 后取 min 再乘 dt |
+| 湿叶比例（`leaf_temperature.rs`、`_pc.rs`） | `fwet = (ldew/max(cap,1e-10))^0.666666666666`，容量 = 方案 8 的 CoLM2024 容量或 `dewmx*max(0,lai+sai)` | 雨、总量同式；雪分量用 `((1/dewmx)/(48*lsai))*snow` |
+| 负蒸腾（两个叶温） | `etr<0` 时 `evplwet += etr`，`etr/etrsun/etrsha = 0`，PHS 的 `rootflux` 清零；PC 版在 `elwmax` 之前 | 普通加法 |
+| PC 露水更新 | 所有方案走 colm2014 写法；关 VEG_SNOW 时 `rain = ldew*(rain/(rain+snow))`、`snow = ldew - rain`，分量和 ≤ 1e-10 时按叶温整体归雨或雪 | 比值先除后乘 |
+| THERMAL PFT 段、CoLMMAIN | 关 VEG_SNOW 时按 patch 叶温把各 PFT 与 patch 的冠层水整体归成雨或雪（PFT 段在 `pft_canopy_energy` 开头，patch 段在 `finish_energy_step` 开头） | — |
+| `relocate_soil_frost_ice`（新，`snow.rs`） | 土壤 patch 在雪层合并/分裂之后：`excess = max(FNMA(917*porsl, dz, wice1), 0)` 挪进雪；无雪层时加到 `scv/snowdp`，够 1 cm 建层（温度取土层 1，SNICAR 粒径 54.526、气溶胶清零）；有雪层时并入顶层，`t = FMA(t, hc, (excess*cpice)*t1)/(excess*cpice + hc)`，`hc = FMA(wice, cpice, wliq*cpliq)` | `z = FNMA(dz, 0.5, zi)` |
+| `WATER_2014` | 土壤/城市 patch `gwat += wdsrf/dt`、`wdsrf = 0`（在灌溉三项之前）；凝结：`dew_input = max(dt*qsdew,0)`，冰 `max(FMA(dt, qfros-qsubl, wice),0)`，容量 `max((porsl*dz - wice/917)*1000, 0)`，新霜（冰增 > 1e-12）挤出 `min(max(wliq-cap,0), max(wliq,0))`，露水留 `min(max(cap-wliq,0), dew)`，`wdsrf = (wdsrf + frost) + dew_excess`，超过 `pondmx` 进 `rsur`/`rnof`；`rsub = rnof - rsur` | 均不融合 |
+| `WATER_VSF` | 凝结块同上但结合不同：先 `wdsrf += frost`，`dew>0` 时 `wdsrf = (wdsrf + dew) - retained`；不透水顶层亏缺先由积水承担，冻结且有冰时先扣冰后扣液，否则反之；动态湿地/干湖 `|qgtop*dt| < 1e-3` 时直接记到积水；非动态湿地重算 `smp/hk`（冻结层 `max(smpmin, (t-tfrz)*3.4019432683129787e7/t)`，`hk = 10^(-icefrac*imp)*hksat`） | 容差块是乘积再加 |
+| `soil_water_vertical_movement` | PHS 且 `deficit<0` 时 `deficit` 与 `rsubst*dt`（`rsubst>0`）分两次与含水层交换，`pond_exchange = dp_before - ss_dp`；否则一次交换，`pond_exchange = max(交换前 - 交换后, 0)`；`qinfl = qgtop - ((ss_dp - dp_m1) + pond_exchange)/dt` | — |
+| `richards_solver` | `mass_budget = max(Σ|dz*vl_s|, 1)*256eps`；收敛且 `|Σblc| > mass_budget` 时做 `project_richards_liquid_water`，失败则退回显式步 | 边界残差 `FNMA(dt,·,·)`；层残差 `FMA(unsat, vl-vl_m1, (vl_s-vl_m1)*((wf-wf_m1)+(wt-wt_m1))) - dt*(q(j-1)-q(j))`；判据 `unsat <= max(dz,1)*64eps` |
+| 氮分解（`bgc_soil_n_state_update.rs`） | 非硝化终端转移 `FMA(flux - denit, dt, sminn)`；硝化 `nh4 = FMA(gross - immob, dt, nh4)`，随后 `sminn = nh4 + no3` | 碳那一侧算式不变 |
+| 水量平衡 `xerr`（`history.rs`） | `FNMA(dt, (((prc+prl) + qinfl_fld) - (fevpa - fevpg_fld)) - rnof, endwb - totwb)`，不再改 `endwb` | 无漫滩时与默认内核 `((prc+prl)+0.0) - fevpa - rnof` 逐位相同 |
+| `qcharge` 历史 | VSF 打开时冰川/湖/城市也不再累加 | — |
+| 河道动量、ndep/fire 起始年 | `veloc` 截断后 `momen = veloc*w`；`init_ndep/fire` 用 `s_year` | — |
+
+**新冒出来的一处**：bc 算例（CN-Cng）新霜挤出后表层液水留下 `-9.0e-54`（`wliq - min(wliq - cap, wliq)` 的舍入残差）。上游不夹也不检查，Rust 有十几处 `>= 0` 的输入校验把它拦死。新增 `SOIL_WATER_ROUNDOFF_KG_M2 = 1e-12`，雪层合并、地表光学/反照率、土壤热参数、地温、相变、根系吸水、地面湿度、土面阻抗、`WATER_2014`/`WATER_VSF`/VIC/Campbell 的状态校验都改为放行这个量级；真正的亏缺照样报错。放开后 bc 逐位一致。
+
+**实测**：
+
+- 截留闭环 `compare_interception.sh`（`.bld` 用保留构建目录的 dump 脚本重编）：4000/4000 逐位一致，`DEF_VEG_SNOW` 开/关各 2000。单元测试 `vegetation_snow_partition_matches_current_fortran` 的期望值按新卸雪式换成闭环通过后的现值。
+- 单点：142 个算例用三个新内核重生成 Fortran 参照（`tmp/refgen.sh`）。回归 141 个，139 个 history + restart 全部逐位一致；`bm1` 是 Rust mksrfdata 缺外部 PFT 数据（与本轮无关），`g1iv`/`g1tr0` 属示踪物阶段。
+- 空间（latlon 内核，纯 Fortran 三段 vs 全 Rust 三段，`tmp/purecmp.sh`）：
+
+| 算例 | 结果 |
+|---|---|
+| `g1` | history 2、续跑 5 全部 `diff 0` |
+| `g1fl`（漫滩回馈，验证新 `xerr` 式） | history 2、续跑 5 全部 `diff 0` |
+| `g1all`（全部河道选项） | history 2、续跑 5 全部 `diff 0` |
+| `g1i`（IsoGSM） | history 2、续跑 5 全部 `diff 0` |
+
+`cargo test --release -p colm-core`（399）与 `-p colm-runtime` 全过；clippy 无告警。
+
+**未移植（只服务示踪物记账）**：`etroot_*_out`/`rsub_*_out` 的分摊、`dew_overflow`/`frost_displaced`/`late_runoff`、`raw_out`、`permeable_soil_out`、`qgtop_out`。示踪物阶段再补。

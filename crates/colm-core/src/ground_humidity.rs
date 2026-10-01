@@ -206,7 +206,7 @@ fn validate(input: GroundHumidityInput) -> Result<()> {
             && (0.0..=1.0).contains(&input.air_specific_humidity)
             && (0.0..=1.0).contains(&input.snow_cover_fraction)
             && input.top_layer_thickness_m > 0.0
-            && input.top_layer_liquid_water_kg_m2 >= 0.0
+            && input.top_layer_liquid_water_kg_m2 >= -crate::SOIL_WATER_ROUNDOFF_KG_M2
             && input.top_layer_ice_water_kg_m2 >= 0.0
             && input.top_layer_porosity >= 0.0
             && input.top_layer_residual_water >= 0.0

@@ -1016,6 +1016,10 @@ fn route_system<'a>(
                 veloc[k] = veloc[k].min(0.0);
             }
             veloc[k] = veloc[k].min(20.0).max(-20.0);
+            // 截断后的流速与动量重新对齐（原来只在开示踪物时做，vendor 已解耦成无条件）。
+            if w >= RIVERMIN {
+                momen[k] = veloc[k] * w;
+            }
         }
         // history 累加：`a_x = FMA(x, dt, a_x)`，`acctime` 平铺相加。
         for k in 0..n {

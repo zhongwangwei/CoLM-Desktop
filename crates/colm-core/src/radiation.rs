@@ -529,7 +529,8 @@ pub(crate) fn soil_albedo(
 ) -> Result<[[f64; RADIATION_TYPES]; BANDS]> {
     ensure!(
         soil_surface_wetness.is_finite()
-            && (0.0..=1.0).contains(&soil_surface_wetness)
+            // `wliq(1)` 可以带舍入级负值（见 `SOIL_WATER_ROUNDOFF_KG_M2`）。
+            && (-crate::SOIL_WATER_ROUNDOFF_KG_M2..=1.0).contains(&soil_surface_wetness)
             && ground_temperature_k.is_finite()
             && cosine_zenith.is_finite()
             && cosine_zenith > 0.0,

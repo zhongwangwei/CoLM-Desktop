@@ -104,7 +104,7 @@ pub fn prepare_surface_optics_with_snicar(
             && input.temporal_leaf_area_index.is_finite()
             && input.temporal_stem_area_index.is_finite()
             && input.soil_liquid_water_kg_m2.is_finite()
-            && input.soil_liquid_water_kg_m2 >= 0.0
+            && input.soil_liquid_water_kg_m2 >= -crate::SOIL_WATER_ROUNDOFF_KG_M2
             && input.soil_thickness_m.is_finite()
             && input.soil_thickness_m > 0.0
             && input.snow_water_equivalent_mm.is_finite()

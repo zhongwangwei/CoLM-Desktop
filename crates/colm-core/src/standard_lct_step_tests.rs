@@ -688,6 +688,7 @@ fn input(forcing: crate::RuntimeForcing) -> StandardLctEnergyInput<'static> {
     };
     let leaf_temperature = LeafTemperatureInput {
         time_step_seconds: 1800.0,
+        colm2024: None,
         maximum_dew_mm: 0.1,
         leaf_area_index: 2.0,
         stem_area_index: 0.5,

@@ -182,6 +182,14 @@ pub mod water_2014;
 /// CoLM's landdata/restart missing marker.
 pub const MISSING: f64 = -1.0e36;
 
+/// 土壤（与雪）液态水校验放行的舍入负值上限 [kg m-2]。
+///
+/// 上游不夹也不检查液态水的符号。表层凝结的新霜挤出
+/// `wliq - min(max(wliq-cap,0), max(wliq,0))` 在孔隙剩余容量接近 0 时会留下
+/// 1 ulp 量级的负残差（实测 bc 算例 -9e-54），之后被雪层合并、地表光学、地温等照常使用。
+/// 各模块的输入校验放行这个量级，真正的亏缺仍然拦下。
+pub(crate) const SOIL_WATER_ROUNDOFF_KG_M2: f64 = 1.0e-12;
+
 pub use albedo::{land_cover_soil_reflectance, LandCoverScheme, SoilReflectance};
 pub use atmosphere::{
     hydrometeor_temperature, new_snow_bulk_density, orbital_cosine_azimuth, orbital_cosine_zenith,

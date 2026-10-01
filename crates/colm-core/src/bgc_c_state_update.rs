@@ -48,7 +48,7 @@ pub fn c_state_update1(s: &mut BgcState, p: &BgcPhysics, c: &BgcPftConstants, sw
                 s.patch_flux.phenology_to_lig_c[j].mul_add(p.deltim, s.patch.I_lig_c_vr_acc[j]);
         }
     }
-    // DEF_USE_TRACER 的示踪物分解分支未移植（运行时拒绝 DEF_USE_TRACER）。
+    // 分解转移（上游已抽成 `CDecompStateUpdate`/`SoilBiogeochemNDecompStateUpdate`，算式不变）。
     {
         for k in 0..d.ndecomp_transitions {
             for j in 0..d.nl_soil {

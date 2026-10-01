@@ -90,21 +90,9 @@ pub struct SoilIrrigation<'a> {
 }
 
 impl SoilIrrigation<'_> {
-    /// `gwat = gwat + drip + flood + paddy`（左结合）。`WATER_2014`（非 VSF、无示踪物）再加
-    /// `wdsrf/deltim`，而 `wdsrf` 并不清零——入渗那一句 `qinfl = gwat - rsur - wdsrf/deltim` 又减回去。
-    pub fn ground_water_input(
-        &self,
-        gwat: f64,
-        surface_water_mm: f64,
-        time_step_seconds: f64,
-        variably_saturated: bool,
-    ) -> f64 {
-        let gwat = ((gwat + self.drip_mm_s) + self.flood_mm_s) + self.paddy_mm_s;
-        if variably_saturated {
-            gwat
-        } else {
-            gwat + surface_water_mm / time_step_seconds
-        }
+    /// `gwat` 加上滴灌、漫灌、水田三项（`MOD_SoilSnowHydrology.F90:298-300`）。
+    pub fn ground_water_input(&self, gwat: f64) -> f64 {
+        ((gwat + self.drip_mm_s) + self.flood_mm_s) + self.paddy_mm_s
     }
 
     pub fn has_paddy(&self) -> bool {

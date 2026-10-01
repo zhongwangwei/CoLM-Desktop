@@ -25,6 +25,8 @@ const SOURCE_REFERENCE_STEP_SECONDS: f64 = 1800.0;
 /// 与 `water_2014.rs` 各自持有一份（仓库惯例：常数按模块就近定义）。
 const ICE_DENSITY_KG_M3: f64 = 917.0;
 const WATER_DENSITY_KG_M3: f64 = 1000.0;
+/// `WATER_VSF` 的 `richards_water_tolerance`（`MOD_SoilSnowHydrology.F90:788`）。
+const RICHARDS_WATER_TOLERANCE_MM: f64 = 1.0e-3;
 /// `MOD_Hydro_SoilWater.F90:3536` 里 `secant_method_iteration` 的 `alp = 0.9_r8`。
 ///
 /// 夹逼上下界写的是 `x_l*alp + x_r*(1.0_r8-alp)`，而 `1.0 - 0.9` 求值出来是
@@ -3435,6 +3437,102 @@ fn richards_flux_all_input<'d>(
     }
 }
 
+/// [`project_richards_liquid_water`] 的输入（`Richards_solver` 子步的现值与步首值）。
+struct RichardsProjection<'a> {
+    thickness_mm: &'a [f64],
+    time_step_seconds: f64,
+    porosity: &'a [f64],
+    residual_water: &'a [f64],
+    interface_flux_mm_s: &'a [f64],
+    /// 上边界为 `BC_RAINFALL` 时的 `ubc_val`。
+    rainfall_top: Option<f64>,
+    drainage_bottom: bool,
+    ponding_depth_mm: f64,
+    aquifer_water_mm: f64,
+    wetting_front_mm: &'a [f64],
+    water_table_thickness_mm: &'a [f64],
+    previous_ponding_depth_mm: f64,
+    previous_aquifer_water_mm: f64,
+    previous_wetting_front_mm: &'a [f64],
+    previous_liquid_water: &'a [f64],
+    previous_water_table_thickness_mm: &'a [f64],
+    mass_budget_mm: f64,
+}
+
+/// `project_richards_liquid_water`（`MOD_Hydro_SoilWater.F90:1210-1271`）。
+///
+/// 每个边界与每层的残差都要在 `mass_budget/(n+2)` 之内；超出的层用非饱和段厚度把
+/// 液态水移回守恒（`vl - residual/unsat`），候选值须落在 `[max(0, min(vl_r, vl)), vl_s]`。
+/// 任何一处不满足就返回 `false`、不改 `vl`。GIMPLE：边界残差是 `FNMA(dt, ·, ·)`，
+/// 层残差是 `FMA(unsat, vl-vl_m1, (vl_s-vl_m1)*((wf-wf_m1)+(wt-wt_m1))) - dt*(q(j-1)-q(j))`。
+fn project_richards_liquid_water(input: RichardsProjection<'_>, liquid_water: &mut [f64]) -> bool {
+    let layers = liquid_water.len();
+    let dt = input.time_step_seconds;
+    let q = input.interface_flux_mm_s;
+    let level_budget = input.mass_budget_mm / (layers + 2) as f64;
+    let mut total_residual = 0.0;
+    if let Some(top_value) = input.rainfall_top {
+        let residual = (-dt).mul_add(
+            top_value - q[0],
+            input.ponding_depth_mm.max(0.0) - input.previous_ponding_depth_mm.max(0.0),
+        );
+        if !residual.is_finite() || residual.abs() > level_budget {
+            return false;
+        }
+        total_residual += residual;
+    }
+    if input.drainage_bottom {
+        let residual = (-dt).mul_add(
+            q[layers],
+            input.aquifer_water_mm - input.previous_aquifer_water_mm,
+        );
+        if !residual.is_finite() || residual.abs() > level_budget {
+            return false;
+        }
+        total_residual += residual;
+    }
+    let mut candidate = vec![0.0; layers];
+    for j in 0..layers {
+        let dz = input.thickness_mm[j];
+        let wf = input.wetting_front_mm[j];
+        let wt = input.water_table_thickness_mm[j];
+        let vl = liquid_water[j];
+        let vl_m1 = input.previous_liquid_water[j];
+        let unsat = (dz - wf) - wt;
+        let storage_change = (input.porosity[j] - vl_m1)
+            * ((wf - input.previous_wetting_front_mm[j])
+                + (wt - input.previous_water_table_thickness_mm[j]));
+        let flux_change = dt * (q[j] - q[j + 1]);
+        let mut residual = unsat.mul_add(vl - vl_m1, storage_change) - flux_change;
+        if !residual.is_finite() || !unsat.is_finite() {
+            return false;
+        }
+        candidate[j] = vl;
+        if residual.abs() > level_budget {
+            if unsat <= dz.max(1.0) * (64.0 * f64::EPSILON) {
+                return false;
+            }
+            candidate[j] = vl - residual / unsat;
+            if !candidate[j].is_finite()
+                || candidate[j] < vl.min(input.residual_water[j]).max(0.0)
+                || candidate[j] > input.porosity[j]
+            {
+                return false;
+            }
+            residual = unsat.mul_add(candidate[j] - vl_m1, storage_change) - flux_change;
+            if residual.abs() > level_budget {
+                return false;
+            }
+        }
+        total_residual += residual;
+    }
+    if total_residual.abs() > input.mass_budget_mm {
+        return false;
+    }
+    liquid_water.copy_from_slice(&candidate);
+    true
+}
+
 /// 组装 [`variable_saturated_water_balance`] 的输入。
 #[allow(clippy::too_many_arguments)]
 fn richards_water_balance_input<'d>(
@@ -3499,6 +3597,13 @@ pub fn richards_solver(
         .map(|level| input.interface_depth_mm[level + 1] - input.interface_depth_mm[level])
         .collect::<Vec<_>>();
     let explicit_time_step_seconds = input.time_step_seconds / MAX_ITERS_RICHARDS as f64;
+    // `:849-850`：`mass_budget = 256*eps*max(1, sum(abs(sp_dz*vl_s)))`。
+    let mass_budget_mm = thickness_mm
+        .iter()
+        .zip(input.porosity)
+        .fold(0.0, |sum, (dz, porosity)| (dz * porosity).abs() + sum)
+        .max(1.0)
+        * (256.0 * f64::EPSILON);
 
     let mut zone = VariableSaturatedSaturatedZoneAllState {
         saturated: vec![false; layers],
@@ -3658,7 +3763,45 @@ pub fn richards_solver(
                 || !balance.solvable
                 || wet_to_dry;
             if converged || forced_explicit {
-                if forced_explicit {
+                // `:937-947`：收敛但总残差超过质量预算时，把各层液态水投影回逐层守恒；
+                // 投影失败则与不收敛一样退回显式步。
+                let mut projection_ok = true;
+                if converged
+                    && !forced_explicit
+                    && balance
+                        .residual_mm
+                        .iter()
+                        .fold(0.0, |sum, residual| residual + sum)
+                        .abs()
+                        > mass_budget_mm
+                {
+                    projection_ok = project_richards_liquid_water(
+                        RichardsProjection {
+                            thickness_mm: &thickness_mm,
+                            time_step_seconds: time_this_seconds,
+                            porosity: input.porosity,
+                            residual_water: input.residual_water,
+                            interface_flux_mm_s: &zone.interface_flux_mm_s,
+                            rainfall_top: (input.upper_boundary.kind
+                                == VariableSaturatedBoundaryKind::Rainfall)
+                                .then_some(input.upper_boundary.value),
+                            drainage_bottom: input.lower_boundary.kind
+                                == VariableSaturatedBoundaryKind::Drainage,
+                            ponding_depth_mm,
+                            aquifer_water_mm,
+                            wetting_front_mm: &zone.wetting_front_mm,
+                            water_table_thickness_mm: &zone.water_table_thickness_mm,
+                            previous_ponding_depth_mm,
+                            previous_aquifer_water_mm,
+                            previous_wetting_front_mm: &previous_wetting_front_mm,
+                            previous_liquid_water: &previous_liquid_water,
+                            previous_water_table_thickness_mm: &previous_water_table_thickness_mm,
+                            mass_budget_mm,
+                        },
+                        &mut zone.liquid_water,
+                    );
+                }
+                if forced_explicit || !projection_ok {
                     time_this_seconds = time_this_seconds.min(explicit_time_step_seconds);
                     zone.interface_flux_mm_s = initial_interface_flux_mm_s.clone();
                     let explicit =
@@ -4364,6 +4507,21 @@ pub fn variably_saturated_flow_step(
 
     // 渗入表层的通量。
     let mut ground_water_flux_mm_s = input.ground_water_flux_mm_s - surface_runoff_mm_s;
+    // `:1052-1063`：动态湿地与干湖上小于 Richards 容差（1e-3 mm）的净入流/净蒸发直接记到
+    // 积水上，不进求解器（乘积先独立舍入再相加）。
+    if input.patch_type == 2 || input.patch_type == 4 {
+        let amount = ground_water_flux_mm_s * dt;
+        if (ground_water_flux_mm_s < 0.0
+            && -amount < RICHARDS_WATER_TOLERANCE_MM
+            && state.surface_water_mm >= -amount)
+            || (ground_water_flux_mm_s > 0.0
+                && amount < RICHARDS_WATER_TOLERANCE_MM
+                && state.surface_water_mm > 0.0)
+        {
+            state.surface_water_mm += amount;
+            ground_water_flux_mm_s = 0.0;
+        }
+    }
 
     // `:1087-1145` 漫滩再入渗（`new_cama_flood`，GRID 回馈）：淹没水按 TOPMODEL 在饱和比例 1 下
     // 重算一次地表产流，余下的入渗（受 `FloodInfiltMax` 限制）按淹没比例加进 `qgtop`。
@@ -4492,22 +4650,28 @@ pub fn variably_saturated_flow_step(
 
     state.surface_water_mm = state.surface_water_mm.max(0.0);
 
-    // 不透水表层上的蒸发亏损（`qgtop < 0`）。按 CoLM-SYSU-integration 非 TRACER 构建的写法
-    // （`MOD_SoilSnowHydrology.F90` `WATER_VSF`）：有积水先让积水承担，积水变负的部分从
-    // 表层**液态水**里扣；没有积水就直接扣表层液态水。**不动冰。**
-    // 分叉点 `CoLM202X@2f91b435` 对所有构建都按冰/液比例扣，本函数此前照它写；上游这一版
-    // 只在 TRACER 构建里保留那种写法（见 docs/upstream-bugs.md 第 10 条）。
+    // `:1176-1208` 不透水表层上的蒸发亏损（`qgtop < 0`）：先由积水承担，余下的从表层扣；
+    // 冻结（`t <= tfrz` 且有冰）时先扣冰再扣液，否则先扣液再扣冰。
     if !permeable[0] && ground_water_flux_mm_s < 0.0 {
-        if state.surface_water_mm > 0.0 {
-            state.surface_water_mm += ground_water_flux_mm_s * dt;
-            if state.surface_water_mm < 0.0 {
-                state.liquid_water_kg_m2[0] =
-                    (state.liquid_water_kg_m2[0] + state.surface_water_mm).max(0.0);
-                state.surface_water_mm = 0.0;
-            }
-        } else {
-            state.liquid_water_kg_m2[0] =
-                (state.liquid_water_kg_m2[0] + ground_water_flux_mm_s * dt).max(0.0);
+        let deficit = -ground_water_flux_mm_s * dt;
+        let surface_loss = state.surface_water_mm.max(0.0).min(deficit);
+        if surface_loss > 0.0 {
+            state.surface_water_mm = (state.surface_water_mm - surface_loss).max(0.0);
+        }
+        let soil_deficit = (deficit - surface_loss).max(0.0);
+        if soil_deficit > 0.0 {
+            let liquid = state.liquid_water_kg_m2[0];
+            let ice = state.ice_water_kg_m2[0];
+            let (liquid_loss, ice_loss) =
+                if input.temperature_k[0] <= crate::FREEZING_K && ice > 0.0 {
+                    let ice_loss = ice.max(0.0).min(soil_deficit);
+                    (liquid.max(0.0).min((soil_deficit - ice_loss).max(0.0)), ice_loss)
+                } else {
+                    let liquid_loss = liquid.max(0.0).min(soil_deficit);
+                    (liquid_loss, ice.max(0.0).min((soil_deficit - liquid_loss).max(0.0)))
+                };
+            state.liquid_water_kg_m2[0] = (liquid - liquid_loss).max(0.0);
+            state.ice_water_kg_m2[0] = (ice - ice_loss).max(0.0);
         }
         ground_water_flux_mm_s = 0.0;
     }
@@ -4541,8 +4705,7 @@ pub fn variably_saturated_flow_step(
             root_flux_mm_s: input.root_flux_mm_s,
             subsurface_runoff_mm_s,
             plant_hydraulics: input.plant_hydraulics,
-            // 上游 `MOD_SoilSnowHydrology.F90:1101` 传的就是这个硬编码值。
-            tolerance_mm: 1.0e-3,
+            tolerance_mm: RICHARDS_WATER_TOLERANCE_MM,
         },
         &mut soil_state,
     )?;
@@ -4582,19 +4745,38 @@ pub fn variably_saturated_flow_step(
     }
     state.water_table_depth_m = water_table_depth_mm / 1000.0;
 
-    // 凝结：露/霜/升华按上游的符号约定加回表层。
-    // 液态那一句**不收缩**：`deltim*qsdew` 被提到分支之前，与 TRACER 构建的
-    // `dew_input = max(qsdew*deltim, 0)` 共用（GIMPLE `_1760 = deltim*qsdew`，
-    // 随后 `_1039 = wliq + _1760`）；冰那一句没有共用者，照样是 `.FMA`。
-    // 写成 FMA 时 AT-Neu 2010-03-08 起表层液水差 1 ulp（第 406 轮）。
-    state.liquid_water_kg_m2[0] =
-        (state.liquid_water_kg_m2[0] + dt * input.fluxes.soil_dew_kg_m2_s).max(0.0);
-    state.ice_water_kg_m2[0] = dt
-        .mul_add(
-            input.fluxes.soil_frost_kg_m2_s - input.fluxes.soil_sublimation_kg_m2_s,
-            state.ice_water_kg_m2[0],
-        )
-        .max(0.0);
+    // `:1237-1280` 凝结：表层冰按 `FMA(deltim, qfros-qsubl, wice)` 更新；新霜（冰增加
+    // 超过 1e-12）把超过孔隙剩余容量 `max((porsl*dz - wice/denice)*denh2o, 0)` 的液态水挤进
+    // 积水；露水 `max(qsdew*deltim, 0)` 只填到容量为止，余下按 `(wdsrf + dew) - retained`
+    // 进积水。新霜超过整个孔隙由雪层合并后的 `relocate_soil_frost_ice` 处理。
+    {
+        let ice_before_frost = state.ice_water_kg_m2[0];
+        let dew_input = (input.fluxes.soil_dew_kg_m2_s * dt).max(0.0);
+        state.ice_water_kg_m2[0] = dt
+            .mul_add(
+                input.fluxes.soil_frost_kg_m2_s - input.fluxes.soil_sublimation_kg_m2_s,
+                ice_before_frost,
+            )
+            .max(0.0);
+        let ice = state.ice_water_kg_m2[0];
+        let dew_capacity = ((input.porosity[0] * input.layer_thickness_m[0]
+            - ice / ICE_DENSITY_KG_M3)
+            * WATER_DENSITY_KG_M3)
+            .max(0.0);
+        let mut liquid = state.liquid_water_kg_m2[0];
+        let mut frost_excess = 0.0;
+        if ice > ice_before_frost + 1.0e-12 {
+            frost_excess = (liquid - dew_capacity).max(0.0).min(liquid.max(0.0));
+            liquid -= frost_excess;
+        }
+        state.surface_water_mm += frost_excess;
+        if dew_input > 0.0 {
+            let dew_retained = (dew_capacity - liquid).max(0.0).min(dew_input);
+            liquid += dew_retained;
+            state.surface_water_mm = (state.surface_water_mm + dew_input) - dew_retained;
+        }
+        state.liquid_water_kg_m2[0] = liquid;
+    }
 
     // 水量亏缺由冰补：`wblc > 0` 时自上而下融冰。
     let mut ice_sink_kg_m2 = vec![0.0; nlev];
@@ -4806,7 +4988,7 @@ fn validate_variable_saturated_flow(
                 .liquid_water_kg_m2
                 .iter()
                 .chain(&state.ice_water_kg_m2)
-                .all(|value| value.is_finite() && *value >= 0.0)
+                .all(|value| value.is_finite() && *value >= -crate::SOIL_WATER_ROUNDOFF_KG_M2)
             && [
                 state.water_table_depth_m,
                 state.aquifer_water_mm,
@@ -5047,25 +5229,48 @@ pub fn soil_water_vertical_movement(
     // `:345 wexchange = rsubst*dt + deficit`：`main/` 的 GIMPLE 是 `_100 = rsubst*dt ;
     // _102 = _100 + deficit`，**不**融合（旧内核的出货汇编是 `fmadd`）。CN-Cng 1 月第 57 步
     // 的 `zwt` 1 ULP 就是从这里来的（第 402 轮探针：`get_zwt_from_wa` 的入参 `-reswater` 已不同）。
-    let aquifer = exchange_soil_water_with_aquifer(VariableSaturatedAquiferInput {
-        water_exchange_mm: input.subsurface_runoff_mm_s * input.time_step_seconds + deficit_mm,
-        interface_depth_mm: input.interface_depth_mm,
-        permeable: input.permeable,
-        porosity: input.porosity,
-        residual_water: input.residual_water,
-        saturated_potential_mm: input.saturated_potential_mm,
-        hydraulic_model: input.hydraulic_model,
-        aquifer_porosity: input.aquifer_porosity,
-        ponding_depth_mm: state.ponding_depth_mm,
-        unsaturated_liquid_water: &state.liquid_water,
-        water_table_depth_mm,
-        aquifer_water_mm: state.aquifer_water_mm,
-    })?;
-    state.ponding_depth_mm = aquifer.ponding_depth_mm;
-    state.liquid_water = aquifer.unsaturated_liquid_water;
-    water_table_depth_mm = aquifer.water_table_depth_mm;
-    state.aquifer_water_mm = aquifer.aquifer_water_mm;
-    water_table_level = aquifer.water_table_interface_count;
+    let water_exchange_mm = input.subsurface_runoff_mm_s * input.time_step_seconds + deficit_mm;
+    let ponding_before_exchange_mm = state.ponding_depth_mm;
+    // `:349-393`：PHS 的净根系回水（`deficit < 0`）与基流分两次和含水层交换，
+    // `pond_exchange = dp_before - ss_dp`；否则按 `wexchange` 一次交换，
+    // `pond_exchange = max(交换前积水 - 交换后, 0)`（仅 `wexchange > 0`）。
+    let exchanges: &[f64] = if input.plant_hydraulics && deficit_mm < 0.0 {
+        &[deficit_mm, input.subsurface_runoff_mm_s * input.time_step_seconds]
+    } else {
+        &[water_exchange_mm]
+    };
+    for (index, &amount_mm) in exchanges.iter().enumerate() {
+        // 第二次（基流）只在 `rsubst > 0` 时做。
+        if index == 1 && input.subsurface_runoff_mm_s <= 0.0 {
+            continue;
+        }
+        let aquifer = exchange_soil_water_with_aquifer(VariableSaturatedAquiferInput {
+            water_exchange_mm: amount_mm,
+            interface_depth_mm: input.interface_depth_mm,
+            permeable: input.permeable,
+            porosity: input.porosity,
+            residual_water: input.residual_water,
+            saturated_potential_mm: input.saturated_potential_mm,
+            hydraulic_model: input.hydraulic_model,
+            aquifer_porosity: input.aquifer_porosity,
+            ponding_depth_mm: state.ponding_depth_mm,
+            unsaturated_liquid_water: &state.liquid_water,
+            water_table_depth_mm,
+            aquifer_water_mm: state.aquifer_water_mm,
+        })?;
+        state.ponding_depth_mm = aquifer.ponding_depth_mm;
+        state.liquid_water = aquifer.unsaturated_liquid_water;
+        water_table_depth_mm = aquifer.water_table_depth_mm;
+        state.aquifer_water_mm = aquifer.aquifer_water_mm;
+        water_table_level = aquifer.water_table_interface_count;
+    }
+    let pond_exchange_mm = if exchanges.len() == 2 {
+        previous_ponding_depth_mm - state.ponding_depth_mm
+    } else if water_exchange_mm > 0.0 {
+        (ponding_before_exchange_mm - state.ponding_depth_mm).max(0.0)
+    } else {
+        0.0
+    };
 
     // 水位在每一层内的位置：`izwt` 那一层是"从层底往上到水位"，再往下整层饱和。
     let mut water_table_thickness_mm = vec![0.0; nlev];
@@ -5227,8 +5432,10 @@ pub fn soil_water_vertical_movement(
         }
     }
 
+    // `:526`：含水层交换从积水里取走的部分不算入渗。
     let infiltration_mm_s = input.ground_water_flux_mm_s
-        - (state.ponding_depth_mm - previous_ponding_depth_mm) / input.time_step_seconds;
+        - ((state.ponding_depth_mm - previous_ponding_depth_mm) + pond_exchange_mm)
+            / input.time_step_seconds;
 
     let mut balance_after_mm = state.ponding_depth_mm;
     for (level, layer_thickness_mm) in thickness_mm.iter().enumerate() {

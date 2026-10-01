@@ -1815,6 +1815,7 @@ impl StandardLctRestartTemplate {
                 leaf_temperature: colm_core::LeafTemperatureInput {
                     time_step_seconds,
                     maximum_dew_mm: physics.maximum_dew_mm,
+                    colm2024: self.colm2024_canopy,
                     leaf_area_index: self.leaf_area_index,
                     stem_area_index: self.stem_area_index,
                     canopy_top_height_m: self.canopy_top_height_m,

@@ -212,7 +212,7 @@ fn validate(input: ThermalWaterInput) -> Result<()> {
         ]
         .iter()
         .all(|value| value.is_finite())
-            && input.upper_liquid_water_kg_m2 >= 0.0
+            && input.upper_liquid_water_kg_m2 >= -crate::SOIL_WATER_ROUNDOFF_KG_M2
             && input.upper_ice_water_kg_m2 >= 0.0
             && input.time_step_seconds > 0.0
             && input.ground_latent_heat_j_kg >= 0.0,
@@ -241,7 +241,7 @@ fn validate_split(input: SplitThermalWaterInput) -> Result<()> {
         .iter()
         .all(|value| value.is_finite())
             && (0.0..=1.0).contains(&input.snow_cover_fraction)
-            && input.soil_liquid_water_kg_m2 >= 0.0
+            && input.soil_liquid_water_kg_m2 >= -crate::SOIL_WATER_ROUNDOFF_KG_M2
             && input.soil_ice_water_kg_m2 >= 0.0
             && input.snow_liquid_water_kg_m2 >= 0.0
             && input.snow_ice_water_kg_m2 >= 0.0,

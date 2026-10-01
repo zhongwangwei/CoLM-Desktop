@@ -125,14 +125,16 @@ fn vegetation_snow_partition_matches_current_fortran() {
     let mut snow = input();
     snow.vegetation_snow = true;
     let fluxes = intercept_canopy(snow, &mut water).unwrap();
-    close(water.total_mm, 0.25796295101176364);
-    close(water.rain_mm, 0.1510304503881765);
-    close(water.snow_mm, 0.10693250062358715);
-    close(fluxes.ground_rain_kg_m2_s, 0.001_227_205_305_486_083_8);
-    close(fluxes.ground_snow_kg_m2_s, 0.000_546_148_611_726_557);
-    close(fluxes.retained_kg_m2_s, 0.00012664608389542425);
-    close(fluxes.retained_rain_kg_m2_s, 0.000_072_794_694_513_916_37);
-    close(fluxes.retained_snow_kg_m2_s, 0.000_053_851_388_273_443_07);
+    // 期望值来自解耦后的 Fortran（卸雪速率 = 积雪量 ×（FT+FV），`compare_interception.sh`
+    // 4000/4000 逐位一致之后取的现值）。
+    close(water.total_mm, 2.5746634629448939e-1);
+    close(water.rain_mm, 1.5103045038817653e-1);
+    close(water.snow_mm, 1.0643589590631286e-1);
+    close(fluxes.ground_rain_kg_m2_s, 1.2272053053399021e-3);
+    close(fluxes.ground_snow_kg_m2_s, 5.4642450227427068e-4);
+    close(fluxes.retained_kg_m2_s, 1.2637019238582737e-4);
+    close(fluxes.retained_rain_kg_m2_s, 7.2794694660098048e-5);
+    close(fluxes.retained_snow_kg_m2_s, 5.3575497725729380e-5);
 }
 
 #[test]
