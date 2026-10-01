@@ -371,8 +371,24 @@ fn run_spatial(
             "Grid flood feedback with DEF_SPLIT_SOILSNOW is not ported"
         );
     }
+    if logical_field(&document, "DEF_USE_LEVEE")? {
+        // 堤防只接了单独打开的路径：与分汊（堤内受保护通量）、漫滩回馈（受保护水量的发布与扣账）、
+        // LULCC（换年时堤防状态的保留）的组合都还没对过。
+        for (field, on) in [
+            (
+                "DEF_GridRiverLake_FloodFeedback",
+                logical_field(&document, "DEF_GridRiverLake_FloodFeedback")?,
+            ),
+            ("DEF_USE_LULCC", logical_field(&document, "DEF_USE_LULCC")?),
+        ] {
+            ensure!(
+                !on,
+                "DEF_USE_LEVEE together with {field} is not ported to the Rust river model; \
+                 run this case with --engine fortran"
+            );
+        }
+    }
     for (field, unported) in [
-        ("DEF_USE_LEVEE", logical_field(&document, "DEF_USE_LEVEE")?),
         (
             "DEF_USE_BIFURCATION",
             logical_field(&document, "DEF_USE_BIFURCATION")?,
@@ -688,6 +704,14 @@ fn run_spatial_segment(
             )
         })
         .transpose()?;
+    let levee = if logical_field(document, "DEF_USE_LEVEE")? {
+        Some(colm_runtime::river::levee::Levee::read(
+            Path::new(&string_field(document, "DEF_UnitCatchment_file")?),
+            &network,
+        )?)
+    } else {
+        None
+    };
     let river_start = river_restart_path(&segment.input, name, &start_label, year);
     let river_state = colm_runtime::river::restart::read_river_state(&river_start, &network)?;
     // `restore_river_history_acc_restart`：陆面旁车标记 `history_river_required = 1` 时读回河道累加。
@@ -716,6 +740,7 @@ fn run_spatial_segment(
             Some(colm_runtime::river::restart::read_river_history(
                 &river_file,
                 network.len(),
+                levee.is_some(),
             )?)
         } else {
             None
@@ -726,6 +751,7 @@ fn run_spatial_segment(
         routing,
         river_state,
         real_field(document, "DEF_GRIDBASED_ROUTING_MAX_DT")?,
+        levee,
     )?;
     if let Some(history) = river_history {
         river.history = history;
@@ -1230,7 +1256,8 @@ fn lulcc_transition(
             Path::new(&string_field(document, "DEF_UnitCatchment_file")?),
             logical_field(document, "DEF_GridRiverLake_FloodplainStorageFix")?,
         )?;
-        colm_runtime::river::rebuild_volwater(&network, &mut state);
+        // 堤防与 LULCC 的组合在入口就拒绝了。
+        colm_runtime::river::rebuild_volwater(&network, &mut state, None);
         let path = river_restart_path(target, name, &label, years.new);
         colm_runtime::river::restart::write_river_state(
             &path,

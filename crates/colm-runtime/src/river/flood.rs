@@ -51,7 +51,11 @@ pub struct FloodFeedback {
 
 impl FloodFeedback {
     /// `grid_riverlake_flow_init` 里回馈那一段（发布由调用方随后做）。
-    pub fn new(network: &RiverNetwork, routing: &RunoffRouting, infiltration_max_mm_day: f64) -> Self {
+    pub fn new(
+        network: &RiverNetwork,
+        routing: &RunoffRouting,
+        infiltration_max_mm_day: f64,
+    ) -> Self {
         let patches = routing.patch_parts.len();
         // `flood_credit_patch = 1` 按份面积摊到网格上，再与单元流域的份面积和取大。
         let ones = vec![1.0; patches];

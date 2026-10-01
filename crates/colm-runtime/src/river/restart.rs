@@ -1,7 +1,8 @@
 //! 河道续跑文件 `<case>_restart_gridriver_<date>_lc<year>.nc`（`READ/WRITE_GridRiverLakeTimeVars`）。
 //!
-//! schema 2、默认路径（无分汊、堤防、水库、示踪物）：标记、`gridriver_ucatch_identity`、
-//! `wdsrf_ucat`、`veloc_riv`、`acctime_rnof`、`acc_rnof_uc`、`volwater_ucat`。
+//! schema 2（无分汊、水库、示踪物）：标记、`gridriver_ucatch_identity`、
+//! `wdsrf_ucat`、`veloc_riv`、`acctime_rnof`、`acc_rnof_uc`、`volwater_ucat`，
+//! 开堤防时再加 `levsto`（`gridriver_restart_feature_levee = 1`）。
 
 use std::path::Path;
 
@@ -52,16 +53,17 @@ pub fn read_river_state(path: &Path, network: &RiverNetwork) -> Result<RiverStat
         "{} is an uncommitted GridRiverLake restart",
         path.display()
     );
-    for (feature, name) in [
-        ("bifurcation", "gridriver_restart_feature_bifurcation"),
-        ("levee", "gridriver_restart_feature_levee"),
-    ] {
-        ensure!(
-            scalar_i32(name)? == 0,
-            "{} was written with {feature}; the Rust river model runs the default routing only",
-            path.display()
-        );
-    }
+    ensure!(
+        scalar_i32("gridriver_restart_feature_bifurcation")? == 0,
+        "{} was written with bifurcation, which the Rust river model does not run yet",
+        path.display()
+    );
+    let levee_flag = scalar_i32("gridriver_restart_feature_levee")?;
+    ensure!(
+        levee_flag == 0 || levee_flag == 1,
+        "{} has an invalid levee feature flag",
+        path.display()
+    );
     // `validate_gridriver_ucatch_identity`：网络必须与写续跑时相同。
     let identity = file
         .variable("gridriver_ucatch_identity")
@@ -97,7 +99,21 @@ pub fn read_river_state(path: &Path, network: &RiverNetwork) -> Result<RiverStat
         acctime_rnof: *acctime
             .first()
             .with_context(|| format!("acctime_rnof in {} is empty", path.display()))?,
+        // `read_levee_restart`：标记为 1 时 `levsto` 必须在；标记为 0 时即使有也不读。
+        levsto: if levee_flag == 1 {
+            Some(read_vector(&file, "levsto", n, path)?)
+        } else {
+            None
+        },
+        levdph: None,
     };
+    if let Some(levsto) = &state.levsto {
+        ensure!(
+            levsto.iter().all(|v| v.is_finite() && *v >= 0.0),
+            "levsto in {} contains a negative or non-finite value",
+            path.display()
+        );
+    }
     ensure!(
         state.wdsrf.iter().all(|w| w.is_finite() && *w >= 0.0)
             && state.veloc.iter().all(|v| v.is_finite() && v.abs() <= 50.0)
@@ -130,7 +146,10 @@ pub fn write_river_state(
         ("gridriver_restart_schema", SCHEMA),
         ("gridriver_restart_complete", 0),
         ("gridriver_restart_feature_bifurcation", 0),
-        ("gridriver_restart_feature_levee", 0),
+        (
+            "gridriver_restart_feature_levee",
+            i32::from(state.levsto.is_some()),
+        ),
     ] {
         file.add_variable::<i32>(name, &[])?
             .put_values(&[value], ..)?;
@@ -181,6 +200,9 @@ pub fn write_river_state(
         &state.volwater,
         true,
     )?;
+    if let Some(levsto) = &state.levsto {
+        vector(&mut file, "levsto", &["ucatch"], levsto, true)?;
+    }
     file.variable_mut("gridriver_restart_complete")
         .context("the completion marker disappeared")?
         .put_values(&[1], ..)?;
@@ -223,7 +245,17 @@ pub fn write_river_history(path: &Path, history: &RiverHistory) -> Result<()> {
     let mut file =
         netcdf::create(path).with_context(|| format!("cannot create {}", path.display()))?;
     file.add_dimension("ucatch", n)?;
-    for (name, values) in HISTORY_FIELDS.iter().zip(history_fields(history)) {
+    let levee = history
+        .levsto
+        .iter()
+        .zip(&history.levdph)
+        .flat_map(|(s, d)| [("hist_levsto", s), ("hist_levdph", d)]);
+    let fields = HISTORY_FIELDS
+        .iter()
+        .copied()
+        .zip(history_fields(history))
+        .chain(levee);
+    for (name, values) in fields {
         let mut variable = file.add_variable::<f64>(name, &["ucatch"])?;
         variable.put_attribute("missing_value", colm_core::MISSING)?;
         variable.put_values(values, ..)?;
@@ -232,8 +264,9 @@ pub fn write_river_history(path: &Path, history: &RiverHistory) -> Result<()> {
     Ok(())
 }
 
-/// 读回河道 history 旁车（`read_gridriverlake_hist_restart`，`strict`：十个量都必须在）。
-pub fn read_river_history(path: &Path, n: usize) -> Result<RiverHistory> {
+/// 读回河道 history 旁车（`read_gridriverlake_hist_restart`，`strict`：十个量都必须在，
+/// 开堤防时 `hist_levsto/levdph` 也必须在）。
+pub fn read_river_history(path: &Path, n: usize, levee: bool) -> Result<RiverHistory> {
     let file = netcdf::open(path).with_context(|| format!("cannot open {}", path.display()))?;
     let mut fields = HISTORY_FIELDS
         .iter()
@@ -252,5 +285,11 @@ pub fn read_river_history(path: &Path, n: usize) -> Result<RiverHistory> {
         flddph: next(),
         storge: next(),
         sfcelv: next(),
+        levsto: levee
+            .then(|| read_vector(&file, "hist_levsto", n, path))
+            .transpose()?,
+        levdph: levee
+            .then(|| read_vector(&file, "hist_levdph", n, path))
+            .transpose()?,
     })
 }

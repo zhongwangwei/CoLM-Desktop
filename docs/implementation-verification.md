@@ -26922,3 +26922,48 @@ Rust：`FloodplainCurve::new` 与 `RiverNetwork::read` 加 `storage_fix` 参数�
 - 构建只编 `.F90`；仓库里没有任何地方引用它们。oracle 探针脚本里出现的 `.orig` 是它们自己在临时目录里建的备份，与这几个文件无关。
 
 处理：`git rm` 掉；根 `.gitignore` 加 `*.orig`、`*.rej`，下次同步不会再带进来。`gen_fortran_deps.py --check` 与 `cargo test -p xtask` 通过。
+
+## 第 469 轮：堤防（`DEF_USE_LEVEE`）
+
+**几何**（`river/levee.rs`，`MOD_Grid_RiverLakeLevee`）：
+- `levee_init`：从单元流域文件读 `levee_frc/levee_hgt`，非有限值或越界的置为无堤。按漫滩曲线分层算堤距、堤基高、堤基蓄量、堤顶蓄量、填满蓄量，以及逐层的坡度与蓄量上限。
+- `levee_fldstg` 的 5 个分支（河槽内、堤前漫滩、堤基与堤顶之间、堤顶以上未漫过、全漫）逐个按 GIMPLE 对过形状，包括 FMS `(j as f64).mul_add(dwth_inc, -dst)`。
+- `visible_volume_from_stage` 供 `rebuild_volwater_ucat` 用：有堤单元流域只补堤外可见的那份。
+
+**汇流**（`route_system` 的堤防模式）：
+- 开了堤防，**所有**单元流域都以 `volwater_ucat` 为状态，不再由水深反算蓄量。这包括：径流注入、蓄量限制子步长、`FNMA(sum_h, dt, volwater)` 更新，以及 history 的 `rivsto/fldsto/storge`。上游写法是 `IF (DEF_USE_BIFURCATION .or. DEF_USE_LEVEE)`。
+- 有堤单元流域在注入后、每个子步更新后各做一次 `levee_repartition_storage`：`vol_total = 可见 + levsto`，用 `fldstg` 分区，得到新的水深、`levsto`、`levdph`，并置 `levee_floodarea = fldfrc*area`。这个数组每次汇流开头清零。
+- 无分汊时 `levee_apply_protected_flux` 的受保护通量为 0：`levsto` 不变，它重算的 `levdph` 随即被重新分区覆盖，所以不移植。
+- history：
+  - `a_floodarea` 在 `levee_floodarea > 0` 时用它，否则用曲线；
+  - 有堤单元流域的 `a_storge` 是 `FMA(volwater + levsto, dt, ·)`；
+  - 新增 `a_levsto/a_levdph`；
+  - unitcat 多 `f_levsto/f_levdph`，`acctime > 0` 时取均值，否则为 0（不是 spval）。
+- `publish_(levee_)fldfrc_to_patches` 只服务示踪物，不移植。
+
+**续跑：**
+- 写：堤防开时 `gridriver_restart_feature_levee = 1`，在 `volwater_ucat` 之后写 `levsto`。`levdph` 不存，下一次汇流注入时重算。
+- 读：标记为 1 时 `levsto` 必须在。之后按 `read_levee_restart` 处理：
+  - 当前配置在某单元流域无堤，就把堤内蓄量并回可见蓄量；
+  - 整体关了堤防却读到带堤防的续跑，也并回，并按新蓄量重算水深；
+  - 续跑没带 `levsto`，就从 0 起。
+- `.river` 旁车在 10 个 `hist_*` 之后加 `hist_levsto/hist_levdph`。开堤防时读回必须有这两项。
+- mkinidata-rs 冷启动早就写零 `levsto` 与标记 1（`gridriver.rs`），本轮不用改。
+
+**拒绝：** 堤防与以下选项的组合在 colm-rs 入口拒绝：
+- 漫滩回馈：受保护水量的发布与扣账没接；
+- LULCC：换年时堤防状态的保留没对过；
+- 分汊：已经整体拒绝。
+
+**实测**（g1 区域 + `DEF_USE_LEVEE`，单元流域文件为 `/Volumes/Data01/Data/CoLMruntime/unitcatchment/grid_routing_data_15min.nc`，其中 22248 个有效堤；全 Rust 三段 vs 纯 Fortran 三段）：
+
+| 算例 | 内容 | 结果 |
+|---|---|---|
+| `g1lv`（1 天，history DAILY） | 续跑 5 个文件，history 2 个（含 `f_levsto/f_levdph`） | 全部 `diff 0` |
+| `g1lw`（1 天，history MONTHLY、续跑 DAILY） | 续跑 5 个，`.river` 旁车（含 `hist_levsto/levdph`），history 2 个 | 全部 `diff 0` |
+| `g1lwc`（各自从第 2 天续跑接着跑 1 天） | 续跑 8 个，history 2 个 | 全部 `diff 0` |
+
+- 堤防确实生效：第 2 天末有 7 个单元流域带堤内蓄量，合计 3.82e8 m³；`f_levdph` 最大 3.01 m。
+- `cargo test --release -p colm-runtime` 全过（含 `levee_tests.rs` 3 个）；`clippy --workspace --all-targets` 无告警。
+- 顺带把上一轮留下的几个 rustfmt 差异格式化了。
+- 回归脚本的 SKIP 加 `g1lv/g1lw/g1lwc`。

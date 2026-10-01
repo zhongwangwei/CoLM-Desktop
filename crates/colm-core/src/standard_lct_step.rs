@@ -493,7 +493,9 @@ fn finish_energy_step(
                     air_density_kg_m3: ground_flux_input.air_density_kg_m3,
                     surface_pressure_pa: input.forcing.surface_pressure_pa,
                     surface_temperature_k: ground_temperature_k,
-                    boundary_layer_height_m: ground_flux_input.boundary_layer_height_m.unwrap_or(0.0),
+                    boundary_layer_height_m: ground_flux_input
+                        .boundary_layer_height_m
+                        .unwrap_or(0.0),
                     scheme: ground_flux_input.surface_layer_scheme,
                 },
             )?;

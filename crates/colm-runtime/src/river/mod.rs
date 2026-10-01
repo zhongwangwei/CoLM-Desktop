@@ -8,6 +8,7 @@
 
 pub mod flood;
 pub mod history;
+pub mod levee;
 pub mod network;
 pub mod remap;
 pub mod restart;
@@ -27,10 +28,20 @@ const GRAV: f64 = 9.80616;
 ///
 /// 读回续跑与 LULCC（`grid_riverlake_flow_lulcc`）都走这一步；漫滩曲线的深度与体积不互逆，
 /// 所以已有的蓄量不能从水深重算。
-pub fn rebuild_volwater(network: &RiverNetwork, state: &mut RiverState) {
+/// 有堤的单元流域按 `levee_visible_volume_from_stage` 补（只算堤外可见的那份）。
+pub fn rebuild_volwater(
+    network: &RiverNetwork,
+    state: &mut RiverState,
+    levee: Option<&levee::Levee>,
+) {
     for i in 0..network.len() {
         if state.volwater[i] <= 0.0 && state.wdsrf[i] > RIVERMIN {
-            state.volwater[i] = network.curves[i].volume(state.wdsrf[i]);
+            state.volwater[i] = match (levee, state.levsto.as_ref()) {
+                (Some(levee), Some(levsto)) if levee.has[i] => {
+                    levee.visible_volume_from_stage(network, i, state.wdsrf[i], levsto[i])
+                }
+                _ => network.curves[i].volume(state.wdsrf[i]),
+            };
         }
     }
 }
@@ -43,6 +54,10 @@ pub struct RiverState {
     pub volwater: Vec<f64>,
     pub acc_rnof: Vec<f64>,
     pub acctime_rnof: f64,
+    /// `DEF_USE_LEVEE`：堤内受保护的蓄量（m³，续跑里的 `levsto`）；没开堤防时是 `None`。
+    pub levsto: Option<Vec<f64>>,
+    /// 堤内水深（m）：不进续跑，汇流开头的重新分区会重算它。
+    pub levdph: Option<Vec<f64>>,
 }
 
 /// 河道 history 累加量（`MOD_Grid_RiverLakeHist` 的 `a_*`，按 `dt` 加权）。
@@ -58,9 +73,21 @@ pub struct RiverHistory {
     pub flddph: Vec<f64>,
     pub storge: Vec<f64>,
     pub sfcelv: Vec<f64>,
+    /// `a_levsto`、`a_levdph`：只在 `DEF_USE_LEVEE` 时有。
+    pub levsto: Option<Vec<f64>>,
+    pub levdph: Option<Vec<f64>>,
 }
 
 impl RiverHistory {
+    /// 全零的累加量；`levee` 决定有没有堤防那两项。
+    pub fn zeros_with_levee(n: usize, levee: bool) -> Self {
+        Self {
+            levsto: levee.then(|| vec![0.0; n]),
+            levdph: levee.then(|| vec![0.0; n]),
+            ..Self::zeros(n)
+        }
+    }
+
     pub fn zeros(n: usize) -> Self {
         let z = vec![0.0; n];
         Self {
@@ -74,6 +101,8 @@ impl RiverHistory {
             flddph: z.clone(),
             storge: z.clone(),
             sfcelv: z,
+            levsto: None,
+            levdph: None,
         }
     }
 }
@@ -97,6 +126,8 @@ pub struct RiverModel {
     pub raw_history_at_end: Option<RiverHistory>,
     /// `DEF_GridRiverLake_FloodFeedback`：漫滩回馈的 patch 与单元流域状态。
     pub flood: Option<flood::FloodFeedback>,
+    /// `DEF_USE_LEVEE`：每个单元流域的堤防几何。
+    pub levee: Option<levee::Levee>,
     momen: Vec<f64>,
 }
 
@@ -107,6 +138,7 @@ impl RiverModel {
         routing: RunoffRouting,
         mut state: RiverState,
         max_dt: f64,
+        levee: Option<levee::Levee>,
     ) -> Result<Self> {
         let n = network.len();
         ensure!(
@@ -120,10 +152,53 @@ impl RiverModel {
             max_dt.is_finite() && max_dt > 0.0,
             "DEF_GRIDBASED_ROUTING_MAX_DT must be finite and positive"
         );
-        rebuild_volwater(&network, &mut state);
+        // `read_levee_restart`：续跑没带 `levsto` 时堤内蓄量从 0 起；当前配置在某单元流域没有堤
+        // （或整体关了堤防）时，堤内蓄量并回堤外可见蓄量。
+        let levsto = state.levsto.take();
+        if let Some(levsto) = &levsto {
+            ensure!(
+                levsto.len() == n,
+                "levsto does not match the unit-catchment network"
+            );
+        }
+        match (levee.as_ref(), levsto) {
+            (Some(levee), levsto) => {
+                let mut levsto = levsto.unwrap_or_else(|| vec![0.0; n]);
+                for ((protected, visible), &has) in
+                    levsto.iter_mut().zip(&mut state.volwater).zip(&levee.has)
+                {
+                    if !has && *protected > 0.0 {
+                        *visible += *protected;
+                        *protected = 0.0;
+                    }
+                }
+                state.levsto = Some(levsto);
+                state.levdph = Some(vec![0.0; n]);
+            }
+            (None, Some(levsto)) => {
+                for (visible, &protected) in state.volwater.iter_mut().zip(&levsto) {
+                    if protected > 0.0 {
+                        *visible += protected;
+                    }
+                }
+                // 关了堤防却读到带堤防的续跑：水深按并回后的可见蓄量重算。
+                for ((w, &visible), curve) in state
+                    .wdsrf
+                    .iter_mut()
+                    .zip(&state.volwater)
+                    .zip(&network.curves)
+                {
+                    *w = curve.depth(visible);
+                }
+                state.levdph = None;
+            }
+            (None, None) => state.levdph = None,
+        }
+        rebuild_volwater(&network, &mut state, levee.as_ref());
         Ok(Self {
             momen: vec![0.0; n],
-            history: RiverHistory::zeros(n),
+            history: RiverHistory::zeros_with_levee(n, levee.is_some()),
+            levee,
             network,
             routing,
             state,
@@ -209,11 +284,12 @@ impl RiverModel {
         let net = &self.network;
         let state = &self.state;
         let history = &self.history;
+        let levee = self.levee.as_ref();
         let acctime = state.acctime_rnof;
         let results = net
             .systems
             .par_iter()
-            .map(|system| route_system(net, system, state, history, acctime))
+            .map(|system| route_system(net, system, state, history, levee, acctime))
             .collect::<Vec<_>>();
         for (system, result) in net.systems.iter().zip(results) {
             for (k, &i) in system.cells.iter().enumerate() {
@@ -232,6 +308,12 @@ impl RiverModel {
                 hist.flddph[i] = result.history[k][7];
                 hist.storge[i] = result.history[k][8];
                 hist.sfcelv[i] = result.history[k][9];
+                if let Some(lev) = result.levee.as_ref() {
+                    self.state.levsto.as_mut().expect("levee state")[i] = lev[k].0;
+                    self.state.levdph.as_mut().expect("levee state")[i] = lev[k].1;
+                    hist.levsto.as_mut().expect("levee history")[i] = lev[k].2;
+                    hist.levdph.as_mut().expect("levee history")[i] = lev[k].3;
+                }
             }
         }
         self.state.acctime_rnof = 0.0;
@@ -246,6 +328,8 @@ struct SystemResult {
     volwater: Vec<f64>,
     momen: Vec<f64>,
     history: Vec<[f64; 10]>,
+    /// 开堤防时每个单元流域的 `(levsto, levdph, a_levsto, a_levdph)`。
+    levee: Option<Vec<(f64, f64, f64, f64)>>,
 }
 
 // 阶段循环按单元流域下标写多组数组（与上游逐单元流域的 DO 循环一一对应），用下标更清楚。
@@ -256,6 +340,7 @@ fn route_system(
     system: &network::RiverSystem,
     state: &RiverState,
     history: &RiverHistory,
+    levee: Option<&levee::Levee>,
     acctime: f64,
 ) -> SystemResult {
     let cells = &system.cells;
@@ -264,10 +349,44 @@ fn route_system(
     let mut veloc = Vec::with_capacity(n);
     let mut volwater_ucat = Vec::with_capacity(n);
     let mut momen = Vec::with_capacity(n);
-    for &i in cells {
+    // 堤防：`levsto/levdph`、累加 `a_levsto/a_levdph` 与本次汇流的 `levee_floodarea`（每次汇流清零）。
+    let mut lev = levee.map(|_| {
+        let levsto = state.levsto.as_ref().expect("levee state");
+        let levdph = state.levdph.as_ref().expect("levee state");
+        let a_levsto = history.levsto.as_ref().expect("levee history");
+        let a_levdph = history.levdph.as_ref().expect("levee history");
+        cells
+            .iter()
+            .map(|&i| (levsto[i], levdph[i], a_levsto[i], a_levdph[i]))
+            .collect::<Vec<_>>()
+    });
+    let mut levee_floodarea = vec![0.0; n];
+    // `levee_repartition_storage`：可见 + 堤内重新分区，返回新的可见蓄量与水深。
+    let repartition = |lev: &mut (f64, f64, f64, f64), i: usize, visible: f64, area: &mut f64| {
+        let levee = levee.expect("levee");
+        let vol_total = visible + lev.0;
+        let stage = levee.fldstg(net, i, vol_total);
+        lev.0 = stage.levsto;
+        lev.1 = stage.levdph;
+        *area = stage.fldfrc * net.area[i];
+        (vol_total - stage.levsto, stage.wdsrf)
+    };
+    for (k, &i) in cells.iter().enumerate() {
         let mom = state.wdsrf[i] * state.veloc[i];
-        let volwater = net.curves[i].volume(state.wdsrf[i]) + state.acc_rnof[i];
-        let w = net.curves[i].depth(volwater);
+        // 开堤防时所有单元流域都以 `volwater_ucat` 为状态，而不是由水深反算。
+        let mut volwater = if levee.is_some() {
+            state.volwater[i]
+        } else {
+            net.curves[i].volume(state.wdsrf[i])
+        } + state.acc_rnof[i];
+        let w = match (levee, lev.as_mut()) {
+            (Some(levee), Some(lev)) if levee.has[i] => {
+                let (visible, w) = repartition(&mut lev[k], i, volwater, &mut levee_floodarea[k]);
+                volwater = visible;
+                w
+            }
+            _ => net.curves[i].depth(volwater),
+        };
         momen.push(mom);
         volwater_ucat.push(volwater);
         wdsrf.push(w);
@@ -332,7 +451,12 @@ fn route_system(
                 dt_this = dt_this.min(net.rivlen[i] / wave * 0.8);
             }
             if sums[k].0 > 0.0 {
-                dt_this = dt_this.min(net.curves[i].volume(w) / sums[k].0);
+                let volwater = if levee.is_some() {
+                    volwater_ucat[k]
+                } else {
+                    net.curves[i].volume(w)
+                };
+                dt_this = dt_this.min(volwater / sums[k].0);
             }
             dt_all = dt_this.min(dt_all);
         }
@@ -343,13 +467,28 @@ fn route_system(
             let curve = &net.curves[i];
             let (sum_h, sum_m, sum_z) = sums[k];
             // `volwater = FNMA(visible_hflux, dt, volwater)`。
-            let mut volwater = (-sum_h).mul_add(dt, curve.volume(wdsrf[k]));
+            let start = if levee.is_some() {
+                volwater_ucat[k]
+            } else {
+                curve.volume(wdsrf[k])
+            };
+            let mut volwater = (-sum_h).mul_add(dt, start);
+            // 无分汊时 `levee_apply_protected_flux` 的受保护通量为 0：堤内蓄量不变，
+            // 它重算的 `levdph` 随即被下面的重新分区覆盖。
             volwater = volwater.max(0.0);
             if system.next[k] == INLAND_DEPRESSION && volwater > net.rivstomax[i] {
                 faces[k].hflux = (volwater - net.rivstomax[i]) / dt;
                 volwater = net.rivstomax[i];
             }
-            let w = curve.depth(volwater);
+            let w = match (levee, lev.as_mut()) {
+                (Some(levee), Some(lev)) if levee.has[i] => {
+                    let (visible, w) =
+                        repartition(&mut lev[k], i, volwater, &mut levee_floodarea[k]);
+                    volwater = visible;
+                    w
+                }
+                _ => curve.depth(volwater),
+            };
             wdsrf[k] = w;
             volwater_ucat[k] = volwater;
             if w >= RIVERMIN {
@@ -373,19 +512,36 @@ fn route_system(
             let i = cells[k];
             let curve = &net.curves[i];
             let w = wdsrf[k];
-            let volwater = curve.volume(w);
+            let volwater = if levee.is_some() {
+                volwater_ucat[k]
+            } else {
+                curve.volume(w)
+            };
             let rivsto = volwater.min(curve.rivstomax);
+            let floodarea = if levee_floodarea[k] > 0.0 {
+                levee_floodarea[k]
+            } else {
+                curve.floodarea(w)
+            };
             let a = &mut hist[k];
             a[0] += dt;
             a[1] = w.mul_add(dt, a[1]);
             a[2] = veloc[k].mul_add(dt, a[2]);
             // `a_discharge + hflux_fc*dt` 不融合：乘积与调试用的 `totaldis` 共用（`_7820`）。
             a[3] += faces[k].hflux * dt;
-            a[4] = curve.floodarea(w).mul_add(dt, a[4]);
+            a[4] = floodarea.mul_add(dt, a[4]);
             a[5] = rivsto.mul_add(dt, a[5]);
             a[6] = (volwater - rivsto).mul_add(dt, a[6]);
             a[7] = (w - curve.rivhgt).max(0.0).mul_add(dt, a[7]);
-            a[8] = volwater.mul_add(dt, a[8]);
+            match (levee, lev.as_mut()) {
+                (Some(levee), Some(lev)) if levee.has[i] => {
+                    let l = &mut lev[k];
+                    a[8] = (volwater + l.0).mul_add(dt, a[8]);
+                    l.2 = l.0.mul_add(dt, l.2);
+                    l.3 = l.1.mul_add(dt, l.3);
+                }
+                _ => a[8] = volwater.mul_add(dt, a[8]),
+            }
             a[9] = (net.rivelv[i] + w).mul_add(dt, a[9]);
         }
         dt_res -= dt;
@@ -396,6 +552,7 @@ fn route_system(
         volwater: volwater_ucat,
         momen,
         history: hist,
+        levee: lev,
     }
 }
 

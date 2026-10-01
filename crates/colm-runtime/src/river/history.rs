@@ -238,7 +238,7 @@ impl RiverHistoryWriter {
             .zip(&network.next)
             .map(|(&d, &next)| if next == RIVER_MOUTH { d } else { SPVAL })
             .collect::<Vec<_>>();
-        let unitcat = [
+        let mut unitcat = vec![
             (
                 "f_wdpth_ucat",
                 "deepest water depth in river and flood plain",
@@ -296,6 +296,28 @@ impl RiverHistoryWriter {
                 mean_or_keep(&history.sfcelv),
             ),
         ];
+        // `DEF_USE_LEVEE`：`WHERE (acctime_ucat > 0) a/acctime ELSEWHERE 0`。
+        if let (Some(levsto), Some(levdph)) = (&history.levsto, &history.levdph) {
+            let mean_or_zero = |values: &[f64]| {
+                values
+                    .iter()
+                    .zip(&history.acctime)
+                    .map(|(&v, &t)| if t > 0.0 { v / t } else { 0.0 })
+                    .collect::<Vec<_>>()
+            };
+            unitcat.push((
+                "f_levsto",
+                "water storage in levee-protected area",
+                "m^3",
+                mean_or_zero(levsto),
+            ));
+            unitcat.push((
+                "f_levdph",
+                "water depth in levee-protected area",
+                "m",
+                mean_or_zero(levdph),
+            ));
+        }
         self.write_unitcat(network, record, end, window_seconds, &unitcat)?;
 
         // 回到 patch（`*_pch`），再按各自的过滤与分母聚合到 history 网格。
@@ -368,7 +390,7 @@ impl RiverHistoryWriter {
             session.stage_gridded(name, values)?;
         }
         debug_assert_eq!(history.acctime.len(), n);
-        *history = RiverHistory::zeros(n);
+        *history = RiverHistory::zeros_with_levee(n, history.levsto.is_some());
         Ok(())
     }
 
