@@ -96,6 +96,10 @@ fn read_tracer_parameter_file(path: &str) -> Result<Option<TracerParameterOverri
 type PatchField = fn(&TracerPools) -> f64;
 /// 逐层的量（`(patch, soilsnow, trc_land_transport)`）。
 type LayerField = fn(&TracerPools) -> &[f64; SOISNO_LAYERS];
+/// 读回时给逐 patch 量赋值。
+type PatchSetter = fn(&mut TracerPools, f64);
+/// 读回时取分层量的可变引用。
+type LayerSetter = fn(&mut TracerPools) -> &mut [f64; SOISNO_LAYERS];
 
 /// 上游 `write_land_tracer_restart` 的写出顺序（`trc_wa` 之后插 `trc_aquifer_ref_*`）。
 const CANOPY_FIELDS: [(&str, PatchField); 2] = [
@@ -272,7 +276,7 @@ pub fn read_land_tracer_restart(
     let n = transport.len();
     let read_patch = |name: &str,
                       states: &mut [PatchTracerState],
-                      set_value: fn(&mut TracerPools, f64)|
+                      set_value: PatchSetter|
      -> Result<()> {
         let values = restart.floats(name)?;
         anyhow::ensure!(values.len() == patches * n, "{name} has an unexpected size");
@@ -283,7 +287,7 @@ pub fn read_land_tracer_restart(
         }
         Ok(())
     };
-    let setters: [(&str, fn(&mut TracerPools, f64)); 19] = [
+    let setters: [(&str, PatchSetter); 19] = [
         ("trc_ldew_rain", |p, v| p.ldew_rain = v),
         ("trc_ldew_snow", |p, v| p.ldew_snow = v),
         ("trc_wa", |p, v| p.wa = v),
@@ -307,7 +311,7 @@ pub fn read_land_tracer_restart(
     for (name, setter) in setters {
         read_patch(name, &mut states, setter)?;
     }
-    let layer_setters: [(&str, fn(&mut TracerPools) -> &mut [f64; SOISNO_LAYERS]); 3] = [
+    let layer_setters: [(&str, LayerSetter); 3] = [
         ("trc_wliq_soisno", |p| &mut p.wliq_soisno),
         ("trc_wice_soisno", |p| &mut p.wice_soisno),
         ("trc_solid_soisno", |p| &mut p.solid_soisno),
