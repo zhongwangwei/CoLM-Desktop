@@ -27174,3 +27174,31 @@ Rust 在 `route_system` 的子步长循环与 `bifurcation_substep` 里各加一
 | 重跑 `g1t`、`g1all` | 仍然逐位 | |
 
 `cargo test --release -p colm-runtime` 全过；clippy 无告警。
+
+## 第 475 轮：河道选项与 LULCC 同开（含上游两处缺陷）
+
+**上游语义**：
+- LULCC 换年时 `LulccInitialize` 用 `hold/restore_GridRiverLakeTimeVars_lulcc` 保留河道时变量：水深、上一子步水深、流速、动量、`volresv`、`volwater`、累计径流。
+- 之后 `grid_riverlake_flow_lulcc` 重建 `volwater_ucat`（有堤单元流域只补堤外可见那份）；开分汊时令上一子步水深 = 当前水深。
+- 漫滩回馈与 LULCC 同开，上游自己就拒绝。
+
+**上游缺陷**（`mkinidata/MOD_Initialize.F90`，LULCC 时重跑 `initialize(lulcc_call=.true.)`）：
+1. 会先 `riverlake_network_final` 再重建网络，然后调 `reservoir_init`，但水库模块的数组没释放：`Attempting to allocate already allocated variable 'ucat2resv'`。只要开水库并跨过换年，就会崩溃。
+2. `levee_init` 先 `levee_final` 再把堤防数组清零分配，堤内蓄量 `levsto/levdph` 就此清零。这是不报错的水量不守恒：堤内的水凭空消失。堤内蓄量和 hold/restore 保护的那些量一样是河道状态。
+
+修复：LULCC 时先 `reservoir_final` 再 `reservoir_init`；`levee_init` 前后保存并恢复 `levsto/levdph`（单元流域不变，长度一致才恢复）。重编 latlon 内核；`gen_fortran_deps.py --check` 与 `cargo test -p xtask` 通过。
+
+**Rust**：
+- colm-rs 换年时写新一年的河道续跑，现在会读入堤防（含水库单元流域强制无堤）与水库表，带堤防做 `rebuild_volwater`。
+- 开分汊时，上一子步水深取当前水深。
+- 续跑写入水库标识。
+- 堤内蓄量、分汊路径状态与 `volresv` 都在续跑里，新一段读回即接上，对应上游在内存里保留。
+- 入口不再拒绝河道选项与 LULCC 同开（漫滩回馈除外，与上游一致）。
+
+**实测**（`g3r`：`g3` 的 LULCC 方案 1 区域 + 堤防 + 分汊 + 水库，2005-12-31 起跑 2 天跨过换年；landdata 各自取自 `g3` 的同侧产物，mkinidata 与 colm 两段重跑；全 Rust vs 纯 Fortran）：
+
+| 对照 | 结果 |
+|---|---|
+| 续跑 8 个、history 4 个 | 全部 `diff 0` |
+| 2006-001（换年后）河道续跑 | 106 个单元流域带堤内蓄量，合计 4.33e10 m³（修复前上游此处为 0）；路径状态 2907 处非零；已建成水库 3397 座 |
+| 新内核重跑原 `g3`（不开这些选项） | 仍然逐位 |

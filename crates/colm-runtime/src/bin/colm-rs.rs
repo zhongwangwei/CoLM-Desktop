@@ -376,22 +376,8 @@ fn run_spatial(
         reservoir_method <= 1,
         "unsupported reservoir operation method {reservoir_method}"
     );
-    // 堤防、分汊、水库与漫滩回馈之间可以任意组合；与 LULCC（换年时这些状态的保留）的组合
-    // 还没对过。
-    for (field, on) in [
-        ("DEF_USE_LEVEE", logical_field(&document, "DEF_USE_LEVEE")?),
-        (
-            "DEF_USE_BIFURCATION",
-            logical_field(&document, "DEF_USE_BIFURCATION")?,
-        ),
-        ("DEF_Reservoir_Method > 0", reservoir_method > 0),
-    ] {
-        ensure!(
-            !(on && logical_field(&document, "DEF_USE_LULCC")?),
-            "{field} together with DEF_USE_LULCC is not ported to the Rust river model; \
-             run this case with --engine fortran"
-        );
-    }
+    // 堤防、分汊、水库与漫滩回馈之间可以任意组合，也都可以与 LULCC 同开（漫滩回馈除外，
+    // 上游自己拒绝，见上）。
     for (field, unported) in [
         (
             "DEF_USE_TRACER",
@@ -1284,15 +1270,41 @@ fn lulcc_transition(
             Path::new(&string_field(document, "DEF_UnitCatchment_file")?),
             logical_field(document, "DEF_GridRiverLake_FloodplainStorageFix")?,
         )?;
-        // 堤防与 LULCC 的组合在入口就拒绝了。
-        colm_runtime::river::rebuild_volwater(&network, &mut state, None);
+        // `grid_riverlake_flow_lulcc`：河道时变量原样保留（上游 hold/restore），堤内蓄量与分汊
+        // 路径状态在各自模块里本就不动；之后重建 `volwater_ucat`（有堤单元流域只补堤外可见那份），
+        // 开分汊时上一子步水深取当前水深。漫滩回馈与 LULCC 同开上游自己就拒绝。
+        let reservoir = if integer_field(document, "DEF_Reservoir_Method")? > 0 {
+            Some(colm_runtime::river::reservoir::Reservoir::read(
+                Path::new(&string_field(document, "DEF_ReservoirPara_file")?),
+                &network,
+                integer_field(document, "DEF_Reservoir_Method")?,
+            )?)
+        } else {
+            None
+        };
+        let levee = if logical_field(document, "DEF_USE_LEVEE")? {
+            let reservoir_cells = reservoir.as_ref().map_or_else(
+                || vec![false; network.len()],
+                |r| r.of_catchment.iter().map(Option::is_some).collect(),
+            );
+            Some(colm_runtime::river::levee::Levee::read(
+                Path::new(&string_field(document, "DEF_UnitCatchment_file")?),
+                &network,
+                &reservoir_cells,
+            )?)
+        } else {
+            None
+        };
+        colm_runtime::river::rebuild_volwater(&network, &mut state, levee.as_ref());
+        if let Some(bif) = state.bifurcation.as_mut() {
+            bif.wdsrf_prev.clone_from(&state.wdsrf);
+        }
         let path = river_restart_path(target, name, &label, years.new);
         colm_runtime::river::restart::write_river_state(
             &path,
             &network,
             &state,
-            // 水库与 LULCC 的组合在入口就拒绝了。
-            None,
+            reservoir.as_ref().map(|r| r.identity()).as_deref(),
             u8::try_from(integer_field(document, "DEF_REST_CompressLevel")?)
                 .context("DEF_REST_CompressLevel must fit 0..=9")?,
         )?;
