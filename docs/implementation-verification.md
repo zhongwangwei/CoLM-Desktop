@@ -27282,7 +27282,7 @@ Rust 在 `route_system` 的子步长循环与 `bifurcation_substep` 里各加一
 **实测**：
 
 - 截留闭环 `compare_interception.sh`（`.bld` 用保留构建目录的 dump 脚本重编）：4000/4000 逐位一致，`DEF_VEG_SNOW` 开/关各 2000。单元测试 `vegetation_snow_partition_matches_current_fortran` 的期望值按新卸雪式换成闭环通过后的现值。
-- 单点：142 个算例用三个新内核重生成 Fortran 参照（`tmp/refgen.sh`）。回归 141 个，139 个 history + restart 全部逐位一致；`bm1` 是 Rust mksrfdata 缺外部 PFT 数据（与本轮无关），`g1iv`/`g1tr0` 属示踪物阶段。
+- 单点：142 个算例用三个新内核重生成 Fortran 参照（`tmp/refgen.sh`）。回归 141 个，140 个 history + restart 全部逐位一致（`bm1` 首次手动按默认内核跑、在 mksrfdata 失败，它属 CROP 组，换 crop 内核后逐位）；`g1iv`/`g1tr0` 属示踪物阶段。
 - 空间（latlon 内核，纯 Fortran 三段 vs 全 Rust 三段，`tmp/purecmp.sh`）：
 
 | 算例 | 结果 |
