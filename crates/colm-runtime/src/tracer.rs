@@ -161,6 +161,20 @@ impl TracerRuntime {
         let Some(set) = tracer_set_from_document(document)? else {
             return Ok(None);
         };
+        // provider 示踪物（CH4 的 `methane`、SEDIMENT 的泥沙）各有自己的状态与物理，还没移植；
+        // 不拒绝的话 Rust 会照常跑完却没有甲烷/泥沙过程，输出悄悄与 Fortran 不同。
+        if let Some(tracer) = set
+            .tracers
+            .iter()
+            .find(|t| t.state_owner == colm_core::tracer::descriptor::StateOwner::Provider)
+        {
+            anyhow::bail!(
+                "provider tracer {} ({}) is not ported to the Rust runtime yet (methane/sediment); \
+                 run this case with --engine fortran",
+                tracer.name.trim(),
+                tracer.category
+            );
+        }
         let physics = tracer_physics_from_document(document)?;
         let precip_ratio = set.tracers.iter().map(|t| t.precip_default_ratio()).collect();
         let vapor_ratio = set.tracers.iter().map(|t| t.vapor_default_ratio()).collect();
