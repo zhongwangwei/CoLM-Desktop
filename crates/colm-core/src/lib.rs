@@ -130,6 +130,7 @@ pub mod land_cover_generated;
 pub mod leaf_temperature;
 pub mod leaf_temperature_pc;
 pub mod linear;
+pub mod methane;
 pub mod monin_obukhov;
 pub mod net_solar;
 pub mod pc_radiation;
