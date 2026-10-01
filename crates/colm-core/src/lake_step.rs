@@ -114,6 +114,8 @@ pub struct LakeStepOutput {
     /// `errorw`（mm）；非动态湖上 `xerr` 恒为 0。
     pub water_balance_error_mm: f64,
     pub initial_total_water_mm: f64,
+    /// `endwb`（非动态湖已扣 `lake_deficit*deltim`）。
+    pub final_total_water_mm: f64,
 }
 
 /// 湖一步。`input` 与规则土壤同一个装配结果：本函数只取它的强迫、时间步、参考高度、
@@ -403,6 +405,7 @@ pub fn lake_snow_step(
         lake_deficit_mm_s: lake_deficit,
         water_balance_error_mm,
         initial_total_water_mm: total_water_before,
+        final_total_water_mm: total_water_after,
     })
 }
 

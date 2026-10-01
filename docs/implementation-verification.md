@@ -27373,3 +27373,26 @@ Rust 在 `route_system` 的子步长循环与 `bifurcation_substep` 里各加一
 **尚未接入/尚未移植**：城市、湖、冰川（`tracer_glacier_patch`/`tracer_waterbody_patch` 已移植未接入）、PFT/PC（冠层相变质量未按 PFT 聚合）、示踪物强迫文件（`&nl_colm_tracer_forcing`）、`DEF_hist_vars` 对示踪物变量的开关、空间网格的示踪物 history 聚合（被河道示踪物的上游缺陷挡住）、同位素分馏（T2）。`with_tracer` 对这些情形直接拒绝。
 
 **宿主无回退**：`PROFILE=release bash tmp/regress_all.sh`（默认/CROP 内核单点全量）145 行中 143 个 `ok rst: ok`；其余为 `nn`（本来就不出 history）与误入的 3 个空间算例 `g1iv/g1tr0/g1ts`（已加进 SKIP，空间算例单独用 latlon 内核比）。空间：`g1` history 2 bad 0、restarts 5 bad 0；`g1tr0` history 3 bad 0、restarts 5 bad 0。湿地接入与 `tracer_balance_check` 改传真实 patchtype（只进报告文字）之后重编，`tsa/tsat/tsw` 再跑全部 `ok rst: ok`。
+
+## 第 482 轮：示踪物 T1b（三）—— 冰川、湖（含动态湖与干湖）示踪物接入
+
+**上游核对**：`CoLM-SYSU-integration` `git fetch` 后 `HEAD..@{u}` 为 0 个提交，vendor 仍是最新（`85cf2328`）。
+
+**接入**：冰川与湖在 `CoLMMAIN` 里各只有分支末尾一次调用（`tracer_glacier_patch`、`tracer_waterbody_patch`，`:1773`、`:1990`），都在 `patchtype > 2` 的清零之前，各自内部做存储快照、箱式记账、衰减、收支检查与 history 累加。运行时层新增 `glacier_end_of_step`/`lake_end_of_step`，放在 `clear_non_soil_patch` 之前；报告/中止从 `end_of_step` 抽成共用的 `report_step`。
+- 冰川步输出补 `endwb` 与 `glacier_overflow_mass_trc`：GIMPLE 里它是内存变量，两段 `_x = wextra*deltim + mem` 无融合，所以按 `0 + a + b` 逐段加。
+- 湖步输出补 `endwb`（非动态湖已含 `FNMA(lake_deficit, deltim, endwb)`）。
+- 干湖（`DEF_USE_Dynamic_Lake` 且 `wdsrf<100` 或 `zwt>0`）上游整步走土壤分支，`tracer_soil_water` 与步末收支都照常、patchtype 报 4；步末重建湖层只改几何与湖温不搬水，示踪物不动。
+- `with_tracer` 放开到 patchtype 0/2/3/4（PFT/PC、城市仍拒绝）。
+
+**逐位对照**（均由 `tsa` 改 `SITE_landtype`、站点文件得到；Fortran 参照 `--engine fortran`，内核 `kernels/default`）：
+
+| 算例 | 路径 | 结果 |
+|---|---|---|
+| `tsg`（15，`gl` 站点） | 冰川；`f_scv` 0.05→2.08 mm | history 2、续跑全部 ok |
+| `tsl`（17，`lc` 站点） | 非动态湖 | ok |
+| `tsd1`（17 + 动态湖，`dc3` 站点） | 湿湖，`wdsrf` 118–119 mm | ok |
+| `tsd2`（17 + 动态湖，`dh5` 站点，1/1–3/20） | 干湖 79 天，`wdsrf` 69–99 mm，土层示踪物浓度蒸发浓缩到 7.95 | history 6、续跑全部 ok |
+
+宿主不变：`gl gc lc dc3 dh5 dl3 sl3` 重跑全部 `ok rst: ok`；`cargo test`（colm-core 462、colm-runtime 131）与 `clippy` 无告警。
+
+**剩余**：城市（`CoLMMAIN_Urban` 另一套示踪物调用）、PFT/PC、`DEF_hist_vars` 开关、空间网格示踪物 history（等 T3）；示踪物强迫文件归 T2。

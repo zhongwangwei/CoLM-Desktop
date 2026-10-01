@@ -96,6 +96,10 @@ pub struct GlacierStepOutput {
     pub water_balance_error_mm_s: f64,
     /// `totwb`：溢出扣除之后的步首总水量，`history` 的 `xerr` 不再需要另算。
     pub initial_total_water_mm: f64,
+    /// `endwb`。
+    pub final_total_water_mm: f64,
+    /// `glacier_overflow_mass_trc`：首冰层溢出、并入本步降水的液+固水（mm）。
+    pub overflow_mass_mm: f64,
 }
 
 /// 冰川一步。`input` 与规则土壤同一个装配结果：本函数只取它的强迫、时间步、
@@ -176,6 +180,8 @@ pub fn glacier_snow_step(
 
     // 首冰层装不下的液/固水当作本步的降水从顶上重新进来（`:1632-1654`）。
     let mut rain_temperature = precipitation_temperature;
+    // 上游放在内存变量里逐段累加（GIMPLE 无融合）。
+    let mut overflow_mass = 0.0;
     let liquid_capacity = first_ice_thickness_m * DENH2O;
     if state.soil_water.liquid_water_kg_m2[0] > liquid_capacity {
         let extra = (state.soil_water.liquid_water_kg_m2[0] - liquid_capacity) / dt;
@@ -185,6 +191,7 @@ pub fn glacier_snow_step(
         rainfall += extra;
         state.soil_water.liquid_water_kg_m2[0] = liquid_capacity;
         total_water_before -= dt * extra;
+        overflow_mass += extra * dt;
     }
     let mut snow_temperature = precipitation_temperature;
     let ice_capacity = first_ice_thickness_m * DENICE;
@@ -196,6 +203,7 @@ pub fn glacier_snow_step(
         snowfall += extra;
         state.soil_water.ice_water_kg_m2[0] = ice_capacity;
         total_water_before -= dt * extra;
+        overflow_mass += extra * dt;
     }
     if rainfall + snowfall > 0.0 {
         // `:1657` `.FMA (pg_rain*cpliq, t_rain, (pg_snow*cpice)*t_snow) / (…+…)`
@@ -403,6 +411,8 @@ pub fn glacier_snow_step(
         water_balance_error_mm,
         water_balance_error_mm_s,
         initial_total_water_mm: total_water_before,
+        final_total_water_mm: total_water_after,
+        overflow_mass_mm: overflow_mass,
     })
 }
 

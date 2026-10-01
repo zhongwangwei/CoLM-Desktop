@@ -996,6 +996,9 @@ fn advance_patch(
     }
     if template.patch_type == 3 {
         let output = colm_core::glacier_snow_step(input, state)?;
+        if let Some((tracer, _)) = &template.tracer {
+            crate::tracer::glacier_end_of_step(tracer, state, &output, deltim, &step.forcing)?;
+        }
         template.prepare_surface_optics(
             state,
             SurfaceOpticsStep {
@@ -1052,6 +1055,18 @@ fn advance_patch(
             let mut input = input;
             input.energy.ground_temperature.is_dry_lake = true;
             let output = colm_core::standard_lct_snow_soil_step(input, state)?;
+            if let (Some((tracer, _)), Some(total)) = (&template.tracer, tracer_initial_total) {
+                crate::tracer::end_of_step(
+                    tracer,
+                    template.patch_type,
+                    state,
+                    &output,
+                    &step.forcing,
+                    deltim,
+                    total,
+                )?;
+            }
+            // 重建湖层只改几何与湖温，不搬水，示踪物不动。
             colm_core::refill_dry_lake(state)?;
             // `albland` 仍按 patchtype 4 取湖面反照率，`t_soisno_(1)` 这时是土温（只有 SNICAR 读）。
             let optics = surface_optics_step(
@@ -1064,6 +1079,16 @@ fn advance_patch(
             return Ok(PatchOutput::Soil(Box::new(output)));
         }
         let output = colm_core::lake_snow_step(input, lake.site, state)?;
+        if let Some((tracer, _)) = &template.tracer {
+            crate::tracer::lake_end_of_step(
+                tracer,
+                state,
+                &output,
+                deltim,
+                &step.forcing,
+                lake.site.dynamic,
+            )?;
+        }
         // 湖面反照率只看 `t_grnd`（`albland` 的 `patchtype >= 4` 支）；`t_soisno_(1)` 换成
         // `t_lake(1)` 那一句只在 SNICAR 下有读者。
         let lake_top_layer = state

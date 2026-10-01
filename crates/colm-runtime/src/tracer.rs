@@ -270,6 +270,11 @@ pub fn end_of_step(
             scv: state.snow.water_equivalent_kg_m2,
         },
     );
+    report_step(runtime)
+}
+
+/// `tracer_report`：打印本步的收支/签名报告，按 `DEF_TRACER_*_ABORT_NBAD` 决定是否中止。
+fn report_step(runtime: &TracerRuntime) -> Result<()> {
     let report = runtime
         .tracker
         .lock()
@@ -282,6 +287,139 @@ pub fn end_of_step(
         anyhow::bail!("{message}");
     }
     Ok(())
+}
+
+/// 冰川 patch 步末（`CoLMMAIN.F90:1773-1779` 的 `tracer_glacier_patch`）：上游在
+/// `patchtype > 2` 的清零之前调，这里也在 `clear_non_soil_patch` 之前。
+pub fn glacier_end_of_step(
+    runtime: &TracerRuntime,
+    state: &mut colm_core::StandardLctSnowSoilState,
+    output: &colm_core::GlacierStepOutput,
+    deltim: f64,
+    forcing: &colm_core::RuntimeForcing,
+) -> Result<()> {
+    use colm_core::tracer::{special_patches, step::pack_soisno};
+    let t_grnd = state.surface_temperature_k();
+    let Some(track) = state.tracer.as_deref_mut() else {
+        return Ok(());
+    };
+    let wliq = pack_soisno(&state.snow.liquid_water_kg_m2, &state.soil_water.liquid_water_kg_m2);
+    let wice = pack_soisno(&state.snow.ice_water_kg_m2, &state.soil_water.ice_water_kg_m2);
+    let precipitation = &output.precipitation;
+    let thermal = &output.thermal;
+    {
+        let mut tracker = runtime
+            .tracker
+            .lock()
+            .map_err(|_| anyhow::anyhow!("the tracer balance tracker lock is poisoned"))?;
+        special_patches::tracer_glacier_patch(
+            &runtime.set,
+            runtime.physics,
+            &mut track.state,
+            &mut track.snapshot,
+            &mut tracker,
+            &special_patches::GlacierInput {
+                ipatch: 1,
+                deltim,
+                prc_rain: precipitation.convective_rain_kg_m2_s,
+                prl_rain: precipitation.large_scale_rain_kg_m2_s,
+                prc_snow: precipitation.convective_snow_kg_m2_s,
+                prl_snow: precipitation.large_scale_snow_kg_m2_s,
+                rnof: output.total_runoff_mm_s,
+                qseva: thermal.qseva,
+                qsubl: thermal.qsubl,
+                qsdew: thermal.qsdew,
+                qfros: thermal.qfros,
+                endwb: output.final_total_water_mm,
+                totwb: output.initial_total_water_mm,
+                glacier_overflow_mass: output.overflow_mass_mm,
+                errorw: output.water_balance_error_mm,
+                wdsrf: state.soil_water.surface_water_mm,
+                scv: state.snow.water_equivalent_kg_m2,
+                t_grnd,
+                forc_q: forcing.specific_humidity,
+                forc_psrf: forcing.surface_pressure_pa,
+                wliq_soisno: &wliq,
+                wice_soisno: &wice,
+                subl_skin_mm: runtime.soil_options.subl_skin_mm,
+                precip_ratio: &runtime.precip_ratio,
+                vapor_ratio: &runtime.vapor_ratio,
+                runtime_forced: &runtime.runtime_forced,
+                catch_lateral_flow: false,
+            },
+        )?;
+    }
+    report_step(runtime)
+}
+
+/// 湖 patch 步末（`CoLMMAIN.F90:1990-1996` 的 `tracer_waterbody_patch`）。单点没有
+/// 河湖子步，每步都采样 history。
+pub fn lake_end_of_step(
+    runtime: &TracerRuntime,
+    state: &mut colm_core::StandardLctSnowSoilState,
+    output: &colm_core::LakeStepOutput,
+    deltim: f64,
+    forcing: &colm_core::RuntimeForcing,
+    dynamic_lake: bool,
+) -> Result<()> {
+    use colm_core::tracer::{special_patches, step::pack_soisno};
+    let t_grnd = state.surface_temperature_k();
+    let Some(track) = state.tracer.as_deref_mut() else {
+        return Ok(());
+    };
+    let wliq = pack_soisno(&state.snow.liquid_water_kg_m2, &state.soil_water.liquid_water_kg_m2);
+    let wice = pack_soisno(&state.snow.ice_water_kg_m2, &state.soil_water.ice_water_kg_m2);
+    let precipitation = &output.precipitation;
+    let thermal = &output.thermal;
+    {
+        let mut tracker = runtime
+            .tracker
+            .lock()
+            .map_err(|_| anyhow::anyhow!("the tracer balance tracker lock is poisoned"))?;
+        special_patches::tracer_waterbody_patch(
+            &runtime.set,
+            runtime.physics,
+            &mut track.state,
+            &mut track.snapshot,
+            &mut tracker,
+            &special_patches::WaterbodyInput {
+                ipatch: 1,
+                snl: state.snow.layer_count,
+                deltim,
+                forc_rain: precipitation.convective_rain_kg_m2_s
+                    + precipitation.large_scale_rain_kg_m2_s,
+                forc_snow: precipitation.convective_snow_kg_m2_s
+                    + precipitation.large_scale_snow_kg_m2_s,
+                lake_deficit: output.lake_deficit_mm_s,
+                rnof: output.total_runoff_mm_s,
+                qseva: thermal.qseva,
+                qsubl: thermal.qsubl,
+                qsdew: thermal.qsdew,
+                qfros: thermal.qfros,
+                endwb: output.final_total_water_mm,
+                totwb: output.initial_total_water_mm,
+                errorw: output.water_balance_error_mm,
+                wa: state.soil_water.aquifer_water_mm,
+                wdsrf: state.soil_water.surface_water_mm,
+                scv: state.snow.water_equivalent_kg_m2,
+                t_grnd,
+                forc_q: forcing.specific_humidity,
+                forc_psrf: forcing.surface_pressure_pa,
+                forc_us: forcing.eastward_wind_m_s,
+                forc_vs: forcing.northward_wind_m_s,
+                wliq_soisno: &wliq,
+                wice_soisno: &wice,
+                use_dynamic_lake: dynamic_lake,
+                subl_skin_mm: runtime.soil_options.subl_skin_mm,
+                hist_sample: true,
+                precip_ratio: &runtime.precip_ratio,
+                vapor_ratio: &runtime.vapor_ratio,
+                runtime_forced: &runtime.runtime_forced,
+                catch_lateral_flow: false,
+            },
+        )?;
+    }
+    report_step(runtime)
 }
 
 /// 每个输运示踪物逐 patch 的一个量（重启里的 `(patch, trc_land_transport)`）。
