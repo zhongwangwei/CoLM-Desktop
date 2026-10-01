@@ -27718,3 +27718,25 @@ GIMPLE 要点（默认内核另建一份 `-fdump-tree-optimized-lineno`）：
 **回归**：单点全量 `regress_all` 171 项，除 `nn`（history 为 `none`）外全部一致。最终二进制上复验以下算例，全部一致：
 - 整段：`tc4/tc4y/tc4wl/bwl/blk/bgl/tc4lk/tc4lky/tsh/rc4`；
 - 续跑：`tc4c/tshc/tc4wc/tc4lkyc/rc4c`，以及 `tmp/mkwl.sh` 重建的湿地链。
+
+## 第 498 轮：宿主 —— 湖泊的水体子步（`deltim > 1800`），及子步里的示踪物与甲烷
+
+**宿主缺口**：上游 `CoLMDRIVER.F90:95-99` 对 `WATERBODY` 类每个 `deltim` 跑 `ceiling(deltim/1800)` 次 `CoLMMAIN`（步长 `deltim/n`，每个子步都做末尾的光学准备与非土壤清零），history 取最后一个子步的量；BGC 数据更新在子步之外。Rust 的湖完全没有子步。
+
+**对照脚本的漏洞**：第一次用 AT-Neu 半小时强迫加 `timestep = 3600` 时 Fortran 停在"data required is out of range"，`tmp/pair2.sh` 不查 Fortran 是否成功，照样报了 ok。现在 `pair2.sh`/`contrun.sh` 都先检查 Fortran 的 `colm ok`；之前依赖过的算例逐个核对，Fortran 端都确实跑完了。
+
+**改法**：
+- 模板加 `with_timestep`（只换步长），湖分支循环 n 个子步。
+- 湖上示踪物每个子步跑一次，`hist_sample` 只在最后一个子步为真（`waterbody_hist_sample`）。
+- 湖泊甲烷每个子步以子步步长跑；`nsub > 1` 时按上游 `accumulate_methane_lake_substep_diagnostics` 做时间加权平均：每个子步 `FMA(var, dt, acc)`，最后一个子步 `acc/(dt·nsub)` 写回。只平均下游读得到的量：`core` history 的通量与总量，以及写进续跑文件的三个地表导度（`grnd_methane_cond`、`_sat`、`_lake`）。
+- 动态湖（干湖分支）的多子步仍拒绝。
+
+**对照**（US-Ne3 小时强迫，`timestep = 3600`，`SITE_landtype = 17`，2 个子步）：
+
+| 算例 | 内容 | 结果 |
+|---|---|---|
+| `lk36` | BGC 湖泊，2002 全年 | history 12 ok，restart ok |
+| `lk36sol` | 湖 + 溶质示踪物，到 02-10 | history 4 ok，restart ok |
+| `lk36ch4` | 湖泊 CH4，到 01-10 | history 2 ok，restart ok |
+| `lk36ch4y` | 湖泊 CH4，2002 全年 | history 24 ok，restart ok |
+| `lk36ch4yc` | 从 07-01 续跑到 09-30 | history 6 bad 0，restarts 38 bad 0 |

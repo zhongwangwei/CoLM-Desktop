@@ -664,8 +664,9 @@ impl BgcRuntime {
         self.update_data(begin, idate, bgc)
     }
 
-    /// 湖泊 patch 的甲烷（`tracer_lake_step` → `ch4_impl_lake_step`）：`CoLMMAIN` 之后、在水体子步里跑。
-    /// 只移植了一个水体子步（`deltim <= 1800`，子步诊断累加此时不起作用）与定深湖。
+    /// 湖泊 patch 的甲烷（`tracer_lake_step` → `ch4_impl_lake_step`）：`CoLMMAIN` 之后、在第
+    /// `isub`/`nsub` 个水体子步里以子步步长跑；`nsub > 1` 时诊断量按时间加权平均（`mean`）。
+    /// 动态湖（干湖分支）尚未移植。
     #[allow(clippy::too_many_arguments)]
     pub fn lake_methane(
         &self,
@@ -676,6 +677,8 @@ impl BgcRuntime {
         output: &colm_core::LakeStepOutput,
         lakedepth: f64,
         dynamic_lake: bool,
+        (isub, nsub): (usize, usize),
+        mean: &mut colm_core::methane::driver::LakeSubstepMean,
     ) -> Result<()> {
         let Some((setup, site)) = &self.methane else {
             return Ok(());
@@ -683,12 +686,7 @@ impl BgcRuntime {
         if !setup.params.methane.allowlakeprod {
             return Ok(());
         }
-        anyhow::ensure!(
-            self.deltim <= 1800.0,
-            "lake methane with more than one WATERBODY substep (deltim {} s) is not ported to the \
-             Rust runtime yet",
-            self.deltim
-        );
+        let substep_dt = self.deltim / nsub as f64;
         anyhow::ensure!(
             !dynamic_lake,
             "lake methane with DEF_USE_Dynamic_Lake is not ported to the Rust runtime yet"
@@ -703,7 +701,7 @@ impl BgcRuntime {
             let host = crate::methane::lake_host_inputs(
                 &arrays,
                 idate,
-                self.deltim,
+                substep_dt,
                 state,
                 output,
                 forcing,
@@ -720,6 +718,15 @@ impl BgcRuntime {
                 &mut patch,
             )
         })();
+        if outcome.is_ok() && nsub > 1 {
+            if isub == 1 {
+                *mean = colm_core::methane::driver::LakeSubstepMean::default();
+            }
+            mean.add(&patch, substep_dt);
+            if isub == nsub {
+                mean.finish(&mut patch, substep_dt * nsub as f64);
+            }
+        }
         bgc.methane = Some(patch);
         state.bgc = Some(bgc);
         outcome

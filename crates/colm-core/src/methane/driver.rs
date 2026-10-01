@@ -732,3 +732,67 @@ fn repartition(patch: &mut MethanePatch, old: f64, new: f64) {
     scalar(&mut soil.fsat_bef, &mut rice.fsat_bef);
     scalar(&mut soil.finundated_lag, &mut rice.finundated_lag);
 }
+
+/// `accumulate_methane_lake_substep_diagnostics`（`nsub > 1` 时）：湖在水体子步里跑甲烷，诊断量按
+/// 时间加权平均（每个子步 `FMA(var, dt, acc)`，最后一个子步 `acc/(dt·nsub)` 写回）。这里只平均
+/// 下游读得到的量：`core` history 用的通量与总量，以及写进续跑文件的三个地表导度。
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct LakeSubstepMean {
+    surf_flux: f64,
+    surf_flux_phys: f64,
+    balance_residual: f64,
+    ch4_clip_credit: f64,
+    o2_cap_loss: f64,
+    o2_cap_gain: f64,
+    prod_tot: f64,
+    oxid_tot: f64,
+    surf_flux_tot_lake: f64,
+    grnd_cond: f64,
+    grnd_cond_sat: f64,
+    grnd_cond_lake: f64,
+}
+
+impl LakeSubstepMean {
+    /// 一个子步之后累加（`add1d`）。
+    pub fn add(&mut self, patch: &MethanePatch, dt: f64) {
+        let Some(r) = patch.last else { return };
+        let g = &r.merged;
+        for (acc, value) in [
+            (&mut self.surf_flux, g.surf_flux),
+            (&mut self.surf_flux_phys, r.surf_flux_phys),
+            (&mut self.balance_residual, g.balance_residual),
+            (&mut self.ch4_clip_credit, g.ch4_clip_credit),
+            (&mut self.o2_cap_loss, g.o2_cap_loss),
+            (&mut self.o2_cap_gain, g.o2_cap_gain),
+            (&mut self.prod_tot, g.prod_tot),
+            (&mut self.oxid_tot, g.oxid_tot),
+            (&mut self.surf_flux_tot_lake, r.surf_flux_tot_lake),
+            (&mut self.grnd_cond, patch.grnd_methane_cond),
+            (&mut self.grnd_cond_sat, r.sat.grnd_cond),
+            (&mut self.grnd_cond_lake, patch.lake.grnd_cond),
+        ] {
+            *acc = value.mul_add(dt, *acc);
+        }
+    }
+
+    /// 最后一个子步写回时间平均（`finish1d`）。
+    pub fn finish(&self, patch: &mut MethanePatch, total_dt: f64) {
+        if total_dt <= 0.0 {
+            return;
+        }
+        let Some(r) = patch.last.as_mut() else { return };
+        r.merged.surf_flux = self.surf_flux / total_dt;
+        r.surf_flux_phys = self.surf_flux_phys / total_dt;
+        r.merged.balance_residual = self.balance_residual / total_dt;
+        r.merged.ch4_clip_credit = self.ch4_clip_credit / total_dt;
+        r.merged.o2_cap_loss = self.o2_cap_loss / total_dt;
+        r.merged.o2_cap_gain = self.o2_cap_gain / total_dt;
+        r.merged.prod_tot = self.prod_tot / total_dt;
+        r.merged.oxid_tot = self.oxid_tot / total_dt;
+        r.surf_flux_tot_lake = self.surf_flux_tot_lake / total_dt;
+        patch.grnd_methane_cond = self.grnd_cond / total_dt;
+        r.merged.grnd_cond = patch.grnd_methane_cond;
+        r.sat.grnd_cond = self.grnd_cond_sat / total_dt;
+        patch.lake.grnd_cond = self.grnd_cond_lake / total_dt;
+    }
+}

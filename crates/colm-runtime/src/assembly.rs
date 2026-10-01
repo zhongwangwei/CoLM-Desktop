@@ -1646,6 +1646,14 @@ impl StandardLctRestartTemplate {
         }
     }
 
+    /// 水体子步（`CoLMDRIVER.F90:95-99`：`WATERBODY` 类 `ceiling(deltim/1800)` 个子步）用的模板：
+    /// 只换步长，其余与本模板相同。
+    pub fn with_timestep(&self, seconds: f64) -> Self {
+        let mut template = self.clone();
+        template.physics.timestep_seconds = seconds;
+        template
+    }
+
     /// `LAI_readin` 那一步：月份变了就把 `tlai`/`tsai` 换成新一个月的。
     ///
     /// 返回是否真的换了（调用方据此判断"这一步跨月了"）。上游的判据是

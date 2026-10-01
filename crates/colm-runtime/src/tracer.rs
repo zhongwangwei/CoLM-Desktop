@@ -457,8 +457,9 @@ pub fn glacier_end_of_step(
     Ok(())
 }
 
-/// 湖 patch 步末（`CoLMMAIN.F90:1990-1996` 的 `tracer_waterbody_patch`）。单点没有
-/// 河湖子步，每步都采样 history。
+/// 湖 patch 步末（`CoLMMAIN.F90:1990-1996` 的 `tracer_waterbody_patch`）。水体子步里每个子步跑一次，
+/// history 只在最后一个子步采样（`waterbody_hist_sample`，`hist_sample`）。
+#[allow(clippy::too_many_arguments)]
 pub fn lake_end_of_step(
     runtime: &TracerRuntime,
     state: &mut colm_core::StandardLctSnowSoilState,
@@ -467,6 +468,7 @@ pub fn lake_end_of_step(
     forcing: &colm_core::RuntimeForcing,
     dynamic_lake: bool,
     ratios: Option<(&[f64], &[f64])>,
+    hist_sample: bool,
 ) -> Result<()> {
     use colm_core::tracer::{special_patches, step::pack_soisno};
     let (precip_ratio, vapor_ratio) =
@@ -519,7 +521,7 @@ pub fn lake_end_of_step(
                 wice_soisno: &wice,
                 use_dynamic_lake: dynamic_lake,
                 subl_skin_mm: runtime.soil_options.subl_skin_mm,
-                hist_sample: true,
+                hist_sample,
                 precip_ratio,
                 vapor_ratio,
                 runtime_forced: &runtime.runtime_forced,

@@ -1075,6 +1075,89 @@ fn advance_patch(
         return Ok(PatchOutput::Urban(Box::new(output)));
     }
     if let Some(lake) = &template.lake {
+        // 水体子步（`CoLMDRIVER.F90:95-99`）：`WATERBODY` 类每个 `deltim` 跑 `ceiling(deltim/1800)` 次
+        // `CoLMMAIN`（含末尾的光学准备与非土壤清零），history 取最后一个子步的量；BGC 数据更新
+        // 在子步之外。动态湖（干湖分支）与湖上示踪物/甲烷的多子步尚未移植。
+        let waterbody =
+            template.land_class == colm_core::waterbody_class(template.physics.land_cover_scheme);
+        let substeps = if waterbody {
+            (template.physics.timestep_seconds / 1800.0).ceil().max(1.0) as usize
+        } else {
+            1
+        };
+        if substeps > 1 {
+            ensure!(
+                !lake.site.dynamic,
+                "dynamic lakes with WATERBODY substeps (deltim > 1800 s) are not ported to the \
+                 Rust runtime yet"
+            );
+            let sub = template.with_timestep(template.physics.timestep_seconds / substeps as f64);
+            let mut last = None;
+            let mut methane_mean = colm_core::methane::driver::LakeSubstepMean::default();
+            for isub in 1..=substeps {
+                let previous_snow_water_equivalent_mm = state.snow.water_equivalent_kg_m2;
+                let mut input = baseflow_scaled(sub.snow_input(binding), baseflow_scale);
+                if let Some(snicar) = input.snicar.as_mut() {
+                    snicar.aerosol_deposition_kg_m2_s =
+                        sub.aerosol_deposition(step.clock.forcing_time)?;
+                }
+                let output = colm_core::lake_snow_step(input, lake.site, state)?;
+                if let Some((tracer, _)) = &template.tracer {
+                    crate::tracer::lake_end_of_step(
+                        tracer,
+                        state,
+                        &output,
+                        sub.physics.timestep_seconds,
+                        &step.forcing,
+                        lake.site.dynamic,
+                        binding.tracer_ratios,
+                        isub == substeps,
+                    )?;
+                }
+                let lake_top_layer = state
+                    .lake
+                    .as_ref()
+                    .map(|lake| (lake.column.thickness_m[0], lake.column.temperature_k[0]));
+                sub.prepare_surface_optics(
+                    state,
+                    SurfaceOpticsStep {
+                        cosine_zenith: step.surface_cosine_zenith,
+                        ground_temperature_k: state.surface_temperature_k(),
+                        momentum_roughness_m: output.thermal.z0m,
+                        wet_snow_fraction: 0.0,
+                        previous_snow_water_equivalent_mm,
+                        ground_snowfall_kg_m2_s: output.snowfall_kg_m2_s,
+                        air_temperature_k: step.forcing.air_temperature_k,
+                        lake_top_layer,
+                    },
+                )?;
+                colm_core::clear_non_soil_patch(
+                    state,
+                    step.forcing.air_temperature_k,
+                    template.physics.variably_saturated_flow,
+                );
+                if let Some(bgc) = &template.bgc {
+                    bgc.lake_methane(
+                        idate,
+                        &step.forcing,
+                        binding.partial_pressures_pa.unwrap_or((
+                            step.forcing.bottom_pressure_pa * binding.co2_volume_fraction,
+                            step.forcing.bottom_pressure_pa * 0.209,
+                        )),
+                        state,
+                        &output,
+                        lake.site.depth_m,
+                        lake.site.dynamic,
+                        (isub, substeps),
+                        &mut methane_mean,
+                    )?;
+                }
+                last = Some(output);
+            }
+            update_non_soil_bgc(state)?;
+            let output = last.context("a lake step runs at least one WATERBODY substep")?;
+            return Ok(PatchOutput::Lake(Box::new(output)));
+        }
         if lake.site.is_dry(state) {
             // 干湖（`CoLMMAIN.F90:794-799`）：整步走土壤分支（patchtype 仍是 4，THERMAL 的地面湿度、
             // `meltf` 的过冷水、WATER_VSF 的产流都按 `is_dry_lake` 分支），步末由积水重建湖层；
@@ -1117,6 +1200,7 @@ fn advance_patch(
                 &step.forcing,
                 lake.site.dynamic,
                 binding.tracer_ratios,
+                true,
             )?;
         }
         // 湖面反照率只看 `t_grnd`（`albland` 的 `patchtype >= 4` 支）；`t_soisno_(1)` 换成
@@ -1157,6 +1241,8 @@ fn advance_patch(
                 &output,
                 lake.site.depth_m,
                 lake.site.dynamic,
+                (1, 1),
+                &mut colm_core::methane::driver::LakeSubstepMean::default(),
             )?;
         }
         return Ok(PatchOutput::Lake(Box::new(output)));
