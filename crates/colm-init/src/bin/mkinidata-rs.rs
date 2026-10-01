@@ -164,6 +164,14 @@ fn run_namelist(namelist: PathBuf, mut args: impl Iterator<Item = String>) -> Re
     if let Some(path) = files.urban {
         println!("wrote {}", path.display());
     }
+    // `DEF_USE_TRACER`：时间重启带空示踪物事务（mkinidata 不注册示踪物）。
+    let document = parse(&std::fs::read_to_string(&run.namelist)?)?;
+    if namelist_bool(&document, "DEF_USE_TRACER", false)? {
+        colm_init::write_empty_land_tracer_transaction(
+            &time.common.block,
+            namelist_f64(&document, "DEF_TRACER_AQUIFER_MIXING_WATER_MM", -1.0)?,
+        )?;
+    }
     println!("wrote {}", time.common.block.display());
     if let Some(file) = da {
         println!("wrote {}", file.path.display());

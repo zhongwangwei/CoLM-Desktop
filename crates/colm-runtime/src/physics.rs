@@ -486,7 +486,7 @@ fn soil_surface_resistance_scheme(
 /// 整数，算例里写成 `1.0` 就该报错，而不是被 `as_f64` 悄悄收下。
 /// schema 不认识这个路径同样报错 —— 那说明字段名拼错了，而继续走下去只会拿到
 /// 一个凭空来的值。
-fn integer(document: &Document, path: &str) -> Result<i64> {
+pub(crate) fn integer(document: &Document, path: &str) -> Result<i64> {
     if let Some(value) = document.get(path) {
         return match value {
             Value::Int(value) => Ok(*value),
@@ -508,7 +508,7 @@ fn scheme_index(document: &Document, path: &str, low: i64, high: i64) -> Result<
     i32::try_from(value).with_context(|| format!("{path} does not fit an i32"))
 }
 
-fn real(document: &Document, path: &str) -> Result<f64> {
+pub(crate) fn real(document: &Document, path: &str) -> Result<f64> {
     let text = if let Some(value) = document.get(path) {
         match value {
             Value::Real { text } => text.clone(),
@@ -541,7 +541,7 @@ fn land_cover_override(document: &Document, path: &str) -> Result<Option<f64>> {
     Ok(Some(value))
 }
 
-fn logical(document: &Document, path: &str) -> Result<bool> {
+pub(crate) fn logical(document: &Document, path: &str) -> Result<bool> {
     if let Some(value) = document.get(path) {
         return match value {
             Value::Bool(value) => Ok(*value),
@@ -554,7 +554,7 @@ fn logical(document: &Document, path: &str) -> Result<bool> {
     }
 }
 
-fn text(document: &Document, path: &str) -> Result<String> {
+pub(crate) fn text(document: &Document, path: &str) -> Result<String> {
     if let Some(value) = document.get(path) {
         return match value {
             Value::Str(value) => Ok(value.clone()),

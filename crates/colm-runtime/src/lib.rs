@@ -19,6 +19,7 @@ pub mod pft;
 pub mod physics;
 pub mod river;
 pub mod spatial;
+pub mod tracer;
 
 use std::path::{Path, PathBuf};
 
