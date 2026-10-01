@@ -148,6 +148,7 @@ pub mod snicar;
 pub mod snicar_column;
 pub mod snow;
 pub mod snow_grain;
+pub mod tracer;
 pub mod soil_surface_resistance;
 pub mod soil_water;
 pub mod standard_lct_step;
