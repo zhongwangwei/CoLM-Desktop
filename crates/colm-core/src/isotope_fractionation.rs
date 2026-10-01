@@ -302,6 +302,7 @@ impl IsotopeTracer {
     }
 
     /// `tracer_craig_gordon_evap_ratio`：蒸发/升华通量的同位素比。
+    #[allow(clippy::too_many_arguments)]
     pub fn craig_gordon_evap_ratio(
         &self,
         config: &FractionationConfig,
