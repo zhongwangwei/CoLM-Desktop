@@ -27203,3 +27203,24 @@ Rust 在 `route_system` 的子步长循环与 `bifurcation_substep` 里各加一
 | 2006-001（换年后）河道续跑 | 106 个单元流域带堤内蓄量，合计 4.33e10 m³（修复前上游此处为 0）；路径状态 2907 处非零；已建成水库 3397 座 |
 | 新内核重跑原 `g3`（不开这些选项） | 仍然逐位 |
 | `g3mr`（LULCC 方案 2（MEC）+ 堤防 + 分汊 + 水库，同样跨过换年） | 续跑 8 个、history 4 个全部 `diff 0` |
+
+## 第 476 轮：IsoGSM 驱动（示踪物的前置）
+
+同位素算例要用 IsoGSM 的全套驱动，主驱动也是 IsoGSM（`/Volumes/Data/CoLM_Forcing/IsoGSM/`，2000–2004 年，6 小时，0.5°）。Rust 空间驱动原来只认 JRA3Q。
+
+- `metfilename`：IsoGSM 是 `'/'//prefix//'_'//YYYY//'.nc'`。
+- 按年分组（`groupby = 'year'`）：移植 `setstampLB/UB` 的按年分支。
+  - 上界跨年时进到下一年第 1 天；
+  - 不用闰年历时，第 59 天之后减一天。
+  - 上游的按年分支在判断"数据集起始时刻"时用了还没赋值的 `month`。只有从驱动数据第一年的 1 月 1 日起跑才会碰到，Rust 按"起始年的第 1 天且 `startmo = 1`"处理。
+- `metpreprocess`：IsoGSM 只把比湿截到饱和比湿。
+- 顺带补上 JRA3Q 遗漏的"负降水截成 0"。此前的 JRA3Q 算例都对上了，说明测过的那几天没有负值。补上后重跑 `g1t`、`g1all` 仍然逐位。
+
+**实测**（g1 区域，IsoGSM 驱动，不开示踪物；全 Rust 三段 vs 纯 Fortran 三段）：
+
+| 算例 | 结果 |
+|---|---|
+| `g1i`（2003-01-01 起 2 天） | 续跑 5 个、history 2 个全部 `diff 0` |
+| `g1iy`（2003-12-31 → 2004-01-01，跨年换文件） | 续跑 8 个、history 4 个全部 `diff 0` |
+
+`cargo test --release -p colm-runtime` 全过；clippy 无告警。

@@ -179,13 +179,14 @@ pub struct GriddedForcingConfig {
 }
 
 impl GriddedForcingConfig {
-    /// 读 forcing namelist。目前只接 `JRA3Q` 的文件命名；其余数据集的 `metfilename` 各不相同，明确拒绝。
+    /// 读 forcing namelist。目前接 `JRA3Q` 与 `IsoGSM` 的文件命名；其余数据集的 `metfilename`
+    /// 各不相同，明确拒绝。
     pub fn from_document(forcing: &Document) -> Result<Self> {
         let dataset = string(forcing, "DEF_forcing%dataset")?;
         ensure!(
-            dataset == "JRA3Q",
-            "the Rust spatial runtime reads the JRA3Q file layout only; DEF_forcing%dataset = \
-             {dataset:?} needs its own `metfilename` branch (use --engine fortran)"
+            matches!(dataset.trim(), "JRA3Q" | "IsoGSM"),
+            "the Rust spatial runtime reads the JRA3Q and IsoGSM file layouts only; \
+             DEF_forcing%dataset = {dataset:?} needs its own `metfilename` branch (use --engine fortran)"
         );
         ensure!(
             !boolean(forcing, "DEF_forcing%has_missing_value", false)?,
@@ -271,13 +272,15 @@ impl GriddedForcingConfig {
         })
     }
 
-    /// `trim(dir_forcing)//metfilename(...)`：JRA3Q 是 `'/'//prefix//'_'//YYYY//'_'//MM//'.nc'`。
+    /// `trim(dir_forcing)//metfilename(...)`：JRA3Q 是 `'/'//prefix//'_'//YYYY//'_'//MM//'.nc'`，
+    /// IsoGSM 是 `'/'//prefix//'_'//YYYY//'.nc'`。
     fn file_name(&self, year: i32, month: i32, variable: usize) -> PathBuf {
         let directory = self.directory.to_string_lossy();
-        PathBuf::from(format!(
-            "{directory}/{}_{year:04}_{month:02}.nc",
-            self.variables[variable].prefix.trim()
-        ))
+        let prefix = self.variables[variable].prefix.trim();
+        PathBuf::from(match self.dataset.trim() {
+            "IsoGSM" => format!("{directory}/{prefix}_{year:04}.nc"),
+            _ => format!("{directory}/{prefix}_{year:04}_{month:02}.nc"),
+        })
     }
 
     /// `setstampLB`：返回文件年、月与记录号（1 起），并给出下界时间戳。
@@ -328,7 +331,41 @@ impl GriddedForcingConfig {
                 time_index = floor_div(sec - v.offset, v.dtime) + 1;
                 month = m;
             }
-            _ => bail!("only DEF_forcing%groupby = 'month' is ported"),
+            GroupBy::Year => {
+                let mut day = day;
+                sec += 86_400 * (day - 1);
+                let index = floor_div(sec - v.offset, v.dtime) + 1;
+                sec = (index - 1) * v.dtime + v.offset - 86_400 * (day - 1);
+                lower.sec = sec;
+                if sec < 0 {
+                    lower.sec = 86_400 + sec;
+                    lower.day = day - 1;
+                    if lower.day == 0 {
+                        lower.year = year - 1;
+                        lower.day = days_in_year(lower.year);
+                    }
+                }
+                if sec < 0 || (sec == 0 && v.offset != 0) {
+                    // 上游这里用的 `month` 在按年分组时还没赋值；按「数据集起始年的第一天」理解。
+                    if year == self.start_year && self.start_month == 1 && day == 1 {
+                        sec = v.offset;
+                    } else {
+                        sec += 86_400;
+                        day -= 1;
+                        if day == 0 {
+                            year -= 1;
+                            day = days_in_year(year);
+                        }
+                    }
+                }
+                if !self.leapyear && colm_core::is_leap_year(year) && day > 59 {
+                    day -= 1;
+                }
+                sec += 86_400 * (day - 1);
+                time_index = floor_div(sec - v.offset, v.dtime) + 1;
+                month = 1;
+            }
+            GroupBy::Day => bail!("DEF_forcing%groupby = 'day' is not ported"),
         }
         ensure!(time_index > 0, "got the wrong time record of forcing");
         Ok((year, month, time_index as usize, lower))
@@ -363,7 +400,25 @@ impl GriddedForcingConfig {
                 ensure!(index > 0, "got the wrong time record of forcing");
                 Ok((year, month, index as usize))
             }
-            _ => bail!("only DEF_forcing%groupby = 'month' is ported"),
+            GroupBy::Year => {
+                let mut day = day;
+                if sec == 86_400 && v.offset == 0 {
+                    sec = 0;
+                    day += 1;
+                    if day > days_in_year(year) {
+                        year += 1;
+                        day = 1;
+                    }
+                }
+                if !self.leapyear && colm_core::is_leap_year(year) && day > 59 {
+                    day -= 1;
+                }
+                sec += 86_400 * (day - 1);
+                let index = floor_div(sec - v.offset, v.dtime) + 1;
+                ensure!(index > 0, "got the wrong time record of forcing");
+                Ok((year, 1, index as usize))
+            }
+            GroupBy::Day => bail!("DEF_forcing%groupby = 'day' is not ported"),
         }
     }
 }
@@ -575,12 +630,16 @@ impl GriddedForcing {
             };
             values.push(field);
         }
-        // `metpreprocess`（JRA3Q）：比湿截到饱和比湿。
+        // `metpreprocess`（JRA3Q、IsoGSM）：比湿截到饱和比湿；JRA3Q 另把负降水截成 0。
+        let clamp_precipitation = self.config.dataset.trim() == "JRA3Q";
         #[allow(clippy::needless_range_loop)] // 同一格要同时读 t、p 并改 q
         for i in 0..n {
             let saturation = colm_core::saturation_specific_humidity(values[0][i], values[2][i])?;
             if saturation.specific_humidity < values[1][i] {
                 values[1][i] = saturation.specific_humidity;
+            }
+            if clamp_precipitation && values[3][i] < 0.0 {
+                values[3][i] = 0.0;
             }
         }
         let mut out = CellForcing {
