@@ -411,13 +411,8 @@ fn run_spatial(
             reservoir_method == 1,
             "unsupported reservoir operation method {reservoir_method}"
         );
-        // 水库只接了单独打开的路径：与堤防、分汊、漫滩回馈、LULCC 的组合都还没对过。
+        // 水库可以与分汊、堤防同开；与漫滩回馈、LULCC 的组合还没对过。
         for (field, on) in [
-            ("DEF_USE_LEVEE", logical_field(&document, "DEF_USE_LEVEE")?),
-            (
-                "DEF_USE_BIFURCATION",
-                logical_field(&document, "DEF_USE_BIFURCATION")?,
-            ),
             (
                 "DEF_GridRiverLake_FloodFeedback",
                 logical_field(&document, "DEF_GridRiverLake_FloodFeedback")?,
@@ -739,10 +734,25 @@ fn run_spatial_segment(
             )
         })
         .transpose()?;
+    let reservoir = if integer_field(document, "DEF_Reservoir_Method")? > 0 {
+        Some(colm_runtime::river::reservoir::Reservoir::read(
+            Path::new(&string_field(document, "DEF_ReservoirPara_file")?),
+            &network,
+            integer_field(document, "DEF_Reservoir_Method")?,
+        )?)
+    } else {
+        None
+    };
     let levee = if logical_field(document, "DEF_USE_LEVEE")? {
+        // 水库表里的单元流域（`lake_type == 2`）上游强制无堤。
+        let reservoir_cells = reservoir.as_ref().map_or_else(
+            || vec![false; network.len()],
+            |r| r.of_catchment.iter().map(Option::is_some).collect(),
+        );
         Some(colm_runtime::river::levee::Levee::read(
             Path::new(&string_field(document, "DEF_UnitCatchment_file")?),
             &network,
+            &reservoir_cells,
         )?)
     } else {
         None
@@ -756,15 +766,6 @@ fn run_spatial_segment(
         None
     };
     let river_start = river_restart_path(&segment.input, name, &start_label, year);
-    let reservoir = if integer_field(document, "DEF_Reservoir_Method")? > 0 {
-        Some(colm_runtime::river::reservoir::Reservoir::read(
-            Path::new(&string_field(document, "DEF_ReservoirPara_file")?),
-            &network,
-            integer_field(document, "DEF_Reservoir_Method")?,
-        )?)
-    } else {
-        None
-    };
     let mut river_writer = river_writer;
     if let (Some(writer), Some(reservoir)) = (river_writer.as_mut(), reservoir.as_ref()) {
         writer.reservoir_ids = Some(reservoir.grand_id.clone());

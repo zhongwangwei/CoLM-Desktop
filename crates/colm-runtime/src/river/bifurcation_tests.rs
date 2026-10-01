@@ -64,6 +64,7 @@ fn water_flows_down_the_surface_slope_and_is_conserved() {
         &volwater,
         60.0,
         &[0.0, 0.0],
+        &[],
         &mut veloc,
         &mut momen,
     );
@@ -93,6 +94,7 @@ fn an_empty_donor_cannot_send_water() {
         &volwater,
         60.0,
         &[0.0, 0.0],
+        &[],
         &mut veloc,
         &mut momen,
     );
@@ -109,7 +111,15 @@ fn ordinary_outflow_takes_priority_over_bifurcation() {
     // 普通汇流已把上游在本子步内的蓄量全部用完：分汊一点也不能出。
     let normal = [volwater[0] / 60.0, 0.0];
     let flux = bif.calc(
-        &network, &wdsrf, &wdsrf, &volwater, 60.0, &normal, &mut veloc, &mut momen,
+        &network,
+        &wdsrf,
+        &wdsrf,
+        &volwater,
+        60.0,
+        &normal,
+        &[],
+        &mut veloc,
+        &mut momen,
     );
     assert_eq!(flux.hflux_lev[0], 0.0);
     assert_eq!(flux.hflux_sum, vec![0.0, 0.0]);

@@ -271,6 +271,18 @@ impl RiverModel {
         match (levee.as_ref(), levsto) {
             (Some(levee), levsto) => {
                 let mut levsto = levsto.unwrap_or_else(|| vec![0.0; n]);
+                // 水库单元流域的堤内蓄量无法并进可见蓄量（它的水在 `volresv` 里）：上游报错。
+                if let Some(reservoir) = reservoir.as_ref() {
+                    ensure!(
+                        reservoir
+                            .of_catchment
+                            .iter()
+                            .zip(&levsto)
+                            .all(|(r, &protected)| r.is_none() || protected <= 0.0),
+                        "protected storage exists on a reservoir cell; levee-to-reservoir restart \
+                         mapping is ambiguous"
+                    );
+                }
                 for ((protected, visible), &has) in
                     levsto.iter_mut().zip(&mut state.volwater).zip(&levee.has)
                 {
@@ -569,6 +581,13 @@ struct SystemResult<'a> {
     reservoirs: Vec<(usize, f64, [f64; 4])>,
 }
 
+/// 分汊子步里看到的水库：哪些单元流域是已建成的水库、它们的库容，以及要改写的出入流。
+struct ReservoirView<'r> {
+    built: &'r [Option<usize>],
+    reservoirs: &'r [(usize, f64, [f64; 4])],
+    q: &'r mut [(f64, f64)],
+}
+
 /// 一次汇流里分汊要带进带出的东西（全网一个河系，单元流域下标即全局序号）。
 struct BifurcationRun<'a> {
     bif: &'a bifurcation::Bifurcation,
@@ -838,6 +857,11 @@ fn route_system<'a>(
                 &mut faces,
                 &mut sums,
                 &mut bif_sum,
+                ReservoirView {
+                    built: &built,
+                    reservoirs: &reservoirs,
+                    q: &mut qresv,
+                },
             ),
             _ => dt_all,
         };
@@ -979,8 +1003,14 @@ fn bifurcation_substep(
     faces: &mut [Face],
     sums: &mut [(f64, f64, f64)],
     bif_sum: &mut [f64],
+    resv: ReservoirView<'_>,
 ) -> f64 {
     let n = faces.len();
+    // 已建成的水库用库容代替河道蓄量。
+    let volume = |k: usize| match resv.built[k] {
+        Some(j) => resv.reservoirs[j].1,
+        None => volwater[k],
+    };
     let push = |faces: &[Face], k: usize, value: fn(&Face) -> f64| {
         let mut total = 0.0;
         for &u in &system.upstream[k] {
@@ -1020,7 +1050,7 @@ fn bifurcation_substep(
         scale[k] = if !dt.is_finite() || dt <= 0.0 {
             0.0
         } else {
-            (volwater[k].max(0.0) / (normal[k] * dt)).min(1.0)
+            (volume(k).max(0.0) / (normal[k] * dt)).min(1.0)
         };
         normal[k] *= scale[k];
     }
@@ -1037,10 +1067,18 @@ fn bifurcation_substep(
         };
         faces[k].hflux *= factor;
         faces[k].mflux *= factor;
+        if let Some(j) = resv.built[k] {
+            resv.q[j].1 = faces[k].hflux;
+        }
     }
     for k in 0..n {
-        sums[k].0 = faces[k].hflux - push(faces, k, |face| face.hflux);
+        let inflow = push(faces, k, |face| face.hflux);
+        sums[k].0 = faces[k].hflux - inflow;
         sums[k].1 = faces[k].mflux - push(faces, k, |face| face.mflux);
+        // 水库入流取缩放后上游推来的出口通量（`qresv_in = hflux_sumups`）。
+        if let Some(j) = resv.built[k] {
+            resv.q[j].0 = inflow;
+        }
     }
     // `sync_global_routing_dt`：无效的河系子步长退回 `min(10, dt_res)`，再取全局最小。
     for dt in dt_sys.iter_mut() {
@@ -1049,6 +1087,11 @@ fn bifurcation_substep(
         }
     }
     let dt = dt_sys.iter().fold(f64::INFINITY, |a, &b| a.min(b));
+    let reservoir_volume: Vec<Option<f64>> = resv
+        .built
+        .iter()
+        .map(|b| b.map(|j| resv.reservoirs[j].1))
+        .collect();
     let flux = run.bif.calc(
         net,
         wdsrf,
@@ -1056,6 +1099,7 @@ fn bifurcation_substep(
         volwater,
         dt,
         &normal,
+        &reservoir_volume,
         &mut run.state.veloc,
         &mut run.state.momen,
     );

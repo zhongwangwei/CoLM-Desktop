@@ -65,11 +65,22 @@ fn read_vector(file: &netcdf::File, name: &str, n: usize, path: &Path) -> Result
 
 impl Levee {
     /// 读 `levee_frc`/`levee_hgt` 并做 `levee_init`（不接水库：`lake_type == 2` 的冲突处理不会出现）。
-    pub fn read(path: &Path, network: &RiverNetwork) -> Result<Self> {
+    ///
+    /// `reservoir_cells[i]` 为真表示单元流域 `i` 在水库表里（`lake_type == 2`，不论是否已建成）：
+    /// 上游在建几何之前把这些单元流域强制设成无堤。
+    pub fn read(path: &Path, network: &RiverNetwork, reservoir_cells: &[bool]) -> Result<Self> {
         let file = netcdf::open(path).with_context(|| format!("cannot open {}", path.display()))?;
         let n = network.len();
-        let frc = read_vector(&file, "levee_frc", n, path)?;
-        let hgt = read_vector(&file, "levee_hgt", n, path)?;
+        let mut frc = read_vector(&file, "levee_frc", n, path)?;
+        let mut hgt = read_vector(&file, "levee_hgt", n, path)?;
+        // `levee_init` 先做输入校验再处理水库冲突；冲突的单元流域按无效输入同样处理
+        // （`frc = 1`、`hgt = 0`），结果与上游先校验后覆盖相同。
+        for (i, &reservoir) in reservoir_cells.iter().enumerate() {
+            if reservoir {
+                frc[i] = 1.0;
+                hgt[i] = 0.0;
+            }
+        }
         Ok(Self::new(network, frc, hgt))
     }
 

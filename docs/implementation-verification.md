@@ -27087,3 +27087,27 @@ Rust：`FloodplainCurve::new` 与 `RiverNetwork::read` 加 `storage_fix` 参数�
 - 水库确实生效：3697 座坝里 3551 座在 2010 年已建成，全部参与调度；`qresv_out` 最大约 3.1e4 m³/s。
 - `cargo test --release -p colm-runtime -p colm-init -- --test-threads=1` 全过（含 `reservoir_tests.rs` 3 个）；`clippy --workspace --all-targets` 无告警。
 - 单点回归 138/140（nn/pni 没有 history，与以前相同）。回归脚本的 SKIP 加 `g1rs/g1rw/g1rwc`。
+
+## 第 472 轮：河道选项组合（一）：分汊 + 水库、堤防 + 水库
+
+**分汊 + 水库**（上游 `grid_riverlake_flow` 分汊分支与 `bifurcation_calc` 里的 `is_built_resv`）：
+- 普通出流限制里，已建成水库用 `volresv` 代替河道蓄量；
+- 缩放出口通量后，`qresv_out` 改写为缩放后的 `hflux_fc`；
+- 重新求和后，`qresv_in` 取上游推来的通量和 `hflux_sumups`；
+- `bifurcation_calc` 跳过任一端是已建成水库的路径；
+- 可用蓄量取 `volresv`，可见蓄量取 `max(volresv, 0)`。
+
+**堤防 + 水库**（`levee_init` 的 Bug L 守卫）：
+- 水库表里的单元流域（`lake_type == 2`，不论是否已建成）在建堤防几何之前就被强制设成无堤（`frc = 1`、`hgt = 0`）。Rust 在 `Levee::read` 里按同样效果处理。
+- 由此，"有堤且非水库"的各个条件自动成立，汇流与 history 不用另改。
+- 续跑里，水库单元流域若带着堤内蓄量，上游报错（`reservoir_fold_failed`），Rust 同样报错。
+
+**实测**（全 Rust 三段 vs 纯 Fortran 三段，1 天）：
+
+| 算例 | 结果 | 生效情况 |
+|---|---|---|
+| `g1br`（分汊 + 水库） | 续跑 5 个、history 2 个全部 `diff 0` | 148 条分汊路径连着已建成水库；路径动量与只开分汊的 `g1bf` 有 3257 处不同 |
+| `g1lr`（堤防 + 水库） | 续跑 5 个、history 2 个全部 `diff 0` | 上游日志：664 个单元流域因水库与堤防冲突被强制无堤 |
+| 重跑 `g1lv/g1bf/g1rs` | 仍然逐位 | |
+
+`cargo test --release -p colm-runtime` 全过，clippy 无告警。colm-rs 的拒绝表相应放开：仍拒绝堤防 + 分汊，以及任一选项与漫滩回馈、LULCC 的组合。

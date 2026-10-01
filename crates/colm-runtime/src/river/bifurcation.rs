@@ -242,6 +242,7 @@ impl Bifurcation {
         volwater: &[f64],
         dt: f64,
         normal_outgoing: &[f64],
+        reservoir: &[Option<f64>],
         veloc: &mut [f64],
         momen: &mut [f64],
     ) -> BifurcationFlux {
@@ -251,11 +252,21 @@ impl Bifurcation {
         let mut hflux_lev = vec![0.0; paths * levels];
         let mut hflux_sum = vec![0.0; n];
         let mut active = vec![false; paths];
+        // 已建成的水库（`reservoir[i] = Some(volresv)`）：可用蓄量就是库容，可见蓄量不小于 0。
         let storage: Vec<f64> = (0..n)
-            .map(|i| Self::available_storage(net, i, wdsrf[i], volwater[i]))
+            .map(|i| match reservoir.get(i).copied().flatten() {
+                Some(volresv) => volresv,
+                None => Self::available_storage(net, i, wdsrf[i], volwater[i]),
+            })
             .collect();
         // 无堤防：可见蓄量就是可用蓄量。
-        let visible = &storage;
+        let visible: Vec<f64> = (0..n)
+            .map(|i| match reservoir.get(i).copied().flatten() {
+                Some(volresv) => volresv.max(0.0),
+                None => storage[i],
+            })
+            .collect();
+        let is_reservoir = |i: usize| matches!(reservoir.get(i), Some(Some(_)));
         let mut total = vec![0.0; paths];
         let mut pth_rate = vec![1.0f64; paths];
         let mut layer_rate = vec![1.0f64; paths * levels];
@@ -265,8 +276,15 @@ impl Bifurcation {
         // Step 3：逐路径逐层的局部惯性更新与限流量。
         for p in 0..paths {
             let i_up = self.upst[p];
+            // 水库里的水静止：两端任一是已建成的水库都不走分汊。
+            if is_reservoir(i_up) {
+                continue;
+            }
             // 下游不在网络里：推到路径上的是填充值，跳过。
             let Some(i_dn) = self.down[p] else { continue };
+            if is_reservoir(i_dn) {
+                continue;
+            }
             if dt <= 0.0 {
                 continue;
             }
