@@ -221,7 +221,8 @@ impl SpatialRuntime {
                                 flood.infil_mm_s[index] = infiltration;
                             }
                         }
-                        river.step(&runoff, included, time_step_seconds)?;
+                        // `grid_riverlake_flow(idate(1), …)`：`TICKTIME` 之后的年份，即本步末。
+                        river.step(&runoff, included, time_step_seconds, clock.end_time.year)?;
                     }
                 }
                 // `hist_out` 在写记录的那一步先写河道部分（`hist_grid_riverlake_out`），它把河道量

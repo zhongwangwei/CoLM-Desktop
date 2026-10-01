@@ -27031,3 +27031,59 @@ Rust：`FloodplainCurve::new` 与 `RiverNetwork::read` 加 `storage_fix` 参数�
 - 全 Rust colm 段一天约 87 s：全网同步子步，只能单线程推进。
 - `cargo test --release -p colm-runtime -p colm-init -- --test-threads=1` 全过。多线程跑 colm-init 会有 39 个 HDF5 并发失败，与本轮无关。
 - `clippy --workspace --all-targets` 无告警。回归脚本的 SKIP 加 `g1bf/g1bw/g1bwc`。
+
+## 第 471 轮：水库（`DEF_Reservoir_Method = 1`）
+
+只接汇流内置的这一套：参数直接从单元流域 nc 读，即 `DEF_ReservoirPara_file` 指向 `grid_routing_data_15min.nc`，与上游示例相同。用到的变量是 `dam_GRAND_ID/dam_seq/dam_year/dam_TotalVol_mcm/dam_ConVol_mcm/dam_Qn/dam_Qf`，共 3697 座坝。
+
+**`river/reservoir.rs`**（`reservoir_init` + `reservoir_operation`）：
+- 参数表行序里落在网络中的坝依次编号，就是续跑 `volresv` 的次序（`resv_global_id`）。
+- 派生参数：
+  - 紧急库容 = 总库容 ×0.94；
+  - 调节库容 = 总库容 ×0.77；
+  - 正常库容 = `min(总库容×0.7, ConVol)`；
+  - 调节出流 = `(Qn+Qf)×0.5`。
+- 方法 1 四段调度的形状核对了 GIMPLE：
+  - 调节段为 `FMA(Qf-Qa, pow(·,0.1), Qa)`；
+  - 正常段为 `FMA(Qa-Qn, pow(·,3), Qn)`，`pow` 没有被展开；
+  - 低水段为 `pow(vol/Vn,0.5)·Qn`；
+  - 入流超过洪水出流时取 `max(qout, Qn + (qin-Qn)(vol-Vn)/(Ve-Vn))`。
+
+**汇流里的水库**：
+- 水库都在各自河系内部，所以仍按河系并行。
+- 年份是 `grid_riverlake_flow(idate(1))` 的年份。上游先 `TICKTIME` 再调用，所以是本步末的年份；`year >= dam_year` 算作已建成。
+- 每次汇流开头，对已建成的水库：
+  - `volresv` 是 `spval` 时由水深补算，否则水深由库容反算；
+  - 动量、流速置 0；
+  - 径流直接进库，水深不随之更新；
+  - `volwater_ucat` 整个汇流期间都不动。
+- 每个子步：
+  - 水库没有出口面通量（`zgrad_dn` 也清零）；
+  - 求和后，入流取 `-sum_hflux`；库容大于总库容的 1e-4 时按调度出流，否则不放水；
+  - 出流作为出口通量 `hflux`，`mflux = qout·sqrt(2g·h)`，再推到下游；
+  - 洼地上的水库不放水；
+  - 子步长只受蓄量限制，用 `volresv`；
+  - 更新后水深由库容反算，动量为 0；洼地溢出量计为出流。
+- 累加：`acctime_resv += dt`，`a_volresv/a_qresv_in/a_qresv_out = FMA(·, dt, ·)`。
+
+**续跑与 history：**
+- 河道续跑在 `acc_rnof_uc` 之后、`volwater_ucat` 之前写 `reservoir` 维、`gridriver_reservoir_identity`（逐水库 `(1, dam_seq)`）与 `volresv`。读回时核对标识。
+- unitcat：
+  - 文件骨架里写 `reservoir` 维与 `resv_GRAND_ID`。第一次对比只差这一项，上游在 `route_hist_begin` 里写；补上后一致。
+  - 每条记录写 `volresv/qresv_in/qresv_out`，`acctime_resv > 0` 时取均值，否则为 `spval`。
+- `.river` 旁车加 `hist_acctime_resv/volresv/qresv_in/qresv_out`。
+
+**拒绝**：水库与堤防、分汊、漫滩回馈、LULCC 的组合在 colm-rs 入口拒绝；只支持方法 1。
+
+**实测**（g1 区域 + `DEF_Reservoir_Method = 1`，参数取自 Data01 的单元流域文件；全 Rust 三段 vs 纯 Fortran 三段）：
+
+| 算例 | 内容 | 结果 |
+|---|---|---|
+| `g1rs`（1 天，history DAILY） | 续跑 5 个（含 `volresv` 与水库标识），history 2 个（含 `volresv/qresv_in/qresv_out/resv_GRAND_ID`） | 全部 `diff 0` |
+| `g1rw`（history MONTHLY、续跑 DAILY） | 续跑 5 个；`.river` 旁车（含四项水库累加）`diff 0` | 全部 `diff 0` |
+| `g1rwc`（各自从第 2 天续跑接着跑 1 天） | 续跑 8 个，history 2 个 | 全部 `diff 0` |
+| 改动后重跑 `g1t/g1lv/g1ff/g1bf` | 只跑 colm 段 | 仍然逐位 |
+
+- 水库确实生效：3697 座坝里 3551 座在 2010 年已建成，全部参与调度；`qresv_out` 最大约 3.1e4 m³/s。
+- `cargo test --release -p colm-runtime -p colm-init -- --test-threads=1` 全过（含 `reservoir_tests.rs` 3 个）；`clippy --workspace --all-targets` 无告警。
+- 单点回归 138/140（nn/pni 没有 history，与以前相同）。回归脚本的 SKIP 加 `g1rs/g1rw/g1rwc`。

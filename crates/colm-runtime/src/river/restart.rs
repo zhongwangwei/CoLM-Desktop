@@ -11,6 +11,7 @@ use std::path::Path;
 use anyhow::{ensure, Context, Result};
 
 use super::network::RiverNetwork;
+use super::reservoir::Reservoir;
 use super::{BifurcationState, RiverHistory, RiverState};
 
 const SCHEMA: i32 = 2;
@@ -32,7 +33,14 @@ fn read_vector(file: &netcdf::File, name: &str, n: usize, path: &Path) -> Result
 }
 
 /// 读回河道状态（冷启动文件与续跑文件同形）。
-pub fn read_river_state(path: &Path, network: &RiverNetwork) -> Result<RiverState> {
+///
+/// 开水库时（`reservoir` 非空）读 `volresv`，并按 `validate_gridriver_reservoir_identity`
+/// 核对逐水库的 `(版本, dam_seq)`。
+pub fn read_river_state(
+    path: &Path,
+    network: &RiverNetwork,
+    reservoir: Option<&Reservoir>,
+) -> Result<RiverState> {
     let file = netcdf::open(path).with_context(|| format!("cannot open {}", path.display()))?;
     let n = network.len();
     let scalar_i32 = |name: &str| -> Result<i32> {
@@ -110,6 +118,23 @@ pub fn read_river_state(path: &Path, network: &RiverNetwork) -> Result<RiverStat
         },
         levdph: None,
         // 标记为 1 时上一子步水深与路径状态都必须在；签名由构造模型时核对。
+        volresv: match reservoir {
+            Some(reservoir) if !reservoir.is_empty() => {
+                let identity = file
+                    .variable("gridriver_reservoir_identity")
+                    .with_context(|| {
+                        format!("{} has no gridriver_reservoir_identity", path.display())
+                    })?
+                    .get_values::<f64, _>(..)?;
+                ensure!(
+                    identity == reservoir.identity(),
+                    "{} was written for a different reservoir table",
+                    path.display()
+                );
+                Some(read_vector(&file, "volresv", reservoir.len(), path)?)
+            }
+            _ => None,
+        },
         bifurcation: if bifurcation_flag == 1 {
             let matrix = |name: &str| -> Result<Vec<f64>> {
                 file.variable(name)
@@ -167,6 +192,7 @@ pub fn write_river_state(
     path: &Path,
     network: &RiverNetwork,
     state: &RiverState,
+    reservoir_identity: Option<&[f64]>,
     compression_level: u8,
 ) -> Result<()> {
     if let Some(parent) = path.parent() {
@@ -240,6 +266,21 @@ pub fn write_river_state(
     file.add_variable::<f64>("acctime_rnof", &[])?
         .put_values(&[state.acctime_rnof], ..)?;
     vector(&mut file, "acc_rnof_uc", &["ucatch"], &state.acc_rnof, true)?;
+    // 水库：`reservoir` 维、`gridriver_reservoir_identity`、`volresv`（在 `volwater_ucat` 之前）。
+    if let (Some(volresv), Some(identity)) = (&state.volresv, reservoir_identity) {
+        if !volresv.is_empty() {
+            file.add_dimension("reservoir", volresv.len())?;
+            file.add_dimension("gridriver_reservoir_identity_field", 2)?;
+            vector(
+                &mut file,
+                "gridriver_reservoir_identity",
+                &["reservoir", "gridriver_reservoir_identity_field"],
+                identity,
+                false,
+            )?;
+            vector(&mut file, "volresv", &["reservoir"], volresv, true)?;
+        }
+    }
     vector(
         &mut file,
         "volwater_ucat",
@@ -325,6 +366,7 @@ pub fn write_river_history(path: &Path, history: &RiverHistory) -> Result<()> {
         .zip(&history.levdph)
         .flat_map(|(s, d)| [("hist_levsto", s), ("hist_levdph", d)]);
     let bifout = history.bifout.iter().map(|b| ("hist_bifout", b));
+    let reservoirs = history.acctime_resv.as_ref().map_or(0, Vec::len);
     let fields = HISTORY_FIELDS
         .iter()
         .copied()
@@ -335,6 +377,20 @@ pub fn write_river_history(path: &Path, history: &RiverHistory) -> Result<()> {
         let mut variable = file.add_variable::<f64>(name, &["ucatch"])?;
         variable.put_attribute("missing_value", colm_core::MISSING)?;
         variable.put_values(values, ..)?;
+    }
+    // 水库累加（`reservoir` 维）。
+    if reservoirs > 0 {
+        file.add_dimension("reservoir", reservoirs)?;
+        for (name, values) in [
+            ("hist_acctime_resv", &history.acctime_resv),
+            ("hist_volresv", &history.volresv),
+            ("hist_qresv_in", &history.qresv_in),
+            ("hist_qresv_out", &history.qresv_out),
+        ] {
+            let mut variable = file.add_variable::<f64>(name, &["reservoir"])?;
+            variable.put_attribute("missing_value", colm_core::MISSING)?;
+            variable.put_values(values.as_ref().expect("reservoir history"), ..)?;
+        }
     }
     // 分汊路径的累加（`ncio_write_serial` 的二维量，不带缺测属性）。
     if let (Some(lev), Some(acctime)) = (&history.bifflw_lev, &history.bifflw_acctime) {
@@ -365,6 +421,7 @@ pub fn read_river_history(
     n: usize,
     levee: bool,
     bifurcation: Option<(usize, usize)>,
+    reservoirs: Option<usize>,
 ) -> Result<RiverHistory> {
     let file = netcdf::open(path).with_context(|| format!("cannot open {}", path.display()))?;
     let mut fields = HISTORY_FIELDS
@@ -373,6 +430,14 @@ pub fn read_river_history(
         .collect::<Result<Vec<_>>>()?
         .into_iter();
     let mut next = || fields.next().expect("ten river-history fields");
+    // 没有水库时上游不写这几项（`totalnumresv > 0` 才写）。
+    let read_resv = |name: &str| -> Result<Option<Vec<f64>>> {
+        match reservoirs {
+            Some(0) => Ok(Some(Vec::new())),
+            Some(m) => Ok(Some(read_vector(&file, name, m, path)?)),
+            None => Ok(None),
+        }
+    };
     Ok(RiverHistory {
         acctime: next(),
         wdsrf: next(),
@@ -399,5 +464,9 @@ pub fn read_river_history(
         bifflw_acctime: bifurcation
             .map(|(paths, _)| read_vector(&file, "hist_bifflw_acctime", paths, path))
             .transpose()?,
+        acctime_resv: read_resv("hist_acctime_resv")?,
+        volresv: read_resv("hist_volresv")?,
+        qresv_in: read_resv("hist_qresv_in")?,
+        qresv_out: read_resv("hist_qresv_out")?,
     })
 }

@@ -405,11 +405,33 @@ fn run_spatial(
             );
         }
     }
+    let reservoir_method = integer_field(&document, "DEF_Reservoir_Method")?;
+    if reservoir_method > 0 {
+        ensure!(
+            reservoir_method == 1,
+            "unsupported reservoir operation method {reservoir_method}"
+        );
+        // 水库只接了单独打开的路径：与堤防、分汊、漫滩回馈、LULCC 的组合都还没对过。
+        for (field, on) in [
+            ("DEF_USE_LEVEE", logical_field(&document, "DEF_USE_LEVEE")?),
+            (
+                "DEF_USE_BIFURCATION",
+                logical_field(&document, "DEF_USE_BIFURCATION")?,
+            ),
+            (
+                "DEF_GridRiverLake_FloodFeedback",
+                logical_field(&document, "DEF_GridRiverLake_FloodFeedback")?,
+            ),
+            ("DEF_USE_LULCC", logical_field(&document, "DEF_USE_LULCC")?),
+        ] {
+            ensure!(
+                !on,
+                "DEF_Reservoir_Method > 0 together with {field} is not ported to the Rust river \
+                 model; run this case with --engine fortran"
+            );
+        }
+    }
     for (field, unported) in [
-        (
-            "DEF_Reservoir_Method > 0",
-            integer_field(&document, "DEF_Reservoir_Method")? > 0,
-        ),
         (
             "DEF_USE_TRACER",
             logical_field(&document, "DEF_USE_TRACER")?,
@@ -734,7 +756,21 @@ fn run_spatial_segment(
         None
     };
     let river_start = river_restart_path(&segment.input, name, &start_label, year);
-    let river_state = colm_runtime::river::restart::read_river_state(&river_start, &network)?;
+    let reservoir = if integer_field(document, "DEF_Reservoir_Method")? > 0 {
+        Some(colm_runtime::river::reservoir::Reservoir::read(
+            Path::new(&string_field(document, "DEF_ReservoirPara_file")?),
+            &network,
+            integer_field(document, "DEF_Reservoir_Method")?,
+        )?)
+    } else {
+        None
+    };
+    let mut river_writer = river_writer;
+    if let (Some(writer), Some(reservoir)) = (river_writer.as_mut(), reservoir.as_ref()) {
+        writer.reservoir_ids = Some(reservoir.grand_id.clone());
+    }
+    let river_state =
+        colm_runtime::river::restart::read_river_state(&river_start, &network, reservoir.as_ref())?;
     // `restore_river_history_acc_restart`：陆面旁车标记 `history_river_required = 1` 时读回河道累加。
     let river_history = {
         let sidecar = history_sidecar_path(&block_files[0].time)?;
@@ -763,6 +799,7 @@ fn run_spatial_segment(
                 network.len(),
                 levee.is_some(),
                 bifurcation.as_ref().map(|bif| (bif.paths(), bif.levels)),
+                reservoir.as_ref().map(|r| r.len()),
             )?)
         } else {
             None
@@ -775,6 +812,7 @@ fn run_spatial_segment(
         real_field(document, "DEF_GRIDBASED_ROUTING_MAX_DT")?,
         levee,
         bifurcation,
+        reservoir,
     )?;
     if let Some(history) = river_history {
         river.history = history;
@@ -950,6 +988,7 @@ fn run_spatial_segment(
                         &river_restart_path(&out.join("restart"), name, &label, year),
                         &river.network,
                         &river.state,
+                        river.reservoir.as_ref().map(|r| r.identity()).as_deref(),
                         rest_compression,
                     )?;
                 }
@@ -991,6 +1030,7 @@ fn run_spatial_segment(
             &river_restart_path(&out.join("restart"), name, &label, year),
             &river.network,
             &river.state,
+            river.reservoir.as_ref().map(|r| r.identity()).as_deref(),
             rest_compression,
         )?;
     }
@@ -1286,6 +1326,8 @@ fn lulcc_transition(
             &path,
             &network,
             &state,
+            // 水库与 LULCC 的组合在入口就拒绝了。
+            None,
             u8::try_from(integer_field(document, "DEF_REST_CompressLevel")?)
                 .context("DEF_REST_CompressLevel must fit 0..=9")?,
         )?;

@@ -45,6 +45,8 @@ pub struct RiverHistoryWriter {
     stem: String,
     lon: Vec<f64>,
     lat: Vec<f64>,
+    /// 开水库时的 `dam_GRAND_ID`（按水库序号），建 unitcat 文件骨架时写成 `resv_GRAND_ID`。
+    pub reservoir_ids: Option<Vec<i32>>,
 }
 
 /// `worker_remap_data_grid2pset`（填充值 `spval`）：`average` 除以非缺测份的面积和，`sum` 不除。
@@ -153,6 +155,7 @@ impl RiverHistoryWriter {
             stem: stem.into(),
             lon,
             lat,
+            reservoir_ids: None,
         })
     }
 
@@ -343,7 +346,38 @@ impl RiverHistoryWriter {
                 .collect::<Vec<_>>();
             bifflw = Some((levels, mean));
         }
-        self.write_unitcat(network, record, end, window_seconds, &unitcat, bifflw)?;
+        // 水库（`totalnumresv > 0`）：逐水库按 `acctime_resv` 平均，没累加时为 `spval`。
+        let mut reservoirs = Vec::new();
+        if let Some(acctime) = history.acctime_resv.as_ref().filter(|a| !a.is_empty()) {
+            for (name, long_name, units, values) in [
+                ("volresv", "reservoir water volume", "m^3", &history.volresv),
+                ("qresv_in", "reservoir inflow", "m^3/s", &history.qresv_in),
+                (
+                    "qresv_out",
+                    "reservoir outflow",
+                    "m^3/s",
+                    &history.qresv_out,
+                ),
+            ] {
+                let mean = values
+                    .as_ref()
+                    .expect("reservoir history")
+                    .iter()
+                    .zip(acctime)
+                    .map(|(&v, &t)| if t > 0.0 { v / t } else { SPVAL })
+                    .collect::<Vec<_>>();
+                reservoirs.push((name, long_name, units, mean));
+            }
+        }
+        self.write_unitcat(
+            network,
+            record,
+            end,
+            window_seconds,
+            &unitcat,
+            bifflw,
+            &reservoirs,
+        )?;
 
         // 回到 patch（`*_pch`），再按各自的过滤与分母聚合到 history 网格。
         let per_area = |values: &[f64], area: &[f64]| {
@@ -419,6 +453,7 @@ impl RiverHistoryWriter {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn write_unitcat(
         &self,
         network: &RiverNetwork,
@@ -427,6 +462,7 @@ impl RiverHistoryWriter {
         window_seconds: f64,
         fields: &[(&str, &str, &str, Vec<f64>)],
         bifflw: Option<(usize, Vec<f64>)>,
+        reservoirs: &[(&str, &str, &str, Vec<f64>)],
     ) -> Result<()> {
         std::fs::create_dir_all(&self.directory)
             .with_context(|| format!("cannot create {}", self.directory.display()))?;
@@ -474,6 +510,13 @@ impl RiverHistoryWriter {
             )?;
             mask.put_attribute("units", "100%")?;
             mask.put_values(&to_grid(&self.allups_mask), ..)?;
+            // 水库轴属于文件骨架（`route_hist_begin`）：`reservoir` 维与 `resv_GRAND_ID`。
+            if let Some(ids) = self.reservoir_ids.as_ref().filter(|ids| !ids.is_empty()) {
+                file.add_dimension("reservoir", ids.len())?;
+                let mut variable = file.add_variable::<i32>("resv_GRAND_ID", &["reservoir"])?;
+                variable.put_values(ids, ..)?;
+                variable.put_attribute("long_name", "reservoir GRAND ID")?;
+            }
             for (name, long_name, units, _) in fields {
                 let mut variable =
                     file.add_variable::<f64>(name, &["time", "lat_ucat", "lon_ucat"])?;
@@ -521,6 +564,21 @@ impl RiverHistoryWriter {
             file.variable_mut("f_bifflw_lev")
                 .context("f_bifflw_lev disappeared")?
                 .put_values(&values, (t..t + 1, .., ..))?;
+        }
+        // `route_hist_write_resv`（单文件）：`vector_gather_and_write` 到 `(time, reservoir)`。
+        for (name, long_name, units, values) in reservoirs {
+            if first {
+                if file.dimension("reservoir").is_none() {
+                    file.add_dimension("reservoir", values.len())?;
+                }
+                let mut variable = file.add_variable::<f64>(name, &["time", "reservoir"])?;
+                variable.put_attribute("long_name", *long_name)?;
+                variable.put_attribute("units", *units)?;
+                variable.put_attribute("missing_value", SPVAL)?;
+            }
+            file.variable_mut(name)
+                .with_context(|| format!("{name} disappeared"))?
+                .put_values(values, (t..t + 1, ..))?;
         }
         Ok(())
     }
