@@ -82,6 +82,8 @@ pub struct GroundFluxState {
     pub momentum_integral: f64,
     pub heat_integral: f64,
     pub moisture_integral: f64,
+    /// `raw_out`：参考高度到地面的水汽阻抗 [s/m]（示踪物分馏的 `raw_trc`）。
+    pub moisture_resistance_s_m: f64,
 }
 
 /// Ports `MOD_GroundFluxes:GroundFluxes`, including its six stability
@@ -236,6 +238,7 @@ pub fn ground_fluxes(input: GroundFluxInput) -> Result<GroundFluxState> {
         ),
         momentum_roughness_m: momentum_roughness,
         heat_roughness_m: heat_roughness,
+        moisture_resistance_s_m: moisture_resistance,
         dimensionless_height,
         bulk_richardson_number,
         friction_velocity_m_s: profile.friction_velocity_m_s,

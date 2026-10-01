@@ -23,10 +23,10 @@ use super::super::{
 };
 use super::common::{
     aquifer_actual_water, check_isotope_aquifer, release_leaf_iso_storage, snow_column,
-    snow_vapor_diffusion_unregistered, soil_slot, FrostShape, SnowColumn, TracerCtx,
+    snow_vapor_diffusion, soil_slot, EvapKinetics, FrostShape, SnowColumn, TracerCtx,
     DEFAULT_LAYER_TEMP_K,
 };
-use super::{ensure_ported, SoilWaterOptions};
+use super::SoilWaterOptions;
 use crate::tracer::TracerPhysics;
 use crate::FREEZING_K;
 
@@ -80,18 +80,18 @@ pub struct WetlandInput<'a> {
     pub dz_soisno: &'a [f64; SOISNO_LAYERS],
     /// `qflx_irrig_drip + qflx_irrig_flood + qflx_irrig_paddy` [mm/s]。
     pub qflx_irrig_ground: f64,
-    /// `forc_us`/`forc_vs`：只进开阔水面的动力分馏（未移植）。
+    /// `forc_us`/`forc_vs`：开阔水面的动力分馏。
     pub forc_us: f64,
     pub forc_vs: f64,
     /// `waterstorage_trc_ground`（CoLMMAIN 总是给出）。
     pub waterstorage_patch: Option<f64>,
     /// `snow_qout_layer_trc(snl+1:0)`。
     pub snow_qout_layer: Option<&'a [f64; MAX_SNOW_LAYERS]>,
-    /// `forc_q`：只进分馏（未移植）。
+    /// `forc_q`：分馏的近地面相对湿度。
     pub forc_q: Option<f64>,
     /// `forc_psrf`：雪层气相扩散与分馏。
     pub forc_psrf: Option<f64>,
-    /// `tleaf`、`rst`、`raw_trc`：只进叶片 NSS 分馏（未移植）。
+    /// `tleaf`、`rst`、`raw_trc`：叶片 NSS。
     pub tleaf: Option<f64>,
     /// `lai`：叶面积消失时释放叶片同位素异常。
     pub lai: Option<f64>,
@@ -101,6 +101,8 @@ pub struct WetlandInput<'a> {
     pub dz_sno: Option<&'a [f64; MAX_SNOW_LAYERS]>,
     /// 逐示踪物的 `tracer_forcing_vapor_value(itrc, ipatch)`。
     pub vapor_ratio: &'a [f64],
+    /// 逐示踪物的 `tracer_forcing_has_vapor(itrc, ipatch)`（`None` 即都没有）。
+    pub has_vapor: Option<&'a [bool]>,
 }
 
 /// `tracer_wetland`。
@@ -126,13 +128,8 @@ pub fn tracer_wetland(
         input.vapor_ratio.len(),
         set.len()
     );
-    let snow_vapor_block = options.soil_vapor_diffusion
-        && input.snl < 0
-        && input.dz_sno.is_some()
-        && input.forc_psrf.is_some();
-    for tracer in set.tracers.iter().filter(|t| t.uses_land_water_transport()) {
-        ensure_ported(tracer, physics, false, snow_vapor_block, "tracer_wetland")?;
-    }
+    // 开阔水面风速 `sqrt(FMA(us, us, vs*vs))`（GIMPLE 去掉了 `max(·,0)`）。
+    let wind = input.forc_us.mul_add(input.forc_us, input.forc_vs * input.forc_vs).sqrt();
 
     let dt = input.deltim;
     let nl = SOIL_LAYERS as i32;
@@ -151,7 +148,16 @@ pub fn tracer_wetland(
         if !tracer.uses_land_water_transport() {
             continue;
         }
-        let ctx = TracerCtx::new(tracer, itrc, input.vapor_ratio[itrc], options.subl_skin_mm);
+        let ctx = TracerCtx::new(
+            tracer,
+            itrc,
+            physics,
+            input.vapor_ratio[itrc],
+            options.subl_skin_mm,
+            input.forc_q,
+            input.forc_psrf,
+            EvapKinetics::OpenWater { wind },
+        );
         let nonvolatile = ctx.nonvolatile;
         let mut p = state.pools[itrc].clone();
         let (aquifer_ref_water, aquifer_ref_mass) = if tracer.is_isotope() {
@@ -218,10 +224,12 @@ pub fn tracer_wetland(
                 qsubl_snow: input.qsubl_snow,
                 qfros_snow: input.qfros_snow,
                 wliq_soisno: input.wliq_soisno,
+                wice_soisno: input.wice_soisno,
                 wliq_soisno_bef: input.wliq_soisno_bef,
                 wice_soisno_bef: input.wice_soisno_bef,
                 snow_qout_layer: input.snow_qout_layer,
                 layer_temp: &layer_temp,
+                snowmelt_equilibration: options.snowmelt_equilibration,
             };
             let outcome = snow_column(&ctx, state, &mut p, &col, FrostShape::Fused);
             trc_gwat_snow_local = outcome.trc_gwat_snow;
@@ -229,7 +237,8 @@ pub fn tracer_wetland(
             if let (true, Some(dz_sno), Some(psrf)) =
                 (options.soil_vapor_diffusion, input.dz_sno, input.forc_psrf)
             {
-                snow_vapor_diffusion_unregistered(
+                snow_vapor_diffusion(
+                    &ctx,
                     &mut p,
                     input.snl,
                     input.wliq_soisno,
@@ -359,10 +368,11 @@ pub fn tracer_wetland(
 
         // 露与霜：大气输入。
         if q_dew_in + q_frost_in > TRC_TINY {
-            let trc_dew_input = q_dew_in * ctx.deposition_ratio;
-            pool_tracer = q_frost_in.mul_add(ctx.deposition_ratio, pool_tracer + trc_dew_input);
+            let trc_dew_input = q_dew_in * ctx.deposition_ratio_for(layer_temp(1), false);
+            let frost_ratio = ctx.deposition_ratio_for(layer_temp(1), true);
+            pool_tracer = q_frost_in.mul_add(frost_ratio, pool_tracer + trc_dew_input);
             let acc = &mut state.acc[itrc];
-            acc.precip = q_frost_in.mul_add(ctx.deposition_ratio, acc.precip + trc_dew_input);
+            acc.precip = q_frost_in.mul_add(frost_ratio, acc.precip + trc_dew_input);
             acc.water_precip = (acc.water_precip + q_dew_in) + q_frost_in;
         }
 
@@ -380,14 +390,96 @@ pub fn tracer_wetland(
             "wetland mixed pool",
         )?;
 
-        // 4) 蒸发/升华/蒸腾按池比值离开（不分馏）。
+        // 4) 蒸发/升华按大气交换的签名离开，蒸腾按池比值（分馏时经叶片 NSS）。
         let loss_water = (q_evap_out + q_subl_out) + q_etr_out;
         let pool_ratio = if pool_water.abs() > TRC_WATER_MIN_FOR_RATIO {
             pool_tracer / pool_water
         } else {
             r_atm
         };
-        let (trc_loss, trc_evap_subl, trc_etr_loss, transp_output_tracer) = if nonvolatile {
+        let fractionate_pool_loss =
+            ctx.active && pool_water > TRC_WATER_MIN_FOR_RATIO && pool_tracer > TRC_TINY;
+        let (trc_loss, trc_evap_subl, trc_etr_loss, transp_output_tracer) = if fractionate_pool_loss {
+            // 对一个临时的有限池依次扣，单步大量损失也能积分残余水的富集（`:2715-2789`）。
+            let mut pool_water_loss = pool_water;
+            let mut pool_tracer_loss = pool_tracer;
+            let loss_liq_avail = q_evap_out.min(pool_water_loss.max(0.0));
+            let mut trc_evap_loss =
+                ctx.atmospheric_loss(pool_tracer_loss, pool_water_loss, loss_liq_avail, layer_temp(1), false);
+            if q_evap_out > loss_liq_avail {
+                trc_evap_loss = (q_evap_out - loss_liq_avail).mul_add(pool_ratio, trc_evap_loss);
+            }
+            pool_tracer_loss -= trc_evap_loss;
+            pool_water_loss -= q_evap_out;
+            let mut pool_ratio_loss = if pool_water_loss > TRC_WATER_MIN_FOR_RATIO {
+                pool_tracer_loss / pool_water_loss
+            } else {
+                pool_ratio
+            };
+            let loss_ice_avail = q_subl_out.min(pool_water_loss.max(0.0));
+            let mut trc_subl_loss =
+                ctx.atmospheric_loss(pool_tracer_loss, pool_water_loss, loss_ice_avail, layer_temp(1), true);
+            if q_subl_out > loss_ice_avail {
+                trc_subl_loss = (q_subl_out - loss_ice_avail).mul_add(pool_ratio_loss, trc_subl_loss);
+            }
+            pool_tracer_loss -= trc_subl_loss;
+            pool_water_loss -= q_subl_out;
+            pool_ratio_loss = if pool_water_loss > TRC_WATER_MIN_FOR_RATIO {
+                pool_tracer_loss / pool_water_loss
+            } else {
+                pool_ratio
+            };
+            let transp_source_tracer = q_etr_out * pool_ratio_loss;
+            let mut transp_output_tracer = transp_source_tracer;
+            if let (true, Some(tleaf), Some(forc_q), Some(forc_psrf), Some(lai), Some(rst)) = (
+                q_etr_out > TRC_TINY,
+                input.tleaf,
+                input.forc_q,
+                input.forc_psrf,
+                input.lai,
+                input.rst,
+            ) {
+                let ra = input.ra.map_or(0.0, |ra| ra.max(0.0));
+                let has_vapor = input.has_vapor.is_some_and(|flags| flags[itrc]);
+                let vapor = if has_vapor {
+                    r_atm
+                } else {
+                    pool_ratio_loss / physics.alpha_liq_vap(tracer, tleaf).max(TRC_TINY)
+                };
+                let relhum_leaf = crate::tracer::frac::surface_relhum(forc_q, forc_psrf, tleaf, false);
+                let out = physics.transpiration_nss_ratio(
+                    tracer,
+                    &crate::tracer::frac::NssInput {
+                        source_ratio: pool_ratio_loss,
+                        vapor_ratio: vapor,
+                        temp_k: tleaf,
+                        relhum: relhum_leaf,
+                        psrf: forc_psrf,
+                        transp_water: q_etr_out,
+                        deltim: dt,
+                        leaf_area: lai,
+                        aerodynamic_resistance: ra,
+                        stomatal_resistance: rst,
+                        prev_delta_e: p.leaf_delta_e,
+                        prev_delta_b: p.leaf_delta_b,
+                        prev_peclet: p.leaf_peclet,
+                        prev_leaf_moles: p.leaf_water_moles,
+                    },
+                );
+                p.leaf_delta_e = out.new_delta_e;
+                p.leaf_delta_b = out.new_delta_b;
+                p.leaf_peclet = out.new_peclet;
+                p.leaf_water_moles = out.new_leaf_moles;
+                transp_output_tracer = q_etr_out * out.trans_ratio;
+                p.leaf_iso_storage = (p.leaf_iso_storage + transp_source_tracer) - transp_output_tracer;
+            }
+            (
+                (trc_evap_loss + trc_subl_loss) + transp_source_tracer,
+                trc_evap_loss + trc_subl_loss,
+                transp_source_tracer,
+                transp_output_tracer,
+            )
+        } else if nonvolatile {
             (0.0, 0.0, 0.0, 0.0)
         } else {
             let trc_subl_loss = pool_ratio * q_subl_out;

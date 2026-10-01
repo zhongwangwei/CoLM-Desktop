@@ -105,6 +105,8 @@ pub(crate) struct PcPatchFlux {
     pub(crate) fm: f64,
     pub(crate) fh: f64,
     pub(crate) fq: f64,
+    /// `raw_trc_out = max(raw, 0)`（`:2071`）。
+    pub(crate) raw: f64,
 }
 
 /// `(tl*tl)*(tl*tl)`：gfortran 的 `powmult` 展开。
@@ -1392,6 +1394,7 @@ pub(crate) fn leaf_temperature_pc(
     }
     Ok((
         PcPatchFlux {
+            raw: raw.max(0.0),
             taux,
             tauy,
             fseng,

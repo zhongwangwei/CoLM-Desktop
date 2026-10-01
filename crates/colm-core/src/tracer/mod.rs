@@ -7,6 +7,7 @@ pub mod conservation;
 pub mod descriptor;
 pub mod evap_limit;
 pub mod evapo;
+pub mod frac;
 pub mod hist;
 pub mod precip;
 pub mod snow;
@@ -26,19 +27,44 @@ pub use state::{
 };
 pub use precip::{tracer_precip, PrecipInput};
 
-/// 示踪物物理的全局开关（`DEF_TRACER_USE_FRACTIONATION` 等）。
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
+/// 示踪物物理的全局开关与分馏参数（`DEF_TRACER_USE_FRACTIONATION` 等）。
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TracerPhysics {
     /// `DEF_TRACER_USE_FRACTIONATION`。
     pub fractionation: bool,
+    /// `DEF_TRACER_KINETIC_SCHEME`。
+    pub kinetic_scheme: frac::KineticScheme,
+    /// `DEF_TRACER_ICE_SUPERSAT_SLOPE`。
+    pub ice_supersat_slope: f64,
+    /// `DEF_TRACER_CG_RELHUM_MAX`。
+    pub cg_relhum_max: f64,
+    /// `DEF_TRACER_OPEN_WATER_KINETIC`。
+    pub open_water_kinetic: frac::OpenWaterKinetic,
+    /// `DEF_TRACER_NSS_LEAF_WATER_PER_LAI`、`_PATH_LENGTH`、`_RB`。
+    pub nss_leaf_water_per_lai: f64,
+    pub nss_leaf_path_length: f64,
+    pub nss_leaf_rb: f64,
+}
+
+impl Default for TracerPhysics {
+    /// `MOD_Namelist.F90:421-442` 的默认值。
+    fn default() -> Self {
+        Self {
+            fractionation: false,
+            kinetic_scheme: frac::KineticScheme::Merlivat1978,
+            ice_supersat_slope: 0.003,
+            cg_relhum_max: 0.99,
+            open_water_kinetic: frac::OpenWaterKinetic::Mj79,
+            nss_leaf_water_per_lai: 0.12,
+            nss_leaf_path_length: 0.01,
+            nss_leaf_rb: 100.0,
+        }
+    }
 }
 
 impl TracerPhysics {
-    /// `tracer_fractionation_active(itrc)`：开关打开且是同位素。
-    ///
-    /// 上游还要求该同位素在分馏注册表里（O18/HDO）；分馏物理属于 T2，现在各过程在
-    /// 分馏生效时拒绝运行。
+    /// `tracer_fractionation_active(itrc)`：开关打开、是同位素、且在分馏注册表里（O18/HDO）。
     pub fn fractionation_active(&self, tracer: &TracerDescriptor) -> bool {
-        self.fractionation && tracer.is_isotope()
+        self.fractionation && frac::IsotopeSpecies::find(tracer).is_some()
     }
 }

@@ -609,6 +609,8 @@ struct PftLeafRecord {
     dheatl: f64,
     /// `canopy_smelt_mass_p_local`/`canopy_frzc_mass_p_local`（mm）。
     canopy_melt_mass_mm: f64,
+    /// `raw_trc_p`（`MOD_Thermal.F90:982/994/1145`）。
+    raw: f64,
     canopy_freeze_mass_mm: f64,
     rootr: Vec<f64>,
     rootflux: Vec<f64>,
@@ -784,6 +786,7 @@ pub(crate) fn pft_canopy_energy(
             dheatl: output.canopy_heat_storage_w_m2,
             canopy_melt_mass_mm: output.canopy_melt_mass_mm,
             canopy_freeze_mass_mm: output.canopy_freeze_mass_mm,
+            raw: output.reference_to_canopy_moisture_resistance_s_m,
             rootr: root.layer_fraction,
             rootflux: if output.root_flux_kg_m2_s.is_empty() {
                 vec![0.0; layers]
@@ -909,7 +912,8 @@ pub(crate) fn pft_canopy_energy(
         heat_similarity: sum(|r| r.fh),
         moisture_similarity: sum(|r| r.fq),
         // 这两项只是单冠层求解的诊断，PFT 聚合里没有对应量。
-        reference_to_canopy_moisture_resistance_s_m: MISSING,
+        // `:1203` `sum(raw_trc_p*pftfrac)`。
+        reference_to_canopy_moisture_resistance_s_m: sum(|r| r.raw),
         energy_balance_error_w_m2: 0.0,
         iterations: 0,
     };
@@ -1074,6 +1078,7 @@ fn pc_records(context: &PftCanopyContext<'_>, patch: &mut PftPatch) -> Result<Ve
             dheatl: flux.dheatl,
             canopy_melt_mass_mm: flux.canopy_melt_mass_mm,
             canopy_freeze_mass_mm: flux.canopy_freeze_mass_mm,
+            raw: shared.raw,
             rootr: vec![0.0; layers],
             rootflux: if flux.rootflux.is_empty() {
                 vec![0.0; layers]
@@ -1132,6 +1137,7 @@ fn bare_record(context: &PftCanopyContext<'_>, layers: usize) -> PftLeafRecord {
         fq: preliminary.moisture_integral,
         rootr: vec![0.0; layers],
         rootflux: vec![0.0; layers],
+        raw: preliminary.moisture_resistance_s_m,
         ..PftLeafRecord::default()
     }
 }

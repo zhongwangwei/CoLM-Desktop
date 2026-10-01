@@ -97,7 +97,7 @@ fn mixed_box_matches_fortran_kernel() {
             t_grnd: 273.0,
         };
         assert_eq!(a[3], a[4], "harness ties R_frost to R_vapor");
-        let fluxes = mixed_box(&tracer, &mut pools, a[0], a[2], a[3], &box_water);
+        let fluxes = mixed_box(&tracer, &SpecialFrac { physics: TracerPhysics::default(), forc_q: 0.0, forc_psrf: 1.0e5, open_water_wind: None }, &mut pools, a[0], a[2], a[3], &box_water);
         assert_eq!(fluxes.trc_input.to_bits(), outputs[0]);
         assert_eq!(fluxes.trc_evap_liq.to_bits(), outputs[1]);
         assert_eq!(fluxes.trc_evap_ice.to_bits(), outputs[2]);
@@ -320,7 +320,7 @@ fn waterbody_fixed_signature_isotope_uses_r_init() {
 }
 
 #[test]
-fn glacier_folds_layered_snow_and_rejects_unported_paths() {
+fn glacier_folds_layered_snow_and_rejects_aquifer_reference() {
     let set = TracerSet {
         tracers: vec![descriptor(TracerFamily::Isotope, 2.0e-3, 0.0)],
     };
@@ -377,19 +377,18 @@ fn glacier_folds_layered_snow_and_rejects_unported_paths() {
     assert_eq!(state.water_acc.scv, 12.0);
 
     let mut frac_state = PatchTracerState::allocated(&set);
-    let err = tracer_glacier_patch(
+    tracer_glacier_patch(
         &set,
         TracerPhysics {
             fractionation: true,
+            ..Default::default()
         },
         &mut frac_state,
         &mut snapshot,
         &mut tracker,
         &input,
     )
-    .unwrap_err();
-    assert!(err.to_string().contains("not ported yet"));
-    assert_eq!(frac_state, PatchTracerState::allocated(&set));
+    .unwrap();
 
     let mut ref_state = PatchTracerState::allocated(&set);
     ref_state.aquifer_ref_water = 100.0;

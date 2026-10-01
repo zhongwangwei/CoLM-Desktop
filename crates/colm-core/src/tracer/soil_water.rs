@@ -59,7 +59,7 @@ mod wetland;
 use anyhow::{bail, ensure, Result};
 
 use super::{
-    soisno_slot, EvapKind, PatchTracerState, TracerDescriptor, TracerPhysics, TracerSet,
+    soisno_slot, EvapKind, PatchTracerState, TracerPhysics, TracerSet,
     MAX_SNOW_LAYERS, SOIL_LAYERS, SOISNO_LAYERS, TRC_TINY, TRC_WATER_MIN_FOR_RATIO,
 };
 pub use common::{
@@ -67,9 +67,8 @@ pub use common::{
     check_isotope_aquifer, exhaust_surface_phase, release_leaf_iso_storage,
 };
 use common::{
-    rayleigh_freezing_loss_conservative, snow_column, snow_vapor_diffusion_unregistered,
-    soil_diffusion_unregistered, soil_slot, FrostShape, SnowColumn, TracerCtx,
-    DEFAULT_LAYER_TEMP_K,
+    snow_column, snow_vapor_diffusion, soil_diffusion, soil_slot, EvapKinetics, FrostShape,
+    SnowColumn, TracerCtx, DEFAULT_LAYER_TEMP_K,
 };
 pub use wetland::{tracer_wetland, WetlandInput};
 
@@ -78,8 +77,7 @@ const SPVAL: f64 = -1.0e36;
 
 /// 本模块读的 namelist 开关（`MOD_Namelist`）。
 ///
-/// `DEF_TRACER_SOIL_KINETIC` 与 `DEF_TRACER_SNOWMELT_EQUILIBRATION` 只在分馏生效时起作用，
-/// 随分馏一起移植。
+/// `DEF_TRACER_SOIL_KINETIC` 与 `DEF_TRACER_SNOWMELT_EQUILIBRATION` 只在分馏生效时起作用。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SoilWaterOptions {
     /// `DEF_TRACER_SUBL_SKIN_MM`（默认 5）：升华的表层交换厚度，总以 `skin_mass=` 传入
@@ -91,6 +89,10 @@ pub struct SoilWaterOptions {
     pub soil_vapor_diffusion: bool,
     /// `DEF_USE_CoLMDEBUG`：标准土壤支里 `wetwat` 变化时打印警告。
     pub colm_debug: bool,
+    /// `DEF_TRACER_SOIL_KINETIC == 'RESISTANCE'`（默认）；`'EXPONENT'` 时为假。
+    pub soil_kinetic_resistance: bool,
+    /// `DEF_TRACER_SNOWMELT_EQUILIBRATION`（默认 0）。
+    pub snowmelt_equilibration: f64,
 }
 
 impl Default for SoilWaterOptions {
@@ -100,6 +102,8 @@ impl Default for SoilWaterOptions {
             soil_diffusion: true,
             soil_vapor_diffusion: true,
             colm_debug: false,
+            soil_kinetic_resistance: true,
+            snowmelt_equilibration: 0.0,
         }
     }
 }
@@ -169,17 +173,17 @@ pub struct SoilWaterInput<'a> {
     pub snow_qout_layer: Option<&'a [f64; MAX_SNOW_LAYERS]>,
     /// `qgtop_trc` [mm/s]。
     pub qgtop_solver: Option<f64>,
-    /// `tleaf`：只进分馏（未移植）。
+    /// `tleaf`：植物回流的凝结比值与叶片 NSS。
     pub tleaf: Option<f64>,
     /// `t_soisno(snl+1:nl_soil)`：`layer_temp`（溶质气相扩散用）。
     pub t_soisno: Option<&'a [f64; SOISNO_LAYERS]>,
-    /// `forc_q`：只进分馏（未移植）。
+    /// `forc_q`：分馏的近地面相对湿度。
     pub forc_q: Option<f64>,
     /// `forc_psrf`：气相扩散与分馏。
     pub forc_psrf: Option<f64>,
     /// `lai`：叶面积消失时释放叶片同位素异常。
     pub lai: Option<f64>,
-    /// `rst`、`raw_trc`、`rss`：只进分馏（未移植）。
+    /// `rst`、`raw_trc`、`rss`：叶片 NSS 与裸土动力分馏的阻力。
     pub rst: Option<f64>,
     pub ra: Option<f64>,
     pub rss: Option<f64>,
@@ -206,6 +210,8 @@ pub struct SoilWaterInput<'a> {
     pub precip_ratio: &'a [f64],
     /// 逐示踪物的 `tracer_forcing_vapor_value(itrc, ipatch)`。
     pub vapor_ratio: &'a [f64],
+    /// 逐示踪物的 `tracer_forcing_has_vapor(itrc, ipatch)`（`None` 即都没有）。
+    pub has_vapor: Option<&'a [bool]>,
 }
 
 /// CoLMMAIN.F90:1272 的 `qcharge_trc`：由含水层水量变化反推的补给通量 [mm/s]。
@@ -219,30 +225,6 @@ pub fn qcharge_trc(
     deltim: f64,
 ) -> f64 {
     (((wa - wa_old) + etroot_aquifer) + rsub_source_aquifer.max(0.0)) / deltim.max(TRC_TINY)
-}
-
-/// 分馏与同位素扩散尚未移植：会走到这些分支时拒绝。
-fn ensure_ported(
-    tracer: &TracerDescriptor,
-    physics: TracerPhysics,
-    isotope_soil_diffusion: bool,
-    snow_vapor_diffusion: bool,
-    routine: &str,
-) -> Result<()> {
-    if physics.fractionation_active(tracer) {
-        bail!(
-            "{routine}: isotope fractionation for tracer {} not ported yet",
-            tracer.name
-        );
-    }
-    if tracer.is_isotope() && (isotope_soil_diffusion || snow_vapor_diffusion) {
-        bail!(
-            "{routine}: isotope soil/snow diffusion (DEF_TRACER_SOIL_DIFFUSION / \
-             DEF_TRACER_SOIL_VAPOR_DIFFUSION) for tracer {} not ported yet",
-            tracer.name
-        );
-    }
-    Ok(())
 }
 
 /// 内部函数 `current_liq_ratio`：按示踪物眼中的水量求当前液相比值。
@@ -295,21 +277,10 @@ pub fn tracer_soil_water(
     let soil_diffusion_block = (options.soil_diffusion || options.soil_vapor_diffusion)
         && input.dz_soi.is_some()
         && input.porsl.is_some();
-    let isotope_soil_diffusion = soil_diffusion_block
-        && (options.soil_diffusion || (options.soil_vapor_diffusion && input.forc_psrf.is_some()));
     let snow_vapor_block = options.soil_vapor_diffusion
         && input.snl < 0
         && input.dz_sno.is_some()
         && input.forc_psrf.is_some();
-    for tracer in set.tracers.iter().filter(|t| t.uses_land_water_transport()) {
-        ensure_ported(
-            tracer,
-            physics,
-            isotope_soil_diffusion,
-            snow_vapor_block,
-            "tracer_soil_water",
-        )?;
-    }
 
     let dt = input.deltim;
     let nl = SOIL_LAYERS as i32;
@@ -374,7 +345,20 @@ pub fn tracer_soil_water(
         if !tracer.uses_land_water_transport() {
             continue;
         }
-        let ctx = TracerCtx::new(tracer, itrc, input.vapor_ratio[itrc], options.subl_skin_mm);
+        let ctx = TracerCtx::new(
+            tracer,
+            itrc,
+            physics,
+            input.vapor_ratio[itrc],
+            options.subl_skin_mm,
+            input.forc_q,
+            input.forc_psrf,
+            EvapKinetics::Soil {
+                resistance: options.soil_kinetic_resistance,
+                ra: input.ra,
+                rss: input.rss,
+            },
+        );
         let nonvolatile = ctx.nonvolatile;
         let is_isotope = tracer.is_isotope();
         let mut p = state.pools[itrc].clone();
@@ -397,7 +381,6 @@ pub fn tracer_soil_water(
             )
         };
         let r_precip = input.precip_ratio[itrc];
-        let r_dep = ctx.deposition_ratio;
         let mut soil_resid_trc = 0.0;
         let mut soil_resid_water = 0.0;
         let mut water_shadow = [0.0; SOIL_LAYERS];
@@ -495,7 +478,14 @@ pub fn tracer_soil_water(
         let root_return_water =
             ((-etroot_aquifer).max(0.0) - negative_uptake) + surface_root_return;
         let root_return_excess = (root_return_water - root_gross_water).max(0.0);
+        // `:452`：净蒸腾水量（总吸水减植物水力回流）。
+        let transp_water_total = (root_gross_water - root_return_water).max(0.0);
         let mut root_gross_tracer = 0.0;
+        let mut transp_ratio = xylem_ratio;
+        // 分馏时根系取出的示踪物先攒在 `transp_source_tracer_total`，叶片 NSS 定出蒸腾比值后
+        // 再记蒸发损失，差额进叶片同位素储量（`:457`、`:658-670`）。
+        let mut transp_source_tracer_total = 0.0;
+        let transp_frac_active = transp_water_total > TRC_TINY && ctx.active;
 
         for j in 1..=nl {
             let k = soil_slot(j);
@@ -505,8 +495,12 @@ pub fn tracer_soil_water(
                     let flux = (e * ratio_layer[k]).min(p.wliq_soisno[s(j)].max(0.0));
                     p.wliq_soisno[s(j)] -= flux;
                     root_gross_tracer += flux;
-                    state.book_evap_loss(itrc, flux, e, EvapKind::Transpiration);
-                    state.acc[itrc].transp_src += flux;
+                    if transp_frac_active {
+                        transp_source_tracer_total += flux;
+                    } else {
+                        state.book_evap_loss(itrc, flux, e, EvapKind::Transpiration);
+                        state.acc[itrc].transp_src += flux;
+                    }
                 }
                 water_shadow[k] -= e;
             }
@@ -519,21 +513,29 @@ pub fn tracer_soil_water(
             }
             p.wa -= flux;
             root_gross_tracer += flux;
-            state.book_evap_loss(itrc, flux, etroot_aquifer, EvapKind::Transpiration);
-            state.acc[itrc].transp_src += flux;
+            if transp_frac_active {
+                transp_source_tracer_total += flux;
+            } else {
+                state.book_evap_loss(itrc, flux, etroot_aquifer, EvapKind::Transpiration);
+                state.acc[itrc].transp_src += flux;
+            }
         }
         if surface_et_water > TRC_TINY && !nonvolatile {
             let flux = surface_et_tracer.min(p.wdsrf.max(0.0));
             p.wdsrf -= flux;
             root_gross_tracer = flux + root_gross_tracer;
-            state.book_evap_loss(itrc, flux, surface_et_water, EvapKind::Transpiration);
-            state.acc[itrc].transp_src += flux;
+            if transp_frac_active {
+                transp_source_tracer_total += flux;
+            } else {
+                state.book_evap_loss(itrc, flux, surface_et_water, EvapKind::Transpiration);
+                state.acc[itrc].transp_src += flux;
+            }
         }
 
         let mut return_ratio = xylem_ratio;
         let mut excess_ratio = 0.0;
         if root_return_water > TRC_TINY && !nonvolatile {
-            excess_ratio = r_dep;
+            excess_ratio = ctx.deposition_ratio_for(input.tleaf.unwrap_or_else(|| layer_temp(1)), false);
             return_ratio = if root_gross_water > TRC_TINY && root_return_excess <= 0.0 {
                 root_gross_tracer / root_gross_water
             } else if root_gross_water > TRC_TINY {
@@ -544,6 +546,50 @@ pub fn tracer_soil_water(
             } else {
                 excess_ratio
             };
+            xylem_ratio = return_ratio;
+            transp_ratio = return_ratio;
+        }
+        // 叶片非稳态（NSS）蒸腾比值（`:539-563`）。
+        if let (true, Some(tleaf), Some(forc_q), Some(forc_psrf), Some(lai), Some(rst)) = (
+            transp_frac_active,
+            input.tleaf,
+            input.forc_q,
+            input.forc_psrf,
+            input.lai,
+            input.rst,
+        ) {
+            let ra = input.ra.map_or(0.0, |ra| ra.max(0.0));
+            let has_vapor = input.has_vapor.is_some_and(|flags| flags[itrc]);
+            let vapor = if has_vapor {
+                ctx.r_atm
+            } else {
+                xylem_ratio / physics.alpha_liq_vap(tracer, tleaf).max(TRC_TINY)
+            };
+            let relhum_leaf = crate::tracer::frac::surface_relhum(forc_q, forc_psrf, tleaf, false);
+            let out = physics.transpiration_nss_ratio(
+                tracer,
+                &crate::tracer::frac::NssInput {
+                    source_ratio: xylem_ratio,
+                    vapor_ratio: vapor,
+                    temp_k: tleaf,
+                    relhum: relhum_leaf,
+                    psrf: forc_psrf,
+                    transp_water: transp_water_total,
+                    deltim: dt,
+                    leaf_area: lai,
+                    aerodynamic_resistance: ra,
+                    stomatal_resistance: rst,
+                    prev_delta_e: p.leaf_delta_e,
+                    prev_delta_b: p.leaf_delta_b,
+                    prev_peclet: p.leaf_peclet,
+                    prev_leaf_moles: p.leaf_water_moles,
+                },
+            );
+            transp_ratio = out.trans_ratio;
+            p.leaf_delta_e = out.new_delta_e;
+            p.leaf_delta_b = out.new_delta_b;
+            p.leaf_peclet = out.new_peclet;
+            p.leaf_water_moles = out.new_leaf_moles;
         }
 
         if root_return_water > TRC_TINY {
@@ -577,12 +623,16 @@ pub fn tracer_soil_water(
                 if root_return_tracer_total > limit {
                     bail!("plant hydraulic isotope return exceeds actual donor isotope");
                 }
-                let acc = &mut state.acc[itrc];
-                acc.evap -= root_return_tracer_total;
-                acc.transp -= root_return_tracer_total;
-                acc.transp_src -= root_return_tracer_total;
-                acc.water_transp -= root_return_water;
-                acc.water_evap_gross -= root_return_water;
+                if transp_frac_active {
+                    transp_source_tracer_total -= root_return_tracer_total;
+                } else {
+                    let acc = &mut state.acc[itrc];
+                    acc.evap -= root_return_tracer_total;
+                    acc.transp -= root_return_tracer_total;
+                    acc.transp_src -= root_return_tracer_total;
+                    acc.water_transp -= root_return_water;
+                    acc.water_evap_gross -= root_return_water;
+                }
             }
         }
         check(p.wa, wa_after_root, "after aquifer root exchange")?;
@@ -639,6 +689,14 @@ pub fn tracer_soil_water(
             }
         }
 
+        // `:658-670`：NSS 只改蒸腾汽的同位素组成；根系取出的与蒸腾带走的差额留在叶片储量里。
+        if transp_frac_active {
+            state.acc[itrc].transp_src += transp_source_tracer_total;
+            let transp_output_tracer = transp_water_total * transp_ratio;
+            state.book_evap_loss(itrc, transp_output_tracer, transp_water_total, EvapKind::Transpiration);
+            p.leaf_iso_storage = (p.leaf_iso_storage + transp_source_tracer_total) - transp_output_tracer;
+        }
+
         // 0b/0c. 雪顶层外部通量与渗流。
         let mut d_wice_ext_snow = 0.0;
         let mut trc_gwat_snow = 0.0;
@@ -658,10 +716,12 @@ pub fn tracer_soil_water(
                 qsubl_snow: input.qsubl_snow,
                 qfros_snow: input.qfros_snow,
                 wliq_soisno: input.wliq_soisno,
+                wice_soisno: input.wice_soisno,
                 wliq_soisno_bef: wliq_bef,
                 wice_soisno_bef: wice_bef,
                 snow_qout_layer: input.snow_qout_layer,
                 layer_temp: &layer_temp,
+                snowmelt_equilibration: options.snowmelt_equilibration,
             };
             let outcome = snow_column(&ctx, state, &mut p, &col, FrostShape::Shared);
             d_wice_ext_snow = outcome.d_wice_ext_snow;
@@ -715,12 +775,11 @@ pub fn tracer_soil_water(
             };
             if eff_qseva > TRC_TINY && qgtop_est < -TRC_TINY {
                 top_soil_evap_water = top_boundary_out_water;
-                let flux = ctx.atmospheric_loss(
+                let flux = ctx.atmospheric_loss_soil_surface(
                     p.wliq_soisno[s(1)],
                     water_shadow[0].max(0.0),
                     top_soil_evap_water,
                     layer_temp(1),
-                    false,
                 );
                 p.wliq_soisno[s(1)] -= flux;
                 state.book_evap_loss(itrc, flux, top_soil_evap_water, EvapKind::SoilEvaporation);
@@ -784,12 +843,11 @@ pub fn tracer_soil_water(
             }
         }
         if imperv_soil_loss > TRC_TINY {
-            let flux = ctx.atmospheric_loss(
+            let flux = ctx.atmospheric_loss_soil_surface(
                 p.wliq_soisno[s(1)],
                 water_shadow[0].max(0.0),
                 imperv_soil_loss,
                 layer_temp(1),
-                false,
             );
             p.wliq_soisno[s(1)] -= flux;
             state.book_evap_loss(itrc, flux, imperv_soil_loss, EvapKind::SoilEvaporation);
@@ -970,16 +1028,18 @@ pub fn tracer_soil_water(
             }
         }
 
-        // 液膜 + 孔隙气相扩散（层间内部交换，不进收支）。同位素已在入口拒绝。
+        // 液膜 + 孔隙气相扩散（层间内部交换，不进收支）。
         if soil_diffusion_block {
             if let (Some(dz_soi), Some(porsl)) = (input.dz_soi, input.porsl) {
-                soil_diffusion_unregistered(
+                soil_diffusion(
+                    &ctx,
                     &mut p,
                     &water_shadow,
                     input.wice_soisno,
                     dz_soi,
                     porsl,
                     &layer_temp,
+                    options.soil_diffusion,
                     options.soil_vapor_diffusion,
                     input.forc_psrf,
                     dt,
@@ -989,7 +1049,8 @@ pub fn tracer_soil_water(
         // 雪层（冰载体）的气相扩散。
         if snow_vapor_block {
             if let (Some(dz_sno), Some(psrf)) = (input.dz_sno, input.forc_psrf) {
-                snow_vapor_diffusion_unregistered(
+                snow_vapor_diffusion(
+                    &ctx,
                     &mut p,
                     input.snl,
                     input.wliq_soisno,
@@ -1098,6 +1159,7 @@ pub fn tracer_soil_water(
                 pending_surface_tracer += flux;
             }
             if dew_surface_water > TRC_TINY {
+                let r_dep = ctx.deposition_ratio_for(layer_temp(1), false);
                 pending_surface_tracer = dew_surface_water.mul_add(r_dep, pending_surface_tracer);
                 let acc = &mut state.acc[itrc];
                 acc.precip = dew_surface_water.mul_add(r_dep, acc.precip);
@@ -1128,7 +1190,7 @@ pub fn tracer_soil_water(
 
         // 4b. 第 1 层液相的露（WATER 直接加到 wliq_soisno(1)）。
         if eff_qsdew_topliq > TRC_TINY {
-            let flux = dt * (eff_qsdew_topliq * r_dep);
+            let flux = dt * (eff_qsdew_topliq * ctx.deposition_ratio_for(layer_temp(1), false));
             p.wliq_soisno[s(1)] = flux + p.wliq_soisno[s(1)];
             let acc = &mut state.acc[itrc];
             acc.precip = flux + acc.precip;
@@ -1143,7 +1205,7 @@ pub fn tracer_soil_water(
         let d_wice_ext_soil1 = (frost_top_water - imperv_subl_loss)
             - (dt * eff_qsubl_top.max(0.0)).min(wice_after_frost);
         if eff_qfros_top > TRC_TINY {
-            let flux = dt * (eff_qfros_top * r_dep);
+            let flux = dt * (eff_qfros_top * ctx.deposition_ratio_for(layer_temp(1), true));
             p.wice_soisno[s(1)] = flux + p.wice_soisno[s(1)];
             let acc = &mut state.acc[itrc];
             acc.precip = flux + acc.precip;
@@ -1203,12 +1265,9 @@ pub fn tracer_soil_water(
             if d_wice > TRC_TINY {
                 let wliq_pre_phase = (input.wliq_soisno[slot] + d_wice).max(0.0);
                 if wliq_pre_phase > TRC_TINY {
-                    let flux = rayleigh_freezing_loss_conservative(
-                        p.wliq_soisno[slot],
-                        wliq_pre_phase,
-                        d_wice,
-                    )
-                    .min(p.wliq_soisno[slot].max(0.0));
+                    let flux = physics
+                        .rayleigh_freezing_loss(tracer, p.wliq_soisno[slot], wliq_pre_phase, d_wice, layer_temp(j))
+                        .min(p.wliq_soisno[slot].max(0.0));
                     p.wliq_soisno[slot] -= flux;
                     p.wice_soisno[slot] += flux;
                     if j >= 1 {

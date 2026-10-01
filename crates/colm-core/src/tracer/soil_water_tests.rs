@@ -1,6 +1,7 @@
 //! 不变量：均一比值保持、示踪物总量与记账通量闭合、非挥发溶质不随蒸发离开。
 
 use super::*;
+use crate::tracer::TracerDescriptor;
 use crate::tracer::{ReactionMode, StateOwner, TracerFamily, TracerPools};
 
 const DT: f64 = 1800.0;
@@ -236,6 +237,7 @@ impl Scenario {
             permeable_soil: None,
             precip_ratio: ratios,
             vapor_ratio: ratios,
+            has_vapor: None,
         }
     }
 
@@ -593,6 +595,7 @@ fn wetland_pool_closes_and_keeps_uniform_ratio() {
         ra: None,
         dz_sno: None,
         vapor_ratio: &ratios,
+        has_vapor: None,
     };
     let mut before = scen.state(&set, &[R_ISO, 0.3]);
     for (itrc, pools) in before.pools.iter_mut().enumerate() {
@@ -621,7 +624,7 @@ fn wetland_pool_closes_and_keeps_uniform_ratio() {
 }
 
 #[test]
-fn fractionation_is_rejected_before_any_state_change() {
+fn fractionation_changes_only_the_registered_isotope() {
     let set = TracerSet {
         tracers: vec![
             descriptor("Cl", TracerFamily::Solute),
@@ -634,16 +637,15 @@ fn fractionation_is_rejected_before_any_state_change() {
     let mut after = before.clone();
     let physics = TracerPhysics {
         fractionation: true,
+        ..Default::default()
     };
-    assert!(tracer_soil_water(
-        &set,
-        &mut after,
-        physics,
-        &no_diffusion(),
-        &scen.input(&ratios)
-    )
-    .is_err());
-    assert_eq!(after, before);
+    let mut plain = before.clone();
+    tracer_soil_water(&set, &mut after, physics, &no_diffusion(), &scen.input(&ratios)).unwrap();
+    tracer_soil_water(&set, &mut plain, TracerPhysics::default(), &no_diffusion(), &scen.input(&ratios))
+        .unwrap();
+    // 溶质（Cl）不受分馏开关影响；HDO 走分馏路径。
+    assert_eq!(after.pools[0], plain.pools[0]);
+    assert_ne!(after.pools[1], plain.pools[1]);
 }
 
 #[test]

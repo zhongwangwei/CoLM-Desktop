@@ -196,8 +196,38 @@ struct BoxFluxes {
 }
 
 /// 混合箱（`mixed_signature`）分支：只在不分馏时调用（分馏需要的平衡/蒸发比值尚未移植）。
+/// 冰川/水体箱式记账的分馏环境（`glacier_evap_ratio_for`/`waterbody_evap_ratio_for`）。
+#[derive(Clone, Copy)]
+struct SpecialFrac {
+    physics: TracerPhysics,
+    forc_q: f64,
+    forc_psrf: f64,
+    /// 液面动力分馏：冰川 `craig_gordon(.false.)`，水体开阔水面 `open_water(|u|)`。
+    open_water_wind: Option<f64>,
+}
+
+impl SpecialFrac {
+    fn evap_ratio(&self, tracer: &TracerDescriptor, r_vapor: f64, source_ratio: f64, temp_k: f64, from_ice: bool) -> f64 {
+        let physics = self.physics;
+        if !physics.fractionation_active(tracer) {
+            return source_ratio;
+        }
+        let alpha_k = if from_ice {
+            physics.alpha_kinetic_craig_gordon(tracer, true)
+        } else {
+            match self.open_water_wind {
+                Some(wind) => physics.alpha_kinetic_open_water(tracer, wind),
+                None => physics.alpha_kinetic_craig_gordon(tracer, false),
+            }
+        };
+        let relhum = super::frac::surface_relhum(self.forc_q, self.forc_psrf, temp_k, from_ice);
+        physics.craig_gordon_evap_ratio(tracer, source_ratio, r_vapor, temp_k, relhum, alpha_k, from_ice)
+    }
+}
+
 fn mixed_box(
     tracer: &TracerDescriptor,
+    frac: &SpecialFrac,
     pools: &mut TracerPools,
     storage_beg: f64,
     r_precip: f64,
@@ -209,8 +239,16 @@ fn mixed_box(
     let trc_held_storage = (pools.subsurface_residue + surface_residue_beg)
         + solid_inventory(pools, box_water.held_lb);
     let water_beg = box_water.water_beg;
+    let active = frac.physics.fractionation_active(tracer);
     let (r_dew, r_frost) = if nonvolatile {
         (0.0, 0.0)
+    } else if active {
+        (
+            frac.physics
+                .equilibrium_deposition_ratio(tracer, r_vapor, box_water.t_grnd, false),
+            frac.physics
+                .equilibrium_deposition_ratio(tracer, r_vapor, box_water.t_grnd, true),
+        )
     } else {
         (r_vapor, r_vapor)
     };
@@ -235,8 +273,11 @@ fn mixed_box(
     let (trc_evap_liq, trc_evap_ice) = if nonvolatile {
         (0.0, 0.0)
     } else {
-        // 不分馏：蒸发比值就是源比值；`tracer_ratio_cap` 为 0。
-        let evap_ratio = |source_ratio: f64, _temp_k: f64, _from_ice: bool| source_ratio;
+        let evap_ratio = |source_ratio: f64, temp_k: f64, from_ice: bool| {
+            frac.evap_ratio(tracer, r_vapor, source_ratio, temp_k, from_ice)
+        };
+        // `tracer_ratio_cap`：分馏时 `ref_ratio*(1+2000/1000)`，否则 0。
+        let ratio_cap = if active { tracer.ref_ratio * 3.0 } else { 0.0 };
         let liq = atmospheric_tracer_loss(
             trc_available,
             water_before_output,
@@ -245,7 +286,7 @@ fn mixed_box(
             false,
             &evap_ratio,
             TRC_TINY,
-            0.0,
+            ratio_cap,
             nonvolatile,
             None,
         );
@@ -259,7 +300,7 @@ fn mixed_box(
             true,
             &evap_ratio,
             TRC_TINY,
-            0.0,
+            ratio_cap,
             nonvolatile,
             Some(box_water.subl_skin_mm),
         );
@@ -329,18 +370,6 @@ fn fixed_box(r_init: f64, box_water: &BoxWater) -> BoxFluxes {
     }
 }
 
-/// 拒绝分馏（分馏的平衡凝结比值与 Craig-Gordon 蒸发比值属于 T2）。
-fn reject_fractionation(set: &TracerSet, physics: TracerPhysics, routine: &str) -> Result<()> {
-    for tracer in &set.tracers {
-        if tracer.uses_land_water_transport() && physics.fractionation_active(tracer) {
-            bail!(
-                "{routine}: isotope fractionation for {} is not ported yet",
-                tracer.name
-            );
-        }
-    }
-    Ok(())
-}
 
 /// 记账、重建存储之后，非挥发溶质的地表残留若有液相载体则并回（地表水优先，其次顶层液水）。
 fn release_surface_residue(
@@ -368,7 +397,7 @@ fn release_surface_residue(
 #[allow(clippy::too_many_arguments)]
 fn account_tracer(
     tracer: &TracerDescriptor,
-    physics: TracerPhysics,
+    frac: &SpecialFrac,
     itrc: usize,
     state: &mut PatchTracerState,
     runtime_forced: bool,
@@ -385,7 +414,7 @@ fn account_tracer(
     state.step[itrc].rnof_step = 0.0;
     let r_init = tracer.init_water_ratio();
     let fixed_signature = tracer.can_use_fixed_signature()
-        && !physics.fractionation_active(tracer)
+        && !frac.physics.fractionation_active(tracer)
         && !runtime_forced;
     let storage_beg = state.step[itrc].storage_beg;
     let fluxes = if fixed_signature {
@@ -393,6 +422,7 @@ fn account_tracer(
     } else {
         mixed_box(
             tracer,
+            frac,
             &mut state.pools[itrc],
             storage_beg,
             r_precip,
@@ -498,7 +528,6 @@ pub fn tracer_glacier_patch(
     if state.aquifer_ref_water > 0.0 {
         bail!("glacier transition with isotope aquifer reference needs explicit water transfer");
     }
-    reject_fractionation(set, physics, "tracer_glacier_patch")?;
     for (itrc, tracer) in set.tracers.iter().enumerate() {
         if !tracer.uses_land_water_transport() {
             continue;
@@ -552,6 +581,12 @@ pub fn tracer_glacier_patch(
     }
     let water_beg = water_end - water_ds;
     let top_slot = soisno_slot(1);
+    let glacier_frac = SpecialFrac {
+        physics,
+        forc_q: input.forc_q,
+        forc_psrf: input.forc_psrf,
+        open_water_wind: None,
+    };
     let box_water = BoxWater {
         atm_precip_mass: precip_mass,
         deficit_mass: None,
@@ -575,7 +610,7 @@ pub fn tracer_glacier_patch(
         }
         account_tracer(
             tracer,
-            physics,
+            &glacier_frac,
             itrc,
             state,
             input.runtime_forced[itrc],
@@ -692,7 +727,6 @@ pub fn tracer_waterbody_patch(
     if state.aquifer_ref_water > 0.0 {
         bail!("waterbody transition with isotope aquifer reference needs explicit water transfer");
     }
-    reject_fractionation(set, physics, "tracer_waterbody_patch")?;
     for (itrc, tracer) in set.tracers.iter().enumerate() {
         if !tracer.uses_land_water_transport() {
             continue;
@@ -742,6 +776,13 @@ pub fn tracer_waterbody_patch(
     }
     let water_beg = water_end - water_ds;
     let top_slot = soisno_slot(input.snl + 1);
+    let waterbody_frac = SpecialFrac {
+        physics,
+        forc_q: input.forc_q,
+        forc_psrf: input.forc_psrf,
+        // `sqrt(FMA(us, us, vs*vs))`（`max(·,0)` 被优化掉）。
+        open_water_wind: Some(input.forc_us.mul_add(input.forc_us, input.forc_vs * input.forc_vs).sqrt()),
+    };
     let box_water = BoxWater {
         atm_precip_mass,
         deficit_mass: Some(deficit_mass),
@@ -765,7 +806,7 @@ pub fn tracer_waterbody_patch(
         }
         account_tracer(
             tracer,
-            physics,
+            &waterbody_frac,
             itrc,
             state,
             input.runtime_forced[itrc],

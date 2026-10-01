@@ -8,15 +8,15 @@
 //! [`tracer_flood_evap_loss`] 是洪水水池的蒸发损失（不进陆面 `a_trc_evap`）。
 //! [`tracer_snow_melt_carry`] 是 CoLMMAIN 紧随其后的无雪层 `scv` 融化携带。
 //!
-//! 分馏（`tracer_fractionation_active`）属于后续阶段：凡需要 Craig-Gordon 蒸发比值、
-//! 平衡凝结比值、Rayleigh 冻结 α 或冠层平衡交换的路径都返回错误。
+//! 分馏（`tracer_fractionation_active`）时蒸发按 Craig-Gordon、凝结按平衡（冰面 JM84 有效）
+//! 比值、冻结按 Rayleigh，湿叶另与环境水汽做平衡交换（[`super::frac`]）。
 //!
 //! 收缩形状取自 `MOD_Tracer_Evapo.F90` 的 GIMPLE：
 //! * 冠层露/霜：`trc_flux = d_external * ratio` 单独舍入后两处相加（不收缩）；
 //! * 第 1 层露/霜：`trc_wliq = FMA(trc_flux, ratio, trc_wliq)`、
 //!   `a_trc_precip = FMA(trc_flux, ratio, a_trc_precip)`（`trc_wice` 同）；
 //! * `r_max = ref_ratio * (1 + 2000/1000)` 折成 `ref_ratio * 3.0`；
-//! * 洪水蒸发里 `FMA(us, us, vs*vs)` 只在分馏路径上（未移植）；
+//! * 洪水蒸发的风速 `sqrt(FMA(us, us, vs*vs))`（分馏路径）；
 //! * 其余相加相减均按源码从左到右独立舍入。
 //!
 //! CoLMMAIN 的 `trc_sm_carry` 块：`max(scv_bef, trc_tiny)` 在该分支里被折成 `scv_bef`
@@ -24,9 +24,8 @@
 
 #![allow(clippy::manual_clamp)]
 
-use std::cell::Cell;
 
-use anyhow::{bail, Result};
+use anyhow::Result;
 
 use super::evap_limit::{
     atmospheric_tracer_loss, evaporative_tracer_loss, skin_limited_tracer_loss,
@@ -202,7 +201,8 @@ pub fn tracer_evapo(
                 pools.ldew_rain,
                 ldew_rain_pre_phase + thaw_amt,
                 freeze_amt,
-            )?;
+                canopy_temp,
+            );
             pools.ldew_rain -= trc_flux;
             pools.ldew_snow += trc_flux;
         }
@@ -213,17 +213,23 @@ pub fn tracer_evapo(
             &mut pools.canopy_solid,
         );
 
-        // 湿叶与环境水汽的双向平衡交换只在分馏时发生。
+        // 湿叶与环境水汽的双向平衡交换（净水通量为零、示踪物通量非零，记进单独的
+        // `a_trc_vapor_exchange`；只对液相，`:248-262`）。
         if input.canopy_equilibration > 0.0
             && physics.fractionation_active(tracer)
             && !tracer.is_nonvolatile_solute()
             && input.ldew_rain > TRC_TINY
         {
-            bail!(
-                "tracer_evapo: canopy equilibration exchange for {} needs isotope \
-                 fractionation, which is not ported yet",
-                tracer.name
+            let pools = &mut state.pools[itrc];
+            let equil_gain = super::frac::equilibration_exchange(
+                pools.ldew_rain,
+                input.ldew_rain.max(0.0),
+                frac.r_atm,
+                physics.alpha_liq_vap(tracer, canopy_temp),
+                input.canopy_equilibration,
             );
+            pools.ldew_rain = (pools.ldew_rain + equil_gain).max(0.0);
+            state.acc[itrc].vapor_exchange += equil_gain;
         }
 
         // 雪+土各层：液+冰。
@@ -266,7 +272,8 @@ pub fn tracer_evapo(
                     pools.wliq_soisno[s],
                     wliq_bef + thaw_amt,
                     freeze_amt,
-                )?;
+                    layer_temp(j),
+                );
                 pools.wliq_soisno[s] -= trc_flux;
                 pools.wice_soisno[s] += trc_flux;
             }
@@ -425,16 +432,24 @@ pub fn tracer_flood_evap_loss(
         if !tracer.uses_land_water_transport() || tracer.is_nonvolatile_solute() {
             continue;
         }
-        // `vapor_ratio` 只在分馏的 Craig-Gordon 比值里用。
-        let _ = vapor_ratio[itrc];
         let active = physics.fractionation_active(tracer);
-        let needed = Cell::new(false);
-        // 分馏时这里要 Craig-Gordon 比值（开放水面动力学 α）。
-        let evap_ratio = |source_ratio: f64, _temp: f64, _from_ice: bool| {
-            if active {
-                needed.set(true);
+        // Craig-Gordon 比值用开阔水面动力学 α，风速 `sqrt(FMA(us, us, vs*vs))`。
+        let wind = input.forc_us.mul_add(input.forc_us, input.forc_vs * input.forc_vs).sqrt();
+        let evap_ratio = |source_ratio: f64, temp: f64, from_ice: bool| {
+            if !active {
+                return source_ratio;
             }
-            source_ratio
+            let relhum = super::frac::surface_relhum(input.forc_q, input.forc_psrf, temp, from_ice);
+            let alpha_k = physics.alpha_kinetic_open_water(tracer, wind);
+            physics.craig_gordon_evap_ratio(
+                tracer,
+                source_ratio,
+                vapor_ratio[itrc],
+                temp,
+                relhum,
+                alpha_k,
+                from_ice,
+            )
         };
         let loss = atmospheric_tracer_loss(
             tracer_credit[itrc],
@@ -448,12 +463,6 @@ pub fn tracer_flood_evap_loss(
             false,
             None,
         );
-        if needed.get() {
-            bail!(
-                "tracer_flood_evap_loss: {} needs isotope fractionation, which is not ported yet",
-                tracer.name
-            );
-        }
         tracer_loss[itrc] = loss;
     }
     Ok(tracer_loss)
@@ -531,17 +540,9 @@ impl Frac<'_, '_> {
             return Ok(0.0);
         }
         let active = self.active();
-        // `evap_ratio_for`：分馏且给了 forc_q/forc_psrf 时才走 Craig-Gordon。
-        let needs_cg = active && self.input.forc_q.is_some() && self.input.forc_psrf.is_some();
-        let needed = Cell::new(false);
-        let evap_ratio = |source_ratio: f64, _temp: f64, _from_ice: bool| {
-            if needs_cg {
-                needed.set(true);
-            }
-            source_ratio
-        };
+        let evap_ratio = |source_ratio: f64, temp: f64, ice: bool| self.evap_ratio_for(source_ratio, temp, ice);
         let r_max = r_max(self.tracer, active);
-        let loss = if from_ice {
+        Ok(if from_ice {
             skin_limited_tracer_loss(
                 pool_trc,
                 pool_water,
@@ -564,57 +565,47 @@ impl Frac<'_, '_> {
                 TRC_TINY,
                 r_max,
             )
-        };
-        if needed.get() {
-            bail!(
-                "tracer_evapo: Craig-Gordon evaporation ratio for {} needs isotope \
-                 fractionation, which is not ported yet",
-                self.tracer.name
-            );
+        })
+    }
+
+    /// 内部函数 `evap_ratio_for`：冠层与地表都用 `tracer_alpha_kinetic_craig_gordon`。
+    fn evap_ratio_for(&self, source_ratio: f64, temp_k: f64, from_ice: bool) -> f64 {
+        if !self.active() {
+            return source_ratio;
         }
-        Ok(loss)
+        let (Some(forc_q), Some(forc_psrf)) = (self.input.forc_q, self.input.forc_psrf) else {
+            return source_ratio;
+        };
+        let relhum = super::frac::surface_relhum(forc_q, forc_psrf, temp_k, from_ice);
+        let alpha_k = self.physics.alpha_kinetic_craig_gordon(self.tracer, from_ice);
+        self.physics.craig_gordon_evap_ratio(
+            self.tracer,
+            source_ratio,
+            self.r_atm,
+            temp_k,
+            relhum,
+            alpha_k,
+            from_ice,
+        )
     }
 
     /// 内部函数 `deposition_ratio_for`。
-    fn deposition_ratio(&self, _temp_k: f64, _from_ice: bool) -> Result<f64> {
+    fn deposition_ratio(&self, temp_k: f64, from_ice: bool) -> Result<f64> {
         if self.tracer.is_nonvolatile_solute() {
             return Ok(0.0);
         }
-        if self.active() {
-            bail!(
-                "tracer_evapo: equilibrium deposition ratio for {} needs isotope \
-                 fractionation, which is not ported yet",
-                self.tracer.name
-            );
+        if !self.active() {
+            return Ok(self.r_atm);
         }
-        Ok(self.r_atm)
+        Ok(self
+            .physics
+            .equilibrium_deposition_ratio(self.tracer, self.r_atm, temp_k, from_ice))
     }
 
-    /// `tracer_rayleigh_freezing_loss`（`MOD_Tracer_Frac`）的非分馏部分。
-    fn rayleigh_freezing_loss(
-        &self,
-        pool_trc: f64,
-        pool_water: f64,
-        freeze_water: f64,
-    ) -> Result<f64> {
-        if pool_water <= TRC_TINY || freeze_water <= TRC_TINY {
-            return Ok(0.0);
-        }
-        if pool_trc <= TRC_TINY {
-            return Ok(0.0);
-        }
-        if freeze_water >= pool_water * (1.0 - 1.0e-12) {
-            return Ok(pool_trc.max(0.0));
-        }
-        let source_ratio = pool_trc.max(0.0) / pool_water;
-        if !self.active() {
-            return Ok((freeze_water * source_ratio).min(pool_trc.max(0.0)));
-        }
-        bail!(
-            "tracer_evapo: Rayleigh freezing for {} needs isotope fractionation, which is not \
-             ported yet",
-            self.tracer.name
-        )
+    /// `tracer_rayleigh_freezing_loss`。
+    fn rayleigh_freezing_loss(&self, pool_trc: f64, pool_water: f64, freeze_water: f64, temp_k: f64) -> f64 {
+        self.physics
+            .rayleigh_freezing_loss(self.tracer, pool_trc, pool_water, freeze_water, temp_k)
     }
 }
 

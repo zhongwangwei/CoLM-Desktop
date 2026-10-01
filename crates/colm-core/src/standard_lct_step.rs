@@ -797,7 +797,7 @@ fn bare_lct_canopy(
         momentum_similarity: preliminary.momentum_integral,
         heat_similarity: preliminary.heat_integral,
         moisture_similarity: preliminary.moisture_integral,
-        reference_to_canopy_moisture_resistance_s_m: f64::NAN,
+        reference_to_canopy_moisture_resistance_s_m: preliminary.moisture_resistance_s_m,
         energy_balance_error_w_m2: 0.0,
         iterations: 0,
     };
@@ -1339,6 +1339,9 @@ pub fn standard_lct_snow_soil_step(
             snow_melt_kg_m2_s: energy.ground.snow_melt_rate_kg_m2_s,
             leaf_temperature_k: state.energy.leaf.leaf_temperature_k,
             transpiration_kg_m2_s: energy.leaf.transpiration_kg_m2_s,
+            stomatal_resistance_s_m: energy.leaf.canopy_stomatal_resistance_s_m,
+            moisture_resistance_s_m: energy.leaf.reference_to_canopy_moisture_resistance_s_m,
+            soil_surface_resistance_s_m: state.energy.soil_surface_resistance_s_m,
             pg_rain: energy.interception.ground_rain_kg_m2_s,
             pg_snow: energy.interception.ground_snow_kg_m2_s,
         })?;
@@ -2025,6 +2028,10 @@ struct TracerAfterWater<'a, 'b> {
     leaf_temperature_k: f64,
     /// `etr`（只进 `tracer_wetland`）。
     transpiration_kg_m2_s: f64,
+    /// `rst`、`raw_trc`（THERMAL 的参考高度到冠层/地面的水汽阻抗）、`rss`：分馏用。
+    stomatal_resistance_s_m: f64,
+    moisture_resistance_s_m: f64,
+    soil_surface_resistance_s_m: f64,
     pg_rain: f64,
     pg_snow: f64,
 }
@@ -2048,6 +2055,9 @@ fn tracer_after_water(host: TracerAfterWater<'_, '_>) -> Result<()> {
         snow_melt_kg_m2_s,
         leaf_temperature_k,
         transpiration_kg_m2_s,
+        stomatal_resistance_s_m,
+        moisture_resistance_s_m,
+        soil_surface_resistance_s_m,
         pg_rain,
         pg_snow,
     } = host;
@@ -2128,10 +2138,11 @@ fn tracer_after_water(host: TracerAfterWater<'_, '_>) -> Result<()> {
                 forc_psrf: Some(input.energy.forcing.surface_pressure_pa),
                 tleaf: Some(leaf_temperature_k),
                 lai: Some(input.energy.leaf_temperature.leaf_area_index),
-                rst: None,
-                ra: None,
+                rst: Some(stomatal_resistance_s_m),
+                ra: Some(moisture_resistance_s_m),
                 dz_sno: Some(&dz_sno),
                 vapor_ratio: ctx.vapor_ratio,
+                has_vapor: None,
             },
         );
     }
@@ -2216,9 +2227,9 @@ fn tracer_after_water(host: TracerAfterWater<'_, '_>) -> Result<()> {
             forc_q: Some(input.energy.forcing.specific_humidity),
             forc_psrf: Some(input.energy.forcing.surface_pressure_pa),
             lai: Some(input.energy.leaf_temperature.leaf_area_index),
-            rst: None,
-            ra: None,
-            rss: None,
+            rst: Some(stomatal_resistance_s_m),
+            ra: Some(moisture_resistance_s_m),
+            rss: Some(soil_surface_resistance_s_m),
             dz_soi: Some(&dz_soi),
             porsl: Some(&porsl),
             dz_sno: Some(&dz_sno),
@@ -2234,6 +2245,7 @@ fn tracer_after_water(host: TracerAfterWater<'_, '_>) -> Result<()> {
             permeable_soil: Some(&permeable),
             precip_ratio: ctx.precip_ratio,
             vapor_ratio: ctx.vapor_ratio,
+            has_vapor: None,
         },
     )
 }

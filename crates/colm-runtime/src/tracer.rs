@@ -115,6 +115,41 @@ pub struct TracerRuntime {
     pub tracker: std::sync::Mutex<colm_core::tracer::conservation::BalanceTracker>,
 }
 
+/// 分馏开关与参数（`MOD_Namelist.F90:421-442`，方案名的规范化同 `:1703-1717`）。
+fn tracer_physics_from_document(document: &Document) -> Result<colm_core::tracer::TracerPhysics> {
+    use colm_core::tracer::frac::{KineticScheme, OpenWaterKinetic};
+    let kinetic = text(document, "DEF_TRACER_KINETIC_SCHEME")?;
+    let open_water = text(document, "DEF_TRACER_OPEN_WATER_KINETIC")?;
+    let physics = colm_core::tracer::TracerPhysics {
+        fractionation: logical(document, "DEF_TRACER_USE_FRACTIONATION")?,
+        kinetic_scheme: KineticScheme::parse(&kinetic)
+            .with_context(|| format!("Invalid DEF_TRACER_KINETIC_SCHEME: {kinetic}"))?,
+        ice_supersat_slope: real(document, "DEF_TRACER_ICE_SUPERSAT_SLOPE")?,
+        cg_relhum_max: real(document, "DEF_TRACER_CG_RELHUM_MAX")?,
+        open_water_kinetic: OpenWaterKinetic::parse(&open_water)
+            .with_context(|| format!("Invalid DEF_TRACER_OPEN_WATER_KINETIC: {open_water}"))?,
+        nss_leaf_water_per_lai: real(document, "DEF_TRACER_NSS_LEAF_WATER_PER_LAI")?,
+        nss_leaf_path_length: real(document, "DEF_TRACER_NSS_LEAF_PATH_LENGTH")?,
+        nss_leaf_rb: real(document, "DEF_TRACER_NSS_LEAF_RB")?,
+    };
+    anyhow::ensure!(
+        physics.cg_relhum_max > 0.0 && physics.cg_relhum_max < 1.0 && physics.ice_supersat_slope >= 0.0,
+        "Invalid tracer fractionation parameters (DEF_TRACER_CG_RELHUM_MAX in (0,1), \
+         DEF_TRACER_ICE_SUPERSAT_SLOPE >= 0)"
+    );
+    Ok(physics)
+}
+
+/// `DEF_TRACER_SOIL_KINETIC`（`MOD_Namelist.F90:1718-1725`）：`RESISTANCE` 为真、`EXPONENT` 为假。
+fn soil_kinetic_resistance(document: &Document) -> Result<bool> {
+    let scheme = text(document, "DEF_TRACER_SOIL_KINETIC")?;
+    match scheme.trim() {
+        "RESISTANCE" | "resistance" => Ok(true),
+        "EXPONENT" | "exponent" => Ok(false),
+        other => anyhow::bail!("Invalid DEF_TRACER_SOIL_KINETIC: {other}"),
+    }
+}
+
 impl TracerRuntime {
     /// 由算例文档建立；`DEF_USE_TRACER` 关着返回 `None`。示踪物强迫文件
     /// （`&nl_colm_tracer_forcing`）尚未移植：有输运示踪物时一律用默认比值。
@@ -122,9 +157,7 @@ impl TracerRuntime {
         let Some(set) = tracer_set_from_document(document)? else {
             return Ok(None);
         };
-        let physics = colm_core::tracer::TracerPhysics {
-            fractionation: logical(document, "DEF_TRACER_USE_FRACTIONATION")?,
-        };
+        let physics = tracer_physics_from_document(document)?;
         let precip_ratio = set.tracers.iter().map(|t| t.precip_default_ratio()).collect();
         let vapor_ratio = set.tracers.iter().map(|t| t.vapor_default_ratio()).collect();
         let runtime_forced = vec![false; set.len()];
@@ -135,6 +168,8 @@ impl TracerRuntime {
                 soil_diffusion: logical(document, "DEF_TRACER_SOIL_DIFFUSION")?,
                 soil_vapor_diffusion: logical(document, "DEF_TRACER_SOIL_VAPOR_DIFFUSION")?,
                 colm_debug: logical(document, "DEF_USE_CoLMDEBUG")?,
+                soil_kinetic_resistance: soil_kinetic_resistance(document)?,
+                snowmelt_equilibration: real(document, "DEF_TRACER_SNOWMELT_EQUILIBRATION")?,
             },
             canopy_equilibration: real(document, "DEF_TRACER_CANOPY_EQUILIBRATION")?,
             precip_ratio,
@@ -213,12 +248,21 @@ pub fn end_of_step(
     let snl = state.snow.layer_count;
     conservation::tracer_apply_reactive_processes(&runtime.set, &mut track.state, snl, deltim);
     // `endwb`（`CoLMMAIN.F90:1496-1504`）与 `errorw`：与 history 的 `xerr` 同一套式子。
-    let end_total = colm_core::total_water_storage_mm(
-        &state.soil_water,
+    // 与 history 的 `endwb` 同一套（`history.rs` 的 LCT 分支）：灌溉打开时取 `bgc_driver`
+    // 之前的土壤水与 `waterstorage`；VSF 湿地再加 `wetwat`（`CoLMMAIN.F90:1496-1506`）。
+    let (balance_water, irrigation_storage) = match &output.irrigation_balance {
+        Some(balance) => (&balance.soil_water, Some(balance.storage_mm)),
+        None => (&state.soil_water, None),
+    };
+    let mut end_total = colm_core::total_water_storage_mm(
+        balance_water,
         state.energy.leaf.canopy_water.total_mm,
         state.snow.water_equivalent_kg_m2,
-        None,
+        irrigation_storage,
     );
+    if patch_type == 2 && runtime.variably_saturated_flow {
+        end_total += state.soil_water.wetland_water_mm;
+    }
     let precipitation =
         forcing.convective_precipitation_kg_m2_s + forcing.large_scale_precipitation_kg_m2_s;
     let evaporation_wb = output.energy.total_evaporation_kg_m2_s;

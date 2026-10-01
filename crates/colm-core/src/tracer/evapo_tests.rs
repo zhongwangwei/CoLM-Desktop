@@ -240,16 +240,20 @@ fn legacy_heuristic_matches_explicit_phase_masses_when_unambiguous() {
 }
 
 #[test]
-fn fractionating_isotope_is_refused() {
+fn fractionating_isotope_departs_from_the_proportional_path() {
     let set = isotope_set();
     let s = scene();
     let mut state = PatchTracerState::allocated(&set);
     fill(&mut state, 0, &s, R);
     let physics = TracerPhysics {
         fractionation: true,
+        ..Default::default()
     };
-    let err = tracer_evapo(&set, &mut state, physics, &[R], &input(&s)).unwrap_err();
-    assert!(err.to_string().contains("not ported yet"), "{err}");
+    let mut plain = state.clone();
+    tracer_evapo(&set, &mut state, physics, &[R], &input(&s)).unwrap();
+    tracer_evapo(&set, &mut plain, TracerPhysics::default(), &[R], &input(&s)).unwrap();
+    // O18 已登记分馏物理：蒸发/凝结比值不再等于源/水汽比值。
+    assert_ne!(state, plain);
     // 溶质不受分馏开关影响。
     let solute = set_of("solute", "cl", 1);
     let mut state = PatchTracerState::allocated(&solute);
@@ -280,12 +284,16 @@ fn flood_loss_is_proportional_and_skips_solutes() {
     };
     let physics = TracerPhysics {
         fractionation: true,
+        ..Default::default()
     };
     assert_eq!(
         tracer_flood_evap_loss(&set, physics, &[R, 0.7], &credit, &none).unwrap(),
         vec![0.0, 0.0]
     );
-    assert!(tracer_flood_evap_loss(&set, physics, &[R, 0.7], &credit, &flood).is_err());
+    let fractionated = tracer_flood_evap_loss(&set, physics, &[R, 0.7], &credit, &flood).unwrap();
+    // Craig-Gordon 让洪水蒸发的重同位素少于按比例带走；溶质仍为 0。
+    assert!(fractionated[0] < loss[0], "{fractionated:?} vs {loss:?}");
+    assert_eq!(fractionated[1], 0.0);
 }
 
 #[test]

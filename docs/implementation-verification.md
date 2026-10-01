@@ -27434,3 +27434,31 @@ colm-rs: DEF_HIST_vars_out_default = .false. (per-variable history selection) is
 **变异检验**（确认新路径真的在逐位路径上）：临时把 PFT 聚合的 `canopy_melt/freeze` 置 0、`gross_rain` 改成聚合后取 `max`，另建目录编译跑：`tsp`、`tsq` 都变成 `history 2 bad 1 restarts 11 bad 3`；恢复后重跑全部 ok。
 
 宿主不变：`pf pm qm qr tsa tsw` 重跑 `ok rst: ok`；`cargo test`（colm-core 462、colm-runtime 131）与 `clippy` 无告警。至此 T1 的单点陆面 patch 类型全部接入（装了城市模型的 patch 上游自己也停机）。
+
+## 第 486 轮：示踪物 T2a —— 同位素分馏物理，单点逐位
+
+**上游约束**：分馏生效的同位素必须配 `role='vapor'` 的示踪物强迫（`MOD_Tracer_Forcing.F90:773-779` 停机），而示踪物强迫又不支持 `DEF_forcing%dataset = 'POINT'`（`:133-139` 停机）。所以分馏的**真实**配置只能在空间算例里跑（T2c 用 IsoGSM 验收）。T2a 的单点逐位用一个**测试专用内核**：vendor 原样编译，只把 `:773` 的停机条件改成 `.false. .and. …`（构建目录在 scratchpad 的 `dbg/`，kernel 清单标 `test-harness`），降水/水汽比值回落到描述符默认值。其余每一行都是上游。
+
+**移植**
+- 新模块 `tracer/frac.rs`：`MOD_Tracer_Frac` 的 30 个函数 + O18/HDO 物种（`IsotopeSpecies`，名字模式 `18o,o18` / `hdo,2h,deuter,=h2`，`=` 前缀为全等，再退到 `|ref_ratio-hint|/hint<0.1`）+ `TracerPhysics` 的分馏参数（`KINETIC_SCHEME`、`ICE_SUPERSAT_SLOPE`、`CG_RELHUM_MAX`、`OPEN_WATER_KINETIC`、`NSS_LEAF_*`）。`fractionation_active` 现在同时要求物种已登记。
+- **删除旧的 `isotope_fractionation.rs`**（770 行，早先某轮按旧 latlon dump `gimpleL` 写的）：与当前 GIMPLE 有三处融合不同（NSS 的 `denom`、分子、`trans_ratio`），名字匹配把 `=h2` 当子串、没有按 `ref_ratio` 回退。溶质的气相扩散原先用它的三个函数，改用 `frac` 后 `tsa` 等照样逐位。
+- `soil_water`：`TracerCtx` 补全 `evap_ratio_for`/`deposition_ratio_for`（土壤支裸土液面在 `kinetic_on_soil_surface` 且 `RESISTANCE` 时按 `ra/rss` 加权；湿地支液面用开阔水面 MJ79，风速 `sqrt(FMA(us,us,vs*vs))`）、`r_max = ref*3`；蒸腾分馏时根系取出的先攒成 `transp_source_tracer_total`，叶片 NSS 定出比值后再记损失，差额进 `leaf_iso_storage`；融水与层冰的平衡交换（`DEF_TRACER_SNOWMELT_EQUILIBRATION`）；土壤液膜+气相、雪层气相扩散改成一般形（未登记物种自然退化为 α=1、液相自扩散 0）；Rayleigh 冻结；湿地池的分馏损失（依次扣临时有限池，超额 `FMA(q-avail, ratio, loss)`）。
+- `evapo`：Craig-Gordon、平衡凝结（冰面 JM84 有效 α）、Rayleigh、湿叶平衡交换（`a_trc_vapor_exchange`）、洪水蒸发的开阔水面分馏。
+- `special_patches`：冰川/水体箱式记账的 `R_dew/R_frost` 与 Craig-Gordon（冰川液面 `craig_gordon`，水体液面开阔水面）、`tracer_ratio_cap`。
+- 宿主补出 `raw_trc`：`GroundFluxes` 的 `raw`、叶温 `max(raw,0)`、PFT `sum(raw_p*pftfrac)`（裸 PFT 取地面值、PC 广播 PC 值）；示踪物土壤水改传 `rst`/`raw_trc`/`rss`。
+- 冷启动含水层相对质量是 GIMPLE `.FMS (wa+ref_water, R_init, ref_mass)`（`MOD_Tracer_Rest`）——第一次对照只差这一处，`trc_wa` 4e-17。
+- 示踪物步末收支的 `endwb` 与 history 的 `xerr` 统一：VSF 湿地加 `wetwat`，灌溉取 `bgc_driver` 之前的土壤水与 `waterstorage`。溶质算例不比 `water_err` 所以没暴露；同位素湿地（`tiw`）第一次跑就以 `TRC_BAL hard failure`（`water_dS = -200`）停下。
+
+**逐位对照**（O18 + HDO，`DEF_TRACER_USE_FRACTIONATION`，VSF+PHS，含水层混合水 1000 mm；降水 δ −8/−55‰，水汽 −18/−140‰；Fortran = 测试内核，`tmp/isopair.sh`）：
+
+| 算例 | 路径 | 结果 |
+|---|---|---|
+| `tia` | 土壤，3 天有雪 | history 2、续跑 7 全部 ok；蒸发 δ18O 到 −64‰，叶水 +11‰ |
+| `tie` | 同上 + 冠层/融水平衡 0.5、`SOIL_KINETIC='EXPONENT'`、`CAPPA2003` | ok |
+| `tim` | 1–4 月（融雪、蒸腾） | history 8 全部 ok |
+| `tiw`/`tig`/`til`/`tid` | 湿地 / 冰川 / 静态湖 / 干湖（1/1–3/20） | 全部 ok |
+| `tip`/`tiq`/`tiu` | PFT / PC / 简单城市 | 全部 ok |
+
+宿主与溶质示踪物不变：`tsa tsat tsw tsg tsl tsd1 tsd2 tsp tsq tsu bc pf qm gl dh5` 重跑全部 `ok rst: ok`；`cargo test`（colm-core 466）通过，clippy 无告警。
+
+**还没做**：`tracer_forcing_has_vapor` 恒为否（`has_vapor: None`）——接 T2c 的强迫后由运行时传入；空间示踪物运行时（T2b）。
