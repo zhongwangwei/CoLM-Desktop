@@ -1538,20 +1538,16 @@ impl StandardLctRestartTemplate {
         Ok(self)
     }
 
-    /// 装上灌溉：起跑状态（重启 + `CROP_readin`），并把设置交给 BGC 运行期的 `CalIrrigationNeeded`。
-    ///
-    /// 只验证了 BGC 作物土壤 patch（`patchtype == 0`）。其它 patch 上游也带灌溉状态（`totwb` 含
-    /// `waterstorage`、城市透水面的 `WATER_2014` 仍加 `wdsrf/deltim`），Rust 没接这些分支，拒绝。
-    /// 挂上示踪物（`land_tracer_init`）。只验证了土壤 patch：湿地、城市、湖、冰川与 PFT/PC
-    /// 的示踪物分支尚未接入，拒绝。
+    /// 挂上示踪物（`land_tracer_init`）：土壤（含 PFT/PC）、简单城市、湿地、冰川、湖。
+    /// 装了城市模型的 patch 拒绝 —— 上游 `CoLMDRIVER.F90:90-93` 自己也停机。
     pub fn with_tracer(
         mut self,
         runtime: std::sync::Arc<crate::tracer::TracerRuntime>,
         initial: colm_core::tracer::PatchTracerState,
     ) -> Result<Self> {
         ensure!(
-            matches!(self.patch_type, 0..=4) && self.pft.is_none() && self.urban.is_none(),
-            "tracer bookkeeping is wired only for LCT patches without the urban model \
+            matches!(self.patch_type, 0..=4) && self.urban.is_none(),
+            "tracer bookkeeping is wired only for patches without the urban model \
              (patchtype 0-4; upstream stops on full urban too); this one has patchtype {}",
             self.patch_type
         );
@@ -1563,6 +1559,10 @@ impl StandardLctRestartTemplate {
         Ok(self)
     }
 
+    /// 装上灌溉：起跑状态（重启 + `CROP_readin`），并把设置交给 BGC 运行期的 `CalIrrigationNeeded`。
+    ///
+    /// 只验证了 BGC 作物土壤 patch（`patchtype == 0`）。其它 patch 上游也带灌溉状态（`totwb` 含
+    /// `waterstorage`、城市透水面的 `WATER_2014` 仍加 `wdsrf/deltim`），Rust 没接这些分支，拒绝。
     pub fn with_irrigation(mut self, state: colm_core::IrrigationState) -> Result<Self> {
         let settings = self
             .physics

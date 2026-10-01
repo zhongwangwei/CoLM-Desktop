@@ -189,6 +189,8 @@ pub(crate) fn intercept_pfts(
         retained_snow_kg_m2_s: sum(|f| f.retained_snow_kg_m2_s),
         released_rain_kg_m2_s: sum(|f| f.released_rain_kg_m2_s),
         released_snow_kg_m2_s: sum(|f| f.released_snow_kg_m2_s),
+        gross_rain_kg_m2_s: sum(|f| f.gross_rain_kg_m2_s),
+        gross_snow_kg_m2_s: sum(|f| f.gross_snow_kg_m2_s),
     };
     *patch_water = CanopyWater {
         total_mm: patch.sum(|column| column.leaf.canopy_water.total_mm),
@@ -605,6 +607,9 @@ struct PftLeafRecord {
     etrsha: f64,
     hprl: f64,
     dheatl: f64,
+    /// `canopy_smelt_mass_p_local`/`canopy_frzc_mass_p_local`（mm）。
+    canopy_melt_mass_mm: f64,
+    canopy_freeze_mass_mm: f64,
     rootr: Vec<f64>,
     rootflux: Vec<f64>,
 }
@@ -777,6 +782,8 @@ pub(crate) fn pft_canopy_energy(
             etrsha: output.shaded_transpiration_kg_m2_s,
             hprl: output.precipitation_heat_w_m2,
             dheatl: output.canopy_heat_storage_w_m2,
+            canopy_melt_mass_mm: output.canopy_melt_mass_mm,
+            canopy_freeze_mass_mm: output.canopy_freeze_mass_mm,
             rootr: root.layer_fraction,
             rootflux: if output.root_flux_kg_m2_s.is_empty() {
                 vec![0.0; layers]
@@ -846,10 +853,9 @@ pub(crate) fn pft_canopy_energy(
     };
     let output = crate::LeafTemperatureOutput {
         wet_snow_fraction: patch.sum(|column| column.wet_snow_fraction),
-        // 上游按 `sum(canopy_*_mass_p*pftfrac)` 聚合；PFT/PC 的示踪物尚未接入（运行时拒绝），
-        // 这里不聚合。
-        canopy_melt_mass_mm: 0.0,
-        canopy_freeze_mass_mm: 0.0,
+        // `MOD_Thermal.F90:1201-1202`：`sum(canopy_*_mass_p*pftfrac)`。
+        canopy_melt_mass_mm: sum(|r| r.canopy_melt_mass_mm),
+        canopy_freeze_mass_mm: sum(|r| r.canopy_freeze_mass_mm),
         eastward_stress_kg_m_s2: sum(|r| r.taux),
         northward_stress_kg_m_s2: sum(|r| r.tauy),
         ground_sensible_heat_w_m2: sum(|r| r.fseng),
@@ -1066,6 +1072,8 @@ fn pc_records(context: &PftCanopyContext<'_>, patch: &mut PftPatch) -> Result<Ve
             etrsha: flux.etrsha,
             hprl: flux.hprl,
             dheatl: flux.dheatl,
+            canopy_melt_mass_mm: flux.canopy_melt_mass_mm,
+            canopy_freeze_mass_mm: flux.canopy_freeze_mass_mm,
             rootr: vec![0.0; layers],
             rootflux: if flux.rootflux.is_empty() {
                 vec![0.0; layers]

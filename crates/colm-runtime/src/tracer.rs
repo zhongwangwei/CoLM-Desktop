@@ -270,7 +270,16 @@ pub fn end_of_step(
             scv: state.snow.water_equivalent_kg_m2,
         },
     );
-    report_step(runtime)
+    Ok(())
+}
+
+/// 一步里所有 patch 都推进完之后（`CoLMDRIVER.F90:392-393`，在 `hist_out` 之前）调一次
+/// `tracer_report`。各 patch 共用同一个 [`TracerRuntime`]，取第一个挂了示踪物的模板。
+pub fn report_after_patches(templates: &[crate::assembly::StandardLctRestartTemplate]) -> Result<()> {
+    match templates.iter().find_map(|template| template.tracer.as_ref()) {
+        Some((runtime, _)) => report_step(runtime),
+        None => Ok(()),
+    }
 }
 
 /// `tracer_report`：打印本步的收支/签名报告，按 `DEF_TRACER_*_ABORT_NBAD` 决定是否中止。
@@ -349,7 +358,7 @@ pub fn glacier_end_of_step(
             },
         )?;
     }
-    report_step(runtime)
+    Ok(())
 }
 
 /// 湖 patch 步末（`CoLMMAIN.F90:1990-1996` 的 `tracer_waterbody_patch`）。单点没有
@@ -419,7 +428,7 @@ pub fn lake_end_of_step(
             },
         )?;
     }
-    report_step(runtime)
+    Ok(())
 }
 
 /// 每个输运示踪物逐 patch 的一个量（重启里的 `(patch, trc_land_transport)`）。

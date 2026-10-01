@@ -46,6 +46,10 @@ pub struct CanopyInterceptionFluxes {
     pub retained_snow_kg_m2_s: f64,
     pub released_rain_kg_m2_s: f64,
     pub released_snow_kg_m2_s: f64,
+    /// `gross_intr_rain`/`gross_intr_snow`：单柱是 `max(0, qintr_*)`（`:510-511`）；PFT 是逐 PFT
+    /// 取过 `max` 再按 `pftfrac` 聚合（`:689-690`），不等于聚合后再取 `max`。只给示踪物用。
+    pub gross_rain_kg_m2_s: f64,
+    pub gross_snow_kg_m2_s: f64,
 }
 
 /// Wet canopy area and dry transpiring leaf area for one canopy water state.
@@ -349,6 +353,8 @@ pub fn intercept_canopy(
             retained_snow_kg_m2_s: 0.0,
             released_rain_kg_m2_s: released_rain,
             released_snow_kg_m2_s: released_snow,
+            gross_rain_kg_m2_s: 0.0,
+            gross_snow_kg_m2_s: 0.0,
         });
     }
 
@@ -556,6 +562,8 @@ pub fn intercept_canopy(
         retained_snow_kg_m2_s,
         released_rain_kg_m2_s: released_rain_mm / input.time_step_seconds,
         released_snow_kg_m2_s: released_snow_mm / input.time_step_seconds,
+        gross_rain_kg_m2_s: retained_rain_kg_m2_s.max(0.0),
+        gross_snow_kg_m2_s: retained_snow_kg_m2_s.max(0.0),
     })
 }
 

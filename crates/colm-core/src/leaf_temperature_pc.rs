@@ -68,6 +68,9 @@ pub(crate) struct PcPftFlux {
     pub(crate) etrsha: f64,
     pub(crate) hprl: f64,
     pub(crate) dheatl: f64,
+    /// `canopy_smelt_mass_p_out`/`canopy_frzc_mass_p_out`：`qmelt*deltim`、`qfrz*deltim`。
+    pub(crate) canopy_melt_mass_mm: f64,
+    pub(crate) canopy_freeze_mass_mm: f64,
     pub(crate) rstfacsun: f64,
     pub(crate) rstfacsha: f64,
     pub(crate) rootflux: Vec<f64>,
@@ -1321,7 +1324,7 @@ pub(crate) fn leaf_temperature_pc(
         let dt_precip = t_precip - tl[i];
         fluxes[i].hprl = rain_heat.mul_add(dt_precip, snow_heat * dt_precip);
         fluxes[i].dheatl = d * (clai[i] / deltim);
-        update_pc_canopy_water(
+        let (melt, freeze) = update_pc_canopy_water(
             &mut columns[i].leaf.canopy_water,
             &mut columns[i].wet_snow_fraction,
             &mut tl[i],
@@ -1330,6 +1333,8 @@ pub(crate) fn leaf_temperature_pc(
             deltim,
             vegetation_snow,
         );
+        fluxes[i].canopy_melt_mass_mm = melt;
+        fluxes[i].canopy_freeze_mass_mm = freeze;
     }
 
     // `:2061-2065`
@@ -1472,7 +1477,8 @@ fn solve_canopy_air(
 }
 
 /// `:1901-2038`（`DEF_Interception_scheme = 1` 与 `DEF_VEG_SNOW`）：叶面蒸发/凝结记账、
-/// 湿雪比例与冠层融化/冻结（Niu 2004 的叶温拉回）。
+/// 湿雪比例与冠层融化/冻结（Niu 2004 的叶温拉回）。返回冠层融化、冻结的质量
+/// （`qmelt*deltim`、`qfrz*deltim`，示踪物用；没有相变时为 0）。
 fn update_pc_canopy_water(
     water: &mut CanopyWater,
     wet_snow_fraction: &mut f64,
@@ -1481,7 +1487,7 @@ fn update_pc_canopy_water(
     lsai: f64,
     deltim: f64,
     vegetation_snow: bool,
-) {
+) -> (f64, f64) {
     // `:1903`：`max(FNMA(deltim, evplwet, ldew), 0)`
     water.total_mm = (-deltim).mul_add(evplwet, water.total_mm).max(0.0);
     if !vegetation_snow {
@@ -1497,7 +1503,7 @@ fn update_pc_canopy_water(
             water.rain_mm = 0.0;
             water.snow_mm = water.total_mm;
         }
-        return;
+        return (0.0, 0.0);
     }
     let (mut qevpl, qdewl, mut qsubl, qfrol);
     if *tl > FREEZING_K {
@@ -1530,12 +1536,14 @@ fn update_pc_canopy_water(
         *wet_snow_fraction = fraction.min(1.0);
     }
     let fwet_snow = *wet_snow_fraction;
+    let (mut melt_mass, mut freeze_mass) = (0.0, 0.0);
     if water.snow_mm > 1.0e-6 && *tl > FREEZING_K {
         let qmelt = (water.snow_mm / deltim).min(
             water.snow_mm * ((*tl - FREEZING_K) * ICE_HEAT_CAPACITY_J_KG_K)
                 / (deltim * LATENT_HEAT_FUSION_J_KG),
         );
         let melted = deltim * qmelt;
+        melt_mass = melted;
         water.snow_mm = (water.snow_mm - melted).max(0.0);
         water.rain_mm = (melted + water.rain_mm).max(0.0);
         *tl = fwet_snow.mul_add(FREEZING_K, *tl * (1.0 - fwet_snow));
@@ -1546,10 +1554,12 @@ fn update_pc_canopy_water(
                 / (deltim * LATENT_HEAT_FUSION_J_KG),
         );
         let frozen = deltim * qfrz;
+        freeze_mass = frozen;
         water.rain_mm = (water.rain_mm - frozen).max(0.0);
         water.snow_mm = (frozen + water.snow_mm).max(0.0);
         *tl = fwet_snow.mul_add(FREEZING_K, *tl * (1.0 - fwet_snow));
     }
+    (melt_mass, freeze_mass)
 }
 
 #[cfg(test)]

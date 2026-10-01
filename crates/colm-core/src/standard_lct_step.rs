@@ -1017,9 +1017,9 @@ pub fn standard_lct_snow_soil_step(
                 ldew_rain_old: tracer_scratch.ldew_rain_old,
                 ldew_snow_old: tracer_scratch.ldew_snow_old,
                 sprinkler: input.energy.interception.sprinkler_irrigation_kg_m2_s,
-                // CoLM2014：`gross_intr = max(0, qintr)`、`xsc_out = xsc/deltim`，无冠层相变。
-                gross_intr_rain: interception.retained_rain_kg_m2_s.max(0.0),
-                gross_intr_snow: interception.retained_snow_kg_m2_s.max(0.0),
+                // `xsc_out = xsc/deltim`；CoLM2014/2024 都不在截留里做冠层相变（`:514-515`）。
+                gross_intr_rain: interception.gross_rain_kg_m2_s,
+                gross_intr_snow: interception.gross_snow_kg_m2_s,
                 xsc_rain: interception.released_rain_kg_m2_s,
                 xsc_snow: interception.released_snow_kg_m2_s,
                 ldew_smelt_mass: 0.0,

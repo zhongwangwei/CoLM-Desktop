@@ -27417,3 +27417,20 @@ colm-rs: DEF_HIST_vars_out_default = .false. (per-variable history selection) is
 `tsu`（`tsa` 改 `SITE_landtype = 13`，AT-Neu 站点文件）：patchtype 1，`f_trc_conc_soisno` 1→2.17、积雪 2→2.07、冠层 0.49–5.89；`PROFILE=release bash tmp/regress.sh tsu` → `tsu [colm ok] hist(2): ok rst: ok`。
 
 同时核对了 `CoLMDRIVER` 的驱动级示踪物钩子：`tracer_resolve_step`/`tracer_lake_step`/`tracer_wetland_decomp`/`tracer_soil_step` 只转发给生命周期注册（甲烷 T4、泥沙 T5），solute 下为空；`tracer_report` 每步在**所有 patch 之后**调一次（`:392-393`），Rust 现在逐 patch 报告 —— 单 patch 等价，多 patch（PFT/PC 之外的多 patch 单点也一样）要挪到步末，随 PFT/PC 一起做。
+
+## 第 485 轮：示踪物 T1b（五）—— PFT/PC，与步末一次的 `tracer_report`
+
+上游示踪物池是逐 patch 的，PFT/PC 只影响两处宿主量的聚合：
+- **冠层相变质量**：`MOD_Thermal.F90:1201-1202` `sum(canopy_*_mass_p*pftfrac)`，逐 PFT 的值来自 `LeafTemperature`（`qmelt*deltim`）与 `LeafTemperaturePC:1962/1972`。Rust 的 PFT 记录与 PC 通量各补两项，`update_pc_canopy_water` 返回融化/冻结质量，聚合用 `pft_sum`（无冠层 PFT 记 0）。
+- **截留毛量**：`LEAF_interception_pftwrap:689-690` 是逐 PFT 先 `max(0, qintr_rain_i)` 再 `FMA(pftfrac, gross_i, tmp)`，**不等于**聚合后再取 `max`。`CanopyInterceptionFluxes` 补 `gross_rain/snow_kg_m2_s`（单柱 `max(0, retained)`，PFT 用 `pft_sum`），示踪物改读它。GIMPLE 核对：`gross/xsc/smelt/frzc_tmp` 都是 `.FMA (_139, x_i, tmp)` 链。CoLM2014/2024 截留里 `ldew_smelt/frzc_out` 恒为 0（`:514-515`；2024 只是换了 `satcap` 再调 2014），沿用 0。
+
+`tracer_report` 从逐 patch 改为一步里所有 patch 推进完之后调一次（`CoLMDRIVER.F90:392-393`，在 `hist_out` 之前）；单 patch 不变。
+
+| 算例 | 配置 | 结果 |
+|---|---|---|
+| `tsp` | `tsa` + `DEF_USE_LCT=.false.`、`DEF_USE_PFT=.true.`（`pf` 站点） | history 2、续跑全部 ok |
+| `tsq` | 同上，`DEF_USE_PC=.true.`（`qm` 站点） | ok |
+
+**变异检验**（确认新路径真的在逐位路径上）：临时把 PFT 聚合的 `canopy_melt/freeze` 置 0、`gross_rain` 改成聚合后取 `max`，另建目录编译跑：`tsp`、`tsq` 都变成 `history 2 bad 1 restarts 11 bad 3`；恢复后重跑全部 ok。
+
+宿主不变：`pf pm qm qr tsa tsw` 重跑 `ok rst: ok`；`cargo test`（colm-core 462、colm-runtime 131）与 `clippy` 无告警。至此 T1 的单点陆面 patch 类型全部接入（装了城市模型的 patch 上游自己也停机）。

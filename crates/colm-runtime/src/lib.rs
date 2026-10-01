@@ -525,6 +525,7 @@ impl PointRuntime {
                     optimizer.as_ref().map(|optimizer| optimizer.scale(index)),
                 )?);
             }
+            crate::tracer::report_after_patches(templates)?;
             // `hist_out` 在 `itstamp <= ptstamp` 时直接返回（`MOD_Hist.F90:225`），连累加都不做：
             // 预热期（含每一轮重复）不产生 history。步末 `itstamp <= ptstamp` 与本步
             // `is_spinup` 在步长整除预热区间时是同一件事。
@@ -667,6 +668,7 @@ impl PointRuntime {
                 refresh_lai(step, template, next)?;
                 outputs.push(output);
             }
+            crate::tracer::report_after_patches(templates)?;
             optimize_baseflow(
                 optimizer.as_mut(),
                 step,
