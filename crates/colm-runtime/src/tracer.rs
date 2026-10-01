@@ -163,11 +163,12 @@ impl TracerRuntime {
         };
         // provider 示踪物（CH4 的 `methane`、SEDIMENT 的泥沙）各有自己的状态与物理，还没移植；
         // 不拒绝的话 Rust 会照常跑完却没有甲烷/泥沙过程，输出悄悄与 Fortran 不同。
-        if let Some(tracer) = set
-            .tracers
-            .iter()
-            .find(|t| t.state_owner == colm_core::tracer::descriptor::StateOwner::Provider)
-        {
+        // CH4 由 [`crate::methane`] 接在 BGC 之后（要开 BGC）；其余 provider 都还没移植。
+        let use_bgc = logical(document, "DEF_USE_BGC")?;
+        if let Some(tracer) = set.tracers.iter().find(|t| {
+            t.state_owner == colm_core::tracer::descriptor::StateOwner::Provider
+                && !(use_bgc && crate::methane::is_methane_tracer(t))
+        }) {
             anyhow::bail!(
                 "provider tracer {} ({}) is not ported to the Rust runtime yet (methane/sediment); \
                  run this case with --engine fortran",
@@ -905,7 +906,7 @@ pub fn read_land_tracer_restart(
     Ok(Some(states))
 }
 
-fn ensure_dimension(file: &mut netcdf::FileMut, name: &str, len: usize) -> Result<()> {
+pub(crate) fn ensure_dimension(file: &mut netcdf::FileMut, name: &str, len: usize) -> Result<()> {
     match file.dimension(name) {
         Some(dimension) => {
             anyhow::ensure!(
@@ -921,7 +922,7 @@ fn ensure_dimension(file: &mut netcdf::FileMut, name: &str, len: usize) -> Resul
     Ok(())
 }
 
-fn put_scalar_i32(file: &mut netcdf::FileMut, name: &str, value: i32) -> Result<()> {
+pub(crate) fn put_scalar_i32(file: &mut netcdf::FileMut, name: &str, value: i32) -> Result<()> {
     let mut variable = match file.variable_mut(name) {
         Some(variable) => variable,
         None => file.add_variable::<i32>(name, &[])?,
@@ -939,7 +940,7 @@ fn put_scalar_f64(file: &mut netcdf::FileMut, name: &str, value: f64) -> Result<
     Ok(())
 }
 
-fn put_array_f64(
+pub(crate) fn put_array_f64(
     file: &mut netcdf::FileMut,
     name: &str,
     dims: &[&str],
@@ -953,7 +954,7 @@ fn put_array_f64(
     Ok(())
 }
 
-fn put_array_i32(
+pub(crate) fn put_array_i32(
     file: &mut netcdf::FileMut,
     name: &str,
     dims: &[&str],

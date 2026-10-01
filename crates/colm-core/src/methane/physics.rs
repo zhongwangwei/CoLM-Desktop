@@ -150,7 +150,11 @@ pub fn split_phases(
 }
 
 /// `methane_distribute_grid_finundation`：网格淹没比例分配到湿地/土壤 patch。
-pub fn distribute_grid_finundation(grid_fraction: f64, wetland_fraction: f64, patchtype: i32) -> f64 {
+pub fn distribute_grid_finundation(
+    grid_fraction: f64,
+    wetland_fraction: f64,
+    patchtype: i32,
+) -> f64 {
     let clean = |x: f64| {
         if x.is_nan() || x.abs() >= 0.5 * SPVAL.abs() {
             0.0
@@ -240,7 +244,9 @@ pub fn annual_update(
     };
     let secsperyear = year_seconds(idate[0]);
     // GIMPLE：`FMA(real(idate(2)-1), 86400, real(idate(3)))`。
-    let end_sec = f64::from(idate[1] - 1).mul_add(SECSPDAY, f64::from(idate[2])).max(0.0);
+    let end_sec = f64::from(idate[1] - 1)
+        .mul_add(SECSPDAY, f64::from(idate[2]))
+        .max(0.0);
     if end_sec < deltim {
         let previous = year_seconds(idate[0] - 1);
         let dt_current = end_sec;
@@ -332,18 +338,30 @@ pub fn prod(m: &super::config::MethaneConfig, i: &ProdInput<'_>) -> ProdOutput {
             continue;
         }
         if i.patchtype == 4 && m.allowlakeprod {
-            let mut base = m.lake_decomp_fact * m.cnscalefactor * i.lake_soilc[k].max(0.0) * dz(k)
+            let mut base = m.lake_decomp_fact
+                * m.cnscalefactor
+                * i.lake_soilc[k].max(0.0)
+                * dz(k)
                 * q10lake_eff.lpow((t(k) - m.q10lakebase) / 10.0)
                 / CATOMW;
             let freeze = 1.0f64.min(0.0f64.max(t(k) - TFRZ + 1.0));
             base *= freeze;
-            let fraction = if j > i.jwt { m.f_methane.max(0.0).min(0.5) } else { 0.0 };
+            let fraction = if j > i.jwt {
+                m.f_methane.max(0.0).min(0.5)
+            } else {
+                0.0
+            };
             out.methane_prod_depth[k] = fraction * base / dz(k);
             out.co2_decomp_depth[k] = 0.0f64.max(base / dz(k) - out.methane_prod_depth[k]);
             continue;
         }
         let mut base = (i.somhr + i.lithr) / CATOMW;
-        if i.sat == 1 && m.use_ch4_sif && !m.bgc_anoxia_limits_decomp && i.annavg_finrw != SPVAL && i.finundated > 0.0 {
+        if i.sat == 1
+            && m.use_ch4_sif
+            && !m.bgc_anoxia_limits_decomp
+            && i.annavg_finrw != SPVAL
+            && i.finundated > 0.0
+        {
             let seasonalfin = (i.finundated - i.annavg_finrw).max(0.0);
             if seasonalfin > 0.0 {
                 let sif = seasonalfin.mul_add(m.mino2lim, i.annavg_finrw) / i.finundated;
@@ -402,19 +420,20 @@ pub fn prod(m: &super::config::MethaneConfig, i: &ProdInput<'_>) -> ProdOutput {
         } else if use_microbe_override {
             cap = 0.0;
         }
-        let prod = if use_microbe_override && i.microbial_prod_potential[k].abs() < 0.5 * SPVAL.abs() {
-            if j > i.jwt || m.anoxicmicrosites {
-                0.0f64.max(i.microbial_prod_potential[k]).min(cap)
+        let prod =
+            if use_microbe_override && i.microbial_prod_potential[k].abs() < 0.5 * SPVAL.abs() {
+                if j > i.jwt || m.anoxicmicrosites {
+                    0.0f64.max(i.microbial_prod_potential[k]).min(cap)
+                } else {
+                    0.0
+                }
+            } else if j > i.jwt {
+                raw_prod
+            } else if m.anoxicmicrosites {
+                anoxic(raw_prod)
             } else {
                 0.0
-            }
-        } else if j > i.jwt {
-            raw_prod
-        } else if m.anoxicmicrosites {
-            anoxic(raw_prod)
-        } else {
-            0.0
-        };
+            };
         out.methane_prod_depth[k] = prod;
         let mut o2 = 0.0f64.max((-prod).mul_add(2.0, carbon));
         if m.anoxia && !m.bgc_anoxia_limits_decomp && i.o_scalar[k] > 0.0 {
@@ -588,12 +607,24 @@ pub fn aere(m: &super::config::MethaneConfig, i: &AereInput<'_>) -> AereOutput {
     if !valid(anpp) {
         anpp = 0.0;
     }
-    if anpp <= 0.0 && valid(i.annavg_agnpp) && valid(i.annavg_bgnpp) && i.annavg_agnpp + i.annavg_bgnpp > 0.0 {
-        let secsperyear = if crate::is_leap_year(i.year) { 366.0 * SECSPDAY } else { 365.0 * SECSPDAY };
+    if anpp <= 0.0
+        && valid(i.annavg_agnpp)
+        && valid(i.annavg_bgnpp)
+        && i.annavg_agnpp + i.annavg_bgnpp > 0.0
+    {
+        let secsperyear = if crate::is_leap_year(i.year) {
+            366.0 * SECSPDAY
+        } else {
+            365.0 * SECSPDAY
+        };
         anpp = (i.annavg_agnpp + i.annavg_bgnpp) * secsperyear;
     }
     let anpp = anpp.max(0.0);
-    let nppratio = if valid(i.annavg_agnpp) && valid(i.annavg_bgnpp) && i.annavg_agnpp > 0.0 && i.annavg_bgnpp > 0.0 {
+    let nppratio = if valid(i.annavg_agnpp)
+        && valid(i.annavg_bgnpp)
+        && i.annavg_agnpp > 0.0
+        && i.annavg_bgnpp > 0.0
+    {
         i.annavg_bgnpp / (i.annavg_agnpp + i.annavg_bgnpp)
     } else {
         0.5
@@ -603,12 +634,14 @@ pub fn aere(m: &super::config::MethaneConfig, i: &AereInput<'_>) -> AereOutput {
         let j = k as i32 + 1;
         let dz = i.dz_soisno[sn(j)];
         if m.transpirationloss && i.lai > 0.0 {
-            out.methane_tran_depth[k] = (i.etr * (i.conc_ch4_aqu_porsl[k] * i.rootr[k]) / dz / 1000.0).max(0.0);
+            out.methane_tran_depth[k] =
+                (i.etr * (i.conc_ch4_aqu_porsl[k] * i.rootr[k]) / dz / 1000.0).max(0.0);
         }
         if j > i.jwt && i.t_soisno[sn(j)] > TFRZ && i.lai > 0.0 {
             let m_tiller = anpp * nppratio * i.lai;
             let n_tiller = m_tiller / tiller_c;
-            let area_tiller = scale * n_tiller * poros_tiller_real * std::f64::consts::PI * (radius * radius);
+            let area_tiller =
+                scale * n_tiller * poros_tiller_real * std::f64::consts::PI * (radius * radius);
             let z_rob = i.z_soisno[sn(j)] * m.rob;
             let path = area_tiller * i.rootfr[k];
             let aere_ch4_resis = 1.0 / (path * D_CON_G[0][0] * 1.0e-4 / z_rob + SMALL);
@@ -616,8 +649,13 @@ pub fn aere(m: &super::config::MethaneConfig, i: &AereInput<'_>) -> AereOutput {
             let aerecond = 1.0 / (aere_ch4_resis + grnd_resis);
             out.methane_aere_depth[k] = aerecond * (i.conc_ch4_gas_porsl[k] - i.c_atm[0]) / dz;
             let aere_o2_resis = 1.0 / (path * D_CON_G[1][0] * 1.0e-4 / z_rob + SMALL);
-            let oxaere = -(i.conc_o2_gas_porsl[k] - i.c_atm[1]) / (dz * (aere_o2_resis + grnd_resis));
-            out.o2_aere_depth[k] = if m.use_aereoxid_prog { oxaere.max(0.0) } else { 0.0 };
+            let oxaere =
+                -(i.conc_o2_gas_porsl[k] - i.c_atm[1]) / (dz * (aere_o2_resis + grnd_resis));
+            out.o2_aere_depth[k] = if m.use_aereoxid_prog {
+                oxaere.max(0.0)
+            } else {
+                0.0
+            };
         }
     }
     out
@@ -667,7 +705,8 @@ pub fn ebul(
         }
         let vgc = conc_ch4_gas_porsl[k] * RGASM * t / pressure;
         if vgc > m.vgc_max {
-            out[k] = (-m.vgc_max).mul_add(m.bubble_f, vgc) / vgc.max(SMALL) * conc_methane[k] / deltim;
+            out[k] =
+                (-m.vgc_max).mul_add(m.bubble_f, vgc) / vgc.max(SMALL) * conc_methane[k] / deltim;
         }
     }
     out
@@ -778,17 +817,25 @@ pub fn tran(
         } else {
             1.0
         };
-        let supply = ((l.conc_methane[k] / dt + i.methane_prod_depth[k]) - l.methane_aere_depth[k].min(0.0))
+        let supply = ((l.conc_methane[k] / dt + i.methane_prod_depth[k])
+            - l.methane_aere_depth[k].min(0.0))
             - l.methane_tran_depth[k].min(0.0);
-        let demand = ((l.methane_aere_depth[k].max(0.0) + l.methane_oxid_depth[k]) + l.methane_tran_depth[k].max(0.0))
+        let demand = ((l.methane_aere_depth[k].max(0.0) + l.methane_oxid_depth[k])
+            + l.methane_tran_depth[k].max(0.0))
             + l.methane_ebul_depth[k];
-        let mut ch4stress = if demand > 0.0 { (supply / demand).min(1.0) } else { 1.0 };
+        let mut ch4stress = if demand > 0.0 {
+            (supply / demand).min(1.0)
+        } else {
+            1.0
+        };
         if o2stress < 1.0 || ch4stress < 1.0 {
             if ch4stress <= o2stress {
                 if o2stress < 1.0 {
                     let o2demand = l.o2_decomp_depth[k];
                     o2stress = if o2demand > 0.0 {
-                        ((l.conc_o2[k] / dt + i.o2_aere_depth[k] - ch4stress * l.o2_oxid_depth[k]) / o2demand).min(1.0)
+                        ((l.conc_o2[k] / dt + i.o2_aere_depth[k] - ch4stress * l.o2_oxid_depth[k])
+                            / o2demand)
+                            .min(1.0)
                     } else {
                         1.0
                     };
@@ -797,7 +844,8 @@ pub fn tran(
                 l.o2_oxid_depth[k] *= ch4stress;
             } else {
                 if ch4stress < 1.0 {
-                    let demand = (l.methane_aere_depth[k].max(0.0) + l.methane_tran_depth[k].max(0.0))
+                    let demand = (l.methane_aere_depth[k].max(0.0)
+                        + l.methane_tran_depth[k].max(0.0))
                         + l.methane_ebul_depth[k];
                     ch4stress = if demand > 0.0 {
                         ((supply - o2stress * l.methane_oxid_depth[k]) / demand).min(1.0)
@@ -827,7 +875,8 @@ pub fn tran(
     let mut source = [[0.0f64; 2]; NL_SOIL];
     let conc_ch4_bef = l.conc_methane;
     for k in 0..n {
-        source[k][0] = (((i.methane_prod_depth[k] - l.methane_oxid_depth[k]) - l.methane_aere_depth[k])
+        source[k][0] = (((i.methane_prod_depth[k] - l.methane_oxid_depth[k])
+            - l.methane_aere_depth[k])
             - l.methane_tran_depth[k])
             - l.methane_ebul_depth[k];
         source[k][1] = (-l.o2_oxid_depth[k] - l.o2_decomp_depth[k]) + i.o2_aere_depth[k];
@@ -878,7 +927,8 @@ pub fn tran(
             let airfrac = (1.0 - icefrac - waterfrac).max(0.0);
             let filled = waterfrac + airfrac;
             let snowdiff = if airfrac > 0.05 {
-                t_c.mul_add(D_CON_G[s][1], D_CON_G[s][0]) * 1.0e-4 * airfrac.lpow(10.0 / 3.0) / (filled * filled)
+                t_c.mul_add(D_CON_G[s][1], D_CON_G[s][0]) * 1.0e-4 * airfrac.lpow(10.0 / 3.0)
+                    / (filled * filled)
                     * m.scale_factor_gasdiff
             } else {
                 filled.lpow(m.satpow) * water_poly(s, t_c) * 1.0e-9 * m.scale_factor_liqdiff
@@ -897,7 +947,8 @@ pub fn tran(
             let t1 = i.t_soisno[sn(1)];
             let base = water_poly(s, t1 - TFRZ) * 1.0e-9;
             let ponddiff = if t1 <= TFRZ {
-                (wliq1 / DENH2O + SMALL) * base / (wliq1 / DENH2O + wice1 / DENICE + SMALL) * m.scale_factor_liqdiff
+                (wliq1 / DENH2O + SMALL) * base / (wliq1 / DENH2O + wice1 / DENICE + SMALL)
+                    * m.scale_factor_liqdiff
             } else {
                 m.scale_factor_liqdiff * base
             };
@@ -913,7 +964,8 @@ pub fn tran(
                 pond_resis += 1.0 / SMALL;
             }
         }
-        spec_grnd_cond[s] = 1.0 / ((1.0 / i.grnd_methane_cond_base.max(SMALL) + snow_resis) + pond_resis);
+        spec_grnd_cond[s] =
+            1.0 / ((1.0 / i.grnd_methane_cond_base.max(SMALL) + snow_resis) + pond_resis);
         // 逐层扩散系数。
         let mut diffus = [0.0f64; NL_SOIL];
         for k in 0..n {
@@ -927,16 +979,25 @@ pub fn tran(
                 } else {
                     1.0
                 };
-                let one_minus = if i.organic_max > 0.0 { 1.0 - om_frac } else { 0.0 };
+                let one_minus = if i.organic_max > 0.0 {
+                    1.0 - om_frac
+                } else {
+                    0.0
+                };
                 let vg = i.vol_gas[k];
                 let porsl = i.porsl[k];
                 let first = vg.lpow(10.0 / 3.0) * om_frac / (porsl * porsl);
                 let second = (vg * vg) * one_minus;
                 let ratio_pow = (vg / porsl).lpow(3.0 / i.bsw[k].max(0.5));
-                t_c.mul_add(D_CON_G[s][1], D_CON_G[s][0]) * 1.0e-4 * second.mul_add(ratio_pow, first)
+                t_c.mul_add(D_CON_G[s][1], D_CON_G[s][0])
+                    * 1.0e-4
+                    * second.mul_add(ratio_pow, first)
                     * m.scale_factor_gasdiff
             } else {
-                i.vol_aqu[k].max(SMALL).lpow(m.satpow) * water_poly(s, t_c) * 1.0e-9 * m.scale_factor_liqdiff
+                i.vol_aqu[k].max(SMALL).lpow(m.satpow)
+                    * water_poly(s, t_c)
+                    * 1.0e-9
+                    * m.scale_factor_liqdiff
             };
             diffus[k] = diffus[k].max(SMALL);
         }
@@ -1024,7 +1085,8 @@ pub fn tran(
                 }
             }
             anyhow::ensure!(
-                !(m.numerical_correction_fatal_threshold > 0.0 && clip > m.numerical_correction_fatal_threshold),
+                !(m.numerical_correction_fatal_threshold > 0.0
+                    && clip > m.numerical_correction_fatal_threshold),
                 "CH4 nonnegative column clip exceeds fatal threshold"
             );
         } else {
@@ -1041,7 +1103,8 @@ pub fn tran(
                 out.o2_cap_gain = gain / dt;
             }
             anyhow::ensure!(
-                !(m.numerical_correction_fatal_threshold > 0.0 && gain > m.numerical_correction_fatal_threshold),
+                !(m.numerical_correction_fatal_threshold > 0.0
+                    && gain > m.numerical_correction_fatal_threshold),
                 "O2 nonnegative floor exceeds fatal threshold"
             );
         }
@@ -1058,11 +1121,13 @@ pub fn tran(
         err = (dz(k) * l.methane_tran_depth[k]).mul_add(dt, err);
     }
     out.grnd_methane_cond_effective = spec_grnd_cond[0];
-    err = ((out.methane_surf_aere + out.methane_surf_ebul) + out.methane_surf_diff).mul_add(dt, err);
+    err =
+        ((out.methane_surf_aere + out.methane_surf_ebul) + out.methane_surf_diff).mul_add(dt, err);
     out.methane_balance_residual = -err / dt;
     out.methane_surf_diff += out.methane_balance_residual;
     anyhow::ensure!(
-        !(m.numerical_correction_fatal_threshold > 0.0 && err.abs() > m.numerical_correction_fatal_threshold),
+        !(m.numerical_correction_fatal_threshold > 0.0
+            && err.abs() > m.numerical_correction_fatal_threshold),
         "CH4 transport closure residual exceeds fatal threshold"
     );
     Ok(out)
@@ -1071,3 +1136,84 @@ pub fn tran(
 #[cfg(test)]
 #[path = "physics_tests.rs"]
 mod physics_tests;
+
+use colm_lapack::libm::erf;
+
+/// `compute_f_h2osfc`：坡度决定的微地形高程标准差下，积水 `wdsrf`（mm）覆盖的面积比例
+/// （高斯微地形；牛顿迭代 20 次不收敛就二分 60 次）。
+pub fn f_h2osfc(hydrology: &super::config::MethaneHydrology, slpratio: f64, wdsrf: f64) -> f64 {
+    const PONDMIN: f64 = 1.0e-8;
+    const FD_TOL: f64 = 1.0e-10;
+    /// `sqrt(2.0)`、`sqrt(2.0*PI)`：GIMPLE 里的折叠值（前者与标准库常量同位）。
+    const SQRT_2: f64 = std::f64::consts::SQRT_2;
+    const SQRT_2PI: f64 = 2.506628274631000241612355239340104162693023681640625;
+    use crate::LibmPow;
+    if !wdsrf.is_finite()
+        || !slpratio.is_finite()
+        || wdsrf == SPVAL
+        || slpratio == SPVAL
+        || wdsrf <= PONDMIN
+        || slpratio.abs() >= 1.0e30
+        || hydrology.slopemax <= 0.0
+        || hydrology.slopebeta >= 0.0
+    {
+        return 0.0;
+    }
+    let slope_angle = slpratio
+        .max(0.0)
+        .atan()
+        .min(0.5 * std::f64::consts::PI)
+        .max(0.0);
+    let micro_sigma = (hydrology.slopemax.lpow(1.0 / hydrology.slopebeta) + slope_angle)
+        .lpow(hydrology.slopebeta);
+    let sigma_mm = 1.0e3 * hydrology.slopemax.min(micro_sigma).max(0.0);
+    if sigma_mm <= 1.0e-3 {
+        return 0.0;
+    }
+    let cap = 10.0 * sigma_mm;
+    if wdsrf >= cap {
+        return 1.0;
+    }
+    let s2 = sigma_mm * SQRT_2;
+    let amp = sigma_mm / SQRT_2PI;
+    let twice_var = sigma_mm * sigma_mm * 2.0;
+    let f = |d: f64| {
+        let cdf = erf(d / s2) + 1.0;
+        (
+            (d * 0.5).mul_add(cdf, amp * (-(d * d / twice_var)).exp()) - wdsrf,
+            cdf,
+        )
+    };
+    let mut d = wdsrf.max(0.0).min(cap);
+    let mut converged = false;
+    for _ in 0..20 {
+        let (fd, cdf) = f(d);
+        let dfdd = cdf * 0.5;
+        if fd.abs() < FD_TOL {
+            converged = true;
+            break;
+        }
+        if dfdd < 1.0e-12 {
+            break;
+        }
+        d = (d - fd / dfdd).min(cap).max(-cap);
+    }
+    if !converged {
+        let (mut lo, mut hi) = (-cap, cap);
+        let mut mid = 0.0;
+        for _ in 0..60 {
+            mid = (hi + lo) * 0.5;
+            let (fm, _) = f(mid);
+            if fm.abs() < FD_TOL {
+                break;
+            }
+            if fm > 0.0 {
+                hi = mid;
+            } else {
+                lo = mid;
+            }
+        }
+        d = mid;
+    }
+    (0.5 * (1.0 + erf(d / s2))).min(1.0).max(0.0)
+}

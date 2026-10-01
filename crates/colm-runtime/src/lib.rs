@@ -19,7 +19,9 @@ pub mod pft;
 pub mod physics;
 pub mod river;
 pub mod spatial;
+pub mod methane;
 pub mod tracer;
+pub mod tracer_sidecar;
 
 use std::path::{Path, PathBuf};
 
@@ -1160,6 +1162,10 @@ fn advance_patch(
                 i32::try_from(end.seconds)?,
             ],
             &step.forcing,
+            binding.partial_pressures_pa.unwrap_or((
+                step.forcing.bottom_pressure_pa * binding.co2_volume_fraction,
+                step.forcing.bottom_pressure_pa * 0.209,
+            )),
             state,
             &output,
         )?;

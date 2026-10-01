@@ -42,6 +42,10 @@ pub struct BgcState {
     /// [`IRRIGATION_DIAGNOSTICS`] 的当前值：CROP 内核分配为整型 spval（−9999），作物汇总
     /// （`MOD_BGC_CNSummary.F90:429` 起）把 `irrig_method_p` 写进来，跨步保留。
     pub irrigation_diagnostics: [f64; 8],
+    /// CH4 provider 的 patch 状态（注册了 `gas` 类 CH4 示踪物时才有）。
+    pub methane: Option<Box<crate::methane::driver::MethanePatch>>,
+    /// CH4 `core` history 的累加量（`a_*` 与 `a_methane_acc_num`）。
+    pub methane_acc: crate::methane::driver::CoreAccumulator,
 }
 
 /// patch 级的灌溉方式诊断量（`MOD_Vars_TimeVariables`，`#ifdef CROP`），与 `BgcPhysics` 同名。
@@ -90,6 +94,8 @@ impl BgcState {
             pft_flux: BgcPftFluxes::new(npft, dims),
             lai_diagnostics: [crate::MISSING; 14],
             irrigation_diagnostics: [-9999.0; 8],
+            methane: None,
+            methane_acc: crate::methane::driver::CoreAccumulator::default(),
         }
     }
 

@@ -10,10 +10,11 @@
 //! - **其它平台**：Windows 内核由 MSYS2 构建，链的是 netlib 参考 LAPACK/BLAS；那是开源的，
 //!   逐句移植（[`reference`]）即可，不必让 MSVC 工具链与 GUI 打包依赖一个系统库。
 //!
-//! 工作区对 `unsafe_code` 是 `forbid`；本 crate 单独降为 `deny`，只有 `accelerate` 模块放行。
+//! 工作区对 `unsafe_code` 是 `forbid`；本 crate 单独降为 `deny`，只有 `accelerate` 与 `libm`（`erf` 等标准库没包装的 libm 函数）两个模块放行。
 
 use anyhow::{ensure, Result};
 
+pub mod libm;
 #[cfg(target_os = "macos")]
 mod accelerate;
 #[cfg_attr(target_os = "macos", allow(dead_code))]

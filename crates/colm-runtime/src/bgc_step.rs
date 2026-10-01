@@ -502,6 +502,8 @@ pub struct BgcRuntime {
     pub deltim: f64,
     /// `DEF_USE_IRRIGATION`（CROP）的设置；灌溉状态本身在 patch 状态上。
     pub irrigation: Option<colm_core::IrrigationSettings>,
+    /// CH4 provider（注册了 CH4 示踪物时）：配置与本 patch 的静态量。
+    pub methane: Option<(crate::methane::MethaneSetup, colm_core::methane::driver::MethaneSite)>,
     trace: Mutex<Option<TraceWriter>>,
 }
 
@@ -528,6 +530,7 @@ impl Clone for BgcRuntime {
             ndep_start_year: self.ndep_start_year,
             deltim: self.deltim,
             irrigation: self.irrigation,
+            methane: self.methane.clone(),
             // 追踪文件只属于第一个实例。
             trace: Mutex::new(None),
         }
@@ -586,6 +589,7 @@ impl BgcRuntime {
             ndep_start_year,
             deltim,
             irrigation: None,
+            methane: None,
             trace: Mutex::new(TraceWriter::from_env()?),
         })
     }
@@ -596,6 +600,7 @@ impl BgcRuntime {
         begin: colm_core::calendar::CalendarTime,
         idate: [i32; 3],
         forcing: &colm_core::RuntimeForcing,
+        partial_pressures_pa: (f64, f64),
         state: &mut StandardLctSnowSoilState,
         output: &StandardLctSnowSoilOutput,
     ) -> Result<()> {
@@ -674,6 +679,35 @@ impl BgcRuntime {
             bgc_driver(&mut step, &mut record)?;
         }
         self.write_back(&physics, state)?;
+        // `tracer_soil_step`（`CoLMDRIVER.F90:246-248`）：`bgc_driver` 之后跑甲烷，改写
+        // `decomp_hr`/`er`。
+        if let Some((setup, site)) = &self.methane {
+            let mut patch = bgc
+                .methane
+                .take()
+                .context("a methane patch needs its methane state")?;
+            let arrays = crate::methane::HostArrays::from_state(state, output)?;
+            let host = crate::methane::host_inputs(
+                &arrays,
+                idate,
+                deltim,
+                state,
+                output,
+                forcing,
+                partial_pressures_pa,
+                &physics.pftfrac,
+                setup.dynamic_wetland,
+            );
+            colm_core::methane::driver::soil_step(
+                &setup.params,
+                setup.scheme,
+                site,
+                &host,
+                &mut bgc,
+                &mut patch,
+            )?;
+            bgc.methane = Some(patch);
+        }
         // 汇总写的分 PFT 类型 LAI 只供历史，跟着 BGC 状态走。
         let inputs = physics.trace_inputs();
         for (slot, name) in bgc

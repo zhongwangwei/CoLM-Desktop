@@ -14,7 +14,11 @@ fn defaults_follow_the_fortran_type() {
 #[test]
 fn entries_override_in_order_and_validate() {
     let mut p = MethaneParameters::from_entries([
-        ("DEF_METHANE", "inundation_mode", FieldValue::Text("wetwat".into())),
+        (
+            "DEF_METHANE",
+            "inundation_mode",
+            FieldValue::Text("wetwat".into()),
+        ),
         ("DEF_METHANE", "q10methane", FieldValue::Real(2.5)),
         ("DEF_METHANE", "q10methane", FieldValue::Int(3)),
         ("DEF_METHANE", "anoxia", FieldValue::Logical(false)),
@@ -33,10 +37,17 @@ fn entries_override_in_order_and_validate() {
 fn bad_entries_and_modes_fail() {
     let mut p = MethaneParameters::default();
     assert!(p.configure_inundation(true, false).is_err());
-    assert!(MethaneParameters::from_entries([("DEF_METHANE", "nope", FieldValue::Real(1.0))]).is_err());
-    assert!(MethaneParameters::from_entries([("DEF_METHANE", "f_methane", FieldValue::Real(0.9))]).is_err());
     assert!(
-        MethaneParameters::from_entries([("DEF_METHANE", "use_microbial_pools", FieldValue::Logical(true))])
+        MethaneParameters::from_entries([("DEF_METHANE", "nope", FieldValue::Real(1.0))]).is_err()
+    );
+    assert!(
+        MethaneParameters::from_entries([("DEF_METHANE", "f_methane", FieldValue::Real(0.9))])
             .is_err()
     );
+    assert!(MethaneParameters::from_entries([(
+        "DEF_METHANE",
+        "use_microbial_pools",
+        FieldValue::Logical(true)
+    )])
+    .is_err());
 }

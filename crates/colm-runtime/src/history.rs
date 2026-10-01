@@ -2634,6 +2634,8 @@ pub struct HistorySession {
     /// 运行终点那条不在自然边界上的记录写出**之前**的窗口：上游此时先存原始窗口
     /// （`MOD_Hist.F90:265-274`），写完历史、清零之后的重启不再重存。
     raw_at_end: Option<Vec<crate::history_sidecar::HistoryWindow>>,
+    /// 同一时刻示踪物与 CH4 累加器的原始值（它们存在 patch 状态里，写完最后一条就清零）。
+    tracer_raw_at_end: crate::tracer_sidecar::RawTracersHandle,
     /// 多 patch 单点本步的网格元近地面诊断（见 [`element_surface_input`]）；单 patch 为 `None`。
     element_surface: Option<colm_core::HistoryDiagnostics>,
     /// `DEF_USE_Dynamic_Wetland`：`f_wetwat` 改写 `wdsrf` 的平均（由 `push_lct_snow` 现场给出）。
@@ -2678,6 +2680,11 @@ impl HistorySession {
         std::sync::Arc::clone(&self.window)
     }
 
+    /// 运行终点的示踪物/CH4 累加器快照（见 `tracer_raw_at_end` 字段）；写续跑旁车的一方取走。
+    pub fn tracer_raw_handle(&self) -> crate::tracer_sidecar::RawTracersHandle {
+        std::sync::Arc::clone(&self.tracer_raw_at_end)
+    }
+
     /// 本步各 patch 共用的网格元近地面诊断（多 patch 单点）；`None` 时逐 patch 重算。
     pub fn set_element_surface(&mut self, element: Option<colm_core::HistoryDiagnostics>) {
         self.element_surface = element;
@@ -2720,6 +2727,9 @@ impl HistorySession {
             .iter()
             .map(HistoryAccumulator::from_window)
             .collect();
+        if let (Some(tracer), Some(window)) = (self.tracer_variables.as_mut(), windows.first()) {
+            tracer.steps = window.steps;
+        }
         *self.window.lock().expect("history window lock") = windows;
         Ok(())
     }
@@ -2762,6 +2772,7 @@ impl HistorySession {
                 dimensions.patch
             ])),
             raw_at_end: None,
+            tracer_raw_at_end: std::sync::Arc::default(),
             element_surface: None,
             dynamic_wetland: false,
             dynamic_lake: false,
@@ -3501,11 +3512,13 @@ impl HistorySession {
         set: colm_core::tracer::TracerSet,
         patch_types: Vec<i32>,
     ) -> Self {
+        // 示踪物文件的平均用主 history 的 `nac`：续跑接着累加时（先 `restore` 了窗口）从那里接上。
+        let steps = self.accumulators.first().map_or(0, |accumulator| accumulator.steps);
         self.tracer_variables = Some(TracerHistoryState {
             set,
             patch_types,
             cursor: 0,
-            steps: 0,
+            steps,
             open: None,
         });
         self
@@ -3527,6 +3540,16 @@ impl HistorySession {
             return Ok(None);
         }
         tracer.steps += 1;
+        // CH4 `core` history：每步累加（`accumulate_methane_fluxes`），与示踪物同在预热期之后。
+        for (patch, state) in states.iter_mut().enumerate() {
+            if let Some(bgc) = state.bgc.as_deref_mut() {
+                if let Some(methane) = bgc.methane.as_deref() {
+                    let patch_type = tracer.patch_types[patch];
+                    let active = patch_type == 0 || patch_type == 2;
+                    bgc.methane_acc.accumulate(methane, active);
+                }
+            }
+        }
         let Some(record) = self.records.get(tracer.cursor).cloned() else {
             return Ok(None);
         };
@@ -3656,9 +3679,62 @@ impl HistorySession {
                 index += 1;
             }
         }
+        // CH4 `core` 变量（`methane_reactive_history`，排在示踪物变量之后）：单点 patch 维。
+        let has_methane = states
+            .iter()
+            .any(|state| state.bgc.as_deref().is_some_and(|bgc| bgc.methane.is_some()));
+        if has_methane {
+            ensure!(grid.is_none(), "gridded methane history is not ported to the Rust runtime yet");
+            let template = colm_core::methane::driver::CoreAccumulator::default().core_values(false, false);
+            for (k, (name, long_name, units, _)) in template.iter().enumerate() {
+                if variables.len() == index + k {
+                    variables.push(colm_hist::history::TracerFileVariable {
+                        name: (*name).to_owned(),
+                        long_name: (*long_name).to_owned(),
+                        units: (*units).to_owned(),
+                        layered: false,
+                        values: vec![colm_core::MISSING; records_in_group * patches],
+                    });
+                }
+            }
+            for (patch, state) in states.iter().enumerate() {
+                let patch_type = tracer.patch_types[patch];
+                let active = patch_type == 0 || patch_type == 2;
+                let land = patch_type < 99;
+                let acc = state
+                    .bgc
+                    .as_deref()
+                    .map(|bgc| bgc.methane_acc)
+                    .unwrap_or_default();
+                for (k, (_, _, _, value)) in acc.core_values(active, land).into_iter().enumerate() {
+                    variables[index + k].values[record.record * patches + patch] = value;
+                }
+            }
+        }
+        // 运行终点不在自然边界上：上游先存原始窗口再写这一条（`MOD_Hist.F90:270`）。
+        if !record.natural_boundary {
+            let raw = states
+                .iter()
+                .map(|state| crate::tracer_sidecar::RawTracers {
+                    tracer: state
+                        .tracer
+                        .as_deref()
+                        .map(|track| crate::tracer_sidecar::PatchAccumulators::of(&track.state)),
+                    methane: state
+                        .bgc
+                        .as_deref()
+                        .filter(|bgc| bgc.methane.is_some())
+                        .map(|bgc| bgc.methane_acc),
+                })
+                .collect();
+            *self.tracer_raw_at_end.lock().expect("tracer raw lock") = Some(raw);
+        }
         for state in states.iter_mut() {
             if let Some(track) = state.tracer.as_deref_mut() {
                 track.state.flush_accumulators();
+            }
+            if let Some(bgc) = state.bgc.as_deref_mut() {
+                bgc.methane_acc = colm_core::methane::driver::CoreAccumulator::default();
             }
         }
         tracer.cursor += 1;

@@ -38,7 +38,15 @@ fn phases_split_without_ice_storage() {
     }
     let porsl = [0.5; NL_SOIL];
     let k_h = henry_law(288.0, &[288.0; SOISNO]);
-    let p = split_phases(&dz, &wliq, &wice, &porsl, &[1.0; NL_SOIL], &[2.0; NL_SOIL], &k_h);
+    let p = split_phases(
+        &dz,
+        &wliq,
+        &wice,
+        &porsl,
+        &[1.0; NL_SOIL],
+        &[2.0; NL_SOIL],
+        &k_h,
+    );
     assert!((p.vol_aqu[0] - 0.2).abs() < 1e-15);
     assert!((p.vol_gas[0] - 0.3).abs() < 1e-15);
     // 总量守恒：f_aqu*C_aqu + f_gas*C_gas = C/porsl。
@@ -52,9 +60,41 @@ fn ebullition_needs_a_gas_excess_below_the_water_table() {
     let z: [f64; SOISNO] = std::array::from_fn(|i| if i >= 5 { 0.1 * (i - 4) as f64 } else { 0.0 });
     let zi = [0.0; SOISNO + 1];
     let t = [290.0; SOISNO];
-    let none = ebul(&m, 0, 0, 1, 1.0, 1800.0, &z, &zi, 101325.0, 0.0, 0.0, &t, 0.0, &[1.0; NL_SOIL], &[0.1; NL_SOIL]);
+    let none = ebul(
+        &m,
+        0,
+        0,
+        1,
+        1.0,
+        1800.0,
+        &z,
+        &zi,
+        101325.0,
+        0.0,
+        0.0,
+        &t,
+        0.0,
+        &[1.0; NL_SOIL],
+        &[0.1; NL_SOIL],
+    );
     assert!(none.iter().all(|&x| x == 0.0));
-    let some = ebul(&m, 0, 0, 1, 1.0, 1800.0, &z, &zi, 101325.0, 0.0, 0.0, &t, 0.0, &[1.0; NL_SOIL], &[100.0; NL_SOIL]);
+    let some = ebul(
+        &m,
+        0,
+        0,
+        1,
+        1.0,
+        1800.0,
+        &z,
+        &zi,
+        101325.0,
+        0.0,
+        0.0,
+        &t,
+        0.0,
+        &[1.0; NL_SOIL],
+        &[100.0; NL_SOIL],
+    );
     assert!(some[0] > 0.0);
 }
 
@@ -77,4 +117,17 @@ fn annual_update_turns_over_at_the_year_boundary() {
     annual_update(&mut acc, [2011, 1, 0], 0.5, 1800.0, 1.0, 2.0, 3.0);
     assert!(acc.annavg_somhr > 0.0);
     assert_eq!(acc.tempavg_somhr, 0.0);
+}
+
+#[test]
+fn surface_water_fraction_grows_with_ponding() {
+    let h = crate::methane::config::MethaneHydrology::default();
+    assert_eq!(f_h2osfc(&h, 0.01, 0.0), 0.0);
+    let small = f_h2osfc(&h, 0.01, 1.0);
+    let large = f_h2osfc(&h, 0.01, 50.0);
+    assert!(
+        small > 0.0 && small < large && large <= 1.0,
+        "{small} {large}"
+    );
+    assert_eq!(f_h2osfc(&h, 0.01, 1.0e6), 1.0);
 }

@@ -209,6 +209,12 @@ fn run() -> Result<()> {
         let restart = colm_init::RestartFile::open(&files.time)?;
         templates = attach_land_tracers(tracer, templates, &restart, patch_count)?;
     }
+    restore_sidecar_tracers(
+        &mut templates,
+        &history_sidecar_path(&restarts.initial)?,
+        patch_count,
+        |_, template| template.patch,
+    )?;
     // `Opt_Baseflow_init` 无论开不开优化都先建 `ParaOpt/`（`MOD_Opt_Baseflow.F90:40-42`）。
     let para_opt = layout.out().join(&name).join("restart/ParaOpt");
     std::fs::create_dir_all(&para_opt)
@@ -276,6 +282,7 @@ fn run() -> Result<()> {
     let history_restart = HistoryRestart {
         config: sidecar_config,
         window: session.as_ref().map(HistorySession::window_handle),
+        tracer_raw: session.as_ref().map(HistorySession::tracer_raw_handle),
     };
     // 主循环的 `coszen`/`cosazi`/本地时间都读常数重启的 `patchlonr`/`patchlatr`（上游
     // `MOD_Vars_TimeInvariants`），不从度数现算 —— 两者差 1 ULP 时只有读重启才与内核同源。
@@ -400,7 +407,16 @@ fn run_spatial(
     // 示踪物：陆面输运、河湖输运、网格示踪物强迫都已移植。还没接的是 LULCC 的示踪物状态迁移
     // （`save/remap_land_tracer_lulcc_state`、`tracer_forcing_lulcc_remap`）与漫滩回馈的示踪物账
     // （`flood_tracer_credit_patch` 等）—— 这两种组合明确拒绝，免得悄悄丢账。
-    let transport_tracers = colm_runtime::tracer::tracer_set_from_document(&document)?
+    let tracer_set = colm_runtime::tracer::tracer_set_from_document(&document)?;
+    ensure!(
+        !tracer_set
+            .as_ref()
+            .is_some_and(|set| set.tracers.iter().any(colm_runtime::methane::is_methane_tracer)),
+        "methane (CH4 tracer) in spatial runs is not ported to the Rust runtime yet; run this case \
+         with --engine fortran"
+    );
+    let transport_tracers = tracer_set
+        .as_ref()
         .is_some_and(|set| set.transport_indices().next().is_some());
     if transport_tracers {
         ensure!(
@@ -977,11 +993,21 @@ fn run_spatial_segment(
         window: history
             .as_ref()
             .map(|history| history.session.window_handle()),
+        tracer_raw: history
+            .as_ref()
+            .map(|history| history.session.tracer_raw_handle()),
     };
     // `read_history_acc_restart`：续跑重启带着未写完的历史区间时接着累加（每块一份旁车，按块拼接）。
     let mut restored = Vec::with_capacity(patch_count);
     let mut open_window = false;
     for ((_, patches), files) in topology.blocks.iter().zip(&block_files) {
+        // 示踪物部分按块读回（块内顺序即旁车顺序）。
+        restore_sidecar_tracers(
+            &mut templates[patches.clone()],
+            &history_sidecar_path(&files.time)?,
+            patches.len(),
+            |position, _| position,
+        )?;
         match colm_runtime::history_sidecar::read_sidecar(
             &files.time,
             &history_sidecar_path(&files.time)?,
@@ -1337,6 +1363,7 @@ fn lulcc_transition(
             river_lake_flow: true,
         },
         window: None,
+        tracer_raw: None,
     };
     let mut written = Vec::with_capacity(new_topology.blocks.len());
     for (block, patches) in &new_topology.blocks {
@@ -1399,7 +1426,8 @@ fn lulcc_transition(
         let path = target.join(&label).join(time_name(years.new, block));
         std::fs::create_dir_all(path.parent().expect("a restart path has a parent"))?;
         cold.write_with(&path, &overrides)?;
-        mark_history_restart_with_river(&path, &history_restart, None, false)?;
+        // 过渡这一步的历史区间已关，旁车不带示踪物部分。
+        mark_history_restart_with_river(&path, &history_restart, None, false, None)?;
         written.push(path);
     }
     // 合并续跑不留在 `restart/` 时，冷启动建的日期目录空了就收掉。
@@ -1566,7 +1594,13 @@ fn write_block_restarts(
             &path,
             tracer_cache.map(|cache| cache.block(patches.clone())).as_ref(),
         )?;
-        mark_history_restart_with_river(&path, history, Some(patches.clone()), river_required)?;
+        mark_history_restart_with_river(
+            &path,
+            history,
+            Some(patches.clone()),
+            river_required,
+            sidecar_tracers(&templates[patches.clone()], &states[patches.clone()])?.as_ref(),
+        )?;
         written.push(path);
     }
     if let (Some(history), true) = (river_history, river_required) {
@@ -1623,7 +1657,52 @@ fn assemble_patch(
     }
     // `DEF_USE_BGC`：BGC 状态来自四份 BGC 重启，氮沉降来自 `DEF_dir_runtime/ndep`。
     if let Some(switches) = template.physics.bgc {
-        let (bgc, irrigation) = assemble_bgc(document, files, patch, switches)?;
+        let (mut bgc, irrigation) = assemble_bgc(document, files, patch, switches)?;
+        // `ch4_reactive_init`：注册了 CH4 示踪物时，BGC 之后跑甲烷（单点内核没有网格河湖汇流）。
+        if let Some(setup) = colm_runtime::methane::setup_from_document(document, false)? {
+            let constant = colm_init::RestartFile::open(&files.constant)?;
+            let slpratio = *constant
+                .floats("slpratio")?
+                .get(patch)
+                .context("the constant restart has no slpratio for this patch")?;
+            let soil = |name: &str| -> Result<Vec<f64>> {
+                bgc.statics
+                    .soil
+                    .iter()
+                    .find(|(field, _)| *field == name)
+                    .map(|(_, values)| values.clone())
+                    .with_context(|| format!("the BGC statics have no {name}"))
+            };
+            let site = colm_runtime::methane::site(
+                template.patch_type,
+                bgc.statics.patchclass,
+                bgc.statics.patchlatr,
+                slpratio,
+                &template.root_fraction,
+                &bgc.statics.z_soi,
+                &bgc.statics.dz_soi,
+                &bgc.statics.zi_soi,
+                &soil("bsw")?,
+                &soil("porsl")?,
+                bgc.initial.constants.organic_max,
+            )?;
+            // `ch4_reactive_read_restart`：时间重启里有甲烷事务就续跑，否则冷启动。
+            let time = colm_init::RestartFile::open(&files.time)?;
+            match colm_runtime::methane::read_restart(&time, patch, &setup)
+                .with_context(|| format!("cannot read the methane state of {}", files.time.display()))?
+            {
+                Some(restarted) => {
+                    bgc.initial.methane = Some(Box::new(restarted.patch));
+                    bgc.initial.methane_acc = restarted.accumulator;
+                }
+                None => {
+                    bgc.initial.methane = Some(Box::new(
+                        colm_core::methane::driver::MethanePatch::cold(&setup.params),
+                    ));
+                }
+            }
+            bgc.methane = Some((setup, site));
+        }
         template = template
             .with_bgc(bgc)
             .context("cannot assemble the BGC state")?;
@@ -1911,7 +1990,11 @@ fn run_snow(
                 if path != restart_out {
                     write_evolved_restart(templates, states, &snapshots, restart_in, &path)?;
                     append_tracer_restart(templates, states, &path, None)?;
-                    mark_history_restart(&path, history_restart)?;
+                    mark_history_restart(
+                        &path,
+                        history_restart,
+                        sidecar_tracers(templates, states)?.as_ref(),
+                    )?;
                 }
             }
         }
@@ -1936,7 +2019,11 @@ fn run_snow(
     let last = last.context(NO_STEP)?;
     write_evolved_restart(templates, &states, &last, restart_in, restart_out)?;
     append_tracer_restart(templates, &states, restart_out, None)?;
-    mark_history_restart(restart_out, history_restart)?;
+    mark_history_restart(
+        restart_out,
+        history_restart,
+        sidecar_tracers(templates, &states)?.as_ref(),
+    )?;
     Ok(RunSummary {
         steps,
         history_files,
@@ -1992,26 +2079,42 @@ fn append_tracer_restart(
     path: &Path,
     cache: Option<&colm_runtime::tracer::ForcingCache<'_>>,
 ) -> Result<()> {
-    let Some((tracer, _)) = templates.first().and_then(|template| template.tracer.as_ref()) else {
-        return Ok(());
-    };
-    let tracks = states
-        .iter()
-        .map(|state| {
-            state
-                .tracer
-                .as_deref()
-                .map(|track| &track.state)
-                .context("every patch of a tracer run carries tracer state")
-        })
-        .collect::<Result<Vec<_>>>()?;
-    colm_runtime::tracer::write_land_tracer_restart(
-        path,
-        &tracer.set,
-        &tracks,
-        tracer.aquifer_mixing_water_mm,
-        cache,
-    )
+    if let Some((tracer, _)) = templates.first().and_then(|template| template.tracer.as_ref()) {
+        let tracks = states
+            .iter()
+            .map(|state| {
+                state
+                    .tracer
+                    .as_deref()
+                    .map(|track| &track.state)
+                    .context("every patch of a tracer run carries tracer state")
+            })
+            .collect::<Result<Vec<_>>>()?;
+        colm_runtime::tracer::write_land_tracer_restart(
+            path,
+            &tracer.set,
+            &tracks,
+            tracer.aquifer_mixing_water_mm,
+            cache,
+        )?;
+    }
+    // `tracer_lifecycle_land_write_restart`：CH4 provider 的状态接在示踪物事务之后。
+    let methane = templates
+        .first()
+        .and_then(|template| template.bgc.as_ref())
+        .and_then(|bgc| bgc.methane.as_ref());
+    if let Some((setup, _)) = methane {
+        let patches = states
+            .iter()
+            .map(|state| {
+                let bgc = state.bgc.as_deref().context("a methane patch needs its BGC state")?;
+                let patch = bgc.methane.as_deref().context("a methane patch needs its methane state")?;
+                Ok((patch, &bgc.methane_acc))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        colm_runtime::methane::write_restart(path, setup, &patches)?;
+    }
+    Ok(())
 }
 
 /// 写续跑文件时要附带的历史累加器信息（`land_history_restart.inc`）。
@@ -2020,6 +2123,8 @@ struct HistoryRestart {
     /// 当前历史区间的原始累加状态；没开 history 时为 `None`（恒为空窗口）。
     window:
         Option<std::sync::Arc<std::sync::Mutex<Vec<colm_runtime::history_sidecar::HistoryWindow>>>>,
+    /// 运行终点（非自然边界）清零前的示踪物/CH4 累加器；有值时旁车用它而不是状态里的。
+    tracer_raw: Option<colm_runtime::tracer_sidecar::RawTracersHandle>,
 }
 
 /// 续跑文件 → 同目录的旁车路径。
@@ -2047,8 +2152,105 @@ fn history_frequency_code(frequency: colm_hist::schedule::HistoryFrequency) -> u
 /// （`write_history_acc_restart` + `complete_history_acc_restart`），并在主重启末尾写
 /// `history_sidecar_required = 1`（`mark_history_acc_restart`）。区间跨过重启时旁车带全部
 /// 已分配的累加器（[`colm_runtime::history_sidecar`]）。
-fn mark_history_restart(restart: &Path, history: &HistoryRestart) -> Result<()> {
-    mark_history_restart_with_river(restart, history, None, false)
+fn mark_history_restart(
+    restart: &Path,
+    history: &HistoryRestart,
+    tracers: Option<&colm_runtime::tracer_sidecar::SidecarTracers<'_>>,
+) -> Result<()> {
+    mark_history_restart_with_river(restart, history, None, false, tracers)
+}
+
+/// `read_history_acc_restart` 的示踪物部分：区间跨过重启时，用旁车里的累加器覆盖起跑状态
+/// （示踪物的 `a_trc_*`/`a_water_*` 只在旁车里；CH4 的累加量覆盖续跑文件读回的那份）。
+/// `file_patches` 是旁车的 patch 数，`index` 给出模板在旁车里的位置。
+fn restore_sidecar_tracers(
+    templates: &mut [StandardLctRestartTemplate],
+    sidecar: &Path,
+    file_patches: usize,
+    index: impl Fn(usize, &StandardLctRestartTemplate) -> usize,
+) -> Result<()> {
+    let Some(first) = templates.first() else {
+        return Ok(());
+    };
+    let set = first.tracer.as_ref().map(|(tracer, _)| tracer.set.clone());
+    let setup = first
+        .bgc
+        .as_ref()
+        .and_then(|bgc| bgc.methane.as_ref())
+        .map(|(setup, _)| setup.clone());
+    if set.is_none() && setup.is_none() {
+        return Ok(());
+    }
+    let restored =
+        colm_runtime::tracer_sidecar::read(sidecar, set.as_ref(), setup.as_ref(), file_patches)?;
+    for (position, template) in templates.iter_mut().enumerate() {
+        let at = index(position, template);
+        if let (Some(accumulators), Some((_, state))) =
+            (restored.tracers.as_ref(), template.tracer.as_mut())
+        {
+            let patch = &accumulators[at];
+            state.acc = patch.tracers.clone();
+            state.water_acc = patch.water.clone();
+        }
+        if let (Some(accumulators), Some(bgc)) = (restored.methane.as_ref(), template.bgc.as_mut()) {
+            bgc.initial.methane_acc = accumulators[at];
+        }
+    }
+    Ok(())
+}
+
+/// 旁车的示踪物部分（`tracer_history_write` + 生命周期钩子）要的累加器：有输运示踪物或 CH4
+/// provider 时才有，取自各 patch 状态。
+fn sidecar_tracers<'a>(
+    templates: &'a [StandardLctRestartTemplate],
+    states: &[StandardLctSnowSoilState],
+) -> Result<Option<colm_runtime::tracer_sidecar::SidecarTracers<'a>>> {
+    use colm_runtime::tracer_sidecar::PatchAccumulators;
+    let first = templates.first();
+    let set = first
+        .and_then(|template| template.tracer.as_ref())
+        .map(|(tracer, _)| &tracer.set);
+    let setup = first
+        .and_then(|template| template.bgc.as_ref())
+        .and_then(|bgc| bgc.methane.as_ref())
+        .map(|(setup, _)| setup);
+    if set.is_none() && setup.is_none() {
+        return Ok(None);
+    }
+    let patches = match set {
+        Some(_) => states
+            .iter()
+            .map(|state| {
+                state
+                    .tracer
+                    .as_deref()
+                    .map(|track| PatchAccumulators::of(&track.state))
+                    .context("every patch of a tracer run carries tracer state")
+            })
+            .collect::<Result<Vec<_>>>()?,
+        None => Vec::new(),
+    };
+    let methane = match setup {
+        Some(setup) => Some((
+            setup,
+            states
+                .iter()
+                .map(|state| {
+                    state
+                        .bgc
+                        .as_deref()
+                        .map(|bgc| bgc.methane_acc)
+                        .context("a methane patch needs its BGC state")
+                })
+                .collect::<Result<Vec<_>>>()?,
+        )),
+        None => None,
+    };
+    Ok(Some(colm_runtime::tracer_sidecar::SidecarTracers {
+        set,
+        patches,
+        methane,
+    }))
 }
 
 /// [`mark_history_restart`]；空间构建另带 `history_river_required`。
@@ -2058,25 +2260,72 @@ fn mark_history_restart_with_river(
     history: &HistoryRestart,
     block: Option<std::ops::Range<usize>>,
     river_required: bool,
+    tracers: Option<&colm_runtime::tracer_sidecar::SidecarTracers<'_>>,
 ) -> Result<()> {
     let mut windows = history
         .window
         .as_ref()
         .map(|window| window.lock().expect("history window lock").clone())
         .unwrap_or_else(|| vec![colm_runtime::history_sidecar::HistoryWindow::default()]);
-    if let Some(block) = block {
+    if let Some(block) = block.clone() {
         if windows.len() > 1 {
             windows = windows[block].to_vec();
         }
     }
     let patches = colm_init::RestartFile::open(restart)?.dimension("patch")?;
+    let sidecar = history_sidecar_path(restart)?;
     colm_runtime::history_sidecar::write_sidecar_with_river(
-        &history_sidecar_path(restart)?,
+        &sidecar,
         patches,
         &history.config,
         &windows,
         river_required,
     )?;
+    // 区间跨过重启（`window_active`）时旁车再带示踪物部分；运行终点（非自然边界）用清零前的快照。
+    if let Some(tracers) = tracers.filter(|_| windows.first().is_some_and(|w| w.steps > 0)) {
+        let raw = history
+            .tracer_raw
+            .as_ref()
+            .and_then(|raw| raw.lock().expect("tracer raw lock").clone());
+        match raw {
+            Some(raw) => {
+                let raw = match &block {
+                    Some(block) if raw.len() > 1 => raw[block.clone()].to_vec(),
+                    _ => raw,
+                };
+                let patches = match tracers.set {
+                    Some(_) => raw
+                        .iter()
+                        .map(|patch| {
+                            patch
+                                .tracer
+                                .clone()
+                                .context("the raw tracer window lost a patch")
+                        })
+                        .collect::<Result<_>>()?,
+                    None => Vec::new(),
+                };
+                let methane = match &tracers.methane {
+                    Some((setup, _)) => Some((
+                        *setup,
+                        raw.iter()
+                            .map(|patch| {
+                                patch.methane.context("the raw methane window lost a patch")
+                            })
+                            .collect::<Result<_>>()?,
+                    )),
+                    None => None,
+                };
+                let raw_tracers = colm_runtime::tracer_sidecar::SidecarTracers {
+                    set: tracers.set,
+                    patches,
+                    methane,
+                };
+                colm_runtime::tracer_sidecar::write(&sidecar, &raw_tracers)?;
+            }
+            None => colm_runtime::tracer_sidecar::write(&sidecar, tracers)?,
+        }
+    }
     let mut primary =
         netcdf::append(restart).with_context(|| format!("cannot reopen {}", restart.display()))?;
     // 续跑起点本身就是带标记的续跑文件时，写出是从它复制来的，标记已经在了。

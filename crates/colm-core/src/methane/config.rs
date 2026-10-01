@@ -153,7 +153,10 @@ impl MethaneParameters {
                 7
             }
             "dynamic_wtd" | "dynamic-wtd" => {
-                ensure!(dynamic_wetland, "dynamic_wtd requires DEF_USE_Dynamic_Wetland = .true.");
+                ensure!(
+                    dynamic_wetland,
+                    "dynamic_wtd requires DEF_USE_Dynamic_Wetland = .true."
+                );
                 6
             }
             "hybrid" | "dh_all_thr05" | "dyn_routing_hybrid" => {
@@ -162,7 +165,10 @@ impl MethaneParameters {
                     "hybrid methane inundation mode requires a GridRiverLakeFlow-enabled kernel."
                 );
                 m.use_routing_for_soil = true;
-                ensure!(dynamic_wetland, "hybrid mode requires DEF_USE_Dynamic_Wetland = .true.");
+                ensure!(
+                    dynamic_wetland,
+                    "hybrid mode requires DEF_USE_Dynamic_Wetland = .true."
+                );
                 6
             }
             _ => bail!(
@@ -179,7 +185,13 @@ impl MethaneParameters {
         if !self.methane.write_ch4_history {
             return 0;
         }
-        match self.methane.ch4_history_vars.trim().to_ascii_lowercase().as_str() {
+        match self
+            .methane
+            .ch4_history_vars
+            .trim()
+            .to_ascii_lowercase()
+            .as_str()
+        {
             "none" | "off" | "false" | ".false." => 0,
             "core" | "default" | "minimal" | "fast" => 1,
             _ => 2,
@@ -197,33 +209,103 @@ impl MethaneParameters {
             }
         };
         let reals = [
-            m.q10methane, m.f_methane, m.f_methane_tropical_peat, m.f_methane_tropical_floodplain,
-            m.f_methane_floodplain, m.f_methane_temperate_marsh, m.f_methane_boreal_fen,
-            m.f_methane_boreal_bog, m.f_methane_rice_paddy, m.f_methane_upland_soil,
-            m.redoxlag_tropical_peat, m.redoxlag_tropical_floodplain, m.redoxlag_temperate_marsh,
-            m.redoxlag_boreal_fen, m.redoxlag_boreal_bog, m.redoxlag_rice_paddy,
-            m.redoxlag_upland_soil, m.z0_methane_prod, m.vmax_methane_oxid, m.vmax_oxid_unsat,
-            m.k_m, m.k_m_unsat, m.k_m_o2, m.q10_methane_oxid, m.lake_oxid_scale, m.lake_k_m_o2,
-            m.lake_vmax_methane_oxid, m.lake_oxic_sediment_depth, m.b_init_methanogen,
-            m.b_init_methanotroph, m.b_min_methanogen, m.b_min_methanotroph,
-            m.b_max_fraction_methanogen, m.b_max_fraction_methanotroph, m.mu_max_methanogen,
-            m.mu_max_methanotroph, m.gamma_methanogen, m.gamma_methanotroph,
-            m.gamma_microbial_dormant, m.gamma_microbial_freeze, m.k_substrate_methanogen_pool,
-            m.k_inh_o2_methanogen, m.kappa_m_methanogen, m.kappa_m_methanotroph,
-            m.max_microbe_prod_multiplier, m.q10_microbe_growth, m.t_ref_microbe,
-            m.dormancy_rate_active, m.dormancy_rate_revive, m.dormancy_threshold_methanogen_fs,
-            m.dormancy_threshold_methanogen_fo2, m.dormancy_threshold_methanotroph_fs,
-            m.dormancy_threshold_methanotroph_fo2, m.vgc_max, m.nongrassporosratio,
-            m.poros_tiller, m.unsat_aere_ratio, m.porosmin, m.aere_radius, m.rob,
-            m.scale_factor_aere, m.scale_factor_gasdiff, m.scale_factor_liqdiff,
-            m.lake_liqdiff_scale, m.lake_o2_liqdiff_scale, m.grnd_methane_cond_default,
-            m.mino2lim, m.q10methane_base, m.q10lakebase, m.cnscalefactor, m.redoxlag,
-            m.lake_decomp_fact, m.redoxlag_vertical, m.phmax, m.phmin, m.oxinhib, m.smp_crit,
-            m.bubble_f, m.aereoxid, m.tiller_c, m.satpow, m.capthick, m.atm_methane,
-            m.om_frac_sf, m.wtd_inflection, m.wtd_steepness, m.wtd_inflection_soil,
-            m.wtd_steepness_soil, m.hybrid_soil_threshold, m.rice_drain_window_days,
-            m.rice_substrate_boost, m.numerical_correction_fatal_threshold,
-            m.host_water_tolerance, h.vdcf, h.slopebeta, h.slopemax, h.pc,
+            m.q10methane,
+            m.f_methane,
+            m.f_methane_tropical_peat,
+            m.f_methane_tropical_floodplain,
+            m.f_methane_floodplain,
+            m.f_methane_temperate_marsh,
+            m.f_methane_boreal_fen,
+            m.f_methane_boreal_bog,
+            m.f_methane_rice_paddy,
+            m.f_methane_upland_soil,
+            m.redoxlag_tropical_peat,
+            m.redoxlag_tropical_floodplain,
+            m.redoxlag_temperate_marsh,
+            m.redoxlag_boreal_fen,
+            m.redoxlag_boreal_bog,
+            m.redoxlag_rice_paddy,
+            m.redoxlag_upland_soil,
+            m.z0_methane_prod,
+            m.vmax_methane_oxid,
+            m.vmax_oxid_unsat,
+            m.k_m,
+            m.k_m_unsat,
+            m.k_m_o2,
+            m.q10_methane_oxid,
+            m.lake_oxid_scale,
+            m.lake_k_m_o2,
+            m.lake_vmax_methane_oxid,
+            m.lake_oxic_sediment_depth,
+            m.b_init_methanogen,
+            m.b_init_methanotroph,
+            m.b_min_methanogen,
+            m.b_min_methanotroph,
+            m.b_max_fraction_methanogen,
+            m.b_max_fraction_methanotroph,
+            m.mu_max_methanogen,
+            m.mu_max_methanotroph,
+            m.gamma_methanogen,
+            m.gamma_methanotroph,
+            m.gamma_microbial_dormant,
+            m.gamma_microbial_freeze,
+            m.k_substrate_methanogen_pool,
+            m.k_inh_o2_methanogen,
+            m.kappa_m_methanogen,
+            m.kappa_m_methanotroph,
+            m.max_microbe_prod_multiplier,
+            m.q10_microbe_growth,
+            m.t_ref_microbe,
+            m.dormancy_rate_active,
+            m.dormancy_rate_revive,
+            m.dormancy_threshold_methanogen_fs,
+            m.dormancy_threshold_methanogen_fo2,
+            m.dormancy_threshold_methanotroph_fs,
+            m.dormancy_threshold_methanotroph_fo2,
+            m.vgc_max,
+            m.nongrassporosratio,
+            m.poros_tiller,
+            m.unsat_aere_ratio,
+            m.porosmin,
+            m.aere_radius,
+            m.rob,
+            m.scale_factor_aere,
+            m.scale_factor_gasdiff,
+            m.scale_factor_liqdiff,
+            m.lake_liqdiff_scale,
+            m.lake_o2_liqdiff_scale,
+            m.grnd_methane_cond_default,
+            m.mino2lim,
+            m.q10methane_base,
+            m.q10lakebase,
+            m.cnscalefactor,
+            m.redoxlag,
+            m.lake_decomp_fact,
+            m.redoxlag_vertical,
+            m.phmax,
+            m.phmin,
+            m.oxinhib,
+            m.smp_crit,
+            m.bubble_f,
+            m.aereoxid,
+            m.tiller_c,
+            m.satpow,
+            m.capthick,
+            m.atm_methane,
+            m.om_frac_sf,
+            m.wtd_inflection,
+            m.wtd_steepness,
+            m.wtd_inflection_soil,
+            m.wtd_steepness_soil,
+            m.hybrid_soil_threshold,
+            m.rice_drain_window_days,
+            m.rice_substrate_boost,
+            m.numerical_correction_fatal_threshold,
+            m.host_water_tolerance,
+            h.vdcf,
+            h.slopebeta,
+            h.slopemax,
+            h.pc,
         ];
         check(
             reals.iter().all(|x| x.is_finite()),
@@ -241,7 +323,10 @@ impl MethaneParameters {
         for (name, value) in [
             ("f_methane", m.f_methane),
             ("f_methane_tropical_peat", m.f_methane_tropical_peat),
-            ("f_methane_tropical_floodplain", m.f_methane_tropical_floodplain),
+            (
+                "f_methane_tropical_floodplain",
+                m.f_methane_tropical_floodplain,
+            ),
             ("f_methane_floodplain", m.f_methane_floodplain),
             ("f_methane_temperate_marsh", m.f_methane_temperate_marsh),
             ("f_methane_boreal_fen", m.f_methane_boreal_fen),
@@ -249,16 +334,31 @@ impl MethaneParameters {
             ("f_methane_rice_paddy", m.f_methane_rice_paddy),
             ("f_methane_upland_soil", m.f_methane_upland_soil),
         ] {
-            check(!(value < 0.0 || value > 0.5), format!("{name} out of [0,0.5]: {value}"));
+            check(
+                !(value < 0.0 || value > 0.5),
+                format!("{name} out of [0,0.5]: {value}"),
+            );
         }
         check(!(m.q10methane <= 0.0), "q10methane must be > 0".into());
-        check(!(m.q10_methane_oxid <= 0.0), "q10_methane_oxid must be > 0".into());
-        check(!(m.vmax_methane_oxid < 0.0), "vmax_methane_oxid must be >= 0".into());
-        check(!(m.vmax_oxid_unsat < 0.0), "vmax_oxid_unsat must be >= 0".into());
+        check(
+            !(m.q10_methane_oxid <= 0.0),
+            "q10_methane_oxid must be > 0".into(),
+        );
+        check(
+            !(m.vmax_methane_oxid < 0.0),
+            "vmax_methane_oxid must be >= 0".into(),
+        );
+        check(
+            !(m.vmax_oxid_unsat < 0.0),
+            "vmax_oxid_unsat must be >= 0".into(),
+        );
         check(!(m.k_m <= 0.0), "k_m must be > 0".into());
         check(!(m.k_m_unsat <= 0.0), "k_m_unsat must be > 0".into());
         check(!(m.k_m_o2 <= 0.0), "k_m_o2 must be > 0".into());
-        check(!(m.lake_oxid_scale < 0.0), "lake_oxid_scale must be >= 0".into());
+        check(
+            !(m.lake_oxid_scale < 0.0),
+            "lake_oxid_scale must be >= 0".into(),
+        );
         check(
             !(m.lake_k_m_o2 != -1.0 && m.lake_k_m_o2 <= 0.0),
             "lake_k_m_o2 must be -1 or > 0".into(),
@@ -271,16 +371,31 @@ impl MethaneParameters {
             !(m.lake_oxic_sediment_depth != -1.0 && m.lake_oxic_sediment_depth <= 0.0),
             "lake_oxic_sediment_depth must be -1 or > 0".into(),
         );
-        check(!(m.aereoxid < 0.0 || m.aereoxid > 1.0), "aereoxid out of [0,1]".into());
-        check(!(m.bubble_f <= 0.0 || m.bubble_f > 1.0), "bubble_f out of (0,1]".into());
+        check(
+            !(m.aereoxid < 0.0 || m.aereoxid > 1.0),
+            "aereoxid out of [0,1]".into(),
+        );
+        check(
+            !(m.bubble_f <= 0.0 || m.bubble_f > 1.0),
+            "bubble_f out of (0,1]".into(),
+        );
         check(!(m.phmin >= m.phmax), "pHmin must be < pHmax".into());
-        check(!(m.mino2lim < 0.0 || m.mino2lim > 1.0), "mino2lim out of [0,1]".into());
+        check(
+            !(m.mino2lim < 0.0 || m.mino2lim > 1.0),
+            "mino2lim out of [0,1]".into(),
+        );
         check(!(m.atm_methane < 0.0), "atm_methane must be >= 0".into());
         check(
             !(m.host_water_tolerance < 0.0 || m.host_water_tolerance >= 1.0),
-            format!("host_water_tolerance out of [0,1): {}", m.host_water_tolerance),
+            format!(
+                "host_water_tolerance out of [0,1): {}",
+                m.host_water_tolerance
+            ),
         );
-        check(!(m.wtd_steepness <= 0.0), "wtd_steepness must be > 0".into());
+        check(
+            !(m.wtd_steepness <= 0.0),
+            "wtd_steepness must be > 0".into(),
+        );
         check(
             m.wtd_inflection_soil.is_finite() && !(m.wtd_inflection_soil < 0.0),
             "wtd_inflection_soil must be >= 0".into(),
@@ -299,10 +414,22 @@ impl MethaneParameters {
             "z0_methane_prod must be >= 0".into(),
         );
         check(!(m.vgc_max <= 0.0), "vgc_max must be > 0".into());
-        check(!(m.poros_tiller < 0.0 || m.poros_tiller > 1.0), "poros_tiller out of [0,1]".into());
-        check(!(m.nongrassporosratio < 0.0), "nongrassporosratio must be >= 0".into());
-        check(!(m.unsat_aere_ratio < 0.0), "unsat_aere_ratio must be >= 0".into());
-        check(!(m.porosmin < 0.0 || m.porosmin > 1.0), "porosmin out of [0,1]".into());
+        check(
+            !(m.poros_tiller < 0.0 || m.poros_tiller > 1.0),
+            "poros_tiller out of [0,1]".into(),
+        );
+        check(
+            !(m.nongrassporosratio < 0.0),
+            "nongrassporosratio must be >= 0".into(),
+        );
+        check(
+            !(m.unsat_aere_ratio < 0.0),
+            "unsat_aere_ratio must be >= 0".into(),
+        );
+        check(
+            !(m.porosmin < 0.0 || m.porosmin > 1.0),
+            "porosmin out of [0,1]".into(),
+        );
         check(!(m.aere_radius <= 0.0), "aere_radius must be > 0".into());
         check(!(m.rob <= 0.0), "rob must be > 0".into());
         check(
@@ -313,12 +440,18 @@ impl MethaneParameters {
                 || m.lake_o2_liqdiff_scale < 0.0),
             "methane scale factors must be >= 0".into(),
         );
-        check(!(m.grnd_methane_cond_default <= 0.0), "grnd_methane_cond_default must be > 0".into());
+        check(
+            !(m.grnd_methane_cond_default <= 0.0),
+            "grnd_methane_cond_default must be > 0".into(),
+        );
         check(
             !(m.q10methane_base <= 0.0 || m.q10lakebase <= 0.0),
             "q10methane_base and q10lakebase must be > 0".into(),
         );
-        check(!(m.cnscalefactor < 0.0), "cnscalefactor must be >= 0".into());
+        check(
+            !(m.cnscalefactor < 0.0),
+            "cnscalefactor must be >= 0".into(),
+        );
         check(
             !(m.redoxlag < 0.0 || m.redoxlag_vertical < 0.0),
             "redoxlag and redoxlag_vertical must be >= 0".into(),
@@ -334,17 +467,26 @@ impl MethaneParameters {
         ]
         .into_iter()
         .fold(f64::INFINITY, f64::min);
-        check(!(min_redox < 0.0), "biome redoxlag values must be >= 0".into());
+        check(
+            !(min_redox < 0.0),
+            "biome redoxlag values must be >= 0".into(),
+        );
         check(!(m.oxinhib < 0.0), "oxinhib must be >= 0".into());
         check(
             !(m.b_max_fraction_methanogen > 1.0 || m.b_max_fraction_methanotroph > 1.0),
             "B_max fractions must be <= 1".into(),
         );
-        check(!(m.lake_decomp_fact < 0.0), "lake_decomp_fact must be >= 0".into());
+        check(
+            !(m.lake_decomp_fact < 0.0),
+            "lake_decomp_fact must be >= 0".into(),
+        );
         check(!(m.smp_crit >= 0.0), "smp_crit must be < 0".into());
         check(!(m.satpow <= 0.0), "satpow must be > 0".into());
         check(!(m.capthick < 0.0), "capthick must be >= 0".into());
-        check(!(m.rice_drain_window_days <= 0.0), "rice_drain_window_days must be > 0".into());
+        check(
+            !(m.rice_drain_window_days <= 0.0),
+            "rice_drain_window_days must be > 0".into(),
+        );
         check(
             !((m.rice_substrate_boost - 1.0).abs() > 10.0 * f64::EPSILON),
             "rice_substrate_boost must remain 1 until methane production debits BGC carbon".into(),
@@ -417,7 +559,8 @@ impl MethaneParameters {
             "methane hydrology requires slopemax > 0 and slopebeta < 0".into(),
         );
         check(
-            !((h.vdcf - 2.0).abs() > 64.0 * f64::EPSILON || (h.pc - 0.4).abs() > 64.0 * f64::EPSILON),
+            !((h.vdcf - 2.0).abs() > 64.0 * f64::EPSILON
+                || (h.pc - 0.4).abs() > 64.0 * f64::EPSILON),
             "retired methane hydrology knobs vdcf/pc must retain defaults 2.0/0.4".into(),
         );
         let file = m.atm_methane_file.trim().to_ascii_lowercase();

@@ -27564,3 +27564,57 @@ unitcat history 开分汊时逐示踪物多写 `f_trc_bifout_*`（`a_trc_bifout/
 第一次对照只缺 `f_trc_bifout_sol1`（二进制编在补这个变量之前），续跑全一致；补上后只重跑 Rust 侧即全一致。
 
 **T3 结论**：河湖示踪物的默认、堤防、水库、堤防 + 水库、分汊、堤防 + 分汊、续跑接着跑、多块，全部逐位。仍拒绝：漫滩回馈 + 示踪物、LULCC + 示踪物。
+
+## 第 492 轮：示踪物 T4a —— CH4 provider 的土壤 patch 甲烷逐位（含跨年与续跑）
+
+**移植**（`MOD_Tracer_Reactive_Methane_*`，土壤 patch、非水稻、非湖泊）：
+- **配置**：`&nl_colm_methane_parameter` 的 130 个字段由 `oracle/scripts/gen_methane_config.py` 从上游声明生成（`config_generated.rs`，不手改）；`configure_methane_inundation_mode` 的预设、`validate`、`history_accumulation_mode`。colm-core 不依赖 namelist，文件解析放在运行时（`FieldValue`）。
+- **柱物理**（`column::methane`）：两相（unsat/sat）各跑一遍 prod/oxid/aere/ebul/tran，再按 `finundated` 合并；`annual_update` 跨年按两段分别累加。
+- **BGC 耦合**（`bgc_link`）：`patch_inputs` 汇总 7 个分解池、按供体池分 somhr/lithr（分类不了的正呼吸是契约违例，报错）；步末 `finalize` 只把 CO2 那份 `FMA(net, CATOMW, total_hr)` 发布到 `decomp_hr`/`er`。
+- **运行时**：`soil_step` 接在 BGC `write_back` 之后；氧/CO2 分压用宿主的 `partial_pressures_pa`。history `core` 模式 18 个量（单点）；restart 写 schema 5 事务（约 80 个状态量 + 150 个 `ch4_a_*`，后者顺序由 `oracle/scripts/gen_methane_restart.py` 生成）。
+- **续跑读入**（`methane::read_restart`）：只接受本版本的已提交事务（schema 5、`ch4_restart_complete = 1`、无微生物池）。严格读时上游把非法或负的预报量当损坏拒绝，合法文件上其余 `WHERE` 修补都是恒等，唯一例外是导度 `<= 0` 换默认值。历史模式或选择指纹变了就清空进行中的累加窗口（`flush_methane_acc_fluxes`）；`core` 模式之外的 `ch4_a_*` 必须为 0。
+
+**GIMPLE 要点**：`erf` 走 libm（colm-core 禁 `unsafe`，FFI 放在 `colm-lapack::libm`）；水的扩散系数在雪/土层是 `pow*poly*1e-9`、在积水层是 `poly*1e-9`，乘法顺序不同；`PH_FACT_REFERENCE`、`sqrt(2π)` 取 GIMPLE 折叠值（`sqrt(2)` 与 `std::f64::consts::SQRT_2` 同位）；全部 `pow` 走 `LibmPow::lpow`。
+
+**本轮查出的 Rust 缺陷**：甲烷的 `t_grnd` 必须是 CoLMMAIN 末尾雪层合并后的 `t_grnd = t_soisno(lb)`（`state.surface_temperature_k()`），不是热力学步内的地表温度。两者只在雪层合并的那一步分开（tc4 第 8 天 63000 s），而且只经 `t_h2osfc` 进饱和列，所以 history 全对、只有 restart 的 `ch4_conc_ch4_sat` 差 1e-4 相对量。定位方法：Fortran 与 Rust 两边在柱物理入口打印 38 个输入的逐步轨迹，逐位比，第一处分歧直接给出变量。另：累加器的初值与清零值是 0，不是 spval。
+
+**教训（误导性二分）**：此前"只在月末恰好结束运行时 restart 不一致"的二分结论是假象 —— `kernels/default`（10-01 16:40）比 vendor 里已提交的 `CoLMMAIN.F90` 等更新旧，且 tc4f 的 Fortran 参照是更早一次运行留下的。用当前 vendor 重建内核后，Fortran 终末 restart 与同一时刻的周期 restart 完全相同。**vendor 有改动就先重建内核、重生成 Fortran 参照，再做任何二分。**
+
+**对照**（AT-Neu 站点 + BGC + CH4，`wetwat` 淹没方案，`kernels/default` 重建后）：
+
+| 算例 | 时段 | 结果 |
+|---|---|---|
+| `tc4` | 2010-01 | history 2 ok，restart ok |
+| `tc4f` | 2010-01-01 → 02-01 00:30 | history 4 ok，restart（含 032-00000、032-01800）ok |
+| `tc4y` | 2010-01-01 → 2011-01-10（冬季积雪、跨年 `annual_update`） | history 26 ok，13 份月度 restart 全部 ok |
+| `tc4c` | 从 tc4y 的 2010-07-01 restart 续跑到 09-30 | history 6 bad 0，restarts bad 0 |
+
+**仍拒绝**：湖泊/湿地/水稻甲烷、空间与网格 history 的甲烷、CH4 与输运示踪物同开、微生物池、`core` 之外的 history 模式、旧 schema 的甲烷 restart。
+
+**补出的 T1 缺口**：区间跨过重启时，上游的 history 旁车还带示踪物累加（`tracer_history_write` 的 44 个 `a_trc_*/a_water_*` 与描述符身份、CH4 的 `write_methane_accflux_restart`），Rust 旁车从来没写这部分。移植见第 493 轮。
+
+## 第 493 轮：示踪物 —— history 旁车的示踪物部分（T1 缺口）与区间跨重启续跑
+
+**移植**（`tracer_land_history_restart.inc` + 生命周期钩子，新模块 `tracer_sidecar`）：区间跨过重启（`window_active`）时，旁车在主机累加器之后再写：
+- 有输运示踪物（`tracer_history_required`）：`trc_hist_schema = 1`、`trc_hist_count`、`trc_hist_descriptor`（`tracer_build_descriptor_identity` **不限输运示踪物**，每个注册示踪物一行 384 个 ASCII 码），以及 44 个 `a_trc_*`/`a_water_*`。盘上布局照 `ncio_write_vector`：逐示踪物量 `(patch, d1 = ntracers)`，`a_trc_soil_mass`/`a_trc_snow_mass` 是 `(patch, d2 = 层, d1 = ntracers)`，按 patch 的水量 `(patch)` 或 `(patch, d1 = 层)`。
+- 有 CH4 provider：`write_methane_accflux_restart`（选择指纹 + 150 个 `ch4_a_*`，与续跑文件共用一个写函数）。
+- 读回（`read_history_acc_restart`）只在 `nac > 0` 时发生：44 项缺一即停、描述符逐行核对、全部有限；CH4 走非严格读（指纹变了或计数损坏只清空窗口）。读回的示踪物累加器覆盖起跑状态，CH4 累加量覆盖续跑文件读回的那份。单点按 `template.patch`、空间按块内位置对齐。
+
+**一并修掉的两处 Rust 缺陷**：
+1. **运行终点（非自然边界）的旁车**：上游在 `hist_out` 里先存原始窗口、再写最后一条 history 并清零（`MOD_Hist.F90:270`）。主机累加器早有 `raw_at_end` 快照，示踪物与 CH4 的累加器存在 patch 状态里、写完最后一条就清零，终点那份旁车于是全是 0。现在 `push_tracer` 在清零前留快照（`RawTracersHandle`），终点旁车用它。
+2. **续跑后示踪物 history 的 `nac`**：示踪物文件的平均用主 history 的 `nac`，Rust 的示踪物计数续跑时从 0 起，只有平均型变量（如 `f_trc_surface_residue_*`）暴露出来（恰好 2 倍），比值型变量 `nac` 相消。`restore`/`with_tracer_variables` 现在从恢复的窗口接上。
+
+**对照**（日重启、月 history，运行到 01-10，区间每次重启都开着；续跑从 01-06 起）：
+
+| 算例 | 内容 | 结果 |
+|---|---|---|
+| `tsh` | 溶质（单点） | history 2 bad 0，restarts（含旁车）21 bad 0 |
+| `tshc` | tsh 从 01-06 续跑 | history 2 bad 0，restarts 21 bad 0 |
+| `tc4w` | CH4（单点 BGC） | history 2 bad 0，restarts 43 bad 0 |
+| `tc4wc` | tc4w 从 01-06 续跑 | history 2 bad 0，restarts 43 bad 0 |
+| `g1tw` | 空间多块溶质（`kernels/latlon` 重建后），到 01-04 | history 3 bad 0，restarts（含各块旁车）14 bad 0 |
+| `g1twc` | g1tw 从 01-03 续跑（旁车 `nac = 96`） | history 3 bad 0，restarts 14 bad 0 |
+
+单元测试 `tracer_sidecar_tests.rs`：44 项往返与盘上顺序、描述符不符拒绝、区间已关不读。
+
+**回归**：单点全量 `regress_all`（默认 + CROP 内核）154 个算例一致；同位素 10 个（`COLM_RS_ALLOW_UNFORCED_FRACTIONATION=1`，参照由 kiso 内核生成）一致；`nn` 的 `hist(0)` 是 `DEF_HIST_FREQ = 'none'`。`regress_all.sh` 把续跑算例与需要 `kernels/latlon` 的空间示踪物算例移进 SKIP。

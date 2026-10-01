@@ -217,6 +217,12 @@ impl TracerSet {
             .map(TracerDescriptor::identity)
             .collect()
     }
+
+    /// `tracer_build_descriptor_identity(identity)`（不限输运示踪物）：history 旁车的
+    /// `trc_hist_descriptor` 每个注册示踪物一行。
+    pub fn descriptor_identity_all(&self) -> Vec<[i32; DESCRIPTOR_IDENTITY_WIDTH]> {
+        self.tracers.iter().map(TracerDescriptor::identity).collect()
+    }
 }
 
 impl TracerDescriptor {
