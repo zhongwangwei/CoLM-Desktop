@@ -122,6 +122,7 @@ pub mod history_diagnostics;
 pub mod hydrology;
 pub mod interception;
 pub mod irrigation;
+pub mod isotope_fractionation;
 pub mod lake;
 pub mod lake_step;
 pub mod lake_temperature;
