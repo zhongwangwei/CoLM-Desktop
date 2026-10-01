@@ -6,17 +6,26 @@
 //! 3. [`FloodFeedback::publish`] 把单元流域的漫滩水量折到 patch 上：可用水量 `credit`（m）、
 //!    淹没比例 `fraction` 与淹没水深 `depth`（mm），供下一步陆面用。
 //!
-//! 汇流满一个间隔后再发布一次。只接默认路径：无堤防、水库、示踪物（调用方先拒绝）；
-//! 这时 `flood_protected_uc` 恒为 0。
+//! 汇流满一个间隔后再发布一次。堤防：堤内蓄量作为受保护的漫滩水量一并发布与扣账；
+//! 水库：已建成水库的可见水量取库容，扣账后 `volwater_ucat` 跟着库容走。示踪物由调用方拒绝。
 
 // 夹紧保留上游 `MIN(MAX(·))` 的次序；逐单元流域的下标循环与上游 `DO i = 1, numucat` 对应。
 #![allow(clippy::manual_clamp, clippy::needless_range_loop)]
 
 use anyhow::{bail, ensure, Result};
 
+use super::levee::Levee;
 use super::network::{RiverNetwork, RunoffRouting};
 use super::remap::{catchments_to_inpm, grid_to_patches, inpm_to_catchments, patches_to_grid};
+use super::reservoir::Reservoir;
 use super::RiverState;
+
+/// 发布与扣账要看到的河道选项：堤防几何，以及水库表与当前年份（判断是否已建成）。
+#[derive(Clone, Copy, Default)]
+pub struct FloodContext<'a> {
+    pub levee: Option<&'a Levee>,
+    pub reservoir: Option<(&'a Reservoir, i32)>,
+}
 
 /// `RIVERLAKE_FLOOD_MISSING_VALUE`。
 const MISSING: f64 = -1.0e30;
@@ -40,6 +49,10 @@ pub struct FloodFeedback {
     infil_acc: Vec<f64>,
     /// `flood_visible_uc`：每个单元流域超出河槽的可见漫滩水量（m³）。
     visible_uc: Vec<f64>,
+    /// `flood_protected_uc`：堤内受保护的漫滩水量（m³）。
+    protected_uc: Vec<f64>,
+    /// `flood_reservoir_uc`：发布时已建成的水库（水库号）。
+    reservoir_uc: Vec<Option<usize>>,
     /// `flood_grid_area`：每个汇流网格的面积（patch 份面积与单元流域份面积取大）。
     grid_area: Vec<f64>,
     /// 本次运行累计扣掉的漫滩蒸发与入渗水量（m³），与上游打印的诊断相同。
@@ -74,6 +87,8 @@ impl FloodFeedback {
             evap_acc: vec![0.0; patches],
             infil_acc: vec![0.0; patches],
             visible_uc: vec![0.0; network.len()],
+            protected_uc: vec![0.0; network.len()],
+            reservoir_uc: vec![None; network.len()],
             grid_area,
             evap_period: 0.0,
             infil_period: 0.0,
@@ -93,35 +108,73 @@ impl FloodFeedback {
         }
     }
 
-    /// `publish_flood_feedback`（无堤防、水库、示踪物）。
-    pub fn publish(&mut self, network: &RiverNetwork, routing: &RunoffRouting, state: &RiverState) {
+    /// `publish_flood_feedback`（无示踪物）。
+    ///
+    /// 已建成水库的库容若还是 `spval`，上游在这里就由水深补上（`volresv` 的副作用）。
+    pub fn publish(
+        &mut self,
+        network: &RiverNetwork,
+        routing: &RunoffRouting,
+        state: &mut RiverState,
+        context: FloodContext<'_>,
+    ) {
         let n = network.len();
         let mut fraction_uc = vec![0.0; n];
         self.visible_uc.fill(0.0);
+        self.protected_uc.fill(0.0);
+        self.reservoir_uc.fill(None);
         for i in 0..n {
-            let visible = state.volwater[i].max(0.0);
+            if let Some((table, year)) = context.reservoir {
+                if let Some(r) = table.of_catchment[i] {
+                    if table.is_built(r, year) {
+                        self.reservoir_uc[i] = Some(r);
+                    }
+                }
+            }
             let curve = &network.curves[i];
-            let stage = curve.depth(visible);
-            let fraction = curve.floodarea(stage) / network.area[i].max(1.0);
+            let mut visible = state.volwater[i].max(0.0);
+            if let Some(r) = self.reservoir_uc[i] {
+                let volresv = &mut state.volresv.as_mut().expect("reservoir state")[r];
+                if *volresv == colm_core::MISSING {
+                    *volresv = curve.volume(state.wdsrf[i]);
+                }
+                visible = volresv.max(0.0);
+            }
+            let leveed = context.levee.filter(|levee| levee.has[i]);
+            let protected = match leveed {
+                Some(_) => state.levsto.as_ref().expect("levee state")[i].max(0.0),
+                None => 0.0,
+            };
+            let fraction = match leveed {
+                Some(levee) => levee.fldstg(network, i, visible + protected).fldfrc,
+                None => {
+                    let stage = curve.depth(visible);
+                    curve.floodarea(stage) / network.area[i].max(1.0)
+                }
+            };
             if fraction <= 0.0 {
                 continue;
             }
             self.visible_uc[i] = (visible - network.rivstomax[i]).max(0.0);
+            self.protected_uc[i] = protected;
             fraction_uc[i] = fraction.min(1.0);
         }
-        let density: Vec<f64> = (0..n)
-            .map(|i| {
-                let area = routing.catchment_area[i];
-                if area > 0.0 {
-                    self.visible_uc[i] / area.max(TINY)
-                } else {
-                    0.0
-                }
-            })
-            .collect();
-        let mut grid_visible = catchments_to_inpm(routing, &density, 0.0, false);
-        // 无堤防：受保护水量恒为 0，推到网格上全是填充值 0。
-        let mut grid_protected = vec![0.0; grid_visible.len()];
+        let density_of = |values: &[f64]| -> Vec<f64> {
+            (0..n)
+                .map(|i| {
+                    let area = routing.catchment_area[i];
+                    if area > 0.0 {
+                        values[i] / area.max(TINY)
+                    } else {
+                        0.0
+                    }
+                })
+                .collect()
+        };
+        let mut grid_visible =
+            catchments_to_inpm(routing, &density_of(&self.visible_uc), 0.0, false);
+        let mut grid_protected =
+            catchments_to_inpm(routing, &density_of(&self.protected_uc), 0.0, false);
         let mut grid_fraction = catchments_to_inpm(routing, &fraction_uc, 0.0, true);
         for k in 0..grid_visible.len() {
             if self.grid_area[k] > 0.0 {
@@ -154,12 +207,13 @@ impl FloodFeedback {
         }
     }
 
-    /// `debit_flood_feedback`（无堤防、水库、示踪物）：返回扣掉的蒸发与入渗水量（m³）。
+    /// `debit_flood_feedback`（无示踪物）：返回扣掉的蒸发与入渗水量（m³）。
     pub fn debit(
         &mut self,
         network: &RiverNetwork,
         routing: &RunoffRouting,
         state: &mut RiverState,
+        context: FloodContext<'_>,
     ) -> Result<(f64, f64)> {
         for p in 0..self.credit.len() {
             ensure!(
@@ -216,8 +270,9 @@ impl FloodFeedback {
                 } else {
                     0.0
                 };
-                // `volume = FMA(visible + protected, debit_fraction, volume)`；protected 恒为 0。
-                *volume = (self.visible_uc[j] + 0.0).mul_add(debit_fraction, *volume);
+                // `volume = FMA(visible + protected, debit_fraction, volume)`。
+                *volume =
+                    (self.visible_uc[j] + self.protected_uc[j]).mul_add(debit_fraction, *volume);
                 fraction_sum[j] += debit_fraction;
             }
         }
@@ -228,9 +283,42 @@ impl FloodFeedback {
         for j in 0..n {
             // 乘积在分支前算好、各分支共用，所以减法不收缩。
             let taken = fraction_sum[j] * self.visible_uc[j];
-            state.volwater[j] = (state.volwater[j] - taken).max(0.0);
+            if let Some(r) = self.reservoir_uc[j] {
+                // 水库：从库容里扣，`volwater_ucat` 跟着库容走（即使这一步没扣）。
+                let volresv = &mut state.volresv.as_mut().expect("reservoir state")[r];
+                *volresv = (*volresv - taken).max(0.0);
+                state.volwater[j] = *volresv;
+            } else {
+                state.volwater[j] = (state.volwater[j] - taken).max(0.0);
+            }
+            let leveed = context.levee.filter(|levee| levee.has[j]);
+            if leveed.is_some() {
+                // `levsto = max(FNMA(protected, fraction_sum, levsto), 0)`。
+                let levsto = &mut state.levsto.as_mut().expect("levee state")[j];
+                *levsto = (-self.protected_uc[j])
+                    .mul_add(fraction_sum[j], *levsto)
+                    .max(0.0);
+            }
             if fraction_sum[j] > 0.0 {
-                state.wdsrf[j] = network.curves[j].depth(state.volwater[j]);
+                match (leveed, self.reservoir_uc[j]) {
+                    (Some(levee), None) => {
+                        // `levee_repartition_storage`。
+                        let levsto = &mut state.levsto.as_mut().expect("levee state")[j];
+                        let vol_total = state.volwater[j] + *levsto;
+                        let stage = levee.fldstg(network, j, vol_total);
+                        *levsto = stage.levsto;
+                        state.levdph.as_mut().expect("levee state")[j] = stage.levdph;
+                        state.volwater[j] = vol_total - stage.levsto;
+                        state.wdsrf[j] = stage.wdsrf;
+                    }
+                    (_, Some(r)) => {
+                        state.wdsrf[j] = network.curves[j]
+                            .depth(state.volresv.as_ref().expect("reservoir state")[r]);
+                    }
+                    (None, None) => {
+                        state.wdsrf[j] = network.curves[j].depth(state.volwater[j]);
+                    }
+                }
             }
         }
         self.evap_acc.fill(0.0);

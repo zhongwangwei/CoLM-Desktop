@@ -395,10 +395,16 @@ impl RiverModel {
     }
 
     /// 打开漫滩回馈：`grid_riverlake_flow_init` 末尾立刻发布一次（非 spinup）。
-    pub fn with_flood_feedback(mut self, infiltration_max_mm_day: f64) -> Self {
+    ///
+    /// `start_year` 是 `publish_flood_feedback(start_year)` 判断水库是否已建成用的年份。
+    pub fn with_flood_feedback(mut self, infiltration_max_mm_day: f64, start_year: i32) -> Self {
         let mut flood =
             flood::FloodFeedback::new(&self.network, &self.routing, infiltration_max_mm_day);
-        flood.publish(&self.network, &self.routing, &self.state);
+        let context = flood::FloodContext {
+            levee: self.levee.as_ref(),
+            reservoir: self.reservoir.as_ref().map(|r| (r, start_year)),
+        };
+        flood.publish(&self.network, &self.routing, &mut self.state, context);
         self.flood = Some(flood);
         self
     }
@@ -457,16 +463,24 @@ impl RiverModel {
         // 漫滩回馈：每个陆面步都扣账、再发布（`grid_riverlake_flow` 里汇流判定之前）。
         if let Some(flood) = self.flood.as_mut() {
             flood.accumulate(deltime);
-            flood.debit(&self.network, &self.routing, &mut self.state)?;
-            flood.publish(&self.network, &self.routing, &self.state);
+            let context = flood::FloodContext {
+                levee: self.levee.as_ref(),
+                reservoir: self.reservoir.as_ref().map(|r| (r, year)),
+            };
+            flood.debit(&self.network, &self.routing, &mut self.state, context)?;
+            flood.publish(&self.network, &self.routing, &mut self.state, context);
         }
         self.state.acctime_rnof += deltime;
         if self.state.acctime_rnof + 0.01 < self.max_dt {
             return Ok(false);
         }
-        self.route(year);
+        self.route(year)?;
         if let Some(flood) = self.flood.as_mut() {
-            flood.publish(&self.network, &self.routing, &self.state);
+            let context = flood::FloodContext {
+                levee: self.levee.as_ref(),
+                reservoir: self.reservoir.as_ref().map(|r| (r, year)),
+            };
+            flood.publish(&self.network, &self.routing, &mut self.state, context);
         }
         Ok(true)
     }
@@ -475,7 +489,7 @@ impl RiverModel {
     ///
     /// 河系之间没有耦合（上下游都在同一河系，子步长在河系内取最小），所以逐河系独立推进、
     /// 河系之间并行；河系内部的顺序与上游逐单元流域的循环相同。
-    fn route(&mut self, year: i32) {
+    fn route(&mut self, year: i32) -> Result<()> {
         // 分汊：把路径状态与累加量搬进这次汇流，全网一个河系推进，结束后放回。
         let bif_run = self.bifurcation.as_ref().map(|(bif, _)| BifurcationRun {
             bif,
@@ -520,6 +534,10 @@ impl RiverModel {
                 ),
             };
         let mut bif_back = None;
+        ensure!(
+            results.iter().all(|result| !result.protected_failed),
+            "BIF protected-side limiter failed"
+        );
         for (system, mut result) in systems.into_iter().zip(results) {
             for &(r, volresv, a) in &result.reservoirs {
                 self.state.volresv.as_mut().expect("reservoir state")[r] = volresv;
@@ -564,6 +582,7 @@ impl RiverModel {
         }
         self.state.acctime_rnof = 0.0;
         self.state.acc_rnof.fill(0.0);
+        Ok(())
     }
 }
 
@@ -579,6 +598,8 @@ struct SystemResult<'a> {
     bifurcation: Option<BifurcationRun<'a>>,
     /// 本河系里已建成的水库：`(水库号, volresv, [acctime, a_volresv, a_qresv_in, a_qresv_out])`。
     reservoirs: Vec<(usize, f64, [f64; 4])>,
+    /// 堤内一侧的分汊出流扣穿了堤内蓄量（上游 `BIF protected-side limiter failed`）。
+    protected_failed: bool,
 }
 
 /// 分汊子步里看到的水库：哪些单元流域是已建成的水库、它们的库容，以及要改写的出入流。
@@ -735,6 +756,9 @@ fn route_system<'a>(
     let mut dt_res = acctime;
     // 分汊：逐河系的子步长与这一子步的净分汊出流。
     let mut bif_sum = vec![0.0; if bif.is_some() { n } else { 0 }];
+    // 堤防 + 分汊：第 2 层及以上（堤内一侧）的净分汊出流，以及堤内蓄量被扣穿时的报错。
+    let mut bif_lev_sum = Vec::new();
+    let mut protected_failed = false;
     while dt_res > 0.0 {
         let mut dt_all = dt_res.min(60.0);
         // 所有河系的剩余时间相同（每个子步都同步成同一 `dt`），起始子步长也相同。
@@ -862,6 +886,14 @@ fn route_system<'a>(
                     reservoirs: &reservoirs,
                     q: &mut qresv,
                 },
+                lev.as_ref().map(|lev| {
+                    (
+                        levee.expect("levee"),
+                        lev.iter().map(|l| l.0).collect::<Vec<_>>(),
+                        lev.iter().map(|l| l.1).collect::<Vec<_>>(),
+                    )
+                }),
+                &mut bif_lev_sum,
             ),
             _ => dt_all,
         };
@@ -878,9 +910,35 @@ fn route_system<'a>(
             } else {
                 curve.volume(wdsrf[k])
             };
-            let mut volwater = (-sum_h).mul_add(dt, start);
-            // 无分汊时 `levee_apply_protected_flux` 的受保护通量为 0：堤内蓄量不变，
-            // 它重算的 `levdph` 随即被下面的重新分区覆盖。
+            // 堤防 + 分汊：有堤单元流域的第 2 层及以上分汊通量走堤内一侧。
+            let leveed_bif = !bif_lev_sum.is_empty()
+                && levee.is_some_and(|levee| levee.has[i])
+                && built[k].is_none();
+            let (visible_hflux, protected_hflux) = if leveed_bif {
+                (sum_h - bif_lev_sum[k], bif_lev_sum[k])
+            } else {
+                (sum_h, 0.0)
+            };
+            let mut volwater = (-visible_hflux).mul_add(dt, start);
+            // `levee_apply_protected_flux`：堤内蓄量扣掉堤内一侧的分汊出流（不收缩，乘积与报错
+            // 判断共用），扣穿超过容差就报错。无分汊时通量为 0，蓄量不变；它重算的 `levdph`
+            // 随即被下面的重新分区覆盖。
+            if leveed_bif {
+                if let Some(lev) = lev.as_mut() {
+                    let levsto = lev[k].0;
+                    let taken = dt * protected_hflux;
+                    let mut raw = levsto - taken;
+                    if raw < 0.0 {
+                        let tol = levsto.abs().max(taken.abs().max(1.0)) * 1.0e-10;
+                        if -raw <= tol {
+                            raw = 0.0;
+                        } else {
+                            protected_failed = true;
+                        }
+                    }
+                    lev[k].0 = raw.max(0.0);
+                }
+            }
             volwater = volwater.max(0.0);
             if system.next[k] == INLAND_DEPRESSION && volwater > net.rivstomax[i] {
                 faces[k].hflux = (volwater - net.rivstomax[i]) / dt;
@@ -985,6 +1043,7 @@ fn route_system<'a>(
         levee: lev,
         bifurcation: bif,
         reservoirs,
+        protected_failed,
     }
 }
 
@@ -1004,6 +1063,8 @@ fn bifurcation_substep(
     sums: &mut [(f64, f64, f64)],
     bif_sum: &mut [f64],
     resv: ReservoirView<'_>,
+    levee: Option<(&levee::Levee, Vec<f64>, Vec<f64>)>,
+    lev_sum: &mut Vec<f64>,
 ) -> f64 {
     let n = faces.len();
     // 已建成的水库用库容代替河道蓄量。
@@ -1100,6 +1161,13 @@ fn bifurcation_substep(
         dt,
         &normal,
         &reservoir_volume,
+        levee
+            .as_ref()
+            .map(|(levee, levsto, levdph)| bifurcation::BifurcationLevee {
+                levee,
+                levsto,
+                levdph,
+            }),
         &mut run.state.veloc,
         &mut run.state.momen,
     );
@@ -1118,6 +1186,7 @@ fn bifurcation_substep(
         sums[k].0 += flux.hflux_sum[k];
     }
     bif_sum.copy_from_slice(&flux.hflux_sum);
+    *lev_sum = flux.lev_hflux_sum;
     dt
 }
 

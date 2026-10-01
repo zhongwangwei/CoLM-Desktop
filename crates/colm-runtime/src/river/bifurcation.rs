@@ -15,6 +15,7 @@ use std::path::Path;
 use anyhow::{bail, ensure, Context, Result};
 use colm_core::LibmPow;
 
+use super::levee::Levee;
 use super::network::RiverNetwork;
 use super::GRAV;
 
@@ -54,6 +55,16 @@ pub struct BifurcationFlux {
     pub hflux_sum: Vec<f64>,
     /// `bif_path_active`。
     pub active: Vec<bool>,
+    /// `bif_lev_hflux_sum`：第 2 层及以上（漫过河岸、堤内一侧）的净出流，只在开堤防时算。
+    pub lev_hflux_sum: Vec<f64>,
+}
+
+/// 开堤防时分汊要看的堤防状态。
+#[derive(Clone, Copy)]
+pub struct BifurcationLevee<'a> {
+    pub levee: &'a Levee,
+    pub levsto: &'a [f64],
+    pub levdph: &'a [f64],
 }
 
 fn read_values<T: netcdf::NcTypeDescriptor + Copy>(
@@ -229,7 +240,10 @@ impl Bifurcation {
         }
     }
 
-    /// `bifurcation_calc` 的一个子步（单进程，所有单元流域同一子步长 `dt`，无堤防、无水库）。
+    /// `bifurcation_calc` 的一个子步（单进程，所有单元流域同一子步长 `dt`）。
+    ///
+    /// 开堤防时（`levee` 非空）第 2 层及以上在有堤一侧用堤内水面与堤内蓄量，堤内一侧另有
+    /// 供水方限流；第 1 层的界面水深不再有 0.01 m 下限。
     ///
     /// `normal_outgoing` 是普通汇流缩放后的出流（`normal_outgoing_rate`）；`veloc`/`momen`
     /// 是路径状态 `pth_veloc`/`pth_momen`，就地更新。
@@ -243,6 +257,7 @@ impl Bifurcation {
         dt: f64,
         normal_outgoing: &[f64],
         reservoir: &[Option<f64>],
+        levee: Option<BifurcationLevee<'_>>,
         veloc: &mut [f64],
         momen: &mut [f64],
     ) -> BifurcationFlux {
@@ -252,26 +267,70 @@ impl Bifurcation {
         let mut hflux_lev = vec![0.0; paths * levels];
         let mut hflux_sum = vec![0.0; n];
         let mut active = vec![false; paths];
-        // 已建成的水库（`reservoir[i] = Some(volresv)`）：可用蓄量就是库容，可见蓄量不小于 0。
+        let is_reservoir = |i: usize| matches!(reservoir.get(i), Some(Some(_)));
+        let has_levee = |i: usize| levee.is_some_and(|l| l.levee.has[i]);
+        // 有堤单元流域：可见蓄量为零却有水深时（老续跑的占位），由水位按堤外可见那份补算。
+        let stage_visible = |i: usize| {
+            let l = levee.expect("levee");
+            l.levee
+                .visible_volume_from_stage(net, i, wdsrf[i], l.levsto[i])
+        };
+        let wet_volume = |i: usize| volwater[i] > 0.0 || wdsrf[i] <= STAGE_RESTART_TOL;
+        // `available_storage_ucat`：已建成的水库是库容；有堤单元流域再加上堤内蓄量。
         let storage: Vec<f64> = (0..n)
             .map(|i| match reservoir.get(i).copied().flatten() {
                 Some(volresv) => volresv,
+                None if has_levee(i) => {
+                    let protected = levee.expect("levee").levsto[i].max(0.0);
+                    if wet_volume(i) {
+                        volwater[i] + protected
+                    } else {
+                        stage_visible(i) + protected
+                    }
+                }
                 None => Self::available_storage(net, i, wdsrf[i], volwater[i]),
             })
             .collect();
-        // 无堤防：可见蓄量就是可用蓄量。
+        // `available_visible_storage_ucat`：不开堤防时就是可用蓄量。
         let visible: Vec<f64> = (0..n)
             .map(|i| match reservoir.get(i).copied().flatten() {
                 Some(volresv) => volresv.max(0.0),
-                None => storage[i],
+                None if levee.is_none() => storage[i],
+                None if has_levee(i) && !wet_volume(i) => stage_visible(i).max(0.0),
+                None if wet_volume(i) => volwater[i].max(0.0),
+                None => Self::available_storage(net, i, wdsrf[i], volwater[i]).max(0.0),
             })
             .collect();
-        let is_reservoir = |i: usize| matches!(reservoir.get(i), Some(Some(_)));
+        // `available_protected_storage_ucat` 与堤内水面 `rivhgt + levdph`。
+        let protected: Vec<f64> = (0..n)
+            .map(|i| {
+                if has_levee(i) && !is_reservoir(i) {
+                    levee.expect("levee").levsto[i].max(0.0)
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+        let protected_wdsrf: Vec<f64> = (0..n)
+            .map(|i| {
+                if has_levee(i) {
+                    net.curves[i].rivhgt + levee.expect("levee").levdph[i]
+                } else {
+                    wdsrf[i]
+                }
+            })
+            .collect();
+        let use_protected = levee.is_some() && levels >= 2;
+        let mut protected_outgoing = vec![0.0; n];
+        let mut protected_rate = vec![1.0f64; n];
         let mut total = vec![0.0; paths];
         let mut pth_rate = vec![1.0f64; paths];
         let mut layer_rate = vec![1.0f64; paths * levels];
         let mut outgoing = vec![0.0; n];
         let mut out_rate = vec![1.0f64; n];
+        let with_lev = levee.is_some() && levels >= 2;
+        let mut lev_total = vec![0.0; if with_lev { paths } else { 0 }];
+        let mut lev_hflux_sum = vec![0.0; if with_lev { n } else { 0 }];
 
         // Step 3：逐路径逐层的局部惯性更新与限流量。
         for p in 0..paths {
@@ -299,6 +358,7 @@ impl Bifurcation {
             let (w_up, w_dn) = (wdsrf[i_up], wdsrf[i_dn]);
             let (w_up_prev, w_dn_prev) = (wdsrf_prev[i_up], wdsrf_prev[i_dn]);
             let dst = self.dst[p];
+            let (up_levee, dn_levee) = (has_levee(i_up), has_levee(i_dn));
             for l in 0..levels {
                 let k = p * levels + l;
                 let width = self.wth[k];
@@ -308,6 +368,17 @@ impl Bifurcation {
                     continue;
                 }
                 let elv = self.elv[k];
+                // 漫过河岸的层在有堤一侧用堤内水面。
+                let w_up = if l > 0 && up_levee {
+                    protected_wdsrf[i_up]
+                } else {
+                    w_up
+                };
+                let w_dn = if l > 0 && dn_levee {
+                    protected_wdsrf[i_dn]
+                } else {
+                    w_dn
+                };
                 let height_up = ((w_up + rivelv_up) - elv).max(0.0);
                 let height_dn = ((w_dn + rivelv_dn) - elv).max(0.0);
                 if height_up < BIFMIN && height_dn < BIFMIN {
@@ -319,11 +390,25 @@ impl Bifurcation {
                 let zsurf_dn = w_dn + rivelv_dn;
                 let slope = ((zsurf_dn - zsurf_up) / dst).min(0.005).max(-0.005);
                 let current = height_up.max(height_dn);
-                // 标准 CaMa 分汊：当前与上一子步深度的几何平均，0.01 m 的下限保证由干转湿时有导水。
                 let up_prev = ((w_up_prev + rivelv_up) - elv).max(0.0);
                 let dn_prev = ((w_dn_prev + rivelv_dn) - elv).max(0.0);
                 let previous = up_prev.max(dn_prev);
-                let h_face = (current * previous).sqrt().max((current * 0.01).sqrt());
+                let h_face = if levee.is_some() {
+                    // CaMa 堤防方案：河槽层用几何平均（一侧干时退回当前深度），漫过河岸的层显式。
+                    if l == 0 {
+                        let h = (current * previous).sqrt();
+                        if h <= 0.0 {
+                            current
+                        } else {
+                            h
+                        }
+                    } else {
+                        current
+                    }
+                } else {
+                    // 标准 CaMa 分汊：几何平均，0.01 m 的下限保证由干转湿时有导水。
+                    (current * previous).sqrt().max((current * 0.01).sqrt())
+                };
                 if h_face <= BIFMIN {
                     momen[k] = 0.0;
                     veloc[k] = 0.0;
@@ -355,14 +440,34 @@ impl Bifurcation {
                     if transfer <= 0.0 {
                         continue;
                     }
-                    let donor = if hflux_lev[k] >= 0.0 { i_up } else { i_dn };
-                    outgoing[donor] += transfer;
+                    let (donor, donor_levee) = if hflux_lev[k] >= 0.0 {
+                        (i_up, up_levee)
+                    } else {
+                        (i_dn, dn_levee)
+                    };
+                    // 漫过河岸的层从有堤一侧的堤内蓄量出水。
+                    let available = if l > 0 && donor_levee {
+                        protected_outgoing[donor] += transfer;
+                        protected[donor]
+                    } else {
+                        outgoing[donor] += transfer;
+                        visible[donor]
+                    };
                     layer_rate[k] =
-                        layer_rate[k].min(limiter_fraction(visible[donor].max(0.0), transfer * dt));
+                        layer_rate[k].min(limiter_fraction(available.max(0.0), transfer * dt));
                 }
             }
         }
 
+        // 堤内一侧的总出流限制。
+        if use_protected {
+            for i in 0..n {
+                if protected_outgoing[i] > 0.0 && dt > 0.0 {
+                    protected_rate[i] =
+                        limiter_fraction(protected[i].max(0.0), protected_outgoing[i] * dt);
+                }
+            }
+        }
         // 单元流域总出流限制：普通汇流已占用的出流先扣掉。
         for i in 0..n {
             let reference = visible[i].max(0.0);
@@ -384,12 +489,18 @@ impl Bifurcation {
             let i_up = self.upst[p];
             let Some(i_dn) = self.down[p] else { continue };
             total[p] = 0.0;
+            let (up_levee, dn_levee) = (has_levee(i_up), has_levee(i_dn));
             for l in 0..levels {
                 let k = p * levels + l;
                 let mut rate = pth_rate[p].min(layer_rate[k]);
-                if hflux_lev[k] > 0.0 {
+                let h = hflux_lev[k];
+                if levee.is_some() && l > 0 && h > 0.0 && up_levee {
+                    rate = rate.min(protected_rate[i_up]);
+                } else if levee.is_some() && l > 0 && h < 0.0 && dn_levee {
+                    rate = rate.min(protected_rate[i_dn]);
+                } else if h > 0.0 {
                     rate = rate.min(out_rate[i_up]);
-                } else if hflux_lev[k] < 0.0 {
+                } else if h < 0.0 {
                     rate = rate.min(out_rate[i_dn]);
                 }
                 if rate < 1.0 {
@@ -415,7 +526,16 @@ impl Bifurcation {
                 }
             }
             hflux_sum[i_up] += total[p];
+            if levee.is_some() && levels >= 2 {
+                lev_total[p] = hflux_lev[p * levels + 1..(p + 1) * levels]
+                    .iter()
+                    .fold(0.0, |sum, &h| h + sum);
+                lev_hflux_sum[i_up] += lev_total[p];
+            }
             hflux_sum[i_dn] -= total[p];
+            if levee.is_some() && levels >= 2 {
+                lev_hflux_sum[i_dn] -= lev_total[p];
+            }
         }
 
         // Step 6/7：`push_bif_influx` 把路径净通量推到下游，再减掉本地已算过的部分。
@@ -434,10 +554,28 @@ impl Bifurcation {
         for (sum, &inflow) in hflux_sum.iter_mut().zip(&influx) {
             *sum -= inflow;
         }
+        // 同样推送第 2 层及以上的净通量（`bif_lev_influx`）。
+        if with_lev {
+            let mut lev_influx = vec![0.0; n];
+            for (slot, paths_in) in lev_influx.iter_mut().zip(&self.incoming) {
+                for &p in paths_in {
+                    accumulate(slot, lev_total[p]);
+                }
+            }
+            for p in 0..paths {
+                if let Some(j) = self.down[p] {
+                    lev_influx[j] -= lev_total[p];
+                }
+            }
+            for (sum, &inflow) in lev_hflux_sum.iter_mut().zip(&lev_influx) {
+                *sum -= inflow;
+            }
+        }
         BifurcationFlux {
             hflux_lev,
             hflux_sum,
             active,
+            lev_hflux_sum,
         }
     }
 }

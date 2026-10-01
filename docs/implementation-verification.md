@@ -27111,3 +27111,48 @@ Rust：`FloodplainCurve::new` 与 `RiverNetwork::read` 加 `storage_fix` 参数�
 | 重跑 `g1lv/g1bf/g1rs` | 仍然逐位 | |
 
 `cargo test --release -p colm-runtime` 全过，clippy 无告警。colm-rs 的拒绝表相应放开：仍拒绝堤防 + 分汊，以及任一选项与漫滩回馈、LULCC 的组合。
+
+## 第 473 轮：河道选项组合（二）：漫滩回馈 × {堤防, 水库, 分汊}、堤防 + 分汊
+
+**漫滩回馈 + 堤防/水库**（`publish/debit_flood_feedback` 的完整形态）：
+- 发布：
+  - 已建成水库（按当年判断）的可见水量取 `max(0, volresv)`；库容若还是 `spval`，上游在发布时就由水深补上，这是 `volresv` 的副作用，Rust 照做。
+  - 有堤单元流域：受保护水量 = `max(0, levsto)`，淹没比例取 `levee_fldstg(visible+protected)` 的 `fldfrc`。
+  - 受保护水量与可见水量一样按面积推到网格、再到 patch，即 `credit = visible + protected`。
+- 扣账：
+  - 体积为 `FMA(visible+protected, f, ·)`；
+  - 水库从库容里扣（共用乘积，不收缩），且每步都令 `volwater_ucat = volresv`，即使这一步没扣；
+  - 有堤单元流域的堤内蓄量为 `max(FNMA(protected, fsum, levsto), 0)`；
+  - 有扣账时：有堤单元流域做一次 `levee_repartition_storage`，水库的水深由库容反算。
+- 发布用的年份：初始化用本次运行的起始年份（`grid_riverlake_flow_init(s_year)`），之后用本步末年份。
+
+**漫滩回馈 + 分汊**：上游没有专门的处理，放开即可。
+
+**堤防 + 分汊**（`bifurcation_calc` 的堤防部分与 `levee_apply_protected_flux`）：
+- 可用蓄量：
+  - 有堤单元流域为可见蓄量 + `max(levsto,0)`；
+  - 可见蓄量为零却有水深时，由水位按堤外可见那份补算（`levee_visible_volume_from_stage`）。
+- 堤内蓄量为 `max(levsto,0)`，堤内水面为 `rivhgt + levdph`。
+- 第 2 层及以上在有堤一侧用堤内水面算水深与坡度；该侧作为供水方时，从堤内蓄量限流，另有堤内一侧的总出流限制（`protected_out_rate`）。
+- 开堤防时界面水深的公式改变（对所有路径都适用，不只是有堤的）：
+  - 第 1 层为 `sqrt(当前·上一子步)`，为 0 时退回当前深度，没有 0.01 m 下限；
+  - 第 2 层及以上直接用当前深度。
+- 第 2 层及以上的净通量 `bif_lev_hflux_sum`，与总通量一样逐路径累加并推送到下游。
+- 汇流更新时，有堤单元流域的可见通量 = `sum_hflux - bif_lev_hflux_sum`，堤内蓄量扣 `dt·bif_lev_hflux_sum`（不收缩）。扣穿超过容差时上游报错（`BIF protected-side limiter failed`），Rust 同样报错。随后照常重新分区。
+
+**colm-rs 的拒绝表**：堤防、分汊、水库与漫滩回馈之间可以任意组合；它们与 LULCC 的组合仍然拒绝。
+
+**实测**（全 Rust 三段 vs 纯 Fortran 三段，1 天）：
+
+| 算例 | 结果 | 生效情况 |
+|---|---|---|
+| `g1fl`（回馈 + 堤防） | 续跑 5 个、history 2 个全部 `diff 0` | 陆面续跑与只开回馈的 `g1ff` 有 6803 处不同 |
+| `g1fr`（回馈 + 水库） | 全部 `diff 0` | 与 `g1ff` 有 6780 处不同 |
+| `g1fb`（回馈 + 分汊） | 全部 `diff 0` | 与 `g1ff` 有 6763 处不同 |
+| `g1lb`（堤防 + 分汊） | 全部 `diff 0` | 3787 条路径连着有堤单元流域，2231 条第 2 层及以上有流量；堤内蓄量与只开堤防时有 7 处不同 |
+| 重跑 `g1lv/g1bf/g1br/g1ff/g1rs` | 仍然逐位 | |
+| `g1all`（回馈 + 堤防 + 分汊 + 水库） | 全部 `diff 0` | |
+| `g1allw`（同上，history MONTHLY、续跑 DAILY） | 续跑 5 个、history 2 个、`.river` 旁车全部 `diff 0` | |
+| `g1allwc`（各自从第 2 天续跑接着跑 1 天） | 续跑 8 个、history 2 个全部 `diff 0` | |
+
+- `cargo test --release -p colm-runtime` 全过；`clippy --workspace --all-targets` 无告警；单点回归 138/140（nn/pni 没有 history，与以前相同）。回归脚本的 SKIP 加上这些新算例。

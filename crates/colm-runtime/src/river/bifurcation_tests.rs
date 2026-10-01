@@ -65,6 +65,7 @@ fn water_flows_down_the_surface_slope_and_is_conserved() {
         60.0,
         &[0.0, 0.0],
         &[],
+        None,
         &mut veloc,
         &mut momen,
     );
@@ -95,6 +96,7 @@ fn an_empty_donor_cannot_send_water() {
         60.0,
         &[0.0, 0.0],
         &[],
+        None,
         &mut veloc,
         &mut momen,
     );
@@ -118,6 +120,7 @@ fn ordinary_outflow_takes_priority_over_bifurcation() {
         60.0,
         &normal,
         &[],
+        None,
         &mut veloc,
         &mut momen,
     );

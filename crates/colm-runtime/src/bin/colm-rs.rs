@@ -371,60 +371,26 @@ fn run_spatial(
             "Grid flood feedback with DEF_SPLIT_SOILSNOW is not ported"
         );
     }
-    if logical_field(&document, "DEF_USE_LEVEE")? {
-        // 堤防只接了单独打开的路径：与分汊（堤内受保护通量）、漫滩回馈（受保护水量的发布与扣账）、
-        // LULCC（换年时堤防状态的保留）的组合都还没对过。
-        for (field, on) in [
-            (
-                "DEF_GridRiverLake_FloodFeedback",
-                logical_field(&document, "DEF_GridRiverLake_FloodFeedback")?,
-            ),
-            ("DEF_USE_LULCC", logical_field(&document, "DEF_USE_LULCC")?),
-        ] {
-            ensure!(
-                !on,
-                "DEF_USE_LEVEE together with {field} is not ported to the Rust river model; \
-                 run this case with --engine fortran"
-            );
-        }
-    }
-    if logical_field(&document, "DEF_USE_BIFURCATION")? {
-        // 分汊只接了单独打开的路径：与堤防（堤内受保护通量）、漫滩回馈、LULCC 的组合都还没对过。
-        for (field, on) in [
-            ("DEF_USE_LEVEE", logical_field(&document, "DEF_USE_LEVEE")?),
-            (
-                "DEF_GridRiverLake_FloodFeedback",
-                logical_field(&document, "DEF_GridRiverLake_FloodFeedback")?,
-            ),
-            ("DEF_USE_LULCC", logical_field(&document, "DEF_USE_LULCC")?),
-        ] {
-            ensure!(
-                !on,
-                "DEF_USE_BIFURCATION together with {field} is not ported to the Rust river model; \
-                 run this case with --engine fortran"
-            );
-        }
-    }
     let reservoir_method = integer_field(&document, "DEF_Reservoir_Method")?;
-    if reservoir_method > 0 {
+    ensure!(
+        reservoir_method <= 1,
+        "unsupported reservoir operation method {reservoir_method}"
+    );
+    // 堤防、分汊、水库与漫滩回馈之间可以任意组合；与 LULCC（换年时这些状态的保留）的组合
+    // 还没对过。
+    for (field, on) in [
+        ("DEF_USE_LEVEE", logical_field(&document, "DEF_USE_LEVEE")?),
+        (
+            "DEF_USE_BIFURCATION",
+            logical_field(&document, "DEF_USE_BIFURCATION")?,
+        ),
+        ("DEF_Reservoir_Method > 0", reservoir_method > 0),
+    ] {
         ensure!(
-            reservoir_method == 1,
-            "unsupported reservoir operation method {reservoir_method}"
+            !(on && logical_field(&document, "DEF_USE_LULCC")?),
+            "{field} together with DEF_USE_LULCC is not ported to the Rust river model; \
+             run this case with --engine fortran"
         );
-        // 水库可以与分汊、堤防同开；与漫滩回馈、LULCC 的组合还没对过。
-        for (field, on) in [
-            (
-                "DEF_GridRiverLake_FloodFeedback",
-                logical_field(&document, "DEF_GridRiverLake_FloodFeedback")?,
-            ),
-            ("DEF_USE_LULCC", logical_field(&document, "DEF_USE_LULCC")?),
-        ] {
-            ensure!(
-                !on,
-                "DEF_Reservoir_Method > 0 together with {field} is not ported to the Rust river \
-                 model; run this case with --engine fortran"
-            );
-        }
     }
     for (field, unported) in [
         (
@@ -832,7 +798,8 @@ fn run_spatial_segment(
             // `MOD_Namelist.F90` 的缺省 `5._r8`（mm/day）。
             None => 5.0,
         };
-        river = river.with_flood_feedback(infiltration_max_mm_day);
+        // `grid_riverlake_flow_init(s_year, …)`：本次运行的起始年份。
+        river = river.with_flood_feedback(infiltration_max_mm_day, config.start.year);
     }
     runtime = runtime.with_river(river, runoff_filter)?;
     let rest_compression = u8::try_from(integer_field(document, "DEF_REST_CompressLevel")?)
