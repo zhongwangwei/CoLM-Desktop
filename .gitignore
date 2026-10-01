@@ -31,3 +31,7 @@ CLAUDE.local.md
 CLAUDE.md
 /prompts
 __pycache__/
+
+# patch(1) 的残留：同步 vendor 时别把它们带进来
+*.orig
+*.rej

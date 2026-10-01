@@ -26912,3 +26912,13 @@ Rust：`FloodplainCurve::new` 与 `RiverNetwork::read` 加 `storage_fix` 参数�
 
 - `cargo test -p colm-core -p colm-runtime`（单线程）全过。
 - 回归脚本把这几轮新建的空间测试目录（`g1sf/g1t/g3/g3m/g3n/g1ff`）加进 SKIP：它们是空间算例，原来被当成单点算例扫进去、报 FAILED。
+
+## 第 468 轮：清掉 vendor 里的 `.orig` 残留
+
+`vendor/CoLM202X` 下入库了 6 个 `*.orig`：`CoLMMAIN.F90`、`MOD_Grid_RiverLakeFlow.F90`、`MOD_SPMD_Task.F90` 与三个示踪物模块各一个。
+
+- 都是 `6b87446a`（同步上游 85cf2328）那次打补丁留下的备份。
+- 上游一个都没有。
+- 构建只编 `.F90`；仓库里没有任何地方引用它们。oracle 探针脚本里出现的 `.orig` 是它们自己在临时目录里建的备份，与这几个文件无关。
+
+处理：`git rm` 掉；根 `.gitignore` 加 `*.orig`、`*.rej`，下次同步不会再带进来。`gen_fortran_deps.py --check` 与 `cargo test -p xtask` 通过。
