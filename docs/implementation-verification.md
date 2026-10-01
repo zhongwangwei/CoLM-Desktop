@@ -27295,3 +27295,31 @@ Rust 在 `route_system` 的子步长循环与 `bifurcation_substep` 里各加一
 `cargo test --release -p colm-core`（399）与 `-p colm-runtime` 全过；clippy 无告警。
 
 **未移植（只服务示踪物记账）**：`etroot_*_out`/`rsub_*_out` 的分摊、`dew_overflow`/`frost_displaced`/`late_runoff`、`raw_out`、`permeable_soil_out`、`qgtop_out`。示踪物阶段再补。
+
+## 第 479 轮：示踪物 T1a —— 开关本身（`DEF_TRACER_NUM = 0`）
+
+示踪物子系统按 T1 基础设施 → T2 同位素 → T3 河道输运 → T4 甲烷 → T5 泥沙推进（维护者确认）。T1 先做零示踪物：第 477 轮解耦之后，开关打开、不注册示踪物时宿主物理不变，Fortran 只在 I/O 上多出三样东西：
+
+| 位置 | 内容 | Rust |
+|---|---|---|
+| 主 history（`MOD_Hist.F90:319-338`，仅 `HistForm == 'Gridded'`） | `history_window_seconds(time) = max(nac,0)*deltim`、`history_window_end_minutes(time) = minutes_since_1900(idate) + mod(sec,60)/60`（窗口末时刻；`time` 仍是窗口中点） | `colm-hist` 的 `HistoryBuffers::enable_windows/set_window`，`HistorySession::with_tracer_history(deltim)` 在写每条记录时给值 |
+| 示踪物 history（`<case>_hist_tracer_<cdate>.nc`，`:341-358`） | 网格骨架（无 `sensor` 维、无静态量）、`time` 与同样两个窗口变量；`tracer_hist_out` 只为输运示踪物加变量 | `HistoryBuffers::write_tracer_skeleton`，与主文件同时写 |
+| 陆面时间重启（`MOD_Tracer_Rest.F90:1257-1267`、`:461-488`） | 空事务：`trc_land_restart_complete = 1`、`trc_land_restart_schema = 5`、`trc_land_transport_count = 0`（int），`trc_aquifer_mixing_water_mm = DEF_TRACER_AQUIFER_MIXING_WATER_MM`（double，默认 -1）。mkinidata 写的冷启动重启也带 | `colm_init::write_empty_land_tracer_transaction`，空间 mkinidata 三类块写出器在开关打开时追加；之后的续跑重启以上一份为模板，原样带下去 |
+
+河道 unitcat 文件、历史累加器旁车与河道重启不受开关影响。
+
+**顺带修的**：
+- vendor 缺陷（`upstream-bugs.md` 第 34 条）：零示踪物时 `CoLMMAIN` 给雪层合并/分裂传未分配的 `trc_*` 切片，改为 `ntracers > 0` 才传。latlon 内核已重编；default/crop 内核只在开示踪物时走到这里，下次重编时带上。
+- `mksrfdata-rs` 的甲烷预处理判断把 `DEF_TRACER_NUM`、`DEF_TRACER_NAMES` 的默认值写成 2 与 `'H2_18O,HDO'`，与上游的 0 与 `''` 不符，已改。
+- `colm-rs` 不再整体拒绝 `DEF_USE_TRACER`，只拒绝 `DEF_TRACER_NUM > 0`（输运尚未移植）。
+
+**实测**（g1 区域，IsoGSM 驱动，VSF；latlon 内核，纯 Fortran 三段 vs 全 Rust 三段）：
+
+| 对比 | 结果 |
+|---|---|
+| `g1tr0`（开关开，0 个示踪物）Fortran vs Rust | history 3 个（含 `_hist_tracer_`）、续跑 5 个全部 `diff 0` |
+| `g1tr0` vs `g1iv`（开关关），均为 Rust | 主 history 只多两个窗口变量，其余变量逐位相同；unitcat 全同 —— 开关本身不改宿主 |
+
+`cargo test --release -p colm-hist -p colm-runtime` 全过；`-p colm-init` 串行 165 个全过（并行时 9 个河道/BGC 重启测试因 HDF5 不支持线程并发偶发 `HDF error`，与本轮无关）；clippy 无告警。
+
+下一步 T1b：注册了陆面输运示踪物（solute/isotope，不带分馏）的通用记账 —— 描述符与注册表、`trc_*` 状态与续跑、降水/蒸发/土壤水/雪/特殊 patch 的输运、守恒检查与示踪物 history 变量。

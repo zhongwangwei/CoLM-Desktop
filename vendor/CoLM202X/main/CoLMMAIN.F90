@@ -1356,7 +1356,9 @@ SUBROUTINE CoLMMAIN ( &
             lb = maxsnl + 1
 
             IF (DEF_USE_SNICAR) THEN
-      IF (DEF_USE_TRACER) THEN
+      ! The trc_* arrays are allocated only when tracers are registered: with
+      ! DEF_TRACER_NUM = 0 the slices below would reference unallocated arrays.
+      IF (DEF_USE_TRACER .and. ntracers > 0) THEN
                   CALL snowlayerscombine_snicar (lb,snl,&
                                z_soisno(lb:1),dz_soisno(lb:1),zi_soisno(lb-1:1),&
                                wliq_soisno(lb:1),wice_soisno(lb:1),t_soisno(lb:1),scv,snowdp,&
@@ -1374,7 +1376,7 @@ SUBROUTINE CoLMMAIN ( &
                                mss_dst1(lb:0), mss_dst2(lb:0), mss_dst3(lb:0), mss_dst4(lb:0) )
       ENDIF
             ELSE
-      IF (DEF_USE_TRACER) THEN
+      IF (DEF_USE_TRACER .and. ntracers > 0) THEN
                   CALL snowlayerscombine (lb,snl,&
                                z_soisno(lb:1),dz_soisno(lb:1),zi_soisno(lb-1:1),&
                                wliq_soisno(lb:1),wice_soisno(lb:1),t_soisno(lb:1),scv,snowdp, &
@@ -1392,7 +1394,7 @@ SUBROUTINE CoLMMAIN ( &
             ! Divide thick snow elements
             IF(snl<0) THEN
                IF (DEF_USE_SNICAR) THEN
-                  IF (DEF_USE_TRACER) THEN
+                  IF (DEF_USE_TRACER .and. ntracers > 0) THEN
                      CALL snowlayersdivide_snicar (lb,snl,&
                                z_soisno(lb:0),dz_soisno(lb:0),zi_soisno(lb-1:0),&
                                wliq_soisno(lb:0),wice_soisno(lb:0),t_soisno(lb:0),&
@@ -1409,7 +1411,7 @@ SUBROUTINE CoLMMAIN ( &
                             mss_dst1(lb:0),mss_dst2(lb:0),mss_dst3(lb:0),mss_dst4(lb:0) )
                   ENDIF
                ELSE
-                  IF (DEF_USE_TRACER) THEN
+                  IF (DEF_USE_TRACER .and. ntracers > 0) THEN
                      CALL snowlayersdivide (lb,snl,&
                                z_soisno(lb:0),dz_soisno(lb:0),zi_soisno(lb-1:0),&
                                wliq_soisno(lb:0),wice_soisno(lb:0),t_soisno(lb:0), &

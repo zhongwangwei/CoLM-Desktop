@@ -238,6 +238,8 @@ struct SpatialNamelistRun {
     observations: SpatialObservedInitializationPaths,
     tuning: RestartTuning,
     snicar: Option<SnicarInitialization>,
+    /// `DEF_USE_TRACER`：`Some(DEF_TRACER_AQUIFER_MIXING_WATER_MM)`，时间重启带空示踪物事务。
+    tracer_mixing_water_mm: Option<f64>,
 }
 
 /// 空间冷启动的调用开关。参数已到 clippy 的 7 个上限，聚成一个结构体而不是
@@ -450,6 +452,9 @@ fn write_spatial_urban_namelist_block(
     if let Some(path) = files.urban {
         println!("wrote {}", path.display());
     }
+    if let Some(mixing) = run.tracer_mixing_water_mm {
+        colm_init::write_empty_land_tracer_transaction(&time.common.block, mixing)?;
+    }
     println!("wrote {}", time.common.block.display());
     if let Some(file) = da {
         println!("wrote {}", file.path.display());
@@ -526,6 +531,9 @@ fn write_spatial_lct_namelist_block(
         .transpose()?;
     println!("wrote {}", files.constants.display());
     println!("wrote {}", files.block.display());
+    if let Some(mixing) = run.tracer_mixing_water_mm {
+        colm_init::write_empty_land_tracer_transaction(&time.block, mixing)?;
+    }
     println!("wrote {}", time.block.display());
     if let Some(file) = da {
         println!("wrote {}", file.path.display());
@@ -589,6 +597,9 @@ fn write_spatial_pft_namelist_block(
     if let Some(files) = files.bgc {
         println!("wrote {}", files.constants.display());
         println!("wrote {}", files.block.display());
+    }
+    if let Some(mixing) = run.tracer_mixing_water_mm {
+        colm_init::write_empty_land_tracer_transaction(&time.common.block, mixing)?;
     }
     println!("wrote {}", time.common.block.display());
     if let Some(file) = da {
@@ -765,6 +776,11 @@ fn spatial_namelist_run_with_subgrid(
         observations: SpatialObservedInitializationPaths::from_document(&document)?,
         tuning: RestartTuning::from_document(&document)?,
         snicar,
+        tracer_mixing_water_mm: if namelist_bool(&document, "DEF_USE_TRACER", false)? {
+            Some(namelist_f64(&document, "DEF_TRACER_AQUIFER_MIXING_WATER_MM", -1.0)?)
+        } else {
+            None
+        },
     })
 }
 

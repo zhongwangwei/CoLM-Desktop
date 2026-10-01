@@ -5260,9 +5260,9 @@ fn methane_preprocessing_requirements(
             spatial_ph: false,
         });
     }
-    let count = case_i32(document, "DEF_TRACER_NUM", 2)?;
+    let count = case_i32(document, "DEF_TRACER_NUM", 0)?;
     ensure!(count >= 0, "DEF_TRACER_NUM must be non-negative");
-    let names = optional_case_string(document, "DEF_TRACER_NAMES", "H2_18O,HDO")?;
+    let names = optional_case_string(document, "DEF_TRACER_NAMES", "")?;
     let names = names.split(',').map(str::trim).collect::<Vec<_>>();
     let mut methane = None;
     for index in 0..usize::try_from(count)? {

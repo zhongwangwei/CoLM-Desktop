@@ -241,6 +241,15 @@
   冠层）都偏大，且所有 patch 相同，与各自的 `tlai_p` 不一致。`DEF_USE_LAIFEEDBACK` 下 `tlai` 不走这里，`tsai` 仍然。
 - **处理**：`vendor/` 未改；Rust 照写（`colm-runtime/src/pft.rs` 的 `refresh_monthly_leaf_area_index`）。
 
+### 34. 零示踪物时雪层合并/分裂传入未分配的示踪物数组切片
+
+- **位置**：`main/CoLMMAIN.F90` 的 `snowlayerscombine[_snicar]`、`snowlayersdivide[_snicar]` 四处调用。
+- **原因**：条件只看 `DEF_USE_TRACER`，就把 `trc_wliq_soisno(:, lb:1, ipatch)` 等切片作为可选实参传进去；
+  而 `trc_*` 只在 `ntracers > 0` 时分配（`MOD_Tracer_Vars.F90:244`）。`DEF_TRACER_NUM = 0` 时是对未分配数组取切片，
+  属未定义行为（紧随其后的 `relocate_soil_frost_ice` 调用有 `ntracers > 0` 判断，这四处没有）。
+- **影响**：没有雪层合并/分裂的算例碰不到；有雪时可能崩溃或读到垃圾。
+- **处理**：`vendor/` 已修（第 479 轮）：四处条件改为 `DEF_USE_TRACER .and. ntracers > 0`。
+
 ## 二、TRACER 编译开关改变了物理（需要上游确认哪一边是对的）
 
 这一版上游在很多地方给 TRACER 构建和非 TRACER 构建写了**不同的物理**，不只是记账不同。

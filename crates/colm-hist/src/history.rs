@@ -140,6 +140,9 @@ pub struct HistoryBuffers {
     included: BTreeMap<&'static str, Vec<bool>>,
     /// 调用方已经聚合到网格窗口的量（河道量各有自己的过滤、分母与写法）：`(record, cell)`。
     gridded: BTreeMap<&'static str, Vec<f64>>,
+    /// `DEF_USE_TRACER`：每条记录的 `(history_window_seconds, history_window_end_minutes)`
+    /// （`MOD_Hist.F90:319-361`，只在网格写出时写）。
+    windows: Option<Vec<(f64, f64)>>,
 }
 
 impl HistoryBuffers {
@@ -156,7 +159,85 @@ impl HistoryBuffers {
             grid: None,
             included: BTreeMap::new(),
             gridded: BTreeMap::new(),
+            windows: None,
         }
+    }
+
+    /// 打开示踪物模式的窗口变量（`history_window_seconds`/`history_window_end_minutes`）。
+    pub fn enable_windows(&mut self) {
+        self.windows = Some(vec![(0.0, 0.0); self.records]);
+    }
+
+    /// 第 `record` 条记录的窗口长度 [s] 与窗口末时刻 [minutes since 1900-1-1]。
+    pub fn set_window(&mut self, record: usize, seconds: f64, end_minutes: f64) -> Result<()> {
+        let windows = self
+            .windows
+            .as_mut()
+            .context("history windows were not enabled for this group")?;
+        ensure!(
+            record < windows.len(),
+            "record {record} is outside the {}-record group",
+            windows.len()
+        );
+        windows[record] = (seconds, end_minutes);
+        Ok(())
+    }
+
+    /// 示踪物 history 文件（`<case>_hist_tracer_<cdate>.nc`）：网格骨架、`time` 与两个窗口
+    /// 变量。示踪物为 0 个时上游写出的就是这些（`MOD_Hist.F90:341-358`，`tracer_hist_out`
+    /// 对每个输运示踪物才加变量）。
+    pub fn write_tracer_skeleton(&self, path: impl AsRef<Path>) -> Result<()> {
+        let path = path.as_ref();
+        let grid = self
+            .grid
+            .as_ref()
+            .context("the tracer history file is only written for gridded history")?;
+        let mut file =
+            netcdf::create(path).with_context(|| format!("cannot create {}", path.display()))?;
+        file.add_unlimited_dimension("time")?;
+        self.define_grid(&mut file, grid)?;
+        {
+            let mut time = file.add_variable::<i32>("time", &["time"])?;
+            time.put_attribute("long_name", "time")?;
+            time.put_attribute("units", TIME_UNITS)?;
+        }
+        self.define_windows(&mut file)?;
+        self.put_grid_coordinates(&mut file, grid)?;
+        file.variable_mut("time")
+            .context("time disappeared after definition")?
+            .put_values(&self.times, netcdf::Extents::All)?;
+        self.put_windows(&mut file)?;
+        Ok(())
+    }
+
+    fn define_windows(&self, file: &mut netcdf::FileMut) -> Result<()> {
+        if self.windows.is_none() {
+            return Ok(());
+        }
+        let mut window = file.add_variable::<f64>("history_window_seconds", &["time"])?;
+        window.put_attribute("units", "s")?;
+        window.put_attribute(
+            "long_name",
+            "elapsed window ending at history_window_end_minutes; terminal and resumed records can overlap",
+        )?;
+        file.add_variable::<f64>("history_window_end_minutes", &["time"])?
+            .put_attribute("units", TIME_UNITS)?;
+        Ok(())
+    }
+
+    fn put_windows(&self, file: &mut netcdf::FileMut) -> Result<()> {
+        let Some(windows) = &self.windows else {
+            return Ok(());
+        };
+        let seconds = windows.iter().map(|w| w.0).collect::<Vec<_>>();
+        let end = windows.iter().map(|w| w.1).collect::<Vec<_>>();
+        file.variable_mut("history_window_seconds")
+            .context("history_window_seconds disappeared")?
+            .put_values(&seconds, netcdf::Extents::All)?;
+        file.variable_mut("history_window_end_minutes")
+            .context("history_window_end_minutes disappeared")?
+            .put_values(&end, netcdf::Extents::All)?;
+        Ok(())
     }
 
     /// 声明一组由调用方聚合好的网格量（只在网格写出时可用，须是闸门表里的二维量）。
@@ -620,6 +701,7 @@ impl HistoryBuffers {
             time.put_attribute("long_name", "time")?;
             time.put_attribute("units", TIME_UNITS)?;
         }
+        self.define_windows(&mut file)?;
         for (name, long_name, units, _) in &grid.statics {
             let mut variable = file.add_variable::<f64>(name, &["lat", "lon"])?;
             variable.put_attribute("long_name", long_name.as_str())?;
@@ -665,6 +747,7 @@ impl HistoryBuffers {
         file.variable_mut("time")
             .context("time disappeared after definition")?
             .put_values(&self.times, netcdf::Extents::All)?;
+        self.put_windows(&mut file)?;
         for (name, _, _, values) in &grid.statics {
             file.variable_mut(name)
                 .with_context(|| format!("{name} disappeared after definition"))?

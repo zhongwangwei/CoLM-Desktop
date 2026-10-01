@@ -2646,6 +2646,9 @@ pub struct HistorySession {
     gridded_names: Vec<&'static str>,
     /// 本步要写的那条记录的预聚合值（[`Self::stage_gridded`]），写记录时放进缓冲。
     staged: Vec<(&'static str, Vec<f64>)>,
+    /// `DEF_USE_TRACER`（网格写出）：步长 [s]。打开时每条记录多写窗口变量，并另写
+    /// 示踪物 history 文件（见 [`Self::with_tracer_history`]）。
+    tracer_time_step_seconds: Option<f64>,
 }
 
 /// 多 patch 时每个累加器只写自己那一格；单 patch 一次写全部（缓冲区只有一格）。
@@ -2751,6 +2754,7 @@ impl HistorySession {
             grid: None,
             gridded_names: Vec::new(),
             staged: Vec::new(),
+            tracer_time_step_seconds: None,
         })
     }
 
@@ -2766,6 +2770,20 @@ impl HistorySession {
             return Ok(None);
         };
         Ok((tick_of(end)? == record.write_at_tick).then(|| record.clone()))
+    }
+
+    /// `DEF_USE_TRACER`：主 history 多写 `history_window_seconds = nac*deltim` 与
+    /// `history_window_end_minutes`，并另写 `<case>_hist_tracer_<cdate>.nc`
+    /// （`MOD_Hist.F90:319-358`，只在 `HistForm == 'Gridded'` 时写窗口变量）。
+    pub fn with_tracer_history(mut self, time_step_seconds: Option<f64>) -> Result<Self> {
+        if time_step_seconds.is_some() {
+            ensure!(
+                self.grid.is_some(),
+                "the tracer history windows are only written for gridded history"
+            );
+        }
+        self.tracer_time_step_seconds = time_step_seconds;
+        Ok(self)
     }
 
     /// 本步那条记录里一个预聚合网格量的值；随本步的记录一起写进缓冲。
@@ -3553,6 +3571,9 @@ impl HistorySession {
                 buffer.declare(&["dz_lake"])?;
                 buffer.undeclare("lake_deficit");
             }
+            if self.tracer_time_step_seconds.is_some() {
+                buffer.enable_windows();
+            }
             self.open = Some((record.suffix.clone(), buffer));
         }
         let (_, buffer) = self.open.as_mut().expect("just opened");
@@ -3565,6 +3586,16 @@ impl HistorySession {
                 )
             })?,
         )?;
+        if let Some(deltim) = self.tracer_time_step_seconds {
+            // `history_window_seconds = max(nac,0)*deltim`；末时刻 `minutes_since_1900(idate)
+            // + mod(sec,60)/60`。
+            let steps = means.first().map_or(0, |means| means.steps);
+            let minutes = colm_hist::time::minutes_from_1900(end.year)
+                + (i64::from(end.julian_day) - 1) * 1440
+                + i64::from(end.seconds / 60);
+            let end_minutes = minutes as f64 + f64::from(end.seconds % 60) / 60.0;
+            buffer.set_window(record.record, steps as f64 * deltim, end_minutes)?;
+        }
         for (patch, means) in means.iter().enumerate() {
             if means_are_split(self.accumulators.len()) {
                 buffer.select_patch(Some(patch))?;
@@ -3618,6 +3649,12 @@ impl HistorySession {
             .directory
             .join(format!("{}_hist_{suffix}.nc", self.stem));
         buffer.write(&path)?;
+        if self.tracer_time_step_seconds.is_some() {
+            buffer.write_tracer_skeleton(
+                self.directory
+                    .join(format!("{}_hist_tracer_{suffix}.nc", self.stem)),
+            )?;
+        }
         Ok(path)
     }
 }

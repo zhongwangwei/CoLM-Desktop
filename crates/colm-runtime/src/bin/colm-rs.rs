@@ -378,21 +378,18 @@ fn run_spatial(
     );
     // 堤防、分汊、水库与漫滩回馈之间可以任意组合，也都可以与 LULCC 同开（漫滩回馈除外，
     // 上游自己拒绝，见上）。
-    for (field, unported) in [
-        (
-            "DEF_USE_TRACER",
-            logical_field(&document, "DEF_USE_TRACER")?,
-        ),
-        (
-            "DEF_UnitCatchment_regional",
-            logical_field(&document, "DEF_UnitCatchment_regional")?,
-        ),
-    ] {
-        ensure!(
-            !unported,
-            "{field} is not ported to the Rust river model; run this case with --engine fortran"
-        );
-    }
+    // 示踪物：开关本身（`DEF_TRACER_NUM = 0`）已移植 —— 宿主物理不变，只多写 history 窗口变量、
+    // 示踪物 history 文件与重启里的空示踪物事务；注册了示踪物的输运尚未移植。
+    let tracers = logical_field(&document, "DEF_USE_TRACER")?;
+    ensure!(
+        !tracers || integer_field(&document, "DEF_TRACER_NUM")? == 0,
+        "DEF_USE_TRACER with DEF_TRACER_NUM > 0 is not ported yet; run this case with --engine fortran"
+    );
+    ensure!(
+        !logical_field(&document, "DEF_UnitCatchment_regional")?,
+        "DEF_UnitCatchment_regional is not ported to the Rust river model; run this case with \
+         --engine fortran"
+    );
     let lulcc = logical_field(&document, "DEF_USE_LULCC")?;
     if lulcc {
         check_spatial_lulcc(&document, &config, arguments.land_cover)?;
@@ -822,7 +819,12 @@ fn run_spatial_segment(
             )?
             .with_patches(patch_count)?
             .with_grid(grid)
-            .with_gridded(&colm_runtime::river::history::GRIDDED_RIVER_VARIABLES),
+            .with_gridded(&colm_runtime::river::history::GRIDDED_RIVER_VARIABLES)
+            .with_tracer_history(
+                logical_field(document, "DEF_USE_TRACER")?
+                    .then(|| real_field(document, "DEF_simulation_time%timestep"))
+                    .transpose()?,
+            )?,
             river: river_writer,
             elements: ElementGroups::from_topology(&topology)?,
             files: Vec::new(),

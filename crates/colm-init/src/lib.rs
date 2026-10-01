@@ -225,7 +225,8 @@ pub use surface_data::{
     SinglePointUrbanData, UrbanLucyRawData,
 };
 pub use time_restart::{
-    append_time_hyperspectral_fields, write_time_restart, write_time_restart_block,
+    append_time_hyperspectral_fields, write_empty_land_tracer_transaction, write_time_restart,
+    write_time_restart_block,
     IrrigationFields, OzoneFields, PlantHydraulicFields, RestartDate, SnowAerosolFields,
     SnowSoilRestartFields, TimeHyperspectralFields, TimeLakeFields, TimePatchFields,
     TimeRadiationFields, TimeRestartDimensions, TimeRestartFile, TimeRestartInput,
