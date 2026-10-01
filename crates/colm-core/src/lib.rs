@@ -100,6 +100,7 @@ pub mod bgc_summary;
 pub mod bgc_trace;
 pub mod bgc_veg_struct;
 pub mod bgc_vertical_profile;
+pub mod bgc_wetland;
 pub mod bgc_zero_fluxes_generated;
 pub mod calendar;
 pub mod canopy_layer_profile;

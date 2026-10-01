@@ -3544,9 +3544,7 @@ impl HistorySession {
         for (patch, state) in states.iter_mut().enumerate() {
             if let Some(bgc) = state.bgc.as_deref_mut() {
                 if let Some(methane) = bgc.methane.as_deref() {
-                    let patch_type = tracer.patch_types[patch];
-                    let active = patch_type == 0 || patch_type == 2;
-                    bgc.methane_acc.accumulate(methane, active);
+                    bgc.methane_acc.accumulate(methane, tracer.patch_types[patch]);
                 }
             }
         }

@@ -65,7 +65,10 @@ impl BgcTemplate {
         load_arrays(&open(&patch_constant)?, &mut state, false)?;
         load_arrays(&open(&bgc_time_path(time)?)?, &mut state, false)?;
         // PFT 文件里还有物理 PFT 变量（`tleaf_p` 等），由 `crate::pft` 管，这里跳过。
-        load_arrays(&open(pft_time)?, &mut state, true)?;
+        // 没有 PFT 的站点（如纯湿地，`pft` 维为 0）上下游都不写时间 PFT 重启。
+        if npft > 0 {
+            load_arrays(&open(pft_time)?, &mut state, true)?;
+        }
         Ok(Self { initial: state })
     }
 

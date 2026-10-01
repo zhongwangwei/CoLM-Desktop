@@ -1525,17 +1525,29 @@ impl StandardLctRestartTemplate {
     }
 
     /// 装上 `DEF_USE_BGC` 的运行期（要求已经装好 PFT 子网格）。
+    /// 非土壤 patch 没有 PFT：BGC 状态只带 patch 级量，上游不对它跑 `bgc_driver`。
     pub fn with_bgc(mut self, bgc: crate::bgc_step::BgcRuntime) -> Result<Self> {
-        let pft = self
-            .pft
-            .as_ref()
-            .context("DEF_USE_BGC needs the PFT subgrid first")?;
-        ensure!(
-            pft.initial.columns.len() == bgc.initial.pft.leafc_p.len(),
-            "the BGC restart has {} PFTs, the PFT subgrid {}",
-            bgc.initial.pft.leafc_p.len(),
-            pft.initial.columns.len()
-        );
+        if self.patch_type == 0 {
+            let pft = self
+                .pft
+                .as_ref()
+                .context("DEF_USE_BGC needs the PFT subgrid first")?;
+            ensure!(
+                pft.initial.columns.len() == bgc.initial.pft.leafc_p.len(),
+                "the BGC restart has {} PFTs, the PFT subgrid {}",
+                bgc.initial.pft.leafc_p.len(),
+                pft.initial.columns.len()
+            );
+        } else {
+            ensure!(
+                bgc.initial.pft.leafc_p.is_empty(),
+                "a patch of type {} carries {} PFTs in the BGC restart",
+                self.patch_type,
+                bgc.initial.pft.leafc_p.len()
+            );
+        }
+        let mut bgc = bgc;
+        bgc.patch_type = self.patch_type;
         self.bgc = Some(bgc);
         Ok(self)
     }
@@ -1661,6 +1673,20 @@ impl StandardLctRestartTemplate {
             return Ok(false);
         };
         let (tlai, tsai) = lai.for_time(time)?;
+        // PFT/PC 构建（`DEF_USE_LCT` 关）里没有 PFT 子网格的 patch（湿地等）：`MOD_LAIReadin.F90:177-184`
+        // 直接取站点逐月值、不做 `fveg0` 后处理；LAI 反馈开着时只换 `tsai`。
+        if (self.physics.use_pft || self.physics.use_pc) && self.pft.is_none() && !lai.is_urban() {
+            let feedback = self.physics.bgc.is_some_and(|bgc| bgc.laifeedback);
+            state.energy.temporal_canopy = colm_core::TemporalCanopy {
+                leaf_area_index: if feedback {
+                    state.energy.temporal_canopy.leaf_area_index
+                } else {
+                    tlai
+                },
+                stem_area_index: tsai,
+            };
+            return Ok(true);
+        }
         if lai.is_urban() {
             // `UrbanLAI_readin`：直接赋值，`LAI_readin` 的地类后处理对 URBAN 是 `CYCLE`。
             state.energy.temporal_canopy = colm_core::TemporalCanopy {

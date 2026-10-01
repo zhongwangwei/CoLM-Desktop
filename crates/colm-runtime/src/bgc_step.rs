@@ -504,6 +504,9 @@ pub struct BgcRuntime {
     pub irrigation: Option<colm_core::IrrigationSettings>,
     /// CH4 provider（注册了 CH4 示踪物时）：配置与本 patch 的静态量。
     pub methane: Option<(crate::methane::MethaneSetup, colm_core::methane::driver::MethaneSite)>,
+    /// 本 patch 的 `patchtype`（装到模板上时写入）：只有土壤 patch（0）跑 `bgc_driver`
+    /// （`CoLMDRIVER.F90:237-244`），其余 patch 的 BGC 状态只随步首的数据更新。
+    pub patch_type: i32,
     trace: Mutex<Option<TraceWriter>>,
 }
 
@@ -531,6 +534,7 @@ impl Clone for BgcRuntime {
             deltim: self.deltim,
             irrigation: self.irrigation,
             methane: self.methane.clone(),
+            patch_type: self.patch_type,
             // 追踪文件只属于第一个实例。
             trace: Mutex::new(None),
         }
@@ -590,6 +594,7 @@ impl BgcRuntime {
             deltim,
             irrigation: None,
             methane: None,
+            patch_type: 0,
             trace: Mutex::new(TraceWriter::from_env()?),
         })
     }
@@ -648,6 +653,54 @@ impl BgcRuntime {
                 bgc.patch.hdm_lf[0] = fire.hdm(idate[0])?;
             }
         }
+        if self.patch_type != 0 {
+            // 湿地 CH4（`CoLMDRIVER.F90:245-247`）：`tracer_wetland_decomp` 借土壤分解级联算逐层
+            // 异养呼吸，`tracer_soil_step` 跑甲烷，finalize 按这一步的分解通量直接推进分解池。
+            if let (2, Some((setup, site))) = (self.patch_type, &self.methane) {
+                anyhow::ensure!(
+                    !(self.switches.sasu || self.switches.diag_matrix),
+                    "wetland methane with DEF_USE_SASU/DEF_USE_DiagMatrix is not ported to the \
+                     Rust runtime yet"
+                );
+                let physics = self.wetland_physics(idate, deltim, state);
+                colm_core::bgc_wetland::wetland_decomp(&mut bgc, &physics, self.switches, deltim);
+                let mut patch = bgc
+                    .methane
+                    .take()
+                    .context("a methane patch needs its methane state")?;
+                let arrays = crate::methane::HostArrays::from_state(state, output)?;
+                let host = crate::methane::host_inputs(
+                    &arrays,
+                    idate,
+                    deltim,
+                    state,
+                    output,
+                    forcing,
+                    partial_pressures_pa,
+                    colm_core::methane::bgc_link::PftInputs::default(),
+                    setup.dynamic_wetland,
+                );
+                colm_core::methane::driver::soil_step(
+                    &setup.params,
+                    setup.scheme,
+                    site,
+                    &host,
+                    &mut bgc,
+                    &mut patch,
+                )?;
+                // finalize 的湿地前半：甲烷读完这一步的池（`cellorg`）之后才推进分解池。
+                colm_core::bgc_wetland::wetland_state_update(
+                    &mut bgc,
+                    &physics,
+                    &self.pft,
+                    self.switches,
+                    deltim,
+                );
+                bgc.methane = Some(patch);
+            }
+            state.bgc = Some(bgc);
+            return Ok(());
+        }
         let mut physics = self.physics(idate, deltim, forcing, state, output, &bgc)?;
         {
             let mut trace = self.trace.lock().expect("trace lock");
@@ -695,7 +748,12 @@ impl BgcRuntime {
                 output,
                 forcing,
                 partial_pressures_pa,
-                &physics.pftfrac,
+                colm_core::methane::bgc_link::PftInputs {
+                    class: &physics.pftclass,
+                    fraction: &physics.pftfrac,
+                    lai: &physics.lai_p,
+                    irrig_method: &physics.irrig_method_p,
+                },
                 setup.dynamic_wetland,
             );
             colm_core::methane::driver::soil_step(
@@ -732,6 +790,37 @@ impl BgcRuntime {
         }
         state.bgc = Some(bgc);
         Ok(())
+    }
+
+    /// 湿地 patch（没有 PFT）分解级联与非植被汇总要的那部分物理量。
+    fn wetland_physics(
+        &self,
+        idate: [i32; 3],
+        deltim: f64,
+        state: &StandardLctSnowSoilState,
+    ) -> BgcPhysics {
+        let nl = self.initial.dims.nl_soil;
+        let soil = |name: &str| {
+            self.statics
+                .soil
+                .iter()
+                .find(|(field, _)| *field == name)
+                .map_or_else(|| vec![MISSING; nl], |(_, values)| values.clone())
+        };
+        BgcPhysics {
+            idate,
+            patchclass: self.statics.patchclass,
+            z_soi: self.statics.z_soi.clone(),
+            dz_soi: self.statics.dz_soi.clone(),
+            zi_soi: self.statics.zi_soi.clone(),
+            BD_all: soil("BD_all"),
+            t_soisno: state.soil_temperature_k[..nl].to_vec(),
+            smp: state.soil_water.matric_potential_mm[..nl].to_vec(),
+            deltim,
+            smpmax_hr: self.statics.smpmax_hr,
+            smpmin_hr: self.statics.smpmin_hr,
+            ..BgcPhysics::default()
+        }
     }
 
     fn physics(

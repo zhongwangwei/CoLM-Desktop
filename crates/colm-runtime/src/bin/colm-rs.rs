@@ -1646,7 +1646,8 @@ fn assemble_patch(
             .context("cannot assemble the snow-free standard LCT template")?
     };
     // `DEF_USE_PFT`：土壤 patch 的 PFT 子网格来自同目录的 `*_restart_pft_*` 两份重启。
-    if template.physics.use_pft {
+    // 只有土壤 patch 有 PFT（`patch_pft_s/e`）；湿地等其余 patch 在 PFT 模式下仍走 patch 级 LAI。
+    if template.physics.use_pft && template.patch_type == 0 {
         template = template
             .with_pft(
                 &colm_runtime::pft::pft_restart_path(&files.constant)?,
@@ -1685,6 +1686,7 @@ fn assemble_patch(
                 &soil("bsw")?,
                 &soil("porsl")?,
                 bgc.initial.constants.organic_max,
+                template.physics.wetland_water_capacity_mm,
             )?;
             // `ch4_reactive_read_restart`：时间重启里有甲烷事务就续跑，否则冷启动。
             let time = colm_init::RestartFile::open(&files.time)?;

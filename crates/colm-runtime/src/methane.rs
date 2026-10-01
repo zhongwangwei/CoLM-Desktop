@@ -160,7 +160,7 @@ pub fn host_inputs<'a>(
     output: &colm_core::StandardLctSnowSoilOutput,
     forcing: &colm_core::RuntimeForcing,
     partial_pressures_pa: (f64, f64),
-    pftfrac: &'a [f64],
+    pft: colm_core::methane::bgc_link::PftInputs<'a>,
     dynamic_wetland: bool,
 ) -> HostInputs<'a> {
     let leaf = &output.energy.leaf;
@@ -182,13 +182,13 @@ pub fn host_inputs<'a>(
         snowdp: state.snow.depth_m,
         etr: leaf.transpiration_kg_m2_s,
         wdsrf: state.soil_water.surface_water_mm,
-        wetwat: 0.0,
+        wetwat: state.soil_water.wetland_water_mm,
         smp: &arrays.smp,
         lai: state.energy.canopy.leaf_area_index,
         sai: state.energy.canopy.stem_area_index,
         rootr: &arrays.rootr,
         frcsat: output.water.soil.saturated_fraction,
-        pftfrac,
+        pft,
         dynamic_wetland,
     }
 }
@@ -207,6 +207,7 @@ pub fn site(
     bsw: &[f64],
     porsl: &[f64],
     organic_max: f64,
+    wetwatmax: f64,
 ) -> Result<MethaneSite> {
     let take = |values: &[f64], name: &str| -> Result<[f64; 10]> {
         values
@@ -226,6 +227,7 @@ pub fn site(
         bsw: take(bsw, "bsw")?,
         porsl: take(porsl, "porsl")?,
         organic_max,
+        wetwatmax,
     })
 }
 
@@ -317,6 +319,8 @@ pub fn write_restart(
     let p = |i: usize| patches[i].0;
     let soil = |i: usize| &p(i).components[COMP_SOIL];
     let rice = |i: usize| &p(i).components[COMP_RICE];
+    // patch 级聚合状态：土壤 patch 上与土壤分量相同，湿地上是唯一在推进的那份。
+    let agg = |i: usize| &p(i).aggregate;
     let last = |i: usize| p(i).last.unwrap_or_default();
     // 聚合量（`aggregate_methane_columns`，土壤 patch 取土壤分量）。冷启动尚未走步时取分配时的值。
     let agg_layers =
@@ -333,12 +337,12 @@ pub fn write_restart(
     scalar(&mut file, "ch4_grnd_methane_cond", &|i| {
         p(i).grnd_methane_cond
     })?;
-    layered(&mut file, "ch4_conc_o2_unsat", &|i| soil(i).conc_o2_unsat)?;
-    layered(&mut file, "ch4_conc_o2_sat", &|i| soil(i).conc_o2_sat)?;
+    layered(&mut file, "ch4_conc_o2_unsat", &|i| agg(i).conc_o2_unsat)?;
+    layered(&mut file, "ch4_conc_o2_sat", &|i| agg(i).conc_o2_sat)?;
     layered(&mut file, "ch4_conc_ch4_unsat", &|i| {
-        soil(i).conc_methane_unsat
+        agg(i).conc_methane_unsat
     })?;
-    layered(&mut file, "ch4_conc_ch4_sat", &|i| soil(i).conc_methane_sat)?;
+    layered(&mut file, "ch4_conc_ch4_sat", &|i| agg(i).conc_methane_sat)?;
     layered(&mut file, "ch4_conc_o2_unsat_soil", &|i| {
         soil(i).conc_o2_unsat
     })?;
@@ -383,7 +387,7 @@ pub fn write_restart(
         scalar(&mut file, name, &|_| 0.0)?;
     }
     scalar(&mut file, "ch4_lake_liquid_fraction_prev", &|_| SPVAL)?;
-    layered(&mut file, "ch4_layer_sat_lag", &|i| soil(i).layer_sat_lag)?;
+    layered(&mut file, "ch4_layer_sat_lag", &|i| agg(i).layer_sat_lag)?;
     layered(&mut file, "ch4_layer_sat_lag_soil", &|i| {
         soil(i).layer_sat_lag
     })?;
@@ -405,7 +409,7 @@ pub fn write_restart(
         ("tempavg_finrw", |a| a.tempavg_finrw),
     ];
     for (name, f) in annual {
-        scalar(&mut file, &format!("ch4_{name}"), &|i| f(&soil(i).annual))?;
+        scalar(&mut file, &format!("ch4_{name}"), &|i| f(&agg(i).annual))?;
     }
     for (name, f) in annual {
         scalar(&mut file, &format!("ch4_{name}_soil"), &|i| {
@@ -415,8 +419,8 @@ pub fn write_restart(
             f(&rice(i).annual)
         })?;
     }
-    scalar(&mut file, "ch4_fsat_bef", &|i| soil(i).fsat_bef)?;
-    scalar(&mut file, "ch4_finundated_lag", &|i| soil(i).finundated_lag)?;
+    scalar(&mut file, "ch4_fsat_bef", &|i| agg(i).fsat_bef)?;
+    scalar(&mut file, "ch4_finundated_lag", &|i| agg(i).finundated_lag)?;
     scalar(&mut file, "ch4_fsat_bef_soil", &|i| soil(i).fsat_bef)?;
     scalar(&mut file, "ch4_fsat_bef_rice", &|i| rice(i).fsat_bef)?;
     scalar(&mut file, "ch4_finundated_lag_soil", &|i| {
@@ -678,6 +682,27 @@ pub fn read_restart(
             &[a.annavg_finrw, c.fsat_bef, c.finundated_lag],
             &bad_fraction,
         );
+    }
+    // patch 级聚合状态（湿地直接推进它；土壤 patch 上它与土壤分量相同）。
+    {
+        let a = &mut restarted.aggregate;
+        a.conc_o2_unsat = layers("ch4_conc_o2_unsat")?;
+        a.conc_o2_sat = layers("ch4_conc_o2_sat")?;
+        a.conc_methane_unsat = layers("ch4_conc_ch4_unsat")?;
+        a.conc_methane_sat = layers("ch4_conc_ch4_sat")?;
+        a.layer_sat_lag = layers("ch4_layer_sat_lag")?;
+        let n = &mut a.annual;
+        n.annavg_agnpp = scalar("ch4_annavg_agnpp")?;
+        n.annavg_bgnpp = scalar("ch4_annavg_bgnpp")?;
+        n.annavg_somhr = scalar("ch4_annavg_somhr")?;
+        n.annavg_finrw = scalar("ch4_annavg_finrw")?;
+        n.tempavg_agnpp = scalar("ch4_tempavg_agnpp")?;
+        n.tempavg_bgnpp = scalar("ch4_tempavg_bgnpp")?;
+        n.annsum_counter = scalar("ch4_annsum_counter")?;
+        n.tempavg_somhr = scalar("ch4_tempavg_somhr")?;
+        n.tempavg_finrw = scalar("ch4_tempavg_finrw")?;
+        a.fsat_bef = scalar("ch4_fsat_bef")?;
+        a.finundated_lag = scalar("ch4_finundated_lag")?;
     }
     restarted.rice_fraction_prev = scalar("ch4_rice_fraction_prev")?;
     check(&[restarted.rice_fraction_prev], &unit);

@@ -1,14 +1,15 @@
-//! `methane_driver` 的土壤 patch 路径（`MOD_Tracer_Reactive_Methane_Driver` +
+//! `methane_driver` 的土壤与湿地 patch 路径（`MOD_Tracer_Reactive_Methane_Driver` +
 //! `MOD_Tracer_Reactive_Methane_Impl:ch4_impl_soil_step`），以及 `core` history 累加。
 //!
 //! 土壤 patch 的水稻比例为 0：只跑土壤分量，两分量合并（`aggregate_methane_columns`）在
-//! `ws = 1, wr = 0` 下对每个量都是恒等，所以直接取土壤分量的结果。水稻、湿地、湖未移植。
+//! `ws = 1, wr = 0` 下对每个量都是恒等，所以聚合状态就是土壤分量。湿地 patch 不分分量，直接用
+//! patch 级聚合状态调 `methane`，分量状态停在冷启动值。水稻、湖未移植。
 
 use anyhow::{ensure, Result};
 
 use super::bgc_link::{self, BgcInputs};
 use super::column::{self, ColumnInput, ColumnResult, ComponentState};
-use super::config::{MethaneParameters, COMP_SOIL};
+use super::config::{MethaneParameters, COMP_RICE, COMP_SOIL};
 use super::physics::{self, sn, MAXSNL, NL_SOIL, SOISNO, SPVAL};
 use crate::bgc_state::BgcState;
 
@@ -16,6 +17,8 @@ use crate::bgc_state::BgcState;
 #[derive(Debug, Clone, PartialEq)]
 pub struct MethanePatch {
     pub components: [ComponentState; 2],
+    /// patch 级聚合状态（`conc_*_unsat/sat(i)`、`layer_sat_lag(i)`、年累加、`fsat_bef(i)` 等）。
+    pub aggregate: ComponentState,
     pub rice_fraction_prev: f64,
     pub f_h2osfc: f64,
     pub lake_soilc: [f64; NL_SOIL],
@@ -33,6 +36,7 @@ impl MethanePatch {
     pub fn cold(params: &MethaneParameters) -> Self {
         Self {
             components: [ComponentState::cold(), ComponentState::cold()],
+            aggregate: ComponentState::cold(),
             rice_fraction_prev: 0.0,
             f_h2osfc: 0.0,
             lake_soilc: [0.0; NL_SOIL],
@@ -60,6 +64,8 @@ pub struct MethaneSite {
     pub bsw: [f64; NL_SOIL],
     pub porsl: [f64; NL_SOIL],
     pub organic_max: f64,
+    /// `wetwatmax`（湿地水桶容量，`enable_wetwat_finundated_override` 用）。
+    pub wetwatmax: f64,
 }
 
 /// 一步里来自宿主（能量、水、强迫）的量。
@@ -88,7 +94,8 @@ pub struct HostInputs<'a> {
     pub sai: f64,
     pub rootr: &'a [f64; NL_SOIL],
     pub frcsat: f64,
-    pub pftfrac: &'a [f64],
+    /// 逐 PFT 的类别、面积份额、`lai_p`（`bgc_driver` 之后）与 `irrig_method_p`；湿地为空。
+    pub pft: bgc_link::PftInputs<'a>,
     pub dynamic_wetland: bool,
 }
 
@@ -163,15 +170,20 @@ pub fn soil_step(
 ) -> Result<()> {
     let m = &params.methane;
     ensure!(
-        site.patchtype == 0,
-        "only soil-patch methane is ported to the Rust runtime yet"
+        site.patchtype == 0 || site.patchtype == 2,
+        "only soil and wetland methane are ported to the Rust runtime yet"
     );
-    ensure!(
-        !m.enable_rice_paddy,
-        "rice-paddy methane is not ported to the Rust runtime yet"
-    );
+    let wetland = site.patchtype == 2;
+    // `ch4_impl_soil_step`：稻田模式下土壤 patch 的稻田 PFT 份额超过 `PADDY_RICE_FRAC_MIN` 才算稻田，
+    // 那时即使 `only_wetland` 也要跑。
+    let rice_pft_frac = if m.enable_rice_paddy && site.patchtype == 0 {
+        bgc_link::paddy_rice_fraction(&host.pft)
+    } else {
+        0.0
+    };
+    let is_rice_paddy = rice_pft_frac > bgc_link::PADDY_RICE_FRAC_MIN;
     let run = if m.only_wetland {
-        site.patchtype == 2
+        site.patchtype == 2 || is_rice_paddy
     } else {
         site.patchtype == 2 || site.patchtype == 0
     };
@@ -185,24 +197,105 @@ pub fn soil_step(
     let forc_pbot = sanitize(host.forc_pbot, |x| x <= 0.0, 101325.0);
     let forc_po2m = sanitize(host.forc_po2m, |x| x <= 0.0, 0.2095 * forc_pbot);
     let forc_pco2m = sanitize(host.forc_pco2m, |x| x < 0.0, 415.0e-6 * forc_pbot);
-    let inputs: BgcInputs =
-        bgc_link::patch_inputs(m, bgc, &site.rootfr, host.pftfrac, &site.dz_soi)?;
-    let biome_f = bgc_link::biome_f_methane(m, site.patchtype, site.dlat, inputs.cellorg[0]);
-    let biome_redox = bgc_link::biome_redoxlag(m, site.patchtype, site.dlat, inputs.cellorg[0]);
-    // 水稻比例 0：`repartition_methane_column_state(i, rice_fraction_prev, 0)` 在上一步也是 0 时什么都不做。
-    ensure!(
-        patch.rice_fraction_prev.abs() <= 1.0e-14,
-        "a methane patch with a rice fraction is not ported to the Rust runtime yet"
-    );
-    let comp = &mut patch.components[COMP_SOIL];
-    // `run_methane_component`：列总量由本分量的两相浓度与 `fsat_bef` 拼出（只给收支检查用）。
+    let mut inputs: BgcInputs =
+        bgc_link::patch_inputs(m, bgc, &site.rootfr, host.pft.fraction, &site.dz_soi)?;
+    // 湿地植被代理（`get_wetland_veg_proxy`）：没有 PFT，LAI/NPP/根廓线按气候带给，`crootfr` 与根吸水
+    // 廓线都换成代理廓线，根呼吸取 `max(rr, 0.5·bgnpp)`；通气组织覆盖在这条路径上生效。
+    let mut lai = host.lai;
+    let mut rootfr = site.rootfr;
+    let mut rootr = *host.rootr;
+    let mut aere_override = None;
+    if wetland {
+        let proxy = bgc_link::wetland_veg_proxy(site.dlat, inputs.cellorg[0], host.lai);
+        lai = proxy.lai;
+        inputs.annsum_npp = proxy.annsum_npp;
+        inputs.agnpp = proxy.agnpp;
+        inputs.bgnpp = proxy.bgnpp;
+        rootfr = proxy.rootfr;
+        inputs.crootfr = proxy.rootfr;
+        rootr = proxy.rootfr;
+        inputs.rr = inputs.rr.max(0.5 * inputs.bgnpp);
+        aere_override = Some(proxy.aere);
+    }
+    // 稻田（`methane_driver` 开头）：稻田参数在生长季生效，收获后排水期（`rice_drain_window_days`）内仍生效。
+    let rice_pft_frac = rice_pft_frac.max(0.0).min(1.0);
+    let rice_live = is_rice_paddy && bgc_link::is_paddy_rice_live(bgc, &host.pft);
+    let mut rice_parameter_active = is_rice_paddy && rice_pft_frac > 0.0;
+    if rice_parameter_active && !rice_live {
+        let dsh = bgc_link::rice_days_since_harvest(bgc, &host.pft, host.idate[1], host.idate[0]);
+        rice_parameter_active = dsh >= 0 && f64::from(dsh) < m.rice_drain_window_days;
+    }
+    // 土壤 patch 的两个分量：按稻田份额整 patch 划给水稻或土壤分量。
+    let mut component = COMP_SOIL;
+    let mut veg = None;
+    if !wetland {
+        let mut rice_weight = if is_rice_paddy { rice_pft_frac } else { 0.0 };
+        rice_weight = rice_weight.max(0.0).min(1.0);
+        if rice_weight <= 1.0e-14 {
+            rice_weight = 0.0;
+        }
+        if rice_weight >= 1.0 - 1.0e-14 {
+            rice_weight = 1.0;
+        }
+        if is_rice_paddy {
+            let v = bgc_link::component_veg_inputs(bgc, &host.pft, &site.rootfr, &site.dz_soi);
+            ensure!(
+                !(v.ready.iter().any(|&r| r)
+                    && (v.fraction[COMP_RICE] - rice_weight).abs() > 1.0e-8),
+                "rice methane component fraction disagrees with PFT bridge"
+            );
+            veg = Some(v);
+        }
+        // 单点作物每个 patch 只有一个 PFT，份额只会是 0 或 1；两分量都跑再按份额合并的 FMA 形状没核对。
+        ensure!(
+            rice_weight == 0.0 || rice_weight == 1.0,
+            "mixed soil/rice methane patches (rice fraction {rice_weight}) are not ported to the \
+             Rust runtime yet"
+        );
+        repartition(patch, patch.rice_fraction_prev, rice_weight);
+        patch.rice_fraction_prev = rice_weight;
+        if rice_weight == 1.0 {
+            component = COMP_RICE;
+        }
+    }
+    let rice_column = component == COMP_RICE;
+    // `run_methane_component`：分量就绪时用分量的植被输入；稻田分量在生长季用稻田通气组织几何。
+    if let Some(v) = veg.filter(|v| v.ready[component]) {
+        lai = v.lai[component];
+        inputs.crootfr = v.crootfr[component];
+        inputs.rr = v.rr[component];
+        inputs.agnpp = v.agnpp[component];
+        inputs.bgnpp = v.bgnpp[component];
+        inputs.annsum_npp = v.annsum_npp[component];
+    }
+    if !wetland {
+        aere_override = (rice_column && rice_live).then(|| bgc_link::rice_veg_proxy(lai, 1.0));
+    }
+    let rice = bgc_link::RiceWeight {
+        is_rice_paddy: rice_column,
+        fraction: if rice_column { 1.0 } else { 0.0 },
+        parameter_active: rice_column && rice_parameter_active,
+    };
+    let biome_f = bgc_link::biome_f_methane(m, site.patchtype, site.dlat, inputs.cellorg[0], rice);
+    let biome_redox =
+        bgc_link::biome_redoxlag(m, site.patchtype, site.dlat, inputs.cellorg[0], rice);
+    // 湿地：上一步的 `totcol_methane(i)` 就是步首列总量；土壤（`run_methane_component`）：由本分量
+    // 的两相浓度与 `fsat_bef` 拼出（只给收支检查用）。
+    let previous_totcol = patch.totcol_methane;
+    let comp = if wetland {
+        &mut patch.aggregate
+    } else {
+        &mut patch.components[component]
+    };
     let fsat = comp.fsat_bef;
     let col_sum = |x: &[f64; NL_SOIL]| {
         (0..NL_SOIL).fold(0.0f64, |acc, k| x[k].mul_add(dz[sn(k as i32 + 1)], acc))
     };
     let totcol_unsat = col_sum(&comp.conc_methane_unsat);
     let totcol_sat = col_sum(&comp.conc_methane_sat);
-    let totcol_before = if (0.0..=1.0).contains(&fsat) {
+    let totcol_before = if wetland {
+        previous_totcol
+    } else if (0.0..=1.0).contains(&fsat) {
         fsat.mul_add(totcol_sat, (1.0 - fsat) * totcol_unsat)
     } else {
         0.5 * (totcol_sat + totcol_unsat)
@@ -228,7 +321,7 @@ pub fn soil_step(
             forc_po2m,
             forc_pco2m,
             zwt: host.zwt,
-            rootfr: &site.rootfr,
+            rootfr: &rootfr,
             snowdp: host.snowdp,
             etr: host.etr,
             wdsrf: host.wdsrf,
@@ -236,9 +329,9 @@ pub fn soil_step(
             bsw: &site.bsw,
             smp: host.smp,
             porsl: &site.porsl,
-            lai: host.lai,
+            lai,
             sai: host.sai,
-            rootr: host.rootr,
+            rootr: &rootr,
             annsum_npp: inputs.annsum_npp,
             rr: inputs.rr,
             frcsat: host.frcsat,
@@ -263,7 +356,8 @@ pub fn soil_step(
             scheme,
             biome_f_methane: Some(biome_f),
             biome_redoxlag: Some(biome_redox),
-            aere_override: None,
+            aere_override,
+            wetwatmax: site.wetwatmax,
             totcol_before,
             lake_soilc: &patch.lake_soilc,
         },
@@ -272,8 +366,11 @@ pub fn soil_step(
     bgc_link::finalize(bgc, site.patchtype, result.merged.net, &site.dz_soi)?;
     patch.totcol_methane = result.merged.totcol;
     patch.grnd_methane_cond = result.merged.grnd_cond;
-    patch.soil_zwt = host.zwt;
-    patch.rice_fraction_prev = 0.0;
+    if !wetland {
+        // `aggregate_methane_columns`：份额 0/1 时聚合逐位等于跑过的那个分量。
+        patch.soil_zwt = host.zwt;
+        patch.aggregate = patch.components[component];
+    }
     // 水稻分量不跑，状态保持。
     patch.last = Some(result);
     Ok(())
@@ -337,9 +434,11 @@ fn acc(sum: &mut f64, value: f64) {
 }
 
 impl CoreAccumulator {
-    /// 一步的累加。`active` 是 `methane_active_mask`（土壤/湿地 patch）。没跑过甲烷的 patch
-    /// 用冷启动时的状态值（`allocate_methane_state` 的 0 与默认值）。
-    pub fn accumulate(&mut self, patch: &MethanePatch, active: bool) {
+    /// 一步的累加。`patch_type` 决定 `methane_active_mask`（土壤/湿地 patch）与通量归到哪一类：
+    /// 湿地 patch 的 `methane_surf_flux_wetland` 是总通量、土壤类为 0；土壤 patch 反之。没跑过
+    /// 甲烷的 patch 用冷启动时的状态值（`allocate_methane_state` 的 0 与默认值）。
+    pub fn accumulate(&mut self, patch: &MethanePatch, patch_type: i32) {
+        let active = patch_type == 0 || patch_type == 2;
         let r = patch.last.unwrap_or_default();
         let g = &r.merged;
         acc(&mut self.surf_flux_tot, g.surf_flux);
@@ -351,17 +450,22 @@ impl CoreAccumulator {
         acc(&mut self.prod_tot, g.prod_tot);
         acc(&mut self.oxid_tot, g.oxid_tot);
         acc(&mut self.totcol, patch.totcol_methane);
-        acc(&mut self.surf_flux_wetland, 0.0);
-        acc(
-            &mut self.surf_flux_soil,
-            if patch.last.is_some() {
-                g.surf_flux
-            } else {
-                0.0
-            },
-        );
+        let stepped = if patch.last.is_some() {
+            g.surf_flux
+        } else {
+            0.0
+        };
+        // 土壤 patch 按 `aggregate_methane_columns` 分到土壤/水稻两类：`ws·flux` 与 `wr·flux`。
+        let wr = patch.rice_fraction_prev;
+        let (wetland, soil, rice) = if patch_type == 2 {
+            (stepped, 0.0, 0.0)
+        } else {
+            (0.0, (1.0 - wr) * stepped, wr * stepped)
+        };
+        acc(&mut self.surf_flux_wetland, wetland);
+        acc(&mut self.surf_flux_soil, soil);
         acc(&mut self.surf_flux_lake, 0.0);
-        acc(&mut self.surf_flux_rice, 0.0);
+        acc(&mut self.surf_flux_rice, rice);
         acc(&mut self.surf_flux_tot_lake, 0.0);
         let valid = |x: f64| !x.is_nan() && x.abs() < 0.5 * SPVAL.abs();
         if active && valid(patch.totcol_methane) {
@@ -491,4 +595,99 @@ impl CoreAccumulator {
             ),
         ]
     }
+}
+
+/// `repartition_methane_column_state`：稻田份额从 `old` 变到 `new` 时，在两个分量之间按面积守恒
+/// 重分配两相浓度（新增的那部分取另一分量的面积加权平均）与各标量记忆。
+///
+/// GIMPLE（`repartition_phase_state`/`repartition_scalar`）：内层 `FMA(sat, h, (1-h)·unsat)`，
+/// 外层 `FMA(inner_old, old, delta·inner_other)/new`（反向是 `FMA(1-old, inner, delta·other)/(1-new)`）。
+fn repartition(patch: &mut MethanePatch, old: f64, new: f64) {
+    let rold = old.max(0.0).min(1.0);
+    let rnew = new.max(0.0).min(1.0);
+    if (rnew - rold).abs() <= 1.0e-14 {
+        return;
+    }
+    let [soil, rice] = &mut patch.components;
+    let fraction = |x: f64| {
+        if x.is_nan() || x.abs() >= 0.5 * SPVAL.abs() || !(0.0..=1.0).contains(&x) {
+            0.5
+        } else {
+            x
+        }
+    };
+    let hs = fraction(soil.fsat_bef);
+    let hr = fraction(rice.fsat_bef);
+    let phase = |su: &mut [f64; NL_SOIL],
+                 ss: &mut [f64; NL_SOIL],
+                 ru: &mut [f64; NL_SOIL],
+                 rs: &mut [f64; NL_SOIL]| {
+        for j in 0..NL_SOIL {
+            let s_mix = |a: f64, b: f64| b.mul_add(hs, (1.0 - hs) * a);
+            let r_mix = |a: f64, b: f64| b.mul_add(hr, (1.0 - hr) * a);
+            if rnew > rold {
+                let delta = rnew - rold;
+                let mixed = r_mix(ru[j], rs[j]).mul_add(rold, delta * s_mix(su[j], ss[j])) / rnew;
+                ru[j] = mixed;
+                rs[j] = mixed;
+            } else {
+                let delta = rold - rnew;
+                let mixed = (1.0 - rold).mul_add(s_mix(su[j], ss[j]), delta * r_mix(ru[j], rs[j]))
+                    / (1.0 - rnew);
+                su[j] = mixed;
+                ss[j] = mixed;
+            }
+        }
+    };
+    phase(
+        &mut soil.conc_o2_unsat,
+        &mut soil.conc_o2_sat,
+        &mut rice.conc_o2_unsat,
+        &mut rice.conc_o2_sat,
+    );
+    phase(
+        &mut soil.conc_methane_unsat,
+        &mut soil.conc_methane_sat,
+        &mut rice.conc_methane_unsat,
+        &mut rice.conc_methane_sat,
+    );
+    let scalar = |s: &mut f64, r: &mut f64| {
+        let valid = |x: f64| !x.is_nan() && x.abs() < 0.5 * SPVAL.abs();
+        if rnew > rold {
+            if !valid(*s) {
+                return;
+            }
+            if !valid(*r) || rold <= 1.0e-14 {
+                *r = *s;
+            } else {
+                let delta = rnew - rold;
+                *r = rold.mul_add(*r, *s * delta) / rnew;
+            }
+        } else {
+            if !valid(*r) {
+                return;
+            }
+            if !valid(*s) || rold >= 1.0 - 1.0e-14 {
+                *s = *r;
+            } else {
+                let delta = rold - rnew;
+                *s = s.mul_add(1.0 - rold, delta * *r) / (1.0 - rnew);
+            }
+        }
+    };
+    for j in 0..NL_SOIL {
+        scalar(&mut soil.layer_sat_lag[j], &mut rice.layer_sat_lag[j]);
+    }
+    let (sa, ra) = (&mut soil.annual, &mut rice.annual);
+    scalar(&mut sa.annavg_agnpp, &mut ra.annavg_agnpp);
+    scalar(&mut sa.annavg_bgnpp, &mut ra.annavg_bgnpp);
+    scalar(&mut sa.annavg_somhr, &mut ra.annavg_somhr);
+    scalar(&mut sa.annavg_finrw, &mut ra.annavg_finrw);
+    scalar(&mut sa.tempavg_agnpp, &mut ra.tempavg_agnpp);
+    scalar(&mut sa.tempavg_bgnpp, &mut ra.tempavg_bgnpp);
+    scalar(&mut sa.annsum_counter, &mut ra.annsum_counter);
+    scalar(&mut sa.tempavg_somhr, &mut ra.tempavg_somhr);
+    scalar(&mut sa.tempavg_finrw, &mut ra.tempavg_finrw);
+    scalar(&mut soil.fsat_bef, &mut rice.fsat_bef);
+    scalar(&mut soil.finundated_lag, &mut rice.finundated_lag);
 }

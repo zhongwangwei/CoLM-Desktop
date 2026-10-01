@@ -27618,3 +27618,56 @@ unitcat history 开分汊时逐示踪物多写 `f_trc_bifout_*`（`a_trc_bifout/
 单元测试 `tracer_sidecar_tests.rs`：44 项往返与盘上顺序、描述符不符拒绝、区间已关不读。
 
 **回归**：单点全量 `regress_all`（默认 + CROP 内核）154 个算例一致；同位素 10 个（`COLM_RS_ALLOW_UNFORCED_FRACTIONATION=1`，参照由 kiso 内核生成）一致；`nn` 的 `hist(0)` 是 `DEF_HIST_FREQ = 'none'`。`regress_all.sh` 把续跑算例与需要 `kernels/latlon` 的空间示踪物算例移进 SKIP。
+
+## 第 494 轮：示踪物 T4b —— 湿地甲烷（含"BGC + 湿地 patch"的宿主缺口）
+
+**宿主缺口先补**：Rust 的 BGC/PFT 构建遇到非土壤 patch 直接拒绝装配（"DEF_USE_PFT gives PFTs only to soil patches"），不带 CH4 的 BGC + 湿地站点也跑不了。上游的做法：
+- 非土壤 patch 没有 PFT：`pft` 维为 0，两边都不写时间 PFT 重启。
+- BGC 状态照样随 patch 存、照样写 BGC 重启，但只有 `patchtype == 0` 跑 `bgc_driver`（`CoLMDRIVER.F90:237-244`）；步首的 ndep/硝化/闪电数据更新对所有 patch 都做。
+- 改法：`with_pft` 只给土壤 patch，`with_bgc` 对非土壤 patch 要求 0 个 PFT，`BgcRuntime` 记 `patch_type`，非土壤 patch 在步首更新之后直接返回；`BgcTemplate::read` 在 0 个 PFT 时不开时间 PFT 重启。
+- 顺带修掉一处 LAI 缺陷：PFT/PC 构建（`DEF_USE_LCT` 关）里没有 PFT 子网格的 patch，`MOD_LAIReadin.F90:177-184` 直接取站点逐月值、不做 `fveg0` 后处理，LAI 反馈开着时只换 `tsai`。Rust 落到了 LCT 段，把 `tlai` 也换了（3 月 1 日 Fortran 0.4、Rust 0.9）。
+
+**湿地甲烷**（`CoLMDRIVER.F90:245-247`）：
+1. `tracer_wetland_decomp`（`MOD_Tracer_Reactive_BgcShim`）：清零通量，跑 `decomp_rate_constants_bgc` → `SoilBiogeochemPotential` → `SoilBiogeochemCompetitionNoPlant` → `SoilBiogeochemDecomp`，池不动。新模块 `bgc_wetland.rs` 手写（NoPlant 竞争与两段分解状态更新 f2rs 处理不了 `present()`）。GIMPLE：NoPlant 两个列积分是 `FMA(actual_immob_vr, dz, ·)` 与 `FMA(dz, max(pot, 0), ·)`；分解状态更新供体 `FNMA`、受体 `FMA`，与土壤路径内联的同一函数体一致。
+2. `methane_driver` 的湿地路径**不走** `run_methane_component`：直接用 patch 级聚合状态（`conc_*_unsat/sat(i)`、`layer_sat_lag(i)`、年累加、`fsat_bef(i)`）调 `methane`，土壤/水稻分量停在冷启动值。`MethanePatch` 新增 `aggregate`：土壤 patch 每步后等于土壤分量，湿地直接推进它；restart 的聚合字段改从它读写。步首列总量取上一步的 `totcol_methane(i)`。
+3. 湿地植被代理 `get_wetland_veg_proxy`（五个气候带）：LAI 有数据（0.1–20）就用数据，NPP、莎草型根廓线按带给定；`crootfr` 与根吸水廓线换成代理廓线，`rr = max(rr, 0.5·bgnpp)`；通气组织覆盖 `wetland_aere_*` 在这条路径上生效（土壤分量路径里那句清零只影响土壤 patch）。
+4. `enable_wetwat_finundated_override`：`finundated = max(0, min(1, wetwat/wetwatmax))`。宿主 `wetwat` 改用真实的 `wetland_water_mm`（原来写死为 0，土壤 patch 上恒为 0 所以没暴露）。
+5. finalize 的湿地前半：甲烷读完这一步的池（`cellorg`）之后，`CDecompStateUpdate`/`SoilBiogeochemNDecompStateUpdate(.., .true.)` 直接推进分解池，再 `CNDriverSummarizeNonvegetatedSoilStates`（两个土壤汇总在 `regen.py` 里改为公开，生成文件做同一处可见性改动）；`ar = 0`。
+6. `core` history：湿地 patch 的 `f_methane_surf_flux_wetland` 是总通量，`soil` 为 0。
+
+**对照**（AT-Neu，`SITE_landtype = 11`，`wetwat` 方案）：
+
+| 算例 | 内容 | 结果 |
+|---|---|---|
+| `bwl` | BGC + 湿地、无 CH4，到 04-30 | history 4 ok，restart ok |
+| `tc4wl` | 湿地 CH4（冷启动池全 0，只测到 wetwat 覆盖：`fsat_bef = 0.997`） | history 2 ok，restart ok |
+| `tc4wlc` | 起始 BGC 重启换成 tc4y 年末土壤 patch 的碳氮池，到 01-31（产甲烷约 3.4e-8） | history 2 bad 0，restarts 5 bad 0 |
+| `tc4wly` | 同上，2010-01 → 2011-01-10（积雪、跨年） | history 26 bad 0，restarts 41 bad 0 |
+| `tc4wlyc` | tc4wly 从 07-01 续跑到 09-30 | history 6 bad 0，restarts 41 bad 0 |
+
+**仍拒绝**：湖泊甲烷、GIEMS、空间甲烷；湿地 CH4 与 `DEF_USE_SASU`/`DEF_USE_DiagMatrix` 同开。水稻见第 495 轮。
+
+## 第 495 轮：示踪物 T4b —— 稻田甲烷（土壤/水稻两分量）
+
+**上游结构**：`methane()` 里的 `is_rice_paddy_in`/`rice_pft_frac_in` 只声明不使用，稻田的差别全在驱动层：
+- **判定**（`ch4_impl_soil_step`）：`enable_rice_paddy` 下土壤 patch 的稻田 PFT 份额（`paddy_rice_fraction`：CFT 61/62 且 `irrig_method_p` 为 flood 3 或 paddy 4）超过 0.01 才算稻田，那时 `only_wetland` 也照跑。
+- **参数生效**：生长季（`croplive_p`）生效；收获后 `rice_days_since_harvest < rice_drain_window_days` 时仍生效。生效时 biome 的 `f_methane`/`redoxlag` 取 `(1−rf)·nonrice + rf·rice_paddy`，GIMPLE 是 `FMA(1−rf, nonrice, rice·rf)`。
+- **分量**：`tracer_ch4_bgc_component_veg_inputs` 把 PFT 按是否稻田分到两个分量、按面积平均。GIMPLE：`lai = FMA(frac, lai_p, ·)`、`agnpp/bgnpp/rr = FMA(x, frac, ·)`、`annsum = FMA(frac, max(·, 0), ·)`、`crootfr = FMA(dz, frac·max(c, 0), ·)`。任一 PFT 量非法时两分量都不就绪。
+- **通气组织**：稻田分量在生长季用 `get_rice_veg_proxy`（`scale = clamp(lai·0.25, 0.5, 1.5)`，除以 4 被折成乘 0.25）。
+- **重分配**（`repartition_methane_column_state`）：份额变化时两相浓度按面积守恒在分量间重分配。GIMPLE：内层 `FMA(sat, h, (1−h)·unsat)`，外层 `FMA(inner, old, delta·inner')/new`，反向 `FMA(1−old, ·, delta··)/(1−new)`。标量记忆同理。
+- **聚合**（`aggregate_methane_columns`）：份额 0/1 时 `0·x + 1·y`、`hr/hr` 都逐位恒等，聚合状态就是跑过的那个分量。`core` history 的 soil/rice 两类按 `ws·flux`、`wr·flux` 记。
+
+单点作物每个 patch 只有一个 PFT，份额只会是 0 或 1。两分量都跑再按份额合并的 FMA 形状没有核对，混合份额显式拒绝。
+
+**算例**：rc4 由 ci1（Mead NE，灌溉开）改成水稻（`croptyp = 47`，CROP 构建里 `pftclass = croptyp + 14 = 61`），`tmp/runtime_rice` 把灌溉方式文件里水稻 CFT 设为 flood(3)，CH4 参数开 `enable_rice_paddy`。Fortran 端 6–12 月 `f_methane_prod_tot` 均值约 1e-10–7e-10。`kernels/crop` 用当前 vendor 重建；水稻代码在 `#ifdef CROP` 里，另建一份带 `-fdump-tree-optimized-lineno` 的 CROP 构建取 GIMPLE。
+
+| 算例 | 内容 | 结果 |
+|---|---|---|
+| `rc4` | 2002 全年（播种、生长季、收获、排水期） | history 24 bad 0，restarts 51 bad 0 |
+| `rc4c` | 从 07-01（生长季中、通气组织覆盖生效）续跑到 10-31 | history 8 bad 0，restarts 51 bad 0 |
+
+**仍拒绝**：同一 patch 内土壤/水稻混合份额、湖泊甲烷、GIEMS、空间甲烷。
+
+**回归**：单点全量 `regress_all` 176 项，除下列预期项外全部一致：`nn`（history 为 `none`）；`tc4wlc/tc4wly/tc4wlyc` 起始重启手工改过池，全流程重跑会被 mkinidata 覆盖，不能进全量回归（已移进 SKIP）；`thw` 是两边本该都失败的同位素算例（已删）。最终二进制上再验 `tc4/tc4f/tc4y/tc4w/tc4wl/bwl/tsh/rc4` 与续跑 `tc4c/tshc/tc4wc/tc4wlc/tc4wly/tc4wlyc/rc4c`，全部一致。`cargo test -p colm-runtime` 141 项通过。
+
+**教训**：续跑算例（`*c`）一旦被全流程回归跑过，Rust 侧的起跑重启就被 mkinidata 的冷启动文件覆盖了，之后的 contrun 全红，看上去像代码回归。判断方法是先比两边起跑重启是否相同。新建续跑算例时要同步加进 `regress_all.sh` 的 SKIP，湿地链用 `tmp/mkwl.sh` 重建。排查中还收紧了第 494 轮的 LAI 分支：条件必须是"没有 PFT 子网格"。PFT 土壤 patch 在月份没变时，`refresh_monthly_leaf_area_index` 返回 `None` 后会落到后面的分支。

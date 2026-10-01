@@ -203,6 +203,8 @@ pub struct ColumnInput<'a> {
     pub biome_f_methane: Option<f64>,
     pub biome_redoxlag: Option<f64>,
     pub aere_override: Option<AereOverride>,
+    /// `wetwatmax`（`MOD_Vars_TimeInvariants`）：湿地 wetwat 覆盖淹没比例时的分母。
+    pub wetwatmax: f64,
     /// 列收支检查用的步首总量（`totcol_methane` 进来的值）。
     pub totcol_before: f64,
     pub lake_soilc: &'a [f64; NL_SOIL],
@@ -274,8 +276,9 @@ pub fn methane(
         finundated = 0.0;
     }
     finundated = finundated.max(0.0).min(1.0);
-    if m.enable_wetwat_finundated_override && i.patchtype == 2 {
-        bail!("wetland methane (wetwat override) is not ported to the Rust runtime yet");
+    // 湿地水文把 `zwt = 0`、`frcsat = 1` 写死，季节性改从水桶 `wetwat/wetwatmax` 来。
+    if m.enable_wetwat_finundated_override && i.patchtype == 2 && i.wetwatmax > 0.0 {
+        finundated = 0.0f64.max(1.0f64.min(i.wetwat / i.wetwatmax));
     }
     if comp.fsat_bef.is_nan() {
         comp.fsat_bef = SPVAL;

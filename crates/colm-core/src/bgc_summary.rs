@@ -47,8 +47,8 @@ pub fn cn_driver_summarize_fluxes(
     Ok(())
 }
 
-/// 土壤 C 池汇总。
-fn soilbiogeochem_carbonstate_summary(
+/// 土壤 C 池汇总（湿地 CH4 的 `CNDriverSummarizeNonvegetatedSoilStates` 也用）。
+pub fn soilbiogeochem_carbonstate_summary(
     s: &mut BgcState,
     p: &BgcPhysics,
     _c: &BgcPftConstants,
@@ -82,8 +82,8 @@ fn soilbiogeochem_carbonstate_summary(
     }
 }
 
-/// 土壤 N 池汇总。
-fn soilbiogeochem_nitrogenstate_summary(
+/// 土壤 N 池汇总（湿地 CH4 的 `CNDriverSummarizeNonvegetatedSoilStates` 也用）。
+pub fn soilbiogeochem_nitrogenstate_summary(
     s: &mut BgcState,
     p: &BgcPhysics,
     _c: &BgcPftConstants,
