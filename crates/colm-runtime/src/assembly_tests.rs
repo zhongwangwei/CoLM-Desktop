@@ -109,6 +109,7 @@ fn binding() -> StandardLctStepBinding {
         // 2008 年附近约 385 ppm。
         co2_volume_fraction: 385.04e-6,
         partial_pressures_pa: None,
+        flood: None,
     }
 }
 

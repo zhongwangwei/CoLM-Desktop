@@ -111,6 +111,18 @@ pub fn surface_budget(energy: &StandardLctEnergyOutput) -> Result<SurfaceBudget>
     } else {
         leaf_evaporation.mul_add(leaf_latent_heat, ground_latent_heat)
     };
+    // 漫滩蒸发按水面潜热计价（`:1471`）：`lfevpa = FMA(fevpg_fld, hvap-htvp, lfevpa)`；
+    // `fgrnd` 末尾对应 `FNMA(hvap-htvp, fevpg_fld, fgrnd)`（`:1492`）。
+    let flood_heat = energy.flood.map(|flood| {
+        (
+            flood.evaporation_mm_s,
+            crate::flood_evaporation::LATENT_HEAT_VAPORIZATION - sublimation_heat,
+        )
+    });
+    let latent_heat = match flood_heat {
+        Some((evaporation, excess)) => evaporation.mul_add(excess, latent_heat),
+        None => latent_heat,
+    };
 
     // `main/MOD_Thermal.F90:1475-1489` 的 `fgrnd` 是一条累加链，GIMPLE（非 split，bb 487）：
     //   _1778 = .FMA (dlrad, emg, sabg)
@@ -160,6 +172,10 @@ pub fn surface_budget(energy: &StandardLctEnergyOutput) -> Result<SurfaceBudget>
         // 降水显热两项：内核把**每一项**熔进累加器（`_1768`/`_1772`），不是先求和再加。
         // 这里与 `zerr` 共用 [`add_precipitation_heat`]，别再写第二套。
         add_precipitation_heat(energy, ground_heat)
+    };
+    let ground_heat = match flood_heat {
+        Some((evaporation, excess)) => (-excess).mul_add(evaporation, ground_heat),
+        None => ground_heat,
     };
     // `MOD_Vars_1DAccFluxes.F90:2087`：`rnet = sabg + sabvsun + sabvsha - olrg + forc_frl`。
     //

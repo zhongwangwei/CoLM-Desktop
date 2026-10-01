@@ -4150,6 +4150,8 @@ pub struct VariableSaturatedFlowInput<'a> {
     /// `patchtype == 0` 且 `DEF_USE_IRRIGATION`：水田规则（`MOD_SoilSnowHydrology.F90:1049-1059`、
     /// `:1346-1365`）。灌溉通量本身已在 `ground_water_flux_mm_s` 里。
     pub paddy: Option<crate::SoilIrrigation<'a>>,
+    /// `DEF_GridRiverLake_FloodFeedback`：土壤 patch 上的漫滩再入渗；没开或不是土壤 patch 时是 `None`。
+    pub flood: Option<crate::flood_evaporation::FloodInfiltrationInput>,
 }
 
 /// `WATER_VSF` 的诊断输出。
@@ -4184,6 +4186,8 @@ pub struct VariableSaturatedFlowOutput {
     pub hydraulic_conductivity_mm_s: Vec<f64>,
     /// `err_solver`：整柱水量闭合误差 [mm]。
     pub balance_error_mm: f64,
+    /// `qinfl_fld`：漫滩再入渗（按淹没比例折算，mm/s），报给河道扣账；没开回馈时为 0。
+    pub flood_infiltration_mm_s: f64,
 }
 
 /// 水量的"体积分数 ↔ 质量"换算系数：`dz[m] * 密度` 得到 kg/m² per 单位体积分数。
@@ -4360,6 +4364,51 @@ pub fn variably_saturated_flow_step(
 
     // 渗入表层的通量。
     let mut ground_water_flux_mm_s = input.ground_water_flux_mm_s - surface_runoff_mm_s;
+
+    // `:1087-1145` 漫滩再入渗（`new_cama_flood`，GRID 回馈）：淹没水按 TOPMODEL 在饱和比例 1 下
+    // 重算一次地表产流，余下的入渗（受 `FloodInfiltMax` 限制）按淹没比例加进 `qgtop`。
+    // GIMPLE：`qinfl_fld = sub*fldfrc`、`qgtop = qinfl_fld + qgtop`（不融合）、
+    // `flddepth = max(FNMA(sub, dt, flddepth), 0)`。
+    let mut flood_infiltration_mm_s = 0.0;
+    let mut flood_balance_mm = 0.0;
+    if let Some(flood) = input.flood {
+        let (mut gfld, mut rsur_fld, mut sub) = (0.0, 0.0, 0.0);
+        if input.patch_type == 0 && flood.depth_mm > 0.0 && flood.fraction > f64::EPSILON {
+            gfld = flood.depth_mm / dt;
+            let Water2014Runoff::Topmodel {
+                saturated_fraction_decay_m_inv,
+                decay_tuning,
+                ..
+            } = input.runoff
+            else {
+                bail!("grid flood feedback forces DEF_Runoff_SCHEME = 0 (TOPMODEL)");
+            };
+            rsur_fld = topmodel_surface_runoff(TopmodelSurfaceInput {
+                impermeable_porosity: input.impermeable_porosity,
+                saturated_hydraulic_conductivity_mm_s: input.saturated_hydraulic_conductivity_mm_s,
+                effective_porosity: &effective_porosity,
+                ice_fraction: &ice_fraction,
+                saturated_fraction_max: 1.0,
+                saturated_fraction_decay_m_inv,
+                decay_tuning,
+                water_table_depth_m: state.water_table_depth_m,
+                water_input_mm_s: gfld,
+            })?
+            .surface_runoff_mm_s;
+            sub = gfld.min((gfld - rsur_fld).max(0.0));
+            if flood.infiltration_max_mm_day >= 0.0 {
+                let cap = flood.infiltration_max_mm_day / 86400.0;
+                if cap < sub {
+                    sub = cap;
+                    rsur_fld = gfld - sub;
+                }
+            }
+        }
+        flood_infiltration_mm_s = sub * flood.fraction;
+        // `qgtop = qinfl_fld + qgtop`：IEEE 加法可交换，`+=` 与之逐位相同。
+        ground_water_flux_mm_s += flood_infiltration_mm_s;
+        flood_balance_mm = (gfld - rsur_fld) * flood.fraction * dt;
+    }
 
     // 深度换到 mm：`zwtmm`/`sp_zc`/`sp_zi`。
     let mut water_table_depth_mm = state.water_table_depth_m * 1000.0;
@@ -4658,6 +4707,8 @@ pub fn variably_saturated_flow_step(
             solver_balance_error_mm,
         );
     }
+    // `:1428-1432`：漫滩再入渗不算柱内来水，从闭合误差里扣掉（只是诊断）。
+    solver_balance_error_mm -= flood_balance_mm;
 
     state.matric_potential_mm = soil_state.matric_potential_mm.clone();
     state.hydraulic_conductivity_mm_s = hydraulic_conductivity_mm_s.clone();
@@ -4679,6 +4730,7 @@ pub fn variably_saturated_flow_step(
         matric_potential_mm: soil_state.matric_potential_mm,
         hydraulic_conductivity_mm_s,
         balance_error_mm: solver_balance_error_mm,
+        flood_infiltration_mm_s,
     })
 }
 

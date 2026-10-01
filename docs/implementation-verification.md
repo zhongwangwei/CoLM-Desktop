@@ -26878,3 +26878,37 @@ Rust：`FloodplainCurve::new` 与 `RiverNetwork::read` 加 `storage_fix` 参数�
 **实测**（修后内核）：`g1t` landdata 254 项、重启 7 个文件、history 2 个文件全部逐位。
 - `cargo test -p colm-init`（单线程）164 个全过；`colm-srfdata`（单线程）271 + 49 个全过。
 - `COLM_RAWDATA=/Volumes/Data/CoLMrawdata` 下 `tests/raster.rs` 5 个全过。
+
+## 第 467 轮：网格河湖漫滩回馈（`DEF_GridRiverLake_FloodFeedback`）
+
+**上游的前置：** 必须开 `FloodplainStorageFix`（第 464 轮），不能与 LULCC 同开，产流方案强制为 0（TOPMODEL，第 466 轮）。
+
+**河道侧**（`MOD_Grid_RiverLakeFlow`）：
+- 每个陆面步末，先把陆面报来的漫滩蒸发、入渗累加（`FMA(rate, dt, acc)`）。
+- `debit_flood_feedback` 把它们按 patch → 汇流网格 → 单元流域摊回去，扣蓄量（`volwater - fsum*visible`，乘积在分支前共用、不融合），并由新蓄量重算水深。
+- `publish_flood_feedback` 把单元流域超出河槽的可见漫滩水量与淹没比例折到 patch 上，得到 `credit`、`fraction`、`depth = 1000*credit/fraction`。
+- 每步都扣账、发布，汇流之后再发布一次；启动时也发布一次。
+- 新增 `river/remap.rs`：`MOD_WorkerPushData` 的四个原语带上填充值参数。上游这几处用的填充值各不相同（0 或 `-1e30`），决定了值为 0 的份算不算进平均的面积和。history 的三个原语改为调用它，行为不变。
+
+**陆面侧：**
+- `THERMAL`：移植 `get_fldevp`（`colm_core::flood_evaporation`），即开阔水面的 M-O 通量：Charnock 加粘性粗糙度、稳定度迭代 10 次、变号 4 次提前结束。
+  - 淹没部分的感热、蒸发按比例与陆面混合，三个温度导数乘 `1-fldfrc`。
+  - `tinc` 订正之后扣回 `(hvap/htvp)*fevpg_fld`（FNMA），水量限制之后加回 `fevpg_fld`。
+  - `lfevpa`/`fgrnd` 各加一项 `(hvap-htvp)*fevpg_fld`（FMA/FNMA）。
+- `WATER_VSF`：蒸发后的淹没水按 TOPMODEL 在饱和比例 1 下重算地表产流；入渗受 `FloodInfiltMax` 限制，按淹没比例加进 `qgtop`。
+- `CoLMMAIN` 的水量闭合：`endwb` 先扣再入渗（`FNMA(qinfl_fld, dt, ·)`），`errorw` 末尾再扣漫滩蒸发。没开回馈时这两项是 0，`FNMA(0, dt, x) = x`，既有算例不变。
+- 每个 GIMPLE 形状都核对过（`MOD_Thermal`、`MOD_SoilSnowHydrology`、`CoLMMAIN`、`MOD_CaMa_colmCaMa`、`MOD_Grid_RiverLakeFlow`）。
+- 只接 LCT + 变饱和流 + 不拆雪土；堤防、水库、示踪物、PFT/PC、城市、非 VSF、`DEF_SPLIT_SOILSNOW` 都显式拒绝。
+
+**实测**（`g1ff`：g1 区域，方案 0 + 修正曲线 + 回馈，跑 1 天；全 Rust 三段 vs 纯 Fortran 三段）：
+
+| 对照 | 结果 |
+|---|---|
+| landdata | 254 项逐位 |
+| 重启（陆面、河道、旁车） | 7 个文件逐位 |
+| history（`gd_hist`、unitcat） | 2 个文件全部变量逐位；第一次跑只差 `f_xerr`，补上水量闭合两项后为 0 差 |
+| 同配置、关回馈的 `g1t`（纯 Fortran）对照 | 175 个 patch 里 131 个的土壤水不同，约 3000 个单元流域的河道状态不同：回馈确实生效 |
+| 改动后重跑 `g1t`（关回馈，Rust） | 仍然逐位 |
+
+- `cargo test -p colm-core -p colm-runtime`（单线程）全过。
+- 回归脚本把这几轮新建的空间测试目录（`g1sf/g1t/g3/g3m/g3n/g1ff`）加进 SKIP：它们是空间算例，原来被当成单点算例扫进去、报 FAILED。

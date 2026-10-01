@@ -47,32 +47,9 @@ pub struct RiverHistoryWriter {
     lat: Vec<f64>,
 }
 
-/// `worker_remap_data_grid2pset`：`average` 除以非缺测份的面积和，`sum` 不除。
+/// `worker_remap_data_grid2pset`（填充值 `spval`）：`average` 除以非缺测份的面积和，`sum` 不除。
 fn grid_to_patches(routing: &RunoffRouting, grid: &[f64], average: bool) -> Vec<f64> {
-    routing
-        .patch_parts
-        .iter()
-        .map(|parts| {
-            let mut value = SPVAL;
-            let mut area_sum = 0.0;
-            for &(k, area) in parts {
-                if grid[k] == SPVAL {
-                    continue;
-                }
-                value = if value == SPVAL {
-                    grid[k] * area
-                } else {
-                    value + grid[k] * area
-                };
-                area_sum += area;
-            }
-            if average && value != SPVAL && area_sum > 0.0 {
-                value / area_sum
-            } else {
-                value
-            }
-        })
-        .collect()
+    super::remap::grid_to_patches(routing, grid, SPVAL, average)
 }
 
 /// `push_ucat2grid`：每个区域网格取格心在其中的单元流域的值。
@@ -84,51 +61,14 @@ fn catchments_to_grid(routing: &RunoffRouting, values: &[f64]) -> Vec<f64> {
         .collect()
 }
 
-/// `push_ucat2inpm`（`average`）：按单元流域的份面积加权平均，跳过缺测。
+/// `push_ucat2inpm`（`average`，填充值 `spval`）：按单元流域的份面积加权平均，跳过缺测。
 fn catchments_to_inpm(routing: &RunoffRouting, values: &[f64]) -> Vec<f64> {
-    routing
-        .grid_catchments
-        .iter()
-        .map(|entries| {
-            let mut value = SPVAL;
-            let mut area_sum = 0.0;
-            for &(i, area) in entries {
-                if values[i] == SPVAL {
-                    continue;
-                }
-                value = if value == SPVAL {
-                    values[i] * area
-                } else {
-                    value + values[i] * area
-                };
-                area_sum += area;
-            }
-            if value != SPVAL && area_sum > 0.0 {
-                value / area_sum
-            } else {
-                value
-            }
-        })
-        .collect()
+    super::remap::catchments_to_inpm(routing, values, SPVAL, true)
 }
 
 /// `worker_remap_data_pset2grid`（填充值 `spval`）：过滤掉的与缺测的 patch 不参与。
 fn patches_to_grid(routing: &RunoffRouting, values: &[f64], filter: &[bool]) -> Vec<f64> {
-    let mut grid = vec![SPVAL; routing.grids.len()];
-    for ((parts, &value), &keep) in routing.patch_parts.iter().zip(values).zip(filter) {
-        if !keep || value == SPVAL {
-            continue;
-        }
-        for &(k, area) in parts {
-            let term = value * area;
-            grid[k] = if grid[k] == SPVAL {
-                term
-            } else {
-                grid[k] + term
-            };
-        }
-    }
-    grid
+    super::remap::patches_to_grid(routing, values, filter, SPVAL)
 }
 
 impl RiverHistoryWriter {

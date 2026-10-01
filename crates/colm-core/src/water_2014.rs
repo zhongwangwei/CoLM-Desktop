@@ -60,6 +60,8 @@ pub struct Water2014SoilFluxes {
 /// Immutable regular-soil inputs to one `WATER_2014` call.
 #[derive(Debug, Clone, Copy)]
 pub struct Water2014SoilInput<'a> {
+    /// `DEF_GridRiverLake_FloodFeedback` 的漫滩再入渗（只在 VSF 路径接）；没有时是 `None`。
+    pub flood: Option<crate::flood_evaporation::FloodInfiltrationInput>,
     pub patch_type: i32,
     pub urban_run: bool,
     pub plant_hydraulics: bool,
@@ -210,6 +212,8 @@ pub fn initial_total_water_storage_mm(
 /// Diagnostics from one no-snow regular-soil `WATER_2014` call.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Water2014SoilOutput {
+    /// `qinfl_fld`：漫滩再入渗（mm/s），没开回馈时为 0。
+    pub flood_infiltration_mm_s: f64,
     pub water_input_mm_s: f64,
     pub infiltration_mm_s: f64,
     pub surface_runoff_mm_s: f64,
@@ -270,6 +274,10 @@ pub fn water_2014_soil_step(
     if input.variably_saturated {
         return variably_saturated_soil_step(input, state);
     }
+    ensure!(
+        input.flood.is_none(),
+        "grid flood re-infiltration is only ported for DEF_USE_VariablySaturatedFlow"
+    );
     let layers = validate(input, state)?;
     let (effective_porosity, ice_fraction, liquid_volume_fraction) = soil_volumes(input, state);
     let water_input_mm_s = input.ground_water_input(state);
@@ -389,6 +397,7 @@ pub fn water_2014_soil_step(
     state.hydraulic_conductivity_mm_s = soil.hydraulic_conductivity_mm_s.clone();
 
     Ok(Water2014SoilOutput {
+        flood_infiltration_mm_s: 0.0,
         water_input_mm_s,
         infiltration_mm_s,
         surface_runoff_mm_s,
@@ -644,6 +653,7 @@ fn wetland_soil_step(
     };
     state.water_table_depth_m = 0.0;
     Ok(Water2014SoilOutput {
+        flood_infiltration_mm_s: 0.0,
         water_input_mm_s: water_input,
         infiltration_mm_s: 0.0,
         surface_runoff_mm_s: surface_runoff,
@@ -707,10 +717,12 @@ fn variably_saturated_soil_step(
             root_fraction: input.root_fraction,
             root_flux_mm_s: input.root_flux_mm_s,
             paddy: input.paddy_methods(),
+            flood: input.flood,
         },
         state,
     )?;
     Ok(Water2014SoilOutput {
+        flood_infiltration_mm_s: vsf.flood_infiltration_mm_s,
         water_input_mm_s: vsf.water_input_mm_s,
         infiltration_mm_s: vsf.infiltration_mm_s,
         surface_runoff_mm_s: vsf.surface_runoff_mm_s,

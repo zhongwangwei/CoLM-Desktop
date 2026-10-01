@@ -69,6 +69,8 @@ pub struct StandardLctEnergyInput<'a> {
     /// `fevpg(+_soil/_snow) = fevpg + tinc*cgrndl` 在单点内核里乘积被复用、不融合，在带河湖流的
     /// 空间内核里是 `.FMA (cgrndl, tinc, fevpg)`（两份 GIMPLE 对照见实现记录第 453 轮）。
     pub river_lake_flow_build: bool,
+    /// `DEF_GridRiverLake_FloodFeedback` 发布给这个土壤 patch 的淹没水深与比例；没开或不是土壤 patch 时是 `None`。
+    pub flood: Option<crate::flood_evaporation::FloodPatchInput>,
 }
 
 /// 上游的 `lai`/`sai` 时间变量（`CoLMMAIN.F90:2097-2102`）。
@@ -204,6 +206,8 @@ pub struct SplitSurface {
 /// The component results of one standard LCT energy update.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StandardLctEnergyOutput {
+    /// 漫滩蒸发（`fevpg_fld`）与蒸发后剩下的淹没水深；这一步没有漫滩时是 `None`。
+    pub flood: Option<crate::flood_evaporation::FloodEnergy>,
     /// 带河湖流的空间内核（见 [`StandardLctEnergyInput::river_lake_flow_build`]）：
     /// [`crate::surface_budget`] 的 `lfevpa`/`fgrnd` 在这种构建里少几次收缩。
     pub river_lake_flow_build: bool,
@@ -422,7 +426,7 @@ fn finish_energy_step(
             humidity.ground_humidity_temperature_slope_kg_kg_k;
     }
     let preliminary_ground_flux = ground_fluxes(ground_flux_input)?;
-    let (leaf, root_uptake) = if let Some(pft) = state.pft.as_mut() {
+    let (mut leaf, root_uptake) = if let Some(pft) = state.pft.as_mut() {
         let pft_shortwave =
             crate::pft::pft_shortwave(pft, input.forcing.shortwave, input.solar.patch_type);
         crate::pft::pft_canopy_energy(
@@ -468,6 +472,68 @@ fn finish_energy_step(
     // 两支共用的地面边界：`htvp` 与 `emg` 与叶温无关，直接从入参取。
     let ground_latent_heat_j_kg = ground_flux_input.vaporization_heat_j_kg;
     let ground_emissivity = input.leaf_temperature.ground_emissivity;
+    // `MOD_Thermal.F90:1285-1310`：有漫滩时先算水面通量，再按淹没比例把地面的感热、蒸发混合，
+    // 三个温度导数乘 `1-fldfrc`。GIMPLE：`FMA(fld, fr, (1-fr)*land)`、
+    // `FMA(fevpg_fld, hvap/htvp, (1-fr)*land)`、`flddepth = max(FNMA(dt, local, flddepth), 0)`。
+    let hvap = crate::flood_evaporation::LATENT_HEAT_VAPORIZATION;
+    let flood = match input.flood {
+        Some(patch) if patch.depth_mm > 0.0 && patch.fraction > f64::EPSILON => {
+            #[allow(clippy::manual_clamp)] // `MIN(1, MAX(0, fldfrc))`，保留上游次序
+            let fraction = patch.fraction.max(0.0).min(1.0);
+            let time_step = input.ground_temperature.time_step_seconds;
+            let flux = crate::flood_evaporation::flood_evaporation(
+                crate::flood_evaporation::FloodEvaporationInput {
+                    wind_height_m: ground_flux_input.wind_height_m,
+                    temperature_height_m: ground_flux_input.temperature_height_m,
+                    humidity_height_m: ground_flux_input.humidity_height_m,
+                    wind_east_m_s: ground_flux_input.eastward_wind_m_s,
+                    wind_north_m_s: ground_flux_input.northward_wind_m_s,
+                    air_temperature_k: input.forcing.air_temperature_k,
+                    specific_humidity_kg_kg: input.forcing.specific_humidity,
+                    air_density_kg_m3: ground_flux_input.air_density_kg_m3,
+                    surface_pressure_pa: input.forcing.surface_pressure_pa,
+                    surface_temperature_k: ground_temperature_k,
+                    boundary_layer_height_m: ground_flux_input.boundary_layer_height_m.unwrap_or(0.0),
+                    scheme: ground_flux_input.surface_layer_scheme,
+                },
+            )?;
+            let local = flux
+                .evaporation_mm_s
+                .max(0.0)
+                .min(patch.depth_mm / time_step);
+            let evaporation = fraction * local;
+            let depth_after = (-time_step).mul_add(local, patch.depth_mm).max(0.0);
+            let rest = 1.0 - fraction;
+            let ratio = hvap / ground_latent_heat_j_kg;
+            let sensible = flux.sensible_heat_w_m2;
+            leaf.ground_sensible_heat_w_m2 =
+                sensible.mul_add(fraction, rest * leaf.ground_sensible_heat_w_m2);
+            leaf.ground_evaporation_kg_m2_s =
+                evaporation.mul_add(ratio, rest * leaf.ground_evaporation_kg_m2_s);
+            leaf.soil_sensible_heat_w_m2 =
+                sensible.mul_add(fraction, rest * leaf.soil_sensible_heat_w_m2);
+            leaf.soil_evaporation_kg_m2_s =
+                evaporation.mul_add(ratio, rest * leaf.soil_evaporation_kg_m2_s);
+            leaf.snow_sensible_heat_w_m2 =
+                sensible.mul_add(fraction, rest * leaf.snow_sensible_heat_w_m2);
+            leaf.snow_evaporation_kg_m2_s =
+                evaporation.mul_add(ratio, rest * leaf.snow_evaporation_kg_m2_s);
+            leaf.ground_flux_temperature_slope_w_m2_k *= rest;
+            leaf.ground_latent_temperature_slope_kg_m2_s_k *= rest;
+            leaf.ground_sensible_temperature_slope_w_m2_k *= rest;
+            Some(crate::flood_evaporation::FloodEnergy {
+                evaporation_mm_s: evaporation,
+                depth_after_mm: depth_after,
+                fraction: patch.fraction,
+                infiltration_max_mm_day: patch.infiltration_max_mm_day,
+            })
+        }
+        _ => None,
+    };
+    ensure!(
+        flood.is_none() || !input.ground_temperature.use_split_soil_snow,
+        "flood feedback with DEF_SPLIT_SOILSNOW is not ported"
+    );
     let ground = ground_temperature(GroundTemperatureInput {
         time_step_seconds: input.interception.time_step_seconds,
         absorbed_ground_shortwave_w_m2: shortwave.ground_absorbed_w_m2,
@@ -511,11 +577,18 @@ fn finish_energy_step(
             value + evaporation_change
         }
     };
-    let corrected_soil_evaporation_kg_m2_s = evaporation_corrected(leaf.soil_evaporation_kg_m2_s);
-    let corrected_snow_evaporation_kg_m2_s = evaporation_corrected(leaf.snow_evaporation_kg_m2_s);
+    // `:1355-1359`：漫滩时把按 `hvap/htvp` 折算进去的那份蒸发先扣回来，`FNMA(ratio, fevpg_fld, ·)`。
+    let flood_removed = |value: f64| match flood {
+        Some(flood) => (-(hvap / ground_latent_heat_j_kg)).mul_add(flood.evaporation_mm_s, value),
+        None => value,
+    };
+    let corrected_soil_evaporation_kg_m2_s =
+        flood_removed(evaporation_corrected(leaf.soil_evaporation_kg_m2_s));
+    let corrected_snow_evaporation_kg_m2_s =
+        flood_removed(evaporation_corrected(leaf.snow_evaporation_kg_m2_s));
     let mut corrected_ground_sensible_heat_w_m2 = leaf.ground_sensible_heat_w_m2 + sensible_change;
     let mut corrected_ground_evaporation_kg_m2_s =
-        evaporation_corrected(leaf.ground_evaporation_kg_m2_s);
+        flood_removed(evaporation_corrected(leaf.ground_evaporation_kg_m2_s));
     let (thermal_water, split_thermal_water) = if input.ground_temperature.use_split_soil_snow {
         let snow_layers = input.ground_temperature.snow_layers;
         let snow_layer_exists = snow_layers > 0;
@@ -566,6 +639,10 @@ fn finish_energy_step(
         corrected_ground_evaporation_kg_m2_s = water.ground_evaporation_kg_m2_s;
         (Some(water), None)
     };
+    // `:1458-1462`：受水量限制的地面蒸发算完之后，把漫滩蒸发加回去（不融合）。
+    if let Some(flood) = flood {
+        corrected_ground_evaporation_kg_m2_s += flood.evaporation_mm_s;
+    }
     let total_sensible_heat_w_m2 =
         leaf.leaf_sensible_heat_w_m2 + corrected_ground_sensible_heat_w_m2;
     let total_evaporation_kg_m2_s =
@@ -600,6 +677,7 @@ fn finish_energy_step(
         split_thermal_water,
         total_sensible_heat_w_m2,
         total_evaporation_kg_m2_s,
+        flood,
     })
 }
 
@@ -818,6 +896,7 @@ pub fn standard_lct_soil_step(
             // 各层吸水阻力都为 1 时二者逐位相同，所以湿润站点看不出来。
             root_fraction: &energy.root_uptake.layer_fraction,
             root_flux_mm_s,
+            flood: energy.flood.map(|flood| flood.infiltration()),
             ..input.water
         },
         &mut state.water,
@@ -1054,6 +1133,7 @@ pub fn standard_lct_snow_soil_step(
                 ..input.snow_water
             },
             soil: Water2014SoilInput {
+                flood: energy.flood.map(|flood| flood.infiltration()),
                 time_step_seconds: input.energy.interception.time_step_seconds,
                 fluxes: crate::Water2014SoilFluxes {
                     // 薄雪（无雪层）的融化 `sm`：上游 `WATER_2014` 在 `lb >= 1` 时

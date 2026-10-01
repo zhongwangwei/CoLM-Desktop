@@ -187,6 +187,17 @@ impl SpatialRuntime {
                             patch_forcing[index].pco2m,
                             patch_forcing[index].po2m,
                         )),
+                        // 漫滩回馈只作用在土壤 patch 上（`patchtype == 0`）。
+                        flood: self
+                            .river
+                            .as_ref()
+                            .and_then(|(river, _)| river.flood.as_ref())
+                            .filter(|_| template.patch_type == 0)
+                            .map(|flood| colm_core::flood_evaporation::FloodPatchInput {
+                                depth_mm: flood.depth_mm[index],
+                                fraction: flood.fraction[index],
+                                infiltration_max_mm_day: flood.infiltration_max_mm_day,
+                            }),
                     };
                     let scale = optimizer.as_ref().map(|optimizer| optimizer.scale(index));
                     outputs.push(
@@ -201,6 +212,15 @@ impl SpatialRuntime {
                             .iter()
                             .map(|output| output.view().total_runoff_mm_s())
                             .collect::<Vec<_>>();
+                        // `CoLMDRIVER` 把 `fevpg_fld`/`qinfl_fld` 写进 `flood_evap/infil_patch`。
+                        if let Some(flood) = river.flood.as_mut() {
+                            for (index, output) in outputs.iter().enumerate() {
+                                let (evaporation, infiltration) =
+                                    output.view().flood_exchange_mm_s();
+                                flood.evap_mm_s[index] = evaporation;
+                                flood.infil_mm_s[index] = infiltration;
+                            }
+                        }
                         river.step(&runoff, included, time_step_seconds)?;
                     }
                 }

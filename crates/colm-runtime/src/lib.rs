@@ -832,6 +832,7 @@ fn lct_binding(
             month,
         )? * 1.0e-6,
         partial_pressures_pa: None,
+        flood: None,
     })
 }
 
@@ -852,6 +853,21 @@ impl PatchStepOutput<'_> {
             Self::Glacier(output) => output.thermal.fevpa,
             Self::Lake(output) => output.thermal.fevpa,
             Self::Urban(output) => output.thermal.fevpa,
+        }
+    }
+
+    /// 漫滩回馈的陆面去向：`(fevpg_fld, qinfl_fld)`（mm/s，已按淹没比例折算）。
+    /// 只有土壤 patch 会有，其余类型为 0。
+    pub fn flood_exchange_mm_s(self) -> (f64, f64) {
+        match self {
+            Self::Soil(output) => (
+                output
+                    .energy
+                    .flood
+                    .map_or(0.0, |flood| flood.evaporation_mm_s),
+                output.water.soil.flood_infiltration_mm_s,
+            ),
+            _ => (0.0, 0.0),
         }
     }
 

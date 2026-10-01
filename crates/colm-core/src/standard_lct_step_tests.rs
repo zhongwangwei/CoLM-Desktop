@@ -609,6 +609,7 @@ fn energy_state(forcing: crate::RuntimeForcing) -> StandardLctEnergyState {
 
 fn water_input() -> Water2014SoilInput<'static> {
     Water2014SoilInput {
+        flood: None,
         dynamic_wetland: false,
         irrigation: None,
         patch_type: 0,
@@ -757,6 +758,7 @@ fn input(forcing: crate::RuntimeForcing) -> StandardLctEnergyInput<'static> {
     StandardLctEnergyInput {
         dynamic_wetland: false,
         river_lake_flow_build: false,
+        flood: None,
         forcing,
         precipitation_scheme: crate::PrecipitationPhaseScheme::AirTemperature,
         interception: CanopyInterceptionInput {

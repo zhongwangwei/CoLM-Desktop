@@ -108,6 +108,7 @@ pub mod co2;
 pub mod co2_generated;
 pub mod crop_phenology;
 pub mod extended;
+pub mod flood_evaporation;
 pub mod forcing_downscaling;
 pub mod glacier;
 pub mod glacier_step;

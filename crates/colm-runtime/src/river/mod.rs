@@ -6,8 +6,10 @@
 //!
 //! 收缩形状取自 latlon 内核的 GIMPLE（`gimpleL/MOD_Grid_RiverLakeFlow.F90`），逐句注明。
 
+pub mod flood;
 pub mod history;
 pub mod network;
+pub mod remap;
 pub mod restart;
 
 use anyhow::{ensure, Result};
@@ -93,6 +95,8 @@ pub struct RiverModel {
     pub max_dt: f64,
     /// 运行终点那条不满周期的记录写出之前的原始累加（`MOD_Hist.F90:265-274` 先存旁车再写历史）。
     pub raw_history_at_end: Option<RiverHistory>,
+    /// `DEF_GridRiverLake_FloodFeedback`：漫滩回馈的 patch 与单元流域状态。
+    pub flood: Option<flood::FloodFeedback>,
     momen: Vec<f64>,
 }
 
@@ -125,7 +129,17 @@ impl RiverModel {
             state,
             max_dt,
             raw_history_at_end: None,
+            flood: None,
         })
+    }
+
+    /// 打开漫滩回馈：`grid_riverlake_flow_init` 末尾立刻发布一次（非 spinup）。
+    pub fn with_flood_feedback(mut self, infiltration_max_mm_day: f64) -> Self {
+        let mut flood =
+            flood::FloodFeedback::new(&self.network, &self.routing, infiltration_max_mm_day);
+        flood.publish(&self.network, &self.routing, &self.state);
+        self.flood = Some(flood);
+        self
     }
 
     /// 一个陆面步：把 patch 径流（mm/s，`rnof`）汇进 `acc_rnof_uc`，满时间就汇流一次。
@@ -170,11 +184,20 @@ impl RiverModel {
             }
             self.state.acc_rnof[*i] = (sum * 1.0e-3).mul_add(deltime, self.state.acc_rnof[*i]);
         }
+        // 漫滩回馈：每个陆面步都扣账、再发布（`grid_riverlake_flow` 里汇流判定之前）。
+        if let Some(flood) = self.flood.as_mut() {
+            flood.accumulate(deltime);
+            flood.debit(&self.network, &self.routing, &mut self.state)?;
+            flood.publish(&self.network, &self.routing, &self.state);
+        }
         self.state.acctime_rnof += deltime;
         if self.state.acctime_rnof + 0.01 < self.max_dt {
             return Ok(false);
         }
         self.route();
+        if let Some(flood) = self.flood.as_mut() {
+            flood.publish(&self.network, &self.routing, &self.state);
+        }
         Ok(true)
     }
 

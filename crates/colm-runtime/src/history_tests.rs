@@ -119,6 +119,7 @@ fn binding() -> StandardLctStepBinding {
         longitude_radians: 0.0,
         co2_volume_fraction: 385.04e-6,
         partial_pressures_pa: None,
+        flood: None,
     }
 }
 

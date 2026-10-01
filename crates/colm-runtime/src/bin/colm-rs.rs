@@ -347,11 +347,31 @@ fn run_spatial(
         missing.join("\n  - ")
     );
     // GRID 内核总是编进 `GridRiverLakeFlow`：汇流默认路径（单向耦合，`FloodplainStorageFix` 两种曲线都行），其余选项还没移植。
+    // 漫滩回馈：上游自己要求修正漫滩曲线、不与 LULCC 同开，并把产流方案强制成 0；
+    // Rust 只接变饱和流、不拆雪土、LCT 的那条路径。
+    if logical_field(&document, "DEF_GridRiverLake_FloodFeedback")? {
+        ensure!(
+            logical_field(&document, "DEF_GridRiverLake_FloodplainStorageFix")?,
+            "Grid flood feedback requires DEF_GridRiverLake_FloodplainStorageFix (upstream stops too)"
+        );
+        ensure!(
+            !logical_field(&document, "DEF_USE_LULCC")?,
+            "Grid flood feedback does not support LULCC (upstream stops too)"
+        );
+        ensure!(
+            integer_field(&document, "DEF_Runoff_SCHEME")? == 0,
+            "Grid flood feedback forces DEF_Runoff_SCHEME = 0 upstream; set it in the namelist"
+        );
+        ensure!(
+            physics.variably_saturated_flow && !physics.use_pft && !physics.urban_run,
+            "Grid flood feedback is ported for LCT variably saturated flow only"
+        );
+        ensure!(
+            !logical_field(&document, "DEF_SPLIT_SOILSNOW")?,
+            "Grid flood feedback with DEF_SPLIT_SOILSNOW is not ported"
+        );
+    }
     for (field, unported) in [
-        (
-            "DEF_GridRiverLake_FloodFeedback",
-            logical_field(&document, "DEF_GridRiverLake_FloodFeedback")?,
-        ),
         ("DEF_USE_LEVEE", logical_field(&document, "DEF_USE_LEVEE")?),
         (
             "DEF_USE_BIFURCATION",
@@ -709,6 +729,22 @@ fn run_spatial_segment(
     )?;
     if let Some(history) = river_history {
         river.history = history;
+    }
+    // `grid_riverlake_flow_init`：回馈打开时立刻按读回的状态发布一次（Rust 不在 spinup 里汇流）。
+    if logical_field(document, "DEF_GridRiverLake_FloodFeedback")? {
+        let infiltration_max_mm_day = match document.get("DEF_GridRiverLake_FloodInfiltMax") {
+            Some(Value::Real { text }) => text
+                .trim()
+                .trim_end_matches("_r8")
+                .replace(['d', 'D'], "e")
+                .parse::<f64>()
+                .with_context(|| format!("DEF_GridRiverLake_FloodInfiltMax = {text}"))?,
+            Some(Value::Int(value)) => *value as f64,
+            Some(other) => bail!("DEF_GridRiverLake_FloodInfiltMax must be real, got {other}"),
+            // `MOD_Namelist.F90` 的缺省 `5._r8`（mm/day）。
+            None => 5.0,
+        };
+        river = river.with_flood_feedback(infiltration_max_mm_day);
     }
     runtime = runtime.with_river(river, runoff_filter)?;
     let rest_compression = u8::try_from(integer_field(document, "DEF_REST_CompressLevel")?)

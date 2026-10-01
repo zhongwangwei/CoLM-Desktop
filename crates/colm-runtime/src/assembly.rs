@@ -238,6 +238,8 @@ pub struct StandardLctStepBinding {
     /// 空间算例：`(forc_pco2m, forc_po2m)` 已由 `grid2pset` 逐量映射好（格上先乘分数再映射，
     /// 与在 patch 上用 `forc_pbot` 相乘舍入不同）。单点为 `None`，按 `pbot × 分数` 算。
     pub partial_pressures_pa: Option<(f64, f64)>,
+    /// 漫滩回馈发布给这个土壤 patch 的淹没水深与比例（只有空间算例开了回馈时才有）。
+    pub flood: Option<colm_core::flood_evaporation::FloodPatchInput>,
 }
 
 /// 原时间重启里续跑需要用到的整变量（所有 patch）。
@@ -1707,6 +1709,7 @@ impl StandardLctRestartTemplate {
             energy: colm_core::StandardLctEnergyInput {
                 dynamic_wetland: physics.dynamic_wetland,
                 river_lake_flow_build: physics.river_lake_flow_build,
+                flood: binding.flood,
                 forcing,
                 precipitation_scheme: physics.precipitation_scheme,
                 interception: colm_core::CanopyInterceptionInput {
@@ -1964,6 +1967,8 @@ impl StandardLctRestartTemplate {
                 plant_hydraulics: self.plant_hydraulic_settings,
             },
             water: colm_core::Water2014SoilInput {
+                // 漫滩再入渗由每步的能量输出带进来（`standard_lct_step`），模板里不放。
+                flood: None,
                 dynamic_wetland: physics.dynamic_wetland,
                 // 灌溉的开关与水田积水上限；本步的通量与方式由 `standard_lct_snow_soil_step` 从状态填。
                 irrigation: physics

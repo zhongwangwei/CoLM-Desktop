@@ -1981,15 +1981,20 @@ pub fn set_lct_balance_errors(
         zerr -= (now - before) / factor;
     }
 
+    // 漫滩回馈（`CoLMMAIN.F90:1512-1531`，土壤 patch）：再入渗的水不是降水带来的，先从 `endwb`
+    // 里扣掉（`FNMA(qinfl_fld, deltim, endwb)`），蒸发里那份漫滩蒸发最后再扣（`FNMA(fevpg_fld, deltim, ·)`）。
+    // 没开回馈时两项都是 0，`FNMA(0, dt, x)` 恰好是 `x`，不影响既有算例。
+    let flood_infiltration = output.water.flood_infiltration_mm_s;
+    let flood_evaporation = energy.flood.map_or(0.0, |flood| flood.evaporation_mm_s);
+    let dt = reference.time_step_seconds;
+    let end_water_storage_mm = (-flood_infiltration).mul_add(dt, end_water_storage_mm);
     // `CoLMMAIN.F90:1518`：GIMPLE 是 `.FNMA (通量和, deltim, endwb-totwb)` —— 乘积熔进减法。
     let errorw = (-(reference.convective_precipitation_kg_m2_s
         + reference.large_scale_precipitation_kg_m2_s
         - energy.total_evaporation_kg_m2_s
         - output.water.total_runoff_mm_s))
-        .mul_add(
-            reference.time_step_seconds,
-            end_water_storage_mm - reference.initial_total_water_mm,
-        );
+        .mul_add(dt, end_water_storage_mm - reference.initial_total_water_mm);
+    let errorw = (-flood_evaporation).mul_add(dt, errorw);
     let xerr = errorw / reference.time_step_seconds;
 
     for (name, value) in [("xerr", xerr), ("zerr", zerr)] {
