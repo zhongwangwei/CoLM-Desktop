@@ -4330,7 +4330,30 @@ pub struct VariableSaturatedFlowOutput {
     /// `err_solver`：整柱水量闭合误差 [mm]。
     pub balance_error_mm: f64,
     /// `qinfl_fld`：漫滩再入渗（按淹没比例折算，mm/s），报给河道扣账；没开回馈时为 0。
-    pub flood_infiltration_mm_s: f64,
+    pub flood_infiltration_mm_s: f64,    /// 只供示踪物记账的诊断（`WATER_VSF` 的可选输出）。
+    pub tracer: VariableSaturatedTracerDiagnostics,
+}
+
+/// `WATER_VSF` 只为示踪物导出的量（上游的 `*_trc` 实参）。
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct VariableSaturatedTracerDiagnostics {
+    /// `permeable_soil_out`。
+    pub permeable: Vec<bool>,
+    /// `qgtop_out`：交给土壤求解器的地表入流 [mm/s]（不透水表层亏损处理之后）。
+    pub ground_flux_to_solver_mm_s: f64,
+    /// `imperv_evap_wdsrf`/`imperv_evap_soil`/`imperv_subl_soil` [mm]。
+    pub impervious_surface_loss_mm: f64,
+    pub impervious_soil_evaporation_mm: f64,
+    pub impervious_soil_sublimation_mm: f64,
+    /// `etroot_surface`、`rsub_source_layer/surface/aquifer` [mm]。
+    pub transpiration_surface_mm: f64,
+    pub subsurface_source_layer_mm: Vec<f64>,
+    pub subsurface_source_surface_mm: f64,
+    pub subsurface_source_aquifer_mm: f64,
+    /// `dew_overflow`、`frost_displaced`、`late_runoff` [mm]。
+    pub dew_overflow_mm: f64,
+    pub frost_displaced_mm: f64,
+    pub late_runoff_mm: f64,
 }
 
 /// 水量的"体积分数 ↔ 质量"换算系数：`dz[m] * 密度` 得到 kg/m² per 单位体积分数。
@@ -4652,10 +4675,15 @@ pub fn variably_saturated_flow_step(
 
     // `:1176-1208` 不透水表层上的蒸发亏损（`qgtop < 0`）：先由积水承担，余下的从表层扣；
     // 冻结（`t <= tfrz` 且有冰）时先扣冰再扣液，否则先扣液再扣冰。
+    let mut tracer = VariableSaturatedTracerDiagnostics {
+        permeable: permeable.clone(),
+        ..VariableSaturatedTracerDiagnostics::default()
+    };
     if !permeable[0] && ground_water_flux_mm_s < 0.0 {
         let deficit = -ground_water_flux_mm_s * dt;
         let surface_loss = state.surface_water_mm.max(0.0).min(deficit);
         if surface_loss > 0.0 {
+            tracer.impervious_surface_loss_mm += surface_loss;
             state.surface_water_mm = (state.surface_water_mm - surface_loss).max(0.0);
         }
         let soil_deficit = (deficit - surface_loss).max(0.0);
@@ -4672,9 +4700,12 @@ pub fn variably_saturated_flow_step(
                 };
             state.liquid_water_kg_m2[0] = (liquid - liquid_loss).max(0.0);
             state.ice_water_kg_m2[0] = (ice - ice_loss).max(0.0);
+            tracer.impervious_soil_evaporation_mm += liquid_loss;
+            tracer.impervious_soil_sublimation_mm += ice_loss;
         }
         ground_water_flux_mm_s = 0.0;
     }
+    tracer.ground_flux_to_solver_mm_s = ground_water_flux_mm_s;
 
     let mut soil_state = VariableSaturatedSoilWaterState {
         ponding_depth_mm: state.surface_water_mm,
@@ -4749,7 +4780,8 @@ pub fn variably_saturated_flow_step(
     // 超过 1e-12）把超过孔隙剩余容量 `max((porsl*dz - wice/denice)*denh2o, 0)` 的液态水挤进
     // 积水；露水 `max(qsdew*deltim, 0)` 只填到容量为止，余下按 `(wdsrf + dew) - retained`
     // 进积水。新霜超过整个孔隙由雪层合并后的 `relocate_soil_frost_ice` 处理。
-    {
+    let runoff_before_late_mm_s = surface_runoff_mm_s;
+    let late_candidate = {
         let ice_before_frost = state.ice_water_kg_m2[0];
         let dew_input = (input.fluxes.soil_dew_kg_m2_s * dt).max(0.0);
         state.ice_water_kg_m2[0] = dt
@@ -4770,13 +4802,18 @@ pub fn variably_saturated_flow_step(
             liquid -= frost_excess;
         }
         state.surface_water_mm += frost_excess;
+        tracer.frost_displaced_mm = frost_excess;
+        let mut dew_retained = 0.0;
         if dew_input > 0.0 {
-            let dew_retained = (dew_capacity - liquid).max(0.0).min(dew_input);
+            dew_retained = (dew_capacity - liquid).max(0.0).min(dew_input);
             liquid += dew_retained;
             state.surface_water_mm = (state.surface_water_mm + dew_input) - dew_retained;
+            tracer.dew_overflow_mm = dew_input - dew_retained;
         }
         state.liquid_water_kg_m2[0] = liquid;
-    }
+        // `:1354`：`frost_excess + dew_input - dew_retained > 0` 时记下溢出带来的地表径流。
+        (frost_excess + dew_input) - dew_retained
+    };
 
     // 水量亏缺由冰补：`wblc > 0` 时自上而下融冰。
     let mut ice_sink_kg_m2 = vec![0.0; nlev];
@@ -4856,6 +4893,10 @@ pub fn variably_saturated_flow_step(
         0.0
     };
 
+    if late_candidate > 0.0 {
+        tracer.late_runoff_mm = (surface_runoff_mm_s - runoff_before_late_mm_s).max(0.0) * dt;
+    }
+
     // 冰阻抗：冻结层的导水率按含冰比例指数衰减。
     let mut hydraulic_conductivity_mm_s = soil_state.hydraulic_conductivity_mm_s.clone();
     for (level, conductivity_mm_s) in hydraulic_conductivity_mm_s.iter_mut().enumerate() {
@@ -4913,6 +4954,13 @@ pub fn variably_saturated_flow_step(
         hydraulic_conductivity_mm_s,
         balance_error_mm: solver_balance_error_mm,
         flood_infiltration_mm_s,
+        tracer: VariableSaturatedTracerDiagnostics {
+            transpiration_surface_mm: soil.transpiration_surface_mm,
+            subsurface_source_layer_mm: soil.subsurface_source_layer_mm,
+            subsurface_source_surface_mm: soil.subsurface_source_surface_mm,
+            subsurface_source_aquifer_mm: soil.subsurface_source_aquifer_mm,
+            ..tracer
+        },
     })
 }
 
@@ -5074,8 +5122,14 @@ pub struct VariableSaturatedSoilWaterOutput {
     pub transpiration_demand_mm_s: Vec<f64>,
     /// `etroot_actual_out`：逐层真正被取走的水 [mm]。
     pub transpiration_actual_mm: Vec<f64>,
-    /// `etroot_aquifer_out`：含水层承担的蒸腾亏缺 [mm]。
+    /// `etroot_aquifer_out`：含水层承担的蒸腾 [mm]（PHS 回水时为负）。
     pub transpiration_aquifer_mm: f64,
+    /// `etroot_surface_out`：积水承担的蒸腾 [mm]。
+    pub transpiration_surface_mm: f64,
+    /// `rsub_layer_out`/`rsub_surface_out`/`rsub_aquifer_out`：基流的来源 [mm]。
+    pub subsurface_source_layer_mm: Vec<f64>,
+    pub subsurface_source_surface_mm: f64,
+    pub subsurface_source_aquifer_mm: f64,
     /// `wblc`：整柱质量平衡误差 [mm]。
     pub balance_error_mm: f64,
 }
@@ -5223,27 +5277,35 @@ pub fn soil_water_vertical_movement(
     {
         deficit_mm = demand_mm_s.mul_add(input.time_step_seconds, deficit_mm);
     }
-    let transpiration_aquifer_mm = deficit_mm.max(0.0);
 
     // 与含水层交换（`wexchange` 是**体积** mm，不是通量）。
     // `:345 wexchange = rsubst*dt + deficit`：`main/` 的 GIMPLE 是 `_100 = rsubst*dt ;
     // _102 = _100 + deficit`，**不**融合（旧内核的出货汇编是 `fmadd`）。CN-Cng 1 月第 57 步
     // 的 `zwt` 1 ULP 就是从这里来的（第 402 轮探针：`get_zwt_from_wa` 的入参 `-reswater` 已不同）。
     let water_exchange_mm = input.subsurface_runoff_mm_s * input.time_step_seconds + deficit_mm;
-    let ponding_before_exchange_mm = state.ponding_depth_mm;
-    // `:349-393`：PHS 的净根系回水（`deficit < 0`）与基流分两次和含水层交换，
-    // `pond_exchange = dp_before - ss_dp`；否则按 `wexchange` 一次交换，
-    // `pond_exchange = max(交换前积水 - 交换后, 0)`（仅 `wexchange > 0`）。
-    let exchanges: &[f64] = if input.plant_hydraulics && deficit_mm < 0.0 {
-        &[deficit_mm, input.subsurface_runoff_mm_s * input.time_step_seconds]
-    } else {
-        &[water_exchange_mm]
+    // 交换前后各层可见水量（示踪物记账用）：水位以上整层 `vliq*dz`，水位所在层与以下
+    // `FMA(vliq, max(zwt-zi(l-1),0), porsl*min(dz, zi(l)-zwt))`（`:352-358`）。
+    let layer_volumes = |liquid: &[f64], water_table_depth_mm: f64| -> Vec<f64> {
+        (0..nlev)
+            .map(|level| {
+                if input.permeable[level] && water_table_depth_mm < input.interface_depth_mm[level + 1] {
+                    liquid[level].mul_add(
+                        (water_table_depth_mm - input.interface_depth_mm[level]).max(0.0),
+                        input.porosity[level]
+                            * thickness_mm[level]
+                                .min(input.interface_depth_mm[level + 1] - water_table_depth_mm),
+                    )
+                } else {
+                    liquid[level] * thickness_mm[level]
+                }
+            })
+            .collect()
     };
-    for (index, &amount_mm) in exchanges.iter().enumerate() {
-        // 第二次（基流）只在 `rsubst > 0` 时做。
-        if index == 1 && input.subsurface_runoff_mm_s <= 0.0 {
-            continue;
-        }
+    let exchange = |amount_mm: f64,
+                        state: &mut VariableSaturatedSoilWaterState,
+                        water_table_depth_mm: &mut f64,
+                        water_table_level: &mut usize|
+     -> Result<()> {
         let aquifer = exchange_soil_water_with_aquifer(VariableSaturatedAquiferInput {
             water_exchange_mm: amount_mm,
             interface_depth_mm: input.interface_depth_mm,
@@ -5255,21 +5317,82 @@ pub fn soil_water_vertical_movement(
             aquifer_porosity: input.aquifer_porosity,
             ponding_depth_mm: state.ponding_depth_mm,
             unsaturated_liquid_water: &state.liquid_water,
-            water_table_depth_mm,
+            water_table_depth_mm: *water_table_depth_mm,
             aquifer_water_mm: state.aquifer_water_mm,
         })?;
         state.ponding_depth_mm = aquifer.ponding_depth_mm;
         state.liquid_water = aquifer.unsaturated_liquid_water;
-        water_table_depth_mm = aquifer.water_table_depth_mm;
+        *water_table_depth_mm = aquifer.water_table_depth_mm;
         state.aquifer_water_mm = aquifer.aquifer_water_mm;
-        water_table_level = aquifer.water_table_interface_count;
-    }
-    let pond_exchange_mm = if exchanges.len() == 2 {
+        *water_table_level = aquifer.water_table_interface_count;
+        Ok(())
+    };
+    let mut transpiration_aquifer_mm = 0.0;
+    let mut transpiration_surface_mm = 0.0;
+    let mut subsurface_source_layer_mm = vec![0.0; nlev];
+    let mut subsurface_source_surface_mm = 0.0;
+    let mut subsurface_source_aquifer_mm = 0.0;
+    // `:349-393`：PHS 的净根系回水（`deficit < 0`）与基流分两次和含水层交换，
+    // `pond_exchange = dp_before - ss_dp`；否则按 `wexchange` 一次交换，
+    // `pond_exchange = max(交换前积水 - 交换后, 0)`（仅 `wexchange > 0`）。
+    let pond_exchange_mm = if input.plant_hydraulics && deficit_mm < 0.0 {
+        let aquifer_before = state.aquifer_water_mm;
+        let mut layer_before = layer_volumes(&state.liquid_water, water_table_depth_mm);
+        exchange(deficit_mm, state, &mut water_table_depth_mm, &mut water_table_level)?;
+        transpiration_surface_mm = previous_ponding_depth_mm - state.ponding_depth_mm;
+        transpiration_aquifer_mm = aquifer_before - state.aquifer_water_mm;
+        let after = layer_volumes(&state.liquid_water, water_table_depth_mm);
+        for level in 0..nlev {
+            transpiration_actual_mm[level] =
+                (transpiration_actual_mm[level] + layer_before[level]) - after[level];
+        }
+        layer_before = after;
+        if input.subsurface_runoff_mm_s > 0.0 {
+            let aquifer_before = state.aquifer_water_mm;
+            let ponding_before = state.ponding_depth_mm;
+            exchange(
+                input.subsurface_runoff_mm_s * input.time_step_seconds,
+                state,
+                &mut water_table_depth_mm,
+                &mut water_table_level,
+            )?;
+            subsurface_source_surface_mm = (ponding_before - state.ponding_depth_mm).max(0.0);
+            subsurface_source_aquifer_mm = (aquifer_before - state.aquifer_water_mm).max(0.0);
+            let after = layer_volumes(&state.liquid_water, water_table_depth_mm);
+            for level in 0..nlev {
+                subsurface_source_layer_mm[level] = (layer_before[level] - after[level]).max(0.0);
+            }
+        }
         previous_ponding_depth_mm - state.ponding_depth_mm
-    } else if water_exchange_mm > 0.0 {
-        (ponding_before_exchange_mm - state.ponding_depth_mm).max(0.0)
     } else {
-        0.0
+        let positive = water_exchange_mm > 0.0;
+        let transpiration_fraction = if positive {
+            (deficit_mm.max(0.0) / water_exchange_mm).min(1.0)
+        } else {
+            0.0
+        };
+        let subsurface_fraction = 1.0 - transpiration_fraction;
+        let aquifer_before = state.aquifer_water_mm;
+        let layer_before = positive.then(|| layer_volumes(&state.liquid_water, water_table_depth_mm));
+        exchange(water_exchange_mm, state, &mut water_table_depth_mm, &mut water_table_level)?;
+        if let Some(layer_before) = layer_before {
+            let pond = (previous_ponding_depth_mm - state.ponding_depth_mm).max(0.0);
+            transpiration_surface_mm = transpiration_fraction * pond;
+            subsurface_source_surface_mm = subsurface_fraction * pond;
+            let aquifer = (aquifer_before - state.aquifer_water_mm).max(0.0);
+            transpiration_aquifer_mm = transpiration_fraction * aquifer;
+            subsurface_source_aquifer_mm = subsurface_fraction * aquifer;
+            let after = layer_volumes(&state.liquid_water, water_table_depth_mm);
+            for level in 0..nlev {
+                let debit = (layer_before[level] - after[level]).max(0.0);
+                transpiration_actual_mm[level] =
+                    transpiration_fraction.mul_add(debit, transpiration_actual_mm[level]);
+                subsurface_source_layer_mm[level] = subsurface_fraction * debit;
+            }
+            pond
+        } else {
+            0.0
+        }
     };
 
     // 水位在每一层内的位置：`izwt` 那一层是"从层底往上到水位"，再往下整层饱和。
@@ -5523,11 +5646,44 @@ pub fn soil_water_vertical_movement(
     state.interface_flux_mm_s = interface_flux_mm_s;
     state.water_table_depth_mm = water_table_depth_mm;
 
+    // `:576-587`：PHS 下三项都不为正、且负值总量在舍入级时一并清零。阈值
+    // `max((sum|etroot|*sqrt(eps))*dt, maxval|vliq*dz|*8eps)`。
+    if input.plant_hydraulics
+        && !transpiration_actual_mm.iter().any(|value| *value > 0.0)
+        && transpiration_aquifer_mm <= 0.0
+        && transpiration_surface_mm <= 0.0
+    {
+        let negative = -transpiration_actual_mm
+            .iter()
+            .fold(0.0, |sum, value| value.min(0.0) + sum);
+        let demand = transpiration_demand_mm
+            .iter()
+            .fold(0.0, |sum, value| value.abs() + sum);
+        let storage = state
+            .liquid_water
+            .iter()
+            .zip(&thickness_mm)
+            .fold(f64::NEG_INFINITY, |max, (vliq, dz)| max.max((vliq * dz).abs()));
+        let threshold = (demand * f64::EPSILON.sqrt() * input.time_step_seconds)
+            .max(storage * (8.0 * f64::EPSILON));
+        if (negative - transpiration_aquifer_mm.min(0.0)) - transpiration_surface_mm.min(0.0)
+            <= threshold
+        {
+            transpiration_actual_mm.iter_mut().for_each(|value| *value = 0.0);
+            transpiration_aquifer_mm = 0.0;
+            transpiration_surface_mm = 0.0;
+        }
+    }
+
     Ok(VariableSaturatedSoilWaterOutput {
         infiltration_mm_s,
         transpiration_demand_mm_s: transpiration_demand_mm,
         transpiration_actual_mm,
         transpiration_aquifer_mm,
+        transpiration_surface_mm,
+        subsurface_source_layer_mm,
+        subsurface_source_surface_mm,
+        subsurface_source_aquifer_mm,
         balance_error_mm,
     })
 }
