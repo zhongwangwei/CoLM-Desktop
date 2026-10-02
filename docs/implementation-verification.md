@@ -28352,5 +28352,15 @@ Rust 在 `lulcc_transition` 里从旧年份续跑读出缓存、计数与标识�
 - 改用溶质 `sol1` 加 IsoGSM 降水强迫（`normalized_over_total`）。
 
 **验收**：`g3i` history 6 份、restart 8 份逐位一致（含跨年续跑里的强迫缓存）。
+`g3im` = g3i 改用 MEC（走 `lccpct` 加权那一支），同样 history 6 份、restart 8 份逐位一致。
 
 **仍然拒绝**：甲烷 + LULCC、泥沙 + LULCC。
+
+## 第 515 轮：LULCC 的其余组合（泥沙、BGC、甲烷）
+
+- **泥沙 + LULCC**：上游的泥沙状态和河道一样留在内存里，LULCC 年末重写的河道续跑带着它（`tracer_lifecycle_route_write_restart`）。Rust 原来在这里只写河道状态、泥沙会冷启动，所以一直拒绝。现在 `run_spatial_segment` 把泥沙也交出来，`lulcc_transition` 写进新一年的河道续跑。
+  - `g3sed` = g3 + `SEDIMENT`：history 6 份、restart 8 份逐位一致。跨年的河道续跑里有 180 个泥沙相关变量。
+  - 不带示踪物的 `g3` 重跑仍然一致。
+- **BGC + LULCC**：上游 `MOD_Namelist.F90:2272-2276` 在 `DEF_USE_USGS .or. DEF_USE_BGC` 时停机（"LULCC is not supported for LULC_USGS/BGC at present"）。Rust 的 `check_spatial_lulcc` 原来只拒绝 USGS，漏了 BGC，现在照上游拒绝。
+- **甲烷 + LULCC**：甲烷依赖 BGC，上游不可能跑到这个组合。Rust 的拒绝信息改成引用上游的这条限制，不再记作移植缺口。上游里 `remap_methane_lulcc_state` 那 850 行在上游自己的约束下是走不到的。
+- **同位素 + LULCC**：见第 514 轮，只要出现新建的土壤/湿地 patch，上游自己就会停机。Rust 照搬了这条检查。

@@ -463,18 +463,6 @@ fn run_spatial(
              ported; run this case with --engine fortran"
         );
     }
-    // 上游 LULCC 年末重写的河道续跑里带着泥沙（`WRITE_GridRiverLakeTimeVars` →
-    // `tracer_lifecycle_route_write_restart`），Rust 的 LULCC 重写只写河道状态，泥沙会悄悄冷启动。
-    let sediment = tracer_set.as_ref().is_some_and(|set| {
-        set.tracers
-            .iter()
-            .any(colm_runtime::river::sediment::is_sediment_tracer)
-    });
-    ensure!(
-        !(sediment && logical_field(&document, "DEF_USE_LULCC")?),
-        "SEDIMENT with DEF_USE_LULCC (sediment state across the LULCC river restart) is not ported; \
-         run this case with --engine fortran"
-    );
     // 输运示踪物跨 LULCC：陆面状态见 `lulcc_land_tracers`（SAT/MEC），强迫缓存见 `lulcc_forcing_cache`。
     let methane_tracer = tracer_set.as_ref().is_some_and(|set| {
         set.tracers
@@ -483,8 +471,8 @@ fn run_spatial(
     });
     ensure!(
         !(methane_tracer && logical_field(&document, "DEF_USE_LULCC")?),
-        "methane with DEF_USE_LULCC (save/remap_methane_lulcc_state) is not ported; run this \
-         case with --engine fortran"
+        "methane with DEF_USE_LULCC: methane needs BGC, and upstream does not support LULCC with \
+         BGC (MOD_Namelist stops too)"
     );
     ensure!(
         !logical_field(&document, "DEF_UnitCatchment_regional")?,
@@ -637,6 +625,7 @@ fn run_spatial_segment(
     Option<(
         colm_runtime::river::RiverState,
         Option<colm_runtime::river::tracer::RiverTracers>,
+        Option<colm_runtime::river::sediment::Sediment>,
     )>,
 > {
     use colm_runtime::spatial::{
@@ -1491,9 +1480,13 @@ fn run_spatial_segment(
         );
         println!("colm-rs: {} history file(s)", history.files.len());
     }
-    Ok(runtime
-        .river()
-        .map(|river| (river.state.clone(), river.tracers.clone())))
+    Ok(runtime.river().map(|river| {
+        (
+            river.state.clone(),
+            river.tracers.clone(),
+            river.sediment.clone(),
+        )
+    }))
 }
 
 /// Rust 这边 LULCC 只接上游的 SAT 默认路径：LCT、IGBP、不 spinup、2000 年以后。
@@ -1509,6 +1502,12 @@ fn check_spatial_lulcc(
     ensure!(
         land_cover == LandCoverScheme::Igbp,
         "upstream LULCC supports IGBP land cover only"
+    );
+    // `MOD_Namelist.F90:2272-2276`：`DEF_USE_USGS .or. DEF_USE_BGC` 时上游停机
+    // （"LULCC is not supported for LULC_USGS/BGC at present"）。甲烷依赖 BGC，所以也跟着不支持。
+    ensure!(
+        !logical_field(document, "DEF_USE_BGC")?,
+        "LULCC is not supported for BGC upstream (MOD_Namelist stops too)"
     );
     for field in [
         "DEF_USE_PFT",
@@ -2134,6 +2133,7 @@ fn lulcc_transition(
     river: Option<(
         colm_runtime::river::RiverState,
         Option<colm_runtime::river::tracer::RiverTracers>,
+        Option<colm_runtime::river::sediment::Sediment>,
     )>,
 ) -> Result<()> {
     use colm_runtime::spatial::topology::SpatialTopology;
@@ -2437,7 +2437,7 @@ fn lulcc_transition(
         let _ = std::fs::remove_dir(restart_root.join(&label));
     }
     // 3. 河道：网络不变，状态接着用。
-    if let Some((mut state, river_tracers)) = river {
+    if let Some((mut state, river_tracers, sediment)) = river {
         let network = colm_runtime::river::network::RiverNetwork::read(
             Path::new(&string_field(document, "DEF_UnitCatchment_file")?),
             logical_field(document, "DEF_GridRiverLake_FloodplainStorageFix")?,
@@ -2493,6 +2493,15 @@ fn lulcc_transition(
                 colm_runtime::river::restart::write_empty_river_tracers(&path)?;
             }
             None => {}
+        }
+        // 泥沙同样留在内存里，LULCC 年末重写的河道续跑带着它（`tracer_lifecycle_route_write_restart`）。
+        if let Some(sediment) = sediment.as_ref() {
+            sediment.write_restart(
+                &path,
+                &network,
+                u8::try_from(integer_field(document, "DEF_REST_CompressLevel")?)
+                    .context("DEF_REST_CompressLevel must fit 0..=9")?,
+            )?;
         }
         written.push(path);
     }
