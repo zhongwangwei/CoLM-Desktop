@@ -2680,6 +2680,20 @@ pub struct HistorySession {
     tracer_time_step_seconds: Option<f64>,
     /// 有输运示踪物时的示踪物 history（`tracer_hist_out`），见 [`Self::with_tracer_variables`]。
     tracer_variables: Option<TracerHistoryState>,
+    /// 闸门 3（`DEF_hist_vars`）：开会话时取 [`install_selection`] 装好的那一份。
+    selection: Option<std::sync::Arc<colm_hist::selection::HistorySelection>>,
+}
+
+/// 本进程的 `DEF_hist_vars` 开关状态。上游它是 namelist 模块里的全局量，读一次、整个运行不变；
+/// 这里同样只装一次，之后开的每个 history 会话都按它过滤（不装就不过滤）。
+static SELECTION: std::sync::OnceLock<std::sync::Arc<colm_hist::selection::HistorySelection>> =
+    std::sync::OnceLock::new();
+
+/// 装上本进程的 history 开关状态（只能装一次）。
+pub fn install_selection(selection: colm_hist::selection::HistorySelection) -> Result<()> {
+    SELECTION
+        .set(std::sync::Arc::new(selection))
+        .map_err(|_| anyhow::anyhow!("the history selection is installed twice"))
 }
 
 /// 示踪物 history 的调度与当前文件（与主 history 同一份记录表，自己计步）。
@@ -2691,7 +2705,11 @@ struct TracerHistoryState {
     cursor: usize,
     /// 上次写出以来的非预热步数（主 history 的 `nac`）。
     steps: usize,
-    open: Option<(String, HistoryBuffers, Vec<colm_hist::history::TracerFileVariable>)>,
+    open: Option<(
+        String,
+        HistoryBuffers,
+        Vec<colm_hist::history::TracerFileVariable>,
+    )>,
 }
 
 /// 多 patch 时每个累加器只写自己那一格；单 patch 一次写全部（缓冲区只有一格）。
@@ -2812,6 +2830,7 @@ impl HistorySession {
             staged_patch: Vec::new(),
             tracer_time_step_seconds: None,
             tracer_variables: None,
+            selection: SELECTION.get().cloned(),
         })
     }
 
@@ -3593,7 +3612,10 @@ impl HistorySession {
         patch_types: Vec<i32>,
     ) -> Self {
         // 示踪物文件的平均用主 history 的 `nac`：续跑接着累加时（先 `restore` 了窗口）从那里接上。
-        let steps = self.accumulators.first().map_or(0, |accumulator| accumulator.steps);
+        let steps = self
+            .accumulators
+            .first()
+            .map_or(0, |accumulator| accumulator.steps);
         self.tracer_variables = Some(TracerHistoryState {
             set,
             patch_types,
@@ -3624,7 +3646,8 @@ impl HistorySession {
         for (patch, state) in states.iter_mut().enumerate() {
             if let Some(bgc) = state.bgc.as_deref_mut() {
                 if let Some(methane) = bgc.methane.as_deref() {
-                    bgc.methane_acc.accumulate(methane, tracer.patch_types[patch]);
+                    bgc.methane_acc
+                        .accumulate(methane, tracer.patch_types[patch]);
                 }
             }
         }
@@ -3710,8 +3733,9 @@ impl HistorySession {
                         let land = hist::PatchFilter::Land.admits(patch_type, true, true);
                         let patch_ok = variable.patch_filter.admits(patch_type, true, true);
                         let pairs = layered.then(|| hist::soisno_layer_pairs(itrc, &track.state));
-                        let term = (!layered)
-                            .then(|| hist::patch_term(variable, descriptor, itrc, &track.state, nac));
+                        let term = (!layered).then(|| {
+                            hist::patch_term(variable, descriptor, itrc, &track.state, nac)
+                        });
                         for &(cell, area) in &grid.parts[patch] {
                             for layer in 0..width {
                                 let target = &mut cells[layer * columns + cell];
@@ -3723,8 +3747,12 @@ impl HistorySession {
                                         let (mass, water) = pairs[layer];
                                         target.add_layer(mass, water, area, patch_ok);
                                     }
-                                    (None, Some(term)) => target.add(variable, term, area, patch_ok),
-                                    (None, None) => unreachable!("a 2-D variable always has a term"),
+                                    (None, Some(term)) => {
+                                        target.add(variable, term, area, patch_ok)
+                                    }
+                                    (None, None) => {
+                                        unreachable!("a 2-D variable always has a term")
+                                    }
                                 }
                             }
                         }
@@ -3742,28 +3770,45 @@ impl HistorySession {
                         .tracer
                         .as_deref()
                         .context("a tracer history needs every patch to carry tracer state")?;
-                    let patch_ok = variable.patch_filter.admits(tracer.patch_types[patch], true, true);
+                    let patch_ok =
+                        variable
+                            .patch_filter
+                            .admits(tracer.patch_types[patch], true, true);
                     if layered {
-                        let values =
-                            hist::single_point_soisno(itrc, &track.state, nac, patch_ok);
-                        let base = (record.record * patches + patch) * colm_core::tracer::SOISNO_LAYERS;
+                        let values = hist::single_point_soisno(itrc, &track.state, nac, patch_ok);
+                        let base =
+                            (record.record * patches + patch) * colm_core::tracer::SOISNO_LAYERS;
                         file_variable.values[base..base + colm_core::tracer::SOISNO_LAYERS]
                             .copy_from_slice(&values);
                     } else {
                         file_variable.values[record.record * patches + patch] =
-                            hist::single_point_value(variable, descriptor, itrc, &track.state, nac, patch_ok);
+                            hist::single_point_value(
+                                variable,
+                                descriptor,
+                                itrc,
+                                &track.state,
+                                nac,
+                                patch_ok,
+                            );
                     }
                 }
                 index += 1;
             }
         }
         // CH4 `core` 变量（`methane_reactive_history`，排在示踪物变量之后）：单点 patch 维。
-        let has_methane = states
-            .iter()
-            .any(|state| state.bgc.as_deref().is_some_and(|bgc| bgc.methane.is_some()));
+        let has_methane = states.iter().any(|state| {
+            state
+                .bgc
+                .as_deref()
+                .is_some_and(|bgc| bgc.methane.is_some())
+        });
         if has_methane {
-            ensure!(grid.is_none(), "gridded methane history is not ported to the Rust runtime yet");
-            let template = colm_core::methane::driver::CoreAccumulator::default().core_values(false, false, false);
+            ensure!(
+                grid.is_none(),
+                "gridded methane history is not ported to the Rust runtime yet"
+            );
+            let template = colm_core::methane::driver::CoreAccumulator::default()
+                .core_values(false, false, false);
             for (k, (name, long_name, units, _)) in template.iter().enumerate() {
                 if variables.len() == index + k {
                     variables.push(colm_hist::history::TracerFileVariable {
@@ -3930,6 +3975,9 @@ impl HistorySession {
                 self.site,
                 self.record_count(&record.suffix),
             );
+            if let Some(selection) = &self.selection {
+                buffer = buffer.with_selection(std::sync::Arc::clone(selection));
+            }
             if let Some(grid) = &self.grid {
                 buffer = buffer.with_grid(std::sync::Arc::clone(grid))?;
                 if !self.gridded_names.is_empty() {

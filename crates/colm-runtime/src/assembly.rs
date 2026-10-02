@@ -689,11 +689,13 @@ enum LeafAreaSource {
         patch: usize,
         start_year: i32,
         end_year: i32,
+        /// `DEF_USE_LAIFEEDBACK` 时 `LAI_readin` 不读 `LAI_patches`（上游 mksrfdata 也不写它）。
+        leaf_area: bool,
     },
 }
 
 impl MonthlyLeafAreaIndex {
-    /// 空间算例的逐月 LAI（`landdata/LAI`）。
+    /// 空间算例的逐月 LAI（`landdata/LAI`）。`leaf_area` 为假（LAI 反馈）时只读 `SAI_patches`。
     pub fn read_grid(
         landdata: impl AsRef<std::path::Path>,
         block: &str,
@@ -701,6 +703,7 @@ impl MonthlyLeafAreaIndex {
         change_yearly: bool,
         land_cover_year: i32,
         (start_year, end_year): (i32, i32),
+        leaf_area: bool,
     ) -> Self {
         Self {
             vegetation: LeafAreaSource::Grid {
@@ -709,6 +712,7 @@ impl MonthlyLeafAreaIndex {
                 patch,
                 start_year,
                 end_year,
+                leaf_area,
             },
             change_yearly,
             land_cover_year,
@@ -764,7 +768,8 @@ impl MonthlyLeafAreaIndex {
     ///
     /// `for_year` 最后两个参数是 `USE_SITE_LAI = .false.` 那一支的年界；
     /// 构造时已经拒绝那一支，所以传 0（`lai_year_index` 只在另一支用它们）。
-    pub fn for_time(&self, time: colm_core::CalendarTime) -> Result<(f64, f64)> {
+    /// 网格源在 LAI 反馈下不读 LAI，返回的 LAI 为 `None`。
+    pub fn for_time(&self, time: colm_core::CalendarTime) -> Result<(Option<f64>, f64)> {
         let (month, _) = colm_core::month_day(time)?;
         let year = if self.change_yearly {
             time.year
@@ -779,6 +784,7 @@ impl MonthlyLeafAreaIndex {
                 patch,
                 start_year,
                 end_year,
+                leaf_area,
             } => {
                 let year = year.max(*start_year).min(*end_year);
                 let read = |stem: &str| -> Result<f64> {
@@ -791,13 +797,19 @@ impl MonthlyLeafAreaIndex {
                         format!("{} has no {stem} value for patch {patch}", path.display())
                     })
                 };
-                return Ok((read("LAI_patches")?, read("SAI_patches")?));
+                let lai = if *leaf_area {
+                    Some(read("LAI_patches")?)
+                } else {
+                    None
+                };
+                return Ok((lai, read("SAI_patches")?));
             }
         };
-        match self.urban_year_bounds {
+        let (lai, sai) = match self.urban_year_bounds {
             Some((start, end)) => vegetation.for_year(year, month, false, start, end),
             None => vegetation.for_year(year, month, true, 0, 0),
-        }
+        }?;
+        Ok((Some(lai), sai))
     }
 }
 
@@ -915,7 +927,10 @@ pub struct StandardLctRestartTemplate {
     pub irrigation: Option<colm_core::IrrigationState>,
     /// `DEF_USE_TRACER` 且有输运示踪物：共享配置与本 patch 的起跑示踪物状态
     /// （[`Self::with_tracer`] 装上）。
-    pub tracer: Option<(std::sync::Arc<crate::tracer::TracerRuntime>, colm_core::tracer::PatchTracerState)>,
+    pub tracer: Option<(
+        std::sync::Arc<crate::tracer::TracerRuntime>,
+        colm_core::tracer::PatchTracerState,
+    )>,
     /// 本 patch 在网格元里的面积份额 `elm_patch%subfrc`：单 patch 为 1，多作物单点是归一化的
     /// `pctcrop`（`MOD_SingleSrfdata.F90:1490-1493`）。只用于网格元的近地面诊断聚合。
     pub patch_fraction: f64,
@@ -1607,6 +1622,19 @@ impl StandardLctRestartTemplate {
         Ok(self)
     }
 
+    /// 非土壤 patch 的灌溉量：上游对它们不跑 `CalIrrigationNeeded`/施灌，数组只保留重启值
+    /// （`sum_irrig`、`waterstorage` 等，mkinidata 置 0）与分配值 `spval`（需水、供水），
+    /// 但 `accumulate_fluxes` 照样对每个 patch 累加。这里只挂状态给 history 与续跑写回用，
+    /// 不打开灌溉物理（`physics.irrigation` 由调用方关掉）。
+    pub fn with_frozen_irrigation(mut self, state: colm_core::IrrigationState) -> Result<Self> {
+        ensure!(
+            self.patch_type != 0,
+            "frozen irrigation state is for non-soil patches; soil patches run the irrigation physics"
+        );
+        self.irrigation = Some(state);
+        Ok(self)
+    }
+
     /// 给 PFT 子网格装上月度 LAI 源（见 [`crate::pft::PftTemplate::with_monthly_leaf_area_index`]）。
     pub fn with_pft_monthly_leaf_area_index(
         mut self,
@@ -1710,6 +1738,7 @@ impl StandardLctRestartTemplate {
             return Ok(false);
         };
         let (tlai, tsai) = lai.for_time(time)?;
+        let tlai = || tlai.context("the monthly LAI source skipped LAI outside LAI feedback");
         // PFT/PC 构建（`DEF_USE_LCT` 关）里没有 PFT 子网格的 patch（湿地等）：`MOD_LAIReadin.F90:177-184`
         // 直接取站点逐月值、不做 `fveg0` 后处理；LAI 反馈开着时只换 `tsai`。
         if (self.physics.use_pft || self.physics.use_pc) && self.pft.is_none() && !lai.is_urban() {
@@ -1727,7 +1756,7 @@ impl StandardLctRestartTemplate {
                     leaf_area_index: if feedback {
                         state.energy.temporal_canopy.leaf_area_index
                     } else {
-                        tlai
+                        tlai()?
                     },
                     stem_area_index: tsai,
                 }
@@ -1737,7 +1766,7 @@ impl StandardLctRestartTemplate {
         if lai.is_urban() {
             // `UrbanLAI_readin`：直接赋值，`LAI_readin` 的地类后处理对 URBAN 是 `CYCLE`。
             state.energy.temporal_canopy = colm_core::TemporalCanopy {
-                leaf_area_index: tlai,
+                leaf_area_index: tlai()?,
                 stem_area_index: tsai,
             };
             return Ok(true);
@@ -1754,7 +1783,7 @@ impl StandardLctRestartTemplate {
         {
             (0.0, 0.0)
         } else {
-            (tlai / fveg0, tsai / fveg0)
+            (tlai()? / fveg0, tsai / fveg0)
         };
         state.energy.temporal_canopy = colm_core::TemporalCanopy {
             leaf_area_index: tlai,
@@ -2170,7 +2199,9 @@ impl StandardLctRestartTemplate {
                 .as_ref()
                 .map(|snicar| Box::new(snicar.initial.clone())),
             tracer: self.tracer.as_ref().map(|(_, initial)| {
-                Box::new(colm_core::tracer::step::PatchTracerTrack::new(initial.clone()))
+                Box::new(colm_core::tracer::step::PatchTracerTrack::new(
+                    initial.clone(),
+                ))
             }),
         }
     }

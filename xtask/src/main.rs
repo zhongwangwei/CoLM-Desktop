@@ -487,10 +487,28 @@ fn gen_histmap() -> Result<()> {
     }
     vars.extend(methane);
 
-    let out = hist::render(&vars);
+    let src = root.join("vendor/CoLM202X/share/MOD_Namelist.F90");
+    let text =
+        std::fs::read_to_string(&src).with_context(|| format!("cannot read {}", src.display()))?;
+    let switches = hist::extract_switches(&text)?;
+    // 每个变量的开关都必须是声明过的成员（大小写不敏感，Fortran 如此）。
+    for var in &vars {
+        if let Some(switch) = &var.switch {
+            if !switches.iter().any(|s| s.name.eq_ignore_ascii_case(switch)) {
+                anyhow::bail!("f_{} is gated by undeclared DEF_hist_vars%{switch}", var.name);
+            }
+        }
+    }
+
+    let out = hist::render(&vars, &switches);
     let dst = root.join("crates/colm-hist/src/generated.rs");
     std::fs::write(&dst, out)?;
-    println!("wrote {} variables to {}", vars.len(), dst.display());
+    println!(
+        "wrote {} variables and {} switches to {}",
+        vars.len(),
+        switches.len(),
+        dst.display()
+    );
     Ok(())
 }
 

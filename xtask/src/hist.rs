@@ -23,6 +23,9 @@ pub struct Var {
     pub units: Option<String>,
     /// 除 `time` 与 `patch` 之外的维度名，**按文件里的顺序**。
     pub dims: Vec<String>,
+    /// 首参里的 `DEF_hist_vars%X` 开关名（闸门 3）；首参是 `.true.`、`restart_date` 或甲烷的
+    /// `mhist_on(...)` 时为 `None`。
+    pub switch: Option<String>,
     pub line: u32,
 }
 
@@ -199,6 +202,7 @@ pub fn extract_at_least(text: &str, minimum: usize) -> Result<Vec<Var>> {
             let lits = raw_literals(&keyword_literals_removed(&buf));
             let (long_name, units) = call_metadata(&lits);
             let dims = call_dimensions(&lits);
+            let switch = first_argument_switch(&buf);
             for name in literals(&buf) {
                 let macros: Vec<Cond> = mstack.iter().flatten().cloned().collect();
                 let candidate = Var {
@@ -208,6 +212,7 @@ pub fn extract_at_least(text: &str, minimum: usize) -> Result<Vec<Var>> {
                     long_name: long_name.clone(),
                     units: units.clone(),
                     dims: dims.clone(),
+                    switch: switch.clone(),
                     line: (start + 1) as u32,
                 };
                 match out.entry(candidate.name.clone()) {
@@ -315,6 +320,17 @@ fn merge_sites(existing: &mut Var, candidate: Var) -> Result<()> {
             candidate.line
         );
     }
+    // 开关决定写不写：同一个变量在两处由不同开关控制，就没法用一个开关描述它。
+    if existing.switch != candidate.switch {
+        bail!(
+            "{} is written under different DEF_hist_vars switches ({:?} vs {:?}) at lines {} and {}",
+            existing.name,
+            existing.switch,
+            candidate.switch,
+            existing.line,
+            candidate.line
+        );
+    }
     // `long_name` 允许分歧：实测 `f_methane_surf_flux_lake` 与
     // `f_methane_surf_flux_rice` 各在两个分支里出现（面平均 vs 强度量），
     // 运行期只会有一支生效，而表的 schema 只能留一个。取先出现的那条，
@@ -337,6 +353,31 @@ fn runtime_if(t: &str) -> Option<String> {
     let close = t.rfind(')')?;
     let inner = t[open + 1..close].trim();
     inner.contains("DEF_").then(|| inner.to_string())
+}
+
+/// 写出调用首参（到首个顶层逗号）里的 `DEF_hist_vars%X` 的 `X`。
+fn first_argument_switch(call: &str) -> Option<String> {
+    let open = call.find('(')?;
+    let mut depth = 0i32;
+    let mut end = call.len();
+    for (k, ch) in call[open + 1..].char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            ',' if depth <= 0 => {
+                end = open + 1 + k;
+                break;
+            }
+            _ => {}
+        }
+    }
+    let first = &call[open + 1..end];
+    let at = first.find("DEF_hist_vars%")? + "DEF_hist_vars%".len();
+    let name: String = first[at..]
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+        .collect();
+    (!name.is_empty()).then_some(name)
 }
 
 /// 首参 `DEF_hist_vars%X .and. <条件>` 里 `.and.` 之后到首个顶层逗号。
@@ -481,9 +522,140 @@ fn literals(s: &str) -> Vec<String> {
         .collect()
 }
 
+/// `DEF_hist_vars` 的一个开关（`MOD_Namelist.F90` 的 `history_var_type`）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Switch {
+    pub name: String,
+    /// 类型声明里的默认值。
+    pub declared: bool,
+    /// `sync_hist_vars(set_defaults = .true.)` 何时把它置成 `DEF_HIST_vars_out_default`。
+    pub sync: Sync,
+    /// `DEF_USE_DiagMatrix` 时读完历史 namelist 后强制置真。
+    pub diag_matrix: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Sync {
+    Always,
+    /// 外层 `IF (<条件>) THEN` 的原文。
+    Runtime(String),
+    /// 外层 `#ifdef <宏>`。
+    Macro(String),
+    /// 不在 `sync_hist_vars` 里：一直是声明默认值（除非历史 namelist 改它）。
+    Never,
+}
+
+/// 从 `MOD_Namelist.F90` 读出全部开关：声明默认值、同步条件与 DiagMatrix 强制列表。
+pub fn extract_switches(text: &str) -> Result<Vec<Switch>> {
+    let lines: Vec<&str> = text.lines().map(|l| strip_comment(l).trim()).collect();
+    let find = |needle: &str, from: usize| -> Result<usize> {
+        lines[from..]
+            .iter()
+            .position(|l| l.to_ascii_lowercase().starts_with(&needle.to_ascii_lowercase()))
+            .map(|k| from + k)
+            .ok_or_else(|| anyhow::anyhow!("MOD_Namelist.F90 has no line starting with {needle:?}"))
+    };
+    let start = find("type history_var_type", 0)?;
+    let end = find("END type history_var_type", start)?;
+    let mut switches: Vec<Switch> = Vec::new();
+    for line in &lines[start + 1..end] {
+        if line.is_empty() {
+            continue;
+        }
+        let low = line.to_ascii_lowercase();
+        let Some(rest) = low.strip_prefix("logical") else {
+            bail!("unexpected history_var_type member: {line}");
+        };
+        let rest = rest.trim_start().trim_start_matches("::").trim();
+        let Some((name, value)) = line[line.len() - rest.len()..].split_once('=') else {
+            bail!("history_var_type member without a default: {line}");
+        };
+        let declared = match value.trim().to_ascii_lowercase().as_str() {
+            ".true." => true,
+            ".false." => false,
+            other => bail!("history_var_type default {other:?} is not a logical literal"),
+        };
+        switches.push(Switch {
+            name: name.trim().to_string(),
+            declared,
+            sync: Sync::Never,
+            diag_matrix: false,
+        });
+    }
+    let position = |switches: &[Switch], name: &str| -> Result<usize> {
+        switches
+            .iter()
+            .position(|s| s.name.eq_ignore_ascii_case(name))
+            .ok_or_else(|| anyhow::anyhow!("DEF_hist_vars%{name} is not declared"))
+    };
+    let member = |line: &str| -> Option<String> {
+        let at = line.find("DEF_hist_vars%")? + "DEF_hist_vars%".len();
+        let name: String = line[at..]
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+            .collect();
+        (!name.is_empty()).then_some(name)
+    };
+    let sync_start = find("SUBROUTINE sync_hist_vars (set_defaults)", 0)?;
+    let sync_end = find("END SUBROUTINE sync_hist_vars", sync_start)?;
+    let mut condition: Option<Sync> = None;
+    for line in &lines[sync_start + 1..sync_end] {
+        let low = line.to_ascii_lowercase().replace(' ', "");
+        if low.starts_with("#ifdef") {
+            ensure_flat(&condition, line)?;
+            condition = Some(Sync::Macro(line["#ifdef".len()..].trim().to_string()));
+        } else if low.starts_with("#endif") || low == "endif" {
+            condition = None;
+        } else if low.starts_with("if(") && low.ends_with(")then") {
+            ensure_flat(&condition, line)?;
+            let inner = &line[line.find('(').unwrap() + 1..line.rfind(')').unwrap()];
+            condition = Some(Sync::Runtime(inner.trim().to_string()));
+        } else if low.starts_with('#') || low.starts_with("else") {
+            bail!("unsupported conditional in sync_hist_vars: {line}");
+        } else if low.starts_with("callsync_hist_vars_one") {
+            let name = member(line).ok_or_else(|| anyhow::anyhow!("no switch in {line}"))?;
+            let k = position(&switches, &name)?;
+            if switches[k].sync != Sync::Never {
+                bail!("DEF_hist_vars%{name} is synchronized twice");
+            }
+            switches[k].sync = condition.clone().unwrap_or(Sync::Always);
+        }
+    }
+    // `read_namelist` 里 `IF(DEF_USE_DiagMatrix)THEN` 那一段的强制置真。
+    let read = find("CALL sync_hist_vars (set_defaults = .true.)", 0)?;
+    let diag = find("IF(DEF_USE_DiagMatrix)THEN", read)?;
+    let mut forced = 0;
+    for line in &lines[diag + 1..] {
+        if line.to_ascii_lowercase().replace(' ', "") == "endif" {
+            break;
+        }
+        if line.is_empty() {
+            continue;
+        }
+        let name = member(line).ok_or_else(|| anyhow::anyhow!("unexpected DiagMatrix line {line}"))?;
+        let k = position(&switches, &name)?;
+        switches[k].diag_matrix = true;
+        forced += 1;
+    }
+    if switches.len() < 400 || forced == 0 {
+        bail!(
+            "only {} switches and {forced} DiagMatrix overrides found — MOD_Namelist.F90 changed shape",
+            switches.len()
+        );
+    }
+    Ok(switches)
+}
+
+fn ensure_flat(condition: &Option<Sync>, line: &str) -> Result<()> {
+    if condition.is_some() {
+        bail!("nested conditional in sync_hist_vars: {line}");
+    }
+    Ok(())
+}
+
 /// 渲染入库产物。**按 `name` 排序**，不依赖 `extract` 用的容器 ——
 /// 否则换掉 `BTreeMap` 会让 drift 测试假红。
-pub fn render(vars: &[Var]) -> String {
+pub fn render(vars: &[Var], switches: &[Switch]) -> String {
     let mut s = String::new();
     s.push_str(&format!(
         "//! 由 `cargo run -p xtask -- gen-histmap` 生成。**不要手改。**\n\
@@ -491,7 +663,7 @@ pub fn render(vars: &[Var]) -> String {
          //! 源：vendor/CoLM202X/main/MOD_Hist.F90\n\
          //!     vendor/CoLM202X/main/TRACER/MOD_Tracer_Reactive_Methane_Hist.F90\n\
          //! 漂移由 crates/colm-hist/tests/drift.rs 守住。\n\n\
-         use crate::{{Cond, Var}};\n\n\
+         use crate::{{Cond, Switch, Sync, Var}};\n\n\
          // 一个变量一行 —— 上游改一处，diff 就只有一行。rustfmt 会把每条拆成\n\
          // 六行（{count} 条 -> 近四千行），那样 code review 里就看不出改了什么了。\n\
          // colm-schema 的同类文件不用写这条：它有一条 626 字符、断不开的数组\n\
@@ -527,10 +699,33 @@ pub fn render(vars: &[Var]) -> String {
             .map(|dim| format!("{dim:?}"))
             .collect::<Vec<_>>()
             .join(", ");
+        let switch = match &v.switch {
+            Some(value) => format!("Some({value:?})"),
+            None => "None".to_string(),
+        };
         let _ = writeln!(
             s,
-            "    Var {{ name: {:?}, macros: &[{macros}], runtime: {runtime}, long_name: {long_name}, units: {units}, dims: &[{dims}], line: {} }},",
+            "    Var {{ name: {:?}, macros: &[{macros}], runtime: {runtime}, long_name: {long_name}, units: {units}, dims: &[{dims}], switch: {switch}, line: {} }},",
             v.name, v.line
+        );
+    }
+    s.push_str("];\n\n");
+    s.push_str(
+        "/// `DEF_hist_vars` 的全部开关，按 `history_var_type` 的声明顺序（`MOD_Namelist.F90`）。\n\
+         #[rustfmt::skip]\n\
+         pub static SWITCHES: &[Switch] = &[\n",
+    );
+    for switch in switches {
+        let sync = match &switch.sync {
+            Sync::Always => "Sync::Always".to_string(),
+            Sync::Runtime(condition) => format!("Sync::Runtime({condition:?})"),
+            Sync::Macro(name) => format!("Sync::Macro({name:?})"),
+            Sync::Never => "Sync::Never".to_string(),
+        };
+        let _ = writeln!(
+            s,
+            "    Switch {{ name: {:?}, declared: {}, sync: {sync}, diag_matrix: {} }},",
+            switch.name, switch.declared, switch.diag_matrix
         );
     }
     s.push_str("];\n");

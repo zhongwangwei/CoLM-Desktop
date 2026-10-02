@@ -27924,7 +27924,7 @@ GIMPLE 要点（默认内核另建一份 `-fdump-tree-optimized-lineno`）：
 
 `end_month = 1, end_day = 33` 在 Fortran 里被当成年内第 33 天，Rust 预检把它当非法日期拒绝。算例改写成 `end_month = 2, end_day = 2`。
 
-## 第 502 轮：B1 —— 空间 CROP（进行中）与两处前置问题
+## 第 502 轮：B1 —— 空间 CROP 的数据映射与两处前置问题
 
 **空间 `CROP_readin`**：上游在空间里拒绝播种日覆盖（mksrfdata 报"crop planting-day override is only supported in SinglePoint"），只走读数据的那一支。
 - patch 级的 `pdrice2` 用 `mg2patch_crop`，PFT 级的 `PLANTDATE_CFT_xx` 与施肥用 `mg2pft_crop`/`mg2pft_fert`，都是面积加权。
@@ -27951,4 +27951,125 @@ GIMPLE 要点（默认内核另建一份 `-fdump-tree-optimized-lineno`）：
 2. 纯 Fortran 前处理在空间 PFT + LAI 反馈下，给非土壤 patch（湿地、城市）留下 `spval` 的 `tlai/lai`。
    - 原因：`LAI_readin` 在反馈下只读 `SAI`，`tlai` 保持分配时的 `spval`。土壤 patch 随后由 BGC 给出，非土壤 patch 一直是 `-1e36`。
    - 上游整段都带着 `lai = -1e36` 跑：`lai+sai` 为大负数，走无冠层支。截留等处则直接拿它做乘法。
-   - Rust 的 mkinidata 在这里给 0，运行期内核对负 LAI 有多处守卫。这是 vendor 的未初始化缺陷，待修 vendor 后再验收空间 CROP。在那之前，空间 CROP 由 `COLM_RS_SPATIAL_CROP` 环境变量把关，默认拒绝。
+   - Rust 的 mkinidata 在这里给 0，运行期内核对负 LAI 有多处守卫。这是 vendor 的未初始化缺陷，待修 vendor 后再验收空间 CROP。在那之前，空间 CROP 由 `COLM_RS_SPATIAL_CROP` 环境变量把关，默认拒绝（vendor 已修；剩下的差异见第 503 轮，把关已去掉）。
+
+## 第 503 轮：B1 —— 空间 CROP 验收（landpatch 的 `pctshared`）
+
+**根因**：Rust 的 `SpatialTopology` 把 landpatch 的 `pctshared` 一律当成 1。CROP 下每个单元的农田 patch
+共用同一像元区间，按 `pctcrop` 分份。上游在 `pixelset_load_from_file` 里检查相邻两个集合：`ielm` 与 `ipxstt`
+都相同，就置 `has_shared`，此时读 `pctshared`。随后两处乘上它：
+- `build_arealweighted` 的 `areapart`（forcing、history、河网三个映射）；
+- `subset_build` 的 `subfrc`（网格元内近地面诊断的权重）。
+
+少乘这一份的后果：
+- history 网格的 `landarea` 约为上游的 10 倍（每格 27675 km² 对 2807 km²）；
+- forcing 映射里 `Σ a·p·f / Σ a·p` 与 `Σ a·f / Σ a` 只差舍入，第一步起就有 1 ulp 级的偏差，两天后放大到约 1e-9
+  （`t_soisno`、BGC 总量、`tleaf_p`）；河道入流随之偏离，`f_discharge` 不一致。
+
+先前对比脚本在每个 history 文件里遇到第一个不一致的量就停，`landarea` 被 `croparea` 的缺失挡住，没有暴露出来。
+
+**修正**：
+- `SpatialTopology::read` 按 `has_shared` 读 `pctshared`；
+- `ElementGroups::from_topology` 的 `subfrc` 乘它；
+- 多块且共享时拒绝（上游 `has_shared` 经 `MPI_LOR` 是全局的，多块尚未移植）。
+
+**`croparea`/`irrigarea`**：只在 `HistForm = 'Gridded'` 的 CROP 内核里写。
+- 写法是 `hist_write_var_real8_2d(..., itime = 1)`：变量带 `time` 维，只写第 1 个时间槽，其余槽是 netCDF 默认填充值 `9.969e36`。
+- `croparea` 的过滤是 `patchclass == 12 .and. patchmask`。
+- `irrigarea` 不开灌溉时用的是未初始化的 `filter_irrig`（upstream-bugs 第 37 条），Rust 写 0。
+- 这两个量在 `HistoryGrid::first_record_statics` 里。
+
+**空间 CROP 去掉 `COLM_RS_SPATIAL_CROP` 把关**，默认放行；播种日覆盖与灌溉仍拒绝（上游拒绝 / 未移植）。
+
+**验收**（纯 Fortran 前处理，两侧同一份输入）：
+- `g1crop`：restart 9 份、history 2 份，全部逐位一致；
+- `g1cropc`（从第 3 天续跑）：restart 14 份、history 2 份，全部逐位一致；
+- `g1cropm`（跨月）：结果见下文。
+
+**空间灌溉**（`DEF_USE_IRRIGATION`）：
+- `grid2pset_dominant`：取面积最大的那一份（`maxloc`，并列取第一个）所在格的值。面积和不为正时上游给 −9999，随后与负值一样变成 −99999999。移植为 `Footprint::dominant`。
+- 需水（`bgc_driver` 里的 `CalIrrigationNeeded`）与施灌（`CalIrrigationApplicationFluxes`）都只在 `patchtype == 0` 上跑。
+- 非土壤 patch 的灌溉量只保留重启值（mkinidata 置 0）与分配值 `spval`（需水、供水），但 `accumulate_fluxes` 照样逐 patch 累加。Rust 给这些 patch 挂一份冻结的状态（`with_frozen_irrigation`），不打开灌溉物理。
+- `irrigarea` 的 `filter_irrig`：`patchclass == 12`，且首个 PFT `>= npcropmin` 且为偶数。
+- `g1irr`（灌溉 + 施肥来源 1，纯 Fortran 前处理）：restart 9 份、history 2 份，全部逐位一致。
+
+## 第 504 轮：B1 —— 空间前处理对纯 Fortran（PFT、BGC、CROP）
+
+第 501–503 轮的空间对照，两侧用的都是**同一份 Rust 前处理**（`--engine fortran` 默认仍走 Rust 的 mksrfdata/mkinidata）。只有 `g1crop` 系列用了纯 Fortran 前处理。这一轮用 `tmp/prepcmp.sh` 把两套前处理各跑一遍，逐位比 landdata 与初始重启，修掉了以下问题。
+
+**mksrfdata（`Aggregation_LAI` 的 PFT/PC 段）**：
+1. `PCT_PFT` 的年份：上游按 LAI 年份的后缀重读（`read_5x5_data_pft(dir_5x5, suffix, ...)`，`suffix = MOD<LAI 年>`）；`Aggregation_PercentagesPFT` 才用土地覆盖年份。Rust 原来复用了土地覆盖年份那一份，`DEF_LC_YEAR ≠ LAI 年`时每个 PFT 的 LAI/SAI 都不同（`g1pft`：最大相对差 0.72）。
+2. 非土壤 patch（湿地、城市、水体）：上游对每个 patch 都写面积加权的 `LAI/SAI_patches`，只有 PFT 量按 patch 类型分支。Rust 原来写 0。
+   - 湿地的 LAI 运行期要用；水体在 `LAI_readin` 里清零。
+   - 原来两侧同用 Rust 前处理时，湿地 LAI 恒为 0，也就逐位一致，问题因此被掩盖。
+3. `DEF_USE_LAIFEEDBACK`（BGC 打开）：上游只聚合 SAI，不写 `LAI_*`。Rust 加 `--stem-area-only`，与上游的文件集一致。
+   - 运行期在反馈下也不再打开 `LAI_patches`（`MonthlyLeafAreaIndex::read_grid(..., leaf_area)`）。原来它会读、然后丢掉读到的值。纯 Fortran 前处理的 landdata 里没有这个文件，原来的写法因此会报找不到文件。
+   - `g1crop` 当时能跑，是因为目录里还留着更早一次 Rust 前处理写下的 LAI 文件。
+4. CROP 份额（`pixelsetshared_build`）：`sum(datashared1d * areapixel)` 被 gfortran 收缩成 FMA 链；CFT 份额是 `fracin * (share/total)`，不是 `(fracin*share)/total`。原来 `pctshared`/`pct_crops` 差约 5e-15。
+
+**mkinidata**：
+1. 作物冷启动的门槛：上游的叶、根碳清零与 CROP 段的 LAI/SAI 清零都是 `ivt >= npcropmin`（17）。Rust 用的是 `>= 15`，把 C3 作物的雨养/灌溉两型（15、16）也当作管理作物清掉了（`g1crop` 的农田 patch：Fortran `totvegc = 100`，Rust 为 0）。单点、空间、colm-core 三处一并改。
+2. 空间 LAI 反馈：上游的流程分三步，单点已移植，空间原来没有。
+   - `LAI_readin` 不读 LAI，`tlai`/`tlai_p` 停在分配值 spval；vendor 修复后 `tlai` 为 0。
+   - `IniTimeVariable` 末尾令 `tlai_p = lai_p = max(0, slatop·leafc_p)`，土壤 patch 的 `lai = sum(lai_p·pftfrac)`。
+   - 反照率按这组 LAI 算。
+   现在：
+   - 空间 LCT 公共冷启动加 `zero_leaf_area`；
+   - PFT 段按 BGC 叶碳重算 `tlai_p`，并改写土壤 patch 的 `lai`；
+   - 有初始积雪时拒绝（上游那条路径用的是 spval 的 `tlai_p`，单点同样不移植）。
+   - vendor 修复（upstream-bugs 第 36 条）把所有 patch 的 `tlai` 从 spval 改成了 0，单点 Rust mkinidata 同步改为 0。
+3. 面积加权映射：mkinidata 原来有一份自己写的映射（`crop::AreaMapping`），重叠面积公式、份的顺序、求和与缺测处理都和上游不同（`pdrice2` 截断成 207 对 208，`plantdate_p` 差 1 ulp）。
+   - 现在改为运行期那份逐位验收过的 `AreaWeightedMapping`：`grid.rs`/`mapping.rs` 移到 colm-init（`spatial_grid`/`spatial_mapping`），colm-runtime 重导出。
+   - `exclude_invalid` 按 `set_missing_value` 把缺测份的面积清零、重算面积和；`average` 按 `grid2pset` 写成 FMA 链。
+   - 显式边界的网格（地下水深图）走新加的 `LatLonGrid::define_by_edges`（`grid_define_from_file` 无格心支）。
+4. CROP 的 patch 汇总（`CNDriverSummarizeStates` 只对土壤 patch 跑）：
+   - `cphase(i) = sum(cphase_p·pftfrac)`，是 FMA 链，不除权重；
+   - 没有 PFT 的 patch，`cphase` 与 `fertnitro_*` 停在 spval。原来 Rust 除以权重和、写 0。
+
+**结果**（landdata 全目录与 `const`、`2010-001` 两组初始重启逐文件逐变量比较）：
+- `g1pftp`（空间 PFT）：landdata 275 份逐位一致，初始重启全部逐位一致；
+- `g1bgcp`（空间 BGC + 硝化 + 火灾 + LAI 反馈）：初始重启全部逐位一致；
+- `g1cropp`（空间 CROP + LAI 反馈）：landdata 253 份、初始重启全部逐位一致。
+- `g1`（空间 LCT）：landdata 248 份、初始重启全部逐位一致；
+- `g1initp`（LCT + `DEF_USE_WaterTableInit` + `DEF_USE_SoilInit`，`/Volumes/Data/CoLMruntime/{wtd,soilstate}.nc`）：
+  - 起初一个 patch 的深层 `wliq_soisno/smp/hk` 差 1–2 ulp。
+  - 原因是 `IniTimeVariable` 里水位所在层的插值被 gfortran 收缩成 `FMA(zi(j)-zwt, porsl, (zwt-zi(j-1))*wet)`。
+  - `psi`/`wa` 的 `zwt*1000. - zi*1000.` 是 `FMS(zwt, 1000, zi*1000)`，`psi0 - d*0.5` 是 `FNMA`；Rust 原来写成代数等价的 `(zwt-zi)*500`。
+  - 照 GIMPLE 改后逐位一致（colm-core `time_state`，单点同用）。
+- `g1bgcinitp`（BGC + `DEF_USE_CN_INIT`，`cnsteadystate.nc`）：初始重启全部逐位一致。
+
+**端到端**（纯 Fortran = Fortran 前处理 + Fortran 内核；纯 Rust = Rust 前处理 + Rust 运行期），全部逐位一致：
+
+| 算例 | landdata | restart | history |
+|---|---|---|---|
+| `g1pftp`（空间 PFT） | 275 | 7 | 2 |
+| `g1bgcp`（空间 BGC + LAI 反馈） | 251 | 9 | 2 |
+| `g1cropp`（空间 CROP + LAI 反馈） | 253 | 9 | 2 |
+
+`g1bgcp` 的 Rust 侧另有 24 份 `LAI_*`，是同目录更早一次运行留下的，新的 mksrfdata 不写它们。
+
+## 第 505 轮：history 逐变量选择（闸门 3，`DEF_hist_vars`）
+
+原来遇到 `DEF_HIST_vars_out_default = .false.` 或存在的 `DEF_HIST_vars_namelist` 就拒绝。现在照上游求开关状态（`MOD_Namelist.F90:2788-2870`）：
+1. 先取 `history_var_type` 的声明默认值（482 个开关，139 个默认为假）；
+2. `sync_hist_vars(set_defaults=.true.)` 同步到的开关置成 `DEF_HIST_vars_out_default`。
+   - 464 个同步；其中 26 个只在 FERT/IRRIGATION/NITRIF/FIRE/OZONESTRESS 打开时同步，23 个只在 HYPERSPECTRAL/DataAssimilation 宏下同步；
+   - 18 个从不同步，一直是声明值：`pd*`、`irrig_method_*`、`huiswheat`、`xy_ozone`。
+3. 文件存在时读其中第一个 `&nl_colm_history` 覆盖（成员名不区分大小写，未声明的成员报错，与 `read(nml=)` 一致）；
+4. DiagMatrix 再强制打开 52 个容量量。
+
+Fortran 进程在算例目录里跑，相对路径按算例目录解析。
+
+实现：
+- `xtask gen-histmap` 多读 `MOD_Namelist.F90`，给每个变量记下写出调用首参里的开关（`Var::switch`），并生成 `SWITCHES` 表（声明值、同步条件、DiagMatrix 强制）。
+- `colm_hist::selection` 求出关掉的变量集。
+- `HistoryBuffers::with_selection` 让被关的变量不声明、写入为空操作。
+- 进程级只装一次（`install_selection`），上游它本就是全局量。
+
+FIRE 的五个历史量写的是上一次 `vecacc` 的残留（upstream-bugs 第 26 条），残留随写出集合而变：FIRE 打开且开关改变写出集合时拒绝。
+
+验收（单点，两侧同一份前处理）：
+- `hsel`：`out_default = .false.`，文件只开 6 个量，其中一个成员名写成大写；
+- `hsel2`：`out_default = .true.`，文件关掉同样 6 个量。
+
+两者的 history 3 份、重启全部逐位一致，变量集合相同（6 个 / 111 个）。

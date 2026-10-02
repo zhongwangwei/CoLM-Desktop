@@ -167,12 +167,14 @@ pub fn build_crop_land_patches(
             });
             continue;
         }
+        // `pctshared_xy = (1 - pctcrop/100, pctcrop/100)`，`sum(datashared1d * areapixel)` 被 gfortran
+        // 收缩成 FMA 链。
         let mut shares = [0.0; 2];
         for &cell in patches.raw_cells(patch) {
             let area = area(land_area, cell, patch)?;
             let crop = crop_percent[cell] / 100.0;
-            shares[0] += (1.0 - crop) * area;
-            shares[1] += crop * area;
+            shares[0] = (1.0 - crop).mul_add(area, shares[0]);
+            shares[1] = crop.mul_add(area, shares[1]);
         }
         let total = shares.iter().sum::<f64>();
         ensure!(
@@ -201,7 +203,8 @@ pub fn build_crop_land_patches(
         for &cell in patches.raw_cells(parent.source) {
             let area = area(land_area, cell, parent.source)?;
             for class in 0..cft_class_count {
-                shares[class] += cft_percent[class * land_area.len() + cell] * area;
+                shares[class] =
+                    cft_percent[class * land_area.len() + cell].mul_add(area, shares[class]);
             }
         }
         let total = shares.iter().sum::<f64>();
@@ -215,7 +218,8 @@ pub fn build_crop_land_patches(
                 children.push(Child {
                     source: parent.source,
                     set_type: IGBP_CROPLAND,
-                    pctshared: parent.pctshared * share / total,
+                    // `fracout = fracin * pctshared`，`pctshared` 已先归一化。
+                    pctshared: parent.pctshared * (share / total),
                     crop_class: Some(class + 1),
                 });
             }
@@ -804,6 +808,11 @@ pub fn aggregate_pft_index(
                     && patches.wmo_source_for(patch).is_none(),
                 "PFT/PC patch {patch} has no PFT"
             );
+            // `Aggregation_LAI` 对每个 patch（湿地、城市、水体也一样）都写面积加权的
+            // `LAI/SAI_patches`，只有 PFT 量按 patch 类型分支。
+            let (patch_index, area_sum) =
+                aggregate_patch_index(patches.raw_cells(patch), input, patch)?;
+            output.patch_index[patch] = patch_index / area_sum;
             continue;
         }
         let first = range

@@ -660,7 +660,9 @@ fn spatial_vic_scalar_and_grid_parameters_follow_runoff_scheme_one() {
     .unwrap();
     assert_eq!(values_f64(&block, "vic_b_infilt").unwrap(), [2.0]);
     assert_eq!(values_f64(&block, "vic_Dsmax").unwrap(), [12.0]);
-    assert_eq!(values_f64(&block, "vic_Ds").unwrap(), [0.3]);
+    // 两格各半：`grid2pset` 的 FMA 链给 0.30000000000000004（上游同样），这里只核对取值来源。
+    let ds = values_f64(&block, "vic_Ds").unwrap();
+    assert!(ds.len() == 1 && (ds[0] - 0.3).abs() < 1.0e-15);
     assert_eq!(values_f64(&block, "vic_Ws").unwrap(), [0.6]);
     assert_eq!(values_f64(&block, "vic_c").unwrap(), [2.0]);
 
@@ -1358,7 +1360,8 @@ fn spatial_crop_tuning_writes_pft_and_bgc_restart_state_without_management_maps(
     write_landdata(&landdata, 2005, "w180_s90");
     set_single_topology_range(&landdata, "landpatch", "landpatch", 1, 2, Some(12));
     write_monthly_vegetation(&landdata, 2005, "w180_s90", 2.5, 0.4);
-    write_pft_topology(&landdata, 2005, "w180_s90", 15);
+    // 17（玉米）是 `ivt >= npcropmin` 的管理作物：冷启动清叶碳与 LAI/SAI；15、16 不清。
+    write_pft_topology(&landdata, 2005, "w180_s90", 17);
     write_f64(
         &landdata, "pctpft", "pct_pfts", "pct_pfts", 2005, "w180_s90", 1.0,
     );

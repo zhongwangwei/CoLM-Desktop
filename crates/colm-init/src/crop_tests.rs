@@ -241,7 +241,8 @@ fn spatial_management_allows_empty_pft_axis_but_keeps_patch_crop_maps() {
     assert!(state.pft_fields().fertilizer_nitrogen.is_empty());
     assert_eq!(state.irrigation_method(), Some(&[][..]));
     assert_eq!(state.bgc_fields().crop_phase, [MISSING, MISSING]);
-    assert_eq!(state.bgc_fields().planting_day_rice2, [1.0, 3.0]);
+    // `grid2pset`：`round(3·area)/area = 2.9999999999999996`，`int()` 截成 2（上游同样如此）。
+    assert_eq!(state.bgc_fields().planting_day_rice2, [1.0, 2.0]);
     let irrigation = state.irrigation_fields(&[0.0, 0.0]).unwrap();
     for (values, expected) in [
         (irrigation.groundwater_allocation, [0.2, 0.6]),
@@ -471,3 +472,4 @@ fn source_one_manure_matches_the_complete_fortran_class_table() {
     ];
     assert_eq!(state.pft_fields().manure_nitrogen, expected);
 }
+

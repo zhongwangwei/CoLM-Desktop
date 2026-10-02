@@ -39,3 +39,4 @@ fn parts_are_sorted_by_latitude_then_longitude() {
     let value = mapping.grid_to_set(1, |_, _| 280.0);
     assert!((value - 280.0).abs() < 1.0e-12);
 }
+

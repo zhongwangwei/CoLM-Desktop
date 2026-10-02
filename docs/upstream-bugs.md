@@ -273,6 +273,16 @@
 - **影响**：空间 PFT/PC + BGC + LAI 反馈的所有非土壤 patch。Rust 的 mkinidata 在这里给 0，两种前处理因此不一致。
 - **处理**：`vendor/` 已修（第 502 轮）：`LAI_readin` 之后把仍是 `spval` 的 `tlai` 置 0（裸地起步），与 Rust 前处理一致。
 
+### 37. 不开灌溉时网格 history 的 `irrigarea` 用未初始化的 `filter_irrig`
+
+- **位置**：`main/MOD_Hist.F90:446-477`（`#ifdef CROP`）。
+- **原因**：`filter_irrig` 在 370 行 `allocate` 后只在 `IF (DEF_USE_IRRIGATION)` 里逐 patch 赋值，
+  `get_sumarea (sumarea_irrig, filter_irrig)` 与 `irrigarea` 的写出却不受该开关约束。
+- **证据**：`g1crop`（CROP 内核、灌溉关闭）的 `irrigarea` 恰好全为 0 —— 新分配的内存碰巧是零，
+  换平台或换分配器就可能是任意值。
+- **影响**：CROP 内核、`HistForm = 'Gridded'`、`DEF_USE_IRRIGATION = .false.` 时的 `irrigarea` 静态量（不影响物理）。
+- **处理**：Rust 按"全假"写 0（第 503 轮），与本机观测一致；vendor 未改。
+
 ## 二、TRACER 编译开关改变了物理（需要上游确认哪一边是对的）
 
 这一版上游在很多地方给 TRACER 构建和非 TRACER 构建写了**不同的物理**，不只是记账不同。

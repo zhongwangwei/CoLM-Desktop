@@ -26,6 +26,7 @@ pub mod metric;
 pub mod obs;
 pub mod pair;
 pub mod schedule;
+pub mod selection;
 pub mod time;
 
 use std::collections::BTreeSet;
@@ -77,8 +78,35 @@ pub struct Var {
     /// 除 `time` 与 `patch` 之外的维度名，**按文件里的顺序**（生成器已按
     /// `ncio_write_serial` 的反序还原）。空数组表示只有 `(time, patch)`。
     pub dims: &'static [&'static str],
+    /// 首参里的 `DEF_hist_vars%X` 开关名（闸门 3）；首参是 `.true.`、`restart_date` 或甲烷的
+    /// `mhist_on(...)` 时为 `None`（不受 `DEF_hist_vars` 控制）。
+    pub switch: Option<&'static str>,
     /// `MOD_Hist.F90` 里的行号，便于回查。
     pub line: u32,
+}
+
+/// `DEF_hist_vars` 的一个开关（`MOD_Namelist.F90` 的 `history_var_type`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Switch {
+    pub name: &'static str,
+    /// 类型声明里的默认值。
+    pub declared: bool,
+    /// `sync_hist_vars(set_defaults = .true.)` 何时把它置成 `DEF_HIST_vars_out_default`。
+    pub sync: Sync,
+    /// `DEF_USE_DiagMatrix` 时读完历史 namelist 后强制置真。
+    pub diag_matrix: bool,
+}
+
+/// 开关在 `sync_hist_vars` 里的同步条件。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Sync {
+    Always,
+    /// 外层 `IF (<条件>) THEN` 的原文。
+    Runtime(&'static str),
+    /// 外层 `#ifdef <宏>`。
+    Macro(&'static str),
+    /// 不在 `sync_hist_vars` 里：一直是声明默认值（除非历史 namelist 改它）。
+    Never,
 }
 
 /// 全部变量，按名字排序。

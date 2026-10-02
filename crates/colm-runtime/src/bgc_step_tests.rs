@@ -222,3 +222,20 @@ fn the_monthly_ndep_switch_uses_the_begin_form_of_the_step_end() {
     assert_eq!(year_month(time(2010, 32, 0)).unwrap(), (2010, 2));
     assert_eq!(year_month(time(2010, 31, 82_800)).unwrap(), (2010, 1));
 }
+
+/// `grid2pset_dominant`：取面积最大的那一份（并列取第一个），面积和不为正时没有值（上游 −9999）。
+#[test]
+fn the_dominant_value_follows_the_largest_part() {
+    let grid = |lat: usize, lon: usize| Ok((lat * 10 + lon) as f64);
+    let parts = Footprint::Parts {
+        parts: vec![(0, 1, 2.0), (1, 0, 3.0), (1, 1, 3.0), (2, 2, 0.5)],
+        area: 8.5,
+    };
+    assert_eq!(parts.dominant(grid).unwrap(), Some(10.0));
+    let empty = Footprint::Parts {
+        parts: vec![(0, 0, 0.0)],
+        area: 0.0,
+    };
+    assert_eq!(empty.dominant(grid).unwrap(), None);
+    assert_eq!(Footprint::Cell(3, 4).dominant(grid).unwrap(), Some(34.0));
+}

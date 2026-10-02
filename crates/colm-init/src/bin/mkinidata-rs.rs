@@ -52,6 +52,7 @@ fn run_namelist(namelist: PathBuf, mut args: impl Iterator<Item = String>) -> Re
     let mut grid_river = false;
     let mut catch_lateral = false;
     let mut data_assimilation = false;
+    let mut crop = false;
     let mut subgrid = None;
     let mut high_resolution = HighResolutionOptions::default();
     while let Some(argument) = args.next() {
@@ -65,6 +66,8 @@ fn run_namelist(namelist: PathBuf, mut args: impl Iterator<Item = String>) -> Re
             "--grid-river" => grid_river = true,
             "--catch-lateral" => catch_lateral = true,
             "--data-assimilation" => data_assimilation = true,
+            // `CROP` 内核宏（`DEF_USE_CROP` 的来源）；单点从地表文件的作物份额自行判断，用不到它。
+            "--crop" => crop = true,
             "--subgrid" => {
                 subgrid = Some(parse_subgrid(
                     &args.next().context("--subgrid needs lct, pft, or pc")?,
@@ -111,6 +114,7 @@ fn run_namelist(namelist: PathBuf, mut args: impl Iterator<Item = String>) -> Re
             catch_lateral,
             data_assimilation_ensembles,
             subgrid_fallback: subgrid,
+            crop,
         });
     }
     ensure!(
@@ -262,6 +266,8 @@ struct SpatialNamelistInvocation<'a> {
     data_assimilation_ensembles: Option<usize>,
     /// 旧 namelist 没写 `DEF_USE_LCT/PFT/PC` 时用的内核 subgrid。
     subgrid_fallback: Option<SurfaceSubgrid>,
+    /// `CROP` 内核宏。
+    crop: bool,
 }
 
 fn run_spatial_namelist(invocation: SpatialNamelistInvocation<'_>) -> Result<()> {
@@ -274,6 +280,7 @@ fn run_spatial_namelist(invocation: SpatialNamelistInvocation<'_>) -> Result<()>
         catch_lateral,
         data_assimilation_ensembles,
         subgrid_fallback,
+        crop,
     } = invocation;
     let mut run = spatial_namelist_run_with_subgrid(namelist, subgrid_fallback)?;
     ensure!(
@@ -305,6 +312,7 @@ fn run_spatial_namelist(invocation: SpatialNamelistInvocation<'_>) -> Result<()>
                     &block,
                     high_resolution,
                     data_assimilation_ensembles,
+                    crop,
                 )?;
             }
         }
@@ -555,6 +563,7 @@ fn write_spatial_pft_namelist_block(
     block: &str,
     high_resolution: &HighResolutionOptions,
     data_assimilation_ensembles: Option<usize>,
+    crop: bool,
 ) -> Result<()> {
     let mut static_config = SpatialPftStaticConfig::new(
         namelist,
@@ -564,6 +573,7 @@ fn write_spatial_pft_namelist_block(
         run.land_cover_year,
         block,
     );
+    static_config.crop = crop;
     static_config.subgrid_fallback = Some(match run.subgrid {
         SpatialSubgrid::Pft => SpatialPftSubgrid::Pft,
         SpatialSubgrid::Pc => SpatialPftSubgrid::Pc,
@@ -2266,6 +2276,7 @@ mod tests {
             catch_lateral: false,
             data_assimilation_ensembles: None,
             subgrid_fallback: None,
+            crop: false,
         })
         .unwrap_err();
 
@@ -2308,6 +2319,7 @@ mod tests {
             catch_lateral: false,
             data_assimilation_ensembles: None,
             subgrid_fallback: None,
+            crop: false,
         })
         .unwrap_err();
 

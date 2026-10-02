@@ -113,6 +113,9 @@ pub struct HistoryGrid {
     /// 只在建文件时写一次的二维量（`landarea`、`landfraction`、`area_wetland`、`area_lake`）：
     /// `(名字, long_name, units, 值)`。
     pub statics: Vec<(String, String, String, Vec<f64>)>,
+    /// 同样只在建文件时写一次、但定义带 `time` 维的量（CROP 的 `croparea`、`irrigarea`：
+    /// `hist_write_var_real8_2d(..., itime = 1, ...)`）。只写第 1 个时间槽，其余槽留 netCDF 默认填充值。
+    pub first_record_statics: Vec<(String, String, String, Vec<f64>)>,
 }
 
 impl HistoryGrid {
@@ -217,6 +220,8 @@ pub struct HistoryBuffers {
     patch_fields: BTreeMap<&'static str, PatchField>,
     /// 只在文件第一条记录写一次、没有时间维的逐单元量：`(名字, long_name, units, 值)`。
     vector_statics: Vec<(String, String, String, Vec<f64>)>,
+    /// 闸门 3（`DEF_hist_vars`）：关掉的变量不声明，对它们的写入什么也不做。
+    selection: Option<std::sync::Arc<crate::selection::HistorySelection>>,
 }
 
 impl HistoryBuffers {
@@ -238,7 +243,25 @@ impl HistoryBuffers {
             steps: vec![0.0; records],
             patch_fields: BTreeMap::new(),
             vector_statics: Vec::new(),
+            selection: None,
         }
+    }
+
+    /// 按 `DEF_hist_vars` 过滤：之后声明的变量里开关为假的不进文件，写入它们是空操作。
+    /// 必须在声明之前调用。
+    pub fn with_selection(
+        mut self,
+        selection: std::sync::Arc<crate::selection::HistorySelection>,
+    ) -> Self {
+        self.selection = Some(selection);
+        self
+    }
+
+    /// 开关把这个变量关掉了（不是"没声明"：没声明的名字照旧报错）。
+    fn deselected(&self, name: &str) -> bool {
+        self.selection
+            .as_ref()
+            .is_some_and(|selection| !selection.writes(name))
     }
 
     /// 改成向量写出（非结构网格，`DEF_HISTORY_IN_VECTOR`）。
@@ -286,6 +309,9 @@ impl HistoryBuffers {
             "per-patch history fields need vector history"
         );
         for (name, total) in names {
+            if self.deselected(name) {
+                continue;
+            }
             let entry = VARS
                 .iter()
                 .find(|entry| entry.name == *name)
@@ -311,6 +337,9 @@ impl HistoryBuffers {
         values: &[f64],
         included: &[bool],
     ) -> Result<()> {
+        if self.deselected(name) {
+            return Ok(());
+        }
         let patches = self.dims.patch;
         ensure!(
             record < self.records,
@@ -469,6 +498,9 @@ impl HistoryBuffers {
             .context("pre-gridded history variables need a history grid")?
             .cells();
         for name in names {
+            if self.deselected(name) {
+                continue;
+            }
             let entry = VARS
                 .iter()
                 .find(|entry| entry.name == *name)
@@ -485,6 +517,9 @@ impl HistoryBuffers {
 
     /// 第 `record` 条记录里某个预聚合量在窗口格子上的值（`ilat*nlon + ilon`）。
     pub fn set_gridded(&mut self, name: &str, record: usize, values: &[f64]) -> Result<()> {
+        if self.deselected(name) {
+            return Ok(());
+        }
         let cells = self
             .grid
             .as_ref()
@@ -517,6 +552,7 @@ impl HistoryBuffers {
         ensure!(
             grid.statics
                 .iter()
+                .chain(&grid.first_record_statics)
                 .all(|(_, _, _, values)| values.len() == grid.cells()),
             "a static history field does not cover the grid window"
         );
@@ -526,6 +562,9 @@ impl HistoryBuffers {
 
     /// 选中的 patch 在第 `record` 条记录里计入 `name` 的 `filter`（网格聚合的分母要它）。
     pub fn include(&mut self, name: &str, record: usize) -> Result<()> {
+        if self.deselected(name) {
+            return Ok(());
+        }
         ensure!(
             record < self.records,
             "record {record} is outside the {}-record group",
@@ -583,6 +622,9 @@ impl HistoryBuffers {
     /// 本层还不支持的维度（例如 DA 的 `ens`）显式拒绝，不静默当成标量。
     pub fn declare(&mut self, names: &[&str]) -> Result<()> {
         for name in names {
+            if self.deselected(name) {
+                continue;
+            }
             let Some(entry) = VARS.iter().find(|entry| entry.name == *name) else {
                 bail!("{name} is not a history variable in the generated gate table");
             };
@@ -639,6 +681,9 @@ impl HistoryBuffers {
 
     /// 写一个只有 `(time, patch)` 的标量变量。
     pub fn set_patch_scalar(&mut self, name: &str, record: usize, value: f64) -> Result<()> {
+        if self.deselected(name) {
+            return Ok(());
+        }
         let layers = self.layers_of(name)?;
         ensure!(
             layers == 1,
@@ -649,6 +694,9 @@ impl HistoryBuffers {
 
     /// 写一个带层维的变量：`values` 按 `(patch, layer)` 行主序给出。
     pub fn set_layered(&mut self, name: &str, record: usize, values: &[f64]) -> Result<()> {
+        if self.deselected(name) {
+            return Ok(());
+        }
         let layers = self.layers_of(name)?;
         let (first, count) = self.patch_span();
         ensure!(
@@ -686,6 +734,9 @@ impl HistoryBuffers {
     /// 直接写缓冲的 sink 没有步数概念，只能"把贡献加进去"来实现同一个顺序，
     /// 所以需要这个入口。
     pub fn add_patch_scalar(&mut self, name: &str, record: usize, delta: f64) -> Result<()> {
+        if self.deselected(name) {
+            return Ok(());
+        }
         let layers = self.layers_of(name)?;
         ensure!(
             layers == 1,
@@ -1024,6 +1075,12 @@ impl HistoryBuffers {
             variable.put_attribute("units", units.as_str())?;
             variable.put_attribute("missing_value", MISSING_VALUE)?;
         }
+        for (name, long_name, units, _) in &grid.first_record_statics {
+            let mut variable = file.add_variable::<f64>(name, &["time", "lat", "lon"])?;
+            variable.put_attribute("long_name", long_name.as_str())?;
+            variable.put_attribute("units", units.as_str())?;
+            variable.put_attribute("missing_value", MISSING_VALUE)?;
+        }
         for name in self.values.keys() {
             let entry = VARS
                 .iter()
@@ -1068,6 +1125,12 @@ impl HistoryBuffers {
             file.variable_mut(name)
                 .with_context(|| format!("{name} disappeared after definition"))?
                 .put_values(values, netcdf::Extents::All)?;
+        }
+        for (name, _, _, values) in &grid.first_record_statics {
+            let (nlat, nlon) = (grid.lat.len(), grid.lon.len());
+            file.variable_mut(name)
+                .with_context(|| format!("{name} disappeared after definition"))?
+                .put_values(values, [0..1, 0..nlat, 0..nlon])?;
         }
         let cells = grid.cells();
         let patches = self.dims.patch;

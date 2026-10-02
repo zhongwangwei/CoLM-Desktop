@@ -189,6 +189,8 @@ struct SpatialPftArgs {
     output_2m_wmo: bool,
     lulcc: bool,
     lulcc_lai_only: bool,
+    /// LAI 反馈：逐月只写 `SAI_patches`/`SAI_pfts`，不写 LAI。
+    stem_area_only: bool,
     plant_tiles: PathBuf,
     canopy_tiles: Option<PathBuf>,
     crop_surface: Option<PathBuf>,
@@ -791,28 +793,49 @@ fn materialize_pft_monthly_vegetation(
         let mut sai_pft_frames = Vec::with_capacity(12);
         let (suffix, lai_name) = monthly_pft_vegetation_source("MONTHLY_PFT_LAI", year)?;
         let (_, sai_name) = monthly_pft_vegetation_source("MONTHLY_PFT_SAI", year)?;
-        for month in 1..=12 {
-            let lai = aggregate_pft_index(
-                layout,
-                PftIndexInput {
-                    pft_offsets: &pfts.patch_offsets,
-                    pft_classes: &pfts.pft_classes,
-                    patch_kind: &pfts.patch_kind,
-                    raw_class_count: MODIS_PFT_CLASSES,
-                    raw_percent,
-                    raw_index: &read_mesh_tiled_raster_pft_time_f64(
-                        &args.plant_tiles,
-                        &suffix,
-                        &lai_name,
-                        MODIS_PFT_CLASSES,
-                        month,
-                        mesh,
-                        &topology.pixel,
-                        COLM_500M,
-                    )?,
-                    land_area: area,
-                },
+        // `Aggregation_LAI` 按 LAI 年份的后缀重读 `PCT_PFT`（`read_5x5_data_pft(dir_5x5, suffix, ...)`），
+        // 不是土地覆盖年份那一份（`Aggregation_PercentagesPFT` 用的）。两年不同时份额就不同。
+        let year_percent;
+        let raw_percent = if suffix == format!("MOD{:04}", args.year) {
+            raw_percent
+        } else {
+            year_percent = read_mesh_tiled_raster_pft_f64(
+                &args.plant_tiles,
+                &suffix,
+                "PCT_PFT",
+                MODIS_PFT_CLASSES,
+                mesh,
+                &topology.pixel,
+                COLM_500M,
             )?;
+            year_percent.as_slice()
+        };
+        for month in 1..=12 {
+            let lai = (!args.stem_area_only)
+                .then(|| -> Result<_> {
+                    aggregate_pft_index(
+                        layout,
+                        PftIndexInput {
+                            pft_offsets: &pfts.patch_offsets,
+                            pft_classes: &pfts.pft_classes,
+                            patch_kind: &pfts.patch_kind,
+                            raw_class_count: MODIS_PFT_CLASSES,
+                            raw_percent,
+                            raw_index: &read_mesh_tiled_raster_pft_time_f64(
+                                &args.plant_tiles,
+                                &suffix,
+                                &lai_name,
+                                MODIS_PFT_CLASSES,
+                                month,
+                                mesh,
+                                &topology.pixel,
+                                COLM_500M,
+                            )?,
+                            land_area: area,
+                        },
+                    )
+                })
+                .transpose()?;
             let sai = aggregate_pft_index(
                 layout,
                 PftIndexInput {
@@ -834,30 +857,32 @@ fn materialize_pft_monthly_vegetation(
                     land_area: area,
                 },
             )?;
-            write_landpatch_vector(
-                &args.landdata,
-                year,
-                topology,
-                patches,
-                &args.blocks,
-                args.srfdata_compression,
-                "LAI",
-                &format!("LAI_patches{month:02}"),
-                "LAI_patches",
-                &lai.patch_index,
-            )?;
-            write_landpft_vector(
-                &args.landdata,
-                year,
-                topology,
-                &pfts.land_pfts,
-                &args.blocks,
-                args.srfdata_compression,
-                "LAI",
-                &format!("LAI_pfts{month:02}"),
-                "LAI_pfts",
-                &lai.pft_index,
-            )?;
+            if let Some(lai) = &lai {
+                write_landpatch_vector(
+                    &args.landdata,
+                    year,
+                    topology,
+                    patches,
+                    &args.blocks,
+                    args.srfdata_compression,
+                    "LAI",
+                    &format!("LAI_patches{month:02}"),
+                    "LAI_patches",
+                    &lai.patch_index,
+                )?;
+                write_landpft_vector(
+                    &args.landdata,
+                    year,
+                    topology,
+                    &pfts.land_pfts,
+                    &args.blocks,
+                    args.srfdata_compression,
+                    "LAI",
+                    &format!("LAI_pfts{month:02}"),
+                    "LAI_pfts",
+                    &lai.pft_index,
+                )?;
+            }
             write_landpatch_vector(
                 &args.landdata,
                 year,
@@ -883,8 +908,10 @@ fn materialize_pft_monthly_vegetation(
                 &sai.pft_index,
             )?;
             if args.diagnostics {
-                lai_patch_frames.push(lai.patch_index);
-                lai_pft_frames.push(lai.pft_index);
+                if let Some(lai) = lai {
+                    lai_patch_frames.push(lai.patch_index);
+                    lai_pft_frames.push(lai.pft_index);
+                }
                 sai_patch_frames.push(sai.patch_index);
                 sai_pft_frames.push(sai.pft_index);
             }
@@ -895,6 +922,10 @@ fn materialize_pft_monthly_vegetation(
                 ("LAI_patch", "LAI", &lai_patch_frames),
                 ("SAI_patch", "SAI", &sai_patch_frames),
             ] {
+                // LAI 反馈下没有 LAI 帧，上游也不写 LAI 诊断。
+                if frames.is_empty() {
+                    continue;
+                }
                 write_patch_diagnostic_time(
                     args.landdata
                         .join("diag")
@@ -911,16 +942,18 @@ fn materialize_pft_monthly_vegetation(
                     args.srfdata_compression,
                 )?;
             }
-            write_pft_diagnostic_time(
-                args,
-                year,
-                topology,
-                &pfts.land_pfts,
-                pft_shares,
-                &lai_pft_frames,
-                "LAI_pft",
-                "LAI_pft",
-            )?;
+            if !lai_pft_frames.is_empty() {
+                write_pft_diagnostic_time(
+                    args,
+                    year,
+                    topology,
+                    &pfts.land_pfts,
+                    pft_shares,
+                    &lai_pft_frames,
+                    "LAI_pft",
+                    "LAI_pft",
+                )?;
+            }
             write_pft_diagnostic_time(
                 args,
                 year,
@@ -3968,6 +4001,7 @@ fn parse_spatial_pft(args: &[String]) -> Result<SpatialPftArgs> {
     let mut simple_topography_factors = None;
     let mut regular_topography_factors = None;
     let mut bedrock = None;
+    let mut stem_area_only = false;
     let mut diagnostics = false;
     let mut soil_hyper_albedo_dir = None;
     let mut index = 5;
@@ -4197,6 +4231,10 @@ fn parse_spatial_pft(args: &[String]) -> Result<SpatialPftArgs> {
                 diagnostics = true;
                 index += 1;
             }
+            "--stem-area-only" => {
+                stem_area_only = true;
+                index += 1;
+            }
             "--monthly-vegetation-year" => {
                 let year = args
                     .get(index + 1)
@@ -4238,6 +4276,7 @@ fn parse_spatial_pft(args: &[String]) -> Result<SpatialPftArgs> {
         output_2m_wmo,
         lulcc,
         lulcc_lai_only: false,
+        stem_area_only,
         plant_tiles: plant_tiles.context("spatial-pft requires --plant-tiles plant_15s")?,
         canopy_tiles,
         crop_surface,
@@ -5007,6 +5046,13 @@ fn spatial_case_command_with_subgrid(
         };
         for lai_year in lai_years {
             args.extend(["--monthly-vegetation-year".to_owned(), lai_year.to_string()]);
+        }
+        // `Aggregation_LAI` 的 PFT/PC 段在 `DEF_USE_LAIFEEDBACK` 下只聚合 SAI（`IF(.not. DEF_USE_LAIFEEDBACK)`）；
+        // BGC 关闭时上游把反馈强制置假。
+        if case_bool(&document, "DEF_USE_BGC", false)?
+            && case_bool(&document, "DEF_USE_LAIFEEDBACK", false)?
+        {
+            args.push("--stem-area-only".to_owned());
         }
         if let Some(blocks) = &blocks {
             args.extend(blocks.iter().cloned());

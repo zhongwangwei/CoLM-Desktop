@@ -45,12 +45,20 @@ impl HistoryGridConfig {
 /// `landarea` 的过滤是 `patchtype < 99 .and. patchmask`，`landfraction` 不过滤、再除以格子面积
 /// （`block_data_division`：面积不为正写 `spval`），`area_wetland` 是 `patchtype == 2 .and. patchmask`，
 /// `area_lake` 是 `patchtype == 4`（`MOD_Hist.F90:4499` 没有与 `patchmask`）。
+///
+/// `crop_classes` 是 CROP 内核下每个 patch 的 `patchclass`（不开 CROP 时为 `None`）：
+/// 多写 `croparea`（`patchclass == 12 .and. patchmask`，`MOD_Hist.F90:424-445`）与 `irrigarea`。
+/// `irrigated` 是 `DEF_USE_IRRIGATION` 时每个 patch 的 `filter_irrig`（`patchclass == 12` 且首个 PFT
+/// `>= npcropmin` 且为偶数，即灌溉型作物）；不开灌溉时上游用的是未初始化的 `filter_irrig`
+/// （upstream-bugs 第 37 条），这里按全假写 0。
 pub fn build_history_grid(
     config: &HistoryGridConfig,
     forcing_grid: &LatLonGrid,
     topology: &SpatialTopology,
     patch_types: &[i32],
     patch_mask: &[bool],
+    crop_classes: Option<&[usize]>,
+    irrigated: Option<&[bool]>,
 ) -> Result<HistoryGrid> {
     let patches = topology.patch_count();
     ensure!(
@@ -129,6 +137,34 @@ pub fn build_history_grid(
     }
     let area_wetland = sumarea(&|patch| patch_types[patch] == 2 && patch_mask[patch]);
     let area_lake = sumarea(&|patch| patch_types[patch] == 4);
+    let mut first_record_statics = Vec::new();
+    if let Some(classes) = crop_classes {
+        ensure!(
+            classes.len() == patches,
+            "one patch class per patch is needed for croparea"
+        );
+        first_record_statics.push((
+            "croparea".to_owned(),
+            "crop area".to_owned(),
+            "km2".to_owned(),
+            sumarea(&|patch| classes[patch] == 12 && patch_mask[patch]),
+        ));
+        first_record_statics.push((
+            "irrigarea".to_owned(),
+            "irrigation area".to_owned(),
+            "km2".to_owned(),
+            match irrigated {
+                Some(irrigated) => {
+                    ensure!(
+                        irrigated.len() == patches,
+                        "one irrigation flag per patch is needed for irrigarea"
+                    );
+                    sumarea(&|patch| irrigated[patch] && patch_mask[patch])
+                }
+                None => vec![0.0; cells],
+            },
+        ));
+    }
     let mut lon = Vec::with_capacity(nlon);
     for &ilon in &columns {
         let (west, east) = (grid.lon_w[ilon], grid.lon_e[ilon]);
@@ -182,6 +218,7 @@ pub fn build_history_grid(
                 area_lake,
             ),
         ],
+        first_record_statics,
     })
 }
 
@@ -195,25 +232,30 @@ pub struct ElementGroups {
 }
 
 impl ElementGroups {
-    /// `subfrc`：patch 各像元的 `areaquad` 从 0 起相加，再除以本网格元的和（同样从 0 起）。
+    /// `subfrc`：patch 各像元的 `areaquad` 从 0 起相加、乘 `pctshared`（`has_shared` 时），
+    /// 再除以本网格元的和（同样从 0 起）。
     pub fn from_topology(topology: &SpatialTopology) -> Result<Self> {
         let pixel = &topology.pixel;
         let areas = topology
             .cells
             .iter()
-            .map(|cells| {
-                cells.iter().try_fold(0.0, |sum, &(ilon, ilat)| {
-                    let x = usize::try_from(ilon - 1).context("pixel longitude index")?;
-                    let y = usize::try_from(ilat - 1).context("pixel latitude index")?;
-                    Ok::<f64, anyhow::Error>(
-                        sum + areaquad(
-                            pixel.lat_s[y],
-                            pixel.lat_n[y],
-                            pixel.lon_w[x],
-                            pixel.lon_e[x],
-                        ),
-                    )
-                })
+            .zip(&topology.shared_fraction)
+            .map(|(cells, &shared)| {
+                cells
+                    .iter()
+                    .try_fold(0.0, |sum, &(ilon, ilat)| {
+                        let x = usize::try_from(ilon - 1).context("pixel longitude index")?;
+                        let y = usize::try_from(ilat - 1).context("pixel latitude index")?;
+                        Ok::<f64, anyhow::Error>(
+                            sum + areaquad(
+                                pixel.lat_s[y],
+                                pixel.lat_n[y],
+                                pixel.lon_w[x],
+                                pixel.lon_e[x],
+                            ),
+                        )
+                    })
+                    .map(|area| area * shared)
             })
             .collect::<Result<Vec<_>>>()?;
         let mut ranges = Vec::new();

@@ -73,7 +73,11 @@ fn run() -> Result<()> {
         arguments.case_directory.display()
     );
     let name = colm_case::case_name(&case_nml)?;
-    reject_history_selection(&read_document(&case_nml)?)?;
+    install_history_selection(
+        &read_document(&case_nml)?,
+        &arguments.case_directory,
+        arguments.crop,
+    )?;
     if colm_case::is_spatial_case(&case_nml)? {
         return run_spatial(&arguments, &layout, &name, &case_nml);
     }
@@ -215,7 +219,10 @@ fn run() -> Result<()> {
             Ok(std::sync::Arc::new(tracer))
         })
         .transpose()?;
-    if let Some(tracer) = tracer_runtime.as_ref().filter(|tracer| tracer.has_transport()) {
+    if let Some(tracer) = tracer_runtime
+        .as_ref()
+        .filter(|tracer| tracer.has_transport())
+    {
         let restart = colm_init::RestartFile::open(&files.time)?;
         templates = attach_land_tracers(tracer, templates, &restart, patch_count)?;
     }
@@ -259,8 +266,12 @@ fn run() -> Result<()> {
         .transpose()?;
     // 开示踪物时另写 `<case>_hist_tracer_<cdate>.nc`（没有输运示踪物时只有文件骨架）。
     if let Some(tracer) = &tracer_runtime {
-        let patch_types = templates.iter().map(|template| template.patch_type).collect();
-        session = session.map(|session| session.with_tracer_variables(tracer.set.clone(), patch_types));
+        let patch_types = templates
+            .iter()
+            .map(|template| template.patch_type)
+            .collect();
+        session =
+            session.map(|session| session.with_tracer_variables(tracer.set.clone(), patch_types));
     }
     let sidecar_config = colm_runtime::history_sidecar::SidecarConfig {
         frequency_code: history_frequency_code(config.history_frequency),
@@ -368,16 +379,11 @@ fn run_spatial(
             humidity_m: config.forcing.height_humidity_m,
         },
     )?;
-    physics.irrigation = None;
-    // `CROP` 内核（与单点同一套开关，见 `run`）。空间的 `CROP_readin` 按网格映射读播种日与施肥图；
-    // 上游在空间里拒绝播种日覆盖（"only supported in SinglePoint"）；灌溉方式的
-    // `grid2pset_dominant` 还没移植。
-    // 还没验收：上游 mkinidata 在 LAI 反馈下给非土壤 patch 留 `spval` 的 LAI（见第 502 轮），
-    // 对照参照要先修 vendor。
-    ensure!(
-        !arguments.crop || std::env::var_os("COLM_RS_SPATIAL_CROP").is_some(),
-        "CROP kernels are not verified in the Rust spatial runtime yet; run this case with --engine fortran"
-    );
+    // `CROP` 内核（与单点同一套开关，见 `run`）。空间的 `CROP_readin` 按网格映射读播种日、施肥图与
+    // 灌溉方式（`grid2pset_dominant`）；上游在空间里拒绝播种日覆盖（"only supported in SinglePoint"）。
+    if !arguments.crop {
+        physics.irrigation = None;
+    }
     if arguments.crop {
         let switches = physics
             .bgc
@@ -387,16 +393,11 @@ fn run_spatial(
             real_field(&document, "DEF_TUNING_CROP_PLANTING_DAY")? <= 0.0,
             "Fatal ERROR: crop planting-day override is only supported in SinglePoint (upstream stops too)"
         );
-        ensure!(
-            !logical_field(&document, "DEF_USE_IRRIGATION")?,
-            "spatial irrigation (grid2pset_dominant irrigation methods) is not ported; run this \
-             case with --engine fortran"
-        );
         physics.bgc = Some(colm_core::bgc_driver::BgcSwitches {
             crop: true,
             fert,
             cnsoyfixn: logical_field(&document, "DEF_USE_CNSOYFIXN")?,
-            irrigation: false,
+            irrigation: physics.irrigation.is_some(),
             ..switches
         });
     }
@@ -766,7 +767,10 @@ fn run_spatial_segment(
             Ok(std::sync::Arc::new(tracer))
         })
         .transpose()?;
-    if let Some(tracer) = tracer_runtime.as_ref().filter(|tracer| tracer.has_transport()) {
+    if let Some(tracer) = tracer_runtime
+        .as_ref()
+        .filter(|tracer| tracer.has_transport())
+    {
         let mut attached = Vec::with_capacity(templates.len());
         let mut rest = templates.into_iter();
         for ((_, patches), files) in topology.blocks.iter().zip(&block_files) {
@@ -783,12 +787,37 @@ fn run_spatial_segment(
             .iter()
             .map(|template| template.patch_type)
             .collect::<Vec<_>>();
+        let crop_classes = physics.bgc.is_some_and(|bgc| bgc.crop).then(|| {
+            templates
+                .iter()
+                .map(|template| template.land_class)
+                .collect::<Vec<_>>()
+        });
+        // `filter_irrig`：农田 patch 的首个 PFT 是灌溉型作物（`>= npcropmin` 且为偶数）。
+        let irrigated = physics.irrigation.is_some().then(|| {
+            templates
+                .iter()
+                .map(|template| {
+                    template.land_class == 12
+                        && template
+                            .pft
+                            .as_ref()
+                            .and_then(|pft| pft.initial.parameters.first())
+                            .is_some_and(|first| {
+                                first.class >= colm_core::bgc_driver::NPCROPMIN
+                                    && first.class % 2 == 0
+                            })
+                })
+                .collect::<Vec<_>>()
+        });
         Some(build_history_grid(
             &HistoryGridConfig::read(document)?,
             &grid,
             &topology,
             &patch_types,
             &patch_mask,
+            crop_classes.as_deref(),
+            irrigated.as_deref(),
         )?)
     } else {
         None
@@ -819,8 +848,7 @@ fn run_spatial_segment(
         config.co2_scenario,
     )?;
     runtime.apply_mapped_heights(&mut templates)?;
-    if let (Some(tracer), Some(forcing_config)) = (tracer_runtime.as_ref(), tracer_forcing_config)
-    {
+    if let (Some(tracer), Some(forcing_config)) = (tracer_runtime.as_ref(), tracer_forcing_config) {
         if forcing_config.enabled() {
             ensure!(
                 !logical_field(document, "DEF_USE_LULCC")?,
@@ -1039,10 +1067,18 @@ fn run_spatial_segment(
     }
     // `river_lake_tracer_init` + `read_tracer_restart`/`tracer_init_from_water`
     // （`grid_riverlake_flow_init`）：有输运示踪物时河道示踪物与陆面一起开。
-    if let Some(tracer) = tracer_runtime.as_ref().filter(|tracer| tracer.has_transport()) {
+    if let Some(tracer) = tracer_runtime
+        .as_ref()
+        .filter(|tracer| tracer.has_transport())
+    {
         let mut tracers =
             colm_runtime::river::tracer::RiverTracers::new(tracer.set.clone(), river.network.len());
-        let loaded = colm_runtime::river::restart::read_river_tracers(&river_start, &river.network, river.levee.as_ref(), &mut tracers)?;
+        let loaded = colm_runtime::river::restart::read_river_tracers(
+            &river_start,
+            &river.network,
+            river.levee.as_ref(),
+            &mut tracers,
+        )?;
         if !loaded {
             // `is_built_resv_init`：起始年份下已建成的水库。
             let built = (0..river.network.len())
@@ -1133,12 +1169,17 @@ fn run_spatial_segment(
                     .then(|| real_field(document, "DEF_simulation_time%timestep"))
                     .transpose()?,
             )
-            .map(|session| match tracer_runtime.as_ref().filter(|t| t.has_transport()) {
-                Some(tracer) => session.with_tracer_variables(
-                    tracer.set.clone(),
-                    templates.iter().map(|template| template.patch_type).collect(),
-                ),
-                None => session,
+            .map(|session| {
+                match tracer_runtime.as_ref().filter(|t| t.has_transport()) {
+                    Some(tracer) => session.with_tracer_variables(
+                        tracer.set.clone(),
+                        templates
+                            .iter()
+                            .map(|template| template.patch_type)
+                            .collect(),
+                    ),
+                    None => session,
+                }
             })?,
             river: river_writer,
             elements: ElementGroups::from_topology(&topology)?,
@@ -1810,7 +1851,9 @@ fn write_block_restarts(
             &templates[patches.clone()],
             &states[patches.clone()],
             &path,
-            tracer_cache.map(|cache| cache.block(patches.clone())).as_ref(),
+            tracer_cache
+                .map(|cache| cache.block(patches.clone()))
+                .as_ref(),
         )?;
         mark_history_restart_with_river(
             &path,
@@ -1919,8 +1962,9 @@ fn assemble_patch(
             // `ch4_reactive_read_restart`：时间重启里有甲烷事务就续跑，否则冷启动。
             let time = colm_init::RestartFile::open(&files.time)?;
             match colm_runtime::methane::read_restart(&time, patch, template.patch_type, &setup)
-                .with_context(|| format!("cannot read the methane state of {}", files.time.display()))?
-            {
+                .with_context(|| {
+                    format!("cannot read the methane state of {}", files.time.display())
+                })? {
                 Some(restarted) => {
                     bgc.initial.methane = Some(Box::new(restarted.patch));
                     bgc.initial.methane_acc = restarted.accumulator;
@@ -1953,16 +1997,24 @@ fn assemble_patch(
             .with_bgc(bgc)
             .context("cannot assemble the BGC state")?;
         // `DEF_USE_IRRIGATION`：时间重启里的灌溉量，叠上 `CROP_readin` 读的灌溉方式（与配水比例）。
+        // 需水（`bgc_driver`）与施灌（`CalIrrigationApplicationFluxes`）都只在 `patchtype == 0` 上跑；
+        // 其余 patch 只挂冻结的状态（history 照样逐 patch 累加）。
         if let Some(readin) = irrigation {
             let state = colm_runtime::irrigation::initial_state(
                 &colm_init::RestartFile::open(&files.time)?,
                 patch,
                 readin,
             )?;
-            template = template
-                .with_irrigation(state)
-                .context("cannot assemble the irrigation state")?;
+            template = if template.patch_type == 0 {
+                template.with_irrigation(state)
+            } else {
+                template.with_frozen_irrigation(state)
+            }
+            .context("cannot assemble the irrigation state")?;
         }
+    }
+    if template.patch_type != 0 {
+        template.physics.irrigation = None;
     }
     ensure!(
         template.physics.irrigation.is_none() || template.irrigation.is_some(),
@@ -1990,6 +2042,9 @@ fn assemble_patch(
                 (year("DEF_LAI_START_YEAR")?, year("DEF_LAI_END_YEAR")?),
             )?;
         }
+        // LAI 反馈（PFT/PC 构建）：`LAI_readin` 只读 `SAI_patches`。
+        let feedback = (template.physics.use_pft || template.physics.use_pc)
+            && template.physics.bgc.is_some_and(|bgc| bgc.laifeedback);
         template = template.with_monthly_leaf_area_index(MonthlyLeafAreaIndex::read_grid(
             layout.out().join(name).join("landdata"),
             block,
@@ -1997,6 +2052,7 @@ fn assemble_patch(
             logical_field(document, "DEF_LAI_CHANGE_YEARLY")?,
             year("DEF_LC_YEAR")?,
             (year("DEF_LAI_START_YEAR")?, year("DEF_LAI_END_YEAR")?),
+            !feedback,
         ));
     }
     if logical_field(document, "DEF_LAI_MONTHLY")? && !spatial {
@@ -2360,7 +2416,10 @@ fn append_tracer_restart(
     path: &Path,
     cache: Option<&colm_runtime::tracer::ForcingCache<'_>>,
 ) -> Result<()> {
-    if let Some((tracer, _)) = templates.first().and_then(|template| template.tracer.as_ref()) {
+    if let Some((tracer, _)) = templates
+        .first()
+        .and_then(|template| template.tracer.as_ref())
+    {
         let tracks = states
             .iter()
             .map(|state| {
@@ -2388,8 +2447,14 @@ fn append_tracer_restart(
         let patches = states
             .iter()
             .map(|state| {
-                let bgc = state.bgc.as_deref().context("a methane patch needs its BGC state")?;
-                let patch = bgc.methane.as_deref().context("a methane patch needs its methane state")?;
+                let bgc = state
+                    .bgc
+                    .as_deref()
+                    .context("a methane patch needs its BGC state")?;
+                let patch = bgc
+                    .methane
+                    .as_deref()
+                    .context("a methane patch needs its methane state")?;
                 Ok((patch, &bgc.methane_acc))
             })
             .collect::<Result<Vec<_>>>()?;
@@ -2473,7 +2538,8 @@ fn restore_sidecar_tracers(
             state.acc = patch.tracers.clone();
             state.water_acc = patch.water.clone();
         }
-        if let (Some(accumulators), Some(bgc)) = (restored.methane.as_ref(), template.bgc.as_mut()) {
+        if let (Some(accumulators), Some(bgc)) = (restored.methane.as_ref(), template.bgc.as_mut())
+        {
             bgc.initial.methane_acc = accumulators[at];
         }
     }
@@ -3068,31 +3134,90 @@ fn read_document(path: &Path) -> Result<Document> {
     parse(&text).with_context(|| format!("cannot parse case namelist {}", path.display()))
 }
 
-/// 取一个逻辑字段：算例里写了就用算例的，否则用 schema 的声明默认值。
-/// `DEF_hist_vars` 的逐变量开关尚未移植：Rust 的 history 按默认（全开）写。上游
-/// `sync_hist_vars(set_defaults=.true.)` 先把所有开关置成 `DEF_HIST_vars_out_default`，再在
-/// `DEF_HIST_vars_namelist` 文件存在时读 `&nl_colm_history` 覆盖（文件不存在只打印一行、
-/// 保留默认，`MOD_Namelist.F90:2788-2805`）。两者任一会改变写出的变量集，就拒绝，
-/// 免得悄悄写出与 Fortran 不同的文件。
-fn reject_history_selection(document: &Document) -> Result<()> {
-    ensure!(
-        logical_field(document, "DEF_HIST_vars_out_default")?,
-        "DEF_HIST_vars_out_default = .false. (per-variable history selection) is not ported yet; \
-         run this case with --engine fortran"
-    );
-    let selection = string_field(document, "DEF_HIST_vars_namelist")?;
-    let path = std::path::Path::new(selection.trim());
-    // 相对路径按 Fortran 进程的工作目录解析，这里判断不了，一并拒绝（`null` 是默认值）。
-    let inert = selection.trim() == "null" || (path.is_absolute() && !path.is_file());
-    ensure!(
-        inert,
-        "DEF_HIST_vars_namelist ({}) selects history variables, which is not ported yet; run this \
-         case with --engine fortran",
-        selection.trim()
-    );
-    Ok(())
+/// 闸门 3（`DEF_hist_vars`，`MOD_Namelist.F90:2788-2870`）：开关先取声明默认值，`sync_hist_vars` 把同步到
+/// 的置成 `DEF_HIST_vars_out_default`，`DEF_HIST_vars_namelist` 文件存在时读它的 `&nl_colm_history` 覆盖，
+/// DiagMatrix 再强制打开一批容量量。Fortran 进程在算例目录里跑，相对路径按算例目录解析。
+///
+/// FIRE 的五个历史量写的是上一次 `vecacc` 的残留（upstream-bugs 第 26 条），残留取决于前面实际
+/// 写了哪个量；开关一旦改变写出集合，这条链就变了 —— 这种组合拒绝。
+fn install_history_selection(document: &Document, case_directory: &Path, crop: bool) -> Result<()> {
+    let out_default = logical_field(document, "DEF_HIST_vars_out_default")?;
+    let file = string_field(document, "DEF_HIST_vars_namelist")?;
+    let file = case_directory.join(file.trim());
+    let overrides = if file.is_file() {
+        history_namelist_overrides(&file)?
+    } else {
+        Vec::new()
+    };
+    let bgc = logical_field(document, "DEF_USE_BGC")?;
+    // `MOD_Namelist.F90`：FERT/灌溉只在 CROP 内核里生效，其余开关读 namelist 本身。
+    let runtime = |condition: &str| -> Result<bool> {
+        Ok(match condition {
+            "DEF_USE_FERT" | "DEF_USE_IRRIGATION" => crop && logical_field(document, condition)?,
+            other => logical_field(document, other)?,
+        })
+    };
+    let diag_matrix = bgc && logical_field(document, "DEF_USE_DiagMatrix")?;
+    let resolve = |out_default: bool, overrides: &[(String, bool)]| {
+        colm_hist::selection::HistorySelection::resolve(&colm_hist::selection::SelectionInput {
+            out_default,
+            overrides,
+            runtime: &runtime,
+            // Rust 运行期不支持 HYPERSPECTRAL/DataAssimilation 内核。
+            defined: &|_| false,
+            diag_matrix,
+        })
+    };
+    let selection = resolve(out_default, &overrides)?;
+    if bgc && logical_field(document, "DEF_USE_FIRE")? {
+        ensure!(
+            selection == resolve(true, &[])?,
+            "DEF_USE_FIRE with a DEF_hist_vars selection is not ported (the fire history writes the \
+             residual of whichever variable was written before it); run this case with --engine fortran"
+        );
+    }
+    colm_runtime::history::install_selection(selection)
 }
 
+/// `&nl_colm_history` 里的 `DEF_hist_vars%X = .true./.false.`（只读第一个这样的组，与 `read(nml=)` 一致）。
+fn history_namelist_overrides(path: &Path) -> Result<Vec<(String, bool)>> {
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("cannot read history namelist {}", path.display()))?;
+    let document = parse(&text)
+        .with_context(|| format!("cannot parse history namelist {}", path.display()))?;
+    let mut inside = false;
+    let mut seen = false;
+    let mut overrides = Vec::new();
+    for item in &document.items {
+        match item {
+            colm_namelist::document::Item::GroupStart(line) => {
+                let name = line.trim().trim_start_matches('&').trim().to_ascii_lowercase();
+                inside = !seen && name.starts_with("nl_colm_history");
+                seen |= inside;
+            }
+            colm_namelist::document::Item::GroupEnd(_) => inside = false,
+            colm_namelist::document::Item::Entry(entry) if inside => {
+                let field = entry.path.to_string();
+                let member = field
+                    .split_once('%')
+                    .filter(|(name, _)| name.eq_ignore_ascii_case("DEF_hist_vars"))
+                    .map(|(_, member)| member.to_owned())
+                    .with_context(|| {
+                        format!("{} sets {field}, which is not a DEF_hist_vars member", path.display())
+                    })?;
+                let Value::Bool(value) = entry.value else {
+                    bail!("DEF_hist_vars%{member} must be a logical");
+                };
+                overrides.push((member, value));
+            }
+            _ => {}
+        }
+    }
+    ensure!(seen, "{} has no &nl_colm_history group", path.display());
+    Ok(overrides)
+}
+
+/// 取一个逻辑字段：算例里写了就用算例的，否则用 schema 的声明默认值。
 fn logical_field(document: &Document, field: &str) -> Result<bool> {
     if let Some(value) = document.get(field) {
         return match value {

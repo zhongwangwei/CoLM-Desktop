@@ -23,7 +23,8 @@ pub struct SpatialTopology {
     pub land_type: Vec<i32>,
     /// 每个 patch 的像元 `(ilon, ilat)`（1 起）。
     pub cells: Vec<Vec<(i32, i32)>>,
-    /// `pctshared`；landpatch 不共享像元，各为 1。
+    /// `pctshared`：只在 `has_shared` 时读（CROP 的农田 patch 按 `pctcrop` 分一个像元区间）；
+    /// 否则各为 1（上游不乘，乘 1 是恒等）。
     pub shared_fraction: Vec<f64>,
 }
 
@@ -64,6 +65,7 @@ impl SpatialTopology {
             cells: Vec::new(),
             shared_fraction: Vec::new(),
         };
+        let mut any_shared = false;
         for (_, block) in keyed {
             let path = landpatch_path(landdata, year, &block);
             let file =
@@ -79,7 +81,18 @@ impl SpatialTopology {
                 "{} has inconsistent patch vectors",
                 path.display()
             );
-            let shared_fraction = vec![1.0; element.len()];
+            let has_shared = has_shared(&element, &start);
+            let shared_fraction = if has_shared {
+                read_vector::<f64>(&file, "pctshared", &path)?
+            } else {
+                vec![1.0; element.len()]
+            };
+            ensure!(
+                shared_fraction.len() == element.len(),
+                "{} has inconsistent patch vectors",
+                path.display()
+            );
+            any_shared |= has_shared;
             let sets = colm_init::spatial_static::read_spatial_pixel_sets(
                 landdata,
                 year,
@@ -111,12 +124,26 @@ impl SpatialTopology {
             topology.shared_fraction.extend(sets.shared_fraction);
             topology.blocks.push((block, first..topology.element.len()));
         }
+        // `has_shared` 在上游是全局的（`MPI_LOR`）：任一块共享，各块都读 `pctshared`。
+        ensure!(
+            !any_shared || topology.blocks.len() == 1,
+            "pctshared on a multi-block case is not supported yet"
+        );
         Ok(topology)
     }
 
     pub fn patch_count(&self) -> usize {
         self.element.len()
     }
+}
+
+/// `pixelset_load_from_file`：相邻两个集合 `ielm` 与 `ipxstt` 都相同才算共享像元，
+/// 此时才读 `pctshared`。
+fn has_shared(element: &[i64], start: &[i32]) -> bool {
+    element
+        .windows(2)
+        .zip(start.windows(2))
+        .any(|(e, s)| e[0] == e[1] && s[0] == s[1])
 }
 
 /// 分块名 → `(lon_w, lat_s)`：`e110_n20` 是 (110, 20)，`w180_s90` 是 (-180, -90)。

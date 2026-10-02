@@ -310,22 +310,30 @@ fn cold_bgc_keeps_nonvegetated_patch_state_without_a_synthetic_pft() {
     assert_eq!(state.pools.mineral_nitrogen, [10.0; BGC_SOIL_LAYERS]);
 }
 
+/// `MOD_IniTimeVariable.F90:824`：只有 `ivt >= npcropmin`（17）按作物清零；15、16（C3 作物的雨养/
+/// 灌溉两型）走落叶分支（`leafc_storage = 100`）。
 #[test]
-fn cold_bgc_treats_the_first_cft_as_a_crop() {
-    let mut input = sample_input(None);
-    input.pft = BgcPftColdStartInput {
-        class: &[15],
-        fraction: &[1.0],
-        leaf_carbon_to_nitrogen: &[25.0],
-        fine_root_carbon_to_nitrogen: &[40.0],
-        live_wood_carbon_to_nitrogen: &[50.0],
-        dead_wood_carbon_to_nitrogen: &[100.0],
+fn cold_bgc_zeroes_only_classes_from_npcropmin() {
+    let cold = |class: i32| {
+        let classes = [class];
+        let mut input = sample_input(None);
+        input.pft = BgcPftColdStartInput {
+            class: &classes,
+            fraction: &[1.0],
+            leaf_carbon_to_nitrogen: &[25.0],
+            fine_root_carbon_to_nitrogen: &[40.0],
+            live_wood_carbon_to_nitrogen: &[50.0],
+            dead_wood_carbon_to_nitrogen: &[100.0],
+        };
+        derive_cold_start_bgc_state(input).unwrap()
     };
-    let state = derive_cold_start_bgc_state(input).unwrap();
-
-    assert_eq!(pft_values(&state, "leafc_p"), [0.0]);
-    assert_eq!(pft_values(&state, "leafc_storage_p"), [0.0]);
-    assert_eq!(pft_values(&state, "frootc_p"), [0.0]);
+    let crop = cold(17);
+    assert_eq!(pft_values(&crop, "leafc_p"), [0.0]);
+    assert_eq!(pft_values(&crop, "leafc_storage_p"), [0.0]);
+    assert_eq!(pft_values(&crop, "frootc_p"), [0.0]);
+    let c3_crop = cold(15);
+    assert_eq!(pft_values(&c3_crop, "leafc_p"), [0.0]);
+    assert_eq!(pft_values(&c3_crop, "leafc_storage_p"), [100.0]);
 }
 
 #[test]

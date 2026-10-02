@@ -54,6 +54,9 @@ pub struct SpatialPftStaticConfig<'a> {
     pub subgrid_fallback: Option<SpatialPftSubgrid>,
     /// Force soil texture/BVIC initialization for CatchLateral even when runoff scheme is not Simple VIC.
     pub force_soil_texture: bool,
+    /// `CROP` 内核宏。上游的 `DEF_USE_CROP` 是它的只读映射、不在 namelist 里，所以由调用方传进来；
+    /// namelist 里写了 `DEF_USE_CROP = .true.` 也算（旧测试与研究算例）。
+    pub crop: bool,
     pub landdata: &'a Path,
     pub restart_dir: &'a Path,
     pub case_name: &'a str,
@@ -124,6 +127,7 @@ impl<'a> SpatialPftStaticConfig<'a> {
             namelist,
             subgrid_fallback: None,
             force_soil_texture: false,
+            crop: false,
             landdata,
             restart_dir,
             case_name,
@@ -180,7 +184,7 @@ pub fn write_spatial_pft_constant_restart(
         config.land_cover_year,
         class.len(),
     )?;
-    let crop_fraction = optional_bool_or(&document, "DEF_USE_CROP", false)?.then(|| {
+    let crop_fraction = (config.crop || optional_bool_or(&document, "DEF_USE_CROP", false)?).then(|| {
         read_f64(
             config.landdata,
             "pctpft",
@@ -303,7 +307,7 @@ pub fn write_spatial_pft_constant_restarts(
         .map(|&class| spatial_patch_type(LandCoverScheme::Igbp, class))
         .collect::<Result<Vec<_>>>()?;
     let pfts = read_pft_vectors(config)?;
-    let use_crop = optional_bool_or(&document, "DEF_USE_CROP", false)?;
+    let use_crop = config.crop || optional_bool_or(&document, "DEF_USE_CROP", false)?;
     let pft_indices = match_pfts_to_patches(&patches, &patch_kind, &pfts, use_crop)?;
     let pft_heights = pft_canopy(&document, &pfts.class, &pfts.observed_height_m)?;
     let mut canopy = colm_core::CanopyState {
@@ -378,7 +382,8 @@ pub fn write_spatial_pft_cold_time_restarts(
     };
     let observations = SpatialObservedInitializationPaths::from_document(&document)?;
     let use_bgc = optional_bool_or(&document, "DEF_USE_BGC", false)?;
-    let use_crop = optional_bool_or(&document, "DEF_USE_CROP", false)?;
+    let use_crop =
+        config.static_config.crop || optional_bool_or(&document, "DEF_USE_CROP", false)?;
     ensure!(
         !use_crop || use_bgc,
         "spatial CROP cold starts require DEF_USE_BGC = .true."
@@ -394,6 +399,8 @@ pub fn write_spatial_pft_cold_time_restarts(
         );
     }
     let use_nitrification = optional_bool_or(&document, "DEF_USE_NITRIF", true)?;
+    // `DEF_USE_LAIFEEDBACK`：BGC 关闭时上游强制置假（`MOD_Namelist.F90:1915`）。
+    let lai_feedback = use_bgc && optional_bool_or(&document, "DEF_USE_LAIFEEDBACK", false)?;
     // SASU/DiagMatrix 的冷启动字段只在单点路径上按 Fortran 核对过。
     ensure!(
         !optional_bool_or(&document, "DEF_USE_SASU", false)?
@@ -484,6 +491,7 @@ pub fn write_spatial_pft_cold_time_restarts(
     common_config.tuning = config.tuning;
     common_config.observations = observations.borrow();
     common_config.snicar = snicar;
+    common_config.zero_leaf_area = lai_feedback;
     let common = crate::write_spatial_lct_cold_time_restart(common_config)?;
 
     let patches = read_patches(
@@ -526,13 +534,18 @@ pub fn write_spatial_pft_cold_time_restarts(
     });
     let pft_count = pfts.class.len();
     let month = crate::spatial_time::month(config.date)?;
-    let mut total_lai = read_pft_monthly(
-        config.static_config,
-        config.lai_year,
-        "LAI_pfts",
-        month,
-        pft_count,
-    )?;
+    // 反馈下 `LAI_readin` 不读 `LAI_pfts`（mksrfdata 也不写它），`tlai_p` 由下面的 BGC 叶碳给出。
+    let mut total_lai = if lai_feedback {
+        vec![0.0; pft_count]
+    } else {
+        read_pft_monthly(
+            config.static_config,
+            config.lai_year,
+            "LAI_pfts",
+            month,
+            pft_count,
+        )?
+    };
     let mut total_sai = read_pft_monthly(
         config.static_config,
         config.lai_year,
@@ -546,14 +559,41 @@ pub fn write_spatial_pft_cold_time_restarts(
     );
     if crop.is_some() {
         for pft in 0..pft_count {
-            if pfts.class[pft] >= 15 {
+            // `MOD_Initialize.F90` 的 CROP 段只清 `ivt >= npcropmin` 的作物。
+            if pfts.class[pft] >= colm_core::bgc_driver::NPCROPMIN {
                 total_lai[pft] = 0.0;
                 total_sai[pft] = 0.0;
             }
         }
     }
+    // `IniTimeVariable` 的反馈块（`MOD_IniTimeVariable.F90:988-996`）：`tlai_p = max(0, slatop·leafc_p)`、
+    // `lai_p = tlai_p`。CROP 段先清了作物的 `leafc_p`，这里作物仍得 0。
+    if lai_feedback {
+        let state = bgc_state
+            .as_ref()
+            .context("DEF_USE_LAIFEEDBACK requires the BGC cold-start state")?;
+        let leaf_carbon = colm_core::PFT_BGC_F64_VARIABLES
+            .iter()
+            .position(|&name| name == "leafc_p")
+            .map(|index| &state.pft_values[index])
+            .context("the BGC cold-start state has no leafc_p")?;
+        let slatop = crate::single_point::pft_parameters(
+            &document,
+            "DEF_PFT_SLATOP",
+            &pfts.class,
+            hydraulic_model == HydraulicModel::Campbell,
+        )?;
+        for ((lai, &slatop), &leafc) in total_lai.iter_mut().zip(&slatop).zip(leaf_carbon) {
+            *lai = (slatop * leafc).max(0.0);
+        }
+    }
     let canopy = pft_canopy(&document, &pfts.class, &pfts.observed_height_m)?;
     let common_state = read_common_state(&common.block, patches.class.len())?;
+    // 雪初值那一支在反馈块之前就用 spval 的 `tlai_p` 算雪盖（单点同样不移植）。
+    ensure!(
+        !lai_feedback || common_state.snow_depth_m.iter().all(|&depth| depth == 0.0),
+        "DEF_USE_LAIFEEDBACK cold starts with initial snow are not ported"
+    );
     ensure!(
         !config.use_hyperspectral || common_state.snow_depth_m.iter().all(|&depth| depth == 0.0),
         "HYPERSPECTRAL snow cold start is not implemented: upstream has no verified 211-band SNICAR snow output mapping"
@@ -1079,10 +1119,27 @@ pub fn write_spatial_pft_cold_time_restarts(
         &patch_snow_cover,
         &snicar_by_patch,
     )?;
+    // 反馈：土壤 PFT patch 的 `lai = sum(lai_p·pftfrac)`；`tlai` 与其余 patch 的 `lai` 是 0
+    // （vendor 修复后的 `tlai`，见 upstream-bugs 第 36 条）。
+    if lai_feedback {
+        let lai = pft_to_patch
+            .iter()
+            .map(|indices| {
+                indices.iter().fold(0.0, |sum, &pft| {
+                    total_lai[pft].mul_add(pfts.fraction[pft], sum)
+                })
+            })
+            .collect::<Vec<_>>();
+        set_common_patch_values(&common.block, "lai", &lai)?;
+    }
     if crop.is_some() {
         let crop_patch = pft_to_patch
             .iter()
-            .map(|indices| indices.iter().any(|&pft| pfts.class[pft] >= 15))
+            .map(|indices| {
+                indices
+                    .iter()
+                    .any(|&pft| pfts.class[pft] >= colm_core::bgc_driver::NPCROPMIN)
+            })
             .collect::<Vec<_>>();
         zero_common_crop_vegetation(&common.block, &crop_patch)?;
     }
@@ -2160,6 +2217,22 @@ fn update_common_pft_optics(
             .expect("checked common restart variable exists")
             .put_values(&layers, (.., .., .., ..))?;
     }
+    file.close()?;
+    Ok(())
+}
+
+fn set_common_patch_values(path: &Path, name: &str, values: &[f64]) -> Result<()> {
+    let mut file = netcdf::append(path)
+        .with_context(|| format!("cannot update {name} in {}", path.display()))?;
+    let mut variable = file
+        .variable_mut(name)
+        .with_context(|| format!("common restart has no {name}"))?;
+    ensure!(
+        variable.len() == values.len(),
+        "common restart {name} has an unexpected patch layout"
+    );
+    variable.put_values(values, ..)?;
+    drop(variable);
     file.close()?;
     Ok(())
 }

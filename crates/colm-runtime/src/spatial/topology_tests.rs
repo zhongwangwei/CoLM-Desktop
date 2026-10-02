@@ -17,3 +17,12 @@ fn blocks_sort_longitude_first_then_latitude() {
     let order = names.map(|(_, name)| name);
     assert_eq!(order, ["w005_s10", "e110_n20", "e110_n25", "e115_n20"]);
 }
+
+/// CROP 的农田 patch 共用同一像元区间（同 `eindex`、同 `ipxstt`），只有这时才读 `pctshared`。
+#[test]
+fn shared_pixels_need_same_element_and_same_start() {
+    assert!(!has_shared(&[1, 1, 2], &[1, 3, 1]));
+    assert!(!has_shared(&[1, 2], &[1, 1]));
+    assert!(has_shared(&[1, 1, 1, 2], &[1, 3, 3, 1]));
+    assert!(!has_shared(&[7], &[1]));
+}

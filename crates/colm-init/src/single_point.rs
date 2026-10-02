@@ -1915,7 +1915,8 @@ fn write_single_point_pft_cold_time_restarts(
             .iter()
             .zip(total_lai_p.iter_mut().zip(total_sai_p.iter_mut()))
         {
-            if *class >= 15 {
+            // `MOD_Initialize.F90` 的 CROP 段只清 `ivt >= npcropmin` 的作物。
+            if *class >= colm_core::bgc_driver::NPCROPMIN {
                 *lai = 0.0;
                 *sai = 0.0;
             }
@@ -1925,7 +1926,7 @@ fn write_single_point_pft_cold_time_restarts(
     // `DEF_USE_LAIFEEDBACK`：初始化时 `LAI_readin` 跳过 `tlai`/`tlai_p`（`MOD_LAIReadin.F90:170-186`），
     // 两者停在分配时的 spval；`IniTimeVariable` 末尾再令 `tlai_p = max(0, slatop·leafc_p)`、
     // `lai_p = tlai_p`、`lai = sum(lai_p·pftfrac)`（`MOD_IniTimeVariable.F90:988-996`），
-    // patch `tlai` 一直是 spval 写进重启。反照率在其后按这组 LAI 算（`MOD_Initialize.F90:1518`）。
+    // patch `tlai` 经 vendor 修复置 0 写进重启。反照率在其后按这组 LAI 算（`MOD_Initialize.F90:1518`）。
     let feedback_lai = if run.lai_feedback {
         // 雪初值那一支在反馈块之前就用 spval 的 `tlai`/`tlai_p` 算雪盖（`:527-545`），
         // 上游这条路径本身不自洽，暂不移植。作物段（`MOD_Initialize.F90:1290-1305`）先于
@@ -2020,9 +2021,10 @@ fn write_single_point_pft_cold_time_restarts(
         .zip(&pft_snow.pft_snow_free_vegetation_fraction)
         .map(|(sai, sigf)| sai * sigf)
         .collect::<Vec<_>>();
-    // `lai`：反馈时是 `sum(lai_p·pftfrac)`，否则就是 `tlai`；`tlai` 反馈时是 spval。
+    // `lai`：反馈时是 `sum(lai_p·pftfrac)`，否则就是 `tlai`。`tlai` 反馈时停在分配值 spval，
+    // vendor 修复后在 `LAI_readin` 之后置 0（upstream-bugs 第 36 条）。
     let (total_lai, lai) = match feedback_lai {
-        Some(lai) => (MISSING, lai),
+        Some(lai) => (0.0, lai),
         None => {
             let total = weighted_sum(&total_lai_p, &pft.fraction)?;
             (total, total)
@@ -2387,15 +2389,14 @@ fn write_single_point_pft_cold_time_restarts(
         (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new())
     };
     let common_patches = if crop.is_some() {
-        pft.class
-            .iter()
-            .enumerate()
-            .map(|(index, &class)| ColdPatchFields {
-                // LAI 反馈：作物段把作物 patch 的 `tlai` 置 0，其余 patch 的 `tlai` 停在 spval。
-                total_lai: match (feedback_lai, class >= 15) {
-                    (None, _) => total_lai_p[index],
-                    (Some(_), true) => 0.0,
-                    (Some(_), false) => MISSING,
+        (0..pft.class.len())
+            .map(|index| ColdPatchFields {
+                // LAI 反馈：作物段把作物 patch 的 `tlai` 置 0；其余 patch 停在 spval，vendor 修复后
+                // 也是 0（upstream-bugs 第 36 条）。
+                total_lai: if feedback_lai.is_some() {
+                    0.0
+                } else {
+                    total_lai_p[index]
                 },
                 total_sai: total_sai_p[index],
                 vegetation_fraction: 1.0,

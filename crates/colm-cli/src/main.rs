@@ -2071,9 +2071,9 @@ fn rust_preprocessor_arguments(
     }
     // `CROP` 内核：mksrfdata 要按 `croptyp`/`pctcrop` 物化作物站点（上游 `#ifdef CROP` 时
     // `SITE_pfttyp = croptyp + N_PFT - 1`），不给 `--crop` 会按自然 PFT 审核并拒绝 `pfttyp = 17`。
-    // mkinidata 从地表文件里有无作物份额自行判断，不需要这个开关。
-    if stage == Stage::MkSrfData
-        && !lct
+    // 单点 mkinidata 从地表文件里有无作物份额自行判断；空间 mkinidata 要它决定 `map_patch_to_pft`
+    // 的农田 patch 规则（`DEF_USE_CROP` 是宏的只读映射，namelist 里没有）。
+    if !lct
         && kernel
             .manifest
             .macros

@@ -1229,8 +1229,10 @@ fn is_woody(class: i32) -> bool {
     (1..=11).contains(&class)
 }
 
+/// `ivt >= npcropmin`（`MOD_IniTimeVariable.F90:824`）：作物冷启动不给叶、根碳。
+/// 15、16（C3 作物的雨养/灌溉两型）不在其中，按落叶 PFT 冷启动。
 fn is_crop(class: i32) -> bool {
-    class >= 15
+    class >= crate::bgc_driver::NPCROPMIN
 }
 
 const CARBON_TOTAL_FIELDS: &[&str] = &[

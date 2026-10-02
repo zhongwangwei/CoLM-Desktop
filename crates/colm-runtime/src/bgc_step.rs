@@ -166,6 +166,29 @@ impl Footprint {
             }
         }
     }
+
+    /// `grid2pset_dominant`：面积最大的那一份（`maxloc`，并列取第一个）所在格的值；
+    /// 面积和不为正时是 `None`（上游给 −9999）。单点就是所在那一格。
+    pub fn dominant(&self, read: impl Fn(usize, usize) -> Result<f64>) -> Result<Option<f64>> {
+        match self {
+            Footprint::Cell(lat, lon) => read(*lat, *lon).map(Some),
+            Footprint::Parts { parts, area } => {
+                if *area <= 0.0 {
+                    return Ok(None);
+                }
+                let mut best: Option<&(usize, usize, f64)> = None;
+                for part in parts {
+                    if best.is_none_or(|top| part.2 > top.2) {
+                        best = Some(part);
+                    }
+                }
+                match best {
+                    Some(&(lat, lon, _)) => read(lat, lon).map(Some),
+                    None => Ok(None),
+                }
+            }
+        }
+    }
 }
 
 /// 一个 patch 在数据网格上的定位方式：单点按站点经纬度，空间按它的像元。
@@ -616,7 +639,10 @@ pub struct BgcRuntime {
     /// `DEF_USE_IRRIGATION`（CROP）的设置；灌溉状态本身在 patch 状态上。
     pub irrigation: Option<colm_core::IrrigationSettings>,
     /// CH4 provider（注册了 CH4 示踪物时）：配置与本 patch 的静态量。
-    pub methane: Option<(crate::methane::MethaneSetup, colm_core::methane::driver::MethaneSite)>,
+    pub methane: Option<(
+        crate::methane::MethaneSetup,
+        colm_core::methane::driver::MethaneSite,
+    )>,
     /// 本 patch 的 `patchtype`（装到模板上时写入）：只有土壤 patch（0）跑 `bgc_driver`
     /// （`CoLMDRIVER.F90:237-244`），其余 patch 的 BGC 状态只随步首的数据更新。
     pub patch_type: i32,
@@ -804,7 +830,10 @@ impl BgcRuntime {
             !dynamic_lake,
             "lake methane with DEF_USE_Dynamic_Lake is not ported to the Rust runtime yet"
         );
-        let mut bgc = state.bgc.take().context("a BGC patch needs its BGC state")?;
+        let mut bgc = state
+            .bgc
+            .take()
+            .context("a BGC patch needs its BGC state")?;
         let mut patch = bgc
             .methane
             .take()
@@ -1353,6 +1382,19 @@ impl CropGrid {
     fn read_pft(&self, m: usize, path: &Path, name: &str, index: Option<usize>) -> Result<f64> {
         Self::sample(&self.pfts[m], path, name, index)
     }
+
+    /// 第 `m` 个 PFT 的映射下第 `index` 个前导切片的主导值（`grid2pset_dominant`）。
+    fn dominant_pft(&self, m: usize, path: &Path, name: &str, index: usize) -> Result<Option<f64>> {
+        let file = netcdf::open(path).with_context(|| format!("cannot open {}", path.display()))?;
+        let variable = file
+            .variable(name)
+            .with_context(|| format!("{} has no {name}", path.display()))?;
+        self.pfts[m].dominant(|lat, lon| {
+            variable
+                .get_value::<f64, _>([index, lat, lon])
+                .with_context(|| format!("cannot read {name} from {}", path.display()))
+        })
+    }
 }
 
 /// `CROP_readin`（`MOD_CropReadin.F90`，`CoLM.F90:442` 启动时调用）：覆盖作物的播种日与施肥量。
@@ -1481,22 +1523,16 @@ pub fn crop_readin(
         return Ok(None);
     }
     let path = data.runtime_dir.join(CROP_IRRIGATION_METHOD);
-    // `grid2pset_dominant`（逐 PFT 取面积最大的类别）只移植了单点：那里就是所在格点的值。
-    ensure!(
-        matches!(data.patch, Locator::Site { .. }),
-        "spatial irrigation (grid2pset_dominant irrigation methods) is not ported"
-    );
     let grid = CropGrid::open(&path, data.patch, &data.pfts)?;
     let mut methods = vec![-99_999_999; classes.len()];
     for (m, &class) in classes.iter().enumerate() {
         if crop(class) {
             let index = usize::try_from(class - 15).expect("crop class");
-            // `grid2pset_dominant`：单点就是所在格点的整数值。
-            let method = grid.read_pft(m, &path, "irrigation_method", Some(index))?;
-            methods[m] = if method < 0.0 {
-                -99_999_999
-            } else {
-                method as i32
+            // `grid2pset_dominant`：面积最大的那一格的整数值；没有有效面积时上游给 −9999，随后与负值一样
+            // 变成 −99999999。
+            methods[m] = match grid.dominant_pft(m, &path, "irrigation_method", index)? {
+                Some(method) if method >= 0.0 => method as i32,
+                _ => -99_999_999,
             };
         }
     }

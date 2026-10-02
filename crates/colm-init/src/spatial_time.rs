@@ -53,6 +53,9 @@ pub struct SpatialLctTimeConfig<'a> {
     /// The year of the already materialized LAI vector files.
     pub lai_year: i32,
     pub lai_frequency: LaiFrequency,
+    /// `DEF_USE_LAIFEEDBACK`：`LAI_readin` 不读 `LAI_patches`，`tlai` 停在分配值 spval，
+    /// vendor 修复（upstream-bugs 第 36 条）之后是 0。为真时各 patch 的 LAI 按 0 冷启动。
+    pub zero_leaf_area: bool,
     pub dynamic_lake: bool,
     pub plant_hydraulics: bool,
     pub ozone_stress: bool,
@@ -91,6 +94,7 @@ impl<'a> SpatialLctTimeConfig<'a> {
             greenwich: false,
             lai_year: land_cover_year,
             lai_frequency: LaiFrequency::Monthly,
+            zero_leaf_area: false,
             dynamic_lake: false,
             plant_hydraulics: true,
             ozone_stress: false,
@@ -278,6 +282,9 @@ pub(crate) fn write_spatial_lct_cold_time_restart_with_urban(
         )?,
     ];
     let (lai, sai) = match config.lai_frequency {
+        LaiFrequency::Monthly if config.zero_leaf_area => {
+            (vec![0.0; count], read_monthly(config, "SAI_patches", month)?)
+        }
         LaiFrequency::Monthly => (
             read_monthly(config, "LAI_patches", month)?,
             read_monthly(config, "SAI_patches", month)?,

@@ -129,6 +129,38 @@ impl LatLonGrid {
         Ok(grid)
     }
 
+    /// `grid_define_from_file` 不给格心名时：直接读 `lat_s/lat_n/lon_w/lon_e`，再 `normalize`。
+    pub fn define_by_edges(
+        lat_s: Vec<f64>,
+        lat_n: Vec<f64>,
+        lon_w: Vec<f64>,
+        lon_e: Vec<f64>,
+    ) -> Result<Self> {
+        ensure!(
+            !lat_s.is_empty()
+                && lat_s.len() == lat_n.len()
+                && !lon_w.is_empty()
+                && lon_w.len() == lon_e.len(),
+            "a grid needs matching latitude and longitude edges"
+        );
+        ensure!(
+            lat_s.iter().chain(&lat_n).chain(&lon_w).chain(&lon_e).all(|v| v.is_finite()),
+            "grid edges must be finite"
+        );
+        let mut grid = Self {
+            lat_s,
+            lat_n,
+            lon_w,
+            lon_e,
+            yinc: 1,
+            rlon: Vec::new(),
+            rlat: Vec::new(),
+        };
+        grid.normalize()?;
+        grid.set_centers()?;
+        Ok(grid)
+    }
+
     /// `grid_define_by_res`：`nint(360/lon_res)` × `nint(180/lat_res)` 个格子。
     pub fn define_by_res(lon_res: f64, lat_res: f64) -> Result<Self> {
         ensure!(
@@ -452,5 +484,5 @@ pub fn areaquad(lat_s: f64, lat_n: f64, lon_w: f64, lon_e: f64) -> f64 {
 }
 
 #[cfg(test)]
-#[path = "grid_tests.rs"]
-mod grid_tests;
+#[path = "spatial_grid_tests.rs"]
+mod spatial_grid_tests;

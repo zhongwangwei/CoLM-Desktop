@@ -6,7 +6,7 @@
 
 use anyhow::{ensure, Result};
 
-use super::grid::{
+use crate::spatial_grid::{
     areaquad, find_nearest_east, find_nearest_north, find_nearest_south, find_nearest_west,
     lon_between_ceil, lon_between_floor, LatLonGrid,
 };
@@ -174,5 +174,5 @@ fn insert_sorted(list: &mut Vec<MappingPart>, x: usize, y: usize, area: f64) {
 }
 
 #[cfg(test)]
-#[path = "mapping_tests.rs"]
-mod mapping_tests;
+#[path = "spatial_mapping_tests.rs"]
+mod spatial_mapping_tests;

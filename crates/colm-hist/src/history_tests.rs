@@ -298,6 +298,12 @@ fn gridded_history_aggregates_by_area_and_filter() {
             "km2".to_owned(),
             vec![4.0, 2.0],
         )],
+        first_record_statics: vec![(
+            "croparea".to_owned(),
+            "crop area".to_owned(),
+            "km2".to_owned(),
+            vec![3.0, 0.0],
+        )],
     });
     let mut buffers = HistoryBuffers::new(dims, site, 1).with_grid(grid).unwrap();
     buffers.declare(&["t_grnd", "fsena"]).unwrap();
@@ -331,6 +337,15 @@ fn gridded_history_aggregates_by_area_and_filter() {
         vec![(1.0 * 3.0 + 5.0 * 1.0) / 4.0, MISSING_VALUE]
     );
     assert_eq!(values("landarea"), vec![4.0, 2.0]);
+    // `croparea` 定义带 time 维（上游 itime = 1），只写第 1 个时间槽。
+    assert_eq!(values("croparea"), vec![3.0, 0.0]);
+    let croparea = file.variable("croparea").unwrap();
+    let names = croparea
+        .dimensions()
+        .iter()
+        .map(|dimension| dimension.name())
+        .collect::<Vec<_>>();
+    assert_eq!(names, vec!["time", "lat", "lon"]);
     let t_grnd = file.variable("f_t_grnd").unwrap();
     let dimensions = t_grnd
         .dimensions()

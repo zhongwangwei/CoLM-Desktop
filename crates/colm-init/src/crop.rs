@@ -173,8 +173,6 @@ pub(crate) fn spatial_crop_cold_start_from_tuning(
     if fertilizer_source == 1 {
         state.set_source_one_manure(classes);
     }
-    let mut phase_weight = vec![0.0; patches];
-    let mut phase_sum = vec![0.0; patches];
     for (pft, &class) in classes.iter().enumerate() {
         if class >= CFT_FIRST {
             ensure!(
@@ -183,15 +181,8 @@ pub(crate) fn spatial_crop_cold_start_from_tuning(
             );
             state.planting_date[pft] = planting_day;
         }
-        let patch = pft_to_patch[pft];
-        phase_weight[patch] += pft_fraction[pft];
-        phase_sum[patch] += state.crop_phase[pft] * pft_fraction[pft];
     }
-    for patch in 0..patches {
-        if phase_weight[patch] > 0.0 {
-            state.patch_phase[patch] = phase_sum[patch];
-        }
-    }
+    set_spatial_patch_phase(&mut state, pft_to_patch, pft_fraction)?;
     state.planting_day_rice2.fill(0.0);
     Ok(state)
 }
@@ -706,233 +697,74 @@ fn set_spatial_patch_phase(
                 .all(|&patch| patch < state.patch_phase.len()),
         "CROP PFT phase ownership is inconsistent"
     );
-    let mut weight = vec![0.0; state.patch_phase.len()];
-    let mut phase = vec![0.0; state.patch_phase.len()];
+    // `CNDriverSummarizeStates` 只对土壤 patch 跑：`cphase(i) = sum(cphase_p*pftfrac)`（FMA 链，不除权重），
+    // `fertnitro_*(i)` 先置 0 再按类别覆盖。没有 PFT 的 patch 两者都停在分配值 spval。
+    let patches = state.patch_phase.len();
+    let mut has_pft = vec![false; patches];
+    let mut phase = vec![0.0; patches];
     for ((&patch, &fraction), &crop_phase) in
         pft_to_patch.iter().zip(pft_fraction).zip(&state.crop_phase)
     {
-        weight[patch] += fraction;
-        phase[patch] += crop_phase * fraction;
+        has_pft[patch] = true;
+        phase[patch] = crop_phase.mul_add(fraction, phase[patch]);
     }
-    for patch in 0..state.patch_phase.len() {
-        state.patch_phase[patch] = if weight[patch] > 0.0 {
-            phase[patch] / weight[patch]
-        } else {
-            MISSING
-        };
+    for patch in 0..patches {
+        state.patch_phase[patch] = if has_pft[patch] { phase[patch] } else { MISSING };
+        if !has_pft[patch] {
+            for field in [
+                &mut state.fertilizer_nitrogen_corn,
+                &mut state.fertilizer_nitrogen_spring_wheat,
+                &mut state.fertilizer_nitrogen_winter_wheat,
+                &mut state.fertilizer_nitrogen_soybean,
+                &mut state.fertilizer_nitrogen_cotton,
+                &mut state.fertilizer_nitrogen_rice1,
+                &mut state.fertilizer_nitrogen_rice2,
+                &mut state.fertilizer_nitrogen_sugarcane,
+            ] {
+                field[patch] = MISSING;
+            }
+        }
     }
     Ok(())
 }
 
+/// 一张 CoLM 数据图的网格（`grid_type`）：格心文件走 `define_by_center`，`lat_s/lat_n/lon_w/lon_e`
+/// 文件走 `grid_define_from_file` 的显式边界支。下标按文件顺序。
 pub(crate) struct MapGrid {
-    lat_s: Vec<f64>,
-    lat_n: Vec<f64>,
-    lon_w: Vec<f64>,
-    lon_span: Vec<f64>,
-    /// Cyclic longitudes unwrapped into one increasing 360° sweep.
-    lon_start: Vec<f64>,
+    grid: crate::spatial_grid::LatLonGrid,
 }
 
 impl MapGrid {
     pub(crate) fn from_file(file: &netcdf::File) -> Result<Self> {
         let latitude = coordinate_values(file, "lat")?;
         let longitude = coordinate_values(file, "lon")?;
-        ensure!(
-            !latitude.is_empty()
-                && !longitude.is_empty()
-                && latitude.iter().all(|value| value.is_finite())
-                && longitude.iter().all(|value| value.is_finite()),
-            "CROP management coordinates must be finite and nonempty"
-        );
-        let increasing = latitude.len() < 2 || latitude[1] > latitude[0];
-        ensure!(
-            latitude.windows(2).all(|pair| if increasing {
-                pair[1] > pair[0]
-            } else {
-                pair[1] < pair[0]
-            }),
-            "CROP management latitude coordinates must be strictly monotonic"
-        );
-        let (lat_s, lat_n) = (0..latitude.len())
-            .map(|index| {
-                if increasing {
-                    (
-                        if index == 0 {
-                            -90.0
-                        } else {
-                            (latitude[index - 1] + latitude[index]) * 0.5
-                        },
-                        if index + 1 == latitude.len() {
-                            90.0
-                        } else {
-                            (latitude[index] + latitude[index + 1]) * 0.5
-                        },
-                    )
-                } else {
-                    (
-                        if index + 1 == latitude.len() {
-                            -90.0
-                        } else {
-                            (latitude[index] + latitude[index + 1]) * 0.5
-                        },
-                        if index == 0 {
-                            90.0
-                        } else {
-                            (latitude[index - 1] + latitude[index]) * 0.5
-                        },
-                    )
-                }
-            })
-            .unzip();
-        let longitude = longitude
-            .into_iter()
-            .map(normalize_longitude)
-            .collect::<Vec<_>>();
-        ensure!(
-            longitude.len() == 1
-                || longitude.windows(2).all(|pair| {
-                    let distance = (pair[1] - pair[0]).rem_euclid(360.0);
-                    distance > 0.0 && distance < 360.0
-                }),
-            "CROP management longitude coordinates must be unique in cyclic order"
-        );
-        let (lon_w, lon_span) = if longitude.len() == 1 {
-            (vec![-180.0], vec![360.0])
-        } else {
-            (0..longitude.len())
-                .map(|index| {
-                    let previous = longitude[(index + longitude.len() - 1) % longitude.len()];
-                    let current = longitude[index];
-                    let next = longitude[(index + 1) % longitude.len()];
-                    let west = midpoint_longitude(previous, current);
-                    let east = midpoint_longitude(current, next);
-                    (west, longitude_span(west, east))
-                })
-                .unzip()
-        };
-        let lon_start = unwrap_longitude_starts(&lon_w)?;
         Ok(Self {
-            lat_s,
-            lat_n,
-            lon_w,
-            lon_span,
-            lon_start,
+            grid: crate::spatial_grid::LatLonGrid::define_by_center(&latitude, &longitude, None)?,
         })
     }
 
     /// Read CoLM's explicit cell edges (`grid_define_from_file` without
     /// center-coordinate arguments).  Groundwater-depth maps use this form.
     pub(crate) fn from_explicit_edges(file: &netcdf::File) -> Result<Self> {
-        let lat_s = coordinate_values(file, "lat_s")?;
-        let lat_n = coordinate_values(file, "lat_n")?;
-        let lon_w = coordinate_values(file, "lon_w")?;
-        let lon_e = coordinate_values(file, "lon_e")?;
-        ensure!(
-            !lat_s.is_empty()
-                && !lon_w.is_empty()
-                && lat_s.len() == lat_n.len()
-                && lon_w.len() == lon_e.len()
-                && lat_s
-                    .iter()
-                    .zip(&lat_n)
-                    .all(|(&south, &north)| south.is_finite()
-                        && north.is_finite()
-                        && north > south)
-                && lon_w
-                    .iter()
-                    .zip(&lon_e)
-                    .all(|(&west, &east)| west.is_finite()
-                        && east.is_finite()
-                        && longitude_span(west, east) > 0.0),
-            "CoLM map cell edges must be finite, nonempty, and have positive area"
-        );
-        let increasing = lat_s.len() < 2 || lat_s[1] > lat_s[0];
-        ensure!(
-            lat_s.windows(2).all(|pair| if increasing {
-                pair[1] > pair[0]
-            } else {
-                pair[1] < pair[0]
-            }) && lat_n.windows(2).all(|pair| if increasing {
-                pair[1] > pair[0]
-            } else {
-                pair[1] < pair[0]
-            }),
-            "CoLM map latitude edges must be strictly monotonic"
-        );
-        let lon_span = lon_w
-            .iter()
-            .zip(&lon_e)
-            .map(|(&west, &east)| longitude_span(west, east))
-            .collect();
-        let lon_start = unwrap_longitude_starts(&lon_w)?;
         Ok(Self {
-            lat_s,
-            lat_n,
-            lon_w,
-            lon_span,
-            lon_start,
+            grid: crate::spatial_grid::LatLonGrid::define_by_edges(
+                coordinate_values(file, "lat_s")?,
+                coordinate_values(file, "lat_n")?,
+                coordinate_values(file, "lon_w")?,
+                coordinate_values(file, "lon_e")?,
+            )?,
         })
     }
 
     fn values(&self) -> usize {
-        self.lat_s.len() * self.lon_w.len()
+        self.grid.nlat() * self.grid.nlon()
     }
 
     fn matches(&self, other: &Self) -> bool {
-        self.lat_s == other.lat_s
-            && self.lat_n == other.lat_n
-            && self.lon_w == other.lon_w
-            && self.lon_span == other.lon_span
-    }
-
-    fn overlapping_latitudes(&self, south: f64, north: f64) -> std::ops::Range<usize> {
-        let increasing = self.lat_s.len() < 2 || self.lat_s[1] > self.lat_s[0];
-        let (start, end) = if increasing {
-            (
-                self.lat_n.partition_point(|edge| *edge <= south),
-                self.lat_s.partition_point(|edge| *edge < north),
-            )
-        } else {
-            (
-                self.lat_s.partition_point(|edge| *edge >= north),
-                self.lat_n.partition_point(|edge| *edge > south),
-            )
-        };
-        start.min(end)..end
-    }
-
-    fn overlapping_longitudes(&self, west: f64, span: f64) -> Vec<(usize, f64)> {
-        let first = self.lon_start[0];
-        let mut start = west.rem_euclid(360.0);
-        while start < first {
-            start += 360.0;
-        }
-        while start >= first + 360.0 {
-            start -= 360.0;
-        }
-        let end = start + span;
-        let source_count = self.lon_start.len();
-        let first_index = self
-            .lon_start
-            .partition_point(|candidate| *candidate <= start)
-            .saturating_sub(1);
-        let mut overlaps = Vec::new();
-        for position in first_index..first_index + source_count + 1 {
-            let index = position % source_count;
-            let source_start =
-                self.lon_start[index] + if position >= source_count { 360.0 } else { 0.0 };
-            if source_start >= end {
-                break;
-            }
-            if source_start + self.lon_span[index] <= start {
-                continue;
-            }
-            let width = longitude_overlap(west, span, self.lon_w[index], self.lon_span[index]);
-            if width >= 1.0e-6 {
-                overlaps.push((index, width));
-            }
-        }
-        overlaps
+        self.grid.lat_s == other.grid.lat_s
+            && self.grid.lat_n == other.grid.lat_n
+            && self.grid.lon_w == other.grid.lon_w
+            && self.grid.lon_e == other.grid.lon_e
     }
 }
 
@@ -947,86 +779,66 @@ impl MapField {
     }
 }
 
+/// `build_arealweighted` + `grid2pset`（与运行期强迫、history 共用 [`crate::spatial_mapping`]）：
+/// `parts[iset]` 是 `(文件下标 ilat*nlon+ilon, areapart)`，按上游份序；`area[iset] = areapset`。
 pub(crate) struct AreaMapping {
     parts: Vec<Vec<(usize, f64)>>,
+    area: Vec<f64>,
 }
 
 impl AreaMapping {
     pub(crate) fn new(grid: &MapGrid, pixel_sets: &SpatialPixelSets) -> Result<Self> {
         ensure!(
-            pixel_sets.cells.len() == pixel_sets.shared_fraction.len()
-                && !pixel_sets.lon_w.is_empty()
-                && pixel_sets.lon_w.len() == pixel_sets.lon_e.len()
-                && !pixel_sets.lat_s.is_empty()
-                && pixel_sets.lat_s.len() == pixel_sets.lat_n.len(),
+            pixel_sets.cells.len() == pixel_sets.shared_fraction.len(),
             "spatial CROP pixel geometry is inconsistent"
         );
-        let mut parts = Vec::with_capacity(pixel_sets.cells.len());
-        for (set, cells) in pixel_sets.cells.iter().enumerate() {
-            let share = pixel_sets.shared_fraction[set];
-            let mut overlap = BTreeMap::<(usize, usize), f64>::new();
-            for &(x, y) in cells {
-                let x = usize::try_from(x).context("CROP mesh longitude is negative")?;
-                let y = usize::try_from(y).context("CROP mesh latitude is negative")?;
-                ensure!(
-                    x > 0 && x <= pixel_sets.lon_w.len() && y > 0 && y <= pixel_sets.lat_s.len(),
-                    "CROP mesh pixel is outside pixel axes"
-                );
-                let west = pixel_sets.lon_w[x - 1];
-                let east = pixel_sets.lon_e[x - 1];
-                let south = pixel_sets.lat_s[y - 1];
-                let north = pixel_sets.lat_n[y - 1];
-                ensure!(
-                    south.is_finite()
-                        && north.is_finite()
-                        && west.is_finite()
-                        && east.is_finite()
-                        && north > south,
-                    "CROP pixel has invalid geographic edges"
-                );
-                let target_span = longitude_span(west, east);
-                ensure!(target_span > 0.0, "CROP pixel has zero longitude width");
-                let longitudes = grid.overlapping_longitudes(west, target_span);
-                for latitude in grid.overlapping_latitudes(south, north) {
-                    let overlap_south = south.max(grid.lat_s[latitude]);
-                    let overlap_north = north.min(grid.lat_n[latitude]);
-                    for &(longitude, width) in &longitudes {
-                        let area = width.to_radians()
-                            * (overlap_north.to_radians().sin() - overlap_south.to_radians().sin())
-                            * share;
-                        ensure!(
-                            area.is_finite() && area >= 0.0,
-                            "CROP map overlap has invalid spherical area"
-                        );
-                        *overlap.entry((longitude, latitude)).or_default() += area;
-                    }
-                }
-            }
-            parts.push(
-                overlap
-                    .into_iter()
-                    .filter_map(|((longitude, latitude), area)| {
-                        (area > 0.0).then_some((latitude * grid.lon_w.len() + longitude, area))
-                    })
-                    .collect(),
-            );
-        }
-        Ok(Self { parts })
+        let pixel = crate::spatial_mapping::PixelAxes {
+            lon_w: pixel_sets.lon_w.clone(),
+            lon_e: pixel_sets.lon_e.clone(),
+            lat_s: pixel_sets.lat_s.clone(),
+            lat_n: pixel_sets.lat_n.clone(),
+        };
+        let mapping = crate::spatial_mapping::AreaWeightedMapping::build(
+            &grid.grid,
+            &pixel,
+            &pixel_sets.cells,
+            &pixel_sets.shared_fraction,
+        )?;
+        let nlon = grid.grid.nlon();
+        Ok(Self {
+            parts: mapping
+                .parts
+                .iter()
+                .map(|parts| {
+                    parts
+                        .iter()
+                        .map(|part| (part.ilat * nlon + part.ilon, part.area))
+                        .collect()
+                })
+                .collect(),
+            area: mapping.area,
+        })
     }
 
     pub(crate) fn len(&self) -> usize {
         self.parts.len()
     }
 
-    /// Apply `spatial_mapping_set_missing_value` semantics before averaging.
-    /// The remaining weights are renormalized by [`Self::average`].
+    /// `spatial_mapping_set_missing_value`：缺测格的 `areapart` 置 0，`areapset` 按剩下的份从 0 起重算。
     pub(crate) fn exclude_invalid(&mut self, valid: &[bool]) -> Result<()> {
-        for parts in &mut self.parts {
+        for (parts, area) in self.parts.iter_mut().zip(&mut self.area) {
             ensure!(
                 parts.iter().all(|(index, _)| *index < valid.len()),
                 "CROP map masking has inconsistent source dimensions"
             );
-            parts.retain(|(index, _)| valid[*index]);
+            *area = 0.0;
+            for (index, weight) in parts.iter_mut() {
+                if valid[*index] {
+                    *area += *weight;
+                } else {
+                    *weight = 0.0;
+                }
+            }
         }
         Ok(())
     }
@@ -1041,16 +853,22 @@ impl AreaMapping {
                     .all(|(index, _)| *index < field.values.len()),
             "CROP map values have inconsistent dimensions"
         );
+        // `grid2pset`：`areapset > 0` 时只累加 `areapart > 0` 的份（`pdata + v*areapart` 收缩成 FMA），
+        // 再除以 `areapset`；否则是 spval（这里为 `None`）。
         Ok(self
             .parts
             .iter()
-            .map(|parts| {
-                let (sum, area) = parts
-                    .iter()
-                    .fold((0.0, 0.0), |(sum, area), &(index, weight)| {
-                        (sum + field.values[index] * weight, area + weight)
-                    });
-                (area > 0.0).then_some(sum / area)
+            .zip(&self.area)
+            .map(|(parts, &area)| {
+                (area > 0.0).then(|| {
+                    parts
+                        .iter()
+                        .filter(|(_, weight)| *weight > 0.0)
+                        .fold(0.0, |sum, &(index, weight)| {
+                            weight.mul_add(field.values[index], sum)
+                        })
+                        / area
+                })
             })
             .collect())
     }
@@ -1096,69 +914,6 @@ impl AreaMapping {
     }
 }
 
-fn midpoint_longitude(west: f64, east: f64) -> f64 {
-    normalize_longitude(if west > east {
-        (west + east + 360.0) * 0.5
-    } else {
-        (west + east) * 0.5
-    })
-}
-
-fn normalize_longitude(value: f64) -> f64 {
-    (value + 180.0).rem_euclid(360.0) - 180.0
-}
-
-fn longitude_span(west: f64, east: f64) -> f64 {
-    if (east - west).abs() >= 360.0 - 1.0e-10 {
-        360.0
-    } else {
-        (normalize_longitude(east) - normalize_longitude(west)).rem_euclid(360.0)
-    }
-}
-
-fn unwrap_longitude_starts(values: &[f64]) -> Result<Vec<f64>> {
-    ensure!(
-        !values.is_empty() && values.iter().all(|value| value.is_finite()),
-        "CoLM map longitude edges must be finite and nonempty"
-    );
-    let mut starts = Vec::with_capacity(values.len());
-    for &value in values {
-        let mut value = value.rem_euclid(360.0);
-        if let Some(&previous) = starts.last() {
-            while value <= previous {
-                value += 360.0;
-            }
-            ensure!(
-                value - previous < 360.0,
-                "CoLM map longitude edges must be in cyclic order"
-            );
-        }
-        starts.push(value);
-    }
-    Ok(starts)
-}
-
-fn longitude_overlap(west_a: f64, span_a: f64, west_b: f64, span_b: f64) -> f64 {
-    let segments = |west: f64, span: f64| {
-        let west = west.rem_euclid(360.0);
-        if span >= 360.0 - 1.0e-10 {
-            vec![(0.0, 360.0)]
-        } else if west + span <= 360.0 {
-            vec![(west, west + span)]
-        } else {
-            vec![(west, 360.0), (0.0, west + span - 360.0)]
-        }
-    };
-    segments(west_a, span_a)
-        .into_iter()
-        .flat_map(|(west_a, east_a)| {
-            segments(west_b, span_b)
-                .into_iter()
-                .map(move |(west_b, east_b)| (east_a.min(east_b) - west_a.max(west_b)).max(0.0))
-        })
-        .sum()
-}
-
 pub(crate) fn map_field_2d(file: &netcdf::File, name: &str, grid: &MapGrid) -> Result<MapField> {
     let variable = required_variable(file, name)?;
     require_dimensions(&variable, name, &["lat", "lon"])?;
@@ -1182,8 +937,8 @@ pub(crate) fn map_field_soil_3d(
         soil < variable.dimensions()[2].len(),
         "{name} has no soil index {soil}"
     );
-    let latitude = grid.lat_s.len();
-    let longitude = grid.lon_w.len();
+    let latitude = grid.grid.nlat();
+    let longitude = grid.grid.nlon();
     let values = variable
         .get_values::<f64, _>((0..latitude, 0..longitude, soil..soil + 1))
         .or_else(|_| {
@@ -1211,8 +966,8 @@ pub(crate) fn map_field_time_3d(
         time < variable.dimensions()[0].len(),
         "{name} has no time index {time}"
     );
-    let latitude = grid.lat_s.len();
-    let longitude = grid.lon_w.len();
+    let latitude = grid.grid.nlat();
+    let longitude = grid.grid.nlon();
     let values = variable
         .get_values::<f64, _>((time..time + 1, 0..latitude, 0..longitude))
         .or_else(|_| {
@@ -1241,8 +996,8 @@ pub(crate) fn map_field_time_profile_4d(
         layer < variable.dimensions()[3].len(),
         "{name} has no layer index {layer}"
     );
-    let latitude = grid.lat_s.len();
-    let longitude = grid.lon_w.len();
+    let latitude = grid.grid.nlat();
+    let longitude = grid.grid.nlon();
     let values = variable
         .get_values::<f64, _>((time..time + 1, 0..latitude, 0..longitude, layer..layer + 1))
         .or_else(|_| {
@@ -1260,8 +1015,8 @@ fn map_field_3d(file: &netcdf::File, name: &str, cft: usize, grid: &MapGrid) -> 
         cft < variable.dimensions()[0].len(),
         "{name} has no CFT index {cft}"
     );
-    let latitude = grid.lat_s.len();
-    let longitude = grid.lon_w.len();
+    let latitude = grid.grid.nlat();
+    let longitude = grid.grid.nlon();
     let values = variable
         .get_values::<f64, _>((cft..cft + 1, 0..latitude, 0..longitude))
         .or_else(|_| {
