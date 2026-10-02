@@ -321,6 +321,19 @@
 - **处理**：vendor 改为先判 `ieee_is_nan(v)`（计入该月的样本数、不进和），再做有序比较（第 520 轮）。
   对非 NaN 的输入，行为与原写法完全相同。Rust 的 `GiemsPatch::from_samples` 本来就先按区间判断，NaN 不会出错。
 
+### 41. `DEF_forcing%groupby = 'day'` 没有对应的按天文件名
+
+- **位置**：
+  - `main/MOD_Forcing.F90:1551-1590`（`setstampLB`）与 `:1719-1752`（`setstampUB`）：都有 `groupby == 'day'` 分支；
+  - `main/MOD_UserSpecifiedForcing.F90:153` 的 `metfilename(year, month, day, …)`：全部 24 个数据集分支都不用 `day` 参数。
+- **原因**：`day` 分支把记录号算成日内的 `floor((sec - offset)/dtime) + 1`，默认每个文件只装一天；
+  但文件名只到年或月，读的仍是按年/月分的文件。
+- **影响**：
+  - 选 `day` 时，每天都从年/月文件的开头几条记录读起，强迫静默错误（不停机）；
+  - vendor 的 21 份网格强迫 namelist 没有一份用 `day`，所以默认配置不受影响。
+- **处理**：vendor 未改，因为上游要么补按天的文件名，要么删掉这个选项。Rust 在解析强迫配置时直接拒绝 `day`，
+  报错信息说明原因（第 522 轮）；此前它只笼统报"not ported"。
+
 ## 二、TRACER 编译开关改变了物理（需要上游确认哪一边是对的）
 
 这一版上游在很多地方给 TRACER 构建和非 TRACER 构建写了**不同的物理**，不只是记账不同。

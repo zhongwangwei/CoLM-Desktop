@@ -137,7 +137,6 @@ fn cumulative_days(year: i32) -> [i32; 13] {
 pub(super) enum GroupBy {
     Year,
     Month,
-    Day,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -334,7 +333,13 @@ impl GriddedForcingConfig {
         let groupby = match groupby_text.trim() {
             "year" => GroupBy::Year,
             "month" => GroupBy::Month,
-            "day" => GroupBy::Day,
+            // 上游 `metfilename` 不用 `day` 参数，没有哪个数据集按天分文件；`groupby = 'day'` 时
+            // `setstampLB/UB` 拿日内秒数去索引按年/月分的文件，静默读错记录（upstream-bugs 第 41 条）。
+            "day" => bail!(
+                "DEF_forcing%groupby = 'day' has no day-level forcing files upstream (metfilename \
+                 ignores the day), so the Fortran kernel would read the wrong records; use 'year' \
+                 or 'month'"
+            ),
             other => bail!("unknown DEF_forcing%groupby {other:?}"),
         };
         let regional = if boolean(forcing, "DEF_forcing%regional", false)? {
@@ -477,7 +482,6 @@ impl GriddedForcingConfig {
                 time_index = floor_div(sec - v.offset, v.dtime) + 1;
                 month = 1;
             }
-            GroupBy::Day => bail!("DEF_forcing%groupby = 'day' is not ported"),
         }
         ensure!(time_index > 0, "got the wrong time record of forcing");
         Ok((year, month, time_index as usize, lower))
@@ -534,7 +538,6 @@ impl GriddedForcingConfig {
                 ensure!(index > 0, "got the wrong time record of forcing");
                 Ok((year, 1, index as usize))
             }
-            GroupBy::Day => bail!("DEF_forcing%groupby = 'day' is not ported"),
         }
     }
 }

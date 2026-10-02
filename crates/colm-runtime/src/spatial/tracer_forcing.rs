@@ -826,7 +826,6 @@ fn file_name(main: &GriddedForcingConfig, var: &ForcingVar, year: i32, month: i3
     Ok(PathBuf::from(match main.groupby {
         GroupBy::Year => format!("{directory}/{prefix}_{year:04}.nc"),
         GroupBy::Month => format!("{directory}/{prefix}_{year:04}_{month:02}.nc"),
-        GroupBy::Day => bail!("DEF_forcing%groupby = 'day' is not ported"),
     }))
 }
 

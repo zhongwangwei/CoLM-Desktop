@@ -28539,3 +28539,12 @@ Rust 原来在两处都把活跃写死成"土壤或湿地"：
 - 空间 `g1ch4 g1ch4rt g1ch4g`。
 
 `tmp/ch4case.sh` 现在可以用 `BASE`/`KERNEL` 换底，`tmp/nmlcase.sh` 用来换单点算例的 CH4 参数文件。
+
+## 第 522 轮：强迫 `groupby = 'day'` 改为带原因的拒绝
+
+逐个数据集查了 `metfilename`：`day` 参数从来不用，所以 `groupby = 'day'` 在上游会静默读错记录（upstream-bugs 第 41 条）。
+它不是"没移植"，而是上游本身没有可对齐的正确行为。Rust 的处理：
+- 解析强迫配置时就拒绝，报错信息说明原因；
+- 去掉了 `GroupBy::Day` 及三处"not ported"分支。
+
+验证：`cargo clippy -p colm-runtime --lib --bins -D warnings` 无告警。
