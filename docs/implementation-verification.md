@@ -27740,3 +27740,146 @@ GIMPLE 要点（默认内核另建一份 `-fdump-tree-optimized-lineno`）：
 | `lk36ch4` | 湖泊 CH4，到 01-10 | history 2 ok，restart ok |
 | `lk36ch4y` | 湖泊 CH4，2002 全年 | history 24 ok，restart ok |
 | `lk36ch4yc` | 从 07-01 续跑到 09-30 | history 6 bad 0，restarts 38 bad 0 |
+
+**回归**：单点全量 `regress_all` 176 项，除 `nn` 外全部一致。
+
+## 第 499 轮：T5 —— 河道泥沙（`SEDIMENT` provider，`MOD_Tracer_Particle_Sediment.F90`）
+
+**位置**：泥沙是网格河湖汇流（`GridRiverLakeFlow`）上的 provider 示踪物，只在空间内核里编进来；单点内核没有它的 provider。Rust 由 `river/sediment.rs` 实现，挂在 `RiverModel` 上，作为与通用输运示踪物（`river/tracer.rs`）并列的一支。单点入口遇到 `SEDIMENT` 直接拒绝。
+
+**挂点**（与上游的生命周期钩子一一对应）：
+
+| 上游钩子 | 上游位置 | Rust |
+|---|---|---|
+| `route_forcing_put` | `MOD_Grid_RiverLakeFlow.F90:472`，每个陆面步，在径流示踪物之后、漫滩回馈之前 | `RiverModel::step` |
+| `route_diag_accumulate` | 每个 HYDRO 子步末 | `route_system`，紧跟 history 累加 |
+| `route_calc(acctime_rnof)` | 一次汇流结束 | `route` 的末尾，`acctime_rnof` 清零之前 |
+| `route_history` / `route_flush_history` | 写 unitcat history 时 | `RiverHistoryWriter::write_record` |
+| 续跑读写 | gridriver 续跑文件 | `Sediment::read_restart` / `write_restart` |
+
+- **降水**：取 `forc_prc + forc_prl`，过滤条件是 `patchtype<99 .and. patchmask`、两项都有限、非 `spval`、非负。按面积映射到单元流域（与径流同一套 `remap_patch2inpm` → `push_inpm2ucat`）。单元流域上得到有效面积上的平均降水，以及有效面积占单元流域的份额；`forcing_put` 的权重是 `dt·份额`。
+- **子步累加**：
+  - 用子步首和子步末的 `max(蓄量, 0)`；水库单元流域取 `volresv`。
+  - 用洼地溢流之后的 `hflux_fc`，以及本子步的淹没面积（与 history 的 `floodarea` 同一个量）。
+  - 每次汇流都从续跑或上一次 `calc` 清零后的累加接着加。
+
+**收缩形状**（latlon 内核的 GIMPLE，`-fdump-tree-optimized-lineno`）：
+- **子步累加**：`acc_time = dt + acc`；`v2 = FMA(dt, v·v, acc)`；其余各项都是 `FMA(x, dt, acc)`。
+- **降水**：`precip = FMA(weight, p, acc)`；`yield = FMA(pow(rate, pyldpc), weight, acc)`。
+- **沉速**：`(sqrt(FMA(d, (ρs−ρw)·(2/3)/ρw·g, s·s)) − s)·pset`。
+- **悬浮速度**：`cb·setvel/(1+s) · FNMA(s, 0.08, 1) / FMA(s, 0.92, 1)`。
+- **形态步的水量插值**：`max(FMA(end−start, f, start) − protected, 0)`。
+- **剪切流速**：`sqrt(man²·g·v2·pow(h, −1/3))`。`−1/3` 走 `pow`，不是 `cbrt`。
+- **Egiazoroff**：`log10(19)` 编译期折叠成 `1.2787536009528289`；指数为 1 的两段不调 `pow`。
+- **输运**：
+  - 质量基线 `FMA(Σlayer, 1−λ, Σsedsto)`。
+  - 第二向可用量 `max(FNMA(dt, max(out_first,0), avail), 0)`。
+  - 悬沙更新 `FMA(dt, ups − out, sedsto)`；活动层不收缩，`layer + dt·(ups−out)/(1−λ)`。
+  - 推移质 `donor·((m²·(plus·17w))/rel/g)/Σ`，乘法次序与源码相同。
+- **交换**：Rouse 过渡 `w²·FNMA(w,2,3)`，`rouse = FMA(w, profile−1, 1)`；其余不收缩。
+- **产沙**：`FMA(min(...)·(((avg·pyld·pow)/3600)·area)·dsylunit, frc, sedinp)`；入河量 `FMA(sedinp, dt, sedsto)`。
+- **history 累加**：`FMA(x, dt, a_x)`。
+- **冷启动最底层**：`max(FNMA(lyrdph, totlyrnum, bed_depth), 0)·w·len·frc`。
+
+**push 语义**：
+- `push_next2ucat`：取下游单元流域的值；河口和洼地取填充值（浓度、活动层、剪切流速、河宽填 0，临界剪切填 `1e20`，反向限流比填 1）。
+- `push_ups2ucat`（`sum`）：按上游序号递增相加，跳过 0，首项直接赋值，与河道汇流的面通量求和相同。
+
+**续跑**：
+- 写不开堤防、不开分汊的 schema 2：全部 `*_meta` 标量向量、`sed_frc/slope/rivwth/rivlen` 指纹，以及 `sedcon/sedsto/layer/seddep`、`sed_acc_*`、`sed_precip*`、`a_*`、`sed_hist_acctime_vec`。
+- 读回时核对 schema、参数指纹与 `nsed/totlyrnum`，规则同上游。
+- 另一处缺口：只有 provider 示踪物时，上游 `write_tracer_restart` 仍提交一个**空**的河道示踪物事务（`trc_river_restart_complete/descriptor_count/schema`）。Rust 原来没有 `RiverTracers` 就不写。现在 `RiverModel::empty_tracer_transaction` 补上。
+
+**堤防与分汊**（同一轮补上）：开任一项时，每个形态步按"联合供体"走。
+- 每步先 `begin_suspended_period`；`ordinary_sediment_donor_demand` 用期初浓度、期初床沙算普通面的毛需求，反向面记在真正的供体（下游）上。
+- 开堤防时加漫堤/退水需求：`donor·to_protected·dt/deltime/rivsto_donor`，左结合。
+- 开分汊时 `prepare_bif_sediment`：
+  - 逐层按路径毛水量求路径需求。悬沙用 `q·浓度`；推移质用 `wth·rate·time·dt/dt_call`，第 2 层及以上不动堤内床沙。
+  - 与普通面、堤防需求合成联合缩放 `min(1, max(stock,0)/demand)`。
+  - 先扣路径输运；到达量作为信用，等普通输运之后由 `apply_bif_sediment_credits` 加上。
+- 不开分汊时直接三个 `joint_sediment_scale`。
+- 输运之前 `transfer_levee_sediment(to_protected=.true.)`：漫堤与普通输运争同一份可见悬沙。输运之后 `(.false.)`：
+  - 退水只用期初堤内悬沙；
+  - 堤内按 `setvel·面积·浓度·dt` 沉到不动的堤内床沙；
+  - 两侧各自截浓度上限，这一段对**所有**单元流域都做。
+
+河道侧的挂点：
+- 汇流开始与每个子步的堤防重新分区，以及漫滩回馈扣账后的重新分区，都调 `sediment_levee_repartition`。前者在 `pre_levee` 处，后者通过 `FloodFeedback::debit` 返回的分区表。
+- 子步累加的蓄量是可见 + 堤内，另记堤内端点。
+- 堤内淹没面积 `min(max(FNMA(levee_frc, area, levee_floodarea), 0), area·(1−levee_frc))`。
+- 分汊路径的毛水量 `FMA(dt, max(±h,0), acc)` 只累加活动路径，正反两向分开、在子步之间不抵消。
+
+形态步里的堤内端点也插值：`max(FMA(pe−ps, f, ps), 0)`，可见侧再减掉它。
+
+上游 GIMPLE 里的几处形状：
+- 两处截浓度上限都是 `max(FNMA(water, 0.01, Σ), 0)`。
+- 分摊量 `min(stock, stock·excess/Σ)`。
+- 质量基线 `FMA(1−λ, layer, sedsto+堤内) + 堤内床沙`。
+- 分汊接收量 `(recv + main) + levee_to`，左结合。
+
+续跑：开堤防或分汊时写 schema 5，另有 `sed_use_levee/bif_meta`、`sedsto/sedbed_protected_*` 与 `sed_acc_protected_*`/`pre_repartition_start`/`to/from_protected`。分汊毛水量在续跑边界必须为 0，读回时清零。
+
+**范围**：
+- `DEF_hist_vars%sed*` 开关按缺省全写；逐变量选择本来就整体拒绝。
+- `SEDIMENT` + `DEF_USE_LULCC` 显式拒绝：上游 LULCC 年末重写的河道续跑里带着泥沙，Rust 的 LULCC 重写只写河道状态，泥沙会悄悄冷启动。
+
+**对照**（latlon 内核，广东 113–115°E、23–25°N，IsoGSM 强迫，全球 15′ 单元流域网络，3 个粒径类，`tmp/tracer/sediment.nml`）：
+
+| 算例 | 内容 | 结果 |
+|---|---|---|
+| `g1sed` | 2003-01-01 → 01-02，冷启动 | history 3 bad 0，restarts 5 bad 0 |
+| `g1sedc` | 各自从 01-03 的续跑起步，跑到 01-04 | history 3 bad 0，restarts 8 bad 0 |
+| `g1rssed` | 水库 + 泥沙，2010-01-01 → 01-02（JRA3Q） | history 3 ok，restart ok |
+| `g1ffsed` | 漫滩回馈 + 泥沙 | history 3 ok，restart ok |
+| `g1lvsed` | 堤防 + 泥沙（schema 5，堤内悬沙/床沙非零） | history 3 bad 0，restarts 5 bad 0 |
+| `g1lvsedc` | 从 01-03 续跑到 01-04 | history 3 bad 0，restarts 8 bad 0 |
+| `g1bfsed` | 分汊 + 泥沙 | history 3 bad 0，restarts 5 bad 0 |
+| `g1allsed` | 漫滩回馈 + 堤防 + 分汊 + 水库 + 泥沙 | history 3 ok，restart ok |
+
+- 泥沙量非零、全网有值：`f_sedcon_1` 达到浓度上限 `0.010000000000000002`，`f_sedout_2` 最大 333 m³/s，`f_layer_1` 最大 6.8e6 m³，`sedsto_1` 有 16325 个非零单元流域。
+- 续跑的 Fortran 与 Rust 各自读回自己的泥沙续跑，结果逐位一致，说明续跑确实读回了状态，而不是冷启动。
+- 分汊路径确实在起作用：临时插桩看 `g1bfsed`，每个形态步的悬沙信用累计到约 1.3e7 m³、推移质信用约 1e6 m³；插桩已去掉，去掉后复验仍逐位一致。
+
+**过期参照**：这一轮的网格回归里，2010 JRA3Q 的几个算例（`g1w`、`g1t`、`g1lv`、`g1lw`）对不上，差在陆面 `t_soisno` 与 `f_assim`，与河道无关。原因是 Fortran 参照生成于 09-30，而 latlon 内核 10-02 重建过（vendor 更新）。用当前内核重跑参照后 `g1w` 逐位一致；其余几个按同样方式重生成后再判。
+
+## 第 500 轮：B1 —— UNSTRUCTURED 主循环与向量 history（`DEF_HISTORY_IN_VECTOR`）
+
+**测试网格**：没有上游非结构网格的样例。在 `g1` 的区域（113–115°E、23–25°N）上用 0.1° 底板做了一个 `elmindex` 文件（`tmp/unstr/unstr_mesh.nc`）：
+- 9 个 Voronoi 单元，每个 28–80 个像元；
+- 单元号故意不连续（`1000 + 7k`），以检验单元排序；
+- 通过 `colm-cli spatial-preflight --grid-kind unstructured`。
+
+内核用 `build_kernel.sh unstructured`（`UNSTRUCTURED LULC_IGBP`）。
+
+**主循环**：Rust 空间主循环本来就按 `landpatch` 的像元与 `eindex` 做拓扑与面积加权映射，与网格类型无关。去掉 `colm-cli` 只放行 GRIDBASED 的闸门后，网格化 history 的算例直接逐位一致。
+
+**向量 history**（`MOD_HistVector`）：`DEF_HISTORY_IN_VECTOR` 只在 UNSTRUCTURED 下生效。`colm-cli` 把内核宏 `UNSTRUCTURED` 以 `--unstructured` 交给 `colm-rs`。
+- 单元按 `elmindex` 递增写（`eindex_glb`），带 `elmindex(element)`。
+- 不写网格坐标与 `landarea` 等静态场，也不写 `f_floodarea`（`MOD_Hist.F90:4783` 只在 Gridded 时写）。
+- `mask_complete_upstream_regird` 是无时间维的逐单元量。
+- 聚合（GIMPLE）：`Σ FMA(frac, v, acc) / Σ frac`，掩码为"值非 `spval` 且计入"。`frac = elm_patch%subfrc`：patch 各像元的 `areaquad` 之和，再按单元归一（与已有的 `ElementGroups` 同一个算法）。
+- `input_mode = 'total'` 的河道流量直接 `Σ v`。
+- 除法次序有一处要紧：
+  - 二维量与四维量（`band×rtyp`）先逐 patch 除 `nac`，再聚合；
+  - 三维量（一个层维）是 `aggregate_to_vector_and_write_3d` 先聚合**原始累加**，再 `/sumwt/nac`。
+
+  所以向量写出时，累加器对一维层的量交原始和（`HistoryBuffers::wants_raw_layers`），并逐记录记下 `nac`。
+- 维度：上游写 Fortran 序的 `acc_vec(dim1[,dim2], element)`，文件里是 `(time, element, 层维...)`，与网格的 `(time, 层维..., lat, lon)` 次序不同。第一次对照只有 11 个分层量不一致，原因就是这一点，值本身是对的。
+- 河道量逐 patch 交给会话（`stage_patch_field`），各用自己的过滤：`filter_ucat` 或 `filter_inpm`。
+
+**范围**：
+- 向量 history 下的示踪物 history（`MOD_Tracer_Hist` 的 Vector 分支）显式拒绝；
+- 城市量在向量写出时上游另走一条不除 `nac` 的路（`write_history_variable_urb_2d`，注释为 TODO），显式拒绝。
+
+**对照**（纯 Fortran 引擎 vs Rust，2010-01-01 → 01-02，JRA3Q，日输出）：
+
+| 算例 | 内容 | 结果 |
+|---|---|---|
+| `u1` | UNSTRUCTURED，网格化 history | history 2 bad 0，restarts 5 bad 0 |
+| `u1v` | UNSTRUCTURED，`DEF_HISTORY_IN_VECTOR = .true.` | history 2 bad 0，restarts 5 bad 0 |
+
+改完之后复验 `g1`、`g1sed`（latlon）逐位一致。
+
+**网格回归**（本轮与第 499 轮的最终二进制）：
+- 10 个 2010 JRA3Q 算例的参照用当前内核重生成，全部逐位一致：`g1t/g1lv/g1lw/g1bf/g1bw/g1rs/g1rw/g1ff/g1allw/g1mt`；
+- 另有 15 个算例复验，全部逐位一致：`g1/g1w/g1tr0/g1ts/g1tw/g1tl/g1fl/g1all/g1i` 与 6 个泥沙算例。

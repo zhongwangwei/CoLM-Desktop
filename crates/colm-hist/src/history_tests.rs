@@ -341,3 +341,19 @@ fn gridded_history_aggregates_by_area_and_filter() {
     drop(file);
     let _ = std::fs::remove_file(&path);
 }
+
+#[test]
+fn vector_aggregation_weights_by_subfrc_and_skips_missing() {
+    let vector = HistoryVector {
+        elmindex: vec![10, 20],
+        elements: vec![0..2, 2..3],
+        subfrc: vec![0.25, 0.75, 1.0],
+    };
+    let values = [4.0, 8.0, MISSING_VALUE];
+    let out = vector.aggregate(|p| values[p], |_| true, false);
+    // `Σ FMA(frac, v, acc) / Σ frac`；全缺测的单元写 spval。
+    assert_eq!(out[0], 0.75f64.mul_add(8.0, 0.25 * 4.0) / (0.25 + 0.75));
+    assert_eq!(out[1], MISSING_VALUE);
+    let total = vector.aggregate(|p| values[p], |p| p != 0, true);
+    assert_eq!(total, vec![8.0, MISSING_VALUE]);
+}

@@ -214,6 +214,7 @@ impl FloodFeedback {
         routing: &RunoffRouting,
         state: &mut RiverState,
         context: FloodContext<'_>,
+        repartitions: &mut Vec<(usize, [f64; 4])>,
     ) -> Result<(f64, f64)> {
         for p in 0..self.credit.len() {
             ensure!(
@@ -304,12 +305,22 @@ impl FloodFeedback {
                     (Some(levee), None) => {
                         // `levee_repartition_storage`。
                         let levsto = &mut state.levsto.as_mut().expect("levee state")[j];
+                        let (visible_before, protected_before) = (state.volwater[j], *levsto);
                         let vol_total = state.volwater[j] + *levsto;
                         let stage = levee.fldstg(network, j, vol_total);
                         *levsto = stage.levsto;
                         state.levdph.as_mut().expect("levee state")[j] = stage.levdph;
                         state.volwater[j] = vol_total - stage.levsto;
                         state.wdsrf[j] = stage.wdsrf;
+                        repartitions.push((
+                            j,
+                            [
+                                visible_before,
+                                protected_before,
+                                state.volwater[j],
+                                stage.levsto,
+                            ],
+                        ));
                     }
                     (_, Some(r)) => {
                         state.wdsrf[j] = network.curves[j]

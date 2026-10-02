@@ -201,6 +201,15 @@ fn run() -> Result<()> {
     // `tracer_forcing_init`：POINT 不支持示踪物强迫变量（`MOD_Tracer_Forcing.F90`）。
     let tracer_runtime = colm_runtime::tracer::TracerRuntime::from_document(&document)?
         .map(|mut tracer| -> Result<_> {
+            // 泥沙是河网汇流上的示踪物，单点内核不编进 `GridRiverLakeFlow`，上游没有它的 provider。
+            ensure!(
+                !tracer
+                    .set
+                    .tracers
+                    .iter()
+                    .any(colm_runtime::river::sediment::is_sediment_tracer),
+                "SEDIMENT needs GridRiverLakeFlow, which single-point kernels do not build"
+            );
             tracer.configure_forcing(None)?;
             Ok(std::sync::Arc::new(tracer))
         })
@@ -415,6 +424,18 @@ fn run_spatial(
         "methane (CH4 tracer) in spatial runs is not ported to the Rust runtime yet; run this case \
          with --engine fortran"
     );
+    // 上游 LULCC 年末重写的河道续跑里带着泥沙（`WRITE_GridRiverLakeTimeVars` →
+    // `tracer_lifecycle_route_write_restart`），Rust 的 LULCC 重写只写河道状态，泥沙会悄悄冷启动。
+    let sediment = tracer_set.as_ref().is_some_and(|set| {
+        set.tracers
+            .iter()
+            .any(colm_runtime::river::sediment::is_sediment_tracer)
+    });
+    ensure!(
+        !(sediment && logical_field(&document, "DEF_USE_LULCC")?),
+        "SEDIMENT with DEF_USE_LULCC (sediment state across the LULCC river restart) is not ported; \
+         run this case with --engine fortran"
+    );
     let transport_tracers = tracer_set
         .as_ref()
         .is_some_and(|set| set.transport_indices().next().is_some());
@@ -450,12 +471,21 @@ fn run_spatial(
     } else {
         integer_field(&document, "DEF_LC_YEAR")?
     };
+    let vector_history =
+        arguments.unstructured && logical_field(&document, "DEF_HISTORY_IN_VECTOR")?;
+    // 向量 history 下的示踪物 history（`MOD_Tracer_Hist` 的 `Vector` 分支）还没接。
+    ensure!(
+        !(vector_history && logical_field(&document, "DEF_USE_TRACER")?),
+        "tracers with DEF_HISTORY_IN_VECTOR (vector tracer history) are not ported; run this case \
+         with --engine fortran"
+    );
     let case = SpatialCase {
         layout,
         name,
         document: &document,
         physics: &physics,
         out: &out,
+        vector_history,
     };
     let restart_root = out.join("restart");
     let scratch = restart_root.join(LULCC_SCRATCH);
@@ -533,6 +563,8 @@ struct SpatialCase<'a> {
     document: &'a Document,
     physics: &'a colm_runtime::assembly::LandPhysicsParameters,
     out: &'a Path,
+    /// `HistForm = 'Vector'`：UNSTRUCTURED 内核且 `DEF_HISTORY_IN_VECTOR`。
+    vector_history: bool,
 }
 
 /// 一段连续的运行（没有 LULCC 时就是整个运行）。
@@ -567,6 +599,7 @@ fn run_spatial_segment(
         document,
         physics,
         out,
+        vector_history,
     } = *case;
     let config = &segment.config;
     let year = segment.year;
@@ -662,22 +695,22 @@ fn run_spatial_segment(
         templates = attached;
     }
     let grid = GriddedForcing::open_grid(&config.forcing, config.start)?;
-    let mut history_grid =
-        if config.history_frequency != colm_hist::schedule::HistoryFrequency::None {
-            let patch_types = templates
-                .iter()
-                .map(|template| template.patch_type)
-                .collect::<Vec<_>>();
-            Some(build_history_grid(
-                &HistoryGridConfig::read(document)?,
-                &grid,
-                &topology,
-                &patch_types,
-                &patch_mask,
-            )?)
-        } else {
-            None
-        };
+    let writes_history = config.history_frequency != colm_hist::schedule::HistoryFrequency::None;
+    let mut history_grid = if writes_history && !vector_history {
+        let patch_types = templates
+            .iter()
+            .map(|template| template.patch_type)
+            .collect::<Vec<_>>();
+        Some(build_history_grid(
+            &HistoryGridConfig::read(document)?,
+            &grid,
+            &topology,
+            &patch_types,
+            &patch_mask,
+        )?)
+    } else {
+        None
+    };
     let mapping = AreaWeightedMapping::build(
         &grid,
         &topology.pixel,
@@ -765,19 +798,61 @@ fn run_spatial_segment(
         ));
         std::sync::Arc::new(grid)
     });
-    let river_writer = history_grid
-        .as_ref()
-        .map(|grid| {
-            colm_runtime::river::history::RiverHistoryWriter::new(
+    let river_writer = if vector_history && writes_history {
+        Some(colm_runtime::river::history::RiverHistoryWriter::new(
+            &network,
+            &routing,
+            None,
+            &runoff_filter,
+            out.join("history"),
+            name,
+        )?)
+    } else {
+        history_grid
+            .as_ref()
+            .map(|grid| {
+                colm_runtime::river::history::RiverHistoryWriter::new(
+                    &network,
+                    &routing,
+                    Some(std::sync::Arc::clone(grid)),
+                    &runoff_filter,
+                    out.join("history"),
+                    name,
+                )
+            })
+            .transpose()?
+    };
+    // 向量 history（`HistForm = 'Vector'`）：单元按 `elmindex` 递增（`eindex_glb`），每个单元的 patch
+    // 区间与 `subfrc` 来自拓扑；河道的静态掩码按 `filter_ucat` 聚合到单元。
+    let history_vector = if vector_history && writes_history {
+        let groups = ElementGroups::from_topology(&topology)?;
+        let mut elements = groups
+            .ranges
+            .iter()
+            .map(|range| (topology.element[range.start], range.clone()))
+            .collect::<Vec<_>>();
+        elements.sort_by_key(|(id, _)| *id);
+        let vector = colm_hist::history::HistoryVector {
+            elmindex: elements.iter().map(|(id, _)| *id).collect(),
+            elements: elements.into_iter().map(|(_, range)| range).collect(),
+            subfrc: groups.fractions.clone(),
+        };
+        let (mask, filter) =
+            colm_runtime::river::history::RiverHistoryWriter::upstream_mask_patches(
                 &network,
                 &routing,
-                std::sync::Arc::clone(grid),
                 &runoff_filter,
-                out.join("history"),
-                name,
-            )
-        })
-        .transpose()?;
+            );
+        let statics = vec![(
+            "mask_complete_upstream_regird".to_owned(),
+            "Mask of grids with all upstream located in simulation region".to_owned(),
+            "100%".to_owned(),
+            vector.aggregate(|p| mask[p], |p| filter[p], false),
+        )];
+        Some((std::sync::Arc::new(vector), statics))
+    } else {
+        None
+    };
     let reservoir = if integer_field(document, "DEF_Reservoir_Method")? > 0 {
         Some(colm_runtime::river::reservoir::Reservoir::read(
             Path::new(&string_field(document, "DEF_ReservoirPara_file")?),
@@ -906,6 +981,32 @@ fn run_spatial_segment(
         }
         river = river.with_tracers(tracers)?;
     }
+    river.empty_tracer_transaction = tracer_runtime.is_some();
+    // `grid_sediment_init` + `read_sediment_restart`：`SEDIMENT` provider 示踪物（河道泥沙）。
+    if let Some(set) = tracer_runtime.as_ref().map(|tracer| &tracer.set) {
+        if let Some(index) = set
+            .tracers
+            .iter()
+            .position(colm_runtime::river::sediment::is_sediment_tracer)
+        {
+            let files = string_field(document, "DEF_TRACER_PARAM_FILES")?;
+            let param =
+                colm_core::tracer::descriptor::param_file_for_index(&files, &set.tracers, index)?
+                    .context(
+                    "Cannot find sediment parameter file for SEDIMENT in DEF_TRACER_PARAM_FILES",
+                )?;
+            let sediment = colm_runtime::river::sediment::Sediment::init(
+                &river.network,
+                Path::new(&string_field(document, "DEF_UnitCatchment_file")?),
+                &param,
+            )?;
+            river = river.with_sediment(sediment)?;
+            let network = &river.network;
+            if let Some(sediment) = river.sediment.as_mut() {
+                sediment.read_restart(&river_start, network)?;
+            }
+        }
+    }
     runtime = runtime.with_river(river, runoff_filter)?;
     let rest_compression = u8::try_from(integer_field(document, "DEF_REST_CompressLevel")?)
         .context("DEF_REST_CompressLevel must fit 0..=9")?;
@@ -961,7 +1062,30 @@ fn run_spatial_segment(
             elements: ElementGroups::from_topology(&topology)?,
             files: Vec::new(),
         }),
-        None => None,
+        None => match history_vector {
+            Some((vector, statics)) => Some(SpatialHistory {
+                session: colm_runtime::open_history_session(
+                    config.history_window(),
+                    colm_runtime::history::point_dimensions(),
+                    colm_hist::history::HistorySite {
+                        latitude_degrees: 0.0,
+                        longitude_degrees: 0.0,
+                    },
+                    out.join("history"),
+                    name,
+                )?
+                .with_patches(patch_count)?
+                .with_vector(
+                    vector,
+                    &colm_runtime::river::history::VECTOR_RIVER_VARIABLES,
+                    statics,
+                )?,
+                river: river_writer,
+                elements: ElementGroups::from_topology(&topology)?,
+                files: Vec::new(),
+            }),
+            None => None,
+        },
     };
 
     let periodic = topology
@@ -1097,6 +1221,12 @@ fn run_spatial_segment(
                             rest_compression,
                         )?;
                     }
+                    if river.tracers.is_none() && river.empty_tracer_transaction {
+                        colm_runtime::river::restart::write_empty_river_tracers(&path)?;
+                    }
+                    if let Some(sediment) = river.sediment.as_ref() {
+                        sediment.write_restart(&path, &river.network, rest_compression)?;
+                    }
                 }
             }
             last = Some(snapshots);
@@ -1151,6 +1281,12 @@ fn run_spatial_segment(
                 &mut tracers.clone(),
                 rest_compression,
             )?;
+        }
+        if river.tracers.is_none() && river.empty_tracer_transaction {
+            colm_runtime::river::restart::write_empty_river_tracers(&path)?;
+        }
+        if let Some(sediment) = river.sediment.as_ref() {
+            sediment.write_restart(&path, &river.network, rest_compression)?;
         }
     }
     println!(
@@ -2897,6 +3033,8 @@ struct Arguments {
     allow_unported_branches: bool,
     /// 内核带 `CROP` 宏（`DEF_USE_CROP` 是它的只读映射，namelist 里没有）。
     crop: bool,
+    /// 内核带 `UNSTRUCTURED` 宏：`DEF_HISTORY_IN_VECTOR` 只在它下生效（`MOD_Hist.F90:71-75`）。
+    unstructured: bool,
 }
 
 impl Arguments {
@@ -2912,6 +3050,7 @@ impl Arguments {
         let mut case_outputs = false;
         let mut preflight = false;
         let mut crop = false;
+        let mut unstructured = false;
         while let Some(flag) = values.next() {
             let mut value = |name: &str| -> Result<String> {
                 values
@@ -2942,6 +3081,7 @@ impl Arguments {
                 "--case-outputs" => case_outputs = true,
                 "--preflight" => preflight = true,
                 "--crop" => crop = true,
+                "--unstructured" => unstructured = true,
                 other if other.starts_with("--") => {
                     bail!("unknown option {other}; the accepted set is documented in this binary's module docs")
                 }
@@ -3006,6 +3146,7 @@ impl Arguments {
             preflight,
             allow_unported_branches,
             crop,
+            unstructured,
         })
     }
 }

@@ -121,6 +121,72 @@ impl HistoryGrid {
     }
 }
 
+/// 非结构网格的向量写出（`HistForm = 'Vector'`，`MOD_HistVector`）：每个单元一个值。
+///
+/// 单元的值是单元内计入的 patch 按 `subfrc` 的加权平均：`Σ FMA(frac, v, acc) / Σ frac`
+/// （`sum(frac*v, mask)/sum(frac, mask)`，掩码是"值不是 `spval` 且计入"）；`input_mode = 'total'`
+/// 的量是普通相加 `Σ v`。没有计入 patch 的单元写 `spval`。
+#[derive(Debug, Clone, PartialEq)]
+pub struct HistoryVector {
+    /// `eindex_glb`：单元号，按文件里的顺序。
+    pub elmindex: Vec<i64>,
+    /// 每个单元的 patch 区间（`elm_patch%substt:subend`）。
+    pub elements: Vec<std::ops::Range<usize>>,
+    /// `elm_patch%subfrc`：patch 在所在单元里的面积份额（单元内归一）。
+    pub subfrc: Vec<f64>,
+}
+
+impl HistoryVector {
+    fn patches(&self) -> usize {
+        self.elements.last().map_or(0, |range| range.end)
+    }
+
+    /// `aggregate_to_vector_and_write_*` 的单元聚合。`value(p)` 给出 patch 的值，`keep(p)` 是 `filter`。
+    pub fn aggregate(
+        &self,
+        value: impl Fn(usize) -> f64,
+        keep: impl Fn(usize) -> bool,
+        total: bool,
+    ) -> Vec<f64> {
+        self.elements
+            .iter()
+            .map(|range| {
+                let mut any = false;
+                let mut sumwt = 0.0;
+                let mut acc = 0.0;
+                for p in range.clone() {
+                    let v = value(p);
+                    if v == MISSING_VALUE || !keep(p) {
+                        continue;
+                    }
+                    any = true;
+                    if total {
+                        acc += v;
+                    } else {
+                        sumwt += self.subfrc[p];
+                        acc = self.subfrc[p].mul_add(v, acc);
+                    }
+                }
+                match (any, total) {
+                    (false, _) => MISSING_VALUE,
+                    (true, true) => acc,
+                    (true, false) => acc / sumwt,
+                }
+            })
+            .collect()
+    }
+}
+
+/// 由调用方逐 patch 给出、按自己的过滤与方式聚合到单元的量（向量写出时的河道量）。
+#[derive(Debug, Clone)]
+struct PatchField {
+    /// `(record, patch)`。
+    values: Vec<f64>,
+    included: Vec<bool>,
+    /// `input_mode = 'total'`。
+    total: bool,
+}
+
 /// 内存里累积的一个 history 分组。
 #[derive(Debug, Clone)]
 pub struct HistoryBuffers {
@@ -143,6 +209,14 @@ pub struct HistoryBuffers {
     /// `DEF_USE_TRACER`：每条记录的 `(history_window_seconds, history_window_end_minutes)`
     /// （`MOD_Hist.F90:319-361`，只在网格写出时写）。
     windows: Option<Vec<(f64, f64)>>,
+    /// 非结构网格的向量写出；与 `grid` 互斥。
+    vector: Option<std::sync::Arc<HistoryVector>>,
+    /// 每条记录的 `nac`：向量写出时一维层的量收的是原始累加，聚合后再除（`/sumwt/nac`）。
+    steps: Vec<f64>,
+    /// 逐 patch 给出、各自聚合的量（见 [`PatchField`]）。
+    patch_fields: BTreeMap<&'static str, PatchField>,
+    /// 只在文件第一条记录写一次、没有时间维的逐单元量：`(名字, long_name, units, 值)`。
+    vector_statics: Vec<(String, String, String, Vec<f64>)>,
 }
 
 impl HistoryBuffers {
@@ -160,7 +234,119 @@ impl HistoryBuffers {
             included: BTreeMap::new(),
             gridded: BTreeMap::new(),
             windows: None,
+            vector: None,
+            steps: vec![0.0; records],
+            patch_fields: BTreeMap::new(),
+            vector_statics: Vec::new(),
         }
+    }
+
+    /// 改成向量写出（非结构网格，`DEF_HISTORY_IN_VECTOR`）。
+    pub fn with_vector(mut self, vector: std::sync::Arc<HistoryVector>) -> Result<Self> {
+        ensure!(
+            vector.patches() == self.dims.patch && vector.subfrc.len() == self.dims.patch,
+            "the history vector covers {} patches but the buffers hold {}",
+            vector.patches(),
+            self.dims.patch
+        );
+        ensure!(self.grid.is_none(), "history is either gridded or vector");
+        self.vector = Some(vector);
+        Ok(self)
+    }
+
+    /// 向量写出时，只有一个层维的量要交**原始累加**（`aggregate_to_vector_and_write_3d` 先聚合、
+    /// 再 `/sumwt/nac`）；两个层维的量照样交平均（`write_history_variable_4d` 先除 `nac`）。
+    pub fn wants_raw_layers(&self, name: &str) -> bool {
+        self.vector.is_some()
+            && VARS
+                .iter()
+                .find(|entry| entry.name == name)
+                .is_some_and(|entry| entry.dims.len() == 1)
+    }
+
+    /// 第 `record` 条记录的 `nac`。
+    pub fn set_steps(&mut self, record: usize, steps: f64) -> Result<()> {
+        ensure!(
+            record < self.records,
+            "record {record} is outside the group"
+        );
+        self.steps[record] = steps;
+        Ok(())
+    }
+
+    /// 声明逐 patch 给值、自己聚合的量（必须是二维量）。
+    pub fn declare_patch_fields(&mut self, names: &[(&str, bool)]) -> Result<()> {
+        ensure!(
+            self.vector.is_some(),
+            "per-patch history fields need vector history"
+        );
+        for (name, total) in names {
+            let entry = VARS
+                .iter()
+                .find(|entry| entry.name == *name)
+                .with_context(|| format!("{name} is not in the history gate table"))?;
+            ensure!(entry.dims.is_empty(), "{name} must be two-dimensional");
+            self.patch_fields.insert(
+                entry.name,
+                PatchField {
+                    values: vec![MISSING_VALUE; self.records * self.dims.patch],
+                    included: vec![false; self.records * self.dims.patch],
+                    total: *total,
+                },
+            );
+        }
+        Ok(())
+    }
+
+    /// 第 `record` 条记录里某个逐 patch 量的值与过滤。
+    pub fn set_patch_field(
+        &mut self,
+        name: &str,
+        record: usize,
+        values: &[f64],
+        included: &[bool],
+    ) -> Result<()> {
+        let patches = self.dims.patch;
+        ensure!(
+            record < self.records,
+            "record {record} is outside the group"
+        );
+        ensure!(
+            values.len() == patches && included.len() == patches,
+            "{name} needs one value per patch"
+        );
+        let field = self
+            .patch_fields
+            .get_mut(name)
+            .with_context(|| format!("{name} was not declared with declare_patch_fields()"))?;
+        field.values[record * patches..(record + 1) * patches].copy_from_slice(values);
+        field.included[record * patches..(record + 1) * patches].copy_from_slice(included);
+        Ok(())
+    }
+
+    /// 文件第一条记录时写的、没有时间维的逐单元量（`itime_in_file = -1`）。
+    pub fn add_vector_static(
+        &mut self,
+        name: &str,
+        long_name: &str,
+        units: &str,
+        values: Vec<f64>,
+    ) -> Result<()> {
+        let vector = self
+            .vector
+            .as_ref()
+            .context("vector statics need vector history")?;
+        ensure!(
+            values.len() == vector.elmindex.len(),
+            "{name} needs one value per element"
+        );
+        self.vector_statics.push((
+            name.to_owned(),
+            long_name.to_owned(),
+            units.to_owned(),
+            values,
+        ));
+        Ok(())
     }
 
     /// 打开示踪物模式的窗口变量（`history_window_seconds`/`history_window_end_minutes`）。
@@ -580,6 +766,9 @@ impl HistoryBuffers {
         if let Some(grid) = self.grid.clone() {
             return self.write_gridded(path, &grid);
         }
+        if let Some(vector) = self.vector.clone() {
+            return self.write_vector(path, &vector);
+        }
         let mut file =
             netcdf::create(path).with_context(|| format!("cannot create {}", path.display()))?;
 
@@ -933,6 +1122,129 @@ impl HistoryBuffers {
             file.variable_mut(&file_name)
                 .with_context(|| format!("{file_name} disappeared after definition"))?
                 .put_values(values, netcdf::Extents::All)?;
+        }
+        file.close()?;
+        Ok(())
+    }
+}
+
+impl HistoryBuffers {
+    /// `hist_vector_write_time` + `aggregate_to_vector_and_write_*`：单元维的文件。
+    fn write_vector(&self, path: &Path, vector: &HistoryVector) -> Result<()> {
+        let mut file =
+            netcdf::create(path).with_context(|| format!("cannot create {}", path.display()))?;
+        let elements = vector.elmindex.len();
+        file.add_unlimited_dimension("time")?;
+        file.add_dimension("element", elements)?;
+        {
+            let mut variable = file.add_variable::<i64>("elmindex", &["element"])?;
+            variable.put_attribute("long_name", "element index in mesh")?;
+        }
+        for (name, _, values) in self.dims.index_variables() {
+            file.add_dimension(name, values.len())?;
+        }
+        file.add_dimension("sensor", self.dims.sensor)?;
+        for (name, long_name, _) in self.dims.index_variables() {
+            let mut variable = file.add_variable::<i32>(name, &[name])?;
+            variable.put_attribute("long_name", long_name)?;
+        }
+        {
+            let mut time = file.add_variable::<i32>("time", &["time"])?;
+            time.put_attribute("long_name", "time")?;
+            time.put_attribute("units", TIME_UNITS)?;
+        }
+        let define = |file: &mut netcdf::FileMut,
+                      name: &str,
+                      dims: &[&str],
+                      long: Option<&str>,
+                      units: Option<&str>|
+         -> Result<()> {
+            let mut variable = file.add_variable::<f64>(name, dims)?;
+            if let Some(long) = long {
+                variable.put_attribute("long_name", long)?;
+            }
+            if let Some(units) = units {
+                variable.put_attribute("units", units)?;
+            }
+            variable.put_attribute("missing_value", MISSING_VALUE)?;
+            Ok(())
+        };
+        for (name, long_name, units, _) in &self.vector_statics {
+            define(&mut file, name, &["element"], Some(long_name), Some(units))?;
+        }
+        for name in self.values.keys().chain(self.patch_fields.keys()) {
+            let entry = VARS
+                .iter()
+                .find(|entry| entry.name == *name)
+                .expect("declared names come from the gate table");
+            // 上游写的是 Fortran 序的 `acc_vec(dim1[,dim2], element)`：文件里单元维紧跟时间。
+            let mut dimensions = vec!["time", "element"];
+            dimensions.extend_from_slice(entry.dims);
+            define(
+                &mut file,
+                &file_variable_name(entry.name),
+                &dimensions,
+                entry.long_name,
+                entry.units,
+            )?;
+        }
+        file.variable_mut("elmindex")
+            .context("elmindex disappeared")?
+            .put_values(&vector.elmindex, netcdf::Extents::All)?;
+        for (name, _, values) in self.dims.index_variables() {
+            file.variable_mut(name)
+                .with_context(|| format!("{name} disappeared after definition"))?
+                .put_values(&values, netcdf::Extents::All)?;
+        }
+        file.variable_mut("time")
+            .context("time disappeared after definition")?
+            .put_values(&self.times, netcdf::Extents::All)?;
+        for (name, _, _, values) in &self.vector_statics {
+            file.variable_mut(name)
+                .with_context(|| format!("{name} disappeared after definition"))?
+                .put_values(values, netcdf::Extents::All)?;
+        }
+        let patches = self.dims.patch;
+        for (name, values) in &self.values {
+            let layers = self.layers[name];
+            let included = &self.included[name];
+            let raw = self.wants_raw_layers(name);
+            let mut out = vec![MISSING_VALUE; self.records * layers * elements];
+            for record in 0..self.records {
+                for layer in 0..layers {
+                    let column = vector.aggregate(
+                        |p| values[(record * patches + p) * layers + layer],
+                        |p| included[record * patches + p],
+                        false,
+                    );
+                    for (e, value) in column.into_iter().enumerate() {
+                        out[(record * elements + e) * layers + layer] =
+                            if raw && value != MISSING_VALUE {
+                                value / self.steps[record]
+                            } else {
+                                value
+                            };
+                    }
+                }
+            }
+            let file_name = file_variable_name(name);
+            file.variable_mut(&file_name)
+                .with_context(|| format!("{file_name} disappeared after definition"))?
+                .put_values(&out, netcdf::Extents::All)?;
+        }
+        for (name, field) in &self.patch_fields {
+            let mut out = Vec::with_capacity(self.records * elements);
+            for record in 0..self.records {
+                out.extend(vector.aggregate(
+                    |p| field.values[record * patches + p],
+                    |p| field.included[record * patches + p],
+                    field.total,
+                ));
+            }
+            let file_name = file_variable_name(name);
+            file.variable_mut(&file_name)
+                .with_context(|| format!("{file_name} disappeared after definition"))?
+                .put_values(&out, netcdf::Extents::All)?;
         }
         file.close()?;
         Ok(())

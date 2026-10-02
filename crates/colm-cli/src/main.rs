@@ -1892,12 +1892,18 @@ fn rust_model_land_cover(kernel: &Kernel) -> Result<&'static str> {
 
 /// `CROP` 内核：`DEF_USE_CROP` 在上游是这个宏的只读映射、不在 namelist 里，
 /// 所以要像 `--land-cover` 一样由内核告诉 `colm-rs`，否则作物算例会被当成非作物 BGC 静默跑完。
+/// 内核宏里 `colm-rs` 要知道、namelist 里又没有的：`CROP`（`DEF_USE_CROP` 的只读映射）与
+/// `UNSTRUCTURED`（决定 `DEF_HISTORY_IN_VECTOR` 是否生效）。
 fn rust_model_crop_arguments(kernel: &Kernel) -> Vec<String> {
-    if kernel.manifest.macros.iter().any(|item| item == "CROP") {
-        vec!["--crop".to_owned()]
-    } else {
-        Vec::new()
+    let has = |name: &str| kernel.manifest.macros.iter().any(|item| item == name);
+    let mut arguments = Vec::new();
+    if has("CROP") {
+        arguments.push("--crop".to_owned());
     }
+    if has("UNSTRUCTURED") {
+        arguments.push("--unstructured".to_owned());
+    }
+    arguments
 }
 
 fn sidecar_executable(name: &str) -> Result<PathBuf> {
@@ -1934,12 +1940,12 @@ fn preflight_rust_model(case_nml: &Path, kernel: &Kernel, ranks: usize) -> Resul
         ranks == 1,
         "the Rust model engine runs one process; --ranks {ranks} needs --engine fortran"
     );
-    // 空间算例：Rust 主循环接 GRIDBASED 内核（经纬网格 + `GridRiverLakeFlow` 默认汇流）；
-    // 非结构网格与流域网格还没移植。河道的未移植选项由 `colm-rs --preflight` 挡。
+    // 空间算例：Rust 主循环接 GRIDBASED 与 UNSTRUCTURED 内核（`GridRiverLakeFlow` 默认汇流）；
+    // 流域网格还没移植。河道的未移植选项由 `colm-rs --preflight` 挡。
     if colm_case::is_spatial_case(case_nml)? {
         ensure!(
-            kernel_grid_kind(kernel) == Some("latlon"),
-            "the Rust model engine runs SinglePoint and GRIDBASED cases; rerun this {} case with --engine fortran",
+            matches!(kernel_grid_kind(kernel), Some("latlon" | "unstructured")),
+            "the Rust model engine runs SinglePoint, GRIDBASED and UNSTRUCTURED cases; rerun this {} case with --engine fortran",
             kernel_grid_kind(kernel).unwrap_or("spatial")
         );
     }

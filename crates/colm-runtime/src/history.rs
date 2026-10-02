@@ -926,6 +926,7 @@ impl HistoryAccumulator {
                 buffer.include(name, record)?;
             }
         }
+        buffer.set_steps(record, self.steps as f64)?;
         for (name, accumulated) in &self.sums {
             // 只为旁车累加、本算例历史文件里没有的量（上游照样 `acc1d`，只是不写出）。
             if !buffer.declares(name) && crate::history_sidecar::is_window_key(name) {
@@ -961,6 +962,13 @@ impl HistoryAccumulator {
                 }
                 Accumulated::Column { sum, count } => {
                     if *count == 0 {
+                        continue;
+                    }
+                    // 向量写出的一维层量：交原始累加，聚合后再 `/sumwt/nac`。
+                    if buffer.wants_raw_layers(name) {
+                        buffer.set_layered(name, record, sum).with_context(|| {
+                            format!("cannot write {name} into the history buffers")
+                        })?;
                         continue;
                     }
                     let steps = self.divisor(name, *count);
@@ -2648,6 +2656,14 @@ pub struct HistorySession {
     gridded_names: Vec<&'static str>,
     /// 本步要写的那条记录的预聚合值（[`Self::stage_gridded`]），写记录时放进缓冲。
     staged: Vec<(&'static str, Vec<f64>)>,
+    /// 非结构网格的向量写出（`DEF_HISTORY_IN_VECTOR`）；与 `grid` 互斥。
+    vector: Option<std::sync::Arc<colm_hist::history::HistoryVector>>,
+    /// 向量写出时由调用方逐 patch 给值的量（河道量）：`(名字, input_mode = 'total')`。
+    patch_field_names: Vec<(&'static str, bool)>,
+    /// 向量写出时每个文件第一条记录写一次的无时间维量。
+    vector_statics: Vec<(String, String, String, Vec<f64>)>,
+    /// 本步那条记录的逐 patch 量（[`Self::stage_patch_field`]）。
+    staged_patch: Vec<(&'static str, Vec<f64>, Vec<bool>)>,
     /// `DEF_USE_TRACER`（网格写出）：步长 [s]。打开时每条记录多写窗口变量，并另写
     /// 示踪物 history 文件（见 [`Self::with_tracer_history`]）。
     tracer_time_step_seconds: Option<f64>,
@@ -2779,6 +2795,10 @@ impl HistorySession {
             grid: None,
             gridded_names: Vec::new(),
             staged: Vec::new(),
+            vector: None,
+            patch_field_names: Vec::new(),
+            vector_statics: Vec::new(),
+            staged_patch: Vec::new(),
             tracer_time_step_seconds: None,
             tracer_variables: None,
         })
@@ -2820,6 +2840,41 @@ impl HistorySession {
         );
         self.staged.push((name, values));
         Ok(())
+    }
+
+    /// 非结构网格：history 写成单元向量（`HistForm = 'Vector'`）。`patch_fields` 是由调用方逐 patch
+    /// 给值的量（[`Self::stage_patch_field`]），`statics` 是每个文件第一条记录写一次的无时间维量。
+    pub fn with_vector(
+        mut self,
+        vector: std::sync::Arc<colm_hist::history::HistoryVector>,
+        patch_fields: &[(&'static str, bool)],
+        statics: Vec<(String, String, String, Vec<f64>)>,
+    ) -> Result<Self> {
+        ensure!(self.grid.is_none(), "history is either gridded or vector");
+        self.vector = Some(vector);
+        self.patch_field_names = patch_fields.to_vec();
+        self.vector_statics = statics;
+        Ok(self)
+    }
+
+    /// 本步那条记录里一个逐 patch 量的值与过滤（向量写出时的河道量）。
+    pub fn stage_patch_field(
+        &mut self,
+        name: &'static str,
+        values: Vec<f64>,
+        included: Vec<bool>,
+    ) -> Result<()> {
+        ensure!(
+            self.patch_field_names.iter().any(|(n, _)| *n == name),
+            "{name} was not declared with with_vector()"
+        );
+        self.staged_patch.push((name, values, included));
+        Ok(())
+    }
+
+    /// 是不是向量写出。
+    pub fn is_vector(&self) -> bool {
+        self.vector.is_some()
     }
 
     /// 空间算例：history 写成经纬网格（每个 patch 的份面积见 [`colm_hist::history::HistoryGrid`]）。
@@ -3861,6 +3916,18 @@ impl HistorySession {
                     buffer.declare_gridded(&self.gridded_names)?;
                 }
             }
+            if let Some(vector) = &self.vector {
+                // 城市量在向量写出时上游另有一条未完成的路（`write_history_variable_urb_2d` 不除 `nac`）。
+                ensure!(
+                    !self.urban,
+                    "vector history with urban variables is not ported; run this case with --engine fortran"
+                );
+                buffer = buffer.with_vector(std::sync::Arc::clone(vector))?;
+                buffer.declare_patch_fields(&self.patch_field_names)?;
+                for (name, long_name, units, values) in &self.vector_statics {
+                    buffer.add_vector_static(name, long_name, units, values.clone())?;
+                }
+            }
             // 声明本层能负责的变量；写出的文件因此只包含它们。
             declare_lct_variables(&mut buffer, self.plant_hydraulics, self.variably_saturated)?;
             if self.urban {
@@ -3911,6 +3978,9 @@ impl HistorySession {
         buffer.select_patch(None)?;
         for (name, values) in self.staged.drain(..) {
             buffer.set_gridded(name, record.record, &values)?;
+        }
+        for (name, values, included) in self.staged_patch.drain(..) {
+            buffer.set_patch_field(name, record.record, &values, &included)?;
         }
         self.cursor += 1;
         // 分组的最后一条写完就落盘（上游写回模式在这一刻把内存里的整组写出）；开着的缓冲区因此

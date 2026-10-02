@@ -270,9 +270,17 @@ impl SpatialRuntime {
                                 })
                                 .collect::<Vec<_>>()
                         });
+                        // 泥沙的降水：`forc_prc`、`forc_prl`（读入并映射到 patch 的强迫）。
+                        let precip = river.sediment.as_ref().map(|_| {
+                            patch_forcing
+                                .iter()
+                                .map(|forcing| (forcing.prc, forcing.prl))
+                                .collect::<Vec<_>>()
+                        });
                         river.step(
                             &runoff,
                             tracer_runoff.as_deref(),
+                            precip.as_deref(),
                             included,
                             time_step_seconds,
                             clock.end_time.year,
@@ -297,6 +305,7 @@ impl SpatialRuntime {
                                 &river.routing,
                                 &mut river.history,
                                 river.tracers.as_mut(),
+                                river.sediment.as_mut(),
                                 &record,
                                 clock.end_time,
                                 &mut history.session,

@@ -477,6 +477,28 @@ const RIVER_TRACER_SCHEMA: i32 = 2;
 /// `write_tracer_restart`：在河道续跑文件末尾追加示踪物事务（先 `complete = 0`，网络元数据、
 /// 逐示踪物的质量/待释放/累计输入/堤内池（有溶解度上限的另带固相），共享的 `acc_rnof_ref`，
 /// history 累加行，最后写描述符并 `complete = 1`）。没有输运示踪物时写空事务。
+/// `write_tracer_restart` 在只有 provider 示踪物（没有通用输运）时：提交一个空事务，
+/// 以后加上输运示踪物的续跑能干净地冷启动，而不是把它当成写到一半的事务。
+pub fn write_empty_river_tracers(path: &Path) -> Result<()> {
+    let mut file =
+        netcdf::append(path).with_context(|| format!("cannot reopen {}", path.display()))?;
+    let mut scalar = |name: &str, value: i32| -> Result<()> {
+        match file.variable_mut(name) {
+            Some(mut variable) => variable.put_values(&[value], ..)?,
+            None => file
+                .add_variable::<i32>(name, &[])?
+                .put_values(&[value], ..)?,
+        }
+        Ok(())
+    };
+    scalar("trc_river_restart_complete", 0)?;
+    scalar("trc_river_descriptor_count", 0)?;
+    scalar("trc_river_restart_schema", RIVER_TRACER_SCHEMA)?;
+    scalar("trc_river_restart_complete", 1)?;
+    file.close()?;
+    Ok(())
+}
+
 pub fn write_river_tracers(
     path: &Path,
     network: &RiverNetwork,

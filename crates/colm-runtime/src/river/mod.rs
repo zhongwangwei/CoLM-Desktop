@@ -14,6 +14,7 @@ pub mod network;
 pub mod remap;
 pub mod reservoir;
 pub mod restart;
+pub mod sediment;
 pub mod tracer;
 
 use anyhow::{ensure, Context, Result};
@@ -222,6 +223,10 @@ pub struct RiverModel {
     pub momentum_dt_limit: bool,
     /// `DEF_USE_TRACER`（有走通用输运的示踪物）：河湖示踪物（[`tracer`]）。
     pub tracers: Option<tracer::RiverTracers>,
+    /// `SEDIMENT` provider 示踪物：河道泥沙（[`sediment`]）。
+    pub sediment: Option<sediment::Sediment>,
+    /// `DEF_USE_TRACER` 但没有输运示踪物：续跑里仍提交空的河道示踪物事务。
+    pub empty_tracer_transaction: bool,
     momen: Vec<f64>,
 }
 
@@ -398,12 +403,30 @@ impl RiverModel {
             raw_history_at_end: None,
             flood: None,
             tracers: None,
+            sediment: None,
+            empty_tracer_transaction: false,
         })
     }
 
     /// 挂上河湖示踪物（`river_lake_tracer_init`）。
     pub fn with_tracers(mut self, tracers: tracer::RiverTracers) -> Result<Self> {
         self.tracers = Some(tracers);
+        Ok(self)
+    }
+
+    /// 挂上河道泥沙（`grid_sediment_init`）：按汇流的堤防与分汊配置打开堤内泥沙池与路径毛水量。
+    /// 续跑随后由 [`sediment::Sediment::read_restart`] 读回（schema 依赖这两个开关）。
+    pub fn with_sediment(mut self, mut sediment: sediment::Sediment) -> Result<Self> {
+        ensure!(
+            sediment.shearvel.len() == self.network.len(),
+            "sediment state does not match the unit-catchment network"
+        );
+        sediment.levee = self.levee.as_ref().map(|levee| levee.has.clone());
+        sediment.bif_acc = self
+            .bifurcation
+            .as_ref()
+            .map(|(bif, _)| sediment::BifWaterAcc::new(bif.paths(), bif.levels));
+        self.sediment = Some(sediment);
         Ok(self)
     }
 
@@ -432,6 +455,7 @@ impl RiverModel {
         &mut self,
         runoff_mm_s: &[f64],
         tracer_runoff: Option<&[Vec<f64>]>,
+        precip: Option<&[(f64, f64)]>,
         included: &[bool],
         deltime: f64,
         year: i32,
@@ -464,6 +488,48 @@ impl RiverModel {
             }
             tracers.input_from_runoff(&depth, &trc);
         }
+        // `tracer_lifecycle_route_forcing_put`：泥沙的降水 `forc_prc + forc_prl`（mm/s），只取
+        // 有效、非负的 patch；单元流域上的值是有效面积上的平均，另给有效面积占单元流域的份额。
+        if let Some(sediment) = self.sediment.as_mut() {
+            let precip = precip.context("river sediment needs the patch precipitation")?;
+            ensure!(
+                precip.len() == included.len(),
+                "one precipitation pair is needed per patch"
+            );
+            let n = self.network.len();
+            let filter = included
+                .iter()
+                .zip(precip)
+                .map(|(&keep, &(prc, prl))| {
+                    keep && prc.is_finite()
+                        && prl.is_finite()
+                        && prc != colm_core::MISSING
+                        && prl != colm_core::MISSING
+                        && prc >= 0.0
+                        && prl >= 0.0
+                })
+                .collect::<Vec<_>>();
+            let total = precip
+                .iter()
+                .zip(&filter)
+                .map(|(&(prc, prl), &keep)| if keep { prc + prl } else { 0.0 })
+                .collect::<Vec<_>>();
+            let mut prcp_uc = remap_to_catchments(routing, &total, &filter, n);
+            let mut area_uc = remap_to_catchments(routing, &vec![1.0; total.len()], &filter, n);
+            for i in 0..n {
+                prcp_uc[i] = if area_uc[i] > 0.0 {
+                    prcp_uc[i] / area_uc[i]
+                } else {
+                    0.0
+                };
+                area_uc[i] = if self.network.area[i] > 0.0 {
+                    area_uc[i] / self.network.area[i]
+                } else {
+                    0.0
+                };
+            }
+            sediment.forcing_put(&prcp_uc, deltime, &area_uc)?;
+        }
         // 漫滩回馈：每个陆面步都扣账、再发布（`grid_riverlake_flow` 里汇流判定之前）。
         if let Some(flood) = self.flood.as_mut() {
             flood.accumulate(deltime);
@@ -471,7 +537,20 @@ impl RiverModel {
                 levee: self.levee.as_ref(),
                 reservoir: self.reservoir.as_ref().map(|r| (r, year)),
             };
-            flood.debit(&self.network, &self.routing, &mut self.state, context)?;
+            let mut repartitions = Vec::new();
+            flood.debit(
+                &self.network,
+                &self.routing,
+                &mut self.state,
+                context,
+                &mut repartitions,
+            )?;
+            // 扣账后的堤防重新分区也要告诉泥沙（`tracer_lifecycle_route_sediment_levee_repartition`）。
+            if let Some(sediment) = self.sediment.as_mut() {
+                for (j, water) in repartitions {
+                    sediment.acc[j].levee_repartition(water)?;
+                }
+            }
             flood.publish(&self.network, &self.routing, &mut self.state, context);
         }
         self.state.acctime_rnof += deltime;
@@ -506,6 +585,7 @@ impl RiverModel {
                 .take()
                 .expect("bifurcation history"),
             layer_flux: Vec::new(),
+            layer_active: Vec::new(),
         });
         let net = &self.network;
         let state = &self.state;
@@ -515,6 +595,11 @@ impl RiverModel {
         let momentum_limit = self.momentum_dt_limit;
         let acctime = state.acctime_rnof;
         let record = self.tracers.is_some();
+        let sed_acc = self.sediment.as_ref().map(|sediment| SedimentIn {
+            acc: sediment.acc.as_slice(),
+            bif: sediment.bif_acc.as_ref(),
+            levee: levee.filter(|_| sediment.levee.is_some()),
+        });
         let (systems, results): (Vec<&network::RiverSystem>, Vec<SystemResult<'_>>) =
             match (bif_run, self.bifurcation.as_ref()) {
                 (Some(run), Some((_, global))) => (
@@ -530,6 +615,7 @@ impl RiverModel {
                         momentum_limit,
                         acctime,
                         record,
+                        sed_acc,
                     )],
                 ),
                 _ => (
@@ -548,6 +634,7 @@ impl RiverModel {
                                 momentum_limit,
                                 acctime,
                                 record,
+                                sed_acc,
                             )
                         })
                         .collect(),
@@ -573,6 +660,17 @@ impl RiverModel {
             }
             if let Some(tape) = result.tape.take() {
                 tapes.push(tape);
+            }
+            if let (Some(sediment), Some(out)) = (self.sediment.as_mut(), result.sediment.take()) {
+                if let Some(error) = out.error {
+                    return Err(error);
+                }
+                for (k, &i) in system.cells.iter().enumerate() {
+                    sediment.acc[i] = out.acc[k];
+                }
+                if out.bif.is_some() {
+                    sediment.bif_acc = out.bif;
+                }
             }
             for (k, &i) in system.cells.iter().enumerate() {
                 self.state.wdsrf[i] = result.wdsrf[k];
@@ -611,6 +709,14 @@ impl RiverModel {
                 self.levee.as_ref(),
                 self.bifurcation.as_ref().map(|(bif, _)| bif),
                 &tapes,
+            )?;
+        }
+        // `tracer_lifecycle_route_calc(acctime_rnof)`：一次汇流之后的泥沙形态步。
+        if let Some(sediment) = self.sediment.as_mut() {
+            sediment.calc(
+                &self.network,
+                self.bifurcation.as_ref().map(|(bif, _)| bif),
+                self.state.acctime_rnof,
             )?;
         }
         self.state.acctime_rnof = 0.0;
@@ -691,6 +797,25 @@ struct SystemResult<'a> {
     protected_failed: bool,
     /// 开示踪物时这一河系的磁带。
     tape: Option<tracer::SystemTape>,
+    /// 开泥沙时逐单元流域的水量累加（`sediment_diag_accumulate`）。
+    sediment: Option<SedimentOut>,
+}
+
+/// 汇流开始时交给一个河系的泥沙累加。
+#[derive(Clone, Copy)]
+struct SedimentIn<'a> {
+    acc: &'a [sediment::WaterAcc],
+    bif: Option<&'a sediment::BifWaterAcc>,
+    /// 开堤防时的堤防几何（算堤内淹没面积）。
+    levee: Option<&'a levee::Levee>,
+}
+
+/// 一个河系汇流后的泥沙累加（单元流域按 `RiverSystem::cells` 次序）。
+struct SedimentOut {
+    acc: Vec<sediment::WaterAcc>,
+    bif: Option<sediment::BifWaterAcc>,
+    /// 第一个越界（上游 `CoLM_stop`）。
+    error: Option<anyhow::Error>,
 }
 
 /// 分汊子步里看到的水库：哪些单元流域是已建成的水库、它们的库容，以及要改写的出入流。
@@ -716,6 +841,8 @@ struct BifurcationRun<'a> {
     bifflw_acctime: Vec<f64>,
     /// 最近一个子步的 `bif_hflux_lev`（示踪物磁带要记它，`[p*levels + l]`）。
     layer_flux: Vec<f64>,
+    /// 最近一个子步的 `bif_path_active`（泥沙的路径毛水量只累加活动路径）。
+    layer_active: Vec<bool>,
 }
 
 // 阶段循环按单元流域下标写多组数组（与上游逐单元流域的 DO 循环一一对应），用下标更清楚。
@@ -740,9 +867,23 @@ fn route_system<'a>(
     momentum_limit: bool,
     acctime: f64,
     record: bool,
+    sed_in: Option<SedimentIn<'_>>,
 ) -> SystemResult<'a> {
     let cells = &system.cells;
     let n = cells.len();
+    let mut sed = sed_in.map(|sed_in| SedimentOut {
+        acc: cells.iter().map(|&i| sed_in.acc[i]).collect(),
+        bif: sed_in.bif.cloned(),
+        error: None,
+    });
+    let sed_levee = sed_in.and_then(|sed_in| sed_in.levee);
+    // 泥沙：每个子步首的总蓄量与堤内蓄量（`particle_water_storage_start`、`particle_protected_start`）。
+    let mut sed_start = vec![(0.0, 0.0); if sed.is_some() { n } else { 0 }];
+    let sed_note = |sed: &mut Option<SedimentOut>, result: Result<()>| {
+        if let (Some(sed), Err(error)) = (sed.as_mut(), result) {
+            sed.error.get_or_insert(error);
+        }
+    };
     // 开堤防或分汊时所有单元流域都以 `volwater_ucat` 为状态，而不是由水深反算
     // （上游 `IF (DEF_USE_BIFURCATION .or. DEF_USE_LEVEE)`）。
     let volume_state = levee.is_some() || bif.is_some();
@@ -845,6 +986,11 @@ fn route_system<'a>(
                 volwater = visible;
                 if let Some(tape) = tape.as_mut() {
                     tape.pre_levee[k] = Some([vis_bef, lev_bef, visible, lev[k].0]);
+                }
+                if let Some(out) = sed.as_mut() {
+                    let result =
+                        out.acc[k].levee_repartition([vis_bef, lev_bef, visible, lev[k].0]);
+                    sed_note(&mut sed, result);
                 }
                 w
             }
@@ -1038,6 +1184,13 @@ fn route_system<'a>(
             ),
             _ => dt_all,
         };
+        // `tracer_lifecycle_route_sediment_bif`：每条活动路径逐层限流后的毛水量。
+        if let (Some(out), Some(run)) = (sed.as_mut(), bif.as_ref()) {
+            if let Some(acc) = out.bif.as_mut() {
+                let result = acc.add(dt, &run.layer_flux, &run.layer_active);
+                sed_note(&mut sed, result);
+            }
+        }
         let mut cells_tape = tape.as_ref().map(|_| {
             (0..n)
                 .map(|k| tracer::CellSubstep {
@@ -1061,6 +1214,15 @@ fn route_system<'a>(
             } else {
                 curve.volume(wdsrf[k])
             };
+            if !sed_start.is_empty() {
+                let protected = match (sed_levee, lev.as_ref()) {
+                    (Some(levee), Some(lev)) if levee.has[i] && built[k].is_none() => {
+                        lev[k].0.max(0.0)
+                    }
+                    _ => 0.0,
+                };
+                sed_start[k] = (start.max(0.0) + protected, protected);
+            }
             // 堤防 + 分汊：有堤单元流域的第 2 层及以上分汊通量走堤内一侧。
             let leveed_bif = !bif_lev_sum.is_empty()
                 && levee.is_some_and(|levee| levee.has[i])
@@ -1117,6 +1279,11 @@ fn route_system<'a>(
                     volwater = visible;
                     if let Some(cells_tape) = cells_tape.as_mut() {
                         cells_tape[k].levee = Some([vis_bef, lev_bef, visible, lev[k].0]);
+                    }
+                    if let Some(out) = sed.as_mut() {
+                        let result =
+                            out.acc[k].levee_repartition([vis_bef, lev_bef, visible, lev[k].0]);
+                        sed_note(&mut sed, result);
                     }
                     w
                 }
@@ -1202,6 +1369,39 @@ fn route_system<'a>(
                 a[2] = qin.mul_add(dt, a[2]);
                 a[3] = qout.mul_add(dt, a[3]);
             }
+            // `tracer_lifecycle_route_diag_accumulate`：子步末的蓄量（水库取 `volresv`）、
+            // 洼地溢流之后的出口通量与本子步的淹没面积。
+            if let Some(out) = sed.as_mut() {
+                let leveed = sed_levee.filter(|levee| levee.has[i] && built[k].is_none());
+                let (end, protected_end) = match (built[k], leveed, lev.as_ref()) {
+                    (Some(j), _, _) if reservoirs[j].1 != colm_core::MISSING => {
+                        (reservoirs[j].1.max(0.0), 0.0)
+                    }
+                    (Some(_), _, _) => (volwater_ucat[k].max(0.0), 0.0),
+                    (None, Some(_), Some(lev)) => {
+                        let protected = lev[k].0.max(0.0);
+                        (protected + volwater_ucat[k].max(0.0), protected)
+                    }
+                    _ => (volwater_ucat[k].max(0.0), 0.0),
+                };
+                // `min(max(FNMA(levee_frc, area, levee_floodarea), 0), area*(1-levee_frc))`。
+                let protected_area = sed_levee.map(|levee| match leveed {
+                    Some(_) => (-levee.frc[i])
+                        .mul_add(net.area[i], levee_floodarea[k])
+                        .max(0.0)
+                        .min(net.area[i] * (1.0 - levee.frc[i])),
+                    None => 0.0,
+                });
+                let water = sediment::SubstepWater {
+                    start: sed_start[k].0,
+                    end,
+                    protected_start: sed_start[k].1,
+                    protected_end,
+                    protected_area,
+                };
+                let result = out.acc[k].add(dt, veloc[k], w, water, faces[k].hflux, floodarea);
+                sed_note(&mut sed, result);
+            }
         }
         dt_res -= dt;
     }
@@ -1216,6 +1416,7 @@ fn route_system<'a>(
         reservoirs,
         protected_failed,
         tape,
+        sediment: sed,
     }
 }
 
@@ -1376,6 +1577,7 @@ fn bifurcation_substep(
     bif_sum.copy_from_slice(&flux.hflux_sum);
     *lev_sum = flux.lev_hflux_sum;
     run.layer_flux = flux.hflux_lev;
+    run.layer_active = flux.active;
     dt
 }
 

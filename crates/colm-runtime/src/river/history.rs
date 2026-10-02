@@ -29,9 +29,20 @@ pub const GRIDDED_RIVER_VARIABLES: [&str; 6] = [
     "floodarea",
 ];
 
+/// 向量 history（非结构网格）里由河道写出的量：`(闸门表名, input_mode = 'total')`。
+/// 向量写出不写 `f_floodarea`（`MOD_Hist.F90:4783` 只在 `Gridded` 时写）。
+pub const VECTOR_RIVER_VARIABLES: [(&str, bool); 5] = [
+    ("wdpth_ucat_regrid", false),
+    ("veloc_riv_regrid", false),
+    ("discharge", true),
+    ("discharge_rivermouth_regrid", true),
+    ("floodfrc", false),
+];
+
 /// 河道 history 的静态部分（`hist_grid_riverlake_init`）与 unitcat 文件的落点。
 pub struct RiverHistoryWriter {
-    grid: Arc<HistoryGrid>,
+    /// 网格 history；向量 history 时为 `None`（河道量逐 patch 交给会话聚合到单元）。
+    grid: Option<Arc<HistoryGrid>>,
     filter_ucat: Vec<bool>,
     filter_inpm: Vec<bool>,
     /// 区域网格上的 `sum_grid_area`/`sum_rmth_area`（没有贡献的网格是 `spval`）。
@@ -79,7 +90,7 @@ impl RiverHistoryWriter {
     pub fn new(
         network: &RiverNetwork,
         routing: &RunoffRouting,
-        grid: Arc<HistoryGrid>,
+        grid: Option<Arc<HistoryGrid>>,
         basic: &[bool],
         directory: impl AsRef<Path>,
         stem: impl Into<String>,
@@ -119,8 +130,10 @@ impl RiverHistoryWriter {
             .zip(&inpm)
             .map(|(&keep, &value)| keep && value != SPVAL)
             .collect::<Vec<_>>();
-        let sumarea_ucat = sumarea(&grid, &filter_ucat);
-        let sumarea_inpm = sumarea(&grid, &filter_inpm);
+        let (sumarea_ucat, sumarea_inpm) = match grid.as_deref() {
+            Some(grid) => (sumarea(grid, &filter_ucat), sumarea(grid, &filter_inpm)),
+            None => (Vec::new(), Vec::new()),
+        };
         let allups_mask = complete_upstream_mask(network, routing);
         let lon_count = network.nlon;
         let lat_count = network.nlat;
@@ -158,6 +171,25 @@ impl RiverHistoryWriter {
             lat,
             reservoir_ids: None,
         })
+    }
+
+    /// 向量 history 的 `mask_complete_upstream_regird`：逐 patch 的掩码与 `filter_ucat`
+    /// （`aggregate_to_vector_and_write_2d(allups_mask_pch, …, -1, filter_ucat)`）。
+    pub fn upstream_mask_patches(
+        network: &RiverNetwork,
+        routing: &RunoffRouting,
+        basic: &[bool],
+    ) -> (Vec<f64>, Vec<bool>) {
+        let n = network.len();
+        let covered = grid_to_patches(routing, &catchments_to_grid(routing, &vec![1.0; n]), true);
+        let filter_ucat = basic
+            .iter()
+            .zip(&covered)
+            .map(|(&keep, &value)| keep && value != SPVAL)
+            .collect::<Vec<_>>();
+        let mask = complete_upstream_mask(network, routing);
+        let mask_patch = grid_to_patches(routing, &catchments_to_grid(routing, &mask), true);
+        (mask_patch, filter_ucat)
     }
 
     /// 网格 history 的静态场 `mask_complete_upstream_regird`（每个文件第一条记录时写）。
@@ -207,17 +239,22 @@ impl RiverHistoryWriter {
         routing: &RunoffRouting,
         history: &mut RiverHistory,
         tracers: Option<&mut super::tracer::RiverTracers>,
+        sediment: Option<&mut super::sediment::Sediment>,
         record: &ScheduledRecord,
         end: colm_core::CalendarTime,
         session: &mut crate::history::HistorySession,
     ) -> Result<()> {
         let n = network.len();
-        let tracer_fields = tracers
+        let mut tracer_fields = tracers
             .as_deref()
             .map(|tracers| {
                 self.tracer_fields(tracers, history.levsto.is_some(), history.bifout.is_some())
             })
             .unwrap_or_default();
+        // `tracer_lifecycle_route_write_history`：泥沙的 unitcat 量（`write_sediment_history`）。
+        if let Some(sediment) = sediment.as_deref() {
+            tracer_fields.extend(sediment.history_fields());
+        }
         let window_seconds = history
             .acctime
             .iter()
@@ -410,12 +447,32 @@ impl RiverHistoryWriter {
         let mouth_pch =
             grid_to_patches(routing, &per_area(&rivermouth, &self.sum_rmth_area), false);
         let floodfrc_pch = grid_to_patches(routing, &catchments_to_inpm(routing, &floodfrc), true);
-        let ones = vec![1.0; self.grid.lat.len() * self.grid.lon.len()];
+        let Some(grid) = self.grid.clone() else {
+            // 向量 history：逐 patch 交给会话，按单元聚合（`aggregate_to_vector_and_write_2d`）。
+            for (name, values, filter) in [
+                ("wdpth_ucat_regrid", wdsrf_pch, &self.filter_ucat),
+                ("veloc_riv_regrid", veloc_pch, &self.filter_ucat),
+                ("discharge", discharge_pch, &self.filter_ucat),
+                ("discharge_rivermouth_regrid", mouth_pch, &self.filter_ucat),
+                ("floodfrc", floodfrc_pch, &self.filter_inpm),
+            ] {
+                session.stage_patch_field(name, values, filter.clone())?;
+            }
+            history.reset();
+            if let Some(tracers) = tracers {
+                tracers.history.reset();
+            }
+            if let Some(sediment) = sediment {
+                sediment.flush_history();
+            }
+            return Ok(());
+        };
+        let ones = vec![1.0; grid.lat.len() * grid.lon.len()];
         let fields = [
             (
                 "wdpth_ucat_regrid",
                 aggregate(
-                    &self.grid,
+                    &grid,
                     &wdsrf_pch,
                     &self.filter_ucat,
                     &self.sumarea_ucat,
@@ -425,7 +482,7 @@ impl RiverHistoryWriter {
             (
                 "veloc_riv_regrid",
                 aggregate(
-                    &self.grid,
+                    &grid,
                     &veloc_pch,
                     &self.filter_ucat,
                     &self.sumarea_ucat,
@@ -434,16 +491,16 @@ impl RiverHistoryWriter {
             ),
             (
                 "discharge",
-                aggregate(&self.grid, &discharge_pch, &self.filter_ucat, &ones, true),
+                aggregate(&grid, &discharge_pch, &self.filter_ucat, &ones, true),
             ),
             (
                 "discharge_rivermouth_regrid",
-                aggregate(&self.grid, &mouth_pch, &self.filter_ucat, &ones, true),
+                aggregate(&grid, &mouth_pch, &self.filter_ucat, &ones, true),
             ),
             (
                 "floodfrc",
                 aggregate(
-                    &self.grid,
+                    &grid,
                     &floodfrc_pch,
                     &self.filter_inpm,
                     &self.sumarea_inpm,
@@ -452,7 +509,7 @@ impl RiverHistoryWriter {
             ),
             (
                 "floodarea",
-                aggregate(&self.grid, &floodfrc_pch, &self.filter_inpm, &ones, false),
+                aggregate(&grid, &floodfrc_pch, &self.filter_inpm, &ones, false),
             ),
         ];
         for (name, values) in fields {
@@ -463,6 +520,10 @@ impl RiverHistoryWriter {
         // `flush_acc_fluxes_riverlake` 同时清零示踪物累加（`tracer_flush_acc`）。
         if let Some(tracers) = tracers {
             tracers.history.reset();
+        }
+        // `tracer_lifecycle_route_flush_history`。
+        if let Some(sediment) = sediment {
+            sediment.flush_history();
         }
         Ok(())
     }

@@ -165,9 +165,11 @@ impl TracerRuntime {
         // 不拒绝的话 Rust 会照常跑完却没有甲烷/泥沙过程，输出悄悄与 Fortran 不同。
         // CH4 由 [`crate::methane`] 接在 BGC 之后（要开 BGC）；其余 provider 都还没移植。
         let use_bgc = logical(document, "DEF_USE_BGC")?;
+        // SEDIMENT 由 [`crate::river::sediment`] 接在网格河湖汇流上（单点没有汇流，由单点入口拒绝）。
         if let Some(tracer) = set.tracers.iter().find(|t| {
             t.state_owner == colm_core::tracer::descriptor::StateOwner::Provider
                 && !(use_bgc && crate::methane::is_methane_tracer(t))
+                && !crate::river::sediment::is_sediment_tracer(t)
         }) {
             anyhow::bail!(
                 "provider tracer {} ({}) is not ported to the Rust runtime yet (methane/sediment); \
