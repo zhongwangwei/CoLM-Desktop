@@ -479,14 +479,8 @@ fn run_spatial(
         .as_ref()
         .is_some_and(|set| set.transport_indices().next().is_some());
     if transport_tracers && logical_field(&document, "DEF_USE_LULCC")? {
-        // SAT（`remap_land_tracer_lulcc_state` 不带转移份额）：同单元同类型的 patch 抄旧示踪物，
-        // 其余取分配值。MEC 要按 `lulcc_inventory_trace` 做面积守恒的加权，示踪物强迫要
-        // `tracer_forcing_lulcc_remap`，都还没接。
-        ensure!(
-            integer_field(&document, "DEF_LULCC_SCHEME")? == 1,
-            "land tracers with DEF_LULCC_SCHEME = 2 (area-conserving MEC tracer remap) are not \
-             ported; run this case with --engine fortran"
-        );
+        // SAT 与 MEC 的陆面示踪物迁移见 `lulcc_land_tracers`；示踪物强迫的缓存要
+        // `tracer_forcing_lulcc_remap`，还没接。
         let runtime = colm_runtime::tracer::TracerRuntime::from_document(&document)?
             .context("transport tracers need a tracer runtime")?;
         ensure!(
@@ -1564,9 +1558,47 @@ fn check_spatial_lulcc(
     Ok(())
 }
 
-/// `remap_land_tracer_lulcc_state`（SAT：没有 `lccpct_patches`）：每个新 patch 先取
-/// `allocate_Tracer_Vars` 的分配值，同单元同类型的旧 patch（`fallback_source`，与 SAT 配对相同）
-/// 整份抄过来（含 `trc_aquifer_ref_water`）。
+/// MEC 的示踪物重映射输入：每个新 patch 的来源地类份额（`lccpct_patches(np, 0:N)`）与
+/// 新旧两侧 patch 的物理面积（`lulcc_patch_areas`，m²）。
+struct TracerMec {
+    lccpct: Vec<Vec<f64>>,
+    new_area: Vec<f64>,
+    old_area: Vec<f64>,
+}
+
+/// `lulcc_patch_areas`：patch 各像元 `FMA(areaquad, 1e6, area)` 从 0 起累加，有共享像元时再乘
+/// `pctshared`（不共享时 Rust 存的是 1，乘 1 是恒等）。
+fn lulcc_patch_areas(
+    topology: &colm_runtime::spatial::topology::SpatialTopology,
+    patches: std::ops::Range<usize>,
+) -> Vec<f64> {
+    use colm_runtime::spatial::grid::areaquad;
+    let pixel = &topology.pixel;
+    patches
+        .map(|p| {
+            let area = topology.cells[p].iter().fold(0.0, |area, &(ilon, ilat)| {
+                let (x, y) = (ilon as usize - 1, ilat as usize - 1);
+                areaquad(
+                    pixel.lat_s[y],
+                    pixel.lat_n[y],
+                    pixel.lon_w[x],
+                    pixel.lon_e[x],
+                )
+                .mul_add(1.0e6, area)
+            });
+            area * topology.shared_fraction[p]
+        })
+        .collect()
+}
+
+/// `remap_land_tracer_lulcc_state`：每个新 patch 先取 `allocate_Tracer_Vars` 的分配值，再按方案搬旧池。
+///
+/// * SAT（没有 `lccpct_patches`）：同单元同类型的旧 patch（`fallback_source`，与 SAT 配对相同）整份抄过来。
+/// * MEC（`lulcc_inventory_trace` 加新旧面积）：广延量按面积守恒加权 —— 旧 patch `op` 转给新 patch `np`
+///   的面积 `w = old_area(op)·target(np,c)/Σ_nq target(nq,c)`，`target(np,c) = new_area(np)·lcc(np,c)/Σ lcc(np,:)`，
+///   和 `FMA(w, old, new)` 依旧 patch 次序累加后除以新面积；强度量（叶片 δ、Péclet）用来源面积权重
+///   `lcc(np,c)·old_area(op)/Σ_同类 old_area` 加权平均。没有权重时退回同类型的旧 patch，再没有就保持分配值。
+///   之后核对每个输运示踪物的陆面水池质量守恒（`TRC_LULCC_BAL`）。
 ///
 /// 同位素且开了含水层混合（变饱和流、`DEF_TRACER_AQUIFER_MIXING_WATER_MM > 0`）时，上游另查：
 /// 特殊地类不能带参考水量，新建的土壤/湿地 patch 不能没有参考水量，否则停机。
@@ -1576,9 +1608,13 @@ fn lulcc_land_tracers(
     new: &colm_init::lulcc::SatSide<'_>,
     new_patch_type: &[i64],
     old: Option<(colm_init::lulcc::SatSide<'_>, &colm_init::RestartFile)>,
+    mec: Option<TracerMec>,
+    abort_nbad: i64,
 ) -> Result<Vec<colm_core::tracer::PatchTracerState>> {
-    use colm_core::tracer::PatchTracerState;
-    let mut states: Vec<PatchTracerState> = (0..new.patch_class.len())
+    use colm_core::tracer::{PatchTracerState, TracerPools};
+    const TINY: f64 = f64::MIN_POSITIVE;
+    let nnew = new.patch_class.len();
+    let mut states: Vec<PatchTracerState> = (0..nnew)
         .map(|_| PatchTracerState::allocated(set))
         .collect();
     let mut any_reference = false;
@@ -1587,9 +1623,198 @@ fn lulcc_land_tracers(
             colm_runtime::tracer::read_land_tracer_restart(old_time, set, old.patch_class.len())?
                 .context("the old year's restart has no committed land tracer state")?;
         any_reference = old_states.iter().any(|state| state.aquifer_ref_water > 0.0);
-        for (n, o) in colm_init::lulcc::match_patches(new, &old)? {
-            states[n].pools.clone_from(&old_states[o].pools);
-            states[n].aquifer_ref_water = old_states[o].aquifer_ref_water;
+        match mec {
+            None => {
+                for (n, o) in colm_init::lulcc::match_patches(new, &old)? {
+                    states[n].pools.clone_from(&old_states[o].pools);
+                    states[n].aquifer_ref_water = old_states[o].aquifer_ref_water;
+                }
+            }
+            Some(mec) => {
+                lulcc_check_inventory_transfer(new, &old, &mec)?;
+                let nold = old.patch_class.len();
+                let lcc = |np: usize, c: i64| mec.lccpct[np][c as usize].max(0.0);
+                // `lulcc_target_class_area(np, c)`。
+                let target = |np: usize, c: i64| -> f64 {
+                    let class_sum: f64 = mec.lccpct[np].iter().fold(0.0, |s, &v| s + v.max(0.0));
+                    if class_sum <= TINY {
+                        0.0
+                    } else {
+                        mec.new_area[np].max(0.0) * lcc(np, c) / class_sum
+                    }
+                };
+                // `lulcc_source_area_weight(np, op)`。
+                let source_weight = |np: usize, op: usize| -> f64 {
+                    let w = lcc(np, old.patch_class[op]);
+                    if w <= 0.0 {
+                        return 0.0;
+                    }
+                    let class_area = (0..nold)
+                        .filter(|&oq| {
+                            old.element[oq] == new.element[np]
+                                && old.patch_class[oq] == old.patch_class[op]
+                        })
+                        .fold(0.0, |s, oq| s + mec.old_area[oq].max(0.0));
+                    if class_area > TINY {
+                        w * mec.old_area[op].max(0.0) / class_area
+                    } else {
+                        w
+                    }
+                };
+                // `lulcc_mass_transfer_area(np, op)`。
+                let transfer = |np: usize, op: usize| -> f64 {
+                    let c = old.patch_class[op];
+                    let t = target(np, c);
+                    if t <= TINY {
+                        return 0.0;
+                    }
+                    let class_target = (0..nnew)
+                        .filter(|&nq| new.element[nq] == new.element[np])
+                        .fold(0.0, |s, nq| s + target(nq, c));
+                    if class_target <= TINY {
+                        return 0.0;
+                    }
+                    mec.old_area[op].max(0.0) * t / class_target
+                };
+                type Weights = (Vec<(usize, f64)>, f64);
+                let weights = |np: usize, intensive: bool| -> Weights {
+                    let conserve = !intensive && mec.new_area[np] > TINY;
+                    let mut list = Vec::new();
+                    let mut wsum = 0.0;
+                    for op in 0..nold {
+                        if old.element[op] != new.element[np] {
+                            continue;
+                        }
+                        let w = if conserve {
+                            transfer(np, op)
+                        } else {
+                            source_weight(np, op)
+                        };
+                        if w <= 0.0 {
+                            continue;
+                        }
+                        list.push((op, w));
+                        wsum += w;
+                    }
+                    // `remap_denominator`。
+                    let denom = if conserve {
+                        mec.new_area[np]
+                    } else {
+                        wsum.max(TINY)
+                    };
+                    (list, if wsum > 0.0 { denom } else { 0.0 })
+                };
+                let fallback = |np: usize| {
+                    (0..nold).find(|&op| {
+                        old.element[op] == new.element[np]
+                            && old.patch_class[op] == new.patch_class[np]
+                    })
+                };
+                type Field = fn(&mut TracerPools) -> &mut f64;
+                const MASS: [Field; 16] = [
+                    |p| &mut p.ldew_rain,
+                    |p| &mut p.ldew_snow,
+                    |p| &mut p.wa,
+                    |p| &mut p.aquifer_ref_mass,
+                    |p| &mut p.wdsrf,
+                    |p| &mut p.wetwat,
+                    |p| &mut p.surface_residue,
+                    |p| &mut p.subsurface_residue,
+                    |p| &mut p.canopy_solid,
+                    |p| &mut p.surface_solid,
+                    |p| &mut p.subsurface_solid,
+                    |p| &mut p.waterstorage_solid,
+                    |p| &mut p.waterstorage,
+                    |p| &mut p.scv,
+                    |p| &mut p.leaf_water_moles,
+                    |p| &mut p.leaf_iso_storage,
+                ];
+                const INTENSIVE: [Field; 3] = [
+                    |p| &mut p.leaf_delta_e,
+                    |p| &mut p.leaf_delta_b,
+                    |p| &mut p.leaf_peclet,
+                ];
+                type Layers = fn(&mut TracerPools) -> &mut [f64; colm_core::tracer::SOISNO_LAYERS];
+                const LAYERS: [Layers; 3] = [
+                    |p| &mut p.wliq_soisno,
+                    |p| &mut p.wice_soisno,
+                    |p| &mut p.solid_soisno,
+                ];
+                let mut old_states = old_states;
+                for np in 0..nnew {
+                    let (mass_w, mass_denom) = weights(np, false);
+                    let (int_w, int_denom) = weights(np, true);
+                    let src = fallback(np);
+                    // 一个量的重映射：`new = 0`，依旧 patch 次序 `FMA(w, old, new)`，再除分母；
+                    // 没有权重时取同类型旧 patch，再没有就保持分配值。
+                    let remap = |get: &dyn Fn(&mut PatchTracerState) -> f64,
+                                 list: &[(usize, f64)],
+                                 denom: f64,
+                                 old_states: &mut Vec<PatchTracerState>,
+                                 current: f64|
+                     -> f64 {
+                        if !list.is_empty() {
+                            list.iter()
+                                .fold(0.0, |v, &(op, w)| w.mul_add(get(&mut old_states[op]), v))
+                                / denom
+                        } else if let Some(op) = src {
+                            get(&mut old_states[op])
+                        } else {
+                            current
+                        }
+                    };
+                    for itrc in 0..set.len() {
+                        for field in MASS {
+                            let current = *field(&mut states[np].pools[itrc]);
+                            *field(&mut states[np].pools[itrc]) = remap(
+                                &|s| *field(&mut s.pools[itrc]),
+                                &mass_w,
+                                mass_denom,
+                                &mut old_states,
+                                current,
+                            );
+                        }
+                        for field in INTENSIVE {
+                            let current = *field(&mut states[np].pools[itrc]);
+                            *field(&mut states[np].pools[itrc]) = remap(
+                                &|s| *field(&mut s.pools[itrc]),
+                                &int_w,
+                                int_denom,
+                                &mut old_states,
+                                current,
+                            );
+                        }
+                        for layers in LAYERS {
+                            for slot in 0..colm_core::tracer::SOISNO_LAYERS {
+                                let current = layers(&mut states[np].pools[itrc])[slot];
+                                layers(&mut states[np].pools[itrc])[slot] = remap(
+                                    &|s| layers(&mut s.pools[itrc])[slot],
+                                    &mass_w,
+                                    mass_denom,
+                                    &mut old_states,
+                                    current,
+                                );
+                            }
+                        }
+                    }
+                    let current = states[np].aquifer_ref_water;
+                    states[np].aquifer_ref_water = remap(
+                        &|s| s.aquifer_ref_water,
+                        &mass_w,
+                        mass_denom,
+                        &mut old_states,
+                        current,
+                    );
+                }
+                lulcc_check_land_water_mass(
+                    set,
+                    &old_states,
+                    &mec.old_area,
+                    &states,
+                    &mec.new_area,
+                    abort_nbad,
+                )?;
+            }
         }
     }
     let require_reference = aquifer_mixing
@@ -1611,6 +1836,187 @@ fn lulcc_land_tracers(
         }
     }
     Ok(states)
+}
+
+/// `compute_*_lulcc_land_water_mass` + `assert_lulcc_land_water_mass_conserved`：逐输运示踪物把各陆面
+/// 水池按面积求和（`FMA(pool, area, total)`，面积 ≤ tiny 的 patch 不计），前后之差超过
+/// `max(1e-8, 1e-10·max(|前|, |后|, 1))` 的示踪物个数多于 `DEF_TRACER_LULCC_ABORT_NBAD` 就停。
+fn lulcc_check_land_water_mass(
+    set: &colm_core::tracer::TracerSet,
+    old_states: &[colm_core::tracer::PatchTracerState],
+    old_area: &[f64],
+    new_states: &[colm_core::tracer::PatchTracerState],
+    new_area: &[f64],
+    abort_nbad: i64,
+) -> Result<()> {
+    use colm_core::tracer::{PatchTracerState, TracerPools};
+    const TINY: f64 = f64::MIN_POSITIVE;
+    let total = |states: &[PatchTracerState], areas: &[f64]| -> Vec<f64> {
+        let mut total = vec![0.0; set.len()];
+        let scalar: [fn(&TracerPools) -> f64; 14] = [
+            |p| p.ldew_rain,
+            |p| p.ldew_snow,
+            |p| p.wa,
+            |p| p.aquifer_ref_mass,
+            |p| p.wdsrf,
+            |p| p.wetwat,
+            |p| p.surface_residue,
+            |p| p.subsurface_residue,
+            |p| p.canopy_solid,
+            |p| p.surface_solid,
+            |p| p.subsurface_solid,
+            |p| p.waterstorage_solid,
+            |p| p.waterstorage,
+            |p| p.scv,
+        ];
+        let layered: [fn(&TracerPools) -> &[f64; colm_core::tracer::SOISNO_LAYERS]; 3] =
+            [|p| &p.wliq_soisno, |p| &p.wice_soisno, |p| &p.solid_soisno];
+        // 上游的累加次序：ldew_rain, ldew_snow, wliq, wice, wa, aquifer_ref_mass, wdsrf, wetwat,
+        // 两种残留, solid_soisno, 四种固相, waterstorage, scv。
+        let order: [Result<usize, usize>; 17] = [
+            Ok(0),
+            Ok(1),
+            Err(0),
+            Err(1),
+            Ok(2),
+            Ok(3),
+            Ok(4),
+            Ok(5),
+            Ok(6),
+            Ok(7),
+            Err(2),
+            Ok(8),
+            Ok(9),
+            Ok(10),
+            Ok(11),
+            Ok(12),
+            Ok(13),
+        ];
+        for item in order {
+            for (state, &area) in states.iter().zip(areas) {
+                let area = area.max(0.0);
+                if area <= TINY {
+                    continue;
+                }
+                match item {
+                    Ok(k) => {
+                        for (itrc, tracer) in set.tracers.iter().enumerate() {
+                            if tracer.uses_land_water_transport() {
+                                total[itrc] =
+                                    scalar[k](&state.pools[itrc]).mul_add(area, total[itrc]);
+                            }
+                        }
+                    }
+                    Err(k) => {
+                        for slot in 0..colm_core::tracer::SOISNO_LAYERS {
+                            for (itrc, tracer) in set.tracers.iter().enumerate() {
+                                if tracer.uses_land_water_transport() {
+                                    total[itrc] = layered[k](&state.pools[itrc])[slot]
+                                        .mul_add(area, total[itrc]);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        total
+    };
+    let before = total(old_states, old_area);
+    let after = total(new_states, new_area);
+    let mut bad = 0;
+    for (itrc, tracer) in set.tracers.iter().enumerate() {
+        if !tracer.uses_land_water_transport() {
+            continue;
+        }
+        let scale = before[itrc].abs().max(after[itrc].abs()).max(1.0);
+        if (after[itrc] - before[itrc]).abs() > (1.0e-10 * scale).max(1.0e-8) {
+            bad += 1;
+        }
+    }
+    ensure!(
+        bad <= abort_nbad,
+        "TRACER LULCC remap land-water mass conservation failed ({bad} tracer(s))"
+    );
+    Ok(())
+}
+
+/// `lulcc_check_inventory_transfer`：每个单元的旧/新物理面积一致，且按来源地类，旧 patch 的面积与
+/// 新 patch 按转移份额推出的来源面积一致（容差 1e-10）。
+fn lulcc_check_inventory_transfer(
+    new: &colm_init::lulcc::SatSide<'_>,
+    old: &colm_init::lulcc::SatSide<'_>,
+    mec: &TracerMec,
+) -> Result<()> {
+    const TINY: f64 = f64::MIN_POSITIVE;
+    const CLASSES: usize = 18;
+    ensure!(
+        mec.lccpct.len() == new.patch_class.len()
+            && mec.new_area.len() == new.patch_class.len()
+            && mec.old_area.len() == old.patch_class.len(),
+        "TRACER LULCC inventory map shape mismatch"
+    );
+    ensure!(
+        mec.old_area
+            .iter()
+            .chain(&mec.new_area)
+            .all(|a| a.is_finite() && *a >= 0.0)
+            && mec
+                .lccpct
+                .iter()
+                .flatten()
+                .all(|v| v.is_finite() && *v >= 0.0),
+        "TRACER LULCC invalid inventory area or transfer trace"
+    );
+    let elements: std::collections::BTreeSet<i64> =
+        old.element.iter().chain(new.element).copied().collect();
+    for element in elements {
+        let mut source = [0.0f64; CLASSES];
+        let mut target = [0.0f64; CLASSES];
+        let olds: Vec<usize> = (0..old.element.len())
+            .filter(|&p| old.element[p] == element)
+            .collect();
+        let news: Vec<usize> = (0..new.element.len())
+            .filter(|&p| new.element[p] == element)
+            .collect();
+        ensure!(
+            !olds.is_empty() && !news.is_empty(),
+            "TRACER LULCC element footprint changed"
+        );
+        for &op in &olds {
+            if mec.old_area[op] <= TINY {
+                continue;
+            }
+            source[old.patch_class[op] as usize] += mec.old_area[op];
+        }
+        for &np in &news {
+            if mec.new_area[np] <= TINY {
+                continue;
+            }
+            let rowsum: f64 = mec.lccpct[np].iter().sum();
+            ensure!(
+                (rowsum - 1.0).abs() <= 1.0e-10,
+                "TRACER LULCC incomplete source trace"
+            );
+            for c in 0..CLASSES {
+                target[c] += mec.new_area[np] * mec.lccpct[np][c] / rowsum;
+            }
+        }
+        let old_total: f64 = source.iter().sum();
+        let new_total: f64 = news.iter().map(|&np| mec.new_area[np]).sum();
+        ensure!(
+            (old_total - new_total).abs() <= 1.0e-10 * old_total.max(new_total).max(1.0),
+            "TRACER LULCC element physical footprint changed (element {element}: {old_total} vs {new_total} m2)"
+        );
+        for c in 0..CLASSES {
+            ensure!(
+                (source[c] > 0.0) == (target[c] > 0.0)
+                    && (source[c] - target[c]).abs() <= 1.0e-10 * source[c].max(target[c]),
+                "TRACER LULCC source-class physical area mismatch (element {element}, class {c})"
+            );
+        }
+    }
+    Ok(())
 }
 
 /// `start` 所在年份的最后一步的终点，按 CoLM 的写法 `(year, 365|366, 86400)`。
@@ -1849,6 +2255,21 @@ fn lulcc_transition(
                         ))
                     })
                     .transpose()?,
+                // MEC：`lulcc_inventory_trace`（IGBP LCT 下就是 `lccpct_patches`）与新旧 patch 的物理面积。
+                match (mec.is_some(), old.as_ref()) {
+                    (true, Some((_, _, old_patches))) => Some(TracerMec {
+                        lccpct: read_lulcc_transfer_trace(
+                            &landdata,
+                            years.new,
+                            block,
+                            patches.len(),
+                        )?,
+                        new_area: lulcc_patch_areas(&new_topology, patches.clone()),
+                        old_area: lulcc_patch_areas(&old_topology, old_patches.clone()),
+                    }),
+                    _ => None,
+                },
+                integer_field(document, "DEF_TRACER_LULCC_ABORT_NBAD")?,
             )
             .with_context(|| format!("cannot carry the tracers of block {block} over"))?;
             colm_runtime::tracer::write_land_tracer_restart(

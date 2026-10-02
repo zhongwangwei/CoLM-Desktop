@@ -28312,3 +28312,25 @@ f_ustar     0.10293637      0.11577442      0.11577442
 `CoLM-SYSU-integration` 执行 `git fetch` 之后，`origin/master` 仍是 `85cf2328`（PR #17），没有比第 437 轮同步更新的提交。
 
 逐文件核对：`git diff -U0 3c799bae 85cf2328` 共涉及 8 个文件、新增 70 行，全部原样出现在 `vendor/CoLM202X` 的对应文件里。直接 `diff` 两边会看到更多不同，但那些都是本仓库已经记录在 upstream-bugs 里的 vendor 修复与 TRACER 统一，不是漏同步。
+
+## 第 513 轮：B1 —— 输运示踪物与 LULCC（MEC）
+
+第 510 轮只接了 SAT。MEC（`DEF_LULCC_SCHEME = 2`）下，上游给 `remap_land_tracer_lulcc_state` 传三样东西：
+- 转移份额 `inventory_trace`：IGBP LCT 下就是 `lccpct_patches`；
+- 新旧两侧 patch 的物理面积（`lulcc_patch_areas`）；
+- 质量守恒检查。
+
+**移植**（GIMPLE：累加与求和是 FMA，其余逐条舍入）：
+- **面积**：patch 各像元 `FMA(areaquad, 1e6, area)` 从 0 起累加，共享像元再乘 `pctshared`。
+- **广延量**（16 个标量池、3 个分层池、`trc_aquifer_ref_water`）：
+  - 旧 patch `op` 转给新 patch `np` 的面积 `w = old_area(op)·target(np,c)/Σ_同单元 target(nq,c)`，其中 `target(np,c) = new_area(np)·lcc(np,c)/Σ lcc(np,:)`；
+  - 按旧 patch 次序 `FMA(w, old, new)` 累加，再除以新面积。
+- **强度量**（叶片 δ_e、δ_b、Péclet）：来源面积权重 `lcc(np,c)·old_area(op)/Σ_同单元同类 old_area`，加权平均。
+- **没有权重时**：退回同单元同类型的旧 patch，再没有就保持分配值。
+- **停机检查**：照搬 `lulcc_check_inventory_transfer`（每个单元新旧物理面积一致，按来源地类旧面积等于推出来的面积）与 `TRC_LULCC_BAL`（每个输运示踪物的陆面水池总量守恒，超出 `max(1e-8, 1e-10·scale)` 的个数多于 `DEF_TRACER_LULCC_ABORT_NBAD` 就停）。
+
+**验收**：
+- `g3mt` = g3m（MEC，2005→2006，175 → 172 个 patch，其中 130 个新 patch 有不止一个来源地类，最大非主导份额 0.49999）加溶质 `sol1`：history 6 份、restart 8 份逐位一致；
+- SAT 的 `g3t` 重跑仍然一致。
+
+**仍然拒绝**：示踪物强迫 + LULCC（`tracer_forcing_lulcc_remap`）、甲烷 + LULCC、泥沙 + LULCC。
