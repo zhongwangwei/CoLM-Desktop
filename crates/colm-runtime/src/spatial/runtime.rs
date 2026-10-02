@@ -30,6 +30,9 @@ pub struct SpatialRuntime {
     deferred_lai_refresh: Option<colm_core::CalendarTime>,
     /// 网格示踪物强迫（`read_tracer_forcing`）。
     tracer_forcing: Option<super::tracer_forcing::GriddedTracerForcing>,
+    /// `forcmask_pch`：足迹不全落在缺测格上的 patch 为真。为假的 patch 整步跳过
+    /// （`CoLMDRIVER.F90:78` 的 `CYCLE`），状态不动、不出通量。
+    forcing_mask: Vec<bool>,
 }
 
 impl SpatialRuntime {
@@ -39,15 +42,23 @@ impl SpatialRuntime {
         mapping: AreaWeightedMapping,
         coordinates: Vec<(f64, f64)>,
         co2_scenario: Co2Scenario,
+        forcing_mask: Vec<bool>,
     ) -> Result<Self> {
         ensure!(
-            mapping.parts.len() == coordinates.len(),
-            "the forcing mapping covers {} patches but {} coordinates were given",
+            mapping.parts.len() == coordinates.len() && forcing_mask.len() == coordinates.len(),
+            "the forcing mapping covers {} patches and the forcing mask {}, but {} coordinates \
+             were given",
             mapping.parts.len(),
+            forcing_mask.len(),
             coordinates.len()
         );
+        // 被遮蔽的 patch（足迹全是缺测格）面积清零是预期的；其余必须与强迫网格有重叠。
         ensure!(
-            mapping.area.iter().all(|&area| area > 0.0),
+            mapping
+                .area
+                .iter()
+                .zip(&forcing_mask)
+                .all(|(&area, &active)| area > 0.0 || !active),
             "a patch has no overlap with the forcing grid"
         );
         Ok(Self {
@@ -60,6 +71,7 @@ impl SpatialRuntime {
             river: None,
             deferred_lai_refresh: None,
             tracer_forcing: None,
+            forcing_mask,
         })
     }
 
@@ -146,7 +158,7 @@ impl SpatialRuntime {
         F: FnMut(
             &[PointRuntimeStep],
             &[StandardLctSnowSoilState],
-            &[PatchStepOutput<'_>],
+            &[Option<PatchStepOutput<'_>>],
             Option<&crate::river::RiverModel>,
             Option<&crate::tracer::ForcingCache<'_>>,
         ) -> Result<()>,
@@ -156,6 +168,13 @@ impl SpatialRuntime {
             "every patch needs one template, one state and one coordinate"
         );
         let time_step_seconds = self.clock.timestep_seconds();
+        let masked = self.forcing_mask.iter().any(|&active| !active);
+        // 上游 `BaseFlow_Optimize` 不看 `forcmask_pch`，会用被遮蔽 patch 从未赋值的通量。
+        ensure!(
+            !(masked && self.baseflow_optimizer.is_some()),
+            "baseflow optimization with patches masked by missing forcing has no defined upstream \
+             behaviour (BaseFlow_Optimize reads their unassigned fluxes)"
+        );
         let mut optimizer = self.baseflow_optimizer.take();
         let mut completed = 0;
         let result = (|| -> Result<()> {
@@ -168,6 +187,7 @@ impl SpatialRuntime {
                 let co2 =
                     colm_core::monthly_co2_ppm(self.co2_scenario, clock.forcing_time.year, month)?
                         * 1.0e-6;
+                self.forcing.set_spinup(clock.is_spinup);
                 let cells = self.forcing.step(clock.forcing_time, co2)?;
                 let patch_forcing = map_to_patches(&self.mapping, &self.forcing, &cells);
                 // `read_tracer_forcing (jdate, dir_forcing)`：紧跟 `read_forcing`。
@@ -192,7 +212,8 @@ impl SpatialRuntime {
                     })
                     .collect::<Vec<_>>();
                 let mut next_states = states.clone();
-                let mut outputs = Vec::with_capacity(templates.len());
+                // 被遮蔽的 patch 没有输出（`None`）。
+                let mut outputs: Vec<Option<PatchOutput>> = Vec::with_capacity(templates.len());
                 let initial_totals = templates
                     .iter()
                     .zip(states.iter())
@@ -204,6 +225,10 @@ impl SpatialRuntime {
                     .zip(&steps)
                     .enumerate()
                 {
+                    if !self.forcing_mask[index] {
+                        outputs.push(None);
+                        continue;
+                    }
                     let binding = StandardLctStepBinding {
                         forcing: step.forcing,
                         seconds_of_day,
@@ -243,10 +268,10 @@ impl SpatialRuntime {
                             }),
                     };
                     let scale = optimizer.as_ref().map(|optimizer| optimizer.scale(index));
-                    outputs.push(
+                    outputs.push(Some(
                         crate::advance_patch(*step, template, &binding, state, scale)
                             .with_context(|| format!("patch {index}"))?,
-                    );
+                    ));
                 }
                 // `CNFireArea` 的 `tsoi17 = forc_t(i)` 是整列赋值：一步之后所有 patch 都是最后一个
                 // 跑火灾的 patch 的值（续跑里写的就是它）。
@@ -256,13 +281,19 @@ impl SpatialRuntime {
                 // `CoLM.F90:559-563`：陆面步之后、`hist_out` 之前汇流；预热期不汇流。
                 if !clock.is_spinup {
                     if let Some((river, included)) = self.river.as_mut() {
+                        // 被遮蔽的 patch 不在 `filter_rnof` 里（`included` 已与上掩膜），值不用。
                         let runoff = outputs
                             .iter()
-                            .map(|output| output.view().total_runoff_mm_s())
+                            .map(|output| {
+                                output
+                                    .as_ref()
+                                    .map_or(0.0, |output| output.view().total_runoff_mm_s())
+                            })
                             .collect::<Vec<_>>();
                         // `CoLMDRIVER` 把 `fevpg_fld`/`qinfl_fld` 写进 `flood_evap/infil_patch`。
                         if let Some(flood) = river.flood.as_mut() {
                             for (index, output) in outputs.iter().enumerate() {
+                                let Some(output) = output else { continue };
                                 let (evaporation, infiltration) =
                                     output.view().flood_exchange_mm_s();
                                 flood.evap_mm_s[index] = evaporation;
@@ -386,15 +417,22 @@ impl SpatialRuntime {
                     }
                 }
                 let forcings = steps.iter().map(|step| step.forcing).collect::<Vec<_>>();
-                crate::optimize_baseflow(
-                    optimizer.as_mut(),
-                    steps[0],
-                    &forcings,
-                    &next_states,
-                    &outputs,
-                    time_step_seconds,
-                )?;
-                let views = outputs.iter().map(PatchOutput::view).collect::<Vec<_>>();
+                if optimizer.is_some() {
+                    // 入口已拒绝"优化 + 遮蔽"，这里每个 patch 都有输出。
+                    let present = outputs.iter().flatten().collect::<Vec<_>>();
+                    crate::optimize_baseflow(
+                        optimizer.as_mut(),
+                        steps[0],
+                        &forcings,
+                        &next_states,
+                        &present,
+                        time_step_seconds,
+                    )?;
+                }
+                let views = outputs
+                    .iter()
+                    .map(|output| output.as_ref().map(PatchOutput::view))
+                    .collect::<Vec<_>>();
                 let cache = self.tracer_forcing.as_ref().map(|forcing| forcing.cache());
                 on_step(
                     &steps,
@@ -418,7 +456,8 @@ fn push_history(
     history: &mut super::history::SpatialHistory,
     templates: &[StandardLctRestartTemplate],
     states: &[StandardLctSnowSoilState],
-    outputs: &[crate::PatchOutput],
+    // 被强迫缺测遮蔽的 patch 没有输出（`None`）。
+    outputs: &[Option<crate::PatchOutput>],
     steps: &[PointRuntimeStep],
     initial_totals: &[f64],
     time_step_seconds: f64,
@@ -432,32 +471,48 @@ fn push_history(
         )
     };
     for range in history.elements.ranges.clone() {
+        // 网格元诊断只用未遮蔽的 patch（`filter = patchmask .and. forcmask_pch`）；
+        // 全元都被遮蔽时上游 `CYCLE`，诊断留 `spval`。
         let inputs = range
             .clone()
-            .map(|index| {
-                (
-                    crate::history::patch_surface_input(
-                        &templates[index],
-                        &outputs[index],
-                        reference(index),
-                    ),
-                    history.elements.fractions[index],
-                )
+            .filter_map(|index| {
+                outputs[index].as_ref().map(|output| {
+                    (
+                        crate::history::patch_surface_input(
+                            &templates[index],
+                            output,
+                            reference(index),
+                        ),
+                        history.elements.fractions[index],
+                    )
+                })
             })
             .collect::<Vec<_>>();
-        let element =
-            colm_core::history_diagnostics(crate::history::element_surface_input(&inputs)?)
-                .context("cannot recompute the element near-surface diagnostics")?;
-        history.session.set_element_surface(Some(element));
+        let element = if inputs.is_empty() {
+            None
+        } else {
+            Some(
+                colm_core::history_diagnostics(crate::history::element_surface_input(&inputs)?)
+                    .context("cannot recompute the element near-surface diagnostics")?,
+            )
+        };
+        history.session.set_element_surface(element);
         for index in range {
-            if let Some(path) = crate::push_patch_history(
-                &mut history.session,
-                steps[index].clock.end_time,
-                &templates[index],
-                &states[index],
-                &outputs[index],
-                reference(index),
-            )? {
+            let end = steps[index].clock.end_time;
+            let pushed = match &outputs[index] {
+                Some(output) => crate::push_patch_history(
+                    &mut history.session,
+                    end,
+                    &templates[index],
+                    &states[index],
+                    output,
+                    reference(index),
+                )?,
+                None => history
+                    .session
+                    .push_masked(end, &templates[index], &states[index])?,
+            };
+            if let Some(path) = pushed {
                 history.files.push(path);
             }
         }
@@ -495,7 +550,7 @@ fn patch_step(
         solar_in_w_m2: forcing.solarin,
         cosine_zenith,
         air_density_kg_m3: forcing.rhoair,
-        boundary_layer_height_m: None,
+        boundary_layer_height_m: forcing.hpbl,
     };
     PointRuntimeStep {
         clock,
@@ -528,6 +583,8 @@ pub struct SpatialRuntimeConfig {
     pub history_frequency: colm_hist::schedule::HistoryFrequency,
     pub history_grouping: colm_hist::schedule::HistoryGrouping,
     pub forcing: super::forcing::GriddedForcingConfig,
+    /// `DEF_Forcing_Interp_Method = 'bilinear'`：强迫到 patch 的映射用 `build_bilinear`。
+    pub bilinear: bool,
 }
 
 impl SpatialRuntimeConfig {
@@ -535,7 +592,7 @@ impl SpatialRuntimeConfig {
         let case = crate::read_document(case_namelist, "case")?;
         let forcing_namelist =
             std::path::PathBuf::from(crate::required_string(&case, "DEF_forcing_namelist")?);
-        let forcing = crate::read_document(&forcing_namelist, "forcing")?;
+        let forcing_document = crate::read_document(&forcing_namelist, "forcing")?;
         // 空间强迫里还没移植的分支：一次列全，默认拒绝（原来它们会被悄悄忽略）。
         let interpolation = match case.get("DEF_Forcing_Interp_Method") {
             Some(colm_namelist::Value::Str(text)) => text.trim().to_owned(),
@@ -543,19 +600,19 @@ impl SpatialRuntimeConfig {
             None => "arealweight".to_owned(),
         };
         anyhow::ensure!(
+            matches!(interpolation.as_str(), "arealweight" | "bilinear"),
+            "unknown DEF_Forcing_Interp_Method = {interpolation:?}; upstream accepts 'arealweight' \
+             and 'bilinear'"
+        );
+        // `build_bilinear` 已移植，但上游 latlon（FLAT_SPMD）内核在建双线性映射时段错误，
+        // 还没有可逐位对照的参照，先拒绝。
+        anyhow::ensure!(
             interpolation == "arealweight",
-            "DEF_Forcing_Interp_Method = {interpolation:?} is not ported to the Rust spatial \
-             runtime (only 'arealweight'); run this case with --engine fortran"
+            "DEF_Forcing_Interp_Method = 'bilinear' is not verified against the Fortran kernel yet \
+             (the upstream latlon kernel crashes while building the bilinear mapping); run this \
+             case with --engine fortran"
         );
         for (key, what) in [
-            (
-                "DEF_USE_ClimForcing_for_Spinup",
-                "climatological spin-up forcing",
-            ),
-            (
-                "DEF_USE_CBL_HEIGHT",
-                "the boundary-layer-height forcing (variable 9)",
-            ),
             ("DEF_USE_Forcing_Downscaling", "forcing downscaling"),
             (
                 "DEF_USE_Forcing_Downscaling_Simple",
@@ -575,6 +632,12 @@ impl SpatialRuntimeConfig {
             } else {
                 crate::simulation_date(&case, "spinup")?
             };
+        let mut forcing = super::forcing::GriddedForcingConfig::from_document(&forcing_document)?;
+        forcing.clim_spinup =
+            crate::optional_bool_or(&case, "DEF_USE_ClimForcing_for_Spinup", false)?;
+        if crate::optional_bool_or(&case, "DEF_USE_CBL_HEIGHT", false)? {
+            forcing.enable_cbl(&forcing_document)?;
+        }
         Ok(Self {
             start,
             end: crate::simulation_date(&case, "end")?,
@@ -594,7 +657,8 @@ impl SpatialRuntimeConfig {
             co2_scenario: crate::co2_scenario(&case)?,
             history_frequency: crate::history_frequency(&case)?,
             history_grouping: crate::history_grouping(&case)?,
-            forcing: super::forcing::GriddedForcingConfig::from_document(&forcing)?,
+            forcing,
+            bilinear: interpolation == "bilinear",
         })
     }
 

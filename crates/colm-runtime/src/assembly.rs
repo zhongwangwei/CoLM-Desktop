@@ -862,6 +862,9 @@ impl MonthlyLeafAreaIndex {
 #[derive(Debug, Clone)]
 pub struct StandardLctRestartTemplate {
     pub patch: usize,
+    /// 本进程内的 patch 序号（0 起）：单点就是 `patch`，空间运行是跨块的装配顺序
+    /// （上游 worker 的局部 `ipatch - 1`）。只用于诊断报告。
+    pub worker_patch: usize,
     pub physics: LandPhysicsParameters,
     /// 重启里的 `patchtype`。本分支要求它是 0（土壤），但 `emg` 的推法要按它判，
     /// 所以留着而不是当常量写死。
@@ -1495,6 +1498,7 @@ fn assemble(
         tracer: None,
         patch_fraction: 1.0,
         patch,
+        worker_patch: patch,
         patch_type: i32::try_from(patch_type).context("patchtype is outside the kernel's range")?,
         // 入参重启里没有 `rss` 时按 `spval` 处理 —— 与上游"起跑时是缺测值"一致。
         soil_surface_resistance_s_m: surface_diagnostics
@@ -1550,6 +1554,11 @@ fn assemble(
 }
 
 impl StandardLctRestartTemplate {
+    /// 收支报告里的 `ipatch`（1 起）。
+    pub fn worker_ipatch(&self) -> i32 {
+        i32::try_from(self.worker_patch + 1).unwrap_or(i32::MAX)
+    }
+
     /// 装上月度 LAI 重读（`DEF_LAI_MONTHLY = .true.`）。
     ///
     /// 做成 builder 而不是 `assemble_*` 的参数：装配函数只认重启与物理参数，
@@ -2755,6 +2764,48 @@ impl StandardLctRestartTemplate {
             if let Some(override_) = self.surface_diagnostics.splice(name, self.patch, value)? {
                 overrides.push(override_);
             }
+        }
+        Ok(overrides)
+    }
+
+    /// 起跑重启里本 patch 的地表诊断量（`tref`、`qref`、`z0m`、`emis`、`coszen` 等）；
+    /// 重启里没有该变量时为 `None`。被强迫缺测遮蔽的 patch 一直停在这些值上。
+    pub fn restart_diagnostic(&self, name: &str) -> Option<f64> {
+        self.surface_diagnostics.input_value(name, self.patch)
+    }
+
+    /// 起跑重启里本 patch `t_soisno` 的雪段原值。状态里的空雪槽装配时清成了 0，而上游
+    /// 重启里空雪槽是 −999；被遮蔽的 patch 不走一步，`a_t_soisno` 累加的就是这些原值。
+    pub fn restart_snow_temperature(&self) -> Result<Vec<f64>> {
+        let width = self.snow_slots() + self.soil_layers();
+        let start = self.patch * width;
+        self.restart_columns
+            .temperature_k
+            .get(start..start + self.snow_slots())
+            .map(<[f64]>::to_vec)
+            .with_context(|| format!("the restart's t_soisno has no snow span for patch {}", self.patch))
+    }
+
+    /// 被强迫缺测遮蔽的 patch（`forcmask_pch = .false.`）的续跑替换项：`CoLMDRIVER` 整步跳过它，
+    /// 只有 `LAI_readin` 照常改 `tlai`/`tsai`，其余变量都是起跑重启里的原值（不替换即保持）。
+    pub fn masked_overrides(&self, state: &StandardLctSnowSoilState) -> Result<Vec<RestartOverride>> {
+        let mut overrides = Vec::with_capacity(2);
+        for (name, source, value) in [
+            (
+                "tlai",
+                &self.restart_columns.temporal_leaf_area_index,
+                state.energy.temporal_canopy.leaf_area_index,
+            ),
+            (
+                "tsai",
+                &self.restart_columns.temporal_stem_area_index,
+                state.energy.temporal_canopy.stem_area_index,
+            ),
+        ] {
+            overrides.push(RestartOverride::new(
+                name,
+                replaced(source, self.patch, name, value)?,
+            ));
         }
         Ok(overrides)
     }

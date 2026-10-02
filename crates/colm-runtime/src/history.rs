@@ -2387,6 +2387,14 @@ pub fn set_lct_forcing_mirrors(
         );
         sink.scalar(name, record, value)?;
     }
+    // `DEF_USE_CBL_HEIGHT`：`acc1d (forc_hpbl, a_hpbl)`（`MOD_Vars_1DAccFluxes.F90:2067-2069`）。
+    if let Some(hpbl) = reference.boundary_layer_height_m {
+        ensure!(
+            hpbl.is_finite(),
+            "the history value for xy_hpbl is not finite"
+        );
+        sink.scalar("xy_hpbl", record, hpbl)?;
+    }
     // `xy_solarin` 单独走"四次 `acc1d` 进同一个累加器"的路径，不能并进上面的循环：
     // 上游 `MOD_Vars_1DAccFluxes.F90:2060-2063` 四个波段分别累加，而 `nac` 每步
     // 只加一次（`:2038`）。只有**第一项**算一步，后三项只进和 —— 见
@@ -2524,6 +2532,25 @@ pub fn set_lct_snow_state(
     state: &StandardLctSnowSoilState,
     ground_temperature_k: f64,
 ) -> Result<()> {
+    set_lct_snow_state_with(
+        sink,
+        record,
+        template,
+        state,
+        ground_temperature_k,
+        state.snow.temperature_k.clone(),
+    )
+}
+
+/// 同 [`set_lct_snow_state`]，雪段温度由调用方给（被遮蔽的 patch 用重启原值）。
+fn set_lct_snow_state_with(
+    sink: &mut impl HistorySink,
+    record: usize,
+    template: &StandardLctRestartTemplate,
+    state: &StandardLctSnowSoilState,
+    ground_temperature_k: f64,
+    snow_temperature_k: Vec<f64>,
+) -> Result<()> {
     // **必须在积雪入口也写一次**：`standard_lct_snow_soil_step` 才是通用入口
     // （无雪起步的算例也走它，见它的文档），只补 `set_lct_state` 会让
     // `f_vegwp` 整列留填充值 —— 实测就是这样漏了一整轮。
@@ -2533,7 +2560,7 @@ pub fn set_lct_snow_state(
         record,
         template,
         &[
-            state.snow.temperature_k.clone(),
+            snow_temperature_k,
             state.snow.liquid_water_kg_m2.clone(),
             state.snow.ice_water_kg_m2.clone(),
         ],
@@ -2662,6 +2689,9 @@ pub struct HistorySession {
     element_surface: Option<colm_core::HistoryDiagnostics>,
     /// `DEF_USE_Dynamic_Wetland`：`f_wetwat` 改写 `wdsrf` 的平均（由 `push_lct_snow` 现场给出）。
     dynamic_wetland: bool,
+    /// `forcmask_pch`（空间算例、强迫有缺测时）：为假的 patch 不进任何网格聚合
+    /// （上游各 `filter` 都与上了它）。`None` 即全部有效。
+    forcing_mask: Option<Vec<bool>>,
     /// `DEF_USE_Dynamic_Lake`：多写 `f_dz_lake`、不写 `f_lake_deficit`（由 `push_lake` 现场给出）。
     dynamic_lake: bool,
     /// 空间算例：写文件时按面积聚合到经纬网格（`HistForm = 'Gridded'`）。
@@ -2731,6 +2761,101 @@ impl HistorySession {
     /// 运行终点的示踪物/CH4 累加器快照（见 `tracer_raw_at_end` 字段）；写续跑旁车的一方取走。
     pub fn tracer_raw_handle(&self) -> crate::tracer_sidecar::RawTracersHandle {
         std::sync::Arc::clone(&self.tracer_raw_at_end)
+    }
+
+    /// `forcmask_pch`：被强迫缺测遮蔽的 patch 在写网格/向量均值时整个跳过。
+    pub fn set_forcing_mask(&mut self, mask: Option<Vec<bool>>) {
+        self.forcing_mask = mask;
+    }
+
+    /// 被强迫缺测遮蔽的 patch（`forcmask_pch = .false.`）的一步累加。
+    ///
+    /// `CoLMDRIVER` 整步跳过它，但 `accumulate_fluxes` 照常对整个数组 `acc1d`：
+    /// - 通量数组在它上面一直是分配时的 `spval`，`acc1d` 跳过 —— 这里不交；
+    /// - 时间变量（水、温度、雪、`lai`/`sai`、`sigf`/`green`、`alb` …）是起跑重启里的值，照常累加；
+    /// - `tref`/`qref`/`z0m`/`emis` 是重启里的模块数组值，`t2m_wmo = tref`；
+    /// - `forc_rain`/`forc_snow` 在它上面是 0；
+    /// - `coszen` 停在重启值（`read_forcing` 跳过了它），所以 `alb` 按它的正负计入；
+    /// - 近地面相似诊断取网格元的值（只用未遮蔽 patch 聚合，`MOD_Vars_1DAccFluxes.F90:2690-2790`），
+    ///   全元都被遮蔽时 `CYCLE`，留 `spval`。
+    ///
+    /// 这些值只进续跑旁车；写历史时被遮蔽 patch 整个跳过（各 `filter` 都与上了 `forcmask_pch`）。
+    pub fn push_masked(
+        &mut self,
+        end: CalendarTime,
+        template: &StandardLctRestartTemplate,
+        state: &StandardLctSnowSoilState,
+    ) -> Result<Option<PathBuf>> {
+        ensure!(
+            matches!(template.patch_type, 0 | 2),
+            "patch {} (patchtype {}) lies entirely on missing forcing cells; only soil and wetland \
+             patches can be masked by missing forcing in the Rust runtime so far",
+            template.patch,
+            template.patch_type
+        );
+        let restart = |name: &str| {
+            template
+                .restart_diagnostic(name)
+                .with_context(|| format!("the restart has no {name} for masked patch {}", template.patch))
+        };
+        let (tref, qref, z0m, emis, coszen) = (
+            restart("tref")?,
+            restart("qref")?,
+            restart("z0m")?,
+            restart("emis")?,
+            restart("coszen")?,
+        );
+        let ground = state.surface_temperature_k();
+        let snow_temperature = template.restart_snow_temperature()?;
+        self.plant_hydraulics = template.plant_hydraulics();
+        self.variably_saturated = template.physics.variably_saturated_flow;
+        self.dynamic_wetland = template.physics.dynamic_wetland;
+        let element_surface = self.element_surface;
+        self.push(end, |accumulator| {
+            set_lct_snow_state_with(accumulator, 0, template, state, ground, snow_temperature)?;
+            for (name, value) in [
+                ("ldew", state.energy.leaf.canopy_water.total_mm),
+                ("sigf", state.energy.canopy.vegetation_free_fraction),
+                ("green", template.vegetation_greenness),
+                ("tref", tref),
+                ("qref", qref),
+                ("z0m", z0m),
+                ("emis", emis),
+                ("xy_rain", 0.0),
+                ("xy_snow", 0.0),
+            ] {
+                accumulator.scalar(name, 0, value)?;
+            }
+            set_lct_albedo(accumulator, 0, &state.energy, coszen)?;
+            if let Some(element) = element_surface.as_ref() {
+                for (name, value) in [
+                    ("zol", element.zol),
+                    ("rib", element.bulk_richardson),
+                    ("ustar", element.friction_velocity_m_s),
+                    ("qstar", element.humidity_scale),
+                    ("tstar", element.temperature_scale_k),
+                    ("fm", element.momentum_similarity),
+                    ("fh", element.heat_similarity),
+                    ("fq", element.moisture_similarity),
+                    ("us10m", element.wind_10m_eastward_m_s),
+                    ("vs10m", element.wind_10m_northward_m_s),
+                    ("fm10m", element.momentum_at_10m),
+                    ("ustar2", element.similarity_friction_velocity_m_s),
+                ] {
+                    accumulator.scalar(name, 0, value)?;
+                }
+            }
+            set_sidecar_only(
+                accumulator,
+                template,
+                &state.soil_water,
+                state.lake.as_ref(),
+                tref,
+                state.energy.leaf.canopy_water.rain_mm,
+                state.energy.leaf.canopy_water.snow_mm,
+                None,
+            )
+        })
     }
 
     /// 本步各 patch 共用的网格元近地面诊断（多 patch 单点）；`None` 时逐 patch 重算。
@@ -2823,6 +2948,7 @@ impl HistorySession {
             tracer_raw_at_end: std::sync::Arc::default(),
             element_surface: None,
             dynamic_wetland: false,
+            forcing_mask: None,
             dynamic_lake: false,
             grid: None,
             gridded_names: Vec::new(),
@@ -3658,6 +3784,13 @@ impl HistorySession {
         states: &mut [colm_core::StandardLctSnowSoilState],
     ) -> Result<Option<PathBuf>> {
         use colm_core::tracer::hist;
+        // `forcmask_pch`：示踪物历史的各 `filter` 都与上它（`MOD_Tracer_Hist.F90:229/261/644/657`）。
+        let forcing_mask = self.forcing_mask.clone();
+        let forcmask_ok = |patch: usize| {
+            forcing_mask
+                .as_ref()
+                .is_none_or(|mask| mask.get(patch).copied().unwrap_or(true))
+        };
         let Some(tracer) = self.tracer_variables.as_mut() else {
             return Ok(None);
         };
@@ -3763,7 +3896,7 @@ impl HistorySession {
                     let keep = |p: usize| {
                         variable
                             .patch_filter
-                            .admits(tracer.patch_types[p], true, true)
+                            .admits(tracer.patch_types[p], forcmask_ok(p), true)
                     };
                     let ref_ratio = descriptor.ref_ratio;
                     let elements = columns;
@@ -3867,8 +4000,8 @@ impl HistorySession {
                             .as_deref()
                             .context("a tracer history needs every patch to carry tracer state")?;
                         let patch_type = tracer.patch_types[patch];
-                        let land = hist::PatchFilter::Land.admits(patch_type, true, true);
-                        let patch_ok = variable.patch_filter.admits(patch_type, true, true);
+                        let land = hist::PatchFilter::Land.admits(patch_type, forcmask_ok(patch), true);
+                        let patch_ok = variable.patch_filter.admits(patch_type, forcmask_ok(patch), true);
                         let pairs = layered.then(|| hist::soisno_layer_pairs(itrc, &track.state));
                         let term = (!layered).then(|| {
                             hist::patch_term(variable, descriptor, itrc, &track.state, nac)
@@ -3910,7 +4043,7 @@ impl HistorySession {
                     let patch_ok =
                         variable
                             .patch_filter
-                            .admits(tracer.patch_types[patch], true, true);
+                            .admits(tracer.patch_types[patch], forcmask_ok(patch), true);
                     if layered {
                         let values = hist::single_point_soisno(itrc, &track.state, nac, patch_ok);
                         let base =
@@ -4193,8 +4326,13 @@ impl HistorySession {
             if self.tracer_time_step_seconds.is_some() {
                 buffer.enable_windows();
             }
+            // `DEF_USE_CBL_HEIGHT`：`acc1d (forc_hpbl, a_hpbl)` → `f_xy_hpbl`（`MOD_Hist.F90:538`）。
+            if means.iter().any(|means| means.offered.contains("xy_hpbl")) {
+                buffer.declare(&["xy_hpbl"])?;
+            }
             self.open = Some((record.suffix.clone(), buffer));
         }
+        let forcing_mask = self.forcing_mask.clone();
         let (_, buffer) = self.open.as_mut().expect("just opened");
         buffer.set_time(
             record.record,
@@ -4216,6 +4354,13 @@ impl HistorySession {
             buffer.set_window(record.record, steps as f64 * deltim, end_minutes)?;
         }
         for (patch, means) in means.iter().enumerate() {
+            // 被强迫缺测遮蔽的 patch 不进任何聚合（值与分母都没有它）。
+            if forcing_mask
+                .as_ref()
+                .is_some_and(|mask| !mask.get(patch).copied().unwrap_or(true))
+            {
+                continue;
+            }
             if means_are_split(self.accumulators.len()) {
                 buffer.select_patch(Some(patch))?;
             }

@@ -1263,3 +1263,65 @@ fn unassigned_saturated_fraction_still_counts_in_the_grid_denominator() {
     assert!(accumulator.offered.contains("frcsat"));
     assert!(!accumulator.sums.contains_key("frcsat"));
 }
+
+/// 被强迫缺测遮蔽的 patch：只累加上游 `acc1d` 在它身上真正累加到的量（时间变量与重启里的
+/// 诊断值），通量一概不交（上游那里一直是 `spval`）。实测 `g1fmm` 的旁车：79 个通量为 `spval`、
+/// 状态与诊断量照常累加。
+#[test]
+fn a_masked_patch_accumulates_states_and_restart_diagnostics_only() {
+    let root = temp_dir("masked");
+    let fixture = SyntheticRestart::write_with_snow(
+        root.join("restart"),
+        SyntheticSnow {
+            depth_m: 0.15,
+            water_equivalent_kg_m2: 45.0,
+            ground_snow_fraction: 1.0,
+            temperature_k: 268.0,
+        },
+    )
+    .unwrap();
+    let template = assemble_standard_lct_snow_template(
+        &RestartStateFiles {
+            constant: fixture.constant.block.clone(),
+            time: fixture.time.block.clone(),
+        },
+        1,
+        physics(),
+    )
+    .unwrap();
+    let state = template.snow_state();
+    let window = SimulationWindow {
+        start_year: 2008,
+        start_julian_day: 1,
+        start_seconds: 0,
+        end_year: 2008,
+        end_julian_day: 1,
+        end_seconds: 3_600,
+        timestep_seconds: 1800,
+    };
+    let mut session = HistorySession::new(
+        dimensions(),
+        site(),
+        window,
+        HistoryFrequency::Daily,
+        HistoryGrouping::Month,
+        root.join("out"),
+        "masked",
+    )
+    .unwrap();
+    let end = colm_core::CalendarTime {
+        year: 2008,
+        julian_day: 1,
+        seconds: 1800,
+    };
+    session.push_masked(end, &template, &state).unwrap();
+    let windows = session.window_handle();
+    let windows = windows.lock().unwrap();
+    let sums = &windows[0].sums;
+    for kept in ["t_soisno", "wliq_soisno", "scv", "lai", "tref", "qref", "z0m", "emis", "xy_rain"] {
+        assert!(sums.contains_key(kept), "{kept} should accumulate on a masked patch");
+    }
+    for skipped in ["fsena", "rnof", "xy_t", "trad", "wat", "h2osoi"] {
+        assert!(!sums.contains_key(skipped), "{skipped} must stay spval on a masked patch");
+    }
+}

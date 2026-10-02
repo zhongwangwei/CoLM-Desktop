@@ -1023,6 +1023,7 @@ fn advance_patch(
         if let Some((tracer, _)) = &template.tracer {
             crate::tracer::glacier_end_of_step(
                 tracer,
+                template.worker_ipatch(),
                 state,
                 &output,
                 deltim,
@@ -1110,6 +1111,7 @@ fn advance_patch(
                 if let Some((tracer, _)) = &template.tracer {
                     crate::tracer::lake_end_of_step(
                         tracer,
+                        template.worker_ipatch(),
                         state,
                         &output,
                         sub.physics.timestep_seconds,
@@ -1174,6 +1176,7 @@ fn advance_patch(
             if let (Some((tracer, _)), Some(total)) = (&template.tracer, tracer_initial_total) {
                 crate::tracer::end_of_step(
                     tracer,
+                    template.worker_ipatch(),
                     template.patch_type,
                     state,
                     &output,
@@ -1199,6 +1202,7 @@ fn advance_patch(
         if let Some((tracer, _)) = &template.tracer {
             crate::tracer::lake_end_of_step(
                 tracer,
+                template.worker_ipatch(),
                 state,
                 &output,
                 deltim,
@@ -1256,6 +1260,7 @@ fn advance_patch(
     if let (Some((tracer, _)), Some(total)) = (&template.tracer, tracer_initial_total) {
         crate::tracer::end_of_step(
             tracer,
+            template.worker_ipatch(),
             template.patch_type,
             state,
             &output,
@@ -1308,13 +1313,13 @@ fn baseflow_scaled(
 /// `is_spinup` 取本步的值 —— 上游在调用**之后**才判断要不要进入下一轮或结束预热
 /// （`:723-736`），所以每一轮的最后一步仍算预热，跨年更新会发生在它上面。
 /// `isendofyear` 的步长是 `INT(deltim)`。
-fn optimize_baseflow(
+fn optimize_baseflow<O: std::borrow::Borrow<PatchOutput>>(
     optimizer: Option<&mut baseflow_optimizer::BaseflowOptimizer>,
     step: PointRuntimeStep,
     // 每个 patch 的强迫：单点只有一份（所有 patch 共用），空间算例每个 patch 一份。
     forcings: &[RuntimeForcing],
     states: &[StandardLctSnowSoilState],
-    outputs: &[PatchOutput],
+    outputs: &[O],
     time_step_seconds: f64,
 ) -> Result<()> {
     let Some(optimizer) = optimizer else {
@@ -1324,7 +1329,7 @@ fn optimize_baseflow(
         return Ok(());
     }
     for (index, output) in outputs.iter().enumerate() {
-        let output = output.view();
+        let output = output.borrow().view();
         let forcing = forcings[index.min(forcings.len() - 1)];
         optimizer.accumulate(
             index,

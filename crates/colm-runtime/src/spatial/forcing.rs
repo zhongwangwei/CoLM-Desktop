@@ -219,6 +219,8 @@ pub struct GriddedForcingConfig {
     pub height_humidity_m: f64,
     /// `DEF_forcing%HEIGHT_mode`（ERA5、ERA5LAND 的 vendor namelist 写 `'relative'`）。
     pub height_mode: colm_core::ObservationHeightMode,
+    /// `DEF_USE_ClimForcing_for_Spinup`（在 case namelist 里，由运行配置填）。
+    pub clim_spinup: bool,
 }
 
 impl GriddedForcingConfig {
@@ -374,18 +376,74 @@ impl GriddedForcingConfig {
             height_temperature_m: real(forcing, "DEF_forcing%HEIGHT_T")?,
             height_humidity_m: real(forcing, "DEF_forcing%HEIGHT_Q")?,
             height_mode: crate::physics::observation_height_mode(forcing)?,
+            clim_spinup: false,
         })
     }
 
     /// `trim(dir_forcing)//metfilename(year, month, day, var_i)`（`MOD_UserSpecifiedForcing.F90:178-685`）。
     pub(super) fn file_name(&self, year: i32, month: i32, variable: usize) -> PathBuf {
+        self.file_name_for(year, month, variable, false)
+    }
+
+    /// `DEF_USE_CBL_HEIGHT`（`init_user_specified_forcing`）：`NVAR + 1`，第 9 个变量的前缀、变量名、
+    /// 插值、步长与偏移取 `DEF_forcing%CBL_*`。
+    ///
+    /// 上游没给它的 `timelog` 赋值（未初始化），只有 `uniform`/`coszen` 插值会读它，所以这两种拒绝。
+    /// 文件名见 [`Self::file_name_for`]。
+    pub fn enable_cbl(&mut self, forcing: &Document) -> Result<()> {
+        ensure!(
+            self.variables.len() == 8,
+            "the boundary-layer-height forcing goes after the eight standard variables"
+        );
+        let interpolation = match string(forcing, "DEF_forcing%CBL_tintalgo")?.trim() {
+            "linear" => Interpolation::Linear,
+            "nearest" => Interpolation::Nearest,
+            other => bail!(
+                "DEF_forcing%CBL_tintalgo = {other:?} is not supported: upstream never sets \
+                 timelog for the boundary-layer height, and only 'linear' and 'nearest' do not \
+                 read it"
+            ),
+        };
+        self.variables.push(Variable {
+            prefix: string(forcing, "DEF_forcing%CBL_fprefix")?,
+            name: string(forcing, "DEF_forcing%CBL_vname")?,
+            forward: false,
+            interpolation,
+            dtime: i32::try_from(integer_or_default(forcing, "DEF_forcing%CBL_dtime")?)?,
+            offset: i32::try_from(integer_or_default(forcing, "DEF_forcing%CBL_offset")?)?,
+        });
+        Ok(())
+    }
+
+    /// `metreadLBUB` 的那一处：预热期且开了 `DEF_USE_ClimForcing_for_Spinup` 时年份串换成 `'clim'`。
+    /// 其余调用（`metread_latlon`、缺测值、示踪物强迫）不传 `is_spinup`，用真实年份。
+    pub(super) fn file_name_for(
+        &self,
+        year: i32,
+        month: i32,
+        variable: usize,
+        spinup: bool,
+    ) -> PathBuf {
         let directory = self.directory.to_string_lossy();
+        let y = if spinup && self.clim_spinup {
+            "clim".to_owned()
+        } else {
+            format!("{year:04}")
+        };
+        // `DEF_USE_CBL_HEIGHT` 的第 9 个变量：不论数据集，一律按月文件
+        // `/<CBL_fprefix>_<年>_<月>_boundary_layer_height.nc4`（`MOD_UserSpecifiedForcing.F90:686-697`）。
+        if variable == 8 {
+            return PathBuf::from(format!(
+                "{directory}/{}_{y}_{month:02}_boundary_layer_height.nc4",
+                self.variables[variable].prefix.trim()
+            ));
+        }
         PathBuf::from(format!(
             "{directory}{}",
-            metfilename(
+            metfilename_with_year(
                 self.dataset.trim(),
                 self.variables[variable].prefix.trim(),
-                year,
+                &y,
                 month,
                 variable
             )
@@ -707,6 +765,7 @@ fn qian_shortwave(solarin: f64) -> ShortwaveForcing {
 
 /// `metfilename`：各数据集的文件命名，`variable` 是 0 起的变量下标（上游 `var_i - 1`）。
 /// 数据集名已在读配置时核对过。
+#[cfg(test)]
 pub(super) fn metfilename(
     dataset: &str,
     prefix: &str,
@@ -714,7 +773,18 @@ pub(super) fn metfilename(
     month: i32,
     variable: usize,
 ) -> String {
-    let y = format!("{year:04}");
+    metfilename_with_year(dataset, prefix, &format!("{year:04}"), month, variable)
+}
+
+/// 同 [`metfilename`]，年份串由调用方给：`DEF_USE_ClimForcing_for_Spinup` 预热期是 `'clim'`
+/// （`MOD_UserSpecifiedForcing.F90:172-176`）。
+pub(super) fn metfilename_with_year(
+    dataset: &str,
+    prefix: &str,
+    y: &str,
+    month: i32,
+    variable: usize,
+) -> String {
     let m = format!("{month:02}");
     match dataset {
         "PRINCETON" => format!("/{prefix}{y}-{y}.nc"),
@@ -775,6 +845,8 @@ pub struct CellForcing {
     pub solld: Vec<f64>,
     pub pco2m: Vec<f64>,
     pub po2m: Vec<f64>,
+    /// `forc_xy_hpbl`（`DEF_USE_CBL_HEIGHT`，`block_data_copy (forcn(9), …)`，不做预处理）；没开时为空。
+    pub hpbl: Vec<f64>,
 }
 
 #[derive(Debug, Clone)]
@@ -805,6 +877,8 @@ pub struct GriddedForcing {
     missing: Option<f64>,
     /// `forc_xy_sols/soll/solsd/solld` 是常驻的块数据：跳过的格子保留上一步的值（起初为 0）。
     split: Vec<ShortwaveForcing>,
+    /// 本步是否在预热期（`read_forcing (…, is_spinup)`），决定 `metreadLBUB` 读不读 `clim` 文件。
+    spinup: bool,
 }
 
 impl GriddedForcing {
@@ -904,7 +978,13 @@ impl GriddedForcing {
             time_step_seconds,
             lat_window: (lat_min, lat_max),
             lon_window: (lon_min, lon_max),
+            spinup: false,
         })
+    }
+
+    /// 本步是否在预热期（`DEF_USE_ClimForcing_for_Spinup` 时预热期读 `clim` 文件）。
+    pub fn set_spinup(&mut self, spinup: bool) {
+        self.spinup = spinup;
     }
 
     /// `has_missing_value` 的初始化（`MOD_Forcing.F90:196-225`）：缺测值是第一个变量在起始时刻那个
@@ -1093,6 +1173,7 @@ impl GriddedForcing {
             frl: values[7].clone(),
             us,
             vs,
+            hpbl: values.get(8).cloned().unwrap_or_default(),
             ..CellForcing::default()
         };
         // 全波段短波拆分：QIAN 用 CLM4.5 的经验多项式（`MOD_Forcing.F90:568-591`），
@@ -1210,7 +1291,7 @@ impl GriddedForcing {
 
     /// `ncio_read_block_time`：读第 `record` 条（1 起）在用到的格子上的值。
     fn read_record(&self, year: i32, month: i32, ivar: usize, record: usize) -> Result<Vec<f64>> {
-        let path = self.config.file_name(year, month, ivar);
+        let path = self.config.file_name_for(year, month, ivar, self.spinup);
         self.read_cells(&path, self.config.variables[ivar].name.trim(), record)
     }
 
@@ -1276,6 +1357,17 @@ fn integer(document: &Document, field: &str) -> Result<i64> {
         Some(Value::Int(number)) => Ok(*number),
         Some(other) => bail!("{field} must be an integer, got {other:?}"),
         None => bail!("{field} is missing"),
+    }
+}
+
+fn integer_or_default(document: &Document, field: &str) -> Result<i64> {
+    match value(document, field) {
+        Some(Value::Int(number)) => Ok(*number),
+        Some(other) => bail!("{field} must be an integer, got {other:?}"),
+        None => match colm_schema::find(field).map(|f| &f.default) {
+            Some(colm_schema::Default::Integer(number)) => Ok(*number),
+            _ => bail!("{field} is missing"),
+        },
     }
 }
 
@@ -1360,6 +1452,8 @@ pub struct PatchForcing {
     pub hgt_q: f64,
     /// `forc_xy_solarin` 映射到 patch 的值（history 的 `f_xy_solarin` 由它聚合）。
     pub solarin: f64,
+    /// `forc_hpbl`（`DEF_USE_CBL_HEIGHT`）。
+    pub hpbl: Option<f64>,
 }
 
 /// `read_forcing` 在 patch 上的那一半（不降尺度）：逐量 `grid2pset`，再截断 `forc_t` 并算 `forc_rhoair`。
@@ -1401,6 +1495,7 @@ pub fn map_to_patches(
                 hgt_t: constant(heights.height_temperature_m),
                 hgt_q: constant(heights.height_humidity_m),
                 solarin: map(&cells.solarin),
+                hpbl: (!cells.hpbl.is_empty()).then(|| map(&cells.hpbl)),
             }
         })
         .collect()

@@ -51,25 +51,34 @@ impl HistoryGridConfig {
 /// `irrigated` 是 `DEF_USE_IRRIGATION` 时每个 patch 的 `filter_irrig`（`patchclass == 12` 且首个 PFT
 /// `>= npcropmin` 且为偶数，即灌溉型作物）；不开灌溉时上游用的是未初始化的 `filter_irrig`
 /// （upstream-bugs 第 37 条），这里按全假写 0。
+#[allow(clippy::too_many_arguments)]
 pub fn build_history_grid(
     config: &HistoryGridConfig,
     forcing_grid: &LatLonGrid,
     topology: &SpatialTopology,
     patch_types: &[i32],
     patch_mask: &[bool],
+    forcing_mask: &[bool],
     crop_classes: Option<&[usize]>,
     irrigated: Option<&[bool]>,
 ) -> Result<HistoryGrid> {
     let patches = topology.patch_count();
     ensure!(
-        patch_types.len() == patches && patch_mask.len() == patches,
-        "one patch type and one patch mask per patch are needed"
+        patch_types.len() == patches && patch_mask.len() == patches && forcing_mask.len() == patches,
+        "one patch type, one patch mask and one forcing mask per patch are needed"
     );
     // 过滤里的 `patchmask` 只在 `DEF_URBAN_ONLY` 与 2m WMO 虚拟 patch 时为假；这两样都没移植。
     ensure!(
         patch_mask.iter().all(|&mask| mask),
         "the Rust gridded history assumes every patch is unmasked (no DEF_URBAN_ONLY or 2m WMO patches)"
     );
+    // 各静态面积的 `filter` 在强迫有缺测时都与上 `forcmask_pch`（`MOD_Hist.F90:399/429/462/874/4501`）；
+    // 没缺测时 `forcing_mask` 全真。
+    let patch_mask = &patch_mask
+        .iter()
+        .zip(forcing_mask)
+        .map(|(&mask, &active)| mask && active)
+        .collect::<Vec<_>>();
     let grid = if config.as_forcing {
         forcing_grid.clone()
     } else {
@@ -136,7 +145,7 @@ pub fn build_history_grid(
         }
     }
     let area_wetland = sumarea(&|patch| patch_types[patch] == 2 && patch_mask[patch]);
-    let area_lake = sumarea(&|patch| patch_types[patch] == 4);
+    let area_lake = sumarea(&|patch| patch_types[patch] == 4 && forcing_mask[patch]);
     let mut first_record_statics = Vec::new();
     if let Some(classes) = crop_classes {
         ensure!(

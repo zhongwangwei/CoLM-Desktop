@@ -284,8 +284,11 @@ impl TracerRuntime {
 
 /// 一个土壤/湿地 patch 步末的示踪物记账（`CoLMMAIN.F90:1528-1561` 与 `tracer_report`）：一阶衰减、
 /// 收支检查、history 累加，再按 `DEF_TRACER_*_ABORT_NBAD` 决定是否中止。
+#[allow(clippy::too_many_arguments)]
 pub fn end_of_step(
     runtime: &TracerRuntime,
+    // `ipatch`：本进程内的 patch 序号（1 起），只进收支报告。
+    ipatch: i32,
     patch_type: i32,
     state: &mut colm_core::StandardLctSnowSoilState,
     output: &colm_core::StandardLctSnowSoilOutput,
@@ -342,7 +345,7 @@ pub fn end_of_step(
             &track.snapshot,
             &mut tracker,
             &conservation::BalanceCheckInput {
-                ipatch: 1,
+                ipatch,
                 snl,
                 deltim,
                 patchtype: Some(patch_type),
@@ -408,6 +411,8 @@ fn report_step(runtime: &TracerRuntime) -> Result<()> {
 /// `patchtype > 2` 的清零之前调，这里也在 `clear_non_soil_patch` 之前。
 pub fn glacier_end_of_step(
     runtime: &TracerRuntime,
+    // `ipatch`：本进程内的 patch 序号（1 起），只进收支报告。
+    ipatch: i32,
     state: &mut colm_core::StandardLctSnowSoilState,
     output: &colm_core::GlacierStepOutput,
     deltim: f64,
@@ -437,7 +442,7 @@ pub fn glacier_end_of_step(
             &mut track.snapshot,
             &mut tracker,
             &special_patches::GlacierInput {
-                ipatch: 1,
+                ipatch,
                 deltim,
                 prc_rain: precipitation.convective_rain_kg_m2_s,
                 prl_rain: precipitation.large_scale_rain_kg_m2_s,
@@ -475,6 +480,8 @@ pub fn glacier_end_of_step(
 #[allow(clippy::too_many_arguments)]
 pub fn lake_end_of_step(
     runtime: &TracerRuntime,
+    // `ipatch`：本进程内的 patch 序号（1 起），只进收支报告。
+    ipatch: i32,
     state: &mut colm_core::StandardLctSnowSoilState,
     output: &colm_core::LakeStepOutput,
     deltim: f64,
@@ -506,7 +513,7 @@ pub fn lake_end_of_step(
             &mut track.snapshot,
             &mut tracker,
             &special_patches::WaterbodyInput {
-                ipatch: 1,
+                ipatch,
                 snl: state.snow.layer_count,
                 deltim,
                 forc_rain: precipitation.convective_rain_kg_m2_s

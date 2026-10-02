@@ -734,6 +734,10 @@ fn run_spatial_segment(
                 )
                 .with_context(|| format!("cannot assemble patch {patch} of block {block}"))?,
             );
+            let worker_patch = templates.len() - 1;
+            if let Some(template) = templates.last_mut() {
+                template.worker_patch = worker_patch;
+            }
         }
         let constant = colm_init::RestartFile::open(&files.constant)?;
         coordinates.extend(
@@ -786,6 +790,60 @@ fn run_spatial_segment(
     }
     let grid = GriddedForcing::open_grid(&config.forcing, config.start)?;
     let writes_history = config.history_frequency != colm_hist::schedule::HistoryFrequency::None;
+    let mut mapping = if config.bilinear {
+        AreaWeightedMapping::build_bilinear(
+            &grid,
+            &topology.pixel,
+            &topology.cells,
+            &topology.shared_fraction,
+            &coordinates,
+        )?
+    } else {
+        AreaWeightedMapping::build(
+            &grid,
+            &topology.pixel,
+            &topology.cells,
+            &topology.shared_fraction,
+        )?
+    };
+    let cells = mapping
+        .parts
+        .iter()
+        .flatten()
+        .map(|part| (part.ilon, part.ilat))
+        .collect::<Vec<_>>();
+    let mut forcing = GriddedForcing::new(
+        config.forcing.clone(),
+        grid.clone(),
+        cells,
+        config.timestep_seconds as i32,
+    )?;
+    // `DEF_forcing%has_missing_value`：映射去掉起始那条记录里缺测的格子（`set_missing_value`），
+    // 足迹全是缺测格的 patch 的 `forcmask_pch` 为假：`CoLMDRIVER` 整步跳过它，汇流与各 history
+    // `filter` 都与上它（见 `SpatialRuntime`、`HistorySession::push_masked`）。
+    let forcing_mask = match forcing.missing_field(config.start)? {
+        Some((missing, field, nlon)) => {
+            mapping.set_missing_value(|ilon, ilat| field[ilat * nlon + ilon], missing)
+        }
+        None => vec![true; coordinates.len()],
+    };
+    let masked = forcing_mask.iter().filter(|&&active| !active).count();
+    if masked > 0 {
+        // 这几支上游对被遮蔽 patch 的处理没有对齐或没有定义，先拒绝：
+        // - BGC：`f_manunitro` 与 CROP 的逐 PFT 历史 `filter` 没与上 `forcmask_pch`，
+        //   火灾的 `tsoi17` 广播也会跨过被跳过的 patch；
+        // - LULCC：年末合并要用被遮蔽 patch 的状态；
+        // - 漫滩回馈：被跳过的 patch 的 `flood_evap/infil_patch` 停在上次发布的值。
+        ensure!(
+            templates.iter().all(|template| template.bgc.is_none())
+                && !logical_field(document, "DEF_USE_LULCC")?
+                && !logical_field(document, "DEF_GridRiverLake_FloodFeedback")?,
+            "{masked} patch(es) lie entirely on missing forcing cells (forcmask_pch = .false.); \
+             masking them is ported only without BGC, LULCC and grid flood feedback, run this case \
+             with --engine fortran or enlarge the forcing coverage"
+        );
+    }
+    // 静态面积（`landarea` 等）的过滤也与上 `forcmask_pch`，所以 history 网格在掩膜之后建。
     let mut history_grid = if writes_history && !vector_history {
         let patch_types = templates
             .iter()
@@ -820,49 +878,20 @@ fn run_spatial_segment(
             &topology,
             &patch_types,
             &patch_mask,
+            &forcing_mask,
             crop_classes.as_deref(),
             irrigated.as_deref(),
         )?)
     } else {
         None
     };
-    let mut mapping = AreaWeightedMapping::build(
-        &grid,
-        &topology.pixel,
-        &topology.cells,
-        &topology.shared_fraction,
-    )?;
-    let cells = mapping
-        .parts
-        .iter()
-        .flatten()
-        .map(|part| (part.ilon, part.ilat))
-        .collect::<Vec<_>>();
-    let mut forcing = GriddedForcing::new(
-        config.forcing.clone(),
-        grid,
-        cells,
-        config.timestep_seconds as i32,
-    )?;
-    // `DEF_forcing%has_missing_value`：映射去掉起始那条记录里缺测的格子（`set_missing_value`），
-    // 足迹全是缺测格的 patch 的 `forcmask_pch` 为假 —— 上游整步跳过它们、并从累加与 history 里
-    // 排除，这一支还没移植，遇到就拒绝。
-    if let Some((missing, field, nlon)) = forcing.missing_field(config.start)? {
-        let mask = mapping.set_missing_value(|ilon, ilat| field[ilat * nlon + ilon], missing);
-        let masked = mask.iter().filter(|&&keep| !keep).count();
-        ensure!(
-            masked == 0,
-            "{masked} patch(es) lie entirely on missing forcing cells (forcmask_pch = .false.); \
-             skipping masked patches is not ported to the Rust spatial runtime yet, run this case \
-             with --engine fortran or enlarge the forcing coverage"
-        );
-    }
     let mut runtime = SpatialRuntime::new(
         config.clock()?,
         forcing,
         mapping,
         coordinates,
         config.co2_scenario,
+        forcing_mask.clone(),
     )?;
     runtime.apply_mapped_heights(&mut templates)?;
     if let (Some(tracer), Some(forcing_config)) = (tracer_runtime.as_ref(), tracer_forcing_config) {
@@ -901,10 +930,12 @@ fn run_spatial_segment(
         logical_field(document, "DEF_GridRiverLake_FloodplainStorageFix")?,
     )?;
     let routing = colm_runtime::river::network::RunoffRouting::build(&network, &topology)?;
+    // `filter_rnof`/`filter_basic`：`patchtype < 99 .and. patchmask .and. forcmask_pch`。
     let runoff_filter = templates
         .iter()
         .zip(&patch_mask)
-        .map(|(template, &mask)| template.patch_type < 99 && mask)
+        .zip(&forcing_mask)
+        .map(|((template, &mask), &active)| template.patch_type < 99 && mask && active)
         .collect::<Vec<_>>();
     // 网格 history 多一个静态场与 6 个河道量（`MOD_Hist.F90:4749-4790`）。
     let history_grid = history_grid.take().map(|mut grid| {
@@ -1257,6 +1288,11 @@ fn run_spatial_segment(
         },
     };
 
+    if let Some(history) = history.as_mut() {
+        history
+            .session
+            .set_forcing_mask((masked > 0).then(|| forcing_mask.clone()));
+    }
     let periodic = topology
         .blocks
         .iter()
@@ -1345,6 +1381,9 @@ fn run_spatial_segment(
                 .zip(outputs)
                 .zip(steps)
                 .map(|((state, output), step)| {
+                    let Some(output) = output else {
+                        return Ok(RestartSnapshot::masked());
+                    };
                     let mut snapshot =
                         RestartSnapshot::new(state, *output, step.surface_cosine_zenith)?;
                     // LULCC 年末那一步没重读 LAI（`defer_lai_refresh_at`）。
@@ -3583,9 +3622,42 @@ struct RestartSnapshot {
     diagnostics: SurfaceDiagnosticsRow,
     /// 这一步末尾是否重读了 LAI（见 `EvolvedStepOutput::lai_refreshed`）。
     lai_refreshed: bool,
+    /// 被强迫缺测遮蔽、整步跳过的 patch：续跑里只替换 `tlai`/`tsai`，上面三项不用。
+    masked: bool,
 }
 
 impl RestartSnapshot {
+    /// 被强迫缺测遮蔽的 patch：没有步输出，写回时保留起跑重启里的值。
+    fn masked() -> Self {
+        Self {
+            matric_potential_mm: Vec::new(),
+            hydraulic_conductivity_mm_s: Vec::new(),
+            diagnostics: SurfaceDiagnosticsRow {
+                cosine_zenith: f64::NAN,
+                wet_snow_fraction: f64::NAN,
+                tref: f64::NAN,
+                qref: f64::NAN,
+                stomatal_resistance: None,
+                soil_surface_resistance: None,
+                trad: f64::NAN,
+                emis: f64::NAN,
+                z0m: f64::NAN,
+                zol: f64::NAN,
+                rib: f64::NAN,
+                ustar: f64::NAN,
+                qstar: f64::NAN,
+                tstar: f64::NAN,
+                fm: f64::NAN,
+                fh: f64::NAN,
+                fq: f64::NAN,
+                gs0sun: None,
+                gs0sha: None,
+            },
+            lai_refreshed: false,
+            masked: true,
+        }
+    }
+
     fn new(
         state: &StandardLctSnowSoilState,
         output: PatchStepOutput<'_>,
@@ -3597,6 +3669,7 @@ impl RestartSnapshot {
                 hydraulic_conductivity_mm_s: output.water.soil.hydraulic_conductivity_mm_s.clone(),
                 diagnostics: SurfaceDiagnosticsRow::from_lct(&output.energy, cosine_zenith)?,
                 lai_refreshed: false,
+                masked: false,
             },
             // 冰川分支不调 `soilwater`：`smp`/`hk` 保持重启里的值。
             PatchStepOutput::Glacier(output) => Self {
@@ -3604,6 +3677,7 @@ impl RestartSnapshot {
                 hydraulic_conductivity_mm_s: state.soil_water.hydraulic_conductivity_mm_s.clone(),
                 diagnostics: SurfaceDiagnosticsRow::from_glacier(&output.thermal, cosine_zenith),
                 lai_refreshed: false,
+                masked: false,
             },
             // 湖同样不调 `soilwater`。
             // 城市：透水地面的 `WATER_2014` 已把 `smp`/`hk` 写进状态。
@@ -3612,12 +3686,14 @@ impl RestartSnapshot {
                 hydraulic_conductivity_mm_s: state.soil_water.hydraulic_conductivity_mm_s.clone(),
                 diagnostics: SurfaceDiagnosticsRow::from_urban(output, cosine_zenith),
                 lai_refreshed: false,
+                masked: false,
             },
             PatchStepOutput::Lake(output) => Self {
                 matric_potential_mm: state.soil_water.matric_potential_mm.clone(),
                 hydraulic_conductivity_mm_s: state.soil_water.hydraulic_conductivity_mm_s.clone(),
                 diagnostics: SurfaceDiagnosticsRow::from_lake(&output.thermal, cosine_zenith),
                 lai_refreshed: false,
+                masked: false,
             },
         })
     }
@@ -3667,6 +3743,10 @@ fn write_evolved_restart(
     // 主重启。`t_grnd` 是雪层合并之后重取的那个（`CoLMMAIN.F90:1452`）。
     let mut lists = Vec::with_capacity(templates.len());
     for ((template, state), snapshot) in templates.iter().zip(states).zip(snapshots) {
+        if snapshot.masked {
+            lists.push(template.masked_overrides(state)?);
+            continue;
+        }
         let mut overrides = template.evolved_snow_overrides(
             state,
             EvolvedStepOutput {
@@ -3703,7 +3783,7 @@ fn write_evolved_restart(
     // PFT 子网格另有一份时间重启（`<case>_restart_pft_<date>_…nc`），与主重启同目录。
     if let Some(pft_source) = &pft_source {
         let mut lists = Vec::with_capacity(templates.len());
-        for (template, state) in templates.iter().zip(states) {
+        for ((template, state), snapshot) in templates.iter().zip(states).zip(snapshots) {
             // 空间算例的非土壤 patch 没有 PFT（区间为空），不改 PFT 重启。
             if template.pft.is_none() {
                 lists.push(Vec::new());
@@ -3713,6 +3793,12 @@ fn write_evolved_restart(
                 anyhow::bail!("patch {} has no PFT subgrid to write back", template.patch);
             };
             let mut overrides = pft_template.overrides(pft);
+            // 被遮蔽的 patch：只有 `LAI_readin` 改过的 `tlai_p`/`tsai_p`。
+            if snapshot.masked {
+                overrides.retain(|o| matches!(o.name.as_str(), "tlai_p" | "tsai_p"));
+                lists.push(overrides);
+                continue;
+            }
             // `WRITE_PFTimeVariables` 在 BGC 下把 `WRITE_BGCPFTimeVariables` 写进同一份文件。
             if let Some(bgc) = &state.bgc {
                 overrides.extend(colm_runtime::bgc::BgcTemplate::overrides(bgc, pft_source));

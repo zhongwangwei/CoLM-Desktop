@@ -28548,3 +28548,81 @@ Rust 原来在两处都把活跃写死成"土壤或湿地"：
 - 去掉了 `GroupBy::Day` 及三处"not ported"分支。
 
 验证：`cargo clippy -p colm-runtime --lib --bins -D warnings` 无告警。
+
+## 第 523 轮：强迫缺测遮蔽的 patch（`forcmask_pch`）
+
+`DEF_forcing%has_missing_value` 时，`set_missing_value` 把起始记录里的缺测格从映射里去掉，足迹全在缺测格上的 patch 的 `forcmask_pch` 为假。
+区域强迫（CLDAS、CMFD、TPMFD 等）的海岸格很常见。Rust 原来遇到这类 patch 就拒绝整个算例。
+
+**上游行为**（用 `g1fmm` 实测反推：g1f 底 + 合成 CMFD 在区域西南角挖掉 3×2 个格子，7 个 patch 被遮蔽，月历史、5 天）：
+- `CoLMDRIVER.F90:78` 整步跳过：状态不动。续跑文件里 7 个 patch 的**全部**变量都与起跑重启相同。
+- `accumulate_fluxes` 照常对整个数组 `acc1d`，history 旁车里被遮蔽 patch 有两类：
+  - 79 个通量为 `spval`（从没被赋值，`acc1d` 跳过）；
+  - 52 个照常累加：
+    - 时间变量（水、温度、雪、`lai/sai`、`sigf/green`、`vegwp` 等）；
+    - 重启里的诊断值：`tref/qref/z0m/emis`，以及 `t2m_wmo = tref`；
+    - `rain/snow = 0`；
+    - `alb`：`coszen` 停在重启值，因此 `nac_dt = 240`；
+    - 近地面相似诊断（`ustar/tstar/qstar/zol/rib/fm/fh/fq/us10m/vs10m/fm10m/ustar2`）：取网格元的值，网格元只用未遮蔽 patch 聚合（`MOD_Vars_1DAccFluxes.F90:2690-2790`）。
+  - 一个细节：空雪槽的 `t_soisno` 是重启里的 −999，而 Rust 组装状态时把它清成了 0。
+- 各 history `filter` 都与上了 `forcmask_pch`，被遮蔽 patch 不进分子也不进分母。涉及：
+  - 主历史、示踪物历史、河道 `filter_basic`；
+  - 静态面积 `landarea/area_wetland/area_lake`；
+  - 汇流 `filter_rnof`。
+
+**Rust 的实现**：
+- `SpatialRuntime` 带 `forcing_mask`：被遮蔽 patch 不调 `advance_patch`，输出为 `None`；
+- 汇流的 `included`、河道 history 的 basic 过滤、`build_history_grid` 的静态面积都与上掩膜；
+- `HistorySession::push_masked`：只交上面那 52 类量。雪段温度用重启原值（`restart_snow_temperature`），重启诊断值取 `restart_diagnostic`；
+- 写均值时整个跳过被遮蔽 patch；示踪物历史的 `admits` 传入掩膜；
+- 续跑快照：被遮蔽 patch 只替换 `tlai/tsai`（以及 PFT 的 `tlai_p/tsai_p`，`LAI_readin` 对所有 patch 生效），其余保留起跑重启的值。
+
+**仍然拒绝**（遮蔽 patch 与下列开关同开时）：
+- BGC：`f_manunitro` 与 CROP 逐 PFT 历史的 `filter` 没与上 `forcmask_pch`，被遮蔽 patch 的陈旧值会漏进去；火灾 `tsoi17` 也有广播问题；
+- LULCC；
+- 漫滩回馈；
+- 基流优化：上游 `BaseFlow_Optimize` 会读被遮蔽 patch 从未赋值的通量；
+- 被遮蔽的 patch 不是土壤或湿地（冰川、湖、城市的累加清单还没实测）。
+
+**验收**：
+- `g1fm`（逐日历史）：history 2 份、restart 5 份逐位一致；
+- `g1fmm`（月历史，旁车带累加量）：history 2 份、restart 5 份逐位一致；
+- `g1fmmt`（`g1fmm` + 溶质示踪物）：history 3 份、restart 5 份逐位一致；
+- `g1fmi`（`g1fm` + 同位素不分馏）：两侧都在第 193 步以 `TRC_SIG hard failure` 停机，报告行逐字相同（`worst_abs= 0.19186E-08 @ipatch= 26`）；
+- 新增单测 `a_masked_patch_accumulates_states_and_restart_diagnostics_only`。
+
+`g1fmi` 顺带暴露了一个诊断问题：Rust 示踪物收支报告里的 `ipatch` 写死成 1（单点遗留），空间算例停机时报错的 patch 不对。
+现在模板带 `worker_patch`：空间按跨块装配顺序，对应上游 worker 的局部下标。修好后报告行与上游逐字相同。
+
+## 第 524 轮：气候态预热强迫、边界层高度强迫
+
+**`DEF_USE_ClimForcing_for_Spinup`**：上游只在 `metreadLBUB` 调 `metfilename` 时传 `is_spinup`，预热期的年份串换成 `'clim'`。
+`metread_latlon`、缺测值初始化、示踪物强迫都不传 `is_spinup`，仍用真实年份。Rust 的做法：
+- `GriddedForcing` 每步记下 `is_spinup`；
+- 只有读上下界记录时用 `file_name_for(…, spinup)`。
+
+**`DEF_USE_CBL_HEIGHT`**（空间）：`NVAR + 1`，第 9 个变量的前缀、变量名、插值、步长与偏移取 `DEF_forcing%CBL_*`。
+- **文件名**：不论数据集，一律是 `/<CBL_fprefix>_<年>_<月>_boundary_layer_height.nc4`（`MOD_UserSpecifiedForcing.F90:686-697`）。我起初以为 ERA5 系的后缀表没有第 9 项，读了这段才知道它被统一覆盖了。
+- **上游的两处未定义行为**：
+  - `timelog(9)` 从未赋值，只有 `uniform`/`coszen` 插值会读它，所以 Rust 拒绝这两种插值；
+  - `dtime(:) = DEF_forcing%dtime(:)` 两边长度 9 对 8，但第 9 项随后被 `CBL_dtime` 覆盖，不影响结果。
+- **数据流**：`forc_xy_hpbl` 直接拷第 9 个变量（不做预处理），经 `grid2pset` 得到 `forc_hpbl`，进 `boundary_layer_height_m`。
+- **history**：上游 `acc1d (forc_hpbl, a_hpbl)` → `f_xy_hpbl`，而 Rust 原来**单点和空间都没写**这个量（单点 CBL 只验证过物理）。现在在 `set_lct_forcing_mirrors` 里累加，有值时声明。
+
+**验收**：
+- `g1fcs`：g1f + 合成的 `clim` 文件，温度 +2 K、降水 ×1.5，前 2 天预热，`spinup_repeat = 1`。
+  - history 2 份、restart 5 份逐位一致；
+  - 地温与不用气候态的 `g1f_CMFD` 最多差 0.097 K；
+  - 反证：挪走 `clim` 温度文件后，Rust 报打不开 `…_clim01.nc4`。
+- `g1fcbl`：g1f + 合成的 `blh` 变量。
+  - history 2 份、restart 5 份逐位一致；
+  - `f_xy_hpbl` 两侧都在 948.98–1069.04 m。
+- 回归：`g1f_ERA5LAND`、`g1f_CMFD`、`g1ch4`、`g1fft`、`u1vt`、`g3t` 全部逐位一致。
+
+**双线性插值（`DEF_Forcing_Interp_Method = 'bilinear'`）**：
+- `AreaWeightedMapping::build_bilinear` 已按 `MOD_SpatialMapping.F90:537-989` 移植：
+  - 4 份依次是西北、东北、西南、东南；
+  - 权重按 `arclen` 反比，GIMPLE 为 `FMA(sin, sin, cos·cos·cos)`；
+  - 区域网格边外取最近一列；
+  - 加了单测。
+- 但上游 latlon（FLAT_SPMD）内核在 "Building bilinear interpolation" 之后段错误，没有可对照的参照。所以入口暂时仍拒绝，原因在查。

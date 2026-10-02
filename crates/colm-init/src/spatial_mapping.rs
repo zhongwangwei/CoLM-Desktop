@@ -8,7 +8,7 @@ use anyhow::{ensure, Result};
 
 use crate::spatial_grid::{
     areaquad, find_nearest_east, find_nearest_north, find_nearest_south, find_nearest_west,
-    lon_between_ceil, lon_between_floor, LatLonGrid,
+    lon_between_ceil, lon_between_floor, normalize_longitude, LatLonGrid,
 };
 
 /// 一个 set 覆盖的一个网格格子（0 起下标）与重叠面积。
@@ -140,6 +140,133 @@ impl AreaWeightedMapping {
         Ok(Self { parts, area })
     }
 
+    /// `build_bilinear (fgrid, pixelset)`（`MOD_SpatialMapping.F90:537-989`，`DEF_Forcing_Interp_Method
+    /// = 'bilinear'`）：每个 set 固定 4 份，依次是西北、东北、西南、东南四个格心，份面积是 set 面积
+    /// （像元 `areaquad` 从 0 起相加、乘 `pctshared`）乘南北权重再乘东西权重。权重按 set 中心到两侧格心的
+    /// 大圆距离反比（`arclen`）。`coordinates[iset]` 是 set 中心 `(rlon, rlat)`（弧度，即 `patchlonr/latr`）。
+    ///
+    /// 四份不合并：两侧取到同一个格心时（落在格心带之外、或只有一行/一列），它照样占两份、另一份权重为 0。
+    pub fn build_bilinear(
+        grid: &LatLonGrid,
+        pixel: &PixelAxes,
+        cells: &[Vec<(i32, i32)>],
+        shared_fraction: &[f64],
+        coordinates: &[(f64, f64)],
+    ) -> Result<Self> {
+        ensure!(
+            cells.len() == shared_fraction.len() && cells.len() == coordinates.len(),
+            "the bilinear mapping needs one shared fraction and one centre per pixel set"
+        );
+        let nlat = grid.rlat.len();
+        let nlon = grid.nlon();
+        ensure!(nlat > 0 && nlon > 0, "the forcing grid is empty");
+        let degrees = |radians: f64| radians * 180.0 / std::f64::consts::PI;
+        let mut parts = Vec::with_capacity(cells.len());
+        let mut area = Vec::with_capacity(cells.len());
+        for ((set_cells, &shared), &(rlon, rlat)) in cells.iter().zip(shared_fraction).zip(coordinates)
+        {
+            // 南北：格心按纬度单调，找夹住 set 中心的两行。
+            let (yn, ys) = if grid.rlat[0] > grid.rlat[nlat - 1] {
+                let mut ilat = 0;
+                while rlat < grid.rlat[ilat] && ilat < nlat - 1 {
+                    ilat += 1;
+                }
+                if rlat >= grid.rlat[ilat] {
+                    (ilat.saturating_sub(1), ilat)
+                } else {
+                    (nlat - 1, nlat - 1)
+                }
+            } else {
+                let mut ilat = nlat - 1;
+                while rlat < grid.rlat[ilat] && ilat > 0 {
+                    ilat -= 1;
+                }
+                if rlat >= grid.rlat[ilat] {
+                    ((ilat + 1).min(nlat - 1), ilat)
+                } else {
+                    (0, 0)
+                }
+            };
+            let (nwgt, swgt) = if yn != ys {
+                let distn = arclen(rlat, rlon, grid.rlat[yn], rlon);
+                let dists = arclen(rlat, rlon, grid.rlat[ys], rlon);
+                (dists / (dists + distn), distn / (dists + distn))
+            } else {
+                (1.0, 0.0)
+            };
+            // 东西：找第一个使 set 中心落在 [格心 iwest, 格心 iwest+1) 的 iwest（经度归一到 [-180, 180)）。
+            let lon = normalize_longitude(degrees(rlon))?;
+            let mut found = None;
+            for iwest in 0..nlon {
+                let lonw = normalize_longitude(degrees(grid.rlon[iwest]))?;
+                let ieast = (iwest + 1) % nlon;
+                let lone = normalize_longitude(degrees(grid.rlon[ieast]))?;
+                if lon_between_floor(lon, lonw, lone) {
+                    found = Some((iwest, ieast, lonw, lone));
+                    break;
+                }
+            }
+            let Some((iwest, ieast, lonw, lone)) = found else {
+                anyhow::bail!("no forcing grid column brackets the pixel-set centre at {lon} degrees");
+            };
+            let (mut xw, mut xe) = (iwest, ieast);
+            // 区域网格最后一列与第一列之间不连通：取近的那一列，不插值。
+            if iwest == nlon - 1
+                && nlon > 1
+                && lon_between_floor(grid.lon_e[nlon - 1], lonw, grid.lon_w[0])
+            {
+                let mut diffw = lon - lonw;
+                if diffw < 0.0 {
+                    diffw += 360.0;
+                }
+                let mut diffe = lone - lon;
+                if diffe < 0.0 {
+                    diffe += 360.0;
+                }
+                if diffw > diffe {
+                    (xw, xe) = (ieast, ieast);
+                } else {
+                    (xw, xe) = (iwest, iwest);
+                }
+            }
+            let (wwgt, ewgt) = if xw != xe {
+                let distw = arclen(rlat, rlon, rlat, grid.rlon[xw]);
+                let diste = arclen(rlat, rlon, rlat, grid.rlon[xe]);
+                (diste / (distw + diste), distw / (distw + diste))
+            } else {
+                (1.0, 0.0)
+            };
+            let mut areathis = 0.0;
+            for &(px, py) in set_cells {
+                ensure!(
+                    px >= 1
+                        && py >= 1
+                        && (px as usize) <= pixel.lon_w.len()
+                        && (py as usize) <= pixel.lat_s.len(),
+                    "mesh pixel ({px}, {py}) is outside the pixel axes"
+                );
+                let (ilon, ilat) = ((px - 1) as usize, (py - 1) as usize);
+                areathis += areaquad(
+                    pixel.lat_s[ilat],
+                    pixel.lat_n[ilat],
+                    pixel.lon_w[ilon],
+                    pixel.lon_e[ilon],
+                );
+            }
+            areathis *= shared;
+            let list = vec![
+                MappingPart { ilon: xw, ilat: yn, area: areathis * nwgt * wwgt },
+                MappingPart { ilon: xe, ilat: yn, area: areathis * nwgt * ewgt },
+                MappingPart { ilon: xw, ilat: ys, area: areathis * swgt * wwgt },
+                MappingPart { ilon: xe, ilat: ys, area: areathis * swgt * ewgt },
+            ];
+            // `areapset = sum(areapart)`：从 0 起依次相加。
+            area.push(list.iter().fold(0.0, |sum, part| sum + part.area));
+            parts.push(list);
+        }
+        Ok(Self { parts, area })
+    }
+
     /// `grid2pset`：`value(ilon, ilat)` 取网格值；面积为 0 的 set 得 `spval`。
     /// `set_missing_value (gdata, missing_value, pmask)`：网格值等于 `missing` 的份面积清零，
     /// `areapset` 按剩下的份从 0 起重算；返回 `pmask = areapset > 0`。
@@ -198,3 +325,15 @@ fn insert_sorted(list: &mut Vec<MappingPart>, x: usize, y: usize, area: f64) {
 #[cfg(test)]
 #[path = "spatial_mapping_tests.rs"]
 mod spatial_mapping_tests;
+
+/// `arclen`（`MOD_Utils.F90:1077-1092`，km）：GIMPLE 是
+/// `tmp = .FMA (sin lat1, sin lat2, (cos lat1 * cos lat2) * cos (lon1 - lon2))`，再
+/// `MIN_EXPR (MAX_EXPR (tmp, -1), 1)`（不换成 `clamp`：两者对 NaN 的处理不同）。
+#[allow(clippy::manual_clamp)]
+fn arclen(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
+    let (s1, c1) = lat1.sin_cos();
+    let (s2, c2) = lat2.sin_cos();
+    let tmp = s1.mul_add(s2, c1 * c2 * (lon1 - lon2).cos());
+    let tmp = tmp.max(-1.0).min(1.0);
+    6.37122e3 * tmp.acos()
+}
