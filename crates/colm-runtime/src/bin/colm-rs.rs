@@ -463,16 +463,9 @@ fn run_spatial(
     // 都已移植。还没接的组合在下面逐条拒绝，免得悄悄丢账。
     let tracer_set = colm_runtime::tracer::tracer_set_from_document(&document)?;
     // CH4 provider：与单点同一条 `soil_step`。空间内核编进了网格河湖，所以 `routing`/`hybrid` 可用；
-    // `satellite`（GIEMS）由 `methane_giems` 读入。`only_wetland` 与稻田会改 history 的活跃掩膜
-    // （`methane_patch_active_mask`），网格写出尚未接。
-    if let Some(setup) = colm_runtime::methane::setup_from_document(&document, true)? {
-        let m = &setup.params.methane;
-        ensure!(
-            !m.only_wetland && !m.enable_rice_paddy,
-            "spatial methane with only_wetland or enable_rice_paddy (history active mask) is not \
-             ported; run this case with --engine fortran"
-        );
-    }
+    // `satellite`（GIEMS）由 `methane_giems` 读入；`only_wetland` 与稻田改的活跃掩膜由 `soil_step`
+    // 每步写进 `MethanePatch::history_active`。这里先解析一遍配置，坏配置在入口就停。
+    colm_runtime::methane::setup_from_document(&document, true)?;
     // 输运示踪物跨 LULCC：陆面状态见 `lulcc_land_tracers`（SAT/MEC），强迫缓存见 `lulcc_forcing_cache`。
     let methane_tracer = tracer_set.as_ref().is_some_and(|set| {
         set.tracers

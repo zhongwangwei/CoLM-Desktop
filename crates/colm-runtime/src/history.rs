@@ -3964,9 +3964,14 @@ impl HistorySession {
             let mut per_patch = Vec::with_capacity(patches);
             for (patch, state) in states.iter().enumerate() {
                 let patch_type = tracer.patch_types[patch];
-                // `methane_patch_active_mask`：单点里不活跃的 patch 计数为 0，与掩膜等价；网格运行在
-                // 入口拒绝了 `only_wetland` 与稻田，于是活跃 = 湿地或土壤。
-                let active = patch_type == 0 || patch_type == 2;
+                // `methane_patch_active_mask`：湿地、（非 `only_wetland` 时的）土壤与有稻田的土壤。
+                let active = state
+                    .bgc
+                    .as_deref()
+                    .and_then(|bgc| bgc.methane.as_deref())
+                    .map_or(patch_type == 0 || patch_type == 2, |methane| {
+                        methane.history_active_or_default(patch_type)
+                    });
                 let land = patch_type < 99;
                 let acc = state
                     .bgc

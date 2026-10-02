@@ -28502,3 +28502,40 @@ Rust 在 `lulcc_transition` 里从旧年份续跑读出缓存、计数与标识�
 - 单点的 `wetland_frac_per_patch` 确实是 1：如果 Fortran 单点算成 0，湿地会分到 0，两侧就会不一致。
 
 `tc4g`/`tc4wg` 的土壤 patch 在 W = 1 时分到 0，与 wetwat 基线相同，这两组只验证读入与映射路径。
+
+## 第 521 轮：甲烷 history 的活跃掩膜（`only_wetland`、稻田）
+
+**问题**：上游 `methane_patch_active_mask` 定义了"活跃甲烷 patch"：
+- 湿地总是活跃；
+- 不开 `only_wetland` 时，土壤也活跃；
+- 开了稻田（只在 CROP 内核里生效）时，稻田 PFT 份额超过 0.01 的土壤也活跃。
+
+这个掩膜同时决定两件事：
+- `a_methane_acc_num` 计不计数（AccFlux）；
+- 网格写出前 9 个"活跃均值"变量的 `sumarea`（Hist）。
+
+Rust 原来在两处都把活跃写死成"土壤或湿地"：
+- 空间入口直接拒绝了 `only_wetland` 和稻田；
+- 单点虽然没拒绝，但 `only_wetland` 下的土壤 patch 照样计数，与上游不一致（之前没有这类单点算例，所以没暴露）。
+
+**修改**：
+- `soil_step` 开头按上游的规则算出掩膜，写进 `MethanePatch::history_active`（不进重启，每步重算；还没走过一步时按默认处理）；
+- `CoreAccumulator::accumulate` 和网格 history 都改用它；
+- 空间入口不再拒绝 `only_wetland`/`enable_rice_paddy`，只先解析一遍配置。
+
+**验收**（全部逐位一致）：
+
+| 算例 | 内容 | 掩膜的作用 |
+|---|---|---|
+| `tc4ow` | 单点土壤 + `only_wetland` | 土壤不活跃：`f_methane_surf_flux_tot_active`/`f_totcol_methane` 为 spval，`f_methane_surf_flux_tot` 为 0 |
+| `tc4wlow` | 单点湿地 + `only_wetland` | 湿地照常 |
+| `rc4ow` | 单点稻田（crop 内核）+ `only_wetland` | 稻田土壤仍活跃，24 份 history 一致 |
+| `g1ch4ow` | 空间 + `only_wetland` | history 3 份、restart 9 份 |
+| `g1irrch4r` | 空间 CROP + 灌溉 + 稻田甲烷（g1irr 底，latlon-crop 内核，湖泊不产甲烷） | 第一次跑空间 CROP 甲烷即一致 |
+| `g1irrch4ro` | 同上 + `only_wetland` | 32 格土壤通量全为 0，稻田通量全非零 |
+
+**回归**：
+- 单点甲烷 `tc4 tc4w tc4wl tc4lk lk36ch4 tc4ws tc4y tc4f rc4`；
+- 空间 `g1ch4 g1ch4rt g1ch4g`。
+
+`tmp/ch4case.sh` 现在可以用 `BASE`/`KERNEL` 换底，`tmp/nmlcase.sh` 用来换单点算例的 CH4 参数文件。

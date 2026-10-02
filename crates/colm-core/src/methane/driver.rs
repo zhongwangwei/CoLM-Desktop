@@ -35,9 +35,19 @@ pub struct MethanePatch {
     /// `publish_methane_flood_patch`）：`f_inund_levee_patch`、`f_inund_flood_patch` 与
     /// `f_inund_flood_depth_patch`。`wetwat` 方案的物理不用它们，只随重启往返。
     pub flood: [f64; 3],
+    /// `methane_patch_active_mask`：history 的活跃甲烷 patch（累加计数与网格分母都按它）。
+    /// 每步在 [`soil_step`] 开头按 `patchtype`、`only_wetland` 与稻田重算；不进重启。
+    /// 还没走过一步时为 `None`，按默认（土壤或湿地）处理。
+    pub history_active: Option<bool>,
 }
 
 impl MethanePatch {
+    /// 当前的活跃掩膜；没算过时按 `only_wetland = .false.`、不开稻田的默认。
+    pub fn history_active_or_default(&self, patch_type: i32) -> bool {
+        self.history_active
+            .unwrap_or(patch_type == 0 || patch_type == 2)
+    }
+
     /// `allocate_methane_state` 的冷启动值。
     pub fn cold(params: &MethaneParameters) -> Self {
         Self {
@@ -52,6 +62,7 @@ impl MethanePatch {
             soil_zwt: SPVAL,
             lake: LakeState::cold(params.methane.grnd_methane_cond_default),
             flood: [0.0; 3],
+            history_active: None,
         }
     }
 }
@@ -188,6 +199,16 @@ pub fn soil_step(
         matches!(site.patchtype, 0 | 2 | 4),
         "methane on patchtype {} is not ported to the Rust runtime yet",
         site.patchtype
+    );
+    // `methane_patch_active_mask`：湿地；不是 `only_wetland` 时加土壤；开了稻田时再加有稻田的土壤
+    // （上游只在 CROP 内核里认稻田；非 CROP 运行没有稻田 PFT，份额恒为 0）。
+    patch.history_active = Some(
+        site.patchtype == 2
+            || (site.patchtype == 0
+                && (!m.only_wetland
+                    || (m.enable_rice_paddy
+                        && bgc_link::paddy_rice_fraction(&host.pft)
+                            > bgc_link::PADDY_RICE_FRAC_MIN))),
     );
     // 湖泊 patch（`ch4_impl_lake_step`）：只在 `allowlakeprod` 下跑，否则状态与诊断都不动。
     let lake = site.patchtype == 4;
@@ -476,7 +497,7 @@ impl CoreAccumulator {
     /// 湿地 patch 的 `methane_surf_flux_wetland` 是总通量、土壤类为 0；土壤 patch 反之。没跑过
     /// 甲烷的 patch 用冷启动时的状态值（`allocate_methane_state` 的 0 与默认值）。
     pub fn accumulate(&mut self, patch: &MethanePatch, patch_type: i32) {
-        let active = patch_type == 0 || patch_type == 2;
+        let active = patch.history_active_or_default(patch_type);
         let r = patch.last.unwrap_or_default();
         let g = &r.merged;
         acc(&mut self.surf_flux_tot, g.surf_flux);
