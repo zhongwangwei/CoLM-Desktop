@@ -28334,3 +28334,23 @@ f_ustar     0.10293637      0.11577442      0.11577442
 - SAT 的 `g3t` 重跑仍然一致。
 
 **仍然拒绝**：示踪物强迫 + LULCC（`tracer_forcing_lulcc_remap`）、甲烷 + LULCC、泥沙 + LULCC。
+
+## 第 514 轮：B1 —— 示踪物强迫与 LULCC（`tracer_forcing_lulcc_remap`）
+
+运行期示踪物强迫在每个 patch 上留一份"最近有效值"缓存（`trc_forcing_precip/vapor_last`）。LULCC 时上游把它按新的 patch 重映射（`tracer_forcing_lulcc_map`），原来这个组合是拒绝的。
+
+**规则**（IGBP LCT 下 `source_class` 是恒等映射，`old_patch_area` 是旧侧的 `elm_patch%subfrc`）：
+- 新 patch 先取描述符的默认比值；
+- MEC 时旧 patch 的权重是 `(subfrc(op)·lcc(np, c_old))/Σ_同单元同类 subfrc`；
+- SAT 时，新 patch 的类型在旧侧有面积就只取同类旧 patch，否则取同单元的全部旧 patch，权重为 `subfrc`；
+- 只有一个来源时原样抄，否则按 `FMA(w, old, acc)` 累加、除以权重和（GIMPLE 核对过）。
+
+Rust 在 `lulcc_transition` 里从旧年份续跑读出缓存、计数与标识，重映射后随陆面示踪物事务一起写进合并出的续跑。
+
+**算例的选择**：IsoGSM 只有 2000–2004 年，所以另做了 `g3i`（2003-12-31 起 2 天，LULCC 2003→2004，SAT）。两个年份的 landdata 都由 Rust 前处理生成，两侧共用。
+- 同位素不行：上游要求变饱和流下的同位素开含水层混合（`VSF isotopes require explicit positive DEF_TRACER_AQUIFER_MIXING_WATER_MM`）；而开了混合，LULCC 新建的土壤 patch 又没有参考水量，上游停机（`LULCC cannot create soil or wetland isotope aquifer without reference`）。所以上游跑不了"同位素 + LULCC 且出现新土壤 patch"。
+- 改用溶质 `sol1` 加 IsoGSM 降水强迫（`normalized_over_total`）。
+
+**验收**：`g3i` history 6 份、restart 8 份逐位一致（含跨年续跑里的强迫缓存）。
+
+**仍然拒绝**：甲烷 + LULCC、泥沙 + LULCC。

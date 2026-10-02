@@ -475,20 +475,7 @@ fn run_spatial(
         "SEDIMENT with DEF_USE_LULCC (sediment state across the LULCC river restart) is not ported; \
          run this case with --engine fortran"
     );
-    let transport_tracers = tracer_set
-        .as_ref()
-        .is_some_and(|set| set.transport_indices().next().is_some());
-    if transport_tracers && logical_field(&document, "DEF_USE_LULCC")? {
-        // SAT 与 MEC 的陆面示踪物迁移见 `lulcc_land_tracers`；示踪物强迫的缓存要
-        // `tracer_forcing_lulcc_remap`，还没接。
-        let runtime = colm_runtime::tracer::TracerRuntime::from_document(&document)?
-            .context("transport tracers need a tracer runtime")?;
-        ensure!(
-            runtime.forcing_specs.iter().all(Vec::is_empty),
-            "tracer runtime forcing with DEF_USE_LULCC (tracer_forcing_lulcc_remap) is not \
-             ported; run this case with --engine fortran"
-        );
-    }
+    // 输运示踪物跨 LULCC：陆面状态见 `lulcc_land_tracers`（SAT/MEC），强迫缓存见 `lulcc_forcing_cache`。
     let methane_tracer = tracer_set.as_ref().is_some_and(|set| {
         set.tracers
             .iter()
@@ -891,10 +878,6 @@ fn run_spatial_segment(
     runtime.apply_mapped_heights(&mut templates)?;
     if let (Some(tracer), Some(forcing_config)) = (tracer_runtime.as_ref(), tracer_forcing_config) {
         if forcing_config.enabled() {
-            ensure!(
-                !logical_field(document, "DEF_USE_LULCC")?,
-                "tracer runtime forcing with LULCC (tracer_forcing_lulcc_remap) is not ported"
-            );
             let mut forcing = colm_runtime::spatial::tracer_forcing::GriddedTracerForcing::new(
                 forcing_config,
                 &tracer.set,
@@ -2019,6 +2002,99 @@ fn lulcc_check_inventory_transfer(
     Ok(())
 }
 
+/// `tracer_forcing_lulcc_map`（IGBP LCT：`source_class` 是恒等映射）。`old`/返回值是 `[patch][species]`
+/// 平铺；新 patch 先取默认比值。
+///
+/// * MEC（有 `lccpct`）：同单元的旧 patch 以 `lcc(np, c_old)·subfrc(op)/Σ_同单元同类 subfrc` 加权；
+/// * SAT：新 patch 的类型在旧侧有面积时只取同类旧 patch，否则取同单元全部旧 patch，以 `subfrc` 加权。
+///
+/// 只有一个来源时直接抄（不经乘除），否则 `Σ w·old / Σ w`；没有来源保持默认比值。
+#[allow(clippy::too_many_arguments)]
+fn lulcc_forcing_cache(
+    old: &[f64],
+    default: &[f64],
+    new_class: &[i64],
+    new_element: &[i64],
+    old_class: &[i64],
+    old_element: &[i64],
+    old_area: &[f64],
+    lccpct: Option<&[Vec<f64>]>,
+) -> Result<Vec<f64>> {
+    const TINY: f64 = f64::MIN_POSITIVE;
+    let ns = default.len();
+    let (nnew, nold) = (new_class.len(), old_class.len());
+    ensure!(
+        old.len() == nold * ns && old_area.len() == nold,
+        "tracer forcing LULCC map shape mismatch"
+    );
+    ensure!(
+        old.iter().all(|v| v.is_finite()),
+        "tracer forcing LULCC old cache contains non-finite values"
+    );
+    let class_area: Vec<f64> = (0..nold)
+        .map(|op| {
+            (0..nold)
+                .filter(|&oq| old_element[oq] == old_element[op] && old_class[oq] == old_class[op])
+                .fold(0.0, |s, oq| s + old_area[oq])
+        })
+        .collect();
+    let mut mapped: Vec<f64> = (0..nnew).flat_map(|_| default.iter().copied()).collect();
+    for np in 0..nnew {
+        let same_class = lccpct.is_none()
+            && (0..nold).any(|op| {
+                old_element[op] == new_element[np]
+                    && old_class[op] == new_class[np]
+                    && old_area[op] > TINY
+            });
+        let mut total = 0.0;
+        let mut count = 0;
+        let mut source = 0;
+        let row = &mut mapped[np * ns..(np + 1) * ns];
+        for op in 0..nold {
+            if old_element[op] != new_element[np] {
+                continue;
+            }
+            let weight = match lccpct {
+                Some(lcc) => {
+                    let w = lcc[np][old_class[op] as usize];
+                    if w <= 0.0 || class_area[op] <= TINY {
+                        continue;
+                    }
+                    w * old_area[op] / class_area[op]
+                }
+                None => {
+                    if same_class && old_class[op] != new_class[np] {
+                        continue;
+                    }
+                    old_area[op].max(0.0)
+                }
+            };
+            if weight <= 0.0 {
+                continue;
+            }
+            if total == 0.0 {
+                row.fill(0.0);
+            }
+            for k in 0..ns {
+                row[k] = weight.mul_add(old[op * ns + k], row[k]);
+            }
+            total += weight;
+            count += 1;
+            source = op;
+        }
+        if total > 0.0 {
+            if count == 1 {
+                row.copy_from_slice(&old[source * ns..(source + 1) * ns]);
+            } else {
+                for value in row.iter_mut() {
+                    *value /= total;
+                }
+            }
+        }
+    }
+    Ok(mapped)
+}
+
 /// `start` 所在年份的最后一步的终点，按 CoLM 的写法 `(year, 365|366, 86400)`。
 fn year_end(start: CalendarTime) -> CalendarTime {
     CalendarTime {
@@ -2162,6 +2238,19 @@ fn lulcc_transition(
             ))
         })
         .transpose()?;
+    // 示踪物强迫的"最近有效值"缓存（`tracer_forcing_lulcc_remap`）：默认比值与旧侧的 `subfrc`。
+    let forcing_defaults = match &land_tracers {
+        Some(_) => colm_runtime::tracer::TracerRuntime::from_document(document)?
+            .filter(|runtime| runtime.forcing_specs.iter().any(|specs| !specs.is_empty()))
+            .map(|runtime| (runtime.precip_ratio.clone(), runtime.vapor_ratio.clone())),
+        None => None,
+    };
+    let old_subfrc = match forcing_defaults {
+        Some(_) => Some(
+            colm_runtime::spatial::history::ElementGroups::from_topology(&old_topology)?.fractions,
+        ),
+        None => None,
+    };
     let mut written = Vec::with_capacity(new_topology.blocks.len());
     for (block, patches) in &new_topology.blocks {
         let cold_path = restart_root.join(&label).join(time_name(years.new, block));
@@ -2272,12 +2361,71 @@ fn lulcc_transition(
                 integer_field(document, "DEF_TRACER_LULCC_ABORT_NBAD")?,
             )
             .with_context(|| format!("cannot carry the tracers of block {block} over"))?;
+            let cache = match (&forcing_defaults, &old, &old_subfrc) {
+                (
+                    Some((precip_default, vapor_default)),
+                    Some((old_const, old_time, old_patches)),
+                    Some(subfrc),
+                ) => {
+                    let nvars = usize::try_from(
+                        old_time
+                            .integers("trc_forcing_cache_count")?
+                            .first()
+                            .copied()
+                            .unwrap_or(0),
+                    )?;
+                    let identity = old_time
+                        .integers("trc_forcing_cache_identity")?
+                        .iter()
+                        .map(|&v| i32::try_from(v))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let new_class = new_const.integers("patchclass")?;
+                    let old_class = old_const.integers("patchclass")?;
+                    let lccpct = match mec {
+                        Some(_) => Some(read_lulcc_transfer_trace(
+                            &landdata,
+                            years.new,
+                            block,
+                            patches.len(),
+                        )?),
+                        None => None,
+                    };
+                    let remap = |old: &[f64], default: &[f64]| {
+                        lulcc_forcing_cache(
+                            old,
+                            default,
+                            new_class,
+                            &new_topology.element[patches.clone()],
+                            old_class,
+                            &old_topology.element[old_patches.clone()],
+                            &subfrc[old_patches.clone()],
+                            lccpct.as_deref(),
+                        )
+                    };
+                    let precip =
+                        remap(old_time.floats("trc_forcing_precip_last")?, precip_default)?;
+                    let vapor = remap(old_time.floats("trc_forcing_vapor_last")?, vapor_default)?;
+                    Some((nvars, identity, precip, vapor))
+                }
+                _ => None,
+            };
             colm_runtime::tracer::write_land_tracer_restart(
                 &path,
                 set,
                 &states.iter().collect::<Vec<_>>(),
                 *mixing,
-                None,
+                cache
+                    .as_ref()
+                    .map(
+                        |(nvars, identity, precip, vapor)| colm_runtime::tracer::ForcingCache {
+                            nvars: *nvars,
+                            ntracers: set.len(),
+                            identity: std::sync::Arc::new(identity.clone()),
+                            precip,
+                            vapor,
+                        },
+                    )
+                    .as_ref(),
             )?;
         }
         // 过渡这一步的历史区间已关，旁车不带示踪物部分。
