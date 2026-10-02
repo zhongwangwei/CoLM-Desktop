@@ -188,6 +188,17 @@ impl TracerSet {
                 );
             }
         }
+        // `register_tracer_provider`（`tracer_lifecycle_init` 里编进来的 provider）：注册时以 provider
+        // 的声明覆盖 `reaction_mode`。CH4 声明 `REACTION_PROVIDER`
+        // （`MOD_Tracer_Reactive_Methane.F90:102`），SEDIMENT 声明 `REACTION_NONE`。它进
+        // 描述符指纹（history 旁车的 `trc_hist_descriptor`）。
+        for tracer in &mut tracers {
+            if matches!(tracer.name.trim().to_ascii_uppercase().as_str(), "CH4" | "METHANE")
+                && tracer.family == TracerFamily::Gas
+            {
+                tracer.reaction_mode = ReactionMode::Provider;
+            }
+        }
         Ok(Self { tracers })
     }
 

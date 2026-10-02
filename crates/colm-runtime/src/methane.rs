@@ -33,11 +33,6 @@ pub fn setup_from_document(document: &Document, grid_river: bool) -> Result<Opti
     let Some(index) = set.tracers.iter().position(is_methane_tracer) else {
         return Ok(None);
     };
-    // CH4 与输运示踪物同开时，甲烷量要插在示踪物事务中间（`trc_forcing_cache_*` 之前），尚未接。
-    anyhow::ensure!(
-        set.transport_indices().next().is_none(),
-        "methane together with water-transported tracers is not ported to the Rust runtime yet"
-    );
     let files = crate::physics::text(document, "DEF_TRACER_PARAM_FILES")?;
     let path = colm_core::tracer::descriptor::param_file_for_index(&files, &set.tracers, index)?
         .context(

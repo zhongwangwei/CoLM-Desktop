@@ -28364,3 +28364,18 @@ Rust 在 `lulcc_transition` 里从旧年份续跑读出缓存、计数与标识�
 - **BGC + LULCC**：上游 `MOD_Namelist.F90:2272-2276` 在 `DEF_USE_USGS .or. DEF_USE_BGC` 时停机（"LULCC is not supported for LULC_USGS/BGC at present"）。Rust 的 `check_spatial_lulcc` 原来只拒绝 USGS，漏了 BGC，现在照上游拒绝。
 - **甲烷 + LULCC**：甲烷依赖 BGC，上游不可能跑到这个组合。Rust 的拒绝信息改成引用上游的这条限制，不再记作移植缺口。上游里 `remap_methane_lulcc_state` 那 850 行在上游自己的约束下是走不到的。
 - **同位素 + LULCC**：见第 514 轮，只要出现新建的土壤/湿地 patch，上游自己就会停机。Rust 照搬了这条检查。
+
+## 第 516 轮：甲烷与输运示踪物同开
+
+原来 CH4 provider 与走通用水输运的示踪物同开时拒绝，理由是"甲烷量要插在示踪物事务中间"。实际去掉拒绝后，物理、history 和续跑都逐位一致；唯一的不同在 history 旁车的 `trc_hist_descriptor`。
+
+- Fortran 的 CH4 那一行第 6 个字段是 `2`，Rust 是 `0`。这个字段是 `reaction_mode`。
+- 上游 `register_tracer_provider` 注册编进来的 provider 时，用 provider 的声明覆盖它：CH4 声明 `REACTION_PROVIDER`（`MOD_Tracer_Reactive_Methane.F90:102`），SEDIMENT 声明 `REACTION_NONE`。
+- Rust 只做了 `derive_tracer_taxonomy`，没做注册这一步。只有甲烷时不写示踪物旁车，所以这个差异一直没有暴露出来。
+- 现在描述符表建完之后补上这一步，CH4/METHANE 的气体示踪物改成 `Provider`。
+
+**验收**：
+- `tc4ws`（单点 tc4w + `sol1`，10 天）：history 2 份、restart 全部逐位一致。
+- `g1ch4s`（空间 g1ch4 + `sol1`）：history 3 份、restart 9 份逐位一致。
+- `g1ch4sc`（从第 3 天续跑 2 天）：history 3 份、restart 10 份逐位一致。
+- 甲烷相关的单点回归 `tc4 tc4w tc4wl tc4y tc4lk tc4lky tc4f lk36ch4 lk36ch4y lk36sol rc4` 与空间 `g1ch4c` 重跑全部一致。
