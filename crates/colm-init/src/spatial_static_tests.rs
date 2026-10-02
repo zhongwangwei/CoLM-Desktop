@@ -1889,6 +1889,25 @@ fn spatial_lcz_urban_cold_start_writes_common_and_urban_restarts() {
     write_landdata(&landdata, 2005, "w180_s90");
     write_monthly_vegetation(&landdata, 2005, "w180_s90", 2.5, 0.4);
     write_urban_landdata(&landdata, 2005, "w180_s90");
+    // `UrbanLAI_readin`：城市 patch 的 `tlai/tsai` 取树冠的 `TREE_LAI/TREE_SAI`。
+    write_f64(
+        &landdata,
+        "urban",
+        "LAI/urban_LAI_01",
+        "TREE_LAI",
+        2005,
+        "w180_s90",
+        2.5,
+    );
+    write_f64(
+        &landdata,
+        "urban",
+        "LAI/urban_SAI_01",
+        "TREE_SAI",
+        2005,
+        "w180_s90",
+        0.4,
+    );
     let geometry = crate::UrbanConfig {
         water_enabled: true,
         trees_enabled: true,

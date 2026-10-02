@@ -1694,8 +1694,20 @@ fn materialize_spatial_urban(
     if land_urban.is_empty() {
         return Ok(());
     }
-    let layout = land_urban.aggregation_layout(&topology.mesh, vec![None; land_urban.len()])?;
-    let area = mesh_cell_area_weights(&topology.mesh, &topology.pixel)?;
+    // `aggregation_request_data(..., zip = USE_zip_for_aggregation)`：默认按唯一的原始格聚合
+    // （同一格里的像元面积先相加，x 先 y 后的顺序），`area_one` 与求和顺序都随之而变。
+    let zipped = |raw_grid| -> Result<(FlatMesh, colm_srfdata::FlatPatches, Vec<f64>)> {
+        if args.zip_aggregation {
+            gather_patch_raster(&topology.mesh, &topology.pixel, land_urban, raw_grid, true)
+        } else {
+            Ok((
+                topology.mesh.clone(),
+                land_urban.aggregation_layout(&topology.mesh, vec![None; land_urban.len()])?,
+                mesh_cell_area_weights(&topology.mesh, &topology.pixel)?,
+            ))
+        }
+    };
+    let (mesh, layout, area) = zipped(COLM_500M)?;
     let surface_year = args.year / 5 * 5;
     let suffix = format!("URBSRF{surface_year:04}");
     let urban_raw = inputs.rawdata.join("urban");
@@ -1704,7 +1716,7 @@ fn materialize_spatial_urban(
         &urban_raw,
         &suffix,
         roof_variable,
-        &topology.mesh,
+        &mesh,
         &topology.pixel,
         COLM_500M,
     )?;
@@ -1712,7 +1724,7 @@ fn materialize_spatial_urban(
         &urban_raw,
         &suffix,
         height_variable,
-        &topology.mesh,
+        &mesh,
         &topology.pixel,
         COLM_500M,
     )?;
@@ -1720,7 +1732,7 @@ fn materialize_spatial_urban(
         &urban_raw,
         &suffix,
         "PCT_Tree",
-        &topology.mesh,
+        &mesh,
         &topology.pixel,
         COLM_500M,
     )?;
@@ -1728,7 +1740,7 @@ fn materialize_spatial_urban(
         &urban_raw,
         &suffix,
         "HTOP",
-        &topology.mesh,
+        &mesh,
         &topology.pixel,
         COLM_500M,
     )?;
@@ -1736,7 +1748,7 @@ fn materialize_spatial_urban(
         &urban_raw,
         &suffix,
         "PCT_Water",
-        &topology.mesh,
+        &mesh,
         &topology.pixel,
         COLM_500M,
     )?;
@@ -1750,7 +1762,7 @@ fn materialize_spatial_urban(
         &suffix,
         "POP_DEN",
         population_index,
-        &topology.mesh,
+        &mesh,
         &topology.pixel,
         COLM_500M,
     )?;
@@ -1778,7 +1790,7 @@ fn materialize_spatial_urban(
                 &inputs.rawdata.join("urban_type"),
                 "URBTYP",
                 "REGION_ID",
-                &topology.mesh,
+                &mesh,
                 &topology.pixel,
                 COLM_500M,
             )?;
@@ -1873,12 +1885,15 @@ fn materialize_spatial_urban(
             Some(0.0),
         )?;
     }
+    // LUCY 在 5km 网格上单独聚合（`aggregation_request_data(..., grid_urban_5km, zip)`），
+    // 众数取在唯一的 5km 格上。
+    let (lucy_mesh, lucy_layout, _) = zipped(COLM_5KM)?;
     let lucy = aggregate_urban_region_ids(
-        &layout,
+        &lucy_layout,
         &read_mesh_raster_i32(
             &urban_raw.join("LUCY_regionid.nc"),
             "LUCY_REGION_ID",
-            &topology.mesh,
+            &lucy_mesh,
             &topology.pixel,
             COLM_5KM,
         )?,
@@ -1964,7 +1979,7 @@ fn materialize_spatial_urban(
                         &lai_suffix,
                         source,
                         month,
-                        &topology.mesh,
+                        &mesh,
                         &topology.pixel,
                         COLM_500M,
                     )?,

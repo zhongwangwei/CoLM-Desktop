@@ -822,7 +822,7 @@ fn run_spatial_segment(
     } else {
         None
     };
-    let mapping = AreaWeightedMapping::build(
+    let mut mapping = AreaWeightedMapping::build(
         &grid,
         &topology.pixel,
         &topology.cells,
@@ -834,12 +834,25 @@ fn run_spatial_segment(
         .flatten()
         .map(|part| (part.ilon, part.ilat))
         .collect::<Vec<_>>();
-    let forcing = GriddedForcing::new(
+    let mut forcing = GriddedForcing::new(
         config.forcing.clone(),
         grid,
         cells,
         config.timestep_seconds as i32,
     )?;
+    // `DEF_forcing%has_missing_value`：映射去掉起始那条记录里缺测的格子（`set_missing_value`），
+    // 足迹全是缺测格的 patch 的 `forcmask_pch` 为假 —— 上游整步跳过它们、并从累加与 history 里
+    // 排除，这一支还没移植，遇到就拒绝。
+    if let Some((missing, field, nlon)) = forcing.missing_field(config.start)? {
+        let mask = mapping.set_missing_value(|ilon, ilat| field[ilat * nlon + ilon], missing);
+        let masked = mask.iter().filter(|&&keep| !keep).count();
+        ensure!(
+            masked == 0,
+            "{masked} patch(es) lie entirely on missing forcing cells (forcmask_pch = .false.); \
+             skipping masked patches is not ported to the Rust spatial runtime yet, run this case \
+             with --engine fortran or enlarge the forcing coverage"
+        );
+    }
     let mut runtime = SpatialRuntime::new(
         config.clock()?,
         forcing,
@@ -2025,8 +2038,8 @@ fn assemble_patch(
     // 空间算例的逐月 LAI 读 `landdata/LAI/<year>/` 的分块向量（`LAI_readin` 的非单点支）。
     if logical_field(document, "DEF_LAI_MONTHLY")? && spatial {
         ensure!(
-            template.urban.is_none() && !template.physics.use_pc,
-            "the Rust spatial runtime reads LCT and PFT LAI only; urban and PC LAI are not ported"
+            !template.physics.use_pc,
+            "the Rust spatial runtime reads LCT, PFT and urban LAI; PC LAI is not ported"
         );
         let year = |key: &str| -> Result<i32> {
             i32::try_from(integer_field(document, key)?)
@@ -2045,15 +2058,28 @@ fn assemble_patch(
         // LAI 反馈（PFT/PC 构建）：`LAI_readin` 只读 `SAI_patches`。
         let feedback = (template.physics.use_pft || template.physics.use_pc)
             && template.physics.bgc.is_some_and(|bgc| bgc.laifeedback);
-        template = template.with_monthly_leaf_area_index(MonthlyLeafAreaIndex::read_grid(
-            layout.out().join(name).join("landdata"),
-            block,
-            patch,
-            logical_field(document, "DEF_LAI_CHANGE_YEARLY")?,
-            year("DEF_LC_YEAR")?,
-            (year("DEF_LAI_START_YEAR")?, year("DEF_LAI_END_YEAR")?),
-            !feedback,
-        ));
+        // 城市 patch 走 `UrbanLAI_readin`（`CoLM.F90:637`）：树冠 LAI/SAI 按城市单元读。
+        let urban_unit = template.urban.as_ref().map(|urban| urban.urban_index);
+        template = template.with_monthly_leaf_area_index(if let Some(unit) = urban_unit {
+            MonthlyLeafAreaIndex::read_urban_grid(
+                layout.out().join(name).join("landdata"),
+                block,
+                unit,
+                logical_field(document, "DEF_LAI_CHANGE_YEARLY")?,
+                year("DEF_LC_YEAR")?,
+                (year("DEF_LAI_START_YEAR")?, year("DEF_LAI_END_YEAR")?),
+            )
+        } else {
+            MonthlyLeafAreaIndex::read_grid(
+                layout.out().join(name).join("landdata"),
+                block,
+                patch,
+                logical_field(document, "DEF_LAI_CHANGE_YEARLY")?,
+                year("DEF_LC_YEAR")?,
+                (year("DEF_LAI_START_YEAR")?, year("DEF_LAI_END_YEAR")?),
+                !feedback,
+            )
+        });
     }
     if logical_field(document, "DEF_LAI_MONTHLY")? && !spatial {
         let path = layout.out().join(name).join("landdata/srfdata.nc");
@@ -2860,14 +2886,16 @@ fn write_evolved_restart(
         )?;
     }
     // 城市单元另有一份时间重启（`<case>_restart_urban_<date>_…nc`），与主重启同目录。
-    if let (Some(urban_template), Some(urban)) = (&templates[0].urban, &states[0].urban) {
-        ensure!(
-            templates.len() == 1,
-            "urban sites are single-patch; {} patches were run",
-            templates.len()
-        );
-        let template = &templates[0];
-        let state = &states[0];
+    // 空间算例一块里有多个城市单元：每个城市 patch 只改自己那一格（`urban_index`），
+    // 以第一个的整变量为底，依次把其余单元的那一格拷进去。
+    let urban_patches = templates
+        .iter()
+        .zip(states)
+        .filter_map(|(template, state)| {
+            template.urban.as_ref().zip(state.urban.as_ref()).map(|(t, s)| (template, state, t, s))
+        })
+        .collect::<Vec<_>>();
+    if !urban_patches.is_empty() {
         let urban_path = |path: &Path| -> Result<std::path::PathBuf> {
             let name = path
                 .file_name()
@@ -2875,23 +2903,39 @@ fn write_evolved_restart(
                 .context("a restart path has no file name")?;
             Ok(path.with_file_name(name.replacen("_restart_", "_restart_urban_", 1)))
         };
-        // `UrbanLAI_readin` 同时写 `urb_lai(u)` 与 `tlai(npatch)`（两者恒等），所以装了城市月度
-        // LAI 时 `tree_lai`/`tree_sai` 就是当前的 `tlai`/`tsai`；没装时二者都停在重启值。
-        let tree = template
-            .monthly_leaf_area_index
-            .as_ref()
-            .filter(|lai| lai.is_urban())
-            .map(|_| {
-                (
-                    state.energy.temporal_canopy.leaf_area_index,
-                    state.energy.temporal_canopy.stem_area_index,
-                )
-            });
-        let overrides = urban_template.overrides(urban, tree)?;
+        let urban_count = colm_init::RestartFile::open(&urban_path(restart_in)?)?.dimension("urban")?;
+        let mut merged: Option<Vec<colm_init::RestartOverride>> = None;
+        for (template, state, urban_template, urban) in urban_patches {
+            // `UrbanLAI_readin` 同时写 `urb_lai(u)` 与 `tlai(npatch)`（两者恒等），所以装了城市月度
+            // LAI 时 `tree_lai`/`tree_sai` 就是当前的 `tlai`/`tsai`；没装时二者都停在重启值。
+            let tree = template
+                .monthly_leaf_area_index
+                .as_ref()
+                .filter(|lai| lai.is_urban())
+                .map(|_| {
+                    (
+                        state.energy.temporal_canopy.leaf_area_index,
+                        state.energy.temporal_canopy.stem_area_index,
+                    )
+                });
+            let overrides = urban_template.overrides(urban, tree)?;
+            match merged.as_mut() {
+                None => merged = Some(overrides),
+                Some(merged) => {
+                    let unit = urban_template.urban_index;
+                    for (into, from) in merged.iter_mut().zip(overrides) {
+                        ensure!(into.name == from.name, "urban overrides are not aligned");
+                        let width = from.values.len() / urban_count;
+                        into.values[unit * width..(unit + 1) * width]
+                            .copy_from_slice(&from.values[unit * width..(unit + 1) * width]);
+                    }
+                }
+            }
+        }
         write_restart(
             &urban_path(restart_in)?,
             &urban_path(restart_out)?,
-            overrides.as_slice(),
+            merged.expect("at least one urban patch").as_slice(),
         )?;
     }
     Ok(())
@@ -3191,7 +3235,11 @@ fn history_namelist_overrides(path: &Path) -> Result<Vec<(String, bool)>> {
     for item in &document.items {
         match item {
             colm_namelist::document::Item::GroupStart(line) => {
-                let name = line.trim().trim_start_matches('&').trim().to_ascii_lowercase();
+                let name = line
+                    .trim()
+                    .trim_start_matches('&')
+                    .trim()
+                    .to_ascii_lowercase();
                 inside = !seen && name.starts_with("nl_colm_history");
                 seen |= inside;
             }
@@ -3203,7 +3251,10 @@ fn history_namelist_overrides(path: &Path) -> Result<Vec<(String, bool)>> {
                     .filter(|(name, _)| name.eq_ignore_ascii_case("DEF_hist_vars"))
                     .map(|(_, member)| member.to_owned())
                     .with_context(|| {
-                        format!("{} sets {field}, which is not a DEF_hist_vars member", path.display())
+                        format!(
+                            "{} sets {field}, which is not a DEF_hist_vars member",
+                            path.display()
+                        )
                     })?;
                 let Value::Bool(value) = entry.value else {
                     bail!("DEF_hist_vars%{member} must be a logical");

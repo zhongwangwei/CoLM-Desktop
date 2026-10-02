@@ -141,6 +141,28 @@ impl AreaWeightedMapping {
     }
 
     /// `grid2pset`：`value(ilon, ilat)` 取网格值；面积为 0 的 set 得 `spval`。
+    /// `set_missing_value (gdata, missing_value, pmask)`：网格值等于 `missing` 的份面积清零，
+    /// `areapset` 按剩下的份从 0 起重算；返回 `pmask = areapset > 0`。
+    pub fn set_missing_value(
+        &mut self,
+        value: impl Fn(usize, usize) -> f64,
+        missing: f64,
+    ) -> Vec<bool> {
+        let mut mask = Vec::with_capacity(self.parts.len());
+        for (parts, area) in self.parts.iter_mut().zip(&mut self.area) {
+            *area = 0.0;
+            for part in parts.iter_mut() {
+                if value(part.ilon, part.ilat) == missing {
+                    part.area = 0.0;
+                } else {
+                    *area += part.area;
+                }
+            }
+            mask.push(*area > 0.0);
+        }
+        mask
+    }
+
     pub fn grid_to_set(&self, iset: usize, value: impl Fn(usize, usize) -> f64) -> f64 {
         if self.area[iset] > 0.0 {
             let mut sum = 0.0;

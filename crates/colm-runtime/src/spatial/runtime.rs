@@ -495,6 +495,38 @@ impl SpatialRuntimeConfig {
         let forcing_namelist =
             std::path::PathBuf::from(crate::required_string(&case, "DEF_forcing_namelist")?);
         let forcing = crate::read_document(&forcing_namelist, "forcing")?;
+        // 空间强迫里还没移植的分支：一次列全，默认拒绝（原来它们会被悄悄忽略）。
+        let interpolation = match case.get("DEF_Forcing_Interp_Method") {
+            Some(colm_namelist::Value::Str(text)) => text.trim().to_owned(),
+            Some(other) => anyhow::bail!("DEF_Forcing_Interp_Method must be a string, got {other}"),
+            None => "arealweight".to_owned(),
+        };
+        anyhow::ensure!(
+            interpolation == "arealweight",
+            "DEF_Forcing_Interp_Method = {interpolation:?} is not ported to the Rust spatial \
+             runtime (only 'arealweight'); run this case with --engine fortran"
+        );
+        for (key, what) in [
+            (
+                "DEF_USE_ClimForcing_for_Spinup",
+                "climatological spin-up forcing",
+            ),
+            (
+                "DEF_USE_CBL_HEIGHT",
+                "the boundary-layer-height forcing (variable 9)",
+            ),
+            ("DEF_USE_Forcing_Downscaling", "forcing downscaling"),
+            (
+                "DEF_USE_Forcing_Downscaling_Simple",
+                "simple forcing downscaling",
+            ),
+        ] {
+            anyhow::ensure!(
+                !crate::optional_bool_or(&case, key, false)?,
+                "{key} ({what}) is not ported to the Rust spatial runtime; run this case with \
+                 --engine fortran"
+            );
+        }
         let start = crate::simulation_date(&case, "start")?;
         let spinup_until =
             if crate::required_integer(&case, "DEF_simulation_time%spinup_year")? == 0 {

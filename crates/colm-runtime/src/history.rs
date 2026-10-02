@@ -3399,6 +3399,19 @@ impl HistorySession {
                 );
                 accumulator.scalar(name, 0, value)?;
             }
+            // 城市分支（`CoLMMAIN_Urban`）不碰这些 `*_out`/土壤水量，它们停在分配值 `spval`：
+            // `acc1d` 跳过，但写网格时 `filter = patchtype < 99`（`qlayer` 是 `<= 2`）仍把城市 patch 的
+            // 面积算进分母。交一次 `spval` 让它计入分母、不进和。`rootr` 在 `CoLMMAIN_Urban` 里是
+            // 局部量（`CoLMDRIVER` 只把 patch 的 `rootr(1:,i)` 交给 `CoLMMAIN`），所以同样停在 `spval`。
+            for name in [
+                "assimsun", "assimsha", "etrsun", "etrsha", "gssun", "gssha", "rstfacsha", "frcsat",
+                "rsur_se",
+            ] {
+                accumulator.scalar(name, 0, colm_core::MISSING)?;
+            }
+            let layers = template.soil_layer_thickness_m().len();
+            accumulator.layer("qlayer", 0, &vec![colm_core::MISSING; layers + 1])?;
+            accumulator.layer("rootr", 0, &vec![colm_core::MISSING; layers])?;
             // `fsen_urbl`/`lfevp_urbl` 是 `spval` 时 `acc1d` 跳过，文件里留填充值
             for (name, value) in [
                 ("fsenurbl", urban.fsen_urbl),

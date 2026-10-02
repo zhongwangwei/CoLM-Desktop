@@ -281,7 +281,7 @@ pub(crate) fn write_spatial_lct_cold_time_restart_with_urban(
             count,
         )?,
     ];
-    let (lai, sai) = match config.lai_frequency {
+    let (mut lai, mut sai) = match config.lai_frequency {
         LaiFrequency::Monthly if config.zero_leaf_area => {
             (vec![0.0; count], read_monthly(config, "SAI_patches", month)?)
         }
@@ -298,6 +298,29 @@ pub(crate) fn write_spatial_lct_cold_time_restart_with_urban(
                 .collect::<Result<Vec<_>>>()?,
         ),
     };
+    // 城市跑法：`LAI_readin` 之后 `UrbanLAI_readin` 把城市 patch 的 `tlai/tsai` 换成树冠的
+    // `TREE_LAI/TREE_SAI`（`urban/<年>/LAI/urban_{LAI,SAI}_<月>`，按 `landurban` 排，`MOD_Initialize.F90:1295`）。
+    if let (Some(data), LaiFrequency::Monthly) = (urban_data, config.lai_frequency) {
+        if urban_count > 0 {
+            let read = |stem: &str, variable: &str| {
+                read_f64(
+                    config.landdata,
+                    "urban",
+                    &format!("LAI/{stem}_{month:02}"),
+                    variable,
+                    config.lai_year,
+                    config.block_label,
+                    urban_count,
+                )
+            };
+            let tree_lai = read("urban_LAI", "TREE_LAI")?;
+            let tree_sai = read("urban_SAI", "TREE_SAI")?;
+            for (urban, &patch) in data.urban_to_patch.iter().enumerate() {
+                lai[patch] = tree_lai[urban];
+                sai[patch] = tree_sai[urban];
+            }
+        }
+    }
     let grid = colm_soil_grid(dimensions.soil_layers)?;
     let interface_mm = grid
         .interface_depth_m
@@ -441,9 +464,9 @@ pub(crate) fn write_spatial_lct_cold_time_restart_with_urban(
         )?;
         ground_snow_fraction[patch] = cover.ground_snow_fraction;
         sigf[patch] = spatial_sigf(
-            water,
             config.observations.snow.is_some(),
             cover.snow_free_vegetation_fraction,
+            fveg[patch],
         );
         sai_now[patch] *= sigf[patch];
         let calendar_day = orbital_calendar_day(
@@ -993,15 +1016,17 @@ fn is_water(scheme: LandCoverScheme, class: i32) -> bool {
         || matches!(scheme, LandCoverScheme::Usgs) && class == 16
 }
 
+/// `MOD_IniTimeVariable.F90:527-665`：有雪初值时取 `snowfraction` 的 `sigf`，否则 `sigf = fveg`
+/// （LCT 自然 patch 的 `fveg0` 为 1、水体为 0、城市是树冠覆盖率）。
 fn spatial_sigf(
-    water: bool,
     snow_initialization_enabled: bool,
     snow_free_vegetation_fraction: f64,
+    fveg: f64,
 ) -> f64 {
-    if water && !snow_initialization_enabled {
-        0.0
-    } else {
+    if snow_initialization_enabled {
         snow_free_vegetation_fraction
+    } else {
+        fveg
     }
 }
 
@@ -1106,14 +1131,13 @@ mod tests {
         // MOD_IniTimeVariable.F90 calls snowfraction when use_snowini is true
         // and skips the later no-snow fveg assignment. For lake/water patches
         // with zero LAI/SAI, snowfraction returns sigf=1.
-        assert_eq!(spatial_sigf(true, true, 1.0), 1.0);
+        assert_eq!(spatial_sigf(true, 1.0, 0.0), 1.0);
 
-        // Without snow initialization, the original no-snow branch uses fveg;
-        // Desktop represents water patches with fveg=0.
-        assert_eq!(spatial_sigf(true, false, 1.0), 0.0);
-
-        assert_eq!(spatial_sigf(false, true, 0.75), 0.75);
-        assert_eq!(spatial_sigf(false, false, 0.75), 0.75);
+        // Without snow initialization, the original no-snow branch uses fveg:
+        // 0 for water, the tree cover for urban patches.
+        assert_eq!(spatial_sigf(false, 1.0, 0.0), 0.0);
+        assert_eq!(spatial_sigf(false, 1.0, 0.158), 0.158);
+        assert_eq!(spatial_sigf(true, 0.75, 1.0), 0.75);
     }
 
     #[test]

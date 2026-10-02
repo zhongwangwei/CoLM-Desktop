@@ -28073,3 +28073,78 @@ FIRE 的五个历史量写的是上一次 `vecacc` 的残留（upstream-bugs 第
 - `hsel2`：`out_default = .true.`，文件关掉同样 6 个量。
 
 两者的 history 3 份、重启全部逐位一致，变量集合相同（6 个 / 111 个）。
+
+**单点全量回归**（`tmp/regress_all.sh`，第 504–505 轮的改动之后）：
+- 164 例完全一致；
+- 13 例 LAI 反馈算例（`bl bl1 sn3 ta1 tb1 tc4 tc4f tc4w tc4y tr1 tr3 tt1 tt2`）只有初始重启的 `tlai` 不同：参照里是旧 Rust 前处理留下的 −1e36，现在是 0（vendor 修复第 36 条）。它们的 history 与之后的全部重启逐位一致，说明反馈下运行期不读土壤 patch 的 `tlai` 初值。
+- `nn` 照旧（无 history，预期）。
+- 本轮新建的 7 个空间算例被误送进单点回归，已加进 SKIP 表。
+
+## 第 506 轮：B1 —— 空间强迫的数据集覆盖（`MOD_UserSpecifiedForcing`）
+
+原来空间运行期只认 JRA3Q 与 IsoGSM 的文件命名，NULL 变量、缺测值、二维经纬度一律拒绝。vendor 的 24 份 `run/forcing/*.nml` 里：
+- 没有一份用 `groupby = 'day'`、`solarin_all_band = .false.` 或高度维；
+- 10 份要缺测值，5 份要二维经纬度（`dim2d`），大多数有 3 个 NULL 变量（单支风速、QIAN 还缺长波）。
+
+**移植**：
+1. `metfilename`：21 个数据集的命名逐字照抄。GSWP2 只在 `metpreprocess` 里有分支、`metfilename` 里没有，上游也跑不了，不收。
+2. NULL 变量（`vname` 或 `tintalgo` 为 `'NULL'`）不读不插值。
+   - 只有一支风时，那一支乘 `1/sqrt(2)` 给两支（`sca = 1/sqrt(2.0_r8)`）；两支都缺按上游停机。
+   - 温度、比湿、气压、降水、短波缺了也拒绝。长波只有 QIAN 允许缺。
+3. `metpreprocess`：逐格逐数据集的截断、换算与比湿上限。字面量按 `-fdefault-real-8` 是双精度，`*1000./3600.` 等按书写顺序求值（GIMPLE 核对过）。
+   - QIAN 的长波：`e = (p*q)/FMA(q, 0.378, 0.622)`，`ea = FMA(e*5.95e-7, exp(1500/t), 0.70)`，`lw = ea*stefnc*(t²)²`；
+   - QIAN 的短波拆分是 CLM4.5 的多项式（`FMA(h³,c3, FNMA(h²,c2, FMA(h,c1,c0)))`，夹在 [0.01, 0.99]）。
+   - 原来 Rust 对 JRA3Q 把负降水截成 0，上游 JRA3Q 分支没有这一步（真实数据里不触发，已删）。
+4. 缺测值（`has_missing_value`）：
+   - 缺测值取第一个变量起始那个文件的 `missing_value_name` 属性。
+   - 映射按起始那条记录做 `set_missing_value`：缺测格的份面积清零、`areapset` 重算。
+   - 之后每步第一个变量**上界**为缺测的格子不做 `metpreprocess`、不重拆短波（`forc_xy_sol*` 沿用上一步的值）。
+   - 足迹全落在缺测格上的 patch（`forcmask_pch = .false.`）上游整步跳过，并从累加、history 与平衡检查里排除。这一支牵涉面广，还没移植：遇到就报出个数并拒绝。
+5. `dim2d`：`lat_in = latxy(1,:)`、`lon_in = lonxy(:,1)`，即 netCDF `(lat, lon)` 数组的第一列与第一行。
+
+**补上的拒绝**（原来空间运行期悄悄忽略它们）：
+- `DEF_Forcing_Interp_Method = 'bilinear'`；
+- `DEF_USE_ClimForcing_for_Spinup`；
+- `DEF_USE_CBL_HEIGHT`（第 9 个强迫变量）；
+- `DEF_USE_Forcing_Downscaling(_Simple)`。
+
+**验收**：
+- 本机只有 JRA3Q/IsoGSM 的真实数据。`tmp/synthforcing.py` 把 JRA3Q 2003-01 在 20–28°N、110–118°E 的切片改写成各数据集的布局：
+  - 文件名、变量名、NULL 与 dim2d 取自 vendor namelist，同文件多变量合写；
+  - 按 `metpreprocess` 的单位换算取逆，单支风写成风速；
+  - 缺测数据集把区域南端两行（g1 域外）写成缺测值；
+  - 步长与偏移保留 JRA3Q 的。
+- `tmp/fcase.sh` 共用一份 `g1f` 的前处理（2003-01-01 起 5 天），两侧只跑 colm 阶段，逐位比较 restart 与 history。
+
+## 第 507 轮：B1 —— 空间城市（`DEF_URBAN_RUN`，`g1urb`）
+
+原来 Rust 运行期只支持单点的一个城市单元，空间城市从没跑过。对照算例 `g1urb`：
+- g1 区域（113–115°E、23–25°N，珠三角）加 `DEF_URBAN_RUN = .true.`；
+- 默认 NCAR 方案、`DEF_USE_CANYON_HWR`；
+- 32 个城市 patch。
+
+**mksrfdata**（修完与纯 Fortran 的 landdata 283 份逐位一致）：
+1. 城市的 5km 网格（LUCY 区域）并进像元轴后，与 500m 格边差 1 ulp，留下 ~1e-15° 的细像元（上游的 `pixel.nc` 里纬向、经向各 32 个）。它们不属于任何网格元，但 `mesh_cell_area_weights` 要求每行面积 > 0，于是报错。改为允许 0，与 `areaquad` 不检查一致。
+2. 城市瓦片的 `POP_DEN(year, lat, lon)`：时间轴的名字原来只认 `time/month/mon`，加 `year`。
+3. 城市聚合原来逐像元聚合（`aggregation_layout` + 每像元面积）。上游默认 `USE_zip_for_aggregation = .true.`，按唯一的原始格聚合（同格像元面积先相加，x 先 y 后）。改用与 PFT/LCT 相同的 `gather_patch_raster(..., zip)`。LUCY 在 5km 网格上单独聚合，众数取在唯一的 5km 格上。
+4. 聚合求和照 GIMPLE 改成 FMA 链：
+   - `sum(x*area)` 是 `FMA(x, area, acc)`，`sum(area)` 是普通加法；
+   - LAI 的 `sum(ulai*fvegu*area)` 是 `FMA(ulai*fvegu, area, acc)`；
+   - NCAR 材料参数的 `acc + p*area(ipxl)` 也是 FMA，含向量化的分层与反照率数组。
+5. `hlr*(1-sqrt(wt))/sqrt(wt)` 按书写顺序先乘后除。Rust 原来写成 `hlr *= (1-s)/s`，差 1 ulp。LCZ、NCAR 两处都改。
+
+**mkinidata**（修完初始重启全部逐位一致，含城市重启）：
+1. 城市跑法下 `LAI_readin` 之后 `UrbanLAI_readin` 把城市 patch 的 `tlai/tsai` 换成树冠的 `TREE_LAI/TREE_SAI`（按 `landurban` 排）。原来 Rust 用的是 `LAI_patches`。
+2. 无雪初值时 `sigf = fveg`（`MOD_IniTimeVariable.F90:636-665`）：LCT 自然 patch 的 `fveg0` 为 1，水体为 0，城市是树冠覆盖率。原来 Rust 一律用雪盖算出的 `sigf`（无雪时为 1），只单独处理了水体，城市因此错了。
+
+**运行期**：
+1. 城市单元号：`landurban` 按城市 patch 的顺序建，所以本 patch 的单元号就是它前面城市 patch 的个数（原来只接受 1 个单元）。
+2. 城市逐月 LAI 按单元读 `urban/<年>/LAI/urban_{LAI,SAI}_<月>`（`MonthlyLeafAreaIndex::read_urban_grid`）。
+3. 内核里的 `urban_run` 指"这个 patch 走城市分支"。城市跑法里只有城市地类走 `CoLMMAIN_Urban`，其余 patch 照常走土壤分支。原来整个算例的所有 patch 都带着它，土壤 patch 因此被拒。
+4. 墙的覆盖比 `fcover(1:2) = 4*fw*HL*fb` 是墙面积对地面积之比，可以大于 1（本例 1.58）。原来校验要求 ≤ 1。
+5. history：城市分支不碰 `assimsun/sha`、`etrsun/sha`、`gssun/sha`、`rstfacsha`、`frcsat`、`rsur_se`、`qlayer`，`rootr` 在 `CoLMMAIN_Urban` 里也是局部量。它们停在分配值 `spval`，`acc1d` 跳过，但网格写出时 `filter = patchtype < 99`（`qlayer`/`rootr` 是 `<= 2`）仍把城市面积算进分母。城市 patch 现在对这些量交一次 `spval`，计入分母、不进和。
+6. 城市时间重启：一块里有多个城市单元，各单元只改自己那一格，合并后写一份。原来只看第 0 个 patch，空间里就静默不写。
+
+**验收**（纯 Fortran = Fortran 前处理 + Fortran 内核；纯 Rust = Rust 前处理 + Rust 运行期；3 天）：
+- restart 7 份（含城市重启）、history 2 份，全部逐位一致。
+- 单点城市回归 `hp nu su1 uc1 uh1 uh2 uo up uy` 全部一致（`nuc` 是续跑目录，不走 `regress.sh`）。

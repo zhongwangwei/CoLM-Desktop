@@ -40,3 +40,24 @@ fn parts_are_sorted_by_latitude_then_longitude() {
     assert!((value - 280.0).abs() < 1.0e-12);
 }
 
+
+/// `set_missing_value`：缺测格的份面积清零、面积和重算；全落在缺测格上的 set 掩掉。
+#[test]
+fn missing_cells_drop_out_of_the_mapping() {
+    let grid = one_degree_grid();
+    let pixel = half_degree_pixels();
+    let mut mapping = AreaWeightedMapping::build(
+        &grid,
+        &pixel,
+        &[vec![(1, 1), (3, 1)], vec![(1, 1)]],
+        &[1.0, 1.0],
+    )
+    .unwrap();
+    // 格子 (ilon 0, ilat 0) 缺测。
+    let mask = mapping.set_missing_value(|ilon, ilat| if (ilon, ilat) == (0, 0) { -9999.0 } else { 1.0 }, -9999.0);
+    assert_eq!(mask, vec![true, false]);
+    assert_eq!(mapping.area[1], 0.0);
+    assert_eq!(mapping.area[0], areaquad(23.0, 23.5, 114.0, 114.5));
+    // `round(7·a)/a`：FMA 链下常数场映射回来差 1 ulp 以内。
+    assert!((mapping.grid_to_set(0, |_, _| 7.0) - 7.0).abs() < 1.0e-14);
+}

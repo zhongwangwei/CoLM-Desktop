@@ -232,13 +232,18 @@ fn validate(input: UrbanGroundFluxInput) -> Result<()> {
         "urban ground-flux physical inputs are invalid"
     );
     ensure!(
+        // 墙的 `fcover(1:2) = 4*fw*HL*fb` 是墙面积对地面积之比，可以大于 1（`MOD_Urban_Longwave.F90:216`）。
         input
             .cover_fraction
             .iter()
-            .all(|value| { value.is_finite() && *value >= 0.0 && *value <= 1.0 })
+            .enumerate()
+            .all(|(surface, value)| {
+                value.is_finite() && *value >= 0.0 && (matches!(surface, 1 | 2) || *value <= 1.0)
+            })
             && input.cover_fraction[0] < 1.0
             && input.cover_fraction[3] + input.cover_fraction[4] > 0.0,
-        "urban ground-flux cover fractions are invalid"
+        "urban ground-flux cover fractions are invalid: {:?}",
+        input.cover_fraction
     );
     Ok(())
 }

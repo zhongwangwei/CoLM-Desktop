@@ -1782,8 +1782,10 @@ pub fn mesh_cell_area_weights(mesh: &FlatMesh, pixel: &PixelAxes) -> Result<Vec<
         .zip(&pixel.lat_n)
         .map(|(&south, &north)| {
             let area = (north * DEG2RAD).sin() - (south * DEG2RAD).sin();
+            // 两套网格的格边差 1 ulp 时，上游的像元轴里也留着 ~1e-15° 的细条（城市的 5km 网格就会），
+            // 它们不属于任何网格元，`sin` 之差可以恰为 0；`areaquad` 本身不做检查。
             ensure!(
-                area.is_finite() && area > 0.0,
+                area.is_finite() && area >= 0.0,
                 "pixel latitude has invalid area"
             );
             Ok(area)
@@ -3105,7 +3107,8 @@ fn tile_values<T: NcTypeDescriptor + Copy>(
                 .position(|dimension| {
                     matches!(
                         dimension.name().to_ascii_lowercase().as_str(),
-                        "time" | "month" | "mon"
+                        // 城市瓦片的 `POP_DEN(year, lat, lon)` 按年份切片（`read_5x5_data_time`）。
+                        "time" | "month" | "mon" | "year"
                     )
                 })
                 .unwrap_or(2);

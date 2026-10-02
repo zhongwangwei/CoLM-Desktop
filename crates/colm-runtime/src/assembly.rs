@@ -691,6 +691,9 @@ enum LeafAreaSource {
         end_year: i32,
         /// `DEF_USE_LAIFEEDBACK` 时 `LAI_readin` 不读 `LAI_patches`（上游 mksrfdata 也不写它）。
         leaf_area: bool,
+        /// 城市 patch：`UrbanLAI_readin` 读 `urban/<年>/LAI/urban_{LAI,SAI}_<月>` 的
+        /// `TREE_LAI/TREE_SAI`，下标是城市单元号（此时 `patch` 存的是它）。
+        urban: bool,
     },
 }
 
@@ -713,10 +716,36 @@ impl MonthlyLeafAreaIndex {
                 start_year,
                 end_year,
                 leaf_area,
+                urban: false,
             },
             change_yearly,
             land_cover_year,
             urban_year_bounds: None,
+        }
+    }
+
+    /// 空间算例的城市树冠 LAI（`UrbanLAI_readin` 的非单点支）：第 `urban` 个城市单元。
+    pub fn read_urban_grid(
+        landdata: impl AsRef<std::path::Path>,
+        block: &str,
+        urban: usize,
+        change_yearly: bool,
+        land_cover_year: i32,
+        (start_year, end_year): (i32, i32),
+    ) -> Self {
+        Self {
+            vegetation: LeafAreaSource::Grid {
+                directory: landdata.as_ref().join("urban"),
+                block: block.to_string(),
+                patch: urban,
+                start_year,
+                end_year,
+                leaf_area: true,
+                urban: true,
+            },
+            change_yearly,
+            land_cover_year,
+            urban_year_bounds: Some((start_year, end_year)),
         }
     }
 
@@ -785,24 +814,34 @@ impl MonthlyLeafAreaIndex {
                 start_year,
                 end_year,
                 leaf_area,
+                urban,
             } => {
                 let year = year.max(*start_year).min(*end_year);
-                let read = |stem: &str| -> Result<f64> {
+                let read = |stem: &str, variable: &str| -> Result<f64> {
                     let path = directory
                         .join(format!("{year:04}"))
                         .join(format!("{stem}{month:02}_{block}.nc"));
                     let file = colm_init::RestartFile::open(&path)
                         .with_context(|| format!("cannot open {}", path.display()))?;
-                    file.floats(stem)?.get(*patch).copied().with_context(|| {
-                        format!("{} has no {stem} value for patch {patch}", path.display())
-                    })
+                    file.floats(variable)?
+                        .get(*patch)
+                        .copied()
+                        .with_context(|| {
+                            format!("{} has no {variable} value for set {patch}", path.display())
+                        })
                 };
+                if *urban {
+                    return Ok((
+                        Some(read("LAI/urban_LAI_", "TREE_LAI")?),
+                        read("LAI/urban_SAI_", "TREE_SAI")?,
+                    ));
+                }
                 let lai = if *leaf_area {
-                    Some(read("LAI_patches")?)
+                    Some(read("LAI_patches", "LAI_patches")?)
                 } else {
                     None
                 };
-                return Ok((lai, read("SAI_patches")?));
+                return Ok((lai, read("SAI_patches", "SAI_patches")?));
             }
         };
         let (lai, sai) = match self.urban_year_bounds {
@@ -2111,7 +2150,9 @@ impl StandardLctRestartTemplate {
                         paddy_ponding_limit_mm: settings.paddy_ponding_limit_mm,
                     }),
                 patch_type: self.patch_type,
-                urban_run: self.physics.urban_run,
+                // 内核里的 `urban_run` 指「这个 patch 走城市分支」：城市跑法里只有城市地类走
+                // `CoLMMAIN_Urban`（`CoLMDRIVER.F90:253`），其余 patch 照常走 `CoLMMAIN`。
+                urban_run: self.physics.urban_run && self.patch_type == 1,
                 // 打开时 `soilwater` 用**叶温内核给的分层根通量**替换
                 // 「蒸腾 × rootfr」那一支（`MOD_SoilSnowHydrology.F90` 的
                 // `IF (input%plant_hydraulics)`）；两个内核必须同时打开，
@@ -3253,12 +3294,20 @@ impl UrbanTemplate {
             .with_context(|| format!("cannot open {}", constant_path.display()))?;
         let time = RestartFile::open(&time_path)
             .with_context(|| format!("cannot open {}", time_path.display()))?;
+        // `landurban` 按 landpatch 里城市 patch 的顺序建（`urban2patch` 单调），
+        // 所以本 patch 的城市单元号就是它前面城市 patch 的个数。
         let urban_count = constant.dimension("urban")?;
+        let index = main_constant
+            .integers("patchtype")?
+            .get(..patch)
+            .context("the constant restart has fewer patches than the urban patch index")?
+            .iter()
+            .filter(|&&kind| kind == 1)
+            .count();
         ensure!(
-            urban_count == 1,
-            "the Rust urban runtime runs one urban unit, the restart has {urban_count}"
+            index < urban_count,
+            "urban patch {patch} is urban unit {index}, but the urban restart has {urban_count}"
         );
-        let index = 0;
         let scalar_u = |file: &RestartFile, name: &str| -> Result<f64> {
             file.floats(name)?
                 .get(index)

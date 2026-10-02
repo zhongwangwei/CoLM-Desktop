@@ -160,6 +160,39 @@ pub(super) struct Variable {
     pub(super) offset: i32,
 }
 
+impl Variable {
+    /// `trim(vname) == 'NULL' .or. trim(tintalgo) == 'NULL'`：不读、不插值。
+    pub(super) fn is_null(&self) -> bool {
+        self.name.trim() == "NULL" || self.interpolation == Interpolation::Null
+    }
+}
+
+/// `metfilename` 有分支的数据集（`MOD_UserSpecifiedForcing.F90:178-685`，不含单点的 POINT）。
+/// GSWP2 只在 `metpreprocess` 里有分支，`metfilename` 没有，上游也跑不了。
+const DATASETS: [&str; 21] = [
+    "PRINCETON",
+    "GSWP3",
+    "QIAN",
+    "CRUNCEPV4",
+    "CRUNCEPV7",
+    "ERA5LAND",
+    "ERA5",
+    "MSWX",
+    "WFDE5",
+    "CRUJRA",
+    "WFDEI",
+    "JRA3Q",
+    "JRA55",
+    "GDAS",
+    "CLDAS",
+    "CMFD",
+    "CMFDv2",
+    "CMIP6",
+    "CRA40",
+    "TPMFD",
+    "IsoGSM",
+];
+
 /// `DEF_forcing` 的网格部分。
 #[derive(Debug, Clone, PartialEq)]
 pub struct GriddedForcingConfig {
@@ -177,6 +210,11 @@ pub struct GriddedForcingConfig {
     latname: String,
     lonname: String,
     regional: Option<GridBounds>,
+    /// `DEF_forcing%dim2d`：经纬度是二维 `(lat, lon)` 数组，取第一列/第一行（`metread_latlon`）。
+    dim2d: bool,
+    /// `DEF_forcing%has_missing_value` 与 `missing_value_name`（缺测值取第一个变量的这个属性）。
+    pub has_missing_value: bool,
+    missing_value_name: String,
     pub height_wind_m: f64,
     pub height_temperature_m: f64,
     pub height_humidity_m: f64,
@@ -188,24 +226,26 @@ impl GriddedForcingConfig {
     pub fn from_document(forcing: &Document) -> Result<Self> {
         let dataset = string(forcing, "DEF_forcing%dataset")?;
         ensure!(
-            matches!(dataset.trim(), "JRA3Q" | "IsoGSM"),
-            "the Rust spatial runtime reads the JRA3Q and IsoGSM file layouts only; \
-             DEF_forcing%dataset = {dataset:?} needs its own `metfilename` branch (use --engine fortran)"
+            DATASETS.contains(&dataset.trim()),
+            "DEF_forcing%dataset = {dataset:?} has no `metfilename` branch upstream (POINT is the \
+             single-point reader)"
         );
-        ensure!(
-            !boolean(forcing, "DEF_forcing%has_missing_value", false)?,
-            "DEF_forcing%has_missing_value is not ported to the Rust spatial runtime"
-        );
+        let has_missing_value = boolean(forcing, "DEF_forcing%has_missing_value", false)?;
+        let missing_value_name = if has_missing_value {
+            string(forcing, "DEF_forcing%missing_value_name")?
+        } else {
+            String::new()
+        };
         ensure!(
             boolean(forcing, "DEF_forcing%solarin_all_band", true)?,
             "only DEF_forcing%solarin_all_band = .true. is ported"
         );
         ensure!(
             boolean(forcing, "DEF_forcing%data2d", true)?
-                && !boolean(forcing, "DEF_forcing%hightdim", false)?
-                && !boolean(forcing, "DEF_forcing%dim2d", false)?,
-            "only 1-d lat/lon forcing files without a height dimension are ported"
+                && !boolean(forcing, "DEF_forcing%hightdim", false)?,
+            "only (time, lat, lon) forcing files without a height dimension are ported"
         );
+        let dim2d = boolean(forcing, "DEF_forcing%dim2d", false)?;
         let nvar = usize::try_from(integer(forcing, "DEF_forcing%NVAR")?)?;
         ensure!(
             nvar == 8,
@@ -238,9 +278,30 @@ impl GriddedForcingConfig {
                 })
             })
             .collect::<Result<Vec<_>>>()?;
+        // `vname = 'NULL'` 或 `tintalgo = 'NULL'` 的变量不读（`metreadLBUB`/`read_forcing` 都 CYCLE）。
+        // 温度要用来定义网格与缺测掩膜，比湿、气压、降水、两支辐射是派生量的来源，都不能缺；
+        // 风只缺一支时另一支除以 sqrt(2) 给两支，两支都缺上游停机。
+        for (i, what) in [
+            (0, "temperature"),
+            (1, "humidity"),
+            (2, "pressure"),
+            (3, "precipitation"),
+            (6, "shortwave"),
+        ] {
+            ensure!(
+                !variables[i].is_null(),
+                "forcing variable {} ({what}) is NULL; upstream cannot run without it",
+                i + 1
+            );
+        }
         ensure!(
-            variables.iter().all(|v| v.name.trim() != "NULL"),
-            "forcing layouts with NULL variables are not ported"
+            !(variables[4].is_null() && variables[5].is_null()),
+            "At least one of the wind components must be provided! (upstream stops too)"
+        );
+        // QIAN 由 `metpreprocess` 从温度、比湿、气压算长波，其余数据集都要读它。
+        ensure!(
+            !variables[7].is_null() || dataset.trim() == "QIAN",
+            "forcing variable 8 (longwave) is NULL; only QIAN derives it"
         );
         let groupby_text = string(forcing, "DEF_forcing%groupby")?;
         let groupby = match groupby_text.trim() {
@@ -274,21 +335,28 @@ impl GriddedForcingConfig {
             latname: string(forcing, "DEF_forcing%latname")?,
             lonname: string(forcing, "DEF_forcing%lonname")?,
             regional,
+            dim2d,
+            has_missing_value,
+            missing_value_name,
             height_wind_m: real(forcing, "DEF_forcing%HEIGHT_V")?,
             height_temperature_m: real(forcing, "DEF_forcing%HEIGHT_T")?,
             height_humidity_m: real(forcing, "DEF_forcing%HEIGHT_Q")?,
         })
     }
 
-    /// `trim(dir_forcing)//metfilename(...)`：JRA3Q 是 `'/'//prefix//'_'//YYYY//'_'//MM//'.nc'`，
-    /// IsoGSM 是 `'/'//prefix//'_'//YYYY//'.nc'`。
+    /// `trim(dir_forcing)//metfilename(year, month, day, var_i)`（`MOD_UserSpecifiedForcing.F90:178-685`）。
     pub(super) fn file_name(&self, year: i32, month: i32, variable: usize) -> PathBuf {
         let directory = self.directory.to_string_lossy();
-        let prefix = self.variables[variable].prefix.trim();
-        PathBuf::from(match self.dataset.trim() {
-            "IsoGSM" => format!("{directory}/{prefix}_{year:04}.nc"),
-            _ => format!("{directory}/{prefix}_{year:04}_{month:02}.nc"),
-        })
+        PathBuf::from(format!(
+            "{directory}{}",
+            metfilename(
+                self.dataset.trim(),
+                self.variables[variable].prefix.trim(),
+                year,
+                month,
+                variable
+            )
+        ))
     }
 
     /// `setstampLB`：返回文件年、月与记录号（1 起），并给出下界时间戳。
@@ -448,6 +516,213 @@ fn floor_div(numerator: i32, denominator: i32) -> i32 {
     (f64::from(numerator) / f64::from(denominator)).floor() as i32
 }
 
+/// `metpreprocess`（`MOD_UserSpecifiedForcing.F90:705-977`）：逐格按数据集做单位换算与截断，
+/// 最后（各支都有）把比湿截到饱和比湿。`values` 按变量 0..8：t、q、p、降水、u、v、短波、长波；
+/// NULL 变量是空的（长波在 QIAN 下是占位，这里算出来）。内核以 `-fdefault-real-8` 编译，
+/// 字面量（`212.0`、`1000./3600.`、`0.5E-05` 等）都是双精度，按书写顺序求值。
+pub(super) fn metpreprocess(
+    dataset: &str,
+    values: &mut [Vec<f64>],
+    n: usize,
+    skipped: &[bool],
+) -> Result<()> {
+    const STEFNC: f64 = 5.67e-8;
+    let qcap = |values: &mut [Vec<f64>], i: usize| -> Result<()> {
+        let saturation = colm_core::saturation_specific_humidity(values[0][i], values[2][i])?;
+        if saturation.specific_humidity < values[1][i] {
+            values[1][i] = saturation.specific_humidity;
+        }
+        Ok(())
+    };
+    let cap_wind = |w: &mut f64| {
+        if w.abs() > 40.0 {
+            *w = 40.0 * *w / w.abs();
+        }
+    };
+    for i in 0..n {
+        if skipped[i] {
+            continue;
+        }
+        match dataset {
+            "PRINCETON" | "WFDE5" | "WFDEI" | "CMFDv2" | "GDAS" | "IsoGSM" | "JRA3Q" => {
+                qcap(values, i)?;
+            }
+            "GSWP3" => {
+                if values[0][i] < 212.0 {
+                    values[0][i] = 212.0;
+                }
+                if values[3][i] < 0.0 {
+                    values[3][i] = 0.0;
+                }
+                qcap(values, i)?;
+            }
+            "QIAN" => {
+                qcap(values, i)?;
+                // GIMPLE：`e = (p*q) / FMA(q, 0.378, 0.622)`，`ea = FMA(e*5.95e-7, exp(1500/t), 0.70)`
+                // （`5.95e-05_R8*0.01_R8` 编译期折叠），`t**4` 是 `(t*t)*(t*t)`。
+                let (t, q, p) = (values[0][i], values[1][i], values[2][i]);
+                let e = p * q / q.mul_add(0.378, 0.622);
+                let ea = (e * (5.95e-05 * 0.01)).mul_add((1500.0 / t).exp(), 0.70);
+                let t2 = t * t;
+                values[7][i] = ea * STEFNC * (t2 * t2);
+            }
+            "CRUNCEPV4" | "CRUNCEPV7" => {
+                if values[0][i] < 212.0 {
+                    values[0][i] = 212.0;
+                }
+                if values[3][i] < 0.0 {
+                    values[3][i] = 0.0;
+                }
+                if values[6][i] < 0.0 {
+                    values[6][i] = 0.0;
+                }
+                // V7 上游注掉了 u 那一行（它的 u 是 NULL）。
+                if dataset == "CRUNCEPV4" && !values[4].is_empty() {
+                    cap_wind(&mut values[4][i]);
+                }
+                if !values[5].is_empty() {
+                    cap_wind(&mut values[5][i]);
+                }
+                qcap(values, i)?;
+            }
+            "ERA5LAND" => {
+                values[3][i] = values[3][i] * 1000.0 / 3600.0;
+                qcap(values, i)?;
+            }
+            "ERA5" => {
+                if values[3][i] < 0.0 {
+                    values[3][i] = 0.0;
+                }
+                for k in [4, 5] {
+                    if !values[k].is_empty() && values[k][i].abs() > 40.0 {
+                        values[k][i] = 40.0 * 1.0_f64.copysign(values[k][i]);
+                    }
+                }
+                qcap(values, i)?;
+                if values[3][i] < 0.0 {
+                    values[3][i] = 0.0;
+                }
+            }
+            "MSWX" => {
+                values[0][i] += 273.15;
+                values[3][i] /= 10800.0;
+                if values[3][i] > 1000.0 {
+                    values[3][i] = 0.0;
+                }
+                qcap(values, i)?;
+                if values[1][i] < 0.5e-05 {
+                    values[1][i] = 0.5e-05;
+                }
+            }
+            "CLDAS" | "CMFD" => {
+                values[3][i] /= 3600.0;
+                qcap(values, i)?;
+            }
+            "CRUJRA" => {
+                values[3][i] /= 21600.0;
+                values[6][i] /= 21600.0;
+                qcap(values, i)?;
+            }
+            "JRA55" => {
+                values[3][i] /= 86400.0;
+                qcap(values, i)?;
+            }
+            "TPMFD" => {
+                values[3][i] /= 3600.0;
+                values[2][i] *= 100.0;
+                qcap(values, i)?;
+            }
+            "CMIP6" | "CRA40" => {
+                // CRA40 在上游 `metpreprocess` 里没有分支：不做任何处理。
+                if dataset == "CMIP6" {
+                    if values[3][i] < 0.0 {
+                        values[3][i] = 0.0;
+                    }
+                    qcap(values, i)?;
+                    if values[3][i] < 0.0 {
+                        values[3][i] = 0.0;
+                    }
+                }
+            }
+            other => bail!("metpreprocess has no branch for {other}"),
+        }
+    }
+    Ok(())
+}
+
+/// QIAN 的短波拆分（`MOD_Forcing.F90:577-589`）。GIMPLE：
+/// `ratio = min(max(FMA(h³, c3, FNMA(h², c2, FMA(h, c1, c0))), 0.01), 0.99)`，`h³ = h*(h*h)`；
+/// 直射 `h*ratio`、散射 `(1-ratio)*h`。
+fn qian_shortwave(solarin: f64) -> ShortwaveForcing {
+    let h = solarin * 0.5;
+    let h2 = h * h;
+    let h3 = h * h2;
+    let ratio = |c0: f64, c1: f64, c2: f64, c3: f64| {
+        h3.mul_add(c3, (-h2).mul_add(c2, h.mul_add(c1, c0)))
+            .max(0.01)
+            .min(0.99)
+    };
+    let nir = ratio(0.29548, 0.00504, 1.4957e-05, 1.4881e-08);
+    let vis = ratio(0.17639, 0.00380, 9.0039e-06, 8.1351e-09);
+    ShortwaveForcing {
+        direct_visible_w_m2: h * vis,
+        diffuse_visible_w_m2: (1.0 - vis) * h,
+        direct_near_infrared_w_m2: h * nir,
+        diffuse_near_infrared_w_m2: (1.0 - nir) * h,
+    }
+}
+
+/// `metfilename`：各数据集的文件命名，`variable` 是 0 起的变量下标（上游 `var_i - 1`）。
+/// 数据集名已在读配置时核对过。
+pub(super) fn metfilename(
+    dataset: &str,
+    prefix: &str,
+    year: i32,
+    month: i32,
+    variable: usize,
+) -> String {
+    let y = format!("{year:04}");
+    let m = format!("{month:02}");
+    match dataset {
+        "PRINCETON" => format!("/{prefix}{y}-{y}.nc"),
+        "GSWP3" | "QIAN" | "CRUNCEPV4" | "CRUNCEPV7" | "WFDEI" => format!("/{prefix}{y}-{m}.nc"),
+        "ERA5LAND" => {
+            const SUFFIX: [&str; 8] = [
+                "_2m_temperature.nc",
+                "_specific_humidity.nc",
+                "_surface_pressure.nc",
+                "_total_precipitation_m_hr.nc",
+                "_10m_u_component_of_wind.nc",
+                "_10m_v_component_of_wind.nc",
+                "_surface_solar_radiation_downwards_w_m2.nc",
+                "_surface_thermal_radiation_downwards_w_m2.nc",
+            ];
+            format!("/{prefix}_{y}_{m}{}", SUFFIX[variable])
+        }
+        "ERA5" => {
+            const SUFFIX: [&str; 8] = [
+                "_2m_temperature.nc4",
+                "_q.nc4",
+                "_surface_pressure.nc4",
+                "_mean_total_precipitation_rate.nc4",
+                "_10m_u_component_of_wind.nc4",
+                "_10m_v_component_of_wind.nc4",
+                "_mean_surface_downward_short_wave_radiation_flux.nc4",
+                "_mean_surface_downward_long_wave_radiation_flux.nc4",
+            ];
+            format!("/{prefix}_{y}_{m}{}", SUFFIX[variable])
+        }
+        "MSWX" | "JRA3Q" => format!("/{prefix}_{y}_{m}.nc"),
+        "WFDE5" => format!("/{prefix}{y}{m}_v2.1.nc"),
+        "CRUJRA" => format!("/{prefix}{y}.365d.noc.nc"),
+        "JRA55" | "CMFDv2" | "TPMFD" => format!("/{prefix}{y}{m}.nc"),
+        "GDAS" | "CMFD" => format!("/{prefix}{y}{m}.nc4"),
+        "CLDAS" => format!("/{prefix}-{y}{m}.nc"),
+        "CMIP6" | "CRA40" | "IsoGSM" => format!("/{prefix}_{y}.nc"),
+        other => unreachable!("dataset {other} has no metfilename branch"),
+    }
+}
+
 /// 格上派生好的一步强迫（`forc_xy_*`），每个量一份，按 [`GriddedForcing::cells`] 的顺序。
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct CellForcing {
@@ -492,6 +767,11 @@ pub struct GriddedForcing {
     /// 读文件用的纬度/经度窗口（闭区间，0 起）。经度跨越时读整行。
     lat_window: (usize, usize),
     lon_window: (usize, usize),
+    /// `forc_missing_value`（`has_missing_value` 时）：第一个变量上界等于它的格子不做
+    /// `metpreprocess`、不重算短波拆分（沿用上一步的值）。
+    missing: Option<f64>,
+    /// `forc_xy_sols/soll/solsd/solld` 是常驻的块数据：跳过的格子保留上一步的值（起初为 0）。
+    split: Vec<ShortwaveForcing>,
 }
 
 impl GriddedForcing {
@@ -501,8 +781,43 @@ impl GriddedForcing {
         let path = config.file_name(year, month, 0);
         let file = netcdf::open(&path)
             .with_context(|| format!("cannot open the forcing file {}", path.display()))?;
-        let lat = read_axis(&file, config.latname.trim(), &path)?;
-        let lon = read_axis(&file, config.lonname.trim(), &path)?;
+        let (lat, lon) = if config.dim2d {
+            // Fortran `latxy(lon, lat)` 即 netCDF 的 `(lat, lon)`：`lat_in = latxy(1,:)` 是第一列，
+            // `lon_in = lonxy(:,1)` 是第一行。
+            let read = |name: &str| -> Result<(Vec<f64>, usize, usize)> {
+                let variable = file
+                    .variable(name)
+                    .with_context(|| format!("{} has no {name}", path.display()))?;
+                let dims = variable.dimensions();
+                ensure!(
+                    dims.len() == 2,
+                    "{name} in {} must be two-dimensional",
+                    path.display()
+                );
+                let (rows, columns) = (dims[0].len(), dims[1].len());
+                let values = variable
+                    .get_values::<f64, _>(..)
+                    .with_context(|| format!("cannot read {name} from {}", path.display()))?;
+                Ok((values, rows, columns))
+            };
+            let (latxy, rows, columns) = read(config.latname.trim())?;
+            let (lonxy, lon_rows, lon_columns) = read(config.lonname.trim())?;
+            ensure!(
+                (rows, columns) == (lon_rows, lon_columns),
+                "{} and {} have different shapes",
+                config.latname.trim(),
+                config.lonname.trim()
+            );
+            (
+                (0..rows).map(|r| latxy[r * columns]).collect::<Vec<_>>(),
+                lonxy[..columns].to_vec(),
+            )
+        } else {
+            (
+                read_axis(&file, config.latname.trim(), &path)?,
+                read_axis(&file, config.lonname.trim(), &path)?,
+            )
+        };
         LatLonGrid::define_by_center(&lat, &lon, config.regional)
     }
 
@@ -542,11 +857,61 @@ impl GriddedForcing {
                 variables
             ],
             average_cosine: vec![0.0; cells.len()],
+            missing: None,
+            split: vec![
+                ShortwaveForcing {
+                    direct_visible_w_m2: 0.0,
+                    direct_near_infrared_w_m2: 0.0,
+                    diffuse_visible_w_m2: 0.0,
+                    diffuse_near_infrared_w_m2: 0.0,
+                };
+                cells.len()
+            ],
             cells,
             time_step_seconds,
             lat_window: (lat_min, lat_max),
             lon_window: (lon_min, lon_max),
         })
+    }
+
+    /// `has_missing_value` 的初始化（`MOD_Forcing.F90:196-225`）：缺测值是第一个变量在起始时刻那个
+    /// 文件里的 `missing_value_name` 属性，`metdata` 是那一条记录。返回缺测值与按 `(ilon, ilat)` 取
+    /// 网格值的整幅数据（`set_missing_value` 用它给映射去掉缺测格），并让之后的步跳过缺测格。
+    pub fn missing_field(&mut self, start: CalendarTime) -> Result<Option<(f64, Vec<f64>, usize)>> {
+        if !self.config.has_missing_value {
+            return Ok(None);
+        }
+        let (year, month, record, _) = self.config.lower_record(Stamp::from_calendar(start), 0)?;
+        let path = self.config.file_name(year, month, 0);
+        let file = netcdf::open(&path)
+            .with_context(|| format!("cannot open the forcing file {}", path.display()))?;
+        let name = self.config.variables[0].name.trim();
+        let variable = file
+            .variable(name)
+            .with_context(|| format!("{} has no variable {name}", path.display()))?;
+        let attribute = self.config.missing_value_name.trim();
+        let missing = match variable
+            .attribute_value(attribute)
+            .transpose()?
+            .with_context(|| format!("{name} in {} has no {attribute} attribute", path.display()))?
+        {
+            netcdf::AttributeValue::Double(value) => value,
+            netcdf::AttributeValue::Float(value) => f64::from(value),
+            netcdf::AttributeValue::Int(value) => f64::from(value),
+            netcdf::AttributeValue::Short(value) => f64::from(value),
+            other => bail!("unsupported {attribute} attribute {other:?}"),
+        };
+        let nlon = self.grid.nlon();
+        let field: Vec<f64> = variable.get_values((record - 1, .., ..)).with_context(|| {
+            format!("cannot read {name} record {record} from {}", path.display())
+        })?;
+        ensure!(
+            field.len() == nlon * self.grid.nlat(),
+            "{name} in {} does not cover the forcing grid",
+            path.display()
+        );
+        self.missing = Some(missing);
+        Ok(Some((missing, field, nlon)))
     }
 
     pub fn cells(&self) -> &[(usize, usize)] {
@@ -587,6 +952,10 @@ impl GriddedForcing {
         let mut values: Vec<Vec<f64>> = Vec::with_capacity(self.brackets.len());
         let calendar_now = colm_core::orbital_calendar_day(now.calendar(), true, 0.0)?;
         for (ivar, bracket) in self.brackets.iter().enumerate() {
+            if self.config.variables[ivar].is_null() {
+                values.push(Vec::new());
+                continue;
+            }
             let lower = bracket.lower_stamp.expect("read above");
             let upper = bracket.upper_stamp.expect("read above");
             ensure!(
@@ -646,22 +1015,39 @@ impl GriddedForcing {
                         })
                         .collect()
                 }
-                Interpolation::Null => bail!("NULL interpolation is not ported"),
+                Interpolation::Null => unreachable!("NULL variables are skipped above"),
             };
             values.push(field);
         }
-        // `metpreprocess`（JRA3Q、IsoGSM）：比湿截到饱和比湿；JRA3Q 另把负降水截成 0。
-        let clamp_precipitation = self.config.dataset.trim() == "JRA3Q";
-        #[allow(clippy::needless_range_loop)] // 同一格要同时读 t、p 并改 q
-        for i in 0..n {
-            let saturation = colm_core::saturation_specific_humidity(values[0][i], values[2][i])?;
-            if saturation.specific_humidity < values[1][i] {
-                values[1][i] = saturation.specific_humidity;
-            }
-            if clamp_precipitation && values[3][i] < 0.0 {
-                values[3][i] = 0.0;
-            }
+        // QIAN 的长波由 `metpreprocess` 派生，先占位。
+        if self.config.variables[7].is_null() {
+            values[7] = vec![0.0; n];
         }
+        // 缺测格按第一个变量的**上界**判（`metpreprocess(..., forcn_UB(1), ...)`）。
+        let missing_cell = |i: usize| {
+            self.missing
+                .is_some_and(|missing| self.brackets[0].upper[i] == missing)
+        };
+        let skipped = (0..n).map(missing_cell).collect::<Vec<_>>();
+        metpreprocess(self.config.dataset.trim(), &mut values, n, &skipped)?;
+        // 风：两支都有就各用各的；只有一支时那一支乘 `1/sqrt(2)` 给两支（`sca = 1/sqrt(2.0_r8)`）。
+        let (us, vs) = match (
+            self.config.variables[4].is_null(),
+            self.config.variables[5].is_null(),
+        ) {
+            (false, false) => (values[4].clone(), values[5].clone()),
+            (false, true) | (true, false) => {
+                let one = if self.config.variables[4].is_null() {
+                    &values[5]
+                } else {
+                    &values[4]
+                };
+                let scale = 1.0 / 2.0_f64.sqrt();
+                let wind = one.iter().map(|w| w * scale).collect::<Vec<_>>();
+                (wind.clone(), wind)
+            }
+            (true, true) => unreachable!("checked when the configuration was read"),
+        };
         let mut out = CellForcing {
             t: values[0].clone(),
             q: values[1].clone(),
@@ -672,13 +1058,24 @@ impl GriddedForcing {
             prc: values[3].iter().map(|p| p * (1.0 / 3.0)).collect(),
             solarin: values[6].clone(),
             frl: values[7].clone(),
-            us: values[4].clone(),
-            vs: values[5].clone(),
+            us,
+            vs,
             ..CellForcing::default()
         };
-        // 全波段短波拆分：`a = max(0, solarin)`，`sunang` 取格心、`calendarday(idate)`。
+        // 全波段短波拆分：QIAN 用 CLM4.5 的经验多项式（`MOD_Forcing.F90:568-591`），
+        // 其余 `a = max(0, solarin)`，`sunang` 取格心、`calendarday(idate)`。
+        let qian = self.config.dataset.trim() == "QIAN";
         let mut split = Vec::with_capacity(n);
         for i in 0..n {
+            if qian {
+                split.push(qian_shortwave(out.solarin[i]));
+                continue;
+            }
+            // 缺测格 `CYCLE`：`forc_xy_sol*` 保留上一步的值。
+            if skipped[i] {
+                split.push(self.split[i]);
+                continue;
+            }
             let (ilon, ilat) = self.cells[i];
             let sun = colm_core::orbital_cosine_zenith(
                 calendar_now,
@@ -690,6 +1087,7 @@ impl GriddedForcing {
                 sun,
             ));
         }
+        self.split.clone_from(&split);
         let pick = |f: fn(&ShortwaveForcing) -> f64| split.iter().map(f).collect::<Vec<_>>();
         out.sols = pick(|s| s.direct_visible_w_m2);
         out.soll = pick(|s| s.direct_near_infrared_w_m2);
@@ -703,6 +1101,9 @@ impl GriddedForcing {
     /// `metreadLBUB`
     fn read_brackets(&mut self, now: Stamp) -> Result<()> {
         for ivar in 0..self.brackets.len() {
+            if self.config.variables[ivar].is_null() {
+                continue;
+            }
             let bracket = &self.brackets[ivar];
             if let (Some(lower), Some(upper)) = (bracket.lower_stamp, bracket.upper_stamp) {
                 if lower.less_equal(now) && now.less_than(upper) {
