@@ -334,6 +334,19 @@
 - **处理**：vendor 未改，因为上游要么补按天的文件名，要么删掉这个选项。Rust 在解析强迫配置时直接拒绝 `day`，
   报错信息说明原因（第 522 轮）；此前它只笼统报"not ported"。
 
+### 42. 双线性强迫映射会取到区域块覆盖之外的格子
+
+- **位置**：`share/MOD_SpatialMapping.F90:537-989`（`spatial_mapping_build_bilinear`），越界点在 `:753` 的 `gblock%pio(xblk,yblk)`。
+- **原因**：
+  - `grid_set_blocks`（`share/MOD_Grid.F90:496-679`）只给与 `DEF_domain` 相交的强迫行列分配块号，其余是 0；
+  - 双线性按 patch 中心找两侧格心，中心落在最外一排格心与区域边界之间时，另一侧的格心在区域外，于是 `xblk/yblk = 0`。
+- **证据**：g1f 底（区域 23–25°N、113–115°E，合成 CMFD 强迫）加 `DEF_Forcing_Interp_Method = 'bilinear'`。
+  - 生产内核：在 "Building bilinear interpolation" 之后 SIGSEGV；
+  - 带越界检查的 debug 内核：`At line 753 of file share/MOD_SpatialMapping.F90: Index '0' of dimension 2 of array 'gblock%pio' below lower bound of 1`。
+- **影响**：几乎所有区域算例都会撞上。即使不越界，那些格子的强迫也不在读入的块里。只有全球区域才能跑。
+- **处理**：vendor 未改。正确的修法要上游决定：是把双线性的邻格扩进块覆盖，还是在区域边缘退化为最近格心。
+  Rust 已按上游写法移植 `build_bilinear`（含单测），但入口拒绝 `bilinear` 并说明原因（第 525 轮）。
+
 ## 二、TRACER 编译开关改变了物理（需要上游确认哪一边是对的）
 
 这一版上游在很多地方给 TRACER 构建和非 TRACER 构建写了**不同的物理**，不只是记账不同。

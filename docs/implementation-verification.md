@@ -28626,3 +28626,13 @@ Rust 原来在两处都把活跃写死成"土壤或湿地"：
   - 区域网格边外取最近一列；
   - 加了单测。
 - 但上游 latlon（FLAT_SPMD）内核在 "Building bilinear interpolation" 之后段错误，没有可对照的参照。所以入口暂时仍拒绝，原因在查。
+
+## 第 525 轮：双线性强迫映射的上游崩溃
+
+第 524 轮遗留的问题查清了：上游双线性映射取邻格时不看 `DEF_domain` 的块覆盖，区域边缘外的行列块号是 0，`gblock%pio` 越界（upstream-bugs 第 42 条）。
+定位过程：
+- 生产内核直接 SIGSEGV；
+- lldb 直接起 MPI 程序会卡在初始化；
+- 最后用 `COLM_KERNEL_PROFILE=debug` 编了带越界检查的 latlon 内核（scratchpad 的 `kdbg/`），运行期报出 `MOD_SpatialMapping.F90:753` 与越界的下标。
+
+Rust 保持拒绝，报错信息改为说明原因，`build_bilinear` 与单测保留。

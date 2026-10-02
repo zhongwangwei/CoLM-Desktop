@@ -604,13 +604,14 @@ impl SpatialRuntimeConfig {
             "unknown DEF_Forcing_Interp_Method = {interpolation:?}; upstream accepts 'arealweight' \
              and 'bilinear'"
         );
-        // `build_bilinear` 已移植，但上游 latlon（FLAT_SPMD）内核在建双线性映射时段错误，
-        // 还没有可逐位对照的参照，先拒绝。
+        // `build_bilinear` 已移植，但上游取邻格时不看 `DEF_domain` 的块覆盖：区域边缘外的强迫行列
+        // `yblk/xblk = 0`，`gblock%pio(xblk, 0)` 越界（upstream-bugs 第 42 条），那些格子的强迫也从不读入。
+        // 没有可对齐的上游结果，拒绝。
         anyhow::ensure!(
             interpolation == "arealweight",
-            "DEF_Forcing_Interp_Method = 'bilinear' is not verified against the Fortran kernel yet \
-             (the upstream latlon kernel crashes while building the bilinear mapping); run this \
-             case with --engine fortran"
+            "DEF_Forcing_Interp_Method = 'bilinear' has no defined upstream result on regional \
+             domains: the bilinear mapping picks forcing cells outside the domain blocks and indexes \
+             gblock%pio out of bounds (upstream crashes); use 'arealweight'"
         );
         for (key, what) in [
             ("DEF_USE_Forcing_Downscaling", "forcing downscaling"),
