@@ -30,13 +30,29 @@ pub struct PftTemplate {
     site_pft_count: usize,
 }
 
-/// `LAI_readin` 的 PFT 段（`MOD_LAIReadin.F90:166-185`，单点）。
+/// `LAI_readin` 的 PFT 段的数据源。
+#[derive(Debug, Clone)]
+enum PftLeafAreaSource {
+    /// 单点（`MOD_LAIReadin.F90:166-185`）：站点表；patch 的 `tlai`/`tsai` 是按站点份额的和。
+    SinglePoint {
+        vegetation: colm_init::SinglePointPftMonthlyVegetation,
+        /// 全站 PFT 的站点份额 `SITE_pctpfts`（作物站点恒为 1）。
+        site_fraction: Vec<f64>,
+        use_site_lai: bool,
+    },
+    /// 空间（`MOD_LAIReadin.F90:192-232`）：`landdata/LAI/<年>/` 的分块向量 `LAI/SAI_patches<月>`
+    /// （patch 的 `tlai`/`tsai`，第 `patch` 个）与 `LAI/SAI_pfts<月>`（本 patch 的 PFT 区间）。
+    Grid {
+        directory: PathBuf,
+        block: String,
+        patch: usize,
+    },
+}
+
+/// `LAI_readin` 的 PFT 段。
 #[derive(Debug, Clone)]
 struct PftMonthlyLeafAreaIndex {
-    vegetation: colm_init::SinglePointPftMonthlyVegetation,
-    /// 全站 PFT 的站点份额 `SITE_pctpfts`（作物站点恒为 1）。
-    site_fraction: Vec<f64>,
-    use_site_lai: bool,
+    source: PftLeafAreaSource,
     change_yearly: bool,
     land_cover_year: i32,
     start_year: i32,
@@ -77,6 +93,123 @@ pub fn patch_pft_range(
     }
 }
 
+/// 空间算例里每个（块内）patch 的 PFT 区间（`map_patch_to_pft`，`MOD_LandPFT.F90:264-320`）：
+/// 沿 `landpft` 顺序走一个指针 ——
+/// - 自然土壤 patch（`patchtype == 0`，CROP 内核下还要不是 `CROPLAND`）吃掉后面同 `eindex`、
+///   同 `ipxstt`、`settyp < N_PFT` 的那一串；
+/// - CROP 内核的农田 patch 恰好吃一个；
+/// - 其余 patch 为空。
+///
+/// `N_PFT` 不开 CROP 是 16，开 CROP 是 15（`MOD_Vars_Global.F90:41-47`）。
+pub fn spatial_pft_ranges(
+    landdata: &Path,
+    year: i32,
+    block: &str,
+    scheme: colm_core::LandCoverScheme,
+    crop: bool,
+) -> Result<Vec<std::ops::Range<usize>>> {
+    /// IGBP 的 `CROPLAND`。
+    const CROPLAND: i64 = 12;
+    let open = |kind: &str| -> Result<(PathBuf, netcdf::File)> {
+        let path = landdata
+            .join(kind)
+            .join(format!("{year:04}"))
+            .join(format!("{kind}_{block}.nc"));
+        let file =
+            netcdf::open(&path).with_context(|| format!("cannot open {}", path.display()))?;
+        Ok((path, file))
+    };
+    let read = |(path, file): &(PathBuf, netcdf::File), name: &str| -> Result<Vec<i64>> {
+        file.variable(name)
+            .with_context(|| format!("{} has no {name}", path.display()))?
+            .get_values::<i64, _>(..)
+            .with_context(|| format!("cannot read {name} from {}", path.display()))
+    };
+    let patches = open("landpatch")?;
+    let pfts = open("landpft")?;
+    let (patch_element, patch_start, patch_type) = (
+        read(&patches, "eindex")?,
+        read(&patches, "ipxstt")?,
+        read(&patches, "settyp")?,
+    );
+    let (pft_element, pft_start, pft_type) = (
+        read(&pfts, "eindex")?,
+        read(&pfts, "ipxstt")?,
+        read(&pfts, "settyp")?,
+    );
+    let n_pft: i64 = if crop { 15 } else { 16 };
+    let mut ipft = 0usize;
+    let mut ranges = Vec::with_capacity(patch_element.len());
+    for p in 0..patch_element.len() {
+        let class = usize::try_from(patch_type[p]).context("a negative patch settyp")?;
+        let kind = colm_core::ClassConstants::new(scheme, class)?.patch_type();
+        let cropland = crop && patch_type[p] == CROPLAND;
+        if kind == 0 && !cropland {
+            let start = ipft;
+            while ipft < pft_element.len()
+                && pft_element[ipft] == patch_element[p]
+                && pft_start[ipft] == patch_start[p]
+                && pft_type[ipft] < n_pft
+            {
+                ipft += 1;
+            }
+            ranges.push(start..ipft);
+        } else if cropland {
+            ensure!(
+                ipft < pft_element.len(),
+                "a cropland patch has no PFT left in landpft"
+            );
+            ranges.push(ipft..ipft + 1);
+            ipft += 1;
+        } else {
+            ranges.push(0..0);
+        }
+    }
+    Ok(ranges)
+}
+
+/// 一块里每个 PFT 的像元与 `pctshared`（`landpft` 的 `eindex/ipxstt/ipxend/pctshared`，按块内顺序）。
+pub fn spatial_pft_pixel_sets(
+    landdata: &Path,
+    year: i32,
+    block: &str,
+) -> Result<colm_init::spatial_static::SpatialPixelSets> {
+    let path = landdata
+        .join("landpft")
+        .join(format!("{year:04}"))
+        .join(format!("landpft_{block}.nc"));
+    let file = netcdf::open(&path).with_context(|| format!("cannot open {}", path.display()))?;
+    let read_i64 = |name: &str| -> Result<Vec<i64>> {
+        file.variable(name)
+            .with_context(|| format!("{} has no {name}", path.display()))?
+            .get_values::<i64, _>(..)
+            .with_context(|| format!("cannot read {name} from {}", path.display()))
+    };
+    let read_i32 = |name: &str| -> Result<Vec<i32>> {
+        file.variable(name)
+            .with_context(|| format!("{} has no {name}", path.display()))?
+            .get_values::<i32, _>(..)
+            .with_context(|| format!("cannot read {name} from {}", path.display()))
+    };
+    let element = read_i64("eindex")?;
+    let shared = match file.variable("pctshared") {
+        Some(variable) => variable
+            .get_values::<f64, _>(..)
+            .with_context(|| format!("cannot read pctshared from {}", path.display()))?,
+        None => vec![1.0; element.len()],
+    };
+    colm_init::spatial_static::read_spatial_pixel_sets(
+        landdata,
+        year,
+        block,
+        &element,
+        &read_i32("ipxstt")?,
+        &read_i32("ipxend")?,
+        &shared,
+        "pft",
+    )
+}
+
 /// PFT 重启里的 `(patch 数, PFT 数)`。非 CROP 的 PFT 重启没有 `patch` 维，那时就是一个 patch。
 pub fn patch_and_pft_counts(file: &RestartFile) -> Result<(usize, usize)> {
     Ok((
@@ -106,12 +239,28 @@ impl PftTemplate {
         physics: &LandPhysicsParameters,
         interface_depth_m: &[f64],
         patch: usize,
+        spatial_pfts: Option<std::ops::Range<usize>>,
     ) -> Result<Self> {
         let whole = RestartFile::open(constant_path)?;
         let (patches, site_pft_count) = patch_and_pft_counts(&whole)?;
-        let site_pfts = patch_pft_range(patches, site_pft_count, patch)?;
-        let constant = open_patch(constant_path, patch, patches, site_pft_count)?;
-        let time = open_patch(time_path, patch, patches, site_pft_count)?;
+        // 空间算例：PFT 重启没有 `patch` 维，区间来自 `landpft`（见 [`spatial_pft_ranges`]）。
+        let (constant, time, site_pfts) = match spatial_pfts {
+            Some(range) => {
+                let pick = |path: &Path| -> Result<RestartFile> {
+                    RestartFile::open(path)?
+                        .select_patch(0, range.clone())
+                        .with_context(|| {
+                            format!("cannot select PFTs {range:?} of {}", path.display())
+                        })
+                };
+                (pick(constant_path)?, pick(time_path)?, range.clone())
+            }
+            None => (
+                open_patch(constant_path, patch, patches, site_pft_count)?,
+                open_patch(time_path, patch, patches, site_pft_count)?,
+                patch_pft_range(patches, site_pft_count, patch)?,
+            ),
+        };
         let classes = constant
             .integers("pftclass")?
             .iter()
@@ -252,15 +401,46 @@ impl PftTemplate {
             self.site_pft_count
         );
         self.monthly = Some(PftMonthlyLeafAreaIndex {
-            vegetation: data.monthly,
-            site_fraction: data.fraction,
-            use_site_lai,
+            source: PftLeafAreaSource::SinglePoint {
+                vegetation: data.monthly,
+                site_fraction: data.fraction,
+                use_site_lai,
+            },
             change_yearly,
             land_cover_year,
             start_year,
             end_year,
         });
         Ok(self)
+    }
+
+    /// 装上空间算例的 PFT 月度数据源（`landdata/LAI`，块 `block` 里第 `patch` 个 patch）。
+    pub fn with_grid_monthly_leaf_area_index(
+        mut self,
+        landdata: &Path,
+        block: &str,
+        patch: usize,
+        change_yearly: bool,
+        land_cover_year: i32,
+        (start_year, end_year): (i32, i32),
+    ) -> Self {
+        self.monthly = Some(PftMonthlyLeafAreaIndex {
+            source: PftLeafAreaSource::Grid {
+                directory: landdata.join("LAI"),
+                block: block.to_owned(),
+                patch,
+            },
+            change_yearly,
+            land_cover_year,
+            start_year,
+            end_year,
+        });
+        self
+    }
+
+    /// 本 patch 在 PFT 重启里的区间。
+    pub fn pft_range(&self) -> std::ops::Range<usize> {
+        self.site_pfts.clone()
     }
 
     pub fn has_monthly_leaf_area_index(&self) -> bool {
@@ -290,10 +470,69 @@ impl PftTemplate {
         } else {
             monthly.land_cover_year
         };
-        let (lai, sai) = monthly.vegetation.for_year(
+        let (vegetation, site_fraction, use_site_lai) = match &monthly.source {
+            PftLeafAreaSource::SinglePoint {
+                vegetation,
+                site_fraction,
+                use_site_lai,
+            } => (vegetation, site_fraction, *use_site_lai),
+            PftLeafAreaSource::Grid {
+                directory,
+                block,
+                patch: index,
+            } => {
+                // 年份夹到 `[DEF_LAI_START_YEAR, DEF_LAI_END_YEAR]`；LAI 反馈时不读 `LAI_*`。
+                let year = year.max(monthly.start_year).min(monthly.end_year);
+                let read = |stem: &str| -> Result<Vec<f64>> {
+                    let path = directory
+                        .join(format!("{year:04}"))
+                        .join(format!("{stem}{month:02}_{block}.nc"));
+                    let file = RestartFile::open(&path)
+                        .with_context(|| format!("cannot open {}", path.display()))?;
+                    Ok(file.floats(stem)?.to_vec())
+                };
+                let at = |values: Vec<f64>, stem: &str| -> Result<f64> {
+                    values
+                        .get(*index)
+                        .copied()
+                        .with_context(|| format!("{stem} has no value for patch {index}"))
+                };
+                let range = self.site_pfts.clone();
+                ensure!(
+                    range.len() == patch.columns.len(),
+                    "the patch PFT range does not match its PFT columns"
+                );
+                let tlai = if lai_feedback {
+                    None
+                } else {
+                    Some(at(read("LAI_patches")?, "LAI_patches")?)
+                };
+                let tsai = at(read("SAI_patches")?, "SAI_patches")?;
+                if !lai_feedback {
+                    let lai = read("LAI_pfts")?;
+                    ensure!(
+                        range.end <= lai.len(),
+                        "LAI_pfts is shorter than the PFT range"
+                    );
+                    for (column, &value) in patch.columns.iter_mut().zip(&lai[range.clone()]) {
+                        column.temporal_leaf_area_index = value;
+                    }
+                }
+                let sai = read("SAI_pfts")?;
+                ensure!(
+                    range.end <= sai.len(),
+                    "SAI_pfts is shorter than the PFT range"
+                );
+                for (column, &value) in patch.columns.iter_mut().zip(&sai[range]) {
+                    column.temporal_stem_area_index = value;
+                }
+                return Ok(Some((tlai, tsai)));
+            }
+        };
+        let (lai, sai) = vegetation.for_year(
             year,
             month,
-            monthly.use_site_lai,
+            use_site_lai,
             monthly.start_year,
             monthly.end_year,
         )?;
@@ -326,12 +565,7 @@ impl PftTemplate {
         // （`MOD_LAIReadin.F90:174-175`），作物站点 `SITE_pctpfts = 1`，于是是各作物 LAI 之和
         // （upstream-bugs 第 33 条）。照写。
         let site_sum = |values: &[f64]| {
-            colm_core::pft_sum(
-                values
-                    .iter()
-                    .copied()
-                    .zip(monthly.site_fraction.iter().copied()),
-            )
+            colm_core::pft_sum(values.iter().copied().zip(site_fraction.iter().copied()))
         };
         Ok(Some((
             (!lai_feedback).then(|| site_sum(&lai)),

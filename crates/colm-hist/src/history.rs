@@ -264,6 +264,11 @@ impl HistoryBuffers {
                 .is_some_and(|entry| entry.dims.len() == 1)
     }
 
+    /// 空间写出（网格或向量）：单点的 `patch` 维写法之外的两种。
+    pub fn is_spatial(&self) -> bool {
+        self.grid.is_some() || self.vector.is_some()
+    }
+
     /// 第 `record` 条记录的 `nac`。
     pub fn set_steps(&mut self, record: usize, steps: f64) -> Result<()> {
         ensure!(

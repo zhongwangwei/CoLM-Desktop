@@ -527,6 +527,8 @@ impl PointRuntime {
                     optimizer.as_ref().map(|optimizer| optimizer.scale(index)),
                 )?);
             }
+            // 多作物单点同样受 `tsoi17 = forc_t(i)` 整列赋值影响（见 [`broadcast_fire_tsoi17`]）。
+            broadcast_fire_tsoi17(templates, states);
             crate::tracer::report_after_patches(templates)?;
             // `hist_out` 在 `itstamp <= ptstamp` 时直接返回（`MOD_Hist.F90:225`），连累加都不做：
             // 预热期（含每一轮重复）不产生 history。步末 `itstamp <= ptstamp` 与本步
@@ -1341,6 +1343,39 @@ fn optimize_baseflow(
         optimizer.close_year(&water_tables)?;
     }
     Ok(())
+}
+
+/// 上游 `CNFireArea`（`MOD_BGC_Veg_CNFireLi2016.F90:97`）的 `tsoi17 = forc_t(i)` 少了下标，是**整列**赋值：
+/// 每个跑火灾的 patch 都把所有 patch 的 `tsoi17` 改成自己的 `forc_t`，本 patch 随即用的是对的值，
+/// 但一步之后留下的是按 patch 顺序最后一个跑火灾的那个值，连非土壤 patch 也一样，续跑里写的就是它。
+/// 单 patch 时这是恒等的。
+pub fn broadcast_fire_tsoi17(
+    templates: &[assembly::StandardLctRestartTemplate],
+    states: &mut [colm_core::StandardLctSnowSoilState],
+) {
+    let last = templates
+        .iter()
+        .zip(states.iter())
+        .rposition(|(template, state)| {
+            template.patch_type == 0
+                && template.physics.bgc.is_some_and(|bgc| bgc.fire)
+                && state.bgc.is_some()
+        });
+    let Some(last) = last else {
+        return;
+    };
+    let value = states[last]
+        .bgc
+        .as_ref()
+        .and_then(|bgc| bgc.patch.tsoi17.first().copied());
+    let Some(value) = value else {
+        return;
+    };
+    for state in states.iter_mut() {
+        if let Some(bgc) = state.bgc.as_mut() {
+            bgc.patch.tsoi17.fill(value);
+        }
+    }
 }
 
 /// `LAI_readin` 那一步（`CoLM.F90:595-605`）。

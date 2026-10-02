@@ -1352,8 +1352,11 @@ fn assemble(
     let biochemistry = class.biochemistry();
     // 冠层可以为 0：`lai+sai <= 1e-6` 时内核走 `MOD_Thermal.F90:706` 的无冠层支
     // （`colm_core` 的 `bare_lct_canopy`）。空间算例里 IGBP 湿地（第 11 类）的 LAI/SAI 常年是 0。
+    // CROP 内核的 Fortran 前处理在 LAI 反馈下给非土壤 patch（湿地、城市）留的是 `spval`，上游整段都带着
+    // 它跑（`lai+sai` 为大负数，同样走无冠层支），所以 `spval` 照收，其余负值仍拒绝。
+    let canopy_ok = |value: f64| value >= 0.0 || value == colm_core::MISSING;
     ensure!(
-        leaf_area_index >= 0.0 && stem_area_index >= 0.0,
+        canopy_ok(leaf_area_index) && canopy_ok(stem_area_index),
         "the standard LCT energy step needs a nonnegative canopy"
     );
 
@@ -1507,6 +1510,7 @@ impl StandardLctRestartTemplate {
         constant: &std::path::Path,
         time: &std::path::Path,
         document: &colm_namelist::Document,
+        spatial_pfts: Option<std::ops::Range<usize>>,
     ) -> Result<Self> {
         ensure!(
             self.patch_type == 0,
@@ -1520,6 +1524,7 @@ impl StandardLctRestartTemplate {
             &self.physics,
             &self.interface_depth_m,
             self.patch,
+            spatial_pfts,
         )?);
         Ok(self)
     }
@@ -1623,6 +1628,30 @@ impl StandardLctRestartTemplate {
             start_year,
             end_year,
         )?);
+        Ok(self)
+    }
+
+    /// 空间算例：给 PFT 子网格装上 `landdata/LAI` 的月度数据源。
+    pub fn with_pft_grid_monthly_leaf_area_index(
+        mut self,
+        landdata: &std::path::Path,
+        block: &str,
+        change_yearly: bool,
+        land_cover_year: i32,
+        years: (i32, i32),
+    ) -> Result<Self> {
+        let pft = self
+            .pft
+            .take()
+            .context("the PFT monthly LAI needs a PFT template first")?;
+        self.pft = Some(pft.with_grid_monthly_leaf_area_index(
+            landdata,
+            block,
+            self.patch,
+            change_yearly,
+            land_cover_year,
+            years,
+        ));
         Ok(self)
     }
 

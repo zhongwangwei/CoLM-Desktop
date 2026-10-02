@@ -14,8 +14,13 @@ fn critical_shear_squares_follow_the_size_bands() {
 #[test]
 fn water_accumulator_keeps_the_first_start_and_last_end() {
     let mut acc = WaterAcc::default();
-    acc.add(10.0, 2.0, 1.0, 5.0, 6.0, -3.0, 7.0);
-    acc.add(10.0, 1.0, 1.0, 6.0, 8.0, 1.0, 7.0);
+    let water = |start, end| SubstepWater {
+        start,
+        end,
+        ..Default::default()
+    };
+    acc.add(10.0, 2.0, 1.0, water(5.0, 6.0), -3.0, 7.0).unwrap();
+    acc.add(10.0, 1.0, 1.0, water(6.0, 8.0), 1.0, 7.0).unwrap();
     assert_eq!(acc.rivsto_start, 5.0);
     assert_eq!(acc.rivsto_end, 8.0);
     assert_eq!(acc.time, 20.0);

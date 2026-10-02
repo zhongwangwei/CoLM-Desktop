@@ -40,12 +40,13 @@ impl BgcStatics {
     /// 从主常数重启读第 `patch` 个 patch（0 起）的静态量。
     pub fn read(constant: &Path, patch: usize, layers: usize) -> Result<Self> {
         let file = RestartFile::open(constant)?;
-        // `smpmax_hr`/`smpmin_hr` 是模块级标量，写在不带 `_w180_s90` 的那份全局常数重启里。
+        // `smpmax_hr`/`smpmin_hr` 是模块级标量，写在不带块后缀的那份全局常数重启里。
         let name = constant
             .file_name()
             .and_then(|name| name.to_str())
             .context("the constant restart path has no file name")?;
-        let global = RestartFile::open(constant.with_file_name(name.replacen("_w180_s90", "", 1)))?;
+        let global =
+            RestartFile::open(constant.with_file_name(crate::bgc::without_block_suffix(name)))?;
         let scalar = |name: &str| -> Result<f64> {
             let values = global.floats(name)?;
             ensure!(values.len() == 1, "{name} is not a scalar");
@@ -100,12 +101,127 @@ impl BgcStatics {
     }
 }
 
+/// BGC 驱动数据（氮沉降、硝化、火灾）在数据网格上取值的位置。
+///
+/// 上游都是 `build_arealweighted(grid, landpatch)` + `grid2pset`：单点里 patch 只落在一格，就取那一格；
+/// 空间算例里 patch 的像元可能跨好几格，取 `Σ FMA(areapart, v, sum) / Σ areapart`
+/// （与强迫映射 [`crate::spatial::mapping::AreaWeightedMapping::grid_to_set`] 同一实现）。
+#[derive(Debug, Clone, PartialEq)]
+pub enum Footprint {
+    /// 包含站点的那一格 `(ilat, ilon)`。
+    Cell(usize, usize),
+    /// patch 覆盖的格子 `(ilat, ilon, 重叠面积)` 与面积和。
+    Parts {
+        parts: Vec<(usize, usize, f64)>,
+        area: f64,
+    },
+}
+
+impl Footprint {
+    /// `set_missing_value`：网格值等于 `missing` 的格子的份面积清零，面积和按剩下的份从 0 起重算。
+    /// 单点的那一格是缺测时变成空的映射（之后取值都是 `spval`）。
+    pub fn mask_missing(
+        &mut self,
+        read: &impl Fn(usize, usize) -> Result<f64>,
+        missing: f64,
+    ) -> Result<()> {
+        match self {
+            Footprint::Cell(lat, lon) => {
+                if read(*lat, *lon)? == missing {
+                    *self = Footprint::Parts {
+                        parts: Vec::new(),
+                        area: 0.0,
+                    };
+                }
+            }
+            Footprint::Parts { parts, area } => {
+                *area = 0.0;
+                for part in parts.iter_mut() {
+                    if read(part.0, part.1)? == missing {
+                        part.2 = 0.0;
+                    } else {
+                        *area += part.2;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// 按 `read(ilat, ilon)` 取网格值，再映射到 patch。
+    pub fn sample(&self, read: impl Fn(usize, usize) -> Result<f64>) -> Result<f64> {
+        match self {
+            Footprint::Cell(lat, lon) => read(*lat, *lon),
+            Footprint::Parts { parts, area } => {
+                if *area <= 0.0 {
+                    return Ok(colm_core::MISSING);
+                }
+                let mut sum = 0.0;
+                for &(lat, lon, part) in parts {
+                    if part > 0.0 {
+                        sum = part.mul_add(read(lat, lon)?, sum);
+                    }
+                }
+                Ok(sum / area)
+            }
+        }
+    }
+}
+
+/// 一个 patch 在数据网格上的定位方式：单点按站点经纬度，空间按它的像元。
+#[derive(Debug, Clone, Copy)]
+pub enum Locator<'a> {
+    Site {
+        latitude_deg: f64,
+        longitude_deg: f64,
+    },
+    Patch {
+        pixel: &'a crate::spatial::mapping::PixelAxes,
+        cells: &'a [(i32, i32)],
+        shared_fraction: f64,
+    },
+}
+
+impl Locator<'_> {
+    /// 数据网格（中心 `lat`/`lon`，`define_by_center`）上的取值位置。
+    pub fn footprint(&self, lat: &[f64], lon: &[f64]) -> Result<Footprint> {
+        match *self {
+            Locator::Site {
+                latitude_deg,
+                longitude_deg,
+            } => Ok(Footprint::Cell(
+                containing_cell(lat, latitude_deg, false)?,
+                containing_cell(lon, longitude_deg, true)?,
+            )),
+            Locator::Patch {
+                pixel,
+                cells,
+                shared_fraction,
+            } => {
+                let grid = crate::spatial::grid::LatLonGrid::define_by_center(lat, lon, None)?;
+                let mapping = crate::spatial::mapping::AreaWeightedMapping::build(
+                    &grid,
+                    pixel,
+                    &[cells.to_vec()],
+                    &[shared_fraction],
+                )?;
+                Ok(Footprint::Parts {
+                    parts: mapping.parts[0]
+                        .iter()
+                        .map(|part| (part.ilat, part.ilon, part.area))
+                        .collect(),
+                    area: mapping.area[0],
+                })
+            }
+        }
+    }
+}
+
 /// `MOD_NdepData` 的氮沉降：年度（`DEF_NDEP_FREQUENCY = 1`）或月度（`= 2`）文件。
 #[derive(Debug, Clone, PartialEq)]
 pub struct NdepSource {
     path: PathBuf,
-    lat: usize,
-    lon: usize,
+    footprint: Footprint,
     /// `DEF_USE_PN`：沉降乘 5（加速 spin-up）。
     punctuated: bool,
     /// 月度文件 `fndep_colm_monthly.nc` 的 `NDEP_month`。
@@ -117,8 +233,7 @@ impl NdepSource {
     /// 月度 `DEF_dir_runtime/ndep/fndep_colm_monthly.nc`（`init_ndep_data_*`）。
     pub fn open(
         runtime_dir: &Path,
-        latitude_deg: f64,
-        longitude_deg: f64,
+        locator: Locator<'_>,
         punctuated: bool,
         monthly: bool,
     ) -> Result<Self> {
@@ -135,12 +250,10 @@ impl NdepSource {
                 .get_values::<f64, _>(..)
                 .with_context(|| format!("cannot read {name} from {}", path.display()))
         };
-        let lat = containing_cell(&axis("lat")?, latitude_deg, false)?;
-        let lon = containing_cell(&axis("lon")?, longitude_deg, true)?;
+        let footprint = locator.footprint(&axis("lat")?, &axis("lon")?)?;
         Ok(Self {
             path,
-            lat,
-            lon,
+            footprint,
             punctuated,
             monthly,
         })
@@ -178,11 +291,14 @@ impl NdepSource {
     fn read(&self, variable: &str, itime: usize, patchclass: i32) -> Result<(f64, f64)> {
         let file = netcdf::open(&self.path)
             .with_context(|| format!("cannot open {}", self.path.display()))?;
-        let ndep: f64 = file
+        let values = file
             .variable(variable)
-            .with_context(|| format!("the N deposition file has no {variable}"))?
-            .get_value([itime, self.lat, self.lon])
-            .with_context(|| format!("cannot read {variable}"))?;
+            .with_context(|| format!("the N deposition file has no {variable}"))?;
+        let ndep = self.footprint.sample(|lat, lon| {
+            values
+                .get_value::<f64, _>([itime, lat, lon])
+                .with_context(|| format!("cannot read {variable}"))
+        })?;
         // `ndep / 3600. / 365. / 24.`：依次相除，不合并成一个常数。
         let to_sminn = if patchclass == 0 {
             0.0
@@ -199,19 +315,13 @@ impl NdepSource {
 #[derive(Debug, Clone, PartialEq)]
 pub struct NitrifSource {
     dir: PathBuf,
-    lat: usize,
-    lon: usize,
+    footprint: Footprint,
     layers: usize,
 }
 
 impl NitrifSource {
     /// 网格取自 `nitrif/CONC_O2_UNSAT/CONC_O2_UNSAT_l01.nc`（`init_nitrif_data`）。
-    pub fn open(
-        runtime_dir: &Path,
-        latitude_deg: f64,
-        longitude_deg: f64,
-        layers: usize,
-    ) -> Result<Self> {
+    pub fn open(runtime_dir: &Path, locator: Locator<'_>, layers: usize) -> Result<Self> {
         let dir = runtime_dir.join("nitrif");
         let path = dir.join("CONC_O2_UNSAT/CONC_O2_UNSAT_l01.nc");
         let file = netcdf::open(&path)
@@ -227,12 +337,10 @@ impl NitrifSource {
                 .map(f64::from)
                 .collect())
         };
-        let lat = containing_cell(&axis("lat")?, latitude_deg, false)?;
-        let lon = containing_cell(&axis("lon")?, longitude_deg, true)?;
+        let footprint = locator.footprint(&axis("lat")?, &axis("lon")?)?;
         Ok(Self {
             dir,
-            lat,
-            lon,
+            footprint,
             layers,
         })
     }
@@ -247,19 +355,20 @@ impl NitrifSource {
                         .join(format!("{variable}/{variable}_l{layer:02}.nc"));
                     let file = netcdf::open(&path)
                         .with_context(|| format!("cannot open {}", path.display()))?;
-                    let value: f32 = file
+                    let values = file
                         .variable(variable)
-                        .with_context(|| format!("{} has no {variable}", path.display()))?
-                        .get_value([usize::from(month) - 1, self.lat, self.lon])
-                        .with_context(|| {
-                            format!("cannot read {variable} from {}", path.display())
-                        })?;
+                        .with_context(|| format!("{} has no {variable}", path.display()))?;
+                    // 文件是 float，读进 real(r8) 的块再映射。
+                    let value = self.footprint.sample(|lat, lon| {
+                        values
+                            .get_value::<f32, _>([usize::from(month) - 1, lat, lon])
+                            .map(f64::from)
+                            .with_context(|| {
+                                format!("cannot read {variable} from {}", path.display())
+                            })
+                    })?;
                     // 非土壤 patch 清零；`< 1E-10` 也清零（`MOD_NitrifData.F90`）。
-                    let value = if patchclass == 0 {
-                        0.0
-                    } else {
-                        f64::from(value)
-                    };
+                    let value = if patchclass == 0 { 0.0 } else { value };
                     Ok(if value < 1.0e-10 { 0.0 } else { value })
                 })
                 .collect()
@@ -275,8 +384,8 @@ impl NitrifSource {
 #[derive(Debug, Clone, PartialEq)]
 pub struct FireSource {
     dir: PathBuf,
-    cell: (usize, usize),
-    lightning_cell: (usize, usize),
+    cell: Footprint,
+    lightning_cell: Footprint,
     /// `abm_lf`（作物火高峰月）、`peatf_lf`（泥炭地比例）、`gdp_lf`：启动时读一次。
     pub abm: f64,
     pub peatf: f64,
@@ -292,9 +401,9 @@ const FIRE_LIGHTNING: &str = "clmforc.Li_2012_climo1995-2011.T62.lnfm_Total_c140
 
 impl FireSource {
     /// `init_fire_data` 的静态部分：`abm`/`peatf`/`gdp`。
-    pub fn open(runtime_dir: &Path, latitude_deg: f64, longitude_deg: f64) -> Result<Self> {
+    pub fn open(runtime_dir: &Path, locator: Locator<'_>) -> Result<Self> {
         let dir = runtime_dir.join("fire");
-        let cell = |file: &str| -> Result<(usize, usize)> {
+        let cell = |file: &str| -> Result<Footprint> {
             let path = dir.join(file);
             let nc = netcdf::open(&path)
                 .with_context(|| format!("cannot open the fire data {}", path.display()))?;
@@ -304,10 +413,7 @@ impl FireSource {
                     .get_values::<f64, _>(..)
                     .with_context(|| format!("cannot read {name} from {}", path.display()))
             };
-            Ok((
-                containing_cell(&axis("lat")?, latitude_deg, false)?,
-                containing_cell(&axis("lon")?, longitude_deg, true)?,
-            ))
+            locator.footprint(&axis("lat")?, &axis("lon")?)
         };
         let grid = cell(FIRE_ABM)?;
         let lightning_cell = cell(FIRE_LIGHTNING)?;
@@ -319,9 +425,9 @@ impl FireSource {
             peatf: 0.0,
             gdp: 0.0,
         };
-        source.abm = source.read(FIRE_ABM, "abm", None, grid)?;
-        source.peatf = source.read(FIRE_PEATF, "peatf", None, grid)?;
-        source.gdp = source.read(FIRE_GDP, "gdp", None, grid)?;
+        source.abm = source.read(FIRE_ABM, "abm", None, &source.cell)?;
+        source.peatf = source.read(FIRE_PEATF, "peatf", None, &source.cell)?;
+        source.gdp = source.read(FIRE_GDP, "gdp", None, &source.cell)?;
         Ok(source)
     }
 
@@ -330,30 +436,37 @@ impl FireSource {
         file: &str,
         variable: &str,
         time: Option<usize>,
-        (lat, lon): (usize, usize),
+        footprint: &Footprint,
     ) -> Result<f64> {
         let path = self.dir.join(file);
         let nc = netcdf::open(&path).with_context(|| format!("cannot open {}", path.display()))?;
         let variable_ref = nc
             .variable(variable)
             .with_context(|| format!("{} has no {variable}", path.display()))?;
-        let value = match time {
-            Some(t) => variable_ref.get_value::<f64, _>([t, lat, lon]),
-            None => variable_ref.get_value::<f64, _>([lat, lon]),
-        };
-        value.with_context(|| format!("cannot read {variable} from {}", path.display()))
+        footprint.sample(|lat, lon| {
+            match time {
+                Some(t) => variable_ref.get_value::<f64, _>([t, lat, lon]),
+                None => variable_ref.get_value::<f64, _>([lat, lon]),
+            }
+            .with_context(|| format!("cannot read {variable} from {}", path.display()))
+        })
     }
 
     /// `update_hdm_data(YY)`：`itime = max(1850, min(YY, 2016)) - 1849`（1 起）。
     pub fn hdm(&self, year: i32) -> Result<f64> {
         let itime = usize::try_from(year.clamp(1850, 2016) - 1850).expect("clamped");
-        self.read(FIRE_HDM, "hdm", Some(itime), self.cell)
+        self.read(FIRE_HDM, "hdm", Some(itime), &self.cell)
     }
 
     /// 闪电气候态的第 `itime` 条（1 起，3 小时一条，一年 2920 条）。
     pub fn lightning(&self, itime: usize) -> Result<f64> {
         ensure!(itime >= 1, "the lightning record index starts at 1");
-        self.read(FIRE_LIGHTNING, "lnfm", Some(itime - 1), self.lightning_cell)
+        self.read(
+            FIRE_LIGHTNING,
+            "lnfm",
+            Some(itime - 1),
+            &self.lightning_cell,
+        )
     }
 }
 
@@ -1150,11 +1263,13 @@ fn previous_step_start(
 
 /// 未移植的 BGC 分支：遇到就拒绝，而不是静默跑成另一个模式。
 /// `CROP_readin` 读数据时需要的站点与目录（`DEF_dir_runtime/crop/`）。
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct CropReadinData<'a> {
     pub runtime_dir: &'a Path,
-    pub latitude_deg: f64,
-    pub longitude_deg: f64,
+    /// patch 在作物数据网格上的定位（`mg2patch_crop`）。
+    pub patch: Locator<'a>,
+    /// 本 patch 每个 PFT 的定位（`mg2pft_crop`/`mg2pft_fert`），与 PFT 一一对应。
+    pub pfts: Vec<Locator<'a>>,
     /// `DEF_FERT_SOURCE`（1 或 2）。
     pub fert_source: i64,
     /// `DEF_IRRIGATION_ALLOCATION`（灌溉打开时才用；3 才读配水比例图）。
@@ -1169,15 +1284,14 @@ const CROP_IRRIGATION_ALLOCATION: &str = "crop/surfdata_irrigation_allocation.nc
 const CROP_ABSENT: f64 = -99_999_999.0;
 
 /// 作物数据文件里单点所在格点的读取（`define_by_center` + 面积加权，单点即包含站点的那一格）。
+/// 一张作物数据网格上的映射：patch 一份（`mg2patch_*`）、每个 PFT 一份（`mg2pft_*`）。
 struct CropGrid {
-    cell: (usize, usize),
-    /// 上游 `set_missing_value`：种植日文件用 `pdrice2` 的 `missing_value`，并把它设给整张映射
-    /// （之后按同一映射读的施肥来源 1 也用它）；来源 2 的映射没有缺测值。
-    missing: Option<f64>,
+    patch: Footprint,
+    pfts: Vec<Footprint>,
 }
 
 impl CropGrid {
-    fn open(path: &Path, lat: f64, lon: f64) -> Result<Self> {
+    fn open(path: &Path, patch: Locator<'_>, pfts: &[Locator<'_>]) -> Result<Self> {
         let file = netcdf::open(path).with_context(|| format!("cannot open {}", path.display()))?;
         let axis = |name: &str| -> Result<Vec<f64>> {
             file.variable(name)
@@ -1185,33 +1299,59 @@ impl CropGrid {
                 .get_values::<f64, _>(..)
                 .with_context(|| format!("cannot read {name} from {}", path.display()))
         };
-        let cell = (
-            containing_cell(&axis("lat")?, lat, false)?,
-            containing_cell(&axis("lon")?, lon, true)?,
-        );
+        let (lat, lon) = (axis("lat")?, axis("lon")?);
         Ok(Self {
-            cell,
-            missing: None,
+            patch: patch.footprint(&lat, &lon)?,
+            pfts: pfts
+                .iter()
+                .map(|locator| locator.footprint(&lat, &lon))
+                .collect::<Result<_>>()?,
         })
     }
 
-    /// 第 `index` 个前导切片（二维变量为 `None`）在站点格点上的值；等于缺测值时是 `spval`。
-    fn read(&self, path: &Path, name: &str, index: Option<usize>) -> Result<f64> {
+    /// 上游 `set_missing_value`：种植日文件用 `pdrice2` 的 `missing_value`，按 `pdrice2` 在各格的值
+    /// 把落在缺测格上的份面积清零、重算面积和；之后按同一映射读的量（种植日、施肥来源 1）都用它。
+    fn mask_missing(&mut self, path: &Path, name: &str, missing: f64) -> Result<()> {
         let file = netcdf::open(path).with_context(|| format!("cannot open {}", path.display()))?;
         let variable = file
             .variable(name)
             .with_context(|| format!("{} has no {name}", path.display()))?;
-        let (lat, lon) = self.cell;
-        let value = match index {
-            Some(k) => variable.get_value::<f64, _>([k, lat, lon]),
-            None => variable.get_value::<f64, _>([lat, lon]),
+        let read = |lat: usize, lon: usize| -> Result<f64> {
+            variable
+                .get_value::<f64, _>([lat, lon])
+                .with_context(|| format!("cannot read {name} from {}", path.display()))
+        };
+        self.patch.mask_missing(&read, missing)?;
+        for footprint in &mut self.pfts {
+            footprint.mask_missing(&read, missing)?;
         }
-        .with_context(|| format!("cannot read {name} from {}", path.display()))?;
-        Ok(if self.missing == Some(value) {
-            MISSING
-        } else {
-            value
+        Ok(())
+    }
+
+    fn sample(footprint: &Footprint, path: &Path, name: &str, index: Option<usize>) -> Result<f64> {
+        let file = netcdf::open(path).with_context(|| format!("cannot open {}", path.display()))?;
+        let variable = file
+            .variable(name)
+            .with_context(|| format!("{} has no {name}", path.display()))?;
+        // `ncio_read_block_time` 对没有时间维的二维变量就读那一张（种植日文件的 `PLANTDATE_CFT_xx`）。
+        let leading = variable.dimensions().len() > 2;
+        footprint.sample(|lat, lon| {
+            match index.filter(|_| leading) {
+                Some(k) => variable.get_value::<f64, _>([k, lat, lon]),
+                None => variable.get_value::<f64, _>([lat, lon]),
+            }
+            .with_context(|| format!("cannot read {name} from {}", path.display()))
         })
+    }
+
+    /// patch 映射下第 `index` 个前导切片（二维变量为 `None`）的值；没有有效面积时是 `spval`。
+    fn read(&self, path: &Path, name: &str, index: Option<usize>) -> Result<f64> {
+        Self::sample(&self.patch, path, name, index)
+    }
+
+    /// 第 `m` 个 PFT 的映射下的值。
+    fn read_pft(&self, m: usize, path: &Path, name: &str, index: Option<usize>) -> Result<f64> {
+        Self::sample(&self.pfts[m], path, name, index)
     }
 }
 
@@ -1254,9 +1394,13 @@ pub fn crop_readin(
         }
         return Ok(None);
     }
+    ensure!(
+        data.pfts.len() == classes.len(),
+        "CROP_readin needs one PFT locator per PFT"
+    );
     let planting_path = data.runtime_dir.join(CROP_PLANTING);
-    let mut grid = CropGrid::open(&planting_path, data.latitude_deg, data.longitude_deg)?;
-    grid.missing = {
+    let mut grid = CropGrid::open(&planting_path, data.patch, &data.pfts)?;
+    let missing = {
         let file = netcdf::open(&planting_path)
             .with_context(|| format!("cannot open {}", planting_path.display()))?;
         let variable = file
@@ -1269,13 +1413,17 @@ pub fn crop_readin(
             None => None,
         }
     };
+    if let Some(missing) = missing {
+        grid.mask_missing(&planting_path, "pdrice2", missing)?;
+    }
     let rice2 = grid.read(&planting_path, "pdrice2", None)?;
     // `int(pdrice2_tmp)`：向零截断。
     state.patch.pdrice2[0] = if rice2 == MISSING { 0.0 } else { rice2.trunc() };
     for (m, &class) in classes.iter().enumerate() {
         state.pft.plantdate_p[m] = CROP_ABSENT;
         if crop(class) {
-            let day = grid.read(
+            let day = grid.read_pft(
+                m,
                 &planting_path,
                 &format!("PLANTDATE_CFT_{class:02}"),
                 Some(0),
@@ -1299,26 +1447,30 @@ pub fn crop_readin(
                 state.pft.fertnitro_p.fill(CROP_ABSENT);
                 for (m, &class) in classes.iter().enumerate() {
                     if crop(class) {
-                        let fert =
-                            grid.read(&path, &format!("CONST_FERTNITRO_CFT_{class:02}"), Some(0))?;
+                        let fert = grid.read_pft(
+                            m,
+                            &path,
+                            &format!("CONST_FERTNITRO_CFT_{class:02}"),
+                            Some(0),
+                        )?;
                         state.pft.fertnitro_p[m] = if fert <= 0.0 { 0.0 } else { fert };
                     }
                 }
             }
             2 => {
                 let path = data.runtime_dir.join(CROP_FERT_TWO);
-                let grid_two = CropGrid::open(&path, data.latitude_deg, data.longitude_deg)?;
+                let grid_two = CropGrid::open(&path, data.patch, &data.pfts)?;
                 state.pft.fertnitro_p.fill(CROP_ABSENT);
                 state.pft.manunitro_p.fill(CROP_ABSENT);
-                let manure = grid_two.read(&path, "manure", None)?;
                 for (m, &class) in classes.iter().enumerate() {
                     if class >= 15 {
-                        state.pft.manunitro_p[m] = manure.max(0.0);
+                        let manure = grid_two.read_pft(m, &path, "manure", None)?;
+                        state.pft.manunitro_p[m] = if manure < 0.0 { 0.0 } else { manure };
                     }
                     if crop(class) {
                         let index = usize::try_from(class - 15).expect("crop class");
-                        let fert = grid_two.read(&path, "fertilizer", Some(index))?;
-                        state.pft.fertnitro_p[m] = fert.max(0.0);
+                        let fert = grid_two.read_pft(m, &path, "fertilizer", Some(index))?;
+                        state.pft.fertnitro_p[m] = if fert < 0.0 { 0.0 } else { fert };
                     }
                 }
             }
@@ -1329,13 +1481,18 @@ pub fn crop_readin(
         return Ok(None);
     }
     let path = data.runtime_dir.join(CROP_IRRIGATION_METHOD);
-    let grid = CropGrid::open(&path, data.latitude_deg, data.longitude_deg)?;
+    // `grid2pset_dominant`（逐 PFT 取面积最大的类别）只移植了单点：那里就是所在格点的值。
+    ensure!(
+        matches!(data.patch, Locator::Site { .. }),
+        "spatial irrigation (grid2pset_dominant irrigation methods) is not ported"
+    );
+    let grid = CropGrid::open(&path, data.patch, &data.pfts)?;
     let mut methods = vec![-99_999_999; classes.len()];
     for (m, &class) in classes.iter().enumerate() {
         if crop(class) {
             let index = usize::try_from(class - 15).expect("crop class");
             // `grid2pset_dominant`：单点就是所在格点的整数值。
-            let method = grid.read(&path, "irrigation_method", Some(index))?;
+            let method = grid.read_pft(m, &path, "irrigation_method", Some(index))?;
             methods[m] = if method < 0.0 {
                 -99_999_999
             } else {
@@ -1345,7 +1502,7 @@ pub fn crop_readin(
     }
     let allocation = if data.irrigation_allocation == 3 {
         let path = data.runtime_dir.join(CROP_IRRIGATION_ALLOCATION);
-        let grid = CropGrid::open(&path, data.latitude_deg, data.longitude_deg)?;
+        let grid = CropGrid::open(&path, data.patch, &data.pfts)?;
         Some((
             grid.read(&path, "irrig_gw_alloc", None)?,
             grid.read(&path, "irrig_sw_alloc", None)?,

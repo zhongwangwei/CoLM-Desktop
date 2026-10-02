@@ -29,11 +29,29 @@ pub fn bgc_constant_paths(constant: &Path) -> Result<(PathBuf, PathBuf)> {
         .file_name()
         .and_then(|name| name.to_str())
         .context("the constant restart path has no file name")?;
-    let patch = constant.with_file_name(name.replacen("_restart_const_", "_restart_bgc_const_", 1));
-    let global_name = name
-        .replacen("_restart_const_", "_restart_bgc_const_", 1)
-        .replacen("_w180_s90", "", 1);
-    Ok((constant.with_file_name(global_name), patch))
+    let patch_name = name.replacen("_restart_const_", "_restart_bgc_const_", 1);
+    let patch = constant.with_file_name(&patch_name);
+    Ok((
+        constant.with_file_name(without_block_suffix(&patch_name)),
+        patch,
+    ))
+}
+
+/// 分块重启名去掉末尾的块后缀 `_[ew]<n>_[ns]<n>`（单点是 `_w180_s90`，空间是各块的 `_e110_n20` 之类），
+/// 得到全局常数重启的名字（模块级标量写在那里）；没有块后缀时原样返回。
+pub fn without_block_suffix(name: &str) -> String {
+    let Some(stem) = name.strip_suffix(".nc") else {
+        return name.to_owned();
+    };
+    let is_block = |part: &str, axis: [char; 2]| {
+        part.starts_with(axis) && part.len() > 1 && part[1..].chars().all(|c| c.is_ascii_digit())
+    };
+    match stem.rsplitn(3, '_').collect::<Vec<_>>().as_slice() {
+        [lat, lon, rest] if is_block(lat, ['n', 's']) && is_block(lon, ['e', 'w']) => {
+            format!("{rest}.nc")
+        }
+        _ => name.to_owned(),
+    }
 }
 
 /// 主时间重启旁的 BGC 时间重启。
@@ -55,11 +73,21 @@ impl BgcTemplate {
         patch: usize,
         patches: usize,
         pfts: usize,
+        spatial_pfts: Option<std::ops::Range<usize>>,
     ) -> Result<Self> {
-        let npft = crate::pft::patch_pft_range(patches, pfts, patch)?.len();
+        // 空间算例的 PFT 区间来自 `landpft`（[`crate::pft::spatial_pft_ranges`]），单点按 patch 推。
+        let range = match spatial_pfts {
+            Some(range) => range,
+            None => crate::pft::patch_pft_range(patches, pfts, patch)?,
+        };
+        let npft = range.len();
         let mut state = BgcState::new(npft, BgcDims::default());
         let (global, patch_constant) = bgc_constant_paths(constant)?;
-        let open = |path: &Path| crate::pft::open_patch(path, patch, patches, pfts);
+        let open = |path: &Path| -> Result<RestartFile> {
+            RestartFile::open(path)?
+                .select_patch(patch, range.clone())
+                .with_context(|| format!("cannot select patch {patch} of {}", path.display()))
+        };
         load_constants(&RestartFile::open(&global)?, &mut state)?;
         load_arrays(&RestartFile::open(&global)?, &mut state, false)?;
         load_arrays(&open(&patch_constant)?, &mut state, false)?;

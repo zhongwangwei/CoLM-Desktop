@@ -236,6 +236,9 @@ impl SpatialRuntime {
                             .with_context(|| format!("patch {index}"))?,
                     );
                 }
+                // `CNFireArea` 的 `tsoi17 = forc_t(i)` 是整列赋值：一步之后所有 patch 都是最后一个
+                // 跑火灾的 patch 的值（续跑里写的就是它）。
+                crate::broadcast_fire_tsoi17(templates, &mut next_states);
                 // `tracer_report`：一步里所有 patch 推进完之后（`CoLMDRIVER.F90:392-393`）。
                 crate::tracer::report_after_patches(templates)?;
                 // `CoLM.F90:559-563`：陆面步之后、`hist_out` 之前汇流；预热期不汇流。

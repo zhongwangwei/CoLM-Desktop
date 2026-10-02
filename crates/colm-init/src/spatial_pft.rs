@@ -1869,26 +1869,32 @@ fn match_pfts_to_patches(
         patches.class.len() == patch_kind.len(),
         "spatial patch kind vector does not match topology"
     );
-    // MOD_LandPFT emits PFTs in patch order. Shared natural/CFT patches may
-    // have identical ranges, so a unique (element,start,end) map loses owners.
+    // `map_patch_to_pft`（MOD_LandPFT.F90:264-320）：沿 landpft 走一个指针。自然土壤 patch 吃掉后面
+    // 同 `eindex`、同 `ipxstt`、`settyp < N_PFT` 的那一串；CROP 下的农田 patch 恰好吃一个（不比像元）。
+    // `N_PFT` 不开 CROP 是 16，开 CROP 是 15。
+    let n_pft = if use_crop { 15 } else { 16 };
     let mut out = vec![Vec::new(); patches.class.len()];
     let mut next = 0;
     for (patch, indices) in out.iter_mut().enumerate() {
         if patch_kind[patch] != 0 {
             continue;
         }
-        let crop = use_crop && patches.class[patch] == 12;
+        if use_crop && patches.class[patch] == 12 {
+            ensure!(
+                next < pfts.class.len(),
+                "cropland patch {patch} has no PFT left in landpft"
+            );
+            indices.push(next);
+            next += 1;
+            continue;
+        }
         while next < pfts.class.len()
             && pfts.element[next] == patches.element[patch]
             && pfts.start[next] == patches.start[patch]
-            && pfts.end[next] == patches.end[patch]
-            && (!use_crop || (pfts.class[next] >= 15) == crop)
+            && pfts.class[next] < n_pft
         {
             indices.push(next);
             next += 1;
-            if crop {
-                break;
-            } // one PFT for each CFT child, even with shared pixels
         }
         ensure!(
             !indices.is_empty(),

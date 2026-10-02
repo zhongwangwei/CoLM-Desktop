@@ -1310,6 +1310,14 @@ ENDIF
       CALL check_vector_data ('SAI ', tsai)
       ENDIF
 
+      ! Under DEF_USE_LAIFEEDBACK the PFT/PC branch of LAI_readin reads SAI only.
+      ! Soil patches get their LAI from BGC below, but patches without BGC leaf
+      ! carbon (wetland, urban, water) would keep the allocation value spval and
+      ! carry LAI = -1e36 through the whole run. Start them bare instead.
+      IF (p_is_worker .and. allocated(tlai)) THEN
+         WHERE (tlai == spval) tlai = 0._r8
+      ENDIF
+
 #ifdef CROP
          CALL CROP_readin ()
          IF (p_is_worker) THEN

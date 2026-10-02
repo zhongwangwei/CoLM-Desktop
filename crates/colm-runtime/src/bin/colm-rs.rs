@@ -178,6 +178,7 @@ fn run() -> Result<()> {
                 patch,
                 SINGLE_POINT_BLOCK,
                 false,
+                None,
             )
             .with_context(|| format!("cannot assemble patch {patch}"))
         })
@@ -356,10 +357,6 @@ fn run_spatial(
         arguments.patch.is_none(),
         "--patch selects a patch of a single point; spatial cases run every patch"
     );
-    ensure!(
-        !arguments.crop,
-        "CROP kernels are not ported to the Rust spatial runtime yet"
-    );
     let document = read_document(case_nml)?;
     let config = SpatialRuntimeConfig::read(case_nml)?;
     let mut physics = land_physics_parameters(
@@ -372,6 +369,37 @@ fn run_spatial(
         },
     )?;
     physics.irrigation = None;
+    // `CROP` 内核（与单点同一套开关，见 `run`）。空间的 `CROP_readin` 按网格映射读播种日与施肥图；
+    // 上游在空间里拒绝播种日覆盖（"only supported in SinglePoint"）；灌溉方式的
+    // `grid2pset_dominant` 还没移植。
+    // 还没验收：上游 mkinidata 在 LAI 反馈下给非土壤 patch 留 `spval` 的 LAI（见第 502 轮），
+    // 对照参照要先修 vendor。
+    ensure!(
+        !arguments.crop || std::env::var_os("COLM_RS_SPATIAL_CROP").is_some(),
+        "CROP kernels are not verified in the Rust spatial runtime yet; run this case with --engine fortran"
+    );
+    if arguments.crop {
+        let switches = physics
+            .bgc
+            .context("CROP kernels need DEF_USE_BGC (the crop state lives in the BGC restarts)")?;
+        let fert = logical_field(&document, "DEF_USE_FERT")?;
+        ensure!(
+            real_field(&document, "DEF_TUNING_CROP_PLANTING_DAY")? <= 0.0,
+            "Fatal ERROR: crop planting-day override is only supported in SinglePoint (upstream stops too)"
+        );
+        ensure!(
+            !logical_field(&document, "DEF_USE_IRRIGATION")?,
+            "spatial irrigation (grid2pset_dominant irrigation methods) is not ported; run this \
+             case with --engine fortran"
+        );
+        physics.bgc = Some(colm_core::bgc_driver::BgcSwitches {
+            crop: true,
+            fert,
+            cnsoyfixn: logical_field(&document, "DEF_USE_CNSOYFIXN")?,
+            irrigation: false,
+            ..switches
+        });
+    }
     // GRID/UNSTRUCTURED 内核总是编进 `GridRiverLakeFlow`，它改变了几处收缩形状。
     physics.river_lake_flow_build = true;
     let missing = colm_runtime::physics::unported_branches(&physics);
@@ -567,6 +595,19 @@ struct SpatialCase<'a> {
     vector_history: bool,
 }
 
+/// 空间算例里一个 patch 的块内信息：PFT 区间（`patch_pft_s/e`）与像元
+/// （BGC 驱动数据的面积加权映射用）。
+#[derive(Clone)]
+struct SpatialPatch<'a> {
+    pfts: std::ops::Range<usize>,
+    pixel: &'a colm_runtime::spatial::mapping::PixelAxes,
+    cells: &'a [(i32, i32)],
+    shared_fraction: f64,
+    /// 本 patch 各 PFT 的像元与 `pctshared`（`landpft`，区间同 `pfts`）。
+    pft_cells: &'a [Vec<(i32, i32)>],
+    pft_shared: &'a [f64],
+}
+
 /// 一段连续的运行（没有 LULCC 时就是整个运行）。
 struct SpatialSegment {
     config: colm_runtime::spatial::runtime::SpatialRuntimeConfig,
@@ -639,7 +680,47 @@ fn run_spatial_segment(
     let mut coordinates = Vec::with_capacity(patch_count);
     let mut patch_mask = Vec::with_capacity(patch_count);
     for ((block, patches), files) in topology.blocks.iter().zip(&block_files) {
+        // `DEF_USE_PFT`：土壤 patch 的 PFT 区间来自本块的 `landpft`。
+        let pft_ranges = if physics.use_pft {
+            Some(colm_runtime::pft::spatial_pft_ranges(
+                &out.join("landdata"),
+                i32::try_from(year)?,
+                block,
+                physics.land_cover_scheme,
+                physics.bgc.is_some_and(|bgc| bgc.crop),
+            )?)
+        } else {
+            None
+        };
+        // CROP 的 `mg2pft_*` 映射要每个 PFT 的像元。
+        let pft_sets = if physics.bgc.is_some_and(|bgc| bgc.crop) {
+            Some(colm_runtime::pft::spatial_pft_pixel_sets(
+                &out.join("landdata"),
+                i32::try_from(year)?,
+                block,
+            )?)
+        } else {
+            None
+        };
         for patch in 0..patches.len() {
+            let global = patches.start + patch;
+            let pfts = pft_ranges
+                .as_ref()
+                .map_or(0..0, |ranges| ranges[patch].clone());
+            let pft_cells: &[Vec<(i32, i32)>] = pft_sets
+                .as_ref()
+                .map_or(&[], |sets| &sets.cells[pfts.clone()]);
+            let pft_shared: &[f64] = pft_sets
+                .as_ref()
+                .map_or(&[], |sets| &sets.shared_fraction[pfts.clone()]);
+            let spatial_patch = SpatialPatch {
+                pfts,
+                pixel: &topology.pixel,
+                cells: &topology.cells[global],
+                shared_fraction: topology.shared_fraction[global],
+                pft_cells,
+                pft_shared,
+            };
             templates.push(
                 assemble_patch(
                     document,
@@ -650,6 +731,7 @@ fn run_spatial_segment(
                     patch,
                     block,
                     true,
+                    Some(spatial_patch),
                 )
                 .with_context(|| format!("cannot assemble patch {patch} of block {block}"))?,
             );
@@ -1769,6 +1851,7 @@ fn assemble_patch(
     patch: usize,
     block: &str,
     spatial: bool,
+    spatial_patch: Option<SpatialPatch<'_>>,
 ) -> Result<StandardLctRestartTemplate> {
     // 两支装配的**断言**不同（一支要求启动时有雪、另一支要求没有），但返回的是同一个
     // 模板类型；运行时只走通用入口（能长雪的那一支），所以这里按启动时的雪列选断言。
@@ -1781,6 +1864,13 @@ fn assemble_patch(
         assemble_standard_lct_template(files, patch, physics)
             .context("cannot assemble the snow-free standard LCT template")?
     };
+    // 空间算例的 PFT 区间是所在单元的；只有土壤 patch 拥有它，其余 patch 没有 PFT。
+    let spatial_patch = spatial_patch.map(|mut patch| {
+        if template.patch_type != 0 {
+            patch.pfts = 0..0;
+        }
+        patch
+    });
     // `DEF_USE_PFT`：土壤 patch 的 PFT 子网格来自同目录的 `*_restart_pft_*` 两份重启。
     // 只有土壤 patch 有 PFT（`patch_pft_s/e`）；湿地等其余 patch 在 PFT 模式下仍走 patch 级 LAI。
     if template.physics.use_pft && template.patch_type == 0 {
@@ -1789,12 +1879,14 @@ fn assemble_patch(
                 &colm_runtime::pft::pft_restart_path(&files.constant)?,
                 &colm_runtime::pft::pft_restart_path(&files.time)?,
                 document,
+                spatial_patch.as_ref().map(|patch| patch.pfts.clone()),
             )
             .context("cannot assemble the PFT subgrid")?;
     }
     // `DEF_USE_BGC`：BGC 状态来自四份 BGC 重启，氮沉降来自 `DEF_dir_runtime/ndep`。
     if let Some(switches) = template.physics.bgc {
-        let (mut bgc, irrigation) = assemble_bgc(document, files, patch, switches)?;
+        let (mut bgc, irrigation) =
+            assemble_bgc(document, files, patch, switches, spatial_patch.as_ref())?;
         // `ch4_reactive_init`：注册了 CH4 示踪物时，BGC 之后跑甲烷（单点内核没有网格河湖汇流）。
         if let Some(setup) = colm_runtime::methane::setup_from_document(document, false)? {
             let constant = colm_init::RestartFile::open(&files.constant)?;
@@ -1881,13 +1973,23 @@ fn assemble_patch(
     // 空间算例的逐月 LAI 读 `landdata/LAI/<year>/` 的分块向量（`LAI_readin` 的非单点支）。
     if logical_field(document, "DEF_LAI_MONTHLY")? && spatial {
         ensure!(
-            template.urban.is_none() && template.pft.is_none(),
-            "the Rust spatial runtime reads LCT LAI only; urban and PFT/PC LAI are not ported"
+            template.urban.is_none() && !template.physics.use_pc,
+            "the Rust spatial runtime reads LCT and PFT LAI only; urban and PC LAI are not ported"
         );
         let year = |key: &str| -> Result<i32> {
             i32::try_from(integer_field(document, key)?)
                 .with_context(|| format!("{key} does not fit an i32"))
         };
+        // PFT 土壤 patch：`LAI/SAI_patches` 给 patch、`LAI/SAI_pfts` 给 PFT（`MOD_LAIReadin.F90:192-232`）。
+        if template.pft.is_some() {
+            template = template.with_pft_grid_monthly_leaf_area_index(
+                &layout.out().join(name).join("landdata"),
+                block,
+                logical_field(document, "DEF_LAI_CHANGE_YEARLY")?,
+                year("DEF_LC_YEAR")?,
+                (year("DEF_LAI_START_YEAR")?, year("DEF_LAI_END_YEAR")?),
+            )?;
+        }
         template = template.with_monthly_leaf_area_index(MonthlyLeafAreaIndex::read_grid(
             layout.out().join(name).join("landdata"),
             block,
@@ -1984,6 +2086,7 @@ fn assemble_bgc(
     files: &RestartStateFiles,
     patch: usize,
     switches: colm_core::bgc_driver::BgcSwitches,
+    spatial_patch: Option<&SpatialPatch<'_>>,
 ) -> Result<(
     colm_runtime::bgc_step::BgcRuntime,
     Option<colm_runtime::irrigation::IrrigationReadin>,
@@ -2000,16 +2103,34 @@ fn assemble_bgc(
         patch,
         patches,
         pfts,
+        spatial_patch.map(|patch| patch.pfts.clone()),
     )?
     .initial;
     let layers = initial.dims.nl_soil;
     let statics = colm_runtime::bgc_step::BgcStatics::read(&files.constant, patch, layers)?;
     let runtime_dir = std::path::PathBuf::from(string_field(document, "DEF_dir_runtime")?);
     let degrees = |radians: f64| radians * 180.0 / std::f64::consts::PI;
+    // 驱动数据的取值位置：单点取站点所在格，空间按 patch 的像元面积加权（`build_arealweighted`）。
+    let locator = match spatial_patch {
+        Some(patch) => colm_runtime::bgc_step::Locator::Patch {
+            pixel: patch.pixel,
+            cells: patch.cells,
+            shared_fraction: patch.shared_fraction,
+        },
+        None => colm_runtime::bgc_step::Locator::Site {
+            latitude_deg: degrees(statics.patchlatr),
+            longitude_deg: degrees(statics.patchlonr),
+        },
+    };
     // `CROP_readin`（`CoLM.F90:442`）：启动时覆盖作物的播种日与施肥量（与灌溉方式）。
     let mut irrigation = None;
     if switches.crop {
-        let classes = colm_runtime::pft::open_patch(&pft_constant, patch, patches, pfts)?
+        let pft_file = match spatial_patch {
+            Some(spatial) => colm_init::RestartFile::open(&pft_constant)?
+                .select_patch(patch, spatial.pfts.clone())?,
+            None => colm_runtime::pft::open_patch(&pft_constant, patch, patches, pfts)?,
+        };
+        let classes = pft_file
             .integers("pftclass")?
             .iter()
             .map(|&class| i32::try_from(class))
@@ -2021,8 +2142,21 @@ fn assemble_bgc(
             switches,
             colm_runtime::bgc_step::CropReadinData {
                 runtime_dir: &runtime_dir,
-                latitude_deg: degrees(statics.patchlatr),
-                longitude_deg: degrees(statics.patchlonr),
+                patch: locator,
+                // 空间：每个 PFT 按自己的像元（`landpft` 的 `ipxstt/ipxend/pctshared`）映射；单点同站点。
+                pfts: match spatial_patch {
+                    Some(spatial) => spatial
+                        .pft_cells
+                        .iter()
+                        .zip(spatial.pft_shared)
+                        .map(|(cells, &shared)| colm_runtime::bgc_step::Locator::Patch {
+                            pixel: spatial.pixel,
+                            cells,
+                            shared_fraction: shared,
+                        })
+                        .collect(),
+                    None => vec![locator; classes.len()],
+                },
                 fert_source: integer_field(document, "DEF_FERT_SOURCE")?,
                 irrigation_allocation: i32::try_from(integer_field(
                     document,
@@ -2039,8 +2173,7 @@ fn assemble_bgc(
     };
     let ndep = colm_runtime::bgc_step::NdepSource::open(
         &runtime_dir,
-        degrees(statics.patchlatr),
-        degrees(statics.patchlonr),
+        locator,
         logical_field(document, "DEF_USE_PN")?,
         monthly_ndep,
     )?;
@@ -2054,12 +2187,7 @@ fn assemble_bgc(
     // `init_nitrif_data(ststamp)`：起始时刻（未经 adj2end）所在的月。
     let nitrif = if switches.nitrif {
         Some((
-            colm_runtime::bgc_step::NitrifSource::open(
-                &runtime_dir,
-                degrees(statics.patchlatr),
-                degrees(statics.patchlonr),
-                layers,
-            )?,
+            colm_runtime::bgc_step::NitrifSource::open(&runtime_dir, locator, layers)?,
             u8::try_from(month).context("DEF_simulation_time%start_month is not a month")?,
         ))
     } else {
@@ -2069,8 +2197,7 @@ fn assemble_bgc(
     let fire = if switches.fire {
         Some(colm_runtime::bgc_step::FireSource::open(
             &runtime_dir,
-            degrees(statics.patchlatr),
-            degrees(statics.patchlonr),
+            locator,
         )?)
     } else {
         None
@@ -2556,22 +2683,19 @@ fn write_evolved_restart(
     );
     let source = colm_init::RestartFile::open(restart_in)?;
     let pft_in = colm_runtime::pft::pft_restart_path(restart_in)?;
-    let pft_source = templates[0]
-        .pft
-        .as_ref()
-        .map(|_| colm_init::RestartFile::open(&pft_in))
+    // 空间算例的第一个 patch 不一定是土壤 patch：只要有一个 patch 带 PFT 就有 PFT 重启。
+    let pft_source = templates
+        .iter()
+        .any(|template| template.pft.is_some())
+        .then(|| colm_init::RestartFile::open(&pft_in))
         .transpose()?;
     let slots = templates
         .iter()
         .map(|template| {
-            let pfts = match &pft_source {
-                // PFT 时间重启没有 `patch` 维：patch 数取主重启的。
-                Some(file) => colm_runtime::pft::patch_pft_range(
-                    source.dimension("patch")?,
-                    file.dimension("pft")?,
-                    template.patch,
-                )?,
-                None => 0..0,
+            // 每个 patch 在 PFT 重启里的区间就是装配时用的那一段（单点按 patch 推，空间来自 `landpft`）。
+            let pfts = match (&pft_source, template.pft.as_ref()) {
+                (Some(_), Some(pft)) => pft.pft_range(),
+                _ => 0..0,
             };
             Ok(colm_runtime::multi_patch::PatchSlot {
                 patch: template.patch,
@@ -2623,6 +2747,11 @@ fn write_evolved_restart(
     if let Some(pft_source) = &pft_source {
         let mut lists = Vec::with_capacity(templates.len());
         for (template, state) in templates.iter().zip(states) {
+            // 空间算例的非土壤 patch 没有 PFT（区间为空），不改 PFT 重启。
+            if template.pft.is_none() {
+                lists.push(Vec::new());
+                continue;
+            }
             let (Some(pft_template), Some(pft)) = (&template.pft, &state.energy.pft) else {
                 anyhow::bail!("patch {} has no PFT subgrid to write back", template.patch);
             };
@@ -2999,7 +3128,11 @@ fn real_field(document: &Document, field: &str) -> Result<f64> {
             .with_context(|| format!("{field} must be a real value, got {value:?}"));
     }
     match colm_schema::find(field).map(|field| &field.default) {
+        // Fortran 字面量可能带种类后缀（`0.0_r8`）与 `d` 指数。
         Some(colm_schema::Default::Real(text)) => text
+            .split('_')
+            .next()
+            .unwrap_or(text)
             .replace(['d', 'D'], "e")
             .parse()
             .with_context(|| format!("{field} has an unreadable default {text}")),

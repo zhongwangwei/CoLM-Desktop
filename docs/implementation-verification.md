@@ -27883,3 +27883,72 @@ GIMPLE 要点（默认内核另建一份 `-fdump-tree-optimized-lineno`）：
 **网格回归**（本轮与第 499 轮的最终二进制）：
 - 10 个 2010 JRA3Q 算例的参照用当前内核重生成，全部逐位一致：`g1t/g1lv/g1lw/g1bf/g1bw/g1rs/g1rw/g1ff/g1allw/g1mt`；
 - 另有 15 个算例复验，全部逐位一致：`g1/g1w/g1tr0/g1ts/g1tw/g1tl/g1fl/g1all/g1i` 与 6 个泥沙算例。
+
+## 第 501 轮：B1 —— 空间 PFT 与空间 BGC（含硝化、火灾）
+
+**PFT 子网格的区间**：单点的 PFT 重启只有两种布局（单 patch 拥有全部 PFT，或多作物每 patch 一个）。空间算例的 PFT 重启没有 `patch` 维，区间来自 `landpft` 的 `eindex`：土壤 patch 拥有本单元的那一段（`patch_pft_s/e`，`pft::spatial_pft_ranges`），其余 patch 为空。
+- 区间由空间循环按块算好，经 `SpatialPatch` 交给装配；物理 PFT、BGC 两份重启都按它切。
+- 写回续跑时，每个 patch 的 PFT 区间直接取模板里的那一段。
+- 两处原先按单点写的假设改掉：PFT 重启的有无看"任一 patch 有 PFT"，不看第一个 patch；非土壤 patch 不改 PFT 重启。
+
+**空间 PFT 的逐月 LAI**（`MOD_LAIReadin.F90:192-232`）：
+- patch 的 `tlai/tsai` 直接取 `LAI/SAI_patches<月>_<块>.nc`，不像单点那样按站点份额求和；
+- PFT 的 `tlai_p/tsai_p` 取 `LAI/SAI_pfts<月>_<块>.nc` 的本 patch 区间；
+- LAI 反馈开着时不读 `LAI_*`；
+- 非 PFT 的 patch 照旧走 patch 级的 `read_grid`：不除 `fveg0`，水体清零。
+
+**BGC 驱动数据的面积加权**：氮沉降、硝化 O₂、火灾的 `abm/peatf/gdp/hdm/闪电`，上游都是 `build_arealweighted(grid, landpatch)` + `grid2pset`。
+- 单点的 patch 只落在一格，原来 Rust 直接取包含站点的那一格。
+- 空间的 patch 跨格，现在用 `Footprint::Parts`：把 patch 的像元按数据网格（`define_by_center`）做面积加权映射，取 `Σ FMA(areapart, v, sum)/Σ areapart`。这与强迫映射的 `grid_to_set` 是同一实现；单点仍取 `Footprint::Cell`。
+
+**全局常数重启**：`smpmax_hr/smpmin_hr` 与 BGC 的全局常数在不带块后缀的那份文件里。原来写死去掉 `_w180_s90`，空间块是 `_e110_n20` 之类。现在统一去掉末尾的 `_[ew]<n>_[ns]<n>`（`bgc::without_block_suffix`）。
+
+**两处上游行为在空间算例里才显形**：
+1. `CNFireArea` 的 `tsoi17 = forc_t(i)`（`MOD_BGC_Veg_CNFireLi2016.F90:97`）少了下标，是整列赋值。一步之后，所有 patch（含非土壤 patch）都是按顺序最后一个跑火灾的 patch 的 `forc_t`，续跑写的就是它。单 patch 时是恒等的。Rust 在每步所有 patch 推进完之后广播（`broadcast_fire_tsoi17`）；空间与多作物单点都调用。
+2. 五个火灾 history 量（`f_abm/gdp/peatf/hdm/lnfm`）传的是残留的 `vecacc`，每写一个再除一次 `nac`。
+   - 单点的 `single_write_2d` 按 `filter` 把残留清成 `spval`，所以单点全是填充值。
+   - 网格的 `flux_map_and_write_2d` 不清，默认内核残留的是 `f_wetzwt` 的 `vecacc = a_zwt`（已除过一次 `nac`，`MOD_Hist.F90:916-919`）。
+   - 空间写出因此取 `zwt` 的平均再逐个除 `nac`。
+
+**history 过滤**：按 14 类自然 PFT 分列的 `gpp_*/leafc_*/lai_*/npp_*/npptoleafc_*`，上游 filter 是 `patchclass /= 12 .and. patchtype == 0`。Rust 原来只排除农田；空间算例里湿地 patch 与土壤 patch 同格，会把它的 0 算进分母。现在按 `patch_type == 0` 过滤。
+
+**对照**（latlon 内核，`g1` 区域，JRA3Q 2010，`DEF_USE_PFT`）：
+
+| 算例 | 内容 | 结果 |
+|---|---|---|
+| `g1pft` | PFT，01-01 → 01-02 | history 2 bad 0，restarts 7 bad 0 |
+| `g1bgc` | PFT + BGC + 硝化 + 火灾 + LAI 反馈 | history 2 ok，restart ok |
+| `g1bgcc` | 从 01-03 续跑到 01-04 | history 2 bad 0，restarts 14 bad 0 |
+| `g1pftm` | PFT，01-01 → 02-02（跨月换 LAI） | history 4 ok，restart ok |
+| `g1bgcm` | BGC 同上，01-01 → 02-02（跨月换硝化数据） | history 4 ok，restart ok |
+
+`end_month = 1, end_day = 33` 在 Fortran 里被当成年内第 33 天，Rust 预检把它当非法日期拒绝。算例改写成 `end_month = 2, end_day = 2`。
+
+## 第 502 轮：B1 —— 空间 CROP（进行中）与两处前置问题
+
+**空间 `CROP_readin`**：上游在空间里拒绝播种日覆盖（mksrfdata 报"crop planting-day override is only supported in SinglePoint"），只走读数据的那一支。
+- patch 级的 `pdrice2` 用 `mg2patch_crop`，PFT 级的 `PLANTDATE_CFT_xx` 与施肥用 `mg2pft_crop`/`mg2pft_fert`，都是面积加权。
+- `set_missing_value` 按 `pdrice2` 在各格的值，把缺测格的份面积清零、重算面积和；之后同一映射读的量都用它。缺测值是 `1e20`（正数）。
+- Rust 的 `CropGrid` 改成 patch 一份、每个 PFT 一份 `Footprint`（PFT 的像元来自 `landpft` 的 `ipxstt/ipxend/pctshared`）。单点仍是站点所在格，缺测格变成空映射。
+- `PLANTDATE_CFT_xx` 在文件里是二维（无时间维），`ncio_read_block_time` 照读那一张。
+- 灌溉方式的 `grid2pset_dominant` 还没移植，空间下拒绝。
+
+**PFT 区间改成 `map_patch_to_pft` 原样**（运行期 `pft::spatial_pft_ranges` 与 mkinidata 的 `match_pfts_to_patches` 同一规则），沿 `landpft` 走一个指针：
+- 自然土壤 patch 吃掉后面同 `eindex`、同 `ipxstt`、`settyp < N_PFT` 的那一串；
+- CROP 内核的农田 patch 恰好吃一个；
+- `N_PFT` 不开 CROP 为 16、开 CROP 为 15。
+
+原来的 mkinidata 要求 PFT 与 patch 的像元区间完全相同。CROP 区域每个单元有 9 个农田 patch，但 CFT 的像元区间与农田 patch 不一一对上，于是报"natural/CFT patch has no matching ordered PFT"。
+
+**数据卷**：`/Volumes/Data/CoLMrawdata/global_CFT_surface_data.nc` 是指向 HPC 路径的断链，CROP 的 mksrfdata 读不到。
+- 不改数据卷，在工作树建了 `tmp/rawdata_overlay/`（符号链接到 rawdata 各项，CFT 改指本地的 `CFT/global_0.25x0.25.MOD2000_V4.5_CFT_lf-20260120.nc`）。
+
+**对照算例的两个前置问题**：
+1. CROP + FIRE：上游第一步就在 `CNFireArea` 的 `1/(1−cropf)` 除零（upstream-bugs 第 25 条）。生产内核报 SIGILL，用调试内核加 lldb 定位到 `MOD_BGC_Veg_CNFireLi2016.F90:216`。
+   - lldb 直接起 `colm.x`（MPI 单进程）时，hwloc 的 OpenCL 设备探测会初始化 Metal 驱动。`-ffpe-trap` 下驱动里一次浮点运算就被陷阱拦下，先于模型崩溃。
+   - 设 `HWLOC_COMPONENTS=-opencl` 绕开它才走到真正的崩溃点。这只是调试手段，与 CoLM 无关。
+   - 对照算例因此不开 FIRE。
+2. 纯 Fortran 前处理在空间 PFT + LAI 反馈下，给非土壤 patch（湿地、城市）留下 `spval` 的 `tlai/lai`。
+   - 原因：`LAI_readin` 在反馈下只读 `SAI`，`tlai` 保持分配时的 `spval`。土壤 patch 随后由 BGC 给出，非土壤 patch 一直是 `-1e36`。
+   - 上游整段都带着 `lai = -1e36` 跑：`lai+sai` 为大负数，走无冠层支。截留等处则直接拿它做乘法。
+   - Rust 的 mkinidata 在这里给 0，运行期内核对负 LAI 有多处守卫。这是 vendor 的未初始化缺陷，待修 vendor 后再验收空间 CROP。在那之前，空间 CROP 由 `COLM_RS_SPATIAL_CROP` 环境变量把关，默认拒绝。

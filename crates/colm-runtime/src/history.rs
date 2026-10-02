@@ -547,6 +547,7 @@ fn set_bgc_history(
     s: &colm_core::bgc_state::BgcState,
     first_pft_class: Option<i32>,
     irrigation: Option<&colm_core::IrrigationState>,
+    soil: bool,
 ) -> Result<()> {
     let nl = s.dims.nl_soil;
     let full = s.dims.nl_soil_full;
@@ -601,8 +602,9 @@ fn set_bgc_history(
                         .any(|lai| lai.strip_prefix("lai_") == Some(kind))
                 })
             });
-        // 同样照累加、写出时过滤。
-        if natural_type && runtime.statics.patchclass == 12 && !sink.keep_filtered(name) {
+        // 同样照累加、写出时过滤；非土壤 patch（`patchtype /= 0`，空间算例里与土壤 patch 同格）也不计入。
+        if natural_type && (runtime.statics.patchclass == 12 || !soil) && !sink.keep_filtered(name)
+        {
             continue;
         }
         // `BD_all`/`wfc`/`OM_density` 每个算例都累加，统一由 `set_sidecar_only` 写。
@@ -892,6 +894,15 @@ impl HistoryAccumulator {
             }
             _ => colm_core::MISSING,
         };
+        // 网格/向量写出（空间算例）：`flux_map_and_write_2d` 不像单点的 `single_write_2d` 那样按 `filter`
+        // 把残留清成 `spval`，默认内核残留的是 `f_wetzwt` 的 `vecacc = a_zwt` 除过一次 `nac`
+        // （`MOD_Hist.F90:916-919`，每个 patch 都有）。
+        if !buffer.declares(residual) && buffer.is_spatial() {
+            value = match self.sums.get("zwt") {
+                Some(Accumulated::Scalar { sum, count }) if *count > 0 => sum / steps,
+                _ => colm_core::MISSING,
+            };
+        }
         for (name, _) in FIRE_HISTORY {
             buffer.include(name, record)?;
             if value == colm_core::MISSING {
@@ -3123,7 +3134,15 @@ impl HistorySession {
             };
             set_lct_snow_state(accumulator, 0, template, state, ground)?;
             if let (Some(runtime), Some(bgc)) = (&template.bgc, &state.bgc) {
-                set_bgc_history(accumulator, 0, runtime, bgc, None, state.irrigation.as_deref())?;
+                set_bgc_history(
+                    accumulator,
+                    0,
+                    runtime,
+                    bgc,
+                    None,
+                    state.irrigation.as_deref(),
+                    false,
+                )?;
             }
             // `frcsat = 1` 由末尾 `patchtype > 2` 那一节无条件写，与 VSF 无关。
             let mut fluxes = vec![
@@ -3446,6 +3465,7 @@ impl HistorySession {
                     bgc,
                     first_pft_class,
                     state.irrigation.as_deref(),
+                    template.patch_type == 0,
                 )?;
             }
             set_lct_snow_state(accumulator, 0, template, state, ground)?;

@@ -263,6 +263,16 @@
 - **处理**：`vendor/` 已修（第 487 轮）：两处判据改成 `-max(DUST, 1e-12 × (|旧质量| + (|flux|+|flux_ups|+|bif_net|)·dt))`，
   其余不变（仍 `max(·,0)` 夹到 0）；`g1ts` 此后跑完 2 天。
 
+### 36. LAI 反馈下非土壤 patch 的初始 LAI 是 `spval`
+
+- **位置**：`mkinidata/MOD_Initialize.F90` 的 `LAI_readin` 之后；`main/MOD_LAIReadin.F90` 的 PFT/PC 支。
+- **原因**：`DEF_USE_LAIFEEDBACK` 时 PFT/PC 支只读 `SAI`，`tlai` 交给 BGC。土壤 patch 随后由 BGC 叶碳给出，
+  湿地、城市、水体等没有 BGC 叶碳的 patch 一直保留分配时的 `spval`，`iniTimeVar` 再把它抄进 `lai`。
+- **证据**：CROP 内核空间算例（`g1crop`，纯 Fortran 前处理）的初始续跑里，湿地与城市 patch 的 `tlai = lai = -1e36`。
+  整段运行都带着它：`lai+sai` 为大负数，走无冠层支；截留等处则直接拿它做乘法。
+- **影响**：空间 PFT/PC + BGC + LAI 反馈的所有非土壤 patch。Rust 的 mkinidata 在这里给 0，两种前处理因此不一致。
+- **处理**：`vendor/` 已修（第 502 轮）：`LAI_readin` 之后把仍是 `spval` 的 `tlai` 置 0（裸地起步），与 Rust 前处理一致。
+
 ## 二、TRACER 编译开关改变了物理（需要上游确认哪一边是对的）
 
 这一版上游在很多地方给 TRACER 构建和非 TRACER 构建写了**不同的物理**，不只是记账不同。

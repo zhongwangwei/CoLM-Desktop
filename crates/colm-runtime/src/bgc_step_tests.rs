@@ -45,17 +45,21 @@ fn crop_readin_sets_planting_dates_and_clears_fertilizer() {
         ..BgcSwitches::default()
     };
     let unused = std::path::PathBuf::from("/nonexistent");
-    crop_readin(&mut state, &[1, 17, 78], 120.0, switches, data(&unused)).unwrap();
+    crop_readin(&mut state, &[1, 17, 78], 120.0, switches, data(&unused, 3)).unwrap();
     assert_eq!(state.pft.plantdate_p, vec![-99_999_999.0, 120.0, 120.0]);
     assert_eq!(state.pft.manunitro_p, vec![0.0; 3]);
     assert_eq!(state.pft.fertnitro_p, vec![0.0; 3]);
 }
 
-fn data(dir: &std::path::Path) -> CropReadinData<'_> {
-    CropReadinData {
-        runtime_dir: dir,
+fn data(dir: &std::path::Path, pfts: usize) -> CropReadinData<'_> {
+    let site = Locator::Site {
         latitude_deg: 10.0,
         longitude_deg: 100.0,
+    };
+    CropReadinData {
+        runtime_dir: dir,
+        patch: site,
+        pfts: vec![site; pfts],
         fert_source: 1,
         irrigation_allocation: 1,
     }
@@ -113,7 +117,7 @@ fn crop_readin_reads_planting_and_fertilizer_maps() {
         fert: true,
         ..BgcSwitches::default()
     };
-    crop_readin(&mut state, &[17, 23, 1], 0.0, fert, data(&dir)).unwrap();
+    crop_readin(&mut state, &[17, 23, 1], 0.0, fert, data(&dir, 3)).unwrap();
     assert_eq!(state.patch.pdrice2[0], 214.0);
     assert_eq!(
         state.pft.plantdate_p,
@@ -156,7 +160,7 @@ fn crop_readin_reads_planting_and_fertilizer_maps() {
         irrigation: true,
         ..fert
     };
-    let readin = crop_readin(&mut state, &[17, 23, 1], 0.0, irrigation, data(&dir))
+    let readin = crop_readin(&mut state, &[17, 23, 1], 0.0, irrigation, data(&dir, 3))
         .unwrap()
         .unwrap();
     assert_eq!(readin.methods, vec![3, -99_999_999, -99_999_999]);
