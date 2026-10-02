@@ -28400,3 +28400,21 @@ Rust 在 `lulcc_transition` 里从旧年份续跑读出缓存、计数与标识�
 - 不带示踪物的 `u1v`、网格示踪物的 `g1ts`、`g1ti` 重跑仍然一致。
 
 **没测**：向量 history 下的 CH4，因为没有带 BGC 的 UNSTRUCTURED 算例。代码走的是与均值类相同的 `aggregate`。
+
+## 第 518 轮：重生成三份黄金
+
+第 399 轮起一直记着"黄金没有重生成"。此后内核换成了 `main/`（第 400 轮），又叠了多轮 vendor 修复，`oracle/tests/generated_case.rs` 因此在 `PLUMBER2_ROOT` 下失败。
+
+**做法**：
+- 用当前的 `kernels/default`（`colm_git_sha = 6e433ff7`）对 `CN-Cng`、`CN-Cng-wet`、`US-NR1-snow` 各跑一次 `golden-run <case> --write-golden`，三份 `.nc` 和 `kernel-manifest.json` 一并重写；
+- manifest 里的 `macros` 少了 `extend_interception`，因为上游 `d6de53e9` 起就不再编进扩展截获。
+
+**Rust 对新黄金**：拿 golden-run 留下的 Fortran 前处理产物，Rust 只跑 colm 阶段，history 与黄金逐变量逐位比较，三份都是零差异（`bitfirst.py` 输出 `[]`）。
+
+**指标表**：`oracle/tests/metrics.rs` 复现的 design.md §2.8 冬季窗口里，Qh、Qle 两行随物理修复略变：
+- Qh：RMSE 46.37 → 46.33，R² 0.530 → 0.533；
+- Qle：RMSE 32.47 → 32.45，R² 0.047 → 0.044。
+
+湿季窗口（§2.8b）六个数都不变。design.md 的表与测试期望已一起更新（旧值留在表下注明）。
+
+**结果**：`PLUMBER2_ROOT` 下 `cargo test -p oracle` 共 49 个测试全部通过，包括 `generated_case`、`golden_run`、`metrics`、`tier_compare`。

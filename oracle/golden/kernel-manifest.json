@@ -2,17 +2,17 @@
   "schema": 1,
   "preset": "default",
   "platform": "Darwin-arm64",
-  "colm_git_sha": "ad75e8e",
+  "colm_git_sha": "6e433ff7",
   "generator_args": "SinglePoint LULC_IGBP CaMaOFF CROPOFF",
   "build_profile": "production",
-  "macros": ["LULC_IGBP","SinglePoint","URBAN_MODEL","extend_interception"],
+  "macros": ["LULC_IGBP","SinglePoint","URBAN_MODEL"],
   "built_with": "GNU Fortran (Homebrew GCC 16.1.0) 16.1.0",
   "netcdf_c": "netCDF 4.9.3",
   "netcdf_fortran": "4.6.3",
   "hdf5": "1.14.6",
   "sha256": {
-    "mksrfdata": "ef4a695ae1d1c1114504fac7d3fa71c05b33639188cb1909614364fdab273186",
-    "mkinidata": "c81e65e03bac39feefe352106b8beafdc898ffc4e77e47c38b6d493252e28810",
-    "colm":      "ce87a772222ba0c0dc92ced958f15de72b6a51b39912f8ce42da814a8a4e8f1c"
+    "mksrfdata": "14752773f1aaace25a5b515874c0957c55652a80c40e22dc3d3d84b23467263a",
+    "mkinidata": "baff8beed34a74fe1f0cbcf97b8275613be92c719f4c309c42011d2541e5e65e",
+    "colm":      "6508aea28644e9cface003a9c3fadc95ac6a6c6cb2e1971fc5641e0167d348b7"
   }
 }
