@@ -229,6 +229,18 @@ impl SpatialRuntime {
                             .tracer_forcing
                             .as_ref()
                             .map(|forcing| forcing.ratios(index)),
+                        flood_tracer: self
+                            .river
+                            .as_ref()
+                            .and_then(|(river, _)| river.flood.as_ref())
+                            .and_then(|flood| {
+                                flood.tracer.as_ref().map(|tracer| {
+                                    (
+                                        flood.credit[index] * 1000.0,
+                                        tracer.credit_patch[index].as_slice(),
+                                    )
+                                })
+                            }),
                     };
                     let scale = optimizer.as_ref().map(|optimizer| optimizer.scale(index));
                     outputs.push(
@@ -255,6 +267,20 @@ impl SpatialRuntime {
                                     output.view().flood_exchange_mm_s();
                                 flood.evap_mm_s[index] = evaporation;
                                 flood.infil_mm_s[index] = infiltration;
+                            }
+                            // `flood_tracer_evap/land_patch`：走 CoLMMAIN 的 patch 本步写过，其余停在
+                            // 发布时清的 0。
+                            if let Some(tracer) = flood.tracer.as_mut() {
+                                for (index, state) in next_states.iter().enumerate() {
+                                    if let Some(exchange) = state
+                                        .tracer
+                                        .as_deref()
+                                        .and_then(|track| track.flood_exchange.as_ref())
+                                    {
+                                        tracer.evap_patch[index].clone_from(&exchange.evap);
+                                        tracer.land_patch[index].clone_from(&exchange.land);
+                                    }
+                                }
                             }
                         }
                         // `grid_riverlake_flow(idate(1), …)`：`TICKTIME` 之后的年份，即本步末。

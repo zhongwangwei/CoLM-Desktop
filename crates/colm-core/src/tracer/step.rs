@@ -36,6 +36,24 @@ pub struct TracerStepContext<'a> {
     pub debug: bool,
     /// `DEF_VEG_SNOW`。
     pub vegetation_snow: bool,
+    /// 网格河湖漫滩回馈发布给本 patch 的可用水量与其中的示踪物（`flood_credit_patch*1000`、
+    /// `flood_tracer_credit_patch(:,ipatch)`）；没开回馈时为 `None`。
+    pub flood: Option<FloodTracerCredit<'a>>,
+}
+
+/// 漫滩回馈发布给一个 patch 的水量（mm）与示踪物（mm·比值，逐示踪物）。
+#[derive(Debug, Clone, Copy)]
+pub struct FloodTracerCredit<'a> {
+    pub water_credit_mm: f64,
+    pub tracer_credit: &'a [f64],
+}
+
+/// 本步陆面从漫滩水池取走的示踪物：蒸发损失（`flood_tracer_evap_patch`，负值是大气同位素
+/// 吸收）与随入渗进土壤的量（`flood_tracer_land_patch`），交给河道扣账。
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct FloodTracerExchange {
+    pub evap: Vec<f64>,
+    pub land: Vec<f64>,
 }
 
 /// 随 patch 保存的示踪物状态与本步开头的收支快照。
@@ -43,6 +61,8 @@ pub struct TracerStepContext<'a> {
 pub struct PatchTracerTrack {
     pub state: PatchTracerState,
     pub snapshot: BalanceSnapshot,
+    /// 开了漫滩回馈时本步的示踪物交换（见 [`FloodTracerExchange`]）。
+    pub flood_exchange: Option<FloodTracerExchange>,
 }
 
 impl PatchTracerTrack {
@@ -50,6 +70,7 @@ impl PatchTracerTrack {
         Self {
             state,
             snapshot: BalanceSnapshot::default(),
+            flood_exchange: None,
         }
     }
 }
@@ -74,6 +95,8 @@ pub struct TracerStepScratch {
     pub wa_old: f64,
     pub wdsrf_old: f64,
     pub wetwat_old: f64,
+    /// `flood_evap_temp_trc = t_soisno(lb)`：THERMAL 之前的顶层温度（`CoLMMAIN.F90:1033`）。
+    pub flood_evap_temp_k: f64,
 }
 
 /// 雪 5 层 + 土 10 层拼成 Fortran 的 `maxsnl+1:nl_soil`。

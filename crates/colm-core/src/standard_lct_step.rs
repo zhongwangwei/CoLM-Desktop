@@ -1164,6 +1164,12 @@ pub fn standard_lct_snow_soil_step(
         ));
     }
     split_canopy_water_before_thermal(input.energy, &mut state.energy);
+    // `flood_evap_temp_trc = t_soisno(lb)`（split 与漫滩回馈同开已在上面拒绝）。
+    tracer_scratch.flood_evap_temp_k = if state.snow.layer_count < 0 {
+        state.snow.temperature_k[crate::snow::snow_layer_slot(state.snow.layer_count + 1)]
+    } else {
+        state.soil_temperature_k[0]
+    };
     if let (Some(ctx), Some(track)) = (input.tracer.as_ref(), state.tracer.as_deref_mut()) {
         crate::tracer::step::before_thermal(
             ctx,
@@ -1245,6 +1251,37 @@ pub fn standard_lct_snow_soil_step(
                 scv: state.snow.water_equivalent_kg_m2,
             },
         )?;
+        // `CoLMMAIN.F90:1101-1107`：THERMAL 之后先清零本 patch 的漫滩蒸发示踪物，土壤 patch 有
+        // 漫滩蒸发时按 Craig-Gordon 算洪水水池的示踪物损失（不进陆面 `a_trc_evap`）。
+        track.flood_exchange = match ctx.flood {
+            Some(flood) => {
+                let fevpg = energy.flood.map_or(0.0, |flood| flood.evaporation_mm_s);
+                let evap = if input.energy.ground_temperature.patch_type == 0 && fevpg > 0.0 {
+                    crate::tracer::evapo::tracer_flood_evap_loss(
+                        ctx.set,
+                        ctx.physics,
+                        ctx.vapor_ratio,
+                        flood.tracer_credit,
+                        &crate::tracer::evapo::FloodEvapInput {
+                            water_credit: flood.water_credit_mm,
+                            water_evap: fevpg * input.energy.interception.time_step_seconds,
+                            temp_k: tracer_scratch.flood_evap_temp_k,
+                            forc_q: input.energy.forcing.specific_humidity,
+                            forc_psrf: input.energy.forcing.surface_pressure_pa,
+                            forc_us: input.energy.forcing.eastward_wind_m_s,
+                            forc_vs: input.energy.forcing.northward_wind_m_s,
+                        },
+                    )?
+                } else {
+                    vec![0.0; ctx.set.len()]
+                };
+                Some(crate::tracer::step::FloodTracerExchange {
+                    evap,
+                    land: vec![0.0; ctx.set.len()],
+                })
+            }
+            None => None,
+        };
     }
     let melted = energy.ground.phase_flag[..snow_layers]
         .iter()
@@ -1342,6 +1379,7 @@ pub fn standard_lct_snow_soil_step(
             stomatal_resistance_s_m: energy.leaf.canopy_stomatal_resistance_s_m,
             moisture_resistance_s_m: energy.leaf.reference_to_canopy_moisture_resistance_s_m,
             soil_surface_resistance_s_m: state.energy.soil_surface_resistance_s_m,
+            flood_evaporation_mm_s: energy.flood.map_or(0.0, |flood| flood.evaporation_mm_s),
             pg_rain: energy.interception.ground_rain_kg_m2_s,
             pg_snow: energy.interception.ground_snow_kg_m2_s,
         })?;
@@ -2032,6 +2070,8 @@ struct TracerAfterWater<'a, 'b> {
     stomatal_resistance_s_m: f64,
     moisture_resistance_s_m: f64,
     soil_surface_resistance_s_m: f64,
+    /// `fevpg_fld`（漫滩蒸发，mm/s）：入渗示踪物要扣掉蒸发后剩下的水池。
+    flood_evaporation_mm_s: f64,
     pg_rain: f64,
     pg_snow: f64,
 }
@@ -2058,6 +2098,7 @@ fn tracer_after_water(host: TracerAfterWater<'_, '_>) -> Result<()> {
         stomatal_resistance_s_m,
         moisture_resistance_s_m,
         soil_surface_resistance_s_m,
+        flood_evaporation_mm_s,
         pg_rain,
         pg_snow,
     } = host;
@@ -2164,6 +2205,39 @@ fn tracer_after_water(host: TracerAfterWater<'_, '_>) -> Result<()> {
         .as_slice()
         .try_into()
         .map_err(|_| anyhow::anyhow!("expected {SOIL_LAYERS} permeability flags"))?;
+    // `CoLMMAIN.F90:1252-1268`：入渗的漫滩水按"发布的示踪物减去蒸发损失、再按入渗占蒸发后
+    // 剩余水量的份额"带进土壤；有溶解度上限的溶质另截在 `max_dissolved_conc*qinfl_fld*deltim`。
+    // GIMPLE 全是逐条舍入（`(tc - te) * (qinfl*dt / (credit*1e3 - fevpg*dt))`）。
+    let qinfl_fld = water.soil.flood_infiltration_mm_s;
+    let flood_input: Option<Vec<f64>> = match (ctx.flood, track.flood_exchange.as_ref()) {
+        (Some(flood), Some(exchange)) => {
+            let mut values = vec![0.0; ctx.set.len()];
+            if input.soil_water.patch_type == 0 && qinfl_fld > 0.0 {
+                let water_credit = flood.water_credit_mm;
+                let evaporated = flood_evaporation_mm_s * dt;
+                if water_credit <= evaporated {
+                    ensure!(
+                        !(water_credit.max(1.0) * 1.0e-12 < qinfl_fld * dt),
+                        "grid flood feedback: infiltration without published tracer credit"
+                    );
+                } else {
+                    let share = (qinfl_fld * dt) / (water_credit - evaporated);
+                    for (itrc, value) in values.iter_mut().enumerate() {
+                        *value = (flood.tracer_credit[itrc] - exchange.evap[itrc]) * share;
+                    }
+                    for (itrc, tracer) in ctx.set.tracers.iter().enumerate() {
+                        if tracer.has_dissolved_limit() {
+                            values[itrc] = values[itrc]
+                                .max(0.0)
+                                .min(qinfl_fld * tracer.max_dissolved_conc * dt);
+                        }
+                    }
+                }
+            }
+            Some(values)
+        }
+        _ => None,
+    };
     let qcharge = crate::tracer::soil_water::qcharge_trc(
         soil_water.aquifer_water_mm,
         scratch.wa_old,
@@ -2171,7 +2245,7 @@ fn tracer_after_water(host: TracerAfterWater<'_, '_>) -> Result<()> {
         diag.subsurface_source_aquifer_mm,
         dt,
     );
-    crate::tracer::soil_water::tracer_soil_water(
+    let outcome = crate::tracer::soil_water::tracer_soil_water(
         ctx.set,
         &mut track.state,
         ctx.physics,
@@ -2233,8 +2307,8 @@ fn tracer_after_water(host: TracerAfterWater<'_, '_>) -> Result<()> {
             dz_soi: Some(&dz_soi),
             porsl: Some(&porsl),
             dz_sno: Some(&dz_sno),
-            flood_tracer_input: None,
-            flood_infil_water: None,
+            flood_tracer_input: flood_input.as_deref(),
+            flood_infil_water: flood_input.as_ref().map(|_| qinfl_fld * dt),
             etroot_surface: Some(diag.transpiration_surface_mm),
             dew_overflow: Some(diag.dew_overflow_mm),
             frost_displaced: Some(diag.frost_displaced_mm),
@@ -2247,5 +2321,10 @@ fn tracer_after_water(host: TracerAfterWater<'_, '_>) -> Result<()> {
             vapor_ratio: ctx.vapor_ratio,
             has_vapor: Some(ctx.has_vapor),
         },
-    )
+    );
+    // `flood_tracer_land_patch(:,ipatch) = flood_input_tracer`（`:1340-1341`）。
+    if let (Some(exchange), Some(values)) = (track.flood_exchange.as_mut(), flood_input) {
+        exchange.land = values;
+    }
+    outcome
 }

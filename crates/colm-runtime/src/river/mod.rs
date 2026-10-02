@@ -452,16 +452,34 @@ impl RiverModel {
     /// 打开漫滩回馈：`grid_riverlake_flow_init` 末尾立刻发布一次（非 spinup）。
     ///
     /// `start_year` 是 `publish_flood_feedback(start_year)` 判断水库是否已建成用的年份。
-    pub fn with_flood_feedback(mut self, infiltration_max_mm_day: f64, start_year: i32) -> Self {
+    pub fn with_flood_feedback(
+        mut self,
+        infiltration_max_mm_day: f64,
+        start_year: i32,
+    ) -> Result<Self> {
         let mut flood =
             flood::FloodFeedback::new(&self.network, &self.routing, infiltration_max_mm_day);
+        // 有输运示踪物时另开示踪物账（上游在河湖示踪物初始化之后分配并发布，所以示踪物要先挂上）。
+        if let Some(tracers) = self.tracers.as_ref() {
+            flood.tracer = Some(flood::FloodTracers::new(
+                tracers.set.len(),
+                self.network.len(),
+                self.routing.patch_parts.len(),
+            ));
+        }
         let context = flood::FloodContext {
             levee: self.levee.as_ref(),
             reservoir: self.reservoir.as_ref().map(|r| (r, start_year)),
         };
-        flood.publish(&self.network, &self.routing, &mut self.state, context);
+        flood.publish(
+            &self.network,
+            &self.routing,
+            &mut self.state,
+            context,
+            self.tracers.as_mut(),
+        )?;
         self.flood = Some(flood);
-        self
+        Ok(self)
     }
 
     /// 一个陆面步：把 patch 径流（mm/s，`rnof`）汇进 `acc_rnof_uc`，满时间就汇流一次。
@@ -563,6 +581,7 @@ impl RiverModel {
                 &mut self.state,
                 context,
                 &mut repartitions,
+                self.tracers.as_mut(),
             )?;
             // 扣账后的堤防重新分区也要告诉泥沙（`tracer_lifecycle_route_sediment_levee_repartition`）。
             if let Some(sediment) = self.sediment.as_mut() {
@@ -570,7 +589,13 @@ impl RiverModel {
                     sediment.acc[j].levee_repartition(water)?;
                 }
             }
-            flood.publish(&self.network, &self.routing, &mut self.state, context);
+            flood.publish(
+                &self.network,
+                &self.routing,
+                &mut self.state,
+                context,
+                self.tracers.as_mut(),
+            )?;
         }
         self.state.acctime_rnof += deltime;
         if self.state.acctime_rnof + 0.01 < self.max_dt {
@@ -585,7 +610,13 @@ impl RiverModel {
                 levee: self.levee.as_ref(),
                 reservoir: self.reservoir.as_ref().map(|r| (r, year)),
             };
-            flood.publish(&self.network, &self.routing, &mut self.state, context);
+            flood.publish(
+                &self.network,
+                &self.routing,
+                &mut self.state,
+                context,
+                self.tracers.as_mut(),
+            )?;
         }
         Ok(true)
     }

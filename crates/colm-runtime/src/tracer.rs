@@ -253,6 +253,7 @@ impl TracerRuntime {
             runtime_forced: &self.runtime_forced,
             debug: self.debug,
             vegetation_snow: self.vegetation_snow,
+            flood: None,
         }
     }
 
@@ -316,9 +317,18 @@ pub fn end_of_step(
     }
     let precipitation =
         forcing.convective_precipitation_kg_m2_s + forcing.large_scale_precipitation_kg_m2_s;
-    let evaporation_wb = output.energy.total_evaporation_kg_m2_s;
+    // 漫滩回馈（`CoLMMAIN.F90:1509-1517`，土壤 patch）：再入渗 `qinfl_fld` 是显式输入
+    // （`flood_input_wb`），漫滩蒸发从 `fevpa` 里扣掉（`fevpa_wb`）；与 history 的 `xerr` 同式。
+    let flood = output.energy.flood.filter(|_| patch_type == 0);
+    let flood_input_wb = if flood.is_some() {
+        output.water.soil.flood_infiltration_mm_s
+    } else {
+        0.0
+    };
+    let evaporation_wb =
+        output.energy.total_evaporation_kg_m2_s - flood.map_or(0.0, |flood| flood.evaporation_mm_s);
     let runoff = output.water.soil.total_runoff_mm_s;
-    let errorw = (-(((precipitation + 0.0) - evaporation_wb) - runoff))
+    let errorw = (-(((precipitation + flood_input_wb) - evaporation_wb) - runoff))
         .mul_add(deltim, end_total - initial_total_water_mm);
     {
         let mut tracker = runtime
@@ -338,11 +348,12 @@ pub fn end_of_step(
                 patchtype: Some(patch_type),
                 water_err: Some(errorw),
                 water_ds: Some(end_total - initial_total_water_mm),
-                water_input: Some((precipitation + 0.0) * deltim),
+                water_input: Some((precipitation + flood_input_wb) * deltim),
                 water_output: Some((evaporation_wb + runoff) * deltim),
                 water_evap: Some(evaporation_wb * deltim),
                 water_rnof: Some(runoff * deltim),
-                flood_heterogeneous: None,
+                // `flood_heterogeneous_in = LWINFILT .and. patchtype == 0`（GridRiverLakeFlow 构建）。
+                flood_heterogeneous: Some(flood.is_some()),
                 catch_lateral_flow: false,
                 runtime_forced: &runtime.runtime_forced,
             },

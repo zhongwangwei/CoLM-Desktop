@@ -242,6 +242,9 @@ pub struct StandardLctStepBinding<'a> {
     pub flood: Option<colm_core::flood_evaporation::FloodPatchInput>,
     /// 网格示踪物强迫给这个 patch 的 `(precip, vapor)` 比值（逐示踪物）；`None` 用运行时的默认比值。
     pub tracer_ratios: Option<(&'a [f64], &'a [f64])>,
+    /// 漫滩回馈发布给这个 patch 的水量（mm，`flood_credit_patch*1000`）与其中的示踪物
+    /// （`flood_tracer_credit_patch(:,ipatch)`）；没开回馈或没有输运示踪物时为 `None`。
+    pub flood_tracer: Option<(f64, &'a [f64])>,
 }
 
 /// 原时间重启里续跑需要用到的整变量（所有 patch）。
@@ -2468,6 +2471,14 @@ impl StandardLctRestartTemplate {
                     context.precip_ratio = precip;
                     context.vapor_ratio = vapor;
                 }
+                context.flood = binding
+                    .flood_tracer
+                    .map(|(water_credit_mm, tracer_credit)| {
+                        colm_core::tracer::step::FloodTracerCredit {
+                            water_credit_mm,
+                            tracer_credit,
+                        }
+                    });
                 context
             }),
         }

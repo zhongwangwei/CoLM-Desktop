@@ -28267,3 +28267,42 @@ f_ustar     0.10293637      0.11577442      0.11577442
 **本机还跑不了或没跑的**：
 - 黄金回归 `oracle/tests/generated_case.rs` 在 `PLUMBER2_ROOT` 下失败：第 0 步起多数变量不同。它比较的是 Fortran 内核的当场运行与入库黄金。第 399 轮起就记着"黄金没有重生成"，之后内核又换成了 `main/`，这是黄金过期，与本轮改动无关。重生成黄金是单独一项。
 - `colm-srfdata` 的 `raster`、`real_sites` 要 `COLM_RAWDATA`，本机未设，没跑。
+
+## 第 511 轮：B1 —— 输运示踪物与网格河湖漫滩回馈
+
+原来"输运示踪物 + `DEF_GridRiverLake_FloodFeedback`"直接拒绝。上游在 TRACER 构建里给漫滩回馈记了一本示踪物账，三处要接。
+
+**1. 发布**（`publish_flood_feedback`）：
+- 每个单元流域先 `equilibrate_river_tracer_cell`（只有带溶解度上限的溶质才有固相），再算可见/堤内水量；
+- 可见漫滩示踪物 = `max(trc_mass, 0) × (可见漫滩水 / 可见水)`，堤内示踪物 = `max(trc_levsto, 0)`；
+- 两份各自按密度推到网格、除以网格面积、平均到 patch，`credit = 1000 × (可见 + 堤内)`（不截负，与水量不同）。
+
+**2. 陆面**（`CoLMMAIN.F90`）：
+- THERMAL 之前记 `flood_evap_temp_trc = t_soisno(lb)`；
+- THERMAL 之后，土壤 patch 有漫滩蒸发时用 `tracer_flood_evap_loss` 算洪水水池的示踪物损失（Craig-Gordon，用开阔水面动力学 α；不进陆面 `a_trc_evap`）；
+- 入渗的示踪物 = `(credit - 蒸发损失) × qinfl_fld·dt / (credit 水量 - fevpg_fld·dt)`，有溶解度上限的溶质截在 `max_dissolved_conc·qinfl_fld·dt`（GIMPLE 全是逐条舍入）。它作为 `flood_tracer_input` 交给 `tracer_soil_water`，同时报给河道。
+- **收支检查漏了漫滩项**：上游 `tracer_balance_check` 的 `water_input_in = (forc_prc+forc_prl+flood_input_wb)·dt`，`fevpa_wb = fevpa - fevpg_fld`，另传 `flood_heterogeneous_in`。`water_input` 会进 `a_water_precip`。Rust 原来写的是 `precipitation + 0.0`，于是 `f_trc_conc_precip` 第一版不一致（F 1.9857、R 1.9972）；照上游补上后一致。
+
+**3. 扣账**（`debit_flood_feedback`）：水量的两遍扣账之后、更新蓄量之前，逐示踪物：
+- patch 份额 `ratio = FMA(1-蒸发份额, 入渗份额, 蒸发份额)`。有溶解度上限的溶质改用 `陆面取走 / credit`；
+- 大气同位素吸收按 `vapor_gain·(1-入渗份额)/水量` 回补，非挥发溶质不回补；
+- 推回单元流域，从可见与堤内两份示踪物里扣（`after = (mass - coef·vis) + gain·visible`，逐条舍入）；
+- 核对"陆面 + 大气 = 河道扣掉的量"。
+
+  蓄量更新之后、堤防重新分区之前再 `equilibrate`；堤防重新分区时示踪物跟着搬（`levee_tracer_repartition`，不带待释放的径流示踪物）。
+
+**初始化次序**：上游先初始化河湖示踪物，再分配回馈并发布。colm-rs 原来先挂回馈后挂示踪物，现在调了过来。
+
+**验收**（两侧共用 Rust 前处理，只跑 colm 阶段，3 天；每组 Fortran 日志都有 5 条 `Grid flood tracer land/vapor/donor/residual`，账目闭合）：
+
+| 算例 | 内容 | history | restart |
+|---|---|---|---|
+| `g1fft` | g1ff + 溶质 `sol1` | 3 份逐位一致 | 5 份逐位一致 |
+| `g1ffi` | g1ti（IsoGSM 强迫、两个分馏同位素）+ 漫滩回馈、TOPMODEL；蒸发项非零 | 3 | 5 |
+| `g1flt` | + 堤防 | 3 | 5 |
+| `g1frt` | + 水库 | 3 | 5 |
+| `g1fbt` | + 分汊 | 3 | 5 |
+
+`g1ffi` 起初借用 g1ti 的前处理，Rust 报常数重启缺 `fsatmax`（TOPMODEL 要），按新 namelist 重做前处理后两侧共用。
+
+**不带示踪物的漫滩回馈回归**：`g1ff`、`g1fl`、`g1ffsed` 逐位一致。`g1fr`、`g1fb` 的 Fortran 参照是 10 月 1 日用旧内核生成的；起始续跑两侧相同，HEAD 的二进制同样不一致。用当前内核重跑参照后，两个都是 history 2 份、restart 5 份逐位一致。

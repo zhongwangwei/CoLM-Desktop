@@ -444,9 +444,8 @@ fn run_spatial(
     );
     // 堤防、分汊、水库与漫滩回馈之间可以任意组合，也都可以与 LULCC 同开（漫滩回馈除外，
     // 上游自己拒绝，见上）。
-    // 示踪物：陆面输运、河湖输运、网格示踪物强迫都已移植。还没接的是 LULCC 的示踪物状态迁移
-    // （`save/remap_land_tracer_lulcc_state`、`tracer_forcing_lulcc_remap`）与漫滩回馈的示踪物账
-    // （`flood_tracer_credit_patch` 等）—— 这两种组合明确拒绝，免得悄悄丢账。
+    // 示踪物：陆面输运、河湖输运、网格示踪物强迫、漫滩回馈的示踪物账、LULCC（SAT）的示踪物迁移
+    // 都已移植。还没接的组合在下面逐条拒绝，免得悄悄丢账。
     let tracer_set = colm_runtime::tracer::tracer_set_from_document(&document)?;
     // CH4 provider：与单点同一条 `soil_step`，只移植了 `wetwat` 淹没方案（`routing`/`hybrid` 要接
     // 网格河湖的淹没比例，`satellite` 要读 GIEMS，`dynamic_wtd` 在内核里尚未移植）。
@@ -506,13 +505,6 @@ fn run_spatial(
         "methane with DEF_USE_LULCC (save/remap_methane_lulcc_state) is not ported; run this \
          case with --engine fortran"
     );
-    if transport_tracers {
-        ensure!(
-            !logical_field(&document, "DEF_GridRiverLake_FloodFeedback")?,
-            "land tracers with DEF_GridRiverLake_FloodFeedback (flood tracer ledger) are not ported; \
-             run this case with --engine fortran"
-        );
-    }
     ensure!(
         !logical_field(&document, "DEF_UnitCatchment_regional")?,
         "DEF_UnitCatchment_regional is not ported to the Rust river model; run this case with \
@@ -1103,23 +1095,6 @@ fn run_spatial_segment(
         river.history = history;
     }
     river.momentum_dt_limit = logical_field(document, "DEF_GRIDBASED_ROUTING_MOMENTUM_DT_LIMIT")?;
-    // `grid_riverlake_flow_init`：回馈打开时立刻按读回的状态发布一次（Rust 不在 spinup 里汇流）。
-    if logical_field(document, "DEF_GridRiverLake_FloodFeedback")? {
-        let infiltration_max_mm_day = match document.get("DEF_GridRiverLake_FloodInfiltMax") {
-            Some(Value::Real { text }) => text
-                .trim()
-                .trim_end_matches("_r8")
-                .replace(['d', 'D'], "e")
-                .parse::<f64>()
-                .with_context(|| format!("DEF_GridRiverLake_FloodInfiltMax = {text}"))?,
-            Some(Value::Int(value)) => *value as f64,
-            Some(other) => bail!("DEF_GridRiverLake_FloodInfiltMax must be real, got {other}"),
-            // `MOD_Namelist.F90` 的缺省 `5._r8`（mm/day）。
-            None => 5.0,
-        };
-        // `grid_riverlake_flow_init(s_year, …)`：本次运行的起始年份。
-        river = river.with_flood_feedback(infiltration_max_mm_day, config.start.year);
-    }
     // `river_lake_tracer_init` + `read_tracer_restart`/`tracer_init_from_water`
     // （`grid_riverlake_flow_init`）：有输运示踪物时河道示踪物与陆面一起开。
     if let Some(tracer) = tracer_runtime
@@ -1153,6 +1128,24 @@ fn run_spatial_segment(
             );
         }
         river = river.with_tracers(tracers)?;
+    }
+    // `grid_riverlake_flow_init`：回馈打开时立刻按读回的状态发布一次（Rust 不在 spinup 里汇流）。
+    // 上游在河湖示踪物初始化之后才分配回馈、发布，所以排在示踪物后面。
+    if logical_field(document, "DEF_GridRiverLake_FloodFeedback")? {
+        let infiltration_max_mm_day = match document.get("DEF_GridRiverLake_FloodInfiltMax") {
+            Some(Value::Real { text }) => text
+                .trim()
+                .trim_end_matches("_r8")
+                .replace(['d', 'D'], "e")
+                .parse::<f64>()
+                .with_context(|| format!("DEF_GridRiverLake_FloodInfiltMax = {text}"))?,
+            Some(Value::Int(value)) => *value as f64,
+            Some(other) => bail!("DEF_GridRiverLake_FloodInfiltMax must be real, got {other}"),
+            // `MOD_Namelist.F90` 的缺省 `5._r8`（mm/day）。
+            None => 5.0,
+        };
+        // `grid_riverlake_flow_init(s_year, …)`：本次运行的起始年份。
+        river = river.with_flood_feedback(infiltration_max_mm_day, config.start.year)?;
     }
     river.empty_tracer_transaction = tracer_runtime.is_some();
     // CH4 provider 注册了 `publish_flood`/`publish_levee_flood`：每次汇流末把淹没比例推到 patch。

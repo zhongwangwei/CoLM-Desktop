@@ -215,7 +215,7 @@ impl RiverTracers {
     }
 
     /// `equilibrate_river_tracer_cell`。
-    fn equilibrate_cell(&mut self, i: usize, visible: f64, protected: f64) -> Result<()> {
+    pub(crate) fn equilibrate_cell(&mut self, i: usize, visible: f64, protected: f64) -> Result<()> {
         let Some((solid, levsto_solid)) = self.solid.as_mut() else {
             return Ok(());
         };
