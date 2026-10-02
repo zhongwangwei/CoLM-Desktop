@@ -28306,3 +28306,9 @@ f_ustar     0.10293637      0.11577442      0.11577442
 `g1ffi` 起初借用 g1ti 的前处理，Rust 报常数重启缺 `fsatmax`（TOPMODEL 要），按新 namelist 重做前处理后两侧共用。
 
 **不带示踪物的漫滩回馈回归**：`g1ff`、`g1fl`、`g1ffsed` 逐位一致。`g1fr`、`g1fb` 的 Fortran 参照是 10 月 1 日用旧内核生成的；起始续跑两侧相同，HEAD 的二进制同样不一致。用当前内核重跑参照后，两个都是 history 2 份、restart 5 份逐位一致。
+
+## 第 512 轮：上游复核（2026-10-02）
+
+`CoLM-SYSU-integration` 执行 `git fetch` 之后，`origin/master` 仍是 `85cf2328`（PR #17），没有比第 437 轮同步更新的提交。
+
+逐文件核对：`git diff -U0 3c799bae 85cf2328` 共涉及 8 个文件、新增 70 行，全部原样出现在 `vendor/CoLM202X` 的对应文件里。直接 `diff` 两边会看到更多不同，但那些都是本仓库已经记录在 upstream-bugs 里的 vendor 修复与 TRACER 统一，不是漏同步。
