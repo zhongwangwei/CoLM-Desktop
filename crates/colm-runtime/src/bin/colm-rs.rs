@@ -496,12 +496,6 @@ fn run_spatial(
     };
     let vector_history =
         arguments.unstructured && logical_field(&document, "DEF_HISTORY_IN_VECTOR")?;
-    // 向量 history 下的示踪物 history（`MOD_Tracer_Hist` 的 `Vector` 分支）还没接。
-    ensure!(
-        !(vector_history && logical_field(&document, "DEF_USE_TRACER")?),
-        "tracers with DEF_HISTORY_IN_VECTOR (vector tracer history) are not ported; run this case \
-         with --engine fortran"
-    );
     let case = SpatialCase {
         layout,
         name,
@@ -1234,7 +1228,21 @@ fn run_spatial_segment(
                     vector,
                     &colm_runtime::river::history::VECTOR_RIVER_VARIABLES,
                     statics,
-                )?,
+                )
+                .map(|session| {
+                    // 向量写出（没有窗口变量，所以不调 `with_tracer_history`）：开了示踪物就写示踪物文件（`MOD_Tracer_Hist` 的 `Vector` 支），
+                    // 没有输运示踪物也没有 CH4 时只有维与坐标。
+                    match tracer_runtime.as_ref() {
+                        Some(tracer) => session.with_tracer_variables(
+                            tracer.set.clone(),
+                            templates
+                                .iter()
+                                .map(|template| template.patch_type)
+                                .collect(),
+                        ),
+                        None => session,
+                    }
+                })?,
                 river: river_writer,
                 elements: ElementGroups::from_topology(&topology)?,
                 files: Vec::new(),

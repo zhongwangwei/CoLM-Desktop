@@ -28379,3 +28379,24 @@ Rust 在 `lulcc_transition` 里从旧年份续跑读出缓存、计数与标识�
 - `g1ch4s`（空间 g1ch4 + `sol1`）：history 3 份、restart 9 份逐位一致。
 - `g1ch4sc`（从第 3 天续跑 2 天）：history 3 份、restart 10 份逐位一致。
 - 甲烷相关的单点回归 `tc4 tc4w tc4wl tc4y tc4lk tc4lky tc4f lk36ch4 lk36ch4y lk36sol rc4` 与空间 `g1ch4c` 重跑全部一致。
+
+## 第 517 轮：向量 history 下的示踪物 history（`DEF_HISTORY_IN_VECTOR`）
+
+原来 UNSTRUCTURED + 向量 history + 示踪物时拒绝。上游 `MOD_Tracer_Hist` 的 `Vector` 支：
+- **比值类**（`write_history_tracer_ratio_vector_2d/3d`）：每个单元在掩膜内对示踪物量与水量各做 `sum(subfrc*x, mask)`，再相除。2d 掩膜是 `|water| > trc_tiny .and. mass /= spval .and. filter`，逐层的同理；
+- **δ 类**（`write_history_tracer_delta_vector_2d`）：掩膜改成 `water > water_min`，单元值经 `mass_to_delta`，超出 `trc_delta_sanity_max` 记缺测；
+- **均值类**：走 `aggregate_to_vector_and_write_2d`，按 `subfrc` 加权平均；
+- **文件**：与主向量文件同样的 `element` 维和 `elmindex`、各层维坐标，但没有 `sensor` 维，也没有窗口变量；分层量是 `(time, element, soilsnow)`。
+
+**Rust**：
+- `HistoryVector::pair_sums`：按 patch 次序 `FMA(subfrc, x, acc)`，与主向量平均同一形状，第 500 轮已验证；
+- `HistoryBuffers::write_tracer_vector`；
+- `push_tracer` 加了向量支（含 CH4 `core` 变量，同样走 `aggregate`）；
+- 向量会话在开了示踪物时挂上示踪物变量。
+
+**验收**（UNSTRUCTURED 内核，2 天，两侧共用 u1v 的前处理）：
+- `u1vt`（溶质）：history 3 份（含示踪物向量文件）、restart 5 份逐位一致；
+- `u1vi`（两个同位素，不分馏，带 δ 变量）：history 3 份、restart 5 份逐位一致；
+- 不带示踪物的 `u1v`、网格示踪物的 `g1ts`、`g1ti` 重跑仍然一致。
+
+**没测**：向量 history 下的 CH4，因为没有带 BGC 的 UNSTRUCTURED 算例。代码走的是与均值类相同的 `aggregate`。

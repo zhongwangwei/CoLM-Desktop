@@ -3684,11 +3684,15 @@ impl HistorySession {
                     buffer.enable_windows();
                 }
             }
+            if let Some(vector) = &self.vector {
+                buffer = buffer.with_vector(std::sync::Arc::clone(vector))?;
+            }
             tracer.open = Some((record.suffix.clone(), buffer, Vec::new()));
         }
         let nac = tracer.steps as f64;
         let patches = states.len();
         let grid = self.grid.clone();
+        let vector = self.vector.clone();
         let (_, buffer, variables) = tracer.open.as_mut().expect("just opened");
         buffer.set_time(record.record, i32::try_from(record.label_minutes)?)?;
         if let (Some(deltim), true) = (self.tracer_time_step_seconds, grid.is_some()) {
@@ -3718,10 +3722,12 @@ impl HistorySession {
                 } else {
                     1
                 };
-                // 网格写出时第二维是格子（`lat*lon`），单点是 patch。
-                let columns = grid
-                    .as_ref()
-                    .map_or(patches, |grid| grid.lat.len() * grid.lon.len());
+                // 网格写出时第二维是格子（`lat*lon`），向量是单元，单点是 patch。
+                let columns = match (grid.as_ref(), vector.as_ref()) {
+                    (Some(grid), _) => grid.lat.len() * grid.lon.len(),
+                    (None, Some(vector)) => vector.elmindex.len(),
+                    (None, None) => patches,
+                };
                 if variables.len() == index {
                     variables.push(colm_hist::history::TracerFileVariable {
                         name: variable.variable_name(descriptor),
@@ -3732,6 +3738,112 @@ impl HistorySession {
                     });
                 }
                 let file_variable = &mut variables[index];
+                if let Some(vector) = vector.as_ref() {
+                    // `MOD_Tracer_Hist` 的 `Vector` 支（`write_history_tracer_vector_2d/3d` 与
+                    // `aggregate_to_vector_and_write_2d`）：比值/δ 先在单元里对示踪物量与水量各做
+                    // `sum(subfrc*x, mask)` 再相除；均值类按 `subfrc` 加权平均。`filter` 是变量自己的。
+                    let track = |patch: usize| -> Result<&colm_core::tracer::PatchTracerState> {
+                        states[patch]
+                            .tracer
+                            .as_deref()
+                            .map(|track| &track.state)
+                            .context("a tracer history needs every patch to carry tracer state")
+                    };
+                    let tracks = (0..patches).map(track).collect::<Result<Vec<_>>>()?;
+                    let keep = |p: usize| {
+                        variable
+                            .patch_filter
+                            .admits(tracer.patch_types[p], true, true)
+                    };
+                    let ref_ratio = descriptor.ref_ratio;
+                    let elements = columns;
+                    let base = record.record * elements * width;
+                    if layered {
+                        let pairs: Vec<_> = tracks
+                            .iter()
+                            .map(|state| hist::soisno_layer_pairs(itrc, state))
+                            .collect();
+                        for layer in 0..width {
+                            let sums = vector.pair_sums(
+                                |p| pairs[p][layer],
+                                |p| {
+                                    let (mass, water) = pairs[p][layer];
+                                    water.abs() > colm_core::tracer::TRC_TINY
+                                        && mass != colm_core::MISSING
+                                        && keep(p)
+                                },
+                            );
+                            for (element, (mass, water)) in sums.into_iter().enumerate() {
+                                file_variable.values[base + element * width + layer] =
+                                    if water.abs() > colm_core::tracer::TRC_TINY {
+                                        mass / water
+                                    } else {
+                                        colm_core::MISSING
+                                    };
+                            }
+                        }
+                    } else {
+                        let terms: Vec<_> = tracks
+                            .iter()
+                            .map(|state| hist::patch_term(variable, descriptor, itrc, state, nac))
+                            .collect();
+                        let pair = |p: usize| match terms[p] {
+                            hist::PatchTerm::Pair { mass, water } => (mass, water),
+                            hist::PatchTerm::Scalar(_) => (colm_core::MISSING, 0.0),
+                        };
+                        let values: Vec<f64> = match variable.kind {
+                            hist::TracerHistKind::Ratio | hist::TracerHistKind::LayerRatio => {
+                                let threshold = colm_core::tracer::TRC_TINY;
+                                vector
+                                    .pair_sums(pair, |p| {
+                                        let (mass, water) = pair(p);
+                                        water.abs() > threshold
+                                            && mass != colm_core::MISSING
+                                            && keep(p)
+                                    })
+                                    .into_iter()
+                                    .map(|(mass, water)| {
+                                        if water.abs() > threshold {
+                                            mass / water
+                                        } else {
+                                            colm_core::MISSING
+                                        }
+                                    })
+                                    .collect()
+                            }
+                            hist::TracerHistKind::Delta { water_min } => vector
+                                .pair_sums(pair, |p| {
+                                    let (mass, water) = pair(p);
+                                    water > water_min && mass != colm_core::MISSING && keep(p)
+                                })
+                                .into_iter()
+                                .map(|(mass, water)| {
+                                    if water > water_min {
+                                        let delta = hist::mass_to_delta(mass, water, ref_ratio);
+                                        if delta != colm_core::MISSING
+                                            && delta.abs() <= hist::TRC_DELTA_SANITY_MAX
+                                        {
+                                            return delta;
+                                        }
+                                    }
+                                    colm_core::MISSING
+                                })
+                                .collect(),
+                            hist::TracerHistKind::Mean | hist::TracerHistKind::AreaState => vector
+                                .aggregate(
+                                    |p| match terms[p] {
+                                        hist::PatchTerm::Scalar(value) => value,
+                                        hist::PatchTerm::Pair { .. } => colm_core::MISSING,
+                                    },
+                                    keep,
+                                    false,
+                                ),
+                        };
+                        file_variable.values[base..base + elements].copy_from_slice(&values);
+                    }
+                    index += 1;
+                    continue;
+                }
                 if let Some(grid) = grid.as_ref() {
                     // `tracer_hist_out` 的网格支：`sumarea` 用陆面 `filter`（`patchtype < 99`，
                     // `patchmask` 在 Rust 空间运行里恒真），分子按各变量自己的 `filter`，
@@ -3818,10 +3930,12 @@ impl HistorySession {
         if has_methane {
             let template = colm_core::methane::driver::CoreAccumulator::default()
                 .core_values(false, false, false);
-            // 网格写出时第二维是格子（`lat*lon`），单点是 patch。
-            let columns = grid
-                .as_ref()
-                .map_or(patches, |grid| grid.lat.len() * grid.lon.len());
+            // 网格写出时第二维是格子（`lat*lon`），向量是单元，单点是 patch。
+            let columns = match (grid.as_ref(), vector.as_ref()) {
+                (Some(grid), _) => grid.lat.len() * grid.lon.len(),
+                (None, Some(vector)) => vector.elmindex.len(),
+                (None, None) => patches,
+            };
             for (k, (name, long_name, units, _)) in template.iter().enumerate() {
                 if variables.len() == index + k {
                     variables.push(colm_hist::history::TracerFileVariable {
@@ -3856,7 +3970,15 @@ impl HistorySession {
                         .is_some_and(|methane| methane.last.is_some());
                 per_patch.push((active, land, acc.core_values(active, land, lake)));
             }
-            if let Some(grid) = grid.as_ref() {
+            if let Some(vector) = vector.as_ref() {
+                // 向量支：`write_history_variable_2d` → `aggregate_to_vector_and_write_2d`（平均）。
+                // 不在各变量 `filter` 里的 patch 值已是 `spval`，聚合时跳过。
+                for k in 0..template.len() {
+                    let values = vector.aggregate(|p| per_patch[p].2[k].3, |_| true, false);
+                    let base = record.record * columns;
+                    variables[index + k].values[base..base + columns].copy_from_slice(&values);
+                }
+            } else if let Some(grid) = grid.as_ref() {
                 // `methane_reactive_history` 的网格支：前 9 个变量（活跃面积均值）的 `sumarea`
                 // 取活跃掩膜（`get_sumarea(sumarea, filter)`），其后 10 个陆面面积均值换成
                 // `filter_all_land`（`:821`）。两组都按 patch 序、再按份序累加（`pset2grid`）。

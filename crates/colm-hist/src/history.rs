@@ -144,6 +144,31 @@ impl HistoryVector {
         self.elements.last().map_or(0, |range| range.end)
     }
 
+    /// `write_history_tracer_vector_2d/3d` 的单元求和：`keep(p)` 为真的 patch 上分别对
+    /// 示踪物量与水量做 `sum(frac*x, mask)`（按 patch 次序 `FMA(frac, x, acc)`）。没有 patch
+    /// 计入的单元是 `(0, 0)`（上游的 `trc_local/water_local` 初值）。
+    pub fn pair_sums(
+        &self,
+        pair: impl Fn(usize) -> (f64, f64),
+        keep: impl Fn(usize) -> bool,
+    ) -> Vec<(f64, f64)> {
+        self.elements
+            .iter()
+            .map(|range| {
+                range
+                    .clone()
+                    .filter(|&p| keep(p))
+                    .fold((0.0, 0.0), |(t, w), p| {
+                        let (mass, water) = pair(p);
+                        (
+                            self.subfrc[p].mul_add(mass, t),
+                            self.subfrc[p].mul_add(water, w),
+                        )
+                    })
+            })
+            .collect()
+    }
+
     /// `aggregate_to_vector_and_write_*` 的单元聚合。`value(p)` 给出 patch 的值，`keep(p)` 是 `filter`。
     pub fn aggregate(
         &self,
@@ -413,6 +438,72 @@ impl HistoryBuffers {
     /// 网格示踪物文件（`tracer_hist_out` 的 `Gridded` 支）：骨架同主文件，变量是调用方已聚合到
     /// 网格窗口的值，二维 `(time, lat, lon)`、分层 `(time, soilsnow, lat, lon)`；`values` 按
     /// `(record, [layer,] cell)` 行主序，`cell = ilat*nlon + ilon`。
+    /// 向量写出的示踪物文件（`HistForm = 'Vector'`）：单元维与主向量文件相同，但没有 `sensor` 维、
+    /// 也没有窗口变量；分层量是 `(time, element, soilsnow)`，值按 `[record][element][layer]` 排。
+    fn write_tracer_vector(
+        &self,
+        path: &Path,
+        vector: &HistoryVector,
+        variables: &[TracerFileVariable],
+    ) -> Result<()> {
+        let mut file =
+            netcdf::create(path).with_context(|| format!("cannot create {}", path.display()))?;
+        let elements = vector.elmindex.len();
+        file.add_unlimited_dimension("time")?;
+        file.add_dimension("element", elements)?;
+        {
+            let mut variable = file.add_variable::<i64>("elmindex", &["element"])?;
+            variable.put_attribute("long_name", "element index in mesh")?;
+        }
+        for (name, _, values) in self.dims.index_variables() {
+            file.add_dimension(name, values.len())?;
+        }
+        for (name, long_name, _) in self.dims.index_variables() {
+            let mut variable = file.add_variable::<i32>(name, &[name])?;
+            variable.put_attribute("long_name", long_name)?;
+        }
+        {
+            let mut time = file.add_variable::<i32>("time", &["time"])?;
+            time.put_attribute("long_name", "time")?;
+            time.put_attribute("units", TIME_UNITS)?;
+        }
+        for variable in variables {
+            let (dims, width): (&[&str], usize) = if variable.layered {
+                (&["time", "element", "soilsnow"], self.dims.soilsnow())
+            } else {
+                (&["time", "element"], 1)
+            };
+            ensure!(
+                variable.values.len() == self.records * width * elements,
+                "{} has {} values for {} records x {elements} elements x {width} layers",
+                variable.name,
+                variable.values.len(),
+                self.records
+            );
+            let mut nc = file.add_variable::<f64>(&variable.name, dims)?;
+            nc.put_attribute("long_name", variable.long_name.as_str())?;
+            nc.put_attribute("units", variable.units.as_str())?;
+            nc.put_attribute("missing_value", MISSING_VALUE)?;
+        }
+        file.variable_mut("elmindex")
+            .context("elmindex disappeared")?
+            .put_values(&vector.elmindex, netcdf::Extents::All)?;
+        for (name, _, values) in self.dims.index_variables() {
+            file.variable_mut(name)
+                .with_context(|| format!("{name} disappeared after definition"))?
+                .put_values(&values, netcdf::Extents::All)?;
+        }
+        file.variable_mut("time")
+            .context("time disappeared after definition")?
+            .put_values(&self.times, netcdf::Extents::All)?;
+        for variable in variables {
+            file.variable_mut(&variable.name)
+                .with_context(|| format!("{} disappeared after definition", variable.name))?
+                .put_values(&variable.values, netcdf::Extents::All)?;
+        }
+        Ok(())
+    }
+
     fn write_tracer_gridded(&self, path: &Path, variables: &[TracerFileVariable]) -> Result<()> {
         let grid = self
             .grid
@@ -931,6 +1022,9 @@ impl HistoryBuffers {
         let path = path.as_ref();
         if self.grid.is_some() {
             return self.write_tracer_gridded(path, variables);
+        }
+        if let Some(vector) = self.vector.clone() {
+            return self.write_tracer_vector(path, &vector, variables);
         }
         let mut file =
             netcdf::create(path).with_context(|| format!("cannot create {}", path.display()))?;
