@@ -922,6 +922,13 @@ impl PatchStepOutput<'_> {
 #[derive(Debug, Clone, PartialEq)]
 pub enum PatchOutput {
     Soil(Box<StandardLctSnowSoilOutput>),
+    /// 动态湖多子步时最后一个子步是干湖：`CoLMMAIN` 的 `xerr` 用的是这个子步开头的 `totwb`
+    /// 与子步步长 `deltim_phy`，history 的收支窗口要跟着换。
+    DryLakeSubstep {
+        output: Box<StandardLctSnowSoilOutput>,
+        initial_total_water_mm: f64,
+        time_step_seconds: f64,
+    },
     Glacier(Box<colm_core::GlacierStepOutput>),
     Lake(Box<colm_core::LakeStepOutput>),
     Urban(Box<colm_core::UrbanStepOutput>),
@@ -930,7 +937,9 @@ pub enum PatchOutput {
 impl PatchOutput {
     pub fn view(&self) -> PatchStepOutput<'_> {
         match self {
-            Self::Soil(output) => PatchStepOutput::Soil(output),
+            Self::Soil(output) | Self::DryLakeSubstep { output, .. } => {
+                PatchStepOutput::Soil(output)
+            }
             Self::Glacier(output) => PatchStepOutput::Glacier(output),
             Self::Lake(output) => PatchStepOutput::Lake(output),
             Self::Urban(output) => PatchStepOutput::Urban(output),
@@ -953,6 +962,16 @@ fn push_patch_history(
 ) -> Result<Option<PathBuf>> {
     match output {
         PatchOutput::Soil(output) => session.push_lct_snow(end, template, state, output, reference),
+        PatchOutput::DryLakeSubstep {
+            output,
+            initial_total_water_mm,
+            time_step_seconds,
+        } => {
+            let mut reference = reference;
+            reference.initial_total_water_mm = *initial_total_water_mm;
+            reference.time_step_seconds = *time_step_seconds;
+            session.push_lct_snow(end, template, state, output, reference)
+        }
         PatchOutput::Glacier(output) => {
             session.push_glacier(end, template, state, output, reference)
         }
@@ -1083,7 +1102,8 @@ fn advance_patch(
     if let Some(lake) = &template.lake {
         // 水体子步（`CoLMDRIVER.F90:95-99`）：`WATERBODY` 类每个 `deltim` 跑 `ceiling(deltim/1800)` 次
         // `CoLMMAIN`（含末尾的光学准备与非土壤清零），history 取最后一个子步的量；BGC 数据更新
-        // 在子步之外。动态湖（干湖分支）与湖上示踪物/甲烷的多子步尚未移植。
+        // 在子步之外。动态湖每个子步开头各自判断干湖（`is_dry_lake` 在 `CoLMMAIN` 里按当时的
+        // 湖水重算），干湖子步走土壤分支。
         let waterbody =
             template.land_class == colm_core::waterbody_class(template.physics.land_cover_scheme);
         let substeps = if waterbody {
@@ -1092,11 +1112,6 @@ fn advance_patch(
             1
         };
         if substeps > 1 {
-            ensure!(
-                !lake.site.dynamic,
-                "dynamic lakes with WATERBODY substeps (deltim > 1800 s) are not ported to the \
-                 Rust runtime yet"
-            );
             let sub = template.with_timestep(template.physics.timestep_seconds / substeps as f64);
             let mut last = None;
             let mut methane_mean = colm_core::methane::driver::LakeSubstepMean::default();
@@ -1106,6 +1121,39 @@ fn advance_patch(
                 if let Some(snicar) = input.snicar.as_mut() {
                     snicar.aerosol_deposition_kg_m2_s =
                         sub.aerosol_deposition(step.clock.forcing_time)?;
+                }
+                // 干湖子步：与下面单步的干湖分支相同，`totwb` 取本子步开头的。
+                if lake.site.is_dry(state) {
+                    let initial_total = initial_total_water_mm(&sub, state);
+                    let tracer_total = sub.tracer.as_ref().map(|_| initial_total);
+                    input.energy.ground_temperature.is_dry_lake = true;
+                    let output = colm_core::standard_lct_snow_soil_step(input, state)?;
+                    if let (Some((tracer, _)), Some(total)) = (&sub.tracer, tracer_total) {
+                        crate::tracer::end_of_step(
+                            tracer,
+                            template.worker_ipatch(),
+                            template.patch_type,
+                            state,
+                            &output,
+                            &step.forcing,
+                            sub.physics.timestep_seconds,
+                            total,
+                        )?;
+                    }
+                    colm_core::refill_dry_lake(state)?;
+                    let optics = surface_optics_step(
+                        step,
+                        previous_snow_water_equivalent_mm,
+                        state.surface_temperature_k(),
+                        &output,
+                    );
+                    sub.prepare_surface_optics(state, optics)?;
+                    last = Some(PatchOutput::DryLakeSubstep {
+                        output: Box::new(output),
+                        initial_total_water_mm: initial_total,
+                        time_step_seconds: sub.physics.timestep_seconds,
+                    });
+                    continue;
                 }
                 let output = colm_core::lake_snow_step(input, lake.site, state)?;
                 if let Some((tracer, _)) = &template.tracer {
@@ -1159,11 +1207,10 @@ fn advance_patch(
                         &mut methane_mean,
                     )?;
                 }
-                last = Some(output);
+                last = Some(PatchOutput::Lake(Box::new(output)));
             }
             update_non_soil_bgc(state)?;
-            let output = last.context("a lake step runs at least one WATERBODY substep")?;
-            return Ok(PatchOutput::Lake(Box::new(output)));
+            return last.context("a lake step runs at least one WATERBODY substep");
         }
         if lake.site.is_dry(state) {
             // 干湖（`CoLMMAIN.F90:794-799`）：整步走土壤分支（patchtype 仍是 4，THERMAL 的地面湿度、

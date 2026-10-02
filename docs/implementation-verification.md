@@ -28636,3 +28636,25 @@ Rust 原来在两处都把活跃写死成"土壤或湿地"：
 - 最后用 `COLM_KERNEL_PROFILE=debug` 编了带越界检查的 latlon 内核（scratchpad 的 `kdbg/`），运行期报出 `MOD_SpatialMapping.F90:753` 与越界的下标。
 
 Rust 保持拒绝，报错信息改为说明原因，`build_bilinear` 与单测保留。
+
+## 第 526 轮：动态湖的 WATERBODY 子步；POINT 强迫的饱和比湿夹在插值之后
+
+**动态湖子步**：`deltim > 1800` 时水体每步跑 `ceiling(deltim/1800)` 次 `CoLMMAIN`，每个子步开头各自判断是否干湖。
+- 干湖子步走土壤分支：示踪物 `totwb` 取本子步开头的值，随后重建湖层、准备光学；
+- 湿湖子步走湖泊分支。
+- 子步里 `xerr` 的分母是 `deltim_phy`：
+  - 湖泊支原来除以整步步长，改用 `colmmain_step_seconds`；
+  - 最后一个子步是干湖时，history 的收支窗口（`totwb` 与步长）要换成该子步的。新增 `PatchOutput::DryLakeSubstep` 携带这两个量。
+
+**顺带发现的 POINT 强迫问题**：上游 `metpreprocess`（`MOD_Forcing.F90:524`）作用在**插值后**的 `forcn` 上，POINT 那一支按插值后的 T、P 夹饱和比湿。
+Rust 原来夹的是原始记录（注释也写反了）。以往的对照都是 1800 s 步长配半小时数据，插值权重为 1/0，两种写法等价，所以没暴露。
+- 暴露它的算例：用逐时强迫（AT-Neu 隔条抽样，`:30` 时刻）跑 3600 s 步长，第一步 `f_xy_q` 就差 2e-9。
+- 还有一处约束：上游 POINT 强迫每更新一次上界只前进一条记录，模式步长大于强迫步长就停机（`the data required is out of range`）。所以 3600 s 步长必须配逐时数据。
+- 修法：`sample_at_seconds` 插值之后再夹，`frame()` 返回原始记录。单测已改。
+
+**验收**：
+- `dl5h`（dl5 + 逐时强迫 + 3600 s，1–6 月，湿干三次切换）：history 6 份与全部 restart 逐位一致；
+- `dl5hd`（同上，2 天逐时历史）：逐位一致；
+- 回归 `dl1 dl2 dl3 dl5 sl3 sl5 dc3 dc5 dh5 lk36ch4 tc4lk` 全部 ok；
+- `PLUMBER2_ROOT` 下 `cargo test -p oracle`：49 项通过；
+- `colm-forcing` 单测（含 PLUMBER2 集成测试）全部通过。

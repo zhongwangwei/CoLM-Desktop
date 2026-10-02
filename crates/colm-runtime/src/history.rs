@@ -1573,7 +1573,9 @@ pub fn patch_surface_input(
 ) -> colm_core::HistoryDiagnosticsInput {
     let physics = &template.physics;
     match output {
-        crate::PatchOutput::Soil(output) => lct_surface_input(&output.energy, reference, physics),
+        crate::PatchOutput::Soil(output) | crate::PatchOutput::DryLakeSubstep { output, .. } => {
+            lct_surface_input(&output.energy, reference, physics)
+        }
         crate::PatchOutput::Glacier(output) => {
             glacier_surface_input(&output.thermal, reference, physics)
         }
@@ -3184,8 +3186,9 @@ impl HistorySession {
         self.dynamic_lake = dynamic;
         // 动态湖：`xerr = errorw/deltim`（`CoLMMAIN.F90:1984-1988`），定深湖恒为 0；`a_lake_deficit` 不累加、
         // `a_dz_lake` 累加（`MOD_Vars_1DAccFluxes.F90:2485`、`:2502`）。
+        // `deltim` 在 `CoLMMAIN` 里是 `deltim_phy`：水体按 `ceiling(deltim/1800)` 分子步时是子步步长。
         let water_balance_error = if dynamic {
-            output.water_balance_error_mm / template.physics.timestep_seconds
+            output.water_balance_error_mm / template.colmmain_step_seconds()
         } else {
             0.0
         };

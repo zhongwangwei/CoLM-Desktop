@@ -60,13 +60,9 @@ fn point_loader_canonicalizes_a_scalar_wind_series_once() {
         PointForcingFrame {
             time_seconds: 0.0,
             air_temperature_k: 273.15,
-            // 夹具写的是 `Qair = 5 g/kg`，而 0 °C / 1000 hPa 的饱和比湿只有
-            // 3.807 g/kg —— `metpreprocess` 的 POINT 分支会把它夹回来
-            // （见下一个测试）。这里**从函数算**而不是写死字面量：饱和值本身
-            // 归 `qsadv` 的测试管，这条只管"夹没夹"。
-            specific_humidity: colm_core::saturation_specific_humidity(273.15, 100_000.0)
-                .unwrap()
-                .specific_humidity,
+            // 原始记录原样保存（`Qair = 5 g/kg`，过饱和）；`metpreprocess` 的 POINT 分支
+            // 只夹插值之后的值（见下一个测试）。
+            specific_humidity: 0.005,
             surface_pressure_pa: 100_000.0,
             precipitation_kg_m2_s: 0.001,
             eastward_wind_m_s: 0.0,
@@ -94,10 +90,9 @@ fn point_loader_canonicalizes_a_scalar_wind_series_once() {
 /// 差到 4.67%，而叶温/冠层水/雪深的整条残差链就是从这里起步的。
 /// 夹具的温度与压力恰好落在饱和线两侧，所以这个测试同时守住"夹"与"不夹"。
 #[test]
-fn point_loader_clamps_supersaturated_humidity_like_metpreprocess() {
+fn point_sampling_clamps_supersaturated_humidity_like_metpreprocess() {
     let dir = temp_dir("qclamp");
     let path = point_file(&dir, false);
-    // 两条记录的温度不同（0 与 1 °C），所以饱和值逐记录算。
     let saturation = |t: f64, p: f64| {
         colm_core::saturation_specific_humidity(t, p)
             .unwrap()
@@ -108,13 +103,20 @@ fn point_loader_clamps_supersaturated_humidity_like_metpreprocess() {
         "the fixture must start supersaturated"
     );
     let series = load_point_forcing(&path).unwrap();
+    // 原始记录不夹（上游 `forc_disk` 原样存）。
+    assert_eq!(series.frame(0).unwrap().specific_humidity, 0.005);
+    // 落在记录上：夹到该记录温压下的饱和值。
+    let first = series.frame(0).unwrap().time_seconds;
+    let second = series.frame(1).unwrap().time_seconds;
     assert_eq!(
-        series.frame(0).unwrap().specific_humidity,
+        series.sample_at_seconds(first).unwrap().specific_humidity,
         saturation(273.15, 100_000.0)
     );
+    // 两条记录正中：先插值 T、P、q，再按插值后的 T、P 夹，不是夹完再插。
+    let mid = series.sample_at_seconds(0.5 * (first + second)).unwrap();
     assert_eq!(
-        series.frame(1).unwrap().specific_humidity,
-        saturation(274.15, 100_100.0)
+        mid.specific_humidity,
+        saturation(mid.air_temperature_k, mid.surface_pressure_pa)
     );
 
     // 干燥的记录原样通过：夹是 `min`，不是替换。
@@ -126,8 +128,7 @@ fn point_loader_clamps_supersaturated_humidity_like_metpreprocess() {
             .unwrap();
     }
     let dry = load_point_forcing(&path).unwrap();
-    assert_eq!(dry.frame(0).unwrap().specific_humidity, 0.0005);
-    assert_eq!(dry.frame(1).unwrap().specific_humidity, 0.0006);
+    assert_eq!(dry.sample_at_seconds(first).unwrap().specific_humidity, 0.0005);
 }
 
 /// `forc_hpbl` 是上游在 `DEF_USE_CBL_HEIGHT` 下追加的第 9 个强迫变量。

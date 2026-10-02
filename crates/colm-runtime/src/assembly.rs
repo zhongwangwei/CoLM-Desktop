@@ -1554,6 +1554,17 @@ fn assemble(
 }
 
 impl StandardLctRestartTemplate {
+    /// 一次 `CoLMMAIN` 的步长 `deltim_phy`（`CoLMDRIVER.F90:95-99`）：`WATERBODY` 类按
+    /// `ceiling(deltim/1800)` 分子步，其余就是 `deltim`。
+    pub fn colmmain_step_seconds(&self) -> f64 {
+        let timestep = self.physics.timestep_seconds;
+        if self.land_class == colm_core::waterbody_class(self.physics.land_cover_scheme) {
+            timestep / (timestep / 1800.0).ceil().max(1.0)
+        } else {
+            timestep
+        }
+    }
+
     /// 收支报告里的 `ipatch`（1 起）。
     pub fn worker_ipatch(&self) -> i32 {
         i32::try_from(self.worker_patch + 1).unwrap_or(i32::MAX)

@@ -81,6 +81,33 @@ impl PointForcingSeries {
     /// linear lower/upper interpolation; precipitation is nearest-neighbour
     /// and a midpoint tie selects the lower record.
     pub fn sample_at_seconds(&self, time_seconds: f64) -> Result<PointForcingFrame> {
+        let mut frame = self.interpolate_at_seconds(time_seconds)?;
+        // **插值之后**把比湿夹到饱和值：上游 `read_forcing` 先按上下界插出 `forcn`，再调
+        // `metpreprocess`（`MOD_Forcing.F90:524`），POINT 那一支（`MOD_UserSpecifiedForcing.F90:729-736`）
+        // 对插值后的值做
+        //
+        // ```fortran
+        // CALL qsadv(T, P, es, esdT, qsat_tmp, dqsat_tmpdT)
+        // IF (qsat_tmp < q) q = qsat_tmp
+        // ```
+        //
+        // 模式时刻落在记录上时（1800 s 步长配半小时数据）插值权重是 1/0，夹原始记录与夹插值结果
+        // 等价，所以早先夹原始记录的写法在那些对照里看不出来；3600 s 步长配 `:30` 的逐时数据
+        // 就不同了（`dl5h` 的 `f_xy_q` 第一步差 2e-9）。
+        //
+        // 漏掉这一夹的代价见 `US-NR1-snow`：`f_xy_q`（tier0）150/360 条差到 4.67%。
+        let saturation = colm_core::saturation_specific_humidity(
+            frame.air_temperature_k,
+            frame.surface_pressure_pa,
+        )
+        .with_context(|| format!("cannot evaluate saturation at forcing second {time_seconds}"))?;
+        if saturation.specific_humidity < frame.specific_humidity {
+            frame.specific_humidity = saturation.specific_humidity;
+        }
+        Ok(frame)
+    }
+
+    fn interpolate_at_seconds(&self, time_seconds: f64) -> Result<PointForcingFrame> {
         ensure!(
             time_seconds.is_finite(),
             "forcing sample time must be finite"
@@ -361,34 +388,10 @@ pub fn load_point_forcing(path: impl AsRef<Path>) -> Result<PointForcingSeries> 
     let boundary_layer_height = optional_values(&file, path, &["blh", "hpbl"], summary.steps)?;
     let mut frames = Vec::with_capacity(summary.steps);
     for index in 0..summary.steps {
-        // **POINT 数据集上来就把比湿夹到饱和值**，这是上游 `metpreprocess`
-        // （`MOD_UserSpecifiedForcing.F90:731-736`）对 `DEF_forcing%dataset == 'POINT'`
-        // 做的唯一一件事：
-        //
-        // ```fortran
-        // CALL qsadv(T, P, es, esdT, qsat_tmp, dqsat_tmpdT)
-        // IF (qsat_tmp < q) q = qsat_tmp
-        // ```
-        //
-        // 夹的是**原始记录**，不是插值之后的值 —— 上游在 `read_forcing` 的
-        // 预处理阶段做，所以这里也在读帧时做。
-        //
-        // 这一条以前漏了，代价是 `f_xy_q`（**tier0**，逐位）在 `US-NR1-snow`
-        // 上 150/360 条差到 4.67%：PLUMBER2 的 `Qair` 在冷湿站点会超过同温度的
-        // 饱和值，上游把它夹回来、本仓库原样带下去。那一层叶温/冠层水/雪深的
-        // 整条残差链就是从这里起步的（见 docs/implementation-verification.md）。
-        let saturation =
-            colm_core::saturation_specific_humidity(temperature[index], pressure[index])
-                .with_context(|| {
-                    format!(
-                        "{} record {index}: cannot evaluate saturation",
-                        path.display()
-                    )
-                })?;
         let frame = PointForcingFrame {
             time_seconds: time[index],
             air_temperature_k: temperature[index],
-            specific_humidity: humidity[index].min(saturation.specific_humidity),
+            specific_humidity: humidity[index],
             surface_pressure_pa: pressure[index],
             precipitation_kg_m2_s: precipitation[index],
             eastward_wind_m_s: eastward_wind[index],
