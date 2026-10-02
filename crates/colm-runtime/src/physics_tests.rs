@@ -10,6 +10,7 @@ const HEIGHTS: ObservationHeights = ObservationHeights {
     wind_m: 6.0,
     temperature_m: 6.0,
     humidity_m: 6.0,
+    mode: ObservationHeightMode::Absolute,
 };
 
 fn empty_case() -> Document {
@@ -321,11 +322,13 @@ fn canopy_settings_can_be_overridden_from_the_case() {
              DEF_WUE_LAMBDA = 1200.\n\
              DEF_USE_Campbell_SOIL_MODEL = .true.\n\
              DEF_USE_CBL_HEIGHT = .true.\n\
-             DEF_forcing%HEIGHT_mode = 'relative'\n\
              DEF_TUNING_CAPR = 0.4",
         ),
         LandCoverScheme::Usgs,
-        HEIGHTS,
+        ObservationHeights {
+            mode: ObservationHeightMode::RelativeToCanopy,
+            ..HEIGHTS
+        },
     )
     .unwrap();
     assert_eq!(physics.hydraulic_model, HydraulicModel::Campbell);
@@ -356,17 +359,49 @@ fn both_stomata_switches_on_fall_back_to_ball_berry() {
     assert!(!physics.stomata.use_wue);
 }
 
-/// 观测高度模式拼错一个字母就该报错：它决定每个参考高度是绝对高度还是相对冠层，
-/// 静默落进另一支会让整条湍流交换算错而没有任何迹象。
+/// `HEIGHT_mode` 在 **forcing** namelist 里（与 `HEIGHT_V/T/Q` 同组）。原先从 case 文档读，
+/// 永远拿到声明默认 `'absolute'`：ERA5LAND 的 `'relative'` 被静默丢掉，单点与空间对照
+/// 都从第 1 步起分歧。
 #[test]
-fn a_misspelled_height_mode_is_refused() {
-    let error = land_physics_parameters(
-        &case_with("DEF_forcing%HEIGHT_mode = 'absolut'"),
+fn height_mode_is_read_from_the_forcing_namelist() {
+    let forcing = |body: &str| {
+        parse(&format!("&nl_colm_forcing\n{body}\n/\n")).expect("the forcing namelist parses")
+    };
+    assert_eq!(
+        observation_height_mode(&forcing("")).unwrap(),
+        ObservationHeightMode::Absolute
+    );
+    assert_eq!(
+        observation_height_mode(&forcing("DEF_forcing%HEIGHT_mode = 'relative'")).unwrap(),
+        ObservationHeightMode::RelativeToCanopy
+    );
+    // 映射本身不再读 case 文档里的这一项：开关只经 `ObservationHeights::mode` 进来。
+    let physics = land_physics_parameters(
+        &case_with("DEF_forcing%HEIGHT_mode = 'relative'"),
         LandCoverScheme::Igbp,
         HEIGHTS,
     )
-    .expect_err("a misspelled mode must not fall through");
-    assert!(error.to_string().contains("absolut"));
+    .unwrap();
+    assert_eq!(
+        physics.observation_height_mode,
+        ObservationHeightMode::Absolute
+    );
+}
+
+/// 观测高度模式拼错一个字母（或大小写不同）就该报错：上游 `trim(HEIGHT_mode) == 'absolute'`
+/// 之外的一切都进 relative 分支，静默换掉每个参考高度。
+#[test]
+fn a_misspelled_height_mode_is_refused() {
+    for spelling in ["absolut", "Absolute"] {
+        let error = observation_height_mode(
+            &parse(&format!(
+                "&nl_colm_forcing\nDEF_forcing%HEIGHT_mode = '{spelling}'\n/\n"
+            ))
+            .unwrap(),
+        )
+        .expect_err("a misspelled mode must not fall through");
+        assert!(error.to_string().contains(spelling));
+    }
 }
 
 #[test]

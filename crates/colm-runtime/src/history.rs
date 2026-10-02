@@ -3816,12 +3816,12 @@ impl HistorySession {
                 .is_some_and(|bgc| bgc.methane.is_some())
         });
         if has_methane {
-            ensure!(
-                grid.is_none(),
-                "gridded methane history is not ported to the Rust runtime yet"
-            );
             let template = colm_core::methane::driver::CoreAccumulator::default()
                 .core_values(false, false, false);
+            // 网格写出时第二维是格子（`lat*lon`），单点是 patch。
+            let columns = grid
+                .as_ref()
+                .map_or(patches, |grid| grid.lat.len() * grid.lon.len());
             for (k, (name, long_name, units, _)) in template.iter().enumerate() {
                 if variables.len() == index + k {
                     variables.push(colm_hist::history::TracerFileVariable {
@@ -3829,12 +3829,17 @@ impl HistorySession {
                         long_name: (*long_name).to_owned(),
                         units: (*units).to_owned(),
                         layered: false,
-                        values: vec![colm_core::MISSING; records_in_group * patches],
+                        values: vec![colm_core::MISSING; records_in_group * columns],
                     });
                 }
             }
+            // 每个 patch 的 `core` 值：不在该变量 `filter` 里的已是 `spval`（`core_values` 的
+            // `with_filter`），与 `pset2grid(msk = filter)` 跳过它们等价。
+            let mut per_patch = Vec::with_capacity(patches);
             for (patch, state) in states.iter().enumerate() {
                 let patch_type = tracer.patch_types[patch];
+                // `methane_patch_active_mask`：单点里不活跃的 patch 计数为 0，与掩膜等价；网格运行在
+                // 入口拒绝了 `only_wetland` 与稻田，于是活跃 = 湿地或土壤。
                 let active = patch_type == 0 || patch_type == 2;
                 let land = patch_type < 99;
                 let acc = state
@@ -3849,10 +3854,34 @@ impl HistorySession {
                         .as_deref()
                         .and_then(|bgc| bgc.methane.as_deref())
                         .is_some_and(|methane| methane.last.is_some());
-                for (k, (_, _, _, value)) in
-                    acc.core_values(active, land, lake).into_iter().enumerate()
-                {
-                    variables[index + k].values[record.record * patches + patch] = value;
+                per_patch.push((active, land, acc.core_values(active, land, lake)));
+            }
+            if let Some(grid) = grid.as_ref() {
+                // `methane_reactive_history` 的网格支：前 9 个变量（活跃面积均值）的 `sumarea`
+                // 取活跃掩膜（`get_sumarea(sumarea, filter)`），其后 10 个陆面面积均值换成
+                // `filter_all_land`（`:821`）。两组都按 patch 序、再按份序累加（`pset2grid`）。
+                const ACTIVE_MEAN: usize = 9;
+                for k in 0..template.len() {
+                    let mut cells = vec![hist::GridCell::default(); columns];
+                    for (patch, (active, land, values)) in per_patch.iter().enumerate() {
+                        let in_area = if k < ACTIVE_MEAN { *active } else { *land };
+                        for &(cell, area) in &grid.parts[patch] {
+                            if in_area {
+                                cells[cell].add_area(area);
+                            }
+                            cells[cell].add_mean(values[k].3, area);
+                        }
+                    }
+                    let base = record.record * columns;
+                    for (offset, cell) in cells.iter().enumerate() {
+                        variables[index + k].values[base + offset] = cell.finish_mean();
+                    }
+                }
+            } else {
+                for (patch, (_, _, values)) in per_patch.iter().enumerate() {
+                    for (k, (_, _, _, value)) in values.iter().enumerate() {
+                        variables[index + k].values[record.record * patches + patch] = *value;
+                    }
                 }
             }
         }

@@ -288,6 +288,21 @@ impl SpatialRuntime {
                             time_step_seconds,
                             clock.end_time.year,
                         )?;
+                        // `ch4_reactive_publish_flood`/`_levee_flood`：汇流过就覆盖甲烷状态里的三个比例。
+                        if let Some(flood) = river.methane_flood.as_mut() {
+                            if std::mem::take(&mut flood.published) {
+                                for (p, state) in next_states.iter_mut().enumerate() {
+                                    if let Some(methane) = state
+                                        .bgc
+                                        .as_deref_mut()
+                                        .and_then(|bgc| bgc.methane.as_deref_mut())
+                                    {
+                                        methane.flood =
+                                            [flood.levee[p], flood.fraction[p], flood.depth[p]];
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
                 // `hist_out` 在写记录的那一步先写河道部分（`hist_grid_riverlake_out`），它把河道量

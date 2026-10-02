@@ -2611,31 +2611,38 @@ fn materialize_spatial_common_fields(
     } else {
         None
     };
-    let lake_soil_carbon = if let Some(path) = &args.lake_soil_carbon {
-        let waterbody = match args.land_cover {
-            SiteMode::Igbp => 17,
-            SiteMode::Usgs => 16,
-            SiteMode::Pft | SiteMode::Pc | SiteMode::Urban => {
-                bail!("--lake-soil-carbon supports only LCT IGBP or USGS land cover")
-            }
-        };
-        if patches.set_type.contains(&waterbody) {
-            let raw = read_mesh_raster_layers_f64(
-                path,
-                "lake_soilc",
-                LAKE_SOIL_LAYERS,
-                &mesh,
-                &topology.pixel,
-                COLM_500M,
-            )?;
+    // `Aggregation_LakeSoilC`：raw `lake_soilc.nc` 在就聚合它，不在就（在土壤参数之后）用
+    // 有机质密度代理（`580 gC/kg OM * OM_density_s`）。
+    let lake_soil_carbon_proxy = args
+        .lake_soil_carbon
+        .as_ref()
+        .is_some_and(|path| !path.is_file());
+    let lake_soil_carbon =
+        if let Some(path) = args.lake_soil_carbon.as_ref().filter(|path| path.is_file()) {
+            let waterbody = match args.land_cover {
+                SiteMode::Igbp => 17,
+                SiteMode::Usgs => 16,
+                SiteMode::Pft | SiteMode::Pc | SiteMode::Urban => {
+                    bail!("--lake-soil-carbon supports only LCT IGBP or USGS land cover")
+                }
+            };
+            if patches.set_type.contains(&waterbody) {
+                let raw = read_mesh_raster_layers_f64(
+                    path,
+                    "lake_soilc",
+                    LAKE_SOIL_LAYERS,
+                    &mesh,
+                    &topology.pixel,
+                    COLM_500M,
+                )?;
 
-            Some(layout.aggregate_lake_soil_carbon(&raw, LAKE_SOIL_LAYERS, &area, waterbody)?)
+                Some(layout.aggregate_lake_soil_carbon(&raw, LAKE_SOIL_LAYERS, &area, waterbody)?)
+            } else {
+                Some(vec![0.0; LAKE_SOIL_LAYERS * patches.len()])
+            }
         } else {
-            Some(vec![0.0; LAKE_SOIL_LAYERS * patches.len()])
-        }
-    } else {
-        None
-    };
+            None
+        };
     let methane_ph = if let Some(path) = &args.methane_ph {
         let relevant = |land_cover| methane_ph_patch_is_relevant(args.land_cover, land_cover);
         if patches.set_type.iter().copied().any(relevant) {
@@ -2732,7 +2739,31 @@ fn materialize_spatial_common_fields(
             },
             SiteMode::Pft | SiteMode::Pc | SiteMode::Urban => unreachable!("LCT checked above"),
         };
-        materialize_spatial_soil(directory, args, topology, patches, patch_pctshared, classes)?;
+        let organic =
+            materialize_spatial_soil(directory, args, topology, patches, patch_pctshared, classes)?;
+        if lake_soil_carbon_proxy {
+            let carbon =
+                lake_soil_carbon_from_organic_matter(&patches.set_type, classes.water, &organic)?;
+            write_landpatch_layered_vector(
+                &args.landdata,
+                args.year,
+                topology,
+                patches,
+                &args.blocks,
+                args.srfdata_compression,
+                "soil",
+                "lake_soilc_patches",
+                "lake_soilc_patches",
+                "soil",
+                LAKE_SOIL_LAYERS,
+                &carbon,
+            )?;
+        }
+    } else {
+        ensure!(
+            !lake_soil_carbon_proxy,
+            "the lake CH4 organic-matter proxy needs the soil parameters (--soil-dir)"
+        );
     }
     if let Some(lake_depth) = lake_depth {
         write_landpatch_scalar(
@@ -3244,7 +3275,8 @@ fn materialize_spatial_soil(
     patches: &FlatLandPatches,
     patch_pctshared: Option<&[f64]>,
     classes: SoilPatchClasses,
-) -> Result<()> {
+) -> Result<Vec<Vec<f64>>> {
+    let mut organic_density = Vec::with_capacity(SOIL_LAYERS);
     let (mesh, layout, area) = gather_patch_raster(
         &topology.mesh,
         &topology.pixel,
@@ -3322,6 +3354,9 @@ fn materialize_spatial_soil(
             let raw = raw.read(file, source, layer)?;
             let values =
                 aggregate_soil_field(&layout, &raw, &area, classes, SoilField { statistic, fill })?;
+            if output == "OM_density_s" {
+                organic_density.push(values.clone());
+            }
             write_soil_layer(
                 args,
                 topology,
@@ -3472,6 +3507,9 @@ fn materialize_spatial_soil(
             let raw = raw.read(file, source, layer)?;
             let values =
                 aggregate_soil_field(&layout, &raw, &area, classes, SoilField { statistic, fill })?;
+            if output == "OM_density_s" {
+                organic_density.push(values.clone());
+            }
             write_soil_layer(
                 args,
                 topology,
@@ -3488,7 +3526,45 @@ fn materialize_spatial_soil(
     // Other platforms must close normally (in particular before deleting files on Windows).
     #[cfg(target_os = "macos")]
     std::mem::forget(raw);
-    Ok(())
+    Ok(organic_density)
+}
+
+/// `Aggregation_LakeSoilC` 的有机质代理：湖泊 patch 第 `j` 层取原始层 `min(8, max(1, j-1))` 的
+/// `580 * OM_density_s`（`SoilParametersReadin` 把原始第 1 层映射到模式 1–2 层），其余 patch 为 0。
+/// 湖泊 patch 的有机质密度不有限、为负或是缺测值时上游停机。返回按层平铺（`[soil][patch]`，
+/// 与 [`write_landpatch_layered_vector`] 的输入一致）。
+fn lake_soil_carbon_from_organic_matter(
+    set_type: &[i32],
+    waterbody: i32,
+    organic_density: &[Vec<f64>],
+) -> Result<Vec<f64>> {
+    const CARBON_PER_KG_OM: f64 = 580.0;
+    let mut carbon = vec![0.0; set_type.len() * LAKE_SOIL_LAYERS];
+    for (source, values) in organic_density.iter().enumerate() {
+        let source = source + 1;
+        let mut invalid = 0usize;
+        for (patch, &kind) in set_type.iter().enumerate() {
+            if kind != waterbody {
+                continue;
+            }
+            let value = values[patch];
+            if !value.is_finite() || value < 0.0 || value >= 0.5 * 1.0e36 {
+                invalid += 1;
+                continue;
+            }
+            for j in 1..=LAKE_SOIL_LAYERS {
+                if (j as i64 - 1).clamp(1, 8) as usize == source {
+                    carbon[(j - 1) * set_type.len() + patch] = CARBON_PER_KG_OM * value;
+                }
+            }
+        }
+        ensure!(
+            invalid == 0,
+            "lake CH4 organic-matter proxy requires finite non-negative OM_density for every lake \
+             patch; layer {source} has {invalid} invalid values"
+        );
+    }
+    Ok(carbon)
 }
 
 struct SoilRawReader<'a> {
@@ -5568,6 +5644,22 @@ fn usage() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 湖泊沉积碳的有机质代理（raw `lake_soilc.nc` 缺失时）：模式第 1、2 层都取原始第 1 层，
+    /// 第 9、10 层都取原始第 8 层；非湖泊 patch 为 0；输出按层平铺。
+    #[test]
+    fn lake_soil_carbon_proxy_maps_raw_layers_and_skips_other_patches() {
+        let organic: Vec<Vec<f64>> = (1..=8).map(|l| vec![f64::from(l), 99.0]).collect();
+        let carbon = lake_soil_carbon_from_organic_matter(&[17, 1], 17, &organic).unwrap();
+        let lake: Vec<f64> = (0..LAKE_SOIL_LAYERS).map(|j| carbon[j * 2]).collect();
+        let source = [1.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 8.0];
+        assert_eq!(lake, source.map(|om| 580.0 * om));
+        assert!((0..LAKE_SOIL_LAYERS).all(|j| carbon[j * 2 + 1] == 0.0));
+        let mut bad = organic.clone();
+        bad[2][0] = -1.0;
+        let error = lake_soil_carbon_from_organic_matter(&[17, 1], 17, &bad).unwrap_err();
+        assert!(error.to_string().contains("layer 3"), "{error}");
+    }
 
     #[test]
     fn hyperspectral_soil_albedo_keeps_igbp_classes_for_pft_and_pc() {

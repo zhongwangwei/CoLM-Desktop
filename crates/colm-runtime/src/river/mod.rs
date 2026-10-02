@@ -227,6 +227,11 @@ pub struct RiverModel {
     pub sediment: Option<sediment::Sediment>,
     /// `DEF_USE_TRACER` 但没有输运示踪物：续跑里仍提交空的河道示踪物事务。
     pub empty_tracer_transaction: bool,
+    /// 注册了 CH4 provider：每次汇流末推到 patch 的淹没比例（见 [`MethaneFlood`]）。
+    pub methane_flood: Option<MethaneFlood>,
+    /// 本次汇流每个单元流域的 `[total_floodarea, total_flooddepth, levee_floodarea]`；
+    /// 不在任何河系里的单元流域保持 0（上游每次汇流重新分配、置 0）。
+    flood_uc: Vec<[f64; 3]>,
     momen: Vec<f64>,
 }
 
@@ -405,7 +410,21 @@ impl RiverModel {
             tracers: None,
             sediment: None,
             empty_tracer_transaction: false,
+            methane_flood: None,
+            flood_uc: Vec::new(),
         })
+    }
+
+    /// 注册了 CH4 provider（`tracer_lifecycle_has_flood_publisher`）：每次汇流末把淹没比例推到 patch。
+    pub fn with_methane_flood(mut self) -> Self {
+        let patches = self.routing.patch_parts.len();
+        self.methane_flood = Some(MethaneFlood {
+            levee: vec![0.0; patches],
+            fraction: vec![0.0; patches],
+            depth: vec![0.0; patches],
+            published: false,
+        });
+        self
     }
 
     /// 挂上河湖示踪物（`river_lake_tracer_init`）。
@@ -558,6 +577,9 @@ impl RiverModel {
             return Ok(false);
         }
         self.route(year)?;
+        if let Some(methane) = self.methane_flood.as_mut() {
+            methane.publish(&self.network, &self.routing, &self.flood_uc);
+        }
         if let Some(flood) = self.flood.as_mut() {
             let context = flood::FloodContext {
                 levee: self.levee.as_ref(),
@@ -646,6 +668,7 @@ impl RiverModel {
             results.iter().all(|result| !result.protected_failed),
             "BIF protected-side limiter failed"
         );
+        self.flood_uc = vec![[0.0; 3]; self.network.len()];
         for (system, mut result) in systems.into_iter().zip(results) {
             for &(r, volresv, a) in &result.reservoirs {
                 self.state.volresv.as_mut().expect("reservoir state")[r] = volresv;
@@ -673,6 +696,7 @@ impl RiverModel {
                 }
             }
             for (k, &i) in system.cells.iter().enumerate() {
+                self.flood_uc[i] = result.flood[k];
                 self.state.wdsrf[i] = result.wdsrf[k];
                 self.state.veloc[i] = result.veloc[k];
                 self.state.volwater[i] = result.volwater[k];
@@ -722,6 +746,56 @@ impl RiverModel {
         self.state.acctime_rnof = 0.0;
         self.state.acc_rnof.fill(0.0);
         Ok(())
+    }
+}
+
+/// CH4 provider 的淹没比例（`publish_fldfrc_to_patches`、`publish_levee_fldfrc_to_patches`）：
+/// 单元流域 → 输入网格 → patch，填充值 `RIVERLAKE_FLOOD_MISSING_VALUE`，都取 `average`，缺测记 0。
+#[derive(Debug, Clone)]
+pub struct MethaneFlood {
+    pub levee: Vec<f64>,
+    pub fraction: Vec<f64>,
+    pub depth: Vec<f64>,
+    /// 上次取走之后又汇流过一次（只在那时覆盖 patch 上的甲烷状态）。
+    pub published: bool,
+}
+
+/// `RIVERLAKE_FLOOD_MISSING_VALUE`（`MOD_Grid_RiverLakeFlow.F90:39`）。
+const FLOOD_MISSING: f64 = -1.0e30;
+
+impl MethaneFlood {
+    fn publish(&mut self, network: &RiverNetwork, routing: &RunoffRouting, flood_uc: &[[f64; 3]]) {
+        let n = network.len();
+        let fraction_of = |area: f64, i: usize| {
+            if network.area[i] > 0.0 {
+                (area / network.area[i]).max(0.0).min(1.0)
+            } else {
+                0.0
+            }
+        };
+        let to_patches = |uc: &[f64]| -> Vec<f64> {
+            let grid = remap::catchments_to_inpm(routing, uc, FLOOD_MISSING, true);
+            remap::grid_to_patches(routing, &grid, FLOOD_MISSING, true)
+                .into_iter()
+                .map(|v| if v == FLOOD_MISSING { 0.0 } else { v })
+                .collect()
+        };
+        let levee_uc: Vec<f64> = (0..n).map(|i| fraction_of(flood_uc[i][2], i)).collect();
+        self.levee = to_patches(&levee_uc);
+        let fraction_uc: Vec<f64> = (0..n).map(|i| fraction_of(flood_uc[i][0], i)).collect();
+        // `fldwat_uc = fldfrc_uc * max(0, total_flooddepth)`（面积为 0 的单元流域是 0）。
+        let water_uc: Vec<f64> = (0..n)
+            .map(|i| fraction_uc[i] * flood_uc[i][1].max(0.0))
+            .collect();
+        self.fraction = to_patches(&fraction_uc);
+        let water = to_patches(&water_uc);
+        self.depth = self
+            .fraction
+            .iter()
+            .zip(&water)
+            .map(|(&f, &w)| if f > 0.0 { w.max(0.0) / f } else { 0.0 })
+            .collect();
+        self.published = true;
     }
 }
 
@@ -799,6 +873,9 @@ struct SystemResult<'a> {
     tape: Option<tracer::SystemTape>,
     /// 开泥沙时逐单元流域的水量累加（`sediment_diag_accumulate`）。
     sediment: Option<SedimentOut>,
+    /// 每个单元流域最后一个子步的 `(total_floodarea, total_flooddepth)` 与汇流末的
+    /// `levee_floodarea`（`publish_fldfrc_to_patches` 与 `publish_levee_fldfrc_to_patches` 的输入）。
+    flood: Vec<[f64; 3]>,
 }
 
 /// 汇流开始时交给一个河系的泥沙累加。
@@ -903,6 +980,7 @@ fn route_system<'a>(
             .collect::<Vec<_>>()
     });
     let mut levee_floodarea = vec![0.0; n];
+    let mut flood_uc = vec![[0.0; 2]; n];
     let mut tape = record.then(|| tracer::SystemTape {
         cells: cells.clone(),
         pre_levee: vec![None; n],
@@ -1338,6 +1416,15 @@ fn route_system<'a>(
             } else {
                 curve.floodarea(w)
             };
+            // `DEF_USE_TRACER`：`total_floodarea/total_flooddepth`（`:1200-1207`），留最后一个子步的值。
+            let above_bank = (w - curve.rivhgt).max(0.0);
+            flood_uc[k] = [
+                floodarea,
+                match lev.as_ref() {
+                    Some(lev) if levee_floodarea[k] > 0.0 => lev[k].1.max(above_bank),
+                    _ => above_bank,
+                },
+            ];
             let a = &mut hist[k];
             a[0] += dt;
             a[1] = w.mul_add(dt, a[1]);
@@ -1417,6 +1504,11 @@ fn route_system<'a>(
         protected_failed,
         tape,
         sediment: sed,
+        flood: flood_uc
+            .into_iter()
+            .zip(&levee_floodarea)
+            .map(|([area, depth], &levee)| [area, depth, levee])
+            .collect(),
     }
 }
 

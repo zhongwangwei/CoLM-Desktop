@@ -283,6 +283,30 @@
 - **影响**：CROP 内核、`HistForm = 'Gridded'`、`DEF_USE_IRRIGATION = .false.` 时的 `irrigarea` 静态量（不影响物理）。
 - **处理**：Rust 按"全假"写 0（第 503 轮），与本机观测一致；vendor 未改。
 
+### 38. `run/forcing/GDAS.nml` 的 `missing_value_name` 漏了 `DEF_forcing%` 前缀
+
+- **位置**：`run/forcing/GDAS.nml:16`（CoLM-SYSU-integration 当前版本相同）。
+- **原因**：`nl_colm_forcing` 组只有 `DEF_dir_forcing` 与 `DEF_forcing` 两个对象
+  （`share/MOD_Namelist.F90:1625`），裸写的 `missing_value_name` 不是组内对象名。
+- **证据**：`MOD_Namelist.F90:1644` 带 `iostat` 读这一组，非零即 `CoLM_Stop`；原样的 GDAS.nml 读不进来。
+  其余 20 份 vendor 强迫 namelist 逐行扫过，没有第二处裸写的键。
+- **影响**：GDAS 强迫的算例启动即停。
+- **处理**：vendor 改成 `DEF_forcing%missing_value_name`（第 508 轮）。实测原样的 namelist 在 Fortran 内核里报
+  `Cannot match namelist object name missing_value_name` 后停机；Rust 的网格强迫读取现在也拒绝组外对象名。
+
+### 39. `run/forcing/CRA40.nml` 的 u 分量有名字却 `tintalgo = 'NULL'`
+
+- **位置**：`run/forcing/CRA40.nml:47`（CoLM-SYSU-integration 当前版本相同）：
+  `vname(5) = 'U_GRD_GDS0_HTGL'`、`fprefix(5) = 'CRA40_sp_t_u_v'`、`dtime(5) = 21600`，`tintalgo(5)` 却是 `'NULL'`。
+- **原因**：`MOD_Forcing.F90:445-448` 只按 `vname` 判断有没有这个变量：
+  - `has_u` 仍为真；
+  - `metreadLBUB` 照读上下界；
+  - 插值循环因 `tintalgo == 'NULL'` 跳过，`forcn(5)` 从不赋值。
+  `forcn` 由 `allocate_block_data` 分配、不初始化，于是 `forc_us` 取的是未初始化内存（`has_u .and. has_v` 分支直接用它）。
+- **证据**：vendor 21 份网格 namelist 逐项扫过 `vname` 与 `tintalgo` 的 NULL 是否一致，只有这一处不一致。
+- **影响**：CRA40 强迫的东西向风是未定义值。
+- **处理**：vendor 把 `tintalgo(5)` 改成 `'linear'`，与 v 分量相同（第 508 轮）。Rust 的网格强迫读取遇到"有名字但 `tintalgo = 'NULL'`"直接拒绝：这种组合没有确定的上游行为可以对齐。
+
 ## 二、TRACER 编译开关改变了物理（需要上游确认哪一边是对的）
 
 这一版上游在很多地方给 TRACER 构建和非 TRACER 构建写了**不同的物理**，不只是记账不同。

@@ -72,6 +72,8 @@ pub struct PointRuntimeConfig {
     pub wind_height_m: f64,
     pub temperature_height_m: f64,
     pub humidity_height_m: f64,
+    /// `DEF_forcing%HEIGHT_mode`（forcing namelist），见 [`physics::observation_height_mode`]。
+    pub observation_height_mode: colm_core::ObservationHeightMode,
 }
 
 /// One fully prepared POINT forcing record for a `CoLM.F90` loop pass.
@@ -1491,6 +1493,7 @@ pub fn read_point_runtime_config(case_namelist: impl AsRef<Path>) -> Result<Poin
     let forcing_file = PathBuf::from(format!("{forcing_directory}{forcing_name}"));
     let (wind_height_m, temperature_height_m, humidity_height_m) =
         observation_heights(&forcing, &forcing_file)?;
+    let observation_height_mode = physics::observation_height_mode(&forcing)?;
     let start = simulation_date(&case, "start")?;
     // `spinup_year = 0` 在上游就是"不预热"的写法：`CoLM.F90:315` 判的是
     // `is_spinup = ststamp < ptstamp`，年份 0 永远早于真实起报时刻。
@@ -1539,6 +1542,7 @@ pub fn read_point_runtime_config(case_namelist: impl AsRef<Path>) -> Result<Poin
         wind_height_m,
         temperature_height_m,
         humidity_height_m,
+        observation_height_mode,
     })
 }
 

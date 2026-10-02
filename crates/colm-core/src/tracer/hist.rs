@@ -772,6 +772,25 @@ impl GridCell {
         }
     }
 
+    /// 不经示踪物表项的普通面积均值（`flux_map_and_write_2d`）：`spval` 不入图，
+    /// 掩膜由调用方判断。CH4 `core` history 用它。
+    pub fn add_mean(&mut self, value: f64, area: f64) {
+        pset_add(&mut self.mass, value, area);
+    }
+
+    /// [`Self::add_mean`] 累加后的网格值：`sumarea > 1e-5` 时除以面积，否则 `spval`。
+    pub fn finish_mean(&self) -> f64 {
+        if self.sumarea > GRID_MIN_SUMAREA {
+            if self.mass != SPVAL {
+                self.mass / self.sumarea
+            } else {
+                self.mass
+            }
+        } else {
+            SPVAL
+        }
+    }
+
     /// 三维 `f_trc_conc_soisno_*` 的一层贡献（映射初值是 spval：不合格的层不入图）。
     pub fn add_layer(&mut self, mass: f64, water: f64, area: f64, patch_ok: bool) {
         if !patch_ok || !(water > TRC_TINY && mass != SPVAL) {

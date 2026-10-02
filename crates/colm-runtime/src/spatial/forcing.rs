@@ -218,12 +218,25 @@ pub struct GriddedForcingConfig {
     pub height_wind_m: f64,
     pub height_temperature_m: f64,
     pub height_humidity_m: f64,
+    /// `DEF_forcing%HEIGHT_mode`（ERA5、ERA5LAND 的 vendor namelist 写 `'relative'`）。
+    pub height_mode: colm_core::ObservationHeightMode,
 }
 
 impl GriddedForcingConfig {
     /// 读 forcing namelist。目前接 `JRA3Q` 与 `IsoGSM` 的文件命名；其余数据集的 `metfilename`
     /// 各不相同，明确拒绝。
     pub fn from_document(forcing: &Document) -> Result<Self> {
+        // `namelist /nl_colm_forcing/ DEF_dir_forcing, DEF_forcing`（`MOD_Namelist.F90:1625`）：
+        // 其余对象名上游带 `iostat` 读到就 `CoLM_Stop`（vendor 的 GDAS.nml 曾裸写
+        // `missing_value_name`，见 upstream-bugs 第 38 条）。
+        for path in forcing.paths() {
+            let lower = path.to_ascii_lowercase();
+            ensure!(
+                lower == "def_dir_forcing" || lower.starts_with("def_forcing%"),
+                "{path} is not an object of &nl_colm_forcing (only DEF_dir_forcing and \
+                 DEF_forcing%...); upstream stops with \"Cannot match namelist object name\""
+            );
+        }
         let dataset = string(forcing, "DEF_forcing%dataset")?;
         ensure!(
             DATASETS.contains(&dataset.trim()),
@@ -278,6 +291,20 @@ impl GriddedForcingConfig {
                 })
             })
             .collect::<Result<Vec<_>>>()?;
+        // 上游只按 `vname` 判断有没有这个变量（`has_u/has_v`、`metreadLBUB`）：`vname` 有名字而
+        // `tintalgo = 'NULL'` 时照读上下界却从不插值，`forcn(ivar)` 停在未初始化的内存上
+        // （vendor 的 CRA40.nml 曾经这样写 u，见 upstream-bugs 第 39 条）。这种组合没有确定的
+        // 上游行为可对齐，拒绝。
+        for (i, variable) in variables.iter().enumerate() {
+            ensure!(
+                variable.name.trim() == "NULL" || variable.interpolation != Interpolation::Null,
+                "forcing variable {} ({}) has a name but DEF_forcing%tintalgo = 'NULL'; upstream \
+                 reads it but never interpolates it and uses uninitialized memory. Set its \
+                 tintalgo, or set vname to 'NULL' if the dataset lacks it",
+                i + 1,
+                variable.name.trim()
+            );
+        }
         // `vname = 'NULL'` 或 `tintalgo = 'NULL'` 的变量不读（`metreadLBUB`/`read_forcing` 都 CYCLE）。
         // 温度要用来定义网格与缺测掩膜，比湿、气压、降水、两支辐射是派生量的来源，都不能缺；
         // 风只缺一支时另一支除以 sqrt(2) 给两支，两支都缺上游停机。
@@ -341,6 +368,7 @@ impl GriddedForcingConfig {
             height_wind_m: real(forcing, "DEF_forcing%HEIGHT_V")?,
             height_temperature_m: real(forcing, "DEF_forcing%HEIGHT_T")?,
             height_humidity_m: real(forcing, "DEF_forcing%HEIGHT_Q")?,
+            height_mode: crate::physics::observation_height_mode(forcing)?,
         })
     }
 

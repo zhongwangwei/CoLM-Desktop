@@ -53,6 +53,10 @@ pub struct ObservationHeights {
     pub wind_m: f64,
     pub temperature_m: f64,
     pub humidity_m: f64,
+    /// `DEF_forcing%HEIGHT_mode`。它和三个高度一样在 **forcing namelist** 里，
+    /// 由调用方用 [`observation_height_mode`] 从那份文档解出；case 文档里没有这一项，
+    /// 照读只会拿到声明默认的 `'absolute'`（ERA5LAND 的 `'relative'` 曾因此被静默丢掉）。
+    pub mode: ObservationHeightMode,
 }
 
 pub fn land_physics_parameters(
@@ -307,10 +311,7 @@ pub fn land_physics_parameters(
             document,
             "DEF_THERMAL_CONDUCTIVITY_SCHEME",
         )?)?,
-        observation_height_mode: observation_height_mode(&text(
-            document,
-            "DEF_forcing%HEIGHT_mode",
-        )?)?,
+        observation_height_mode: heights.mode,
         stomata: stomata(document, urban_run)?,
         soil_ice_impedance: real(document, "DEF_TUNING_SOIL_ICE_IMPEDANCE")?,
         snow_irreducible_saturation: real(document, "DEF_TUNING_SSI")?,
@@ -408,17 +409,17 @@ fn thermal_conductivity_scheme(scheme: i64) -> Result<ThermalConductivityScheme>
     })
 }
 
-/// `DEF_forcing%HEIGHT_mode`：观测高度是绝对高度还是相对冠层顶。
-fn observation_height_mode(name: &str) -> Result<ObservationHeightMode> {
-    // 上游按大小写不敏感比较，且只认这两种写法（`MOD_Forcing.F90` 的
-    // `TRIM(ADJUSTL(...)) == 'absolute'` 那一组）。第三种拼法一律报错，
-    // 否则一个笔误会静默落进另一支。
-    match name.trim().to_ascii_lowercase().as_str() {
+/// `DEF_forcing%HEIGHT_mode`：观测高度是绝对高度还是相对冠层顶。`forcing` 是 forcing namelist。
+pub fn observation_height_mode(forcing: &Document) -> Result<ObservationHeightMode> {
+    // 上游是 `trim(HEIGHT_mode) == 'absolute'`（`MOD_LeafTemperature.F90:573` 等四处），
+    // 区分大小写，其余任何写法都进 relative 分支。这里只认上游 namelist 里出现的两种
+    // 写法，其余一律报错：一个笔误（或 `'Absolute'`）在上游会静默落进 relative 分支。
+    match text(forcing, "DEF_forcing%HEIGHT_mode")?.trim_end() {
         "absolute" => Ok(ObservationHeightMode::Absolute),
-        "relative" | "relative_to_canopy" => Ok(ObservationHeightMode::RelativeToCanopy),
+        "relative" => Ok(ObservationHeightMode::RelativeToCanopy),
         other => bail!(
             "DEF_forcing%HEIGHT_mode={other:?} is neither \"absolute\" nor \"relative\"; \
-             a typo here silently switches every reference height"
+             upstream would silently treat it as \"relative\""
         ),
     }
 }

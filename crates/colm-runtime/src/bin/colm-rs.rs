@@ -93,6 +93,7 @@ fn run() -> Result<()> {
             wind_m: config.wind_height_m,
             temperature_m: config.temperature_height_m,
             humidity_m: config.humidity_height_m,
+            mode: config.observation_height_mode,
         },
     )?;
     // `CROP` 内核：`DEF_USE_CROP` 是宏的只读映射，由 `--crop` 告知。只有它打开时
@@ -377,6 +378,7 @@ fn run_spatial(
             wind_m: config.forcing.height_wind_m,
             temperature_m: config.forcing.height_temperature_m,
             humidity_m: config.forcing.height_humidity_m,
+            mode: config.forcing.height_mode,
         },
     )?;
     // `CROP` 内核（与单点同一套开关，见 `run`）。空间的 `CROP_readin` 按网格映射读播种日、施肥图与
@@ -446,13 +448,22 @@ fn run_spatial(
     // （`save/remap_land_tracer_lulcc_state`、`tracer_forcing_lulcc_remap`）与漫滩回馈的示踪物账
     // （`flood_tracer_credit_patch` 等）—— 这两种组合明确拒绝，免得悄悄丢账。
     let tracer_set = colm_runtime::tracer::tracer_set_from_document(&document)?;
-    ensure!(
-        !tracer_set
-            .as_ref()
-            .is_some_and(|set| set.tracers.iter().any(colm_runtime::methane::is_methane_tracer)),
-        "methane (CH4 tracer) in spatial runs is not ported to the Rust runtime yet; run this case \
-         with --engine fortran"
-    );
+    // CH4 provider：与单点同一条 `soil_step`，只移植了 `wetwat` 淹没方案（`routing`/`hybrid` 要接
+    // 网格河湖的淹没比例，`satellite` 要读 GIEMS，`dynamic_wtd` 在内核里尚未移植）。
+    // `only_wetland` 与稻田会改 history 的活跃掩膜（`methane_patch_active_mask`），网格写出尚未接。
+    if let Some(setup) = colm_runtime::methane::setup_from_document(&document, false)? {
+        ensure!(
+            setup.scheme == 1,
+            "spatial methane is ported for DEF_METHANE%inundation_mode = 'wetwat' only; run this \
+             case with --engine fortran"
+        );
+        let m = &setup.params.methane;
+        ensure!(
+            !m.only_wetland && !m.enable_rice_paddy,
+            "spatial methane with only_wetland or enable_rice_paddy (history active mask) is not \
+             ported; run this case with --engine fortran"
+        );
+    }
     // 上游 LULCC 年末重写的河道续跑里带着泥沙（`WRITE_GridRiverLakeTimeVars` →
     // `tracer_lifecycle_route_write_restart`），Rust 的 LULCC 重写只写河道状态，泥沙会悄悄冷启动。
     let sediment = tracer_set.as_ref().is_some_and(|set| {
@@ -468,12 +479,34 @@ fn run_spatial(
     let transport_tracers = tracer_set
         .as_ref()
         .is_some_and(|set| set.transport_indices().next().is_some());
-    if transport_tracers {
+    if transport_tracers && logical_field(&document, "DEF_USE_LULCC")? {
+        // SAT（`remap_land_tracer_lulcc_state` 不带转移份额）：同单元同类型的 patch 抄旧示踪物，
+        // 其余取分配值。MEC 要按 `lulcc_inventory_trace` 做面积守恒的加权，示踪物强迫要
+        // `tracer_forcing_lulcc_remap`，都还没接。
         ensure!(
-            !logical_field(&document, "DEF_USE_LULCC")?,
-            "land tracers with DEF_USE_LULCC (save/remap_land_tracer_lulcc_state) are not ported; \
-             run this case with --engine fortran"
+            integer_field(&document, "DEF_LULCC_SCHEME")? == 1,
+            "land tracers with DEF_LULCC_SCHEME = 2 (area-conserving MEC tracer remap) are not \
+             ported; run this case with --engine fortran"
         );
+        let runtime = colm_runtime::tracer::TracerRuntime::from_document(&document)?
+            .context("transport tracers need a tracer runtime")?;
+        ensure!(
+            runtime.forcing_specs.iter().all(Vec::is_empty),
+            "tracer runtime forcing with DEF_USE_LULCC (tracer_forcing_lulcc_remap) is not \
+             ported; run this case with --engine fortran"
+        );
+    }
+    let methane_tracer = tracer_set.as_ref().is_some_and(|set| {
+        set.tracers
+            .iter()
+            .any(colm_runtime::methane::is_methane_tracer)
+    });
+    ensure!(
+        !(methane_tracer && logical_field(&document, "DEF_USE_LULCC")?),
+        "methane with DEF_USE_LULCC (save/remap_methane_lulcc_state) is not ported; run this \
+         case with --engine fortran"
+    );
+    if transport_tracers {
         ensure!(
             !logical_field(&document, "DEF_GridRiverLake_FloodFeedback")?,
             "land tracers with DEF_GridRiverLake_FloodFeedback (flood tracer ledger) are not ported; \
@@ -627,7 +660,12 @@ const LULCC_SCRATCH: &str = "lulcc-scratch";
 fn run_spatial_segment(
     case: &SpatialCase<'_>,
     segment: &SpatialSegment,
-) -> Result<Option<colm_runtime::river::RiverState>> {
+) -> Result<
+    Option<(
+        colm_runtime::river::RiverState,
+        Option<colm_runtime::river::tracer::RiverTracers>,
+    )>,
+> {
     use colm_runtime::spatial::{
         forcing::GriddedForcing,
         history::{build_history_grid, ElementGroups, HistoryGridConfig, SpatialHistory},
@@ -767,6 +805,10 @@ fn run_spatial_segment(
             Ok(std::sync::Arc::new(tracer))
         })
         .transpose()?;
+    let empty_land_tracer = tracer_runtime
+        .as_ref()
+        .filter(|tracer| !tracer.has_transport())
+        .map(|tracer| tracer.aquifer_mixing_water_mm);
     if let Some(tracer) = tracer_runtime
         .as_ref()
         .filter(|tracer| tracer.has_transport())
@@ -1113,6 +1155,16 @@ fn run_spatial_segment(
         river = river.with_tracers(tracers)?;
     }
     river.empty_tracer_transaction = tracer_runtime.is_some();
+    // CH4 provider 注册了 `publish_flood`/`publish_levee_flood`：每次汇流末把淹没比例推到 patch。
+    if tracer_runtime.as_ref().is_some_and(|tracer| {
+        tracer
+            .set
+            .tracers
+            .iter()
+            .any(colm_runtime::methane::is_methane_tracer)
+    }) {
+        river = river.with_methane_flood();
+    }
     // `grid_sediment_init` + `read_sediment_restart`：`SEDIMENT` provider 示踪物（河道泥沙）。
     if let Some(set) = tracer_runtime.as_ref().map(|tracer| &tracer.set) {
         if let Some(index) = set
@@ -1183,7 +1235,15 @@ fn run_spatial_segment(
                     .transpose()?,
             )
             .map(|session| {
-                match tracer_runtime.as_ref().filter(|t| t.has_transport()) {
+                // 有输运示踪物或 CH4 provider 时写变量（`tracer_hist_out` 与
+                // `methane_reactive_history`），否则只有文件骨架。
+                match tracer_runtime.as_ref().filter(|t| {
+                    t.has_transport()
+                        || t.set
+                            .tracers
+                            .iter()
+                            .any(colm_runtime::methane::is_methane_tracer)
+                }) {
                     Some(tracer) => session.with_tracer_variables(
                         tracer.set.clone(),
                         templates
@@ -1338,6 +1398,7 @@ fn run_spatial_segment(
                     &history_restart,
                     river,
                     tracer_cache,
+                    empty_land_tracer,
                 )?;
                 if let Some(river) = river {
                     let label = date_label(normalized_day_end(step.clock.end_time));
@@ -1399,6 +1460,7 @@ fn run_spatial_segment(
             .tracer_forcing()
             .map(|forcing| forcing.cache())
             .as_ref(),
+        empty_land_tracer,
     )?;
     if let (Some(river), false) = (runtime.river(), segment.lulcc_boundary) {
         let label = date_label(normalized_day_end(config.end));
@@ -1459,7 +1521,9 @@ fn run_spatial_segment(
         );
         println!("colm-rs: {} history file(s)", history.files.len());
     }
-    Ok(runtime.river().map(|river| river.state.clone()))
+    Ok(runtime
+        .river()
+        .map(|river| (river.state.clone(), river.tracers.clone())))
 }
 
 /// Rust 这边 LULCC 只接上游的 SAT 默认路径：LCT、IGBP、不 spinup、2000 年以后。
@@ -1507,6 +1571,55 @@ fn check_spatial_lulcc(
     Ok(())
 }
 
+/// `remap_land_tracer_lulcc_state`（SAT：没有 `lccpct_patches`）：每个新 patch 先取
+/// `allocate_Tracer_Vars` 的分配值，同单元同类型的旧 patch（`fallback_source`，与 SAT 配对相同）
+/// 整份抄过来（含 `trc_aquifer_ref_water`）。
+///
+/// 同位素且开了含水层混合（变饱和流、`DEF_TRACER_AQUIFER_MIXING_WATER_MM > 0`）时，上游另查：
+/// 特殊地类不能带参考水量，新建的土壤/湿地 patch 不能没有参考水量，否则停机。
+fn lulcc_land_tracers(
+    set: &colm_core::tracer::TracerSet,
+    aquifer_mixing: bool,
+    new: &colm_init::lulcc::SatSide<'_>,
+    new_patch_type: &[i64],
+    old: Option<(colm_init::lulcc::SatSide<'_>, &colm_init::RestartFile)>,
+) -> Result<Vec<colm_core::tracer::PatchTracerState>> {
+    use colm_core::tracer::PatchTracerState;
+    let mut states: Vec<PatchTracerState> = (0..new.patch_class.len())
+        .map(|_| PatchTracerState::allocated(set))
+        .collect();
+    let mut any_reference = false;
+    if let Some((old, old_time)) = old {
+        let old_states =
+            colm_runtime::tracer::read_land_tracer_restart(old_time, set, old.patch_class.len())?
+                .context("the old year's restart has no committed land tracer state")?;
+        any_reference = old_states.iter().any(|state| state.aquifer_ref_water > 0.0);
+        for (n, o) in colm_init::lulcc::match_patches(new, &old)? {
+            states[n].pools.clone_from(&old_states[o].pools);
+            states[n].aquifer_ref_water = old_states[o].aquifer_ref_water;
+        }
+    }
+    let require_reference = aquifer_mixing
+        && set
+            .tracers
+            .iter()
+            .any(|tracer| tracer.uses_land_water_transport() && tracer.is_isotope());
+    if require_reference || any_reference {
+        for (state, &patch_type) in states.iter().zip(new_patch_type) {
+            let soil_or_wetland = patch_type == 0 || patch_type == 2;
+            ensure!(
+                !(state.aquifer_ref_water > 0.0 && !soil_or_wetland),
+                "LULCC cannot transfer isotope aquifer reference to special patch"
+            );
+            ensure!(
+                !(require_reference && state.aquifer_ref_water <= 0.0 && soil_or_wetland),
+                "LULCC cannot create soil or wetland isotope aquifer without reference"
+            );
+        }
+    }
+    Ok(states)
+}
+
 /// `start` 所在年份的最后一步的终点，按 CoLM 的写法 `(year, 365|366, 86400)`。
 fn year_end(start: CalendarTime) -> CalendarTime {
     CalendarTime {
@@ -1543,7 +1656,10 @@ fn lulcc_transition(
     boundary: CalendarTime,
     old_dir: &Path,
     target: &Path,
-    river: Option<colm_runtime::river::RiverState>,
+    river: Option<(
+        colm_runtime::river::RiverState,
+        Option<colm_runtime::river::tracer::RiverTracers>,
+    )>,
 ) -> Result<()> {
     use colm_runtime::spatial::topology::SpatialTopology;
     let SpatialCase {
@@ -1637,6 +1753,16 @@ fn lulcc_transition(
         window: None,
         tracer_raw: None,
     };
+    // 输运示踪物（`remap_land_tracer_lulcc_state` 的 SAT 形态，不带转移份额）。
+    let land_tracers = colm_runtime::tracer::tracer_set_from_document(document)?
+        .filter(|set| set.transport_indices().next().is_some())
+        .map(|set| -> Result<_> {
+            Ok((
+                set,
+                real_field(document, "DEF_TRACER_AQUIFER_MIXING_WATER_MM")?,
+            ))
+        })
+        .transpose()?;
     let mut written = Vec::with_capacity(new_topology.blocks.len());
     for (block, patches) in &new_topology.blocks {
         let cold_path = restart_root.join(&label).join(time_name(years.new, block));
@@ -1698,6 +1824,48 @@ fn lulcc_transition(
         let path = target.join(&label).join(time_name(years.new, block));
         std::fs::create_dir_all(path.parent().expect("a restart path has a parent"))?;
         cold.write_with(&path, &overrides)?;
+        if let Some((set, mixing)) = &land_tracers {
+            let old = match old_topology.blocks.iter().find(|(old, _)| old == block) {
+                Some((_, old_patches)) => Some((
+                    colm_init::RestartFile::open(const_path(years.old, block))?,
+                    colm_init::RestartFile::open(
+                        old_dir.join(&label).join(time_name(years.old, block)),
+                    )?,
+                    old_patches.clone(),
+                )),
+                None => None,
+            };
+            let states = lulcc_land_tracers(
+                set,
+                *mixing > 0.0 && case.physics.variably_saturated_flow,
+                &colm_init::lulcc::SatSide {
+                    time: &cold,
+                    patch_class: new_const.integers("patchclass")?,
+                    element: &new_topology.element[patches.clone()],
+                },
+                new_const.integers("patchtype")?,
+                old.as_ref()
+                    .map(|(old_const, old_time, old_patches)| -> Result<_> {
+                        Ok((
+                            colm_init::lulcc::SatSide {
+                                time: old_time,
+                                patch_class: old_const.integers("patchclass")?,
+                                element: &old_topology.element[old_patches.clone()],
+                            },
+                            old_time,
+                        ))
+                    })
+                    .transpose()?,
+            )
+            .with_context(|| format!("cannot carry the tracers of block {block} over"))?;
+            colm_runtime::tracer::write_land_tracer_restart(
+                &path,
+                set,
+                &states.iter().collect::<Vec<_>>(),
+                *mixing,
+                None,
+            )?;
+        }
         // 过渡这一步的历史区间已关，旁车不带示踪物部分。
         mark_history_restart_with_river(&path, &history_restart, None, false, None)?;
         written.push(path);
@@ -1707,7 +1875,7 @@ fn lulcc_transition(
         let _ = std::fs::remove_dir(restart_root.join(&label));
     }
     // 3. 河道：网络不变，状态接着用。
-    if let Some(mut state) = river {
+    if let Some((mut state, river_tracers)) = river {
         let network = colm_runtime::river::network::RiverNetwork::read(
             Path::new(&string_field(document, "DEF_UnitCatchment_file")?),
             logical_field(document, "DEF_GridRiverLake_FloodplainStorageFix")?,
@@ -1750,6 +1918,20 @@ fn lulcc_transition(
             u8::try_from(integer_field(document, "DEF_REST_CompressLevel")?)
                 .context("DEF_REST_CompressLevel must fit 0..=9")?,
         )?;
+        // 河道示踪物：上游在内存里原样留着（`grid_riverlake_flow_lulcc` 不碰），续跑照常提交。
+        match river_tracers {
+            Some(mut tracers) => colm_runtime::river::restart::write_river_tracers(
+                &path,
+                &network,
+                &mut tracers,
+                u8::try_from(integer_field(document, "DEF_REST_CompressLevel")?)
+                    .context("DEF_REST_CompressLevel must fit 0..=9")?,
+            )?,
+            None if logical_field(document, "DEF_USE_TRACER")? => {
+                colm_runtime::river::restart::write_empty_river_tracers(&path)?;
+            }
+            None => {}
+        }
         written.push(path);
     }
     println!(
@@ -1845,6 +2027,7 @@ fn write_block_restarts(
     history: &HistoryRestart,
     river: Option<&colm_runtime::river::RiverModel>,
     tracer_cache: Option<&colm_runtime::tracer::ForcingCache<'_>>,
+    empty_land_tracer: Option<f64>,
 ) -> Result<Vec<PathBuf>> {
     // `river_active`：河道 history 累加器（`acctime_ucat`）有值。
     let river_history = river.map(colm_runtime::river::RiverModel::history_for_restart);
@@ -1868,6 +2051,11 @@ fn write_block_restarts(
                 .map(|cache| cache.block(patches.clone()))
                 .as_ref(),
         )?;
+        // 开了示踪物却没有输运示踪物（例如只有 CH4 provider）：patch 上不挂示踪物状态，
+        // 上游仍提交一份空的陆面示踪物事务。
+        if let Some(mixing) = empty_land_tracer {
+            colm_init::write_empty_land_tracer_transaction(&path, mixing)?;
+        }
         mark_history_restart_with_river(
             &path,
             history,
@@ -2892,7 +3080,11 @@ fn write_evolved_restart(
         .iter()
         .zip(states)
         .filter_map(|(template, state)| {
-            template.urban.as_ref().zip(state.urban.as_ref()).map(|(t, s)| (template, state, t, s))
+            template
+                .urban
+                .as_ref()
+                .zip(state.urban.as_ref())
+                .map(|(t, s)| (template, state, t, s))
         })
         .collect::<Vec<_>>();
     if !urban_patches.is_empty() {
@@ -2903,7 +3095,8 @@ fn write_evolved_restart(
                 .context("a restart path has no file name")?;
             Ok(path.with_file_name(name.replacen("_restart_", "_restart_urban_", 1)))
         };
-        let urban_count = colm_init::RestartFile::open(&urban_path(restart_in)?)?.dimension("urban")?;
+        let urban_count =
+            colm_init::RestartFile::open(&urban_path(restart_in)?)?.dimension("urban")?;
         let mut merged: Option<Vec<colm_init::RestartOverride>> = None;
         for (template, state, urban_template, urban) in urban_patches {
             // `UrbanLAI_readin` 同时写 `urb_lai(u)` 与 `tlai(npatch)`（两者恒等），所以装了城市月度

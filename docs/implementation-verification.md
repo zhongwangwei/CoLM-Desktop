@@ -28116,6 +28116,20 @@ FIRE 的五个历史量写的是上一次 `vecacc` 的残留（upstream-bugs 第
   - 步长与偏移保留 JRA3Q 的。
 - `tmp/fcase.sh` 共用一份 `g1f` 的前处理（2003-01-01 起 5 天），两侧只跑 colm 阶段，逐位比较 restart 与 history。
 
+**结果**（第 508 轮补跑完）：21 个数据集全部逐位一致，每个都是 history 2 份、restart 5 份：
+- CMFD、CLDAS、CMFDv2、CRA40、CRUJRA、CRUNCEPV4、CRUNCEPV7、ERA5、ERA5LAND、GDAS、GSWP3、
+- IsoGSM、JRA3Q、JRA55、MSWX、PRINCETON、QIAN、TPMFD、WFDE5、WFDEI，
+- 以及 CMIP6（vendor 文件名是 `MPI-ESM1-2-HR_ssp585.nml`）。
+
+途中暴露的问题：
+- **ERA5LAND**：第一轮 46 个量不一致，是 `HEIGHT_mode = 'relative'` 从未生效，见第 508 轮。
+- **GDAS**：vendor namelist 裸写 `missing_value_name`，上游读不进来（upstream-bugs 第 38 条）。
+- **CRA40**：u 分量有名字却 `tintalgo = 'NULL'`，上游用的是未初始化内存（第 39 条）。
+  - 合成脚本原先按 `tintalgo` 把它的 `dtime` 写成 0，Fortran 在 `setstampLB` 的 `(sec-offset)*1./dtime` 处除以 0，触发浮点陷阱（arm64 上是 SIGILL）。
+  - vendor 修正后用正常的 `dtime` 重新合成，逐位一致。
+- **CRA40、CRUJRA**：按年分组。合成数据只有 2003 年，起始那一步的偏移会回到 2002 年的文件，所以偏移置 0。
+- **WFDE5、WFDEI**：缺测属性名本身就是 `_FillValue`，合成时要在建变量时给出。
+
 ## 第 507 轮：B1 —— 空间城市（`DEF_URBAN_RUN`，`g1urb`）
 
 原来 Rust 运行期只支持单点的一个城市单元，空间城市从没跑过。对照算例 `g1urb`：
@@ -28148,3 +28162,108 @@ FIRE 的五个历史量写的是上一次 `vecacc` 的残留（upstream-bugs 第
 **验收**（纯 Fortran = Fortran 前处理 + Fortran 内核；纯 Rust = Rust 前处理 + Rust 运行期；3 天）：
 - restart 7 份（含城市重启）、history 2 份，全部逐位一致。
 - 单点城市回归 `hp nu su1 uc1 uh1 uh2 uo up uy` 全部一致（`nuc` 是续跑目录，不走 `regress.sh`）。
+
+## 第 508 轮：`DEF_forcing%HEIGHT_mode` 从来没生效过
+
+第 506 轮的合成强迫对照里只有 ERA5LAND 不一致：
+- restart 46 个量不一致，history 2 份都不一致，雪深差到厘米级；
+- 它是 vendor 里唯一写 `HEIGHT_mode = 'relative'` 的数据集（ERA5 写的是 `'absolute'`）。
+
+把 ERA5LAND 的 namelist 改成 `'absolute'` 重跑（`E5LA`），history 2 份、restart 5 份逐位一致，问题锁定在 relative 分支。单点也能复现：`bl`（PFT+BGC）加 `HEIGHT_mode = 'relative'` 得到 `hrel`，第 0 步起 132 个变量不同。Rust relative 的第一步 `f_tref` 与 Fortran **absolute** 的逐位相同：
+
+```
+           F-relative      R-relative      F-absolute
+f_tref    274.32780158    274.24183129    274.24183129
+f_fsena    94.420003       96.74640895     96.74640895
+f_ustar     0.10293637      0.11577442      0.11577442
+```
+
+**根因**：`physics.rs` 从 case namelist 里读 `DEF_forcing%HEIGHT_mode`。这一项和 `HEIGHT_V/T/Q` 一样属于 **forcing** namelist（`nl_colm_forcing`）。case 文档里没有它，于是永远拿到声明默认值 `'absolute'`。`LeafTemperature`、`LeafTemperaturePC`、`Urban_Flux` 里的 relative 分支本身移植得没错，只是从来没被选中过。三个高度当初为同一个原因改成由调用方传入（见 `physics_tests.rs` 里的说明），开关却漏了。
+
+**修复**：
+- `ObservationHeights` 加 `mode` 字段，由 `physics::observation_height_mode(forcing)` 从 forcing 文档解出；
+- 单点在 `read_point_runtime_config` 里解，空间在 `GriddedForcingConfig::read` 里解，`land_physics_parameters` 不再读它；
+- 上游的判断是 `trim(HEIGHT_mode) == 'absolute'`，区分大小写，其他任何写法都走 relative。Rust 只认 `'absolute'` 与 `'relative'` 两种写法，`'Absolute'` 和拼错的值都报错，不静默进 relative；
+- 去掉了原来多认的 `'relative_to_canopy'`（上游没有这种写法）。
+
+**验收**：
+- `hrel`（单点，12 个月逐时 history）：history 12 份、restart 全部逐位一致；
+- ERA5LAND 合成强迫：见第 506 轮的补充结果。
+
+**顺带补上的两条拒绝**（都在网格强迫的 namelist 读取里）：
+- `&nl_colm_forcing` 组外的对象名（只允许 `DEF_dir_forcing` 与 `DEF_forcing%...`）。上游带 `iostat` 读，碰到就停机；Rust 原来静默接受。
+- 变量有名字但 `tintalgo = 'NULL'`（upstream-bugs 第 39 条）。
+
+## 第 509 轮：B1 —— 空间甲烷（CH4 provider）
+
+原来空间运行入口直接拒绝 CH4 示踪物。空间 BGC 已经逐位一致（第 501–504 轮），甲烷走的是与单点同一条 `soil_step`，所以这一轮要补的是空间特有的几处接线。
+
+**对照算例**：
+- `g1ch4`：g1bgcp（PFT+BGC，珠三角 60 个 patch，其中 13 个湖泊）加 CH4 示踪物，`inundation_mode = 'wetwat'`，关掉 `allowlakeprod`，两侧共用 Rust 前处理，只跑 colm 阶段，2 天；
+- `g1ch4c`：从 `g1ch4` 各自的 2010-003 续跑文件起步，再跑 2 天（运行终点不在月末，覆盖 history 原始窗口的往返）；
+- `g1ch4p`：打开 `allowlakeprod`，纯 Fortran（Fortran 前处理 + Fortran 内核）对纯 Rust。
+
+**修补**：
+1. **甲烷 history 在空间里只写了文件骨架。** 空间会话只在有输运示踪物时才挂示踪物变量（`with_tracer_variables`），只有 CH4 provider 时 `tracer_hist_out` 根本没被调用。现在 CH4 provider 也挂上。
+2. **网格甲烷 history**（`methane_reactive_history` 的 `Gridded` 支）：19 个 `core` 变量的 patch 值与单点相同（不在该变量 filter 里的已是 `spval`，等价于 `pset2grid(msk = filter)`）；网格均值的分母分两组：
+   - 前 9 个（活跃面积均值）的 `sumarea` 用活跃掩膜（湿地或土壤，`methane_patch_active_mask`）；
+   - 后 10 个（陆面面积均值）在 `:821` 换成 `filter_all_land`（`patchtype < 99`）。
+   - 累加与 `sumarea > 1e-5` 的除法沿用示踪物 history 已验证的 `GridCell`（新增 `add_mean`/`finish_mean`）。
+   - `only_wetland` 与稻田会改活跃掩膜，空间里先拒绝。
+3. **空事务**：开了 `DEF_USE_TRACER` 却没有输运示踪物时，上游仍写 `trc_land_restart_complete/schema/transport_count` 与 `trc_aquifer_mixing_water_mm`。单点一直有这一步；空间的 patch 不挂示踪物状态，于是漏了。`write_block_restarts` 现在补写。
+4. **河道淹没比例推到 patch**（`publish_fldfrc_to_patches`、`publish_levee_fldfrc_to_patches`，`MOD_Grid_RiverLakeFlow.F90:1426-1427`）：
+   - 每次汇流末，上游把单元流域的淹没面积比（`floodarea/topo_area`，取最后一个子步）和水量（`比例 × max(0, 水深)`）经 `push_ucat2inpm`、`remap_patch2inpm` 两次 `average` 映射到 patch（填充值 `-1e30`，缺测记 0），水深 = 水量 / 比例；堤内淹没面积另推一份。
+   - 甲烷状态把这三个量写进 restart（`ch4_f_inund_{levee,flood,flood_depth}_patch`）。wetwat 方案的物理用不到它们，但原来 Rust 写的是 0，restart 因此不一致（patch 28 是 0.00645 对 0）。
+   - 现在河道子步记下 `total_floodarea/total_flooddepth`（堤防时水深取 `max(levdph, max(wdsrf-rivhgt, 0))`），汇流末发布，空间运行把结果写进各 patch 的甲烷状态；restart 也照实读写这三个量。
+5. **湖泊沉积碳的前处理**（`Aggregation_LakeSoilC`）：
+   - raw `lake_soilc.nc` 两处都不在时，上游用有机质代理：湖泊 patch 第 j 层 = `580 × OM_density_s(min(8, max(1, j-1)))`，其余 patch 为 0；湖泊 patch 的有机质密度无效时停机。
+   - Rust 原来只会聚合 raw 文件，文件缺失时直接写不出 `lake_soilc_patches`，Fortran 内核在 `ch4_reactive_init` 报"13 个湖泊 patch 都缺 lake_soilc"。
+   - 现在 raw 文件缺失时，在土壤参数之后用聚合好的 `OM_density_s` 生成；输出按层平铺（`[soil][patch]`，第一版按 patch 平铺写错过一次，对照里所有湖泊 patch 都成了 0）。
+
+**拒绝**（遇到就报，不静默降级）：
+- 非 `wetwat` 的淹没方案：`routing`/`hybrid` 要接网格河湖的淹没比例进物理，`satellite` 要读 GIEMS，`dynamic_wtd` 在内核里还没移植；
+- `only_wetland`、`enable_rice_paddy`。
+
+**验收**：
+
+| 算例 | 内容 | history | restart |
+|---|---|---|---|
+| `g1ch4` | 共用前处理，2 天 | 3 份逐位一致 | 9 份逐位一致 |
+| `g1ch4c` | 续跑 2 天 | 3 份逐位一致 | 10 份逐位一致（含 history 续跑旁车） |
+| `g1ch4p` 前处理 | 纯 F 对纯 R | — | landdata 252 份、初始 restart 9 份逐位一致 |
+| `g1ch4p` 全程 | 纯 F 对纯 R，湖泊产甲烷 | 3 份逐位一致 | 9 份逐位一致 |
+
+单元测试：colm-core 475、colm-runtime 147、colm-hist 56、colm-srfdata 271 + 50 个，全部通过（`colm-srfdata/tests/raster.rs` 的 5 个要 `COLM_RAWDATA`，本机未设，没跑）。`colm-init` 的 171 个在 `--test-threads=1` 下全部通过；并发跑时 netCDF/HDF5 偶发失败，单独跑这些用例都通过，与本轮改动无关。
+
+## 第 510 轮：B1 —— 输运示踪物与 LULCC（SAT）
+
+原来空间运行入口遇到"输运示踪物 + `DEF_USE_LULCC`"直接拒绝。Rust 的 LULCC 做法是：在年末切段，用 `mkinidata-rs` 冷启动新一年，再把旧状态按 SAT 抄回去合并成新的续跑文件。示踪物要在同一个合并里搬过去。
+
+**上游**（`LulccDriver`，`DEF_LULCC_SCHEME = 1`）：
+1. `save_land_tracer_lulcc_state` 存下旧的示踪物池；
+2. `LulccInitialize` 之后，`remap_land_tracer_lulcc_state`：
+   - 先按新的 patch 数重新 `allocate_Tracer_Vars`：全 0，只有 `trc_leaf_peclet = 1`，同位素的叶片 δ 取 `init_delta`；
+   - SAT 不传 `lccpct_patches`，所以每个量都走 `fallback_source`：同网格元、同 `patchclass` 的第一个旧 patch 整份抄过来，找不到就保持分配值。IGBP LCT 下每个网格元每个地类只有一个 patch，这与宿主的 SAT 配对相同；
+   - 同位素且含水层混合打开时，另做两项检查：特殊地类不能带参考水量，新建的土壤/湿地 patch 不能没有参考水量，否则停机。
+3. 河道示踪物留在内存里不动（`grid_riverlake_flow_lulcc` 不碰），年末那份续跑照常提交。
+
+**Rust**：
+- `lulcc_transition` 每块合并之后，用 `read_land_tracer_restart` 读出旧年份每个 patch 的示踪物状态，按 `match_patches` 配对搬到新 patch，其余取 `PatchTracerState::allocated`，再用 `write_land_tracer_restart` 写进合并出的续跑；
+- 含水层参考的两项停机检查照搬；
+- `run_spatial_segment` 把河道示踪物和河道状态一起交出来，新年份的河道续跑照写；没有输运示踪物但开了 `DEF_USE_TRACER` 时写空事务。
+
+**仍然拒绝**：
+- MEC（`DEF_LULCC_SCHEME = 2`）：要按 `lulcc_inventory_trace` 做面积守恒的加权（`lulcc_mass_transfer_area`、`remap_denominator`），并做质量守恒检查；
+- 示踪物强迫（`tracer_forcing_lulcc_remap`）；
+- 甲烷（`remap_methane_lulcc_state`）；
+- 泥沙。
+
+**验收**：`g3t` = g3（2005-12-31 起 2 天，跨 2005→2006 的 LULCC，175 → 172 个 patch）加溶质示踪物 `sol1`，两侧共用 g3 的前处理，只跑 colm 阶段：
+- history 6 份逐位一致，含跨年的两份 `hist_tracer`；
+- restart 8 份逐位一致，含新年份的陆面与河道示踪物。新出现的那一个 patch 示踪物为 0（分配值），也一致。
+
+**顺带**：`g3`、`g3m`、`g3r`、`g3mr` 的 Fortran 参照是 10 月 1 日用旧内核生成的，用 6e433ff7 的内核重跑之后，四个算例都是 history 4 份、restart 8 份逐位一致（起始续跑两侧完全相同，差异全在参照）。
+
+**本机还跑不了或没跑的**：
+- 黄金回归 `oracle/tests/generated_case.rs` 在 `PLUMBER2_ROOT` 下失败：第 0 步起多数变量不同。它比较的是 Fortran 内核的当场运行与入库黄金。第 399 轮起就记着"黄金没有重生成"，之后内核又换成了 `main/`，这是黄金过期，与本轮改动无关。重生成黄金是单独一项。
+- `colm-srfdata` 的 `raster`、`real_sites` 要 `COLM_RAWDATA`，本机未设，没跑。

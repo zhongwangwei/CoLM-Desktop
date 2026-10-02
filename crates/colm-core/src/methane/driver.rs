@@ -31,6 +31,10 @@ pub struct MethanePatch {
     pub soil_zwt: f64,
     /// 湖泊 patch 的沉积层与水柱状态（其余 patch 停在冷启动值）。
     pub lake: LakeState,
+    /// 网格河湖每次汇流末推到 patch 的淹没比例（`publish_methane_levee_flood_patch`、
+    /// `publish_methane_flood_patch`）：`f_inund_levee_patch`、`f_inund_flood_patch` 与
+    /// `f_inund_flood_depth_patch`。`wetwat` 方案的物理不用它们，只随重启往返。
+    pub flood: [f64; 3],
 }
 
 impl MethanePatch {
@@ -47,6 +51,7 @@ impl MethanePatch {
             last: None,
             soil_zwt: SPVAL,
             lake: LakeState::cold(params.methane.grnd_methane_cond_default),
+            flood: [0.0; 3],
         }
     }
 }

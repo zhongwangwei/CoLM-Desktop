@@ -209,6 +209,39 @@ fn every_vendor_gridded_dataset_namelist_reads() {
     assert!(vendor("CMFD").has_missing_value);
 }
 
+/// `&nl_colm_forcing` 只有 `DEF_dir_forcing` 与 `DEF_forcing` 两个对象：vendor 的 GDAS.nml 原来
+/// 裸写 `missing_value_name`，上游读 namelist 时停机（实测 `Cannot match namelist object name`）。
+#[test]
+fn a_bare_forcing_namelist_object_is_refused() {
+    let text = std::fs::read_to_string(format!(
+        "{}/../../vendor/CoLM202X/run/forcing/GDAS.nml",
+        env!("CARGO_MANIFEST_DIR")
+    ))
+    .unwrap()
+    .replace("DEF_forcing%missing_value_name", "missing_value_name");
+    let error =
+        GriddedForcingConfig::from_document(&colm_namelist::parse(&text).unwrap()).unwrap_err();
+    assert!(error.to_string().contains("missing_value_name"), "{error}");
+}
+
+/// 有名字却 `tintalgo = 'NULL'` 的变量：上游照读上下界、从不插值，用的是未初始化内存
+/// （vendor 的 CRA40.nml 原来这样写 u）。拒绝，而不是悄悄当成 NULL 变量。
+#[test]
+fn a_named_variable_without_interpolation_is_refused() {
+    let text = std::fs::read_to_string(format!(
+        "{}/../../vendor/CoLM202X/run/forcing/CRA40.nml",
+        env!("CARGO_MANIFEST_DIR")
+    ))
+    .unwrap()
+    .replace(
+        "'nearest' 'linear' 'linear' 'coszen'",
+        "'nearest' 'NULL' 'linear' 'coszen'",
+    );
+    let error =
+        GriddedForcingConfig::from_document(&colm_namelist::parse(&text).unwrap()).unwrap_err();
+    assert!(error.to_string().contains("U_GRD_GDS0_HTGL"), "{error}");
+}
+
 /// `metpreprocess`：单位换算、截断与比湿上限；缺测格整格跳过。
 #[test]
 fn metpreprocess_converts_units_and_skips_missing_cells() {

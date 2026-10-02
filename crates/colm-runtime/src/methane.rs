@@ -522,12 +522,15 @@ pub fn write_restart(
     })?;
     scalar(&mut file, "ch4_methane_dfsat_tot", &|i| last(i).dfsat_tot)?;
     scalar(&mut file, "ch4_f_h2osfc", &|i| p(i).f_h2osfc)?;
-    for name in [
+    for (k, name) in [
         "ch4_f_inund_levee_patch",
         "ch4_f_inund_flood_patch",
         "ch4_f_inund_flood_depth_patch",
-    ] {
-        scalar(&mut file, name, &|_| 0.0)?;
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        scalar(&mut file, name, &|i| p(i).flood[k])?;
     }
     let accumulators: Vec<_> = patches.iter().map(|(_, a)| *a).collect();
     write_accflux(&mut file, setup, &accumulators)?;
@@ -709,10 +712,13 @@ pub fn read_restart(
     let f_h2osfc = scalar("ch4_f_h2osfc")?;
     let unit = |x: f64| invalid(x) || !(0.0..=1.0).contains(&x);
     check(&[f_h2osfc], &unit);
-    for name in ["ch4_f_inund_levee_patch", "ch4_f_inund_flood_patch"] {
-        check(&[scalar(name)?], &unit);
-    }
-    check(&[scalar("ch4_f_inund_flood_depth_patch")?], &nonneg);
+    let flood = [
+        scalar("ch4_f_inund_levee_patch")?,
+        scalar("ch4_f_inund_flood_patch")?,
+        scalar("ch4_f_inund_flood_depth_patch")?,
+    ];
+    check(&flood[..2], &unit);
+    check(&flood[2..], &nonneg);
     // 湖库存（schema 2+/4+ 一定在）：严格读时允许 -1e-18 以内的负零头，读回后截到 0。
     let floor = |x: f64| invalid(x) || x < -1.0e-18;
     for name in [
@@ -833,6 +839,7 @@ pub fn read_restart(
     let positive_or_default = |x: f64| if x <= 0.0 { default_cond } else { x };
     restarted.lake_soilc = layers("ch4_lake_soilc")?;
     restarted.f_h2osfc = f_h2osfc;
+    restarted.flood = flood;
     restarted.totcol_methane = totcol;
     restarted.grnd_methane_cond = positive_or_default(grnd_cond);
     // 只供续跑写出的聚合量（`aggregate_methane_columns` 的结果）；下一步的物理不读它们。
