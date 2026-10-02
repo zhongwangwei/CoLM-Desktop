@@ -447,14 +447,14 @@ fn run_spatial(
     // 示踪物：陆面输运、河湖输运、网格示踪物强迫、漫滩回馈的示踪物账、LULCC（SAT）的示踪物迁移
     // 都已移植。还没接的组合在下面逐条拒绝，免得悄悄丢账。
     let tracer_set = colm_runtime::tracer::tracer_set_from_document(&document)?;
-    // CH4 provider：与单点同一条 `soil_step`，只移植了 `wetwat` 淹没方案（`routing`/`hybrid` 要接
-    // 网格河湖的淹没比例，`satellite` 要读 GIEMS，`dynamic_wtd` 在内核里尚未移植）。
-    // `only_wetland` 与稻田会改 history 的活跃掩膜（`methane_patch_active_mask`），网格写出尚未接。
-    if let Some(setup) = colm_runtime::methane::setup_from_document(&document, false)? {
+    // CH4 provider：与单点同一条 `soil_step`。空间内核编进了网格河湖，所以 `routing`/`hybrid` 可用；
+    // `satellite`（GIEMS）要另读卫星淹没数据，还没接。`only_wetland` 与稻田会改 history 的活跃掩膜
+    // （`methane_patch_active_mask`），网格写出尚未接。
+    if let Some(setup) = colm_runtime::methane::setup_from_document(&document, true)? {
         ensure!(
-            setup.scheme == 1,
-            "spatial methane is ported for DEF_METHANE%inundation_mode = 'wetwat' only; run this \
-             case with --engine fortran"
+            setup.scheme != 5,
+            "spatial methane with DEF_METHANE%inundation_mode = 'satellite'/'giems' (GIEMS input) is \
+             not ported; run this case with --engine fortran"
         );
         let m = &setup.params.methane;
         ensure!(
@@ -611,17 +611,18 @@ struct SpatialSegment {
 /// LULCC 临时文件（`restart/` 下）：旧年份的终态、不该留在 `restart/` 里的合并续跑、冷启动 namelist。
 const LULCC_SCRATCH: &str = "lulcc-scratch";
 
+/// 一段跑完时的河道终态：水量、示踪物与泥沙（后两者按开关有无）。
+type SegmentRiverEnd = (
+    colm_runtime::river::RiverState,
+    Option<colm_runtime::river::tracer::RiverTracers>,
+    Option<colm_runtime::river::sediment::Sediment>,
+);
+
 /// 跑一段，返回终点的河道状态（LULCC 过渡要接着用）。
 fn run_spatial_segment(
     case: &SpatialCase<'_>,
     segment: &SpatialSegment,
-) -> Result<
-    Option<(
-        colm_runtime::river::RiverState,
-        Option<colm_runtime::river::tracer::RiverTracers>,
-        Option<colm_runtime::river::sediment::Sediment>,
-    )>,
-> {
+) -> Result<Option<SegmentRiverEnd>> {
     use colm_runtime::spatial::{
         forcing::GriddedForcing,
         history::{build_history_grid, ElementGroups, HistoryGridConfig, SpatialHistory},
@@ -750,6 +751,7 @@ fn run_spatial_segment(
             patch_mask.extend(std::iter::repeat_n(true, patches.len()));
         }
     }
+    methane_wetland_fractions(&mut templates, &topology);
     // `land_tracer_init`：逐块读续跑里的示踪物事务（或按水量冷启动）。
     // `tracer_forcing_init`：网格主强迫给出总降水/总比湿的配置。
     let mut tracer_forcing_config = None;
@@ -1592,6 +1594,8 @@ fn lulcc_patch_areas(
 ///
 /// 同位素且开了含水层混合（变饱和流、`DEF_TRACER_AQUIFER_MIXING_WATER_MM > 0`）时，上游另查：
 /// 特殊地类不能带参考水量，新建的土壤/湿地 patch 不能没有参考水量，否则停机。
+// 按新 patch 下标 `np` 同时索引多张表，照上游的 `DO np` 写。
+#[allow(clippy::needless_range_loop)]
 fn lulcc_land_tracers(
     set: &colm_core::tracer::TracerSet,
     aquifer_mixing: bool,
@@ -1933,6 +1937,8 @@ fn lulcc_check_land_water_mass(
 
 /// `lulcc_check_inventory_transfer`：每个单元的旧/新物理面积一致，且按来源地类，旧 patch 的面积与
 /// 新 patch 按转移份额推出的来源面积一致（容差 1e-10）。
+// 按类下标 `c` 同时索引 `target` 与 `lccpct` 行，照上游的 `DO` 写。
+#[allow(clippy::needless_range_loop)]
 fn lulcc_check_inventory_transfer(
     new: &colm_init::lulcc::SatSide<'_>,
     old: &colm_init::lulcc::SatSide<'_>,
@@ -2102,6 +2108,56 @@ fn lulcc_forcing_cache(
     Ok(mapped)
 }
 
+/// `init_methane_wetland_fraction_cache`：每个单元里湿地 patch 的面积占土壤 + 湿地 patch 面积的份额，
+/// 存进各 patch 的甲烷站点（`wetland_frac_per_patch`）。patch 面积是各像元 `areaquad` 从 0 起相加、
+/// 共享时再乘 `pctshared`；单元里没有活跃面积时为 0。
+// `max(0).min(1)` 照搬上游 `min(max(…))` 的 NaN 行为，不换成 `clamp`。
+#[allow(clippy::manual_clamp)]
+fn methane_wetland_fractions(
+    templates: &mut [StandardLctRestartTemplate],
+    topology: &colm_runtime::spatial::topology::SpatialTopology,
+) {
+    use colm_runtime::spatial::grid::areaquad;
+    let pixel = &topology.pixel;
+    let area: Vec<f64> = topology
+        .cells
+        .iter()
+        .zip(&topology.shared_fraction)
+        .map(|(cells, &shared)| {
+            cells.iter().fold(0.0, |sum, &(ilon, ilat)| {
+                let (x, y) = (ilon as usize - 1, ilat as usize - 1);
+                sum + areaquad(pixel.lat_s[y], pixel.lat_n[y], pixel.lon_w[x], pixel.lon_e[x])
+            }) * shared.max(0.0)
+        })
+        .collect();
+    let mut active = std::collections::HashMap::<i64, f64>::new();
+    let mut wetland = std::collections::HashMap::<i64, f64>::new();
+    for (p, template) in templates.iter().enumerate() {
+        if area[p] <= 0.0 {
+            continue;
+        }
+        let element = topology.element[p];
+        if template.patch_type == 0 || template.patch_type == 2 {
+            *active.entry(element).or_insert(0.0) += area[p];
+        }
+        if template.patch_type == 2 {
+            *wetland.entry(element).or_insert(0.0) += area[p];
+        }
+    }
+    for (p, template) in templates.iter_mut().enumerate() {
+        let element = topology.element[p];
+        let fraction = match active.get(&element) {
+            Some(&act) if act > 0.0 => {
+                (wetland.get(&element).copied().unwrap_or(0.0) / act).max(0.0).min(1.0)
+            }
+            _ => 0.0,
+        };
+        if let Some((_, site)) = template.bgc.as_mut().and_then(|bgc| bgc.methane.as_mut()) {
+            site.wetland_fraction = fraction;
+        }
+    }
+}
+
 /// `start` 所在年份的最后一步的终点，按 CoLM 的写法 `(year, 365|366, 86400)`。
 fn year_end(start: CalendarTime) -> CalendarTime {
     CalendarTime {
@@ -2138,11 +2194,7 @@ fn lulcc_transition(
     boundary: CalendarTime,
     old_dir: &Path,
     target: &Path,
-    river: Option<(
-        colm_runtime::river::RiverState,
-        Option<colm_runtime::river::tracer::RiverTracers>,
-        Option<colm_runtime::river::sediment::Sediment>,
-    )>,
+    river: Option<SegmentRiverEnd>,
 ) -> Result<()> {
     use colm_runtime::spatial::topology::SpatialTopology;
     let SpatialCase {
@@ -2711,7 +2763,10 @@ fn assemble_patch(
         let (mut bgc, irrigation) =
             assemble_bgc(document, files, patch, switches, spatial_patch.as_ref())?;
         // `ch4_reactive_init`：注册了 CH4 示踪物时，BGC 之后跑甲烷（单点内核没有网格河湖汇流）。
-        if let Some(setup) = colm_runtime::methane::setup_from_document(document, false)? {
+        // 空间内核编进了网格河湖（`routing`/`hybrid` 可用），单点内核没有。
+        if let Some(setup) =
+            colm_runtime::methane::setup_from_document(document, spatial_patch.is_some())?
+        {
             let constant = colm_init::RestartFile::open(&files.constant)?;
             let slpratio = *constant
                 .floats("slpratio")?

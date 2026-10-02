@@ -28418,3 +28418,51 @@ Rust 在 `lulcc_transition` 里从旧年份续跑读出缓存、计数与标识�
 湿季窗口（§2.8b）六个数都不变。design.md 的表与测试期望已一起更新（旧值留在表下注明）。
 
 **结果**：`PLUMBER2_ROOT` 下 `cargo test -p oracle` 共 49 个测试全部通过，包括 `generated_case`、`golden_run`、`metrics`、`tier_compare`。
+
+## 第 519 轮：甲烷淹没方案 `routing`、`dynamic_wtd`、`hybrid`
+
+原来甲烷核心只移植了方案 1–4（`wetwat` 走 1），空间运行入口只放行 `wetwat`。第 509、511 轮已经把网格河湖的淹没比例与水深推到了 patch 上，这一轮把用到它们的方案接上。
+
+**核心**（`MOD_Tracer_Reactive_Methane_Physics.F90:777-900`、`:1360-1374`）：
+- 方案 7（`routing`）：`finundated = f_inund_flood_patch`，再经 `methane_distribute_grid_finundation` 按湿地优先分到 patch：
+  - 湿地取 `min(flood/W, 1)`；
+  - 土壤取 `max(flood-W, 0)/(1-W)`；
+  - 其他类型取原值。
+- 方案 6（`dynamic_wtd`）：`1/(1+exp(clamp((zwt-拐点)/陡度, ±50)))`；土壤 patch 设了 `wtd_inflection_soil` 时用土壤那组参数；湖泊开了产甲烷时取 1。
+- hybrid（方案 6 + `use_routing_for_soil`）：非湿地 patch 改用汇流淹没比例，超过 `hybrid_soil_threshold` 才计入，再按湿地优先分。
+- **饱和一侧的积水深度**：用了汇流淹没比例的 patch（方案 7 全部 patch；hybrid 只有非湿地 patch），积水深度取 `max(wdsrf_sat, max(finundated, 0.01)·1000·f_inund_flood_depth_patch)`。
+  - 第一版漏了这一段，routing 对照的饱和分支浓度与地表导度不一致：`conc_o2_sat` 0.1776 对 0.1732，`grnd_methane_cond_sat` 9.0e-10 对 4.4e-7。补上后一致。
+
+**运行期**：
+- `wetland_frac_per_patch`（`init_methane_wetland_fraction_cache`）：每个单元里湿地 patch 面积 ÷ 土壤与湿地 patch 面积。patch 面积是像元 `areaquad` 从 0 起相加、共享时乘 `pctshared`。
+- 空间运行传 `grid_river = true`（空间内核都编进了网格河湖），入口只再拒绝 `satellite`/`giems`。
+
+**验收**（g1ch4 的共用前处理，湖泊不产甲烷，2 天）：
+- `g1ch4rt`（routing）：history 3 份、restart 9 份逐位一致。
+- `g1ch4dw`（dynamic_wtd + 动态湿地）、`g1ch4hy`（hybrid）：
+  - 用默认拐点 0.30 m 时，两侧都在第 58 个 patch（Rust 下标 57）以 `methane inundation exceeds host soil water` 停机，行为一致；
+  - 把拐点改成 −0.20 m 后：history 3 份、restart 9 份逐位一致（修完下面的 `f_frcsat` 之后）。
+- 单点 `tc4dw`（tc4w + 动态湿地 + dynamic_wtd）：两侧在同一步以同一条检查停机。
+- 原有甲烷算例 `tc4 tc4w tc4wl tc4lk lk36ch4 tc4ws` 与空间 `g1ch4` 重跑仍然一致。
+
+### `f_frcsat`：空间 + 动态湿地时 Rust 全场偏大
+
+`g1ch4dw`/`g1ch4hy` 修完核心后，restart 全部一致，只有 `gd_hist_2010-01.nc` 的 `f_frcsat` 不同，并且 Rust 在每个单元都偏大（如 0.8122 对 0.8063）。去掉甲烷后的 `g1dwet`（只开动态湿地）同样出现，所以这是"空间 + 动态湿地"本身的 history 问题，和甲烷无关。
+
+**原因**：
+- 动态湿地的湿地 patch 走 `WATER_VSF` 的土壤分支，但产流方案只对 `patchtype <= 1` 调用（`MOD_SoilSnowHydrology.F90:968`），`frcsat` 没有赋值，一直是分配时的 `spval`。
+- 上游的 `flux_map_and_write_2d`（`MOD_HistGridded.F90:203-220`）中：
+  - 分子 `pset2grid(spv=spval)` 跳过这个 patch；
+  - 分母 `sumarea` 只按 `filter` 算，湿地面积仍然计入。
+- Rust 的 `set_lct_fluxes` 遇到 NaN 的 `frcsat` 时直接 `continue`，这个 patch 就算"没交过值"（`offered` 里没有它），不进分母，于是网格平均偏大。
+- 单点不受影响：单点按 patch 写，不做面积平均。
+
+**修复**：NaN 时改交 `spval`。这样不进和、不进计数，但会进 `offered`，因而计入分母。VIC 产流与干湖两条同样不给 `frcsat` 赋值的分支也一起改正了。新增单测 `unassigned_saturated_fraction_still_counts_in_the_grid_denominator`。
+
+**验收**：
+- `g1dwet`：history 2 份、restart 9 份逐位一致。
+- `g1ch4dw`、`g1ch4hy`：history 3 份、restart 9 份逐位一致。
+- 单点回归全部 ok，覆盖动态湿地、VIC、动态湖：
+  - 22 个算例：`c1 dc3 dc5 dh5 dl1 dl2 dl3 dl5 dw1–dw5 sl3 sl5 sw_dw4 sw_dw4c tsd1 tsd2 vc vn`，以及 `tid`；
+  - `tid` 必须按 `tmp/isopair.sh` 的约定带 `COLM_RS_ALLOW_UNFORCED_FRACTIONATION=1` 跑，与参照用的 test-harness 内核对应。不带这个变量时，Rust 按上游的严格检查报错，属于预期行为。
+- `tc4dw`：两侧在同一步以同一条检查停机。

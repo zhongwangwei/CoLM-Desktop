@@ -1234,3 +1234,32 @@ fn a_restored_window_continues_to_the_same_means() {
     feed(&mut resumed, 2);
     assert_eq!(means(&resumed), means(&whole));
 }
+
+/// `frcsat` 没赋值的 patch（动态湿地、VIC、干湖）：不进和，但要计入网格分母。
+/// 上游 `flux_map_and_write_2d` 的 `sumarea` 只看 `filter`，这类 patch 的 `a_frcsat` 一直是
+/// `spval`，面积却照样计入；漏掉它网格平均就偏大（实测 `g1dwet` 的 `f_frcsat` 全场偏大）。
+#[test]
+fn unassigned_saturated_fraction_still_counts_in_the_grid_denominator() {
+    let water = colm_core::Water2014SoilOutput {
+        flood_infiltration_mm_s: 0.0,
+        water_input_mm_s: 0.0,
+        infiltration_mm_s: 0.0,
+        surface_runoff_mm_s: 0.0,
+        saturation_excess_runoff_mm_s: 0.0,
+        infiltration_excess_runoff_mm_s: 0.0,
+        subsurface_runoff_mm_s: 0.0,
+        total_runoff_mm_s: 0.0,
+        saturated_fraction: f64::NAN,
+        recharge_mm_s: 0.0,
+        soil_interface_flux_mm_s: vec![0.0; 11],
+        root_uptake_mm_s: Vec::new(),
+        root_uptake_amount_mm: Vec::new(),
+        matric_potential_mm: Vec::new(),
+        hydraulic_conductivity_mm_s: Vec::new(),
+        tracer: None,
+    };
+    let mut accumulator = HistoryAccumulator::default();
+    set_lct_fluxes(&mut accumulator, 0, &water, true).unwrap();
+    assert!(accumulator.offered.contains("frcsat"));
+    assert!(!accumulator.sums.contains_key("frcsat"));
+}

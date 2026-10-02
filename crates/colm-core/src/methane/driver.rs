@@ -74,6 +74,9 @@ pub struct MethaneSite {
     pub organic_max: f64,
     /// `wetwatmax`（湿地水桶容量，`enable_wetwat_finundated_override` 用）。
     pub wetwatmax: f64,
+    /// `wetland_frac_per_patch`（`init_methane_wetland_fraction_cache`）：单元里湿地占
+    /// 土壤 + 湿地面积的份额；单点与没有算过时是分配值 1。
+    pub wetland_fraction: f64,
 }
 
 /// 一步里来自宿主（能量、水、强迫）的量。
@@ -373,6 +376,9 @@ pub fn soil_step(
             atm_methane_mix: m.atm_methane,
             dynamic_wetland: host.dynamic_wetland,
             scheme,
+            flood_fraction: patch.flood[1],
+            flood_depth_m: patch.flood[2],
+            wetland_fraction: site.wetland_fraction,
             biome_f_methane: Some(biome_f),
             biome_redoxlag: Some(biome_redox),
             aere_override,

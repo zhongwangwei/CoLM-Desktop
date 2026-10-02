@@ -245,6 +245,12 @@ pub struct ColumnInput<'a> {
     pub dynamic_wetland: bool,
     /// `DEF_wetland_finundation_scheme`。
     pub scheme: i32,
+    /// `f_inund_flood_patch(ipatch)`：网格河湖最近一次发布的淹没比例（方案 7 与 hybrid 用）。
+    pub flood_fraction: f64,
+    /// `wetland_frac_per_patch(ipatch)`：本单元里湿地占活跃（土壤 + 湿地）面积的份额。
+    pub wetland_fraction: f64,
+    /// `f_inund_flood_depth_patch(ipatch)`（m）：汇流发布的漫滩水深。
+    pub flood_depth_m: f64,
     pub biome_f_methane: Option<f64>,
     pub biome_redoxlag: Option<f64>,
     pub aere_override: Option<AereOverride>,
@@ -329,6 +335,37 @@ pub fn methane(
                 i.f_h2osfc
             }
         }
+        // 方案 6（`dynamic_wtd`/`hybrid`）：水位的 logistic 曲线；hybrid 的土壤 patch 改用汇流发布的
+        // 淹没比例（超过门槛才算），先按湿地优先分到 patch。
+        6 => {
+            if i.patchtype == 4 && m.allowlakeprod {
+                1.0
+            } else if i.patchtype != 2 && m.use_routing_for_soil {
+                if i.flood_fraction > m.hybrid_soil_threshold {
+                    distribute_grid_finundation(i.flood_fraction, i.wetland_fraction, i.patchtype)
+                } else {
+                    0.0
+                }
+            } else {
+                ensure!(
+                    m.wtd_steepness > 0.0,
+                    "DEF_METHANE%wtd_steepness must be positive for methane scheme 6."
+                );
+                ensure!(
+                    !(i.zwt.is_nan() || i.zwt.abs() >= 0.5 * SPVAL.abs()),
+                    "invalid zwt for methane scheme 6 logistic inundation: {}",
+                    i.zwt
+                );
+                let arg = if i.patchtype != 2 && m.wtd_inflection_soil > 0.0 {
+                    (i.zwt - m.wtd_inflection_soil) / m.wtd_steepness_soil.max(1.0e-3)
+                } else {
+                    (i.zwt - m.wtd_inflection) / m.wtd_steepness
+                };
+                1.0 / (1.0 + arg.max(-50.0).min(50.0).exp())
+            }
+        }
+        // 方案 7（`routing`）：汇流发布的淹没比例，湿地优先分到 patch。
+        7 => distribute_grid_finundation(i.flood_fraction, i.wetland_fraction, i.patchtype),
         other => bail!("methane inundation scheme {other} is not ported to the Rust runtime yet"),
     };
     if lake_on {
@@ -565,10 +602,18 @@ pub fn methane(
                 )
             }
         } else {
-            (
-                0,
-                physics::wetland_water_depth(i.patchtype, i.wdsrf, i.wetwat, i.dynamic_wetland),
-            )
+            let mut wdsrf_sat =
+                physics::wetland_water_depth(i.patchtype, i.wdsrf, i.wetwat, i.dynamic_wetland);
+            // 用了汇流淹没比例的 patch 也用汇流发布的漫滩水深（方案 7 全部 patch；hybrid 只有
+            // 非湿地 patch），避免面积与水深不配套。
+            if finundated > 0.0
+                && (i.scheme == 7
+                    || (i.scheme == 6 && m.use_routing_for_soil && i.patchtype != 2))
+            {
+                let routing_depth_mm = 1000.0 * i.flood_depth_m.max(0.0);
+                wdsrf_sat = wdsrf_sat.max(finundated.max(0.01) * routing_depth_mm);
+            }
+            (0, wdsrf_sat)
         };
         let (conc_o2, conc_ch4) = if sat == 0 {
             (&mut comp.conc_o2_unsat, &mut comp.conc_methane_unsat)
@@ -902,4 +947,37 @@ pub fn methane(
     r.finundated_default = finundated_default;
     comp.fsat_bef = finundated;
     Ok(r)
+}
+
+/// `methane_distribute_grid_finundation`：网格上的淹没比例先占湿地，土壤只拿剩下的，
+/// 使 `W·f_wet + (1-W)·f_soil == f_grid`。
+fn distribute_grid_finundation(grid_fraction: f64, wetland_fraction: f64, patchtype: i32) -> f64 {
+    let invalid = |x: f64| x.is_nan() || x.abs() >= 0.5 * SPVAL.abs();
+    let flood = if invalid(grid_fraction) {
+        0.0
+    } else {
+        grid_fraction.max(0.0).min(1.0)
+    };
+    let wetland = if invalid(wetland_fraction) {
+        0.0
+    } else {
+        wetland_fraction.max(0.0).min(1.0)
+    };
+    match patchtype {
+        2 => {
+            if wetland > 0.0 {
+                (flood / wetland).min(1.0)
+            } else {
+                0.0
+            }
+        }
+        0 => {
+            if wetland < 1.0 {
+                (flood - wetland).max(0.0) / (1.0 - wetland)
+            } else {
+                0.0
+            }
+        }
+        _ => flood,
+    }
 }

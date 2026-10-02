@@ -304,6 +304,7 @@ pub fn site(
         porsl: take(porsl, "porsl")?,
         organic_max,
         wetwatmax,
+        wetland_fraction: 1.0,
     })
 }
 

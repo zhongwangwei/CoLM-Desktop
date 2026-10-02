@@ -2444,8 +2444,11 @@ pub fn set_lct_fluxes(
     // （`colm-hist` 的填充值与上游的 `spval` 都是 -1e36）。
     for (name, value) in scalars {
         // VIC 产流那一支上游不给 `frcsat` 赋值（`intent(out)` 未写，见 upstream-bugs 第 16 条），
-        // 数组里一直是分配时的 `spval`，`acc1d` 跳过它 —— 这里就不写，留填充值。
+        // 数组里一直是分配时的 `spval`，`acc1d` 跳过它 —— 交 `spval`，留填充值。
+        // 不能干脆不交：网格写出的分母 `sumarea` 只看 `filter`（`MOD_HistGridded.F90:203-220`），
+        // 这类 patch（动态湿地、VIC、干湖）的面积照样计入，只是分子里没有它。
         if name == "frcsat" && value.is_nan() {
+            sink.scalar(name, record, colm_core::MISSING)?;
             continue;
         }
         ensure!(
@@ -3404,7 +3407,14 @@ impl HistorySession {
             // 面积算进分母。交一次 `spval` 让它计入分母、不进和。`rootr` 在 `CoLMMAIN_Urban` 里是
             // 局部量（`CoLMDRIVER` 只把 patch 的 `rootr(1:,i)` 交给 `CoLMMAIN`），所以同样停在 `spval`。
             for name in [
-                "assimsun", "assimsha", "etrsun", "etrsha", "gssun", "gssha", "rstfacsha", "frcsat",
+                "assimsun",
+                "assimsha",
+                "etrsun",
+                "etrsha",
+                "gssun",
+                "gssha",
+                "rstfacsha",
+                "frcsat",
                 "rsur_se",
             ] {
                 accumulator.scalar(name, 0, colm_core::MISSING)?;
@@ -3763,6 +3773,8 @@ impl HistorySession {
                             .iter()
                             .map(|state| hist::soisno_layer_pairs(itrc, state))
                             .collect();
+                        // `layer` 索引的是每个 patch 的内层，不是 `pairs` 本身。
+                        #[allow(clippy::needless_range_loop)]
                         for layer in 0..width {
                             let sums = vector.pair_sums(
                                 |p| pairs[p][layer],
