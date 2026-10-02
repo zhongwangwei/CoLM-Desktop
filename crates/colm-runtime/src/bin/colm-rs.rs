@@ -202,6 +202,21 @@ fn run() -> Result<()> {
                 .context("cropfrac is shorter than the patch count")?;
         }
     }
+    // 方案 5 的 GIEMS 按 patch 中心取像元（单点：常数重启里的站点坐标）。
+    let patch_indices: Vec<usize> = templates.iter().map(|template| template.patch).collect();
+    methane_giems(&document, &mut templates, || {
+        let constant = colm_init::RestartFile::open(&files.constant)?;
+        let (lon, lat) = (constant.floats("patchlonr")?, constant.floats("patchlatr")?);
+        patch_indices
+            .iter()
+            .map(|&patch| -> Result<(f64, f64)> {
+                Ok((
+                    *lon.get(patch).context("patchlonr is too short")?,
+                    *lat.get(patch).context("patchlatr is too short")?,
+                ))
+            })
+            .collect()
+    })?;
     // `land_tracer_init`（`CoLM.F90:339`）：注册示踪物；有输运示踪物时读续跑里的示踪物事务，
     // 读不到（冷启动重启只有空事务）就按水量冷启动。
     // `tracer_forcing_init`：POINT 不支持示踪物强迫变量（`MOD_Tracer_Forcing.F90`）。
@@ -448,14 +463,9 @@ fn run_spatial(
     // 都已移植。还没接的组合在下面逐条拒绝，免得悄悄丢账。
     let tracer_set = colm_runtime::tracer::tracer_set_from_document(&document)?;
     // CH4 provider：与单点同一条 `soil_step`。空间内核编进了网格河湖，所以 `routing`/`hybrid` 可用；
-    // `satellite`（GIEMS）要另读卫星淹没数据，还没接。`only_wetland` 与稻田会改 history 的活跃掩膜
+    // `satellite`（GIEMS）由 `methane_giems` 读入。`only_wetland` 与稻田会改 history 的活跃掩膜
     // （`methane_patch_active_mask`），网格写出尚未接。
     if let Some(setup) = colm_runtime::methane::setup_from_document(&document, true)? {
-        ensure!(
-            setup.scheme != 5,
-            "spatial methane with DEF_METHANE%inundation_mode = 'satellite'/'giems' (GIEMS input) is \
-             not ported; run this case with --engine fortran"
-        );
         let m = &setup.params.methane;
         ensure!(
             !m.only_wetland && !m.enable_rice_paddy,
@@ -752,6 +762,7 @@ fn run_spatial_segment(
         }
     }
     methane_wetland_fractions(&mut templates, &topology);
+    methane_giems(document, &mut templates, || Ok(coordinates.clone()))?;
     // `land_tracer_init`：逐块读续跑里的示踪物事务（或按水量冷启动）。
     // `tracer_forcing_init`：网格主强迫给出总降水/总比湿的配置。
     let mut tracer_forcing_config = None;
@@ -2156,6 +2167,45 @@ fn methane_wetland_fractions(
             site.wetland_fraction = fraction;
         }
     }
+}
+
+/// `read_methane_giems`：方案 5 时读 `DEF_file_GIEMS`，按每个 patch 的中心 `(patchlonr, patchlatr)`
+/// 取最近像元的月序列挂到甲烷静态量上。文件只读一次，所有 patch 一起映射。
+fn methane_giems(
+    document: &colm_namelist::Document,
+    templates: &mut [StandardLctRestartTemplate],
+    coordinates: impl FnOnce() -> Result<Vec<(f64, f64)>>,
+) -> Result<()> {
+    let giems_patches = || {
+        templates.iter().any(|template| {
+            template
+                .bgc
+                .as_ref()
+                .and_then(|bgc| bgc.methane.as_ref())
+                .is_some_and(|(setup, _)| setup.scheme == 5)
+        })
+    };
+    if !giems_patches() {
+        return Ok(());
+    }
+    let path = string_field(document, "DEF_file_GIEMS")?;
+    let path = path.trim();
+    ensure!(
+        !path.is_empty() && path != "null",
+        " ***** ERROR: DEF_wetland_finundation_scheme=5 requires DEF_file_GIEMS."
+    );
+    let coordinates = coordinates()?;
+    ensure!(
+        coordinates.len() == templates.len(),
+        "GIEMS methane input requires coordinates for every worker-local patch."
+    );
+    let series = colm_runtime::methane::read_giems(path, &coordinates)?;
+    for (template, giems) in templates.iter_mut().zip(series) {
+        if let Some((_, site)) = template.bgc.as_mut().and_then(|bgc| bgc.methane.as_mut()) {
+            site.giems = Some(giems);
+        }
+    }
+    Ok(())
 }
 
 /// `start` 所在年份的最后一步的终点，按 CoLM 的写法 `(year, 365|366, 86400)`。

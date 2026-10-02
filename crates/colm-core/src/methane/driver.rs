@@ -77,6 +77,8 @@ pub struct MethaneSite {
     /// `wetland_frac_per_patch`（`init_methane_wetland_fraction_cache`）：单元里湿地占
     /// 土壤 + 湿地面积的份额；单点与没有算过时是分配值 1。
     pub wetland_fraction: f64,
+    /// 方案 5 的 GIEMS 月序列（`read_methane_giems` 按 patch 中心取最近像元）。
+    pub giems: Option<super::giems::GiemsPatch>,
 }
 
 /// 一步里来自宿主（能量、水、强迫）的量。
@@ -379,6 +381,7 @@ pub fn soil_step(
             flood_fraction: patch.flood[1],
             flood_depth_m: patch.flood[2],
             wetland_fraction: site.wetland_fraction,
+            giems: site.giems.as_ref(),
             biome_f_methane: Some(biome_f),
             biome_redoxlag: Some(biome_redox),
             aere_override,

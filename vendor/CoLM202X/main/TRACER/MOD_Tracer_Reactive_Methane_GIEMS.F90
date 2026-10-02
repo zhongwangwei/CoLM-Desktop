@@ -596,12 +596,17 @@ CONTAINS
             DO month_in_chunk = 1, chunk_n
                mo = mod(t + month_in_chunk - 2, 12) + 1
                v = unique_values(month_in_chunk, patch_to_unique(ipatch))
-               IF (v >= 0._r4 .and. v <= 1._r4) THEN
+               ! NaN is a documented fill value: test it first.  The ordered
+               ! comparisons below are signalling compares, so with the
+               ! standard -ffpe-trap=invalid build a NaN reaching them aborts
+               ! the run instead of being counted as a physical zero.
+               IF (ieee_is_nan(v)) THEN
+                  CONTINUE
+               ELSEIF (v >= 0._r4 .and. v <= 1._r4) THEN
                   giems_ts_wetland_frac(t + month_in_chunk - 1, ipatch) = v
                   giems_clim_wetland_frac(mo, ipatch) = &
                      giems_clim_wetland_frac(mo, ipatch) + real(v, r8)
-               ELSEIF (.not. ieee_is_nan(v) .and. v /= -999._r4 .and. &
-                       v /= -998._r4 .and. v /= -997._r4) THEN
+               ELSEIF (v /= -999._r4 .and. v /= -998._r4 .and. v /= -997._r4) THEN
                   giems_value_error = 1
                ENDIF
                ! Valid observations and documented ocean/snow/urban/NaN

@@ -28466,3 +28466,39 @@ Rust 在 `lulcc_transition` 里从旧年份续跑读出缓存、计数与标识�
   - 22 个算例：`c1 dc3 dc5 dh5 dl1 dl2 dl3 dl5 dw1–dw5 sl3 sl5 sw_dw4 sw_dw4c tsd1 tsd2 vc vn`，以及 `tid`；
   - `tid` 必须按 `tmp/isopair.sh` 的约定带 `COLM_RS_ALLOW_UNFORCED_FRACTIONATION=1` 跑，与参照用的 test-harness 内核对应。不带这个变量时，Rust 按上游的严格检查报错，属于预期行为。
 - `tc4dw`：两侧在同一步以同一条检查停机。
+
+## 第 520 轮：甲烷方案 5（`satellite`/`giems`，GIEMS-MC 月淹没比例）
+
+**移植**（`MOD_Tracer_Reactive_Methane_GIEMS`）：
+- 核心 `methane/giems.rs` 的 `GiemsPatch`：
+  - 每个 patch 存一条 `real(r4)` 月序列，外加 12 个月的气候态（`real(r8)` 按时间次序累加）；
+  - 填充值（−999/−998/−997/NaN）存 0，但仍计入该月的样本数；其余超出 `[0, 1]` 的值停机；
+  - `finundated(year, julian_day)`：1992–2020 年取当月值，年份之外取气候态。
+- 运行期 `methane::read_giems`：
+  - 检查与上游相同：维度、348 个月、时间轴（`days since 1992-01-01`、公历、`monthly_average`、逐月月初日数 ±0.25）、坐标、变量维序 `(time, latitude, longitude)`；
+  - 最近像元：纬度取首个严格最小的，超过 5° 停机；经度用 `|Δ| mod 360` 后取短的一边；两者的合成距离超过 5° 停机；
+  - 逐月读一层，只取用到的像元，不把整个文件读进内存。
+- 列计算方案 5：GIEMS 值经 `distribute_grid_finundation` 按湿地优先分到 patch（`wetland_frac_per_patch` 总会分配，单点为 1）。
+- colm-rs：`methane_giems` 在模板组装完后统一读一次 `DEF_file_GIEMS`。坐标来自常数重启的 `patchlonr/patchlatr`：
+  - 空间：沿用块循环收集的坐标；
+  - 单点：只在需要时才读。
+- 空间入口不再拒绝方案 5。
+
+**上游缺陷 40**：GIEMS 的 NaN 填充值在 `-ffpe-trap=invalid` 下触发陷阱（详见 upstream-bugs）。vendor 已修，default、latlon、unstructured、latlon-crop、crop 五个内核已重编。
+
+**验收**：合成的 GIEMS 文件由 `tmp/mkgiems.py` 生成：
+- 0.5° 区域网格，348 个月；
+- 混有海洋、冬季积雪、城市与 NaN 的填充值。
+
+| 算例 | 内容 | 结果 |
+|---|---|---|
+| `g1ch4g` | g1 共用前处理，湖泊不产甲烷，2 天 | history 3 份、restart 9 份逐位一致；`f_methane_prod_tot` 最大值 1.8e-11（routing 是 8e-13），GIEMS 确实进了计算 |
+| `tc4g` | 单点土壤 | 逐位一致 |
+| `tc4wg` | 单点土壤（wetwat 底的算例） | 逐位一致 |
+| `tc4wlg` | 单点湿地 | 逐位一致 |
+
+`tc4wlg` 还验证了两件事：
+- GIEMS 确实生效：临时调试输出显示 `raw = 0.2272, W = 1, patchtype = 2 → 0.2272`，地表通量从 wetwat 的 −1.66e-11 变为 −3.79e-12；
+- 单点的 `wetland_frac_per_patch` 确实是 1：如果 Fortran 单点算成 0，湿地会分到 0，两侧就会不一致。
+
+`tc4g`/`tc4wg` 的土壤 patch 在 W = 1 时分到 0，与 wetwat 基线相同，这两组只验证读入与映射路径。

@@ -307,6 +307,20 @@
 - **影响**：CRA40 强迫的东西向风是未定义值。
 - **处理**：vendor 把 `tintalgo(5)` 改成 `'linear'`，与 v 分量相同（第 508 轮）。Rust 的网格强迫读取遇到"有名字但 `tintalgo = 'NULL'`"直接拒绝：这种组合没有确定的上游行为可以对齐。
 
+### 40. GIEMS 的 NaN 填充值在标准构建下触发浮点陷阱
+
+- **位置**：`main/TRACER/MOD_Tracer_Reactive_Methane_GIEMS.F90:599`（CoLM-SYSU-integration 当前版本相同）。
+  原写法 `IF (v >= 0._r4 .and. v <= 1._r4) … ELSEIF (.not. ieee_is_nan(v) .and. …)`。
+- **原因**：模块注释和这一段的注释都把 NaN 列为合法的填充值（当作物理上的 0），但先做的是有序比较 `v >= 0`。
+  - 有序比较是带信号的比较（arm64 上是 `fcmpe`），遇到 NaN 会置 invalid；
+  - 上游标准 Makeoptions 带 `-ffpe-trap=invalid,zero,overflow`，于是直接陷入；
+  - 后面的 `ieee_is_nan` 分支永远到不了。
+- **证据**：合成的 GIEMS 文件在站点像元的某些月份放 NaN。单点 `tc4g` 在 `GIEMS dims` 之后以 SIGILL 停机，
+  lldb 定位在 `read_methane_giems+4052: fcmpe s31, #0.0`。空间 `g1ch4g` 取到的像元碰巧没有 NaN，所以没暴露。
+- **影响**：只要选中的像元在任何一个月是 NaN，方案 5（`satellite`/`giems`）的初始化就会崩溃。
+- **处理**：vendor 改为先判 `ieee_is_nan(v)`（计入该月的样本数、不进和），再做有序比较（第 520 轮）。
+  对非 NaN 的输入，行为与原写法完全相同。Rust 的 `GiemsPatch::from_samples` 本来就先按区间判断，NaN 不会出错。
+
 ## 二、TRACER 编译开关改变了物理（需要上游确认哪一边是对的）
 
 这一版上游在很多地方给 TRACER 构建和非 TRACER 构建写了**不同的物理**，不只是记账不同。

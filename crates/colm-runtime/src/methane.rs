@@ -1,7 +1,7 @@
 //! CH4 provider 的运行时接线：从 CH4 示踪物的参数文件读 `&nl_colm_methane_parameter`，
 //! 组装 patch 的静态量，每步在 BGC 之后调用 [`colm_core::methane::driver::soil_step`]。
 
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, ensure, Context, Result};
 use colm_core::methane::config::{FieldValue, MethaneParameters};
 use colm_core::methane::driver::{HostInputs, MethaneSite};
 use colm_namelist::{Document, Segment, Value};
@@ -305,6 +305,7 @@ pub fn site(
         organic_max,
         wetwatmax,
         wetland_fraction: 1.0,
+        giems: None,
     })
 }
 
@@ -1006,4 +1007,164 @@ pub fn read_accflux_sidecar(
         return flushed();
     }
     Ok(Some(accumulators))
+}
+
+/// `read_methane_giems`：读 GIEMS-MC 文件，给每个 patch 中心（弧度 `(lon, lat)`）取最近像元的月序列。
+///
+/// 元数据、时间轴、坐标、映射与取值的检查都照上游，任一不过就停（上游 `CoLM_stop`）。
+/// 逐月读一层 `(latitude, longitude)`，只取要用的像元，不把整个文件读进内存。
+pub fn read_giems(
+    path: &str,
+    coordinates: &[(f64, f64)],
+) -> Result<Vec<colm_core::methane::giems::GiemsPatch>> {
+    use colm_core::methane::giems::{GiemsPatch, GIEMS_MONTHS};
+    use std::f64::consts::PI;
+    const VARIABLE: &str = "inund_sat_wetland_frac";
+    ensure!(
+        std::path::Path::new(path).exists(),
+        "GIEMS file not found: {path}"
+    );
+    let file = netcdf::open(path).with_context(|| format!("GIEMS open failed: {path}"))?;
+    let length = |name: &str| file.dimension(name).map_or(0, |d| d.len());
+    let (ntime, nlat, nlon) = (length("time"), length("latitude"), length("longitude"));
+    ensure!(
+        ntime > 0 && nlat > 0 && nlon > 0,
+        "GIEMS is missing required time/latitude/longitude dimensions."
+    );
+    ensure!(
+        ntime == GIEMS_MONTHS,
+        "GIEMS time dimension has {ntime} months; expected exactly {GIEMS_MONTHS} (1992-01 \
+         through 2020-12)."
+    );
+    validate_giems_time_axis(&file, ntime)?;
+    let coordinate = |name: &str| -> Result<Vec<f64>> {
+        file.variable(name)
+            .with_context(|| format!("GIEMS {name} read failed"))?
+            .get_values::<f64, _>(..)
+            .with_context(|| format!("GIEMS {name} read failed"))
+    };
+    let lat_g = coordinate("latitude")?;
+    let lon_g = coordinate("longitude")?;
+    ensure!(
+        lat_g.iter().chain(&lon_g).all(|x| x.is_finite()) && lat_g.iter().all(|x| x.abs() <= 90.0),
+        "GIEMS latitude/longitude coordinates are invalid."
+    );
+    let variable = file
+        .variable(VARIABLE)
+        .context("GIEMS variable not found: inund_sat_wetland_frac")?;
+    let dims: Vec<(String, usize)> = variable
+        .dimensions()
+        .iter()
+        .map(|d| (d.name(), d.len()))
+        .collect();
+    ensure!(
+        dims.len() == 3,
+        "GIEMS variable has {} dimensions; expected longitude, latitude, time.",
+        dims.len()
+    );
+    // C 次序 `(time, latitude, longitude)`，即上游 Fortran 次序的 `(longitude, latitude, time)`。
+    for ((name, len), (want, want_len)) in
+        dims.iter()
+            .zip([("time", ntime), ("latitude", nlat), ("longitude", nlon)])
+    {
+        ensure!(
+            name == want && *len == want_len,
+            "invalid GIEMS metadata; expected longitude, latitude, time (found {name} len={len})."
+        );
+    }
+
+    // 最近像元：先纬度（首个严格更小者），再经度（跨日界取短的一边）。
+    let mut pixels = Vec::with_capacity(coordinates.len());
+    for &(lonr, latr) in coordinates {
+        ensure!(
+            latr.is_finite() && lonr.is_finite() && latr.abs() <= 0.5 * PI && lonr.abs() <= 2.0 * PI,
+            "at least one CoLM patch has invalid coordinates or no matching GIEMS cell."
+        );
+        let lat_deg = latr * 180.0 / PI;
+        let lon_deg = lonr * 180.0 / PI;
+        let (mut iy, mut dlat_min) = (0, f64::MAX);
+        for (ilat, &lat) in lat_g.iter().enumerate() {
+            let d = (lat_deg - lat).abs();
+            if d < dlat_min {
+                dlat_min = d;
+                iy = ilat;
+            }
+        }
+        ensure!(
+            dlat_min <= 5.0,
+            "at least one CoLM patch has invalid coordinates or no matching GIEMS cell."
+        );
+        let (mut ix, mut dlon_min) = (0, f64::MAX);
+        for (ilon, &lon) in lon_g.iter().enumerate() {
+            let d = (lon_deg - lon).abs().rem_euclid(360.0);
+            let d = d.min(360.0 - d);
+            if d < dlon_min {
+                dlon_min = d;
+                ix = ilon;
+            }
+        }
+        ensure!(
+            (dlat_min.powi(2) + dlon_min.powi(2)).sqrt() <= 5.0,
+            "at least one CoLM patch has invalid coordinates or no matching GIEMS cell."
+        );
+        pixels.push(iy * nlon + ix);
+    }
+
+    let mut samples = vec![Vec::with_capacity(ntime); coordinates.len()];
+    for t in 0..ntime {
+        let slab = variable
+            .get_values::<f32, _>([t..t + 1, 0..nlat, 0..nlon])
+            .with_context(|| format!("GIEMS slab read failed at time index {}", t + 1))?;
+        for (series, &pixel) in samples.iter_mut().zip(&pixels) {
+            series.push(slab[pixel]);
+        }
+    }
+    samples.iter().map(|s| GiemsPatch::from_samples(s)).collect()
+}
+
+/// `validate_giems_time_axis`：时间轴必须是 1992-01-01 起的逐月月初日数（公历）。
+fn validate_giems_time_axis(file: &netcdf::File, ntime: usize) -> Result<()> {
+    let time = file
+        .variable("time")
+        .context("GIEMS time coordinate not found")?;
+    let values = time
+        .get_values::<f64, _>(..)
+        .context("GIEMS time coordinate read failed")?;
+    let text = |name: &str| -> Option<String> {
+        match time.attribute_value(name)?.ok()? {
+            netcdf::AttributeValue::Str(s) => Some(s),
+            _ => None,
+        }
+    };
+    let units = text("units")
+        .context("GIEMS time coordinate must define its day-based 1992-01-01 origin.")?;
+    ensure!(
+        units.trim_start().to_ascii_lowercase().trim_end().starts_with("days since 1992-01-01"),
+        "GIEMS time units must be days since 1992-01-01: {units}"
+    );
+    let calendar = text("calendar").unwrap_or_default();
+    ensure!(
+        matches!(
+            calendar.trim().to_ascii_lowercase().as_str(),
+            "proleptic_gregorian" | "gregorian" | "standard"
+        ),
+        "GIEMS time calendar is missing or not Gregorian: {calendar}"
+    );
+    let resolution = text("time_resolution").unwrap_or_default();
+    ensure!(
+        resolution.trim().eq_ignore_ascii_case("monthly_average"),
+        "GIEMS time_resolution must be monthly_average: {resolution}"
+    );
+    let mut expected = 0i64;
+    for (i, &value) in values.iter().enumerate().take(ntime) {
+        ensure!(
+            value.is_finite() && (value - expected as f64).abs() <= 0.25,
+            "GIEMS time index {} has day={value}; expected month-start day={expected}",
+            i + 1
+        );
+        let year = 1992 + (i / 12) as i32;
+        let month = i % 12;
+        expected += i64::from(colm_core::calendar::month_lengths(year)[month]);
+    }
+    Ok(())
 }

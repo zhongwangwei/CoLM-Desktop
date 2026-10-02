@@ -251,6 +251,8 @@ pub struct ColumnInput<'a> {
     pub wetland_fraction: f64,
     /// `f_inund_flood_depth_patch(ipatch)`（m）：汇流发布的漫滩水深。
     pub flood_depth_m: f64,
+    /// 方案 5：这个 patch 的 GIEMS 月序列（`giems_active` 且读到了它时才有）。
+    pub giems: Option<&'a super::giems::GiemsPatch>,
     pub biome_f_methane: Option<f64>,
     pub biome_redoxlag: Option<f64>,
     pub aere_override: Option<AereOverride>,
@@ -363,6 +365,18 @@ pub fn methane(
                 };
                 1.0 / (1.0 + arg.max(-50.0).min(50.0).exp())
             }
+        }
+        // 方案 5（`satellite`/`giems`）：GIEMS 是单元的绝对淹没比例，同样按湿地优先分到 patch。
+        // `wetland_frac_per_patch` 总是分配的（单点为 1），所以总要分。
+        5 => {
+            let Some(giems) = i.giems else {
+                bail!("methane scheme 5 requires an active GIEMS file.");
+            };
+            distribute_grid_finundation(
+                giems.finundated(i.idate[0], i.idate[1])?,
+                i.wetland_fraction,
+                i.patchtype,
+            )
         }
         // 方案 7（`routing`）：汇流发布的淹没比例，湿地优先分到 patch。
         7 => distribute_grid_finundation(i.flood_fraction, i.wetland_fraction, i.patchtype),
