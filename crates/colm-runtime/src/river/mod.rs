@@ -795,6 +795,8 @@ pub struct MethaneFlood {
 const FLOOD_MISSING: f64 = -1.0e30;
 
 impl MethaneFlood {
+    // `max(0).min(1)` 照搬上游 `min(max(x,0),1)`：NaN 落到 0，`clamp` 会把 NaN 原样放过。
+    #[allow(clippy::manual_clamp)]
     fn publish(&mut self, network: &RiverNetwork, routing: &RunoffRouting, flood_uc: &[[f64; 3]]) {
         let n = network.len();
         let fraction_of = |area: f64, i: usize| {

@@ -3548,7 +3548,7 @@ fn lake_soil_carbon_from_organic_matter(
                 continue;
             }
             let value = values[patch];
-            if !value.is_finite() || value < 0.0 || value >= 0.5 * 1.0e36 {
+            if !value.is_finite() || !(0.0..0.5 * 1.0e36).contains(&value) {
                 invalid += 1;
                 continue;
             }

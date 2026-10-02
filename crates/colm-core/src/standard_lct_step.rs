@@ -2216,8 +2216,10 @@ fn tracer_after_water(host: TracerAfterWater<'_, '_>) -> Result<()> {
                 let water_credit = flood.water_credit_mm;
                 let evaporated = flood_evaporation_mm_s * dt;
                 if water_credit <= evaporated {
+                    // 上游 `IF (qinfl*dt > tol)` 才停：NaN 不停，所以不写成 `<=`。
+                    let uncovered = water_credit.max(1.0) * 1.0e-12 < qinfl_fld * dt;
                     ensure!(
-                        !(water_credit.max(1.0) * 1.0e-12 < qinfl_fld * dt),
+                        !uncovered,
                         "grid flood feedback: infiltration without published tracer credit"
                     );
                 } else {

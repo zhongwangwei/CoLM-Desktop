@@ -12,6 +12,7 @@
 //! 输运示踪物（[`FloodTracers`]）：发布时可见漫滩水按 `trc_mass` 的比例、堤内按 `trc_levsto`
 //! 折到 patch；陆面报回蒸发损失与随入渗进土壤的量，扣账时按比例从河道示踪物里扣，并核对
 //! 陆面/大气/河道三方的账。
+#![allow(clippy::neg_cmp_op_on_partial_ord)] // `!(x < y)` 照搬上游判据，保留 NaN 的比较语义
 
 // 夹紧保留上游 `MIN(MAX(·))` 的次序；逐单元流域的下标循环与上游 `DO i = 1, numucat` 对应。
 #![allow(clippy::manual_clamp, clippy::needless_range_loop)]

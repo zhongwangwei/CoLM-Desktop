@@ -681,6 +681,8 @@ pub(super) fn metpreprocess(
 /// QIAN 的短波拆分（`MOD_Forcing.F90:577-589`）。GIMPLE：
 /// `ratio = min(max(FMA(h³, c3, FNMA(h², c2, FMA(h, c1, c0))), 0.01), 0.99)`，`h³ = h*(h*h)`；
 /// 直射 `h*ratio`、散射 `(1-ratio)*h`。
+// `max(0.01).min(0.99)` 与上游 `min(max(…))` 的 NaN 行为一致，不换成 `clamp`。
+#[allow(clippy::manual_clamp)]
 fn qian_shortwave(solarin: f64) -> ShortwaveForcing {
     let h = solarin * 0.5;
     let h2 = h * h;
@@ -1094,6 +1096,8 @@ impl GriddedForcing {
         // 其余 `a = max(0, solarin)`，`sunang` 取格心、`calendarday(idate)`。
         let qian = self.config.dataset.trim() == "QIAN";
         let mut split = Vec::with_capacity(n);
+        // `i` 同时索引 `out`、`skipped`、`self.split` 与格心坐标。
+        #[allow(clippy::needless_range_loop)]
         for i in 0..n {
             if qian {
                 split.push(qian_shortwave(out.solarin[i]));
