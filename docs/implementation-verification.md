@@ -28977,3 +28977,19 @@ Rust 之前的拒绝理由（"城市单点混有别的地类的 patch"）不对�
 回归逐位一致：`g1fm g1fmm g1fmmt g3 g3m`。
 
 另记：`run-7920` 先前报的 "No route to host" 是暂时性的局域网故障（到 192.168.50.29 的路由走 `en12`），现已恢复。按用户要求，本项目的计算全部留在本地。
+
+## 第 540 轮：被强迫缺测遮蔽的 patch + 漫滩回馈
+
+第 523 轮拒绝的理由是被跳过的 patch 的 `flood_evap/infil_patch` 会停在上次发布的值。核对上游：
+- `MOD_Grid_RiverLakeFlow.F90:481-484` 每个汇流步先把 `flood_evap/infil_patch*deltime` 累加进 `*_acc`，再把它们**清零**；
+- 被遮蔽 patch 在 `CoLMDRIVER` 里整步跳过，从不写这两个量，所以恒为 0；
+- `publish_flood_feedback` 照常把漫滩比例发给它们，但没有人用。
+
+Rust 的 `SpatialRuntime` 对被遮蔽 patch 不交输出，累加时等价于 0，去掉这条拒绝即可。现在只剩 BGC 仍拒绝。
+
+**验收 `g1ffm`**：g1fmm 底（合成 CMFDm，7 个 patch 被遮蔽，2003-01-01 → 01-05，月历史）加 `FloodplainStorageFix`、`FloodFeedback` 与 `DEF_Runoff_SCHEME = 0`。
+- Rust 全套运行，Fortran 沿用 Rust 预处理；
+- history 2、restart 5 逐位一致；
+- 网格历史 `f_floodfrc` 最大 0.094，漫滩确实有水。
+
+回归逐位一致：`g1ff g1ffs g1ffts g1fmm`。
