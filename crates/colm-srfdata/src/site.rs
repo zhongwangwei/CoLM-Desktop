@@ -1995,6 +1995,271 @@ pub fn append_single_point_hyperspectral_albedo_with_compression(
         .with_context(|| format!("cannot close single-point surface {}", surface.display()))
 }
 
+/// 单点 `DEF_USE_Forcing_Downscaling`（`MOD_SingleSrfdata.F90:1292-1400` 与写出 `:3219-3237`）：
+/// 天空视角因子、曲率、四坡型的坡度/坡向/面积分数与 16×101 阴影查表。`USE_SITE_topography` 时站点文件
+/// 里有就取站点文件的，否则从 `DEF_DS_HiresTopographyDataDir` 的高分辨率栅格按站点所在格取一个点
+/// （`read_point_var_2d_real8`，网格由 `slope.nc` 的格心定义）。
+pub fn append_single_point_topography_factors(
+    surface: &Path,
+    site_file: &Path,
+    directory: &Path,
+    use_site_topography: bool,
+) -> Result<()> {
+    const AZIMUTHS: usize = 16;
+    const ZENITHS: usize = 101;
+    const SLOPE_TYPES: usize = 4;
+    let (longitude, latitude) = {
+        let file = netcdf::open(surface)
+            .with_context(|| format!("cannot open single-point surface {}", surface.display()))?;
+        (
+            normalize_site_longitude(scalar_f64(&file, "longitude")?),
+            scalar_f64(&file, "latitude")?,
+        )
+    };
+    let site = netcdf::open(site_file)
+        .with_context(|| format!("cannot open site file {}", site_file.display()))?;
+    let from_site = |name: &str| use_site_topography && site.variable(name).is_some();
+    let site_values = |name: &str| -> Result<Vec<f64>> {
+        Ok(site
+            .variable(name)
+            .with_context(|| format!("{name} is absent from {}", site_file.display()))?
+            .get_values::<f64, _>(..)?)
+    };
+    let grid = crate::coordinate_grid_from_file(directory.join("slope.nc"), "slope")?;
+    let ilon = site_find_nearest_west(longitude, &grid.lon_w);
+    let ilat = site_find_nearest_south(latitude, &grid.lat_s);
+    let point = |file: &str, variable: &str, layers: usize| -> Result<Vec<f64>> {
+        let path = directory.join(file);
+        let raster =
+            netcdf::open(&path).with_context(|| format!("cannot open {}", path.display()))?;
+        let source = raster
+            .variable(variable)
+            .with_context(|| format!("{variable} is absent from {}", path.display()))?;
+        // `nf90_get_var (…, (/1,ilon,ilat/), (/n,1,1/))`：盘上 `(lat, lon[, azimuth])`，只取前 n 个方位。
+        Ok(if layers == 0 {
+            source.get_values::<f64, _>((ilat..ilat + 1, ilon..ilon + 1))?
+        } else {
+            source.get_values::<f64, _>((ilat..ilat + 1, ilon..ilon + 1, 0..layers))?
+        })
+    };
+    let source = |site: bool| if site { "SITE" } else { "CoLM 2024 raw data" };
+
+    let svf_site = from_site("SITE_svf");
+    let svf = if svf_site {
+        site_values("SITE_svf")?[0]
+    } else {
+        point("sky_view_factor.nc", "svf", 0)?[0]
+    };
+    let cur_site = from_site("SITE_cur");
+    let cur = if cur_site {
+        site_values("SITE_cur")?[0]
+    } else {
+        point("curvature.nc", "curvature", 0)?[0]
+    };
+    let type_site =
+        from_site("SITE_slp_type") && from_site("SITE_asp_type") && from_site("SITE_area_type");
+    let (slope_type, aspect_type, area_type) = if type_site {
+        (
+            site_values("SITE_slp_type")?,
+            site_values("SITE_asp_type")?,
+            site_values("SITE_area_type")?,
+        )
+    } else {
+        let slope = point("slope.nc", "slope", 0)?[0];
+        let aspect = point("aspect.nc", "aspect", 0)?[0];
+        let steep = slope >= 15.0 * std::f64::consts::PI / 180.0;
+        // 单点版只分南北：不在北坡区间的一律算南坡（含缺测）。
+        let north = (0.0..=90.0 * std::f64::consts::PI / 180.0).contains(&aspect)
+            || (270.0 * std::f64::consts::PI / 180.0..=360.0 * std::f64::consts::PI / 180.0)
+                .contains(&aspect);
+        let kind = match (north, steep) {
+            (true, true) => 0,
+            (true, false) => 1,
+            (false, true) => 2,
+            (false, false) => 3,
+        };
+        let mut slopes = vec![0.0; SLOPE_TYPES];
+        let mut aspects = vec![0.0; SLOPE_TYPES];
+        let mut areas = vec![0.0; SLOPE_TYPES];
+        slopes[kind] = slope;
+        aspects[kind] = aspect;
+        areas[kind] = 1.0;
+        (slopes, aspects, areas)
+    };
+    let lut_site = from_site("SITE_sf_lut");
+    // 盘上 `(zen, azi)`。
+    let lut = if lut_site {
+        site_values("SITE_sf_lut")?
+    } else {
+        let front = point("terrain_elev_angle_front.nc", "tea_front", AZIMUTHS)?;
+        let back = point("terrain_elev_angle_back.nc", "tea_back", AZIMUTHS)?;
+        let mut lut = vec![0.0; ZENITHS * AZIMUTHS];
+        for azimuth in 0..AZIMUTHS {
+            let mut front = front[azimuth].clamp(-1.0, 1.0).asin();
+            let back = back[azimuth].clamp(-1.0, 1.0).asin();
+            if front <= back {
+                front = back + 0.001;
+            }
+            for zenith in 0..ZENITHS {
+                // `pi*0.5 - pi/(2*num_zenith)*(z-1)`：标量循环里 gfortran 把它收缩成
+                // `FNMA(pi/202, z-1, pi/2)`（与上游 sf_lut 逐位对过，未融合的写法 69/1616 处差 1 ULP），
+                // 三处 `0.5*pi - zenith_angle` 共用这一个值。
+                let altitude = (-(std::f64::consts::PI / (2.0 * ZENITHS as f64)))
+                    .mul_add(zenith as f64, std::f64::consts::PI * 0.5);
+                lut[zenith * AZIMUTHS + azimuth] = if altitude < back {
+                    0.0
+                } else if altitude > front {
+                    1.0
+                } else {
+                    (altitude - back) / (front - back)
+                };
+            }
+        }
+        lut
+    };
+    ensure!(
+        slope_type.len() == SLOPE_TYPES
+            && aspect_type.len() == SLOPE_TYPES
+            && area_type.len() == SLOPE_TYPES
+            && lut.len() == ZENITHS * AZIMUTHS,
+        "single-point topography factors have the wrong shape"
+    );
+
+    let _netcdf_guard = netcdf_write_lock().lock().unwrap();
+    let mut file =
+        netcdf::append(surface).with_context(|| format!("cannot append {}", surface.display()))?;
+    file.redef()?;
+    for (name, length) in [("slope_type", SLOPE_TYPES), ("azi", AZIMUTHS), ("zen", ZENITHS)] {
+        if file.dimension(name).is_none() {
+            file.add_dimension(name, length)?;
+        }
+    }
+    let fields: [(&str, &[&str], &[f64], bool, &str); 6] = [
+        ("SITE_svf", &[], &[svf], svf_site, "sky view factor"),
+        ("SITE_cur", &[], &[cur], cur_site, "curvature"),
+        (
+            "SITE_sf_lut",
+            &["zen", "azi"],
+            &lut,
+            lut_site,
+            "look up table of shadow factor",
+        ),
+        (
+            "SITE_slp_type",
+            &["slope_type"],
+            &slope_type,
+            type_site,
+            "topographic slope of each character",
+        ),
+        (
+            "SITE_asp_type",
+            &["slope_type"],
+            &aspect_type,
+            type_site,
+            "topographic aspect of each character",
+        ),
+        (
+            "SITE_area_type",
+            &["slope_type"],
+            &area_type,
+            type_site,
+            "area percentage of each character",
+        ),
+    ];
+    for (name, dimensions, _, from_site, long_name) in &fields {
+        let mut variable = file.add_variable::<f64>(name, dimensions)?;
+        variable.put_attribute("source", source(*from_site))?;
+        variable.put_attribute("long_name", *long_name)?;
+    }
+    file.enddef()?;
+    for (name, dimensions, values, _, _) in &fields {
+        let mut variable = file.variable_mut(name).expect("new topography variable");
+        if dimensions.is_empty() {
+            variable.put_value(values[0], ())?;
+        } else {
+            variable.put_values(values, ..)?;
+        }
+    }
+    file.close()
+        .with_context(|| format!("cannot close single-point surface {}", surface.display()))
+}
+
+/// `normalize_longitude`。
+fn normalize_site_longitude(lon: f64) -> f64 {
+    if (-180.0..180.0).contains(&lon) {
+        lon
+    } else {
+        let mut value = lon.rem_euclid(360.0);
+        if value >= 180.0 {
+            value -= 360.0;
+        }
+        value
+    }
+}
+
+/// `find_nearest_south`（0 起）。
+fn site_find_nearest_south(y: f64, lat: &[f64]) -> usize {
+    let n = lat.len();
+    let ascending = lat[0] < lat[n - 1];
+    if ascending {
+        if y <= lat[0] {
+            return 0;
+        }
+        if y >= lat[n - 1] {
+            return n - 1;
+        }
+    } else {
+        if y >= lat[0] {
+            return 0;
+        }
+        if y <= lat[n - 1] {
+            return n - 1;
+        }
+    }
+    let (mut left, mut right) = (0, n - 1);
+    while right - left > 1 {
+        let i = (right + left) / 2;
+        if (y >= lat[i]) == ascending {
+            left = i;
+        } else {
+            right = i;
+        }
+    }
+    if ascending {
+        left
+    } else {
+        right
+    }
+}
+
+/// `find_nearest_west`（0 起）。
+fn site_find_nearest_west(x: f64, lon: &[f64]) -> usize {
+    let between = |lon: f64, west: f64, east: f64| {
+        if west >= east {
+            lon >= west || lon < east
+        } else {
+            lon >= west && lon < east
+        }
+    };
+    let n = lon.len();
+    if n == 1 {
+        return 0;
+    }
+    if between(x, lon[n - 1], lon[0]) {
+        return n - 1;
+    }
+    let (mut left, mut right) = (0, n - 1);
+    while right - left > 1 {
+        let i = (right + left) / 2;
+        if between(x, lon[i], lon[right]) {
+            left = i;
+        } else {
+            right = i;
+        }
+    }
+    left
+}
+
 fn materialize_single_point_surface_impl(
     source: &Path,
     landdata_dir: &Path,

@@ -787,34 +787,35 @@ impl FlatPatches {
                         value;
                 }
             }
+            // `sum(area_one, mask = area_one > 0)`：普通加法。
             let total_area = self
                 .raw_cells(patch)
                 .iter()
                 .map(|&cell| landarea[cell])
                 .filter(|area| *area > 0.0)
-                .sum::<f64>();
+                .fold(0.0, |sum, area| sum + area);
             if total_area == 0.0 {
                 continue;
             }
+            // 上游先逐像元存 `area`、`asp*area`、`slp*area`，再按坡型普通相加，最后除一次总面积。
+            let mut sums = [[0.0_f64; 3]; REGULAR_SLOPE_TYPES];
             for &cell in self.raw_cells(patch) {
                 let slope = value(slope, cell, "slope", patch)?;
                 let aspect = value(aspect, cell, "aspect", patch)?;
-                ensure!(
-                    (slope.is_finite() && aspect.is_finite())
-                        || (slope == -9999.0 && aspect == -9999.0),
-                    "regular topography patch {patch} contains a non-finite slope or aspect"
-                );
-                let kind = regular_slope_type(slope, aspect);
-                let Some(kind) = kind else {
+                let Some(kind) = regular_slope_type(slope, aspect) else {
                     continue;
                 };
                 let area = landarea[cell];
-                if area == 0.0 || area > total_area {
-                    continue;
+                if area > 0.0 && area <= total_area {
+                    sums[kind][0] += area;
+                    sums[kind][1] += aspect * area;
+                    sums[kind][2] += slope * area;
                 }
-                output.area_type[kind * patches + patch] += area / total_area;
-                output.aspect_type[kind * patches + patch] += aspect * area / total_area;
-                output.slope_type[kind * patches + patch] += slope * area / total_area;
+            }
+            for (kind, [area, aspect, slope]) in sums.into_iter().enumerate() {
+                output.area_type[kind * patches + patch] = area / total_area;
+                output.aspect_type[kind * patches + patch] = aspect / total_area;
+                output.slope_type[kind * patches + patch] = slope / total_area;
             }
         }
         Ok(output)
@@ -1187,19 +1188,24 @@ fn value(source: &[f64], cell: usize, name: &str, patch: usize) -> Result<f64> {
     })
 }
 
+/// `zenith_angle(i) = pi/(2*num_zenith)*(i-1)`：常量 `pi/202` 折叠后再乘（GIMPLE）。
+fn regular_zenith_angle(zenith: usize) -> f64 {
+    zenith as f64 * (std::f64::consts::PI / (2.0 * REGULAR_ZENITHS as f64))
+}
+
+/// `sf_lut_patches(a, z)`：`NaN` 的源格算作不遮挡（`sf = 1`、计入和但不计入个数），
+/// 其余夹到 `[-1, 1]` 取 `asin`。和是普通加法；个数为 0 时照上游除以 0。
 fn regular_shadow_lut(
     cells: &[usize],
     front: &[f64],
     back: &[f64],
     raw_cells: usize,
-    patch: usize,
+    _patch: usize,
 ) -> Result<Vec<f64>> {
     let mut output = vec![0.0; REGULAR_AZIMUTHS * REGULAR_ZENITHS];
     for azimuth in 0..REGULAR_AZIMUTHS {
         for zenith in 0..REGULAR_ZENITHS {
-            let zenith_angle =
-                std::f64::consts::PI * zenith as f64 / (2.0 * REGULAR_ZENITHS as f64);
-            let sun_altitude = std::f64::consts::FRAC_PI_2 - zenith_angle;
+            let sun_altitude = std::f64::consts::PI * 0.5 - regular_zenith_angle(zenith);
             let mut sum = 0.0;
             let mut valid = 0_usize;
             for &cell in cells {
@@ -1209,10 +1215,6 @@ fn regular_shadow_lut(
                     sum += 1.0;
                     continue;
                 }
-                ensure!(
-                    front.is_finite() && back.is_finite(),
-                    "regular topography patch {patch} has an infinite terrain angle"
-                );
                 let mut front = front.clamp(-1.0, 1.0).asin();
                 let back = back.clamp(-1.0, 1.0).asin();
                 valid += 1;
@@ -1222,16 +1224,12 @@ fn regular_shadow_lut(
                     1.0
                 } else {
                     if front == back {
-                        front += 0.001;
+                        front = back + 0.001;
                     }
                     (sun_altitude - back) / (front - back)
                 };
                 sum += shadow;
             }
-            ensure!(
-                valid > 0,
-                "regular topography patch {patch} has no finite terrain-angle samples"
-            );
             output[azimuth * REGULAR_ZENITHS + zenith] = sum / valid as f64;
         }
     }
@@ -1246,52 +1244,56 @@ fn regular_shadow_curve(lut: &[f64]) -> [f64; REGULAR_CURVE_PARAMETERS] {
             index = zenith + 1;
         }
     }
-    let x = (index..REGULAR_ZENITHS)
-        .map(|zenith| std::f64::consts::PI * zenith as f64 / (2.0 * REGULAR_ZENITHS as f64))
-        .collect::<Vec<_>>();
-    let y = lut[index..]
-        .iter()
-        .map(|value| (-value.clamp(0.001, 0.999).ln()).ln())
-        .collect::<Vec<_>>();
-    let count = x.len() as f64;
-    let x_sum = x.iter().sum::<f64>();
-    let y_sum = y.iter().sum::<f64>();
-    let x2_sum = x.iter().map(|value| value * value).sum::<f64>();
-    let xy_sum = x.iter().zip(&y).map(|(x, y)| x * y).sum::<f64>();
-    let denominator = count * x2_sum - x_sum * x_sum;
+    let count = (REGULAR_ZENITHS - index) as f64;
+    // GIMPLE：`xy_sum`、`x2_sum` 是 `.FMA` 累加，`x_sum`、`y_sum` 是普通加法，同一个循环里。
+    let (mut x_sum, mut y_sum, mut x2_sum, mut xy_sum) = (0.0_f64, 0.0_f64, 0.0_f64, 0.0_f64);
+    for (zenith, &value) in lut.iter().enumerate().skip(index) {
+        let x = regular_zenith_angle(zenith);
+        let y = if value <= 0.0 {
+            0.001
+        } else if value >= 1.0 {
+            0.999
+        } else {
+            value
+        };
+        let y = (-y.ln()).ln();
+        xy_sum = x.mul_add(y, xy_sum);
+        x_sum += x;
+        y_sum += y;
+        x2_sum = x.mul_add(x, x2_sum);
+    }
+    // `n*x2_sum - x_sum*x_sum` 是 `.FMS (n, x2_sum, x_sum*x_sum)`；`a2` 的分子是 `.FNMA (x_sum, a1, y_sum)`。
+    let denominator = count.mul_add(x2_sum, -(x_sum * x_sum));
     let (a1, a2) = if denominator == 0.0 {
         (0.0, 0.0)
     } else {
-        let a1 = (count * xy_sum - x_sum * y_sum) / denominator;
-        (a1, (y_sum - a1 * x_sum) / count)
+        let a1 = count.mul_add(xy_sum, -(x_sum * y_sum)) / denominator;
+        (a1, (-x_sum).mul_add(a1, y_sum) / count)
     };
-    [
-        std::f64::consts::PI * (index - 1) as f64 / (2.0 * REGULAR_ZENITHS as f64),
-        a1,
-        a2,
-    ]
+    [regular_zenith_angle(index - 1), a1, a2]
 }
 
+/// 上游的四个分支逐条照抄：坡度为 `NaN` 时四支都不进（`CYCLE`），坡度缺测 `-9999` 而坡向有效时算缓坡。
 fn regular_slope_type(slope: f64, aspect: f64) -> Option<usize> {
+    const STEEP: f64 = 15.0 * std::f64::consts::PI / 180.0;
     let north = (0.0..=std::f64::consts::FRAC_PI_2).contains(&aspect)
         || (3.0 * std::f64::consts::FRAC_PI_2..=std::f64::consts::TAU).contains(&aspect);
-    if north {
-        Some(if slope >= std::f64::consts::PI / 12.0 {
-            0
-        } else {
-            1
-        })
-    } else if (std::f64::consts::FRAC_PI_2..3.0 * std::f64::consts::FRAC_PI_2).contains(&aspect) {
-        Some(if slope >= std::f64::consts::PI / 12.0 {
-            2
-        } else {
-            3
-        })
+    let south = aspect > std::f64::consts::FRAC_PI_2 && aspect < 3.0 * std::f64::consts::FRAC_PI_2;
+    if north && slope >= STEEP {
+        Some(0)
+    } else if north && slope < STEEP {
+        Some(1)
+    } else if south && slope >= STEEP {
+        Some(2)
+    } else if south && slope < STEEP {
+        Some(3)
     } else {
         None
     }
 }
 
+/// `sum(v*area, mask = v /= -9999)/sum(area, mask = v /= -9999)`（两个 `Aggregation_TopographyFactors*`）：
+/// GIMPLE 里分子是 `.FMA` 累加、分母普通加法；`any(v /= -9999)` 为假时是 `-1e36`。
 fn weighted_not_missing(
     cells: &[usize],
     source: &[f64],
@@ -1301,6 +1303,7 @@ fn weighted_not_missing(
     name: &str,
 ) -> Result<f64> {
     let raw_cells = landarea.len();
+    let mut any = false;
     let mut area_sum = 0.0;
     let mut value_sum = 0.0;
     for &cell in cells {
@@ -1318,10 +1321,11 @@ fn weighted_not_missing(
             "{name} patch {patch} contains a non-finite value"
         );
         let area = landarea[cell];
+        any = true;
         area_sum += area;
-        value_sum += value * area;
+        value_sum = value.mul_add(area, value_sum);
     }
-    Ok(if area_sum > 0.0 {
+    Ok(if any {
         value_sum / area_sum
     } else {
         SURFACE_MISSING

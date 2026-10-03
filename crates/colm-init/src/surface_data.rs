@@ -33,6 +33,19 @@ pub struct SinglePointSurfaceData {
     pub canopy_structure_m: Option<[f64; 3]>,
     /// The first eight CoLM soil layers, from top to bottom.
     pub soil_layers: Vec<SoilLayerInput>,
+    /// `DEF_USE_Forcing_Downscaling` 的站点地形因子（`SITE_svf/cur/sf_lut/slp_type/asp_type/area_type`）。
+    pub terrain: Option<SinglePointTerrain>,
+}
+
+/// 单点地形因子：四坡型的坡度、坡向与面积分数，`shadow_lookup` 是盘上 `(zen, azi)` 次序的 101×16 阴影表。
+#[derive(Debug, Clone, PartialEq)]
+pub struct SinglePointTerrain {
+    pub sky_view_factor: f64,
+    pub curvature: f64,
+    pub slope_type: Vec<f64>,
+    pub aspect_type: Vec<f64>,
+    pub area_type: Vec<f64>,
+    pub shadow_lookup: Vec<f64>,
 }
 
 /// Site monthly vegetation records stored alongside single-point surface data.
@@ -571,6 +584,25 @@ fn single_point_surface_from_file(
             _ => None,
         },
         soil_layers: source.into_layers(),
+        terrain: match optional_scalar(file, "SITE_svf")? {
+            Some(sky_view_factor) => {
+                let values = |name: &str| -> Result<Vec<f64>> {
+                    Ok(file
+                        .variable(name)
+                        .with_context(|| format!("srfdata.nc has SITE_svf but no {name}"))?
+                        .get_values::<f64, _>(..)?)
+                };
+                Some(SinglePointTerrain {
+                    sky_view_factor,
+                    curvature: scalar(file, "SITE_cur")?,
+                    slope_type: values("SITE_slp_type")?,
+                    aspect_type: values("SITE_asp_type")?,
+                    area_type: values("SITE_area_type")?,
+                    shadow_lookup: values("SITE_sf_lut")?,
+                })
+            }
+            None => None,
+        },
     })
 }
 

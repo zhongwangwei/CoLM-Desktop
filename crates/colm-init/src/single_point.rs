@@ -69,6 +69,8 @@ pub struct SinglePointStaticConfig<'a> {
     pub hydraulic_model: HydraulicModel,
     pub tuning: RestartTuning,
     pub use_bedrock: bool,
+    /// `DEF_USE_Forcing_Downscaling`：把 srfdata 的站点地形因子写进常数重启。
+    pub use_regular_terrain: bool,
     /// Include the BGC lake sediment carbon common constant.
     pub use_bgc: bool,
     pub use_topmodel: bool,
@@ -100,6 +102,7 @@ impl<'a> SinglePointStaticConfig<'a> {
             hydraulic_model,
             tuning: RestartTuning::default(),
             use_bedrock: false,
+            use_regular_terrain: false,
             use_bgc: false,
             use_topmodel: false,
             use_soil_texture: true,
@@ -147,6 +150,8 @@ pub struct SinglePointStaticRun {
     pub land_cover: LandCoverScheme,
     pub hydraulic_model: HydraulicModel,
     pub use_bedrock: bool,
+    /// `DEF_USE_Forcing_Downscaling`：常数重启写站点地形因子。
+    pub use_regular_terrain: bool,
     pub tuning: RestartTuning,
     pub runoff_scheme: i32,
     pub topmodel_method: i32,
@@ -261,6 +266,7 @@ impl SinglePointStaticRun {
         );
         config.compression_level = self.compression_level;
         config.use_bedrock = self.use_bedrock;
+        config.use_regular_terrain = self.use_regular_terrain;
         config.use_bgc = self.use_bgc;
         config.tuning = self.tuning;
         config.use_topmodel = self.runoff_scheme == 0;
@@ -345,6 +351,7 @@ pub fn single_point_static_run_from_namelist(
         land_cover,
         hydraulic_model,
         use_bedrock,
+        use_regular_terrain: optional_bool_or(&document, "DEF_USE_Forcing_Downscaling", false)?,
         tuning: RestartTuning::from_document(&document)?,
         runoff_scheme: optional_i32(&document, "DEF_Runoff_SCHEME")?.unwrap_or(3),
         topmodel_method: optional_i32(&document, "DEF_TOPMOD_method")?.unwrap_or(0),
@@ -510,6 +517,10 @@ pub fn write_single_point_urban_constant_restart(
     urban_config: UrbanConfig,
     lucy_enabled: bool,
 ) -> Result<PathBuf> {
+    ensure!(
+        !config.use_regular_terrain,
+        "forcing downscaling on an urban single point is not ported to the Rust mkinidata yet"
+    );
     let initialized = prepare_single_point_urban(
         surface,
         config.land_cover,
@@ -974,6 +985,39 @@ fn write_single_point_constant_restart_from_surface(
         .use_topmodel
         .then(|| single_point_topmodel(config.topmodel_method, patches))
         .transpose()?;
+    // `MOD_Initialize.F90:480-487`：`svf/cur` 整列赋值，坡型与阴影表只赋给第 1 个 patch。
+    let terrain = if config.use_regular_terrain {
+        let site = surface
+            .terrain
+            .as_ref()
+            .context("DEF_USE_Forcing_Downscaling requires SITE_svf/SITE_sf_lut in srfdata.nc")?;
+        ensure!(
+            patches == 1,
+            "single-point forcing downscaling with {patches} patches leaves patches 2.. without \
+             terrain factors upstream (MOD_Initialize only fills patch 1)"
+        );
+        const AZIMUTHS: usize = 16;
+        const ZENITHS: usize = 101;
+        ensure!(
+            site.shadow_lookup.len() == AZIMUTHS * ZENITHS && site.slope_type.len() == 4,
+            "srfdata.nc site terrain factors have the wrong shape"
+        );
+        Some(SinglePointTerrainColumns {
+            sky_view_factor: vec![site.sky_view_factor],
+            curvature: vec![site.curvature],
+            slope_type: site.slope_type.clone(),
+            aspect_type: site.aspect_type.clone(),
+            area_type: site.area_type.clone(),
+            // 盘上 `(zen, azi)` → 写重启要的 `(azi, zen)` 方位为主序。
+            shadow_lookup: (0..AZIMUTHS)
+                .flat_map(|azimuth| {
+                    (0..ZENITHS).map(move |zenith| site.shadow_lookup[zenith * AZIMUTHS + azimuth])
+                })
+                .collect(),
+        })
+    } else {
+        None
+    };
     let vic = single_point_vic_parameters(config.vic_parameters, surface, patches)?;
     // `MOD_HtopReadin.F90:54-58`：方案 8 的单点直接用站点值 `ncd = SITE_ncd` 等。
     let canopy_structure = surface
@@ -1044,11 +1088,30 @@ fn write_single_point_constant_restart_from_surface(
                 chi_twi: &fields.chi_twi,
                 mu_twi: &fields.mu_twi,
             }),
-            terrain: None,
+            terrain: terrain.as_ref().map(|terrain| crate::TerrainFields {
+                sky_view_factor: &terrain.sky_view_factor,
+                curvature: &terrain.curvature,
+                slope_type: &terrain.slope_type,
+                aspect_type: &terrain.aspect_type,
+                area_type: &terrain.area_type,
+                radiation: crate::TerrainRadiation::LookupTable {
+                    values: &terrain.shadow_lookup,
+                },
+            }),
             simple_terrain: None,
             hyperspectral_albedo: hyperspectral_albedo.as_deref(),
         },
     )
+}
+
+/// 单 patch 的地形因子列（布局与 [`TerrainFields`] 一致）。
+struct SinglePointTerrainColumns {
+    sky_view_factor: Vec<f64>,
+    curvature: Vec<f64>,
+    slope_type: Vec<f64>,
+    aspect_type: Vec<f64>,
+    area_type: Vec<f64>,
+    shadow_lookup: Vec<f64>,
 }
 
 fn single_point_topmodel(method: i32, patches: usize) -> Result<TopmodelSurfaceFields> {

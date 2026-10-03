@@ -344,7 +344,20 @@ fn run() -> Result<()> {
             ..config
         }
     };
+    let downscaling =
+        match colm_runtime::spatial::downscaling::DownscalingSettings::from_case(&document)? {
+            Some(settings) => Some(point_downscaling(
+                settings,
+                &files.constant,
+                &patches,
+                config.temperature_height_m,
+            )?),
+            None => None,
+        };
     let mut runtime = PointRuntime::open(config)?;
+    if let Some(downscaling) = downscaling {
+        runtime = runtime.with_downscaling(downscaling);
+    }
     if let Some(optimizer) = baseflow_optimizer {
         runtime = runtime.with_baseflow_optimizer(optimizer);
     }
@@ -370,6 +383,42 @@ fn run() -> Result<()> {
     }
     println!("{SUCCESS_MARKER}");
     Ok(())
+}
+
+/// 单点降尺度：从常数重启读本站点 patch 的 `elvmean` 与地形因子（`sf_lut_patches`）。
+fn point_downscaling(
+    settings: colm_runtime::spatial::downscaling::DownscalingSettings,
+    constant_path: &Path,
+    patches: &[usize],
+    reference_height_m: f64,
+) -> Result<colm_runtime::spatial::downscaling::PointDownscaling> {
+    let constant = colm_init::RestartFile::open(constant_path)?;
+    let count = constant.dimension("patch")?;
+    let patch_types = constant
+        .integers("patchtype")?
+        .iter()
+        .map(|&kind| i32::try_from(kind))
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let mask = if constant.contains("patchmask") {
+        constant
+            .integers("patchmask")?
+            .iter()
+            .map(|&mask| mask != 0)
+            .collect()
+    } else {
+        vec![true; count]
+    };
+    let all = colm_runtime::spatial::downscaling::read_block_patches(
+        &constant,
+        settings.simple,
+        &patch_types,
+        &mask,
+    )?;
+    colm_runtime::spatial::downscaling::PointDownscaling::new(
+        settings,
+        patches.iter().map(|&patch| all[patch].clone()).collect(),
+        reference_height_m,
+    )
 }
 
 /// 空间算例（`GRIDBASED`）：patch 拓扑来自 `landdata`，强迫是网格强迫经面积加权映射到每个 patch。
@@ -681,6 +730,7 @@ fn run_spatial_segment(
     let mut templates = Vec::with_capacity(patch_count);
     let mut coordinates = Vec::with_capacity(patch_count);
     let mut patch_mask = Vec::with_capacity(patch_count);
+    let mut downscaling_patches = Vec::new();
     for ((block, patches), files) in topology.blocks.iter().zip(&block_files) {
         // `DEF_USE_PFT`：土壤 patch 的 PFT 区间来自本块的 `landpft`。
         let pft_ranges = if physics.use_pft {
@@ -759,6 +809,20 @@ fn run_spatial_segment(
             );
         } else {
             patch_mask.extend(std::iter::repeat_n(true, patches.len()));
+        }
+        // 强迫降尺度的地形因子与 `elvmean`（`MOD_Vars_TimeInvariants` 写在常数重启里）。
+        if let Some(settings) = config.downscaling {
+            let first = templates.len() - patches.len();
+            let patch_types = templates[first..]
+                .iter()
+                .map(|template| template.patch_type)
+                .collect::<Vec<_>>();
+            downscaling_patches.extend(colm_runtime::spatial::downscaling::read_block_patches(
+                &constant,
+                settings.simple,
+                &patch_types,
+                &patch_mask[first..],
+            )?);
         }
     }
     methane_wetland_fractions(&mut templates, &topology);
@@ -893,6 +957,9 @@ fn run_spatial_segment(
         config.co2_scenario,
         forcing_mask.clone(),
     )?;
+    if let Some(settings) = config.downscaling {
+        runtime = runtime.with_downscaling(settings, downscaling_patches)?;
+    }
     runtime.apply_mapped_heights(&mut templates)?;
     if let (Some(tracer), Some(forcing_config)) = (tracer_runtime.as_ref(), tracer_forcing_config) {
         if forcing_config.enabled() {

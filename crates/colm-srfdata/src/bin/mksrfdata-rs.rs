@@ -18,9 +18,9 @@ use colm_srfdata::{
     aggregate_pft_canopy_structure, aggregate_pft_fractions, aggregate_pft_height,
     aggregate_pft_index, aggregate_urban_region_ids, aggregate_urban_tree_index,
     build_catchment_lct_land_patches_from_raster, build_catchment_pft_land_patches_from_raster,
-    build_catchment_spatial_topology_with_filter_and_raw_grids, build_coordinate_patch_selection,
-    build_crop_land_patches, build_crop_pft_topology, build_lct_land_patches_from_raster,
-    build_methane_ph_patch_selection, build_pft_land_patches_from_raster, build_pft_topology,
+    build_catchment_spatial_topology_with_filter_and_raw_grids, build_crop_land_patches,
+    build_crop_pft_topology, build_lct_land_patches_from_raster, build_methane_ph_patch_selection,
+    build_pft_land_patches_from_raster, build_pft_topology,
     build_spatial_topology_with_filter_grid_and_raw_grids, clip_existing_surface,
     crop_pft_pctshared, gather_patch_raster, map_patch_diagnostic,
     materialize_single_point_surface, materialize_single_point_surface_from_namelist_with_subgrid,
@@ -261,6 +261,16 @@ fn materialize_spatial_pft(args: &[String]) -> Result<()> {
         println!("DEF_Output_2mWMO is disabled outside GRIDBASED, matching upstream");
         args.output_2m_wmo = false;
     }
+    // `DEF_USE_Forcing_Downscaling`：`grid_topo_factor%define_from_file(slope.nc)` 并入像元
+    // （`MKSRFDATA.F90:267-309`），之后所有聚合都在这套更细的像元上做。
+    let topography_grid = args
+        .regular_topography_factors
+        .as_ref()
+        .map(|directory| {
+            colm_srfdata::coordinate_grid_from_file(directory.join("slope.nc"), "slope")
+        })
+        .transpose()?;
+    let coordinate_grids = topography_grid.as_slice();
     let mesh_filter = optional_mesh_filter(args.mesh_filter.as_deref())?;
     let (mut topology, mut base_patches, land_hrus) = match args.kind {
         SpatialInputKind::Catchment => {
@@ -274,6 +284,7 @@ fn materialize_spatial_pft(args: &[String]) -> Result<()> {
                 mesh_filter.as_ref(),
                 Some(&args.blocks),
                 &catchment_extra_grids,
+                coordinate_grids,
             )?;
             let (catchment, patches) = build_catchment_pft_land_patches_from_raster(
                 catchment,
@@ -293,6 +304,7 @@ fn materialize_spatial_pft(args: &[String]) -> Result<()> {
                 args.bounds,
                 mesh_filter.as_ref().map(|filter| &filter.grid),
                 &[],
+                coordinate_grids,
                 Some(&args.blocks),
             )?;
             topology.preserve_element_blocks(&args.blocks)?;
@@ -1012,6 +1024,16 @@ fn materialize_spatial_lct(args: &[String]) -> Result<()> {
     } else {
         &[][..]
     };
+    // `DEF_USE_Forcing_Downscaling`：`grid_topo_factor%define_from_file(slope.nc)` 并入像元
+    // （`MKSRFDATA.F90:267-309`），之后所有聚合都在这套更细的像元上做。
+    let topography_grid = args
+        .regular_topography_factors
+        .as_ref()
+        .map(|directory| {
+            colm_srfdata::coordinate_grid_from_file(directory.join("slope.nc"), "slope")
+        })
+        .transpose()?;
+    let coordinate_grids = topography_grid.as_slice();
     let (mut topology, mut patches, land_hrus) = match args.kind {
         SpatialInputKind::Catchment => {
             let catchment = build_catchment_spatial_topology_with_filter_and_raw_grids(
@@ -1021,6 +1043,7 @@ fn materialize_spatial_lct(args: &[String]) -> Result<()> {
                 mesh_filter.as_ref(),
                 Some(&args.blocks),
                 &catchment_extra_grids,
+                coordinate_grids,
             )?;
             let (catchment, patches) = build_catchment_lct_land_patches_from_raster(
                 catchment,
@@ -1040,6 +1063,7 @@ fn materialize_spatial_lct(args: &[String]) -> Result<()> {
                 args.bounds,
                 mesh_filter.as_ref().map(|filter| &filter.grid),
                 urban_extra_grids,
+                coordinate_grids,
                 Some(&args.blocks),
             )?;
             topology.preserve_element_blocks(&args.blocks)?;
@@ -2316,7 +2340,14 @@ fn materialize_regular_topography_factors(
     const SLOPE_TYPES: usize = 4;
     const CURVE_PARAMETERS: usize = 3;
     let slope = directory.join("slope.nc");
-    let selection = build_coordinate_patch_selection(&slope, "slope", topology, patches)?;
+    // 上游逐像元取样（`aggregation_request_data`，地形因子网格已并入像元），不是按源格心归属 patch。
+    let selection = colm_srfdata::build_pixel_coordinate_patch_selection(
+        &slope,
+        "slope",
+        topology,
+        patches,
+        args.zip_aggregation,
+    )?;
     let factors = selection.layout().aggregate_regular_topography_factors(
         &read_coordinate_patch_selection_f64(&slope, "slope", &selection)?,
         &read_coordinate_patch_selection_f64(&directory.join("aspect.nc"), "aspect", &selection)?,
@@ -4524,6 +4555,26 @@ fn materialize_case(args: &[String]) -> Result<()> {
             run.srfdata_compression,
         )?;
     }
+    {
+        let text = std::fs::read_to_string(&namelist)
+            .with_context(|| format!("cannot read case namelist {}", namelist.display()))?;
+        let document = parse(&text)
+            .with_context(|| format!("cannot parse case namelist {}", namelist.display()))?;
+        // 上游单点只为完整方案准备地形因子；简单方案在单点下没有任何输入，运行期读重启会失败。
+        ensure!(
+            !case_bool(&document, "DEF_USE_Forcing_Downscaling_Simple", false)?,
+            "DEF_USE_Forcing_Downscaling_Simple has no single-point surface data upstream \
+             (MOD_SingleSrfdata prepares only the regular downscaling factors)"
+        );
+        if case_bool(&document, "DEF_USE_Forcing_Downscaling", false)? {
+            colm_srfdata::append_single_point_topography_factors(
+                &run.landdata_dir.join("srfdata.nc"),
+                Path::new(&case_string(&document, "SITE_fsitedata")?),
+                Path::new(&case_string(&document, "DEF_DS_HiresTopographyDataDir")?),
+                case_bool(&document, "USE_SITE_topography", true)?,
+            )?;
+        }
+    }
     print_result(report, &run.landdata_dir);
     Ok(())
 }
@@ -6494,6 +6545,7 @@ mod tests {
             None,
             None,
             &[COLM_500M, COLM_5KM],
+            &[],
             None,
         )
         .unwrap();
@@ -6549,6 +6601,7 @@ mod tests {
             }),
             None,
             &[COLM_500M, COLM_5KM],
+            &[],
             None,
         )
         .unwrap();
@@ -6745,6 +6798,7 @@ mod tests {
             COLM_500M,
             None,
             None,
+            &[],
             &[],
             None,
         )

@@ -3224,15 +3224,15 @@ ENDIF
          CALL ncio_put_attr     (fsrfdata, 'SITE_sf_lut','source', trim(datasource(u_site_sf_lut)))
          CALL ncio_put_attr     (fsrfdata, 'SITE_sf_lut','long_name', 'look up table of shadow factor')
 
-         CALL ncio_write_serial (fsrfdata, 'SITE_slp_type' , SITE_slp_type , 'type')
+         CALL ncio_write_serial (fsrfdata, 'SITE_slp_type' , SITE_slp_type , 'slope_type')
          CALL ncio_put_attr     (fsrfdata, 'SITE_slp_type','source', trim(datasource(u_site_slp_type)))
          CALL ncio_put_attr     (fsrfdata, 'SITE_slp_type','long_name', 'topographic slope of each character')
 
-         CALL ncio_write_serial (fsrfdata, 'SITE_asp_type' , SITE_asp_type , 'type')
+         CALL ncio_write_serial (fsrfdata, 'SITE_asp_type' , SITE_asp_type , 'slope_type')
          CALL ncio_put_attr     (fsrfdata, 'SITE_asp_type','source', trim(datasource(u_site_asp_type)))
          CALL ncio_put_attr     (fsrfdata, 'SITE_asp_type','long_name', 'topographic aspect of each character')
 
-         CALL ncio_write_serial (fsrfdata, 'SITE_area_type', SITE_area_type, 'type')
+         CALL ncio_write_serial (fsrfdata, 'SITE_area_type', SITE_area_type, 'slope_type')
          CALL ncio_put_attr     (fsrfdata, 'SITE_area_type','source', trim(datasource(u_site_area_type)))
          CALL ncio_put_attr     (fsrfdata, 'SITE_area_type','long_name', 'area percentage of each character')
       ENDIF
@@ -3525,15 +3525,15 @@ ENDIF
          CALL ncio_put_attr     (fsrfdata, 'SITE_sf_lut','source', trim(datasource(u_site_sf_lut)))
          CALL ncio_put_attr     (fsrfdata, 'SITE_sf_lut','long_name', 'look up table of shadow factor')
 
-         CALL ncio_write_serial (fsrfdata, 'SITE_slp_type' , SITE_slp_type , 'type')
+         CALL ncio_write_serial (fsrfdata, 'SITE_slp_type' , SITE_slp_type , 'slope_type')
          CALL ncio_put_attr     (fsrfdata, 'SITE_slp_type','source', trim(datasource(u_site_slp_type)))
          CALL ncio_put_attr     (fsrfdata, 'SITE_slp_type','long_name', 'topographic slope of each character')
 
-         CALL ncio_write_serial (fsrfdata, 'SITE_asp_type' , SITE_asp_type , 'type')
+         CALL ncio_write_serial (fsrfdata, 'SITE_asp_type' , SITE_asp_type , 'slope_type')
          CALL ncio_put_attr     (fsrfdata, 'SITE_asp_type','source', trim(datasource(u_site_asp_type)))
          CALL ncio_put_attr     (fsrfdata, 'SITE_asp_type','long_name', 'topographic aspect of each character')
 
-         CALL ncio_write_serial (fsrfdata, 'SITE_area_type', SITE_area_type, 'type')
+         CALL ncio_write_serial (fsrfdata, 'SITE_area_type', SITE_area_type, 'slope_type')
          CALL ncio_put_attr     (fsrfdata, 'SITE_area_type','source', trim(datasource(u_site_area_type)))
          CALL ncio_put_attr     (fsrfdata, 'SITE_area_type','long_name', 'area percentage of each character')
       ENDIF

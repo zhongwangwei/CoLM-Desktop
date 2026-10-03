@@ -255,6 +255,8 @@ pub struct PointRuntime {
     co2_scenario: Co2Scenario,
     /// `DEF_Optimize_Baseflow`：打开时由它给出每步的 `scale_baseflow`，并在预热期逐年改写。
     baseflow_optimizer: Option<baseflow_optimizer::BaseflowOptimizer>,
+    /// `DEF_USE_Forcing_Downscaling(_Simple)`：站点强迫按地形降到列上。
+    downscaling: Option<spatial::downscaling::PointDownscaling>,
 }
 
 impl PointRuntime {
@@ -284,6 +286,7 @@ impl PointRuntime {
             )),
             co2_scenario: config.co2_scenario,
             baseflow_optimizer: None,
+            downscaling: None,
         })
     }
 
@@ -296,6 +299,28 @@ impl PointRuntime {
     ) -> Self {
         self.baseflow_optimizer = Some(optimizer);
         self
+    }
+
+    /// 接上站点强迫降尺度（每步用步首的 patch `alb`）。
+    #[must_use]
+    pub fn with_downscaling(mut self, downscaling: spatial::downscaling::PointDownscaling) -> Self {
+        self.downscaling = Some(downscaling);
+        self
+    }
+
+    /// 降尺度打开时把这一步的站点强迫换成列强迫。
+    fn downscaled_step(
+        downscaling: Option<&spatial::downscaling::PointDownscaling>,
+        (greenwich, longitude_degrees): (bool, f64),
+        step: PointRuntimeStep,
+        states: &[StandardLctSnowSoilState],
+    ) -> Result<PointRuntimeStep> {
+        let Some(downscaling) = downscaling else {
+            return Ok(step);
+        };
+        let calendar_day =
+            orbital_calendar_day(step.clock.forcing_time, greenwich, longitude_degrees)?;
+        downscaling.apply(step, states[0].energy.radiation.albedo, calendar_day)
     }
 
     pub fn baseflow_optimizer(&self) -> Option<&baseflow_optimizer::BaseflowOptimizer> {
@@ -514,7 +539,10 @@ impl PointRuntime {
                 .is_none_or(|optimizer| optimizer.patch_count() == templates.len()),
             "the baseflow optimizer needs one entry per patch"
         );
+        let downscaling = self.downscaling.clone();
+        let site = (self.greenwich, self.longitude_degrees);
         let steps = self.run_with_state(states, |step, states| {
+            let step = Self::downscaled_step(downscaling.as_ref(), site, step, states)?;
             let binding = lct_binding(step, greenwich_time, longitude_radians, co2_scenario)?;
             // `CoLMDRIVER` 先推进全部 patch，`hist_out` 再逐 patch 累加（`CoLM.F90:512-537`）。
             let mut outputs = Vec::with_capacity(templates.len());
@@ -665,7 +693,10 @@ impl PointRuntime {
                 .is_none_or(|optimizer| optimizer.patch_count() == templates.len()),
             "the baseflow optimizer needs one entry per patch"
         );
+        let downscaling = self.downscaling.clone();
+        let site = (self.greenwich, self.longitude_degrees);
         let steps = self.run_with_state(states, |step, states| {
+            let step = Self::downscaled_step(downscaling.as_ref(), site, step, states)?;
             let binding = lct_binding(step, greenwich_time, longitude_radians, co2_scenario)?;
             let mut outputs = Vec::with_capacity(templates.len());
             for (index, (template, next)) in templates.iter().zip(states.iter_mut()).enumerate() {

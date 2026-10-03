@@ -225,10 +225,11 @@ pub use crop_phenology::{
 };
 pub use forcing_downscaling::{
     apply_downscaled_runtime_forcing, atmospheric_density, downscale_forcings, downscale_wind,
-    downscale_wind_simple, grid_forcing_from_runtime, DownscaledForcing, DownscalingSolarGeometry,
-    DownscalingTerrain, ForcingDownscalingConfig, ForcingDownscalingInput, FullTerrain,
-    GridForcing, LongwaveDownscaling, PrecipitationDownscaling, ShadowMask, SimpleTerrain,
-    ASPECT_TYPES, AZIMUTH_BINS, SHADOW_CURVE_PARAMETERS, SLOPE_TYPES, ZENITH_BINS,
+    downscale_wind_simple, grid_forcing_from_runtime, potential_temperature_k, DownscaledForcing,
+    DownscalingSolarGeometry, DownscalingTerrain, ForcingDownscalingConfig,
+    ForcingDownscalingInput, FullTerrain, GridForcing, LongwaveDownscaling,
+    PrecipitationDownscaling, ShadowMask, SimpleTerrain, ASPECT_TYPES, AZIMUTH_BINS,
+    SHADOW_CURVE_PARAMETERS, SLOPE_TYPES, ZENITH_BINS,
 };
 pub use glacier::{glacier_water, GlacierSurfaceWater, GlacierWaterInput};
 pub use glacier_step::{

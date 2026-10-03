@@ -29178,3 +29178,61 @@ colm-rs: 21 patch(es) lie entirely on missing forcing cells (forcmask_pch = .fal
 放开 patchtype 3 后不需要别的改动：history 2、restart 5（含月历史旁车）逐位一致。说明冰川被遮蔽时累加的变量集合与其它类型相同。`push_masked` 的检查改为只拒绝未知 patchtype。
 
 回归逐位一致：`g1fmm g1bgcm`。被强迫缺测遮蔽的 patch 与各开关、各 patch 类型的组合至此全部移植完。
+
+## 第 549 轮：强迫降尺度（空间完整/简单方案与单点）
+
+原来空间运行期拒绝 `DEF_USE_Forcing_Downscaling(_Simple)`；单点运行期**不拒绝也不做**——开了降尺度照样按网格强迫跑完，悄悄给出另一套结果。
+
+**运行期移植**（新模块 `colm_runtime::spatial::downscaling`）：
+- 初始化照 `MOD_Forcing.F90:227-276`：
+  - `forc_topo = elvmean`（`spval` 换 0）；
+  - `topo_grid = pset2grid(forc_topo, patchmask) / get_sumarea(patchmask)`，面积不为正处为 `spval`；
+  - `maxelv_grid = pset2grid_max`（不看份面积）；冰川 = `patchtype == 3`。
+- 每步照 `:715-981`：
+  - `grid2pset` 的量照常映射；
+  - 逐 patch 用**步首**的 `alb` 与映射来的四波段短波求 `balb`；
+  - 逐个面积为正的份：截断温度，算格点 `rho`/`th`，调 `downscale_forcings`；
+  - `part2pset` 得到 `t/q/pbot/rhoair/us/vs`，`forc_psrf = forc_pbot`，再做风场降尺度；
+  - 非单点的守恒段：每份降水先换成 patch 平均，再与短波、长波一起按强迫格 `normalize`（份值乘 `格值 / part2grid(份值)`），重新 `part2pset`；
+  - 按降尺度后的总短波、步首天顶角重拆四波段（`isnan` 取 0）。
+- 求和形状（GIMPLE）：
+  - `part2pset`、`part2grid` 都是从 0 起逐份 `.FMA (sdata, areapart, acc)`；
+  - `pset2grid`（2D、无 `spv`）是 `acc + pdata*areapart`，不融合；`get_sumarea` 普通相加；
+  - `balb` 是 `FMA(solld, alb22, FMA(soll, alb21, FMA(sols, alb11, solsd*alb12))) / (((sols+solsd)+soll)+solld)`。
+- 降水方案 III（经 MPI 交给外部 Python）与 I/II 以外的取值照旧拒绝。
+- 单点（`SinglePoint`）映射平凡（每个 set 一份、面积 1），没有守恒段，阴影用查表；单点主循环所有 patch 共用一份强迫，所以多 patch 单点拒绝（上游 mkinidata 也只给第 1 个 patch 填坡型与阴影表）。
+
+**内核里的 `sincos` 合并**：`downscale_wind` 末尾 `ws_c*cos(dir)`、`ws_c*sin(dir)`。
+- gfortran 在 Darwin 上把这对降成 `cexp(0+ix)`，其虚部与 `sin()` 逐位相同；
+- LLVM 在 release 下把同参的 `sin`/`cos` 并成 `__sincos_stret`，其 sin 与 `sin()` 在 1000 万个随机输入里有 87412 个差 1 ULP（cos 全同）。用 C 程序实测过这三者；
+- 第一轮 dsf 只有一个格子的 `f_xy_vs` 差 1 ULP，就是它。内核四处同参对（风向两支、两处坡度角）改用不内联的 `fortran_sin`（pc_radiation 里早就为同一原因用过它）；
+- 之前的差分探针没抓到，是因为探针按 debug 编译，LLVM 不做这种合并。
+
+**mksrfdata（完整方案）的两处结构性偏差**：
+1. **像元集合**。上游开降尺度时把 `slope.nc` 格心定义的网格（`define_by_center`，首尾格绕地球一周）并入像元（`MKSRFDATA.F90:267-309`），之后**所有**聚合都在这套更细的像元上做。Rust 原来没并：黑河 2°×2° 的 `pixel.nc` 纬向 Fortran 2848 行、Rust 480 行，LAI、土壤、植被高度全部跟着差。`assimilated_pixels` 加了 `coordinate_grids` 参数（与 mesh filter 同一套排序去重）。
+2. **样本**。Rust 原来按"源格心落在哪个 patch 像元里"归属、用源格面积，是自创的写法。改成上游的 `aggregation_request_data`：逐像元取所在源格，`zip` 时同一源格的像元面积先相加，按（列、行）升序。
+3. **公式细节**：
+   - `svf/cur` 的分子 `.FMA` 累加；
+   - 坡型面积是先逐像元存 `area`、`asp*area`、`slp*area`，再普通求和，最后除一次总面积；坡度为 NaN 时四支都不进；
+   - 天顶角是 `(z-1) * (pi/202)`（常量先折叠）；
+   - 曲线拟合 `xy_sum`、`x2_sum` 为 FMA，分母与 `a1` 分子为 FMS，`a2` 分子为 FNMA；
+   - 所有源格都是 NaN 时照上游除以 0。
+
+**mksrfdata（简单方案）**：空间路径从来没在真实数据上跑过——`topography_MERITHydro.nc` 的层维叫 `azimuth`，Rust 分层栅格读取器不认，直接报错。加上之后只剩 `cur/asp_type/slp_type` 的 ULP 差：`weighted_not_missing` 的分子改成 FMA，"全缺测"判据改成上游的 `any(v /= -9999)`。
+
+**单点前处理**：Rust 原来两头都没有地形因子。
+- mksrfdata 新加 `append_single_point_topography_factors`：`USE_SITE_topography` 时站点文件有 `SITE_*` 就用，否则按 `find_nearest_west/south` 从高分辨率栅格取一个点；`tea_*` 文件有 36 个方位，上游只读前 16 个。
+- 单点版的规则与空间版不同：坡向不在北坡区间的一律算南坡；`tea_f <= tea_b` 时加 0.001；阴影表的 `0.5*pi - zenith_angle` 在标量循环里被收缩成 `FNMA(pi/202, z-1, pi/2)`。不融合的写法有 69/1616 个表项差 1 ULP，融合后 0。
+- mkinidata 从 srfdata 读入，写进常数重启（`sf_lut_patches` 为 `(patch, zen, azi)`）。城市单点开降尺度时明确拒绝（还没接）。
+
+**上游缺陷 49**：单点写 srfdata 时用了未定义的维度名 `type`，mksrfdata 必然失败。vendor 已修，`kernels/default` 已重编。
+
+**验收**（全部是纯 Fortran 全链路对纯 Rust 全链路）：
+- 网格 `tmp/grid/hh_mesh.nc`：黑河 100–102°E、37–39°N，半度 GRIDBASED；JRA3Q 强迫，2010-01-01 → 01-05，日历史、日重启。
+- `dsf`（完整方案，`topo_factor/heihe`）：landdata 254 个文件、history 2、restart 19 逐位一致。
+- `dss`（简单方案，rawdata 根目录的 MERIT 文件）：landdata 248 个文件、history 2、restart 19 逐位一致。
+- `pds`（单点，bc 站点挪到 101°E、38°N，2008-01 → 02）：history 2、restart 7（含常数重启的 `sf_lut_patches`）逐位一致。
+- 降尺度确实生效：同一 pds 关掉降尺度，1 月平均 `f_xy_us` 从 2.18 变成 2.72 m/s，`f_xy_solarin` 从 94.6 变成 93.0 W/m²；单 patch 下格点与列高程相同，所以 `f_xy_t` 不变，与上游一致。
+- 定位用的 `dsf1`（同一算例 1 天、逐步 history）48 步全部逐位一致。
+
+回归逐位一致：`bc bd g1als`。工作区单元测试 1786 个全过（新加 2 个：`topo_grid`/`maxelv_grid` 初始化、`part2pset`）；clippy 除既有的 `interception_tests` 精度告警外无告警。

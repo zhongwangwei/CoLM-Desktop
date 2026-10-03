@@ -197,9 +197,10 @@ pub fn grid_forcing_from_runtime(
         surface_elevation_m,
         maximum_elevation_m,
         air_temperature_k: forcing.air_temperature_k,
-        potential_temperature_k: forcing.air_temperature_k
-            * (100_000.0 / forcing.bottom_pressure_pa)
-                .lpow(dry_air_gas_constant() / DRY_AIR_HEAT_CAPACITY_J_KG_K),
+        potential_temperature_k: potential_temperature_k(
+            forcing.air_temperature_k,
+            forcing.bottom_pressure_pa,
+        ),
         specific_humidity: forcing.specific_humidity,
         bottom_pressure_pa: forcing.bottom_pressure_pa,
         density_kg_m3,
@@ -211,6 +212,14 @@ pub fn grid_forcing_from_runtime(
         eastward_wind_m_s: forcing.eastward_wind_m_s,
         northward_wind_m_s: forcing.northward_wind_m_s,
     })
+}
+
+/// `MOD_Forcing` 的格点位温 `t*(1.e5/pbot)**(rair/cpair)`（GIMPLE：`__builtin_pow`，
+/// 指数是常量折叠后的 `0.28571658640413355`，即 `rair` 由阿伏伽德罗常数与玻尔兹曼常数算出）。
+pub fn potential_temperature_k(air_temperature_k: f64, bottom_pressure_pa: f64) -> f64 {
+    air_temperature_k
+        * (100_000.0 / bottom_pressure_pa)
+            .lpow(dry_air_gas_constant() / DRY_AIR_HEAT_CAPACITY_J_KG_K)
 }
 
 /// Replaces a reader's grid-level fields with one downscaled column record.
@@ -415,8 +424,10 @@ pub fn downscale_wind(
         })
         .sum::<f64>();
     Ok((
+        // gfortran 把这对降成 `cexp(0+ix)`（虚部与 `sin()` 逐位相同）；LLVM 会把同参的 `sin`/`cos`
+        // 并成 `__sincos_stret`，其 sin 约 0.9% 的输入差 1 ULP（第 549 轮），所以用不内联的 `sin`。
         column_speed * wind_direction.cos(),
-        column_speed * wind_direction.sin(),
+        column_speed * crate::atmosphere::fortran_sin(wind_direction),
     ))
 }
 
@@ -483,7 +494,10 @@ pub fn downscale_wind_simple(
     let northward_sign = if northward_wind_m_s >= 0.0 { 1.0 } else { -1.0 };
     Ok((
         eastward_sign * (column_speed * wind_direction.cos()).powi(2).sqrt(),
-        northward_sign * (column_speed * wind_direction.sin()).powi(2).sqrt(),
+        northward_sign
+            * (column_speed * crate::atmosphere::fortran_sin(wind_direction))
+                .powi(2)
+                .sqrt(),
     ))
 }
 
@@ -573,7 +587,7 @@ fn downscale_shortwave(
         .map(|((&slope, &aspect), &area)| {
             // GIMPLE：`_49 = tan(zen)*sin(slp)`、`_53 = cos(asp)`、
             // `_57 = .FMA (_49, _53, cos(slp))` —— 与 simple 支同样必须写成收缩式。
-            let illumination = (zenith_radians.tan() * slope.sin())
+            let illumination = (zenith_radians.tan() * crate::atmosphere::fortran_sin(slope))
                 .mul_add(aspect.cos(), slope.cos())
                 .clamp(0.0, 1.0);
             shadow * illumination * optical_factor * area.clamp(0.0, 1.0) * beam_grid
@@ -645,7 +659,7 @@ fn downscale_shortwave_simple(
                 // GIMPLE：`_35 = tan(zen)*sin(slp)`、`_38 = cos(asp)`、
                 // `_40 = .FMA (_35, _38, cos(slp))` —— 这里上游**是收缩的**，
                 // 平铺写 `cos + tan*sin*cos` 会在 5/20000 的样本上差 1 ULP。
-                (zenith_radians.tan() * slope_angle.sin())
+                (zenith_radians.tan() * crate::atmosphere::fortran_sin(slope_angle))
                     .mul_add(simple_aspect(index).cos(), slope_angle.cos())
                     .clamp(0.0, 1.0)
             };

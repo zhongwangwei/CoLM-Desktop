@@ -1537,6 +1537,7 @@ fn crop_common_restart_keeps_each_cft_on_its_own_patch_axis() {
             land_cover: LandCoverScheme::Igbp,
             hydraulic_model: HydraulicModel::VanGenuchten,
             use_bedrock: false,
+            use_regular_terrain: false,
             tuning: RestartTuning::default(),
             runoff_scheme: 3,
             topmodel_method: 0,
@@ -2017,6 +2018,7 @@ fn single_point_restart_surface() -> SinglePointSurfaceData {
                 ba_beta: 18.0,
             })
             .collect(),
+        terrain: None,
     }
 }
 

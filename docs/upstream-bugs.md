@@ -425,6 +425,15 @@
 - **影响**：单进程 MPI 下开区域单元流域时，mksrfdata 永远不结束。多 rank、master 不兼 worker 的布局不受影响。
 - **处理**：vendor 已修（第 547 轮）。master 遇到自己那个 worker 时直接读本地 `remap%ids_me`，其余照旧收发。
 
+### 49. 单点降尺度写 srfdata 时用了未定义的维度名 `type`
+
+- **位置**：`mksrfdata/MOD_SingleSrfdata.F90:3227/3231/3235`（`write_surface_data_single`）与 `:3528/3532/3536`（城市版）。
+- **原因**：`:2950` 与 `:3271` 定义的维度叫 `slope_type`，写 `SITE_slp_type/asp_type/area_type` 时却传 `'type'`。
+- **证据**：单点 pds（站点挪到黑河 101°E、38°N，`DEF_USE_Forcing_Downscaling`，地形因子取 `topo_factor/heihe`）。
+  mksrfdata 把地形因子全部算完、打印出来之后报 `Netcdf error: NetCDF: Invalid dimension ID or name`，`STOP 1`。
+- **影响**：单点开完整降尺度时 mksrfdata 必然失败（LCT/PFT 与城市单点都是）。
+- **处理**：vendor 已修（第 549 轮）：六处都改成 `'slope_type'`，与 Rust 写出的维度名一致。`kernels/default` 已重编。
+
 ## 二、TRACER 编译开关改变了物理（需要上游确认哪一边是对的）
 
 这一版上游在很多地方给 TRACER 构建和非 TRACER 构建写了**不同的物理**，不只是记账不同。

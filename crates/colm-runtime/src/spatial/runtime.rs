@@ -33,6 +33,8 @@ pub struct SpatialRuntime {
     /// `forcmask_pch`：足迹不全落在缺测格上的 patch 为真。为假的 patch 整步跳过
     /// （`CoLMDRIVER.F90:78` 的 `CYCLE`），状态不动、不出通量。
     forcing_mask: Vec<bool>,
+    /// `DEF_USE_Forcing_Downscaling(_Simple)`：强迫按地形降到 patch（[`super::downscaling`]）。
+    downscaling: Option<super::downscaling::SpatialDownscaling>,
 }
 
 impl SpatialRuntime {
@@ -72,7 +74,22 @@ impl SpatialRuntime {
             deferred_lai_refresh: None,
             tracer_forcing: None,
             forcing_mask,
+            downscaling: None,
         })
+    }
+
+    /// 接上强迫降尺度（`patches` 与映射的 set 一一对应）。
+    pub fn with_downscaling(
+        mut self,
+        settings: super::downscaling::DownscalingSettings,
+        patches: Vec<super::downscaling::DownscalingPatch>,
+    ) -> Result<Self> {
+        self.downscaling = Some(super::downscaling::SpatialDownscaling::new(
+            settings,
+            patches,
+            &self.mapping,
+        )?);
+        Ok(self)
     }
 
     /// 接上网格示踪物强迫（只在配置了示踪物强迫变量时）。
@@ -189,12 +206,23 @@ impl SpatialRuntime {
                         * 1.0e-6;
                 self.forcing.set_spinup(clock.is_spinup);
                 let cells = self.forcing.step(clock.forcing_time, co2)?;
-                let patch_forcing = map_to_patches(&self.mapping, &self.forcing, &cells);
+                let calendar_day = orbital_calendar_day(clock.forcing_time, true, 0.0)?;
+                let patch_forcing = match &self.downscaling {
+                    // 降尺度用的是步首（上一步末）的 `alb`。
+                    Some(downscaling) => downscaling.map_to_patches(
+                        &self.mapping,
+                        &self.forcing,
+                        &cells,
+                        states,
+                        &self.coordinates,
+                        calendar_day,
+                    )?,
+                    None => map_to_patches(&self.mapping, &self.forcing, &cells),
+                };
                 // `read_tracer_forcing (jdate, dir_forcing)`：紧跟 `read_forcing`。
                 if let Some(tracer_forcing) = self.tracer_forcing.as_mut() {
                     tracer_forcing.step(clock.forcing_time, &self.forcing, &self.mapping)?;
                 }
-                let calendar_day = orbital_calendar_day(clock.forcing_time, true, 0.0)?;
                 let surface_calendar_day = orbital_calendar_day(clock.end_time, true, 0.0)?;
                 let seconds_of_day = crate::seconds_of_day(clock.end_time)?;
                 let steps = patch_forcing
@@ -597,6 +625,8 @@ pub struct SpatialRuntimeConfig {
     pub forcing: super::forcing::GriddedForcingConfig,
     /// `DEF_Forcing_Interp_Method = 'bilinear'`：强迫到 patch 的映射用 `build_bilinear`。
     pub bilinear: bool,
+    /// `DEF_USE_Forcing_Downscaling(_Simple)` 与 `DEF_DS_*`。
+    pub downscaling: Option<super::downscaling::DownscalingSettings>,
 }
 
 impl SpatialRuntimeConfig {
@@ -625,19 +655,7 @@ impl SpatialRuntimeConfig {
              domains: the bilinear mapping picks forcing cells outside the domain blocks and indexes \
              gblock%pio out of bounds (upstream crashes); use 'arealweight'"
         );
-        for (key, what) in [
-            ("DEF_USE_Forcing_Downscaling", "forcing downscaling"),
-            (
-                "DEF_USE_Forcing_Downscaling_Simple",
-                "simple forcing downscaling",
-            ),
-        ] {
-            anyhow::ensure!(
-                !crate::optional_bool_or(&case, key, false)?,
-                "{key} ({what}) is not ported to the Rust spatial runtime; run this case with \
-                 --engine fortran"
-            );
-        }
+        let downscaling = super::downscaling::DownscalingSettings::from_case(&case)?;
         let start = crate::simulation_date(&case, "start")?;
         let spinup_until =
             if crate::required_integer(&case, "DEF_simulation_time%spinup_year")? == 0 {
@@ -672,6 +690,7 @@ impl SpatialRuntimeConfig {
             history_grouping: crate::history_grouping(&case)?,
             forcing,
             bilinear: interpolation == "bilinear",
+            downscaling,
         })
     }
 

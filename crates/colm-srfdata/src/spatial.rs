@@ -345,10 +345,12 @@ pub fn build_spatial_topology_with_filter_grid(
         bounds,
         filter_grid,
         &[],
+        &[],
         None,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn build_spatial_topology_with_filter_grid_and_raw_grids(
     path: impl AsRef<Path>,
     kind: SpatialInputKind,
@@ -356,6 +358,7 @@ pub fn build_spatial_topology_with_filter_grid_and_raw_grids(
     bounds: Option<crate::SpatialBounds>,
     filter_grid: Option<&SpatialGrid>,
     extra_raw_grids: &[Grid],
+    coordinate_grids: &[SpatialGrid],
     block_order: Option<&BlockLayout>,
 ) -> Result<SpatialTopology> {
     let path = path.as_ref();
@@ -379,7 +382,14 @@ pub fn build_spatial_topology_with_filter_grid_and_raw_grids(
         pixel,
         columns,
         rows,
-    } = assimilated_pixels(&grid, raw_grid, bounds, filter_grid, extra_raw_grids)?;
+    } = assimilated_pixels(
+        &grid,
+        raw_grid,
+        bounds,
+        filter_grid,
+        extra_raw_grids,
+        coordinate_grids,
+    )?;
     let source = PixelSourceMapping { columns, rows };
 
     let mut members = BTreeMap::<i64, Vec<(i32, i32)>>::new();
@@ -477,6 +487,7 @@ pub fn build_catchment_spatial_topology_with_filter(
         filter,
         block_layout,
         &[],
+        &[],
     )
 }
 
@@ -487,6 +498,7 @@ pub fn build_catchment_spatial_topology_with_filter_and_raw_grids(
     filter: Option<&MeshFilter>,
     block_layout: Option<&BlockLayout>,
     extra_raw_grids: &[Grid],
+    coordinate_grids: &[SpatialGrid],
 ) -> Result<CatchmentSpatialTopology> {
     let path = path.as_ref();
     let summary = inspect_spatial_input(path, SpatialInputKind::Catchment.input_label())?;
@@ -522,6 +534,7 @@ pub fn build_catchment_spatial_topology_with_filter_and_raw_grids(
         bounds,
         filter.map(|filter| &filter.grid),
         extra_raw_grids,
+        coordinate_grids,
     )?;
     let source = PixelSourceMapping { columns, rows };
 
@@ -1155,6 +1168,190 @@ pub fn read_mesh_coordinate_raster_layers_f64(
         output.extend(mesh_order(mesh, pixel.lon_w.len(), &pixels)?);
     }
     Ok(output)
+}
+
+/// `grid_define_from_file (file, "lat", "lon")`：由格心定义网格（`grid_define_by_center`，不给边界），
+/// 再 `normalize`。首尾两格的外侧边界绕地球一周（如西边界 `(lon_n + lon_1 + 360)/2`），只有落在区域
+/// 内的中点边界会并入像元。
+pub fn coordinate_grid_from_file(path: impl AsRef<Path>, variable: &str) -> Result<SpatialGrid> {
+    let (latitude, longitude) = read_reference_axes(path.as_ref(), variable)?;
+    Ok(grid_by_center(&latitude, &longitude))
+}
+
+fn read_reference_axes(reference: &Path, variable: &str) -> Result<(Vec<f64>, Vec<f64>)> {
+    let file =
+        netcdf::open(reference).with_context(|| format!("cannot open {}", reference.display()))?;
+    let source = file
+        .variable(variable)
+        .with_context(|| format!("{variable} is absent from {}", reference.display()))?;
+    let axes = coordinate_raster_axes(&source, reference)?;
+    let dimensions = source.dimensions();
+    let latitude = read_coordinate(&file, &dimensions[axes.latitude], "latitude", reference)?;
+    let longitude = read_coordinate(&file, &dimensions[axes.longitude], "longitude", reference)?;
+    validate_coordinate_axes(&latitude, &longitude)?;
+    Ok((latitude, longitude))
+}
+
+/// `grid_define_by_center` + `normalize`。`normalize` 的对齐一步在这里是恒等：相邻两格的公共边界
+/// 由同一个中点公式算出，本来就相等。
+fn grid_by_center(lat_in: &[f64], lon_in: &[f64]) -> SpatialGrid {
+    let nlat = lat_in.len();
+    let nlon = lon_in.len();
+    let descending = lat_in[0] > lat_in[nlat - 1];
+    let mut lat_s = vec![0.0; nlat];
+    let mut lat_n = vec![0.0; nlat];
+    for ilat in 0..nlat {
+        let (low, high) = if descending {
+            (
+                (ilat + 1 < nlat).then(|| (lat_in[ilat] + lat_in[ilat + 1]) * 0.5),
+                (ilat > 0).then(|| (lat_in[ilat - 1] + lat_in[ilat]) * 0.5),
+            )
+        } else {
+            (
+                (ilat > 0).then(|| (lat_in[ilat - 1] + lat_in[ilat]) * 0.5),
+                (ilat + 1 < nlat).then(|| (lat_in[ilat] + lat_in[ilat + 1]) * 0.5),
+            )
+        };
+        lat_s[ilat] = low.unwrap_or(-90.0).clamp(-90.0, 90.0);
+        lat_n[ilat] = high.unwrap_or(90.0).clamp(-90.0, 90.0);
+    }
+    let lon_n = lon_in
+        .iter()
+        .map(|&lon| normalize_longitude_value(lon))
+        .collect::<Vec<_>>();
+    let midpoint = |west: f64, east: f64| {
+        if west > east {
+            (west + east + 360.0) * 0.5
+        } else {
+            (west + east) * 0.5
+        }
+    };
+    let lon_e = (0..nlon)
+        .map(|ilon| normalize_longitude_value(midpoint(lon_n[ilon], lon_n[(ilon + 1) % nlon])))
+        .collect();
+    let lon_w = (0..nlon)
+        .map(|ilon| {
+            normalize_longitude_value(midpoint(lon_n[(ilon + nlon - 1) % nlon], lon_n[ilon]))
+        })
+        .collect();
+    SpatialGrid {
+        lon_w,
+        lon_e,
+        lat_s,
+        lat_n,
+    }
+}
+
+/// `aggregation_request_data` 在格心定义的高分辨率网格（地形因子）上取样：网格已并入像元，所以每个像元
+/// 落在唯一一个源格里（`pixel%map_to_grid`）。`zip` 时同一源格的像元面积先相加，按源格的
+/// （列、行）升序；否则逐像元、面积为像元的 `areaquad`。
+pub fn build_pixel_coordinate_patch_selection(
+    reference: &Path,
+    variable: &str,
+    topology: &SpatialTopology,
+    patches: &FlatLandPatches,
+    zip: bool,
+) -> Result<CoordinatePatchSelection> {
+    validate_patches(&topology.mesh, patches)?;
+    let (latitude, longitude) = read_reference_axes(reference, variable)?;
+    let grid = grid_by_center(&latitude, &longitude);
+    let pixel = &topology.pixel;
+    // 经度：以第 1 格西边界为起点展开，各格东边界单调上升，像元中心落在 `[west, east)`。
+    let origin = grid.lon_w[0];
+    let unwrap = |lon: f64| origin + (lon - origin).rem_euclid(360.0);
+    let mut east = grid
+        .lon_e
+        .iter()
+        .map(|&lon| unwrap(lon))
+        .collect::<Vec<_>>();
+    if let Some(last) = east.last_mut() {
+        if *last <= origin {
+            *last = origin + 360.0;
+        }
+    }
+    let columns = pixel
+        .lon_w
+        .iter()
+        .zip(&pixel.lon_e)
+        .map(|(&west, &east_edge)| {
+            let width = (east_edge - west).rem_euclid(360.0);
+            let mid = unwrap(west + width * 0.5);
+            east.partition_point(|&edge| edge <= mid)
+                .min(longitude.len() - 1)
+        })
+        .collect::<Vec<_>>();
+    let mut by_south = (0..latitude.len()).collect::<Vec<_>>();
+    by_south.sort_by(|&a, &b| grid.lat_s[a].total_cmp(&grid.lat_s[b]));
+    let rows = pixel
+        .lat_s
+        .iter()
+        .zip(&pixel.lat_n)
+        .map(|(&south, &north)| {
+            let mid = (south + north) * 0.5;
+            let position = by_south
+                .partition_point(|&row| grid.lat_s[row] <= mid)
+                .checked_sub(1)
+                .context("a pixel lies south of the topography-factor grid")?;
+            Ok(by_south[position])
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let pixel_area = mesh_cell_area_weights(&topology.mesh, pixel)?;
+    let mut element_offsets = vec![0];
+    for element in 0..topology.mesh.len() {
+        element_offsets.push(element_offsets[element] + topology.mesh.pixel_count(element)?);
+    }
+    let mut offsets = vec![0];
+    let mut cells = Vec::new();
+    let mut source_rows = Vec::new();
+    let mut source_columns = Vec::new();
+    let mut area = Vec::new();
+    for patch in 0..patches.len() {
+        let element = patches.element_index[patch]
+            .checked_sub(1)
+            .with_context(|| format!("land patch {patch} has zero element index"))?;
+        let (xs, ys) = topology.mesh.pixels(element)?;
+        let mut samples = Vec::new();
+        let mut zipped = BTreeMap::<(usize, usize), f64>::new();
+        for position in patches.owned_pixel_range(patch, xs.len())? {
+            let x = usize::try_from(xs[position])?
+                .checked_sub(1)
+                .context("patch longitude is zero")?;
+            let y = usize::try_from(ys[position])?
+                .checked_sub(1)
+                .context("patch latitude is zero")?;
+            let key = (columns[x], rows[y]);
+            let weight = pixel_area[element_offsets[element] + position];
+            if zip {
+                *zipped.entry(key).or_insert(0.0) += weight;
+            } else {
+                samples.push((key, weight));
+            }
+        }
+        if zip {
+            samples.extend(zipped);
+        }
+        for ((column, row), weight) in samples {
+            cells.push(area.len());
+            source_columns.push(column);
+            source_rows.push(row);
+            area.push(weight);
+        }
+        offsets.push(cells.len());
+    }
+    let layout = FlatPatches::new(
+        patches.set_type.clone(),
+        offsets,
+        cells,
+        patches.wmo_sources()?,
+    )?;
+    Ok(CoordinatePatchSelection {
+        layout,
+        source_rows,
+        source_columns,
+        latitude,
+        longitude,
+        area,
+    })
 }
 
 /// Build a source-grid selection whose cells are grouped by land patch.
@@ -2776,9 +2973,10 @@ fn raster_layer_axes(
             .iter()
             .position(|dimension| labels.contains(&dimension.name().to_ascii_lowercase().as_str()))
     };
-    // `pixel`：TWI.nc 把每个 15″ 格点的 25 个子像元放在最后一维（`twi(lat, lon, pixel)`）。
-    let layer = axis(&["soil", "layer", "depth", "pixel"])
-        .context("layered raster has no soil/layer/depth/pixel dimension")?;
+    // `pixel`：TWI.nc 把每个 15″ 格点的 25 个子像元放在最后一维（`twi(lat, lon, pixel)`）；
+    // `azimuth`：topography_MERITHydro.nc 的九个坡向（`slp_aspect(lat, lon, azimuth)`）。
+    let layer = axis(&["soil", "layer", "depth", "pixel", "azimuth"])
+        .context("layered raster has no soil/layer/depth/pixel/azimuth dimension")?;
     let latitude =
         axis(&["lat", "latitude"]).context("layered raster has no latitude dimension")?;
     let longitude =
@@ -4608,6 +4806,7 @@ fn assimilated_pixels(
     bounds: Option<crate::SpatialBounds>,
     filter_grid: Option<&SpatialGrid>,
     extra_raw_grids: &[Grid],
+    coordinate_grids: &[SpatialGrid],
 ) -> Result<PixelMapping> {
     ensure!(raw.nlon > 0 && raw.nlat > 0, "raw grid must be nonempty");
     ensure!(
@@ -4704,6 +4903,11 @@ fn assimilated_pixels(
                 .iter()
                 .flat_map(|grid| (0..grid.nlon).map(|i| grid.lon_w(i + 1))),
         )
+        .chain(
+            coordinate_grids
+                .iter()
+                .flat_map(|grid| grid.lon_w.iter().chain(&grid.lon_e).copied()),
+        )
     {
         // Avoid changing the last bits of already-in-window coordinates.
         let edge = if edge >= west && edge <= east {
@@ -4731,6 +4935,11 @@ fn assimilated_pixels(
             extra_raw_grids
                 .iter()
                 .flat_map(|grid| (0..=grid.nlat).map(|j| grid.lat_s(j))),
+        )
+        .chain(
+            coordinate_grids
+                .iter()
+                .flat_map(|grid| grid.lat_s.iter().chain(&grid.lat_n).copied()),
         )
     {
         if edge > bounds.south && edge < bounds.north {
