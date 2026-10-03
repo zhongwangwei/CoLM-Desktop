@@ -148,7 +148,7 @@ fn a_written_sidecar_reads_back_the_same_window() {
     assert_eq!(dims, ["patch", "d2_a_alb", "d1_a_alb"]);
     drop(file);
 
-    let read = read_sidecar(&primary, &sidecar, &config())
+    let read = read_sidecar(&primary, &sidecar, &config(), &[])
         .unwrap()
         .unwrap();
     assert_eq!(read, vec![window()]);
@@ -179,7 +179,7 @@ fn an_aligned_sidecar_holds_only_the_markers() {
             "history_complete"
         ]
     );
-    let read = read_sidecar(&primary, &sidecar, &config())
+    let read = read_sidecar(&primary, &sidecar, &config(), &[])
         .unwrap()
         .unwrap();
     assert_eq!(read, vec![HistoryWindow::default()]);
@@ -196,7 +196,7 @@ fn inconsistent_sidecars_are_refused() {
         file.add_dimension("patch", 1).unwrap();
     }
     let sidecar = directory.join("s.nc");
-    assert!(read_sidecar(&primary, &sidecar, &config())
+    assert!(read_sidecar(&primary, &sidecar, &config(), &[])
         .unwrap()
         .is_none());
 
@@ -207,14 +207,14 @@ fn inconsistent_sidecars_are_refused() {
             .put_values(&[1.0], ..)
             .unwrap();
     }
-    assert!(read_sidecar(&primary, &sidecar, &config()).is_err());
+    assert!(read_sidecar(&primary, &sidecar, &config(), &[]).is_err());
 
     write_sidecar(&sidecar, 1, &config(), &[window()]).unwrap();
     let daily = SidecarConfig {
         frequency_code: 3,
         ..config()
     };
-    let error = read_sidecar(&primary, &sidecar, &daily).unwrap_err();
+    let error = read_sidecar(&primary, &sidecar, &daily, &[]).unwrap_err();
     assert!(error.to_string().contains("frequency changed"), "{error}");
 
     // 旁车按草地写、续跑按 BGC 读：BGC 的累加器缺席。
@@ -222,7 +222,7 @@ fn inconsistent_sidecars_are_refused() {
         bgc: true,
         ..config()
     };
-    let error = read_sidecar(&primary, &sidecar, &bgc).unwrap_err();
+    let error = read_sidecar(&primary, &sidecar, &bgc, &[]).unwrap_err();
     assert!(
         error
             .to_string()
@@ -270,7 +270,7 @@ fn river_lake_builds_write_schema_two() {
 
     // 区间跨过重启：河道累加器有值时标记为 1（河道旁车由调用方另写）。
     let open = sidecar.with_file_name("open.nc");
-    write_sidecar_with_river(&open, 1, &river, &[window()], true).unwrap();
+    write_sidecar_with_river(&open, 1, &river, &[window()], true, &[false]).unwrap();
     let file = netcdf::open(&open).unwrap();
     let required = file
         .variable("history_river_required")
@@ -279,4 +279,40 @@ fn river_lake_builds_write_schema_two() {
         .unwrap();
     assert_eq!(required, vec![1.0]);
     let _ = std::fs::remove_dir_all(&directory);
+}
+
+/// 多 patch 空间块：城市累加量排在 `urban` 维上，只对应城市 patch；读回时落回原来那个 patch。
+#[test]
+fn urban_accumulators_follow_the_urban_patches_of_a_block() {
+    let directory = scratch_directory("urban-block");
+    let primary = directory.join("case_restart_2010-002-00000_lc2005_e110_n20.nc");
+    netcdf::create(&primary)
+        .unwrap()
+        .add_dimension("patch", 3)
+        .unwrap();
+    let sidecar = directory.join("case_restart_hist_2010-002-00000_e110_n20.nc");
+    let urban_config = SidecarConfig {
+        urban_run: true,
+        urban_patches: 1,
+        ..config()
+    };
+    let flags = [false, true, false];
+    let mut windows = vec![window(); 3];
+    windows[1]
+        .sums
+        .insert("t_room".to_owned(), WindowValue::Scalar(67920.0));
+    write_sidecar_with_river(&sidecar, 3, &urban_config, &windows, false, &flags).unwrap();
+
+    let file = netcdf::open(&sidecar).unwrap();
+    assert_eq!(file.dimension("urban").unwrap().len(), 1);
+    let t_room = file.variable("a_t_room").unwrap();
+    assert_eq!(t_room.get_values::<f64, _>(..).unwrap(), vec![67920.0]);
+    drop(file);
+
+    let read = read_sidecar(&primary, &sidecar, &urban_config, &flags)
+        .unwrap()
+        .unwrap();
+    assert_eq!(read[1], windows[1]);
+    assert_eq!(read[0], window());
+    assert!(!read[2].sums.contains_key("t_room"));
 }

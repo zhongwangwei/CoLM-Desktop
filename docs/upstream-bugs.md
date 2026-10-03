@@ -399,6 +399,20 @@
 - **证据**：blsn0（AT-Neu，BGC/PFT，1 月雪深 0.333 m）。未修时：Fortran 跑完，Rust 首步拒绝；冷启动重启两侧逐位相同，说明 Rust 原本照抄了这个 bug。
 - **处理**：vendor 已修（第 537 轮），Rust 的 `initialize_snow_layers` 按修后的写，单测补了 5 层的节点深度。
 
+### 47. `forc_rain/forc_snow` 分配后未初始化，被强迫缺测遮蔽的 patch 把垃圾值累加进历史
+
+- **位置**：`main/MOD_Vars_1DForcing.F90:79-80` 分配；`main/MOD_Vars_1DAccFluxes.F90:2196-2197` 每步 `acc1d(forc_rain, a_rain)`、`acc1d(forc_snow, a_snow)`。
+- **原因**：
+  - 这两个数组只由 `CoLMMAIN`/`CoLMMAIN_Urban` 按 patch 写；
+  - 被遮蔽 patch（`forcmask_pch = .false.`）在 `CoLMDRIVER` 里整步跳过，从不写它们；
+  - 而分配后又没有赋初值。
+- **证据**：g1urbmm（城市模型，`CMFDmb` 遮蔽 48 个 patch，月历史，5 天 240 步）。Fortran 旁车里被遮蔽 patch 的 `a_snow/nac` 在 2.05–3.45 mm/s 之间，每个 patch 都不同；同时 `a_rain` 全为 0，1 月华南也不可能有这么大的降雪。
+  - 此前的算例（g1fmm、g1bgcm 等）里碰巧是 0，所以第 523 轮记成了"`rain/snow = 0`"。
+- **影响**：
+  - 历史文件不受影响，因为各 `filter` 都与上了 `forcmask_pch`；
+  - 但月历史续跑的旁车会带进随机值。分配到哪块内存决定了值是多少，结果不可复现。
+- **处理**：vendor 已修，分配后 `forc_rain(:) = 0`、`forc_snow(:) = 0`（第 543 轮）。这与 Rust 对被遮蔽 patch 一直交 0 的做法一致。三套内核（default、latlon、latlon-crop）已重编。
+
 ## 二、TRACER 编译开关改变了物理（需要上游确认哪一边是对的）
 
 这一版上游在很多地方给 TRACER 构建和非 TRACER 构建写了**不同的物理**，不只是记账不同。

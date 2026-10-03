@@ -104,6 +104,12 @@ CONTAINS
 
             allocate (forc_aerdep(14,numpatch) ) ! atmospheric aerosol deposition data [kg/m/s]
 
+! ==== FIX: forc_rain/forc_snow are written only by CoLMMAIN per patch; patches masked by
+! ==== missing forcing (forcmask_pch) never run it, so accumulate_fluxes summed
+! ==== uninitialised memory into a_rain/a_snow (upstream-bugs #47). Start them at 0.
+            forc_rain(:) = 0._r8
+            forc_snow(:) = 0._r8
+
          ENDIF
 
       ENDIF

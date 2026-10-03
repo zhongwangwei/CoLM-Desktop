@@ -2956,6 +2956,24 @@ impl HistorySession {
                     accumulator.scalar(name, 0, value)?;
                 }
             }
+            // 城市模型：城市状态量照常累加（重启值，g1urbmm 实测，第 543 轮）；城市各项通量停在 `spval`。
+            if let Some(urban) = state.urban.as_ref() {
+                for (name, value) in [
+                    ("t_room", urban.t_room),
+                    ("tafu", urban.tafu),
+                    ("fhac", urban.fhac),
+                    ("fwst", urban.fwst),
+                    ("fach", urban.fach),
+                    ("fhah", urban.fhah),
+                    ("fahe", urban.fahe),
+                    ("fvehc", urban.vehc),
+                    ("fmeta", urban.meta),
+                    ("t_roof", urban.t_roof),
+                    ("t_wall", urban.t_wall),
+                ] {
+                    accumulator.scalar(name, 0, value)?;
+                }
+            }
             // 湖：重启里的湖层温度与冰比例照常累加。
             if let Some(lake) = state.lake.as_ref().filter(|_| template.patch_type == 4) {
                 accumulator.layer("t_lake", 0, &lake.column.temperature_k)?;

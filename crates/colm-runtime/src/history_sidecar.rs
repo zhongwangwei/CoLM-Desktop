@@ -135,7 +135,17 @@ pub fn write_sidecar(
     config: &SidecarConfig,
     windows: &[HistoryWindow],
 ) -> Result<()> {
-    write_sidecar_with_river(path, patches, config, windows, false)
+    let urban = vec![config.urban_run; patches];
+    write_sidecar_with_river(path, patches, config, windows, false, &urban)
+}
+
+/// 本文件里城市 patch 的个数（`numurban`，旁车 `urban` 维的长度）。`urban` 为空时退回配置里的总数。
+fn urban_units(config: &SidecarConfig, urban: &[bool]) -> usize {
+    if urban.is_empty() {
+        config.urban_patches
+    } else {
+        urban.iter().filter(|&&is_urban| is_urban).count()
+    }
 }
 
 /// [`write_sidecar`]；空间构建（`river_lake_flow`）另写 `history_river_required`：河道累加器
@@ -146,6 +156,7 @@ pub fn write_sidecar_with_river(
     config: &SidecarConfig,
     windows: &[HistoryWindow],
     river_required: bool,
+    urban: &[bool],
 ) -> Result<()> {
     let window = windows
         .first()
@@ -154,7 +165,7 @@ pub fn write_sidecar_with_river(
         netcdf::create(path).with_context(|| format!("cannot create {}", path.display()))?;
     file.add_dimension("patch", patches)?;
     if config.urban_run {
-        file.add_dimension("urban", config.urban_patches)?;
+        file.add_dimension("urban", urban_units(config, urban))?;
     }
     let per_patch = |value: f64| vec![value; patches];
     let schema = if config.river_lake_flow { 2.0 } else { 1.0 };
@@ -179,12 +190,16 @@ pub fn write_sidecar_with_river(
             "the patches disagree on the history sample count"
         );
         for entry in allocated_fields(config) {
+            // 城市量排在 `urban` 维上：只取城市 patch 的窗口，按 patch 顺序（`landurban` 即此序）。
             ensure!(
-                !entry.urban || patches == 1,
-                "urban accumulators are written for single-patch urban sites only"
+                !entry.urban || patches == 1 || urban.len() == patches,
+                "urban accumulators need the urban flag of every patch"
             );
             let mut values = Vec::new();
-            for window in windows {
+            for (index, window) in windows.iter().enumerate() {
+                if entry.urban && patches > 1 && !urban[index] {
+                    continue;
+                }
                 values.extend(field_values(entry, window)?);
             }
             let vector = if entry.urban { "urban" } else { "patch" };
@@ -269,6 +284,7 @@ pub fn read_sidecar(
     primary: &Path,
     sidecar: &Path,
     config: &SidecarConfig,
+    urban: &[bool],
 ) -> Result<Option<Vec<HistoryWindow>>> {
     let required = {
         let file =
@@ -365,8 +381,18 @@ pub fn read_sidecar(
         let values: Vec<f64> = variable
             .get_values(..)
             .with_context(|| format!("cannot read {} from {}", entry.name, sidecar.display()))?;
+        // 城市量排在 `urban` 维上，只对应城市 patch（多 patch 时按 `urban` 标记分配）。
+        let targets: Vec<usize> = if entry.urban && patches > 1 {
+            ensure!(
+                urban.len() == patches,
+                "urban accumulators need the urban flag of every patch"
+            );
+            (0..patches).filter(|&patch| urban[patch]).collect()
+        } else {
+            (0..patches).collect()
+        };
         ensure!(
-            values.len() == entry.width() * patches,
+            values.len() == entry.width() * targets.len(),
             "incompatible land-history sidecar shape for {} in {}",
             entry.name,
             sidecar.display()
@@ -380,7 +406,8 @@ pub fn read_sidecar(
             );
             Ok(value as usize)
         };
-        for (window, values) in windows.iter_mut().zip(values.chunks(entry.width())) {
+        for (&target, values) in targets.iter().zip(values.chunks(entry.width())) {
+            let window = &mut windows[target];
             match entry.name {
                 "nac_ln" => window.local_noon_steps = count(values[0])?,
                 "nac_dt" => window.daytime_steps = count(values[0])?,

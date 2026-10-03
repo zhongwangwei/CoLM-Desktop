@@ -29051,3 +29051,29 @@ colm-runtime 单测 151 通过，clippy 无告警。
 回归逐位一致：`g1crop g1cropp g1irr g1bgcm g1fmm g1urbp g1bgc g1ffm`。colm-runtime 单测 151 通过，clippy 无告警。
 
 **被遮蔽 patch 的组合现在只剩冰川没有实测**（本区域没有冰川），`push_masked` 仍拒绝 patchtype 3。
+
+## 第 543 轮：空间城市的月历史旁车；被遮蔽城市单元的累加；上游缺陷 47
+
+**空间城市月历史旁车**：
+- 原来写旁车遇到城市累加量就要求 `patches == 1`（"urban accumulators are written for single-patch urban sites only"），`urban` 维长度用的是全局城市数；
+- 上游每块各写各的，`urban` 维是本块的 `numurban`，城市量按 `landurban` 顺序（即城市 patch 在块内的顺序）排。
+
+现在：
+- `write_sidecar_with_river`、`read_sidecar` 都多收一份本文件每个 patch 是否城市的标记，城市量只取或只回填城市 patch；
+- `HistoryRestart.urban` 带全部分块的标记，按块切片；
+- 换年那一步按新年各块常数重启的 `patchtype` 拼标记，并传入块区间（原来传 `None`）。
+
+**被遮蔽城市单元的累加**（g1urbmm 实测）：上游照常累加城市状态量，取重启值，共 11 个：`t_room tafu fhac fwst fach fhah fahe vehc meta t_roof t_wall`；城市各项通量是 `spval`。`push_masked` 已补上。
+
+**上游缺陷 47**：`forc_rain/forc_snow` 未初始化，被遮蔽 patch 的 `a_snow` 是垃圾值，vendor 已修（见 upstream-bugs）。
+
+**验收**（两侧都用修后的内核）：
+
+| 算例 | 设置 | history | restart |
+|---|---|---|---|
+| `g1urbpm` | g1urbp 改月历史，不遮蔽，2010-01-01 → 01-03 | 2，bad 0 | 7（含城市时间重启与月旁车），bad 0 |
+| `g1urbmm` | g1urbm 改月历史，48 个 patch 被遮蔽 | 2，bad 0 | 7，bad 0 |
+
+用修后的内核重跑掩膜算例的 Fortran 侧：`g1fmm g1bgcm g1cropm g1ffm` 仍逐位一致。单点回归 `nu bl` 逐位一致。
+
+新单测 `urban_accumulators_follow_the_urban_patches_of_a_block`；colm-runtime 单测 152 通过，clippy 无告警。

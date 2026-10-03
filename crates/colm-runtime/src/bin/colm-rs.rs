@@ -303,10 +303,15 @@ fn run() -> Result<()> {
         river_lake_flow: false,
     };
     // `read_history_acc_restart`（`CoLM.F90:376`）：续跑重启带着未写完的历史区间时接着累加。
+    let urban_flags = templates
+        .iter()
+        .map(|template| template.urban.is_some())
+        .collect::<Vec<_>>();
     let initial_window = colm_runtime::history_sidecar::read_sidecar(
         &restarts.initial,
         &history_sidecar_path(&restarts.initial)?,
         &sidecar_config,
+        &urban_flags,
     )?;
     if let Some(window) =
         initial_window.filter(|windows| windows.first().is_some_and(|window| window.steps > 0))
@@ -320,6 +325,7 @@ fn run() -> Result<()> {
         config: sidecar_config,
         window: session.as_ref().map(HistorySession::window_handle),
         tracer_raw: session.as_ref().map(HistorySession::tracer_raw_handle),
+        urban: urban_flags,
     };
     // 主循环的 `coszen`/`cosazi`/本地时间都读常数重启的 `patchlonr`/`patchlatr`（上游
     // `MOD_Vars_TimeInvariants`），不从度数现算 —— 两者差 1 ULP 时只有读重启才与内核同源。
@@ -1319,6 +1325,10 @@ fn run_spatial_segment(
         tracer_raw: history
             .as_ref()
             .map(|history| history.session.tracer_raw_handle()),
+        urban: templates
+            .iter()
+            .map(|template| template.urban.is_some())
+            .collect(),
     };
     // `read_history_acc_restart`：续跑重启带着未写完的历史区间时接着累加（每块一份旁车，按块拼接）。
     let mut restored = Vec::with_capacity(patch_count);
@@ -1335,6 +1345,7 @@ fn run_spatial_segment(
             &files.time,
             &history_sidecar_path(&files.time)?,
             &history_restart.config,
+            &history_restart.urban[patches.clone()],
         )? {
             Some(windows) if windows.first().is_some_and(|window| window.steps > 0) => {
                 ensure!(
@@ -2463,21 +2474,24 @@ fn lulcc_transition(
     let time_name =
         |year: i64, block: &str| format!("{name}_restart_{label}_lc{year:04}_{block}.nc");
     // 过渡这一步的历史区间已关（`run_spatial_segment` 核对过），旁车是空窗口。
+    // 新年各块的城市标记（`patchtype == 1`），按块顺序拼接；旁车 `urban` 维按块取。
+    let new_urban = new_topology
+        .blocks
+        .iter()
+        .map(|(block, _)| -> Result<Vec<bool>> {
+            Ok(colm_init::RestartFile::open(const_path(years.new, block))?
+                .integers("patchtype")?
+                .iter()
+                .map(|&kind| kind == 1)
+                .collect())
+        })
+        .collect::<Result<Vec<_>>>()?
+        .concat();
     let history_restart = HistoryRestart {
         config: colm_runtime::history_sidecar::SidecarConfig {
             frequency_code: history_frequency_code(years.history_frequency),
             urban_run: logical_field(document, "DEF_URBAN_RUN")?,
-            urban_patches: new_topology
-                .blocks
-                .iter()
-                .map(|(block, _)| -> Result<usize> {
-                    Ok(colm_init::RestartFile::open(const_path(years.new, block))?
-                        .integers("patchtype")?
-                        .iter()
-                        .filter(|&&kind| kind == 1)
-                        .count())
-                })
-                .sum::<Result<usize>>()?,
+            urban_patches: new_urban.iter().filter(|&&is_urban| is_urban).count(),
             pft_or_pc: case.physics.use_pft || case.physics.use_pc,
             bgc: false,
             crop: false,
@@ -2485,6 +2499,7 @@ fn lulcc_transition(
         },
         window: None,
         tracer_raw: None,
+        urban: new_urban,
     };
     // 输运示踪物（`remap_land_tracer_lulcc_state` 的 SAT 形态，不带转移份额）。
     let land_tracers = colm_runtime::tracer::tracer_set_from_document(document)?
@@ -2919,7 +2934,13 @@ fn lulcc_transition(
             )?;
         }
         // 过渡这一步的历史区间已关，旁车不带示踪物部分。
-        mark_history_restart_with_river(&path, &history_restart, None, false, None)?;
+        mark_history_restart_with_river(
+            &path,
+            &history_restart,
+            Some(patches.clone()),
+            false,
+            None,
+        )?;
         written.push(path);
     }
     // 合并续跑不留在 `restart/` 时，冷启动建的日期目录空了就收掉。
@@ -3745,6 +3766,8 @@ struct HistoryRestart {
         Option<std::sync::Arc<std::sync::Mutex<Vec<colm_runtime::history_sidecar::HistoryWindow>>>>,
     /// 运行终点（非自然边界）清零前的示踪物/CH4 累加器；有值时旁车用它而不是状态里的。
     tracer_raw: Option<colm_runtime::tracer_sidecar::RawTracersHandle>,
+    /// 每个 patch 是不是城市（城市累加器排在旁车的 `urban` 维上），全部分块按装配顺序。
+    urban: Vec<bool>,
 }
 
 /// 续跑文件 → 同目录的旁车路径。
@@ -3895,12 +3918,17 @@ fn mark_history_restart_with_river(
     }
     let patches = colm_init::RestartFile::open(restart)?.dimension("patch")?;
     let sidecar = history_sidecar_path(restart)?;
+    let urban = match &block {
+        Some(block) if history.urban.len() > 1 => &history.urban[block.clone()],
+        _ => &history.urban[..],
+    };
     colm_runtime::history_sidecar::write_sidecar_with_river(
         &sidecar,
         patches,
         &history.config,
         &windows,
         river_required,
+        urban,
     )?;
     // 区间跨过重启（`window_active`）时旁车再带示踪物部分；运行终点（非自然边界）用清零前的快照。
     if let Some(tracers) = tracers.filter(|_| windows.first().is_some_and(|w| w.steps > 0)) {
