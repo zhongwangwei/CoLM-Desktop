@@ -1558,14 +1558,6 @@ fn check_spatial_lulcc(
         !logical_field(document, "DEF_USE_BGC")?,
         "LULCC is not supported for BGC upstream (MOD_Namelist stops too)"
     );
-    // PFT：SAT 的逐 PFT 配对与 MEC 的 PFT 段已移植；示踪物的 PFT 库存映射还没有。
-    if logical_field(document, "DEF_USE_PFT")? {
-        ensure!(
-            colm_runtime::tracer::tracer_set_from_document(document)?
-                .is_none_or(|set| set.transport_indices().next().is_none()),
-            "transport tracers with DEF_USE_PFT and DEF_USE_LULCC are not ported"
-        );
-    }
     for field in [
         "DEF_USE_PC",
         "DEF_URBAN_RUN",
@@ -1594,6 +1586,36 @@ fn check_spatial_lulcc(
         "DEF_USE_LULCC before 2000 (five-yearly land cover) is not ported to the Rust runtime"
     );
     Ok(())
+}
+
+/// `lulcc_inventory_trace`（`MOD_Lulcc_Driver.F90:319-342`）：PFT（非 SOLO）时把 `patchtypes == 0`
+/// 的各类份额按类号次序加进第 1 类（从 0 起的顺序加法），其余类照抄；LCT 时原样返回。
+/// `tracer_forcing_lulcc_map` 的 `source_class` 求和是同一条加法链，所以两处都用这份。
+fn lulcc_inventory_trace(raw: Vec<Vec<f64>>, merge_soil_classes: bool) -> Result<Vec<Vec<f64>>> {
+    ensure!(
+        raw.iter().flatten().all(|v| v.is_finite() && *v >= 0.0),
+        "TRACER LULCC invalid transfer trace"
+    );
+    if !merge_soil_classes {
+        return Ok(raw);
+    }
+    use colm_init::lulcc_mec::IGBP_PATCHTYPES;
+    ensure!(
+        raw.iter().all(|row| row.len() == IGBP_PATCHTYPES.len() + 1),
+        "TRACER LULCC transfer trace class count mismatch"
+    );
+    Ok(raw
+        .into_iter()
+        .map(|row| {
+            let mut mapped = vec![0.0; row.len()];
+            mapped[0] = row[0];
+            for (c, &value) in row.iter().enumerate().skip(1) {
+                let dest = if IGBP_PATCHTYPES[c - 1] == 0 { 1 } else { c };
+                mapped[dest] += value;
+            }
+            mapped
+        })
+        .collect())
 }
 
 /// MEC 的示踪物重映射输入：每个新 patch 的来源地类份额（`lccpct_patches(np, 0:N)`）与
@@ -2396,6 +2418,9 @@ fn lulcc_transition(
         ),
         None => None,
     };
+    // `(DEF_USE_PFT .and. .not. DEF_SOLO_PFT)`：份额按 PFT 土壤 patch（第 1 类）归并。
+    let merge_soil_classes =
+        case.physics.use_pft && !logical_field(document, "DEF_SOLO_PFT")?;
     let mut written = Vec::with_capacity(new_topology.blocks.len());
     for (block, patches) in &new_topology.blocks {
         let cold_path = restart_root.join(&label).join(time_name(years.new, block));
@@ -2517,7 +2542,7 @@ fn lulcc_transition(
                                     htop: new_pft_const.floats("htop_p")?,
                                     hbot: new_pft_const.floats("hbot_p")?,
                                     ranges: new_ranges,
-                                    merge_soil_classes: !logical_field(document, "DEF_SOLO_PFT")?,
+                                    merge_soil_classes,
                                 })
                             }
                             _ => None,
@@ -2590,11 +2615,9 @@ fn lulcc_transition(
                 // MEC：`lulcc_inventory_trace`（IGBP LCT 下就是 `lccpct_patches`）与新旧 patch 的物理面积。
                 match (mec.is_some(), old.as_ref()) {
                     (true, Some((_, _, old_patches))) => Some(TracerMec {
-                        lccpct: read_lulcc_transfer_trace(
-                            &landdata,
-                            years.new,
-                            block,
-                            patches.len(),
+                        lccpct: lulcc_inventory_trace(
+                            read_lulcc_transfer_trace(&landdata, years.new, block, patches.len())?,
+                            merge_soil_classes,
                         )?,
                         new_area: lulcc_patch_areas(&new_topology, patches.clone()),
                         old_area: lulcc_patch_areas(&old_topology, old_patches.clone()),
@@ -2624,12 +2647,11 @@ fn lulcc_transition(
                         .collect::<Result<Vec<_>, _>>()?;
                     let new_class = new_const.integers("patchclass")?;
                     let old_class = old_const.integers("patchclass")?;
+                    // `source_class` 把土壤类并进第 1 类，与库存映射是同一条加法链。
                     let lccpct = match mec {
-                        Some(_) => Some(read_lulcc_transfer_trace(
-                            &landdata,
-                            years.new,
-                            block,
-                            patches.len(),
+                        Some(_) => Some(lulcc_inventory_trace(
+                            read_lulcc_transfer_trace(&landdata, years.new, block, patches.len())?,
+                            merge_soil_classes,
                         )?),
                         None => None,
                     };

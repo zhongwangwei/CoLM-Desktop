@@ -32,7 +32,7 @@ const GLACIER: i64 = 3;
 /// 裸土粗糙度（上游在这里写死 `zlnd = 0.01`）。
 const ZLND: f64 = 0.01;
 /// IGBP `patchtypes`（`MOD_Const_LC.F90:398`，下标是类号 1..=17）。
-const IGBP_PATCHTYPES: [i64; 17] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 1, 0, 3, 0, 4];
+pub const IGBP_PATCHTYPES: [i64; 17] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 1, 0, 3, 0, 4];
 /// PFT 归并时单独保留的类：WETLAND、URBAN、GLACIERS、WATERBODY（赋值次序不影响结果）。
 const KEPT_CLASSES: [usize; 4] = [13, 11, 17, 15];
 

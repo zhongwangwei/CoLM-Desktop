@@ -28763,3 +28763,29 @@ g3pm 与 g3p 的 2006-001 重启相比，patch 级有 30 个变量不同（`t_so
 回归 `g3 g3m g3t g3p g3mt` 全部逐位一致。
 
 另记：`cargo test -p colm-init` 默认并行时有 36 个 netCDF 写读测试偶发失败，单独跑或 `--test-threads=1` 全过（init 174、runtime 151）。原因是 HDF5 非线程安全，不是回归。
+
+## 第 532 轮：输运示踪物 + LULCC + PFT
+
+上游 PFT（非 SOLO）下，示踪物在 LULCC 里用的份额有两处换算：
+- `lulcc_inventory_trace`（`MOD_Lulcc_Driver.F90:319-342`）：`mapped(:,1)` 从 0 起按类号次序累加 `patchtypes(c) == 0` 的各类，其余类照抄。MEC 的池重映射与 `lulcc_check_inventory_transfer` 都用这份。
+- `tracer_forcing_lulcc_remap` 不用 `inventory_trace`，而是给 `tracer_forcing_lulcc_map` 传原始 `lccpct_patches` 和 `source_class`（土壤类 → 1）。
+  - 权重是 `DO raw = 0..N: IF (source_class(raw) == c) weight += lcc(np,raw)`。
+  - 这与库存映射是同一条从 0 起的加法链：类 0 映到自己，不混进类 1。
+  - 所以 Rust 两处都喂 `lulcc_inventory_trace` 的结果，逐位等价。
+
+示踪物没有 PFT 级状态，SAT 的池搬运只看 `patchclass`；PFT 土壤 patch 的 `patchclass` 是 1，不用改。
+
+Rust：
+- `colm-rs` 新增 `lulcc_inventory_trace`，应用在 `TracerMec.lccpct` 与 forcing 缓存重映射两处；
+- `IGBP_PATCHTYPES` 与 MEC 共用 `colm_init::lulcc_mec` 的那份；
+- 入口去掉"transport tracers with DEF_USE_PFT and DEF_USE_LULCC"的拒绝。
+
+**验收**（初值重启不带示踪物，冷启动分配）：
+
+| 算例 | 配置 | history | restart |
+|---|---|---|---|
+| `g3pmt` | g3pm + `sol1` solute，MEC | 6 份，bad 0 | 11 份，bad 0 |
+| `g3pt` | g3p + `sol1`，SAT | 6 份，bad 0 | 11 份，bad 0 |
+
+- g3pmt 过渡后的 2006-001 重启里，`trc_wliq_soisno`、`trc_wdsrf`、`trc_wetwat` 等都非零，说明池重映射真正走到了。
+- g3pt 的 Fortran 端跑了约 10 分钟（g3p 只要不到 1 分钟），Rust 端很快；结果一致，没有深究上游慢在哪。
