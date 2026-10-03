@@ -101,6 +101,11 @@ pub fn is_spatial_case(nml: &Path) -> anyhow::Result<bool> {
             Some(other) => bail!("{field} must be a path string, got {other}"),
         }
     }
+    // 不给网格文件、只写分辨率的 GRIDBASED 算例：上游按 `DEF_GRIDBASED_lon_res/lat_res`
+    // 现造全球网格（`init_gridbased_mesh_grid`），站点算例从不写这两个字段。
+    spatial |= ["DEF_GRIDBASED_lon_res", "DEF_GRIDBASED_lat_res"]
+        .iter()
+        .any(|field| doc.get(field).is_some());
     Ok(spatial)
 }
 

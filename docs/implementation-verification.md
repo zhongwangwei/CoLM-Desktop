@@ -29299,3 +29299,29 @@ colm-rs: 21 patch(es) lie entirely on missing forcing cells (forcmask_pch = .fal
 - `g1aes`：`DEF_AverageElementSize = 4.8` → 180×90 个 2° 块，区域横跨 4 个块。landdata 983 个文件、history、restart 28 逐位一致。
 
 colm-srfdata 单元测试 271 个全过。`tests/raster.rs` 的 5 个需要设 `COLM_RAWDATA`，与本次改动无关。
+
+## 第 553 轮：按分辨率现造 GRIDBASED 网格
+
+上游 `init_gridbased_mesh_grid`（`MOD_Mesh.F90:67-85`）先看 `DEF_file_mesh` 是否存在（`inquire(exist)`）：
+- 不存在（包括没写、取默认值 `path/to/mesh/file` 的情形）时，用 `define_by_res(DEF_GRIDBASED_lon_res, DEF_GRIDBASED_lat_res)` 造全球网格：`nint(360/res)` × `nint(180/res)`，`grid_define_by_ndims` 的边界；
+- `mesh_build` 再把 landmask 全部当成 1，单元由 `DEF_domain` 裁出；单元号是**全球**网格里的行优先偏移 +1（给窗口网格文件时是窗口内偏移）。
+
+Rust 原来在三处挡住这条路：
+- colm-case 只凭 `DEF_file_mesh` 判断空间算例，不写网格文件的算例被当成单点；
+- colm-cli 预检要求网格文件存在；
+- mksrfdata-rs 直接拒绝。
+
+**改动**：
+- `colm_case::is_spatial_case`：显式写了 `DEF_GRIDBASED_lon_res/lat_res` 也算空间算例（站点算例从不写它们）。
+- colm-cli 预检：GRIDBASED 内核下网格文件不存在时只提示、不检查。
+- mksrfdata-rs：GRIDBASED 且网格文件不存在时，`colm_srfdata::mesh::write_gridbased_mesh_by_res` 在临时目录写一份"全球 `define_by_ndims` 网格、landmask 全 1"的普通网格文件，交给原有流程，跑完删除。单元号因此就是全球偏移，与上游相同。
+- 提示语原写成 "… does not exist; …"，被 colm-cli 的日志扫描当成错误标记（`ErrorMarker`）；改成 "no DEF_file_mesh at …"。
+
+**验收 `g1res`**（g1 底，删掉 `DEF_file_mesh`，写 `DEF_GRIDBASED_lon_res = lat_res = 0.5`，区域 113–115°E、23–25°N，2 天；纯 Fortran 全链路对纯 Rust 全链路）：
+- landdata 248 个文件、history、restart 10 逐位一致；
+- 与窗口网格文件版（g1）相比，`landpatch` 的 `eindex` 确实变成了全球编号（175 处都不同）；
+- 临时网格文件跑完已删除。
+
+单元测试 `spatial_lct_case_uses_the_standard_rawdata_contract_before_writing` 原来用一个不存在的网格路径只验参数拼装，现在先建占位文件（否则按新语义改走按分辨率造网格）。colm-case/colm-cli/colm-srfdata 的 lib 与 bin 测试全过。
+
+至此，原清单上移植面内的条目全部完成。

@@ -141,6 +141,70 @@ pub struct SpatialInputSummary {
 }
 
 /// Validate the exact NetCDF fields consumed by CoLM's three spatial modes.
+/// `init_gridbased_mesh_grid` 在 `DEF_file_mesh` 不存在时的那一支（`MOD_Mesh.F90:79-83`）：
+/// `gridmesh%define_by_res(lon_res, lat_res)` 是 `nint(360/lon_res)` × `nint(180/lat_res)` 的全球网格
+/// （`grid_define_by_ndims`：自北向南、自 -180° 向东，最后一列东边界归一化成 -180°），`mesh_build`
+/// 再把 landmask 全部当成 1（`flush_block_data (datamesh, 1)`）。写成一份普通的 landmask 网格文件，
+/// 单元号因此就是全球网格里的行优先偏移 +1，与上游相同。
+pub fn write_gridbased_mesh_by_res(
+    path: impl AsRef<Path>,
+    lon_res: f64,
+    lat_res: f64,
+) -> Result<()> {
+    let path = path.as_ref();
+    if !(lon_res.is_finite() && lat_res.is_finite() && lon_res > 0.0 && lat_res > 0.0) {
+        bail!("DEF_GRIDBASED_lon_res and DEF_GRIDBASED_lat_res must be positive");
+    }
+    let nlon = (360.0 / lon_res).round() as usize;
+    let nlat = (180.0 / lat_res).round() as usize;
+    if nlon == 0 || nlat == 0 {
+        bail!("DEF_GRIDBASED resolution {lon_res} x {lat_res} leaves no grid cell");
+    }
+    let del_lat = 180.0 / nlat as f64;
+    let del_lon = 360.0 / nlon as f64;
+    let lat_s = (1..=nlat)
+        .map(|i| (90.0 - del_lat * i as f64).clamp(-90.0, 90.0))
+        .collect::<Vec<_>>();
+    let lat_n = (1..=nlat)
+        .map(|i| (90.0 - del_lat * (i - 1) as f64).clamp(-90.0, 90.0))
+        .collect::<Vec<_>>();
+    let normalize = |lon: f64| {
+        if (-180.0..180.0).contains(&lon) {
+            lon
+        } else {
+            let value = lon.rem_euclid(360.0);
+            if value >= 180.0 {
+                value - 360.0
+            } else {
+                value
+            }
+        }
+    };
+    let lon_w = (1..=nlon)
+        .map(|i| normalize(-180.0 + del_lon * (i - 1) as f64))
+        .collect::<Vec<_>>();
+    let lon_e = (1..=nlon)
+        .map(|i| normalize(-180.0 + del_lon * i as f64))
+        .collect::<Vec<_>>();
+    let mut file =
+        netcdf::create(path).with_context(|| format!("cannot create {}", path.display()))?;
+    file.add_dimension("nlon", nlon)?;
+    file.add_dimension("nlat", nlat)?;
+    for (name, dimension, values) in [
+        ("lon_w", "nlon", &lon_w),
+        ("lon_e", "nlon", &lon_e),
+        ("lat_s", "nlat", &lat_s),
+        ("lat_n", "nlat", &lat_n),
+    ] {
+        file.add_variable::<f64>(name, &[dimension])?
+            .put_values(values, ..)?;
+    }
+    file.add_variable::<i32>("landmask", &["nlat", "nlon"])?
+        .put_values(&vec![1_i32; nlat * nlon], ..)?;
+    file.close()
+        .with_context(|| format!("cannot close {}", path.display()))
+}
+
 pub fn inspect_spatial_input(
     path: impl AsRef<Path>,
     grid_kind: &str,

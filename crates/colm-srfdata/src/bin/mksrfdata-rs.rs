@@ -4574,12 +4574,17 @@ fn materialize_case(args: &[String]) -> Result<()> {
                 directory.display().to_string(),
             ]);
         }
-        command.preflight()?;
-        return if command.pft_or_pc {
-            materialize_spatial_pft(&command.args)
-        } else {
-            materialize_spatial_lct(&command.args)
-        };
+        let result = command.preflight().and_then(|()| {
+            if command.pft_or_pc {
+                materialize_spatial_pft(&command.args)
+            } else {
+                materialize_spatial_lct(&command.args)
+            }
+        });
+        if let Some(path) = &command.temporary_mesh {
+            let _ = std::fs::remove_file(path);
+        }
+        return result;
     }
     ensure!(
         spatial_blocks.is_none(),
@@ -4628,6 +4633,8 @@ fn materialize_case(args: &[String]) -> Result<()> {
 
 struct SpatialCaseCommand {
     args: Vec<String>,
+    /// 按分辨率现造的临时网格文件，子命令跑完后删除。
+    temporary_mesh: Option<PathBuf>,
     required_files: Vec<PathBuf>,
     required_directories: Vec<PathBuf>,
     pft_or_pc: bool,
@@ -4795,6 +4802,7 @@ fn spatial_case_command_with_subgrid(
     let Some((kind, mesh)) = spatial_mesh(&document, grid_kind)? else {
         return Ok(None);
     };
+    let (mesh, temporary_mesh) = gridbased_mesh_by_res(&document, kind, mesh)?;
     let blocks = match blocks {
         Some(blocks) => vec!["--blocks".to_owned(), blocks[0].clone(), blocks[1].clone()],
         None => namelist_block_args(&document)?,
@@ -5299,6 +5307,7 @@ fn spatial_case_command_with_subgrid(
 
     Ok(Some(SpatialCaseCommand {
         args,
+        temporary_mesh,
         required_files,
         required_directories,
         pft_or_pc: pft || pc,
@@ -5335,10 +5344,11 @@ fn spatial_mesh(
         return match (kind, mesh, catchment) {
             // 空间内核却没给网格文件：上游 GRIDBASED 会按 `DEF_GRIDBASED_*_res` 现造网格，这条没移植；
             // 退回单点物化只会产出一份错的地表。
-            (_, None, None) => bail!(
-                "a spatial kernel needs DEF_file_mesh (or DEF_CatchmentMesh_data); building the \
-                 GRIDBASED mesh from DEF_GRIDBASED_lon_res/lat_res is not ported"
-            ),
+            // GRIDBASED 没给网格文件：按 `DEF_GRIDBASED_*_res` 现造（调用方见 [`gridbased_mesh_by_res`]）。
+            (SpatialInputKind::GridBased, None, None) => Ok(Some((kind, PathBuf::new()))),
+            (_, None, None) => {
+                bail!("a spatial kernel needs DEF_file_mesh (or DEF_CatchmentMesh_data)")
+            }
             (SpatialInputKind::Catchment, None, Some(path)) => Ok(Some((kind, path))),
             (SpatialInputKind::GridBased | SpatialInputKind::Unstructured, Some(path), None) => {
                 Ok(Some((kind, path)))
@@ -5367,6 +5377,42 @@ fn spatial_mesh(
             )))
         }
         (Some(_), Some(_)) => unreachable!("validated above"),
+    }
+}
+
+/// `init_gridbased_mesh_grid`：GRIDBASED 而 `DEF_file_mesh` 不存在（`inquire(exist)` 为假，含没写的情形）时，
+/// 按 `DEF_GRIDBASED_lon_res/lat_res`（默认 0.5°）在临时目录现造全球网格。返回要用的网格路径与临时文件。
+fn gridbased_mesh_by_res(
+    document: &colm_namelist::Document,
+    kind: SpatialInputKind,
+    mesh: PathBuf,
+) -> Result<(PathBuf, Option<PathBuf>)> {
+    if kind != SpatialInputKind::GridBased || mesh.is_file() {
+        return Ok((mesh, None));
+    }
+    let lon_res = case_f64_or(document, "DEF_GRIDBASED_lon_res", 0.5)?;
+    let lat_res = case_f64_or(document, "DEF_GRIDBASED_lat_res", 0.5)?;
+    let path = std::env::temp_dir().join(format!(
+        "colm-gridbased-mesh-{}-{}.nc",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_nanos())
+    ));
+    colm_srfdata::mesh::write_gridbased_mesh_by_res(&path, lon_res, lat_res)?;
+    println!(
+        "no DEF_file_mesh at {}: building the GRIDBASED mesh from {lon_res} x {lat_res} degrees",
+        mesh.display()
+    );
+    Ok((path.clone(), Some(path)))
+}
+
+fn case_f64_or(document: &colm_namelist::Document, field: &str, default: f64) -> Result<f64> {
+    match document.get(field) {
+        None => Ok(default),
+        Some(value) => value
+            .as_f64()
+            .with_context(|| format!("{field} must be numeric")),
     }
 }
 
@@ -7888,6 +7934,8 @@ mod tests {
 ",
         );
 
+        // 网格文件要真的存在：不存在时上游（与这里）改按 `DEF_GRIDBASED_*_res` 现造网格。
+        std::fs::write(root.join("mesh.nc"), b"").unwrap();
         let blocks = ["2".to_owned(), "3".to_owned()];
         let command =
             spatial_case_command(&namelist, Some(SiteMode::Igbp), false, None, Some(&blocks))
@@ -8281,6 +8329,7 @@ mod tests {
             std::env::temp_dir().join(format!("colm-srfdata-preflight-{}", std::process::id()));
         let command = SpatialCaseCommand {
             args: Vec::new(),
+            temporary_mesh: None,
             required_files: vec![root.join("missing.nc")],
             required_directories: Vec::new(),
             pft_or_pc: false,

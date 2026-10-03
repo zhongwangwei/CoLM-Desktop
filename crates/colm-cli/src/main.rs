@@ -2792,9 +2792,21 @@ fn preflight_spatial_case(
     } else {
         "DEF_file_mesh"
     };
-    let mesh = string(mesh_field)?;
-    colm_srfdata::mesh::inspect_spatial_input(&mesh, grid_kind)
-        .with_context(|| format!("spatial preflight failed for {}", mesh.display()))?;
+    // GRIDBASED 不存在网格文件时上游按 `DEF_GRIDBASED_*_res` 现造（`init_gridbased_mesh_grid`），
+    // mksrfdata 照做；其余网格类型必须有文件。
+    let mesh = match (grid_kind, doc.get(mesh_field)) {
+        ("latlon", None) => None,
+        _ => Some(string(mesh_field)?),
+    };
+    match mesh {
+        Some(mesh) if grid_kind != "latlon" || mesh.is_file() => {
+            colm_srfdata::mesh::inspect_spatial_input(&mesh, grid_kind)
+                .with_context(|| format!("spatial preflight failed for {}", mesh.display()))?;
+        }
+        _ => eprintln!(
+            "note: no GRIDBASED mesh file; mksrfdata builds the mesh from DEF_GRIDBASED_lon_res/lat_res"
+        ),
+    }
     let existing_surface = matches!(
         doc.get("USE_srfdata_from_larger_region"),
         Some(colm_namelist::Value::Bool(true))
