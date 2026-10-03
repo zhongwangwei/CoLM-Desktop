@@ -28943,3 +28943,15 @@ Rust 之前的拒绝理由（"城市单点混有别的地类的 patch"）不对�
 - 上一轮遗留的单测改为接受城市 + 方案 1。
 
 `bm1` 停在 Rust mksrfdata（"pctpfts: PFT/PC fractions must sum to 1 or 100"）。会话起点以来 `colm-srfdata` 没改过，所以这不是回归，是那个站点原有的数据问题。
+
+## 第 538 轮：上游复核（2026-10-03，`CoLM-SYSU-integration@85cf2328`）
+
+- 集成仓库本地 `master` 与 `origin/master` 都是 `85cf2328`（2026-09-29），没有新提交，也没有未合入的分支；第 437 轮已同步到这一版。
+- `python3 oracle/scripts/test_upstream_f48_sync.py`：`CoLM202X f48 production sync: PASS`。本会话对 vendor 的几处修补（第 40、45、46 条）没有冲掉同步内容。
+- 本会话改过的两个 vendor 文件（`MOD_Lulcc_MassEnergyConserve.F90`、`MOD_IniTimeVariable.F90`）与集成仓库的差异只有两类：宏 → 运行期开关的改造，以及标了 `FIX` 的修补。
+- 第 44、45、46 条在集成仓库原样存在：
+  - `MOD_IniTimeVariable.F90:1366` 的 `zi = -zi-dz_soisno(i)`；
+  - `MOD_Lulcc_MassEnergyConserve.F90:814` 把 `get_zwt_from_wa` 的结果直接写进 `zwt(np)`；
+  - `:971` 的 `selfu_ = -1` 只在 `nurb > 0` 分支里。
+  
+  所以它们是上游缺陷，不是 vendor 改造带进来的。
