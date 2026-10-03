@@ -28874,3 +28874,29 @@ Rust：
   - `urban_patch_water_is_recomposed_from_the_urban_columns`。
 
 回归 `g3 g3m g3t g3mt g3p g3pm g3pmt g3c g3cm` 全部逐位一致，clippy 无告警。
+
+## 第 535 轮：MEC 的 `get_zwt_from_wa` 分支（水位在土柱以下）；vendor 修毫米/米单位缺陷
+
+上游 MEC 在混合后 `wa < 0` 时调 `get_zwt_from_wa` 反解水位（`:786-807`）：
+- 土壤水力参数取**最底层**：Campbell 用 `bsw`，否则用 van Genuchten 五参数；
+- 容差 `tol_z = 1e-3/nl_soil/2`（毫米），`tol_v = tol_z / maxval(sp_dz)`；
+- `zmin = sp_zi(nl_soil)`，以毫米计。
+
+上游把毫米结果直接写进以米计的 `zwt`（upstream-bugs 第 45 条），vendor 已改为除以 1000。
+
+Rust：
+- `lulcc_mec` 去掉"get_zwt_from_wa is not ported"的拒绝，改调 `colm_core::variably_saturated_flow::water_table_from_aquifer`，结果除以 1000；
+- `MecOptions.campbell_soil`；
+- 底层参数只在需要时才读，所以 LCT 单测夹具不必带这些变量。
+- 修了一个自己引入的错误：删掉局部 `let last` 后，`porsl.at(np, last)` 悄悄绑定到外层单元区间的 `last`（一个 patch 下标），debug 构建越界才暴露。
+
+**新验收算例 `g3a`**：
+- 区域：38–40°N、100–102°E，半度 GRIDBASED 网格 `tmp/grid/ga_mesh.nc`（`colm-cli mesh-new --grid-kind latlon`）；g3 底改 MEC，Rust 预处理 2005/2006，各 65 个 patch，其中 44 个份额有变化。
+- 冷启动后一天就换年，`wa` 全是 0，走不到这一支。因此两侧用**同一份**改过的初值：49 个土壤 patch 设 `wa = -300`、`zwt = 4.0`。
+- 未修内核：`zwt` 最大 5865.23；修后内核：5.865。
+- Rust 起初在换年后第一步报 "VSF explicit update layer inputs are invalid"：
+  - 原因是上一子步的含水量算出 `-7.5e-18`，Rust 的 `previous_liquid_water >= 0` 比上游严，上游不查；
+  - 下界按上界同样的 `volume_tolerance` 放宽，只影响校验、不改数值；报错里也补上了层号与各量。
+- 结果：history 4、restart 8 逐位一致。
+
+`kernels/latlon` 已带修补重编。回归逐位一致：`g3 g3m g3mt g3pm g3cm g3u g3um`。单测（`--test-threads=1`）：core 479、init 176 通过。

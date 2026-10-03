@@ -159,6 +159,7 @@ fn options() -> MecOptions {
         variably_saturated_flow: true,
         vegetation_snow: true,
         snow_cover_exponent: 1.0,
+        campbell_soil: true,
     }
 }
 

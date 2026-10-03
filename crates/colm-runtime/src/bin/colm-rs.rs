@@ -2447,6 +2447,8 @@ fn lulcc_transition(
                 vegetation_snow: case.physics.vegetation_snow,
                 // 用已按 schema 解析好的值（缺省是 Fortran 字面量 `1.0_r8`）。
                 snow_cover_exponent: case.physics.snow_cover_exponent,
+                campbell_soil: case.physics.hydraulic_model
+                    == colm_core::HydraulicModel::Campbell,
             })
         })
         .transpose()?;

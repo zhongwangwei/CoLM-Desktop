@@ -49,6 +49,8 @@ pub struct MecOptions {
     pub vegetation_snow: bool,
     /// `DEF_TUNING_SNOW_COVER_EXPONENT`（`snowfraction` 的 `m`）。
     pub snow_cover_exponent: f64,
+    /// `DEF_USE_Campbell_SOIL_MODEL`：`get_zwt_from_wa` 的土壤水力参数取 `bsw`，否则取 van Genuchten 五参数。
+    pub campbell_soil: bool,
 }
 
 /// MEC 的输入：新旧两侧的重启、单元归属与新 patch 的转移份额。
@@ -227,6 +229,11 @@ pub fn mass_energy_conserve(
     let tsai = inputs.new_time.floats("tsai")?;
     let csol_old = load(inputs.old_const, "csol")?;
     let porsl = load(inputs.new_const, "porsl")?;
+    // `get_zwt_from_wa` 用的最底层土壤水力参数，只在混合后 `wa < 0` 时才读。
+    let bottom = |name: &str, np: usize| -> Result<f64> {
+        let field = load(inputs.new_const, name)?;
+        Ok(field.at(np, field.row - 1))
+    };
     let soil_layers = csol_old.row;
     ensure!(
         porsl.row == soil_layers && state["t_soisno"].row == SNOW_LAYERS + soil_layers,
@@ -618,23 +625,56 @@ pub fn mass_energy_conserve(
             set!("t_grnd", 0, t_grnd);
 
             if options.variably_saturated_flow {
-                ensure!(
-                    get!("wa", 0) >= 0.0,
-                    "new patch {np}: the mixed water table is below the soil column \
-                     (get_zwt_from_wa is not ported)"
-                );
-                let mut zwt = get!("zwt", 0);
-                for l in (0..soil_layers).rev() {
-                    let s = SNOW_LAYERS + l;
-                    let vf_water = (get!("wliq_soisno", s) / DENH2O) / dz_soi[l];
-                    let vf_ice = (get!("wice_soisno", s) / DENICE) / dz_soi[l];
-                    if vf_water + vf_ice < porsl.at(np, l) {
-                        zwt = zi_soi[l + 1];
-                        break;
-                    } else if l == 0 {
-                        zwt = 0.0;
+                let wa = get!("wa", 0);
+                let zwt = if wa >= 0.0 {
+                    let mut zwt = get!("zwt", 0);
+                    for l in (0..soil_layers).rev() {
+                        let s = SNOW_LAYERS + l;
+                        let vf_water = (get!("wliq_soisno", s) / DENH2O) / dz_soi[l];
+                        let vf_ice = (get!("wice_soisno", s) / DENICE) / dz_soi[l];
+                        if vf_water + vf_ice < porsl.at(np, l) {
+                            zwt = zi_soi[l + 1];
+                            break;
+                        } else if l == 0 {
+                            zwt = 0.0;
+                        }
                     }
-                }
+                    zwt
+                } else {
+                    // `:786-807`：水位落到土柱以下时由亏缺量反解。上游把 `get_zwt_from_wa` 的
+                    // 毫米结果直接写进以米计的 `zwt`（upstream-bugs 第 45 条，vendor 已改为
+                    // 除以 1000）；容差照上游 `tol_z = 1e-3/nl_soil/2`、`tol_v = tol_z/maxval(sp_dz)`。
+                    let model = if options.campbell_soil {
+                        colm_core::SoilHydraulicModel::Campbell {
+                            bsw: bottom("bsw", np)?,
+                        }
+                    } else {
+                        colm_core::SoilHydraulicModel::VanGenuchten {
+                            alpha_vgm: bottom("alpha_vgm", np)?,
+                            n_vgm: bottom("n_vgm", np)?,
+                            l_vgm: bottom("L_vgm", np)?,
+                            sc_vgm: bottom("sc_vgm", np)?,
+                            fc_vgm: bottom("fc_vgm", np)?,
+                        }
+                    };
+                    let tol_z = 1.0e-3 / soil_layers as f64 / 2.0;
+                    let sp_zi: Vec<f64> = zi_soi.iter().map(|z| z * 1000.0).collect();
+                    let max_dz = (1..=soil_layers)
+                        .map(|l| sp_zi[l] - sp_zi[l - 1])
+                        .fold(f64::NEG_INFINITY, f64::max);
+                    let zwt_mm = colm_core::variably_saturated_flow::water_table_from_aquifer(
+                        porsl.at(np, soil_layers - 1),
+                        bottom("theta_r", np)?,
+                        bottom("psi0", np)?,
+                        model,
+                        tol_z / max_dz,
+                        tol_z,
+                        wa,
+                        sp_zi[soil_layers],
+                    )
+                    .with_context(|| format!("get_zwt_from_wa for new patch {np}"))?;
+                    zwt_mm / 1000.0
+                };
                 set!("zwt", 0, zwt);
             }
         }

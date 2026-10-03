@@ -103,6 +103,7 @@ CONTAINS
 
    ! update for zwt, wa, ldew
    real(r8) :: tolerance, tol_z, tol_v, zi_soisno(0:nl_soil), sp_zi(0:nl_soil), sp_dz(1:nl_soil)
+   real(r8) :: zwt_mm   ! get_zwt_from_wa works in mm (FIX: upstream-bugs #45)
    ! Used to be 1 under Campbell, 5 under vanGenuchten; always sized for
    ! the union now, see the fill further below (Campbell only ever uses
    ! prms(1,:)).
@@ -803,8 +804,10 @@ ENDIF
                               sp_zi(0:nl_soil) = zi_soisno(0:nl_soil) * 1000.0   ! from meter to mm
                               sp_dz(1:nl_soil) = sp_zi(1:nl_soil) - sp_zi(0:nl_soil-1)
                               tol_v = tol_z / maxval(sp_dz)
+! ==== FIX: get_zwt_from_wa returns mm (zmin = sp_zi is mm); zwt is in m (upstream-bugs #45) ====
                               CALL get_zwt_from_wa(porsl(nl_soil,np), theta_r(nl_soil,np), psi0(nl_soil,np), hksati(nl_soil,np), &
-                                                   nprms, prms(:,nl_soil), tol_v, tol_z, wa(np), sp_zi(nl_soil), zwt(np)         )
+                                                   nprms, prms(:,nl_soil), tol_v, tol_z, wa(np), sp_zi(nl_soil), zwt_mm          )
+                              zwt(np) = zwt_mm / 1000.0
                            ENDIF
                         ENDIF
 

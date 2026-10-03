@@ -6463,10 +6463,22 @@ fn validate_explicit(input: VariableSaturatedExplicitInput<'_>) -> Result<usize>
                     <= thickness
                 && input.liquid_water[layer] >= 0.0
                 && input.liquid_water[layer] <= input.porosity[layer]
-                && input.previous_liquid_water[layer] >= 0.0
+                // 上一子步的含水量是求解器算出来的，舍入可能让它比 0 小一点点（如 -7.5e-18，
+                // 第 535 轮干旱区 LULCC）或比孔隙度大一点点；上游不查，这里两侧都放宽 `tol_v`。
+                && input.previous_liquid_water[layer] >= -input.volume_tolerance
                 && input.previous_liquid_water[layer]
                     <= input.porosity[layer] + input.volume_tolerance,
-            "VSF explicit update layer inputs are invalid"
+            "VSF explicit update layer inputs are invalid at layer {layer} (thickness {thickness}): \
+             porosity {}, theta_r {}, psi_s {}, wf {}, vl {}, wt {}, prev wf {}, prev vl {}, prev wt {}",
+            input.porosity[layer],
+            input.residual_water[layer],
+            input.saturated_potential_mm[layer],
+            input.wetting_front_mm[layer],
+            input.liquid_water[layer],
+            input.water_table_thickness_mm[layer],
+            input.previous_wetting_front_mm[layer],
+            input.previous_liquid_water[layer],
+            input.previous_water_table_thickness_mm[layer]
         );
     }
     Ok(layers)
