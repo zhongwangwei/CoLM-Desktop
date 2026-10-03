@@ -834,16 +834,7 @@ fn run_spatial_segment(
                 .map(|(patch, _)| (patch, templates[patch].patch_type))
                 .collect::<Vec<_>>()
         );
-        // CROP 的 `f_manunitro` 与逐 PFT 作物历史的 `filter` 没与上 `forcmask_pch`
-        // （`MOD_Hist.F90:2356-2382` 等），被遮蔽 patch 的陈旧累加会漏进去，还没实测，先拒绝。
-        // 其余已对齐：BGC 火灾 `tsoi17` 广播跳过被遮蔽 patch 选"最后一个"（第 541 轮）；
-        // LULCC（第 539 轮）；漫滩回馈（第 540 轮）。
-        ensure!(
-            physics.bgc.is_none_or(|bgc| !bgc.crop),
-            "{masked} patch(es) lie entirely on missing forcing cells (forcmask_pch = .false.); \
-             masking them is not ported with CROP, run this case with --engine fortran or \
-             enlarge the forcing coverage"
-        );
+        // 已对齐：BGC（含 CROP）、火灾 `tsoi17` 广播（第 541、542 轮）、LULCC（第 539 轮）、漫滩回馈（第 540 轮）。
     }
     // 静态面积（`landarea` 等）的过滤也与上 `forcmask_pch`，所以 history 网格在掩膜之后建。
     let mut history_grid = if writes_history && !vector_history {
@@ -4146,9 +4137,22 @@ fn write_evolved_restart(
                 anyhow::bail!("patch {} has no PFT subgrid to write back", template.patch);
             };
             let mut overrides = pft_template.overrides(pft);
-            // 被遮蔽的 patch：只有 `LAI_readin` 改过的 `tlai_p`/`tsai_p`。
+            // 被遮蔽的 patch：只有起跑时对整列赋值的量 —— `LAI_readin` 的 `tlai_p`/`tsai_p`，
+            // 以及 CROP 下 `CROP_readin`（`CoLM.F90:430`）的施肥、播种日与灌溉方式。
             if snapshot.masked {
                 overrides.retain(|o| matches!(o.name.as_str(), "tlai_p" | "tsai_p"));
+                if let Some(bgc) = &state.bgc {
+                    overrides.extend(
+                        colm_runtime::bgc::BgcTemplate::overrides(bgc, pft_source)
+                            .into_iter()
+                            .filter(|o| {
+                                matches!(
+                                    o.name.as_str(),
+                                    "manunitro_p" | "fertnitro_p" | "plantdate_p" | "irrig_method_p"
+                                )
+                            }),
+                    );
+                }
                 lists.push(overrides);
                 continue;
             }
@@ -4195,12 +4199,13 @@ fn write_evolved_restart(
     let urban_patches = templates
         .iter()
         .zip(states)
-        .filter_map(|(template, state)| {
+        .zip(snapshots)
+        .filter_map(|((template, state), snapshot)| {
             template
                 .urban
                 .as_ref()
                 .zip(state.urban.as_ref())
-                .map(|(t, s)| (template, state, t, s))
+                .map(|(t, s)| (template, state, t, s, snapshot.masked))
         })
         .collect::<Vec<_>>();
     if !urban_patches.is_empty() {
@@ -4214,7 +4219,7 @@ fn write_evolved_restart(
         let urban_count =
             colm_init::RestartFile::open(&urban_path(restart_in)?)?.dimension("urban")?;
         let mut merged: Option<Vec<colm_init::RestartOverride>> = None;
-        for (template, state, urban_template, urban) in urban_patches {
+        for (template, state, urban_template, urban, masked) in urban_patches {
             // `UrbanLAI_readin` 同时写 `urb_lai(u)` 与 `tlai(npatch)`（两者恒等），所以装了城市月度
             // LAI 时 `tree_lai`/`tree_sai` 就是当前的 `tlai`/`tsai`；没装时二者都停在重启值。
             let tree = template
@@ -4227,7 +4232,12 @@ fn write_evolved_restart(
                         state.energy.temporal_canopy.stem_area_index,
                     )
                 });
-            let overrides = urban_template.overrides(urban, tree)?;
+            // 被遮蔽的单元整步跳过：本单元那一格保留起跑值（`tree_lai/tree_sai` 除外）。
+            let overrides = if masked {
+                urban_template.masked_overrides(urban, tree)?
+            } else {
+                urban_template.overrides(urban, tree)?
+            };
             match merged.as_mut() {
                 None => merged = Some(overrides),
                 Some(merged) => {

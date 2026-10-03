@@ -3691,6 +3691,31 @@ impl UrbanTemplate {
     }
 }
 
+impl UrbanTemplate {
+    /// 被强迫缺测遮蔽、整步跳过的城市单元：与 [`Self::overrides`] 同名同序（拼整变量时按位置对齐），
+    /// 但本单元那一格放回起跑重启的值 —— 只有 `UrbanLAI_readin` 对所有单元生效的 `tree_lai/tree_sai` 例外。
+    /// 空雪槽温度因此保持重启里的值（如冷启动的 283），而不是组装状态时清成的 0。
+    pub fn masked_overrides(
+        &self,
+        urban: &colm_core::UrbanPatchState,
+        tree_area_index: Option<(f64, f64)>,
+    ) -> Result<Vec<RestartOverride>> {
+        let mut overrides = self.overrides(urban, tree_area_index)?;
+        for entry in &mut overrides {
+            if matches!(entry.name.as_str(), "tree_lai" | "tree_sai") {
+                continue;
+            }
+            let (width, base) = self
+                .restart_values
+                .get(entry.name.as_str())
+                .with_context(|| format!("the urban restart has no {}", entry.name))?;
+            let unit = self.urban_index * width..(self.urban_index + 1) * width;
+            entry.values[unit.clone()].copy_from_slice(&base[unit]);
+        }
+        Ok(overrides)
+    }
+}
+
 /// 覆盖名要 `&'static str`；这些名字只有几十个、只在写出时生成一次。
 fn leak(name: String) -> &'static str {
     Box::leak(name.into_boxed_str())

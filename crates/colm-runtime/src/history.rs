@@ -938,6 +938,26 @@ impl HistoryAccumulator {
     }
 
     fn write_plain_means(&self, buffer: &mut HistoryBuffers, record: usize) -> Result<()> {
+        self.write_plain_means_where(buffer, record, |_| true)
+    }
+
+    /// 被强迫缺测遮蔽的 patch：上游各 `filter` 都与上了 `forcmask_pch`，唯独 CROP 段按作物类别
+    /// 现建的那几个没有（`MOD_Hist.F90:2356-2900` 的 `f_manunitro`、`f_huiswheat`、`f_fertnitro_*`、
+    /// `f_irrig_method_*`），被遮蔽的作物 patch 照样进它们的分子分母。
+    fn write_masked_crop_means(&self, buffer: &mut HistoryBuffers, record: usize) -> Result<()> {
+        self.write_plain_means_where(buffer, record, |name| {
+            matches!(name, "manunitro" | "huiswheat")
+                || name.starts_with("fertnitro_")
+                || name.starts_with("irrig_method_")
+        })
+    }
+
+    fn write_plain_means_where(
+        &self,
+        buffer: &mut HistoryBuffers,
+        record: usize,
+        keep: impl Fn(&str) -> bool,
+    ) -> Result<()> {
         ensure!(
             self.steps > 0,
             "the history accumulator reached a write step without accumulating anything"
@@ -945,7 +965,7 @@ impl HistoryAccumulator {
         // 网格聚合的分母（上游的 `filter`）：交过值、没被过滤就计入，哪怕整段都是 `spval`；
         // 只有 `f_alb`（`filter_dt`）与本地正午量（`nac_ln > 0`）还要求自己的计数非零。
         for name in &self.offered {
-            if !buffer.declares(name) || self.filtered.contains(name) {
+            if !keep(name) || !buffer.declares(name) || self.filtered.contains(name) {
                 continue;
             }
             let count = match self.sums.get(name) {
@@ -960,6 +980,9 @@ impl HistoryAccumulator {
         }
         buffer.set_steps(record, self.steps as f64)?;
         for (name, accumulated) in &self.sums {
+            if !keep(name) {
+                continue;
+            }
             // 只为旁车累加、本算例历史文件里没有的量（上游照样 `acc1d`，只是不写出）。
             if !buffer.declares(name) && crate::history_sidecar::is_window_key(name) {
                 continue;
@@ -1806,7 +1829,12 @@ impl<S: HistorySink> MaskedBgcSink<'_, S> {
         if name == "totsoiln_vr" {
             return self.soil;
         }
-        STATES.contains(&name) || name == "lnfm" || name.ends_with("_vr")
+        // CROP：`CROP_readin` 与作物汇总对整列赋值的量（g1cropm 实测，第 542 轮）。
+        let crop = name == "cphase"
+            || name == "pdrice2"
+            || name.starts_with("fertnitro_")
+            || name.starts_with("irrig_method_");
+        STATES.contains(&name) || name == "lnfm" || name.ends_with("_vr") || crop
     }
 }
 
@@ -2869,7 +2897,7 @@ impl HistorySession {
         // 土壤、湿地、湖与不开城市模型时的城市 patch 实测过（g1fmm、g1bgcm）：累加的变量集合相同。
         // 冰川与城市模型（城市时间变量另有一套累加）还没实测。
         ensure!(
-            matches!(template.patch_type, 0 | 1 | 2 | 4) && template.urban.is_none(),
+            matches!(template.patch_type, 0 | 1 | 2 | 4),
             "patch {} (patchtype {}) lies entirely on missing forcing cells; masking is ported for \
              soil, wetland, lake and non-urban-model urban patches only",
             template.patch,
@@ -4467,11 +4495,18 @@ impl HistorySession {
             buffer.set_window(record.record, steps as f64 * deltim, end_minutes)?;
         }
         for (patch, means) in means.iter().enumerate() {
-            // 被强迫缺测遮蔽的 patch 不进任何聚合（值与分母都没有它）。
+            // 被强迫缺测遮蔽的 patch 不进聚合（值与分母都没有它），只有 CROP 那几个没与上
+            // `forcmask_pch` 的作物历史除外（见 [`PatchMeans::write_masked_crop_means`]）。
             if forcing_mask
                 .as_ref()
                 .is_some_and(|mask| !mask.get(patch).copied().unwrap_or(true))
             {
+                if self.bgc.is_some_and(|bgc| bgc.crop) && means.steps > 0 {
+                    if means_are_split(self.accumulators.len()) {
+                        buffer.select_patch(Some(patch))?;
+                    }
+                    means.write_masked_crop_means(buffer, record.record)?;
+                }
                 continue;
             }
             if means_are_split(self.accumulators.len()) {

@@ -29027,3 +29027,27 @@ colm-rs: 12 patch(es) lie entirely on missing forcing cells (forcmask_pch = .fal
 - `g1cropp` 是纯 Fortran 全链路对纯 Rust 全链路，Rust 侧重跑了全套预处理。
 
 colm-runtime 单测 151 通过，clippy 无告警。
+
+## 第 542 轮：被强迫缺测遮蔽的 patch + 城市模型、CROP
+
+**城市模型（`DEF_URBAN_RUN`）**：
+- 算例 `g1urbm`：g1fmm 底，`CMFDmb` 强迫，48 个 patch 被遮蔽，其中有城市。
+- 差异只在城市时间重启：被遮蔽城市单元的空雪层温度（`t_roofsno/t_gimpsno/t_gpersno/t_lakesno`），Fortran 保留重启里的 283，Rust 组装时清成了 0。
+- 改法：新加 `UrbanTemplate::masked_overrides`，与 `overrides` 同名同序（拼整变量按位置对齐），但本单元那一格放回起跑值；只有 `UrbanLAI_readin` 对所有单元生效的 `tree_lai/tree_sai` 例外。
+- 算例用逐日历史。月历史会撞上一个与掩膜无关的原有缺口："urban accumulators are written for single-patch urban sites only"（空间城市的月历史旁车还没移植），已记入剩余清单。
+
+**CROP**（`g1cropm`：`CMFDmb` + g1crop 的开关，`latlon-crop` 内核，48 个 patch 被遮蔽）差三处，都已对齐：
+1. **PFT 续跑**：`CROP_readin`（`CoLM.F90:430`）起跑时对整列 PFT 赋值（不施肥时 `manunitro_p(:) = 0` 等）。被遮蔽 patch 的 PFT 续跑现在除 `tlai_p/tsai_p` 外，也写 `manunitro_p/fertnitro_p/plantdate_p/irrig_method_p`。
+2. **旁车**：被遮蔽 patch 上还累加作物数据量 `cphase`、`pdrice2`、`fertnitro_*`、`irrig_method_*`，已加进 `MaskedBgcSink`。
+3. **历史**：CROP 段按作物类别现建的过滤没与上 `forcmask_pch`（`MOD_Hist.F90:2356-2900`），涉及 `f_manunitro`、`f_huiswheat`、`f_fertnitro_*`、`f_irrig_method_*`，被遮蔽的作物 patch 照样进分子分母。Rust 写均值时对被遮蔽 patch 只写这几类（`write_masked_crop_means`）。
+
+**验收**：
+
+| 算例 | history | restart |
+|---|---|---|
+| `g1urbm`（含城市时间重启） | 2，bad 0 | 7，bad 0 |
+| `g1cropm`（含 PFT、BGC 与月旁车） | 2，bad 0 | 9，bad 0 |
+
+回归逐位一致：`g1crop g1cropp g1irr g1bgcm g1fmm g1urbp g1bgc g1ffm`。colm-runtime 单测 151 通过，clippy 无告警。
+
+**被遮蔽 patch 的组合现在只剩冰川没有实测**（本区域没有冰川），`push_masked` 仍拒绝 patchtype 3。
