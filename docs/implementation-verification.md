@@ -29286,3 +29286,16 @@ colm-rs: 21 patch(es) lie entirely on missing forcing cells (forcmask_pch = .fal
 - landdata 290 个文件、history 4、restart 16（土地覆盖年份都是 1995）逐位一致。
 
 **没测的**：真正换入 1990/1995/2000 的那一步要从 1985/1990/1995 跑满 5 年，本机两侧各要数小时。它与 ≥2000 的转换是同一套机制（SAT、MEC 都已逐位验证），区别只在判据与新年份，由上面的单测钉住。
+
+## 第 552 轮：mksrfdata 的块文件与按平均单元大小分块
+
+`block_set`（`MOD_Block.F90:104-160`）有三支，Rust 原来只接 `DEF_nx_blocks/DEF_ny_blocks`，另两支拒绝。
+- **`DEF_BlockInfoFile`**（文件存在时）：直接读 `lat_s/lat_n/lon_w/lon_e`，纬向若自北向南就翻转。新加 `BlockLayout::from_file`，`spatial-lct/spatial-pft` 子命令新加 `--block-file`。
+- **`DEF_AverageElementSize > 0`**：`nx = floor(360/(S/120*50))`，不超过 360，再往上找到 360 的因子；纬向同理用 180。照算出块数，走规则分块。块数算成 0 时上游整数除零，Rust 报错。
+- **块边界并入像元**（`MKSRFDATA.F90:201` 的 `pixel%assimilate_gblock`）：Rust 原来没做。规则分块的边界都在 500 m 格线上，不影响像元；块文件的边界可以任意。现在两个拓扑构建函数都把块边界作为一张坐标网格并入（与降尺度地形网格同一条路）。
+
+**验收**（gd 区域 LCT，2010-01-01 → 01-02，日重启；纯 Fortran 全链路对纯 Rust 全链路）：
+- `g1blk`：块文件，4×3 个块；经向边界取 0、113.31°E（故意不在 500 m 格线上）、114.25°E，纬向 0、24.5°N，并且按自北向南写入。landdata 1473 个文件（6 个块后缀）、history、restart 40 逐位一致。
+- `g1aes`：`DEF_AverageElementSize = 4.8` → 180×90 个 2° 块，区域横跨 4 个块。landdata 983 个文件、history、restart 28 逐位一致。
+
+colm-srfdata 单元测试 271 个全过。`tests/raster.rs` 的 5 个需要设 `COLM_RAWDATA`，与本次改动无关。

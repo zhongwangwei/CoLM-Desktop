@@ -295,6 +295,42 @@ impl BlockLayout {
         })
     }
 
+    /// `DEF_BlockInfoFile`（`MOD_Block.F90:107-121`）：直接读 `lat_s/lat_n/lon_w/lon_e`，
+    /// 纬向若自北向南就翻转成自南向北。经度不做归一化（上游也不做）。
+    pub fn from_file(path: impl AsRef<Path>) -> Result<Self> {
+        let path = path.as_ref();
+        let file = netcdf::open(path).with_context(|| format!("cannot open {}", path.display()))?;
+        let read = |name: &str| -> Result<Vec<f64>> {
+            Ok(file
+                .variable(name)
+                .with_context(|| format!("{name} is absent from {}", path.display()))?
+                .get_values::<f64, _>(..)?)
+        };
+        let (mut lat_s, mut lat_n) = (read("lat_s")?, read("lat_n")?);
+        if lat_s.first() > lat_s.last() {
+            lat_s.reverse();
+            lat_n.reverse();
+        }
+        let layout = Self {
+            lon_w: read("lon_w")?,
+            lon_e: read("lon_e")?,
+            lat_s,
+            lat_n,
+        };
+        layout.dimensions()?;
+        Ok(layout)
+    }
+
+    /// 块边界作为一张"网格"并入像元（`pixel%assimilate_gblock`）。
+    fn as_grid(&self) -> SpatialGrid {
+        SpatialGrid {
+            lon_w: self.lon_w.clone(),
+            lon_e: self.lon_e.clone(),
+            lat_s: self.lat_s.clone(),
+            lat_n: self.lat_n.clone(),
+        }
+    }
+
     fn dimensions(&self) -> Result<(usize, usize)> {
         ensure!(
             !self.lon_w.is_empty()
@@ -388,7 +424,7 @@ pub fn build_spatial_topology_with_filter_grid_and_raw_grids(
         bounds,
         filter_grid,
         extra_raw_grids,
-        coordinate_grids,
+        &with_block_edges(coordinate_grids, block_order),
     )?;
     let source = PixelSourceMapping { columns, rows };
 
@@ -534,7 +570,7 @@ pub fn build_catchment_spatial_topology_with_filter_and_raw_grids(
         bounds,
         filter.map(|filter| &filter.grid),
         extra_raw_grids,
-        coordinate_grids,
+        &with_block_edges(coordinate_grids, block_layout),
     )?;
     let source = PixelSourceMapping { columns, rows };
 
@@ -4798,6 +4834,14 @@ fn read_filter_row(
         }
     }
     Ok(output)
+}
+
+/// `MKSRFDATA.F90:201`：像元先并入块边界（规则分块的边界都在 500 m 格线上，不改变像元；
+/// `DEF_BlockInfoFile` 的边界可以任意）。
+fn with_block_edges(grids: &[SpatialGrid], blocks: Option<&BlockLayout>) -> Vec<SpatialGrid> {
+    let mut out = grids.to_vec();
+    out.extend(blocks.map(BlockLayout::as_grid));
+    out
 }
 
 fn assimilated_pixels(

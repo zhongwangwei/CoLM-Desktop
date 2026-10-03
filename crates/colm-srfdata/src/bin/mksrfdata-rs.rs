@@ -3770,6 +3770,13 @@ fn parse_spatial_lct(args: &[String]) -> Result<SpatialLctArgs> {
                 blocks = BlockLayout::regular(nx, ny)?;
                 index += 3;
             }
+            "--block-file" => {
+                blocks = BlockLayout::from_file(
+                    args.get(index + 1)
+                        .context("--block-file needs a block information NetCDF path")?,
+                )?;
+                index += 2;
+            }
             "--aggregation-zip" => {
                 zip_aggregation = args
                     .get(index + 1)
@@ -4184,6 +4191,13 @@ fn parse_spatial_pft(args: &[String]) -> Result<SpatialPftArgs> {
                     .context("invalid latitude block count")?;
                 blocks = BlockLayout::regular(nx, ny)?;
                 index += 3;
+            }
+            "--block-file" => {
+                blocks = BlockLayout::from_file(
+                    args.get(index + 1)
+                        .context("--block-file needs a block information NetCDF path")?,
+                )?;
+                index += 2;
             }
             "--aggregation-zip" => {
                 zip_aggregation = args
@@ -4781,13 +4795,9 @@ fn spatial_case_command_with_subgrid(
     let Some((kind, mesh)) = spatial_mesh(&document, grid_kind)? else {
         return Ok(None);
     };
-    let namelist_blocks;
     let blocks = match blocks {
-        Some(blocks) => Some(blocks),
-        None => {
-            namelist_blocks = namelist_block_counts(&document)?;
-            Some(&namelist_blocks)
-        }
+        Some(blocks) => vec!["--blocks".to_owned(), blocks[0].clone(), blocks[1].clone()],
+        None => namelist_block_args(&document)?,
     };
     ensure!(
         observation.is_none(),
@@ -4895,13 +4905,7 @@ fn spatial_case_command_with_subgrid(
     let mut required_files = vec![mesh.clone()];
     let mut required_directories = Vec::new();
     let mut args = Vec::new();
-    let blocks = blocks.map(|blocks| {
-        [
-            "--blocks".to_owned(),
-            blocks[0].to_owned(),
-            blocks[1].to_owned(),
-        ]
-    });
+    let blocks = Some(blocks);
 
     if lct {
         let land_cover = if urban {
@@ -5394,40 +5398,59 @@ fn spatial_patch_fractions(urban: bool, crop: bool, output_2m_wmo: bool) -> bool
     urban || crop || output_2m_wmo
 }
 
-/// 没给 `--blocks` 时的分块数：上游 `block_set`（`MOD_Block.F90:104-145`）在没有
-/// `DEF_BlockInfoFile`、`DEF_AverageElementSize <= 0` 时取 `DEF_nx_blocks`/`DEF_ny_blocks`（默认 72×36）。
-/// 分块决定文件名后缀与 patch 顺序，默认值不能自己另定。另两条分支没移植，遇到就拒绝。
-fn namelist_block_counts(document: &colm_namelist::Document) -> Result<[String; 2]> {
+/// 没给 `--blocks` 时的分块（`block_set`，`MOD_Block.F90:104-160`），转成转发给子命令的参数：
+/// - `DEF_BlockInfoFile` 存在：`--block-file <路径>`，直接读块边界；
+/// - 否则 `DEF_AverageElementSize > 0`：`nx = floor(360/(S/120*50))`，不超过 360，再往上找到 360 的因子
+///   （纬向同理，180）；
+/// - 否则 `DEF_nx_blocks`/`DEF_ny_blocks`（默认 72×36）。
+///
+/// 分块决定文件名后缀与 patch 顺序，默认值不能自己另定。
+fn namelist_block_args(document: &colm_namelist::Document) -> Result<Vec<String>> {
     let info = match document.get("DEF_BlockInfoFile") {
         None => None,
-        Some(Value::Str(path)) => {
-            let path = path.trim();
-            (!path.is_empty() && !path.eq_ignore_ascii_case("null")).then(|| path.to_owned())
-        }
+        Some(Value::Str(path)) => Some(path.trim().to_owned()),
         Some(_) => bail!("DEF_BlockInfoFile must be a path string"),
     };
-    ensure!(
-        info.as_deref().is_none_or(|path| !Path::new(path).exists()),
-        "DEF_BlockInfoFile block layouts are not ported to Rust mksrfdata; use --preprocessors fortran"
-    );
+    // `inquire(file=trim(DEF_BlockInfoFile), exist=fexists)`：不存在（含默认的 'null'）就走后两支。
+    if let Some(path) = info.filter(|path| !path.is_empty() && Path::new(path).is_file()) {
+        BlockLayout::from_file(&path)?;
+        return Ok(vec!["--block-file".to_owned(), path]);
+    }
     let average = match document.get("DEF_AverageElementSize") {
         None => 0.0,
         Some(value) => value
             .as_f64()
             .context("DEF_AverageElementSize must be numeric")?,
     };
-    ensure!(
-        average <= 0.0,
-        "DEF_AverageElementSize block layouts are not ported to Rust mksrfdata; use --preprocessors fortran"
-    );
-    let nx = case_i32(document, "DEF_nx_blocks", 72)?;
-    let ny = case_i32(document, "DEF_ny_blocks", 36)?;
+    let (nx, ny) = if average > 0.0 {
+        let count = |span: i32| -> Result<i32> {
+            // 上游以 `-fdefault-real-8` 编译：`360./(S/120.*50)` 自左向右的双精度运算。
+            let mut blocks =
+                ((f64::from(span) / (average / 120.0 * 50.0)).floor() as i32).min(span);
+            // 块比半个地球还大时为 0，上游随后 `mod(360, 0)` 整数除零。
+            ensure!(
+                blocks > 0,
+                "DEF_AverageElementSize = {average} leaves no block in {span} degrees \
+                 (upstream divides by zero)"
+            );
+            while blocks < span && span % blocks != 0 {
+                blocks += 1;
+            }
+            Ok(blocks)
+        };
+        (count(360)?, count(180)?)
+    } else {
+        (
+            case_i32(document, "DEF_nx_blocks", 72)?,
+            case_i32(document, "DEF_ny_blocks", 36)?,
+        )
+    };
     ensure!(
         nx > 0 && ny > 0,
-        "DEF_nx_blocks and DEF_ny_blocks must be positive"
+        "the block counts must be positive (DEF_nx_blocks/DEF_ny_blocks or DEF_AverageElementSize)"
     );
     BlockLayout::regular(nx as usize, ny as usize)?;
-    Ok([nx.to_string(), ny.to_string()])
+    Ok(vec!["--blocks".to_owned(), nx.to_string(), ny.to_string()])
 }
 
 fn case_bool(document: &colm_namelist::Document, field: &str, default: bool) -> Result<bool> {
