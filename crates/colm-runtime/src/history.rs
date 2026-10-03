@@ -847,9 +847,14 @@ impl HistoryAccumulator {
     /// 逐位实测 `f_solvdln` 在 264 条里 11 条真值、253 条 spval，真值约等于同小时的 `f_solvd`。
     /// **其余变量一律除以全局 `nac`**，即使某些步是 spval 被跳过：DiagMatrix 的 `*Cap` 在年末
     /// 那一小时里前一步还是 spval、后一步才有值，上游写出的是值的一半（第 421 轮）。
-    fn write_means(&self, buffer: &mut HistoryBuffers, record: usize) -> Result<()> {
+    fn write_means(
+        &self,
+        buffer: &mut HistoryBuffers,
+        record: usize,
+        bgc: Option<colm_core::bgc_driver::BgcSwitches>,
+    ) -> Result<()> {
         self.write_plain_means(buffer, record)?;
-        self.write_fire_history(buffer, record)
+        self.write_fire_history(buffer, record, bgc)
     }
 
     /// `DEF_USE_Dynamic_Wetland`：`f_wetwat` 写的是 `a_wdsrf / nac`（`MOD_Hist.F90:893-898`），
@@ -873,37 +878,53 @@ impl HistoryAccumulator {
     }
 
     /// 五个火灾历史量：复现上游传残留 `vecacc` 的写法（见 [`FIRE_HISTORY`]）。
-    fn write_fire_history(&self, buffer: &mut HistoryBuffers, record: usize) -> Result<()> {
-        if !buffer.declares("abm") {
+    ///
+    /// `vecacc` 的赋值不受 `DEF_hist_vars` 控制，火灾段之前最后一次赋值的来源由内核定：
+    /// - 默认内核：`f_wetzwt` 的 `a_zwt`；
+    /// - CROP：`f_grainc_to_cropprodc`；
+    /// - CROP + 灌溉：`f_runoff_supply`。
+    ///
+    /// 而 `write_history_variable_2d` 开头 `IF (.not. is_hist) RETURN`：
+    /// - 来源变量关掉时，残留是**原始累加和**，没除 `nac`，也没按 filter 置 `spval`；
+    /// - 五个火灾量各自只在开启时原地除一次 `nac` 并写出。
+    fn write_fire_history(
+        &self,
+        buffer: &mut HistoryBuffers,
+        record: usize,
+        bgc: Option<colm_core::bgc_driver::BgcSwitches>,
+    ) -> Result<()> {
+        if !FIRE_HISTORY.iter().any(|(name, _)| buffer.declares(name)) {
             return Ok(());
         }
         let steps = self.steps as f64;
-        // CROP 内核（声明了 `grainc_to_cropprodc`）：`vecacc` 残留的是 `a_grainc_to_cropprodc / nac`；
-        // 灌溉打开时其后还有灌溉段，最后一个是 `f_runoff_supply`（按 `filter_irrig` 置 `spval`）。
-        // 默认内核：`f_wetzwt` 把非湿地 patch 置成了 `spval`。
-        let residual = if buffer.declares("runoff_supply") {
-            "runoff_supply"
+        let crop = bgc.is_some_and(|switches| switches.crop);
+        let irrigation = bgc.is_some_and(|switches| switches.irrigation);
+        let (source, history_name) = if crop && irrigation {
+            ("runoff_supply", "runoff_supply")
+        } else if crop {
+            ("grainc_to_cropprodc", "grainc_to_cropprodc")
         } else {
-            "grainc_to_cropprodc"
+            ("zwt", "wetzwt")
         };
-        let mut value = match self.sums.get(residual) {
-            Some(Accumulated::Scalar { sum, count })
-                if buffer.declares(residual) && !self.filtered.contains(residual) && *count > 0 =>
-            {
-                sum / steps
-            }
+        let mut value = match self.sums.get(source) {
+            Some(Accumulated::Scalar { sum, count }) if *count > 0 => *sum,
             _ => colm_core::MISSING,
         };
-        // 网格/向量写出（空间算例）：`flux_map_and_write_2d` 不像单点的 `single_write_2d` 那样按 `filter`
-        // 把残留清成 `spval`，默认内核残留的是 `f_wetzwt` 的 `vecacc = a_zwt` 除过一次 `nac`
-        // （`MOD_Hist.F90:916-919`，每个 patch 都有）。
-        if !buffer.declares(residual) && buffer.is_spatial() {
-            value = match self.sums.get("zwt") {
-                Some(Accumulated::Scalar { sum, count }) if *count > 0 => sum / steps,
-                _ => colm_core::MISSING,
-            };
+        if buffer.declares(history_name) {
+            if value != colm_core::MISSING {
+                value /= steps;
+            }
+            // 被过滤的 patch 置 `spval`：CROP 的两个来源两种写出都这样；`f_wetzwt` 只有单点的
+            // `single_write_2d` 置（网格的 `flux_map_and_write_2d` 不改 `acc_vec`）。
+            let filtered = self.filtered.contains(history_name);
+            if filtered && (crop || !buffer.is_spatial()) {
+                value = colm_core::MISSING;
+            }
         }
         for (name, _) in FIRE_HISTORY {
+            if !buffer.declares(name) {
+                continue;
+            }
             buffer.include(name, record)?;
             if value == colm_core::MISSING {
                 continue;
@@ -4367,7 +4388,7 @@ impl HistorySession {
             if means_are_split(self.accumulators.len()) {
                 buffer.select_patch(Some(patch))?;
             }
-            means.write_means(buffer, record.record)?;
+            means.write_means(buffer, record.record, self.bgc)?;
             if self.dynamic_wetland {
                 means.write_dynamic_wetland_storage(buffer, record.record)?;
             }

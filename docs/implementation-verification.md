@@ -28658,3 +28658,17 @@ Rust 原来夹的是原始记录（注释也写反了）。以往的对照都是
 - 回归 `dl1 dl2 dl3 dl5 sl3 sl5 dc3 dc5 dh5 lk36ch4 tc4lk` 全部 ok；
 - `PLUMBER2_ROOT` 下 `cargo test -p oracle`：49 项通过；
 - `colm-forcing` 单测（含 PLUMBER2 集成测试）全部通过。
+
+## 第 527 轮：火灾历史量 + `DEF_hist_vars`
+
+火灾的五个历史量写的是 `vecacc` 的残留（见 `FIRE_HISTORY`）。上游有两条规则：
+- 给 `vecacc` 赋值不受开关控制：火灾段之前最后一次赋值的来源由内核定（默认内核 `a_zwt`，CROP 是 `grainc_to_cropprodc`，CROP + 灌溉是 `runoff_supply`）；
+- `write_history_variable_2d` 开头 `IF (.not. is_hist) RETURN`：来源变量关掉时残留是原始累加和（不除 `nac`、不置 `spval`），每个火灾量也只在开启时原地除一次 `nac`。
+
+Rust 原来用"有没有声明某变量"来猜内核，一有选择列表就会猜错，所以拒绝了。现在改为：
+- 按 BGC 开关（`crop`、`irrigation`）确定残留来源；
+- 按来源变量与各火灾量的开关决定除几次。
+
+**验收**：
+- `g1bgcfs`（g1bgcp + 关掉 `wetzwt` 与 `abm`）：history 2 份、restart 9 份逐位一致，`f_gdp` 最大值 0.04761（走"来源未除、第一个火灾量未除"的路径）；
+- 回归：`by2`、`g1bgcp`、`g1ch4` 逐位一致；`bx`、`cx` 仍是两侧同步停机（第 25821/25824 行记录的行为）。

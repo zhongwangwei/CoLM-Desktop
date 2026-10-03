@@ -4169,13 +4169,6 @@ fn install_history_selection(document: &Document, case_directory: &Path, crop: b
         })
     };
     let selection = resolve(out_default, &overrides)?;
-    if bgc && logical_field(document, "DEF_USE_FIRE")? {
-        ensure!(
-            selection == resolve(true, &[])?,
-            "DEF_USE_FIRE with a DEF_hist_vars selection is not ported (the fire history writes the \
-             residual of whichever variable was written before it); run this case with --engine fortran"
-        );
-    }
     colm_runtime::history::install_selection(selection)
 }
 
