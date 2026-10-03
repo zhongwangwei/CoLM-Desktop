@@ -1558,8 +1558,19 @@ fn check_spatial_lulcc(
         !logical_field(document, "DEF_USE_BGC")?,
         "LULCC is not supported for BGC upstream (MOD_Namelist stops too)"
     );
+    // PFT：SAT 的逐 PFT 配对已移植；MEC 的 PFT 段与示踪物的 PFT 库存映射还没有。
+    if logical_field(document, "DEF_USE_PFT")? {
+        ensure!(
+            integer_field(document, "DEF_LULCC_SCHEME")? == 1,
+            "DEF_USE_PFT with DEF_USE_LULCC is ported for the SAT scheme (DEF_LULCC_SCHEME = 1) only"
+        );
+        ensure!(
+            colm_runtime::tracer::tracer_set_from_document(document)?
+                .is_none_or(|set| set.transport_indices().next().is_none()),
+            "transport tracers with DEF_USE_PFT and DEF_USE_LULCC are not ported"
+        );
+    }
     for field in [
-        "DEF_USE_PFT",
         "DEF_USE_PC",
         "DEF_URBAN_RUN",
         "DEF_USE_IRRIGATION",
@@ -2358,7 +2369,7 @@ fn lulcc_transition(
             frequency_code: history_frequency_code(years.history_frequency),
             urban_run: false,
             urban_patches: 0,
-            pft_or_pc: false,
+            pft_or_pc: case.physics.use_pft || case.physics.use_pc,
             bgc: false,
             crop: false,
             river_lake_flow: true,
@@ -2393,9 +2404,20 @@ fn lulcc_transition(
     for (block, patches) in &new_topology.blocks {
         let cold_path = restart_root.join(&label).join(time_name(years.new, block));
         let cold = colm_init::RestartFile::open(&cold_path)?;
+        // PFT/PC：冷启动同时写了 PFT 时间重启，SAT 再逐 PFT 抄旧值（`REST_LulccTimeVariables`）。
+        let use_pft = case.physics.use_pft;
+        let cold_pft_path = colm_runtime::pft::pft_restart_path(&cold_path)?;
+        let cold_pft = use_pft
+            .then(|| colm_init::RestartFile::open(&cold_pft_path))
+            .transpose()?;
         std::fs::remove_file(&cold_path)
             .with_context(|| format!("cannot remove {}", cold_path.display()))?;
+        if use_pft {
+            std::fs::remove_file(&cold_pft_path)
+                .with_context(|| format!("cannot remove {}", cold_pft_path.display()))?;
+        }
         let new_const = colm_init::RestartFile::open(const_path(years.new, block))?;
+        let mut pft_overrides = Vec::new();
         let overrides = match old_topology.blocks.iter().find(|(old, _)| old == block) {
             Some((_, old_patches)) => {
                 let old_const = colm_init::RestartFile::open(const_path(years.old, block))?;
@@ -2420,6 +2442,67 @@ fn lulcc_transition(
                 .with_context(|| {
                     format!("cannot carry the {} state of block {block} over", years.old)
                 })?;
+                let mut sat = sat;
+                if let Some(cold_pft) = &cold_pft {
+                    let old_pft = colm_init::RestartFile::open(colm_runtime::pft::pft_restart_path(
+                        &old_dir.join(&label).join(time_name(years.old, block)),
+                    )?)?;
+                    let pft_const = |year: i64| -> Result<colm_init::RestartFile> {
+                        colm_init::RestartFile::open(colm_runtime::pft::pft_restart_path(
+                            &const_path(year, block),
+                        )?)
+                    };
+                    let (new_pft_const, old_pft_const) =
+                        (pft_const(years.new)?, pft_const(years.old)?);
+                    let ranges = |year: i64| {
+                        colm_runtime::pft::spatial_pft_ranges(
+                            &landdata,
+                            i32::try_from(year)?,
+                            block,
+                            case.physics.land_cover_scheme,
+                            false,
+                        )
+                    };
+                    let (new_ranges, old_ranges) = (ranges(years.new)?, ranges(years.old)?);
+                    let (pft_sat, ldew) = colm_init::lulcc::pft_same_type_assignment(
+                        &colm_init::lulcc::SatSide {
+                            time: &cold,
+                            patch_class: new_const.integers("patchclass")?,
+                            element: new_element,
+                        },
+                        &colm_init::lulcc::SatSide {
+                            time: &old_time,
+                            patch_class: old_const.integers("patchclass")?,
+                            element: old_element,
+                        },
+                        &colm_init::lulcc::PftSatSide {
+                            time: cold_pft,
+                            pft_class: new_pft_const.integers("pftclass")?,
+                            ranges: &new_ranges,
+                            patch_type: new_const.integers("patchtype")?,
+                        },
+                        &colm_init::lulcc::PftSatSide {
+                            time: &old_pft,
+                            pft_class: old_pft_const.integers("pftclass")?,
+                            ranges: &old_ranges,
+                            patch_type: old_const.integers("patchtype")?,
+                        },
+                        new_pft_const.floats("pftfrac")?,
+                        options,
+                    )
+                    .with_context(|| {
+                        format!("cannot carry the {} PFT state of block {block} over", years.old)
+                    })?;
+                    pft_overrides = pft_sat;
+                    // `ldew(np) = sum(ldew_p*pftfrac)` 覆盖 patch 级照抄来的那个值。
+                    let ldew_override = sat
+                        .iter_mut()
+                        .find(|o| o.name == "ldew")
+                        .context("SAT always overrides ldew")?;
+                    for (np, value) in ldew {
+                        ldew_override.values[np] = value;
+                    }
+                }
                 // MEC（`DEF_LULCC_SCHEME = 2`）：SAT 之后按转移份额混合份额有变化的 patch。
                 match mec {
                     Some(mec_options) => {
@@ -2450,6 +2533,9 @@ fn lulcc_transition(
         let path = target.join(&label).join(time_name(years.new, block));
         std::fs::create_dir_all(path.parent().expect("a restart path has a parent"))?;
         cold.write_with(&path, &overrides)?;
+        if let Some(cold_pft) = &cold_pft {
+            cold_pft.write_with(&colm_runtime::pft::pft_restart_path(&path)?, &pft_overrides)?;
+        }
         if let Some((set, mixing)) = &land_tracers {
             let old = match old_topology.blocks.iter().find(|(old, _)| old == block) {
                 Some((_, old_patches)) => Some((

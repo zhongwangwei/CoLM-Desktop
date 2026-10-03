@@ -5,7 +5,8 @@
 //! 抄到新 patch 上；新出现的类型保持冷启动值。这里在两份时间重启之间做同一件事：
 //! 输入是旧年份的续跑重启与新年份的冷启动重启，输出是写回新重启时的替换值。
 //!
-//! 只做 LCT 的默认路径；PFT/PC 与城市分支在上游另有一套逐 PFT/城市类型的配对，调用方先拒绝。
+//! PFT/PC（[`pft_same_type_assignment`]）：两侧都是土壤 patch 时再按 `pftclass` 逐 PFT 配对。
+//! 城市分支在上游另有一套逐城市类型的配对，调用方先拒绝。
 
 use std::collections::BTreeMap;
 
@@ -230,6 +231,130 @@ pub fn same_type_assignment(
         overrides.push(RestartOverride::new("ssno_lyr", merged));
     }
     Ok(overrides)
+}
+
+/// PFT 一侧：PFT 时间重启、每个 PFT 的 `pftclass`、每个 patch 的 PFT 区间（`patch_pft_s/e`，
+/// 非土壤 patch 为空区间）与 `patchtype`。
+pub struct PftSatSide<'a> {
+    pub time: &'a RestartFile,
+    pub pft_class: &'a [i64],
+    pub ranges: &'a [std::ops::Range<usize>],
+    pub patch_type: &'a [i64],
+}
+
+/// [`pft_same_type_assignment`] 的结果：PFT 时间重启的替换项，与 `(patch, 新 ldew)`。
+pub type PftSatResult = (Vec<RestartOverride>, Vec<(usize, f64)>);
+
+/// 逐 PFT 照抄的变量（`REST_LulccTimeVariables` 的 PFT 段，`MOD_Lulcc_Vars_TimeVariables.F90:803-861`）。
+const PFT_ALWAYS: [&str; 10] = [
+    "tleaf_p",
+    "ldew_p",
+    "ldew_rain_p",
+    "ldew_snow_p",
+    "fwet_snow_p",
+    "sigf_p",
+    "tref_p",
+    "qref_p",
+    "rst_p",
+    "z0m_p",
+];
+const PFT_PLANT_HYDRAULICS: [&str; 3] = ["vegwp_p", "gs0sun_p", "gs0sha_p"];
+const PFT_OZONE_STRESS: [&str; 3] = ["lai_old_p", "o3uptakesun_p", "o3uptakesha_p"];
+
+/// 一个 PFT 在盘上占几个值（PFT 轴之外各轴的乘积）。
+fn pft_row_length(new: &RestartFile, old: &RestartFile, name: &str) -> Result<usize> {
+    let dims = new
+        .variable_dimensions(name)
+        .with_context(|| format!("the new PFT restart has no {name}"))?;
+    ensure!(
+        dims == old.variable_dimensions(name)?,
+        "{name} has a different layout in the old PFT restart"
+    );
+    ensure!(
+        dims.first().map(String::as_str) == Some("pft"),
+        "{name} is not a PFT-major variable ({dims:?})"
+    );
+    let mut length = 1;
+    for dimension in &dims[1..] {
+        length *= new.dimension(dimension)?;
+    }
+    Ok(length)
+}
+
+/// SAT 的 PFT 段：返回 PFT 时间重启的替换项，以及 patch 级 `ldew` 的新值
+/// （`ldew(np) = sum(ldew_p(ps:pe)*pftfrac(ps:pe))`，GIMPLE 是从 0 起的顺序 FMA）。
+///
+/// 只处理两侧都是土壤 patch（`patchtype == 0`）的配对；同一 patch 里按 `pftclass` 升序对齐，
+/// 旧的类别小就跳旧的（PFT 消失），新的小就跳新的（PFT 新增，保持冷启动值）。
+pub fn pft_same_type_assignment(
+    new_patch: &SatSide<'_>,
+    old_patch: &SatSide<'_>,
+    new: &PftSatSide<'_>,
+    old: &PftSatSide<'_>,
+    new_pftfrac: &[f64],
+    options: SatOptions,
+) -> Result<PftSatResult> {
+    let pairs = match_patches(new_patch, old_patch)?;
+    let mut names: Vec<&str> = PFT_ALWAYS.to_vec();
+    if options.plant_hydraulics {
+        names.extend(PFT_PLANT_HYDRAULICS);
+    }
+    if options.ozone_stress {
+        names.extend(PFT_OZONE_STRESS);
+    }
+    // 先求出 PFT 配对，各变量共用。
+    let mut pft_pairs = Vec::new();
+    let mut soil_pairs = Vec::new();
+    for &(np, np_) in &pairs {
+        if new.patch_type[np] != 0 || old.patch_type[np_] != 0 {
+            continue;
+        }
+        let (range, range_) = (&new.ranges[np], &old.ranges[np_]);
+        ensure!(
+            !range.is_empty() && !range_.is_empty(),
+            "Error in REST_LulccTimeVariables LULC_IGBP_PFT|LULC_IGBP_PC! (soil patch {np} or \
+             {np_} has no PFT)"
+        );
+        let (mut ip, mut ip_) = (range.start, range_.start);
+        while ip < range.end && ip_ < range_.end {
+            if new.pft_class[ip] > old.pft_class[ip_] {
+                ip_ += 1;
+                continue;
+            }
+            if new.pft_class[ip] < old.pft_class[ip_] {
+                ip += 1;
+                continue;
+            }
+            pft_pairs.push((ip, ip_));
+            ip += 1;
+            ip_ += 1;
+        }
+        soil_pairs.push(np);
+    }
+    let mut overrides = Vec::with_capacity(names.len());
+    let mut ldew_p = Vec::new();
+    for name in names {
+        let row = pft_row_length(new.time, old.time, name)?;
+        let mut merged = values(new.time, name)?;
+        let source = values(old.time, name)?;
+        for &(ip, ip_) in &pft_pairs {
+            merged[ip * row..(ip + 1) * row].copy_from_slice(&source[ip_ * row..(ip_ + 1) * row]);
+        }
+        if name == "ldew_p" {
+            ldew_p.clone_from(&merged);
+        }
+        overrides.push(RestartOverride::new(name, merged));
+    }
+    let ldew = soil_pairs
+        .into_iter()
+        .map(|np| {
+            let value = new.ranges[np]
+                .clone()
+                .fold(0.0f64, |acc, ip| ldew_p[ip].mul_add(new_pftfrac[ip], acc));
+            (np, value)
+        })
+        .collect();
+    Ok((overrides, ldew))
 }
 
 #[cfg(test)]

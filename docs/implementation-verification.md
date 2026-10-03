@@ -28704,3 +28704,23 @@ Rust 的实现：
 **混合稻田 patch**：稻田份额只在 CROP 内核里非零，而 CROP 的农田 patch 恰好一个 PFT（`MOD_LandPFT.F90:211-216/306-310`），份额只会是 0 或 1，上游的混合分量合并在标准布局里走不到。所以不移植，报错信息改为说明原因。
 
 **补正**：第 527 轮改了 `write_means` 的签名，却没改 `history_tests.rs` 里的三处调用，导致测试编译失败，当时提交前没跑单测。本轮补上；colm-core 与 colm-runtime 单测共 631 项通过。
+
+## 第 530 轮：LULCC + PFT（SAT）
+
+上游 `REST_LulccTimeVariables` 的 PFT 段（`MOD_Lulcc_Vars_TimeVariables.F90:803-861`）：
+- 新旧 patch 都是土壤时，在两侧的 PFT 区间里按 `pftclass` 升序对齐：旧的类别小就跳旧的（PFT 消失），新的小就跳新的（PFT 新增，保持冷启动值）；
+- 同类别的抄 10 个 PFT 时间变量（`tleaf_p ldew_p ldew_rain_p ldew_snow_p fwet_snow_p sigf_p tref_p qref_p rst_p z0m_p`），PHS 再加 3 个、臭氧再加 3 个；
+- 最后 `ldew(np) = sum(ldew_p(ps:pe)*pftfrac(ps:pe))`，GIMPLE 是从 0 起的顺序 `FMA(ldew_p, pftfrac, acc)`。
+
+Rust：
+- `colm_init::lulcc::pft_same_type_assignment`：输入新旧两侧的 PFT 时间重启、`pftclass`、patch 的 PFT 区间（`spatial_pft_ranges`）与 `patchtype`；
+- `lulcc_transition` 把冷启动的 PFT 时间重启连同替换项写到目标目录，并用重算的 `ldew` 覆盖 patch 级照抄的值；
+- 过渡时的旁车配置 `pft_or_pc` 改为实际值；
+- 入口放开 `DEF_USE_PFT`。MEC + PFT（`lccpct` 归并、`ldew_p` 缩放、`snowfraction_pftwrap`）与输运示踪物 + PFT（库存映射把自然地类并进第 1 类）仍然拒绝，留到后面。
+
+**验收**：`g3p`（g3 底改 `DEF_USE_LCT = .false.`、`DEF_USE_PFT = .true.`，Rust mksrfdata 生成 2005/2006 两年 landdata，2005-12-31 → 2006-01-01 跨年）：
+- history 4 份、restart 11 份逐位一致；
+- 两年的 `pftfrac` 最多差 0.049，`ldew` 重算被覆盖到；
+- PFT 类别两年相同，类别消失/新增的跳过分支用新单测 `pfts_pair_by_class_and_ldew_is_reweighted` 覆盖。
+
+回归 `g3 g3m g3t` 逐位一致。

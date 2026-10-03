@@ -173,3 +173,50 @@ fn a_missing_variable_is_named() {
     .unwrap_err();
     assert!(format!("{error:#}").contains("lai_old"), "{error:#}");
 }
+
+/// PFT 时间重启：`pfts` 个 PFT，每个变量第 ip 个取 `base + ip`。
+fn pft_restart(path: &Path, pfts: usize, base: f64) -> RestartFile {
+    let mut file = netcdf::create(path).unwrap();
+    file.add_dimension("pft", pfts).unwrap();
+    for name in PFT_ALWAYS {
+        let values = (0..pfts).map(|ip| base + ip as f64).collect::<Vec<_>>();
+        file.add_variable::<f64>(name, &["pft"])
+            .unwrap()
+            .put_values(&values, ..)
+            .unwrap();
+    }
+    file.close().unwrap();
+    RestartFile::open(path).unwrap()
+}
+
+/// 逐 PFT 配对：同一土壤 patch 里按 `pftclass` 对齐，消失的旧 PFT 被跳过、新增的保持冷启动值；
+/// `ldew` 按新的 `pftfrac` 从 0 起顺序 FMA 重算。非土壤配对不碰 PFT。
+#[test]
+fn pfts_pair_by_class_and_ldew_is_reweighted() {
+    let dir = temp_dir("pft");
+    let new_time = restart(&dir.join("new.nc"), 2, 100.0, &[1.0, 1.0], &[1.0, 1.0]);
+    let old_time = restart(&dir.join("old.nc"), 2, 0.0, &[1.0, 1.0], &[1.0, 1.0]);
+    // 一个单元两个 patch：土壤（类 1）与湿地（类 11）。
+    let (class, element) = ([1i64, 11], [7i64, 7]);
+    let new_side = SatSide { time: &new_time, patch_class: &class, element: &element };
+    let old_side = SatSide { time: &old_time, patch_class: &class, element: &element };
+    // 新：PFT 类 1、3、4；旧：类 1、2、4（类 2 消失、类 3 新增）。
+    let new_pft = pft_restart(&dir.join("new_pft.nc"), 3, 100.0);
+    let old_pft = pft_restart(&dir.join("old_pft.nc"), 3, 0.0);
+    let ranges = [0..3, 3..3];
+    let patch_type = [0i64, 2];
+    let (overrides, ldew) = pft_same_type_assignment(
+        &new_side,
+        &old_side,
+        &PftSatSide { time: &new_pft, pft_class: &[1, 3, 4], ranges: &ranges, patch_type: &patch_type },
+        &PftSatSide { time: &old_pft, pft_class: &[1, 2, 4], ranges: &ranges, patch_type: &patch_type },
+        &[0.5, 0.3, 0.2],
+        SatOptions { plant_hydraulics: false, ..options() },
+    )
+    .unwrap();
+    let tleaf = &overrides.iter().find(|o| o.name == "tleaf_p").unwrap().values;
+    // 类 1 ← 旧第 0 个（0），类 3 冷启动（101），类 4 ← 旧第 2 个（2）。
+    assert_eq!(tleaf, &vec![0.0, 101.0, 2.0]);
+    let expected = 2.0f64.mul_add(0.2, 101.0f64.mul_add(0.3, 0.0f64.mul_add(0.5, 0.0)));
+    assert_eq!(ldew, vec![(0, expected)]);
+}
