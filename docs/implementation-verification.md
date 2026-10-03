@@ -28900,3 +28900,16 @@ Rust：
 - 结果：history 4、restart 8 逐位一致。
 
 `kernels/latlon` 已带修补重编。回归逐位一致：`g3 g3m g3mt g3pm g3cm g3u g3um`。单测（`--test-threads=1`）：core 479、init 176 通过。
+
+## 第 536 轮：单点城市 + `DEF_SOIL_REFL_SCHEME = 1`
+
+上游方案 1（`MOD_SoilParametersReadin.F90:490-497`）对每个 patch 按 `landpatch%settyp` 查 `soil_color_refl`。单点城市只有一个 patch，`SITE_landtype = URBAN`（`MOD_SingleSrfdata.F90:1651`），所以就是按城市类查色表，站点文件里的四个土壤反照率被顶掉。
+
+Rust 之前的拒绝理由（"城市单点混有别的地类的 patch"）不对。真正的问题是：城市冷启动走 `read_single_point_urban_data`，不经过 `read_surface` 里的方案 1 替换。现在 `prepare_single_point_urban` 收 `soil_reflectance_scheme`，方案 1 时以 `land_cover_soil_reflectance(land_cover, common.land_class)` 替换，并去掉拒绝。
+
+**验收 `nur1`**（nu 底，AU-Preston，加 `DEF_SOIL_REFL_SCHEME = 1`）：
+- 参照侧用 `--engine fortran --preprocessors fortran`，因为这次改的是冷启动，参照必须是纯 Fortran 预处理。
+- 原站点值恰好等于城市色表值（0.08/0.19/0.16/0.27），区分不出来。于是把两侧 `site.nc` 的四个值改成 0.11/0.22/0.33/0.44 再跑：两侧常数重启都是色表值。
+- 历史与全部重启逐位一致，包括 `restart_urban`、`urb_const` 与两份 const。
+
+回归 `nu uy uo uh1` 逐位一致。

@@ -317,12 +317,6 @@ pub fn single_point_static_run_from_namelist(
         "DEF_SOIL_REFL_SCHEME must be 1 (land-cover soil colour) or 2 (site soil albedo), got \
          {soil_reflectance_scheme}"
     );
-    // 城市单点混有别的地类的 patch，方案 1 要逐 patch 查色表，城市冷启动那条路径没接。
-    ensure!(
-        soil_reflectance_scheme == 2 || !optional_bool_or(&document, "DEF_URBAN_RUN", false)?,
-        "DEF_SOIL_REFL_SCHEME = 1 with DEF_URBAN_RUN is not ported: the urban cold start keeps \
-         the site soil albedo for every patch"
-    );
     let case_dir = output.join(&case_name);
     let surface = case_dir.join("landdata/srfdata.nc");
     let urban = optional_bool_or(&document, "DEF_URBAN_RUN", false)?;
@@ -524,10 +518,12 @@ pub fn write_single_point_urban_constant_restart(
         urban_config,
         lucy_enabled,
         config.use_soil_texture,
+        config.soil_reflectance_scheme,
     )?;
     write_urban_constant_restart_from_initialized(restart_dir, config, &initialized)
 }
 
+#[allow(clippy::too_many_arguments)] // 与上游 `MOD_Urban_*` 读入的开关一一对应
 fn prepare_single_point_urban(
     surface: impl AsRef<Path>,
     land_cover: LandCoverScheme,
@@ -536,9 +532,16 @@ fn prepare_single_point_urban(
     urban_config: UrbanConfig,
     lucy_enabled: bool,
     use_soil_texture: bool,
+    soil_reflectance_scheme: i32,
 ) -> Result<SinglePointUrbanStatic> {
-    let data =
+    let mut data =
         read_single_point_urban_data(surface, land_cover, hydraulic_model, use_soil_texture)?;
+    // 方案 1：单点城市的唯一 patch 的 `settyp` 是 `URBAN`（`MOD_SingleSrfdata.F90:1651`），
+    // 按城市类查 `soil_color_refl`。
+    if soil_reflectance_scheme == 1 {
+        data.common.albedo =
+            crate::land_cover_soil_reflectance(land_cover, data.common.land_class)?;
+    }
     let region_id = [data.lucy_region_id];
     let population_density = [data.population_density];
     let lucy = if lucy_enabled {
@@ -679,6 +682,7 @@ fn write_single_point_constant_restarts_with_hyperspectral(
             urban.geometry,
             urban.lucy_enabled,
             static_config.use_soil_texture,
+            static_config.soil_reflectance_scheme,
         )?;
         let common = write_single_point_constant_restart_from_surface(
             &initialized.data.common,
@@ -1550,6 +1554,7 @@ fn write_single_point_urban_cold_time_restarts(
         urban.geometry,
         urban.lucy_enabled,
         config.use_soil_texture,
+        config.soil_reflectance_scheme,
     )?;
     let surface = &initialized.data.common;
     let kind = patch_type(config.land_cover, surface.land_class)?;
