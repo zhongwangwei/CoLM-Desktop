@@ -4323,10 +4323,14 @@ impl HistorySession {
                 }
             }
             if let Some(vector) = &self.vector {
-                // 城市量在向量写出时上游另有一条未完成的路（`write_history_variable_urb_2d` 不除 `nac`）。
+                // 上游 `write_history_variable_urb_2d` 的 `Vector` 支自己标了 TODO：把城市长度（`numurban`）的
+                // 累加数组当 patch 长度的向量交给 `aggregate_to_vector_and_write_2d`（越界读、也不除 `nac`），
+                // 没有确定的结果可对齐。
                 ensure!(
                     !self.urban,
-                    "vector history with urban variables is not ported; run this case with --engine fortran"
+                    "vector history with urban variables has no defined upstream result (the Vector \
+                     branch of write_history_variable_urb_2d passes urban-length arrays as patch \
+                     vectors; upstream marks it TODO); use gridded history"
                 );
                 buffer = buffer.with_vector(std::sync::Arc::clone(vector))?;
                 buffer.declare_patch_fields(&self.patch_field_names)?;

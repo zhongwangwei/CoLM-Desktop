@@ -552,10 +552,6 @@ fn finish_energy_step(
         }
         _ => None,
     };
-    ensure!(
-        flood.is_none() || !input.ground_temperature.use_split_soil_snow,
-        "flood feedback with DEF_SPLIT_SOILSNOW is not ported"
-    );
     let ground = ground_temperature(GroundTemperatureInput {
         time_step_seconds: input.interception.time_step_seconds,
         absorbed_ground_shortwave_w_m2: shortwave.ground_absorbed_w_m2,

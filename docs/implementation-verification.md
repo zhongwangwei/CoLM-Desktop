@@ -28672,3 +28672,15 @@ Rust 原来用"有没有声明某变量"来猜内核，一有选择列表就会�
 **验收**：
 - `g1bgcfs`（g1bgcp + 关掉 `wetzwt` 与 `abm`）：history 2 份、restart 9 份逐位一致，`f_gdp` 最大值 0.04761（走"来源未除、第一个火灾量未除"的路径）；
 - 回归：`by2`、`g1bgcp`、`g1ch4` 逐位一致；`bx`、`cx` 仍是两侧同步停机（第 25821/25824 行记录的行为）。
+
+## 第 528 轮：漫滩回馈 + `DEF_SPLIT_SOILSNOW`；向量 history + 城市的拒绝理由
+
+**漫滩 + SPLIT**：查了两处上游代码，结论是 Rust 早已对齐，原先的拒绝不必要，已去掉。
+- 上游 THERMAL 在有漫滩时把土壤/雪两部分的感热与蒸发同样混合（`MOD_Thermal.F90:1295-1298`），Rust 早已这样做；
+- SPLIT 只额外影响 VIC 产流用的 `fevpg_runoff`，而漫滩回馈时上游强制 `DEF_Runoff_SCHEME = 0`，走不到这一支。
+
+验收：
+- `g1ffs`（g1ff + SPLIT）：history 2 份、restart 5 份逐位一致；
+- `g1ffts`（g1fft，带示踪物，+ SPLIT）：history 3 份、restart 5 份逐位一致。
+
+**向量 history + 城市**：上游 `write_history_variable_urb_2d` 的 `Vector` 支自己标了 TODO，把城市长度的累加数组当 patch 长度的向量传给 `aggregate_to_vector_and_write_2d`（越界读、不除 `nac`），没有确定的结果可对齐。Rust 保持拒绝，报错信息改为说明这一原因。

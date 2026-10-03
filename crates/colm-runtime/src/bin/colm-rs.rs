@@ -429,7 +429,7 @@ fn run_spatial(
     );
     // GRID 内核总是编进 `GridRiverLakeFlow`：汇流默认路径（单向耦合，`FloodplainStorageFix` 两种曲线都行），其余选项还没移植。
     // 漫滩回馈：上游自己要求修正漫滩曲线、不与 LULCC 同开，并把产流方案强制成 0；
-    // Rust 只接变饱和流、不拆雪土、LCT 的那条路径。
+    // Rust 只接变饱和流、LCT 的那条路径。
     if logical_field(&document, "DEF_GridRiverLake_FloodFeedback")? {
         ensure!(
             logical_field(&document, "DEF_GridRiverLake_FloodplainStorageFix")?,
@@ -446,10 +446,6 @@ fn run_spatial(
         ensure!(
             physics.variably_saturated_flow && !physics.use_pft && !physics.urban_run,
             "Grid flood feedback is ported for LCT variably saturated flow only"
-        );
-        ensure!(
-            !logical_field(&document, "DEF_SPLIT_SOILSNOW")?,
-            "Grid flood feedback with DEF_SPLIT_SOILSNOW is not ported"
         );
     }
     let reservoir_method = integer_field(&document, "DEF_Reservoir_Method")?;
