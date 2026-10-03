@@ -29118,3 +29118,21 @@ colm-runtime 单测 151 通过，clippy 无告警。
 - tc4ws 的 AKX 到 11 月累计到 8.6（`AKX_met_exit_c`）与 0.55（`AKX_soil1_to_soil2_n`），确实走到了湿地 + SASU 这一支。
 
 回归逐位一致：`tc4w tc4wg bl bu`、`blsn`（纯全链路）。单测 core 479、init 176、runtime 152 通过，clippy 无新告警。
+
+## 第 546 轮：空间 SASU / DiagMatrix 冷启动
+
+单点早已按 Fortran 核对过：`DEF_USE_SASU .or. DEF_USE_DiagMatrix` 时，BGC 重启（patch 与 PFT 两份）多写 SASU 累加量，冷启动全为 0。空间路径把这两个开关写死成 `false`，入口拒绝。
+
+现在空间 PFT 冷启动与单点同一套：
+- 从 namelist 求 `sasu = bgc .and. (SASU .or. DiagMatrix)`、`diag_matrix = bgc .and. DiagMatrix`；
+- 传给 `PftBgcFields` 与 `BgcTimeRestartInput`；
+- 去掉拒绝。
+
+**验收**（纯 Fortran 全链路 = Fortran 预处理 + Fortran 内核，对纯 Rust 全链路；g1bgcp 底：空间 BGC/PFT/硝化/火灾/LAI 反馈）：
+
+| 算例 | 开关 | history | restart（含 2010-001 冷启动） | const |
+|---|---|---|---|---|
+| `g1bgcs` | `DEF_USE_SASU` | 2，bad 0 | 9，bad 0 | 5 份逐位一致 |
+| `g1bgcd` | `DEF_USE_DiagMatrix` | 2，bad 0 | 9，bad 0 | — |
+
+colm-init 单测 176 通过，clippy 无告警。

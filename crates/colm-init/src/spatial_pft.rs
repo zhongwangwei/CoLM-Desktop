@@ -401,12 +401,12 @@ pub fn write_spatial_pft_cold_time_restarts(
     let use_nitrification = optional_bool_or(&document, "DEF_USE_NITRIF", true)?;
     // `DEF_USE_LAIFEEDBACK`：BGC 关闭时上游强制置假（`MOD_Namelist.F90:1915`）。
     let lai_feedback = use_bgc && optional_bool_or(&document, "DEF_USE_LAIFEEDBACK", false)?;
-    // SASU/DiagMatrix 的冷启动字段只在单点路径上按 Fortran 核对过。
-    ensure!(
-        !optional_bool_or(&document, "DEF_USE_SASU", false)?
-            && !optional_bool_or(&document, "DEF_USE_DiagMatrix", false)?,
-        "spatial DEF_USE_SASU / DEF_USE_DiagMatrix cold starts are not ported"
-    );
+    // `DEF_USE_SASU .or. DEF_USE_DiagMatrix`：BGC 重启（patch 与 PFT）多写 SASU 累加量，冷启动全为 0；
+    // 与单点同一套字段（第 546 轮）。
+    let sasu = use_bgc
+        && (optional_bool_or(&document, "DEF_USE_SASU", false)?
+            || optional_bool_or(&document, "DEF_USE_DiagMatrix", false)?);
+    let diag_matrix = use_bgc && optional_bool_or(&document, "DEF_USE_DiagMatrix", false)?;
     let subgrid = spatial_pft_subgrid(&document, config.static_config.subgrid_fallback)?;
     if use_crop {
         ensure!(
@@ -1210,8 +1210,8 @@ pub fn write_spatial_pft_cold_time_restarts(
                         |(state, values)| PftBgcFields {
                             values,
                             active_crop_years: &state.active_crop_years,
-                            sasu: false,
-                            diag_matrix: false,
+                            sasu,
+                            diag_matrix,
                         },
                     ),
                     crop: crop.as_ref().map(crate::CropColdStartState::pft_fields),
@@ -1235,6 +1235,8 @@ pub fn write_spatial_pft_cold_time_restarts(
         .as_ref()
         .map(|state| {
             let mut input = bgc_time_restart_input(state, compression_level);
+            input.sasu = sasu;
+            input.diag_matrix = diag_matrix;
             input.crop = crop.as_ref().map(crate::CropColdStartState::bgc_fields);
             write_bgc_time_restart(
                 config.static_config.restart_dir,
