@@ -1558,16 +1558,27 @@ fn check_spatial_lulcc(
         !logical_field(document, "DEF_USE_BGC")?,
         "LULCC is not supported for BGC upstream (MOD_Namelist stops too)"
     );
-    for field in [
-        "DEF_URBAN_RUN",
-        "DEF_USE_IRRIGATION",
-        "DEF_Optimize_Baseflow",
-    ] {
+    // 城市：SAT 与 MEC 的城市段已移植；示踪物的城市重映射还没有。
+    if logical_field(document, "DEF_URBAN_RUN")? {
         ensure!(
-            !logical_field(document, field)?,
-            "{field} with DEF_USE_LULCC is not ported to the Rust runtime; run it with --engine fortran"
+            colm_runtime::tracer::tracer_set_from_document(document)?
+                .is_none_or(|set| set.transport_indices().next().is_none()),
+            "transport tracers with DEF_URBAN_RUN and DEF_USE_LULCC are not ported"
         );
     }
+    // 上游灌溉只在 `#ifdef CROP` 下按作物物候施水（`CoLMMAIN.F90:849-858`），要 BGC 作物状态；
+    // 而 LULCC 与 BGC 上游互斥（见上），所以这个组合在上游走不到有意义的路径。
+    ensure!(
+        !logical_field(document, "DEF_USE_IRRIGATION")?,
+        "DEF_USE_IRRIGATION needs CROP BGC, which upstream refuses together with DEF_USE_LULCC"
+    );
+    // `scale_baseflow` 按旧年 patch 布局标定、LULCC 后不重映射（upstream-bugs 第 43 条）；
+    // 优化器只在 spinup 里迭代，而 LULCC 的 spinup 还没接，所以同开没有可验证的路径。
+    ensure!(
+        !logical_field(document, "DEF_Optimize_Baseflow")?,
+        "DEF_Optimize_Baseflow with DEF_USE_LULCC: the calibrated scale_baseflow keeps the old year's \
+         patch layout upstream (docs/upstream-bugs.md #43)"
+    );
     // `MOD_Namelist` 在 LULCC 时强制月度 LAI、逐年换 LAI；Rust 不替 namelist 改，直接要求。
     for field in ["DEF_LAI_MONTHLY", "DEF_LAI_CHANGE_YEARLY"] {
         ensure!(
@@ -1585,6 +1596,64 @@ fn check_spatial_lulcc(
         "DEF_USE_LULCC before 2000 (five-yearly land cover) is not ported to the Rust runtime"
     );
     Ok(())
+}
+
+/// 主时间重启旁的城市时间重启（`<case>_restart_urban_<date>_…nc`）。
+fn lulcc_urban_path(path: &Path) -> Result<std::path::PathBuf> {
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .context("a restart path has no file name")?;
+    ensure!(name.contains("_restart_"), "{name} is not a CoLM restart");
+    Ok(path.with_file_name(name.replacen("_restart_", "_restart_urban_", 1)))
+}
+
+/// 主常数重启旁的城市常数重启（`<case>_restart_urb_const_lc<year>_…nc`）。
+fn lulcc_urban_const_path(path: &Path) -> Result<std::path::PathBuf> {
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .context("a restart path has no file name")?;
+    ensure!(name.contains("_restart_const_"), "{name} is not a CoLM constant restart");
+    Ok(path.with_file_name(name.replacen("_restart_const_", "_restart_urb_const_", 1)))
+}
+
+/// 一块里每个 patch 的城市类型（`landurban%settyp`，非城市为 0）与城市单元号（`patch2urban`）。
+/// `landurban` 按 landpatch 里城市 patch（`patchtype == 1`）的次序建，所以第 k 个城市 patch
+/// 就是第 k 个城市单元。
+fn lulcc_urban_layout(
+    landdata: &Path,
+    year: i64,
+    block: &str,
+    patch_type: &[i64],
+) -> Result<(Vec<i64>, Vec<Option<usize>>)> {
+    let path = landdata
+        .join("landurban")
+        .join(format!("{year:04}"))
+        .join(format!("landurban_{block}.nc"));
+    let classes = colm_init::RestartFile::open(&path)?.integers("settyp")?.to_vec();
+    let mut class = vec![0; patch_type.len()];
+    let mut urban = vec![None; patch_type.len()];
+    let mut next = 0;
+    for (p, &kind) in patch_type.iter().enumerate() {
+        if kind == 1 {
+            ensure!(
+                next < classes.len(),
+                "{} has fewer urban units than block {block} has urban patches",
+                path.display()
+            );
+            class[p] = classes[next];
+            urban[p] = Some(next);
+            next += 1;
+        }
+    }
+    ensure!(
+        next == classes.len(),
+        "{} has {} urban units but block {block} has {next} urban patches",
+        path.display(),
+        classes.len()
+    );
+    Ok((class, urban))
 }
 
 /// `lulcc_inventory_trace`（`MOD_Lulcc_Driver.F90:319-342`）：PFT（非 SOLO）或 FAST_PC 时把
@@ -2397,8 +2466,18 @@ fn lulcc_transition(
     let history_restart = HistoryRestart {
         config: colm_runtime::history_sidecar::SidecarConfig {
             frequency_code: history_frequency_code(years.history_frequency),
-            urban_run: false,
-            urban_patches: 0,
+            urban_run: logical_field(document, "DEF_URBAN_RUN")?,
+            urban_patches: new_topology
+                .blocks
+                .iter()
+                .map(|(block, _)| -> Result<usize> {
+                    Ok(colm_init::RestartFile::open(const_path(years.new, block))?
+                        .integers("patchtype")?
+                        .iter()
+                        .filter(|&&kind| kind == 1)
+                        .count())
+                })
+                .sum::<Result<usize>>()?,
             pft_or_pc: case.physics.use_pft || case.physics.use_pc,
             bgc: false,
             crop: false,
@@ -2444,6 +2523,7 @@ fn lulcc_transition(
         let cold = colm_init::RestartFile::open(&cold_path)?;
         // PFT/PC：冷启动同时写了 PFT 时间重启，SAT 再逐 PFT 抄旧值（`REST_LulccTimeVariables`）。
         let use_pft = case.physics.use_pft;
+        let use_urban = logical_field(document, "DEF_URBAN_RUN")?;
         let cold_pft_path = colm_runtime::pft::pft_restart_path(&cold_path)?;
         let cold_pft = use_pft
             .then(|| colm_init::RestartFile::open(&cold_pft_path))
@@ -2454,6 +2534,16 @@ fn lulcc_transition(
             std::fs::remove_file(&cold_pft_path)
                 .with_context(|| format!("cannot remove {}", cold_pft_path.display()))?;
         }
+        // 城市：冷启动同时写了城市时间重启，城市 SAT 以它为底。
+        let cold_urban_path = lulcc_urban_path(&cold_path)?;
+        let cold_urban = use_urban
+            .then(|| colm_init::RestartFile::open(&cold_urban_path))
+            .transpose()?;
+        if use_urban {
+            std::fs::remove_file(&cold_urban_path)
+                .with_context(|| format!("cannot remove {}", cold_urban_path.display()))?;
+        }
+        let mut urban_overrides = Vec::new();
         let new_const = colm_init::RestartFile::open(const_path(years.new, block))?;
         let mut pft_overrides = Vec::new();
         let overrides = match old_topology.blocks.iter().find(|(old, _)| old == block) {
@@ -2464,16 +2554,37 @@ fn lulcc_transition(
                 )?;
                 let new_element = &new_topology.element[patches.clone()];
                 let old_element = &old_topology.element[old_patches.clone()];
+                // 城市：每个 patch 的城市类型与城市单元号（两年各自的 `landurban`）。
+                let urban_layouts = if use_urban {
+                    Some((
+                        lulcc_urban_layout(
+                            &landdata,
+                            years.new,
+                            block,
+                            new_const.integers("patchtype")?,
+                        )?,
+                        lulcc_urban_layout(
+                            &landdata,
+                            years.old,
+                            block,
+                            old_const.integers("patchtype")?,
+                        )?,
+                    ))
+                } else {
+                    None
+                };
                 let sat = colm_init::lulcc::same_type_assignment(
                     &colm_init::lulcc::SatSide {
                         time: &cold,
                         patch_class: new_const.integers("patchclass")?,
                         element: new_element,
+                        urban_class: urban_layouts.as_ref().map(|(new, _)| new.0.as_slice()),
                     },
                     &colm_init::lulcc::SatSide {
                         time: &old_time,
                         patch_class: old_const.integers("patchclass")?,
                         element: old_element,
+                        urban_class: urban_layouts.as_ref().map(|(_, old)| old.0.as_slice()),
                     },
                     options,
                 )
@@ -2509,11 +2620,13 @@ fn lulcc_transition(
                             time: &cold,
                             patch_class: new_const.integers("patchclass")?,
                             element: new_element,
+                            urban_class: None,
                         },
                         &colm_init::lulcc::SatSide {
                             time: &old_time,
                             patch_class: old_const.integers("patchclass")?,
                             element: old_element,
+                            urban_class: None,
                         },
                         &colm_init::lulcc::PftSatSide {
                             time: cold_pft,
@@ -2544,6 +2657,70 @@ fn lulcc_transition(
                     }
                     pft_side = Some((new_pft_const, new_ranges));
                 }
+                // 城市（`:863-979`）：同类型同城市类型的单元抄旧城市状态，再按新年的
+                // `froof/fgper` 重组 patch 的 `wliq/wice_soisno` 与 `scv`。
+                if let (Some(cold_urban), Some((new_urban, old_urban))) =
+                    (&cold_urban, &urban_layouts)
+                {
+                    let old_urban_time = colm_init::RestartFile::open(lulcc_urban_path(
+                        &old_dir.join(&label).join(time_name(years.old, block)),
+                    )?)?;
+                    let pairs = colm_init::lulcc::match_patches(
+                        &colm_init::lulcc::SatSide {
+                            time: &cold,
+                            patch_class: new_const.integers("patchclass")?,
+                            element: new_element,
+                            urban_class: Some(&new_urban.0),
+                        },
+                        &colm_init::lulcc::SatSide {
+                            time: &old_time,
+                            patch_class: old_const.integers("patchclass")?,
+                            element: old_element,
+                            urban_class: Some(&old_urban.0),
+                        },
+                    )?;
+                    let (urban, targets) = colm_init::lulcc::urban_same_type_assignment(
+                        &pairs,
+                        &colm_init::lulcc::UrbanSide {
+                            time: cold_urban,
+                            patch_to_urban: &new_urban.1,
+                        },
+                        &colm_init::lulcc::UrbanSide {
+                            time: &old_urban_time,
+                            patch_to_urban: &old_urban.1,
+                        },
+                    )
+                    .with_context(|| {
+                        format!("cannot carry the {} urban state of block {block} over", years.old)
+                    })?;
+                    let urban_const = colm_init::RestartFile::open(lulcc_urban_const_path(
+                        &const_path(years.new, block),
+                    )?)?;
+                    let patch_row = cold.dimension("soilsnow")?;
+                    colm_init::lulcc::recompose_urban_patch_water(
+                        &targets,
+                        &urban,
+                        cold_urban,
+                        urban_const.floats("WT_ROOF")?,
+                        urban_const.floats("WTROAD_PERV")?,
+                        &mut sat,
+                        patch_row,
+                    )?;
+                    urban_overrides = urban;
+                }
+                // MEC 的城市段要旧城市重启与两侧城市布局。
+                let old_urban_time = match &urban_layouts {
+                    Some(_) => Some(colm_init::RestartFile::open(lulcc_urban_path(
+                        &old_dir.join(&label).join(time_name(years.old, block)),
+                    )?)?),
+                    None => None,
+                };
+                let urban_const = match &urban_layouts {
+                    Some(_) => Some(colm_init::RestartFile::open(lulcc_urban_const_path(
+                        &const_path(years.new, block),
+                    )?)?),
+                    None => None,
+                };
                 // MEC（`DEF_LULCC_SCHEME = 2`）：SAT 之后按转移份额混合份额有变化的 patch。
                 match mec {
                     Some(mec_options) => {
@@ -2565,6 +2742,25 @@ fn lulcc_transition(
                             }
                             _ => None,
                         };
+                        let urban = match (&cold_urban, &urban_layouts, &old_urban_time, &urban_const) {
+                            (
+                                Some(cold_urban),
+                                Some((new_urban, old_urban)),
+                                Some(old_urban_time),
+                                Some(urban_const),
+                            ) => Some(colm_init::lulcc_mec::MecUrban {
+                                new_time: cold_urban,
+                                sat: std::mem::take(&mut urban_overrides),
+                                old_time: old_urban_time,
+                                new_class: &new_urban.0,
+                                new_urban: &new_urban.1,
+                                old_class: &old_urban.0,
+                                old_urban: &old_urban.1,
+                                froof: urban_const.floats("WT_ROOF")?,
+                                fgper: urban_const.floats("WTROAD_PERV")?,
+                            }),
+                            _ => None,
+                        };
                         let result = colm_init::lulcc_mec::mass_energy_conserve(
                             &colm_init::lulcc_mec::MecInputs {
                                 new_time: &cold,
@@ -2575,6 +2771,7 @@ fn lulcc_transition(
                                 old_element,
                                 lccpct: &lccpct,
                                 pft,
+                                urban,
                             },
                             sat,
                             mec_options,
@@ -2584,6 +2781,9 @@ fn lulcc_transition(
                         })?;
                         if cold_pft.is_some() {
                             pft_overrides = result.pft;
+                        }
+                        if cold_urban.is_some() {
+                            urban_overrides = result.urban;
                         }
                         result.patch
                     }
@@ -2597,6 +2797,9 @@ fn lulcc_transition(
         cold.write_with(&path, &overrides)?;
         if let Some(cold_pft) = &cold_pft {
             cold_pft.write_with(&colm_runtime::pft::pft_restart_path(&path)?, &pft_overrides)?;
+        }
+        if let Some(cold_urban) = &cold_urban {
+            cold_urban.write_with(&lulcc_urban_path(&path)?, &urban_overrides)?;
         }
         if let Some((set, mixing)) = &land_tracers {
             let old = match old_topology.blocks.iter().find(|(old, _)| old == block) {
@@ -2616,6 +2819,7 @@ fn lulcc_transition(
                     time: &cold,
                     patch_class: new_const.integers("patchclass")?,
                     element: &new_topology.element[patches.clone()],
+                    urban_class: None,
                 },
                 new_const.integers("patchtype")?,
                 old.as_ref()
@@ -2625,6 +2829,7 @@ fn lulcc_transition(
                                 time: old_time,
                                 patch_class: old_const.integers("patchclass")?,
                                 element: &old_topology.element[old_patches.clone()],
+                                urban_class: None,
                             },
                             old_time,
                         ))

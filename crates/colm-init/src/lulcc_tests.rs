@@ -88,11 +88,13 @@ fn pairs_walk_each_element_by_patch_class() {
         time: &file,
         patch_class: &old_class,
         element: &old_element,
+        urban_class: None,
     };
     let new = SatSide {
         time: &file,
         patch_class: &new_class,
         element: &new_element,
+        urban_class: None,
     };
     assert_eq!(match_patches(&new, &old).unwrap(), vec![(0, 0), (2, 2)]);
 }
@@ -113,11 +115,13 @@ fn matched_patches_take_the_old_state_and_new_ones_stay_cold() {
         time: &old_file,
         patch_class: &[1, 17],
         element: &[3, 3],
+        urban_class: None,
     };
     let new = SatSide {
         time: &new_file,
         patch_class: &[1, 2, 17],
         element: &[3, 3, 3],
+        urban_class: None,
     };
     let overrides = same_type_assignment(&new, &old, options()).unwrap();
     let get = |name: &str| {
@@ -161,6 +165,7 @@ fn a_missing_variable_is_named() {
         time: file,
         patch_class: &[1],
         element: &[1],
+        urban_class: None,
     };
     let error = same_type_assignment(
         &side(&new_file),
@@ -198,8 +203,8 @@ fn pfts_pair_by_class_and_ldew_is_reweighted() {
     let old_time = restart(&dir.join("old.nc"), 2, 0.0, &[1.0, 1.0], &[1.0, 1.0]);
     // 一个单元两个 patch：土壤（类 1）与湿地（类 11）。
     let (class, element) = ([1i64, 11], [7i64, 7]);
-    let new_side = SatSide { time: &new_time, patch_class: &class, element: &element };
-    let old_side = SatSide { time: &old_time, patch_class: &class, element: &element };
+    let new_side = SatSide { time: &new_time, patch_class: &class, element: &element, urban_class: None };
+    let old_side = SatSide { time: &old_time, patch_class: &class, element: &element, urban_class: None };
     // 新：PFT 类 1、3、4；旧：类 1、2、4（类 2 消失、类 3 新增）。
     let new_pft = pft_restart(&dir.join("new_pft.nc"), 3, 100.0);
     let old_pft = pft_restart(&dir.join("old_pft.nc"), 3, 0.0);
@@ -219,4 +224,79 @@ fn pfts_pair_by_class_and_ldew_is_reweighted() {
     assert_eq!(tleaf, &vec![0.0, 101.0, 2.0]);
     let expected = 2.0f64.mul_add(0.2, 101.0f64.mul_add(0.3, 0.0f64.mul_add(0.5, 0.0)));
     assert_eq!(ldew, vec![(0, expected)]);
+}
+
+/// 城市 patch 还要按城市类型对齐：旧 [城市 2, 城市 3]，新 [城市 1, 城市 3] —— 2 消失、1 新增。
+#[test]
+fn urban_patches_pair_by_urban_class() {
+    let dir = temp_dir("urban-pairs");
+    let time = restart(&dir.join("t.nc"), 3, 0.0, &[0.0; 3], &[0.0; 3]);
+    let class = [1, URBAN, URBAN];
+    let element = [7, 7, 7];
+    let side = |urban: &'static [i64]| SatSide {
+        time: &time,
+        patch_class: &class,
+        element: &element,
+        urban_class: Some(urban),
+    };
+    let pairs = match_patches(&side(&[0, 1, 3]), &side(&[0, 2, 3])).unwrap();
+    assert_eq!(pairs, vec![(0, 0), (2, 2)]);
+    // 不带城市类型时按 patchclass 一一配对。
+    let plain = |time| SatSide {
+        time,
+        patch_class: &class,
+        element: &element,
+        urban_class: None,
+    };
+    assert_eq!(
+        match_patches(&plain(&time), &plain(&time)).unwrap(),
+        vec![(0, 0), (1, 1), (2, 2)]
+    );
+}
+
+/// 城市 patch 的水量重组：屋顶只占前 6 层，透水地面整列，不透水地面前 6 层；`scv` 三项加权。
+#[test]
+fn urban_patch_water_is_recomposed_from_the_urban_columns() {
+    let dir = temp_dir("urban-water");
+    let mut file = netcdf::create(dir.join("u.nc")).unwrap();
+    file.add_dimension("urban", 1).unwrap();
+    file.add_dimension("roofsnow", 8).unwrap();
+    file.add_dimension("soilsnow", 8).unwrap();
+    for name in ["wliq_roofsno", "wice_roofsno"] {
+        file.add_variable::<f64>(name, &["urban", "roofsnow"]).unwrap().put_values(&[1.0; 8], ..).unwrap();
+    }
+    for name in ["wliq_gpersno", "wice_gpersno", "wliq_gimpsno", "wice_gimpsno"] {
+        let value = if name.contains("gper") { 2.0 } else { 4.0 };
+        file.add_variable::<f64>(name, &["urban", "soilsnow"]).unwrap().put_values(&[value; 8], ..).unwrap();
+    }
+    for (name, value) in [("scv_roof", 1.0), ("scv_gper", 2.0), ("scv_gimp", 4.0)] {
+        file.add_variable::<f64>(name, &["urban"]).unwrap().put_values(&[value], ..).unwrap();
+    }
+    file.close().unwrap();
+    let urban_time = RestartFile::open(dir.join("u.nc")).unwrap();
+    let urban: Vec<RestartOverride> = [
+        "wliq_roofsno", "wice_roofsno", "wliq_gpersno", "wice_gpersno", "wliq_gimpsno",
+        "wice_gimpsno", "scv_roof", "scv_gper", "scv_gimp",
+    ]
+    .iter()
+    .map(|&name| RestartOverride::new(name, values(&urban_time, name).unwrap()))
+    .collect();
+    let mut patch = vec![
+        RestartOverride::new("wliq_soisno", vec![9.0; 16]),
+        RestartOverride::new("wice_soisno", vec![9.0; 16]),
+        RestartOverride::new("scv", vec![9.0, 9.0]),
+    ];
+    let (froof, fgper) = (0.25, 0.5);
+    recompose_urban_patch_water(&[(1, 0)], &urban, &urban_time, &[froof], &[fgper], &mut patch, 8)
+        .unwrap();
+    let open = 1.0 - froof;
+    let top = (4.0 * open).mul_add(1.0 - fgper, (2.0 * open).mul_add(fgper, 1.0 * froof));
+    let deep = (2.0 * open).mul_add(fgper, 0.0);
+    let column = &patch[0].values[8..];
+    assert_eq!(column[..6], [top; 6]);
+    assert_eq!(column[6..], [deep; 2]);
+    // 第 0 个 patch 不在目标里，原样保留。
+    assert_eq!(patch[0].values[..8], [9.0; 8]);
+    let scv = (4.0 * open).mul_add(1.0 - fgper, 1.0f64.mul_add(froof, (2.0 * open) * fgper));
+    assert_eq!(patch[2].values, vec![9.0, scv]);
 }

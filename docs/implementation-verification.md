@@ -28832,3 +28832,45 @@ Rust（`colm_core::pft`）：
 新单测 `plant_community_stops_the_three_dimensional_range_at_the_first_crop`。
 
 另记：Fortran 的空间 PC 很慢（g1pc 一个多月约 50 分钟，Rust 约 8 分钟），g3pt 的 Fortran 端也慢。
+
+## 第 534 轮：LULCC + 城市（SAT 与 MEC）；LULCC 的另外两个拒绝
+
+**SAT 城市段**（`MOD_Lulcc_Vars_TimeVariables.F90:706-724, 863-979`）：
+- 配对时，城市 patch 除了 `patchclass` 相同，还要 `landurban%settyp` 相同。仍是双指针：旧的城市类型小就跳旧的，新的小就跳新的。
+- 配上的城市单元整行抄 66 个城市时间变量；`tree_lai/tree_sai` 不抄，保持冷启动值。
+- 然后按**新年**的 `froof`（`WT_ROOF`）、`fgper`（`WTROAD_PERV`）重组 patch 的 `wliq/wice_soisno` 与 `scv`。GIMPLE 里 `_1743 = 1-froof`，`_1742 = fgper`：
+  - `(:1)`（5 层雪 + 第 1 层土）先取 `roof*froof`；
+  - 整列 `FMA(gper*(1-froof), fgper, ·)`；
+  - `(:1)` 再 `FMA(gimp*(1-froof), 1-fgper, ·)`；
+  - `scv = FMA(gimp*(1-froof), 1-fgper, FMA(roof, froof, (gper*(1-froof))*fgper))`。
+
+**MEC 城市段**（`MOD_Lulcc_MassEnergyConserve.F90:950-1114`）：在配对单元里，对**每个**城市 patch 执行（不只是份额有变化的）。
+- 来源单元：同城市类型的**最后一个**（循环不提前退出）；没有同类型时，取类型差最小的第一个（严格 `>` 才换）。
+- 抄城市状态。没有同类型、且来源里有土壤 patch 时，透水地面的雪先借第一个来源 patch 的（`FROM_SOIL`）。
+- 再在 MEC 混合后的状态上重组水量。
+- 上游有两处读失效值（upstream-bugs 第 44 条），Rust 拒绝。
+
+Rust：
+- `SatSide.urban_class`；
+- `colm_init::lulcc` 的 `URBAN_COPIED`、`urban_same_type_assignment`、`recompose_urban_patch_water`；
+- `lulcc_mec::MecUrban` 与 `urban_tail`；
+- `lulcc_transition` 读两年的 `landurban` 城市类型，城市单元号就是前面 `patchtype == 1` 的 patch 数；换年时写城市时间重启，旁车的 `urban_run/urban_patches` 改成实际值；
+- 输运示踪物 + 城市 + LULCC 仍拒绝。
+
+**另外两个拒绝改成说明真实原因**（不移植）：
+- `DEF_USE_IRRIGATION`：上游灌溉在 `#ifdef CROP` 下按作物物候施水，要 BGC 作物；LULCC 与 BGC 在上游互斥。
+- `DEF_Optimize_Baseflow`：`scale_baseflow` 按旧年 patch 布局标定，LULCC 后不重映射（upstream-bugs 第 43 条）。优化器只在 spinup 里迭代，而 LULCC 的 spinup 还没接。
+
+**验收**（g3 底加 `DEF_URBAN_RUN`，Rust 预处理 2005/2006；新旧年都是 32 个城市单元、城市布局相同，patch 数 191→188）：
+
+| 算例 | 方案 | history | restart（含城市时间重启） |
+|---|---|---|---|
+| `g3u` | SAT | 4 份，bad 0 | 11 份，bad 0 |
+| `g3um` | MEC | 4 份，bad 0 | 11 份，bad 0 |
+
+- g3um 与 g3u 的主重启相比有 29 个变量不同；32 个城市 patch 里有 17 个份额有变化（MEC 混合后再重组水量）。
+- 两年城市布局相同，所以最近类型与 `FROM_SOIL` 两支端到端没走到；单测覆盖了配对与水量重组：
+  - `urban_patches_pair_by_urban_class`；
+  - `urban_patch_water_is_recomposed_from_the_urban_columns`。
+
+回归 `g3 g3m g3t g3mt g3p g3pm g3pmt g3c g3cm` 全部逐位一致，clippy 无告警。

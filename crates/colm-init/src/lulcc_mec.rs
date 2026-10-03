@@ -67,6 +67,25 @@ pub struct MecInputs<'a> {
     pub lccpct: &'a [Vec<f64>],
     /// PFT 路径的输入；LCT 时为 `None`。
     pub pft: Option<MecPft<'a>>,
+    /// `DEF_URBAN_RUN` 的输入。
+    pub urban: Option<MecUrban<'a>>,
+}
+
+/// MEC 的城市输入（`MOD_Lulcc_MassEnergyConserve.F90:950-1114`）。
+pub struct MecUrban<'a> {
+    /// 新年冷启动的城市时间重启（行长取这里）与 SAT 的城市替换值。
+    pub new_time: &'a RestartFile,
+    pub sat: Vec<RestartOverride>,
+    /// 旧年终态的城市时间重启。
+    pub old_time: &'a RestartFile,
+    /// 每个 patch 的城市类型（非城市为 0）与城市单元号，新旧两侧。
+    pub new_class: &'a [i64],
+    pub new_urban: &'a [Option<usize>],
+    pub old_class: &'a [i64],
+    pub old_urban: &'a [Option<usize>],
+    /// 新年的 `froof`（`WT_ROOF`）与 `fgper`（`WTROAD_PERV`）。
+    pub froof: &'a [f64],
+    pub fgper: &'a [f64],
 }
 
 /// MEC 的 PFT 输入（新侧）：冷启动 PFT 时间重启叠上 SAT 的逐 PFT 替换。
@@ -91,6 +110,7 @@ pub struct MecPft<'a> {
 pub struct MecResult {
     pub patch: Vec<RestartOverride>,
     pub pft: Vec<RestartOverride>,
+    pub urban: Vec<RestartOverride>,
 }
 
 /// 一个变量：每 patch 的值数与全部值（盘上次序，patch 在前）。
@@ -240,6 +260,8 @@ pub fn mass_energy_conserve(
     let mut touched = false;
     // 配对单元里的新 patch：PFT 尾段对其中每个土壤 patch 都执行。
     let mut matched = Vec::new();
+    // 份额有变化的 patch 的来源（`frnp_`），城市段的 `FROM_SOIL` 要用。
+    let mut sources_of: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
 
     for (element, (first, last)) in spans(inputs.new_element) {
         let Some(&(first_, last_)) = old_spans.get(&element) else {
@@ -292,6 +314,7 @@ pub fn mass_energy_conserve(
                     }
                 }
             }
+            sources_of.insert(np, sources.clone());
             let weight = |k: usize| lcc_of(old_class[sources[k]]);
 
             // 清零（上游逐个置 0 的那一组）。
@@ -621,9 +644,26 @@ pub fn mass_energy_conserve(
         Some(pft) => pft_tail(pft, &mut state, &matched, new_type, options)?,
         None => Vec::new(),
     };
-    // 没有需要混合的 patch、也没有 PFT 尾段时 SAT 原样返回。
-    if !touched && inputs.pft.is_none() {
-        return Ok(MecResult { patch: sat, pft });
+    let urban = match &inputs.urban {
+        Some(urban) => urban_tail(
+            urban,
+            &mut state,
+            &old,
+            &matched,
+            &sources_of,
+            inputs,
+            new_class,
+            old_class,
+        )?,
+        None => Vec::new(),
+    };
+    // 没有需要混合的 patch、也没有 PFT/城市尾段时 SAT 原样返回。
+    if !touched && inputs.pft.is_none() && inputs.urban.is_none() {
+        return Ok(MecResult {
+            patch: sat,
+            pft,
+            urban,
+        });
     }
     let mut overrides: Vec<RestartOverride> = sat
         .into_iter()
@@ -637,6 +677,151 @@ pub fn mass_energy_conserve(
     Ok(MecResult {
         patch: overrides,
         pft,
+        urban,
+    })
+}
+
+/// 城市尾段（`:950-1114`）：配对单元里每个城市 patch 从旧单元的城市 patch 取城市状态，
+/// 再由城市分量重组 patch 的 `wliq/wice_soisno` 与 `scv`。
+///
+/// 来源单元：同城市类型的**最后一个**（循环不提前退出）；没有同类型时取类型差最小的
+/// 第一个（严格 `>` 才换）。上游两处会读到失效的值，这里拒绝（`docs/upstream-bugs.md` 第 44 条）：
+/// 旧单元里没有城市 patch 时 `selfu_`/`u_` 沿用上一个 patch 的；没有同类型、份额又没变时
+/// `FROM_SOIL` 读未赋值的 `frnp_`。
+#[allow(clippy::too_many_arguments)]
+fn urban_tail(
+    urban: &MecUrban<'_>,
+    state: &mut BTreeMap<&str, Field>,
+    old: &BTreeMap<&str, Field>,
+    matched: &[usize],
+    sources_of: &BTreeMap<usize, Vec<usize>>,
+    inputs: &MecInputs<'_>,
+    new_class: &[i64],
+    old_class: &[i64],
+) -> Result<Vec<RestartOverride>> {
+    let old_type = inputs.old_const.integers("patchtype")?;
+    let mut copies = Vec::new();
+    let mut from_soil = Vec::new();
+    let mut targets = Vec::new();
+    for &np in matched {
+        if new_class[np] != crate::lulcc::URBAN {
+            continue;
+        }
+        let u = urban.new_urban[np].with_context(|| format!("urban patch {np} has no urban unit"))?;
+        let element = inputs.new_element[np];
+        let candidates: Vec<(usize, usize)> = (0..old_class.len())
+            .filter(|&p| inputs.old_element[p] == element && old_class[p] == crate::lulcc::URBAN)
+            .map(|p| {
+                urban.old_urban[p]
+                    .map(|u_| (p, u_))
+                    .with_context(|| format!("old urban patch {p} has no urban unit"))
+            })
+            .collect::<Result<_>>()?;
+        ensure!(
+            !candidates.is_empty(),
+            "LULCC MEC: new urban patch {np} has no urban patch in last year's element; upstream \
+             reuses a stale source index there (docs/upstream-bugs.md #44)"
+        );
+        let class = urban.new_class[np];
+        let same = candidates
+            .iter()
+            .rev()
+            .find(|&&(p, _)| urban.old_class[p] == class)
+            .map(|&(_, u_)| u_);
+        let u_ = match same {
+            Some(u_) => u_,
+            None => {
+                let mut best = candidates[0];
+                let mut gap = (class - urban.old_class[best.0]).abs();
+                for &candidate in &candidates[1..] {
+                    let d = (class - urban.old_class[candidate.0]).abs();
+                    if gap > d {
+                        best = candidate;
+                        gap = d;
+                    }
+                }
+                best.1
+            }
+        };
+        copies.push((u, u_));
+        if same.is_none() {
+            let sources = sources_of.get(&np).with_context(|| {
+                format!(
+                    "LULCC MEC: urban patch {np} has no same-class source and an unchanged \
+                     transfer row; upstream reads an unset source list (docs/upstream-bugs.md #44)"
+                )
+            })?;
+            if sources.iter().any(|&p| old_type[p] == 0) {
+                from_soil.push((u, sources[0]));
+            }
+        }
+        targets.push((np, u));
+    }
+    // 以 SAT 的城市值为底，逐变量把来源单元整行抄过来。
+    let mut overrides = urban.sat.clone();
+    for name in crate::lulcc::URBAN_COPIED {
+        let row = crate::lulcc::urban_row(urban.new_time, name)?;
+        let source = load_urban(urban.old_time, name)?;
+        let entry = match overrides.iter().position(|entry| entry.name == name) {
+            Some(index) => &mut overrides[index],
+            None => {
+                overrides.push(RestartOverride::new(name, load_urban(urban.new_time, name)?));
+                overrides.last_mut().expect("just pushed")
+            }
+        };
+        for &(u, u_) in &copies {
+            entry.values[u * row..(u + 1) * row].copy_from_slice(&source[u_ * row..(u_ + 1) * row]);
+        }
+    }
+    // `:1089-1096`：透水地面先借第一个来源土壤 patch 的雪。
+    for &(u, p) in &from_soil {
+        for (urban_name, patch_name) in [
+            ("z_sno_gper", "z_sno"),
+            ("sag_gper", "sag"),
+            ("scv_gper", "scv"),
+            ("fsno_gper", "fsno"),
+            ("snowdp_gper", "snowdp"),
+        ] {
+            let row = crate::lulcc::urban_row(urban.new_time, urban_name)?;
+            let field = &old[patch_name];
+            ensure!(field.row == row, "{patch_name} and {urban_name} rows disagree");
+            let entry = overrides
+                .iter_mut()
+                .find(|entry| entry.name == urban_name)
+                .expect("every copied urban variable is overridden");
+            for i in 0..row {
+                entry.values[u * row + i] = field.at(p, i);
+            }
+        }
+    }
+    // patch 的水量与雪：在 MEC 状态上重组。
+    let mut patch: Vec<RestartOverride> = ["wliq_soisno", "wice_soisno", "scv"]
+        .iter()
+        .map(|&name| RestartOverride::new(name, state[name].values.clone()))
+        .collect();
+    let patch_row = state["wliq_soisno"].row;
+    crate::lulcc::recompose_urban_patch_water(
+        &targets,
+        &overrides,
+        urban.new_time,
+        urban.froof,
+        urban.fgper,
+        &mut patch,
+        patch_row,
+    )?;
+    for entry in patch {
+        state
+            .get_mut(entry.name.as_str())
+            .expect("the patch field is loaded")
+            .values = entry.values;
+    }
+    Ok(overrides)
+}
+
+fn load_urban(file: &RestartFile, name: &str) -> Result<Vec<f64>> {
+    Ok(match file.floats(name) {
+        Ok(values) => values.to_vec(),
+        Err(_) => file.integers(name)?.iter().map(|&v| v as f64).collect(),
     })
 }
 

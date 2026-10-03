@@ -347,6 +347,34 @@
 - **处理**：vendor 未改。正确的修法要上游决定：是把双线性的邻格扩进块覆盖，还是在区域边缘退化为最近格心。
   Rust 已按上游写法移植 `build_bilinear`（含单测），但入口拒绝 `bilinear` 并说明原因（第 525 轮）。
 
+### 43. LULCC 之后 `scale_baseflow` 仍按旧年 patch 编号取值
+
+- **位置**：
+  - `main/ParaOpt/MOD_Opt_Baseflow.F90:23-58`（`Opt_Baseflow_init`）：启动时按当年 `landpatch` 读 `ParaOpt/<case>_baseflow.nc` 的 `scale_baseflow`，缺文件时取 1；
+  - `main/MOD_SoilSnowHydrology.F90:1022`：每步 `rsubst = rsubst * scale_baseflow(ipatch)`，**与 `DEF_Optimize_Baseflow` 无关**；
+  - `main/LULCC/*`：换年后不重分配、也不重映射这个数组。
+- **原因**：标定文件不带年份，按旧年 patch 布局存放；LULCC 改了 patch 布局，数组却原样保留。
+- **影响**：
+  - 新年 patch 少于旧年时：新 patch `ipatch` 拿到旧年第 `ipatch` 个 patch 的系数，系数与 patch 错位，结果静默错误；
+  - 多于旧年时：越界读（生产构建不查界）；
+  - 没有标定文件（全是 1）时无影响，现有 LULCC 算例都属于这种（g3：175→172；g3p、g3c 的 patch 数不变）。
+  - 下一段续跑重新读文件时仍按旧布局，错位依旧。
+- **处理**：vendor 未改。正确的修法需要上游定：要么标定文件按土地覆盖年份分开，要么在 LULCC 里按 SAT 配对重映射、新类型 patch 取 1。
+  - Rust 与 Fortran 的取值方式相同：按新 patch 编号读文件，文件太短时报错，而不是越界读。
+  - `DEF_Optimize_Baseflow`（只在 spinup 里迭代）与 LULCC 同开时，Rust 仍拒绝，理由改为本条（第 534 轮）。
+
+### 44. MEC 城市段在两种情况下读失效的来源下标
+
+- **位置**：`main/LULCC/MOD_Lulcc_MassEnergyConserve.F90:950-1096`。
+- **情况一（旧单元里没有城市 patch）**：
+  - `selfu_ = -1` 与 `gu_` 只在 `nurb > 0` 时设，`u_` 也只在 `selfu_ > 0` 或 `nurb > 0` 时赋值；
+  - `nurb == 0` 时，两者都沿用**上一个城市 patch**（可能在别的单元）的值，`u.le.0 .or. u_.le.0` 也拦不住，于是新城市从别处的城市单元抄状态；
+  - 若这是本 worker 的第一个城市 patch，读到的就是未初始化值。
+  - 注释写的是"保留冷启动值"，代码没做到。
+- **情况二（份额没变、旧单元里又没有同城市类型）**：`FROM_SOIL` 遍历 `frnp_(1:num)` 判断来源里有没有土壤 patch，可 `frnp_` 只在份额有变化的分支里赋值，这里读的是刚 `allocate` 的未定义内容。
+- **影响**：只在城市布局逐年变化时出现。现有算例 g3um 两年城市布局相同，走不到。
+- **处理**：vendor 未改。情况一的正确做法应是跳过（保留冷启动值）；情况二应只在有来源时判断。Rust 在这两种情况下都拒绝并指向本条（第 534 轮）。
+
 ## 二、TRACER 编译开关改变了物理（需要上游确认哪一边是对的）
 
 这一版上游在很多地方给 TRACER 构建和非 TRACER 构建写了**不同的物理**，不只是记账不同。

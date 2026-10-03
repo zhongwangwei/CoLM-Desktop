@@ -204,6 +204,7 @@ fn changed_patches_mix_sources_by_transfer_fraction() {
         old_element: &[7, 7],
         lccpct: &lccpct,
         pft: None,
+        urban: None,
     };
     let overrides = mass_energy_conserve(&inputs, Vec::new(), options()).unwrap().patch;
     let get = |name: &str| {
@@ -254,6 +255,7 @@ fn a_missing_source_class_is_refused() {
         old_element: &[7, 7],
         lccpct: &lccpct,
         pft: None,
+        urban: None,
     };
     let error = mass_energy_conserve(&inputs, Vec::new(), options()).unwrap_err();
     assert!(format!("{error:#}").contains("class 8"), "{error:#}");
@@ -277,6 +279,7 @@ fn unchanged_fractions_keep_the_sat_result() {
         old_element: &[7, 7],
         lccpct: &lccpct,
         pft: None,
+        urban: None,
     };
     let sat = vec![RestartOverride::new("tleaf", vec![285.0, 0.0])];
     let overrides = mass_energy_conserve(&inputs, sat.clone(), options()).unwrap().patch;
@@ -329,6 +332,7 @@ fn pft_merges_soil_classes_and_rescales_ldew_p() {
         old_const: &old_const,
         old_element: &[7, 7],
         lccpct: &lccpct,
+        urban: None,
         pft: Some(MecPft {
             time: &pft_time,
             sat: Vec::new(),
