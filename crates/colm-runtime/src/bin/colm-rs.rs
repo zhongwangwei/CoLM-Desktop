@@ -569,9 +569,10 @@ fn run_spatial(
         lulcc_boundary: false,
     };
     loop {
-        // LULCC 在一年最后一步之后做（`isendofyear`），运行在那里切段。
+        // LULCC 在一年最后一步之后做（`isendofyear`），运行在那里切段；2000 年以前只在换入
+        // 5 的倍数年时做（见 [`lulcc_year_end`]）。
         let boundary = lulcc
-            .then(|| year_end(segment.config.start))
+            .then(|| lulcc_year_end(segment.config.start))
             .filter(|boundary| {
                 calendar_key(normalized_day_end(*boundary)) <= calendar_key(run_end)
             });
@@ -597,7 +598,7 @@ fn run_spatial(
             &case,
             LulccYears {
                 old: year,
-                new: year + 1,
+                new: i64::from(boundary.year) + 1,
                 history_frequency: config.history_frequency,
             },
             boundary,
@@ -605,19 +606,18 @@ fn run_spatial(
             &target,
             river,
         )?;
-        year += 1;
+        year = i64::from(boundary.year) + 1;
         if next_start == run_end {
             break;
         }
         // 预热区间按绝对时刻延续到后面的段（单遍预热可以跨 LULCC 年末，`check_spatial_lulcc`
         // 已拒绝跨年末回卷的情形）；已经结束的预热在新段里不再出现。
-        let spinup_until = if calendar_key(normalized_day_end(config.spinup_until))
-            > calendar_key(next_start)
-        {
-            config.spinup_until
-        } else {
-            next_start
-        };
+        let spinup_until =
+            if calendar_key(normalized_day_end(config.spinup_until)) > calendar_key(next_start) {
+                config.spinup_until
+            } else {
+                next_start
+            };
         segment = SpatialSegment {
             config: colm_runtime::spatial::runtime::SpatialRuntimeConfig {
                 start: next_start,
@@ -1675,7 +1675,7 @@ fn check_spatial_lulcc(
         && calendar_key(normalized_day_end(config.spinup_until))
             > calendar_key(normalized_day_end(config.start))
     {
-        let first_lulcc = normalized_day_end(year_end(config.start));
+        let first_lulcc = normalized_day_end(lulcc_year_end(config.start));
         ensure!(
             calendar_key(normalized_day_end(config.spinup_until)) < calendar_key(first_lulcc),
             "DEF_USE_LULCC with {} spinup cycles reaching the year end at {}: upstream rewinds the \
@@ -1685,10 +1685,13 @@ fn check_spatial_lulcc(
             date_label(first_lulcc)
         );
     }
-    // 2000 年以前上游每 5 年才换一次土地覆盖，重启年份也按 5 年取整；只接逐年的那段。
+    // 上游运行期 `lc_year = s_year` 不取整，而 2000 年以前 mksrfdata 只写 `max(1985, 5 年取整)` 的
+    // 土地覆盖：起始年不是那样的年份时，上游去读不存在的 landdata 年份。
     ensure!(
-        config.start.year >= 2000,
-        "DEF_USE_LULCC before 2000 (five-yearly land cover) is not ported to the Rust runtime"
+        config.start.year >= 2000 || (config.start.year >= 1985 && config.start.year % 5 == 0),
+        "DEF_USE_LULCC starting in {} before 2000: upstream loads the land cover of the start year, \
+         but mksrfdata writes it only for 1985, 1990, 1995 (and every year from 2000)",
+        config.start.year
     );
     Ok(())
 }
@@ -2457,6 +2460,24 @@ fn methane_giems(
         }
     }
     Ok(())
+}
+
+/// `start` 之后第一个做 LULCC 的年末。上游的判据（`CoLM.F90:580-581`）看的是**下一年**
+/// `jdate(1)`：`>= 2000` 每年换，`> 1985` 时只在下一年是 5 的倍数时换（换入 1990、1995、2000）。
+fn lulcc_year_end(start: CalendarTime) -> CalendarTime {
+    let mut end = year_end(start);
+    while !lulcc_changes_into(end.year + 1) {
+        end = year_end(CalendarTime {
+            year: end.year + 1,
+            julian_day: 1,
+            seconds: 0,
+        });
+    }
+    end
+}
+
+fn lulcc_changes_into(year: i32) -> bool {
+    year >= 2000 || (year > 1985 && year % 5 == 0)
 }
 
 /// `start` 所在年份的最后一步的终点，按 CoLM 的写法 `(year, 365|366, 86400)`。
@@ -4904,3 +4925,7 @@ impl Arguments {
         })
     }
 }
+
+#[cfg(test)]
+#[path = "../colm_rs_tests.rs"]
+mod colm_rs_tests;

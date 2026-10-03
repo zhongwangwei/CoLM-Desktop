@@ -450,8 +450,11 @@ impl FlatPatches {
         landarea: &[f64],
         max_class: usize,
     ) -> Result<Vec<f64>> {
-        let (mut result, patch_area, classes) =
+        // `MOD_Lulcc_TransferTrace.F90:205-211`：`sum_areabuff = sum(areabuff)`，再逐个样本
+        // `lccpct(ipatch, lc) += areabuff/sum_areabuff` —— 先除后加，按样本顺序。
+        let (_, patch_area, classes) =
             self.lulcc_source_area_by_patch(previous_class, landarea, max_class)?;
+        let mut result = vec![0.0; classes * self.len()];
         for patch in 0..self.len() {
             if self.wmo_source[patch].is_some() {
                 continue;
@@ -461,8 +464,10 @@ impl FlatPatches {
                 total > 0.0 && total.is_finite(),
                 "LULCC patch {patch} has zero or non-finite land area"
             );
-            for class in 0..classes {
-                result[class * self.len() + patch] /= total;
+            for &cell in &self.cells[self.cells_for(patch)] {
+                // 类别与面积已在 `lulcc_source_area_by_patch` 里校验过。
+                let class = previous_class[cell] as usize;
+                result[class * self.len() + patch] += landarea[cell] / total;
             }
         }
         Ok(result)
@@ -1150,6 +1155,11 @@ impl FlatPatches {
 
     fn cells_for(&self, patch: usize) -> std::ops::Range<usize> {
         self.cell_offsets[patch]..self.cell_offsets[patch + 1]
+    }
+
+    /// 第 `patch` 个 set 的样本数。
+    pub fn sample_count(&self, patch: usize) -> usize {
+        self.cells_for(patch).len()
     }
 
     pub(crate) fn raw_cells(&self, patch: usize) -> &[usize] {

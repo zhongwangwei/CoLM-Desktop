@@ -2104,8 +2104,41 @@ fn materialize_lulcc_transfer_traces(
         COLM_500M,
     )?;
     let area = mesh_cell_area_weights(&topology.mesh, &topology.pixel)?;
-    let fractions =
-        layout.aggregate_lulcc_source_fractions(&previous_class, &area, IGBP_LULCC_CLASSES)?;
+    // 上游取样是 `aggregation_request_data (…, zip = .true.)`：同一 500 m 源格的像元面积先相加，
+    // 按（列、行）升序；随后却按像元数 `ipxstt:ipxend` 接收（`:200-204`），源格数少于像元数时越界读
+    // （upstream-bugs 第 51 条）。两者相等时样本与像元一一对应，只是次序不同。
+    let (zipped_mesh, zipped_layout, zipped_area) =
+        gather_patch_raster(&topology.mesh, &topology.pixel, patches, COLM_500M, true)?;
+    let wmo_sources = patches.wmo_sources()?;
+    for (patch, wmo_source) in wmo_sources.iter().enumerate() {
+        if wmo_source.is_some() {
+            continue;
+        }
+        let element = patches.element_index[patch] - 1;
+        let pixels = patches
+            .owned_pixel_range(patch, topology.mesh.pixel_count(element)?)?
+            .len();
+        let samples = zipped_layout.sample_count(patch);
+        ensure!(
+            pixels == samples,
+            "LULCC transfer trace: patch {patch} has {pixels} pixels in {samples} distinct 500 m \
+             cells; upstream copies the zipped samples into a pixel-sized buffer and reads past \
+             them (docs/upstream-bugs.md #51)"
+        );
+    }
+    let zipped_class = read_mesh_tiled_raster_i32(
+        tiles,
+        &format!("MOD{previous_year:04}"),
+        "LC",
+        &zipped_mesh,
+        &topology.pixel,
+        COLM_500M,
+    )?;
+    let fractions = zipped_layout.aggregate_lulcc_source_fractions(
+        &zipped_class,
+        &zipped_area,
+        IGBP_LULCC_CLASSES,
+    )?;
     for source_class in 0..=IGBP_LULCC_CLASSES {
         write_landpatch_vector(
             args.landdata,
