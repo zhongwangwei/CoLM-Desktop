@@ -29077,3 +29077,13 @@ colm-runtime 单测 151 通过，clippy 无告警。
 用修后的内核重跑掩膜算例的 Fortran 侧：`g1fmm g1bgcm g1cropm g1ffm` 仍逐位一致。单点回归 `nu bl` 逐位一致。
 
 新单测 `urban_accumulators_follow_the_urban_patches_of_a_block`；colm-runtime 单测 152 通过，clippy 无告警。
+
+## 第 544 轮：示踪物 + 城市模型 + LULCC（上游走不到，去掉单列的拒绝）
+
+`CoLMDRIVER.F90:89-92`：`DEF_USE_TRACER .and. DEF_URBAN_RUN .and. m == URBAN .and. ntracers > 0` 时上游 `CoLM_stop`。实测 `g1urbt`（g1urbp + `sol1`）：
+- Fortran 在 `TIMESTEP = 1` 打出 "TRACER does not yet support full urban patches: CoLMMAIN_Urban has no tracer sub-surface state or runoff tracer update." 后 `MPI_ABORT`；
+- Rust 在装配城市 patch 的示踪物时就拒绝（`assembly.rs:1646`，"upstream stops on full urban too"）。
+
+所以示踪物 + 城市模型 + LULCC 在上游根本跑不起来。`check_spatial_lulcc` 里那条单列的"transport tracers with DEF_URBAN_RUN and DEF_USE_LULCC are not ported"是重复的，删掉，统一由装配处的检查覆盖。
+
+剩余清单里这一项就此结束。

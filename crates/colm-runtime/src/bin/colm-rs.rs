@@ -1567,14 +1567,8 @@ fn check_spatial_lulcc(
         !logical_field(document, "DEF_USE_BGC")?,
         "LULCC is not supported for BGC upstream (MOD_Namelist stops too)"
     );
-    // 城市：SAT 与 MEC 的城市段已移植；示踪物的城市重映射还没有。
-    if logical_field(document, "DEF_URBAN_RUN")? {
-        ensure!(
-            colm_runtime::tracer::tracer_set_from_document(document)?
-                .is_none_or(|set| set.transport_indices().next().is_none()),
-            "transport tracers with DEF_URBAN_RUN and DEF_USE_LULCC are not ported"
-        );
-    }
+    // 城市：SAT 与 MEC 的城市段已移植。示踪物 + 城市模型上游在 `CoLMDRIVER.F90:89-92` 第一步就停机，
+    // Rust 在装配城市 patch 的示踪物时拒绝（`assembly.rs`），不再单列 LULCC 的拒绝。
     // 上游灌溉只在 `#ifdef CROP` 下按作物物候施水（`CoLMMAIN.F90:849-858`），要 BGC 作物状态；
     // 而 LULCC 与 BGC 上游互斥（见上），所以这个组合在上游走不到有意义的路径。
     ensure!(
