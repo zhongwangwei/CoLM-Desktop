@@ -92,6 +92,7 @@ pub mod urban {
 pub mod urban_radiation {
     pub use colm_core::urban_radiation::*;
 }
+pub mod unitcatchment_regional;
 pub mod urban_restart;
 pub mod vegetation {
     pub use colm_core::vegetation::*;

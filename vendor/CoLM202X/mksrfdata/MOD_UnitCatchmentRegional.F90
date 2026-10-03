@@ -66,8 +66,19 @@ CONTAINS
       touched = .false.
 
 #ifdef USEMPI
+! ==== FIX: in flat SPMD (one rank that is both master and worker) the master waited in
+! ==== mpi_recv for a message from itself that the ELSEIF branch never sent: deadlock
+! ==== (upstream-bugs #48). The master now reads its own remap directly.
       IF (p_is_master) THEN
          DO iworker = 0, p_np_worker-1
+            IF (p_address_worker(iworker) == p_iam_glb) THEN
+               DO i = 1, remap%num_grid
+                  ix = mod(remap%ids_me(i)-1, nlon) + 1
+                  iy = (remap%ids_me(i)-1) / nlon + 1
+                  touched(ix,iy) = .true.
+               ENDDO
+               CYCLE
+            ENDIF
             CALL mpi_recv (ng, 1, MPI_INTEGER, p_address_worker(iworker), mpi_tag_mesg, p_comm_glb, p_stat, p_err)
             IF (ng > 0) THEN
                allocate (ids (ng))

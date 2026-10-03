@@ -47,6 +47,8 @@ pub struct GridRiverColdStartConfig<'a> {
     pub levee: bool,
     pub reservoir_method: i32,
     pub reservoir_parameters: Option<&'a Path>,
+    /// `DEF_UnitCatchment_regional`：区域网络文件（`unit_catchment` 也应指向它），水库 `dam_seq` 按它换号。
+    pub regional: Option<&'a Path>,
     pub compression_level: u8,
 }
 
@@ -126,6 +128,7 @@ pub fn write_gridriver_cold_restart(
                     .context("GridRiverLake reservoir method 1 needs DEF_ReservoirPara_file")?,
                 count,
                 config.date.year,
+                config.regional,
             )
         })
         .transpose()?;
@@ -432,6 +435,7 @@ fn read_reservoir_cold_state(
     parameters: &Path,
     catchments: usize,
     start_year: i32,
+    regional: Option<&Path>,
 ) -> Result<ReservoirColdState> {
     let file = netcdf::open(parameters).with_context(|| {
         format!(
@@ -440,7 +444,10 @@ fn read_reservoir_cold_state(
         )
     })?;
     let grand_id = read_i32(&file, "dam_GRAND_ID")?;
-    let sequence = read_i32(&file, "dam_seq")?;
+    let mut sequence = read_i32(&file, "dam_seq")?;
+    if let Some(regional) = regional {
+        crate::unitcatchment_regional::translate_dam_seq(&mut sequence, parameters, regional)?;
+    }
     let build_year = read_i32(&file, "dam_year")?;
     let total_volume = read_f64(&file, "dam_TotalVol_mcm")?;
     let conservation_volume = read_f64(&file, "dam_ConVol_mcm")?;

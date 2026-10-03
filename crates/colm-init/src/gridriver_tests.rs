@@ -60,6 +60,7 @@ fn cold_restart_matches_gridriver_schema_two_base_state() {
         levee: false,
         reservoir_method: 0,
         reservoir_parameters: None,
+        regional: None,
         compression_level: 1,
     })
     .unwrap();
@@ -149,6 +150,7 @@ fn gridriver_restart_compresses_vectors_but_not_transaction_scalars() {
         levee: false,
         reservoir_method: 0,
         reservoir_parameters: None,
+        regional: None,
         compression_level: 4,
     })
     .unwrap();
@@ -174,6 +176,7 @@ fn gridriver_restart_compresses_vectors_but_not_transaction_scalars() {
         levee: false,
         reservoir_method: 0,
         reservoir_parameters: None,
+        regional: None,
         compression_level: 10,
     })
     .is_err());
@@ -200,6 +203,7 @@ fn cold_restart_refuses_unimplemented_reservoir_methods() {
         levee: false,
         reservoir_method: 2,
         reservoir_parameters: None,
+        regional: None,
         compression_level: 1,
     })
     .unwrap_err()
@@ -228,6 +232,7 @@ fn cold_restart_carries_native_zero_bifurcation_state() {
         levee: false,
         reservoir_method: 0,
         reservoir_parameters: None,
+        regional: None,
         compression_level: 1,
     })
     .unwrap();
@@ -303,6 +308,7 @@ fn cold_restart_accepts_inactive_levels_before_active_ones() {
         levee: false,
         reservoir_method: 0,
         reservoir_parameters: None,
+        regional: None,
         compression_level: 1,
     })
     .unwrap();
@@ -337,6 +343,7 @@ fn cold_restart_carries_zero_levee_state() {
         levee: true,
         reservoir_method: 0,
         reservoir_parameters: None,
+        regional: None,
         compression_level: 1,
     })
     .unwrap();
@@ -384,6 +391,7 @@ fn cold_restart_carries_native_reservoir_identity_and_volume() {
         levee: false,
         reservoir_method: 1,
         reservoir_parameters: Some(&parameters),
+        regional: None,
         compression_level: 1,
     })
     .unwrap();

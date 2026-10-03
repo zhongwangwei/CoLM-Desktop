@@ -348,7 +348,26 @@ fn write_gridriver_namelist_restart(namelist: &Path, run: &SpatialNamelistRun) -
         .with_context(|| format!("cannot read case namelist {}", namelist.display()))?;
     let document = parse(&text)
         .with_context(|| format!("cannot parse case namelist {}", namelist.display()))?;
-    let unit_catchment = PathBuf::from(required_string(&document, "DEF_UnitCatchment_file")?);
+    let source_catchment = PathBuf::from(required_string(&document, "DEF_UnitCatchment_file")?);
+    // `DEF_UnitCatchment_regional`：上游在 mksrfdata 里由 landpatch 裁出区域网络
+    // （`unitcatchment_regional_build`），之后各处读的都是它（`get_unitcatchment_file`）。
+    // Rust 的 mksrfdata 拿不到面积映射，在这里生成（第 547 轮）。
+    let regional = namelist_bool(&document, "DEF_UnitCatchment_regional", false)?;
+    let unit_catchment = if regional {
+        let (kept, systems) = colm_init::unitcatchment_regional::build(
+            &source_catchment,
+            &run.landdata,
+            run.land_cover_year,
+        )?;
+        let file = colm_init::unitcatchment_regional::regional_file(&run.landdata);
+        println!(
+            "Regional unit-catchment network: {kept} unit catchments in {systems} river systems, written to {}",
+            file.display()
+        );
+        file
+    } else {
+        source_catchment
+    };
     let reservoir_method = namelist_i32(&document, "DEF_Reservoir_Method", 0)?;
     let reservoir_parameters = (reservoir_method == 1)
         .then(|| required_string(&document, "DEF_ReservoirPara_file"))
@@ -365,6 +384,7 @@ fn write_gridriver_namelist_restart(namelist: &Path, run: &SpatialNamelistRun) -
         levee: namelist_bool(&document, "DEF_USE_LEVEE", false)?,
         reservoir_method,
         reservoir_parameters: reservoir_parameters.as_deref(),
+        regional: regional.then_some(unit_catchment.as_path()),
     })?;
     Ok(file.path)
 }

@@ -413,6 +413,18 @@
   - 但月历史续跑的旁车会带进随机值。分配到哪块内存决定了值是多少，结果不可复现。
 - **处理**：vendor 已修，分配后 `forc_rain(:) = 0`、`forc_snow(:) = 0`（第 543 轮）。这与 Rust 对被遮蔽 patch 一直交 0 的做法一致。三套内核（default、latlon、latlon-crop）已重编。
 
+### 48. 区域单元流域在单进程 MPI 下死锁
+
+- **位置**：`mksrfdata/MOD_UnitCatchmentRegional.F90:66-90`（`unitcatchment_regional_build` 的 `USEMPI` 段）。
+- **原因**：
+  - master 逐个 `mpi_recv` 各 worker 发来的 `remap%ids_me`；worker 的发送写在 `ELSEIF (p_is_worker)` 里。
+  - 扁平 SPMD 只有一个 rank 时，它既是 master 又是 worker：只走 master 分支，向自己收一条永远不会发出的消息。
+- **证据**：g1reg（g1all + `DEF_UnitCatchment_regional`，`prterun -n 1`，colm-cli 跑 Fortran 的默认方式）。
+  - mksrfdata 跑到 35 分钟 CPU 仍不结束，`sample` 显示停在 `unitcatchment_regional_build → ompi_recv_f → PMPI_Recv`；
+  - 修后整条纯 Fortran 链路 85 秒跑完。
+- **影响**：单进程 MPI 下开区域单元流域时，mksrfdata 永远不结束。多 rank、master 不兼 worker 的布局不受影响。
+- **处理**：vendor 已修（第 547 轮）。master 遇到自己那个 worker 时直接读本地 `remap%ids_me`，其余照旧收发。
+
 ## 二、TRACER 编译开关改变了物理（需要上游确认哪一边是对的）
 
 这一版上游在很多地方给 TRACER 构建和非 TRACER 构建写了**不同的物理**，不只是记账不同。

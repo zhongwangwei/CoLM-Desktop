@@ -54,12 +54,26 @@ fn read<T: netcdf::NcTypeDescriptor + Copy>(
 impl Reservoir {
     /// `reservoir_init`（单进程、全球网络）。
     pub fn read(path: &Path, network: &RiverNetwork, method: i64) -> Result<Self> {
+        Self::read_with_regional(path, network, method, None)
+    }
+
+    /// [`Self::read`]；`regional` 是区域网络文件时，参数表的 `dam_seq` 先按它的 `seq_src_index`
+    /// 换成区域编号（`MOD_Grid_Reservoir.F90:91-110`）。
+    pub fn read_with_regional(
+        path: &Path,
+        network: &RiverNetwork,
+        method: i64,
+        regional: Option<&Path>,
+    ) -> Result<Self> {
         if method != 1 {
             bail!("unsupported reservoir operation method {method}");
         }
         let file = netcdf::open(path).with_context(|| format!("cannot open {}", path.display()))?;
         let grand_id = read::<i32>(&file, "dam_GRAND_ID", path)?;
-        let dam_seq_all = read::<i32>(&file, "dam_seq", path)?;
+        let mut dam_seq_all = read::<i32>(&file, "dam_seq", path)?;
+        if let Some(regional) = regional {
+            colm_init::unitcatchment_regional::translate_dam_seq(&mut dam_seq_all, path, regional)?;
+        }
         let rows = dam_seq_all.len();
         ensure!(
             grand_id.len() == rows,

@@ -479,10 +479,11 @@ fn run_spatial(
         "methane with DEF_USE_LULCC: methane needs BGC, and upstream does not support LULCC with \
          BGC (MOD_Namelist stops too)"
     );
+    // `MOD_Namelist.F90:1670-1679`：区域单元流域要 GridRiverLakeFlow（空间内核总有）且不能开 LULCC。
     ensure!(
-        !logical_field(&document, "DEF_UnitCatchment_regional")?,
-        "DEF_UnitCatchment_regional is not ported to the Rust river model; run this case with \
-         --engine fortran"
+        !(logical_field(&document, "DEF_UnitCatchment_regional")?
+            && logical_field(&document, "DEF_USE_LULCC")?),
+        "Regional unit catchment requires GridRiverLakeFlow without LULCC (upstream stops too)"
     );
     let lulcc = logical_field(&document, "DEF_USE_LULCC")?;
     if lulcc {
@@ -925,7 +926,7 @@ fn run_spatial_segment(
         runtime = runtime.defer_lai_refresh_at(config.end);
     }
     let network = colm_runtime::river::network::RiverNetwork::read(
-        Path::new(&string_field(document, "DEF_UnitCatchment_file")?),
+        &unit_catchment_file(document, out)?,
         logical_field(document, "DEF_GridRiverLake_FloodplainStorageFix")?,
     )?;
     let routing = colm_runtime::river::network::RunoffRouting::build(&network, &topology)?;
@@ -1007,10 +1008,11 @@ fn run_spatial_segment(
         None
     };
     let reservoir = if integer_field(document, "DEF_Reservoir_Method")? > 0 {
-        Some(colm_runtime::river::reservoir::Reservoir::read(
+        Some(colm_runtime::river::reservoir::Reservoir::read_with_regional(
             Path::new(&string_field(document, "DEF_ReservoirPara_file")?),
             &network,
             integer_field(document, "DEF_Reservoir_Method")?,
+            regional_catchment(document, out)?.as_deref(),
         )?)
     } else {
         None
@@ -1022,7 +1024,7 @@ fn run_spatial_segment(
             |r| r.of_catchment.iter().map(Option::is_some).collect(),
         );
         Some(colm_runtime::river::levee::Levee::read(
-            Path::new(&string_field(document, "DEF_UnitCatchment_file")?),
+            &unit_catchment_file(document, out)?,
             &network,
             &reservoir_cells,
         )?)
@@ -1031,7 +1033,7 @@ fn run_spatial_segment(
     };
     let bifurcation = if logical_field(document, "DEF_USE_BIFURCATION")? {
         Some(colm_runtime::river::bifurcation::Bifurcation::read(
-            Path::new(&string_field(document, "DEF_UnitCatchment_file")?),
+            &unit_catchment_file(document, out)?,
             &network,
         )?)
     } else {
@@ -1169,7 +1171,7 @@ fn run_spatial_segment(
                 )?;
             let sediment = colm_runtime::river::sediment::Sediment::init(
                 &river.network,
-                Path::new(&string_field(document, "DEF_UnitCatchment_file")?),
+                &unit_catchment_file(document, out)?,
                 &param,
             )?;
             river = river.with_sediment(sediment)?;
@@ -1599,6 +1601,24 @@ fn check_spatial_lulcc(
         "DEF_USE_LULCC before 2000 (five-yearly land cover) is not ported to the Rust runtime"
     );
     Ok(())
+}
+
+/// 区域模式下的区域网络文件（水库 `dam_seq` 按它的 `seq_src_index` 换号）；否则 `None`。
+fn regional_catchment(document: &Document, out: &Path) -> Result<Option<std::path::PathBuf>> {
+    Ok(logical_field(document, "DEF_UnitCatchment_regional")?
+        .then(|| colm_init::unitcatchment_regional::regional_file(&out.join("landdata"))))
+}
+
+/// `get_unitcatchment_file`（`share/MOD_Namelist.F90:2884-2895`）：区域模式读 landdata 下裁好的区域网络，
+/// 否则读 `DEF_UnitCatchment_file`。区域模式下先核对区域网络属于当前的源网络（`verify_regional_network`）。
+fn unit_catchment_file(document: &Document, out: &Path) -> Result<std::path::PathBuf> {
+    let source = std::path::PathBuf::from(string_field(document, "DEF_UnitCatchment_file")?);
+    if !logical_field(document, "DEF_UnitCatchment_regional")? {
+        return Ok(source);
+    }
+    let regional = colm_init::unitcatchment_regional::regional_file(&out.join("landdata"));
+    colm_init::unitcatchment_regional::verify(&regional, &source)?;
+    Ok(regional)
 }
 
 /// 主时间重启旁的城市时间重启（`<case>_restart_urban_<date>_…nc`）。
@@ -2944,17 +2964,18 @@ fn lulcc_transition(
     // 3. 河道：网络不变，状态接着用。
     if let Some((mut state, river_tracers, sediment)) = river {
         let network = colm_runtime::river::network::RiverNetwork::read(
-            Path::new(&string_field(document, "DEF_UnitCatchment_file")?),
+            &unit_catchment_file(document, out)?,
             logical_field(document, "DEF_GridRiverLake_FloodplainStorageFix")?,
         )?;
         // `grid_riverlake_flow_lulcc`：河道时变量原样保留（上游 hold/restore），堤内蓄量与分汊
         // 路径状态在各自模块里本就不动；之后重建 `volwater_ucat`（有堤单元流域只补堤外可见那份），
         // 开分汊时上一子步水深取当前水深。漫滩回馈与 LULCC 同开上游自己就拒绝。
         let reservoir = if integer_field(document, "DEF_Reservoir_Method")? > 0 {
-            Some(colm_runtime::river::reservoir::Reservoir::read(
+            Some(colm_runtime::river::reservoir::Reservoir::read_with_regional(
                 Path::new(&string_field(document, "DEF_ReservoirPara_file")?),
                 &network,
                 integer_field(document, "DEF_Reservoir_Method")?,
+                regional_catchment(document, out)?.as_deref(),
             )?)
         } else {
             None
@@ -2965,7 +2986,7 @@ fn lulcc_transition(
                 |r| r.of_catchment.iter().map(Option::is_some).collect(),
             );
             Some(colm_runtime::river::levee::Levee::read(
-                Path::new(&string_field(document, "DEF_UnitCatchment_file")?),
+                &unit_catchment_file(document, out)?,
                 &network,
                 &reservoir_cells,
             )?)

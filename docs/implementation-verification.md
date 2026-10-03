@@ -29136,3 +29136,30 @@ colm-runtime 单测 151 通过，clippy 无告警。
 | `g1bgcd` | `DEF_USE_DiagMatrix` | 2，bad 0 | 9，bad 0 | — |
 
 colm-init 单测 176 通过，clippy 无告警。
+
+## 第 547 轮：区域单元流域（`DEF_UnitCatchment_regional`）；上游缺陷 48
+
+**上游流程**：
+- mksrfdata 建完 landpatch 后，`unitcatchment_regional_build`：
+  1. 求陆面 patch 覆盖的汇流输入格（`build_worker_remapdata (landpatch, gridro)`）；
+  2. 调 `unitcatchment_subset_write`（`MOD_UnitCatchmentSubset.F90:300-534`），由 `inpmat_x/y` 找出接收这些格子径流的单元流域，保留其整条河流系统（按 `seq_next` 回溯到同一个河口）；
+  3. 开 `bif_closure` 时，沿分汊路径反复闭包，直到每条触及选择的路径两端都在选择里；
+  4. 沿 `nseqmax/npthout/dam_ndams` 裁剪全部变量，重编号 `seq seq_next seq_upst bifurcation_upst bifurcation_down dam_seq`；
+  5. 加 `seq_src_index` 与 `source_nseqmax`、`subset_bif_mode`、`subset_note` 等全局属性，并改写 `nseqall/nseqmax/nseqriv/npthout/dam_ndams`。
+- 运行期 `get_unitcatchment_file` 读这份区域文件，读网络时先 `verify_regional_network`；水库表的 `dam_seq` 按 `seq_src_index` 换成区域编号，不在区域里的记为 `-行号`。
+
+**Rust**：
+- 新模块 `colm_init::unitcatchment_regional`：`touched_cells`（与运行期 `RunoffRouting` 同一个面积映射）、`select`、`subset_write`、`build`、`translate_dam_seq`、`verify`。
+- `colm-srfdata` 不依赖 `colm-init`，拿不到面积映射，所以区域文件由 **mkinidata-rs** 在写汇流冷启动前生成（上游在 mksrfdata）。
+- 汇流冷启动、运行期的网络、堤防、分汊、泥沙都改用 `unit_catchment_file`；冷启动与运行期的水库读入都做 `dam_seq` 换号。
+- 去掉 colm-rs 的拒绝，改为照上游拒绝"区域 + LULCC"（`MOD_Namelist.F90:1670-1679`）。
+- **与 Fortran 产物唯一的差别**：区域文件不写字符变量 `dam_DamName`。netcdf crate 写 `NC_CHAR` 需要 `unsafe impl NcTypeDescriptor`，而本仓库 `forbid(unsafe_code)`；上游与 Rust 的运行期都不读它。
+
+**上游缺陷 48**：单进程 MPI 下 `unitcatchment_regional_build` 死锁，vendor 已修（见 upstream-bugs）。`kernels/latlon` 已重编。
+
+**验收 `g1reg`**（g1all 底：堤防 + 分汊 + 水库 + 漫滩回馈，一天；加 `DEF_UnitCatchment_regional`。纯 Fortran 全链路对纯 Rust 全链路）：
+- 两侧都裁出 5197 个单元流域、39 条河流系统；区域里有 291 座坝、565 条分汊路径；
+- `tmp/ncfilecmp.py` 比对两份区域文件：只差 `var dam_DamName: only in A`，其余维度、变量、属性与全局属性全部一致；
+- history 2、restart 5（含河道重启的 `volresv`）、const 逐位一致。
+
+回归逐位一致：`g1all g1ffm g3`。新单测 4 个（选择、分汊闭包与丢弃、无覆盖时报错、沿轴裁剪）；init 180、runtime 152 通过，clippy 无告警。
