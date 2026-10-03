@@ -33,6 +33,8 @@ const GLACIER: i64 = 3;
 const ZLND: f64 = 0.01;
 /// IGBP `patchtypes`（`MOD_Const_LC.F90:398`，下标是类号 1..=17）。
 pub const IGBP_PATCHTYPES: [i64; 17] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 1, 0, 3, 0, 4];
+/// IGBP CROPLAND。
+const CROPLAND: usize = 12;
 /// PFT 归并时单独保留的类：WETLAND、URBAN、GLACIERS、WATERBODY（赋值次序不影响结果）。
 const KEPT_CLASSES: [usize; 4] = [13, 11, 17, 15];
 
@@ -78,8 +80,10 @@ pub struct MecPft<'a> {
     pub hbot: &'a [f64],
     /// 每个新 patch 的 PFT 区间（`patch_pft_s:patch_pft_e`）。
     pub ranges: &'a [std::ops::Range<usize>],
-    /// `DEF_USE_PFT .and. .not. DEF_SOLO_PFT`：把土壤类的份额并进类 1。
+    /// `(DEF_USE_PFT .and. .not. DEF_SOLO_PFT) .or. DEF_FAST_PC`：把土壤类的份额并进类 1。
     pub merge_soil_classes: bool,
+    /// `DEF_FAST_PC`：作物（CROPLAND 与类 14）另成 CROPLAND，再从类 1 里减掉。
+    pub fast_pc: bool,
 }
 
 /// MEC 的结果：patch 级与 PFT 级的替换值。
@@ -258,6 +262,11 @@ pub fn mass_energy_conserve(
                         .fold(0.0, |acc, ilc| row[ilc] + acc);
                     for ilc in KEPT_CLASSES {
                         merged[ilc - 1] = row[ilc];
+                    }
+                    // `:181-185`：FAST_PC 先合出 CROPLAND，再从类 1 的总和里**减**（不是另起一条和）。
+                    if pft.fast_pc {
+                        merged[CROPLAND - 1] = row[CROPLAND] + row[14];
+                        merged[0] -= merged[CROPLAND - 1];
                     }
                     merged
                 }

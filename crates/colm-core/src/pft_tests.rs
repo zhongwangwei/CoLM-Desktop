@@ -126,3 +126,28 @@ fn tree_burial_uses_the_canopy_bounds_under_vegetation_snow() {
     );
     assert_eq!(fraction.vegetation_snow_fraction, buried.mul_add(0.5, 0.0));
 }
+
+/// PC 的三维段截在第一个作物 PFT 前；关掉 `DEF_PC_CROP_SPLIT` 时全部 PFT 都进三维。
+#[test]
+fn plant_community_stops_the_three_dimensional_range_at_the_first_crop() {
+    let mut patch = PftPatch::new(
+        vec![parameters(1, 0.5), parameters(13, 0.3), parameters(15, 0.2)],
+        vec![column(2.0, 0.5), column(1.0, 0.2), column(3.0, 0.3)],
+        2,
+    )
+    .unwrap();
+    patch.plant_community = true;
+    assert_eq!(patch.plant_community_pfts().unwrap(), 2);
+    patch.pc_crop_split = false;
+    assert_eq!(patch.plant_community_pfts().unwrap(), 3);
+
+    // 作物之后再出现自然 PFT：上游两种冠层都不算它，Rust 拒绝。
+    let mut odd = PftPatch::new(
+        vec![parameters(15, 0.5), parameters(1, 0.5)],
+        vec![column(2.0, 0.5), column(1.0, 0.2)],
+        2,
+    )
+    .unwrap();
+    odd.plant_community = true;
+    assert!(odd.plant_community_pfts().is_err());
+}

@@ -1559,7 +1559,6 @@ fn check_spatial_lulcc(
         "LULCC is not supported for BGC upstream (MOD_Namelist stops too)"
     );
     for field in [
-        "DEF_USE_PC",
         "DEF_URBAN_RUN",
         "DEF_USE_IRRIGATION",
         "DEF_Optimize_Baseflow",
@@ -1588,10 +1587,15 @@ fn check_spatial_lulcc(
     Ok(())
 }
 
-/// `lulcc_inventory_trace`（`MOD_Lulcc_Driver.F90:319-342`）：PFT（非 SOLO）时把 `patchtypes == 0`
-/// 的各类份额按类号次序加进第 1 类（从 0 起的顺序加法），其余类照抄；LCT 时原样返回。
+/// `lulcc_inventory_trace`（`MOD_Lulcc_Driver.F90:319-342`）：PFT（非 SOLO）或 FAST_PC 时把
+/// `patchtypes == 0` 的各类份额按类号次序加进第 1 类（从 0 起的顺序加法；FAST_PC 下作物两类
+/// 改加进 CROPLAND），其余类照抄；LCT 时原样返回。
 /// `tracer_forcing_lulcc_map` 的 `source_class` 求和是同一条加法链，所以两处都用这份。
-fn lulcc_inventory_trace(raw: Vec<Vec<f64>>, merge_soil_classes: bool) -> Result<Vec<Vec<f64>>> {
+fn lulcc_inventory_trace(
+    raw: Vec<Vec<f64>>,
+    merge_soil_classes: bool,
+    fast_pc: bool,
+) -> Result<Vec<Vec<f64>>> {
     ensure!(
         raw.iter().flatten().all(|v| v.is_finite() && *v >= 0.0),
         "TRACER LULCC invalid transfer trace"
@@ -1600,6 +1604,7 @@ fn lulcc_inventory_trace(raw: Vec<Vec<f64>>, merge_soil_classes: bool) -> Result
         return Ok(raw);
     }
     use colm_init::lulcc_mec::IGBP_PATCHTYPES;
+    const CROPLAND: usize = 12;
     ensure!(
         raw.iter().all(|row| row.len() == IGBP_PATCHTYPES.len() + 1),
         "TRACER LULCC transfer trace class count mismatch"
@@ -1610,7 +1615,14 @@ fn lulcc_inventory_trace(raw: Vec<Vec<f64>>, merge_soil_classes: bool) -> Result
             let mut mapped = vec![0.0; row.len()];
             mapped[0] = row[0];
             for (c, &value) in row.iter().enumerate().skip(1) {
-                let dest = if IGBP_PATCHTYPES[c - 1] == 0 { 1 } else { c };
+                // FAST_PC：作物两类（CROPLAND 与 14）各自加进 CROPLAND。
+                let dest = if fast_pc && (c == CROPLAND || c == 14) {
+                    CROPLAND
+                } else if IGBP_PATCHTYPES[c - 1] == 0 {
+                    1
+                } else {
+                    c
+                };
                 mapped[dest] += value;
             }
             mapped
@@ -2418,9 +2430,14 @@ fn lulcc_transition(
         ),
         None => None,
     };
-    // `(DEF_USE_PFT .and. .not. DEF_SOLO_PFT)`：份额按 PFT 土壤 patch（第 1 类）归并。
-    let merge_soil_classes =
-        case.physics.use_pft && !logical_field(document, "DEF_SOLO_PFT")?;
+    // `(DEF_USE_PFT .and. .not. DEF_SOLO_PFT) .or. DEF_FAST_PC`：份额按土壤 patch（第 1 类）归并。
+    // `physics.use_pft` 在 PC 下也为真，这里看 namelist 本身；`MOD_Namelist` 在 PFT/LCT 下把
+    // `DEF_FAST_PC` 置假、在 PC 下把 `DEF_SOLO_PFT` 置假，生效值照此推出。
+    let use_pc = logical_field(document, "DEF_USE_PC")?;
+    let fast_pc = use_pc && logical_field(document, "DEF_FAST_PC")?;
+    let merge_soil_classes = (logical_field(document, "DEF_USE_PFT")?
+        && !logical_field(document, "DEF_SOLO_PFT")?)
+        || fast_pc;
     let mut written = Vec::with_capacity(new_topology.blocks.len());
     for (block, patches) in &new_topology.blocks {
         let cold_path = restart_root.join(&label).join(time_name(years.new, block));
@@ -2543,6 +2560,7 @@ fn lulcc_transition(
                                     hbot: new_pft_const.floats("hbot_p")?,
                                     ranges: new_ranges,
                                     merge_soil_classes,
+                                    fast_pc,
                                 })
                             }
                             _ => None,
@@ -2618,6 +2636,7 @@ fn lulcc_transition(
                         lccpct: lulcc_inventory_trace(
                             read_lulcc_transfer_trace(&landdata, years.new, block, patches.len())?,
                             merge_soil_classes,
+                            fast_pc,
                         )?,
                         new_area: lulcc_patch_areas(&new_topology, patches.clone()),
                         old_area: lulcc_patch_areas(&old_topology, old_patches.clone()),
@@ -2652,6 +2671,7 @@ fn lulcc_transition(
                         Some(_) => Some(lulcc_inventory_trace(
                             read_lulcc_transfer_trace(&landdata, years.new, block, patches.len())?,
                             merge_soil_classes,
+                            fast_pc,
                         )?),
                         None => None,
                     };
@@ -3064,10 +3084,6 @@ fn assemble_patch(
     // 跨月的运行会从第二个月起一直用第一天的叶面积，而且不会报错。
     // 空间算例的逐月 LAI 读 `landdata/LAI/<year>/` 的分块向量（`LAI_readin` 的非单点支）。
     if logical_field(document, "DEF_LAI_MONTHLY")? && spatial {
-        ensure!(
-            !template.physics.use_pc,
-            "the Rust spatial runtime reads LCT, PFT and urban LAI; PC LAI is not ported"
-        );
         let year = |key: &str| -> Result<i32> {
             i32::try_from(integer_field(document, key)?)
                 .with_context(|| format!("{key} does not fit an i32"))

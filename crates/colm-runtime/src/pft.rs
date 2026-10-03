@@ -364,6 +364,12 @@ impl PftTemplate {
             .collect();
         let mut initial = PftPatch::new(parameters, columns, interface_depth_m.len() - 1)?;
         initial.plant_community = pc;
+        // `DEF_PC_CROP_SPLIT`（缺省 `.true.`）：PC 的作物 PFT 走一维冠层。
+        initial.pc_crop_split = match document.get("DEF_PC_CROP_SPLIT") {
+            Some(colm_namelist::Value::Bool(value)) => *value,
+            Some(_) => anyhow::bail!("DEF_PC_CROP_SPLIT must be a logical value"),
+            None => true,
+        };
         Ok(Self {
             initial,
             plant_hydraulics,

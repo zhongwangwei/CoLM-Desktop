@@ -103,6 +103,8 @@ pub struct PftPatch {
     pub layers: usize,
     /// `DEF_USE_PC`：冠层能量走 `LeafTemperaturePC`、反照率走 `ThreeDCanopy_wrap`。
     pub plant_community: bool,
+    /// `DEF_PC_CROP_SPLIT`（缺省真）：PC 下作物 PFT（类 ≥ 15）改走一维 `twostream`/`LeafTemperature`。
+    pub pc_crop_split: bool,
 }
 
 impl PftPatch {
@@ -126,7 +128,29 @@ impl PftPatch {
             columns,
             layers,
             plant_community: false,
+            pc_crop_split: true,
         })
+    }
+
+    /// PC 交给三维冠层（`ThreeDCanopy_wrap`/`LeafTemperaturePC`）的自然 PFT 个数 `pn - ps + 1`。
+    ///
+    /// 上游从 `ps` 起找第一个作物 PFT（`DEF_PC_CROP_SPLIT .and. p >= 15`），三维段截在它之前
+    /// （`MOD_3DCanopyRadiation.F90:110-127`、`MOD_Thermal.F90:1043-1052`）；作物之后再出现的
+    /// 自然 PFT 两边都不算，所以这里要求作物 PFT 排在最后（`pftclass` 升序时恒成立）。
+    pub fn plant_community_pfts(&self) -> Result<usize> {
+        if !self.pc_crop_split {
+            return Ok(self.parameters.len());
+        }
+        let natural = self
+            .parameters
+            .iter()
+            .position(|pft| pft.class >= 15)
+            .unwrap_or(self.parameters.len());
+        ensure!(
+            self.parameters[natural..].iter().all(|pft| pft.class >= 15),
+            "a PC patch has a natural PFT after a crop PFT; upstream leaves it out of both canopy models"
+        );
+        Ok(natural)
     }
 
     pub fn fractions(&self) -> impl Iterator<Item = f64> + '_ {
@@ -441,26 +465,13 @@ pub(crate) fn pft_canopy_radiation(
     }
     let mut states = Vec::with_capacity(patch.columns.len());
     for (parameters, column) in patch.parameters.iter().zip(patch.columns.iter_mut()) {
-        let state = broadband_radiation_from_ground_using(
-            0,
+        states.push(pft_two_stream(
+            parameters,
+            column,
             ground,
-            parameters.optics,
-            column.leaf_area_index,
-            column.stem_area_index,
-            column.wet_snow_fraction,
             cosine_zenith,
-            true,
             vegetation_snow,
-            TwoStreamKind::Pft,
-            // 无冠层时 `albland` 入口已把它置 1（`:254`），`broadband_…` 自己会处理。
-            column.thermal_gap_fraction,
-        )?;
-        column.sunlit_absorption = state.sunlit_absorption;
-        column.shaded_absorption = state.shaded_absorption;
-        column.thermal_gap_fraction = state.thermal_gap_fraction;
-        column.direct_extinction = state.direct_extinction;
-        column.diffuse_extinction = state.diffuse_extinction;
-        states.push(state);
+        )?);
     }
     let fractions = patch.fractions().collect::<Vec<_>>();
     let previous_thermal_gap_fraction = radiation.thermal_gap_fraction;
@@ -470,6 +481,36 @@ pub(crate) fn pft_canopy_radiation(
         radiation.thermal_gap_fraction = previous_thermal_gap_fraction;
     }
     Ok(())
+}
+
+/// `twostream_wrap` 里单个 PFT 的 `twostream_mod`（无冠层时取地面值），结果写回该 PFT 的列。
+fn pft_two_stream(
+    parameters: &PftParameters,
+    column: &mut PftColumn,
+    ground: ColdStartGroundAlbedo,
+    cosine_zenith: f64,
+    vegetation_snow: bool,
+) -> Result<ColdStartRadiation> {
+    let state = broadband_radiation_from_ground_using(
+        0,
+        ground,
+        parameters.optics,
+        column.leaf_area_index,
+        column.stem_area_index,
+        column.wet_snow_fraction,
+        cosine_zenith,
+        true,
+        vegetation_snow,
+        TwoStreamKind::Pft,
+        // 无冠层时 `albland` 入口已把它置 1（`:254`），`broadband_…` 自己会处理。
+        column.thermal_gap_fraction,
+    )?;
+    column.sunlit_absorption = state.sunlit_absorption;
+    column.shaded_absorption = state.shaded_absorption;
+    column.thermal_gap_fraction = state.thermal_gap_fraction;
+    column.direct_extinction = state.direct_extinction;
+    column.diffuse_extinction = state.diffuse_extinction;
+    Ok(state)
 }
 
 /// PC 的 `albland`（`MOD_Albedo.F90:432-440`）：`ThreeDCanopy_wrap` 解自然 PFT，随后照旧调
@@ -483,14 +524,13 @@ fn pc_canopy_radiation(
     vegetation_snow: bool,
     radiation: &mut ColdStartRadiation,
 ) -> Result<()> {
-    ensure!(
-        patch.parameters.iter().all(|pft| pft.class < 15),
-        "PC patches with crop PFTs (DEF_PC_CROP_SPLIT) are not ported"
-    );
-    let inputs: Vec<crate::PcPftInput> = patch
-        .parameters
+    // `DEF_PC_CROP_SPLIT`：三维只解前 `natural` 个自然 PFT（`fcover` 也只在它们之间归一），
+    // 作物 PFT 在 `twostream_wrap` 里逐个 `twostream_mod`；没有自然 PFT 时 `ThreeDCanopy_wrap`
+    // 直接返回，自然段为空，`albv`/`tran` 不被任何 PFT 读到。
+    let natural = patch.plant_community_pfts()?;
+    let inputs: Vec<crate::PcPftInput> = patch.parameters[..natural]
         .iter()
-        .zip(&patch.columns)
+        .zip(&patch.columns[..natural])
         .map(|(parameters, column)| crate::PcPftInput {
             canopy_layer: parameters.canopy_layer,
             fraction: parameters.fraction,
@@ -502,35 +542,50 @@ fn pc_canopy_radiation(
             wet_snow_fraction: column.wet_snow_fraction,
         })
         .collect();
-    let total = patch.fractions().fold(0.0, |sum, value| value + sum);
-    let fcover: Vec<f64> = patch.fractions().map(|value| value / total).collect();
-    let three_d = crate::pc_radiation::three_d_canopy_wrap(
-        &inputs,
-        &fcover,
-        cosine_zenith,
-        ground.ground,
-        vegetation_snow,
-    );
+    let natural_fractions = || patch.parameters[..natural].iter().map(|pft| pft.fraction);
+    let total = natural_fractions().fold(0.0, |sum, value| value + sum);
+    let fcover: Vec<f64> = natural_fractions().map(|value| value / total).collect();
     let mut states = Vec::with_capacity(patch.columns.len());
-    for (column, pft) in patch.columns.iter_mut().zip(&three_d.pft) {
-        column.sunlit_absorption = pft.sunlit_absorption;
-        column.shaded_absorption = pft.shaded_absorption;
-        column.thermal_gap_fraction = pft.thermal_gap_fraction;
-        column.shade_fraction = pft.shade_fraction;
-        column.direct_extinction = pft.direct_extinction;
-        column.diffuse_extinction = pft.diffuse_extinction;
-        states.push(ColdStartRadiation {
-            albedo: three_d.albedo,
-            sunlit_absorption: pft.sunlit_absorption,
-            shaded_absorption: pft.shaded_absorption,
-            soil_absorption: [[0.0; 2]; 2],
-            snow_absorption: [[0.0; 2]; 2],
-            transmission: Some(three_d.transmission),
-            snow_age: ground.snow_age,
-            thermal_gap_fraction: pft.thermal_gap_fraction,
-            direct_extinction: pft.direct_extinction,
-            diffuse_extinction: pft.diffuse_extinction,
-        });
+    if natural > 0 {
+        let three_d = crate::pc_radiation::three_d_canopy_wrap(
+            &inputs,
+            &fcover,
+            cosine_zenith,
+            ground.ground,
+            vegetation_snow,
+        );
+        for (column, pft) in patch.columns[..natural].iter_mut().zip(&three_d.pft) {
+            column.sunlit_absorption = pft.sunlit_absorption;
+            column.shaded_absorption = pft.shaded_absorption;
+            column.thermal_gap_fraction = pft.thermal_gap_fraction;
+            column.shade_fraction = pft.shade_fraction;
+            column.direct_extinction = pft.direct_extinction;
+            column.diffuse_extinction = pft.diffuse_extinction;
+            states.push(ColdStartRadiation {
+                albedo: three_d.albedo,
+                sunlit_absorption: pft.sunlit_absorption,
+                shaded_absorption: pft.shaded_absorption,
+                soil_absorption: [[0.0; 2]; 2],
+                snow_absorption: [[0.0; 2]; 2],
+                transmission: Some(three_d.transmission),
+                snow_age: ground.snow_age,
+                thermal_gap_fraction: pft.thermal_gap_fraction,
+                direct_extinction: pft.direct_extinction,
+                diffuse_extinction: pft.diffuse_extinction,
+            });
+        }
+    }
+    for (parameters, column) in patch.parameters[natural..]
+        .iter()
+        .zip(patch.columns[natural..].iter_mut())
+    {
+        states.push(pft_two_stream(
+            parameters,
+            column,
+            ground,
+            cosine_zenith,
+            vegetation_snow,
+        )?);
     }
     let fractions = patch.fractions().collect::<Vec<_>>();
     let previous_thermal_gap_fraction = radiation.thermal_gap_fraction;
@@ -647,15 +702,23 @@ pub(crate) fn pft_canopy_energy(
         }
     }
     let mut records = Vec::with_capacity(patch.columns.len());
-    if patch.plant_community {
-        records = pc_records(&context, patch)?;
+    // PC：前 `natural` 个自然 PFT 由 `LeafTemperaturePC` 一次解完；`DEF_PC_CROP_SPLIT` 时其后的
+    // 作物 PFT 照 PFT 路径逐个 `LeafTemperature`（`MOD_Thermal.F90:938`）。上游先跑一维再跑 PC，
+    // 两段只写各自 PFT 的状态，次序不影响结果；记录按 PFT 次序排好再聚合。
+    let natural = if patch_is_pc {
+        patch.plant_community_pfts()?
+    } else {
+        0
+    };
+    if patch_is_pc && natural > 0 {
+        records = pc_records(&context, patch, natural)?;
     }
     for (index, (parameters, column)) in patch
         .parameters
         .iter()
         .zip(patch.columns.iter_mut())
         .enumerate()
-        .filter(|_| !patch_is_pc)
+        .filter(|(index, _)| !patch_is_pc || *index >= natural)
     {
         if !has_canopy(column.leaf_area_index, column.stem_area_index) {
             // `:876-887` 与 `:1004-1031`。
@@ -931,17 +994,25 @@ pub(crate) fn pft_canopy_energy(
 /// 第一个 PFT 循环（`eroot`、`fsun_p`、`laisun_p`）对 PC 照常执行；它算出的 `rootr_p`/`etrc_p`/
 /// `rstfac_p` 随后被 PC 段的初始化（`vendor/` 本地修补 FIX 2026-08-16）覆盖成 0/0/1，
 /// 所以关掉 PHS 时 `etr >= etrc = 0` 恒成立、蒸腾被截成 0 —— 照样复现。
-fn pc_records(context: &PftCanopyContext<'_>, patch: &mut PftPatch) -> Result<Vec<PftLeafRecord>> {
+///
+/// `natural` 是三维段的 PFT 个数（`pe = pn`）；作物 PFT 不在这里，PHS 的 `vegwp_p` 重置与
+/// FIX 2026-08-16 的初始化也只作用于这一段。
+fn pc_records(
+    context: &PftCanopyContext<'_>,
+    patch: &mut PftPatch,
+    natural: usize,
+) -> Result<Vec<PftLeafRecord>> {
     let input = context.input;
     let forcing = input.forcing;
     let layers = patch.layers;
     let preliminary = context.preliminary_ground_flux;
-    // `:1088`：`fcover = pftfrac/sum(pftfrac)`，求和是普通加法。
-    let total = patch.fractions().fold(0.0, |sum, value| value + sum);
-    let drive: Vec<crate::leaf_temperature_pc::PcPftDrive> = patch
-        .parameters
+    let parameters = &patch.parameters[..natural];
+    let columns = &mut patch.columns[..natural];
+    // `:1088`：`fcover = pftfrac(ps:pn)/sum(pftfrac(ps:pn))`，求和是普通加法。
+    let total = parameters.iter().fold(0.0, |sum, pft| pft.fraction + sum);
+    let drive: Vec<crate::leaf_temperature_pc::PcPftDrive> = parameters
         .iter()
-        .zip(&patch.columns)
+        .zip(columns.iter())
         .enumerate()
         .map(|(index, (parameters, column))| {
             let shortwave = context.shortwave[index];
@@ -967,7 +1038,7 @@ fn pc_records(context: &PftCanopyContext<'_>, patch: &mut PftPatch) -> Result<Ve
         })
         .collect();
     // 第一个 PFT 循环对无冠层 PFT 的清零（`:876-887`）。
-    for column in &mut patch.columns {
+    for column in columns.iter_mut() {
         if !has_canopy(column.leaf_area_index, column.stem_area_index) {
             column.leaf.canopy_water = CanopyWater {
                 total_mm: 0.0,
@@ -978,7 +1049,7 @@ fn pc_records(context: &PftCanopyContext<'_>, patch: &mut PftPatch) -> Result<Ve
         }
     }
     // `:1092-1094`：PHS 下每步先把 `vegwp_p` 重置成 -2.5e4 再解。
-    for column in &mut patch.columns {
+    for column in columns.iter_mut() {
         if let Some(state) = column.leaf.plant_hydraulics.as_mut() {
             state.vegetation_water_potential_mm =
                 [BARE_PFT_WATER_POTENTIAL_MM; crate::VEGETATION_SEGMENTS];
@@ -1010,12 +1081,12 @@ fn pc_records(context: &PftCanopyContext<'_>, patch: &mut PftPatch) -> Result<Ve
         forcing.air_temperature_k,
         preliminary.heat_roughness_m,
         preliminary.friction_velocity_m_s,
-        &patch.parameters,
-        &mut patch.columns,
+        parameters,
+        columns,
         &drive,
     )?;
     let mut records = Vec::with_capacity(fluxes.len());
-    for ((column, flux), pft) in patch.columns.iter_mut().zip(fluxes).zip(&drive) {
+    for ((column, flux), pft) in columns.iter_mut().zip(fluxes).zip(&drive) {
         // 第一个 PFT 循环（`:853-889`）：有冠层时 `laisun_p = lai_p*fsun_p`，否则清零。
         let (laisun, laisha) = if has_canopy(column.leaf_area_index, column.stem_area_index) {
             (

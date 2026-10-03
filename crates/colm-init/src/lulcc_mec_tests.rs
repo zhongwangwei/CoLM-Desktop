@@ -338,6 +338,7 @@ fn pft_merges_soil_classes_and_rescales_ldew_p() {
             hbot: &[1.0, 0.0],
             ranges: &ranges,
             merge_soil_classes: merge,
+            fast_pc: false,
         }),
     };
     // 不归并时类 2 的来源在旧单元里找不到。

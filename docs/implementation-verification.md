@@ -28789,3 +28789,46 @@ Rust：
 
 - g3pmt 过渡后的 2006-001 重启里，`trc_wliq_soisno`、`trc_wdsrf`、`trc_wetwat` 等都非零，说明池重映射真正走到了。
 - g3pt 的 Fortran 端跑了约 10 分钟（g3p 只要不到 1 分钟），Rust 端很快；结果一致，没有深究上游慢在哪。
+
+## 第 533 轮：PC 的作物拆分（`DEF_PC_CROP_SPLIT`）、PC 空间逐月 LAI、LULCC + PC
+
+**PC 作物拆分**（`DEF_PC_CROP_SPLIT`，缺省 `.true.`）：上游 PC 下，作物 PFT（类 ≥ 15）不进三维冠层，改走 PFT 的一维路径。
+- 反照率（`MOD_Albedo.F90:432-440`）：
+  - `ThreeDCanopy_wrap` 从 `ps` 找第一个作物 PFT，三维段截在它之前（`pe = pn`）；`fcover` 只在自然段内归一（`pftfrac(ps:pn)/sum(pftfrac(ps:pn))`）。
+  - 没有自然 PFT 时直接返回，自然段为空，`albv`/`tran` 没有 PFT 会读到。
+  - 随后 `twostream_wrap` 里：自然 PFT `CYCLE`，取三维结果；作物 PFT 逐个 `twostream_mod`；最后整体按 `pftfrac` 聚合。
+- 热力（`MOD_Thermal.F90:938/1043-1150`）：
+  - 作物 PFT 在第一个 PFT 循环里走 `LeafTemperature`（无冠层走 `GroundFluxes`）。
+  - 自然段由 `LeafTemperaturePC` 一次解完。只作用于自然段的有：`fcover`、PHS 的 `vegwp_p = -2.5e4` 重置、本地修补 FIX 2026-08-16 的初始化，以及 patch 量抄回 `_p`。
+  - `LeafTemperaturePC` 收的是整段数组（`fsun_p(:)` 等），但虚参都是显式形状 `(ps:pe)`，靠序列关联只用前 `pn-ps+1` 个，下标对齐。
+- 作物之后再出现的自然 PFT，两种冠层都不算它。Rust 要求作物排在最后（`pftclass` 升序时恒成立），否则拒绝。
+
+Rust（`colm_core::pft`）：
+- `PftPatch.pc_crop_split` 与 `plant_community_pfts()`；
+- `pc_canopy_radiation` 拆成自然段三维 + 作物段 `pft_two_stream`；
+- `pc_records(…, natural)` 只解自然段；`pft_canopy_energy` 的一维循环对 PC 只跑 `index >= natural`；
+- runtime 从 namelist 读 `DEF_PC_CROP_SPLIT`。
+
+**PC 空间逐月 LAI**：上游 PFT 与 PC 的空间 `LAI_readin` 是同一支（`LAI/SAI_patches` + `LAI/SAI_pfts`），PC 在 Rust 里本就走 PFT 子网格，去掉拒绝即可。
+
+**LULCC + PC**：`DEF_FAST_PC` 缺省 `.true.`（PC 下生效），各处的份额换算不同，分别照搬：
+- MEC（`:181-185`）：先 `lccpct_np(1) = sum(mask=patchtypes==0)`（含 12、14），再 `lccpct_np(12) = lcc(12)+lcc(14)`，然后 `lccpct_np(1) -= lccpct_np(12)`。这一步是**减法**。
+- 示踪物库存（`lulcc_inventory_trace`）与 forcing 的 `source_class`：作物两类直接加进 CROPLAND，自然类加进 1。这是**分开累加**，舍入与 MEC 不同。
+- `physics.use_pft` 在 PC 下也为真。归并条件改为按 namelist 的 `(DEF_USE_PFT .and. .not. DEF_SOLO_PFT) .or. (DEF_USE_PC .and. DEF_FAST_PC)`。
+
+**验收**（Rust 预处理，两侧共用 landdata 与初值）：
+
+| 算例 | 内容 | 结果 |
+|---|---|---|
+| `g1pc` | g1pftm 改 PC（FAST_PC，2010-01-01 → 02-02，含作物 PFT） | history 4、restart 11 逐位一致 |
+| `g3c` | LULCC + PC，SAT，2005→2006；新年 247 个 PFT 中 16 个作物 | history 4、restart 11 逐位一致 |
+| `g3cm` | 同上，MEC | history 4、restart 11 逐位一致；与 g3c 相比 30 个变量不同（MEC 生效）；`lcc12>0` 的 patch 34 个、`lcc14>0` 的 26 个 |
+| `g3cmt` | g3cm + `sol1` | history 6、restart 11 逐位一致 |
+
+回归逐位一致：
+- 单点 PC：`qb qm qy bp`；
+- 空间 PFT：`g1pftm g1pft`。
+
+新单测 `plant_community_stops_the_three_dimensional_range_at_the_first_crop`。
+
+另记：Fortran 的空间 PC 很慢（g1pc 一个多月约 50 分钟，Rust 约 8 分钟），g3pt 的 Fortran 端也慢。
