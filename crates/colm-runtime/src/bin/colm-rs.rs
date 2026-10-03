@@ -825,17 +825,17 @@ fn run_spatial_segment(
     };
     let masked = forcing_mask.iter().filter(|&&active| !active).count();
     if masked > 0 {
+        println!("colm-rs: {masked} patch(es) lie entirely on missing forcing cells (forcmask_pch = .false.)");
         // 这几支上游对被遮蔽 patch 的处理没有对齐或没有定义，先拒绝：
         // - BGC：`f_manunitro` 与 CROP 的逐 PFT 历史 `filter` 没与上 `forcmask_pch`，
         //   火灾的 `tsoi17` 广播也会跨过被跳过的 patch；
-        // - LULCC：年末合并要用被遮蔽 patch 的状态；
+        // （LULCC：被遮蔽 patch 的续跑值就是起跑值，年末 SAT/MEC 照常拿它合并，第 539 轮已对齐。）
         // - 漫滩回馈：被跳过的 patch 的 `flood_evap/infil_patch` 停在上次发布的值。
         ensure!(
             templates.iter().all(|template| template.bgc.is_none())
-                && !logical_field(document, "DEF_USE_LULCC")?
                 && !logical_field(document, "DEF_GridRiverLake_FloodFeedback")?,
             "{masked} patch(es) lie entirely on missing forcing cells (forcmask_pch = .false.); \
-             masking them is ported only without BGC, LULCC and grid flood feedback, run this case \
+             masking them is ported only without BGC and grid flood feedback, run this case \
              with --engine fortran or enlarge the forcing coverage"
         );
     }
