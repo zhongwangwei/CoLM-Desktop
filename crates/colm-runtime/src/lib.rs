@@ -1148,6 +1148,23 @@ fn advance_patch(
                         &output,
                     );
                     sub.prepare_surface_optics(state, optics)?;
+                    // `tracer_lake_step` 照常跟在这个子步的 `CoLMMAIN` 之后（干湖支在里面判）。
+                    if let Some(bgc) = &template.bgc {
+                        bgc.lake_methane(
+                            idate,
+                            &step.forcing,
+                            binding.partial_pressures_pa.unwrap_or((
+                                step.forcing.bottom_pressure_pa * binding.co2_volume_fraction,
+                                step.forcing.bottom_pressure_pa * 0.209,
+                            )),
+                            state,
+                            crate::methane::LakeMethaneSurface::from_dry_lake(&output),
+                            lake.site.depth_m,
+                            lake.site.dynamic,
+                            (isub, substeps),
+                            &mut methane_mean,
+                        )?;
+                    }
                     last = Some(PatchOutput::DryLakeSubstep {
                         output: Box::new(output),
                         initial_total_water_mm: initial_total,
@@ -1200,7 +1217,7 @@ fn advance_patch(
                             step.forcing.bottom_pressure_pa * 0.209,
                         )),
                         state,
-                        &output,
+                        crate::methane::LakeMethaneSurface::from_lake(&output),
                         lake.site.depth_m,
                         lake.site.dynamic,
                         (isub, substeps),
@@ -1242,6 +1259,22 @@ fn advance_patch(
                 &output,
             );
             template.prepare_surface_optics(state, optics)?;
+            if let Some(bgc) = &template.bgc {
+                bgc.lake_methane(
+                    idate,
+                    &step.forcing,
+                    binding.partial_pressures_pa.unwrap_or((
+                        step.forcing.bottom_pressure_pa * binding.co2_volume_fraction,
+                        step.forcing.bottom_pressure_pa * 0.209,
+                    )),
+                    state,
+                    crate::methane::LakeMethaneSurface::from_dry_lake(&output),
+                    lake.site.depth_m,
+                    lake.site.dynamic,
+                    (1, 1),
+                    &mut colm_core::methane::driver::LakeSubstepMean::default(),
+                )?;
+            }
             return Ok(PatchOutput::Soil(Box::new(output)));
         }
         let output = colm_core::lake_snow_step(input, lake.site, state)?;
@@ -1294,7 +1327,7 @@ fn advance_patch(
                     step.forcing.bottom_pressure_pa * 0.209,
                 )),
                 state,
-                &output,
+                crate::methane::LakeMethaneSurface::from_lake(&output),
                 lake.site.depth_m,
                 lake.site.dynamic,
                 (1, 1),

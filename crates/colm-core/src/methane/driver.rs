@@ -291,11 +291,14 @@ pub fn soil_step(
             );
             veg = Some(v);
         }
-        // 单点作物每个 patch 只有一个 PFT，份额只会是 0 或 1；两分量都跑再按份额合并的 FMA 形状没核对。
+        // 稻田份额只在 CROP 内核里非零，而 CROP 的农田 patch 恰好一个 PFT（`MOD_LandPFT.F90:211-216`、
+        // `:306-310`：`patch_pft_s = patch_pft_e`），份额只会是 0 或 1。两分量都跑再按份额合并的
+        // `aggregate_methane_columns` 在上游的标准布局里走不到，没有移植。
         ensure!(
             rice_weight == 0.0 || rice_weight == 1.0,
-            "mixed soil/rice methane patches (rice fraction {rice_weight}) are not ported to the \
-             Rust runtime yet"
+            "mixed soil/rice methane patches (rice fraction {rice_weight}) cannot occur in upstream \
+             layouts (a CROP cropland patch has exactly one PFT); the mixed-column aggregation is \
+             not ported"
         );
         repartition(patch, patch.rice_fraction_prev, rice_weight);
         patch.rice_fraction_prev = rice_weight;
@@ -678,6 +681,69 @@ impl CoreAccumulator {
 ///
 /// GIMPLE（`repartition_phase_state`/`repartition_scalar`）：内层 `FMA(sat, h, (1-h)·unsat)`，
 /// 外层 `FMA(inner_old, old, delta·inner_other)/new`（反向是 `FMA(1-old, inner, delta·other)/(1-new)`）。
+/// 动态湖的干湖子步（`ch4_impl_lake_step` 的 `wdsrf < 100 .or. zwt > 0` 支 →
+/// `handle_methane_dry_lake_substep`，`MOD_Tracer_Reactive_Methane_State.F90:1071-1131`）。
+///
+/// - 先清过程诊断（`reset_methane_inactive_lake_diagnostics`）：各速率与通量归 0，三个地表导度回到
+///   默认值，应激因子归 0；浓度与沉积层存量是预报量，不动。
+/// - 湖水与湖冰里的 CH4/O2 存量一次性导出：CH4 作为本子步的扩散通量（地表、物理、湖泊三套通量都取它），
+///   O2 进 `lake_air_o2_flux`（Rust 不单存它）。
+/// - 列总量只剩沉积层：`totcol = totcol_sat = totcol_lake`，`totcol_unsat = 0`。
+/// - 冷启动标记置 `spval`，复湿时水柱按冷启动重建。
+pub fn dry_lake_substep(params: &MethaneParameters, patch: &mut MethanePatch, substep_dt: f64) {
+    let default_cond = params.methane.grnd_methane_cond_default;
+    let previous = patch.last;
+    let mut result = ColumnResult::default();
+    // 浓度是预报量：沿用上一步聚合出来的；冷启动尚未走步时是分配时的值。
+    match previous {
+        Some(r) => {
+            result.conc_o2 = r.conc_o2;
+            result.conc_methane = r.conc_methane;
+            result.c_atm = r.c_atm;
+            result.forc_pmethanem = r.forc_pmethanem;
+        }
+        None => {
+            result.conc_o2 = [1.0; NL_SOIL];
+            result.conc_methane = [1.0e-6; NL_SOIL];
+        }
+    }
+    for phase in [&mut result.merged, &mut result.unsat, &mut result.sat] {
+        phase.o2stress = [0.0; NL_SOIL];
+        phase.ch4stress = [0.0; NL_SOIL];
+        phase.grnd_cond = default_cond;
+    }
+    patch.grnd_methane_cond = default_cond;
+    patch.lake.grnd_cond = default_cond;
+    patch.f_h2osfc = 0.0;
+    patch.soil_zwt = SPVAL;
+    if substep_dt > 0.0 {
+        let lake = &mut patch.lake;
+        let ch4 = lake.water.ch4.max(0.0) + lake.frozen_ch4.max(0.0);
+        lake.water.ch4 = 0.0;
+        lake.frozen_ch4 = 0.0;
+        lake.water.o2 = 0.0;
+        lake.frozen_o2 = 0.0;
+        let totcol_lake = lake.totcol;
+        result.merged.totcol = totcol_lake;
+        result.sat.totcol = totcol_lake;
+        result.unsat.totcol = 0.0;
+        patch.totcol_methane = totcol_lake;
+        if ch4 > 0.0 {
+            let flux = ch4 / substep_dt;
+            result.merged.surf_diff = flux;
+            result.merged.surf_diff_phys = flux;
+            result.merged.surf_flux = flux;
+            result.surf_flux_phys = flux;
+            result.surf_flux_tot_lake = flux;
+        }
+        patch.aggregate.fsat_bef = SPVAL;
+        patch.aggregate.finundated_lag = SPVAL;
+        patch.aggregate.layer_sat_lag = [SPVAL; NL_SOIL];
+        patch.lake.liquid_fraction_prev = SPVAL;
+    }
+    patch.last = Some(result);
+}
+
 fn repartition(patch: &mut MethanePatch, old: f64, new: f64) {
     let rold = old.max(0.0).min(1.0);
     let rnew = new.max(0.0).min(1.0);

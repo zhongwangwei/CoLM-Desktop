@@ -216,6 +216,37 @@ impl HostArrays {
     }
 }
 
+/// 湖泊甲烷要的、本子步 `CoLMMAIN` 留在全局数组里的几个地面量（`ustar`、`fq`、`etr`、`frcsat`）。
+/// 湿湖支是湖面的（`etr = 0`、`frcsat = 1`）；动态湖干湖支之后复湿时是土壤支的（`frcsat = spval`）。
+#[derive(Debug, Clone, Copy)]
+pub struct LakeMethaneSurface {
+    pub ustar: f64,
+    pub fq: f64,
+    pub etr: f64,
+    pub frcsat: f64,
+}
+
+impl LakeMethaneSurface {
+    pub fn from_lake(output: &colm_core::LakeStepOutput) -> Self {
+        Self {
+            ustar: output.thermal.ustar,
+            fq: output.thermal.fq,
+            etr: 0.0,
+            frcsat: 1.0,
+        }
+    }
+
+    pub fn from_dry_lake(output: &colm_core::StandardLctSnowSoilOutput) -> Self {
+        let leaf = &output.energy.leaf;
+        Self {
+            ustar: leaf.friction_velocity_m_s,
+            fq: leaf.moisture_similarity,
+            etr: leaf.transpiration_kg_m2_s,
+            frcsat: colm_core::MISSING,
+        }
+    }
+}
+
 /// 湖泊 patch 的 [`HostInputs`]（`ch4_impl_lake_step`，在 `CoLMMAIN` 末尾的非土壤清零之后）。
 #[allow(clippy::too_many_arguments)]
 pub fn lake_host_inputs<'a>(
@@ -223,7 +254,7 @@ pub fn lake_host_inputs<'a>(
     idate: [i32; 3],
     deltim: f64,
     state: &'a colm_core::StandardLctSnowSoilState,
-    output: &colm_core::LakeStepOutput,
+    surface: LakeMethaneSurface,
     forcing: &colm_core::RuntimeForcing,
     partial_pressures_pa: (f64, f64),
     lakedepth: f64,
@@ -244,18 +275,18 @@ pub fn lake_host_inputs<'a>(
         forc_pbot: forcing.bottom_pressure_pa,
         forc_po2m: partial_pressures_pa.1,
         forc_pco2m: partial_pressures_pa.0,
-        ustar: output.thermal.ustar,
-        fq: output.thermal.fq,
+        ustar: surface.ustar,
+        fq: surface.fq,
         zwt: state.soil_water.water_table_depth_m,
         snowdp: state.snow.depth_m,
-        etr: 0.0,
+        etr: surface.etr,
         wdsrf: state.soil_water.surface_water_mm,
         wetwat: state.soil_water.wetland_water_mm,
         smp: &arrays.smp,
         lai: state.energy.canopy.leaf_area_index,
         sai: state.energy.canopy.stem_area_index,
         rootr: &arrays.rootr,
-        frcsat: 1.0,
+        frcsat: surface.frcsat,
         pft: colm_core::methane::bgc_link::PftInputs::default(),
         lake: Some(colm_core::methane::column::LakeHost {
             dz_lake: &lake.column.thickness_m,

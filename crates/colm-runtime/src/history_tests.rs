@@ -928,7 +928,7 @@ fn the_accumulator_skips_missing_samples_and_counts_only_valid_ones() {
     let mut buffer = HistoryBuffers::new(dimensions(), site(), 1);
     // 声明是为了让缓冲区的类型/维度定下来；`never_valid` 故意不声明。
     buffer.declare(&["solvdln"]).unwrap();
-    accumulator.write_means(&mut buffer, 0).unwrap();
+    accumulator.write_means(&mut buffer, 0, None).unwrap();
     buffer.set_time(0, 56_802_270).unwrap();
     let root = temp_dir("accumulator-missing");
     let path = root.join("history.nc");
@@ -1104,7 +1104,7 @@ fn the_instantaneous_water_variables_take_the_last_step_not_the_mean() {
     }
     let mut buffer = HistoryBuffers::new(dimensions(), site(), 1);
     buffer.declare(&["wat_inst", "wat"]).unwrap();
-    accumulator.write_means(&mut buffer, 0).unwrap();
+    accumulator.write_means(&mut buffer, 0, None).unwrap();
     buffer.set_time(0, 56_802_270).unwrap();
     let root = temp_dir("instantaneous");
     let path = root.join("history.nc");
@@ -1196,7 +1196,7 @@ fn a_restored_window_continues_to_the_same_means() {
     let means = |accumulator: &HistoryAccumulator| {
         let mut buffer = HistoryBuffers::new(dimensions(), site(), 1);
         buffer.declare(&["fsena", "solvdln", "alb"]).unwrap();
-        accumulator.write_means(&mut buffer, 0).unwrap();
+        accumulator.write_means(&mut buffer, 0, None).unwrap();
         let directory = std::env::temp_dir().join(format!(
             "colm-history-window-{}-{}",
             std::process::id(),

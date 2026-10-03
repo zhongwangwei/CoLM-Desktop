@@ -805,7 +805,8 @@ impl BgcRuntime {
 
     /// 湖泊 patch 的甲烷（`tracer_lake_step` → `ch4_impl_lake_step`）：`CoLMMAIN` 之后、在第
     /// `isub`/`nsub` 个水体子步里以子步步长跑；`nsub > 1` 时诊断量按时间加权平均（`mean`）。
-    /// 动态湖（干湖分支）尚未移植。
+    /// 动态湖：本子步物理之后 `wdsrf < 100 .or. zwt > 0` 时走干湖支
+    /// （[`colm_core::methane::driver::dry_lake_substep`]），不论这个子步跑的是湖面还是土壤物理。
     #[allow(clippy::too_many_arguments)]
     pub fn lake_methane(
         &self,
@@ -813,7 +814,7 @@ impl BgcRuntime {
         forcing: &colm_core::RuntimeForcing,
         partial_pressures_pa: (f64, f64),
         state: &mut StandardLctSnowSoilState,
-        output: &colm_core::LakeStepOutput,
+        surface: crate::methane::LakeMethaneSurface,
         lakedepth: f64,
         dynamic_lake: bool,
         (isub, nsub): (usize, usize),
@@ -826,10 +827,9 @@ impl BgcRuntime {
             return Ok(());
         }
         let substep_dt = self.deltim / nsub as f64;
-        anyhow::ensure!(
-            !dynamic_lake,
-            "lake methane with DEF_USE_Dynamic_Lake is not ported to the Rust runtime yet"
-        );
+        let dry = dynamic_lake
+            && (state.soil_water.surface_water_mm < 100.0
+                || state.soil_water.water_table_depth_m > 0.0);
         let mut bgc = state
             .bgc
             .take()
@@ -839,13 +839,17 @@ impl BgcRuntime {
             .take()
             .context("a methane patch needs its methane state")?;
         let outcome = (|| {
+            if dry {
+                colm_core::methane::driver::dry_lake_substep(&setup.params, &mut patch, substep_dt);
+                return Ok(());
+            }
             let arrays = crate::methane::HostArrays::from_lake_state(state)?;
             let host = crate::methane::lake_host_inputs(
                 &arrays,
                 idate,
                 substep_dt,
                 state,
-                output,
+                surface,
                 forcing,
                 partial_pressures_pa,
                 lakedepth,

@@ -28684,3 +28684,23 @@ Rust 原来用"有没有声明某变量"来猜内核，一有选择列表就会�
 - `g1ffts`（g1fft，带示踪物，+ SPLIT）：history 3 份、restart 5 份逐位一致。
 
 **向量 history + 城市**：上游 `write_history_variable_urb_2d` 的 `Vector` 支自己标了 TODO，把城市长度的累加数组当 patch 长度的向量传给 `aggregate_to_vector_and_write_2d`（越界读、不除 `nac`），没有确定的结果可对齐。Rust 保持拒绝，报错信息改为说明这一原因。
+
+## 第 529 轮：动态湖甲烷；混合稻田 patch 在上游布局里走不到
+
+**动态湖甲烷**（`ch4_impl_lake_step`）：每个水体子步的 `CoLMMAIN` 之后都调一次，不论这一子步跑的是湖面物理还是干湖的土壤物理。物理之后若 `wdsrf < 100` 或 `zwt > 0`，就走 `handle_methane_dry_lake_substep`：
+- 清过程诊断：速率与通量归 0，三个地表导度回到默认值，应激因子归 0；浓度与沉积层是预报量，不动；
+- 湖水与湖冰的 CH4 存量一次性作为本子步的扩散通量导出（地表、物理、湖泊三套通量都取它），O2 同样导出；
+- 列总量只剩沉积层：`totcol = totcol_sat = totcol_lake`，`totcol_unsat = 0`；
+- `fsat_bef`、`finundated_lag`、`layer_sat_lag`、`lake_liquid_fraction_prev` 置 `spval`，复湿时冷启动。
+
+Rust 的实现：
+- 核心 `dry_lake_substep`；
+- `lake_methane` 在两种干湖支（单步、子步）之后也调用；
+- 宿主输入的 `ustar/fq/etr/frcsat` 由 `LakeMethaneSurface` 给出：湖面支是 `etr = 0`、`frcsat = 1`，干湖支取土壤支的值、`frcsat = spval`。
+
+**验收**：`lkdch4`（`lk36ch4` 改湖深 0.1 m、打开动态湖、1–6 月、3600 s 两个子步；湖 1 月起变浅、3 月起干湿交替）：history 12 份、restart 全部逐位一致。
+回归 `lk36ch4 lk36ch4y tc4lk dl5 dl5h tc4wl g1ch4` 全部一致。
+
+**混合稻田 patch**：稻田份额只在 CROP 内核里非零，而 CROP 的农田 patch 恰好一个 PFT（`MOD_LandPFT.F90:211-216/306-310`），份额只会是 0 或 1，上游的混合分量合并在标准布局里走不到。所以不移植，报错信息改为说明原因。
+
+**补正**：第 527 轮改了 `write_means` 的签名，却没改 `history_tests.rs` 里的三处调用，导致测试编译失败，当时提交前没跑单测。本轮补上；colm-core 与 colm-runtime 单测共 631 项通过。
