@@ -1558,12 +1558,8 @@ fn check_spatial_lulcc(
         !logical_field(document, "DEF_USE_BGC")?,
         "LULCC is not supported for BGC upstream (MOD_Namelist stops too)"
     );
-    // PFT：SAT 的逐 PFT 配对已移植；MEC 的 PFT 段与示踪物的 PFT 库存映射还没有。
+    // PFT：SAT 的逐 PFT 配对与 MEC 的 PFT 段已移植；示踪物的 PFT 库存映射还没有。
     if logical_field(document, "DEF_USE_PFT")? {
-        ensure!(
-            integer_field(document, "DEF_LULCC_SCHEME")? == 1,
-            "DEF_USE_PFT with DEF_USE_LULCC is ported for the SAT scheme (DEF_LULCC_SCHEME = 1) only"
-        );
         ensure!(
             colm_runtime::tracer::tracer_set_from_document(document)?
                 .is_none_or(|set| set.transport_indices().next().is_none()),
@@ -2443,6 +2439,8 @@ fn lulcc_transition(
                     format!("cannot carry the {} state of block {block} over", years.old)
                 })?;
                 let mut sat = sat;
+                // PFT 常数与区间留给 MEC 的 PFT 尾段用。
+                let mut pft_side = None;
                 if let Some(cold_pft) = &cold_pft {
                     let old_pft = colm_init::RestartFile::open(colm_runtime::pft::pft_restart_path(
                         &old_dir.join(&label).join(time_name(years.old, block)),
@@ -2502,13 +2500,29 @@ fn lulcc_transition(
                     for (np, value) in ldew {
                         ldew_override.values[np] = value;
                     }
+                    pft_side = Some((new_pft_const, new_ranges));
                 }
                 // MEC（`DEF_LULCC_SCHEME = 2`）：SAT 之后按转移份额混合份额有变化的 patch。
                 match mec {
                     Some(mec_options) => {
                         let lccpct =
                             read_lulcc_transfer_trace(&landdata, years.new, block, patches.len())?;
-                        colm_init::lulcc_mec::mass_energy_conserve(
+                        let pft = match (&cold_pft, &pft_side) {
+                            (Some(cold_pft), Some((new_pft_const, new_ranges))) => {
+                                Some(colm_init::lulcc_mec::MecPft {
+                                    time: cold_pft,
+                                    sat: std::mem::take(&mut pft_overrides),
+                                    pft_class: new_pft_const.integers("pftclass")?,
+                                    pftfrac: new_pft_const.floats("pftfrac")?,
+                                    htop: new_pft_const.floats("htop_p")?,
+                                    hbot: new_pft_const.floats("hbot_p")?,
+                                    ranges: new_ranges,
+                                    merge_soil_classes: !logical_field(document, "DEF_SOLO_PFT")?,
+                                })
+                            }
+                            _ => None,
+                        };
+                        let result = colm_init::lulcc_mec::mass_energy_conserve(
                             &colm_init::lulcc_mec::MecInputs {
                                 new_time: &cold,
                                 new_const: &new_const,
@@ -2517,13 +2531,18 @@ fn lulcc_transition(
                                 old_const: &old_const,
                                 old_element,
                                 lccpct: &lccpct,
+                                pft,
                             },
                             sat,
                             mec_options,
                         )
                         .with_context(|| {
                             format!("cannot conserve mass and energy in block {block}")
-                        })?
+                        })?;
+                        if cold_pft.is_some() {
+                            pft_overrides = result.pft;
+                        }
+                        result.patch
                     }
                     None => sat,
                 }

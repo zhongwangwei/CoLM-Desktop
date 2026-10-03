@@ -5,7 +5,10 @@
 //! `lccpct_patches` 把同一单元里各来源旧 patch 的水、热与雪层状态加权混合，再重算雪盖、
 //! 地表温度与地下水位。份额没变的 patch 保留 SAT 的结果。
 //!
-//! 只做 LCT 路径；PFT/PC 与城市分支（按 PFT 重分 `ldew_p`、按城市类型取来源）调用方先拒绝。
+//! LCT 与 PFT 路径；PC 与城市分支（按城市类型取来源）调用方先拒绝。PFT（非 SOLO）时
+//! 上游先把 `patchtypes == 0` 的各类份额并进类 1（PFT 土壤 patch 的 `patchclass`），
+//! 再对配对单元里**每个**土壤 patch（不只是份额有变化的）按 PFT 重分 `ldew_p`、重算
+//! `sigf_p/sigf/fsno` 与 `sai(_p)`/`lai(_p)`（`MOD_Lulcc_MassEnergyConserve.F90:876-905`）。
 //! 数值形状按 gfortran `-O2` 的 GIMPLE：加权累加 `x + x_*lcc/sum` 与 `t + t_*cv*lcc/wgt` 都不
 //! 收缩（末尾是除法），`wgt`、`hcap`、雪层热容与焓、`rhosnow` 的累加（两个商之积）是 FMA，
 //! `z_sno = zi - 0.5*dz` 是 FNMA。
@@ -28,6 +31,10 @@ const SNOW_LAYERS: usize = 5;
 const GLACIER: i64 = 3;
 /// 裸土粗糙度（上游在这里写死 `zlnd = 0.01`）。
 const ZLND: f64 = 0.01;
+/// IGBP `patchtypes`（`MOD_Const_LC.F90:398`，下标是类号 1..=17）。
+const IGBP_PATCHTYPES: [i64; 17] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 1, 0, 3, 0, 4];
+/// PFT 归并时单独保留的类：WETLAND、URBAN、GLACIERS、WATERBODY（赋值次序不影响结果）。
+const KEPT_CLASSES: [usize; 4] = [13, 11, 17, 15];
 
 /// 控制 MEC 行为的 namelist 开关。
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -56,6 +63,30 @@ pub struct MecInputs<'a> {
     pub old_element: &'a [i64],
     /// `lccpct[patch][ilc]`，`ilc = 0..=nlc`（`landdata/lulcc/<year>/lccpct_patches_lcXX`）。
     pub lccpct: &'a [Vec<f64>],
+    /// PFT 路径的输入；LCT 时为 `None`。
+    pub pft: Option<MecPft<'a>>,
+}
+
+/// MEC 的 PFT 输入（新侧）：冷启动 PFT 时间重启叠上 SAT 的逐 PFT 替换。
+pub struct MecPft<'a> {
+    pub time: &'a RestartFile,
+    /// `pft_same_type_assignment` 的逐 PFT 替换值。
+    pub sat: Vec<RestartOverride>,
+    pub pft_class: &'a [i64],
+    pub pftfrac: &'a [f64],
+    pub htop: &'a [f64],
+    pub hbot: &'a [f64],
+    /// 每个新 patch 的 PFT 区间（`patch_pft_s:patch_pft_e`）。
+    pub ranges: &'a [std::ops::Range<usize>],
+    /// `DEF_USE_PFT .and. .not. DEF_SOLO_PFT`：把土壤类的份额并进类 1。
+    pub merge_soil_classes: bool,
+}
+
+/// MEC 的结果：patch 级与 PFT 级的替换值。
+#[derive(Debug, Clone, PartialEq)]
+pub struct MecResult {
+    pub patch: Vec<RestartOverride>,
+    pub pft: Vec<RestartOverride>,
 }
 
 /// 一个变量：每 patch 的值数与全部值（盘上次序，patch 在前）。
@@ -125,7 +156,7 @@ pub fn mass_energy_conserve(
     inputs: &MecInputs<'_>,
     sat: Vec<RestartOverride>,
     options: MecOptions,
-) -> Result<Vec<RestartOverride>> {
+) -> Result<MecResult> {
     let new_class = inputs.new_const.integers("patchclass")?;
     let new_type = inputs.new_const.integers("patchtype")?;
     let old_class = inputs.old_const.integers("patchclass")?;
@@ -203,17 +234,36 @@ pub fn mass_energy_conserve(
     };
     let old_spans = spans(inputs.old_element);
     let mut touched = false;
+    // 配对单元里的新 patch：PFT 尾段对其中每个土壤 patch 都执行。
+    let mut matched = Vec::new();
 
     for (element, (first, last)) in spans(inputs.new_element) {
         let Some(&(first_, last_)) = old_spans.get(&element) else {
             continue;
         };
         for np in first..=last {
+            matched.push(np);
             if new_type[np] == GLACIER {
                 continue;
             }
-            // LCT：`lccpct_np(:) = lccpct_patches(np, 1:nlc)`。
-            let lcc = &inputs.lccpct[np][1..=nlc];
+            let lcc = match &inputs.pft {
+                // PFT（非 SOLO）：`lccpct_np(1) = sum(lccpct_patches(np,1:), mask=patchtypes==0)`
+                // （从 0 起的顺序加法），四个非土壤类照抄，其余为 0。
+                Some(pft) if pft.merge_soil_classes => {
+                    ensure!(nlc == IGBP_PATCHTYPES.len(), "PFT MEC expects the 17 IGBP classes");
+                    let row = &inputs.lccpct[np];
+                    let mut merged = vec![0.0; nlc];
+                    merged[0] = (1..=nlc)
+                        .filter(|&ilc| IGBP_PATCHTYPES[ilc - 1] == 0)
+                        .fold(0.0, |acc, ilc| row[ilc] + acc);
+                    for ilc in KEPT_CLASSES {
+                        merged[ilc - 1] = row[ilc];
+                    }
+                    merged
+                }
+                // LCT：`lccpct_np(:) = lccpct_patches(np, 1:nlc)`。
+                _ => inputs.lccpct[np][1..=nlc].to_vec(),
+            };
             let lcc_of = |class: i64| lcc[(class - 1) as usize];
             let sum_lcc: f64 = lcc.iter().sum();
             if sum_lcc - lcc_of(new_class[np]) <= 0.0 {
@@ -558,9 +608,13 @@ pub fn mass_energy_conserve(
         }
     }
 
-    // 没有需要混合的 patch 时 SAT 原样返回。
-    if !touched {
-        return Ok(sat);
+    let pft = match &inputs.pft {
+        Some(pft) => pft_tail(pft, &mut state, &matched, new_type, options)?,
+        None => Vec::new(),
+    };
+    // 没有需要混合的 patch、也没有 PFT 尾段时 SAT 原样返回。
+    if !touched && inputs.pft.is_none() {
+        return Ok(MecResult { patch: sat, pft });
     }
     let mut overrides: Vec<RestartOverride> = sat
         .into_iter()
@@ -570,6 +624,125 @@ pub fn mass_energy_conserve(
         state
             .into_iter()
             .map(|(name, field)| RestartOverride::new(name, field.values)),
+    );
+    Ok(MecResult {
+        patch: overrides,
+        pft,
+    })
+}
+
+/// PFT 尾段（`MOD_Lulcc_MassEnergyConserve.F90:876-905`），对 `matched` 里的每个土壤 patch：
+/// 按混合后的 `ldew` 重分 `ldew_p`，`snowfraction_pftwrap` 重算 `sigf_p/sigf/fsno`，
+/// 再由 `tsai_p*sigf_p`（`DEF_VEG_SNOW` 时还有 `tlai_p*sigf_p`）重算 `sai(_p)`/`lai(_p)`。
+/// 求和都是从 0 起的顺序 FMA；`ldew_p` 的缩放先算商 `ldew/ldew_tmp` 再乘。
+fn pft_tail(
+    pft: &MecPft<'_>,
+    state: &mut BTreeMap<&str, Field>,
+    matched: &[usize],
+    new_type: &[i64],
+    options: MecOptions,
+) -> Result<Vec<RestartOverride>> {
+    let pfts = pft.pft_class.len();
+    ensure!(
+        pft.pftfrac.len() == pfts && pft.htop.len() == pfts && pft.hbot.len() == pfts,
+        "the PFT constants disagree on the PFT count"
+    );
+    let mut fields: BTreeMap<&str, Vec<f64>> = BTreeMap::new();
+    for name in ["ldew_p", "sigf_p", "sai_p", "lai_p", "z0m_p"] {
+        let mut values = pft.time.floats(name)?.to_vec();
+        if let Some(entry) = pft.sat.iter().find(|entry| entry.name == name) {
+            ensure!(
+                entry.values.len() == values.len(),
+                "the SAT value of {name} does not fit the new PFT restart"
+            );
+            values.clone_from(&entry.values);
+        }
+        ensure!(values.len() == pfts, "{name} does not have one value per PFT");
+        fields.insert(name, values);
+    }
+    let tlai = pft.time.floats("tlai_p")?;
+    let tsai = pft.time.floats("tsai_p")?;
+    let fsum = |values: &[f64], range: &std::ops::Range<usize>| {
+        range
+            .clone()
+            .fold(0.0, |acc, ip| values[ip].mul_add(pft.pftfrac[ip], acc))
+    };
+    for &np in matched {
+        if new_type[np] != 0 {
+            continue;
+        }
+        let range = pft
+            .ranges
+            .get(np)
+            .with_context(|| format!("no PFT range for new patch {np}"))?;
+        macro_rules! patch {
+            ($name:expr) => {{
+                let field = state.get_mut($name).expect("the patch field is loaded");
+                &mut field.values[np * field.row]
+            }};
+        }
+        let ldew_tmp = fsum(&fields["ldew_p"], range);
+        if ldew_tmp > 0.0 {
+            let ratio = *patch!("ldew") / ldew_tmp;
+            let ldew_p = fields.get_mut("ldew_p").expect("loaded");
+            for ip in range.clone() {
+                ldew_p[ip] *= ratio;
+            }
+        } else {
+            *patch!("ldew") = 0.0;
+        }
+        let (scv, snowdp) = (*patch!("scv"), *patch!("snowdp"));
+        for ip in range.clone() {
+            // `MOD_SnowFraction.F90:126-146`；无冠层的 PFT 不读 `z0m_p`（裸土 PFT 可能是 0）。
+            let vegetated = tlai[ip] + tsai[ip] > 1.0e-6;
+            let mut sigf = 1.0;
+            if vegetated {
+                let wt = 0.1 * snowdp / fields["z0m_p"][ip];
+                sigf = 1.0 - wt / (1.0 + wt);
+            }
+            if options.vegetation_snow && vegetated && (1..=8).contains(&pft.pft_class[ip]) {
+                let buried = ((snowdp - pft.hbot[ip]).max(0.0) / (pft.htop[ip] - pft.hbot[ip]))
+                    .min(1.0);
+                sigf = 1.0 - buried;
+            }
+            fields.get_mut("sigf_p").expect("loaded")[ip] = sigf;
+        }
+        // `fsno` 与 PFT 无关：同一个 `snowfraction` 地面雪盖式子。
+        let fsno = colm_core::snow::snow_fraction(
+            0.0,
+            0.0,
+            1.0,
+            ZLND,
+            scv,
+            snowdp,
+            options.snow_cover_exponent,
+        )
+        .with_context(|| format!("snowfraction_pftwrap for new patch {np}"))?
+        .ground_snow_fraction;
+        *patch!("sigf") = fsum(&fields["sigf_p"], range);
+        *patch!("fsno") = fsno;
+        for ip in range.clone() {
+            let sigf = fields["sigf_p"][ip];
+            fields.get_mut("sai_p").expect("loaded")[ip] = tsai[ip] * sigf;
+            if options.vegetation_snow {
+                fields.get_mut("lai_p").expect("loaded")[ip] = tlai[ip] * sigf;
+            }
+        }
+        *patch!("sai") = fsum(&fields["sai_p"], range);
+        if options.vegetation_snow {
+            *patch!("lai") = fsum(&fields["lai_p"], range);
+        }
+    }
+    let mut overrides: Vec<RestartOverride> = pft
+        .sat
+        .iter()
+        .filter(|entry| !fields.contains_key(entry.name.as_str()))
+        .cloned()
+        .collect();
+    overrides.extend(
+        fields
+            .into_iter()
+            .map(|(name, values)| RestartOverride::new(name, values)),
     );
     Ok(overrides)
 }

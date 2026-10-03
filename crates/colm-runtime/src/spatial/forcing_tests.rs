@@ -270,7 +270,7 @@ fn metpreprocess_converts_units_and_skips_missing_cells() {
 
     let mut values = fresh();
     metpreprocess("ERA5LAND", &mut values, 2, &[false, false]).unwrap();
-    assert_eq!(values[3][0], -1.0 * 1000.0 / 3600.0);
+    assert_eq!(values[3][0], -1000.0 / 3600.0);
 
     let mut values = fresh();
     values[7] = vec![0.0, 0.0];

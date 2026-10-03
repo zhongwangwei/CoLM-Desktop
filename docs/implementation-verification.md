@@ -28724,3 +28724,42 @@ Rust：
 - PFT 类别两年相同，类别消失/新增的跳过分支用新单测 `pfts_pair_by_class_and_ldew_is_reweighted` 覆盖。
 
 回归 `g3 g3m g3t` 逐位一致。
+
+## 第 531 轮：LULCC + PFT（MEC）
+
+上游 `LulccMassEnergyConserve` 在 PFT 下有两处与 LCT 不同（`MOD_Lulcc_MassEnergyConserve.F90`）：
+
+1. **份额归并**（`:172-185`，`DEF_USE_PFT .and. .not. DEF_SOLO_PFT`）：
+   - `lccpct_np(1) = sum(lccpct_patches(np,1:), mask=patchtypes(:)==0)`，其余清零；
+   - URBAN、WETLAND、WATERBODY、GLACIERS 四类照抄。
+   - `patchtypes` 是 `real(r8), dimension(N_land_classification)`，下标从 1 起，与 `lccpct_patches(np,1:)` 逐位对齐，**没有错位**。GIMPLE 里是 `patchtypes == 0.0` 的实数比较，从 0 起顺序加法（不收缩）。
+   - 归并后来源 patch 按类 1 去找，PFT 土壤 patch 的 `patchclass` 正是 1。
+2. **PFT 尾段**（`:876-905`）：在 `IF (patchtype(np) .ne. 3)` 之外，对配对单元里**每个**土壤 patch 都执行，份额没变的也算。
+   - `ldew_tmp = sum(ldew_p*pftfrac)`，是从 0 起的顺序 FMA；
+   - `ldew_tmp > 0` 时 `ldew_p *= ldew(np)/ldew_tmp`，先算商；否则 `ldew(np) = 0`；
+   - `snowfraction_pftwrap` 重算 `sigf_p/sigf/fsno`；
+   - `sai_p = tsai_p*sigf_p`，`sai` 是 FMA 求和；`DEF_VEG_SNOW` 时 `lai(_p)` 同样处理。
+   - 份额没变的 patch，SAT 已把 `ldew` 设成同一条 FMA 链，所以比值恰为 1，`ldew_p` 不变；但 `sigf/fsno/sai/lai` 会按 PFT 重算。
+
+Rust：
+- `colm_init::lulcc_mec` 新增：
+  - `MecPft`：冷启动 PFT 时间重启、SAT 的逐 PFT 替换、`pftclass/pftfrac/htop_p/hbot_p`、PFT 区间与 `merge_soil_classes`；
+  - `MecResult { patch, pft }`；
+  - `pft_tail`。
+- `pftwrap` 是内联写的：无冠层的 PFT 不读 `z0m_p`（裸土 PFT 的冷启动值可能是 0），所以不调 `snow_fraction`（它会检查 `z0m > 0`）。`fsno` 仍用 `snow_fraction` 的地面雪盖式子。
+- `lulcc_transition` 把 SAT 的 PFT 常数与区间留给 MEC，MEC 返回的 PFT 替换写进 PFT 时间重启。
+- 入口放开 `DEF_USE_PFT` + `DEF_LULCC_SCHEME = 2`；输运示踪物 + PFT 仍拒绝。
+
+**验收**：`g3pm`（g3p 改 `DEF_LULCC_SCHEME = 2`，沿用 g3p 的 landdata 与初值）：
+```
+history 4 bad 0
+restarts 11 bad 0
+```
+g3pm 与 g3p 的 2006-001 重启相比，patch 级有 30 个变量不同（`t_soisno wliq_soisno smp hk vegwp gs0sun …`），PFT 级 `ldew_p` 不同，说明 MEC 与 PFT 尾段都真正走到了。
+
+这个区域 1 月无雪，所以 `snowfraction_pftwrap` 的埋没分支与 `DEF_VEG_SNOW` 的树木分支只由单测覆盖：
+- 新单测 `pft_merges_soil_classes_and_rescales_ldew_p`：不归并时找不到类 2 的来源；归并后 `ldew_p` 放大 2 倍，`sai/lai` 按 FMA 求和。
+
+回归 `g3 g3m g3t g3p g3mt` 全部逐位一致。
+
+另记：`cargo test -p colm-init` 默认并行时有 36 个 netCDF 写读测试偶发失败，单独跑或 `--test-threads=1` 全过（init 174、runtime 151）。原因是 HDF5 非线程安全，不是回归。

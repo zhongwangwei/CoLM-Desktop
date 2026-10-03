@@ -203,8 +203,9 @@ fn changed_patches_mix_sources_by_transfer_fraction() {
         old_const: &old_const,
         old_element: &[7, 7],
         lccpct: &lccpct,
+        pft: None,
     };
-    let overrides = mass_energy_conserve(&inputs, Vec::new(), options()).unwrap();
+    let overrides = mass_energy_conserve(&inputs, Vec::new(), options()).unwrap().patch;
     let get = |name: &str| {
         overrides
             .iter()
@@ -252,6 +253,7 @@ fn a_missing_source_class_is_refused() {
         old_const: &old_const,
         old_element: &[7, 7],
         lccpct: &lccpct,
+        pft: None,
     };
     let error = mass_energy_conserve(&inputs, Vec::new(), options()).unwrap_err();
     assert!(format!("{error:#}").contains("class 8"), "{error:#}");
@@ -274,8 +276,89 @@ fn unchanged_fractions_keep_the_sat_result() {
         old_const: &old_const,
         old_element: &[7, 7],
         lccpct: &lccpct,
+        pft: None,
     };
     let sat = vec![RestartOverride::new("tleaf", vec![285.0, 0.0])];
-    let overrides = mass_energy_conserve(&inputs, sat.clone(), options()).unwrap();
+    let overrides = mass_energy_conserve(&inputs, sat.clone(), options()).unwrap().patch;
     assert_eq!(overrides, sat);
+}
+
+/// PFT 时间重启：两个 PFT 都属于新 patch 0。
+fn pft_restart(path: &Path) -> RestartFile {
+    let mut file = netcdf::create(path).unwrap();
+    file.add_dimension("pft", 2).unwrap();
+    for (name, values) in [
+        ("ldew_p", [2.0, 0.0]),
+        ("sigf_p", [0.0, 0.0]),
+        ("sai_p", [0.0, 0.0]),
+        ("lai_p", [0.0, 0.0]),
+        ("z0m_p", [0.5, 0.0]),
+        ("tlai_p", [3.0, 0.0]),
+        ("tsai_p", [0.5, 0.0]),
+    ] {
+        file.add_variable::<f64>(name, &["pft"])
+            .unwrap()
+            .put_values(&values, ..)
+            .unwrap();
+    }
+    file.close().unwrap();
+    RestartFile::open(path).unwrap()
+}
+
+#[test]
+fn pft_merges_soil_classes_and_rescales_ldew_p() {
+    let dir = temp_dir("pft");
+    let (old_time, _, new_time, new_const) = case(&dir);
+    // 旧单元：PFT 土壤 patch（类 1）与水体（类 17）。
+    let old_const = const_restart(&dir.join("old_const_pft.nc"), &[1, 17], 2.0e6, 0.45);
+    let pft_time = pft_restart(&dir.join("pft.nc"));
+    // 新 patch 0：类 2 与类 5 都是土壤类，归并后是类 1 的 0.75；类 17 的 0.25。
+    let mut lcc0 = vec![0.0; 18];
+    lcc0[2] = 0.25;
+    lcc0[5] = 0.5;
+    lcc0[17] = 0.25;
+    let mut lcc1 = vec![0.0; 18];
+    lcc1[17] = 1.0;
+    let lccpct = [lcc0, lcc1];
+    let ranges = [0..2, 2..2];
+    let inputs = |merge: bool| MecInputs {
+        new_time: &new_time,
+        new_const: &new_const,
+        new_element: &[7, 7],
+        old_time: &old_time,
+        old_const: &old_const,
+        old_element: &[7, 7],
+        lccpct: &lccpct,
+        pft: Some(MecPft {
+            time: &pft_time,
+            sat: Vec::new(),
+            pft_class: &[1, 0],
+            pftfrac: &[0.25, 0.75],
+            htop: &[10.0, 0.0],
+            hbot: &[1.0, 0.0],
+            ranges: &ranges,
+            merge_soil_classes: merge,
+        }),
+    };
+    // 不归并时类 2 的来源在旧单元里找不到。
+    let error = mass_energy_conserve(&inputs(false), Vec::new(), options()).unwrap_err();
+    assert!(format!("{error:#}").contains("class 2"), "{error:#}");
+
+    let result = mass_energy_conserve(&inputs(true), Vec::new(), options()).unwrap();
+    let get = |set: &[RestartOverride], name: &str| {
+        set.iter()
+            .find(|entry| entry.name == name)
+            .unwrap_or_else(|| panic!("{name} is overridden"))
+            .values
+            .clone()
+    };
+    // 两个来源的 ldew 都是 1，混合后 ldew = 1；ldew_tmp = 2*0.25 = 0.5，ldew_p 放大 2 倍。
+    assert_eq!(get(&result.patch, "ldew")[0], 1.0);
+    assert_eq!(get(&result.pft, "ldew_p"), vec![4.0, 0.0]);
+    // 无雪：有冠层的 PFT sigf_p = 1，裸土 PFT 也是 1；sai_p = tsai_p，lai_p = tlai_p。
+    assert_eq!(get(&result.pft, "sigf_p"), vec![1.0, 1.0]);
+    assert_eq!(get(&result.patch, "sigf")[0], 1.0);
+    assert_eq!(get(&result.pft, "sai_p"), vec![0.5, 0.0]);
+    assert_eq!(get(&result.patch, "sai")[0], 0.125);
+    assert_eq!(get(&result.patch, "lai")[0], 0.75);
 }
