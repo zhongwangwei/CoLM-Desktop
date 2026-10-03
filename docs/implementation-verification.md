@@ -28993,3 +28993,37 @@ Rust 的 `SpatialRuntime` 对被遮蔽 patch 不交输出，累加时等价于 0
 - 网格历史 `f_floodfrc` 最大 0.094，漫滩确实有水。
 
 回归逐位一致：`g1ff g1ffs g1ffts g1fmm`。
+
+## 第 541 轮：被强迫缺测遮蔽的 patch + BGC，以及湖、城市（不开城市模型）类型；空间 BGC 的历史旁车
+
+**合成强迫 `tmp/fsynth/CMFDmb`**：`CMFDm` 再把 24–25.5°N、114–115.5°E 整块设成缺测。PFT 模式下每个 0.5° 单元只有一个合并的土壤 patch，`CMFDm` 原来挖的 2 个高斯格盖不住。新算例 `g1bgcm`：g1fmm 底（2003-01-01 → 01-05，月历史）加 BGC/PFT/LAI 反馈/火灾/硝化。
+
+日志里新加了被遮蔽 patch 的下标与类型：
+```
+colm-rs: 12 patch(es) lie entirely on missing forcing cells (forcmask_pch = .false.): [(8, 0), (9, 2), (10, 1), (11, 0), (12, 2), (13, 1), (22, 0), (23, 1), (24, 0), (25, 2), (26, 1), (27, 4)]
+```
+土壤、湿地、城市（`DEF_URBAN_RUN` 关）和湖都有。一路对齐时发现了四件事：
+
+1. **空间旁车把 `bgc/crop` 写死成假**（与掩膜无关的原有缺口）。现有空间 BGC 算例都用逐日历史，续跑处没有未写完的区间，所以一直没暴露；改成实际开关后，月历史续跑的旁车带上全部 BGC 累加量。
+2. **被遮蔽 patch 上 BGC 只累加"状态"一类**（Fortran 旁车实测）：
+   - 从续跑读进来的汇总量与分层库：`tot*` 10 个、`*_vr` 各库与 `sminn_vr`、O2 两项；`totsoiln_vr` 只在土壤 patch；
+   - 读数据时整列更新的驱动：`ndep_to_sminn` 与 `abm/gdp/peatf/hdm/lnfm`；
+   - `gpp/leafc` 等在 `CoLMDRIVER` 里才算的量停在 `spval`。
+
+   Rust 用 `MaskedBgcSink` 包住 `set_bgc_history`，只放行这几类。
+3. **BGC 数据更新对整列 patch 做**（`CoLM.F90:495-541`）。`update_lightning_data` 的 `grid2pset` 会把被遮蔽 patch 的 `lnfm` 从 `spval` 换成数据值。Rust 的被遮蔽 patch 现在每步也调 `update_non_soil`（只做数据更新，不跑驱动）。
+4. **火灾 `tsoi17` 整列广播**：选"最后一个跑火灾的 patch"时排除被遮蔽 patch，因为它们不调火灾；但整列赋值照样盖到它们身上（`broadcast_fire_tsoi17` 加了 `active` 参数）。
+
+被遮蔽的湖 patch 另外累加 `t_lake/lake_icefrac`（重启值）；被遮蔽的城市 patch（不开城市模型）与土壤累加同一组量。
+
+**仍然拒绝**：
+- CROP：`f_manunitro` 与逐 PFT 作物历史的 `filter` 没与上 `forcmask_pch`，还没实测；
+- 被遮蔽的冰川 patch，以及开了城市模型的城市 patch（城市时间变量另有一套累加），同样还没实测。
+
+**验收 `g1bgcm`**（12 个被遮蔽 patch，四种类型）：history 2、restart 9（含 BGC、PFT、河道与月历史旁车）逐位一致。
+
+回归逐位一致：
+- `g1bgc g1bgcp g1bgcfs g1crop g1irr g1ch4 g1ch4p g1fmm g3fm`；
+- `g1cropp` 是纯 Fortran 全链路对纯 Rust 全链路，Rust 侧重跑了全套预处理。
+
+colm-runtime 单测 151 通过，clippy 无告警。

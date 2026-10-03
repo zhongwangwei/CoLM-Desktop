@@ -226,6 +226,18 @@ impl SpatialRuntime {
                     .enumerate()
                 {
                     if !self.forcing_mask[index] {
+                        // `CoLM.F90:495-541` 的 BGC 数据更新（硝化 O2、闪电、氮沉降、人口密度）对整列
+                        // patch 做，被遮蔽的也一样：`update_lightning_data` 的 `grid2pset` 会把
+                        // `lnfm` 从分配时的 `spval` 换成数据值（第 541 轮）。
+                        if let Some(bgc) = &template.bgc {
+                            let end = step.clock.end_time;
+                            let idate = [
+                                end.year,
+                                i32::from(end.julian_day),
+                                i32::try_from(end.seconds)?,
+                            ];
+                            bgc.update_non_soil(step.clock.forcing_time, idate, state)?;
+                        }
                         outputs.push(None);
                         continue;
                     }
@@ -275,7 +287,7 @@ impl SpatialRuntime {
                 }
                 // `CNFireArea` 的 `tsoi17 = forc_t(i)` 是整列赋值：一步之后所有 patch 都是最后一个
                 // 跑火灾的 patch 的值（续跑里写的就是它）。
-                crate::broadcast_fire_tsoi17(templates, &mut next_states);
+                crate::broadcast_fire_tsoi17(templates, &mut next_states, Some(&self.forcing_mask));
                 // `tracer_report`：一步里所有 patch 推进完之后（`CoLMDRIVER.F90:392-393`）。
                 crate::tracer::report_after_patches(templates)?;
                 // `CoLM.F90:559-563`：陆面步之后、`hist_out` 之前汇流；预热期不汇流。

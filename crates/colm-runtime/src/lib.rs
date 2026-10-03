@@ -530,7 +530,7 @@ impl PointRuntime {
                 )?);
             }
             // 多作物单点同样受 `tsoi17 = forc_t(i)` 整列赋值影响（见 [`broadcast_fire_tsoi17`]）。
-            broadcast_fire_tsoi17(templates, states);
+            broadcast_fire_tsoi17(templates, states, None);
             crate::tracer::report_after_patches(templates)?;
             // `hist_out` 在 `itstamp <= ptstamp` 时直接返回（`MOD_Hist.F90:225`），连累加都不做：
             // 预热期（含每一轮重复）不产生 history。步末 `itstamp <= ptstamp` 与本步
@@ -1437,15 +1437,21 @@ fn optimize_baseflow<O: std::borrow::Borrow<PatchOutput>>(
 /// 每个跑火灾的 patch 都把所有 patch 的 `tsoi17` 改成自己的 `forc_t`，本 patch 随即用的是对的值，
 /// 但一步之后留下的是按 patch 顺序最后一个跑火灾的那个值，连非土壤 patch 也一样，续跑里写的就是它。
 /// 单 patch 时这是恒等的。
+///
+/// `active` 是强迫掩膜（`forcmask_pch`）：被遮蔽的 patch 整步跳过、不调火灾，不能当"最后一个"，
+/// 但整列赋值照样盖到它们身上。
 pub fn broadcast_fire_tsoi17(
     templates: &[assembly::StandardLctRestartTemplate],
     states: &mut [colm_core::StandardLctSnowSoilState],
+    active: Option<&[bool]>,
 ) {
     let last = templates
         .iter()
         .zip(states.iter())
-        .rposition(|(template, state)| {
-            template.patch_type == 0
+        .enumerate()
+        .rposition(|(index, (template, state))| {
+            active.is_none_or(|active| active[index])
+                && template.patch_type == 0
                 && template.physics.bgc.is_some_and(|bgc| bgc.fire)
                 && state.bgc.is_some()
         });

@@ -825,16 +825,23 @@ fn run_spatial_segment(
     };
     let masked = forcing_mask.iter().filter(|&&active| !active).count();
     if masked > 0 {
-        println!("colm-rs: {masked} patch(es) lie entirely on missing forcing cells (forcmask_pch = .false.)");
-        // 这几支上游对被遮蔽 patch 的处理没有对齐或没有定义，先拒绝：
-        // - BGC：`f_manunitro` 与 CROP 的逐 PFT 历史 `filter` 没与上 `forcmask_pch`，
-        //   火灾的 `tsoi17` 广播也会跨过被跳过的 patch；
-        // （LULCC：被遮蔽 patch 的续跑值就是起跑值，年末 SAT/MEC 照常拿它合并，第 539 轮已对齐。）
-        // （漫滩回馈：上游每步累加后把 `flood_evap/infil_patch` 清零，被跳过的 patch 恒为 0，第 540 轮已对齐。）
+        println!(
+            "colm-rs: {masked} patch(es) lie entirely on missing forcing cells (forcmask_pch = .false.): {:?}",
+            forcing_mask
+                .iter()
+                .enumerate()
+                .filter(|(_, &active)| !active)
+                .map(|(patch, _)| (patch, templates[patch].patch_type))
+                .collect::<Vec<_>>()
+        );
+        // CROP 的 `f_manunitro` 与逐 PFT 作物历史的 `filter` 没与上 `forcmask_pch`
+        // （`MOD_Hist.F90:2356-2382` 等），被遮蔽 patch 的陈旧累加会漏进去，还没实测，先拒绝。
+        // 其余已对齐：BGC 火灾 `tsoi17` 广播跳过被遮蔽 patch 选"最后一个"（第 541 轮）；
+        // LULCC（第 539 轮）；漫滩回馈（第 540 轮）。
         ensure!(
-            templates.iter().all(|template| template.bgc.is_none()),
+            physics.bgc.is_none_or(|bgc| !bgc.crop),
             "{masked} patch(es) lie entirely on missing forcing cells (forcmask_pch = .false.); \
-             masking them is ported only without BGC, run this case with --engine fortran or \
+             masking them is not ported with CROP, run this case with --engine fortran or \
              enlarge the forcing coverage"
         );
     }
@@ -1310,8 +1317,9 @@ fn run_spatial_segment(
                 .count(),
             pft_or_pc: logical_field(document, "DEF_USE_PFT")?
                 || logical_field(document, "DEF_USE_PC")?,
-            bgc: false,
-            crop: false,
+            // BGC 的累加量（`a_leafc` … `a_*Cap`）也进旁车（第 541 轮）。
+            bgc: physics.bgc.is_some(),
+            crop: physics.bgc.is_some_and(|switches| switches.crop),
             river_lake_flow: true,
         },
         window: history

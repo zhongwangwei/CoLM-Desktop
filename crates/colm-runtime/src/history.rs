@@ -1786,6 +1786,63 @@ impl<S: HistorySink> HistorySink for PatchFilteredSink<'_, S> {
     }
 }
 
+/// 被强迫缺测遮蔽的 patch 上 BGC 只累加"状态"一类（g1bgcm 实测，第 541 轮）：
+/// - 从续跑读进来的汇总量与分层库：`tot*`、`*_vr`（含 `sminn_vr`；`totsoiln_vr` 只在土壤 patch）、O2 两项；
+/// - 读数据时整列更新的驱动：`ndep_to_sminn` 与火灾的 `abm/gdp/peatf/hdm/lnfm`。
+///
+/// 其余（`gpp`、`leafc` 等在 `CoLMDRIVER` 里才算的量）停在分配时的 `spval`，`acc1d` 跳过。
+struct MaskedBgcSink<'a, S: HistorySink> {
+    inner: &'a mut S,
+    soil: bool,
+}
+
+impl<S: HistorySink> MaskedBgcSink<'_, S> {
+    fn passes(&self, name: &str) -> bool {
+        const STATES: [&str; 17] = [
+            "totvegc", "totlitc", "totcwdc", "totsomc", "totcolc", "totvegn", "totlitn", "totcwdn",
+            "totsomn", "totcoln", "CONC_O2_UNSAT", "O2_DECOMP_DEPTH_UNSAT", "ndep_to_sminn", "abm",
+            "gdp", "peatf", "hdm",
+        ];
+        if name == "totsoiln_vr" {
+            return self.soil;
+        }
+        STATES.contains(&name) || name == "lnfm" || name.ends_with("_vr")
+    }
+}
+
+impl<S: HistorySink> HistorySink for MaskedBgcSink<'_, S> {
+    fn scalar(&mut self, name: &str, record: usize, value: f64) -> Result<()> {
+        if !self.passes(name) {
+            return Ok(());
+        }
+        self.inner.scalar(name, record, value)
+    }
+
+    fn layer(&mut self, name: &str, record: usize, values: &[f64]) -> Result<()> {
+        if !self.passes(name) {
+            return Ok(());
+        }
+        self.inner.layer(name, record, values)
+    }
+
+    fn accumulate(
+        &mut self,
+        name: &str,
+        record: usize,
+        value: f64,
+        counts_as_step: bool,
+    ) -> Result<()> {
+        if !self.passes(name) {
+            return Ok(());
+        }
+        self.inner.accumulate(name, record, value, counts_as_step)
+    }
+
+    fn keep_filtered(&mut self, name: &str) -> bool {
+        self.inner.keep_filtered(name)
+    }
+}
+
 /// 冰川的近地层诊断：`taux`/`tauy`/`tref`/`qref`/`z0m` 取 `GLACIER_TEMP`，其余与植被
 /// 分支一样由 `accumulate_fluxes` 从 `taux`/`tauy`/`fsena`/`fevpa`/`z0m` 重算。
 fn set_glacier_surface_diagnostics(
@@ -2809,10 +2866,12 @@ impl HistorySession {
         template: &StandardLctRestartTemplate,
         state: &StandardLctSnowSoilState,
     ) -> Result<Option<PathBuf>> {
+        // 土壤、湿地、湖与不开城市模型时的城市 patch 实测过（g1fmm、g1bgcm）：累加的变量集合相同。
+        // 冰川与城市模型（城市时间变量另有一套累加）还没实测。
         ensure!(
-            matches!(template.patch_type, 0 | 2),
-            "patch {} (patchtype {}) lies entirely on missing forcing cells; only soil and wetland \
-             patches can be masked by missing forcing in the Rust runtime so far",
+            matches!(template.patch_type, 0 | 1 | 2 | 4) && template.urban.is_none(),
+            "patch {} (patchtype {}) lies entirely on missing forcing cells; masking is ported for \
+             soil, wetland, lake and non-urban-model urban patches only",
             template.patch,
             template.patch_type
         );
@@ -2833,6 +2892,7 @@ impl HistorySession {
         self.plant_hydraulics = template.plant_hydraulics();
         self.variably_saturated = template.physics.variably_saturated_flow;
         self.dynamic_wetland = template.physics.dynamic_wetland;
+        self.bgc = template.bgc.as_ref().map(|bgc| bgc.switches);
         let element_surface = self.element_surface;
         self.push(end, |accumulator| {
             set_lct_snow_state_with(accumulator, 0, template, state, ground, snow_temperature)?;
@@ -2867,6 +2927,31 @@ impl HistorySession {
                 ] {
                     accumulator.scalar(name, 0, value)?;
                 }
+            }
+            // 湖：重启里的湖层温度与冰比例照常累加。
+            if let Some(lake) = state.lake.as_ref().filter(|_| template.patch_type == 4) {
+                accumulator.layer("t_lake", 0, &lake.column.temperature_k)?;
+                accumulator.layer("lake_icefrac", 0, &lake.column.ice_fraction)?;
+            }
+            if let (Some(runtime), Some(bgc)) = (&template.bgc, &state.bgc) {
+                let first_pft_class = state
+                    .energy
+                    .pft
+                    .as_ref()
+                    .and_then(|pft| pft.parameters.first())
+                    .map(|parameters| parameters.class);
+                set_bgc_history(
+                    &mut MaskedBgcSink {
+                        inner: accumulator,
+                        soil: template.patch_type == 0,
+                    },
+                    0,
+                    runtime,
+                    bgc,
+                    first_pft_class,
+                    state.irrigation.as_deref(),
+                    template.patch_type == 0,
+                )?;
             }
             set_sidecar_only(
                 accumulator,
