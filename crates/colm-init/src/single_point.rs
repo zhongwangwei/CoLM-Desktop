@@ -1933,13 +1933,8 @@ fn write_single_point_pft_cold_time_restarts(
     // `lai_p = tlai_p`、`lai = sum(lai_p·pftfrac)`（`MOD_IniTimeVariable.F90:988-996`），
     // patch `tlai` 经 vendor 修复置 0 写进重启。反照率在其后按这组 LAI 算（`MOD_Initialize.F90:1518`）。
     let feedback_lai = if run.lai_feedback {
-        // 雪初值那一支在反馈块之前就用 spval 的 `tlai`/`tlai_p` 算雪盖（`:527-545`），
-        // 上游这条路径本身不自洽，暂不移植。作物段（`MOD_Initialize.F90:1290-1305`）先于
-        // 反馈块把作物的 `leafc_p`/`tlai_p` 清零，反馈块再按 `slatop·leafc_p` 重算，作物仍得 0。
-        ensure!(
-            snow_depth_m == 0.0,
-            "DEF_USE_LAIFEEDBACK cold starts with initial snow are not ported"
-        );
+        // 作物段（`MOD_Initialize.F90:1290-1305`）先于反馈块把作物的 `leafc_p`/`tlai_p` 清零，
+        // 反馈块再按 `slatop·leafc_p` 重算，作物仍得 0。
         let state = bgc_state
             .as_ref()
             .context("DEF_USE_LAIFEEDBACK requires the BGC cold-start state")?;
@@ -1968,6 +1963,16 @@ fn write_single_point_pft_cold_time_restarts(
     let snow_water_equivalent_mm = snow_depth_m * 250.0;
     let roughness = weighted_sum(&canopy.top_m, &pft.fraction)? * 0.1;
     let roughness_p = canopy.top_m.iter().map(|top| top * 0.1).collect::<Vec<_>>();
+    // 雪初值那一支（`MOD_IniTimeVariable.F90:527-545`）在反馈块之前算雪盖：反馈时 `tlai/tlai_p`
+    // 还是分配值 `spval = -1e36`，`tlai_p + tsai_p > 1e-6` 恒假，各 PFT 都按无冠层处理
+    // （`sigf_p = 1`，树木埋没分支也进不去）。给雪盖传全零的叶/茎面积就是同一条分支；
+    // `sai_p = tsai_p·sigf_p` 仍用真实的 `tsai_p`。
+    let zeros = vec![0.0; pft.class.len()];
+    let (snow_lai_p, snow_sai_p) = if run.lai_feedback {
+        (&zeros, &zeros)
+    } else {
+        (&total_lai_p, &total_sai_p)
+    };
     let pft_snow = if snow_depth_m > 0.0 {
         if crop.is_some() {
             let patches = (0..pft.class.len())
@@ -1975,8 +1980,8 @@ fn write_single_point_pft_cold_time_restarts(
                     derive_pft_snow_cover(
                         &pft.class[index..=index],
                         &pft.fraction[index..=index],
-                        &total_lai_p[index..=index],
-                        &total_sai_p[index..=index],
+                        &snow_lai_p[index..=index],
+                        &snow_sai_p[index..=index],
                         &roughness_p[index..=index],
                         &canopy.bottom_m[index..=index],
                         &canopy.top_m[index..=index],
@@ -1999,8 +2004,8 @@ fn write_single_point_pft_cold_time_restarts(
             derive_pft_snow_cover(
                 &pft.class,
                 &pft.fraction,
-                &total_lai_p,
-                &total_sai_p,
+                snow_lai_p,
+                snow_sai_p,
                 &roughness_p,
                 &canopy.bottom_m,
                 &canopy.top_m,

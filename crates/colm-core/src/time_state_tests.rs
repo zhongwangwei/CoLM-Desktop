@@ -23,7 +23,7 @@ fn soil_hydraulics_match_unfrozen_and_frozen_initialization_branches() {
 }
 
 #[test]
-fn snow_layers_match_fortran_boundary_bands_and_signed_node_recurrence() {
+fn snow_layers_match_fortran_boundary_bands_and_node_depths_decrease() {
     let state = initialize_snow_layers(0, 0.05, 5).unwrap();
     assert_eq!(state.layer_count, -2);
     assert_close(&state.thickness_m, &[0.0, 0.0, 0.0, 0.02, 0.03]);
@@ -32,6 +32,8 @@ fn snow_layers_match_fortran_boundary_bands_and_signed_node_recurrence() {
     let deep = initialize_snow_layers(0, 0.64, 5).unwrap();
     assert_eq!(deep.layer_count, -5);
     assert_close(&deep.thickness_m, &[0.02, 0.05, 0.11, 0.23, 0.23]);
+    // 节点在各层中点，自底向上单调变浅（upstream-bugs 第 46 条修后的递推）。
+    assert_close(&deep.node_depth_m, &[-0.63, -0.595, -0.515, -0.345, -0.115]);
 }
 
 #[test]

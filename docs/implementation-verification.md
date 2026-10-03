@@ -28913,3 +28913,33 @@ Rust 之前的拒绝理由（"城市单点混有别的地类的 patch"）不对�
 - 历史与全部重启逐位一致，包括 `restart_urban`、`urb_const` 与两份 const。
 
 回归 `nu uy uo uh1` 逐位一致。
+
+## 第 537 轮：`DEF_USE_LAIFEEDBACK` 冷启动带初始雪；vendor 修 `snow_ini` 的界面深度递推
+
+**LAIFEEDBACK + 雪初值**：
+- 上游的雪初值块（`MOD_IniTimeVariable.F90:527-545`）在反馈块（`:988-996`）之前。此时 `tlai_p` 还是分配值 `spval = -1e36`；patch `tlai` 经第 36 条的 vendor 修补已是 0。
+- 于是 `snowfraction_pftwrap` 的 `tlai_p + tsai_p > 1e-6` 恒假，各 PFT 都按无冠层处理（`sigf_p = 1`，树木埋没分支也进不去），`fsno` 与 LAI 无关。
+- 这条路径是确定的，此前说它“不自洽”不对。
+- Rust（单点与空间 PFT）在反馈时给雪盖传全零的叶/茎面积，走同一分支；`sai_p = tsai_p·sigf_p` 仍用真实的 `tsai_p`。两处拒绝已去掉。
+
+**上游缺陷 46**（`snow_ini`）：
+- 界面深度递推写成 `zi = -zi-dz`，从第三层起节点深度不单调、出现正值。
+- 这是在 blsn0（不开反馈、只有雪初值）里发现的：Fortran 照跑，Rust 首步的 `ground_temperature` 拒绝。冷启动重启两侧本来逐位相同，说明 Rust 原本照抄了 bug，还加了注释说要保留。
+- vendor 已修为 `zi = zi-dz`，Rust 同步；`kernels/default` 与 `kernels/latlon` 已重编。
+
+**验收**（参照侧一律 `--engine fortran --preprocessors fortran`，因为改的是冷启动）。新脚本 `tmp/purepair.sh`：两侧各自全套运行，逐位比对历史与全部重启。
+
+| 算例 | 内容 | 结果 |
+|---|---|---|
+| `blsn0` | bl 底（AT-Neu，BGC/PFT），1 月 1–5 日，`DEF_USE_SnowInit`（`soilstate.nc`，雪深 0.333 m，4 层），不开反馈 | 12 份重启逐位一致 |
+| `blsn` | 同上，开 `DEF_USE_LAIFEEDBACK` | 12 份重启逐位一致；修后初始 `z_sno = [0, -0.323, -0.288, -0.208, -0.0765]` |
+| `g1als` | 空间：阿尔卑斯 46–48°N、10–12°E（新网格 `tmp/grid/al_mesh.nc`），g1bgcp 底（BGC/PFT/反馈/火）加雪初值 | 两侧全套预处理；62 个 patch 雪深都 > 0.07 m、节点单调；history 2、restart 9、5 份 const 逐位一致 |
+
+回归逐位一致：`bl`、`g1bgcp`、`g1pftm`。
+
+单测：
+- core 479、init 176 通过；
+- `snow_layers_match_fortran_boundary_bands_and_node_depths_decrease` 补了 5 层的节点深度；
+- 上一轮遗留的单测改为接受城市 + 方案 1。
+
+`bm1` 停在 Rust mksrfdata（"pctpfts: PFT/PC fractions must sum to 1 or 100"）。会话起点以来 `colm-srfdata` 没改过，所以这不是回归，是那个站点原有的数据问题。

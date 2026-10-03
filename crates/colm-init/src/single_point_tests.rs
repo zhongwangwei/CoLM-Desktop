@@ -2346,7 +2346,7 @@ fn assert_bgc_pft_restart_equal(actual_path: &std::path::Path, expected_path: &s
 }
 
 #[test]
-fn soil_reflectance_scheme_defaults_to_site_values_and_rejects_urban_colour_tables() {
+fn soil_reflectance_scheme_defaults_to_site_values_and_accepts_urban_colour_tables() {
     let root = std::env::temp_dir().join(format!("colm-init-soil-refl-{}", std::process::id()));
     std::fs::create_dir_all(&root).unwrap();
     let namelist = root.join("case.nml");
@@ -2355,10 +2355,8 @@ fn soil_reflectance_scheme_defaults_to_site_values_and_rejects_urban_colour_tabl
         ("DEF_SOIL_REFL_SCHEME=2", Ok(2)),
         ("DEF_SOIL_REFL_SCHEME=1", Ok(1)),
         ("DEF_SOIL_REFL_SCHEME=3", Err("must be 1")),
-        (
-            "DEF_SOIL_REFL_SCHEME=1\nDEF_URBAN_RUN=.true.",
-            Err("DEF_URBAN_RUN"),
-        ),
+        // 单点城市的 patch 是 URBAN，方案 1 按城市类查色表（第 536 轮）。
+        ("DEF_SOIL_REFL_SCHEME=1\nDEF_URBAN_RUN=.true.", Ok(1)),
     ] {
         std::fs::write(
             &namelist,

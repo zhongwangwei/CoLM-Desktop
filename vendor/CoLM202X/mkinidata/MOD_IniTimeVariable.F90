@@ -1352,7 +1352,9 @@ ENDIF
             zi = 0.
             DO i = 0, snl+1, -1
                z_soisno(i) = zi - dz_soisno(i)/2.
-               zi = -zi-dz_soisno(i)
+! ==== FIX: interface depth recurrence was `zi = -zi-dz`, which flips sign from the
+! ==== third layer on and leaves non-monotonic node depths (upstream-bugs #46)
+               zi = zi-dz_soisno(i)
             ENDDO
          ENDIF
 

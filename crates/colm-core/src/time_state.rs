@@ -561,12 +561,13 @@ pub fn initialize_snow_layers(
             - state.thickness_m[slot(-1)];
     }
 
-    // Keep the reference's signed recurrence exactly, including its unusual `-zi` term.
+    // 界面深度自上而下递减：`zi = zi - dz`。上游写成 `zi = -zi - dz`，从第三层起符号翻转、
+    // 节点深度不单调（upstream-bugs 第 46 条），vendor 已改，这里按修后的写。
     let mut zi = 0.0;
     for layer in (state.layer_count + 1..=0).rev() {
         let index = slot(layer);
         state.node_depth_m[index] = zi - state.thickness_m[index] / 2.0;
-        zi = -zi - state.thickness_m[index];
+        zi -= state.thickness_m[index];
     }
     Ok(state)
 }

@@ -589,23 +589,27 @@ pub fn write_spatial_pft_cold_time_restarts(
     }
     let canopy = pft_canopy(&document, &pfts.class, &pfts.observed_height_m)?;
     let common_state = read_common_state(&common.block, patches.class.len())?;
-    // 雪初值那一支在反馈块之前就用 spval 的 `tlai_p` 算雪盖（单点同样不移植）。
-    ensure!(
-        !lai_feedback || common_state.snow_depth_m.iter().all(|&depth| depth == 0.0),
-        "DEF_USE_LAIFEEDBACK cold starts with initial snow are not ported"
-    );
     ensure!(
         !config.use_hyperspectral || common_state.snow_depth_m.iter().all(|&depth| depth == 0.0),
         "HYPERSPECTRAL snow cold start is not implemented: upstream has no verified 211-band SNICAR snow output mapping"
     );
     let top_soil_thickness_m = crate::colm_soil_grid(10)?.thickness_m[0];
     let pft_roughness = canopy.top_m.iter().map(|top| top * 0.1).collect::<Vec<_>>();
+    // 雪初值那一支（`MOD_IniTimeVariable.F90:527-545`）在反馈块之前算雪盖：反馈时 `tlai_p`
+    // 还是分配值 `spval`，`snowfraction_pftwrap` 的 `tlai_p + tsai_p > 1e-6` 恒假，各 PFT 按
+    // 无冠层处理。传全零的叶/茎面积走同一分支；`sai_p = tsai_p·sigf_p` 仍用真实的 `tsai_p`。
+    let zeros = vec![0.0; total_lai.len()];
+    let (snow_lai, snow_sai) = if lai_feedback {
+        (&zeros, &zeros)
+    } else {
+        (&total_lai, &total_sai)
+    };
     let (patch_snow_cover, pft_snow_free_vegetation_fraction) = derive_spatial_pft_snow_cover(
         &patch_kind,
         &pft_to_patch,
         &pfts,
-        &total_lai,
-        &total_sai,
+        snow_lai,
+        snow_sai,
         &pft_roughness,
         &canopy,
         &common_state.snow_depth_m,
