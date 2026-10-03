@@ -29163,3 +29163,18 @@ colm-init 单测 176 通过，clippy 无告警。
 - history 2、restart 5（含河道重启的 `volresv`）、const 逐位一致。
 
 回归逐位一致：`g1all g1ffm g3`。新单测 4 个（选择、分汊闭包与丢弃、无覆盖时报错、沿轴裁剪）；init 180、runtime 152 通过，clippy 无告警。
+
+## 第 548 轮：被强迫缺测遮蔽的冰川 patch
+
+被遮蔽 patch 的组合里只剩冰川（patchtype 3）没实测。原来的区域（华南）没有冰川，所以造了一个喜马拉雅算例：
+- `tmp/synthforcing.py` 新加环境变量 `COLM_SYNTH_BOX="south,north,west,east"`；用它生成 26–32°N、84–90°E 的合成 CMFD 强迫 `tmp/fsynth/CMFDh`，再把 27.5–29.2°N、85.5–87.2°E 整块设成缺测；
+- 网格 `tmp/grid/hm_mesh.nc`：28–30°N、86–88°E，半度 GRIDBASED；
+- 算例 `g1glm`：g1fmm 底（LCT，2003-01-01 → 01-05，月历史），Rust 全套预处理。
+
+被遮蔽的 21 个 patch 里有冰川 47、51，以及湖 53：
+```
+colm-rs: 21 patch(es) lie entirely on missing forcing cells (forcmask_pch = .false.): [(26, 0), …, (47, 3), …, (51, 3), (52, 0), (53, 4)]
+```
+放开 patchtype 3 后不需要别的改动：history 2、restart 5（含月历史旁车）逐位一致。说明冰川被遮蔽时累加的变量集合与其它类型相同。`push_masked` 的检查改为只拒绝未知 patchtype。
+
+回归逐位一致：`g1fmm g1bgcm`。被强迫缺测遮蔽的 patch 与各开关、各 patch 类型的组合至此全部移植完。

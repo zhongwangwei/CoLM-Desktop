@@ -2894,12 +2894,10 @@ impl HistorySession {
         template: &StandardLctRestartTemplate,
         state: &StandardLctSnowSoilState,
     ) -> Result<Option<PathBuf>> {
-        // 土壤、湿地、湖与不开城市模型时的城市 patch 实测过（g1fmm、g1bgcm）：累加的变量集合相同。
-        // 冰川与城市模型（城市时间变量另有一套累加）还没实测。
+        // 五类 patch 都实测过：土壤、湿地、湖、城市（g1fmm、g1bgcm、g1urbmm）与冰川（g1glm）。
         ensure!(
-            matches!(template.patch_type, 0 | 1 | 2 | 4),
-            "patch {} (patchtype {}) lies entirely on missing forcing cells; masking is ported for \
-             soil, wetland, lake and non-urban-model urban patches only",
+            matches!(template.patch_type, 0..=4),
+            "patch {} has an unknown patchtype {}",
             template.patch,
             template.patch_type
         );
