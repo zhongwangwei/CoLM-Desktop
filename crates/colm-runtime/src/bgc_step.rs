@@ -898,11 +898,6 @@ impl BgcRuntime {
             // 湿地 CH4（`CoLMDRIVER.F90:245-247`）：`tracer_wetland_decomp` 借土壤分解级联算逐层
             // 异养呼吸，`tracer_soil_step` 跑甲烷，finalize 按这一步的分解通量直接推进分解池。
             if let (2, Some((setup, site))) = (self.patch_type, &self.methane) {
-                anyhow::ensure!(
-                    !(self.switches.sasu || self.switches.diag_matrix),
-                    "wetland methane with DEF_USE_SASU/DEF_USE_DiagMatrix is not ported to the \
-                     Rust runtime yet"
-                );
                 let physics = self.wetland_physics(idate, deltim, state);
                 colm_core::bgc_wetland::wetland_decomp(&mut bgc, &physics, self.switches, deltim);
                 let mut patch = bgc

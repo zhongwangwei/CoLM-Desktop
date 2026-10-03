@@ -120,6 +120,50 @@ fn competition_no_plant(s: &mut BgcState, sw: BgcSwitches, deltim: f64, dz_soi: 
     };
 }
 
+/// 十个分解转移各自累加到的 AKX 量（下标即转移号 `k`，`MOD_BGC_CNCStateUpdate1.F90:478-497`）。
+const AKX_TRANSFER: [&str; 10] = [
+    "met_to_soil1", "cel_to_soil1", "lig_to_soil2", "soil1_to_soil2", "cwd_to_cel", "cwd_to_lig",
+    "soil1_to_soil3", "soil2_to_soil1", "soil2_to_soil3", "soil3_to_soil1",
+];
+/// 十个分解转移的供体池流出量；`cwd`/`soil1`/`soil2` 各被两个转移依次累加。
+const AKX_EXIT: [&str; 10] = [
+    "met", "cel", "lig", "soil1", "cwd", "cwd", "soil1", "soil2", "soil2", "soil3",
+];
+
+/// 湿地分解的 SASU/DiagMatrix 累加器，FMA 形状与土壤路径（`bgc_c_state_update`、
+/// `bgc_soil_n_state_update`）相同：
+/// - C 转移 `FMA(ctransfer, dt, acc)`，C 流出 `FMA(hr + ctransfer, dt, acc)`；
+/// - N 转移 `FMA(ntransfer + sminn_flux, dt, acc)`，N 流出 `FMA(ntransfer, dt, acc)`。
+///
+/// 上游逐层 `j` 外循环、各量依次累加；同一个量（如 `cwd_exit`）按 `k` 递增被加两次，这里按 `k` 外循环
+/// 也保持同样的先后。
+fn wetland_matrix_accumulators(s: &mut BgcState, deltim: f64) {
+    let d = s.dims;
+    let (nl, full) = (d.nl_soil, d.nl_soil_full);
+    let f = &s.patch_flux;
+    let (hr, ct, nt, sf) = (
+        f.decomp_hr_vr.clone(),
+        f.decomp_ctransfer_vr.clone(),
+        f.decomp_ntransfer_vr.clone(),
+        f.decomp_sminn_flux_vr.clone(),
+    );
+    for k in 0..AKX_TRANSFER.len() {
+        let at = |j: usize| j + full * k;
+        let mut update = |name: String, value: &dyn Fn(usize) -> f64| {
+            let acc = s
+                .f64_field_mut(&name)
+                .unwrap_or_else(|| panic!("the BGC state has no {name}"));
+            for j in 0..nl {
+                acc[j] = value(j).mul_add(deltim, acc[j]);
+            }
+        };
+        update(format!("AKX_{}_c_vr_acc", AKX_TRANSFER[k]), &|j| ct[at(j)]);
+        update(format!("AKX_{}_exit_c_vr_acc", AKX_EXIT[k]), &|j| hr[at(j)] + ct[at(j)]);
+        update(format!("AKX_{}_n_vr_acc", AKX_TRANSFER[k]), &|j| nt[at(j)] + sf[at(j)]);
+        update(format!("AKX_{}_exit_n_vr_acc", AKX_EXIT[k]), &|j| nt[at(j)]);
+    }
+}
+
 /// `tracer_ch4_bgc_finalize_step` 的湿地前半：`CDecompStateUpdate(.., .true.)`、
 /// `SoilBiogeochemNDecompStateUpdate(.., .true.)` 与 `CNDriverSummarizeNonvegetatedSoilStates`。
 pub fn wetland_state_update(
@@ -131,7 +175,11 @@ pub fn wetland_state_update(
 ) {
     let d = s.dims;
     let (nl, full) = (d.nl_soil, d.nl_soil_full);
-    // `SASU`/`DiagMatrix` 的累加器只在土壤 BGC 的矩阵求解里用到；湿地 CH4 路径拒绝这两个开关。
+    // `SASU`/`DiagMatrix`：`CDecompStateUpdate`/`SoilBiogeochemNDecompStateUpdate` 在湿地这一支也累加
+    // `AKX_*_vr_acc`（`MOD_BGC_CNCStateUpdate1.F90:478-497`、`MOD_BGC_Soil_BiogeochemNStateUpdate1.F90:198-221`）。
+    if sw.sasu || sw.diag_matrix {
+        wetland_matrix_accumulators(s, deltim);
+    }
     {
         let inv = &s.invariants;
         let f = &mut s.patch_flux;

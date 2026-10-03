@@ -29087,3 +29087,34 @@ colm-runtime 单测 151 通过，clippy 无告警。
 所以示踪物 + 城市模型 + LULCC 在上游根本跑不起来。`check_spatial_lulcc` 里那条单列的"transport tracers with DEF_URBAN_RUN and DEF_USE_LULCC are not ported"是重复的，删掉，统一由装配处的检查覆盖。
 
 剩余清单里这一项就此结束。
+
+## 第 545 轮：SASU/DiagMatrix 下的湿地甲烷；单点 PFT 模式非土壤站点的 LAI 读入
+
+**湿地甲烷 + SASU/DiagMatrix**：
+- 上游湿地分解链（`reactive_bgc_run_wetland_decomp` → 速率常数、Potential、无植物竞争、Decomp）不看这两个开关。
+- 之后的 `tracer_ch4_bgc_finalize_step` 调 `CDecompStateUpdate(.., .true.)` 与 `SoilBiogeochemNDecompStateUpdate(.., .true.)`，这两个函数开着开关时累加 `AKX_*_vr_acc`（`MOD_BGC_CNCStateUpdate1.F90:478-497`、`MOD_BGC_Soil_BiogeochemNStateUpdate1.F90:198-221`）。
+- Rust 的 `wetland_state_update` 原本不累加，所以入口拒绝。现在按名字表补上，FMA 形状与土壤路径相同：
+  - C 转移 `FMA(ctransfer, dt, acc)`，C 流出 `FMA(hr + ctransfer, dt, acc)`；
+  - N 转移 `FMA(ntransfer + sminn_flux, dt, acc)`，N 流出 `FMA(ntransfer, dt, acc)`；
+  - `cwd/soil1/soil2` 的流出各按 `k` 递增累加两次。
+
+**顺带发现的冷启动问题**（只有用纯 Fortran 全链路对照才看得出）：
+- 单点 PFT/PC 模式下，非土壤站点（如湿地）走 `LAI_readin` 的 PFT 支：不除 `fveg0`，`fveg = fveg0`、`green = 1`；
+- `DEF_USE_LAIFEEDBACK` 时只读 `tsai`，`tlai` 由第 36 条的 vendor 修补置 0；
+- Rust 原来按 LCT 支给了站点 LAI（0.4）。现在 PFT/PC 模式改走 PFT 支。
+
+以前 `tc4wc`（湿地 + 反馈）用共用 Rust 预处理对照，这个差异被掩盖了。
+
+**验收**（`tmp/purepair.sh`：纯 Fortran 全链路对纯 Rust 全链路）：
+
+| 算例 | 设置 | 结果 |
+|---|---|---|
+| `tc4ws0` | tc4w 底，站点改湿地（`SITE_landtype = 11`），BGC/PFT/反馈 + `DEF_USE_SASU` | 历史与 37 份重启逐位一致 |
+| `tc4ws` | 同上，加 `DEF_USE_CN_INIT`（`cnsteadystate.nc`），让湿地分解池有初值 | 48 份重启逐位一致 |
+| `tc4wl` | 原有算例，纯全链路重对照 | 逐位一致 |
+| `tc4wc` | 原有算例，纯全链路重对照 | 逐位一致 |
+
+- tc4ws0 不加 `CN_INIT` 时，冷启动的湿地分解池全是 0，AKX 不动；
+- tc4ws 的 AKX 到 11 月累计到 8.6（`AKX_met_exit_c`）与 0.55（`AKX_soil1_to_soil2_n`），确实走到了湿地 + SASU 这一支。
+
+回归逐位一致：`tc4w tc4wg bl bu`、`blsn`（纯全链路）。单测 core 479、init 176、runtime 152 通过，clippy 无新告警。

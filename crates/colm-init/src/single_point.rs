@@ -1282,10 +1282,22 @@ fn write_single_point_scalar_cold_time_restarts(
     // `MOD_LAIReadin.F90:130-157`：水体清零；否则 `fveg = fveg0`，`fveg0 > 0` 时 `tlai/fveg0`、
     // 月度 LAI 时 `tsai/fveg0`（8 天 LAI 时 `tsai = sai0`）。表里植被地类的 `fveg0` 都是 1，
     // 只有 `DEF_LC_FVEG0` 会让除法起作用。城市单点里的城市 patch 被上游跳过，保持原样。
+    // PFT/PC 模式下非土壤站点走 `LAI_readin` 的 PFT 支（`MOD_LAIReadin.F90:166-256`）：不除 `fveg0`，
+    // `fveg = fveg0`、`green = 1`；`DEF_USE_LAIFEEDBACK` 时只读 `tsai`，`tlai` 停在 spval，由 vendor 修补
+    // （upstream-bugs 第 36 条）置 0。水体照样清零。
+    let pft_mode = matches!(
+        run.subgrid,
+        SinglePointSubgrid::Pft | SinglePointSubgrid::Pc
+    );
     let (fveg, green) = if water {
         total_lai = 0.0;
         total_sai = 0.0;
         (0.0, 0.0)
+    } else if pft_mode && kind != 1 {
+        if run.lai_feedback {
+            total_lai = 0.0;
+        }
+        (site_class.maximum_vegetation_fraction(), 1.0)
     } else if kind == 1 {
         (1.0, 1.0)
     } else {
