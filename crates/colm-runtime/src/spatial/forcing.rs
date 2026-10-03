@@ -983,6 +983,15 @@ impl GriddedForcing {
     }
 
     /// 本步是否在预热期（`DEF_USE_ClimForcing_for_Spinup` 时预热期读 `clim` 文件）。
+    /// `forcing_reset`：预热回卷时清掉上下界时间戳，下一步按新时刻重新读（缓存的四波段短波拆分与
+    /// `avgcos` 不动，上游也不动）。
+    pub fn reset(&mut self) {
+        for bracket in &mut self.brackets {
+            bracket.lower_stamp = None;
+            bracket.upper_stamp = None;
+        }
+    }
+
     pub fn set_spinup(&mut self, spinup: bool) {
         self.spinup = spinup;
     }

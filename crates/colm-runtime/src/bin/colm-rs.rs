@@ -609,10 +609,19 @@ fn run_spatial(
         if next_start == run_end {
             break;
         }
+        // 预热区间按绝对时刻延续到后面的段（单遍预热可以跨 LULCC 年末，`check_spatial_lulcc`
+        // 已拒绝跨年末回卷的情形）；已经结束的预热在新段里不再出现。
+        let spinup_until = if calendar_key(normalized_day_end(config.spinup_until))
+            > calendar_key(next_start)
+        {
+            config.spinup_until
+        } else {
+            next_start
+        };
         segment = SpatialSegment {
             config: colm_runtime::spatial::runtime::SpatialRuntimeConfig {
                 start: next_start,
-                spinup_until: next_start,
+                spinup_until,
                 ..config.clone()
             },
             year,
@@ -1658,10 +1667,24 @@ fn check_spatial_lulcc(
             "DEF_USE_LULCC forces {field} = .true. upstream; set it in the namelist"
         );
     }
-    ensure!(
-        config.spinup_until == config.start,
-        "DEF_USE_LULCC with a spinup interval is not ported to the Rust runtime"
-    );
+    // 预热回卷（`CoLM.F90:711-724`）不回退土地覆盖：回卷前若已过了 LULCC 年末，回到起点后
+    // patch 布局是新一年的，而 `LAI_readin` 按 `jdate(1)` 读旧年份的 LAI（布局不同），上游没有
+    // 定义好的结果（upstream-bugs 第 50 条）。单遍预热（`spinup_repeat <= 1`）不回卷，可以跨年末；
+    // 多遍预热要在起始年年末（第一次 LULCC）之前结束。
+    if config.spinup_repeats > 1
+        && calendar_key(normalized_day_end(config.spinup_until))
+            > calendar_key(normalized_day_end(config.start))
+    {
+        let first_lulcc = normalized_day_end(year_end(config.start));
+        ensure!(
+            calendar_key(normalized_day_end(config.spinup_until)) < calendar_key(first_lulcc),
+            "DEF_USE_LULCC with {} spinup cycles reaching the year end at {}: upstream rewinds the \
+             clock without restoring the land cover, then reads the old year's LAI into the new \
+             patch layout (docs/upstream-bugs.md #50)",
+            config.spinup_repeats,
+            date_label(first_lulcc)
+        );
+    }
     // 2000 年以前上游每 5 年才换一次土地覆盖，重启年份也按 5 年取整；只接逐年的那段。
     ensure!(
         config.start.year >= 2000,

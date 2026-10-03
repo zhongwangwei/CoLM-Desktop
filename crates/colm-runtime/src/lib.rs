@@ -202,6 +202,17 @@ pub fn open_history_session(
     } else {
         spec.start
     };
+    // 整个窗口都在预热里（LULCC 分段时，预热可以盖过一整段）：这一段不写任何记录。
+    let all_spinup = (
+        history_start.year,
+        history_start.julian_day,
+        history_start.seconds,
+    ) >= (spec.end.year, spec.end.julian_day, spec.end.seconds);
+    let (history_start, frequency) = if all_spinup {
+        (spec.start, colm_hist::schedule::HistoryFrequency::None)
+    } else {
+        (history_start, spec.frequency)
+    };
     let (start_year, start_julian_day, start_seconds) = field(history_start)?;
     let (end_year, end_julian_day, end_seconds) = field(spec.end)?;
     crate::history::HistorySession::new(
@@ -216,7 +227,7 @@ pub fn open_history_session(
             end_seconds,
             timestep_seconds,
         },
-        spec.frequency,
+        frequency,
         spec.grouping,
         directory,
         stem,

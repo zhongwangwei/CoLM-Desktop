@@ -465,6 +465,14 @@ pub struct GriddedTracerForcing {
 }
 
 impl GriddedTracerForcing {
+    /// `tracer_forcing_reset`：预热回卷时清掉上下界时间戳。
+    pub fn reset(&mut self) {
+        for bracket in &mut self.brackets {
+            bracket.lower_stamp = None;
+            bracket.upper_stamp = None;
+        }
+    }
+
     /// `tracer_forcing_init` + `tracer_forcing_allocate_state`：比值从描述符默认值起步。
     pub fn new(
         config: ForcingConfig,

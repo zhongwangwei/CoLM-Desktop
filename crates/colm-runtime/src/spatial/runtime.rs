@@ -194,6 +194,11 @@ impl SpatialRuntime {
         );
         let mut optimizer = self.baseflow_optimizer.take();
         let mut completed = 0;
+        let mut spinup_cycle = self
+            .clock
+            .clone()
+            .next_step()
+            .map_or(1, |step| step.spinup_cycle);
         let result = (|| -> Result<()> {
             loop {
                 let mut next_clock = self.clock.clone();
@@ -204,6 +209,14 @@ impl SpatialRuntime {
                 let co2 =
                     colm_core::monthly_co2_ppm(self.co2_scenario, clock.forcing_time.year, month)?
                         * 1.0e-6;
+                // 上一步把时钟回卷到了起点（`CoLM.F90:711-724`）：`forcing_reset` 与 `tracer_forcing_reset`。
+                if clock.spinup_cycle > spinup_cycle {
+                    self.forcing.reset();
+                    if let Some(tracer_forcing) = self.tracer_forcing.as_mut() {
+                        tracer_forcing.reset();
+                    }
+                }
+                spinup_cycle = clock.spinup_cycle;
                 self.forcing.set_spinup(clock.is_spinup);
                 let cells = self.forcing.step(clock.forcing_time, co2)?;
                 let calendar_day = orbital_calendar_day(clock.forcing_time, true, 0.0)?;

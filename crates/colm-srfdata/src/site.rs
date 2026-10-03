@@ -2134,7 +2134,9 @@ pub fn append_single_point_topography_factors(
             file.add_dimension(name, length)?;
         }
     }
-    let fields: [(&str, &[&str], &[f64], bool, &str); 6] = [
+    // （变量名、维度、值、是否取自站点文件、long_name）
+    type Field<'a> = (&'a str, &'a [&'a str], &'a [f64], bool, &'a str);
+    let fields: [Field<'_>; 6] = [
         ("SITE_svf", &[], &[svf], svf_site, "sky view factor"),
         ("SITE_cur", &[], &[cur], cur_site, "curvature"),
         (

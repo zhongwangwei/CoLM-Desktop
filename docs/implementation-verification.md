@@ -29236,3 +29236,26 @@ colm-rs: 21 patch(es) lie entirely on missing forcing cells (forcmask_pch = .fal
 - 定位用的 `dsf1`（同一算例 1 天、逐步 history）48 步全部逐位一致。
 
 回归逐位一致：`bc bd g1als`。工作区单元测试 1786 个全过（新加 2 个：`topo_grid`/`maxelv_grid` 初始化、`part2pset`）；clippy 除既有的 `interception_tests` 精度告警外无告警。
+
+## 第 550 轮：LULCC 与预热区间
+
+原来 colm-rs 遇到"LULCC + 预热区间"一律拒绝。上游的语义（`CoLM.F90:579-610, 711-724`）：
+- 预热段里照样在年末做 LULCC；
+- 回卷只重置时钟与强迫，不回退土地覆盖。
+
+**良定义的两类，照上游实现**：
+- **单遍预热**（`spinup_repeat <= 1`，不回卷）：预热可以跨任意个 LULCC 年末。Rust 按年末切段，原来后续各段的 `spinup_until` 一律设成段起点，即"后面的段不预热"；现在按绝对时刻延续：`max(原 spinup_until, 段起点)`。
+- **多遍预热、且在起始年年末之前结束**：回卷发生在第一次 LULCC 之前，与不开 LULCC 相同。
+
+**其余情形**（多遍预热跨过 LULCC 年末）继续拒绝，记为上游缺陷 50：上游第二遍按新布局读旧年份的 LAI，并再做一次旧→新的转换，不报错但结果没有意义。g3sc 实测：两次 `LULCC: initializing`，175 个与 172 个 patch 混用。
+
+**顺带修的两处**（空间多遍预热从来没测过，g1fcs 是 `spinup_repeat = 1`）：
+- 回卷后网格强迫没有 `forcing_reset`：上下界停在回卷前的时刻，下一步报 "the forcing data required is out of range"。`GriddedForcing::reset` 与 `GriddedTracerForcing::reset` 照上游只清时间戳，`SpatialRuntime` 在 `spinup_cycle` 增加后的第一步调用。
+- 一整段都在预热里时，history 窗口为空，`open_history_session` 报 "simulation window ends before it starts"；现在这一段不安排记录。
+
+**验收**（g3 两侧各自的两年 landdata；两侧重跑 mkinidata 与 colm，纯 Fortran 对全 Rust）：
+- `g3sa`：2005-12-30 → 2006-01-02，预热到 2006-01-01 12:00、`spinup_repeat = 0`，预热跨过 2005 年末的 LULCC。history 2、restart 15 逐位一致。
+- `g3sb`：2005-12-30 → 2006-01-01，预热到 2005-12-30 24:00、`spinup_repeat = 2`，回卷后再跨年做 LULCC。history 4、restart 15 逐位一致。
+- `g3sc`（多遍预热跨年末）：Rust 拒绝并指向第 50 条；Fortran 照跑，见上。
+
+回归逐位一致：`g3 g1fcs`。
