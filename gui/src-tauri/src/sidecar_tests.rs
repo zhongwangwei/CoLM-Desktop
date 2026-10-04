@@ -19,6 +19,15 @@ fn batch_parallelism_accounts_for_ranks_per_case() {
 }
 
 #[test]
+fn concurrent_rust_cases_split_the_cores_as_threads() {
+    assert_eq!(threads_per_case(16, 4), 4);
+    assert_eq!(threads_per_case(16, 3), 5);
+    assert_eq!(threads_per_case(4, 8), 1);
+    assert_eq!(threads_per_case(16, 1), 16);
+    assert_eq!(threads_per_case(16, 0), 16);
+}
+
+#[test]
 fn spatial_grid_dimensions_reject_partial_global_cells() {
     assert_eq!(grid_dimensions(0.5, 0.25).unwrap(), (720, 720));
     assert!(grid_dimensions(7.0, 0.5).is_err());

@@ -1846,9 +1846,9 @@ impl PreprocessorMode {
 
 /// 第三段（`colm`）用哪个引擎。
 ///
-/// 与 [`PreprocessorMode`] 分开：两者的覆盖面不同 —— Rust 前处理已经覆盖
-/// LCT/PFT/PC 与空间算例，而 Rust 主循环（`colm-rs`）目前只覆盖 SinglePoint + LCT
-/// 土面 patch。合成一个开关就只能二选一地"全 Rust"或"全 Fortran"，
+/// 与 [`PreprocessorMode`] 分开：两者的覆盖面不同 —— Rust 前处理覆盖全部网格，
+/// 而 Rust 主循环（`colm-rs`）覆盖站点、经纬度网格与非结构网格（LCT/PFT/PC 都在内），
+/// 流域网格仍要 Fortran 内核。合成一个开关就只能二选一地"全 Rust"或"全 Fortran"，
 /// 而用户最常见的需要恰恰是"前处理 Rust、主循环按算例能力选"。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ModelEngine {
@@ -1873,8 +1873,8 @@ fn requested_engine(value: Option<&str>) -> Result<ModelEngine> {
     }
 }
 
-/// `colm-rs` 的 `--land-cover`：它来自内核的编译期 LULC 宏，namelist 里读不出来
-/// （见 `colm-rs` 模块文档）。PFT/PC 内核没有对应的 Rust 主循环，直接拒绝。
+/// `colm-rs` 的 `--land-cover`：它来自内核的编译期 LULC 宏（IGBP 或 USGS），namelist 里读不出来
+/// （见 `colm-rs` 模块文档）。LCT/PFT/PC 是运行期的 namelist 开关，不在这里区分。
 fn rust_model_land_cover(kernel: &Kernel) -> Result<&'static str> {
     let has = |name: &str| kernel.manifest.macros.iter().any(|item| item == name);
     if has("LULC_IGBP") {
@@ -1883,7 +1883,7 @@ fn rust_model_land_cover(kernel: &Kernel) -> Result<&'static str> {
         Ok("usgs")
     } else {
         bail!(
-            "the Rust model engine only runs LCT (LULC_IGBP / LULC_USGS) cases, but kernel {} is built for another subgrid; \
+            "the Rust model engine needs a LULC_IGBP or LULC_USGS kernel, but kernel {} defines neither; \
              rerun with --engine fortran",
             kernel.manifest.identity()
         )

@@ -852,6 +852,14 @@ fn batch_width(requested: usize, available: usize, ranks_per_case: usize) -> usi
     requested.clamp(1, (available / ranks_per_case.max(1)).max(1))
 }
 
+/// 批量里每个算例给 Rust 引擎的线程数（`RAYON_NUM_THREADS`）：同时跑的算例平分 CPU 核。
+///
+/// `colm-rs` 默认取全部逻辑核；同时跑 `width` 个算例时不限的话，每个都开满核，
+/// 线程数是核数的 `width` 倍，互相抢 CPU。单算例运行不设，仍用全部核。
+fn threads_per_case(available: usize, width: usize) -> usize {
+    (available / width.max(1)).max(1)
+}
+
 fn grid_dimensions(dlon: f64, dlat: f64) -> Result<(usize, usize), String> {
     if !dlon.is_finite() || !dlat.is_finite() || dlon <= 0.0 || dlat <= 0.0 {
         return Err("dlon and dlat must be positive finite numbers".into());
@@ -944,6 +952,7 @@ fn run_batch_blocking(
     let total = cases.len();
     processes.prepare(&cases)?;
     let width = batch_width(max_concurrent, available, mpi_ranks).min(total.max(1));
+    let threads = threads_per_case(available, width);
     let queue = Arc::new(Mutex::new(VecDeque::from(cases)));
     let succeeded = Arc::new(AtomicUsize::new(0));
     let mut workers = Vec::with_capacity(width);
@@ -977,6 +986,7 @@ fn run_batch_blocking(
                     requested_stage.as_deref(),
                     mpi_ranks,
                     e.as_deref(),
+                    Some(threads),
                 )
             }));
             match outcome {
@@ -1057,6 +1067,7 @@ fn run_case_blocking(
         stage.as_deref(),
         mpi_ranks,
         engine.as_deref(),
+        None,
     )
 }
 
@@ -1072,6 +1083,7 @@ fn run_one(
     stage: Option<&str>,
     mpi_ranks: usize,
     engine: Option<&str>,
+    threads: Option<usize>,
 ) -> Result<i32, String> {
     if processes.take_cancelled(case)? {
         let _ = app.emit(
@@ -1091,6 +1103,10 @@ fn run_one(
     }
     let cli = resolve_cli();
     let mut cmd = sidecar_command(&cli);
+    // 用户自己在环境里设了就听用户的。
+    if let Some(threads) = threads.filter(|_| std::env::var_os("RAYON_NUM_THREADS").is_none()) {
+        cmd.env("RAYON_NUM_THREADS", threads.to_string());
+    }
     let args = run_args(case, kernel, force, stage, mpi_ranks, engine)?;
     let mut child = colm_kernel::run::top_level_sidecar(&mut cmd)
         .args(args)

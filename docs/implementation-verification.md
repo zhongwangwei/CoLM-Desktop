@@ -29693,3 +29693,12 @@ Rust 版的并行是 rayon（共享内存，相当于 OpenMP；线程数用 `RAY
 **计时待补**：本轮所有计时都是在本机另有任务把 16 核占到负载 16–20 时测的（`g1` 全链路 Fortran 主循环 4726 s、Rust 539 s，
 只能看量级）。线程数扩展（`gbig`，110–120°E、20–30°N、10 天，`RAYON_NUM_THREADS` = 1/2/4/8/16）与 `c1`/`g1` 的干净对照等机器
 空闲时补测。
+
+**并发算例平分线程**（同轮补）：`colm-rs` 默认开满全部逻辑核，GUI 批量（按"每算例 1 个进程"算并行数，最多到核数）与
+`colm-cli study-run`（`--jobs`）同时跑 N 个 Rust 算例时线程数会是核数的 N 倍。现在两处都给每个算例设
+`RAYON_NUM_THREADS = max(1, 可用核数 / 同时运行的算例数)`（GUI 设在 `colm-cli` 子进程上；Study 在起工作线程之前设进程环境，
+成员子进程继承）；用户自己设了 `RAYON_NUM_THREADS` 就不动；单算例运行不设。界面文字同步：运行页的引擎说明与 MPI 提示改成
+"Rust 引擎在一个进程内多线程运行"，批量并行数的说明加上"Rust 引擎下各算例平分 CPU 核作线程"，删掉一条没有出处的过时译文
+（"每个算例使用 1 个 CPU 核，单个算例仍为串行"）。`colm-cli` 里"Rust 主循环只覆盖 SinglePoint + LCT""PFT/PC 内核直接拒绝"
+两处过时注释与报错文字一并改正（LCT/PFT/PC 是运行期开关，内核只决定 IGBP/USGS）。测试：`threads_per_case`、
+`threads_per_job` 单元测试；GUI sidecar 42 个、`check-gui` 通过。

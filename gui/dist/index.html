@@ -454,7 +454,7 @@
         <div class="run-parallel-setting">
           <div>
             <label for="cpu-workers">批量并行算例数</label>
-            <span>仅在同时运行多个算例时生效；总并行度会结合下方每算例 MPI 进程数自动限额。</span>
+            <span>仅在同时运行多个算例时生效；总并行度会结合下方每算例 MPI 进程数自动限额，Rust 引擎下各算例平分 CPU 核作线程。</span>
           </div>
           <input class="input" id="cpu-workers" type="number" min="1" step="1" value="2">
           <span class="muted mini" id="cpu-capacity"></span>
@@ -462,7 +462,7 @@
         <div class="run-parallel-setting">
           <div>
             <label for="model-engine">模拟引擎</label>
-            <span>只影响 colm 模拟阶段。Rust 引擎单进程运行站点、经纬度网格与非结构网格算例，与 Fortran 内核逐位一致；流域网格或需要多进程 MPI 时选 Fortran 内核。不支持的组合会在运行前提示。</span>
+            <span>只影响 colm 模拟阶段。Rust 引擎在一个进程内多线程运行站点、经纬度网格与非结构网格算例（共享内存并行，线程数取 CPU 核数），与 Fortran 内核逐位一致；流域网格或需要多进程 MPI 时选 Fortran 内核。不支持的组合会在运行前提示。</span>
           </div>
           <select class="select" id="model-engine">
             <option value="rust" selected>Rust 引擎（默认）</option>

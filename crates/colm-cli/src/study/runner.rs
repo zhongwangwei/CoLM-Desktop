@@ -470,12 +470,19 @@ pub fn run(study_dir: &Path, options: RunOptions<'_>) -> Result<StudyState> {
     let mut members = super::generation::reconcile_tasks(&manifest, &mut state)?;
     state.status = StudyStatus::Running;
     super::checkpoint::write_next(&checkpoint_dir, &state)?;
-    let jobs = bounded_jobs(
-        options.jobs,
-        std::thread::available_parallelism()
-            .map(|value| value.get())
-            .unwrap_or(1),
-    );
+    let available = std::thread::available_parallelism()
+        .map(|value| value.get())
+        .unwrap_or(1);
+    let jobs = bounded_jobs(options.jobs, available);
+    // `colm-rs` 默认开满全部逻辑核；`jobs` 个成员同时跑时让它们平分，否则线程数是核数的
+    // `jobs` 倍。成员的子进程继承这个环境变量。用户自己设了就不动。此时工作线程还没起，
+    // 进程里没有别的线程在读环境。
+    if jobs > 1 && std::env::var_os("RAYON_NUM_THREADS").is_none() {
+        std::env::set_var(
+            "RAYON_NUM_THREADS",
+            threads_per_job(available, jobs).to_string(),
+        );
+    }
     emit(
         &study_dir,
         options.stream,
@@ -601,6 +608,11 @@ pub fn run(study_dir: &Path, options: RunOptions<'_>) -> Result<StudyState> {
 
 fn bounded_jobs(requested: usize, available: usize) -> usize {
     requested.clamp(1, available.max(1))
+}
+
+/// 同时跑 `jobs` 个成员时，每个成员的 Rust 引擎线程数（`RAYON_NUM_THREADS`）：平分 CPU 核。
+fn threads_per_job(available: usize, jobs: usize) -> usize {
+    (available / jobs.max(1)).max(1)
 }
 
 pub(super) fn ensure_scheduler_idle(study_dir: &Path) -> Result<()> {
@@ -3784,6 +3796,8 @@ mod tests {
         assert_eq!(bounded_jobs(4, 8), 4);
         assert_eq!(bounded_jobs(99, 8), 8);
         assert_eq!(bounded_jobs(4, 0), 1);
+        assert_eq!(threads_per_job(16, 4), 4);
+        assert_eq!(threads_per_job(4, 8), 1);
     }
 
     fn exited_child_pid() -> u32 {

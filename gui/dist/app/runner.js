@@ -13,7 +13,7 @@ import { acceptsRunEvent, appendLogText, progressText } from './run-format.js';
 import { modelEngine } from './engine.js';
 
 // 单点内核不启 MPI；空间算例默认最多使用八个 MPI rank。
-// Rust 引擎只跑单进程（`colm-cli` 预检对它要求 `--ranks 1`），所以 rank 数只对 Fortran 内核生效。
+// Rust 引擎只跑单进程（`colm-cli` 预检对它要求 `--ranks 1`），在进程内用多线程并行，所以 rank 数只对 Fortran 内核生效。
 const cpuCapacity = Math.max(1, Number(navigator.hardwareConcurrency) || 1);
 const spatialDefaultRanks = Math.min(8, cpuCapacity);
 let discoverRunTargets = true;
@@ -38,7 +38,7 @@ function syncParallelMode() {
   else if (!mpiRanksCustomized) $('mpi-ranks').value = String(spatialDefaultRanks);
   $('mpi-capacity').textContent = mpi
     ? `最多 ${cpuCapacity} 个进程；批量并行数会按每算例 rank 数自动限额。`
-    : spatial ? 'Rust 引擎单进程运行；MPI 进程数只对 Fortran 内核生效。' : '站点算例固定使用 1 个进程。';
+    : spatial ? 'Rust 引擎在一个进程内多线程运行；MPI 进程数只对 Fortran 内核生效。' : '站点算例固定使用 1 个进程。';
   $('cpu-capacity').textContent = spatial
     ? `检测到 ${cpuCapacity} 个逻辑 CPU；批量算例使用普通线程池调度。`
     : `检测到 ${cpuCapacity} 个逻辑 CPU；单个站点仍使用 1 核。`;
