@@ -21,7 +21,7 @@ MODULE MOD_Lulcc_Driver
 
 
    SUBROUTINE LulccDriver (casename, dir_landdata, dir_restart, &
-                           jdate, greenwich)
+                           jdate, greenwich, rewind)
 
 !-----------------------------------------------------------------------
 !
@@ -117,9 +117,18 @@ MODULE MOD_Lulcc_Driver
 
    logical, intent(in)    :: greenwich   !true: greenwich time, false: local time
    integer, intent(inout) :: jdate(3)    !year, julian day, seconds of the starting time
+   ! FIX upstream-bugs #50: a spinup rewind back to the start year. mksrfdata writes the
+   ! transfer trace only from the previous year, so the rewind always uses SAT.
+   logical, intent(in), optional :: rewind
    real(r8), allocatable :: old_patch_area(:), new_patch_area(:), inventory_trace(:,:)
    logical :: inventory_active
+   integer :: scheme
 !-----------------------------------------------------------------------
+
+      scheme = DEF_LULCC_SCHEME
+      IF (present(rewind)) THEN
+         IF (rewind) scheme = 1
+      ENDIF
 
       ! allocate Lulcc memory
       CALL allocate_LulccTimeInvariants
@@ -131,7 +140,7 @@ MODULE MOD_Lulcc_Driver
       IF (DEF_USE_TRACER) THEN
       CALL save_land_tracer_lulcc_state ()
       CALL tracer_lifecycle_land_save_lulcc_state ()
-      inventory_active = p_is_worker .and. ntracers > 0 .and. DEF_LULCC_SCHEME == 2
+      inventory_active = p_is_worker .and. ntracers > 0 .and. scheme == 2
       IF (inventory_active) THEN
          IF (numpatch > 0) THEN
             IF (.not. allocated(landpatch%eindex)) &
@@ -171,7 +180,7 @@ MODULE MOD_Lulcc_Driver
       ! 1. Same Type Assignment (SAT) scheme for variable recovery
       ! =============================================================
 
-      IF (DEF_LULCC_SCHEME == 1) THEN
+      IF (scheme == 1) THEN
          IF (p_is_master) THEN
             print *, ">>> LULCC: Same Type Assignment (SAT) scheme for variable recovery..."
          ENDIF
@@ -183,7 +192,7 @@ MODULE MOD_Lulcc_Driver
       ! 2. Mass and Energy conservation (MEC) scheme for variable recovery
       ! =============================================================
 
-      IF (DEF_LULCC_SCHEME == 2) THEN
+      IF (scheme == 2) THEN
          IF (p_is_master) THEN
             print *, ">>> LULCC: Mass&Energy conserve (MEC) for variable recovery..."
          ENDIF
@@ -256,7 +265,7 @@ MODULE MOD_Lulcc_Driver
       ! deallocate Lulcc memory
       CALL deallocate_LulccTimeInvariants()
       CALL deallocate_LulccTimeVariables()
-      IF (DEF_LULCC_SCHEME == 2) THEN
+      IF (scheme == 2) THEN
          CALL deallocate_LulccTransferTrace()
       ENDIF
 

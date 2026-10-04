@@ -24,7 +24,10 @@ MODULE MOD_Vars_Global
    integer, parameter :: URBAN     = 1
    integer, parameter :: WATERBODY = 16
    integer, parameter :: WETLAND   = 17
-   integer, parameter :: CROPLAND  = 7
+   ! FIX upstream-bugs #73: was 7, which is Grassland in the GLCC legend (MOD_Const_LC).
+   ! Class 2 is Dryland Cropland and Pasture. Every user of CROPLAND is in a PFT/PC/CROP
+   ! path, which supports IGBP only, so no valid USGS configuration reached the old value.
+   integer, parameter :: CROPLAND  = 2
    integer, parameter :: GLACIERS  = 24
 #else
    ! MODIS IGBP number of land cover category

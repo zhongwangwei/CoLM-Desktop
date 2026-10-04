@@ -738,6 +738,7 @@ MODULE MOD_Namelist
 
    logical  :: DEF_HISTORY_IN_VECTOR            = .false.
 
+   logical  :: DEF_HIST_grid_as_model_mesh      = .false.
    logical  :: DEF_HIST_grid_as_forcing         = .false.
    real(r8) :: DEF_HIST_lon_res                 = 0.5
    real(r8) :: DEF_HIST_lat_res                 = 0.5
@@ -1716,6 +1717,7 @@ CONTAINS
       DEF_HISTORY_IN_VECTOR,                  &
       DEF_HIST_lon_res,                       &
       DEF_HIST_lat_res,                       &
+      DEF_HIST_grid_as_model_mesh,            &
       DEF_HIST_grid_as_forcing,               &
       DEF_WRST_FREQ,                          &
       DEF_HIST_FREQ,                          &
@@ -2480,6 +2482,16 @@ CONTAINS
          ENDIF
 #endif
 
+! ----- history ---- Macros&Namelist conflicts and dependency management
+#ifndef GRIDBASED
+         IF (DEF_hist_grid_as_model_mesh) THEN
+            DEF_hist_grid_as_model_mesh = .false.
+            write(*,*) '                  *****                                                         '
+            write(*,*) 'Warning: DEF_hist_grid_as_model_mesh only effective for longitude-latitude mesh.'
+            write(*,*) 'DEF_hist_grid_as_model_mesh will be set to false automatically.                 '
+         ENDIF
+#endif
+
 ! ----- [Complement IF needed] ----- Macros&Namelist conflicts and dependency management
 
 
@@ -2833,6 +2845,7 @@ CONTAINS
       CALL mpi_bcast (DEF_HIST_lon_res                       ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
       CALL mpi_bcast (DEF_HIST_lat_res                       ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
 
+      CALL mpi_bcast (DEF_HIST_grid_as_model_mesh            ,1   ,mpi_logical   ,p_address_master ,p_comm_glb ,p_err)
       CALL mpi_bcast (DEF_HIST_grid_as_forcing               ,1   ,mpi_logical   ,p_address_master ,p_comm_glb ,p_err)
 
       CALL mpi_bcast (DEF_WRST_FREQ                          ,256 ,mpi_character ,p_address_master ,p_comm_glb ,p_err)

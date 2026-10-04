@@ -357,7 +357,7 @@ CONTAINS
                   IF (.not. DEF_USE_Campbell_SOIL_MODEL) THEN
                      psi0       (nsl,ipatch) = -10.      ! mm
                      theta_r    (nsl,ipatch) = soil_theta_r_l  (ipatch)
-                     alpha_vgm  (nsl,ipatch) = soil_alpha_vgm_l(ipatch)
+                     alpha_vgm  (nsl,ipatch) = soil_alpha_vgm_l(ipatch) * 0.1         ! 1/cm -> 1/mm (CoLM-SYSU/CoLM#507)
                      L_vgm      (nsl,ipatch) = soil_L_vgm_l    (ipatch)
                      n_vgm      (nsl,ipatch) = soil_n_vgm_l    (ipatch)
                      wfc        (nsl,ipatch) = soil_theta_r_l  (ipatch)+(soil_theta_s_l(ipatch)-soil_theta_r_l(ipatch))*&

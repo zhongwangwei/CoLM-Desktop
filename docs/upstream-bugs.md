@@ -458,8 +458,12 @@
   - 再到旧年年末又调一次 `LulccDriver`，把已经是新年布局的状态当成旧年布局去做 SAT 转换。
 - **证据**：g3sc（g3 区域，2005-12-30 → 2006-01-01，预热到 2006-01-01、`spinup_repeat = 2`）。纯 Fortran 跑完不报错，日志里 `LULCC: initializing` 出现 2 次；2005 年 175 个 patch、2006 年 172 个。
 - **影响**：只要多遍预热的区间跨过 LULCC 年末，第二遍起的结果就没有意义（不报错）。单遍预热、或预热在第一个年末之前结束的情形不受影响。
-- **处理**：vendor 已修（第 557 轮）：预热回卷时若本轮里做过 LULCC 就 `CoLM_stop` 并说明原因（不再静默跑出无意义的结果）。
-  真正恢复起始年土地覆盖的写法是行为变更，留给上游；Rust 同样拒绝。
+- **处理**：vendor 已修（第 557 轮先改成停机；第 564 轮改为真正回退）：预热回卷时若本轮里做过 LULCC，就按年末 LULCC
+  同样的流程（`deallocate`/`hist_final` → `LulccDriver` → `grid_riverlake_flow_lulcc` → `forcing_init`/`hist_init`）把土地覆盖
+  换回起始年，`jdate` 取运行起点，所以 `LulccInitialize` 读的是起始年、起始月的 LAI。mksrfdata 只写"上一年 → 本年"的转移矩阵，
+  没有从后一年回到起始年的，所以这次换年一律用 SAT（`LulccDriver` 新加可选参数 `rewind`）。不开 LULCC、或预热不跨 LULCC 年末时
+  行为不变。Rust 把每一轮拆成一条段链（前几轮跑到预热终点后换回起始年，最后一轮跑到运行终点），回卷的冷启动写进临时目录、不盖初值；
+  预热终点恰在 LULCC 年末时同一步先换到新一年再换回，基流优化器的配对按两次复合。
 
 ### 51. LULCC 转移轨迹按像元数接收 zip 后的样本
 
@@ -607,7 +611,12 @@
 - **原因**：LCT 没有 PFT 类别，调用处直接传字面量 1。
 - **影响**：`DEF_USE_OZONESTRESS` 下任何 IGBP/USGS 地类都按温带常绿针叶林算臭氧（常绿、`lai_thresh = 0`、`leaf_long(1)` 衰减、
   通量阈值 0.8 nmol m⁻² s⁻¹、针叶林的 `o3coefv/o3coefg` 公式）；草地、农田、落叶林因此按错误的类别计算。
-- **处理**：**未修，需上游决定**——IGBP/USGS 地类该映射到哪个 PFT 的臭氧参数是科学取舍。Rust 保持同样行为。
+- **处理**：vendor 已修（第 564 轮）：`MOD_Ozone` 新加 `ozone_pft_of_lct(patchclass)`，`MOD_Thermal` 的 LCT 调用改传它。
+  按生活型与叶习性取最接近的 PFT（IGBP：ENF→1、EBF→4、DNF→3、DBF→7、混交林→1（保持原值）、郁闭灌丛→9、稀疏灌丛→10、
+  木本稀树草原→7、稀树草原→14、草地/湿地/城市→13、农田与镶嵌→15；USGS 同理，苔原草本→12、木本苔原→11），
+  无植被的地类（海洋、冰雪、裸地、水体）取 0，`CalcOzoneStress` 对 0 不施加胁迫（`o3coefv = o3coefg = 1`）。
+  LCT 分支里 `ivt` 只被臭氧用（截留容量在 LCT 下取 `patchclass`），所以不开 `DEF_USE_OZONESTRESS` 时结果不变。
+  这张表是一个科学取舍，上游可以按需要调整。Rust `lct_ozone_vegetation_type` 同表。
 
 ### 69. 冷启动漏赋臭氧状态
 
@@ -635,6 +644,29 @@
 - **原因**：启动读 `(sec-1800)/10800+…` 档，更新时读 `(sec-deltim)/10800+…` 档，而数据的 `time` 是窗口中点（第 1 档对应 00:00–03:00）。
 - **影响**：所用臭氧浓度比所在窗口晚约一档；`deltim = 10800` 且年初 0 时起步时 `itime = 0`，读文件越界；单位标成 `mol/mol`，实际是 ppbv。
 - **处理**：vendor 已修（第 561 轮）：新加 `ozone_record(year, day, sec)` 取步首所在窗口（恒 ≥ 1），与内存里那一档不同时才读；单位改 `ppbv`。Rust 同步。
+
+### 73. USGS 下 `CROPLAND = 7`，而 GLCC 第 7 类是草地（潜在）
+
+- **位置**：`main/MOD_Vars_Global.F90:27`（`#ifdef LULC_USGS` 段）；地类图例见 `main/MOD_Const_LC.F90:29-53`。
+- **原因**：GLCC USGS 图例里 2–6 是农田与镶嵌（2 旱地农田与牧场），7 是草地；常数取成了 7。
+- **影响**：`CROPLAND` 的使用处全在 PFT/PC/CROP 路径（`MOD_SingleSrfdata`、`MOD_LandPFT`、`MOD_LandCrop`、`Aggregation_*`、
+  `MOD_Albedo_HiRes` 的 PC 分支、LULCC MEC 与示踪物的 `DEF_FAST_PC` 合并），而这些路径上游只支持 IGBP，所以合法的 USGS
+  配置走不到它。一旦以后让 USGS 支持 PFT/PC/CROP，草地会被当成农田。
+- **处理**：vendor 已修（第 564 轮）：改为 2，并在旁边注明。IGBP 构建不受影响；Rust 只有 IGBP 的 12。
+
+### 74. van Genuchten 的 `alpha` 按 1/cm 读入却按 1/mm 使用（CoLM-SYSU/CoLM#507）
+
+- **位置**：`mkinidata/MOD_SoilParametersReadin.F90`（`alpha_vgm = soil_alpha_vgm_l`）；`main/MOD_SoilSurfaceResistance.F90`
+  （LP92 的 `wfc` 用 `alpha_vgm*339.9`）。
+- **原因**：landdata（与单点 SITE 文件）里的 `alpha_vgm` 单位是 1/cm，而模式里吸力 `smp`/`psi0` 都是 mm，所有
+  `soil_psi_from_vliq`/`soil_vliq_from_psi`/`sc_vgm` 等都把 `alpha` 当 1/mm 用；`wfc` 那处用 339.9（cm）与 1/cm 的 `alpha`
+  相乘，换算后要配 3399（mm）。
+- **影响**：默认的 van Genuchten 土壤方案下，持水曲线与导水率的吸力尺度差了 10 倍，土壤水分、蒸发与径流全部受影响。
+  Campbell 方案不受影响。
+- **处理**：按上游 PR #507 并入（第 564 轮）：读入时 `* 0.1`，`wfc` 常数改 3399；mkinidata 里由原始 `alpha` 配 339.9 cm 算的
+  `wfc` 本来就对，不动。PR 同时加了 namelist 开关 `DEF_HIST_grid_as_model_mesh`（非 GRIDBASED 时自动关），目前没有代码读它，
+  照样并入（schema 重新生成）。Rust：`derive_soil_parameters` 存 `alpha*0.1`、`sc_vgm/fc_vgm` 用换算后的值，
+  `soil_surface_resistance` 的常数改 3399。
 
 ## 二、TRACER 编译开关改变了物理（需要上游确认哪一边是对的）
 

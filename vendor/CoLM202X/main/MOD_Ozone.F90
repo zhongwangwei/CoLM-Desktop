@@ -42,10 +42,45 @@ Module MOD_Ozone
    SAVE
 
    PUBLIC :: CalcOzoneStress
+   PUBLIC :: ozone_pft_of_lct
    PUBLIC :: init_ozone_data
    PUBLIC :: update_ozone_data
 
 CONTAINS
+
+   ! FIX upstream-bugs #68: LCT patches have no PFT, and MOD_Thermal used to call
+   ! LeafTemperature with ivt = 1, so every land cover class took the ozone
+   ! parameters of the temperate needleleaf evergreen tree. Each class now takes
+   ! the PFT closest in life form and leaf habit; classes without vegetation take
+   ! 0 (bare), which leaves o3coefv = o3coefg = 1. Mixed forests keep PFT 1.
+   integer FUNCTION ozone_pft_of_lct (lc) RESULT(ivt)
+
+   IMPLICIT NONE
+   integer, intent(in) :: lc
+
+#ifdef LULC_USGS
+   ! 0 ocean, 1 urban, 2-6 cropland and mosaics, 7 grassland, 8 shrubland,
+   ! 9 mixed shrub/grass, 10 savanna, 11 DBF, 12 DNF, 13 EBF, 14 ENF, 15 mixed,
+   ! 16 water, 17 herbaceous wetland, 18 wooded wetland, 19 barren,
+   ! 20 herbaceous tundra, 21 wooded tundra, 22 mixed tundra, 23 bare tundra, 24 ice
+   integer, parameter :: map(0:24) = (/ 0, 13, 15, 15, 15, 15, 15, 13, 10, 10, 14, &
+                                        7,  3,  4,  1,  1,  0, 13,  7,  0, 12, 11, 12, 0, 0 /)
+#else
+   ! 0 ocean, 1 ENF, 2 EBF, 3 DNF, 4 DBF, 5 mixed, 6 closed shrub, 7 open shrub,
+   ! 8 woody savanna, 9 savanna, 10 grassland, 11 wetland, 12 cropland, 13 urban,
+   ! 14 cropland mosaic, 15 snow/ice, 16 barren, 17 water
+   integer, parameter :: map(0:17) = (/ 0, 1, 4, 3, 7, 1, 9, 10, 7, 14, 13, 13, 15, &
+                                        13, 15, 0, 0, 0 /)
+#endif
+
+      IF (lc >= lbound(map,1) .and. lc <= ubound(map,1)) THEN
+         ivt = map(lc)
+      ELSE
+         ivt = 0
+      ENDIF
+
+   END FUNCTION ozone_pft_of_lct
+
 
    SUBROUTINE CalcOzoneStress (o3coefv,o3coefg, forc_ozone, forc_psrf, th, ram, &
                               rs, rb, lai, lai_old, ivt, o3uptake, sabv, deltim)

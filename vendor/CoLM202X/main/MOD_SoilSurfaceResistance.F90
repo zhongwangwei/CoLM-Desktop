@@ -268,7 +268,7 @@ CONTAINS
             !               * soil_theta_s_l(ipatch)
             !wfc = porsl(1)*(-3399._r8/psi0(1))**(-1./bsw(1))
          ELSE
-            wfc = theta_r(1)+(porsl(1)-theta_r(1))*(1+(alpha_vgm(1)*339.9)**n_vgm(1))**(1.0/n_vgm(1)-1)
+            wfc = theta_r(1)+(porsl(1)-theta_r(1))*(1+(alpha_vgm(1)*3399.)**n_vgm(1))**(1.0/n_vgm(1)-1)
          ENDIF
 
          ! Lee and Pielke 1992 beta
