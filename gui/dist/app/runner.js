@@ -13,12 +13,15 @@ import { acceptsRunEvent, appendLogText, progressText } from './run-format.js';
 import { modelEngine } from './engine.js';
 
 // 单点内核不启 MPI；空间算例默认最多使用八个 MPI rank。
+// Rust 引擎只跑单进程（`colm-cli` 预检对它要求 `--ranks 1`），所以 rank 数只对 Fortran 内核生效。
 const cpuCapacity = Math.max(1, Number(navigator.hardwareConcurrency) || 1);
 const spatialDefaultRanks = Math.min(8, cpuCapacity);
 let discoverRunTargets = true;
 let activeRunId = null;
 let fallbackRunSequence = 0;
 let mpiRanksCustomized = false;
+// 切到 Rust 引擎时输入框锁成 1；记下 Fortran 下的取值，切回来时还原。
+let fortranRanks = null;
 $('cpu-workers').max = String(cpuCapacity);
 $('cpu-workers').value = String(Math.min(cpuCapacity, Number($('cpu-workers').value) || 2));
 $('cpu-capacity').textContent = `检测到 ${cpuCapacity} 个逻辑 CPU；单个站点仍使用 1 核。`;
@@ -27,12 +30,15 @@ $('mpi-ranks').addEventListener('input', () => { mpiRanksCustomized = true; });
 
 function syncParallelMode() {
   const spatial = !!state.domain && state.domain !== 'site';
-  $('mpi-ranks').disabled = !spatial;
-  if (!spatial) $('mpi-ranks').value = '1';
+  const mpi = spatial && modelEngine() === 'fortran';
+  if (!mpi && !$('mpi-ranks').disabled && spatial) fortranRanks = $('mpi-ranks').value;
+  $('mpi-ranks').disabled = !mpi;
+  if (!mpi) $('mpi-ranks').value = '1';
+  else if (fortranRanks !== null) { $('mpi-ranks').value = fortranRanks; fortranRanks = null; }
   else if (!mpiRanksCustomized) $('mpi-ranks').value = String(spatialDefaultRanks);
-  $('mpi-capacity').textContent = spatial
+  $('mpi-capacity').textContent = mpi
     ? `最多 ${cpuCapacity} 个进程；批量并行数会按每算例 rank 数自动限额。`
-    : '站点算例固定使用 1 个进程。';
+    : spatial ? 'Rust 引擎单进程运行；MPI 进程数只对 Fortran 内核生效。' : '站点算例固定使用 1 个进程。';
   $('cpu-capacity').textContent = spatial
     ? `检测到 ${cpuCapacity} 个逻辑 CPU；批量算例使用普通线程池调度。`
     : `检测到 ${cpuCapacity} 个逻辑 CPU；单个站点仍使用 1 核。`;
@@ -42,7 +48,7 @@ function requestedRanks() {
   const n = Math.trunc(Number($('mpi-ranks').value));
   const clamped = Math.max(1, Math.min(cpuCapacity, Number.isFinite(n) ? n : 1));
   $('mpi-ranks').value = String(clamped);
-  return state.domain === 'site' ? 1 : clamped;
+  return state.domain === 'site' || modelEngine() === 'rust' ? 1 : clamped;
 }
 
 function requestedWorkers() {
@@ -260,6 +266,7 @@ async function applyKernel() {
 }
 
 addEventListener('colm:wizard', () => { syncParallelMode(); syncKernel(); });
+$('model-engine').addEventListener('change', syncParallelMode);
 syncParallelMode();
 
 const RUN_STAGES = ['mksrfdata', 'mkinidata', 'colm', null];

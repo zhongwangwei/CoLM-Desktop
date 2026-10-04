@@ -29526,3 +29526,17 @@ vendor 的 gnu 构建加上 `-fdefault-double-8` 之后，`DOUBLE PRECISION` 与
 | `hz_g1fbil0`（级别 0） | `gd_hist_unitcat_2003-01.nc` | 456.4 MB | 456.4 MB |
 
 主网格文件 Fortran 1.5–1.6 MB、Rust 0.6 MB：设置全同，差在上游逐变量 `nf90_redef` 追加留下的元数据/空洞，不是压缩差异。单点 history（`MOD_HistSingle`）两侧都不压缩，没动。
+
+## 第 563 轮：GUI 对照第 554–562 轮的核查
+
+逐项对照 GUI（`gui/dist`、`gui/src-tauri`）与本批改动，找到并修了三处：
+
+1. **空间算例在 Rust 引擎下被预检拒跑**：运行页的「每个算例的 MPI 进程数」只看站点/空间，空间算例默认填 `min(8, CPU 数)`，而 `colm-cli` 的 `preflight_rust_model` 要求 Rust 引擎 `--ranks 1`（`the Rust model engine runs one process; --ranks 8 needs --engine fortran`）。默认引擎就是 Rust，于是从 GUI 跑任何空间算例都在第一段之前失败。`runner.js` 改为：Rust 引擎下输入框锁成 1、提示「MPI 进程数只对 Fortran 内核生效」，切回 Fortran 时还原用户原来的取值；`requestedRanks()` 对 Rust 一律返回 1；监听引擎下拉框的 `change`。
+2. **引擎说明过时**：仍写「Rust 引擎目前支持站点 + LCT 土地覆盖」。改为按 `preflight_rust_model` 的实际边界：单进程运行站点、经纬度网格与非结构网格算例；流域网格或多进程 MPI 选 Fortran；不支持的组合运行前提示。PFT/PC 不需要单列——发布的内核是运行期开关版（宏只有 `LULC_IGBP`），`rust_model_land_cover` 不会误拒。
+3. **历史变量开关数**：`hist_vars` 现覆盖 586 个开关（482 + PR #504 的 104 个火诊断量），`histvars_tests.rs` 仍断言 482——这个测试在 `gui/src-tauri` 自己的工作区里，第 562 轮的全仓测试没跑到它。改断言与注释。
+
+另外给 `spinup_repeat` 的说明补一行：开 LULCC 时多轮预热须在起始年年末之前结束（第 50 条，两侧都停机）。
+
+核对过、不需要改的：LULCC 与 USGS/BGC/站点的互斥与 `colm-rs` 一致；`DEF_TOPMOD_method` 0/1/2、`DEF_Forcing_Interp_Method` 的 bilinear、臭氧两个开关与 `DEF_OZONE_KO3` 都在参数页；火诊断量的闸门是上游的 `DEF_USE_BGC`（关火时 Fortran 写填充值，Rust 同样），`f_xy_ozone` 单位已随第 72 条变为 ppbv（目录自动生成）。
+
+验证：`gui/src-tauri` `cargo test --offline` 162 passed；`gui/tests/*.mjs` 11 个全过（含 `i18n.mjs` 的中英对照完整性）；`cargo run -p xtask -- check-gui` 通过。

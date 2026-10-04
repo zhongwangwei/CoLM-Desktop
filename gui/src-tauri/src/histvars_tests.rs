@@ -86,7 +86,7 @@ fn a_runtime_switch_is_evaluated_against_this_case() {
 
 #[test]
 fn a_switch_the_gate_table_does_not_know_says_so() {
-    // 482 个开关里有 61 个在闸门表里没有对应条目（多为 DA_*）。
+    // 有几十个开关在闸门表里没有对应条目（多为 DA_*）。
     // **不知道就说不知道** —— 当成能写会让人以为勾上就有输出。
     if !have_kernel("default") {
         return;
@@ -98,7 +98,7 @@ fn a_switch_the_gate_table_does_not_know_says_so() {
         unknown.iter().all(|x| x.blocked_by.is_some()),
         "未知也要有说法"
     );
-    assert_eq!(v.len(), 482, "hist_vars 应当覆盖全部 482 个开关");
+    assert_eq!(v.len(), 586, "hist_vars 应当覆盖全部 586 个开关");
 }
 
 #[test]

@@ -462,7 +462,7 @@
         <div class="run-parallel-setting">
           <div>
             <label for="model-engine">模拟引擎</label>
-            <span>只影响 colm 模拟阶段。Rust 引擎目前支持站点 + LCT 土地覆盖；不支持的算例会在运行前提示改用 Fortran 内核。</span>
+            <span>只影响 colm 模拟阶段。Rust 引擎单进程运行站点、经纬度网格与非结构网格算例，与 Fortran 内核逐位一致；流域网格或需要多进程 MPI 时选 Fortran 内核。不支持的组合会在运行前提示。</span>
           </div>
           <select class="select" id="model-engine">
             <option value="rust" selected>Rust 引擎（默认）</option>
