@@ -42,6 +42,11 @@ MODULE MOD_Lulcc_Vars_TimeVariables
    real(r8), allocatable :: fsno_            (:)  !frac of snow cover on ground
    real(r8), allocatable :: sigf_            (:)  !frac of veg cover, excluding snow-covered veg [-]
    real(r8), allocatable :: zwt_             (:)  !the depth to water table [m]
+   ! MOD_Opt_Baseflow arrays of last year's patch layout (remapped like the other states)
+   real(r8), allocatable :: scale_baseflow_  (:)
+   real(r8), allocatable :: zwt_init_        (:)
+   real(r8), allocatable :: rchg_year_       (:)
+   real(r8), allocatable :: rsub_year_       (:)
    real(r8), allocatable :: wa_              (:)  !water storage in aquifer [mm]
    real(r8), allocatable :: wdsrf_           (:)  !depth of surface water [mm]
    real(r8), allocatable :: rss_             (:)  !soil surface resistance [s/m]
@@ -414,6 +419,7 @@ CONTAINS
 
    SUBROUTINE SAVE_LulccTimeVariables
 
+   USE MOD_Opt_Baseflow, only: scale_baseflow, zwt_init, rchg_year, rsub_year
    USE MOD_Namelist
    USE MOD_Precision
    USE MOD_SPMD_Task
@@ -602,11 +608,26 @@ IF (DEF_URBAN_RUN) THEN
 ENDIF
       ENDIF
 
+      CALL save_baseflow (scale_baseflow, scale_baseflow_)
+      CALL save_baseflow (zwt_init      , zwt_init_      )
+      CALL save_baseflow (rchg_year     , rchg_year_     )
+      CALL save_baseflow (rsub_year     , rsub_year_     )
+
+   CONTAINS
+
+      SUBROUTINE save_baseflow (now, last)
+      real(r8), allocatable, intent(in)    :: now (:)
+      real(r8), allocatable, intent(inout) :: last(:)
+         IF (allocated(last)) deallocate(last)
+         IF (allocated(now )) allocate(last, source = now)
+      END SUBROUTINE save_baseflow
+
    END SUBROUTINE SAVE_LulccTimeVariables
 
 
    SUBROUTINE REST_LulccTimeVariables
 
+   USE MOD_Opt_Baseflow, only: scale_baseflow, zwt_init, rchg_year, rsub_year
    USE MOD_Namelist
    USE MOD_SPMD_Task
    USE MOD_Precision
@@ -631,6 +652,25 @@ ENDIF
    integer i, j, np, np_, ip, ip_, pc, pc_, u, u_
    integer ps, ps_, pe, pe_
    integer numpxl, ipxl
+
+      ! MOD_Opt_Baseflow arrays follow the new patch layout: patches without a match
+      ! start from the defaults of Opt_Baseflow_init (scale 1, annual sums spval, zwt_init = zwt
+      ! once LulccDriver has finished, i.e. after MEC), matched patches keep last year's values
+      ! like the other states.
+      IF (p_is_worker) THEN
+         IF (allocated(scale_baseflow_)) THEN
+            IF (allocated(scale_baseflow)) deallocate(scale_baseflow)
+            allocate (scale_baseflow (numpatch));  scale_baseflow(:) = 1.
+         ENDIF
+         IF (allocated(zwt_init_)) THEN
+            IF (allocated(zwt_init )) deallocate(zwt_init )
+            IF (allocated(rchg_year)) deallocate(rchg_year)
+            IF (allocated(rsub_year)) deallocate(rsub_year)
+            allocate (zwt_init  (numpatch));  zwt_init  (:) = spval
+            allocate (rchg_year (numpatch));  rchg_year (:) = spval
+            allocate (rsub_year (numpatch));  rsub_year (:) = spval
+         ENDIF
+      ENDIF
 
       IF (p_is_worker) THEN
          ! allocate with numelm
@@ -748,6 +788,12 @@ ENDIF
                         sigf(np) = 1
                      ENDIF
                      zwt           (np) = zwt_           (np_)
+                     IF (allocated(scale_baseflow_)) scale_baseflow(np) = scale_baseflow_(np_)
+                     IF (allocated(zwt_init_)) THEN
+                        zwt_init  (np) = zwt_init_  (np_)
+                        rchg_year (np) = rchg_year_ (np_)
+                        rsub_year (np) = rsub_year_ (np_)
+                     ENDIF
                      wa            (np) = wa_            (np_)
                      wdsrf         (np) = wdsrf_         (np_)
                      rss           (np) = rss_           (np_)

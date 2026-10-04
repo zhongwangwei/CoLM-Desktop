@@ -29,14 +29,14 @@ run_phase () {  # $1 = curve|lut
     # 让 `#include <define.h>` 取到这一份。该模块里 `#ifdef SinglePoint` 只包着阴影表
     # 那几行（:110/:154/:269/:281/:659/:702/:755），所以这样翻不动别的语义。
     sed 's/^#undef SinglePoint$/#define SinglePoint/' include/define.h > "$WORK/define.h"
-    gfortran -c -O2 -fdefault-real-8 -ffree-form -cpp -ffree-line-length-0 \
+    gfortran -c -O2 -fdefault-real-8 -fdefault-double-8 -ffree-form -cpp -ffree-line-length-0 \
       -fallow-argument-mismatch -I"$WORK" -I.bld -Iinclude -Imain -Ishare \
       main/MOD_ForcingDownscaling.F90 -J"$WORK" -o "$WORK/fd_singlepoint.o"
     modobj="$WORK/fd_singlepoint.o"
   else
     modobj="$(ls .bld/*.o | grep '/MOD_ForcingDownscaling.o$')"
   fi
-  gfortran -O2 -fdefault-real-8 -ffree-form -cpp -ffree-line-length-0 \
+  gfortran -O2 -fdefault-real-8 -fdefault-double-8 -ffree-form -cpp -ffree-line-length-0 \
     -fallow-argument-mismatch -fwrapv -ffp-contract=off $defs \
     -I"$WORK" -I.bld -Iinclude -Imain -Ishare -J"$WORK" \
     "$BASE/oracle/scripts/forcingdownscaling_shortwave_diff.f90" -c -o "$WORK/drv_$variant.o"

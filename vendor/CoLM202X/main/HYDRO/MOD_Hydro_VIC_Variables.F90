@@ -196,6 +196,8 @@ CONTAINS
       ELSEIF (colm_lay == 3) THEN
          vic_ice    = ice_tmp
       ELSE
+         ! vic_ice is intent(out): clear it before accumulating the top and bottom layers
+         vic_ice = 0.
          DO idx = 1, min(int((colm_lay-1)/vic_lay), vic_lay)
             multiplier = merge(1.0, 0.0, colm_lay > idx*vic_lay)
             vic_ice(1) = vic_ice(1) + ice_tmp(idx) * multiplier

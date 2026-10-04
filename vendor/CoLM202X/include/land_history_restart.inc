@@ -1261,6 +1261,422 @@
       IF (allocated(a_lnfm)) THEN
          local(i)=1
       ENDIF
+      i=i+1; names(i)='a_farea_burned'; ranks(i)=1; urban(i)=.false.
+      IF (allocated(a_farea_burned)) THEN
+         local(i)=1
+      ENDIF
+      i=i+1; names(i)='a_baf_crop'; ranks(i)=1; urban(i)=.false.
+      IF (allocated(a_baf_crop)) THEN
+         local(i)=1
+      ENDIF
+      i=i+1; names(i)='a_baf_peatf'; ranks(i)=1; urban(i)=.false.
+      IF (allocated(a_baf_peatf)) THEN
+         local(i)=1
+      ENDIF
+      i=i+1; names(i)='a_nfire'; ranks(i)=1; urban(i)=.false.
+      IF (allocated(a_nfire)) THEN
+         local(i)=1
+      ENDIF
+      i=i+1; names(i)='a_fuelc'; ranks(i)=1; urban(i)=.false.
+      IF (allocated(a_fuelc)) THEN
+         local(i)=1
+      ENDIF
+      i=i+1; names(i)='a_btran2'; ranks(i)=1; urban(i)=.false.
+      IF (allocated(a_btran2)) THEN
+         local(i)=1
+      ENDIF
+      i=i+1; names(i)='a_pft_fire_closs'; ranks(i)=1; urban(i)=.false.
+      IF (allocated(a_pft_fire_closs)) THEN
+         local(i)=1
+      ENDIF
+      i=i+1; names(i)='a_pft_fire_nloss'; ranks(i)=1; urban(i)=.false.
+      IF (allocated(a_pft_fire_nloss)) THEN
+         local(i)=1
+      ENDIF
+      i=i+1; names(i)='a_col_fire_closs'; ranks(i)=1; urban(i)=.false.
+      IF (allocated(a_col_fire_closs)) THEN
+         local(i)=1
+      ENDIF
+      i=i+1; names(i)='a_col_fire_nloss'; ranks(i)=1; urban(i)=.false.
+      IF (allocated(a_col_fire_nloss)) THEN
+         local(i)=1
+      ENDIF
+      i=i+1; names(i)='a_somc_fire'; ranks(i)=1; urban(i)=.false.
+      IF (allocated(a_somc_fire)) THEN
+         local(i)=1
+      ENDIF
+      i=i+1; names(i)='a_litfire'; ranks(i)=1; urban(i)=.false.
+      IF (allocated(a_litfire)) THEN
+         local(i)=1
+      ENDIF
+      i=i+1; names(i)='a_somfire'; ranks(i)=1; urban(i)=.false.
+      IF (allocated(a_somfire)) THEN
+         local(i)=1
+      ENDIF
+      i=i+1; names(i)='a_totfire'; ranks(i)=1; urban(i)=.false.
+      IF (allocated(a_totfire)) THEN
+         local(i)=1
+      ENDIF
+      i=i+1; names(i)='a_m_leafc_to_fire'; ranks(i)=1; urban(i)=.false.
+      IF (allocated(a_m_leafc_to_fire)) THEN
+         local(i)=1
+      ENDIF
+      i=i+1; names(i)='a_m_frootc_to_fire'; ranks(i)=1; urban(i)=.false.
+      IF (allocated(a_m_frootc_to_fire)) THEN
+         local(i)=1
+      ENDIF
+      i=i+1; names(i)='a_m_livestemc_to_fire'; ranks(i)=1; urban(i)=.false.
+      IF (allocated(a_m_livestemc_to_fire)) THEN
+         local(i)=1
+      ENDIF
+      i=i+1; names(i)='a_m_deadstemc_to_fire'; ranks(i)=1; urban(i)=.false.
+      IF (allocated(a_m_deadstemc_to_fire)) THEN
+         local(i)=1
+      ENDIF
+      i=i+1; names(i)='a_m_livecrootc_to_fire'; ranks(i)=1; urban(i)=.false.
+      IF (allocated(a_m_livecrootc_to_fire)) THEN
+         local(i)=1
+      ENDIF
+      i=i+1; names(i)='a_m_deadcrootc_to_fire'; ranks(i)=1; urban(i)=.false.
+      IF (allocated(a_m_deadcrootc_to_fire)) THEN
+         local(i)=1
+      ENDIF
+      i=i+1; names(i)='a_m_leafc_storage_to_fire'; ranks(i)=1; urban(i)=.false.
+      IF (allocated(a_m_leafc_storage_to_fire)) THEN
+         local(i)=1
+      ENDIF
+      i=i+1; names(i)='a_m_frootc_storage_to_fire'; ranks(i)=1; urban(i)=.false.
+      IF (allocated(a_m_frootc_storage_to_fire)) THEN
+         local(i)=1
+      ENDIF
+      i=i+1; names(i)='a_m_livestemc_storage_to_fire'; ranks(i)=1; urban(i)=.false.
+      IF (allocated(a_m_livestemc_storage_to_fire)) THEN
+         local(i)=1
+      ENDIF
+      i=i+1; names(i)='a_m_deadstemc_storage_to_fire'; ranks(i)=1; urban(i)=.false.
+      IF (allocated(a_m_deadstemc_storage_to_fire)) THEN
+         local(i)=1
+      ENDIF
+      i=i+1; names(i)='a_m_livecrootc_storage_to_fire'; ranks(i)=1; urban(i)=.false.
+      IF (allocated(a_m_livecrootc_storage_to_fire)) THEN
+         local(i)=1
+      ENDIF
+      i=i+1; names(i)='a_m_deadcrootc_storage_to_fire'; ranks(i)=1; urban(i)=.false.
+      IF (allocated(a_m_deadcrootc_storage_to_fire)) THEN
+         local(i)=1
+      ENDIF
+      i=i+1; names(i)='a_m_gresp_storage_to_fire'; ranks(i)=1; urban(i)=.false.
+      IF (allocated(a_m_gresp_storage_to_fire)) THEN
+         local(i)=1
+      ENDIF
+      i=i+1; names(i)='a_m_leafc_xfer_to_fire'; ranks(i)=1; urban(i)=.false.
+      IF (allocated(a_m_leafc_xfer_to_fire)) THEN
+         local(i)=1
+      ENDIF
+      i=i+1; names(i)='a_m_frootc_xfer_to_fire'; ranks(i)=1; urban(i)=.false.
+      IF (allocated(a_m_frootc_xfer_to_fire)) THEN
+         local(i)=1
+      ENDIF
+      i=i+1; names(i)='a_m_livestemc_xfer_to_fire'; ranks(i)=1; urban(i)=.false.
+      IF (allocated(a_m_livestemc_xfer_to_fire)) THEN
+         local(i)=1
+      ENDIF
+      i=i+1; names(i)='a_m_deadstemc_xfer_to_fire'; ranks(i)=1; urban(i)=.false.
+      IF (allocated(a_m_deadstemc_xfer_to_fire)) THEN
+         local(i)=1
+      ENDIF
+      i=i+1; names(i)='a_m_livecrootc_xfer_to_fire'; ranks(i)=1; urban(i)=.false.
+      IF (allocated(a_m_livecrootc_xfer_to_fire)) THEN
+         local(i)=1
+      ENDIF
+      i=i+1; names(i)='a_m_deadcrootc_xfer_to_fire'; ranks(i)=1; urban(i)=.false.
+      IF (allocated(a_m_deadcrootc_xfer_to_fire)) THEN
+         local(i)=1
+      ENDIF
+      i=i+1; names(i)='a_m_gresp_xfer_to_fire'; ranks(i)=1; urban(i)=.false.
+      IF (allocated(a_m_gresp_xfer_to_fire)) THEN
+         local(i)=1
+      ENDIF
+      i=i+1; names(i)='a_m_livestemc_to_deadstemc_fire'; ranks(i)=1; urban(i)=.false.
+      IF (allocated(a_m_livestemc_to_deadstemc_fire)) THEN
+         local(i)=1
+      ENDIF
+      i=i+1; names(i)='a_m_livecrootc_to_deadcrootc_fire'; ranks(i)=1; urban(i)=.false.
+      IF (allocated(a_m_livecrootc_to_deadcrootc_fire)) THEN
+         local(i)=1
+      ENDIF
+      i=i+1; names(i)='a_m_leafc_to_litter_fire'; ranks(i)=1; urban(i)=.false.
+      IF (allocated(a_m_leafc_to_litter_fire)) THEN
+         local(i)=1
+      ENDIF
+      i=i+1; names(i)='a_m_frootc_to_litter_fire'; ranks(i)=1; urban(i)=.false.
+      IF (allocated(a_m_frootc_to_litter_fire)) THEN
+         local(i)=1
+      ENDIF
+      i=i+1; names(i)='a_m_livestemc_to_litter_fire'; ranks(i)=1; urban(i)=.false.
+      IF (allocated(a_m_livestemc_to_litter_fire)) THEN
+         local(i)=1
+      ENDIF
+      i=i+1; names(i)='a_m_deadstemc_to_litter_fire'; ranks(i)=1; urban(i)=.false.
+      IF (allocated(a_m_deadstemc_to_litter_fire)) THEN
+         local(i)=1
+      ENDIF
+      i=i+1; names(i)='a_m_livecrootc_to_litter_fire'; ranks(i)=1; urban(i)=.false.
+      IF (allocated(a_m_livecrootc_to_litter_fire)) THEN
+         local(i)=1
+      ENDIF
+      i=i+1; names(i)='a_m_deadcrootc_to_litter_fire'; ranks(i)=1; urban(i)=.false.
+      IF (allocated(a_m_deadcrootc_to_litter_fire)) THEN
+         local(i)=1
+      ENDIF
+      i=i+1; names(i)='a_m_leafc_storage_to_litter_fire'; ranks(i)=1; urban(i)=.false.
+      IF (allocated(a_m_leafc_storage_to_litter_fire)) THEN
+         local(i)=1
+      ENDIF
+      i=i+1; names(i)='a_m_frootc_storage_to_litter_fire'; ranks(i)=1; urban(i)=.false.
+      IF (allocated(a_m_frootc_storage_to_litter_fire)) THEN
+         local(i)=1
+      ENDIF
+      i=i+1; names(i)='a_m_livestemc_storage_to_litter_fire'; ranks(i)=1; urban(i)=.false.
+      IF (allocated(a_m_livestemc_storage_to_litter_fire)) THEN
+         local(i)=1
+      ENDIF
+      i=i+1; names(i)='a_m_deadstemc_storage_to_litter_fire'; ranks(i)=1; urban(i)=.false.
+      IF (allocated(a_m_deadstemc_storage_to_litter_fire)) THEN
+         local(i)=1
+      ENDIF
+      i=i+1; names(i)='a_m_livecrootc_storage_to_litter_fire'; ranks(i)=1; urban(i)=.false.
+      IF (allocated(a_m_livecrootc_storage_to_litter_fire)) THEN
+         local(i)=1
+      ENDIF
+      i=i+1; names(i)='a_m_deadcrootc_storage_to_litter_fire'; ranks(i)=1; urban(i)=.false.
+      IF (allocated(a_m_deadcrootc_storage_to_litter_fire)) THEN
+         local(i)=1
+      ENDIF
+      i=i+1; names(i)='a_m_gresp_storage_to_litter_fire'; ranks(i)=1; urban(i)=.false.
+      IF (allocated(a_m_gresp_storage_to_litter_fire)) THEN
+         local(i)=1
+      ENDIF
+      i=i+1; names(i)='a_m_leafc_xfer_to_litter_fire'; ranks(i)=1; urban(i)=.false.
+      IF (allocated(a_m_leafc_xfer_to_litter_fire)) THEN
+         local(i)=1
+      ENDIF
+      i=i+1; names(i)='a_m_frootc_xfer_to_litter_fire'; ranks(i)=1; urban(i)=.false.
+      IF (allocated(a_m_frootc_xfer_to_litter_fire)) THEN
+         local(i)=1
+      ENDIF
+      i=i+1; names(i)='a_m_livestemc_xfer_to_litter_fire'; ranks(i)=1; urban(i)=.false.
+      IF (allocated(a_m_livestemc_xfer_to_litter_fire)) THEN
+         local(i)=1
+      ENDIF
+      i=i+1; names(i)='a_m_deadstemc_xfer_to_litter_fire'; ranks(i)=1; urban(i)=.false.
+      IF (allocated(a_m_deadstemc_xfer_to_litter_fire)) THEN
+         local(i)=1
+      ENDIF
+      i=i+1; names(i)='a_m_livecrootc_xfer_to_litter_fire'; ranks(i)=1; urban(i)=.false.
+      IF (allocated(a_m_livecrootc_xfer_to_litter_fire)) THEN
+         local(i)=1
+      ENDIF
+      i=i+1; names(i)='a_m_deadcrootc_xfer_to_litter_fire'; ranks(i)=1; urban(i)=.false.
+      IF (allocated(a_m_deadcrootc_xfer_to_litter_fire)) THEN
+         local(i)=1
+      ENDIF
+      i=i+1; names(i)='a_m_gresp_xfer_to_litter_fire'; ranks(i)=1; urban(i)=.false.
+      IF (allocated(a_m_gresp_xfer_to_litter_fire)) THEN
+         local(i)=1
+      ENDIF
+      i=i+1; names(i)='a_m_leafn_to_fire'; ranks(i)=1; urban(i)=.false.
+      IF (allocated(a_m_leafn_to_fire)) THEN
+         local(i)=1
+      ENDIF
+      i=i+1; names(i)='a_m_frootn_to_fire'; ranks(i)=1; urban(i)=.false.
+      IF (allocated(a_m_frootn_to_fire)) THEN
+         local(i)=1
+      ENDIF
+      i=i+1; names(i)='a_m_livestemn_to_fire'; ranks(i)=1; urban(i)=.false.
+      IF (allocated(a_m_livestemn_to_fire)) THEN
+         local(i)=1
+      ENDIF
+      i=i+1; names(i)='a_m_deadstemn_to_fire'; ranks(i)=1; urban(i)=.false.
+      IF (allocated(a_m_deadstemn_to_fire)) THEN
+         local(i)=1
+      ENDIF
+      i=i+1; names(i)='a_m_livecrootn_to_fire'; ranks(i)=1; urban(i)=.false.
+      IF (allocated(a_m_livecrootn_to_fire)) THEN
+         local(i)=1
+      ENDIF
+      i=i+1; names(i)='a_m_deadcrootn_to_fire'; ranks(i)=1; urban(i)=.false.
+      IF (allocated(a_m_deadcrootn_to_fire)) THEN
+         local(i)=1
+      ENDIF
+      i=i+1; names(i)='a_m_leafn_storage_to_fire'; ranks(i)=1; urban(i)=.false.
+      IF (allocated(a_m_leafn_storage_to_fire)) THEN
+         local(i)=1
+      ENDIF
+      i=i+1; names(i)='a_m_frootn_storage_to_fire'; ranks(i)=1; urban(i)=.false.
+      IF (allocated(a_m_frootn_storage_to_fire)) THEN
+         local(i)=1
+      ENDIF
+      i=i+1; names(i)='a_m_livestemn_storage_to_fire'; ranks(i)=1; urban(i)=.false.
+      IF (allocated(a_m_livestemn_storage_to_fire)) THEN
+         local(i)=1
+      ENDIF
+      i=i+1; names(i)='a_m_deadstemn_storage_to_fire'; ranks(i)=1; urban(i)=.false.
+      IF (allocated(a_m_deadstemn_storage_to_fire)) THEN
+         local(i)=1
+      ENDIF
+      i=i+1; names(i)='a_m_livecrootn_storage_to_fire'; ranks(i)=1; urban(i)=.false.
+      IF (allocated(a_m_livecrootn_storage_to_fire)) THEN
+         local(i)=1
+      ENDIF
+      i=i+1; names(i)='a_m_deadcrootn_storage_to_fire'; ranks(i)=1; urban(i)=.false.
+      IF (allocated(a_m_deadcrootn_storage_to_fire)) THEN
+         local(i)=1
+      ENDIF
+      i=i+1; names(i)='a_m_leafn_xfer_to_fire'; ranks(i)=1; urban(i)=.false.
+      IF (allocated(a_m_leafn_xfer_to_fire)) THEN
+         local(i)=1
+      ENDIF
+      i=i+1; names(i)='a_m_frootn_xfer_to_fire'; ranks(i)=1; urban(i)=.false.
+      IF (allocated(a_m_frootn_xfer_to_fire)) THEN
+         local(i)=1
+      ENDIF
+      i=i+1; names(i)='a_m_livestemn_xfer_to_fire'; ranks(i)=1; urban(i)=.false.
+      IF (allocated(a_m_livestemn_xfer_to_fire)) THEN
+         local(i)=1
+      ENDIF
+      i=i+1; names(i)='a_m_deadstemn_xfer_to_fire'; ranks(i)=1; urban(i)=.false.
+      IF (allocated(a_m_deadstemn_xfer_to_fire)) THEN
+         local(i)=1
+      ENDIF
+      i=i+1; names(i)='a_m_livecrootn_xfer_to_fire'; ranks(i)=1; urban(i)=.false.
+      IF (allocated(a_m_livecrootn_xfer_to_fire)) THEN
+         local(i)=1
+      ENDIF
+      i=i+1; names(i)='a_m_deadcrootn_xfer_to_fire'; ranks(i)=1; urban(i)=.false.
+      IF (allocated(a_m_deadcrootn_xfer_to_fire)) THEN
+         local(i)=1
+      ENDIF
+      i=i+1; names(i)='a_m_livestemn_to_deadstemn_fire'; ranks(i)=1; urban(i)=.false.
+      IF (allocated(a_m_livestemn_to_deadstemn_fire)) THEN
+         local(i)=1
+      ENDIF
+      i=i+1; names(i)='a_m_livecrootn_to_deadcrootn_fire'; ranks(i)=1; urban(i)=.false.
+      IF (allocated(a_m_livecrootn_to_deadcrootn_fire)) THEN
+         local(i)=1
+      ENDIF
+      i=i+1; names(i)='a_m_retransn_to_fire'; ranks(i)=1; urban(i)=.false.
+      IF (allocated(a_m_retransn_to_fire)) THEN
+         local(i)=1
+      ENDIF
+      i=i+1; names(i)='a_m_leafn_to_litter_fire'; ranks(i)=1; urban(i)=.false.
+      IF (allocated(a_m_leafn_to_litter_fire)) THEN
+         local(i)=1
+      ENDIF
+      i=i+1; names(i)='a_m_frootn_to_litter_fire'; ranks(i)=1; urban(i)=.false.
+      IF (allocated(a_m_frootn_to_litter_fire)) THEN
+         local(i)=1
+      ENDIF
+      i=i+1; names(i)='a_m_livestemn_to_litter_fire'; ranks(i)=1; urban(i)=.false.
+      IF (allocated(a_m_livestemn_to_litter_fire)) THEN
+         local(i)=1
+      ENDIF
+      i=i+1; names(i)='a_m_deadstemn_to_litter_fire'; ranks(i)=1; urban(i)=.false.
+      IF (allocated(a_m_deadstemn_to_litter_fire)) THEN
+         local(i)=1
+      ENDIF
+      i=i+1; names(i)='a_m_livecrootn_to_litter_fire'; ranks(i)=1; urban(i)=.false.
+      IF (allocated(a_m_livecrootn_to_litter_fire)) THEN
+         local(i)=1
+      ENDIF
+      i=i+1; names(i)='a_m_deadcrootn_to_litter_fire'; ranks(i)=1; urban(i)=.false.
+      IF (allocated(a_m_deadcrootn_to_litter_fire)) THEN
+         local(i)=1
+      ENDIF
+      i=i+1; names(i)='a_m_leafn_storage_to_litter_fire'; ranks(i)=1; urban(i)=.false.
+      IF (allocated(a_m_leafn_storage_to_litter_fire)) THEN
+         local(i)=1
+      ENDIF
+      i=i+1; names(i)='a_m_frootn_storage_to_litter_fire'; ranks(i)=1; urban(i)=.false.
+      IF (allocated(a_m_frootn_storage_to_litter_fire)) THEN
+         local(i)=1
+      ENDIF
+      i=i+1; names(i)='a_m_livestemn_storage_to_litter_fire'; ranks(i)=1; urban(i)=.false.
+      IF (allocated(a_m_livestemn_storage_to_litter_fire)) THEN
+         local(i)=1
+      ENDIF
+      i=i+1; names(i)='a_m_deadstemn_storage_to_litter_fire'; ranks(i)=1; urban(i)=.false.
+      IF (allocated(a_m_deadstemn_storage_to_litter_fire)) THEN
+         local(i)=1
+      ENDIF
+      i=i+1; names(i)='a_m_livecrootn_storage_to_litter_fire'; ranks(i)=1; urban(i)=.false.
+      IF (allocated(a_m_livecrootn_storage_to_litter_fire)) THEN
+         local(i)=1
+      ENDIF
+      i=i+1; names(i)='a_m_deadcrootn_storage_to_litter_fire'; ranks(i)=1; urban(i)=.false.
+      IF (allocated(a_m_deadcrootn_storage_to_litter_fire)) THEN
+         local(i)=1
+      ENDIF
+      i=i+1; names(i)='a_m_leafn_xfer_to_litter_fire'; ranks(i)=1; urban(i)=.false.
+      IF (allocated(a_m_leafn_xfer_to_litter_fire)) THEN
+         local(i)=1
+      ENDIF
+      i=i+1; names(i)='a_m_frootn_xfer_to_litter_fire'; ranks(i)=1; urban(i)=.false.
+      IF (allocated(a_m_frootn_xfer_to_litter_fire)) THEN
+         local(i)=1
+      ENDIF
+      i=i+1; names(i)='a_m_livestemn_xfer_to_litter_fire'; ranks(i)=1; urban(i)=.false.
+      IF (allocated(a_m_livestemn_xfer_to_litter_fire)) THEN
+         local(i)=1
+      ENDIF
+      i=i+1; names(i)='a_m_deadstemn_xfer_to_litter_fire'; ranks(i)=1; urban(i)=.false.
+      IF (allocated(a_m_deadstemn_xfer_to_litter_fire)) THEN
+         local(i)=1
+      ENDIF
+      i=i+1; names(i)='a_m_livecrootn_xfer_to_litter_fire'; ranks(i)=1; urban(i)=.false.
+      IF (allocated(a_m_livecrootn_xfer_to_litter_fire)) THEN
+         local(i)=1
+      ENDIF
+      i=i+1; names(i)='a_m_deadcrootn_xfer_to_litter_fire'; ranks(i)=1; urban(i)=.false.
+      IF (allocated(a_m_deadcrootn_xfer_to_litter_fire)) THEN
+         local(i)=1
+      ENDIF
+      i=i+1; names(i)='a_m_retransn_to_litter_fire'; ranks(i)=1; urban(i)=.false.
+      IF (allocated(a_m_retransn_to_litter_fire)) THEN
+         local(i)=1
+      ENDIF
+      i=i+1; names(i)='a_m_litr1_c_to_fire'; ranks(i)=1; urban(i)=.false.
+      IF (allocated(a_m_litr1_c_to_fire)) THEN
+         local(i)=1
+      ENDIF
+      i=i+1; names(i)='a_m_litr1_n_to_fire'; ranks(i)=1; urban(i)=.false.
+      IF (allocated(a_m_litr1_n_to_fire)) THEN
+         local(i)=1
+      ENDIF
+      i=i+1; names(i)='a_m_litr2_c_to_fire'; ranks(i)=1; urban(i)=.false.
+      IF (allocated(a_m_litr2_c_to_fire)) THEN
+         local(i)=1
+      ENDIF
+      i=i+1; names(i)='a_m_litr2_n_to_fire'; ranks(i)=1; urban(i)=.false.
+      IF (allocated(a_m_litr2_n_to_fire)) THEN
+         local(i)=1
+      ENDIF
+      i=i+1; names(i)='a_m_litr3_c_to_fire'; ranks(i)=1; urban(i)=.false.
+      IF (allocated(a_m_litr3_c_to_fire)) THEN
+         local(i)=1
+      ENDIF
+      i=i+1; names(i)='a_m_litr3_n_to_fire'; ranks(i)=1; urban(i)=.false.
+      IF (allocated(a_m_litr3_n_to_fire)) THEN
+         local(i)=1
+      ENDIF
+      i=i+1; names(i)='a_m_cwd_c_to_fire'; ranks(i)=1; urban(i)=.false.
+      IF (allocated(a_m_cwd_c_to_fire)) THEN
+         local(i)=1
+      ENDIF
+      i=i+1; names(i)='a_m_cwd_n_to_fire'; ranks(i)=1; urban(i)=.false.
+      IF (allocated(a_m_cwd_n_to_fire)) THEN
+         local(i)=1
+      ENDIF
       i=i+1; names(i)='a_leafcCap'; ranks(i)=1; urban(i)=.false.
       IF (allocated(a_leafcCap)) THEN
          local(i)=1
@@ -4260,6 +4676,838 @@
             CALL history_acc_write(file, 'a_lnfm', landpatch, 'patch', a_lnfm, dims(1,i), dims(2,i))
          ELSE
             CALL ncio_read_vector(file, 'a_lnfm', landpatch, a_lnfm, known_present=.true.)
+         ENDIF
+      ENDIF
+      i=i+1
+      IF (present_flags(i) /= 0) THEN
+         IF (writing) THEN
+            CALL history_acc_write(file, 'a_farea_burned', landpatch, 'patch', a_farea_burned, dims(1,i), dims(2,i))
+         ELSE
+            CALL ncio_read_vector(file, 'a_farea_burned', landpatch, a_farea_burned, known_present=.true.)
+         ENDIF
+      ENDIF
+      i=i+1
+      IF (present_flags(i) /= 0) THEN
+         IF (writing) THEN
+            CALL history_acc_write(file, 'a_baf_crop', landpatch, 'patch', a_baf_crop, dims(1,i), dims(2,i))
+         ELSE
+            CALL ncio_read_vector(file, 'a_baf_crop', landpatch, a_baf_crop, known_present=.true.)
+         ENDIF
+      ENDIF
+      i=i+1
+      IF (present_flags(i) /= 0) THEN
+         IF (writing) THEN
+            CALL history_acc_write(file, 'a_baf_peatf', landpatch, 'patch', a_baf_peatf, dims(1,i), dims(2,i))
+         ELSE
+            CALL ncio_read_vector(file, 'a_baf_peatf', landpatch, a_baf_peatf, known_present=.true.)
+         ENDIF
+      ENDIF
+      i=i+1
+      IF (present_flags(i) /= 0) THEN
+         IF (writing) THEN
+            CALL history_acc_write(file, 'a_nfire', landpatch, 'patch', a_nfire, dims(1,i), dims(2,i))
+         ELSE
+            CALL ncio_read_vector(file, 'a_nfire', landpatch, a_nfire, known_present=.true.)
+         ENDIF
+      ENDIF
+      i=i+1
+      IF (present_flags(i) /= 0) THEN
+         IF (writing) THEN
+            CALL history_acc_write(file, 'a_fuelc', landpatch, 'patch', a_fuelc, dims(1,i), dims(2,i))
+         ELSE
+            CALL ncio_read_vector(file, 'a_fuelc', landpatch, a_fuelc, known_present=.true.)
+         ENDIF
+      ENDIF
+      i=i+1
+      IF (present_flags(i) /= 0) THEN
+         IF (writing) THEN
+            CALL history_acc_write(file, 'a_btran2', landpatch, 'patch', a_btran2, dims(1,i), dims(2,i))
+         ELSE
+            CALL ncio_read_vector(file, 'a_btran2', landpatch, a_btran2, known_present=.true.)
+         ENDIF
+      ENDIF
+      i=i+1
+      IF (present_flags(i) /= 0) THEN
+         IF (writing) THEN
+            CALL history_acc_write(file, 'a_pft_fire_closs', landpatch, 'patch', a_pft_fire_closs, dims(1,i), dims(2,i))
+         ELSE
+            CALL ncio_read_vector(file, 'a_pft_fire_closs', landpatch, a_pft_fire_closs, known_present=.true.)
+         ENDIF
+      ENDIF
+      i=i+1
+      IF (present_flags(i) /= 0) THEN
+         IF (writing) THEN
+            CALL history_acc_write(file, 'a_pft_fire_nloss', landpatch, 'patch', a_pft_fire_nloss, dims(1,i), dims(2,i))
+         ELSE
+            CALL ncio_read_vector(file, 'a_pft_fire_nloss', landpatch, a_pft_fire_nloss, known_present=.true.)
+         ENDIF
+      ENDIF
+      i=i+1
+      IF (present_flags(i) /= 0) THEN
+         IF (writing) THEN
+            CALL history_acc_write(file, 'a_col_fire_closs', landpatch, 'patch', a_col_fire_closs, dims(1,i), dims(2,i))
+         ELSE
+            CALL ncio_read_vector(file, 'a_col_fire_closs', landpatch, a_col_fire_closs, known_present=.true.)
+         ENDIF
+      ENDIF
+      i=i+1
+      IF (present_flags(i) /= 0) THEN
+         IF (writing) THEN
+            CALL history_acc_write(file, 'a_col_fire_nloss', landpatch, 'patch', a_col_fire_nloss, dims(1,i), dims(2,i))
+         ELSE
+            CALL ncio_read_vector(file, 'a_col_fire_nloss', landpatch, a_col_fire_nloss, known_present=.true.)
+         ENDIF
+      ENDIF
+      i=i+1
+      IF (present_flags(i) /= 0) THEN
+         IF (writing) THEN
+            CALL history_acc_write(file, 'a_somc_fire', landpatch, 'patch', a_somc_fire, dims(1,i), dims(2,i))
+         ELSE
+            CALL ncio_read_vector(file, 'a_somc_fire', landpatch, a_somc_fire, known_present=.true.)
+         ENDIF
+      ENDIF
+      i=i+1
+      IF (present_flags(i) /= 0) THEN
+         IF (writing) THEN
+            CALL history_acc_write(file, 'a_litfire', landpatch, 'patch', a_litfire, dims(1,i), dims(2,i))
+         ELSE
+            CALL ncio_read_vector(file, 'a_litfire', landpatch, a_litfire, known_present=.true.)
+         ENDIF
+      ENDIF
+      i=i+1
+      IF (present_flags(i) /= 0) THEN
+         IF (writing) THEN
+            CALL history_acc_write(file, 'a_somfire', landpatch, 'patch', a_somfire, dims(1,i), dims(2,i))
+         ELSE
+            CALL ncio_read_vector(file, 'a_somfire', landpatch, a_somfire, known_present=.true.)
+         ENDIF
+      ENDIF
+      i=i+1
+      IF (present_flags(i) /= 0) THEN
+         IF (writing) THEN
+            CALL history_acc_write(file, 'a_totfire', landpatch, 'patch', a_totfire, dims(1,i), dims(2,i))
+         ELSE
+            CALL ncio_read_vector(file, 'a_totfire', landpatch, a_totfire, known_present=.true.)
+         ENDIF
+      ENDIF
+      i=i+1
+      IF (present_flags(i) /= 0) THEN
+         IF (writing) THEN
+            CALL history_acc_write(file, 'a_m_leafc_to_fire', landpatch, 'patch', a_m_leafc_to_fire, dims(1,i), dims(2,i))
+         ELSE
+            CALL ncio_read_vector(file, 'a_m_leafc_to_fire', landpatch, a_m_leafc_to_fire, known_present=.true.)
+         ENDIF
+      ENDIF
+      i=i+1
+      IF (present_flags(i) /= 0) THEN
+         IF (writing) THEN
+            CALL history_acc_write(file, 'a_m_frootc_to_fire', landpatch, 'patch', a_m_frootc_to_fire, dims(1,i), dims(2,i))
+         ELSE
+            CALL ncio_read_vector(file, 'a_m_frootc_to_fire', landpatch, a_m_frootc_to_fire, known_present=.true.)
+         ENDIF
+      ENDIF
+      i=i+1
+      IF (present_flags(i) /= 0) THEN
+         IF (writing) THEN
+            CALL history_acc_write(file, 'a_m_livestemc_to_fire', landpatch, 'patch', a_m_livestemc_to_fire, dims(1,i), dims(2,i))
+         ELSE
+            CALL ncio_read_vector(file, 'a_m_livestemc_to_fire', landpatch, a_m_livestemc_to_fire, known_present=.true.)
+         ENDIF
+      ENDIF
+      i=i+1
+      IF (present_flags(i) /= 0) THEN
+         IF (writing) THEN
+            CALL history_acc_write(file, 'a_m_deadstemc_to_fire', landpatch, 'patch', a_m_deadstemc_to_fire, dims(1,i), dims(2,i))
+         ELSE
+            CALL ncio_read_vector(file, 'a_m_deadstemc_to_fire', landpatch, a_m_deadstemc_to_fire, known_present=.true.)
+         ENDIF
+      ENDIF
+      i=i+1
+      IF (present_flags(i) /= 0) THEN
+         IF (writing) THEN
+            CALL history_acc_write(file, 'a_m_livecrootc_to_fire', landpatch, 'patch', a_m_livecrootc_to_fire, dims(1,i), dims(2,i))
+         ELSE
+            CALL ncio_read_vector(file, 'a_m_livecrootc_to_fire', landpatch, a_m_livecrootc_to_fire, known_present=.true.)
+         ENDIF
+      ENDIF
+      i=i+1
+      IF (present_flags(i) /= 0) THEN
+         IF (writing) THEN
+            CALL history_acc_write(file, 'a_m_deadcrootc_to_fire', landpatch, 'patch', a_m_deadcrootc_to_fire, dims(1,i), dims(2,i))
+         ELSE
+            CALL ncio_read_vector(file, 'a_m_deadcrootc_to_fire', landpatch, a_m_deadcrootc_to_fire, known_present=.true.)
+         ENDIF
+      ENDIF
+      i=i+1
+      IF (present_flags(i) /= 0) THEN
+         IF (writing) THEN
+            CALL history_acc_write(file, 'a_m_leafc_storage_to_fire', landpatch, 'patch', a_m_leafc_storage_to_fire, dims(1,i), dims(2,i))
+         ELSE
+            CALL ncio_read_vector(file, 'a_m_leafc_storage_to_fire', landpatch, a_m_leafc_storage_to_fire, known_present=.true.)
+         ENDIF
+      ENDIF
+      i=i+1
+      IF (present_flags(i) /= 0) THEN
+         IF (writing) THEN
+            CALL history_acc_write(file, 'a_m_frootc_storage_to_fire', landpatch, 'patch', a_m_frootc_storage_to_fire, dims(1,i), dims(2,i))
+         ELSE
+            CALL ncio_read_vector(file, 'a_m_frootc_storage_to_fire', landpatch, a_m_frootc_storage_to_fire, known_present=.true.)
+         ENDIF
+      ENDIF
+      i=i+1
+      IF (present_flags(i) /= 0) THEN
+         IF (writing) THEN
+            CALL history_acc_write(file, 'a_m_livestemc_storage_to_fire', landpatch, 'patch', a_m_livestemc_storage_to_fire, dims(1,i), dims(2,i))
+         ELSE
+            CALL ncio_read_vector(file, 'a_m_livestemc_storage_to_fire', landpatch, a_m_livestemc_storage_to_fire, known_present=.true.)
+         ENDIF
+      ENDIF
+      i=i+1
+      IF (present_flags(i) /= 0) THEN
+         IF (writing) THEN
+            CALL history_acc_write(file, 'a_m_deadstemc_storage_to_fire', landpatch, 'patch', a_m_deadstemc_storage_to_fire, dims(1,i), dims(2,i))
+         ELSE
+            CALL ncio_read_vector(file, 'a_m_deadstemc_storage_to_fire', landpatch, a_m_deadstemc_storage_to_fire, known_present=.true.)
+         ENDIF
+      ENDIF
+      i=i+1
+      IF (present_flags(i) /= 0) THEN
+         IF (writing) THEN
+            CALL history_acc_write(file, 'a_m_livecrootc_storage_to_fire', landpatch, 'patch', a_m_livecrootc_storage_to_fire, dims(1,i), dims(2,i))
+         ELSE
+            CALL ncio_read_vector(file, 'a_m_livecrootc_storage_to_fire', landpatch, a_m_livecrootc_storage_to_fire, known_present=.true.)
+         ENDIF
+      ENDIF
+      i=i+1
+      IF (present_flags(i) /= 0) THEN
+         IF (writing) THEN
+            CALL history_acc_write(file, 'a_m_deadcrootc_storage_to_fire', landpatch, 'patch', a_m_deadcrootc_storage_to_fire, dims(1,i), dims(2,i))
+         ELSE
+            CALL ncio_read_vector(file, 'a_m_deadcrootc_storage_to_fire', landpatch, a_m_deadcrootc_storage_to_fire, known_present=.true.)
+         ENDIF
+      ENDIF
+      i=i+1
+      IF (present_flags(i) /= 0) THEN
+         IF (writing) THEN
+            CALL history_acc_write(file, 'a_m_gresp_storage_to_fire', landpatch, 'patch', a_m_gresp_storage_to_fire, dims(1,i), dims(2,i))
+         ELSE
+            CALL ncio_read_vector(file, 'a_m_gresp_storage_to_fire', landpatch, a_m_gresp_storage_to_fire, known_present=.true.)
+         ENDIF
+      ENDIF
+      i=i+1
+      IF (present_flags(i) /= 0) THEN
+         IF (writing) THEN
+            CALL history_acc_write(file, 'a_m_leafc_xfer_to_fire', landpatch, 'patch', a_m_leafc_xfer_to_fire, dims(1,i), dims(2,i))
+         ELSE
+            CALL ncio_read_vector(file, 'a_m_leafc_xfer_to_fire', landpatch, a_m_leafc_xfer_to_fire, known_present=.true.)
+         ENDIF
+      ENDIF
+      i=i+1
+      IF (present_flags(i) /= 0) THEN
+         IF (writing) THEN
+            CALL history_acc_write(file, 'a_m_frootc_xfer_to_fire', landpatch, 'patch', a_m_frootc_xfer_to_fire, dims(1,i), dims(2,i))
+         ELSE
+            CALL ncio_read_vector(file, 'a_m_frootc_xfer_to_fire', landpatch, a_m_frootc_xfer_to_fire, known_present=.true.)
+         ENDIF
+      ENDIF
+      i=i+1
+      IF (present_flags(i) /= 0) THEN
+         IF (writing) THEN
+            CALL history_acc_write(file, 'a_m_livestemc_xfer_to_fire', landpatch, 'patch', a_m_livestemc_xfer_to_fire, dims(1,i), dims(2,i))
+         ELSE
+            CALL ncio_read_vector(file, 'a_m_livestemc_xfer_to_fire', landpatch, a_m_livestemc_xfer_to_fire, known_present=.true.)
+         ENDIF
+      ENDIF
+      i=i+1
+      IF (present_flags(i) /= 0) THEN
+         IF (writing) THEN
+            CALL history_acc_write(file, 'a_m_deadstemc_xfer_to_fire', landpatch, 'patch', a_m_deadstemc_xfer_to_fire, dims(1,i), dims(2,i))
+         ELSE
+            CALL ncio_read_vector(file, 'a_m_deadstemc_xfer_to_fire', landpatch, a_m_deadstemc_xfer_to_fire, known_present=.true.)
+         ENDIF
+      ENDIF
+      i=i+1
+      IF (present_flags(i) /= 0) THEN
+         IF (writing) THEN
+            CALL history_acc_write(file, 'a_m_livecrootc_xfer_to_fire', landpatch, 'patch', a_m_livecrootc_xfer_to_fire, dims(1,i), dims(2,i))
+         ELSE
+            CALL ncio_read_vector(file, 'a_m_livecrootc_xfer_to_fire', landpatch, a_m_livecrootc_xfer_to_fire, known_present=.true.)
+         ENDIF
+      ENDIF
+      i=i+1
+      IF (present_flags(i) /= 0) THEN
+         IF (writing) THEN
+            CALL history_acc_write(file, 'a_m_deadcrootc_xfer_to_fire', landpatch, 'patch', a_m_deadcrootc_xfer_to_fire, dims(1,i), dims(2,i))
+         ELSE
+            CALL ncio_read_vector(file, 'a_m_deadcrootc_xfer_to_fire', landpatch, a_m_deadcrootc_xfer_to_fire, known_present=.true.)
+         ENDIF
+      ENDIF
+      i=i+1
+      IF (present_flags(i) /= 0) THEN
+         IF (writing) THEN
+            CALL history_acc_write(file, 'a_m_gresp_xfer_to_fire', landpatch, 'patch', a_m_gresp_xfer_to_fire, dims(1,i), dims(2,i))
+         ELSE
+            CALL ncio_read_vector(file, 'a_m_gresp_xfer_to_fire', landpatch, a_m_gresp_xfer_to_fire, known_present=.true.)
+         ENDIF
+      ENDIF
+      i=i+1
+      IF (present_flags(i) /= 0) THEN
+         IF (writing) THEN
+            CALL history_acc_write(file, 'a_m_livestemc_to_deadstemc_fire', landpatch, 'patch', a_m_livestemc_to_deadstemc_fire, dims(1,i), dims(2,i))
+         ELSE
+            CALL ncio_read_vector(file, 'a_m_livestemc_to_deadstemc_fire', landpatch, a_m_livestemc_to_deadstemc_fire, known_present=.true.)
+         ENDIF
+      ENDIF
+      i=i+1
+      IF (present_flags(i) /= 0) THEN
+         IF (writing) THEN
+            CALL history_acc_write(file, 'a_m_livecrootc_to_deadcrootc_fire', landpatch, 'patch', a_m_livecrootc_to_deadcrootc_fire, dims(1,i), dims(2,i))
+         ELSE
+            CALL ncio_read_vector(file, 'a_m_livecrootc_to_deadcrootc_fire', landpatch, a_m_livecrootc_to_deadcrootc_fire, known_present=.true.)
+         ENDIF
+      ENDIF
+      i=i+1
+      IF (present_flags(i) /= 0) THEN
+         IF (writing) THEN
+            CALL history_acc_write(file, 'a_m_leafc_to_litter_fire', landpatch, 'patch', a_m_leafc_to_litter_fire, dims(1,i), dims(2,i))
+         ELSE
+            CALL ncio_read_vector(file, 'a_m_leafc_to_litter_fire', landpatch, a_m_leafc_to_litter_fire, known_present=.true.)
+         ENDIF
+      ENDIF
+      i=i+1
+      IF (present_flags(i) /= 0) THEN
+         IF (writing) THEN
+            CALL history_acc_write(file, 'a_m_frootc_to_litter_fire', landpatch, 'patch', a_m_frootc_to_litter_fire, dims(1,i), dims(2,i))
+         ELSE
+            CALL ncio_read_vector(file, 'a_m_frootc_to_litter_fire', landpatch, a_m_frootc_to_litter_fire, known_present=.true.)
+         ENDIF
+      ENDIF
+      i=i+1
+      IF (present_flags(i) /= 0) THEN
+         IF (writing) THEN
+            CALL history_acc_write(file, 'a_m_livestemc_to_litter_fire', landpatch, 'patch', a_m_livestemc_to_litter_fire, dims(1,i), dims(2,i))
+         ELSE
+            CALL ncio_read_vector(file, 'a_m_livestemc_to_litter_fire', landpatch, a_m_livestemc_to_litter_fire, known_present=.true.)
+         ENDIF
+      ENDIF
+      i=i+1
+      IF (present_flags(i) /= 0) THEN
+         IF (writing) THEN
+            CALL history_acc_write(file, 'a_m_deadstemc_to_litter_fire', landpatch, 'patch', a_m_deadstemc_to_litter_fire, dims(1,i), dims(2,i))
+         ELSE
+            CALL ncio_read_vector(file, 'a_m_deadstemc_to_litter_fire', landpatch, a_m_deadstemc_to_litter_fire, known_present=.true.)
+         ENDIF
+      ENDIF
+      i=i+1
+      IF (present_flags(i) /= 0) THEN
+         IF (writing) THEN
+            CALL history_acc_write(file, 'a_m_livecrootc_to_litter_fire', landpatch, 'patch', a_m_livecrootc_to_litter_fire, dims(1,i), dims(2,i))
+         ELSE
+            CALL ncio_read_vector(file, 'a_m_livecrootc_to_litter_fire', landpatch, a_m_livecrootc_to_litter_fire, known_present=.true.)
+         ENDIF
+      ENDIF
+      i=i+1
+      IF (present_flags(i) /= 0) THEN
+         IF (writing) THEN
+            CALL history_acc_write(file, 'a_m_deadcrootc_to_litter_fire', landpatch, 'patch', a_m_deadcrootc_to_litter_fire, dims(1,i), dims(2,i))
+         ELSE
+            CALL ncio_read_vector(file, 'a_m_deadcrootc_to_litter_fire', landpatch, a_m_deadcrootc_to_litter_fire, known_present=.true.)
+         ENDIF
+      ENDIF
+      i=i+1
+      IF (present_flags(i) /= 0) THEN
+         IF (writing) THEN
+            CALL history_acc_write(file, 'a_m_leafc_storage_to_litter_fire', landpatch, 'patch', a_m_leafc_storage_to_litter_fire, dims(1,i), dims(2,i))
+         ELSE
+            CALL ncio_read_vector(file, 'a_m_leafc_storage_to_litter_fire', landpatch, a_m_leafc_storage_to_litter_fire, known_present=.true.)
+         ENDIF
+      ENDIF
+      i=i+1
+      IF (present_flags(i) /= 0) THEN
+         IF (writing) THEN
+            CALL history_acc_write(file, 'a_m_frootc_storage_to_litter_fire', landpatch, 'patch', a_m_frootc_storage_to_litter_fire, dims(1,i), dims(2,i))
+         ELSE
+            CALL ncio_read_vector(file, 'a_m_frootc_storage_to_litter_fire', landpatch, a_m_frootc_storage_to_litter_fire, known_present=.true.)
+         ENDIF
+      ENDIF
+      i=i+1
+      IF (present_flags(i) /= 0) THEN
+         IF (writing) THEN
+            CALL history_acc_write(file, 'a_m_livestemc_storage_to_litter_fire', landpatch, 'patch', a_m_livestemc_storage_to_litter_fire, dims(1,i), dims(2,i))
+         ELSE
+            CALL ncio_read_vector(file, 'a_m_livestemc_storage_to_litter_fire', landpatch, a_m_livestemc_storage_to_litter_fire, known_present=.true.)
+         ENDIF
+      ENDIF
+      i=i+1
+      IF (present_flags(i) /= 0) THEN
+         IF (writing) THEN
+            CALL history_acc_write(file, 'a_m_deadstemc_storage_to_litter_fire', landpatch, 'patch', a_m_deadstemc_storage_to_litter_fire, dims(1,i), dims(2,i))
+         ELSE
+            CALL ncio_read_vector(file, 'a_m_deadstemc_storage_to_litter_fire', landpatch, a_m_deadstemc_storage_to_litter_fire, known_present=.true.)
+         ENDIF
+      ENDIF
+      i=i+1
+      IF (present_flags(i) /= 0) THEN
+         IF (writing) THEN
+            CALL history_acc_write(file, 'a_m_livecrootc_storage_to_litter_fire', landpatch, 'patch', a_m_livecrootc_storage_to_litter_fire, dims(1,i), dims(2,i))
+         ELSE
+            CALL ncio_read_vector(file, 'a_m_livecrootc_storage_to_litter_fire', landpatch, a_m_livecrootc_storage_to_litter_fire, known_present=.true.)
+         ENDIF
+      ENDIF
+      i=i+1
+      IF (present_flags(i) /= 0) THEN
+         IF (writing) THEN
+            CALL history_acc_write(file, 'a_m_deadcrootc_storage_to_litter_fire', landpatch, 'patch', a_m_deadcrootc_storage_to_litter_fire, dims(1,i), dims(2,i))
+         ELSE
+            CALL ncio_read_vector(file, 'a_m_deadcrootc_storage_to_litter_fire', landpatch, a_m_deadcrootc_storage_to_litter_fire, known_present=.true.)
+         ENDIF
+      ENDIF
+      i=i+1
+      IF (present_flags(i) /= 0) THEN
+         IF (writing) THEN
+            CALL history_acc_write(file, 'a_m_gresp_storage_to_litter_fire', landpatch, 'patch', a_m_gresp_storage_to_litter_fire, dims(1,i), dims(2,i))
+         ELSE
+            CALL ncio_read_vector(file, 'a_m_gresp_storage_to_litter_fire', landpatch, a_m_gresp_storage_to_litter_fire, known_present=.true.)
+         ENDIF
+      ENDIF
+      i=i+1
+      IF (present_flags(i) /= 0) THEN
+         IF (writing) THEN
+            CALL history_acc_write(file, 'a_m_leafc_xfer_to_litter_fire', landpatch, 'patch', a_m_leafc_xfer_to_litter_fire, dims(1,i), dims(2,i))
+         ELSE
+            CALL ncio_read_vector(file, 'a_m_leafc_xfer_to_litter_fire', landpatch, a_m_leafc_xfer_to_litter_fire, known_present=.true.)
+         ENDIF
+      ENDIF
+      i=i+1
+      IF (present_flags(i) /= 0) THEN
+         IF (writing) THEN
+            CALL history_acc_write(file, 'a_m_frootc_xfer_to_litter_fire', landpatch, 'patch', a_m_frootc_xfer_to_litter_fire, dims(1,i), dims(2,i))
+         ELSE
+            CALL ncio_read_vector(file, 'a_m_frootc_xfer_to_litter_fire', landpatch, a_m_frootc_xfer_to_litter_fire, known_present=.true.)
+         ENDIF
+      ENDIF
+      i=i+1
+      IF (present_flags(i) /= 0) THEN
+         IF (writing) THEN
+            CALL history_acc_write(file, 'a_m_livestemc_xfer_to_litter_fire', landpatch, 'patch', a_m_livestemc_xfer_to_litter_fire, dims(1,i), dims(2,i))
+         ELSE
+            CALL ncio_read_vector(file, 'a_m_livestemc_xfer_to_litter_fire', landpatch, a_m_livestemc_xfer_to_litter_fire, known_present=.true.)
+         ENDIF
+      ENDIF
+      i=i+1
+      IF (present_flags(i) /= 0) THEN
+         IF (writing) THEN
+            CALL history_acc_write(file, 'a_m_deadstemc_xfer_to_litter_fire', landpatch, 'patch', a_m_deadstemc_xfer_to_litter_fire, dims(1,i), dims(2,i))
+         ELSE
+            CALL ncio_read_vector(file, 'a_m_deadstemc_xfer_to_litter_fire', landpatch, a_m_deadstemc_xfer_to_litter_fire, known_present=.true.)
+         ENDIF
+      ENDIF
+      i=i+1
+      IF (present_flags(i) /= 0) THEN
+         IF (writing) THEN
+            CALL history_acc_write(file, 'a_m_livecrootc_xfer_to_litter_fire', landpatch, 'patch', a_m_livecrootc_xfer_to_litter_fire, dims(1,i), dims(2,i))
+         ELSE
+            CALL ncio_read_vector(file, 'a_m_livecrootc_xfer_to_litter_fire', landpatch, a_m_livecrootc_xfer_to_litter_fire, known_present=.true.)
+         ENDIF
+      ENDIF
+      i=i+1
+      IF (present_flags(i) /= 0) THEN
+         IF (writing) THEN
+            CALL history_acc_write(file, 'a_m_deadcrootc_xfer_to_litter_fire', landpatch, 'patch', a_m_deadcrootc_xfer_to_litter_fire, dims(1,i), dims(2,i))
+         ELSE
+            CALL ncio_read_vector(file, 'a_m_deadcrootc_xfer_to_litter_fire', landpatch, a_m_deadcrootc_xfer_to_litter_fire, known_present=.true.)
+         ENDIF
+      ENDIF
+      i=i+1
+      IF (present_flags(i) /= 0) THEN
+         IF (writing) THEN
+            CALL history_acc_write(file, 'a_m_gresp_xfer_to_litter_fire', landpatch, 'patch', a_m_gresp_xfer_to_litter_fire, dims(1,i), dims(2,i))
+         ELSE
+            CALL ncio_read_vector(file, 'a_m_gresp_xfer_to_litter_fire', landpatch, a_m_gresp_xfer_to_litter_fire, known_present=.true.)
+         ENDIF
+      ENDIF
+      i=i+1
+      IF (present_flags(i) /= 0) THEN
+         IF (writing) THEN
+            CALL history_acc_write(file, 'a_m_leafn_to_fire', landpatch, 'patch', a_m_leafn_to_fire, dims(1,i), dims(2,i))
+         ELSE
+            CALL ncio_read_vector(file, 'a_m_leafn_to_fire', landpatch, a_m_leafn_to_fire, known_present=.true.)
+         ENDIF
+      ENDIF
+      i=i+1
+      IF (present_flags(i) /= 0) THEN
+         IF (writing) THEN
+            CALL history_acc_write(file, 'a_m_frootn_to_fire', landpatch, 'patch', a_m_frootn_to_fire, dims(1,i), dims(2,i))
+         ELSE
+            CALL ncio_read_vector(file, 'a_m_frootn_to_fire', landpatch, a_m_frootn_to_fire, known_present=.true.)
+         ENDIF
+      ENDIF
+      i=i+1
+      IF (present_flags(i) /= 0) THEN
+         IF (writing) THEN
+            CALL history_acc_write(file, 'a_m_livestemn_to_fire', landpatch, 'patch', a_m_livestemn_to_fire, dims(1,i), dims(2,i))
+         ELSE
+            CALL ncio_read_vector(file, 'a_m_livestemn_to_fire', landpatch, a_m_livestemn_to_fire, known_present=.true.)
+         ENDIF
+      ENDIF
+      i=i+1
+      IF (present_flags(i) /= 0) THEN
+         IF (writing) THEN
+            CALL history_acc_write(file, 'a_m_deadstemn_to_fire', landpatch, 'patch', a_m_deadstemn_to_fire, dims(1,i), dims(2,i))
+         ELSE
+            CALL ncio_read_vector(file, 'a_m_deadstemn_to_fire', landpatch, a_m_deadstemn_to_fire, known_present=.true.)
+         ENDIF
+      ENDIF
+      i=i+1
+      IF (present_flags(i) /= 0) THEN
+         IF (writing) THEN
+            CALL history_acc_write(file, 'a_m_livecrootn_to_fire', landpatch, 'patch', a_m_livecrootn_to_fire, dims(1,i), dims(2,i))
+         ELSE
+            CALL ncio_read_vector(file, 'a_m_livecrootn_to_fire', landpatch, a_m_livecrootn_to_fire, known_present=.true.)
+         ENDIF
+      ENDIF
+      i=i+1
+      IF (present_flags(i) /= 0) THEN
+         IF (writing) THEN
+            CALL history_acc_write(file, 'a_m_deadcrootn_to_fire', landpatch, 'patch', a_m_deadcrootn_to_fire, dims(1,i), dims(2,i))
+         ELSE
+            CALL ncio_read_vector(file, 'a_m_deadcrootn_to_fire', landpatch, a_m_deadcrootn_to_fire, known_present=.true.)
+         ENDIF
+      ENDIF
+      i=i+1
+      IF (present_flags(i) /= 0) THEN
+         IF (writing) THEN
+            CALL history_acc_write(file, 'a_m_leafn_storage_to_fire', landpatch, 'patch', a_m_leafn_storage_to_fire, dims(1,i), dims(2,i))
+         ELSE
+            CALL ncio_read_vector(file, 'a_m_leafn_storage_to_fire', landpatch, a_m_leafn_storage_to_fire, known_present=.true.)
+         ENDIF
+      ENDIF
+      i=i+1
+      IF (present_flags(i) /= 0) THEN
+         IF (writing) THEN
+            CALL history_acc_write(file, 'a_m_frootn_storage_to_fire', landpatch, 'patch', a_m_frootn_storage_to_fire, dims(1,i), dims(2,i))
+         ELSE
+            CALL ncio_read_vector(file, 'a_m_frootn_storage_to_fire', landpatch, a_m_frootn_storage_to_fire, known_present=.true.)
+         ENDIF
+      ENDIF
+      i=i+1
+      IF (present_flags(i) /= 0) THEN
+         IF (writing) THEN
+            CALL history_acc_write(file, 'a_m_livestemn_storage_to_fire', landpatch, 'patch', a_m_livestemn_storage_to_fire, dims(1,i), dims(2,i))
+         ELSE
+            CALL ncio_read_vector(file, 'a_m_livestemn_storage_to_fire', landpatch, a_m_livestemn_storage_to_fire, known_present=.true.)
+         ENDIF
+      ENDIF
+      i=i+1
+      IF (present_flags(i) /= 0) THEN
+         IF (writing) THEN
+            CALL history_acc_write(file, 'a_m_deadstemn_storage_to_fire', landpatch, 'patch', a_m_deadstemn_storage_to_fire, dims(1,i), dims(2,i))
+         ELSE
+            CALL ncio_read_vector(file, 'a_m_deadstemn_storage_to_fire', landpatch, a_m_deadstemn_storage_to_fire, known_present=.true.)
+         ENDIF
+      ENDIF
+      i=i+1
+      IF (present_flags(i) /= 0) THEN
+         IF (writing) THEN
+            CALL history_acc_write(file, 'a_m_livecrootn_storage_to_fire', landpatch, 'patch', a_m_livecrootn_storage_to_fire, dims(1,i), dims(2,i))
+         ELSE
+            CALL ncio_read_vector(file, 'a_m_livecrootn_storage_to_fire', landpatch, a_m_livecrootn_storage_to_fire, known_present=.true.)
+         ENDIF
+      ENDIF
+      i=i+1
+      IF (present_flags(i) /= 0) THEN
+         IF (writing) THEN
+            CALL history_acc_write(file, 'a_m_deadcrootn_storage_to_fire', landpatch, 'patch', a_m_deadcrootn_storage_to_fire, dims(1,i), dims(2,i))
+         ELSE
+            CALL ncio_read_vector(file, 'a_m_deadcrootn_storage_to_fire', landpatch, a_m_deadcrootn_storage_to_fire, known_present=.true.)
+         ENDIF
+      ENDIF
+      i=i+1
+      IF (present_flags(i) /= 0) THEN
+         IF (writing) THEN
+            CALL history_acc_write(file, 'a_m_leafn_xfer_to_fire', landpatch, 'patch', a_m_leafn_xfer_to_fire, dims(1,i), dims(2,i))
+         ELSE
+            CALL ncio_read_vector(file, 'a_m_leafn_xfer_to_fire', landpatch, a_m_leafn_xfer_to_fire, known_present=.true.)
+         ENDIF
+      ENDIF
+      i=i+1
+      IF (present_flags(i) /= 0) THEN
+         IF (writing) THEN
+            CALL history_acc_write(file, 'a_m_frootn_xfer_to_fire', landpatch, 'patch', a_m_frootn_xfer_to_fire, dims(1,i), dims(2,i))
+         ELSE
+            CALL ncio_read_vector(file, 'a_m_frootn_xfer_to_fire', landpatch, a_m_frootn_xfer_to_fire, known_present=.true.)
+         ENDIF
+      ENDIF
+      i=i+1
+      IF (present_flags(i) /= 0) THEN
+         IF (writing) THEN
+            CALL history_acc_write(file, 'a_m_livestemn_xfer_to_fire', landpatch, 'patch', a_m_livestemn_xfer_to_fire, dims(1,i), dims(2,i))
+         ELSE
+            CALL ncio_read_vector(file, 'a_m_livestemn_xfer_to_fire', landpatch, a_m_livestemn_xfer_to_fire, known_present=.true.)
+         ENDIF
+      ENDIF
+      i=i+1
+      IF (present_flags(i) /= 0) THEN
+         IF (writing) THEN
+            CALL history_acc_write(file, 'a_m_deadstemn_xfer_to_fire', landpatch, 'patch', a_m_deadstemn_xfer_to_fire, dims(1,i), dims(2,i))
+         ELSE
+            CALL ncio_read_vector(file, 'a_m_deadstemn_xfer_to_fire', landpatch, a_m_deadstemn_xfer_to_fire, known_present=.true.)
+         ENDIF
+      ENDIF
+      i=i+1
+      IF (present_flags(i) /= 0) THEN
+         IF (writing) THEN
+            CALL history_acc_write(file, 'a_m_livecrootn_xfer_to_fire', landpatch, 'patch', a_m_livecrootn_xfer_to_fire, dims(1,i), dims(2,i))
+         ELSE
+            CALL ncio_read_vector(file, 'a_m_livecrootn_xfer_to_fire', landpatch, a_m_livecrootn_xfer_to_fire, known_present=.true.)
+         ENDIF
+      ENDIF
+      i=i+1
+      IF (present_flags(i) /= 0) THEN
+         IF (writing) THEN
+            CALL history_acc_write(file, 'a_m_deadcrootn_xfer_to_fire', landpatch, 'patch', a_m_deadcrootn_xfer_to_fire, dims(1,i), dims(2,i))
+         ELSE
+            CALL ncio_read_vector(file, 'a_m_deadcrootn_xfer_to_fire', landpatch, a_m_deadcrootn_xfer_to_fire, known_present=.true.)
+         ENDIF
+      ENDIF
+      i=i+1
+      IF (present_flags(i) /= 0) THEN
+         IF (writing) THEN
+            CALL history_acc_write(file, 'a_m_livestemn_to_deadstemn_fire', landpatch, 'patch', a_m_livestemn_to_deadstemn_fire, dims(1,i), dims(2,i))
+         ELSE
+            CALL ncio_read_vector(file, 'a_m_livestemn_to_deadstemn_fire', landpatch, a_m_livestemn_to_deadstemn_fire, known_present=.true.)
+         ENDIF
+      ENDIF
+      i=i+1
+      IF (present_flags(i) /= 0) THEN
+         IF (writing) THEN
+            CALL history_acc_write(file, 'a_m_livecrootn_to_deadcrootn_fire', landpatch, 'patch', a_m_livecrootn_to_deadcrootn_fire, dims(1,i), dims(2,i))
+         ELSE
+            CALL ncio_read_vector(file, 'a_m_livecrootn_to_deadcrootn_fire', landpatch, a_m_livecrootn_to_deadcrootn_fire, known_present=.true.)
+         ENDIF
+      ENDIF
+      i=i+1
+      IF (present_flags(i) /= 0) THEN
+         IF (writing) THEN
+            CALL history_acc_write(file, 'a_m_retransn_to_fire', landpatch, 'patch', a_m_retransn_to_fire, dims(1,i), dims(2,i))
+         ELSE
+            CALL ncio_read_vector(file, 'a_m_retransn_to_fire', landpatch, a_m_retransn_to_fire, known_present=.true.)
+         ENDIF
+      ENDIF
+      i=i+1
+      IF (present_flags(i) /= 0) THEN
+         IF (writing) THEN
+            CALL history_acc_write(file, 'a_m_leafn_to_litter_fire', landpatch, 'patch', a_m_leafn_to_litter_fire, dims(1,i), dims(2,i))
+         ELSE
+            CALL ncio_read_vector(file, 'a_m_leafn_to_litter_fire', landpatch, a_m_leafn_to_litter_fire, known_present=.true.)
+         ENDIF
+      ENDIF
+      i=i+1
+      IF (present_flags(i) /= 0) THEN
+         IF (writing) THEN
+            CALL history_acc_write(file, 'a_m_frootn_to_litter_fire', landpatch, 'patch', a_m_frootn_to_litter_fire, dims(1,i), dims(2,i))
+         ELSE
+            CALL ncio_read_vector(file, 'a_m_frootn_to_litter_fire', landpatch, a_m_frootn_to_litter_fire, known_present=.true.)
+         ENDIF
+      ENDIF
+      i=i+1
+      IF (present_flags(i) /= 0) THEN
+         IF (writing) THEN
+            CALL history_acc_write(file, 'a_m_livestemn_to_litter_fire', landpatch, 'patch', a_m_livestemn_to_litter_fire, dims(1,i), dims(2,i))
+         ELSE
+            CALL ncio_read_vector(file, 'a_m_livestemn_to_litter_fire', landpatch, a_m_livestemn_to_litter_fire, known_present=.true.)
+         ENDIF
+      ENDIF
+      i=i+1
+      IF (present_flags(i) /= 0) THEN
+         IF (writing) THEN
+            CALL history_acc_write(file, 'a_m_deadstemn_to_litter_fire', landpatch, 'patch', a_m_deadstemn_to_litter_fire, dims(1,i), dims(2,i))
+         ELSE
+            CALL ncio_read_vector(file, 'a_m_deadstemn_to_litter_fire', landpatch, a_m_deadstemn_to_litter_fire, known_present=.true.)
+         ENDIF
+      ENDIF
+      i=i+1
+      IF (present_flags(i) /= 0) THEN
+         IF (writing) THEN
+            CALL history_acc_write(file, 'a_m_livecrootn_to_litter_fire', landpatch, 'patch', a_m_livecrootn_to_litter_fire, dims(1,i), dims(2,i))
+         ELSE
+            CALL ncio_read_vector(file, 'a_m_livecrootn_to_litter_fire', landpatch, a_m_livecrootn_to_litter_fire, known_present=.true.)
+         ENDIF
+      ENDIF
+      i=i+1
+      IF (present_flags(i) /= 0) THEN
+         IF (writing) THEN
+            CALL history_acc_write(file, 'a_m_deadcrootn_to_litter_fire', landpatch, 'patch', a_m_deadcrootn_to_litter_fire, dims(1,i), dims(2,i))
+         ELSE
+            CALL ncio_read_vector(file, 'a_m_deadcrootn_to_litter_fire', landpatch, a_m_deadcrootn_to_litter_fire, known_present=.true.)
+         ENDIF
+      ENDIF
+      i=i+1
+      IF (present_flags(i) /= 0) THEN
+         IF (writing) THEN
+            CALL history_acc_write(file, 'a_m_leafn_storage_to_litter_fire', landpatch, 'patch', a_m_leafn_storage_to_litter_fire, dims(1,i), dims(2,i))
+         ELSE
+            CALL ncio_read_vector(file, 'a_m_leafn_storage_to_litter_fire', landpatch, a_m_leafn_storage_to_litter_fire, known_present=.true.)
+         ENDIF
+      ENDIF
+      i=i+1
+      IF (present_flags(i) /= 0) THEN
+         IF (writing) THEN
+            CALL history_acc_write(file, 'a_m_frootn_storage_to_litter_fire', landpatch, 'patch', a_m_frootn_storage_to_litter_fire, dims(1,i), dims(2,i))
+         ELSE
+            CALL ncio_read_vector(file, 'a_m_frootn_storage_to_litter_fire', landpatch, a_m_frootn_storage_to_litter_fire, known_present=.true.)
+         ENDIF
+      ENDIF
+      i=i+1
+      IF (present_flags(i) /= 0) THEN
+         IF (writing) THEN
+            CALL history_acc_write(file, 'a_m_livestemn_storage_to_litter_fire', landpatch, 'patch', a_m_livestemn_storage_to_litter_fire, dims(1,i), dims(2,i))
+         ELSE
+            CALL ncio_read_vector(file, 'a_m_livestemn_storage_to_litter_fire', landpatch, a_m_livestemn_storage_to_litter_fire, known_present=.true.)
+         ENDIF
+      ENDIF
+      i=i+1
+      IF (present_flags(i) /= 0) THEN
+         IF (writing) THEN
+            CALL history_acc_write(file, 'a_m_deadstemn_storage_to_litter_fire', landpatch, 'patch', a_m_deadstemn_storage_to_litter_fire, dims(1,i), dims(2,i))
+         ELSE
+            CALL ncio_read_vector(file, 'a_m_deadstemn_storage_to_litter_fire', landpatch, a_m_deadstemn_storage_to_litter_fire, known_present=.true.)
+         ENDIF
+      ENDIF
+      i=i+1
+      IF (present_flags(i) /= 0) THEN
+         IF (writing) THEN
+            CALL history_acc_write(file, 'a_m_livecrootn_storage_to_litter_fire', landpatch, 'patch', a_m_livecrootn_storage_to_litter_fire, dims(1,i), dims(2,i))
+         ELSE
+            CALL ncio_read_vector(file, 'a_m_livecrootn_storage_to_litter_fire', landpatch, a_m_livecrootn_storage_to_litter_fire, known_present=.true.)
+         ENDIF
+      ENDIF
+      i=i+1
+      IF (present_flags(i) /= 0) THEN
+         IF (writing) THEN
+            CALL history_acc_write(file, 'a_m_deadcrootn_storage_to_litter_fire', landpatch, 'patch', a_m_deadcrootn_storage_to_litter_fire, dims(1,i), dims(2,i))
+         ELSE
+            CALL ncio_read_vector(file, 'a_m_deadcrootn_storage_to_litter_fire', landpatch, a_m_deadcrootn_storage_to_litter_fire, known_present=.true.)
+         ENDIF
+      ENDIF
+      i=i+1
+      IF (present_flags(i) /= 0) THEN
+         IF (writing) THEN
+            CALL history_acc_write(file, 'a_m_leafn_xfer_to_litter_fire', landpatch, 'patch', a_m_leafn_xfer_to_litter_fire, dims(1,i), dims(2,i))
+         ELSE
+            CALL ncio_read_vector(file, 'a_m_leafn_xfer_to_litter_fire', landpatch, a_m_leafn_xfer_to_litter_fire, known_present=.true.)
+         ENDIF
+      ENDIF
+      i=i+1
+      IF (present_flags(i) /= 0) THEN
+         IF (writing) THEN
+            CALL history_acc_write(file, 'a_m_frootn_xfer_to_litter_fire', landpatch, 'patch', a_m_frootn_xfer_to_litter_fire, dims(1,i), dims(2,i))
+         ELSE
+            CALL ncio_read_vector(file, 'a_m_frootn_xfer_to_litter_fire', landpatch, a_m_frootn_xfer_to_litter_fire, known_present=.true.)
+         ENDIF
+      ENDIF
+      i=i+1
+      IF (present_flags(i) /= 0) THEN
+         IF (writing) THEN
+            CALL history_acc_write(file, 'a_m_livestemn_xfer_to_litter_fire', landpatch, 'patch', a_m_livestemn_xfer_to_litter_fire, dims(1,i), dims(2,i))
+         ELSE
+            CALL ncio_read_vector(file, 'a_m_livestemn_xfer_to_litter_fire', landpatch, a_m_livestemn_xfer_to_litter_fire, known_present=.true.)
+         ENDIF
+      ENDIF
+      i=i+1
+      IF (present_flags(i) /= 0) THEN
+         IF (writing) THEN
+            CALL history_acc_write(file, 'a_m_deadstemn_xfer_to_litter_fire', landpatch, 'patch', a_m_deadstemn_xfer_to_litter_fire, dims(1,i), dims(2,i))
+         ELSE
+            CALL ncio_read_vector(file, 'a_m_deadstemn_xfer_to_litter_fire', landpatch, a_m_deadstemn_xfer_to_litter_fire, known_present=.true.)
+         ENDIF
+      ENDIF
+      i=i+1
+      IF (present_flags(i) /= 0) THEN
+         IF (writing) THEN
+            CALL history_acc_write(file, 'a_m_livecrootn_xfer_to_litter_fire', landpatch, 'patch', a_m_livecrootn_xfer_to_litter_fire, dims(1,i), dims(2,i))
+         ELSE
+            CALL ncio_read_vector(file, 'a_m_livecrootn_xfer_to_litter_fire', landpatch, a_m_livecrootn_xfer_to_litter_fire, known_present=.true.)
+         ENDIF
+      ENDIF
+      i=i+1
+      IF (present_flags(i) /= 0) THEN
+         IF (writing) THEN
+            CALL history_acc_write(file, 'a_m_deadcrootn_xfer_to_litter_fire', landpatch, 'patch', a_m_deadcrootn_xfer_to_litter_fire, dims(1,i), dims(2,i))
+         ELSE
+            CALL ncio_read_vector(file, 'a_m_deadcrootn_xfer_to_litter_fire', landpatch, a_m_deadcrootn_xfer_to_litter_fire, known_present=.true.)
+         ENDIF
+      ENDIF
+      i=i+1
+      IF (present_flags(i) /= 0) THEN
+         IF (writing) THEN
+            CALL history_acc_write(file, 'a_m_retransn_to_litter_fire', landpatch, 'patch', a_m_retransn_to_litter_fire, dims(1,i), dims(2,i))
+         ELSE
+            CALL ncio_read_vector(file, 'a_m_retransn_to_litter_fire', landpatch, a_m_retransn_to_litter_fire, known_present=.true.)
+         ENDIF
+      ENDIF
+      i=i+1
+      IF (present_flags(i) /= 0) THEN
+         IF (writing) THEN
+            CALL history_acc_write(file, 'a_m_litr1_c_to_fire', landpatch, 'patch', a_m_litr1_c_to_fire, dims(1,i), dims(2,i))
+         ELSE
+            CALL ncio_read_vector(file, 'a_m_litr1_c_to_fire', landpatch, a_m_litr1_c_to_fire, known_present=.true.)
+         ENDIF
+      ENDIF
+      i=i+1
+      IF (present_flags(i) /= 0) THEN
+         IF (writing) THEN
+            CALL history_acc_write(file, 'a_m_litr1_n_to_fire', landpatch, 'patch', a_m_litr1_n_to_fire, dims(1,i), dims(2,i))
+         ELSE
+            CALL ncio_read_vector(file, 'a_m_litr1_n_to_fire', landpatch, a_m_litr1_n_to_fire, known_present=.true.)
+         ENDIF
+      ENDIF
+      i=i+1
+      IF (present_flags(i) /= 0) THEN
+         IF (writing) THEN
+            CALL history_acc_write(file, 'a_m_litr2_c_to_fire', landpatch, 'patch', a_m_litr2_c_to_fire, dims(1,i), dims(2,i))
+         ELSE
+            CALL ncio_read_vector(file, 'a_m_litr2_c_to_fire', landpatch, a_m_litr2_c_to_fire, known_present=.true.)
+         ENDIF
+      ENDIF
+      i=i+1
+      IF (present_flags(i) /= 0) THEN
+         IF (writing) THEN
+            CALL history_acc_write(file, 'a_m_litr2_n_to_fire', landpatch, 'patch', a_m_litr2_n_to_fire, dims(1,i), dims(2,i))
+         ELSE
+            CALL ncio_read_vector(file, 'a_m_litr2_n_to_fire', landpatch, a_m_litr2_n_to_fire, known_present=.true.)
+         ENDIF
+      ENDIF
+      i=i+1
+      IF (present_flags(i) /= 0) THEN
+         IF (writing) THEN
+            CALL history_acc_write(file, 'a_m_litr3_c_to_fire', landpatch, 'patch', a_m_litr3_c_to_fire, dims(1,i), dims(2,i))
+         ELSE
+            CALL ncio_read_vector(file, 'a_m_litr3_c_to_fire', landpatch, a_m_litr3_c_to_fire, known_present=.true.)
+         ENDIF
+      ENDIF
+      i=i+1
+      IF (present_flags(i) /= 0) THEN
+         IF (writing) THEN
+            CALL history_acc_write(file, 'a_m_litr3_n_to_fire', landpatch, 'patch', a_m_litr3_n_to_fire, dims(1,i), dims(2,i))
+         ELSE
+            CALL ncio_read_vector(file, 'a_m_litr3_n_to_fire', landpatch, a_m_litr3_n_to_fire, known_present=.true.)
+         ENDIF
+      ENDIF
+      i=i+1
+      IF (present_flags(i) /= 0) THEN
+         IF (writing) THEN
+            CALL history_acc_write(file, 'a_m_cwd_c_to_fire', landpatch, 'patch', a_m_cwd_c_to_fire, dims(1,i), dims(2,i))
+         ELSE
+            CALL ncio_read_vector(file, 'a_m_cwd_c_to_fire', landpatch, a_m_cwd_c_to_fire, known_present=.true.)
+         ENDIF
+      ENDIF
+      i=i+1
+      IF (present_flags(i) /= 0) THEN
+         IF (writing) THEN
+            CALL history_acc_write(file, 'a_m_cwd_n_to_fire', landpatch, 'patch', a_m_cwd_n_to_fire, dims(1,i), dims(2,i))
+         ELSE
+            CALL ncio_read_vector(file, 'a_m_cwd_n_to_fire', landpatch, a_m_cwd_n_to_fire, known_present=.true.)
          ENDIF
       ENDIF
       i=i+1

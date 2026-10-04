@@ -78,7 +78,7 @@ MODULE MOD_BGC_Veg_CNFireBase
        m_livecrootn_to_litter_fire_p, m_livecrootn_storage_to_litter_fire_p, m_livecrootn_xfer_to_litter_fire_p, &
        m_deadcrootn_to_litter_fire_p, m_deadcrootn_storage_to_litter_fire_p, m_deadcrootn_xfer_to_litter_fire_p
 
-   USE MOD_Vars_PFTimeInvariants, only: pftfrac
+   USE MOD_Vars_PFTimeInvariants, only: pftfrac, pftclass
 
    IMPLICIT NONE
 
@@ -99,6 +99,7 @@ CONTAINS
    integer :: j,l   ! indices
    real(r8):: f
    real(r8):: mort
+   real(r8):: cwd_fire_factor
    integer :: ivt, m
 
    integer, parameter :: lit_fp = 1   ! Pool for liter
@@ -106,6 +107,7 @@ CONTAINS
 
 
       DO m = ps, pe
+         ivt = pftclass(m)
          IF(cropf(i) < 1.0_r8)THEN
             ! For non-crop (bare-soil and natural vegetation)
             f = (farea_burned(i)-baf_crop(i))/(1.0_r8-cropf(i))
@@ -117,6 +119,8 @@ CONTAINS
               f = 0._r8
             ENDIF
          ENDIF
+
+         cwd_fire_factor = MAX(0._r8, f - baf_crop(i))
 
          ! apply this rate to the patch state variables to get flux rates
          ! biomass burning
@@ -188,7 +192,7 @@ CONTAINS
          m_livestemc_to_deadstemc_fire_p(m)            =  livestemc_p(m) * f * &
               (1._r8 - cc_lstem(ivt)) * &
               (fm_lstem(ivt)-fm_droot(ivt))
-         m_deadstemc_to_litter_fire_p(m)               =  deadstemc_p(m) * f * m * &
+         m_deadstemc_to_litter_fire_p(m)               =  deadstemc_p(m) * f * &
               (1._r8 - cc_dstem(ivt)) * &
               fm_droot(ivt)
          m_deadstemc_storage_to_litter_fire_p(m)       =  deadstemc_storage_p(m) * f * &
@@ -215,7 +219,7 @@ CONTAINS
               fm_other(ivt)
          m_livecrootc_to_deadcrootc_fire_p(m)          =  livecrootc_p(m)         * f * &
               (fm_lroot(ivt)-fm_droot(ivt))
-         m_deadcrootc_to_litter_fire_p(m)              =  deadcrootc_p(m)         * f * m * &
+         m_deadcrootc_to_litter_fire_p(m)              =  deadcrootc_p(m)         * f * &
               fm_droot(ivt)
          m_deadcrootc_storage_to_litter_fire_p(m)      =  deadcrootc_storage_p(m) * f * &
               (1._r8- cc_other(ivt)) * &
@@ -253,7 +257,7 @@ CONTAINS
          m_livestemn_to_deadstemn_fire_p(m)           =  livestemn_p(m) * f * &
               (1._r8 - cc_lstem(ivt)) * &
               (fm_lstem(ivt)-fm_droot(ivt))
-         m_deadstemn_to_litter_fire_p(m)              =  deadstemn_p(m) * f * m * &
+         m_deadstemn_to_litter_fire_p(m)              =  deadstemn_p(m) * f * &
               (1._r8 - cc_dstem(ivt)) * &
               fm_droot(ivt)
          m_deadstemn_storage_to_litter_fire_p(m)      =  deadstemn_storage_p(m) * f * &
@@ -300,7 +304,13 @@ CONTAINS
          fire_mortality_to_cwdc (j,i) = 0._r8
          fire_mortality_to_cwdn (j,i) = 0._r8
          fire_mortality_to_met_c(j,i) = 0._r8
+         fire_mortality_to_cel_c(j,i) = 0._r8
+         fire_mortality_to_lig_c(j,i) = 0._r8
+         fire_mortality_to_met_n(j,i) = 0._r8
+         fire_mortality_to_cel_n(j,i) = 0._r8
+         fire_mortality_to_lig_n(j,i) = 0._r8
          DO m = ps, pe
+            ivt = pftclass(m)
             fire_mortality_to_cwdc(j,i) = fire_mortality_to_cwdc(j,i) + &
                           m_deadstemc_to_litter_fire_p(m) * stem_prof_p(j,m) * pftfrac(m)
             fire_mortality_to_cwdc(j,i) = fire_mortality_to_cwdc(j,i) + &
@@ -362,11 +372,11 @@ CONTAINS
                           +   m_deadcrootn_storage_to_litter_fire_p(m) &
                           +   m_deadcrootn_xfer_to_litter_fire_p(m)) * croot_prof_p(j,m)) * pftfrac(m)
             fire_mortality_to_cel_n(j,i)=fire_mortality_to_cel_n(j,i) &
-                          +  (m_leafn_to_litter_fire_p(m)*lf_fcel(i)*leaf_prof_p(j,m) &
-                          +   m_frootn_to_litter_fire_p(m)*fr_fcel(i)*froot_prof_p(j,m)) * pftfrac(m)
+                          +  (m_leafn_to_litter_fire_p(m)*lf_fcel(ivt)*leaf_prof_p(j,m) &
+                          +   m_frootn_to_litter_fire_p(m)*fr_fcel(ivt)*froot_prof_p(j,m)) * pftfrac(m)
             fire_mortality_to_lig_n(j,i)=fire_mortality_to_lig_n(j,i) &
-                          +  (m_leafn_to_litter_fire_p(m)*lf_flig(i)*leaf_prof_p(j,m) &
-                          +   m_frootn_to_litter_fire_p(m)*fr_flig(i)*froot_prof_p(j,m)) * pftfrac(m)
+                          +  (m_leafn_to_litter_fire_p(m)*lf_flig(ivt)*leaf_prof_p(j,m) &
+                          +   m_frootn_to_litter_fire_p(m)*fr_flig(ivt)*froot_prof_p(j,m)) * pftfrac(m)
          ENDDO
       ENDDO
       !
@@ -382,7 +392,7 @@ CONTAINS
             ENDIF
             IF ( is_cwd(l) ) THEN
                m_decomp_cpools_to_fire_vr(j,l,i) = decomp_cpools_vr(j,l,i) * &
-                       (f-baf_crop(i)) * cmb_cmplt_fact(cwd_fp)
+                       cwd_fire_factor * cmb_cmplt_fact(cwd_fp)
             ENDIF
          ENDDO
 
@@ -394,7 +404,7 @@ CONTAINS
             ENDIF
             IF ( is_cwd(l) ) THEN
                m_decomp_npools_to_fire_vr(j,l,i) = decomp_npools_vr(j,l,i) * &
-                      (f-baf_crop(i)) * cmb_cmplt_fact(cwd_fp)
+                      cwd_fire_factor * cmb_cmplt_fact(cwd_fp)
             ENDIF
          ENDDO
 
@@ -403,7 +413,8 @@ CONTAINS
       !
       ! somc_fire is not connected to clm45 soil carbon pool, ie does not decrease
       ! soil carbon b/c clm45 soil carbon was very low in several peatland grids
-      IF( patchlatr(i)  <  borealat)THEN
+      ! borealat is in degrees (as dlat in CNFireArea); patchlatr is in radians
+      IF( patchlatr(i)*180._r8/(4._r8*atan(1._r8))  <  borealat)THEN
          somc_fire(i)= totsomc(i)*baf_peatf(i)*6.0_r8/33.9_r8
       ELSE
          somc_fire(i)= baf_peatf(i)*2.2e3_r8

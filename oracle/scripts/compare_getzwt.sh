@@ -28,7 +28,7 @@ MODULE MOD_Namelist
 END MODULE MOD_Namelist
 EOF
 cd "$BASE/vendor/CoLM202X"
-BASE_FLAGS=(-O2 -fdefault-real-8 -ffree-form -cpp -ffree-line-length-0
+BASE_FLAGS=(-O2 -fdefault-real-8 -fdefault-double-8 -ffree-form -cpp -ffree-line-length-0
             -fallow-argument-mismatch -fopenmp -ffunction-sections)
 gfortran -c "${BASE_FLAGS[@]}" \
   -I"$WORK" -I.bld -Iinclude -Ishare -Imain \
@@ -36,7 +36,7 @@ gfortran -c "${BASE_FLAGS[@]}" \
 gfortran -c "${BASE_FLAGS[@]}" \
   -I"$WORK" -I.bld -Iinclude -Ishare -Imain \
   main/HYDRO/MOD_Hydro_SoilWater.F90 -J"$WORK" -o "$WORK/hsw.o"
-gfortran -O2 -fdefault-real-8 -ffree-form -cpp -ffree-line-length-0 \
+gfortran -O2 -fdefault-real-8 -fdefault-double-8 -ffree-form -cpp -ffree-line-length-0 \
   -fallow-argument-mismatch -fwrapv -ffp-contract=off -fopenmp \
   -I"$WORK" -I.bld -Iinclude -Ishare -Imain \
   "$BASE/oracle/scripts/get_zwt_diff.f90" \

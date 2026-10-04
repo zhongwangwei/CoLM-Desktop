@@ -24,13 +24,13 @@ MODULE MOD_Namelist
 END MODULE MOD_Namelist
 EOF
 cd "$BASE/vendor/CoLM202X"
-gfortran -c -O2 -fdefault-real-8 -ffree-form -cpp -ffree-line-length-0 \
+gfortran -c -O2 -fdefault-real-8 -fdefault-double-8 -ffree-form -cpp -ffree-line-length-0 \
   -fallow-argument-mismatch -I"$WORK" -I.bld -Iinclude -Imain -Ishare \
   "$WORK/namelist_stub.F90" -J"$WORK" -o "$WORK/stub.o"
-gfortran -c -O2 -fdefault-real-8 -ffree-form -cpp -ffree-line-length-0 \
+gfortran -c -O2 -fdefault-real-8 -fdefault-double-8 -ffree-form -cpp -ffree-line-length-0 \
   -fallow-argument-mismatch -I"$WORK" -I.bld -Iinclude -Imain -Ishare \
   main/HYDRO/MOD_Hydro_SoilFunction.F90 -J"$WORK" -o "$WORK/hf_mod.o"
-gfortran -O2 -fdefault-real-8 -ffree-form -cpp -ffree-line-length-0 \
+gfortran -O2 -fdefault-real-8 -fdefault-double-8 -ffree-form -cpp -ffree-line-length-0 \
   -fallow-argument-mismatch -fwrapv -ffp-contract=off \
   -I"$WORK" -I.bld -Iinclude -Imain -Ishare \
   "$BASE/oracle/scripts/soil_hydro_fn_diff.f90" \

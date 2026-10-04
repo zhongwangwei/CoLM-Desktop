@@ -559,14 +559,14 @@ CONTAINS
 ! were left as spval (never read from restart, and the ELSE branch below that sets
 ! them to 1.0 runs only AFTER the stability iteration). They are USED inside the
 ! iteration (gs0sun at line ~1200), so initialize them to 1.0 BEFORE the loop. ====
-      IF (.not. DEF_USE_OZONESTRESS) THEN
-         DO i = ps, pe
-            o3coefv_sun(i) = 1.0_r8
-            o3coefg_sun(i) = 1.0_r8
-            o3coefv_sha(i) = 1.0_r8
-            o3coefg_sha(i) = 1.0_r8
-         ENDDO
-      ENDIF
+      ! Unconditional (upstream-bugs #5): with ozone stress ON the first call of a run read
+      ! undefined values as well; CalcOzoneStress after the iteration overwrites them.
+      DO i = ps, pe
+         o3coefv_sun(i) = 1.0_r8
+         o3coefg_sun(i) = 1.0_r8
+         o3coefv_sha(i) = 1.0_r8
+         o3coefg_sha(i) = 1.0_r8
+      ENDDO
 ! ==== FIX 2026-08-16 #4 END ====
 
       d_opt  = 2
@@ -1824,7 +1824,7 @@ ENDIF
                rst(i) = 2.0e4
             ENDIF
             assim(i) = assimsun(i) + assimsha(i)
-            respc(i) = respcsun(i) + respcsha(i) + rsoil
+            respc(i) = respcsun(i) + respcsha(i)
 
 ! canopy fluxes and total assimilation and respiration
             fsenl(i) = fsenl(i) + fsenl_dtl(i)*dtl(it-1,i) &

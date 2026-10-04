@@ -100,13 +100,23 @@ CONTAINS
 
          ELSE
 
-            eta = topoweti
+            ! Newton iteration for the critical index; it must start above the distribution's
+            ! lower bound mu_twi, otherwise x = 0, pgr0 = 0 and the patch is taken as fully
+            ! saturated whatever zwt is. topoweti is the mean mu + alp*chi for consistent data.
+            IF (topoweti > mu_twi) THEN
+               eta = topoweti
+            ELSE
+               eta = mu_twi + alp_twi*chi_twi
+            ENDIF
             niter = 0
             DO WHILE (niter < 20)
                niter = niter + 1
-               CALL GRATIO (alp_twi+1, (eta-mu_twi)/chi_twi, pgr1, qgr, 0)
-               CALL GRATIO (alp_twi,   (eta-mu_twi)/chi_twi, pgr0, qgr, 0)
+               CALL GRATIO (alp_twi+1, max(0._r8, (eta-mu_twi)/chi_twi), pgr1, qgr, 0)
+               CALL GRATIO (alp_twi,   max(0._r8, (eta-mu_twi)/chi_twi), pgr0, qgr, 0)
                gfun = ((eta-mu_twi)*pgr0 - chi_twi*alp_twi*pgr1)/DEF_TUNING_TOPMOD_DECAY - zwt
+
+               ! x clipped at 0 (eta <= mu_twi) gives pgr0 = 0: the update would divide by 0
+               IF (pgr0 <= 0.) EXIT
 
                IF (abs(gfun) > 1.e-6) THEN
                   eta = mu_twi + (chi_twi * alp_twi * pgr1 + DEF_TUNING_TOPMOD_DECAY*zwt) / pgr0
@@ -120,7 +130,7 @@ CONTAINS
                   alp_twi, chi_twi, mu_twi, topoweti, zwt, gfun
             ENDIF
 
-            CALL GRATIO (alp_twi, (eta-mu_twi)/chi_twi, pgr0, qgr, 0)
+            CALL GRATIO (alp_twi, max(0._r8, (eta-mu_twi)/chi_twi), pgr0, qgr, 0)
 
             fsat = qgr
 

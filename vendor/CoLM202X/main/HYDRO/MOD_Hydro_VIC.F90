@@ -15,7 +15,7 @@ MODULE MOD_Hydro_VIC
     SUBROUTINE Runoff_VIC(deltim, porsl, theta_r, hksati, bsw, &
                           wice_soisno, wliq_soisno, fevpg, rootflux, ppt, &
                           b_infilt, Dsmax, Ds, Ws, c, &
-                          rsur,rsubst,wliq_soisno_tmp)
+                          rsur,rsubst,wliq_soisno_tmp,frcsat)
 
         USE MOD_Namelist
         USE MOD_Precision
@@ -38,6 +38,7 @@ MODULE MOD_Hydro_VIC
 
         real(r8), intent(inout) :: rsur, rsubst
         real(r8), intent(out)   :: wliq_soisno_tmp(1:nl_soil)
+        real(r8), intent(out)   :: frcsat   ! fraction of saturated area (VIC asat)
 
         !-----------------------Local Variables---------------------------------
         integer  :: ilay
@@ -63,6 +64,7 @@ MODULE MOD_Hydro_VIC
 
         IF (ppt > 0.) rsur = cell%runoff/deltim
         rsubst = cell%baseflow/deltim
+        frcsat = cell%asat
 
     END SUBROUTINE Runoff_VIC
 

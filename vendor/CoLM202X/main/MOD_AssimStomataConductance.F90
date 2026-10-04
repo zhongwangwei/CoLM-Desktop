@@ -480,6 +480,9 @@ CONTAINS
                                vm, epar, respc, omss, gbh2o, gammas, rrkk, c3, c4)
 
    USE MOD_Precision
+#ifdef SinglePoint
+   USE MOD_Namelist, only: DEF_USE_LCT, DEF_LC_RESPCP, LC_OVERRIDE_UNSET
+#endif
    IMPLICIT NONE
 
 !-------------------------- Dummy Arguments ----------------------------
@@ -590,6 +593,11 @@ CONTAINS
       epar = min(4.6e-6 * par * effcon, jmax)
 
       respcp = 0.015 * c3 + 0.025 * c4
+#ifdef SinglePoint
+      ! DEF_LC_RESPCP (single-point LCT, the site's class) used to be stored in the land
+      ! cover table but never reached here: respcp is recomputed from c3/c4 above
+      IF (DEF_USE_LCT .and. DEF_LC_RESPCP /= LC_OVERRIDE_UNSET) respcp = DEF_LC_RESPCP
+#endif
       respc = respcp * vmax25 * 2.0**qt / ( 1. + exp( trda*(tlef-trdm )) ) * rstfac
 !     respc = 0.7e-6 * 2.0**qt / ( 1. + exp( trda*(tlef-trdm )) ) * rstfac
       respc = respc * cint(1)

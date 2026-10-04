@@ -21,7 +21,7 @@
   # Desktop releases default to optimized kernels.  The old full-check build
   # remains available with COLM_KERNEL_PROFILE=debug.
   COLM_KERNEL_PROFILE ?= production
-  FOPTS_COMMON = -fdefault-real-8 -ffree-form -g \
+  FOPTS_COMMON = -fdefault-real-8 -fdefault-double-8 -ffree-form -g \
                  -ffpe-trap=invalid,zero,overflow -fbacktrace -cpp \
                  -ffree-line-length-0
   GFORTRAN_MAJOR := $(shell $(word 1,$(FF)) -dumpversion 2>/dev/null | cut -d. -f1)

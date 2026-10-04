@@ -34,13 +34,13 @@ grep -q '^   PUBLIC  :: flux_inside_hm_soil$' "$WORK/hsw_copy.F90" || {
 cd "$BASE/vendor/CoLM202X"
 # `-ffunction-sections` + 链接期 `-Wl,-dead_strip`：模块里有些子程序依赖
 # `MOD_SPMD_Task`（MPI 那一支），本闭环用不到，也不该把 MPI 拖进来。
-BASE_FLAGS=(-O2 -fdefault-real-8 -ffree-form -cpp -ffree-line-length-0
+BASE_FLAGS=(-O2 -fdefault-real-8 -fdefault-double-8 -ffree-form -cpp -ffree-line-length-0
             -fallow-argument-mismatch -fopenmp -ffunction-sections)
 gfortran -c "${BASE_FLAGS[@]}" -I"$WORK" -I.bld -Iinclude -Ishare -Imain \
   "$WORK/namelist_stub.F90" -J"$WORK" -o "$WORK/stub.o"
 gfortran -c "${BASE_FLAGS[@]}" -I"$WORK" -I.bld -Iinclude -Ishare -Imain \
   "$WORK/hsw_copy.F90" -J"$WORK" -o "$WORK/hsw.o"
-gfortran -O2 -fdefault-real-8 -ffree-form -cpp -ffree-line-length-0 \
+gfortran -O2 -fdefault-real-8 -fdefault-double-8 -ffree-form -cpp -ffree-line-length-0 \
   -fallow-argument-mismatch -fwrapv -ffp-contract=off -fopenmp \
   -I"$WORK" -I.bld -Iinclude -Ishare -Imain \
   "$BASE/oracle/scripts/flux_inside_diff.f90" \

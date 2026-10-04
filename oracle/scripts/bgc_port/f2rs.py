@@ -26,7 +26,8 @@ SCALARS = {n.lower(): (n, k) for n, k in gen_bgc_state.parse_scalars(gen_bgc_sta
 PHYS_PFT = "pftfrac tsai_p tlai_p lai_p laisun_p laisha_p sigf_p tref_p assim_p respc_p irrig_method_p".split()
 PHYS_SOIL = "porsl psi0 bsw theta_r alpha_vgm n_vgm l_vgm sc_vgm fc_vgm bd_all wfc om_density t_soisno wliq_soisno wice_soisno smp h2osoi".split()
 PHYS_PATCH = ("patchlatr lai tlai tref rsur rnof forc_t forc_q forc_psrf forc_prc forc_prl forc_us forc_vs "
-              "lai_enftemp lai_enfboreal lai_dnfboreal lai_ebftrop lai_ebftemp lai_dbftrop lai_dbftemp lai_dbfboreal lai_ebstemp lai_dbstemp lai_dbsboreal lai_c3arcgrass lai_c3grass lai_c4grass irrig_method_corn irrig_method_swheat irrig_method_wwheat irrig_method_soybean irrig_method_cotton irrig_method_rice1 irrig_method_rice2 irrig_method_sugarcane").split()
+              "lai_enftemp lai_enfboreal lai_dnfboreal lai_ebftrop lai_ebftemp lai_dbftrop lai_dbftemp lai_dbfboreal lai_ebstemp lai_dbstemp lai_dbsboreal lai_c3arcgrass lai_c3grass lai_c4grass irrig_method_corn irrig_method_swheat irrig_method_wwheat irrig_method_soybean irrig_method_cotton irrig_method_rice1 irrig_method_rice2 irrig_method_sugarcane "
+              "zwt frcsat fsatmax fsatdcf topoweti alp_twi chi_twi mu_twi").split()
 PHYS_GRID = "z_soi dz_soi zi_soi".split()
 PHYS_SCALAR = {"deltim": "p.deltim", "dlat": "p.dlat", "dlon": "p.dlon", "smpmax_hr": "p.smpmax_hr", "smpmin_hr": "p.smpmin_hr"}
 PHYS_CASE = {"l_vgm": "L_vgm", "bd_all": "BD_all", "om_density": "OM_density"}
@@ -35,7 +36,7 @@ PFTC = set("""woody isevg issed isstd isbare iscrop isnatveg isshrub isgrass isb
 cc_dstem cc_leaf cc_lstem cc_other croot_stem deadwdcn fcur2 fd_pft flivewd fm_droot fm_leaf fm_lroot fm_lstem fm_other fm_root
 fr_fcel fr_flab fr_flig froot_leaf frootcn fsr_pft graincn grperc grpnow laimx leaf_long leafcn lf_fcel lf_flab lf_flig lflitcn
 livewdcn slatop stem_leaf lfemerg grnfill mxmat baset allconss arootf arooti astemf bfact ffrootcn fleafcn fleafi
-fstemcn""".split())
+fstemcn rswf_min rswf_max""".split())
 PFTC_LOGICAL = set("isevg issed isstd isbare iscrop isnatveg isshrub isgrass isbetr isbdtr".split())
 
 DIMS = {"nl_soil": "d.nl_soil", "nl_soil_full": "d.nl_soil_full", "ndecomp_pools": "d.ndecomp_pools",
@@ -48,7 +49,8 @@ FLOATCONST = {"spval": "MISSING", "tfrz": "273.16", "zmin_bedrock": "0.4", "denh
 SWITCH = {"def_use_nitrif": "sw.nitrif", "def_use_sasu": "sw.sasu", "def_use_diagmatrix": "sw.diag_matrix",
           "def_use_fire": "sw.fire", "def_use_cnsoyfixn": "sw.cnsoyfixn", "def_use_fert": "sw.fert",
           "def_use_irrigation": "sw.irrigation", "def_use_laifeedback": "sw.laifeedback",
-          "def_use_nostressnitrogen": "sw.nostressnitrogen", "def_use_tracer": "false /*TRACER*/"}
+          "def_use_nostressnitrogen": "sw.nostressnitrogen", "def_use_tracer": "false /*TRACER*/",
+          "def_runoff_scheme": "sw.runoff_scheme", "def_topmod_method": "sw.topmod_method"}
 
 
 # ---------------------------------------------------------------- lexer/parser
@@ -249,7 +251,7 @@ def typeof(e, ctx):
             return "i32"
         if n in ctx.locals:
             return ctx.locals[n]
-        if n in ("ivt", "ps", "pe", "patchclass"):
+        if n in ("ivt", "ps", "pe", "patchclass", "def_runoff_scheme", "def_topmod_method"):
             return "i32"
         if n in INTCONST or n in DIMS:
             return "i32"
@@ -395,7 +397,11 @@ def emit(e, ctx, want="f64", fma_ok=True):
             if t == "f64" and tx == "i32" and x[0] != "num":
                 return f"f64::from({strip_parens(text)})"
             return text
-        return f"{side(e[2], ta)} {op} {side(e[3], tb)}"
+        lhs, rhs = side(e[2], ta), side(e[3], tb)
+        # `x == x` / `x /= x` 是 Fortran 的 NaN 检查：写成 `is_nan`（语义相同，免得 clippy 报 eq_op）。
+        if t == "f64" and lhs == rhs and op in ("==", "!="):
+            return f"!{wrap_recv(lhs, e[2])}.is_nan()" if op == "==" else f"{wrap_recv(lhs, e[2])}.is_nan()"
+        return f"{lhs} {op} {rhs}"
     if k in ("&&", "||"):
         def side(x):
             r = emit(x, ctx)
@@ -918,6 +924,9 @@ def main():
                 w(f"for {var} in {int(lo) - 1}..{DIMS[hi]} {{")
             elif step == "-1" and lo in DIMS and re.fullmatch(r"\d+", hi):
                 w(f"for {var} in ({int(hi) - 1}..{DIMS[lo]}).rev() {{")
+            elif step is None and re.fullmatch(r"\d+", lo) and re.fullmatch(r"\d+", hi):
+                # 两端都是字面量（`DO niter = 1, 20`）：直接写成 0 起的区间。
+                w(f"for {var} in {int(lo) - 1}..{int(hi)} {{")
             else:
                 lo_e = emit(parse_expr(lo), ctx, "i32")
                 hi_e = emit(parse_expr(hi), ctx, "i32")
@@ -951,6 +960,12 @@ def main():
             continue
         if low in ("endif", "end if"):
             indent -= 1
+            w("}")
+            continue
+        m = re.match(r"if\s*\((.*)\)\s*(exit|cycle)$", s, re.I)
+        if m:
+            w(f"if {emit(parse_expr(m.group(1)), ctx)} {{")
+            w(f"    {'break' if m.group(2).lower() == 'exit' else 'continue'};")
             w("}")
             continue
         m = re.match(r"if\s*\((.*)\)\s*(\w.*=.*)$", s, re.I)
@@ -1008,6 +1023,24 @@ def main():
             a = [x.strip() for x in re.split(r",(?![^(]*\))", m.group(1))]
             RESULT[0] = True
             w(f"{emit(parse_expr(a[-1]), ctx)} = crate::bgc_fire_support::eroot_rstfac(p, sw, m)?;")
+            continue
+        m = re.match(r"call\s+gratio\s*\((.*)\)$", s, re.I)
+        if m:
+            # `MOD_IncompleteGamma:GRATIO(A, X, ANS, QANS, IND)`，`CNFireArea` 里都是 `IND = 0`。
+            a, depth, cur = [], 0, ""
+            for ch in m.group(1):  # 实参里有嵌套括号（`MAX(0, (eta-mu)/chi)`），按深度切
+                depth += (ch == "(") - (ch == ")")
+                if ch == "," and depth == 0:
+                    a.append(cur.strip())
+                    cur = ""
+                else:
+                    cur += ch
+            a.append(cur.strip())
+            assert a[4] == "0", s
+            # 出错返回时上游只写 `ANS = 2`、`QANS` 保持原值：用保留 `qans` 的那个入口。
+            w(f"crate::incomplete_gamma::gratio_fortran({strip_parens(emit(parse_expr(a[0]), ctx))}, "
+              f"{strip_parens(emit(parse_expr(a[1]), ctx))}, &mut {emit(parse_expr(a[2]), ctx)}, "
+              f"&mut {emit(parse_expr(a[3]), ctx)}, 0);")
             continue
         m = re.match(r"call\s+julian2monthday\s*\((.*)\)$", s, re.I)
         if m:

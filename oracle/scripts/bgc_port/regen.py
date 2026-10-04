@@ -27,6 +27,8 @@ GENERATED = """//!
 #![allow(clippy::collapsible_if, clippy::collapsible_else_if, clippy::needless_late_init)]
 // `a >= lo .and. a <= hi`、`max(lo, min(hi, x))` 照抄：改成 `contains`/`clamp` 会改变 NaN 的行为。
 #![allow(clippy::manual_range_contains, clippy::manual_clamp)]
+// `x = x * y` 照上游一条赋值写（与 `*=` 舍入相同，保留以便对照）。
+#![allow(clippy::assign_op_pattern)]
 """
 
 # (输出文件, 模块说明, 额外 use, [(Fortran 模块, 子程序, Rust 函数名, 文档)])
@@ -123,7 +125,8 @@ MODULES = [
          ("MOD_BGC_Veg_CNNDynamics", "CNNFert", "cn_n_fert", "`CNNFert`：施肥进入土壤矿质 N。"),
          ("MOD_BGC_Veg_CNNDynamics", "CNSoyfix", "cn_soyfix", "`CNSoyfix`：大豆共生固氮（`DEF_USE_CNSOYFIXN`）。"),
      ]),
-    ("bgc_fire.rs", "`MOD_BGC_Veg_CNFireLi2016.F90`/`MOD_BGC_Veg_CNFireBase.F90`：火烧面积与火烧通量（`DEF_USE_FIRE`）。", "", [
+    ("bgc_fire.rs", "`MOD_BGC_Veg_CNFireLi2016.F90`/`MOD_BGC_Veg_CNFireBase.F90`：火烧面积与火烧通量（`DEF_USE_FIRE`）。",
+     "// 照搬上游的死存储（`GRATIO` 的另一个输出、`gfun_fire` 的初值）。\n#![allow(unused_assignments)]", [
         ("MOD_BGC_Veg_CNFireLi2016", "CNFireArea", "cn_fire_area",
          "`CNFireArea`：Li et al. (2012–2017) 的火烧面积（农田、泥炭与其他火）。"),
         ("MOD_BGC_Veg_CNFireBase", "CNFireFluxes", "cn_fire_fluxes",
@@ -143,12 +146,11 @@ ZERO_INIT = {
     "CNSoyfix": ["fxn"],
     # 赋值在 `#ifdef CROP` 的作物块里，使用在同一 `ivt >= npcropmin` 条件下的后一个块里。
     "calc_plant_nutrient_competition_CLM45_default": ["f5"],
-    # 上游声明了 `ivt` 却从不赋值；两个内核的反汇编都按常数表第 0 项取（upstream-bugs 第 24 条）。
-    # `btran2` 只在 PFT 循环里赋值，没有 PFT 时上游读的是未定义值（GIMPLE `btran2_824(D)`）；
-    # 实际运行至少有一个 PFT。
-    "CNFireArea": ["ivt", "btran2"],
     # `f` 在 PFT 循环里赋值（与 `m` 无关），循环之后的分解池燃烧还用它。
-    "CNFireFluxes": ["ivt", "f"],
+    # （`ivt` 原来从不赋值，upstream-bugs 第 24 条；CoLM-SYSU/CoLM#504 改为逐 PFT 取 `pftclass(m)`。）
+    # `GRATIO` 的输出按 `&mut` 传：上游的未初值局部量，在调用前不读。
+    "CNFireArea": ["pgr0_fire", "pgr1_fire", "qgr_fire"],
+    "CNFireFluxes": ["f", "cwd_fire_factor"],
 }
 
 # 前向代入的局部变量（见 f2rs.py `FORWARD`），每个都由 GIMPLE 核实。

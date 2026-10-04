@@ -606,7 +606,7 @@ CONTAINS
 
       IF (dfwsun > 0) THEN
          t_wallsun = (fwsun*t_wallsun + dfwsun*t_wallsha) / (fwsun+dfwsun)
-         twsun_inner = (fwsun*twsun_inner + dfwsun*twsun_inner) / (fwsun+dfwsun)
+         twsun_inner = (fwsun*twsun_inner + dfwsun*twsha_inner) / (fwsun+dfwsun)
          lwsun = (fwsun*lwsun + dfwsun*lwsha ) / (fwsun+dfwsun)
       ENDIF
 
@@ -616,8 +616,9 @@ CONTAINS
          lwsha = (fwsha*lwsha - dfwsun*lwsun ) / (fwsha-dfwsun)
       ENDIF
 
-      ! update fwsun
+      ! update fwsun (and fwsha, which weights twall below)
       fwsun = fwsun + dfwsun
+      fwsha = 1. - fwsun
 
       ! temperature and water mass from previous time step
       twsun = t_wallsun( 1 )

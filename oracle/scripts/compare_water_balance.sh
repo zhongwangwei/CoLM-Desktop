@@ -35,13 +35,13 @@ sed 's/^   PRIVATE :: water_balance$/   PUBLIC  :: water_balance/' \
 grep -q '^   PUBLIC  :: water_balance$' "$WORK/hsw_copy.F90" || {
   echo "!! 拷贝里没找到 PRIVATE :: water_balance（上游改过？）" >&2; exit 3; }
 cd "$BASE/vendor/CoLM202X"
-BASE_FLAGS=(-O2 -fdefault-real-8 -ffree-form -cpp -ffree-line-length-0
+BASE_FLAGS=(-O2 -fdefault-real-8 -fdefault-double-8 -ffree-form -cpp -ffree-line-length-0
             -fallow-argument-mismatch -fopenmp -ffunction-sections)
 gfortran -c "${BASE_FLAGS[@]}" -I"$WORK" -I.bld -Iinclude -Ishare -Imain \
   "$WORK/namelist_stub.F90" -J"$WORK" -o "$WORK/stub.o"
 gfortran -c "${BASE_FLAGS[@]}" -I"$WORK" -I.bld -Iinclude -Ishare -Imain \
   "$WORK/hsw_copy.F90" -J"$WORK" -o "$WORK/hsw.o"
-gfortran -O2 -fdefault-real-8 -ffree-form -cpp -ffree-line-length-0 \
+gfortran -O2 -fdefault-real-8 -fdefault-double-8 -ffree-form -cpp -ffree-line-length-0 \
   -fallow-argument-mismatch -fwrapv -ffp-contract=off -fopenmp \
   -I"$WORK" -I.bld -Iinclude -Ishare -Imain \
   "$BASE/oracle/scripts/water_balance_diff.f90" \

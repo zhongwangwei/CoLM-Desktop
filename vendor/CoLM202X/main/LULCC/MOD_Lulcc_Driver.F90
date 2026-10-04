@@ -99,6 +99,8 @@ MODULE MOD_Lulcc_Driver
    USE MOD_Lulcc_TransferTraceReadin
    USE MOD_Lulcc_MassEnergyConserve
    USE MOD_Namelist
+   USE MOD_Opt_Baseflow, only: zwt_init
+   USE MOD_Vars_Global, only: spval
    USE MOD_Tracer_Defs, only: ntracers
    USE MOD_Tracer_Lifecycle, only: tracer_lifecycle_land_save_lulcc_state, &
       tracer_lifecycle_land_remap_lulcc_state, tracer_lifecycle_land_reload_lulcc_inputs
@@ -215,6 +217,11 @@ MODULE MOD_Lulcc_Driver
          ENDIF
       ENDIF
          CALL LulccMassEnergyConserve()
+      ENDIF
+
+      ! new patches of the baseflow optimization start from the new year's water table
+      IF (p_is_worker .and. allocated(zwt_init)) THEN
+         WHERE (zwt_init == spval) zwt_init = zwt
       ENDIF
 
       IF (DEF_USE_TRACER) THEN

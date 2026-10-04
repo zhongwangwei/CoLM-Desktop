@@ -1193,7 +1193,8 @@ SUBROUTINE CoLMMAIN ( &
                  mss_dst1(lbsn:0)  ,mss_dst2(lbsn:0)  ,mss_dst3(lbsn:0)  ,mss_dst4(lbsn:0)  ,&
 !  irrigation variables
 	                 qflx_irrig_drip   ,qflx_irrig_flood  ,qflx_irrig_paddy, &
-                    defer_surface_ice_overflow=(patchtype==0))
+                    defer_surface_ice_overflow=(patchtype==0), &
+                    topoweti=topoweti, alp_twi=alp_twi, chi_twi=chi_twi, mu_twi=mu_twi)
 	                 rsub = rnof - rsur
 	         ELSE
 

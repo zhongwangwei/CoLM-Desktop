@@ -10,7 +10,7 @@ NETCDF_INC = /share/home/dq089/soft/netcdf-fortran-4.6.1-gnu/include
 
 MOD_CMD = -J
 
-FOPTS = -fdefault-real-8 -ffree-form -C -g -u -xcheck=stkovf \
+FOPTS = -fdefault-real-8 -fdefault-double-8 -ffree-form -C -g -u -xcheck=stkovf \
         -ffpe-trap=invalid,zero,overflow -fbounds-check \
         -mcmodel=medium -fbacktrace -fdump-core -cpp \
         -ffree-line-length-0 -fopenmp

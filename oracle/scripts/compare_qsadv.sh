@@ -7,10 +7,10 @@ WORK=${WORK:-/tmp/gf/qs_diff}
 export QS_TMIN QS_TMAX
 rm -rf "$WORK"; mkdir -p "$WORK"
 cd "$BASE/vendor/CoLM202X"
-gfortran -c -O2 -fdefault-real-8 -ffree-form -cpp -ffree-line-length-0 \
+gfortran -c -O2 -fdefault-real-8 -fdefault-double-8 -ffree-form -cpp -ffree-line-length-0 \
   -fallow-argument-mismatch -I.bld -Iinclude -Imain -Ishare \
   main/MOD_Qsadv.F90 -J"$WORK" -o "$WORK/qs.o"
-gfortran -O2 -fdefault-real-8 -ffree-form -cpp -ffree-line-length-0 \
+gfortran -O2 -fdefault-real-8 -fdefault-double-8 -ffree-form -cpp -ffree-line-length-0 \
   -fallow-argument-mismatch -fwrapv -ffp-contract=off \
   -I"$WORK" -I.bld -Iinclude -Imain -Ishare \
   "$BASE/oracle/scripts/qsadv_diff.f90" "$WORK/qs.o" -o "$WORK/qs"

@@ -18,13 +18,13 @@ MODULE MOD_Namelist
 END MODULE MOD_Namelist
 EOF
 cd "$BASE/vendor/CoLM202X"
-gfortran -c -O2 -fdefault-real-8 -ffree-form -cpp -ffree-line-length-0 \
+gfortran -c -O2 -fdefault-real-8 -fdefault-double-8 -ffree-form -cpp -ffree-line-length-0 \
   -fallow-argument-mismatch -I"$WORK" -I.bld -Iinclude -Imain -Ishare \
   "$WORK/namelist_stub.F90" -J"$WORK" -o "$WORK/stub.o"
-gfortran -c -O2 -fdefault-real-8 -ffree-form -cpp -ffree-line-length-0 \
+gfortran -c -O2 -fdefault-real-8 -fdefault-double-8 -ffree-form -cpp -ffree-line-length-0 \
   -fallow-argument-mismatch -I"$WORK" -I.bld -Iinclude -Imain -Ishare \
   main/MOD_SoilThermalParameters.F90 -J"$WORK" -o "$WORK/hc_mod.o"
-gfortran -O2 -fdefault-real-8 -ffree-form -cpp -ffree-line-length-0 \
+gfortran -O2 -fdefault-real-8 -fdefault-double-8 -ffree-form -cpp -ffree-line-length-0 \
   -fallow-argument-mismatch -fwrapv -ffp-contract=off \
   -I"$WORK" -I.bld -Iinclude -Imain -Ishare \
   "$BASE/oracle/scripts/soil_hcap_cond_diff.f90" \

@@ -110,6 +110,15 @@ EXTRAS = [
     ("irrig_method_rice2", "MOD_Vars_TimeVariables", "raw:real(irrig_method_rice2(i:i),r8)"),
     ("irrig_method_sugarcane", "MOD_Vars_TimeVariables", "raw:real(irrig_method_sugarcane(i:i),r8)"),
     ("irrig_method_p", "MOD_Vars_PFTimeVariables", "raw:real(irrig_method_p(ps:pe),r8)"),
+    # `CNFireArea` 的饱和面积比（PR #504）：TOPMODEL 现算或取水文的 `frcsat`
+    ("zwt", "MOD_Vars_TimeVariables", "opatch"),
+    ("frcsat", "MOD_Vars_1DFluxes", "opatch"),
+    ("fsatmax", "MOD_Vars_TimeInvariants", "opatch"),
+    ("fsatdcf", "MOD_Vars_TimeInvariants", "opatch"),
+    ("topoweti", "MOD_Vars_TimeInvariants", "opatch"),
+    ("alp_twi", "MOD_Vars_TimeInvariants", "opatch"),
+    ("chi_twi", "MOD_Vars_TimeInvariants", "opatch"),
+    ("mu_twi", "MOD_Vars_TimeInvariants", "opatch"),
 ]
 
 
@@ -119,6 +128,7 @@ def extra_slice(name, kind):
     return {
         "pft": f"{name}(ps:pe)",
         "patch": f"{name}(i:i)",
+        "opatch": f"{name}(i:i)",
         "soil": f"{name}(1:nl_soil,i)",
     }[kind]
 
@@ -212,6 +222,14 @@ def trace_module():
         "      write(trace_unit) label",
     ]
     for name, _, kind in EXTRAS:
+        if kind == "opatch":
+            # 只在部分配置下分配（TOPMODEL 参数、`frcsat`）：未分配写 n=0，Rust 按 `spval` 读。
+            out.append(f"      IF (allocated({name})) THEN")
+            emit_value(out, name, extra_slice(name, kind), "f64")
+            out.append("      ELSE")
+            emit_empty(out, name)
+            out.append("      ENDIF")
+            continue
         emit_value(out, name, extra_slice(name, kind), "f64")
     out.append("      write(trace_unit) 0_4  ! 物理量段结束")
     for file, _, _ in gen_bgc_state.MODULES:

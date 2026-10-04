@@ -23,7 +23,7 @@ rm -rf "$WORK"; mkdir -p "$WORK"
 cd "$BASE/vendor/CoLM202X"
 [ -f .bld/mod_assimstomataconductance.mod ] || {
   echo "缺少 .bld/mod_assimstomataconductance.mod：先跑 ./oracle/scripts/build_kernel.sh default" >&2; exit 2; }
-gfortran -O2 -fdefault-real-8 -ffree-form -cpp -ffree-line-length-0 \
+gfortran -O2 -fdefault-real-8 -fdefault-double-8 -ffree-form -cpp -ffree-line-length-0 \
   -fallow-argument-mismatch -fwrapv -ffp-contract=off -fopenmp \
   -I"$WORK" -I.bld -Iinclude -Ishare -Imain \
   "$BASE/oracle/scripts/update_photosyn_diff.f90" \

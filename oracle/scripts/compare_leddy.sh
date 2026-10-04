@@ -14,10 +14,10 @@ WORK=${WORK:-/tmp/gf/leddy_diff}
 export LEDDY_OUT="$WORK"
 rm -rf "$WORK"; mkdir -p "$WORK"
 cd "$BASE/vendor/CoLM202X"
-gfortran -c -O2 -fdefault-real-8 -ffree-form -cpp -ffree-line-length-0 \
+gfortran -c -O2 -fdefault-real-8 -fdefault-double-8 -ffree-form -cpp -ffree-line-length-0 \
   -fallow-argument-mismatch -I.bld -Iinclude -Imain -Ishare \
   main/MOD_TurbulenceLEddy.F90 -J"$WORK" -o "$WORK/leddy.o"
-gfortran -O2 -fdefault-real-8 -ffree-form -cpp -ffree-line-length-0 \
+gfortran -O2 -fdefault-real-8 -fdefault-double-8 -ffree-form -cpp -ffree-line-length-0 \
   -fallow-argument-mismatch -fwrapv -ffp-contract=off \
   -I"$WORK" -I.bld -Iinclude -Imain -Ishare \
   "$BASE/oracle/scripts/turbulence_leddy_diff.f90" "$WORK/leddy.o" -o "$WORK/leddy"

@@ -203,6 +203,9 @@ CONTAINS
             allocate (t_room                        (numurban))
             allocate (t_roof                        (numurban))
             allocate (t_wall                        (numurban))
+            ! diagnostics computed in UrbanTHERMAL; give the cold-start restart a defined value
+            t_roof(:) = 0.
+            t_wall(:) = 0.
             allocate (tafu                          (numurban))
 
             allocate (urb_green                     (numurban))

@@ -54,11 +54,11 @@ open(p, 'w').write(s)
 print("injected dbg_intermediates")
 PY
 cd "$BASE/vendor/CoLM202X"
-BASE_FLAGS=(-O2 -fdefault-real-8 -ffree-form -cpp -ffree-line-length-0
+BASE_FLAGS=(-O2 -fdefault-real-8 -fdefault-double-8 -ffree-form -cpp -ffree-line-length-0
             -fallow-argument-mismatch -fopenmp -ffunction-sections)
 gfortran -c "${BASE_FLAGS[@]}" -I"$WORK" -I.bld -Iinclude -Ishare -Imain \
   "$WORK/asc_copy.F90" -J"$WORK" -o "$WORK/asc.o"
-gfortran -O2 -fdefault-real-8 -ffree-form -cpp -ffree-line-length-0 \
+gfortran -O2 -fdefault-real-8 -fdefault-double-8 -ffree-form -cpp -ffree-line-length-0 \
   -fallow-argument-mismatch -fwrapv -ffp-contract=off -fopenmp \
   -I"$WORK" -I.bld -Iinclude -Ishare -Imain \
   "$BASE/oracle/scripts/sortin_diff.f90" \

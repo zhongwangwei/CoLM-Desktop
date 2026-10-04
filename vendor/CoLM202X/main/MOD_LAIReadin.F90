@@ -52,7 +52,7 @@ CONTAINS
    integer :: iyear, itime
    character(len=256) :: cyear, ctime
    character(len=256) :: landdir, lndname
-   integer :: m, npatch, pc
+   integer :: m, npatch, pc, ps, pe
 
 #ifdef LULC_USGS
    real(r8), dimension(24), parameter :: &   ! Maximum fractional cover of vegetation [-]
@@ -172,8 +172,15 @@ IF ((.not. DEF_URBAN_RUN)) THEN
          IF (patchtypes(SITE_landtype) == 0) THEN
             tlai_p(:) = pack(SITE_LAI_pfts_monthly(:,time,iyear), SITE_pctpfts > 0.)
             tsai_p(:) = pack(SITE_SAI_pfts_monthly(:,time,iyear), SITE_pctpfts > 0.)
-            tlai(:)   = sum (SITE_LAI_pfts_monthly(:,time,iyear) * SITE_pctpfts)
-            tsai(:)   = sum (SITE_SAI_pfts_monthly(:,time,iyear) * SITE_pctpfts)
+            ! each patch sums its own PFTs (a multi-crop site has one patch per crop with
+            ! SITE_pctpfts = 1, so the all-site sum added every crop's LAI to every patch);
+            ! a natural site has one patch spanning all PFTs, i.e. the same sum as before
+            DO npatch = 1, numpatch
+               ps = patch_pft_s(npatch)
+               pe = patch_pft_e(npatch)
+               tlai(npatch) = sum (SITE_LAI_pfts_monthly(ps:pe,time,iyear) * SITE_pctpfts(ps:pe))
+               tsai(npatch) = sum (SITE_SAI_pfts_monthly(ps:pe,time,iyear) * SITE_pctpfts(ps:pe))
+            ENDDO
          ELSE
             tlai(:) = SITE_LAI_monthly(time,iyear)
             tsai(:) = SITE_SAI_monthly(time,iyear)
@@ -181,7 +188,11 @@ IF ((.not. DEF_URBAN_RUN)) THEN
       ELSE
          IF (patchtypes(SITE_landtype) == 0) THEN
             tsai_p(:) = pack(SITE_SAI_pfts_monthly(:,time,iyear), SITE_pctpfts > 0.)
-            tsai(:)   = sum (SITE_SAI_pfts_monthly(:,time,iyear) * SITE_pctpfts)
+            DO npatch = 1, numpatch
+               ps = patch_pft_s(npatch)
+               pe = patch_pft_e(npatch)
+               tsai(npatch) = sum (SITE_SAI_pfts_monthly(ps:pe,time,iyear) * SITE_pctpfts(ps:pe))
+            ENDDO
          ELSE
             tsai(:) = SITE_SAI_monthly(time,iyear)
          ENDIF

@@ -769,10 +769,10 @@ MOD_LandPatch.o: MOD_AggregationRequestData.o MOD_Const_LC.o MOD_DataType.o MOD_
 MOD_LandUrban.o: MOD_5x5DataReadin.o MOD_AggregationRequestData.o MOD_DataType.o MOD_Grid.o MOD_LandElm.o MOD_LandHRU.o MOD_LandPatch.o MOD_Mesh.o MOD_Namelist.o MOD_NetCDFBlock.o MOD_Pixelset.o MOD_Precision.o MOD_SPMD_Task.o MOD_Utils.o MOD_Vars_Global.o
 MOD_LeafTemperature.o: MOD_AssimStomataConductance.o MOD_CanopyLayerProfile.o MOD_FrictionVelocity.o MOD_LeafInterception.o MOD_Ozone.o MOD_PlantHydraulic.o MOD_TurbulenceLEddy.o
 MOD_LeafTemperaturePC.o: MOD_AssimStomataConductance.o MOD_CanopyLayerProfile.o MOD_FrictionVelocity.o MOD_LeafInterception.o MOD_Ozone.o MOD_PlantHydraulic.o MOD_TurbulenceLEddy.o
-MOD_Lulcc_Driver.o: MOD_Lulcc_Initialize.o MOD_Lulcc_MassEnergyConserve.o MOD_Lulcc_TransferTraceReadin.o MOD_Lulcc_Vars_TimeInvariants.o MOD_Lulcc_Vars_TimeVariables.o
+MOD_Lulcc_Driver.o: MOD_Lulcc_Initialize.o MOD_Lulcc_MassEnergyConserve.o MOD_Lulcc_TransferTraceReadin.o MOD_Lulcc_Vars_TimeInvariants.o MOD_Lulcc_Vars_TimeVariables.o MOD_Opt_Baseflow.o
 MOD_Lulcc_Initialize.o: MOD_Lulcc_Vars_TimeInvariants.o MOD_Lulcc_Vars_TimeVariables.o
 MOD_Lulcc_MassEnergyConserve.o: MOD_GroundTemperature.o MOD_Lulcc_TransferTraceReadin.o MOD_Lulcc_Vars_TimeInvariants.o MOD_Lulcc_Vars_TimeVariables.o
-MOD_Lulcc_Vars_TimeVariables.o: MOD_Lulcc_Vars_TimeInvariants.o
+MOD_Lulcc_Vars_TimeVariables.o: MOD_Lulcc_Vars_TimeInvariants.o MOD_Opt_Baseflow.o
 MOD_Mesh.o: MOD_Block.o MOD_CatchmentDataReadin.o MOD_DataType.o MOD_Grid.o MOD_Namelist.o MOD_NetCDFBlock.o MOD_Pixel.o MOD_Precision.o MOD_SPMD_Task.o MOD_Utils.o
 MOD_MeshFilter.o: MOD_AggregationRequestData.o MOD_Block.o MOD_DataType.o MOD_Grid.o MOD_LandElm.o MOD_Mesh.o MOD_Namelist.o MOD_NetCDFBlock.o MOD_Precision.o MOD_SPMD_Task.o
 MOD_Namelist.o: MOD_Filesystem.o MOD_Precision.o MOD_SPMD_Task.o

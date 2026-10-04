@@ -676,6 +676,11 @@ CONTAINS
                ENDIF
             ENDIF
 
+            ! Rows outside the region's block coverage (grid_set_blocks leaves yblk = 0) are
+            ! never read; near the region edge use the covered row only.
+            IF (this%grid%yblk(yn(iset)) == 0) yn(iset) = ys(iset)
+            IF (this%grid%yblk(ys(iset)) == 0) ys(iset) = yn(iset)
+
             IF (yn(iset) /= ys(iset)) THEN
                latn = this%grid%rlat(yn(iset))
                lats = this%grid%rlat(ys(iset))
@@ -724,6 +729,10 @@ CONTAINS
 
                ENDIF
             ENDIF
+
+            ! same for columns outside the block coverage
+            IF (this%grid%xblk(xw(iset)) == 0) xw(iset) = xe(iset)
+            IF (this%grid%xblk(xe(iset)) == 0) xe(iset) = xw(iset)
 
             IF (xw(iset) /= xe(iset)) THEN
                lonw = this%grid%rlon(xw(iset))

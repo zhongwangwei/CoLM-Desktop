@@ -49,7 +49,7 @@ CONTAINS
                      ,col_sminnendnb, col_sminnbegnb &
                      ,altmax, altmax_lastyear, altmax_lastyear_indx, lag_npp &
                      ,sminn_vr, sminn, smin_no3_vr, smin_nh4_vr &
-                     ,prec10, prec60, prec365, prec_today, prec_daily, tsoi17, rh30, accumnstep, skip_balance_check &
+                     ,prec10, prec30, prec60, prec365, prec_today, rh30_today, prec_daily, tsoi17, rh30, accumnstep, skip_balance_check &
 !------------------------SASU variables-----------------
                      ,decomp0_cpools_vr          , decomp0_npools_vr           &
                      ,I_met_c_vr_acc             , I_cel_c_vr_acc             , I_lig_c_vr_acc             , I_cwd_c_vr_acc              &
@@ -287,9 +287,11 @@ CONTAINS
         smin_no3_vr               (nl_soil)                   , &
         smin_nh4_vr               (nl_soil)                   , &
         prec10                                                , &
+        prec30                                                , &
         prec60                                                , &
         prec365                                               , &
         prec_today                                            , &
+        rh30_today                                            , &
         prec_daily                (365)                       , &
         tsoi17                                                , &
         rh30                                                  , &
@@ -735,9 +737,11 @@ IF (DEF_USE_BGC) THEN
          col_sminnbegnb                  = sminn
          totcoln                         = totvegn + totcwdn + totlitn + totsomn + sminn + ntrunc_veg + ntrunc_soil
          prec10                          = 0._r8
+         prec30                          = 0._r8   ! like the other running means (was spval)
          prec60                          = 0._r8
          prec365                         = 0._r8
          prec_today                      = 0._r8
+         rh30_today                      = 0._r8
          prec_daily                (:)   = 0._r8
          tsoi17                          = 273.15_r8
          rh30                            = 0._r8
@@ -865,14 +869,8 @@ IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
                !            totcoln = totcoln + (leafn_p(m) + leafn_storage_p(m) + deadstemn_p(m))* pftfrac(m)
                !            totvegn = totvegn + (leafn_p(m) + leafn_storage_p(m) + deadstemn_p(m))* pftfrac(m)
             ENDDO
-            IF(DEF_USE_OZONESTRESS)THEN
-               o3uptakesun_p         (ps:pe) = 0._r8
-               o3uptakesha_p         (ps:pe) = 0._r8
-               o3coefv_sun_p         (ps:pe) = 1._r8
-               o3coefv_sha_p         (ps:pe) = 1._r8
-               o3coefg_sun_p         (ps:pe) = 1._r8
-               o3coefg_sha_p         (ps:pe) = 1._r8
-            ENDIF
+            ! (upstream-bugs #69) the PFT ozone state is now initialized for every
+            ! configuration in MOD_Initialize, not only in this DEF_USE_BGC section.
             leafc_xfer_p             (ps:pe) = 0.0
             frootc_xfer_p            (ps:pe) = 0.0
             livestemc_storage_p      (ps:pe) = 0.0

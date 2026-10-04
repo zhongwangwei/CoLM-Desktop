@@ -21,7 +21,7 @@ rm -rf "$WORK"; mkdir -p "$WORK"
 cd "$BASE/vendor/CoLM202X"
 [ -f .bld/MOD_Eroot.o ] || {
   echo "缺少 .bld/MOD_Eroot.o：先跑 ./oracle/scripts/build_kernel.sh default" >&2; exit 2; }
-gfortran -O2 -fdefault-real-8 -ffree-form -cpp -ffree-line-length-0 \
+gfortran -O2 -fdefault-real-8 -fdefault-double-8 -ffree-form -cpp -ffree-line-length-0 \
   -fallow-argument-mismatch -fwrapv -ffp-contract=off -fopenmp \
   -I"$WORK" -I.bld -Iinclude -Ishare -Imain \
   "$BASE/oracle/scripts/eroot_diff.f90" \

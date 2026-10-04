@@ -16,8 +16,6 @@
    USE_SITE_soilparameters   = .false.
    USE_SITE_dbedrock         = .false.
    USE_SITE_topography       = .false.
-   USE_SITE_topostd          = .false.
-   USE_SITE_BVIC             = .false.
 
    DEF_simulation_time%greenwich    = .TRUE.
    DEF_simulation_time%start_year   = 1951

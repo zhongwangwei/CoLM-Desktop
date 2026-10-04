@@ -369,6 +369,8 @@ CONTAINS
             IF (numpatch > 0) THEN
                allocate (filter_crop (numpatch))
                allocate (filter_irrig (numpatch))
+               ! only DEF_USE_IRRIGATION sets it; without irrigation no patch is irrigated
+               filter_irrig(:) = .false.
             ENDIF
 #endif
          ENDIF
@@ -1109,6 +1111,527 @@ ENDIF
              'soil surface resistance','s/m')
 
 IF (DEF_USE_BGC) THEN
+         ! Fire diagnostics: rates averaged in time by the standard history writer.
+         CALL write_history_variable_2d ( DEF_hist_vars%farea_burned, &
+            a_farea_burned, &
+            file_hist, 'f_farea_burned', itime_in_file, sumarea, filter, &
+            'Total burned area fraction per second', 's-1')
+
+         CALL write_history_variable_2d ( DEF_hist_vars%baf_crop, &
+            a_baf_crop, &
+            file_hist, 'f_baf_crop', itime_in_file, sumarea, filter, &
+            'Crop burned area fraction per second', 's-1')
+
+         CALL write_history_variable_2d ( DEF_hist_vars%baf_peatf, &
+            a_baf_peatf, &
+            file_hist, 'f_baf_peatf', itime_in_file, sumarea, filter, &
+            'Peatland burned area fraction per second', 's-1')
+
+         CALL write_history_variable_2d ( DEF_hist_vars%nfire, &
+            a_nfire, &
+            file_hist, 'f_nfire', itime_in_file, sumarea, filter, &
+            'Non-crop fire occurrence rate per unit area', 'counts/km2/s')
+
+         CALL write_history_variable_2d ( DEF_hist_vars%fuelc, &
+            a_fuelc, &
+            file_hist, 'f_fuelc', itime_in_file, sumarea, filter, &
+            'Fuel carbon load per non-crop area; missing when fire is off', 'gC/m2')
+
+         CALL write_history_variable_2d ( DEF_hist_vars%btran2, &
+            a_btran2, &
+            file_hist, 'f_btran2', itime_in_file, sumarea, filter, &
+            'Normalized root-zone wetness used by fire; missing when fire is off', 'unitless')
+
+         CALL write_history_variable_2d ( DEF_hist_vars%pft_fire_closs, &
+            a_pft_fire_closs, &
+            file_hist, 'f_pft_fire_closs', itime_in_file, sumarea, filter, &
+            'Vegetation fire C emissions, PFT-fraction weighted to CoLM patch', 'gC/m2/s')
+
+         CALL write_history_variable_2d ( DEF_hist_vars%pft_fire_nloss, &
+            a_pft_fire_nloss, &
+            file_hist, 'f_pft_fire_nloss', itime_in_file, sumarea, filter, &
+            'Vegetation fire N emissions, PFT-fraction weighted to CoLM patch', 'gN/m2/s')
+
+         CALL write_history_variable_2d ( DEF_hist_vars%col_fire_closs, &
+            a_col_fire_closs, &
+            file_hist, 'f_col_fire_closs', itime_in_file, sumarea, filter, &
+            'CoLM patch fire C loss from vegetation, litter and CWD; excludes diagnostic peat', 'gC/m2/s')
+
+         CALL write_history_variable_2d ( DEF_hist_vars%col_fire_nloss, &
+            a_col_fire_nloss, &
+            file_hist, 'f_col_fire_nloss', itime_in_file, sumarea, filter, &
+            'CoLM patch fire N loss from vegetation, litter and CWD', 'gN/m2/s')
+
+         CALL write_history_variable_2d ( DEF_hist_vars%somc_fire, &
+            a_somc_fire, &
+            file_hist, 'f_somc_fire', itime_in_file, sumarea, filter, &
+            'Diagnostic peat fire C emissions; not subtracted from soil C pools', 'gC/m2/s')
+
+         CALL write_history_variable_2d ( DEF_hist_vars%litfire, &
+            a_litfire, &
+            file_hist, 'f_litfire', itime_in_file, sumarea, filter, &
+            'Fire C loss from litter pools; excludes CWD and diagnostic peat', 'gC/m2/s')
+
+         CALL write_history_variable_2d ( DEF_hist_vars%somfire, &
+            a_somfire, &
+            file_hist, 'f_somfire', itime_in_file, sumarea, filter, &
+            'Fire C loss from modeled soil pools; excludes diagnostic peat', 'gC/m2/s')
+
+         CALL write_history_variable_2d ( DEF_hist_vars%totfire, &
+            a_totfire, &
+            file_hist, 'f_totfire', itime_in_file, sumarea, filter, &
+            'Total fire C emissions including diagnostic peat; not a budget loss term', 'gC/m2/s')
+
+         CALL write_history_variable_2d ( DEF_hist_vars%m_leafc_to_fire, &
+            a_m_leafc_to_fire, &
+            file_hist, 'f_m_leafc_to_fire', itime_in_file, sumarea, filter, &
+            'leaf display C to fire emissions; PFT-weighted to CoLM patch', 'gC/m2/s')
+
+         CALL write_history_variable_2d ( DEF_hist_vars%m_frootc_to_fire, &
+            a_m_frootc_to_fire, &
+            file_hist, 'f_m_frootc_to_fire', itime_in_file, sumarea, filter, &
+            'fine root display C to fire emissions; PFT-weighted to CoLM patch', 'gC/m2/s')
+
+         CALL write_history_variable_2d ( DEF_hist_vars%m_livestemc_to_fire, &
+            a_m_livestemc_to_fire, &
+            file_hist, 'f_m_livestemc_to_fire', itime_in_file, sumarea, filter, &
+            'live stem display C to fire emissions; PFT-weighted to CoLM patch', 'gC/m2/s')
+
+         CALL write_history_variable_2d ( DEF_hist_vars%m_deadstemc_to_fire, &
+            a_m_deadstemc_to_fire, &
+            file_hist, 'f_m_deadstemc_to_fire', itime_in_file, sumarea, filter, &
+            'dead stem display C to fire emissions; PFT-weighted to CoLM patch', 'gC/m2/s')
+
+         CALL write_history_variable_2d ( DEF_hist_vars%m_livecrootc_to_fire, &
+            a_m_livecrootc_to_fire, &
+            file_hist, 'f_m_livecrootc_to_fire', itime_in_file, sumarea, filter, &
+            'live coarse root display C to fire emissions; PFT-weighted to CoLM patch', 'gC/m2/s')
+
+         CALL write_history_variable_2d ( DEF_hist_vars%m_deadcrootc_to_fire, &
+            a_m_deadcrootc_to_fire, &
+            file_hist, 'f_m_deadcrootc_to_fire', itime_in_file, sumarea, filter, &
+            'dead coarse root display C to fire emissions; PFT-weighted to CoLM patch', 'gC/m2/s')
+
+         CALL write_history_variable_2d ( DEF_hist_vars%m_leafc_storage_to_fire, &
+            a_m_leafc_storage_to_fire, &
+            file_hist, 'f_m_leafc_storage_to_fire', itime_in_file, sumarea, filter, &
+            'leaf storage C to fire emissions; PFT-weighted to CoLM patch', 'gC/m2/s')
+
+         CALL write_history_variable_2d ( DEF_hist_vars%m_frootc_storage_to_fire, &
+            a_m_frootc_storage_to_fire, &
+            file_hist, 'f_m_frootc_storage_to_fire', itime_in_file, sumarea, filter, &
+            'fine root storage C to fire emissions; PFT-weighted to CoLM patch', 'gC/m2/s')
+
+         CALL write_history_variable_2d ( DEF_hist_vars%m_livestemc_storage_to_fire, &
+            a_m_livestemc_storage_to_fire, &
+            file_hist, 'f_m_livestemc_storage_to_fire', itime_in_file, sumarea, filter, &
+            'live stem storage C to fire emissions; PFT-weighted to CoLM patch', 'gC/m2/s')
+
+         CALL write_history_variable_2d ( DEF_hist_vars%m_deadstemc_storage_to_fire, &
+            a_m_deadstemc_storage_to_fire, &
+            file_hist, 'f_m_deadstemc_storage_to_fire', itime_in_file, sumarea, filter, &
+            'dead stem storage C to fire emissions; PFT-weighted to CoLM patch', 'gC/m2/s')
+
+         CALL write_history_variable_2d ( DEF_hist_vars%m_livecrootc_storage_to_fire, &
+            a_m_livecrootc_storage_to_fire, &
+            file_hist, 'f_m_livecrootc_storage_to_fire', itime_in_file, sumarea, filter, &
+            'live coarse root storage C to fire emissions; PFT-weighted to CoLM patch', 'gC/m2/s')
+
+         CALL write_history_variable_2d ( DEF_hist_vars%m_deadcrootc_storage_to_fire, &
+            a_m_deadcrootc_storage_to_fire, &
+            file_hist, 'f_m_deadcrootc_storage_to_fire', itime_in_file, sumarea, filter, &
+            'dead coarse root storage C to fire emissions; PFT-weighted to CoLM patch', 'gC/m2/s')
+
+         CALL write_history_variable_2d ( DEF_hist_vars%m_gresp_storage_to_fire, &
+            a_m_gresp_storage_to_fire, &
+            file_hist, 'f_m_gresp_storage_to_fire', itime_in_file, sumarea, filter, &
+            'growth respiration storage C to fire emissions; PFT-weighted to CoLM patch', 'gC/m2/s')
+
+         CALL write_history_variable_2d ( DEF_hist_vars%m_leafc_xfer_to_fire, &
+            a_m_leafc_xfer_to_fire, &
+            file_hist, 'f_m_leafc_xfer_to_fire', itime_in_file, sumarea, filter, &
+            'leaf transfer C to fire emissions; PFT-weighted to CoLM patch', 'gC/m2/s')
+
+         CALL write_history_variable_2d ( DEF_hist_vars%m_frootc_xfer_to_fire, &
+            a_m_frootc_xfer_to_fire, &
+            file_hist, 'f_m_frootc_xfer_to_fire', itime_in_file, sumarea, filter, &
+            'fine root transfer C to fire emissions; PFT-weighted to CoLM patch', 'gC/m2/s')
+
+         CALL write_history_variable_2d ( DEF_hist_vars%m_livestemc_xfer_to_fire, &
+            a_m_livestemc_xfer_to_fire, &
+            file_hist, 'f_m_livestemc_xfer_to_fire', itime_in_file, sumarea, filter, &
+            'live stem transfer C to fire emissions; PFT-weighted to CoLM patch', 'gC/m2/s')
+
+         CALL write_history_variable_2d ( DEF_hist_vars%m_deadstemc_xfer_to_fire, &
+            a_m_deadstemc_xfer_to_fire, &
+            file_hist, 'f_m_deadstemc_xfer_to_fire', itime_in_file, sumarea, filter, &
+            'dead stem transfer C to fire emissions; PFT-weighted to CoLM patch', 'gC/m2/s')
+
+         CALL write_history_variable_2d ( DEF_hist_vars%m_livecrootc_xfer_to_fire, &
+            a_m_livecrootc_xfer_to_fire, &
+            file_hist, 'f_m_livecrootc_xfer_to_fire', itime_in_file, sumarea, filter, &
+            'live coarse root transfer C to fire emissions; PFT-weighted to CoLM patch', 'gC/m2/s')
+
+         CALL write_history_variable_2d ( DEF_hist_vars%m_deadcrootc_xfer_to_fire, &
+            a_m_deadcrootc_xfer_to_fire, &
+            file_hist, 'f_m_deadcrootc_xfer_to_fire', itime_in_file, sumarea, filter, &
+            'dead coarse root transfer C to fire emissions; PFT-weighted to CoLM patch', 'gC/m2/s')
+
+         CALL write_history_variable_2d ( DEF_hist_vars%m_gresp_xfer_to_fire, &
+            a_m_gresp_xfer_to_fire, &
+            file_hist, 'f_m_gresp_xfer_to_fire', itime_in_file, sumarea, filter, &
+            'growth respiration transfer C to fire emissions; PFT-weighted to CoLM patch', 'gC/m2/s')
+
+         CALL write_history_variable_2d ( DEF_hist_vars%m_livestemc_to_deadstemc_fire, &
+            a_m_livestemc_to_deadstemc_fire, &
+            file_hist, 'f_m_livestemc_to_deadstemc_fire', itime_in_file, sumarea, filter, &
+            'live stem display C to dead stem display C due to fire; PFT-weighted to CoLM patch', 'gC/m2/s')
+
+         CALL write_history_variable_2d ( DEF_hist_vars%m_livecrootc_to_deadcrootc_fire, &
+            a_m_livecrootc_to_deadcrootc_fire, &
+            file_hist, 'f_m_livecrootc_to_deadcrootc_fire', itime_in_file, sumarea, filter, &
+            'live coarse root display C to dead coarse root display C due to fire; PFT-weighted to CoLM patch', 'gC/m2/s')
+
+         CALL write_history_variable_2d ( DEF_hist_vars%m_leafc_to_litter_fire, &
+            a_m_leafc_to_litter_fire, &
+            file_hist, 'f_m_leafc_to_litter_fire', itime_in_file, sumarea, filter, &
+            'leaf display C to litter C due to fire; PFT-weighted to CoLM patch', 'gC/m2/s')
+
+         CALL write_history_variable_2d ( DEF_hist_vars%m_frootc_to_litter_fire, &
+            a_m_frootc_to_litter_fire, &
+            file_hist, 'f_m_frootc_to_litter_fire', itime_in_file, sumarea, filter, &
+            'fine root display C to litter C due to fire; PFT-weighted to CoLM patch', 'gC/m2/s')
+
+         CALL write_history_variable_2d ( DEF_hist_vars%m_livestemc_to_litter_fire, &
+            a_m_livestemc_to_litter_fire, &
+            file_hist, 'f_m_livestemc_to_litter_fire', itime_in_file, sumarea, filter, &
+            'live stem display C to litter C due to fire; PFT-weighted to CoLM patch', 'gC/m2/s')
+
+         CALL write_history_variable_2d ( DEF_hist_vars%m_deadstemc_to_litter_fire, &
+            a_m_deadstemc_to_litter_fire, &
+            file_hist, 'f_m_deadstemc_to_litter_fire', itime_in_file, sumarea, filter, &
+            'dead stem display C to litter C due to fire; PFT-weighted to CoLM patch', 'gC/m2/s')
+
+         CALL write_history_variable_2d ( DEF_hist_vars%m_livecrootc_to_litter_fire, &
+            a_m_livecrootc_to_litter_fire, &
+            file_hist, 'f_m_livecrootc_to_litter_fire', itime_in_file, sumarea, filter, &
+            'live coarse root display C to litter C due to fire; PFT-weighted to CoLM patch', 'gC/m2/s')
+
+         CALL write_history_variable_2d ( DEF_hist_vars%m_deadcrootc_to_litter_fire, &
+            a_m_deadcrootc_to_litter_fire, &
+            file_hist, 'f_m_deadcrootc_to_litter_fire', itime_in_file, sumarea, filter, &
+            'dead coarse root display C to litter C due to fire; PFT-weighted to CoLM patch', 'gC/m2/s')
+
+         CALL write_history_variable_2d ( DEF_hist_vars%m_leafc_storage_to_litter_fire, &
+            a_m_leafc_storage_to_litter_fire, &
+            file_hist, 'f_m_leafc_storage_to_litter_fire', itime_in_file, sumarea, filter, &
+            'leaf storage C to litter C due to fire; PFT-weighted to CoLM patch', 'gC/m2/s')
+
+         CALL write_history_variable_2d ( DEF_hist_vars%m_frootc_storage_to_litter_fire, &
+            a_m_frootc_storage_to_litter_fire, &
+            file_hist, 'f_m_frootc_storage_to_litter_fire', itime_in_file, sumarea, filter, &
+            'fine root storage C to litter C due to fire; PFT-weighted to CoLM patch', 'gC/m2/s')
+
+         CALL write_history_variable_2d ( DEF_hist_vars%m_livestemc_storage_to_litter_fire, &
+            a_m_livestemc_storage_to_litter_fire, &
+            file_hist, 'f_m_livestemc_storage_to_litter_fire', itime_in_file, sumarea, filter, &
+            'live stem storage C to litter C due to fire; PFT-weighted to CoLM patch', 'gC/m2/s')
+
+         CALL write_history_variable_2d ( DEF_hist_vars%m_deadstemc_storage_to_litter_fire, &
+            a_m_deadstemc_storage_to_litter_fire, &
+            file_hist, 'f_m_deadstemc_storage_to_litter_fire', itime_in_file, sumarea, filter, &
+            'dead stem storage C to litter C due to fire; PFT-weighted to CoLM patch', 'gC/m2/s')
+
+         CALL write_history_variable_2d ( DEF_hist_vars%m_livecrootc_storage_to_litter_fire, &
+            a_m_livecrootc_storage_to_litter_fire, &
+            file_hist, 'f_m_livecrootc_storage_to_litter_fire', itime_in_file, sumarea, filter, &
+            'live coarse root storage C to litter C due to fire; PFT-weighted to CoLM patch', 'gC/m2/s')
+
+         CALL write_history_variable_2d ( DEF_hist_vars%m_deadcrootc_storage_to_litter_fire, &
+            a_m_deadcrootc_storage_to_litter_fire, &
+            file_hist, 'f_m_deadcrootc_storage_to_litter_fire', itime_in_file, sumarea, filter, &
+            'dead coarse root storage C to litter C due to fire; PFT-weighted to CoLM patch', 'gC/m2/s')
+
+         CALL write_history_variable_2d ( DEF_hist_vars%m_gresp_storage_to_litter_fire, &
+            a_m_gresp_storage_to_litter_fire, &
+            file_hist, 'f_m_gresp_storage_to_litter_fire', itime_in_file, sumarea, filter, &
+            'growth respiration storage C to litter C due to fire; PFT-weighted to CoLM patch', 'gC/m2/s')
+
+         CALL write_history_variable_2d ( DEF_hist_vars%m_leafc_xfer_to_litter_fire, &
+            a_m_leafc_xfer_to_litter_fire, &
+            file_hist, 'f_m_leafc_xfer_to_litter_fire', itime_in_file, sumarea, filter, &
+            'leaf transfer C to litter C due to fire; PFT-weighted to CoLM patch', 'gC/m2/s')
+
+         CALL write_history_variable_2d ( DEF_hist_vars%m_frootc_xfer_to_litter_fire, &
+            a_m_frootc_xfer_to_litter_fire, &
+            file_hist, 'f_m_frootc_xfer_to_litter_fire', itime_in_file, sumarea, filter, &
+            'fine root transfer C to litter C due to fire; PFT-weighted to CoLM patch', 'gC/m2/s')
+
+         CALL write_history_variable_2d ( DEF_hist_vars%m_livestemc_xfer_to_litter_fire, &
+            a_m_livestemc_xfer_to_litter_fire, &
+            file_hist, 'f_m_livestemc_xfer_to_litter_fire', itime_in_file, sumarea, filter, &
+            'live stem transfer C to litter C due to fire; PFT-weighted to CoLM patch', 'gC/m2/s')
+
+         CALL write_history_variable_2d ( DEF_hist_vars%m_deadstemc_xfer_to_litter_fire, &
+            a_m_deadstemc_xfer_to_litter_fire, &
+            file_hist, 'f_m_deadstemc_xfer_to_litter_fire', itime_in_file, sumarea, filter, &
+            'dead stem transfer C to litter C due to fire; PFT-weighted to CoLM patch', 'gC/m2/s')
+
+         CALL write_history_variable_2d ( DEF_hist_vars%m_livecrootc_xfer_to_litter_fire, &
+            a_m_livecrootc_xfer_to_litter_fire, &
+            file_hist, 'f_m_livecrootc_xfer_to_litter_fire', itime_in_file, sumarea, filter, &
+            'live coarse root transfer C to litter C due to fire; PFT-weighted to CoLM patch', 'gC/m2/s')
+
+         CALL write_history_variable_2d ( DEF_hist_vars%m_deadcrootc_xfer_to_litter_fire, &
+            a_m_deadcrootc_xfer_to_litter_fire, &
+            file_hist, 'f_m_deadcrootc_xfer_to_litter_fire', itime_in_file, sumarea, filter, &
+            'dead coarse root transfer C to litter C due to fire; PFT-weighted to CoLM patch', 'gC/m2/s')
+
+         CALL write_history_variable_2d ( DEF_hist_vars%m_gresp_xfer_to_litter_fire, &
+            a_m_gresp_xfer_to_litter_fire, &
+            file_hist, 'f_m_gresp_xfer_to_litter_fire', itime_in_file, sumarea, filter, &
+            'growth respiration transfer C to litter C due to fire; PFT-weighted to CoLM patch', 'gC/m2/s')
+
+         CALL write_history_variable_2d ( DEF_hist_vars%m_leafn_to_fire, &
+            a_m_leafn_to_fire, &
+            file_hist, 'f_m_leafn_to_fire', itime_in_file, sumarea, filter, &
+            'leaf display N to fire emissions; PFT-weighted to CoLM patch', 'gN/m2/s')
+
+         CALL write_history_variable_2d ( DEF_hist_vars%m_frootn_to_fire, &
+            a_m_frootn_to_fire, &
+            file_hist, 'f_m_frootn_to_fire', itime_in_file, sumarea, filter, &
+            'fine root display N to fire emissions; PFT-weighted to CoLM patch', 'gN/m2/s')
+
+         CALL write_history_variable_2d ( DEF_hist_vars%m_livestemn_to_fire, &
+            a_m_livestemn_to_fire, &
+            file_hist, 'f_m_livestemn_to_fire', itime_in_file, sumarea, filter, &
+            'live stem display N to fire emissions; PFT-weighted to CoLM patch', 'gN/m2/s')
+
+         CALL write_history_variable_2d ( DEF_hist_vars%m_deadstemn_to_fire, &
+            a_m_deadstemn_to_fire, &
+            file_hist, 'f_m_deadstemn_to_fire', itime_in_file, sumarea, filter, &
+            'dead stem display N to fire emissions; PFT-weighted to CoLM patch', 'gN/m2/s')
+
+         CALL write_history_variable_2d ( DEF_hist_vars%m_livecrootn_to_fire, &
+            a_m_livecrootn_to_fire, &
+            file_hist, 'f_m_livecrootn_to_fire', itime_in_file, sumarea, filter, &
+            'live coarse root display N to fire emissions; PFT-weighted to CoLM patch', 'gN/m2/s')
+
+         CALL write_history_variable_2d ( DEF_hist_vars%m_deadcrootn_to_fire, &
+            a_m_deadcrootn_to_fire, &
+            file_hist, 'f_m_deadcrootn_to_fire', itime_in_file, sumarea, filter, &
+            'dead coarse root display N to fire emissions; PFT-weighted to CoLM patch', 'gN/m2/s')
+
+         CALL write_history_variable_2d ( DEF_hist_vars%m_leafn_storage_to_fire, &
+            a_m_leafn_storage_to_fire, &
+            file_hist, 'f_m_leafn_storage_to_fire', itime_in_file, sumarea, filter, &
+            'leaf storage N to fire emissions; PFT-weighted to CoLM patch', 'gN/m2/s')
+
+         CALL write_history_variable_2d ( DEF_hist_vars%m_frootn_storage_to_fire, &
+            a_m_frootn_storage_to_fire, &
+            file_hist, 'f_m_frootn_storage_to_fire', itime_in_file, sumarea, filter, &
+            'fine root storage N to fire emissions; PFT-weighted to CoLM patch', 'gN/m2/s')
+
+         CALL write_history_variable_2d ( DEF_hist_vars%m_livestemn_storage_to_fire, &
+            a_m_livestemn_storage_to_fire, &
+            file_hist, 'f_m_livestemn_storage_to_fire', itime_in_file, sumarea, filter, &
+            'live stem storage N to fire emissions; PFT-weighted to CoLM patch', 'gN/m2/s')
+
+         CALL write_history_variable_2d ( DEF_hist_vars%m_deadstemn_storage_to_fire, &
+            a_m_deadstemn_storage_to_fire, &
+            file_hist, 'f_m_deadstemn_storage_to_fire', itime_in_file, sumarea, filter, &
+            'dead stem storage N to fire emissions; PFT-weighted to CoLM patch', 'gN/m2/s')
+
+         CALL write_history_variable_2d ( DEF_hist_vars%m_livecrootn_storage_to_fire, &
+            a_m_livecrootn_storage_to_fire, &
+            file_hist, 'f_m_livecrootn_storage_to_fire', itime_in_file, sumarea, filter, &
+            'live coarse root storage N to fire emissions; PFT-weighted to CoLM patch', 'gN/m2/s')
+
+         CALL write_history_variable_2d ( DEF_hist_vars%m_deadcrootn_storage_to_fire, &
+            a_m_deadcrootn_storage_to_fire, &
+            file_hist, 'f_m_deadcrootn_storage_to_fire', itime_in_file, sumarea, filter, &
+            'dead coarse root storage N to fire emissions; PFT-weighted to CoLM patch', 'gN/m2/s')
+
+         CALL write_history_variable_2d ( DEF_hist_vars%m_leafn_xfer_to_fire, &
+            a_m_leafn_xfer_to_fire, &
+            file_hist, 'f_m_leafn_xfer_to_fire', itime_in_file, sumarea, filter, &
+            'leaf transfer N to fire emissions; PFT-weighted to CoLM patch', 'gN/m2/s')
+
+         CALL write_history_variable_2d ( DEF_hist_vars%m_frootn_xfer_to_fire, &
+            a_m_frootn_xfer_to_fire, &
+            file_hist, 'f_m_frootn_xfer_to_fire', itime_in_file, sumarea, filter, &
+            'fine root transfer N to fire emissions; PFT-weighted to CoLM patch', 'gN/m2/s')
+
+         CALL write_history_variable_2d ( DEF_hist_vars%m_livestemn_xfer_to_fire, &
+            a_m_livestemn_xfer_to_fire, &
+            file_hist, 'f_m_livestemn_xfer_to_fire', itime_in_file, sumarea, filter, &
+            'live stem transfer N to fire emissions; PFT-weighted to CoLM patch', 'gN/m2/s')
+
+         CALL write_history_variable_2d ( DEF_hist_vars%m_deadstemn_xfer_to_fire, &
+            a_m_deadstemn_xfer_to_fire, &
+            file_hist, 'f_m_deadstemn_xfer_to_fire', itime_in_file, sumarea, filter, &
+            'dead stem transfer N to fire emissions; PFT-weighted to CoLM patch', 'gN/m2/s')
+
+         CALL write_history_variable_2d ( DEF_hist_vars%m_livecrootn_xfer_to_fire, &
+            a_m_livecrootn_xfer_to_fire, &
+            file_hist, 'f_m_livecrootn_xfer_to_fire', itime_in_file, sumarea, filter, &
+            'live coarse root transfer N to fire emissions; PFT-weighted to CoLM patch', 'gN/m2/s')
+
+         CALL write_history_variable_2d ( DEF_hist_vars%m_deadcrootn_xfer_to_fire, &
+            a_m_deadcrootn_xfer_to_fire, &
+            file_hist, 'f_m_deadcrootn_xfer_to_fire', itime_in_file, sumarea, filter, &
+            'dead coarse root transfer N to fire emissions; PFT-weighted to CoLM patch', 'gN/m2/s')
+
+         CALL write_history_variable_2d ( DEF_hist_vars%m_livestemn_to_deadstemn_fire, &
+            a_m_livestemn_to_deadstemn_fire, &
+            file_hist, 'f_m_livestemn_to_deadstemn_fire', itime_in_file, sumarea, filter, &
+            'live stem display N to dead stem display N due to fire; PFT-weighted to CoLM patch', 'gN/m2/s')
+
+         CALL write_history_variable_2d ( DEF_hist_vars%m_livecrootn_to_deadcrootn_fire, &
+            a_m_livecrootn_to_deadcrootn_fire, &
+            file_hist, 'f_m_livecrootn_to_deadcrootn_fire', itime_in_file, sumarea, filter, &
+            'live coarse root display N to dead coarse root display N due to fire; PFT-weighted to CoLM patch', 'gN/m2/s')
+
+         CALL write_history_variable_2d ( DEF_hist_vars%m_retransn_to_fire, &
+            a_m_retransn_to_fire, &
+            file_hist, 'f_m_retransn_to_fire', itime_in_file, sumarea, filter, &
+            'retranslocated N to fire emissions; PFT-weighted to CoLM patch', 'gN/m2/s')
+
+         CALL write_history_variable_2d ( DEF_hist_vars%m_leafn_to_litter_fire, &
+            a_m_leafn_to_litter_fire, &
+            file_hist, 'f_m_leafn_to_litter_fire', itime_in_file, sumarea, filter, &
+            'leaf display N to litter N due to fire; PFT-weighted to CoLM patch', 'gN/m2/s')
+
+         CALL write_history_variable_2d ( DEF_hist_vars%m_frootn_to_litter_fire, &
+            a_m_frootn_to_litter_fire, &
+            file_hist, 'f_m_frootn_to_litter_fire', itime_in_file, sumarea, filter, &
+            'fine root display N to litter N due to fire; PFT-weighted to CoLM patch', 'gN/m2/s')
+
+         CALL write_history_variable_2d ( DEF_hist_vars%m_livestemn_to_litter_fire, &
+            a_m_livestemn_to_litter_fire, &
+            file_hist, 'f_m_livestemn_to_litter_fire', itime_in_file, sumarea, filter, &
+            'live stem display N to litter N due to fire; PFT-weighted to CoLM patch', 'gN/m2/s')
+
+         CALL write_history_variable_2d ( DEF_hist_vars%m_deadstemn_to_litter_fire, &
+            a_m_deadstemn_to_litter_fire, &
+            file_hist, 'f_m_deadstemn_to_litter_fire', itime_in_file, sumarea, filter, &
+            'dead stem display N to litter N due to fire; PFT-weighted to CoLM patch', 'gN/m2/s')
+
+         CALL write_history_variable_2d ( DEF_hist_vars%m_livecrootn_to_litter_fire, &
+            a_m_livecrootn_to_litter_fire, &
+            file_hist, 'f_m_livecrootn_to_litter_fire', itime_in_file, sumarea, filter, &
+            'live coarse root display N to litter N due to fire; PFT-weighted to CoLM patch', 'gN/m2/s')
+
+         CALL write_history_variable_2d ( DEF_hist_vars%m_deadcrootn_to_litter_fire, &
+            a_m_deadcrootn_to_litter_fire, &
+            file_hist, 'f_m_deadcrootn_to_litter_fire', itime_in_file, sumarea, filter, &
+            'dead coarse root display N to litter N due to fire; PFT-weighted to CoLM patch', 'gN/m2/s')
+
+         CALL write_history_variable_2d ( DEF_hist_vars%m_leafn_storage_to_litter_fire, &
+            a_m_leafn_storage_to_litter_fire, &
+            file_hist, 'f_m_leafn_storage_to_litter_fire', itime_in_file, sumarea, filter, &
+            'leaf storage N to litter N due to fire; PFT-weighted to CoLM patch', 'gN/m2/s')
+
+         CALL write_history_variable_2d ( DEF_hist_vars%m_frootn_storage_to_litter_fire, &
+            a_m_frootn_storage_to_litter_fire, &
+            file_hist, 'f_m_frootn_storage_to_litter_fire', itime_in_file, sumarea, filter, &
+            'fine root storage N to litter N due to fire; PFT-weighted to CoLM patch', 'gN/m2/s')
+
+         CALL write_history_variable_2d ( DEF_hist_vars%m_livestemn_storage_to_litter_fire, &
+            a_m_livestemn_storage_to_litter_fire, &
+            file_hist, 'f_m_livestemn_storage_to_litter_fire', itime_in_file, sumarea, filter, &
+            'live stem storage N to litter N due to fire; PFT-weighted to CoLM patch', 'gN/m2/s')
+
+         CALL write_history_variable_2d ( DEF_hist_vars%m_deadstemn_storage_to_litter_fire, &
+            a_m_deadstemn_storage_to_litter_fire, &
+            file_hist, 'f_m_deadstemn_storage_to_litter_fire', itime_in_file, sumarea, filter, &
+            'dead stem storage N to litter N due to fire; PFT-weighted to CoLM patch', 'gN/m2/s')
+
+         CALL write_history_variable_2d ( DEF_hist_vars%m_livecrootn_storage_to_litter_fire, &
+            a_m_livecrootn_storage_to_litter_fire, &
+            file_hist, 'f_m_livecrootn_storage_to_litter_fire', itime_in_file, sumarea, filter, &
+            'live coarse root storage N to litter N due to fire; PFT-weighted to CoLM patch', 'gN/m2/s')
+
+         CALL write_history_variable_2d ( DEF_hist_vars%m_deadcrootn_storage_to_litter_fire, &
+            a_m_deadcrootn_storage_to_litter_fire, &
+            file_hist, 'f_m_deadcrootn_storage_to_litter_fire', itime_in_file, sumarea, filter, &
+            'dead coarse root storage N to litter N due to fire; PFT-weighted to CoLM patch', 'gN/m2/s')
+
+         CALL write_history_variable_2d ( DEF_hist_vars%m_leafn_xfer_to_litter_fire, &
+            a_m_leafn_xfer_to_litter_fire, &
+            file_hist, 'f_m_leafn_xfer_to_litter_fire', itime_in_file, sumarea, filter, &
+            'leaf transfer N to litter N due to fire; PFT-weighted to CoLM patch', 'gN/m2/s')
+
+         CALL write_history_variable_2d ( DEF_hist_vars%m_frootn_xfer_to_litter_fire, &
+            a_m_frootn_xfer_to_litter_fire, &
+            file_hist, 'f_m_frootn_xfer_to_litter_fire', itime_in_file, sumarea, filter, &
+            'fine root transfer N to litter N due to fire; PFT-weighted to CoLM patch', 'gN/m2/s')
+
+         CALL write_history_variable_2d ( DEF_hist_vars%m_livestemn_xfer_to_litter_fire, &
+            a_m_livestemn_xfer_to_litter_fire, &
+            file_hist, 'f_m_livestemn_xfer_to_litter_fire', itime_in_file, sumarea, filter, &
+            'live stem transfer N to litter N due to fire; PFT-weighted to CoLM patch', 'gN/m2/s')
+
+         CALL write_history_variable_2d ( DEF_hist_vars%m_deadstemn_xfer_to_litter_fire, &
+            a_m_deadstemn_xfer_to_litter_fire, &
+            file_hist, 'f_m_deadstemn_xfer_to_litter_fire', itime_in_file, sumarea, filter, &
+            'dead stem transfer N to litter N due to fire; PFT-weighted to CoLM patch', 'gN/m2/s')
+
+         CALL write_history_variable_2d ( DEF_hist_vars%m_livecrootn_xfer_to_litter_fire, &
+            a_m_livecrootn_xfer_to_litter_fire, &
+            file_hist, 'f_m_livecrootn_xfer_to_litter_fire', itime_in_file, sumarea, filter, &
+            'live coarse root transfer N to litter N due to fire; PFT-weighted to CoLM patch', 'gN/m2/s')
+
+         CALL write_history_variable_2d ( DEF_hist_vars%m_deadcrootn_xfer_to_litter_fire, &
+            a_m_deadcrootn_xfer_to_litter_fire, &
+            file_hist, 'f_m_deadcrootn_xfer_to_litter_fire', itime_in_file, sumarea, filter, &
+            'dead coarse root transfer N to litter N due to fire; PFT-weighted to CoLM patch', 'gN/m2/s')
+
+         CALL write_history_variable_2d ( DEF_hist_vars%m_retransn_to_litter_fire, &
+            a_m_retransn_to_litter_fire, &
+            file_hist, 'f_m_retransn_to_litter_fire', itime_in_file, sumarea, filter, &
+            'retranslocated N to litter N due to fire; PFT-weighted to CoLM patch', 'gN/m2/s')
+
+         CALL write_history_variable_2d ( DEF_hist_vars%m_litr1_c_to_fire, &
+            a_m_litr1_c_to_fire, &
+            file_hist, 'f_m_litr1_c_to_fire', itime_in_file, sumarea, filter, &
+            'litr1 C fire loss integrated over soil depth', 'gC/m2/s')
+
+         CALL write_history_variable_2d ( DEF_hist_vars%m_litr1_n_to_fire, &
+            a_m_litr1_n_to_fire, &
+            file_hist, 'f_m_litr1_n_to_fire', itime_in_file, sumarea, filter, &
+            'litr1 N fire loss integrated over soil depth', 'gN/m2/s')
+
+         CALL write_history_variable_2d ( DEF_hist_vars%m_litr2_c_to_fire, &
+            a_m_litr2_c_to_fire, &
+            file_hist, 'f_m_litr2_c_to_fire', itime_in_file, sumarea, filter, &
+            'litr2 C fire loss integrated over soil depth', 'gC/m2/s')
+
+         CALL write_history_variable_2d ( DEF_hist_vars%m_litr2_n_to_fire, &
+            a_m_litr2_n_to_fire, &
+            file_hist, 'f_m_litr2_n_to_fire', itime_in_file, sumarea, filter, &
+            'litr2 N fire loss integrated over soil depth', 'gN/m2/s')
+
+         CALL write_history_variable_2d ( DEF_hist_vars%m_litr3_c_to_fire, &
+            a_m_litr3_c_to_fire, &
+            file_hist, 'f_m_litr3_c_to_fire', itime_in_file, sumarea, filter, &
+            'litr3 C fire loss integrated over soil depth', 'gC/m2/s')
+
+         CALL write_history_variable_2d ( DEF_hist_vars%m_litr3_n_to_fire, &
+            a_m_litr3_n_to_fire, &
+            file_hist, 'f_m_litr3_n_to_fire', itime_in_file, sumarea, filter, &
+            'litr3 N fire loss integrated over soil depth', 'gN/m2/s')
+
+         CALL write_history_variable_2d ( DEF_hist_vars%m_cwd_c_to_fire, &
+            a_m_cwd_c_to_fire, &
+            file_hist, 'f_m_cwd_c_to_fire', itime_in_file, sumarea, filter, &
+            'cwd C fire loss integrated over soil depth', 'gC/m2/s')
+
+         CALL write_history_variable_2d ( DEF_hist_vars%m_cwd_n_to_fire, &
+            a_m_cwd_n_to_fire, &
+            file_hist, 'f_m_cwd_n_to_fire', itime_in_file, sumarea, filter, &
+            'cwd N fire loss integrated over soil depth', 'gN/m2/s')
+
          ! leaf carbon display pool
          CALL write_history_variable_2d ( DEF_hist_vars%leafc, &
              a_leafc, file_hist, 'f_leafc', itime_in_file, sumarea, filter, &
@@ -1507,7 +2030,9 @@ IF (DEF_USE_BGC) THEN
             !  total irrigation amounts at growing season
             IF (p_is_worker) THEN
                IF (numpatch > 0) THEN
+                  ! running total, not a mean: write the latest value (as the *_inst variables)
                   vecacc (:) = a_sum_irrig (:)
+                  WHERE (vecacc /= spval) vecacc = vecacc * nac
                ENDIF
             ENDIF
             CALL write_history_variable_2d ( DEF_hist_vars%sum_irrig, &
@@ -1517,7 +2042,9 @@ IF (DEF_USE_BGC) THEN
             !  total irrigation amounts demand at growing season
             IF (p_is_worker) THEN
                IF (numpatch > 0) THEN
+                  ! running total, not a mean: write the latest value (as the *_inst variables)
                   vecacc (:) = a_sum_deficit_irrig (:)
+                  WHERE (vecacc /= spval) vecacc = vecacc * nac
                ENDIF
             ENDIF
             CALL write_history_variable_2d ( DEF_hist_vars%sum_deficit_irrig, &
@@ -1525,14 +2052,22 @@ IF (DEF_USE_BGC) THEN
                'total irrigation amounts demand at growing season','kg/m2')
 
             ! total irrigation times at growing season
+            IF (p_is_worker) THEN
+               IF (numpatch > 0) THEN
+                  vecacc (:) = a_sum_irrig_count (:)
+                  WHERE (vecacc /= spval) vecacc = vecacc * nac
+               ENDIF
+            ENDIF
             CALL write_history_variable_2d ( DEF_hist_vars%sum_irrig_count, &
-               a_sum_irrig_count, file_hist, 'f_sum_irrig_count', itime_in_file, sumarea_irrig, filter_irrig, &
+               vecacc, file_hist, 'f_sum_irrig_count', itime_in_file, sumarea_irrig, filter_irrig, &
                'total irrigation times at growing season','-')
 
             ! irrigation waterstorage [kg/m2]
             IF (p_is_worker) THEN
                IF (numpatch > 0) THEN
+                  ! running total, not a mean: write the latest value (as the *_inst variables)
                   vecacc (:) = a_waterstorage (:)
+                  WHERE (vecacc /= spval) vecacc = vecacc * nac
                ENDIF
             ENDIF
             CALL write_history_variable_2d ( DEF_hist_vars%waterstorage, &
@@ -1823,7 +2358,7 @@ IF (DEF_USE_BGC) THEN
          ! ozone concentration
             CALL write_history_variable_2d ( DEF_hist_vars%xy_ozone, &
                a_ozone, file_hist, 'f_xy_ozone', itime_in_file, sumarea, filter, &
-               'Ozone concentration','mol/mol')
+               'Ozone concentration','ppbv') ! FIX upstream-bugs #72: was 'mol/mol'
          ENDIF
 
          ! litter 1 carbon density in soil layers
@@ -1937,23 +2472,23 @@ IF (DEF_USE_BGC) THEN
 
          IF (DEF_USE_FIRE) THEN
             CALL write_history_variable_2d ( DEF_hist_vars%abm, &
-                 vecacc, file_hist, 'f_abm', itime_in_file, sumarea, filter, &
+                 a_abm, file_hist, 'f_abm', itime_in_file, sumarea, filter, &
                  'peak crop fire month','unitless')
 
             CALL write_history_variable_2d ( DEF_hist_vars%gdp, &
-                 vecacc, file_hist, 'f_gdp', itime_in_file, sumarea, filter, &
+                 a_gdp, file_hist, 'f_gdp', itime_in_file, sumarea, filter, &
                  'gdp','unitless')
 
             CALL write_history_variable_2d ( DEF_hist_vars%peatf, &
-                 vecacc, file_hist, 'f_peatf', itime_in_file, sumarea, filter, &
+                 a_peatf, file_hist, 'f_peatf', itime_in_file, sumarea, filter, &
                  'peatf','unitless')
 
             CALL write_history_variable_2d ( DEF_hist_vars%hdm, &
-                 vecacc, file_hist, 'f_hdm', itime_in_file, sumarea, filter, &
+                 a_hdm, file_hist, 'f_hdm', itime_in_file, sumarea, filter, &
                  'hdm','unitless')
 
             CALL write_history_variable_2d ( DEF_hist_vars%lnfm, &
-                 vecacc, file_hist, 'f_lnfm', itime_in_file, sumarea, filter, &
+                 a_lnfm, file_hist, 'f_lnfm', itime_in_file, sumarea, filter, &
                  'lnfm','unitless')
          ENDIF
 
@@ -2805,7 +3340,8 @@ IF (DEF_USE_BGC) THEN
                IF (numpatch > 0) THEN
                   DO i=1,numpatch
                      IF(patchclass(i) == 12)THEN
-                        IF(pftclass(patch_pft_s(i)) .eq. 17)THEN
+                        ! 17 rainfed / 18 irrigated temperate corn, like the other crops' pairs
+                        IF(pftclass(patch_pft_s(i)).eq.17 .or. pftclass(patch_pft_s(i)).eq.18)THEN
                            filter(i) = .true.
                         ELSE
                            filter(i) = .false.

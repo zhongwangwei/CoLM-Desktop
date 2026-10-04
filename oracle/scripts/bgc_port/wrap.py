@@ -61,7 +61,8 @@ while True:
     ls = body.rfind("\n", 0, i) + 1
     body = body[:ls] + body[e + 2:]
 
-ASSIGN = r"^\s*{v}(\[[^\]]*\])?\s*(=|\+=|-=|\*=|/=)\s"
+# 也认元组解构赋值 `(a, b) = f(...)`（`GRATIO` 的两个输出）。
+ASSIGN = r"^\s*(?:{v}(\[[^\]]*\])?|\((?:\w+, )*{v}(?:, \w+)*\))\s*(=|\+=|-=|\*=|/=)\s"
 
 
 def block_paths(lines):
@@ -115,8 +116,13 @@ def tidy(body):
                     pass
             reads += len(re.findall(rf"\b{v}\b", c))
         if reads == 0:
-            drop = set(assigns) | {lines.index(decl)}
+            # 元组赋值还给别的量赋值：留着，下面把不读的那一项换成 `_`。
+            drop = {a for a in assigns if not code(lines[a]).lstrip().startswith("(")}
+            drop |= {lines.index(decl)}
             lines = [l for k, l in enumerate(lines) if k not in drop]
+            continue
+        # 按 `&mut` 传出去的（`gratio_fortran` 的输出）：保留 `mut`。
+        if any(re.search(rf"&mut {v}\b", code(l)) for l in lines):
             continue
         # 需要 mut：多次赋值、复合赋值、或在循环里赋值
         in_loop = False
@@ -153,6 +159,30 @@ def tidy(body):
                     del lines[k]
                     continue
             lines[k] = decl.replace("let mut ", "let ", 1)
+    # 只当循环变量用的整型声明（Fortran 的 `DO niter = 1, 20`）：Rust 的 `for` 自己引入它。
+    for k, l in enumerate(lines):
+        m = re.match(r"^\s*let (\w+): i32;$", l)
+        if not m:
+            continue
+        v = m.group(1)
+        if all(not re.search(rf"\b{v}\b", code(x)) or re.match(rf"^\s*for {v} in ", code(x))
+               for j, x in enumerate(lines) if j != k):
+            lines[k] = None
+            loops = [j for j, x in enumerate(lines) if x is not None and re.match(rf"^\s*for {v} in ", code(x))]
+            for j in loops:
+                # 循环体里不读它：换成 `_v`。
+                depth, body_uses = 0, 0
+                for x in lines[j + 1:]:
+                    if x is None:
+                        continue
+                    c = code(x)
+                    body_uses += len(re.findall(rf"\b{v}\b", c))
+                    depth += c.count("{") - c.count("}")
+                    if depth < 0:
+                        break
+                if body_uses == 0:
+                    lines[j] = lines[j].replace(f"for {v} in ", f"for _{v} in ", 1)
+    lines = [l for l in lines if l is not None]
     # `(month, mday) = …` 里从不被读的量：换成 `_`，并删掉它的声明。
     for k, l in enumerate(lines):
         m = re.match(r"^(\s*)\((\w+), (\w+)\) = (.*)$", code(l))

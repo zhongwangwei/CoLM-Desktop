@@ -17,10 +17,10 @@ BASE="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 WORK=${WORK:-/tmp/gf/mo_diff}
 rm -rf "$WORK"; mkdir -p "$WORK"
 cd "$BASE/vendor/CoLM202X"
-gfortran -c -O2 -fdefault-real-8 -ffree-form -cpp -ffree-line-length-0 \
+gfortran -c -O2 -fdefault-real-8 -fdefault-double-8 -ffree-form -cpp -ffree-line-length-0 \
   -fallow-argument-mismatch -I.bld -Iinclude -Imain -Ishare \
   main/MOD_FrictionVelocity.F90 -J"$WORK" -o "$WORK/fv.o"
-gfortran -O2 -fdefault-real-8 -ffree-form -cpp -ffree-line-length-0 \
+gfortran -O2 -fdefault-real-8 -fdefault-double-8 -ffree-form -cpp -ffree-line-length-0 \
   -fallow-argument-mismatch -fwrapv -ffp-contract=off \
   -I"$WORK" -I.bld -Iinclude -Imain -Ishare \
   "$BASE/oracle/scripts/moninobukm_diff.f90" "$WORK/fv.o" -o "$WORK/mo"

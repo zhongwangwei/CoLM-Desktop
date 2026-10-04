@@ -170,6 +170,111 @@ MODULE MOD_Vars_1DAccFluxes
    real(r8), allocatable :: a_lai_c3grass      (:) !13
    real(r8), allocatable :: a_lai_c4grass      (:) !14
 
+   ! Fire diagnostics
+   real(r8), allocatable :: a_farea_burned(:)
+   real(r8), allocatable :: a_baf_crop(:)
+   real(r8), allocatable :: a_baf_peatf(:)
+   real(r8), allocatable :: a_nfire(:)
+   real(r8), allocatable :: a_fuelc(:)
+   real(r8), allocatable :: a_btran2(:)
+   real(r8), allocatable :: a_pft_fire_closs(:)
+   real(r8), allocatable :: a_pft_fire_nloss(:)
+   real(r8), allocatable :: a_col_fire_closs(:)
+   real(r8), allocatable :: a_col_fire_nloss(:)
+   real(r8), allocatable :: a_somc_fire(:)
+   real(r8), allocatable :: a_litfire(:)
+   real(r8), allocatable :: a_somfire(:)
+   real(r8), allocatable :: a_totfire(:)
+   real(r8), allocatable :: a_m_leafc_to_fire(:)
+   real(r8), allocatable :: a_m_frootc_to_fire(:)
+   real(r8), allocatable :: a_m_livestemc_to_fire(:)
+   real(r8), allocatable :: a_m_deadstemc_to_fire(:)
+   real(r8), allocatable :: a_m_livecrootc_to_fire(:)
+   real(r8), allocatable :: a_m_deadcrootc_to_fire(:)
+   real(r8), allocatable :: a_m_leafc_storage_to_fire(:)
+   real(r8), allocatable :: a_m_frootc_storage_to_fire(:)
+   real(r8), allocatable :: a_m_livestemc_storage_to_fire(:)
+   real(r8), allocatable :: a_m_deadstemc_storage_to_fire(:)
+   real(r8), allocatable :: a_m_livecrootc_storage_to_fire(:)
+   real(r8), allocatable :: a_m_deadcrootc_storage_to_fire(:)
+   real(r8), allocatable :: a_m_gresp_storage_to_fire(:)
+   real(r8), allocatable :: a_m_leafc_xfer_to_fire(:)
+   real(r8), allocatable :: a_m_frootc_xfer_to_fire(:)
+   real(r8), allocatable :: a_m_livestemc_xfer_to_fire(:)
+   real(r8), allocatable :: a_m_deadstemc_xfer_to_fire(:)
+   real(r8), allocatable :: a_m_livecrootc_xfer_to_fire(:)
+   real(r8), allocatable :: a_m_deadcrootc_xfer_to_fire(:)
+   real(r8), allocatable :: a_m_gresp_xfer_to_fire(:)
+   real(r8), allocatable :: a_m_livestemc_to_deadstemc_fire(:)
+   real(r8), allocatable :: a_m_livecrootc_to_deadcrootc_fire(:)
+   real(r8), allocatable :: a_m_leafc_to_litter_fire(:)
+   real(r8), allocatable :: a_m_frootc_to_litter_fire(:)
+   real(r8), allocatable :: a_m_livestemc_to_litter_fire(:)
+   real(r8), allocatable :: a_m_deadstemc_to_litter_fire(:)
+   real(r8), allocatable :: a_m_livecrootc_to_litter_fire(:)
+   real(r8), allocatable :: a_m_deadcrootc_to_litter_fire(:)
+   real(r8), allocatable :: a_m_leafc_storage_to_litter_fire(:)
+   real(r8), allocatable :: a_m_frootc_storage_to_litter_fire(:)
+   real(r8), allocatable :: a_m_livestemc_storage_to_litter_fire(:)
+   real(r8), allocatable :: a_m_deadstemc_storage_to_litter_fire(:)
+   real(r8), allocatable :: a_m_livecrootc_storage_to_litter_fire(:)
+   real(r8), allocatable :: a_m_deadcrootc_storage_to_litter_fire(:)
+   real(r8), allocatable :: a_m_gresp_storage_to_litter_fire(:)
+   real(r8), allocatable :: a_m_leafc_xfer_to_litter_fire(:)
+   real(r8), allocatable :: a_m_frootc_xfer_to_litter_fire(:)
+   real(r8), allocatable :: a_m_livestemc_xfer_to_litter_fire(:)
+   real(r8), allocatable :: a_m_deadstemc_xfer_to_litter_fire(:)
+   real(r8), allocatable :: a_m_livecrootc_xfer_to_litter_fire(:)
+   real(r8), allocatable :: a_m_deadcrootc_xfer_to_litter_fire(:)
+   real(r8), allocatable :: a_m_gresp_xfer_to_litter_fire(:)
+   real(r8), allocatable :: a_m_leafn_to_fire(:)
+   real(r8), allocatable :: a_m_frootn_to_fire(:)
+   real(r8), allocatable :: a_m_livestemn_to_fire(:)
+   real(r8), allocatable :: a_m_deadstemn_to_fire(:)
+   real(r8), allocatable :: a_m_livecrootn_to_fire(:)
+   real(r8), allocatable :: a_m_deadcrootn_to_fire(:)
+   real(r8), allocatable :: a_m_leafn_storage_to_fire(:)
+   real(r8), allocatable :: a_m_frootn_storage_to_fire(:)
+   real(r8), allocatable :: a_m_livestemn_storage_to_fire(:)
+   real(r8), allocatable :: a_m_deadstemn_storage_to_fire(:)
+   real(r8), allocatable :: a_m_livecrootn_storage_to_fire(:)
+   real(r8), allocatable :: a_m_deadcrootn_storage_to_fire(:)
+   real(r8), allocatable :: a_m_leafn_xfer_to_fire(:)
+   real(r8), allocatable :: a_m_frootn_xfer_to_fire(:)
+   real(r8), allocatable :: a_m_livestemn_xfer_to_fire(:)
+   real(r8), allocatable :: a_m_deadstemn_xfer_to_fire(:)
+   real(r8), allocatable :: a_m_livecrootn_xfer_to_fire(:)
+   real(r8), allocatable :: a_m_deadcrootn_xfer_to_fire(:)
+   real(r8), allocatable :: a_m_livestemn_to_deadstemn_fire(:)
+   real(r8), allocatable :: a_m_livecrootn_to_deadcrootn_fire(:)
+   real(r8), allocatable :: a_m_retransn_to_fire(:)
+   real(r8), allocatable :: a_m_leafn_to_litter_fire(:)
+   real(r8), allocatable :: a_m_frootn_to_litter_fire(:)
+   real(r8), allocatable :: a_m_livestemn_to_litter_fire(:)
+   real(r8), allocatable :: a_m_deadstemn_to_litter_fire(:)
+   real(r8), allocatable :: a_m_livecrootn_to_litter_fire(:)
+   real(r8), allocatable :: a_m_deadcrootn_to_litter_fire(:)
+   real(r8), allocatable :: a_m_leafn_storage_to_litter_fire(:)
+   real(r8), allocatable :: a_m_frootn_storage_to_litter_fire(:)
+   real(r8), allocatable :: a_m_livestemn_storage_to_litter_fire(:)
+   real(r8), allocatable :: a_m_deadstemn_storage_to_litter_fire(:)
+   real(r8), allocatable :: a_m_livecrootn_storage_to_litter_fire(:)
+   real(r8), allocatable :: a_m_deadcrootn_storage_to_litter_fire(:)
+   real(r8), allocatable :: a_m_leafn_xfer_to_litter_fire(:)
+   real(r8), allocatable :: a_m_frootn_xfer_to_litter_fire(:)
+   real(r8), allocatable :: a_m_livestemn_xfer_to_litter_fire(:)
+   real(r8), allocatable :: a_m_deadstemn_xfer_to_litter_fire(:)
+   real(r8), allocatable :: a_m_livecrootn_xfer_to_litter_fire(:)
+   real(r8), allocatable :: a_m_deadcrootn_xfer_to_litter_fire(:)
+   real(r8), allocatable :: a_m_retransn_to_litter_fire(:)
+   real(r8), allocatable :: a_m_litr1_c_to_fire(:)
+   real(r8), allocatable :: a_m_litr1_n_to_fire(:)
+   real(r8), allocatable :: a_m_litr2_c_to_fire(:)
+   real(r8), allocatable :: a_m_litr2_n_to_fire(:)
+   real(r8), allocatable :: a_m_litr3_c_to_fire(:)
+   real(r8), allocatable :: a_m_litr3_n_to_fire(:)
+   real(r8), allocatable :: a_m_cwd_c_to_fire(:)
+   real(r8), allocatable :: a_m_cwd_n_to_fire(:)
    real(r8), allocatable :: a_leafc              (:)
    real(r8), allocatable :: a_leafc_storage      (:)
    real(r8), allocatable :: a_leafc_xfer         (:)
@@ -651,6 +756,110 @@ IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
             allocate (a_lai_c4grass        (numpatch))
 ENDIF
 IF (DEF_USE_BGC) THEN
+            allocate (a_farea_burned(numpatch))
+            allocate (a_baf_crop(numpatch))
+            allocate (a_baf_peatf(numpatch))
+            allocate (a_nfire(numpatch))
+            allocate (a_fuelc(numpatch))
+            allocate (a_btran2(numpatch))
+            allocate (a_pft_fire_closs(numpatch))
+            allocate (a_pft_fire_nloss(numpatch))
+            allocate (a_col_fire_closs(numpatch))
+            allocate (a_col_fire_nloss(numpatch))
+            allocate (a_somc_fire(numpatch))
+            allocate (a_litfire(numpatch))
+            allocate (a_somfire(numpatch))
+            allocate (a_totfire(numpatch))
+            allocate (a_m_leafc_to_fire(numpatch))
+            allocate (a_m_frootc_to_fire(numpatch))
+            allocate (a_m_livestemc_to_fire(numpatch))
+            allocate (a_m_deadstemc_to_fire(numpatch))
+            allocate (a_m_livecrootc_to_fire(numpatch))
+            allocate (a_m_deadcrootc_to_fire(numpatch))
+            allocate (a_m_leafc_storage_to_fire(numpatch))
+            allocate (a_m_frootc_storage_to_fire(numpatch))
+            allocate (a_m_livestemc_storage_to_fire(numpatch))
+            allocate (a_m_deadstemc_storage_to_fire(numpatch))
+            allocate (a_m_livecrootc_storage_to_fire(numpatch))
+            allocate (a_m_deadcrootc_storage_to_fire(numpatch))
+            allocate (a_m_gresp_storage_to_fire(numpatch))
+            allocate (a_m_leafc_xfer_to_fire(numpatch))
+            allocate (a_m_frootc_xfer_to_fire(numpatch))
+            allocate (a_m_livestemc_xfer_to_fire(numpatch))
+            allocate (a_m_deadstemc_xfer_to_fire(numpatch))
+            allocate (a_m_livecrootc_xfer_to_fire(numpatch))
+            allocate (a_m_deadcrootc_xfer_to_fire(numpatch))
+            allocate (a_m_gresp_xfer_to_fire(numpatch))
+            allocate (a_m_livestemc_to_deadstemc_fire(numpatch))
+            allocate (a_m_livecrootc_to_deadcrootc_fire(numpatch))
+            allocate (a_m_leafc_to_litter_fire(numpatch))
+            allocate (a_m_frootc_to_litter_fire(numpatch))
+            allocate (a_m_livestemc_to_litter_fire(numpatch))
+            allocate (a_m_deadstemc_to_litter_fire(numpatch))
+            allocate (a_m_livecrootc_to_litter_fire(numpatch))
+            allocate (a_m_deadcrootc_to_litter_fire(numpatch))
+            allocate (a_m_leafc_storage_to_litter_fire(numpatch))
+            allocate (a_m_frootc_storage_to_litter_fire(numpatch))
+            allocate (a_m_livestemc_storage_to_litter_fire(numpatch))
+            allocate (a_m_deadstemc_storage_to_litter_fire(numpatch))
+            allocate (a_m_livecrootc_storage_to_litter_fire(numpatch))
+            allocate (a_m_deadcrootc_storage_to_litter_fire(numpatch))
+            allocate (a_m_gresp_storage_to_litter_fire(numpatch))
+            allocate (a_m_leafc_xfer_to_litter_fire(numpatch))
+            allocate (a_m_frootc_xfer_to_litter_fire(numpatch))
+            allocate (a_m_livestemc_xfer_to_litter_fire(numpatch))
+            allocate (a_m_deadstemc_xfer_to_litter_fire(numpatch))
+            allocate (a_m_livecrootc_xfer_to_litter_fire(numpatch))
+            allocate (a_m_deadcrootc_xfer_to_litter_fire(numpatch))
+            allocate (a_m_gresp_xfer_to_litter_fire(numpatch))
+            allocate (a_m_leafn_to_fire(numpatch))
+            allocate (a_m_frootn_to_fire(numpatch))
+            allocate (a_m_livestemn_to_fire(numpatch))
+            allocate (a_m_deadstemn_to_fire(numpatch))
+            allocate (a_m_livecrootn_to_fire(numpatch))
+            allocate (a_m_deadcrootn_to_fire(numpatch))
+            allocate (a_m_leafn_storage_to_fire(numpatch))
+            allocate (a_m_frootn_storage_to_fire(numpatch))
+            allocate (a_m_livestemn_storage_to_fire(numpatch))
+            allocate (a_m_deadstemn_storage_to_fire(numpatch))
+            allocate (a_m_livecrootn_storage_to_fire(numpatch))
+            allocate (a_m_deadcrootn_storage_to_fire(numpatch))
+            allocate (a_m_leafn_xfer_to_fire(numpatch))
+            allocate (a_m_frootn_xfer_to_fire(numpatch))
+            allocate (a_m_livestemn_xfer_to_fire(numpatch))
+            allocate (a_m_deadstemn_xfer_to_fire(numpatch))
+            allocate (a_m_livecrootn_xfer_to_fire(numpatch))
+            allocate (a_m_deadcrootn_xfer_to_fire(numpatch))
+            allocate (a_m_livestemn_to_deadstemn_fire(numpatch))
+            allocate (a_m_livecrootn_to_deadcrootn_fire(numpatch))
+            allocate (a_m_retransn_to_fire(numpatch))
+            allocate (a_m_leafn_to_litter_fire(numpatch))
+            allocate (a_m_frootn_to_litter_fire(numpatch))
+            allocate (a_m_livestemn_to_litter_fire(numpatch))
+            allocate (a_m_deadstemn_to_litter_fire(numpatch))
+            allocate (a_m_livecrootn_to_litter_fire(numpatch))
+            allocate (a_m_deadcrootn_to_litter_fire(numpatch))
+            allocate (a_m_leafn_storage_to_litter_fire(numpatch))
+            allocate (a_m_frootn_storage_to_litter_fire(numpatch))
+            allocate (a_m_livestemn_storage_to_litter_fire(numpatch))
+            allocate (a_m_deadstemn_storage_to_litter_fire(numpatch))
+            allocate (a_m_livecrootn_storage_to_litter_fire(numpatch))
+            allocate (a_m_deadcrootn_storage_to_litter_fire(numpatch))
+            allocate (a_m_leafn_xfer_to_litter_fire(numpatch))
+            allocate (a_m_frootn_xfer_to_litter_fire(numpatch))
+            allocate (a_m_livestemn_xfer_to_litter_fire(numpatch))
+            allocate (a_m_deadstemn_xfer_to_litter_fire(numpatch))
+            allocate (a_m_livecrootn_xfer_to_litter_fire(numpatch))
+            allocate (a_m_deadcrootn_xfer_to_litter_fire(numpatch))
+            allocate (a_m_retransn_to_litter_fire(numpatch))
+            allocate (a_m_litr1_c_to_fire(numpatch))
+            allocate (a_m_litr1_n_to_fire(numpatch))
+            allocate (a_m_litr2_c_to_fire(numpatch))
+            allocate (a_m_litr2_n_to_fire(numpatch))
+            allocate (a_m_litr3_c_to_fire(numpatch))
+            allocate (a_m_litr3_n_to_fire(numpatch))
+            allocate (a_m_cwd_c_to_fire(numpatch))
+            allocate (a_m_cwd_n_to_fire(numpatch))
             allocate (a_leafc              (numpatch))
             allocate (a_leafc_storage      (numpatch))
             allocate (a_leafc_xfer         (numpatch))
@@ -1144,6 +1353,110 @@ IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
 ENDIF
 
 IF (DEF_USE_BGC) THEN
+            deallocate (a_farea_burned)
+            deallocate (a_baf_crop)
+            deallocate (a_baf_peatf)
+            deallocate (a_nfire)
+            deallocate (a_fuelc)
+            deallocate (a_btran2)
+            deallocate (a_pft_fire_closs)
+            deallocate (a_pft_fire_nloss)
+            deallocate (a_col_fire_closs)
+            deallocate (a_col_fire_nloss)
+            deallocate (a_somc_fire)
+            deallocate (a_litfire)
+            deallocate (a_somfire)
+            deallocate (a_totfire)
+            deallocate (a_m_leafc_to_fire)
+            deallocate (a_m_frootc_to_fire)
+            deallocate (a_m_livestemc_to_fire)
+            deallocate (a_m_deadstemc_to_fire)
+            deallocate (a_m_livecrootc_to_fire)
+            deallocate (a_m_deadcrootc_to_fire)
+            deallocate (a_m_leafc_storage_to_fire)
+            deallocate (a_m_frootc_storage_to_fire)
+            deallocate (a_m_livestemc_storage_to_fire)
+            deallocate (a_m_deadstemc_storage_to_fire)
+            deallocate (a_m_livecrootc_storage_to_fire)
+            deallocate (a_m_deadcrootc_storage_to_fire)
+            deallocate (a_m_gresp_storage_to_fire)
+            deallocate (a_m_leafc_xfer_to_fire)
+            deallocate (a_m_frootc_xfer_to_fire)
+            deallocate (a_m_livestemc_xfer_to_fire)
+            deallocate (a_m_deadstemc_xfer_to_fire)
+            deallocate (a_m_livecrootc_xfer_to_fire)
+            deallocate (a_m_deadcrootc_xfer_to_fire)
+            deallocate (a_m_gresp_xfer_to_fire)
+            deallocate (a_m_livestemc_to_deadstemc_fire)
+            deallocate (a_m_livecrootc_to_deadcrootc_fire)
+            deallocate (a_m_leafc_to_litter_fire)
+            deallocate (a_m_frootc_to_litter_fire)
+            deallocate (a_m_livestemc_to_litter_fire)
+            deallocate (a_m_deadstemc_to_litter_fire)
+            deallocate (a_m_livecrootc_to_litter_fire)
+            deallocate (a_m_deadcrootc_to_litter_fire)
+            deallocate (a_m_leafc_storage_to_litter_fire)
+            deallocate (a_m_frootc_storage_to_litter_fire)
+            deallocate (a_m_livestemc_storage_to_litter_fire)
+            deallocate (a_m_deadstemc_storage_to_litter_fire)
+            deallocate (a_m_livecrootc_storage_to_litter_fire)
+            deallocate (a_m_deadcrootc_storage_to_litter_fire)
+            deallocate (a_m_gresp_storage_to_litter_fire)
+            deallocate (a_m_leafc_xfer_to_litter_fire)
+            deallocate (a_m_frootc_xfer_to_litter_fire)
+            deallocate (a_m_livestemc_xfer_to_litter_fire)
+            deallocate (a_m_deadstemc_xfer_to_litter_fire)
+            deallocate (a_m_livecrootc_xfer_to_litter_fire)
+            deallocate (a_m_deadcrootc_xfer_to_litter_fire)
+            deallocate (a_m_gresp_xfer_to_litter_fire)
+            deallocate (a_m_leafn_to_fire)
+            deallocate (a_m_frootn_to_fire)
+            deallocate (a_m_livestemn_to_fire)
+            deallocate (a_m_deadstemn_to_fire)
+            deallocate (a_m_livecrootn_to_fire)
+            deallocate (a_m_deadcrootn_to_fire)
+            deallocate (a_m_leafn_storage_to_fire)
+            deallocate (a_m_frootn_storage_to_fire)
+            deallocate (a_m_livestemn_storage_to_fire)
+            deallocate (a_m_deadstemn_storage_to_fire)
+            deallocate (a_m_livecrootn_storage_to_fire)
+            deallocate (a_m_deadcrootn_storage_to_fire)
+            deallocate (a_m_leafn_xfer_to_fire)
+            deallocate (a_m_frootn_xfer_to_fire)
+            deallocate (a_m_livestemn_xfer_to_fire)
+            deallocate (a_m_deadstemn_xfer_to_fire)
+            deallocate (a_m_livecrootn_xfer_to_fire)
+            deallocate (a_m_deadcrootn_xfer_to_fire)
+            deallocate (a_m_livestemn_to_deadstemn_fire)
+            deallocate (a_m_livecrootn_to_deadcrootn_fire)
+            deallocate (a_m_retransn_to_fire)
+            deallocate (a_m_leafn_to_litter_fire)
+            deallocate (a_m_frootn_to_litter_fire)
+            deallocate (a_m_livestemn_to_litter_fire)
+            deallocate (a_m_deadstemn_to_litter_fire)
+            deallocate (a_m_livecrootn_to_litter_fire)
+            deallocate (a_m_deadcrootn_to_litter_fire)
+            deallocate (a_m_leafn_storage_to_litter_fire)
+            deallocate (a_m_frootn_storage_to_litter_fire)
+            deallocate (a_m_livestemn_storage_to_litter_fire)
+            deallocate (a_m_deadstemn_storage_to_litter_fire)
+            deallocate (a_m_livecrootn_storage_to_litter_fire)
+            deallocate (a_m_deadcrootn_storage_to_litter_fire)
+            deallocate (a_m_leafn_xfer_to_litter_fire)
+            deallocate (a_m_frootn_xfer_to_litter_fire)
+            deallocate (a_m_livestemn_xfer_to_litter_fire)
+            deallocate (a_m_deadstemn_xfer_to_litter_fire)
+            deallocate (a_m_livecrootn_xfer_to_litter_fire)
+            deallocate (a_m_deadcrootn_xfer_to_litter_fire)
+            deallocate (a_m_retransn_to_litter_fire)
+            deallocate (a_m_litr1_c_to_fire)
+            deallocate (a_m_litr1_n_to_fire)
+            deallocate (a_m_litr2_c_to_fire)
+            deallocate (a_m_litr2_n_to_fire)
+            deallocate (a_m_litr3_c_to_fire)
+            deallocate (a_m_litr3_n_to_fire)
+            deallocate (a_m_cwd_c_to_fire)
+            deallocate (a_m_cwd_n_to_fire)
             deallocate (a_leafc              )
             deallocate (a_leafc_storage      )
             deallocate (a_leafc_xfer         )
@@ -1641,6 +1954,110 @@ IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
             a_lai_c4grass      (:) = spval
 ENDIF
 IF (DEF_USE_BGC) THEN
+            a_farea_burned(:) = spval
+            a_baf_crop(:) = spval
+            a_baf_peatf(:) = spval
+            a_nfire(:) = spval
+            a_fuelc(:) = spval
+            a_btran2(:) = spval
+            a_pft_fire_closs(:) = spval
+            a_pft_fire_nloss(:) = spval
+            a_col_fire_closs(:) = spval
+            a_col_fire_nloss(:) = spval
+            a_somc_fire(:) = spval
+            a_litfire(:) = spval
+            a_somfire(:) = spval
+            a_totfire(:) = spval
+            a_m_leafc_to_fire(:) = spval
+            a_m_frootc_to_fire(:) = spval
+            a_m_livestemc_to_fire(:) = spval
+            a_m_deadstemc_to_fire(:) = spval
+            a_m_livecrootc_to_fire(:) = spval
+            a_m_deadcrootc_to_fire(:) = spval
+            a_m_leafc_storage_to_fire(:) = spval
+            a_m_frootc_storage_to_fire(:) = spval
+            a_m_livestemc_storage_to_fire(:) = spval
+            a_m_deadstemc_storage_to_fire(:) = spval
+            a_m_livecrootc_storage_to_fire(:) = spval
+            a_m_deadcrootc_storage_to_fire(:) = spval
+            a_m_gresp_storage_to_fire(:) = spval
+            a_m_leafc_xfer_to_fire(:) = spval
+            a_m_frootc_xfer_to_fire(:) = spval
+            a_m_livestemc_xfer_to_fire(:) = spval
+            a_m_deadstemc_xfer_to_fire(:) = spval
+            a_m_livecrootc_xfer_to_fire(:) = spval
+            a_m_deadcrootc_xfer_to_fire(:) = spval
+            a_m_gresp_xfer_to_fire(:) = spval
+            a_m_livestemc_to_deadstemc_fire(:) = spval
+            a_m_livecrootc_to_deadcrootc_fire(:) = spval
+            a_m_leafc_to_litter_fire(:) = spval
+            a_m_frootc_to_litter_fire(:) = spval
+            a_m_livestemc_to_litter_fire(:) = spval
+            a_m_deadstemc_to_litter_fire(:) = spval
+            a_m_livecrootc_to_litter_fire(:) = spval
+            a_m_deadcrootc_to_litter_fire(:) = spval
+            a_m_leafc_storage_to_litter_fire(:) = spval
+            a_m_frootc_storage_to_litter_fire(:) = spval
+            a_m_livestemc_storage_to_litter_fire(:) = spval
+            a_m_deadstemc_storage_to_litter_fire(:) = spval
+            a_m_livecrootc_storage_to_litter_fire(:) = spval
+            a_m_deadcrootc_storage_to_litter_fire(:) = spval
+            a_m_gresp_storage_to_litter_fire(:) = spval
+            a_m_leafc_xfer_to_litter_fire(:) = spval
+            a_m_frootc_xfer_to_litter_fire(:) = spval
+            a_m_livestemc_xfer_to_litter_fire(:) = spval
+            a_m_deadstemc_xfer_to_litter_fire(:) = spval
+            a_m_livecrootc_xfer_to_litter_fire(:) = spval
+            a_m_deadcrootc_xfer_to_litter_fire(:) = spval
+            a_m_gresp_xfer_to_litter_fire(:) = spval
+            a_m_leafn_to_fire(:) = spval
+            a_m_frootn_to_fire(:) = spval
+            a_m_livestemn_to_fire(:) = spval
+            a_m_deadstemn_to_fire(:) = spval
+            a_m_livecrootn_to_fire(:) = spval
+            a_m_deadcrootn_to_fire(:) = spval
+            a_m_leafn_storage_to_fire(:) = spval
+            a_m_frootn_storage_to_fire(:) = spval
+            a_m_livestemn_storage_to_fire(:) = spval
+            a_m_deadstemn_storage_to_fire(:) = spval
+            a_m_livecrootn_storage_to_fire(:) = spval
+            a_m_deadcrootn_storage_to_fire(:) = spval
+            a_m_leafn_xfer_to_fire(:) = spval
+            a_m_frootn_xfer_to_fire(:) = spval
+            a_m_livestemn_xfer_to_fire(:) = spval
+            a_m_deadstemn_xfer_to_fire(:) = spval
+            a_m_livecrootn_xfer_to_fire(:) = spval
+            a_m_deadcrootn_xfer_to_fire(:) = spval
+            a_m_livestemn_to_deadstemn_fire(:) = spval
+            a_m_livecrootn_to_deadcrootn_fire(:) = spval
+            a_m_retransn_to_fire(:) = spval
+            a_m_leafn_to_litter_fire(:) = spval
+            a_m_frootn_to_litter_fire(:) = spval
+            a_m_livestemn_to_litter_fire(:) = spval
+            a_m_deadstemn_to_litter_fire(:) = spval
+            a_m_livecrootn_to_litter_fire(:) = spval
+            a_m_deadcrootn_to_litter_fire(:) = spval
+            a_m_leafn_storage_to_litter_fire(:) = spval
+            a_m_frootn_storage_to_litter_fire(:) = spval
+            a_m_livestemn_storage_to_litter_fire(:) = spval
+            a_m_deadstemn_storage_to_litter_fire(:) = spval
+            a_m_livecrootn_storage_to_litter_fire(:) = spval
+            a_m_deadcrootn_storage_to_litter_fire(:) = spval
+            a_m_leafn_xfer_to_litter_fire(:) = spval
+            a_m_frootn_xfer_to_litter_fire(:) = spval
+            a_m_livestemn_xfer_to_litter_fire(:) = spval
+            a_m_deadstemn_xfer_to_litter_fire(:) = spval
+            a_m_livecrootn_xfer_to_litter_fire(:) = spval
+            a_m_deadcrootn_xfer_to_litter_fire(:) = spval
+            a_m_retransn_to_litter_fire(:) = spval
+            a_m_litr1_c_to_fire(:) = spval
+            a_m_litr1_n_to_fire(:) = spval
+            a_m_litr2_c_to_fire(:) = spval
+            a_m_litr2_n_to_fire(:) = spval
+            a_m_litr3_c_to_fire(:) = spval
+            a_m_litr3_n_to_fire(:) = spval
+            a_m_cwd_c_to_fire(:) = spval
+            a_m_cwd_n_to_fire(:) = spval
             a_leafc              (:) = spval
             a_leafc_storage      (:) = spval
             a_leafc_xfer         (:) = spval
@@ -1991,7 +2408,7 @@ ENDIF
    USE MOD_Vars_1DFluxes
    USE MOD_FrictionVelocity
    USE MOD_Namelist, only: DEF_USE_CBL_HEIGHT, DEF_USE_OZONESTRESS, DEF_USE_PLANTHYDRAULICS, DEF_USE_NITRIF, &
-      DEF_USE_TRACER, DEF_USE_PFT, DEF_USE_PC, DEF_USE_BGC, DEF_USE_VariablySaturatedFlow
+      DEF_USE_TRACER, DEF_USE_PFT, DEF_USE_PC, DEF_USE_BGC, DEF_USE_VariablySaturatedFlow, DEF_USE_FIRE
    USE MOD_TurbulenceLEddy
    USE MOD_Vars_Global
 #ifdef CatchLateralFlow
@@ -2256,6 +2673,112 @@ IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
             CALL acc1d (lai_c4grass        , a_lai_c4grass       )
 ENDIF
 IF (DEF_USE_BGC) THEN
+            IF (DEF_USE_FIRE) THEN
+               CALL acc1d (farea_burned                                 , a_farea_burned)
+               CALL acc1d (baf_crop                                     , a_baf_crop)
+               CALL acc1d (baf_peatf                                    , a_baf_peatf)
+               CALL acc1d (nfire                                        , a_nfire)
+               CALL acc1d (fuelc                                        , a_fuelc)
+               CALL acc1d (fire_btran2                                  , a_btran2)
+               CALL acc1d (pft_fire_closs                               , a_pft_fire_closs)
+               CALL acc1d (pft_fire_nloss                               , a_pft_fire_nloss)
+               CALL acc1d (fire_closs                                   , a_col_fire_closs)
+               CALL acc1d (fire_nloss                                   , a_col_fire_nloss)
+               CALL acc1d (somc_fire                                    , a_somc_fire)
+               CALL acc1d (litfire                                      , a_litfire)
+               CALL acc1d (somfire                                      , a_somfire)
+               CALL acc1d (totfire                                      , a_totfire)
+               CALL acc1d (m_leafc_to_fire                              , a_m_leafc_to_fire)
+               CALL acc1d (m_frootc_to_fire                             , a_m_frootc_to_fire)
+               CALL acc1d (m_livestemc_to_fire                          , a_m_livestemc_to_fire)
+               CALL acc1d (m_deadstemc_to_fire                          , a_m_deadstemc_to_fire)
+               CALL acc1d (m_livecrootc_to_fire                         , a_m_livecrootc_to_fire)
+               CALL acc1d (m_deadcrootc_to_fire                         , a_m_deadcrootc_to_fire)
+               CALL acc1d (m_leafc_storage_to_fire                      , a_m_leafc_storage_to_fire)
+               CALL acc1d (m_frootc_storage_to_fire                     , a_m_frootc_storage_to_fire)
+               CALL acc1d (m_livestemc_storage_to_fire                  , a_m_livestemc_storage_to_fire)
+               CALL acc1d (m_deadstemc_storage_to_fire                  , a_m_deadstemc_storage_to_fire)
+               CALL acc1d (m_livecrootc_storage_to_fire                 , a_m_livecrootc_storage_to_fire)
+               CALL acc1d (m_deadcrootc_storage_to_fire                 , a_m_deadcrootc_storage_to_fire)
+               CALL acc1d (m_gresp_storage_to_fire                      , a_m_gresp_storage_to_fire)
+               CALL acc1d (m_leafc_xfer_to_fire                         , a_m_leafc_xfer_to_fire)
+               CALL acc1d (m_frootc_xfer_to_fire                        , a_m_frootc_xfer_to_fire)
+               CALL acc1d (m_livestemc_xfer_to_fire                     , a_m_livestemc_xfer_to_fire)
+               CALL acc1d (m_deadstemc_xfer_to_fire                     , a_m_deadstemc_xfer_to_fire)
+               CALL acc1d (m_livecrootc_xfer_to_fire                    , a_m_livecrootc_xfer_to_fire)
+               CALL acc1d (m_deadcrootc_xfer_to_fire                    , a_m_deadcrootc_xfer_to_fire)
+               CALL acc1d (m_gresp_xfer_to_fire                         , a_m_gresp_xfer_to_fire)
+               CALL acc1d (m_livestemc_to_deadstemc_fire                , a_m_livestemc_to_deadstemc_fire)
+               CALL acc1d (m_livecrootc_to_deadcrootc_fire              , a_m_livecrootc_to_deadcrootc_fire)
+               CALL acc1d (m_leafc_to_litter_fire                       , a_m_leafc_to_litter_fire)
+               CALL acc1d (m_frootc_to_litter_fire                      , a_m_frootc_to_litter_fire)
+               CALL acc1d (m_livestemc_to_litter_fire                   , a_m_livestemc_to_litter_fire)
+               CALL acc1d (m_deadstemc_to_litter_fire                   , a_m_deadstemc_to_litter_fire)
+               CALL acc1d (m_livecrootc_to_litter_fire                  , a_m_livecrootc_to_litter_fire)
+               CALL acc1d (m_deadcrootc_to_litter_fire                  , a_m_deadcrootc_to_litter_fire)
+               CALL acc1d (m_leafc_storage_to_litter_fire               , a_m_leafc_storage_to_litter_fire)
+               CALL acc1d (m_frootc_storage_to_litter_fire              , a_m_frootc_storage_to_litter_fire)
+               CALL acc1d (m_livestemc_storage_to_litter_fire           , a_m_livestemc_storage_to_litter_fire)
+               CALL acc1d (m_deadstemc_storage_to_litter_fire           , a_m_deadstemc_storage_to_litter_fire)
+               CALL acc1d (m_livecrootc_storage_to_litter_fire          , a_m_livecrootc_storage_to_litter_fire)
+               CALL acc1d (m_deadcrootc_storage_to_litter_fire          , a_m_deadcrootc_storage_to_litter_fire)
+               CALL acc1d (m_gresp_storage_to_litter_fire               , a_m_gresp_storage_to_litter_fire)
+               CALL acc1d (m_leafc_xfer_to_litter_fire                  , a_m_leafc_xfer_to_litter_fire)
+               CALL acc1d (m_frootc_xfer_to_litter_fire                 , a_m_frootc_xfer_to_litter_fire)
+               CALL acc1d (m_livestemc_xfer_to_litter_fire              , a_m_livestemc_xfer_to_litter_fire)
+               CALL acc1d (m_deadstemc_xfer_to_litter_fire              , a_m_deadstemc_xfer_to_litter_fire)
+               CALL acc1d (m_livecrootc_xfer_to_litter_fire             , a_m_livecrootc_xfer_to_litter_fire)
+               CALL acc1d (m_deadcrootc_xfer_to_litter_fire             , a_m_deadcrootc_xfer_to_litter_fire)
+               CALL acc1d (m_gresp_xfer_to_litter_fire                  , a_m_gresp_xfer_to_litter_fire)
+               CALL acc1d (m_leafn_to_fire                              , a_m_leafn_to_fire)
+               CALL acc1d (m_frootn_to_fire                             , a_m_frootn_to_fire)
+               CALL acc1d (m_livestemn_to_fire                          , a_m_livestemn_to_fire)
+               CALL acc1d (m_deadstemn_to_fire                          , a_m_deadstemn_to_fire)
+               CALL acc1d (m_livecrootn_to_fire                         , a_m_livecrootn_to_fire)
+               CALL acc1d (m_deadcrootn_to_fire                         , a_m_deadcrootn_to_fire)
+               CALL acc1d (m_leafn_storage_to_fire                      , a_m_leafn_storage_to_fire)
+               CALL acc1d (m_frootn_storage_to_fire                     , a_m_frootn_storage_to_fire)
+               CALL acc1d (m_livestemn_storage_to_fire                  , a_m_livestemn_storage_to_fire)
+               CALL acc1d (m_deadstemn_storage_to_fire                  , a_m_deadstemn_storage_to_fire)
+               CALL acc1d (m_livecrootn_storage_to_fire                 , a_m_livecrootn_storage_to_fire)
+               CALL acc1d (m_deadcrootn_storage_to_fire                 , a_m_deadcrootn_storage_to_fire)
+               CALL acc1d (m_leafn_xfer_to_fire                         , a_m_leafn_xfer_to_fire)
+               CALL acc1d (m_frootn_xfer_to_fire                        , a_m_frootn_xfer_to_fire)
+               CALL acc1d (m_livestemn_xfer_to_fire                     , a_m_livestemn_xfer_to_fire)
+               CALL acc1d (m_deadstemn_xfer_to_fire                     , a_m_deadstemn_xfer_to_fire)
+               CALL acc1d (m_livecrootn_xfer_to_fire                    , a_m_livecrootn_xfer_to_fire)
+               CALL acc1d (m_deadcrootn_xfer_to_fire                    , a_m_deadcrootn_xfer_to_fire)
+               CALL acc1d (m_livestemn_to_deadstemn_fire                , a_m_livestemn_to_deadstemn_fire)
+               CALL acc1d (m_livecrootn_to_deadcrootn_fire              , a_m_livecrootn_to_deadcrootn_fire)
+               CALL acc1d (m_retransn_to_fire                           , a_m_retransn_to_fire)
+               CALL acc1d (m_leafn_to_litter_fire                       , a_m_leafn_to_litter_fire)
+               CALL acc1d (m_frootn_to_litter_fire                      , a_m_frootn_to_litter_fire)
+               CALL acc1d (m_livestemn_to_litter_fire                   , a_m_livestemn_to_litter_fire)
+               CALL acc1d (m_deadstemn_to_litter_fire                   , a_m_deadstemn_to_litter_fire)
+               CALL acc1d (m_livecrootn_to_litter_fire                  , a_m_livecrootn_to_litter_fire)
+               CALL acc1d (m_deadcrootn_to_litter_fire                  , a_m_deadcrootn_to_litter_fire)
+               CALL acc1d (m_leafn_storage_to_litter_fire               , a_m_leafn_storage_to_litter_fire)
+               CALL acc1d (m_frootn_storage_to_litter_fire              , a_m_frootn_storage_to_litter_fire)
+               CALL acc1d (m_livestemn_storage_to_litter_fire           , a_m_livestemn_storage_to_litter_fire)
+               CALL acc1d (m_deadstemn_storage_to_litter_fire           , a_m_deadstemn_storage_to_litter_fire)
+               CALL acc1d (m_livecrootn_storage_to_litter_fire          , a_m_livecrootn_storage_to_litter_fire)
+               CALL acc1d (m_deadcrootn_storage_to_litter_fire          , a_m_deadcrootn_storage_to_litter_fire)
+               CALL acc1d (m_leafn_xfer_to_litter_fire                  , a_m_leafn_xfer_to_litter_fire)
+               CALL acc1d (m_frootn_xfer_to_litter_fire                 , a_m_frootn_xfer_to_litter_fire)
+               CALL acc1d (m_livestemn_xfer_to_litter_fire              , a_m_livestemn_xfer_to_litter_fire)
+               CALL acc1d (m_deadstemn_xfer_to_litter_fire              , a_m_deadstemn_xfer_to_litter_fire)
+               CALL acc1d (m_livecrootn_xfer_to_litter_fire             , a_m_livecrootn_xfer_to_litter_fire)
+               CALL acc1d (m_deadcrootn_xfer_to_litter_fire             , a_m_deadcrootn_xfer_to_litter_fire)
+               CALL acc1d (m_retransn_to_litter_fire                    , a_m_retransn_to_litter_fire)
+               CALL acc1d (m_litr1_c_to_fire                            , a_m_litr1_c_to_fire)
+               CALL acc1d (m_litr1_n_to_fire                            , a_m_litr1_n_to_fire)
+               CALL acc1d (m_litr2_c_to_fire                            , a_m_litr2_c_to_fire)
+               CALL acc1d (m_litr2_n_to_fire                            , a_m_litr2_n_to_fire)
+               CALL acc1d (m_litr3_c_to_fire                            , a_m_litr3_c_to_fire)
+               CALL acc1d (m_litr3_n_to_fire                            , a_m_litr3_n_to_fire)
+               CALL acc1d (m_cwd_c_to_fire                              , a_m_cwd_c_to_fire)
+               CALL acc1d (m_cwd_n_to_fire                              , a_m_cwd_n_to_fire)
+            ENDIF
             CALL acc1d (leafc              , a_leafc               )
             CALL acc1d (leafc_storage      , a_leafc_storage       )
             CALL acc1d (leafc_xfer         , a_leafc_xfer          )
@@ -2416,7 +2939,9 @@ IF (DEF_USE_BGC) THEN
             CALL acc1d (grainc_to_seed     ,   a_grainc_to_seed     )
             CALL acc1d (fert_to_sminn      ,   a_fert_to_sminn      )
 
+            ! growing-season running totals: keep the latest value (written as instantaneous)
             a_sum_irrig = sum_irrig
+            a_sum_deficit_irrig = sum_deficit_irrig
             a_sum_irrig_count = sum_irrig_count
             a_waterstorage = waterstorage
             CALL acc1d (groundwater_demand   ,   a_groundwater_demand )
@@ -2880,7 +3405,7 @@ ENDIF
    END SUBROUTINE accumulate_fluxes
 
 
-   !------
+
    SUBROUTINE acc1d (var, s)
 
    USE MOD_Precision

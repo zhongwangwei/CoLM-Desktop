@@ -63,6 +63,7 @@ CONTAINS
    USE MOD_SPMD_Task
    USE MOD_Mesh
    USE MOD_LandPatch
+   USE MOD_Vars_Global, only: spval
    IMPLICIT NONE
 
       IF (p_is_worker) THEN
@@ -94,7 +95,12 @@ CONTAINS
             allocate (forc_hgt_t  (numpatch) ) ! observational height of temperature [m]
             allocate (forc_hgt_q  (numpatch) ) ! observational height of humidity [m]
             allocate (forc_rhoair (numpatch) ) ! air density [kg/m3]
-            allocate (forc_ozone  (numpatch) ) ! air density [kg/m3]
+            allocate (forc_ozone  (numpatch) ) ! ozone concentration [ppbv]
+            ! FIX upstream-bugs #70: without DEF_USE_OZONEDATA, forc_ozone is assigned only
+            ! by the first CalcOzoneStress call of a patch, but acc1d(forc_ozone, a_ozone)
+            ! runs for every patch every step. Start from spval so acc1d skips patches
+            ! that never ran LeafTemperature instead of accumulating uninitialized memory.
+            forc_ozone(:) = spval
 
             allocate (forc_hpbl   (numpatch) ) ! atmospheric boundary layer height [m]
 

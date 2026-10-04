@@ -86,6 +86,7 @@ CONTAINS
    SUBROUTINE init_user_specified_forcing
 
    USE MOD_Namelist
+   USE MOD_SPMD_Task, only: CoLM_stop
    IMPLICIT NONE
 
    ! Local variables
@@ -133,6 +134,11 @@ CONTAINS
       lonname          = DEF_forcing%lonname          ! dimension name of longitude
 
       groupby          = DEF_forcing%groupby          ! file grouped by year/month
+      ! setstampLB/UB have a 'day' branch (one day of records per file), but metfilename has
+      ! no daily file names: every day would silently re-read the start of a year/month file.
+      IF (trim(groupby) == 'day') THEN
+         CALL CoLM_stop ("DEF_forcing%groupby = 'day' is not supported: metfilename has no daily file names")
+      ENDIF
 
       DO ivar = 1, NVAR_default
          fprefix (ivar) = DEF_forcing%fprefix(ivar)   ! file prefix

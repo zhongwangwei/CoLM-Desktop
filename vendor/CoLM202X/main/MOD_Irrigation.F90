@@ -26,7 +26,7 @@ MODULE MOD_Irrigation
        groundwater_demand, groundwater_supply, reservoirriver_demand, reservoirriver_supply, &
        reservoir_supply, river_supply, runoff_supply, &
        waterstorage, deficit_irrig, actual_irrig, irrig_gw_alloc, irrig_sw_alloc, zwt_stand
-   USE MOD_Vars_PFTimeInvariants, only: pftclass
+   USE MOD_Vars_PFTimeInvariants, only: pftclass, pftfrac
    USE MOD_Vars_PFTimeVariables, only: irrig_method_p
    USE MOD_BGC_Vars_PFTimeVariables, only: cphase_p
    USE MOD_Vars_1DForcing, only: forc_t, forc_frl, forc_psrf, forc_us, forc_vs
@@ -185,23 +185,26 @@ CONTAINS
       ENDDO
 
       !  calculate total irrigation needed in all soil layers
-      DO m = ps, pe
-         DO j = 1, nl_soil
-            IF (.not. reached_max_depth) THEN
-               IF (z_soi(j) > DEF_TUNING_IRRIGATION_MAX_DEPTH) THEN
-                  reached_max_depth = .true.
-               ELSEIF (j > nbedrock) THEN
-                  reached_max_depth = .true.
-               ELSEIF (t_soisno(j,i) <= tfrz) THEN
-                  reached_max_depth = .true.
-               ELSE
-                  h2osoi_liq_tot = h2osoi_liq_tot + wliq_soisno(j,i)
-                  h2osoi_liq_wilting_point_tot = h2osoi_liq_wilting_point_tot + h2osoi_liq_wilting_point(j)
-                  h2osoi_liq_field_capacity_tot = h2osoi_liq_field_capacity_tot + h2osoi_liq_field_capacity(j)
-                  h2osoi_liq_saturation_capacity_tot = h2osoi_liq_saturation_capacity_tot + h2osoi_liq_saturation_capacity(j)
-               ENDIF
+      !  The soil column and the irrigation state belong to the patch: the sums are taken once
+      !  (the old PFT loop kept accumulating them for every further PFT) and the patch is
+      !  irrigated with the method of its dominant PFT (the only PFT of a crop patch).
+      DO j = 1, nl_soil
+         IF (.not. reached_max_depth) THEN
+            IF (z_soi(j) > DEF_TUNING_IRRIGATION_MAX_DEPTH) THEN
+               reached_max_depth = .true.
+            ELSEIF (j > nbedrock) THEN
+               reached_max_depth = .true.
+            ELSEIF (t_soisno(j,i) <= tfrz) THEN
+               reached_max_depth = .true.
+            ELSE
+               h2osoi_liq_tot = h2osoi_liq_tot + wliq_soisno(j,i)
+               h2osoi_liq_wilting_point_tot = h2osoi_liq_wilting_point_tot + h2osoi_liq_wilting_point(j)
+               h2osoi_liq_field_capacity_tot = h2osoi_liq_field_capacity_tot + h2osoi_liq_field_capacity(j)
+               h2osoi_liq_saturation_capacity_tot = h2osoi_liq_saturation_capacity_tot + h2osoi_liq_saturation_capacity(j)
             ENDIF
-         ENDDO
+         ENDIF
+      ENDDO
+      m = dominant_irrig_pft (ps, pe)
          IF (irrig_method_p(m) == irrig_method_drip .or. irrig_method_p(m) == irrig_method_sprinkler .or. &
                irrig_method_p(m) == irrig_method_flood) THEN
                !  flood irrigation threshold at field capacity, but irrigation amount at saturation capacity
@@ -212,7 +215,6 @@ CONTAINS
                !  default irrigation is sprinkler irrigation
                h2osoi_liq_target_tot = h2osoi_liq_field_capacity_tot
          ENDIF
-      ENDDO
 
       !  calculate irrigation threshold
       deficit_irrig(i) = 0._r8
@@ -221,7 +223,6 @@ CONTAINS
          (h2osoi_liq_target_tot - h2osoi_liq_wilting_point_tot)
 
       !   calculate total irrigation
-      DO m = ps, pe
          IF (h2osoi_liq_tot < h2osoi_liq_at_threshold) THEN
             IF (irrig_method_p(m) == irrig_method_sprinkler) THEN
                 deficit_irrig(i) = DEF_TUNING_IRRIGATION_SUPPLY_FRACTION * &
@@ -237,9 +238,18 @@ CONTAINS
          ELSE
             deficit_irrig(i) = 0
          ENDIF
-      ENDDO
 
    END SUBROUTINE CalIrrigationPotentialNeeded
+
+   ! The PFT whose irrigation method the patch uses: the largest pftfrac, the first on ties.
+   integer FUNCTION dominant_irrig_pft (ps, pe)
+      integer, intent(in) :: ps, pe
+      integer :: m
+      dominant_irrig_pft = ps
+      DO m = ps+1, pe
+         IF (pftfrac(m) > pftfrac(dominant_irrig_pft)) dominant_irrig_pft = m
+      ENDDO
+   END FUNCTION dominant_irrig_pft
 
    SUBROUTINE CalIrrigationApplicationFluxes(i,deltim,qflx_irrig_drip,qflx_irrig_sprinkler,qflx_irrig_flood,qflx_irrig_paddy)
       !   DESCRIPTION:
@@ -259,7 +269,8 @@ CONTAINS
       qflx_irrig_paddy = 0._r8
 
       !   add irrigation fluxes to precipitation or land surface
-      DO m = ps, pe
+      !   (once per patch step: the old PFT loop withdrew water and counted a step per PFT)
+      m = dominant_irrig_pft (ps, pe)
          IF (n_irrig_steps_left(i) > 0) THEN
             n_irrig_steps_left(i) = n_irrig_steps_left(i) -1
             IF (waterstorage(i) - irrig_rate(i)*deltim < 0._r8) irrig_rate(i) = waterstorage(i)/deltim
@@ -278,7 +289,6 @@ CONTAINS
          ELSE
              irrig_rate(i) = 0._r8
          ENDIF
-      ENDDO
    END SUBROUTINE CalIrrigationApplicationFluxes
 
    SUBROUTINE PointNeedsCheckForIrrig(i,ps,pe,idate,deltim,dlon,npcropmin,check_for_irrig)
@@ -305,6 +315,9 @@ CONTAINS
          ENDIF
       ENDDO
 
+      ! the patch is checked when any of its irrigated crop PFTs is in season (the old loop kept
+      ! only the last PFT's answer)
+      check_for_irrig = .false.
       DO m = ps, pe
          ivt = pftclass(m)
          IF ((ivt >= npcropmin) .and. (irrig_crop(ivt)) .and. &
@@ -318,11 +331,7 @@ CONTAINS
             ENDIF
             IF ((seconds_since_irrig_start_time >= 0._r8) .and. (seconds_since_irrig_start_time < deltim)) THEN
                 check_for_irrig = .true.
-            ELSE
-                check_for_irrig = .false.
             ENDIF
-         ELSE
-            check_for_irrig = .false.
          ENDIF
       ENDDO
 

@@ -35,7 +35,7 @@
 
 - **位置**：`run/examples/SiteSYSUAtmos_IGBP_VG.nml:19-20`（`USE_SITE_topostd`、`USE_SITE_BVIC`）。
 - **原因**：`share/MOD_Namelist.F90` 没有这两个键；namelist 读取带 `iostat` 检查，读到未知键即 `CoLM_Stop`。
-- **处理**：删去这两行。
+- **处理**：删去这两行（vendor 原来漏删，第 560 轮补上）。
 
 ### 4. `MOD_Thermal` 的 `pn` 在非 TRACER 构建里未定义
 
@@ -53,7 +53,8 @@
   （`:625`）内就交给了 `stomata`。上游的修复只在 `.not. DEF_USE_OZONESTRESS` 时于迭代前置 1；
   **臭氧胁迫打开时**，一次运行的第一次调用读到的仍是未定义值（实测关闭时第 1 步 `etr` 小 4800 倍，
   打开时同源）。
-- **处理**：迭代前无条件置 1（臭氧打开时迭代后的 `CalcOzoneStress` 照常覆盖）。
+- **处理**：迭代前无条件置 1（臭氧打开时迭代后的 `CalcOzoneStress` 照常覆盖）。LCT（`MOD_LeafTemperature`）早已如此；
+  PC（`MOD_LeafTemperaturePC`）原来仍只在臭氧关闭时置 1，第 560 轮补齐。Rust 尚未移植臭氧胁迫，`DEF_USE_OZONESTRESS = .true.` 现在明确拒绝。
 
 ### 16. VIC 产流那一支不给 `frcsat` 赋值
 
@@ -61,7 +62,9 @@
 - **原因**：`frcsat` 在 `WATER_VSF` 里是 `intent(out)`（`:741`），其余三个产流方案都给它赋值，
   VIC 这一支没有。按标准是未定义值；gfortran 下实际保留数组里原来的值（分配时的 `spval`），
   所以 `f_frcsat` 整列是填充值。
-- **处理**：`vendor/` 未改（改了会改变输出）；Rust 照内核的实际结果，VIC 时不写 `f_frcsat`。
+- **处理**：vendor 已修（第 555 轮）：`Runoff_VIC` 新增 `intent(out) frcsat = cell%asat`，`WATER_VSF` 的 VIC 支传进
+  `frcsat`，另外三处不保留它的调用传局部 `frcsat_vic`；动态湿地支补 `frcsat = 1.`。Rust 的 VIC 返回饱和面积比
+  （`water_2014.rs::vic_runoff_for`），VSF 写出它。只有干湖的 `f_frcsat` 仍是填充值（`CoLMMAIN.F90:1237`）。
 
 ### 17. `-fdefault-real-8` 不带 `-fdefault-double-8`：带 `d0` 的表达式被提升成四倍精度
 
@@ -74,8 +77,11 @@
   或加上 `-fdefault-double-8`，数值就不同；而且明显更慢。
 - **影响**：`calc_Q12` 在"可排水量几乎为零"时（`tmp_liq ≈ resid_moist`）最后一步相消超过 53 位，
   Fortran 结果的末几位由 `powq` 的舍入决定。
-- **处理**：`vendor/` 未改。Rust 用双倍双精度（`colm-core/src/extended.rs`，约 106 位）复现这些表达式；
-  相消超过约 50 位的极少数情形不保证逐位一致。建议上游加 `-fdefault-double-8`，或把这些 `d0` 改成 `_r8`。
+- **处理**：vendor 已修（第 558 轮）：所有 gnu 的 `Makeoptions*`（及 `oracle/scripts` 的对照脚本）加 `-fdefault-double-8`，
+  这些表达式回到 double，与 ifort `-r8` 的语义一致。受影响的是 VIC `calc_Q12`、`MOD_IncompleteGamma`、`MOD_Utils`
+  的 `lmder` 与 `MOD_prospect_DB`（GIMPLE 里 kind=16 的行数 21/32/97/118 → 0）；Rust 对应改成普通 f64（去掉 GRATIO 的
+  `F128` 与 VIC 用的双倍双精度），逐位对照全部为 0 不一致。`MOD_3DCanopyRadiation` 与城市长短波源码里显式写
+  `real(r16)`，不受这个选项影响，Rust 仍用 `extended.rs` 复现。
 
 ### 18. `VIC_IceLay` 在 4 层分组时把未初始化的 `intent(out)` 当累加器
 
@@ -85,8 +91,8 @@
   `vic_para` 同一个局部数组里上一组（土层 4–6）刚写下的冻土区冰量。于是最深 VIC 层三个冻土区的冰是
   `wice(4)+wice(7)`、`总和-两端`、`wice(6)+wice(10)`，中间那一区可能为负，也不守恒于本组。
   另外这一组本意的拆分也有问题：`multiplier = merge((colm_lay-idx*vic_lay)/vic_lay, 0, …)` 是整数除法，恒为 0。
-- **处理**：`vendor/` 未改；Rust 照内核的实际行为复现（`vic.rs::partition_ice`），以保持两个引擎可比。
-  建议上游在循环前 `vic_ice = 0`，并重写这一支的拆分。
+- **处理**：vendor 已修（第 555 轮）：`VIC_IceLay` 的 ELSE 支先 `vic_ice = 0.`。Rust `vic.rs::partition_ice`
+  从零起算，不再读上一组的残值。整数除法那一处的拆分逻辑保持上游原意不动（它只决定分到哪一区）。
 
 ### 19. `adjust_lake_layer` 对零深度读未初始化数组、对极薄湖层跳过重映射
 
@@ -110,8 +116,7 @@
   阴面权重偏大 `dfwsun`，反之偏小。分母做了归一，所以结果仍是加权平均，只是权重错了。
 - **影响**：只有诊断量 `twall`（history `f_t_wall`）。`:621` 之后 `fwsha` 再无别的有效用处
   （`:798/956/1258` 里只出现在注释中）。AU-Preston 第 1 步差 1.4e-3 K。
-- **处理**：`vendor/` 未改（改了会改变输出）；Rust 照内核的实际行为，**不**在更新后重算 `fwsha`
-  （`urban_thermal.rs`）。建议上游在 `:621` 之后补 `fwsha = 1. - fwsun`。
+- **处理**：vendor 已修（第 554 轮）：`fwsun = fwsun + dfwsun` 之后补 `fwsha = 1. - fwsun`；Rust `urban_thermal.rs` 同样重算。
 
 ### 21. `UrbanTHERMAL` 读未初始化的 `dT(5)`
 
@@ -121,8 +126,7 @@
 - **影响**：`dX` 的每个分量都含 `Ainv(i,5)*dBdT(5)*dT(5)`，进而进 `dlw*`、`lout`、`olrg`。
   实测 AU-Preston 1488 步 Fortran 读到的全是 0（macOS 的新分配页），所以结果恰好等于 `dT(5) = 0`；
   换平台或换分配器可能不同。
-- **处理**：`vendor/` 未改；Rust 取 0（`urban_thermal.rs`）。建议上游赋 `dT(5) = 0.`（叶温已在
-  `UrbanVegFlux` 里闭合，长波增量不应再计一次）。
+- **处理**：vendor 已有 `IF (doveg) dT(5) = 0.`（与 Rust 一致），第 554 轮核对过，无需再改。
 
 ### 22. 城市冷启动把未初始化的 `t_roof`/`t_wall` 写进重启
 
@@ -130,7 +134,7 @@
   （`ncio_write_vector (…, 't_roof', …)`）；`mkinidata/` 里没有任何地方给它们赋值。
 - **原因**：`t_roof`/`t_wall` 是诊断量，只在 `UrbanTHERMAL` 里算；冷启动 `allocate` 后直接写出。
 - **影响**：只有冷启动重启里的这两个值（实测 macOS 上是 0）；第一步 `UrbanTHERMAL` 会覆盖它们。
-- **处理**：`vendor/` 未改；colm-init 照实测写 0（`urban_restart.rs`）。建议上游初始化为 `tref` 或 0。
+- **处理**：vendor 已修（第 554 轮）：分配后 `t_roof(:) = 0.; t_wall(:) = 0.`，与 colm-init 写的 0 一致。
 
 ### 23. 单点历史写回模式下 `DEF_HIST_FREQ = 'none'` 读未初始化的 `secs_write`（SIGILL）
 
@@ -141,8 +145,8 @@
 - **影响**：单点、`USE_SITE_HistWriteBack = .true.`、`DEF_HIST_FREQ = 'none'` 时 `colm.x` 一启动就 SIGILL。
   回溯（按 ASLR 偏移 `0x980000` 符号化）：`hist_single_init + 175` ← `hist_init + 227` ← `MAIN__`。
   关掉写回（`USE_SITE_HistWriteBack = .false.`）即可正常跑，历史累加照常进行、只是不写文件。
-- **处理**：`vendor/` 未改；Rust 引擎不走写回缓冲，`'none'` 下照上游语义只累加、不写历史，续跑旁车存整段原始窗口
-  （与关掉写回的 Fortran 逐位一致，第 431 轮）。建议上游补 `CASE DEFAULT`（或 `'none'` 时不建写回缓冲）。
+- **处理**：vendor 已修（第 555 轮）：补 `CASE DEFAULT`（`secs_write = secs_group`），`secs_group` 的 ELSE 支取一年。
+  Rust 引擎本来不走写回缓冲，行为不变。
 
 ### 24. `CNFireArea`/`CNFireFluxes` 的 `ivt` 从不赋值
 
@@ -155,8 +159,8 @@
 - **影响**：火烧面积只剩泥炭火（`fsr_pft(0) = fd_pft(0) = 0`），植被燃烧系数 `cc_*(0) = 0`；纯作物 patch
   （`cropf = 1`）也走自然植被那一支，`1/(1-cropf)`、`fd_pft(0)*3600/(1-cropf)` 必然除零——内核带
   `-ffpe-trap=invalid,zero,overflow`，CROP 内核打开 FIRE 第一步即 SIGILL（lldb：`cnfirearea+33892` 的 `fdiv`）。
-- **处理**：`vendor/` 未改；Rust 照编译产物按 0（`regen.py` 的 `ZERO_INIT`），并在 `CNFireArea` 之后检查输出是否
-  有限、不有限就同样终止（`bgc_fire_support::ensure_no_fp_trap`）。建议上游在 PFT 循环里取 `ivt = pftclass(m)`。
+- **处理**：并入 CoLM-SYSU/CoLM PR #504（第 556 轮）：两个过程都在 PFT 循环里取 `ivt = pftclass(m)`。Rust 由
+  `regen.py` 从新的 GIMPLE 重新生成 `bgc_fire.rs`，不再按 0 处理。
 
 ### 25. FIRE 的其他记账错误（`CNFireFluxes`）
 
@@ -169,7 +173,8 @@
   - 凋落物与粗木质残体的燃烧（`m_decomp_cpools_to_fire_vr`）从池里扣掉，却不计入 `CBalanceCheck` 的输出项
     （`fire_closs` 恒为 0），收支误差随火烧面积累积：合成数据下 AT-Neu 2010-08-15 第 10885 步
     `column cbalance error = 1.0002e-7` 超限 abort。
-- **处理**：`vendor/` 未改；Rust 照转写（生成代码逐字复现），在同一步以同样的收支误差终止。
+- **处理**：并入 PR #504（第 556 轮）：`m` → `mort`、下标改成 PFT 类别、各项每步清零，凋落物/粗木质残体燃烧计入
+  `fire_closs` 进收支检查；另把泥炭火排放 `somc_fire` 记为诊断量（不从土壤池扣）。Rust 由生成器同步。
 
 ### 26. FIRE 的五个历史量写的是临时数组 `vecacc`
 
@@ -179,7 +184,8 @@
 - **影响**：写出的是上一次用 `vecacc` 写历史后的残留、每个量再多除一次 `nac`：默认内核里上一次是 `f_wetzwt`
   （湿地过滤，BGC patch 恒为土壤 → 五个量全是缺测），CROP 内核里灌溉关时是 `f_grainc_to_cropprodc`、
   灌溉开时是 `f_runoff_supply`（`filter_irrig`）。
-- **处理**：`vendor/` 未改；Rust 照写（`history.rs` 的 `FIRE_HISTORY` 与 `write_fire_history`），`a_abm` 等照常累加进旁车。
+- **处理**：并入 PR #504（第 556 轮）：五个量改传 `a_abm` 等累加器，同时新增 104 个火诊断累加量（`a_farea_burned`…）。
+  Rust 去掉复现 `vecacc` 残留的特例，全部走普通时间平均（`history.rs` 的 `FIRE_SOURCES`/`FIRE_DIAGNOSTICS`）。
 
 ### 27. 灌溉历史量：`f_sum_deficit_irrig` 恒缺测，三个"年累计"量被除以 `nac`
 
@@ -189,8 +195,8 @@
   `write_history_variable_2d` 的 `/nac` 处理。
 - **影响**：`f_sum_deficit_irrig` 永远是缺测；`f_sum_irrig`/`f_sum_irrig_count`/`f_waterstorage` 写出的是
   "窗口末步的年累计值 / 窗口步数"（日输出时是 /24），既不是累计也不是平均。
-- **处理**：`vendor/` 未改；Rust 照写（`history.rs` 的 `ASSIGNED_VARIABLES` 与 `irrigation_history_value`），
-  旁车里存末值，与上游 `a_*` 一致。
+- **处理**：vendor 已修（第 555 轮）：补 `a_sum_deficit_irrig = sum_deficit_irrig`，四个量按瞬时量写（先乘 `nac`
+  再交给除 `nac` 的写出器，即写末值）。Rust 的 `ASSIGNED_VARIABLES` 同样写末值。
 
 ### 28. 灌溉的逐 PFT 循环不适合多 PFT patch（潜在）
 
@@ -200,7 +206,9 @@
   一遍；`deficit_irrig`/`check_for_irrig` 都取最后一个 PFT 的结果；施灌时每个 PFT 各减一次
   `n_irrig_steps_left`、各从 `waterstorage` 扣一次。
 - **影响**：CROP 构建里作物 patch 只有一个 PFT，碰不到；若 patch 内有多个 PFT，灌溉量与持续步数都不对。
-- **处理**：`vendor/` 未改；Rust 逐字照搬（`colm-core/src/irrigation.rs`）。
+- **处理**：vendor 已修（第 557 轮）：土柱各总量只算一遍，patch 的灌溉方式取份额最大的 PFT（`dominant_irrig_pft`，
+  并列取第一个），施灌每步只扣一次存水，`check_for_irrig` 改为"任一可灌作物 PFT 在窗口内"。作物 patch 只有一个 PFT，
+  结果不变。Rust `irrigation.rs` 同步（`IrrigationState::dominant_pft`）。
 
 ### 29. `f_irrig_method_corn` 只写雨养玉米
 
@@ -208,7 +216,7 @@
 - **原因**：玉米的过滤条件是 `pftclass == 17`（雨养温带玉米），其余七种作物都是"雨养 + 灌溉"两个类别
   （如春小麦 19/20）。
 - **影响**：灌溉玉米（18）patch 上 `f_irrig_method_corn` 是缺测，而这正是唯一会灌溉的玉米。
-- **处理**：`vendor/` 未改；Rust 照写（`CROP_TYPE_HISTORY` 的 `irrig_method_corn` 只认 17）。
+- **处理**：vendor 已修（第 555 轮）：过滤条件改为 17 或 18；Rust `CROP_TYPE_HISTORY` 同步。
 
 ### 30. 单点 mksrfdata 正常结束时退出码为 1（`85cf2328` 引入）
 
@@ -223,14 +231,16 @@
 - **位置**：`mkinidata/MOD_Initialize.F90:513-564`。
 - **原因**：`DEF_TOPMOD_method == 0` 只赋 `fsatmax`/`fsatdcf`，另外四个量只在方法 1、2 读文件；分配后没有初值。
 - **影响**：写进常数重启的是未定义内存（单点纯 Fortran 实测为 0）。方法 0 下它们不参与计算，结果不受影响。
-- **处理**：`vendor/` 未改；Rust 写 0（原先写的是自拟占位值 9.27/1.34/1.61/6.95），与实测一致。
+- **处理**：vendor 已修（第 555 轮）：`DEF_Runoff_SCHEME == 0` 时先把四个量置 0 再按方法赋值；Rust 写 0，与之一致。
 
 ### 32. `DEF_LC_RESPCP` 不起作用
 
 - **位置**：`main/MOD_Const_LC.F90:902`（覆盖）、`main/MOD_AssimStomataConductance.F90:592`。
 - **原因**：`stomata` 里的 `respcp` 是局部量，每次按 `0.015*c3 + 0.025*c4` 重算，地类表的 `respcp` 从未传进去。
 - **影响**：设了 `DEF_LC_RESPCP` 也不改变任何结果。
-- **处理**：Rust 照样解析、保存，不使用。
+- **处理**：vendor 已修（第 557 轮）：`calc_photo_params` 在单点 LCT、设了 `DEF_LC_RESPCP` 时用它，否则照旧按
+  `0.015*c3 + 0.025*c4`（`DEF_LC_C3C4` 覆盖的语义不变）。Rust `LeafBiochemistry::respiration_fraction_override` 同步。
+- **上游适用性**：`DEF_LC_RESPCP`/`LC_OVERRIDE_UNSET` 这套单点地类覆盖是本仓库加的，上游没有；上游分支不改。
 
 ### 33. 多作物单点每个 patch 的 `tlai`/`tsai` 是各作物之和
 
@@ -239,7 +249,8 @@
   农田站点 `SITE_pctpfts = 1.`（不是 `pctcrop`），于是是各作物 LAI 直接相加。
 - **影响**：只有一种作物时无害；多作物站点每个 patch 的 `tlai`/`tsai`（以及由它们折算的 `lai`/`sai`、辐射、
   冠层）都偏大，且所有 patch 相同，与各自的 `tlai_p` 不一致。`DEF_USE_LAIFEEDBACK` 下 `tlai` 不走这里，`tsai` 仍然。
-- **处理**：`vendor/` 未改；Rust 照写（`colm-runtime/src/pft.rs` 的 `refresh_monthly_leaf_area_index`）。
+- **处理**：vendor 已修（第 557 轮）：每个 patch 只对自己的 PFT 区间求 `sum(SITE_LAI_pfts_monthly(ps:pe)*SITE_pctpfts(ps:pe))`；
+  自然站点只有一个 patch，与原来逐项相同。Rust `pft.rs` 同步。
 
 ### 34. 零示踪物时雪层合并/分裂传入未分配的示踪物数组切片
 
@@ -281,7 +292,7 @@
 - **证据**：`g1crop`（CROP 内核、灌溉关闭）的 `irrigarea` 恰好全为 0 —— 新分配的内存碰巧是零，
   换平台或换分配器就可能是任意值。
 - **影响**：CROP 内核、`HistForm = 'Gridded'`、`DEF_USE_IRRIGATION = .false.` 时的 `irrigarea` 静态量（不影响物理）。
-- **处理**：Rust 按"全假"写 0（第 503 轮），与本机观测一致；vendor 未改。
+- **处理**：vendor 已修（第 555 轮）：分配后 `filter_irrig(:) = .false.`；Rust 写 0，与之一致。
 
 ### 38. `run/forcing/GDAS.nml` 的 `missing_value_name` 漏了 `DEF_forcing%` 前缀
 
@@ -331,8 +342,8 @@
 - **影响**：
   - 选 `day` 时，每天都从年/月文件的开头几条记录读起，强迫静默错误（不停机）；
   - vendor 的 21 份网格强迫 namelist 没有一份用 `day`，所以默认配置不受影响。
-- **处理**：vendor 未改，因为上游要么补按天的文件名，要么删掉这个选项。Rust 在解析强迫配置时直接拒绝 `day`，
-  报错信息说明原因（第 522 轮）；此前它只笼统报"not ported"。
+- **处理**：vendor 已修（第 557 轮）：`init_user_specified_forcing` 遇到 `groupby = 'day'` 直接停机并说明原因
+  （不再静默读错记录）；Rust 同样拒绝。
 
 ### 42. 双线性强迫映射会取到区域块覆盖之外的格子
 
@@ -344,8 +355,9 @@
   - 生产内核：在 "Building bilinear interpolation" 之后 SIGSEGV；
   - 带越界检查的 debug 内核：`At line 753 of file share/MOD_SpatialMapping.F90: Index '0' of dimension 2 of array 'gblock%pio' below lower bound of 1`。
 - **影响**：几乎所有区域算例都会撞上。即使不越界，那些格子的强迫也不在读入的块里。只有全球区域才能跑。
-- **处理**：vendor 未改。正确的修法要上游决定：是把双线性的邻格扩进块覆盖，还是在区域边缘退化为最近格心。
-  Rust 已按上游写法移植 `build_bilinear`（含单测），但入口拒绝 `bilinear` 并说明原因（第 525 轮）。
+- **处理**：vendor 已修（第 557 轮）：选出的邻行/邻列若不在块覆盖里（`yblk/xblk = 0`），该方向退化为只用覆盖内那一侧
+  （权重 1/0）。全球区域每格都有块号，结果不变。Rust `build_bilinear` 接收 `DEF_domain`，按 `domain_window` 同样处理，
+  入口不再拒绝 `bilinear`。
 
 ### 43. LULCC 之后 `scale_baseflow` 仍按旧年 patch 编号取值
 
@@ -359,9 +371,11 @@
   - 多于旧年时：越界读（生产构建不查界）；
   - 没有标定文件（全是 1）时无影响，现有 LULCC 算例都属于这种（g3：175→172；g3p、g3c 的 patch 数不变）。
   - 下一段续跑重新读文件时仍按旧布局，错位依旧。
-- **处理**：vendor 未改。正确的修法需要上游定：要么标定文件按土地覆盖年份分开，要么在 LULCC 里按 SAT 配对重映射、新类型 patch 取 1。
-  - Rust 与 Fortran 的取值方式相同：按新 patch 编号读文件，文件太短时报错，而不是越界读。
-  - `DEF_Optimize_Baseflow`（只在 spinup 里迭代）与 LULCC 同开时，Rust 仍拒绝，理由改为本条（第 534 轮）。
+- **处理**：vendor 已修（第 557 轮）：`SAVE/REST_LulccTimeVariables` 把 `scale_baseflow` 与优化器的
+  `zwt_init/rchg_year/rsub_year` 按 SAT 配对搬到新布局，新出现的 patch 取 `Opt_Baseflow_init` 的缺省（1、spval，
+  `zwt_init` 在 `LulccDriver` 末尾取新年的 `zwt`）。另见第 54 条（优化器与 LULCC 的先后）。
+  Rust：`lulcc_transition` 按 `match_patches` 重映射 `scale_baseflow`，优化器以 `BaseflowOptimizer::carried_over`
+  跨段延续，不再拒绝 `DEF_Optimize_Baseflow` 与 LULCC 同开。续跑重读标定文件时仍按文件本身的布局（文件不带年份）。
 
 ### 44. MEC 城市段在两种情况下读失效的来源下标
 
@@ -373,7 +387,8 @@
   - 注释写的是"保留冷启动值"，代码没做到。
 - **情况二（份额没变、旧单元里又没有同城市类型）**：`FROM_SOIL` 遍历 `frnp_(1:num)` 判断来源里有没有土壤 patch，可 `frnp_` 只在份额有变化的分支里赋值，这里读的是刚 `allocate` 的未定义内容。
 - **影响**：只在城市布局逐年变化时出现。现有算例 g3um 两年城市布局相同，走不到。
-- **处理**：vendor 未改。情况一的正确做法应是跳过（保留冷启动值）；情况二应只在有来源时判断。Rust 在这两种情况下都拒绝并指向本条（第 534 轮）。
+- **处理**：vendor 已修（第 557 轮）：每个城市 patch 先复位 `selfu_ = u_ = -1`；旧单元没有城市 patch 时不抄（保留冷启动值）；
+  `FROM_SOIL` 只在份额有变化（`frnp_` 已赋值）时判断。Rust `lulcc_mec.rs::urban_tail` 同步，不再拒绝。
 
 ### 45. MEC 把 `get_zwt_from_wa` 的毫米结果直接写进以米计的 `zwt`
 
@@ -424,6 +439,7 @@
   - 修后整条纯 Fortran 链路 85 秒跑完。
 - **影响**：单进程 MPI 下开区域单元流域时，mksrfdata 永远不结束。多 rank、master 不兼 worker 的布局不受影响。
 - **处理**：vendor 已修（第 547 轮）。master 遇到自己那个 worker 时直接读本地 `remap%ids_me`，其余照旧收发。
+- **上游适用性**：上游的 `spmd_init` 不会让一个 rank 同时当 master 与 worker，只有本仓库的扁平 SPMD（FLAT_SPMD）会；上游分支不改。
 
 ### 49. 单点降尺度写 srfdata 时用了未定义的维度名 `type`
 
@@ -442,7 +458,8 @@
   - 再到旧年年末又调一次 `LulccDriver`，把已经是新年布局的状态当成旧年布局去做 SAT 转换。
 - **证据**：g3sc（g3 区域，2005-12-30 → 2006-01-01，预热到 2006-01-01、`spinup_repeat = 2`）。纯 Fortran 跑完不报错，日志里 `LULCC: initializing` 出现 2 次；2005 年 175 个 patch、2006 年 172 个。
 - **影响**：只要多遍预热的区间跨过 LULCC 年末，第二遍起的结果就没有意义（不报错）。单遍预热、或预热在第一个年末之前结束的情形不受影响。
-- **处理**：Rust 拒绝这种组合（第 550 轮），其余情形照上游实现。没改 vendor：合理的修法（回卷时恢复起始年的土地覆盖与状态）是行为变更，需要上游决定。
+- **处理**：vendor 已修（第 557 轮）：预热回卷时若本轮里做过 LULCC 就 `CoLM_stop` 并说明原因（不再静默跑出无意义的结果）。
+  真正恢复起始年土地覆盖的写法是行为变更，留给上游；Rust 同样拒绝。
 
 ### 51. LULCC 转移轨迹按像元数接收 zip 后的样本
 
@@ -451,7 +468,173 @@
   长度是源格数；随后 `lcfrbuff(ipxstt:ipxend) = lcdatafr_one(:)`、`areabuff(ipxstt:ipxend) = area_one(:)` 按 patch 的**像元数**接收。
 - **影响**：像元比 500 m 格细时（例如开了完整降尺度、地形因子网格并入像元，或网格边界不在 500 m 格线上），源格数少于像元数，赋值越界读，
   `lccpct_patches` 是垃圾值（不报错）。像元与 500 m 格一一对应时只是样本次序变成（列、行）升序，结果有定义。
-- **处理**：Rust 照上游的 zip 次序计算；源格数与像元数不等时拒绝（第 551 轮）。没改 vendor：正确的写法（按源格数分配缓冲）会改变现有结果的求和次序，需要上游决定。
+- **处理**：vendor 已修（第 557 轮）：直接遍历 zip 后的样本（`size(area_one)`），不再拷进按像元数分配的缓冲。
+  像元与源格一一对应时元素与次序都不变。Rust 本来就按 zip 样本算，去掉拒绝。
+
+### 52. `UrbanTHERMAL` 合并阳面/阴面墙内温时用了阳面自己的温度
+
+- **位置**：`main/URBAN/MOD_Urban_Thermal.F90:608`。
+- **原因**：`fwsun` 变化后按面积重分配内墙温，写成 `twsun_inner = (fwsun*twsun_inner + dfwsun*twsun_inner)/(fwsun+dfwsun)`，
+  第二项应为阴面 `twsha_inner`（阴面转为阳面的那部分带来的是阴面的温度）。式子因此（除舍入外）等于原值，重分配不起作用。
+- **影响**：城市模型 `fwsun` 变化（太阳高度角变化）的每一步，阳面内墙温度都少了阴面那部分的混合。
+- **处理**：vendor 已修（第 554 轮），Rust `urban_thermal.rs` 同步。
+
+### 53. `GRATIO` 在 `x < 0` 时只写 `ANS = 2`，TOPMODEL 方法 2 读到未定义的 `qgr`
+
+- **位置**：`share/MOD_IncompleteGamma.F90:400-403`（出错返回）；调用方 `main/MOD_Runoff.F90:107-126`、
+  PR #504 的 `main/BGC/MOD_BGC_Veg_CNFireLi2016.F90`（饱和面积比）。
+- **原因**：`x = (eta - mu_twi)/chi_twi`，初值 `eta = topoweti` 小于 `mu_twi` 时 `x < 0`，`GRATIO` 走出错返回、不写 `QANS`，
+  调用方接着把未赋值（或上一次调用残留）的 `qgr` 当饱和面积比；牛顿迭代里 `pgr0` 也无定义。
+- **影响**：`DEF_TOPMOD_method = 2` 下平均地形指数低于伽马分布下界的 patch，饱和面积比与地表产流不确定。
+- **处理**：vendor 已修（第 556 轮）：三处调用都传 `max(0, x)`（分布下界以下即全饱和，`x = 0` 时 `Q = 1`）；`MOD_Runoff` 的迭代
+  补 `IF (pgr0 <= 0.) EXIT` 避免除零。Rust `incomplete_gamma.rs` 逐位移植了 `GRATIO`（6464 组与 gfortran 逐位一致），
+  调用用保留 `qans` 语义的 `gratio_fortran`。
+
+### 54. 年末先做 LULCC 再结算基流优化：最后一步丢失，结算落在新布局上
+
+- **位置**：`main/CoLM.F90`：`LulccDriver`（年末）在前，`ParameterOptimization` 在约 120 行之后。
+- **原因**：LULCC 释放并重新分配通量数组（`fevpa/rsur/rsub = spval`），随后的 `BaseFlow_Optimize` 在这一步的累加被
+  `spval` 掩掉；年末结算用的 `zwt`/`zwt_init` 已经是新布局（而且第 43 条的数组还没重映射）。
+- **影响**：`DEF_Optimize_Baseflow` 与 LULCC 同开时，每年最后一步的补给与基流不计入，结算错位。
+- **处理**：vendor 已修（第 557 轮）：把 `ParameterOptimization` 挪到 LULCC 之前（两处之间只有 LAI 读入与写续跑，
+  不碰它的输入，所以不开 LULCC 时结果不变）。Rust 的优化器本来就在旧段最后一步结算。
+
+### 55. PR #504 新增的 `prec30`/`rh30_today` 冷启动是 `spval`
+
+- **位置**：`main/BGC/MOD_BGC_Vars_TimeVariables.F90`（分配为 `spval`）、`mkinidata/MOD_IniTimeVariable.F90`（只初始化
+  `prec10/prec60/prec365/prec_today/rh30` 等）。
+- **原因**：两个新量没有加进 `IniTimeVariable` 的参数表，冷启动重启里是 `spval`，与同类滑动平均（置 0）不一致。
+  第一步 `nsteps = 1` 时 `spval*0` 恰好不影响结果。
+- **处理**：vendor 已修（第 556 轮）：加进参数表并置 0；Rust 冷启动写出器同步写这两个量。
+
+### 56. WATER_2014 与两处漫滩再入渗不传 TWI 统计量：方法 2 解引用缺省的可选参数
+
+- **位置**：`main/MOD_SoilSnowHydrology.F90`：`WATER_2014` 调 `SurfaceRunoff_TOPMOD`（约 `:334`）、`WATER_2014` 与
+  `WATER_VSF` 的漫滩再入渗（约 `:404`、`:1082`）。
+- **原因**：`SurfaceRunoff_TOPMOD` 的 `topoweti/alp_twi/chi_twi/mu_twi` 是可选参数，方法 2 无条件读它们；这三处调用都不传。
+  GIMPLE 里就是直接读 `*mu_twi`，即空指针。
+- **影响**：`DEF_Runoff_SCHEME = 0`、`DEF_TOPMOD_method = 2` 时，经典 Richards（WATER_2014）或开了河湖漫滩回馈就崩溃；
+  城市透水地面（也走 WATER_2014）同样。
+- **处理**：vendor 已修（第 559 轮）：WATER_2014 新增可选参数 `topoweti/alp_twi/chi_twi/mu_twi`（CoLMMAIN 与城市水文按关键字传入），
+  三处调用都带上。Rust 同步（TOPMODEL 方法 1/2 原来只接了 VSF，见第 559 轮）。
+
+### 57. WATER_2014 的地下径流不传 `hksati/topoweti`：方法 1 静默退化为方法 0
+
+- **位置**：`main/MOD_SoilSnowHydrology.F90` 的 `groundwater` 调 `SubsurfaceRunoff_TOPMOD`（约 `:2563`）。
+- **原因**：方法 1/2 的分支要求 `present(hksati) .and. present(topoweti)`（或 `eta`），这里都不传，于是落进方法 0 的式子。
+  地表饱和面积在方法 0/1 本来同式，所以 WATER_2014 下方法 1 与方法 0 完全相同，用户不会察觉。
+- **处理**：vendor 已修（第 559 轮）：`groundwater` 新增可选 `hksati/topoweti/eta` 并转传；WATER_2014 传入地表那次带出的 `eta`。Rust 同步。
+
+### 58. TOPMODEL 方法 2 的牛顿初值 `eta = topoweti` 不高于 `mu_twi` 时直接判为全饱和
+
+- **位置**：`main/MOD_Runoff.F90` 方法 2；PR #504 的 FIRE 饱和面积比照抄了同一段。
+- **原因**：`x = (eta - mu_twi)/chi_twi` 在初值处 ≤ 0 时（截到 0 后）`pgr0 = 0`，迭代立即退出，`fsat = Q(alp, 0) = 1`，与水位无关。
+  数据自洽时 `topoweti` 是分布均值 `mu + alp·chi`，不会出现；插值或缺测填充造出的 patch 会。
+- **处理**：vendor 已修（第 559 轮）：`topoweti ≤ mu_twi` 时初值取 `mu_twi + alp_twi·chi_twi`（分布均值），Runoff 与 FIRE 两处一致。Rust 同步。
+
+### 59. TOPMODEL 方法 2 不初始化 `fsatmax/fsatdcf`
+
+- **位置**：`mkinidata/MOD_Initialize.F90` 方法 0/1/2 分支。
+- **原因**：方法 2 只读四个 TWI 量，`fsatmax/fsatdcf` 分配后不赋值就写进常数重启；漫滩再入渗那次调用（修第 56 条之前）会读 `fsatdcf`。
+- **处理**：vendor 已修（第 559 轮）：所有方法先赋方法 0 的值（0.38、0.125），方法 1 再读文件覆盖；Rust 的冷启动本来就这样写。
+
+### 60. WATER_2014 在 `gwat <= 0` 的步里不算 `eta`，方法 2 的基流按 `exp(0)` 爆大
+
+- **位置**：`main/MOD_SoilSnowHydrology.F90` WATER_2014 的 `IF (gwat > 0.) CALL SurfaceRunoff_TOPMOD` 与随后的 `groundwater`。
+- **原因**：方法 2 的地下径流是 `imped*3e3*mean(hksati)/DECAY*exp(-eta)`，`eta` 由地表那次调用带出；`gwat <= 0`（无雨、蒸发大于
+  入渗）时那次调用被跳过，`eta` 停在初值 0。修第 56/57 条之前方法 2 在 WATER_2014 下直接崩溃，修后才暴露。
+- **影响**：方法 2 + WATER_2014 下每个干步的基流比正常大三四个量级，土柱被抽干。
+- **处理**：vendor 已修（第 559 轮）：每步都调 `SurfaceRunoff_TOPMOD` 求 `eta`，`gwat` 不大于 0 时仍把 `rsur` 置 0（方法 0/1 结果逐位不变，
+  包括 `-0.0` 的边角）。Rust 同步。
+
+### 61. `CNFireArea` 对整个 `tsoi17` 数组赋值
+
+- **位置**：`main/BGC/MOD_BGC_Veg_CNFireLi2016.F90`（PR #504 之前就有）：`tsoi17 = forc_t(i)`。
+- **原因**：`tsoi17` 是逐 patch 的状态（进重启），这里漏了下标，每处理一个 patch 就把**所有** patch 的 `tsoi17` 改成这一个 patch 的气温。
+- **影响**：多 patch（空间）算例里，非最后处理的 patch 的 `tsoi17` 与重启值都是别处的气温；本步泥炭火用的是自己刚写的值，不受影响。单点无影响。
+- **处理**：vendor 已修（第 560 轮）：`tsoi17(i) = forc_t(i)`。Rust 原来在每步末用 `broadcast_fire_tsoi17` 复现整列赋值（第 501 轮加入），
+  现已删掉，各 patch 只写自己的。
+
+### 62. `CNFireFluxes` 拿弧度的 `patchlatr` 比以度计的 `borealat`
+
+- **位置**：`main/BGC/MOD_BGC_Veg_CNFireBase.F90`：`IF (patchlatr(i) < borealat)`；`CNFireArea` 用的是以度计的 `dlat`。
+- **原因**：`patchlatr` 是弧度（|值| ≤ π/2），与度比较恒为真，寒带分支永远走不到。
+- **处理**：vendor 已修（第 560 轮）：换算成度再比。Rust 由生成器同步。
+
+### 63. PR #504 的火参数被旧行覆盖；`troplat` 是错误的"换算"
+
+- **位置**：`mkinidata/MOD_Initialize.F90` 火参数段。
+- **原因**：
+  - PR #504 在段首新加 `occur_hi_gdp_tree = 0.33`、`borealat = 60`，却没删 PR 之前的 `occur_hi_gdp_tree = 0.39`、
+    `borealat = 40/(4*atan(1))`，后者排在后面，把新值覆盖了（`CNFireArea` 里另有局部 `parameter occur_hi_gdp_tree = 0.33`
+    遮住了重启里的 0.39，两处不一致）；`non_boreal_peatfire_c`/`boreal_peatfire_c` 也各赋了两次（值相同）。
+  - `borealat = 40/(4*atan(1))`（≈ 12.7）与 `troplat = 23.5/(4*atan(1))`（≈ 7.5）看起来想把度换成弧度却除错了，
+    而使用处都与以度计的 `dlat` 比较：寒带泥炭火的分界落在 12.7°N，热带落叶树的热带判据只剩 ±7.5°。
+- **处理**：vendor 已修（第 560 轮）：删掉重复的旧行，`borealat = 60`（度，按 PR 本意）、`troplat = 23.5`（度），
+  `occur_hi_gdp_tree = 0.33` 与局部常数一致。Rust 常数表同步。
+
+### 64. TOPMODEL 湿度指数偏度的 32 位整数溢出；只在部分方案下赋值的常数写进重启
+
+- **位置**：`mksrfdata/Aggregation_TopoWetness.F90`（patch 与单元两处）、`main/MOD_Vars_TimeInvariants.F90`。
+- **原因**：偏度的分母 `(npxl-1)*(npxl-2)` 是整数乘法，大 patch（子像元数过 46341）回绕，`alp/chi/mu_twi` 被夹到界上；
+  `BVIC`、三参数伽马的 TWI 量、`fsat*`、VIC 参数只在部分产流方案下赋值，却总写进常数重启。
+- **处理**：vendor 已修（第 466 轮）：分母改为 `real(npxl-1)*real(npxl-2)`；这些量分配时清零。
+
+### 65. URBAN 内核、不开城市时 TOPMODEL 湿度指数聚合用到未建的 `elm_patch`
+
+- **位置**：`mksrfdata/Aggregation_TopoWetness.F90`；`landpatch_build` 在 URBAN_MODEL 内核里把 `elm_patch` 留给 `landurban_build`。
+- **原因**：`DEF_Runoff_SCHEME = 0`、URBAN 内核、不开城市（也无 CROP、2 m WMO）时没人建 `elm_patch`，聚合段错误。
+- **处理**：vendor 已修（第 465 轮）：聚合前若未建就自己建（不改 `patchfrac_elm` 的写出条件）。
+- **上游适用性**：复核后**只在本仓库出现**——上游有 `URBAN_MODEL` 宏时一定调 `landurban_build`（它会建 `elm_patch`），是本仓库把城市改成
+  运行时开关 `DEF_URBAN_RUN` 后才可能跳过。第 465 轮记的"上游同样如此"有误；上游分支不改。
+
+### 66. LULCC 重新初始化时水库表重复分配、堤防蓄水被清零
+
+- **位置**：`mkinidata/MOD_Initialize.F90` 的 LULCC 再初始化路径（`reservoir_init`、`levee_init`）。
+- **原因**：水库数组没释放就再 `allocate`，开水库并跨过换年即崩溃；`levee_init` 把 `levsto/levdph` 置 0，堤内水每次换年凭空消失。
+- **处理**：vendor 已修（第 475 轮）：先释放水库表再初始化，堤防状态跨换年保留。
+
+### 67. LULCC 重新初始化把河网整张冷启动
+
+- **位置**：`main/LULCC/MOD_Lulcc_Initialize.F90`、`main/HYDRO/MOD_Grid_RiverLakeTimeVars.F90`。
+- **原因**：`LulccInitialize` 释放并重分配全部时间变量（含河道状态）再调 `initialize`：先是重建河网时重复分配崩溃，绕过后每年把河网冷启动成
+  `topo_rivhgt`，河道水量不守恒。单元流域不随土地覆盖变，状态本应保留（`grid_riverlake_flow_lulcc` 只补 `volwater_ucat` 也说明这一点）。
+- **处理**：vendor 已修（第 459 轮）：重建网络前先释放，`move_alloc` 把河道状态挪开、初始化后挪回。
+
+### 68. LCT 调 `LeafTemperature` 时 `ivt` 写死为 1：臭氧胁迫按温带常绿针叶林算
+
+- **位置**：`main/MOD_Thermal.F90:718` 的 `CALL LeafTemperature(ipatch,1,...)`（PFT/PC 模式下的非土壤 patch 也走这一支）。
+- **原因**：LCT 没有 PFT 类别，调用处直接传字面量 1。
+- **影响**：`DEF_USE_OZONESTRESS` 下任何 IGBP/USGS 地类都按温带常绿针叶林算臭氧（常绿、`lai_thresh = 0`、`leaf_long(1)` 衰减、
+  通量阈值 0.8 nmol m⁻² s⁻¹、针叶林的 `o3coefv/o3coefg` 公式）；草地、农田、落叶林因此按错误的类别计算。
+- **处理**：**未修，需上游决定**——IGBP/USGS 地类该映射到哪个 PFT 的臭氧参数是科学取舍。Rust 保持同样行为。
+
+### 69. 冷启动漏赋臭氧状态
+
+- **位置**：`mkinidata/MOD_IniTimeVariable.F90`：patch 级 `o3uptakesun/sha` 从不赋值；PFT 级 `o3uptake*_p`/`o3coef*_p` 只在 `IF (DEF_USE_BGC)` 段里赋值。
+- **影响**：重启里写 `spval`；非 BGC 的 PFT/PC 算例里裸地 PFT 从不调 `LeafTemperature`，`o3uptakesun_p` 一直是 `spval`，
+  patch 聚合后每条 `f_o3uptakesun/sha` 都约为 −2×10³⁵。
+- **处理**：vendor 已修（第 561 轮）：`IniTimeVar` 循环之后对所有配置赋 `o3uptakesun/sha = 0`、`o3uptake*_p = 0`、`o3coef*_p = 1`。Rust 同步。
+
+### 70. `forc_ozone` 未初始化就被 `a_ozone` 累加
+
+- **位置**：`main/MOD_Vars_1DForcing.F90`（分配）；`main/MOD_Vars_1DAccFluxes.F90` 的 `acc1d(forc_ozone, a_ozone)`。
+- **原因**：不用臭氧数据时 `forc_ozone` 只在该 patch 第一次调 `CalcOzoneStress` 时被写成 100，`acc1d` 却每步对所有 patch 累加。
+- **影响**：冰川、湖、无冠层 patch 的 `a_ozone`/`f_xy_ozone` 与旁车是未初始化内存。
+- **处理**：vendor 已修（第 561 轮）：分配后置 `spval`（`acc1d` 跳过）。Rust 原本就从 `spval` 起步。
+
+### 71. `ivt` 不在 1..15 时 `CalcOzoneStress` 不给 `o3coefv/o3coefg` 赋值
+
+- **位置**：`main/MOD_Ozone.F90` 的 `CalcOzoneStress`（两个 `intent(out)` 哑元）。
+- **影响**：裸地等类别下返回值未定义（GIMPLE 在调用点放了 `CLOBBER`）。
+- **处理**：vendor 已修（第 561 轮）：开头先置 1。Rust 同步。
+
+### 72. 臭氧数据读晚一档、`itime` 可为 0、`f_xy_ozone` 单位标错
+
+- **位置**：`main/MOD_Ozone.F90` 的 `init_ozone_data`/`update_ozone_data`；`main/MOD_Hist.F90` 的 `f_xy_ozone`。
+- **原因**：启动读 `(sec-1800)/10800+…` 档，更新时读 `(sec-deltim)/10800+…` 档，而数据的 `time` 是窗口中点（第 1 档对应 00:00–03:00）。
+- **影响**：所用臭氧浓度比所在窗口晚约一档；`deltim = 10800` 且年初 0 时起步时 `itime = 0`，读文件越界；单位标成 `mol/mol`，实际是 ppbv。
+- **处理**：vendor 已修（第 561 轮）：新加 `ozone_record(year, day, sec)` 取步首所在窗口（恒 ≥ 1），与内存里那一档不同时才读；单位改 `ppbv`。Rust 同步。
 
 ## 二、TRACER 编译开关改变了物理（需要上游确认哪一边是对的）
 
