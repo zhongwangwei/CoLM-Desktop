@@ -5,6 +5,7 @@
 
 pub mod downscaling;
 pub mod forcing;
+mod forcing_reader;
 pub mod history;
 pub mod runtime;
 // 经纬网格与面积加权映射在 colm-init 里（mkinidata 的 `build_arealweighted`/`grid2pset` 也用同一份）。

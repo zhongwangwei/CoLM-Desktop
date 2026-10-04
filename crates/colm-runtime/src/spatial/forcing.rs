@@ -875,6 +875,8 @@ pub struct GriddedForcing {
     split: Vec<ShortwaveForcing>,
     /// 本步是否在预热期（`read_forcing (…, is_spinup)`），决定 `metreadLBUB` 读不读 `clim` 文件。
     spinup: bool,
+    /// 文件句柄复用 + 后台预读下一条记录（见 [`super::forcing_reader`]）。
+    reader: super::forcing_reader::RecordReader,
 }
 
 impl GriddedForcing {
@@ -975,6 +977,7 @@ impl GriddedForcing {
             lat_window: (lat_min, lat_max),
             lon_window: (lon_min, lon_max),
             spinup: false,
+            reader: super::forcing_reader::RecordReader::new(),
         })
     }
 
@@ -1302,18 +1305,11 @@ impl GriddedForcing {
 
     /// 从 `path` 的变量 `name` 读第 `record` 条（1 起）在用到的格子上的值。
     pub(super) fn read_cells(&self, path: &Path, name: &str, record: usize) -> Result<Vec<f64>> {
-        let file = netcdf::open(path)
-            .with_context(|| format!("cannot open the forcing file {}", path.display()))?;
-        let variable = file
-            .variable(name)
-            .with_context(|| format!("{} has no variable {name}", path.display()))?;
-        let (lat0, lat1) = self.lat_window;
+        let (lat0, _) = self.lat_window;
         let (lon0, lon1) = self.lon_window;
-        let block: Vec<f64> = variable
-            .get_values((record - 1, lat0..=lat1, lon0..=lon1))
-            .with_context(|| {
-                format!("cannot read {name} record {record} from {}", path.display())
-            })?;
+        let block =
+            self.reader
+                .read_block(path, name, record, (self.lat_window, self.lon_window))?;
         let width = lon1 - lon0 + 1;
         Ok(self
             .cells

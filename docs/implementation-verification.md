@@ -29630,3 +29630,14 @@ main 上一次绿是 9 月 26 日；这次快进带上 188 个从没跑过 CI �
 **打开之后的下一个瓶颈**：Rust 主线程一半以上在 `GriddedForcing::read_record` 里解压 JRA3Q——文件按 `(1, 480, 960)` 分块（每小时一整张全球场一块，deflate + shuffle），2°×2° 的区域每条记录要把 8 个变量的全球场各解压一遍。Fortran 同样的读法。后续做强迫场的区域裁剪 + 重新分块。
 
 **GUI**：`wizardFields` 对空间算例写 `DEF_UnitCatchment_regional`：范围不是全球、网格不是流域网格（流域网格内核没有 GridRiverLakeFlow）、且没开 LULCC 时为 `.true.`，否则 `.false.`；站点与流域网格不写。参数页仍可改。`validate_runtime_contract` 新加一条：LULCC 与区域汇流同开时提前报错（上游 `MOD_Namelist` 会 `CoLM_stop`）。测试：`gui/tests/domain.mjs` 五种情形（区域、LULCC、全球、流域网格、站点）、`config_tests.rs` 的冲突用例；GUI 后端 162、前端 11 个、`check-gui`、两个 workspace 的 clippy/fmt 通过。
+
+## 第 568 轮：网格强迫的文件句柄复用与后台预读
+
+开了区域汇流之后（第 567 轮），`g1r` 的 Rust 主线程一半以上在 `GriddedForcing::read_record` 里：JRA3Q 按 `(1, 480, 960)` 分块，每条记录一整张全球场压成一块，2°×2° 的区域每读一条记录都要把 8 个变量的全球场各解压一遍；而且 `read_cells` 每读一条记录都 `netcdf::open` 一次几百 MB 的文件（采样里的 `listxattr/getxattr`）。
+
+试过的做法与取舍：
+
+- **预先裁剪强迫场**（原型：Python 裁到区域外扩 3 格、整月一块）：两侧逐位不变（Fortran 用裁剪文件与用全球文件全同；边界推算的道理见下），Rust 模拟阶段 85 → 43 s。但裁剪本身要把文件完整解压一遍（3 个月 104 s），模式本来就每条记录只读一次，单次运行不划算，而且要用户运行前多一步。**撤掉，没有提交。**（逐位不变的理由：`grid_define_by_center` 内部格点边界取相邻格心中点，只有最外圈延伸到 ±90° 或绕经度一圈，外扩至少一圈后区域内 patch 覆盖到的格点边界与全球网格相同。）
+- **主程序里预读**（提交的做法）：新 `spatial/forcing_reader.rs` 的 `RecordReader`——两边各自缓存打开的文件句柄（上限 32 个）；主线程取到第 k 条后，后台线程接着读同一文件的第 k+1 条，主线程下次要时直接取（没读完就等），读过文件末尾的那次不留结果，同一变量过时的预读结果丢掉。后台做的是与主线程完全相同的 `get_values` 调用；netcdf crate 用一把全局锁（`netcdf-sys` 的 `hdf5_sys::LOCK`）串起所有调用，后台读与主线程写历史不会同时进库。
+
+实测：`g1r` 的 Rust 模拟阶段 85 → **35 s**，与 Fortran 逐位一致。回归（两侧重跑 mkinidata，`tmp/b568*.sh`）：`g1t`（示踪物强迫）、`g1bgc`、`g1ch4`、`g1urbm`、`g1pc`、`g3`、`g3cm`、`g3sd`（LULCC 分段 + 预热回卷，每段建/拆一个读取器）、`u1`、`g1crop` 全部逐位一致。单元测试 `forcing_reader_tests.rs`：顺序、回跳、跨文件读与直接读逐位相同，读到末尾之后的预读与不存在的变量都不会卡住。
