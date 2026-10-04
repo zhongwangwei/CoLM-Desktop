@@ -15,6 +15,7 @@ mod history_manifest;
 pub mod history_sidecar;
 pub mod irrigation;
 pub mod multi_patch;
+pub mod ozone;
 pub mod pft;
 pub mod physics;
 pub mod river;
@@ -568,8 +569,6 @@ impl PointRuntime {
                     optimizer.as_ref().map(|optimizer| optimizer.scale(index)),
                 )?);
             }
-            // 多作物单点同样受 `tsoi17 = forc_t(i)` 整列赋值影响（见 [`broadcast_fire_tsoi17`]）。
-            broadcast_fire_tsoi17(templates, states, None);
             crate::tracer::report_after_patches(templates)?;
             // `hist_out` 在 `itstamp <= ptstamp` 时直接返回（`MOD_Hist.F90:225`），连累加都不做：
             // 预热期（含每一轮重复）不产生 history。步末 `itstamp <= ptstamp` 与本步
@@ -1060,6 +1059,8 @@ fn advance_patch(
         .tracer
         .as_ref()
         .map(|_| initial_total_water_mm(template, state));
+    // `update_ozone_data(itstamp, deltim)`：`CoLMDRIVER` 之前。
+    template.update_ozone(step.clock.forcing_time, state)?;
     let mut input = baseflow_scaled(template.snow_input(binding), baseflow_scale);
     let deltim = input.energy.interception.time_step_seconds;
     if let Some(snicar) = input.snicar.as_mut() {
@@ -1473,45 +1474,6 @@ fn optimize_baseflow<O: std::borrow::Borrow<PatchOutput>>(
         optimizer.close_year(&water_tables)?;
     }
     Ok(())
-}
-
-/// 上游 `CNFireArea`（`MOD_BGC_Veg_CNFireLi2016.F90:97`）的 `tsoi17 = forc_t(i)` 少了下标，是**整列**赋值：
-/// 每个跑火灾的 patch 都把所有 patch 的 `tsoi17` 改成自己的 `forc_t`，本 patch 随即用的是对的值，
-/// 但一步之后留下的是按 patch 顺序最后一个跑火灾的那个值，连非土壤 patch 也一样，续跑里写的就是它。
-/// 单 patch 时这是恒等的。
-///
-/// `active` 是强迫掩膜（`forcmask_pch`）：被遮蔽的 patch 整步跳过、不调火灾，不能当"最后一个"，
-/// 但整列赋值照样盖到它们身上。
-pub fn broadcast_fire_tsoi17(
-    templates: &[assembly::StandardLctRestartTemplate],
-    states: &mut [colm_core::StandardLctSnowSoilState],
-    active: Option<&[bool]>,
-) {
-    let last = templates
-        .iter()
-        .zip(states.iter())
-        .enumerate()
-        .rposition(|(index, (template, state))| {
-            active.is_none_or(|active| active[index])
-                && template.patch_type == 0
-                && template.physics.bgc.is_some_and(|bgc| bgc.fire)
-                && state.bgc.is_some()
-        });
-    let Some(last) = last else {
-        return;
-    };
-    let value = states[last]
-        .bgc
-        .as_ref()
-        .and_then(|bgc| bgc.patch.tsoi17.first().copied());
-    let Some(value) = value else {
-        return;
-    };
-    for state in states.iter_mut() {
-        if let Some(bgc) = state.bgc.as_mut() {
-            bgc.patch.tsoi17.fill(value);
-        }
-    }
 }
 
 /// `LAI_readin` 那一步（`CoLM.F90:595-605`）。
@@ -2122,6 +2084,7 @@ mod tests {
             river_lake_flow_build: false,
             plant_hydraulic_parameters: colm_core::PlantHydraulicParameters::default(),
             plant_hydraulic_overrides: colm_core::PlantHydraulicOverrides::default(),
+            ozone: None,
             vegetation_snow: false,
             split_soil_snow: false,
             colm2024_interception: false,
@@ -2164,6 +2127,7 @@ mod tests {
             sprinkler_irrigation_kg_m2_s: 0.0,
             runoff_scheme: crate::assembly::StandardLctRunoffScheme::Topmodel,
             topmodel_decay_tuning: 0.1,
+            topmodel_method: 0,
         }
     }
 

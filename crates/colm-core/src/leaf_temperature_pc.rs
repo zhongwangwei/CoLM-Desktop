@@ -167,6 +167,18 @@ pub(crate) fn leaf_temperature_pc(
     let plant_hydraulics = leaf.plant_hydraulics;
     let layers_soil = plant_hydraulics.map_or(0, |p| p.layer_thickness_m.len());
 
+    ensure!(
+        columns
+            .iter()
+            .all(|column| column.leaf.ozone.is_some() == leaf.ozone.is_some()),
+        "every PC PFT needs an ozone state exactly when DEF_USE_OZONESTRESS is on"
+    );
+    // `:558-570`（vendor FIX 2026-08-16 #4，后改成无条件）：迭代前 `o3coef*_p = 1`。
+    for column in columns.iter_mut() {
+        if let Some(ozone) = column.leaf.ozone.as_mut() {
+            ozone.reset_factors();
+        }
+    }
     let lai: Vec<f64> = columns.iter().map(|c| c.leaf_area_index).collect();
     let sai: Vec<f64> = columns.iter().map(|c| c.stem_area_index).collect();
     // `:535`
@@ -1234,6 +1246,35 @@ pub(crate) fn leaf_temperature_pc(
             fluxes[i].gssha = 0.0;
         }
     }
+    // `:1787-1806`：逐 PFT（含无冠层的）一对 `CalcOzoneStress`，`ivt = pftclass`，`sabv = sabv_p`，
+    // 用 patch 的 `ram`/`th`/`psrf`、本 PFT 叶尺度的 `rssun`/`rssha` 与 `rb`（无冠层的 PFT 每轮被
+    // `rb(:) = 0` 清零，`:1147`）。关掉臭氧时那一支的 `o3coef* = 1` 落在不存在的状态上，不必做。
+    if let Some(patch_ozone) = leaf.ozone {
+        for i in 0..n {
+            let parameters_i = crate::pft::pft_ozone(Some(patch_ozone), &parameters[i])
+                .expect("the patch ozone parameters are present");
+            let state = columns[i]
+                .leaf
+                .ozone
+                .as_mut()
+                .expect("checked on entry: every PC PFT has an ozone state");
+            let (sunlit, shaded) = crate::canopy_ozone_stress(
+                parameters_i,
+                state,
+                psrf,
+                th,
+                ram,
+                rssun[i],
+                rssha[i],
+                rb[i],
+                lai[i],
+                drive[i].absorbed_solar_w_m2,
+                deltim,
+            );
+            fluxes[i].assimsun *= sunlit;
+            fluxes[i].assimsha *= shaded;
+        }
+    }
     let rib = (zeta * (ustar * ustar) / (0.160_000_000_000_000_03 / fh * (um * um))).min(5.0);
 
     // `:1819-2056`
@@ -1251,7 +1292,8 @@ pub(crate) fn leaf_temperature_pc(
             fluxes[i].rst = 2.0e4;
         }
         fluxes[i].assim = fluxes[i].assimsun + fluxes[i].assimsha;
-        fluxes[i].respc = respcsun[i] + respcsha[i] + rsoil;
+        // 冠层呼吸不含土壤呼吸 `rsoil`（CoLM-SYSU/CoLM#504 的 PC 修复）；`rsoil` 只进上面的 CO2 通量。
+        fluxes[i].respc = respcsun[i] + respcsha[i];
         let d = dtl[i][last];
         let rain_heat = drive[i].retained_rain_kg_m2_s * WATER_HEAT_CAPACITY_J_KG_K;
         let snow_heat = drive[i].retained_snow_kg_m2_s * ICE_HEAT_CAPACITY_J_KG_K;

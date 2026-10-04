@@ -4,6 +4,10 @@
 //! `MOD_tav_abs.F90`, and `update_params_PROSPECT` in
 //! `MOD_HighRes_Parameters.F90`.  It returns the 211 CoLM wavelengths
 //! (400--2500 nm, every 10 nm) while retaining the supplied dead-stem spectrum.
+//!
+//! 按 CoLM 构建选项（`-fdefault-real-8 -fdefault-double-8`，后者见 upstream-bugs 第 17 条）
+//! 的 GIMPLE 逐条对齐：默认 REAL 字面量与 `d` 字面量都是 real(8)，`.FMA/.FMS/.FNMA` 写成
+//! `mul_add`，其余照 GIMPLE 的次序分开舍入。
 
 use crate::LibmPow;
 use anyhow::{ensure, Result};
@@ -14,6 +18,8 @@ const PROSPECT_WAVELENGTHS: usize = 2101;
 const PFT_CLASSES: usize = 16;
 const SAMPLE_INTERVAL: usize = 10;
 
+// 光谱数据是实测表，个别值恰好接近 `LOG2_E`、`SQRT_2` 等常数。
+#[allow(clippy::approx_constant)]
 mod data {
     use super::PROSPECT_WAVELENGTHS;
 
@@ -58,25 +64,26 @@ pub fn prospect_leaf_optics(
         "PROSPECT leaf optics must contain 211 finite wavelength-by-tissue values"
     );
 
-    // These update_params_PROSPECT literals are default Fortran REAL before
-    // assignment to r8, so retain their f32-to-f64 rounding exactly.
-    let r8 = f64::from;
-    let sla = r8([
-        0.0_f32, 0.0100, 0.0100, 0.0202, 0.0190, 0.0190, 0.0308, 0.0308, 0.0308, 0.0180, 0.0307,
+    // `update_params_PROSPECT`（`MOD_HighRes_Parameters.F90:296-347`）：`-fdefault-real-8` 下
+    // 字面量都是 f64；`vmax25_p(...) * 1.e-6` 在编译期按 f64 乘法折叠。
+    let sla: f64 = [
+        0.0, 0.0100, 0.0100, 0.0202, 0.0190, 0.0190, 0.0308, 0.0308, 0.0308, 0.0180, 0.0307,
         0.0307, 0.0402, 0.0402, 0.0385, 0.0402,
-    ][pft_class]);
-    let vmax25 = r8([
-        52.0_f32, 55.0, 42.0, 29.0, 41.0, 51.0, 36.0, 30.0, 40.0, 36.0, 30.0, 19.0, 21.0, 26.0,
-        25.0, 57.0,
+    ][pft_class];
+    let vmax25: f64 = [
+        52.0, 55.0, 42.0, 29.0, 41.0, 51.0, 36.0, 30.0, 40.0, 36.0, 30.0, 19.0, 21.0, 26.0, 25.0,
+        57.0,
     ][pft_class]
-        * 1.0e-6_f32);
-    let n =
-        (r8(0.9_f32) * (sla * r8(10.0_f32)) + r8(0.025_f32)) / (sla * r8(10.0_f32) - r8(0.01_f32));
-    let cm = r8(1.0_f32) / (sla * r8(1.0e4_f32));
-    let cab = (vmax25 * r8(1.0e6_f32) - r8(3.72_f32)) / r8(1.3_f32);
-    let cw = r8(0.01_f32) - (r8(0.01_f32) - r8(0.0_f32)) * (-r8(5.5_f32) * soil_moisture).exp();
+        * 1.0e-6;
+    // `:338` `N = (0.9*(SLA*10.) + 0.025) / ((SLA*10.) - 0.01)`：分子是 `.FMA (sla*10, 0.9, 0.025)`
+    let sla_10 = sla * 10.0;
+    let n = sla_10.mul_add(0.9, 0.025) / (sla_10 - 0.01);
+    let cm = 1.0 / (sla * 1.0e4);
+    let cab = (vmax25 * 1.0e6 - 3.72) / 1.3;
+    // `:347` `0.01 - ((0.01 - 0.)*exp(-5.5*soilmoisture))`：GIMPLE 为 `0.01 - exp(-(sm*5.5))*0.01`
+    let cw = 0.01 - (-(soil_moisture * 5.5)).exp() * 0.01;
     let (reflectance_green, transmittance_green) =
-        prospect_spectrum(n, cab, r8(8.0_f32), r8(0.0_f32), r8(0.01_f32), cw, cm)?;
+        prospect_spectrum(n, cab, 8.0, 0.0, 0.01, cw, cm)?;
 
     let mut reflectance = Vec::with_capacity(HIGH_RES_WAVELENGTHS * 2);
     let mut transmittance = Vec::with_capacity(HIGH_RES_WAVELENGTHS * 2);
@@ -119,66 +126,60 @@ fn prospect_spectrum(
     let mut reflectance = Vec::with_capacity(HIGH_RES_WAVELENGTHS);
     let mut transmittance = Vec::with_capacity(HIGH_RES_WAVELENGTHS);
     for wavelength in (0..PROSPECT_WAVELENGTHS).step_by(SAMPLE_INTERVAL) {
-        let k = (cab * data::CHLOROPHYLL_ABSORPTION[wavelength]
-            + car * data::CAROTENOID_ABSORPTION[wavelength]
-            + anth * data::ANTHOCYANIN_ABSORPTION[wavelength]
-            + cbrown * data::BROWN_PIGMENT_ABSORPTION[wavelength]
-            + cw * data::WATER_ABSORPTION[wavelength]
-            + cm * data::DRY_MATTER_ABSORPTION[wavelength])
-            / n;
+        // `:105`：`k_Car*Car` 先乘，其余逐项 `.FMA`，最后除以 N
+        let k = data::DRY_MATTER_ABSORPTION[wavelength].mul_add(
+            cm,
+            data::WATER_ABSORPTION[wavelength].mul_add(
+                cw,
+                data::BROWN_PIGMENT_ABSORPTION[wavelength].mul_add(
+                    cbrown,
+                    data::ANTHOCYANIN_ABSORPTION[wavelength].mul_add(
+                        anth,
+                        data::CHLOROPHYLL_ABSORPTION[wavelength]
+                            .mul_add(cab, data::CAROTENOID_ABSORPTION[wavelength] * car),
+                    ),
+                ),
+            ),
+        ) / n;
         let tau = absorption_transmittance(k);
         let refractive = data::REFRACTIVE_INDEX[wavelength];
         let t12 = tav_90[wavelength];
         let talf = tav_40[wavelength];
         let ralf = 1.0 - talf;
         let r12 = 1.0 - t12;
-        let t21 = t12 / refractive.powi(2);
+        let t21 = t12 / (refractive * refractive);
         let r21 = 1.0 - t21;
-        let denominator = 1.0 - r21 * r21 * tau * tau;
-        ensure!(
-            denominator.is_finite() && denominator.abs() > f64::EPSILON,
-            "PROSPECT encountered a singular leaf-layer denominator"
-        );
+        // `:165` `1 - r21*r21*tau**2`：`.FNMA (tau², r21², 1)`
+        let denominator = (-(tau * tau)).mul_add(r21 * r21, 1.0);
         let ta = talf * tau * t21 / denominator;
-        let ra = ralf + r21 * tau * ta;
+        let ra = (r21 * tau).mul_add(ta, ralf);
         let t = t12 * tau * t21 / denominator;
-        let r = r12 + r21 * tau * t;
-        let d = ((1.0 + r + t) * (1.0 + r - t) * (1.0 - r + t) * (1.0 - r - t)).sqrt();
+        let r = (r21 * tau).mul_add(t, r12);
+        let one_plus_r = r + 1.0;
+        let one_minus_r = 1.0 - r;
+        let d =
+            ((one_plus_r + t) * (one_plus_r - t) * (t + one_minus_r) * (one_minus_r - t)).sqrt();
         let rq = r * r;
         let tq = t * t;
-        ensure!(
-            r.abs() > f64::EPSILON && t.abs() > f64::EPSILON,
-            "PROSPECT encountered a singular leaf-stack coefficient"
-        );
-        let a = (1.0 + rq - tq + d) / (2.0 * r);
-        let b = (1.0 - rq + tq + d) / (2.0 * t);
+        let a = (rq + 1.0 - tq + d) / (r * 2.0);
+        let b = (1.0 - rq + tq + d) / (t * 2.0);
         let b_nm1 = b.lpow(n - 1.0);
         let b_n2 = b_nm1 * b_nm1;
         let a2 = a * a;
-        let denominator = a2 * b_n2 - 1.0;
-        ensure!(
-            denominator.is_finite() && denominator.abs() > f64::EPSILON,
-            "PROSPECT encountered a singular leaf-stack denominator"
-        );
-        let (rsub, tsub) = if r + t >= 1.0 {
-            let denominator = t + (1.0 - t) * (n - 1.0);
-            ensure!(
-                denominator.is_finite() && denominator.abs() > f64::EPSILON,
-                "PROSPECT encountered a singular zero-absorption leaf stack"
-            );
-            (1.0 - t / denominator, t / denominator)
+        // `where (r+t >= 1)` 只覆盖零吸收的波段；上游先按一般式算出 Rsub/Tsub 再覆盖
+        let (rsub, tsub) = if t + r >= 1.0 {
+            let tsub = t / (1.0 - t).mul_add(n - 1.0, t);
+            (1.0 - tsub, tsub)
         } else {
+            let denominator = a2.mul_add(b_n2, -1.0);
             (
                 a * (b_n2 - 1.0) / denominator,
                 b_nm1 * (a2 - 1.0) / denominator,
             )
         };
-        let denominator = 1.0 - rsub * r;
-        ensure!(
-            denominator.is_finite() && denominator.abs() > f64::EPSILON,
-            "PROSPECT encountered a singular leaf reflectance denominator"
-        );
-        let leaf_transmittance = ta * tsub / denominator;
+        // `:198-200`
+        let denominator = (-rsub).mul_add(r, 1.0);
+        let leaf_transmittance = tsub * ta / denominator;
         let leaf_reflectance = ra + ta * rsub * t / denominator;
         ensure!(
             leaf_reflectance.is_finite() && leaf_transmittance.is_finite(),
@@ -243,13 +244,14 @@ fn absorption_transmittance(k: f64) -> f64 {
     if k > 85.0 {
         return 0.0;
     }
-    let exp = (-k).exp();
+    // `:120/135`：多项式整条是 `.FMA` 链；`tau = (1-k)*exp(-k) + k**2*yy` 为
+    // `.FMA (1-k, exp(-k), yy*(k*k))`
     let y = if k <= 4.0 {
-        horner(&SMALL_K_COEFFICIENTS, 0.5 * k - 1.0) - k.ln()
+        horner(&SMALL_K_COEFFICIENTS, k.mul_add(0.5, -1.0)) - k.ln()
     } else {
-        exp * horner(&LARGE_K_COEFFICIENTS, 14.5 / (k + 3.25) - 1.0) / k
+        (-k).exp() * horner(&LARGE_K_COEFFICIENTS, 14.5 / (k + 3.25) - 1.0) / k
     };
-    (1.0 - k) * exp + k * k * y
+    (1.0 - k).mul_add((-k).exp(), y * (k * k))
 }
 
 fn horner(coefficients: &[f64], x: f64) -> f64 {
@@ -257,53 +259,50 @@ fn horner(coefficients: &[f64], x: f64) -> f64 {
         .iter()
         .copied()
         .fold(coefficients[0], |value, coefficient| {
-            value * x + coefficient
+            value.mul_add(x, coefficient)
         })
 }
 
+/// `MOD_tav_abs::tav_abs`，按其 GIMPLE 逐条对齐。
 fn tav(theta_degrees: f64) -> Result<Vec<f64>> {
-    // `MOD_tav_abs` evaluates `atan(1.) * 4.` in default REAL before assigning to r8.
-    let upstream_pi = f64::from((1.0_f32).atan() * 4.0_f32);
-    let sin_theta = (theta_degrees * upstream_pi / 180.0).sin();
+    // `pi = atan(1.)*4.`、`rd = pi/180.` 在 real(8) 里折成常数 `theta*0.017453292519943295`
+    let sin_theta = crate::atmosphere::fortran_sin(theta_degrees * 1.745_329_251_994_329_5e-2);
     let sin_theta_squared = sin_theta * sin_theta;
     let mut values = Vec::with_capacity(PROSPECT_WAVELENGTHS);
     for &refractive in &data::REFRACTIVE_INDEX {
-        let refractive_squared = refractive * refractive;
-        let np = refractive_squared + 1.0;
-        let nm = refractive_squared - 1.0;
-        let a = (refractive + 1.0).powi(2) / 2.0;
-        let k = -nm.powi(2) / 4.0;
+        let n2 = refractive * refractive;
+        let np = n2 + 1.0;
+        let nm = n2 - 1.0;
+        let a = (refractive + 1.0) * (refractive + 1.0) * 0.5;
+        let k = -((n2 - 1.0) * (n2 - 1.0) * 0.25);
+        // `sa**2 - np/2` 是 `.FMS (sa, sa, np*0.5)`
+        let b2 = sin_theta.mul_add(sin_theta, -(np * 0.5));
         let b1 = if theta_degrees == 90.0 {
             0.0
         } else {
-            ((sin_theta_squared - np / 2.0).powi(2) + k).sqrt()
+            b2.mul_add(b2, k).sqrt()
         };
-        let b = b1 - (sin_theta_squared - np / 2.0);
-        let b3 = b.powi(3);
-        let a3 = a.powi(3);
+        let b = b1 - b2;
+        let b3 = b * (b * b);
+        let a3 = a * a * a;
+        let k2 = k * k;
         let ts =
-            (k.powi(2) / (6.0 * b3) + k / b - b / 2.0) - (k.powi(2) / (6.0 * a3) + k / a - a / 2.0);
-        let denominator = np.powi(3) * nm.powi(2);
-        ensure!(
-            b.is_finite()
-                && a.is_finite()
-                && denominator.is_finite()
-                && denominator.abs() > f64::EPSILON,
-            "PROSPECT encountered a singular interface transmittance"
-        );
-        let tp = -2.0 * refractive_squared * (b - a) / np.powi(2)
-            - 2.0 * refractive_squared * np * (b / a).ln() / nm.powi(2)
-            + refractive_squared * (1.0 / b - 1.0 / a) / 2.0
-            + 16.0
-                * refractive_squared.powi(2)
-                * (refractive_squared.powi(2) + 1.0)
-                * ((2.0 * np * b - nm.powi(2)) / (2.0 * np * a - nm.powi(2))).ln()
-                / denominator
-            + 16.0
-                * refractive_squared.powi(3)
-                * (1.0 / (2.0 * np * b - nm.powi(2)) - 1.0 / (2.0 * np * a - nm.powi(2)))
-                / np.powi(3);
-        let value = (ts + tp) / (2.0 * sin_theta_squared);
+            (-b).mul_add(0.5, k / b + k2 / (b3 * 6.0)) - (-a).mul_add(0.5, k / a + k2 / (a3 * 6.0));
+        let nm2 = nm * nm;
+        let tp1 = -((b - a) * (n2 * 2.0) / (np * np));
+        let tp2 = -(n2 * 2.0 * np * (b / a).ln() / nm2);
+        let tp3 = (1.0 / b - 1.0 / a) * n2 * 0.5;
+        let n2_sq = n2 * n2;
+        let np_2 = np * 2.0;
+        let tp4 =
+            n2_sq * 16.0 * (n2_sq + 1.0) * (np_2.mul_add(b, -nm2) / np_2.mul_add(a, -nm2)).ln()
+                / (np.lpow(3.0) * nm2);
+        let tp5 = n2.lpow(3.0)
+            * 16.0
+            * (1.0 / (-nm).mul_add(nm, np_2 * b) - 1.0 / (-nm).mul_add(nm, np_2 * a))
+            / np.lpow(3.0);
+        let tp = tp2 + tp1 + tp3 + tp4 + tp5;
+        let value = (tp + ts) / (sin_theta_squared * 2.0);
         ensure!(
             value.is_finite(),
             "PROSPECT produced a non-finite interface transmittance"

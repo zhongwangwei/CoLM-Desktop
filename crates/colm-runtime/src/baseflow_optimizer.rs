@@ -46,7 +46,7 @@ pub struct BaseflowOptimizer {
     iteration: u32,
     /// `DEF_dir_restart/ParaOpt`。
     directory: PathBuf,
-    /// `<case>_baseflow_w180_s90.nc`：`ncio_create_file_vector` 与读取同一套块后缀。
+    /// `<case>_baseflow_<block>.nc`：`ncio_create_file_vector` 与读取同一套块后缀（单点是 `w180_s90`）。
     file_name: String,
 }
 
@@ -72,11 +72,12 @@ pub struct BaseflowStep {
 }
 
 impl BaseflowOptimizer {
-    /// `Opt_Baseflow_init`，`patches` 按 patch 下标排列。
+    /// `Opt_Baseflow_init`，`patches` 按 patch 下标排列；`block` 是块后缀（单点 `w180_s90`）。
     pub fn new(
         patches: &[BaseflowPatchInit],
         directory: impl Into<PathBuf>,
         case_name: &str,
+        block: &str,
     ) -> Self {
         Self {
             patches: patches
@@ -91,8 +92,61 @@ impl BaseflowOptimizer {
                 .collect(),
             iteration: 0,
             directory: directory.into(),
-            file_name: format!("{case_name}_baseflow_w180_s90.nc"),
+            file_name: format!("{case_name}_baseflow_{block}.nc"),
         }
+    }
+
+    /// LULCC 换年（`REST_LulccTimeVariables` 与 `LulccDriver`，upstream-bugs 第 43 条 vendor 已修）：
+    /// `previous[np]` 是新 patch 配上的旧 patch。配上的沿用四个量（年末结算刚复位过两个累加器），
+    /// 新出现的按 `Opt_Baseflow_init` 的缺省：`scale = 1`、`zwt_init` 取换年后的 `zwt`。迭代计数延续。
+    pub fn carried_over(
+        &self,
+        previous: &[Option<usize>],
+        patches: &[BaseflowPatchInit],
+    ) -> Result<Self> {
+        ensure!(
+            previous.len() == patches.len(),
+            "the LULCC pairing has {} entries for {} patches",
+            previous.len(),
+            patches.len()
+        );
+        let patches = previous
+            .iter()
+            .zip(patches)
+            .map(|(old, init)| -> Result<PatchBaseflow> {
+                let adjustable = init.patch_type <= 1;
+                Ok(match old {
+                    Some(old) => {
+                        let state = self
+                            .patches
+                            .get(*old)
+                            .with_context(|| format!("old patch {old} is out of range"))?;
+                        PatchBaseflow {
+                            adjustable,
+                            ..state.clone()
+                        }
+                    }
+                    None => PatchBaseflow {
+                        scale: 1.0,
+                        initial_water_table_depth_m: init.water_table_depth_m,
+                        recharge_mm: None,
+                        subsurface_runoff_mm: None,
+                        adjustable,
+                    },
+                })
+            })
+            .collect::<Result<_>>()?;
+        Ok(Self {
+            patches,
+            iteration: self.iteration,
+            directory: self.directory.clone(),
+            file_name: self.file_name.clone(),
+        })
+    }
+
+    /// 当前的 `scale_baseflow` 整向量。
+    pub fn scales(&self) -> Vec<f64> {
+        self.patches.iter().map(|patch| patch.scale).collect()
     }
 
     pub fn patch_count(&self) -> usize {

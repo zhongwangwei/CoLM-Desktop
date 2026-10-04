@@ -38,6 +38,7 @@ fn physics(timestep_seconds: f64) -> LandPhysicsParameters {
         river_lake_flow_build: false,
         plant_hydraulic_parameters: PlantHydraulicParameters::default(),
         plant_hydraulic_overrides: colm_core::PlantHydraulicOverrides::default(),
+        ozone: None,
         vegetation_snow: false,
         split_soil_snow: false,
         colm2024_interception: false,
@@ -80,6 +81,7 @@ fn physics(timestep_seconds: f64) -> LandPhysicsParameters {
         sprinkler_irrigation_kg_m2_s: 0.0,
         runoff_scheme: StandardLctRunoffScheme::Topmodel,
         topmodel_decay_tuning: 0.1,
+        topmodel_method: 0,
     }
 }
 
@@ -375,6 +377,51 @@ fn runoff_and_patch_selection_follow_the_requested_patch() {
     assert_ne!(
         first.temperature_k[0], topmodel.temperature_k[0],
         "the two patches must not read the same column"
+    );
+}
+
+#[test]
+fn topmodel_methods_one_and_two_read_the_patch_twi_parameters() {
+    // 空间构建的 `DEF_TOPMOD_method = 1/2`：TWI 参数来自常数重启，按 patch 取（`per_patch` 给 patch 1 加 1）。
+    let root = temp_dir("topmod-method");
+    let fixture = SyntheticRestart::write(root.join("restart")).unwrap();
+    let files = RestartStateFiles {
+        constant: fixture.constant.block.clone(),
+        time: fixture.time.block.clone(),
+    };
+    let method = |topmodel_method| {
+        let template = assemble_standard_lct_template(
+            &files,
+            1,
+            LandPhysicsParameters {
+                topmodel_method,
+                ..physics(1800.0)
+            },
+        )
+        .unwrap();
+        let Water2014Runoff::Topmodel {
+            subsurface_method, ..
+        } = template.runoff
+        else {
+            panic!("DEF_Runoff_SCHEME = 0 must assemble TOPMODEL");
+        };
+        subsurface_method
+    };
+    assert_eq!(method(0), TopmodelMethod::Exponential);
+    assert_eq!(
+        method(1),
+        TopmodelMethod::Hydraulic {
+            mean_topographic_index: fixture.topmodel.topographic_index + 1.0,
+        }
+    );
+    assert_eq!(
+        method(2),
+        TopmodelMethod::Gamma {
+            mean_topographic_index: fixture.topmodel.topographic_index + 1.0,
+            alpha: fixture.topmodel.alpha_twi + 1.0,
+            chi: fixture.topmodel.chi_twi + 1.0,
+            mu: fixture.topmodel.mu_twi + 1.0,
+        }
     );
 }
 

@@ -219,6 +219,7 @@ fn sample_state() -> LeafTemperatureState {
             snow_mm: 0.0,
         },
         plant_hydraulics: None,
+        ozone: None,
     }
 }
 
@@ -235,6 +236,7 @@ fn sample_input() -> LeafTemperatureInput<'static> {
             quantum_efficiency: 0.05,
             maximum_carboxylation_25c_mol_m2_s: 60e-6,
             c3c4: 1,
+            respiration_fraction_override: None,
             low_temperature_slope: 0.2,
             low_temperature_half_k: 288.16,
             high_temperature_slope: 0.3,
@@ -291,6 +293,7 @@ fn sample_input() -> LeafTemperatureInput<'static> {
         intercepted_snow_kg_m2_s: 0.0,
         ground_latent_heat_j_kg: LATENT_HEAT_VAPORIZATION_J_KG,
         plant_hydraulics: None,
+        ozone: None,
         options: LeafTemperatureOptions::default(),
     }
 }

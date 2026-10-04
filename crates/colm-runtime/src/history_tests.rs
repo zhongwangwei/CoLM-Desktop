@@ -49,6 +49,7 @@ fn physics() -> LandPhysicsParameters {
         river_lake_flow_build: false,
         plant_hydraulic_parameters: PlantHydraulicParameters::default(),
         plant_hydraulic_overrides: colm_core::PlantHydraulicOverrides::default(),
+        ozone: None,
         vegetation_snow: false,
         split_soil_snow: false,
         colm2024_interception: false,
@@ -91,6 +92,7 @@ fn physics() -> LandPhysicsParameters {
         sprinkler_irrigation_kg_m2_s: 0.0,
         runoff_scheme: StandardLctRunoffScheme::Topmodel,
         topmodel_decay_tuning: 0.1,
+        topmodel_method: 0,
     }
 }
 
@@ -928,7 +930,7 @@ fn the_accumulator_skips_missing_samples_and_counts_only_valid_ones() {
     let mut buffer = HistoryBuffers::new(dimensions(), site(), 1);
     // 声明是为了让缓冲区的类型/维度定下来；`never_valid` 故意不声明。
     buffer.declare(&["solvdln"]).unwrap();
-    accumulator.write_means(&mut buffer, 0, None).unwrap();
+    accumulator.write_means(&mut buffer, 0).unwrap();
     buffer.set_time(0, 56_802_270).unwrap();
     let root = temp_dir("accumulator-missing");
     let path = root.join("history.nc");
@@ -1104,7 +1106,7 @@ fn the_instantaneous_water_variables_take_the_last_step_not_the_mean() {
     }
     let mut buffer = HistoryBuffers::new(dimensions(), site(), 1);
     buffer.declare(&["wat_inst", "wat"]).unwrap();
-    accumulator.write_means(&mut buffer, 0, None).unwrap();
+    accumulator.write_means(&mut buffer, 0).unwrap();
     buffer.set_time(0, 56_802_270).unwrap();
     let root = temp_dir("instantaneous");
     let path = root.join("history.nc");
@@ -1129,35 +1131,37 @@ fn the_instantaneous_water_variables_take_the_last_step_not_the_mean() {
     crate::remove_test_tree(root);
 }
 
-/// `DEF_USE_BGC` 的历史变量：Fortran 文件里 BGC 专属的 143 个（AT-Neu，NITRIF 关），NITRIF 打开时
-/// 多出 `CONC_O2_UNSAT`/`O2_DECOMP_DEPTH_UNSAT`；`#ifdef CROP` 的一批不在其中。
+/// `DEF_USE_BGC` 的历史变量：Fortran 文件里 BGC 专属的 143 个（AT-Neu，NITRIF 关），加 PR #504 在
+/// `DEF_USE_BGC` 下声明的 104 个火诊断量；NITRIF 打开时多出 `CONC_O2_UNSAT`/`O2_DECOMP_DEPTH_UNSAT`；
+/// `#ifdef CROP` 的一批不在其中。
 #[test]
 fn bgc_history_variables_follow_the_fortran_file() {
     let off = bgc_history_variables(BgcSwitches {
         ..BgcSwitches::default()
     });
-    assert_eq!(off.len(), 143);
+    assert_eq!(off.len(), 143 + 104);
+    assert!(off.contains(&"farea_burned") && !off.contains(&"abm"));
     assert!(off.contains(&"leafc") && off.contains(&"hr") && off.contains(&"retrasn"));
     assert!(!off.iter().any(|name| name.starts_with("cropprod")));
     let on = bgc_history_variables(BgcSwitches {
         nitrif: true,
         ..BgcSwitches::default()
     });
-    assert_eq!(on.len(), 145);
+    assert_eq!(on.len(), 145 + 104);
     assert!(on.contains(&"CONC_O2_UNSAT") && on.contains(&"O2_DECOMP_DEPTH_UNSAT"));
     // DiagMatrix 多 52 个容量（36 个植被、14 个土壤廓线，另 2 个 CWD 廓线）。
     let diag = bgc_history_variables(BgcSwitches {
         diag_matrix: true,
         ..BgcSwitches::default()
     });
-    assert_eq!(diag.len(), 143 + 52);
+    assert_eq!(diag.len(), 143 + 104 + 52);
     assert!(diag.contains(&"leafnCap") && diag.contains(&"cwdcCap_vr"));
     // CROP 内核多 64 个（`#ifdef CROP`）。
     let crop = bgc_history_variables(BgcSwitches {
         crop: true,
         ..BgcSwitches::default()
     });
-    assert_eq!(crop.len(), 143 + 64);
+    assert_eq!(crop.len(), 143 + 104 + 64);
     assert!(crop.contains(&"grainc") && crop.contains(&"plantdate_rainfed_temp_corn"));
 }
 
@@ -1196,7 +1200,7 @@ fn a_restored_window_continues_to_the_same_means() {
     let means = |accumulator: &HistoryAccumulator| {
         let mut buffer = HistoryBuffers::new(dimensions(), site(), 1);
         buffer.declare(&["fsena", "solvdln", "alb"]).unwrap();
-        accumulator.write_means(&mut buffer, 0, None).unwrap();
+        accumulator.write_means(&mut buffer, 0).unwrap();
         let directory = std::env::temp_dir().join(format!(
             "colm-history-window-{}-{}",
             std::process::id(),

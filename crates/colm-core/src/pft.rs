@@ -46,6 +46,10 @@ pub struct PftParameters {
     pub plant_hydraulic_traits: PlantHydraulicTraits,
     /// `canlay_p`（PC 的三层冠层分层：0 裸地、1 草本与灌木及作物、2 乔木）；PFT 不读。
     pub canopy_layer: usize,
+    /// `isevg(pftclass)`：臭氧吸收的落叶阈值与衰减方式（`MOD_Ozone.F90:89/134`）。
+    pub evergreen: bool,
+    /// `leaf_long(pftclass)` [年]（含 `DEF_PFT_LEAF_LONG` 覆盖）：常绿 PFT 的臭氧吸收衰减。
+    pub leaf_longevity_years: f64,
 }
 
 impl PftParameters {
@@ -161,6 +165,19 @@ impl PftPatch {
     pub fn sum(&self, value: impl Fn(&PftColumn) -> f64) -> f64 {
         pft_sum(self.columns.iter().map(value).zip(self.fractions()))
     }
+}
+
+/// 一个 PFT 的 `CalcOzoneStress` 参数：`ivt = pftclass`，`DEF_OZONE_KO3`/`DEF_USE_OZONEDATA` 取 patch 的。
+pub(crate) fn pft_ozone(
+    patch: Option<crate::OzoneParameters>,
+    parameters: &PftParameters,
+) -> Option<crate::OzoneParameters> {
+    patch.map(|ozone| crate::OzoneParameters {
+        vegetation_type: parameters.class,
+        evergreen: parameters.evergreen,
+        leaf_longevity_years: parameters.leaf_longevity_years,
+        ..ozone
+    })
 }
 
 /// `sum(x_p*pftfrac)`：从 0 起、按 PFT 顺序的 FMA 链。
@@ -701,6 +718,16 @@ pub(crate) fn pft_canopy_energy(
             };
         }
     }
+    // patch 的 `forc_ozone` 是逐 PFT 调用共用的同一个 `intent(inout)` 标量：先抄进各 PFT 的状态，
+    // 调用过 `CalcOzoneStress` 的那一份再写回 patch（`DEF_USE_OZONEDATA` 关掉时就是 100）。
+    let mut ozone_concentration = patch_leaf.ozone.map(|ozone| ozone.concentration_ppbv);
+    if let Some(concentration) = ozone_concentration {
+        for column in &mut patch.columns {
+            if let Some(ozone) = column.leaf.ozone.as_mut() {
+                ozone.concentration_ppbv = concentration;
+            }
+        }
+    }
     let mut records = Vec::with_capacity(patch.columns.len());
     // PC：前 `natural` 个自然 PFT 由 `LeafTemperaturePC` 一次解完；`DEF_PC_CROP_SPLIT` 时其后的
     // 作物 PFT 照 PFT 路径逐个 `LeafTemperature`（`MOD_Thermal.F90:938`）。上游先跑一维再跑 PC，
@@ -712,6 +739,9 @@ pub(crate) fn pft_canopy_energy(
     };
     if patch_is_pc && natural > 0 {
         records = pc_records(&context, patch, natural)?;
+        if let Some(ozone) = patch.columns[0].leaf.ozone {
+            ozone_concentration = Some(ozone.concentration_ppbv);
+        }
     }
     for (index, (parameters, column)) in patch
         .parameters
@@ -772,6 +802,7 @@ pub(crate) fn pft_canopy_energy(
                 vulnerability_shape: parameters.plant_hydraulic_traits.vulnerability_shape,
                 ..shared
             }),
+            ozone: pft_ozone(input.leaf_temperature.ozone, parameters),
             ..input.leaf_temperature
         };
         let leaf_input = crate::standard_lct_step::leaf_input(
@@ -796,6 +827,9 @@ pub(crate) fn pft_canopy_energy(
             preliminary,
         );
         let output = crate::leaf_temperature(leaf_input, &mut column.leaf)?;
+        if let Some(ozone) = column.leaf.ozone {
+            ozone_concentration = Some(ozone.concentration_ppbv);
+        }
         column.wet_snow_fraction = output.wet_snow_fraction;
         column.reference_temperature_k = output.air_temperature_2m_k;
         column.reference_humidity = output.air_specific_humidity_2m;
@@ -916,6 +950,24 @@ pub(crate) fn pft_canopy_energy(
                     })
                 }),
             }),
+        // `MOD_Thermal.F90:1204-1207`：patch 的 `o3uptakesun/sha = sum(o3uptake*_p*pftfrac)`（同一条
+        // FMA 链）；patch 的 `lai_old`/`o3coef*` 在 PFT 模式下没人碰，保持重启值。
+        ozone: patch_leaf.ozone.map(|ozone| crate::OzoneState {
+            sunlit_uptake_mmol_m2: patch.sum(|column| {
+                column
+                    .leaf
+                    .ozone
+                    .map_or(MISSING, |state| state.sunlit_uptake_mmol_m2)
+            }),
+            shaded_uptake_mmol_m2: patch.sum(|column| {
+                column
+                    .leaf
+                    .ozone
+                    .map_or(MISSING, |state| state.shaded_uptake_mmol_m2)
+            }),
+            concentration_ppbv: ozone_concentration.unwrap_or(ozone.concentration_ppbv),
+            ..ozone
+        }),
     };
     let output = crate::LeafTemperatureOutput {
         wet_snow_fraction: patch.sum(|column| column.wet_snow_fraction),

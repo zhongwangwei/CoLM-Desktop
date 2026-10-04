@@ -76,9 +76,13 @@ pub struct BgcPermafrostFields<'a> {
 #[derive(Debug, Clone, Copy)]
 pub struct BgcClimateFields<'a> {
     pub precipitation_10_day: &'a [f64],
+    /// `prec30`（PR #504，FIRE 的泥炭火用）。
+    pub precipitation_30_day: &'a [f64],
     pub precipitation_60_day: &'a [f64],
     pub precipitation_365_day: &'a [f64],
     pub precipitation_today: &'a [f64],
+    /// `rh30_today`（PR #504，`rh30` 的当步值）。
+    pub relative_humidity_today: &'a [f64],
     /// `day * patch` in Fortran order.
     pub precipitation_daily: &'a [f64],
     pub soil_temperature_17: &'a [f64],
@@ -452,12 +456,14 @@ fn total_entries(fields: BgcTotals<'_>) -> [(&'static str, &[f64]); 12] {
     ]
 }
 
-fn precipitation_entries(fields: BgcClimateFields<'_>) -> [(&'static str, &[f64]); 4] {
+fn precipitation_entries(fields: BgcClimateFields<'_>) -> [(&'static str, &[f64]); 6] {
     [
         ("prec10", fields.precipitation_10_day),
+        ("prec30", fields.precipitation_30_day),
         ("prec60", fields.precipitation_60_day),
         ("prec365", fields.precipitation_365_day),
         ("prec_today", fields.precipitation_today),
+        ("rh30_today", fields.relative_humidity_today),
     ]
 }
 
@@ -497,9 +503,11 @@ fn validate_input(input: BgcTimeRestartInput<'_>) -> Result<usize> {
             ),
             ("lag_npp", input.pools.lagged_npp),
             ("prec10", input.climate.precipitation_10_day),
+            ("prec30", input.climate.precipitation_30_day),
             ("prec60", input.climate.precipitation_60_day),
             ("prec365", input.climate.precipitation_365_day),
             ("prec_today", input.climate.precipitation_today),
+            ("rh30_today", input.climate.relative_humidity_today),
             ("tsoi17", input.climate.soil_temperature_17),
             ("rh30", input.climate.relative_humidity_30_day),
             ("accumnstep", input.climate.accumulated_steps),

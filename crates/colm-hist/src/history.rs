@@ -25,6 +25,22 @@ pub const MISSING_VALUE: f64 = -1.0e36;
 /// `time` 的单位串，与 `MOD_Hist.F90` 写出的完全一致。
 const TIME_UNITS: &str = "minutes since 1900-1-1 0:0:0";
 
+/// 上游把网格 history 的静态面积（`landarea`、`landfraction`、`area_wetland`、`area_lake`、
+/// `croparea`、`irrigarea`、`mask_complete_upstream_regird`）写死成 `compress = 1`
+/// （`MOD_Hist.F90:417-478,889,5048`，`MOD_Grid_RiverLakeHist.F90:301`），不看 `DEF_HIST_CompressLevel`。
+pub const STATIC_COMPRESS_LEVEL: u8 = 1;
+
+/// 按上游 `nf90_def_var(..., deflate_level = compress)` 给一个 history 数据变量设压缩：
+/// 只开 deflate、不开 shuffle；`level = 0` 时 netcdf-fortran 不挂过滤器，这里同样什么也不做
+/// （netcdf-c 的 `nc_def_var_deflate(.., deflate = 1, level = 0)` 会挂一个 0 级过滤器，两侧就不一致了）。
+/// 分块不设：两侧是同一版 netcdf-c（4.10.1），默认分块一致（时间维 1、其余整维）。
+pub fn set_history_compression(variable: &mut netcdf::VariableMut<'_>, level: u8) -> Result<()> {
+    if level > 0 {
+        variable.set_compression(i32::from(level), false)?;
+    }
+    Ok(())
+}
+
 /// 闸门表里的名字**不带** `f_` 前缀（生成器按 `MOD_Hist.F90` 的开关命名），
 /// 而 NetCDF 文件里的变量名带前缀 —— `f_rnet`、`f_assim`。写盘时在这一处补回。
 fn file_variable_name(table_name: &str) -> String {
@@ -116,6 +132,9 @@ pub struct HistoryGrid {
     /// 同样只在建文件时写一次、但定义带 `time` 维的量（CROP 的 `croparea`、`irrigarea`：
     /// `hist_write_var_real8_2d(..., itime = 1, ...)`）。只写第 1 个时间槽，其余槽留 netCDF 默认填充值。
     pub first_record_statics: Vec<(String, String, String, Vec<f64>)>,
+    /// `DEF_HIST_CompressLevel`：逐时间的 history 量（主文件与示踪物文件）的 deflate 级别；
+    /// `statics`/`first_record_statics` 照上游固定用 [`STATIC_COMPRESS_LEVEL`]。
+    pub compress_level: u8,
 }
 
 impl HistoryGrid {
@@ -137,6 +156,11 @@ pub struct HistoryVector {
     pub elements: Vec<std::ops::Range<usize>>,
     /// `elm_patch%subfrc`：patch 在所在单元里的面积份额（单元内归一）。
     pub subfrc: Vec<f64>,
+    /// `DEF_HIST_CompressLevel`：向量文件（主文件与示踪物文件）里逐时间量的 deflate 级别。
+    /// 无时间维的单元静态量（`aggregate_to_vector_and_write_2d(itime = -1)`）虽然也传了这个级别，
+    /// 但 `ncio_write_serial_real8_1d` 用标量 `dimid` 调 `nf90_def_var`，netcdf-fortran 的一维重载
+    /// 不理 `deflate_level`，上游文件里它们是未压缩的连续存储，这里照样不压。
+    pub compress_level: u8,
 }
 
 impl HistoryVector {
@@ -213,6 +237,14 @@ struct PatchField {
     included: Vec<bool>,
     /// `input_mode = 'total'`。
     total: bool,
+}
+
+/// 窗口变量（`history_window_seconds`/`history_window_end_minutes`）的分块：上游在 `time` 已写进
+/// 第一条记录之后才定义它们（`ncio_write_serial_real8_0d_time` 重新进 define 模式），netcdf-c 对
+/// 这时定义的一维无限维变量给的默认分块是 1（而不是建文件时定义的 4096 字节）。这里显式设成 1。
+pub fn set_window_chunking(variable: &mut netcdf::VariableMut<'_>) -> Result<()> {
+    variable.set_chunking(&[1])?;
+    Ok(())
 }
 
 /// 内存里累积的一个 history 分组。
@@ -481,6 +513,7 @@ impl HistoryBuffers {
                 self.records
             );
             let mut nc = file.add_variable::<f64>(&variable.name, dims)?;
+            set_history_compression(&mut nc, vector.compress_level)?;
             nc.put_attribute("long_name", variable.long_name.as_str())?;
             nc.put_attribute("units", variable.units.as_str())?;
             nc.put_attribute("missing_value", MISSING_VALUE)?;
@@ -534,6 +567,7 @@ impl HistoryBuffers {
                 self.records
             );
             let mut nc = file.add_variable::<f64>(&variable.name, dims)?;
+            set_history_compression(&mut nc, grid.compress_level)?;
             nc.put_attribute("long_name", variable.long_name.as_str())?;
             nc.put_attribute("units", variable.units.as_str())?;
             nc.put_attribute("missing_value", MISSING_VALUE)?;
@@ -556,13 +590,15 @@ impl HistoryBuffers {
             return Ok(());
         }
         let mut window = file.add_variable::<f64>("history_window_seconds", &["time"])?;
+        set_window_chunking(&mut window)?;
         window.put_attribute("units", "s")?;
         window.put_attribute(
             "long_name",
             "elapsed window ending at history_window_end_minutes; terminal and resumed records can overlap",
         )?;
-        file.add_variable::<f64>("history_window_end_minutes", &["time"])?
-            .put_attribute("units", TIME_UNITS)?;
+        let mut end = file.add_variable::<f64>("history_window_end_minutes", &["time"])?;
+        set_window_chunking(&mut end)?;
+        end.put_attribute("units", TIME_UNITS)?;
         Ok(())
     }
 
@@ -1165,12 +1201,14 @@ impl HistoryBuffers {
         self.define_windows(&mut file)?;
         for (name, long_name, units, _) in &grid.statics {
             let mut variable = file.add_variable::<f64>(name, &["lat", "lon"])?;
+            set_history_compression(&mut variable, STATIC_COMPRESS_LEVEL)?;
             variable.put_attribute("long_name", long_name.as_str())?;
             variable.put_attribute("units", units.as_str())?;
             variable.put_attribute("missing_value", MISSING_VALUE)?;
         }
         for (name, long_name, units, _) in &grid.first_record_statics {
             let mut variable = file.add_variable::<f64>(name, &["time", "lat", "lon"])?;
+            set_history_compression(&mut variable, STATIC_COMPRESS_LEVEL)?;
             variable.put_attribute("long_name", long_name.as_str())?;
             variable.put_attribute("units", units.as_str())?;
             variable.put_attribute("missing_value", MISSING_VALUE)?;
@@ -1187,6 +1225,7 @@ impl HistoryBuffers {
             dimensions.push("lon");
             let mut variable =
                 file.add_variable::<f64>(&file_variable_name(entry.name), &dimensions)?;
+            set_history_compression(&mut variable, grid.compress_level)?;
             if let Some(long_name) = entry.long_name {
                 variable.put_attribute("long_name", long_name)?;
             }
@@ -1202,6 +1241,7 @@ impl HistoryBuffers {
                 .expect("declare_gridded() only stores names found in the gate table");
             let mut variable =
                 file.add_variable::<f64>(&file_variable_name(entry.name), &["time", "lat", "lon"])?;
+            set_history_compression(&mut variable, grid.compress_level)?;
             if let Some(long_name) = entry.long_name {
                 variable.put_attribute("long_name", long_name)?;
             }
@@ -1319,9 +1359,11 @@ impl HistoryBuffers {
                       name: &str,
                       dims: &[&str],
                       long: Option<&str>,
-                      units: Option<&str>|
+                      units: Option<&str>,
+                      level: u8|
          -> Result<()> {
             let mut variable = file.add_variable::<f64>(name, dims)?;
+            set_history_compression(&mut variable, level)?;
             if let Some(long) = long {
                 variable.put_attribute("long_name", long)?;
             }
@@ -1332,7 +1374,15 @@ impl HistoryBuffers {
             Ok(())
         };
         for (name, long_name, units, _) in &self.vector_statics {
-            define(&mut file, name, &["element"], Some(long_name), Some(units))?;
+            // 单元静态量不压缩（见 [`HistoryVector::compress_level`]）。
+            define(
+                &mut file,
+                name,
+                &["element"],
+                Some(long_name),
+                Some(units),
+                0,
+            )?;
         }
         for name in self.values.keys().chain(self.patch_fields.keys()) {
             let entry = VARS
@@ -1348,6 +1398,7 @@ impl HistoryBuffers {
                 &dimensions,
                 entry.long_name,
                 entry.units,
+                vector.compress_level,
             )?;
         }
         file.variable_mut("elmindex")

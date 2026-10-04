@@ -53,6 +53,8 @@ pub fn initial_state(
     };
     Ok(IrrigationState {
         methods: readin.methods,
+        // 装配时按 PFT 份额改（`colm-rs` 里 `dominant_irrigation_pft`）。
+        dominant_pft: 0,
         rate_mm_s: float("irrig_rate")?,
         steps_left: i32::try_from(steps_left)?,
         water_storage_mm: float("waterstorage")?,

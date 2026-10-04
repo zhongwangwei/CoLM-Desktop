@@ -10,29 +10,12 @@ fn assert_close(actual: DoubleDouble, hi: f64, lo: f64) {
 }
 
 #[test]
-fn exp_ln_and_pow_match_a_high_precision_reference() {
+fn exp_matches_a_high_precision_reference() {
     // mpmath（300 位）拆成 hi + lo 的参照值。
     assert_close(
         DoubleDouble::new(1.0).exp(),
         std::f64::consts::E,
         1.4456468917292502e-16,
-    );
-    assert_close(
-        DoubleDouble::new(10.0).ln(),
-        std::f64::consts::LN_10,
-        -2.1707562233822494e-16,
-    );
-    assert_close(
-        DoubleDouble::new(2.0).powf(DoubleDouble::new(0.5)),
-        std::f64::consts::SQRT_2,
-        -9.667293313452913e-17,
-    );
-    // VIC `calc_Q12` 的第一段 `(init-resid)**(1-expt)`（expt = 0.1；参照值用两者的 double 精确值）。
-    assert_close(
-        DoubleDouble::new(26.487_994_682_743_185)
-            .powf(DoubleDouble::new(1.0) - DoubleDouble::new(0.1)),
-        19.087285629639975,
-        7.197841773826158e-16,
     );
 }
 

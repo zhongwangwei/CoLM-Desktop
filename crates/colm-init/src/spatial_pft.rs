@@ -492,7 +492,6 @@ pub fn write_spatial_pft_cold_time_restarts(
     common_config.observations = observations.borrow();
     common_config.snicar = snicar;
     common_config.zero_leaf_area = lai_feedback;
-    let common = crate::write_spatial_lct_cold_time_restart(common_config)?;
 
     let patches = read_patches(
         config.static_config.landdata,
@@ -510,6 +509,10 @@ pub fn write_spatial_pft_cold_time_restarts(
     let crop = use_crop
         .then(|| spatial_crop_state(&document, config.static_config, &patches, &pfts, &pft_owner))
         .transpose()?;
+    // 灌溉量写在公共时间重启里（`#ifdef CROP`），所以作物状态要先算好（原来这里写 `None`，
+    // 空间 CROP + 灌溉的冷启动缺这 17 个量）。
+    common_config.crop = crop.as_ref();
+    let common = crate::write_spatial_lct_cold_time_restart(common_config)?;
     let bgc_state = use_bgc
         .then(|| {
             derive_spatial_bgc_state(
@@ -1163,7 +1166,10 @@ pub fn write_spatial_pft_cold_time_restarts(
     let missing = vec![MISSING; pft_count];
     let plant_water = vec![-25_000.0; 4 * pft_count];
     let conductance = vec![10_000.0; pft_count];
-    let ozone_zero = vec![0.0; pft_count];
+    // `o3uptake*_p = 0`、`o3coef*_p = 1` 对所有配置（upstream-bugs 第 69 条：上游原来只在 `DEF_USE_BGC`
+    // 段里赋值，否则停在 `spval`）。
+    let ozone_uptake = vec![0.0; pft_count];
+    let ozone_factor = one.clone();
     let pft = (pft_count > 0)
         .then(|| {
             write_pft_time_restart(
@@ -1217,12 +1223,12 @@ pub fn write_spatial_pft_cold_time_restarts(
                     crop: crop.as_ref().map(crate::CropColdStartState::pft_fields),
                     ozone: config.ozone_stress.then_some(PftOzoneFields {
                         lai_old: &total_lai,
-                        sunlit_uptake: &ozone_zero,
-                        shaded_uptake: &ozone_zero,
-                        sunlit_vegetation_coefficient: &one,
-                        shaded_vegetation_coefficient: &one,
-                        sunlit_stomatal_coefficient: &one,
-                        shaded_stomatal_coefficient: &one,
+                        sunlit_uptake: &ozone_uptake,
+                        shaded_uptake: &ozone_uptake,
+                        sunlit_vegetation_coefficient: &ozone_factor,
+                        shaded_vegetation_coefficient: &ozone_factor,
+                        sunlit_stomatal_coefficient: &ozone_factor,
+                        shaded_stomatal_coefficient: &ozone_factor,
                     }),
                     irrigation_method: crop
                         .as_ref()
@@ -1520,6 +1526,7 @@ fn derive_spatial_bgc_state(
             config.land_cover_year,
             config.block_label,
             patches.class.len(),
+            hydraulic_model == HydraulicModel::VanGenuchten,
         )?,
         &patches.class,
         patch_kind,

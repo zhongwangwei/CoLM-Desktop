@@ -23,6 +23,9 @@ pub enum Water2014Runoff {
         saturated_fraction_max: f64,
         saturated_fraction_decay_m_inv: f64,
         decay_tuning: f64,
+        /// `DEF_TOPMOD_method`（名字沿用旧称：它同时决定饱和面积与地下径流）。
+        /// 单点构建恒为 [`TopmodelMethod::Exponential`]；`WATER_2014`（含城市透水面）与
+        /// `WATER_VSF` 都按它走（upstream-bugs 第 56、57 条，vendor 已修）。
         subsurface_method: TopmodelMethod,
     },
     XinAnJiang {
@@ -284,14 +287,15 @@ pub fn water_2014_soil_step(
     let layers = validate(input, state)?;
     let (effective_porosity, ice_fraction, liquid_volume_fraction) = soil_volumes(input, state);
     let water_input_mm_s = input.ground_water_input(state);
-    let (mut surface_runoff_mm_s, initial_subsurface_runoff_mm_s, saturated_fraction) = runoff(
-        input,
-        state,
-        water_input_mm_s,
-        &effective_porosity,
-        &ice_fraction,
-        &liquid_volume_fraction,
-    )?;
+    let (mut surface_runoff_mm_s, initial_subsurface_runoff_mm_s, saturated_fraction, eta_topmod) =
+        runoff(
+            input,
+            state,
+            water_input_mm_s,
+            &effective_porosity,
+            &ice_fraction,
+            &liquid_volume_fraction,
+        )?;
     // 水田（`MOD_SoilSnowHydrology.F90:374-390`）：产流先全部留作积水，超过
     // `DEF_TUNING_IRRIGATION_PONDMX` 的部分才是地表径流。
     if let Some(irrigation) = input.paddy_methods() {
@@ -365,7 +369,11 @@ pub fn water_2014_soil_step(
         } => update_groundwater_topmodel(
             groundwater_input,
             TopmodelSubsurfaceInput {
+                // `groundwater` 现在带 `hksati, topoweti, eta_topmod` 转给 `SubsurfaceRunoff_TOPMOD`
+                // （`MOD_SoilSnowHydrology.F90:484-488,2576`；upstream-bugs 第 57 条，vendor 已修），
+                // 方法 1/2 在 `WATER_2014` 里也生效。
                 method: subsurface_method,
+                critical_topographic_index: Some(eta_topmod),
                 layer_thickness_m: input.layer_thickness_m,
                 interface_depth_m: input.interface_depth_m,
                 ice_fraction: &ice_fraction,
@@ -633,19 +641,16 @@ fn wetland_soil_step(
                 state.hydraulic_conductivity_mm_s[layer] =
                     input.saturated_hydraulic_conductivity_mm_s[layer];
             } else {
-                state.matric_potential_mm[layer] = ((t - crate::FREEZING_K)
-                    * 34_019_432.683_129_79
-                    / t)
-                    .max(input.minimum_soil_potential_mm);
+                state.matric_potential_mm[layer] =
+                    ((t - crate::FREEZING_K) * 34_019_432.683_129_79 / t)
+                        .max(input.minimum_soil_potential_mm);
                 let porosity = input.porosity[layer];
                 let ice_volume = (state.ice_water_kg_m2[layer]
                     / (input.layer_thickness_m[layer] * ICE_DENSITY_KG_M3))
                     .min(porosity)
                     .max(0.0);
-                let impedance = crate::LibmPow::lpow(
-                    10.0,
-                    -(ice_volume / porosity * input.soil_ice_impedance),
-                );
+                let impedance =
+                    crate::LibmPow::lpow(10.0, -(ice_volume / porosity * input.soil_ice_impedance));
                 state.hydraulic_conductivity_mm_s[layer] =
                     impedance * input.saturated_hydraulic_conductivity_mm_s[layer];
             }
@@ -798,10 +803,7 @@ pub(crate) struct CondensationInput {
 /// 1e-12）把超过容量的液态水挤出。挤出的水与装不下的露水按 `(wdsrf + frost) + dew_excess`
 /// 进积水。新霜超过整个孔隙的情形由 `relocate_soil_frost_ice` 在雪层合并后处理（土壤 patch
 /// 的 `defer_surface_ice_overflow`）。
-pub(crate) fn absorb_condensation(
-    input: CondensationInput,
-    state: &mut Water2014SoilState,
-) {
+pub(crate) fn absorb_condensation(input: CondensationInput, state: &mut Water2014SoilState) {
     let dt = input.time_step_seconds;
     let ice_before_frost = state.ice_water_kg_m2[0];
     let dew_input_mm = (dt * input.dew_kg_m2_s).max(0.0);
@@ -824,6 +826,8 @@ pub(crate) fn absorb_condensation(
     state.surface_water_mm = (state.surface_water_mm + frost_excess_mm) + dew_excess;
 }
 
+/// 返回 `(rsur, rsubst, frcsat, eta_topmod)`；`eta_topmod` 是方法 2 交给 `groundwater` 的
+/// 临界地形指数，其余情形是上游的初值 0。
 fn runoff(
     input: Water2014SoilInput<'_>,
     state: &Water2014SoilState,
@@ -831,7 +835,7 @@ fn runoff(
     effective_porosity: &[f64],
     ice_fraction: &[f64],
     liquid_volume_fraction: &[f64],
-) -> Result<(f64, f64, f64)> {
+) -> Result<(f64, f64, f64, f64)> {
     let storage = StorageRunoffInput {
         layer_thickness_m: input.layer_thickness_m,
         effective_porosity,
@@ -844,8 +848,14 @@ fn runoff(
             saturated_fraction_max,
             saturated_fraction_decay_m_inv,
             decay_tuning,
-            ..
+            subsurface_method,
         } => {
+            // `WATER_2014` 把四个 TWI 量与 `eta_out=eta_topmod` 传给 `SurfaceRunoff_TOPMOD`
+            // （upstream-bugs 第 56 条），并且**每步都调**：方法 2 的基流要用这一步的 `eta`
+            // （原来 `gwat <= 0` 时跳过，`eta` 留 0，基流按 `exp(-0)` 爆大，第 60 条，vendor 已修）。
+            // `gwat` 不大于 0（含 NaN）时 `rsur` 仍置 0。
+            let positive =
+                storage.water_input_mm_s.partial_cmp(&0.0) == Some(std::cmp::Ordering::Greater);
             let runoff = topmodel_surface_runoff(crate::TopmodelSurfaceInput {
                 impermeable_porosity: input.impermeable_porosity,
                 saturated_hydraulic_conductivity_mm_s: input.saturated_hydraulic_conductivity_mm_s,
@@ -856,8 +866,18 @@ fn runoff(
                 decay_tuning,
                 water_table_depth_m: state.water_table_depth_m,
                 water_input_mm_s: storage.water_input_mm_s,
+                method: subsurface_method,
             })?;
-            Ok((runoff.surface_runoff_mm_s, 0.0, runoff.saturated_fraction))
+            Ok((
+                if positive {
+                    runoff.surface_runoff_mm_s
+                } else {
+                    0.0
+                },
+                0.0,
+                runoff.saturated_fraction,
+                runoff.critical_topographic_index.unwrap_or(0.0),
+            ))
         }
         Water2014Runoff::XinAnJiang {
             elevation_standard_deviation_m,
@@ -867,6 +887,7 @@ fn runoff(
                 runoff.surface_runoff_mm_s,
                 runoff.subsurface_runoff_mm_s,
                 runoff.saturated_fraction,
+                0.0,
             ))
         }
         Water2014Runoff::SimpleVic { bvic } => {
@@ -875,10 +896,11 @@ fn runoff(
                 runoff.surface_runoff_mm_s,
                 runoff.subsurface_runoff_mm_s,
                 runoff.saturated_fraction,
+                0.0,
             ))
         }
         Water2014Runoff::Vic { .. } => {
-            let (surface, subsurface) = vic_runoff_for(
+            let (surface, subsurface, _) = vic_runoff_for(
                 input.runoff,
                 VicColumn {
                     time_step_seconds: input.time_step_seconds,
@@ -896,7 +918,7 @@ fn runoff(
                 },
             )?;
             // `WATER_2014` 没有 `frcsat` 这个输出，值不会被读。
-            Ok((surface, subsurface, f64::NAN))
+            Ok((surface, subsurface, f64::NAN, 0.0))
         }
     }
 }
@@ -920,7 +942,11 @@ pub(crate) struct VicColumn<'a> {
 
 /// `DEF_Runoff_SCHEME = 1`：返回 `(rsur, rsubst)`。`frcsat` 上游在这一支**不赋值**
 /// （`intent(out)` 却没写，见 `docs/upstream-bugs.md` 第 16 条），调用方按"没有值"处理。
-pub(crate) fn vic_runoff_for(runoff: Water2014Runoff, column: VicColumn<'_>) -> Result<(f64, f64)> {
+/// 返回 `(rsur, rsubst, frcsat)`；`frcsat` 是 VIC 的饱和面积分数 `cell%asat`（upstream-bugs 第 16 条）。
+pub(crate) fn vic_runoff_for(
+    runoff: Water2014Runoff,
+    column: VicColumn<'_>,
+) -> Result<(f64, f64, f64)> {
     let Water2014Runoff::Vic {
         infiltration_shape,
         maximum_baseflow_mm_day,
@@ -949,7 +975,11 @@ pub(crate) fn vic_runoff_for(runoff: Water2014Runoff, column: VicColumn<'_>) -> 
         baseflow_threshold,
         baseflow_exponent,
     })?;
-    Ok((vic.surface_runoff_mm_s, vic.subsurface_runoff_mm_s))
+    Ok((
+        vic.surface_runoff_mm_s,
+        vic.subsurface_runoff_mm_s,
+        vic.saturated_fraction,
+    ))
 }
 
 fn soil_volumes(

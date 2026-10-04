@@ -597,6 +597,7 @@ fn energy_state(forcing: crate::RuntimeForcing) -> StandardLctEnergyState {
                 snow_mm: 0.0,
             },
             plant_hydraulics: None,
+            ozone: None,
         },
         canopy: CanopyGeometry {
             leaf_area_index: 2.0,
@@ -704,6 +705,7 @@ fn input(forcing: crate::RuntimeForcing) -> StandardLctEnergyInput<'static> {
             quantum_efficiency: 0.05,
             maximum_carboxylation_25c_mol_m2_s: 60e-6,
             c3c4: 1,
+            respiration_fraction_override: None,
             low_temperature_slope: 0.2,
             low_temperature_half_k: 288.16,
             high_temperature_slope: 0.3,
@@ -760,6 +762,7 @@ fn input(forcing: crate::RuntimeForcing) -> StandardLctEnergyInput<'static> {
         intercepted_snow_kg_m2_s: 0.0,
         ground_latent_heat_j_kg: 0.0,
         plant_hydraulics: None,
+        ozone: None,
         options: LeafTemperatureOptions::default(),
     };
     StandardLctEnergyInput {

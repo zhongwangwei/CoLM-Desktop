@@ -2,8 +2,9 @@
 //!
 //! This is the reusable LCT/PFT two-big-leaf path used by the native runtime;
 //! it contains no NetCDF or process orchestration. Plant hydraulics shares the
-//! root-to-leaf network in [`crate::plant_hydraulics`]; ozone remains a
-//! separate upstream feature branch and is not silently approximated here.
+//! root-to-leaf network in [`crate::plant_hydraulics`]. `DEF_USE_OZONESTRESS` runs
+//! [`crate::canopy_ozone_stress`] after the stability iteration, exactly where the
+//! upstream calls `CalcOzoneStress` (`MOD_LeafTemperature.F90:1027-1037`).
 
 use crate::LibmPow;
 use anyhow::{ensure, Context, Result};
@@ -173,6 +174,9 @@ pub struct LeafTemperatureInput<'a> {
     /// Optional default LCT PHS branch. Its persistent potential lives in
     /// [`LeafTemperatureState::plant_hydraulics`].
     pub plant_hydraulics: Option<LeafPlantHydraulicInput<'a>>,
+    /// `DEF_USE_OZONESTRESS`：本叶（LCT 的 patch 或一个 PFT）的 `CalcOzoneStress` 参数；
+    /// 关掉时是 `None`。状态在 [`LeafTemperatureState::ozone`]，两者同有同无。
+    pub ozone: Option<crate::OzoneParameters>,
     pub options: LeafTemperatureOptions,
 }
 
@@ -183,6 +187,8 @@ pub struct LeafTemperatureState {
     pub canopy_water: CanopyWater,
     /// Persistent sunlit/shaded/xylem/root water potentials for PHS.
     pub plant_hydraulics: Option<PlantHydraulicState>,
+    /// `DEF_USE_OZONESTRESS` 的 `lai_old`/`o3uptake*`/`o3coef*` 与 patch 的 `forc_ozone`。
+    pub ozone: Option<crate::OzoneState>,
 }
 
 /// Fluxes and diagnostic state produced by one converged canopy solve.
@@ -283,6 +289,11 @@ pub fn leaf_temperature(
     state: &mut LeafTemperatureState,
 ) -> Result<LeafTemperatureOutput> {
     validate(input, *state)?;
+    // `MOD_LeafTemperature.F90:452-455`：`o3coef*` 在迭代前无条件置 1（vendor 修补；上游原来只在
+    // 循环之后的非臭氧分支里赋值，迭代里的 `stomata` 读到的是重启值或未定义值）。
+    if let Some(ozone) = state.ozone.as_mut() {
+        ozone.reset_factors();
+    }
     let lai = input.leaf_area_index;
     let sai = input.stem_area_index;
     let lsai = lai + sai;
@@ -1098,6 +1109,7 @@ pub fn leaf_temperature(
             shaded_resistance,
             leaf_sunlit_resistance,
             leaf_shaded_resistance,
+            leaf_boundary_resistance,
             root_flux_kg_m2_s,
             sunlit_soil_water_stress,
             shaded_soil_water_stress,
@@ -1118,6 +1130,27 @@ pub fn leaf_temperature(
         prior_flux_change = flux_change;
     }
 
+    // `MOD_LeafTemperature.F90:1027-1037`：收敛之后的 `CalcOzoneStress`（阳叶、阴叶各一次）与
+    // `lai_old = lai`，再把 `o3coefv` 乘进 `assimsun`/`assimsha`。用的是最后一轮的 `ram`、叶尺度的
+    // `rssun`/`rssha`（`:797-798` 已乘回 `laisun`/`laisha`）与 `rb`；`lai <= 0.001` 时上游此后才把
+    // 光合清零（`:1062-1066`），这里的乘积因此作用在 0 上。`rssun/o3coefg` 那两行在上游是注释。
+    if let (Some(parameters), Some(ozone)) = (input.ozone, state.ozone.as_mut()) {
+        let (sunlit, shaded) = crate::canopy_ozone_stress(
+            parameters,
+            ozone,
+            input.surface_pressure_pa,
+            input.potential_temperature_k,
+            last.ram,
+            last.leaf_sunlit_resistance,
+            last.leaf_shaded_resistance,
+            last.leaf_boundary_resistance,
+            lai,
+            input.canopy_absorbed_solar_w_m2,
+            input.time_step_seconds,
+        );
+        last.sunlit_resistance.assimilation_mol_m2_s *= sunlit;
+        last.shaded_resistance.assimilation_mol_m2_s *= shaded;
+    }
     let final_temperature_change = dtl[iteration - 1];
     let leaf_latent_heat_j_kg = LATENT_HEAT_VAPORIZATION_J_KG;
     // `MOD_LeafTemperature.F90:1062-1093` 的收敛后收尾。GIMPLE（dump 第 2636-2650、
@@ -1470,6 +1503,8 @@ struct Iteration {
     shaded_resistance: crate::StomataState,
     leaf_sunlit_resistance: f64,
     leaf_shaded_resistance: f64,
+    /// `rb`：叶边界层阻抗（臭氧吸收用最后一轮的值）。
+    leaf_boundary_resistance: f64,
     root_flux_kg_m2_s: Vec<f64>,
     sunlit_soil_water_stress: f64,
     shaded_soil_water_stress: f64,
@@ -1532,6 +1567,7 @@ impl Default for Iteration {
             },
             leaf_sunlit_resistance: 0.0,
             leaf_shaded_resistance: 0.0,
+            leaf_boundary_resistance: 0.0,
             root_flux_kg_m2_s: Vec::new(),
             sunlit_soil_water_stress: 0.0,
             shaded_soil_water_stress: 0.0,
@@ -2072,6 +2108,10 @@ fn validate(input: LeafTemperatureInput<'_>, state: LeafTemperatureState) -> Res
     check(
         "plant hydraulics must match its state",
         input.plant_hydraulics.is_none() || state.plant_hydraulics.is_some(),
+    );
+    check(
+        "ozone parameters must match the ozone state",
+        input.ozone.is_some() == state.ozone.is_some(),
     );
     ensure!(
         failed.is_empty(),

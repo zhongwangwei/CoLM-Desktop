@@ -147,12 +147,8 @@ fn build_state(input: VicRunoffInput<'_>) -> (VicSoil, VicCell, [f64; VIC_LAYERS
     let frost_count = if has_ice { VIC_LAYERS } else { 1 };
     let mut ice_mm = [[0.0; VIC_LAYERS]; VIC_LAYERS];
     if has_ice {
-        // `vic_para` 用同一个局部数组 `ice_tmp` 依次接三组的 `VIC_IceLay` 结果，
-        // 第三组（4 个 CoLM 层）的累加起点就是第二组刚写下的值，见 [`partition_ice`]。
-        let mut previous = [0.0; VIC_LAYERS];
         for (layer, range) in group_ranges().iter().enumerate() {
-            ice_mm[layer] = partition_ice(&input.ice_water_kg_m2[range.clone()], previous);
-            previous = ice_mm[layer];
+            ice_mm[layer] = partition_ice(&input.ice_water_kg_m2[range.clone()]);
         }
     }
     (
@@ -410,18 +406,17 @@ fn runoff_and_saturation(soil: VicSoil, moisture: [f64; VIC_LAYERS], inflow: f64
 
 /// `calc_Q12`（`MOD_Hydro_VIC.F90`）。
 ///
-/// 源码里的 `1.0d0` 在 `-fdefault-real-8` 下被提升成 `real(kind=16)`，整条在 binary128 里
-/// 求值（GIMPLE：`powq`、四倍精度的减法与除法）；只有 `(max_moist-resid_moist)**expt`
-/// 与 `Ksat/…` 仍是 double。这里照同样的分段用双倍双精度复现，最后才转回 f64 ——
-/// 全程 f64 在 AT-Neu VIC 算例第 0 步就让 `Q12` 差 1 ULP。
+/// 构建加了 `-fdefault-double-8`（upstream-bugs 第 17 条）后源码里的 `1.0d0` 就是 real(8)，
+/// 整条都是 double。GIMPLE（`MOD_Hydro_VIC.F90:478`）：
+/// `first = pow(init-resid, 1-expt)`，`scaled = Ksat / pow(max-resid, expt)`，
+/// `.FNMA (1-expt, scaled, first)` 再 `pow(·, 1/(1-expt))`，最后 `(init - root) - resid`。
 fn q12(conductivity: f64, moisture: f64, residual: f64, maximum: f64, exponent: f64) -> f64 {
-    use crate::extended::DoubleDouble as Dd;
-    let one_minus_exponent = Dd::new(1.0) - Dd::new(exponent);
-    let first = Dd::new(moisture - residual).powf(one_minus_exponent);
+    let one_minus_exponent = 1.0 - exponent;
+    let first = (moisture - residual).lpow(one_minus_exponent);
     let scaled = conductivity / (maximum - residual).lpow(exponent);
-    let second = one_minus_exponent * Dd::new(scaled);
-    let root = (first - second).powf(Dd::new(1.0) / one_minus_exponent);
-    (Dd::new(moisture) - root - Dd::new(residual)).to_f64()
+    let base = (-one_minus_exponent).mul_add(scaled, first);
+    let root = base.lpow(1.0 / one_minus_exponent);
+    moisture - root - residual
 }
 
 fn overflow_to_limit(liquid: &mut f64, ice: f64, maximum: f64) -> f64 {
@@ -462,15 +457,15 @@ fn project_to_colm(values: &[f64; VIC_LAYERS], thickness_m: &[f64]) -> Vec<f64> 
 ///
 /// * 最后一律 `vic_ice(2) = totalSum - vic_ice(1) - vic_ice(3)`，所以中间那一区即使在
 ///   "三层直接拷贝"的情形下也要按这个差重算（直接拷贝会差 1 ULP）。
-/// * `colm_lay > 3`（默认分组里最深的土层 7–10）那一支把 `intent(out)` 的 `vic_ice`
-///   **当累加器用而不清零**（上游缺陷，见 `docs/upstream-bugs.md` 第 18 条）。gfortran 下它读到的是
-///   调用方同一个局部数组里上一组（土层 4–6）刚写下的值，即 `previous`；这里照内核的实际行为。
-///   累加是 `.FMA (ice, multiplier, acc)`，`multiplier` 是 1 或 0。
-fn partition_ice(values: &[f64], previous: [f64; VIC_LAYERS]) -> [f64; VIC_LAYERS] {
+/// * `colm_lay > 3`（默认分组里最深的土层 7–10）那一支从 0 起累加：顶部若干层进第 1 区、底部若干层进
+///   第 3 区，其余在第 2 区。上游原来不清零 `intent(out)` 的 `vic_ice`，读到上一组的值（upstream-bugs
+///   第 18 条，vendor 已修）。累加是 `.FMA (ice, multiplier, acc)`，`multiplier` 是 1 或 0；循环后那一份的
+///   整数除法恒为 0。
+fn partition_ice(values: &[f64]) -> [f64; VIC_LAYERS] {
     let total: f64 = values.iter().fold(0.0, |sum, value| sum + value);
     let layers = values.len();
     let vic_layers = VIC_LAYERS;
-    let mut ice = previous;
+    let mut ice = [0.0; VIC_LAYERS];
     match layers {
         1 => ice = [total / 3.0; VIC_LAYERS],
         2 => {

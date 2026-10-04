@@ -102,8 +102,8 @@ pub struct PlantHydraulicOverrides {
 ///
 /// 上游只在单点、`DEF_USE_LCT` 时对本站地类（`SITE_landtype`）生效，在 `Init_LC_Const` 里、根系分布
 /// 之前覆盖——所以 `d50`/`beta` 的覆盖也改 `rootfr`。`vmax25` 以 µmol/m²/s 给出，与表值一样再乘 1e-6。
-/// `respcp` 覆盖了也不起作用：`stomata` 把同名局部量按 `0.015*c3 + 0.025*c4` 重算
-/// （`MOD_AssimStomataConductance.F90:592`），这里只为不丢设置而保留。
+/// `respcp` 覆盖原来不起作用（`calc_photo_params` 把同名局部量按 `0.015*c3 + 0.025*c4` 重算，
+/// upstream-bugs 第 32 条）；vendor 已修，现由 [`crate::LeafBiochemistry::respiration_fraction_override`] 带进光合。
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct LandClassOverrides {
     pub htop0: Option<f64>,
@@ -412,6 +412,7 @@ impl ClassConstants {
             quantum_efficiency: self.column(|table| table.effcon, |o| o.effcon),
             maximum_carboxylation_25c_mol_m2_s: self.maximum_carboxylation_25c_mol_m2_s(),
             c3c4: self.c3c4(),
+            respiration_fraction_override: self.overrides.respcp,
             low_temperature_slope: self.column(|table| table.slti, |o| o.slti),
             low_temperature_half_k: self.column(|table| table.hlti, |o| o.hlti),
             high_temperature_slope: self.column(|table| table.shti, |o| o.shti),

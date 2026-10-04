@@ -2043,6 +2043,8 @@ fn write_single_point_pft_cold_time_restarts(
     // （`sigf_p = 1`，树木埋没分支也进不去）。给雪盖传全零的叶/茎面积就是同一条分支；
     // `sai_p = tsai_p·sigf_p` 仍用真实的 `tsai_p`。
     let zeros = vec![0.0; pft.class.len()];
+    let (pft_ozone_uptake, pft_ozone_factor) =
+        (vec![0.0; pft.class.len()], vec![1.0; pft.class.len()]);
     let (snow_lai_p, snow_sai_p) = if run.lai_feedback {
         (&zeros, &zeros)
     } else {
@@ -2597,14 +2599,16 @@ fn write_single_point_pft_cold_time_restarts(
                     diag_matrix: run.diag_matrix,
                 }),
             crop: crop.as_ref().map(CropColdStartState::pft_fields),
+            // `o3uptake*_p = 0`、`o3coef*_p = 1`：上游原来只在 `IF (DEF_USE_BGC)` 段里赋值，不开 BGC 时停在
+            // `spval`（upstream-bugs 第 69 条，vendor 已改成对所有配置赋值）。
             ozone: run.ozone_stress.then_some(PftOzoneFields {
                 lai_old: &total_lai_p,
-                sunlit_uptake: &vec![0.0; pft.class.len()],
-                shaded_uptake: &vec![0.0; pft.class.len()],
-                sunlit_vegetation_coefficient: &vec![1.0; pft.class.len()],
-                shaded_vegetation_coefficient: &vec![1.0; pft.class.len()],
-                sunlit_stomatal_coefficient: &vec![1.0; pft.class.len()],
-                shaded_stomatal_coefficient: &vec![1.0; pft.class.len()],
+                sunlit_uptake: &pft_ozone_uptake,
+                shaded_uptake: &pft_ozone_uptake,
+                sunlit_vegetation_coefficient: &pft_ozone_factor,
+                shaded_vegetation_coefficient: &pft_ozone_factor,
+                sunlit_stomatal_coefficient: &pft_ozone_factor,
+                shaded_stomatal_coefficient: &pft_ozone_factor,
             }),
             irrigation_method: crop
                 .as_ref()
@@ -3311,6 +3315,8 @@ fn write_cold_time_restart(
                 shaded_stomatal_conductance: &vec![10_000.0; patch_count],
                 vegetation_nodes: 4,
             }),
+            // `o3uptakesun/sha = 0`：上游原来从不赋值、重启里是 `spval`（upstream-bugs 第 69 条，vendor 已在
+            // `MOD_Initialize.F90` 对所有配置补上）。
             ozone: run.ozone_stress.then_some(OzoneFields {
                 lai_old: &lai,
                 sunlit_uptake: &zeros,

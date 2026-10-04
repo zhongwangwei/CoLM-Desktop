@@ -17,7 +17,8 @@ fn config() -> SidecarConfig {
 }
 
 /// 分配条件：单点草地（无 BGC/PFT/城市）旁车里是 `nac_ln`、`nac_dt` 与 124 个 `a_*`
-/// （实测 Fortran `hs` 旁车 130 个变量 = 4 个标记 + 126）；BGC、作物、城市、PFT 各自再加。
+/// （实测 Fortran `hs` 旁车 130 个变量 = 4 个标记 + 126）；BGC、作物、城市、PFT 各自再加
+/// （BGC 的 297 = 原 193 + PR #504 的 104 个火诊断累加量）。
 #[test]
 fn the_allocated_set_follows_the_configuration() {
     let count = |config: SidecarConfig| allocated_fields(&config).count();
@@ -26,8 +27,8 @@ fn the_allocated_set_follows_the_configuration() {
         bgc: true,
         ..config()
     };
-    assert_eq!(count(bgc), 126 + 193);
-    assert_eq!(count(SidecarConfig { crop: true, ..bgc }), 126 + 193 + 48);
+    assert_eq!(count(bgc), 126 + 297);
+    assert_eq!(count(SidecarConfig { crop: true, ..bgc }), 126 + 297 + 48);
     // 没有 BGC 的 CROP 内核不分配作物量（条件是 `DEF_USE_BGC` 块里的 `#ifdef CROP`）。
     assert_eq!(
         count(SidecarConfig {

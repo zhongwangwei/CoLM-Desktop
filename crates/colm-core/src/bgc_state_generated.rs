@@ -4145,12 +4145,16 @@ pub struct BgcPatchTimeVariables {
     pub fsat: Vec<f64>,
     /// `prec10(numpatch)`
     pub prec10: Vec<f64>,
+    /// `prec30(numpatch)`
+    pub prec30: Vec<f64>,
     /// `prec60(numpatch)`
     pub prec60: Vec<f64>,
     /// `prec365(numpatch)`
     pub prec365: Vec<f64>,
     /// `prec_today(numpatch)`
     pub prec_today: Vec<f64>,
+    /// `rh30_today(numpatch)`
+    pub rh30_today: Vec<f64>,
     /// `prec_daily(365, numpatch)`
     pub prec_daily: Vec<f64>,
     /// `wf2(numpatch)`
@@ -4487,9 +4491,11 @@ impl BgcPatchTimeVariables {
             nfire: vec![MISSING; 1],
             fsat: vec![MISSING; 1],
             prec10: vec![MISSING; 1],
+            prec30: vec![MISSING; 1],
             prec60: vec![MISSING; 1],
             prec365: vec![MISSING; 1],
             prec_today: vec![MISSING; 1],
+            rh30_today: vec![MISSING; 1],
             prec_daily: vec![MISSING; 365],
             wf2: vec![MISSING; 1],
             tsoi17: vec![MISSING; 1],
@@ -4742,9 +4748,11 @@ impl BgcPatchTimeVariables {
             "nfire" => Some(&self.nfire),
             "fsat" => Some(&self.fsat),
             "prec10" => Some(&self.prec10),
+            "prec30" => Some(&self.prec30),
             "prec60" => Some(&self.prec60),
             "prec365" => Some(&self.prec365),
             "prec_today" => Some(&self.prec_today),
+            "rh30_today" => Some(&self.rh30_today),
             "prec_daily" => Some(&self.prec_daily),
             "wf2" => Some(&self.wf2),
             "tsoi17" => Some(&self.tsoi17),
@@ -4996,9 +5004,11 @@ impl BgcPatchTimeVariables {
             "nfire" => Some(&mut self.nfire),
             "fsat" => Some(&mut self.fsat),
             "prec10" => Some(&mut self.prec10),
+            "prec30" => Some(&mut self.prec30),
             "prec60" => Some(&mut self.prec60),
             "prec365" => Some(&mut self.prec365),
             "prec_today" => Some(&mut self.prec_today),
+            "rh30_today" => Some(&mut self.rh30_today),
             "prec_daily" => Some(&mut self.prec_daily),
             "wf2" => Some(&mut self.wf2),
             "tsoi17" => Some(&mut self.tsoi17),
@@ -5293,9 +5303,11 @@ impl BgcPatchTimeVariables {
         ("nfire", &["numpatch"]),
         ("fsat", &["numpatch"]),
         ("prec10", &["numpatch"]),
+        ("prec30", &["numpatch"]),
         ("prec60", &["numpatch"]),
         ("prec365", &["numpatch"]),
         ("prec_today", &["numpatch"]),
+        ("rh30_today", &["numpatch"]),
         ("prec_daily", &["365", "numpatch"]),
         ("wf2", &["numpatch"]),
         ("tsoi17", &["numpatch"]),
@@ -5529,8 +5541,200 @@ pub struct BgcPatchFluxes {
     pub er: Vec<f64>,
     /// `fire_closs(numpatch)`
     pub fire_closs: Vec<f64>,
+    /// `fire_btran2(numpatch)`
+    pub fire_btran2: Vec<f64>,
     /// `fire_nloss(numpatch)`
     pub fire_nloss: Vec<f64>,
+    /// `pft_fire_closs(numpatch)`
+    pub pft_fire_closs: Vec<f64>,
+    /// `pft_fire_nloss(numpatch)`
+    pub pft_fire_nloss: Vec<f64>,
+    /// `litfire(numpatch)`
+    pub litfire: Vec<f64>,
+    /// `somfire(numpatch)`
+    pub somfire: Vec<f64>,
+    /// `totfire(numpatch)`
+    pub totfire: Vec<f64>,
+    /// `m_leafc_to_fire(numpatch)`
+    pub m_leafc_to_fire: Vec<f64>,
+    /// `m_frootc_to_fire(numpatch)`
+    pub m_frootc_to_fire: Vec<f64>,
+    /// `m_livestemc_to_fire(numpatch)`
+    pub m_livestemc_to_fire: Vec<f64>,
+    /// `m_deadstemc_to_fire(numpatch)`
+    pub m_deadstemc_to_fire: Vec<f64>,
+    /// `m_livecrootc_to_fire(numpatch)`
+    pub m_livecrootc_to_fire: Vec<f64>,
+    /// `m_deadcrootc_to_fire(numpatch)`
+    pub m_deadcrootc_to_fire: Vec<f64>,
+    /// `m_leafc_storage_to_fire(numpatch)`
+    pub m_leafc_storage_to_fire: Vec<f64>,
+    /// `m_frootc_storage_to_fire(numpatch)`
+    pub m_frootc_storage_to_fire: Vec<f64>,
+    /// `m_livestemc_storage_to_fire(numpatch)`
+    pub m_livestemc_storage_to_fire: Vec<f64>,
+    /// `m_deadstemc_storage_to_fire(numpatch)`
+    pub m_deadstemc_storage_to_fire: Vec<f64>,
+    /// `m_livecrootc_storage_to_fire(numpatch)`
+    pub m_livecrootc_storage_to_fire: Vec<f64>,
+    /// `m_deadcrootc_storage_to_fire(numpatch)`
+    pub m_deadcrootc_storage_to_fire: Vec<f64>,
+    /// `m_gresp_storage_to_fire(numpatch)`
+    pub m_gresp_storage_to_fire: Vec<f64>,
+    /// `m_leafc_xfer_to_fire(numpatch)`
+    pub m_leafc_xfer_to_fire: Vec<f64>,
+    /// `m_frootc_xfer_to_fire(numpatch)`
+    pub m_frootc_xfer_to_fire: Vec<f64>,
+    /// `m_livestemc_xfer_to_fire(numpatch)`
+    pub m_livestemc_xfer_to_fire: Vec<f64>,
+    /// `m_deadstemc_xfer_to_fire(numpatch)`
+    pub m_deadstemc_xfer_to_fire: Vec<f64>,
+    /// `m_livecrootc_xfer_to_fire(numpatch)`
+    pub m_livecrootc_xfer_to_fire: Vec<f64>,
+    /// `m_deadcrootc_xfer_to_fire(numpatch)`
+    pub m_deadcrootc_xfer_to_fire: Vec<f64>,
+    /// `m_gresp_xfer_to_fire(numpatch)`
+    pub m_gresp_xfer_to_fire: Vec<f64>,
+    /// `m_livestemc_to_deadstemc_fire(numpatch)`
+    pub m_livestemc_to_deadstemc_fire: Vec<f64>,
+    /// `m_livecrootc_to_deadcrootc_fire(numpatch)`
+    pub m_livecrootc_to_deadcrootc_fire: Vec<f64>,
+    /// `m_leafc_to_litter_fire(numpatch)`
+    pub m_leafc_to_litter_fire: Vec<f64>,
+    /// `m_frootc_to_litter_fire(numpatch)`
+    pub m_frootc_to_litter_fire: Vec<f64>,
+    /// `m_livestemc_to_litter_fire(numpatch)`
+    pub m_livestemc_to_litter_fire: Vec<f64>,
+    /// `m_deadstemc_to_litter_fire(numpatch)`
+    pub m_deadstemc_to_litter_fire: Vec<f64>,
+    /// `m_livecrootc_to_litter_fire(numpatch)`
+    pub m_livecrootc_to_litter_fire: Vec<f64>,
+    /// `m_deadcrootc_to_litter_fire(numpatch)`
+    pub m_deadcrootc_to_litter_fire: Vec<f64>,
+    /// `m_leafc_storage_to_litter_fire(numpatch)`
+    pub m_leafc_storage_to_litter_fire: Vec<f64>,
+    /// `m_frootc_storage_to_litter_fire(numpatch)`
+    pub m_frootc_storage_to_litter_fire: Vec<f64>,
+    /// `m_livestemc_storage_to_litter_fire(numpatch)`
+    pub m_livestemc_storage_to_litter_fire: Vec<f64>,
+    /// `m_deadstemc_storage_to_litter_fire(numpatch)`
+    pub m_deadstemc_storage_to_litter_fire: Vec<f64>,
+    /// `m_livecrootc_storage_to_litter_fire(numpatch)`
+    pub m_livecrootc_storage_to_litter_fire: Vec<f64>,
+    /// `m_deadcrootc_storage_to_litter_fire(numpatch)`
+    pub m_deadcrootc_storage_to_litter_fire: Vec<f64>,
+    /// `m_gresp_storage_to_litter_fire(numpatch)`
+    pub m_gresp_storage_to_litter_fire: Vec<f64>,
+    /// `m_leafc_xfer_to_litter_fire(numpatch)`
+    pub m_leafc_xfer_to_litter_fire: Vec<f64>,
+    /// `m_frootc_xfer_to_litter_fire(numpatch)`
+    pub m_frootc_xfer_to_litter_fire: Vec<f64>,
+    /// `m_livestemc_xfer_to_litter_fire(numpatch)`
+    pub m_livestemc_xfer_to_litter_fire: Vec<f64>,
+    /// `m_deadstemc_xfer_to_litter_fire(numpatch)`
+    pub m_deadstemc_xfer_to_litter_fire: Vec<f64>,
+    /// `m_livecrootc_xfer_to_litter_fire(numpatch)`
+    pub m_livecrootc_xfer_to_litter_fire: Vec<f64>,
+    /// `m_deadcrootc_xfer_to_litter_fire(numpatch)`
+    pub m_deadcrootc_xfer_to_litter_fire: Vec<f64>,
+    /// `m_gresp_xfer_to_litter_fire(numpatch)`
+    pub m_gresp_xfer_to_litter_fire: Vec<f64>,
+    /// `m_leafn_to_fire(numpatch)`
+    pub m_leafn_to_fire: Vec<f64>,
+    /// `m_frootn_to_fire(numpatch)`
+    pub m_frootn_to_fire: Vec<f64>,
+    /// `m_livestemn_to_fire(numpatch)`
+    pub m_livestemn_to_fire: Vec<f64>,
+    /// `m_deadstemn_to_fire(numpatch)`
+    pub m_deadstemn_to_fire: Vec<f64>,
+    /// `m_livecrootn_to_fire(numpatch)`
+    pub m_livecrootn_to_fire: Vec<f64>,
+    /// `m_deadcrootn_to_fire(numpatch)`
+    pub m_deadcrootn_to_fire: Vec<f64>,
+    /// `m_leafn_storage_to_fire(numpatch)`
+    pub m_leafn_storage_to_fire: Vec<f64>,
+    /// `m_frootn_storage_to_fire(numpatch)`
+    pub m_frootn_storage_to_fire: Vec<f64>,
+    /// `m_livestemn_storage_to_fire(numpatch)`
+    pub m_livestemn_storage_to_fire: Vec<f64>,
+    /// `m_deadstemn_storage_to_fire(numpatch)`
+    pub m_deadstemn_storage_to_fire: Vec<f64>,
+    /// `m_livecrootn_storage_to_fire(numpatch)`
+    pub m_livecrootn_storage_to_fire: Vec<f64>,
+    /// `m_deadcrootn_storage_to_fire(numpatch)`
+    pub m_deadcrootn_storage_to_fire: Vec<f64>,
+    /// `m_leafn_xfer_to_fire(numpatch)`
+    pub m_leafn_xfer_to_fire: Vec<f64>,
+    /// `m_frootn_xfer_to_fire(numpatch)`
+    pub m_frootn_xfer_to_fire: Vec<f64>,
+    /// `m_livestemn_xfer_to_fire(numpatch)`
+    pub m_livestemn_xfer_to_fire: Vec<f64>,
+    /// `m_deadstemn_xfer_to_fire(numpatch)`
+    pub m_deadstemn_xfer_to_fire: Vec<f64>,
+    /// `m_livecrootn_xfer_to_fire(numpatch)`
+    pub m_livecrootn_xfer_to_fire: Vec<f64>,
+    /// `m_deadcrootn_xfer_to_fire(numpatch)`
+    pub m_deadcrootn_xfer_to_fire: Vec<f64>,
+    /// `m_livestemn_to_deadstemn_fire(numpatch)`
+    pub m_livestemn_to_deadstemn_fire: Vec<f64>,
+    /// `m_livecrootn_to_deadcrootn_fire(numpatch)`
+    pub m_livecrootn_to_deadcrootn_fire: Vec<f64>,
+    /// `m_retransn_to_fire(numpatch)`
+    pub m_retransn_to_fire: Vec<f64>,
+    /// `m_leafn_to_litter_fire(numpatch)`
+    pub m_leafn_to_litter_fire: Vec<f64>,
+    /// `m_frootn_to_litter_fire(numpatch)`
+    pub m_frootn_to_litter_fire: Vec<f64>,
+    /// `m_livestemn_to_litter_fire(numpatch)`
+    pub m_livestemn_to_litter_fire: Vec<f64>,
+    /// `m_deadstemn_to_litter_fire(numpatch)`
+    pub m_deadstemn_to_litter_fire: Vec<f64>,
+    /// `m_livecrootn_to_litter_fire(numpatch)`
+    pub m_livecrootn_to_litter_fire: Vec<f64>,
+    /// `m_deadcrootn_to_litter_fire(numpatch)`
+    pub m_deadcrootn_to_litter_fire: Vec<f64>,
+    /// `m_leafn_storage_to_litter_fire(numpatch)`
+    pub m_leafn_storage_to_litter_fire: Vec<f64>,
+    /// `m_frootn_storage_to_litter_fire(numpatch)`
+    pub m_frootn_storage_to_litter_fire: Vec<f64>,
+    /// `m_livestemn_storage_to_litter_fire(numpatch)`
+    pub m_livestemn_storage_to_litter_fire: Vec<f64>,
+    /// `m_deadstemn_storage_to_litter_fire(numpatch)`
+    pub m_deadstemn_storage_to_litter_fire: Vec<f64>,
+    /// `m_livecrootn_storage_to_litter_fire(numpatch)`
+    pub m_livecrootn_storage_to_litter_fire: Vec<f64>,
+    /// `m_deadcrootn_storage_to_litter_fire(numpatch)`
+    pub m_deadcrootn_storage_to_litter_fire: Vec<f64>,
+    /// `m_leafn_xfer_to_litter_fire(numpatch)`
+    pub m_leafn_xfer_to_litter_fire: Vec<f64>,
+    /// `m_frootn_xfer_to_litter_fire(numpatch)`
+    pub m_frootn_xfer_to_litter_fire: Vec<f64>,
+    /// `m_livestemn_xfer_to_litter_fire(numpatch)`
+    pub m_livestemn_xfer_to_litter_fire: Vec<f64>,
+    /// `m_deadstemn_xfer_to_litter_fire(numpatch)`
+    pub m_deadstemn_xfer_to_litter_fire: Vec<f64>,
+    /// `m_livecrootn_xfer_to_litter_fire(numpatch)`
+    pub m_livecrootn_xfer_to_litter_fire: Vec<f64>,
+    /// `m_deadcrootn_xfer_to_litter_fire(numpatch)`
+    pub m_deadcrootn_xfer_to_litter_fire: Vec<f64>,
+    /// `m_retransn_to_litter_fire(numpatch)`
+    pub m_retransn_to_litter_fire: Vec<f64>,
+    /// `m_litr1_c_to_fire(numpatch)`
+    pub m_litr1_c_to_fire: Vec<f64>,
+    /// `m_litr1_n_to_fire(numpatch)`
+    pub m_litr1_n_to_fire: Vec<f64>,
+    /// `m_litr2_c_to_fire(numpatch)`
+    pub m_litr2_c_to_fire: Vec<f64>,
+    /// `m_litr2_n_to_fire(numpatch)`
+    pub m_litr2_n_to_fire: Vec<f64>,
+    /// `m_litr3_c_to_fire(numpatch)`
+    pub m_litr3_c_to_fire: Vec<f64>,
+    /// `m_litr3_n_to_fire(numpatch)`
+    pub m_litr3_n_to_fire: Vec<f64>,
+    /// `m_cwd_c_to_fire(numpatch)`
+    pub m_cwd_c_to_fire: Vec<f64>,
+    /// `m_cwd_n_to_fire(numpatch)`
+    pub m_cwd_n_to_fire: Vec<f64>,
     /// `hrv_xsmrpool_to_atm(numpatch)`
     pub hrv_xsmrpool_to_atm: Vec<f64>,
     /// `wood_harvestc(numpatch)`
@@ -5772,7 +5976,103 @@ impl BgcPatchFluxes {
             hr: vec![MISSING; 1],
             er: vec![MISSING; 1],
             fire_closs: vec![MISSING; 1],
+            fire_btran2: vec![MISSING; 1],
             fire_nloss: vec![MISSING; 1],
+            pft_fire_closs: vec![MISSING; 1],
+            pft_fire_nloss: vec![MISSING; 1],
+            litfire: vec![MISSING; 1],
+            somfire: vec![MISSING; 1],
+            totfire: vec![MISSING; 1],
+            m_leafc_to_fire: vec![MISSING; 1],
+            m_frootc_to_fire: vec![MISSING; 1],
+            m_livestemc_to_fire: vec![MISSING; 1],
+            m_deadstemc_to_fire: vec![MISSING; 1],
+            m_livecrootc_to_fire: vec![MISSING; 1],
+            m_deadcrootc_to_fire: vec![MISSING; 1],
+            m_leafc_storage_to_fire: vec![MISSING; 1],
+            m_frootc_storage_to_fire: vec![MISSING; 1],
+            m_livestemc_storage_to_fire: vec![MISSING; 1],
+            m_deadstemc_storage_to_fire: vec![MISSING; 1],
+            m_livecrootc_storage_to_fire: vec![MISSING; 1],
+            m_deadcrootc_storage_to_fire: vec![MISSING; 1],
+            m_gresp_storage_to_fire: vec![MISSING; 1],
+            m_leafc_xfer_to_fire: vec![MISSING; 1],
+            m_frootc_xfer_to_fire: vec![MISSING; 1],
+            m_livestemc_xfer_to_fire: vec![MISSING; 1],
+            m_deadstemc_xfer_to_fire: vec![MISSING; 1],
+            m_livecrootc_xfer_to_fire: vec![MISSING; 1],
+            m_deadcrootc_xfer_to_fire: vec![MISSING; 1],
+            m_gresp_xfer_to_fire: vec![MISSING; 1],
+            m_livestemc_to_deadstemc_fire: vec![MISSING; 1],
+            m_livecrootc_to_deadcrootc_fire: vec![MISSING; 1],
+            m_leafc_to_litter_fire: vec![MISSING; 1],
+            m_frootc_to_litter_fire: vec![MISSING; 1],
+            m_livestemc_to_litter_fire: vec![MISSING; 1],
+            m_deadstemc_to_litter_fire: vec![MISSING; 1],
+            m_livecrootc_to_litter_fire: vec![MISSING; 1],
+            m_deadcrootc_to_litter_fire: vec![MISSING; 1],
+            m_leafc_storage_to_litter_fire: vec![MISSING; 1],
+            m_frootc_storage_to_litter_fire: vec![MISSING; 1],
+            m_livestemc_storage_to_litter_fire: vec![MISSING; 1],
+            m_deadstemc_storage_to_litter_fire: vec![MISSING; 1],
+            m_livecrootc_storage_to_litter_fire: vec![MISSING; 1],
+            m_deadcrootc_storage_to_litter_fire: vec![MISSING; 1],
+            m_gresp_storage_to_litter_fire: vec![MISSING; 1],
+            m_leafc_xfer_to_litter_fire: vec![MISSING; 1],
+            m_frootc_xfer_to_litter_fire: vec![MISSING; 1],
+            m_livestemc_xfer_to_litter_fire: vec![MISSING; 1],
+            m_deadstemc_xfer_to_litter_fire: vec![MISSING; 1],
+            m_livecrootc_xfer_to_litter_fire: vec![MISSING; 1],
+            m_deadcrootc_xfer_to_litter_fire: vec![MISSING; 1],
+            m_gresp_xfer_to_litter_fire: vec![MISSING; 1],
+            m_leafn_to_fire: vec![MISSING; 1],
+            m_frootn_to_fire: vec![MISSING; 1],
+            m_livestemn_to_fire: vec![MISSING; 1],
+            m_deadstemn_to_fire: vec![MISSING; 1],
+            m_livecrootn_to_fire: vec![MISSING; 1],
+            m_deadcrootn_to_fire: vec![MISSING; 1],
+            m_leafn_storage_to_fire: vec![MISSING; 1],
+            m_frootn_storage_to_fire: vec![MISSING; 1],
+            m_livestemn_storage_to_fire: vec![MISSING; 1],
+            m_deadstemn_storage_to_fire: vec![MISSING; 1],
+            m_livecrootn_storage_to_fire: vec![MISSING; 1],
+            m_deadcrootn_storage_to_fire: vec![MISSING; 1],
+            m_leafn_xfer_to_fire: vec![MISSING; 1],
+            m_frootn_xfer_to_fire: vec![MISSING; 1],
+            m_livestemn_xfer_to_fire: vec![MISSING; 1],
+            m_deadstemn_xfer_to_fire: vec![MISSING; 1],
+            m_livecrootn_xfer_to_fire: vec![MISSING; 1],
+            m_deadcrootn_xfer_to_fire: vec![MISSING; 1],
+            m_livestemn_to_deadstemn_fire: vec![MISSING; 1],
+            m_livecrootn_to_deadcrootn_fire: vec![MISSING; 1],
+            m_retransn_to_fire: vec![MISSING; 1],
+            m_leafn_to_litter_fire: vec![MISSING; 1],
+            m_frootn_to_litter_fire: vec![MISSING; 1],
+            m_livestemn_to_litter_fire: vec![MISSING; 1],
+            m_deadstemn_to_litter_fire: vec![MISSING; 1],
+            m_livecrootn_to_litter_fire: vec![MISSING; 1],
+            m_deadcrootn_to_litter_fire: vec![MISSING; 1],
+            m_leafn_storage_to_litter_fire: vec![MISSING; 1],
+            m_frootn_storage_to_litter_fire: vec![MISSING; 1],
+            m_livestemn_storage_to_litter_fire: vec![MISSING; 1],
+            m_deadstemn_storage_to_litter_fire: vec![MISSING; 1],
+            m_livecrootn_storage_to_litter_fire: vec![MISSING; 1],
+            m_deadcrootn_storage_to_litter_fire: vec![MISSING; 1],
+            m_leafn_xfer_to_litter_fire: vec![MISSING; 1],
+            m_frootn_xfer_to_litter_fire: vec![MISSING; 1],
+            m_livestemn_xfer_to_litter_fire: vec![MISSING; 1],
+            m_deadstemn_xfer_to_litter_fire: vec![MISSING; 1],
+            m_livecrootn_xfer_to_litter_fire: vec![MISSING; 1],
+            m_deadcrootn_xfer_to_litter_fire: vec![MISSING; 1],
+            m_retransn_to_litter_fire: vec![MISSING; 1],
+            m_litr1_c_to_fire: vec![MISSING; 1],
+            m_litr1_n_to_fire: vec![MISSING; 1],
+            m_litr2_c_to_fire: vec![MISSING; 1],
+            m_litr2_n_to_fire: vec![MISSING; 1],
+            m_litr3_c_to_fire: vec![MISSING; 1],
+            m_litr3_n_to_fire: vec![MISSING; 1],
+            m_cwd_c_to_fire: vec![MISSING; 1],
+            m_cwd_n_to_fire: vec![MISSING; 1],
             hrv_xsmrpool_to_atm: vec![MISSING; 1],
             wood_harvestc: vec![MISSING; 1],
             wood_harvestn: vec![MISSING; 1],
@@ -5928,7 +6228,111 @@ impl BgcPatchFluxes {
             "hr" => Some(&self.hr),
             "er" => Some(&self.er),
             "fire_closs" => Some(&self.fire_closs),
+            "fire_btran2" => Some(&self.fire_btran2),
             "fire_nloss" => Some(&self.fire_nloss),
+            "pft_fire_closs" => Some(&self.pft_fire_closs),
+            "pft_fire_nloss" => Some(&self.pft_fire_nloss),
+            "litfire" => Some(&self.litfire),
+            "somfire" => Some(&self.somfire),
+            "totfire" => Some(&self.totfire),
+            "m_leafc_to_fire" => Some(&self.m_leafc_to_fire),
+            "m_frootc_to_fire" => Some(&self.m_frootc_to_fire),
+            "m_livestemc_to_fire" => Some(&self.m_livestemc_to_fire),
+            "m_deadstemc_to_fire" => Some(&self.m_deadstemc_to_fire),
+            "m_livecrootc_to_fire" => Some(&self.m_livecrootc_to_fire),
+            "m_deadcrootc_to_fire" => Some(&self.m_deadcrootc_to_fire),
+            "m_leafc_storage_to_fire" => Some(&self.m_leafc_storage_to_fire),
+            "m_frootc_storage_to_fire" => Some(&self.m_frootc_storage_to_fire),
+            "m_livestemc_storage_to_fire" => Some(&self.m_livestemc_storage_to_fire),
+            "m_deadstemc_storage_to_fire" => Some(&self.m_deadstemc_storage_to_fire),
+            "m_livecrootc_storage_to_fire" => Some(&self.m_livecrootc_storage_to_fire),
+            "m_deadcrootc_storage_to_fire" => Some(&self.m_deadcrootc_storage_to_fire),
+            "m_gresp_storage_to_fire" => Some(&self.m_gresp_storage_to_fire),
+            "m_leafc_xfer_to_fire" => Some(&self.m_leafc_xfer_to_fire),
+            "m_frootc_xfer_to_fire" => Some(&self.m_frootc_xfer_to_fire),
+            "m_livestemc_xfer_to_fire" => Some(&self.m_livestemc_xfer_to_fire),
+            "m_deadstemc_xfer_to_fire" => Some(&self.m_deadstemc_xfer_to_fire),
+            "m_livecrootc_xfer_to_fire" => Some(&self.m_livecrootc_xfer_to_fire),
+            "m_deadcrootc_xfer_to_fire" => Some(&self.m_deadcrootc_xfer_to_fire),
+            "m_gresp_xfer_to_fire" => Some(&self.m_gresp_xfer_to_fire),
+            "m_livestemc_to_deadstemc_fire" => Some(&self.m_livestemc_to_deadstemc_fire),
+            "m_livecrootc_to_deadcrootc_fire" => Some(&self.m_livecrootc_to_deadcrootc_fire),
+            "m_leafc_to_litter_fire" => Some(&self.m_leafc_to_litter_fire),
+            "m_frootc_to_litter_fire" => Some(&self.m_frootc_to_litter_fire),
+            "m_livestemc_to_litter_fire" => Some(&self.m_livestemc_to_litter_fire),
+            "m_deadstemc_to_litter_fire" => Some(&self.m_deadstemc_to_litter_fire),
+            "m_livecrootc_to_litter_fire" => Some(&self.m_livecrootc_to_litter_fire),
+            "m_deadcrootc_to_litter_fire" => Some(&self.m_deadcrootc_to_litter_fire),
+            "m_leafc_storage_to_litter_fire" => Some(&self.m_leafc_storage_to_litter_fire),
+            "m_frootc_storage_to_litter_fire" => Some(&self.m_frootc_storage_to_litter_fire),
+            "m_livestemc_storage_to_litter_fire" => Some(&self.m_livestemc_storage_to_litter_fire),
+            "m_deadstemc_storage_to_litter_fire" => Some(&self.m_deadstemc_storage_to_litter_fire),
+            "m_livecrootc_storage_to_litter_fire" => {
+                Some(&self.m_livecrootc_storage_to_litter_fire)
+            }
+            "m_deadcrootc_storage_to_litter_fire" => {
+                Some(&self.m_deadcrootc_storage_to_litter_fire)
+            }
+            "m_gresp_storage_to_litter_fire" => Some(&self.m_gresp_storage_to_litter_fire),
+            "m_leafc_xfer_to_litter_fire" => Some(&self.m_leafc_xfer_to_litter_fire),
+            "m_frootc_xfer_to_litter_fire" => Some(&self.m_frootc_xfer_to_litter_fire),
+            "m_livestemc_xfer_to_litter_fire" => Some(&self.m_livestemc_xfer_to_litter_fire),
+            "m_deadstemc_xfer_to_litter_fire" => Some(&self.m_deadstemc_xfer_to_litter_fire),
+            "m_livecrootc_xfer_to_litter_fire" => Some(&self.m_livecrootc_xfer_to_litter_fire),
+            "m_deadcrootc_xfer_to_litter_fire" => Some(&self.m_deadcrootc_xfer_to_litter_fire),
+            "m_gresp_xfer_to_litter_fire" => Some(&self.m_gresp_xfer_to_litter_fire),
+            "m_leafn_to_fire" => Some(&self.m_leafn_to_fire),
+            "m_frootn_to_fire" => Some(&self.m_frootn_to_fire),
+            "m_livestemn_to_fire" => Some(&self.m_livestemn_to_fire),
+            "m_deadstemn_to_fire" => Some(&self.m_deadstemn_to_fire),
+            "m_livecrootn_to_fire" => Some(&self.m_livecrootn_to_fire),
+            "m_deadcrootn_to_fire" => Some(&self.m_deadcrootn_to_fire),
+            "m_leafn_storage_to_fire" => Some(&self.m_leafn_storage_to_fire),
+            "m_frootn_storage_to_fire" => Some(&self.m_frootn_storage_to_fire),
+            "m_livestemn_storage_to_fire" => Some(&self.m_livestemn_storage_to_fire),
+            "m_deadstemn_storage_to_fire" => Some(&self.m_deadstemn_storage_to_fire),
+            "m_livecrootn_storage_to_fire" => Some(&self.m_livecrootn_storage_to_fire),
+            "m_deadcrootn_storage_to_fire" => Some(&self.m_deadcrootn_storage_to_fire),
+            "m_leafn_xfer_to_fire" => Some(&self.m_leafn_xfer_to_fire),
+            "m_frootn_xfer_to_fire" => Some(&self.m_frootn_xfer_to_fire),
+            "m_livestemn_xfer_to_fire" => Some(&self.m_livestemn_xfer_to_fire),
+            "m_deadstemn_xfer_to_fire" => Some(&self.m_deadstemn_xfer_to_fire),
+            "m_livecrootn_xfer_to_fire" => Some(&self.m_livecrootn_xfer_to_fire),
+            "m_deadcrootn_xfer_to_fire" => Some(&self.m_deadcrootn_xfer_to_fire),
+            "m_livestemn_to_deadstemn_fire" => Some(&self.m_livestemn_to_deadstemn_fire),
+            "m_livecrootn_to_deadcrootn_fire" => Some(&self.m_livecrootn_to_deadcrootn_fire),
+            "m_retransn_to_fire" => Some(&self.m_retransn_to_fire),
+            "m_leafn_to_litter_fire" => Some(&self.m_leafn_to_litter_fire),
+            "m_frootn_to_litter_fire" => Some(&self.m_frootn_to_litter_fire),
+            "m_livestemn_to_litter_fire" => Some(&self.m_livestemn_to_litter_fire),
+            "m_deadstemn_to_litter_fire" => Some(&self.m_deadstemn_to_litter_fire),
+            "m_livecrootn_to_litter_fire" => Some(&self.m_livecrootn_to_litter_fire),
+            "m_deadcrootn_to_litter_fire" => Some(&self.m_deadcrootn_to_litter_fire),
+            "m_leafn_storage_to_litter_fire" => Some(&self.m_leafn_storage_to_litter_fire),
+            "m_frootn_storage_to_litter_fire" => Some(&self.m_frootn_storage_to_litter_fire),
+            "m_livestemn_storage_to_litter_fire" => Some(&self.m_livestemn_storage_to_litter_fire),
+            "m_deadstemn_storage_to_litter_fire" => Some(&self.m_deadstemn_storage_to_litter_fire),
+            "m_livecrootn_storage_to_litter_fire" => {
+                Some(&self.m_livecrootn_storage_to_litter_fire)
+            }
+            "m_deadcrootn_storage_to_litter_fire" => {
+                Some(&self.m_deadcrootn_storage_to_litter_fire)
+            }
+            "m_leafn_xfer_to_litter_fire" => Some(&self.m_leafn_xfer_to_litter_fire),
+            "m_frootn_xfer_to_litter_fire" => Some(&self.m_frootn_xfer_to_litter_fire),
+            "m_livestemn_xfer_to_litter_fire" => Some(&self.m_livestemn_xfer_to_litter_fire),
+            "m_deadstemn_xfer_to_litter_fire" => Some(&self.m_deadstemn_xfer_to_litter_fire),
+            "m_livecrootn_xfer_to_litter_fire" => Some(&self.m_livecrootn_xfer_to_litter_fire),
+            "m_deadcrootn_xfer_to_litter_fire" => Some(&self.m_deadcrootn_xfer_to_litter_fire),
+            "m_retransn_to_litter_fire" => Some(&self.m_retransn_to_litter_fire),
+            "m_litr1_c_to_fire" => Some(&self.m_litr1_c_to_fire),
+            "m_litr1_n_to_fire" => Some(&self.m_litr1_n_to_fire),
+            "m_litr2_c_to_fire" => Some(&self.m_litr2_c_to_fire),
+            "m_litr2_n_to_fire" => Some(&self.m_litr2_n_to_fire),
+            "m_litr3_c_to_fire" => Some(&self.m_litr3_c_to_fire),
+            "m_litr3_n_to_fire" => Some(&self.m_litr3_n_to_fire),
+            "m_cwd_c_to_fire" => Some(&self.m_cwd_c_to_fire),
+            "m_cwd_n_to_fire" => Some(&self.m_cwd_n_to_fire),
             "hrv_xsmrpool_to_atm" => Some(&self.hrv_xsmrpool_to_atm),
             "wood_harvestc" => Some(&self.wood_harvestc),
             "wood_harvestn" => Some(&self.wood_harvestn),
@@ -6084,7 +6488,119 @@ impl BgcPatchFluxes {
             "hr" => Some(&mut self.hr),
             "er" => Some(&mut self.er),
             "fire_closs" => Some(&mut self.fire_closs),
+            "fire_btran2" => Some(&mut self.fire_btran2),
             "fire_nloss" => Some(&mut self.fire_nloss),
+            "pft_fire_closs" => Some(&mut self.pft_fire_closs),
+            "pft_fire_nloss" => Some(&mut self.pft_fire_nloss),
+            "litfire" => Some(&mut self.litfire),
+            "somfire" => Some(&mut self.somfire),
+            "totfire" => Some(&mut self.totfire),
+            "m_leafc_to_fire" => Some(&mut self.m_leafc_to_fire),
+            "m_frootc_to_fire" => Some(&mut self.m_frootc_to_fire),
+            "m_livestemc_to_fire" => Some(&mut self.m_livestemc_to_fire),
+            "m_deadstemc_to_fire" => Some(&mut self.m_deadstemc_to_fire),
+            "m_livecrootc_to_fire" => Some(&mut self.m_livecrootc_to_fire),
+            "m_deadcrootc_to_fire" => Some(&mut self.m_deadcrootc_to_fire),
+            "m_leafc_storage_to_fire" => Some(&mut self.m_leafc_storage_to_fire),
+            "m_frootc_storage_to_fire" => Some(&mut self.m_frootc_storage_to_fire),
+            "m_livestemc_storage_to_fire" => Some(&mut self.m_livestemc_storage_to_fire),
+            "m_deadstemc_storage_to_fire" => Some(&mut self.m_deadstemc_storage_to_fire),
+            "m_livecrootc_storage_to_fire" => Some(&mut self.m_livecrootc_storage_to_fire),
+            "m_deadcrootc_storage_to_fire" => Some(&mut self.m_deadcrootc_storage_to_fire),
+            "m_gresp_storage_to_fire" => Some(&mut self.m_gresp_storage_to_fire),
+            "m_leafc_xfer_to_fire" => Some(&mut self.m_leafc_xfer_to_fire),
+            "m_frootc_xfer_to_fire" => Some(&mut self.m_frootc_xfer_to_fire),
+            "m_livestemc_xfer_to_fire" => Some(&mut self.m_livestemc_xfer_to_fire),
+            "m_deadstemc_xfer_to_fire" => Some(&mut self.m_deadstemc_xfer_to_fire),
+            "m_livecrootc_xfer_to_fire" => Some(&mut self.m_livecrootc_xfer_to_fire),
+            "m_deadcrootc_xfer_to_fire" => Some(&mut self.m_deadcrootc_xfer_to_fire),
+            "m_gresp_xfer_to_fire" => Some(&mut self.m_gresp_xfer_to_fire),
+            "m_livestemc_to_deadstemc_fire" => Some(&mut self.m_livestemc_to_deadstemc_fire),
+            "m_livecrootc_to_deadcrootc_fire" => Some(&mut self.m_livecrootc_to_deadcrootc_fire),
+            "m_leafc_to_litter_fire" => Some(&mut self.m_leafc_to_litter_fire),
+            "m_frootc_to_litter_fire" => Some(&mut self.m_frootc_to_litter_fire),
+            "m_livestemc_to_litter_fire" => Some(&mut self.m_livestemc_to_litter_fire),
+            "m_deadstemc_to_litter_fire" => Some(&mut self.m_deadstemc_to_litter_fire),
+            "m_livecrootc_to_litter_fire" => Some(&mut self.m_livecrootc_to_litter_fire),
+            "m_deadcrootc_to_litter_fire" => Some(&mut self.m_deadcrootc_to_litter_fire),
+            "m_leafc_storage_to_litter_fire" => Some(&mut self.m_leafc_storage_to_litter_fire),
+            "m_frootc_storage_to_litter_fire" => Some(&mut self.m_frootc_storage_to_litter_fire),
+            "m_livestemc_storage_to_litter_fire" => {
+                Some(&mut self.m_livestemc_storage_to_litter_fire)
+            }
+            "m_deadstemc_storage_to_litter_fire" => {
+                Some(&mut self.m_deadstemc_storage_to_litter_fire)
+            }
+            "m_livecrootc_storage_to_litter_fire" => {
+                Some(&mut self.m_livecrootc_storage_to_litter_fire)
+            }
+            "m_deadcrootc_storage_to_litter_fire" => {
+                Some(&mut self.m_deadcrootc_storage_to_litter_fire)
+            }
+            "m_gresp_storage_to_litter_fire" => Some(&mut self.m_gresp_storage_to_litter_fire),
+            "m_leafc_xfer_to_litter_fire" => Some(&mut self.m_leafc_xfer_to_litter_fire),
+            "m_frootc_xfer_to_litter_fire" => Some(&mut self.m_frootc_xfer_to_litter_fire),
+            "m_livestemc_xfer_to_litter_fire" => Some(&mut self.m_livestemc_xfer_to_litter_fire),
+            "m_deadstemc_xfer_to_litter_fire" => Some(&mut self.m_deadstemc_xfer_to_litter_fire),
+            "m_livecrootc_xfer_to_litter_fire" => Some(&mut self.m_livecrootc_xfer_to_litter_fire),
+            "m_deadcrootc_xfer_to_litter_fire" => Some(&mut self.m_deadcrootc_xfer_to_litter_fire),
+            "m_gresp_xfer_to_litter_fire" => Some(&mut self.m_gresp_xfer_to_litter_fire),
+            "m_leafn_to_fire" => Some(&mut self.m_leafn_to_fire),
+            "m_frootn_to_fire" => Some(&mut self.m_frootn_to_fire),
+            "m_livestemn_to_fire" => Some(&mut self.m_livestemn_to_fire),
+            "m_deadstemn_to_fire" => Some(&mut self.m_deadstemn_to_fire),
+            "m_livecrootn_to_fire" => Some(&mut self.m_livecrootn_to_fire),
+            "m_deadcrootn_to_fire" => Some(&mut self.m_deadcrootn_to_fire),
+            "m_leafn_storage_to_fire" => Some(&mut self.m_leafn_storage_to_fire),
+            "m_frootn_storage_to_fire" => Some(&mut self.m_frootn_storage_to_fire),
+            "m_livestemn_storage_to_fire" => Some(&mut self.m_livestemn_storage_to_fire),
+            "m_deadstemn_storage_to_fire" => Some(&mut self.m_deadstemn_storage_to_fire),
+            "m_livecrootn_storage_to_fire" => Some(&mut self.m_livecrootn_storage_to_fire),
+            "m_deadcrootn_storage_to_fire" => Some(&mut self.m_deadcrootn_storage_to_fire),
+            "m_leafn_xfer_to_fire" => Some(&mut self.m_leafn_xfer_to_fire),
+            "m_frootn_xfer_to_fire" => Some(&mut self.m_frootn_xfer_to_fire),
+            "m_livestemn_xfer_to_fire" => Some(&mut self.m_livestemn_xfer_to_fire),
+            "m_deadstemn_xfer_to_fire" => Some(&mut self.m_deadstemn_xfer_to_fire),
+            "m_livecrootn_xfer_to_fire" => Some(&mut self.m_livecrootn_xfer_to_fire),
+            "m_deadcrootn_xfer_to_fire" => Some(&mut self.m_deadcrootn_xfer_to_fire),
+            "m_livestemn_to_deadstemn_fire" => Some(&mut self.m_livestemn_to_deadstemn_fire),
+            "m_livecrootn_to_deadcrootn_fire" => Some(&mut self.m_livecrootn_to_deadcrootn_fire),
+            "m_retransn_to_fire" => Some(&mut self.m_retransn_to_fire),
+            "m_leafn_to_litter_fire" => Some(&mut self.m_leafn_to_litter_fire),
+            "m_frootn_to_litter_fire" => Some(&mut self.m_frootn_to_litter_fire),
+            "m_livestemn_to_litter_fire" => Some(&mut self.m_livestemn_to_litter_fire),
+            "m_deadstemn_to_litter_fire" => Some(&mut self.m_deadstemn_to_litter_fire),
+            "m_livecrootn_to_litter_fire" => Some(&mut self.m_livecrootn_to_litter_fire),
+            "m_deadcrootn_to_litter_fire" => Some(&mut self.m_deadcrootn_to_litter_fire),
+            "m_leafn_storage_to_litter_fire" => Some(&mut self.m_leafn_storage_to_litter_fire),
+            "m_frootn_storage_to_litter_fire" => Some(&mut self.m_frootn_storage_to_litter_fire),
+            "m_livestemn_storage_to_litter_fire" => {
+                Some(&mut self.m_livestemn_storage_to_litter_fire)
+            }
+            "m_deadstemn_storage_to_litter_fire" => {
+                Some(&mut self.m_deadstemn_storage_to_litter_fire)
+            }
+            "m_livecrootn_storage_to_litter_fire" => {
+                Some(&mut self.m_livecrootn_storage_to_litter_fire)
+            }
+            "m_deadcrootn_storage_to_litter_fire" => {
+                Some(&mut self.m_deadcrootn_storage_to_litter_fire)
+            }
+            "m_leafn_xfer_to_litter_fire" => Some(&mut self.m_leafn_xfer_to_litter_fire),
+            "m_frootn_xfer_to_litter_fire" => Some(&mut self.m_frootn_xfer_to_litter_fire),
+            "m_livestemn_xfer_to_litter_fire" => Some(&mut self.m_livestemn_xfer_to_litter_fire),
+            "m_deadstemn_xfer_to_litter_fire" => Some(&mut self.m_deadstemn_xfer_to_litter_fire),
+            "m_livecrootn_xfer_to_litter_fire" => Some(&mut self.m_livecrootn_xfer_to_litter_fire),
+            "m_deadcrootn_xfer_to_litter_fire" => Some(&mut self.m_deadcrootn_xfer_to_litter_fire),
+            "m_retransn_to_litter_fire" => Some(&mut self.m_retransn_to_litter_fire),
+            "m_litr1_c_to_fire" => Some(&mut self.m_litr1_c_to_fire),
+            "m_litr1_n_to_fire" => Some(&mut self.m_litr1_n_to_fire),
+            "m_litr2_c_to_fire" => Some(&mut self.m_litr2_c_to_fire),
+            "m_litr2_n_to_fire" => Some(&mut self.m_litr2_n_to_fire),
+            "m_litr3_c_to_fire" => Some(&mut self.m_litr3_c_to_fire),
+            "m_litr3_n_to_fire" => Some(&mut self.m_litr3_n_to_fire),
+            "m_cwd_c_to_fire" => Some(&mut self.m_cwd_c_to_fire),
+            "m_cwd_n_to_fire" => Some(&mut self.m_cwd_n_to_fire),
             "hrv_xsmrpool_to_atm" => Some(&mut self.hrv_xsmrpool_to_atm),
             "wood_harvestc" => Some(&mut self.wood_harvestc),
             "wood_harvestn" => Some(&mut self.wood_harvestn),
@@ -6266,7 +6782,103 @@ impl BgcPatchFluxes {
         ("hr", &["numpatch"]),
         ("er", &["numpatch"]),
         ("fire_closs", &["numpatch"]),
+        ("fire_btran2", &["numpatch"]),
         ("fire_nloss", &["numpatch"]),
+        ("pft_fire_closs", &["numpatch"]),
+        ("pft_fire_nloss", &["numpatch"]),
+        ("litfire", &["numpatch"]),
+        ("somfire", &["numpatch"]),
+        ("totfire", &["numpatch"]),
+        ("m_leafc_to_fire", &["numpatch"]),
+        ("m_frootc_to_fire", &["numpatch"]),
+        ("m_livestemc_to_fire", &["numpatch"]),
+        ("m_deadstemc_to_fire", &["numpatch"]),
+        ("m_livecrootc_to_fire", &["numpatch"]),
+        ("m_deadcrootc_to_fire", &["numpatch"]),
+        ("m_leafc_storage_to_fire", &["numpatch"]),
+        ("m_frootc_storage_to_fire", &["numpatch"]),
+        ("m_livestemc_storage_to_fire", &["numpatch"]),
+        ("m_deadstemc_storage_to_fire", &["numpatch"]),
+        ("m_livecrootc_storage_to_fire", &["numpatch"]),
+        ("m_deadcrootc_storage_to_fire", &["numpatch"]),
+        ("m_gresp_storage_to_fire", &["numpatch"]),
+        ("m_leafc_xfer_to_fire", &["numpatch"]),
+        ("m_frootc_xfer_to_fire", &["numpatch"]),
+        ("m_livestemc_xfer_to_fire", &["numpatch"]),
+        ("m_deadstemc_xfer_to_fire", &["numpatch"]),
+        ("m_livecrootc_xfer_to_fire", &["numpatch"]),
+        ("m_deadcrootc_xfer_to_fire", &["numpatch"]),
+        ("m_gresp_xfer_to_fire", &["numpatch"]),
+        ("m_livestemc_to_deadstemc_fire", &["numpatch"]),
+        ("m_livecrootc_to_deadcrootc_fire", &["numpatch"]),
+        ("m_leafc_to_litter_fire", &["numpatch"]),
+        ("m_frootc_to_litter_fire", &["numpatch"]),
+        ("m_livestemc_to_litter_fire", &["numpatch"]),
+        ("m_deadstemc_to_litter_fire", &["numpatch"]),
+        ("m_livecrootc_to_litter_fire", &["numpatch"]),
+        ("m_deadcrootc_to_litter_fire", &["numpatch"]),
+        ("m_leafc_storage_to_litter_fire", &["numpatch"]),
+        ("m_frootc_storage_to_litter_fire", &["numpatch"]),
+        ("m_livestemc_storage_to_litter_fire", &["numpatch"]),
+        ("m_deadstemc_storage_to_litter_fire", &["numpatch"]),
+        ("m_livecrootc_storage_to_litter_fire", &["numpatch"]),
+        ("m_deadcrootc_storage_to_litter_fire", &["numpatch"]),
+        ("m_gresp_storage_to_litter_fire", &["numpatch"]),
+        ("m_leafc_xfer_to_litter_fire", &["numpatch"]),
+        ("m_frootc_xfer_to_litter_fire", &["numpatch"]),
+        ("m_livestemc_xfer_to_litter_fire", &["numpatch"]),
+        ("m_deadstemc_xfer_to_litter_fire", &["numpatch"]),
+        ("m_livecrootc_xfer_to_litter_fire", &["numpatch"]),
+        ("m_deadcrootc_xfer_to_litter_fire", &["numpatch"]),
+        ("m_gresp_xfer_to_litter_fire", &["numpatch"]),
+        ("m_leafn_to_fire", &["numpatch"]),
+        ("m_frootn_to_fire", &["numpatch"]),
+        ("m_livestemn_to_fire", &["numpatch"]),
+        ("m_deadstemn_to_fire", &["numpatch"]),
+        ("m_livecrootn_to_fire", &["numpatch"]),
+        ("m_deadcrootn_to_fire", &["numpatch"]),
+        ("m_leafn_storage_to_fire", &["numpatch"]),
+        ("m_frootn_storage_to_fire", &["numpatch"]),
+        ("m_livestemn_storage_to_fire", &["numpatch"]),
+        ("m_deadstemn_storage_to_fire", &["numpatch"]),
+        ("m_livecrootn_storage_to_fire", &["numpatch"]),
+        ("m_deadcrootn_storage_to_fire", &["numpatch"]),
+        ("m_leafn_xfer_to_fire", &["numpatch"]),
+        ("m_frootn_xfer_to_fire", &["numpatch"]),
+        ("m_livestemn_xfer_to_fire", &["numpatch"]),
+        ("m_deadstemn_xfer_to_fire", &["numpatch"]),
+        ("m_livecrootn_xfer_to_fire", &["numpatch"]),
+        ("m_deadcrootn_xfer_to_fire", &["numpatch"]),
+        ("m_livestemn_to_deadstemn_fire", &["numpatch"]),
+        ("m_livecrootn_to_deadcrootn_fire", &["numpatch"]),
+        ("m_retransn_to_fire", &["numpatch"]),
+        ("m_leafn_to_litter_fire", &["numpatch"]),
+        ("m_frootn_to_litter_fire", &["numpatch"]),
+        ("m_livestemn_to_litter_fire", &["numpatch"]),
+        ("m_deadstemn_to_litter_fire", &["numpatch"]),
+        ("m_livecrootn_to_litter_fire", &["numpatch"]),
+        ("m_deadcrootn_to_litter_fire", &["numpatch"]),
+        ("m_leafn_storage_to_litter_fire", &["numpatch"]),
+        ("m_frootn_storage_to_litter_fire", &["numpatch"]),
+        ("m_livestemn_storage_to_litter_fire", &["numpatch"]),
+        ("m_deadstemn_storage_to_litter_fire", &["numpatch"]),
+        ("m_livecrootn_storage_to_litter_fire", &["numpatch"]),
+        ("m_deadcrootn_storage_to_litter_fire", &["numpatch"]),
+        ("m_leafn_xfer_to_litter_fire", &["numpatch"]),
+        ("m_frootn_xfer_to_litter_fire", &["numpatch"]),
+        ("m_livestemn_xfer_to_litter_fire", &["numpatch"]),
+        ("m_deadstemn_xfer_to_litter_fire", &["numpatch"]),
+        ("m_livecrootn_xfer_to_litter_fire", &["numpatch"]),
+        ("m_deadcrootn_xfer_to_litter_fire", &["numpatch"]),
+        ("m_retransn_to_litter_fire", &["numpatch"]),
+        ("m_litr1_c_to_fire", &["numpatch"]),
+        ("m_litr1_n_to_fire", &["numpatch"]),
+        ("m_litr2_c_to_fire", &["numpatch"]),
+        ("m_litr2_n_to_fire", &["numpatch"]),
+        ("m_litr3_c_to_fire", &["numpatch"]),
+        ("m_litr3_n_to_fire", &["numpatch"]),
+        ("m_cwd_c_to_fire", &["numpatch"]),
+        ("m_cwd_n_to_fire", &["numpatch"]),
         ("hrv_xsmrpool_to_atm", &["numpatch"]),
         ("wood_harvestc", &["numpatch"]),
         ("wood_harvestn", &["numpatch"]),
@@ -6604,6 +7216,11 @@ pub struct BgcConstants {
     pub soilpsi_on: f64,
     pub soilpsi_off: f64,
     pub occur_hi_gdp_tree: f64,
+    pub nonborpeat_fire_precip_denom: f64,
+    pub borpeat_fire_soilmoist_denom: f64,
+    pub prh30: f64,
+    pub max_rh30_affecting_fuel: f64,
+    pub ignition_efficiency: f64,
     pub lfuel: f64,
     pub ufuel: f64,
     pub cropfire_a1: f64,
@@ -6679,6 +7296,11 @@ impl BgcConstants {
             "soilpsi_on" => Some(&mut self.soilpsi_on),
             "soilpsi_off" => Some(&mut self.soilpsi_off),
             "occur_hi_gdp_tree" => Some(&mut self.occur_hi_gdp_tree),
+            "nonborpeat_fire_precip_denom" => Some(&mut self.nonborpeat_fire_precip_denom),
+            "borpeat_fire_soilmoist_denom" => Some(&mut self.borpeat_fire_soilmoist_denom),
+            "prh30" => Some(&mut self.prh30),
+            "max_rh30_affecting_fuel" => Some(&mut self.max_rh30_affecting_fuel),
+            "ignition_efficiency" => Some(&mut self.ignition_efficiency),
             "lfuel" => Some(&mut self.lfuel),
             "ufuel" => Some(&mut self.ufuel),
             "cropfire_a1" => Some(&mut self.cropfire_a1),
@@ -6755,6 +7377,11 @@ impl BgcConstants {
             "soilpsi_on" => Some(self.soilpsi_on),
             "soilpsi_off" => Some(self.soilpsi_off),
             "occur_hi_gdp_tree" => Some(self.occur_hi_gdp_tree),
+            "nonborpeat_fire_precip_denom" => Some(self.nonborpeat_fire_precip_denom),
+            "borpeat_fire_soilmoist_denom" => Some(self.borpeat_fire_soilmoist_denom),
+            "prh30" => Some(self.prh30),
+            "max_rh30_affecting_fuel" => Some(self.max_rh30_affecting_fuel),
+            "ignition_efficiency" => Some(self.ignition_efficiency),
             "lfuel" => Some(self.lfuel),
             "ufuel" => Some(self.ufuel),
             "cropfire_a1" => Some(self.cropfire_a1),

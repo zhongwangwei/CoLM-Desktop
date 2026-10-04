@@ -19,12 +19,13 @@ fn the_table_has_the_measured_number_of_fields() {
     // 运行时参数，顶层数从 216 变 244；MOD_Const_LC 的 39 个可调地类
     // 常量新增为稀疏 SinglePoint 覆盖后，顶层数从 244 变 283；冻结土壤、
     // TOPMODEL、Simple VIC、积雪覆盖与灌溉的 13 个运行时系数使其变为 296；
-    // CROP 单点播种日覆盖项使其变为 297。
+    // CROP 单点播种日覆盖项使其变为 297。PR #504（FIRE）给 `history_var_type` 加了 104 个火诊断开关，
+    // 总数到 944（顶层不变）。
     // 若这个数再变了，要么上游改了，要么生成器漏了 —— 两种都必须有人看一眼。
     let total = all().len();
     assert!(
-        (800..=880).contains(&total),
-        "expected roughly 840 fields, got {total}"
+        (900..=980).contains(&total),
+        "expected roughly 944 fields, got {total}"
     );
     let top = all().iter().filter(|f| f.owner.is_none()).count();
     assert_eq!(top, 305, "top-level count changed");
@@ -96,7 +97,8 @@ fn the_history_type_contributes_the_bulk_of_the_table() {
         .iter()
         .filter(|f| f.owner == Some("history_var_type"))
         .count();
-    assert_eq!(n, 482, "history_var_type member count changed");
+    // 482 + PR #504 的 104 个火诊断量。
+    assert_eq!(n, 482 + 104, "history_var_type member count changed");
 }
 
 #[test]

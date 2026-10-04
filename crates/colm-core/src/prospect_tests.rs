@@ -1,62 +1,44 @@
 use super::*;
 
+/// `update_params_PROSPECT` 与 gfortran 逐位比对：PFT 1..15 × 土壤湿度 {0.1, 0.7}，211 个波长的
+/// 绿叶反射率与透射率。
 #[test]
-#[allow(clippy::excessive_precision)]
-fn spectrum_matches_the_vendored_fortran_prospect_oracle() {
-    // Values emitted by a local gfortran build of the vendored
-    // MOD_prospect_DB.F90 with these exact inputs.
-    let (reflectance, transmittance) =
-        prospect_spectrum(1.8, 35.0, 8.0, 0.0, 0.01, 0.007, 0.006).unwrap();
-    for (wavelength, expected_reflectance, expected_transmittance) in [
-        (0, 4.342_781_225_769_463_3e-2, 4.691_942_258_038_408_3e-4),
-        (29, 6.737_247_764_146_725_4e-2, 3.348_260_396_970_516_3e-2),
-        (105, 2.465_030_032_459_742_4e-1, 2.301_833_642_061_820_7e-1),
-        (210, 7.076_390_892_989_949_1e-2, 8.800_230_853_238_931_4e-2),
-    ] {
-        assert!(
-            (reflectance[wavelength] - expected_reflectance).abs() < 2.0e-13,
-            "{wavelength}: reflectance got {:.17e}, expected {expected_reflectance:.17e}",
-            reflectance[wavelength]
-        );
-        assert!(
-            (transmittance[wavelength] - expected_transmittance).abs() < 2.0e-13,
-            "{wavelength}: transmittance got {:.17e}, expected {expected_transmittance:.17e}",
-            transmittance[wavelength]
-        );
-    }
-}
-
-#[test]
-#[allow(clippy::excessive_precision)]
-fn pft_parameterization_matches_the_vendored_fortran_oracle() {
+fn pft_parameterization_matches_gfortran_bitwise() {
+    let fixture = include_str!("../tests/data/prospect_pft_gfortran.txt");
+    let hex = |s: &str| f64::from_bits(u64::from_str_radix(s, 16).unwrap());
     let reflectance = vec![0.1; HIGH_RES_WAVELENGTHS * 2];
     let transmittance = vec![0.05; HIGH_RES_WAVELENGTHS * 2];
-    let optics = prospect_leaf_optics(
-        7,
-        0.3,
-        HighResolutionLeafOptics {
-            reflectance: &reflectance,
-            transmittance: &transmittance,
-        },
-    )
-    .unwrap();
-    for (wavelength, expected_reflectance, expected_transmittance) in [
-        (0, 4.315_729_254_294_031_8e-2, 6.552_043_576_987_233_6e-3),
-        (29, 6.353_325_053_949_612_8e-2, 1.462_306_044_938_804_8e-1),
-        (105, 1.383_286_192_843_577_2e-1, 3.329_044_422_150_699_3e-1),
-        (210, 3.151_063_511_307_480_2e-2, 1.449_978_446_661_720_8e-1),
-    ] {
-        assert!(
-            (optics.reflectance[wavelength * 2] - expected_reflectance).abs() < 2.0e-13,
-            "{wavelength}: reflectance got {:.17e}, expected {expected_reflectance:.17e}",
-            optics.reflectance[wavelength * 2]
-        );
-        assert!(
-            (optics.transmittance[wavelength * 2] - expected_transmittance).abs() < 2.0e-13,
-            "{wavelength}: transmittance got {:.17e}, expected {expected_transmittance:.17e}",
-            optics.transmittance[wavelength * 2]
-        );
+    let input = HighResolutionLeafOptics {
+        reflectance: &reflectance,
+        transmittance: &transmittance,
+    };
+    let (mut total, mut bad) = (0, Vec::new());
+    for line in fixture.lines().filter(|line| !line.starts_with('#')) {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        let pft: usize = fields[1].parse().unwrap();
+        let moisture = hex(fields[2]);
+        let optics = prospect_leaf_optics(pft, moisture, input).unwrap();
+        let got = if fields[0] == "R" {
+            &optics.reflectance
+        } else {
+            &optics.transmittance
+        };
+        for (band, want) in fields[3..].iter().enumerate() {
+            total += 1;
+            if got[band * 2].to_bits() != hex(want).to_bits() {
+                bad.push(format!(
+                    "{} pft {pft} ssw {moisture} band {band}",
+                    fields[0]
+                ));
+            }
+        }
     }
+    eprintln!(
+        "update_params_PROSPECT：{total} 组，按位不一致 {} 组",
+        bad.len()
+    );
+    assert_eq!(total, 15 * 2 * 2 * HIGH_RES_WAVELENGTHS);
+    assert!(bad.is_empty(), "{:#?}", &bad[..bad.len().min(8)]);
 }
 
 #[test]
@@ -87,4 +69,38 @@ fn pft_update_replaces_only_green_leaf_optics() {
         .iter()
         .chain(&low_moisture.transmittance)
         .all(|value| value.is_finite()));
+}
+
+/// `prospect_DB` 与 gfortran（CoLM 构建选项 + `-fdefault-double-8`）逐位比对：30 组参数 × 211 个
+/// 取样波长的反射率与透射率。
+#[test]
+fn spectrum_matches_gfortran_bitwise() {
+    let fixture = include_str!("../tests/data/prospect_gfortran.txt");
+    let hex = |s: &str| f64::from_bits(u64::from_str_radix(s, 16).unwrap());
+    let lines: Vec<Vec<&str>> = fixture
+        .lines()
+        .filter(|line| !line.starts_with('#'))
+        .map(|line| line.split_whitespace().collect())
+        .collect();
+    let (mut total, mut bad) = (0, Vec::new());
+    for group in lines.chunks(3) {
+        let p: Vec<f64> = group[0][1..].iter().map(|v| hex(v)).collect();
+        let (reflectance, transmittance) =
+            prospect_spectrum(p[0], p[1], p[2], p[3], p[4], p[5], p[6]).unwrap();
+        for (row, got) in [(&group[1], &reflectance), (&group[2], &transmittance)] {
+            for (band, (want, got)) in row[1..].iter().zip(got.iter()).enumerate() {
+                total += 1;
+                if hex(want).to_bits() != got.to_bits() {
+                    bad.push(format!(
+                        "{} {p:?} band {band}: {got:e} vs {:e}",
+                        row[0],
+                        hex(want)
+                    ));
+                }
+            }
+        }
+    }
+    eprintln!("PROSPECT：{total} 组，按位不一致 {} 组", bad.len());
+    assert_eq!(total, 30 * 211 * 2);
+    assert!(bad.is_empty(), "{:#?}", &bad[..bad.len().min(8)]);
 }

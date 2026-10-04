@@ -5,7 +5,7 @@
 //! 施灌的 `waterstorage - irrig_rate*deltim`（两次，都是 FNMA）与阈值
 //! `wilt + THRESHOLD*(target - wilt)`（FMA）。
 
-use anyhow::{ensure, Result};
+use anyhow::{ensure, Context, Result};
 
 use crate::{soil_vliq_from_psi, LibmPow, SoilHydraulicModel, FREEZING_K};
 
@@ -46,6 +46,9 @@ pub struct IrrigationSettings {
 pub struct IrrigationState {
     /// `irrig_method_p`（patch 内按 PFT）。水稻的漫灌在检查时被**就地**改成水田，并随重启保留。
     pub methods: Vec<i32>,
+    /// patch 用哪个 PFT 的灌溉方式：份额最大的那个，并列取第一个（`dominant_irrig_pft`；作物 patch
+    /// 只有一个 PFT，就是 0）。upstream-bugs 第 28 条：原来逐 PFT 循环，vendor 已修。
+    pub dominant_pft: usize,
     pub rate_mm_s: f64,
     pub steps_left: i32,
     pub water_storage_mm: f64,
@@ -100,11 +103,23 @@ impl SoilIrrigation<'_> {
     }
 }
 
+/// `dominant_irrig_pft`：份额最大的 PFT，并列取第一个（严格 `>` 才换）。
+pub fn dominant_irrigation_pft(fractions: &[f64]) -> usize {
+    let mut best = 0;
+    for (m, &fraction) in fractions.iter().enumerate().skip(1) {
+        if fraction > fractions[best] {
+            best = m;
+        }
+    }
+    best
+}
+
 impl IrrigationState {
     /// `CalIrrigationApplicationFluxes`（`patchtype == 0` 才调）。
     pub fn application_fluxes(&mut self, time_step_seconds: f64) -> IrrigationApplicationFluxes {
         let mut fluxes = IrrigationApplicationFluxes::default();
-        for &method in &self.methods {
+        // 每步只施一次（原来每个 PFT 各扣一次存水、各减一步）。
+        if let Some(&method) = self.methods.get(self.dominant_pft) {
             if self.steps_left > 0 {
                 self.steps_left -= 1;
                 // GIMPLE：两处 `waterstorage - irrig_rate*deltim` 都是 FNMA。
@@ -207,7 +222,8 @@ pub fn irrigation_needed(
     Ok(())
 }
 
-/// `PointNeedsCheckForIrrig`：水稻（62）的漫灌改成水田；结果取**最后一个** PFT 的判定。
+/// `PointNeedsCheckForIrrig`：水稻（62）的漫灌改成水田；任一可灌作物 PFT 在窗口内就检查
+/// （原来只取最后一个 PFT 的判定，upstream-bugs 第 28 条）。
 fn needs_check(
     state: &mut IrrigationState,
     settings: IrrigationSettings,
@@ -227,7 +243,7 @@ fn needs_check(
     let elapsed = seconds - settings.start_seconds + dt;
     let mut check = false;
     for (m, &class) in column.pft_class.iter().enumerate() {
-        check = class >= FIRST_CROP_CLASS
+        check |= class >= FIRST_CROP_CLASS
             && irrigated_crop(class)
             && column.crop_phase[m] >= settings.min_crop_phase
             && column.crop_phase[m] < settings.max_crop_phase
@@ -301,13 +317,16 @@ fn potential_needed(
         }
     }
 
-    // 上游的 PFT 循环不重置 `reached_max_depth` 与各总量：第二个 PFT 起只在第一个没碰到深度
-    // 上限时才会再累加一遍。照搬。
+    // 土柱各总量只算一遍，灌溉方式取份额最大的 PFT（原来逐 PFT 循环且不重置总量，
+    // upstream-bugs 第 28 条，vendor 已修；单 PFT 时结果不变）。
     let mut reached_max_depth = false;
     let (mut liquid, mut wilting_total, mut field_total, mut saturation_total) =
         (0.0, 0.0, 0.0, 0.0);
-    let mut target = 0.0;
-    for &method in &state.methods {
+    let method = *state
+        .methods
+        .get(state.dominant_pft)
+        .context("irrigation: the dominant PFT is out of range")?;
+    {
         for j in 0..nl {
             if reached_max_depth {
                 continue;
@@ -324,16 +343,16 @@ fn potential_needed(
                 saturation_total += saturation[j];
             }
         }
-        target = if method == IRRIGATION_PADDY {
-            saturation_total
-        } else {
-            field_total
-        };
     }
+    let target = if method == IRRIGATION_PADDY {
+        saturation_total
+    } else {
+        field_total
+    };
 
     let threshold = (target - wilting_total).mul_add(settings.threshold_fraction, wilting_total);
     state.deficit_mm = 0.0;
-    for &method in &state.methods {
+    {
         state.deficit_mm = if liquid < threshold {
             let goal = if method == IRRIGATION_FLOOD {
                 saturation_total

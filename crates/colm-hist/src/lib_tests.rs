@@ -19,8 +19,8 @@ fn default() -> BTreeSet<&'static str> {
 
 #[test]
 fn the_table_covers_every_live_write_site() {
-    // 456 个 MOD_Hist.F90 变量 + 163 个 TRACER/CH4 写出变量。
-    assert_eq!(all().len(), 619);
+    // 456 个 MOD_Hist.F90 变量 + 163 个 TRACER/CH4 写出变量 + PR #504 的 104 个火诊断量。
+    assert_eq!(all().len(), 619 + 104);
     for dead in ["cwddecomp", "cwdprod", "pdcorn", "pdwwheat"] {
         assert!(
             all().iter().all(|v| v.name != dead),
@@ -38,7 +38,8 @@ fn the_default_preset_can_write_five_hundred_and_nine() {
     // 全部从第一道闸门（编译期宏）挪到了第二道闸门（运行时 `IF (DEF_*) THEN`）。
     // 第一道闸门因此从 123 涨到 346；纳入 TRACER/CH4 写出后是 509。
     // CH4 写出点统一挂 DEF_USE_TRACER，所以默认无运行时条件的仍是 114。
-    assert_eq!(writable(&default()).len(), 509);
+    // PR #504 的 104 个火诊断量挂 `DEF_USE_BGC`，同样过得了第一道闸门。
+    assert_eq!(writable(&default()).len(), 509 + 104);
     assert_eq!(unconditional(&default()).len(), 114);
 }
 
@@ -54,7 +55,7 @@ fn every_runtime_gated_variable_carries_its_condition() {
     let w = writable(&default());
     let u = unconditional(&default());
     let gated: BTreeSet<&str> = w.difference(&u).cloned().collect();
-    assert_eq!(gated.len(), 395);
+    assert_eq!(gated.len(), 395 + 104); // 含 PR #504 的 104 个火诊断量（`DEF_USE_BGC`）
 
     let cond = |n: &str| all().iter().find(|v| v.name == n).unwrap().runtime.unwrap();
 
@@ -191,5 +192,5 @@ fn ifndef_really_does_subtract() {
     assert!(!after.contains("rsur_se"));
     // 同一个宏的 #ifdef 侧又放行了三个，所以净变化是 +1 而不是 -2。
     assert!(after.contains("fldarea") && after.contains("xwsub") && after.contains("xwsur"));
-    assert_eq!(after.len(), 510);
+    assert_eq!(after.len(), 510 + 104);
 }

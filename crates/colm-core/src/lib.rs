@@ -121,6 +121,7 @@ pub mod high_res_parameters;
 pub mod high_res_radiation;
 pub mod history_diagnostics;
 pub mod hydrology;
+pub mod incomplete_gamma;
 pub mod interception;
 pub mod irrigation;
 pub mod lake;
@@ -134,6 +135,7 @@ pub mod linear;
 pub mod methane;
 pub mod monin_obukhov;
 pub mod net_solar;
+pub mod ozone;
 pub mod pc_radiation;
 pub mod pft;
 pub mod phase_change;
@@ -282,7 +284,7 @@ pub use interception::{
     CanopyInterceptionInput, CanopyWater, CanopyWetness, Colm2024Canopy,
 };
 pub use irrigation::{
-    irrigation_needed, IrrigationApplicationFluxes, IrrigationColumn, IrrigationSettings,
+    dominant_irrigation_pft, irrigation_needed, IrrigationApplicationFluxes, IrrigationColumn, IrrigationSettings,
     IrrigationState, SoilIrrigation, IRRIGATION_DRIP, IRRIGATION_FLOOD, IRRIGATION_PADDY,
     IRRIGATION_SPRINKLER,
 };
@@ -375,6 +377,10 @@ pub use surface_optics::{
     prepare_surface_optics_with_snicar, SurfaceOptics, SurfaceOpticsInput,
 };
 
+pub use ozone::{
+    canopy_ozone_stress, ozone_stress, OzoneParameters, OzoneState, OzoneUptakeInput,
+    CONSTANT_OZONE_PPBV,
+};
 pub use pft::{
     aggregate_pft_radiation, pft_snow_fraction, pft_sum, PftColumn, PftParameters, PftPatch,
     PftShortwave, PftSnowFraction, BARE_PFT_WATER_POTENTIAL_MM,

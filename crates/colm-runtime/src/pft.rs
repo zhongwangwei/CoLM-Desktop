@@ -23,6 +23,8 @@ pub struct PftTemplate {
     pub initial: PftPatch,
     /// PHS 打开时时间重启里才有 `vegwp_p`/`gs0sun_p`/`gs0sha_p`。
     plant_hydraulics: bool,
+    /// `DEF_USE_OZONESTRESS`：PFT 时间重启里有 `lai_old_p` 等七个臭氧变量。
+    ozone: bool,
     monthly: Option<PftMonthlyLeafAreaIndex>,
     /// 本 patch 在全站 PFT 里的区间（多作物单点每个 patch 一个 PFT；单 patch 时是全部）。
     site_pfts: std::ops::Range<usize>,
@@ -322,6 +324,24 @@ impl PftTemplate {
         } else {
             (Vec::new(), vec![0.0; pfts], vec![0.0; pfts])
         };
+        // `READ_PFTimeVariables`（`MOD_Vars_TimeVariables.F90:199-210`）：缺变量时 `lai_old_p`/
+        // `o3uptake*_p` 取 0、`o3coef*_p` 取 1（`defval`）。
+        let ozone = physics.ozone.is_some();
+        let ozone_fields = if ozone {
+            PFT_OZONE_RESTART_FIELDS
+                .iter()
+                .zip([0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0])
+                .map(|(name, default)| {
+                    if time.variable_dimensions(name).is_ok() {
+                        vector(name)
+                    } else {
+                        Ok(vec![default; pfts])
+                    }
+                })
+                .collect::<Result<Vec<_>>>()?
+        } else {
+            Vec::new()
+        };
         let columns = (0..pfts)
             .map(|p| PftColumn {
                 leaf: LeafTemperatureState {
@@ -336,6 +356,11 @@ impl PftTemplate {
                         vegetation_water_potential_mm: std::array::from_fn(|node| {
                             vegwp[p * VEGETATION_SEGMENTS + node]
                         }),
+                    }),
+                    ozone: ozone.then(|| {
+                        crate::assembly::ozone_state_from_fields(std::array::from_fn(|field| {
+                            ozone_fields[field][p]
+                        }))
                     }),
                 },
                 wet_snow_fraction: fwet_snow[p],
@@ -373,6 +398,7 @@ impl PftTemplate {
         Ok(Self {
             initial,
             plant_hydraulics,
+            ozone,
             monthly: None,
             site_pfts,
             site_pft_count,
@@ -567,11 +593,15 @@ impl PftTemplate {
                 patch.sum(|column| column.temporal_stem_area_index),
             )));
         }
-        // 多作物单点：上游给**每个** patch 赋同一个全站和 `sum(SITE_LAI_pfts_monthly*SITE_pctpfts)`
-        // （`MOD_LAIReadin.F90:174-175`），作物站点 `SITE_pctpfts = 1`，于是是各作物 LAI 之和
-        // （upstream-bugs 第 33 条）。照写。
+        // 多作物单点：每个 patch 只对自己的 PFT 区间求 `sum(SITE_LAI_pfts_monthly(ps:pe)*SITE_pctpfts(ps:pe))`。
+        // 上游原来给每个 patch 赋同一个全站和，即各作物 LAI 之和（upstream-bugs 第 33 条，vendor 已修）。
         let site_sum = |values: &[f64]| {
-            colm_core::pft_sum(values.iter().copied().zip(site_fraction.iter().copied()))
+            colm_core::pft_sum(
+                values[range.clone()]
+                    .iter()
+                    .copied()
+                    .zip(site_fraction[range.clone()].iter().copied()),
+            )
         };
         Ok(Some((
             (!lai_feedback).then(|| site_sum(&lai)),
@@ -636,9 +666,35 @@ impl PftTemplate {
             overrides.push(field("gs0sun_p", |c| c.maximum_sunlit_leaf_conductance));
             overrides.push(field("gs0sha_p", |c| c.maximum_shaded_leaf_conductance));
         }
+        if self.ozone {
+            for (index, name) in PFT_OZONE_RESTART_FIELDS.iter().enumerate() {
+                overrides.push(RestartOverride::new(
+                    *name,
+                    columns
+                        .iter()
+                        .map(|c| {
+                            c.leaf.ozone.map_or(colm_core::MISSING, |state| {
+                                crate::assembly::ozone_state_fields(&state)[index]
+                            })
+                        })
+                        .collect(),
+                ));
+            }
+        }
         overrides
     }
 }
+
+/// `MOD_Vars_PFTimeVariables` 的臭氧时间变量，次序同 [`crate::assembly::OZONE_RESTART_FIELDS`]。
+const PFT_OZONE_RESTART_FIELDS: [&str; 7] = [
+    "lai_old_p",
+    "o3uptakesun_p",
+    "o3uptakesha_p",
+    "o3coefv_sun_p",
+    "o3coefv_sha_p",
+    "o3coefg_sun_p",
+    "o3coefg_sha_p",
+];
 
 const PFT_VECTORS: [&str; 18] = [
     "tleaf_p",
@@ -715,6 +771,7 @@ fn pft_parameters(
             // （`MOD_Const_PFT.F90:1779/1812` 与 `pft_override_fields.inc` 的 scale）。
             maximum_carboxylation_25c_mol_m2_s: value("DEF_PFT_VMAX25")? * 1.0e-6,
             c3c4: value("DEF_PFT_C3C4")? as i32,
+            respiration_fraction_override: None,
             low_temperature_slope: value("DEF_PFT_SLTI")?,
             low_temperature_half_k: value("DEF_PFT_HLTI")?,
             high_temperature_slope: value("DEF_PFT_SHTI")?,
@@ -752,6 +809,12 @@ fn pft_parameters(
             1..=8 => 2,
             _ => 1,
         },
+        // 臭氧胁迫（`MOD_Ozone.F90`）的类别参数：`isevg` 写死，`leaf_long` 可被 `DEF_PFT_LEAF_LONG` 覆盖。
+        evergreen: colm_case::pft::fixed_value(
+            "isevg",
+            u8::try_from(class).context("pftclass must be nonnegative")?,
+        )? != 0.0,
+        leaf_longevity_years: value("DEF_PFT_LEAF_LONG")?,
     })
 }
 

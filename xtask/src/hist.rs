@@ -618,6 +618,23 @@ pub fn extract_switches(text: &str) -> Result<Vec<Switch>> {
             if switches[k].sync != Sync::Never {
                 bail!("DEF_hist_vars%{name} is synchronized twice");
             }
+            // `sync_hist_vars_one (…, default_value=.false.)`（PR #504 的火诊断量）：同步时取这个固定值，
+            // 不跟 `DEF_HIST_vars_out_default`。等同于"声明默认值就是它、从不同步"。
+            if let Some(at) = low.find("default_value=") {
+                let value = &low[at + "default_value=".len()..];
+                let fixed = if value.starts_with(".true.") {
+                    true
+                } else if value.starts_with(".false.") {
+                    false
+                } else {
+                    bail!("unsupported default_value in {line}");
+                };
+                if condition.is_some() && fixed != switches[k].declared {
+                    bail!("conditional default_value that differs from the declaration: {line}");
+                }
+                switches[k].declared = fixed;
+                continue;
+            }
             switches[k].sync = condition.clone().unwrap_or(Sync::Always);
         }
     }

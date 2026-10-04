@@ -10,6 +10,7 @@ fn leaf() -> LeafPhotosynthesisInput {
             quantum_efficiency: 0.05,
             maximum_carboxylation_25c_mol_m2_s: 60e-6,
             c3c4: 1,
+            respiration_fraction_override: None,
             low_temperature_slope: 0.2,
             low_temperature_half_k: 288.16,
             high_temperature_slope: 0.3,

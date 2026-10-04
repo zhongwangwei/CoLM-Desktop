@@ -4,18 +4,29 @@
 //! They are deliberately independent of restart and forcing I/O so the Rust
 //! time-step driver can feed their output straight into [`crate::soil_water`].
 
+use crate::incomplete_gamma::gratio_fortran;
 use crate::LibmPow;
-use anyhow::{ensure, Result};
+use anyhow::{ensure, Context, Result};
 
 use crate::{soil_vliq_from_psi, SoilHydraulicModel};
 
-/// TOPMODEL's supported saturated-area/baseflow parameterizations.
+/// TOPMODEL's supported saturated-area/baseflow parameterizations (`DEF_TOPMOD_method`).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum TopmodelMethod {
     /// `DEF_TOPMOD_method = 0`: historic exponential baseflow.
     Exponential,
     /// `DEF_TOPMOD_method = 1`: conductivity-scaled exponential baseflow.
+    /// 饱和面积与方法 0 是同一条式子（`MOD_Runoff.F90:90-92`）。
     Hydraulic { mean_topographic_index: f64 },
+    /// `DEF_TOPMOD_method = 2`：TWI 服从三参数伽马分布（`alp_twi`/`chi_twi`/`mu_twi`），
+    /// 饱和面积比与地下径流都由迭代出的临界地形指数 `eta` 决定（`MOD_Runoff.F90:94-130,218-219`）。
+    Gamma {
+        /// `topoweti`：平均地形指数，只作迭代初值（不高于 `mu` 时改用 `mu + alpha*chi`）。
+        mean_topographic_index: f64,
+        alpha: f64,
+        chi: f64,
+        mu: f64,
+    },
 }
 
 /// Inputs shared by `SurfaceRunoff_TOPMOD` and its two active Desktop modes.
@@ -30,6 +41,8 @@ pub struct TopmodelSurfaceInput<'a> {
     pub decay_tuning: f64,
     pub water_table_depth_m: f64,
     pub water_input_mm_s: f64,
+    /// `DEF_TOPMOD_method`。方法 0 与 1 的饱和面积相同；方法 2 走伽马分布迭代。
+    pub method: TopmodelMethod,
 }
 
 /// Partition of TOPMODEL's surface runoff.
@@ -39,6 +52,8 @@ pub struct TopmodelSurfaceState {
     pub saturation_excess_runoff_mm_s: f64,
     pub infiltration_excess_runoff_mm_s: f64,
     pub saturated_fraction: f64,
+    /// `eta_out`：方法 2 的临界地形指数，交给 `SubsurfaceRunoff_TOPMOD`；方法 0/1 上游不写它。
+    pub critical_topographic_index: Option<f64>,
 }
 
 /// Inputs to `SubsurfaceRunoff_TOPMOD`.
@@ -52,6 +67,8 @@ pub struct TopmodelSubsurfaceInput<'a> {
     pub saturated_hydraulic_conductivity_mm_s: &'a [f64],
     pub decay_tuning: f64,
     pub water_table_depth_m: f64,
+    /// 方法 2 的 `eta`（[`TopmodelSurfaceState::critical_topographic_index`]）；其余方法不读。
+    pub critical_topographic_index: Option<f64>,
 }
 
 /// Shared inputs to the XinAnJiang and SimpleVIC surface runoff schemes.
@@ -91,12 +108,35 @@ pub struct SimpleVicSubsurfaceInput<'a> {
     pub baseflow_threshold: f64,
 }
 
-/// Ports `SurfaceRunoff_TOPMOD` for the method-0 and method-1 Desktop paths.
+/// Ports `SurfaceRunoff_TOPMOD`（方法 0/1/2，`MOD_Runoff.F90:24-157`）。
 pub fn topmodel_surface_runoff(input: TopmodelSurfaceInput<'_>) -> Result<TopmodelSurfaceState> {
     let layers = validate_topmodel_surface(input)?;
-    let saturated_fraction = input.saturated_fraction_max
-        * (-input.saturated_fraction_decay_m_inv * input.decay_tuning * input.water_table_depth_m)
-            .exp();
+    let (saturated_fraction, critical_topographic_index) = match input.method {
+        TopmodelMethod::Exponential | TopmodelMethod::Hydraulic { .. } => (
+            input.saturated_fraction_max
+                * (-input.saturated_fraction_decay_m_inv
+                    * input.decay_tuning
+                    * input.water_table_depth_m)
+                    .exp(),
+            None,
+        ),
+        TopmodelMethod::Gamma {
+            mean_topographic_index,
+            alpha,
+            chi,
+            mu,
+        } => {
+            let (fraction, eta) = gamma_saturated_fraction(
+                input.water_table_depth_m,
+                input.decay_tuning,
+                mean_topographic_index,
+                alpha,
+                chi,
+                mu,
+            );
+            (fraction, Some(eta))
+        }
+    };
     let maximum_infiltration = input.saturated_hydraulic_conductivity_mm_s[..layers.min(3)]
         .iter()
         .zip(&input.ice_fraction[..layers.min(3)])
@@ -115,10 +155,71 @@ pub fn topmodel_surface_runoff(input: TopmodelSurfaceInput<'_>) -> Result<Topmod
         saturation_excess_runoff_mm_s: saturation_excess,
         infiltration_excess_runoff_mm_s: infiltration_excess,
         saturated_fraction,
+        critical_topographic_index,
     })
 }
 
-/// Ports `SubsurfaceRunoff_TOPMOD` for method 0 and method 1.
+/// 方法 2 的饱和面积比 `fsat` 与临界地形指数 `eta`（`MOD_Runoff.F90:96-138`，vendor 已改：
+/// 初值不低于分布下界、传给 `GRATIO` 的 x 截到 `max(0, (eta-mu)/chi)`、`pgr0 <= 0` 时退出）。
+///
+/// 照 GIMPLE（`MOD_Runoff.F90.273t.optimized`）：
+/// * `chi_twi*alp_twi*pgr1` 是 `(alp*chi)*pgr1`，先算出来，`gfun` 与更新式共用；
+/// * `gfun = FMS(eta-mu, pgr0, 上面那个乘积) / DECAY - zwt` —— 乘积被吸收进 fms；
+/// * 更新式 `eta = FMA(DECAY, zwt, 上面那个乘积) / pgr0 + mu`；
+/// * 传给 `GRATIO` 的 x 由未截断的 `eta-mu` 除 `chi` 再截 0，`gfun` 里用的是未截断的差。
+///
+/// `pgr0`/`pgr1`/`qgr` 是未初始化的局部量：`GRATIO` 出错（`ANS = 2`）时不写 `QANS`，
+/// `fsat = qgr` 便是上一次成功调用留下的值 —— 用 [`gratio_fortran`] 保留这一语义。
+/// 循环至少跑一次，第一次调用的 `a = alp+1 >= 1`，所以只要 `alp >= -1`，`qgr` 总被写过；
+/// 这里的 NaN 初值只在 `alp < -1` 这种上游也没有定义的输入里露出来。
+///
+/// 上游不收敛时 `write(*,*) 'Fail to converge in TOPModel: ...'`，结果照用；这里不打印。
+fn gamma_saturated_fraction(
+    water_table_depth_m: f64,
+    decay_tuning: f64,
+    mean_topographic_index: f64,
+    alpha: f64,
+    chi: f64,
+    mu: f64,
+) -> (f64, f64) {
+    if water_table_depth_m <= 0.0 {
+        return (1.0, mu);
+    }
+    // 初值（upstream-bugs 第 58 条，vendor 已修）：`topoweti <= mu_twi` 时改从分布均值
+    // `mu + alp*chi` 起步 —— 否则第一轮 x 截到 0、`pgr0 = 0` 立即退出，整块当全饱和。
+    // GIMPLE：`.FMA (alp_twi, chi_twi, mu_twi)`。
+    let mut eta = if mean_topographic_index > mu {
+        mean_topographic_index
+    } else {
+        alpha.mul_add(chi, mu)
+    };
+    let (mut pgr0, mut pgr1, mut qgr) = (0.0, 0.0, f64::NAN);
+    for _ in 0..20 {
+        let excess = eta - mu;
+        let x = (excess / chi).max(0.0);
+        gratio_fortran(alpha + 1.0, x, &mut pgr1, &mut qgr, 0);
+        gratio_fortran(alpha, x, &mut pgr0, &mut qgr, 0);
+        let spread = alpha * chi * pgr1;
+        let gfun = excess.mul_add(pgr0, -spread) / decay_tuning - water_table_depth_m;
+        // x 截到 0（eta <= mu）时 pgr0 = 0，更新式会除以 0。
+        if pgr0 <= 0.0 {
+            break;
+        }
+        if gfun.abs() > 1.0e-6 {
+            eta = decay_tuning.mul_add(water_table_depth_m, spread) / pgr0 + mu;
+        } else {
+            break;
+        }
+    }
+    gratio_fortran(alpha, ((eta - mu) / chi).max(0.0), &mut pgr0, &mut qgr, 0);
+    (qgr, eta)
+}
+
+/// Ports `SubsurfaceRunoff_TOPMOD`（方法 0/1/2，`MOD_Runoff.F90:160-224`）。
+///
+/// 上游按 `present(hksati) .and. present(topoweti/eta)` 选分支，缺参数时落进方法 0 的式子。
+/// 现在 `WATER_VSF` 与 `groundwater`（`WATER_2014`）都带齐这三个（upstream-bugs 第 57 条，
+/// vendor 已修），所以调用方直接传 `DEF_TOPMOD_method` 对应的方法。
 pub fn topmodel_subsurface_runoff(input: TopmodelSubsurfaceInput<'_>) -> Result<f64> {
     let layers = validate_topmodel_subsurface(input)?;
     let start = water_table_layer(input.water_table_depth_m, input.interface_depth_m);
@@ -147,21 +248,36 @@ pub fn topmodel_subsurface_runoff(input: TopmodelSubsurfaceInput<'_>) -> Result<
         TopmodelMethod::Exponential => {
             Ok(ice_impedance * 5.5e-3 * (-2.5 * input.water_table_depth_m).exp())
         }
+        // GIMPLE（`:217`）：`((((imped*3e4)*sum)/nl)/DECAY)*exp(-topoweti))*exp(-DECAY*zwt)`。
+        // `sum(hksati)/nl_soil` **不是**先算出的均值：除以层数排在乘 `imped*3e4` 之后。
         TopmodelMethod::Hydraulic {
             mean_topographic_index,
-        } => {
-            let mean_conductivity = input
-                .saturated_hydraulic_conductivity_mm_s
-                .iter()
-                .sum::<f64>()
-                / layers as f64;
+        } => Ok(ice_impedance * 3.0e4 * conductivity_sum(input)
+            / layers as f64
+            / input.decay_tuning
+            * (-mean_topographic_index).exp()
+            * (-input.decay_tuning * input.water_table_depth_m).exp()),
+        // `:219`：`(((imped*3e3)*sum)/nl)/DECAY*exp(-eta)`。
+        TopmodelMethod::Gamma { .. } => {
+            let eta = input
+                .critical_topographic_index
+                .context("TOPMODEL method 2 baseflow needs eta from SurfaceRunoff_TOPMOD")?;
             Ok(
-                ice_impedance * 3.0e4 * mean_conductivity / input.decay_tuning
-                    * (-mean_topographic_index).exp()
-                    * (-input.decay_tuning * input.water_table_depth_m).exp(),
+                ice_impedance * 3.0e3 * conductivity_sum(input)
+                    / layers as f64
+                    / input.decay_tuning
+                    * (-eta).exp(),
             )
         }
     }
+}
+
+/// `sum(hksati(1:nl_soil))`：从 0 起顺序累加（GIMPLE `val = h + val`）。
+fn conductivity_sum(input: TopmodelSubsurfaceInput<'_>) -> f64 {
+    input
+        .saturated_hydraulic_conductivity_mm_s
+        .iter()
+        .fold(0.0, |sum, &conductivity| conductivity + sum)
 }
 
 /// Ports `Runoff_XinAnJiang`（`MOD_Runoff.F90:224-282`）。
@@ -385,6 +501,27 @@ fn validate_topmodel_surface(input: TopmodelSurfaceInput<'_>) -> Result<usize> {
         .all(|value| value.is_finite()),
         "TOPMODEL surface scalars must be finite"
     );
+    if let TopmodelMethod::Gamma {
+        mean_topographic_index,
+        alpha,
+        chi,
+        mu,
+    } = input.method
+    {
+        ensure!(
+            [mean_topographic_index, alpha, chi, mu]
+                .iter()
+                .all(|value| value.is_finite()),
+            "TOPMODEL method 2 needs finite topoweti/alp_twi/chi_twi/mu_twi"
+        );
+        // 上游 `(eta-mu_twi)/chi_twi` 在 `-ffpe-trap=zero` 下除零即中止。`chi_twi = 0` 多半是
+        // 拿方法 0/1 建的常数重启（那时四个 TWI 参数都置 0，`MOD_Initialize.F90`）去跑方法 2。
+        // `zwt <= 0` 那一支不做这次除法，上游不会中止。
+        ensure!(
+            chi != 0.0 || input.water_table_depth_m <= 0.0,
+            "TOPMODEL method 2 needs chi_twi != 0 (was the constant restart built for DEF_TOPMOD_method = 2?)"
+        );
+    }
     Ok(layers)
 }
 
@@ -426,6 +563,14 @@ fn validate_topmodel_subsurface(input: TopmodelSubsurfaceInput<'_>) -> Result<us
         ensure!(
             mean_topographic_index.is_finite(),
             "topographic index must be finite"
+        );
+    }
+    if let TopmodelMethod::Gamma { .. } = input.method {
+        ensure!(
+            input
+                .critical_topographic_index
+                .is_some_and(|eta| eta.is_finite()),
+            "TOPMODEL method 2 baseflow needs a finite eta"
         );
     }
     Ok(layers)

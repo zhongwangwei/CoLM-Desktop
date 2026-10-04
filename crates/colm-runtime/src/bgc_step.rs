@@ -34,7 +34,15 @@ pub struct BgcStatics {
     pub zi_soi: Vec<f64>,
     /// `porsl`/`psi0`/`bsw`/`theta_r`/`*_vgm`/`BD_all`/`wfc`/`OM_density`，按 Fortran 名。
     pub soil: Vec<(&'static str, Vec<f64>)>,
+    /// `CNFireArea` 算饱和面积比用的 `fsatmax`/`fsatdcf`/`topoweti`/`alp_twi`/`chi_twi`/`mu_twi`：
+    /// 常数重启里没有的（非 TOPMODEL 产流）按 `spval`，与上游的回退判断一致。
+    pub topmodel: [f64; 6],
 }
+
+/// [`BgcStatics::topmodel`] 的 Fortran 名。
+pub const TOPMODEL_STATICS: [&str; 6] = [
+    "fsatmax", "fsatdcf", "topoweti", "alp_twi", "chi_twi", "mu_twi",
+];
 
 impl BgcStatics {
     /// 从主常数重启读第 `patch` 个 patch（0 起）的静态量。
@@ -97,6 +105,15 @@ impl BgcStatics {
             .filter(|name| file.float_names().iter().any(|present| present == name))
             .map(soil)
             .collect::<Result<_>>()?,
+            topmodel: {
+                let mut values = [MISSING; 6];
+                for (slot, name) in values.iter_mut().zip(TOPMODEL_STATICS) {
+                    if file.float_names().iter().any(|present| present == name) {
+                        *slot = at(name)?;
+                    }
+                }
+                values
+            },
         })
     }
 }
@@ -1168,6 +1185,21 @@ impl BgcRuntime {
             forc_prl: vec![forcing.large_scale_precipitation_kg_m2_s],
             forc_us: vec![forcing.eastward_wind_m_s],
             forc_vs: vec![forcing.northward_wind_m_s],
+            zwt: vec![state.soil_water.water_table_depth_m],
+            // `WATER_2014` 不写 `frcsat`（保持 `spval`）；干湖等未定义的值同样按 `spval`。
+            frcsat: vec![if self.switches.variably_saturated
+                && output.water.soil.saturated_fraction.is_finite()
+            {
+                output.water.soil.saturated_fraction
+            } else {
+                MISSING
+            }],
+            fsatmax: vec![self.statics.topmodel[0]],
+            fsatdcf: vec![self.statics.topmodel[1]],
+            topoweti: vec![self.statics.topmodel[2]],
+            alp_twi: vec![self.statics.topmodel[3]],
+            chi_twi: vec![self.statics.topmodel[4]],
+            mu_twi: vec![self.statics.topmodel[5]],
             deltim,
             dlat: degrees(self.statics.patchlatr),
             dlon: degrees(self.statics.patchlonr),

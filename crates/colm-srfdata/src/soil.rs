@@ -1110,13 +1110,15 @@ mod tests {
         assert_bits_close(&residual, "3F911BFE24EBF3F7 3F8B2310F7DAE3D8 3F872BBFCB341A0E 3F83D1D520EB2F08 3F833E276431B3F2 3F8408F813A8F3D5 3F858BDB9536EBA6 3F876BC89A2A3A92 3F897468F6BF253F 3F8D92D964C7E823 3F90B8B6D5B9C99A 3F9277B1ADE7C564 3F94056680870A19 3F95661B219DC93B 3F97B6D868D0907C 3F9B700EA7655B2C 3F9CCCA85A82EEC4 3FA15009300D369A 3FA2A63D33118393 3FA6A9DD5D5C61CB 3FA886D9A735BADC 3FA8E73C5C878260 3FAAA816FE083A99 3FAC0FA77D8533DC", "VGM residual FMA operands must match original callback bits");
         assert_bits_close(&jacobian, "3F35281DE4F5F1F2 40009870DF6A4789 BFD786A9EA6AA1F2 BF7F4DA50F3F065A 3F655F7AF8BFFDA5 400A9E2845B7CF28 BFD8F5906D899478 BF796B9F22CB0C6C 3F7A856B73237D9A 400DF95F6FF6CEEF BFD6A04A079BBC69 BF74D5E200C05AC4 3F9095BF5870275A 400B19AF67F32079 BFD0C474E7F58759 BF6C3A45E70E9DA2 3F9C50E25ACF062E 40026ADB0F877A83 BFC6F24D31C0C742 BF62053AB2891ADE 3FA4902A1E6F7619 3FED00565C022EC8 BFBCA23BE798120E BF53B087AC87F62E 3FAB441368925A79 BFE32167F0DF790E BFAE4442EAB4D392 BF39272BD61913B7 3FB10C18FB38DCD8 C000D0F649156E9B BF93679501DA339D 3F336D72D5DB6787 3FB476EE79711C61 C00C6471E8E5392C 3F8657D208708094 3F4C7628F477BA9C 3FBB28C1FA4BD93E C018B30529DD4DD0 3FA8503B14A03348 3F5D01ADD2978A89 3FC0C45DEB88ECF1 C020D0C68BCF8DD3 3FB01D3D58B26688 3F63FF9F41939B6D 3FC3C30713B897E8 C0248E33620F6C3E 3FB0B4745D95CC8D 3F68322FD5070F71 3FC68F2B9C4D7496 C027AD90A067789B 3FAE6B833C38AE90 3F6B798006B6A514 3FC92AE39E35CB9C C02A4A9841C4D378 3FA8DE4C2588F220 3F6E1596D42032E1 3FCDDF33B003EF8F C02E59557442DF55 3F9394599552F528 3F70F6B820834819 3FD33D0F7812F5DB C031F608BB016120 BFACC9E82BAC8D10 3F736D9830977032 3FD500F380E13D83 C032D0FF886E17D9 BFB79390F5942FFC 3F7426419FA0FCB9 3FDDFE06C7429FCC C0354B6FF677F0D7 BFD2AEE79B3C1D94 3F76292810C4E368 3FE17F083E088B96 C035B6C1DBF20B64 BFD9E505AD019731 3F767E37B1BAE38D 3FEA8A6C85651AC1 C0345740B72603E2 BFE8AD7D54CF5A94 3F756B232D8932B0 3FEF4EB9E89F5F60 C0329AF4559DA9F9 BFEDC386AB10494A 3F73FA9F940A6D0C 3FF026E409666CAA C0322C8F5CB3EFD4 BFEEB7AB7D1BA546 3F739B935A12F85C 3FF28E93C19A6406 C02F529E7603C744 BFF14F039A6EEE4F 3F715425BDB6D4FF 3FF4AAAE1BA85DBF C028B742A3EA7559 BFF2090904ECD08A 3F6C11BF28E9394F", "VGM Jacobian FMA operands must match original callback bits");
         let mut fit = x;
+        // 终值金标准用 `MOD_Utils::lmder` 原样编译（加 `-fdefault-double-8`，upstream-bugs 第 17 条）、
+        // 以上面两格子的 ydatv/ydatvks 位模式直接调 `SW_VG_dist` 重新生成。
         assert!(lmder(&problem, &mut fit, 24));
         // 拟合结果也走 `assert_bits_close`：lmder 是迭代求解，末位差异会随迭代放大
         // （实测 ubuntu 上第 2 个参数差 1 ULP、第 4 个差 3 ULP），所以"逐位"这条
         // 同样只在 macOS 上成立。
         assert_bits_close(
             &fit,
-            "3FB8D9AC55556D3F 3F8C3353C983A9BF 3FF4964CCB0C2C2E 40335F93306E0B1A",
+            "3FB8D9AC55556D44 3F8C3353C983A9B4 3FF4964CCB0C2C2D 40335F93306E0AF2",
             "VGM lmder final fit must match original callback plus MOD_Utils bits",
         );
     }
@@ -1363,5 +1365,104 @@ mod tests {
             }
             trial[column] = x[column];
         }
+    }
+
+    /// `MOD_Utils::lmder` + `SW_VG_dist`/`SW_CB_dist` 端到端逐位比对。金标准由一个 Fortran 驱动生成：
+    /// vendor 的 `MOD_Utils.F90` 与两个回调原样编译（`-O2 -fdefault-real-8 -fdefault-double-8`，
+    /// `MOD_Utils` 的 GIMPLE 与构建树转储归一化后逐条相同），随机细网格参数，`ydat` 预计算与 `lmder`
+    /// 调用照 `Aggregation_SoilParameters.F90` 原文。`trap=1` 的组在 CoLM（开 `-ffpe-trap`）里会中止，跳过。
+    /// `isiter=0` 的组上游丢弃拟合结果，对应 Rust `lmder` 返回 false。
+    #[test]
+    fn lmder_soil_fits_match_gfortran_bitwise() {
+        let fixture = include_str!("../tests/fixtures/soil_lmder_gfortran.txt");
+        let hex = |s: &str| f64::from_bits(u64::from_str_radix(s, 16).expect("valid hex golden"));
+        let (mut total, mut skipped, mut rejected) = (0, 0, 0);
+        let mut bad = Vec::new();
+        for line in fixture.lines().filter(|line| !line.starts_with('#')) {
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            let np: usize = fields[1].parse().unwrap();
+            let vgm = fields[0] == "V";
+            let (per_cell, scalars, unknowns) = if vgm { (6, 3, 4) } else { (4, 2, 3) };
+            let values: Vec<f64> = fields[2..2 + np * per_cell + scalars + unknowns]
+                .iter()
+                .map(|value| hex(value))
+                .collect();
+            let tail = &fields[2 + np * per_cell + scalars + unknowns..];
+            let (trap, isiter): (u8, u8) = (tail[0].parse().unwrap(), tail[1].parse().unwrap());
+            let want: Vec<f64> = tail[4..].iter().map(|value| hex(value)).collect();
+            if trap == 1 {
+                skipped += 1;
+                continue;
+            }
+            total += 1;
+            let column = |k: usize| {
+                (0..np)
+                    .map(|cell| values[cell * per_cell + k])
+                    .collect::<Vec<_>>()
+            };
+            let scalar = &values[np * per_cell..];
+            let mut x = scalar[scalars..].to_vec();
+            let converged = if vgm {
+                let (tr, al, n, ts, ks, l) = (
+                    column(0),
+                    column(1),
+                    column(2),
+                    column(3),
+                    column(4),
+                    column(5),
+                );
+                let problem = VgmProblem::new(
+                    VgmInputs {
+                        theta_r: &tr,
+                        alpha: &al,
+                        n: &n,
+                        theta_s: &ts,
+                        k_s: &ks,
+                        l: &l,
+                    },
+                    scalar[0],
+                    scalar[1],
+                    scalar[2],
+                );
+                lmder(&problem, &mut x, VGM_PRESSURES.len())
+            } else {
+                let (ts, ks, psi, lambda) = (column(0), column(1), column(2), column(3));
+                let problem = CampbellProblem::new(
+                    CampbellInputs {
+                        theta_s: &ts,
+                        k_s: &ks,
+                        psi_s: &psi,
+                        lambda: &lambda,
+                    },
+                    scalar[0],
+                    scalar[1],
+                );
+                lmder(&problem, &mut x, CAMPBELL_PRESSURES.len())
+            };
+            if isiter == 0 {
+                rejected += 1;
+                if converged {
+                    bad.push(format!(
+                        "{}: Fortran isiter=0，Rust 收敛到 {x:?}",
+                        fields[0]
+                    ));
+                }
+            } else if !converged
+                || x.iter()
+                    .zip(&want)
+                    .any(|(got, want)| got.to_bits() != want.to_bits())
+            {
+                bad.push(format!(
+                    "{} np={np}: Rust {converged} {x:?}，gfortran {want:?}",
+                    fields[0]
+                ));
+            }
+        }
+        eprintln!(
+            "lmder 土壤拟合：{total} 组（其中 isiter=0 {rejected} 组；另有 {skipped} 组触发浮点异常跳过），按位不一致 {} 组",
+            bad.len()
+        );
+        assert!(total > 600);
+        assert!(bad.is_empty(), "{:#?}", &bad[..bad.len().min(5)]);
     }
 }

@@ -32,6 +32,13 @@ pub struct BgcSwitches {
     pub campbell: bool,
     /// `DEF_RSTFAC`（1 或 2）：`CNFireArea` 调 `eroot` 时的水分胁迫方案。
     pub rstfac: i32,
+    /// `DEF_Runoff_SCHEME`：`CNFireArea` 按产流方案取饱和面积比（0 = TOPMODEL 现算）。
+    pub runoff_scheme: i32,
+    /// `DEF_TOPMOD_method`：TOPMODEL 饱和面积比的算法（0/1 指数，2 地形指数分布）。
+    pub topmod_method: i32,
+    /// `DEF_USE_VariablySaturatedFlow`：只有 `WATER_VSF` 写 `frcsat`，`WATER_2014` 下它保持分配时的
+    /// `spval`，`CNFireArea` 据此回退。
+    pub variably_saturated: bool,
 }
 
 macro_rules! physics_fields {
@@ -71,8 +78,10 @@ macro_rules! physics_fields {
                     Ok(values[0])
                 };
                 // 只有 BGC 历史/作物用到的量：旧追踪里没有时按上游初值 spval 填。
-                let optional = |name: &str, len: usize| {
-                    record.input(name).map_or_else(|| vec![crate::MISSING; len], <[f64]>::to_vec)
+                // 未分配的数组（n=0，如 TOPMODEL 参数）同样按 spval。
+                let optional = |name: &str, len: usize| match record.input(name) {
+                    Some(values) if !values.is_empty() => values.to_vec(),
+                    _ => vec![crate::MISSING; len],
                 };
                 let npft = get("pftfrac")?.len();
                 let idate = get("idate")?;
@@ -117,6 +126,7 @@ physics_fields!(
     optional_patch: [
         lai_enftemp, lai_enfboreal, lai_dnfboreal, lai_ebftrop, lai_ebftemp, lai_dbftrop, lai_dbftemp, lai_dbfboreal, lai_ebstemp, lai_dbstemp, lai_dbsboreal, lai_c3arcgrass, lai_c3grass, lai_c4grass,
         irrig_method_corn, irrig_method_swheat, irrig_method_wwheat, irrig_method_soybean, irrig_method_cotton, irrig_method_rice1, irrig_method_rice2, irrig_method_sugarcane,
+        zwt, frcsat, fsatmax, fsatdcf, topoweti, alp_twi, chi_twi, mu_twi,
     ],
     optional_pft: [irrig_method_p],
 );
@@ -159,7 +169,7 @@ macro_rules! pft_constants {
     };
 }
 
-// 前 14 个是 `MOD_Const_PFT` 写死的类别标志与常数（逻辑量读成 1/0），其余可被 `DEF_PFT_*` 覆盖。
+// 前 14 个与 `rswf_min`/`rswf_max` 是 `MOD_Const_PFT` 写死的类别标志与常数（逻辑量读成 1/0），其余可被 `DEF_PFT_*` 覆盖。
 pft_constants!(
     woody, isevg, issed, isstd, isbare, iscrop, isnatveg, isshrub, isgrass, isbetr, isbdtr,
     dsladlai, declfact, allconsl, cc_dstem, cc_leaf, cc_lstem, cc_other, croot_stem, deadwdcn,
@@ -167,6 +177,7 @@ pft_constants!(
     fr_flab, fr_flig, froot_leaf, frootcn, fsr_pft, graincn, grperc, grpnow, laimx, leaf_long,
     leafcn, lf_fcel, lf_flab, lf_flig, lflitcn, livewdcn, slatop, stem_leaf, lfemerg, grnfill,
     mxmat, baset, allconss, arootf, arooti, astemf, bfact, ffrootcn, fleafcn, fleafi, fstemcn,
+    rswf_min, rswf_max,
 );
 
 /// `julian2monthday(year, jday, month, mday)`：年内第 `jday` 天所在的月与日。
@@ -336,10 +347,10 @@ pub fn run_stage(stage: &str, step: &mut BgcStep<'_>) -> Result<()> {
             crate::bgc_decomp::soil_biogeochem_decomp(step.state, step.physics, switches)
         }
         "CNPhenology1" => {
-            crate::bgc_cn_phenology::cn_phenology(step.state, step.physics, step.pft, switches, 1)
+            crate::bgc_cn_phenology::cn_phenology(step.state, step.physics, step.pft, switches, 1)?
         }
         "CNPhenology2" => {
-            crate::bgc_cn_phenology::cn_phenology(step.state, step.physics, step.pft, switches, 2)
+            crate::bgc_cn_phenology::cn_phenology(step.state, step.physics, step.pft, switches, 2)?
         }
         "CNGResp" => crate::bgc_resp::cn_g_resp(step.state, step.physics, step.pft),
         "CalIrrigationNeeded" => {

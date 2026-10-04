@@ -78,3 +78,25 @@ fn vic_runoff_rejects_a_non_colm_soil_column() {
     invalid.layer_thickness_m = &[0.1; 9];
     assert!(vic_runoff(invalid).is_err());
 }
+
+/// `calc_Q12` 与 gfortran（`-fdefault-real-8 -fdefault-double-8 -O2`）逐位比对。金标准由一个只含
+/// `calc_Q12` 原文的小模块生成，其 GIMPLE 与 CoLM 构建里内联进 `vic_para` 的那段逐条相同
+/// （`pow`、`pow`、除、`.FNMA`、除、`pow`、两次减）。
+#[test]
+fn q12_matches_gfortran_bitwise() {
+    let fixture = include_str!("../tests/data/vic_q12_gfortran.txt");
+    let bits = |s: &str| f64::from_bits(u64::from_str_radix(s, 16).unwrap());
+    let mut total = 0;
+    let mut bad = Vec::new();
+    for line in fixture.lines().filter(|l| !l.starts_with('#')) {
+        let v: Vec<f64> = line.split_whitespace().map(bits).collect();
+        let got = q12(v[0], v[1], v[2], v[3], v[4]);
+        total += 1;
+        if got.to_bits() != v[5].to_bits() {
+            bad.push(format!("{v:?}: {got:e} vs {:e}", v[5]));
+        }
+    }
+    eprintln!("calc_Q12: {total} 组，按位不一致 {} 组", bad.len());
+    assert!(total > 1000);
+    assert!(bad.is_empty(), "{:?}", &bad[..bad.len().min(5)]);
+}

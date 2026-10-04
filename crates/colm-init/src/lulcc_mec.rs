@@ -283,7 +283,10 @@ pub fn mass_energy_conserve(
                 // PFT（非 SOLO）：`lccpct_np(1) = sum(lccpct_patches(np,1:), mask=patchtypes==0)`
                 // （从 0 起的顺序加法），四个非土壤类照抄，其余为 0。
                 Some(pft) if pft.merge_soil_classes => {
-                    ensure!(nlc == IGBP_PATCHTYPES.len(), "PFT MEC expects the 17 IGBP classes");
+                    ensure!(
+                        nlc == IGBP_PATCHTYPES.len(),
+                        "PFT MEC expects the 17 IGBP classes"
+                    );
                     let row = &inputs.lccpct[np];
                     let mut merged = vec![0.0; nlc];
                     merged[0] = (1..=nlc)
@@ -725,9 +728,9 @@ pub fn mass_energy_conserve(
 /// 再由城市分量重组 patch 的 `wliq/wice_soisno` 与 `scv`。
 ///
 /// 来源单元：同城市类型的**最后一个**（循环不提前退出）；没有同类型时取类型差最小的
-/// 第一个（严格 `>` 才换）。上游两处会读到失效的值，这里拒绝（`docs/upstream-bugs.md` 第 44 条）：
-/// 旧单元里没有城市 patch 时 `selfu_`/`u_` 沿用上一个 patch 的；没有同类型、份额又没变时
-/// `FROM_SOIL` 读未赋值的 `frnp_`。
+/// 第一个（严格 `>` 才换）。上游原来有两处读失效的值（`docs/upstream-bugs.md` 第 44 条，vendor 已修）：
+/// 旧单元里没有城市 patch 时 `selfu_`/`u_` 沿用上一个 patch 的 —— 现在不抄，保留冷启动值；
+/// 没有同类型、份额又没变时 `FROM_SOIL` 读未赋值的 `frnp_` —— 现在只在份额变了（有来源表）时判断。
 #[allow(clippy::too_many_arguments)]
 fn urban_tail(
     urban: &MecUrban<'_>,
@@ -747,7 +750,8 @@ fn urban_tail(
         if new_class[np] != crate::lulcc::URBAN {
             continue;
         }
-        let u = urban.new_urban[np].with_context(|| format!("urban patch {np} has no urban unit"))?;
+        let u =
+            urban.new_urban[np].with_context(|| format!("urban patch {np} has no urban unit"))?;
         let element = inputs.new_element[np];
         let candidates: Vec<(usize, usize)> = (0..old_class.len())
             .filter(|&p| inputs.old_element[p] == element && old_class[p] == crate::lulcc::URBAN)
@@ -757,11 +761,6 @@ fn urban_tail(
                     .with_context(|| format!("old urban patch {p} has no urban unit"))
             })
             .collect::<Result<_>>()?;
-        ensure!(
-            !candidates.is_empty(),
-            "LULCC MEC: new urban patch {np} has no urban patch in last year's element; upstream \
-             reuses a stale source index there (docs/upstream-bugs.md #44)"
-        );
         let class = urban.new_class[np];
         let same = candidates
             .iter()
@@ -769,7 +768,9 @@ fn urban_tail(
             .find(|&&(p, _)| urban.old_class[p] == class)
             .map(|&(_, u_)| u_);
         let u_ = match same {
-            Some(u_) => u_,
+            Some(u_) => Some(u_),
+            // 旧单元里没有城市 patch：保留冷启动值。
+            None if candidates.is_empty() => None,
             None => {
                 let mut best = candidates[0];
                 let mut gap = (class - urban.old_class[best.0]).abs();
@@ -780,17 +781,14 @@ fn urban_tail(
                         gap = d;
                     }
                 }
-                best.1
+                Some(best.1)
             }
         };
-        copies.push((u, u_));
-        if same.is_none() {
-            let sources = sources_of.get(&np).with_context(|| {
-                format!(
-                    "LULCC MEC: urban patch {np} has no same-class source and an unchanged \
-                     transfer row; upstream reads an unset source list (docs/upstream-bugs.md #44)"
-                )
-            })?;
+        if let Some(u_) = u_ {
+            copies.push((u, u_));
+        }
+        // 份额没变（没有来源表）时不借土壤 patch 的雪。
+        if let (None, Some(sources)) = (same, sources_of.get(&np)) {
             if sources.iter().any(|&p| old_type[p] == 0) {
                 from_soil.push((u, sources[0]));
             }
@@ -805,7 +803,10 @@ fn urban_tail(
         let entry = match overrides.iter().position(|entry| entry.name == name) {
             Some(index) => &mut overrides[index],
             None => {
-                overrides.push(RestartOverride::new(name, load_urban(urban.new_time, name)?));
+                overrides.push(RestartOverride::new(
+                    name,
+                    load_urban(urban.new_time, name)?,
+                ));
                 overrides.last_mut().expect("just pushed")
             }
         };
@@ -824,7 +825,10 @@ fn urban_tail(
         ] {
             let row = crate::lulcc::urban_row(urban.new_time, urban_name)?;
             let field = &old[patch_name];
-            ensure!(field.row == row, "{patch_name} and {urban_name} rows disagree");
+            ensure!(
+                field.row == row,
+                "{patch_name} and {urban_name} rows disagree"
+            );
             let entry = overrides
                 .iter_mut()
                 .find(|entry| entry.name == urban_name)
@@ -891,7 +895,10 @@ fn pft_tail(
             );
             values.clone_from(&entry.values);
         }
-        ensure!(values.len() == pfts, "{name} does not have one value per PFT");
+        ensure!(
+            values.len() == pfts,
+            "{name} does not have one value per PFT"
+        );
         fields.insert(name, values);
     }
     let tlai = pft.time.floats("tlai_p")?;
@@ -935,8 +942,8 @@ fn pft_tail(
                 sigf = 1.0 - wt / (1.0 + wt);
             }
             if options.vegetation_snow && vegetated && (1..=8).contains(&pft.pft_class[ip]) {
-                let buried = ((snowdp - pft.hbot[ip]).max(0.0) / (pft.htop[ip] - pft.hbot[ip]))
-                    .min(1.0);
+                let buried =
+                    ((snowdp - pft.hbot[ip]).max(0.0) / (pft.htop[ip] - pft.hbot[ip])).min(1.0);
                 sigf = 1.0 - buried;
             }
             fields.get_mut("sigf_p").expect("loaded")[ip] = sigf;

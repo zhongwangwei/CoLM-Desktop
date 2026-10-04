@@ -139,6 +139,13 @@ impl SpatialRuntime {
         self
     }
 
+    /// 段末取出优化器（LULCC 换年时交给下一段）。
+    pub fn take_baseflow_optimizer(
+        &mut self,
+    ) -> Option<crate::baseflow_optimizer::BaseflowOptimizer> {
+        self.baseflow_optimizer.take()
+    }
+
     /// LULCC 年末（`CoLM.F90`）：`LAI_readin` 排在 `LulccDriver` 之后，读的是新一年的 patch。
     /// 旧 patch 在这一步不重读 LAI；新 patch 的 LAI 由新年份的冷启动读进来。
     pub fn defer_lai_refresh_at(mut self, end_time: colm_core::CalendarTime) -> Self {
@@ -267,6 +274,8 @@ impl SpatialRuntime {
                     .enumerate()
                 {
                     if !self.forcing_mask[index] {
+                        // `update_ozone_data` 的 `grid2pset` 同样对整列 patch 做。
+                        template.update_ozone(step.clock.forcing_time, state)?;
                         // `CoLM.F90:495-541` 的 BGC 数据更新（硝化 O2、闪电、氮沉降、人口密度）对整列
                         // patch 做，被遮蔽的也一样：`update_lightning_data` 的 `grid2pset` 会把
                         // `lnfm` 从分配时的 `spval` 换成数据值（第 541 轮）。
@@ -326,9 +335,7 @@ impl SpatialRuntime {
                             .with_context(|| format!("patch {index}"))?,
                     ));
                 }
-                // `CNFireArea` 的 `tsoi17 = forc_t(i)` 是整列赋值：一步之后所有 patch 都是最后一个
-                // 跑火灾的 patch 的值（续跑里写的就是它）。
-                crate::broadcast_fire_tsoi17(templates, &mut next_states, Some(&self.forcing_mask));
+                // （`CNFireArea` 原来对 `tsoi17` 整列赋值、需在此广播；upstream-bugs 第 61 条已修，各 patch 只写自己的。）
                 // `tracer_report`：一步里所有 patch 推进完之后（`CoLMDRIVER.F90:392-393`）。
                 crate::tracer::report_after_patches(templates)?;
                 // `CoLM.F90:559-563`：陆面步之后、`hist_out` 之前汇流；预热期不汇流。
@@ -636,8 +643,9 @@ pub struct SpatialRuntimeConfig {
     pub history_frequency: colm_hist::schedule::HistoryFrequency,
     pub history_grouping: colm_hist::schedule::HistoryGrouping,
     pub forcing: super::forcing::GriddedForcingConfig,
-    /// `DEF_Forcing_Interp_Method = 'bilinear'`：强迫到 patch 的映射用 `build_bilinear`。
-    pub bilinear: bool,
+    /// `DEF_Forcing_Interp_Method = 'bilinear'`：强迫到 patch 的映射用 `build_bilinear`，带上
+    /// `DEF_domain`（决定哪些强迫行列在块覆盖里）。
+    pub bilinear: Option<colm_init::spatial_grid::GridBounds>,
     /// `DEF_USE_Forcing_Downscaling(_Simple)` 与 `DEF_DS_*`。
     pub downscaling: Option<super::downscaling::DownscalingSettings>,
 }
@@ -659,15 +667,7 @@ impl SpatialRuntimeConfig {
             "unknown DEF_Forcing_Interp_Method = {interpolation:?}; upstream accepts 'arealweight' \
              and 'bilinear'"
         );
-        // `build_bilinear` 已移植，但上游取邻格时不看 `DEF_domain` 的块覆盖：区域边缘外的强迫行列
-        // `yblk/xblk = 0`，`gblock%pio(xblk, 0)` 越界（upstream-bugs 第 42 条），那些格子的强迫也从不读入。
-        // 没有可对齐的上游结果，拒绝。
-        anyhow::ensure!(
-            interpolation == "arealweight",
-            "DEF_Forcing_Interp_Method = 'bilinear' has no defined upstream result on regional \
-             domains: the bilinear mapping picks forcing cells outside the domain blocks and indexes \
-             gblock%pio out of bounds (upstream crashes); use 'arealweight'"
-        );
+        // 双线性的邻格限在 `DEF_domain` 的块覆盖内（upstream-bugs 第 42 条，两侧都已修）。
         let downscaling = super::downscaling::DownscalingSettings::from_case(&case)?;
         let start = crate::simulation_date(&case, "start")?;
         let spinup_until =
@@ -702,7 +702,16 @@ impl SpatialRuntimeConfig {
             history_frequency: crate::history_frequency(&case)?,
             history_grouping: crate::history_grouping(&case)?,
             forcing,
-            bilinear: interpolation == "bilinear",
+            bilinear: if interpolation == "bilinear" {
+                Some(colm_init::spatial_grid::GridBounds {
+                    south: crate::required_real(&case, "DEF_domain%edges")?,
+                    north: crate::required_real(&case, "DEF_domain%edgen")?,
+                    west: crate::required_real(&case, "DEF_domain%edgew")?,
+                    east: crate::required_real(&case, "DEF_domain%edgee")?,
+                })
+            } else {
+                None
+            },
             downscaling,
         })
     }

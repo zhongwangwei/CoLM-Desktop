@@ -153,6 +153,7 @@ fn topmodel_baseflow_uses_the_water_table_after_recharge() {
         saturated_hydraulic_conductivity_mm_s: &[0.01, 0.01, 0.01],
         decay_tuning: 1.0,
         water_table_depth_m: input.water_table_depth_m,
+        critical_topographic_index: None,
     };
     let expected_water_table = input.water_table_depth_m
         - input.recharge_mm_s * input.time_step_seconds

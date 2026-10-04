@@ -74,6 +74,34 @@ pub fn land_physics_parameters(
     // `DEF_URBAN_RUN`（`MOD_Namelist.F90:2248-2257`）：打开城市模型时上游把 WUEST、
     // SUPERCOOL_WATER、PLANTHYDRAULICS、OZONESTRESS、SPLIT_SOILSNOW 一律关掉。
     let urban_run = logical(document, "DEF_URBAN_RUN")?;
+    // 臭氧胁迫（`MOD_Ozone.F90`）：`DEF_URBAN_RUN` 下上游把 OZONESTRESS/OZONEDATA 一起关掉
+    // （`MOD_Namelist.F90:2360-2361`），OZONESTRESS 关时 OZONEDATA 也被强制关（`:2092-2097`）。
+    // LCT 的 `LeafTemperature` 收的 `ivt` 是字面量 1（`MOD_Thermal.F90:718`），所以 patch 级参数
+    // 恒取 PFT 1（温带常绿针叶林）的 `isevg`/`leaf_long`；`DEF_PFT_LEAF_LONG` 只在 PFT/PC 下覆盖
+    // （`Init_PFT_Const` 的 `IF (DEF_USE_PFT .or. DEF_USE_PC)`），这里取表值。
+    let ozone = if logical(document, "DEF_USE_OZONESTRESS")? && !urban_run {
+        let ko3 = real(document, "DEF_OZONE_KO3")?;
+        ensure!(
+            ko3.is_finite() && ko3 >= 0.0,
+            "DEF_OZONE_KO3 must be finite and non-negative (MOD_Namelist.F90:2310 stops), got {ko3}"
+        );
+        let campbell = logical(document, "DEF_USE_Campbell_SOIL_MODEL")?;
+        Some(colm_core::OzoneParameters {
+            vegetation_type: 1,
+            evergreen: colm_case::pft::fixed_value("isevg", 1)? != 0.0,
+            leaf_longevity_years: colm_case::pft::default_value(
+                "DEF_PFT_LEAF_LONG",
+                1,
+                campbell,
+                false,
+            )?
+            .context("MOD_Const_PFT has no leaf_long")?,
+            stomatal_resistance_factor: ko3,
+            use_data: logical(document, "DEF_USE_OZONEDATA")?,
+        })
+    } else {
+        None
+    };
     let split_soil_snow = logical(document, "DEF_SPLIT_SOILSNOW")? && !urban_run;
     // `DEF_Interception_scheme`：`main/` 的 `LEAF_interception_wrap` 只接受 1（CoLM2014）
     // 与 8（CoLM2024，CoLM2014 外加按冠层结构算的雨容量），其余档位在非扩展构建里
@@ -151,6 +179,11 @@ pub fn land_physics_parameters(
             nostressnitrogen: logical(document, "DEF_USE_NOSTRESSNITROGEN")?,
             campbell: logical(document, "DEF_USE_Campbell_SOIL_MODEL")?,
             rstfac: scheme_index(document, "DEF_RSTFAC", 1, 2)?,
+            runoff_scheme: i32::try_from(integer(document, "DEF_Runoff_SCHEME")?)?,
+            // 单点构建把它强制为 0（`MOD_Namelist.F90:1901`），`assemble_bgc` 在单点里再置 0。
+            topmod_method: i32::try_from(integer(document, "DEF_TOPMOD_method")?)?,
+            variably_saturated: logical(document, "DEF_USE_VariablySaturatedFlow")?
+                || !logical(document, "DEF_USE_Campbell_SOIL_MODEL")?,
         };
         Some(switches)
     } else {
@@ -220,8 +253,8 @@ pub fn land_physics_parameters(
     // - 只影响前处理（colm-init / colm-srfdata 已实现）：`DEF_USE_BEDROCK`、`DEF_SOIL_REFL_SCHEME`、
     //   `DEF_USE_DOMINANT_PATCHTYPE`、`DEF_USE_SOILPAR_UPS_FIT`、`DEF_LANDONLY`；
     // - `DEF_TOPMOD_method`：TOPMODEL 只在 `DEF_Runoff_SCHEME == 0` 时调用，而单点构建在那时把它强制为 0
-    //   （`MOD_Namelist.F90:1794-1798`），与这里写死的 Exponential 一致。空间主循环接进来时要重新打开
-    //   method 1/2（`MOD_Runoff.F90:90-128,212-219`，含 `GRATIO`）。
+    //   （`MOD_Namelist.F90:1899-1904`），这里给 0；空间入口按 namelist 覆盖成 0/1/2
+    //   （`MOD_Runoff.F90:90-130,215-219`，方法 2 含 `GRATIO`），见 [`topmodel_method`]。
     let plant_hydraulic_overrides = PlantHydraulicOverrides {
         maximum_sunlit_leaf_conductance: land_cover_override(document, "DEF_LC_KMAX_SUN")?,
         maximum_shaded_leaf_conductance: land_cover_override(document, "DEF_LC_KMAX_SHA")?,
@@ -290,6 +323,7 @@ pub fn land_physics_parameters(
         plant_hydraulics,
         plant_hydraulic_parameters,
         plant_hydraulic_overrides,
+        ozone,
         vegetation_snow,
         split_soil_snow,
         colm2024_interception,
@@ -347,7 +381,19 @@ pub fn land_physics_parameters(
         sprinkler_irrigation_kg_m2_s: 0.0,
         runoff_scheme,
         topmodel_decay_tuning: real(document, "DEF_TUNING_TOPMOD_DECAY")?,
+        // 单点构建：`DEF_Runoff_SCHEME == 0` 时上游强制 `DEF_TOPMOD_method = 0`
+        // （`MOD_Namelist.F90:1899-1904`），其余产流方案不读它。空间入口再用 [`topmodel_method`] 覆盖。
+        topmodel_method: 0,
     })
+}
+
+/// 空间构建的 `DEF_TOPMOD_method`。上游只认 0/1/2：`SurfaceRunoff_TOPMOD` 把"不是 0/1"一律当方法 2，
+/// `SubsurfaceRunoff_TOPMOD` 却把"不是 1/2"当方法 0 —— 别的值两边不一致，这里拒绝。
+pub fn topmodel_method(document: &Document) -> Result<u8> {
+    match integer(document, "DEF_TOPMOD_method")? {
+        value @ 0..=2 => Ok(value as u8),
+        other => bail!("DEF_TOPMOD_method must be 0, 1 or 2, got {other}"),
+    }
 }
 
 /// 这个算例要、但**本仓库的运行时尚且没有实现**的分支。

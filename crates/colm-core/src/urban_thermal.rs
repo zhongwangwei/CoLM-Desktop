@@ -310,7 +310,8 @@ pub fn urban_thermal(
             // `:608` `.FMA (t_wallsun, fwsun, t_wallsha*dfwsun)/(fwsun+dfwsun)`
             *sun = sun.mul_add(fwsun, *sha * dfwsun) / total;
         }
-        *st.twsun_inner = fwsun.mul_add(*st.twsun_inner, dfwsun * *st.twsun_inner) / total;
+        // 与 `lwsun` 同形：阳面内墙温混入的是阴面内墙温（upstream-bugs 第 52 条，vendor 已修）。
+        *st.twsun_inner = fwsun.mul_add(*st.twsun_inner, dfwsun * *st.twsha_inner) / total;
         *st.lwsun = fwsun.mul_add(*st.lwsun, dfwsun * *st.lwsha) / total;
     }
     if dfwsun < 0.0 {
@@ -325,9 +326,8 @@ pub fn urban_thermal(
     }
     let fwsun = fwsun + dfwsun;
     *st.fwsun = fwsun;
-    // **不**重算 `fwsha`：上游 `:605` 只在更新 `fwsun` 之前算一次，之后全程
-    // （长波、墙体导热、`:1002` 的 `twall`）用的都是旧值 `fwsha_1091`，
-    // 所以更新后 `fwsun + fwsha ≠ 1`。
+    // 更新后重算 `fwsha`（upstream-bugs 第 20 条，vendor 已修）；之后只有 `:1002` 的 `twall` 用它。
+    let fwsha = 1.0 - fwsun;
 
     let twsun0 = st.t_wallsun[0];
     let twsha0 = st.t_wallsha[0];

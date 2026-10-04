@@ -14,6 +14,8 @@
 )]
 // `a >= lo .and. a <= hi`、`max(lo, min(hi, x))` 照抄：改成 `contains`/`clamp` 会改变 NaN 的行为。
 #![allow(clippy::manual_range_contains, clippy::manual_clamp)]
+// `x = x * y` 照上游一条赋值写（与 `*=` 舍入相同，保留以便对照）。
+#![allow(clippy::assign_op_pattern)]
 
 use crate::bgc_driver::{BgcPftConstants, BgcPhysics, BgcSwitches};
 use crate::bgc_state::BgcState;

@@ -4,6 +4,10 @@
 //! soil hydraulic upscaling routines.  It retains the original QR pivoting,
 //! damping, tolerances, and iteration bounds rather than changing scientific
 //! fit results through normal equations or finite-difference derivatives.
+//!
+//! 构建加了 `-fdefault-double-8`（upstream-bugs 第 17 条）后，`MOD_Utils` 里的 `0.1D+00`、
+//! `0.5D+00` 等字面量都是 real(8)，`lmder`/`lmpar`/`qrfac`/`qrsolv` 全程 double；这里
+//! 逐条照新的 GIMPLE（`.FMA`/`.FNMA` 才用 `mul_add`）。
 
 /// An analytic least-squares problem in MINPACK's `lmder` form.
 pub(crate) trait LeastSquaresProblem {
@@ -124,15 +128,19 @@ pub(crate) fn lmder(problem: &impl LeastSquaresProblem, x: &mut [f64], m: usize)
             }
             let temp1 = enorm(&wa3) / fnorm;
             let temp2 = par.sqrt() * pnorm / fnorm;
-            let prered = temp1.powi(2) + temp2.powi(2) / 0.5;
-            let dirder = -(temp1.powi(2) + temp2.powi(2));
+            // `:1636` `temp1**2 + temp2**2/0.5`：GIMPLE 为 `.FMA (temp2², 2.0, temp1²)`
+            let (temp1_sq, temp2_sq) = (temp1 * temp1, temp2 * temp2);
+            let prered = temp2_sq.mul_add(2.0, temp1_sq);
+            let dirder = -(temp1_sq + temp2_sq);
             let ratio = if prered != 0.0 { actred / prered } else { 0.0 };
 
             if ratio <= 0.25 {
                 let mut temp = if actred >= 0.0 {
                     0.5
                 } else {
-                    lm_step_shrink(dirder, actred)
+                    // `:1656` `0.5D0*dirder/(dirder + 0.5D0*actred)`：GIMPLE 为
+                    // `(dirder*0.5) / .FMS (actred, 0.5, temp1² + temp2²)`，后者恰为 `-dirder`
+                    (dirder * 0.5) / actred.mul_add(0.5, dirder)
                 };
                 if 0.1 * fnorm1 >= fnorm || temp < 0.1 {
                     temp = 0.1;
@@ -171,30 +179,6 @@ pub(crate) fn lmder(problem: &impl LeastSquaresProblem, x: &mut [f64], m: usize)
             }
         }
     }
-}
-
-fn lm_step_shrink(mut dirder: f64, mut actred: f64) -> f64 {
-    // For a rejected step, dirder <= 0 and actred < 0. The original D
-    // literals promote .5*d/(d+.5*a) to REAL16. Use d/(2*d+a), retaining
-    // the denominator's low part and the quotient residual in f64. Tiny
-    // ratios are subsequently clamped to 0.1 by lmder, as in the original.
-    // Exact power-of-two scaling keeps the compensated residual normal.
-    const SCALE: f64 = f64::from_bits((1023 + 512) << 52);
-    let largest = dirder.abs().max(actred.abs());
-    if largest > SCALE {
-        dirder /= SCALE;
-        actred /= SCALE;
-    } else if largest < 1.0 / SCALE {
-        dirder *= SCALE;
-        actred *= SCALE;
-    }
-    let twice = dirder * 2.0;
-    let denominator = twice + actred;
-    let virtual_a = denominator - twice;
-    let low = (twice - (denominator - virtual_a)) + (actred - virtual_a);
-    let q = dirder / denominator;
-    let residual = (-q).mul_add(denominator, dirder) - q * low;
-    q + residual / denominator
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -354,7 +338,8 @@ fn qrfac(a: &mut [f64], m: usize, n: usize) -> (Vec<usize>, Vec<f64>, Vec<f64>) 
                 }
                 if rdiag[column] != 0.0 {
                     let temp = a[j * n + column] / rdiag[column];
-                    rdiag[column] *= (1.0 - temp * temp).max(0.0).sqrt();
+                    // `:2249` `sqrt(max(0, 1 - temp**2))`：GIMPLE 为 `.FNMA (temp, temp, 1.0)`
+                    rdiag[column] *= (-temp).mul_add(temp, 1.0).max(0.0).sqrt();
                     if 0.05 * (rdiag[column] / wa[column]).powi(2) <= f64::EPSILON {
                         rdiag[column] = enorm_column(a, m, n, j + 1, column);
                         wa[column] = rdiag[column];
@@ -438,17 +423,9 @@ fn qrsolv(
 
 fn qrsolv_rotation_coefficient(t: f64) -> f64 {
     debug_assert!(t.is_finite() && t.abs() <= 1.0);
-    // Original 0.5D/sqrt(0.25D + 0.25D*t**2) rounds t*t in f64, then
-    // promotes sqrt/div to REAL16. Recover the low-part residual in f64
-    // instead of rounding 1+q and its reciprocal sqrt independently.
-    let q = t * t;
-    let u = 1.0 + q;
-    let low = q - (u - 1.0);
-    let y = 1.0 / u.sqrt();
-    let yy = y * y;
-    let yy_error = y.mul_add(y, -yy);
-    let residual = (-u).mul_add(yy, 1.0) - u * yy_error - low * yy;
-    (0.5 * y).mul_add(residual, y)
+    // `:2420/2424` `0.5D0/sqrt(0.25D0 + 0.25D0*t**2)`：GIMPLE 为
+    // `0.5 / sqrt(.FMA (t*t, 0.25, 0.25))`
+    0.5 / (t * t).mul_add(0.25, 0.25).sqrt()
 }
 
 fn enorm(values: &[f64]) -> f64 {
@@ -472,39 +449,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn rejected_step_shrink_matches_original_mixed_precision() {
-        // MOD_Utils::lmder evaluates .5D*d/(d+.5D*a) in REAL16. First
-        // four pairs are rejected steps from the original soil trajectories.
-        for (dirder, actred, expected) in [
-            (0xbf60988fda3e6a11, 0xbf73274f3cc3fd10, 0x3fcdb5ec8a80b114),
-            (0xbf2b68c51b146f1b, 0xbee140ca2335dc3f, 0x3fdf61f764480f30),
-            (0xbf87b1d699ddf93a, 0xbfb1f979a6099eb9, 0x3fbfba3df9bf4e1b),
-            (0xbf4a8416f2ae0619, 0xbf6140bf622c2420, 0x3fcbcf624c3a3828),
-            (0xffe0000000000000, 0xffe0000000000000, 0x3fd5555555555555),
-            (0x8000000000000001, 0x8000000000000002, 0x3fd0000000000000),
-            (0x8000000000000000, 0xbff0000000000000, 0x0000000000000000),
-        ] {
-            assert_eq!(
-                lm_step_shrink(f64::from_bits(dirder), f64::from_bits(actred)).to_bits(),
-                expected
-            );
-        }
-    }
-
-    #[test]
-    fn damped_qr_angle_matches_original_mixed_precision_rounding() {
-        // Independent original expression at -O2 -fdefault-real-8: t*t is
-        // rounded in f64 before the D literals promote sqrt/div to REAL16.
+    fn damped_qr_angle_matches_original_double_rounding() {
+        // `MOD_Utils.F90:2424` 原式单独编译（-O2 -fdefault-real-8 -fdefault-double-8），
+        // GIMPLE 与 MOD_Utils 相同：`0.5 / sqrt(.FMA (t*t, 0.25, 0.25))`。
         for (input, expected) in [
             (0x0000000000000000, 0x3ff0000000000000),
             (0x0000000000000001, 0x3ff0000000000000),
             (0x8000000000000000, 0x3ff0000000000000),
-            (0x3ff0000000000000, 0x3fe6a09e667f3bcd),
-            (0xbff0000000000000, 0x3fe6a09e667f3bcd),
+            (0x3ff0000000000000, 0x3fe6a09e667f3bcc),
+            (0xbff0000000000000, 0x3fe6a09e667f3bcc),
             (0x3fefffffffffffff, 0x3fe6a09e667f3bcd),
             (0x3fe8000000000000, 0x3fe999999999999a),
             (0x3fe0000000000000, 0x3fec9f25c5bfedd9),
-            (0x3fb999999999999a, 0x3fefd7583bc82e29),
+            (0x3fb999999999999a, 0x3fefd7583bc82e2a),
             (0x3e40000000000000, 0x3ff0000000000000),
             (0x3e3fffffffffffff, 0x3ff0000000000000),
             (0x1e60000000000000, 0x3ff0000000000000),
@@ -519,8 +476,8 @@ mod tests {
     #[test]
     fn damped_qr_rotations_retain_original_single_rounding() {
         // Original MOD_Utils::qrsolv linked unchanged at -O2 -fdefault-real-8.
-        // This fixture isolates fused rotation updates; it does not prove the
-        // remaining REAL16-literal rotation-angle expressions match in f64.
+        // This fixture isolates fused rotation updates. 加 -fdefault-double-8 后
+        // 结果不变；旋转角系数由上一个测试与 soil.rs 的端到端 lmder 比对覆盖。
         let mut r = [
             0xc0114057a409ce54,
             0xc004302890adc765,

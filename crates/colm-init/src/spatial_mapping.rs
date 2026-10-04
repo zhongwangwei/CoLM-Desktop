@@ -146,12 +146,17 @@ impl AreaWeightedMapping {
     /// 大圆距离反比（`arclen`）。`coordinates[iset]` 是 set 中心 `(rlon, rlat)`（弧度，即 `patchlonr/latr`）。
     ///
     /// 四份不合并：两侧取到同一个格心时（落在格心带之外、或只有一行/一列），它照样占两份、另一份权重为 0。
+    ///
+    /// 邻行/邻列不在 `DEF_domain` 的块覆盖里（`grid_set_blocks` 给的 `yblk/xblk = 0`，即
+    /// [`LatLonGrid::domain_window`] 之外）时，该方向退化成只用覆盖内那一侧（upstream-bugs 第 42 条：
+    /// 上游原来照取，`gblock%pio(xblk, 0)` 越界；vendor 已修）。
     pub fn build_bilinear(
         grid: &LatLonGrid,
         pixel: &PixelAxes,
         cells: &[Vec<(i32, i32)>],
         shared_fraction: &[f64],
         coordinates: &[(f64, f64)],
+        domain: crate::spatial_grid::GridBounds,
     ) -> Result<Self> {
         ensure!(
             cells.len() == shared_fraction.len() && cells.len() == coordinates.len(),
@@ -161,12 +166,21 @@ impl AreaWeightedMapping {
         let nlon = grid.nlon();
         ensure!(nlat > 0 && nlon > 0, "the forcing grid is empty");
         let degrees = |radians: f64| radians * 180.0 / std::f64::consts::PI;
+        let (rows, columns) = grid.domain_window(domain)?;
+        let mut row_covered = vec![false; nlat];
+        for row in rows {
+            row_covered[row] = true;
+        }
+        let mut column_covered = vec![false; nlon];
+        for column in columns {
+            column_covered[column] = true;
+        }
         let mut parts = Vec::with_capacity(cells.len());
         let mut area = Vec::with_capacity(cells.len());
         for ((set_cells, &shared), &(rlon, rlat)) in cells.iter().zip(shared_fraction).zip(coordinates)
         {
             // 南北：格心按纬度单调，找夹住 set 中心的两行。
-            let (yn, ys) = if grid.rlat[0] > grid.rlat[nlat - 1] {
+            let (mut yn, mut ys) = if grid.rlat[0] > grid.rlat[nlat - 1] {
                 let mut ilat = 0;
                 while rlat < grid.rlat[ilat] && ilat < nlat - 1 {
                     ilat += 1;
@@ -187,6 +201,12 @@ impl AreaWeightedMapping {
                     (0, 0)
                 }
             };
+            if !row_covered[yn] {
+                yn = ys;
+            }
+            if !row_covered[ys] {
+                ys = yn;
+            }
             let (nwgt, swgt) = if yn != ys {
                 let distn = arclen(rlat, rlon, grid.rlat[yn], rlon);
                 let dists = arclen(rlat, rlon, grid.rlat[ys], rlon);
@@ -228,6 +248,12 @@ impl AreaWeightedMapping {
                 } else {
                     (xw, xe) = (iwest, iwest);
                 }
+            }
+            if !column_covered[xw] {
+                xw = xe;
+            }
+            if !column_covered[xe] {
+                xe = xw;
             }
             let (wwgt, ewgt) = if xw != xe {
                 let distw = arclen(rlat, rlon, rlat, grid.rlon[xw]);
@@ -329,11 +355,29 @@ mod spatial_mapping_tests;
 /// `arclen`（`MOD_Utils.F90:1077-1092`，km）：GIMPLE 是
 /// `tmp = .FMA (sin lat1, sin lat2, (cos lat1 * cos lat2) * cos (lon1 - lon2))`，再
 /// `MIN_EXPR (MAX_EXPR (tmp, -1), 1)`（不换成 `clamp`：两者对 NaN 的处理不同）。
+///
+/// 同参的 `sin`/`cos` 在 gfortran 里是 `__builtin_cexpi`，macOS 上落到 `cexp(i·x)`，与独立的
+/// `sin()`/`cos()` 逐位相同；Rust 的 `sin_cos()`（或相邻的 `sin`/`cos`）在 release 下会被 LLVM
+/// 并成 `__sincos_stret`，其 sin 对约 1% 的输入差 1 ULP。两点同纬（东西向距离）时 `tmp` 贴近 1，
+/// `acos` 把这 1 ULP 放大到距离的 ~1e-12 相对量级，双线性权重随之错位（g1fbil 边缘几格的末位差）。
+/// 所以走下面两个不内联的 `sin`/`cos`。
 #[allow(clippy::manual_clamp)]
 fn arclen(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
-    let (s1, c1) = lat1.sin_cos();
-    let (s2, c2) = lat2.sin_cos();
+    let (s1, c1) = (libm_sin(lat1), libm_cos(lat1));
+    let (s2, c2) = (libm_sin(lat2), libm_cos(lat2));
     let tmp = s1.mul_add(s2, c1 * c2 * (lon1 - lon2).cos());
     let tmp = tmp.max(-1.0).min(1.0);
     6.37122e3 * tmp.acos()
+}
+
+/// 不内联的 libm `sin`：阻止 LLVM 与同参 `cos` 合并成 `__sincos_stret`（见 [`arclen`]）。
+#[inline(never)]
+fn libm_sin(value: f64) -> f64 {
+    value.sin()
+}
+
+/// 不内联的 libm `cos`（见 [`libm_sin`]）。
+#[inline(never)]
+fn libm_cos(value: f64) -> f64 {
+    value.cos()
 }

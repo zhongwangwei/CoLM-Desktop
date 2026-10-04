@@ -113,6 +113,8 @@ fn an_empty_case_maps_every_declared_default() {
     // 默认 3 是 Simple VIC（不是 XinAnJiang）。
     assert_eq!(physics.runoff_scheme, StandardLctRunoffScheme::SimpleVic);
     assert_eq!(physics.topmodel_decay_tuning, 2.0);
+    // 单点构建强制 `DEF_TOPMOD_method = 0`；空间入口再用 `topmodel_method` 覆盖。
+    assert_eq!(physics.topmodel_method, 0);
     // 观测高度来自传进来的 `ObservationHeights`（真实算例里由三级优先级解出），
     // 不是本函数从 case 文档里读的 —— case 文档里根本没有 `DEF_forcing%HEIGHT_*`，
     // 照读只会拿到 schema 的 100/50/50，实测那会让 `zol` 差几十倍。
@@ -554,4 +556,15 @@ fn bgc_switches_follow_the_namelist_and_unverified_branches_are_refused() {
 
     let off = land_physics_parameters(&case_with(""), LandCoverScheme::Igbp, HEIGHTS).unwrap();
     assert!(off.bgc.is_none());
+}
+
+#[test]
+fn single_point_forces_topmodel_method_zero_and_spatial_reads_it() {
+    let case = case_with("DEF_Runoff_SCHEME = 0\nDEF_TOPMOD_method = 2");
+    let physics = land_physics_parameters(&case, LandCoverScheme::Igbp, HEIGHTS).unwrap();
+    assert_eq!(physics.topmodel_method, 0);
+    assert_eq!(topmodel_method(&case).unwrap(), 2);
+    assert_eq!(topmodel_method(&empty_case()).unwrap(), 0);
+    let error = topmodel_method(&case_with("DEF_TOPMOD_method = 3")).unwrap_err();
+    assert!(error.to_string().contains("0, 1 or 2"), "{error}");
 }

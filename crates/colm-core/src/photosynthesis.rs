@@ -20,6 +20,8 @@ pub struct LeafBiochemistry {
     pub maximum_carboxylation_25c_mol_m2_s: f64,
     /// One for C3 and zero for C4, matching CoLM's `c3c4` flag.
     pub c3c4: i32,
+    /// 单点 LCT 的 `DEF_LC_RESPCP`：设了就取代 `0.015*c3 + 0.025*c4`（upstream-bugs 第 32 条，vendor 已修）。
+    pub respiration_fraction_override: Option<f64>,
     pub low_temperature_slope: f64,
     pub low_temperature_half_k: f64,
     pub high_temperature_slope: f64,
@@ -175,7 +177,9 @@ pub fn photosynthesis_parameters(
     jmax = jmax * input.soil_water_stress * input.canopy_integration[1];
     let electron_transport =
         (f77(4.6e-6) * input.absorbed_par_w_m2 * b.quantum_efficiency).min(jmax);
-    let respiration_fraction = f77(0.015) * c3_fraction + f77(0.025) * c4_fraction;
+    let respiration_fraction = b
+        .respiration_fraction_override
+        .unwrap_or(f77(0.015) * c3_fraction + f77(0.025) * c4_fraction);
     let respiration = respiration_fraction
         * b.maximum_carboxylation_25c_mol_m2_s
         * f77(2.0).lpow(temperature_factor)

@@ -234,6 +234,7 @@ pub(crate) fn write_spatial_lct_constant_restart_with_canopy(
         config.land_cover_year,
         config.block_label,
         patch_count,
+        config.hydraulic_model == HydraulicModel::VanGenuchten,
     )?;
     let soil = derive_spatial_soil_parameters(
         &source_soil,
@@ -591,9 +592,10 @@ fn read_topmodel(
 }
 
 pub(crate) fn topmodel_defaults(patches: usize) -> TopmodelSurfaceFields {
-    // `DEF_TOPMOD_method == 0`（`MOD_Initialize.F90:515-524`）只赋 `fsatmax = 0.38`、`fsatdcf = 0.125`；
-    // `topoweti`/`alp_twi`/`chi_twi`/`mu_twi` 只在方法 1、2 读文件，这里上游**不赋值**就写进常数重启
-    // （upstream-bugs 第 31 条）。纯 Fortran 单点实测写出的是 0，照写 0；这四个量在方法 0 下不参与计算。
+    // `MOD_Initialize.F90` 对所有方法先赋 `fsatmax = 0.38`、`fsatdcf = 0.125`，方法 1 再读文件覆盖
+    // （upstream-bugs 第 59 条，vendor 已修；原来方法 2 不赋值就写进常数重启）；
+    // `topoweti`/`alp_twi`/`chi_twi`/`mu_twi` 先统一置 0，再由方法 1、2 读文件覆盖（upstream-bugs
+    // 第 31 条，vendor 已修；原来不赋值就写进常数重启）。方法 0 下它们不参与计算。
     TopmodelSurfaceFields {
         topographic_index: vec![0.0; patches],
         saturated_fraction_max: vec![0.38; patches],
@@ -885,7 +887,10 @@ pub(crate) fn read_soil(
     year: i32,
     block: &str,
     patches: usize,
+    van_genuchten: bool,
 ) -> Result<Vec<SoilLayerInput>> {
+    // Campbell 下 mksrfdata 不写 VG 专用的四个量，上游也不读（常数重启里 `theta_r = 0`、其余不写）。
+    const VAN_GENUCHTEN_ONLY: [&str; 4] = ["theta_r", "alpha_vgm", "L_vgm", "n_vgm"];
     const FIELDS: [&str; 26] = [
         "vf_quartz_mineral_s",
         "vf_gravels_s",
@@ -918,6 +923,10 @@ pub(crate) fn read_soil(
     for field in FIELDS {
         let mut layers = Vec::with_capacity(8);
         for layer in 1..=8 {
+            if !van_genuchten && VAN_GENUCHTEN_ONLY.contains(&field) {
+                layers.push(vec![0.0; patches]);
+                continue;
+            }
             let name = format!("{field}_l{layer}_patches");
             layers.push(read_f64(
                 landdata, "soil", &name, &name, year, block, patches,

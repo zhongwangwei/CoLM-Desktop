@@ -1258,7 +1258,7 @@ pub fn default_value(name: &str, pft_type: u8, campbell: bool, pc: bool) -> Resu
 /// （`woody`、`isevg`…，逻辑值读成 1/0）与 `dsladlai`/`allconsl` 等。
 pub const FIXED_PARAMETERS: &[&str] = &[
     "woody", "isevg", "issed", "isstd", "isbare", "iscrop", "isnatveg", "isshrub", "isgrass",
-    "isbetr", "isbdtr", "dsladlai", "declfact", "allconsl",
+    "isbetr", "isbdtr", "dsladlai", "declfact", "allconsl", "rswf_min", "rswf_max",
 ];
 
 /// 某个写死的 PFT 参数在 `pft_type`（0..=78）上的取值。

@@ -67,6 +67,9 @@ pub struct SpatialLctTimeConfig<'a> {
     pub observations: SpatialObservedInitialization<'a>,
     /// Immutable SNICAR tables resolved before writing any block outputs.
     pub snicar: Option<&'a crate::SnicarInitialization>,
+    /// CROP 内核：`CROP_readin` 得到的作物冷启动状态；`DEF_USE_IRRIGATION` 时它带灌溉量，
+    /// 写进公共时间重启（`MOD_Vars_TimeVariables` 的 `#ifdef CROP` 段）。
+    pub crop: Option<&'a crate::CropColdStartState>,
 }
 
 impl<'a> SpatialLctTimeConfig<'a> {
@@ -104,6 +107,7 @@ impl<'a> SpatialLctTimeConfig<'a> {
             tuning: RestartTuning::default(),
             observations: SpatialObservedInitialization::default(),
             snicar: None,
+            crop: None,
         }
     }
 }
@@ -196,6 +200,7 @@ pub(crate) fn write_spatial_lct_cold_time_restart_with_urban(
             config.land_cover_year,
             config.block_label,
             count,
+            config.hydraulic_model == HydraulicModel::VanGenuchten,
         )?,
         &patches.class,
         &kind,
@@ -600,6 +605,19 @@ pub(crate) fn write_spatial_lct_cold_time_restart_with_urban(
         .map(|(&value, &depth)| if value == 4 { depth * 1000.0 } else { 0.0 })
         .collect::<Vec<_>>();
 
+    // `zwt_stand = min(80, max(0, zwt + 1))`（`MOD_Initialize.F90`）在这一行时 `zwt` 只有读了初始土壤才有值，
+    // 否则还是分配时的 `spval`，夹出来是 0（与单点相同；g1irr 纯 Fortran 实测全为 0）。
+    let standard_water_table_depth = if config.observations.soil.is_some() {
+        water_table
+            .iter()
+            .map(|zwt| (zwt + 1.0).clamp(0.0, 80.0))
+            .collect::<Vec<_>>()
+    } else {
+        vec![0.0; water_table.len()]
+    };
+    let irrigation_fields = config
+        .crop
+        .and_then(|crop| crop.irrigation_fields(&standard_water_table_depth));
     let common = write_time_restart(
         config.restart_dir,
         config.case_name,
@@ -692,6 +710,8 @@ pub(crate) fn write_spatial_lct_cold_time_restart_with_urban(
                 shaded_stomatal_conductance: &conductance,
                 vegetation_nodes: 4,
             }),
+            // `o3uptakesun/sha = 0`：上游原来从不赋值、重启里是 `spval`（upstream-bugs 第 69 条，vendor 已在
+            // `MOD_Initialize.F90` 对所有配置补上）。
             ozone: config.ozone_stress.then_some(OzoneFields {
                 lai_old: &lai_now,
                 sunlit_uptake: &zero,
@@ -701,7 +721,7 @@ pub(crate) fn write_spatial_lct_cold_time_restart_with_urban(
                 sunlit_ground_coefficient: &one,
                 shaded_ground_coefficient: &one,
             }),
-            irrigation: None,
+            irrigation: irrigation_fields,
         },
     )?;
     let urban = if urban_count == 0 {

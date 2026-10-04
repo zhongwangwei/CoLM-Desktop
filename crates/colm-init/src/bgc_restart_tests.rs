@@ -89,7 +89,8 @@ fn cold_start_bgc_constants_match_fortran_schema_values_and_layout() {
             .unwrap()
             .get_value::<f64, _>(())
             .unwrap(),
-        40.0 / std::f64::consts::PI
+        // 度（upstream-bugs 第 63 条：原来被旧行覆盖成 `40/(4*atan(1))`）
+        60.0
     );
 
     assert_deflate(&files.block, "rf_decomp", 1);

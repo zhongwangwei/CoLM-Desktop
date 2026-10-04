@@ -79,6 +79,7 @@ fn water_2014_soil_calls_the_shared_runoff_richards_and_groundwater_kernels() {
         decay_tuning: 0.1,
         water_table_depth_m: 1.0,
         water_input_mm_s: 8.0e-5,
+        method: TopmodelMethod::Exponential,
     })
     .unwrap();
     assert_eq!(output.water_input_mm_s, 8.0e-5);
@@ -402,4 +403,114 @@ fn split_soil_snow_gives_the_uncovered_rain_and_soil_face_fluxes_to_the_soil() {
             .abs()
             < 1.0e-12
     );
+}
+
+/// 一组可用的方法 2 参数（vendor `READ_TimeInvariants` 的缺省值）。
+const GAMMA: TopmodelMethod = TopmodelMethod::Gamma {
+    mean_topographic_index: 9.27,
+    alpha: 1.34,
+    chi: 1.61,
+    mu: 6.95,
+};
+
+fn with_topmodel_method(
+    mut input: Water2014SoilInput<'static>,
+    method: TopmodelMethod,
+) -> Water2014SoilInput<'static> {
+    let Water2014Runoff::Topmodel {
+        ref mut subsurface_method,
+        ..
+    } = input.runoff
+    else {
+        unreachable!()
+    };
+    *subsurface_method = method;
+    input
+}
+
+#[test]
+fn water_2014_runs_topmodel_methods_one_and_two() {
+    // upstream-bugs 第 56、57 条（vendor 已修）：`WATER_2014` 把 TWI 量传给 `SurfaceRunoff_TOPMOD`，
+    // `groundwater` 把 `hksati, topoweti, eta_topmod` 转给 `SubsurfaceRunoff_TOPMOD`。
+    let run = |input: Water2014SoilInput<'static>| {
+        let mut state = state();
+        water_2014_soil_step(input, &mut state).unwrap()
+    };
+    let zero = run(input());
+    let one = run(with_topmodel_method(
+        input(),
+        TopmodelMethod::Hydraulic {
+            mean_topographic_index: 5.0,
+        },
+    ));
+    // 方法 1：饱和面积与方法 0 同式，地表径流逐位相同；基流换成导水率那条式子。
+    assert_eq!(one.surface_runoff_mm_s, zero.surface_runoff_mm_s);
+    assert_ne!(one.total_runoff_mm_s, zero.total_runoff_mm_s);
+    // 方法 2：地表径流就是伽马分布那条迭代给的值（`gwat > 0`，水位用步初的 1.0 m）。
+    let two = run(with_topmodel_method(input(), GAMMA));
+    let expected = topmodel_surface_runoff(crate::TopmodelSurfaceInput {
+        impermeable_porosity: 0.05,
+        saturated_hydraulic_conductivity_mm_s: &[0.01, 0.01, 0.01],
+        effective_porosity: &[0.45, 0.45, 0.45],
+        ice_fraction: &[0.0, 0.0, 0.0],
+        saturated_fraction_max: 0.5,
+        saturated_fraction_decay_m_inv: 0.5,
+        decay_tuning: 0.1,
+        water_table_depth_m: 1.0,
+        water_input_mm_s: two.water_input_mm_s,
+        method: GAMMA,
+    })
+    .unwrap();
+    assert!(two.water_input_mm_s > 0.0);
+    assert_eq!(two.surface_runoff_mm_s, expected.surface_runoff_mm_s);
+    assert_ne!(two.total_runoff_mm_s, zero.total_runoff_mm_s);
+    // `gwat <= 0` 时地表径流为 0，但 `eta` 照样由伽马迭代给出（upstream-bugs 第 60 条：原来跳过，
+    // `eta` 停在 0，基流按 `exp(-0)` 大三四个量级）：基流与有雨那一步同一量级。
+    let mut dry = with_topmodel_method(input(), GAMMA);
+    dry.fluxes.ground_rain_kg_m2_s = 0.0;
+    let dry = run(dry);
+    assert!(dry.water_input_mm_s <= 0.0);
+    assert_eq!(dry.surface_runoff_mm_s, 0.0);
+    assert!(
+        dry.subsurface_runoff_mm_s < 10.0 * two.subsurface_runoff_mm_s,
+        "{} vs {}",
+        dry.subsurface_runoff_mm_s,
+        two.subsurface_runoff_mm_s
+    );
+}
+
+#[test]
+fn vsf_topmodel_method_two_uses_the_gamma_saturated_fraction() {
+    // `WATER_VSF` 带齐可选参数：方法 2 的 `frcsat` 就是伽马分布那条迭代的 `fsat`，
+    // 地下径流用同一个 `eta`，所以总径流与方法 0 不同。
+    let vsf = |method| {
+        let mut input = with_topmodel_method(input(), method);
+        input.variably_saturated = true;
+        input.hydraulic_model = &[
+            SoilHydraulicModel::Campbell { bsw: 4.0 },
+            SoilHydraulicModel::Campbell { bsw: 4.0 },
+            SoilHydraulicModel::Campbell { bsw: 4.0 },
+        ];
+        let mut state = state();
+        water_2014_soil_step(input, &mut state).unwrap()
+    };
+    let gamma = vsf(GAMMA);
+    let expected = topmodel_surface_runoff(crate::TopmodelSurfaceInput {
+        impermeable_porosity: 0.05,
+        saturated_hydraulic_conductivity_mm_s: &[0.01, 0.01, 0.01],
+        effective_porosity: &[0.45, 0.45, 0.45],
+        ice_fraction: &[0.0, 0.0, 0.0],
+        saturated_fraction_max: 0.5,
+        saturated_fraction_decay_m_inv: 0.5,
+        decay_tuning: 0.1,
+        water_table_depth_m: 1.0,
+        water_input_mm_s: gamma.water_input_mm_s,
+        method: GAMMA,
+    })
+    .unwrap();
+    assert_eq!(gamma.saturated_fraction, expected.saturated_fraction);
+    assert!(expected.critical_topographic_index.is_some());
+    let exponential = vsf(TopmodelMethod::Exponential);
+    assert_ne!(gamma.saturated_fraction, exponential.saturated_fraction);
+    assert_ne!(gamma.total_runoff_mm_s, exponential.total_runoff_mm_s);
 }

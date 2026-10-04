@@ -14,6 +14,8 @@
 )]
 // `a >= lo .and. a <= hi`、`max(lo, min(hi, x))` 照抄：改成 `contains`/`clamp` 会改变 NaN 的行为。
 #![allow(clippy::manual_range_contains, clippy::manual_clamp)]
+// `x = x * y` 照上游一条赋值写（与 `*=` 舍入相同，保留以便对照）。
+#![allow(clippy::assign_op_pattern)]
 
 use crate::bgc_driver::{is_end_of_year, BgcPftConstants, BgcPhysics, BgcSwitches, NPCROPMIN};
 use crate::bgc_state::BgcState;
@@ -27,7 +29,7 @@ pub fn cn_phenology(
     c: &BgcPftConstants,
     sw: BgcSwitches,
     phase: i32,
-) {
+) -> anyhow::Result<()> {
     let dayspyr: f64;
     let h: i32;
     if is_leap_year(p.idate[0]) {
@@ -36,7 +38,7 @@ pub fn cn_phenology(
         dayspyr = 365.0;
     }
     if phase == 1 {
-        cn_phenology_climate(s, p, c, sw, dayspyr);
+        cn_phenology_climate(s, p, c, sw, dayspyr)?;
         cn_evergreen_phenology(s, p, c, sw, dayspyr);
         cn_season_decid_phenology(s, p, c, sw, dayspyr);
         cn_stress_decid_phenology(s, p, c, sw, dayspyr);
@@ -57,6 +59,7 @@ pub fn cn_phenology(
     } else {
         // write(*,*) 'bad phenology phase'
     }
+    Ok(())
 }
 
 /// 气候统计（积温、降水滑动平均）。
@@ -66,7 +69,7 @@ fn cn_phenology_climate(
     c: &BgcPftConstants,
     sw: BgcSwitches,
     dayspyr: f64,
-) {
+) -> anyhow::Result<()> {
     let npft = p.pftclass.len();
     let yravg: f64 = 20.0;
     let yravgm1: f64 = yravg - 1.0;
@@ -95,8 +98,14 @@ fn cn_phenology_climate(
     }
     s.patch.accumnstep[0] += 1.0;
     s.patch.prec_today[0] = p.forc_prc[0] + p.forc_prl[0];
+    let sat = crate::atmosphere::saturation_specific_humidity(p.forc_t[0], p.forc_psrf[0])?;
+    let qsat: f64 = sat.specific_humidity;
+    s.patch.rh30_today[0] = 100.0 * (p.forc_q[0] / qsat);
     nsteps = (10.0 * stepperday).min(s.patch.accumnstep[0]);
     s.patch.prec10[0] = (s.patch.prec10[0].mul_add(nsteps - 1.0, s.patch.prec_today[0])) / nsteps;
+    nsteps = (30.0 * stepperday).min(s.patch.accumnstep[0]);
+    s.patch.prec30[0] = (s.patch.prec30[0].mul_add(nsteps - 1.0, s.patch.prec_today[0])) / nsteps;
+    s.patch.rh30[0] = (s.patch.rh30[0].mul_add(nsteps - 1.0, s.patch.rh30_today[0])) / nsteps;
     nsteps = (60.0 * stepperday).min(s.patch.accumnstep[0]);
     s.patch.prec60[0] = (s.patch.prec60[0].mul_add(nsteps - 1.0, s.patch.prec_today[0])) / nsteps;
     nsteps = (365.0 * stepperday).min(s.patch.accumnstep[0]);
@@ -156,6 +165,7 @@ fn cn_phenology_climate(
             s.pft.nyrs_crop_active_p[m] += 1;
         }
     }
+    Ok(())
 }
 
 /// 常绿物候。
@@ -544,7 +554,7 @@ fn cn_stress_decid_phenology(
             s.pft.lgsf_p[m] = (3.0 * (s.pft.days_active_p[m] - (c.leaf_long[class] * dayspyr))
                 / dayspyr)
                 .min(1.0)
-                .max(0.0); // 无 FMA（上游第 933 行，乘积被 CSE 共享）
+                .max(0.0); // 无 FMA（上游第 942 行，乘积被 CSE 共享）
             if s.pft.offset_flag_p[m] == 1.0 {
                 s.pft.bglfr_p[m] = 0.0;
             } else {

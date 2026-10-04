@@ -68,6 +68,8 @@ pub fn bgc_time_restart_input(
             precipitation_60_day: &state.climate.precipitation_60_day,
             precipitation_365_day: &state.climate.precipitation_365_day,
             precipitation_today: &state.climate.precipitation_today,
+            precipitation_30_day: &state.climate.precipitation_30_day,
+            relative_humidity_today: &state.climate.relative_humidity_today,
             precipitation_daily: &state.climate.precipitation_daily,
             soil_temperature_17: &state.climate.soil_temperature_17,
             relative_humidity_30_day: &state.climate.relative_humidity_30_day,

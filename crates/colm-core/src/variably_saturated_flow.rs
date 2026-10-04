@@ -4450,6 +4450,7 @@ pub fn variably_saturated_flow_step(
                     decay_tuning,
                     water_table_depth_m: state.water_table_depth_m,
                     water_input_mm_s: input.ground_water_flux_mm_s,
+                    method: subsurface_method,
                 })?;
                 surface_runoff_mm_s = surface.surface_runoff_mm_s;
                 saturation_excess_runoff_mm_s = surface.saturation_excess_runoff_mm_s;
@@ -4464,6 +4465,9 @@ pub fn variably_saturated_flow_step(
                         .saturated_hydraulic_conductivity_mm_s,
                     decay_tuning,
                     water_table_depth_m: state.water_table_depth_m,
+                    // `WATER_VSF` 带齐 `hksati, topoweti, eta`（`MOD_SoilSnowHydrology.F90:979-980`），
+                    // 方法 2 用 `SurfaceRunoff_TOPMOD` 刚带出的 `eta`。
+                    critical_topographic_index: surface.critical_topographic_index,
                 })?;
             }
             Water2014Runoff::XinAnJiang {
@@ -4501,7 +4505,7 @@ pub fn variably_saturated_flow_step(
                 saturation_excess_runoff_mm_s = runoff.surface_runoff_mm_s;
             }
             Water2014Runoff::Vic { .. } => {
-                let (surface, subsurface) = crate::water_2014::vic_runoff_for(
+                let (surface, subsurface, vic_saturated) = crate::water_2014::vic_runoff_for(
                     input.runoff,
                     crate::water_2014::VicColumn {
                         time_step_seconds: dt,
@@ -4521,8 +4525,8 @@ pub fn variably_saturated_flow_step(
                 surface_runoff_mm_s = surface;
                 subsurface_runoff_mm_s = subsurface;
                 saturation_excess_runoff_mm_s = surface;
-                // `frcsat` 上游不赋值（`intent(out)` 未写），history 留 spval。
-                saturated_fraction = f64::NAN;
+                // `Runoff_VIC` 带出 `cell%asat`（upstream-bugs 第 16 条，vendor 已修）。
+                saturated_fraction = vic_saturated;
             }
         }
         subsurface_runoff_mm_s *= input.baseflow_scale;
@@ -4563,11 +4567,14 @@ pub fn variably_saturated_flow_step(
             let Water2014Runoff::Topmodel {
                 saturated_fraction_decay_m_inv,
                 decay_tuning,
+                subsurface_method,
                 ..
             } = input.runoff
             else {
                 bail!("grid flood feedback forces DEF_Runoff_SCHEME = 0 (TOPMODEL)");
             };
+            // 这次调用（`:1090-1093`）带四个 TWI 量、不带 `eta_out`（upstream-bugs 第 56 条，
+            // vendor 已修）：方法 2 走伽马分布（`fsatmax = 1.0` 只对方法 0/1 起作用）。
             rsur_fld = topmodel_surface_runoff(TopmodelSurfaceInput {
                 impermeable_porosity: input.impermeable_porosity,
                 saturated_hydraulic_conductivity_mm_s: input.saturated_hydraulic_conductivity_mm_s,
@@ -4578,6 +4585,7 @@ pub fn variably_saturated_flow_step(
                 decay_tuning,
                 water_table_depth_m: state.water_table_depth_m,
                 water_input_mm_s: gfld,
+                method: subsurface_method,
             })?
             .surface_runoff_mm_s;
             sub = gfld.min((gfld - rsur_fld).max(0.0));
@@ -4888,8 +4896,8 @@ pub fn variably_saturated_flow_step(
             state.surface_water_mm = input.wetland_water_capacity_mm;
         }
         surface_runoff_mm_s = saturation_excess_runoff_mm_s;
-        // 产流方案没跑，`frcsat` 是 `intent(out)` 未赋值：历史留填充值（同 VIC 那一支）。
-        saturated_fraction = f64::NAN;
+        // 湿地视为全饱和，与非动态湿地那一支相同（upstream-bugs 第 16 条，vendor 已修）。
+        saturated_fraction = 1.0;
         surface_runoff_mm_s
     } else {
         // 干湖（`:1393-1395`）：不产流，`rnof = 0`；`frcsat` 由 `CoLMMAIN.F90:1228` 置 `spval`。

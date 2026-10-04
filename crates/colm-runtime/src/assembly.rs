@@ -120,6 +120,10 @@ pub struct LandPhysicsParameters {
     /// 地类号一起用；地类号来自重启（`patchclass`），装配期才知道，
     /// 于是这一项只能在这里传递、不能在这里求值。
     pub plant_hydraulic_overrides: colm_core::PlantHydraulicOverrides,
+    /// `DEF_USE_OZONESTRESS`（城市模型下上游强制关掉）：LCT patch 的 `CalcOzoneStress` 参数
+    /// （`ivt = 1`，见 [`colm_core::OzoneParameters::vegetation_type`]）。PFT/PC 的逐 PFT 参数由
+    /// [`colm_core::PftParameters`] 换掉类别那三项。关掉时为 `None`。
+    pub ozone: Option<colm_core::OzoneParameters>,
     /// `DEF_VEG_SNOW`：植被上的雪（冠层雪的湿比例、冠层水的雪/雨分配）。
     ///
     /// **默认也是 `.true.`**（`MOD_Namelist.F90:314`）。打开时上游走
@@ -198,6 +202,10 @@ pub struct LandPhysicsParameters {
     pub runoff_scheme: StandardLctRunoffScheme,
     /// TOPMODEL 的 `DECAY_TUNING`；其余分支忽略。
     pub topmodel_decay_tuning: f64,
+    /// `DEF_TOPMOD_method`（0/1/2）。单点构建在 `DEF_Runoff_SCHEME == 0` 时把它强制为 0
+    /// （`MOD_Namelist.F90:1899-1904`），所以 [`crate::physics::land_physics_parameters`] 给 0；
+    /// 空间入口按 namelist 覆盖（[`crate::physics::topmodel_method`]）。
+    pub topmodel_method: u8,
 }
 
 /// `DEF_Runoff_SCHEME` 的三个本分支可用取值。
@@ -294,6 +302,47 @@ struct RestartColumns {
     thermal_gap_fraction: Vec<f64>,
     direct_extinction: Vec<f64>,
     diffuse_extinction: Vec<f64>,
+    /// `DEF_USE_OZONESTRESS`：[`OZONE_RESTART_FIELDS`] 七个整变量（`(patch)`），续跑写回本 patch 那一格。
+    ozone: Option<Vec<Vec<f64>>>,
+}
+
+/// `MOD_Vars_TimeVariables` 的臭氧时间变量，写读次序同上游（`:1179-1186`、`:1427-1434`）。
+pub const OZONE_RESTART_FIELDS: [&str; 7] = [
+    "lai_old",
+    "o3uptakesun",
+    "o3uptakesha",
+    "o3coefv_sun",
+    "o3coefv_sha",
+    "o3coefg_sun",
+    "o3coefg_sha",
+];
+
+/// 七个臭氧时间变量按 [`OZONE_RESTART_FIELDS`] 的次序装成状态；`forc_ozone` 不在重启里，先放
+/// `spval`（有臭氧数据时由 `init_ozone_data` 的那一档覆盖）。
+pub fn ozone_state_from_fields(values: [f64; 7]) -> colm_core::OzoneState {
+    colm_core::OzoneState {
+        previous_leaf_area_index: values[0],
+        sunlit_uptake_mmol_m2: values[1],
+        shaded_uptake_mmol_m2: values[2],
+        sunlit_photosynthesis_factor: values[3],
+        shaded_photosynthesis_factor: values[4],
+        sunlit_conductance_factor: values[5],
+        shaded_conductance_factor: values[6],
+        concentration_ppbv: colm_core::MISSING,
+    }
+}
+
+/// [`ozone_state_from_fields`] 的反向：按 [`OZONE_RESTART_FIELDS`] 的次序。
+pub fn ozone_state_fields(state: &colm_core::OzoneState) -> [f64; 7] {
+    [
+        state.previous_leaf_area_index,
+        state.sunlit_uptake_mmol_m2,
+        state.shaded_uptake_mmol_m2,
+        state.sunlit_photosynthesis_factor,
+        state.shaded_photosynthesis_factor,
+        state.sunlit_conductance_factor,
+        state.shaded_conductance_factor,
+    ]
 }
 
 /// 续跑写出要用、但**状态里没有**的最后一步输出。
@@ -956,6 +1005,8 @@ pub struct StandardLctRestartTemplate {
     /// `rsubst`/`rsub` 上（`WATER_VSF`/`WATER_2014`）。装配期默认 1.0，
     /// 由 `colm-rs` 用 [`Self::with_baseflow_scale`] 覆盖成文件里的值。
     pub baseflow_scale: f64,
+    /// `DEF_USE_OZONEDATA`：本 patch 的 3 小时臭氧数据源（colm-rs 挂上）；没有时 `forc_ozone` 不变。
+    pub ozone_source: Option<std::sync::Arc<crate::ozone::OzoneSource>>,
     /// 逐波段辐射量的整变量缓冲，同上。
     radiation_fields: RadiationFields,
     /// 湖 patch 的湖层、`savedtke1`、`t_grnd` 与时不变量；其余 patch 为 `None`。
@@ -1204,6 +1255,20 @@ fn assemble(
         thermal_gap_fraction: time.floats("thermk")?.to_vec(),
         direct_extinction: time.floats("extkb")?.to_vec(),
         diffuse_extinction: time.floats("extkd")?.to_vec(),
+        // `READ_TimeVariables` 在 `DEF_USE_OZONESTRESS` 下读这七个，**没有 `defval`**：缺了就停。
+        ozone: match physics.ozone {
+            Some(_) => Some(
+                OZONE_RESTART_FIELDS
+                    .iter()
+                    .map(|name| {
+                        time.floats(name).map(<[f64]>::to_vec).with_context(|| {
+                            format!("DEF_USE_OZONESTRESS needs {name} in the time restart")
+                        })
+                    })
+                    .collect::<Result<Vec<_>>>()?,
+            ),
+            None => None,
+        },
     };
     let surface_diagnostics = SurfaceDiagnostics::read(&time)?;
     let radiation_fields = RadiationFields::read(&time)?;
@@ -1282,6 +1347,17 @@ fn assemble(
             })
         } else {
             None
+        },
+        ozone: match physics.ozone {
+            Some(_) => Some(ozone_state_from_fields(
+                OZONE_RESTART_FIELDS
+                    .map(|name| scalar(&time, name, patch))
+                    .into_iter()
+                    .collect::<Result<Vec<_>>>()?
+                    .try_into()
+                    .expect("seven ozone fields"),
+            )),
+            None => None,
         },
     };
     let water = Water2014SoilState {
@@ -1506,6 +1582,7 @@ fn assemble(
             .unwrap_or(colm_core::MISSING),
         // 默认 1.0；调用方（`colm-rs`）读过 `ParaOpt/*_baseflow.nc` 之后覆盖。
         baseflow_scale: 1.0,
+        ozone_source: None,
         soil,
         soil_thermal_inputs,
         soil_hydraulic_model,
@@ -1753,6 +1830,41 @@ impl StandardLctRestartTemplate {
     pub fn with_baseflow_scale(mut self, scale: f64) -> Self {
         self.baseflow_scale = scale;
         self
+    }
+
+    /// `init_ozone_data`：挂上臭氧数据源，起始那一档的浓度就是第一步的 `forc_ozone`
+    /// （上游在初始化时就 `grid2pset`，`MOD_Ozone.F90:228-231`）。PFT 列在每步开头从 patch 抄。
+    pub fn with_ozone_source(
+        mut self,
+        source: crate::ozone::OzoneSource,
+        initial_ppbv: f64,
+    ) -> Result<Self> {
+        let ozone = self
+            .leaf
+            .ozone
+            .as_mut()
+            .context("ozone data needs DEF_USE_OZONESTRESS and its restart state")?;
+        ozone.concentration_ppbv = initial_ppbv;
+        self.ozone_source = Some(std::sync::Arc::new(source));
+        Ok(self)
+    }
+
+    /// `update_ozone_data(itstamp, deltim)`（`CoLM.F90:480-482`，`read_forcing` 之后、`CoLMDRIVER`
+    /// 之前，对所有 patch）：步首所在的 3 小时窗口变了就换成那一档（upstream-bugs 第 72 条修补后）。
+    pub fn update_ozone(
+        &self,
+        begin: colm_core::CalendarTime,
+        state: &mut StandardLctSnowSoilState,
+    ) -> Result<()> {
+        let Some(source) = &self.ozone_source else {
+            return Ok(());
+        };
+        if let Some(value) = source.update(begin)? {
+            if let Some(ozone) = state.energy.leaf.ozone.as_mut() {
+                ozone.concentration_ppbv = value;
+            }
+        }
+        Ok(())
     }
 
     /// history `wat` 的末项：VSF 打开时是 `wetwat`，关着时是 `wa`
@@ -2082,6 +2194,7 @@ impl StandardLctRestartTemplate {
                     // `standard_lct_snow_soil_step` 现拼（`smp`/`hk`/`rootfr` 都在状态
                     // 与本步输入里，装配期拿不到），这里只留占位。
                     plant_hydraulics: None,
+                    ozone: physics.ozone,
                     options: LeafTemperatureOptions {
                         observation_height_mode: physics.observation_height_mode,
                         vegetation_snow: physics.vegetation_snow,
@@ -2658,6 +2771,22 @@ impl StandardLctRestartTemplate {
             }
             overrides.push(RestartOverride::new("vegwp", potential));
         }
+        // 臭氧的七个时间变量（`WRITE_TimeVariables` 在 `DEF_USE_OZONESTRESS` 下写）：LCT patch 由
+        // `LeafTemperature` 推进；PFT patch 只有 `o3uptakesun/sha` 是 PFT 的聚合，其余保持重启值。
+        if let (Some(ozone), Some(sources)) =
+            (&state.energy.leaf.ozone, &self.restart_columns.ozone)
+        {
+            for ((name, source), value) in OZONE_RESTART_FIELDS
+                .iter()
+                .zip(sources)
+                .zip(ozone_state_fields(ozone))
+            {
+                overrides.push(RestartOverride::new(
+                    *name,
+                    replaced(source, self.patch, name, value)?,
+                ));
+            }
+        }
         // 冠层几何与冠层光学：上游都是**时间变量**，每步末尾由
         // 「Preparation for the next time step」重算（`CoLMMAIN.F90:2096-2102` 的
         // `lai`/`sai`/`sigf` 与 `albland` 写出的 `thermk`/`extkb`/`extkd`）。
@@ -2951,9 +3080,7 @@ fn runoff(
             saturated_fraction_max: scalar(constant, "fsatmax", patch)?,
             saturated_fraction_decay_m_inv: scalar(constant, "fsatdcf", patch)?,
             decay_tuning: physics.topmodel_decay_tuning,
-            // 上游 `DEF_TOPMOD_method` 的 conductivity-scaled 分支需要平均地形指数；
-            // 本仓库尚未移植该分支，先只支持指数型。
-            subsurface_method: TopmodelMethod::Exponential,
+            subsurface_method: topmodel_method(constant, patch, physics.topmodel_method)?,
         },
         StandardLctRunoffScheme::XinAnJiang => Water2014Runoff::XinAnJiang {
             elevation_standard_deviation_m: scalar(constant, "elvstd", patch)?,
@@ -2968,6 +3095,25 @@ fn runoff(
             baseflow_threshold: scalar(constant, "vic_Ws", patch)?,
             baseflow_exponent: scalar(constant, "vic_c", patch)?,
         },
+    })
+}
+
+/// `DEF_TOPMOD_method` 与它要的 TWI 参数。上游 `READ_TimeInvariants` 在 `DEF_Runoff_SCHEME == 0`
+/// 时把 `topoweti/alp_twi/chi_twi/mu_twi` 从常数重启读进来（`MOD_Vars_TimeInvariants.F90:552-559`），
+/// 只有用到的才在这里读：方法 1 只要平均地形指数，方法 2 四个都要。
+fn topmodel_method(constant: &RestartFile, patch: usize, method: u8) -> Result<TopmodelMethod> {
+    Ok(match method {
+        0 => TopmodelMethod::Exponential,
+        1 => TopmodelMethod::Hydraulic {
+            mean_topographic_index: scalar(constant, "topoweti", patch)?,
+        },
+        2 => TopmodelMethod::Gamma {
+            mean_topographic_index: scalar(constant, "topoweti", patch)?,
+            alpha: scalar(constant, "alp_twi", patch)?,
+            chi: scalar(constant, "chi_twi", patch)?,
+            mu: scalar(constant, "mu_twi", patch)?,
+        },
+        other => return Err(anyhow!("DEF_TOPMOD_method must be 0, 1 or 2, got {other}")),
     })
 }
 

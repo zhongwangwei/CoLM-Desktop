@@ -1,4 +1,5 @@
 use super::*;
+use crate::spatial_grid::GridBounds;
 
 fn one_degree_grid() -> LatLonGrid {
     LatLonGrid::define_by_center(&[23.5, 24.5], &[113.5, 114.5], None).unwrap()
@@ -75,6 +76,12 @@ fn bilinear_parts_split_the_set_area_by_great_circle_weights() {
         &[vec![(2, 2), (3, 2), (2, 3), (3, 3)]],
         &[1.0],
         &[(rad(114.0), rad(24.0))],
+        GridBounds {
+            south: -90.0,
+            north: 90.0,
+            west: -180.0,
+            east: 180.0,
+        },
     )
     .unwrap();
     let parts = &mapping.parts[0];
@@ -101,10 +108,76 @@ fn bilinear_parts_split_the_set_area_by_great_circle_weights() {
         &[vec![(1, 2)]],
         &[1.0],
         &[(rad(113.25), rad(24.0))],
+        GridBounds {
+            south: 23.0,
+            north: 25.0,
+            west: 113.0,
+            east: 115.0,
+        },
     )
     .unwrap();
     let parts = &edge.parts[0];
     assert_eq!(parts[0].ilon, parts[1].ilon);
     assert_eq!(parts[1].area, 0.0);
     assert!((edge.grid_to_set(0, |_, _| 280.0) - 280.0).abs() < 1.0e-12);
+}
+
+/// 区域边缘：外侧那一行/列不在 `DEF_domain` 的块覆盖里时只用覆盖内的一侧（upstream-bugs 第 42 条）。
+#[test]
+fn bilinear_neighbours_outside_the_domain_blocks_collapse_to_the_covered_side() {
+    let pixel = half_degree_pixels();
+    let rad = |deg: f64| deg.to_radians();
+    let global = LatLonGrid::define_by_res(1.0, 1.0).unwrap();
+    // 区域 [114, 115] × [24, 25]：中心 (113.75, 23.75) 夹在格心 113.5/114.5 与 23.5/24.5 之间，
+    // 西列（格心 113.5）与南行（格心 23.5）都在区域外。
+    let mapping = AreaWeightedMapping::build_bilinear(
+        &global,
+        &pixel,
+        &[vec![(2, 2)]],
+        &[1.0],
+        &[(rad(113.75), rad(23.75))],
+        GridBounds {
+            south: 24.0,
+            north: 25.0,
+            west: 114.0,
+            east: 115.0,
+        },
+    )
+    .unwrap();
+    let parts = &mapping.parts[0];
+    assert_eq!(parts[0].ilon, parts[1].ilon);
+    assert_eq!(parts[0].ilat, parts[2].ilat);
+    let (rows, columns) = global
+        .domain_window(GridBounds {
+            south: 24.0,
+            north: 25.0,
+            west: 114.0,
+            east: 115.0,
+        })
+        .unwrap();
+    for part in parts {
+        assert!(rows.contains(&part.ilat) && columns.contains(&part.ilon), "{part:?}");
+    }
+    assert_eq!(parts[0].area, mapping.area[0]);
+}
+
+/// `arclen` 的 `sin`/`cos` 不能被 LLVM 并成 `__sincos_stret`：g1fbil 第 17 个 patch 的东西向距离
+/// （两点同纬、`tmp` 贴近 1，`acos` 放大 sin 的 1 ULP）。期望值取自 latlon 内核
+/// （gfortran `-O2 -fdefault-real-8 -fdefault-double-8`，`cexp` 版 sin/cos）打印的 `distw/diste` 与
+/// `wwgt/ewgt`；`__sincos_stret` 版给出的是 `0x401879262E550F0E` 与 `0x3FEAD49F52B768C0`。
+/// 期望位型来自 macOS libm，所以只在 macOS 上断言。
+#[cfg(target_os = "macos")]
+#[test]
+fn arclen_matches_gfortran_bits_for_same_latitude_distances() {
+    // `black_box`：别让 LLVM 在编译期把常量参数折叠掉（那样走的不是运行时 libm）。
+    let rlon = std::hint::black_box(f64::from_bits(0x3FFF_BF3B_92B9_1D8E));
+    let rlat = std::hint::black_box(f64::from_bits(0x3FDB_A11C_D899_FDCE));
+    let lonw = std::hint::black_box(113.625 / 180.0 * std::f64::consts::PI);
+    let lone = std::hint::black_box(114.0 / 180.0 * std::f64::consts::PI);
+    let distw = arclen(rlat, rlon, rlat, lonw);
+    let diste = arclen(rlat, rlon, rlat, lone);
+    assert_eq!(distw.to_bits(), 0x4018_7926_2E48_6783);
+    assert_eq!(diste.to_bits(), 0x403F_C160_8760_4909);
+    assert_eq!((diste / (distw + diste)).to_bits(), 0x3FEA_D49F_52B9_9131);
+    assert_eq!((distw / (distw + diste)).to_bits(), 0x3FC4_AD82_B519_BB3B);
 }

@@ -1,16 +1,15 @@
-//! 双倍双精度（double-double，约 106 位有效数字），用来复现内核里被提升成
-//! **四倍精度**的那几处表达式。
+//! 双倍双精度（double-double，约 106 位有效数字），用来复现内核里**显式**声明成
+//! 四倍精度的那几处表达式。
 //!
-//! 上游全部用 `-fdefault-real-8` 编译而**没有** `-fdefault-double-8`，于是源码里的
-//! `1.0d0` 这类 `DOUBLE PRECISION` 字面量被提升成 `real(kind=16)`，所在表达式整条
-//! 在 binary128 里求值（`powq` 等），最后才转回 double。全内核的 GIMPLE 里有 7 个模块
-//! 这样（VIC 的 `calc_Q12`、PC 三维冠层辐射、不完全 Gamma、城市植被长短波、
-//! `MOD_Utils` 的 Levenberg–Marquardt、PROSPECT），见 `docs/upstream-bugs.md` 第 17 条。
+//! 构建加了 `-fdefault-double-8`（`docs/upstream-bugs.md` 第 17 条）后，`DOUBLE PRECISION`
+//! 与 `d0` 字面量都是 real(8)，VIC `calc_Q12`、不完全 Gamma、`MOD_Utils` 的
+//! Levenberg–Marquardt、PROSPECT 不再走四倍精度。剩下的只有源码里写明
+//! `real(r16)`（`r16 = selected_real_kind(24)`）的 `MOD_3DCanopyRadiation`（`tee`、`phi`）
+//! 和城市植被长短波（`tee(DD1*3/8.*lsai)`），它们不受编译选项影响，GIMPLE 前后逐字相同。
 //!
 //! 用 106 位代替 113 位：这些表达式里最坏的相消只吃掉十几位，转回 f64 时与 binary128
 //! 的结果相同，除非精确值恰好落在 f64 舍入中点附近约 2⁻⁴⁰ 的范围内。
-//! `exp`/`ln` 按 QD 库的做法：`exp` 先按 ln2 取整缩放、再二分 10 次后用 Taylor 级数，
-//! `ln` 用一次以 f64 为初值的 Newton 迭代（每次把精度翻倍）再补一次。
+//! `exp` 按 QD 库的做法：先按 ln2 取整缩放、再二分 10 次后用 Taylor 级数。
 
 use std::ops::{Add, Div, Mul, Neg, Sub};
 
@@ -76,21 +75,6 @@ impl DoubleDouble {
             hi: result.hi * factor,
             lo: result.lo * factor,
         }
-    }
-
-    /// 自然对数，要求 `self > 0`。
-    pub fn ln(self) -> Self {
-        let mut y = Self::new(self.hi.ln());
-        for _ in 0..2 {
-            // Newton：y ← y + x·exp(-y) - 1
-            y = y + self * (-y).exp() - Self::new(1.0);
-        }
-        y
-    }
-
-    /// `self ** exponent`（`self > 0`），即 `exp(exponent·ln(self))`。
-    pub fn powf(self, exponent: Self) -> Self {
-        (exponent * self.ln()).exp()
     }
 }
 

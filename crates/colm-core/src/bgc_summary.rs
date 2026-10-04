@@ -14,6 +14,8 @@
 )]
 // `a >= lo .and. a <= hi`、`max(lo, min(hi, x))` 照抄：改成 `contains`/`clamp` 会改变 NaN 的行为。
 #![allow(clippy::manual_range_contains, clippy::manual_clamp)]
+// `x = x * y` 照上游一条赋值写（与 `*=` 舍入相同，保留以便对照）。
+#![allow(clippy::assign_op_pattern)]
 
 use crate::bgc_driver::{vectorized_dot, BgcPftConstants, BgcPhysics, BgcSwitches};
 use crate::bgc_state::BgcState;
@@ -723,6 +725,7 @@ fn cnveg_carbonflux_summary(
     _c: &BgcPftConstants,
     sw: BgcSwitches,
 ) -> anyhow::Result<()> {
+    let d = s.dims;
     let npft = p.pftclass.len();
     let mut ar_p: f64;
     s.patch_flux.gpp[0] = (0..npft).fold(0.0, |acc, m| {
@@ -761,7 +764,7 @@ fn cnveg_carbonflux_summary(
                 + s.pft_flux.cpool_grain_storage_gr_p[m],
             p.pftfrac[m],
         )
-    }); /*FMA? gimple=1 rust=0 L721*/
+    }); /*FMA? gimple=1 rust=0 L780*/
     s.patch_flux.gpp_enftemp[0] = 0.0;
     s.patch_flux.gpp_enfboreal[0] = 0.0;
     s.patch_flux.gpp_dnfboreal[0] = 0.0;
@@ -924,31 +927,207 @@ fn cnveg_carbonflux_summary(
             s.patch_flux.grainc_to_seed[0] = 0.0;
         }
     }
-    for m in 0..npft {
-        s.pft_flux.fire_closs_p[m] = s.pft_flux.m_leafc_to_fire_p[m]
-            + s.pft_flux.m_leafc_storage_to_fire_p[m]
-            + s.pft_flux.m_leafc_xfer_to_fire_p[m]
-            + s.pft_flux.m_frootc_to_fire_p[m]
-            + s.pft_flux.m_frootc_storage_to_fire_p[m]
-            + s.pft_flux.m_frootc_xfer_to_fire_p[m]
-            + s.pft_flux.m_livestemc_to_fire_p[m]
-            + s.pft_flux.m_livestemc_storage_to_fire_p[m]
-            + s.pft_flux.m_livestemc_xfer_to_fire_p[m]
-            + s.pft_flux.m_deadstemc_to_fire_p[m]
-            + s.pft_flux.m_deadstemc_storage_to_fire_p[m]
-            + s.pft_flux.m_deadstemc_xfer_to_fire_p[m]
-            + s.pft_flux.m_livecrootc_to_fire_p[m]
-            + s.pft_flux.m_livecrootc_storage_to_fire_p[m]
-            + s.pft_flux.m_livecrootc_xfer_to_fire_p[m]
-            + s.pft_flux.m_deadcrootc_to_fire_p[m]
-            + s.pft_flux.m_deadcrootc_storage_to_fire_p[m]
-            + s.pft_flux.m_deadcrootc_xfer_to_fire_p[m]
-            + s.pft_flux.m_gresp_storage_to_fire_p[m]
-            + s.pft_flux.m_gresp_xfer_to_fire_p[m];
+    if sw.fire {
+        for m in 0..npft {
+            s.pft_flux.fire_closs_p[m] = s.pft_flux.m_leafc_to_fire_p[m]
+                + s.pft_flux.m_leafc_storage_to_fire_p[m]
+                + s.pft_flux.m_leafc_xfer_to_fire_p[m]
+                + s.pft_flux.m_frootc_to_fire_p[m]
+                + s.pft_flux.m_frootc_storage_to_fire_p[m]
+                + s.pft_flux.m_frootc_xfer_to_fire_p[m]
+                + s.pft_flux.m_livestemc_to_fire_p[m]
+                + s.pft_flux.m_livestemc_storage_to_fire_p[m]
+                + s.pft_flux.m_livestemc_xfer_to_fire_p[m]
+                + s.pft_flux.m_deadstemc_to_fire_p[m]
+                + s.pft_flux.m_deadstemc_storage_to_fire_p[m]
+                + s.pft_flux.m_deadstemc_xfer_to_fire_p[m]
+                + s.pft_flux.m_livecrootc_to_fire_p[m]
+                + s.pft_flux.m_livecrootc_storage_to_fire_p[m]
+                + s.pft_flux.m_livecrootc_xfer_to_fire_p[m]
+                + s.pft_flux.m_deadcrootc_to_fire_p[m]
+                + s.pft_flux.m_deadcrootc_storage_to_fire_p[m]
+                + s.pft_flux.m_deadcrootc_xfer_to_fire_p[m]
+                + s.pft_flux.m_gresp_storage_to_fire_p[m]
+                + s.pft_flux.m_gresp_xfer_to_fire_p[m];
+        }
+        s.patch_flux.pft_fire_closs[0] = (0..npft).fold(0.0, |acc, m| {
+            s.pft_flux.fire_closs_p[m].mul_add(p.pftfrac[m], acc)
+        });
+        s.patch_flux.m_leafc_to_fire[0] = (0..npft).fold(0.0, |acc, m| {
+            s.pft_flux.m_leafc_to_fire_p[m].mul_add(p.pftfrac[m], acc)
+        });
+        s.patch_flux.m_frootc_to_fire[0] = (0..npft).fold(0.0, |acc, m| {
+            s.pft_flux.m_frootc_to_fire_p[m].mul_add(p.pftfrac[m], acc)
+        });
+        s.patch_flux.m_livestemc_to_fire[0] = (0..npft).fold(0.0, |acc, m| {
+            s.pft_flux.m_livestemc_to_fire_p[m].mul_add(p.pftfrac[m], acc)
+        });
+        s.patch_flux.m_deadstemc_to_fire[0] = (0..npft).fold(0.0, |acc, m| {
+            s.pft_flux.m_deadstemc_to_fire_p[m].mul_add(p.pftfrac[m], acc)
+        });
+        s.patch_flux.m_livecrootc_to_fire[0] = (0..npft).fold(0.0, |acc, m| {
+            s.pft_flux.m_livecrootc_to_fire_p[m].mul_add(p.pftfrac[m], acc)
+        });
+        s.patch_flux.m_deadcrootc_to_fire[0] = (0..npft).fold(0.0, |acc, m| {
+            s.pft_flux.m_deadcrootc_to_fire_p[m].mul_add(p.pftfrac[m], acc)
+        });
+        s.patch_flux.m_leafc_storage_to_fire[0] = (0..npft).fold(0.0, |acc, m| {
+            s.pft_flux.m_leafc_storage_to_fire_p[m].mul_add(p.pftfrac[m], acc)
+        });
+        s.patch_flux.m_frootc_storage_to_fire[0] = (0..npft).fold(0.0, |acc, m| {
+            s.pft_flux.m_frootc_storage_to_fire_p[m].mul_add(p.pftfrac[m], acc)
+        });
+        s.patch_flux.m_livestemc_storage_to_fire[0] = (0..npft).fold(0.0, |acc, m| {
+            s.pft_flux.m_livestemc_storage_to_fire_p[m].mul_add(p.pftfrac[m], acc)
+        });
+        s.patch_flux.m_deadstemc_storage_to_fire[0] = (0..npft).fold(0.0, |acc, m| {
+            s.pft_flux.m_deadstemc_storage_to_fire_p[m].mul_add(p.pftfrac[m], acc)
+        });
+        s.patch_flux.m_livecrootc_storage_to_fire[0] = (0..npft).fold(0.0, |acc, m| {
+            s.pft_flux.m_livecrootc_storage_to_fire_p[m].mul_add(p.pftfrac[m], acc)
+        });
+        s.patch_flux.m_deadcrootc_storage_to_fire[0] = (0..npft).fold(0.0, |acc, m| {
+            s.pft_flux.m_deadcrootc_storage_to_fire_p[m].mul_add(p.pftfrac[m], acc)
+        });
+        s.patch_flux.m_gresp_storage_to_fire[0] = (0..npft).fold(0.0, |acc, m| {
+            s.pft_flux.m_gresp_storage_to_fire_p[m].mul_add(p.pftfrac[m], acc)
+        });
+        s.patch_flux.m_leafc_xfer_to_fire[0] = (0..npft).fold(0.0, |acc, m| {
+            s.pft_flux.m_leafc_xfer_to_fire_p[m].mul_add(p.pftfrac[m], acc)
+        });
+        s.patch_flux.m_frootc_xfer_to_fire[0] = (0..npft).fold(0.0, |acc, m| {
+            s.pft_flux.m_frootc_xfer_to_fire_p[m].mul_add(p.pftfrac[m], acc)
+        });
+        s.patch_flux.m_livestemc_xfer_to_fire[0] = (0..npft).fold(0.0, |acc, m| {
+            s.pft_flux.m_livestemc_xfer_to_fire_p[m].mul_add(p.pftfrac[m], acc)
+        });
+        s.patch_flux.m_deadstemc_xfer_to_fire[0] = (0..npft).fold(0.0, |acc, m| {
+            s.pft_flux.m_deadstemc_xfer_to_fire_p[m].mul_add(p.pftfrac[m], acc)
+        });
+        s.patch_flux.m_livecrootc_xfer_to_fire[0] = (0..npft).fold(0.0, |acc, m| {
+            s.pft_flux.m_livecrootc_xfer_to_fire_p[m].mul_add(p.pftfrac[m], acc)
+        });
+        s.patch_flux.m_deadcrootc_xfer_to_fire[0] = (0..npft).fold(0.0, |acc, m| {
+            s.pft_flux.m_deadcrootc_xfer_to_fire_p[m].mul_add(p.pftfrac[m], acc)
+        });
+        s.patch_flux.m_gresp_xfer_to_fire[0] = (0..npft).fold(0.0, |acc, m| {
+            s.pft_flux.m_gresp_xfer_to_fire_p[m].mul_add(p.pftfrac[m], acc)
+        });
+        s.patch_flux.m_livestemc_to_deadstemc_fire[0] = (0..npft).fold(0.0, |acc, m| {
+            s.pft_flux.m_livestemc_to_deadstemc_fire_p[m].mul_add(p.pftfrac[m], acc)
+        });
+        s.patch_flux.m_livecrootc_to_deadcrootc_fire[0] = (0..npft).fold(0.0, |acc, m| {
+            s.pft_flux.m_livecrootc_to_deadcrootc_fire_p[m].mul_add(p.pftfrac[m], acc)
+        });
+        s.patch_flux.m_leafc_to_litter_fire[0] = (0..npft).fold(0.0, |acc, m| {
+            s.pft_flux.m_leafc_to_litter_fire_p[m].mul_add(p.pftfrac[m], acc)
+        });
+        s.patch_flux.m_frootc_to_litter_fire[0] = (0..npft).fold(0.0, |acc, m| {
+            s.pft_flux.m_frootc_to_litter_fire_p[m].mul_add(p.pftfrac[m], acc)
+        });
+        s.patch_flux.m_livestemc_to_litter_fire[0] = (0..npft).fold(0.0, |acc, m| {
+            s.pft_flux.m_livestemc_to_litter_fire_p[m].mul_add(p.pftfrac[m], acc)
+        });
+        s.patch_flux.m_deadstemc_to_litter_fire[0] = (0..npft).fold(0.0, |acc, m| {
+            s.pft_flux.m_deadstemc_to_litter_fire_p[m].mul_add(p.pftfrac[m], acc)
+        });
+        s.patch_flux.m_livecrootc_to_litter_fire[0] = (0..npft).fold(0.0, |acc, m| {
+            s.pft_flux.m_livecrootc_to_litter_fire_p[m].mul_add(p.pftfrac[m], acc)
+        });
+        s.patch_flux.m_deadcrootc_to_litter_fire[0] = (0..npft).fold(0.0, |acc, m| {
+            s.pft_flux.m_deadcrootc_to_litter_fire_p[m].mul_add(p.pftfrac[m], acc)
+        });
+        s.patch_flux.m_leafc_storage_to_litter_fire[0] = (0..npft).fold(0.0, |acc, m| {
+            s.pft_flux.m_leafc_storage_to_litter_fire_p[m].mul_add(p.pftfrac[m], acc)
+        });
+        s.patch_flux.m_frootc_storage_to_litter_fire[0] = (0..npft).fold(0.0, |acc, m| {
+            s.pft_flux.m_frootc_storage_to_litter_fire_p[m].mul_add(p.pftfrac[m], acc)
+        });
+        s.patch_flux.m_livestemc_storage_to_litter_fire[0] = (0..npft).fold(0.0, |acc, m| {
+            s.pft_flux.m_livestemc_storage_to_litter_fire_p[m].mul_add(p.pftfrac[m], acc)
+        });
+        s.patch_flux.m_deadstemc_storage_to_litter_fire[0] = (0..npft).fold(0.0, |acc, m| {
+            s.pft_flux.m_deadstemc_storage_to_litter_fire_p[m].mul_add(p.pftfrac[m], acc)
+        });
+        s.patch_flux.m_livecrootc_storage_to_litter_fire[0] = (0..npft).fold(0.0, |acc, m| {
+            s.pft_flux.m_livecrootc_storage_to_litter_fire_p[m].mul_add(p.pftfrac[m], acc)
+        });
+        s.patch_flux.m_deadcrootc_storage_to_litter_fire[0] = (0..npft).fold(0.0, |acc, m| {
+            s.pft_flux.m_deadcrootc_storage_to_litter_fire_p[m].mul_add(p.pftfrac[m], acc)
+        });
+        s.patch_flux.m_gresp_storage_to_litter_fire[0] = (0..npft).fold(0.0, |acc, m| {
+            s.pft_flux.m_gresp_storage_to_litter_fire_p[m].mul_add(p.pftfrac[m], acc)
+        });
+        s.patch_flux.m_leafc_xfer_to_litter_fire[0] = (0..npft).fold(0.0, |acc, m| {
+            s.pft_flux.m_leafc_xfer_to_litter_fire_p[m].mul_add(p.pftfrac[m], acc)
+        });
+        s.patch_flux.m_frootc_xfer_to_litter_fire[0] = (0..npft).fold(0.0, |acc, m| {
+            s.pft_flux.m_frootc_xfer_to_litter_fire_p[m].mul_add(p.pftfrac[m], acc)
+        });
+        s.patch_flux.m_livestemc_xfer_to_litter_fire[0] = (0..npft).fold(0.0, |acc, m| {
+            s.pft_flux.m_livestemc_xfer_to_litter_fire_p[m].mul_add(p.pftfrac[m], acc)
+        });
+        s.patch_flux.m_deadstemc_xfer_to_litter_fire[0] = (0..npft).fold(0.0, |acc, m| {
+            s.pft_flux.m_deadstemc_xfer_to_litter_fire_p[m].mul_add(p.pftfrac[m], acc)
+        });
+        s.patch_flux.m_livecrootc_xfer_to_litter_fire[0] = (0..npft).fold(0.0, |acc, m| {
+            s.pft_flux.m_livecrootc_xfer_to_litter_fire_p[m].mul_add(p.pftfrac[m], acc)
+        });
+        s.patch_flux.m_deadcrootc_xfer_to_litter_fire[0] = (0..npft).fold(0.0, |acc, m| {
+            s.pft_flux.m_deadcrootc_xfer_to_litter_fire_p[m].mul_add(p.pftfrac[m], acc)
+        });
+        s.patch_flux.m_gresp_xfer_to_litter_fire[0] = (0..npft).fold(0.0, |acc, m| {
+            s.pft_flux.m_gresp_xfer_to_litter_fire_p[m].mul_add(p.pftfrac[m], acc)
+        });
+        s.patch_flux.fire_closs[0] = s.patch_flux.pft_fire_closs[0];
+        for j in 0..d.nl_soil {
+            for l in 0..d.ndecomp_pools {
+                if s.invariants.is_litter[l] || s.invariants.is_cwd[l] {
+                    s.patch_flux.fire_closs[0] = s.patch_flux.m_decomp_cpools_to_fire_vr
+                        [j + d.nl_soil_full * l]
+                        .mul_add(p.dz_soi[j], s.patch_flux.fire_closs[0]);
+                }
+            }
+        }
+        s.patch_flux.m_litr1_c_to_fire[0] = (0..d.nl_soil).fold(0.0, |acc, j| {
+            s.patch_flux.m_decomp_cpools_to_fire_vr
+                [j + d.nl_soil_full * ((s.constants.i_met_lit - 1) as usize)]
+                .mul_add(p.dz_soi[j], acc)
+        });
+        s.patch_flux.m_litr2_c_to_fire[0] = (0..d.nl_soil).fold(0.0, |acc, j| {
+            s.patch_flux.m_decomp_cpools_to_fire_vr
+                [j + d.nl_soil_full * ((s.constants.i_cel_lit - 1) as usize)]
+                .mul_add(p.dz_soi[j], acc)
+        });
+        s.patch_flux.m_litr3_c_to_fire[0] = (0..d.nl_soil).fold(0.0, |acc, j| {
+            s.patch_flux.m_decomp_cpools_to_fire_vr
+                [j + d.nl_soil_full * ((s.constants.i_lig_lit - 1) as usize)]
+                .mul_add(p.dz_soi[j], acc)
+        });
+        s.patch_flux.m_cwd_c_to_fire[0] = (0..d.nl_soil).fold(0.0, |acc, j| {
+            s.patch_flux.m_decomp_cpools_to_fire_vr
+                [j + d.nl_soil_full * ((s.constants.i_cwd - 1) as usize)]
+                .mul_add(p.dz_soi[j], acc)
+        });
+        s.patch_flux.litfire[0] = 0.0;
+        s.patch_flux.somfire[0] = 0.0;
+        for l in 0..d.ndecomp_pools {
+            if s.invariants.is_litter[l] {
+                s.patch_flux.litfire[0] += (0..d.nl_soil).fold(0.0, |acc, j| {
+                    s.patch_flux.m_decomp_cpools_to_fire_vr[j + d.nl_soil_full * l]
+                        .mul_add(p.dz_soi[j], acc)
+                });
+            }
+            if s.invariants.is_soil[l] {
+                s.patch_flux.somfire[0] += (0..d.nl_soil).fold(0.0, |acc, j| {
+                    s.patch_flux.m_decomp_cpools_to_fire_vr[j + d.nl_soil_full * l]
+                        .mul_add(p.dz_soi[j], acc)
+                });
+            }
+        }
+        s.patch_flux.totfire[0] =
+            s.patch_flux.fire_closs[0] + s.patch_flux.somfire[0] + s.patch_flux.somc_fire[0];
     }
-    s.patch_flux.fire_closs[0] = (0..npft).fold(0.0, |acc, m| {
-        s.pft_flux.fire_closs_p[m].mul_add(p.pftfrac[m], acc)
-    });
     s.patch_flux.hrv_xsmrpool_to_atm[0] = (0..npft).fold(0.0, |acc, m| {
         s.pft_flux.hrv_xsmrpool_to_atm_p[m].mul_add(p.pftfrac[m], acc)
     });
@@ -971,6 +1150,7 @@ fn cnveg_nitrogenflux_summary(
     _c: &BgcPftConstants,
     sw: BgcSwitches,
 ) -> anyhow::Result<()> {
+    let d = s.dims;
     let npft = p.pftclass.len();
     if sw.crop {
         if p.patchclass == 12 {
@@ -983,6 +1163,182 @@ fn cnveg_nitrogenflux_summary(
         } else {
             s.patch_flux.grainn_to_cropprodn[0] = 0.0;
         }
+    }
+    if sw.fire {
+        for m in 0..npft {
+            s.pft_flux.fire_nloss_p[m] = s.pft_flux.m_leafn_to_fire_p[m]
+                + s.pft_flux.m_leafn_storage_to_fire_p[m]
+                + s.pft_flux.m_leafn_xfer_to_fire_p[m]
+                + s.pft_flux.m_frootn_to_fire_p[m]
+                + s.pft_flux.m_frootn_storage_to_fire_p[m]
+                + s.pft_flux.m_frootn_xfer_to_fire_p[m]
+                + s.pft_flux.m_livestemn_to_fire_p[m]
+                + s.pft_flux.m_livestemn_storage_to_fire_p[m]
+                + s.pft_flux.m_livestemn_xfer_to_fire_p[m]
+                + s.pft_flux.m_deadstemn_to_fire_p[m]
+                + s.pft_flux.m_deadstemn_storage_to_fire_p[m]
+                + s.pft_flux.m_deadstemn_xfer_to_fire_p[m]
+                + s.pft_flux.m_livecrootn_to_fire_p[m]
+                + s.pft_flux.m_livecrootn_storage_to_fire_p[m]
+                + s.pft_flux.m_livecrootn_xfer_to_fire_p[m]
+                + s.pft_flux.m_deadcrootn_to_fire_p[m]
+                + s.pft_flux.m_deadcrootn_storage_to_fire_p[m]
+                + s.pft_flux.m_deadcrootn_xfer_to_fire_p[m]
+                + s.pft_flux.m_retransn_to_fire_p[m];
+        }
+        s.patch_flux.pft_fire_nloss[0] = (0..npft).fold(0.0, |acc, m| {
+            s.pft_flux.fire_nloss_p[m].mul_add(p.pftfrac[m], acc)
+        });
+        s.patch_flux.m_leafn_to_fire[0] = (0..npft).fold(0.0, |acc, m| {
+            s.pft_flux.m_leafn_to_fire_p[m].mul_add(p.pftfrac[m], acc)
+        });
+        s.patch_flux.m_frootn_to_fire[0] = (0..npft).fold(0.0, |acc, m| {
+            s.pft_flux.m_frootn_to_fire_p[m].mul_add(p.pftfrac[m], acc)
+        });
+        s.patch_flux.m_livestemn_to_fire[0] = (0..npft).fold(0.0, |acc, m| {
+            s.pft_flux.m_livestemn_to_fire_p[m].mul_add(p.pftfrac[m], acc)
+        });
+        s.patch_flux.m_deadstemn_to_fire[0] = (0..npft).fold(0.0, |acc, m| {
+            s.pft_flux.m_deadstemn_to_fire_p[m].mul_add(p.pftfrac[m], acc)
+        });
+        s.patch_flux.m_livecrootn_to_fire[0] = (0..npft).fold(0.0, |acc, m| {
+            s.pft_flux.m_livecrootn_to_fire_p[m].mul_add(p.pftfrac[m], acc)
+        });
+        s.patch_flux.m_deadcrootn_to_fire[0] = (0..npft).fold(0.0, |acc, m| {
+            s.pft_flux.m_deadcrootn_to_fire_p[m].mul_add(p.pftfrac[m], acc)
+        });
+        s.patch_flux.m_leafn_storage_to_fire[0] = (0..npft).fold(0.0, |acc, m| {
+            s.pft_flux.m_leafn_storage_to_fire_p[m].mul_add(p.pftfrac[m], acc)
+        });
+        s.patch_flux.m_frootn_storage_to_fire[0] = (0..npft).fold(0.0, |acc, m| {
+            s.pft_flux.m_frootn_storage_to_fire_p[m].mul_add(p.pftfrac[m], acc)
+        });
+        s.patch_flux.m_livestemn_storage_to_fire[0] = (0..npft).fold(0.0, |acc, m| {
+            s.pft_flux.m_livestemn_storage_to_fire_p[m].mul_add(p.pftfrac[m], acc)
+        });
+        s.patch_flux.m_deadstemn_storage_to_fire[0] = (0..npft).fold(0.0, |acc, m| {
+            s.pft_flux.m_deadstemn_storage_to_fire_p[m].mul_add(p.pftfrac[m], acc)
+        });
+        s.patch_flux.m_livecrootn_storage_to_fire[0] = (0..npft).fold(0.0, |acc, m| {
+            s.pft_flux.m_livecrootn_storage_to_fire_p[m].mul_add(p.pftfrac[m], acc)
+        });
+        s.patch_flux.m_deadcrootn_storage_to_fire[0] = (0..npft).fold(0.0, |acc, m| {
+            s.pft_flux.m_deadcrootn_storage_to_fire_p[m].mul_add(p.pftfrac[m], acc)
+        });
+        s.patch_flux.m_leafn_xfer_to_fire[0] = (0..npft).fold(0.0, |acc, m| {
+            s.pft_flux.m_leafn_xfer_to_fire_p[m].mul_add(p.pftfrac[m], acc)
+        });
+        s.patch_flux.m_frootn_xfer_to_fire[0] = (0..npft).fold(0.0, |acc, m| {
+            s.pft_flux.m_frootn_xfer_to_fire_p[m].mul_add(p.pftfrac[m], acc)
+        });
+        s.patch_flux.m_livestemn_xfer_to_fire[0] = (0..npft).fold(0.0, |acc, m| {
+            s.pft_flux.m_livestemn_xfer_to_fire_p[m].mul_add(p.pftfrac[m], acc)
+        });
+        s.patch_flux.m_deadstemn_xfer_to_fire[0] = (0..npft).fold(0.0, |acc, m| {
+            s.pft_flux.m_deadstemn_xfer_to_fire_p[m].mul_add(p.pftfrac[m], acc)
+        });
+        s.patch_flux.m_livecrootn_xfer_to_fire[0] = (0..npft).fold(0.0, |acc, m| {
+            s.pft_flux.m_livecrootn_xfer_to_fire_p[m].mul_add(p.pftfrac[m], acc)
+        });
+        s.patch_flux.m_deadcrootn_xfer_to_fire[0] = (0..npft).fold(0.0, |acc, m| {
+            s.pft_flux.m_deadcrootn_xfer_to_fire_p[m].mul_add(p.pftfrac[m], acc)
+        });
+        s.patch_flux.m_livestemn_to_deadstemn_fire[0] = (0..npft).fold(0.0, |acc, m| {
+            s.pft_flux.m_livestemn_to_deadstemn_fire_p[m].mul_add(p.pftfrac[m], acc)
+        });
+        s.patch_flux.m_livecrootn_to_deadcrootn_fire[0] = (0..npft).fold(0.0, |acc, m| {
+            s.pft_flux.m_livecrootn_to_deadcrootn_fire_p[m].mul_add(p.pftfrac[m], acc)
+        });
+        s.patch_flux.m_retransn_to_fire[0] = (0..npft).fold(0.0, |acc, m| {
+            s.pft_flux.m_retransn_to_fire_p[m].mul_add(p.pftfrac[m], acc)
+        });
+        s.patch_flux.m_leafn_to_litter_fire[0] = (0..npft).fold(0.0, |acc, m| {
+            s.pft_flux.m_leafn_to_litter_fire_p[m].mul_add(p.pftfrac[m], acc)
+        });
+        s.patch_flux.m_frootn_to_litter_fire[0] = (0..npft).fold(0.0, |acc, m| {
+            s.pft_flux.m_frootn_to_litter_fire_p[m].mul_add(p.pftfrac[m], acc)
+        });
+        s.patch_flux.m_livestemn_to_litter_fire[0] = (0..npft).fold(0.0, |acc, m| {
+            s.pft_flux.m_livestemn_to_litter_fire_p[m].mul_add(p.pftfrac[m], acc)
+        });
+        s.patch_flux.m_deadstemn_to_litter_fire[0] = (0..npft).fold(0.0, |acc, m| {
+            s.pft_flux.m_deadstemn_to_litter_fire_p[m].mul_add(p.pftfrac[m], acc)
+        });
+        s.patch_flux.m_livecrootn_to_litter_fire[0] = (0..npft).fold(0.0, |acc, m| {
+            s.pft_flux.m_livecrootn_to_litter_fire_p[m].mul_add(p.pftfrac[m], acc)
+        });
+        s.patch_flux.m_deadcrootn_to_litter_fire[0] = (0..npft).fold(0.0, |acc, m| {
+            s.pft_flux.m_deadcrootn_to_litter_fire_p[m].mul_add(p.pftfrac[m], acc)
+        });
+        s.patch_flux.m_leafn_storage_to_litter_fire[0] = (0..npft).fold(0.0, |acc, m| {
+            s.pft_flux.m_leafn_storage_to_litter_fire_p[m].mul_add(p.pftfrac[m], acc)
+        });
+        s.patch_flux.m_frootn_storage_to_litter_fire[0] = (0..npft).fold(0.0, |acc, m| {
+            s.pft_flux.m_frootn_storage_to_litter_fire_p[m].mul_add(p.pftfrac[m], acc)
+        });
+        s.patch_flux.m_livestemn_storage_to_litter_fire[0] = (0..npft).fold(0.0, |acc, m| {
+            s.pft_flux.m_livestemn_storage_to_litter_fire_p[m].mul_add(p.pftfrac[m], acc)
+        });
+        s.patch_flux.m_deadstemn_storage_to_litter_fire[0] = (0..npft).fold(0.0, |acc, m| {
+            s.pft_flux.m_deadstemn_storage_to_litter_fire_p[m].mul_add(p.pftfrac[m], acc)
+        });
+        s.patch_flux.m_livecrootn_storage_to_litter_fire[0] = (0..npft).fold(0.0, |acc, m| {
+            s.pft_flux.m_livecrootn_storage_to_litter_fire_p[m].mul_add(p.pftfrac[m], acc)
+        });
+        s.patch_flux.m_deadcrootn_storage_to_litter_fire[0] = (0..npft).fold(0.0, |acc, m| {
+            s.pft_flux.m_deadcrootn_storage_to_litter_fire_p[m].mul_add(p.pftfrac[m], acc)
+        });
+        s.patch_flux.m_leafn_xfer_to_litter_fire[0] = (0..npft).fold(0.0, |acc, m| {
+            s.pft_flux.m_leafn_xfer_to_litter_fire_p[m].mul_add(p.pftfrac[m], acc)
+        });
+        s.patch_flux.m_frootn_xfer_to_litter_fire[0] = (0..npft).fold(0.0, |acc, m| {
+            s.pft_flux.m_frootn_xfer_to_litter_fire_p[m].mul_add(p.pftfrac[m], acc)
+        });
+        s.patch_flux.m_livestemn_xfer_to_litter_fire[0] = (0..npft).fold(0.0, |acc, m| {
+            s.pft_flux.m_livestemn_xfer_to_litter_fire_p[m].mul_add(p.pftfrac[m], acc)
+        });
+        s.patch_flux.m_deadstemn_xfer_to_litter_fire[0] = (0..npft).fold(0.0, |acc, m| {
+            s.pft_flux.m_deadstemn_xfer_to_litter_fire_p[m].mul_add(p.pftfrac[m], acc)
+        });
+        s.patch_flux.m_livecrootn_xfer_to_litter_fire[0] = (0..npft).fold(0.0, |acc, m| {
+            s.pft_flux.m_livecrootn_xfer_to_litter_fire_p[m].mul_add(p.pftfrac[m], acc)
+        });
+        s.patch_flux.m_deadcrootn_xfer_to_litter_fire[0] = (0..npft).fold(0.0, |acc, m| {
+            s.pft_flux.m_deadcrootn_xfer_to_litter_fire_p[m].mul_add(p.pftfrac[m], acc)
+        });
+        s.patch_flux.m_retransn_to_litter_fire[0] = (0..npft).fold(0.0, |acc, m| {
+            s.pft_flux.m_retransn_to_litter_fire_p[m].mul_add(p.pftfrac[m], acc)
+        });
+        s.patch_flux.fire_nloss[0] = s.patch_flux.pft_fire_nloss[0];
+        for j in 0..d.nl_soil {
+            for l in 0..d.ndecomp_pools {
+                if s.invariants.is_litter[l] || s.invariants.is_cwd[l] {
+                    s.patch_flux.fire_nloss[0] = s.patch_flux.m_decomp_npools_to_fire_vr
+                        [j + d.nl_soil_full * l]
+                        .mul_add(p.dz_soi[j], s.patch_flux.fire_nloss[0]);
+                }
+            }
+        }
+        s.patch_flux.m_litr1_n_to_fire[0] = (0..d.nl_soil).fold(0.0, |acc, j| {
+            s.patch_flux.m_decomp_npools_to_fire_vr
+                [j + d.nl_soil_full * ((s.constants.i_met_lit - 1) as usize)]
+                .mul_add(p.dz_soi[j], acc)
+        });
+        s.patch_flux.m_litr2_n_to_fire[0] = (0..d.nl_soil).fold(0.0, |acc, j| {
+            s.patch_flux.m_decomp_npools_to_fire_vr
+                [j + d.nl_soil_full * ((s.constants.i_cel_lit - 1) as usize)]
+                .mul_add(p.dz_soi[j], acc)
+        });
+        s.patch_flux.m_litr3_n_to_fire[0] = (0..d.nl_soil).fold(0.0, |acc, j| {
+            s.patch_flux.m_decomp_npools_to_fire_vr
+                [j + d.nl_soil_full * ((s.constants.i_lig_lit - 1) as usize)]
+                .mul_add(p.dz_soi[j], acc)
+        });
+        s.patch_flux.m_cwd_n_to_fire[0] = (0..d.nl_soil).fold(0.0, |acc, j| {
+            s.patch_flux.m_decomp_npools_to_fire_vr
+                [j + d.nl_soil_full * ((s.constants.i_cwd - 1) as usize)]
+                .mul_add(p.dz_soi[j], acc)
+        });
     }
     Ok(())
 }

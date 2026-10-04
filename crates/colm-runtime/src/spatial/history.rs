@@ -20,6 +20,8 @@ pub struct HistoryGridConfig {
     pub lat_res: f64,
     pub as_forcing: bool,
     pub domain: GridBounds,
+    /// `DEF_HIST_CompressLevel`（0..=9）：逐时间 history 量的 deflate 级别。
+    pub compress_level: u8,
 }
 
 impl HistoryGridConfig {
@@ -34,8 +36,19 @@ impl HistoryGridConfig {
                 west: crate::required_real(case, "DEF_domain%edgew")?,
                 east: crate::required_real(case, "DEF_domain%edgee")?,
             },
+            compress_level: hist_compress_level(case)?,
         })
     }
+}
+
+/// `DEF_HIST_CompressLevel`：网格、向量、示踪物与 unitcat history 的 deflate 级别（netCDF 只认 0..=9）。
+pub fn hist_compress_level(case: &colm_namelist::Document) -> Result<u8> {
+    let level = crate::required_integer(case, "DEF_HIST_CompressLevel")?;
+    ensure!(
+        (0..=9).contains(&level),
+        "DEF_HIST_CompressLevel must be within 0..=9, got {level}"
+    );
+    Ok(level as u8)
 }
 
 /// 建 history 网格：`ghist` 的窗口、每个 patch 落在窗口里的份（`(格子, 面积)`，映射顺序）与
@@ -49,8 +62,8 @@ impl HistoryGridConfig {
 /// `crop_classes` 是 CROP 内核下每个 patch 的 `patchclass`（不开 CROP 时为 `None`）：
 /// 多写 `croparea`（`patchclass == 12 .and. patchmask`，`MOD_Hist.F90:424-445`）与 `irrigarea`。
 /// `irrigated` 是 `DEF_USE_IRRIGATION` 时每个 patch 的 `filter_irrig`（`patchclass == 12` 且首个 PFT
-/// `>= npcropmin` 且为偶数，即灌溉型作物）；不开灌溉时上游用的是未初始化的 `filter_irrig`
-/// （upstream-bugs 第 37 条），这里按全假写 0。
+/// `>= npcropmin` 且为偶数，即灌溉型作物）；不开灌溉时 `filter_irrig` 全假，写 0（上游原来用未初始化的
+/// 值，upstream-bugs 第 37 条，vendor 已修）。
 #[allow(clippy::too_many_arguments)]
 pub fn build_history_grid(
     config: &HistoryGridConfig,
@@ -228,6 +241,7 @@ pub fn build_history_grid(
             ),
         ],
         first_record_statics,
+        compress_level: config.compress_level,
     })
 }
 

@@ -17,6 +17,7 @@ fn column(lai: f64, sai: f64) -> PftColumn {
                 snow_mm: 0.0,
             },
             plant_hydraulics: None,
+            ozone: None,
         },
         wet_snow_fraction: 0.0,
         vegetation_free_fraction: 1.0,
@@ -61,6 +62,8 @@ fn parameters(class: i32, fraction: f64) -> PftParameters {
         wue_lambda: 1000.0,
         root_fraction: vec![0.5, 0.5],
         canopy_layer: 1,
+        evergreen: false,
+        leaf_longevity_years: 1.0,
         plant_hydraulic_traits: crate::ClassConstants::new(crate::LandCoverScheme::Igbp, 1)
             .unwrap()
             .plant_hydraulic_traits(crate::PlantHydraulicOverrides::default()),

@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use colm_core::tracer::TRC_TINY;
-use colm_hist::history::HistoryGrid;
+use colm_hist::history::{set_history_compression, set_window_chunking, HistoryGrid};
 use colm_hist::schedule::ScheduledRecord;
 
 use super::network::{RiverNetwork, RunoffRouting, RIVER_MOUTH};
@@ -59,6 +59,13 @@ pub struct RiverHistoryWriter {
     lat: Vec<f64>,
     /// 开水库时的 `dam_GRAND_ID`（按水库序号），建 unitcat 文件骨架时写成 `resv_GRAND_ID`。
     pub reservoir_ids: Option<Vec<i32>>,
+    /// `DEF_HIST_CompressLevel`：unitcat 文件里逐时间量（河道量、分汊矩阵、示踪物/泥沙量、水库量）
+    /// 的 deflate 级别（`route_hist_write_*` → `ncio_write_serial_time(..., DEF_HIST_CompressLevel)`）。
+    pub hist_compress_level: u8,
+    /// `DEF_REST_CompressLevel`：无时间维的 `mask_complete_upstream` 走
+    /// `vector_gather_map2grid_and_write` 的无 `itime` 分支，上游在那里传的是重启文件的级别
+    /// （`MOD_Vector_ReadWrite.F90:357-358`）。
+    pub rest_compress_level: u8,
 }
 
 /// `worker_remap_data_grid2pset`（填充值 `spval`）：`average` 除以非缺测份的面积和，`sum` 不除。
@@ -170,6 +177,9 @@ impl RiverHistoryWriter {
             lon,
             lat,
             reservoir_ids: None,
+            // namelist 默认值（`MOD_Namelist.F90:750-751`）；调用方按算例覆盖。
+            hist_compress_level: 1,
+            rest_compress_level: 1,
         })
     }
 
@@ -570,15 +580,18 @@ impl RiverHistoryWriter {
             time.put_attribute("long_name", "time")?;
             time.put_attribute("units", "minutes since 1900-1-1 0:0:0")?;
             let mut window = file.add_variable::<f64>("history_window_seconds", &["time"])?;
+            set_window_chunking(&mut window)?;
             window.put_attribute("units", "s")?;
             window.put_attribute(
                 "long_name",
                 "elapsed window ending at history_window_end_minutes; terminal and resumed records can overlap",
             )?;
-            file.add_variable::<f64>("history_window_end_minutes", &["time"])?
-                .put_attribute("units", "minutes since 1900-1-1 0:0:0")?;
+            let mut end = file.add_variable::<f64>("history_window_end_minutes", &["time"])?;
+            set_window_chunking(&mut end)?;
+            end.put_attribute("units", "minutes since 1900-1-1 0:0:0")?;
             let mut mask =
                 file.add_variable::<f64>("mask_complete_upstream", &["lat_ucat", "lon_ucat"])?;
+            set_history_compression(&mut mask, self.rest_compress_level)?;
             mask.put_attribute("missing_value", SPVAL)?;
             mask.put_attribute(
                 "long_name",
@@ -596,6 +609,7 @@ impl RiverHistoryWriter {
             for (name, long_name, units, _) in fields {
                 let mut variable =
                     file.add_variable::<f64>(name, &["time", "lat_ucat", "lon_ucat"])?;
+                set_history_compression(&mut variable, self.hist_compress_level)?;
                 variable.put_attribute("missing_value", SPVAL)?;
                 variable.put_attribute("long_name", *long_name)?;
                 variable.put_attribute("units", *units)?;
@@ -634,6 +648,7 @@ impl RiverHistoryWriter {
                     "f_bifflw_lev",
                     &["time", "bifurcation_pathway", "bifurcation_level"],
                 )?;
+                set_history_compression(&mut variable, self.hist_compress_level)?;
                 variable.put_attribute("long_name", "effective bifurcation pathway-layer flow")?;
                 variable.put_attribute("units", "m^3/s")?;
             }
@@ -646,6 +661,7 @@ impl RiverHistoryWriter {
             if first {
                 let mut variable =
                     file.add_variable::<f64>(name, &["time", "lat_ucat", "lon_ucat"])?;
+                set_history_compression(&mut variable, self.hist_compress_level)?;
                 variable.put_attribute("missing_value", SPVAL)?;
                 variable.put_attribute("long_name", long_name.as_str())?;
                 variable.put_attribute("units", units.as_str())?;
@@ -661,6 +677,7 @@ impl RiverHistoryWriter {
                     file.add_dimension("reservoir", values.len())?;
                 }
                 let mut variable = file.add_variable::<f64>(name, &["time", "reservoir"])?;
+                set_history_compression(&mut variable, self.hist_compress_level)?;
                 variable.put_attribute("long_name", *long_name)?;
                 variable.put_attribute("units", *units)?;
                 variable.put_attribute("missing_value", SPVAL)?;

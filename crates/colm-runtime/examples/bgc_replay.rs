@@ -51,6 +51,14 @@ fn main() -> Result<()> {
             Some(colm_namelist::Value::Int(value)) => i32::try_from(*value)?,
             _ => 1,
         },
+        runoff_scheme: match document.get("DEF_Runoff_SCHEME") {
+            Some(colm_namelist::Value::Int(value)) => i32::try_from(*value)?,
+            _ => 0,
+        },
+        // 单点构建把它强制为 0（`MOD_Namelist.F90:1901`）。
+        topmod_method: 0,
+        variably_saturated: flag("DEF_USE_VariablySaturatedFlow", true)
+            || !flag("DEF_USE_Campbell_SOIL_MODEL", false),
     };
     let only = args.get(3);
     let mut call = 0;

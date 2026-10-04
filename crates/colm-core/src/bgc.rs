@@ -222,9 +222,11 @@ pub struct BgcPermafrostOwned {
 #[derive(Debug, Clone, PartialEq)]
 pub struct BgcClimateOwned {
     pub precipitation_10_day: Vec<f64>,
+    pub precipitation_30_day: Vec<f64>,
     pub precipitation_60_day: Vec<f64>,
     pub precipitation_365_day: Vec<f64>,
     pub precipitation_today: Vec<f64>,
+    pub relative_humidity_today: Vec<f64>,
     pub precipitation_daily: Vec<f64>,
     pub soil_temperature_17: Vec<f64>,
     pub relative_humidity_30_day: Vec<f64>,
@@ -555,9 +557,12 @@ pub fn derive_cold_start_bgc_state(input: BgcColdStartInput<'_>) -> Result<BgcCo
         },
         climate: BgcClimateOwned {
             precipitation_10_day: vec![0.0],
+            // PR #504 新加的两项：vendor 冷启动也置 0（原来留着分配时的 spval）。
+            precipitation_30_day: vec![0.0],
             precipitation_60_day: vec![0.0],
             precipitation_365_day: vec![0.0],
             precipitation_today: vec![0.0],
+            relative_humidity_today: vec![0.0],
             precipitation_daily: vec![0.0; BGC_DAYS_PER_YEAR],
             soil_temperature_17: vec![273.15],
             relative_humidity_30_day: vec![0.0],
@@ -768,6 +773,9 @@ pub fn merge_bgc_cold_start_states(states: &[BgcColdStartState]) -> Result<BgcCo
             precipitation_10_day: merge_patch_f64(states, "BGC precipitation 10 day", |state| {
                 &state.climate.precipitation_10_day
             })?,
+            precipitation_30_day: merge_patch_f64(states, "BGC precipitation 30 day", |state| {
+                &state.climate.precipitation_30_day
+            })?,
             precipitation_60_day: merge_patch_f64(states, "BGC precipitation 60 day", |state| {
                 &state.climate.precipitation_60_day
             })?,
@@ -777,6 +785,11 @@ pub fn merge_bgc_cold_start_states(states: &[BgcColdStartState]) -> Result<BgcCo
             precipitation_today: merge_patch_f64(states, "BGC precipitation today", |state| {
                 &state.climate.precipitation_today
             })?,
+            relative_humidity_today: merge_patch_f64(
+                states,
+                "BGC relative humidity today",
+                |state| &state.climate.relative_humidity_today,
+            )?,
             precipitation_daily: merge_axis_f64(
                 states,
                 "BGC daily precipitation",
@@ -1087,12 +1100,20 @@ fn initial_leaf_and_root_carbon(
         if is_evergreen(class) {
             return (source.leaf_g_m2.min(300.0), 0.0, source.fine_root_g_m2, 0.0);
         }
-        return (
-            source.leaf_g_m2.min(300.0),
-            source.leaf_storage_g_m2.min(600.0),
-            source.fine_root_g_m2,
-            source.fine_root_storage_g_m2,
-        );
+        // 储存库读成 0（或负）时按 `fstor2tran * max(碳库, 1)` 补一个下限，否则来年无法展叶
+        // （CoLM-SYSU/CoLM#504 的 `MOD_Initialize`；`fstor2tran = 0.5`）。
+        const FSTOR2TRAN: f64 = 0.5;
+        let leaf = source.leaf_g_m2.min(300.0);
+        let mut leaf_storage = source.leaf_storage_g_m2.min(600.0);
+        if leaf_storage <= 0.0 {
+            leaf_storage = FSTOR2TRAN * leaf.max(1.0);
+        }
+        let root = source.fine_root_g_m2;
+        let mut root_storage = source.fine_root_storage_g_m2;
+        if root_storage <= 0.0 {
+            root_storage = FSTOR2TRAN * root.max(1.0);
+        }
+        return (leaf, leaf_storage, root, root_storage);
     }
     if is_evergreen(class) {
         (100.0, 0.0, 0.0, 0.0)

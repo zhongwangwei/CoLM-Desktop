@@ -304,6 +304,7 @@ fn gridded_history_aggregates_by_area_and_filter() {
             "km2".to_owned(),
             vec![3.0, 0.0],
         )],
+        compress_level: 1,
     });
     let mut buffers = HistoryBuffers::new(dims, site, 1).with_grid(grid).unwrap();
     buffers.declare(&["t_grnd", "fsena"]).unwrap();
@@ -363,6 +364,7 @@ fn vector_aggregation_weights_by_subfrc_and_skips_missing() {
         elmindex: vec![10, 20],
         elements: vec![0..2, 2..3],
         subfrc: vec![0.25, 0.75, 1.0],
+        compress_level: 1,
     };
     let values = [4.0, 8.0, MISSING_VALUE];
     let out = vector.aggregate(|p| values[p], |_| true, false);
@@ -371,4 +373,161 @@ fn vector_aggregation_weights_by_subfrc_and_skips_missing() {
     assert_eq!(out[1], MISSING_VALUE);
     let total = vector.aggregate(|p| values[p], |p| p != 0, true);
     assert_eq!(total, vec![8.0, MISSING_VALUE]);
+}
+
+/// 网格 history 的压缩照上游：逐时间量用 `DEF_HIST_CompressLevel`、不开 shuffle，静态面积固定 1 级，
+/// 级别 0 时逐时间量不挂过滤器；窗口变量分块为 1（上游在 `time` 有记录后才定义它们）。
+///
+/// 不在这里调 `ncdump -hs` 读 `_DeflateLevel`：子进程会继承同一测试进程里其它线程打开着的 HDF5
+/// 文件描述符（连带 flock），并行跑时别的测试重开自己刚写的文件就报 -101。所以只用进程内可读的
+/// 两个间接量：定长量压缩后必然分块（未压缩是连续存储），逐时间量压缩与否看文件大小。
+/// 逐变量的 deflate 级别与上游文件的对账在实测算例上用 `h5ls -v`/netCDF4 做。
+#[test]
+fn gridded_history_compression_follows_def_hist_compress_level() {
+    let dims = HistoryDimensions {
+        patch: 1,
+        soil: 10,
+        lake: 10,
+        snow_layers: 5,
+        vegnodes: 4,
+        band: 2,
+        radiation_types: 2,
+        sensor: 1,
+    };
+    let site = HistorySite {
+        latitude_degrees: 0.0,
+        longitude_degrees: 0.0,
+    };
+    // 一行 4000 格，全由 patch 0 覆盖：常值场压缩后远小于 32 kB 的原始数据。
+    let cells = 4000;
+    let mut sizes = Vec::new();
+    for level in [0u8, 3] {
+        let grid = std::sync::Arc::new(HistoryGrid {
+            lat: vec![0.25],
+            lon: (0..cells).map(|i| i as f64 + 0.5).collect(),
+            lat_s: vec![0.0],
+            lat_n: vec![0.5],
+            lon_w: (0..cells).map(|i| i as f64).collect(),
+            lon_e: (0..cells).map(|i| i as f64 + 1.0).collect(),
+            parts: vec![(0..cells).map(|cell| (cell, 1.0)).collect()],
+            patch_area: vec![cells as f64],
+            statics: vec![(
+                "landarea".to_owned(),
+                "land area".to_owned(),
+                "km2".to_owned(),
+                vec![1.0; cells],
+            )],
+            first_record_statics: Vec::new(),
+            compress_level: level,
+        });
+        let mut buffers = HistoryBuffers::new(dims, site, 1).with_grid(grid).unwrap();
+        buffers.enable_windows();
+        buffers.declare(&["t_grnd"]).unwrap();
+        buffers.set_time(0, 60).unwrap();
+        buffers.set_window(0, 1800.0, 60.0).unwrap();
+        buffers.select_patch(Some(0)).unwrap();
+        buffers.set_patch_scalar("t_grnd", 0, 280.0).unwrap();
+        buffers.include("t_grnd", 0).unwrap();
+        buffers.select_patch(None).unwrap();
+        let path = scratch(&format!("gridded-deflate{level}"));
+        buffers.write(&path).unwrap();
+        let file = netcdf::open(&path).unwrap();
+        for name in ["history_window_seconds", "history_window_end_minutes"] {
+            assert_eq!(
+                file.variable(name).unwrap().chunking().unwrap(),
+                Some(vec![1]),
+                "{name}"
+            );
+        }
+        // 静态面积不看级别，总是 1 级压缩 ⇒ 分块存储，块为整个场。
+        assert_eq!(
+            file.variable("landarea").unwrap().chunking().unwrap(),
+            Some(vec![1, cells])
+        );
+        // 坐标不压缩 ⇒ 连续存储。
+        assert_eq!(file.variable("lat_s").unwrap().chunking().unwrap(), None);
+        // 数据不受压缩影响。
+        assert_eq!(
+            file.variable("f_t_grnd")
+                .unwrap()
+                .get_values::<f64, _>(..)
+                .unwrap(),
+            vec![280.0; cells]
+        );
+        drop(file);
+        sizes.push(std::fs::metadata(&path).unwrap().len());
+        let _ = std::fs::remove_file(&path);
+    }
+    // 级别 0 时 `f_t_grnd` 原样 32 kB，3 级时压到几百字节。
+    assert!(
+        sizes[1] + 24_000 < sizes[0],
+        "level 0 file {} B, level 3 file {} B",
+        sizes[0],
+        sizes[1]
+    );
+}
+
+/// 向量 history：逐时间量按 `DEF_HIST_CompressLevel` 压缩，无时间维的单元静态量不压
+/// （上游 `ncio_write_serial_real8_1d` 用标量 `dimid`，netcdf-fortran 的一维重载忽略 `deflate_level`）。
+#[test]
+fn vector_history_compresses_time_variables_but_not_element_statics() {
+    let dims = HistoryDimensions {
+        patch: 3,
+        soil: 10,
+        lake: 10,
+        snow_layers: 5,
+        vegnodes: 4,
+        band: 2,
+        radiation_types: 2,
+        sensor: 1,
+    };
+    let site = HistorySite {
+        latitude_degrees: 0.0,
+        longitude_degrees: 0.0,
+    };
+    let vector = std::sync::Arc::new(HistoryVector {
+        elmindex: vec![10, 20],
+        elements: vec![0..2, 2..3],
+        subfrc: vec![0.25, 0.75, 1.0],
+        compress_level: 2,
+    });
+    let mut buffers = HistoryBuffers::new(dims, site, 1)
+        .with_vector(vector)
+        .unwrap();
+    buffers
+        .add_vector_static(
+            "mask_complete_upstream_regird",
+            "mask",
+            "100%",
+            vec![1.0, 0.0],
+        )
+        .unwrap();
+    buffers.declare(&["t_grnd"]).unwrap();
+    buffers.set_time(0, 60).unwrap();
+    for patch in 0..3 {
+        buffers.select_patch(Some(patch)).unwrap();
+        buffers.set_patch_scalar("t_grnd", 0, 280.0).unwrap();
+        buffers.include("t_grnd", 0).unwrap();
+    }
+    buffers.select_patch(None).unwrap();
+    let path = scratch("vector-deflate");
+    buffers.write(&path).unwrap();
+    let file = netcdf::open(&path).unwrap();
+    // 未压缩的一维定长量是连续存储（`chunking()` 为 `None`）。
+    assert_eq!(
+        file.variable("mask_complete_upstream_regird")
+            .unwrap()
+            .chunking()
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        file.variable("f_t_grnd")
+            .unwrap()
+            .get_values::<f64, _>(..)
+            .unwrap(),
+        vec![280.0, 280.0]
+    );
+    drop(file);
+    let _ = std::fs::remove_file(&path);
 }

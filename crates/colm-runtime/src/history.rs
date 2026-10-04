@@ -447,8 +447,9 @@ pub fn history_sidecar_name(restart: &str) -> Result<String> {
 /// 只在 `patchclass == 12` 且 patch 的首个 PFT 类别在列表里时写出，否则是填充值。
 const CROP_TYPE_HISTORY: &[(&str, &str, &[i32])] = &[
     ("huiswheat", "hui", &[19, 20]),
-    // `irrig_method_*`（`MOD_Hist.F90:2803-2995`）：玉米只认雨养类别 17（上游如此）。
-    ("irrig_method_corn", "irrig_method_corn", &[17]),
+    // `irrig_method_*`（`MOD_Hist.F90` 作物段）：玉米原来只认雨养类别 17，灌溉玉米 18 恰是唯一会灌溉的
+    // 玉米却是缺测（upstream-bugs 第 29 条，vendor 已修成 17/18）。
+    ("irrig_method_corn", "irrig_method_corn", &[17, 18]),
     ("irrig_method_swheat", "irrig_method_swheat", &[19, 20]),
     ("irrig_method_wwheat", "irrig_method_wwheat", &[21, 22]),
     (
@@ -565,11 +566,9 @@ fn set_bgc_history(
             Requires::BgcCrop => switches.crop,
             _ => false,
         };
-        let fire_only = FIRE_HISTORY.iter().any(|(name, _)| *name == key);
-        let unaccumulated = BGC_UNACCUMULATED.contains(&key)
-            && (irrigation.is_none() || key == "sum_deficit_irrig");
+        let unaccumulated = BGC_UNACCUMULATED.contains(&key) && irrigation.is_none();
         let accumulated = !unaccumulated
-            && (switches.fire || !fire_only)
+            && (switches.fire || !fire_only(key))
             && (switches.diag_matrix || !(entry.rank == 1 && key.ends_with("Cap")))
             && (switches.nitrif || !matches!(key, "CONC_O2_UNSAT" | "O2_DECOMP_DEPTH_UNSAT"));
         if allocated && accumulated && !names.contains(&key) {
@@ -577,6 +576,11 @@ fn set_bgc_history(
         }
     }
     for name in names {
+        // 火诊断量在 `DEF_USE_BGC` 下声明，但只在 `DEF_USE_FIRE` 下累加；FIRE 关时 CNSummary 照样把
+        // `fire_closs` 等算成 0，不能交给累加器。
+        if !switches.fire && fire_only(name) {
+            continue;
+        }
         let (name, source) = match CROP_TYPE_HISTORY.iter().find(|(field, ..)| *field == name) {
             Some((field, source, classes)) => {
                 // 上游对每个 patch 都 `acc1d` 这些量，写历史时才按作物类别过滤（`filter_crop`）。
@@ -675,7 +679,7 @@ fn set_bgc_history(
                 continue;
             }
         }
-        let source = match FIRE_HISTORY.iter().find(|(field, _)| *field == source) {
+        let source = match FIRE_SOURCES.iter().find(|(field, _)| *field == source) {
             Some((_, state)) => state,
             None => source,
         };
@@ -847,14 +851,8 @@ impl HistoryAccumulator {
     /// 逐位实测 `f_solvdln` 在 264 条里 11 条真值、253 条 spval，真值约等于同小时的 `f_solvd`。
     /// **其余变量一律除以全局 `nac`**，即使某些步是 spval 被跳过：DiagMatrix 的 `*Cap` 在年末
     /// 那一小时里前一步还是 spval、后一步才有值，上游写出的是值的一半（第 421 轮）。
-    fn write_means(
-        &self,
-        buffer: &mut HistoryBuffers,
-        record: usize,
-        bgc: Option<colm_core::bgc_driver::BgcSwitches>,
-    ) -> Result<()> {
-        self.write_plain_means(buffer, record)?;
-        self.write_fire_history(buffer, record, bgc)
+    fn write_means(&self, buffer: &mut HistoryBuffers, record: usize) -> Result<()> {
+        self.write_plain_means(buffer, record)
     }
 
     /// `DEF_USE_Dynamic_Wetland`：`f_wetwat` 写的是 `a_wdsrf / nac`（`MOD_Hist.F90:893-898`），
@@ -875,66 +873,6 @@ impl HistoryAccumulator {
         buffer
             .set_patch_scalar("wetwat", record, value)
             .context("cannot write the dynamic wetland storage")
-    }
-
-    /// 五个火灾历史量：复现上游传残留 `vecacc` 的写法（见 [`FIRE_HISTORY`]）。
-    ///
-    /// `vecacc` 的赋值不受 `DEF_hist_vars` 控制，火灾段之前最后一次赋值的来源由内核定：
-    /// - 默认内核：`f_wetzwt` 的 `a_zwt`；
-    /// - CROP：`f_grainc_to_cropprodc`；
-    /// - CROP + 灌溉：`f_runoff_supply`。
-    ///
-    /// 而 `write_history_variable_2d` 开头 `IF (.not. is_hist) RETURN`：
-    /// - 来源变量关掉时，残留是**原始累加和**，没除 `nac`，也没按 filter 置 `spval`；
-    /// - 五个火灾量各自只在开启时原地除一次 `nac` 并写出。
-    fn write_fire_history(
-        &self,
-        buffer: &mut HistoryBuffers,
-        record: usize,
-        bgc: Option<colm_core::bgc_driver::BgcSwitches>,
-    ) -> Result<()> {
-        if !FIRE_HISTORY.iter().any(|(name, _)| buffer.declares(name)) {
-            return Ok(());
-        }
-        let steps = self.steps as f64;
-        let crop = bgc.is_some_and(|switches| switches.crop);
-        let irrigation = bgc.is_some_and(|switches| switches.irrigation);
-        let (source, history_name) = if crop && irrigation {
-            ("runoff_supply", "runoff_supply")
-        } else if crop {
-            ("grainc_to_cropprodc", "grainc_to_cropprodc")
-        } else {
-            ("zwt", "wetzwt")
-        };
-        let mut value = match self.sums.get(source) {
-            Some(Accumulated::Scalar { sum, count }) if *count > 0 => *sum,
-            _ => colm_core::MISSING,
-        };
-        if buffer.declares(history_name) {
-            if value != colm_core::MISSING {
-                value /= steps;
-            }
-            // 被过滤的 patch 置 `spval`：CROP 的两个来源两种写出都这样；`f_wetzwt` 只有单点的
-            // `single_write_2d` 置（网格的 `flux_map_and_write_2d` 不改 `acc_vec`）。
-            let filtered = self.filtered.contains(history_name);
-            if filtered && (crop || !buffer.is_spatial()) {
-                value = colm_core::MISSING;
-            }
-        }
-        for (name, _) in FIRE_HISTORY {
-            if !buffer.declares(name) {
-                continue;
-            }
-            buffer.include(name, record)?;
-            if value == colm_core::MISSING {
-                continue;
-            }
-            value /= steps;
-            buffer
-                .set_patch_scalar(name, record, value)
-                .with_context(|| format!("cannot write {name} into the history buffers"))?;
-        }
-        Ok(())
     }
 
     fn write_plain_means(&self, buffer: &mut HistoryBuffers, record: usize) -> Result<()> {
@@ -990,9 +928,6 @@ impl HistoryAccumulator {
             if self.filtered.contains(name) {
                 continue;
             }
-            if FIRE_HISTORY.iter().any(|(fire, _)| fire == name) {
-                continue;
-            }
             match accumulated {
                 Accumulated::Scalar { sum, count } => {
                     // 整条记录里一次有效值都没有的变量沿用缓冲区的填充值，
@@ -1004,8 +939,11 @@ impl HistoryAccumulator {
                     // 乘倒数只在 `nac` 为 2 的幂时相同 —— 小时记录（两子步）看不出来，
                     // 日记录（48 步）就差 1 ulp（第 406 轮）。
                     // 瞬时量上游写的是 `vecacc = x*nac`、再按均值那条路 `/nac`
-                    // （`MOD_Hist.F90:741-743`）：往返在 `nac` 不是 2 的幂时不一定精确。
-                    let mean = if INSTANTANEOUS_VARIABLES.contains(&name.as_str()) {
+                    // （`MOD_Hist.F90:741-743`）：往返在 `nac` 不是 2 的幂时不一定精确。灌溉的四个
+                    // 赋值量（[`ASSIGNED_VARIABLES`]）vendor 修复后同样写法。
+                    let mean = if INSTANTANEOUS_VARIABLES.contains(&name.as_str())
+                        || ASSIGNED_VARIABLES.contains(&name.as_str())
+                    {
                         let steps = self.steps as f64;
                         sum * steps / steps
                     } else {
@@ -1053,8 +991,7 @@ impl HistoryAccumulator {
 const SOIL_STATICS: [&str; 3] = ["BD_all", "wfc", "OM_density"];
 
 /// CROP 下分配的灌溉账目：灌溉关掉时上游数组一直是 `spval`，不累加；打开时见
-/// [`irrigation_history_value`]（`sum_deficit_irrig` 例外，上游从不给 `a_sum_deficit_irrig` 赋值）。
-/// FIRE 的五项见 [`FIRE_HISTORY`]。
+/// [`irrigation_history_value`]。
 const BGC_UNACCUMULATED: [&str; 11] = [
     "sum_irrig",
     "sum_deficit_irrig",
@@ -1070,14 +1007,13 @@ const BGC_UNACCUMULATED: [&str; 11] = [
 ];
 
 /// 灌溉打开时 `accumulate_fluxes` 的灌溉段（`MOD_Vars_1DAccFluxes.F90:2423-2432`）交给累加器的值。
-/// `sum_irrig`/`sum_irrig_count`/`waterstorage` 是**赋值**（见 [`ASSIGNED_VARIABLES`]），其余 `acc1d`。
+/// 四个生长季累计量是**赋值**（见 [`ASSIGNED_VARIABLES`]），其余 `acc1d`。
 fn irrigation_history_value(name: &str, state: &colm_core::IrrigationState) -> Option<f64> {
     Some(match name {
         "sum_irrig" => state.sum_mm,
         "sum_irrig_count" => state.sum_count,
         "waterstorage" => state.water_storage_mm,
-        // 上游从不给 `a_sum_deficit_irrig` 赋值：分配与每次写出后都是 `spval`，历史里是填充值。
-        "sum_deficit_irrig" => colm_core::MISSING,
+        "sum_deficit_irrig" => state.sum_deficit_mm,
         "groundwater_demand" => state.groundwater_demand_mm,
         "groundwater_supply" => state.groundwater_supply_mm,
         "reservoirriver_demand" => state.reservoirriver_demand_mm,
@@ -1089,24 +1025,145 @@ fn irrigation_history_value(name: &str, state: &colm_core::IrrigationState) -> O
     })
 }
 
-/// 每步**赋值**而不是 `acc1d` 的量（`a_sum_irrig = sum_irrig` 等）：累加器里只留末步的值，
-/// 写出时照样除以 `nac`（写出器不区分），所以历史里是"末值 / nac"；旁车里就是末值。
-const ASSIGNED_VARIABLES: [&str; 3] = ["sum_irrig", "sum_irrig_count", "waterstorage"];
+/// 每步**赋值**而不是 `acc1d` 的生长季累计量（`a_sum_irrig = sum_irrig` 等）：累加器里只留末步的值，
+/// 写出时与 `*_inst` 一样先乘 `nac` 再交给除以 `nac` 的写出器，即写末值；旁车里也是末值。上游原来漏了
+/// `a_sum_deficit_irrig`、且写出"末值 / nac"（upstream-bugs 第 27 条，vendor 已修）。
+const ASSIGNED_VARIABLES: [&str; 4] = [
+    "sum_irrig",
+    "sum_deficit_irrig",
+    "sum_irrig_count",
+    "waterstorage",
+];
 
-/// `DEF_USE_FIRE` 的五个历史量与各自的累加来源（`acc1d(abm_lf, a_abm)` 等，`MOD_Vars_1DAccFluxes.F90:2435`）。
+/// `DEF_USE_FIRE` 下才累加（`MOD_Vars_1DAccFluxes.F90` 的 `IF (DEF_USE_FIRE)` 段）、来源名与历史名不同的量。
 ///
-/// **写出的不是它们的平均。** 上游 `MOD_Hist.F90:1937-1957` 五次都把临时数组 `vecacc` 传给
-/// `write_history_variable_2d`，而后者原地 `vecacc = vecacc/nac`（非 `spval` 处）并把过滤掉的 patch 置
-/// `spval`。所以写出的是上一次用 `vecacc` 写历史后的残留、每写一个再除一次 `nac`：默认内核里上一次是
-/// `f_wetzwt`（湿地过滤，BGC patch 恒为土壤 → 全是 `spval`），CROP 内核里是 `f_grainc_to_cropprodc`
-/// （灌溉关闭时）。见 [`HistoryAccumulator::write_fire_history`]。
-const FIRE_HISTORY: [(&str, &str); 5] = [
+/// 上游原来五次都把临时数组 `vecacc` 传给 `write_history_variable_2d`，写出的是上一个历史量的残留；
+/// PR #504 改成传 `a_abm` 等，现在都是普通的时间平均。
+const FIRE_SOURCES: [(&str, &str); 7] = [
     ("abm", "abm_lf"),
     ("gdp", "gdp_lf"),
     ("peatf", "peatf_lf"),
     ("hdm", "hdm_lf"),
-    ("lnfm", "lnfm"),
+    ("btran2", "fire_btran2"),
+    ("col_fire_closs", "fire_closs"),
+    ("col_fire_nloss", "fire_nloss"),
 ];
+
+/// PR #504 的火诊断量（`MOD_Vars_1DAccFluxes.F90` 的 `IF (DEF_USE_FIRE)` 段 `acc1d`，按历史名）。
+/// 历史在 `DEF_USE_BGC` 下就声明（`MOD_Hist.F90` 的 Fire diagnostics 段），火关闭时是填充值。
+const FIRE_DIAGNOSTICS: [&str; 104] = [
+    "farea_burned",
+    "baf_crop",
+    "baf_peatf",
+    "nfire",
+    "fuelc",
+    "btran2",
+    "pft_fire_closs",
+    "pft_fire_nloss",
+    "col_fire_closs",
+    "col_fire_nloss",
+    "somc_fire",
+    "litfire",
+    "somfire",
+    "totfire",
+    "m_leafc_to_fire",
+    "m_frootc_to_fire",
+    "m_livestemc_to_fire",
+    "m_deadstemc_to_fire",
+    "m_livecrootc_to_fire",
+    "m_deadcrootc_to_fire",
+    "m_leafc_storage_to_fire",
+    "m_frootc_storage_to_fire",
+    "m_livestemc_storage_to_fire",
+    "m_deadstemc_storage_to_fire",
+    "m_livecrootc_storage_to_fire",
+    "m_deadcrootc_storage_to_fire",
+    "m_gresp_storage_to_fire",
+    "m_leafc_xfer_to_fire",
+    "m_frootc_xfer_to_fire",
+    "m_livestemc_xfer_to_fire",
+    "m_deadstemc_xfer_to_fire",
+    "m_livecrootc_xfer_to_fire",
+    "m_deadcrootc_xfer_to_fire",
+    "m_gresp_xfer_to_fire",
+    "m_livestemc_to_deadstemc_fire",
+    "m_livecrootc_to_deadcrootc_fire",
+    "m_leafc_to_litter_fire",
+    "m_frootc_to_litter_fire",
+    "m_livestemc_to_litter_fire",
+    "m_deadstemc_to_litter_fire",
+    "m_livecrootc_to_litter_fire",
+    "m_deadcrootc_to_litter_fire",
+    "m_leafc_storage_to_litter_fire",
+    "m_frootc_storage_to_litter_fire",
+    "m_livestemc_storage_to_litter_fire",
+    "m_deadstemc_storage_to_litter_fire",
+    "m_livecrootc_storage_to_litter_fire",
+    "m_deadcrootc_storage_to_litter_fire",
+    "m_gresp_storage_to_litter_fire",
+    "m_leafc_xfer_to_litter_fire",
+    "m_frootc_xfer_to_litter_fire",
+    "m_livestemc_xfer_to_litter_fire",
+    "m_deadstemc_xfer_to_litter_fire",
+    "m_livecrootc_xfer_to_litter_fire",
+    "m_deadcrootc_xfer_to_litter_fire",
+    "m_gresp_xfer_to_litter_fire",
+    "m_leafn_to_fire",
+    "m_frootn_to_fire",
+    "m_livestemn_to_fire",
+    "m_deadstemn_to_fire",
+    "m_livecrootn_to_fire",
+    "m_deadcrootn_to_fire",
+    "m_leafn_storage_to_fire",
+    "m_frootn_storage_to_fire",
+    "m_livestemn_storage_to_fire",
+    "m_deadstemn_storage_to_fire",
+    "m_livecrootn_storage_to_fire",
+    "m_deadcrootn_storage_to_fire",
+    "m_leafn_xfer_to_fire",
+    "m_frootn_xfer_to_fire",
+    "m_livestemn_xfer_to_fire",
+    "m_deadstemn_xfer_to_fire",
+    "m_livecrootn_xfer_to_fire",
+    "m_deadcrootn_xfer_to_fire",
+    "m_livestemn_to_deadstemn_fire",
+    "m_livecrootn_to_deadcrootn_fire",
+    "m_retransn_to_fire",
+    "m_leafn_to_litter_fire",
+    "m_frootn_to_litter_fire",
+    "m_livestemn_to_litter_fire",
+    "m_deadstemn_to_litter_fire",
+    "m_livecrootn_to_litter_fire",
+    "m_deadcrootn_to_litter_fire",
+    "m_leafn_storage_to_litter_fire",
+    "m_frootn_storage_to_litter_fire",
+    "m_livestemn_storage_to_litter_fire",
+    "m_deadstemn_storage_to_litter_fire",
+    "m_livecrootn_storage_to_litter_fire",
+    "m_deadcrootn_storage_to_litter_fire",
+    "m_leafn_xfer_to_litter_fire",
+    "m_frootn_xfer_to_litter_fire",
+    "m_livestemn_xfer_to_litter_fire",
+    "m_deadstemn_xfer_to_litter_fire",
+    "m_livecrootn_xfer_to_litter_fire",
+    "m_deadcrootn_xfer_to_litter_fire",
+    "m_retransn_to_litter_fire",
+    "m_litr1_c_to_fire",
+    "m_litr1_n_to_fire",
+    "m_litr2_c_to_fire",
+    "m_litr2_n_to_fire",
+    "m_litr3_c_to_fire",
+    "m_litr3_n_to_fire",
+    "m_cwd_c_to_fire",
+    "m_cwd_n_to_fire",
+];
+
+/// 只在 `DEF_USE_FIRE` 下累加的历史量。
+fn fire_only(key: &str) -> bool {
+    key == "lnfm"
+        || FIRE_SOURCES.iter().any(|(name, _)| *name == key)
+        || FIRE_DIAGNOSTICS.contains(&key)
+}
 
 /// 只为续跑旁车累加、Rust 的步输出里没有的量：上游 `accumulate_fluxes` 对每个 patch 每步都
 /// `acc2d` 它们（`MOD_Vars_1DAccFluxes.F90:2496-2506`），而它们在一次运行里不变。
@@ -1234,6 +1291,21 @@ fn set_sidecar_only(
         }
     }
     Ok(())
+}
+
+/// `DEF_USE_OZONESTRESS` 的三个累加量：`acc1d(o3uptakesun/sha)`（`MOD_Vars_1DAccFluxes.F90:2616-2619`）与
+/// `acc1d(forc_ozone, a_ozone)`（`:3002-3004`），对所有 patch 做。不开臭氧数据时，没被 `LeafTemperature`
+/// 碰过的 patch 上 `forc_ozone` 是分配时的 `spval`（vendor 修补，upstream-bugs 第 70 条），`acc1d` 跳过。
+fn set_ozone_history(
+    sink: &mut impl HistorySink,
+    ozone: Option<&colm_core::OzoneState>,
+) -> Result<()> {
+    let Some(ozone) = ozone else {
+        return Ok(());
+    };
+    sink.scalar("o3uptakesun", 0, ozone.sunlit_uptake_mmol_m2)?;
+    sink.scalar("o3uptakesha", 0, ozone.shaded_uptake_mmol_m2)?;
+    sink.scalar("xy_ozone", 0, ozone.concentration_ppbv)
 }
 
 impl HistoryAccumulator {
@@ -1822,9 +1894,23 @@ struct MaskedBgcSink<'a, S: HistorySink> {
 impl<S: HistorySink> MaskedBgcSink<'_, S> {
     fn passes(&self, name: &str) -> bool {
         const STATES: [&str; 17] = [
-            "totvegc", "totlitc", "totcwdc", "totsomc", "totcolc", "totvegn", "totlitn", "totcwdn",
-            "totsomn", "totcoln", "CONC_O2_UNSAT", "O2_DECOMP_DEPTH_UNSAT", "ndep_to_sminn", "abm",
-            "gdp", "peatf", "hdm",
+            "totvegc",
+            "totlitc",
+            "totcwdc",
+            "totsomc",
+            "totcolc",
+            "totvegn",
+            "totlitn",
+            "totcwdn",
+            "totsomn",
+            "totcoln",
+            "CONC_O2_UNSAT",
+            "O2_DECOMP_DEPTH_UNSAT",
+            "ndep_to_sminn",
+            "abm",
+            "gdp",
+            "peatf",
+            "hdm",
         ];
         if name == "totsoiln_vr" {
             return self.soil;
@@ -2551,6 +2637,15 @@ pub fn set_lct_fluxes(
             ("rsur_ie", water.infiltration_excess_runoff_mm_s),
             ("frcsat", water.saturated_fraction),
         ]);
+    } else {
+        // `WATER_2014` 不设这三项，它们停在分配时的 `spval`：`acc1d` 跳过、不进分子，但网格写出的分母
+        // `sumarea` 只看 `filter`，这些 patch 的面积照样计入（与干湖同理）。原来干脆不交，网格里只剩水体
+        // patch 的 `frcsat = 1`、`rsur_se = rsur` 被放大成整格的值（tm2w 实测）。
+        scalars.extend_from_slice(&[
+            ("rsur_se", f64::NAN),
+            ("rsur_ie", f64::NAN),
+            ("frcsat", f64::NAN),
+        ]);
     }
     // `qcharge` 每步都累加（VSF 与否），由 `set_sidecar_only` 写；历史里只在 VSF 关掉时声明。
     // **`frcsat` 在 VSF 关掉时刻意不填。** 上游只有 `WATER_VSF` 走 `Runoff_*` 并传
@@ -2559,11 +2654,11 @@ pub fn set_lct_fluxes(
     // 而开了 VSF 的黄金算例 264 条全有值。留空即与 Fortran 逐位相同
     // （`colm-hist` 的填充值与上游的 `spval` 都是 -1e36）。
     for (name, value) in scalars {
-        // VIC 产流那一支上游不给 `frcsat` 赋值（`intent(out)` 未写，见 upstream-bugs 第 16 条），
-        // 数组里一直是分配时的 `spval`，`acc1d` 跳过它 —— 交 `spval`，留填充值。
+        // 干湖的 `frcsat` 是 `spval`（`CoLMMAIN.F90:1237`），`acc1d` 跳过它 —— 交 `spval`，留填充值。
         // 不能干脆不交：网格写出的分母 `sumarea` 只看 `filter`（`MOD_HistGridded.F90:203-220`），
-        // 这类 patch（动态湿地、VIC、干湖）的面积照样计入，只是分子里没有它。
-        if name == "frcsat" && value.is_nan() {
+        // 干湖的面积照样计入，只是分子里没有它。（VIC 与动态湿地原来也不赋值，见 upstream-bugs
+        // 第 16 条，vendor 已修。）
+        if matches!(name, "frcsat" | "rsur_se" | "rsur_ie") && value.is_nan() {
             sink.scalar(name, record, colm_core::MISSING)?;
             continue;
         }
@@ -2902,9 +2997,12 @@ impl HistorySession {
             template.patch_type
         );
         let restart = |name: &str| {
-            template
-                .restart_diagnostic(name)
-                .with_context(|| format!("the restart has no {name} for masked patch {}", template.patch))
+            template.restart_diagnostic(name).with_context(|| {
+                format!(
+                    "the restart has no {name} for masked patch {}",
+                    template.patch
+                )
+            })
         };
         let (tref, qref, z0m, emis, coszen) = (
             restart("tref")?,
@@ -2997,6 +3095,7 @@ impl HistorySession {
                     template.patch_type == 0,
                 )?;
             }
+            set_ozone_history(accumulator, state.energy.leaf.ozone.as_ref())?;
             set_sidecar_only(
                 accumulator,
                 template,
@@ -3251,6 +3350,7 @@ impl HistorySession {
                 reference.surface_cosine_zenith,
             )?;
             set_lct_forcing_mirrors(accumulator, 0, reference, &output.energy.precipitation)?;
+            set_ozone_history(accumulator, state.energy.leaf.ozone.as_ref())?;
             set_sidecar_only(
                 accumulator,
                 template,
@@ -3542,6 +3642,7 @@ impl HistorySession {
             accumulator.layer("rootr", 0, &vec![0.0; layers])?;
             // 冰川/湖：`ldew_rain = ldew_snow = qcharge = 0`（`CoLMMAIN.F90:2218-2254`）；
             // VSF 打开时 `acc1d(qcharge)` 整个不调（`MOD_Vars_1DAccFluxes.F90:2135`）。
+            set_ozone_history(accumulator, state.energy.leaf.ozone.as_ref())?;
             set_sidecar_only(
                 accumulator,
                 template,
@@ -3609,6 +3710,7 @@ impl HistorySession {
                 ("qintr", output.qintr),
                 ("qdrip", output.qdrip),
             ];
+            set_ozone_history(accumulator, state.energy.leaf.ozone.as_ref())?;
             set_sidecar_only(
                 accumulator,
                 template,
@@ -3844,6 +3946,7 @@ impl HistorySession {
             // 非 VSF 时 `errorw = 0`（`:1532`）；`f_wetwat*`/`f_wetzwt` 只在湿地上写
             // （`MOD_Hist.F90` 的 `filter = patchtype == 2`）。
             let wetland = template.patch_type == 2;
+            set_ozone_history(accumulator, state.energy.leaf.ozone.as_ref())?;
             set_sidecar_only(
                 accumulator,
                 template,
@@ -4153,8 +4256,12 @@ impl HistorySession {
                             .as_deref()
                             .context("a tracer history needs every patch to carry tracer state")?;
                         let patch_type = tracer.patch_types[patch];
-                        let land = hist::PatchFilter::Land.admits(patch_type, forcmask_ok(patch), true);
-                        let patch_ok = variable.patch_filter.admits(patch_type, forcmask_ok(patch), true);
+                        let land =
+                            hist::PatchFilter::Land.admits(patch_type, forcmask_ok(patch), true);
+                        let patch_ok =
+                            variable
+                                .patch_filter
+                                .admits(patch_type, forcmask_ok(patch), true);
                         let pairs = layered.then(|| hist::soisno_layer_pairs(itrc, &track.state));
                         let term = (!layered).then(|| {
                             hist::patch_term(variable, descriptor, itrc, &track.state, nac)
@@ -4193,10 +4300,11 @@ impl HistorySession {
                         .tracer
                         .as_deref()
                         .context("a tracer history needs every patch to carry tracer state")?;
-                    let patch_ok =
-                        variable
-                            .patch_filter
-                            .admits(tracer.patch_types[patch], forcmask_ok(patch), true);
+                    let patch_ok = variable.patch_filter.admits(
+                        tracer.patch_types[patch],
+                        forcmask_ok(patch),
+                        true,
+                    );
                     if layered {
                         let values = hist::single_point_soisno(itrc, &track.state, nac, patch_ok);
                         let base =
@@ -4484,6 +4592,17 @@ impl HistorySession {
                 buffer.enable_windows();
             }
             // `DEF_USE_CBL_HEIGHT`：`acc1d (forc_hpbl, a_hpbl)` → `f_xy_hpbl`（`MOD_Hist.F90:538`）。
+            // `DEF_USE_OZONESTRESS`：`f_o3uptakesun/sha`（`MOD_Hist.F90:545-553`）；`f_xy_ozone` 写在
+            // `IF (DEF_USE_BGC)` 段里（`:2357-2362`），不开 BGC 时只累加进旁车。
+            if means
+                .iter()
+                .any(|means| means.offered.contains("o3uptakesun"))
+            {
+                buffer.declare(&["o3uptakesun", "o3uptakesha"])?;
+                if self.bgc.is_some() {
+                    buffer.declare(&["xy_ozone"])?;
+                }
+            }
             if means.iter().any(|means| means.offered.contains("xy_hpbl")) {
                 buffer.declare(&["xy_hpbl"])?;
             }
@@ -4528,7 +4647,7 @@ impl HistorySession {
             if means_are_split(self.accumulators.len()) {
                 buffer.select_patch(Some(patch))?;
             }
-            means.write_means(buffer, record.record, self.bgc)?;
+            means.write_means(buffer, record.record)?;
             if self.dynamic_wetland {
                 means.write_dynamic_wetland_storage(buffer, record.record)?;
             }

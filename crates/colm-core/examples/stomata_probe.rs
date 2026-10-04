@@ -72,6 +72,7 @@ fn main() {
                             quantum_efficiency: effcon,
                             maximum_carboxylation_25c_mol_m2_s: vmax25,
                             c3c4,
+                            respiration_fraction_override: None,
                             low_temperature_slope: slti,
                             low_temperature_half_k: hlti,
                             high_temperature_slope: shti,
