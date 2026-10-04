@@ -142,7 +142,7 @@ pub(crate) fn leaf_temperature_pc(
     parameters: &[PftParameters],
     columns: &mut [PftColumn],
     drive: &[PcPftDrive],
-) -> Result<(PcPatchFlux, Vec<PcPftFlux>)> {
+) -> Result<Option<(PcPatchFlux, Vec<PcPftFlux>)>> {
     let n = parameters.len();
     ensure!(
         columns.len() == n && drive.len() == n,
@@ -166,18 +166,6 @@ pub(crate) fn leaf_temperature_pc(
     let plant_hydraulics = leaf.plant_hydraulics;
     let layers_soil = plant_hydraulics.map_or(0, |p| p.layer_thickness_m.len());
 
-    ensure!(
-        columns
-            .iter()
-            .all(|column| column.leaf.ozone.is_some() == leaf.ozone.is_some()),
-        "every PC PFT needs an ozone state exactly when DEF_USE_OZONESTRESS is on"
-    );
-    // `:558-570`（vendor FIX 2026-08-16 #4，后改成无条件）：迭代前 `o3coef*_p = 1`。
-    for column in columns.iter_mut() {
-        if let Some(ozone) = column.leaf.ozone.as_mut() {
-            ozone.reset_factors();
-        }
-    }
     let lai: Vec<f64> = columns.iter().map(|c| c.leaf_area_index).collect();
     let sai: Vec<f64> = columns.iter().map(|c| c.stem_area_index).collect();
     // `:535`
@@ -191,11 +179,26 @@ pub(crate) fn leaf_temperature_pc(
             tl[i] = forcing_air_temperature_k;
         }
     }
+    // `:545-547`：没有一个有植被的 PFT 时提前返回（上游缺陷 #75：原先 intent(out) 输出不赋值，
+    // vendor 现在显式赋上调用方原有的值）。此时只有 `tl = forc_t` 落地，其余 inout 都不动——
+    // 包括下面 `:558-570` 的臭氧系数重置，所以这个判断要在它之前。
     if !vegetated.iter().any(|&v| v) {
-        bail!(
-            "a PC patch without any vegetated PFT returns early from LeafTemperaturePC with \
-             undefined outputs upstream; the Rust port does not reproduce that"
-        );
+        for (column, &t) in columns.iter_mut().zip(&tl) {
+            column.leaf.leaf_temperature_k = t;
+        }
+        return Ok(None);
+    }
+    ensure!(
+        columns
+            .iter()
+            .all(|column| column.leaf.ozone.is_some() == leaf.ozone.is_some()),
+        "every PC PFT needs an ozone state exactly when DEF_USE_OZONESTRESS is on"
+    );
+    // `:558-570`（vendor FIX 2026-08-16 #4，后改成无条件）：迭代前 `o3coef*_p = 1`。
+    for column in columns.iter_mut() {
+        if let Some(ozone) = column.leaf.ozone.as_mut() {
+            ozone.reset_factors();
+        }
     }
 
     // `:578`：`FMA(1-fsno, zlnd, fsno*zsno)`
@@ -1441,7 +1444,7 @@ pub(crate) fn leaf_temperature_pc(
     for i in 0..n {
         columns[i].leaf.leaf_temperature_k = tl[i];
     }
-    Ok((
+    Ok(Some((
         PcPatchFlux {
             raw: raw.max(0.0),
             taux,
@@ -1470,7 +1473,7 @@ pub(crate) fn leaf_temperature_pc(
             fq,
         },
         fluxes,
-    ))
+    )))
 }
 
 /// `:1378-1420` 与 `:1665-1707`：解各层冠层空气温湿度（两处同式）。

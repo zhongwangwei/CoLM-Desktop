@@ -489,6 +489,20 @@ fn finish_energy_step(
             root_uptake,
         )
     };
+    // `MOD_Thermal.F90:1509-1519`：patch 的 `lai+sai <= 1e-6` 时湍流相似量换成地面值。三支之后
+    // 统一做：LCT 无冠层支本来就是地面值；PFT/PC 的聚合值（`sum(x_p*pftfrac)`，PC 无植被斑块的
+    // `zol/rib/ustar/qstar/tstar` 是 0）在这里被覆盖。
+    if input.leaf_temperature.leaf_area_index + input.leaf_temperature.stem_area_index <= 1.0e-6 {
+        leaf.friction_velocity_m_s = preliminary_ground_flux.friction_velocity_m_s;
+        leaf.temperature_scale_k = preliminary_ground_flux.temperature_scale_k;
+        leaf.humidity_scale = preliminary_ground_flux.humidity_scale;
+        leaf.bulk_richardson = preliminary_ground_flux.bulk_richardson_number;
+        leaf.zol = preliminary_ground_flux.dimensionless_height;
+        leaf.momentum_roughness_m = preliminary_ground_flux.momentum_roughness_m;
+        leaf.momentum_similarity = preliminary_ground_flux.momentum_integral;
+        leaf.heat_similarity = preliminary_ground_flux.heat_integral;
+        leaf.moisture_similarity = preliminary_ground_flux.moisture_integral;
+    }
     // 两支共用的地面边界：`htvp` 与 `emg` 与叶温无关，直接从入参取。
     let ground_latent_heat_j_kg = ground_flux_input.vaporization_heat_j_kg;
     let ground_emissivity = input.leaf_temperature.ground_emissivity;

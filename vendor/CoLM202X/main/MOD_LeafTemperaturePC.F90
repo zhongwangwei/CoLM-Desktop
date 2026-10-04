@@ -544,6 +544,20 @@ CONTAINS
 
       ! When there is no vegetation in this Plant Community Patch, RETURN
       IF (.not. is_vegetated_patch) THEN
+! ==== FIX 2026-10-05 #75 BEGIN: the intent(out) outputs were left unassigned on this
+! early return; the caller only got sensible values because gfortran happened to keep
+! what MOD_Thermal had stored there. Assign those same values explicitly.
+         z0mpc(:)  = (1.-fsno)*zlnd + fsno*zsno
+         rst(:)    = 2.0e4
+         assim(:)  = 0.
+         respc(:)  = 0.
+         fsenl(:)  = 0.
+         fevpl(:)  = 0.
+         etr(:)    = 0.
+         hprl(:)   = 0.
+         dheatl(:) = 0.
+         IF (present(raw_trc_out)) raw_trc_out = 0._r8
+! ==== FIX 2026-10-05 #75 END ====
          RETURN
       ENDIF
 

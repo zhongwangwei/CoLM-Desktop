@@ -1156,7 +1156,12 @@ fn pc_records(
         context.ground_flux,
         preliminary,
     );
-    let (shared, fluxes) = crate::leaf_temperature_pc::leaf_temperature_pc(
+    // `MOD_Thermal.F90:1088`：`z0m_p = (1-fsno)*zlnd + fsno*zsno`，`z0m = sum(z0m_p*pftfrac)`。
+    let ground_roughness = (1.0 - template.snow_cover_fraction).mul_add(
+        template.soil_roughness_m,
+        template.snow_cover_fraction * template.snow_roughness_m,
+    );
+    let Some((shared, fluxes)) = crate::leaf_temperature_pc::leaf_temperature_pc(
         template,
         forcing.air_temperature_k,
         preliminary.heat_roughness_m,
@@ -1164,7 +1169,21 @@ fn pc_records(
         parameters,
         columns,
         &drive,
-    )?;
+    )?
+    else {
+        let roughness = pft_sum(
+            parameters
+                .iter()
+                .map(|pft| (ground_roughness, pft.fraction)),
+        );
+        return Ok(columns
+            .iter_mut()
+            .zip(&drive)
+            .map(|(column, pft)| {
+                pc_unvegetated_record(context, column, pft.sunlit_fraction, roughness, layers)
+            })
+            .collect());
+    };
     let mut records = Vec::with_capacity(fluxes.len());
     for ((column, flux), pft) in columns.iter_mut().zip(fluxes).zip(&drive) {
         // 第一个 PFT 循环（`:853-889`）：有冠层时 `laisun_p = lai_p*fsun_p`，否则清零。
@@ -1239,6 +1258,49 @@ fn pc_records(
         });
     }
     Ok(records)
+}
+
+/// PC 斑块一个有植被的 PFT 都没有时，`LeafTemperaturePC` 提前返回（上游缺陷 #75），各 `_p` 取
+/// `THERMAL` 调用前已有的值：逐 PFT 输出是 PC 分支的初值（`:1044-1072`），patch 级湍流量是前置
+/// `GroundFluxes` 的结果，`dlrad/ulrad` 是 `:555-566` 的裸地值，`zol/rib/ustar/qstar/tstar` 是
+/// `:550-552` 的 0，`raw` 是 `:542` 的 0，`z0m = sum(z0m_p*pftfrac)`。
+///
+/// `fm/fh/fq` 在 Fortran 里是 `THERMAL` 的 intent(out) 实参带进来的上一步值；它们只经聚合进入
+/// patch 级，而这种斑块 `lai+sai <= 1e-6`，`:1509-1519` 随后用 `*_g` 覆盖，这里直接取 `*_g`。
+fn pc_unvegetated_record(
+    context: &PftCanopyContext<'_>,
+    column: &mut PftColumn,
+    sunlit_fraction: f64,
+    roughness: f64,
+    layers: usize,
+) -> PftLeafRecord {
+    let ground = bare_record(context, layers);
+    // 与有植被路径相同（`:853-889`）。
+    let (laisun, laisha) = if has_canopy(column.leaf_area_index, column.stem_area_index) {
+        (
+            column.leaf_area_index * sunlit_fraction,
+            column.leaf_area_index * (1.0 - sunlit_fraction),
+        )
+    } else {
+        (0.0, 0.0)
+    };
+    column.reference_temperature_k = context.preliminary_ground_flux.reference_temperature_k;
+    column.reference_humidity = context.preliminary_ground_flux.reference_humidity;
+    column.momentum_roughness_m = roughness;
+    column.stomatal_resistance_s_m = 2.0e4;
+    PftLeafRecord {
+        laisun,
+        laisha,
+        zol: 0.0,
+        rib: 0.0,
+        ustar: 0.0,
+        qstar: 0.0,
+        tstar: 0.0,
+        rstfacsun: 1.0,
+        rstfacsha: 1.0,
+        raw: 0.0,
+        ..ground
+    }
 }
 
 /// 无冠层 PFT 的记录：湍流量取前置 `GroundFluxes`，长波按裸地（`:1004-1026`）。

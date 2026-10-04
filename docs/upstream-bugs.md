@@ -668,6 +668,20 @@
   照样并入（schema 重新生成）。Rust：`derive_soil_parameters` 存 `alpha*0.1`、`sc_vgm/fc_vgm` 用换算后的值，
   `soil_surface_resistance` 的常数改 3399。
 
+### 75. `LeafTemperaturePC` 在无植被斑块上提前返回，intent(out) 输出全部未赋值
+
+- **位置**：`main/MOD_LeafTemperaturePC.F90:545-547`（`IF (.not. is_vegetated_patch) RETURN`）；调用方 `main/MOD_Thermal.F90`
+  的 PC 分支（`DEF_USE_PC` 且 `DEF_FAST_PC=.false.`）。
+- **原因**：PC 斑块的每个 PFT 都 `fcover==0` 或 `lai+sai<=1e-6`（冬季落叶、雪埋）时，子程序只把 `tl` 设成气温就返回，
+  `z0mpc/rst/assim/respc/fsenl/fevpl/etr/hprl/dheatl` 这些 intent(out) 一个都不赋，按标准是未定义值；可选的
+  `raw_trc_out` 也不赋。
+- **影响**：gfortran 实际不碰这些数组，调用方拿到的恰好是 `THERMAL` 在调用前放进去的初值（`rst_p=2e4`、其余 0、
+  `z0m_p` 为地面粗糙度），所以现有结果没错，但换编译器或优化级别就可能变。全局非 fastPC 算例（g1pcs）每步都有这种斑块。
+- **处理**（第 569 轮）：vendor 在 `RETURN` 前显式赋这些值（Fortran 结果逐位不变）。Rust 原先在这里拒绝运行，
+  现在 `leaf_temperature_pc` 返回 `None`（只落地 `tl = forc_t`，臭氧系数重置在判断之后，不触发），`pft.rs` 的
+  `pc_unvegetated_record` 按 Fortran 调用方的原值组装记录：patch 级湍流量取前置 `GroundFluxes`，`zol/rib/ustar/qstar/tstar`
+  与 `raw` 取 `THERMAL` 开头的 0，`z0m = sum(z0m_p*pftfrac)`。
+
 ## 二、TRACER 编译开关改变了物理（需要上游确认哪一边是对的）
 
 这一版上游在很多地方给 TRACER 构建和非 TRACER 构建写了**不同的物理**，不只是记账不同。
