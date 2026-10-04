@@ -378,8 +378,8 @@ pub use surface_optics::{
 };
 
 pub use ozone::{
-    canopy_ozone_stress, ozone_stress, OzoneParameters, OzoneState, OzoneUptakeInput,
-    CONSTANT_OZONE_PPBV,
+    canopy_ozone_stress, lct_ozone_vegetation_type, ozone_stress, OzoneParameters, OzoneState,
+    OzoneUptakeInput, CONSTANT_OZONE_PPBV,
 };
 pub use pft::{
     aggregate_pft_radiation, pft_snow_fraction, pft_sum, PftColumn, PftParameters, PftPatch,

@@ -4,9 +4,10 @@ use super::parameters::{self, ParameterScope};
 
 #[test]
 fn catalog_counts_match_current_sources() {
-    // 840 + PR #504 的 104 个火诊断历史开关（`history_var_type`）。
-    assert_eq!(colm_schema::all().len(), 840 + 104);
-    assert_eq!(parameters::schema_descriptors().len(), 884 + 104);
+    // 840 + PR #504 的 104 个火诊断历史开关（`history_var_type`）+ PR #507 的
+    // `DEF_HIST_grid_as_model_mesh`。
+    assert_eq!(colm_schema::all().len(), 840 + 104 + 1);
+    assert_eq!(parameters::schema_descriptors().len(), 884 + 104 + 1);
     assert_eq!(parameters::land_cover_descriptors().len(), 88);
     assert_eq!(parameters::pft_descriptors().len(), 87);
     assert_eq!(parameters::pc_pft_descriptors().len(), 87);

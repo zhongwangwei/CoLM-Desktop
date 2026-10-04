@@ -57,7 +57,8 @@ fn van_genuchten_routes_through_the_shared_hydraulic_functions() {
         (1, 4.998_736_824_970_533),
         (2, 4.979361033600443),
         (3, 7.649_597_092_306_99e-3),
-        (4, 0.8264926002450148),
+        // LP92：`wfc` 取 -3399 mm 处的含水量（CoLM-SYSU/CoLM#507），这个输入已在田间持水量之上。
+        (4, 1.0),
         (5, 4.922633036284623),
     ] {
         let actual = soil_surface_resistance(SoilSurfaceResistanceInput {

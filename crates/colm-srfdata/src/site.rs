@@ -2478,13 +2478,14 @@ fn materialize_single_point_surface_impl(
     Ok(report)
 }
 
-/// `DEF_Interception_scheme = 8`：把站点的冠层结构 `ncd`/`ncw`/`bcw` 写进 srfdata
-/// （`MOD_SingleSrfdata.F90:492-540` 读、`:2997-3000` 写）。
+/// `DEF_Interception_scheme = 8`：把站点的冠层结构 `ncd`/`ncw`/`bcw`（PFT/PC 还有逐 PFT 的
+/// `ncd_pfts`/`ncw_pfts`/`bcw_pfts`）写进 srfdata（`MOD_SingleSrfdata.F90:492-563` 读、`:2997-3006` 写）。
 ///
-/// 上游在站点没有这三个量时去读 `<rawdata>/canopy_data` 的 500 m 栅格，再没有就
-/// `CoLM_stop('SinglePoint CoLM2024 needs canopy_data or site ncd/ncw/bcw')`。本仓库不读
-/// 那个栅格，所以站点缺量时直接报同样的错。PFT/PC 的 `*_pfts` 版本还没接（Rust 主循环
-/// 也还没有 PFT/PC），明确拒绝。
+/// 上游在站点既没有三个标量、也没有完整的逐 PFT 数组时去读 `<rawdata>/canopy_data` 的 500 m 栅格，
+/// 再没有就停机。本仓库不读那个栅格，所以这时直接报同样的错。PFT/PC 下：
+/// * 站点给了完整的 `*_pfts`（土壤地类、有 PFT）就用它，长度必须等于打包后的 PFT 数；标量缺任一个
+///   时三个标量都改成 `sum(x_pfts*pctpfts)`；
+/// * 否则每个 PFT 都取站点标量。
 fn add_colm2024_canopy_structure(
     enabled: bool,
     mode: SiteMode,
@@ -2494,28 +2495,104 @@ fn add_colm2024_canopy_structure(
     if !enabled {
         return Ok(());
     }
-    ensure!(
-        matches!(mode, SiteMode::Igbp | SiteMode::Usgs),
-        "DEF_Interception_scheme = 8 with a {mode:?} single-point surface needs the per-PFT \
-         canopy structure (ncd_pfts/ncw_pfts/bcw_pfts), which the Rust preprocessor does not \
-         write yet"
-    );
     let input = netcdf::open(site).with_context(|| format!("cannot open {}", site.display()))?;
-    let mut values = Vec::with_capacity(3);
-    for name in ["ncd", "ncw", "bcw"] {
-        ensure!(
-            input.variable(name).is_some(),
-            "SinglePoint CoLM2024 needs canopy_data or site ncd/ncw/bcw: {} has no {name} \
-             (the Rust preprocessor does not read the canopy_data raster)",
-            site.display()
-        );
-        values.push((name, scalar_f64(&input, name)?));
+    const SCALARS: [&str; 3] = ["ncd", "ncw", "bcw"];
+    const PFT_ARRAYS: [&str; 3] = ["ncd_pfts", "ncw_pfts", "bcw_pfts"];
+    let scalar_present = SCALARS.map(|name| input.variable(name).is_some());
+    let pft_mode = matches!(mode, SiteMode::Pft | SiteMode::Pc);
+    // 打包后的 PFT（`SITE_pctpfts` 已除以总和）：物化好的 srfdata 里就是这一份。
+    let (pfts, fractions, soil) = if pft_mode {
+        let output =
+            netcdf::open(target).with_context(|| format!("cannot open {}", target.display()))?;
+        let fractions = match output.variable("pctpfts") {
+            Some(variable) => variable.get_values::<f64, _>(..)?,
+            None => Vec::new(),
+        };
+        let class = scalar_i32(&output, "IGBP_classification")?;
+        (
+            fractions.len(),
+            fractions,
+            crate::pft::is_igbp_soil_ground(class)?,
+        )
+    } else {
+        (0, Vec::new(), false)
+    };
+    let pft_present = if pfts > 0 && soil {
+        PFT_ARRAYS.map(|name| input.variable(name).is_some())
+    } else {
+        [false; 3]
+    };
+    ensure!(
+        pft_present.iter().all(|&p| p) || !pft_present.iter().any(|&p| p),
+        "SinglePoint CoLM2024 PFT canopy structure is incomplete in {}",
+        site.display()
+    );
+    let all_scalars = scalar_present.iter().all(|&p| p);
+    let all_pfts = pft_present.iter().all(|&p| p);
+    ensure!(
+        all_scalars || all_pfts,
+        "SinglePoint CoLM2024 needs canopy_data or site {}: {} has neither \
+         (the Rust preprocessor does not read the canopy_data raster)",
+        if pft_mode {
+            "canopy structure"
+        } else {
+            "ncd/ncw/bcw"
+        },
+        site.display()
+    );
+    let mut scalars = [0.0; 3];
+    for (index, name) in SCALARS.iter().enumerate() {
+        if scalar_present[index] {
+            scalars[index] = scalar_f64(&input, name)?;
+        }
     }
+    let mut arrays: Option<[Vec<f64>; 3]> = None;
+    if pft_mode && pfts > 0 {
+        arrays = Some(if all_pfts {
+            let read = |name: &str| -> Result<Vec<f64>> {
+                let values = input
+                    .variable(name)
+                    .expect("checked above")
+                    .get_values::<f64, _>(..)?;
+                ensure!(
+                    values.len() == pfts,
+                    "SinglePoint CoLM2024 PFT canopy structure size differs from active PFTs: \
+                     {name} has {} values for {pfts} PFTs",
+                    values.len()
+                );
+                Ok(values)
+            };
+            let arrays = PFT_ARRAYS.map(read);
+            let [ncd, ncw, bcw] = arrays;
+            let arrays = [ncd?, ncw?, bcw?];
+            if !all_scalars {
+                // `sum(SITE_ncd_pfts * SITE_pctpfts)`：gfortran 展成从 0 起的 FMA 链。
+                for (scalar, values) in scalars.iter_mut().zip(&arrays) {
+                    *scalar = values
+                        .iter()
+                        .zip(&fractions)
+                        .fold(0.0, |sum, (value, fraction)| value.mul_add(*fraction, sum));
+                }
+            }
+            arrays
+        } else {
+            scalars.map(|value| vec![value; pfts])
+        });
+    }
+    ensure!(
+        scalars.iter().all(|&value| value > 0.0 && value < 1000.0),
+        "SinglePoint CoLM2024 canopy structure has invalid values"
+    );
     let mut output =
         netcdf::append(target).with_context(|| format!("cannot reopen {}", target.display()))?;
-    for (name, value) in values {
+    for (name, value) in SCALARS.into_iter().zip(scalars) {
         if output.variable(name).is_none() {
             emit_scalar(&mut output, name, value)?;
+        }
+    }
+    if let Some(arrays) = arrays {
+        for (name, values) in PFT_ARRAYS.into_iter().zip(arrays) {
+            put_or_replace_values(&mut output, name, &["pft"], &values, "SITE")?;
         }
     }
     Ok(())

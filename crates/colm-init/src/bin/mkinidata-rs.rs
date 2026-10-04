@@ -54,6 +54,7 @@ fn run_namelist(namelist: PathBuf, mut args: impl Iterator<Item = String>) -> Re
     let mut data_assimilation = false;
     let mut crop = false;
     let mut subgrid = None;
+    let mut restart_dir = None;
     let mut high_resolution = HighResolutionOptions::default();
     while let Some(argument) = args.next() {
         match argument.as_str() {
@@ -63,6 +64,12 @@ fn run_namelist(namelist: PathBuf, mut args: impl Iterator<Item = String>) -> Re
                 )?);
             }
             "--block" => block = Some(args.next().context("--block needs a CoLM block label")?),
+            // 空间冷启动写到别处（`colm-rs` 预热回卷时的 LULCC 冷启动用，不能盖掉 `restart/` 里的初值）。
+            "--restart-dir" => {
+                restart_dir = Some(PathBuf::from(
+                    args.next().context("--restart-dir needs a directory")?,
+                ));
+            }
             "--grid-river" => grid_river = true,
             "--catch-lateral" => catch_lateral = true,
             "--data-assimilation" => data_assimilation = true,
@@ -115,8 +122,13 @@ fn run_namelist(namelist: PathBuf, mut args: impl Iterator<Item = String>) -> Re
             data_assimilation_ensembles,
             subgrid_fallback: subgrid,
             crop,
+            restart_dir,
         });
     }
+    ensure!(
+        restart_dir.is_none(),
+        "--restart-dir applies to spatial cases only"
+    );
     ensure!(
         !grid_river && !catch_lateral,
         "--grid-river and --catch-lateral require a spatial case because routing kernels are not SinglePoint kernels"
@@ -268,6 +280,8 @@ struct SpatialNamelistInvocation<'a> {
     subgrid_fallback: Option<SurfaceSubgrid>,
     /// `CROP` 内核宏。
     crop: bool,
+    /// `--restart-dir`：替换 `<DEF_dir_output>/<case>/restart`。
+    restart_dir: Option<PathBuf>,
 }
 
 fn run_spatial_namelist(invocation: SpatialNamelistInvocation<'_>) -> Result<()> {
@@ -281,8 +295,12 @@ fn run_spatial_namelist(invocation: SpatialNamelistInvocation<'_>) -> Result<()>
         data_assimilation_ensembles,
         subgrid_fallback,
         crop,
+        restart_dir,
     } = invocation;
     let mut run = spatial_namelist_run_with_subgrid(namelist, subgrid_fallback)?;
+    if let Some(restart_dir) = restart_dir {
+        run.restart = restart_dir;
+    }
     ensure!(
         !high_resolution.enabled || matches!(run.subgrid, SpatialSubgrid::Pft | SpatialSubgrid::Pc),
         "--hyperspectral is currently supported only by spatial PFT/PC cold starts"
@@ -2297,6 +2315,7 @@ mod tests {
             data_assimilation_ensembles: None,
             subgrid_fallback: None,
             crop: false,
+            restart_dir: None,
         })
         .unwrap_err();
 
@@ -2340,6 +2359,7 @@ mod tests {
             data_assimilation_ensembles: None,
             subgrid_fallback: None,
             crop: false,
+            restart_dir: None,
         })
         .unwrap_err();
 

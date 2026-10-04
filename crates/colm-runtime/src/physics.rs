@@ -76,9 +76,10 @@ pub fn land_physics_parameters(
     let urban_run = logical(document, "DEF_URBAN_RUN")?;
     // 臭氧胁迫（`MOD_Ozone.F90`）：`DEF_URBAN_RUN` 下上游把 OZONESTRESS/OZONEDATA 一起关掉
     // （`MOD_Namelist.F90:2360-2361`），OZONESTRESS 关时 OZONEDATA 也被强制关（`:2092-2097`）。
-    // LCT 的 `LeafTemperature` 收的 `ivt` 是字面量 1（`MOD_Thermal.F90:718`），所以 patch 级参数
-    // 恒取 PFT 1（温带常绿针叶林）的 `isevg`/`leaf_long`；`DEF_PFT_LEAF_LONG` 只在 PFT/PC 下覆盖
-    // （`Init_PFT_Const` 的 `IF (DEF_USE_PFT .or. DEF_USE_PC)`），这里取表值。
+    // LCT 的 `LeafTemperature` 收的 `ivt` 按地类取（upstream-bugs 第 68 条，`ozone_pft_of_lct`），
+    // 地类号装配期才知道：这里先按 PFT 1 填，[`lct_ozone_parameters`] 在装配时逐 patch 换掉。
+    // `DEF_PFT_LEAF_LONG` 只在 PFT/PC 下覆盖（`Init_PFT_Const` 的 `IF (DEF_USE_PFT .or. DEF_USE_PC)`），
+    // 这里取表值。
     let ozone = if logical(document, "DEF_USE_OZONESTRESS")? && !urban_run {
         let ko3 = real(document, "DEF_OZONE_KO3")?;
         ensure!(
@@ -632,3 +633,27 @@ fn parse_fortran_real(text: &str) -> Result<f64> {
 #[cfg(test)]
 #[path = "physics_tests.rs"]
 mod physics_tests;
+
+/// LCT patch 的 `CalcOzoneStress` 参数：`ivt = ozone_pft_of_lct(patchclass)`（upstream-bugs 第 68 条），
+/// `isevg`/`leaf_long` 取该 PFT 的表值（LCT 下 `DEF_PFT_LEAF_LONG` 不覆盖）。
+pub fn lct_ozone_parameters(
+    base: colm_core::OzoneParameters,
+    scheme: colm_core::LandCoverScheme,
+    land_class: usize,
+    campbell: bool,
+) -> Result<colm_core::OzoneParameters> {
+    let ivt = colm_core::lct_ozone_vegetation_type(scheme, land_class);
+    let index = u8::try_from(ivt).context("an ozone PFT fits u8")?;
+    Ok(colm_core::OzoneParameters {
+        vegetation_type: ivt,
+        evergreen: colm_case::pft::fixed_value("isevg", index)? != 0.0,
+        leaf_longevity_years: colm_case::pft::default_value(
+            "DEF_PFT_LEAF_LONG",
+            index,
+            campbell,
+            false,
+        )?
+        .context("MOD_Const_PFT has no leaf_long")?,
+        ..base
+    })
+}

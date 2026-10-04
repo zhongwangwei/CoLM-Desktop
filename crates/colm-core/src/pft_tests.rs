@@ -64,6 +64,7 @@ fn parameters(class: i32, fraction: f64) -> PftParameters {
         canopy_layer: 1,
         evergreen: false,
         leaf_longevity_years: 1.0,
+        crown_m: None,
         plant_hydraulic_traits: crate::ClassConstants::new(crate::LandCoverScheme::Igbp, 1)
             .unwrap()
             .plant_hydraulic_traits(crate::PlantHydraulicOverrides::default()),

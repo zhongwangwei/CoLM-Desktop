@@ -82,6 +82,9 @@ pub struct SinglePointPftData {
     pub canopy_height_m: Vec<f64>,
     /// `CROP` only: one unnormalized crop fraction per packed CFT patch.
     pub crop_fraction: Option<Vec<f64>>,
+    /// `ncd_pfts`/`ncw_pfts`/`bcw_pfts`（截留方案 8 时 `MOD_SingleSrfdata` 写进 srfdata），按同样的
+    /// `pack(.., pctpfts > 0)` 取（`MOD_HtopReadin.F90:126-128`）；srfdata 里没有时为 `None`。
+    pub crown_m: Option<[Vec<f64>; 3]>,
     pub monthly: SinglePointPftMonthlyVegetation,
 }
 
@@ -371,6 +374,27 @@ pub fn read_single_point_pft_data(path: impl AsRef<Path>) -> Result<SinglePointP
             .collect(),
         crop_fraction: crop_fraction
             .map(|fractions| indices.iter().map(|&index| fractions[index]).collect()),
+        crown_m: if ["ncd_pfts", "ncw_pfts", "bcw_pfts"]
+            .iter()
+            .all(|name| file.variable(name).is_some())
+        {
+            let packed = |name: &str| -> Result<Vec<f64>> {
+                let values = vector(&file, name)?;
+                ensure!(
+                    values.len() == raw_pfts,
+                    "{name} has {} values for {raw_pfts} PFTs",
+                    values.len()
+                );
+                Ok(indices.iter().map(|&index| values[index]).collect())
+            };
+            Some([
+                packed("ncd_pfts")?,
+                packed("ncw_pfts")?,
+                packed("bcw_pfts")?,
+            ])
+        } else {
+            None
+        },
         monthly: SinglePointPftMonthlyVegetation {
             years,
             lai,

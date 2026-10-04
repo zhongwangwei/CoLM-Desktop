@@ -29540,3 +29540,58 @@ vendor 的 gnu 构建加上 `-fdefault-double-8` 之后，`DOUBLE PRECISION` 与
 核对过、不需要改的：LULCC 与 USGS/BGC/站点的互斥与 `colm-rs` 一致；`DEF_TOPMOD_method` 0/1/2、`DEF_Forcing_Interp_Method` 的 bilinear、臭氧两个开关与 `DEF_OZONE_KO3` 都在参数页；火诊断量的闸门是上游的 `DEF_USE_BGC`（关火时 Fortran 写填充值，Rust 同样），`f_xy_ozone` 单位已随第 72 条变为 ppbv（目录自动生成）。
 
 验证：`gui/src-tauri` `cargo test --offline` 162 passed；`gui/tests/*.mjs` 11 个全过（含 `i18n.mjs` 的中英对照完整性）；`cargo run -p xtask -- check-gui` 通过。
+
+## 第 564 轮：上游缺陷 50/68/73 两侧修完；并入 CoLM-SYSU/CoLM#507；第三轮全量回归
+
+### 一、第 50 条：多遍预热回卷时把土地覆盖换回起始年
+
+- vendor：回卷时若本轮做过 LULCC，按年末 LULCC 的同一套流程（`deallocate_1D_*`/`hist_final` → `LulccDriver` → `grid_riverlake_flow_lulcc` → `forcing_init`/`hist_init`）换回起始年。`jdate` 已经是运行起点，`LulccInitialize` 读起始年、起始月的 LAI。`LulccDriver` 新加可选参数 `rewind`，强制 SAT（没有从后一年回到起始年的转移矩阵）。
+- Rust（`colm-rs`）：段的结束方式从 `lulcc_boundary: bool` 改为 `SegmentEnd::{Run, Lulcc, Rewind}`；主循环拆成 `run_spatial_chain`，多遍预热跨过第一个 LULCC 年末时外层逐轮回卷（前 N−1 轮跑到预热终点后 `lulcc_transition(rewind)` 换回起始年，末轮跑到运行终点，每轮只预热一遍）。`lulcc_transition` 拆出新旧两侧的日期（`TransitionTimes`），回卷时只用 SAT，冷启动经 `mkinidata-rs --restart-dir` 写进临时目录、不盖 `restart/` 里的初值。预热终点恰在 LULCC 年末时同一步先换到新一年再换回，基流优化器的配对按两次复合（推导见代码注释，与上游两次 SAT 后 `zwt_init` 的取法一致）。回卷轮的终态不写进 `restart/`：上游同一时刻写的同名文件会被末轮盖掉。
+- 实测（`kernels564/latlon`，两侧重跑 mkinidata）：`g3sc`（回卷点 2006-01-02，不在年末）、`g3sd`（回卷点恰在年末）、`g3se`（MEC、3 遍）、`g3sp`（PC + MEC）、`g3so`（基流优化器、3 遍）全部逐位一致；两侧日志都是 2005→2006、2006→2005、2005→2006 三次换年。
+
+### 二、第 68 条：LCT 的臭氧胁迫按地类取 PFT
+
+vendor `MOD_Ozone` 新加 `ozone_pft_of_lct(patchclass)`（IGBP/USGS 两张表），`MOD_Thermal` 的 LCT 调用改传它；Rust `lct_ozone_vegetation_type` 同表，装配期逐 patch 换掉 `OzoneParameters` 的 `ivt/isevg/leaf_long`。LCT 分支里 `ivt` 只被臭氧用，不开臭氧时结果不变。实测：`ozl ozld ozp ozc ozbn` 全部逐位一致（`ozbn` 这次 36 份重启也全同）；`ozl`（草地）2 月 `f_assim` 总和从 6.068e-4（按针叶林）回到 6.604e-4——C3 草的通量阈值 1.6 在冬季达不到。空间 `g1oz`（14 个 IGBP 地类）与 USGS 站点 `uoz`（新编 `kernels564/usgs`，三段全链路）逐位一致。
+
+### 三、第 73 条：USGS 的 `CROPLAND` 改为 2
+
+所有使用处都在只支持 IGBP 的 PFT/PC/CROP 路径里，合法配置走不到；IGBP 构建不受影响，Rust 只有 IGBP 的 12。
+
+### 四、并入 CoLM-SYSU/CoLM#507（van Genuchten `alpha` 单位）
+
+见 upstream-bugs 第 74 条。vendor：`alpha_vgm = soil_alpha_vgm_l * 0.1`，LP92 `wfc` 常数 339.9 → 3399；新 namelist 开关 `DEF_HIST_grid_as_model_mesh`（无人读，照样并入，schema 重新生成 945 个字段）。Rust：`derive_soil_parameters` 存换算后的 `alpha` 并用它算 `sc_vgm/fc_vgm`，`wfc` 仍用原值配 339.9 cm；`soil_surface_resistance` 常数改 3399。两个单元测试按新单位改期望（LP92 在原输入下 beta 变为 1）。
+
+### 五、回归里查出的 Rust 缺陷：城市 patch 的 `rsur_ie` 没进分母
+
+上游 `CoLMMAIN_Urban` 不碰 `rsur_se/rsur_ie`，它们停在 `spval`：`acc1d` 跳过，但网格写出的分母仍计入城市面积。Rust 给 `rsur_se` 交了 `spval`，漏了 `rsur_ie`，网格平均偏大。以前这几个格点非城市部分的 `rsur_ie` 都是 0，PR #507 之后出现非零值才暴露（`g3u/g3um` 的 `f_rsur_ie` 3 个格点）。补上后两个算例逐位一致。
+
+### 六、第三轮全量回归（PR #507 之后，新内核 `kernels564`）
+
+两侧重跑 mkinidata（Fortran 侧 `--preprocessors fortran`），比对全部历史与全部重启；脚本 `tmp/b564[a-k].sh`（按依赖拆成 11 条并行流）。
+
+- 187 个算例里 186 个逐位一致：单点常规/城市/水文、BGC/PC、CROP、臭氧，空间 g1 全系列（含城市、BGC、甲烷、作物、灌溉、非结构 `u1`）、LULCC g3 全系列（含第 50 条的 5 个新算例、`g1oz`）、TOPMODEL 全链路 `tm1/tm2/tm2w`、`g3bf`/`g3opt`。
+- 18 个续跑（单点 BGC/甲烷/作物、空间 BGC/甲烷/作物）历史与重启全部 bad 0。
+- 不在其中的 `pa`：Rust 侧夹具目录一直不存在（第 560 轮同样），不是回归。
+- 过程中：`g3u/g3um` 查出第五节的缺陷，修后重跑一致；`g1` 一次被停流脚本误杀（中断在 Fortran mkinidata，常数重启是旧的 `alpha_vgm`），单独重跑一致。
+- 另跑：USGS 站点 `uoz` 三段全链路（新编 `kernels564/usgs`）一致。
+
+### 七、GUI
+
+`spinup_repeat` 的说明改为"开启 LULCC 时，每轮预热回卷都会把土地覆盖换回起始年（按 SAT 方案搬运状态）"。
+
+## 第 565 轮：截留方案 8（CoLM2024）接上 PFT/PC
+
+第 405 轮只接了 LCT。PFT/PC 下方案 8 用逐 PFT 的树冠尺寸 `ncd_p/ncw_p/bcw_p`：
+
+- **上游数据流**：单点 `MOD_SingleSrfdata` 读站点的 `ncd_pfts/ncw_pfts/bcw_pfts`（三个缺一停机；长度须等于打包后的 PFT 数），标量缺任一个时三个标量都改成 `sum(x_pfts*pctpfts)`；站点没有逐 PFT 数组时每个 PFT 都取站点标量。空间由 `Aggregation_CanopyStructure` 写 `cstructure/<year>/ncd_pfts.nc`。`HTOP_readin` 把它们写进 PFT 常数重启（`pack(.., pctpfts > 0)`），`READ_PFTimeInvariants` 在方案 8 时读回（没有 `defval`）。主循环三处使用：`LEAF_interception_pftwrap`（`p,.true.,ncd_p(i),..,htop_p(i)`）、`LeafTemperature` 的 `colm2024_rain_capacity_for_fwet`（`ipft_index`）、`LeafTemperaturePC` 的同名函数。
+- **Rust 改动**：
+  - colm-core：`PftParameters::crown_m`；`pft_colm2024` 由 patch 的 `Colm2024Canopy`（是否方案 8 的标志）和 PFT 参数拼出逐 PFT 冠层（`htop_p`、`pftclass`、`is_pft = true`）；逐 PFT 截留、逐 PFT 叶温、PC 叶温的湿润比例都用它。原来的"PFT 不支持方案 8"拒绝删掉。
+  - colm-runtime：方案 8 时从 PFT 常数重启读 `ncd_p/ncw_p/bcw_p`，缺了就停。
+  - colm-init：单点 PFT 数据带上 srfdata 的 `*_pfts`（同样按 `pctpfts > 0` 打包），方案 8 时写进 PFT 常数重启；非土壤地类写长度 0 的三个变量（与上游一致）。
+  - colm-srfdata：单点前处理按上游规则写 `ncd_pfts` 等与标量（含 FMA 链的加权和、`(0,1000)` 校验）；仍不读 `canopy_data` 栅格，站点两样都没有时报同样的错。
+- **实测**（`kernels564/default`，三段全链路 mksrfdata→mkinidata→colm，Fortran 侧纯 Fortran 预处理）：以 `pb` 为底、PFT 改成 1/10/4/13（针叶树、灌木、阔叶树、草），1–2 月逐时：
+  - `i8p`（PFT，只给标量，复制到每个 PFT）、`i8pa`（PFT，只给逐 PFT 数组，标量由加权和回填为 3.32499995343387）、`i8c`（PC，两者都给）：历史与 11 份重启全部逐位一致。
+  - 方案 8 确实起作用：`i8p` 换成方案 1，2 月 `f_ldew` 平均 0.0764 → 0.0794 mm。
+  - 空间 `g1pc8`（`g1pc` + 方案 8，PC，1–2 月，三段全链路，读 `canopy_data` 栅格）：4 份历史与 14 份重启逐位一致；两侧 `cstructure/2005/` 六个文件齐全，PFT 常数重启 246 个 `ncd_p`（4.91–7.08 m，含针叶 1、阔叶 5/7、灌木 9/10）。
+- 单元测试：colm-core 500、colm-runtime 159、colm-init 182（`--test-threads=1`）、colm-srfdata 271（串行；`tests/raster.rs` 5 个要 `COLM_RAWDATA`，本机不跑）全过；clippy 无新警告；GUI 后端 162、前端 11 个、`check-gui` 通过。
+- **GUI**：`DEF_Interception_scheme` 在不带 `extend_interception` 宏的内核（随软件发布的内核都是）上原来只给方案 1，实际上 `main/` 支持 1 与 8。改为给出 1 与 8。

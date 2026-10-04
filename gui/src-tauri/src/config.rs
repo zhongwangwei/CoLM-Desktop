@@ -1858,9 +1858,9 @@ fn field_runtime_state(
         return hidden("站点 POINT 强迫场始终循环同一文件，此开关不会改变读入");
     }
 
-    // 完整扩展截留模块由 extend_interception 宏选择整套源文件。当前随软件
-    // 发布的所有内核都带该宏，因此 1..8 都真实可用；若用户安装了不带宏的
-    // 外部内核，回退模块只调用 CoLM2014，实现上只有方案 1。
+    // 完整扩展截留模块由 extend_interception 宏选择整套源文件，带宏时 1..8 都有计算路径。
+    // 不带宏（随软件发布的内核都是这样）时 `main/` 的 `LEAF_interception_wrap`/`_pftwrap`
+    // 接受 1（CoLM2014）与 8（CoLM2024），其余档位 `CALL abort`（`MOD_LeafInterception.F90`）。
     if name == "DEF_Interception_scheme" {
         return if c.have.contains("extend_interception") {
             (
@@ -1871,8 +1871,8 @@ fn field_runtime_state(
         } else {
             (
                 FieldMode::Editable,
-                Some("当前内核未编入 extend_interception，只能使用 CoLM2014 方案"),
-                vec!["1"],
+                Some("当前内核未编入 extend_interception，可用 CoLM2014（1）与 CoLM2024（8）两种方案"),
+                vec!["1", "8"],
             )
         };
     }

@@ -3797,6 +3797,7 @@ impl HistorySession {
                 "rstfacsha",
                 "frcsat",
                 "rsur_se",
+                "rsur_ie",
             ] {
                 accumulator.scalar(name, 0, colm_core::MISSING)?;
             }

@@ -225,3 +225,26 @@ fn data_concentration_and_bare_ground_factors() {
     assert_eq!(uptake, 5.0);
     assert_eq!(factors, (1.0, 1.0));
 }
+
+#[test]
+fn lct_classes_take_the_nearest_pft_for_ozone() {
+    use crate::LandCoverScheme::{Igbp, Usgs};
+    // upstream-bugs 第 68 条：与 vendor `ozone_pft_of_lct` 的两张表逐项相同。
+    let igbp: Vec<i32> = (0..=17)
+        .map(|c| lct_ozone_vegetation_type(Igbp, c))
+        .collect();
+    assert_eq!(
+        igbp,
+        [0, 1, 4, 3, 7, 1, 9, 10, 7, 14, 13, 13, 15, 13, 15, 0, 0, 0]
+    );
+    let usgs: Vec<i32> = (0..=24)
+        .map(|c| lct_ozone_vegetation_type(Usgs, c))
+        .collect();
+    assert_eq!(
+        usgs,
+        [0, 13, 15, 15, 15, 15, 15, 13, 10, 10, 14, 7, 3, 4, 1, 1, 0, 13, 7, 0, 12, 11, 12, 0, 0]
+    );
+    // 表外取裸地。
+    assert_eq!(lct_ozone_vegetation_type(Igbp, 18), 0);
+    assert_eq!(lct_ozone_vegetation_type(Usgs, 25), 0);
+}

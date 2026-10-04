@@ -114,7 +114,9 @@ fn van_genuchten_uses_its_own_field_capacity_and_psi0() {
     assert_eq!(state.get(SoilField::ThetaR, 0, 0), 0.05);
     assert!((state.get(SoilField::FieldCapacity, 0, 0) - expected).abs() < 1e-14);
     let m = 1.0 - 1.0 / 1.5;
-    let sc = (1.0 + (0.02_f64 * 10.0).powf(1.5)).powf(-m);
+    // 存进状态的 `alpha` 换成 1/mm（CoLM-SYSU/CoLM#507），`wfc` 仍用原值配 339.9 cm。
+    assert_eq!(state.get(SoilField::AlphaVgm, 0, 0), 0.02 * 0.1);
+    let sc = (1.0 + (0.02_f64 * 0.1 * 10.0).powf(1.5)).powf(-m);
     let fc = 1.0 - (1.0 - sc.powf(1.0 / m)).powf(m);
     assert!((state.get(SoilField::ScVgm, 0, 0) - sc).abs() < 1e-14);
     assert!((state.get(SoilField::FcVgm, 0, 0) - fc).abs() < 1e-14);

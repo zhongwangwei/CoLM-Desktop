@@ -414,11 +414,14 @@ pub fn derive_soil_parameters(
                 HydraulicModel::Campbell => 0.0,
                 HydraulicModel::VanGenuchten => input.theta_r,
             };
+            // landdata 里的 `alpha` 是 1/cm，模式里按 1/mm 用（CoLM-SYSU/CoLM#507：
+            // `alpha_vgm = soil_alpha_vgm_l * 0.1`）；上面的 `wfc` 仍用原值配 339.9 cm。
+            let alpha_vgm = input.alpha_vgm * 0.1;
             let (sc_vgm, fc_vgm) = match hydraulic_model {
                 HydraulicModel::Campbell => (MISSING, MISSING),
                 HydraulicModel::VanGenuchten => {
                     let m_vgm = 1.0 - 1.0 / input.n_vgm;
-                    let sc_vgm = (1.0 + (-input.alpha_vgm * psi0).lpow(input.n_vgm)).lpow(-m_vgm);
+                    let sc_vgm = (1.0 + (-alpha_vgm * psi0).lpow(input.n_vgm)).lpow(-m_vgm);
                     let fc_vgm = 1.0 - (1.0 - sc_vgm.lpow(1.0 / m_vgm)).lpow(m_vgm);
                     (sc_vgm, fc_vgm)
                 }
@@ -441,7 +444,7 @@ pub fn derive_soil_parameters(
             values[SoilField::Bsw as usize][index] = 1.0 / input.lambda;
             values[SoilField::ThetaR as usize][index] = theta_r;
             if hydraulic_model == HydraulicModel::VanGenuchten {
-                values[SoilField::AlphaVgm as usize][index] = input.alpha_vgm;
+                values[SoilField::AlphaVgm as usize][index] = alpha_vgm;
                 values[SoilField::LVgm as usize][index] = input.l_vgm;
                 values[SoilField::NVgm as usize][index] = input.n_vgm;
             }

@@ -212,7 +212,7 @@ fn lp92_beta(input: SoilSurfaceResistanceInput) -> f64 {
         } => {
             input.residual_water
                 + (input.porosity - input.residual_water)
-                    * (1.0 + (alpha_vgm * f77(339.9)).lpow(n_vgm)).lpow(1.0 / n_vgm - 1.0)
+                    * (1.0 + (alpha_vgm * f77(3399.0)).lpow(n_vgm)).lpow(1.0 / n_vgm - 1.0)
         }
     };
     if water_ice_volume < field_capacity {

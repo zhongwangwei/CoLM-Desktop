@@ -2534,7 +2534,7 @@ fn interception_choices_follow_the_kernel_file_selection_macro() {
     let fallback = runtime_states("&nl_colm\n/\n", &["SinglePoint", "LULC_IGBP"]);
     assert_eq!(
         runtime_state(&fallback, "DEF_Interception_scheme").allowed_values,
-        ["1"]
+        ["1", "8"]
     );
 }
 

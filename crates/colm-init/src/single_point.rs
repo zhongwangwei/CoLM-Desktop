@@ -735,6 +735,14 @@ fn write_single_point_constant_restarts_with_hyperspectral(
     }
 
     let document = read_run_namelist(run)?;
+    let interception_scheme_8 = document
+        .get("DEF_Interception_scheme")
+        .map(|value| match value {
+            colm_namelist::Value::Int(scheme) => Ok(*scheme == 8),
+            other => anyhow::bail!("DEF_Interception_scheme must be an integer, got {other}"),
+        })
+        .transpose()?
+        .unwrap_or(false);
     let surface = static_config.read_surface(&run.static_run.surface)?;
     if patch_type(run.static_run.land_cover, surface.land_class)? != 0 {
         return Ok(SinglePointConstantRestartFiles {
@@ -756,7 +764,12 @@ fn write_single_point_constant_restarts_with_hyperspectral(
                     fraction: &[],
                     canopy_top_m: &[],
                     canopy_bottom_m: &[],
-                    canopy_structure: None,
+                    // 方案 8 时上游照样写这三个变量（长度 0）。
+                    canopy_structure: interception_scheme_8.then_some(crate::PftCanopyStructure {
+                        needleleaf_crown_depth_m: &[],
+                        needleleaf_crown_width_m: &[],
+                        broadleaf_crown_width_m: &[],
+                    }),
                     crop_fraction: None,
                 },
             )?),
@@ -808,7 +821,20 @@ fn write_single_point_constant_restarts_with_hyperspectral(
             fraction: &pft.fraction,
             canopy_top_m: &canopy.top_m,
             canopy_bottom_m: &canopy.bottom_m,
-            canopy_structure: None,
+            // `HTOP_readin`：方案 8 时 `ncd_p = pack(SITE_ncd_pfts, SITE_pctpfts > 0.)`。
+            canopy_structure: if interception_scheme_8 {
+                let [ncd, ncw, bcw] = pft.crown_m.as_ref().context(
+                    "DEF_Interception_scheme = 8 with DEF_USE_PFT/PC needs ncd_pfts/ncw_pfts/\
+                     bcw_pfts in the single-point srfdata; rerun mksrfdata with scheme 8",
+                )?;
+                Some(crate::PftCanopyStructure {
+                    needleleaf_crown_depth_m: ncd,
+                    needleleaf_crown_width_m: ncw,
+                    broadleaf_crown_width_m: bcw,
+                })
+            } else {
+                None
+            },
             crop_fraction: crop.as_ref().map(|_| pft.crop_fraction.as_deref().unwrap()),
         },
     )?;

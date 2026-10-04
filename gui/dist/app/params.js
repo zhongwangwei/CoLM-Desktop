@@ -47,7 +47,7 @@ const HINTS = {
     '预热期不写 history（MOD_Hist.F90:235 在 itstamp <= ptstamp 时直接 RETURN），' +
     '所以它不会污染输出，也不会被算进指标。\n' +
     '与结果页的「丢弃前 N 条记录」不是一回事：那个丢的是输出记录，单位是条。\n' +
-    '开启 LULCC 时，多轮预热（≥ 2）必须在起始年年末之前结束，否则 CoLM 会停机：回卷不回退土地覆盖。',
+    '开启 LULCC 时，每轮预热回卷都会把土地覆盖换回起始年（按 SAT 方案搬运状态）。',
   'DEF_simulation_time%spinup_year':
     '预热截止时刻。起始时刻早于它，中间那段就是预热期。四项（年月日秒）一起决定。',
   'DEF_simulation_time%spinup_month': '预热截止时刻的月，见 spinup_repeat 的说明。',

@@ -279,6 +279,27 @@ impl PftTemplate {
         );
         let campbell = physics.hydraulic_model == HydraulicModel::Campbell;
         let pc = physics.use_pc;
+        // `READ_PFTimeInvariants`：`DEF_Interception_scheme == 8` 时读 `ncd_p`/`ncw_p`/`bcw_p`
+        // （`MOD_Vars_TimeInvariants.F90:93-97`，没有 `defval`，缺了就停）。
+        let crown = if physics.colm2024_interception {
+            let read = |name: &str| -> Result<Vec<f64>> {
+                let values = constant.floats(name).with_context(|| {
+                    format!(
+                        "DEF_Interception_scheme = 8 needs {name} in {}",
+                        constant_path.display()
+                    )
+                })?;
+                ensure!(
+                    values.len() == pfts,
+                    "{name} holds {} values for {pfts} PFTs",
+                    values.len()
+                );
+                Ok(values.to_vec())
+            };
+            Some([read("ncd_p")?, read("ncw_p")?, read("bcw_p")?])
+        } else {
+            None
+        };
         let parameters = classes
             .iter()
             .enumerate()
@@ -293,6 +314,12 @@ impl PftTemplate {
                     bottom[index],
                     interface_depth_m,
                 )
+                .map(|parameters| PftParameters {
+                    crown_m: crown
+                        .as_ref()
+                        .map(|[ncd, ncw, bcw]| [ncd[index], ncw[index], bcw[index]]),
+                    ..parameters
+                })
             })
             .collect::<Result<Vec<_>>>()?;
 
@@ -815,6 +842,7 @@ fn pft_parameters(
             u8::try_from(class).context("pftclass must be nonnegative")?,
         )? != 0.0,
         leaf_longevity_years: value("DEF_PFT_LEAF_LONG")?,
+        crown_m: None,
     })
 }
 

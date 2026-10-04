@@ -546,7 +546,7 @@ fn run_spatial(
     }
     let out = layout.out().join(name);
     // 上游 `CoLM.F90`：开了 LULCC 时土地覆盖年份取起始年，不看 `DEF_LC_YEAR`。
-    let mut year = if lulcc {
+    let year = if lulcc {
         i64::from(config.start.year)
     } else {
         integer_field(&document, "DEF_LC_YEAR")?
@@ -563,14 +563,139 @@ fn run_spatial(
     };
     let restart_root = out.join("restart");
     let scratch = restart_root.join(LULCC_SCRATCH);
+    // 多遍预热跨过 LULCC 年末（upstream-bugs 第 50 条，两侧都已修）：上游每轮回卷时把土地覆盖
+    // 换回起始年（SAT）。Rust 把每一轮拆成一条段链：前几轮从起点跑到预热终点、换回起始年，
+    // 最后一轮从起点跑到运行终点；每轮内都只预热一遍（不再由时钟回卷）。
+    let rewinds = if lulcc && spinup_crosses_lulcc(&config) {
+        config.spinup_repeats - 1
+    } else {
+        0
+    };
+    let mut input = restart_root.clone();
+    let mut carried = Carried::default();
+    for pass in 0..=rewinds {
+        let rewind = pass < rewinds;
+        let mut pass_config = config.clone();
+        if rewinds > 0 {
+            pass_config.spinup_repeats = 1;
+            if rewind {
+                pass_config.end = config.spinup_until;
+            }
+        }
+        let end = run_spatial_chain(
+            &case,
+            pass_config,
+            year,
+            input,
+            std::mem::take(&mut carried),
+            rewind,
+        )?;
+        if !rewind {
+            break;
+        }
+        println!(
+            "colm-rs: spinup cycle {} of {} ends; LULCC back to {year}",
+            pass + 1,
+            config.spinup_repeats
+        );
+        let target = scratch.join("rewind");
+        let Transition {
+            baseflow, pairing, ..
+        } = lulcc_transition(
+            &case,
+            LulccYears {
+                old: end.year,
+                new: year,
+                history_frequency: config.history_frequency,
+            },
+            TransitionTimes {
+                old: normalized_day_end(config.spinup_until),
+                new: config.start,
+                rewind: true,
+            },
+            &end.directory,
+            &target,
+            end.river,
+            &end.baseflow,
+        )?;
+        // 预热终点恰在 LULCC 年末时，同一步先换到新一年、再换回起始年：配对按两次复合。
+        let pairing = match end.pending_pairing {
+            Some(first) => pairing
+                .iter()
+                .map(|middle| middle.and_then(|m| first.get(m).copied().flatten()))
+                .collect(),
+            None => pairing,
+        };
+        carried = Carried {
+            baseflow: Some(baseflow),
+            optimizer: end.optimizer.map(|optimizer| (optimizer, pairing)),
+        };
+        input = target;
+    }
+    if scratch.exists() {
+        std::fs::remove_dir_all(&scratch)
+            .with_context(|| format!("cannot remove {}", scratch.display()))?;
+    }
+    println!("{SUCCESS_MARKER}");
+    Ok(())
+}
+
+/// 跨轮次带着走的东西：LULCC 换年后的 `scale_baseflow` 与优化器（连同配对）。
+#[derive(Default)]
+struct Carried {
+    baseflow: Option<Vec<f64>>,
+    optimizer: Option<(BaseflowOptimizer, Vec<Option<usize>>)>,
+}
+
+/// 一条段链跑完时的状态。
+struct ChainEnd {
+    /// 终点的土地覆盖年份。
+    year: i64,
+    /// 终态续跑所在的目录（其下是 `<date>/`）。
+    directory: PathBuf,
+    river: Option<SegmentRiverEnd>,
+    baseflow: Vec<f64>,
+    optimizer: Option<BaseflowOptimizer>,
+    /// 终点恰是 LULCC 年末时那次换年的配对：优化器还没按它搬。
+    pending_pairing: Option<Vec<Option<usize>>>,
+}
+
+/// 预热是否需要外层回卷（upstream-bugs 第 50 条）：多遍预热，且第一遍就过了第一个 LULCC 年末。
+fn spinup_crosses_lulcc(config: &colm_runtime::spatial::runtime::SpatialRuntimeConfig) -> bool {
+    let until = calendar_key(normalized_day_end(config.spinup_until));
+    config.spinup_repeats > 1
+        && until > calendar_key(normalized_day_end(config.start))
+        && until >= calendar_key(normalized_day_end(lulcc_year_end(config.start)))
+}
+
+/// 从 `config.start` 跑到 `config.end`，途中在每个 LULCC 年末切段换年。
+///
+/// `rewind`：这是多遍预热中要回卷的一轮，终点是预热终点；终态留在临时目录交给回卷换年。
+fn run_spatial_chain(
+    case: &SpatialCase<'_>,
+    config: colm_runtime::spatial::runtime::SpatialRuntimeConfig,
+    year: i64,
+    input: PathBuf,
+    carried: Carried,
+    rewind: bool,
+) -> Result<ChainEnd> {
+    let lulcc = logical_field(case.document, "DEF_USE_LULCC")?;
+    let restart_root = case.out.join("restart");
+    let scratch = restart_root.join(LULCC_SCRATCH);
     let run_end = normalized_day_end(config.end);
+    let last_end = if rewind {
+        SegmentEnd::Rewind
+    } else {
+        SegmentEnd::Run
+    };
+    let mut year = year;
     let mut segment = SpatialSegment {
         config: config.clone(),
         year,
-        input: restart_root.clone(),
-        lulcc_boundary: false,
-        baseflow: None,
-        optimizer: None,
+        input,
+        end: last_end,
+        baseflow: carried.baseflow,
+        optimizer: carried.optimizer,
     };
     loop {
         // LULCC 在一年最后一步之后做（`isendofyear`），运行在那里切段；2000 年以前只在换入
@@ -582,30 +707,45 @@ fn run_spatial(
             });
         if let Some(boundary) = boundary {
             segment.config.end = boundary;
-            segment.lulcc_boundary = true;
+            segment.end = SegmentEnd::Lulcc;
         }
-        let (river, baseflow, optimizer) = run_spatial_segment(&case, &segment)?;
+        let (river, baseflow, optimizer) = run_spatial_segment(case, &segment)?;
         let Some(boundary) = boundary else {
-            break;
+            return Ok(ChainEnd {
+                year,
+                directory: scratch.join("old"),
+                river,
+                baseflow,
+                optimizer,
+                pending_pairing: None,
+            });
         };
         let next_start = normalized_day_end(boundary);
         // 合并出来的续跑落在哪：这一步本该写续跑（或运行就停在这里）时写进 `restart/`，
-        // 否则放进临时目录，只供下一段起跑。
+        // 否则放进临时目录，只供下一段起跑。回卷轮的终点不是运行终点。
         let target = if config.restart_frequency != colm_core::RestartFrequency::Never
-            || next_start == run_end
+            || (next_start == run_end && !rewind)
         {
             restart_root.clone()
         } else {
             scratch.join("new")
         };
-        let (baseflow, previous) = lulcc_transition(
-            &case,
+        let Transition {
+            baseflow,
+            pairing,
+            river,
+        } = lulcc_transition(
+            case,
             LulccYears {
                 old: year,
                 new: i64::from(boundary.year) + 1,
                 history_frequency: config.history_frequency,
             },
-            boundary,
+            TransitionTimes {
+                old: next_start,
+                new: next_start,
+                rewind: false,
+            },
             &scratch.join("old"),
             &target,
             river,
@@ -613,10 +753,16 @@ fn run_spatial(
         )?;
         year = i64::from(boundary.year) + 1;
         if next_start == run_end {
-            break;
+            return Ok(ChainEnd {
+                year,
+                directory: target,
+                river,
+                baseflow,
+                optimizer,
+                pending_pairing: Some(pairing),
+            });
         }
-        // 预热区间按绝对时刻延续到后面的段（单遍预热可以跨 LULCC 年末，`check_spatial_lulcc`
-        // 已拒绝跨年末回卷的情形）；已经结束的预热在新段里不再出现。
+        // 预热区间按绝对时刻延续到后面的段；已经结束的预热在新段里不再出现。
         let spinup_until =
             if calendar_key(normalized_day_end(config.spinup_until)) > calendar_key(next_start) {
                 config.spinup_until
@@ -631,17 +777,11 @@ fn run_spatial(
             },
             year,
             input: target,
-            lulcc_boundary: false,
+            end: last_end,
             baseflow: Some(baseflow),
-            optimizer: optimizer.map(|optimizer| (optimizer, previous)),
+            optimizer: optimizer.map(|optimizer| (optimizer, pairing)),
         };
     }
-    if scratch.exists() {
-        std::fs::remove_dir_all(&scratch)
-            .with_context(|| format!("cannot remove {}", scratch.display()))?;
-    }
-    println!("{SUCCESS_MARKER}");
-    Ok(())
 }
 
 /// 空间算例里各段共用的东西。
@@ -675,13 +815,24 @@ struct SpatialSegment {
     year: i64,
     /// 起跑重启所在的目录（其下是 `<date>/`）：通常是 `restart/`，LULCC 合并出的临时续跑在别处。
     input: PathBuf,
-    /// 这一段停在 LULCC 年末：终点的旧年份状态写进临时目录，交给 [`lulcc_transition`]。
-    lulcc_boundary: bool,
+    /// 这一段怎么结束：运行终点、LULCC 年末，或多遍预热的回卷点。
+    end: SegmentEnd,
     /// LULCC 换年后按 SAT 配对重映射过的 `scale_baseflow`（全局 patch 次序）；`None` 时照常读
     /// `ParaOpt/<case>_baseflow.nc`（上游 `Opt_Baseflow_init` 只在启动时读一次）。
     baseflow: Option<Vec<f64>>,
     /// `DEF_Optimize_Baseflow`：上一段的优化器与"新 patch → 配上的旧 patch"（全局次序）。
     optimizer: Option<(BaseflowOptimizer, Vec<Option<usize>>)>,
+}
+
+/// 一段的终点。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SegmentEnd {
+    /// 运行终点（或本轮预热的终点之外的普通终点）：终态照常写进 `restart/`。
+    Run,
+    /// LULCC 年末：终态写进临时目录，交给 [`lulcc_transition`] 换到新一年。
+    Lulcc,
+    /// 多遍预热的回卷点（不在 LULCC 年末）：终态写进临时目录，交给 [`lulcc_transition`] 换回起始年。
+    Rewind,
 }
 
 /// LULCC 临时文件（`restart/` 下）：旧年份的终态、不该留在 `restart/` 里的合并续跑、冷启动 namelist。
@@ -1028,7 +1179,7 @@ fn run_spatial_segment(
             runtime = runtime.with_tracer_forcing(forcing);
         }
     }
-    if segment.lulcc_boundary {
+    if segment.end == SegmentEnd::Lulcc {
         runtime = runtime.defer_lai_refresh_at(config.end);
     }
     let network = colm_runtime::river::network::RiverNetwork::read(
@@ -1516,7 +1667,7 @@ fn run_spatial_segment(
                         RestartSnapshot::new(state, *output, step.surface_cosine_zenith)?;
                     // LULCC 年末那一步没重读 LAI（`defer_lai_refresh_at`）。
                     snapshot.lai_refreshed = step.clock.update_lai
-                        && !(segment.lulcc_boundary && step.clock.end_time == config.end);
+                        && !(segment.end == SegmentEnd::Lulcc && step.clock.end_time == config.end);
                     Ok(snapshot)
                 })
                 .collect::<Result<Vec<_>>>()?;
@@ -1571,8 +1722,9 @@ fn run_spatial_segment(
         },
     )?;
     let last = last.context(NO_STEP)?;
-    // 停在 LULCC 年末的一段：旧年份的终态只是合并的输入，写进临时目录。
-    let finals = if segment.lulcc_boundary {
+    // 停在 LULCC 年末或预热回卷点的一段：终态只是换年的输入，写进临时目录。回卷点上上游照常
+    // 按频率写续跑，但最后一轮会在同一时刻写同名文件盖掉它，所以这里不写。
+    let finals = if segment.end != SegmentEnd::Run {
         topology
             .blocks
             .iter()
@@ -1602,7 +1754,7 @@ fn run_spatial_segment(
             .as_ref(),
         empty_land_tracer,
     )?;
-    if let (Some(river), false) = (runtime.river(), segment.lulcc_boundary) {
+    if let (Some(river), SegmentEnd::Run) = (runtime.river(), segment.end) {
         let label = date_label(normalized_day_end(config.end));
         let path = river_restart_path(&out.join("restart"), name, &label, year);
         colm_runtime::river::restart::write_river_state(
@@ -1636,7 +1788,7 @@ fn run_spatial_segment(
             .collect::<Vec<_>>()
             .join(", ")
     );
-    if segment.lulcc_boundary {
+    if segment.end != SegmentEnd::Run {
         // 上游在 LULCC 时 `hist_final` 再 `hist_init`：没写完的区间就丢了。年末之前的区间
         // 都在这一步关上，跨年的区间不会出现；真出现就拒绝，而不是写一条上游没有的记录。
         let open = history_restart.window.as_ref().is_some_and(|window| {
@@ -1713,24 +1865,8 @@ fn check_spatial_lulcc(
             "DEF_USE_LULCC forces {field} = .true. upstream; set it in the namelist"
         );
     }
-    // 预热回卷（`CoLM.F90:711-724`）不回退土地覆盖：回卷前若已过了 LULCC 年末，回到起点后
-    // patch 布局是新一年的，而 `LAI_readin` 按 `jdate(1)` 读旧年份的 LAI（布局不同），上游没有
-    // 定义好的结果（upstream-bugs 第 50 条）。单遍预热（`spinup_repeat <= 1`）不回卷，可以跨年末；
-    // 多遍预热要在起始年年末（第一次 LULCC）之前结束。
-    if config.spinup_repeats > 1
-        && calendar_key(normalized_day_end(config.spinup_until))
-            > calendar_key(normalized_day_end(config.start))
-    {
-        let first_lulcc = normalized_day_end(lulcc_year_end(config.start));
-        ensure!(
-            calendar_key(normalized_day_end(config.spinup_until)) < calendar_key(first_lulcc),
-            "DEF_USE_LULCC with {} spinup cycles reaching the year end at {}: upstream rewinds the \
-             clock without restoring the land cover, then reads the old year's LAI into the new \
-             patch layout (docs/upstream-bugs.md #50)",
-            config.spinup_repeats,
-            date_label(first_lulcc)
-        );
-    }
+    // 多遍预热跨过 LULCC 年末时，回卷把土地覆盖换回起始年（upstream-bugs 第 50 条，两侧都已修），
+    // 见 [`spinup_crosses_lulcc`]。
     // 上游运行期 `lc_year = s_year` 不取整，而 2000 年以前 mksrfdata 只写 `max(1985, 5 年取整)` 的
     // 土地覆盖：起始年不是那样的年份时，上游去读不存在的 landdata 年份。
     ensure!(
@@ -2553,6 +2689,16 @@ fn calendar_key(time: CalendarTime) -> (i32, u16, u32) {
     (time.year, time.julian_day, time.seconds)
 }
 
+/// 换年两侧的时刻（续跑文件名里的日期）。
+struct TransitionTimes {
+    /// 旧状态所在的时刻（LULCC 年末或回卷点）。
+    old: CalendarTime,
+    /// 新状态的时刻：换年时与 `old` 相同，回卷时是运行起点。
+    new: CalendarTime,
+    /// 多遍预热的回卷（upstream-bugs 第 50 条）：换回起始年，一律 SAT，冷启动不落在 `restart/`。
+    rewind: bool,
+}
+
 struct LulccYears {
     old: i64,
     new: i64,
@@ -2569,12 +2715,12 @@ struct LulccYears {
 fn lulcc_transition(
     case: &SpatialCase<'_>,
     years: LulccYears,
-    boundary: CalendarTime,
+    times: TransitionTimes,
     old_dir: &Path,
     target: &Path,
     river: Option<SegmentRiverEnd>,
     old_baseflow: &[f64],
-) -> Result<(Vec<f64>, Vec<Option<usize>>)> {
+) -> Result<Transition> {
     use colm_runtime::spatial::topology::SpatialTopology;
     let SpatialCase {
         name,
@@ -2582,7 +2728,8 @@ fn lulcc_transition(
         out,
         ..
     } = *case;
-    let label = date_label(normalized_day_end(boundary));
+    let old_label = date_label(times.old);
+    let new_label = date_label(times.new);
     let landdata = out.join("landdata");
     let old_topology = SpatialTopology::read(&landdata, i32::try_from(years.old)?)?;
     let new_topology =
@@ -2594,15 +2741,27 @@ fn lulcc_transition(
         })?;
     let restart_root = out.join("restart");
     let scratch = restart_root.join(LULCC_SCRATCH);
-    // 1. 新一年的冷启动。
+    // 冷启动写在哪：换年写进 `restart/`（新年的日期目录本来就是续跑要落的地方）；回卷的冷启动日期
+    // 是运行起点，写进 `restart/` 会盖掉初值，放到临时目录。
+    let cold_root = if times.rewind {
+        scratch.join("rewind-cold")
+    } else {
+        restart_root.clone()
+    };
+    // 1. 新一年的冷启动；回卷时就是起始年在运行起点的冷启动，namelist 原样用。
     let mut cold_document = document.clone();
-    for (field, value) in [
-        ("DEF_simulation_time%start_year", years.new),
-        ("DEF_simulation_time%start_month", 1),
-        ("DEF_simulation_time%start_day", 1),
-        ("DEF_simulation_time%start_sec", 0),
-        ("DEF_LC_YEAR", years.new),
-    ] {
+    let cold_fields = if times.rewind {
+        Vec::new()
+    } else {
+        vec![
+            ("DEF_simulation_time%start_year", years.new),
+            ("DEF_simulation_time%start_month", 1),
+            ("DEF_simulation_time%start_day", 1),
+            ("DEF_simulation_time%start_sec", 0),
+            ("DEF_LC_YEAR", years.new),
+        ]
+    };
+    for (field, value) in cold_fields {
         if cold_document.get(field).is_some() {
             cold_document.set(field, Value::Int(value))?;
         } else {
@@ -2618,6 +2777,13 @@ fn lulcc_transition(
     let output = std::process::Command::new(&executable)
         .arg(&namelist)
         .args(["--land-cover", "igbp"])
+        .args(
+            times
+                .rewind
+                .then(|| ["--restart-dir".as_ref(), cold_root.as_os_str()])
+                .into_iter()
+                .flatten(),
+        )
         .output()
         .with_context(|| format!("cannot start {}", executable.display()))?;
     ensure!(
@@ -2628,7 +2794,8 @@ fn lulcc_transition(
         String::from_utf8_lossy(&output.stderr)
     );
     // 2. SAT，逐块（单元不跨块，按块配对与上游按 worker 配对等价）。
-    let mec = (integer_field(document, "DEF_LULCC_SCHEME")? == 2)
+    // 回卷没有从后一年到起始年的转移矩阵（mksrfdata 只写上一年到本年的），一律 SAT。
+    let mec = (!times.rewind && integer_field(document, "DEF_LULCC_SCHEME")? == 2)
         .then(|| -> Result<_> {
             Ok(colm_init::lulcc_mec::MecOptions {
                 plant_hydraulics: logical_field(document, "DEF_USE_PLANTHYDRAULICS")?,
@@ -2652,8 +2819,14 @@ fn lulcc_transition(
             .join("const")
             .join(format!("{name}_restart_const_lc{year:04}_{block}.nc"))
     };
-    let time_name =
-        |year: i64, block: &str| format!("{name}_restart_{label}_lc{year:04}_{block}.nc");
+    let time_name = |label: &str, year: i64, block: &str| {
+        format!("{name}_restart_{label}_lc{year:04}_{block}.nc")
+    };
+    let old_time_path = |block: &str| {
+        old_dir
+            .join(&old_label)
+            .join(time_name(&old_label, years.old, block))
+    };
     // 过渡这一步的历史区间已关（`run_spatial_segment` 核对过），旁车是空窗口。
     // 新年各块的城市标记（`patchtype == 1`），按块顺序拼接；旁车 `urban` 维按块取。
     let new_urban = new_topology
@@ -2725,7 +2898,9 @@ fn lulcc_transition(
     let mut new_baseflow = vec![1.0; new_topology.patch_count()];
     let mut previous = vec![None; new_topology.patch_count()];
     for (block, patches) in &new_topology.blocks {
-        let cold_path = restart_root.join(&label).join(time_name(years.new, block));
+        let cold_path = cold_root
+            .join(&new_label)
+            .join(time_name(&new_label, years.new, block));
         let cold = colm_init::RestartFile::open(&cold_path)?;
         // PFT/PC：冷启动同时写了 PFT 时间重启，SAT 再逐 PFT 抄旧值（`REST_LulccTimeVariables`）。
         let use_pft = case.physics.use_pft;
@@ -2755,9 +2930,7 @@ fn lulcc_transition(
         let overrides = match old_topology.blocks.iter().find(|(old, _)| old == block) {
             Some((_, old_patches)) => {
                 let old_const = colm_init::RestartFile::open(const_path(years.old, block))?;
-                let old_time = colm_init::RestartFile::open(
-                    old_dir.join(&label).join(time_name(years.old, block)),
-                )?;
+                let old_time = colm_init::RestartFile::open(old_time_path(block))?;
                 let new_element = &new_topology.element[patches.clone()];
                 let old_element = &old_topology.element[old_patches.clone()];
                 // 城市：每个 patch 的城市类型与城市单元号（两年各自的 `landurban`）。
@@ -2818,10 +2991,9 @@ fn lulcc_transition(
                 // PFT 常数与区间留给 MEC 的 PFT 尾段用。
                 let mut pft_side = None;
                 if let Some(cold_pft) = &cold_pft {
-                    let old_pft =
-                        colm_init::RestartFile::open(colm_runtime::pft::pft_restart_path(
-                            &old_dir.join(&label).join(time_name(years.old, block)),
-                        )?)?;
+                    let old_pft = colm_init::RestartFile::open(
+                        colm_runtime::pft::pft_restart_path(&old_time_path(block))?,
+                    )?;
                     let pft_const = |year: i64| -> Result<colm_init::RestartFile> {
                         colm_init::RestartFile::open(colm_runtime::pft::pft_restart_path(
                             &const_path(year, block),
@@ -2889,9 +3061,8 @@ fn lulcc_transition(
                 if let (Some(cold_urban), Some((new_urban, old_urban))) =
                     (&cold_urban, &urban_layouts)
                 {
-                    let old_urban_time = colm_init::RestartFile::open(lulcc_urban_path(
-                        &old_dir.join(&label).join(time_name(years.old, block)),
-                    )?)?;
+                    let old_urban_time =
+                        colm_init::RestartFile::open(lulcc_urban_path(&old_time_path(block))?)?;
                     let pairs = colm_init::lulcc::match_patches(
                         &colm_init::lulcc::SatSide {
                             time: &cold,
@@ -2941,7 +3112,7 @@ fn lulcc_transition(
                 // MEC 的城市段要旧城市重启与两侧城市布局。
                 let old_urban_time = match &urban_layouts {
                     Some(_) => Some(colm_init::RestartFile::open(lulcc_urban_path(
-                        &old_dir.join(&label).join(time_name(years.old, block)),
+                        &old_time_path(block),
                     )?)?),
                     None => None,
                 };
@@ -3023,7 +3194,9 @@ fn lulcc_transition(
             }
             None => Vec::new(),
         };
-        let path = target.join(&label).join(time_name(years.new, block));
+        let path = target
+            .join(&new_label)
+            .join(time_name(&new_label, years.new, block));
         std::fs::create_dir_all(path.parent().expect("a restart path has a parent"))?;
         cold.write_with(&path, &overrides)?;
         if let Some(cold_pft) = &cold_pft {
@@ -3036,9 +3209,7 @@ fn lulcc_transition(
             let old = match old_topology.blocks.iter().find(|(old, _)| old == block) {
                 Some((_, old_patches)) => Some((
                     colm_init::RestartFile::open(const_path(years.old, block))?,
-                    colm_init::RestartFile::open(
-                        old_dir.join(&label).join(time_name(years.old, block)),
-                    )?,
+                    colm_init::RestartFile::open(old_time_path(block))?,
                     old_patches.clone(),
                 )),
                 None => None,
@@ -3160,11 +3331,14 @@ fn lulcc_transition(
         written.push(path);
     }
     // 合并续跑不留在 `restart/` 时，冷启动建的日期目录空了就收掉。
-    if target != restart_root.as_path() {
-        let _ = std::fs::remove_dir(restart_root.join(&label));
+    if times.rewind {
+        std::fs::remove_dir_all(&cold_root)
+            .with_context(|| format!("cannot remove {}", cold_root.display()))?;
+    } else if target != restart_root.as_path() {
+        let _ = std::fs::remove_dir(restart_root.join(&new_label));
     }
     // 3. 河道：网络不变，状态接着用。
-    if let Some((mut state, river_tracers, sediment)) = river {
+    let river = if let Some((mut state, river_tracers, sediment)) = river {
         let network = colm_runtime::river::network::RiverNetwork::read(
             &unit_catchment_file(document, out)?,
             logical_field(document, "DEF_GridRiverLake_FloodplainStorageFix")?,
@@ -3201,7 +3375,7 @@ fn lulcc_transition(
         if let Some(bif) = state.bifurcation.as_mut() {
             bif.wdsrf_prev.clone_from(&state.wdsrf);
         }
-        let path = river_restart_path(target, name, &label, years.new);
+        let path = river_restart_path(target, name, &new_label, years.new);
         colm_runtime::river::restart::write_river_state(
             &path,
             &network,
@@ -3211,11 +3385,11 @@ fn lulcc_transition(
                 .context("DEF_REST_CompressLevel must fit 0..=9")?,
         )?;
         // 河道示踪物：上游在内存里原样留着（`grid_riverlake_flow_lulcc` 不碰），续跑照常提交。
-        match river_tracers {
-            Some(mut tracers) => colm_runtime::river::restart::write_river_tracers(
+        match river_tracers.as_ref() {
+            Some(tracers) => colm_runtime::river::restart::write_river_tracers(
                 &path,
                 &network,
-                &mut tracers,
+                &mut tracers.clone(),
                 u8::try_from(integer_field(document, "DEF_REST_CompressLevel")?)
                     .context("DEF_REST_CompressLevel must fit 0..=9")?,
             )?,
@@ -3234,7 +3408,10 @@ fn lulcc_transition(
             )?;
         }
         written.push(path);
-    }
+        Some((state, river_tracers, sediment))
+    } else {
+        None
+    };
     println!(
         "colm-rs: LULCC {} -> {} ({} -> {} patches); wrote {}",
         years.old,
@@ -3247,7 +3424,18 @@ fn lulcc_transition(
             .collect::<Vec<_>>()
             .join(", ")
     );
-    Ok((new_baseflow, previous))
+    Ok(Transition {
+        baseflow: new_baseflow,
+        pairing: previous,
+        river,
+    })
+}
+
+/// 换年的结果：新布局的 `scale_baseflow`、"新 patch → 配上的旧 patch"（全局次序）与换年后的河道状态。
+struct Transition {
+    baseflow: Vec<f64>,
+    pairing: Vec<Option<usize>>,
+    river: Option<SegmentRiverEnd>,
 }
 
 /// `LulccTransferTraceReadin`：`landdata/lulcc/<year>/lccpct_patches_lcXX_<block>.nc`，

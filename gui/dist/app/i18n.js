@@ -1180,7 +1180,7 @@ const ZH_EN = [
   ['预热期不写 history（MOD_Hist.F90:235 在 itstamp <= ptstamp 时直接 RETURN），', 'Spin-up writes no history (MOD_Hist.F90:235 returns when itstamp <= ptstamp),'],
   ['所以它不会污染输出，也不会被算进指标。', 'so it neither contaminates output nor enters the metrics.'],
   ['与结果页的「丢弃前 N 条记录」不是一回事：那个丢的是输出记录，单位是条。', 'This differs from “Discard first N records” on Results, which removes output records counted as records.'],
-  ['开启 LULCC 时，多轮预热（≥ 2）必须在起始年年末之前结束，否则 CoLM 会停机：回卷不回退土地覆盖。', 'With LULCC, multi-cycle spin-up (≥ 2) must end before the first year end, or CoLM stops: rewinding does not restore the land cover.'],
+  ['开启 LULCC 时，每轮预热回卷都会把土地覆盖换回起始年（按 SAT 方案搬运状态）。', 'With LULCC, each spin-up rewind changes the land cover back to the start year (states carried over with the SAT scheme).'],
   ['预热截止时刻。起始时刻早于它，中间那段就是预热期。四项（年月日秒）一起决定。', 'Spin-up cutoff. The interval between the earlier start and this time is spin-up; year, month, day, and second define it together.'],
   ['预热截止时刻的月，见 spinup_repeat 的说明。', 'Month of the spin-up cutoff; see spinup_repeat.'],
   ['预热截止时刻的日，见 spinup_repeat 的说明。', 'Day of the spin-up cutoff; see spinup_repeat.'],

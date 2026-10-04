@@ -11,7 +11,7 @@
 //! 都是从 0 起、按 PFT 顺序的 FMA 链（`FMA(x_p, pftfrac, acc)`），pftwrap 里手写的
 //! `tmp = tmp + x*pftfrac(i)` 也一样。见 [`pft_sum`]。
 
-use anyhow::{ensure, Result};
+use anyhow::{ensure, Context, Result};
 
 use crate::radiation::{broadband_radiation_from_ground_using, TwoStreamKind};
 use crate::{
@@ -50,6 +50,37 @@ pub struct PftParameters {
     pub evergreen: bool,
     /// `leaf_long(pftclass)` [年]（含 `DEF_PFT_LEAF_LONG` 覆盖）：常绿 PFT 的臭氧吸收衰减。
     pub leaf_longevity_years: f64,
+    /// `ncd_p`/`ncw_p`/`bcw_p`（PFT 常数重启，只在 `DEF_Interception_scheme = 8` 时读写）：
+    /// 截留方案 8 的针叶冠深、针叶冠宽、阔叶冠宽 [m]。
+    pub crown_m: Option<[f64; 3]>,
+}
+
+/// 截留方案 8 的逐 PFT 冠层参数：`htop_p`、`ncd_p`/`ncw_p`/`bcw_p` 与 `pftclass`（`is_pft = .true.`）。
+///
+/// `LEAF_interception_pftwrap` 传 `p,.true.,ncd_p(i),ncw_p(i),bcw_p(i),htop_p(i)`
+/// （`MOD_LeafInterception.F90:681-684`）；`LeafTemperature` 的 `colm2024_rain_capacity_for_fwet` 取
+/// `ncd_p(ipft_index)`（`MOD_LeafTemperature.F90:1411-1415`），`LeafTemperaturePC` 同样（`:655-660`）。
+/// patch 的 `colm2024` 为 `None`（方案 1）时 PFT 也是 `None`。
+pub(crate) fn pft_colm2024(
+    patch: Option<crate::Colm2024Canopy>,
+    parameters: &PftParameters,
+) -> Result<Option<crate::Colm2024Canopy>> {
+    let Some(patch) = patch else {
+        return Ok(None);
+    };
+    let [ncd, ncw, bcw] = parameters.crown_m.context(
+        "DEF_Interception_scheme = 8 with DEF_USE_PFT/PC needs ncd_p/ncw_p/bcw_p in the PFT \
+         constant restart",
+    )?;
+    Ok(Some(crate::Colm2024Canopy {
+        canopy_top_m: parameters.canopy_top_m,
+        needleleaf_crown_depth_m: ncd,
+        needleleaf_crown_width_m: ncw,
+        broadleaf_crown_width_m: bcw,
+        vegetation_class: parameters.class,
+        is_pft: true,
+        land_cover: patch.land_cover,
+    }))
 }
 
 impl PftParameters {
@@ -200,11 +231,6 @@ pub(crate) fn intercept_pfts(
     patch: &mut PftPatch,
     patch_water: &mut CanopyWater,
 ) -> Result<(CanopyInterceptionFluxes, Vec<CanopyInterceptionFluxes>)> {
-    ensure!(
-        template.colm2024.is_none(),
-        "DEF_Interception_scheme = 8 with DEF_USE_PFT needs the per-PFT crown sizes \
-         (ncd_p/ncw_p/bcw_p), which the Rust PFT path does not assemble yet"
-    );
     let mut fluxes = Vec::with_capacity(patch.columns.len());
     for (parameters, column) in patch.parameters.iter().zip(patch.columns.iter_mut()) {
         fluxes.push(crate::intercept_canopy(
@@ -213,6 +239,7 @@ pub(crate) fn intercept_pfts(
                 leaf_area_index: column.leaf_area_index,
                 stem_area_index: column.stem_area_index,
                 leaf_temperature_k: column.leaf.leaf_temperature_k,
+                colm2024: pft_colm2024(template.colm2024, parameters)?,
                 ..template
             },
             &mut column.leaf.canopy_water,
@@ -803,6 +830,7 @@ pub(crate) fn pft_canopy_energy(
                 ..shared
             }),
             ozone: pft_ozone(input.leaf_temperature.ozone, parameters),
+            colm2024: pft_colm2024(input.leaf_temperature.colm2024, parameters)?,
             ..input.leaf_temperature
         };
         let leaf_input = crate::standard_lct_step::leaf_input(

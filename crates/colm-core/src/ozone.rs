@@ -49,8 +49,8 @@ impl OzoneState {
 /// `CalcOzoneStress` 的植被类别参数与两个 namelist 量。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct OzoneParameters {
-    /// `ivt`：PFT 下是 `pftclass`；**LCT 下上游写死成 1**（`MOD_Thermal.F90:718` 的
-    /// `CALL LeafTemperature(ipatch,1,...)`），即所有地类都按温带常绿针叶林取参数。
+    /// `ivt`：PFT 下是 `pftclass`；LCT 下是 [`lct_ozone_vegetation_type`] 按地类给的 PFT
+    /// （upstream-bugs 第 68 条，原来写死成 1，所有地类都按温带常绿针叶林取参数）。
     pub vegetation_type: i32,
     /// `isevg(ivt)`
     pub evergreen: bool,
@@ -60,6 +60,27 @@ pub struct OzoneParameters {
     pub stomatal_resistance_factor: f64,
     /// `DEF_USE_OZONEDATA`（只在 `DEF_USE_OZONESTRESS` 打开时可能为真）。
     pub use_data: bool,
+}
+
+/// `ozone_pft_of_lct`（upstream-bugs 第 68 条，两侧都已修）：LCT patch 的臭氧参数取哪个 PFT。
+///
+/// 按生活型与叶习性取最接近的 PFT；没有植被的地类取 0（裸地，`o3coefv = o3coefg = 1`）；
+/// 混交林保留原来的 1。表外的地类号也取 0。
+pub fn lct_ozone_vegetation_type(scheme: crate::LandCoverScheme, land_class: usize) -> i32 {
+    // IGBP：0 海洋、1 ENF、2 EBF、3 DNF、4 DBF、5 混交林、6 郁闭灌丛、7 稀疏灌丛、8 木本稀树草原、
+    // 9 稀树草原、10 草地、11 湿地、12 农田、13 城市、14 农田/自然植被镶嵌、15 冰雪、16 裸地、17 水体。
+    const IGBP: [i32; 18] = [0, 1, 4, 3, 7, 1, 9, 10, 7, 14, 13, 13, 15, 13, 15, 0, 0, 0];
+    // USGS：0 海洋、1 城市、2-6 农田与镶嵌、7 草地、8 灌丛、9 灌草混合、10 稀树草原、11 DBF、
+    // 12 DNF、13 EBF、14 ENF、15 混交林、16 水体、17 草本湿地、18 木本湿地、19 裸地、
+    // 20 草本苔原、21 木本苔原、22 混合苔原、23 裸苔原、24 冰雪。
+    const USGS: [i32; 25] = [
+        0, 13, 15, 15, 15, 15, 15, 13, 10, 10, 14, 7, 3, 4, 1, 1, 0, 13, 7, 0, 12, 11, 12, 0, 0,
+    ];
+    let table: &[i32] = match scheme {
+        crate::LandCoverScheme::Igbp => &IGBP,
+        crate::LandCoverScheme::Usgs => &USGS,
+    };
+    table.get(land_class).copied().unwrap_or(0)
 }
 
 impl OzoneParameters {

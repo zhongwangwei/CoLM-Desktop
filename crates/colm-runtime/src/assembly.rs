@@ -121,7 +121,7 @@ pub struct LandPhysicsParameters {
     /// 于是这一项只能在这里传递、不能在这里求值。
     pub plant_hydraulic_overrides: colm_core::PlantHydraulicOverrides,
     /// `DEF_USE_OZONESTRESS`（城市模型下上游强制关掉）：LCT patch 的 `CalcOzoneStress` 参数
-    /// （`ivt = 1`，见 [`colm_core::OzoneParameters::vegetation_type`]）。PFT/PC 的逐 PFT 参数由
+    /// （`ivt` 按地类取，装配时由 [`crate::physics::lct_ozone_parameters`] 逐 patch 填）。PFT/PC 的逐 PFT 参数由
     /// [`colm_core::PftParameters`] 换掉类别那三项。关掉时为 `None`。
     pub ozone: Option<colm_core::OzoneParameters>,
     /// `DEF_VEG_SNOW`：植被上的雪（冠层雪的湿比例、冠层水的雪/雨分配）。
@@ -1420,6 +1420,15 @@ fn assemble(
                 physics.land_cover_scheme
             )
         })?;
+    // 臭氧胁迫的 `ivt` 按地类取（upstream-bugs 第 68 条）。
+    if let Some(ozone) = physics.ozone {
+        physics.ozone = Some(crate::physics::lct_ozone_parameters(
+            ozone,
+            physics.land_cover_scheme,
+            land_class,
+            physics.hydraulic_model == colm_core::HydraulicModel::Campbell,
+        )?);
+    }
     let class = ClassConstants::new(physics.land_cover_scheme, land_class)?
         .with_overrides(physics.land_class_overrides);
     // `MOD_LAIReadin.F90:128-145`（`USE_SITE_LAI` 那条）：水体与地类 0 是 0，
