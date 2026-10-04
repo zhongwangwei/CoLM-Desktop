@@ -61,7 +61,9 @@ fn land_tracer_restart_round_trips() {
     let refs: Vec<&PatchTracerState> = states.iter().collect();
     write_land_tracer_restart(&path, &set, &refs, -1.0, None).unwrap();
     let restart = colm_init::RestartFile::open(&path).unwrap();
-    let read = read_land_tracer_restart(&restart, &set, 2).unwrap().unwrap();
+    let read = read_land_tracer_restart(&restart, &set, 2)
+        .unwrap()
+        .unwrap();
     for (a, b) in read.iter().zip(&states) {
         assert_eq!(a.pools, b.pools);
         assert_eq!(a.aquifer_ref_water, b.aquifer_ref_water);
@@ -79,7 +81,9 @@ fn an_empty_transaction_is_not_a_compatible_restart() {
     }
     colm_init::write_empty_land_tracer_transaction(&path, -1.0).unwrap();
     let restart = colm_init::RestartFile::open(&path).unwrap();
-    assert!(read_land_tracer_restart(&restart, &set, 1).unwrap().is_none());
+    assert!(read_land_tracer_restart(&restart, &set, 1)
+        .unwrap()
+        .is_none());
 }
 
 #[test]
@@ -119,5 +123,7 @@ fn the_forcing_cache_round_trips_and_checks_its_identity() {
     other[3] = 8;
     assert!(read_forcing_cache(&restart, loadable, 1, &other).is_err());
     // 没读到示踪物事务（冷启动）时不读缓存。
-    assert!(read_forcing_cache(&restart, false, 1, &identity).unwrap().is_none());
+    assert!(read_forcing_cache(&restart, false, 1, &identity)
+        .unwrap()
+        .is_none());
 }

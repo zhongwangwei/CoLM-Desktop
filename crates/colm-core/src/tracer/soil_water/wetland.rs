@@ -129,7 +129,10 @@ pub fn tracer_wetland(
         set.len()
     );
     // 开阔水面风速 `sqrt(FMA(us, us, vs*vs))`（GIMPLE 去掉了 `max(·,0)`）。
-    let wind = input.forc_us.mul_add(input.forc_us, input.forc_vs * input.forc_vs).sqrt();
+    let wind = input
+        .forc_us
+        .mul_add(input.forc_us, input.forc_vs * input.forc_vs)
+        .sqrt();
 
     let dt = input.deltim;
     let nl = SOIL_LAYERS as i32;
@@ -399,13 +402,19 @@ pub fn tracer_wetland(
         };
         let fractionate_pool_loss =
             ctx.active && pool_water > TRC_WATER_MIN_FOR_RATIO && pool_tracer > TRC_TINY;
-        let (trc_loss, trc_evap_subl, trc_etr_loss, transp_output_tracer) = if fractionate_pool_loss {
+        let (trc_loss, trc_evap_subl, trc_etr_loss, transp_output_tracer) = if fractionate_pool_loss
+        {
             // 对一个临时的有限池依次扣，单步大量损失也能积分残余水的富集（`:2715-2789`）。
             let mut pool_water_loss = pool_water;
             let mut pool_tracer_loss = pool_tracer;
             let loss_liq_avail = q_evap_out.min(pool_water_loss.max(0.0));
-            let mut trc_evap_loss =
-                ctx.atmospheric_loss(pool_tracer_loss, pool_water_loss, loss_liq_avail, layer_temp(1), false);
+            let mut trc_evap_loss = ctx.atmospheric_loss(
+                pool_tracer_loss,
+                pool_water_loss,
+                loss_liq_avail,
+                layer_temp(1),
+                false,
+            );
             if q_evap_out > loss_liq_avail {
                 trc_evap_loss = (q_evap_out - loss_liq_avail).mul_add(pool_ratio, trc_evap_loss);
             }
@@ -417,10 +426,16 @@ pub fn tracer_wetland(
                 pool_ratio
             };
             let loss_ice_avail = q_subl_out.min(pool_water_loss.max(0.0));
-            let mut trc_subl_loss =
-                ctx.atmospheric_loss(pool_tracer_loss, pool_water_loss, loss_ice_avail, layer_temp(1), true);
+            let mut trc_subl_loss = ctx.atmospheric_loss(
+                pool_tracer_loss,
+                pool_water_loss,
+                loss_ice_avail,
+                layer_temp(1),
+                true,
+            );
             if q_subl_out > loss_ice_avail {
-                trc_subl_loss = (q_subl_out - loss_ice_avail).mul_add(pool_ratio_loss, trc_subl_loss);
+                trc_subl_loss =
+                    (q_subl_out - loss_ice_avail).mul_add(pool_ratio_loss, trc_subl_loss);
             }
             pool_tracer_loss -= trc_subl_loss;
             pool_water_loss -= q_subl_out;
@@ -446,7 +461,8 @@ pub fn tracer_wetland(
                 } else {
                     pool_ratio_loss / physics.alpha_liq_vap(tracer, tleaf).max(TRC_TINY)
                 };
-                let relhum_leaf = crate::tracer::frac::surface_relhum(forc_q, forc_psrf, tleaf, false);
+                let relhum_leaf =
+                    crate::tracer::frac::surface_relhum(forc_q, forc_psrf, tleaf, false);
                 let out = physics.transpiration_nss_ratio(
                     tracer,
                     &crate::tracer::frac::NssInput {
@@ -471,7 +487,8 @@ pub fn tracer_wetland(
                 p.leaf_peclet = out.new_peclet;
                 p.leaf_water_moles = out.new_leaf_moles;
                 transp_output_tracer = q_etr_out * out.trans_ratio;
-                p.leaf_iso_storage = (p.leaf_iso_storage + transp_source_tracer) - transp_output_tracer;
+                p.leaf_iso_storage =
+                    (p.leaf_iso_storage + transp_source_tracer) - transp_output_tracer;
             }
             (
                 (trc_evap_loss + trc_subl_loss) + transp_source_tracer,

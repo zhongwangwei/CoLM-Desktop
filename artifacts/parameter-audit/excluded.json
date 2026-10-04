@@ -152,25 +152,25 @@
   {
     "raw_key": "declfact",
     "reason_code": "diagnostic_only",
-    "source_location": "MOD_Const_PFT.F90:1448",
+    "source_location": "MOD_Const_PFT.F90:1478",
     "status": "excluded-internal"
   },
   {
     "raw_key": "allconsl",
     "reason_code": "diagnostic_only",
-    "source_location": "MOD_Const_PFT.F90:1478",
+    "source_location": "MOD_Const_PFT.F90:1508",
     "status": "excluded-internal"
   },
   {
     "raw_key": "mergetoclmpft",
     "reason_code": "structural_switch_not_continuous",
-    "source_location": "MOD_Const_PFT.F90:1554",
+    "source_location": "MOD_Const_PFT.F90:1584",
     "status": "excluded-internal"
   },
   {
     "raw_key": "irrig_crop",
     "reason_code": "structural_switch_not_continuous",
-    "source_location": "MOD_Const_PFT.F90:1710",
+    "source_location": "MOD_Const_PFT.F90:1740",
     "status": "excluded-internal"
   },
   {

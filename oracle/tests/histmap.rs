@@ -85,7 +85,8 @@ fn the_only_over_prediction_is_explained_by_a_runtime_condition() {
         .into_iter()
         .filter(|v| !golden.contains(*v))
         .collect();
-    assert_eq!(over.len(), 392);
+    // PR #504（FIRE）加的 104 个火诊断量都在 `DEF_USE_BGC` 下，这份算例没开 BGC：392 + 104。
+    assert_eq!(over.len(), 392 + 104);
 
     let all = colm_hist::all();
     let runtime_of = |n: &str| all.iter().find(|v| v.name == n).and_then(|v| v.runtime);

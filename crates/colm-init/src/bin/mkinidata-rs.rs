@@ -833,7 +833,11 @@ fn spatial_namelist_run_with_subgrid(
         tuning: RestartTuning::from_document(&document)?,
         snicar,
         tracer_mixing_water_mm: if namelist_bool(&document, "DEF_USE_TRACER", false)? {
-            Some(namelist_f64(&document, "DEF_TRACER_AQUIFER_MIXING_WATER_MM", -1.0)?)
+            Some(namelist_f64(
+                &document,
+                "DEF_TRACER_AQUIFER_MIXING_WATER_MM",
+                -1.0,
+            )?)
         } else {
             None
         },

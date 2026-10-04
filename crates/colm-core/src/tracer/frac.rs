@@ -198,7 +198,9 @@ impl TracerPhysics {
 
     /// `tracer_diffusivity_ratio_air`。
     pub fn diffusivity_ratio_air(&self, tracer: &TracerDescriptor) -> f64 {
-        Self::species(tracer).map_or(1.0, |species| species.diffusivity_ratio_air(self.kinetic_scheme))
+        Self::species(tracer).map_or(1.0, |species| {
+            species.diffusivity_ratio_air(self.kinetic_scheme)
+        })
     }
 
     /// `tracer_leaf_liquid_diffusivity`/`tracer_liquid_self_diffusivity`（未注册时 0）。
@@ -366,7 +368,11 @@ impl TracerPhysics {
     }
 
     /// `tracer_transpiration_nss_ratio`（Farquhar–Cernusak 非稳态叶水）。
-    pub fn transpiration_nss_ratio(&self, tracer: &TracerDescriptor, input: &NssInput) -> NssOutput {
+    pub fn transpiration_nss_ratio(
+        &self,
+        tracer: &TracerDescriptor,
+        input: &NssInput,
+    ) -> NssOutput {
         let source_ratio = input.source_ratio;
         let initial_delta = Self::ratio_to_delta(tracer, source_ratio);
         let mut out = NssOutput {
@@ -437,7 +443,11 @@ impl TracerPhysics {
             } else {
                 leaf_moles
             };
-            (prev_w, input.prev_delta_e, input.prev_peclet.max(0.0).min(1.0))
+            (
+                prev_w,
+                input.prev_delta_e,
+                input.prev_peclet.max(0.0).min(1.0),
+            )
         } else {
             (leaf_moles, delta_x, peclet)
         };
@@ -465,7 +475,10 @@ impl TracerPhysics {
         out.new_delta_b = (out.new_delta_e - delta_x).mul_add(peclet, delta_x);
 
         let (prev_leaf_water, prev_bulk_ratio) = if input.prev_leaf_moles > TRC_TINY {
-            (prev_w / WATER_MOLES_PER_MM, Self::delta_to_ratio(tracer, input.prev_delta_b))
+            (
+                prev_w / WATER_MOLES_PER_MM,
+                Self::delta_to_ratio(tracer, input.prev_delta_b),
+            )
         } else {
             (leaf_moles / WATER_MOLES_PER_MM, source_ratio)
         };
@@ -484,7 +497,8 @@ impl TracerPhysics {
         if (used - storage_tracer_change).abs() > TRC_TINY {
             let target_leaf_storage = used + previous_storage;
             if new_leaf_water > TRC_TINY && target_leaf_storage > TRC_TINY {
-                out.new_delta_b = Self::ratio_to_delta(tracer, target_leaf_storage / new_leaf_water);
+                out.new_delta_b =
+                    Self::ratio_to_delta(tracer, target_leaf_storage / new_leaf_water);
                 out.new_delta_e = if peclet > 1.0e-6 {
                     (out.new_delta_b - delta_x) / peclet + delta_x
                 } else {
@@ -567,10 +581,17 @@ pub fn ice_deposition_alpha(
     if temp_k <= JM84_FULL_KINETIC_TEMP {
         return jm84_effective_alpha(alpha_eq_at_t, diff_ratio, temp_k - TFRZ, slope);
     }
-    let alpha_cold =
-        jm84_effective_alpha(alpha_eq_at_tcold, diff_ratio, JM84_FULL_KINETIC_TEMP - TFRZ, slope);
+    let alpha_cold = jm84_effective_alpha(
+        alpha_eq_at_tcold,
+        diff_ratio,
+        JM84_FULL_KINETIC_TEMP - TFRZ,
+        slope,
+    );
     let span = TFRZ - JM84_FULL_KINETIC_TEMP;
-    alpha_eq_at_tfrz.mul_add(temp_k - JM84_FULL_KINETIC_TEMP, (TFRZ - temp_k) * alpha_cold) / span
+    alpha_eq_at_tfrz.mul_add(
+        temp_k - JM84_FULL_KINETIC_TEMP,
+        (TFRZ - temp_k) * alpha_cold,
+    ) / span
 }
 
 /// `tracer_mj79_kinetic_alpha`。
@@ -592,7 +613,10 @@ pub fn soil_kinetic_alpha_core(ra: f64, rs: f64, diff_ratio: f64) -> f64 {
     if denom <= 0.0 || diff_ratio <= 0.0 {
         return 1.0;
     }
-    diff_ratio.lpow(CG_EXPONENT_LIQUID).mul_add(ra1, diff_ratio * rs1) / denom
+    diff_ratio
+        .lpow(CG_EXPONENT_LIQUID)
+        .mul_add(ra1, diff_ratio * rs1)
+        / denom
 }
 
 /// `tracer_soil_effective_diffusivity`：`D·θ^(7/3)/φ²`。

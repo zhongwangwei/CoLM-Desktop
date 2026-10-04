@@ -19,6 +19,11 @@ fn hf(s: &str) -> f64 {
     f64::from_bits(h64(s))
 }
 
+/// macOS 逐位、其它平台 16 ULP（见 [`crate::reference_bits_match`]）。
+fn close(got: f64, want: u64) -> bool {
+    crate::reference_bits_match(got, f64::from_bits(want), 0.0)
+}
+
 fn records(tag: &str) -> Vec<Vec<&'static str>> {
     FIXTURE
         .lines()
@@ -55,7 +60,7 @@ fn gratio_matches_gfortran_bitwise() {
         let mut ans = f64::from_bits(SENTINEL);
         let mut qans = f64::from_bits(SENTINEL);
         gratio_fortran(a, x, &mut ans, &mut qans, ind);
-        if ans.to_bits() != want_p || qans.to_bits() != want_q {
+        if !(close(ans, want_p) && close(qans, want_q)) {
             bad.push(format!(
                 "ind={ind} a={a:e} x={x:e}: P {:016X} vs {want_p:016X}, Q {:016X} vs {want_q:016X}",
                 ans.to_bits(),
@@ -68,7 +73,7 @@ fn gratio_matches_gfortran_bitwise() {
                 errors += 1;
                 assert_eq!(p, 2.0);
                 assert!(q.is_nan());
-            } else if p.to_bits() != want_p || q.to_bits() != want_q {
+            } else if !(close(p, want_p) && close(q, want_q)) {
                 bad.push(format!("gratio({a:e}, {x:e}) 与 gratio_fortran 不一致"));
             }
         }
@@ -133,7 +138,7 @@ fn check_unary(tag: &str, name: &str, f: impl Fn(f64) -> f64) {
         let x = hf(r[1]);
         let want = h64(r[2]);
         let got = f(x).to_bits();
-        if got != want {
+        if !close(f64::from_bits(got), want) {
             bad.push(format!("{name}({x:e}) = {got:016X}，gfortran {want:016X}"));
         }
     }
@@ -174,7 +179,7 @@ fn erfc1_matches_gfortran_bitwise() {
         let x = hf(r[1]);
         let want = h64(r[2]);
         let got = erfc1(ind, x).to_bits();
-        if got != want {
+        if !close(f64::from_bits(got), want) {
             bad.push(format!(
                 "ERFC1({ind}, {x:e}) = {got:016X}，gfortran {want:016X}"
             ));

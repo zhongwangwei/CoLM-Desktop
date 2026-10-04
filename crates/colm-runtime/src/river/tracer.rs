@@ -215,7 +215,12 @@ impl RiverTracers {
     }
 
     /// `equilibrate_river_tracer_cell`。
-    pub(crate) fn equilibrate_cell(&mut self, i: usize, visible: f64, protected: f64) -> Result<()> {
+    pub(crate) fn equilibrate_cell(
+        &mut self,
+        i: usize,
+        visible: f64,
+        protected: f64,
+    ) -> Result<()> {
         let Some((solid, levsto_solid)) = self.solid.as_mut() else {
             return Ok(());
         };
@@ -455,7 +460,9 @@ impl RiverTracers {
                     let layers = tapes
                         .first()
                         .and_then(|tape| tape.bif_hflux_lev.get(s))
-                        .ok_or_else(|| anyhow::anyhow!("the bifurcation tape misses substep {s}"))?;
+                        .ok_or_else(|| {
+                            anyhow::anyhow!("the bifurcation tape misses substep {s}")
+                        })?;
                     Some((bif, layers.as_slice()))
                 }
                 None => None,
@@ -508,7 +515,12 @@ impl RiverTracers {
     }
 
     /// `tracer_substep`（`do_bif` 由 `step.bif` 决定）。
-    fn substep(&mut self, net: &RiverNetwork, levee: Option<&Levee>, step: &GlobalSubstep<'_>) -> Result<()> {
+    fn substep(
+        &mut self,
+        net: &RiverNetwork,
+        levee: Option<&Levee>,
+        step: &GlobalSubstep<'_>,
+    ) -> Result<()> {
         let n = net.len();
         let limiter_max_iter = 2 * n + 1;
         let mut conc_flux = vec![0.0; n];
@@ -526,7 +538,9 @@ impl RiverTracers {
         let mut inp_step = vec![0.0; n];
         let mut bif_net = vec![0.0; n];
         let mut bif_lev_net = vec![0.0; n];
-        let (paths, levels) = step.bif.map_or((0, 0), |(bif, _)| (bif.paths(), bif.levels));
+        let (paths, levels) = step
+            .bif
+            .map_or((0, 0), |(bif, _)| (bif.paths(), bif.levels));
         let mut pth_levtrc = vec![0.0; paths * levels];
         // `tracer_bif_path_levee_sides`：下游不在网络里时 `has_levee_dn_pth` 的填充值是 0。
         let sides = |i_up: usize, i_dn: Option<usize>| -> (bool, bool) {
@@ -582,7 +596,9 @@ impl RiverTracers {
                 self.inp_buf[itrc][i] -= release;
                 self.mass[itrc][i] += release;
                 // 有堤单元流域的堤内水（子步首）。
-                let leveed = levee.filter(|levee| levee.has[i]).map(|_| step.start[i].levsto.unwrap_or(0.0));
+                let leveed = levee
+                    .filter(|levee| levee.has[i])
+                    .map(|_| step.start[i].levsto.unwrap_or(0.0));
                 if let (Some((solid, levsto_solid)), true) =
                     (self.solid.as_mut(), tracer.has_dissolved_limit())
                 {
@@ -622,7 +638,10 @@ impl RiverTracers {
                     );
                     prot_conc_flux[i] = if levsto > 0.0 {
                         let conc = self.levsto[itrc][i] / levsto;
-                        ensure!(conc.is_finite(), "non-finite protected tracer concentration");
+                        ensure!(
+                            conc.is_finite(),
+                            "non-finite protected tracer concentration"
+                        );
                         conc
                     } else {
                         0.0
@@ -1187,7 +1206,9 @@ impl RiverTracers {
             wdsrf: state.wdsrf[i],
             volwater_ucat: state.volwater[i],
             volresv: match (built[i], reservoir, state.volresv.as_ref()) {
-                (true, Some(reservoir), Some(volresv)) => reservoir.of_catchment[i].map(|r| volresv[r]),
+                (true, Some(reservoir), Some(volresv)) => {
+                    reservoir.of_catchment[i].map(|r| volresv[r])
+                }
                 _ => None,
             },
             levsto: state.levsto.as_ref().map(|levsto| levsto[i]),
@@ -1207,10 +1228,16 @@ impl RiverTracers {
                         0.0
                     };
                 }
-                if let (Some((solid, levsto_solid)), true) = (self.solid.as_mut(), tracer.has_dissolved_limit()) {
+                if let (Some((solid, levsto_solid)), true) =
+                    (self.solid.as_mut(), tracer.has_dissolved_limit())
+                {
                     solid[itrc][i] = 0.0;
                     levsto_solid[itrc][i] = 0.0;
-                    tracer.equilibrate_dissolved(volwater, &mut self.mass[itrc][i], &mut solid[itrc][i]);
+                    tracer.equilibrate_dissolved(
+                        volwater,
+                        &mut self.mass[itrc][i],
+                        &mut solid[itrc][i],
+                    );
                     if let Some(levsto) = cell.levsto {
                         tracer.equilibrate_dissolved(
                             levsto.max(0.0),
@@ -1222,7 +1249,11 @@ impl RiverTracers {
             }
             for i in 0..n {
                 let volwater = cell_volume(net, levee, i, &water(i));
-                self.conc[itrc][i] = if volwater <= V_DRY_OFF { 0.0 } else { self.mass[itrc][i] / volwater };
+                self.conc[itrc][i] = if volwater <= V_DRY_OFF {
+                    0.0
+                } else {
+                    self.mass[itrc][i] / volwater
+                };
             }
         }
     }
@@ -1231,7 +1262,10 @@ impl RiverTracers {
     pub fn validate_for_restart(&mut self) -> Result<()> {
         for itrc in self.transport() {
             for i in 0..self.acc_rnof_ref.len() {
-                ensure!(self.acc_rnof_ref[i].is_finite(), "invalid river/lake tracer restart state");
+                ensure!(
+                    self.acc_rnof_ref[i].is_finite(),
+                    "invalid river/lake tracer restart state"
+                );
                 let mass = self.mass[itrc][i];
                 let held = self.levsto[itrc][i];
                 ensure!(

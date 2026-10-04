@@ -144,7 +144,12 @@ impl LatLonGrid {
             "a grid needs matching latitude and longitude edges"
         );
         ensure!(
-            lat_s.iter().chain(&lat_n).chain(&lon_w).chain(&lon_e).all(|v| v.is_finite()),
+            lat_s
+                .iter()
+                .chain(&lat_n)
+                .chain(&lon_w)
+                .chain(&lon_e)
+                .all(|v| v.is_finite()),
             "grid edges must be finite"
         );
         let mut grid = Self {

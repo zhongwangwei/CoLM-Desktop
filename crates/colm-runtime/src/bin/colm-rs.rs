@@ -269,7 +269,9 @@ fn run() -> Result<()> {
                 patch_type: template.patch_type,
             })
             .collect::<Vec<_>>();
-        Some(BaseflowOptimizer::new(&patches, para_opt, &name, "w180_s90"))
+        Some(BaseflowOptimizer::new(
+            &patches, para_opt, &name, "w180_s90",
+        ))
     } else {
         None
     };
@@ -1307,8 +1309,9 @@ fn run_spatial_segment(
     // unitcat 文件的压缩：逐时间量用 `DEF_HIST_CompressLevel`，静态掩码用 `DEF_REST_CompressLevel`。
     if let Some(writer) = river_writer.as_mut() {
         writer.hist_compress_level = colm_runtime::spatial::history::hist_compress_level(document)?;
-        writer.rest_compress_level = u8::try_from(integer_field(document, "DEF_REST_CompressLevel")?)
-            .context("DEF_REST_CompressLevel must fit 0..=9")?;
+        writer.rest_compress_level =
+            u8::try_from(integer_field(document, "DEF_REST_CompressLevel")?)
+                .context("DEF_REST_CompressLevel must fit 0..=9")?;
     }
     let river_state =
         colm_runtime::river::restart::read_river_state(&river_start, &network, reservoir.as_ref())?;

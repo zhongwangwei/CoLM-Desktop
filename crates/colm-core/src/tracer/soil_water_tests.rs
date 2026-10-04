@@ -640,9 +640,22 @@ fn fractionation_changes_only_the_registered_isotope() {
         ..Default::default()
     };
     let mut plain = before.clone();
-    tracer_soil_water(&set, &mut after, physics, &no_diffusion(), &scen.input(&ratios)).unwrap();
-    tracer_soil_water(&set, &mut plain, TracerPhysics::default(), &no_diffusion(), &scen.input(&ratios))
-        .unwrap();
+    tracer_soil_water(
+        &set,
+        &mut after,
+        physics,
+        &no_diffusion(),
+        &scen.input(&ratios),
+    )
+    .unwrap();
+    tracer_soil_water(
+        &set,
+        &mut plain,
+        TracerPhysics::default(),
+        &no_diffusion(),
+        &scen.input(&ratios),
+    )
+    .unwrap();
     // 溶质（Cl）不受分馏开关影响；HDO 走分馏路径。
     assert_eq!(after.pools[0], plain.pools[0]);
     assert_ne!(after.pools[1], plain.pools[1]);

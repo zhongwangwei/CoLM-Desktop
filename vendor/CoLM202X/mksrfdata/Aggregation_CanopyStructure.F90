@@ -14,6 +14,7 @@ SUBROUTINE Aggregation_CanopyStructure (gland, dir_rawdata, dir_model_landdata, 
    USE MOD_Const_LC
    USE MOD_5x5DataReadin
    USE MOD_LandPFT
+   USE MOD_Filesystem, ONLY: make_directory
 
    IMPLICIT NONE
 
@@ -49,7 +50,7 @@ SUBROUTINE Aggregation_CanopyStructure (gland, dir_rawdata, dir_model_landdata, 
 #endif
    IF (p_is_master) THEN
       write(*,'(/,A)') 'Aggregate canopy structure for CoLM2024 interception ...'
-      CALL system('mkdir -p ' // trim(adjustl(landdir)))
+      CALL make_directory(trim(adjustl(landdir)))
    ENDIF
 #ifdef USEMPI
    CALL mpi_barrier (p_comm_glb, p_err)

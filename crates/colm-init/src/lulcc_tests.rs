@@ -203,8 +203,18 @@ fn pfts_pair_by_class_and_ldew_is_reweighted() {
     let old_time = restart(&dir.join("old.nc"), 2, 0.0, &[1.0, 1.0], &[1.0, 1.0]);
     // 一个单元两个 patch：土壤（类 1）与湿地（类 11）。
     let (class, element) = ([1i64, 11], [7i64, 7]);
-    let new_side = SatSide { time: &new_time, patch_class: &class, element: &element, urban_class: None };
-    let old_side = SatSide { time: &old_time, patch_class: &class, element: &element, urban_class: None };
+    let new_side = SatSide {
+        time: &new_time,
+        patch_class: &class,
+        element: &element,
+        urban_class: None,
+    };
+    let old_side = SatSide {
+        time: &old_time,
+        patch_class: &class,
+        element: &element,
+        urban_class: None,
+    };
     // 新：PFT 类 1、3、4；旧：类 1、2、4（类 2 消失、类 3 新增）。
     let new_pft = pft_restart(&dir.join("new_pft.nc"), 3, 100.0);
     let old_pft = pft_restart(&dir.join("old_pft.nc"), 3, 0.0);
@@ -213,13 +223,30 @@ fn pfts_pair_by_class_and_ldew_is_reweighted() {
     let (overrides, ldew) = pft_same_type_assignment(
         &new_side,
         &old_side,
-        &PftSatSide { time: &new_pft, pft_class: &[1, 3, 4], ranges: &ranges, patch_type: &patch_type },
-        &PftSatSide { time: &old_pft, pft_class: &[1, 2, 4], ranges: &ranges, patch_type: &patch_type },
+        &PftSatSide {
+            time: &new_pft,
+            pft_class: &[1, 3, 4],
+            ranges: &ranges,
+            patch_type: &patch_type,
+        },
+        &PftSatSide {
+            time: &old_pft,
+            pft_class: &[1, 2, 4],
+            ranges: &ranges,
+            patch_type: &patch_type,
+        },
         &[0.5, 0.3, 0.2],
-        SatOptions { plant_hydraulics: false, ..options() },
+        SatOptions {
+            plant_hydraulics: false,
+            ..options()
+        },
     )
     .unwrap();
-    let tleaf = &overrides.iter().find(|o| o.name == "tleaf_p").unwrap().values;
+    let tleaf = &overrides
+        .iter()
+        .find(|o| o.name == "tleaf_p")
+        .unwrap()
+        .values;
     // 类 1 ← 旧第 0 个（0），类 3 冷启动（101），类 4 ← 旧第 2 个（2）。
     assert_eq!(tleaf, &vec![0.0, 101.0, 2.0]);
     let expected = 2.0f64.mul_add(0.2, 101.0f64.mul_add(0.3, 0.0f64.mul_add(0.5, 0.0)));
@@ -263,20 +290,41 @@ fn urban_patch_water_is_recomposed_from_the_urban_columns() {
     file.add_dimension("roofsnow", 8).unwrap();
     file.add_dimension("soilsnow", 8).unwrap();
     for name in ["wliq_roofsno", "wice_roofsno"] {
-        file.add_variable::<f64>(name, &["urban", "roofsnow"]).unwrap().put_values(&[1.0; 8], ..).unwrap();
+        file.add_variable::<f64>(name, &["urban", "roofsnow"])
+            .unwrap()
+            .put_values(&[1.0; 8], ..)
+            .unwrap();
     }
-    for name in ["wliq_gpersno", "wice_gpersno", "wliq_gimpsno", "wice_gimpsno"] {
+    for name in [
+        "wliq_gpersno",
+        "wice_gpersno",
+        "wliq_gimpsno",
+        "wice_gimpsno",
+    ] {
         let value = if name.contains("gper") { 2.0 } else { 4.0 };
-        file.add_variable::<f64>(name, &["urban", "soilsnow"]).unwrap().put_values(&[value; 8], ..).unwrap();
+        file.add_variable::<f64>(name, &["urban", "soilsnow"])
+            .unwrap()
+            .put_values(&[value; 8], ..)
+            .unwrap();
     }
     for (name, value) in [("scv_roof", 1.0), ("scv_gper", 2.0), ("scv_gimp", 4.0)] {
-        file.add_variable::<f64>(name, &["urban"]).unwrap().put_values(&[value], ..).unwrap();
+        file.add_variable::<f64>(name, &["urban"])
+            .unwrap()
+            .put_values(&[value], ..)
+            .unwrap();
     }
     file.close().unwrap();
     let urban_time = RestartFile::open(dir.join("u.nc")).unwrap();
     let urban: Vec<RestartOverride> = [
-        "wliq_roofsno", "wice_roofsno", "wliq_gpersno", "wice_gpersno", "wliq_gimpsno",
-        "wice_gimpsno", "scv_roof", "scv_gper", "scv_gimp",
+        "wliq_roofsno",
+        "wice_roofsno",
+        "wliq_gpersno",
+        "wice_gpersno",
+        "wliq_gimpsno",
+        "wice_gimpsno",
+        "scv_roof",
+        "scv_gper",
+        "scv_gimp",
     ]
     .iter()
     .map(|&name| RestartOverride::new(name, values(&urban_time, name).unwrap()))
@@ -287,8 +335,16 @@ fn urban_patch_water_is_recomposed_from_the_urban_columns() {
         RestartOverride::new("scv", vec![9.0, 9.0]),
     ];
     let (froof, fgper) = (0.25, 0.5);
-    recompose_urban_patch_water(&[(1, 0)], &urban, &urban_time, &[froof], &[fgper], &mut patch, 8)
-        .unwrap();
+    recompose_urban_patch_water(
+        &[(1, 0)],
+        &urban,
+        &urban_time,
+        &[froof],
+        &[fgper],
+        &mut patch,
+        8,
+    )
+    .unwrap();
     let open = 1.0 - froof;
     let top = (4.0 * open).mul_add(1.0 - fgper, (2.0 * open).mul_add(fgper, 1.0 * froof));
     let deep = (2.0 * open).mul_add(fgper, 0.0);

@@ -24,7 +24,6 @@
 
 #![allow(clippy::manual_clamp)]
 
-
 use anyhow::Result;
 
 use super::evap_limit::{
@@ -434,7 +433,10 @@ pub fn tracer_flood_evap_loss(
         }
         let active = physics.fractionation_active(tracer);
         // Craig-Gordon 比值用开阔水面动力学 α，风速 `sqrt(FMA(us, us, vs*vs))`。
-        let wind = input.forc_us.mul_add(input.forc_us, input.forc_vs * input.forc_vs).sqrt();
+        let wind = input
+            .forc_us
+            .mul_add(input.forc_us, input.forc_vs * input.forc_vs)
+            .sqrt();
         let evap_ratio = |source_ratio: f64, temp: f64, from_ice: bool| {
             if !active {
                 return source_ratio;
@@ -540,7 +542,8 @@ impl Frac<'_, '_> {
             return Ok(0.0);
         }
         let active = self.active();
-        let evap_ratio = |source_ratio: f64, temp: f64, ice: bool| self.evap_ratio_for(source_ratio, temp, ice);
+        let evap_ratio =
+            |source_ratio: f64, temp: f64, ice: bool| self.evap_ratio_for(source_ratio, temp, ice);
         let r_max = r_max(self.tracer, active);
         Ok(if from_ice {
             skin_limited_tracer_loss(
@@ -577,7 +580,9 @@ impl Frac<'_, '_> {
             return source_ratio;
         };
         let relhum = super::frac::surface_relhum(forc_q, forc_psrf, temp_k, from_ice);
-        let alpha_k = self.physics.alpha_kinetic_craig_gordon(self.tracer, from_ice);
+        let alpha_k = self
+            .physics
+            .alpha_kinetic_craig_gordon(self.tracer, from_ice);
         self.physics.craig_gordon_evap_ratio(
             self.tracer,
             source_ratio,
@@ -603,7 +608,13 @@ impl Frac<'_, '_> {
     }
 
     /// `tracer_rayleigh_freezing_loss`。
-    fn rayleigh_freezing_loss(&self, pool_trc: f64, pool_water: f64, freeze_water: f64, temp_k: f64) -> f64 {
+    fn rayleigh_freezing_loss(
+        &self,
+        pool_trc: f64,
+        pool_water: f64,
+        freeze_water: f64,
+        temp_k: f64,
+    ) -> f64 {
         self.physics
             .rayleigh_freezing_loss(self.tracer, pool_trc, pool_water, freeze_water, temp_k)
     }

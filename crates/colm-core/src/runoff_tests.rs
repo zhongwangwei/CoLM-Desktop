@@ -270,7 +270,10 @@ fn topmodel_matches_vendor_fortran_bitwise() {
         // 方法 2 下 Fortran 不收敛时 `eta`、`fsat` 照用：也要逐位相同。
         per_method[case.method as usize] += 1;
         let got = case.run();
-        if got != case.expected {
+        let matches = got.iter().zip(&case.expected).all(|(&got, &want)| {
+            crate::reference_bits_match(f64::from_bits(got), f64::from_bits(want), 0.0)
+        });
+        if !matches {
             bad.push(format!(
                 "第 {row} 组（方法 {}）：{:016X?} vs {:016X?}",
                 case.method, got, case.expected

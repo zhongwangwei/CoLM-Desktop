@@ -598,7 +598,10 @@ fn validate(input: PhaseChangeInput<'_>) -> Result<usize> {
             .fact_seconds_per_j_m2_k
             .iter()
             .all(|value| *value > 0.0)
-            && input.liquid_water_kg_m2.iter().all(|value| *value >= -crate::SOIL_WATER_ROUNDOFF_KG_M2)
+            && input
+                .liquid_water_kg_m2
+                .iter()
+                .all(|value| *value >= -crate::SOIL_WATER_ROUNDOFF_KG_M2)
             && input.ice_water_kg_m2.iter().all(|value| *value >= 0.0),
         "phase-change layer capacities must be positive and water masses nonnegative"
     );
@@ -670,7 +673,10 @@ fn validate_urban(input: UrbanPhaseChangeInput<'_>) -> Result<usize> {
                 .fact_seconds_per_j_m2_k
                 .iter()
                 .all(|value| *value > 0.0)
-            && input.liquid_water_kg_m2.iter().all(|value| *value >= -crate::SOIL_WATER_ROUNDOFF_KG_M2)
+            && input
+                .liquid_water_kg_m2
+                .iter()
+                .all(|value| *value >= -crate::SOIL_WATER_ROUNDOFF_KG_M2)
             && input.ice_water_kg_m2.iter().all(|value| *value >= 0.0)
             && input.surface_heat_flux_w_m2.is_finite()
             && input

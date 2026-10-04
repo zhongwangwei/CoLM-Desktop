@@ -1321,7 +1321,7 @@ pub async fn new_spatial_case(
         error
     };
     let existing_mesh = existing_unstructured_mesh(&request.grid_kind, request.mesh_file.clone())
-        .map_err(&cleanup)?;
+        .map_err(cleanup)?;
     let mesh = if let Some(mesh) = existing_mesh {
         mesh
     } else if request.grid_kind == "catchment" {
@@ -1342,7 +1342,7 @@ pub async fn new_spatial_case(
         let dlat = request
             .dlat
             .ok_or_else(|| cleanup("dlat is required".into()))?;
-        let (nlon, nlat) = grid_dimensions(dlon, dlat).map_err(&cleanup)?;
+        let (nlon, nlat) = grid_dimensions(dlon, dlat).map_err(cleanup)?;
         let mesh = case_dir.join("mesh.nc").to_string_lossy().into_owned();
         let mut args = vec![
             "mesh-new".into(),
@@ -1384,7 +1384,7 @@ pub async fn new_spatial_case(
             "global" => {}
             _ => unreachable!(),
         }
-        capture_async(args).await.map_err(&cleanup)?;
+        capture_async(args).await.map_err(cleanup)?;
         mesh
     };
     let manifest = case_dir
@@ -1401,7 +1401,7 @@ pub async fn new_spatial_case(
         manifest,
     ])
     .await
-    .map_err(&cleanup)?;
+    .map_err(cleanup)?;
     let mut args = vec![
         "spatial-new".into(),
         "--grid-kind".into(),
@@ -1435,8 +1435,8 @@ pub async fn new_spatial_case(
             request.dlat.expect("validated above").to_string(),
         ]);
     }
-    let output = capture_async(args).await.map_err(&cleanup)?;
-    crate::config::apply_fields(&request.out, &request.fields).map_err(&cleanup)?;
+    let output = capture_async(args).await.map_err(cleanup)?;
+    crate::config::apply_fields(&request.out, &request.fields).map_err(cleanup)?;
     Ok(output)
 }
 

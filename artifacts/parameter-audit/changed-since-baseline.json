@@ -18,7 +18,7 @@
     "rootb",
     "dsladlai"
   ],
-  "catalog_descriptors_added": 1220,
+  "catalog_descriptors_added": 1333,
   "catalog_version": 2,
   "current_source_counts": {
     "land_cover_base_parameters": 44,
@@ -26,7 +26,7 @@
     "pc_pft_parameters": 87,
     "pft_parameters": 87,
     "process_parameters": 170,
-    "schema_fields": 832
+    "schema_fields": 945
   },
   "note": "Base IDs split LC into IGBP/USGS and PFT into PFT/PC scopes; descriptor count is therefore not a raw-source count."
 }

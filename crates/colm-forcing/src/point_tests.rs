@@ -128,7 +128,10 @@ fn point_sampling_clamps_supersaturated_humidity_like_metpreprocess() {
             .unwrap();
     }
     let dry = load_point_forcing(&path).unwrap();
-    assert_eq!(dry.sample_at_seconds(first).unwrap().specific_humidity, 0.0005);
+    assert_eq!(
+        dry.sample_at_seconds(first).unwrap().specific_humidity,
+        0.0005
+    );
 }
 
 /// `forc_hpbl` 是上游在 `DEF_USE_CBL_HEIGHT` 下追加的第 9 个强迫变量。

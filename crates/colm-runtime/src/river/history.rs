@@ -703,7 +703,9 @@ impl RiverHistoryWriter {
         const DELTA_VMIN: f64 = 1.0;
         const SANITY: f64 = 2.0e3;
         let dust = |v: Vec<f64>| -> Vec<f64> {
-            v.into_iter().map(|x| if x.abs() < DUST { 0.0 } else { x }).collect()
+            v.into_iter()
+                .map(|x| if x.abs() < DUST { 0.0 } else { x })
+                .collect()
         };
         let h = &tracers.history;
         let n = h.acctime.len();
@@ -769,7 +771,13 @@ impl RiverHistoryWriter {
             }
             let per_time = |values: &[f64]| -> Vec<f64> {
                 (0..n)
-                    .map(|i| if h.acctime[i] > 0.0 { values[i] / h.acctime[i] } else { SPVAL })
+                    .map(|i| {
+                        if h.acctime[i] > 0.0 {
+                            values[i] / h.acctime[i]
+                        } else {
+                            SPVAL
+                        }
+                    })
                     .collect()
             };
             out.push((

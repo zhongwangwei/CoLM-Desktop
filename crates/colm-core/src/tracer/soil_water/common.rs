@@ -6,13 +6,13 @@
 use anyhow::{bail, Result};
 
 use super::super::evap_limit::atmospheric_tracer_loss;
-use super::super::{
-    soisno_slot, EvapKind, PatchTracerState, TracerDescriptor, TracerPhysics, TracerPools, MAX_SNOW_LAYERS,
-    SOIL_LAYERS, SOISNO_LAYERS, TRC_TINY, TRC_WATER_MIN_FOR_RATIO,
-};
 use super::super::frac::{
     equilibration_exchange, snow_vapor_equivalent_diffusivity, soil_diffusive_transfer,
     soil_effective_diffusivity, soil_vapor_equivalent_diffusivity, surface_relhum,
+};
+use super::super::{
+    soisno_slot, EvapKind, PatchTracerState, TracerDescriptor, TracerPhysics, TracerPools,
+    MAX_SNOW_LAYERS, SOIL_LAYERS, SOISNO_LAYERS, TRC_TINY, TRC_WATER_MIN_FOR_RATIO,
 };
 
 /// 内部函数 `layer_temp` 在没有温度实参时的取值。
@@ -308,7 +308,13 @@ impl<'a> TracerCtx<'a> {
     }
 
     /// 内部函数 `evap_ratio_for`（Craig-Gordon）；`soil_surface` 即 `kinetic_on_soil_surface`。
-    pub fn evap_ratio_for(&self, source_ratio: f64, temp_k: f64, from_ice: bool, soil_surface: bool) -> f64 {
+    pub fn evap_ratio_for(
+        &self,
+        source_ratio: f64,
+        temp_k: f64,
+        from_ice: bool,
+        soil_surface: bool,
+    ) -> f64 {
         if !self.active {
             return source_ratio;
         }
@@ -317,16 +323,22 @@ impl<'a> TracerCtx<'a> {
         };
         let relhum = surface_relhum(forc_q, forc_psrf, temp_k, from_ice);
         let alpha_k = match self.kinetics {
-            EvapKinetics::Soil { resistance, ra: Some(ra), rss: Some(rss) }
-                if soil_surface && !from_ice && resistance =>
-            {
+            EvapKinetics::Soil {
+                resistance,
+                ra: Some(ra),
+                rss: Some(rss),
+            } if soil_surface && !from_ice && resistance => {
                 self.physics.alpha_kinetic_soil(self.tracer, ra, rss)
             }
-            EvapKinetics::Soil { .. } => self.physics.alpha_kinetic_craig_gordon(self.tracer, from_ice),
+            EvapKinetics::Soil { .. } => self
+                .physics
+                .alpha_kinetic_craig_gordon(self.tracer, from_ice),
             EvapKinetics::OpenWater { .. } if from_ice => {
                 self.physics.alpha_kinetic_craig_gordon(self.tracer, true)
             }
-            EvapKinetics::OpenWater { wind } => self.physics.alpha_kinetic_open_water(self.tracer, wind),
+            EvapKinetics::OpenWater { wind } => {
+                self.physics.alpha_kinetic_open_water(self.tracer, wind)
+            }
         };
         self.physics.craig_gordon_evap_ratio(
             self.tracer,
@@ -339,7 +351,15 @@ impl<'a> TracerCtx<'a> {
         )
     }
 
-    fn loss(&self, pool_trc: f64, pool_water: f64, water_loss: f64, temp_k: f64, from_ice: bool, soil_surface: bool) -> f64 {
+    fn loss(
+        &self,
+        pool_trc: f64,
+        pool_water: f64,
+        water_loss: f64,
+        temp_k: f64,
+        from_ice: bool,
+        soil_surface: bool,
+    ) -> f64 {
         // `merge(ref_ratio*(1+trc_delta_sanity_max/1000), 0, active)`：常数折叠成 `ref*3`。
         let r_max = if self.active {
             self.tracer.ref_ratio * (1.0 + TRC_DELTA_SANITY_MAX / 1000.0)
@@ -361,12 +381,25 @@ impl<'a> TracerCtx<'a> {
     }
 
     /// 内部函数 `atmospheric_loss_tracer`（`kinetic_on_soil_surface = .false.`）。
-    pub fn atmospheric_loss(&self, pool_trc: f64, pool_water: f64, water_loss: f64, temp_k: f64, from_ice: bool) -> f64 {
+    pub fn atmospheric_loss(
+        &self,
+        pool_trc: f64,
+        pool_water: f64,
+        water_loss: f64,
+        temp_k: f64,
+        from_ice: bool,
+    ) -> f64 {
         self.loss(pool_trc, pool_water, water_loss, temp_k, from_ice, false)
     }
 
     /// 同上，裸土液面蒸发的两处调用（上游临时置 `kinetic_on_soil_surface = .true.`）。
-    pub fn atmospheric_loss_soil_surface(&self, pool_trc: f64, pool_water: f64, water_loss: f64, temp_k: f64) -> f64 {
+    pub fn atmospheric_loss_soil_surface(
+        &self,
+        pool_trc: f64,
+        pool_water: f64,
+        water_loss: f64,
+        temp_k: f64,
+    ) -> f64 {
         self.loss(pool_trc, pool_water, water_loss, temp_k, false, true)
     }
 }
@@ -623,7 +656,11 @@ pub(super) fn snow_column(
             && water_before_flow > TRC_WATER_MIN_FOR_RATIO
             && col.wice_soisno[slot] > TRC_WATER_MIN_FOR_RATIO
         {
-            let alpha = 1.0 / ctx.physics.alpha_ice_liq(ctx.tracer, (col.layer_temp)(j)).max(TRC_TINY);
+            let alpha = 1.0
+                / ctx
+                    .physics
+                    .alpha_ice_liq(ctx.tracer, (col.layer_temp)(j))
+                    .max(TRC_TINY);
             let mut melt_exchange = equilibration_exchange(
                 trc_before_flow,
                 water_before_flow,
@@ -775,7 +812,8 @@ pub(super) fn soil_diffusion(
         let mut d_eff_up = 0.0;
         let mut d_eff_dn = 0.0;
         if liquid_diffusion && diff_liquid > 0.0 {
-            d_eff_up = soil_effective_diffusivity(water_shadow[up], dz_soi[up], porsl[up], diff_liquid);
+            d_eff_up =
+                soil_effective_diffusivity(water_shadow[up], dz_soi[up], porsl[up], diff_liquid);
             d_eff_dn = soil_effective_diffusivity(
                 water_shadow[dn],
                 dz_soi[dn],

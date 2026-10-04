@@ -287,9 +287,10 @@ pub(crate) fn write_spatial_lct_cold_time_restart_with_urban(
         )?,
     ];
     let (mut lai, mut sai) = match config.lai_frequency {
-        LaiFrequency::Monthly if config.zero_leaf_area => {
-            (vec![0.0; count], read_monthly(config, "SAI_patches", month)?)
-        }
+        LaiFrequency::Monthly if config.zero_leaf_area => (
+            vec![0.0; count],
+            read_monthly(config, "SAI_patches", month)?,
+        ),
         LaiFrequency::Monthly => (
             read_monthly(config, "LAI_patches", month)?,
             read_monthly(config, "SAI_patches", month)?,

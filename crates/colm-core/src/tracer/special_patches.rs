@@ -207,7 +207,14 @@ struct SpecialFrac {
 }
 
 impl SpecialFrac {
-    fn evap_ratio(&self, tracer: &TracerDescriptor, r_vapor: f64, source_ratio: f64, temp_k: f64, from_ice: bool) -> f64 {
+    fn evap_ratio(
+        &self,
+        tracer: &TracerDescriptor,
+        r_vapor: f64,
+        source_ratio: f64,
+        temp_k: f64,
+        from_ice: bool,
+    ) -> f64 {
         let physics = self.physics;
         if !physics.fractionation_active(tracer) {
             return source_ratio;
@@ -221,7 +228,15 @@ impl SpecialFrac {
             }
         };
         let relhum = super::frac::surface_relhum(self.forc_q, self.forc_psrf, temp_k, from_ice);
-        physics.craig_gordon_evap_ratio(tracer, source_ratio, r_vapor, temp_k, relhum, alpha_k, from_ice)
+        physics.craig_gordon_evap_ratio(
+            tracer,
+            source_ratio,
+            r_vapor,
+            temp_k,
+            relhum,
+            alpha_k,
+            from_ice,
+        )
     }
 }
 
@@ -369,7 +384,6 @@ fn fixed_box(r_init: f64, box_water: &BoxWater) -> BoxFluxes {
         r_final: r_init,
     }
 }
-
 
 /// 记账、重建存储之后，非挥发溶质的地表残留若有液相载体则并回（地表水优先，其次顶层液水）。
 fn release_surface_residue(
@@ -781,7 +795,12 @@ pub fn tracer_waterbody_patch(
         forc_q: input.forc_q,
         forc_psrf: input.forc_psrf,
         // `sqrt(FMA(us, us, vs*vs))`（`max(·,0)` 被优化掉）。
-        open_water_wind: Some(input.forc_us.mul_add(input.forc_us, input.forc_vs * input.forc_vs).sqrt()),
+        open_water_wind: Some(
+            input
+                .forc_us
+                .mul_add(input.forc_us, input.forc_vs * input.forc_vs)
+                .sqrt(),
+        ),
     };
     let box_water = BoxWater {
         atm_precip_mass,

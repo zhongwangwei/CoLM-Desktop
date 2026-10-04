@@ -4330,7 +4330,8 @@ pub struct VariableSaturatedFlowOutput {
     /// `err_solver`：整柱水量闭合误差 [mm]。
     pub balance_error_mm: f64,
     /// `qinfl_fld`：漫滩再入渗（按淹没比例折算，mm/s），报给河道扣账；没开回馈时为 0。
-    pub flood_infiltration_mm_s: f64,    /// 只供示踪物记账的诊断（`WATER_VSF` 的可选输出）。
+    pub flood_infiltration_mm_s: f64,
+    /// 只供示踪物记账的诊断（`WATER_VSF` 的可选输出）。
     pub tracer: VariableSaturatedTracerDiagnostics,
 }
 
@@ -4705,10 +4706,16 @@ pub fn variably_saturated_flow_step(
             let (liquid_loss, ice_loss) =
                 if input.temperature_k[0] <= crate::FREEZING_K && ice > 0.0 {
                     let ice_loss = ice.max(0.0).min(soil_deficit);
-                    (liquid.max(0.0).min((soil_deficit - ice_loss).max(0.0)), ice_loss)
+                    (
+                        liquid.max(0.0).min((soil_deficit - ice_loss).max(0.0)),
+                        ice_loss,
+                    )
                 } else {
                     let liquid_loss = liquid.max(0.0).min(soil_deficit);
-                    (liquid_loss, ice.max(0.0).min((soil_deficit - liquid_loss).max(0.0)))
+                    (
+                        liquid_loss,
+                        ice.max(0.0).min((soil_deficit - liquid_loss).max(0.0)),
+                    )
                 };
             state.liquid_water_kg_m2[0] = (liquid - liquid_loss).max(0.0);
             state.ice_water_kg_m2[0] = (ice - ice_loss).max(0.0);
@@ -5304,7 +5311,9 @@ pub fn soil_water_vertical_movement(
     let layer_volumes = |liquid: &[f64], water_table_depth_mm: f64| -> Vec<f64> {
         (0..nlev)
             .map(|level| {
-                if input.permeable[level] && water_table_depth_mm < input.interface_depth_mm[level + 1] {
+                if input.permeable[level]
+                    && water_table_depth_mm < input.interface_depth_mm[level + 1]
+                {
                     liquid[level].mul_add(
                         (water_table_depth_mm - input.interface_depth_mm[level]).max(0.0),
                         input.porosity[level]
@@ -5318,9 +5327,9 @@ pub fn soil_water_vertical_movement(
             .collect()
     };
     let exchange = |amount_mm: f64,
-                        state: &mut VariableSaturatedSoilWaterState,
-                        water_table_depth_mm: &mut f64,
-                        water_table_level: &mut usize|
+                    state: &mut VariableSaturatedSoilWaterState,
+                    water_table_depth_mm: &mut f64,
+                    water_table_level: &mut usize|
      -> Result<()> {
         let aquifer = exchange_soil_water_with_aquifer(VariableSaturatedAquiferInput {
             water_exchange_mm: amount_mm,
@@ -5354,7 +5363,12 @@ pub fn soil_water_vertical_movement(
     let pond_exchange_mm = if input.plant_hydraulics && deficit_mm < 0.0 {
         let aquifer_before = state.aquifer_water_mm;
         let mut layer_before = layer_volumes(&state.liquid_water, water_table_depth_mm);
-        exchange(deficit_mm, state, &mut water_table_depth_mm, &mut water_table_level)?;
+        exchange(
+            deficit_mm,
+            state,
+            &mut water_table_depth_mm,
+            &mut water_table_level,
+        )?;
         transpiration_surface_mm = previous_ponding_depth_mm - state.ponding_depth_mm;
         transpiration_aquifer_mm = aquifer_before - state.aquifer_water_mm;
         let after = layer_volumes(&state.liquid_water, water_table_depth_mm);
@@ -5389,8 +5403,14 @@ pub fn soil_water_vertical_movement(
         };
         let subsurface_fraction = 1.0 - transpiration_fraction;
         let aquifer_before = state.aquifer_water_mm;
-        let layer_before = positive.then(|| layer_volumes(&state.liquid_water, water_table_depth_mm));
-        exchange(water_exchange_mm, state, &mut water_table_depth_mm, &mut water_table_level)?;
+        let layer_before =
+            positive.then(|| layer_volumes(&state.liquid_water, water_table_depth_mm));
+        exchange(
+            water_exchange_mm,
+            state,
+            &mut water_table_depth_mm,
+            &mut water_table_level,
+        )?;
         if let Some(layer_before) = layer_before {
             let pond = (previous_ponding_depth_mm - state.ponding_depth_mm).max(0.0);
             transpiration_surface_mm = transpiration_fraction * pond;
@@ -5679,13 +5699,17 @@ pub fn soil_water_vertical_movement(
             .liquid_water
             .iter()
             .zip(&thickness_mm)
-            .fold(f64::NEG_INFINITY, |max, (vliq, dz)| max.max((vliq * dz).abs()));
+            .fold(f64::NEG_INFINITY, |max, (vliq, dz)| {
+                max.max((vliq * dz).abs())
+            });
         let threshold = (demand * f64::EPSILON.sqrt() * input.time_step_seconds)
             .max(storage * (8.0 * f64::EPSILON));
         if (negative - transpiration_aquifer_mm.min(0.0)) - transpiration_surface_mm.min(0.0)
             <= threshold
         {
-            transpiration_actual_mm.iter_mut().for_each(|value| *value = 0.0);
+            transpiration_actual_mm
+                .iter_mut()
+                .for_each(|value| *value = 0.0);
             transpiration_aquifer_mm = 0.0;
             transpiration_surface_mm = 0.0;
         }

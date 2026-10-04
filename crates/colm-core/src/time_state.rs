@@ -451,8 +451,7 @@ pub fn initialize_profile_soil(
     if patch_type <= 1 && water_table_m > soil_interface_m[layers - 1] {
         // `zwt*1000. - zi*1000.` 是 `FMS(zwt, 1000, zi*1000)`，`psi0 - d*0.5` 是 `FNMA(d, 0.5, psi0)`，
         // `wa = -(d*(porsl - vliq))`（`MOD_IniTimeVariable.F90:407-410` 的 GIMPLE）。
-        let depth_mm =
-            water_table_m.mul_add(1000.0, -(soil_interface_m[layers - 1] * 1000.0));
+        let depth_mm = water_table_m.mul_add(1000.0, -(soil_interface_m[layers - 1] * 1000.0));
         let psi = (-depth_mm).mul_add(0.5, psi_s_mm[layers - 1]);
         let vliq = soil_vliq_from_psi(
             psi,

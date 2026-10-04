@@ -122,8 +122,16 @@ fn competition_no_plant(s: &mut BgcState, sw: BgcSwitches, deltim: f64, dz_soi: 
 
 /// 十个分解转移各自累加到的 AKX 量（下标即转移号 `k`，`MOD_BGC_CNCStateUpdate1.F90:478-497`）。
 const AKX_TRANSFER: [&str; 10] = [
-    "met_to_soil1", "cel_to_soil1", "lig_to_soil2", "soil1_to_soil2", "cwd_to_cel", "cwd_to_lig",
-    "soil1_to_soil3", "soil2_to_soil1", "soil2_to_soil3", "soil3_to_soil1",
+    "met_to_soil1",
+    "cel_to_soil1",
+    "lig_to_soil2",
+    "soil1_to_soil2",
+    "cwd_to_cel",
+    "cwd_to_lig",
+    "soil1_to_soil3",
+    "soil2_to_soil1",
+    "soil2_to_soil3",
+    "soil3_to_soil1",
 ];
 /// 十个分解转移的供体池流出量；`cwd`/`soil1`/`soil2` 各被两个转移依次累加。
 const AKX_EXIT: [&str; 10] = [
@@ -158,8 +166,12 @@ fn wetland_matrix_accumulators(s: &mut BgcState, deltim: f64) {
             }
         };
         update(format!("AKX_{}_c_vr_acc", AKX_TRANSFER[k]), &|j| ct[at(j)]);
-        update(format!("AKX_{}_exit_c_vr_acc", AKX_EXIT[k]), &|j| hr[at(j)] + ct[at(j)]);
-        update(format!("AKX_{}_n_vr_acc", AKX_TRANSFER[k]), &|j| nt[at(j)] + sf[at(j)]);
+        update(format!("AKX_{}_exit_c_vr_acc", AKX_EXIT[k]), &|j| {
+            hr[at(j)] + ct[at(j)]
+        });
+        update(format!("AKX_{}_n_vr_acc", AKX_TRANSFER[k]), &|j| {
+            nt[at(j)] + sf[at(j)]
+        });
         update(format!("AKX_{}_exit_n_vr_acc", AKX_EXIT[k]), &|j| nt[at(j)]);
     }
 }

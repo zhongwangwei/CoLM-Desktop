@@ -506,11 +506,14 @@ pub fn write_river_tracers(
     compression_level: u8,
 ) -> Result<()> {
     let identity = tracers.set.descriptor_identity();
-    let mut file = netcdf::append(path).with_context(|| format!("cannot reopen {}", path.display()))?;
+    let mut file =
+        netcdf::append(path).with_context(|| format!("cannot reopen {}", path.display()))?;
     let scalar = |file: &mut netcdf::FileMut, name: &str, value: i32| -> Result<()> {
         match file.variable_mut(name) {
             Some(mut variable) => variable.put_values(&[value], ..)?,
-            None => file.add_variable::<i32>(name, &[])?.put_values(&[value], ..)?,
+            None => file
+                .add_variable::<i32>(name, &[])?
+                .put_values(&[value], ..)?,
         }
         Ok(())
     };
@@ -550,23 +553,51 @@ pub fn write_river_tracers(
         let tracer = &tracers.set.tracers[itrc];
         let name = tracer.name.trim();
         vector(&mut file, &format!("trc_mass_{name}"), &tracers.mass[itrc])?;
-        vector(&mut file, &format!("trc_inpbuf_{name}"), &tracers.inp_buf[itrc])?;
-        vector(&mut file, &format!("trc_accinp_{name}"), &tracers.acc_inp[itrc])?;
-        vector(&mut file, &format!("trc_levsto_{name}"), &tracers.levsto[itrc])?;
+        vector(
+            &mut file,
+            &format!("trc_inpbuf_{name}"),
+            &tracers.inp_buf[itrc],
+        )?;
+        vector(
+            &mut file,
+            &format!("trc_accinp_{name}"),
+            &tracers.acc_inp[itrc],
+        )?;
+        vector(
+            &mut file,
+            &format!("trc_levsto_{name}"),
+            &tracers.levsto[itrc],
+        )?;
         if tracer.has_dissolved_limit() {
             let (solid, levsto_solid) = tracers.solid.as_ref().context("solid pools")?;
             vector(&mut file, &format!("trc_solid_{name}"), &solid[itrc])?;
-            vector(&mut file, &format!("trc_levsto_solid_{name}"), &levsto_solid[itrc])?;
+            vector(
+                &mut file,
+                &format!("trc_levsto_solid_{name}"),
+                &levsto_solid[itrc],
+            )?;
         }
     }
     vector(&mut file, "acc_rnof_ref", &tracers.acc_rnof_ref)?;
     let h = &tracers.history;
     for &itrc in &transport {
         let name = tracers.set.tracers[itrc].name.trim().to_owned();
-        vector(&mut file, &format!("trc_hist_stor_{name}"), &h.storage_mass[itrc])?;
-        vector(&mut file, &format!("trc_hist_levsto_{name}"), &h.levsto_mass[itrc])?;
+        vector(
+            &mut file,
+            &format!("trc_hist_stor_{name}"),
+            &h.storage_mass[itrc],
+        )?;
+        vector(
+            &mut file,
+            &format!("trc_hist_levsto_{name}"),
+            &h.levsto_mass[itrc],
+        )?;
         vector(&mut file, &format!("trc_hist_out_{name}"), &h.out[itrc])?;
-        vector(&mut file, &format!("trc_hist_bifout_{name}"), &h.bifout[itrc])?;
+        vector(
+            &mut file,
+            &format!("trc_hist_bifout_{name}"),
+            &h.bifout[itrc],
+        )?;
     }
     vector(&mut file, "trc_hist_water_storage", &h.water_storage)?;
     vector(&mut file, "trc_hist_levsto_water", &h.levsto_water)?;
@@ -576,7 +607,11 @@ pub fn write_river_tracers(
         colm_core::tracer::DESCRIPTOR_IDENTITY_WIDTH,
     )?;
     file.add_dimension("trc_river_transport_tracer", identity.len())?;
-    scalar(&mut file, "trc_river_descriptor_count", identity.len() as i32)?;
+    scalar(
+        &mut file,
+        "trc_river_descriptor_count",
+        identity.len() as i32,
+    )?;
     let flat = identity.iter().flatten().copied().collect::<Vec<i32>>();
     file.add_variable::<i32>(
         "trc_river_descriptor_identity",
@@ -644,7 +679,9 @@ pub fn read_river_tracers(
                 );
                 Ok(Some(values))
             }
-            None if required => bail!("incomplete or malformed committed river tracer restart ({name})"),
+            None if required => {
+                bail!("incomplete or malformed committed river tracer restart ({name})")
+            }
             None => Ok(None),
         }
     };
@@ -652,10 +689,17 @@ pub fn read_river_tracers(
     let next = vector("trc_ucat_next_meta", true)?.expect("required");
     let matches = (0..n).all(|i| {
         let expect_gdid = (network.y[i] - 1) * network.nlon as i32 + network.x[i];
-        let expect_next = if network.next[i] >= 0 { network.next[i] + 1 } else { network.next[i] };
+        let expect_next = if network.next[i] >= 0 {
+            network.next[i] + 1
+        } else {
+            network.next[i]
+        };
         gdid[i].round() as i32 == expect_gdid && next[i].round() as i32 == expect_next
     });
-    ensure!(matches, "river/lake tracer restart belongs to a different catchment network");
+    ensure!(
+        matches,
+        "river/lake tracer restart belongs to a different catchment network"
+    );
     let numucat = vector("trc_numucat_meta", true)?.expect("required");
     ensure!(
         numucat.iter().all(|&v| v.round() as usize == n),
@@ -671,7 +715,8 @@ pub fn read_river_tracers(
         if schema >= 2 && tracer.has_dissolved_limit() {
             let (solid, levsto_solid) = tracers.solid.as_mut().context("solid pools")?;
             solid[itrc] = vector(&format!("trc_solid_{name}"), true)?.expect("required");
-            levsto_solid[itrc] = vector(&format!("trc_levsto_solid_{name}"), true)?.expect("required");
+            levsto_solid[itrc] =
+                vector(&format!("trc_levsto_solid_{name}"), true)?.expect("required");
         }
         tracers.acc_inp[itrc] = vector(&format!("trc_accinp_{name}"), true)?.expect("required");
     }
@@ -681,7 +726,12 @@ pub fn read_river_tracers(
     let mut names = Vec::new();
     for &itrc in &transport {
         let name = tracers.set.tracers[itrc].name.trim().to_owned();
-        for prefix in ["trc_hist_stor_", "trc_hist_levsto_", "trc_hist_out_", "trc_hist_bifout_"] {
+        for prefix in [
+            "trc_hist_stor_",
+            "trc_hist_levsto_",
+            "trc_hist_out_",
+            "trc_hist_bifout_",
+        ] {
             names.push(format!("{prefix}{name}"));
         }
     }
@@ -690,15 +740,21 @@ pub fn read_river_tracers(
     let complete_history = names.iter().all(|name| file.variable(name).is_some());
     if complete_history {
         let finite = |values: Vec<f64>| -> Vec<f64> {
-            values.into_iter().map(|v| if v.is_finite() { v } else { 0.0 }).collect()
+            values
+                .into_iter()
+                .map(|v| if v.is_finite() { v } else { 0.0 })
+                .collect()
         };
         for &itrc in &transport {
             let name = tracers.set.tracers[itrc].name.trim().to_owned();
             let h = &mut tracers.history;
-            h.storage_mass[itrc] = finite(vector(&format!("trc_hist_stor_{name}"), true)?.expect("required"));
-            h.levsto_mass[itrc] = finite(vector(&format!("trc_hist_levsto_{name}"), true)?.expect("required"));
+            h.storage_mass[itrc] =
+                finite(vector(&format!("trc_hist_stor_{name}"), true)?.expect("required"));
+            h.levsto_mass[itrc] =
+                finite(vector(&format!("trc_hist_levsto_{name}"), true)?.expect("required"));
             h.out[itrc] = finite(vector(&format!("trc_hist_out_{name}"), true)?.expect("required"));
-            h.bifout[itrc] = finite(vector(&format!("trc_hist_bifout_{name}"), true)?.expect("required"));
+            h.bifout[itrc] =
+                finite(vector(&format!("trc_hist_bifout_{name}"), true)?.expect("required"));
         }
         let h = &mut tracers.history;
         h.water_storage = finite(vector("trc_hist_water_storage", true)?.expect("required"));

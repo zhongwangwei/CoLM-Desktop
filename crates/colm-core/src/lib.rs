@@ -23,6 +23,23 @@ pub(crate) const fn f77(value: f64) -> f64 {
     value
 }
 
+/// 与 gfortran 参考位型比较（单元测试用）。
+///
+/// 参考位型都是**在 macOS 上**由 gfortran 生成的；`exp/pow/log` 等走系统 libm，ubuntu 与 windows 的
+/// libm 与 macOS 末位不同（见 `radiation_tests.rs` 的同一处理）。所以 macOS 上逐位钉死，其它平台
+/// 放宽到 16 ULP：真算错是量级差，16 ULP 抓得住。`scale` 是比较的量级下限——结果由量级为 1 的
+/// 项相减而来时（如 VIC 的 `calc_Q12`）传 1，否则传 0（按结果本身）。
+#[cfg(test)]
+pub(crate) fn reference_bits_match(got: f64, want: f64, scale: f64) -> bool {
+    if got.to_bits() == want.to_bits() {
+        return true;
+    }
+    if cfg!(target_os = "macos") || got.is_nan() || want.is_nan() {
+        return false;
+    }
+    (got - want).abs() <= 16.0 * f64::EPSILON * scale.max(want.abs())
+}
+
 /// Fortran 的 `x**0.5`：gfortran `-O2` 保留成 libm `pow(x, 0.5)`（不带
 /// `-funsafe-math-optimizations` 不会改写成 `sqrt`），而 LLVM 会把常数指数的
 /// `x.powf(0.5)` 无条件换成 `sqrt` —— 两者不是一回事：macOS 的 `pow` 不是正确舍入，
@@ -151,7 +168,6 @@ pub mod snicar;
 pub mod snicar_column;
 pub mod snow;
 pub mod snow_grain;
-pub mod tracer;
 pub mod soil_surface_resistance;
 pub mod soil_water;
 pub mod standard_lct_step;
@@ -161,6 +177,7 @@ pub mod surface_optics;
 pub mod thermal_properties;
 pub mod thermal_water;
 pub mod time_state;
+pub mod tracer;
 pub mod urban;
 pub mod urban_bem;
 pub mod urban_flux;
@@ -284,9 +301,9 @@ pub use interception::{
     CanopyInterceptionInput, CanopyWater, CanopyWetness, Colm2024Canopy,
 };
 pub use irrigation::{
-    dominant_irrigation_pft, irrigation_needed, IrrigationApplicationFluxes, IrrigationColumn, IrrigationSettings,
-    IrrigationState, SoilIrrigation, IRRIGATION_DRIP, IRRIGATION_FLOOD, IRRIGATION_PADDY,
-    IRRIGATION_SPRINKLER,
+    dominant_irrigation_pft, irrigation_needed, IrrigationApplicationFluxes, IrrigationColumn,
+    IrrigationSettings, IrrigationState, SoilIrrigation, IRRIGATION_DRIP, IRRIGATION_FLOOD,
+    IRRIGATION_PADDY, IRRIGATION_SPRINKLER,
 };
 pub use lake::{
     add_lake_new_snow, adjust_lake_layers, lake_roughness, lake_snow_water,
@@ -457,7 +474,6 @@ pub use variably_saturated_flow::{
     VariableSaturatedBoundary, VariableSaturatedBoundaryKind,
     VariableSaturatedDrainagePerturbation, VariableSaturatedExplicitInput,
     VariableSaturatedExplicitState, VariableSaturatedFlowInput, VariableSaturatedFlowOutput,
-    VariableSaturatedTracerDiagnostics,
     VariableSaturatedFluxAllInput, VariableSaturatedHomogeneousFluxInput,
     VariableSaturatedInterfaceFlux, VariableSaturatedInterfaceFluxInput,
     VariableSaturatedLevelCoordinate, VariableSaturatedLevelPerturbation,
@@ -468,7 +484,8 @@ pub use variably_saturated_flow::{
     VariableSaturatedSoilWaterOutput, VariableSaturatedSoilWaterState,
     VariableSaturatedSublevelInput, VariableSaturatedSublevelState,
     VariableSaturatedTopTransitiveFlux, VariableSaturatedTopTransitiveFluxInput,
-    VariableSaturatedWaterBalance, VariableSaturatedWaterBalanceInput,
+    VariableSaturatedTracerDiagnostics, VariableSaturatedWaterBalance,
+    VariableSaturatedWaterBalanceInput,
 };
 pub use vegetation::{
     derive_igbp_canopy, derive_usgs_canopy, empirical_lai, CanopyState, EmpiricalLandCover,

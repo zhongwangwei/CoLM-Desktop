@@ -551,7 +551,10 @@ pub fn extract_switches(text: &str) -> Result<Vec<Switch>> {
     let find = |needle: &str, from: usize| -> Result<usize> {
         lines[from..]
             .iter()
-            .position(|l| l.to_ascii_lowercase().starts_with(&needle.to_ascii_lowercase()))
+            .position(|l| {
+                l.to_ascii_lowercase()
+                    .starts_with(&needle.to_ascii_lowercase())
+            })
             .map(|k| from + k)
             .ok_or_else(|| anyhow::anyhow!("MOD_Namelist.F90 has no line starting with {needle:?}"))
     };
@@ -649,7 +652,8 @@ pub fn extract_switches(text: &str) -> Result<Vec<Switch>> {
         if line.is_empty() {
             continue;
         }
-        let name = member(line).ok_or_else(|| anyhow::anyhow!("unexpected DiagMatrix line {line}"))?;
+        let name =
+            member(line).ok_or_else(|| anyhow::anyhow!("unexpected DiagMatrix line {line}"))?;
         let k = position(&switches, &name)?;
         switches[k].diag_matrix = true;
         forced += 1;

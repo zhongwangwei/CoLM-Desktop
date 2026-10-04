@@ -709,7 +709,11 @@ fn set_spatial_patch_phase(
         phase[patch] = crop_phase.mul_add(fraction, phase[patch]);
     }
     for patch in 0..patches {
-        state.patch_phase[patch] = if has_pft[patch] { phase[patch] } else { MISSING };
+        state.patch_phase[patch] = if has_pft[patch] {
+            phase[patch]
+        } else {
+            MISSING
+        };
         if !has_pft[patch] {
             for field in [
                 &mut state.fertilizer_nitrogen_corn,

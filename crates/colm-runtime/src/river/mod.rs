@@ -505,16 +505,22 @@ impl RiverModel {
         let rnof_uc = remap_to_catchments(routing, runoff_mm_s, included, self.network.len());
         // `acc = FMA(rnof_uc*1e-3, deltime, acc)`。
         for (i, _) in &routing.catchments {
-            self.state.acc_rnof[*i] = (rnof_uc[*i] * 1.0e-3).mul_add(deltime, self.state.acc_rnof[*i]);
+            self.state.acc_rnof[*i] =
+                (rnof_uc[*i] * 1.0e-3).mul_add(deltime, self.state.acc_rnof[*i]);
         }
         // 示踪物径流同一套映射（`trc_rnof_step` → `trc_rnof_uc`），再
         // `tracer_input_from_runoff(rnof_uc*1e-3*deltime, numucat, trc_rnof_uc*1e-3)`。
         if let Some(tracers) = self.tracers.as_mut() {
-            let tracer_runoff =
-                tracer_runoff.context("river tracers need the patch runoff tracer (trc_rnof_step)")?;
+            let tracer_runoff = tracer_runoff
+                .context("river tracers need the patch runoff tracer (trc_rnof_step)")?;
             let mut trc = vec![vec![0.0; self.network.len()]; tracers.set.len()];
             for itrc in tracers.set.transport_indices().collect::<Vec<_>>() {
-                let uc = remap_to_catchments(routing, &tracer_runoff[itrc], included, self.network.len());
+                let uc = remap_to_catchments(
+                    routing,
+                    &tracer_runoff[itrc],
+                    included,
+                    self.network.len(),
+                );
                 for (i, _) in &routing.catchments {
                     trc[itrc][*i] = uc[*i] * 1.0e-3;
                 }
@@ -864,7 +870,11 @@ fn remap_to_catchments(
             if value == 0.0 {
                 continue;
             }
-            sum = if sum == 0.0 { value * area } else { sum + value * area };
+            sum = if sum == 0.0 {
+                value * area
+            } else {
+                sum + value * area
+            };
         }
         out[*i] = sum;
     }
@@ -1424,7 +1434,8 @@ fn route_system<'a>(
         }
         if let (Some(tape), Some(mut cells_tape)) = (tape.as_mut(), cells_tape.take()) {
             for k in 0..n {
-                cells_tape[k].end = cell_water(k, &wdsrf, &volwater_ucat, &lev, &built, &reservoirs);
+                cells_tape[k].end =
+                    cell_water(k, &wdsrf, &volwater_ucat, &lev, &built, &reservoirs);
             }
             tape.substeps.push((dt, cells_tape));
             if let Some(run) = bif.as_ref() {

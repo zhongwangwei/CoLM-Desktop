@@ -207,7 +207,9 @@ fn changed_patches_mix_sources_by_transfer_fraction() {
         pft: None,
         urban: None,
     };
-    let overrides = mass_energy_conserve(&inputs, Vec::new(), options()).unwrap().patch;
+    let overrides = mass_energy_conserve(&inputs, Vec::new(), options())
+        .unwrap()
+        .patch;
     let get = |name: &str| {
         overrides
             .iter()
@@ -283,7 +285,9 @@ fn unchanged_fractions_keep_the_sat_result() {
         urban: None,
     };
     let sat = vec![RestartOverride::new("tleaf", vec![285.0, 0.0])];
-    let overrides = mass_energy_conserve(&inputs, sat.clone(), options()).unwrap().patch;
+    let overrides = mass_energy_conserve(&inputs, sat.clone(), options())
+        .unwrap()
+        .patch;
     assert_eq!(overrides, sat);
 }
 

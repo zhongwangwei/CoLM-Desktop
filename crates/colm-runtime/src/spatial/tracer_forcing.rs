@@ -16,7 +16,9 @@ use colm_core::tracer::{TracerPhysics, TracerSet};
 use colm_core::CalendarTime;
 use colm_namelist::{Segment, Value};
 
-use super::forcing::{GriddedForcing, GriddedForcingConfig, GroupBy, Interpolation, Stamp, Variable};
+use super::forcing::{
+    GriddedForcing, GriddedForcingConfig, GroupBy, Interpolation, Stamp, Variable,
+};
 use super::mapping::AreaWeightedMapping;
 
 /// `TRACER_FORCING_MAX`。
@@ -85,7 +87,10 @@ pub fn load_specs(set: &TracerSet, param_files: &str) -> Result<Vec<Vec<ForcingS
             let (name, index) = match entry.path.segments.as_slice() {
                 [Segment::Field(name)] => (name.to_ascii_lowercase(), None),
                 [Segment::Field(name), Segment::Index(k)] => (name.to_ascii_lowercase(), Some(*k)),
-                _ => bail!("invalid &nl_colm_tracer_forcing entry {} in {path}", entry.path),
+                _ => bail!(
+                    "invalid &nl_colm_tracer_forcing entry {} in {path}",
+                    entry.path
+                ),
             };
             if name == "forcing_num" {
                 let Value::Int(value) = entry.value else {
@@ -170,7 +175,9 @@ pub fn load_specs(set: &TracerSet, param_files: &str) -> Result<Vec<Vec<ForcingS
             spec.vname = spec.vname.trim_start().to_owned();
         }
         for k in 1..specs.len() {
-            if let Some(kdup) = (0..k).find(|&j| specs[j].role.trim_end() == specs[k].role.trim_end()) {
+            if let Some(kdup) =
+                (0..k).find(|&j| specs[j].role.trim_end() == specs[k].role.trim_end())
+            {
                 bail!(
                     "tracer_forcing_input_load: forcing_role({}) and ({}) for tracer \"{}\" are both \"{}\".",
                     kdup + 1,
@@ -191,7 +198,8 @@ fn forcing_group(source: &str) -> Option<String> {
     let header = lines.by_ref().find(|line| {
         let low = line.trim_start().to_ascii_lowercase();
         !low.starts_with('!')
-            && (low.starts_with("&nl_colm_tracer_forcing") || low.starts_with("$nl_colm_tracer_forcing"))
+            && (low.starts_with("&nl_colm_tracer_forcing")
+                || low.starts_with("$nl_colm_tracer_forcing"))
     })?;
     let mut group = format!("{}\n", header.trim_start().replacen('$', "&", 1));
     for line in lines {
@@ -487,16 +495,28 @@ impl GriddedTracerForcing {
             interp_method.trim()
         );
         let ntracers = set.len();
-        let precip_default: Vec<f64> = set.tracers.iter().map(|t| t.precip_default_ratio()).collect();
-        let vapor_default: Vec<f64> = set.tracers.iter().map(|t| t.vapor_default_ratio()).collect();
+        let precip_default: Vec<f64> = set
+            .tracers
+            .iter()
+            .map(|t| t.precip_default_ratio())
+            .collect();
+        let vapor_default: Vec<f64> = set
+            .tracers
+            .iter()
+            .map(|t| t.vapor_default_ratio())
+            .collect();
         let mut forcing = Self {
             brackets: vec![Bracket::default(); config.vars.len()],
             config,
             ntracers,
             ref_ratio: set.tracers.iter().map(|t| t.ref_ratio).collect(),
             isotope: set.tracers.iter().map(|t| t.is_isotope()).collect(),
-            precip: (0..patches).flat_map(|_| precip_default.iter().copied()).collect(),
-            vapor: (0..patches).flat_map(|_| vapor_default.iter().copied()).collect(),
+            precip: (0..patches)
+                .flat_map(|_| precip_default.iter().copied())
+                .collect(),
+            vapor: (0..patches)
+                .flat_map(|_| vapor_default.iter().copied())
+                .collect(),
             interp_method,
             identity: std::sync::Arc::default(),
         };
@@ -634,7 +654,10 @@ impl GriddedTracerForcing {
             }
             let bracket = &mut self.brackets[iv];
             let upper = match bracket.upper_stamp {
-                None => bracket.lower_stamp.expect("set above").add_seconds(var.dtime),
+                None => bracket
+                    .lower_stamp
+                    .expect("set above")
+                    .add_seconds(var.dtime),
                 Some(upper) => {
                     bracket.lower = std::mem::take(&mut bracket.upper);
                     bracket.lower_stamp = Some(upper);
@@ -821,7 +844,12 @@ fn ratio_to_delta(ratio: f64, ref_ratio: f64) -> f64 {
 
 /// `trim(dir_forcing)//tracer_forcing_filename(year, month, day, iv)`：前缀与主强迫同名变量
 /// 相同就用主强迫的 `metfilename`，否则按 `groupby` 拼。
-fn file_name(main: &GriddedForcingConfig, var: &ForcingVar, year: i32, month: i32) -> Result<PathBuf> {
+fn file_name(
+    main: &GriddedForcingConfig,
+    var: &ForcingVar,
+    year: i32,
+    month: i32,
+) -> Result<PathBuf> {
     let main_var = match var.stream {
         Stream::Precip | Stream::TotalPrecip => 3,
         Stream::Vapor | Stream::TotalVapor => 1,

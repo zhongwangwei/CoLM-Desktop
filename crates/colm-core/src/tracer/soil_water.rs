@@ -59,8 +59,8 @@ mod wetland;
 use anyhow::{bail, ensure, Result};
 
 use super::{
-    soisno_slot, EvapKind, PatchTracerState, TracerPhysics, TracerSet,
-    MAX_SNOW_LAYERS, SOIL_LAYERS, SOISNO_LAYERS, TRC_TINY, TRC_WATER_MIN_FOR_RATIO,
+    soisno_slot, EvapKind, PatchTracerState, TracerPhysics, TracerSet, MAX_SNOW_LAYERS,
+    SOIL_LAYERS, SOISNO_LAYERS, TRC_TINY, TRC_WATER_MIN_FOR_RATIO,
 };
 pub use common::{
     aquifer_actual_mass, aquifer_actual_water, aquifer_isotope_ratio, aquifer_isotope_state_valid,
@@ -535,7 +535,8 @@ pub fn tracer_soil_water(
         let mut return_ratio = xylem_ratio;
         let mut excess_ratio = 0.0;
         if root_return_water > TRC_TINY && !nonvolatile {
-            excess_ratio = ctx.deposition_ratio_for(input.tleaf.unwrap_or_else(|| layer_temp(1)), false);
+            excess_ratio =
+                ctx.deposition_ratio_for(input.tleaf.unwrap_or_else(|| layer_temp(1)), false);
             return_ratio = if root_gross_water > TRC_TINY && root_return_excess <= 0.0 {
                 root_gross_tracer / root_gross_water
             } else if root_gross_water > TRC_TINY {
@@ -693,8 +694,14 @@ pub fn tracer_soil_water(
         if transp_frac_active {
             state.acc[itrc].transp_src += transp_source_tracer_total;
             let transp_output_tracer = transp_water_total * transp_ratio;
-            state.book_evap_loss(itrc, transp_output_tracer, transp_water_total, EvapKind::Transpiration);
-            p.leaf_iso_storage = (p.leaf_iso_storage + transp_source_tracer_total) - transp_output_tracer;
+            state.book_evap_loss(
+                itrc,
+                transp_output_tracer,
+                transp_water_total,
+                EvapKind::Transpiration,
+            );
+            p.leaf_iso_storage =
+                (p.leaf_iso_storage + transp_source_tracer_total) - transp_output_tracer;
         }
 
         // 0b/0c. 雪顶层外部通量与渗流。
@@ -1266,7 +1273,13 @@ pub fn tracer_soil_water(
                 let wliq_pre_phase = (input.wliq_soisno[slot] + d_wice).max(0.0);
                 if wliq_pre_phase > TRC_TINY {
                     let flux = physics
-                        .rayleigh_freezing_loss(tracer, p.wliq_soisno[slot], wliq_pre_phase, d_wice, layer_temp(j))
+                        .rayleigh_freezing_loss(
+                            tracer,
+                            p.wliq_soisno[slot],
+                            wliq_pre_phase,
+                            d_wice,
+                            layer_temp(j),
+                        )
                         .min(p.wliq_soisno[slot].max(0.0));
                     p.wliq_soisno[slot] -= flux;
                     p.wice_soisno[slot] += flux;

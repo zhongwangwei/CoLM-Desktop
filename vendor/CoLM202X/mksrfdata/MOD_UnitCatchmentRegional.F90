@@ -36,6 +36,7 @@ CONTAINS
    USE MOD_LandPatch, only: landpatch
    USE MOD_WorkerPushData
    USE MOD_UnitCatchmentSubset
+   USE MOD_Filesystem, ONLY: make_directory
    IMPLICIT NONE
 
    type(grid_type)             :: gridro
@@ -108,7 +109,7 @@ CONTAINS
 #endif
 
       IF (p_is_master) THEN
-         CALL execute_command_line ('mkdir -p ' // trim(DEF_dir_landdata) // '/riverlake')
+         CALL make_directory(trim(DEF_dir_landdata) // '/riverlake')
          CALL unitcatchment_subset_write (trim(DEF_UnitCatchment_file), trim(file_regional), nlon, nlat, &
             touched, .true., nkeep, nsystem)
          write(*,'(/,A,I0,A,I0,A)') ' Regional unit-catchment network: ', nkeep, ' unit catchments in ', &

@@ -177,7 +177,8 @@ impl AreaWeightedMapping {
         }
         let mut parts = Vec::with_capacity(cells.len());
         let mut area = Vec::with_capacity(cells.len());
-        for ((set_cells, &shared), &(rlon, rlat)) in cells.iter().zip(shared_fraction).zip(coordinates)
+        for ((set_cells, &shared), &(rlon, rlat)) in
+            cells.iter().zip(shared_fraction).zip(coordinates)
         {
             // 南北：格心按纬度单调，找夹住 set 中心的两行。
             let (mut yn, mut ys) = if grid.rlat[0] > grid.rlat[nlat - 1] {
@@ -227,7 +228,9 @@ impl AreaWeightedMapping {
                 }
             }
             let Some((iwest, ieast, lonw, lone)) = found else {
-                anyhow::bail!("no forcing grid column brackets the pixel-set centre at {lon} degrees");
+                anyhow::bail!(
+                    "no forcing grid column brackets the pixel-set centre at {lon} degrees"
+                );
             };
             let (mut xw, mut xe) = (iwest, ieast);
             // 区域网格最后一列与第一列之间不连通：取近的那一列，不插值。
@@ -281,10 +284,26 @@ impl AreaWeightedMapping {
             }
             areathis *= shared;
             let list = vec![
-                MappingPart { ilon: xw, ilat: yn, area: areathis * nwgt * wwgt },
-                MappingPart { ilon: xe, ilat: yn, area: areathis * nwgt * ewgt },
-                MappingPart { ilon: xw, ilat: ys, area: areathis * swgt * wwgt },
-                MappingPart { ilon: xe, ilat: ys, area: areathis * swgt * ewgt },
+                MappingPart {
+                    ilon: xw,
+                    ilat: yn,
+                    area: areathis * nwgt * wwgt,
+                },
+                MappingPart {
+                    ilon: xe,
+                    ilat: yn,
+                    area: areathis * nwgt * ewgt,
+                },
+                MappingPart {
+                    ilon: xw,
+                    ilat: ys,
+                    area: areathis * swgt * wwgt,
+                },
+                MappingPart {
+                    ilon: xe,
+                    ilat: ys,
+                    area: areathis * swgt * ewgt,
+                },
             ];
             // `areapset = sum(areapart)`：从 0 起依次相加。
             area.push(list.iter().fold(0.0, |sum, part| sum + part.area));

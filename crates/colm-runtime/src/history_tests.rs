@@ -1322,10 +1322,26 @@ fn a_masked_patch_accumulates_states_and_restart_diagnostics_only() {
     let windows = session.window_handle();
     let windows = windows.lock().unwrap();
     let sums = &windows[0].sums;
-    for kept in ["t_soisno", "wliq_soisno", "scv", "lai", "tref", "qref", "z0m", "emis", "xy_rain"] {
-        assert!(sums.contains_key(kept), "{kept} should accumulate on a masked patch");
+    for kept in [
+        "t_soisno",
+        "wliq_soisno",
+        "scv",
+        "lai",
+        "tref",
+        "qref",
+        "z0m",
+        "emis",
+        "xy_rain",
+    ] {
+        assert!(
+            sums.contains_key(kept),
+            "{kept} should accumulate on a masked patch"
+        );
     }
     for skipped in ["fsena", "rnof", "xy_t", "trad", "wat", "h2osoi"] {
-        assert!(!sums.contains_key(skipped), "{skipped} must stay spval on a masked patch");
+        assert!(
+            !sums.contains_key(skipped),
+            "{skipped} must stay spval on a masked patch"
+        );
     }
 }

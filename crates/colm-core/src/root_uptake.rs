@@ -155,7 +155,10 @@ fn validate(input: RootUptakeInput<'_>) -> Result<usize> {
                 .all(|value| *value < 0.0)
             && input.root_fraction.iter().all(|value| *value >= 0.0)
             && input.layer_thickness_m.iter().all(|value| *value > 0.0)
-            && input.liquid_water_kg_m2.iter().all(|value| *value >= -crate::SOIL_WATER_ROUNDOFF_KG_M2)
+            && input
+                .liquid_water_kg_m2
+                .iter()
+                .all(|value| *value >= -crate::SOIL_WATER_ROUNDOFF_KG_M2)
             && (1..=2).contains(&input.stress_scheme),
         "root-uptake inputs are invalid"
     );

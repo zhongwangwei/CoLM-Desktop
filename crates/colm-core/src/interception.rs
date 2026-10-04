@@ -160,7 +160,9 @@ pub fn canopy_wetness_with_capacity(
     let satcap_rain = rain_capacity_mm.max(0.0).max(1.0e-10);
     let rain_coverage = |depth_mm: f64| {
         if depth_mm > 0.0 {
-            (depth_mm / satcap_rain).lpow(f77(0.666_666_666_666)).min(1.0)
+            (depth_mm / satcap_rain)
+                .lpow(f77(0.666_666_666_666))
+                .min(1.0)
         } else {
             0.0
         }

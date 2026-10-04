@@ -2129,7 +2129,11 @@ pub fn append_single_point_topography_factors(
     let mut file =
         netcdf::append(surface).with_context(|| format!("cannot append {}", surface.display()))?;
     file.redef()?;
-    for (name, length) in [("slope_type", SLOPE_TYPES), ("azi", AZIMUTHS), ("zen", ZENITHS)] {
+    for (name, length) in [
+        ("slope_type", SLOPE_TYPES),
+        ("azi", AZIMUTHS),
+        ("zen", ZENITHS),
+    ] {
         if file.dimension(name).is_none() {
             file.add_dimension(name, length)?;
         }

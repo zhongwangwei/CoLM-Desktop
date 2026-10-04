@@ -208,9 +208,9 @@ impl Default for MethaneConfig {
             dormancy_threshold_methanotroph_fs: 0.1,
             dormancy_threshold_methanotroph_fo2: 0.1,
             vgc_max: 0.15,
-            nongrassporosratio: 1.0/3.0,
+            nongrassporosratio: 1.0 / 3.0,
             poros_tiller: 0.3,
-            unsat_aere_ratio: 0.05/0.3,
+            unsat_aere_ratio: 0.05 / 0.3,
             porosmin: 0.05,
             aere_radius: 2.9e-3,
             rob: 3.0,
@@ -291,7 +291,9 @@ impl MethaneConfig {
             "f_methane" => self.f_methane = value.real(path)?,
             "use_biome_f_methane" => self.use_biome_f_methane = value.logical(path)?,
             "f_methane_tropical_peat" => self.f_methane_tropical_peat = value.real(path)?,
-            "f_methane_tropical_floodplain" => self.f_methane_tropical_floodplain = value.real(path)?,
+            "f_methane_tropical_floodplain" => {
+                self.f_methane_tropical_floodplain = value.real(path)?
+            }
             "f_methane_floodplain" => self.f_methane_floodplain = value.real(path)?,
             "f_methane_temperate_marsh" => self.f_methane_temperate_marsh = value.real(path)?,
             "f_methane_boreal_fen" => self.f_methane_boreal_fen = value.real(path)?,
@@ -300,7 +302,9 @@ impl MethaneConfig {
             "f_methane_upland_soil" => self.f_methane_upland_soil = value.real(path)?,
             "use_biome_redoxlag" => self.use_biome_redoxlag = value.logical(path)?,
             "redoxlag_tropical_peat" => self.redoxlag_tropical_peat = value.real(path)?,
-            "redoxlag_tropical_floodplain" => self.redoxlag_tropical_floodplain = value.real(path)?,
+            "redoxlag_tropical_floodplain" => {
+                self.redoxlag_tropical_floodplain = value.real(path)?
+            }
             "redoxlag_temperate_marsh" => self.redoxlag_temperate_marsh = value.real(path)?,
             "redoxlag_boreal_fen" => self.redoxlag_boreal_fen = value.real(path)?,
             "redoxlag_boreal_bog" => self.redoxlag_boreal_bog = value.real(path)?,
@@ -318,7 +322,9 @@ impl MethaneConfig {
             "lake_vmax_methane_oxid" => self.lake_vmax_methane_oxid = value.real(path)?,
             "lake_oxic_sediment_depth" => self.lake_oxic_sediment_depth = value.real(path)?,
             "use_microbial_pools" => self.use_microbial_pools = value.logical(path)?,
-            "use_microbial_flux_override" => self.use_microbial_flux_override = value.logical(path)?,
+            "use_microbial_flux_override" => {
+                self.use_microbial_flux_override = value.logical(path)?
+            }
             "use_microbial_dormancy" => self.use_microbial_dormancy = value.logical(path)?,
             "b_init_methanogen" => self.b_init_methanogen = value.real(path)?,
             "b_init_methanotroph" => self.b_init_methanotroph = value.real(path)?,
@@ -341,10 +347,18 @@ impl MethaneConfig {
             "t_ref_microbe" => self.t_ref_microbe = value.real(path)?,
             "dormancy_rate_active" => self.dormancy_rate_active = value.real(path)?,
             "dormancy_rate_revive" => self.dormancy_rate_revive = value.real(path)?,
-            "dormancy_threshold_methanogen_fs" => self.dormancy_threshold_methanogen_fs = value.real(path)?,
-            "dormancy_threshold_methanogen_fo2" => self.dormancy_threshold_methanogen_fo2 = value.real(path)?,
-            "dormancy_threshold_methanotroph_fs" => self.dormancy_threshold_methanotroph_fs = value.real(path)?,
-            "dormancy_threshold_methanotroph_fo2" => self.dormancy_threshold_methanotroph_fo2 = value.real(path)?,
+            "dormancy_threshold_methanogen_fs" => {
+                self.dormancy_threshold_methanogen_fs = value.real(path)?
+            }
+            "dormancy_threshold_methanogen_fo2" => {
+                self.dormancy_threshold_methanogen_fo2 = value.real(path)?
+            }
+            "dormancy_threshold_methanotroph_fs" => {
+                self.dormancy_threshold_methanotroph_fs = value.real(path)?
+            }
+            "dormancy_threshold_methanotroph_fo2" => {
+                self.dormancy_threshold_methanotroph_fo2 = value.real(path)?
+            }
             "vgc_max" => self.vgc_max = value.real(path)?,
             "nongrassporosratio" => self.nongrassporosratio = value.real(path)?,
             "poros_tiller" => self.poros_tiller = value.real(path)?,
@@ -401,15 +415,21 @@ impl MethaneConfig {
             "use_ch4_sif" => self.use_ch4_sif = value.logical(path)?,
             "write_ch4_history" => self.write_ch4_history = value.logical(path)?,
             "ch4_history_vars" => self.ch4_history_vars = value.text(path)?,
-            "numerical_correction_fatal_threshold" => self.numerical_correction_fatal_threshold = value.real(path)?,
+            "numerical_correction_fatal_threshold" => {
+                self.numerical_correction_fatal_threshold = value.real(path)?
+            }
             "host_water_tolerance" => self.host_water_tolerance = value.real(path)?,
             "lake_zero_depth_fatal" => self.lake_zero_depth_fatal = value.logical(path)?,
             "lake_restart_debug" => self.lake_restart_debug = value.logical(path)?,
             "lake_restart_debug_year" => self.lake_restart_debug_year = value.int(path)?,
-            "lake_restart_debug_start_doy" => self.lake_restart_debug_start_doy = value.int(path)?,
+            "lake_restart_debug_start_doy" => {
+                self.lake_restart_debug_start_doy = value.int(path)?
+            }
             "lake_restart_debug_end_doy" => self.lake_restart_debug_end_doy = value.int(path)?,
             "lake_restart_debug_sec" => self.lake_restart_debug_sec = value.int(path)?,
-            "enable_wetwat_finundated_override" => self.enable_wetwat_finundated_override = value.logical(path)?,
+            "enable_wetwat_finundated_override" => {
+                self.enable_wetwat_finundated_override = value.logical(path)?
+            }
             "wetland_dry_unsat_branch" => self.wetland_dry_unsat_branch = value.logical(path)?,
             "rice_drain_window_days" => self.rice_drain_window_days = value.real(path)?,
             "rice_substrate_boost" => self.rice_substrate_boost = value.real(path)?,

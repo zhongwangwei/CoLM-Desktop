@@ -55,4 +55,8 @@ for tname, b, doc in [('MethaneConfig', 'Methane_type', '`Methane_type`（`DEF_M
               '        match name {']
     lines += ['            "%s" => self.%s = %s,' % (n, n, conv[k]) for n, k, _ in fl]
     lines += ['            _ => return Ok(false),', '        }', '        Ok(true)', '    }', '}', '']
-(root / 'crates/colm-core/src/methane/config_generated.rs').write_text('\n'.join(lines))
+out = root / 'crates/colm-core/src/methane/config_generated.rs'
+out.write_text('\n'.join(lines))
+# 与 CI 的 `cargo fmt --all --check` 保持一致：生成后按工作区的 rustfmt 规则排版。
+import subprocess
+subprocess.run(['rustfmt', '--edition', '2021', str(out)], check=True)

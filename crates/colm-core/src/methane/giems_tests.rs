@@ -23,12 +23,17 @@ fn out_of_range_values_stop_like_upstream() {
 
 #[test]
 fn years_outside_the_record_fall_back_to_the_climatology() {
-    let samples: Vec<f32> = (0..GIEMS_MONTHS).map(|t| (t % 100) as f32 / 100.0).collect();
+    let samples: Vec<f32> = (0..GIEMS_MONTHS)
+        .map(|t| (t % 100) as f32 / 100.0)
+        .collect();
     let patch = GiemsPatch::from_samples(&samples).unwrap();
     // 1992-02-15（第 46 天）：第 2 个月。
     assert_eq!(patch.finundated(1992, 46).unwrap(), f64::from(samples[1]));
     // 2020-12-31（闰年第 366 天）：最后一个月。
-    assert_eq!(patch.finundated(2020, 366).unwrap(), f64::from(samples[347]));
+    assert_eq!(
+        patch.finundated(2020, 366).unwrap(),
+        f64::from(samples[347])
+    );
     // 2021 与 1991 退到气候态。
     assert_eq!(patch.finundated(2021, 1).unwrap(), patch.climatology[0]);
     assert_eq!(patch.finundated(1991, 365).unwrap(), patch.climatology[11]);

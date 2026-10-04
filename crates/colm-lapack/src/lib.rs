@@ -14,9 +14,9 @@
 
 use anyhow::{ensure, Result};
 
-pub mod libm;
 #[cfg(target_os = "macos")]
 mod accelerate;
+pub mod libm;
 #[cfg_attr(target_os = "macos", allow(dead_code))]
 mod reference;
 

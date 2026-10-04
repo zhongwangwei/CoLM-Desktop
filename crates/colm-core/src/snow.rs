@@ -1233,13 +1233,14 @@ pub fn relocate_soil_frost_ice(
         let top = layer_slot(top_index);
         let ice = state.ice_water_kg_m2[top];
         let liquid = state.liquid_water_kg_m2[top];
-        let heat_capacity =
-            ice.mul_add(ICE_HEAT_CAPACITY_J_KG_K, liquid * WATER_HEAT_CAPACITY_J_KG_K);
+        let heat_capacity = ice.mul_add(
+            ICE_HEAT_CAPACITY_J_KG_K,
+            liquid * WATER_HEAT_CAPACITY_J_KG_K,
+        );
         let excess_heat_capacity = excess * ICE_HEAT_CAPACITY_J_KG_K;
-        state.temperature_k[top] = state.temperature_k[top].mul_add(
-            heat_capacity,
-            excess_heat_capacity * soil.temperature_k,
-        ) / (excess_heat_capacity + heat_capacity);
+        state.temperature_k[top] = state.temperature_k[top]
+            .mul_add(heat_capacity, excess_heat_capacity * soil.temperature_k)
+            / (excess_heat_capacity + heat_capacity);
         state.ice_water_kg_m2[top] = ice + excess;
         state.thickness_m[top] += added_depth;
         let interface_top = state.interface_depth_m[interface_slot(top_index)];

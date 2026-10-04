@@ -34,8 +34,7 @@ pub fn regional_file(landdata: &Path) -> PathBuf {
 
 /// 汇流输入网格的大小（`nx`/`ny` 维）。
 pub fn grid_size(file: &Path) -> Result<(usize, usize)> {
-    let network =
-        netcdf::open(file).with_context(|| format!("cannot open {}", file.display()))?;
+    let network = netcdf::open(file).with_context(|| format!("cannot open {}", file.display()))?;
     let length = |name: &str| -> Result<usize> {
         Ok(network
             .dimension(name)
@@ -86,8 +85,7 @@ pub fn touched_cells(landdata: &Path, year: i32, nlon: usize, nlat: usize) -> Re
             lat_s: sets.lat_s.clone(),
             lat_n: sets.lat_n.clone(),
         };
-        let mapping =
-            AreaWeightedMapping::build(&grid, &axes, &sets.cells, &sets.shared_fraction)?;
+        let mapping = AreaWeightedMapping::build(&grid, &axes, &sets.cells, &sets.shared_fraction)?;
         for part in mapping.parts.iter().flatten() {
             touched[part.ilat * nlon + part.ilon] = true;
         }
@@ -384,13 +382,19 @@ pub fn subset_write(
             .iter()
             .map(|d| d.len())
             .collect::<Vec<_>>();
-        ensure!(dims.len() <= 2, "variable {name} has more than two dimensions");
+        ensure!(
+            dims.len() <= 2,
+            "variable {name} has more than two dimensions"
+        );
         let cut_axes = dims
             .iter()
             .enumerate()
             .filter(|(_, d)| matches!(d.as_str(), SEQ_DIM | PATH_DIM | DAM_DIM))
             .collect::<Vec<_>>();
-        ensure!(cut_axes.len() <= 1, "variable {name} has two cut dimensions");
+        ensure!(
+            cut_axes.len() <= 1,
+            "variable {name} has two cut dimensions"
+        );
         let axis = cut_axes.first().map(|(axis, dim)| {
             let keep: &[usize] = match dim.as_str() {
                 SEQ_DIM => &selection.seq,

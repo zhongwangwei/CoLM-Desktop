@@ -63,7 +63,9 @@ fn the_standard_o18_group_loads_like_upstream() {
 
 #[test]
 fn indexed_assignments_override_single_elements() {
-    let path = write_param("indexed", "&nl_colm_tracer_forcing\n forcing_num = 1\n forcing_role(1) = 'VAPOR'\n \
+    let path = write_param(
+        "indexed",
+        "&nl_colm_tracer_forcing\n forcing_num = 1\n forcing_role(1) = 'VAPOR'\n \
          forcing_fprefix(1) = 'q'\n forcing_vname(1) = 'v'\n forcing_input_mode(1) = 'Delta'\n/\n",
     );
     let set = isotope_set(&path);
@@ -78,7 +80,9 @@ fn indexed_assignments_override_single_elements() {
 
 #[test]
 fn duplicate_roles_are_rejected() {
-    let path = write_param("duplicate", "&nl_colm_tracer_forcing\n forcing_num = 2\n forcing_role = 'vapor', 'vapor'\n/\n",
+    let path = write_param(
+        "duplicate",
+        "&nl_colm_tracer_forcing\n forcing_num = 2\n forcing_role = 'vapor', 'vapor'\n/\n",
     );
     let set = isotope_set(&path);
     assert!(load_specs(&set, &format!("H2_18O:{path}")).is_err());
@@ -192,8 +196,14 @@ fn main_totals_and_identity_follow_the_main_forcing() {
     // 第 1 槽是数据集名，逐字符 `iachar`。
     assert_eq!(&id[8..14], &[73, 115, 111, 71, 83, 77]);
     // 第 2 列（1 号变量，总降水）：stream 3、itrc 0、mode 1、total 0、dtime、offset。
-    assert_eq!(&id[ID_WIDTH..ID_WIDTH + 8], &[3, 0, 1, 0, 21_600, 10_800, 0, 0]);
-    assert_eq!(&id[2 * ID_WIDTH..2 * ID_WIDTH + 8], &[1, 1, 4, 1, 21_600, 10_800, 0, 0]);
+    assert_eq!(
+        &id[ID_WIDTH..ID_WIDTH + 8],
+        &[3, 0, 1, 0, 21_600, 10_800, 0, 0]
+    );
+    assert_eq!(
+        &id[2 * ID_WIDTH..2 * ID_WIDTH + 8],
+        &[1, 1, 4, 1, 21_600, 10_800, 0, 0]
+    );
     let cache = forcing.cache();
     assert_eq!(cache.block(1..2).precip.len(), 2);
 }

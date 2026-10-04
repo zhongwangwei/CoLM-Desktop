@@ -388,16 +388,72 @@ pub struct UrbanSide<'a> {
 /// 城市 patch 配对时整行照抄的城市变量（`MOD_Lulcc_Vars_TimeVariables.F90:886-962`，
 /// MEC 的 `:1000-1077` 是同一组）。`tree_lai`/`tree_sai` 不在里面，保持冷启动值。
 pub const URBAN_COPIED: [&str; 66] = [
-    "fwsun", "dfwsun", "sroof", "swsun", "swsha", "sgimp", "sgper", "slake", "lwsun", "lwsha",
-    "lgimp", "lgper", "lveg", "z_sno_roof", "z_sno_gimp", "z_sno_gper", "z_sno_lake",
-    "dz_sno_roof", "dz_sno_gimp", "dz_sno_gper", "dz_sno_lake", "t_roofsno", "t_wallsun",
-    "t_wallsha", "t_gimpsno", "t_gpersno", "t_lakesno", "troof_inner", "twsun_inner",
-    "twsha_inner", "wliq_roofsno", "wice_roofsno", "wliq_gimpsno", "wice_gimpsno",
-    "wliq_gpersno", "wice_gpersno", "wliq_lakesno", "wice_lakesno", "sag_roof", "sag_gimp",
-    "sag_gper", "sag_lake", "scv_roof", "scv_gimp", "scv_gper", "scv_lake", "fsno_roof",
-    "fsno_gimp", "fsno_gper", "fsno_lake", "snowdp_roof", "snowdp_gimp", "snowdp_gper",
-    "snowdp_lake", "Fhac", "Fwst", "Fach", "Fahe", "Fhah", "vehc", "meta", "t_room", "t_roof",
-    "t_wall", "tafu", "urb_green",
+    "fwsun",
+    "dfwsun",
+    "sroof",
+    "swsun",
+    "swsha",
+    "sgimp",
+    "sgper",
+    "slake",
+    "lwsun",
+    "lwsha",
+    "lgimp",
+    "lgper",
+    "lveg",
+    "z_sno_roof",
+    "z_sno_gimp",
+    "z_sno_gper",
+    "z_sno_lake",
+    "dz_sno_roof",
+    "dz_sno_gimp",
+    "dz_sno_gper",
+    "dz_sno_lake",
+    "t_roofsno",
+    "t_wallsun",
+    "t_wallsha",
+    "t_gimpsno",
+    "t_gpersno",
+    "t_lakesno",
+    "troof_inner",
+    "twsun_inner",
+    "twsha_inner",
+    "wliq_roofsno",
+    "wice_roofsno",
+    "wliq_gimpsno",
+    "wice_gimpsno",
+    "wliq_gpersno",
+    "wice_gpersno",
+    "wliq_lakesno",
+    "wice_lakesno",
+    "sag_roof",
+    "sag_gimp",
+    "sag_gper",
+    "sag_lake",
+    "scv_roof",
+    "scv_gimp",
+    "scv_gper",
+    "scv_lake",
+    "fsno_roof",
+    "fsno_gimp",
+    "fsno_gper",
+    "fsno_lake",
+    "snowdp_roof",
+    "snowdp_gimp",
+    "snowdp_gper",
+    "snowdp_lake",
+    "Fhac",
+    "Fwst",
+    "Fach",
+    "Fahe",
+    "Fhah",
+    "vehc",
+    "meta",
+    "t_room",
+    "t_roof",
+    "t_wall",
+    "tafu",
+    "urb_green",
 ];
 
 /// 城市变量每个城市单元占几个值（`urban` 轴之外各轴的乘积）。
@@ -436,7 +492,9 @@ pub fn urban_same_type_assignment(
             }
             (None, None) => {}
             // `:868-871`：两边 patch 类型相同却只有一边有城市单元，上游停机。
-            _ => bail!("Error in REST_LulccTimeVariables URBAN_MODEL: patch {np} pairs a non-urban patch"),
+            _ => bail!(
+                "Error in REST_LulccTimeVariables URBAN_MODEL: patch {np} pairs a non-urban patch"
+            ),
         }
     }
     let overrides = copy_urban_rows(&urban_pairs, new.time, old.time)?;
@@ -489,8 +547,18 @@ pub fn recompose_urban_patch_water(
     };
     let top = SNOW_LAYERS + 1;
     for (water, roof, gper, gimp) in [
-        ("wliq_soisno", "wliq_roofsno", "wliq_gpersno", "wliq_gimpsno"),
-        ("wice_soisno", "wice_roofsno", "wice_gpersno", "wice_gimpsno"),
+        (
+            "wliq_soisno",
+            "wliq_roofsno",
+            "wliq_gpersno",
+            "wliq_gimpsno",
+        ),
+        (
+            "wice_soisno",
+            "wice_roofsno",
+            "wice_gpersno",
+            "wice_gimpsno",
+        ),
     ] {
         let (roof, roof_row) = get(roof)?;
         let (gper, gper_row) = get(gper)?;

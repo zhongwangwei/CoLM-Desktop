@@ -267,11 +267,17 @@ fn canopy_phase(
     let (throughfall, drip) = match cap {
         DripCap::Intercepted => {
             let throughfall = (dt * arriving_rate - intercepted).max(0.0);
-            (throughfall, ((dt * pg.max(0.0) - xsc_mass) - throughfall).max(0.0))
+            (
+                throughfall,
+                ((dt * pg.max(0.0) - xsc_mass) - throughfall).max(0.0),
+            )
         }
         DripCap::Mixed => {
             let throughfall = dt.mul_add(arriving_rate, -intercepted).max(0.0);
-            (throughfall, (dt.mul_add(pg.max(0.0), -xsc_mass) - throughfall).max(0.0))
+            (
+                throughfall,
+                (dt.mul_add(pg.max(0.0), -xsc_mass) - throughfall).max(0.0),
+            )
         }
     };
     let drip = match cap {

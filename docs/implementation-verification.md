@@ -29595,3 +29595,15 @@ vendor `MOD_Ozone` 新加 `ozone_pft_of_lct(patchclass)`（IGBP/USGS 两张表�
   - 空间 `g1pc8`（`g1pc` + 方案 8，PC，1–2 月，三段全链路，读 `canopy_data` 栅格）：4 份历史与 14 份重启逐位一致；两侧 `cstructure/2005/` 六个文件齐全，PFT 常数重启 246 个 `ncd_p`（4.91–7.08 m，含针叶 1、阔叶 5/7、灌木 9/10）。
 - 单元测试：colm-core 500、colm-runtime 159、colm-init 182（`--test-threads=1`）、colm-srfdata 271（串行；`tests/raster.rs` 5 个要 `COLM_RAWDATA`，本机不跑）全过；clippy 无新警告；GUI 后端 162、前端 11 个、`check-gui` 通过。
 - **GUI**：`DEF_Interception_scheme` 在不带 `extend_interception` 宏的内核（随软件发布的内核都是）上原来只给方案 1，实际上 `main/` 支持 1 与 8。改为给出 1 与 8。
+
+## 第 566 轮：合入 main 后的 CI（188 个提交第一次过 CI）
+
+main 上一次绿是 9 月 26 日；这次快进带上 188 个从没跑过 CI 的提交，`ci` 与 `windows-kernel` 都红。逐个处理：
+
+1. **vendor 里两处 shell `mkdir -p`**（`Aggregation_CanopyStructure.F90`、`MOD_UnitCatchmentRegional.F90`，随 `3c799bae` 同步进来）被 `test_kernel_filesystem.py` 拦下（Windows 上没有 `mkdir -p`）。改用仓库的 `MOD_Filesystem::make_directory`；latlon 内核编译通过。`kernel`、`kernel-filesystem`、`windows-kernel` 三处都是它。
+2. **gfortran 参考位型的跨平台末位差**：`gratio`/`erfc1`、PROSPECT 两项、TOPMODEL、VIC `calc_Q12` 的金标准是 macOS 上生成的，ubuntu/windows 的 libm 差 1–2 ULP（PROSPECT 约 7 ULP，`calc_Q12` 末尾两次相减抵消，按量级 1 计约 8 ULP）。照 `radiation_tests.rs` 已有的规矩，新加 `reference_bits_match`：macOS 逐位，其它平台 16 ULP。
+3. **`histmap` 多报计数**：PR #504 的 104 个火诊断量都在 `DEF_USE_BGC` 下，392 → 392 + 104（每个仍须挂运行时条件，那条检查不变）。
+4. **GUI clippy**（新版 stable 的 `needless_borrows_for_generic_args`）：`sidecar.rs` 的 `map_err(&cleanup)` 改为按值传（闭包只借用，是 `Copy`）。
+5. **CI 后两步之前没跑到的**：workspace clippy 的 4 个 `excessive_precision`（测试字面量换成位型相同的最短写法）；`cargo fmt --all --check` 欠了 191 处（两个 workspace 都跑了 `cargo fmt --all`；甲烷配置生成器写完后接 `rustfmt`，免得重生成又弄脏）；`parameter-audit` 的产物随 namelist 变化重新生成。
+
+本地按 `ci.yml` 的命令清单逐条跑（`/tmp` 脚本，31 步）全部通过，包括 workspace clippy `-D warnings`、两个 workspace 的 fmt 检查、GUI 后端与 11 个前端测试。Linux/Windows 的 libm 差异本地无法复现，由 CI 验证。

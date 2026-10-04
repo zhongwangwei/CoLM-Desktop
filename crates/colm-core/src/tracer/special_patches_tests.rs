@@ -97,7 +97,20 @@ fn mixed_box_matches_fortran_kernel() {
             t_grnd: 273.0,
         };
         assert_eq!(a[3], a[4], "harness ties R_frost to R_vapor");
-        let fluxes = mixed_box(&tracer, &SpecialFrac { physics: TracerPhysics::default(), forc_q: 0.0, forc_psrf: 1.0e5, open_water_wind: None }, &mut pools, a[0], a[2], a[3], &box_water);
+        let fluxes = mixed_box(
+            &tracer,
+            &SpecialFrac {
+                physics: TracerPhysics::default(),
+                forc_q: 0.0,
+                forc_psrf: 1.0e5,
+                open_water_wind: None,
+            },
+            &mut pools,
+            a[0],
+            a[2],
+            a[3],
+            &box_water,
+        );
         assert_eq!(fluxes.trc_input.to_bits(), outputs[0]);
         assert_eq!(fluxes.trc_evap_liq.to_bits(), outputs[1]);
         assert_eq!(fluxes.trc_evap_ice.to_bits(), outputs[2]);

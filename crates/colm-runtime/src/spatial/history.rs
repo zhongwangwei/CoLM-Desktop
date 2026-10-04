@@ -77,7 +77,9 @@ pub fn build_history_grid(
 ) -> Result<HistoryGrid> {
     let patches = topology.patch_count();
     ensure!(
-        patch_types.len() == patches && patch_mask.len() == patches && forcing_mask.len() == patches,
+        patch_types.len() == patches
+            && patch_mask.len() == patches
+            && forcing_mask.len() == patches,
         "one patch type, one patch mask and one forcing mask per patch are needed"
     );
     // 过滤里的 `patchmask` 只在 `DEF_URBAN_ONLY` 与 2m WMO 虚拟 patch 时为假；这两样都没移植。

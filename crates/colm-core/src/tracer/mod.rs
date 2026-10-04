@@ -21,11 +21,11 @@ pub use descriptor::{
     TracerParameterOverrides, TracerSet, DESCRIPTOR_IDENTITY_WIDTH, TRC_TINY,
     TRC_WATER_MIN_FOR_RATIO,
 };
+pub use precip::{tracer_precip, PrecipInput};
 pub use state::{
     soisno_slot, EvapKind, PatchTracerState, TracerAccumulators, TracerColdStart, TracerPools,
-    TracerStep, WaterAccumulators, WaterInventory, MAX_SNOW_LAYERS, SOISNO_LAYERS, SOIL_LAYERS,
+    TracerStep, WaterAccumulators, WaterInventory, MAX_SNOW_LAYERS, SOIL_LAYERS, SOISNO_LAYERS,
 };
-pub use precip::{tracer_precip, PrecipInput};
 
 /// 示踪物物理的全局开关与分馏参数（`DEF_TRACER_USE_FRACTIONATION` 等）。
 #[derive(Debug, Clone, Copy, PartialEq)]

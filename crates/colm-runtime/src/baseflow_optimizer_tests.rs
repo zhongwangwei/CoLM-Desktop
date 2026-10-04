@@ -71,7 +71,8 @@ fn scale_moves_only_when_the_water_table_trend_and_the_budget_agree() {
 #[test]
 fn a_year_writes_the_cycle_record_then_the_updated_scale() {
     let directory = scratch_directory("year");
-    let mut optimizer = BaseflowOptimizer::new(&[init(1.0, 3.0, 0)], &directory, "site", "w180_s90");
+    let mut optimizer =
+        BaseflowOptimizer::new(&[init(1.0, 3.0, 0)], &directory, "site", "w180_s90");
     optimizer.accumulate(0, step(2.0e-5, 4.0e-5));
     optimizer.accumulate(0, step(1.0e-5, 4.0e-5));
     optimizer.close_year(&[3.5]).unwrap();

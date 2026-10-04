@@ -193,8 +193,10 @@ impl TracerSet {
         // （`MOD_Tracer_Reactive_Methane.F90:102`），SEDIMENT 声明 `REACTION_NONE`。它进
         // 描述符指纹（history 旁车的 `trc_hist_descriptor`）。
         for tracer in &mut tracers {
-            if matches!(tracer.name.trim().to_ascii_uppercase().as_str(), "CH4" | "METHANE")
-                && tracer.family == TracerFamily::Gas
+            if matches!(
+                tracer.name.trim().to_ascii_uppercase().as_str(),
+                "CH4" | "METHANE"
+            ) && tracer.family == TracerFamily::Gas
             {
                 tracer.reaction_mode = ReactionMode::Provider;
             }
@@ -232,7 +234,10 @@ impl TracerSet {
     /// `tracer_build_descriptor_identity(identity)`（不限输运示踪物）：history 旁车的
     /// `trc_hist_descriptor` 每个注册示踪物一行。
     pub fn descriptor_identity_all(&self) -> Vec<[i32; DESCRIPTOR_IDENTITY_WIDTH]> {
-        self.tracers.iter().map(TracerDescriptor::identity).collect()
+        self.tracers
+            .iter()
+            .map(TracerDescriptor::identity)
+            .collect()
     }
 }
 
@@ -375,7 +380,10 @@ pub fn parse_csv(raw: &str) -> Vec<String> {
     if text.is_empty() {
         return Vec::new();
     }
-    let mut tokens: Vec<String> = text.split(',').map(|token| token.trim().to_owned()).collect();
+    let mut tokens: Vec<String> = text
+        .split(',')
+        .map(|token| token.trim().to_owned())
+        .collect();
     // 上游：最后一个逗号之后没有字符时不再补一项（`j <= slen` 不成立）。
     if text.ends_with(',') {
         tokens.pop();
@@ -453,7 +461,10 @@ fn canonical_category(raw: &str) -> String {
 }
 
 fn category_supported(category: &str) -> bool {
-    matches!(category, "isotope" | "solute" | "particle" | "gas" | "reactive")
+    matches!(
+        category,
+        "isotope" | "solute" | "particle" | "gas" | "reactive"
+    )
 }
 
 /// `set_tracer_category_defaults`。
@@ -599,10 +610,15 @@ fn validate(tracer: &mut TracerDescriptor, use_bgc: bool) -> Result<()> {
         tracer.state_owner,
         StateOwner::GenericWater | StateOwner::Provider
     ) {
-        fail("state_owner", "must resolve before transport initialization")?;
+        fail(
+            "state_owner",
+            "must resolve before transport initialization",
+        )?;
     }
-    if matches!(tracer.family, TracerFamily::Isotope | TracerFamily::Particle)
-        && tracer.reaction_mode != ReactionMode::None
+    if matches!(
+        tracer.family,
+        TracerFamily::Isotope | TracerFamily::Particle
+    ) && tracer.reaction_mode != ReactionMode::None
     {
         fail(
             "reaction_mode",
@@ -657,10 +673,12 @@ fn validate(tracer: &mut TracerDescriptor, use_bgc: bool) -> Result<()> {
         fail("unit_kind", "isotope tracers require ratio")?;
     }
     if tracer.charge != 0 && !tracer.is_solute() {
-        fail("charge", "non-zero ionic charge is valid only for solute tracers")?;
+        fail(
+            "charge",
+            "non-zero ionic charge is valid only for solute tracers",
+        )?;
     }
-    if (tracer.is_isotope() || tracer.is_solute())
-        && tracer.state_owner != StateOwner::GenericWater
+    if (tracer.is_isotope() || tracer.is_solute()) && tracer.state_owner != StateOwner::GenericWater
     {
         fail(
             "state_owner",

@@ -472,4 +472,3 @@ fn source_one_manure_matches_the_complete_fortran_class_table() {
     ];
     assert_eq!(state.pft_fields().manure_nitrogen, expected);
 }
-

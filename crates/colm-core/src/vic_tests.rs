@@ -92,7 +92,8 @@ fn q12_matches_gfortran_bitwise() {
         let v: Vec<f64> = line.split_whitespace().map(bits).collect();
         let got = q12(v[0], v[1], v[2], v[3], v[4]);
         total += 1;
-        if got.to_bits() != v[5].to_bits() {
+        // 末尾两次减法里量级为 1 的项相互抵消，跨平台的末位差按量级 1 计（`scale = 1`）。
+        if !crate::reference_bits_match(got, v[5], 1.0) {
             bad.push(format!("{v:?}: {got:e} vs {:e}", v[5]));
         }
     }

@@ -2932,12 +2932,20 @@ impl StandardLctRestartTemplate {
             .temperature_k
             .get(start..start + self.snow_slots())
             .map(<[f64]>::to_vec)
-            .with_context(|| format!("the restart's t_soisno has no snow span for patch {}", self.patch))
+            .with_context(|| {
+                format!(
+                    "the restart's t_soisno has no snow span for patch {}",
+                    self.patch
+                )
+            })
     }
 
     /// 被强迫缺测遮蔽的 patch（`forcmask_pch = .false.`）的续跑替换项：`CoLMDRIVER` 整步跳过它，
     /// 只有 `LAI_readin` 照常改 `tlai`/`tsai`，其余变量都是起跑重启里的原值（不替换即保持）。
-    pub fn masked_overrides(&self, state: &StandardLctSnowSoilState) -> Result<Vec<RestartOverride>> {
+    pub fn masked_overrides(
+        &self,
+        state: &StandardLctSnowSoilState,
+    ) -> Result<Vec<RestartOverride>> {
         let mut overrides = Vec::with_capacity(2);
         for (name, source, value) in [
             (

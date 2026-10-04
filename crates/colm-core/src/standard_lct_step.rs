@@ -1221,10 +1221,8 @@ pub fn standard_lct_snow_soil_step(
             std::array::from_fn(|slot| (tracer_scratch.wice_old[slot] - wice[slot]).max(0.0));
         let freeze: [f64; crate::tracer::SOISNO_LAYERS] =
             std::array::from_fn(|slot| (wice[slot] - tracer_scratch.wice_old[slot]).max(0.0));
-        let t_soisno = crate::tracer::step::pack_soisno(
-            &state.snow.temperature_k,
-            &state.soil_temperature_k,
-        );
+        let t_soisno =
+            crate::tracer::step::pack_soisno(&state.snow.temperature_k, &state.soil_temperature_k);
         crate::tracer::step::after_thermal(
             ctx,
             track,
@@ -1406,11 +1404,12 @@ pub fn standard_lct_snow_soil_step(
     };
     // 示踪物的雪层合并/分裂在宿主调用之后按调用之前的水侧状态重放同样的判定
     // （`CoLMMAIN.F90:1346-1425`，只在 `snl < 0` 时调用）。
-    let combine_snapshot = (state.snow.layer_count < 0).then(|| crate::tracer::snow::SnowCombineInput {
-        snl: state.snow.layer_count,
-        wice: std::array::from_fn(|slot| state.snow.ice_water_kg_m2[slot]),
-        dz: std::array::from_fn(|slot| state.snow.thickness_m[slot]),
-    });
+    let combine_snapshot =
+        (state.snow.layer_count < 0).then(|| crate::tracer::snow::SnowCombineInput {
+            snl: state.snow.layer_count,
+            wice: std::array::from_fn(|slot| state.snow.ice_water_kg_m2[slot]),
+            dz: std::array::from_fn(|slot| state.snow.thickness_m[slot]),
+        });
     let mut aerosols = state
         .snicar
         .as_mut()
@@ -1422,10 +1421,13 @@ pub fn standard_lct_snow_soil_step(
     )?;
     state.soil_water.liquid_water_kg_m2[0] = soil_surface.liquid_water_kg_m2;
     state.soil_water.ice_water_kg_m2[0] = soil_surface.ice_water_kg_m2;
-    if let (Some(ctx), Some(track), Some(snapshot)) =
-        (input.tracer.as_ref(), state.tracer.as_deref_mut(), combine_snapshot.as_ref())
-    {
-        let outcome = crate::tracer::snow::tracer_snow_layers_combine(ctx.set, &mut track.state, snapshot);
+    if let (Some(ctx), Some(track), Some(snapshot)) = (
+        input.tracer.as_ref(),
+        state.tracer.as_deref_mut(),
+        combine_snapshot.as_ref(),
+    ) {
+        let outcome =
+            crate::tracer::snow::tracer_snow_layers_combine(ctx.set, &mut track.state, snapshot);
         ensure!(
             outcome.snl == state.snow.layer_count,
             "tracer snow combine replayed snl={} but the water side has {}",
@@ -1468,7 +1470,11 @@ pub fn standard_lct_snow_soil_step(
             wice1: top.ice_water_kg_m2,
             snowdp: state.snow.depth_m,
         };
-        crate::snow::relocate_soil_frost_ice(&mut state.snow, &mut top, state.snicar.as_deref_mut());
+        crate::snow::relocate_soil_frost_ice(
+            &mut state.snow,
+            &mut top,
+            state.snicar.as_deref_mut(),
+        );
         state.soil_water.ice_water_kg_m2[0] = top.ice_water_kg_m2;
         if let (Some(ctx), Some(track)) = (input.tracer.as_ref(), state.tracer.as_deref_mut()) {
             crate::tracer::snow::tracer_relocate_soil_frost_ice(
@@ -2100,13 +2106,14 @@ fn tracer_after_water(host: TracerAfterWater<'_, '_>) -> Result<()> {
     } = host;
     let dt = input.energy.interception.time_step_seconds;
     let snl = snow.layer_count;
-    let wliq = crate::tracer::step::pack_soisno(&snow.liquid_water_kg_m2, &soil_water.liquid_water_kg_m2);
+    let wliq =
+        crate::tracer::step::pack_soisno(&snow.liquid_water_kg_m2, &soil_water.liquid_water_kg_m2);
     let wice = crate::tracer::step::pack_soisno(&snow.ice_water_kg_m2, &soil_water.ice_water_kg_m2);
     let t_soisno = crate::tracer::step::pack_soisno(&snow.temperature_k, soil_temperature_k);
     let to_array = |values: &[f64]| -> Result<[f64; SOIL_LAYERS]> {
-        values
-            .try_into()
-            .map_err(|_| anyhow::anyhow!("expected {SOIL_LAYERS} soil layers, got {}", values.len()))
+        values.try_into().map_err(|_| {
+            anyhow::anyhow!("expected {SOIL_LAYERS} soil layers, got {}", values.len())
+        })
     };
     let mut snow_qout = [0.0; MAX_SNOW_LAYERS];
     for (relative, outflow) in water.snow.layer_drainage_kg_m2.iter().enumerate() {

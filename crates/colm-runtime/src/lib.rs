@@ -14,13 +14,13 @@ pub mod history;
 mod history_manifest;
 pub mod history_sidecar;
 pub mod irrigation;
+pub mod methane;
 pub mod multi_patch;
 pub mod ozone;
 pub mod pft;
 pub mod physics;
 pub mod river;
 pub mod spatial;
-pub mod methane;
 pub mod tracer;
 pub mod tracer_sidecar;
 

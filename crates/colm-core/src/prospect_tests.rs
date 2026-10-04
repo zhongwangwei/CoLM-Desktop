@@ -25,7 +25,7 @@ fn pft_parameterization_matches_gfortran_bitwise() {
         };
         for (band, want) in fields[3..].iter().enumerate() {
             total += 1;
-            if got[band * 2].to_bits() != hex(want).to_bits() {
+            if !crate::reference_bits_match(got[band * 2], hex(want), 0.0) {
                 bad.push(format!(
                     "{} pft {pft} ssw {moisture} band {band}",
                     fields[0]
@@ -90,7 +90,7 @@ fn spectrum_matches_gfortran_bitwise() {
         for (row, got) in [(&group[1], &reflectance), (&group[2], &transmittance)] {
             for (band, (want, got)) in row[1..].iter().zip(got.iter()).enumerate() {
                 total += 1;
-                if hex(want).to_bits() != got.to_bits() {
+                if !crate::reference_bits_match(*got, hex(want), 0.0) {
                     bad.push(format!(
                         "{} {p:?} band {band}: {got:e} vs {:e}",
                         row[0],

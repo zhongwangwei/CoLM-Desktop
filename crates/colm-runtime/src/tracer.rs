@@ -137,7 +137,9 @@ fn tracer_physics_from_document(document: &Document) -> Result<colm_core::tracer
         nss_leaf_rb: real(document, "DEF_TRACER_NSS_LEAF_RB")?,
     };
     anyhow::ensure!(
-        physics.cg_relhum_max > 0.0 && physics.cg_relhum_max < 1.0 && physics.ice_supersat_slope >= 0.0,
+        physics.cg_relhum_max > 0.0
+            && physics.cg_relhum_max < 1.0
+            && physics.ice_supersat_slope >= 0.0,
         "Invalid tracer fractionation parameters (DEF_TRACER_CG_RELHUM_MAX in (0,1), \
          DEF_TRACER_ICE_SUPERSAT_SLOPE >= 0)"
     );
@@ -179,8 +181,16 @@ impl TracerRuntime {
             );
         }
         let physics = tracer_physics_from_document(document)?;
-        let precip_ratio = set.tracers.iter().map(|t| t.precip_default_ratio()).collect();
-        let vapor_ratio = set.tracers.iter().map(|t| t.vapor_default_ratio()).collect();
+        let precip_ratio = set
+            .tracers
+            .iter()
+            .map(|t| t.precip_default_ratio())
+            .collect();
+        let vapor_ratio = set
+            .tracers
+            .iter()
+            .map(|t| t.vapor_default_ratio())
+            .collect();
         let runtime_forced = vec![false; set.len()];
         let forcing_specs = crate::spatial::tracer_forcing::load_specs(
             &set,
@@ -362,8 +372,14 @@ pub fn end_of_step(
             },
         );
     }
-    let wliq = pack_soisno(&state.snow.liquid_water_kg_m2, &state.soil_water.liquid_water_kg_m2);
-    let wice = pack_soisno(&state.snow.ice_water_kg_m2, &state.soil_water.ice_water_kg_m2);
+    let wliq = pack_soisno(
+        &state.snow.liquid_water_kg_m2,
+        &state.soil_water.liquid_water_kg_m2,
+    );
+    let wice = pack_soisno(
+        &state.snow.ice_water_kg_m2,
+        &state.soil_water.ice_water_kg_m2,
+    );
     hist::tracer_hist_accumulate(
         &runtime.set,
         &mut track.state,
@@ -384,8 +400,13 @@ pub fn end_of_step(
 
 /// 一步里所有 patch 都推进完之后（`CoLMDRIVER.F90:392-393`，在 `hist_out` 之前）调一次
 /// `tracer_report`。各 patch 共用同一个 [`TracerRuntime`]，取第一个挂了示踪物的模板。
-pub fn report_after_patches(templates: &[crate::assembly::StandardLctRestartTemplate]) -> Result<()> {
-    match templates.iter().find_map(|template| template.tracer.as_ref()) {
+pub fn report_after_patches(
+    templates: &[crate::assembly::StandardLctRestartTemplate],
+) -> Result<()> {
+    match templates
+        .iter()
+        .find_map(|template| template.tracer.as_ref())
+    {
         Some((runtime, _)) => report_step(runtime),
         None => Ok(()),
     }
@@ -397,7 +418,11 @@ fn report_step(runtime: &TracerRuntime) -> Result<()> {
         .tracker
         .lock()
         .map_err(|_| anyhow::anyhow!("the tracer balance tracker lock is poisoned"))?
-        .report(runtime.set.len(), runtime.balance_abort_nbad, runtime.resid_abort_nbad);
+        .report(
+            runtime.set.len(),
+            runtime.balance_abort_nbad,
+            runtime.resid_abort_nbad,
+        );
     for line in &report.lines {
         println!("{line}");
     }
@@ -426,8 +451,14 @@ pub fn glacier_end_of_step(
     let Some(track) = state.tracer.as_deref_mut() else {
         return Ok(());
     };
-    let wliq = pack_soisno(&state.snow.liquid_water_kg_m2, &state.soil_water.liquid_water_kg_m2);
-    let wice = pack_soisno(&state.snow.ice_water_kg_m2, &state.soil_water.ice_water_kg_m2);
+    let wliq = pack_soisno(
+        &state.snow.liquid_water_kg_m2,
+        &state.soil_water.liquid_water_kg_m2,
+    );
+    let wice = pack_soisno(
+        &state.snow.ice_water_kg_m2,
+        &state.soil_water.ice_water_kg_m2,
+    );
     let precipitation = &output.precipitation;
     let thermal = &output.thermal;
     {
@@ -497,8 +528,14 @@ pub fn lake_end_of_step(
     let Some(track) = state.tracer.as_deref_mut() else {
         return Ok(());
     };
-    let wliq = pack_soisno(&state.snow.liquid_water_kg_m2, &state.soil_water.liquid_water_kg_m2);
-    let wice = pack_soisno(&state.snow.ice_water_kg_m2, &state.soil_water.ice_water_kg_m2);
+    let wliq = pack_soisno(
+        &state.snow.liquid_water_kg_m2,
+        &state.soil_water.liquid_water_kg_m2,
+    );
+    let wice = pack_soisno(
+        &state.snow.ice_water_kg_m2,
+        &state.soil_water.ice_water_kg_m2,
+    );
     let precipitation = &output.precipitation;
     let thermal = &output.thermal;
     {
@@ -720,7 +757,11 @@ pub fn write_land_tracer_restart(
                 "tracer forcing cache shape mismatch at restart write"
             );
             anyhow::ensure!(
-                cache.precip.iter().chain(cache.vapor).all(|v| v.is_finite()),
+                cache
+                    .precip
+                    .iter()
+                    .chain(cache.vapor)
+                    .all(|v| v.is_finite()),
                 "non-finite tracer forcing cache at restart write"
             );
             ensure_dimension(
@@ -826,7 +867,10 @@ pub fn read_forcing_cache(
         .context("incomplete or malformed tracer forcing cache restart")?;
     anyhow::ensure!(
         stored.len() == identity.len()
-            && stored.iter().zip(identity).all(|(&a, &b)| a == i64::from(b)),
+            && stored
+                .iter()
+                .zip(identity)
+                .all(|(&a, &b)| a == i64::from(b)),
         "tracer forcing cache configuration differs from restart"
     );
     let precip = restart
@@ -860,19 +904,17 @@ pub fn read_land_tracer_restart(
         return Ok(Some(states));
     }
     let n = transport.len();
-    let read_patch = |name: &str,
-                      states: &mut [PatchTracerState],
-                      set_value: PatchSetter|
-     -> Result<()> {
-        let values = restart.floats(name)?;
-        anyhow::ensure!(values.len() == patches * n, "{name} has an unexpected size");
-        for (patch, state) in states.iter_mut().enumerate() {
-            for (k, &itrc) in transport.iter().enumerate() {
-                set_value(&mut state.pools[itrc], values[patch * n + k]);
+    let read_patch =
+        |name: &str, states: &mut [PatchTracerState], set_value: PatchSetter| -> Result<()> {
+            let values = restart.floats(name)?;
+            anyhow::ensure!(values.len() == patches * n, "{name} has an unexpected size");
+            for (patch, state) in states.iter_mut().enumerate() {
+                for (k, &itrc) in transport.iter().enumerate() {
+                    set_value(&mut state.pools[itrc], values[patch * n + k]);
+                }
             }
-        }
-        Ok(())
-    };
+            Ok(())
+        };
     let setters: [(&str, PatchSetter); 19] = [
         ("trc_ldew_rain", |p, v| p.ldew_rain = v),
         ("trc_ldew_snow", |p, v| p.ldew_snow = v),

@@ -621,8 +621,7 @@ pub fn methane(
             // 用了汇流淹没比例的 patch 也用汇流发布的漫滩水深（方案 7 全部 patch；hybrid 只有
             // 非湿地 patch），避免面积与水深不配套。
             if finundated > 0.0
-                && (i.scheme == 7
-                    || (i.scheme == 6 && m.use_routing_for_soil && i.patchtype != 2))
+                && (i.scheme == 7 || (i.scheme == 6 && m.use_routing_for_soil && i.patchtype != 2))
             {
                 let routing_depth_mm = 1000.0 * i.flood_depth_m.max(0.0);
                 wdsrf_sat = wdsrf_sat.max(finundated.max(0.01) * routing_depth_mm);

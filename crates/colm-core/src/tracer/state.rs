@@ -319,7 +319,8 @@ impl PatchTracerState {
                     );
                 }
                 // GIMPLE `.FMS (wa + ref_water, R_init, ref_mass)`（`MOD_Tracer_Rest`）。
-                pools.wa = (water.wa + self.aquifer_ref_water).mul_add(ratio, -pools.aquifer_ref_mass);
+                pools.wa =
+                    (water.wa + self.aquifer_ref_water).mul_add(ratio, -pools.aquifer_ref_mass);
             } else {
                 pools.wa = water.wa * ratio;
             }

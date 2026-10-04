@@ -41,7 +41,6 @@ fn parts_are_sorted_by_latitude_then_longitude() {
     assert!((value - 280.0).abs() < 1.0e-12);
 }
 
-
 /// `set_missing_value`：缺测格的份面积清零、面积和重算；全落在缺测格上的 set 掩掉。
 #[test]
 fn missing_cells_drop_out_of_the_mapping() {
@@ -55,7 +54,10 @@ fn missing_cells_drop_out_of_the_mapping() {
     )
     .unwrap();
     // 格子 (ilon 0, ilat 0) 缺测。
-    let mask = mapping.set_missing_value(|ilon, ilat| if (ilon, ilat) == (0, 0) { -9999.0 } else { 1.0 }, -9999.0);
+    let mask = mapping.set_missing_value(
+        |ilon, ilat| if (ilon, ilat) == (0, 0) { -9999.0 } else { 1.0 },
+        -9999.0,
+    );
     assert_eq!(mask, vec![true, false]);
     assert_eq!(mapping.area[1], 0.0);
     assert_eq!(mapping.area[0], areaquad(23.0, 23.5, 114.0, 114.5));
@@ -87,10 +89,16 @@ fn bilinear_parts_split_the_set_area_by_great_circle_weights() {
     let parts = &mapping.parts[0];
     assert_eq!(parts.len(), 4);
     // 北两份同行、西两份同列；北行的纬度更高。
-    assert_eq!((parts[0].ilat, parts[2].ilon), (parts[1].ilat, parts[0].ilon));
+    assert_eq!(
+        (parts[0].ilat, parts[2].ilon),
+        (parts[1].ilat, parts[0].ilon)
+    );
     assert!(global.rlat[parts[0].ilat] > global.rlat[parts[2].ilat]);
     for part in parts {
-        assert!((part.area / mapping.area[0] - 0.25).abs() < 1.0e-9, "{part:?}");
+        assert!(
+            (part.area / mapping.area[0] - 0.25).abs() < 1.0e-9,
+            "{part:?}"
+        );
     }
     // 区域网格西边界外的 set：两侧都取最近的那一列，东份面积为 0。
     let regional = LatLonGrid {
@@ -156,7 +164,10 @@ fn bilinear_neighbours_outside_the_domain_blocks_collapse_to_the_covered_side() 
         })
         .unwrap();
     for part in parts {
-        assert!(rows.contains(&part.ilat) && columns.contains(&part.ilon), "{part:?}");
+        assert!(
+            rows.contains(&part.ilat) && columns.contains(&part.ilon),
+            "{part:?}"
+        );
     }
     assert_eq!(parts[0].area, mapping.area[0]);
 }

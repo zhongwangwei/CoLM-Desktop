@@ -65,7 +65,9 @@ impl HistorySelection {
                 .position(|switch| switch.name.eq_ignore_ascii_case(member))
             else {
                 // 上游 `read(nml=nl_colm_history)` 遇到未声明的成员就报错停机。
-                bail!("DEF_hist_vars has no member {member:?} (the history namelist would not read)");
+                bail!(
+                    "DEF_hist_vars has no member {member:?} (the history namelist would not read)"
+                );
             };
             on[k] = *value;
         }

@@ -495,7 +495,10 @@ fn gen_histmap() -> Result<()> {
     for var in &vars {
         if let Some(switch) = &var.switch {
             if !switches.iter().any(|s| s.name.eq_ignore_ascii_case(switch)) {
-                anyhow::bail!("f_{} is gated by undeclared DEF_hist_vars%{switch}", var.name);
+                anyhow::bail!(
+                    "f_{} is gated by undeclared DEF_hist_vars%{switch}",
+                    var.name
+                );
             }
         }
     }

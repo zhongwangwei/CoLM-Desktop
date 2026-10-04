@@ -15,10 +15,10 @@
     clippy::int_plus_one
 )]
 
+pub mod bgc_link;
+pub mod column;
 pub mod config;
 mod config_generated;
-pub mod physics;
-pub mod column;
-pub mod bgc_link;
 pub mod driver;
 pub mod giems;
+pub mod physics;

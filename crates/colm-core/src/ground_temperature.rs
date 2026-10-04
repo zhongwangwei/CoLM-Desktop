@@ -602,7 +602,10 @@ fn validate(input: GroundTemperatureInput<'_>) -> Result<usize> {
     );
     ensure!(
         input.layer_thickness_m.iter().all(|value| *value > 0.0)
-            && input.liquid_water_kg_m2.iter().all(|value| *value >= -crate::SOIL_WATER_ROUNDOFF_KG_M2)
+            && input
+                .liquid_water_kg_m2
+                .iter()
+                .all(|value| *value >= -crate::SOIL_WATER_ROUNDOFF_KG_M2)
             && input.ice_water_kg_m2.iter().all(|value| *value >= 0.0),
         "ground-temperature thicknesses and water masses are invalid"
     );

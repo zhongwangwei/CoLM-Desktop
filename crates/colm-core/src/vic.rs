@@ -538,7 +538,10 @@ fn validate(input: VicRunoffInput<'_>) -> Result<()> {
                 .all(|value| *value >= 0.0)
             && input.clapp_hornberger_b.iter().all(|value| *value > 0.0)
             && input.ice_water_kg_m2.iter().all(|value| *value >= 0.0)
-            && input.liquid_water_kg_m2.iter().all(|value| *value >= -crate::SOIL_WATER_ROUNDOFF_KG_M2),
+            && input
+                .liquid_water_kg_m2
+                .iter()
+                .all(|value| *value >= -crate::SOIL_WATER_ROUNDOFF_KG_M2),
         "VIC runoff layer inputs are invalid"
     );
     ensure!(

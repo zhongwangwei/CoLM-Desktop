@@ -1108,7 +1108,10 @@ pub fn read_giems(
     let mut pixels = Vec::with_capacity(coordinates.len());
     for &(lonr, latr) in coordinates {
         ensure!(
-            latr.is_finite() && lonr.is_finite() && latr.abs() <= 0.5 * PI && lonr.abs() <= 2.0 * PI,
+            latr.is_finite()
+                && lonr.is_finite()
+                && latr.abs() <= 0.5 * PI
+                && lonr.abs() <= 2.0 * PI,
             "at least one CoLM patch has invalid coordinates or no matching GIEMS cell."
         );
         let lat_deg = latr * 180.0 / PI;
@@ -1150,7 +1153,10 @@ pub fn read_giems(
             series.push(slab[pixel]);
         }
     }
-    samples.iter().map(|s| GiemsPatch::from_samples(s)).collect()
+    samples
+        .iter()
+        .map(|s| GiemsPatch::from_samples(s))
+        .collect()
 }
 
 /// `validate_giems_time_axis`：时间轴必须是 1992-01-01 起的逐月月初日数（公历）。
@@ -1170,7 +1176,11 @@ fn validate_giems_time_axis(file: &netcdf::File, ntime: usize) -> Result<()> {
     let units = text("units")
         .context("GIEMS time coordinate must define its day-based 1992-01-01 origin.")?;
     ensure!(
-        units.trim_start().to_ascii_lowercase().trim_end().starts_with("days since 1992-01-01"),
+        units
+            .trim_start()
+            .to_ascii_lowercase()
+            .trim_end()
+            .starts_with("days since 1992-01-01"),
         "GIEMS time units must be days since 1992-01-01: {units}"
     );
     let calendar = text("calendar").unwrap_or_default();

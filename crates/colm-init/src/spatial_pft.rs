@@ -184,16 +184,17 @@ pub fn write_spatial_pft_constant_restart(
         config.land_cover_year,
         class.len(),
     )?;
-    let crop_fraction = (config.crop || optional_bool_or(&document, "DEF_USE_CROP", false)?).then(|| {
-        read_f64(
-            config.landdata,
-            "pctpft",
-            "pct_crops",
-            "pct_crops",
-            config.land_cover_year,
-            config.block_label,
-        )
-    });
+    let crop_fraction =
+        (config.crop || optional_bool_or(&document, "DEF_USE_CROP", false)?).then(|| {
+            read_f64(
+                config.landdata,
+                "pctpft",
+                "pct_crops",
+                "pct_crops",
+                config.land_cover_year,
+                config.block_label,
+            )
+        });
     let crop_fraction = crop_fraction.transpose()?;
     if let Some(crop_fraction) = &crop_fraction {
         let patches = read_i32(
@@ -382,8 +383,7 @@ pub fn write_spatial_pft_cold_time_restarts(
     };
     let observations = SpatialObservedInitializationPaths::from_document(&document)?;
     let use_bgc = optional_bool_or(&document, "DEF_USE_BGC", false)?;
-    let use_crop =
-        config.static_config.crop || optional_bool_or(&document, "DEF_USE_CROP", false)?;
+    let use_crop = config.static_config.crop || optional_bool_or(&document, "DEF_USE_CROP", false)?;
     ensure!(
         !use_crop || use_bgc,
         "spatial CROP cold starts require DEF_USE_BGC = .true."
