@@ -1408,6 +1408,13 @@ fn validate_runtime_contract(
         if usgs || bgc {
             return Err("LULCC 当前不支持 USGS 或 BGC".into());
         }
+        // `MOD_Namelist`：区域单元流域汇流与 LULCC 同开时上游 `CoLM_stop`。
+        if logical(doc, "DEF_UnitCatchment_regional") {
+            return Err(
+                "区域单元流域汇流（DEF_UnitCatchment_regional）不能与 LULCC 同开，请关闭其一"
+                    .into(),
+            );
+        }
     }
 
     active_path(

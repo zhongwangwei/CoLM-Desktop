@@ -29613,3 +29613,20 @@ main 上一次绿是 9 月 26 日；这次快进带上 188 个从没跑过 CI �
 6. **macOS**：CI 的 clippy 1.99 新报 `needless_late_init`（`spatial/forcing.rs::lower_record_for`），本机 1.97 报不出；改成 `let (time_index, month) = match ...`。
 7. **ubuntu**：`lmder` 土壤拟合与 macOS gfortran 位型比对。LM 迭代每步都用 `exp/pow`，libm 末位差让 781 组里 495 组的迭代路径分叉（参数最大差约 0.3%），没有合理容差；只在 macOS 上逐位比对，其它平台跳过并打印原因。
 8. **Windows（真缺陷，两侧都修）**：`DEF_TRACER_PARAM_FILES` 里的 Windows 路径 `C:\...` 被 `key:path` 解析当成键 `C`，参数文件没读到（`tracer_param_file_for_index` 与 Rust `param_file_for_index` 同样）。改为：第 2 位是冒号、前面是字母、后面是 `\` 时整项按位置当路径；`X:/...` 仍按映射解释（单字母示踪物名可以这样写，已有测试）。新加 Windows 路径的单元测试；default 内核编译通过。
+
+## 第 567 轮：空间算例默认打开区域单元流域汇流
+
+**瓶颈实测**（本机，单进程）：单点 `c1`（2 个月逐时）Fortran 3.6 s、Rust 1.7 s；空间 `g1`（2°×2°、175 个 patch、1 个月）Fortran 529 s、Rust 516 s。`sample` 采 Rust 的 `g1`：几乎全在 `river::route_system` 与 rayon 空闲线程的等待里，陆面物理只有几十个采样——`g1` 没开 `DEF_UnitCatchment_regional`，每步对**全球** 15′ 河网（252,383 个单元流域）汇流，而一条大河是一个系统、只能一个线程算。
+
+**区域汇流**（上游 `MOD_UnitCatchmentRegional`，vendor 与 Rust 早已都有，只是新建算例默认关）：
+
+| 算例 | 河网 | Fortran colm | Rust colm | 逐位 |
+|---|---|---|---|---|
+| `g1` → `g1r`（经纬度） | 252,383 → 5,197 | 529 → 89 s | 516 → 85 s | 历史 2、重启 7 全同（三段全链路） |
+| `u1r`（非结构） | 区域子网 | 8 s | 5 s | 历史、重启 7 全同（三段全链路） |
+
+前处理顺带：mksrfdata Fortran 88 s、Rust 12 s（`g1r`）。
+
+**打开之后的下一个瓶颈**：Rust 主线程一半以上在 `GriddedForcing::read_record` 里解压 JRA3Q——文件按 `(1, 480, 960)` 分块（每小时一整张全球场一块，deflate + shuffle），2°×2° 的区域每条记录要把 8 个变量的全球场各解压一遍。Fortran 同样的读法。后续做强迫场的区域裁剪 + 重新分块。
+
+**GUI**：`wizardFields` 对空间算例写 `DEF_UnitCatchment_regional`：范围不是全球、网格不是流域网格（流域网格内核没有 GridRiverLakeFlow）、且没开 LULCC 时为 `.true.`，否则 `.false.`；站点与流域网格不写。参数页仍可改。`validate_runtime_contract` 新加一条：LULCC 与区域汇流同开时提前报错（上游 `MOD_Namelist` 会 `CoLM_stop`）。测试：`gui/tests/domain.mjs` 五种情形（区域、LULCC、全球、流域网格、站点）、`config_tests.rs` 的冲突用例；GUI 后端 162、前端 11 个、`check-gui`、两个 workspace 的 clippy/fmt 通过。

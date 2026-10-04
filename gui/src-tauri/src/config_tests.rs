@@ -471,6 +471,11 @@ fn every_model_fatal_runtime_combination_is_rejected_before_write() {
             "USGS 或 BGC",
         ),
         (
+            "lulcc-regional-routing",
+            "&nl_colm\n DEF_USE_LULCC=.true.\n DEF_UnitCatchment_regional=.true.\n/\n",
+            "DEF_UnitCatchment_regional",
+        ),
+        (
             "urban-bgc-site",
             "&nl_colm\n SITE_fsitedata='site.nc'\n DEF_USE_LCT=.true.\n DEF_URBAN_RUN=.true.\n DEF_URBAN_type_scheme=2\n DEF_USE_BGC=.true.\n/\n",
             "DEF_USE_BGC 需要 DEF_USE_PFT 或 DEF_USE_PC",

@@ -265,6 +265,24 @@ for (const [path, value] of Object.entries({
 })) {
   if (fields[path] !== value) throw new Error(`${path}: expected ${value}, got ${fields[path]}`);
 }
+// 区域单元流域汇流：空间算例默认打开；全球、LULCC、流域网格、站点保持不写或关闭。
+{
+  const regional = (wizard) => Object.fromEntries(wizardFields(wizard).map(x => [x.path, x.value]))
+    .DEF_UnitCatchment_regional;
+  const region = { kind: 'region', west: 113, east: 115, south: 23, north: 25 };
+  const spatial = { ...state.wizard, grid: 'latlon', spatial: { domain: region, grid: { kind: 'latlon' } } };
+  const cases = [
+    ['region', spatial, '.true.'],
+    ['lulcc', { ...spatial, physics: { ...spatial.physics, lulcc: true } }, '.false.'],
+    ['global', { ...spatial, spatial: { ...spatial.spatial, domain: { kind: 'global' } } }, '.false.'],
+    ['catchment', { ...spatial, grid: 'catchment' }, undefined],
+    ['site', { ...state.wizard, spatial: null }, undefined],
+  ];
+  for (const [name, wizard, want] of cases) {
+    const got = regional(wizard);
+    if (got !== want) throw new Error(`regional routing for ${name}: expected ${want}, got ${got}`);
+  }
+}
 const usgs = Object.fromEntries(wizardFields({ ...state.wizard, subgrid: 'USGS' }).map(x => [x.path, x.value]));
 if (usgs.DEF_USE_LCT !== '.true.' || usgs.DEF_USE_PFT !== '.false.' || usgs.DEF_USE_PC !== '.false.') {
   throw new Error(`wrong USGS structure fields: ${JSON.stringify(usgs)}`);
