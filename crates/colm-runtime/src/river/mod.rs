@@ -1155,7 +1155,33 @@ fn route_system<'a>(
     // 堤防 + 分汊：第 2 层及以上（堤内一侧）的净分汊出流，以及堤内蓄量被扣穿时的报错。
     let mut bif_lev_sum = Vec::new();
     let mut protected_failed = false;
+    // 普通情形（无已建成水库、堤防、分汊、泥沙、示踪物记录带）且单元数多：子步内各单元按单元并行。
+    let plain = n >= PARALLEL_CELLS
+        && built.iter().all(Option::is_none)
+        && levee.is_none()
+        && bif.is_none()
+        && sed.is_none()
+        && tape.is_none();
     while dt_res > 0.0 {
+        if plain {
+            dt_res -= plain_substep(
+                net,
+                system,
+                dt_res,
+                momentum_limit,
+                PlainCells {
+                    wdsrf: &mut wdsrf,
+                    veloc: &mut veloc,
+                    volwater: &mut volwater_ucat,
+                    momen: &mut momen,
+                    faces: &mut faces,
+                    sums: &mut sums,
+                    hist: &mut hist,
+                    flood: &mut flood_uc,
+                },
+            );
+            continue;
+        }
         let mut dt_all = dt_res.min(60.0);
         // 所有河系的剩余时间相同（每个子步都同步成同一 `dt`），起始子步长也相同。
         let mut dt_sys = bif.is_some().then(|| vec![dt_all; net.river_systems]);
@@ -1726,6 +1752,172 @@ struct Face {
     sum_hflux: f64,
     sum_mflux: f64,
     sum_zgrad: f64,
+}
+
+/// 单元数不少于这个数的河系在子步内按单元并行（再小线程开销就超过收益；结果与串行逐位相同）。
+const PARALLEL_CELLS: usize = 4096;
+
+/// [`plain_substep`] 改写的逐单元数组（与 `route_system` 里同名的量一一对应）。
+struct PlainCells<'a> {
+    wdsrf: &'a mut [f64],
+    veloc: &'a mut [f64],
+    volwater: &'a mut [f64],
+    momen: &'a mut [f64],
+    faces: &'a mut [Face],
+    sums: &'a mut [(f64, f64, f64)],
+    hist: &'a mut [[f64; 10]],
+    flood: &'a mut [[f64; 2]],
+}
+
+/// `route_system` 一个子步的普通情形（无已建成水库、堤防、分汊、泥沙、示踪物记录带），按单元并行。
+///
+/// 每一段都与串行代码里同一情形的表达式逐式相同：出口通量只读本单元与下游的旧状态；上游求和按
+/// `system.upstream[k]` 的原次序；子步长先逐单元算出限制，再按单元次序串行取最小（取最小与次序
+/// 无关）；蓄量、水深、动量与历史累加都只写本单元。所以结果与串行逐位相同。返回本子步长。
+// `min(20).max(-20)` 照抄串行代码：`clamp` 遇 NaN 的行为不同。
+#[allow(clippy::manual_clamp)]
+fn plain_substep(
+    net: &RiverNetwork,
+    system: &network::RiverSystem,
+    dt_res: f64,
+    momentum_limit: bool,
+    cells: PlainCells<'_>,
+) -> f64 {
+    let PlainCells {
+        wdsrf,
+        veloc,
+        volwater,
+        momen,
+        faces,
+        sums,
+        hist,
+        flood,
+    } = cells;
+    let ids = &system.cells;
+    let new_faces: Vec<Face> = (0..ids.len())
+        .into_par_iter()
+        .map(|k| face_of(net, system, wdsrf, veloc, k, faces[k].zgrad_dn))
+        .collect();
+    faces.copy_from_slice(&new_faces);
+    // `push_ups2ucat`（sum，权重 1）：跳过 0 值，首项直接赋值。
+    sums.par_iter_mut().enumerate().for_each(|(k, sum)| {
+        let push = |value: fn(&Face) -> f64| {
+            let mut total = 0.0;
+            for &u in &system.upstream[k] {
+                let value = value(&faces[u]);
+                if value == 0.0 {
+                    continue;
+                }
+                total = if total == 0.0 {
+                    value * 1.0
+                } else {
+                    total + value * 1.0
+                };
+            }
+            total
+        };
+        let face = &faces[k];
+        *sum = (
+            face.sum_hflux - push(|face| face.hflux),
+            face.sum_mflux - push(|face| face.mflux),
+            face.sum_zgrad - push(|face| face.zgrad_dn),
+        );
+    });
+    // 子步长：CFL 与蓄量两道限制，逐单元流域取最小。
+    let dt_start = dt_res.min(60.0);
+    let limits: Vec<f64> = (0..ids.len())
+        .into_par_iter()
+        .map(|k| {
+            let i = ids[k];
+            let mut dt_this = dt_start;
+            let (w, v) = (wdsrf[k], veloc[k]);
+            if v != 0.0 || w > 0.0 {
+                let wave = v.abs() + (w * GRAV).sqrt();
+                dt_this = dt_this.min(net.rivlen[i] / wave * 0.8);
+            }
+            if sums[k].0 > 0.0 {
+                dt_this = dt_this.min(net.curves[i].volume(w) / sums[k].0);
+            }
+            if momentum_limit {
+                let gradient = sums[k].1 - sums[k].2;
+                if v.abs() > 0.1 && v * gradient > 0.0 {
+                    dt_this = dt_this.min(((momen[k] * net.rivare[i]) / gradient).abs());
+                }
+            }
+            dt_this
+        })
+        .collect();
+    let mut dt = dt_start;
+    for dt_this in limits {
+        dt = dt_this.min(dt);
+    }
+    // 蓄量、水深与动量。
+    wdsrf
+        .par_iter_mut()
+        .zip(volwater.par_iter_mut())
+        .zip(momen.par_iter_mut())
+        .zip(veloc.par_iter_mut())
+        .zip(faces.par_iter_mut())
+        .enumerate()
+        .for_each(|(k, ((((wdsrf, volwater_k), momen), veloc), face))| {
+            let i = ids[k];
+            let curve = &net.curves[i];
+            let (sum_h, sum_m, sum_z) = sums[k];
+            let start = curve.volume(*wdsrf);
+            let mut volume = (-sum_h).mul_add(dt, start);
+            volume = volume.max(0.0);
+            if system.next[k] == INLAND_DEPRESSION && volume > net.rivstomax[i] {
+                face.hflux = (volume - net.rivstomax[i]) / dt;
+                volume = net.rivstomax[i];
+            }
+            let w = curve.depth(volume);
+            *wdsrf = w;
+            *volwater_k = volume;
+            if w >= RIVERMIN {
+                let manning = net.rivman[i];
+                let friction = (manning * manning * GRAV / w.lpow(7.0 / 3.0)) * momen.abs();
+                let gradient = (sum_m - sum_z) / net.rivare[i];
+                *momen = (-gradient).mul_add(dt, *momen) / dt.mul_add(friction, 1.0);
+                *veloc = *momen / w;
+            } else {
+                *momen = 0.0;
+                *veloc = 0.0;
+            }
+            if system.next[k] == INLAND_DEPRESSION {
+                *momen = momen.min(0.0);
+                *veloc = veloc.min(0.0);
+            }
+            *veloc = veloc.min(20.0).max(-20.0);
+            if w >= RIVERMIN {
+                *momen = *veloc * w;
+            }
+        });
+    // history 累加：`a_x = FMA(x, dt, a_x)`，`acctime` 平铺相加。
+    hist.par_iter_mut()
+        .zip(flood.par_iter_mut())
+        .enumerate()
+        .for_each(|(k, (a, flood))| {
+            let i = ids[k];
+            let curve = &net.curves[i];
+            let w = wdsrf[k];
+            let volume = curve.volume(w);
+            let rivsto = volume.min(curve.rivstomax);
+            let floodarea = curve.floodarea(w);
+            let above_bank = (w - curve.rivhgt).max(0.0);
+            *flood = [floodarea, above_bank];
+            a[0] += dt;
+            a[1] = w.mul_add(dt, a[1]);
+            a[2] = veloc[k].mul_add(dt, a[2]);
+            // `a_discharge + hflux_fc*dt` 不融合：乘积与调试用的 `totaldis` 共用（`_7820`）。
+            a[3] += faces[k].hflux * dt;
+            a[4] = floodarea.mul_add(dt, a[4]);
+            a[5] = rivsto.mul_add(dt, a[5]);
+            a[6] = (volume - rivsto).mul_add(dt, a[6]);
+            a[7] = (w - curve.rivhgt).max(0.0).mul_add(dt, a[7]);
+            a[8] = volume.mul_add(dt, a[8]);
+            a[9] = (net.rivelv[i] + w).mul_add(dt, a[9]);
+        });
+    dt
 }
 
 /// 河系内第 `k` 个单元流域出口面本子步的通量（`bb 553-588`）。`stale_zgrad` 是洼地保留的旧

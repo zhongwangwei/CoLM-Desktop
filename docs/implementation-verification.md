@@ -29616,13 +29616,13 @@ main 上一次绿是 9 月 26 日；这次快进带上 188 个从没跑过 CI �
 
 ## 第 567 轮：空间算例默认打开区域单元流域汇流
 
-**瓶颈实测**（本机，单进程）：单点 `c1`（2 个月逐时）Fortran 3.6 s、Rust 1.7 s；空间 `g1`（2°×2°、175 个 patch、1 个月）Fortran 529 s、Rust 516 s。`sample` 采 Rust 的 `g1`：几乎全在 `river::route_system` 与 rayon 空闲线程的等待里，陆面物理只有几十个采样——`g1` 没开 `DEF_UnitCatchment_regional`，每步对**全球** 15′ 河网（252,383 个单元流域）汇流，而一条大河是一个系统、只能一个线程算。
+**瓶颈实测**（本机，单进程）：空间 `g1`（2°×2°、175 个 patch、1 个月）Rust 516 s。**更正（第 570 轮）**：本轮原写的"`c1` Fortran 3.6 s、Rust 1.7 s"与"`g1` Fortran 529 s"无效——计时脚本在 zsh 下把 `$eng` 当成一个整词传，`--engine fortran --preprocessors fortran` 没有生效，所谓 Fortran 一侧实际跑的是 Rust。改用 bash 重跑的 `g1` 全链路（第 570 轮，机器上同时有回归在跑，只能看量级）：Fortran 主循环 4726 s、Rust 539 s。下表 `g1r`/`u1r` 两行本来就是 bash 跑的，有效。`sample` 采 Rust 的 `g1`：几乎全在 `river::route_system` 与 rayon 空闲线程的等待里，陆面物理只有几十个采样——`g1` 没开 `DEF_UnitCatchment_regional`，每步对**全球** 15′ 河网（252,383 个单元流域）汇流，而一条大河是一个系统、只能一个线程算。
 
 **区域汇流**（上游 `MOD_UnitCatchmentRegional`，vendor 与 Rust 早已都有，只是新建算例默认关）：
 
 | 算例 | 河网 | Fortran colm | Rust colm | 逐位 |
 |---|---|---|---|---|
-| `g1` → `g1r`（经纬度） | 252,383 → 5,197 | 529 → 89 s | 516 → 85 s | 历史 2、重启 7 全同（三段全链路） |
+| `g1` → `g1r`（经纬度） | 252,383 → 5,197 | 4726（负载下）→ 89 s | 516 → 85 s | 历史 2、重启 7 全同（三段全链路） |
 | `u1r`（非结构） | 区域子网 | 8 s | 5 s | 历史、重启 7 全同（三段全链路） |
 
 前处理顺带：mksrfdata Fortran 88 s、Rust 12 s（`g1r`）。
@@ -29641,3 +29641,55 @@ main 上一次绿是 9 月 26 日；这次快进带上 188 个从没跑过 CI �
 - **主程序里预读**（提交的做法）：新 `spatial/forcing_reader.rs` 的 `RecordReader`——两边各自缓存打开的文件句柄（上限 32 个）；主线程取到第 k 条后，后台线程接着读同一文件的第 k+1 条，主线程下次要时直接取（没读完就等），读过文件末尾的那次不留结果，同一变量过时的预读结果丢掉。后台做的是与主线程完全相同的 `get_values` 调用；netcdf crate 用一把全局锁（`netcdf-sys` 的 `hdf5_sys::LOCK`）串起所有调用，后台读与主线程写历史不会同时进库。
 
 实测：`g1r` 的 Rust 模拟阶段 85 → **35 s**，与 Fortran 逐位一致。回归（两侧重跑 mkinidata，`tmp/b568*.sh`）：`g1t`（示踪物强迫）、`g1bgc`、`g1ch4`、`g1urbm`、`g1pc`、`g3`、`g3cm`、`g3sd`（LULCC 分段 + 预热回卷，每段建/拆一个读取器）、`u1`、`g1crop` 全部逐位一致。单元测试 `forcing_reader_tests.rs`：顺序、回跳、跨文件读与直接读逐位相同，读到末尾之后的预读与不存在的变量都不会卡住。
+
+## 第 569 轮：非 fastPC 下无植被 PC 斑块（上游缺陷 #75）与 PFT/PC 的裸 patch 收尾覆盖
+
+`g1pcs`（`g1pc` + `DEF_FAST_PC=.false.`，全球 PC 走 `LeafTemperaturePC` 三层冠层）Rust 在 patch 115 拒绝运行：
+这个 PC 斑块所有 PFT 都 `fcover==0` 或 `lai+sai<=1e-6`，`LeafTemperaturePC` 在 `:545-547` 只把 `tl` 设成气温就 `RETURN`，
+`z0mpc/rst/assim/respc/fsenl/fevpl/etr/hprl/dheatl` 与可选的 `raw_trc_out` 都不赋值（intent(out) 按标准是未定义值）。
+gfortran 实际不碰这些数组，调用方拿到的恰好是 `THERMAL` 调用前放的值，所以 Fortran 结果没错，只是"碰巧如此"。
+
+1. **vendor**：`RETURN` 前显式赋上这些值（`z0mpc = (1-fsno)*zlnd + fsno*zsno`、`rst = 2e4`、其余 0、`raw_trc_out = 0`），
+   Fortran 结果逐位不变。记为 `docs/upstream-bugs.md` 第 75 条。
+2. **Rust**：`leaf_temperature_pc` 返回 `Option`，无植被时只落地 `tl = forc_t` 并返回 `None`；判断移到臭氧系数重置
+   （`:558-570`）之前，与 Fortran 一样不重置。`pft.rs::pc_unvegetated_record` 按调用方原值组装记录：patch 级湍流量取前置
+   `GroundFluxes`，`dlrad/ulrad` 取 `THERMAL` 入口的裸地值，`zol/rib/ustar/qstar/tstar` 与 `raw` 取入口的 0，
+   `z0m = sum(z0m_p*pftfrac)`，逐 PFT 输出取 PC 分支初值（`rstfacsun/sha = 1`、其余 0）。
+3. **顺带发现的遗漏**：第一次重跑重启文件在 patch 115 差 8 个量（Fortran `zol = 2.0`，Rust 0）。`MOD_Thermal.F90:1509-1519`
+   在 patch 的 `lai+sai <= 1e-6` 时把 `ustar/tstar/qstar/rib/zol/z0m/fm/fh/fq` 换成地面值，这一段在 LCT/PFT/PC 三支**之后**；
+   Rust 只在 LCT 无冠层支里做了。现在 `standard_lct_step.rs` 在三支之后统一覆盖（LCT 无冠层支幂等）。PFT 的裸 patch 以前没
+   暴露：裸 PFT 记录本来就取 `*_g`，聚合 `sum(x_g*pftfrac)` 在回归算例里与 `x_g` 逐位相同（`pftfrac` 和恰为 1 时 FMA 链不引入舍入）；
+   PC 无植被斑块的 `zol` 等是 0，才露出来。
+
+验证（`tmp/bin571`）：`g1pcs` 全链路的 Fortran 结果不动，Rust 主循环重跑 309 s（Fortran 3194 s），历史与 14 个重启全同。
+PFT/PC 回归（`tmp/b571.sh`，只重跑 Rust 主循环对照已有 Fortran 基线）：162 个里 147 个逐位相同；其余 15 个是比对方式不适用
+（`bz` 续跑链、`tc4c`、带预热回卷的 `bm4`——用改动前的 `bin570` 重跑差异相同）或基线早于第 564 轮（`g3pm`、`ozb`、`blx`、
+`mpc`、`rc4ow`、`ci6x`、`mpsc`），以及两侧都按设计拒绝的反例 `tiq`/`tip`。这些在 `tmp/b571x.sh` 里两侧重建后再比：`bm1`–`bm4`、`mps`、`mpsc`、`g3sp`、`g3pm`、`ozb`、`blx`、`mpc`、`rc4ow` 逐位相同；`bz` 链两侧都按"跨重启改历史频率"的一致性校验拒绝（链是第 557 轮故意这样构造的，校验是之后加的），`tc4c` 的基算例 `tc4` 后来缩成只跑 1 月、没有 `2010-182` 起步重启，`ci6x` 缺 mksrfdata 产物，三者是算例过期，不再维护。
+
+**一次没能复现的不一致**：`b571x` 里第一次两侧重跑 `bm4`（bin571）历史与重启从第 0 步起不同；之后 bin564/568/570/571、线程数 2/4/8、单独跑与按 `bm1`–`bm4` 顺序连跑、先 `rcmp` 再 `inipair`，共 11 次全部逐位相同，Rust 历史文件 md5 每次相同（Fortran 历史文件带写出时间，md5 本来就每次不同）。原因没查到；当时本机还有别的任务把 16 核占到负载 16–20。这条留着：若再遇到，先保存两侧输出再重跑。
+colm-core 500、colm-runtime 160 个单元测试通过。六个内核用改后的 vendor 重编，抽查 `bm4`（crop）、`c0`、`bd`（default）两侧重跑逐位相同。
+
+## 第 570 轮：共享内存并行——patch 推进与河网汇流按单元并行
+
+Rust 版的并行是 rayon（共享内存，相当于 OpenMP；线程数用 `RAYON_NUM_THREADS`，默认取全部逻辑核），不做 MPI。两处：
+
+1. **patch 推进**（`spatial/runtime.rs`）：一步之内各 patch 互不依赖——只读本步强迫与共享的只读数据（河网漫滩深度、
+   示踪物强迫、优化器系数），只写自己的状态——所以 `templates/next_states/steps` 用 `par_iter` 一起推进，`collect` 保持
+   patch 次序；之后的汇流、漫滩交换、历史累加仍按原次序串行。每个 patch 的计算与串行时是同一段代码，结果逐位不变。
+   示踪物收支追踪器只记计数与最坏值，最坏值恰好相等时报告里写哪个 patch 会随调度变，只影响诊断文字。
+2. **汇流按单元并行**（`river/mod.rs::plain_substep`）：`route_system` 是显式格式，每个子步依次是出口通量（只读本单元与
+   下游的旧状态）→ 上游求和（按 `system.upstream[k]` 原次序）→ 子步长（逐单元算 CFL 与蓄量限制，再按单元次序串行取最小）
+   → 蓄量/水深/动量更新与历史累加（只写本单元），每一段都可以按单元并行而不改变任何一次浮点运算的次序。只在"普通情形"走
+   并行：河系单元数 ≥ 4096，且没有已建成水库、堤防、分汊、泥沙、示踪物记录带；其余照旧串行（这些分支有跨单元的写或
+   依赖次序的累加）。以前说"一条大河是一个系统、只能一个线程算"不对：系统之间是并行的，系统内部同样可以按单元并行。
+
+验证：
+- `g1`（全球 15′ 河网 252,383 个单元流域、普通情形，`tmp/bin570`，bash 全链路）：历史 2、重启 7 与 Fortran 逐位相同。
+- `g1r`（区域汇流，patch 并行）逐位相同；第 568 轮的十个空间算例、本轮 PFT/PC 回归里的全部空间算例（`g1pc`、`g1pcs`、
+  `g1bgc*`、`g1ch4*`、`g1crop*`、`g3*` 等）都在 patch 并行下逐位相同。走串行分支的 `g1all`（水库 + 堤防 + 分汊）、`g1sed`、
+  `g1t` 按判据不进 `plain_substep`，代码路径与以前相同（本轮没有重跑）。
+- colm-runtime 160 个单元测试通过。
+
+**计时待补**：本轮所有计时都是在本机另有任务把 16 核占到负载 16–20 时测的（`g1` 全链路 Fortran 主循环 4726 s、Rust 539 s，
+只能看量级）。线程数扩展（`gbig`，110–120°E、20–30°N、10 天，`RAYON_NUM_THREADS` = 1/2/4/8/16）与 `c1`/`g1` 的干净对照等机器
+空闲时补测。
