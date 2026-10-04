@@ -554,6 +554,12 @@ CONTAINS
          entry = adjustl(trim(DEF_TRACER_PARAM_FILES(start_pos:end_pos)))
          IF (len_trim(entry) > 0) THEN
             colon_pos = index(entry, ':')
+            ! The drive letter of a native Windows path (C:\) belongs to a positional path, not a
+            ! key:path mapping. X:/... stays a mapping: a one-letter tracer name may be written so.
+            IF (colon_pos == 2 .and. len_trim(entry) >= 3) THEN
+               IF (verify(entry(1:1), 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz') == 0 .and. &
+                   entry(3:3) == '\') colon_pos = 0
+            ENDIF
             IF (colon_pos > 0) THEN
                key = adjustl(trim(entry(:colon_pos-1)))
                value = adjustl(trim(entry(colon_pos+1:)))

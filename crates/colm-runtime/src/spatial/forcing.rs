@@ -463,9 +463,7 @@ impl GriddedForcingConfig {
     ) -> Result<(i32, i32, usize, Stamp)> {
         let (mut year, day, mut sec) = (now.year, now.day, now.sec);
         let mut lower = Stamp { year, day, sec };
-        let time_index;
-        let month;
-        match self.groupby {
+        let (time_index, month) = match self.groupby {
             GroupBy::Month => {
                 let months = cumulative_days(year);
                 let (mut m, mut mday) = julian_to_month_day(year, day);
@@ -503,8 +501,7 @@ impl GriddedForcingConfig {
                     mday = 28;
                 }
                 sec += 86_400 * (mday - 1);
-                time_index = floor_div(sec - v.offset, v.dtime) + 1;
-                month = m;
+                (floor_div(sec - v.offset, v.dtime) + 1, m)
             }
             GroupBy::Year => {
                 let mut day = day;
@@ -537,10 +534,9 @@ impl GriddedForcingConfig {
                     day -= 1;
                 }
                 sec += 86_400 * (day - 1);
-                time_index = floor_div(sec - v.offset, v.dtime) + 1;
-                month = 1;
+                (floor_div(sec - v.offset, v.dtime) + 1, 1)
             }
-        }
+        };
         ensure!(time_index > 0, "got the wrong time record of forcing");
         Ok((year, month, time_index as usize, lower))
     }

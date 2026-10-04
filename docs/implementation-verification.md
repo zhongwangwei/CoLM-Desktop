@@ -29607,3 +29607,9 @@ main 上一次绿是 9 月 26 日；这次快进带上 188 个从没跑过 CI �
 5. **CI 后两步之前没跑到的**：workspace clippy 的 4 个 `excessive_precision`（测试字面量换成位型相同的最短写法）；`cargo fmt --all --check` 欠了 191 处（两个 workspace 都跑了 `cargo fmt --all`；甲烷配置生成器写完后接 `rustfmt`，免得重生成又弄脏）；`parameter-audit` 的产物随 namelist 变化重新生成。
 
 本地按 `ci.yml` 的命令清单逐条跑（`/tmp` 脚本，31 步）全部通过，包括 workspace clippy `-D warnings`、两个 workspace 的 fmt 检查、GUI 后端与 11 个前端测试。Linux/Windows 的 libm 差异本地无法复现，由 CI 验证。
+
+第二轮 CI（`4ed47ccf`）：`windows-kernel` 首次整条通过（含 Windows 上编内核与探针算例），三个平台的 `gui`、`kernel` 通过；`rust` 三个平台各一处：
+
+6. **macOS**：CI 的 clippy 1.99 新报 `needless_late_init`（`spatial/forcing.rs::lower_record_for`），本机 1.97 报不出；改成 `let (time_index, month) = match ...`。
+7. **ubuntu**：`lmder` 土壤拟合与 macOS gfortran 位型比对。LM 迭代每步都用 `exp/pow`，libm 末位差让 781 组里 495 组的迭代路径分叉（参数最大差约 0.3%），没有合理容差；只在 macOS 上逐位比对，其它平台跳过并打印原因。
+8. **Windows（真缺陷，两侧都修）**：`DEF_TRACER_PARAM_FILES` 里的 Windows 路径 `C:\...` 被 `key:path` 解析当成键 `C`，参数文件没读到（`tracer_param_file_for_index` 与 Rust `param_file_for_index` 同样）。改为：第 2 位是冒号、前面是字母、后面是 `\` 时整项按位置当路径；`X:/...` 仍按映射解释（单字母示踪物名可以这样写，已有测试）。新加 Windows 路径的单元测试；default 内核编译通过。

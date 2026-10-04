@@ -546,7 +546,11 @@ pub fn param_file_for_index(
         if entry.is_empty() {
             continue;
         }
-        if let Some((key, value)) = entry.split_once(':') {
+        // Windows 原生路径的盘符（`C:\`）属于按位置的路径，不是 `key:path` 映射（vendor 同步）。
+        // `X:/...` 仍按映射解释：单字母的示踪物名可以这样写（见测试）。
+        let drive_letter =
+            matches!(entry.as_bytes(), [letter, b':', b'\\', ..] if letter.is_ascii_alphabetic());
+        if let Some((key, value)) = entry.split_once(':').filter(|_| !drive_letter) {
             let (key, value) = (key.trim(), value.trim());
             if key.is_empty() || value.is_empty() {
                 bail!("MOD_Tracer_Defs: empty tracer parameter file mapping entry: {entry}");

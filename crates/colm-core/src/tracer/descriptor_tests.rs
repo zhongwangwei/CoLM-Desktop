@@ -97,6 +97,11 @@ fn keyed_and_positional_parameter_files_resolve_like_upstream() {
         Some("/y.nml".to_owned())
     );
     assert_eq!(param_file_for_index("null", &tracers, 0).unwrap(), None);
+    // Windows 原生路径的盘符不是映射键（`C` 不是示踪物名也照样按位置读）。
+    assert_eq!(
+        param_file_for_index(r"C:\cases\a.nml, C:\cases\b.nml", &tracers, 1).unwrap(),
+        Some(r"C:\cases\b.nml".to_owned())
+    );
 }
 
 #[test]
