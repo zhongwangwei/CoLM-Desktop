@@ -73,7 +73,7 @@ const emptyPicked = () => ({
   grid: null,
   spatial: {
     shapefile: '', west: '', east: '', south: '', north: '',
-    dlon: '0.5', dlat: '0.5', meshFile: '', catchmentFile: '', nonOceanMask: '',
+    dlon: '0.5', dlat: '0.5', meshFile: '', catchmentFile: '',
   },
   subgrid: null,
   soil: 'vg',
@@ -99,7 +99,7 @@ function render() {
   const copy = {
     domain: ['这次要跑什么？', '先选择模拟范围，再为流域、区域或全球选择计算网格。'],
     grid: ['计算网格怎么组织？', '三种空间范围都可选择经纬度、非结构或流域网格。'],
-    spatial: ['空间输入怎么准备？', '范围只决定 mask；网格类型决定 CoLM 的运行模式与输入合同。'],
+    spatial: ['空间输入怎么准备？', '网格类型决定要准备哪些空间文件；RawData、Runtime 与强迫场在下一步选。'],
     subgrid: ['次网格怎么分？', '次网格方案决定 BGC 是否可用，也决定站点数据要求。'],
     soil: ['土壤水力用哪套？', '选择本次模拟使用的土壤水力方案。'],
     physics: ['还要打开哪些过程？', '可多选；被上游约束挡住的项会说明回哪一页修改。'],
@@ -150,8 +150,20 @@ function renderSpatial() {
     panel.appendChild(pathField('已有非结构 mesh NetCDF（必需）', 'meshFile', 'nc,nc4'));
     const note = document.createElement('p');
     note.className = 'muted mini';
-    note.textContent = '读取已有 mesh 的 elmindex 与空间范围；无需设置边界、分辨率或非海洋 mask。';
-    panel.appendChild(note);
+    note.textContent = '读取已有 mesh 的 elmindex 与空间范围；无需设置边界或分辨率。';
+    panel.append(note, nextStepNote());
+    $('gatecards').appendChild(panel);
+    return;
+  }
+  if (picked.grid === 'catchment') {
+    // 流域网格文件自带单元、HRU、河网与空间范围：不需要边界或 Shapefile。
+    title.textContent = '流域网格数据';
+    panel.append(title, spatialStudyNote());
+    panel.appendChild(pathField('流域网格 NetCDF（必需）', 'catchmentFile', 'nc,nc4'));
+    const note = document.createElement('p');
+    note.className = 'muted mini';
+    note.textContent = '包含集水区单元、HRU 与河网的 NetCDF（DEF_CatchmentMesh_data）；模拟范围直接取自这个文件，无需另选流域边界。';
+    panel.append(note, nextStepNote());
     $('gatecards').appendChild(panel);
     return;
   }
@@ -174,38 +186,34 @@ function renderSpatial() {
     const note = document.createElement('p');
     note.className = 'muted mini';
     note.textContent = picked.grid === 'latlon'
-      ? '全球经纬度网格自动使用边界：西=-180°，东=180°，南=-90°，北=90°。海洋由下方非海洋 mask 剔除。'
-      : '使用全球范围，不再填写边界。海洋由下方非海洋 mask 剔除。';
+      ? '全球经纬度网格自动使用边界：西=-180°，东=180°，南=-90°，北=90°。'
+      : '使用全球范围，不再填写边界。';
     panel.appendChild(note);
   }
 
   const gridTitle = document.createElement('h3');
-  gridTitle.textContent = picked.grid === 'catchment' ? '流域网格数据' : '经纬度网格设置';
+  gridTitle.textContent = '经纬度网格设置';
   panel.appendChild(gridTitle);
-  if (picked.grid === 'catchment') {
-    panel.appendChild(pathField('Catchment NetCDF', 'catchmentFile', 'nc,nc4'));
-  } else {
+  {
     const row = document.createElement('div');
     row.className = 'row';
     row.append(numberField('经度分辨率（度）', 'dlon', 0, 360), numberField('纬度分辨率（度）', 'dlat', 0, 180));
     panel.appendChild(row);
     const note = document.createElement('p');
     note.className = 'muted mini';
-    note.textContent = '按经纬度边界和分辨率生成 landmask，并以 GRIDBASED 模式运行。';
+    note.textContent = '按经纬度边界和分辨率生成网格，以 GRIDBASED 模式运行；海洋按 RawData 里的地表覆盖自动剔除。';
     panel.appendChild(note);
-    const globalLatLon = picked.domain === 'global';
-    panel.appendChild(pathField(
-      globalLatLon ? '全球非海洋 mask NetCDF 路径（必需）' : '非海洋 mask NetCDF 路径（必需）',
-      'nonOceanMask', 'nc,nc4',
-    ));
-    if (globalLatLon) {
-      const maskNote = document.createElement('p');
-      maskNote.className = 'muted mini';
-      maskNote.textContent = '请选择覆盖全球、且维度与当前经纬度分辨率一致的非海洋 mask NetCDF 路径。';
-      panel.appendChild(maskNote);
-    }
   }
+  panel.appendChild(nextStepNote());
   $('gatecards').appendChild(panel);
+}
+
+/** 空间算例的另外三项输入在「基本设定」页选，这里先说清楚，免得用户在本页找。 */
+function nextStepNote() {
+  const note = document.createElement('p');
+  note.className = 'muted mini';
+  note.textContent = '下一步「基本设定」里还要选择：RawData 目录、Runtime 目录，以及强迫场（选标准数据集并指定本机数据目录，或使用已有 forcing namelist）。';
+  return note;
 }
 
 
@@ -272,6 +280,7 @@ function updateSpatial(key, value) {
 function spatialIssue() {
   const s = picked.spatial;
   if (picked.grid === 'unstructured') return s.meshFile ? null : '请选择已有非结构 mesh NetCDF';
+  if (picked.grid === 'catchment') return s.catchmentFile ? null : '请选择流域网格 NetCDF';
   if (picked.domain === 'watershed' && !s.shapefile) return '请选择流域 Shapefile';
   if (picked.domain === 'region') {
     if ([s.west, s.east, s.south, s.north].some(value => value === '')) return '请填写完整的区域边界';
@@ -281,7 +290,6 @@ function spatialIssue() {
       return '区域边界必须位于 WGS84 范围，并满足西 < 东、南 < 北';
     }
   }
-  if (picked.grid === 'catchment') return s.catchmentFile ? null : '请选择 Catchment NetCDF';
   const dlon = Number(s.dlon);
   const dlat = Number(s.dlat);
   if (!(dlon > 0) || !(dlat > 0)) return '经纬度分辨率必须大于 0';
@@ -292,7 +300,6 @@ function spatialIssue() {
   const [nlon, nlat] = [Math.round(360 / dlon), Math.round(180 / dlat)];
   if (!Number.isSafeInteger(nlon) || !Number.isSafeInteger(nlat)
       || !Number.isSafeInteger(nlon * nlat)) return '格点数量超过安全整数范围';
-  if (!s.nonOceanMask) return '请选择非海洋 mask，避免把海洋格点激活为陆面单元';
   return null;
 }
 
@@ -508,7 +515,7 @@ function finish() {
   state.domain = picked.domain;
   state.grid = picked.grid;
   state.spatial = picked.domain === 'site' ? null : {
-    domain: picked.grid === 'unstructured'
+    domain: picked.grid === 'unstructured' || picked.grid === 'catchment'
       ? { kind: picked.domain }
       : picked.domain === 'watershed'
       ? { kind: picked.domain, shapefile: picked.spatial.shapefile }
@@ -527,11 +534,11 @@ function finish() {
       ? { kind: picked.grid, input: picked.spatial.catchmentFile }
       : {
         kind: picked.grid,
-        meshFile: picked.spatial.meshFile || null,
+        // 经纬度网格总是按分辨率新生成网格；之前在非结构网格页填过的 mesh 不能带过来。
+        meshFile: null,
         dlon: Number(picked.spatial.dlon), dlat: Number(picked.spatial.dlat),
         nlon: Math.round(360 / Number(picked.spatial.dlon)),
         nlat: Math.round(180 / Number(picked.spatial.dlat)),
-        nonOceanMask: picked.spatial.nonOceanMask || null,
       },
   };
   state.subgrid = picked.subgrid;

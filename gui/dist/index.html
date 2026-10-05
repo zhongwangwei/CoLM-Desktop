@@ -315,14 +315,19 @@
         <div id="spatial-case-setup" hidden>
           <div class="card">
             <h3>空间算例</h3>
-            <div class="ch" id="spatial-summary">向导中的范围、网格与 mask 会在这里生成网格并预检。</div>
+            <div class="ch" id="spatial-summary">向导中的范围与网格会在这里生成并预检。</div>
             <p class="warn mini" id="spatial-early-warning">空间算例暂不支持参数调优和不确定性分析。</p>
-            <div class="field"><label for="spatial-rawdata">rawdata 目录</label>
-              <div class="browse"><input class="input" id="spatial-rawdata"><button class="btn-ghost pick" data-for="spatial-rawdata">选择…</button></div></div>
-            <div class="field"><label for="spatial-runtime">runtime 目录</label>
-              <div class="browse"><input class="input" id="spatial-runtime"><button class="btn-ghost pick" data-for="spatial-runtime">选择…</button></div></div>
-            <div class="field"><label for="spatial-forcing">空间强迫场 namelist</label>
+            <div class="field"><label for="spatial-rawdata">RawData 目录（CoLMrawdata）</label>
+              <div class="browse"><input class="input" id="spatial-rawdata" placeholder="…/CoLMrawdata"><button class="btn-ghost pick" data-for="spatial-rawdata">选择…</button></div></div>
+            <div class="field"><label for="spatial-runtime">Runtime 目录（CoLMruntime）</label>
+              <div class="browse"><input class="input" id="spatial-runtime" placeholder="…/CoLMruntime"><button class="btn-ghost pick" data-for="spatial-runtime">选择…</button></div></div>
+            <div class="field"><label for="spatial-forcing-dataset">强迫场数据集</label>
+              <select class="input" id="spatial-forcing-dataset"></select></div>
+            <div class="field" id="spatial-forcing-dir-field"><label for="spatial-forcing-dir">强迫数据目录</label>
+              <div class="browse"><input class="input" id="spatial-forcing-dir" placeholder="…/CoLM_Forcing/JRA3Q"><button class="btn-ghost pick" data-for="spatial-forcing-dir">选择…</button></div></div>
+            <div class="field" id="spatial-forcing-field" hidden><label for="spatial-forcing">已有 forcing namelist</label>
               <div class="browse"><input class="input" id="spatial-forcing" placeholder="…/forcing.nml"><button class="btn-ghost pick" data-for="spatial-forcing" data-file="nml">选择…</button></div></div>
+            <p class="muted mini" id="spatial-forcing-note">选择数据集后，按 CoLM 的标准模板在算例目录生成 forcing.nml，只把数据目录换成你选的位置。</p>
           </div>
           <div class="card">
             <h3>时间与输出</h3>

@@ -111,12 +111,11 @@ if (translateZh('下一步：站点信息 →') !== 'Next: Site information →'
   throw new Error('dynamic workflow navigation is not translated');
 }
 if (CHINESE.test(translateZh('选择流域 Shapefile（WGS84）'))
-    || CHINESE.test(translateZh('选择非海洋 mask NetCDF 路径（必需）'))
-    || CHINESE.test(translateZh('选择全球非海洋 mask NetCDF 路径（必需）'))) {
+    || CHINESE.test(translateZh('选择流域网格 NetCDF（必需）'))) {
   throw new Error('dynamic spatial file-picker labels are not translated');
 }
 for (const message of [
-  '请选择 rawdata 目录', '请选择 runtime 目录', '请选择空间强迫场 namelist',
+  '请选择 RawData 目录', '请选择 Runtime 目录', '请选择强迫数据目录', '请选择已有 forcing namelist',
   '请选择开始日期', '请选择结束日期', '请选择算例根目录', '请输入算例名称',
   '开始日期不能晚于结束日期', '正在生成并预检空间算例…',
 ]) {

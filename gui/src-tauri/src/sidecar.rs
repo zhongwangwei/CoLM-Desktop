@@ -1248,12 +1248,15 @@ struct SpatialCaseRequest {
     north: Option<f64>,
     dlon: Option<f64>,
     dlat: Option<f64>,
-    non_ocean_mask: Option<String>,
     mesh_file: Option<String>,
     catchment_file: Option<String>,
     out: String,
     name: String,
-    forcing: String,
+    /// 已有的 forcing namelist；与 `forcing_dataset` 二选一。
+    forcing: Option<String>,
+    /// 标准网格强迫数据集名（`colm_case::forcing_templates`）与本机数据目录：建例时写出 `<case>/forcing.nml`。
+    forcing_dataset: Option<String>,
+    forcing_dir: Option<String>,
     rawdata: String,
     runtime: String,
     start: String,
@@ -1261,6 +1264,14 @@ struct SpatialCaseRequest {
     timestep: f64,
     mode: String,
     fields: Vec<crate::config::FieldChange>,
+}
+
+/// 可选的标准网格强迫数据集（上游 `run/forcing/*.nml` 模板，站点用的 `POINT` 除外）。
+#[tauri::command]
+pub fn forcing_datasets() -> Vec<String> {
+    colm_case::forcing_templates::forcing_datasets()
+        .map(str::to_owned)
+        .collect()
 }
 
 #[tauri::command]
@@ -1275,12 +1286,13 @@ pub async fn new_spatial_case(
     north: Option<f64>,
     dlon: Option<f64>,
     dlat: Option<f64>,
-    non_ocean_mask: Option<String>,
     mesh_file: Option<String>,
     catchment_file: Option<String>,
     out: String,
     name: String,
-    forcing: String,
+    forcing: Option<String>,
+    forcing_dataset: Option<String>,
+    forcing_dir: Option<String>,
     rawdata: String,
     runtime: String,
     start: String,
@@ -1299,12 +1311,13 @@ pub async fn new_spatial_case(
         north,
         dlon,
         dlat,
-        non_ocean_mask,
         mesh_file,
         catchment_file,
         out,
         name,
         forcing,
+        forcing_dataset,
+        forcing_dir,
         rawdata,
         runtime,
         start,
@@ -1347,11 +1360,6 @@ pub async fn new_spatial_case(
             .filter(|value| !value.trim().is_empty())
             .ok_or_else(|| cleanup("catchmentFile is required".into()))?
     } else {
-        let mask = request
-            .non_ocean_mask
-            .clone()
-            .filter(|value| !value.trim().is_empty())
-            .ok_or_else(|| cleanup("nonOceanMask is required".into()))?;
         let dlon = request
             .dlon
             .ok_or_else(|| cleanup("dlon is required".into()))?;
@@ -1370,9 +1378,9 @@ pub async fn new_spatial_case(
             nlon.to_string(),
             "--nlat".into(),
             nlat.to_string(),
-            "--non-ocean-mask".into(),
-            mask,
         ];
+        // 不传非海洋 mask：`DEF_LANDONLY`（缺省开）已按 RawData 的地表覆盖剔除海洋，上游的
+        // `MOD_MeshFilter` 也是可选的。`colm-cli mesh-new --non-ocean-mask` 留给命令行的高级用法。
         match request.domain.as_str() {
             "watershed" => {
                 let shp = request
@@ -1418,6 +1426,40 @@ pub async fn new_spatial_case(
     ])
     .await
     .map_err(cleanup)?;
+    // 强迫场：选了标准数据集就按模板写出 `<case>/forcing.nml`；否则用用户给的 namelist。
+    let forcing = match request
+        .forcing_dataset
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        Some(dataset) => {
+            let dir = request
+                .forcing_dir
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| cleanup("forcingDir is required with forcingDataset".into()))?;
+            if !std::path::Path::new(dir).is_dir() {
+                return Err(cleanup(format!(
+                    "the forcing data directory does not exist: {dir}"
+                )));
+            }
+            let text = colm_case::forcing_templates::render_forcing_namelist(dataset, dir)
+                .map_err(|e| cleanup(format!("{e:#}")))?;
+            let path = case_dir.join("forcing.nml");
+            std::fs::write(&path, text)
+                .map_err(|e| cleanup(format!("cannot write {}: {e}", path.display())))?;
+            path.to_string_lossy().into_owned()
+        }
+        None => request
+            .forcing
+            .clone()
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| {
+                cleanup("choose a forcing dataset or an existing forcing namelist".into())
+            })?,
+    };
     let mut args = vec![
         "spatial-new".into(),
         "--grid-kind".into(),
@@ -1429,7 +1471,7 @@ pub async fn new_spatial_case(
         "--name".into(),
         request.name,
         "--forcing".into(),
-        request.forcing,
+        forcing,
         "--rawdata".into(),
         request.rawdata,
         "--runtime".into(),

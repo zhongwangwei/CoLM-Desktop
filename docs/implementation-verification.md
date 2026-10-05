@@ -29861,3 +29861,20 @@ Fortran 内核没有对应的改动：它的 `acc1d` 是对整个数组的循环
 
 版本号 0.3.0-beta.1 → 0.3.0-beta.2（工作区、GUI、Tauri 配置、加载页与"关于"页、`style_layout` 测试、中英 README），README 补
 "0.3.0-beta.2 的主要变化"一节（第 575 轮的提速）。beta.1 的安装包打在提速提交之前；这一版带上它们。
+
+## 第 577 轮：空间算例的输入页——去掉多余的 Shapefile 与非海洋 mask，强迫场改为选数据集
+
+- **流域网格**：向导只要流域网格 NetCDF（`DEF_CatchmentMesh_data`，同时作 `DEF_ElementNeighbour_file`）。原来"流域 + 流域网格"
+  还强制选 Shapefile，可那个文件从来没被用到（流域网格分支跳过 `mesh-new`，`DEF_domain` 取自网格文件本身的范围）。
+- **非海洋 mask**：从 GUI 与 Tauri 命令里删去。它从不进 namelist，只用来裁网格；海洋本来就由 `DEF_LANDONLY`（缺省开）按
+  RawData 的地表覆盖剔除（上游 `MKSRFDATA.F90:364-375`，Rust `build_lct_land_patches_from_raster` 同样只留 `types > 0`），上游的
+  `MOD_MeshFilter` 也是可选的。`colm-cli mesh-new --non-ocean-mask` 保留给命令行。
+- **RawData / Runtime / 强迫场**在「基本设定」页的空间算例卡片里选，向导的空间页现在明说这一点。强迫场原来只能指定一份现成的
+  forcing namelist、而示例里只有站点的；现在下拉框列出上游 `run/forcing/` 的 22 个网格数据集（`colm_case::forcing_templates`，
+  编译期内嵌，`POINT` 除外），选数据集并指定本机数据目录，建例时按模板在算例目录写出 `forcing.nml`（只替换 `DEF_dir_forcing`）；
+  下拉框最后一项仍可用已有 namelist。
+- 顺手修了一处：先在向导里选过非结构网格并填了 mesh、再改选经纬度网格时，旧 mesh 会被带进经纬度网格的请求，建例时报
+  "已有 mesh NetCDF 目前仅支持非结构网格"。
+
+测试：`domain.mjs` 改成断言经纬度网格不再出现 mask、不填也能通过，并新增"流域 + 流域网格只要网格文件"；22 个模板生成后都能解析且
+`DEF_dir_forcing` 是所选目录；全部 `gui/tests`、`check-gui`（74/74）、GUI 后端 163 个测试、clippy、fmt 通过。

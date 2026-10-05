@@ -7,6 +7,7 @@
 //! 本 crate **不依赖 `colm-kernel`**：造文件与跑模型是两件事。
 
 pub mod build;
+pub mod forcing_templates;
 pub mod land_cover;
 pub mod layout;
 pub mod minimal;

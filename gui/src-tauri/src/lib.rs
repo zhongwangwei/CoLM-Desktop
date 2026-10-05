@@ -118,6 +118,7 @@ pub fn run() {
             site_pfts,
             new_case,
             new_spatial_case,
+            forcing_datasets,
             read_text,
             read_case,
             read_timing,

@@ -160,16 +160,16 @@ for (const [id, value] of Object.entries({
   input.value = value;
   input.oninput();
 }
-if (!foot('下一步').disabled || !ids.gateinfo.textContent.includes('非海洋 mask')) {
-  throw new Error('a lat-lon spatial case must require an explicit non-ocean mask');
+// 不再有非海洋 mask：海洋按 RawData 的地表覆盖剔除（DEF_LANDONLY）。
+if (findNode(ids.gatecards, node => node.id === 'spatial-nonOceanMask')) {
+  throw new Error('the lat-lon wizard must not ask for a non-ocean mask');
 }
-const mask = findNode(ids.gatecards, node => node.id === 'spatial-nonOceanMask');
-if (!mask) throw new Error('missing non-ocean mask input');
-const maskLabel = findNode(ids.gatecards, node => node.htmlFor === mask.id);
-if (!maskLabel) throw new Error('spatial input labels must be associated with their controls');
-mask.value = '/data/non-ocean.nc';
-mask.oninput();
-if (foot('下一步').disabled) throw new Error('valid regional bounds, resolution, and mask must pass');
+const westLabel = findNode(ids.gatecards, node => node.htmlFor === 'spatial-west');
+if (!westLabel) throw new Error('spatial input labels must be associated with their controls');
+if (foot('下一步').disabled) throw new Error('valid regional bounds and resolution must pass without a mask');
+if (!nodeText(ids.gatecards).includes('RawData 目录、Runtime 目录，以及强迫场')) {
+  throw new Error('the spatial page must say where RawData, Runtime and forcing are chosen');
+}
 next(); choose('IGBP'); next(); next(); next(); next();
 if (state.spatial?.domain?.west !== 100 || state.spatial?.grid?.kind !== 'latlon'
     || state.spatial?.grid?.dlon !== 0.5 || state.spatial?.grid?.nlon !== 720
@@ -183,18 +183,32 @@ if (!nodeText(ids.gatecards).includes('西=-180°，东=180°，南=-90°，北=
     || findNode(ids.gatecards, node => node.id === 'spatial-west')) {
   throw new Error('global lat-lon bounds must be fixed and visible rather than editable');
 }
-const globalMask = findNode(ids.gatecards, node => node.id === 'spatial-nonOceanMask');
-const globalMaskLabel = findNode(ids.gatecards, node => node.htmlFor === globalMask?.id);
-if (!globalMaskLabel || globalMaskLabel.textContent !== '全球非海洋 mask NetCDF 路径（必需）'
-    || !nodeText(ids.gatecards).includes('覆盖全球、且维度与当前经纬度分辨率一致')) {
-  throw new Error('global lat-lon must require an explicit global non-ocean mask path');
+if (findNode(ids.gatecards, node => node.id === 'spatial-nonOceanMask') || foot('下一步').disabled) {
+  throw new Error('global lat-lon must pass without a non-ocean mask');
 }
-globalMask.value = '/data/non-ocean.nc';
-globalMask.oninput();
 next(); choose('IGBP'); next(); next(); next(); next();
 if (JSON.stringify(state.spatial?.domain) !== JSON.stringify({ kind: 'global', west: -180, east: 180, south: -90, north: 90 })) {
   throw new Error(`global lat-lon bounds were not persisted: ${JSON.stringify(state.spatial?.domain)}`);
 }
+// 流域 + 流域网格：只要流域网格文件，不要 Shapefile、边界或 mask；范围取自网格文件。
+showDomainGate();
+choose('流域'); next(); choose('流域网格'); next();
+if (findNode(ids.gatecards, node => ['spatial-shapefile', 'spatial-west', 'spatial-nonOceanMask'].includes(node.id))) {
+  throw new Error('a catchment grid must not ask for a shapefile, bounds or a mask');
+}
+const catchmentInput = findNode(ids.gatecards, node => node.id === 'spatial-catchmentFile');
+if (!catchmentInput || !foot('下一步').disabled || !ids.gateinfo.textContent.includes('流域网格 NetCDF')) {
+  throw new Error('a catchment grid must require only the catchment NetCDF');
+}
+catchmentInput.value = '/data/PearlRiver_250km2.nc';
+catchmentInput.oninput();
+if (foot('下一步').disabled) throw new Error('a catchment NetCDF alone must pass the wizard gate');
+next(); choose('IGBP'); next(); next(); next(); next();
+if (JSON.stringify(state.spatial?.domain) !== JSON.stringify({ kind: 'watershed' })
+    || state.spatial?.grid?.kind !== 'catchment' || state.spatial?.grid?.input !== '/data/PearlRiver_250km2.nc') {
+  throw new Error(`catchment spatial contract was not preserved: ${JSON.stringify(state.spatial)}`);
+}
+
 showDomainGate();
 choose('站点');
 next();

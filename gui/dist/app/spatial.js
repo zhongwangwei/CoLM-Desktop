@@ -17,6 +17,42 @@ const spatialContext = () => JSON.stringify({
   domain: state.domain, grid: state.grid, spatial: state.spatial, subgrid: state.subgrid, wizard: state.wizard,
 });
 
+/** 下拉框最后一项（改用用户自己的 forcing namelist）的值。 */
+const CUSTOM_FORCING = '__custom__';
+let forcingDatasetsLoaded = false;
+
+async function loadForcingDatasets() {
+  if (forcingDatasetsLoaded) return;
+  const select = $('spatial-forcing-dataset');
+  let names = [];
+  try { names = await invoke('forcing_datasets'); } catch { /* 仍可用已有 namelist */ }
+  select.textContent = '';
+  for (const name of names) {
+    const option = document.createElement('option');
+    option.value = name;
+    option.textContent = name;
+    select.appendChild(option);
+  }
+  const custom = document.createElement('option');
+  custom.value = CUSTOM_FORCING;
+  custom.textContent = '使用已有 forcing namelist…';
+  select.appendChild(custom);
+  select.value = names.includes('JRA3Q') ? 'JRA3Q' : (names[0] ?? CUSTOM_FORCING);
+  forcingDatasetsLoaded = true;
+  syncForcingMode();
+}
+
+function syncForcingMode() {
+  const custom = $('spatial-forcing-dataset').value === CUSTOM_FORCING;
+  $('spatial-forcing-dir-field').hidden = custom;
+  $('spatial-forcing-field').hidden = !custom;
+  $('spatial-forcing-note').textContent = custom
+    ? '使用你自己准备的 forcing namelist（需含 DEF_dir_forcing 与 DEF_forcing%* 设置）。'
+    : '选择数据集后，按 CoLM 的标准模板在算例目录生成 forcing.nml，只把数据目录换成你选的位置。';
+}
+
+$('spatial-forcing-dataset').onchange = syncForcingMode;
+
 function syncSpatialSetup() {
   const spatial = state.domain && state.domain !== 'site';
   $('site-case-setup').hidden = spatial;
@@ -27,7 +63,7 @@ function syncSpatialSetup() {
       ? '将读取并预检已有 mesh NetCDF，并复用其中 elmindex。'
       : state.grid === 'catchment'
       ? '将预检已准备的 Catchment/HRU NetCDF。'
-      : '将按指定分辨率生成网格，以 mask 剔除海洋和范围外单元，并生成 int64 空间索引合同。');
+      : '将按指定范围与分辨率生成网格（海洋按 RawData 的地表覆盖剔除），并生成 int64 空间索引合同。');
   $('make-spatial-case').textContent = state.grid === 'unstructured'
     ? '读取网格、预检并建算例'
     : '生成网格、预检并建算例';
@@ -36,13 +72,16 @@ function syncSpatialSetup() {
   if (!$('spatial-rawdata').value) $('spatial-rawdata').value = $('rawdata').value;
   if (!$('spatial-runtime').value) $('spatial-runtime').value = $('runtime').value;
   if (!$('spatial-root').value) $('spatial-root').value = $('root').value;
+  loadForcingDatasets();
 }
 
 function problem() {
   const required = [
-    ['spatial-rawdata', '请选择 rawdata 目录'],
-    ['spatial-runtime', '请选择 runtime 目录'],
-    ['spatial-forcing', '请选择空间强迫场 namelist'],
+    ['spatial-rawdata', '请选择 RawData 目录'],
+    ['spatial-runtime', '请选择 Runtime 目录'],
+    $('spatial-forcing-dataset').value === CUSTOM_FORCING
+      ? ['spatial-forcing', '请选择已有 forcing namelist']
+      : ['spatial-forcing-dir', '请选择强迫数据目录'],
     ['spatial-start', '请选择开始日期'],
     ['spatial-end', '请选择结束日期'],
     ['spatial-root', '请选择算例根目录'],
@@ -82,11 +121,16 @@ $('make-spatial-case').onclick = async () => {
       west: domain.west ?? null, east: domain.east ?? null,
       south: domain.south ?? null, north: domain.north ?? null,
       dlon: grid.dlon ?? null, dlat: grid.dlat ?? null,
-      nonOceanMask: grid.nonOceanMask ?? null,
       meshFile: grid.meshFile ?? null,
       catchmentFile: grid.input ?? null,
       out, name,
-      forcing: $('spatial-forcing').value.trim(),
+      ...($('spatial-forcing-dataset').value === CUSTOM_FORCING
+        ? { forcing: $('spatial-forcing').value.trim(), forcingDataset: null, forcingDir: null }
+        : {
+          forcing: null,
+          forcingDataset: $('spatial-forcing-dataset').value,
+          forcingDir: $('spatial-forcing-dir').value.trim(),
+        }),
       rawdata: $('spatial-rawdata').value.trim(),
       runtime: $('spatial-runtime').value.trim(),
       start: $('spatial-start').value, end: $('spatial-end').value,
