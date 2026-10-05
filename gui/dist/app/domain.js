@@ -11,15 +11,15 @@ import { invoke } from './ipc.js';
 
 const DOMAINS = [
   { id: 'site', t: '站点', d: '单点站点模拟', ready: true },
-  { id: 'watershed', t: '流域（early state，不建议使用）', d: '按流域边界限定模拟范围；空间功能仍处于 early state，不建议正式使用' },
-  { id: 'region', t: '区域（early state，不建议使用）', d: '按经纬度范围限定模拟区域；空间功能仍处于 early state，不建议正式使用' },
-  { id: 'global', t: '全球（early state，不建议使用）', d: '覆盖全球陆地区域；空间功能仍处于 early state，不建议正式使用' },
+  { id: 'watershed', t: '流域', d: '按流域边界限定模拟范围' },
+  { id: 'region', t: '区域', d: '按经纬度范围限定模拟区域' },
+  { id: 'global', t: '全球', d: '覆盖全球陆地区域' },
 ];
 
 const GRIDS = [
-  { id: 'latlon', t: '经纬度网格（early state，不建议使用）', d: '规则等经纬度网格（GRIDBASED）；空间网格仍处于 early state，不建议正式使用' },
-  { id: 'unstructured', t: '非结构网格（early state，不建议使用）', d: '由 elmindex 描述计算单元（UNSTRUCTURED）；空间网格仍处于 early state，不建议正式使用' },
-  { id: 'catchment', t: '流域网格（early state，不建议使用）', d: '集水区与 HRU 水文单元（CATCHMENT）；空间网格仍处于 early state，不建议正式使用' },
+  { id: 'latlon', t: '经纬度网格', d: '规则等经纬度网格（GRIDBASED）' },
+  { id: 'unstructured', t: '非结构网格', d: '由 elmindex 描述计算单元（UNSTRUCTURED）' },
+  { id: 'catchment', t: '流域网格', d: '集水区与 HRU 水文单元（CATCHMENT）；Rust 引擎尚不支持，需 Fortran 内核' },
 ];
 
 const SUBGRIDS = [
@@ -146,7 +146,7 @@ function renderSpatial() {
   const title = document.createElement('h3');
   if (picked.grid === 'unstructured') {
     title.textContent = '非结构网格输入';
-    panel.append(title, spatialEarlyWarning());
+    panel.append(title, spatialStudyNote());
     panel.appendChild(pathField('已有非结构 mesh NetCDF（必需）', 'meshFile', 'nc,nc4'));
     const note = document.createElement('p');
     note.className = 'muted mini';
@@ -158,7 +158,7 @@ function renderSpatial() {
   title.textContent = picked.domain === 'watershed' ? '流域边界'
     : picked.domain === 'region' ? '区域边界' : '全球范围';
   panel.appendChild(title);
-  panel.appendChild(spatialEarlyWarning());
+  panel.appendChild(spatialStudyNote());
 
   if (picked.domain === 'watershed') {
     panel.appendChild(pathField('流域 Shapefile（WGS84）', 'shapefile', 'shp'));
@@ -209,10 +209,10 @@ function renderSpatial() {
 }
 
 
-function spatialEarlyWarning() {
+function spatialStudyNote() {
   const warning = document.createElement('p');
   warning.className = 'warn mini';
-  warning.textContent = '空间功能仍处于 early state，不建议正式使用；选择空间后参数调优和不确定性分析会失效。';
+  warning.textContent = '空间算例暂不支持参数调优和不确定性分析。';
   return warning;
 }
 

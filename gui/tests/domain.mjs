@@ -112,25 +112,25 @@ const findNode = (root, predicate) => predicate(root) ? root
 
 showDomainGate();
 if (ids.gatetitle.textContent !== '这次要跑什么？') throw new Error('page 1 missing');
-if (cards().map(c => c.children[0].textContent).join('|') !== '站点|流域（early state，不建议使用）|区域（early state，不建议使用）|全球（early state，不建议使用）') {
+if (cards().map(c => c.children[0].textContent).join('|') !== '站点|流域|区域|全球') {
   throw new Error('page 1 must list site, watershed, regional, and global in order');
 }
-for (const domain of ['流域（early state，不建议使用）', '区域（early state，不建议使用）', '全球（early state，不建议使用）']) {
+for (const domain of ['流域', '区域', '全球']) {
   showDomainGate();
   choose(domain);
   next();
   if (ids.gatetitle.textContent !== '计算网格怎么组织？') throw new Error(`${domain} did not open the grid page`);
-  if (cards().map(c => c.children[0].textContent).join('|') !== '经纬度网格（early state，不建议使用）|非结构网格（early state，不建议使用）|流域网格（early state，不建议使用）') {
+  if (cards().map(c => c.children[0].textContent).join('|') !== '经纬度网格|非结构网格|流域网格') {
     throw new Error(`${domain} must offer all three spatial grids`);
   }
   if (cards().some(c => c.disabled)) throw new Error(`${domain} unexpectedly disabled a grid choice`);
 }
 
 showDomainGate();
-choose('区域（early state，不建议使用）'); next(); choose('非结构网格（early state，不建议使用）'); next();
+choose('区域'); next(); choose('非结构网格'); next();
 if (ids.gatetitle.textContent !== '空间输入怎么准备？') throw new Error('spatial selections must collect domain and grid inputs');
-if (!nodeText(ids.gatecards).includes('early state') || !nodeText(ids.gatecards).includes('参数调优和不确定性分析会失效')) {
-  throw new Error('spatial setup must keep a persistent early-state warning');
+if (nodeText(ids.gatecards).includes('early state') || !nodeText(ids.gatecards).includes('空间算例暂不支持参数调优和不确定性分析')) {
+  throw new Error('spatial setup must state that Study is unavailable, without an early-state label');
 }
 if (findNode(ids.gatecards, node => node.id === 'spatial-west')
     || findNode(ids.gatecards, node => node.id === 'spatial-nonOceanMask')) {
@@ -151,7 +151,7 @@ if (state.spatial?.domain?.kind !== 'region' || state.spatial?.grid?.kind !== 'u
 }
 
 showDomainGate();
-choose('区域（early state，不建议使用）'); next(); choose('经纬度网格（early state，不建议使用）'); next();
+choose('区域'); next(); choose('经纬度网格'); next();
 for (const [id, value] of Object.entries({
   'spatial-west': '100', 'spatial-east': '110', 'spatial-south': '20', 'spatial-north': '30',
 })) {
@@ -178,7 +178,7 @@ if (state.spatial?.domain?.west !== 100 || state.spatial?.grid?.kind !== 'latlon
 }
 
 showDomainGate();
-choose('全球（early state，不建议使用）'); next(); choose('经纬度网格（early state，不建议使用）'); next();
+choose('全球'); next(); choose('经纬度网格'); next();
 if (!nodeText(ids.gatecards).includes('西=-180°，东=180°，南=-90°，北=90°')
     || findNode(ids.gatecards, node => node.id === 'spatial-west')) {
   throw new Error('global lat-lon bounds must be fixed and visible rather than editable');
@@ -456,7 +456,7 @@ if (pcFieldsAfterUrban.DEF_USE_PC !== '.true.' || pcFieldsAfterUrban.DEF_USE_LCT
 
 // Spatial scope and computation grid are independent and survive the full wizard.
 showDomainGate();
-choose('流域（early state，不建议使用）'); next(); choose('经纬度网格（early state，不建议使用）'); next();
+choose('流域'); next(); choose('经纬度网格'); next();
 const shapefile = findNode(ids.gatecards, node => node.id === 'spatial-shapefile');
 shapefile.value = '/data/basin.shp'; shapefile.oninput(); next(); choose('IGBP'); next();
 choose('van Genuchten–Mualem（Ippisch 2006）'); next(); next(); next();
@@ -480,7 +480,7 @@ state.cases = [state.selected];
 state.createdCases.add('/cases/spatial');
 state.step = 'basic-files';
 go('result-uncertainty');
-if (state.step === 'result-uncertainty' || !ids.status.textContent.includes('参数调优和不确定性分析暂不可用')) {
+if (state.step === 'result-uncertainty' || !ids.status.textContent.includes('空间算例暂不支持参数调优和不确定性分析')) {
   throw new Error('spatial workflow must disable uncertainty-analysis navigation');
 }
 state.domain = 'site';
@@ -495,6 +495,6 @@ state.selected = { name: 'imported-spatial', dir: '/cases/imported-spatial', spa
 state.cases = [state.selected];
 state.createdCases = new Set(['/cases/imported-spatial']);
 go('result-tuning');
-if (state.step === 'result-tuning' || !ids.status.textContent.includes('参数调优和不确定性分析暂不可用')) {
+if (state.step === 'result-tuning' || !ids.status.textContent.includes('空间算例暂不支持参数调优和不确定性分析')) {
   throw new Error('imported spatial case metadata must disable tuning navigation');
 }

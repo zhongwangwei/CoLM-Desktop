@@ -1590,8 +1590,8 @@ const studyScope = () => {
 };
 const spatialCaseEntry = c => c?.spatial === true;
 const spatialStudyReason = () => {
-  if (state.domain && state.domain !== 'site') return '空间功能仍处于 early state，不建议使用；选择空间后参数调优和不确定性分析暂不可用。';
-  if (studyScope().some(spatialCaseEntry)) return '空间算例仍处于 early state，不建议使用；参数调优和不确定性分析暂不可用。';
+  if (state.domain && state.domain !== 'site') return '空间算例暂不支持参数调优和不确定性分析。';
+  if (studyScope().some(spatialCaseEntry)) return '空间算例暂不支持参数调优和不确定性分析。';
   return '';
 };
 const studyMutationGuard = (kind, dirs = activeStudyDirs(kind), kernel = currentKernel()) => {

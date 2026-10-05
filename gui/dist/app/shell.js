@@ -17,7 +17,7 @@ const resultsReady = () => ready() ?? (hasResults() ? null : '先运行完成至
 const spatialCaseEntry = c => c?.spatial === true;
 const spatialStudyDisabled = () => !!(state.domain && state.domain !== 'site')
   || state.cases.some(c => state.createdCases.has(c.dir) && spatialCaseEntry(c));
-const spatialStudyMessage = '空间功能仍处于 early state，不建议使用；选择空间后参数调优和不确定性分析暂不可用。';
+const spatialStudyMessage = '空间算例暂不支持参数调优和不确定性分析。';
 const studyReady = () => ready() ?? (spatialStudyDisabled() ? spatialStudyMessage : null);
 
 /** 大步骤只负责分组，真正的前后关系由扁平的子步骤决定。 */

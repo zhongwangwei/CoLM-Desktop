@@ -11,7 +11,7 @@ const labels = {
   watershed: '流域', region: '区域', global: '全球',
   latlon: '经纬度网格', unstructured: '非结构网格', catchment: '流域网格',
 };
-const spatialEarlyText = '空间功能仍处于 early state，不建议正式使用；选择空间后参数调优和不确定性分析会失效。';
+const spatialStudyText = '空间算例暂不支持参数调优和不确定性分析。';
 const spatialContext = () => JSON.stringify({
   root: $('spatial-root')?.value.trim(), name: $('spatial-name')?.value.trim(),
   domain: state.domain, grid: state.grid, spatial: state.spatial, subgrid: state.subgrid, wizard: state.wizard,
@@ -22,7 +22,7 @@ function syncSpatialSetup() {
   $('site-case-setup').hidden = spatial;
   $('spatial-case-setup').hidden = !spatial;
   if (!spatial || !state.spatial) return;
-  $('spatial-summary').textContent = `${labels[state.domain]} · ${labels[state.grid]} · early state，不建议使用。`
+  $('spatial-summary').textContent = `${labels[state.domain]} · ${labels[state.grid]} 。`
     + (state.grid === 'unstructured'
       ? '将读取并预检已有 mesh NetCDF，并复用其中 elmindex。'
       : state.grid === 'catchment'
@@ -32,7 +32,7 @@ function syncSpatialSetup() {
     ? '读取网格、预检并建算例'
     : '生成网格、预检并建算例';
   const warning = $('spatial-early-warning');
-  if (warning) warning.textContent = spatialEarlyText;
+  if (warning) warning.textContent = spatialStudyText;
   if (!$('spatial-rawdata').value) $('spatial-rawdata').value = $('rawdata').value;
   if (!$('spatial-runtime').value) $('spatial-runtime').value = $('runtime').value;
   if (!$('spatial-root').value) $('spatial-root').value = $('root').value;

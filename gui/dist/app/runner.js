@@ -209,10 +209,8 @@ export async function refreshKernels() {
   }
   for (const k of state.kernels) {
     const o = document.createElement('option');
-    const spatial = k.macros?.some(m => ['GRIDBASED', 'UNSTRUCTURED', 'CATCHMENT'].includes(m));
     o.value = k.dir;
-    o.textContent = spatial ? `${k.preset}（early state，不建议使用）` : k.preset;
-    if (spatial) o.title = '空间内核仍处于 early state，不建议正式使用';
+    o.textContent = k.preset;
     s.appendChild(o);
   }
   await syncKernel();

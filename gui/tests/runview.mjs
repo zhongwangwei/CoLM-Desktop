@@ -112,8 +112,8 @@ if (!controlStudy.includes("action === 'resume' ? spatialStudyReason() : ''")
   throw new Error('pause/cancel controls must stay usable; only resume is spatial-blocked');
 }
 
-if (!runner.includes("（early state，不建议使用）") || !runner.includes("GRIDBASED") || !runner.includes("UNSTRUCTURED") || !runner.includes("CATCHMENT")) {
-  throw new Error('spatial kernel presets must be labeled early state');
+if (runner.includes("early state") || runner.includes("不建议使用")) {
+  throw new Error('kernel presets must not carry an early-state label');
 }
 const domainJs = await readFile(join(root, 'dist', 'app', 'domain.js'), 'utf8');
 if (!domainJs.includes("已有非结构 mesh NetCDF（必需）")
