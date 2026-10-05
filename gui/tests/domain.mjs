@@ -279,14 +279,18 @@ for (const [path, value] of Object.entries({
 })) {
   if (fields[path] !== value) throw new Error(`${path}: expected ${value}, got ${fields[path]}`);
 }
-// 区域单元流域汇流：空间算例默认打开；全球、LULCC、流域网格、站点保持不写或关闭。
+// 区域单元流域汇流：选了河湖汇流的空间算例默认打开；没选河湖汇流、全球、LULCC、流域网格、站点保持不写或关闭。
 {
   const regional = (wizard) => Object.fromEntries(wizardFields(wizard).map(x => [x.path, x.value]))
     .DEF_UnitCatchment_regional;
   const region = { kind: 'region', west: 113, east: 115, south: 23, north: 25 };
-  const spatial = { ...state.wizard, grid: 'latlon', spatial: { domain: region, grid: { kind: 'latlon' } } };
+  const spatial = {
+    ...state.wizard, grid: 'latlon', spatial: { domain: region, grid: { kind: 'latlon' } },
+    physics: { ...state.wizard.physics, river: true },
+  };
   const cases = [
     ['region', spatial, '.true.'],
+    ['no routing', { ...spatial, physics: { ...spatial.physics, river: false } }, '.false.'],
     ['lulcc', { ...spatial, physics: { ...spatial.physics, lulcc: true } }, '.false.'],
     ['global', { ...spatial, spatial: { ...spatial.spatial, domain: { kind: 'global' } } }, '.false.'],
     ['catchment', { ...spatial, grid: 'catchment' }, undefined],
@@ -511,4 +515,21 @@ state.createdCases = new Set(['/cases/imported-spatial']);
 go('result-tuning');
 if (state.step === 'result-tuning' || !ids.status.textContent.includes('空间算例暂不支持参数调优和不确定性分析')) {
   throw new Error('imported spatial case metadata must disable tuning navigation');
+}
+
+// 河湖汇流总开关由向导写（与 BGC 并列），并归向导所有，不在参数页重复出现。
+{
+  const region = { kind: 'region', west: 113, east: 115, south: 23, north: 25 };
+  const fields = (river, grid = 'latlon') => Object.fromEntries(wizardFields({
+    ...state.wizard, grid, spatial: { domain: region, grid: { kind: grid } },
+    physics: { ...state.wizard.physics, river },
+  }).map(x => [x.path, x.value]));
+  if (fields(true).DEF_USE_GridRiverLakeFlow !== '.true.') throw new Error('river card on writes .true.');
+  if (fields(false).DEF_USE_GridRiverLakeFlow !== '.false.') throw new Error('river card off writes .false.');
+  if (fields(true, 'catchment').DEF_USE_GridRiverLakeFlow !== undefined) {
+    throw new Error('catchment meshes do not get the grid routing switch');
+  }
+  if (!wizardFieldNames().includes('DEF_USE_GridRiverLakeFlow')) {
+    throw new Error('the wizard owns the routing switch');
+  }
 }

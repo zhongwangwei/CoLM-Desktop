@@ -196,10 +196,8 @@ for (const value of ['core', 'diagnostic', 'all', 'none']) {
 assert.match(params, /fieldState\?\.built_in_default \?\? fieldState\?\.context_default \?\? meta\?\.default/);
 assert.match(params, /const flows = new Set\(\['basic-files', 'basic-timing'\]\)/);
 assert.doesNotMatch(params, /const flows = new Set\(\['basic-files', 'basic-timing', 'basic-grid'\]\)/);
-// 河湖汇流总开关是河道页顶部的一组按钮，常规模式也显示，不进普通字段表。
-assert.match(params, /const RIVER_SWITCH = 'DEF_USE_GridRiverLakeFlow';/);
-assert.match(params, /if \(riverSwitch\) rows = rows\.filter\(e => e !== riverSwitch\);/);
-assert.match(params, /process\.appendChild\(riverSwitchControl\(riverSwitch, processDirs\)\)/);
+// 河湖汇流总开关在向导里选（与 BGC 并列）；参数页不再单独放按钮。
+assert.doesNotMatch(params, /riverSwitchControl/);
 const css = await import('node:fs').then(fs =>
   fs.readFileSync(new URL('../dist/app/style.css', import.meta.url), 'utf8'));
 assert.match(css, /\.foot \.btn-next \{ margin-left: auto; \}/, 'the next-step button stays on the right');

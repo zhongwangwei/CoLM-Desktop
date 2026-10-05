@@ -38,6 +38,7 @@ const PHYSICS = [
   { id: 'urban', t: 'URBAN', d: '城市冠层与人为热；不锁定次网格方案' },
   { id: 'lulcc', t: 'LULCC', d: '土地利用变化' },
   { id: 'bgc', t: 'BGC', d: '碳氮循环' },
+  { id: 'river', t: '河湖汇流', d: '格点河道、湖泊与水库汇流；不选则不算河道，也没有「河道与水库」参数页' },
   { id: 'crop', t: 'CROP', d: '作物模型' },
   { id: 'tracer', t: 'TRACER', d: '同位素 / 溶质 / 气体 / 颗粒示踪；当前仅开放甲烷' },
 ];
@@ -66,7 +67,9 @@ const pages = () => [
 const pageIndex = page => pages().indexOf(page);
 const pageNumber = page => pageIndex(page) + 1;
 
-const emptyPhysics = () => ({ urban: false, lulcc: false, bgc: false, crop: false, tracer: false });
+const emptyPhysics = () => ({
+  urban: false, lulcc: false, bgc: false, river: false, crop: false, tracer: false,
+});
 const emptyDebug = () => ({ rangecheck: false, colmdebug: false, srfdatadiag: false });
 const emptyPicked = () => ({
   domain: null,
@@ -423,6 +426,15 @@ function physicsBlock(item) {
   if (item.id === 'urban') {
     return null;
   }
+  // `DEF_USE_GridRiverLakeFlow` 只在编进 GridRiverLakeFlow 的经纬度/非结构网格内核里有。
+  if (item.id === 'river') {
+    if (picked.domain === 'site') {
+      return { need: '单点站点没有河湖汇流', cause: '第 1 页选择了站点', page: 0 };
+    }
+    if (picked.grid === 'catchment') {
+      return { need: '流域网格自带坡面与河道侧向流，不用这一项', cause: `第 ${pageNumber('grid')} 页选了流域网格`, page: pageIndex('grid') };
+    }
+  }
   if (item.id === 'bgc') {
     if (picked.domain === 'site' && picked.physics.urban) {
       return { need: '纯城市单点不运行 BGC', cause: '本页已开启 URBAN' };
@@ -588,9 +600,11 @@ export function wizardFields(wizard = state.wizard) {
   // 区域单元流域汇流（`DEF_UnitCatchment_regional`）：只对落在区域内的河网汇流，2°×2° 的算例
   // 模拟阶段快约 6 倍、结果两侧逐位一致（第 567 轮）。上游要求 GridRiverLakeFlow（流域网格内核没有）
   // 且不能与 LULCC 同开；全球范围裁剪了也是全球，保持关闭。参数页不显示它，之后打开 LULCC 时自动关掉。
+  // 河湖汇流总开关（`DEF_USE_GridRiverLakeFlow`）：没选时河道不算，区域单元流域也无从谈起。
   if (wizard.spatial && wizard.grid !== 'catchment') {
     const global = wizard.spatial.domain?.kind === 'global';
-    fields.push(['DEF_UnitCatchment_regional', !global && !p.lulcc, 'logical']);
+    fields.push(['DEF_USE_GridRiverLakeFlow', p.river, 'logical']);
+    fields.push(['DEF_UnitCatchment_regional', p.river && !global && !p.lulcc, 'logical']);
   }
   if (p.crop) fields.push(
     ['DEF_USE_LAIFEEDBACK', true, 'logical'],
@@ -624,7 +638,7 @@ export function wizardFieldNames(wizard = state.wizard) {
     'DEF_USE_USGS', 'DEF_USE_IGBP',
     'DEF_TRACER_NUM', 'DEF_TRACER_NAMES', 'DEF_TRACER_TYPES', 'DEF_TRACER_MRAT',
     'DEF_TRACER_REF_RATIO', 'DEF_TRACER_INIT_DELTA', 'DEF_TRACER_REACTIVE_DECAY_RATE',
-    'DEF_TRACER_PARAM_FILES',
+    'DEF_TRACER_PARAM_FILES', 'DEF_USE_GridRiverLakeFlow',
   );
   if (wizard?.tracer === 'methane') names.push('DEF_USE_Dynamic_Wetland');
   return names;
