@@ -30,8 +30,13 @@ $('mpi-ranks').addEventListener('input', () => { mpiRanksCustomized = true; });
 
 $('case-threads').max = String(cpuCapacity);
 
+/** 空间算例：向导选了空间范围，或者打开的已有算例本身是空间算例（没走向导时 `state.domain` 为空）。 */
+function spatialRun() {
+  return state.selected?.spatial === true || (!!state.domain && state.domain !== 'site');
+}
+
 function syncParallelMode() {
-  const spatial = !!state.domain && state.domain !== 'site';
+  const spatial = spatialRun();
   const mpi = spatial && modelEngine() === 'fortran';
   // 站点算例只调批量并行算例数（每个算例固定 1 核）；空间算例一次跑一个，Rust 引擎只调线程数，
   // Fortran 内核只调 MPI 进程数。
@@ -56,13 +61,12 @@ function requestedRanks() {
   const n = Math.trunc(Number($('mpi-ranks').value));
   const clamped = Math.max(1, Math.min(cpuCapacity, Number.isFinite(n) ? n : 1));
   $('mpi-ranks').value = String(clamped);
-  return state.domain === 'site' || modelEngine() === 'rust' ? 1 : clamped;
+  return !spatialRun() || modelEngine() === 'rust' ? 1 : clamped;
 }
 
 /** Rust 引擎空间算例的每算例线程数；留空（自动）时为 null，由后端按并行算例数平分 CPU 核。 */
 function requestedThreads() {
-  const spatial = !!state.domain && state.domain !== 'site';
-  if (!spatial || modelEngine() !== 'rust') return null;
+  if (!spatialRun() || modelEngine() !== 'rust') return null;
   const raw = $('case-threads').value.trim();
   if (!raw) return null;
   const n = Math.trunc(Number(raw));
@@ -73,7 +77,7 @@ function requestedThreads() {
 
 function requestedWorkers() {
   // 空间算例一次跑一个：每个算例已经用满线程或 MPI 进程。
-  if (state.domain && state.domain !== 'site') return 1;
+  if (spatialRun()) return 1;
   const n = Math.trunc(Number($('cpu-workers').value));
   const valid = Number.isFinite(n) ? n : 1;
   const clamped = Math.max(1, Math.min(cpuCapacity, valid));
@@ -286,6 +290,8 @@ async function applyKernel() {
 }
 
 addEventListener('colm:wizard', () => { syncParallelMode(); syncKernel(); });
+// 换了算例或进到运行页时重新判断：打开已有算例不经过向导。
+addEventListener('colm:step', syncParallelMode);
 $('model-engine').addEventListener('change', syncParallelMode);
 syncParallelMode();
 

@@ -172,6 +172,8 @@ details[open] > summary.flow-head::after { transform: rotate(90deg); }
            color: var(--pass-text); font-weight: 650; box-shadow: var(--shadow); }
 .pill-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
 .run-parallel-setting { display: grid; grid-template-columns: minmax(240px, 1fr) 84px minmax(180px, auto); gap: 12px; align-items: center; margin-top: 14px; padding: 12px; border: 1px solid var(--border); border-radius: var(--r-sm); background: var(--elevated); }
+/* `display:grid` 会盖掉 `[hidden]`：按引擎/算例类型隐藏的并行设置必须真的消失。 */
+.run-parallel-setting[hidden] { display: none; }
 .run-parallel-setting > div { display: grid; gap: 4px; }
 .run-parallel-setting label { color: var(--text); font-size: 13px; font-weight: 750; }
 .run-parallel-setting div span { color: var(--muted); font-size: 12px; line-height: 1.5; }

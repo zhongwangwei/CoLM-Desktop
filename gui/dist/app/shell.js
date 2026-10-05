@@ -129,6 +129,7 @@ export function go(id) {
   if (why) { setStatus(why); return; }
   state.liveCollapsed = step.page !== 'run';
   state.step = id;
+  globalThis.dispatchEvent?.(new Event('colm:step'));
   const group = WORKFLOW.find(g => g.steps.includes(step));
   if (group?.collapsible) state.expandedFlows.add(group.key);
   for (const p of document.querySelectorAll('.page')) p.hidden = p.dataset.step !== step.page;
