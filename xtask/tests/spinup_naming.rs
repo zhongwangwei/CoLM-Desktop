@@ -49,7 +49,12 @@ fn the_model_side_says_it_writes_no_history() {
     let i = js
         .find("DEF_simulation_time%spinup_repeat")
         .expect("模型预热的说明");
-    let block = &js[i..(i + 600).min(js.len())];
+    // 按字符边界截取：600 字节处可能落在一个中文字符中间。
+    let mut end = (i + 600).min(js.len());
+    while !js.is_char_boundary(end) {
+        end -= 1;
+    }
+    let block = &js[i..end];
     assert!(block.contains("预热"), "模型侧要叫「预热」");
     assert!(
         block.contains("history"),

@@ -5,8 +5,7 @@
 每条写清楚：在哪、为什么是错的、影响范围、本仓库 `vendor/CoLM202X` 怎么处理。
 新发现的追加在末尾，已被上游修掉的挪到「已修」一节并注明上游提交。
 
-证据与数值影响的细节在 `docs/implementation-verification.md` 对应轮次；同步过程在
-`vendor/PROVENANCE.md`。
+证据与数值影响的细节以及上游同步过程在 `docs/implementation-verification.md` 对应轮次。
 
 ## 一、确定的缺陷
 
@@ -224,7 +223,7 @@
 - **原因**：单点分支写完 `'Successful in surface data making.'` 后调 `CoLM_stop()` 结束；PR #17 把
   `CoLM_stop` 的非 MPI 实现从 `STOP` 改成 `STOP 1`，以区分出错退出。
 - **影响**：每次成功的单点 mksrfdata 都以退出码 1 结束，调用方（`colm-cli`）按失败处理，后续阶段不跑。
-- **处理**：本地把这一处改回 `STOP`（`vendor/PROVENANCE.md`），应当报给上游。
+- **处理**：本地把这一处改回 `STOP`，应当报给上游。
 
 ### 31. TOPMODEL 方法 0 把未赋值的 `topoweti`/`alp_twi`/`chi_twi`/`mu_twi` 写进常数重启
 

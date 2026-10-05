@@ -95,7 +95,7 @@ BUILD="$OUT_BASE/build-$PRESET"
 rm -rf "$BUILD"
 # **拷贝而不是 `git worktree`。** `vendor/CoLM202X` 曾经是 submodule，
 # 那时用 worktree 从它的 HEAD 建一棵临时树。入库之后它就是普通文件了
-# （见 `vendor/PROVENANCE.md`），没有独立的 git 仓库可以 worktree。
+# （见 `docs/upstream-bugs.md`），没有独立的 git 仓库可以 worktree。
 #
 # 用 `tar` 管道而不是 `cp -r`：CoLM 的源码树里有符号链接
 # （`include/Makeoptions`、`run/scripts/batch.config`、

@@ -29759,3 +29759,20 @@ history：`rsur`/`rsub`/`rnof`/`wat`/`h2osoi` 取侧向流之后的值，`xerr` 
   JRA3Q、2 天、单元流域汇流）287 个文件逐位相同。
 - 单元测试：colm-core 502、colm-runtime 161、colm-cli 237 个通过；colm-init 串行 178 个通过；`check-gui` 通过。colm-init 并行跑时有 30–45 个 `NetCDF: HDF error`
   （次数每次不同），在本轮之前的提交（`d210a8d5`）上同样出现，是本机 HDF5 并发的环境问题，不是本轮引入的；记下待查。
+
+## 第 572 轮：0.3.0-beta.1 测试版
+
+版本号 0.2.0-beta.4 → 0.3.0-beta.1（工作区、GUI、Tauri 配置、加载页与"关于"页、`style_layout` 测试）。README 拆成中文
+`README.md` 与英文 `README.en.md`，互相链接；正文只写 Rust 引擎（含流域网格），Fortran 内核只在文末注明"安装包也带、可切换、
+默认 Rust"，以及从源码运行时内核目录仍需 `build_kernel.sh` 生成（`Kernel::open` 校验内核里的三个二进制，Rust 引擎也读
+它的编译期配置）。删去 `vendor/PROVENANCE.md`，引用它的文档与脚本注释改指 `docs/upstream-bugs.md`（vendor 里三处 Fortran
+注释没动，免得改动内核源码指纹）。
+
+顺带：`vendor/CoLM202X/Makefile` 的生成依赖块早已过期（`MOD_Thermal.o` 缺 `MOD_Ozone.o`），重跑
+`gen_fortran_deps.py` 补上；`xtask/tests/spinup_naming.rs` 按字节截取 600 字节会落在中文字符中间而 panic，改为按字符边界截取。
+这两条测试不在 CI 的点名清单里，所以此前没暴露。
+
+核对：CLI 的 `--engine` 缺省为 `rust`，GUI 的"模拟引擎"缺省为 Rust；CI 在三个平台编译并测试整个 Rust 工作区（含
+colm-core/colm-runtime/colm-init/colm-srfdata 的单元测试与黄金文件判官）。与 Fortran 的端到端黄金回归（`golden` 作业）只在
+带 PLUMBER2 数据的自托管 runner 上跑，目前没有注册这样的 runner，所以 CI 里那一作业一直跳过（`golden-status` 会给出警告）；
+逐位对照靠本地配对回归，结果记在各轮。

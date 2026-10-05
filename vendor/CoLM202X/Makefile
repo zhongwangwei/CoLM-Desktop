@@ -802,7 +802,7 @@ MOD_SoilTextureReadin.o: MOD_Vars_TimeInvariants.o
 MOD_SpatialMapping.o: MOD_Block.o MOD_DataType.o MOD_Grid.o MOD_Mesh.o MOD_Namelist.o MOD_Pixel.o MOD_Pixelset.o MOD_Precision.o MOD_SPMD_Task.o MOD_Utils.o MOD_Vars_Global.o
 MOD_SrfdataDiag.o: MOD_Block.o MOD_DataType.o MOD_Filesystem.o MOD_Grid.o MOD_LandCrop.o MOD_LandElm.o MOD_LandPFT.o MOD_LandPatch.o MOD_LandUrban.o MOD_Namelist.o MOD_NetCDFSerial.o MOD_SPMD_Task.o MOD_SpatialMapping.o
 MOD_SrfdataRestart.o: MOD_Block.o MOD_Filesystem.o MOD_Mesh.o MOD_Namelist.o MOD_NetCDFSerial.o MOD_NetCDFVector.o MOD_Pixelset.o MOD_SPMD_Task.o MOD_Utils.o
-MOD_Thermal.o: MOD_CaMa_colmCaMa.o MOD_FrictionVelocity.o MOD_GroundFluxes.o MOD_GroundTemperature.o MOD_LeafTemperature.o MOD_LeafTemperaturePC.o MOD_SoilSurfaceResistance.o
+MOD_Thermal.o: MOD_CaMa_colmCaMa.o MOD_FrictionVelocity.o MOD_GroundFluxes.o MOD_GroundTemperature.o MOD_LeafTemperature.o MOD_LeafTemperaturePC.o MOD_Ozone.o MOD_SoilSurfaceResistance.o
 MOD_TimeManager.o: MOD_Precision.o MOD_UserDefFun.o
 MOD_Tracer_Conservation.o: MOD_Tracer_Frac.o MOD_Tracer_Vars.o
 MOD_Tracer_Evapo.o: MOD_Tracer_EvapLimit.o MOD_Tracer_Forcing.o MOD_Tracer_Frac.o MOD_Tracer_Vars.o

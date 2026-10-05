@@ -6,7 +6,7 @@
 随包发不可能全覆盖，让用户自己编又要一整套 Fortran 工具链。
 
 **前提**：`vendor/CoLM202X` 已经从 submodule 改成入库副本
-（`acfb596`，见 `vendor/PROVENANCE.md`），改动就是我们自己的文件。
+（`acfb596`，见 `docs/upstream-bugs.md`），改动就是我们自己的文件。
 
 ---
 

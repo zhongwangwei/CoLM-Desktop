@@ -36,7 +36,7 @@ def main() -> None:
     assert "real(r8), intent(inout) :: &\n        rstfacsun" in leaf
     assert "gssun = (laisun / rssun) * (tprcor / tlbef)" in leaf
     assert "gssun(i) = (laisun(i) / rssun(i)) * (tprcor / tlbef(i))" in leaf_pc
-    # 本仓库的本地修复（见 vendor/PROVENANCE.md）：`o3coef*` 必须在迭代**之前**置 1。
+    # 本仓库的本地修复（见 docs/upstream-bugs.md）：`o3coef*` 必须在迭代**之前**置 1。
     # 上游只在迭代之后的非臭氧分支里赋值，而循环体已经把 `o3coefg_*` 交给 `stomata`；
     # `intent(inout)` 的哑元第一次调用读到的是调用方 SAVE 变量的未定义值。实测
     # CN-Cng 第一步因此 `rssun` 大约 10 倍、冠层蒸腾 `etr` 约 4800 倍。
@@ -56,7 +56,7 @@ def main() -> None:
     makefile = read("Makefile")
     assert "extend_interception" not in makefile and "_Extended.F90" not in makefile
     assert "#define extend_interception" not in read(".github/workflows/create_defineh.bash")
-    # 2026-09 同步 CoLM-SYSU-integration@3c799bae 时保住的本地修复（见 vendor/PROVENANCE.md）。
+    # 2026-09 同步 CoLM-SYSU-integration@3c799bae 时保住的本地修复（见 docs/upstream-bugs.md）。
     thermal = read("main/MOD_Thermal.F90")
     assert thermal.count("t_soisno(1:),wliq_soisno(1:)") == 3   # eroot x2 + SoilSurfaceResistance
     assert "dz_gpersno(1:),t_gpersno(1:),wliq_gpersno(1:)" in read("main/URBAN/MOD_Urban_Thermal.F90")

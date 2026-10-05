@@ -11,7 +11,7 @@
     python3 oracle/scripts/gen_fortran_deps.py            # 重写 Makefile 里的生成块
     python3 oracle/scripts/gen_fortran_deps.py --check    # 只比对，不一致时返回 1
 
-同步上游之后必须重跑本脚本（见 vendor/PROVENANCE.md）。
+同步上游之后必须重跑本脚本（见 docs/upstream-bugs.md）。
 """
 
 import argparse
