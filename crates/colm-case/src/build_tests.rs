@@ -476,3 +476,48 @@ fn the_last_day_stops_where_the_forcing_stops() {
         Some(colm_namelist::Value::Int(86400))
     );
 }
+
+#[test]
+fn a_latlon_case_writes_history_on_the_model_grid() {
+    let spec = SpatialCaseSpec {
+        name: "grid".into(),
+        grid: SpatialGrid::LatLon {
+            mesh_file: "/w/mesh.nc".into(),
+            dlon: 0.25,
+            dlat: 0.25,
+        },
+        window: Window {
+            start_year: 2003,
+            start_month: 2,
+            start_day: 1,
+            start_sec: 0,
+            end_year: 2003,
+            end_month: 2,
+            end_day: 5,
+            end_sec: 86400,
+        },
+        timestep_seconds: 1800.0,
+        dirs: Dirs {
+            rawdata: "/w/rawdata/".into(),
+            runtime: "/w/runtime/".into(),
+            output: "/w/out/".into(),
+            forcing_namelist: "/w/forcing.nml".into(),
+        },
+        domain: SpatialBounds {
+            west: 96.25,
+            east: 104.25,
+            south: 37.75,
+            north: 43.25,
+        },
+    };
+    let all = spatial_fields(&spec);
+    let value = |name: &str| {
+        all.iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, v)| v.clone())
+            .unwrap_or_else(|| panic!("{name} is not written"))
+    };
+    for name in ["DEF_HIST_lon_res", "DEF_HIST_lat_res"] {
+        assert_eq!(value(name), value("DEF_GRIDBASED_lon_res"), "{name}");
+    }
+}

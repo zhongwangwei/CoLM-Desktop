@@ -520,7 +520,15 @@ pub fn verify(regional: &Path, source: &Path) -> Result<()> {
 }
 
 /// `unitcatchment_regional_build`：由 landpatch 求 `touched`，写区域网络（`bif_closure = .true.`）。
-pub fn build(unitcatchment_file: &Path, landdata: &Path, year: i32) -> Result<(usize, usize)> {
+/// `bifurcation`（`DEF_USE_BIFURCATION`）：只有分汊打开时才沿分汊通道做闭包。分汊关着时通道不参与
+/// 汇流，闭包只会顺着 CaMa 的跨河系通道把与区域无关的河系一串串拉进来（区域 96–104°E 的算例
+/// 带上了塔里木与华北，116 个河系里 39 个在区域里一个单元流域都没有）；一端在外的通道直接丢掉。
+pub fn build(
+    unitcatchment_file: &Path,
+    landdata: &Path,
+    year: i32,
+    bifurcation: bool,
+) -> Result<(usize, usize)> {
     let (nlon, nlat) = grid_size(unitcatchment_file)?;
     let touched = touched_cells(landdata, year, nlon, nlat)?;
     subset_write(
@@ -529,7 +537,7 @@ pub fn build(unitcatchment_file: &Path, landdata: &Path, year: i32) -> Result<(u
         nlon,
         nlat,
         &touched,
-        true,
+        bifurcation,
     )
 }
 

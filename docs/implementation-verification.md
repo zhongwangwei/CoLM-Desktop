@@ -29957,3 +29957,20 @@ vendor 置 0（重编 catchment 内核后 Fortran 再跑一遍仍 `files ok 1708
 `restart_gridriver`；开着时 `files ok 287` 不变。关掉与开着的 Fortran history 共有 135 个变量全部逐位相同（没开漫滩回馈时
 河道不回馈陆面），只少了 `mask_complete_upstream_regird` 与 6 个河道量。测试：colm-cli 220、colm-runtime 161、GUI 后端 166、
 colm-schema（顶层 307、总数 946）、colm-hist、全部 `gui/tests`、`check-gui`、clippy、fmt 通过。
+
+## 第 582 轮：区域单元流域不再沿分汊通道拉进无关河系；unitcat 输出截到河网外包框；history 网格跟模拟网格
+
+用户的经纬度网格算例（0.25°，96.25–104.25°E、37.75–43.25°N，区域单元流域开、分汊关）里，河道 unitcat 输出覆盖
+73–122°E、24–44°N。坐标本身没错（6933 个单元流域的 `seq_lon/seq_lat` 与输出坐标差为 0），错在区域河网的挑选：
+`unitcatchment_subset_write` 的调用在两个引擎里都写死 `bif_closure = .true.`，沿 CaMa 的跨河系分汊通道做闭包，116 个河系里
+39 个在区域里一个单元流域都没有（塔里木 73–92°E 的 1076 个单元流域、华北 112–118°E 的几个）。分汊关着时这些通道根本不参与
+汇流，现在只在 `DEF_USE_BIFURCATION` 时闭包，否则丢掉一端在外的通道（vendor `MOD_UnitCatchmentRegional.F90`，Rust
+`unitcatchment_regional::build`）。各河系互不相干，区域内的计算不变。
+
+unitcat 文件原来铺在整张全球 15′ 网格上（区域河网文件保留了全球 `nx/ny`）。现在 FLAT_SPMD 的单文件写出截到全部单元流域格点下标
+的外包框（vendor `route_hist_window`，Rust `unitcat_window`）；分组 SPMD 与 block 分片照旧是全球网格。新建的经纬度网格算例把
+`DEF_HIST_lon/lat_res` 写成模拟分辨率（缺省 0.5° 与 0.25° 不等、边界也不对齐，history 会比模拟范围多出半格）。
+
+对照（用户算例的副本，2003-02-01 到 02-03，`--preprocessors fortran`）：两个引擎都得到 79 个河系、2175 个单元流域，全部与区域相交，
+范围 92.1–119.1°E、32.4–44.4°N（流经区域的河要算到入海口）；unitcat 维度 109×49；陆面 history 格心 96.375–104.125°E、
+37.875–43.125°N；`files ok 1124`。区域河网文件里 Fortran 多一个字符变量 `dam_DamName`（Rust 生成时不拷，模型不读）。

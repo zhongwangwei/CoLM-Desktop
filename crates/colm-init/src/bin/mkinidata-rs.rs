@@ -441,6 +441,7 @@ fn write_gridriver_namelist_restart(namelist: &Path, run: &SpatialNamelistRun) -
             &source_catchment,
             &run.landdata,
             run.land_cover_year,
+            namelist_bool(&document, "DEF_USE_BIFURCATION", false)?,
         )?;
         let file = colm_init::unitcatchment_regional::regional_file(&run.landdata);
         println!(

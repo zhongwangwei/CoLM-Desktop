@@ -110,8 +110,10 @@ CONTAINS
 
       IF (p_is_master) THEN
          CALL make_directory(trim(DEF_dir_landdata) // '/riverlake')
+         ! Close over bifurcation pathways only when bifurcation routing is on: otherwise the
+         ! pathways are unused and the closure drags in unrelated river systems.
          CALL unitcatchment_subset_write (trim(DEF_UnitCatchment_file), trim(file_regional), nlon, nlat, &
-            touched, .true., nkeep, nsystem)
+            touched, DEF_USE_BIFURCATION, nkeep, nsystem)
          write(*,'(/,A,I0,A,I0,A)') ' Regional unit-catchment network: ', nkeep, ' unit catchments in ', &
             nsystem, ' river systems'
          write(*,'(2A)') '   written to ', trim(file_regional)

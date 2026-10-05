@@ -88,7 +88,28 @@ MODULE MOD_Grid_RiverLakeHistRoute
    ! them so the fingerprint can be recomputed without re-plumbing them.
    real(r8), allocatable :: rh_lon_cache(:), rh_lat_cache(:)
 
+   ! Output window of the single unitcat file: the bounding box of the unit
+   ! catchments in the network (a regional subset covers its river systems only,
+   ! not the whole 15-minute globe).  Grouped SPMD keeps the global grid.
+   integer :: rh_x0 = 1, rh_y0 = 1, rh_nlon = 0, rh_nlat = 0
+   integer, allocatable :: rh_xw(:), rh_yw(:)
+
 CONTAINS
+
+   SUBROUTINE route_hist_window ()
+   IMPLICIT NONE
+      IF (rh_nlon > 0) RETURN
+      rh_x0 = 1;  rh_nlon = griducat%nlon
+      rh_y0 = 1;  rh_nlat = griducat%nlat
+#ifdef FLAT_SPMD
+      IF (size(x_ucat_all) > 0) THEN
+         rh_x0 = minval(x_ucat_all);  rh_nlon = maxval(x_ucat_all) - rh_x0 + 1
+         rh_y0 = minval(y_ucat_all);  rh_nlat = maxval(y_ucat_all) - rh_y0 + 1
+      ENDIF
+      rh_xw = x_ucat_all - rh_x0 + 1
+      rh_yw = y_ucat_all - rh_y0 + 1
+#endif
+   END SUBROUTINE route_hist_window
 
    logical FUNCTION route_hist_is_block ()
       route_hist_is_block = rh_block
@@ -160,10 +181,13 @@ CONTAINS
             IF (.not. fexists) THEN
                CALL ncio_create_file (trim(file_hist_ucat))
                CALL ncio_define_dimension (trim(file_hist_ucat), 'time', 0)
-               CALL ncio_define_dimension (trim(file_hist_ucat), 'lat_ucat', griducat%nlat)
-               CALL ncio_define_dimension (trim(file_hist_ucat), 'lon_ucat', griducat%nlon)
-               CALL ncio_write_serial (trim(file_hist_ucat), 'lat_ucat', lat_ucat, 'lat_ucat')
-               CALL ncio_write_serial (trim(file_hist_ucat), 'lon_ucat', lon_ucat, 'lon_ucat')
+               CALL route_hist_window ()
+               CALL ncio_define_dimension (trim(file_hist_ucat), 'lat_ucat', rh_nlat)
+               CALL ncio_define_dimension (trim(file_hist_ucat), 'lon_ucat', rh_nlon)
+               CALL ncio_write_serial (trim(file_hist_ucat), 'lat_ucat', &
+                  lat_ucat(rh_y0:rh_y0+rh_nlat-1), 'lat_ucat')
+               CALL ncio_write_serial (trim(file_hist_ucat), 'lon_ucat', &
+                  lon_ucat(rh_x0:rh_x0+rh_nlon-1), 'lon_ucat')
                ! Reservoir axis belongs to the skeleton, not to the first
                ! reservoir variable: it used to be guarded by an 'is the file
                ! new' flag computed in the caller, which is exactly the kind of
@@ -366,14 +390,15 @@ CONTAINS
          ! The master maps the gathered (global) vector with the global coordinates; on FLAT_SPMD
          ! it also computes, so x_ucat/y_ucat are only its local slice there.
 #ifdef FLAT_SPMD
+         CALL route_hist_window ()
          IF (with_time) THEN
             CALL vector_gather_map2grid_and_write (vector, numucat, totalnumucat, &
-               ucat_data_address, griducat%nlon, x_ucat_all, griducat%nlat, y_ucat_all, &
+               ucat_data_address, rh_nlon, rh_xw, rh_nlat, rh_yw, &
                trim(rh_file_one), varname, 'lon_ucat', 'lat_ucat', rh_itime,      &
                longname, units)
          ELSE
             CALL vector_gather_map2grid_and_write (vector, numucat, totalnumucat, &
-               ucat_data_address, griducat%nlon, x_ucat_all, griducat%nlat, y_ucat_all, &
+               ucat_data_address, rh_nlon, rh_xw, rh_nlat, rh_yw, &
                trim(rh_file_one), varname, 'lon_ucat', 'lat_ucat',                &
                longname=longname, units=units)
          ENDIF

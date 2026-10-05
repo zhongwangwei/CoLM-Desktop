@@ -224,6 +224,10 @@ pub fn spatial_fields(s: &SpatialCaseSpec) -> Vec<(String, Value)> {
             ("DEF_file_mesh".into(), Value::Str(mesh_file.clone())),
             ("DEF_GRIDBASED_lon_res".into(), r(*dlon)),
             ("DEF_GRIDBASED_lat_res".into(), r(*dlat)),
+            // history 网格跟模拟网格一致：缺省 0.5° 与 0.25° 等分辨率不同，边界也不对齐，
+            // 输出会比模拟范围多出半格，与河道重插的量也对不上。
+            ("DEF_HIST_lon_res".into(), r(*dlon)),
+            ("DEF_HIST_lat_res".into(), r(*dlat)),
         ]),
         SpatialGrid::Unstructured { mesh_file } => {
             out.push(("DEF_file_mesh".into(), Value::Str(mesh_file.clone())))

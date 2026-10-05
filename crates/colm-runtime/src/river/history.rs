@@ -1,7 +1,7 @@
 //! 河道 history（`MOD_Grid_RiverLakeHist` 与 `MOD_Hist.F90:4749-4790`，`DEF_HIST_mode = 'one'`）。
 //!
 //! 每条 history 记录写两处：
-//! - `<case>_hist_unitcat_<suffix>.nc`：全球单元流域网格（`lon_ucat`×`lat_ucat`）上的 12 个量，
+//! - `<case>_hist_unitcat_<suffix>.nc`：单元流域网格（`lon_ucat`×`lat_ucat`，截到网络的外包框）上的 12 个量，
 //!   单元流域的值铺在它的 `(seq_x, seq_y)`，其余是 `spval`；
 //! - 网格 history 里的 6 个量与静态的 `mask_complete_upstream_regird`：先把单元流域的值经
 //!   `push_ucat2grid`/`push_ucat2inpm` 与 `remap_patch2inpm` 回到 patch，再按各自的过滤与分母聚合。
@@ -57,6 +57,9 @@ pub struct RiverHistoryWriter {
     stem: String,
     lon: Vec<f64>,
     lat: Vec<f64>,
+    /// unitcat 文件的输出窗口（`route_hist_window`）：网络里全部单元流域的外包框，0 起的
+    /// `(x0, y0, nlon, nlat)`。区域子网只铺它自己的河系，不是整张全球 15′ 网格。
+    window: (usize, usize, usize, usize),
     /// 开水库时的 `dam_GRAND_ID`（按水库序号），建 unitcat 文件骨架时写成 `resv_GRAND_ID`。
     pub reservoir_ids: Option<Vec<i32>>,
     /// `DEF_HIST_CompressLevel`：unitcat 文件里逐时间量（河道量、分汊矩阵、示踪物/泥沙量、水库量）
@@ -66,6 +69,21 @@ pub struct RiverHistoryWriter {
     /// `vector_gather_map2grid_and_write` 的无 `itime` 分支，上游在那里传的是重启文件的级别
     /// （`MOD_Vector_ReadWrite.F90:357-358`）。
     pub rest_compress_level: u8,
+}
+
+/// `route_hist_window`：单元流域格点下标的外包框（0 起 `(x0, y0, nlon, nlat)`）；空网络取整张网格。
+fn unitcat_window(network: &RiverNetwork) -> (usize, usize, usize, usize) {
+    let (Some(&xmin), Some(&xmax)) = (network.x.iter().min(), network.x.iter().max()) else {
+        return (0, 0, network.nlon, network.nlat);
+    };
+    let ymin = *network.y.iter().min().expect("y has as many entries as x");
+    let ymax = *network.y.iter().max().expect("y has as many entries as x");
+    (
+        xmin as usize - 1,
+        ymin as usize - 1,
+        (xmax - xmin) as usize + 1,
+        (ymax - ymin) as usize + 1,
+    )
 }
 
 /// `worker_remap_data_grid2pset`（填充值 `spval`）：`average` 除以非缺测份的面积和，`sum` 不除。
@@ -145,7 +163,7 @@ impl RiverHistoryWriter {
         let lon_count = network.nlon;
         let lat_count = network.nlat;
         let ucat_grid = crate::spatial::grid::LatLonGrid::define_by_ndims(lon_count, lat_count)?;
-        let lat = ucat_grid
+        let lat: Vec<f64> = ucat_grid
             .lat_s
             .iter()
             .zip(&ucat_grid.lat_n)
@@ -163,6 +181,10 @@ impl RiverHistoryWriter {
                 }
             })
             .collect::<Result<Vec<_>>>()?;
+        let window = unitcat_window(network);
+        let (x0, y0, nx, ny) = window;
+        let lon: Vec<f64> = lon[x0..x0 + nx].to_vec();
+        let lat: Vec<f64> = lat[y0..y0 + ny].to_vec();
         Ok(Self {
             grid,
             filter_ucat,
@@ -176,6 +198,7 @@ impl RiverHistoryWriter {
             stem: stem.into(),
             lon,
             lat,
+            window,
             reservoir_ids: None,
             // namelist 默认值（`MOD_Namelist.F90:750-751`）；调用方按算例覆盖。
             hist_compress_level: 1,
@@ -555,12 +578,12 @@ impl RiverHistoryWriter {
         let path = self
             .directory
             .join(format!("{}_hist_unitcat_{}.nc", self.stem, record.suffix));
-        let (nlon, nlat) = (network.nlon, network.nlat);
+        let (x0, y0, nlon, nlat) = self.window;
         let to_grid = |values: &[f64]| {
             let mut grid = vec![SPVAL; nlon * nlat];
             for (i, &value) in values.iter().enumerate() {
-                let x = network.x[i] as usize - 1;
-                let y = network.y[i] as usize - 1;
+                let x = network.x[i] as usize - 1 - x0;
+                let y = network.y[i] as usize - 1 - y0;
                 grid[y * nlon + x] = value;
             }
             grid
