@@ -44,12 +44,12 @@ jobs:
         with:
           msystem: MINGW64
           update: true
+          # libgomp：内核用 -fopenmp 链它，MSYS2 的 GCC 16.2.0-4 把它拆成单独的包，不再随 gcc 装上
+          # （2026-10-05 发布在 `cannot find -lgomp` 上失败）。折叠块里不能写注释，所以写在这里。
           install: >-
             git
             make
             mingw-w64-x86_64-gcc-fortran
-            # 内核用 -fopenmp 链 libgomp；MSYS2 的 GCC 16.2.0-4 把它拆成单独的包，不再随 gcc 装上
-            # （2026-10-05 发布在 `cannot find -lgomp` 上失败）。
             mingw-w64-x86_64-libgomp
             mingw-w64-x86_64-gdb
             mingw-w64-x86_64-netcdf-fortran
