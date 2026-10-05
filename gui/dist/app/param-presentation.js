@@ -306,7 +306,7 @@ const OPTIONS = Object.freeze({
     5: pair('MATSIRO 冠层截留', 'MATSIRO interception'),
     6: pair('VIC 冠层截留', 'VIC interception'),
     7: pair('JULES 冠层截留', 'JULES interception'),
-    8: pair('CoLM 202x 冠层截留', 'CoLM 202x interception'),
+    8: pair('CoLM 2024 冠层截留', 'CoLM 2024 interception'),
   },
   DEF_THERMAL_CONDUCTIVITY_SCHEME: {
     1: pair('Farouki（1981）', 'Farouki (1981)'),

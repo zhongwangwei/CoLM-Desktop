@@ -53,6 +53,26 @@ pub struct RuntimeStep {
     pub write_restart: bool,
 }
 
+impl RuntimeStep {
+    /// `CoLM.F90:463-469` 每步开头打的进度行（格式 99/100，`:823-825`）：`istep` 与步首 `jdate`，
+    /// 预热期带轮次。GUI 与 `colm-cli` 靠这一行画进度条。
+    pub fn progress_line(&self, spinup_cycles: usize) -> Result<String> {
+        let t = self.forcing_time;
+        let (month, day) = crate::month_day(t)?;
+        let mut line = format!(
+            "TIMESTEP = {} | DATE = {:04}-{:02}-{:02}-{:05}",
+            self.index, t.year, month, day, t.seconds
+        );
+        if self.is_spinup {
+            line.push_str(&format!(
+                " Spinup (cycle {} of {})",
+                self.spinup_cycle, spinup_cycles
+            ));
+        }
+        Ok(line)
+    }
+}
+
 /// Stateful iterator for the non-I/O portion of `CoLM.F90`'s main loop.
 ///
 /// Input timestamps use the namelist representation: `seconds == 0` means the
@@ -152,6 +172,11 @@ impl RuntimeClock {
     /// 之后会变成整数，拿那两个值换算就会引入一步之内的偏差。
     pub fn timestep_seconds(&self) -> f64 {
         self.timestep_seconds
+    }
+
+    /// `n_spinupcycle`（至少 1）。
+    pub fn spinup_repeats(&self) -> usize {
+        self.spinup_repeats
     }
 
     /// Returns the next forcing/driver boundary, exactly once per model step.

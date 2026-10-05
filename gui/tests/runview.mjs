@@ -180,7 +180,9 @@ console.log('runview: per-site progress/log formatting and undefined metrics are
   if ((runner.match(/engine: modelEngine\(\), threads,/g) ?? []).length !== 2) {
     throw new Error('run_case and run_batch must both receive the requested threads');
   }
-  if (!/\$\('threads-setting'\)\.hidden = !\(spatial && !mpi\)/.test(runner)) {
+  if (!/\$\('workers-setting'\)\.hidden = spatial;/.test(runner)
+    || !/\$\('mpi-setting'\)\.hidden = !mpi;/.test(runner)
+    || !/\$\('threads-setting'\)\.hidden = !\(spatial && !mpi\)/.test(runner)) {
     throw new Error('threads per case replaces MPI ranks only for Rust spatial runs');
   }
 }

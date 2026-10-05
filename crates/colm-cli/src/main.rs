@@ -2774,7 +2774,7 @@ fn preflight_spatial_case(
     let Some(grid_kind) = kernel_grid_kind(kernel) else {
         return Ok(());
     };
-    eprintln!("note: {SPATIAL_NOTE}");
+    // 调参/不确定性分析的提示只在建空间算例时说一次；每次运行都打，日志末尾平白多一行。
     let text = std::fs::read_to_string(case_nml)
         .with_context(|| format!("cannot read {}", case_nml.display()))?;
     let doc = colm_namelist::parse(&text)

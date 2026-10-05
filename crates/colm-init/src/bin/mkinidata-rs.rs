@@ -41,9 +41,65 @@ fn main() -> Result<()> {
     } else {
         run_explicit(first, args)?;
     }
+    report_written();
     // Match the marker expected from upstream MKINIDATA.F90 by the stage runner.
     println!("CoLM Initialization Execution Completed");
     Ok(())
+}
+
+/// 写出的重启文件。跑完按目录汇总成一行：空间算例逐块逐个列路径有几十行，看不出这一段做了什么。
+static WRITTEN: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
+
+fn wrote(path: impl AsRef<Path>) {
+    WRITTEN
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .push(path.as_ref().to_path_buf());
+}
+
+/// `wrote 20 file(s) under <restart>: const (12), 2003-032-00000 (8)`
+fn report_written() {
+    let files: std::collections::BTreeSet<PathBuf> = std::mem::take(
+        &mut *WRITTEN
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+    )
+    .into_iter()
+    .collect();
+    if files.is_empty() {
+        return;
+    }
+    let mut by_dir: std::collections::BTreeMap<PathBuf, usize> = std::collections::BTreeMap::new();
+    for file in &files {
+        *by_dir
+            .entry(file.parent().map(Path::to_path_buf).unwrap_or_default())
+            .or_default() += 1;
+    }
+    // 各目录的公共上级。
+    let mut root = by_dir.keys().next().cloned().unwrap_or_default();
+    for dir in by_dir.keys() {
+        while !dir.starts_with(&root) {
+            if !root.pop() {
+                break;
+            }
+        }
+    }
+    let parts: Vec<String> = by_dir
+        .iter()
+        .map(|(dir, count)| {
+            let name = dir.strip_prefix(&root).unwrap_or(dir).display().to_string();
+            format!(
+                "{} ({count})",
+                if name.is_empty() { ".".into() } else { name }
+            )
+        })
+        .collect();
+    println!(
+        "wrote {} file(s) under {}: {}",
+        files.len(),
+        root.display(),
+        parts.join(", ")
+    );
 }
 
 fn run_namelist(namelist: PathBuf, mut args: impl Iterator<Item = String>) -> Result<()> {
@@ -168,17 +224,17 @@ fn run_namelist(namelist: PathBuf, mut args: impl Iterator<Item = String>) -> Re
             )
         })
         .transpose()?;
-    println!("wrote {}", files.common.constants.display());
-    println!("wrote {}", files.common.block.display());
+    wrote(&files.common.constants);
+    wrote(&files.common.block);
     if let Some(path) = files.pft {
-        println!("wrote {}", path.display());
+        wrote(&path);
     }
     if let Some(files) = files.bgc {
-        println!("wrote {}", files.constants.display());
-        println!("wrote {}", files.block.display());
+        wrote(&files.constants);
+        wrote(&files.block);
     }
     if let Some(path) = files.urban {
-        println!("wrote {}", path.display());
+        wrote(&path);
     }
     // `DEF_USE_TRACER`：时间重启带空示踪物事务（mkinidata 不注册示踪物）。
     let document = parse(&std::fs::read_to_string(&run.namelist)?)?;
@@ -188,18 +244,18 @@ fn run_namelist(namelist: PathBuf, mut args: impl Iterator<Item = String>) -> Re
             namelist_f64(&document, "DEF_TRACER_AQUIFER_MIXING_WATER_MM", -1.0)?,
         )?;
     }
-    println!("wrote {}", time.common.block.display());
+    wrote(&time.common.block);
     if let Some(file) = da {
-        println!("wrote {}", file.path.display());
+        wrote(&file.path);
     }
     if let Some(path) = time.pft {
-        println!("wrote {}", path.display());
+        wrote(&path);
     }
     if let Some(file) = time.bgc {
-        println!("wrote {}", file.block.display());
+        wrote(&file.block);
     }
     if let Some(path) = time.urban {
-        println!("wrote {}", path.display());
+        wrote(&path);
     }
     Ok(())
 }
@@ -352,11 +408,11 @@ fn run_spatial_namelist(invocation: SpatialNamelistInvocation<'_>) -> Result<()>
     }
     if grid_river {
         let path = write_gridriver_namelist_restart(namelist, &run)?;
-        println!("wrote {}", path.display());
+        wrote(&path);
     }
     if catch_lateral {
         let path = write_catch_lateral_namelist_restart(namelist, &run)?;
-        println!("wrote {}", path.display());
+        wrote(&path);
     }
     Ok(())
 }
@@ -510,20 +566,20 @@ fn write_spatial_urban_namelist_block(
             write_data_assimilation_restart(&time.common.block, members, run.compression_level)
         })
         .transpose()?;
-    println!("wrote {}", files.common.constants.display());
-    println!("wrote {}", files.common.block.display());
+    wrote(&files.common.constants);
+    wrote(&files.common.block);
     if let Some(path) = files.urban {
-        println!("wrote {}", path.display());
+        wrote(&path);
     }
     if let Some(mixing) = run.tracer_mixing_water_mm {
         colm_init::write_empty_land_tracer_transaction(&time.common.block, mixing)?;
     }
-    println!("wrote {}", time.common.block.display());
+    wrote(&time.common.block);
     if let Some(file) = da {
-        println!("wrote {}", file.path.display());
+        wrote(&file.path);
     }
     if let Some(path) = time.urban {
-        println!("wrote {}", path.display());
+        wrote(&path);
     }
     Ok(())
 }
@@ -592,14 +648,14 @@ fn write_spatial_lct_namelist_block(
     let da = data_assimilation_ensembles
         .map(|members| write_data_assimilation_restart(&time.block, members, run.compression_level))
         .transpose()?;
-    println!("wrote {}", files.constants.display());
-    println!("wrote {}", files.block.display());
+    wrote(&files.constants);
+    wrote(&files.block);
     if let Some(mixing) = run.tracer_mixing_water_mm {
         colm_init::write_empty_land_tracer_transaction(&time.block, mixing)?;
     }
-    println!("wrote {}", time.block.display());
+    wrote(&time.block);
     if let Some(file) = da {
-        println!("wrote {}", file.path.display());
+        wrote(&file.path);
     }
     Ok(())
 }
@@ -654,27 +710,27 @@ fn write_spatial_pft_namelist_block(
             write_data_assimilation_restart(&time.common.block, members, run.compression_level)
         })
         .transpose()?;
-    println!("wrote {}", files.common.constants.display());
-    println!("wrote {}", files.common.block.display());
+    wrote(&files.common.constants);
+    wrote(&files.common.block);
     if let Some(path) = files.pft {
-        println!("wrote {}", path.display());
+        wrote(&path);
     }
     if let Some(files) = files.bgc {
-        println!("wrote {}", files.constants.display());
-        println!("wrote {}", files.block.display());
+        wrote(&files.constants);
+        wrote(&files.block);
     }
     if let Some(mixing) = run.tracer_mixing_water_mm {
         colm_init::write_empty_land_tracer_transaction(&time.common.block, mixing)?;
     }
-    println!("wrote {}", time.common.block.display());
+    wrote(&time.common.block);
     if let Some(file) = da {
-        println!("wrote {}", file.path.display());
+        wrote(&file.path);
     }
     if let Some(path) = time.pft {
-        println!("wrote {}", path.display());
+        wrote(&path);
     }
     if let Some(files) = time.bgc {
-        println!("wrote {}", files.block.display());
+        wrote(&files.block);
     }
     Ok(())
 }
@@ -1078,8 +1134,8 @@ fn run_explicit(surface: PathBuf, mut args: impl Iterator<Item = String>) -> Res
         .unwrap_or(VicParameterSource::None);
 
     let files = write_single_point_constant_restart(surface, restart, config)?;
-    println!("wrote {}", files.constants.display());
-    println!("wrote {}", files.block.display());
+    wrote(&files.constants);
+    wrote(&files.block);
     Ok(())
 }
 
@@ -1189,8 +1245,8 @@ fn run_spatial_lct(mut args: impl Iterator<Item = String>) -> Result<()> {
         );
     }
     let files = write_spatial_lct_constant_restart(config)?;
-    println!("wrote {}", files.constants.display());
-    println!("wrote {}", files.block.display());
+    wrote(&files.constants);
+    wrote(&files.block);
     if let Some(date) = cold_time {
         let mut time = SpatialLctTimeConfig::new(
             &landdata,
@@ -1216,7 +1272,7 @@ fn run_spatial_lct(mut args: impl Iterator<Item = String>) -> Result<()> {
         time.variably_saturated_flow = variably_saturated_flow;
         time.vegetation_snow = vegetation_snow;
         let file = write_spatial_lct_cold_time_restart(time)?;
-        println!("wrote {}", file.block.display());
+        wrote(&file.block);
     }
     Ok(())
 }
@@ -1310,14 +1366,14 @@ fn run_spatial_pft(mut args: impl Iterator<Item = String>) -> Result<()> {
         &block,
     );
     let files = write_spatial_pft_constant_restarts(static_config, use_bedrock, use_hyperspectral)?;
-    println!("wrote {}", files.common.constants.display());
-    println!("wrote {}", files.common.block.display());
+    wrote(&files.common.constants);
+    wrote(&files.common.block);
     if let Some(path) = files.pft {
-        println!("wrote {}", path.display());
+        wrote(&path);
     }
     if let Some(bgc) = files.bgc {
-        println!("wrote {}", bgc.constants.display());
-        println!("wrote {}", bgc.block.display());
+        wrote(&bgc.constants);
+        wrote(&bgc.block);
     }
     if let Some(date) = cold_time {
         let mut time = SpatialPftTimeConfig::new(static_config, date);
@@ -1336,12 +1392,12 @@ fn run_spatial_pft(mut args: impl Iterator<Item = String>) -> Result<()> {
         time.high_resolution_radiation = high_resolution_radiation.as_deref();
         time.high_resolution_urban_albedo = high_resolution_urban_albedo.as_deref();
         let output = write_spatial_pft_cold_time_restarts(time)?;
-        println!("wrote {}", output.common.block.display());
+        wrote(&output.common.block);
         if let Some(path) = output.pft {
-            println!("wrote {}", path.display());
+            wrote(&path);
         }
         if let Some(bgc) = output.bgc {
-            println!("wrote {}", bgc.block.display());
+            wrote(&bgc.block);
         }
     }
     Ok(())

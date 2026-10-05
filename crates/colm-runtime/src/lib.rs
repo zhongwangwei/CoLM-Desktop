@@ -833,6 +833,7 @@ impl PointRuntime {
         let Some(clock) = next_clock.next_step() else {
             return Ok(None);
         };
+        println!("\n{}", clock.progress_line(self.clock.spinup_repeats())?);
         let forcing = self.forcing.runtime_at_calendar_time(
             clock.forcing_time,
             self.greenwich,

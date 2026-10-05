@@ -241,6 +241,7 @@ impl SpatialRuntime {
                     return Ok(());
                 };
                 timer.mark("other");
+                println!("\n{}", clock.progress_line(self.clock.spinup_repeats())?);
                 let (month, _) = colm_core::month_day(clock.forcing_time)?;
                 let co2 =
                     colm_core::monthly_co2_ppm(self.co2_scenario, clock.forcing_time.year, month)?

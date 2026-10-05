@@ -471,6 +471,21 @@ fn parse_progress(line: &str) -> Option<Step> {
     })
 }
 
+/// 日志窗里一段开始时的标题行。
+fn stage_heading(stage: &str) -> String {
+    let what = match stage {
+        "mksrfdata" => "制作地表数据",
+        "mkinidata" => "制作初始场",
+        "colm" => "模拟",
+        _ => "",
+    };
+    if what.is_empty() {
+        format!("──── {stage} ────")
+    } else {
+        format!("──── {what}（{stage}）────")
+    }
+}
+
 /// `=== colm-stage mksrfdata begin ===` -> `("mksrfdata", "begin")`。
 ///
 /// 标记由 `colm-cli run --stream` 自己打。实测 CoLM 的 34180 行输出里
@@ -777,6 +792,24 @@ fn pump(
             // 阶段标记先认：它不进日志窗，也不该被当成噪声丢掉。
             if let Some((name, state)) = parse_stage(&line) {
                 dropped += 1;
+                // 日志窗里给每段一个醒目的标题；先把上一段攒着的行发出去，次序才对。
+                if state == "begin" {
+                    let heading = stage_heading(&name);
+                    if buf.len() == LOG_CAPACITY {
+                        buf.pop_front();
+                    }
+                    buf.push_back(heading.clone());
+                    pending.push(heading);
+                    last_lines = Instant::now();
+                    let _ = h.emit(
+                        "run://lines",
+                        Lines {
+                            run_id: run_id.clone(),
+                            case: case_id.clone(),
+                            lines: std::mem::take(&mut pending),
+                        },
+                    );
+                }
                 stage = name.clone();
                 let _ = h.emit(
                     "run://stage",

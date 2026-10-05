@@ -38,8 +38,8 @@ export async function renderTiming(stillCurrent = () => true) {
       <label class="check">重复轮数
         <input class="input" id="tm-repeat" type="number" min="0" step="1"
                value="${t.spinup_repeat}" style="width:4.5em"> 轮</label>
-      <button class="btn-ghost" id="tm-apply" type="button">应用</button>
       <span class="muted mini">任一格填 0 就是不预热</span>
+      <button class="btn-ghost" id="tm-apply" type="button" style="margin-left:auto">应用</button>
     </div>
     <p class="muted mini" id="tm-note" style="margin-top:8px"></p>`;
   box.appendChild(card);

@@ -757,3 +757,13 @@ fn engine_is_forwarded_only_when_chosen_and_must_be_known() {
     );
     assert!(args.ends_with(&["--engine".to_string(), "rust".to_string()]));
 }
+
+#[test]
+fn stage_headings_name_the_step_in_plain_words() {
+    assert_eq!(
+        super::stage_heading("mksrfdata"),
+        "──── 制作地表数据（mksrfdata）────"
+    );
+    assert_eq!(super::stage_heading("colm"), "──── 模拟（colm）────");
+    assert_eq!(super::stage_heading("other"), "──── other ────");
+}

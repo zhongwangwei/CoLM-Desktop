@@ -33,8 +33,10 @@ $('case-threads').max = String(cpuCapacity);
 function syncParallelMode() {
   const spatial = !!state.domain && state.domain !== 'site';
   const mpi = spatial && modelEngine() === 'fortran';
-  // Rust 引擎的空间算例用线程数代替 MPI 进程数；站点算例两者都固定为 1。
-  $('mpi-setting').hidden = spatial && !mpi;
+  // 站点算例只调批量并行算例数（每个算例固定 1 核）；空间算例一次跑一个，Rust 引擎只调线程数，
+  // Fortran 内核只调 MPI 进程数。
+  $('workers-setting').hidden = spatial;
+  $('mpi-setting').hidden = !mpi;
   $('threads-setting').hidden = !(spatial && !mpi);
   $('threads-capacity').textContent = `最多 ${cpuCapacity} 个线程（本机逻辑 CPU 数）。`;
   if (!mpi && !$('mpi-ranks').disabled && spatial) fortranRanks = $('mpi-ranks').value;
@@ -70,6 +72,8 @@ function requestedThreads() {
 }
 
 function requestedWorkers() {
+  // 空间算例一次跑一个：每个算例已经用满线程或 MPI 进程。
+  if (state.domain && state.domain !== 'site') return 1;
   const n = Math.trunc(Number($('cpu-workers').value));
   const valid = Number.isFinite(n) ? n : 1;
   const clamped = Math.max(1, Math.min(cpuCapacity, valid));

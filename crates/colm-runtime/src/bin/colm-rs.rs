@@ -1907,12 +1907,16 @@ fn run_spatial_segment(
             sediment.write_restart(&path, &river.network, rest_compression)?;
         }
     }
+    // 逐个列出全部块的重启路径会占满一行，只报个数与目录。
+    let restart_dirs: std::collections::BTreeSet<_> =
+        written.iter().filter_map(|path| path.parent()).collect();
     println!(
-        "colm-rs: {steps} step(s) on {patch_count} spatial patch(es) in {} block(s); wrote {}",
+        "colm-rs: {steps} step(s) on {patch_count} spatial patch(es) in {} block(s); wrote {} restart file(s) to {}",
         topology.blocks.len(),
-        written
+        written.len(),
+        restart_dirs
             .iter()
-            .map(|path| path.display().to_string())
+            .map(|dir| dir.display().to_string())
             .collect::<Vec<_>>()
             .join(", ")
     );

@@ -456,7 +456,7 @@
       <div class="card">
         <h3>开始运行</h3>
         <div class="ch">单阶段按钮会明确重跑该阶段；“运行全部”仍按输入指纹跳过无需重跑的阶段。</div>
-        <div class="run-parallel-setting">
+        <div class="run-parallel-setting" id="workers-setting">
           <div>
             <label for="cpu-workers">批量并行算例数</label>
             <span>仅在同时运行多个算例时生效；同时运行的算例数会按每算例的 MPI 进程数（Fortran）或线程数（Rust）自动限额。</span>
