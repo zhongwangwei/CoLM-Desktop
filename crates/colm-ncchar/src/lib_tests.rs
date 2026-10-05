@@ -22,10 +22,13 @@ fn char_arrays_round_trip_as_nc_char() {
             .unwrap();
         var.put_values(&bytes, ..).unwrap();
     }
-    let file = netcdf::open(&path).unwrap();
-    let var = file.variable("name").unwrap();
-    assert_eq!(var.vartype(), netcdf::types::NcVariableType::Char);
-    let back: Vec<NcChar> = var.get_values(..).unwrap();
-    assert_eq!(back, bytes);
+    {
+        let file = netcdf::open(&path).unwrap();
+        let var = file.variable("name").unwrap();
+        assert_eq!(var.vartype(), netcdf::types::NcVariableType::Char);
+        let back: Vec<NcChar> = var.get_values(..).unwrap();
+        assert_eq!(back, bytes);
+    }
+    // 先关文件再删：Windows 不许删除仍打开着的文件。
     std::fs::remove_dir_all(&dir).unwrap();
 }
