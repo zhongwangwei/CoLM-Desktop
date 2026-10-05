@@ -55,7 +55,7 @@ CONTAINS
    USE MOD_NetCDFSerial
    USE MOD_Utils
    USE MOD_Namelist,              only: DEF_ReservoirPara_file, DEF_Reservoir_Method, &
-      DEF_UnitCatchment_regional, regional_unitcatchment_file
+      DEF_UnitCatchment_regional, regional_unitcatchment_file, DEF_UnitCatchment_file
    USE MOD_Grid_RiverLakeNetwork, only: numucat, ucat_ucid, lake_type
    USE, INTRINSIC :: ieee_arithmetic, only: ieee_is_finite
 
@@ -77,6 +77,10 @@ CONTAINS
 
 
       parafile = DEF_ReservoirPara_file
+      ! The unit catchment file carries the GRanD dam_* table (source numbering), so it is
+      ! the default parameter file when none is given.
+      IF ((trim(parafile) == 'null') .or. (len_trim(parafile) == 0)) &
+         parafile = DEF_UnitCatchment_file
 
       IF (DEF_Reservoir_Method /= 1) &
          CALL CoLM_stop ('unsupported reservoir operation method')

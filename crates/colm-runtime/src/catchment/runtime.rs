@@ -33,6 +33,8 @@ pub struct CatchmentSetup<'a> {
     /// 起跑的流域重启（`<case>_restart_basin_<date>_lc<year>.nc`）。
     pub basin_restart: &'a Path,
     pub time_step_seconds: f64,
+    /// `DEF_Reservoir_Method`（0 关；1 Funato 等的调度）。
+    pub reservoir_method: i64,
 }
 
 /// basin history 的累加器（`MOD_Catch_Hist`：`a_*` 与 `nac_basin`，起点都是 `spval`）。
@@ -46,10 +48,19 @@ struct BasinHistory {
     wdsrf_bsnhru: Vec<f64>,
     veloc_bsnhru: Vec<f64>,
     xsubs_hru: Vec<f64>,
+    volresv: Vec<f64>,
+    qresv_in: Vec<f64>,
+    qresv_out: Vec<f64>,
 }
 
 impl BasinHistory {
-    fn new(numbasin: usize, numelm: usize, numbsnhru: usize, numhru: usize) -> Self {
+    fn new(
+        numbasin: usize,
+        numelm: usize,
+        numbsnhru: usize,
+        numhru: usize,
+        numresv: usize,
+    ) -> Self {
         Self {
             steps: 0,
             wdsrf_bsn: vec![SPVAL; numbasin],
@@ -59,6 +70,9 @@ impl BasinHistory {
             wdsrf_bsnhru: vec![SPVAL; numbsnhru],
             veloc_bsnhru: vec![SPVAL; numbsnhru],
             xsubs_hru: vec![SPVAL; numhru],
+            volresv: vec![SPVAL; numresv],
+            qresv_in: vec![SPVAL; numresv],
+            qresv_out: vec![SPVAL; numresv],
         }
     }
 
@@ -72,6 +86,9 @@ impl BasinHistory {
             &mut self.wdsrf_bsnhru,
             &mut self.veloc_bsnhru,
             &mut self.xsubs_hru,
+            &mut self.volresv,
+            &mut self.qresv_in,
+            &mut self.qresv_out,
         ] {
             values.fill(SPVAL);
         }
@@ -238,11 +255,27 @@ impl CatchmentRuntime {
         );
         let mut element_order: Vec<usize> = (0..topology.numelm()).collect();
         element_order.sort_by_key(|&ie| topology.elements[ie]);
+        // `reservoir_init`（在 `river_lake_network_init` 之后）。
+        ensure!(
+            matches!(setup.reservoir_method, 0 | 1),
+            "unsupported reservoir operation method {}",
+            setup.reservoir_method
+        );
+        let reservoirs = (setup.reservoir_method > 0)
+            .then(|| {
+                colm_init::catch_reservoir::CatchReservoirs::read(
+                    setup.catchment_mesh,
+                    setup.runtime_dir,
+                    &networks.river,
+                )
+            })
+            .transpose()?;
         let history = BasinHistory::new(
             networks.river.lake_id.len(),
             topology.numelm(),
             networks.river.basin_hru.numbsnhru(),
             topology.numhru(),
+            reservoirs.as_ref().map_or(0, |r| r.numresv()),
         );
         let model = CatchmentModel::new(
             topology,
@@ -253,6 +286,10 @@ impl CatchmentRuntime {
             params,
             state,
         )?;
+        let model = match reservoirs {
+            Some(r) => model.with_reservoirs(r),
+            None => model,
+        };
         Ok(Self {
             model,
             lake_columns,
@@ -264,7 +301,7 @@ impl CatchmentRuntime {
     }
 
     /// 一步 `lateral_flow`：从 patch 状态取水量、推进、写回。
-    pub fn step(&mut self, states: &mut [StandardLctSnowSoilState]) -> Result<()> {
+    pub fn step(&mut self, states: &mut [StandardLctSnowSoilState], year: i32) -> Result<()> {
         self.pre_lateral = states.iter().map(|s| s.soil_water.clone()).collect();
         let mut patches = states
             .iter()
@@ -290,7 +327,7 @@ impl CatchmentRuntime {
                 }
             })
             .collect::<Vec<_>>();
-        let fluxes = self.model.step(&mut patches)?;
+        let fluxes = self.model.step(&mut patches, year)?;
         for ((state, patch), lake) in states
             .iter_mut()
             .zip(patches)
@@ -343,6 +380,10 @@ impl CatchmentRuntime {
         acc1d(&m.acc.wdsrf_bsnhru_ta, &mut h.wdsrf_bsnhru);
         acc1d(&m.veloc_bsnhru_ta, &mut h.veloc_bsnhru);
         acc1d(&m.xsubs_hru, &mut h.xsubs_hru);
+        // `:455-457`
+        acc1d(&m.reservoir_flow.volresv_ta, &mut h.volresv);
+        acc1d(&m.reservoir_flow.qresv_in_ta, &mut h.qresv_in);
+        acc1d(&m.reservoir_flow.qresv_out_ta, &mut h.qresv_out);
     }
 
     /// `hist_basin_out`：写一条记录（`<case>_hist_basin_<suffix>.nc`），然后清零。
@@ -435,6 +476,35 @@ impl CatchmentRuntime {
                 },
             ),
         ];
+        // `:298-371`：水库量按 HydroLAKES 编号汇总（同一湖的多个水库相加）。
+        let reservoirs = self
+            .model
+            .reservoirs
+            .as_ref()
+            .filter(|r| !r.resv_hylak_id.is_empty());
+        let reservoir_fields: Vec<(&str, &str, &str, Vec<f64>)> = match reservoirs {
+            Some(r) => vec![
+                (
+                    "volresv",
+                    "reservoir water volume",
+                    "m^3",
+                    r.gather(&mean(&h.volresv, steps)),
+                ),
+                (
+                    "qresv_in",
+                    "reservoir inflow",
+                    "m^3/s",
+                    r.gather(&mean(&h.qresv_in, steps)),
+                ),
+                (
+                    "qresv_out",
+                    "reservoir outflow",
+                    "m^3/s",
+                    r.gather(&mean(&h.qresv_out, steps)),
+                ),
+            ],
+            None => Vec::new(),
+        };
         std::fs::create_dir_all(directory)
             .with_context(|| format!("cannot create {}", directory.display()))?;
         let path = directory.join(format!("{stem}_hist_basin_{}.nc", record.suffix));
@@ -462,6 +532,12 @@ impl CatchmentRuntime {
             let mut v = file.add_variable::<i32>("hru_type", &["hydrounit"])?;
             v.put_values(&hru_type, ..)?;
             v.put_attribute("long_name", "index of hydrological units inside basin")?;
+            if let Some(r) = reservoirs {
+                file.add_dimension("reservoir", r.resv_hylak_id.len())?;
+                let mut v = file.add_variable::<i32>("resv_hylak_id", &["reservoir"])?;
+                v.put_values(&r.resv_hylak_id, ..)?;
+                v.put_attribute("long_name", "HydroLAKE ID of reservoirs")?;
+            }
             let mut time = file.add_variable::<i32>("time", &["time"])?;
             time.put_attribute("long_name", "time")?;
             time.put_attribute("units", "minutes since 1900-1-1 0:0:0")?;
@@ -474,6 +550,15 @@ impl CatchmentRuntime {
                 v.put_attribute("long_name", *long_name)?;
                 v.put_attribute("units", *units)?;
             }
+            for (name, long_name, units, _) in &reservoir_fields {
+                let mut v = file.add_variable::<f64>(name, &["time", "reservoir"])?;
+                if compress_level > 0 {
+                    v.set_compression(i32::from(compress_level), true)?;
+                }
+                v.put_attribute("long_name", *long_name)?;
+                v.put_attribute("units", *units)?;
+                v.put_attribute("missing_value", SPVAL)?;
+            }
             file
         } else {
             netcdf::append(&path).with_context(|| format!("cannot reopen {}", path.display()))?
@@ -484,6 +569,11 @@ impl CatchmentRuntime {
             .context("time disappeared")?
             .put_values(&[label], t..t + 1)?;
         for (name, _, _, _, values) in &fields {
+            file.variable_mut(name)
+                .with_context(|| format!("{name} disappeared"))?
+                .put_values(values, (t..t + 1, ..))?;
+        }
+        for (name, _, _, values) in &reservoir_fields {
             file.variable_mut(name)
                 .with_context(|| format!("{name} disappeared"))?
                 .put_values(values, (t..t + 1, ..))?;
@@ -680,6 +770,28 @@ impl CatchmentRuntime {
             v.put_attribute("missing_value", SPVAL)?;
             if let Some(units) = units {
                 v.put_attribute("units", *units)?;
+            }
+        }
+        // `:191-225`
+        if let Some(r) = self
+            .model
+            .reservoirs
+            .as_ref()
+            .filter(|r| !r.resv_hylak_id.is_empty())
+        {
+            file.add_dimension("reservoir", r.resv_hylak_id.len())?;
+            let mut v = file.add_variable::<i32>("resv_hylak_id", &["reservoir"])?;
+            v.put_values(&r.resv_hylak_id, ..)?;
+            v.put_attribute("long_name", "HydroLAKE ID of reservoirs")?;
+            for (name, values, units) in [
+                ("volresv_total", &r.volresv_total, "m^3"),
+                ("qresv_mean", &r.qresv_mean, "m^3/s"),
+                ("qresv_flood", &r.qresv_flood, "m^3/s"),
+            ] {
+                let mut v = file.add_variable::<f64>(name, &["reservoir"])?;
+                v.set_compression(1, true)?;
+                v.put_values(&r.gather(values), ..)?;
+                v.put_attribute("units", units)?;
             }
         }
         file.close()?;

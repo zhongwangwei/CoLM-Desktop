@@ -376,7 +376,7 @@ impl SpatialRuntime {
                 timer.mark("patches");
                 // `CoLM.F90:544-546`：`lateral_flow (idate(1), deltim)`，预热期也做。
                 if let Some(catchment) = self.catchment.as_mut() {
-                    catchment.step(&mut next_states)?;
+                    catchment.step(&mut next_states, clock.end_time.year)?;
                 }
                 timer.mark("catchment lateral flow");
                 // `CoLM.F90:559-563`：陆面步之后、`hist_out` 之前汇流；预热期不汇流。

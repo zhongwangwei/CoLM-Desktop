@@ -68,7 +68,7 @@ CoLM Desktop 将 CoLM202X 的站点与空间建例、参数约束、三阶段运
 | 结果分析工作台 | 七个分栏覆盖总览、变量目录、时间序列、可选变量评估、多站点排名、过程诊断及 PDF/HTML/CSV/JSON/Markdown 导出 |
 | 中英文界面 | 首页与主工作流均可切换中文/English，保留常规与专家模式入口 |
 
-当前配置体系覆盖 IGBP / USGS、LCT / PFT / PC、水热、BGC、作物、城市、河道与示踪剂过程；GUI 会根据站点/空间模式与过程约束自动隐藏不适用的参数。Rust 引擎尚未覆盖的组合（例如流域网格上的水库调度、LULCC、示踪剂与向量历史）会在运行前明确提示，不会等前处理跑完才失败。
+当前配置体系覆盖 IGBP / USGS、LCT / PFT / PC、水热、BGC、作物、城市、河道与示踪剂过程；GUI 会根据站点/空间模式与过程约束自动隐藏不适用的参数。经纬度网格（含按 Shapefile 圈定的流域范围）配河湖汇流时，水库调度、LULCC 与示踪剂都可用；水库参数缺省读单元流域文件 `DEF_UnitCatchment_file` 自带的 GRanD 表。流域网格（`DEF_CatchmentMesh_data`）上支持水库调度，LULCC、示踪剂与向量历史尚未覆盖；这类组合会在运行前明确提示，不会等前处理跑完才失败。
 参数目录与操作说明见 [`docs/parameter-catalog.md`](docs/parameter-catalog.md)、[`docs/parameter-gui-guide.md`](docs/parameter-gui-guide.md) 和 [`docs/parameter-default-preservation.md`](docs/parameter-default-preservation.md)。上游代码中发现并已在本仓库修复的缺陷记录在 [`docs/upstream-bugs.md`](docs/upstream-bugs.md)。
 
 ## 使用流程

@@ -11,11 +11,13 @@
 use colm_core::binary128::Quad;
 use colm_core::LibmPow;
 use colm_init::catch_network::{basin_surface, CatchState, RiverLakeNetwork};
+use colm_init::catch_reservoir::CatchReservoirs;
 
 const GRAV: f64 = 9.80616;
 const INV_GRAV: f64 = 0.101_976_716_676_048_52;
 const HALF_GRAV: f64 = 4.90308;
 const FRICTION_COEF: f64 = 0.008_825_544;
+const TWO_GRAV: f64 = 19.61232;
 const RIVERMIN: f64 = 1.0e-5;
 const VOLUMEMIN: f64 = 1.0e-5;
 
@@ -31,6 +33,45 @@ pub struct RiverAccum {
     pub ntacc_bsn: Vec<f64>,
 }
 
+/// 水库的运行量（`volresv`、`qresv_in/out`，跨步保留）与本步的时间累加（`*_ta`），水库序。
+#[derive(Debug, Clone, Default)]
+pub struct ReservoirFlow {
+    pub volresv: Vec<f64>,
+    pub qresv_in: Vec<f64>,
+    pub qresv_out: Vec<f64>,
+    pub volresv_ta: Vec<f64>,
+    pub qresv_in_ta: Vec<f64>,
+    pub qresv_out_ta: Vec<f64>,
+}
+
+impl ReservoirFlow {
+    pub fn new(numresv: usize) -> Self {
+        let zeros = vec![0.0; numresv];
+        Self {
+            volresv: zeros.clone(),
+            qresv_in: zeros.clone(),
+            qresv_out: zeros.clone(),
+            volresv_ta: zeros.clone(),
+            qresv_in_ta: zeros.clone(),
+            qresv_out_ta: zeros,
+        }
+    }
+}
+
+/// `DEF_Reservoir_Method > 0` 时的水库参数与运行量。
+pub struct Reservoirs<'a> {
+    pub table: &'a CatchReservoirs,
+    pub flow: &'a mut ReservoirFlow,
+}
+
+impl Reservoirs<'_> {
+    /// 流域 `i` 是已建成（`year >= dam_build_year`）的水库或受控湖时返回水库序号。
+    fn built(&self, network: &RiverLakeNetwork, i: usize, year: i32) -> Option<usize> {
+        self.table.bsn2resv[i]
+            .filter(|&r| network.lake_type[i] >= 2 && year >= self.table.dam_build_year[r])
+    }
+}
+
 fn q(x: f64) -> Quad {
     Quad::from_f64(x)
 }
@@ -40,6 +81,8 @@ pub fn river_lake_flow(
     network: &RiverLakeNetwork,
     state: &mut CatchState,
     acc: &mut RiverAccum,
+    mut reservoirs: Option<Reservoirs<'_>>,
+    year: i32,
     dt: f64,
 ) -> usize {
     let n = network.lake_id.len();
@@ -115,8 +158,15 @@ pub fn river_lake_flow(
                 }
                 let bedelv_fc;
                 if down > 0 {
-                    // `:189` `MAX_EXPR (bedelv, bedelv_ds)`；水库/受控湖的坝高（方法 > 0）未移植。
-                    bedelv_fc = network.bedelv[i].max(network.bedelv_ds[i]);
+                    // `:189` `MAX_EXPR (bedelv, bedelv_ds)`；已建成的水库/受控湖抬到坝顶（`:190-196`）。
+                    let mut fc = network.bedelv[i].max(network.bedelv_ds[i]);
+                    if let Some(r) = reservoirs
+                        .as_ref()
+                        .and_then(|r| r.built(network, i, year).map(|k| r.table.dam_elv[k]))
+                    {
+                        fc = fc.max(r);
+                    }
+                    bedelv_fc = fc;
                     // `:197-198` `MAX_EXPR ((w + bedelv) - bedelv_fc, 0)`
                     height_up = ((w + network.bedelv[i]) - bedelv_fc).max(0.0);
                     height_dn = ((wdsrf_ds[i] + network.bedelv_ds[i]) - bedelv_fc).max(0.0);
@@ -213,6 +263,16 @@ pub fn river_lake_flow(
                 let limit = ((height_up - height_dn) / dt_this) * area;
                 hflux_fc[i] = hflux_fc[i].max(q(limit));
             }
+            // `:306-314`：已建成的水库不走界面通量，由调度放流（见下）。
+            if network.lake_type[i] == 2
+                && reservoirs
+                    .as_ref()
+                    .is_some_and(|r| r.built(network, i, year).is_some())
+            {
+                hflux_fc[i] = Quad::ZERO;
+                mflux_fc[i] = Quad::ZERO;
+                zgrad_dn[i] = Quad::ZERO;
+            }
             sum_h[i] = sum_h[i] + hflux_fc[i];
             sum_m[i] = sum_m[i] + mflux_fc[i];
         }
@@ -223,6 +283,46 @@ pub fn river_lake_flow(
                     sum_h[d] = sum_h[d] - hflux_fc[i];
                     sum_m[d] = sum_m[d] - mflux_fc[i];
                     sum_z[d] = sum_z[d] - zgrad_dn[i];
+                }
+            }
+        }
+        // `:334-372` 水库调度：入流是推完上游之后的 `-Σh`，放流按 `reservoir_operation`。
+        if let Some(r) = reservoirs.as_mut() {
+            let mut hflux_resv = vec![Quad::ZERO; n];
+            let mut mflux_resv = vec![Quad::ZERO; n];
+            for i in 0..n {
+                if !filter[i] || network.lake_type[i] != 2 || network.riverdown[i] == -1 {
+                    continue;
+                }
+                let Some(k) = r.built(network, i, year) else {
+                    continue;
+                };
+                let w = state.wdsrf_bsn[i];
+                let qin = (-sum_h[i]).to_f64();
+                let vol = network.lakeinfo[i].volume(w);
+                // `:349` `vol > total * 1e-4`
+                let qout = if vol > r.table.volresv_total[k] * 1.0e-4 {
+                    r.table.operation(k, qin, vol)
+                } else {
+                    0.0
+                };
+                r.flow.qresv_in[k] = qin;
+                r.flow.volresv[k] = vol;
+                r.flow.qresv_out[k] = qout;
+                hflux_fc[i] = q(qout);
+                // `:357` `(r16) (sqrt (w * 19.61232) * qout)`
+                mflux_fc[i] = q((w * TWO_GRAV).sqrt() * qout);
+                sum_h[i] = sum_h[i] + hflux_fc[i];
+                sum_m[i] = sum_m[i] + mflux_fc[i];
+                hflux_resv[i] = -hflux_fc[i];
+                mflux_resv[i] = -mflux_fc[i];
+            }
+            for i in 0..n {
+                if filter[i] {
+                    if let Some(d) = network.ilocdown[i] {
+                        sum_h[d] = sum_h[d] + hflux_resv[i];
+                        sum_m[d] = sum_m[d] + mflux_resv[i];
+                    }
                 }
             }
         }
@@ -420,6 +520,17 @@ pub fn river_lake_flow(
                     let value = (state.wdsrf_bsn[i] - (info.depth[0] - info.depth0[k])).max(0.0);
                     state.wdsrf_bsnhru[h] = value;
                     acc.wdsrf_bsnhru_ta[h] = dt_sys.mul_add(value, acc.wdsrf_bsnhru_ta[h]);
+                }
+            }
+            // `:554-562` `FMA (x, dt, x_ta)`
+            if network.lake_type[i] == 2 {
+                if let Some(r) = reservoirs.as_mut() {
+                    if let Some(k) = r.built(network, i, year) {
+                        let f = &mut *r.flow;
+                        f.volresv_ta[k] = f.volresv[k].mul_add(dt_sys, f.volresv_ta[k]);
+                        f.qresv_in_ta[k] = f.qresv_in[k].mul_add(dt_sys, f.qresv_in_ta[k]);
+                        f.qresv_out_ta[k] = f.qresv_out[k].mul_add(dt_sys, f.qresv_out_ta[k]);
+                    }
                 }
             }
         }

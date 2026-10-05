@@ -12,6 +12,15 @@ use netcdf::types::{FloatType, IntType, NcVariableType};
 
 use crate::{restart::validate_restart_compression, RestartDate};
 
+/// 水库参数表（`MOD_Grid_Reservoir.F90:79-83`）：`DEF_ReservoirPara_file` 未给（`'null'` 或空）时读
+/// 源单元流域文件 `DEF_UnitCatchment_file`，它自带 GRanD 的 `dam_*` 表（源编号，区域模式也用它）。
+pub fn reservoir_parameter_file(given: Option<&str>, unit_catchment: &Path) -> PathBuf {
+    match given.map(str::trim_end) {
+        Some(value) if !value.is_empty() && value != "null" => PathBuf::from(value),
+        _ => unit_catchment.to_path_buf(),
+    }
+}
+
 const RESTART_SCHEMA_VERSION: i32 = 2;
 const UCATCH_IDENTITY_VERSION: f64 = 1.0;
 const BIFURCATION_SIGNATURE_VERSION: f64 = 1.0;

@@ -29892,3 +29892,29 @@ Fortran 内核没有对应的改动：它的 `acc1d` 是对整个数组的循环
 
 测试：新增 `spatial_cases_hide_site_fields_and_lock_the_generated_grid`（流域网格与经纬度网格两种宏集合）；GUI 后端 164 个、
 全部 `gui/tests`、`check-gui`、clippy、fmt 通过。
+
+## 第 579 轮：水库调度——格点水库参数缺省读单元流域文件；流域网格移植水库
+
+**格点河湖汇流（经纬度网格，含按 Shapefile 圈定的流域范围）**：Rust 早已支持水库、LULCC 与示踪物，但
+`DEF_ReservoirPara_file` 缺省是 `'null'`，GUI 只打开 `DEF_Reservoir_Method = 1` 时两个引擎都打不开参数表。单元流域文件
+（`grid_routing_data_15min.nc`）本身带 GRanD 的 `dam_*` 表（源编号，区域模式也要求源编号），所以改为未给（`'null'` 或空）时
+读 `DEF_UnitCatchment_file`：vendor `MOD_Grid_Reservoir.F90:79-83`，Rust `colm_init::gridriver::reservoir_parameter_file`
+（`colm-rs` 两处、`mkinidata-rs` 冷启动）。GUI 给这一项加了"留空读单元流域文件"的标签。
+
+对照 `tmp/gvpair.sh`（0.5° 网格 110–112E/23–25N，2 天，`--preprocessors fortran`，不给参数文件）：两边 exit 0，
+`files ok 286`，`gridriver` 重启的 `volresv` 3697 座里 3551 座非零、逐位一致，unitcat history 有 `volresv/qresv_in/qresv_out`。
+
+**流域网格（`DEF_CatchmentMesh_data`）**：照上游 `MOD_Catch_Reservoir` 移植，参数仍读 `DEF_dir_runtime/HydroLAKES_Reservoir.nc`
+（网格文件只有 `lake_id` 与出口像元 `ilat/ilon_outlet`，按两者同时相等匹配；GRanD 表没有坝高与 HydroLAKES 编号，珠江 58 个
+水库按 15′ 格只能对上 16 个，不能替代）。
+- `colm_init::catch_reservoir::CatchReservoirs`：`reservoir_init` 的坝高 `MIN(MAX(MAX(dh, wtsrfelv-bedelv), surface(vol)), 335)`、
+  坝顶高程、各级库容与 `qresv_normal = FMA(qmean, 0.25, (normal*0.7)/15552000)`；`operation` 按 GIMPLE 的 `pow`/`FMA` 形状；
+  `gather` 同一湖的多个水库按序相加。
+- `river.rs`：已建成（`year >= dam_build_year`，`year` 是步末 `idate(1)`）的水库/受控湖界面河床抬到坝顶；水库截流后按
+  `-Σh`（r16 推完上游之后）调度放流，`mflux = (r16)(sqrt(w*19.61232)*qout)`，再推给下游；`*_ta` 是 `FMA(x, dt, ta)`。
+- basin history 加 `reservoir` 维、`resv_hylak_id` 与 `volresv/qresv_in/qresv_out`，`catch_parameters.nc` 加
+  `volresv_total/qresv_mean/qresv_flood`；`check_catchment` 去掉对水库的拒绝。
+
+对照 `tmp/pvpair.sh`（珠江 250 km² 网格，2 天，`DEF_Reservoir_Method = 1`，58 个水库）：Rust 139 s、Fortran 801 s，
+`files ok 1708`；单独核对 history 与参数文件里 8 个水库变量全部逐位相等。内流区水库的未赋值读取记为上游缺陷第 76 条，
+vendor 置 0（重编 catchment 内核后 Fortran 再跑一遍仍 `files ok 1708`）。不开水库的珠江 3 天回归仍逐位一致（Rust 320 s，`files ok 1689`）。

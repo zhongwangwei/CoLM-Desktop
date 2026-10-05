@@ -681,6 +681,17 @@
   `pc_unvegetated_record` 按 Fortran 调用方的原值组装记录：patch 级湍流量取前置 `GroundFluxes`，`zol/rib/ustar/qstar/tstar`
   与 `raw` 取 `THERMAL` 开头的 0，`z0m = sum(z0m_p*pftfrac)`。
 
+### 76. 流域网格内流区水库的 `volresv/qresv_in/qresv_out` 未赋值就进时间平均
+
+- **位置**：`main/HYDRO/MOD_Catch_Reservoir.F90:reservoir_init`（`allocate` 后不赋初值）；
+  `main/HYDRO/MOD_Catch_RiverLakeFlow.F90:342`（调度只对 `riverdown /= -1` 的水库做）与 `:554-562`（时间平均对所有
+  已建成的 `lake_type == 2` 流域做）。
+- **原因**：下游为 -1（内流区）的水库从不进调度分支，`volresv/qresv_in/qresv_out` 一直是 `allocate` 出来的未定义值，
+  却每个子步按 `dt` 累进 `*_ta`，写进 basin history。
+- **影响**：珠江 250 km² 网格有一个这样的水库（hylak 1386330，`build_year = -99`）。macOS/gfortran 上新分配的内存恰好是 0，
+  输出为 0；换平台或内存复用时可能是任意值。
+- **处理**（第 579 轮）：vendor 在 `allocate` 时置 0（现有输出逐位不变）；Rust 的 `ReservoirFlow::new` 同样从 0 起。
+
 ## 二、TRACER 编译开关改变了物理（需要上游确认哪一边是对的）
 
 这一版上游在很多地方给 TRACER 构建和非 TRACER 构建写了**不同的物理**，不只是记账不同。

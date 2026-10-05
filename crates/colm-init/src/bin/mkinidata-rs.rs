@@ -367,6 +367,15 @@ fn write_gridriver_namelist_restart(namelist: &Path, run: &SpatialNamelistRun) -
     let document = parse(&text)
         .with_context(|| format!("cannot parse case namelist {}", namelist.display()))?;
     let source_catchment = PathBuf::from(required_string(&document, "DEF_UnitCatchment_file")?);
+    let reservoir_method = namelist_i32(&document, "DEF_Reservoir_Method", 0)?;
+    let reservoir_parameters = if reservoir_method == 1 {
+        Some(colm_init::gridriver::reservoir_parameter_file(
+            optional_string(&document, "DEF_ReservoirPara_file")?.as_deref(),
+            &source_catchment,
+        ))
+    } else {
+        None
+    };
     // `DEF_UnitCatchment_regional`：上游在 mksrfdata 里由 landpatch 裁出区域网络
     // （`unitcatchment_regional_build`），之后各处读的都是它（`get_unitcatchment_file`）。
     // Rust 的 mksrfdata 拿不到面积映射，在这里生成（第 547 轮）。
@@ -386,11 +395,6 @@ fn write_gridriver_namelist_restart(namelist: &Path, run: &SpatialNamelistRun) -
     } else {
         source_catchment
     };
-    let reservoir_method = namelist_i32(&document, "DEF_Reservoir_Method", 0)?;
-    let reservoir_parameters = (reservoir_method == 1)
-        .then(|| required_string(&document, "DEF_ReservoirPara_file"))
-        .transpose()?
-        .map(PathBuf::from);
     let file = write_gridriver_cold_restart(GridRiverColdStartConfig {
         compression_level: run.compression_level,
         unit_catchment: &unit_catchment,
@@ -908,6 +912,14 @@ fn namelist_path_is_set(document: &colm_namelist::Document, field: &str) -> Resu
                 && !value.eq_ignore_ascii_case("null")
                 && is_default(field, &Value::Str(value.into())) != Some(true))
         }
+        Some(_) => bail!("{field} must be a character value"),
+    }
+}
+
+fn optional_string(document: &colm_namelist::Document, field: &str) -> Result<Option<String>> {
+    match document.get(field) {
+        Some(Value::Str(value)) => Ok(Some(value.to_owned())),
+        None => Ok(None),
         Some(_) => bail!("{field} must be a character value"),
     }
 }

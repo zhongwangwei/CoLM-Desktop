@@ -1232,6 +1232,7 @@ fn run_spatial_segment(
                 time_restarts: block_files.iter().map(|f| f.time.clone()).collect(),
                 basin_restart: &basin_restart,
                 time_step_seconds: config.timestep_seconds,
+                reservoir_method: integer_field(document, "DEF_Reservoir_Method")?,
             },
             &templates,
         )?;
@@ -1335,7 +1336,10 @@ fn run_spatial_segment(
         let reservoir = if integer_field(document, "DEF_Reservoir_Method")? > 0 {
             Some(
                 colm_runtime::river::reservoir::Reservoir::read_with_regional(
-                    Path::new(&string_field(document, "DEF_ReservoirPara_file")?),
+                    &colm_init::gridriver::reservoir_parameter_file(
+                        Some(&string_field(document, "DEF_ReservoirPara_file")?),
+                        Path::new(&string_field(document, "DEF_UnitCatchment_file")?),
+                    ),
                     &network,
                     integer_field(document, "DEF_Reservoir_Method")?,
                     regional_catchment(document, out)?.as_deref(),
@@ -1985,10 +1989,6 @@ fn write_catchment_restarts(
 
 /// CATCHMENT 内核（`CatchLateralFlow`）里 Rust 还没有的组合：入口一次拒绝。
 fn check_catchment(document: &Document) -> Result<()> {
-    ensure!(
-        integer_field(document, "DEF_Reservoir_Method")? == 0,
-        "catchment lateral flow with reservoirs (DEF_Reservoir_Method > 0) is not ported"
-    );
     ensure!(
         !logical_field(document, "DEF_USE_LULCC")?,
         "catchment lateral flow with DEF_USE_LULCC is not ported"
@@ -3533,7 +3533,10 @@ fn lulcc_transition(
         let reservoir = if integer_field(document, "DEF_Reservoir_Method")? > 0 {
             Some(
                 colm_runtime::river::reservoir::Reservoir::read_with_regional(
-                    Path::new(&string_field(document, "DEF_ReservoirPara_file")?),
+                    &colm_init::gridriver::reservoir_parameter_file(
+                        Some(&string_field(document, "DEF_ReservoirPara_file")?),
+                        Path::new(&string_field(document, "DEF_UnitCatchment_file")?),
+                    ),
                     &network,
                     integer_field(document, "DEF_Reservoir_Method")?,
                     regional_catchment(document, out)?.as_deref(),

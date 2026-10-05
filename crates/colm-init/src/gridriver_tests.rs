@@ -511,3 +511,15 @@ fn temp_dir(label: &str) -> std::path::PathBuf {
     std::fs::create_dir_all(&path).unwrap();
     path
 }
+
+#[test]
+fn reservoir_parameters_default_to_the_unit_catchment_file() {
+    let source = Path::new("/data/grid_routing_data_15min.nc");
+    for given in [None, Some("null"), Some(""), Some("null   ")] {
+        assert_eq!(reservoir_parameter_file(given, source), source);
+    }
+    assert_eq!(
+        reservoir_parameter_file(Some("/data/dams.nc"), source),
+        Path::new("/data/dams.nc")
+    );
+}

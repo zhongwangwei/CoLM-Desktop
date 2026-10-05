@@ -99,9 +99,9 @@ CONTAINS
             allocate (qresv_adjust  (numresv))
             allocate (qresv_normal  (numresv))
 
-            allocate (volresv       (numresv))
-            allocate (qresv_in      (numresv))
-            allocate (qresv_out     (numresv))
+            allocate (volresv       (numresv));  volresv  (:) = 0.
+            allocate (qresv_in      (numresv));  qresv_in (:) = 0.
+            allocate (qresv_out     (numresv));  qresv_out(:) = 0.
 
             allocate (volresv_ta    (numresv))
             allocate (qresv_in_ta   (numresv))

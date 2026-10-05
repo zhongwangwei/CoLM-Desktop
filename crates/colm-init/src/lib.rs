@@ -14,6 +14,7 @@ pub mod canopy_layer_profile {
     pub use colm_core::canopy_layer_profile::*;
 }
 pub mod catch_network;
+pub mod catch_reservoir;
 pub mod canopy_roughness {
     pub use colm_core::canopy_roughness::*;
 }

@@ -11,7 +11,9 @@ use colm_init::catch_network::{
     CatchState, CatchTopology, ElementNeighbour, RiverLakeNetwork, SubsurfaceNetwork,
 };
 
-use super::river::{river_lake_flow, RiverAccum};
+use colm_init::catch_reservoir::CatchReservoirs;
+
+use super::river::{river_lake_flow, ReservoirFlow, Reservoirs, RiverAccum};
 use super::subsurface::{exchange, lateral_fluxes, PatchSoil, PatchWater, SubsurfaceParams};
 
 /// `nsubstep`（`MOD_Catch_LateralFlow.F90:31`）。
@@ -95,6 +97,9 @@ pub struct CatchmentModel {
     /// 单元 HRU 上的 `wdsrf_hru`（m，本步推回之后）。
     pub wdsrf_hru: Vec<f64>,
     pub patch_hru: Vec<usize>,
+    /// `DEF_Reservoir_Method > 0` 时的水库（`reservoir_init`）与运行量。
+    pub reservoirs: Option<CatchReservoirs>,
+    pub reservoir_flow: ReservoirFlow,
 }
 
 impl CatchmentModel {
@@ -139,12 +144,25 @@ impl CatchmentModel {
             params,
             state,
             patch_hru,
+            reservoirs: None,
+            reservoir_flow: ReservoirFlow::default(),
         })
     }
 
-    /// `lateral_flow (year, deltime)`（不含水库，见调用方的入口检查）。
+    /// 打开水库调度（`reservoir_init` 之后）。
+    pub fn with_reservoirs(mut self, reservoirs: CatchReservoirs) -> Self {
+        self.reservoir_flow = ReservoirFlow::new(reservoirs.numresv());
+        self.reservoirs = Some(reservoirs);
+        self
+    }
+
+    /// `lateral_flow (year, deltime)`；`year` 是 `idate(1)`（步末）。
     #[allow(clippy::too_many_lines)]
-    pub fn step(&mut self, patches: &mut [PatchLateralState]) -> Result<PatchLateralFluxes> {
+    pub fn step(
+        &mut self,
+        patches: &mut [PatchLateralState],
+        year: i32,
+    ) -> Result<PatchLateralFluxes> {
         let topology = &self.topology;
         let numpatch = topology.numpatch();
         let numhru = topology.numhru();
@@ -174,6 +192,10 @@ impl CatchmentModel {
         self.acc.discharge_ta.fill(0.0);
         self.acc.wdsrf_bsnhru_ta.fill(0.0);
         self.acc.momen_bsnhru_ta.fill(0.0);
+        // `:163-167`
+        self.reservoir_flow.volresv_ta.fill(0.0);
+        self.reservoir_flow.qresv_in_ta.fill(0.0);
+        self.reservoir_flow.qresv_out_ta.fill(0.0);
 
         // `worker_push_data (push_elmhru2bsnhru, wdsrf_hru, wdsrf_bsnhru, spval)`
         self.state.wdsrf_bsnhru = self.river.basin_hru.to_basin(&wdsrf_hru);
@@ -187,7 +209,18 @@ impl CatchmentModel {
                 &mut self.acc.momen_bsnhru_ta,
                 dt,
             );
-            river_lake_flow(&self.river, &mut self.state, &mut self.acc, dt);
+            let reservoirs = self.reservoirs.as_ref().map(|table| Reservoirs {
+                table,
+                flow: &mut self.reservoir_flow,
+            });
+            river_lake_flow(
+                &self.river,
+                &mut self.state,
+                &mut self.acc,
+                reservoirs,
+                year,
+                dt,
+            );
         }
 
         // `:193-215`
@@ -209,6 +242,20 @@ impl CatchmentModel {
             } else {
                 0.0
             };
+        }
+
+        // `:214-226`：未建成的水库记 `spval`。
+        if let Some(table) = &self.reservoirs {
+            let f = &mut self.reservoir_flow;
+            for k in 0..table.numresv() {
+                for ta in [&mut f.volresv_ta, &mut f.qresv_in_ta, &mut f.qresv_out_ta] {
+                    ta[k] = if year >= table.dam_build_year[k] {
+                        ta[k] / deltime
+                    } else {
+                        colm_core::MISSING
+                    };
+                }
+            }
         }
 
         // `:229-235` 推回单元 HRU，再到 patch。
