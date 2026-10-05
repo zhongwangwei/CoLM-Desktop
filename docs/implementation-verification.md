@@ -29776,3 +29776,6 @@ history：`rsur`/`rsub`/`rnof`/`wat`/`h2osoi` 取侧向流之后的值，`xerr` 
 colm-core/colm-runtime/colm-init/colm-srfdata 的单元测试与黄金文件判官）。与 Fortran 的端到端黄金回归（`golden` 作业）只在
 带 PLUMBER2 数据的自托管 runner 上跑，目前没有注册这样的 runner，所以 CI 里那一作业一直跳过（`golden-status` 会给出警告）；
 逐位对照靠本地配对回归，结果记在各轮。
+
+同轮补：`oracle/fixtures/PROVENANCE.md` 也删去（站点夹具的字段出处说明，没有代码读它）；`docs/design.md` 里指向它的一处改掉，
+历史计划文档（`plan-m0-m1.md`、`plan-m3.md`）照原样保留。
