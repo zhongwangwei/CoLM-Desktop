@@ -346,8 +346,13 @@ CONTAINS
          allocate (wdata2d (nlon,nlat))
          wdata2d(:,:) = spval
 
+         ! The output grid may be a window of the full grid (route history crops the unitcat
+         ! file to the model domain); elements outside it are routed but not written.
          DO i = 1, totalvlen
-            wdata2d(x_vec(i),y_vec(i)) = wdata(i)
+            IF ((x_vec(i) >= 1) .and. (x_vec(i) <= nlon) .and. &
+                (y_vec(i) >= 1) .and. (y_vec(i) <= nlat)) THEN
+               wdata2d(x_vec(i),y_vec(i)) = wdata(i)
+            ENDIF
          ENDDO
 
          IF (present(itime_in_file)) THEN

@@ -1,7 +1,7 @@
 //! 河道 history（`MOD_Grid_RiverLakeHist` 与 `MOD_Hist.F90:4749-4790`，`DEF_HIST_mode = 'one'`）。
 //!
 //! 每条 history 记录写两处：
-//! - `<case>_hist_unitcat_<suffix>.nc`：单元流域网格（`lon_ucat`×`lat_ucat`，截到网络的外包框）上的 12 个量，
+//! - `<case>_hist_unitcat_<suffix>.nc`：单元流域网格（`lon_ucat`×`lat_ucat`，截到模拟范围）上的 12 个量，
 //!   单元流域的值铺在它的 `(seq_x, seq_y)`，其余是 `spval`；
 //! - 网格 history 里的 6 个量与静态的 `mask_complete_upstream_regird`：先把单元流域的值经
 //!   `push_ucat2grid`/`push_ucat2inpm` 与 `remap_patch2inpm` 回到 patch，再按各自的过滤与分母聚合。
@@ -57,9 +57,12 @@ pub struct RiverHistoryWriter {
     stem: String,
     lon: Vec<f64>,
     lat: Vec<f64>,
-    /// unitcat 文件的输出窗口（`route_hist_window`）：网络里全部单元流域的外包框，0 起的
-    /// `(x0, y0, nlon, nlat)`。区域子网只铺它自己的河系，不是整张全球 15′ 网格。
+    /// unitcat 文件的输出窗口（`route_hist_window`）：格心落在模拟范围里的 15′ 格子，0 起的
+    /// `(x0, y0, nlon, nlat)`，与陆面 history 对齐。河系照旧整条汇流，窗口外的只是不写。
     window: (usize, usize, usize, usize),
+    /// 全球 15′ 网格的格心（窗口按它截取）。
+    lon_all: Vec<f64>,
+    lat_all: Vec<f64>,
     /// 开水库时的 `dam_GRAND_ID`（按水库序号），建 unitcat 文件骨架时写成 `resv_GRAND_ID`。
     pub reservoir_ids: Option<Vec<i32>>,
     /// `DEF_HIST_CompressLevel`：unitcat 文件里逐时间量（河道量、分汊矩阵、示踪物/泥沙量、水库量）
@@ -71,19 +74,28 @@ pub struct RiverHistoryWriter {
     pub rest_compress_level: u8,
 }
 
-/// `route_hist_window`：单元流域格点下标的外包框（0 起 `(x0, y0, nlon, nlat)`）；空网络取整张网格。
-fn unitcat_window(network: &RiverNetwork) -> (usize, usize, usize, usize) {
-    let (Some(&xmin), Some(&xmax)) = (network.x.iter().min(), network.x.iter().max()) else {
-        return (0, 0, network.nlon, network.nlat);
+/// `route_hist_window`：格心严格落在 `(west, east, south, north)` 里的连续下标段（`lat` 自北向南）。
+/// 跨日界线（`west >= east`）或一个格子都没有时取整张网格。
+fn domain_window(
+    lon: &[f64],
+    lat: &[f64],
+    bounds: (f64, f64, f64, f64),
+) -> (usize, usize, usize, usize) {
+    let (west, east, south, north) = bounds;
+    let full = (0, 0, lon.len(), lat.len());
+    if west >= east {
+        return full;
+    }
+    let span = |values: &[f64], low: f64, high: f64| {
+        let inside: Vec<usize> = (0..values.len())
+            .filter(|&i| values[i] > low && values[i] < high)
+            .collect();
+        Some((*inside.first()?, *inside.last()? - inside.first()? + 1))
     };
-    let ymin = *network.y.iter().min().expect("y has as many entries as x");
-    let ymax = *network.y.iter().max().expect("y has as many entries as x");
-    (
-        xmin as usize - 1,
-        ymin as usize - 1,
-        (xmax - xmin) as usize + 1,
-        (ymax - ymin) as usize + 1,
-    )
+    match (span(lon, west, east), span(lat, south, north)) {
+        (Some((x0, nx)), Some((y0, ny))) => (x0, y0, nx, ny),
+        _ => full,
+    }
 }
 
 /// `worker_remap_data_grid2pset`（填充值 `spval`）：`average` 除以非缺测份的面积和，`sum` 不除。
@@ -181,10 +193,7 @@ impl RiverHistoryWriter {
                 }
             })
             .collect::<Result<Vec<_>>>()?;
-        let window = unitcat_window(network);
-        let (x0, y0, nx, ny) = window;
-        let lon: Vec<f64> = lon[x0..x0 + nx].to_vec();
-        let lat: Vec<f64> = lat[y0..y0 + ny].to_vec();
+        let window = (0, 0, lon.len(), lat.len());
         Ok(Self {
             grid,
             filter_ucat,
@@ -196,6 +205,8 @@ impl RiverHistoryWriter {
             allups_mask,
             directory: directory.as_ref().to_path_buf(),
             stem: stem.into(),
+            lon_all: lon.clone(),
+            lat_all: lat.clone(),
             lon,
             lat,
             window,
@@ -204,6 +215,16 @@ impl RiverHistoryWriter {
             hist_compress_level: 1,
             rest_compress_level: 1,
         })
+    }
+
+    /// unitcat 文件只写模拟范围（`DEF_domain`）里的格子，与陆面 history 对齐。
+    pub fn with_domain(mut self, bounds: (f64, f64, f64, f64)) -> Self {
+        let window = domain_window(&self.lon_all, &self.lat_all, bounds);
+        let (x0, y0, nx, ny) = window;
+        self.lon = self.lon_all[x0..x0 + nx].to_vec();
+        self.lat = self.lat_all[y0..y0 + ny].to_vec();
+        self.window = window;
+        self
     }
 
     /// 向量 history 的 `mask_complete_upstream_regird`：逐 patch 的掩码与 `filter_ucat`
@@ -582,9 +603,11 @@ impl RiverHistoryWriter {
         let to_grid = |values: &[f64]| {
             let mut grid = vec![SPVAL; nlon * nlat];
             for (i, &value) in values.iter().enumerate() {
-                let x = network.x[i] as usize - 1 - x0;
-                let y = network.y[i] as usize - 1 - y0;
-                grid[y * nlon + x] = value;
+                // 窗口外的单元流域照常汇流，只是不写。
+                let (x, y) = (network.x[i] as usize - 1, network.y[i] as usize - 1);
+                if (x0..x0 + nlon).contains(&x) && (y0..y0 + nlat).contains(&y) {
+                    grid[(y - y0) * nlon + (x - x0)] = value;
+                }
             }
             grid
         };
@@ -922,3 +945,7 @@ fn complete_upstream_mask(network: &RiverNetwork, routing: &RunoffRouting) -> Ve
     }
     mask
 }
+
+#[cfg(test)]
+#[path = "history_tests.rs"]
+mod history_tests;

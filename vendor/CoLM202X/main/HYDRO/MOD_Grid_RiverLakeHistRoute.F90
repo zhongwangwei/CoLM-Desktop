@@ -88,9 +88,10 @@ MODULE MOD_Grid_RiverLakeHistRoute
    ! them so the fingerprint can be recomputed without re-plumbing them.
    real(r8), allocatable :: rh_lon_cache(:), rh_lat_cache(:)
 
-   ! Output window of the single unitcat file: the bounding box of the unit
-   ! catchments in the network (a regional subset covers its river systems only,
-   ! not the whole 15-minute globe).  Grouped SPMD keeps the global grid.
+   ! Output window of the single unitcat file: the unit-catchment cells whose centres lie
+   ! in the model domain (DEF_domain), so the river fields line up with the land history.
+   ! Rivers are still routed over their whole systems; cells outside are just not written.
+   ! A domain across the dateline, and grouped SPMD, keep the global grid.
    integer :: rh_x0 = 1, rh_y0 = 1, rh_nlon = 0, rh_nlat = 0
    integer, allocatable :: rh_xw(:), rh_yw(:)
 
@@ -98,13 +99,29 @@ CONTAINS
 
    SUBROUTINE route_hist_window ()
    IMPLICIT NONE
+   integer :: i, x0, x1, y0, y1
       IF (rh_nlon > 0) RETURN
       rh_x0 = 1;  rh_nlon = griducat%nlon
       rh_y0 = 1;  rh_nlat = griducat%nlat
 #ifdef FLAT_SPMD
-      IF (size(x_ucat_all) > 0) THEN
-         rh_x0 = minval(x_ucat_all);  rh_nlon = maxval(x_ucat_all) - rh_x0 + 1
-         rh_y0 = minval(y_ucat_all);  rh_nlat = maxval(y_ucat_all) - rh_y0 + 1
+      IF (allocated(rh_lon_cache) .and. (DEF_domain%edgew < DEF_domain%edgee)) THEN
+         x0 = 0;  x1 = 0;  y0 = 0;  y1 = 0
+         DO i = 1, size(rh_lon_cache)
+            IF ((rh_lon_cache(i) > DEF_domain%edgew) .and. (rh_lon_cache(i) < DEF_domain%edgee)) THEN
+               IF (x0 == 0) x0 = i
+               x1 = i
+            ENDIF
+         ENDDO
+         DO i = 1, size(rh_lat_cache)
+            IF ((rh_lat_cache(i) > DEF_domain%edges) .and. (rh_lat_cache(i) < DEF_domain%edgen)) THEN
+               IF (y0 == 0) y0 = i
+               y1 = i
+            ENDIF
+         ENDDO
+         IF ((x0 > 0) .and. (y0 > 0)) THEN
+            rh_x0 = x0;  rh_nlon = x1 - x0 + 1
+            rh_y0 = y0;  rh_nlat = y1 - y0 + 1
+         ENDIF
       ENDIF
       rh_xw = x_ucat_all - rh_x0 + 1
       rh_yw = y_ucat_all - rh_y0 + 1

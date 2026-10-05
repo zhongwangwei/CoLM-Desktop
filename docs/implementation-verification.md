@@ -29985,3 +29985,14 @@ unitcat 文件原来铺在整张全球 15′ 网格上（区域河网文件保�
 
 验证：`colm-ncchar` 的往返测试（写入、读回类型是 `NC_CHAR`、逐字节相同）；用户算例副本重跑 Rust，区域文件的 `dam_DamName`
 （47×256）与 Fortran 逐字节相同、属性相同，整例 `files ok 1125`（比第 582 轮多的一个就是这个变量）。
+
+## 第 584 轮：unitcat 输出截到模拟范围，与陆面 history 逐格对齐
+
+第 582 轮把 unitcat 截到区域河网的外包框（92.1–119.1°E、32.4–44.4°N），框里夹着与区域无关的内流小盆地（腾格里、乌兰布和
+一带，出口 -10），看起来是一大片缺测，也仍与陆面网格对不上。现在窗口取格心落在 `DEF_domain` 里的 15′ 格子（vendor
+`route_hist_window`，Rust `RiverHistoryWriter::with_domain`/`domain_window`）；河系照旧整条汇流，窗口外的单元流域只是不写
+（`vector_gather_map2grid_and_write` 跳过越界下标）。跨日界线的范围与分组 SPMD 保持全球网格。
+
+对照（用户算例副本，3 天）：两个引擎 unitcat 都是 32×22、格心 96.375–104.125°E、43.125–37.875°N，与陆面 history 完全相同；
+`files ok 1125`。窗口里河道有值 621 格、陆面有值 459 格，每个陆面格都有河道值；其余 83 格在 Shapefile 边界外，本来就不属于任何
+接收区域径流的河系。单测 `the_unitcat_window_is_the_model_domain`、`a_dateline_or_global_domain_keeps_the_whole_grid`。

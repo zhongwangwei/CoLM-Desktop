@@ -1305,15 +1305,24 @@ fn run_spatial_segment(
             ));
             std::sync::Arc::new(grid)
         });
+        let domain = (
+            real_field(document, "DEF_domain%edgew")?,
+            real_field(document, "DEF_domain%edgee")?,
+            real_field(document, "DEF_domain%edges")?,
+            real_field(document, "DEF_domain%edgen")?,
+        );
         let river_writer = if vector_history && writes_history {
-            Some(colm_runtime::river::history::RiverHistoryWriter::new(
-                &network,
-                &routing,
-                None,
-                &runoff_filter,
-                out.join("history"),
-                name,
-            )?)
+            Some(
+                colm_runtime::river::history::RiverHistoryWriter::new(
+                    &network,
+                    &routing,
+                    None,
+                    &runoff_filter,
+                    out.join("history"),
+                    name,
+                )?
+                .with_domain(domain),
+            )
         } else {
             history_grid
                 .as_ref()
@@ -1326,6 +1335,7 @@ fn run_spatial_segment(
                         out.join("history"),
                         name,
                     )
+                    .map(|writer| writer.with_domain(domain))
                 })
                 .transpose()?
         };
