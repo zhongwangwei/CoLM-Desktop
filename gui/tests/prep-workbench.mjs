@@ -100,7 +100,8 @@ assert.deepEqual(dynamicForcingHtml, [], 'forcing reports must not interpolate p
 
 const shell = await readFile(new URL('../dist/app/shell.js', import.meta.url), 'utf8');
 for (const id of ['prep-site', 'prep-forcing', 'prep-validation', 'prep-ready']) {
-  assert.match(shell, new RegExp(`id: '${id}'`), `workflow must expose ${id}`);
+  assert.match(shell, new RegExp(`id: '${id}'[^\\n]*show: prepHidden`), `preprocessing step ${id} stays out of the workflow`);
 }
+assert.match(shell, /const prepHidden = \(\) => false;/, 'preprocessing is done outside the app');
 
 console.log('prep workbench: naming, readiness blockers, shared artifacts, and handoff are wired');

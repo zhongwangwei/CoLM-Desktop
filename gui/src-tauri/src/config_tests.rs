@@ -2881,5 +2881,18 @@ fn spatial_cases_hide_site_fields_and_lock_the_generated_grid() {
             matches!(mode(&states, "DEF_file_mesh_filter"), FieldMode::Editable),
             "{grid}"
         );
+        for name in [
+            "DEF_BlockInfoFile",
+            "DEF_AverageElementSize",
+            "DEF_nx_blocks",
+            "DEF_ny_blocks",
+            "DEF_PIO_groupsize",
+            "DEF_nIO_eq_nBlock",
+        ] {
+            assert!(
+                matches!(mode(&states, name), FieldMode::Hidden),
+                "{grid}: {name}"
+            );
+        }
     }
 }

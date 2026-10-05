@@ -29918,3 +29918,21 @@ Fortran 内核没有对应的改动：它的 `acc1d` 是对整个数组的循环
 对照 `tmp/pvpair.sh`（珠江 250 km² 网格，2 天，`DEF_Reservoir_Method = 1`，58 个水库）：Rust 139 s、Fortran 801 s，
 `files ok 1708`；单独核对 history 与参数文件里 8 个水库变量全部逐位相等。内流区水库的未赋值读取记为上游缺陷第 76 条，
 vendor 置 0（重编 catchment 内核后 Fortran 再跑一遍仍 `files ok 1708`）。不开水库的珠江 3 天回归仍逐位一致（Rust 320 s，`files ok 1689`）。
+
+## 第 580 轮：GUI 去掉前处理与并行冗余项；开跑前的指纹不再逐个 stat rawdata
+
+- **前处理**：强迫场转换、站点属性、验证数据改在软件外完成。左栏工作流不再出现「前处理」（页面代码保留，
+  `shell.js` 的 `prepHidden`），其余步骤从 1 起重新编号。
+- **计算网格**：空间算例隐藏 `DEF_BlockInfoFile`、`DEF_AverageElementSize`、`DEF_nx/ny_blocks`（只决定 mksrfdata
+  把地表数据切成哪些块，缺省 72×36 对任何范围都可用）与 `DEF_PIO_groupsize`、`DEF_nIO_eq_nBlock`（只用于 Fortran 内核的
+  MPI IO，Rust 不读）。该页改名「计算网格」。
+- **线程数**：Rust 引擎的空间算例把「每个算例的 MPI 进程数」换成「每个算例的线程数」（留空为自动：单算例用全部核，批量平分），
+  经 `run_case`/`run_batch` 的 `threads` 交给 `RAYON_NUM_THREADS`；批量并行算例数按线程数限额。Fortran 引擎仍是 MPI 进程数。
+- **「等待 CPU」卡住**：实际是 `colm-cli` 在算阶段指纹，`directory_fingerprint` 逐个 stat `DEF_dir_rawdata` 的 310 906 个文件。
+  `/Volumes/Data` 是 exFAT 外接盘：`find -type f`（只读目录）9.5 s，`find -ls`（逐个 stat）7 min 8 s；并行 stat 不快
+  （2 万个文件串行 10.9 s、16 路并行 15.4 s，瓶颈在盘），热缓存下重复 stat 只要 0.09 s。现在树里文件超过 2 万个时只记文件名与
+  各级目录的 len/mtime（增删、改名仍能发现，同名原地改写不算变更）；不超过 2 万个的树沿用原来的逐文件指纹，字节不变，已有算例
+  不会因此重跑。大树（rawdata）的指纹格式变了，已有算例下次运行时 mksrfdata 会按「外部输入变了」重跑一次。
+
+测试：`large_trees_track_names_and_directories_without_per_file_stat`、`spatial_cases_hide_site_fields_and_lock_the_generated_grid`
+扩充、`gui/tests/runview.mjs` 线程数断言；colm-cli 指纹 21 个、GUI 后端 164 个、全部 `gui/tests`、`check-gui`、clippy、fmt 通过。

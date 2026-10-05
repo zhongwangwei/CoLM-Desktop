@@ -277,13 +277,42 @@ pub fn input_identity(path: &Path) -> Result<String> {
     ))
 }
 
+/// 目录树超过这么多文件时不再逐个 stat（见 [`directory_fingerprint`]）。
+const PER_FILE_STAT_LIMIT: usize = 20_000;
+
 fn directory_fingerprint(path: &Path) -> std::io::Result<String> {
+    tree_fingerprint(path, PER_FILE_STAT_LIMIT)
+}
+
+fn tree_fingerprint(path: &Path, per_file_stat_limit: usize) -> std::io::Result<String> {
     // ponytail: directory trees use path/size/mtime only; reading samples from
     // tens of thousands of rawdata files delayed every run before MPI started.
     // Add a persisted content manifest only if silent same-size/mtime rewrites
     // become a real input workflow.
+    //
+    // 文件很多的树（rawdata 约三十万个文件）连逐个 stat 也太贵：exFAT 外接盘上冷遍历一次要
+    // 七分钟，开跑前一直停在「等待 CPU」，并行 stat 也不快（瓶颈在盘）。这种树只记文件名与
+    // 各级目录的 len/mtime —— 目录 mtime 随增删、改名而变，同名原地改写不算变更。
+    let mut entries = Vec::new();
+    list_tree(path, &mut entries)?;
     let mut hash = Sha256::new();
-    hash_tree(path, path, &mut hash)?;
+    if entries.iter().filter(|(_, dir)| !dir).count() <= per_file_stat_limit {
+        hash_tree(path, path, &mut hash)?;
+    } else {
+        hash.update(b"names\0");
+        hash.update(metadata_signature(&std::fs::metadata(path)?).as_bytes());
+        hash.update(b"\n");
+        for (p, dir) in &entries {
+            let rel = p.strip_prefix(path).unwrap_or(p).to_string_lossy();
+            hash.update(rel.as_bytes());
+            hash.update(b"\0");
+            if *dir {
+                hash.update(metadata_signature(&std::fs::metadata(p)?).as_bytes());
+                hash.update(b"\0");
+            }
+            hash.update(b"\n");
+        }
+    }
     Ok(format!("{:x}", hash.finalize()))
 }
 
@@ -302,6 +331,20 @@ fn hash_tree(root: &Path, path: &Path, hash: &mut Sha256) -> std::io::Result<()>
             hash_tree(root, &p, hash)?;
         }
         hash.update(b"\n");
+    }
+    Ok(())
+}
+
+/// 按名字排序的先序遍历；类型取 readdir 的 d_type，不额外 stat。
+fn list_tree(path: &Path, out: &mut Vec<(PathBuf, bool)>) -> std::io::Result<()> {
+    let mut entries = std::fs::read_dir(path)?.collect::<std::io::Result<Vec<_>>>()?;
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+        let dir = entry.file_type()?.is_dir();
+        out.push((entry.path(), dir));
+        if dir {
+            list_tree(&entry.path(), out)?;
+        }
     }
     Ok(())
 }

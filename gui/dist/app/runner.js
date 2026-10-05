@@ -28,9 +28,15 @@ $('cpu-capacity').textContent = `检测到 ${cpuCapacity} 个逻辑 CPU；单个
 $('mpi-ranks').max = String(cpuCapacity);
 $('mpi-ranks').addEventListener('input', () => { mpiRanksCustomized = true; });
 
+$('case-threads').max = String(cpuCapacity);
+
 function syncParallelMode() {
   const spatial = !!state.domain && state.domain !== 'site';
   const mpi = spatial && modelEngine() === 'fortran';
+  // Rust 引擎的空间算例用线程数代替 MPI 进程数；站点算例两者都固定为 1。
+  $('mpi-setting').hidden = spatial && !mpi;
+  $('threads-setting').hidden = !(spatial && !mpi);
+  $('threads-capacity').textContent = `最多 ${cpuCapacity} 个线程（本机逻辑 CPU 数）。`;
   if (!mpi && !$('mpi-ranks').disabled && spatial) fortranRanks = $('mpi-ranks').value;
   $('mpi-ranks').disabled = !mpi;
   if (!mpi) $('mpi-ranks').value = '1';
@@ -49,6 +55,18 @@ function requestedRanks() {
   const clamped = Math.max(1, Math.min(cpuCapacity, Number.isFinite(n) ? n : 1));
   $('mpi-ranks').value = String(clamped);
   return state.domain === 'site' || modelEngine() === 'rust' ? 1 : clamped;
+}
+
+/** Rust 引擎空间算例的每算例线程数；留空（自动）时为 null，由后端按并行算例数平分 CPU 核。 */
+function requestedThreads() {
+  const spatial = !!state.domain && state.domain !== 'site';
+  if (!spatial || modelEngine() !== 'rust') return null;
+  const raw = $('case-threads').value.trim();
+  if (!raw) return null;
+  const n = Math.trunc(Number(raw));
+  const clamped = Math.max(1, Math.min(cpuCapacity, Number.isFinite(n) ? n : 1));
+  $('case-threads').value = String(clamped);
+  return clamped;
 }
 
 function requestedWorkers() {
@@ -305,16 +323,17 @@ async function runRequested(stage) {
   renderCases();
   const force = stage !== null || $('force').checked;
   const mpiRanks = requestedRanks();
+  const threads = requestedThreads();
   try {
     if (dirs.length === 1) {
       await invoke('run_case', {
         runId, case: dirs[0], kernel: $('kernel').value, force, stage, mpiRanks,
-        engine: modelEngine(),
+        engine: modelEngine(), threads,
       });
     } else {
       await invoke('run_batch', {
         runId, cases: dirs, kernel: $('kernel').value, maxConcurrent: requestedWorkers(),
-        force, stage, mpiRanks, engine: modelEngine(),
+        force, stage, mpiRanks, engine: modelEngine(), threads,
       });
     }
   } catch (e) {

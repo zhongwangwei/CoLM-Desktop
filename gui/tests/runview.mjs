@@ -82,7 +82,7 @@ if ((html.match(/id="cpu-workers"/g) || []).length !== 1
     || !runSection.includes('id="cpu-workers"')
     || !runSection.includes('id="cpu-capacity"')
     || !runSection.includes('批量并行算例数')) {
-  throw new Error('batch parallelism must be configured once, next to the Step 4 run controls');
+  throw new Error('batch parallelism must be configured once, next to the Step 3 run controls');
 }
 const runnerJs = await readFile(join(root, 'dist', 'app', 'runner.js'), 'utf8');
 if (!runnerJs.includes('const spatialDefaultRanks = Math.min(8, cpuCapacity);')
@@ -169,5 +169,18 @@ console.log('runview: per-site progress/log formatting and undefined metrics are
   for (const [text, want] of cases) {
     const got = normalizeDate(text);
     if (got !== want) throw new Error(`normalizeDate(${JSON.stringify(text)}) = ${got}, want ${want}`);
+  }
+}
+
+// Rust 引擎的空间算例用每算例线程数代替 MPI 进程数，两条运行路径都把它交给后端。
+{
+  const runner = await readFile(new URL('../dist/app/runner.js', import.meta.url), 'utf8');
+  const html = await readFile(new URL('../dist/index.html', import.meta.url), 'utf8');
+  if (!/id="case-threads"/.test(html)) throw new Error('the run page must offer threads per case');
+  if ((runner.match(/engine: modelEngine\(\), threads,/g) ?? []).length !== 2) {
+    throw new Error('run_case and run_batch must both receive the requested threads');
+  }
+  if (!/\$\('threads-setting'\)\.hidden = !\(spatial && !mpi\)/.test(runner)) {
+    throw new Error('threads per case replaces MPI ranks only for Rust spatial runs');
   }
 }

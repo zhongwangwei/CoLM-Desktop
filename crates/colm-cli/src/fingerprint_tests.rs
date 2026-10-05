@@ -407,3 +407,22 @@ fn old_stage_json_without_file_hashes_still_loads() {
     let loaded = load(&d);
     assert!(loaded.get("colm").unwrap().files.is_empty());
 }
+
+#[test]
+fn large_trees_track_names_and_directories_without_per_file_stat() {
+    let d = temp_dir("large-tree");
+    std::fs::create_dir_all(d.join("soil")).unwrap();
+    std::fs::write(d.join("soil/a.nc"), b"first").unwrap();
+    std::fs::write(d.join("soil/b.nc"), b"first").unwrap();
+    let small = tree_fingerprint(&d, usize::MAX).unwrap();
+    let a = tree_fingerprint(&d, 1).unwrap();
+    assert_ne!(small, a, "the two modes hash differently");
+    // 同名原地改写：大树不算变更（小树仍然算，见上面几条）。
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    std::fs::write(d.join("soil/a.nc"), b"second").unwrap();
+    assert_eq!(tree_fingerprint(&d, 1).unwrap(), a);
+    assert_ne!(tree_fingerprint(&d, usize::MAX).unwrap(), small);
+    // 增删文件：大树也能发现。
+    std::fs::write(d.join("soil/c.nc"), b"new").unwrap();
+    assert_ne!(tree_fingerprint(&d, 1).unwrap(), a);
+}

@@ -20,24 +20,27 @@ const spatialStudyDisabled = () => !!(state.domain && state.domain !== 'site')
 const spatialStudyMessage = '空间算例暂不支持参数调优和不确定性分析。';
 const studyReady = () => ready() ?? (spatialStudyDisabled() ? spatialStudyMessage : null);
 
+// 前处理（强迫场转换、站点属性、验证数据）在软件外完成，不进工作流；页面代码保留，入口隐藏。
+const prepHidden = () => false;
+
 /** 大步骤只负责分组，真正的前后关系由扁平的子步骤决定。 */
 export const WORKFLOW = [
-  { n: 1, key: 'prep', collapsible: true, t: '前处理', d: '原始数据转成模型格式', steps: [
-    { id: 'prep-site', page: 'prep', t: '站点数据入口', d: '单站手动或多站表格', need: () => null },
-    { id: 'prep-forcing', page: 'prep', t: '强迫场', d: '变量映射、时间轴与高度', need: () => null },
-    { id: 'prep-validation', page: 'prep', t: '验证数据（可选）', d: '制作模型评估观测', need: () => null },
-    { id: 'prep-ready', page: 'prep', t: '就绪检查', d: '核对产物并交给基本设定', need: () => null },
+  { n: 0, key: 'prep', collapsible: true, t: '前处理', d: '原始数据转成模型格式', steps: [
+    { id: 'prep-site', page: 'prep', t: '站点数据入口', d: '单站手动或多站表格', need: () => null, show: prepHidden },
+    { id: 'prep-forcing', page: 'prep', t: '强迫场', d: '变量映射、时间轴与高度', need: () => null, show: prepHidden },
+    { id: 'prep-validation', page: 'prep', t: '验证数据（可选）', d: '制作模型评估观测', need: () => null, show: prepHidden },
+    { id: 'prep-ready', page: 'prep', t: '就绪检查', d: '核对产物并交给基本设定', need: () => null, show: prepHidden },
   ] },
-  { n: 2, key: 'basic', collapsible: true, t: '基本设定', d: '建例与基础输入', steps: [
+  { n: 1, key: 'basic', collapsible: true, t: '基本设定', d: '建例与基础输入', steps: [
     { id: 'basic-files', page: 'basic', t: '文件与目录', d: '选站点并建算例', need: () => null, show: available('basic-files') },
     { id: 'basic-site', page: 'basic', t: '站点信息', d: '逐站点数据来源设置', need: ready, show: available('basic-site') },
     { id: 'basic-timing', page: 'basic', t: '预热', d: '慢变量平衡设置', need: ready, show: available('basic-timing') },
-    { id: 'basic-grid', page: 'basic', t: '网格与并行', d: '网格和进程划分', need: ready, show: available('basic-grid') },
+    { id: 'basic-grid', page: 'basic', t: '计算网格', d: '网格文件与模拟范围', need: ready, show: available('basic-grid') },
     { id: 'basic-surface', page: 'basic', t: '地表数据', d: '地表输入设置', need: ready, show: available('basic-surface') },
     { id: 'basic-initial', page: 'basic', t: '初始场', d: '初始状态设置', need: ready, show: available('basic-initial') },
     { id: 'basic-forcing', page: 'basic', t: '强迫场', d: '强迫场读取设置', need: ready, show: available('basic-forcing') },
   ] },
-  { n: 3, key: 'params', collapsible: true, t: '过程参数', d: '按过程逐项配置', steps: [
+  { n: 2, key: 'params', collapsible: true, t: '过程参数', d: '按过程逐项配置', steps: [
     { id: 'params-water', page: 'params', t: '水热过程', d: '土壤、积雪与水分', need: ready, show: processAvailable('params-water') },
     { id: 'params-eco', page: 'params', t: '生态与生地化', d: '植被、碳氮过程', need: ready, show: processAvailable('params-eco') },
     { id: 'params-river', page: 'params', t: '河道与水库', d: '汇流与水库过程', need: ready, show: processAvailable('params-river') },
@@ -45,10 +48,10 @@ export const WORKFLOW = [
     { id: 'params-tracer', page: 'params', t: '示踪剂', d: '示踪过程设置', need: ready, show: processAvailable('params-tracer') },
     { id: 'params-urban', page: 'params', t: '城市过程', d: '城市冠层与人为热', need: ready, show: processAvailable('params-urban') },
   ] },
-  { n: 4, t: '运行', d: '输出与运行', steps: [
+  { n: 3, t: '运行', d: '输出与运行', steps: [
     { id: 'run', page: 'run', t: '运行算例', d: '输出、阶段与日志', need: ready },
   ] },
-  { n: 5, key: 'results', collapsible: true, t: '结果分析', d: '浏览、评估与诊断', steps: [
+  { n: 4, key: 'results', collapsible: true, t: '结果分析', d: '浏览、评估与诊断', steps: [
     { id: 'result-overview', page: 'result', t: '分析总览', d: '本次站点与产物状态', need: ready },
     { id: 'result-data', page: 'result', t: '数据浏览', d: '变量、单位与维度', need: ready, show: hasResults },
     { id: 'result-series', page: 'result', t: '时间序列', d: '按站点和变量绘图', need: ready, show: hasResults },
@@ -56,13 +59,13 @@ export const WORKFLOW = [
     { id: 'result-comparison', page: 'result', t: '多站点比较', d: '排名与批量指标', need: ready, show: hasMultipleResults },
     { id: 'result-diagnostics', page: 'result', t: '过程诊断', d: '质量与物理检查', need: ready, show: hasResults },
   ] },
-  { n: 6, t: '不确定性分析', d: 'OAT / LHS 参数扰动', steps: [
+  { n: 5, t: '不确定性分析', d: 'OAT / LHS 参数扰动', steps: [
     { id: 'result-uncertainty', page: 'result', t: '不确定性分析', d: '可选：OAT / LHS 参数扰动', need: studyReady, optional: true },
   ] },
-  { n: 7, t: '参数调优', d: '差分进化与目标函数', steps: [
+  { n: 6, t: '参数调优', d: '差分进化与目标函数', steps: [
     { id: 'result-tuning', page: 'result', t: '参数调优', d: '可选：差分进化与目标函数', need: studyReady, optional: true },
   ] },
-  { n: 8, t: '报告与导出', d: '保存分析结果', steps: [
+  { n: 7, t: '报告与导出', d: '保存分析结果', steps: [
     { id: 'result-export', page: 'result', t: '报告与导出', d: '保存分析结果', need: resultsReady },
   ] },
 ];

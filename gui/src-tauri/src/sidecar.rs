@@ -706,12 +706,13 @@ pub async fn run_case(
     stage: Option<String>,
     mpi_ranks: usize,
     engine: Option<String>,
+    threads: Option<usize>,
 ) -> Result<i32, String> {
     validate_run_id(&run_id)?;
     let processes = processes.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         run_case_blocking(
-            app, processes, run_id, case, kernel, force, stage, mpi_ranks, engine,
+            app, processes, run_id, case, kernel, force, stage, mpi_ranks, engine, threads,
         )
     })
     .await
@@ -906,6 +907,7 @@ pub async fn run_batch(
     stage: Option<String>,
     mpi_ranks: usize,
     engine: Option<String>,
+    threads: Option<usize>,
 ) -> Result<BatchSummary, String> {
     validate_run_id(&run_id)?;
     let processes = processes.inner().clone();
@@ -921,6 +923,7 @@ pub async fn run_batch(
             stage,
             mpi_ranks,
             engine,
+            threads,
         )
     })
     .await
@@ -940,19 +943,25 @@ fn run_batch_blocking(
     stage: Option<String>,
     mpi_ranks: usize,
     engine: Option<String>,
+    threads: Option<usize>,
 ) -> Result<BatchSummary, String> {
     validate_run_stage(stage.as_deref())?;
     validate_engine(engine.as_deref())?;
     if mpi_ranks == 0 {
         return Err("mpiRanks must be at least 1".into());
     }
+    if threads == Some(0) {
+        return Err("threads must be at least 1".into());
+    }
     let available = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(1);
     let total = cases.len();
     processes.prepare(&cases)?;
-    let width = batch_width(max_concurrent, available, mpi_ranks).min(total.max(1));
-    let threads = threads_per_case(available, width);
+    // Rust 引擎给了每算例线程数时按线程数限额并行算例数；没给就平分 CPU 核。
+    let per_case = threads.unwrap_or(mpi_ranks);
+    let width = batch_width(max_concurrent, available, per_case).min(total.max(1));
+    let threads = threads.unwrap_or_else(|| threads_per_case(available, width));
     let queue = Arc::new(Mutex::new(VecDeque::from(cases)));
     let succeeded = Arc::new(AtomicUsize::new(0));
     let mut workers = Vec::with_capacity(width);
@@ -1055,7 +1064,11 @@ fn run_case_blocking(
     stage: Option<String>,
     mpi_ranks: usize,
     engine: Option<String>,
+    threads: Option<usize>,
 ) -> Result<i32, String> {
+    if threads == Some(0) {
+        return Err("threads must be at least 1".into());
+    }
     processes.prepare(std::slice::from_ref(&case))?;
     run_one(
         &app,
@@ -1067,7 +1080,7 @@ fn run_case_blocking(
         stage.as_deref(),
         mpi_ranks,
         engine.as_deref(),
-        None,
+        threads,
     )
 }
 

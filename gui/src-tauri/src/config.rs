@@ -1733,6 +1733,18 @@ fn field_runtime_state(
         if name.starts_with("DEF_domain%") {
             return disabled("模拟范围取自建例时的网格；要换范围请重新建算例");
         }
+        // 分块只决定 mksrfdata 把地表数据切成哪些块文件（`MOD_Block.F90:104-160`），缺省 72×36 对任何
+        // 范围都可用；PIO 分组只用于 Fortran 内核的 MPI IO，Rust 引擎不读。需要时直接改 namelist。
+        if one_of(&[
+            "DEF_BlockInfoFile",
+            "DEF_AverageElementSize",
+            "DEF_nx_blocks",
+            "DEF_ny_blocks",
+            "DEF_PIO_groupsize",
+            "DEF_nIO_eq_nBlock",
+        ]) {
+            return hidden("分块与 MPI IO 分组用缺省值即可，Rust 引擎在进程内多线程运行");
+        }
     }
 
     // SinglePoint 在读写完单点 surface data 后直接返回；这些字段只服务于

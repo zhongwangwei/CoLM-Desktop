@@ -17,6 +17,7 @@ const REMEMBERED = [
   'fsrc', 'forcingdir',  // 前处理源文件，以及建算例时用于匹配的强迫场目录
   'cpu-workers',         // 批量运行同时占用的 CPU 核数
   'mpi-ranks',
+  'case-threads',
   'soutdir', 'srawdata', // 前处理：站点属性的产物目录与 rawdata
   'rawdata', 'runtime',  // 建例：自然/城市外部数据与城市运行时数据
   'spatial-rawdata', 'spatial-runtime', 'spatial-forcing', 'spatial-root',
