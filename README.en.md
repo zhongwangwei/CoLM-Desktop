@@ -11,7 +11,7 @@
 
 <p align="center">
   <a href="https://github.com/zhongwangwei/CoLM-Desktop/actions/workflows/ci.yml"><img src="https://github.com/zhongwangwei/CoLM-Desktop/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <a href="https://github.com/zhongwangwei/CoLM-Desktop/releases/tag/v0.3.0-beta.2"><img src="https://img.shields.io/badge/version-v0.3.0--beta.2-orange" alt="Current beta version: v0.3.0-beta.2"></a>
+  <a href="https://github.com/zhongwangwei/CoLM-Desktop/releases/tag/v0.3.0-beta.3"><img src="https://img.shields.io/badge/version-v0.3.0--beta.3-orange" alt="Current beta version: v0.3.0-beta.3"></a>
   <img src="https://img.shields.io/badge/status-Beta-orange" alt="Status: Beta">
   <img src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue" alt="License: MIT OR Apache-2.0">
   <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey" alt="Platforms">
@@ -20,14 +20,14 @@
 CoLM Desktop brings CoLM202X site and spatial case setup, parameter constraints, the three-stage run and result evaluation together in one graphical interface. All three stages — surface data (`mksrfdata`), initial conditions (`mkinidata`) and the model main loop (`colm`) — run on the **Rust engine**, and the results are **bit-for-bit identical** to the original CoLM202X. The installers work out of the box: you do not need a Rust, Fortran, MPI or NetCDF toolchain.
 
 > [!WARNING]
-> **This is the `0.3.0-beta.2` prerelease.** Features are still changing quickly and there may be known or unknown defects. Keep backups of your original data and cases, and validate results independently before research use.
+> **This is the `0.3.0-beta.3` prerelease.** Features are still changing quickly and there may be known or unknown defects. Keep backups of your original data and cases, and validate results independently before research use.
 
 > [!IMPORTANT]
 > Both **site** and **spatial** simulations are supported. Spatial runs cover watershed, regional and global extents on lat-lon, unstructured and catchment grids. Several sites can run concurrently as independent cases. **Parameter tuning and uncertainty analysis are not yet available in spatial mode.** They come back when you switch to site mode.
 
 ## Download
 
-Get the installer for your platform from the [v0.3.0-beta.2 prerelease page](https://github.com/zhongwangwei/CoLM-Desktop/releases/tag/v0.3.0-beta.2):
+Get the installer for your platform from the [v0.3.0-beta.3 prerelease page](https://github.com/zhongwangwei/CoLM-Desktop/releases/tag/v0.3.0-beta.3):
 
 | Platform | Architecture | Format |
 |---|---|---|
@@ -37,6 +37,16 @@ Get the installer for your platform from the [v0.3.0-beta.2 prerelease page](htt
 | Linux | x86_64 | `.AppImage` / `.deb` / `.rpm` |
 
 Each installer contains the desktop app, the `colm-cli` command line, the Rust engine (`mksrfdata-rs`, `mkinidata-rs`, `colm-rs`) and example sites. For platforms without a release, or for development builds, see "Running from source" below.
+
+## What's new in 0.3.0-beta.3
+
+- **River-lake routing is optional.** A "River-lake routing" card next to BGC on the start page's process step decides whether rivers are computed (new namelist switch `DEF_USE_GridRiverLakeFlow`). Leave it off and no river network is built, no routing runs and the "Rivers and reservoirs" step disappears; land results are unchanged. The card warns that a watershed boundary, a region or an unstructured mesh may not match the unit catchments of the river network.
+- **Regional river networks no longer pull in unrelated river systems.** River systems are merged along bifurcation pathways only when bifurcation is on. The unitcat river output is cropped to the model domain and lines up cell by cell with the land history. New lat-lon cases write history at the model resolution.
+- **Reservoir operation** now works on catchment meshes, and lat-lon grid reservoirs read the GRanD table carried by the unit-catchment file by default.
+- **Open existing cases** from the start page or the files page. The case's grid, subgrid, process switches, kernel and setup inputs are restored.
+- **Runs and logs.** The progress bar advances during Rust runs; the log is split by stage and written files are summed up on one line; spatial runs show threads or MPI ranks depending on the engine; starting a run no longer checks hundreds of thousands of RawData files one by one.
+- **A leaner interface.** The preprocessing entry is hidden, and options users need not decide (block partition, MPI IO grouping, regional unit catchments) are no longer shown.
+- Both engines remain bit-for-bit identical.
 
 ## What's new in 0.3.0-beta.2
 

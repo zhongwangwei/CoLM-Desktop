@@ -59,7 +59,7 @@ dependencies = [
 
 [[package]]
 name = "colm-case"
-version = "0.3.0-beta.2"
+version = "0.3.0-beta.3"
 dependencies = [
  "anyhow",
  "colm-namelist",
@@ -70,7 +70,7 @@ dependencies = [
 
 [[package]]
 name = "colm-cli"
-version = "0.3.0-beta.2"
+version = "0.3.0-beta.3"
 dependencies = [
  "anyhow",
  "colm-case",
@@ -88,7 +88,7 @@ dependencies = [
 
 [[package]]
 name = "colm-core"
-version = "0.3.0-beta.2"
+version = "0.3.0-beta.3"
 dependencies = [
  "anyhow",
  "colm-lapack",
@@ -96,7 +96,7 @@ dependencies = [
 
 [[package]]
 name = "colm-forcing"
-version = "0.3.0-beta.2"
+version = "0.3.0-beta.3"
 dependencies = [
  "anyhow",
  "colm-core",
@@ -106,7 +106,7 @@ dependencies = [
 
 [[package]]
 name = "colm-hist"
-version = "0.3.0-beta.2"
+version = "0.3.0-beta.3"
 dependencies = [
  "anyhow",
  "netcdf",
@@ -114,7 +114,7 @@ dependencies = [
 
 [[package]]
 name = "colm-init"
-version = "0.3.0-beta.2"
+version = "0.3.0-beta.3"
 dependencies = [
  "anyhow",
  "colm-case",
@@ -128,7 +128,7 @@ dependencies = [
 
 [[package]]
 name = "colm-kernel"
-version = "0.3.0-beta.2"
+version = "0.3.0-beta.3"
 dependencies = [
  "anyhow",
  "colm-namelist",
@@ -139,28 +139,28 @@ dependencies = [
 
 [[package]]
 name = "colm-lapack"
-version = "0.3.0-beta.2"
+version = "0.3.0-beta.3"
 dependencies = [
  "anyhow",
 ]
 
 [[package]]
 name = "colm-namelist"
-version = "0.3.0-beta.2"
+version = "0.3.0-beta.3"
 dependencies = [
  "anyhow",
 ]
 
 [[package]]
 name = "colm-ncchar"
-version = "0.3.0-beta.2"
+version = "0.3.0-beta.3"
 dependencies = [
  "netcdf",
 ]
 
 [[package]]
 name = "colm-runtime"
-version = "0.3.0-beta.2"
+version = "0.3.0-beta.3"
 dependencies = [
  "anyhow",
  "colm-case",
@@ -176,11 +176,11 @@ dependencies = [
 
 [[package]]
 name = "colm-schema"
-version = "0.3.0-beta.2"
+version = "0.3.0-beta.3"
 
 [[package]]
 name = "colm-srfdata"
-version = "0.3.0-beta.2"
+version = "0.3.0-beta.3"
 dependencies = [
  "anyhow",
  "colm-namelist",
@@ -440,7 +440,7 @@ dependencies = [
 
 [[package]]
 name = "oracle"
-version = "0.3.0-beta.2"
+version = "0.3.0-beta.3"
 dependencies = [
  "anyhow",
  "colm-case",
@@ -756,7 +756,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "0.3.0-beta.2"
+version = "0.3.0-beta.3"
 dependencies = [
  "anyhow",
  "colm-case",

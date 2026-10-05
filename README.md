@@ -11,7 +11,7 @@
 
 <p align="center">
   <a href="https://github.com/zhongwangwei/CoLM-Desktop/actions/workflows/ci.yml"><img src="https://github.com/zhongwangwei/CoLM-Desktop/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <a href="https://github.com/zhongwangwei/CoLM-Desktop/releases/tag/v0.3.0-beta.2"><img src="https://img.shields.io/badge/version-v0.3.0--beta.2-orange" alt="当前测试版：v0.3.0-beta.2"></a>
+  <a href="https://github.com/zhongwangwei/CoLM-Desktop/releases/tag/v0.3.0-beta.3"><img src="https://img.shields.io/badge/version-v0.3.0--beta.3-orange" alt="当前测试版：v0.3.0-beta.3"></a>
   <img src="https://img.shields.io/badge/status-Beta-orange" alt="状态：Beta">
   <img src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue" alt="许可证：MIT OR Apache-2.0">
   <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey" alt="平台">
@@ -20,14 +20,14 @@
 CoLM Desktop 将 CoLM202X 的站点与空间建例、参数约束、三阶段运行和结果评估整合到一个图形界面中。地表数据（`mksrfdata`）、初始场（`mkinidata`）与模型主循环（`colm`）三个阶段全部由 **Rust 引擎**完成，结果与 CoLM202X 原版**逐位一致**。安装包开箱即用，无需安装 Rust、Fortran、MPI 或 NetCDF 编译环境。
 
 > [!WARNING]
-> **当前版本为 `0.3.0-beta.2` 测试版。** 功能仍在快速迭代，可能存在已知或未知缺陷。请保留原始数据与算例备份，正式科研使用前务必独立核验结果。
+> **当前版本为 `0.3.0-beta.3` 测试版。** 功能仍在快速迭代，可能存在已知或未知缺陷。请保留原始数据与算例备份，正式科研使用前务必独立核验结果。
 
 > [!IMPORTANT]
 > 支持**站点**与**空间**两类模拟。空间模拟覆盖流域、区域与全球范围，可用经纬度网格、非结构网格与流域网格；多个站点可作为独立算例并发运行。空间模式下**参数调优和不确定性分析暂不可用**，切回站点模式后恢复。
 
 ## 下载
 
-前往 [v0.3.0-beta.2 测试版发布页](https://github.com/zhongwangwei/CoLM-Desktop/releases/tag/v0.3.0-beta.2) 下载对应平台的安装包：
+前往 [v0.3.0-beta.3 测试版发布页](https://github.com/zhongwangwei/CoLM-Desktop/releases/tag/v0.3.0-beta.3) 下载对应平台的安装包：
 
 | 平台 | 架构 | 发行格式 |
 |---|---|---|
@@ -37,6 +37,16 @@ CoLM Desktop 将 CoLM202X 的站点与空间建例、参数约束、三阶段运
 | Linux | x86_64 | `.AppImage` / `.deb` / `.rpm` |
 
 安装包包含桌面端、命令行 `colm-cli`、Rust 引擎（`mksrfdata-rs`、`mkinidata-rs`、`colm-rs`）与示例站点。尚未发布的平台或开发版可以按下文从源码运行。
+
+## 0.3.0-beta.3 的主要变化
+
+- **河湖汇流可选**：首页"还要打开哪些过程？"里与 BGC 并列的"河湖汇流"卡片决定是否计算河道（新 namelist 开关 `DEF_USE_GridRiverLakeFlow`）。不选时不建河网、不汇流，也不出现"河道与水库"页；陆面结果不变。卡片会按流域边界、区域或非结构 mesh 提醒它们与河网的单元流域可能不一致。
+- **区域河网不再拉进无关河系**：只在打开分汊时才沿分汊通道合并河系；河道 unitcat 输出截到模拟范围，与陆面 history 逐格对齐。新建经纬度网格算例的历史输出分辨率跟模拟网格一致。
+- **水库调度**：流域网格支持水库调度；经纬度网格的水库参数缺省读单元流域文件自带的 GRanD 表。
+- **打开已有算例**：首页与"文件与目录"页可直接打开磁盘上的算例，自动恢复它的网格、次网格、各过程开关、内核与建例时的输入。
+- **运行与日志**：Rust 引擎运行时进度条逐步前进；日志按阶段分段、写出文件汇总成一行；空间算例按引擎只显示线程数或 MPI 进程数；开跑前不再逐个检查 RawData 里的几十万个文件。
+- **界面精简**：前处理入口隐藏；分块与 MPI IO 分组、区域单元流域等不需要用户决定的选项不再显示。
+- 两个引擎的结果仍然逐位一致。
 
 ## 0.3.0-beta.2 的主要变化
 

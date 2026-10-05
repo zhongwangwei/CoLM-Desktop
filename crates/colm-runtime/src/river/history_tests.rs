@@ -19,6 +19,12 @@ fn the_unitcat_window_is_the_model_domain() {
 #[test]
 fn a_dateline_or_global_domain_keeps_the_whole_grid() {
     let (lon, lat) = axes();
-    assert_eq!(domain_window(&lon, &lat, (170.0, -170.0, 0.0, 10.0)), (0, 0, 1440, 720));
-    assert_eq!(domain_window(&lon, &lat, (-180.0, 180.0, -90.0, 90.0)), (0, 0, 1440, 720));
+    assert_eq!(
+        domain_window(&lon, &lat, (170.0, -170.0, 0.0, 10.0)),
+        (0, 0, 1440, 720)
+    );
+    assert_eq!(
+        domain_window(&lon, &lat, (-180.0, 180.0, -90.0, 90.0)),
+        (0, 0, 1440, 720)
+    );
 }
