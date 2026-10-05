@@ -557,3 +557,11 @@ if (!/picked\.grid === 'unstructured' \? 'unstructured' : picked\.domain/.test(
   if (!/startSession\(sessionFromProfile\(opened\.profile\)\)/.test(open)) throw new Error('an opened case starts a session from its profile');
   if (!/k\.preset === opened\.profile\.kernel_preset/.test(open)) throw new Error('an opened case returns to the kernel it last ran with');
 }
+{
+  const open = await import('node:fs').then(fs => fs.readFileSync(new URL('../dist/app/opencase.js', import.meta.url), 'utf8'));
+  const spatialSrc = await import('node:fs').then(fs => fs.readFileSync(new URL('../dist/app/spatial.js', import.meta.url), 'utf8'));
+  if (!/await fillSpatialForm\(inputs, opened\.root\)/.test(open)) throw new Error('an opened spatial case fills the setup form');
+  if (!/export async function fillSpatialForm\(inputs, root\) \{\n  await loadForcingDatasets\(\);/.test(spatialSrc)) {
+    throw new Error('the forcing list loads before the opened values are filled in');
+  }
+}

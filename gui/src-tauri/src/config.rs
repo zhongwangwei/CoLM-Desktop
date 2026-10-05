@@ -845,7 +845,7 @@ pub(crate) fn logical(doc: &colm_namelist::Document, name: &str) -> bool {
     }
 }
 
-fn integer(doc: &colm_namelist::Document, name: &str) -> i64 {
+pub(crate) fn integer(doc: &colm_namelist::Document, name: &str) -> i64 {
     match doc.get(name) {
         Some(colm_namelist::Value::Int(value)) => *value,
         _ => match colm_schema::find(name).map(|field| field.default) {

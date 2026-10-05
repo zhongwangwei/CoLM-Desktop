@@ -53,6 +53,31 @@ function syncForcingMode() {
 
 $('spatial-forcing-dataset').onchange = syncForcingMode;
 
+/** 打开已有空间算例：把它的输入填回建算例表单（强迫场用它自己的 forcing namelist）。 */
+export async function fillSpatialForm(inputs, root) {
+  await loadForcingDatasets();
+  const set = (id, value) => {
+    const el = $(id);
+    if (!el || value == null || value === '') return;
+    el.value = String(value);
+    el.dispatchEvent(new Event('change'));
+  };
+  set('spatial-rawdata', inputs.rawdata);
+  set('spatial-runtime', inputs.runtime);
+  if (inputs.forcing_namelist) {
+    $('spatial-forcing-dataset').value = CUSTOM_FORCING;
+    syncForcingMode();
+    set('spatial-forcing', inputs.forcing_namelist);
+  }
+  set('spatial-start', inputs.start);
+  set('spatial-end', inputs.end);
+  if (Number.isFinite(inputs.timestep) && inputs.timestep > 0) set('spatial-timestep', inputs.timestep);
+  set('spatial-root', root);
+  set('spatial-name', inputs.name);
+  $('spatial-summary').textContent =
+    `已打开算例 ${inputs.name}：下面是它现有的设置。改参数、运行直接到后面各页；只有要另建一个新算例时才需要按下面的建算例按钮。`;
+}
+
 function syncSpatialSetup() {
   const spatial = state.domain && state.domain !== 'site';
   $('site-case-setup').hidden = spatial;

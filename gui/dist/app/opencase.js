@@ -7,6 +7,7 @@ import { $ } from './ui.js';
 import { go, renderSteps, setStatus } from './shell.js';
 import { startSession } from './domain.js';
 import { renderCases, selectCase } from './sites.js';
+import { fillSpatialForm } from './spatial.js';
 
 /** `open_case` 的 `profile` → `startSession` 的配置。 */
 export function sessionFromProfile(p) {
@@ -52,12 +53,15 @@ export async function openExistingCase() {
   // 跑过的算例记着上次的内核；按宏匹配到的若不是它，换回它。
   const last = state.kernels.find(k => k.preset === opened.profile.kernel_preset);
   if (last) $('kernel').value = last.dir;
-  for (const id of opened.profile.spatial ? ['root', 'spatial-root'] : ['root']) {
+  // 建算例表单里的输入原样填回：站点算例是 RawData/Runtime 与根目录，空间算例是整张表单。
+  const inputs = opened.profile.inputs;
+  for (const [id, value] of [['root', opened.root], ['rawdata', inputs.rawdata], ['runtime', inputs.runtime]]) {
     const el = $(id);
-    if (!el) continue;
-    el.value = opened.root;
+    if (!el || !value) continue;
+    el.value = value;
     el.dispatchEvent(new Event('change'));
   }
+  if (opened.profile.spatial) await fillSpatialForm(inputs, opened.root);
   try {
     state.cases = await invoke('list_cases', { root: opened.root });
   } catch {

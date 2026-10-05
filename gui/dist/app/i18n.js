@@ -1926,6 +1926,7 @@ export function translateZh(text, target = 'en') {
     .replace(/^──── 制作地表数据（(\w+)）────$/, '──── Surface data ($1) ────')
     .replace(/^──── 制作初始场（(\w+)）────$/, '──── Initial conditions ($1) ────')
     .replace(/^──── 模拟（(\w+)）────$/, '──── Simulation ($1) ────')
+    .replace(/^已打开算例 (.+?)：下面是它现有的设置。改参数、运行直接到后面各页；只有要另建一个新算例时才需要按下面的建算例按钮。$/, 'Opened case $1: below are its current settings. Change parameters and run from the later pages; use the button below only to create another case.')
     .replace(/^已打开算例 (.+)$/, 'Opened case $1')
     .replace(/^空间算例\s*(.+)\s*已通过预检$/, 'Spatial case $1 passed preflight')
     .replace(/^开始运行\s*(\d+)\s*个算例$/, 'Starting $1 cases')

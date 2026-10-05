@@ -135,6 +135,30 @@ fn an_opened_spatial_case_recovers_its_wizard_choices() {
 }
 
 #[test]
+fn an_opened_case_brings_back_its_inputs() {
+    let text =
+        "&nl_colm\n DEF_CASE_NAME = 'spatial-case9'\n DEF_simulation_time%start_year = 2003\n \
+                DEF_simulation_time%start_month = 3\n DEF_simulation_time%end_year = 2003\n \
+                DEF_simulation_time%end_month = 4\n DEF_simulation_time%end_day = 2\n \
+                DEF_simulation_time%end_sec = 86400\n DEF_simulation_time%timestep = 1800.\n \
+                DEF_dir_rawdata = '/d/raw/'\n DEF_dir_runtime = '/d/run/'\n \
+                DEF_forcing_namelist = '/c/forcing.nml'\n/\n";
+    let p = case_profile(text, true, None).expect("profile");
+    assert_eq!(
+        p.inputs,
+        CaseInputs {
+            name: "spatial-case9".into(),
+            rawdata: "/d/raw/".into(),
+            runtime: "/d/run/".into(),
+            forcing_namelist: "/c/forcing.nml".into(),
+            start: "2003-03-01".into(),
+            end: "2003-04-02".into(),
+            timestep: 1800.0,
+        }
+    );
+}
+
+#[test]
 fn an_opened_site_case_reads_usgs_and_methane_from_the_last_run() {
     let text =
         "&nl_colm\n DEF_CASE_NAME = 's'\n DEF_USE_TRACER = .true.\n DEF_TRACER_NAMES = 'CH4'\n/\n";

@@ -79,6 +79,21 @@ pub struct CaseProfile {
     pub resolution: Option<[f64; 2]>,
     /// 上次运行用的内核预设（`stages.json` 里记录的 `preset=`）；没跑过为 `None`。
     pub kernel_preset: Option<String>,
+    /// 「文件与目录」页建算例表单里的那些输入，打开后原样填回。
+    pub inputs: CaseInputs,
+}
+
+#[derive(Debug, Serialize, PartialEq)]
+pub struct CaseInputs {
+    pub name: String,
+    pub rawdata: String,
+    pub runtime: String,
+    /// `DEF_forcing_namelist`（建例时生成的 `forcing.nml` 或用户自己的）。
+    pub forcing_namelist: String,
+    /// `YYYY-MM-DD`：起始日与结束日（含）。
+    pub start: String,
+    pub end: String,
+    pub timestep: f64,
 }
 
 #[derive(Debug, Serialize)]
@@ -123,7 +138,7 @@ pub(crate) fn case_profile(
     spatial: bool,
     stages: Option<&str>,
 ) -> Result<CaseProfile, String> {
-    use crate::config::{character, logical, real};
+    use crate::config::{character, integer, logical, real};
     let doc = colm_namelist::parse(text).map_err(|e| format!("case.nml: {e}"))?;
     let has = |name: &str| doc.get(name).is_some();
     // 只看算例里显式写了的值：schema 缺省是占位路径，不代表用了这种网格。
@@ -175,6 +190,16 @@ pub(crate) fn case_profile(
                 .eq_ignore_ascii_case("CH4")
         });
     let gridded_routing = matches!(grid, Some("latlon" | "unstructured"));
+    // `DEF_simulation_time%<which>_year/month/day`（缺省取 schema 里的值）。
+    let date = |which: &str| {
+        let part = |unit: &str| integer(&doc, &format!("DEF_simulation_time%{which}_{unit}"));
+        format!(
+            "{:04}-{:02}-{:02}",
+            part("year"),
+            part("month"),
+            part("day")
+        )
+    };
     let finite = |v: f64| v.is_finite().then_some(v);
     let domain = spatial
         .then(|| {
@@ -215,6 +240,15 @@ pub(crate) fn case_profile(
         domain,
         resolution,
         kernel_preset: kernel_field("preset="),
+        inputs: CaseInputs {
+            name: character(&doc, "DEF_CASE_NAME"),
+            rawdata: character(&doc, "DEF_dir_rawdata"),
+            runtime: character(&doc, "DEF_dir_runtime"),
+            forcing_namelist: character(&doc, "DEF_forcing_namelist"),
+            start: date("start"),
+            end: date("end"),
+            timestep: real(&doc, "DEF_simulation_time%timestep"),
+        },
     })
 }
 
