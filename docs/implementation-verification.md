@@ -29804,3 +29804,25 @@ colm-core/colm-runtime/colm-init/colm-srfdata 的单元测试与黄金文件判�
 
 验证：工作区与 GUI 两个 workspace 的 build、clippy、fmt；colm-core、colm-runtime、colm-forcing、oracle、xtask 单元测试，
 colm-cli 218 个（串行），GUI 后端 163 个，`check-gui`，CI 点名的 7 个 Python 检查全部通过。
+
+## 第 574 轮：性能剖析（珠江流域算例）
+
+`colm-rs`（release，16 线程）跑 `tmp/pr-rust`（36092 patch、3 天、144 步）全程 539 s，装配约 40 s，其余约 3.4 s/步。用 macOS
+`sample`（1 ms，不需 root）在初始化与稳定步进各采一段（步进段 120 s），`rustfilt` 还原符号后按调用树汇总。
+
+**主线程（决定墙钟）每步的构成**：并行推进 patch 43%（主线程在等工作线程）、**history 累加 35%（串行）**、流域侧向流
+18%（大部分串行）、强迫与其余约 4%。16 个 rayon 工作线程约 57% 的时间空等——正是那两段串行。
+
+- history 累加：每个 patch 每步按字符串键往 `BTreeMap` 里查找/插入（`accumulate`、`layer`、`insert` 与内存分配），加上
+  每步末为续跑旁车把全部 patch 的窗口拍一次快照（`window()` 的复制与排序约占这一段的 1/6）。
+- 侧向流：`river_lake_flow` 占 87%，其中软件四倍精度除法 `Quad::div` 约 48%、`round_pack` 12%；坡面流与地下流已并行，
+  占比很小。
+- 初始化：`assemble_patch` 约一半（`restart_has_snow_column` 与模板各自再读一遍重启）、`with_pft` 约 1/4、流域网络约 1/4。
+
+**patch 物理（并行部分）的 CPU 热点**：`leaf_temperature_pc` 49%（其中植物水力 31%、气孔 17%、冠层扩散阻力 14%）、PC 三维
+冠层辐射 25%（`extended::tee` 的双倍双精度 `exp`）、变饱和土壤水 20%。libm `pow` 约占忙碌 CPU 的 23%，主要来自
+`soil_hydraulic_conductivity`、`photosynthesis_parameters` 与 `plant_hydraulic_stress`。
+
+**可做的、不改变任何浮点结果的改进**（按收益排序）：history 累加改成按变量下标存放、按 patch 并行、旁车快照只在写续跑时
+做；`Quad::div` 换成按字长的整数除法（结果仍需与现有实现逐位相同）、河湖汇流按河系并行；装配阶段去掉重复读重启；
+`pow` 的同参数重复调用做缓存。前两项消掉之后，串行段可从约 53% 降到 10% 左右，墙钟估计快 1.6–1.8 倍。
