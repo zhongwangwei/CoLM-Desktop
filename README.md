@@ -25,9 +25,9 @@ CoLM Desktop 将 CoLM202X 的站点与空间建例、参数约束、三阶段运
 > **This is the `0.2.0-beta.4` prerelease.** Features are evolving and may still contain numerous known or unknown defects. Keep original data and case backups, and independently validate results before research use.
 
 > [!IMPORTANT]
-> 支持**站点**与**空间**（流域、区域、全球范围；经纬度网格、非结构网格、流域网格）两类模拟，多个站点可作为独立算例并发运行。空间模式下**参数调优和不确定性分析暂不可用**，切回站点模式后恢复。流域网格目前只能用 Fortran 内核运行。
+> 支持**站点**与**空间**（流域、区域、全球范围；经纬度网格、非结构网格、流域网格）两类模拟，多个站点可作为独立算例并发运行。空间模式下**参数调优和不确定性分析暂不可用**，切回站点模式后恢复。
 >
-> Site and spatial (watershed, regional and global extents on lat-lon, unstructured and catchment grids) simulations are supported. Parameter tuning and uncertainty analysis are not yet available in spatial mode; catchment grids currently run on the Fortran kernel only.
+> Site and spatial (watershed, regional and global extents on lat-lon, unstructured and catchment grids) simulations are supported. Parameter tuning and uncertainty analysis are not yet available in spatial mode.
 
 ## 下载
 
@@ -67,7 +67,7 @@ CoLM Desktop 将 CoLM202X 的站点与空间建例、参数约束、三阶段运
 | | Rust 引擎（默认） | Fortran 内核 |
 |---|---|---|
 | 数值 | 与 Fortran 内核逐位一致（逐算例回归，见验证记录） | CoLM202X 上游源码 + 本地缺陷修复 |
-| 覆盖 | 站点、经纬度网格、非结构网格 | 全部网格（含流域网格） |
+| 覆盖 | 站点、经纬度网格、非结构网格、流域网格（水库调度、LULCC、示踪物与向量历史等组合尚未移植，运行前提示） | 全部网格与选项 |
 | 并行 | 单进程多线程（rayon），`RAYON_NUM_THREADS` 控制线程数，默认取全部逻辑核 | MPI 多进程（运行页"每算例 MPI 进程数"） |
 
 运行页的"模拟引擎"只决定 `colm` 主循环用哪一个；前两个阶段默认用 Rust 前处理。不支持的组合会在运行前提示，不会等前处理跑完才失败。上游代码中发现并已在本仓库修复的缺陷记录在 [`docs/upstream-bugs.md`](docs/upstream-bugs.md)。

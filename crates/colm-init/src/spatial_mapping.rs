@@ -381,7 +381,7 @@ mod spatial_mapping_tests;
 /// `acos` 把这 1 ULP 放大到距离的 ~1e-12 相对量级，双线性权重随之错位（g1fbil 边缘几格的末位差）。
 /// 所以走下面两个不内联的 `sin`/`cos`。
 #[allow(clippy::manual_clamp)]
-fn arclen(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
+pub(crate) fn arclen(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
     let (s1, c1) = (libm_sin(lat1), libm_cos(lat1));
     let (s2, c2) = (libm_sin(lat2), libm_cos(lat2));
     let tmp = s1.mul_add(s2, c1 * c2 * (lon1 - lon2).cos());

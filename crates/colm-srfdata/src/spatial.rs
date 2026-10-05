@@ -22,7 +22,10 @@ use crate::{
     UrbanMaterialParameters, URBAN_LAYERS, URBAN_RADIATION_TYPES, URBAN_SOLAR_BANDS,
 };
 
-const MAX_SERIAL_RAW_PIXELS: usize = 25_000_000;
+/// 串行拓扑路径一次读进内存的像元数上限，只是防内存失控的护栏（每像元几十字节）。
+/// 2500 万挡住了 3″ MERIT 流域网格（珠江 250 km² 集水区约 9400 万像元，64 GB 机器上
+/// 实测可行）；Fortran 端用分块 + MPI 读，没有对应的语义上限。
+const MAX_SERIAL_RAW_PIXELS: usize = 400_000_000;
 const ALIGNMENT_EPSILON: f64 = 1e-9;
 
 /// The two spatial mesh encodings whose cell values can form a flat mesh.
@@ -594,9 +597,11 @@ pub fn build_catchment_spatial_topology_with_filter_and_raw_grids(
             }
             let hydrounit = i32::try_from(hydrounits[offset])
                 .context("catchment hydrounit does not fit int32")?;
+            // `MOD_LandHRU` 不检查取值：0 号 HRU（流域里的河道/水体像元）照常按类型分组，
+            // 排序后排在最前，`settyp = 0`。
             ensure!(
-                hydrounit > 0,
-                "catchment {catchment} has a non-positive hydrounit"
+                hydrounit >= 0,
+                "catchment {catchment} has a negative hydrounit"
             );
             raw_count += 1;
             members.entry(catchment).or_default().push((
@@ -4646,6 +4651,41 @@ fn normalize_fortran_longitude(value: f64) -> Result<f64> {
     Ok(normalized)
 }
 
+/// `grid_normalize` 末尾的"align grid"（`MOD_Grid.F90:467-491`）：相邻两格的公共边取同一个值，
+/// 最后一格的东边界在落进第一格时绕回到第一格的西边界。`gridmesh%define_by_name('merit_90m')`
+/// 之后就做了这一步，`mesh.nc` 的格心经纬度用的是对齐后的边。
+fn align_grid_edges(lon_w: &mut [f64], lon_e: &mut [f64], lat_s: &mut [f64], lat_n: &mut [f64]) {
+    let nlon = lon_w.len();
+    for ilon in 0..nlon.saturating_sub(1) {
+        if lon_between_ceil(lon_e[ilon], lon_w[ilon + 1], lon_e[ilon + 1]) {
+            lon_e[ilon] = lon_w[ilon + 1];
+        } else {
+            lon_w[ilon + 1] = lon_e[ilon];
+        }
+    }
+    if nlon > 1 && lon_between_ceil(lon_e[nlon - 1], lon_w[0], lon_e[0]) {
+        lon_e[nlon - 1] = lon_w[0];
+    }
+    let nlat = lat_s.len();
+    if nlat == 0 {
+        return;
+    }
+    // `:456-459` `max(-90, min(90, lat))`
+    for lat in lat_s.iter_mut().chain(lat_n.iter_mut()) {
+        *lat = (-90.0_f64).max(90.0_f64.min(*lat));
+    }
+    let yinc_up = lat_s[0] <= lat_s[nlat - 1];
+    for ilat in 0..nlat - 1 {
+        if yinc_up {
+            lat_n[ilat] = lat_n[ilat].max(lat_s[ilat + 1]);
+            lat_s[ilat + 1] = lat_n[ilat];
+        } else {
+            lat_s[ilat] = lat_s[ilat].min(lat_n[ilat + 1]);
+            lat_n[ilat + 1] = lat_s[ilat];
+        }
+    }
+}
+
 fn lon_between_ceil(lon: f64, west: f64, east: f64) -> bool {
     if west >= east {
         lon > west || lon <= east
@@ -5451,12 +5491,14 @@ fn write_mesh_index(
     file.add_dimension("xblk", nx)?;
     file.add_dimension("yblk", ny)?;
     let (lon_w, lon_e, lat_s, lat_n) = if let Some(grid) = topology.mesh_index_grid {
-        (
+        let mut edges = (
             (1..=grid.nlon).map(|i| grid.lon_w(i)).collect::<Vec<_>>(),
             (1..=grid.nlon).map(|i| grid.lon_e(i)).collect::<Vec<_>>(),
             (1..=grid.nlat).map(|j| grid.lat_s(j)).collect::<Vec<_>>(),
             (1..=grid.nlat).map(|j| grid.lat_n(j)).collect::<Vec<_>>(),
-        )
+        );
+        align_grid_edges(&mut edges.0, &mut edges.1, &mut edges.2, &mut edges.3);
+        edges
     } else {
         (
             topology.grid.lon_w.clone(),

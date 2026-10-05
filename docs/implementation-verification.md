@@ -29702,3 +29702,60 @@ Rust 版的并行是 rayon（共享内存，相当于 OpenMP；线程数用 `RAY
 （"每个算例使用 1 个 CPU 核，单个算例仍为串行"）。`colm-cli` 里"Rust 主循环只覆盖 SinglePoint + LCT""PFT/PC 内核直接拒绝"
 两处过时注释与报错文字一并改正（LCT/PFT/PC 是运行期开关，内核只决定 IGBP/USGS）。测试：`threads_per_case`、
 `threads_per_job` 单元测试；GUI sidecar 42 个、`check-gui` 通过。
+
+## 第 571 轮：流域网格（CATCHMENT，`CatchLateralFlow`）移植到 Rust
+
+此前 Rust 引擎只接 GRIDBASED/UNSTRUCTURED（`GridRiverLakeFlow`），流域网格只能走 Fortran 内核。本轮把预处理的流域部分、
+运行期的侧向流与 basin 输出全部移植，Pearl River 算例（`tmp/PearlRiver_250km2.nc`，4091 个单元流域、24404 个 HRU、
+6 块 36092 个 patch，PC 子网格，JRA3Q，2010-01-01 起 3 天，日历史）与 Fortran 内核逐位一致。
+
+**预处理**（`colm-srfdata`/`colm-init`）：
+- `hydrounit = 0`（水体 HRU）三处被当成非法值拒绝（`mesh.rs`、`spatial.rs`、`topology.rs`）；上游 `settyp <= 0` 就是水体，改为 `>= 0`。
+- 串行像元上限 2500 万不够（本例 9400 万），提到 4 亿；`mesh.nc` 的经纬边界补上 `grid_normalize` 的对齐与 ±90° 截断（末列经度差 1 ULP）。
+- `DEF_USE_EstimatedRiverDepth` 的缺省值是 `.true.`（Rust 原来按假处理）；`patchfrac_hru` 只在 `patch_fractions` 打开时写。
+- 流域网络（`colm-init::catch_network`）：单元/HRU/patch 拓扑、邻接（`dist = max(arclen·1e3, 90)`）、坡面与河湖网络、湖泊库容曲线、
+  地下网络、河深估算。河深估算里 `q**0.5` 在 LLVM 下被改写成 `sqrt`（与 libm `pow` 差 2 ULP，第 556 个流域实测），改用
+  `LibmPow::lpow`；`quicksort_real8` 按原样移植（换成稳定排序结果不同）；流域重启的 `hru_type` 写绝对值。冷启动改写各块
+  时间重启的 `wdsrf`/`dz_lake` 并写流域重启。mksrfdata 与 mkinidata 产物与 Fortran 逐位相同。
+
+**四倍精度**：河湖汇流（`MOD_Catch_RiverLakeFlow`）里 8 个数组声明为 `real(r16)`：界面通量按 r8 算完无损转 r16，上游求和、
+子步长（`:400`、`:409`）、蓄量（`:437`、`:449`、`:511`）、动量（`:522`）与 `discharge_ta`（`:542`）都在 r16 里算，赋回 r8 才舍入。
+`colm_core::binary128::Quad` 是软件 IEEE binary128（加减乘除、比较、与 f64 互转，舍入带粘滞位）；对 gfortran 生成的
+100 万组随机向量（`oracle/scripts/binary128/gen.f90`）逐位相同，仓库里留 600 组做单元测试。
+
+**柱内**（`colm-core`）：CATCHMENT 内核强制变饱和流与动态湖（`MOD_Namelist.F90:1879-1884`、`:2445-2459`），且没有
+`GridRiverLakeFlow`（收缩形状按单点内核）。`VariableSaturatedFlowInput::catch_lateral` 为真时：`rsur = rsur_se = rsur_ie =
+rsubst = 0`（`:972-975` 无条件清零，产流方案整段 `#ifndef`），求解后不溢出，`frcsat` 不赋值（保持分配时的 `spval`），
+闭合误差只扣 `gwat - etr`；冰川、动态湖的溢出同样跳过，`errorw` 不含 `rnof`。**舍入形状变了**：`errorw` 少了 `rnof`
+这一项后，土壤与冰川两支 GCC 不再收缩成 FNMA（`CoLMMAIN.F90:1523`、`:1756`，先乘后减），湖那支仍是 FNMA。
+
+**每步侧向流**（`colm-runtime::catchment`，`lateral_flow` 的组装）：patch 积水按 `subfrc` 聚合到 HRU（`FMA` 累加再 `/1e3`）→
+20 个子步的坡面流（HLL，按流域并行）与河湖汇流（按河系推进，r16 求和）→ 时间平均 → 推回 patch（`xwsur`）→ 坡面产流 `rsur`
+（湖泊单元没有；有河道的单元从第 2 个 HRU 起）→ `fldarea` → 地下侧向流（单元间、HRU 间、HRU 内）与逐 patch 的土壤/含水层
+交换（`rsub`、`xwsub`，交换按 patch 并行）→ 重算 `h2osoi`/`wat`、`rnof = rsur + rsub` → 动态湖层厚调整，**对全部 patch**
+（非湖 patch 的 `dz_lake`/`t_lake`/`lake_icefrc` 也被改写并进时间重启，Rust 在运行期另存这几列、写续跑时补进去）。
+history：`rsur`/`rsub`/`rnof`/`wat`/`h2osoi` 取侧向流之后的值，`xerr` 用侧向流之前的土壤水（它是 `CoLMMAIN` 里算的）；
+加写 `f_xwsur`/`f_xwsub`/`f_fldarea`，不写 `f_rsur_se`/`f_rsur_ie`；basin 历史 `<case>_hist_basin_<suffix>.nc`（流域水位、流速、
+流量、累计子步数，HRU 水深与流速，地下侧向流），流域重启 `<case>_restart_basin_<date>_lc<year>.nc`，以及
+`catch_parameters.nc`。入口拒绝尚未移植的组合：水库调度、LULCC、示踪物、城市、向量历史、基流优化。
+
+**空间装配的平方复杂度**（与流域无关，但 3.6 万 patch 才暴露）：
+- `RestartFile::open` 每次整份解压，空间算例每个 patch 都"打开"同一块的两份重启：改成按（路径、修改时间、长度）缓存最近
+  16 份，内部数据 `Arc` 共享（克隆 O(1)）；`select_patch` 只拷贝切出来的块。
+- 每个模板存着整块的 `SoilState`（29 场 × 10 层 × 全块 patch）和整块的续跑缓冲（`RestartColumns`、地表诊断、辐射、湖），
+  续跑写出时每个 patch 再各拷一份整变量。改为只存、只出本 patch 的那一块（`RestartFile::patch_block`），由
+  `merge_overrides` 拼回整变量。改前装配跑了半小时、内存把盘吃满（换页），改后装配约 40 秒，全程峰值 8 GB。
+- PC 分层的覆盖度逐项累加可以是 1.0000000000000002（patch 931），`canopy_roughness` 的 `fc <= 1` 前置检查拒绝了它；上游
+  `cal_z0_displa` 没有这道检查，公式照常有限，去掉。
+
+**验证**（`tmp/pr-fortran` 是 Fortran 内核全链路，`tmp/pr-rust` 是 Rust 预处理 + `--engine rust` 主循环，`tmp/dircmp.py` 逐变量逐位比）：
+- 主历史 `pr_hist_2010-01.nc`、basin 历史 `pr_hist_basin_2010-01.nc`、`2010-004` 的 19 份续跑（6 块主重启、6 块 PFT、6 份历史旁车、
+  流域重启）、`catch_parameters.nc` 全部逐位相同——整棵输出树 1689 个 `.nc`（含 landdata 与起跑重启）无一差异。
+- 用时：Fortran 单进程 2070 s，Rust 581–625 s（16 线程，峰值内存 8 GB）。
+- 定位过程里的两处差异：`f_xerr` 先是 570 个格点差到 1e-5（history 用侧向流之后的状态重算了 `endwb`），改用侧向流之前的
+  土壤水后剩相对 2e-5 的残差（catch 下 `errorw` 不收缩），按 GIMPLE 改后为 0。
+- 装配与续跑写出的改动对所有网格生效，另做两组两侧全链路回归（Fortran 预处理 + Fortran 内核 对 Rust 预处理 + Rust 引擎，
+  `tmp/reg571.sh`）：站点 `st`（CN-Cng 一个月、逐时历史）7 个文件逐位相同；经纬度网格 `gr`（110–112°E、23–25°N、0.5°、PC、
+  JRA3Q、2 天、单元流域汇流）287 个文件逐位相同。
+- 单元测试：colm-core 502、colm-runtime 161、colm-cli 237 个通过；colm-init 串行 178 个通过；`check-gui` 通过。colm-init 并行跑时有 30–45 个 `NetCDF: HDF error`
+  （次数每次不同），在本轮之前的提交（`d210a8d5`）上同样出现，是本机 HDF5 并发的环境问题，不是本轮引入的；记下待查。

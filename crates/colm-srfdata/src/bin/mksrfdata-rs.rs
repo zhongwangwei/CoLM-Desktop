@@ -464,16 +464,19 @@ fn materialize_spatial_pft(args: &[String]) -> Result<()> {
                 &args.blocks,
                 args.srfdata_compression,
             )?;
-            write_spatial_hru_patch_fractions(
-                &args.landdata,
-                args.year,
-                &topology,
-                &land_hrus,
-                patches,
-                crop.as_ref().map(|crop| crop.pctshared.as_slice()),
-                &args.blocks,
-                args.srfdata_compression,
-            )?;
+            // `write_patchfrac` 在 CATCHMENT 下与 `patchfrac_elm` 一起写，条件相同（见 [`spatial_patch_fractions`]）。
+            if args.patch_fractions {
+                write_spatial_hru_patch_fractions(
+                    &args.landdata,
+                    args.year,
+                    &topology,
+                    &land_hrus,
+                    patches,
+                    crop.as_ref().map(|crop| crop.pctshared.as_slice()),
+                    &args.blocks,
+                    args.srfdata_compression,
+                )?;
+            }
         }
         write_spatial_pft_topology_with_shared(
             &args.landdata,
@@ -624,16 +627,19 @@ fn materialize_spatial_pft(args: &[String]) -> Result<()> {
             &args.blocks,
             args.srfdata_compression,
         )?;
-        write_spatial_hru_patch_fractions(
-            &args.landdata,
-            args.year,
-            &topology,
-            &land_hrus,
-            patches,
-            crop.as_ref().map(|crop| crop.pctshared.as_slice()),
-            &args.blocks,
-            args.srfdata_compression,
-        )?;
+        // `write_patchfrac` 在 CATCHMENT 下与 `patchfrac_elm` 一起写，条件相同（见 [`spatial_patch_fractions`]）。
+        if args.patch_fractions {
+            write_spatial_hru_patch_fractions(
+                &args.landdata,
+                args.year,
+                &topology,
+                &land_hrus,
+                patches,
+                crop.as_ref().map(|crop| crop.pctshared.as_slice()),
+                &args.blocks,
+                args.srfdata_compression,
+            )?;
+        }
     }
     // MOD_LandPFT allocates pctshared for every PFT, not just CROP builds.
     write_spatial_pft_topology_with_shared(
@@ -1154,16 +1160,19 @@ fn materialize_spatial_lct(args: &[String]) -> Result<()> {
             &args.blocks,
             args.srfdata_compression,
         )?;
-        write_spatial_hru_patch_fractions(
-            &args.landdata,
-            args.year,
-            &topology,
-            &land_hrus,
-            &patches,
-            None,
-            &args.blocks,
-            args.srfdata_compression,
-        )?;
+        // `write_patchfrac` 在 CATCHMENT 下与 `patchfrac_elm` 一起写，条件相同（见 [`spatial_patch_fractions`]）。
+        if args.patch_fractions {
+            write_spatial_hru_patch_fractions(
+                &args.landdata,
+                args.year,
+                &topology,
+                &land_hrus,
+                &patches,
+                None,
+                &args.blocks,
+                args.srfdata_compression,
+            )?;
+        }
     }
     if args.diagnostics {
         write_spatial_diagnostic_baseline(

@@ -187,6 +187,8 @@ pub struct LandPhysicsParameters {
     /// 对照内核编进了 `GridRiverLakeFlow`（空间构建）。只改变几处收缩形状，见
     /// [`colm_core::StandardLctEnergyInput::river_lake_flow_build`]。
     pub river_lake_flow_build: bool,
+    /// `CatchLateralFlow`（CATCHMENT 内核）：柱内不产流，坡面/地下侧向流由 `catchment` 模块算。
+    pub catch_lateral: bool,
     /// `DEF_TUNING_SNOW_COVER_EXPONENT`：`snowfraction` 的雪密度指数。
     pub snow_cover_exponent: f64,
     pub snow_roughness_m: f64,
@@ -255,7 +257,8 @@ pub struct StandardLctStepBinding<'a> {
     pub flood_tracer: Option<(f64, &'a [f64])>,
 }
 
-/// 原时间重启里续跑需要用到的整变量（所有 patch）。
+/// 原时间重启里续跑需要用到的变量：**只存本 patch 的那一块**（[`RestartFile::patch_block`]），
+/// 覆盖量也只出这一块（[`OWN`] 下标），由 `multi_patch::merge_overrides` 拼回整变量。
 #[derive(Debug, Clone)]
 struct RestartColumns {
     temperature_k: Vec<f64>,
@@ -590,11 +593,11 @@ impl SurfaceDiagnostics {
         "fq",
     ];
 
-    fn read(time: &RestartFile) -> Result<Self> {
+    fn read(time: &RestartFile, patch: usize) -> Result<Self> {
         let mut columns = Vec::with_capacity(Self::NAMES.len());
         for name in Self::NAMES {
             let column = match time.variable_dimensions(name) {
-                Ok(_) => Some(time.floats(name)?.to_vec()),
+                Ok(_) => Some(time.patch_block(name, patch)?),
                 Err(_) => None,
             };
             columns.push((name, column));
@@ -647,13 +650,13 @@ struct RadiationFields {
 }
 
 impl RadiationFields {
-    fn read(time: &RestartFile) -> Result<Self> {
+    fn read(time: &RestartFile, patch: usize) -> Result<Self> {
         Ok(Self {
-            albedo: time.floats("alb")?.to_vec(),
-            sunlit_absorption: time.floats("ssun")?.to_vec(),
-            shaded_absorption: time.floats("ssha")?.to_vec(),
-            soil_absorption: time.floats("ssoi")?.to_vec(),
-            snow_absorption: time.floats("ssno")?.to_vec(),
+            albedo: time.patch_block("alb", patch)?,
+            sunlit_absorption: time.patch_block("ssun", patch)?,
+            shaded_absorption: time.patch_block("ssha", patch)?,
+            soil_absorption: time.patch_block("ssoi", patch)?,
+            snow_absorption: time.patch_block("ssno", patch)?,
         })
     }
 
@@ -680,6 +683,9 @@ impl RadiationFields {
         Ok(RestartOverride::new(name, buffer))
     }
 }
+
+/// 模板里续跑缓冲的本 patch 下标：缓冲只存本 patch 的那一块，所以恒为 0。
+const OWN: usize = 0;
 
 /// 把逐 patch 缓冲里本 patch 的那一项换掉，其余保持原值。
 fn replaced(source: &[f64], patch: usize, name: &str, value: f64) -> Result<Vec<f64>> {
@@ -1159,12 +1165,20 @@ fn assemble(
          3 (glacier) and 4 (lake), got {patch_type}"
     );
 
-    let soil = soil_state(&constant, soil_layers, patches, physics.hydraulic_model)?;
-    let soil_hydraulic_model = soil_hydraulic_models(&soil, patch, physics.hydraulic_model)?;
-    let porosity = soil_field(&soil, SoilField::Porosity, patch, soil_layers);
-    let residual_water = soil_field(&soil, SoilField::ThetaR, patch, soil_layers);
-    let suction_mm = soil_field(&soil, SoilField::Psi0, patch, soil_layers);
-    let clapp_hornberger_b = soil_field(&soil, SoilField::Bsw, patch, soil_layers);
+    // 只取本 patch 的那一列（`SoilState` 里 patch 下标为 0）：整块转置再存进每个模板，在一块
+    // 上万个 patch 的空间算例里是平方的时间与内存（流域网格实测卡死在装配）。
+    let soil = soil_state(
+        &constant,
+        soil_layers,
+        patch,
+        patches,
+        physics.hydraulic_model,
+    )?;
+    let soil_hydraulic_model = soil_hydraulic_models(&soil, 0, physics.hydraulic_model)?;
+    let porosity = soil_field(&soil, SoilField::Porosity, 0, soil_layers);
+    let residual_water = soil_field(&soil, SoilField::ThetaR, 0, soil_layers);
+    let suction_mm = soil_field(&soil, SoilField::Psi0, 0, soil_layers);
+    let clapp_hornberger_b = soil_field(&soil, SoilField::Bsw, 0, soil_layers);
     // **不要再乘 1000。** 重启里的 `hksati` 本来就是 mm/s ——
     // `MOD_Vars_TimeInvariants.F90:238` 的声明、:529 的读、:743 的写三处都写着
     // `[mm h2o/s]`，`mkinidata/MOD_IniTimeVariable.F90:122` 同理。这里原先乘了
@@ -1174,7 +1188,7 @@ fn assemble(
     //
     // 另一条独立证据：Rust 与 Fortran 的 mkinidata 产出做过逐位比对
     // （204 个变量 204 个相同），所以两边写出的 `hksati` 必然是同一个单位。
-    let conductivity_mm_s = soil_field(&soil, SoilField::HydraulicConductivity, patch, soil_layers);
+    let conductivity_mm_s = soil_field(&soil, SoilField::HydraulicConductivity, 0, soil_layers);
 
     let grid = colm_soil_grid(soil_layers)?;
     let layer_thickness_m = grid.thickness_m.clone();
@@ -1217,51 +1231,51 @@ fn assemble(
     // 否则会先撞上 `soil_column` 那句"雪槽必须为空"。
     let snow = restart_snow_column(&time, patch, patch_type, snow_layers, soil_layers)?;
     let restart_columns = RestartColumns {
-        temperature_k: time.floats("t_soisno")?.to_vec(),
-        liquid_water_kg_m2: time.floats("wliq_soisno")?.to_vec(),
-        ice_water_kg_m2: time.floats("wice_soisno")?.to_vec(),
-        water_table_depth_m: time.floats("zwt")?.to_vec(),
-        aquifer_water_mm: time.floats("wa")?.to_vec(),
-        surface_water_mm: time.floats("wdsrf")?.to_vec(),
-        wetland_water_mm: time.floats("wetwat")?.to_vec(),
-        snow_node_depth_m: time.floats("z_sno")?.to_vec(),
-        snow_layer_thickness_m: time.floats("dz_sno")?.to_vec(),
-        snow_depth_m: time.floats("snowdp")?.to_vec(),
-        snow_water_equivalent_mm: time.floats("scv")?.to_vec(),
-        snow_cover_fraction: time.floats("fsno")?.to_vec(),
-        snow_age: time.floats("sag")?.to_vec(),
-        ground_temperature_k: time.floats("t_grnd")?.to_vec(),
-        leaf_temperature_k: time.floats("tleaf")?.to_vec(),
-        canopy_water_mm: time.floats("ldew")?.to_vec(),
-        canopy_rain_mm: time.floats("ldew_rain")?.to_vec(),
-        canopy_snow_mm: time.floats("ldew_snow")?.to_vec(),
-        vegetation_fraction: time.floats("fveg")?.to_vec(),
-        greenness: time.floats("green")?.to_vec(),
+        temperature_k: time.patch_block("t_soisno", patch)?,
+        liquid_water_kg_m2: time.patch_block("wliq_soisno", patch)?,
+        ice_water_kg_m2: time.patch_block("wice_soisno", patch)?,
+        water_table_depth_m: time.patch_block("zwt", patch)?,
+        aquifer_water_mm: time.patch_block("wa", patch)?,
+        surface_water_mm: time.patch_block("wdsrf", patch)?,
+        wetland_water_mm: time.patch_block("wetwat", patch)?,
+        snow_node_depth_m: time.patch_block("z_sno", patch)?,
+        snow_layer_thickness_m: time.patch_block("dz_sno", patch)?,
+        snow_depth_m: time.patch_block("snowdp", patch)?,
+        snow_water_equivalent_mm: time.patch_block("scv", patch)?,
+        snow_cover_fraction: time.patch_block("fsno", patch)?,
+        snow_age: time.patch_block("sag", patch)?,
+        ground_temperature_k: time.patch_block("t_grnd", patch)?,
+        leaf_temperature_k: time.patch_block("tleaf", patch)?,
+        canopy_water_mm: time.patch_block("ldew", patch)?,
+        canopy_rain_mm: time.patch_block("ldew_rain", patch)?,
+        canopy_snow_mm: time.patch_block("ldew_snow", patch)?,
+        vegetation_fraction: time.patch_block("fveg", patch)?,
+        greenness: time.patch_block("green", patch)?,
         // `smp`/`hk` 的维度是 `(patch, soil)` —— 与 `t_soisno` 的 `soilsnow`
         // **不同**，没有雪槽。上游把它们写进重启并在续跑时读回
         // （`MOD_Vars_TimeVariables.F90:1154-1155` 写、`:1363-1364` 读），
         // 所以 Rust 产出的重启也必须带上它们，否则不是一份合法的续跑底稿。
-        matric_potential_mm: time.floats("smp")?.to_vec(),
-        hydraulic_conductivity_mm_s: time.floats("hk")?.to_vec(),
+        matric_potential_mm: time.patch_block("smp", patch)?,
+        hydraulic_conductivity_mm_s: time.patch_block("hk", patch)?,
         vegetation_water_potential_mm: match time.variable_dimensions("vegwp") {
-            Ok(_) => Some(time.floats("vegwp")?.to_vec()),
+            Ok(_) => Some(time.patch_block("vegwp", patch)?),
             Err(_) => None,
         },
-        leaf_area_index: time.floats("lai")?.to_vec(),
-        stem_area_index: time.floats("sai")?.to_vec(),
-        vegetation_free_fraction: time.floats("sigf")?.to_vec(),
-        temporal_leaf_area_index: time.floats("tlai")?.to_vec(),
-        temporal_stem_area_index: time.floats("tsai")?.to_vec(),
-        thermal_gap_fraction: time.floats("thermk")?.to_vec(),
-        direct_extinction: time.floats("extkb")?.to_vec(),
-        diffuse_extinction: time.floats("extkd")?.to_vec(),
+        leaf_area_index: time.patch_block("lai", patch)?,
+        stem_area_index: time.patch_block("sai", patch)?,
+        vegetation_free_fraction: time.patch_block("sigf", patch)?,
+        temporal_leaf_area_index: time.patch_block("tlai", patch)?,
+        temporal_stem_area_index: time.patch_block("tsai", patch)?,
+        thermal_gap_fraction: time.patch_block("thermk", patch)?,
+        direct_extinction: time.patch_block("extkb", patch)?,
+        diffuse_extinction: time.patch_block("extkd", patch)?,
         // `READ_TimeVariables` 在 `DEF_USE_OZONESTRESS` 下读这七个，**没有 `defval`**：缺了就停。
         ozone: match physics.ozone {
             Some(_) => Some(
                 OZONE_RESTART_FIELDS
                     .iter()
                     .map(|name| {
-                        time.floats(name).map(<[f64]>::to_vec).with_context(|| {
+                        time.patch_block(name, patch).with_context(|| {
                             format!("DEF_USE_OZONESTRESS needs {name} in the time restart")
                         })
                     })
@@ -1270,8 +1284,8 @@ fn assemble(
             None => None,
         },
     };
-    let surface_diagnostics = SurfaceDiagnostics::read(&time)?;
-    let radiation_fields = RadiationFields::read(&time)?;
+    let surface_diagnostics = SurfaceDiagnostics::read(&time, patch)?;
+    let radiation_fields = RadiationFields::read(&time, patch)?;
     ensure!(
         snow.layer_count == 0 || snow.depth_m > 0.0,
         "the restart carries {} snow layer(s) under no depth",
@@ -1282,7 +1296,7 @@ fn assemble(
     let ice_water_kg_m2 = soil_column(&time, "wice_soisno", patch, snow_layers, soil_layers)?;
     let soil_thermal_inputs = soil_thermal_inputs(
         &soil,
-        patch,
+        0,
         &temperature_k,
         &liquid_water_kg_m2,
         &ice_water_kg_m2,
@@ -1640,6 +1654,19 @@ fn assemble(
 }
 
 impl StandardLctRestartTemplate {
+    /// `CatchLateralFlow` 的地下侧向流要的逐层土壤参数：`(porsl, hksati [mm/s], psi0 [mm], theta_r,
+    /// 水力模型)`。
+    #[allow(clippy::type_complexity)]
+    pub fn lateral_soil(&self) -> (&[f64], &[f64], &[f64], &[f64], &[SoilHydraulicModel]) {
+        (
+            &self.porosity,
+            &self.conductivity_mm_s,
+            &self.suction_mm,
+            &self.residual_water,
+            &self.soil_hydraulic_model,
+        )
+    }
+
     /// 一次 `CoLMMAIN` 的步长 `deltim_phy`（`CoLMDRIVER.F90:95-99`）：`WATERBODY` 类按
     /// `ceiling(deltim/1800)` 分子步，其余就是 `deltim`。
     pub fn colmmain_step_seconds(&self) -> f64 {
@@ -2283,6 +2310,8 @@ impl StandardLctRestartTemplate {
             water: colm_core::Water2014SoilInput {
                 // 漫滩再入渗由每步的能量输出带进来（`standard_lct_step`），模板里不放。
                 flood: None,
+                // `CatchLateralFlow`：流域网格构建（柱内不产流，见 `VariableSaturatedFlowInput`）。
+                catch_lateral: physics.catch_lateral,
                 dynamic_wetland: physics.dynamic_wetland,
                 // 灌溉的开关与水田积水上限；本步的通量与方式由 `standard_lct_snow_soil_step` 从状态填。
                 irrigation: physics
@@ -2674,11 +2703,11 @@ impl StandardLctRestartTemplate {
         let mut liquid = self.restart_columns.liquid_water_kg_m2.clone();
         let mut ice = self.restart_columns.ice_water_kg_m2.clone();
         for layer in 0..layers {
-            let index = self.patch * width + self.snow_slots() + layer;
+            let index = OWN * width + self.snow_slots() + layer;
             ensure!(
                 index < temperature.len() && index < liquid.len() && index < ice.len(),
                 "the restart's soil columns are too short for patch {} layer {layer}",
-                self.patch
+                OWN
             );
             temperature[index] = state.temperature_k[layer];
             liquid[index] = state.water.liquid_water_kg_m2[layer];
@@ -2686,9 +2715,9 @@ impl StandardLctRestartTemplate {
         }
         let scalars = |source: &[f64]| -> Result<Vec<f64>> {
             ensure!(
-                self.patch < source.len(),
+                OWN < source.len(),
                 "the restart has no patch {} for a scalar column",
-                self.patch
+                OWN
             );
             Ok(source.to_vec())
         };
@@ -2708,25 +2737,25 @@ impl StandardLctRestartTemplate {
         let mut matric_potential = self.restart_columns.matric_potential_mm.clone();
         let mut hydraulic_conductivity = self.restart_columns.hydraulic_conductivity_mm_s.clone();
         for layer in 0..layers {
-            let index = self.patch * width + layer;
+            let index = OWN * width + layer;
             ensure!(
                 index < matric_potential.len() && index < hydraulic_conductivity.len(),
                 "the restart's smp/hk columns are too short for patch {} layer {layer}",
-                self.patch
+                OWN
             );
             matric_potential[index] = step.matric_potential_mm[layer];
             hydraulic_conductivity[index] = step.hydraulic_conductivity_mm_s[layer];
         }
-        water_table[self.patch] = state.water.water_table_depth_m;
-        aquifer[self.patch] = state.water.aquifer_water_mm;
-        surface[self.patch] = state.water.surface_water_mm;
-        wetland[self.patch] = state.water.wetland_water_mm;
+        water_table[OWN] = state.water.water_table_depth_m;
+        aquifer[OWN] = state.water.aquifer_water_mm;
+        surface[OWN] = state.water.surface_water_mm;
+        wetland[OWN] = state.water.wetland_water_mm;
         // 叶温与冠层水量在状态里（`energy.leaf`）；地表温度只有步输出有，所以由调用方给。
-        ground[self.patch] = ground_temperature_k;
-        leaf[self.patch] = state.energy.leaf.leaf_temperature_k;
-        canopy[self.patch] = state.energy.leaf.canopy_water.total_mm;
-        canopy_rain[self.patch] = state.energy.leaf.canopy_water.rain_mm;
-        canopy_snow[self.patch] = state.energy.leaf.canopy_water.snow_mm;
+        ground[OWN] = ground_temperature_k;
+        leaf[OWN] = state.energy.leaf.leaf_temperature_k;
+        canopy[OWN] = state.energy.leaf.canopy_water.total_mm;
+        canopy_rain[OWN] = state.energy.leaf.canopy_water.rain_mm;
+        canopy_snow[OWN] = state.energy.leaf.canopy_water.snow_mm;
         // `patchtype > 2`：`CoLMMAIN` 每步把 `fveg`/`green` 清零，只有刚重读过 LAI 的那一步
         // 才是 `LAI_readin` 的值。只在月初写续跑的算例看不出区别（实测冰川日续跑才暴露）。
         let mut vegetation_fraction = scalars(&self.restart_columns.vegetation_fraction)?;
@@ -2737,8 +2766,8 @@ impl StandardLctRestartTemplate {
             } else {
                 (0.0, 0.0)
             };
-            vegetation_fraction[self.patch] = fveg;
-            greenness[self.patch] = green;
+            vegetation_fraction[OWN] = fveg;
+            greenness[OWN] = green;
         }
         let mut overrides = vec![
             RestartOverride::new("fveg", vegetation_fraction),
@@ -2770,11 +2799,11 @@ impl StandardLctRestartTemplate {
         ) {
             let mut potential = source.clone();
             for (node, value) in plant.vegetation_water_potential_mm.iter().enumerate() {
-                let index = self.patch * colm_core::VEGETATION_SEGMENTS + node;
+                let index = OWN * colm_core::VEGETATION_SEGMENTS + node;
                 ensure!(
                     index < potential.len(),
                     "the restart's vegwp column is too short for patch {} node {node}",
-                    self.patch
+                    OWN
                 );
                 potential[index] = *value;
             }
@@ -2792,7 +2821,7 @@ impl StandardLctRestartTemplate {
             {
                 overrides.push(RestartOverride::new(
                     *name,
-                    replaced(source, self.patch, name, value)?,
+                    replaced(source, OWN, name, value)?,
                 ));
             }
         }
@@ -2833,7 +2862,7 @@ impl StandardLctRestartTemplate {
         ] {
             overrides.push(RestartOverride::new(
                 name,
-                replaced(source, self.patch, name, value)?,
+                replaced(source, OWN, name, value)?,
             ));
         }
         for (name, source, value) in [
@@ -2855,7 +2884,7 @@ impl StandardLctRestartTemplate {
         ] {
             overrides.push(RestartOverride::new(
                 name,
-                replaced(source, self.patch, name, value)?,
+                replaced(source, OWN, name, value)?,
             ));
         }
         // 逐波段辐射量：`net_solar` 每步都会改它们（吸收率被守恒修正缩放），
@@ -2883,7 +2912,7 @@ impl StandardLctRestartTemplate {
                 optics.snow_absorption,
             ),
         ] {
-            overrides.push(RadiationFields::splice(source, self.patch, name, matrix)?);
+            overrides.push(RadiationFields::splice(source, OWN, name, matrix)?);
         }
         let row = step.diagnostics;
         for (name, value) in [
@@ -2910,7 +2939,7 @@ impl StandardLctRestartTemplate {
             let Some(value) = value else {
                 continue;
             };
-            if let Some(override_) = self.surface_diagnostics.splice(name, self.patch, value)? {
+            if let Some(override_) = self.surface_diagnostics.splice(name, OWN, value)? {
                 overrides.push(override_);
             }
         }
@@ -2920,24 +2949,19 @@ impl StandardLctRestartTemplate {
     /// 起跑重启里本 patch 的地表诊断量（`tref`、`qref`、`z0m`、`emis`、`coszen` 等）；
     /// 重启里没有该变量时为 `None`。被强迫缺测遮蔽的 patch 一直停在这些值上。
     pub fn restart_diagnostic(&self, name: &str) -> Option<f64> {
-        self.surface_diagnostics.input_value(name, self.patch)
+        self.surface_diagnostics.input_value(name, OWN)
     }
 
     /// 起跑重启里本 patch `t_soisno` 的雪段原值。状态里的空雪槽装配时清成了 0，而上游
     /// 重启里空雪槽是 −999；被遮蔽的 patch 不走一步，`a_t_soisno` 累加的就是这些原值。
     pub fn restart_snow_temperature(&self) -> Result<Vec<f64>> {
         let width = self.snow_slots() + self.soil_layers();
-        let start = self.patch * width;
+        let start = OWN * width;
         self.restart_columns
             .temperature_k
             .get(start..start + self.snow_slots())
             .map(<[f64]>::to_vec)
-            .with_context(|| {
-                format!(
-                    "the restart's t_soisno has no snow span for patch {}",
-                    self.patch
-                )
-            })
+            .with_context(|| format!("the restart's t_soisno has no snow span for patch {}", OWN))
     }
 
     /// 被强迫缺测遮蔽的 patch（`forcmask_pch = .false.`）的续跑替换项：`CoLMDRIVER` 整步跳过它，
@@ -2961,7 +2985,7 @@ impl StandardLctRestartTemplate {
         ] {
             overrides.push(RestartOverride::new(
                 name,
-                replaced(source, self.patch, name, value)?,
+                replaced(source, OWN, name, value)?,
             ));
         }
         Ok(overrides)
@@ -2992,8 +3016,8 @@ impl StandardLctRestartTemplate {
         );
         // 两个偏移量不能混：`soilsnow` 三根柱每个 patch 宽 `slots + 土层数`，
         // 而 `z_sno`/`dz_sno` 只有雪槽，每个 patch 宽 `slots`。
-        let soilsnow_base = self.patch * (slots + self.soil_layers());
-        let snow_base = self.patch * slots;
+        let soilsnow_base = OWN * (slots + self.soil_layers());
+        let snow_base = OWN * slots;
         // 三根 soilsnow 柱：只改雪段，土段是上一步已经填好的。
         for (name, values) in [
             ("t_soisno", &state.snow.temperature_k),
@@ -3007,7 +3031,7 @@ impl StandardLctRestartTemplate {
             ensure!(
                 soilsnow_base + slots <= entry.values.len(),
                 "the restart's {name} is too short for patch {}",
-                self.patch
+                OWN
             );
             entry.values[soilsnow_base..soilsnow_base + slots].copy_from_slice(values);
         }
@@ -3017,7 +3041,7 @@ impl StandardLctRestartTemplate {
         ensure!(
             snow_base + slots <= node.len() && snow_base + slots <= thickness.len(),
             "the restart's snow geometry is too short for patch {}",
-            self.patch
+            OWN
         );
         node[snow_base..snow_base + slots].copy_from_slice(&state.snow.node_depth_m);
         thickness[snow_base..snow_base + slots].copy_from_slice(&state.snow.thickness_m);
@@ -3043,15 +3067,15 @@ impl StandardLctRestartTemplate {
         ] {
             let mut column = source.clone();
             ensure!(
-                self.patch < column.len(),
+                OWN < column.len(),
                 "the restart has no patch {} for {name}",
-                self.patch
+                OWN
             );
-            column[self.patch] = value;
+            column[OWN] = value;
             overrides.push(RestartOverride::new(name, column));
         }
         if let (Some(template), Some(lake)) = (&self.lake, &state.lake) {
-            overrides.extend(template.overrides(self.patch, lake)?);
+            overrides.extend(template.overrides(OWN, lake)?);
         }
         if let (Some(template), Some(snicar)) = (&self.snicar, &state.snicar) {
             overrides.extend(template.overrides(self.patch, snicar));
@@ -3153,6 +3177,7 @@ fn topmodel_method(constant: &RestartFile, patch: usize, method: u8) -> Result<T
 fn soil_state(
     constant: &RestartFile,
     layers: usize,
+    patch: usize,
     patches: usize,
     hydraulic_model: HydraulicModel,
 ) -> Result<SoilState> {
@@ -3163,7 +3188,7 @@ fn soil_state(
     // 的有限性检查会当场报错，而 `soil_hydraulic_models` 只在选中该关系时才读它们。
     if !van_genuchten {
         for (field, _) in SOIL_FIELDS_VAN_GENUCHTEN {
-            values[field as usize] = vec![f64::NAN; layers * patches];
+            values[field as usize] = vec![f64::NAN; layers];
         }
     }
     for (field, name) in SOIL_FIELDS_COMMON
@@ -3183,15 +3208,14 @@ fn soil_state(
             "constant restart field {name} disagrees on the soil layer count"
         );
         let on_disk = constant.floats(name)?;
-        let mut buffer = vec![0.0; layers * patches];
-        for patch in 0..patches {
-            for layer in 0..layers {
-                buffer[layer * patches + patch] = on_disk[patch * layers + layer];
-            }
-        }
-        values[*field as usize] = buffer;
+        ensure!(
+            on_disk.len() == layers * patches,
+            "constant restart field {name} holds {} values for {patches} patches",
+            on_disk.len()
+        );
+        values[*field as usize] = on_disk[patch * layers..(patch + 1) * layers].to_vec();
     }
-    SoilState::from_fields(layers, patches, values)
+    SoilState::from_fields(layers, 1, values)
 }
 
 /// 事故里那一列雪：槽位顺序就是重启数组顺序（Fortran `-4..0`）。
@@ -3435,11 +3459,11 @@ impl LakeTemplate {
                 saved_tke: scalar(time, "savedtke1", patch)?,
                 ground_temperature_k: scalar(time, "t_grnd", patch)?,
             },
-            restart_temperature_k: time.floats("t_lake")?.to_vec(),
-            restart_ice_fraction: time.floats("lake_icefrc")?.to_vec(),
-            restart_saved_tke: time.floats("savedtke1")?.to_vec(),
+            restart_temperature_k: time.patch_block("t_lake", patch)?,
+            restart_ice_fraction: time.patch_block("lake_icefrc", patch)?,
+            restart_saved_tke: time.patch_block("savedtke1", patch)?,
             restart_thickness_m: if dynamic {
-                Some(time.floats("dz_lake")?.to_vec())
+                Some(time.patch_block("dz_lake", patch)?)
             } else {
                 None
             },
@@ -3449,10 +3473,12 @@ impl LakeTemplate {
     /// 以原文件为底，只换本 patch 的 `t_lake`/`lake_icefrc`/`savedtke1`。
     fn overrides(
         &self,
-        patch: usize,
+        _patch: usize,
         lake: &colm_core::RuntimeLakeState,
     ) -> Result<Vec<RestartOverride>> {
         let layers = lake.column.temperature_k.len();
+        // 缓冲只存本 patch 的那一块（见 [`RestartColumns`]）。
+        let patch = OWN;
         let base = patch * layers;
         let mut temperature = self.restart_temperature_k.clone();
         let mut ice_fraction = self.restart_ice_fraction.clone();

@@ -1491,6 +1491,7 @@ fn variable_saturated_flow_input<'a>(
     transpiration_mm_s: f64,
 ) -> VariableSaturatedFlowInput<'a> {
     VariableSaturatedFlowInput {
+        catch_lateral: false,
         flood: None,
         wetland_water_capacity_mm: 200.0,
         paddy: None,

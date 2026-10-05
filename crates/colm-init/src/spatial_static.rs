@@ -1246,7 +1246,7 @@ pub fn read_spatial_pixel_sets(
 }
 
 impl SpatialPixelSets {
-    fn mean(&self, cells: &[(i32, i32)]) -> Result<(f64, f64)> {
+    pub(crate) fn mean(&self, cells: &[(i32, i32)]) -> Result<(f64, f64)> {
         ensure!(!cells.is_empty(), "patch has no pixels");
         let mut area_sum = 0.0;
         let mut latitude = 0.0;

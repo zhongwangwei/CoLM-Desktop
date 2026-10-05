@@ -58,7 +58,8 @@ use colm_case::{
 use colm_kernel::outcome::Stage;
 use colm_kernel::Kernel;
 
-const SPATIAL_WARNING: &str = "spatial options are early state and not recommended; parameter tuning and uncertainty analysis are disabled for spatial cases";
+const SPATIAL_NOTE: &str =
+    "parameter tuning and uncertainty analysis are not available for spatial cases";
 
 const USAGE: &str = "\
 usage:
@@ -162,16 +163,14 @@ usage:
                            # 猜不到就是 null；三个观测高度缺失时也是 null，
                            # 不是 NaN —— GUI 前处理页据此决定问不问用户
   colm-cli mesh-new --out <mesh.nc> --nlon N --nlat N [--grid-kind latlon|unstructured]
-                    # EARLY STATE / 不建议使用：所有空间范围与网格选项均为早期功能
                     [--west W --east E --south S --north N | --shp basin.shp]
                     [--non-ocean-mask mask.nc --non-ocean-var non_ocean_mask]
                     # 生成 GRIDBASED landmask 或 int64 UNSTRUCTURED elmindex；预检也接受既有 int32 网格；无 bbox/SHP 时为全球
   colm-cli spatial-preflight --grid-kind latlon|unstructured|catchment --input <mesh.nc>
-                    # EARLY STATE / 不建议使用；预检不代表科学结果已验证
                     [--out manifest.json]
                     # 在启动 CoLM 前校验空间文件字段并记录 sha256
   colm-cli spatial-new --grid-kind latlon|unstructured|catchment --mesh <mesh.nc>
-                    # EARLY STATE / 不建议使用；空间模式禁用参数调优和不确定性分析
+                    # 空间算例暂不支持参数调优和不确定性分析
                     --out <case-dir> --forcing <forcing.nml> --rawdata <dir> --runtime <dir>
                     --start YYYY-MM-DD --end YYYY-MM-DD --timestep <seconds>
                     [--name N] [--dlon degrees --dlat degrees] [--mode igbp|usgs|pft|pc]
@@ -1892,8 +1891,8 @@ fn rust_model_land_cover(kernel: &Kernel) -> Result<&'static str> {
 
 /// `CROP` 内核：`DEF_USE_CROP` 在上游是这个宏的只读映射、不在 namelist 里，
 /// 所以要像 `--land-cover` 一样由内核告诉 `colm-rs`，否则作物算例会被当成非作物 BGC 静默跑完。
-/// 内核宏里 `colm-rs` 要知道、namelist 里又没有的：`CROP`（`DEF_USE_CROP` 的只读映射）与
-/// `UNSTRUCTURED`（决定 `DEF_HISTORY_IN_VECTOR` 是否生效）。
+/// 内核宏里 `colm-rs` 要知道、namelist 里又没有的：`CROP`（`DEF_USE_CROP` 的只读映射）、
+/// `UNSTRUCTURED`（决定 `DEF_HISTORY_IN_VECTOR` 是否生效）与 `CATCHMENT`（`CatchLateralFlow`）。
 fn rust_model_crop_arguments(kernel: &Kernel) -> Vec<String> {
     let has = |name: &str| kernel.manifest.macros.iter().any(|item| item == name);
     let mut arguments = Vec::new();
@@ -1902,6 +1901,9 @@ fn rust_model_crop_arguments(kernel: &Kernel) -> Vec<String> {
     }
     if has("UNSTRUCTURED") {
         arguments.push("--unstructured".to_owned());
+    }
+    if has("CATCHMENT") {
+        arguments.push("--catchment".to_owned());
     }
     arguments
 }
@@ -1940,13 +1942,13 @@ fn preflight_rust_model(case_nml: &Path, kernel: &Kernel, ranks: usize) -> Resul
         ranks == 1,
         "the Rust model engine runs one process; --ranks {ranks} needs --engine fortran"
     );
-    // 空间算例：Rust 主循环接 GRIDBASED 与 UNSTRUCTURED 内核（`GridRiverLakeFlow` 默认汇流）；
-    // 流域网格还没移植。河道的未移植选项由 `colm-rs --preflight` 挡。
+    // 空间算例：Rust 主循环接 GRIDBASED、UNSTRUCTURED（`GridRiverLakeFlow` 默认汇流）与 CATCHMENT
+    // （`CatchLateralFlow`）内核。各自未移植的选项由 `colm-rs --preflight` 挡。
     if colm_case::is_spatial_case(case_nml)? {
         ensure!(
-            matches!(kernel_grid_kind(kernel), Some("latlon" | "unstructured")),
-            "the Rust model engine runs SinglePoint, GRIDBASED and UNSTRUCTURED cases; rerun this {} case with --engine fortran",
-            kernel_grid_kind(kernel).unwrap_or("spatial")
+            kernel_grid_kind(kernel).is_some(),
+            "the Rust model engine runs SinglePoint, GRIDBASED, UNSTRUCTURED and CATCHMENT cases; \
+             rerun this case with --engine fortran"
         );
     }
     let land_cover = rust_model_land_cover(kernel)?;
@@ -2773,7 +2775,7 @@ fn preflight_spatial_case(
     let Some(grid_kind) = kernel_grid_kind(kernel) else {
         return Ok(());
     };
-    eprintln!("warning: {SPATIAL_WARNING}");
+    eprintln!("note: {SPATIAL_NOTE}");
     let text = std::fs::read_to_string(case_nml)
         .with_context(|| format!("cannot read {}", case_nml.display()))?;
     let doc = colm_namelist::parse(&text)
@@ -4637,7 +4639,7 @@ fn cmd_netcdf_probe(file: &Path, json: bool) -> Result<()> {
 }
 
 fn cmd_mesh_new(opts: &Opts) -> Result<()> {
-    eprintln!("warning: {SPATIAL_WARNING}");
+    eprintln!("note: {SPATIAL_NOTE}");
     let output = opts.need("--out")?;
     let grid_kind = opts
         .get("--grid-kind")
@@ -4756,7 +4758,7 @@ fn cmd_mesh_new(opts: &Opts) -> Result<()> {
 }
 
 fn cmd_spatial_preflight(opts: &Opts) -> Result<()> {
-    eprintln!("warning: {SPATIAL_WARNING}");
+    eprintln!("note: {SPATIAL_NOTE}");
     let input = opts.need("--input")?;
     let input = input
         .canonicalize()
@@ -4803,7 +4805,7 @@ fn existing_absolute(opts: &Opts, name: &str, directory: bool) -> Result<PathBuf
 }
 
 fn cmd_spatial_new(opts: &Opts) -> Result<PathBuf> {
-    eprintln!("warning: {SPATIAL_WARNING}");
+    eprintln!("note: {SPATIAL_NOTE}");
     let grid_kind = opts.need_str("--grid-kind")?;
     let mesh = existing_absolute(opts, "--mesh", false)?;
     let mesh_summary = colm_srfdata::mesh::inspect_spatial_input(&mesh, &grid_kind)?;

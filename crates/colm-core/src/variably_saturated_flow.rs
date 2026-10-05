@@ -4295,6 +4295,11 @@ pub struct VariableSaturatedFlowInput<'a> {
     pub paddy: Option<crate::SoilIrrigation<'a>>,
     /// `DEF_GridRiverLake_FloodFeedback`：土壤 patch 上的漫滩再入渗；没开或不是土壤 patch 时是 `None`。
     pub flood: Option<crate::flood_evaporation::FloodInfiltrationInput>,
+    /// `CatchLateralFlow`（流域网格）：产流方案整段不算（`MOD_SoilSnowHydrology.F90:977-1056` 的
+    /// `#ifndef`），`rsur = rsur_se = rsur_ie = rsubst = 0`（`:972-975` 无条件清零）；求解后的积水溢出
+    /// 也不算（`:1308-1364`）。`frcsat` 与 `rnof` 不赋值：`frcsat` 保持分配时的 `spval`（这里给 NaN），
+    /// `rnof` 随后由 `lateral_flow` 整体覆盖（这里给 0）。
+    pub catch_lateral: bool,
 }
 
 /// `WATER_VSF` 的诊断输出。
@@ -4432,7 +4437,9 @@ pub fn variably_saturated_flow_step(
     let mut infiltration_excess_runoff_mm_s = 0.0;
     let mut saturated_fraction = 0.0;
     let mut subsurface_runoff_mm_s = 0.0;
-    if input.patch_type <= 1 {
+    if input.catch_lateral {
+        saturated_fraction = f64::NAN;
+    } else if input.patch_type <= 1 {
         match input.runoff {
             Water2014Runoff::Topmodel {
                 saturated_fraction_max,
@@ -4860,7 +4867,9 @@ pub fn variably_saturated_flow_step(
     // `needless_late_init` 会为此报警（本机 1.97.1 不报 ⇒ 这是 CI 才能发现的
     // 版本差）。两者语义相同 —— 分支里对 `surface_runoff_mm_s` 等的修改仍在取值
     // 之前发生，浮点结果逐位不变。
-    let total_runoff_mm_s = if let Some(paddy) = input.paddy {
+    let total_runoff_mm_s = if input.catch_lateral {
+        0.0
+    } else if let Some(paddy) = input.paddy {
         // 灌溉打开的土壤 patch：逐 PFT 按各自方式的积水上限溢出（水田 `DEF_TUNING_IRRIGATION_PONDMX`，
         // 其余 `pondmx`）。
         for &method in paddy.methods {
@@ -4934,11 +4943,17 @@ pub fn variably_saturated_flow_step(
         + state.surface_water_mm;
     // `WATER_VSF` 的水量平衡误差：GIMPLE 是
     // `FNMA(通量和, deltim, 蓄量变化)` —— `通量和*deltim` 被吸收。
-    let mut solver_balance_error_mm = (-(input.ground_water_flux_mm_s
-        - input.fluxes.transpiration_kg_m2_s
-        - surface_runoff_mm_s
-        - subsurface_runoff_mm_s))
-        .mul_add(dt, storage_after_kg_m2 - storage_before_kg_m2);
+    // `CatchLateralFlow`（`:1381-1383`）：产流不在柱内，闭合误差只扣 `gwat - etr`。
+    let column_outflow_mm_s = if input.catch_lateral {
+        input.ground_water_flux_mm_s - input.fluxes.transpiration_kg_m2_s
+    } else {
+        input.ground_water_flux_mm_s
+            - input.fluxes.transpiration_kg_m2_s
+            - surface_runoff_mm_s
+            - subsurface_runoff_mm_s
+    };
+    let mut solver_balance_error_mm =
+        (-column_outflow_mm_s).mul_add(dt, storage_after_kg_m2 - storage_before_kg_m2);
     // 无雪层（`lb >= 1`）时上游再把地表凝结项扣掉一次 —— 因为上面那一步已经
     // 把 `qsdew`/`qfros`/`qsubl` 加进 `wliq_soisno(1)`/`wice_soisno(1)` 了。
     if input.snow_layers == 0 {

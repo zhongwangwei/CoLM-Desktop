@@ -47,6 +47,7 @@ fn physics() -> LandPhysicsParameters {
         plant_hydraulics: false,
         urban_run: false,
         river_lake_flow_build: false,
+        catch_lateral: false,
         plant_hydraulic_parameters: PlantHydraulicParameters::default(),
         plant_hydraulic_overrides: colm_core::PlantHydraulicOverrides::default(),
         ozone: None,
@@ -175,6 +176,7 @@ fn recompute(energy: &colm_core::StandardLctEnergyOutput) -> colm_core::HistoryD
 fn reference() -> HistoryReferenceState {
     let forcing = binding().forcing;
     HistoryReferenceState {
+        catch_lateral: false,
         wind_speed_eastward_m_s: forcing.eastward_wind_m_s,
         wind_speed_northward_m_s: forcing.northward_wind_m_s,
         air_temperature_k: forcing.air_temperature_k,
@@ -1004,6 +1006,7 @@ fn the_balance_residuals_close_on_one_step() {
         &output,
         end,
         HistoryReferenceState {
+            catch_lateral: false,
             initial_total_water_mm: initial,
             ..reference()
         },

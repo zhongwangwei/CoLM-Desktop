@@ -119,6 +119,7 @@ pub mod bgc_veg_struct;
 pub mod bgc_vertical_profile;
 pub mod bgc_wetland;
 pub mod bgc_zero_fluxes_generated;
+pub mod binary128;
 pub mod calendar;
 pub mod canopy_layer_profile;
 pub mod canopy_roughness;

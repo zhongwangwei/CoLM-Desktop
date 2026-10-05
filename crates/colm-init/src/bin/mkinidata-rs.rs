@@ -9,19 +9,19 @@ use anyhow::{bail, ensure, Context, Result};
 use colm_case::{is_default, is_spatial_case};
 use colm_init::spatial_static::{resolve_vic_parameter_file, VicParameterSource};
 use colm_init::{
-    single_point_cold_start_run_from_namelist_with_subgrid, write_catch_lateral_cold_restart,
-    write_data_assimilation_restart, write_gridriver_cold_restart,
-    write_single_point_cold_time_restarts, write_single_point_constant_restart,
-    write_single_point_constant_restarts, write_single_point_hyperspectral_cold_time_restarts,
+    single_point_cold_start_run_from_namelist_with_subgrid, write_data_assimilation_restart,
+    write_gridriver_cold_restart, write_single_point_cold_time_restarts,
+    write_single_point_constant_restart, write_single_point_constant_restarts,
+    write_single_point_hyperspectral_cold_time_restarts,
     write_single_point_hyperspectral_constant_restarts, write_spatial_lct_cold_time_restart,
     write_spatial_lct_constant_restart, write_spatial_pft_cold_time_restarts,
     write_spatial_pft_constant_restarts, write_spatial_urban_cold_time_restarts,
-    write_spatial_urban_constant_restarts, CatchLateralColdStartConfig, GridRiverColdStartConfig,
-    HydraulicModel, LaiFrequency, LandCoverScheme, RestartDate, RestartTuning,
-    SinglePointHyperspectralConfig, SinglePointStaticConfig, SinglePointSubgrid,
-    SnicarInitialization, SpatialLctStaticConfig, SpatialLctTimeConfig,
-    SpatialObservedInitializationPaths, SpatialPftStaticConfig, SpatialPftSubgrid,
-    SpatialPftTimeConfig, SpatialUrbanStaticConfig, SpatialUrbanTimeConfig, UrbanConfig,
+    write_spatial_urban_constant_restarts, GridRiverColdStartConfig, HydraulicModel, LaiFrequency,
+    LandCoverScheme, RestartDate, RestartTuning, SinglePointHyperspectralConfig,
+    SinglePointStaticConfig, SinglePointSubgrid, SnicarInitialization, SpatialLctStaticConfig,
+    SpatialLctTimeConfig, SpatialObservedInitializationPaths, SpatialPftStaticConfig,
+    SpatialPftSubgrid, SpatialPftTimeConfig, SpatialUrbanStaticConfig, SpatialUrbanTimeConfig,
+    UrbanConfig,
 };
 use colm_namelist::{parse, Value};
 use colm_srfdata::site::SurfaceSubgrid;
@@ -416,23 +416,28 @@ fn write_catch_lateral_namelist_restart(
     let document = parse(&text)
         .with_context(|| format!("cannot parse case namelist {}", namelist.display()))?;
     let catchment_mesh = PathBuf::from(required_string(&document, "DEF_CatchmentMesh_data")?);
-    let estimated_river_depth = namelist_bool(&document, "DEF_USE_EstimatedRiverDepth", false)?;
-    let runtime_dir = estimated_river_depth
-        .then(|| required_string(&document, "DEF_dir_runtime"))
-        .transpose()?
-        .map(PathBuf::from);
-    let file = write_catch_lateral_cold_restart(CatchLateralColdStartConfig {
-        compression_level: run.compression_level,
-        catchment_mesh: &catchment_mesh,
-        landdata: &run.landdata,
-        restart_dir: &run.restart,
-        case_name: &run.case_name,
-        land_cover_year: run.land_cover_year,
-        date: run.date,
-        estimated_river_depth,
-        runtime_dir: runtime_dir.as_deref(),
-    })?;
-    Ok(file.path)
+    let neighbour_file = PathBuf::from(required_string(&document, "DEF_ElementNeighbour_file")?);
+    // `build_basin_network` 总要读 `DEF_dir_runtime/HydroLAKES_Reservoir.nc`。
+    let runtime_dir = PathBuf::from(required_string(&document, "DEF_dir_runtime")?);
+    let estimated_river_depth = namelist_bool(&document, "DEF_USE_EstimatedRiverDepth", true)?;
+    let date = format!(
+        "{:04}-{:03}-{:05}",
+        run.date.year, run.date.julian_day, run.date.seconds
+    );
+    colm_init::catch_network::write_catch_cold_restart(
+        colm_init::catch_network::CatchColdStartConfig {
+            landdata: &run.landdata,
+            restart_dir: &run.restart,
+            case_name: &run.case_name,
+            land_cover_year: run.land_cover_year,
+            date: &date,
+            catchment_mesh: &catchment_mesh,
+            neighbour_file: &neighbour_file,
+            runtime_dir: &runtime_dir,
+            estimated_river_depth,
+            compression_level: run.compression_level,
+        },
+    )
 }
 
 fn write_spatial_urban_namelist_block(
@@ -2065,90 +2070,6 @@ mod tests {
             [2.8e6]
         );
         assert!(file.variable("trc_river_restart_complete").is_none());
-        drop(file);
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn catch_lateral_namelist_restart_uses_the_case_mesh_and_landhru() {
-        let root =
-            std::env::temp_dir().join(format!("colm-init-catch-case-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).unwrap();
-        let mesh = root.join("catchment.nc");
-        let mut file = netcdf::create(&mesh).unwrap();
-        file.add_dimension("basin", 1).unwrap();
-        file.add_dimension("hydrounit", 1).unwrap();
-        file.add_variable::<f64>("river_depth", &["basin"])
-            .unwrap()
-            .put_values(&[2.5], ..)
-            .unwrap();
-        for name in ["lake_id", "basin_numhru"] {
-            file.add_variable::<i32>(name, &["basin"])
-                .unwrap()
-                .put_values(&[if name == "lake_id" { 0 } else { 1 }], ..)
-                .unwrap();
-        }
-        file.add_variable::<i32>("hydrounit_index", &["basin", "hydrounit"])
-            .unwrap()
-            .put_values(&[1], (.., ..))
-            .unwrap();
-        file.add_variable::<f64>("hydrounit_hand", &["basin", "hydrounit"])
-            .unwrap()
-            .put_values(&[0.0], (.., ..))
-            .unwrap();
-        file.close().unwrap();
-        let hru_dir = root.join("catch/landdata/landhru/2005");
-        std::fs::create_dir_all(&hru_dir).unwrap();
-        let mut file = netcdf::create(hru_dir.join("landhru_w180_s90.nc")).unwrap();
-        file.add_dimension("landhru", 1).unwrap();
-        file.add_variable::<i64>("eindex", &["landhru"])
-            .unwrap()
-            .put_values(&[1], ..)
-            .unwrap();
-        for name in ["settyp", "ipxstt", "ipxend"] {
-            file.add_variable::<i32>(name, &["landhru"])
-                .unwrap()
-                .put_values(&[1], ..)
-                .unwrap();
-        }
-        file.close().unwrap();
-        let namelist = root.join("case.nml");
-        std::fs::write(
-            &namelist,
-            format!(
-                "&nl_colm\n DEF_CASE_NAME='catch'\n DEF_dir_output='{}'\n DEF_file_mesh='mesh.nc'\n DEF_USE_LCT=.true.\n DEF_USE_PFT=.false.\n DEF_USE_PC=.false.\n DEF_LC_YEAR=2005\n DEF_CatchmentMesh_data='{}'\n DEF_simulation_time%start_year=2008\n/\n",
-                root.display(),
-                mesh.display(),
-            ),
-        )
-        .unwrap();
-
-        let restart = write_catch_lateral_namelist_restart(
-            &namelist,
-            &spatial_namelist_run(&namelist).unwrap(),
-        )
-        .unwrap();
-
-        assert_eq!(
-            restart,
-            root.join("catch/restart/2008-001-00000/catch_restart_basin_2008-001-00000_lc2005.nc")
-        );
-        let file = netcdf::open(&restart).unwrap();
-        assert_eq!(
-            file.variable("wdsrf_bsn_prev")
-                .unwrap()
-                .get_values::<f64, _>(..)
-                .unwrap(),
-            [2.5]
-        );
-        assert_eq!(
-            file.variable("wdsrf_hru_prev")
-                .unwrap()
-                .get_values::<f64, _>(..)
-                .unwrap(),
-            [2.5]
-        );
         drop(file);
         std::fs::remove_dir_all(root).unwrap();
     }

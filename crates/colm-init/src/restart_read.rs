@@ -36,18 +36,39 @@ impl RestartOverride {
     }
 }
 
+/// 变量名 → `(维度名, 扁平数据)`。
+type Columns<T> = BTreeMap<String, (Vec<String>, Vec<T>)>;
+
 /// 一个已读入内存的 CoLM restart 文件。
+///
+/// 内容只读、按 `Arc` 共享：克隆是 O(1)。空间算例每个 patch 都要装配一次、每次都"打开"同一块的
+/// 两份重启，所以 [`Self::open`] 按（路径、修改时间、长度）缓存最近读过的几份文件 —— 不缓存时
+/// 一块一万多个 patch 就是一万多次整文件解压（流域网格的 3.6 万个 patch 在装配上卡了半小时）。
 #[derive(Debug, Clone)]
 pub struct RestartFile {
-    dimensions: BTreeMap<String, usize>,
+    dimensions: std::sync::Arc<BTreeMap<String, usize>>,
     /// 变量名 → `(维度名, 扁平数据)`，数据保持文件里的顺序。
-    floats: BTreeMap<String, (Vec<String>, Vec<f64>)>,
-    integers: BTreeMap<String, (Vec<String>, Vec<i64>)>,
+    floats: std::sync::Arc<Columns<f64>>,
+    integers: std::sync::Arc<Columns<i64>>,
     /// 变量名 → 盘上的原始类型。
     ///
     /// 取值一律加宽给调用方用，但**写出时必须还原**：续跑把 `patchmask` 从 i8 写成
     /// i64，读的人（包括 Fortran 那一侧）虽然能自动转换，文件 schema 却已经变了。
-    types: BTreeMap<String, RestartValueType>,
+    types: std::sync::Arc<BTreeMap<String, RestartValueType>>,
+}
+
+/// [`RestartFile::open`] 的缓存键：规范路径、修改时间、长度。文件被改写后这三者至少变一个。
+type RestartCacheKey = (std::path::PathBuf, Option<std::time::SystemTime>, u64);
+
+/// 最近读过的几份重启（按插入顺序淘汰）。
+static RESTART_CACHE: std::sync::Mutex<Vec<(RestartCacheKey, RestartFile)>> =
+    std::sync::Mutex::new(Vec::new());
+const RESTART_CACHE_CAPACITY: usize = 16;
+
+fn restart_cache_key(path: &Path) -> Option<RestartCacheKey> {
+    let canonical = std::fs::canonicalize(path).ok()?;
+    let metadata = std::fs::metadata(&canonical).ok()?;
+    Some((canonical, metadata.modified().ok(), metadata.len()))
 }
 
 /// 重启里出现过的标量类型。
@@ -69,6 +90,26 @@ impl RestartFile {
     /// 静默跳过会让调用方拿着缺字段的状态跑下去。
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
+        let key = restart_cache_key(path);
+        if let Some(key) = &key {
+            let cache = RESTART_CACHE.lock().expect("restart cache lock");
+            if let Some((_, file)) = cache.iter().find(|(cached, _)| cached == key) {
+                return Ok(file.clone());
+            }
+        }
+        let file = Self::read(path)?;
+        if let Some(key) = key {
+            let mut cache = RESTART_CACHE.lock().expect("restart cache lock");
+            cache.retain(|(cached, _)| cached.0 != key.0);
+            if cache.len() >= RESTART_CACHE_CAPACITY {
+                cache.remove(0);
+            }
+            cache.push((key, file.clone()));
+        }
+        Ok(file)
+    }
+
+    fn read(path: &Path) -> Result<Self> {
         let file = netcdf::open(path)
             .with_context(|| format!("cannot open restart {}", path.display()))?;
         let dimensions = file
@@ -149,10 +190,10 @@ impl RestartFile {
             }
         }
         Ok(Self {
-            dimensions,
-            floats,
-            integers,
-            types,
+            dimensions: std::sync::Arc::new(dimensions),
+            floats: std::sync::Arc::new(floats),
+            integers: std::sync::Arc::new(integers),
+            types: std::sync::Arc::new(types),
         })
     }
 
@@ -214,6 +255,26 @@ impl RestartFile {
             "{name} should be a (patch,) field, but it is {dims:?}"
         );
         self.floats(name)
+    }
+
+    /// 最外层维是 `patch` 的变量里第 `patch` 个 patch 的那一块（宽度 = 总长 / patch 数）。
+    ///
+    /// 空间算例的模板只存本 patch 的块：存整变量的话，一块上万个 patch 就是平方的内存。
+    pub fn patch_block(&self, name: &str, patch: usize) -> Result<Vec<f64>> {
+        let dims = self.variable_dimensions(name)?;
+        ensure!(
+            dims.first().map(String::as_str) == Some("patch"),
+            "{name} has no outer patch dimension ({dims:?})"
+        );
+        let patches = self.dimension("patch")?;
+        ensure!(patch < patches, "{name}: patch {patch} is out of {patches}");
+        let values = self.floats(name)?;
+        ensure!(
+            values.len() % patches == 0,
+            "{name} does not divide by its patch dimension"
+        );
+        let width = values.len() / patches;
+        Ok(values[patch * width..(patch + 1) * width].to_vec())
     }
 
     /// `(patch, 层维)` 变量的某一 patch 整列。
@@ -290,23 +351,36 @@ impl RestartFile {
             }
             Ok(None)
         };
-        let mut view = self.clone();
-        for (name, (dims, values)) in view.floats.iter_mut() {
-            if let Some(range) = pick(name, dims, values.len())? {
-                *values = values[range].to_vec();
-            }
+        // 只拷贝切出来的那一块（不先克隆整份文件再切）：空间算例每个 patch 都切一次。
+        let mut floats = BTreeMap::new();
+        for (name, (dims, values)) in self.floats.iter() {
+            let values = match pick(name, dims, values.len())? {
+                Some(range) => values[range].to_vec(),
+                None => values.clone(),
+            };
+            floats.insert(name.clone(), (dims.clone(), values));
         }
-        for (name, (dims, values)) in view.integers.iter_mut() {
-            if let Some(range) = pick(name, dims, values.len())? {
-                *values = values[range].to_vec();
-            }
+        let mut integers = BTreeMap::new();
+        for (name, (dims, values)) in self.integers.iter() {
+            let values = match pick(name, dims, values.len())? {
+                Some(range) => values[range].to_vec(),
+                None => values.clone(),
+            };
+            integers.insert(name.clone(), (dims.clone(), values));
         }
+        let mut dimensions = (*self.dimensions).clone();
         if patches.is_some() {
-            view.dimensions.insert("patch".to_owned(), 1);
+            dimensions.insert("patch".to_owned(), 1);
         }
         if npft.is_some() {
-            view.dimensions.insert("pft".to_owned(), pfts.len());
+            dimensions.insert("pft".to_owned(), pfts.len());
         }
+        let view = Self {
+            dimensions: std::sync::Arc::new(dimensions),
+            floats: std::sync::Arc::new(floats),
+            integers: std::sync::Arc::new(integers),
+            types: std::sync::Arc::clone(&self.types),
+        };
         Ok(view)
     }
 
@@ -341,7 +415,7 @@ impl RestartFile {
         }
         let mut file = netcdf::create(path)
             .with_context(|| format!("cannot create restart {}", path.display()))?;
-        for (name, length) in &self.dimensions {
+        for (name, length) in self.dimensions.iter() {
             file.add_dimension(name, *length)
                 .with_context(|| format!("cannot define dimension {name}"))?;
         }
@@ -351,7 +425,7 @@ impl RestartFile {
                 .find(|entry| entry.name == name)
                 .map(|entry| entry.values.as_slice())
         };
-        for (name, (dims, source)) in &self.floats {
+        for (name, (dims, source)) in self.floats.iter() {
             let reference = dims.iter().map(String::as_str).collect::<Vec<_>>();
             let values = replacement(name).unwrap_or(source.as_slice());
             match self.types[name] {
@@ -364,7 +438,7 @@ impl RestartFile {
                     .put_values(values, ..)?,
             }
         }
-        for (name, (dims, original)) in &self.integers {
+        for (name, (dims, original)) in self.integers.iter() {
             // 整型状态（BGC 的 `altmax_lastyear_indx`、逻辑型 `skip_balance_check` 等）也会被
             // 推进；替换值按 f64 传进来，必须是精确整数，类型仍按盘上原样还原。
             let replaced = replacement(name)

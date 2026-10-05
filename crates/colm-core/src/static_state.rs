@@ -12,9 +12,9 @@ use anyhow::{ensure, Result};
 use crate::MISSING;
 
 const SOURCE_SOIL_LAYERS: usize = 8;
-const DEFAULT_LAKE_LAYERS: usize = 10;
-const DEFAULT_LAKE_DEPTH_M: f64 = 50.0;
-const DEFAULT_LAKE_THICKNESS_M: [f64; DEFAULT_LAKE_LAYERS] =
+pub const DEFAULT_LAKE_LAYERS: usize = 10;
+pub const DEFAULT_LAKE_DEPTH_M: f64 = 50.0;
+pub const DEFAULT_LAKE_THICKNESS_M: [f64; DEFAULT_LAKE_LAYERS] =
     [0.1, 1.0, 2.0, 3.0, 4.0, 5.0, 7.0, 7.0, 10.45, 10.45];
 
 /// The hydraulic relation selected by the CoLM namelist.

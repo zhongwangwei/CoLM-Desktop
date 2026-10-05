@@ -65,6 +65,9 @@ pub struct Water2014SoilFluxes {
 pub struct Water2014SoilInput<'a> {
     /// `DEF_GridRiverLake_FloodFeedback` 的漫滩再入渗（只在 VSF 路径接）；没有时是 `None`。
     pub flood: Option<crate::flood_evaporation::FloodInfiltrationInput>,
+    /// `CatchLateralFlow`（流域网格）：柱内不产流、不溢出，见 [`crate::VariableSaturatedFlowInput`]。
+    /// 上游在该构建下强制变饱和流，所以只有 VSF、冰川与湖泊路径看它。
+    pub catch_lateral: bool,
     pub patch_type: i32,
     pub urban_run: bool,
     pub plant_hydraulics: bool,
@@ -759,6 +762,7 @@ fn variably_saturated_soil_step(
             root_flux_mm_s: input.root_flux_mm_s,
             paddy: input.paddy_methods(),
             flood: input.flood,
+            catch_lateral: input.catch_lateral,
         },
         state,
     )?;

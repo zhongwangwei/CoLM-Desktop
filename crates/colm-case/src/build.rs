@@ -228,10 +228,19 @@ pub fn spatial_fields(s: &SpatialCaseSpec) -> Vec<(String, Value)> {
         SpatialGrid::Unstructured { mesh_file } => {
             out.push(("DEF_file_mesh".into(), Value::Str(mesh_file.clone())))
         }
-        SpatialGrid::Catchment { mesh_file } => out.push((
-            "DEF_CatchmentMesh_data".into(),
-            Value::Str(mesh_file.clone()),
-        )),
+        // `CatchLateralFlow` 的 `element_neighbour_init` 总要读相邻关系（`num_neighbour`、
+        // `idx_neighbour`、`len_border`）；流域网格文件本身就带这三项，上游算例也把两个
+        // 键指向同一个文件。不写的话 Fortran 会去读默认的占位路径。
+        SpatialGrid::Catchment { mesh_file } => out.extend([
+            (
+                "DEF_CatchmentMesh_data".into(),
+                Value::Str(mesh_file.clone()),
+            ),
+            (
+                "DEF_ElementNeighbour_file".into(),
+                Value::Str(mesh_file.clone()),
+            ),
+        ]),
     }
     out
 }

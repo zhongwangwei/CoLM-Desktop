@@ -346,7 +346,11 @@ pub fn lake_snow_step(
         let depth_mm = lake.column.thickness_m.iter().fold(0.0, |sum, dz| sum + dz) * 1.0e3;
         state.soil_water.surface_water_mm = depth_mm;
         let limit_mm = site.depth_m * 1.0e3;
-        let runoff = if depth_mm > limit_mm {
+        let runoff = if input.soil_water.catch_lateral {
+            // `CatchLateralFlow`（`:1941-1954` 的 `#ifndef`）：不在这里溢出，`rnof` 不赋值，
+            // 随后由 `lateral_flow` 整体覆盖。
+            0.0
+        } else if depth_mm > limit_mm {
             let runoff = (depth_mm - limit_mm) / dt;
             state.soil_water.surface_water_mm = limit_mm;
             let total = lake.column.thickness_m.iter().fold(0.0, |sum, dz| sum + dz);
@@ -376,12 +380,16 @@ pub fn lake_snow_step(
         (-lake_deficit).mul_add(dt, total_water_after)
     };
     // `:1969-1971` `.FMA (rnof, dt, .FNMA (prc+prl-fevpa, dt, endwb-totwb))`
-    let water_balance_error_mm = runoff.mul_add(
-        dt,
-        (-((forcing.convective_precipitation_kg_m2_s + forcing.large_scale_precipitation_kg_m2_s)
-            - thermal.fevpa))
-            .mul_add(dt, total_water_after - total_water_before),
-    );
+    let closure = (-((forcing.convective_precipitation_kg_m2_s
+        + forcing.large_scale_precipitation_kg_m2_s)
+        - thermal.fevpa))
+        .mul_add(dt, total_water_after - total_water_before);
+    // `CatchLateralFlow`（`:1965-1967` 的 `#ifndef`）：不加 `rnof * deltim`。
+    let water_balance_error_mm = if input.soil_water.catch_lateral {
+        closure
+    } else {
+        runoff.mul_add(dt, closure)
+    };
 
     // `snl > maxsnl` 时把空出来的雪槽清零（`:1983-1989`）。
     for index in -(crate::snow::MAX_SNOW_LAYERS as i32) + 1..=state.snow.layer_count {

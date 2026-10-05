@@ -19,7 +19,7 @@ const DOMAINS = [
 const GRIDS = [
   { id: 'latlon', t: '经纬度网格', d: '规则等经纬度网格（GRIDBASED）' },
   { id: 'unstructured', t: '非结构网格', d: '由 elmindex 描述计算单元（UNSTRUCTURED）' },
-  { id: 'catchment', t: '流域网格', d: '集水区与 HRU 水文单元（CATCHMENT）；Rust 引擎尚不支持，需 Fortran 内核' },
+  { id: 'catchment', t: '流域网格', d: '集水区与 HRU 水文单元（CATCHMENT），含坡面、河湖与地下侧向流' },
 ];
 
 const SUBGRIDS = [

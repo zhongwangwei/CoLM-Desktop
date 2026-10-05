@@ -29,9 +29,11 @@ pub fn canopy_roughness(
             .all(|value| value.is_finite())
             && leaf_area_index >= 0.0
             && canopy_height_m > 0.0
-            && canopy_cover_fraction > 0.0
-            && canopy_cover_fraction <= 1.0,
-        "canopy roughness inputs are invalid"
+            // 上游 `cal_z0_displa` 不检查 `fc <= 1`：PC 分层把各 PFT 的 `fcover` 逐项累加，可以是
+            // 1.0000000000000002（珠江流域算例实测），公式在那里照常有限。
+            && canopy_cover_fraction > 0.0,
+        "canopy roughness inputs are invalid (lsai {leaf_area_index}, htop {canopy_height_m}, \
+         fcover {canopy_cover_fraction})"
     );
     let mut square_root_drag = -VON_KARMAN / ((f77(0.01) / canopy_height_m).ln() - PSI_H);
     square_root_drag = square_root_drag.max(f77(0.0031_f64.sqrt()));

@@ -818,6 +818,20 @@ struct HistoryAccumulator {
     /// 本区间里交过值的量，含只交过 `spval` 的（上游每个 patch 都有 `a_*`，过滤只看 `patchtype`）：
     /// 网格聚合的分母按它算——湿地的 `a_qlayer` 一直是 `spval`，却照样占 `sumarea`。
     offered: std::collections::BTreeSet<String>,
+    /// 本步要替换（或补交）的值：`CatchLateralFlow` 的 `lateral_flow` 在 `CoLMMAIN` 之后改写的
+    /// patch 量（见 [`HistoryOverrides`]）。只在一次 `push` 里有效。
+    overrides: Option<HistoryOverrides>,
+}
+
+/// `CatchLateralFlow`：`lateral_flow` 在陆面步之后、`hist_out` 之前改写的 patch 量
+/// （`rsur`/`rsub`/`rnof`/`wat`/`h2osoi`，以及只在该构建下有的 `xwsur`/`xwsub`/`fldarea`）。
+/// 累加时同名量取这里的值；本步没被交的（流域构建独有的三项）在累加末尾补交。
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct HistoryOverrides {
+    pub scalars: Vec<(&'static str, f64)>,
+    pub layers: Vec<(&'static str, Vec<f64>)>,
+    /// `xerr` 是 `CoLMMAIN` 里（侧向流之前）算的：`endwb` 用这份侧向流之前的土壤水。
+    pub balance_water: Option<colm_core::Water2014SoilState>,
 }
 
 #[derive(Debug)]
@@ -832,6 +846,32 @@ const OWN_COUNT_VARIABLES: [&str; 9] = [
 ];
 
 impl HistoryAccumulator {
+    fn take_scalar_override(&mut self, name: &str) -> Option<f64> {
+        let overrides = self.overrides.as_mut()?;
+        let index = overrides.scalars.iter().position(|(n, _)| *n == name)?;
+        Some(overrides.scalars.swap_remove(index).1)
+    }
+
+    fn take_layer_override(&mut self, name: &str) -> Option<Vec<f64>> {
+        let overrides = self.overrides.as_mut()?;
+        let index = overrides.layers.iter().position(|(n, _)| *n == name)?;
+        Some(overrides.layers.swap_remove(index).1)
+    }
+
+    /// 本步没被交过的覆盖量补交一次（流域构建独有的 `xwsur`/`xwsub`/`fldarea`）。
+    fn flush_overrides(&mut self) -> Result<()> {
+        let Some(overrides) = self.overrides.take() else {
+            return Ok(());
+        };
+        for (name, value) in overrides.scalars {
+            self.scalar(name, 0, value)?;
+        }
+        for (name, values) in overrides.layers {
+            self.layer(name, 0, &values)?;
+        }
+        Ok(())
+    }
+
     /// 一个变量的平均除数：[`OWN_COUNT_VARIABLES`] 用自己的有效步数，其余用全局步数 `nac`。
     fn divisor(&self, name: &str, count: usize) -> f64 {
         if OWN_COUNT_VARIABLES.contains(&name) {
@@ -1381,6 +1421,7 @@ impl HistoryAccumulator {
             sums,
             steps: window.steps,
             filtered: std::collections::BTreeSet::new(),
+            overrides: None,
         }
     }
 }
@@ -1402,6 +1443,7 @@ impl HistorySink for HistoryAccumulator {
         value: f64,
         counts_as_step: bool,
     ) -> Result<()> {
+        let value = self.take_scalar_override(name).unwrap_or(value);
         ensure!(
             value.is_finite(),
             "the history value for {name} is not finite"
@@ -1453,6 +1495,8 @@ impl HistorySink for HistoryAccumulator {
     }
 
     fn layer(&mut self, name: &str, _record: usize, values: &[f64]) -> Result<()> {
+        let replaced = self.take_layer_override(name);
+        let values = replaced.as_deref().unwrap_or(values);
         ensure!(
             values.iter().all(|value| value.is_finite()),
             "the history value for {name} is not finite"
@@ -1541,6 +1585,8 @@ pub struct HistoryReferenceState {
     /// 由调用方在**内核动手之前**从状态上取（见 `colm_core::total_water_storage_mm`）——
     /// 步末的值在内核跑完后已经无从还原，所以只能从外面递进来。
     pub initial_total_water_mm: f64,
+    /// `CatchLateralFlow`：`errorw` 不扣 `rnof`（`CoLMMAIN.F90:1519-1524` 的 `#else` 支）。
+    pub catch_lateral: bool,
 }
 
 impl HistoryReferenceState {
@@ -1574,6 +1620,7 @@ impl HistoryReferenceState {
             surface_cosine_zenith,
             time_step_seconds,
             initial_total_water_mm,
+            catch_lateral: false,
         }
     }
 }
@@ -2203,12 +2250,21 @@ pub fn set_lct_balance_errors(
     let flood_evaporation = energy.flood.map_or(0.0, |flood| flood.evaporation_mm_s);
     let dt = reference.time_step_seconds;
     let evaporation_wb = energy.total_evaporation_kg_m2_s - flood_evaporation;
-    let errorw = (-((((reference.convective_precipitation_kg_m2_s
+    let input_wb = ((reference.convective_precipitation_kg_m2_s
         + reference.large_scale_precipitation_kg_m2_s)
         + flood_infiltration)
-        - evaporation_wb)
-        - output.water.total_runoff_mm_s))
-        .mul_add(dt, end_water_storage_mm - reference.initial_total_water_mm);
+        - evaporation_wb;
+    let net_wb = if reference.catch_lateral {
+        input_wb
+    } else {
+        input_wb - output.water.total_runoff_mm_s
+    };
+    let errorw = if reference.catch_lateral {
+        // CATCHMENT 内核（`CoLMMAIN.F90:1523`）：没有 `rnof` 这一项时 GCC 不收缩，先乘后减。
+        (end_water_storage_mm - reference.initial_total_water_mm) - net_wb * dt
+    } else {
+        (-net_wb).mul_add(dt, end_water_storage_mm - reference.initial_total_water_mm)
+    };
     let xerr = errorw / reference.time_step_seconds;
 
     for (name, value) in [("xerr", xerr), ("zerr", zerr)] {
@@ -2918,6 +2974,8 @@ pub struct HistorySession {
     tracer_variables: Option<TracerHistoryState>,
     /// 闸门 3（`DEF_hist_vars`）：开会话时取 [`install_selection`] 装好的那一份。
     selection: Option<std::sync::Arc<colm_hist::selection::HistorySelection>>,
+    /// 下一次 `push` 的覆盖量（[`Self::set_overrides`]）。
+    pending_overrides: Option<HistoryOverrides>,
 }
 
 /// 本进程的 `DEF_hist_vars` 开关状态。上游它是 namelist 模块里的全局量，读一次、整个运行不变；
@@ -3211,7 +3269,13 @@ impl HistorySession {
             tracer_time_step_seconds: None,
             tracer_variables: None,
             selection: SELECTION.get().cloned(),
+            pending_overrides: None,
         })
+    }
+
+    /// 下一个 `push_*` 累加时替换/补交的值（`CatchLateralFlow`，见 [`HistoryOverrides`]）。
+    pub fn set_overrides(&mut self, overrides: Option<HistoryOverrides>) {
+        self.pending_overrides = overrides;
     }
 
     /// 每个 history 文件都多声明这些由调用方聚合好的网格量（见 [`Self::stage_gridded`]）。
@@ -3960,9 +4024,14 @@ impl HistorySession {
             )?;
             // 灌溉打开时 `endwb` 取 `bgc_driver` 之前的土壤水与 `waterstorage`（见
             // `StandardLctSnowSoilOutput::irrigation_balance`）；其余历史量是 BGC 之后的状态。
+            let pre_lateral = accumulator
+                .inner
+                .overrides
+                .as_mut()
+                .and_then(|overrides| overrides.balance_water.take());
             let (balance_water, irrigation_storage) = match &output.irrigation_balance {
                 Some(balance) => (&balance.soil_water, Some(balance.storage_mm)),
-                None => (&state.soil_water, None),
+                None => (pre_lateral.as_ref().unwrap_or(&state.soil_water), None),
             };
             let mut end_water = colm_core::total_water_storage_mm(
                 balance_water,
@@ -3971,7 +4040,7 @@ impl HistorySession {
                 irrigation_storage,
             );
             if wetland && variably_saturated {
-                end_water += state.soil_water.wetland_water_mm;
+                end_water += balance_water.wetland_water_mm;
             }
             if wetland && !variably_saturated {
                 set_lct_balance_errors(
@@ -4502,7 +4571,9 @@ impl HistorySession {
         let patch = self.patch_cursor;
         let mut accumulator = std::mem::take(&mut self.accumulators[patch]);
         accumulator.steps += 1;
-        let filled = accumulate(&mut accumulator);
+        accumulator.overrides = self.pending_overrides.take();
+        let filled = accumulate(&mut accumulator).and_then(|()| accumulator.flush_overrides());
+        accumulator.overrides = None;
         self.accumulators[patch] = accumulator;
         if filled.is_err() {
             self.patch_cursor = 0;
@@ -4606,6 +4677,13 @@ impl HistorySession {
             }
             if means.iter().any(|means| means.offered.contains("xy_hpbl")) {
                 buffer.declare(&["xy_hpbl"])?;
+            }
+            // `CatchLateralFlow`（`MOD_Hist.F90:670-722`）：写 `f_xwsur`/`f_xwsub`/`f_fldarea`，
+            // 不写 `f_rsur_se`/`f_rsur_ie`。
+            if means.iter().any(|means| means.offered.contains("fldarea")) {
+                buffer.declare(&["xwsur", "xwsub", "fldarea"])?;
+                buffer.undeclare("rsur_se");
+                buffer.undeclare("rsur_ie");
             }
             self.open = Some((record.suffix.clone(), buffer));
         }

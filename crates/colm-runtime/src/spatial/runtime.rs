@@ -36,6 +36,8 @@ pub struct SpatialRuntime {
     forcing_mask: Vec<bool>,
     /// `DEF_USE_Forcing_Downscaling(_Simple)`：强迫按地形降到 patch（[`super::downscaling`]）。
     downscaling: Option<super::downscaling::SpatialDownscaling>,
+    /// `CatchLateralFlow`（CATCHMENT 内核）：每步陆面之后的流域侧向流。
+    catchment: Option<crate::catchment::runtime::CatchmentRuntime>,
 }
 
 impl SpatialRuntime {
@@ -76,7 +78,30 @@ impl SpatialRuntime {
             tracer_forcing: None,
             forcing_mask,
             downscaling: None,
+            catchment: None,
         })
+    }
+
+    /// 接上流域侧向流（`CatchLateralFlow`）。与网格河湖汇流互斥，且不支持强迫缺测遮蔽。
+    pub fn with_catchment(
+        mut self,
+        catchment: crate::catchment::runtime::CatchmentRuntime,
+    ) -> Result<Self> {
+        ensure!(
+            self.river.is_none(),
+            "catchment lateral flow and grid river-lake flow are exclusive builds"
+        );
+        ensure!(
+            self.forcing_mask.iter().all(|&active| active),
+            "catchment lateral flow with patches masked by missing forcing is not ported"
+        );
+        self.catchment = Some(catchment);
+        Ok(self)
+    }
+
+    /// 当前的流域侧向流（写续跑用）。
+    pub fn catchment(&self) -> Option<&crate::catchment::runtime::CatchmentRuntime> {
+        self.catchment.as_ref()
     }
 
     /// 接上强迫降尺度（`patches` 与映射的 set 一一对应）。
@@ -186,6 +211,7 @@ impl SpatialRuntime {
             &[Option<PatchStepOutput<'_>>],
             Option<&crate::river::RiverModel>,
             Option<&crate::tracer::ForcingCache<'_>>,
+            Option<&crate::catchment::runtime::CatchmentRuntime>,
         ) -> Result<()>,
     {
         ensure!(
@@ -343,6 +369,10 @@ impl SpatialRuntime {
                 // （`CNFireArea` 原来对 `tsoi17` 整列赋值、需在此广播；upstream-bugs 第 61 条已修，各 patch 只写自己的。）
                 // `tracer_report`：一步里所有 patch 推进完之后（`CoLMDRIVER.F90:392-393`）。
                 crate::tracer::report_after_patches(templates)?;
+                // `CoLM.F90:544-546`：`lateral_flow (idate(1), deltim)`，预热期也做。
+                if let Some(catchment) = self.catchment.as_mut() {
+                    catchment.step(&mut next_states)?;
+                }
                 // `CoLM.F90:559-563`：陆面步之后、`hist_out` 之前汇流；预热期不汇流。
                 if !clock.is_spinup {
                     if let Some((river, included)) = self.river.as_mut() {
@@ -453,6 +483,30 @@ impl SpatialRuntime {
                         }
                     }
                 }
+                // `hist_out`：`accumulate_fluxes` 末尾 `accumulate_fluxes_basin`，写记录时
+                // `hist_basin_out`（`MOD_Hist.F90:5280`）。
+                if let (Some(history), Some(catchment)) =
+                    (history.as_deref_mut(), self.catchment.as_mut())
+                {
+                    if !clock.is_spinup {
+                        catchment.accumulate_history();
+                        let target = history
+                            .basin
+                            .clone()
+                            .context("a catchment history needs its basin history target")?;
+                        if let Some(record) = history.session.pending_record(clock.end_time)? {
+                            let path = catchment.write_history(
+                                &target.directory,
+                                &target.stem,
+                                &record,
+                                target.compress_level,
+                            )?;
+                            if !history.files.contains(&path) {
+                                history.files.push(path);
+                            }
+                        }
+                    }
+                }
                 if let Some(history) = history.as_deref_mut() {
                     if !clock.is_spinup {
                         push_history(
@@ -463,6 +517,7 @@ impl SpatialRuntime {
                             &steps,
                             &initial_totals,
                             time_step_seconds,
+                            self.catchment.as_ref(),
                         )?;
                     }
                     // `tracer_hist_out`：主 history 之后；预热期不计步也不清零（会话里处理）。
@@ -505,6 +560,7 @@ impl SpatialRuntime {
                     &views,
                     self.river.as_ref().map(|(river, _)| river),
                     cache.as_ref(),
+                    self.catchment.as_ref(),
                 )?;
                 *states = next_states;
                 self.clock = next_clock;
@@ -517,6 +573,7 @@ impl SpatialRuntime {
 }
 
 /// `hist_out` 的累加：每个网格元先聚合一次近地面诊断，再逐 patch 交给会话。
+#[allow(clippy::too_many_arguments)]
 fn push_history(
     history: &mut super::history::SpatialHistory,
     templates: &[StandardLctRestartTemplate],
@@ -526,14 +583,17 @@ fn push_history(
     steps: &[PointRuntimeStep],
     initial_totals: &[f64],
     time_step_seconds: f64,
+    catchment: Option<&crate::catchment::runtime::CatchmentRuntime>,
 ) -> Result<()> {
     let reference = |index: usize| {
-        crate::history::HistoryReferenceState::from_forcing(
+        let mut reference = crate::history::HistoryReferenceState::from_forcing(
             &steps[index].forcing,
             steps[index].surface_cosine_zenith,
             time_step_seconds,
             initial_totals[index],
-        )
+        );
+        reference.catch_lateral = catchment.is_some();
+        reference
     };
     for range in history.elements.ranges.clone() {
         // 网格元诊断只用未遮蔽的 patch（`filter = patchmask .and. forcmask_pch`）；
@@ -564,6 +624,10 @@ fn push_history(
         history.session.set_element_surface(element);
         for index in range {
             let end = steps[index].clock.end_time;
+            // `lateral_flow` 改写过的 patch 量（`rsur`/`rsub`/`rnof`/`wat`/`h2osoi` 与流域独有的三项）。
+            history
+                .session
+                .set_overrides(catchment.and_then(|c| c.history_overrides(index)));
             let pushed = match &outputs[index] {
                 Some(output) => crate::push_patch_history(
                     &mut history.session,

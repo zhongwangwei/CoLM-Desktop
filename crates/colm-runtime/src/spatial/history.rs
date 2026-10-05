@@ -314,6 +314,16 @@ pub struct SpatialHistory {
     pub elements: ElementGroups,
     /// 已写出的 history 文件。
     pub files: Vec<std::path::PathBuf>,
+    /// `CatchLateralFlow`：basin history（`<stem>_hist_basin_<suffix>.nc`）的落点。
+    pub basin: Option<BasinHistoryTarget>,
+}
+
+/// basin history 文件的目录、前缀与压缩级别（`DEF_HIST_CompressLevel`）。
+#[derive(Debug, Clone)]
+pub struct BasinHistoryTarget {
+    pub directory: std::path::PathBuf,
+    pub stem: String,
+    pub compress_level: u8,
 }
 
 #[cfg(test)]

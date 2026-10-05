@@ -367,15 +367,21 @@ pub fn glacier_snow_step(
             state.soil_water.surface_water_mm = 0.0;
             state.soil_water.liquid_water_kg_m2[0] = available.max(1.0e-8);
         }
-        let ponding_limit = input.soil_water.ponding_limit_mm;
-        let runoff = if state.soil_water.surface_water_mm > ponding_limit {
-            let runoff = (state.soil_water.surface_water_mm - ponding_limit) / dt;
-            state.soil_water.surface_water_mm = ponding_limit;
-            runoff
+        if input.soil_water.catch_lateral {
+            // `CatchLateralFlow`（`:1727-1738` 的 `#ifndef`）：积水不在这里溢出，`rsur`/`rnof` 不赋值，
+            // 随后由 `lateral_flow` 整体覆盖。
+            (0.0, 0.0)
         } else {
-            0.0
-        };
-        (runoff, runoff)
+            let ponding_limit = input.soil_water.ponding_limit_mm;
+            let runoff = if state.soil_water.surface_water_mm > ponding_limit {
+                let runoff = (state.soil_water.surface_water_mm - ponding_limit) / dt;
+                state.soil_water.surface_water_mm = ponding_limit;
+                runoff
+            } else {
+                0.0
+            };
+            (runoff, runoff)
+        }
     } else {
         let runoff = water_input.max(0.0);
         (runoff, runoff)
@@ -386,11 +392,16 @@ pub fn glacier_snow_step(
     if variably_saturated {
         total_water_after += state.soil_water.surface_water_mm;
     }
-    // `:1759` `.FNMA (deltim, pg_rain+pg_snow-fevpa-rnof, endwb-totwb)`
-    let water_balance_error_mm = (-dt).mul_add(
-        snowfall + rainfall - thermal.fevpa - total_runoff,
-        total_water_after - total_water_before,
-    );
+    // `:1759` `.FNMA (deltim, pg_rain+pg_snow-fevpa-rnof, endwb-totwb)`；
+    // `CatchLateralFlow`（`:1756`）：不扣 `rnof`，而且 GCC 不再收缩——先乘后减。
+    let water_balance_error_mm = if input.soil_water.catch_lateral {
+        (total_water_after - total_water_before) - dt * (snowfall + rainfall - thermal.fevpa)
+    } else {
+        (-dt).mul_add(
+            snowfall + rainfall - thermal.fevpa - total_runoff,
+            total_water_after - total_water_before,
+        )
+    };
     let water_balance_error_mm_s = if variably_saturated {
         water_balance_error_mm / dt
     } else {

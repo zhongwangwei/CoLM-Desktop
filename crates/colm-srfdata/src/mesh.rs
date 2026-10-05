@@ -326,8 +326,9 @@ fn inspect_catchment(file: &netcdf::File) -> Result<SpatialInputSummary> {
                     basin_numhru.len()
                 );
             };
-            if hydrounit <= 0 || hydrounit > *numhru {
-                bail!("catchment element {cat} has invalid hydrounit {hydrounit}; expected 1..={numhru}");
+            // 0 号 HRU 是流域里的河道/水体像元，`MOD_LandHRU` 照常建成 `settyp = 0` 的 HRU。
+            if hydrounit < 0 || hydrounit > *numhru {
+                bail!("catchment element {cat} has invalid hydrounit {hydrounit}; expected 0..={numhru}");
             }
             active_cells += 1;
             max_elmid = max_elmid.max(cat);

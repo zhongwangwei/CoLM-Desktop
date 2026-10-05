@@ -475,8 +475,20 @@ fn run_spatial(
             ..switches
         });
     }
-    // GRID/UNSTRUCTURED 内核总是编进 `GridRiverLakeFlow`，它改变了几处收缩形状。
-    physics.river_lake_flow_build = true;
+    ensure!(
+        !(arguments.catchment && arguments.unstructured),
+        "--catchment and --unstructured name different kernels"
+    );
+    // GRID/UNSTRUCTURED 内核总是编进 `GridRiverLakeFlow`，它改变了几处收缩形状。CATCHMENT 内核
+    // 编进的是 `CatchLateralFlow`：上游强制变饱和流与动态湖（`MOD_Namelist.F90:1879-1884`、
+    // `:2445-2459`），柱内不产流。
+    physics.river_lake_flow_build = !arguments.catchment;
+    if arguments.catchment {
+        check_catchment(&document)?;
+        physics.catch_lateral = true;
+        physics.variably_saturated_flow = true;
+        physics.dynamic_lake = true;
+    }
     // 单点把 `DEF_TOPMOD_method` 强制为 0；空间构建照 namelist（`MOD_Namelist.F90:1899-1904`）。
     physics.topmodel_method = colm_runtime::physics::topmodel_method(&document)?;
     let missing = colm_runtime::physics::unported_branches(&physics);
@@ -562,6 +574,7 @@ fn run_spatial(
         physics: &physics,
         out: &out,
         vector_history,
+        catchment: arguments.catchment,
     };
     let restart_root = out.join("restart");
     let scratch = restart_root.join(LULCC_SCRATCH);
@@ -795,6 +808,8 @@ struct SpatialCase<'a> {
     out: &'a Path,
     /// `HistForm = 'Vector'`：UNSTRUCTURED 内核且 `DEF_HISTORY_IN_VECTOR`。
     vector_history: bool,
+    /// CATCHMENT 内核：流域侧向流代替网格河湖汇流。
+    catchment: bool,
 }
 
 /// 空间算例里一个 patch 的块内信息：PFT 区间（`patch_pft_s/e`）与像元
@@ -866,6 +881,7 @@ fn run_spatial_segment(
         physics,
         out,
         vector_history,
+        catchment,
     } = *case;
     let config = &segment.config;
     let year = segment.year;
@@ -1184,273 +1200,331 @@ fn run_spatial_segment(
     if segment.end == SegmentEnd::Lulcc {
         runtime = runtime.defer_lai_refresh_at(config.end);
     }
-    let network = colm_runtime::river::network::RiverNetwork::read(
-        &unit_catchment_file(document, out)?,
-        logical_field(document, "DEF_GridRiverLake_FloodplainStorageFix")?,
-    )?;
-    let routing = colm_runtime::river::network::RunoffRouting::build(&network, &topology)?;
-    // `filter_rnof`/`filter_basic`：`patchtype < 99 .and. patchmask .and. forcmask_pch`。
-    let runoff_filter = templates
-        .iter()
-        .zip(&patch_mask)
-        .zip(&forcing_mask)
-        .map(|((template, &mask), &active)| template.patch_type < 99 && mask && active)
-        .collect::<Vec<_>>();
-    // 网格 history 多一个静态场与 6 个河道量（`MOD_Hist.F90:4749-4790`）。
-    let history_grid = history_grid.take().map(|mut grid| {
-        grid.statics.push((
-            "mask_complete_upstream_regird".to_owned(),
-            "Mask of grids with all upstream located in simulation region".to_owned(),
-            "100%".to_owned(),
-            colm_runtime::river::history::RiverHistoryWriter::upstream_mask_static(
-                &network,
-                &routing,
-                &grid,
-                &runoff_filter,
-            ),
-        ));
-        std::sync::Arc::new(grid)
-    });
-    let river_writer = if vector_history && writes_history {
-        Some(colm_runtime::river::history::RiverHistoryWriter::new(
-            &network,
-            &routing,
-            None,
-            &runoff_filter,
-            out.join("history"),
+    let (history_grid, river_writer, history_vector, mut runtime) = if catchment {
+        let history_grid = history_grid.take().map(std::sync::Arc::new);
+        let landdata = out.join("landdata");
+        let mesh = PathBuf::from(string_field(document, "DEF_CatchmentMesh_data")?);
+        let neighbours = PathBuf::from(string_field(document, "DEF_ElementNeighbour_file")?);
+        let runtime_dir = PathBuf::from(string_field(document, "DEF_dir_runtime")?);
+        let basin_restart = colm_runtime::catchment::runtime::basin_restart_path(
+            &segment.input,
             name,
-        )?)
+            &start_label,
+            year,
+        );
+        let catchment = colm_runtime::catchment::runtime::CatchmentRuntime::load(
+            &colm_runtime::catchment::runtime::CatchmentSetup {
+                landdata: &landdata,
+                land_cover_year: i32::try_from(year)?,
+                catchment_mesh: &mesh,
+                neighbour_file: &neighbours,
+                runtime_dir: &runtime_dir,
+                estimated_river_depth: logical_field(document, "DEF_USE_EstimatedRiverDepth")?,
+                block_names: topology
+                    .blocks
+                    .iter()
+                    .map(|(block, _)| block.clone())
+                    .collect(),
+                constant_restarts: block_files.iter().map(|f| f.constant.clone()).collect(),
+                time_restarts: block_files.iter().map(|f| f.time.clone()).collect(),
+                basin_restart: &basin_restart,
+                time_step_seconds: config.timestep_seconds,
+            },
+            &templates,
+        )?;
+        // `lateral_flow_init` 末尾 `write_catch_parameters`。
+        catchment.write_parameters(
+            &out.join("catch_parameters.nc"),
+            &block_files
+                .iter()
+                .map(|f| f.constant.clone())
+                .collect::<Vec<_>>(),
+            u8::try_from(integer_field(document, "DEF_REST_CompressLevel")?)
+                .context("DEF_REST_CompressLevel must fit 0..=9")?,
+        )?;
+        let runtime = runtime.with_catchment(catchment)?;
+        (history_grid, None, None, runtime)
     } else {
-        history_grid
-            .as_ref()
-            .map(|grid| {
-                colm_runtime::river::history::RiverHistoryWriter::new(
+        let mut runtime = runtime;
+        let network = colm_runtime::river::network::RiverNetwork::read(
+            &unit_catchment_file(document, out)?,
+            logical_field(document, "DEF_GridRiverLake_FloodplainStorageFix")?,
+        )?;
+        let routing = colm_runtime::river::network::RunoffRouting::build(&network, &topology)?;
+        // `filter_rnof`/`filter_basic`：`patchtype < 99 .and. patchmask .and. forcmask_pch`。
+        let runoff_filter = templates
+            .iter()
+            .zip(&patch_mask)
+            .zip(&forcing_mask)
+            .map(|((template, &mask), &active)| template.patch_type < 99 && mask && active)
+            .collect::<Vec<_>>();
+        // 网格 history 多一个静态场与 6 个河道量（`MOD_Hist.F90:4749-4790`）。
+        let history_grid = history_grid.take().map(|mut grid| {
+            grid.statics.push((
+                "mask_complete_upstream_regird".to_owned(),
+                "Mask of grids with all upstream located in simulation region".to_owned(),
+                "100%".to_owned(),
+                colm_runtime::river::history::RiverHistoryWriter::upstream_mask_static(
                     &network,
                     &routing,
-                    Some(std::sync::Arc::clone(grid)),
+                    &grid,
                     &runoff_filter,
-                    out.join("history"),
-                    name,
-                )
-            })
-            .transpose()?
-    };
-    // 向量 history（`HistForm = 'Vector'`）：单元按 `elmindex` 递增（`eindex_glb`），每个单元的 patch
-    // 区间与 `subfrc` 来自拓扑；河道的静态掩码按 `filter_ucat` 聚合到单元。
-    let history_vector = if vector_history && writes_history {
-        let groups = ElementGroups::from_topology(&topology)?;
-        let mut elements = groups
-            .ranges
-            .iter()
-            .map(|range| (topology.element[range.start], range.clone()))
-            .collect::<Vec<_>>();
-        elements.sort_by_key(|(id, _)| *id);
-        let vector = colm_hist::history::HistoryVector {
-            elmindex: elements.iter().map(|(id, _)| *id).collect(),
-            elements: elements.into_iter().map(|(_, range)| range).collect(),
-            subfrc: groups.fractions.clone(),
-            compress_level: colm_runtime::spatial::history::hist_compress_level(document)?,
-        };
-        let (mask, filter) =
-            colm_runtime::river::history::RiverHistoryWriter::upstream_mask_patches(
+                ),
+            ));
+            std::sync::Arc::new(grid)
+        });
+        let river_writer = if vector_history && writes_history {
+            Some(colm_runtime::river::history::RiverHistoryWriter::new(
                 &network,
                 &routing,
+                None,
                 &runoff_filter,
-            );
-        let statics = vec![(
-            "mask_complete_upstream_regird".to_owned(),
-            "Mask of grids with all upstream located in simulation region".to_owned(),
-            "100%".to_owned(),
-            vector.aggregate(|p| mask[p], |p| filter[p], false),
-        )];
-        Some((std::sync::Arc::new(vector), statics))
-    } else {
-        None
-    };
-    let reservoir = if integer_field(document, "DEF_Reservoir_Method")? > 0 {
-        Some(
-            colm_runtime::river::reservoir::Reservoir::read_with_regional(
-                Path::new(&string_field(document, "DEF_ReservoirPara_file")?),
-                &network,
-                integer_field(document, "DEF_Reservoir_Method")?,
-                regional_catchment(document, out)?.as_deref(),
-            )?,
-        )
-    } else {
-        None
-    };
-    let levee = if logical_field(document, "DEF_USE_LEVEE")? {
-        // 水库表里的单元流域（`lake_type == 2`）上游强制无堤。
-        let reservoir_cells = reservoir.as_ref().map_or_else(
-            || vec![false; network.len()],
-            |r| r.of_catchment.iter().map(Option::is_some).collect(),
-        );
-        Some(colm_runtime::river::levee::Levee::read(
-            &unit_catchment_file(document, out)?,
-            &network,
-            &reservoir_cells,
-        )?)
-    } else {
-        None
-    };
-    let bifurcation = if logical_field(document, "DEF_USE_BIFURCATION")? {
-        Some(colm_runtime::river::bifurcation::Bifurcation::read(
-            &unit_catchment_file(document, out)?,
-            &network,
-        )?)
-    } else {
-        None
-    };
-    let river_start = river_restart_path(&segment.input, name, &start_label, year);
-    let mut river_writer = river_writer;
-    if let (Some(writer), Some(reservoir)) = (river_writer.as_mut(), reservoir.as_ref()) {
-        writer.reservoir_ids = Some(reservoir.grand_id.clone());
-    }
-    // unitcat 文件的压缩：逐时间量用 `DEF_HIST_CompressLevel`，静态掩码用 `DEF_REST_CompressLevel`。
-    if let Some(writer) = river_writer.as_mut() {
-        writer.hist_compress_level = colm_runtime::spatial::history::hist_compress_level(document)?;
-        writer.rest_compress_level =
-            u8::try_from(integer_field(document, "DEF_REST_CompressLevel")?)
-                .context("DEF_REST_CompressLevel must fit 0..=9")?;
-    }
-    let river_state =
-        colm_runtime::river::restart::read_river_state(&river_start, &network, reservoir.as_ref())?;
-    // `restore_river_history_acc_restart`：陆面旁车标记 `history_river_required = 1` 时读回河道累加。
-    let river_history = {
-        let sidecar = history_sidecar_path(&block_files[0].time)?;
-        let required = sidecar.is_file()
-            && netcdf::open(&sidecar)
-                .ok()
-                .and_then(|file| {
-                    file.variable("history_river_required")
-                        .map(|v| v.get_values::<f64, _>(..))
+                out.join("history"),
+                name,
+            )?)
+        } else {
+            history_grid
+                .as_ref()
+                .map(|grid| {
+                    colm_runtime::river::history::RiverHistoryWriter::new(
+                        &network,
+                        &routing,
+                        Some(std::sync::Arc::clone(grid)),
+                        &runoff_filter,
+                        out.join("history"),
+                        name,
+                    )
                 })
                 .transpose()?
-                .is_some_and(|marker| marker.contains(&1.0));
-        if required {
-            let river_file = segment
-                .input
-                .join(&start_label)
-                .join(format!("{name}_restart_hist_{start_label}.nc.river"));
-            ensure!(
-                river_file.is_file(),
-                "{} marks an open river-history window, but {} is missing",
-                sidecar.display(),
-                river_file.display()
+        };
+        // 向量 history（`HistForm = 'Vector'`）：单元按 `elmindex` 递增（`eindex_glb`），每个单元的 patch
+        // 区间与 `subfrc` 来自拓扑；河道的静态掩码按 `filter_ucat` 聚合到单元。
+        let history_vector = if vector_history && writes_history {
+            let groups = ElementGroups::from_topology(&topology)?;
+            let mut elements = groups
+                .ranges
+                .iter()
+                .map(|range| (topology.element[range.start], range.clone()))
+                .collect::<Vec<_>>();
+            elements.sort_by_key(|(id, _)| *id);
+            let vector = colm_hist::history::HistoryVector {
+                elmindex: elements.iter().map(|(id, _)| *id).collect(),
+                elements: elements.into_iter().map(|(_, range)| range).collect(),
+                subfrc: groups.fractions.clone(),
+                compress_level: colm_runtime::spatial::history::hist_compress_level(document)?,
+            };
+            let (mask, filter) =
+                colm_runtime::river::history::RiverHistoryWriter::upstream_mask_patches(
+                    &network,
+                    &routing,
+                    &runoff_filter,
+                );
+            let statics = vec![(
+                "mask_complete_upstream_regird".to_owned(),
+                "Mask of grids with all upstream located in simulation region".to_owned(),
+                "100%".to_owned(),
+                vector.aggregate(|p| mask[p], |p| filter[p], false),
+            )];
+            Some((std::sync::Arc::new(vector), statics))
+        } else {
+            None
+        };
+        let reservoir = if integer_field(document, "DEF_Reservoir_Method")? > 0 {
+            Some(
+                colm_runtime::river::reservoir::Reservoir::read_with_regional(
+                    Path::new(&string_field(document, "DEF_ReservoirPara_file")?),
+                    &network,
+                    integer_field(document, "DEF_Reservoir_Method")?,
+                    regional_catchment(document, out)?.as_deref(),
+                )?,
+            )
+        } else {
+            None
+        };
+        let levee = if logical_field(document, "DEF_USE_LEVEE")? {
+            // 水库表里的单元流域（`lake_type == 2`）上游强制无堤。
+            let reservoir_cells = reservoir.as_ref().map_or_else(
+                || vec![false; network.len()],
+                |r| r.of_catchment.iter().map(Option::is_some).collect(),
             );
-            Some(colm_runtime::river::restart::read_river_history(
-                &river_file,
-                network.len(),
-                levee.is_some(),
-                bifurcation.as_ref().map(|bif| (bif.paths(), bif.levels)),
-                reservoir.as_ref().map(|r| r.len()),
+            Some(colm_runtime::river::levee::Levee::read(
+                &unit_catchment_file(document, out)?,
+                &network,
+                &reservoir_cells,
             )?)
         } else {
             None
+        };
+        let bifurcation = if logical_field(document, "DEF_USE_BIFURCATION")? {
+            Some(colm_runtime::river::bifurcation::Bifurcation::read(
+                &unit_catchment_file(document, out)?,
+                &network,
+            )?)
+        } else {
+            None
+        };
+        let river_start = river_restart_path(&segment.input, name, &start_label, year);
+        let mut river_writer = river_writer;
+        if let (Some(writer), Some(reservoir)) = (river_writer.as_mut(), reservoir.as_ref()) {
+            writer.reservoir_ids = Some(reservoir.grand_id.clone());
         }
-    };
-    let mut river = colm_runtime::river::RiverModel::new(
-        network,
-        routing,
-        river_state,
-        real_field(document, "DEF_GRIDBASED_ROUTING_MAX_DT")?,
-        levee,
-        bifurcation,
-        reservoir,
-    )?;
-    if let Some(history) = river_history {
-        river.history = history;
-    }
-    river.momentum_dt_limit = logical_field(document, "DEF_GRIDBASED_ROUTING_MOMENTUM_DT_LIMIT")?;
-    // `river_lake_tracer_init` + `read_tracer_restart`/`tracer_init_from_water`
-    // （`grid_riverlake_flow_init`）：有输运示踪物时河道示踪物与陆面一起开。
-    if let Some(tracer) = tracer_runtime
-        .as_ref()
-        .filter(|tracer| tracer.has_transport())
-    {
-        let mut tracers =
-            colm_runtime::river::tracer::RiverTracers::new(tracer.set.clone(), river.network.len());
-        let loaded = colm_runtime::river::restart::read_river_tracers(
+        // unitcat 文件的压缩：逐时间量用 `DEF_HIST_CompressLevel`，静态掩码用 `DEF_REST_CompressLevel`。
+        if let Some(writer) = river_writer.as_mut() {
+            writer.hist_compress_level =
+                colm_runtime::spatial::history::hist_compress_level(document)?;
+            writer.rest_compress_level =
+                u8::try_from(integer_field(document, "DEF_REST_CompressLevel")?)
+                    .context("DEF_REST_CompressLevel must fit 0..=9")?;
+        }
+        let river_state = colm_runtime::river::restart::read_river_state(
             &river_start,
-            &river.network,
-            river.levee.as_ref(),
-            &mut tracers,
+            &network,
+            reservoir.as_ref(),
         )?;
-        if !loaded {
-            // `is_built_resv_init`：起始年份下已建成的水库。
-            let built = (0..river.network.len())
-                .map(|i| {
-                    river.reservoir.as_ref().is_some_and(|reservoir| {
-                        reservoir.of_catchment[i]
-                            .is_some_and(|r| reservoir.is_built(r, config.start.year))
+        // `restore_river_history_acc_restart`：陆面旁车标记 `history_river_required = 1` 时读回河道累加。
+        let river_history = {
+            let sidecar = history_sidecar_path(&block_files[0].time)?;
+            let required = sidecar.is_file()
+                && netcdf::open(&sidecar)
+                    .ok()
+                    .and_then(|file| {
+                        file.variable("history_river_required")
+                            .map(|v| v.get_values::<f64, _>(..))
                     })
-                })
-                .collect::<Vec<_>>();
-            tracers.cold_start(
+                    .transpose()?
+                    .is_some_and(|marker| marker.contains(&1.0));
+            if required {
+                let river_file = segment
+                    .input
+                    .join(&start_label)
+                    .join(format!("{name}_restart_hist_{start_label}.nc.river"));
+                ensure!(
+                    river_file.is_file(),
+                    "{} marks an open river-history window, but {} is missing",
+                    sidecar.display(),
+                    river_file.display()
+                );
+                Some(colm_runtime::river::restart::read_river_history(
+                    &river_file,
+                    network.len(),
+                    levee.is_some(),
+                    bifurcation.as_ref().map(|bif| (bif.paths(), bif.levels)),
+                    reservoir.as_ref().map(|r| r.len()),
+                )?)
+            } else {
+                None
+            }
+        };
+        let mut river = colm_runtime::river::RiverModel::new(
+            network,
+            routing,
+            river_state,
+            real_field(document, "DEF_GRIDBASED_ROUTING_MAX_DT")?,
+            levee,
+            bifurcation,
+            reservoir,
+        )?;
+        if let Some(history) = river_history {
+            river.history = history;
+        }
+        river.momentum_dt_limit =
+            logical_field(document, "DEF_GRIDBASED_ROUTING_MOMENTUM_DT_LIMIT")?;
+        // `river_lake_tracer_init` + `read_tracer_restart`/`tracer_init_from_water`
+        // （`grid_riverlake_flow_init`）：有输运示踪物时河道示踪物与陆面一起开。
+        if let Some(tracer) = tracer_runtime
+            .as_ref()
+            .filter(|tracer| tracer.has_transport())
+        {
+            let mut tracers = colm_runtime::river::tracer::RiverTracers::new(
+                tracer.set.clone(),
+                river.network.len(),
+            );
+            let loaded = colm_runtime::river::restart::read_river_tracers(
+                &river_start,
                 &river.network,
                 river.levee.as_ref(),
-                &river.state,
-                river.reservoir.as_ref(),
-                &built,
-            );
+                &mut tracers,
+            )?;
+            if !loaded {
+                // `is_built_resv_init`：起始年份下已建成的水库。
+                let built = (0..river.network.len())
+                    .map(|i| {
+                        river.reservoir.as_ref().is_some_and(|reservoir| {
+                            reservoir.of_catchment[i]
+                                .is_some_and(|r| reservoir.is_built(r, config.start.year))
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                tracers.cold_start(
+                    &river.network,
+                    river.levee.as_ref(),
+                    &river.state,
+                    river.reservoir.as_ref(),
+                    &built,
+                );
+            }
+            river = river.with_tracers(tracers)?;
         }
-        river = river.with_tracers(tracers)?;
-    }
-    // `grid_riverlake_flow_init`：回馈打开时立刻按读回的状态发布一次（Rust 不在 spinup 里汇流）。
-    // 上游在河湖示踪物初始化之后才分配回馈、发布，所以排在示踪物后面。
-    if logical_field(document, "DEF_GridRiverLake_FloodFeedback")? {
-        let infiltration_max_mm_day = match document.get("DEF_GridRiverLake_FloodInfiltMax") {
-            Some(Value::Real { text }) => text
-                .trim()
-                .trim_end_matches("_r8")
-                .replace(['d', 'D'], "e")
-                .parse::<f64>()
-                .with_context(|| format!("DEF_GridRiverLake_FloodInfiltMax = {text}"))?,
-            Some(Value::Int(value)) => *value as f64,
-            Some(other) => bail!("DEF_GridRiverLake_FloodInfiltMax must be real, got {other}"),
-            // `MOD_Namelist.F90` 的缺省 `5._r8`（mm/day）。
-            None => 5.0,
-        };
-        // `grid_riverlake_flow_init(s_year, …)`：本次运行的起始年份。
-        river = river.with_flood_feedback(infiltration_max_mm_day, config.start.year)?;
-    }
-    river.empty_tracer_transaction = tracer_runtime.is_some();
-    // CH4 provider 注册了 `publish_flood`/`publish_levee_flood`：每次汇流末把淹没比例推到 patch。
-    if tracer_runtime.as_ref().is_some_and(|tracer| {
-        tracer
-            .set
-            .tracers
-            .iter()
-            .any(colm_runtime::methane::is_methane_tracer)
-    }) {
-        river = river.with_methane_flood();
-    }
-    // `grid_sediment_init` + `read_sediment_restart`：`SEDIMENT` provider 示踪物（河道泥沙）。
-    if let Some(set) = tracer_runtime.as_ref().map(|tracer| &tracer.set) {
-        if let Some(index) = set
-            .tracers
-            .iter()
-            .position(colm_runtime::river::sediment::is_sediment_tracer)
-        {
-            let files = string_field(document, "DEF_TRACER_PARAM_FILES")?;
-            let param =
-                colm_core::tracer::descriptor::param_file_for_index(&files, &set.tracers, index)?
-                    .context(
+        // `grid_riverlake_flow_init`：回馈打开时立刻按读回的状态发布一次（Rust 不在 spinup 里汇流）。
+        // 上游在河湖示踪物初始化之后才分配回馈、发布，所以排在示踪物后面。
+        if logical_field(document, "DEF_GridRiverLake_FloodFeedback")? {
+            let infiltration_max_mm_day = match document.get("DEF_GridRiverLake_FloodInfiltMax") {
+                Some(Value::Real { text }) => text
+                    .trim()
+                    .trim_end_matches("_r8")
+                    .replace(['d', 'D'], "e")
+                    .parse::<f64>()
+                    .with_context(|| format!("DEF_GridRiverLake_FloodInfiltMax = {text}"))?,
+                Some(Value::Int(value)) => *value as f64,
+                Some(other) => bail!("DEF_GridRiverLake_FloodInfiltMax must be real, got {other}"),
+                // `MOD_Namelist.F90` 的缺省 `5._r8`（mm/day）。
+                None => 5.0,
+            };
+            // `grid_riverlake_flow_init(s_year, …)`：本次运行的起始年份。
+            river = river.with_flood_feedback(infiltration_max_mm_day, config.start.year)?;
+        }
+        river.empty_tracer_transaction = tracer_runtime.is_some();
+        // CH4 provider 注册了 `publish_flood`/`publish_levee_flood`：每次汇流末把淹没比例推到 patch。
+        if tracer_runtime.as_ref().is_some_and(|tracer| {
+            tracer
+                .set
+                .tracers
+                .iter()
+                .any(colm_runtime::methane::is_methane_tracer)
+        }) {
+            river = river.with_methane_flood();
+        }
+        // `grid_sediment_init` + `read_sediment_restart`：`SEDIMENT` provider 示踪物（河道泥沙）。
+        if let Some(set) = tracer_runtime.as_ref().map(|tracer| &tracer.set) {
+            if let Some(index) = set
+                .tracers
+                .iter()
+                .position(colm_runtime::river::sediment::is_sediment_tracer)
+            {
+                let files = string_field(document, "DEF_TRACER_PARAM_FILES")?;
+                let param = colm_core::tracer::descriptor::param_file_for_index(
+                    &files,
+                    &set.tracers,
+                    index,
+                )?
+                .context(
                     "Cannot find sediment parameter file for SEDIMENT in DEF_TRACER_PARAM_FILES",
                 )?;
-            let sediment = colm_runtime::river::sediment::Sediment::init(
-                &river.network,
-                &unit_catchment_file(document, out)?,
-                &param,
-            )?;
-            river = river.with_sediment(sediment)?;
-            let network = &river.network;
-            if let Some(sediment) = river.sediment.as_mut() {
-                sediment.read_restart(&river_start, network)?;
+                let sediment = colm_runtime::river::sediment::Sediment::init(
+                    &river.network,
+                    &unit_catchment_file(document, out)?,
+                    &param,
+                )?;
+                river = river.with_sediment(sediment)?;
+                let network = &river.network;
+                if let Some(sediment) = river.sediment.as_mut() {
+                    sediment.read_restart(&river_start, network)?;
+                }
             }
         }
-    }
-    runtime = runtime.with_river(river, runoff_filter)?;
+        runtime = runtime.with_river(river, runoff_filter)?;
+        (history_grid, river_writer, history_vector, runtime)
+    };
     let rest_compression = u8::try_from(integer_field(document, "DEF_REST_CompressLevel")?)
         .context("DEF_REST_CompressLevel must fit 0..=9")?;
     let para_opt = out.join("restart/ParaOpt");
@@ -1494,7 +1568,11 @@ fn run_spatial_segment(
             )?
             .with_patches(patch_count)?
             .with_grid(grid)
-            .with_gridded(&colm_runtime::river::history::GRIDDED_RIVER_VARIABLES)
+            .with_gridded(if catchment {
+                &[]
+            } else {
+                &colm_runtime::river::history::GRIDDED_RIVER_VARIABLES
+            })
             .with_tracer_history(
                 logical_field(document, "DEF_USE_TRACER")?
                     .then(|| real_field(document, "DEF_simulation_time%timestep"))
@@ -1523,6 +1601,17 @@ fn run_spatial_segment(
             river: river_writer,
             elements: ElementGroups::from_topology(&topology)?,
             files: Vec::new(),
+            basin: catchment
+                .then(|| -> Result<_> {
+                    Ok(colm_runtime::spatial::history::BasinHistoryTarget {
+                        directory: out.join("history"),
+                        stem: name.to_owned(),
+                        compress_level: colm_runtime::spatial::history::hist_compress_level(
+                            document,
+                        )?,
+                    })
+                })
+                .transpose()?,
         }),
         None => match history_vector {
             Some((vector, statics)) => Some(SpatialHistory {
@@ -1559,6 +1648,7 @@ fn run_spatial_segment(
                 river: river_writer,
                 elements: ElementGroups::from_topology(&topology)?,
                 files: Vec::new(),
+                basin: None,
             }),
             None => None,
         },
@@ -1594,7 +1684,7 @@ fn run_spatial_segment(
             // BGC 的累加量（`a_leafc` … `a_*Cap`）也进旁车（第 541 轮）。
             bgc: physics.bgc.is_some(),
             crop: physics.bgc.is_some_and(|switches| switches.crop),
-            river_lake_flow: true,
+            river_lake_flow: !catchment,
         },
         window: history
             .as_ref()
@@ -1657,7 +1747,7 @@ fn run_spatial_segment(
         &templates,
         &mut states,
         history.as_mut(),
-        |steps, states, outputs, river, tracer_cache| {
+        |steps, states, outputs, river, tracer_cache, lateral| {
             let mut snapshots = states
                 .iter()
                 .zip(outputs)
@@ -1719,6 +1809,18 @@ fn run_spatial_segment(
                         sediment.write_restart(&path, &river.network, rest_compression)?;
                     }
                 }
+                if let Some(lateral) = lateral {
+                    write_catchment_restarts(
+                        lateral,
+                        &topology.blocks,
+                        &periodic,
+                        step.clock.end_time,
+                        name,
+                        year,
+                        states,
+                        rest_compression,
+                    )?;
+                }
             }
             last = Some(snapshots);
             Ok(())
@@ -1757,6 +1859,22 @@ fn run_spatial_segment(
             .as_ref(),
         empty_land_tracer,
     )?;
+    if let Some(lateral) = runtime.catchment() {
+        ensure!(
+            segment.end == SegmentEnd::Run,
+            "catchment lateral flow does not support LULCC segments"
+        );
+        write_catchment_restarts(
+            lateral,
+            &topology.blocks,
+            &finals,
+            config.end,
+            name,
+            year,
+            &states,
+            rest_compression,
+        )?;
+    }
     if let (Some(river), SegmentEnd::Run) = (runtime.river(), segment.end) {
         let label = date_label(normalized_day_end(config.end));
         let path = river_restart_path(&out.join("restart"), name, &label, year);
@@ -1829,6 +1947,66 @@ fn run_spatial_segment(
         .as_ref()
         .map_or(baseflow, BaseflowOptimizer::scales);
     Ok((river, baseflow, optimizer))
+}
+
+/// 流域续跑：`<case>_restart_basin_<date>_lc<year>.nc`，以及各块时间重启里非湖 patch 的湖层
+/// （动态湖调整对全部 patch 做，`MOD_Catch_LateralFlow.F90:394-414`）。
+#[allow(clippy::too_many_arguments)]
+fn write_catchment_restarts(
+    lateral: &colm_runtime::catchment::runtime::CatchmentRuntime,
+    blocks: &[(String, std::ops::Range<usize>)],
+    periodic: &[PeriodicRestarts],
+    end_time: CalendarTime,
+    name: &str,
+    year: i64,
+    states: &[StandardLctSnowSoilState],
+    compression: u8,
+) -> Result<()> {
+    let label = date_label(normalized_day_end(end_time));
+    let directory = &periodic
+        .first()
+        .context("a spatial run has at least one block")?
+        .directory;
+    let block_restarts = blocks
+        .iter()
+        .zip(periodic)
+        .map(|((_, range), periodic)| (periodic.path(end_time), range.clone()))
+        .collect::<Vec<_>>();
+    lateral.write_restarts(
+        &colm_runtime::catchment::runtime::basin_restart_path(directory, name, &label, year),
+        &block_restarts,
+        states,
+        compression,
+    )
+}
+
+/// CATCHMENT 内核（`CatchLateralFlow`）里 Rust 还没有的组合：入口一次拒绝。
+fn check_catchment(document: &Document) -> Result<()> {
+    ensure!(
+        integer_field(document, "DEF_Reservoir_Method")? == 0,
+        "catchment lateral flow with reservoirs (DEF_Reservoir_Method > 0) is not ported"
+    );
+    ensure!(
+        !logical_field(document, "DEF_USE_LULCC")?,
+        "catchment lateral flow with DEF_USE_LULCC is not ported"
+    );
+    ensure!(
+        !logical_field(document, "DEF_USE_TRACER")?,
+        "catchment lateral flow with tracers is not ported"
+    );
+    ensure!(
+        !logical_field(document, "DEF_URBAN_RUN")?,
+        "catchment lateral flow with the urban model is not ported"
+    );
+    ensure!(
+        !logical_field(document, "DEF_HISTORY_IN_VECTOR")?,
+        "catchment vector history (DEF_HISTORY_IN_VECTOR) is not ported; use gridded history"
+    );
+    ensure!(
+        !logical_field(document, "DEF_Optimize_Baseflow")?,
+        "catchment lateral flow with DEF_Optimize_Baseflow is not ported"
+    );
+    Ok(())
 }
 
 /// Rust 这边 LULCC 只接上游的 SAT 默认路径：LCT、IGBP、不 spinup、2000 年以后。
@@ -5138,6 +5316,8 @@ struct Arguments {
     crop: bool,
     /// 内核带 `UNSTRUCTURED` 宏：`DEF_HISTORY_IN_VECTOR` 只在它下生效（`MOD_Hist.F90:71-75`）。
     unstructured: bool,
+    /// 内核带 `CATCHMENT` 宏（`CatchLateralFlow`，没有 `GridRiverLakeFlow`）。
+    catchment: bool,
 }
 
 impl Arguments {
@@ -5154,6 +5334,7 @@ impl Arguments {
         let mut preflight = false;
         let mut crop = false;
         let mut unstructured = false;
+        let mut catchment = false;
         while let Some(flag) = values.next() {
             let mut value = |name: &str| -> Result<String> {
                 values
@@ -5185,6 +5366,7 @@ impl Arguments {
                 "--preflight" => preflight = true,
                 "--crop" => crop = true,
                 "--unstructured" => unstructured = true,
+                "--catchment" => catchment = true,
                 other if other.starts_with("--") => {
                     bail!("unknown option {other}; the accepted set is documented in this binary's module docs")
                 }
@@ -5250,6 +5432,7 @@ impl Arguments {
             allow_unported_branches,
             crop,
             unstructured,
+            catchment,
         })
     }
 }

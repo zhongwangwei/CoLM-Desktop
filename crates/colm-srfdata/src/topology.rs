@@ -197,7 +197,7 @@ impl FlatMesh {
 
     /// Port `MOD_LandHRU::landhru_build` after catchment pixels reach a flat mesh.
     ///
-    /// `hydrounit_types` is one positive `ihydrounit2d` value per mesh pixel in
+    /// `hydrounit_types` is one non-negative `ihydrounit2d` value per mesh pixel in
     /// current mesh order. `lake_id_by_element` is one `lake_id` per catchment
     /// element. As upstream does, lake-catchment HRU IDs are written negative.
     pub fn into_land_hrus(
@@ -207,8 +207,9 @@ impl FlatMesh {
     ) -> Result<(Self, FlatLandHrus)> {
         ensure!(
             hydrounit_types.len() == self.ilon.len()
-                && hydrounit_types.iter().all(|&value| value > 0),
-            "catchment hydrologic-unit types must be positive and match mesh pixels"
+                && hydrounit_types.iter().all(|&value| value >= 0),
+            // 0 号 HRU 是河道/水体像元，`MOD_LandPatch` 把 `settyp <= 0` 的 HRU 当作水体。
+            "catchment hydrologic-unit types must be non-negative and match mesh pixels"
         );
         ensure!(
             lake_id_by_element.len() == self.len(),

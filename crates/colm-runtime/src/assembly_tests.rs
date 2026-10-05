@@ -36,6 +36,7 @@ fn physics(timestep_seconds: f64) -> LandPhysicsParameters {
         plant_hydraulics: false,
         urban_run: false,
         river_lake_flow_build: false,
+        catch_lateral: false,
         plant_hydraulic_parameters: PlantHydraulicParameters::default(),
         plant_hydraulic_overrides: colm_core::PlantHydraulicOverrides::default(),
         ozone: None,
@@ -214,7 +215,8 @@ fn static_soil_fields_come_from_the_constant_restart() {
     {
         for layer in 0..SOIL_LAYERS {
             assert_eq!(
-                template.soil.get(*field, layer, 1),
+                // 模板只存本 patch 那一列（下标 0）。
+                template.soil.get(*field, layer, 0),
                 fixture.soil.get(*field, layer, 1),
                 "{field:?} layer {layer}"
             );
@@ -1068,6 +1070,16 @@ fn an_evolved_state_writes_back_a_readable_continuation_restart() {
     // 16 项土壤/标量（含 `wetwat`、`fveg`/`green`）+ 8 项冠层几何与冠层光学（`lai`/`sai`/`sigf`/
     // `tlai`/`tsai` + `thermk`/`extkb`/`extkd`）。
     assert_eq!(overrides.len(), 24 + diagnostics + radiation);
+    // 覆盖量只给本 patch 的那一块，由 `merge_overrides` 拼回整变量。
+    let overrides = crate::multi_patch::merge_overrides(
+        &source,
+        &[crate::multi_patch::PatchSlot {
+            patch: template.patch,
+            pfts: 0..0,
+        }],
+        vec![overrides],
+    )
+    .unwrap();
     source.write_with(&written, &overrides).unwrap();
 
     let restart = colm_init::RestartFile::open(&written).unwrap();
@@ -1241,6 +1253,16 @@ fn an_evolved_snow_state_writes_back_a_readable_continuation_restart() {
                 .is_ok_and(|dims| dims == ["patch"]))
             .count()
     );
+    // 覆盖量只给本 patch 的那一块，由 `merge_overrides` 拼回整变量。
+    let overrides = crate::multi_patch::merge_overrides(
+        &source,
+        &[crate::multi_patch::PatchSlot {
+            patch: template.patch,
+            pfts: 0..0,
+        }],
+        vec![overrides],
+    )
+    .unwrap();
     source.write_with(&written, &overrides).unwrap();
 
     let restart = colm_init::RestartFile::open(&written).unwrap();

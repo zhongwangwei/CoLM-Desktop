@@ -10,6 +10,7 @@ pub mod assembly;
 pub mod baseflow_optimizer;
 pub mod bgc;
 pub mod bgc_step;
+pub mod catchment;
 pub mod history;
 mod history_manifest;
 pub mod history_sidecar;
@@ -2082,6 +2083,7 @@ mod tests {
             plant_hydraulics: false,
             urban_run: false,
             river_lake_flow_build: false,
+            catch_lateral: false,
             plant_hydraulic_parameters: colm_core::PlantHydraulicParameters::default(),
             plant_hydraulic_overrides: colm_core::PlantHydraulicOverrides::default(),
             ozone: None,
