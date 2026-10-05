@@ -1022,6 +1022,35 @@ fn push_patch_history(
     }
 }
 
+/// [`push_patch_history`] 的任务版：只生成本 patch 的累加闭包（会话标志照常设好），由
+/// [`crate::history::HistorySession::push_jobs`] 与同一步的其余 patch 一起并行执行。
+fn patch_history_job<'a>(
+    session: &mut crate::history::HistorySession,
+    template: &'a StandardLctRestartTemplate,
+    state: &'a StandardLctSnowSoilState,
+    output: &'a PatchOutput,
+    reference: crate::history::HistoryReferenceState,
+) -> Result<crate::history::HistoryJob<'a>> {
+    match output {
+        PatchOutput::Soil(output) => session.push_lct_snow_job(template, state, output, reference),
+        PatchOutput::DryLakeSubstep {
+            output,
+            initial_total_water_mm,
+            time_step_seconds,
+        } => {
+            let mut reference = reference;
+            reference.initial_total_water_mm = *initial_total_water_mm;
+            reference.time_step_seconds = *time_step_seconds;
+            session.push_lct_snow_job(template, state, output, reference)
+        }
+        PatchOutput::Glacier(output) => {
+            session.push_glacier_job(template, state, output, reference)
+        }
+        PatchOutput::Lake(output) => session.push_lake_job(template, state, output, reference),
+        PatchOutput::Urban(output) => session.push_urban_job(template, state, output, reference),
+    }
+}
+
 /// `totwb`：上游在 `snl` 重算之后、任何物理步之前取步首总蓄量（`CoLMMAIN.F90:831`），
 /// `xerr` 要靠它和步末的 `endwb` 相减。
 fn initial_total_water_mm(

@@ -810,7 +810,7 @@ impl HistorySink for HistoryBuffers {
 
 /// 一个输出区间里逐变量的和与步数（上游的 `a_*` 与 `nac`）。
 #[derive(Debug, Default)]
-struct HistoryAccumulator {
+pub struct HistoryAccumulator {
     sums: std::collections::BTreeMap<String, Accumulated>,
     steps: usize,
     /// 本区间里按 `patchtype` 过滤、写平均时留作填充值的量（见 [`HistorySink::keep_filtered`]）。
@@ -821,6 +821,22 @@ struct HistoryAccumulator {
     /// 本步要替换（或补交）的值：`CatchLateralFlow` 的 `lateral_flow` 在 `CoLMMAIN` 之后改写的
     /// patch 量（见 [`HistoryOverrides`]）。只在一次 `push` 里有效。
     overrides: Option<HistoryOverrides>,
+}
+
+/// 一个 patch 一步的累加任务（`push_*` 拆出来的闭包），见 [`HistorySession::push_jobs`]。
+pub type HistoryJob<'a> = Box<dyn FnOnce(&mut HistoryAccumulator) -> Result<()> + Send + 'a>;
+
+/// 一个 patch 的一步累加：步数、覆盖量、闭包、补交没被交过的覆盖量。
+fn accumulate_one(
+    accumulator: &mut HistoryAccumulator,
+    overrides: Option<HistoryOverrides>,
+    accumulate: impl FnOnce(&mut HistoryAccumulator) -> Result<()>,
+) -> Result<()> {
+    accumulator.steps += 1;
+    accumulator.overrides = overrides;
+    let filled = accumulate(accumulator).and_then(|()| accumulator.flush_overrides());
+    accumulator.overrides = None;
+    filled
 }
 
 /// `CatchLateralFlow`：`lateral_flow` 在陆面步之后、`hist_out` 之前改写的 patch 量
@@ -1432,7 +1448,9 @@ impl HistorySink for HistoryAccumulator {
     }
 
     fn keep_filtered(&mut self, name: &str) -> bool {
-        self.filtered.insert(name.to_owned());
+        if !self.filtered.contains(name) {
+            self.filtered.insert(name.to_owned());
+        }
         true
     }
 
@@ -1448,7 +1466,9 @@ impl HistorySink for HistoryAccumulator {
             value.is_finite(),
             "the history value for {name} is not finite"
         );
-        self.offered.insert(name.to_owned());
+        if !self.offered.contains(name) {
+            self.offered.insert(name.to_owned());
+        }
         // `spval` 步不计入：既不进和，也不进计数（上游 `acc1d` 的 `IF (var(i) /= spval)`）。
         // 一步都不有效的变量因此**不会**在 `sums` 里建条目，也就不会被写出，
         // 缓冲区留给它的是填充值 —— 与上游一致。
@@ -1463,13 +1483,17 @@ impl HistorySink for HistoryAccumulator {
         let instantaneous = INSTANTANEOUS_VARIABLES.contains(&name) || assigned;
         // 累加器从 spval 起步、首个有效值直接赋值（`acc1d` 的 `IF (s /= spval) … ELSE s = var`），
         // 不是从 `+0.0` 起加：`0.0 + (-0.0)` 会把上游保留的 `-0.0` 变成 `+0.0`。
-        match self
-            .sums
-            .entry(name.to_owned())
-            .or_insert(Accumulated::Scalar {
-                sum: colm_core::MISSING,
-                count: 0,
-            }) {
+        // 先按 `&str` 查，已有条目时不分配键（每个 patch 每步每个变量都走这里）。
+        if !self.sums.contains_key(name) {
+            self.sums.insert(
+                name.to_owned(),
+                Accumulated::Scalar {
+                    sum: colm_core::MISSING,
+                    count: 0,
+                },
+            );
+        }
+        match self.sums.get_mut(name).expect("inserted above") {
             Accumulated::Scalar { sum, count } => {
                 if instantaneous {
                     // "最后一次覆盖"：`count` 保持 1，于是除数为 1、写出的是末步的值。
@@ -1501,20 +1525,24 @@ impl HistorySink for HistoryAccumulator {
             values.iter().all(|value| value.is_finite()),
             "the history value for {name} is not finite"
         );
-        self.offered.insert(name.to_owned());
+        if !self.offered.contains(name) {
+            self.offered.insert(name.to_owned());
+        }
         // 分层量按**整列**是否有效来算（上游的计数器是每 patch 一个，
         // `nac_ln(i)`，不是每层一个）。整列全无效就整列跳过。
         if values.iter().all(|value| *value == colm_core::MISSING) {
             return Ok(());
         }
-        let entry = self
-            .sums
-            .entry(name.to_owned())
-            .or_insert_with(|| Accumulated::Column {
-                sum: vec![colm_core::MISSING; values.len()],
-                count: 0,
-            });
-        match entry {
+        if !self.sums.contains_key(name) {
+            self.sums.insert(
+                name.to_owned(),
+                Accumulated::Column {
+                    sum: vec![colm_core::MISSING; values.len()],
+                    count: 0,
+                },
+            );
+        }
+        match self.sums.get_mut(name).expect("inserted above") {
             Accumulated::Column { sum, count } => {
                 ensure!(
                     sum.len() == values.len(),
@@ -2976,6 +3004,8 @@ pub struct HistorySession {
     selection: Option<std::sync::Arc<colm_hist::selection::HistorySelection>>,
     /// 下一次 `push` 的覆盖量（[`Self::set_overrides`]）。
     pending_overrides: Option<HistoryOverrides>,
+    /// 本步末是否更新续跑旁车用的窗口快照（[`Self::set_snapshot`]）；缺省每步都拍。
+    snapshot_this_step: bool,
 }
 
 /// 本进程的 `DEF_hist_vars` 开关状态。上游它是 namelist 模块里的全局量，读一次、整个运行不变；
@@ -3047,6 +3077,15 @@ impl HistorySession {
         template: &StandardLctRestartTemplate,
         state: &StandardLctSnowSoilState,
     ) -> Result<Option<PathBuf>> {
+        let job = self.push_masked_job(template, state)?;
+        self.push(end, job)
+    }
+
+    pub fn push_masked_job<'a>(
+        &mut self,
+        template: &'a StandardLctRestartTemplate,
+        state: &'a StandardLctSnowSoilState,
+    ) -> Result<HistoryJob<'a>> {
         // 五类 patch 都实测过：土壤、湿地、湖、城市（g1fmm、g1bgcm、g1urbmm）与冰川（g1glm）。
         ensure!(
             matches!(template.patch_type, 0..=4),
@@ -3076,7 +3115,7 @@ impl HistorySession {
         self.dynamic_wetland = template.physics.dynamic_wetland;
         self.bgc = template.bgc.as_ref().map(|bgc| bgc.switches);
         let element_surface = self.element_surface;
-        self.push(end, |accumulator| {
+        Ok(Box::new(move |accumulator: &mut HistoryAccumulator| {
             set_lct_snow_state_with(accumulator, 0, template, state, ground, snow_temperature)?;
             for (name, value) in [
                 ("ldew", state.energy.leaf.canopy_water.total_mm),
@@ -3164,7 +3203,7 @@ impl HistorySession {
                 state.energy.leaf.canopy_water.snow_mm,
                 None,
             )
-        })
+        }))
     }
 
     /// 本步各 patch 共用的网格元近地面诊断（多 patch 单点）；`None` 时逐 patch 重算。
@@ -3270,7 +3309,14 @@ impl HistorySession {
             tracer_variables: None,
             selection: SELECTION.get().cloned(),
             pending_overrides: None,
+            snapshot_this_step: true,
         })
+    }
+
+    /// 本步之后要不要写续跑（周期续跑或运行/段终点）：不要时跳过窗口快照（[`Self::window_handle`]
+    /// 只在写续跑时被读）。
+    pub fn set_snapshot(&mut self, needed: bool) {
+        self.snapshot_this_step = needed;
     }
 
     /// 下一个 `push_*` 累加时替换/补交的值（`CatchLateralFlow`，见 [`HistoryOverrides`]）。
@@ -3371,12 +3417,23 @@ impl HistorySession {
         output: &StandardLctSoilOutput,
         reference: HistoryReferenceState,
     ) -> Result<Option<PathBuf>> {
+        let job = self.push_lct_job(template, state, output, reference)?;
+        self.push(end, job)
+    }
+
+    pub fn push_lct_job<'a>(
+        &mut self,
+        template: &'a StandardLctRestartTemplate,
+        state: &'a StandardLctSoilState,
+        output: &'a StandardLctSoilOutput,
+        reference: HistoryReferenceState,
+    ) -> Result<HistoryJob<'a>> {
         let ground = output.energy.ground.temperature_k[0];
         // 在开文件之前定下 `f_vegwp`/`f_qcharge`/`f_qlayer` 谁在文件里。
         self.plant_hydraulics = template.plant_hydraulics();
         self.variably_saturated = template.physics.variably_saturated_flow;
         let variably_saturated = self.variably_saturated;
-        self.push(end, |accumulator| {
+        Ok(Box::new(move |accumulator: &mut HistoryAccumulator| {
             set_lct_state(accumulator, 0, template, state, ground)?;
             set_lct_fluxes(accumulator, 0, &output.water, variably_saturated)?;
             set_lct_energy_fluxes(accumulator, 0, output)?;
@@ -3437,7 +3494,7 @@ impl HistorySession {
                 ),
                 reference,
             )
-        })
+        }))
     }
 
     /// 积雪分支：与 [`Self::push_lct`] 同构，走雪入口并把 `soil` 那一半当土壤诊断。
@@ -3456,13 +3513,23 @@ impl HistorySession {
         output: &colm_core::GlacierStepOutput,
         reference: HistoryReferenceState,
     ) -> Result<Option<PathBuf>> {
+        let job = self.push_glacier_job(template, state, output, reference)?;
+        self.push(end, job)
+    }
+
+    pub fn push_glacier_job<'a>(
+        &mut self,
+        template: &'a StandardLctRestartTemplate,
+        state: &'a StandardLctSnowSoilState,
+        output: &'a colm_core::GlacierStepOutput,
+        reference: HistoryReferenceState,
+    ) -> Result<HistoryJob<'a>> {
         let water_balance_error = if template.physics.variably_saturated_flow {
             output.water_balance_error_mm_s
         } else {
             0.0
         };
-        self.push_non_soil(
-            end,
+        self.push_non_soil_job(
             template,
             state,
             NonSoilStep {
@@ -3476,7 +3543,7 @@ impl HistorySession {
             },
             reference,
             &VEGETATED_ONLY_VARIABLES,
-            &[],
+            Vec::new(),
         )
     }
 
@@ -3491,6 +3558,17 @@ impl HistorySession {
         output: &colm_core::LakeStepOutput,
         reference: HistoryReferenceState,
     ) -> Result<Option<PathBuf>> {
+        let job = self.push_lake_job(template, state, output, reference)?;
+        self.push(end, job)
+    }
+
+    pub fn push_lake_job<'a>(
+        &mut self,
+        template: &'a StandardLctRestartTemplate,
+        state: &'a StandardLctSnowSoilState,
+        output: &'a colm_core::LakeStepOutput,
+        reference: HistoryReferenceState,
+    ) -> Result<HistoryJob<'a>> {
         let lake = state
             .lake
             .as_ref()
@@ -3512,13 +3590,12 @@ impl HistorySession {
             LakeLayers::Layers("t_lake", &lake.column.temperature_k),
             LakeLayers::Layers("lake_icefrac", &lake.column.ice_fraction),
         ];
-        let extra: Vec<LakeLayers<'_>> = if dynamic {
+        let extra: Vec<LakeLayers<'a>> = if dynamic {
             thickness.into_iter().chain(layers).collect()
         } else {
             deficit.into_iter().chain(layers).collect()
         };
-        self.push_non_soil(
-            end,
+        self.push_non_soil_job(
             template,
             state,
             NonSoilStep {
@@ -3562,7 +3639,7 @@ impl HistorySession {
             },
             reference,
             &LAKE_FILTERED_VARIABLES,
-            &extra,
+            extra,
         )
     }
 
@@ -3574,16 +3651,15 @@ impl HistorySession {
     /// `qintr`/`qinfl`/`qlayer`/`rootr`/`qcharge` = 0，`frcsat = 1`，
     /// `qdrip = forc_rain + forc_snow`）。`rss` 不重算，沿用状态里最近一次的值。
     #[allow(clippy::too_many_arguments)]
-    fn push_non_soil(
+    fn push_non_soil_job<'a>(
         &mut self,
-        end: CalendarTime,
-        template: &StandardLctRestartTemplate,
-        state: &StandardLctSnowSoilState,
-        output: NonSoilStep<'_>,
+        template: &'a StandardLctRestartTemplate,
+        state: &'a StandardLctSnowSoilState,
+        output: NonSoilStep<'a>,
         reference: HistoryReferenceState,
         skipped: &'static [&'static str],
-        extra: &[LakeLayers<'_>],
-    ) -> Result<Option<PathBuf>> {
+        extra: Vec<LakeLayers<'a>>,
+    ) -> Result<HistoryJob<'a>> {
         let ground = state.surface_temperature_k();
         self.plant_hydraulics = template.plant_hydraulics();
         self.variably_saturated = template.physics.variably_saturated_flow;
@@ -3592,7 +3668,7 @@ impl HistorySession {
         let thermal = output.thermal;
         let shortwave = output.shortwave;
         let element_surface = self.element_surface;
-        self.push(end, |accumulator| {
+        Ok(Box::new(move |accumulator: &mut HistoryAccumulator| {
             let accumulator = &mut PatchFilteredSink {
                 inner: accumulator,
                 skipped,
@@ -3733,14 +3809,14 @@ impl HistorySession {
                 reference.surface_cosine_zenith,
             )?;
             set_lct_forcing_mirrors(accumulator, 0, reference, output.precipitation)?;
-            for entry in extra {
+            for entry in &extra {
                 match entry {
                     LakeLayers::Scalar(name, value) => accumulator.scalar(name, 0, *value)?,
                     LakeLayers::Layers(name, values) => accumulator.layer(name, 0, values)?,
                 }
             }
             Ok(())
-        })
+        }))
     }
 
     /// 城市 patch 的一步 history（`CoLMMAIN_Urban` 写下的全局量，外加
@@ -3753,6 +3829,17 @@ impl HistorySession {
         output: &colm_core::UrbanStepOutput,
         reference: HistoryReferenceState,
     ) -> Result<Option<PathBuf>> {
+        let job = self.push_urban_job(template, state, output, reference)?;
+        self.push(end, job)
+    }
+
+    pub fn push_urban_job<'a>(
+        &mut self,
+        template: &'a StandardLctRestartTemplate,
+        state: &'a StandardLctSnowSoilState,
+        output: &'a colm_core::UrbanStepOutput,
+        reference: HistoryReferenceState,
+    ) -> Result<HistoryJob<'a>> {
         let urban = state
             .urban
             .as_ref()
@@ -3764,7 +3851,7 @@ impl HistorySession {
         let thermal = &output.thermal;
         let shortwave = &output.shortwave;
         let element_surface = self.element_surface;
-        self.push(end, |accumulator| {
+        Ok(Box::new(move |accumulator: &mut HistoryAccumulator| {
             set_lct_snow_state(accumulator, 0, template, state, ground)?;
             let fluxes = vec![
                 ("rsur", output.rsur),
@@ -3900,7 +3987,7 @@ impl HistorySession {
                 reference.surface_cosine_zenith,
             )?;
             set_lct_forcing_mirrors(accumulator, 0, reference, &output.precipitation)
-        })
+        }))
     }
 
     pub fn push_lct_snow(
@@ -3911,6 +3998,17 @@ impl HistorySession {
         output: &colm_core::StandardLctSnowSoilOutput,
         reference: HistoryReferenceState,
     ) -> Result<Option<PathBuf>> {
+        let job = self.push_lct_snow_job(template, state, output, reference)?;
+        self.push(end, job)
+    }
+
+    pub fn push_lct_snow_job<'a>(
+        &mut self,
+        template: &'a StandardLctRestartTemplate,
+        state: &'a StandardLctSnowSoilState,
+        output: &'a colm_core::StandardLctSnowSoilOutput,
+        reference: HistoryReferenceState,
+    ) -> Result<HistoryJob<'a>> {
         let ground = state.surface_temperature_k();
         self.plant_hydraulics = template.plant_hydraulics();
         self.variably_saturated = template.physics.variably_saturated_flow;
@@ -3923,7 +4021,7 @@ impl HistorySession {
         }
         let variably_saturated = self.variably_saturated;
         let element_surface = self.element_surface;
-        self.push(end, |accumulator| {
+        Ok(Box::new(move |accumulator: &mut HistoryAccumulator| {
             let lake_filter: &'static [&'static str] = if dry_lake {
                 &LAKE_FILTERED_VARIABLES
             } else {
@@ -4057,7 +4155,7 @@ impl HistorySession {
             } else {
                 set_lct_balance_errors(accumulator, 0, &as_soil, end_water, reference)
             }
-        })
+        }))
     }
 
     /// 收尾：把还开着的那个分组落盘。调度已经保证运行结束那一刻会写一条，所以正常
@@ -4548,8 +4646,9 @@ impl HistorySession {
         accumulate: impl FnOnce(&mut HistoryAccumulator) -> Result<()>,
     ) -> Result<Option<PathBuf>> {
         let pushed = self.push_inner(end, accumulate);
-        // 一步的全部 patch 都累加完才更新共享快照（写续跑文件在步末）。
-        if self.patch_cursor == 0 {
+        // 一步的全部 patch 都累加完才更新共享快照（写续跑文件在步末）。只有这一步之后要写续跑时才拍：
+        // 快照要复制并排序每个 patch 的全部累加器，空间算例里每步都拍是 history 段最贵的一块。
+        if self.patch_cursor == 0 && (self.snapshot_this_step || self.raw_at_end.is_some()) {
             let windows = self.raw_at_end.take().unwrap_or_else(|| {
                 self.accumulators
                     .iter()
@@ -4569,12 +4668,8 @@ impl HistorySession {
         // 1. 每步累加。失败也要把累加器放回去，否则下一次调用从零开始，
         //    会静默丢掉这一段。
         let patch = self.patch_cursor;
-        let mut accumulator = std::mem::take(&mut self.accumulators[patch]);
-        accumulator.steps += 1;
-        accumulator.overrides = self.pending_overrides.take();
-        let filled = accumulate(&mut accumulator).and_then(|()| accumulator.flush_overrides());
-        accumulator.overrides = None;
-        self.accumulators[patch] = accumulator;
+        let overrides = self.pending_overrides.take();
+        let filled = accumulate_one(&mut self.accumulators[patch], overrides, accumulate);
         if filled.is_err() {
             self.patch_cursor = 0;
         }
@@ -4585,7 +4680,45 @@ impl HistorySession {
             return Ok(None);
         }
         self.patch_cursor = 0;
+        self.finish_step(end)
+    }
 
+    /// 一步的全部 patch 一起累加（[`HistoryJob`] 与各自的覆盖量，按 patch 次序），按 patch 并行；
+    /// 每个 patch 只动自己的累加器，结果与逐个 `push_*` 逐位相同。之后照常判断要不要写记录。
+    pub fn push_jobs(
+        &mut self,
+        end: CalendarTime,
+        jobs: Vec<(HistoryJob<'_>, Option<HistoryOverrides>)>,
+    ) -> Result<Option<PathBuf>> {
+        use rayon::prelude::*;
+        ensure!(
+            self.patch_cursor == 0 && jobs.len() == self.accumulators.len(),
+            "a parallel history step needs one job per patch ({} jobs for {} patches)",
+            jobs.len(),
+            self.accumulators.len()
+        );
+        let pushed = self
+            .accumulators
+            .par_iter_mut()
+            .zip(jobs.into_par_iter())
+            .try_for_each(|(accumulator, (job, overrides))| {
+                accumulate_one(accumulator, overrides, job)
+            })
+            .and_then(|()| self.finish_step(end));
+        if self.snapshot_this_step || self.raw_at_end.is_some() {
+            let windows = self.raw_at_end.take().unwrap_or_else(|| {
+                self.accumulators
+                    .iter()
+                    .map(HistoryAccumulator::window)
+                    .collect()
+            });
+            *self.window.lock().expect("history window lock") = windows;
+        }
+        pushed
+    }
+
+    /// 全部 patch 累加完之后：到期就写记录。
+    fn finish_step(&mut self, end: CalendarTime) -> Result<Option<PathBuf>> {
         // 2. 没到期就到此为止。
         let Some(record) = self.records.get(self.cursor).cloned() else {
             // 记录写完之后的步不再产生输出 —— 这在"运行比窗口长"时是正常的收尾。

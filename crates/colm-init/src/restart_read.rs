@@ -57,7 +57,9 @@ pub struct RestartFile {
     types: std::sync::Arc<BTreeMap<String, RestartValueType>>,
 }
 
-/// [`RestartFile::open`] 的缓存键：规范路径、修改时间、长度。文件被改写后这三者至少变一个。
+/// [`RestartFile::open`] 的缓存键：调用方给的路径、修改时间、长度。文件被改写后后两者至少变一个。
+/// 不做 `canonicalize`：那是一次 `realpath` 系统调用，空间装配每个 patch 要开好几次，实测占了装配的一成多；
+/// 同一文件换个写法的路径只会多读一次，不会读错。
 type RestartCacheKey = (std::path::PathBuf, Option<std::time::SystemTime>, u64);
 
 /// 最近读过的几份重启（按插入顺序淘汰）。
@@ -66,9 +68,8 @@ static RESTART_CACHE: std::sync::Mutex<Vec<(RestartCacheKey, RestartFile)>> =
 const RESTART_CACHE_CAPACITY: usize = 16;
 
 fn restart_cache_key(path: &Path) -> Option<RestartCacheKey> {
-    let canonical = std::fs::canonicalize(path).ok()?;
-    let metadata = std::fs::metadata(&canonical).ok()?;
-    Some((canonical, metadata.modified().ok(), metadata.len()))
+    let metadata = std::fs::metadata(path).ok()?;
+    Some((path.to_path_buf(), metadata.modified().ok(), metadata.len()))
 }
 
 /// 重启里出现过的标量类型。

@@ -921,6 +921,8 @@ fn run_spatial_segment(
     let mut coordinates = Vec::with_capacity(patch_count);
     let mut patch_mask = Vec::with_capacity(patch_count);
     let mut downscaling_patches = Vec::new();
+    // 同一份 namelist、同一套土层：PFT 参数按地类缓存，装配循环结束即关。
+    let pft_cache = colm_runtime::pft::PftParameterCache::enable();
     for ((block, patches), files) in topology.blocks.iter().zip(&block_files) {
         // `DEF_USE_PFT`：土壤 patch 的 PFT 区间来自本块的 `landpft`。
         let pft_ranges = if physics.use_pft {
@@ -1015,6 +1017,7 @@ fn run_spatial_segment(
             )?);
         }
     }
+    drop(pft_cache);
     // LULCC 之后的段：`scale_baseflow` 用上一段按 SAT 配对搬过来的（upstream-bugs 第 43 条，vendor 已修），
     // 不再按新 patch 编号重读标定文件。
     if let Some(baseflow) = &segment.baseflow {

@@ -2746,6 +2746,35 @@ fn both_transition_flux_at(
     })
 }
 
+/// 两套水力参数逐位相同（`-0.0` 与 `0.0`、不同的 NaN 都算不同）。
+fn same_model_bits(a: SoilHydraulicModel, b: SoilHydraulicModel) -> bool {
+    match (a, b) {
+        (SoilHydraulicModel::Campbell { bsw: x }, SoilHydraulicModel::Campbell { bsw: y }) => {
+            x.to_bits() == y.to_bits()
+        }
+        (
+            SoilHydraulicModel::VanGenuchten {
+                alpha_vgm: a1,
+                n_vgm: n1,
+                l_vgm: l1,
+                sc_vgm: s1,
+                fc_vgm: f1,
+            },
+            SoilHydraulicModel::VanGenuchten {
+                alpha_vgm: a2,
+                n_vgm: n2,
+                l_vgm: l2,
+                sc_vgm: s2,
+                fc_vgm: f2,
+            },
+        ) => [a1, n1, l1, s1, f1]
+            .iter()
+            .zip([a2, n2, l2, s2, f2])
+            .all(|(x, y)| x.to_bits() == y.to_bits()),
+        _ => false,
+    }
+}
+
 fn interface_fluxes(
     input: VariableSaturatedInterfaceFluxInput,
     interface_pressure_head_mm: f64,
@@ -2756,12 +2785,22 @@ fn interface_fluxes(
         input.upper_saturated_hydraulic_conductivity_mm_s,
         input.upper_hydraulic_model,
     );
-    let lower_interface_hydraulic_conductivity_mm_s = soil_hydraulic_conductivity(
-        interface_pressure_head_mm,
-        input.lower_saturated_potential_mm,
-        input.lower_saturated_hydraulic_conductivity_mm_s,
-        input.lower_hydraulic_model,
-    );
+    // 上下两层参数逐位相同（同一种土）时两次是同参数调用，复用第一次的结果。
+    let same_soil = input.upper_saturated_potential_mm.to_bits()
+        == input.lower_saturated_potential_mm.to_bits()
+        && input.upper_saturated_hydraulic_conductivity_mm_s.to_bits()
+            == input.lower_saturated_hydraulic_conductivity_mm_s.to_bits()
+        && same_model_bits(input.upper_hydraulic_model, input.lower_hydraulic_model);
+    let lower_interface_hydraulic_conductivity_mm_s = if same_soil {
+        upper_interface_hydraulic_conductivity_mm_s
+    } else {
+        soil_hydraulic_conductivity(
+            interface_pressure_head_mm,
+            input.lower_saturated_potential_mm,
+            input.lower_saturated_hydraulic_conductivity_mm_s,
+            input.lower_hydraulic_model,
+        )
+    };
     Ok(VariableSaturatedInterfaceFlux {
         upper_flux_mm_s: flux_inside_variable_saturated_soil(
             VariableSaturatedHomogeneousFluxInput {

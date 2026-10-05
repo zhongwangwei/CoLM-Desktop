@@ -699,30 +699,21 @@ fn spac_change(
     root_flux: f64,
     root_flux_slope: f64,
 ) -> [f64; VEGETATION_SEGMENTS] {
-    let fsun = vulnerability(
+    // 值与导数共用同一组 `pow`（[`vulnerability_with_derivative`]），结果与分别调用逐位相同。
+    let (fsun, dfsun) = vulnerability_with_derivative(
         x[SUNLIT],
         input.sunlit_leaf_psi50_mm,
         input.vulnerability_shape,
     );
-    let fsha = vulnerability(
+    let (fsha, dfsha) = vulnerability_with_derivative(
         x[SHADED],
         input.shaded_leaf_psi50_mm,
         input.vulnerability_shape,
     );
-    let fxyl = vulnerability(x[XYLEM], input.xylem_psi50_mm, input.vulnerability_shape);
-    let froot = vulnerability(x[ROOT], input.root_psi50_mm, input.vulnerability_shape);
-    let dfsun = vulnerability_derivative(
-        x[SUNLIT],
-        input.sunlit_leaf_psi50_mm,
-        input.vulnerability_shape,
-    );
-    let dfsha = vulnerability_derivative(
-        x[SHADED],
-        input.shaded_leaf_psi50_mm,
-        input.vulnerability_shape,
-    );
-    let dfxyl = vulnerability_derivative(x[XYLEM], input.xylem_psi50_mm, input.vulnerability_shape);
-    let dfroot = vulnerability_derivative(x[ROOT], input.root_psi50_mm, input.vulnerability_shape);
+    let (fxyl, dfxyl) =
+        vulnerability_with_derivative(x[XYLEM], input.xylem_psi50_mm, input.vulnerability_shape);
+    let (froot, dfroot) =
+        vulnerability_with_derivative(x[ROOT], input.root_psi50_mm, input.vulnerability_shape);
     let xylem = input.stem_area_index * input.maximum_xylem_hydraulic_conductance
         / input.canopy_top_height_m;
     // 下面四个矩阵元的**分组**必须与上游逐字一致（`MOD_PlantHydraulic.F90:472-489`）。
@@ -900,6 +891,17 @@ fn conductance_conversion(surface_pressure_pa: f64, leaf_temperature_k: f64) -> 
 pub fn vulnerability(potential_mm: f64, psi50_mm: f64, shape: f64) -> f64 {
     let exponent = (-(potential_mm / psi50_mm).lpow(shape)).max(-500.0);
     2.0_f64.lpow(exponent).max(1.0e-5)
+}
+
+/// [`vulnerability`] 与 [`vulnerability_derivative`] 一起算：两者的 `(ψ/ψ50)^ck` 与 `2^exponent` 是同一个
+/// 数，只算一次（每个 `pow` 都是 libm 调用，牛顿迭代里每步八次）。表达式与运算顺序和两个函数各自的一致。
+fn vulnerability_with_derivative(potential_mm: f64, psi50_mm: f64, shape: f64) -> (f64, f64) {
+    let exponent = (-(potential_mm / psi50_mm).lpow(shape)).max(-500.0);
+    let power = 2.0_f64.lpow(exponent);
+    (
+        power.max(1.0e-5),
+        shape * 2.0_f64.ln() * power * exponent / potential_mm,
+    )
 }
 
 /// First derivative of [`vulnerability`] (`d1plc`).

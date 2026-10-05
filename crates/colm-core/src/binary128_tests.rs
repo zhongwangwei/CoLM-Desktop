@@ -91,3 +91,35 @@ fn f64_round_trip_is_exact() {
         assert_eq!(Quad::from_f64(value).to_f64().to_bits(), value.to_bits());
     }
 }
+
+#[test]
+fn chunked_long_division_matches_the_bitwise_one() {
+    use super::{long_divide, long_divide_bitwise};
+    // xorshift：确定性的伪随机输入，覆盖 sa/sb 在 [0.5, 2) 的全范围与两端。
+    let mut state: u64 = 0x9e37_79b9_7f4a_7c15;
+    let mut next = || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state
+    };
+    let top = 1u128 << 112;
+    let mask = top - 1;
+    let check = |sa: u128, sb: u128| {
+        assert_eq!(
+            long_divide(sa, sb),
+            long_divide_bitwise(sa, sb),
+            "{sa:#x} / {sb:#x}"
+        );
+    };
+    for _ in 0..2_000_000 {
+        let sa = top | ((u128::from(next()) << 64 | u128::from(next())) & mask);
+        let sb = top | ((u128::from(next()) << 64 | u128::from(next())) & mask);
+        check(sa, sb);
+    }
+    for sa in [top, top | mask, top | 1, top | (mask >> 1)] {
+        for sb in [top, top | mask, top | 1, top | (mask >> 1), sa] {
+            check(sa, sb);
+        }
+    }
+}

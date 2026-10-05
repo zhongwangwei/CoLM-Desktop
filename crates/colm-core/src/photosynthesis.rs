@@ -132,7 +132,9 @@ pub fn photosynthesis_parameters(
     let c3_fraction = if b.c3c4 == 1 { 1.0 } else { 0.0 };
     let c4_fraction = 1.0 - c3_fraction;
     let temperature_factor = f77(0.1) * (input.leaf_temperature_k - b.optimum_temperature_k);
-    let kc = f77(30.0) * f77(2.1).lpow(temperature_factor);
+    // `2.1**qt` 在 `kc` 与 `vm` 里各出现一次，同参数的 `pow` 只算一次。
+    let factor_2_1 = f77(2.1).lpow(temperature_factor);
+    let kc = f77(30.0) * factor_2_1;
     let ko = f77(30_000.0) * f77(1.2).lpow(temperature_factor);
     let co2_compensation_pa = f77(0.5) * input.oxygen_partial_pressure_pa
         / (f77(2600.0) * f77(0.57).lpow(temperature_factor))
@@ -142,8 +144,7 @@ pub fn photosynthesis_parameters(
         + (b.low_temperature_slope * (b.low_temperature_half_k - input.leaf_temperature_k)).exp();
     let high_inhibition = 1.0
         + (b.high_temperature_slope * (input.leaf_temperature_k - b.high_temperature_half_k)).exp();
-    let mut maximum_carboxylation =
-        b.maximum_carboxylation_25c_mol_m2_s * f77(2.1).lpow(temperature_factor);
+    let mut maximum_carboxylation = b.maximum_carboxylation_25c_mol_m2_s * factor_2_1;
     // `:570 vm = vm/temph*rstfac*c3 + vm/(templ*temph)*rstfac*c4` 的 GIMPLE 是
     // `.FMA(vm/temph*rstfac, c3, vm/(templ*temph)*rstfac*c4)` —— `c4` 那条链整体
     // 独立舍入当加数，`c3` 那一乘收进 FMA。

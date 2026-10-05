@@ -39,10 +39,12 @@ enum Kind {
 impl Quad {
     pub const ZERO: Quad = Quad(0);
 
+    #[inline]
     fn sign(self) -> bool {
         self.0 >> 127 == 1
     }
 
+    #[inline]
     fn kind(self) -> Kind {
         let sign = self.sign();
         let biased = ((self.0 >> SIG_BITS) & EXP_MAX as u128) as i32;
@@ -64,23 +66,28 @@ impl Quad {
         }
     }
 
+    #[inline]
     fn zero(sign: bool) -> Quad {
         Quad(u128::from(sign) << 127)
     }
 
+    #[inline]
     fn inf(sign: bool) -> Quad {
         Quad((u128::from(sign) << 127) | ((EXP_MAX as u128) << SIG_BITS))
     }
 
+    #[inline]
     fn nan() -> Quad {
         Quad(((EXP_MAX as u128) << SIG_BITS) | (1u128 << (SIG_BITS - 1)))
     }
 
+    #[inline]
     pub fn is_nan(self) -> bool {
         matches!(self.kind(), Kind::Nan)
     }
 
     /// f64 → binary128，精确。
+    #[inline]
     pub fn from_f64(value: f64) -> Quad {
         let bits = value.to_bits();
         let sign = bits >> 63 == 1;
@@ -96,6 +103,7 @@ impl Quad {
     }
 
     /// binary128 → f64，就近取偶（含 f64 的非规格化与溢出）。
+    #[inline]
     pub fn to_f64(self) -> f64 {
         match self.kind() {
             Kind::Zero(sign) => {
@@ -119,6 +127,7 @@ impl Quad {
 }
 
 impl From<f64> for Quad {
+    #[inline]
     fn from(value: f64) -> Self {
         Quad::from_f64(value)
     }
@@ -126,6 +135,7 @@ impl From<f64> for Quad {
 
 /// 把 `(-1)^sign · sig · 2^exp` 舍入成 binary128。`sticky` 表示 `sig` 之下还有非零位（数值比
 /// `sig · 2^exp` 略大一点点）；它只在舍入判断里起作用：余数正好一半时有粘滞位就进位。
+#[inline]
 fn round_pack(sign: bool, exp: i32, sig: u128, sticky: bool) -> Quad {
     if sig == 0 {
         return Quad::zero(sign);
@@ -188,6 +198,7 @@ fn round_pack(sign: bool, exp: i32, sig: u128, sticky: bool) -> Quad {
     Quad((u128::from(sign) << 127) | ((biased as u128) << SIG_BITS) | frac)
 }
 
+#[inline]
 fn round_to_f64(u: Unpacked) -> f64 {
     let len = 128 - u.sig.leading_zeros() as i32;
     let top = u.exp + len - 1;
@@ -236,6 +247,7 @@ fn round_to_f64(u: Unpacked) -> f64 {
 }
 
 /// `sig >> shift`，被移出的非零位并进最低位（"jamming"）。
+#[inline]
 fn shift_right_jam(sig: u128, shift: u32) -> u128 {
     if shift == 0 {
         sig
@@ -246,6 +258,7 @@ fn shift_right_jam(sig: u128, shift: u32) -> u128 {
     }
 }
 
+#[inline]
 fn add_finite(a: Unpacked, b: Unpacked) -> Quad {
     // 让 a 的量级不小于 b（按最高位的指数比较）。
     let top = |u: Unpacked| u.exp + 127 - u.sig.leading_zeros() as i32;
@@ -280,6 +293,7 @@ fn add_finite(a: Unpacked, b: Unpacked) -> Quad {
 
 impl Add for Quad {
     type Output = Quad;
+    #[inline]
     fn add(self, other: Quad) -> Quad {
         match (self.kind(), other.kind()) {
             (Kind::Nan, _) | (_, Kind::Nan) => Quad::nan(),
@@ -301,6 +315,7 @@ impl Add for Quad {
 
 impl Neg for Quad {
     type Output = Quad;
+    #[inline]
     fn neg(self) -> Quad {
         Quad(self.0 ^ (1u128 << 127))
     }
@@ -308,12 +323,14 @@ impl Neg for Quad {
 
 impl Sub for Quad {
     type Output = Quad;
+    #[inline]
     fn sub(self, other: Quad) -> Quad {
         self + (-other)
     }
 }
 
 /// 128×128 → 256 位乘积，返回 (高, 低)。
+#[inline]
 fn mul_wide(a: u128, b: u128) -> (u128, u128) {
     let (a1, a0) = (a >> 64, a & u128::from(u64::MAX));
     let (b1, b0) = (b >> 64, b & u128::from(u64::MAX));
@@ -329,6 +346,7 @@ fn mul_wide(a: u128, b: u128) -> (u128, u128) {
 
 impl Mul for Quad {
     type Output = Quad;
+    #[inline]
     fn mul(self, other: Quad) -> Quad {
         let sign = self.sign() != other.sign();
         match (self.kind(), other.kind()) {
@@ -362,8 +380,69 @@ impl Mul for Quad {
     }
 }
 
+/// `q = floor(sa·2^120 / sb)` 与余数 `r`（`sa, sb` 规格化到最高位在第 112 位，`sa/sb ∈ [0.5, 2)`）。
+///
+/// 每轮出 15 位商：`r < sb < 2^113`，所以 `r << 15` 不溢出 u128；商位 `t / sb < 2^15` 先用 f64 估
+/// （相对误差约 2^-52，估值差不出 ±1），再用整数乘法精确修正。商与余数与逐位长除完全相同
+/// （[`long_divide_bitwise`] 对拍），只是从 120 轮移位比较变成 8 轮。
+#[inline]
+fn long_divide(sa: u128, sb: u128) -> (u128, u128) {
+    let mut r = sa;
+    let mut q: u128 = 0;
+    // 先处理整数部分（sa/sb ∈ [0.5, 2)）。
+    if r >= sb {
+        q = 1;
+        r -= sb;
+    }
+    let sb_f = u128_to_f64(sb);
+    for _ in 0..8 {
+        let t = r << 15;
+        let mut digit = (u128_to_f64(t) / sb_f) as u128;
+        let mut product = digit * sb;
+        while product > t {
+            digit -= 1;
+            product -= sb;
+        }
+        let mut rest = t - product;
+        while rest >= sb {
+            digit += 1;
+            rest -= sb;
+        }
+        q = (q << 15) | digit;
+        r = rest;
+    }
+    (q, r)
+}
+
+/// u128 → f64（不必正确舍入，只用来估商）。
+#[inline]
+fn u128_to_f64(x: u128) -> f64 {
+    ((x >> 64) as u64 as f64).mul_add(18_446_744_073_709_551_616.0, x as u64 as f64)
+}
+
+/// 逐位长除（原实现，留作 [`long_divide`] 的对拍参照）。
+#[cfg(test)]
+fn long_divide_bitwise(sa: u128, sb: u128) -> (u128, u128) {
+    let mut r = sa;
+    let mut q: u128 = 0;
+    if r >= sb {
+        q = 1;
+        r -= sb;
+    }
+    for _ in 0..120 {
+        r <<= 1;
+        q <<= 1;
+        if r >= sb {
+            r -= sb;
+            q |= 1;
+        }
+    }
+    (q, r)
+}
+
 impl Div for Quad {
     type Output = Quad;
+    #[inline]
     fn div(self, other: Quad) -> Quad {
         let sign = self.sign() != other.sign();
         match (self.kind(), other.kind()) {
@@ -379,22 +458,7 @@ impl Div for Quad {
                 let sb = b.sig << nb;
                 let ea = a.exp - na;
                 let eb = b.exp - nb;
-                // q = floor(sa·2^120 / sb)，逐位长除；r < sb < 2^113，r<<1 不溢出。
-                let mut r = sa;
-                let mut q: u128 = 0;
-                // 先处理整数部分（sa/sb ∈ [0.5, 2)）。
-                if r >= sb {
-                    q = 1;
-                    r -= sb;
-                }
-                for _ in 0..120 {
-                    r <<= 1;
-                    q <<= 1;
-                    if r >= sb {
-                        r -= sb;
-                        q |= 1;
-                    }
-                }
+                let (q, r) = long_divide(sa, sb);
                 round_pack(sign, ea - eb - 120, q, r != 0)
             }
         }
@@ -402,6 +466,7 @@ impl Div for Quad {
 }
 
 impl PartialOrd for Quad {
+    #[inline]
     fn partial_cmp(&self, other: &Quad) -> Option<Ordering> {
         if self.is_nan() || other.is_nan() {
             return None;
@@ -422,6 +487,7 @@ impl PartialOrd for Quad {
 
 impl Quad {
     /// Fortran `max(a, b)`（`MAX_EXPR`，两数都不是 NaN 时取大者；相等时取第一个）。
+    #[inline]
     pub fn max(self, other: Quad) -> Quad {
         if other > self {
             other
@@ -431,6 +497,7 @@ impl Quad {
     }
 
     /// Fortran `min(a, b)`。
+    #[inline]
     pub fn min(self, other: Quad) -> Quad {
         if other < self {
             other

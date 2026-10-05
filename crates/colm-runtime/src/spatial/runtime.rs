@@ -233,12 +233,14 @@ impl SpatialRuntime {
             .clone()
             .next_step()
             .map_or(1, |step| step.spinup_cycle);
+        let mut timer = PhaseTimer::from_env();
         let result = (|| -> Result<()> {
             loop {
                 let mut next_clock = self.clock.clone();
                 let Some(clock) = next_clock.next_step() else {
                     return Ok(());
                 };
+                timer.mark("other");
                 let (month, _) = colm_core::month_day(clock.forcing_time)?;
                 let co2 =
                     colm_core::monthly_co2_ppm(self.co2_scenario, clock.forcing_time.year, month)?
@@ -286,7 +288,9 @@ impl SpatialRuntime {
                         )
                     })
                     .collect::<Vec<_>>();
+                timer.mark("forcing");
                 let mut next_states = states.clone();
+                timer.mark("state clone");
                 // patch 之间在一步之内互不依赖：每个只读本步强迫与共享的只读数据、只改自己的状态，
                 // 所以用 rayon 并行推进（`RAYON_NUM_THREADS` 控制线程数，相当于 OpenMP）。`collect`
                 // 保持 patch 次序，之后的汇流、漫滩交换与历史累加仍按原次序串行，结果逐位不变。
@@ -369,10 +373,12 @@ impl SpatialRuntime {
                 // （`CNFireArea` 原来对 `tsoi17` 整列赋值、需在此广播；upstream-bugs 第 61 条已修，各 patch 只写自己的。）
                 // `tracer_report`：一步里所有 patch 推进完之后（`CoLMDRIVER.F90:392-393`）。
                 crate::tracer::report_after_patches(templates)?;
+                timer.mark("patches");
                 // `CoLM.F90:544-546`：`lateral_flow (idate(1), deltim)`，预热期也做。
                 if let Some(catchment) = self.catchment.as_mut() {
                     catchment.step(&mut next_states)?;
                 }
+                timer.mark("catchment lateral flow");
                 // `CoLM.F90:559-563`：陆面步之后、`hist_out` 之前汇流；预热期不汇流。
                 if !clock.is_spinup {
                     if let Some((river, included)) = self.river.as_mut() {
@@ -483,6 +489,7 @@ impl SpatialRuntime {
                         }
                     }
                 }
+                timer.mark("grid river");
                 // `hist_out`：`accumulate_fluxes` 末尾 `accumulate_fluxes_basin`，写记录时
                 // `hist_basin_out`（`MOD_Hist.F90:5280`）。
                 if let (Some(history), Some(catchment)) =
@@ -508,6 +515,11 @@ impl SpatialRuntime {
                     }
                 }
                 if let Some(history) = history.as_deref_mut() {
+                    // 续跑旁车的窗口快照只在要写续跑的步上更新：周期续跑，或这一段的最后一步。
+                    let last_step = next_clock.clone().next_step().is_none();
+                    history
+                        .session
+                        .set_snapshot(clock.write_restart || last_step);
                     if !clock.is_spinup {
                         push_history(
                             history,
@@ -529,6 +541,7 @@ impl SpatialRuntime {
                         history.files.push(path);
                     }
                 }
+                timer.mark("history");
                 if self.deferred_lai_refresh != Some(steps[0].clock.end_time) {
                     for ((template, state), step) in
                         templates.iter().zip(next_states.iter_mut()).zip(&steps)
@@ -562,13 +575,57 @@ impl SpatialRuntime {
                     cache.as_ref(),
                     self.catchment.as_ref(),
                 )?;
+                timer.mark("lai, optimizer, restarts");
                 *states = next_states;
                 self.clock = next_clock;
                 completed += 1;
             }
         })();
+        timer.report(completed);
         self.baseflow_optimizer = optimizer;
         result.map(|()| completed)
+    }
+}
+
+/// `COLM_RS_TIMING=1`：主循环各段的墙钟累计，运行结束时打到标准错误（只为性能剖析，不影响结果）。
+struct PhaseTimer {
+    last: Option<std::time::Instant>,
+    totals: Vec<(&'static str, std::time::Duration)>,
+}
+
+impl PhaseTimer {
+    fn from_env() -> Self {
+        let on = std::env::var_os("COLM_RS_TIMING").is_some_and(|v| v != "0");
+        Self {
+            last: on.then(std::time::Instant::now),
+            totals: Vec::new(),
+        }
+    }
+
+    fn mark(&mut self, phase: &'static str) {
+        let Some(last) = self.last else { return };
+        let now = std::time::Instant::now();
+        let elapsed = now - last;
+        match self.totals.iter_mut().find(|(name, _)| *name == phase) {
+            Some((_, total)) => *total += elapsed,
+            None => self.totals.push((phase, elapsed)),
+        }
+        self.last = Some(now);
+    }
+
+    fn report(&self, steps: usize) {
+        if self.last.is_none() {
+            return;
+        }
+        let all: f64 = self.totals.iter().map(|(_, d)| d.as_secs_f64()).sum();
+        eprintln!("colm-rs timing over {steps} step(s), {all:.1} s in the main loop:");
+        for (name, total) in &self.totals {
+            let secs = total.as_secs_f64();
+            eprintln!(
+                "  {name:<26} {secs:8.2} s  {:5.1}%",
+                100.0 * secs / all.max(1e-9)
+            );
+        }
     }
 }
 
@@ -595,6 +652,12 @@ fn push_history(
         reference.catch_lateral = catchment.is_some();
         reference
     };
+    let mut jobs: Vec<
+        Option<(
+            crate::history::HistoryJob<'_>,
+            Option<crate::history::HistoryOverrides>,
+        )>,
+    > = (0..templates.len()).map(|_| None).collect();
     for range in history.elements.ranges.clone() {
         // 网格元诊断只用未遮蔽的 patch（`filter = patchmask .and. forcmask_pch`）；
         // 全元都被遮蔽时上游 `CYCLE`，诊断留 `spval`。
@@ -623,15 +686,11 @@ fn push_history(
         };
         history.session.set_element_surface(element);
         for index in range {
-            let end = steps[index].clock.end_time;
             // `lateral_flow` 改写过的 patch 量（`rsur`/`rsub`/`rnof`/`wat`/`h2osoi` 与流域独有的三项）。
-            history
-                .session
-                .set_overrides(catchment.and_then(|c| c.history_overrides(index)));
-            let pushed = match &outputs[index] {
-                Some(output) => crate::push_patch_history(
+            let overrides = catchment.and_then(|c| c.history_overrides(index));
+            let job = match &outputs[index] {
+                Some(output) => crate::patch_history_job(
                     &mut history.session,
-                    end,
                     &templates[index],
                     &states[index],
                     output,
@@ -639,12 +698,28 @@ fn push_history(
                 )?,
                 None => history
                     .session
-                    .push_masked(end, &templates[index], &states[index])?,
+                    .push_masked_job(&templates[index], &states[index])?,
             };
-            if let Some(path) = pushed {
-                history.files.push(path);
-            }
+            ensure!(
+                jobs[index].is_none(),
+                "patch {index} belongs to two history elements"
+            );
+            jobs[index] = Some((job, overrides));
         }
+    }
+    // 生成任务（设会话标志、取网格元诊断）按 patch 串行；累加按 patch 并行（`push_jobs`）。
+    let jobs = jobs
+        .into_iter()
+        .enumerate()
+        .map(|(index, job)| job.with_context(|| format!("patch {index} has no history element")))
+        .collect::<Result<Vec<_>>>()?;
+    let end = steps
+        .first()
+        .context("a history step needs at least one patch")?
+        .clock
+        .end_time;
+    if let Some(path) = history.session.push_jobs(end, jobs)? {
+        history.files.push(path);
     }
     history.session.set_element_surface(None);
     Ok(())

@@ -762,6 +762,33 @@ fn flatten_absorption(matrix: [[f64; 2]; 2]) -> [f64; 4] {
     [matrix[0][0], matrix[1][0], matrix[0][1], matrix[1][1]]
 }
 
+/// 按 `(地类, Campbell, PC)` 存的 PFT 参数。
+type PftParameterTable = std::collections::HashMap<(i32, bool, bool), PftParameters>;
+
+thread_local! {
+    /// 装配期间的 PFT 参数缓存（[`PftParameterCache`] 打开时才用）：同一次运行里参数只取决于地类与
+    /// Campbell/PC 两个开关，空间算例上万个 patch 不必每个都重新查 namelist 与默认表。
+    static PFT_PARAMETER_CACHE: std::cell::RefCell<Option<PftParameterTable>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// 在本线程上打开 PFT 参数缓存，守卫析构时关闭并清空。只在同一份算例 namelist 与同一套土层下的
+/// 装配循环里用。
+pub struct PftParameterCache(());
+
+impl PftParameterCache {
+    pub fn enable() -> Self {
+        PFT_PARAMETER_CACHE.with(|cache| *cache.borrow_mut() = Some(Default::default()));
+        Self(())
+    }
+}
+
+impl Drop for PftParameterCache {
+    fn drop(&mut self) {
+        PFT_PARAMETER_CACHE.with(|cache| *cache.borrow_mut() = None);
+    }
+}
+
 /// 一个 PFT 的 `MOD_Const_PFT` 参数（默认值 + `DEF_PFT_*` 覆盖）。
 #[allow(clippy::too_many_arguments)]
 fn pft_parameters(
@@ -774,6 +801,42 @@ fn pft_parameters(
     canopy_bottom_m: f64,
     interface_depth_m: &[f64],
 ) -> Result<PftParameters> {
+    let key = (class, campbell, pc);
+    let cached = PFT_PARAMETER_CACHE.with(|cache| {
+        cache
+            .borrow()
+            .as_ref()
+            .and_then(|map| map.get(&key).cloned())
+    });
+    let parameters = match cached {
+        Some(parameters) => parameters,
+        None => {
+            let parameters =
+                pft_parameters_uncached(document, class, campbell, pc, interface_depth_m)?;
+            PFT_PARAMETER_CACHE.with(|cache| {
+                if let Some(map) = cache.borrow_mut().as_mut() {
+                    map.insert(key, parameters.clone());
+                }
+            });
+            parameters
+        }
+    };
+    Ok(PftParameters {
+        fraction,
+        canopy_top_m,
+        canopy_bottom_m,
+        ..parameters
+    })
+}
+
+fn pft_parameters_uncached(
+    document: &Document,
+    class: i32,
+    campbell: bool,
+    pc: bool,
+    interface_depth_m: &[f64],
+) -> Result<PftParameters> {
+    let (fraction, canopy_top_m, canopy_bottom_m) = (0.0, 0.0, 0.0);
     // PC 用另一组叶片光学（`rhol_*_p_pc`/`taul_*_p_pc`，`MOD_Const_PFT.F90:1833-1843`）。
     let value = |name: &str| colm_init::pft_parameter(document, name, class, campbell, pc);
     Ok(PftParameters {
