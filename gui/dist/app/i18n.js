@@ -3,6 +3,8 @@
 //! 同步翻译新节点，而不是要求每个 render 函数再维护一套 DOM。
 
 const ZH_EN = [
+  ['开始日期格式应为 YYYY-MM-DD，且是真实日期', 'The start date must be YYYY-MM-DD and a real date'],
+  ['结束日期格式应为 YYYY-MM-DD，且是真实日期', 'The end date must be YYYY-MM-DD and a real date'],
   ['网格类型决定要准备哪些空间文件；RawData、Runtime 与强迫场在下一步选。', 'The grid type decides which spatial files to prepare; RawData, Runtime and forcing are chosen on the next page.'],
   ['读取已有 mesh 的 elmindex 与空间范围；无需设置边界或分辨率。', 'Reads elmindex and the spatial extent from the existing mesh; no bounds or resolution needed.'],
   ['流域网格 NetCDF（必需）', 'Catchment grid NetCDF (required)'],

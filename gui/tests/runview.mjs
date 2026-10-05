@@ -152,3 +152,22 @@ if (!/<div id="loadinggate" class="gate loading-gate"[^>]*>/.test(html)
 }
 
 console.log('runview: per-site progress/log formatting and undefined metrics are safe');
+
+// 空间算例的日期是文本框（WKWebView 里 `type="date"` 不能用键盘输入）：几种常见写法都能规范成 YYYY-MM-DD。
+{
+  const body = spatialJs.match(/export function normalizeDate\(text\) \{[\s\S]*?\n\}/)?.[0];
+  if (!body) throw new Error('spatial.js must define normalizeDate');
+  if (/type="date"/.test(await readFile(join(root, 'dist', 'index.html'), 'utf8'))) {
+    throw new Error('date inputs must stay keyboard-editable text fields');
+  }
+  const normalizeDate = new Function(`${body.replace('export ', '')}; return normalizeDate;`)();
+  const cases = [
+    ['2010-01-01', '2010-01-01'], ['2010-1-1', '2010-01-01'], ['2010/1/31', '2010-01-31'],
+    ['2010.12.3', '2010-12-03'], ['20100215', '2010-02-15'], [' 2012-02-29 ', '2012-02-29'],
+    ['2010-02-29', null], ['2010-13-01', null], ['10-01-2010', null], ['', null],
+  ];
+  for (const [text, want] of cases) {
+    const got = normalizeDate(text);
+    if (got !== want) throw new Error(`normalizeDate(${JSON.stringify(text)}) = ${got}, want ${want}`);
+  }
+}

@@ -75,6 +75,29 @@ function syncSpatialSetup() {
   loadForcingDatasets();
 }
 
+/**
+ * 日期文本 → `YYYY-MM-DD`；不是真实日期时返回 null。接受 `2010-1-1`、`2010/01/01`、`2010.1.1`、`20100101`。
+ * 用文本框而不是 `type="date"`：macOS 的 WKWebView 里日期控件选中年/月/日后键盘输入不可靠。
+ */
+export function normalizeDate(text) {
+  const raw = String(text ?? '').trim();
+  const match = /^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})$/.exec(raw) ?? /^(\d{4})(\d{2})(\d{2})$/.exec(raw);
+  if (!match) return null;
+  const [year, month, day] = match.slice(1).map(Number);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month - 1 || date.getUTCDate() !== day) {
+    return null;
+  }
+  return `${String(year).padStart(4, '0')}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+}
+
+for (const id of ['spatial-start', 'spatial-end']) {
+  $(id).onchange = () => {
+    const value = normalizeDate($(id).value);
+    if (value) $(id).value = value;
+  };
+}
+
 function problem() {
   const required = [
     ['spatial-rawdata', '请选择 RawData 目录'],
@@ -92,7 +115,13 @@ function problem() {
   if ($('spatial-root').value.includes(' ') || $('spatial-name').value.includes(' ')) {
     return '算例路径不能含空格';
   }
-  if ($('spatial-start').value > $('spatial-end').value) return '开始日期不能晚于结束日期';
+  const start = normalizeDate($('spatial-start').value);
+  const end = normalizeDate($('spatial-end').value);
+  if (!start) return '开始日期格式应为 YYYY-MM-DD，且是真实日期';
+  if (!end) return '结束日期格式应为 YYYY-MM-DD，且是真实日期';
+  $('spatial-start').value = start;
+  $('spatial-end').value = end;
+  if (start > end) return '开始日期不能晚于结束日期';
   const timestep = Number($('spatial-timestep').value);
   if (!(timestep > 0)) return '时间步长必须大于 0';
   return null;
