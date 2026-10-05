@@ -16,6 +16,7 @@ import './sitedata.js';
 import './prep-examples.js';
 import './validation.js';
 import './spatial.js';
+import './opencase.js';
 
 initI18n();
 initShell();

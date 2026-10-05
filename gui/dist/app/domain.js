@@ -505,6 +505,15 @@ function renderFoot() {
     foot.appendChild(prev);
   }
 
+  if (pageIdx === 0) {
+    // 不走向导：直接打开磁盘上已有的算例（`opencase.js` 接这个事件）。
+    const open = document.createElement('button');
+    open.className = 'btn-ghost';
+    open.textContent = '打开已有算例…';
+    open.onclick = () => globalThis.dispatchEvent?.(new Event('colm:open-case'));
+    foot.appendChild(open);
+  }
+
   const list = pages();
   const page = list[pageIdx];
   const required = { domain: picked.domain, grid: picked.grid, subgrid: picked.subgrid, soil: picked.soil, tracer: picked.tracer };
@@ -519,7 +528,10 @@ function renderFoot() {
   foot.appendChild(next);
 }
 
-function finish() {
+/** 开始一次新会话：清掉上一次的选择与运行批次，装上这份模型配置并通知各页。
+ *  `config` 与向导结束时的形状相同：`{ domain, grid, spatial, subgrid, soil, physics, tracer, debug }`。
+ *  向导与「打开已有算例」共用这一条路。 */
+export function startSession(config) {
   // 新向导就是一次新任务；站点库可以复用，但上一次的选择和运行批次不能
   // 混进来，否则运行页会出现与本次模型配置无关的旧算例。
   state.picked.clear();
@@ -543,9 +555,25 @@ function finish() {
     rawdataDir: null, forcingFile: null, forcingDir: null,
     observationFile: null, observationDir: null, batchSites: [],
   };
-  state.domain = picked.domain;
-  state.grid = picked.grid;
-  state.spatial = picked.domain === 'site' ? null : {
+  state.domain = config.domain;
+  state.grid = config.grid;
+  state.spatial = config.spatial;
+  state.subgrid = config.subgrid;
+  state.wizard = {
+    grid: config.grid,
+    spatial: config.spatial,
+    subgrid: config.subgrid,
+    soil: config.soil,
+    physics: { ...emptyPhysics(), ...config.physics },
+    tracer: config.tracer,
+    debug: { ...emptyDebug(), ...config.debug },
+  };
+  globalThis.dispatchEvent?.(new Event('colm:wizard'));
+  $('domaingate').hidden = true;
+}
+
+function finish() {
+  const spatial = picked.domain === 'site' ? null : {
     domain: picked.grid === 'unstructured' || picked.grid === 'catchment'
       ? { kind: picked.domain }
       : picked.domain === 'watershed'
@@ -572,18 +600,10 @@ function finish() {
         nlat: Math.round(180 / Number(picked.spatial.dlat)),
       },
   };
-  state.subgrid = picked.subgrid;
-  state.wizard = {
-    grid: picked.grid,
-    spatial: state.spatial,
-    subgrid: picked.subgrid,
-    soil: picked.soil,
-    physics: { ...picked.physics },
-    tracer: picked.tracer,
-    debug: { ...picked.debug },
-  };
-  globalThis.dispatchEvent?.(new Event('colm:wizard'));
-  $('domaingate').hidden = true;
+  startSession({
+    domain: picked.domain, grid: picked.grid, spatial, subgrid: picked.subgrid, soil: picked.soil,
+    physics: picked.physics, tracer: picked.tracer, debug: picked.debug,
+  });
   // 向导已经决定本次模型结构；通常下一步是选现成站点并建算例，不是重新
   // 制作原始数据。前处理仍在左侧作为按需入口，但不再拦住主路径。
   go('basic-files');

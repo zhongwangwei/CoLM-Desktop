@@ -835,7 +835,7 @@ struct VisibilityContext<'a> {
     wuest: bool,
 }
 
-fn logical(doc: &colm_namelist::Document, name: &str) -> bool {
+pub(crate) fn logical(doc: &colm_namelist::Document, name: &str) -> bool {
     match doc.get(name) {
         Some(colm_namelist::Value::Bool(value)) => *value,
         _ => matches!(
@@ -865,7 +865,7 @@ fn parse_real(value: &str) -> Option<f64> {
         .ok()
 }
 
-fn real(doc: &colm_namelist::Document, name: &str) -> f64 {
+pub(crate) fn real(doc: &colm_namelist::Document, name: &str) -> f64 {
     match doc.get(name) {
         Some(value) => value.as_f64().or_else(|| parse_real(&value.to_string())),
         None => match colm_schema::find(name).map(|field| field.default) {
@@ -877,7 +877,7 @@ fn real(doc: &colm_namelist::Document, name: &str) -> f64 {
     .unwrap_or(f64::NAN)
 }
 
-fn character(doc: &colm_namelist::Document, name: &str) -> String {
+pub(crate) fn character(doc: &colm_namelist::Document, name: &str) -> String {
     match doc.get(name) {
         Some(colm_namelist::Value::Str(value)) => value.clone(),
         _ => match colm_schema::find(name).map(|field| field.default) {

@@ -904,6 +904,7 @@ const ZH_EN = [
   ['完成全部预热轮次后才开始正式输出。', 'Production output starts only after all spin-up cycles finish.'],
   ['年', 'years'],
   ['网格与并行', 'Grid & parallelism'],
+  ['打开已有算例…', 'Open existing case…'],
   ['注意：非结构 mesh 的边界与河网的单元流域划分可能不一致，mesh 须包含所关心河流的全部上游子流域；mesh 外的上游与边界处只部分覆盖的单元流域都会少算产流，出口流量会偏小。', 'Note: the unstructured mesh boundary may not match the unit catchments of the river network, and the mesh must contain every upstream sub-catchment of the rivers you care about; upstream areas outside the mesh and catchments only partly covered at its edge lose runoff, so outlet discharge will be too low.'],
   ['格点河道、湖泊与水库汇流（15′ 单元流域河网）', 'Grid river, lake and reservoir routing (15′ unit-catchment network)'],
   ['注意：Shapefile 的流域边界与河网的单元流域划分可能不一致，边界附近的单元流域只有一部分在模拟范围内，出口流量会偏小。', 'Note: the Shapefile boundary may not match the unit catchments of the river network; catchments on the boundary lie only partly inside the domain, so outlet discharge will be too low.'],
@@ -1925,6 +1926,7 @@ export function translateZh(text, target = 'en') {
     .replace(/^──── 制作地表数据（(\w+)）────$/, '──── Surface data ($1) ────')
     .replace(/^──── 制作初始场（(\w+)）────$/, '──── Initial conditions ($1) ────')
     .replace(/^──── 模拟（(\w+)）────$/, '──── Simulation ($1) ────')
+    .replace(/^已打开算例 (.+)$/, 'Opened case $1')
     .replace(/^空间算例\s*(.+)\s*已通过预检$/, 'Spatial case $1 passed preflight')
     .replace(/^开始运行\s*(\d+)\s*个算例$/, 'Starting $1 cases')
     .replace(/^(mksrfdata|mkinidata|colm|全部阶段)运行完成$/, (_, stage) => `${stage === '全部阶段' ? 'All stages' : stage} completed`)

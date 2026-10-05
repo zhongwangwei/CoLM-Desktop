@@ -546,3 +546,14 @@ if (state.step === 'result-tuning' || !ids.status.textContent.includes('空间�
 if (!/picked\.grid === 'unstructured' \? 'unstructured' : picked\.domain/.test(
   await import('node:fs').then(fs => fs.readFileSync(new URL('../dist/app/domain.js', import.meta.url), 'utf8')),
 )) throw new Error('unstructured meshes get their own routing note');
+// 打开已有算例：首页与「文件与目录」都有入口，复用向导的 startSession，并换回上次用过的内核。
+{
+  const read = name => import('node:fs').then(fs =>
+    fs.readFileSync(new URL(`../dist/${name}`, import.meta.url), 'utf8'));
+  const [open, domainSrc, html] = await Promise.all([read('app/opencase.js'), read('app/domain.js'), read('index.html')]);
+  if (!/id="open-case"/.test(html)) throw new Error('the files page offers to open an existing case');
+  if (!/new Event\('colm:open-case'\)/.test(domainSrc)) throw new Error('the start gate offers to open an existing case');
+  if (!/export function startSession\(config\)/.test(domainSrc)) throw new Error('the wizard and opened cases share startSession');
+  if (!/startSession\(sessionFromProfile\(opened\.profile\)\)/.test(open)) throw new Error('an opened case starts a session from its profile');
+  if (!/k\.preset === opened\.profile\.kernel_preset/.test(open)) throw new Error('an opened case returns to the kernel it last ran with');
+}

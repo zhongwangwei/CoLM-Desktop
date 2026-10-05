@@ -117,3 +117,42 @@ fn spatial_metadata_uses_real_mesh_paths_not_site_template_defaults() {
     }
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn an_opened_spatial_case_recovers_its_wizard_choices() {
+    let text = "&nl_colm\n DEF_CASE_NAME = 'c8'\n DEF_domain%edgew = 96.25\n DEF_domain%edgee = 104.25\n \
+                DEF_domain%edges = 37.75\n DEF_domain%edgen = 43.25\n DEF_file_mesh = '/w/mesh.nc'\n \
+                DEF_GRIDBASED_lon_res = 0.25\n DEF_GRIDBASED_lat_res = 0.25\n DEF_USE_PFT = .true.\n \
+                DEF_USE_GridRiverLakeFlow = .false.\n DEF_USE_BGC = .true.\n/\n";
+    let stages = r#"{"colm":{"kernel":"preset=latlon;platform=Darwin-arm64;args=GRID LULC_IGBP;macros=GRIDBASED,GridRiverLakeFlow,LULC_IGBP"}}"#;
+    let p = case_profile(text, true, Some(stages)).expect("profile");
+    assert_eq!(p.grid, Some("latlon"));
+    assert_eq!(p.subgrid, "PFT");
+    assert!(p.bgc && !p.river && !p.urban);
+    assert_eq!(p.domain, Some([96.25, 104.25, 37.75, 43.25]));
+    assert_eq!(p.resolution, Some([0.25, 0.25]));
+    assert_eq!(p.kernel_preset.as_deref(), Some("latlon"));
+}
+
+#[test]
+fn an_opened_site_case_reads_usgs_and_methane_from_the_last_run() {
+    let text =
+        "&nl_colm\n DEF_CASE_NAME = 's'\n DEF_USE_TRACER = .true.\n DEF_TRACER_NAMES = 'CH4'\n/\n";
+    let stages = r#"{"mksrfdata":{"kernel":"preset=usgs;macros=SinglePoint,LULC_USGS"}}"#;
+    let p = case_profile(text, false, Some(stages)).expect("profile");
+    assert_eq!((p.grid, p.subgrid), (None, "USGS"));
+    assert!(p.methane && !p.river);
+    assert_eq!(p.domain, None);
+    let fresh = case_profile(text, false, None).expect("profile");
+    assert_eq!((fresh.subgrid, fresh.kernel_preset), ("IGBP", None));
+}
+
+#[test]
+fn opening_a_directory_without_case_nml_is_refused() {
+    let root = tmp("open-none");
+    assert!(open_case(root.to_string_lossy().into_owned()).is_err());
+    let dir = make_case(&root, "c", "CN-Cng");
+    let opened = open_case(dir.to_string_lossy().into_owned()).expect("opens");
+    assert_eq!(opened.entry.name, "CN-Cng");
+    assert_eq!(Path::new(&opened.root), root.as_path());
+}

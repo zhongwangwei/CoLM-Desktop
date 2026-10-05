@@ -98,6 +98,7 @@ pub fn run() {
             preview_import_parameter_overrides,
             apply_import_parameter_overrides,
             list_cases,
+            open_case,
             mark_results_stale,
             list_kernels,
             install_example,
