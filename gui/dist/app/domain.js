@@ -38,7 +38,7 @@ const PHYSICS = [
   { id: 'urban', t: 'URBAN', d: '城市冠层与人为热；不锁定次网格方案' },
   { id: 'lulcc', t: 'LULCC', d: '土地利用变化' },
   { id: 'bgc', t: 'BGC', d: '碳氮循环' },
-  { id: 'river', t: '河湖汇流', d: '格点河道、湖泊与水库汇流；不选则不算河道，也没有「河道与水库」参数页' },
+  { id: 'river', t: '河湖汇流', d: '格点河道、湖泊与水库汇流（15′ 单元流域河网）', note: () => riverNote() },
   { id: 'crop', t: 'CROP', d: '作物模型' },
   { id: 'tracer', t: 'TRACER', d: '同位素 / 溶质 / 气体 / 颗粒示踪；当前仅开放甲烷' },
 ];
@@ -314,6 +314,15 @@ function renderCards(items, selected, choose, blocker = null, multi = false) {
   }
 }
 
+// 河网用的是 15′ 单元流域，与用户给的边界各自独立：按第 1 页的空间类型提醒一句。
+const RIVER_NOTES = {
+  watershed: '注意：Shapefile 的流域边界与河网的单元流域划分可能不一致，边界附近的单元流域只有一部分在模拟范围内，出口流量会偏小。',
+  region: '注意：区域须包含所关心河流的全部上游子流域；区域外的上游不产流，下游流量会偏小。',
+};
+function riverNote() {
+  return RIVER_NOTES[picked.domain] ?? null;
+}
+
 function card(item, selected, choose, blocked, multi) {
   const b = document.createElement('button');
   b.type = 'button';
@@ -332,6 +341,13 @@ function card(item, selected, choose, blocked, multi) {
 
   blocked ??= item.ready === false ? { need: item.need } : null;
   if (!blocked) {
+    const note = item.note?.();
+    if (note) {
+      const n = document.createElement('span');
+      n.className = 'dnote';
+      n.textContent = note;
+      b.appendChild(n);
+    }
     b.onclick = () => choose(item.id);
     return b;
   }

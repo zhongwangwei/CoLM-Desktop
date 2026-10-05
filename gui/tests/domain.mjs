@@ -533,3 +533,13 @@ if (state.step === 'result-tuning' || !ids.status.textContent.includes('空间�
     throw new Error('the wizard owns the routing switch');
   }
 }
+// 河湖汇流卡片按空间类型提醒边界与河网的关系，不再写「不选则……」。
+{
+  const source = await import('node:fs').then(fs =>
+    fs.readFileSync(new URL('../dist/app/domain.js', import.meta.url), 'utf8'));
+  if (/不选则不算河道/.test(source)) throw new Error('the river card no longer explains the unchecked state');
+  for (const key of ['watershed:', 'region:']) {
+    if (!source.includes(key)) throw new Error(`the river card needs a ${key} note`);
+  }
+  if (!/n\.className = 'dnote'/.test(source)) throw new Error('river notes render as a card note');
+}
