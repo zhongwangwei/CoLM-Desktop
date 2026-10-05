@@ -11,7 +11,7 @@
 
 <p align="center">
   <a href="https://github.com/zhongwangwei/CoLM-Desktop/actions/workflows/ci.yml"><img src="https://github.com/zhongwangwei/CoLM-Desktop/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <a href="https://github.com/zhongwangwei/CoLM-Desktop/releases/tag/v0.3.0-beta.1"><img src="https://img.shields.io/badge/version-v0.3.0--beta.1-orange" alt="Current beta version: v0.3.0-beta.1"></a>
+  <a href="https://github.com/zhongwangwei/CoLM-Desktop/releases/tag/v0.3.0-beta.2"><img src="https://img.shields.io/badge/version-v0.3.0--beta.2-orange" alt="Current beta version: v0.3.0-beta.2"></a>
   <img src="https://img.shields.io/badge/status-Beta-orange" alt="Status: Beta">
   <img src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue" alt="License: MIT OR Apache-2.0">
   <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey" alt="Platforms">
@@ -20,14 +20,14 @@
 CoLM Desktop brings CoLM202X site and spatial case setup, parameter constraints, the three-stage run and result evaluation together in one graphical interface. All three stages — surface data (`mksrfdata`), initial conditions (`mkinidata`) and the model main loop (`colm`) — run on the **Rust engine**, and the results are **bit-for-bit identical** to the original CoLM202X. The installers work out of the box: you do not need a Rust, Fortran, MPI or NetCDF toolchain.
 
 > [!WARNING]
-> **This is the `0.3.0-beta.1` prerelease.** Features are still changing quickly and there may be known or unknown defects. Keep backups of your original data and cases, and validate results independently before research use.
+> **This is the `0.3.0-beta.2` prerelease.** Features are still changing quickly and there may be known or unknown defects. Keep backups of your original data and cases, and validate results independently before research use.
 
 > [!IMPORTANT]
 > Both **site** and **spatial** simulations are supported. Spatial runs cover watershed, regional and global extents on lat-lon, unstructured and catchment grids. Several sites can run concurrently as independent cases. **Parameter tuning and uncertainty analysis are not yet available in spatial mode.** They come back when you switch to site mode.
 
 ## Download
 
-Get the installer for your platform from the [v0.3.0-beta.1 prerelease page](https://github.com/zhongwangwei/CoLM-Desktop/releases/tag/v0.3.0-beta.1):
+Get the installer for your platform from the [v0.3.0-beta.2 prerelease page](https://github.com/zhongwangwei/CoLM-Desktop/releases/tag/v0.3.0-beta.2):
 
 | Platform | Architecture | Format |
 |---|---|---|
@@ -37,6 +37,12 @@ Get the installer for your platform from the [v0.3.0-beta.1 prerelease page](htt
 | Linux | x86_64 | `.AppImage` / `.deb` / `.rpm` |
 
 Each installer contains the desktop app, the `colm-cli` command line, the Rust engine (`mksrfdata-rs`, `mkinidata-rs`, `colm-rs`) and example sites. For platforms without a release, or for development builds, see "Running from source" below.
+
+## What's new in 0.3.0-beta.2
+
+- **Faster large spatial cases.** History accumulation now runs per patch in parallel, and the restart snapshot is only taken when a restart is written. Quadruple-precision division in catchment river-lake routing is faster. Setup no longer resolves paths or looks up PFT parameters repeatedly. Plant hydraulics, photosynthesis and variably saturated soil water reuse `pow` results for identical arguments. A 3-day Pearl River catchment run (36,000 patches) drops from about 9–10 minutes to about 6.5 minutes.
+- **No change to any result.** Catchment, site and lat-lon grid cases stay bit-for-bit identical to the previous release and to the original Fortran.
+- Run `colm-rs` with `COLM_RS_TIMING=1` to print how long each part of the main loop took.
 
 ## What's new in 0.3.0-beta.1
 

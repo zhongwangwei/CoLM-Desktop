@@ -11,7 +11,7 @@
 
 <p align="center">
   <a href="https://github.com/zhongwangwei/CoLM-Desktop/actions/workflows/ci.yml"><img src="https://github.com/zhongwangwei/CoLM-Desktop/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <a href="https://github.com/zhongwangwei/CoLM-Desktop/releases/tag/v0.3.0-beta.1"><img src="https://img.shields.io/badge/version-v0.3.0--beta.1-orange" alt="当前测试版：v0.3.0-beta.1"></a>
+  <a href="https://github.com/zhongwangwei/CoLM-Desktop/releases/tag/v0.3.0-beta.2"><img src="https://img.shields.io/badge/version-v0.3.0--beta.2-orange" alt="当前测试版：v0.3.0-beta.2"></a>
   <img src="https://img.shields.io/badge/status-Beta-orange" alt="状态：Beta">
   <img src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue" alt="许可证：MIT OR Apache-2.0">
   <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey" alt="平台">
@@ -20,14 +20,14 @@
 CoLM Desktop 将 CoLM202X 的站点与空间建例、参数约束、三阶段运行和结果评估整合到一个图形界面中。地表数据（`mksrfdata`）、初始场（`mkinidata`）与模型主循环（`colm`）三个阶段全部由 **Rust 引擎**完成，结果与 CoLM202X 原版**逐位一致**。安装包开箱即用，无需安装 Rust、Fortran、MPI 或 NetCDF 编译环境。
 
 > [!WARNING]
-> **当前版本为 `0.3.0-beta.1` 测试版。** 功能仍在快速迭代，可能存在已知或未知缺陷。请保留原始数据与算例备份，正式科研使用前务必独立核验结果。
+> **当前版本为 `0.3.0-beta.2` 测试版。** 功能仍在快速迭代，可能存在已知或未知缺陷。请保留原始数据与算例备份，正式科研使用前务必独立核验结果。
 
 > [!IMPORTANT]
 > 支持**站点**与**空间**两类模拟。空间模拟覆盖流域、区域与全球范围，可用经纬度网格、非结构网格与流域网格；多个站点可作为独立算例并发运行。空间模式下**参数调优和不确定性分析暂不可用**，切回站点模式后恢复。
 
 ## 下载
 
-前往 [v0.3.0-beta.1 测试版发布页](https://github.com/zhongwangwei/CoLM-Desktop/releases/tag/v0.3.0-beta.1) 下载对应平台的安装包：
+前往 [v0.3.0-beta.2 测试版发布页](https://github.com/zhongwangwei/CoLM-Desktop/releases/tag/v0.3.0-beta.2) 下载对应平台的安装包：
 
 | 平台 | 架构 | 发行格式 |
 |---|---|---|
@@ -37,6 +37,12 @@ CoLM Desktop 将 CoLM202X 的站点与空间建例、参数约束、三阶段运
 | Linux | x86_64 | `.AppImage` / `.deb` / `.rpm` |
 
 安装包包含桌面端、命令行 `colm-cli`、Rust 引擎（`mksrfdata-rs`、`mkinidata-rs`、`colm-rs`）与示例站点。尚未发布的平台或开发版可以按下文从源码运行。
+
+## 0.3.0-beta.2 的主要变化
+
+- **大规模空间算例更快**：history 累加改为按 patch 并行，续跑快照只在写续跑时做；流域河湖汇流的四倍精度除法提速；装配阶段去掉重复的路径解析与 PFT 参数查表；植物水力、光合与变饱和土壤水里复用同参数的 `pow`。珠江流域（3.6 万 patch）3 天算例从约 9–10 分钟降到约 6.5 分钟。
+- **所有改动都不改变计算结果**：流域、站点与经纬度网格算例与上一版及 Fortran 原版逐位一致。
+- 设 `COLM_RS_TIMING=1` 运行 `colm-rs`，结束时打印主循环各段耗时。
 
 ## 0.3.0-beta.1 的主要变化
 
