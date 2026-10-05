@@ -588,7 +588,13 @@ export async function renderFields(externalStillCurrent = () => true) {
     .filter(e => !e.known || processFieldStates.get(e.path)?.mode !== 'hidden');
   const sectionOf = e => state.fields.find(f => f.name === e.path)?.section;
   const outputFields = shown.filter(e => sectionOf(e) === '输出与重启');
+  // 空间算例没有站点：`SITE_*` 一类字段不适用，「站点信息」这一步整个不出现。
+  const spatialCase = state.selected?.spatial === true || (!!state.domain && state.domain !== 'site');
   for (const [page, basic] of basics) {
+    if (page.id === 'basic-site' && spatialCase) {
+      basic.innerHTML = '<p class="muted">空间算例没有站点信息。</p>';
+      continue;
+    }
     const scoped = page.scoped;
     const rows = (scoped ? processShown : shown)
       .filter(e => page.sections.includes(sectionOf(e)))
