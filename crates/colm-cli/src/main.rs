@@ -2090,7 +2090,14 @@ fn rust_preprocessor_arguments(
             arguments.extend(["--grid-kind".to_owned(), grid_kind.to_owned()]);
         }
     }
+    // `DEF_USE_GridRiverLakeFlow = .false.`：编进了河湖汇流也不建河道冷启动状态（上游同样跳过）。
+    let river_switch = match document.get("DEF_USE_GridRiverLakeFlow") {
+        Some(colm_namelist::Value::Bool(value)) => *value,
+        Some(other) => bail!("DEF_USE_GridRiverLakeFlow must be logical, got {other}"),
+        None => true,
+    };
     if stage == Stage::MkIniData
+        && river_switch
         && kernel
             .manifest
             .macros
@@ -2498,7 +2505,8 @@ fn run_case(
         .iter()
         .any(|macro_name| macro_name == "GridRiverLakeFlow")
         .then(|| gridriver_restart_artifact(&layout.case_nml(), &out, &name, lc_year))
-        .transpose()?;
+        .transpose()?
+        .flatten();
     let stages = stage_artifacts(&out, &name, lc_year, spatial, gridriver_restart.as_deref());
     // 每段的输入指纹。**只看产物在不在是不够的** —— 改了站点文件或
     // rawdata 目录，srfdata.nc 就失效了而文件还在，跳过它等于拿旧地表数据
@@ -2891,11 +2899,17 @@ fn gridriver_restart_artifact(
     out: &Path,
     case_name: &str,
     land_cover_year: i32,
-) -> Result<PathBuf> {
+) -> Result<Option<PathBuf>> {
     let text = std::fs::read_to_string(case_nml)
         .with_context(|| format!("cannot read {}", case_nml.display()))?;
     let document = colm_namelist::parse(&text)
         .with_context(|| format!("cannot parse {}", case_nml.display()))?;
+    // `DEF_USE_GridRiverLakeFlow = .false.`：mkinidata 不写河道冷启动重启。
+    match document.get("DEF_USE_GridRiverLakeFlow") {
+        Some(colm_namelist::Value::Bool(false)) => return Ok(None),
+        Some(colm_namelist::Value::Bool(true)) | None => {}
+        Some(other) => bail!("DEF_USE_GridRiverLakeFlow must be logical, got {other}"),
+    }
     let value = |field: &str, default: i32| match document.get(field) {
         Some(colm_namelist::Value::Int(value)) => i32::try_from(*value)
             .with_context(|| format!("{field} is outside CoLM's integer range")),
@@ -2934,9 +2948,9 @@ fn gridriver_restart_artifact(
         }
     }
     let date = format!("{year:04}-{julian_day:03}-{seconds:05}");
-    Ok(out.join("restart").join(&date).join(format!(
+    Ok(Some(out.join("restart").join(&date).join(format!(
         "{case_name}_restart_gridriver_{date}_lc{land_cover_year:04}.nc"
-    )))
+    ))))
 }
 
 fn validate_native_case_paths(case: &Path, name: &str) -> Result<()> {
@@ -3040,7 +3054,8 @@ pub(crate) fn case_is_current(
                 .any(|macro_name| macro_name == "GridRiverLakeFlow")
         })
         .then(|| gridriver_restart_artifact(&layout.case_nml(), &out, &name, lc_year))
-        .transpose()?;
+        .transpose()?
+        .flatten();
     for (stage, artifacts) in
         stage_artifacts(&out, &name, lc_year, spatial, gridriver_restart.as_deref())
     {

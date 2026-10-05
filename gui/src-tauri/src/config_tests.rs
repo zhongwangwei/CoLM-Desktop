@@ -2896,3 +2896,51 @@ fn spatial_cases_hide_site_fields_and_lock_the_generated_grid() {
         }
     }
 }
+
+#[test]
+fn the_river_switch_hides_the_other_river_fields() {
+    let mode = |states: &[FieldState], name: &str| {
+        states
+            .iter()
+            .find(|s| s.name == name)
+            .unwrap_or_else(|| panic!("{name} has no state"))
+            .mode
+    };
+    let have: std::collections::BTreeSet<&str> = ["GRIDBASED", "GridRiverLakeFlow", "LULC_IGBP"]
+        .into_iter()
+        .collect();
+    let on = field_states_for_at("&nl_colm\n DEF_USE_LCT = .true.\n/\n", &have, None).unwrap();
+    assert!(matches!(
+        mode(&on, "DEF_USE_GridRiverLakeFlow"),
+        FieldMode::Editable
+    ));
+    assert!(matches!(
+        mode(&on, "DEF_Reservoir_Method"),
+        FieldMode::Editable
+    ));
+    let off = field_states_for_at(
+        "&nl_colm\n DEF_USE_LCT = .true.\n DEF_USE_GridRiverLakeFlow = .false.\n/\n",
+        &have,
+        None,
+    )
+    .unwrap();
+    assert!(matches!(
+        mode(&off, "DEF_USE_GridRiverLakeFlow"),
+        FieldMode::Editable
+    ));
+    for name in [
+        "DEF_Reservoir_Method",
+        "DEF_UnitCatchment_file",
+        "DEF_USE_LEVEE",
+    ] {
+        assert!(matches!(mode(&off, name), FieldMode::Hidden), "{name}");
+    }
+    let catchment: std::collections::BTreeSet<&str> =
+        ["CATCHMENT", "LULC_IGBP"].into_iter().collect();
+    let states =
+        field_states_for_at("&nl_colm\n DEF_USE_LCT = .true.\n/\n", &catchment, None).unwrap();
+    assert!(matches!(
+        mode(&states, "DEF_USE_GridRiverLakeFlow"),
+        FieldMode::Hidden
+    ));
+}

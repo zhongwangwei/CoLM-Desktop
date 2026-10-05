@@ -149,7 +149,7 @@ CONTAINS
       CALL deallocate_TimeInvariants
 #ifdef GridRiverLakeFlow
       ! The river state lives on unit catchments, not patches: keep it across the re-initialization.
-      CALL hold_GridRiverLakeTimeVars_lulcc ()
+      IF (DEF_USE_GridRiverLakeFlow) CALL hold_GridRiverLakeTimeVars_lulcc ()
 #endif
       CALL deallocate_TimeVariables
 
@@ -157,7 +157,7 @@ CONTAINS
       CALL initialize (casename, dir_landdata, dir_restart,&
                        jdate, year, greenwich, lulcc_call=.true.)
 #ifdef GridRiverLakeFlow
-      CALL restore_GridRiverLakeTimeVars_lulcc ()
+      IF (DEF_USE_GridRiverLakeFlow) CALL restore_GridRiverLakeTimeVars_lulcc ()
 #endif
 
    END SUBROUTINE LulccInitialize

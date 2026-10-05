@@ -568,7 +568,7 @@ CONTAINS
 	      ! should set DEF_METHANE%inundation_mode to one of:
 	      !   wetwat, satellite/giems, routing, dynamic_wtd, hybrid.
 	      USE MOD_Namelist, only: DEF_wetland_finundation_scheme, &
-	                              DEF_USE_Dynamic_Wetland
+	                              DEF_USE_Dynamic_Wetland, DEF_USE_GridRiverLakeFlow
 	      IMPLICIT NONE
 
 	      character(len=32) :: mode
@@ -609,6 +609,12 @@ CONTAINS
 	         IF (p_is_master) write(6,*) &
 	            '***** ERROR: routing methane inundation mode requires a GridRiverLakeFlow-enabled kernel.'
 	         CALL CoLM_Stop (' ***** ERROR: methane routing mode is unavailable in this kernel')
+#else
+	         IF (.not. DEF_USE_GridRiverLakeFlow) THEN
+	            IF (p_is_master) write(6,*) &
+	               '***** ERROR: routing methane inundation mode requires DEF_USE_GridRiverLakeFlow = .true.'
+	            CALL CoLM_Stop (' ***** ERROR: methane routing mode needs river-lake routing')
+	         ENDIF
 #endif
 	         DEF_wetland_finundation_scheme = 7
 	         DEF_METHANE%enable_wetwat_finundated_override = .false.

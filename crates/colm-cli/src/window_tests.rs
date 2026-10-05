@@ -254,8 +254,9 @@ fn gridriver_mkinidata_artifact_uses_the_normalized_cold_start_date() {
         "&nl_colm\n DEF_CASE_NAME='River'\n DEF_LC_YEAR=2005\n DEF_simulation_time%start_year=2008\n DEF_simulation_time%start_month=2\n DEF_simulation_time%start_day=29\n DEF_simulation_time%start_sec=0\n/\n",
     );
     let out = case.join("out/River");
-    let restart =
-        super::gridriver_restart_artifact(&case.join("case.nml"), &out, "River", 2005).unwrap();
+    let restart = super::gridriver_restart_artifact(&case.join("case.nml"), &out, "River", 2005)
+        .unwrap()
+        .expect("routing is on by default");
     assert_eq!(
         restart,
         out.join("restart/2008-060-00000/River_restart_gridriver_2008-060-00000_lc2005.nc")
@@ -729,4 +730,18 @@ fn missing_forcing_heights_fail_before_writing_nan() {
     let e = super::complete_forcing_heights(&mut summary, &site, &met).unwrap_err();
     let m = e.to_string();
     assert!(m.contains("HEIGHT_V") && m.contains("AA.nml"), "{m}");
+}
+
+#[test]
+fn switched_off_routing_expects_no_gridriver_restart() {
+    let case = case_with_nml(
+        "gridriver-off",
+        "&nl_colm\n DEF_CASE_NAME='River'\n DEF_USE_GridRiverLakeFlow=.false.\n/\n",
+    );
+    let out = case.join("out/River");
+    assert!(
+        super::gridriver_restart_artifact(&case.join("case.nml"), &out, "River", 2005)
+            .unwrap()
+            .is_none()
+    );
 }

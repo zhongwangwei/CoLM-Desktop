@@ -306,8 +306,10 @@ PROGRAM CoLM
 #endif
 
 #ifdef GridRiverLakeFlow
-      CALL build_riverlake_network ()
-      IF (DEF_Reservoir_Method > 0) CALL reservoir_init ()
+      IF (DEF_USE_GridRiverLakeFlow) THEN
+         CALL build_riverlake_network ()
+         IF (DEF_Reservoir_Method > 0) CALL reservoir_init ()
+      ENDIF
 #endif
 #endif
 
@@ -435,8 +437,13 @@ PROGRAM CoLM
       CALL lateral_flow_init (lc_year)
 #endif
 #ifdef GridRiverLakeFlow
-      CALL grid_riverlake_flow_init (s_year, is_spinup)
-      CALL restore_river_history_acc_restart (jdate, casename, dir_restart)
+      IF (DEF_USE_GridRiverLakeFlow) THEN
+         CALL grid_riverlake_flow_init (s_year, is_spinup)
+         CALL restore_river_history_acc_restart (jdate, casename, dir_restart)
+      ELSE
+         ! CoLMDRIVER still passes the (zero) flood fields to the land model.
+         CALL allocate_flood_patch ()
+      ENDIF
 #endif
 
       CALL ParaOpt_init (jdate, lc_year)
@@ -546,7 +553,7 @@ PROGRAM CoLM
 #endif
 
 #if (defined GridRiverLakeFlow)
-         IF (.not. is_spinup) THEN
+         IF (DEF_USE_GridRiverLakeFlow .and. .not. is_spinup) THEN
             CALL grid_riverlake_flow (idate(1), deltim)
          ENDIF
 #endif
@@ -602,7 +609,11 @@ PROGRAM CoLM
             CALL LulccDriver (casename, dir_landdata, dir_restart, jdate, greenwich)
             IF (is_spinup) lulcc_in_spinup = .true.
 #ifdef GridRiverLakeFlow
-            CALL grid_riverlake_flow_lulcc ()
+            IF (DEF_USE_GridRiverLakeFlow) THEN
+               CALL grid_riverlake_flow_lulcc ()
+            ELSE
+               CALL allocate_flood_patch ()
+            ENDIF
 #endif
 
             ! Allocate Forcing and Fluxes variable of next year
@@ -740,7 +751,11 @@ PROGRAM CoLM
                      CALL LulccDriver (casename, dir_landdata, dir_restart, jdate, greenwich, &
                         rewind = .true.)
 #ifdef GridRiverLakeFlow
-                     CALL grid_riverlake_flow_lulcc ()
+                     IF (DEF_USE_GridRiverLakeFlow) THEN
+                        CALL grid_riverlake_flow_lulcc ()
+                     ELSE
+                        CALL allocate_flood_patch ()
+                     ENDIF
 #endif
 
                      CALL allocate_1D_Forcing
@@ -792,7 +807,7 @@ PROGRAM CoLM
 #endif
 
 #if (defined GridRiverLakeFlow)
-      CALL grid_riverlake_flow_final ()
+      IF (DEF_USE_GridRiverLakeFlow) CALL grid_riverlake_flow_final ()
 #endif
 
       IF (DEF_USE_TRACER) THEN

@@ -635,7 +635,8 @@ CONTAINS
    !--------------------------------------------------------------------
 
    USE MOD_Precision
-   USE MOD_Namelist, only: DEF_USE_PFT, DEF_USE_PC, DEF_USE_BGC, DEF_URBAN_RUN
+   USE MOD_Namelist, only: DEF_USE_PFT, DEF_USE_PC, DEF_USE_BGC, DEF_URBAN_RUN, &
+      DEF_USE_GridRiverLakeFlow
    USE MOD_Vars_Global
    USE MOD_SPMD_Task
    USE MOD_LandPatch, only: numpatch
@@ -833,7 +834,7 @@ ENDIF
 #endif
 
 #ifdef GridRiverLakeFlow
-      CALL allocate_GridRiverLakeTimeVars
+      IF (DEF_USE_GridRiverLakeFlow) CALL allocate_GridRiverLakeTimeVars
 #endif
 
 IF (DEF_URBAN_RUN) THEN
@@ -855,7 +856,8 @@ ENDIF
    SUBROUTINE deallocate_TimeVariables ()
 
    USE MOD_SPMD_Task
-   USE MOD_Namelist, only: DEF_USE_PFT, DEF_USE_PC, DEF_USE_BGC, DEF_URBAN_RUN
+   USE MOD_Namelist, only: DEF_USE_PFT, DEF_USE_PC, DEF_USE_BGC, DEF_URBAN_RUN, &
+      DEF_USE_GridRiverLakeFlow
    USE MOD_LandPatch, only: numpatch
    IMPLICIT NONE
 
@@ -1036,7 +1038,7 @@ ENDIF
 #endif
 
 #ifdef GridRiverLakeFlow
-      CALL deallocate_GridRiverLakeTimeVars
+      IF (DEF_USE_GridRiverLakeFlow) CALL deallocate_GridRiverLakeTimeVars
 #endif
 
 IF (DEF_URBAN_RUN) THEN
@@ -1103,7 +1105,7 @@ ENDIF
    USE MOD_SPMD_Task
    USE MOD_Namelist, only: DEF_REST_CompressLevel, DEF_USE_PLANTHYDRAULICS, DEF_USE_OZONESTRESS, &
                            DEF_USE_IRRIGATION, DEF_USE_Dynamic_Lake, SITE_landtype, DEF_USE_TRACER, &
-                           DEF_USE_PFT, DEF_USE_PC, DEF_USE_BGC, DEF_URBAN_RUN
+                           DEF_USE_PFT, DEF_USE_PC, DEF_USE_BGC, DEF_URBAN_RUN, DEF_USE_GridRiverLakeFlow
    USE MOD_LandPatch
    USE MOD_NetCDFVector
    USE MOD_Vars_Global
@@ -1331,10 +1333,12 @@ ENDIF
 #endif
 
 #ifdef GridRiverLakeFlow
+      IF (DEF_USE_GridRiverLakeFlow) THEN
       file_restart = trim(dir_restart)// '/'//trim(cdate)//'/' // trim(site) //'_restart_gridriver_'//trim(cdate)//'_lc'//trim(cyear)//'.nc'
       CALL WRITE_GridRiverLakeTimeVars (file_restart)
       IF (DEF_USE_TRACER) CALL write_tracer_restart(file_restart)
       CALL commit_GridRiverLakeRestart (file_restart)
+      ENDIF
 #endif
 
 IF (DEF_URBAN_RUN) THEN
@@ -1530,8 +1534,10 @@ ENDIF
 #endif
 
 #ifdef GridRiverLakeFlow
+      IF (DEF_USE_GridRiverLakeFlow) THEN
       file_restart = trim(dir_restart)// '/'//trim(cdate)//'/' // trim(site) //'_restart_gridriver_'//trim(cdate)//'_lc'//trim(cyear)//'.nc'
       CALL READ_GridRiverLakeTimeVars (file_restart)
+      ENDIF
 #endif
 
 IF (DEF_URBAN_RUN) THEN

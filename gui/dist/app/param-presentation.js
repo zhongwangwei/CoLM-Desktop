@@ -237,6 +237,7 @@ const LABELS = Object.freeze({
   'DEF_METHANE%atm_methane_file': pair('大气甲烷浓度文件', 'Atmospheric methane file'),
   'DEF_METHANE%atm_methane_file_units': pair('大气甲烷浓度单位', 'Atmospheric methane units'),
 
+  DEF_USE_GridRiverLakeFlow: pair('开启河湖汇流', 'Enable river-lake routing'),
   DEF_Reservoir_Method: pair('水库调度方案', 'Reservoir-operation scheme'),
   DEF_ReservoirPara_file: pair('水库参数文件（留空读单元流域文件）', 'Reservoir-parameter file (blank: unit-catchment file)'),
   DEF_USE_EstimatedRiverDepth: pair('估算河道深度', 'Estimate river depth'),

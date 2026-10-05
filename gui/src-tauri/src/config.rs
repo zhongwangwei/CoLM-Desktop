@@ -1695,6 +1695,18 @@ fn field_runtime_state(
         return hidden("当前内核未编入这个功能");
     }
 
+    // 河湖流总开关：只有编进 `GridRiverLakeFlow` 的网格内核有；关掉时这一页其余河道参数都不起作用。
+    if name == "DEF_USE_GridRiverLakeFlow" && !c.have.contains("GridRiverLakeFlow") {
+        return hidden("当前内核未编入河湖汇流");
+    }
+    if c.have.contains("GridRiverLakeFlow")
+        && name != "DEF_USE_GridRiverLakeFlow"
+        && field_section(name, field.group) == Some("河道与水库")
+        && !logical(c.doc, "DEF_USE_GridRiverLakeFlow")
+    {
+        return hidden("河湖流已关闭");
+    }
+
     if name == "DEF_URBAN_geom_data" {
         return hidden("CoLM 当前只读取并广播此字段，没有任何计算路径使用它");
     }

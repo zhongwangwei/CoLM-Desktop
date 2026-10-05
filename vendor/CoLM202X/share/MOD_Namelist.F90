@@ -389,6 +389,10 @@ MODULE MOD_Namelist
    logical :: DEF_CaMa_StrictDomain = .false.
 
    ! ----- lateral flow related -----
+   ! Runtime switch for grid-based river-lake routing (kernels built with GridRiverLakeFlow).
+   ! When .false., no river network, routing, river history or river restart is made; the
+   ! flood fields seen by the land model stay zero.
+   logical  :: DEF_USE_GridRiverLakeFlow    = .true.
    character(len=256) :: DEF_ElementNeighbour_file = 'null'
    character(len=256) :: DEF_UnitCatchment_file    = 'null'
    logical :: DEF_UnitCatchment_regional = .false.
@@ -1612,6 +1616,7 @@ CONTAINS
       DEF_USE_SNICAR,                         &
       DEF_Aerosol_Readin,                     &
       DEF_Aerosol_Clim,                       &
+      DEF_USE_GridRiverLakeFlow,              &
       DEF_USE_EstimatedRiverDepth,            &
       DEF_Reservoir_Method,                   &
       DEF_GRIDBASED_ROUTING_MAX_DT,           &
@@ -1774,6 +1779,14 @@ CONTAINS
          DEF_HIST_mode = 'one'
 #endif
 
+#ifdef GridRiverLakeFlow
+         IF (.not. DEF_USE_GridRiverLakeFlow) THEN
+            ! Without routing the regional unit-catchment subset has no reader.
+            DEF_UnitCatchment_regional = .false.
+            IF (DEF_GridRiverLake_FloodFeedback) &
+               CALL CoLM_Stop ('Grid flood feedback requires DEF_USE_GridRiverLakeFlow.')
+         ENDIF
+#endif
          IF (DEF_UnitCatchment_regional) THEN
             IF (trim(DEF_UnitCatchment_file) == 'null') &
                CALL CoLM_Stop ('Regional unit catchment requires DEF_UnitCatchment_file.')
@@ -2798,6 +2811,7 @@ CONTAINS
       CALL mpi_bcast (DEF_Aerosol_Readin                     ,1   ,mpi_logical   ,p_address_master ,p_comm_glb ,p_err)
       CALL mpi_bcast (DEF_Aerosol_Clim                       ,1   ,mpi_logical   ,p_address_master ,p_comm_glb ,p_err)
 
+      CALL mpi_bcast (DEF_USE_GridRiverLakeFlow              ,1   ,mpi_logical   ,p_address_master ,p_comm_glb ,p_err)
       CALL mpi_bcast (DEF_USE_EstimatedRiverDepth            ,1   ,mpi_logical   ,p_address_master ,p_comm_glb ,p_err)
       CALL mpi_bcast (DEF_Reservoir_Method                   ,1   ,mpi_integer   ,p_address_master ,p_comm_glb ,p_err)
       CALL mpi_bcast (DEF_GRIDBASED_ROUTING_MAX_DT           ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)

@@ -54,7 +54,7 @@ CONTAINS
 
    SUBROUTINE hist_init (dir_hist, lulcc_call)
 
-   USE MOD_Namelist, only: DEF_USE_TRACER
+   USE MOD_Namelist, only: DEF_USE_TRACER, DEF_USE_GridRiverLakeFlow
    IMPLICIT NONE
 
    character(len=*) , intent(in) :: dir_hist
@@ -94,7 +94,7 @@ CONTAINS
 #endif
 
 #ifdef GridRiverLakeFlow
-      CALL hist_grid_riverlake_init (HistForm)
+      IF (DEF_USE_GridRiverLakeFlow) CALL hist_grid_riverlake_init (HistForm)
 #endif
 
    END SUBROUTINE hist_init
@@ -102,6 +102,7 @@ CONTAINS
 
    SUBROUTINE hist_final ()
 
+   USE MOD_Namelist, only: DEF_USE_GridRiverLakeFlow
    IMPLICIT NONE
 
       CALL deallocate_acc_fluxes ()
@@ -115,7 +116,7 @@ CONTAINS
 #endif
 
 #ifdef GridRiverLakeFlow
-      CALL hist_grid_riverlake_final ()
+      IF (DEF_USE_GridRiverLakeFlow) CALL hist_grid_riverlake_final ()
 #endif
 
    END SUBROUTINE hist_final
@@ -229,7 +230,7 @@ CONTAINS
          CALL flush_Tracer_Acc ()
       ENDIF
 #ifdef GridRiverLakeFlow
-         CALL flush_acc_fluxes_riverlake ()
+         IF (DEF_USE_GridRiverLakeFlow) CALL flush_acc_fluxes_riverlake ()
 #endif
          IF (.not. (itstamp < etstamp)) THEN
             IF (present(restart_date) .and. present(dir_restart)) THEN
@@ -5282,6 +5283,7 @@ ENDIF
 #endif
 
 #ifdef GridRiverLakeFlow
+         IF (DEF_USE_GridRiverLakeFlow) THEN
          CALL hist_grid_riverlake_out (file_hist, HistForm, idate, &
             itime_in_file, trim(file_hist)/=trim(file_last))
 
@@ -5324,6 +5326,7 @@ ENDIF
          ENDIF
 
          IF (allocated(nac_one   )) deallocate (nac_one   )
+         ENDIF
 #endif
 
       IF (DEF_USE_TRACER) THEN

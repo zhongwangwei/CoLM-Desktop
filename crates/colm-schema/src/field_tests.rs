@@ -21,14 +21,15 @@ fn the_table_has_the_measured_number_of_fields() {
     // TOPMODEL、Simple VIC、积雪覆盖与灌溉的 13 个运行时系数使其变为 296；
     // CROP 单点播种日覆盖项使其变为 297。PR #504（FIRE）给 `history_var_type` 加了 104 个火诊断开关，
     // 总数到 944（顶层不变）。PR #507 加了 `DEF_HIST_grid_as_model_mesh`，顶层 305 变 306、总数 945。
+    // 河湖汇流改成运行时开关（`DEF_USE_GridRiverLakeFlow`），顶层 306 变 307、总数 946。
     // 若这个数再变了，要么上游改了，要么生成器漏了 —— 两种都必须有人看一眼。
     let total = all().len();
     assert!(
         (900..=980).contains(&total),
-        "expected roughly 945 fields, got {total}"
+        "expected roughly 946 fields, got {total}"
     );
     let top = all().iter().filter(|f| f.owner.is_none()).count();
-    assert_eq!(top, 306, "top-level count changed");
+    assert_eq!(top, 307, "top-level count changed");
 }
 
 #[test]

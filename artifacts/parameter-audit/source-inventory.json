@@ -25,8 +25,8 @@
   },
   "MOD_Namelist.F90": {
     "case_tuning_fields": 43,
-    "catalog_descriptors": 989,
-    "schema_fields": 945
+    "catalog_descriptors": 990,
+    "schema_fields": 946
   },
   "high_confidence_packages": {
     "bgc_fire_phenology_crop": "covered only where pft_override_fields.inc supplies a reviewed hook",

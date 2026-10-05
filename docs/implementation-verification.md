@@ -29936,3 +29936,24 @@ vendor 置 0（重编 catchment 内核后 Fortran 再跑一遍仍 `files ok 1708
 
 测试：`large_trees_track_names_and_directories_without_per_file_stat`、`spatial_cases_hide_site_fields_and_lock_the_generated_grid`
 扩充、`gui/tests/runview.mjs` 线程数断言；colm-cli 指纹 21 个、GUI 后端 164 个、全部 `gui/tests`、`check-gui`、clippy、fmt 通过。
+
+## 第 581 轮：Rust 运行进度与日志；河湖汇流运行时总开关
+
+- **进度**：`colm-rs` 原来不打 `TIMESTEP`，GUI 的进度条在 colm 阶段一直不动、最后直接跳到完成。现在单点与空间主循环
+  每步按 `CoLM.F90` 格式 99/100 打 `TIMESTEP = n | DATE = YYYY-MM-DD-SSSSS[ Spinup (cycle i of n)]`
+  （`RuntimeStep::progress_line`）。0.5° 网格 2 天两个引擎的 96 行逐字相同，单点 1488 行。
+- **日志**：mkinidata-rs 写出的重启文件按目录汇总成一行；colm-rs 末行只报重启文件数与目录；GUI 日志每段开头插一行标题；
+  每次运行结尾的「空间算例不支持调参」提示只在建例时说。
+- **`DEF_USE_GridRiverLakeFlow`**（新 namelist，缺省 `.true.`）：GRID/UNSTRUCTURED 内核编进了 `GridRiverLakeFlow`，
+  原来没有不跑河道的办法。vendor 里关掉时跳过 `build_riverlake_network`/`reservoir_init`、`grid_riverlake_flow_init`
+  与历史累加恢复、每步汇流、LULCC 的河道重建与状态保留、`grid_riverlake_flow_final`、河道 history 的 init/flush/out/final、
+  `GridRiverLakeTimeVars` 的分配与重启读写、初始化里的河网与冷启动河道状态；`CoLMDRIVER` 仍要读漫滩场，所以只
+  `allocate_flood_patch`（全 0）。区域单元流域随之关掉；漫滩回馈与甲烷 `routing` 模式要求开着（与上游其余检查一样直接停）。
+  Rust：`colm-rs` 不建河网、网格/向量 history 不声明河道量与上游掩码；`colm-cli` 不给 mkinidata 传 `--grid-river`、
+  也不再把 `restart_gridriver` 列为 mkinidata 的产物；history 闸门表重新生成后河道量带 `runtime = DEF_USE_GridRiverLakeFlow`。
+  GUI「河道与水库」页顶部是这个开关，关掉时本页其余字段隐藏（流域网格内核不显示它）。
+
+对照（0.5° 网格 110–112E/23–25N，2 天，`--preprocessors fortran`）：关掉时两个引擎 `files ok 284`，没有 unitcat history 与
+`restart_gridriver`；开着时 `files ok 287` 不变。关掉与开着的 Fortran history 共有 135 个变量全部逐位相同（没开漫滩回馈时
+河道不回馈陆面），只少了 `mask_complete_upstream_regird` 与 6 个河道量。测试：colm-cli 220、colm-runtime 161、GUI 后端 166、
+colm-schema（顶层 307、总数 946）、colm-hist、全部 `gui/tests`、`check-gui`、clippy、fmt 通过。

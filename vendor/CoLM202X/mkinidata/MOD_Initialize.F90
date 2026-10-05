@@ -272,6 +272,7 @@ CONTAINS
 #endif
 
 #ifdef GridRiverLakeFlow
+      IF (DEF_USE_GridRiverLakeFlow) THEN
       ! LULCC re-runs the initialization with the network already built: release it first.
       ! The unit catchments do not change, but the patch-to-grid runoff mapping does.
       IF (present(lulcc_call)) CALL riverlake_network_final ()
@@ -298,6 +299,7 @@ CONTAINS
             ENDIF
             deallocate (levsto_lulcc, levdph_lulcc)
          ENDIF
+      ENDIF
       ENDIF
 #endif
 
@@ -1707,7 +1709,7 @@ ENDIF
 #endif
 
 #ifdef GridRiverLakeFlow
-      IF (p_is_worker) THEN
+      IF (p_is_worker .and. DEF_USE_GridRiverLakeFlow) THEN
          IF (numucat > 0) THEN
             wdsrf_ucat = topo_rivhgt
             veloc_riv  = 0

@@ -501,7 +501,13 @@ fn run_spatial(
     // GRID 内核总是编进 `GridRiverLakeFlow`：汇流默认路径（单向耦合，`FloodplainStorageFix` 两种曲线都行），其余选项还没移植。
     // 漫滩回馈：上游自己要求修正漫滩曲线、不与 LULCC 同开，并把产流方案强制成 0；
     // Rust 只接变饱和流、LCT 的那条路径。
+    // `DEF_USE_GridRiverLakeFlow`：GRID 内核的河湖汇流运行时开关（关掉时陆面照常，河道不算）。
+    let grid_river = !arguments.catchment && logical_field(&document, "DEF_USE_GridRiverLakeFlow")?;
     if logical_field(&document, "DEF_GridRiverLake_FloodFeedback")? {
+        ensure!(
+            grid_river,
+            "Grid flood feedback requires DEF_USE_GridRiverLakeFlow (upstream stops too)"
+        );
         ensure!(
             logical_field(&document, "DEF_GridRiverLake_FloodplainStorageFix")?,
             "Grid flood feedback requires DEF_GridRiverLake_FloodplainStorageFix (upstream stops too)"
@@ -532,7 +538,7 @@ fn run_spatial(
     // CH4 provider：与单点同一条 `soil_step`。空间内核编进了网格河湖，所以 `routing`/`hybrid` 可用；
     // `satellite`（GIEMS）由 `methane_giems` 读入；`only_wetland` 与稻田改的活跃掩膜由 `soil_step`
     // 每步写进 `MethanePatch::history_active`。这里先解析一遍配置，坏配置在入口就停。
-    colm_runtime::methane::setup_from_document(&document, true)?;
+    colm_runtime::methane::setup_from_document(&document, grid_river)?;
     // 输运示踪物跨 LULCC：陆面状态见 `lulcc_land_tracers`（SAT/MEC），强迫缓存见 `lulcc_forcing_cache`。
     let methane_tracer = tracer_set.as_ref().is_some_and(|set| {
         set.tracers
@@ -1248,6 +1254,28 @@ fn run_spatial_segment(
         )?;
         let runtime = runtime.with_catchment(catchment)?;
         (history_grid, None, None, runtime)
+    } else if !logical_field(document, "DEF_USE_GridRiverLakeFlow")? {
+        // 河湖汇流关闭：不建河网、不汇流，history 里也没有河道量与上游掩码。
+        let history_grid = history_grid.take().map(std::sync::Arc::new);
+        let history_vector = if vector_history && writes_history {
+            let groups = ElementGroups::from_topology(&topology)?;
+            let mut elements = groups
+                .ranges
+                .iter()
+                .map(|range| (topology.element[range.start], range.clone()))
+                .collect::<Vec<_>>();
+            elements.sort_by_key(|(id, _)| *id);
+            let vector = colm_hist::history::HistoryVector {
+                elmindex: elements.iter().map(|(id, _)| *id).collect(),
+                elements: elements.into_iter().map(|(_, range)| range).collect(),
+                subfrc: groups.fractions.clone(),
+                compress_level: colm_runtime::spatial::history::hist_compress_level(document)?,
+            };
+            Some((std::sync::Arc::new(vector), Vec::new()))
+        } else {
+            None
+        };
+        (history_grid, None, history_vector, runtime)
     } else {
         let mut runtime = runtime;
         let network = colm_runtime::river::network::RiverNetwork::read(
@@ -1575,7 +1603,7 @@ fn run_spatial_segment(
             )?
             .with_patches(patch_count)?
             .with_grid(grid)
-            .with_gridded(if catchment {
+            .with_gridded(if catchment || river_writer.is_none() {
                 &[]
             } else {
                 &colm_runtime::river::history::GRIDDED_RIVER_VARIABLES
@@ -1635,7 +1663,11 @@ fn run_spatial_segment(
                 .with_patches(patch_count)?
                 .with_vector(
                     vector,
-                    &colm_runtime::river::history::VECTOR_RIVER_VARIABLES,
+                    if river_writer.is_some() {
+                        &colm_runtime::river::history::VECTOR_RIVER_VARIABLES
+                    } else {
+                        &[]
+                    },
                     statics,
                 )
                 .map(|session| {
