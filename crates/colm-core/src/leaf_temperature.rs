@@ -1349,7 +1349,7 @@ pub fn leaf_temperature(
     let pressure_conversion = 44.6 * 273.16 * input.surface_pressure_pa / 1.013e5;
     // `MOD_LeafTemperature.F90:1040` 是 `gssun = (laisun/rssun) * (tprcor/tlbef)`
     // —— **右边的除法先算**。平铺成 `a/r * c / t` 会算成 `((a/r)*c)/t`，
-    // 在 `f_gssun`/`f_gssha` 上留下 ~1 ULP 的第 0 步种子（2026 年 `window_divergence.py`
+    // 在 `f_gssun`/`f_gssha` 上留下 ~1 ULP 的第 0 步种子（2026 年窗口分叉扫描
     // 量到 `f_gssun` 的 maxrel ≈ 2.95e-16，正是 1 ULP 的签名）。
     let resistance_conversion = pressure_conversion / previous_leaf_temperature;
     let (sunlit_stomatal_conductance, shaded_stomatal_conductance) = if stomata_active {

@@ -473,7 +473,7 @@ fn coupled_assimilation(rubisco: f64, electron: f64, sink: f64) -> f64 {
     // 而 `:266` 先乘的是 `omp`（这里叫 `first`）。原先把两处都写成"常量 * rubisco * electron"，
     // 第一处就成了 `(3.508*rubisco)*electron`：乘法可交换但**舍入点不同**，
     // `(3.508*a)*b != (3.508*b)*a`。
-    // 实测（`oracle/scripts/compare_stomata.sh` 第 515 例，Ball-Berry）：
+    // 模块级双侧差分实测（第 515 例，Ball-Berry）：
     //   `(3.508*rubisco)*electron` ⇒ `omp=…E352`、`assim=3EF2E4791654E3CA`（正是改前 Rust 的值）
     //   `(3.508*electron)*rubisco` ⇒ `omp=…E3E4`、`assim=3EF2E4791654E451`（内核值）
     // 该例的 `omc/ome/oms/pco2i` 两侧**逐位相同**，所以差就出在这一处结合顺序上；
@@ -542,51 +542,12 @@ fn selected_parameters(
     Ok((g1, g0, gradm, binter, lambda))
 }
 
-/// 供 `sortin` 闭环探针调用（第 333 轮）。**不是**业务 API —— 只为把
-/// `sortin` 的形状残差夹在一个函数里逐位判（`compare_sortin.sh`）。
-#[doc(hidden)]
-pub fn sortin_for_probe(
-    errors: &mut [f64; ITERATIONS],
-    guesses: &mut [f64; ITERATIONS],
-    range: f64,
-    gamma: f64,
-    iteration: usize,
-) {
-    sortin(errors, guesses, range, gamma, iteration);
-}
-
-/// 第 335 轮：把 `sortin` 二次拟合分支的中间量导出，供闭环定位**第一处分叉**。
-/// 顺序：`ac1, ac2, bc1, bc2, cc1, cc2, bterm, aterm, cterm`（`iteration < 4` 时全 0）。
-#[doc(hidden)]
-pub fn sortin_intermediates_for_probe(
-    errors: &mut [f64; ITERATIONS],
-    guesses: &mut [f64; ITERATIONS],
-    range: f64,
-    gamma: f64,
-    iteration: usize,
-) -> [f64; 9] {
-    let mut debug = [0.0; 9];
-    sortin_impl(errors, guesses, range, gamma, iteration, Some(&mut debug));
-    debug
-}
-
 fn sortin(
     errors: &mut [f64; ITERATIONS],
     co2: &mut [f64; ITERATIONS],
     range: f64,
     gamma: f64,
     iteration: usize,
-) {
-    sortin_impl(errors, co2, range, gamma, iteration, None);
-}
-
-fn sortin_impl(
-    errors: &mut [f64; ITERATIONS],
-    co2: &mut [f64; ITERATIONS],
-    range: f64,
-    gamma: f64,
-    iteration: usize,
-    debug: Option<&mut [f64; 9]>,
 ) {
     if iteration < 4 {
         let error_sign = if errors[0] < 0.0 { -1.0 } else { 1.0 };
@@ -642,17 +603,6 @@ fn sortin_impl(
         let cterm = (-bterm).mul_add(errors[i2], first);
         let quadratic = cterm.max(lower);
         co2[iteration - 1] = f77(0.5) * (linear + quadratic);
-        if let Some(slot) = debug {
-            slot[0] = ac1;
-            slot[1] = ac2;
-            slot[2] = bc1;
-            slot[3] = bc2;
-            slot[4] = cc1;
-            slot[5] = cc2;
-            slot[6] = bterm;
-            slot[7] = aterm;
-            slot[8] = cterm;
-        }
     }
     co2[iteration - 1] = co2[iteration - 1].max(f77(0.01));
 }

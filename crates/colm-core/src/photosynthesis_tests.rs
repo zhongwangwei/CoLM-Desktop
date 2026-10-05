@@ -93,7 +93,7 @@ fn hydraulic_photosynthesis_update_matches_mod_assim_stomata_conductance() {
             canopy_air_co2_pa: 39.0,
             // 40000 µmol m-2 s-1 = 0.04 mol m-2 s-1。上游调用点
             // (`MOD_LeafTemperature_Extended.F90:908-911`) 传进来的就是 µmol 的**数值**，
-            // 不是 mol —— 见第 293 轮 `oracle/scripts/updphotosyn_diff.f90` 的实测。
+            // 不是 mol —— 见验证记录第 293 轮的实测。
             canopy_conductance_h2o_umol_m2_s: 40000.0,
         },
         StomataOptions {
@@ -102,7 +102,7 @@ fn hydraulic_photosynthesis_update_matches_mod_assim_stomata_conductance() {
         },
     )
     .unwrap();
-    // 内核 `update_photosyn` 参考值：`oracle/scripts/updphotosyn_diff.f90`（gsh2o=40000）。
+    // 内核 `update_photosyn` 参考值：第 293 轮 Fortran 差分（gsh2o=40000）。
     close(state.assimilation_mol_m2_s, 2.29820183479526886e-5);
     close(state.respiration_mol_m2_s, 9.81529284775695169e-7);
 }

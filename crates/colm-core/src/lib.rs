@@ -346,10 +346,9 @@ pub use phase_change::{
     UrbanPhaseChangeInput, UrbanPhaseChangeState, LATENT_HEAT_FUSION_J_KG,
 };
 pub use photosynthesis::{
-    photosynthesis_parameters, sortin_for_probe, sortin_intermediates_for_probe, stomata,
-    update_photosynthesis, LeafBiochemistry, LeafPhotosynthesisInput, PhotosynthesisParameters,
-    PhotosynthesisUpdateInput, PhotosynthesisUpdateState, StomataInput, StomataOptions,
-    StomataState,
+    photosynthesis_parameters, stomata, update_photosynthesis, LeafBiochemistry,
+    LeafPhotosynthesisInput, PhotosynthesisParameters, PhotosynthesisUpdateInput,
+    PhotosynthesisUpdateState, StomataInput, StomataOptions, StomataState,
 };
 pub use plant_hydraulics::{
     plant_hydraulic_stress, vegetation_water_potential, vulnerability, vulnerability_derivative,

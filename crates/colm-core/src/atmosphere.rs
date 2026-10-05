@@ -171,7 +171,7 @@ pub fn saturation_specific_humidity(
     // 四个常量由对象直读确认（`/tmp/gf/r152/clamp.f90`，`T=198` 与 `T=349`）：
     //   NEG es=0x3FBF43F7A2AC9200  esdT=0x3F938B4D8B53A580
     //   POS es=0x40E2D80B36C8AC77  esdT=0x40993AF2BB3F60EE
-    // 实测 `oracle/scripts/compare_qsadv.sh`：全区间 5021 组失配（`es`），
+    // 模块级双侧差分实测：全区间 5021 组失配（`es`），
     // 而只跑冷支/暖支各 20000/20000 全同 —— 差异**只**出在这里。
     let (vapor_pressure_pa, vapor_pressure_temperature_slope_pa_k) =
         if temperature_k - FREEZING_K < -75.0 {

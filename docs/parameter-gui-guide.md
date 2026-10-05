@@ -26,6 +26,8 @@ Each editable row identifies its scope and shows the built-in/context default, e
 
 **Export explicit overrides** omits inherited defaults. **Import overrides** always previews compatibility and affected files, then requires confirmation and the unchanged preview version token. Catalog/kernel mismatches and cross-scheme or PFT/PC scope mismatches fail closed.
 
+Under the hood import is two-phase: `preview_import_parameter_overrides` validates the catalog version, the current scheme/scope, the current explicit values and the target files; `apply_import_parameter_overrides` requires the preview version token and writes every changed file atomically. Process parameters only ever write case-local parameter files.
+
 ## Study selection
 
 The uncertainty/tuning selector queries the same contextual catalog as manual editing. It offers an LCT parameter only when all selected cases share the exact IGBP/USGS class, and a PFT/PC dimension only when every selected case contains that component. The generated spec stores `parameter_id` and `scope_instance`; different PFT slots remain different dimensions. No layer-scoped field is offered until the catalog has a reviewed layer write strategy and hard bounds.

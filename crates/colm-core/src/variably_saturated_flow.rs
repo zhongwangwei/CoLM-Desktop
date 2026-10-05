@@ -1822,7 +1822,7 @@ pub fn variable_saturated_water_balance(
         // `(wt-wt_m1)*(vl_s-vl_m1)`，`fmadd` 再把 `(vl_s-vl_m1)*(wf-wf_m1)` 收进去
         // —— 与源语句的书写顺序**相反**（源把 wf 那条写成独立的 `dmss` 赋值）。
         // 第 317 轮"每处只有一个乘积、无收左收右歧义"的说法在这条链上是错的，
-        // 闭环实测才判出来（见 `compare_water_balance.sh`）。
+        // 模块级闭环实测才判出来。
         let mass_change =
             porosity_change.mul_add(wetting_front_change, water_table_change * porosity_change);
         let mass_change =

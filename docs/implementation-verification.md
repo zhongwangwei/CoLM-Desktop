@@ -29779,3 +29779,28 @@ colm-core/colm-runtime/colm-init/colm-srfdata 的单元测试与黄金文件判�
 
 同轮补：`oracle/fixtures/PROVENANCE.md` 也删去（站点夹具的字段出处说明，没有代码读它）；`docs/design.md` 里指向它的一处改掉，
 历史计划文档（`plan-m0-m1.md`、`plan-m3.md`）照原样保留。
+
+## 第 573 轮：清理不再使用的代码与文档
+
+- **文档**：`docs/` 只留 README 链接的现行文档（设计、强迫场修复、表格前处理、结果工作台、参数目录与指南、CPU 并行、
+  上游缺陷、本验证记录）和描述现行 Study 功能的 `uncertainty-and-tuning.md`（README 文档列表补上）。删去 37 份：各里程碑与
+  GUI/前处理的实施计划（`plan-m0-m1` … `plan-m8`、`plan-gui2/3`、`plan-prep-*`、`plan-macro-runtime`）、2026-08/09 的代码评审与
+  审计、移植计划（`mkinidata/mksrfdata-rust-port`、`preprocessing-parity-status`）、`docs/superpowers/`；`parameter-overrides.md`
+  的两段式导入说明并进 `parameter-gui-guide.md`。保留文档与代码注释里指向它们的地方改掉；本记录里的历史提及照旧。
+- **`backups/`**（迁移到 Rust 之前的 Fortran mkinidata 源码快照）删去：同样的源码在 `vendor/CoLM202X/mkinidata` 与 git 历史里。
+- **模块级差分闭环整体失效**：`oracle/scripts/compare_all.sh` 实跑 21 个闭环 0 个通过（内核构建目录 `.bld` 的布局改过、
+  探针编译失败、重启命名带 `_lc<year>` 之后整例对照读不到），两个第二配置整例对照与 `audit_namelist_reads` 也失败。整套删去：
+  `compare_*.sh`、`*_diff.f90`、`*_probe.sh`、`*_cmp.py`、`probe_diff.py`、`restart_*`、`window_divergence.py`、
+  `stage3_diff.py`、`audit_*`，以及配套的 19 个 `crates/colm-core/examples/*_probe.rs` 和只给它们用的
+  `sortin_for_probe`/`sortin_intermediates_for_probe`。代码注释里"见某脚本"的证据说明改成不指向文件的说法。逐位一致的证据
+  现在是各轮记录的整例配对回归。
+- 没被任何地方调用的 `test_*.py`：`test_gridriver_restart_sentinel.py`（纯文本断言，能过）接进 CI；
+  `test_lct_canopy_allocation.py`（已失败）与 `test_native_preprocess_pipeline.py`（依赖本机未入库的 `oracle/work`）删去。
+- **二进制与示例**：`spatial-probe`（临时诊断）、`colm-preprocess-rs`（被 `mksrfdata-rs`/`mkinidata-rs` 取代）、独立的
+  `forcing-convert` 与 `forcing-nml`（`colm-cli` 已有同名子命令）、`sum_urban_precip` 示例删去；`oracle/cases/CN-Cng-phs`
+  （只靠手工跑的植物水力算例，没有测试或 CI 读它）删去。GUI 里没有调用方的 `study_params` 命令删去（`check-gui`：73 注册 / 73 调用）。
+- 保留并核实在用的：`bgc_replay` 示例与 `gen_bgc_trace.py`/`bgc_trace_cmp.py`（BGC 逐过程回放）、生成脚本（`gen_*`、`make_*`、
+  `bgc_port/`、`binary128/gen.f90`）、`extract_urban_*`（城市参数表的生成器）、`tier3_check`、`site-fill`、根目录的 `DESIGN.md`。
+
+验证：工作区与 GUI 两个 workspace 的 build、clippy、fmt；colm-core、colm-runtime、colm-forcing、oracle、xtask 单元测试，
+colm-cli 218 个（串行），GUI 后端 163 个，`check-gui`，CI 点名的 7 个 Python 检查全部通过。

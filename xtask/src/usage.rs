@@ -33,7 +33,7 @@ use anyhow::{bail, Context, Result};
 /// 从来没被任何内核预设打开过），现在也一样——`DEF_USE_LULCC` 不需要
 /// 任何宏。`CROP` 与 `LULC_USGS`/`LULC_IGBP` 不在这张表里，因为它们
 /// **仍然是**编译期宏（N_PFT/N_CFT、N_land_classification 这类
-/// `parameter` 数组尺寸不同，见 docs/plan-macro-runtime.md）——它们该有
+/// `parameter` 数组尺寸不同）——它们该有
 /// 的 `requires` 由下面的通用 `#ifdef` 扫描直接抓到，不需要目录级近似。
 const SUBSYSTEMS: &[(&str, &str)] = &[("main/DA/", "DataAssimilation"), ("CaMa/", "CaMa_Flood")];
 

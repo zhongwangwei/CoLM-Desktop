@@ -5,7 +5,7 @@
 
 ## 0. 运行时边界
 
-宏改造（`docs/plan-macro-runtime.md`）已把下列选择变成 namelist 开关：
+宏改造已把下列选择变成 namelist 开关：
 
 | 组 | 运行时开关 |
 |---|---|

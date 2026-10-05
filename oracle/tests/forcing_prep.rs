@@ -288,8 +288,7 @@ fn a_user_converted_forcing_actually_runs_and_its_choices_reach_the_model() {
     );
 
     // 判据 ③：转换产物的 Precip 总量该等于源文件 Rainf + Snowf 总量——
-    // 证明多源合成真的生效了，不是漏合了一个变量。容差与
-    // `crates/colm-forcing/examples/sum_urban_precip.rs` 一致：逐时刻相加
+    // 证明多源合成真的生效了，不是漏合了一个变量。容差的理由：逐时刻相加
     // 再求总和，与分别求和再相加，浮点非结合性会带来极小的差，不强求逐位。
     let fin = netcdf::open(&src_met).expect("重开源文件");
     let rainf: Vec<f64> = fin

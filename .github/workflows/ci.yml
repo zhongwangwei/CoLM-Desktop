@@ -19,6 +19,7 @@ jobs:
           python3 oracle/scripts/test_physics_audit.py
           python3 oracle/scripts/test_cama_finite.py
           python3 oracle/scripts/test_postprocess_startup.py
+          python3 oracle/scripts/test_gridriver_restart_sentinel.py
       # vendor/CoLM202X 是按**语义 hunk** 同步上游 `f48fbf9` 的：上游带进来的
       # 改动与桌面版自己的扩展（`#ifdef FLAT_SPMD` 传输分支、臭氧的空间映射与
       # 两个 namelist 开关）混在同一批文件里，整树覆盖会静默抹掉后者。这套

@@ -125,7 +125,7 @@ fn vegetation_snow_partition_matches_current_fortran() {
     let mut snow = input();
     snow.vegetation_snow = true;
     let fluxes = intercept_canopy(snow, &mut water).unwrap();
-    // 期望值来自解耦后的 Fortran（卸雪速率 = 积雪量 ×（FT+FV），`compare_interception.sh`
+    // 期望值来自解耦后的 Fortran（卸雪速率 = 积雪量 ×（FT+FV），模块级双侧差分
     // 4000/4000 逐位一致之后取的现值）。
     close(water.total_mm, 0.2574663462944894);
     close(water.rain_mm, 1.5103045038817653e-1);

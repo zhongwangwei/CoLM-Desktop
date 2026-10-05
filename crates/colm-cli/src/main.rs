@@ -176,8 +176,7 @@ usage:
                     [--name N] [--dlon degrees --dlat degrees] [--mode igbp|usgs|pft|pc]
                     # 创建不含 SITE_* 的空间算例；latlon 需要 dlon/dlat
   colm-cli forcing-convert <src.nc> <dst.nc> [--slot N=name:units[+extra] ...] [--height V,T,Q]
-                           # 与独立 bin forcing-convert 同样的行为，供 GUI 走
-                           # sidecar 调用；没给 --slot 的槽位走自动匹配
+                           # 供 GUI 走 sidecar 调用；没给 --slot 的槽位走自动匹配
   colm-cli forcing-gap-probe <src.nc> [--slot N=name:units[+extra] ...]
                            [--short-gap N] [--utc-offset HOURS] [--lat LAT --lon LON] [--json 1]
                            # 只诊断缺口与时区，不修改源文件
@@ -4999,11 +4998,11 @@ fn cmd_forcing_probe(file: &Path, json: bool) -> Result<()> {
     Ok(())
 }
 
-/// 与独立 bin `forcing-convert` 同样的行为：必需槽位自动补齐；只要用户给过
+/// 强迫场转换：必需槽位自动补齐；只要用户给过
 /// `--slot`，未选择的可选槽位就保持未使用。带缺测的变量拦在入口，再转换。
 /// **`--slot`/`--height` 的解析
-/// 调 `colm_forcing::parse_slot_spec`/`parse_heights`**——那份解析原来在
-/// `forcing-convert.rs` 里单独一份，抄第二遍意味着两处要同步改
+/// 调 `colm_forcing::parse_slot_spec`/`parse_heights`**——那份解析曾经在
+/// 独立的 `forcing-convert` 二进制里另有一份，抄第二遍意味着两处要同步改
 /// （`convert.rs` 的 `copy_attributes` 就是同一段代码抄三遍、错也有三份
 /// 的前车之鉴）。
 fn cmd_forcing_convert(

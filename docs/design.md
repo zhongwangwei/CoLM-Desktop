@@ -64,8 +64,7 @@ Rust 桌面程序，让不会编译 Fortran、不会写 namelist 的人也能跑
 ### 2.2 BGC 与 URBAN 在单点下互斥（历史结论，已被运行时重构取代）
 
 当前 Desktop 已把 PFT / PC / BGC / URBAN 改为运行时开关；城市过程不会改写
-`DEF_USE_LCT / DEF_USE_PFT / DEF_USE_PC` 的选择。现行约束见
-`docs/plan-macro-runtime.md`。下面的预设说明仅记录改造前的编译期基线。
+`DEF_USE_LCT / DEF_USE_PFT / DEF_USE_PC` 的选择。下面的预设说明仅记录改造前的编译期基线。
 
 当前 GUI 因此把次网格结构和城市过程作为两个独立选择，并由同一分类内核在运行时组合。
 
@@ -910,7 +909,7 @@ static redesign」—— 立即模式 GUI 做不出想要的排版。这是选 T
 | 入口 | `main.rs` 6 行，只调 `lib::run()`；`crate-type = ["staticlib","cdylib","rlib"]` | 同 |
 | 后端组织 | `lib.rs` 88 行只做模块枢纽与 `generate_handler!`，命令按职责分 13 个模块（最大 784 行），测试在 `lib_tests.rs`（3214 行） | 同 —— 与本仓库 `#[path = "*_tests.rs"]` 的惯例一致 |
 | 权限 | `capabilities/default.json`。**自定义 `#[tauri::command]` 不需要声明权限，只有插件命令需要** | 同 |
-| 重活 | GUI 进程**默认不链接 netcdf/hdf5**，重活一律 shell out 给 sidecar CLI。**但这条已放宽**：窗口进程可以直接读 NetCDF 的元信息与序列（实测代价 +4.1 MB 二进制、首次构建约 60 秒），条件是独立成 `nc.rs` 一层、只读、走专用串行工作线程、且可摘除。计算仍全部走 sidecar。见 `plan-gui2.md` §1.5b | 同 —— 我们的 sidecar 是 `kernels/*.x`，已由 `colm-kernel` 封装 |
+| 重活 | GUI 进程**默认不链接 netcdf/hdf5**，重活一律 shell out 给 sidecar CLI。**但这条已放宽**：窗口进程可以直接读 NetCDF 的元信息与序列（实测代价 +4.1 MB 二进制、首次构建约 60 秒），条件是独立成 `nc.rs` 一层、只读、走专用串行工作线程、且可摘除。计算仍全部走 sidecar。 | 同 —— 我们的 sidecar 是 `kernels/*.x`，已由 `colm-kernel` 封装 |
 | 打包 sidecar | `bundle.externalBin` + 一个 release-only 的 `tauri.bundle.conf.json` 覆盖层 + 暂存脚本 | 同，但暂存脚本用 Rust 写（xtask），不引入 Node |
 | 运行 sidecar | 先拷成带 `$PID-$SOURCE_HASH` 的临时副本再跑 | 同 —— §6.6 那条「先暂存到临时副本」就出自这里 |
 
@@ -1029,26 +1028,23 @@ Windows OV $200–300/年、EV $300–900/年，均需 FIPS 硬件令牌；按 C
 | 3 | `colm-srfdata`：缺失字段检测与合成、站点参数包抽取 | 能从裸 PLUMBER2 站点文件产出可运行的增广站点文件 |
 | 4 | `colm-forcing`：PLUMBER2 → POINT | 产出的强迫场使 CN-Cng 结果与里程碑 1 逐位一致 |
 | 5 | `colm-kernel`：清单握手 + 三段编排 + 成败三件套 | 失败注入测试全绿；配置错误必被判失败 |
-| **5b** | **让两张生成表说真话**（`plan-m5b.md`） | 单点算例的字段 100% 被 schema 认得；闸门表对黄金文件零漏报 |
-| 6 | `colm-hist`：时间轴、指标、QC 筛选（**已完成**；抽稀刻意未做，见 `plan-m6.md`） | 复现 §2.8 的 Rnet R²=0.986 —— **已复现**，且 §2.8b 三行一并复现 |
+| **5b** | **让两张生成表说真话** | 单点算例的字段 100% 被 schema 认得；闸门表对黄金文件零漏报 |
+| 6 | `colm-hist`：时间轴、指标、QC 筛选（**已完成**；抽稀刻意未做） | 复现 §2.8 的 Rnet R²=0.986 —— **已复现**，且 §2.8b 三行一并复现 |
 | 7 | `colm-cli` 打通，命令行端到端可用（**已完成**） | 一条命令从 PLUMBER2 文件到指标表 —— **已实现**；生成的算例另有 `oracle/tests/generated_case.rs` 钉住它与黄金文件逐位相同 |
 | 8 | GUI：三栏工作台 + 新建向导，单站点闭环（**已写完，部分验收**） | macOS + Linux 上双击可跑并出图。**实测进度**：macOS 上窗口开得出（`System Events` 报出标题 `CoLM Desktop`），且 webview 真的执行了页面 JS —— `backend_ready` 的 stderr 面包屑打出来了，这是从外面区分「白窗口」与「正常窗口」的唯一证据。页面渲染与交互另在 Chromium 里用**真后端导出的载荷**逐条走过：三栏骨架、算例库扫描、配置表 24 行、上游示例的未知字段警告、uPlot 画布 26838 个不透明像素、`tzDate` 在 `Asia/Shanghai` 下仍按 UTC 格式化、图表数上限 4。走这一遍时发现进度条建在一个**永远不会到达的输入**上 —— `run_stage` 用 `Command::output()`，`colm-cli run` 只打 39 行摘要且全在结束时到达，528 行 `TIMESTEP` 一条都到不了界面。修成 `run_stage_streaming` + `colm-cli run --stream` 之后，那条链也验过了：进度条 63%→81%→100%、进度文字读出真实模型日期、日志窗按 60000 上限截回 40000、结束文案报出真实的 34180/30802。打包路径此前从未跑过，于是又抓到两个缺陷：`beforeBuildCommand` 的相对路径写错（工作目录是 `gui/` 而非 `gui/src-tauri/`），以及 `resolve_cli` 去 `resource_dir()` 找 sidecar 而 Tauri 把它放在主二进制旁边（`Contents/MacOS/`）—— 后者被「仓库 target/ 产物」那条回落在开发机上永远兜住，要把它挪走才看得见。补好之后 `.app` 双击起窗，尺寸 1240×820 与配置一致；CI 新增 `gui` 作业，三平台构建 + macOS 打包并断言 sidecar 在位。**仍缺**：Linux 与 Windows 上的窗口 |
 | 9 | **Windows 原生构建打通** | MSYS2 内核 + MSVC GUI，Windows 上跑通 CN-Cng。**实测进度**：Fortran 内核已在 CI 的 windows-latest 上编出来（`.github/workflows/windows-kernel.yml`），三个 `.x` 齐全、manifest 记 `MINGW64_NT-10.0-26100-x86_64` / gfortran 16.2.0 / netCDF 4.9.3 / netcdf-fortran 4.6.3 / HDF5 2.2.0，`colm.x` 能加载并在缺 namelist 时正确停下。**尚未在 Windows 上跑通 CN-Cng**（要 PLUMBER2 数据），GUI 侧也未验 |
 | 10 | 三个物理预设全部打包 | 三个预设在三个平台上各自跑通。**实测进度**：三个都编得过，且都已在 macOS 上三段跑通。`bgc` 除 `nitrif` 外**还需 `ndep`**（§10 原先只记了前者，且 `ndep` 在 `#ifdef BGC` 内无关闭分支）。`urban` 在 `AU-Preston` 上跑通，代价是**它是唯一必须带真实全球栅格跑的预设** —— Part 3 有五个 `USE_SITE_urban_*` 却**没有 `USE_SITE_urban_type`**，加上 Urban-PLUMBER 站点文件的 25 个变量全是形态学量，一次真实运行的来源清单里有 30 项写着 `from CoLM 2024 raw data`。于是 `colm-cli new` 认出城市站点后把 `--rawdata`/`--runtime` 变成必填。站点文件这边只补一样：`ground_height` → `elevation`，免掉 7 GB 的 `elevation.nc`。另外城市栅格要摆两份，`<rawdata>/urban/` 与 `<runtime>/urban/` 由两处不同代码各拼各的路径 |
 | 11 | 批量 / 敏感性 / 算例管理 | 12 站批量 + 一个参数扫出汇总表。**实测进度**：批量运行与批量汇总已随里程碑 13 一起做完 —— `run_batch` 并发上限 2（**这个数没被测过**，注释里写明了），逐算例状态按事件 payload 的 `case` 字段分发；汇总表按变量切换、按列排序，没有观测的算例**记名**而不是悄悄少几行。**未做**：参数扫（sensitivity sweep） |
 | 12 | 打包分发（签名策略按 §9 决策） | 三平台安装包产出。**实测进度**：`.github/workflows/release.yml` 已就位 —— 打 `v*` tag，三个平台各自先编三个 Fortran 预设再打包 GUI，内核作为 `bundle.resources` 进安装包，汇总成 draft release。macOS 上本地跑通：`.app` 76 MB / `.dmg` 17 MB，其中 58 MB 是九个 Fortran 二进制；把仓库的 `kernels/` 与 `target/*/colm-cli` 都藏起来之后，程序仍自报 `3 preset(s) from .../Contents/Resources/kernels`，且三个 `colm.x` 的 sha256 与清单逐个相同。**尚未在 CI 上真跑过**（要推上去），Linux 与 Windows 两条也未验。**签名之后要重验 sha256** —— 签名改 Mach-O 字节，而清单认的正是字节 |
-| 13 | GUI 重构（`plan-gui2.md`，11 个任务） | 从 353 行单页做成能扫描、分类、批量运行、自动比对并出评估图的界面。**已全部完成**。落点：`xtask check-gui` 从「13 个命令 / 12 个被调用」到「22 / 21 / 4 个事件」，`gui/src-tauri` 31 个测试，`xtask` 新增 4 组静态检查（分类表、spin-up 命名、样式断点、import/export），黄金回归全程逐字节相同。九条设计决策见该文件 §1，其中三条是被数据推翻原方案后定的：482 个输出变量另立一页、枚举取值与宏依赖两张表的**扫描范围不同**、以及「藏起来不等于假装不存在」 |
+| 13 | GUI 重构（11 个任务） | 从 353 行单页做成能扫描、分类、批量运行、自动比对并出评估图的界面。**已全部完成**。落点：`xtask check-gui` 从「13 个命令 / 12 个被调用」到「22 / 21 / 4 个事件」，`gui/src-tauri` 31 个测试，`xtask` 新增 4 组静态检查（分类表、spin-up 命名、样式断点、import/export），黄金回归全程逐字节相同。九条设计决策中有三条是被数据推翻原方案后定的：482 个输出变量另立一页、枚举取值与宏依赖两张表的**扫描范围不同**、以及「藏起来不等于假装不存在」 |
 
 里程碑 1 排在最前，因为它是 C 阶段唯一的验收标准来源，且现在**已经有材料可做**。
 
-**5b 是本表写成之后才发现需要的，编号也因此与计划文件脱了节。** 为 GUI 做测量时
+**5b 是本表写成之后才发现需要的。** 为 GUI 做测量时
 发现两张表都不能用：`colm-schema` 认不得单点算例 43 个字段里的 13 个（`SITE_*` /
 `USE_SITE_*` 整段），同时给出 6 个用户设了也没用的字段；而「这个内核能产出哪些
 输出变量」在开跑前根本答不出来。GUI 照着这样的表渲染，只会把错误信息渲染得更
 漂亮，所以先修表。
-
-计划文件原先按写作顺序编号，那份计划一度叫 `plan-m6.md`；现已改名
-`plan-m5b.md`。**往后计划文件一律按本表编号**，写作顺序不再参与命名。
 
 **`colm-hist` 这个 crate 现在只做了一半**：5b 建的是闸门表（宏集合 → 可写变量集），
 里程碑 6 要加的时间轴、抽稀、指标与 QC 还没有。§4.2 的 crate 表已标出这个分界。

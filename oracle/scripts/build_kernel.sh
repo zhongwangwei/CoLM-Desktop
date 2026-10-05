@@ -48,7 +48,7 @@ SRC="$REPO_ROOT/vendor/CoLM202X"
 # main/LULCC/ and the PFT/PC subgrid modules are always compiled in, so
 # create_defineh.bash's 2nd argument only picks land *classification* now
 # (LULC_USGS/LULC_IGBP -- still a real compile-time choice, see that
-# script's header comment and docs/plan-macro-runtime.md for why), and the
+# script's header comment for why), and the
 # URBANON/OFF and BGCON/OFF argument slots are gone entirely.
 #
 # default/bgc/urban 编成同一份 IGBP 产物；bgc/urban 只为旧测试名保留别名。
@@ -188,7 +188,7 @@ is_effective() { printf '%s\n' "$EFFECTIVE" | grep -qxF "$1"; }
 # BGC（DEF_USE_BGC）都改成运行时开关了，main/BGC/、main/URBAN/、
 # main/LULCC/ 与 PFT/PC 次网格模块始终编进去，create_defineh.bash 的
 # 第 2 个参数现在只选地类分类（LULC_USGS/LULC_IGBP，仍是编译期选择，
-# 理由见 create_defineh.bash 的头注释与 docs/plan-macro-runtime.md）。
+# 理由见 create_defineh.bash 的头注释）。
 # URBAN_MODEL 现在随第 2 个参数（地类分类）无条件 #define，不再需要
 # 单独核对「有没有打开」。
 macro_for_arg() {

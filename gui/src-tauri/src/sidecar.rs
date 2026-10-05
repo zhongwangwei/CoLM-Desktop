@@ -1682,11 +1682,6 @@ pub async fn history_catalog(case: String) -> Result<String, String> {
     capture_async(vec!["history-catalog".to_string(), case]).await
 }
 
-#[tauri::command]
-pub async fn study_params() -> Result<String, String> {
-    capture_async(vec!["study-params".to_string()]).await
-}
-
 #[derive(Serialize)]
 pub struct StudyParameterContextRow {
     name: String,

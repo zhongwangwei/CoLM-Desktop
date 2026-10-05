@@ -103,7 +103,7 @@
 - **处理**：`vendor/` 已改（`:2084-2136`）：拒绝非有限与负厚度，总深为 0 时原样返回，
   循环条件改成 `resi > 0._r8`（`olp = min(resi, resj)` 必然耗尽 `resi` 或推进 `j`，精确 0 就是终点）。
   正深度的重映射结果不变。Rust `lake.rs::adjust_lake_layers` 同样处理。
-  验证见 `docs/audit-2026-09-08-physics.md` 与 `oracle/scripts/test_physics_audit.py:291-403`。
+  验证见 `oracle/scripts/test_physics_audit.py:291-403`。
   建议上游采纳同样的三处改动。
 
 ### 20. `UrbanTHERMAL` 更新 `fwsun` 之后仍用旧的 `fwsha` 求 `twall`
