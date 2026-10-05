@@ -2829,3 +2829,57 @@ fn pft_matrix_multi_cell_write_is_one_atomic_case_batch() {
         assert!(text.contains("DEF_PFT_VMAX25(15) = 65"));
     }
 }
+
+#[test]
+fn spatial_cases_hide_site_fields_and_lock_the_generated_grid() {
+    let text = "&nl_colm\n DEF_CASE_NAME = 'pr'\n DEF_USE_LCT = .true.\n/\n";
+    let mode = |states: &[FieldState], name: &str| {
+        states
+            .iter()
+            .find(|s| s.name == name)
+            .unwrap_or_else(|| panic!("{name} has no state"))
+            .mode
+    };
+    for (grid, macros) in [
+        ("catchment", ["CATCHMENT", "LULC_IGBP"]),
+        ("latlon", ["GRIDBASED", "LULC_IGBP"]),
+    ] {
+        let have: std::collections::BTreeSet<&str> = macros.into_iter().collect();
+        let states = field_states_for_at(text, &have, None).unwrap();
+        for site in [
+            "SITE_fsitedata",
+            "SITE_lon_location",
+            "USE_SITE_LAI",
+            "USE_SITE_ForcingReadAhead",
+        ] {
+            assert!(
+                matches!(mode(&states, site), FieldMode::Hidden),
+                "{grid}: {site}"
+            );
+        }
+        assert!(
+            matches!(mode(&states, "DEF_domain%edgew"), FieldMode::Disabled),
+            "{grid}"
+        );
+        let catchment = grid == "catchment";
+        assert_eq!(
+            matches!(mode(&states, "DEF_CatchmentMesh_data"), FieldMode::Disabled),
+            catchment,
+            "{grid}"
+        );
+        assert_eq!(
+            matches!(mode(&states, "DEF_file_mesh"), FieldMode::Hidden),
+            catchment,
+            "{grid}"
+        );
+        assert_eq!(
+            matches!(mode(&states, "DEF_GRIDBASED_lon_res"), FieldMode::Disabled),
+            !catchment,
+            "{grid}"
+        );
+        assert!(
+            matches!(mode(&states, "DEF_file_mesh_filter"), FieldMode::Editable),
+            "{grid}"
+        );
+    }
+}

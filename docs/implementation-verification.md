@@ -29878,3 +29878,17 @@ Fortran 内核没有对应的改动：它的 `acc1d` 是对整个数组的循环
 
 测试：`domain.mjs` 改成断言经纬度网格不再出现 mask、不填也能通过，并新增"流域 + 流域网格只要网格文件"；22 个模板生成后都能解析且
 `DEF_dir_forcing` 是所选目录；全部 `gui/tests`、`check-gui`（74/74）、GUI 后端 163 个测试、clippy、fmt 通过。
+
+## 第 578 轮：空间算例的基本设定逐页核对
+
+用 GUI 同一套字段状态（`field_states_batch`）列出流域网格（`tmp/pr-rust`）、经纬度网格（`tmp/gr-rust`）与站点（`tmp/st-rust`）
+三个算例在基本设定各页实际显示的字段，逐项判断：
+- **站点**：空间算例里 12 个 `SITE_*`/`USE_SITE_*` 全部可见（`USE_SITE_ForcingReadAhead` 也只在 POINT 强迫下生效，
+  `MOD_Forcing.F90:284`）。现在非 SinglePoint 一律隐藏；「站点信息」这一步上一轮已对空间算例不出现。
+- **网格与并行**：流域网格显示了它不读的 `DEF_file_mesh`，经纬度网格显示了 `DEF_CatchmentMesh_data`；建例时由向导生成/选定的
+  网格文件、分辨率与 `DEF_domain%*` 可以随手改，改了会与已生成的网格和地表数据对不上。现在按内核的网格类型显隐，这几项只读并
+  说明"要换请重新建算例"；分块、并行 IO 与 `DEF_file_mesh_filter`（三种网格都读，`MKSRFDATA.F90:217`）照常可改。
+- **地表数据、初始场、强迫场**：显示的都是空间算例有效的选项（区域聚合、`DEF_LANDONLY`、LAI 年份、强迫数据集设置等），不改。
+
+测试：新增 `spatial_cases_hide_site_fields_and_lock_the_generated_grid`（流域网格与经纬度网格两种宏集合）；GUI 后端 164 个、
+全部 `gui/tests`、`check-gui`、clippy、fmt 通过。

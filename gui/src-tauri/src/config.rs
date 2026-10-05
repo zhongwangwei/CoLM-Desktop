@@ -1590,6 +1590,10 @@ fn hidden(reason: &'static str) -> (FieldMode, Option<&'static str>, Vec<&'stati
     (FieldMode::Hidden, Some(reason), Vec::new())
 }
 
+fn disabled(reason: &'static str) -> (FieldMode, Option<&'static str>, Vec<&'static str>) {
+    (FieldMode::Disabled, Some(reason), Vec::new())
+}
+
 fn expert_tuning_runtime_state(
     name: &str,
     c: &VisibilityContext<'_>,
@@ -1693,6 +1697,42 @@ fn field_runtime_state(
 
     if name == "DEF_URBAN_geom_data" {
         return hidden("CoLM 当前只读取并广播此字段，没有任何计算路径使用它");
+    }
+
+    // 空间算例没有站点：`SITE_*`/`USE_SITE_*` 只在 SinglePoint 读（`USE_SITE_ForcingReadAhead` 也只在
+    // POINT 强迫下生效，`MOD_Forcing.F90:284`）。
+    if !c.single && (name.starts_with("SITE_") || name.starts_with("USE_SITE_")) {
+        return hidden("空间算例没有站点，站点字段不适用");
+    }
+    // 计算网格：只显示本内核网格类型用得到的字段；建例时由向导生成/选定的网格文件、分辨率与范围只读，
+    // 改了会与已生成的网格（和其上的地表数据）对不上。
+    if !c.single {
+        let catchment = c.have.contains("CATCHMENT");
+        let gridbased = c.have.contains("GRIDBASED");
+        if name == "DEF_CatchmentMesh_data" {
+            return if catchment {
+                disabled("由向导选择的流域网格文件决定；要换网格请重新建算例")
+            } else {
+                hidden("只有流域网格使用")
+            };
+        }
+        if name == "DEF_file_mesh" {
+            return if catchment {
+                hidden("流域网格使用 DEF_CatchmentMesh_data，不读这个字段")
+            } else {
+                disabled("由向导生成或选择的网格文件决定；要换网格请重新建算例")
+            };
+        }
+        if name == "DEF_GRIDBASED_lon_res" || name == "DEF_GRIDBASED_lat_res" {
+            return if gridbased {
+                disabled("网格已按建例时的分辨率生成；要换分辨率请重新建算例")
+            } else {
+                hidden("只有经纬度网格使用")
+            };
+        }
+        if name.starts_with("DEF_domain%") {
+            return disabled("模拟范围取自建例时的网格；要换范围请重新建算例");
+        }
     }
 
     // SinglePoint 在读写完单点 surface data 后直接返回；这些字段只服务于
