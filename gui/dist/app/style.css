@@ -164,6 +164,8 @@ details[open] > summary.flow-head::after { transform: rotate(90deg); }
 .btn-ghost:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
 .btn-ghost:disabled, .run-btn:disabled, .btn-next:disabled { opacity: .45; cursor: default; }
 .btn-stop { border-color: var(--fail); color: var(--fail); background: var(--fail-bg); }
+/* 没有「上一步」时也贴右边：底栏是 space-between，只剩一个按钮会落到左边。 */
+.foot .btn-next { margin-left: auto; }
 .btn-next { padding: 8px 18px; border: 0; border-radius: var(--r-sm);
             background: var(--accent); color: var(--accent-text); font-weight: 650; }
 .run-btn { padding: 8px 20px; border: 0; border-radius: var(--r-sm); background: var(--pass);

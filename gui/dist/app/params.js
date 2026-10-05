@@ -158,6 +158,43 @@ function searchText(item) {
   ].filter(Boolean).join(' '));
 }
 
+const RIVER_SWITCH = 'DEF_USE_GridRiverLakeFlow';
+
+/** 「是否开启河湖汇流」按钮组：写 `DEF_USE_GridRiverLakeFlow` 后重绘（关掉时本页其余字段由后端隐藏）。 */
+function riverSwitchControl(entry, dirs) {
+  const on = entry.unset ? true : /^\.?t/i.test(String(entry.value).trim());
+  const row = document.createElement('div');
+  row.className = 'pill-row river-switch';
+  row.style.marginBottom = '12px';
+  const label = document.createElement('span');
+  label.textContent = '河湖汇流';
+  const seg = document.createElement('div');
+  seg.className = 'seg';
+  seg.setAttribute('role', 'group');
+  seg.setAttribute('aria-label', '是否开启河湖汇流');
+  for (const [value, text] of [[true, '开启'], [false, '不开启']]) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.textContent = text;
+    b.className = value === on ? 'on' : '';
+    b.setAttribute('aria-pressed', String(value === on));
+    b.onclick = async () => {
+      if (value === on) return;
+      try {
+        const r = await invoke('set_field_batch', {
+          dirs, path: RIVER_SWITCH, value: value ? '.true.' : '.false.', kernelDir: $('kernel').value,
+        });
+        await markChanged(r, dirs);
+        status(value ? '已开启河湖汇流' : '已关闭河湖汇流');
+        await renderFields();
+      } catch (err) { status(err); }
+    };
+    seg.appendChild(b);
+  }
+  row.append(label, seg);
+  return row;
+}
+
 async function markChanged(result, dirs) {
   if (result.changed) await markResultsStale(dirs);
 }
@@ -618,17 +655,30 @@ export async function renderFields(externalStillCurrent = () => true) {
   for (const [page, process] of processes) {
     let rows = processShown.filter(e => page.sections.includes(sectionOf(e)))
       .sort((a, b) => (a.derived ? 1 : 0) - (b.derived ? 1 : 0));
+    // 河湖汇流总开关不进字段表：卡片顶部单独一组按钮，常规与专家模式都显示。
+    const riverSwitch = page.id === 'params-river'
+      ? rows.find(e => e.path === RIVER_SWITCH) : null;
+    if (riverSwitch) rows = rows.filter(e => e !== riverSwitch);
     if (page.id === 'params-eco') rows = collapseStomatal(rows);
     const commonField = e => e.derived || e.synthetic || !e.known
       || catalogVisibility(e.path) === 'editable-common' || HINTS[e.path];
     const common = rows.filter(commonField);
     const expert = rows.filter(e => !commonField(e));
-    if (!common.length && !expert.length) {
+    if (!common.length && !expert.length && !riverSwitch) {
       process.innerHTML = '<p class="muted empty-params">当前配置没有这一类可设置项。</p>';
       continue;
     }
     flows.add(page.id);
     renderProcessPicker(process, parameterCases);
+    if (riverSwitch) {
+      process.appendChild(riverSwitchControl(riverSwitch, processDirs));
+      if (!common.length && !expert.length) {
+        const off = document.createElement('p');
+        off.className = 'muted';
+        off.textContent = '河湖汇流已关闭：不计算河道、水库与漫滩，也不输出河道变量。';
+        process.appendChild(off);
+      }
+    }
     if (page.id === 'params-eco') {
       renderLandCoverContext(process, processFieldStates, processDirs);
     }
