@@ -538,8 +538,11 @@ if (state.step === 'result-tuning' || !ids.status.textContent.includes('空间�
   const source = await import('node:fs').then(fs =>
     fs.readFileSync(new URL('../dist/app/domain.js', import.meta.url), 'utf8'));
   if (/不选则不算河道/.test(source)) throw new Error('the river card no longer explains the unchecked state');
-  for (const key of ['watershed:', 'region:']) {
+  for (const key of ['watershed:', 'region:', 'unstructured:']) {
     if (!source.includes(key)) throw new Error(`the river card needs a ${key} note`);
   }
   if (!/n\.className = 'dnote'/.test(source)) throw new Error('river notes render as a card note');
 }
+if (!/picked\.grid === 'unstructured' \? 'unstructured' : picked\.domain/.test(
+  await import('node:fs').then(fs => fs.readFileSync(new URL('../dist/app/domain.js', import.meta.url), 'utf8')),
+)) throw new Error('unstructured meshes get their own routing note');

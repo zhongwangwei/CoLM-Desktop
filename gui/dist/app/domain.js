@@ -314,13 +314,16 @@ function renderCards(items, selected, choose, blocker = null, multi = false) {
   }
 }
 
-// 河网用的是 15′ 单元流域，与用户给的边界各自独立：按第 1 页的空间类型提醒一句。
+// 河网用的是 15′ 单元流域，与模拟范围各自独立：经纬度网格的范围来自第 1 页的流域边界或区域，
+// 非结构网格的范围来自它自己的 mesh 文件。全球范围不必提醒。
 const RIVER_NOTES = {
   watershed: '注意：Shapefile 的流域边界与河网的单元流域划分可能不一致，边界附近的单元流域只有一部分在模拟范围内，出口流量会偏小。',
   region: '注意：区域须包含所关心河流的全部上游子流域；区域外的上游不产流，下游流量会偏小。',
+  unstructured: '注意：非结构 mesh 的边界与河网的单元流域划分可能不一致，mesh 须包含所关心河流的全部上游子流域；mesh 外的上游与边界处只部分覆盖的单元流域都会少算产流，出口流量会偏小。',
 };
 function riverNote() {
-  return RIVER_NOTES[picked.domain] ?? null;
+  if (picked.domain === 'global') return null;
+  return RIVER_NOTES[picked.grid === 'unstructured' ? 'unstructured' : picked.domain] ?? null;
 }
 
 function card(item, selected, choose, blocked, multi) {
