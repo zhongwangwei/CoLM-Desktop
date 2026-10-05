@@ -121,6 +121,7 @@ dependencies = [
  "colm-core",
  "colm-forcing",
  "colm-namelist",
+ "colm-ncchar",
  "colm-srfdata",
  "netcdf",
 ]
@@ -148,6 +149,13 @@ name = "colm-namelist"
 version = "0.3.0-beta.2"
 dependencies = [
  "anyhow",
+]
+
+[[package]]
+name = "colm-ncchar"
+version = "0.3.0-beta.2"
+dependencies = [
+ "netcdf",
 ]
 
 [[package]]

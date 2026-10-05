@@ -1,0 +1,17 @@
+[package]
+name = "colm-ncchar"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+netcdf = { workspace = true, features = ["static"] }
+
+# 不继承工作区的 `unsafe_code = "forbid"`：netcdf crate 没有内置 NC_CHAR 的元素类型，它的文档
+# （`netcdf::types` 的 "Char type" 一节）要求使用方自己 `unsafe impl NcTypeDescriptor`。本 crate
+# 只放这一个实现；降为 deny，唯一的 `#[allow(unsafe_code)]` 就在那一行上。
+[lints.rust]
+unsafe_code = "deny"

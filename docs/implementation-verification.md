@@ -29153,7 +29153,7 @@ colm-init 单测 176 通过，clippy 无告警。
 - `colm-srfdata` 不依赖 `colm-init`，拿不到面积映射，所以区域文件由 **mkinidata-rs** 在写汇流冷启动前生成（上游在 mksrfdata）。
 - 汇流冷启动、运行期的网络、堤防、分汊、泥沙都改用 `unit_catchment_file`；冷启动与运行期的水库读入都做 `dam_seq` 换号。
 - 去掉 colm-rs 的拒绝，改为照上游拒绝"区域 + LULCC"（`MOD_Namelist.F90:1670-1679`）。
-- **与 Fortran 产物唯一的差别**：区域文件不写字符变量 `dam_DamName`。netcdf crate 写 `NC_CHAR` 需要 `unsafe impl NcTypeDescriptor`，而本仓库 `forbid(unsafe_code)`；上游与 Rust 的运行期都不读它。
+- **与 Fortran 产物唯一的差别**：区域文件不写字符变量 `dam_DamName`。netcdf crate 写 `NC_CHAR` 需要 `unsafe impl NcTypeDescriptor`，而本仓库 `forbid(unsafe_code)`；上游与 Rust 的运行期都不读它。（第 583 轮已补上，现在逐位一致。）
 
 **上游缺陷 48**：单进程 MPI 下 `unitcatchment_regional_build` 死锁，vendor 已修（见 upstream-bugs）。`kernels/latlon` 已重编。
 
@@ -29973,4 +29973,15 @@ unitcat 文件原来铺在整张全球 15′ 网格上（区域河网文件保�
 
 对照（用户算例的副本，2003-02-01 到 02-03，`--preprocessors fortran`）：两个引擎都得到 79 个河系、2175 个单元流域，全部与区域相交，
 范围 92.1–119.1°E、32.4–44.4°N（流经区域的河要算到入海口）；unitcat 维度 109×49；陆面 history 格心 96.375–104.125°E、
-37.875–43.125°N；`files ok 1124`。区域河网文件里 Fortran 多一个字符变量 `dam_DamName`（Rust 生成时不拷，模型不读）。
+37.875–43.125°N；`files ok 1124`。区域河网文件里 Fortran 多一个字符变量 `dam_DamName`（Rust 生成时不拷，模型不读）。（第 583 轮已补上。）
+
+## 第 583 轮：区域单元流域文件的 `dam_DamName` 按 `NC_CHAR` 原样拷贝
+
+第 547 轮起 Rust 生成的区域单元流域文件不写字符变量 `dam_DamName(dam_ndams, dam_namelen)`：netcdf crate 0.12.1 没有内置
+`NC_CHAR` 元素类型（文档要求使用方自己 `unsafe impl NcTypeDescriptor`；`put_string` 写的是 netCDF-4 的 `NC_STRING`，类型不同），
+而工作区 `unsafe_code = "forbid"`。按 `colm-lapack` 的先例新建 `crates/colm-ncchar`：只有一个 `#[repr(transparent)]` 包装 `i8`
+的 `NcChar` 和它的 `unsafe impl`，该 crate 的 lint 降为 deny，唯一的 `#[allow(unsafe_code)]` 就在那一行上。`subset_write` 的
+字符变量分支改为 `copy_typed::<NcChar>`，按选中的坝裁剪，属性一并拷贝。
+
+验证：`colm-ncchar` 的往返测试（写入、读回类型是 `NC_CHAR`、逐字节相同）；用户算例副本重跑 Rust，区域文件的 `dam_DamName`
+（47×256）与 Fortran 逐字节相同、属性相同，整例 `files ok 1125`（比第 582 轮多的一个就是这个变量）。

@@ -13,6 +13,7 @@ colm-case = { path = "../colm-case" }
 colm-core = { path = "../colm-core" }
 colm-forcing = { path = "../colm-forcing" }
 colm-namelist = { path = "../colm-namelist" }
+colm-ncchar = { path = "../colm-ncchar" }
 colm-srfdata = { path = "../colm-srfdata" }
 netcdf = { workspace = true, features = ["static"] }
 

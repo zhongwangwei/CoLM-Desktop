@@ -428,10 +428,11 @@ pub fn subset_write(
                 ensure!(!renumber, "index variable {name} must be integer");
                 copy_typed::<f64>(&variable, &mut out, &dims, &shape, axis, Ok)?;
             }
-            // 字符变量（如 `dam_DamName`）不写：netcdf crate 写 `NC_CHAR` 需要 `unsafe impl
-            // NcTypeDescriptor`，而本仓库 `forbid(unsafe_code)`；上游与 Rust 的运行期都不读它们。
-            // 这是与 Fortran 产物唯一的差别（第 547 轮）。
-            NcVariableType::Char => continue,
+            // 字符变量（如 `dam_DamName`）按 `NC_CHAR` 原样裁剪拷贝（`colm_ncchar::NcChar`）。
+            NcVariableType::Char => {
+                ensure!(!renumber, "index variable {name} must be integer");
+                copy_typed::<colm_ncchar::NcChar>(&variable, &mut out, &dims, &shape, axis, Ok)?;
+            }
             kind => bail!("variable {name} has an unsupported data type {kind:?}"),
         }
     }
