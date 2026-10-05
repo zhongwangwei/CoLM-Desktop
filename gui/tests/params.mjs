@@ -203,3 +203,5 @@ assert.match(params, /process\.appendChild\(riverSwitchControl\(riverSwitch, pro
 const css = await import('node:fs').then(fs =>
   fs.readFileSync(new URL('../dist/app/style.css', import.meta.url), 'utf8'));
 assert.match(css, /\.foot \.btn-next \{ margin-left: auto; \}/, 'the next-step button stays on the right');
+assert.match(params, /e\.path === 'DEF_USE_LULCC'\) \{\n\s+changes\.push\(\{ path: 'DEF_UnitCatchment_regional', value: '\.false\.' \}\);/,
+  'turning LULCC on switches the hidden regional unit-catchment option off');

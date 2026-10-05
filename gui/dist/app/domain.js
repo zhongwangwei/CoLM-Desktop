@@ -587,7 +587,7 @@ export function wizardFields(wizard = state.wizard) {
   ];
   // 区域单元流域汇流（`DEF_UnitCatchment_regional`）：只对落在区域内的河网汇流，2°×2° 的算例
   // 模拟阶段快约 6 倍、结果两侧逐位一致（第 567 轮）。上游要求 GridRiverLakeFlow（流域网格内核没有）
-  // 且不能与 LULCC 同开；全球范围裁剪了也是全球，保持关闭。之后仍可在参数页改。
+  // 且不能与 LULCC 同开；全球范围裁剪了也是全球，保持关闭。参数页不显示它，之后打开 LULCC 时自动关掉。
   if (wizard.spatial && wizard.grid !== 'catchment') {
     const global = wizard.spatial.domain?.kind === 'global';
     fields.push(['DEF_UnitCatchment_regional', !global && !p.lulcc, 'logical']);

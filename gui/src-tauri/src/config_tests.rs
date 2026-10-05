@@ -2918,6 +2918,10 @@ fn the_river_switch_hides_the_other_river_fields() {
         mode(&on, "DEF_Reservoir_Method"),
         FieldMode::Editable
     ));
+    assert!(matches!(
+        mode(&on, "DEF_UnitCatchment_regional"),
+        FieldMode::Hidden
+    ));
     let off = field_states_for_at(
         "&nl_colm\n DEF_USE_LCT = .true.\n DEF_USE_GridRiverLakeFlow = .false.\n/\n",
         &have,

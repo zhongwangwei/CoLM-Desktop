@@ -1707,6 +1707,11 @@ fn field_runtime_state(
         return hidden("河湖流已关闭");
     }
 
+    // 区域单元流域汇流只影响速度：建例时按范围与 LULCC 自动写入，打开 LULCC 时参数页自动关掉。
+    if name == "DEF_UnitCatchment_regional" {
+        return hidden("由软件按模拟范围与 LULCC 自动决定");
+    }
+
     if name == "DEF_URBAN_geom_data" {
         return hidden("CoLM 当前只读取并广播此字段，没有任何计算路径使用它");
     }

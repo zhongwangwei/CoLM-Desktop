@@ -1729,6 +1729,10 @@ function table(
             return;
           }
           const changes = [{ path: e.path, value: inp.value }];
+          // 区域单元流域汇流不能与 LULCC 同开（上游 CoLM_stop）；它不在参数页显示，打开 LULCC 时自动关掉。
+          if (enabled(inp.value) && e.path === 'DEF_USE_LULCC') {
+            changes.push({ path: 'DEF_UnitCatchment_regional', value: '.false.' });
+          }
           if (enabled(inp.value) && PATH_ON_ENABLE[e.path]) {
             const spec = PATH_ON_ENABLE[e.path];
             const picked = await pickParameterPath(spec.path, spec.kind);
