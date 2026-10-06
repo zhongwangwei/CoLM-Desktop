@@ -1952,7 +1952,14 @@ fn preflight_rust_model(case_nml: &Path, kernel: &Kernel, ranks: usize) -> Resul
     }
     let land_cover = rust_model_land_cover(kernel)?;
     let executable = rust_model_executable()?;
+    // 在算例目录里预检，与正式运行（`run_stage`）一致：算例里的相对路径（如甲烷参数文件
+    // `CH4:standard_ch4_parameter.nml`）都按算例目录解析，桌面端启动 colm-cli 的工作目录是 `/`。
+    let case_dir = case_nml
+        .parent()
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
     let output = std::process::Command::new(&executable)
+        .current_dir(case_dir)
         .arg(case_nml)
         .args(["--land-cover", land_cover, "--preflight"])
         .args(rust_model_crop_arguments(kernel))

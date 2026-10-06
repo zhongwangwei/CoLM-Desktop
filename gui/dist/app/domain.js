@@ -372,8 +372,15 @@ function chooseDomain(id) {
   render();
 }
 
+// 流域网格的侧向流与城市、LULCC、示踪物都没有移植（`colm-rs` 的 `check_catchment`）；它也没有格点河湖汇流。
+const CATCHMENT_UNSUPPORTED = ['urban', 'lulcc', 'tracer', 'river'];
+
 function chooseGrid(id) {
   picked.grid = id;
+  if (id === 'catchment') {
+    for (const flag of CATCHMENT_UNSUPPORTED) picked.physics[flag] = false;
+    picked.tracer = null;
+  }
   render();
 }
 
@@ -396,6 +403,10 @@ function chooseSoil(id) {
 
 function togglePhysics(id) {
   picked.physics[id] = !picked.physics[id];
+  if (id === 'urban' && picked.physics.urban) {
+    picked.physics.tracer = false;
+    picked.tracer = null;
+  }
   if (id === 'urban' && picked.domain === 'site' && picked.physics.urban) {
     picked.physics.bgc = false;
     picked.physics.crop = false;
@@ -433,6 +444,13 @@ function subgridBlock(item) {
 
 function physicsBlock(item) {
   if (item.ready === false) return null;
+  if (picked.grid === 'catchment' && ['urban', 'lulcc', 'tracer'].includes(item.id)) {
+    return {
+      need: '流域网格的侧向流暂不支持这一项',
+      cause: `第 ${pageNumber('grid')} 页选了流域网格`,
+      page: pageIndex('grid'),
+    };
+  }
   if (item.id === 'lulcc') {
     if (picked.subgrid === 'USGS') {
       return { need: 'LULCC 不支持 USGS 次网格', cause: `第 ${pageNumber('subgrid')} 页选了 USGS`, page: pageIndex('subgrid') };
@@ -469,8 +487,9 @@ function physicsBlock(item) {
     if (!kernelForSubgrid(picked.subgrid, { ...picked, crop: true })) return { need: '当前安装缺少 CROP-enabled 内核' };
   }
   if (item.id === 'tracer') {
-    if (picked.domain === 'site' && picked.physics.urban) {
-      return { need: '城市单点暂不支持甲烷示踪', cause: '本页已开启 URBAN' };
+    // 城市斑块没有示踪物账（建例时 `validate_runtime_contract` 与运行时装配都会拒绝），站点与空间都一样。
+    if (picked.physics.urban) {
+      return { need: '城市模式暂不支持甲烷示踪', cause: '本页已开启 URBAN' };
     }
     if (picked.subgrid !== 'PFT' && picked.subgrid !== 'PC') {
       return { need: '甲烷示踪需要 PFT 或 PC 次网格', cause: `第 ${pageNumber('subgrid')} 页选了 ${picked.subgrid}`, page: pageIndex('subgrid') };
@@ -648,7 +667,9 @@ export function wizardFields(wizard = state.wizard) {
   if (p.crop) fields.push(
     ['DEF_USE_LAIFEEDBACK', true, 'logical'],
     ['DEF_USE_IRRIGATION', false, 'logical'],
-    ['DEF_TUNING_CROP_PLANTING_DAY', '120'],
+    // 播种日覆盖只在 SinglePoint 生效（空间算例上游与 `colm-rs` 都会停）；空间算例写 0 = 读运行时数据。
+    // 字段本身保留：`sidecar.rs` 按它的存在识别作物算例。
+    ['DEF_TUNING_CROP_PLANTING_DAY', wizard.spatial ? '0' : '120'],
   );
   if (methane) fields.push(
     ['DEF_USE_Dynamic_Wetland', false, 'logical'],

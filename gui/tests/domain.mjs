@@ -565,3 +565,21 @@ if (!/picked\.grid === 'unstructured' \? 'unstructured' : picked\.domain/.test(
     throw new Error('the forcing list loads before the opened values are filled in');
   }
 }
+// 全链路排查（向导组合 × colm-rs 预检）发现的四类问题。
+{
+  const crop = (spatial) => Object.fromEntries(wizardFields({
+    ...state.wizard, subgrid: 'PFT', spatial,
+    physics: { ...state.wizard.physics, bgc: true, crop: true },
+  }).map(x => [x.path, x.value])).DEF_TUNING_CROP_PLANTING_DAY;
+  if (crop(null) !== '120') throw new Error('site crop cases keep the planting-day override');
+  if (crop({ domain: { kind: 'region' }, grid: { kind: 'latlon' } }) !== '0') {
+    throw new Error('spatial crop cases must not set a planting-day override (SinglePoint only)');
+  }
+  const src = await import('node:fs').then(fs => fs.readFileSync(new URL('../dist/app/domain.js', import.meta.url), 'utf8'));
+  if (!/picked\.grid === 'catchment' && \['urban', 'lulcc', 'tracer'\]\.includes\(item\.id\)/.test(src)) {
+    throw new Error('catchment meshes block urban, LULCC and tracers');
+  }
+  if (!/if \(picked\.physics\.urban\) \{\n\s+return \{ need: '城市模式暂不支持甲烷示踪'/.test(src)) {
+    throw new Error('urban blocks methane for every domain, not only sites');
+  }
+}

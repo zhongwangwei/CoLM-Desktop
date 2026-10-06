@@ -904,6 +904,8 @@ const ZH_EN = [
   ['完成全部预热轮次后才开始正式输出。', 'Production output starts only after all spin-up cycles finish.'],
   ['年', 'years'],
   ['网格与并行', 'Grid & parallelism'],
+  ['城市模式暂不支持甲烷示踪', 'Methane tracing is not supported with the urban model yet'],
+  ['流域网格的侧向流暂不支持这一项', 'Catchment lateral flow does not support this yet'],
   ['打开已有算例…', 'Open existing case…'],
   ['注意：非结构 mesh 的边界与河网的单元流域划分可能不一致，mesh 须包含所关心河流的全部上游子流域；mesh 外的上游与边界处只部分覆盖的单元流域都会少算产流，出口流量会偏小。', 'Note: the unstructured mesh boundary may not match the unit catchments of the river network, and the mesh must contain every upstream sub-catchment of the rivers you care about; upstream areas outside the mesh and catchments only partly covered at its edge lose runoff, so outlet discharge will be too low.'],
   ['格点河道、湖泊与水库汇流（15′ 单元流域河网）', 'Grid river, lake and reservoir routing (15′ unit-catchment network)'],
