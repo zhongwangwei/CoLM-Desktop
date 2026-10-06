@@ -30054,3 +30054,48 @@ unitcat 文件原来铺在整张全球 15′ 网格上（区域河网文件保�
 - `DEF_CheckEquilibrium` 只有 Fortran 引擎读，暂不处理。
 
 验证：GUI 后端测试 182 个全过（新增 9 个）、`colm-case` 测试、`gui/tests/*.mjs`、check-gui、两处 clippy `-D warnings`、fmt；parameter-audit 只变了 `DEF_Optimize_Baseflow` 一处分栏。
+
+## 第 587 轮：甲烷淹没方案按内核给选项；设定页在浏览器里接真后端实点
+
+**甲烷淹没方案**：`process_parameter_files` 多收一个 `kernel_dir`，给 `DEF_METHANE%inundation_mode` 附上当前算例可选的取值。规则与 `MethaneParameters::configure_inundation` 一致：
+- 动态湿地关时可选 `wetwat`/`satellite`，河湖开着再加 `routing`；
+- 动态湿地开时只能选 `dynamic_wtd`，河湖开着再加 `hybrid`。
+
+河湖开着指内核编进 GridRiverLakeFlow，且 `DEF_USE_GridRiverLakeFlow` 打开。批量编辑时只保留所有算例都能跑的选项。原来下拉固定只有 `wetwat`/`satellite`，动态湿地打开时两项都会被 `colm-rs` 拒绝。
+
+**平衡检查**：`DEF_CheckEquilibrium` 照常可改，并注明只有 Fortran 引擎读。
+
+**实点方法**：Tauri 窗口没法用浏览器工具驱动。我临时在 GUI crate 里加了一个 `#[ignore]` 测试，起一个本地 HTTP 服务：静态文件取 `gui/dist`，页面注入的 `window.__TAURI__` 把 `invoke` 转发给真实的命令函数。这些临时文件不入库，验证完已删除。
+
+用了三个算例副本（放在 scratchpad），逐页读出可见字段与状态：
+- 流域（`pr-rust`，PearlRiver 网格）；
+- 经纬度 + 河湖（`spatial-case9`，PFT）；
+- 站点（`st-rust`，草地）。
+
+实点结果：
+- 流域：
+  - 水热页没有产流方案和变饱和流，动态湖泊、动态湿地已出现；
+  - 河道页只剩邻接表、估算河深、水库方案；
+  - 基流优化隐藏。
+- 经纬度：
+  - 产流方案、基流优化都在；
+  - 河道页没有邻接表与 CaMa 字段；
+  - 漫滩回馈置灰并写明条件。本例用 PFT，不满足 LCT，置灰是对的。
+- 甲烷（经纬度算例，打开 CH4 后）：
+  - 下拉为 `wetwat/satellite/routing`；
+  - 打开动态湿地后为 `dynamic_wtd/hybrid`；
+  - 再关掉河湖只剩 `dynamic_wtd`。
+- 站点：动态湖泊、动态湿地按草地站点隐藏；基流优化保留（单点 Rust 已支持）。
+
+实点中新发现并修掉的：
+- 空间 PFT 算例进专家模式时，前端去读站点 PFT 组成，后端报"当前算例没有 SITE_fsitedata"，状态栏冒错误。PFT 矩阵现在跳过空间算例。
+- 漫滩回馈的变饱和流条件只看显式值。现改为与 `colm-rs` 同一判定：显式打开，或不用 Campbell（上游强制打开）。
+- 漫滩最大入渗率在回馈关闭时也显示，现隐藏。
+- 气孔导度下拉把 Ball–Berry 标成"CoLM 默认"。上游声明缺省是 `DEF_USE_WUEST = .true.`，实际缺省是 WUE，已改。
+- 设定页上一批可见字段没有中文名，显示成"Grid · River · 湖泊 · Flood · Feedback"这类拼接名。补上了河道、基流优化、历史输出、数据同化、示踪剂调参等字段的中英文名。
+
+没改：
+- 甲烷算例里动态湿地由向导接管（固定为关），水热页不显示。这是向导的既定设计。
+- `DEF_wetland_finundation_scheme` 只读显示 namelist 值，不随甲烷参数文件里的淹没方案变化。
+
+验证：GUI 后端测试 184 个全过、`gui/tests/*.mjs`、check-gui、clippy `-D warnings`、fmt、parameter-audit 无变化。

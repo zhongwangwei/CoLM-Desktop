@@ -248,7 +248,7 @@ pub fn export_parameter_overrides(
                 },
             ));
         }
-        for file in process_parameter_files(dir.clone())? {
+        for file in process_parameter_files_at(&dir)? {
             for entry in file.entries.into_iter().filter(|entry| {
                 !entry.unset
                     && !entry.default.as_deref().is_some_and(|default| {
@@ -1862,7 +1862,9 @@ fn field_runtime_state(
             && c.runoff == 0
             && c.lct
             && !c.urban
-            && logical(c.doc, "DEF_USE_VariablySaturatedFlow");
+            // 与 `colm-rs` 同一判定：选 van Genuchten（不用 Campbell）时上游强制打开变饱和流。
+            && (logical(c.doc, "DEF_USE_VariablySaturatedFlow")
+                || !logical(c.doc, "DEF_USE_Campbell_SOIL_MODEL"));
         if !ready {
             let reason =
                 "需要：开启漫滩曲线修正（FloodplainStorageFix）、TOPMODEL 产流（0）、LCT 次网格、\
@@ -1874,9 +1876,24 @@ fn field_runtime_state(
             };
         }
     }
+    // 漫滩入渗上限只在回馈里扣水时用（`debit_flood_feedback`）。
+    if name == "DEF_GridRiverLake_FloodInfiltMax"
+        && !logical(c.doc, "DEF_GridRiverLake_FloodFeedback")
+    {
+        return hidden("仅漫滩回馈陆面时使用");
+    }
     // 向量历史只有非结构网格内核才写（`MOD_Hist.F90:71-75`）；流域网格的向量历史 Rust 还没接。
     if name == "DEF_HISTORY_IN_VECTOR" && !c.have.contains("UNSTRUCTURED") {
         return hidden("只有非结构网格内核写向量历史");
+    }
+    // 平衡检查只在 Fortran 的 `MOD_CheckEquilibrium` 里做；Rust 引擎不读，打开也不会多出诊断输出。
+    // 默认关闭，开着也不影响结果，所以照常可改，只注明引擎。
+    if name == "DEF_CheckEquilibrium" {
+        return (
+            FieldMode::Editable,
+            Some("仅 Fortran 引擎生效；Rust 引擎不做平衡检查"),
+            Vec::new(),
+        );
     }
     // `DEF_SUBGRID_SCHEME` 读进来以后上游再没有任何地方用它；次网格由 DEF_USE_LCT/PFT/PC 决定。
     if name == "DEF_SUBGRID_SCHEME" {
@@ -2930,6 +2947,8 @@ pub struct ProcessParamEntry {
     pub group: String,
     pub unset: bool,
     pub doc: Option<String>,
+    /// 当前算例与内核下可选的取值；空表示由前端按字段的固定取值集合决定。
+    pub options: Vec<&'static str>,
 }
 
 type ProcessCodeDefault = colm_case::parameters::process::ProcessDefault;
@@ -3132,6 +3151,7 @@ fn process_entries(path: &std::path::Path, file_id: String) -> Result<ProcessPar
                     unset: false,
                     doc: code.and_then(|field| field.doc.clone()),
                     path,
+                    options: Vec::new(),
                 });
             }
             _ => {}
@@ -3150,6 +3170,7 @@ fn process_entries(path: &std::path::Path, file_id: String) -> Result<ProcessPar
                 group: field.group.into(),
                 unset: true,
                 doc: field.doc,
+                options: Vec::new(),
             });
         }
     }
@@ -3161,9 +3182,58 @@ fn process_entries(path: &std::path::Path, file_id: String) -> Result<ProcessPar
     })
 }
 
+/// 甲烷淹没方案在这个算例里能选哪些（`MethaneParameters::configure_inundation`）：动态湿地
+/// 打开时只有 `dynamic_wtd`/`hybrid`，关闭时只有 `wetwat`/`satellite`/`routing`；`routing` 与
+/// `hybrid` 还要内核编进网格河湖且河湖汇流打开。其它取值 `colm-rs` 在入口拒绝。
+fn methane_inundation_options(dynamic_wetland: bool, grid_river: bool) -> Vec<&'static str> {
+    match (dynamic_wetland, grid_river) {
+        (false, false) => vec!["wetwat", "satellite"],
+        (false, true) => vec!["wetwat", "satellite", "routing"],
+        (true, false) => vec!["dynamic_wtd"],
+        (true, true) => vec!["dynamic_wtd", "hybrid"],
+    }
+}
+
 #[tauri::command]
-pub fn process_parameter_files(dir: String) -> Result<Vec<ProcessParamFile>, String> {
-    let case_dir = std::path::Path::new(&dir);
+pub fn process_parameter_files(
+    dir: String,
+    kernel_dir: Option<String>,
+) -> Result<Vec<ProcessParamFile>, String> {
+    let mut files = process_parameter_files_at(&dir)?;
+    // 没给内核时无法判断是否编进网格河湖，按没有处理（只少给选项，不会给出跑不了的选项）。
+    let grid_river = match kernel_dir.filter(|dir| !dir.trim().is_empty()) {
+        Some(kernel_dir) => {
+            let kernel = colm_kernel::Kernel::open(std::path::Path::new(&kernel_dir))
+                .map_err(|e| format!("{e:#}"))?;
+            kernel
+                .manifest
+                .macros
+                .iter()
+                .any(|name| name == "GridRiverLakeFlow")
+        }
+        None => false,
+    };
+    let case_path = std::path::Path::new(&dir).join("case.nml");
+    let case_text =
+        std::fs::read_to_string(&case_path).map_err(|e| format!("{}: {e}", case_path.display()))?;
+    let case_doc = colm_namelist::parse(&case_text).map_err(|e| format!("{dir}: {e:#}"))?;
+    let options = methane_inundation_options(
+        logical(&case_doc, "DEF_USE_Dynamic_Wetland"),
+        grid_river && logical(&case_doc, "DEF_USE_GridRiverLakeFlow"),
+    );
+    for entry in files.iter_mut().flat_map(|file| file.entries.iter_mut()) {
+        if entry
+            .path
+            .eq_ignore_ascii_case("DEF_METHANE%inundation_mode")
+        {
+            entry.options = options.clone();
+        }
+    }
+    Ok(files)
+}
+
+fn process_parameter_files_at(dir: &str) -> Result<Vec<ProcessParamFile>, String> {
+    let case_dir = std::path::Path::new(dir);
     let case_text = std::fs::read_to_string(case_dir.join("case.nml"))
         .map_err(|e| format!("{}: {e}", case_dir.join("case.nml").display()))?;
     let case_doc = colm_namelist::parse(&case_text).map_err(|e| format!("{dir}: {e:#}"))?;

@@ -838,7 +838,7 @@ fn expert_process_parameters_are_read_from_case_local_files() {
         }],
     )
     .unwrap();
-    let files = process_parameter_files(dir.clone()).unwrap();
+    let files = process_parameter_files(dir.clone(), None).unwrap();
     let ch4 = files
         .iter()
         .find(|file| file.title == "standard_ch4_parameter.nml")
@@ -858,6 +858,8 @@ fn expert_process_parameters_are_read_from_case_local_files() {
         .expect("inundation mode");
     assert_eq!(mode.value, "'wetwat'");
     assert_eq!(mode.default.as_deref(), Some("'hybrid'"));
+    // 没给内核时不认为有网格河湖：只给不依赖河湖的选项。
+    assert_eq!(mode.options, ["wetwat", "satellite"]);
     let biome = ch4
         .entries
         .iter()
@@ -3044,6 +3046,19 @@ fn flood_feedback_is_offered_only_when_its_preconditions_hold() {
     let state = runtime_state(&states, "DEF_GridRiverLake_FloodFeedback");
     assert!(matches!(state.mode, FieldMode::Editable));
     assert_eq!(state.allowed_values, vec![".false."]);
+    let states = runtime_states(&ready, LATLON_KERNEL);
+    assert!(matches!(
+        mode(&states, "DEF_GridRiverLake_FloodInfiltMax"),
+        FieldMode::Hidden
+    ));
+    // 没显式打开变饱和流，但用 van Genuchten（缺省）时上游会强制打开：同样可选。
+    let implicit_vsf = "&nl_colm\n DEF_USE_LCT = .true.\n DEF_USE_VariablySaturatedFlow = .false.\n \
+                        DEF_GridRiverLake_FloodplainStorageFix = .true.\n DEF_Runoff_SCHEME = 0\n/\n";
+    let states = runtime_states(implicit_vsf, LATLON_KERNEL);
+    assert!(matches!(
+        mode(&states, "DEF_GridRiverLake_FloodFeedback"),
+        FieldMode::Editable
+    ));
     let states = runtime_states(&ready, CATCHMENT_KERNEL);
     assert!(matches!(
         mode(&states, "DEF_GridRiverLake_FloodFeedback"),
@@ -3165,4 +3180,35 @@ fn runtime_contract_rejects_catchment_only_gaps_and_bad_compression() {
             .unwrap();
     let err = super::validate_runtime_contract(&doc, &dir, None).unwrap_err();
     assert!(err.contains("DEF_HIST_CompressLevel"), "{err}");
+}
+
+#[test]
+fn methane_inundation_options_follow_dynamic_wetland_and_river_routing() {
+    assert_eq!(
+        super::methane_inundation_options(false, false),
+        ["wetwat", "satellite"]
+    );
+    assert_eq!(
+        super::methane_inundation_options(false, true),
+        ["wetwat", "satellite", "routing"]
+    );
+    assert_eq!(
+        super::methane_inundation_options(true, false),
+        ["dynamic_wtd"]
+    );
+    assert_eq!(
+        super::methane_inundation_options(true, true),
+        ["dynamic_wtd", "hybrid"]
+    );
+}
+
+#[test]
+fn check_equilibrium_stays_editable_with_an_engine_note() {
+    let text = "&nl_colm\n DEF_USE_LCT = .true.\n/\n";
+    let states = runtime_states(text, LATLON_KERNEL);
+    let state = runtime_state(&states, "DEF_CheckEquilibrium");
+    assert!(matches!(state.mode, FieldMode::Editable));
+    assert!(state
+        .reason
+        .is_some_and(|reason| reason.contains("Fortran")));
 }

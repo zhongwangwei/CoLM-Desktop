@@ -826,7 +826,7 @@ function processControl(entry) {
     s.value = /true|\.t\./i.test(entry.value) ? '.true.' : '.false.';
     return s;
   }
-  const options = fieldOptions(entry.path);
+  const options = entry.options?.length ? entry.options : fieldOptions(entry.path);
   if (options.length && entry.kind !== 'list' && entry.path !== 'DEF_METHANE%ch4_history_vars') {
     const s = document.createElement('select');
     s.className = 'select';
@@ -965,7 +965,8 @@ async function renderExpertProcessFiles(processes, flows, stillCurrent = () => t
   if (!dirs.length) return;
   let files = [];
   try {
-    const lists = await Promise.all(dirs.map(dir => invoke('process_parameter_files', { dir })));
+    const kernelDir = $('kernel').value || null;
+    const lists = await Promise.all(dirs.map(dir => invoke('process_parameter_files', { dir, kernelDir })));
     if (!stillCurrent()) return;
     files = commonProcessFiles(lists);
   } catch (e) {
@@ -993,7 +994,16 @@ function commonProcessFiles(lists) {
     const entries = file.entries.filter(entry => tail.every(list => {
       const peer = list.find(other => other.file === file.file);
       return peer?.entries.some(other => other.path === entry.path);
-    }));
+    })).map(entry => {
+      // 后端按每个算例给出的可选取值：批量编辑时只留所有算例都能跑的。
+      if (!entry.options?.length) return entry;
+      const options = tail.reduce((kept, list) => {
+        const peer = list.find(other => other.file === file.file)
+          ?.entries.find(other => other.path === entry.path);
+        return peer?.options?.length ? kept.filter(value => peer.options.includes(value)) : kept;
+      }, entry.options);
+      return { ...entry, options };
+    });
     return entries.length ? { ...file, entries } : null;
   }).filter(Boolean);
 }
@@ -1349,8 +1359,10 @@ async function renderPftParameters(processes, flows, stillCurrent = () => true) 
   const [, target] = eco;
   const allCases = expertCases();
   if (!allCases.length) return;
-  const selectedCases = state.expertCaseDir === EXPERT_ALL && allCases.length > 1
-    ? allCases : [expertCase()].filter(Boolean);
+  // PFT 矩阵按站点文件里的 PFT 组成列出；空间算例没有 SITE_fsitedata，`site_pfts` 只会报错。
+  const selectedCases = (state.expertCaseDir === EXPERT_ALL && allCases.length > 1
+    ? allCases : [expertCase()].filter(Boolean)).filter(siteCase => siteCase.spatial !== true);
+  if (!selectedCases.length) return;
   let usable;
   try {
     usable = await pftSites(selectedCases);
