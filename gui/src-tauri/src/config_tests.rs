@@ -499,6 +499,7 @@ fn compile_time_classification_and_crop_constraints_use_kernel_facts() {
             single: false,
             usgs: true,
             crop: false,
+            catchment: false,
         }),
     )
     .unwrap_err();
@@ -512,6 +513,7 @@ fn compile_time_classification_and_crop_constraints_use_kernel_facts() {
             single: false,
             usgs: false,
             crop: true,
+            catchment: false,
         }),
     )
     .unwrap_err();
@@ -530,6 +532,7 @@ fn crop_management_runtime_files_are_checked_before_write() {
         single: true,
         usgs: false,
         crop: true,
+        catchment: false,
     });
     let doc = |fields: &str| {
         colm_namelist::parse(&format!(
@@ -2841,8 +2844,8 @@ fn spatial_cases_hide_site_fields_and_lock_the_generated_grid() {
             .mode
     };
     for (grid, macros) in [
-        ("catchment", ["CATCHMENT", "LULC_IGBP"]),
-        ("latlon", ["GRIDBASED", "LULC_IGBP"]),
+        ("catchment", ["CATCHMENT", "CatchLateralFlow", "LULC_IGBP"]),
+        ("latlon", ["GRIDBASED", "GridRiverLakeFlow", "LULC_IGBP"]),
     ] {
         let have: std::collections::BTreeSet<&str> = macros.into_iter().collect();
         let states = field_states_for_at(text, &have, None).unwrap();
@@ -2940,11 +2943,226 @@ fn the_river_switch_hides_the_other_river_fields() {
         assert!(matches!(mode(&off, name), FieldMode::Hidden), "{name}");
     }
     let catchment: std::collections::BTreeSet<&str> =
-        ["CATCHMENT", "LULC_IGBP"].into_iter().collect();
+        ["CATCHMENT", "CatchLateralFlow", "LULC_IGBP"]
+            .into_iter()
+            .collect();
     let states =
         field_states_for_at("&nl_colm\n DEF_USE_LCT = .true.\n/\n", &catchment, None).unwrap();
     assert!(matches!(
         mode(&states, "DEF_USE_GridRiverLakeFlow"),
         FieldMode::Hidden
     ));
+}
+
+const CATCHMENT_KERNEL: &[&str] = &["CATCHMENT", "CatchLateralFlow", "LULC_IGBP", "URBAN_MODEL"];
+const LATLON_KERNEL: &[&str] = &["GRIDBASED", "GridRiverLakeFlow", "LULC_IGBP", "URBAN_MODEL"];
+const UNSTRUCTURED_KERNEL: &[&str] = &[
+    "UNSTRUCTURED",
+    "GridRiverLakeFlow",
+    "LULC_IGBP",
+    "URBAN_MODEL",
+];
+
+#[test]
+fn river_page_shows_only_the_fields_each_routing_reads() {
+    let text = "&nl_colm\n DEF_USE_LCT = .true.\n/\n";
+    let catchment = runtime_states(text, CATCHMENT_KERNEL);
+    for name in [
+        "DEF_ElementNeighbour_file",
+        "DEF_USE_EstimatedRiverDepth",
+        "DEF_Reservoir_Method",
+    ] {
+        assert!(
+            !matches!(mode(&catchment, name), FieldMode::Hidden),
+            "{name}"
+        );
+    }
+    for name in [
+        "DEF_UnitCatchment_file",
+        "DEF_USE_LEVEE",
+        "DEF_CaMa_FloodFeedback",
+    ] {
+        assert!(
+            matches!(mode(&catchment, name), FieldMode::Hidden),
+            "{name}"
+        );
+    }
+    let latlon = runtime_states(text, LATLON_KERNEL);
+    for name in ["DEF_ElementNeighbour_file", "DEF_CaMa_FloodFeedback"] {
+        assert!(matches!(mode(&latlon, name), FieldMode::Hidden), "{name}");
+    }
+    assert!(matches!(
+        mode(&latlon, "DEF_Reservoir_Method"),
+        FieldMode::Editable
+    ));
+}
+
+#[test]
+fn catchment_lateral_flow_hides_the_runoff_schemes() {
+    let text = "&nl_colm\n DEF_USE_LCT = .true.\n/\n";
+    let catchment = runtime_states(text, CATCHMENT_KERNEL);
+    let latlon = runtime_states(text, LATLON_KERNEL);
+    for name in [
+        "DEF_Runoff_SCHEME",
+        "DEF_TOPMOD_method",
+        "DEF_TUNING_TOPMOD_DECAY",
+        "DEF_USE_VariablySaturatedFlow",
+    ] {
+        assert!(
+            matches!(mode(&catchment, name), FieldMode::Hidden),
+            "{name}"
+        );
+    }
+    // 经纬度网格的变饱和流由 van Genuchten 缺省另行隐藏，这里只对照产流方案。
+    assert!(!matches!(
+        mode(&latlon, "DEF_Runoff_SCHEME"),
+        FieldMode::Hidden
+    ));
+}
+
+#[test]
+fn flood_feedback_is_offered_only_when_its_preconditions_hold() {
+    let base = "&nl_colm\n DEF_USE_LCT = .true.\n DEF_USE_VariablySaturatedFlow = .true.\n";
+    let ready = format!(
+        "{base} DEF_GridRiverLake_FloodplainStorageFix = .true.\n DEF_Runoff_SCHEME = 0\n/\n"
+    );
+    let states = runtime_states(&ready, LATLON_KERNEL);
+    assert!(matches!(
+        mode(&states, "DEF_GridRiverLake_FloodFeedback"),
+        FieldMode::Editable
+    ));
+    let missing_fix = format!("{base} DEF_Runoff_SCHEME = 0\n/\n");
+    let states = runtime_states(&missing_fix, LATLON_KERNEL);
+    assert!(matches!(
+        mode(&states, "DEF_GridRiverLake_FloodFeedback"),
+        FieldMode::Disabled
+    ));
+    // 已经打开但条件不满足：仍显示，只允许关掉。
+    let stale =
+        format!("{base} DEF_GridRiverLake_FloodFeedback = .true.\n DEF_Runoff_SCHEME = 1\n/\n");
+    let states = runtime_states(&stale, LATLON_KERNEL);
+    let state = runtime_state(&states, "DEF_GridRiverLake_FloodFeedback");
+    assert!(matches!(state.mode, FieldMode::Editable));
+    assert_eq!(state.allowed_values, vec![".false."]);
+    let states = runtime_states(&ready, CATCHMENT_KERNEL);
+    assert!(matches!(
+        mode(&states, "DEF_GridRiverLake_FloodFeedback"),
+        FieldMode::Hidden
+    ));
+}
+
+#[test]
+fn vector_history_is_offered_only_on_unstructured_kernels() {
+    let text = "&nl_colm\n DEF_USE_LCT = .true.\n/\n";
+    assert!(!matches!(
+        mode(
+            &runtime_states(text, UNSTRUCTURED_KERNEL),
+            "DEF_HISTORY_IN_VECTOR"
+        ),
+        FieldMode::Hidden
+    ));
+    for kernel in [LATLON_KERNEL, CATCHMENT_KERNEL] {
+        assert!(matches!(
+            mode(&runtime_states(text, kernel), "DEF_HISTORY_IN_VECTOR"),
+            FieldMode::Hidden
+        ));
+    }
+}
+
+#[test]
+fn spatial_dynamic_water_bodies_do_not_depend_on_a_site_landtype() {
+    let text = "&nl_colm\n DEF_USE_LCT = .true.\n/\n";
+    let states = runtime_states(text, LATLON_KERNEL);
+    for name in [
+        "DEF_USE_Dynamic_Lake",
+        "DEF_USE_Dynamic_Wetland",
+        "DEF_TUNING_WETWATMAX",
+    ] {
+        assert!(!matches!(mode(&states, name), FieldMode::Hidden), "{name}");
+    }
+}
+
+#[test]
+fn forced_lai_switches_can_only_be_restored() {
+    let lulcc = "&nl_colm\n DEF_USE_LCT = .true.\n DEF_USE_LULCC = .true.\n DEF_LAI_CHANGE_YEARLY = .false.\n/\n";
+    let states = runtime_states(lulcc, LATLON_KERNEL);
+    let state = runtime_state(&states, "DEF_LAI_CHANGE_YEARLY");
+    assert!(matches!(state.mode, FieldMode::Editable));
+    assert_eq!(state.allowed_values, vec![".true."]);
+    assert!(matches!(
+        mode(&states, "DEF_LAI_MONTHLY"),
+        FieldMode::Hidden
+    ));
+
+    let pft = "&nl_colm\n DEF_USE_PFT = .true.\n DEF_LAI_MONTHLY = .false.\n/\n";
+    let states = runtime_states(pft, LATLON_KERNEL);
+    let state = runtime_state(&states, "DEF_LAI_MONTHLY");
+    assert!(matches!(state.mode, FieldMode::Editable));
+    assert_eq!(state.allowed_values, vec![".true."]);
+}
+
+#[test]
+fn rust_unported_history_switches_hide_until_changed() {
+    let text = "&nl_colm\n DEF_USE_LCT = .true.\n/\n";
+    let states = runtime_states(text, LATLON_KERNEL);
+    for name in [
+        "DEF_Output_2mWMO",
+        "DEF_URBAN_ONLY",
+        "DEF_HIST_mode",
+        "DEF_HIST_WriteBack",
+        "DEF_HIST_grid_as_model_mesh",
+        "DEF_SUBGRID_SCHEME",
+    ] {
+        assert!(matches!(mode(&states, name), FieldMode::Hidden), "{name}");
+    }
+    let changed = "&nl_colm\n DEF_USE_LCT = .true.\n DEF_Output_2mWMO = .true.\n DEF_HIST_mode = 'block'\n/\n";
+    let states = runtime_states(changed, LATLON_KERNEL);
+    for name in ["DEF_Output_2mWMO", "DEF_HIST_mode"] {
+        let state = runtime_state(&states, name);
+        assert!(matches!(state.mode, FieldMode::Editable), "{name}");
+        assert!(state.reason.is_some(), "{name}");
+    }
+}
+
+#[test]
+fn baseflow_optimisation_is_not_tied_to_data_assimilation() {
+    let text = "&nl_colm\n DEF_USE_LCT = .true.\n/\n";
+    assert!(!matches!(
+        mode(
+            &runtime_states(text, LATLON_KERNEL),
+            "DEF_Optimize_Baseflow"
+        ),
+        FieldMode::Hidden
+    ));
+    assert!(matches!(
+        mode(
+            &runtime_states(text, CATCHMENT_KERNEL),
+            "DEF_Optimize_Baseflow"
+        ),
+        FieldMode::Hidden
+    ));
+}
+
+#[test]
+fn runtime_contract_rejects_catchment_only_gaps_and_bad_compression() {
+    let dir = std::env::temp_dir();
+    let facts = Some(super::KernelFacts {
+        single: false,
+        usgs: false,
+        crop: false,
+        catchment: true,
+    });
+    for field in ["DEF_URBAN_RUN", "DEF_USE_LULCC", "DEF_USE_TRACER"] {
+        let doc = colm_namelist::parse(&format!(
+            "&nl_colm\n DEF_USE_LCT = .true.\n DEF_URBAN_type_scheme = 2\n {field} = .true.\n/\n"
+        ))
+        .unwrap();
+        let err = super::validate_runtime_contract(&doc, &dir, facts).unwrap_err();
+        assert!(err.contains("流域网格") && err.contains(field), "{err}");
+    }
+    let doc =
+        colm_namelist::parse("&nl_colm\n DEF_USE_LCT = .true.\n DEF_HIST_CompressLevel = 12\n/\n")
+            .unwrap();
+    let err = super::validate_runtime_contract(&doc, &dir, None).unwrap_err();
+    assert!(err.contains("DEF_HIST_CompressLevel"), "{err}");
 }

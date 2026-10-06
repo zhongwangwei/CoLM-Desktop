@@ -1274,6 +1274,7 @@ struct KernelFacts {
     single: bool,
     usgs: bool,
     crop: bool,
+    catchment: bool,
 }
 
 fn kernel_facts(kernel_dir: Option<&str>) -> Result<Option<KernelFacts>, String> {
@@ -1287,6 +1288,7 @@ fn kernel_facts(kernel_dir: Option<&str>) -> Result<Option<KernelFacts>, String>
         single: has("SinglePoint"),
         usgs: has("LULC_USGS"),
         crop: has("CROP"),
+        catchment: has("CATCHMENT"),
     }))
 }
 
@@ -1302,6 +1304,17 @@ fn validate_runtime_contract(
             .filter(|field| is_expert_tuning_name(field.name))
             .map(|field| field.name.to_string()),
     )?;
+    // netCDF deflate 只认 0..=9；Rust 引擎把越界值当错误（`u8::try_from` 之后交给 netCDF），
+    // 在这里先拦住，免得跑完预热才在写文件时失败。
+    for name in [
+        "DEF_HIST_CompressLevel",
+        "DEF_REST_CompressLevel",
+        "DEF_Srfdata_CompressLevel",
+    ] {
+        if !(0..=9).contains(&integer(doc, name)) {
+            return Err(format!("{name} 必须在 0 到 9 之间"));
+        }
+    }
     let timestep = real(doc, "DEF_simulation_time%timestep");
     if !timestep.is_finite() || timestep <= 0.0 || timestep > 3600.0 {
         return Err("DEF_simulation_time%timestep 必须是大于 0 且不超过 3600 秒的有限数值".into());
@@ -1395,6 +1408,21 @@ fn validate_runtime_contract(
         ] {
             if integer(doc, name) < 0 {
                 return Err(format!("{name} 必须为非负整数"));
+            }
+        }
+    }
+    // 流域网格的侧向流（`check_catchment`）还没接城市、LULCC、示踪剂；向导已挡住，这里再拦一次
+    // 手改 namelist 的情况，免得要等到预检才报英文错误。
+    if kernel.is_some_and(|facts| facts.catchment) {
+        for (field, what) in [
+            ("DEF_URBAN_RUN", "城市模型"),
+            ("DEF_USE_LULCC", "LULCC"),
+            ("DEF_USE_TRACER", "示踪剂"),
+        ] {
+            if logical(doc, field) {
+                return Err(format!(
+                    "流域网格当前不支持{what}（{field}），请关闭后再运行"
+                ));
             }
         }
     }
@@ -1594,6 +1622,33 @@ fn disabled(reason: &'static str) -> (FieldMode, Option<&'static str>, Vec<&'sta
     (FieldMode::Disabled, Some(reason), Vec::new())
 }
 
+/// Rust 引擎还没移植、只有 Fortran 引擎认的开关：保持缺省时隐藏；已经被改过（手改 namelist
+/// 或旧算例）时照常显示并带上原因，让用户看得见、改得回来，而不是把生效的配置藏起来。
+fn rust_unported(
+    changed: bool,
+    reason: &'static str,
+) -> (FieldMode, Option<&'static str>, Vec<&'static str>) {
+    if changed {
+        (FieldMode::Editable, Some(reason), Vec::new())
+    } else {
+        hidden(reason)
+    }
+}
+
+/// 上游 `MOD_Namelist` 会强制改成 `.true.` 的开关（Rust 不替 namelist 改，而是直接拒绝）：
+/// 已是 `.true.` 时隐藏；被设成 `.false.` 时显示并只允许改回 `.true.`。
+fn forced_true(
+    c: &VisibilityContext<'_>,
+    name: &str,
+    reason: &'static str,
+) -> (FieldMode, Option<&'static str>, Vec<&'static str>) {
+    if logical(c.doc, name) {
+        hidden(reason)
+    } else {
+        (FieldMode::Editable, Some(reason), vec![".true."])
+    }
+}
+
 fn expert_tuning_runtime_state(
     name: &str,
     c: &VisibilityContext<'_>,
@@ -1619,7 +1674,8 @@ fn expert_tuning_runtime_state(
     {
         return Some(hidden("仅植被或城市地表使用"));
     }
-    if name == "DEF_TUNING_WETWATMAX" && !(c.wetland() || c.dynamic_wetland) {
+    // 区域里总可能有湿地 patch；只有单点才能按站点地表类型判断。
+    if name == "DEF_TUNING_WETWATMAX" && c.single && !(c.wetland() || c.dynamic_wetland) {
         return Some(hidden("仅湿地或动态湿地过程使用"));
     }
     if matches!(
@@ -1686,6 +1742,20 @@ fn field_runtime_state(
 ) -> (FieldMode, Option<&'static str>, Vec<&'static str>) {
     let name = field.name;
     let one_of = |names: &[&str]| names.contains(&name);
+
+    // 流域侧向流自己算地表/地下径流（`MOD_SoilSnowHydrology.F90` 的 `#ifndef CatchLateralFlow`
+    // 整段跳过产流方案），且 `MOD_Namelist` 把变饱和流强制打开。
+    if c.have.contains("CatchLateralFlow")
+        && one_of(&[
+            "DEF_Runoff_SCHEME",
+            "DEF_TOPMOD_method",
+            "DEF_VIC_OPT",
+            "DEF_TUNING_TOPMOD_DECAY",
+            "DEF_USE_VariablySaturatedFlow",
+        ])
+    {
+        return hidden("流域侧向流自行计算产流，并自动开启变饱和流");
+    }
 
     if let Some(state) = expert_tuning_runtime_state(name, c) {
         return state;
@@ -1761,6 +1831,83 @@ fn field_runtime_state(
             "DEF_nIO_eq_nBlock",
         ]) {
             return hidden("分块与 MPI IO 分组用缺省值即可，Rust 引擎在进程内多线程运行");
+        }
+    }
+
+    // 河道与水库：三套汇流各读各的字段。流域侧向流只读邻接表、估算河深与水库方案
+    // （`MOD_Catch_*`）；网格河湖不读邻接表，CaMa 字段只有编进 CaMa_Flood 才有意义。
+    if field_section(name, field.group) == Some("河道与水库") {
+        if c.have.contains("CATCHMENT") {
+            if !one_of(&[
+                "DEF_ElementNeighbour_file",
+                "DEF_USE_EstimatedRiverDepth",
+                "DEF_Reservoir_Method",
+            ]) {
+                return hidden("流域网格的侧向流不读这个字段");
+            }
+        } else if name == "DEF_ElementNeighbour_file" {
+            return hidden("只有流域网格使用");
+        } else if name.starts_with("DEF_CaMa_") && !c.have.contains("CaMa_Flood") {
+            return hidden("当前内核未编入 CaMa-Flood");
+        }
+    }
+    // 漫滩回馈：上游要求修正漫滩曲线、不与 LULCC 同开、产流方案为 0；Rust 只移植了
+    // LCT + 变饱和流且无城市的路径（`colm-rs` 入口逐条拒绝）。
+    if name == "DEF_GridRiverLake_FloodFeedback" {
+        if !c.have.contains("GridRiverLakeFlow") {
+            return hidden("当前内核未编入网格河湖汇流");
+        }
+        let ready = logical(c.doc, "DEF_GridRiverLake_FloodplainStorageFix")
+            && !c.lulcc
+            && c.runoff == 0
+            && c.lct
+            && !c.urban
+            && logical(c.doc, "DEF_USE_VariablySaturatedFlow");
+        if !ready {
+            let reason =
+                "需要：开启漫滩曲线修正（FloodplainStorageFix）、TOPMODEL 产流（0）、LCT 次网格、\
+                          变饱和流，且不开 LULCC 与城市";
+            return if logical(c.doc, name) {
+                (FieldMode::Editable, Some(reason), vec![".false."])
+            } else {
+                disabled(reason)
+            };
+        }
+    }
+    // 向量历史只有非结构网格内核才写（`MOD_Hist.F90:71-75`）；流域网格的向量历史 Rust 还没接。
+    if name == "DEF_HISTORY_IN_VECTOR" && !c.have.contains("UNSTRUCTURED") {
+        return hidden("只有非结构网格内核写向量历史");
+    }
+    // `DEF_SUBGRID_SCHEME` 读进来以后上游再没有任何地方用它；次网格由 DEF_USE_LCT/PFT/PC 决定。
+    if name == "DEF_SUBGRID_SCHEME" {
+        return hidden("CoLM 读入后不使用此字段；次网格由 LCT/PFT/PC 开关决定");
+    }
+    if !c.single {
+        // Rust 网格历史假定每个 patch 都不被屏蔽（`spatial/history.rs`），2m WMO 虚拟 patch 与
+        // 只输出城市都会让它在入口停机。
+        if one_of(&["DEF_Output_2mWMO", "DEF_URBAN_ONLY"]) {
+            return rust_unported(
+                logical(c.doc, name),
+                "Rust 引擎尚未移植（网格历史假定 patch 不被屏蔽），仅 Fortran 引擎生效",
+            );
+        }
+        if name == "DEF_HIST_mode" {
+            return rust_unported(
+                !character(c.doc, name).trim().eq_ignore_ascii_case("one"),
+                "Rust 引擎只写单文件（'one'）历史，'block' 仅 Fortran 引擎生效",
+            );
+        }
+        if one_of(&["DEF_HIST_WriteBack", "DEF_HIST_grid_as_model_mesh"]) {
+            return rust_unported(
+                logical(c.doc, name),
+                "Rust 引擎尚未移植，仅 Fortran 引擎生效",
+            );
+        }
+        if name == "DEF_Optimize_Baseflow" && c.have.contains("CATCHMENT") {
+            return rust_unported(
+                logical(c.doc, name),
+                "流域侧向流的基流优化 Rust 引擎尚未移植，仅 Fortran 引擎生效",
+            );
         }
     }
 
@@ -1865,8 +2012,13 @@ fn field_runtime_state(
     if c.single && name == "DEF_LC_YEAR" && c.lai_change_yearly {
         return hidden("逐年 LAI 使用模拟年份，不使用单一地表数据年份");
     }
-    if name == "DEF_LAI_MONTHLY" && (c.pft || c.pc || c.lulcc || c.urban) {
-        return hidden("当前次网格会自动使用月尺度 LAI");
+    // 上游在 LULCC 时强制月度、逐年 LAI；PFT/PC 只有月度 LAI 数据。Rust 不替 namelist 改，
+    // 设成 `.false.` 要么在入口停机（LULCC），要么静默按 8 天数据走——所以只能改回 `.true.`。
+    if c.lulcc && one_of(&["DEF_LAI_MONTHLY", "DEF_LAI_CHANGE_YEARLY"]) {
+        return forced_true(c, name, "LULCC 要求月尺度、逐年变化的 LAI");
+    }
+    if name == "DEF_LAI_MONTHLY" && (c.pft || c.pc || c.urban) {
+        return forced_true(c, name, "当前次网格会自动使用月尺度 LAI");
     }
     if name == "DEF_USE_LAIFEEDBACK" && !c.bgc {
         return hidden("需要 BGC");
@@ -1968,10 +2120,11 @@ fn field_runtime_state(
     if one_of(&["DEF_file_VIC_para", "DEF_file_VIC_OPT"]) {
         return hidden("CoLM 会从运行时目录派生 VIC 参数文件");
     }
-    if name == "DEF_USE_Dynamic_Lake" && !c.waterbody() {
+    // 只有单点能按站点地表类型判断；区域里总可能有水体与湿地 patch。
+    if name == "DEF_USE_Dynamic_Lake" && c.single && !c.waterbody() {
         return hidden("仅水体站点使用");
     }
-    if name == "DEF_USE_Dynamic_Wetland" && !c.wetland() {
+    if name == "DEF_USE_Dynamic_Wetland" && c.single && !c.wetland() {
         return hidden("仅湿地站点使用");
     }
 
@@ -2685,6 +2838,7 @@ pub fn set_pft_parameters_batch(
         single: have.contains("SinglePoint"),
         usgs: have.contains("LULC_USGS"),
         crop: have.contains("CROP"),
+        catchment: have.contains("CATCHMENT"),
     };
     let dirs = by_dir.keys().cloned().collect::<Vec<_>>();
     let texts = read_all(&dirs)?

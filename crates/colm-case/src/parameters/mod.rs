@@ -601,7 +601,7 @@ pub fn field_section(name: &str, group: Option<&str>) -> Option<&'static str> {
     if has(&["TRACER", "GIEMS", "WETLAND_FINUNDATION"]) {
         return Some("示踪剂");
     }
-    if n.starts_with("DEF_DA_") || n == "DEF_OPTIMIZE_BASEFLOW" {
+    if n.starts_with("DEF_DA_") {
         return Some("数据同化");
     }
     if has(&[
@@ -691,6 +691,9 @@ pub fn field_section(name: &str, group: Option<&str>) -> Option<&'static str> {
         "DYNAMIC_LAKE",
         "DYNAMIC_WETLAND",
         "CHECKEQUILIBRIUM",
+        // 基流优化是预热期的产流参数调整（`MOD_Opt_Baseflow`），不属于数据同化；放在
+        // 「数据同化」里会随 DataAssimilation 宏一起被整栏隐藏。
+        "OPTIMIZE_BASEFLOW",
     ]) {
         return Some("水热过程");
     }

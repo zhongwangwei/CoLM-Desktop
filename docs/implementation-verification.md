@@ -30003,3 +30003,54 @@ unitcat 文件原来铺在整张全球 15′ 网格上（区域河网文件保�
 发布页链接与"主要变化"一节）。这一版收录第 579–584 轮：流域网格水库调度、格点水库参数缺省读单元流域文件、Rust 运行进度与日志、
 河湖汇流运行时开关（向导里的"河湖汇流"卡片）、区域单元流域只在分汊打开时闭包、unitcat 截到模拟范围、`dam_DamName` 按
 `NC_CHAR` 拷贝、打开已有算例，以及 GUI 的前处理隐藏与并行设置按引擎显示。
+
+## 第 586 轮：GUI 设定全链条审查
+
+三路审查：向导 × 预检矩阵、会话流程、设定页字段显隐。
+
+**向导 × 预检**（`06667a3e`）：按向导可组合的选项生成 311 个算例逐个跑 `colm-rs --preflight`，26 个组合失败。
+- 流域网格不支持城市、LULCC、示踪剂、河湖汇流；城市与示踪剂互斥。这些组合现在在向导里直接置灰。
+- 空间算例的作物播种日不再写死 120。
+- 预检改在算例目录里跑，否则 namelist 里的相对路径找不到。
+
+修完后，所有允许的组合都通过预检。
+
+**会话流程**（`9de9389e`）：
+- 运行时会重建所有勾选站点，没勾的也跑了。
+- 打开已有算例时丢了作物、USGS、流域范围与网格文件，现在由 `.colm-desktop.json` 记录补齐。
+- 站点会话里 MPI 进程数丢失。
+- 结果没有 history 也算"完成"。
+
+**设定页**（本轮，`config.rs` 的字段显隐规则）：
+- `DEF_Optimize_Baseflow` 原归"数据同化"栏，随 `DataAssimilation` 宏整栏隐藏，任何内核都看不到。改归"水热过程"。流域网格上 Rust 尚未移植，保持缺省时隐藏。
+- `DEF_USE_Dynamic_Lake`、`DEF_USE_Dynamic_Wetland`、`DEF_TUNING_WETWATMAX` 按站点地表类型判断，空间算例 `SITE_landtype` 为 0，三者永远隐藏。现在只对单点判断。
+- 流域侧向流（`CatchLateralFlow`）跳过产流方案（`MOD_SoilSnowHydrology.F90` 的 `#ifndef CatchLateralFlow`），并强制打开变饱和流（`MOD_Namelist.F90:1892`）。因此在流域网格上隐藏：
+  - `DEF_Runoff_SCHEME`
+  - `DEF_TOPMOD_method`
+  - `DEF_VIC_OPT`
+  - `DEF_TUNING_TOPMOD_DECAY`
+  - `DEF_USE_VariablySaturatedFlow`
+- 河道与水库栏：
+  - 流域网格只显示邻接表、估算河深、水库方案。
+  - 网格河湖隐藏 `DEF_ElementNeighbour_file`；没编进 CaMa_Flood 时隐藏 `DEF_CaMa_*`。
+- `DEF_GridRiverLake_FloodFeedback` 按 `colm-rs` 入口的前置条件判定：FloodplainStorageFix、产流方案为 0、LCT、变饱和流、不开 LULCC 与城市。不满足时置灰；已打开但不满足时只允许关掉。
+- `DEF_HISTORY_IN_VECTOR` 只在 UNSTRUCTURED 内核显示。流域网格向量历史 Rust 入口拒绝；经纬度网格不读这个字段。
+- 上游会强制打开、Rust 不改写而是直接拒绝的 LAI 开关：
+  - LULCC 下的 `DEF_LAI_MONTHLY`、`DEF_LAI_CHANGE_YEARLY`；
+  - PFT/PC/城市下的 `DEF_LAI_MONTHLY`。
+
+  原来被设成 `.false.` 时也隐藏，用户看不到问题；现在显示，且只能改回 `.true.`。
+- 空间算例上 Rust 未移植的开关保持缺省时隐藏，被改过时显示并注明"仅 Fortran 引擎生效"：
+  - `DEF_Output_2mWMO`、`DEF_URBAN_ONLY`：网格历史假定 patch 不被屏蔽；
+  - `DEF_HIST_mode='block'`；
+  - `DEF_HIST_WriteBack`、`DEF_HIST_grid_as_model_mesh`。
+- `DEF_SUBGRID_SCHEME` 上游读入后再无使用，一律隐藏。
+- 运行前校验新增两条：
+  - 流域内核拒绝城市、LULCC、示踪剂，带中文原因；
+  - `DEF_HIST/REST/Srfdata_CompressLevel` 必须在 0..=9。Rust 侧的 `u8::try_from` 会放过 10–255。
+
+未改：
+- 甲烷 `inundation_mode` 的 `routing`/`hybrid`：Rust 已支持，但过程文件编辑器拿不到内核与河湖开关，下拉仍只列 `wetwat`/`satellite`。已有的取值照常显示保留。
+- `DEF_CheckEquilibrium` 只有 Fortran 引擎读，暂不处理。
+
+验证：GUI 后端测试 182 个全过（新增 9 个）、`colm-case` 测试、`gui/tests/*.mjs`、check-gui、两处 clippy `-D warnings`、fmt；parameter-audit 只变了 `DEF_Optimize_Baseflow` 一处分栏。
