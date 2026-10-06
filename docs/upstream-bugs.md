@@ -785,6 +785,16 @@
 - **现状**：记录在案，待维护者决定。可选做法有两种：一是给 `lake_decomp_fact` 加上限，让 `k·dt` 不超过 1；
   二是把分解改成 `C·(1−exp(−k·dt))`。后者会改变缺省参数下的数值（差在 1e-14 量级），vendor 与 Rust 同步。
 
+### 83. `DEF_TRACER_OPEN_WATER_KINETIC` 的别名比声明长度长——GUI 已避开，上游未改
+
+- **位置**：`share/MOD_Namelist.F90:437` 声明 `character(len=16) :: DEF_TRACER_OPEN_WATER_KINETIC`；`:1831-1838` 的
+  `SELECT CASE` 把 `'MERLIVAT_JOUZEL1979'`（19 字符）当成 `MJ79` 的别名。
+- **原因**：namelist 读入时值被截成 `MERLIVAT_JOUZEL1`，落进 `CASE DEFAULT`，以 `Invalid DEF_TRACER_OPEN_WATER_KINETIC` 停机。
+  这个别名永远到不了。
+- **影响**：照注释写全名的用户会碰到一个看不懂的停机。GUI 原来从 schema 取可选值，也把它列了出来，选了就保存失败
+  （第 600 轮设定扫描发现）。
+- **处理**（第 600 轮）：GUI 的 `describe_fields` 滤掉超过字符长度的可选值。上游可以把长度放宽，或删掉这个别名，待维护者决定。
+
 ## 二、TRACER 编译开关改变了物理（需要上游确认哪一边是对的）
 
 这一版上游在很多地方给 TRACER 构建和非 TRACER 构建写了**不同的物理**，不只是记账不同。

@@ -3858,3 +3858,41 @@ fn invalid_methane_parameters_are_refused_before_saving() {
         .unwrap()
         .contains("DEF_METHANE%q10methane       = 2.5"));
 }
+
+/// 上游 `SELECT CASE` 里比声明长度还长的别名存不进去，不该出现在可选值里（upstream-bugs #83）。
+#[test]
+fn options_longer_than_the_character_length_are_not_offered() {
+    let fields = super::describe_fields();
+    let kinetic = fields
+        .iter()
+        .find(|field| field.name == "DEF_TRACER_OPEN_WATER_KINETIC")
+        .unwrap();
+    assert!(!kinetic.values.contains(&"MERLIVAT_JOUZEL1979"));
+    assert!(kinetic.values.contains(&"MJ79") && kinetic.values.contains(&"EXPONENT"));
+}
+
+/// 城市单点混有其它地类，Rust 引擎拒绝 `DEF_LC_*` 覆盖：没改过时隐藏，改过时显示并说明只对 Fortran 生效。
+#[test]
+fn land_class_overrides_on_urban_sites_are_fortran_only() {
+    let mode = |text: &str| {
+        let have: std::collections::BTreeSet<&str> =
+            ["SinglePoint", "LULC_IGBP"].into_iter().collect();
+        field_states_for_at(text, &have, None)
+            .unwrap()
+            .into_iter()
+            .find(|state| state.name == "DEF_LC_C3C4")
+            .unwrap()
+    };
+    let urban = "&nl_colm\n SITE_fsitedata = 'site.nc'\n SITE_landtype = 10\n USE_SITE_landtype = .true.\n \
+                 DEF_URBAN_RUN = .true.\n/\n";
+    assert!(matches!(mode(urban).mode, FieldMode::Hidden));
+    let changed = urban.replace("/\n", " DEF_LC_C3C4 = 0\n/\n");
+    let state = mode(&changed);
+    assert!(matches!(state.mode, FieldMode::Editable));
+    assert!(state.reason.unwrap_or_default().contains("Fortran"));
+    // 非城市站点照常可编辑，不带说明。
+    let plain = urban.replace(" DEF_URBAN_RUN = .true.\n", "");
+    let state = mode(&plain);
+    assert!(matches!(state.mode, FieldMode::Editable));
+    assert!(state.reason.is_none());
+}

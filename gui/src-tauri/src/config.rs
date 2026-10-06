@@ -61,7 +61,7 @@ pub struct Field {
     /// 界面该把它们显示成只读的派生值：给一个改了没用的输入框比不显示更糟。
     pub derived: bool,
     /// 合法取值，非空时界面给下拉框而不是文本框。当前 30 个字段有。
-    pub values: &'static [&'static str],
+    pub values: Vec<&'static str>,
     /// 需要哪些编译期宏。与所选内核 `manifest.json` 的 `macros` 求交，
     /// 交不上就说明这个字段在当前内核下**根本没用**。实测 68 个字段有依赖。
     pub requires: &'static [&'static str],
@@ -95,7 +95,18 @@ pub fn describe_fields() -> Vec<Field> {
             doc: f.doc,
             group: f.group,
             derived: f.group.is_none(),
-            values: f.values,
+            // 上游 `SELECT CASE` 里可能有比声明长度还长的别名（如 `DEF_TRACER_OPEN_WATER_KINETIC` 的
+            // `MERLIVAT_JOUZEL1979`，19 字符对 `character(len=16)`）：namelist 读入时会被截断，永远到不了
+            // 那个分支，选了只会保存失败或停机。不提供这种选项（upstream-bugs #83）。
+            values: f
+                .values
+                .iter()
+                .copied()
+                .filter(|value| match f.kind {
+                    colm_schema::FieldKind::Character { len } => value.len() <= len,
+                    _ => true,
+                })
+                .collect(),
             requires: f.requires,
             section: field_section(f.name, f.group).unwrap_or("未分类（这应该被测试拦住）"),
         })
@@ -1778,6 +1789,18 @@ fn expert_tuning_runtime_state(
         }
         if colm_case::land_cover::needs_plant_hydraulics(name) && !c.plant_hydraulics {
             return Some(hidden("需要先启用植物水力过程"));
+        }
+        // 城市单点里还有别的地类的 patch，上游只覆盖本站地类；Rust 没有按地类区分，`colm-rs` 拒绝。
+        if c.urban {
+            let changed = if name == "DEF_LC_C3C4" {
+                integer(c.doc, name) != -1
+            } else {
+                c.doc.get(name).is_some()
+            };
+            return Some(rust_unported(
+                changed,
+                "城市单点里还有其它地类的 patch，Rust 引擎不支持按地类覆盖（上游只覆盖本站地类），仅 Fortran 引擎生效",
+            ));
         }
         if name == "DEF_LC_C3C4" {
             return Some((FieldMode::Editable, None, vec!["-1", "0", "1"]));

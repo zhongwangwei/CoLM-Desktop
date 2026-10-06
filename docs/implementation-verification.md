@@ -30483,3 +30483,37 @@ GUI 的"不分馏"卡片去掉了"会被上游自检停机"的提示。
 **记录、未修的两条**：#5 甲烷雪层几何（upstream-bugs #81）、#6 湖泊碳分解无上限（#82）。两条都改物理结果或参数范围，待维护者决定。
 
 验证：colm-namelist、colm-cli 223、colm-core 505、colm-srfdata 273+49（单线程；`raster` 集成测试要 `COLM_RAWDATA`，不算回归）、colm-runtime 168、GUI 后端 202、`gui/tests`、check-gui、parameter-audit（产物无变化）、工作区与 GUI 的 fmt/clippy。
+
+## 第 600 轮：全链条测试（向导组合矩阵、设定逐字段扫描、配对与黄金回归）
+
+**向导组合矩阵**：
+- 按当前 `domain.js` 的约束复刻向导：次网格 × 土壤 × 过程组合 × 示踪剂组合，示踪剂含水同位素（分馏/不分馏）、甲烷五种淹水方案、溶质、泥沙及其组合。共枚举 810 个组合，1 个因没有对应内核跳过。
+- 每个组合的 `wizardFields` 经 GUI 后端 `apply_fields` 写成算例（参数文件复制、伪字段分流、后端校验都走真路径）：809 个全部写成。
+  - 初次有 44 个被拒，原因是站点基础算例指向空的 rawdata/runtime（缺城市参数、氮沉降）；指向真实数据后全部通过。
+- 每个算例跑 `colm-rs --preflight`：743 个直接通过。
+  - 66 个缺 `DEF_file_GIEMS`：卫星淹水方案的必填文件，向导不问，建例后在参数页选。
+  - 补上占位文件后这 66 个全部通过。
+
+**设定逐字段扫描**：
+- 选 19 个代表算例，新加了同位素、溶质、泥沙与四种示踪剂同开。
+- 对设定页每个可编辑字段逐个取各可选值或布尔两值，经 `set_field_batch` 写入后跑预检，共 12771 次写入。结果：
+  - 12358 次保存后预检通过；
+  - 412 次被拒。其中 408 次是预期的：`DEF_forcing%*` 属于强迫场页，设定页不显示；初始场开关打开时必须选文件；Medlyn 与 WUE 互斥。另外 4 次是新问题：
+    - `DEF_TRACER_OPEN_WATER_KINETIC` 的可选值 `MERLIVAT_JOUZEL1979` 超过 `character(len=16)`，见 upstream-bugs #83。GUI 改为滤掉存不进去的可选值。
+  - 1 次保存成功、预检失败：
+    - 城市单点上的 `DEF_LC_C3C4 = 0`。Rust 拒绝"城市 + 地类覆盖"：上游只覆盖本站地类，而城市单点混有其它地类。
+    - GUI 改为城市单点上没改过时隐藏 `DEF_LC_*`，改过时显示并说明仅 Fortran 引擎生效。
+    - 重跑这一组扫描：637 次通过，没有失败。
+
+**配对**（Fortran 对 Rust，逐位）：
+- `isosite`、`isosum`、`isosol`、`sol` 各 8 份，`isod` 26 份，`iso`、`sed` 各 261 份，`gh`、`gho` 各 293 份，全部一致（第 594–599 轮的修复之后）。
+
+**黄金回归**：
+- 黄金停在第 518 轮（10-02）。10-04 起并入的上游修复（尤其 #74 vG `alpha` 单位）改变了宿主物理，`generated_case` 从第 0 步起不一致。
+- 用当前 `kernels/default`（`colm_git_sha = 1c908715`）重生成 `CN-Cng`、`CN-Cng-wet`、`US-NR1-snow` 三份黄金。
+  - 用旧 sha 与新 sha 两次生成，数据逐位相同，只有 `create_time` 属性不同。
+- Rust 只跑 colm 阶段对新黄金：三份零差异。
+- design.md §2.8/§2.8b 的指标表与 `metrics.rs` 随之更新，旧值注在表下。
+  - 冬季窗口变化明显：Rnet RMSE 15.05 → 20.45，Qh bias +35.1 → −8.0，Qle R² 0.044 → 0.625。
+  - 湿季窗口基本不变。
+- `PLUMBER2_ROOT` 下 `cargo test -p oracle` 全部通过，`tier-check`、`ci_golden_status` 通过。

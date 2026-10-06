@@ -88,6 +88,8 @@ fn check(hist: &str, spinup: usize, rows: &[Row]) {
 }
 
 #[test]
+// Rnet 的 bias 恰好是 6.28，不是 2π。
+#[allow(clippy::approx_constant)]
 fn the_winter_window_reproduces_section_2_8() {
     // design.md §2.8：剔除冷启动前 8 小时。
     check(
