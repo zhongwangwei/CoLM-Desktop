@@ -10,7 +10,7 @@ import { sourceSite } from './batch.js';
 import { go, renderSteps } from './shell.js';
 import { metricText } from './metric-format.js';
 import { language, translateZh } from './i18n.js';
-import { fieldLabel } from './param-presentation.js';
+import { catalogLabel, fieldLabel } from './param-presentation.js';
 import { modelEngine } from './engine.js';
 import { aggregateStudy, aggregateStudyStatuses, bestTuningSummary, MAX_STUDY_CANDIDATES, paginate, percentageWindow, replaceScopedStudyDirs, scopedStudyDirs, studyActionState, studyBudget, studySiteId, studyWarnings } from './study-model.js';
 import {
@@ -1993,7 +1993,7 @@ function renderStudyParams(hostId) {
     const parameterKey = studyParameterKey(p);
     const saved = previous.get(parameterKey);
     const row = node('div', 'evaluation-variable study-param-option');
-    const label = (language() === 'en' ? p.label_en : p.label_zh) || fieldLabel(p.name, language());
+    const label = catalogLabel(p, language());
     const input = document.createElement('input');
     input.type = 'checkbox'; input.dataset.studyParam = parameterKey;
     input.ariaLabel = label;
@@ -2032,7 +2032,7 @@ function selectedStudyParams(hostId) {
     const parameterKey = cb.dataset.studyParam;
     const meta = studyParamCatalog.find(parameter => studyParameterKey(parameter) === parameterKey);
     const name = meta?.name || parameterKey;
-    const label = (language() === 'en' ? meta?.label_en : meta?.label_zh) || fieldLabel(name, language());
+    const label = catalogLabel(meta ?? { name }, language());
     const minInput = $(hostId).querySelector(`[data-study-min="${CSS.escape(parameterKey)}"]`);
     const maxInput = $(hostId).querySelector(`[data-study-max="${CSS.escape(parameterKey)}"]`);
     if (!minInput?.value.trim() || !maxInput?.value.trim()) throw new Error(`${label} 需要填写上下界。`);

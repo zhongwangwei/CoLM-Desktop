@@ -1477,7 +1477,6 @@ fn natural_lct_singlepoint_hides_unreachable_and_overwritten_fields() {
         "DEF_USE_Forcing_Downscaling_Simple",
         "DEF_HIST_FREQ",
         "DEF_WRST_FREQ",
-        "USE_SITE_HistWriteBack",
     ] {
         assert_eq!(mode(&states, name), &FieldMode::Editable, "{name}");
     }
@@ -2883,8 +2882,9 @@ fn spatial_cases_hide_site_fields_and_lock_the_generated_grid() {
             !catchment,
             "{grid}"
         );
+        // 网格过滤会改掉向导生成的网格掩膜：空间算例一律不给改。
         assert!(
-            matches!(mode(&states, "DEF_file_mesh_filter"), FieldMode::Editable),
+            matches!(mode(&states, "DEF_file_mesh_filter"), FieldMode::Hidden),
             "{grid}"
         );
         for name in [
@@ -3483,4 +3483,57 @@ fn history_variable_toggles_go_to_the_history_namelist() {
     let overrides = super::history_overrides(&doc, case_dir);
     assert_eq!(overrides.get("DEF_hist_vars%fsena"), Some(&false));
     assert_eq!(overrides.get("DEF_hist_vars%fevpa"), Some(&false));
+}
+
+#[test]
+fn urban_forces_off_wue_hydraulics_and_their_parameters() {
+    let urban = "&nl_colm\n DEF_USE_LCT = .true.\n DEF_URBAN_RUN = .true.\n/\n";
+    let states = runtime_states(urban, LATLON_KERNEL);
+    // 上游在城市时关掉 WUE 与植物水力：实际用 Ball–Berry，参数随之切换。
+    assert!(matches!(mode(&states, "DEF_WUE_LAMBDA"), FieldMode::Hidden));
+    assert!(matches!(mode(&states, "DEF_PH_KRMAX"), FieldMode::Hidden));
+    assert!(!matches!(
+        mode(&states, "DEF_BALL_BERRY_GRADM"),
+        FieldMode::Hidden
+    ));
+    let natural = runtime_states("&nl_colm\n DEF_USE_LCT = .true.\n/\n", LATLON_KERNEL);
+    assert!(!matches!(
+        mode(&natural, "DEF_WUE_LAMBDA"),
+        FieldMode::Hidden
+    ));
+    assert!(matches!(
+        mode(&natural, "DEF_BALL_BERRY_GRADM"),
+        FieldMode::Hidden
+    ));
+}
+
+#[test]
+fn subgrid_specific_surface_switches_follow_the_subgrid() {
+    let lct = runtime_states("&nl_colm\n DEF_USE_LCT = .true.\n/\n", LATLON_KERNEL);
+    let pc = runtime_states(
+        "&nl_colm\n DEF_USE_LCT = .false.\n DEF_USE_PC = .true.\n/\n",
+        LATLON_KERNEL,
+    );
+    let pft = runtime_states(
+        "&nl_colm\n DEF_USE_LCT = .false.\n DEF_USE_PFT = .true.\n/\n",
+        LATLON_KERNEL,
+    );
+    for name in ["DEF_FAST_PC", "DEF_SOLO_PFT"] {
+        assert!(matches!(mode(&lct, name), FieldMode::Hidden), "{name}");
+    }
+    assert!(!matches!(mode(&pc, "DEF_FAST_PC"), FieldMode::Hidden));
+    assert!(matches!(mode(&pc, "DEF_SOLO_PFT"), FieldMode::Hidden));
+    assert!(!matches!(mode(&pft, "DEF_SOLO_PFT"), FieldMode::Hidden));
+    // 2m WMO 只在经纬度网格；输出变量文件由输出变量页管理。
+    assert!(matches!(
+        mode(
+            &runtime_states("&nl_colm\n DEF_USE_LCT = .true.\n/\n", UNSTRUCTURED_KERNEL),
+            "DEF_Output_2mWMO"
+        ),
+        FieldMode::Hidden
+    ));
+    assert!(matches!(
+        mode(&lct, "DEF_HIST_vars_namelist"),
+        FieldMode::Disabled
+    ));
 }

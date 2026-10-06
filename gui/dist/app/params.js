@@ -12,7 +12,7 @@ import { language } from './i18n.js';
 import { go } from './shell.js';
 import { landCoverClasses, landCoverLabel } from './land-cover.js';
 import {
-  fieldLabel, fieldOptions, fortranNumberInputValue, optionLabel, technicalFieldHint,
+  catalogLabel, fieldLabel, fieldOptions, fortranNumberInputValue, optionLabel, technicalFieldHint,
 } from './param-presentation.js';
 
 // 分类在后端从 MOD_Namelist.F90 的字段名与 namelist 组推导，并有测试保证
@@ -573,6 +573,9 @@ export async function renderFields(externalStillCurrent = () => true) {
   const processShown = withContextDefaults(processInGroup, processFieldStates)
     .filter(e => !e.known || processFieldStates.get(e.path)?.mode !== 'hidden');
   const sectionOf = e => state.fields.find(f => f.name === e.path)?.section;
+  // 常规模式显示的行：开关、方案、路径与派生值；目录里标成专家级的可调系数只在专家模式出现。
+  const commonField = e => e.derived || e.synthetic || !e.known
+    || catalogVisibility(e.path) === 'editable-common' || HINTS[e.path];
   const outputFields = shown.filter(e => sectionOf(e) === '输出与重启');
   // 空间算例没有站点：`SITE_*` 一类字段不适用，「站点信息」这一步整个不出现。
   const spatialCase = state.selected?.spatial === true || (!!state.domain && state.domain !== 'site');
@@ -582,22 +585,30 @@ export async function renderFields(externalStillCurrent = () => true) {
       continue;
     }
     const scoped = page.scoped;
-    const rows = (scoped ? processShown : shown)
+    const all = (scoped ? processShown : shown)
       .filter(e => page.sections.includes(sectionOf(e)))
       .sort((a, b) => (a.derived ? 1 : 0) - (b.derived ? 1 : 0));
-    if (!rows.length) {
+    // 与过程参数页同一条分层：可调系数（目录里的专家级）只在专家模式、放在本页末尾的「可调参数」里。
+    const rows = all.filter(commonField);
+    const tunable = all.filter(e => !commonField(e));
+    if (!rows.length && !(state.expert && tunable.length)) {
       basic.innerHTML = '<p class="muted">当前配置没有这一类可设置项。</p>';
       continue;
     }
     flows.add(page.id);
-    if (scoped) {
-      renderProcessPicker(basic, parameterCases);
-      basic.appendChild(table(
-        rows, processFieldStates, processDirs, processDirs.length > 1, false,
+    const states = scoped ? processFieldStates : fieldStates;
+    const dirs = scoped ? processDirs : batchDirs;
+    if (scoped) renderProcessPicker(basic, parameterCases);
+    else renderScope(basic, batchDirs);
+    if (rows.length) {
+      basic.appendChild(scoped
+        ? table(rows, states, dirs, dirs.length > 1, false)
+        : table(rows, states, dirs));
+    }
+    if (state.expert && tunable.length) {
+      basic.appendChild(renderTierFields(
+        tunable, states, dirs, language() === 'en' ? 'Tunable parameters' : '可调参数',
       ));
-    } else {
-      renderScope(basic, batchDirs);
-      basic.appendChild(table(rows, fieldStates, batchDirs));
     }
   }
 
@@ -605,8 +616,6 @@ export async function renderFields(externalStillCurrent = () => true) {
     let rows = processShown.filter(e => page.sections.includes(sectionOf(e)))
       .sort((a, b) => (a.derived ? 1 : 0) - (b.derived ? 1 : 0));
     if (page.id === 'params-eco') rows = collapseStomatal(rows);
-    const commonField = e => e.derived || e.synthetic || !e.known
-      || catalogVisibility(e.path) === 'editable-common' || HINTS[e.path];
     const common = rows.filter(commonField);
     const expert = rows.filter(e => !commonField(e));
     if (!common.length && !expert.length) {
@@ -1062,7 +1071,7 @@ function appendCatalogDetails(cell, rawKey, runtime = null) {
   summary.textContent = language() === 'en' ? 'Details' : '详情';
   details.appendChild(summary);
   const lines = [
-    `${language() === 'en' ? 'English name' : '英文名'}：${descriptor.label_en}`,
+    `${language() === 'en' ? 'English name' : '英文名'}：${catalogLabel(descriptor, 'en')}`,
     `${language() === 'en' ? 'CoLM key' : 'CoLM 原始键'}：${descriptor.raw_key}`,
     `${language() === 'en' ? 'Stable ID' : '稳定 ID'}：${descriptor.id}`,
     `${language() === 'en' ? 'Source' : 'Fortran 来源'}：${descriptor.source_location}`,

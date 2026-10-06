@@ -998,7 +998,7 @@
     "raw_key": "DEF_GRIDBASED_ROUTING_MAX_DT",
     "scope": "case-scalar",
     "source_location": "MOD_Namelist.F90:404",
-    "status": "editable-common"
+    "status": "editable-expert"
   },
   {
     "id": "case:DEF_GRIDBASED_ROUTING_MOMENTUM_DT_LIMIT",
@@ -1026,7 +1026,7 @@
     "raw_key": "DEF_GridRiverLake_FloodInfiltMax",
     "scope": "case-scalar",
     "source_location": "MOD_Namelist.F90:408",
-    "status": "editable-common"
+    "status": "editable-expert"
   },
   {
     "id": "case:DEF_USE_LEVEE",
@@ -1068,14 +1068,14 @@
     "raw_key": "DEF_TRACER_ICE_SUPERSAT_SLOPE",
     "scope": "case-scalar",
     "source_location": "MOD_Namelist.F90:435",
-    "status": "editable-common"
+    "status": "editable-expert"
   },
   {
     "id": "case:DEF_TRACER_CG_RELHUM_MAX",
     "raw_key": "DEF_TRACER_CG_RELHUM_MAX",
     "scope": "case-scalar",
     "source_location": "MOD_Namelist.F90:436",
-    "status": "editable-common"
+    "status": "editable-expert"
   },
   {
     "id": "case:DEF_TRACER_OPEN_WATER_KINETIC",
@@ -1089,7 +1089,7 @@
     "raw_key": "DEF_TRACER_SUBL_SKIN_MM",
     "scope": "case-scalar",
     "source_location": "MOD_Namelist.F90:438",
-    "status": "editable-common"
+    "status": "editable-expert"
   },
   {
     "id": "case:DEF_TRACER_SOIL_KINETIC",
@@ -1117,42 +1117,42 @@
     "raw_key": "DEF_TRACER_CANOPY_EQUILIBRATION",
     "scope": "case-scalar",
     "source_location": "MOD_Namelist.F90:442",
-    "status": "editable-common"
+    "status": "editable-expert"
   },
   {
     "id": "case:DEF_TRACER_SNOWMELT_EQUILIBRATION",
     "raw_key": "DEF_TRACER_SNOWMELT_EQUILIBRATION",
     "scope": "case-scalar",
     "source_location": "MOD_Namelist.F90:443",
-    "status": "editable-common"
+    "status": "editable-expert"
   },
   {
     "id": "case:DEF_TRACER_NSS_LEAF_WATER_PER_LAI",
     "raw_key": "DEF_TRACER_NSS_LEAF_WATER_PER_LAI",
     "scope": "case-scalar",
     "source_location": "MOD_Namelist.F90:444",
-    "status": "editable-common"
+    "status": "editable-expert"
   },
   {
     "id": "case:DEF_TRACER_NSS_LEAF_PATH_LENGTH",
     "raw_key": "DEF_TRACER_NSS_LEAF_PATH_LENGTH",
     "scope": "case-scalar",
     "source_location": "MOD_Namelist.F90:445",
-    "status": "editable-common"
+    "status": "editable-expert"
   },
   {
     "id": "case:DEF_TRACER_NSS_LEAF_RB",
     "raw_key": "DEF_TRACER_NSS_LEAF_RB",
     "scope": "case-scalar",
     "source_location": "MOD_Namelist.F90:446",
-    "status": "editable-common"
+    "status": "editable-expert"
   },
   {
     "id": "case:DEF_TRACER_AQUIFER_MIXING_WATER_MM",
     "raw_key": "DEF_TRACER_AQUIFER_MIXING_WATER_MM",
     "scope": "case-scalar",
     "source_location": "MOD_Namelist.F90:447",
-    "status": "editable-common"
+    "status": "editable-expert"
   },
   {
     "id": "case:DEF_TRACER_NUM",
@@ -1166,21 +1166,21 @@
     "raw_key": "DEF_TRACER_BALANCE_ABORT_NBAD",
     "scope": "case-scalar",
     "source_location": "MOD_Namelist.F90:449",
-    "status": "editable-common"
+    "status": "editable-expert"
   },
   {
     "id": "case:DEF_TRACER_RESID_ABORT_NBAD",
     "raw_key": "DEF_TRACER_RESID_ABORT_NBAD",
     "scope": "case-scalar",
     "source_location": "MOD_Namelist.F90:450",
-    "status": "editable-common"
+    "status": "editable-expert"
   },
   {
     "id": "case:DEF_TRACER_LULCC_ABORT_NBAD",
     "raw_key": "DEF_TRACER_LULCC_ABORT_NBAD",
     "scope": "case-scalar",
     "source_location": "MOD_Namelist.F90:451",
-    "status": "editable-common"
+    "status": "editable-expert"
   },
   {
     "id": "case:DEF_TRACER_NAMES",

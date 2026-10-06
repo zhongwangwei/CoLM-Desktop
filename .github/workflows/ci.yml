@@ -136,6 +136,7 @@ jobs:
           node gui/tests/params-race.mjs
           node gui/tests/runview.mjs
           node gui/tests/i18n.mjs
+          node gui/tests/labels.mjs
           node gui/tests/sitepaths.mjs
           node gui/tests/prep-workbench.mjs
           node gui/tests/forcing-gapfill.mjs

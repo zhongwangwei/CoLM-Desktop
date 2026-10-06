@@ -955,13 +955,16 @@ impl<'a> VisibilityContext<'a> {
             runoff: integer(doc, "DEF_Runoff_SCHEME"),
             snicar: logical(doc, "DEF_USE_SNICAR"),
             aerosol_readin: logical(doc, "DEF_Aerosol_Readin"),
-            ozone_stress: logical(doc, "DEF_USE_OZONESTRESS"),
+            // 城市模型打开时上游把 WUE、植物水力、臭氧胁迫强制关掉（`MOD_Namelist.F90:2368-2376`），
+            // 这里取生效值，它们的参数才不会在城市算例里冒出来（Ball–Berry 参数反而要显示）。
+            ozone_stress: logical(doc, "DEF_USE_OZONESTRESS") && !logical(doc, "DEF_URBAN_RUN"),
             ozone_data: logical(doc, "DEF_USE_OZONEDATA"),
-            plant_hydraulics: logical(doc, "DEF_USE_PLANTHYDRAULICS"),
+            plant_hydraulics: logical(doc, "DEF_USE_PLANTHYDRAULICS")
+                && !logical(doc, "DEF_URBAN_RUN"),
             dynamic_wetland: logical(doc, "DEF_USE_Dynamic_Wetland"),
             interception: integer(doc, "DEF_Interception_scheme"),
             medlyn: logical(doc, "DEF_USE_MEDLYNST"),
-            wuest: logical(doc, "DEF_USE_WUEST"),
+            wuest: logical(doc, "DEF_USE_WUEST") && !logical(doc, "DEF_URBAN_RUN"),
         }
     }
 
@@ -1980,6 +1983,39 @@ fn field_runtime_state(
     if name == "DEF_SUBGRID_SCHEME" {
         return hidden("CoLM 读入后不使用此字段；次网格由 LCT/PFT/PC 开关决定");
     }
+    // 2m WMO 只在经纬度网格上做（mksrfdata 在其它网格上把它关掉，单点也一样）。
+    if name == "DEF_Output_2mWMO" && !c.have.contains("GRIDBASED") {
+        return hidden("只有经纬度网格输出 2m WMO 气温");
+    }
+    // 空间算例的网格由向导生成并锁定；网格过滤会改网格的陆地掩膜，等于换网格。
+    if name == "DEF_file_mesh_filter" {
+        return hidden("网格由向导生成并已锁定；要改范围或掩膜请重新建算例");
+    }
+    // PC 的快速版与 PFT 的单一 PFT 只对各自的次网格有意义（`MOD_Namelist` 在另一种次网格下关掉它们）。
+    if name == "DEF_FAST_PC" && !c.pc {
+        return hidden("仅 PC 次网格使用");
+    }
+    if name == "DEF_SOLO_PFT" && !c.pft {
+        return hidden("仅 PFT 次网格使用");
+    }
+    // 输出变量文件由「输出变量」页管理（`set_fields_batch` 写算例目录下的 history.nml）。
+    if name == "DEF_HIST_vars_namelist" {
+        return disabled("由「输出变量」页管理，勾选写在算例目录的 history.nml");
+    }
+    // Fortran 的读写方式开关，不改变结果；Rust 引擎一次读入整段强迫、同步写 history。
+    if one_of(&["USE_SITE_ForcingReadAhead", "USE_SITE_HistWriteBack"]) {
+        return hidden("只影响 Fortran 引擎的读写方式，不改变结果");
+    }
+    // 单点城市：Rust 的站点地表数据总用站点文件里的城市参数，关掉改读 rawdata 的路径没接。
+    if name.starts_with("USE_SITE_urban_") {
+        return rust_unported(
+            !logical(c.doc, name),
+            "Rust 引擎总是用站点文件里的城市参数，改读 rawdata 仅 Fortran 引擎生效",
+        );
+    }
+    if name == "USE_SITE_LAI" && c.single && c.urban {
+        return hidden("城市单点不按这个开关读 LAI");
+    }
     if !c.single {
         // Rust 网格历史假定每个 patch 都不被屏蔽（`spatial/history.rs`），2m WMO 虚拟 patch 与
         // 只输出城市都会让它在入口停机。
@@ -2028,6 +2064,7 @@ fn field_runtime_state(
             "DEF_TOPMOD_method",
             "DEF_HISTORY_IN_VECTOR",
             "DEF_HIST_grid_as_forcing",
+            "DEF_HIST_grid_as_model_mesh",
             "DEF_HIST_lon_res",
             "DEF_HIST_lat_res",
             "DEF_HIST_mode",

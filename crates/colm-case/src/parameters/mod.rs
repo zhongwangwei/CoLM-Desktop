@@ -160,6 +160,18 @@ fn build_catalog() -> Vec<ParameterDescriptor> {
     out
 }
 
+/// 不在调优名单、但同样是"调系数"的字段：示踪剂的物理系数与超差停机阈值、漫滩入渗上限、
+/// 汇流子步长。桌面端把它们和调优系数一起放在各页的专家模式里，常规模式只留开关、方案与路径。
+fn expert_coefficient(field: &colm_schema::Field) -> bool {
+    let name = field.name;
+    (name.starts_with("DEF_TRACER_") && matches!(field.kind, colm_schema::FieldKind::Real))
+        || name.ends_with("_ABORT_NBAD")
+        || matches!(
+            name,
+            "DEF_GridRiverLake_FloodInfiltMax" | "DEF_GRIDBASED_ROUTING_MAX_DT"
+        )
+}
+
 fn schema_descriptor(
     field: &colm_schema::Field,
     land_cover_scheme: Option<&str>,
@@ -223,7 +235,7 @@ fn schema_descriptor(
         value_kind: schema_kind(field.kind),
         unit,
         visibility: if field.group.is_some() {
-            if tuning.is_some() || lc.is_some() {
+            if tuning.is_some() || lc.is_some() || expert_coefficient(field) {
                 Visibility::EditableExpert
             } else {
                 Visibility::EditableCommon

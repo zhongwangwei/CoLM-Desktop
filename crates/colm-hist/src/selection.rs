@@ -45,6 +45,37 @@ impl HistorySelection {
     }
 
     pub fn resolve(input: &SelectionInput<'_>) -> Result<Self> {
+        let on = switch_states(input)?;
+        let mut off = BTreeSet::new();
+        for var in VARS {
+            let Some(name) = var.switch else { continue };
+            let k = SWITCHES
+                .iter()
+                .position(|switch| switch.name.eq_ignore_ascii_case(name))
+                .expect("the generator checks every switch is declared");
+            if !on[k].1 {
+                off.insert(var.name);
+            }
+        }
+        Ok(Self { off })
+    }
+
+    /// 变量（闸门表写法，不带 `f_`）是否写出。
+    pub fn writes(&self, name: &str) -> bool {
+        !self.off.contains(name)
+    }
+
+    /// 被关掉的变量，按名字排序。
+    pub fn disabled(&self) -> impl Iterator<Item = &'static str> + '_ {
+        self.off.iter().copied()
+    }
+}
+
+/// 每个 `DEF_hist_vars` 开关的最终取值（与 [`SWITCHES`] 同序）：声明默认值 → `sync_hist_vars` 置成
+/// `out_default` → 输出变量文件覆盖 → DiagMatrix 强制打开。桌面端的输出变量页用它显示勾选，
+/// 与引擎写不写同一个判定。
+pub fn switch_states(input: &SelectionInput<'_>) -> Result<Vec<(&'static str, bool)>> {
+    {
         let mut on = Vec::with_capacity(SWITCHES.len());
         for switch in SWITCHES {
             let synced = match switch.sync {
@@ -78,28 +109,11 @@ impl HistorySelection {
                 }
             }
         }
-        let mut off = BTreeSet::new();
-        for var in VARS {
-            let Some(name) = var.switch else { continue };
-            let k = SWITCHES
-                .iter()
-                .position(|switch| switch.name.eq_ignore_ascii_case(name))
-                .expect("the generator checks every switch is declared");
-            if !on[k] {
-                off.insert(var.name);
-            }
-        }
-        Ok(Self { off })
-    }
-
-    /// 变量（闸门表写法，不带 `f_`）是否写出。
-    pub fn writes(&self, name: &str) -> bool {
-        !self.off.contains(name)
-    }
-
-    /// 被关掉的变量，按名字排序。
-    pub fn disabled(&self) -> impl Iterator<Item = &'static str> + '_ {
-        self.off.iter().copied()
+        Ok(SWITCHES
+            .iter()
+            .zip(on)
+            .map(|(switch, on)| (switch.name, on))
+            .collect())
     }
 }
 

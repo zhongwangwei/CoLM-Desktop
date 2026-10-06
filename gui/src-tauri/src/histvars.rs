@@ -26,6 +26,25 @@ pub struct HistVar {
     pub blocked_by: Option<String>,
     /// 能否通过 DEF_hist_vars%name 这类布尔开关直接编辑。
     pub settable: bool,
+    /// CoLM 写出时给的描述（NetCDF `long_name`），界面放在变量代码旁边。
+    pub long_name: Option<String>,
+}
+
+/// 开关对应的第一个写出变量的 `long_name`（一个开关可能控制好几个变量）。
+fn switch_long_name(switch: &str) -> Option<String> {
+    colm_hist::generated::VARS
+        .iter()
+        .filter(|var| {
+            var.switch
+                .is_some_and(|name| name.eq_ignore_ascii_case(switch))
+        })
+        .chain(
+            colm_hist::generated::VARS
+                .iter()
+                .filter(|var| var.name.eq_ignore_ascii_case(switch)),
+        )
+        .find_map(|var| var.long_name)
+        .map(str::to_string)
 }
 
 #[tauri::command]
@@ -44,11 +63,34 @@ pub fn hist_vars(
     let overrides = dir
         .map(|dir| crate::config::history_overrides(&doc, std::path::Path::new(&dir)))
         .unwrap_or_default();
-    // 这份配置里某个 logical 的实际取值：文件里设了就用文件的，否则用默认值。
+    // 开关的最终取值与引擎同一判定（`colm_hist::selection::switch_states`）：声明默认值 →
+    // `DEF_HIST_vars_out_default` → 输出变量文件覆盖 → DiagMatrix。
+    let listed: Vec<(String, bool)> = overrides
+        .iter()
+        .map(|(path, on)| (path.trim_start_matches("DEF_hist_vars%").to_string(), *on))
+        .collect();
+    let switches: std::collections::BTreeMap<String, bool> =
+        colm_hist::selection::switch_states(&colm_hist::selection::SelectionInput {
+            out_default: crate::config::logical(&doc, "DEF_HIST_vars_out_default"),
+            overrides: &listed,
+            runtime: &|condition: &str| Ok(crate::config::logical(&doc, condition)),
+            defined: &|name: &str| macros.contains(name),
+            diag_matrix: crate::config::logical(&doc, "DEF_USE_BGC")
+                && crate::config::logical(&doc, "DEF_USE_DiagMatrix"),
+        })
+        .map(|states| {
+            states
+                .into_iter()
+                .map(|(name, on)| (format!("DEF_hist_vars%{}", name.to_ascii_lowercase()), on))
+                .collect()
+        })
+        .unwrap_or_default();
+    // 这份配置里某个 logical 的实际取值：输出变量开关按上面的判定，其余文件里设了就用文件的，否则用默认值。
     let truth = |path: &str| -> bool {
-        overrides
-            .get(path)
+        switches
+            .get(&path.to_ascii_lowercase())
             .copied()
+            .or_else(|| overrides.get(path).copied())
             .unwrap_or_else(|| truth_value(&doc, path).unwrap_or(false))
     };
     let gate_truth = |path: &str| -> Option<bool> { truth_value(&doc, path) };
@@ -93,6 +135,7 @@ pub fn hist_vars(
             writable,
             blocked_by,
             settable: true,
+            long_name: switch_long_name(name),
         });
     }
     if truth("DEF_USE_TRACER") {
@@ -107,6 +150,7 @@ pub fn hist_vars(
                     writable: Some(false),
                     blocked_by: Some(format!("本内核未编入：需要 {}", cond_text(c))),
                     settable: false,
+                    long_name: v.long_name.map(str::to_string),
                 });
                 continue;
             } else {
@@ -125,6 +169,7 @@ pub fn hist_vars(
                 writable: writable.0,
                 blocked_by: writable.1,
                 settable: false,
+                long_name: v.long_name.map(str::to_string),
             });
         }
     }

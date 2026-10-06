@@ -63,7 +63,8 @@ export async function renderHistVars(box, stillCurrent = () => true) {
     only.setAttribute('aria-pressed', String(!!state.histOnlyOn));
     list.textContent = '';
     const q = (state.histFilter ?? '').trim().toLowerCase();
-    let shown = q ? vars.filter(v => v.name.toLowerCase().includes(q)) : vars;
+    let shown = q ? vars.filter(v => v.name.toLowerCase().includes(q)
+      || (v.long_name ?? '').toLowerCase().includes(q)) : vars;
     if (state.histOnlyOn) shown = shown.filter(v => v.on);
     if (!shown.length) { list.innerHTML = '<p class="muted">没有匹配的变量</p>'; return; }
     const tbl = document.createElement('table');
@@ -100,6 +101,13 @@ export async function renderHistVars(box, stillCurrent = () => true) {
     c.appendChild(cb);
     const nm = document.createElement('td');
     nm.textContent = v.name;
+    // CoLM 写出时的描述（long_name）：变量代码本身不好认。
+    if (v.long_name) {
+      const desc = document.createElement('div');
+      desc.className = 'muted mini';
+      desc.textContent = v.long_name;
+      nm.appendChild(desc);
+    }
     const why = document.createElement('td');
     if (v.writable === false) {
       // 勾了却没有输出是这一页最该防的事。**说出原因**，而不是只标个灰。

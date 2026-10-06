@@ -30257,3 +30257,28 @@ unitcat 文件原来铺在整张全球 15′ 网格上（区域河网文件保�
   - 运行日志的阶段小标题（`stage_heading`）在追加日志时按界面语言翻；日志正文仍原样保留模型输出。
 
 验证：GUI 后端测试 191 个、`colm-runtime` 库测试 163 个、`gui/tests`、check-gui、clippy、fmt；新加的翻译在 node 里逐条核对过。
+
+## 第 592 轮：设定页显隐复查；专家模式分层；字段名与翻译
+
+**显隐复查**：用 14 个代表算例导出设定页每一栏实际显示的字段，逐个判断（临时测试，不入库）。改掉的：
+- `DEF_file_mesh_filter`：空间算例的网格由向导生成并锁定，网格过滤会改陆地掩膜，等于换网格，所以一律隐藏。
+- `DEF_FAST_PC` 只在 PC 次网格、`DEF_SOLO_PFT` 只在 PFT 次网格显示（`MOD_Namelist` 在另一种次网格下会关掉它们）。
+- `DEF_Output_2mWMO` 只在经纬度网格显示，mksrfdata 在其它网格和单点上都关掉它。单点的 `DEF_HIST_grid_as_model_mesh` 也隐藏。
+- 城市：上游强制关掉 WUE、植物水力、臭氧胁迫（`MOD_Namelist.F90:2368-2376`）。界面改按生效值判断：城市算例不再显示 `DEF_WUE_LAMBDA` 与 `DEF_PH_*`，改为显示它实际用的 Ball–Berry 参数。城市单点隐藏 `USE_SITE_LAI`。
+- `DEF_HIST_vars_namelist` 由「输出变量」页管理，设定页里只读。
+- `USE_SITE_ForcingReadAhead`、`USE_SITE_HistWriteBack` 只影响 Fortran 的读写方式、不改变结果，隐藏。
+- `USE_SITE_urban_*` 按"Rust 未移植"处理：Rust 的站点地表数据总用站点文件里的城市参数。
+- **输出变量页的勾选状态**改用 `colm-hist` 新增的 `switch_states` 计算：声明缺省 → `DEF_HIST_vars_out_default` → 输出变量文件 → DiagMatrix，与引擎写不写同一个判定。原来不看 `out_default`。
+
+**专家模式**：
+- 「搜索全部可调参数」整张卡片（含导出/导入显式覆盖）只在专家模式显示。它是参数目录（`00b0f37a`，为调优统一参数元数据）的全局搜索，放在过程参数页不直观。
+- 基本设定各页与过程参数页用同一条分层：目录里标成专家级的可调系数只在专家模式、放在本页末尾的「可调参数」里。原来「强迫场」页的 5 个降尺度递减率在常规模式也显示。
+- 目录新增 `expert_coefficient`：示踪剂实数系数、超差停机阈值、漫滩最大入渗率、汇流最大子步长改为专家级。parameter-audit 产物随之更新。
+
+**字段名**：
+- 原来没配名字的字段会被拆词、再用"·"拼成中英混杂的名字（如"目录 · existing · srfdata"）。现在兜底改为显示去掉前缀的 CoLM 原名，并给参数目录里所有设定页字段与过程参数补上中英文名，标签表共 532 条。
+- 新增 `gui/tests/labels.mjs`（已进 CI）：目录里 530 个设定页字段和过程参数都必须有中英文名。
+- 「详情」里的英文名与调优页的参数名改用 `catalogLabel`：PFT 参数用目录里的正式名，其余用 `fieldLabel`。
+- 输出变量页每个变量旁显示 CoLM 写出时的 `long_name`，723 个变量都有，搜索也匹配它。
+
+验证：GUI 后端测试 193 个（新增城市参数切换、次网格开关、2m WMO、输出变量文件只读）、`colm-hist` 46 个、`colm-case` 71 个、`gui/tests/*.mjs`（含新测试）、check-gui、clippy、fmt。

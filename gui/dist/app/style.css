@@ -243,6 +243,8 @@ td:first-child { overflow-wrap: anywhere; }
 .parameter-table .input, .parameter-table .select { min-width: 0; }
 .parameter-default { margin-top: 4px; color: var(--muted); font-size: 11px; font-weight: 400; }
 .parameter-discovery { position: sticky; top: 0; z-index: 2; }
+/* 全目录搜索与覆盖导入导出是专家工具：常规模式只看各页自己的设置。 */
+body:not(.expert) .parameter-discovery { display: none; }
 .parameter-search-row { display: grid; grid-template-columns: auto minmax(220px, 1fr) auto minmax(150px, auto); gap: 8px; align-items: center; }
 .parameter-search-results { margin-top: 10px; color: var(--muted); font-size: 12px; max-height: 280px; overflow: auto; }
 .parameter-search-hit { width: 100%; display: grid; grid-template-columns: minmax(180px, 1.2fr) minmax(180px, 1fr) auto; gap: 10px; align-items: center; padding: 8px 10px; border: 0; border-top: 1px solid var(--border-soft); background: transparent; color: var(--ink); text-align: left; cursor: pointer; }
