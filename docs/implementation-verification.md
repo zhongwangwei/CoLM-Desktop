@@ -30405,3 +30405,38 @@ GUI 的"不分馏"卡片去掉了"会被上游自检停机"的提示。
   - `iso` 261；`gh` 293。
 - **对照实验**：两侧都临时去掉第 595 轮土壤水里的舍入归零（Fortran 编到临时内核目录），`isosite` 也是 `files ok 8`，续跑里 `trc_wliq_soisno` 的最小值为 0.0。第 595 轮恰是这个值不一致（Fortran 0.0 对 Rust -8.67e-19），说明续跑归零移植正确。临时改动已还原。
 - `colm-runtime` 166 个测试、clippy、fmt 通过。
+
+## 第 597 轮：GUI 开放溶质与河道泥沙；上游缺陷 74–77 同步到 CoLM202X
+
+**为什么之前选了河湖汇流也用不了**：向导里溶质和泥沙一直写死为 `ready: false`，跟有没有开河湖汇流无关。泥沙卡片上"需要河道/流域输移链路"的说明，让人以为开了河湖汇流就能用。引擎其实早就支持：泥沙见第 499、515 轮，溶质的陆面输运见第 595 轮的 Cl 算例。
+
+**向导**：
+- **溶质**：氯化物 Cl，站点与空间都可选。新增「溶质浓度怎么设？」页，填初始浓度与降水浓度（kg Cl / kg 水），预填测试值 1.0e-5 与 2.0e-6，并注明"只是测试值，正式模拟请用实测值"。上游模板两者都是 0，用模板等于溶质什么也不做。空值与负值拦下一步。
+- **泥沙**：`SEDIMENT`（`particle`），用上游 `standard_sediment_parameter.nml`（3 个粒径）。
+  - 站点不可选，卡片说明单点内核没有网格河湖汇流。
+  - 空间算例要开河湖汇流，卡片指回物理过程页；关掉河湖汇流时已选的泥沙自动去掉。
+  - 流域网格本来就不开放示踪剂。
+- 示踪物名单按 CH4、H2_18O、HDO、Cl、SEDIMENT 的顺序对齐。物理过程页 TRACER 卡片的说明改为"水同位素 / 甲烷 / 溶质 / 河道泥沙，下一页选择"。
+
+**后端**：
+- 溶质浓度不进 `case.nml`：两个伪字段 `DEF_TRACER%init_conc`、`DEF_TRACER%precip_default_conc` 在 `apply_fields` 里分出来，写进 `standard_chloride_parameter.nml`，与甲烷淹没方案同一套做法。浓度必须是非负有限数。
+- 泥沙参数文件原样复制进算例目录。
+- 校验：泥沙在单点拒绝；空间算例要求内核编进河湖汇流且 `DEF_USE_GridRiverLakeFlow` 打开。
+- `CaseProfile` 新增 `solute`、`solute_conc`、`sediment`，打开已有算例时还原向导状态。浓度从参数文件读回。
+- 两份参数文件都会出现在专家模式「过程参数」页，可以继续改。
+
+**全链条**（用 GUI 后端的 `apply_fields` 生成算例，`--preprocessors fortran` 对全 Rust）：
+- `sol`（CN-Cng 2008-01，只开 Cl，测试浓度）：`files ok 8`。径流 Cl 浓度 8e-9 到 2.2e-5；土壤最高到 1e-2，是参数文件里溶解浓度的上限，蒸发浓缩后触顶。
+- `sed`（第 593 轮的 `iso` 空间算例，示踪剂换成只有 SEDIMENT，2 天）：`files ok 261`。`f_sedcon_1` 最大 0.0064，94 个单元流域非零；`f_layer_1` 128 个非零。
+
+测试：GUI 后端 199 个（新增溶质浓度写入与非法值拒绝、泥沙的站点 / 河湖汇流约束与参数文件复制），`gui/tests/domain.mjs` 新增站点溶质页与空间泥沙的开关联动，check-gui，parameter-audit 产物无变化。
+
+**CoLM202X 同步**：`fix/colm-desktop-audit` 上 #73 及以前、#78/#79 已在。#74–#77 逐条在上游代码里核对，都仍然存在，一起推上去（`7d8a4b4b`）：
+- #74：vG `alpha` 读入时乘 0.1，`MOD_SoilSurfaceResistance` 的 `wfc` 常数 339.9 改为 3399（与 CoLM-SYSU/CoLM#507 相同）。
+- #75：`LeafTemperaturePC` 提前返回前给 intent(out) 赋值。上游的 `raw_trc_out` 只在 `#ifdef TRACER` 下声明，那一行赋值也包进去。
+- #76：流域内流区水库的 `volresv/qresv_in/qresv_out` 从 0 起。
+- #77：上游没有 `DEF_USE_GridRiverLakeFlow` 运行时开关，`routing` 与 `hybrid` 原来都不检查内核。改为在没编进 `GridRiverLakeFlow` 的内核里两者都停机：洪泛比例只由 `MOD_Grid_RiverLakeFlow` 产生，否则土壤淹水恒为 0 且不报错。
+
+上游树里编过 `SinglePoint`（PC、BGC、TRACER）与 `GRID`（PFT、BGC、TRACER）两种配置，都链接出 `colm.x`。`CATCHMENT` 的 Fortran 编译无错，没有重做 MPI 链接。
+
+本仓库 10-05 以后的其余 vendor 改动是桌面版功能，没有同步：河湖汇流运行时开关、区域单元流域、unitcat history 裁剪、流域网格水库调度。它们不是缺陷修复，上游怎么做应由上游决定。

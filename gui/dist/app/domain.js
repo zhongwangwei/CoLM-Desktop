@@ -40,7 +40,7 @@ const PHYSICS = [
   { id: 'bgc', t: 'BGC', d: '碳氮循环' },
   { id: 'river', t: '河湖汇流', d: '格点河道、湖泊与水库汇流（15′ 单元流域河网）', note: () => riverNote() },
   { id: 'crop', t: 'CROP', d: '作物模型' },
-  { id: 'tracer', t: 'TRACER', d: '同位素 / 溶质 / 气体 / 颗粒示踪；当前仅开放甲烷' },
+  { id: 'tracer', t: 'TRACER', d: '水同位素 / 甲烷 / 溶质 / 河道泥沙，下一页选择' },
 ];
 
 const DEBUG = [
@@ -55,8 +55,8 @@ const DEBUG = [
 const TRACERS = [
   { id: 'isotope', t: '水同位素', d: 'H₂¹⁸O / HDO 水循环同位素；可与甲烷同时开', ready: true },
   { id: 'methane', t: '甲烷 CH₄', d: '湿地、土壤、湖泊甲烷产生/氧化/排放', ready: true },
-  { id: 'solute', t: '溶质', d: '水溶性示踪物', ready: false, need: '暂未开放' },
-  { id: 'sediment', t: '泥沙', d: '颗粒泥沙输移', ready: false, need: '单点站点不可用；需要河道/流域输移链路' },
+  { id: 'solute', t: '溶质', d: '水溶性示踪物（氯化物 Cl）：随水入渗、径流与河道输运；站点与空间都可用', ready: true },
+  { id: 'sediment', t: '泥沙', d: '河道颗粒泥沙（黏土 / 粉砂 / 砂 3 个粒径）；空间算例且开河湖汇流', ready: true },
 ];
 
 // 甲烷淹没方案（写进 CH4 参数文件的 `DEF_METHANE%inundation_mode`）。动态湿地跟着方案走：
@@ -79,12 +79,20 @@ const ISOTOPE_MODES = [
 // 含水层混合水量：上游没有缺省值，必须是实测或率定的有效混合水深。向导预填一个测试值让算例能跑，
 // 并在旁边与参数页写明它只是测试值。
 const ISOTOPE_TEST_MIXING_MM = 1000;
+// 溶质（Cl）浓度 [kg Cl / kg 水]：上游模板全是 0（溶质什么也不做）。预填测试值并写明。
+const SOLUTE_TEST_INIT = '1.0e-5';
+const SOLUTE_TEST_PRECIP = '2.0e-6';
+const soluteValue = value => {
+  const number = Number(String(value ?? '').trim());
+  return String(value ?? '').trim() !== '' && Number.isFinite(number) && number >= 0;
+};
 
 const pages = () => [
   'domain',
   ...(picked.domain && picked.domain !== 'site' ? ['grid', 'spatial'] : []),
   'subgrid', 'soil', 'physics', ...(picked.physics.tracer ? ['tracer'] : []),
   ...(hasTracer(picked, 'isotope') ? ['isotope'] : []),
+  ...(hasTracer(picked, 'solute') ? ['solute'] : []),
   ...(hasTracer(picked, 'methane') ? ['methane'] : []), 'debug',
 ];
 const pageIndex = page => pages().indexOf(page);
@@ -110,6 +118,8 @@ const emptyPicked = () => ({
   isotopeMode: null,
   isotopeModeChosen: false,
   isotopeMixing: ISOTOPE_TEST_MIXING_MM,
+  soluteInit: SOLUTE_TEST_INIT,
+  solutePrecip: SOLUTE_TEST_PRECIP,
   debug: emptyDebug(),
 });
 
@@ -150,7 +160,8 @@ function render() {
     subgrid: ['次网格怎么分？', '次网格方案决定 BGC 是否可用，也决定站点数据要求。'],
     soil: ['土壤水力用哪套？', '选择本次模拟使用的土壤水力方案。'],
     physics: ['还要打开哪些过程？', '可多选；被上游约束挡住的项会说明回哪一页修改。'],
-    tracer: ['选择示踪剂类型', '可多选：水同位素与甲烷可以同时开；溶质与泥沙暂未开放。'],
+    tracer: ['选择示踪剂类型', '可多选：水同位素、甲烷、溶质与河道泥沙可以同时开。'],
+    solute: ['溶质浓度怎么设？', '给出土壤与地下水的初始浓度和降水浓度。'],
     isotope: ['水同位素怎么算？', '选择是否分馏，并给出含水层混合水量。'],
     methane: ['甲烷淹水范围怎么算？', '决定湿地与土壤的淹水比例从哪来；动态湿地会随方案自动打开或关闭。'],
     debug: ['要打开调试吗？', '可全部不选；这些开关只增加检查与日志，不改变页间约束。'],
@@ -179,6 +190,7 @@ function render() {
     renderCards(ISOTOPE_MODES, picked.isotopeMode, chooseIsotopeMode, isotopeModeBlock);
     renderIsotopeMixing();
   }
+  if (page === 'solute') renderSoluteConcentrations();
   if (page === 'methane') {
     // 用户没亲手选过时跟着约束走（回去打开河湖汇流后自动换成 hybrid）；亲手选的只在被挡住时才换。
     if (!picked.methaneModeChosen || methaneModeBlock({ id: picked.methaneMode })) {
@@ -206,6 +218,7 @@ function pageInfo(page) {
   if (page === 'tracer') return 'ⓘ 甲烷需要 PFT 或 PC、BGC、van Genuchten 土壤水力；本页会把运行参数自动写入算例';
   if (page === 'methane') return 'ⓘ 建例后仍可在专家模式「示踪剂」页改；改方案时动态湿地会一并改';
   if (page === 'isotope') return 'ⓘ 同位素强迫文件与参数文件建例时自动写入算例目录；含水层混合水量建例后可在「示踪剂」页改';
+  if (page === 'solute') return 'ⓘ 浓度写进算例目录的 standard_chloride_parameter.nml；建例后可在专家模式「过程参数」页改';
   if (page === 'debug') return 'ⓘ 打开调试会让日志明显增多，常规运行可全部关闭';
   return '';
 }
@@ -528,6 +541,31 @@ function renderIsotopeMixing() {
   $('gatecards').appendChild(box);
 }
 
+/** 溶质（Cl）初始浓度与降水浓度输入框，预填测试值并写明。 */
+function renderSoluteConcentrations() {
+  const box = document.createElement('div');
+  box.className = 'card spatial-config';
+  const field = (label, id, key, fallback) => {
+    const caption = document.createElement('label');
+    caption.textContent = label;
+    const input = document.createElement('input');
+    input.className = 'input';
+    input.type = 'text';
+    input.inputMode = 'decimal';
+    input.id = id;
+    input.value = String(picked[key] ?? fallback);
+    input.oninput = () => { picked[key] = input.value.trim(); renderFoot(); };
+    box.append(caption, input);
+  };
+  field('初始浓度（kg Cl / kg 水）', 'solute-init', 'soluteInit', SOLUTE_TEST_INIT);
+  field('降水浓度（kg Cl / kg 水）', 'solute-precip', 'solutePrecip', SOLUTE_TEST_PRECIP);
+  const note = document.createElement('p');
+  note.className = 'muted mini';
+  note.textContent = '预填的 1.0e-5 与 2.0e-6 只是测试值，正式模拟请用实测值。上游模板两者都是 0，溶质不会有任何变化。';
+  box.appendChild(note);
+  $('gatecards').appendChild(box);
+}
+
 function chooseMethaneMode(id) {
   picked.methaneMode = id;
   picked.methaneModeChosen = true;
@@ -635,6 +673,15 @@ function tracerBlock(item) {
       return { need: '甲烷示踪需要同时开启 BGC', cause: `第 ${pageNumber('physics')} 页没有开启 BGC`, page: pageIndex('physics') };
     }
   }
+  // 河道泥沙是网格河湖汇流上的 provider：单点内核不编它，空间算例要打开河湖汇流。
+  if (item.id === 'sediment') {
+    if (picked.domain === 'site') {
+      return { need: '泥沙只能用于空间算例（单点没有网格河湖汇流）', cause: '第 1 页选择了站点', page: 0 };
+    }
+    if (!picked.physics.river) {
+      return { need: '泥沙需要网格河湖汇流', cause: `第 ${pageNumber('physics')} 页没有开启河湖汇流`, page: pageIndex('physics') };
+    }
+  }
   // 同位素开含水层混合后，LULCC 新建的土壤 patch 没有参考水量，上游停机（第 514 轮）。
   if (item.id === 'isotope' && picked.physics.lulcc) {
     return { need: '水同位素不能与 LULCC 同开（上游停机）', cause: `第 ${pageNumber('physics')} 页开启了 LULCC`, page: pageIndex('physics') };
@@ -682,6 +729,7 @@ function renderFoot() {
     domain: picked.domain, grid: picked.grid, subgrid: picked.subgrid, soil: picked.soil,
     tracer: picked.tracer, methane: picked.methaneMode,
     isotope: picked.isotopeMode && Number(picked.isotopeMixing) > 0,
+    solute: soluteValue(picked.soluteInit) && soluteValue(picked.solutePrecip),
   };
   const next = document.createElement('button');
   next.className = 'btn-next';
@@ -740,6 +788,8 @@ export function startSession(config) {
     methaneMode: config.methaneMode ?? null,
     isotopeMode: config.isotopeMode ?? null,
     isotopeMixing: config.isotopeMixing ?? null,
+    soluteInit: config.soluteInit ?? null,
+    solutePrecip: config.solutePrecip ?? null,
     debug: { ...emptyDebug(), ...config.debug },
   };
   globalThis.dispatchEvent?.(new Event('colm:wizard'));
@@ -784,7 +834,8 @@ function finish() {
   startSession({
     domain: picked.domain, grid: picked.grid, spatial, subgrid: picked.subgrid, soil: picked.soil,
     physics: picked.physics, tracer: picked.tracer, methaneMode: picked.methaneMode,
-    isotopeMode: picked.isotopeMode, isotopeMixing: picked.isotopeMixing, debug: picked.debug,
+    isotopeMode: picked.isotopeMode, isotopeMixing: picked.isotopeMixing,
+    soluteInit: picked.soluteInit, solutePrecip: picked.solutePrecip, debug: picked.debug,
   });
   // 向导已经决定本次模型结构；通常下一步是选现成站点并建算例，不是重新
   // 制作原始数据。前处理仍在左侧作为按需入口，但不再拦住主路径。
@@ -800,6 +851,8 @@ export function wizardFields(wizard = state.wizard) {
   const d = wizard.debug;
   const methane = hasTracer(wizard, 'methane');
   const isotope = hasTracer(wizard, 'isotope');
+  const solute = hasTracer(wizard, 'solute');
+  const sediment = hasTracer(wizard, 'sediment');
   const urban = p.urban;
   const bgc = p.bgc || p.crop || methane;
   const fields = [
@@ -814,7 +867,7 @@ export function wizardFields(wizard = state.wizard) {
     ['DEF_Aerosol_Readin', false, 'logical'],
     ['DEF_URBAN_RUN', urban, 'logical'],
     ['DEF_USE_LULCC', p.lulcc, 'logical'],
-    ['DEF_USE_TRACER', methane || isotope, 'logical'],
+    ['DEF_USE_TRACER', methane || isotope || solute || sediment, 'logical'],
     ['DEF_USE_RangeCheck', d.rangecheck, 'logical'],
     ['DEF_USE_CoLMDEBUG', d.colmdebug, 'logical'],
     ['DEF_USE_SrfdataDiag', d.srfdatadiag, 'logical'],
@@ -847,6 +900,8 @@ export function wizardFields(wizard = state.wizard) {
       ['H2_18O', 'isotope', '20.0', '2.0052e-3', '-10.0', 'H2_18O:standard_O18_parameter.nml'],
       ['HDO', 'isotope', '19.0', '1.5576e-4', '-70.0', 'HDO:standard_HDO_parameter.nml'],
     ] : []),
+    ...(solute ? [['Cl', 'solute', '35.453', '1.0', '0.0', 'Cl:standard_chloride_parameter.nml']] : []),
+    ...(sediment ? [['SEDIMENT', 'particle', '1.0', '1.0', '0.0', 'SEDIMENT:standard_sediment_parameter.nml']] : []),
   ];
   const column = k => tracers.map(row => row[k]).join(',');
   if (tracers.length) fields.push(
@@ -858,6 +913,11 @@ export function wizardFields(wizard = state.wizard) {
     ['DEF_TRACER_INIT_DELTA', column(4)],
     ['DEF_TRACER_REACTIVE_DECAY_RATE', tracers.map(() => '0.0').join(',')],
     ['DEF_TRACER_PARAM_FILES', column(5)],
+  );
+  // 溶质浓度不进 case.nml：后端把这两个字段写进 Cl 参数文件。
+  if (solute) fields.push(
+    ['DEF_TRACER%init_conc', String(wizard.soluteInit ?? SOLUTE_TEST_INIT).trim()],
+    ['DEF_TRACER%precip_default_conc', String(wizard.solutePrecip ?? SOLUTE_TEST_PRECIP).trim()],
   );
   if (isotope) {
     const mixing = Number(wizard.isotopeMixing ?? ISOTOPE_TEST_MIXING_MM);

@@ -39,12 +39,16 @@ export function sessionFromProfile(p) {
     subgrid: p.subgrid,
     soil: p.soil,
     physics: {
-      urban: p.urban, lulcc: p.lulcc, bgc: p.bgc, crop: p.crop, tracer: p.methane || p.isotope, river: p.river,
+      urban: p.urban, lulcc: p.lulcc, bgc: p.bgc, crop: p.crop,
+      tracer: p.methane || p.isotope || p.solute || p.sediment, river: p.river,
     },
-    tracer: [p.methane && 'methane', p.isotope && 'isotope'].filter(Boolean).join(',') || null,
+    tracer: [p.methane && 'methane', p.isotope && 'isotope', p.solute && 'solute', p.sediment && 'sediment']
+      .filter(Boolean).join(',') || null,
     methaneMode: p.methane ? (p.methane_mode ?? null) : null,
     isotopeMode: p.isotope ? (p.fractionation ? 'fractionation' : 'conservative') : null,
     isotopeMixing: p.isotope ? (p.aquifer_mixing_mm ?? null) : null,
+    soluteInit: p.solute && p.solute_conc ? String(p.solute_conc[0]) : null,
+    solutePrecip: p.solute && p.solute_conc ? String(p.solute_conc[1]) : null,
     debug: { rangecheck: p.rangecheck, colmdebug: p.colmdebug, srfdatadiag: p.srfdatadiag },
   };
 }

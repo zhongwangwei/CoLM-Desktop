@@ -1395,6 +1395,22 @@ fn validate_runtime_contract(
         if methane && (!bgc || !(pft || pc)) {
             return Err("甲烷 TRACER 需要 BGC 且使用 PFT 或 PC 次网格".into());
         }
+        // 河道泥沙（`SEDIMENT` provider）挂在网格河湖汇流上：单点内核不编它，空间算例要打开河湖汇流。
+        let sediment = character(doc, "DEF_TRACER_NAMES").split(',').any(|name| {
+            matches!(
+                name.trim().to_ascii_uppercase().as_str(),
+                "SEDIMENT" | "SED"
+            )
+        });
+        if sediment {
+            if single {
+                return Err("河道泥沙只能用于空间算例（单点内核没有网格河湖汇流）".into());
+            }
+            let kernel_river = kernel.is_none_or(|facts| facts.grid_river);
+            if !(kernel_river && logical(doc, "DEF_USE_GridRiverLakeFlow")) {
+                return Err("河道泥沙需要网格河湖汇流：请打开 DEF_USE_GridRiverLakeFlow".into());
+            }
+        }
         let isotope = character(doc, "DEF_TRACER_TYPES")
             .split(',')
             .any(|kind| kind.trim().eq_ignore_ascii_case("isotope"));
@@ -3450,6 +3466,9 @@ fn spatial_blocks(doc: &colm_namelist::Document) -> usize {
 
 /// CH4 参数文件里的淹没方案字段（不在 case.nml 里）。
 pub(crate) const METHANE_MODE: &str = "DEF_METHANE%inundation_mode";
+/// 溶质（Cl）参数文件里的初始浓度与降水浓度 [kg/kg]（不在 case.nml 里，向导建例时写进参数文件）。
+pub(crate) const SOLUTE_INIT_CONC: &str = "DEF_TRACER%init_conc";
+pub(crate) const SOLUTE_PRECIP_CONC: &str = "DEF_TRACER%precip_default_conc";
 
 /// 淹没方案 → （`DEF_wetland_finundation_scheme`，要不要动态湿地，要不要网格河湖）。
 /// 与 `configure_methane_inundation_mode` / `MethaneParameters::configure_inundation` 一一对应。
@@ -3520,6 +3539,49 @@ pub(crate) fn methane_mode(
         Some(colm_namelist::Value::Str(mode)) => mode.trim().to_ascii_lowercase(),
         _ => "hybrid".into(),
     })
+}
+
+/// 溶质算例参数文件里的初始浓度与降水浓度 `[init_conc, precip_default_conc]`（kg/kg）。
+/// 取 `DEF_TRACER_TYPES` 里第一个 `solute` 的参数文件；没有溶质或文件读不到时为 `None`，
+/// 文件里没写的量按上游缺省 0。
+pub(crate) fn solute_concentrations(
+    doc: &colm_namelist::Document,
+    case_dir: &std::path::Path,
+) -> Option<[f64; 2]> {
+    if !logical(doc, "DEF_USE_TRACER") {
+        return None;
+    }
+    let names = character(doc, "DEF_TRACER_NAMES");
+    let types = character(doc, "DEF_TRACER_TYPES");
+    let name = names
+        .split(',')
+        .zip(types.split(','))
+        .find(|(_, kind)| kind.trim().eq_ignore_ascii_case("solute"))?
+        .0
+        .trim()
+        .to_string();
+    let files = character(doc, "DEF_TRACER_PARAM_FILES");
+    let file = files.split(',').find_map(|item| {
+        let (owner, file) = item.trim().rsplit_once(':')?;
+        owner
+            .trim()
+            .eq_ignore_ascii_case(&name)
+            .then(|| file.trim().trim_matches(['\'', '"']).to_string())
+    })?;
+    let path = std::path::Path::new(&file);
+    let path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        case_dir.join(path)
+    };
+    let parameters = colm_namelist::parse(&std::fs::read_to_string(path).ok()?).ok()?;
+    let value = |key: &str| match parameters.get(key) {
+        Some(value) => value
+            .as_f64()
+            .or_else(|| value.to_string().replace(['d', 'D'], "e").parse().ok()),
+        None => Some(0.0),
+    };
+    Some([value(SOLUTE_INIT_CONC)?, value(SOLUTE_PRECIP_CONC)?])
 }
 
 #[tauri::command]
@@ -4025,28 +4087,41 @@ pub(crate) fn apply_fields(dir: &str, fields: &[FieldChange]) -> Result<(), Stri
     let path = std::path::Path::new(dir).join("case.nml");
     let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
     let mut doc = colm_namelist::parse(&text).map_err(|e| format!("{dir}: {e:#}"))?;
-    // 甲烷淹没方案写进 CH4 参数文件，不进 case.nml。
-    let (mode, fields): (Vec<_>, Vec<_>) = fields
-        .iter()
-        .cloned()
-        .partition(|field| field.path.eq_ignore_ascii_case(METHANE_MODE));
+    // 甲烷淹没方案与溶质浓度写进各自的参数文件，不进 case.nml。
+    let (param_fields, fields): (Vec<_>, Vec<_>) = fields.iter().cloned().partition(|field| {
+        [METHANE_MODE, SOLUTE_INIT_CONC, SOLUTE_PRECIP_CONC]
+            .iter()
+            .any(|name| field.path.eq_ignore_ascii_case(name))
+    });
+    let param = |name: &str| {
+        param_fields
+            .iter()
+            .find(|field| field.path.eq_ignore_ascii_case(name))
+            .map(|field| field.value.as_str())
+    };
     for field in &fields {
         let value = typed(&field.path, &field.value).map_err(|e| format!("{dir}: {e}"))?;
         put(&mut doc, &field.path, value).map_err(|e| format!("{dir}: {e}"))?;
     }
-    stage_tracer_parameters(dir, &fields, mode.first().map(|field| field.value.as_str()))?;
+    stage_tracer_parameters(
+        dir,
+        &fields,
+        param(METHANE_MODE),
+        (param(SOLUTE_INIT_CONC), param(SOLUTE_PRECIP_CONC)),
+    )?;
     validate_runtime_contract(&doc, std::path::Path::new(dir), None)
         .map_err(|e| format!("{dir}: {e}"))?;
     validate_changed_fields(&doc, &fields).map_err(|e| format!("{dir}: {e}"))?;
     std::fs::write(&path, doc.to_string()).map_err(|e| format!("{}: {e}", path.display()))
 }
 
-/// 向导写的示踪物参数文件：`DEF_TRACER_PARAM_FILES` 里点名的内置文件（CH4、H₂¹⁸O、HDO）从上游
-/// 模板复制到算例目录。
+/// 向导写的示踪物参数文件：`DEF_TRACER_PARAM_FILES` 里点名的内置文件（CH4、H₂¹⁸O、HDO、Cl、
+/// SEDIMENT）从上游模板复制到算例目录。
 fn stage_tracer_parameters(
     dir: &str,
     fields: &[FieldChange],
     mode: Option<&str>,
+    solute: (Option<&str>, Option<&str>),
 ) -> Result<(), String> {
     let Some(files) = fields
         .iter()
@@ -4062,6 +4137,17 @@ fn stage_tracer_parameters(
     };
     if wanted("standard_ch4_parameter.nml") {
         stage_ch4_parameter(dir, mode)?;
+    }
+    if wanted("standard_chloride_parameter.nml") {
+        stage_solute_parameter(dir, solute)?;
+    }
+    if wanted("standard_sediment_parameter.nml") {
+        let path = std::path::Path::new(dir).join("standard_sediment_parameter.nml");
+        std::fs::write(
+            &path,
+            include_str!("../../../vendor/CoLM202X/run/standard_sediment_parameter.nml"),
+        )
+        .map_err(|e| format!("{}: {e}", path.display()))?;
     }
     let fractionation = fields.iter().any(|field| {
         field.path == "DEF_TRACER_USE_FRACTIONATION"
@@ -4106,6 +4192,36 @@ fn isotope_parameter_text(template: &str, fractionation: bool) -> Result<String,
         &template[..start],
         rest
     ))
+}
+
+/// Cl 溶质参数文件：上游模板的初始浓度与降水浓度都是 0（溶质什么也不做），换成向导填的值。
+/// 没给的保持模板值；浓度必须是非负有限数（kg Cl / kg 水）。
+fn stage_solute_parameter(
+    dir: &str,
+    (init, precip): (Option<&str>, Option<&str>),
+) -> Result<(), String> {
+    let template = include_str!("../../../vendor/CoLM202X/run/standard_chloride_parameter.nml");
+    let mut doc = colm_namelist::parse(template).map_err(|e| format!("内置溶质参数模板：{e:#}"))?;
+    for (name, value) in [(SOLUTE_INIT_CONC, init), (SOLUTE_PRECIP_CONC, precip)] {
+        let Some(value) = value else { continue };
+        let number: f64 = value
+            .trim()
+            .replace(['d', 'D'], "e")
+            .parse()
+            .map_err(|_| format!("{name} 不是数：{value}"))?;
+        if !number.is_finite() || number < 0.0 {
+            return Err(format!("{name} 必须是非负有限数（kg/kg），当前是 {value}"));
+        }
+        doc.set(
+            name,
+            colm_namelist::Value::Real {
+                text: value.trim().to_string(),
+            },
+        )
+        .map_err(|e| format!("内置溶质参数模板：{e:#}"))?;
+    }
+    let path = std::path::Path::new(dir).join("standard_chloride_parameter.nml");
+    std::fs::write(&path, doc.to_string()).map_err(|e| format!("{}: {e}", path.display()))
 }
 
 /// CH4 参数文件：淹没方案取向导所选，关掉稻田与空间 pH（分别要 CROP 稻田与预处理生成的 pH 数据）。

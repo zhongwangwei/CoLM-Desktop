@@ -419,17 +419,20 @@ if (ids.gatetitle.textContent !== '选择示踪剂类型') throw new Error('trac
 if (cards().map(c => c.children[0].textContent).join('|') !== '水同位素|甲烷 CH₄|溶质|泥沙') {
   throw new Error('tracer page must list isotope, methane, solute, and sediment');
 }
-for (const label of ['甲烷 CH₄', '溶质', '泥沙']) {
-  if (card(label).getAttribute('aria-disabled') !== 'true') throw new Error(`${label} must be disabled without BGC`);
+for (const label of ['甲烷 CH₄', '泥沙']) {
+  if (card(label).getAttribute('aria-disabled') !== 'true') throw new Error(`${label} must be disabled on a site without BGC`);
 }
-if (card('水同位素').getAttribute('aria-disabled') === 'true') throw new Error('isotope must be open');
-if (!/单点站点不可用/.test(nodeText(card('泥沙')))) throw new Error('sediment must explain SinglePoint is unavailable');
+for (const label of ['水同位素', '溶质']) {
+  if (card(label).getAttribute('aria-disabled') === 'true') throw new Error(`${label} must be open on a site`);
+}
+if (!/只能用于空间算例/.test(nodeText(card('泥沙')))) throw new Error('sediment must explain it is spatial only');
 if (!/BGC/.test(nodeText(card('甲烷 CH₄')))) throw new Error('methane must explain it needs BGC');
 previous();
 choose('BGC');
 next();
 choose('甲烷 CH₄');
 choose('水同位素');
+choose('溶质');
 if (card('甲烷 CH₄').getAttribute('aria-pressed') !== 'true' || card('水同位素').getAttribute('aria-pressed') !== 'true') {
   throw new Error('tracer page must be multi-select');
 }
@@ -447,31 +450,48 @@ if (!foot('下一步').disabled) throw new Error('non-positive mixing water must
 mixingInput.value = '1500';
 mixingInput.oninput();
 next();
+if (ids.gatetitle.textContent !== '溶质浓度怎么设？') throw new Error('solute tracer must ask for its concentrations');
+const soluteBox = card('初始浓度（kg Cl / kg 水）');
+const soluteInit = soluteBox?.children.find(c => c.id === 'solute-init');
+const solutePrecip = soluteBox?.children.find(c => c.id === 'solute-precip');
+if (soluteInit?.value !== '1.0e-5' || solutePrecip?.value !== '2.0e-6') throw new Error('solute concentrations must be prefilled');
+if (!/只是测试值，正式模拟请用实测值/.test(nodeText(soluteBox))) throw new Error('prefilled solute concentrations must be labelled test values');
+soluteInit.value = '';
+soluteInit.oninput();
+if (!foot('下一步').disabled) throw new Error('an empty solute concentration must block the page');
+soluteInit.value = '-1';
+soluteInit.oninput();
+if (!foot('下一步').disabled) throw new Error('a negative solute concentration must block the page');
+soluteInit.value = '3e-5';
+soluteInit.oninput();
+next();
 if (ids.gatetitle.textContent !== '甲烷淹水范围怎么算？') throw new Error('methane tracer must ask for the inundation mode');
 // 单点没有河网，也还不知道是不是湿地站点：只留 satellite 与 wetwat，缺省 wetwat。
 for (const label of ['混合（hybrid）', '河网洪泛（routing）', '动态地下水位（dynamic_wtd）']) {
   if (card(label).getAttribute('aria-disabled') !== 'true') throw new Error(`${label} must be blocked on a site`);
 }
 if (card('湿地蓄水（wetwat）').getAttribute('aria-selected') !== 'true') throw new Error('site methane must default to wetwat');
-previous(); previous(); previous();
+previous(); previous(); previous(); previous();
 if (card('LULCC').getAttribute('aria-disabled') !== 'true') throw new Error('LULCC must be blocked while isotopes are selected');
-next(); next(); next();
+next(); next(); next(); next();
 next();
 if (ids.gatetitle.textContent !== '要打开调试吗？') throw new Error('methane page did not continue to debug');
 next();
-if (state.wizard.tracer !== 'methane,isotope') throw new Error(`wrong tracer state: ${JSON.stringify(state.wizard)}`);
+if (state.wizard.tracer !== 'methane,isotope,solute') throw new Error(`wrong tracer state: ${JSON.stringify(state.wizard)}`);
 const methaneFields = Object.fromEntries(wizardFields().map(x => [x.path, x.value]));
 for (const [path, value] of Object.entries({
   DEF_USE_TRACER: '.true.',
   DEF_USE_BGC: '.true.',
-  DEF_TRACER_NUM: '3',
-  DEF_TRACER_NAMES: 'CH4,H2_18O,HDO',
-  DEF_TRACER_TYPES: 'gas,isotope,isotope',
-  DEF_TRACER_MRAT: '16.04,20.0,19.0',
-  DEF_TRACER_REF_RATIO: '1.0,2.0052e-3,1.5576e-4',
-  DEF_TRACER_INIT_DELTA: '0.0,-10.0,-70.0',
-  DEF_TRACER_REACTIVE_DECAY_RATE: '0.0,0.0,0.0',
-  DEF_TRACER_PARAM_FILES: 'CH4:standard_ch4_parameter.nml,H2_18O:standard_O18_parameter.nml,HDO:standard_HDO_parameter.nml',
+  DEF_TRACER_NUM: '4',
+  DEF_TRACER_NAMES: 'CH4,H2_18O,HDO,Cl',
+  DEF_TRACER_TYPES: 'gas,isotope,isotope,solute',
+  DEF_TRACER_MRAT: '16.04,20.0,19.0,35.453',
+  DEF_TRACER_REF_RATIO: '1.0,2.0052e-3,1.5576e-4,1.0',
+  DEF_TRACER_INIT_DELTA: '0.0,-10.0,-70.0,0.0',
+  DEF_TRACER_REACTIVE_DECAY_RATE: '0.0,0.0,0.0,0.0',
+  DEF_TRACER_PARAM_FILES: 'CH4:standard_ch4_parameter.nml,H2_18O:standard_O18_parameter.nml,HDO:standard_HDO_parameter.nml,Cl:standard_chloride_parameter.nml',
+  'DEF_TRACER%init_conc': '3e-5',
+  'DEF_TRACER%precip_default_conc': '2.0e-6',
   DEF_TRACER_USE_FRACTIONATION: '.false.',
   DEF_TRACER_AQUIFER_MIXING_WATER_MM: '1500.0',
   DEF_USE_Dynamic_Wetland: '.false.',
@@ -491,6 +511,45 @@ for (const [path, value] of Object.entries({
   if (isoOnly[path] !== value) throw new Error(`isotope-only ${path}: expected ${value}, got ${isoOnly[path]}`);
 }
 if ('DEF_METHANE%inundation_mode' in isoOnly) throw new Error('isotope-only must not write methane settings');
+// 空间算例：泥沙要先开河湖汇流；关掉河湖汇流时已选的泥沙被去掉。
+showDomainGate();
+choose('区域'); next(); choose('经纬度网格'); next();
+for (const [id, value] of Object.entries({
+  'spatial-west': '100', 'spatial-east': '110', 'spatial-south': '20', 'spatial-north': '30',
+})) {
+  const input = findNode(ids.gatecards, node => node.id === id);
+  input.value = value;
+  input.oninput();
+}
+next(); choose('IGBP'); next(); choose('van Genuchten–Mualem（Ippisch 2006）'); next();
+if (card('河湖汇流').getAttribute('aria-pressed') === 'true') choose('河湖汇流');
+choose('TRACER');
+next();
+if (card('泥沙').getAttribute('aria-disabled') !== 'true' || !/河湖汇流/.test(nodeText(card('泥沙')))) {
+  throw new Error('spatial sediment must ask for river-lake routing');
+}
+previous();
+choose('河湖汇流');
+next();
+choose('泥沙');
+if (card('泥沙').getAttribute('aria-pressed') !== 'true') throw new Error('sediment must be selectable with river-lake routing');
+previous();
+choose('河湖汇流');
+next();
+if (card('泥沙').getAttribute('aria-pressed') === 'true') throw new Error('turning routing off must drop sediment');
+
+// 泥沙：particle 类型的 SEDIMENT，参数文件用上游标准文件；不写溶质浓度。
+const sedOnly = Object.fromEntries(wizardFields({
+  ...state.wizard, domain: 'global', tracer: 'sediment',
+  physics: { ...state.wizard.physics, bgc: false, river: true },
+}).map(x => [x.path, x.value]));
+for (const [path, value] of Object.entries({
+  DEF_USE_TRACER: '.true.', DEF_TRACER_NUM: '1', DEF_TRACER_NAMES: 'SEDIMENT', DEF_TRACER_TYPES: 'particle',
+  DEF_TRACER_PARAM_FILES: 'SEDIMENT:standard_sediment_parameter.nml',
+})) {
+  if (sedOnly[path] !== value) throw new Error(`sediment-only ${path}: expected ${value}, got ${sedOnly[path]}`);
+}
+if ('DEF_TRACER%init_conc' in sedOnly) throw new Error('sediment-only must not write solute concentrations');
 // 动态湿地留在参数页，由后端按淹没方案置灰并说明，不再被向导整个藏起来。
 if (wizardFieldNames().includes('DEF_USE_Dynamic_Wetland')) {
   throw new Error('dynamic wetland must stay visible (read-only) on the parameters page');

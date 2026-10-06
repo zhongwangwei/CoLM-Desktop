@@ -3692,3 +3692,109 @@ fn isotope_fields_follow_the_tracer_types() {
         FieldMode::Hidden
     ));
 }
+
+fn tracer_fields(rows: &[(&str, &str)]) -> Vec<FieldChange> {
+    rows.iter()
+        .map(|(path, value)| FieldChange {
+            path: (*path).into(),
+            value: (*value).into(),
+        })
+        .collect()
+}
+
+#[test]
+fn solute_wizard_writes_its_concentrations_into_the_parameter_file() {
+    let dir = batch("wizard-solute", &[SAMPLE]).remove(0);
+    super::apply_fields(
+        &dir,
+        &tracer_fields(&[
+            ("DEF_USE_TRACER", ".true."),
+            ("DEF_TRACER_NUM", "1"),
+            ("DEF_TRACER_NAMES", "Cl"),
+            ("DEF_TRACER_TYPES", "solute"),
+            (
+                "DEF_TRACER_PARAM_FILES",
+                "Cl:standard_chloride_parameter.nml",
+            ),
+            (super::SOLUTE_INIT_CONC, "1.0e-5"),
+            (super::SOLUTE_PRECIP_CONC, "2.0e-6"),
+        ]),
+    )
+    .unwrap();
+    let case = std::path::Path::new(&dir);
+    let text = std::fs::read_to_string(case.join("standard_chloride_parameter.nml")).unwrap();
+    let parameters = colm_namelist::parse(&text).unwrap();
+    assert_eq!(
+        parameters.get(super::SOLUTE_INIT_CONC).unwrap().to_string(),
+        "1.0e-5"
+    );
+    assert_eq!(
+        parameters
+            .get(super::SOLUTE_PRECIP_CONC)
+            .unwrap()
+            .to_string(),
+        "2.0e-6"
+    );
+    // 浓度不进 case.nml；打开算例时从参数文件读回。
+    let case_text = std::fs::read_to_string(case.join("case.nml")).unwrap();
+    assert!(!case_text.contains("init_conc"));
+    let doc = colm_namelist::parse(&case_text).unwrap();
+    assert_eq!(
+        super::solute_concentrations(&doc, case),
+        Some([1.0e-5, 2.0e-6])
+    );
+    // 负数或不是数都拒绝，文件不动。
+    for bad in ["-1", "abc"] {
+        let err = super::apply_fields(
+            &dir,
+            &tracer_fields(&[
+                (
+                    "DEF_TRACER_PARAM_FILES",
+                    "Cl:standard_chloride_parameter.nml",
+                ),
+                (super::SOLUTE_INIT_CONC, bad),
+            ]),
+        )
+        .unwrap_err();
+        assert!(err.contains("init_conc"), "{err}");
+    }
+}
+
+#[test]
+fn sediment_needs_a_spatial_case_with_grid_routing() {
+    let fields = tracer_fields(&[
+        ("DEF_USE_TRACER", ".true."),
+        ("DEF_TRACER_NUM", "1"),
+        ("DEF_TRACER_NAMES", "SEDIMENT"),
+        ("DEF_TRACER_TYPES", "particle"),
+        (
+            "DEF_TRACER_PARAM_FILES",
+            "SEDIMENT:standard_sediment_parameter.nml",
+        ),
+    ]);
+    let site = SAMPLE.replace("/\n", " SITE_fsitedata = 'site.nc'\n/\n");
+    let dir = batch("sediment-site", &[&site]).remove(0);
+    let err = super::apply_fields(&dir, &fields).unwrap_err();
+    assert!(err.contains("空间算例"), "{err}");
+    let dir = batch("sediment-spatial", &[SAMPLE]).remove(0);
+    let mut no_river = fields.clone();
+    no_river.push(FieldChange {
+        path: "DEF_USE_GridRiverLakeFlow".into(),
+        value: ".false.".into(),
+    });
+    let err = super::apply_fields(&dir, &no_river).unwrap_err();
+    assert!(err.contains("DEF_USE_GridRiverLakeFlow"), "{err}");
+    let mut with_river = fields.clone();
+    with_river.push(FieldChange {
+        path: "DEF_USE_GridRiverLakeFlow".into(),
+        value: ".true.".into(),
+    });
+    super::apply_fields(&dir, &with_river).unwrap();
+    let staged =
+        std::fs::read_to_string(std::path::Path::new(&dir).join("standard_sediment_parameter.nml"))
+            .unwrap();
+    assert_eq!(
+        staged,
+        include_str!("../../../vendor/CoLM202X/run/standard_sediment_parameter.nml")
+    );
+}

@@ -666,6 +666,7 @@
   `wfc` 本来就对，不动。PR 同时加了 namelist 开关 `DEF_HIST_grid_as_model_mesh`（非 GRIDBASED 时自动关），目前没有代码读它，
   照样并入（schema 重新生成）。Rust：`derive_soil_parameters` 存 `alpha*0.1`、`sc_vgm/fc_vgm` 用换算后的值，
   `soil_surface_resistance` 的常数改 3399。
+- **上游**：已推到 `zhongwangwei/CoLM202X` 的 `fix/colm-desktop-audit`（`7d8a4b4b`，PR #24）。
 
 ### 75. `LeafTemperaturePC` 在无植被斑块上提前返回，intent(out) 输出全部未赋值
 
@@ -680,6 +681,7 @@
   现在 `leaf_temperature_pc` 返回 `None`（只落地 `tl = forc_t`，臭氧系数重置在判断之后，不触发），`pft.rs` 的
   `pc_unvegetated_record` 按 Fortran 调用方的原值组装记录：patch 级湍流量取前置 `GroundFluxes`，`zol/rib/ustar/qstar/tstar`
   与 `raw` 取 `THERMAL` 开头的 0，`z0m = sum(z0m_p*pftfrac)`。
+- **上游**：已推（`7d8a4b4b`）。上游的 `raw_trc_out` 只在 `#ifdef TRACER` 下声明，那一行赋值也包在里面。
 
 ### 76. 流域网格内流区水库的 `volresv/qresv_in/qresv_out` 未赋值就进时间平均
 
@@ -691,6 +693,7 @@
 - **影响**：珠江 250 km² 网格有一个这样的水库（hylak 1386330，`build_year = -99`）。macOS/gfortran 上新分配的内存恰好是 0，
   输出为 0；换平台或内存复用时可能是任意值。
 - **处理**（第 579 轮）：vendor 在 `allocate` 时置 0（现有输出逐位不变）；Rust 的 `ReservoirFlow::new` 同样从 0 起。
+- **上游**：已推（`7d8a4b4b`）。
 
 ### 77. 甲烷 `hybrid` 淹没方案不检查河湖汇流运行时开关
 
@@ -703,6 +706,7 @@
 - **处理**（第 588 轮）：vendor 的 `hybrid` 分支补上与 `routing` 相同的 `DEF_USE_GridRiverLakeFlow` 检查（只多一条停机，
   已能跑的配置结果不变）。Rust 的 `configure_inundation` 收到的 `grid_river` 本来就含运行时开关，两侧一致。GUI 的向导
   按内核与河湖开关给出可选方案，并让动态湿地跟随方案开关。
+- **上游**：上游没有 `DEF_USE_GridRiverLakeFlow` 运行时开关，原来对 `routing` 与 `hybrid` 都不查内核。改为在没编进 `GridRiverLakeFlow` 的内核里两者都停机（洪泛比例只由 `MOD_Grid_RiverLakeFlow` 产生），已推（`7d8a4b4b`）。
 
 ### 78. 土壤顶界向上通量整份记成土壤蒸发
 

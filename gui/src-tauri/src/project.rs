@@ -73,6 +73,11 @@ pub struct CaseProfile {
     pub isotope: bool,
     pub fractionation: bool,
     pub aquifer_mixing_mm: Option<f64>,
+    /// 溶质与它参数文件里的 `[初始浓度, 降水浓度]`（kg/kg）。
+    pub solute: bool,
+    pub solute_conc: Option<[f64; 2]>,
+    /// 河道泥沙（`SEDIMENT` provider）。
+    pub sediment: bool,
     pub river: bool,
     pub rangecheck: bool,
     pub colmdebug: bool,
@@ -174,9 +179,13 @@ pub fn open_case(dir: String) -> Result<OpenedCase, String> {
     )?;
     profile.domain_kind = record.domain;
     profile.shapefile = record.shapefile;
-    profile.methane_mode = colm_namelist::parse(&text)
-        .ok()
-        .and_then(|doc| crate::config::methane_mode(&doc, &dir));
+    let doc = colm_namelist::parse(&text).ok();
+    profile.methane_mode = doc
+        .as_ref()
+        .and_then(|doc| crate::config::methane_mode(doc, &dir));
+    profile.solute_conc = doc
+        .as_ref()
+        .and_then(|doc| crate::config::solute_concentrations(doc, &dir));
     Ok(OpenedCase {
         entry,
         root,
@@ -322,6 +331,18 @@ pub(crate) fn case_profile(
         fractionation: logical(&doc, "DEF_TRACER_USE_FRACTIONATION"),
         aquifer_mixing_mm: Some(real(&doc, "DEF_TRACER_AQUIFER_MIXING_WATER_MM"))
             .filter(|value| *value > 0.0),
+        solute: logical(&doc, "DEF_USE_TRACER")
+            && character(&doc, "DEF_TRACER_TYPES")
+                .split(',')
+                .any(|kind| kind.trim().eq_ignore_ascii_case("solute")),
+        solute_conc: None,
+        sediment: logical(&doc, "DEF_USE_TRACER")
+            && character(&doc, "DEF_TRACER_NAMES").split(',').any(|name| {
+                matches!(
+                    name.trim().to_ascii_uppercase().as_str(),
+                    "SEDIMENT" | "SED"
+                )
+            }),
         river: gridded_routing && logical(&doc, "DEF_USE_GridRiverLakeFlow"),
         rangecheck: logical(&doc, "DEF_USE_RangeCheck"),
         colmdebug: logical(&doc, "DEF_USE_CoLMDEBUG"),
