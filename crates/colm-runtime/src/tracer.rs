@@ -408,6 +408,29 @@ pub fn end_of_step(
 
 /// 一步里所有 patch 都推进完之后（`CoLMDRIVER.F90:392-393`，在 `hist_out` 之前）调一次
 /// `tracer_report`。各 patch 共用同一个 [`TracerRuntime`]，取第一个挂了示踪物的模板。
+/// 写续跑那一步之后，把内存里各 patch 示踪物状态的舍入负值归零，与上游
+/// `write_land_tracer_restart` → `validate_land_tracer_restart_state` 就地 `clamp` 的效果一致。
+pub fn clamp_restart_dust_after_step(
+    write_restart: bool,
+    templates: &[crate::assembly::StandardLctRestartTemplate],
+    states: &mut [colm_core::StandardLctSnowSoilState],
+) {
+    if !write_restart {
+        return;
+    }
+    let Some((runtime, _)) = templates
+        .iter()
+        .find_map(|template| template.tracer.as_ref())
+    else {
+        return;
+    };
+    for state in states {
+        if let Some(track) = state.tracer.as_deref_mut() {
+            clamp_land_tracer_restart_dust(&runtime.set, &mut track.state);
+        }
+    }
+}
+
 pub fn report_after_patches(
     templates: &[crate::assembly::StandardLctRestartTemplate],
 ) -> Result<()> {
@@ -658,20 +681,208 @@ impl<'a> ForcingCache<'a> {
     }
 }
 
+/// `LAND_TRACER_RESTART_NEGATIVE_DUST`：续跑状态里容许的舍入负值。
+const LAND_TRACER_RESTART_NEGATIVE_DUST: f64 = 1.0e-12;
+
+/// 非负量（上游 `count_nonnegative_*` 的清单）。检查之后归零的见
+/// [`clamp_land_tracer_restart_dust`]，`trc_aquifer_ref_mass` 只查不归零。
+const NONNEGATIVE_PATCH: [PatchField; 14] = [
+    |p| p.ldew_rain,
+    |p| p.ldew_snow,
+    |p| p.aquifer_ref_mass,
+    |p| p.wdsrf,
+    |p| p.wetwat,
+    |p| p.surface_residue,
+    |p| p.subsurface_residue,
+    |p| p.canopy_solid,
+    |p| p.surface_solid,
+    |p| p.subsurface_solid,
+    |p| p.waterstorage_solid,
+    |p| p.scv,
+    |p| p.waterstorage,
+    |p| p.leaf_water_moles,
+];
+const NONNEGATIVE_LAYERS: [LayerField; 3] =
+    [|p| &p.wliq_soisno, |p| &p.wice_soisno, |p| &p.solid_soisno];
+/// 有符号量（`count_signed_patch`：只查是否有限）。
+const SIGNED_PATCH: [PatchField; 4] = [
+    |p| p.wa,
+    |p| p.leaf_delta_e,
+    |p| p.leaf_delta_b,
+    |p| p.leaf_iso_storage,
+];
+
+/// 写续跑时检查用到的宿主量：逐 patch 的含水层水量 `wa` 与 `patchtype`，以及生效的变饱和流开关。
+#[derive(Debug, Clone, Copy)]
+pub struct RestartStateCheck<'a> {
+    pub wa: &'a [f64],
+    pub patch_types: &'a [i32],
+    pub variably_saturated_flow: bool,
+}
+
+/// `validate_land_tracer_restart_state` 的检查部分：任一类计数非零就中止，不写出半份事务。
+/// 计数顺序同上游 `[amount_nan amount_neg signed_nan peclet_range missing_state aquifer_state
+/// reference]`；Rust 的示踪物状态总是齐全的，`missing_state` 恒为 0。
+pub fn validate_land_tracer_restart_state(
+    set: &TracerSet,
+    states: &[&PatchTracerState],
+    check: &RestartStateCheck<'_>,
+) -> Result<()> {
+    let transport: Vec<usize> = set.transport_indices().collect();
+    let mut counts = [0_usize; 7];
+    let amount = |value: f64, counts: &mut [usize; 7]| {
+        if !value.is_finite() {
+            counts[0] += 1;
+        } else if value < -LAND_TRACER_RESTART_NEGATIVE_DUST {
+            counts[1] += 1;
+        }
+    };
+    let require_reference = check.variably_saturated_flow
+        && transport.iter().any(|&itrc| set.tracers[itrc].is_isotope());
+    for (ip, state) in states.iter().enumerate() {
+        for &itrc in &transport {
+            let pools = &state.pools[itrc];
+            for field in NONNEGATIVE_PATCH {
+                amount(field(pools), &mut counts);
+            }
+            for field in NONNEGATIVE_LAYERS {
+                for &value in field(pools) {
+                    amount(value, &mut counts);
+                }
+            }
+            for field in SIGNED_PATCH {
+                if !field(pools).is_finite() {
+                    counts[2] += 1;
+                }
+            }
+            if !pools.leaf_peclet.is_finite() {
+                counts[2] += 1;
+            } else if !(0.0..=1.0).contains(&pools.leaf_peclet) {
+                counts[3] += 1;
+            }
+        }
+        // 含水层参考水量：逐 patch 一个，与示踪物无关。
+        let reference = state.aquifer_ref_water;
+        let patch_type = check.patch_types.get(ip).copied();
+        if !reference.is_finite() || reference < 0.0 || (!require_reference && reference > 0.0) {
+            counts[6] += 1;
+        } else if let Some(patch_type) = patch_type {
+            let soil_or_wetland = patch_type == 0 || patch_type == 2;
+            if require_reference && soil_or_wetland && reference <= 0.0 {
+                counts[6] += 1;
+            }
+            if !soil_or_wetland && reference > 0.0 {
+                counts[6] += 1;
+            }
+        }
+        for &itrc in &transport {
+            let tracer = &set.tracers[itrc];
+            let expected = if tracer.is_isotope() {
+                reference * tracer.ref_ratio
+            } else {
+                0.0
+            };
+            let mass = state.pools[itrc].aquifer_ref_mass;
+            if !expected.is_finite()
+                || (mass - expected).abs() > 1.0e-12_f64.max(1.0e-10 * expected.abs())
+            {
+                counts[6] += 1;
+            }
+        }
+        if let Some(&wa) = check.wa.get(ip) {
+            for &itrc in &transport {
+                let tracer = &set.tracers[itrc];
+                if tracer.is_isotope()
+                    && !colm_core::tracer::soil_water::aquifer_isotope_state_valid(
+                        wa,
+                        state.pools[itrc].wa,
+                        tracer.ref_ratio,
+                        reference,
+                        state.pools[itrc].aquifer_ref_mass,
+                    )
+                {
+                    counts[5] += 1;
+                }
+            }
+        }
+    }
+    anyhow::ensure!(
+        counts.iter().all(|&n| n == 0),
+        "invalid generic land tracer restart state: counts [amount_nan amount_neg signed_nan \
+         peclet_range missing_state aquifer_state reference]: {}",
+        counts.map(|n| n.to_string()).join(" ")
+    );
+    Ok(())
+}
+
+/// `validate_land_tracer_restart_state` 末尾的 `clamp_nonnegative_*`：检查放过的舍入负值就地归零
+/// （上游改的是内存里的状态，之后的模拟接着用归零后的值）。有符号量与 `trc_aquifer_ref_mass` 不动。
+pub fn clamp_land_tracer_restart_dust(set: &TracerSet, state: &mut PatchTracerState) {
+    for itrc in set.transport_indices() {
+        let pools = &mut state.pools[itrc];
+        for value in [
+            &mut pools.ldew_rain,
+            &mut pools.ldew_snow,
+            &mut pools.wdsrf,
+            &mut pools.wetwat,
+            &mut pools.surface_residue,
+            &mut pools.subsurface_residue,
+            &mut pools.canopy_solid,
+            &mut pools.surface_solid,
+            &mut pools.subsurface_solid,
+            &mut pools.waterstorage_solid,
+            &mut pools.scv,
+            &mut pools.waterstorage,
+            &mut pools.leaf_water_moles,
+        ] {
+            if *value < 0.0 {
+                *value = 0.0;
+            }
+        }
+        for layers in [
+            &mut pools.wliq_soisno,
+            &mut pools.wice_soisno,
+            &mut pools.solid_soisno,
+        ] {
+            for value in layers.iter_mut() {
+                if *value < 0.0 {
+                    *value = 0.0;
+                }
+            }
+        }
+    }
+}
+
 /// `write_land_tracer_restart`（含 `tracer_forcing_write_restart` 的计数）：把示踪物
 /// 预报量追加进一个已写好的陆面时间重启（`patch`/`soilsnow` 维已在）。没有输运示踪物时
 /// 只写空事务（见 `colm_init::write_empty_land_tracer_transaction`）。
+///
+/// 写之前先做上游的状态检查（[`validate_land_tracer_restart_state`]），写出的是归零舍入负值
+/// 之后的值。上游同时改了内存里的状态；调用方的状态在这里是只读的，内存那一侧由运行时在
+/// 写续跑的那一步之后做（[`clamp_restart_dust_after_step`]）。
 pub fn write_land_tracer_restart(
     path: &Path,
     set: &TracerSet,
     states: &[&PatchTracerState],
     aquifer_mixing_water_mm: f64,
     cache: Option<&ForcingCache<'_>>,
+    check: &RestartStateCheck<'_>,
 ) -> Result<()> {
     let transport: Vec<usize> = set.transport_indices().collect();
     if transport.is_empty() {
         colm_init::write_empty_land_tracer_transaction(path, aquifer_mixing_water_mm)?;
     } else {
+        validate_land_tracer_restart_state(set, states, check)?;
+        let clamped: Vec<PatchTracerState> = states
+            .iter()
+            .map(|&state| {
+                let mut state = state.clone();
+                clamp_land_tracer_restart_dust(set, &mut state);
+                state
+            })
+            .collect();
+        let states: Vec<&PatchTracerState> = clamped.iter().collect();
+        let states = states.as_slice();
         let mut file =
             netcdf::append(path).with_context(|| format!("cannot reopen {}", path.display()))?;
         let ntransport = transport.len();

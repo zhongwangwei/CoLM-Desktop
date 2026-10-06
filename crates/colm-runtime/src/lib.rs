@@ -657,7 +657,13 @@ impl PointRuntime {
                 time_step_seconds,
             )?;
             let views = outputs.iter().map(PatchOutput::view).collect::<Vec<_>>();
-            on_step(step, states, &views)
+            on_step(step, states, &views)?;
+            crate::tracer::clamp_restart_dust_after_step(
+                step.clock.write_restart,
+                templates,
+                states,
+            );
+            Ok(())
         });
         self.baseflow_optimizer = optimizer;
         let steps = match steps {
@@ -731,7 +737,13 @@ impl PointRuntime {
                 time_step_seconds,
             )?;
             let views = outputs.iter().map(PatchOutput::view).collect::<Vec<_>>();
-            on_step(step, states, &views)
+            on_step(step, states, &views)?;
+            crate::tracer::clamp_restart_dust_after_step(
+                step.clock.write_restart,
+                templates,
+                states,
+            );
+            Ok(())
         });
         self.baseflow_optimizer = optimizer;
         steps

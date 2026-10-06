@@ -30372,4 +30372,36 @@ GUI 的"不分馏"卡片去掉了"会被上游自检停机"的提示。
 
 **上游**：#78、#79 一起推到 `zhongwangwei/CoLM202X` 的 `fix/colm-desktop-audit`（`160dc2cf`，PR #24）。上游这个文件与修复前的 vendor 只差 TRACER/CoLMDEBUG 宏几行，补丁干净打上，注释改成上游风格（不带编号）。在上游树里按 `SinglePoint LULC_IGBP_PFT … TRACERON` 编出 `colm.x`。上游的 namelist 与本仓库不同（TRACER 是编译宏），没有在上游内核上跑算例。
 
-**还没移植**：上游写续跑时 `validate_land_tracer_restart_state` 的其余检查（NaN、超过 -1e-12 的负值、含水层参考量、Péclet 范围），Rust 陆面示踪物续跑写出不做这些检查。只在状态已损坏时才有区别。
+**还没移植**：上游写续跑时 `validate_land_tracer_restart_state` 的其余检查（NaN、超过 -1e-12 的负值、含水层参考量、Péclet 范围），Rust 陆面示踪物续跑写出不做这些检查。只在状态已损坏时才有区别。（第 596 轮已移植。）
+
+## 第 596 轮：移植陆面示踪物续跑写出的状态检查（`validate_land_tracer_restart_state`）
+
+上游 `write_land_tracer_restart` 在写出之前（标记事务未完成之前）先检查内存里的示踪物状态，再把舍入负值**就地**归零：
+- **检查**：七类计数 `[amount_nan amount_neg signed_nan peclet_range missing_state aquifer_state reference]`，任一非零就 `CoLM_stop('invalid generic land tracer restart state')`。
+  - 非负量（17 个，含分层的 `wliq/wice/solid_soisno` 与 `aquifer_ref_mass`）：非有限、或小于 -1e-12；
+  - 有符号量（`trc_wa`、`leaf_delta_e/b`、`leaf_iso_storage`）：只查有限；`leaf_peclet` 另查是否在 [0, 1]；
+  - 含水层参考水量：负值或非有限都不行；没有同位素（或不是变饱和流）时必须为 0；有同位素时，土壤/湿地 patch 必须为正，其它类型必须为 0；
+  - 参考质量必须等于参考水量 × `ref_ratio`（非同位素为 0），容差 max(1e-12, 1e-10×期望值)；
+  - 同位素含水层：`tracer_aquifer_isotope_state_valid(wa, trc_wa, …)`。
+- **归零**：上述非负量里除 `aquifer_ref_mass` 外，负值置 0。上游改的是内存，之后的模拟接着用归零后的值。
+
+**Rust**（`colm-runtime/src/tracer.rs`）：
+- `validate_land_tracer_restart_state`：照上表计数，报错信息与上游同序。`missing_state` 恒为 0，因为 Rust 的状态总是齐全的。
+- `clamp_land_tracer_restart_dust`：归零。
+- `write_land_tracer_restart` 新增 `RestartStateCheck { wa, patch_types, variably_saturated_flow }` 参数：先检查，再写归零后的副本。
+- **内存那一侧**：Rust 的定期续跑在只读回调里写，回调同时借用着本步输出，拿不到可变状态。所以改为由运行时在 `clock.write_restart` 那一步、回调返回之后归零（`clamp_restart_dust_after_step`）。站点两个主循环和空间主循环都接上了。窗口末尾那一次写出走的是已归零的状态，与上游一致。
+- 调用方：单点与空间的 `append_tracer_restart` 用状态里的 `wa` 与模板的 `patch_type`；LULCC 过渡那处用新时间重启的 `wa` 与新常数重启的 `patchtype`。
+- 读续跑一侧（上游读入后同样检查并归零）没有移植：Rust 写出的续跑已经归零，读回时再归零是空操作。
+
+原来的往返测试给溶质设了 `aquifer_ref_water = 2.0`，按上游规则这是无效状态，改成 0。新增 3 条测试：
+- 舍入负值写出为 0，而 `trc_wa` 不动；
+- 超出容差、NaN、Péclet 越界、参考水量不一致都拒绝写出，计数串与上游同序；
+- 同位素的参考水量、参考质量与含水层载体检查。
+
+**验收**：
+- 配对（Fortran 未变，只重跑 Rust）：
+  - `isosite`、`isosum`、`isosol` 各 `files ok 8`；
+  - 每日写续跑的 `isod`（10 天、11 份续跑）`files ok 26`；
+  - `iso` 261；`gh` 293。
+- **对照实验**：两侧都临时去掉第 595 轮土壤水里的舍入归零（Fortran 编到临时内核目录），`isosite` 也是 `files ok 8`，续跑里 `trc_wliq_soisno` 的最小值为 0.0。第 595 轮恰是这个值不一致（Fortran 0.0 对 Rust -8.67e-19），说明续跑归零移植正确。临时改动已还原。
+- `colm-runtime` 166 个测试、clippy、fmt 通过。

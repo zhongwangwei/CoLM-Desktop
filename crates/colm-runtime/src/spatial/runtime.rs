@@ -577,6 +577,11 @@ impl SpatialRuntime {
                     self.catchment.as_ref(),
                 )?;
                 timer.mark("lai, optimizer, restarts");
+                crate::tracer::clamp_restart_dust_after_step(
+                    steps[0].clock.write_restart,
+                    templates,
+                    &mut next_states,
+                );
                 *states = next_states;
                 self.clock = next_clock;
                 completed += 1;

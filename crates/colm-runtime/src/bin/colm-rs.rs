@@ -3550,6 +3550,13 @@ fn lulcc_transition(
                 }
                 _ => None,
             };
+            // `write_land_tracer_restart` 同样先检查状态（`wa` 取冷启动时间重启里的值）。
+            let wa = cold.floats("wa")?.to_vec();
+            let patch_types = new_const
+                .integers("patchtype")?
+                .iter()
+                .map(|&t| i32::try_from(t))
+                .collect::<Result<Vec<_>, _>>()?;
             colm_runtime::tracer::write_land_tracer_restart(
                 &path,
                 set,
@@ -3567,6 +3574,11 @@ fn lulcc_transition(
                         },
                     )
                     .as_ref(),
+                &colm_runtime::tracer::RestartStateCheck {
+                    wa: &wa,
+                    patch_types: &patch_types,
+                    variably_saturated_flow: case.physics.variably_saturated_flow,
+                },
             )?;
         }
         // 过渡这一步的历史区间已关，旁车不带示踪物部分。
@@ -4425,12 +4437,25 @@ fn append_tracer_restart(
                     .context("every patch of a tracer run carries tracer state")
             })
             .collect::<Result<Vec<_>>>()?;
+        let wa: Vec<f64> = states
+            .iter()
+            .map(|state| state.soil_water.aquifer_water_mm)
+            .collect();
+        let patch_types: Vec<i32> = templates
+            .iter()
+            .map(|template| template.patch_type)
+            .collect();
         colm_runtime::tracer::write_land_tracer_restart(
             path,
             &tracer.set,
             &tracks,
             tracer.aquifer_mixing_water_mm,
             cache,
+            &colm_runtime::tracer::RestartStateCheck {
+                wa: &wa,
+                patch_types: &patch_types,
+                variably_saturated_flow: tracer.variably_saturated_flow,
+            },
         )?;
     }
     // `tracer_lifecycle_land_write_restart`：CH4 provider 的状态接在示踪物事务之后。
