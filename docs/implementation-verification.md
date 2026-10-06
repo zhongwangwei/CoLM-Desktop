@@ -30442,3 +30442,12 @@ GUI 的"不分馏"卡片去掉了"会被上游自检停机"的提示。
 上游树里编过 `SinglePoint`（PC、BGC、TRACER）与 `GRID`（PFT、BGC、TRACER）两种配置，都链接出 `colm.x`。`CATCHMENT` 的 Fortran 编译无错，没有重做 MPI 链接。
 
 本仓库 10-05 以后的其余 vendor 改动是桌面版功能，没有同步：河湖汇流运行时开关、区域单元流域、unitcat history 裁剪、流域网格水库调度。它们不是缺陷修复，上游怎么做应由上游决定。
+
+## 第 598 轮：降水示踪物 history 的 long_name 写明露霜
+
+`a_water_precip` 除了雨雪还记冠层与地表的露、霜沉积，所以 `f_trc_delta_precip_*`、`f_trc_conc_precip_*` 是全部大气输入的平均值（第 597 轮 1 月 Cl 的"降水浓度为 0"就是露霜造成的）。原来的 long_name 只写"precipitation/deposition"，看不出 deposition 指什么，也看不出溶质为什么会是 0。
+
+- δ：`precipitation plus dew/frost deposition tracer delta (<name>)`；
+- 浓度：`precipitation plus dew/frost deposition tracer concentration (<name>)`，不挥发溶质再接 `, dew/frost adding water only`（上游按 `tracer_is_nonvolatile_solute` 分两种写法，Rust 新增 `LongName::SoluteNote`）。
+
+只改名字，数值不变。验收：`sol` 8、`isosite` 8、`iso` 261 份逐位一致，两侧文件里的 long_name 逐字相同；`colm-core` 的 hist 测试补了 Cl 的名字。同一改动推到 CoLM202X 的 `fix/colm-desktop-audit`（`21ea5f7f`），上游单点 TRACER 配置编译通过。

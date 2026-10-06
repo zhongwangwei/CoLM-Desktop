@@ -306,6 +306,9 @@ pub enum LongName {
     Plain(&'static str),
     /// `'<text><ratio_word> (<name>)'`，`ratio_word` 同位素为 `heavy/total ratio`，否则 `concentration`。
     RatioWord(&'static str),
+    /// `'<text> (<name>)'`，不挥发溶质在 `<text>` 后再接 `<solute_note>`（`MOD_Tracer_Hist` 按
+    /// `tracer_is_nonvolatile_solute` 分两种写法）。
+    SoluteNote(&'static str, &'static str),
 }
 
 /// units 的写法。
@@ -341,6 +344,14 @@ impl TracerHistoryVariable {
     pub fn long_name(&self, tracer: &TracerDescriptor) -> String {
         match self.long_name {
             LongName::Plain(text) => format!("{text} ({})", tracer.name.trim()),
+            LongName::SoluteNote(text, note) => {
+                let note = if tracer.is_nonvolatile_solute() {
+                    note
+                } else {
+                    ""
+                };
+                format!("{text}{note} ({})", tracer.name.trim())
+            }
             LongName::RatioWord(text) => {
                 let word = if tracer.is_isotope() {
                     "heavy/total ratio"
@@ -420,7 +431,7 @@ const PRECIP_KEYS: &[&str] = &["xy_prc", "xy_prl"];
 const PERMIL: Units = Units::Fixed("permil");
 const AMOUNT: Units = Units::Fixed("tracer amount/m2");
 
-use LongName::{Plain, RatioWord};
+use LongName::{Plain, RatioWord, SoluteNote};
 use TracerHistDims::{SoilSnow, Surface};
 use TracerHistId as Id;
 use TracerHistKind::{AreaState, LayerRatio, Mean, Ratio};
@@ -430,7 +441,8 @@ use TracerScope::{Isotope, NonIsotope, NonvolatileSolute, Transport};
 #[rustfmt::skip]
 pub const TRACER_HISTORY_VARIABLES: [TracerHistoryVariable; 28] = [
     var(Id::DeltaPrecip, "f_trc_delta_precip_", Surface, PRECIP_KEYS, Isotope, FLUX_DELTA,
-        Plain("precipitation/deposition tracer delta"), PERMIL, "a_trc_precip / a_water_precip"),
+        Plain("precipitation plus dew/frost deposition tracer delta"), PERMIL,
+        "a_trc_precip / a_water_precip"),
     var(Id::DeltaRunoff, "f_trc_delta_runoff_", Surface, &["rnof"], Isotope, FLUX_DELTA,
         Plain("total runoff tracer delta"), PERMIL, "a_trc_rnof / a_water_rnof"),
     var(Id::DeltaEvap, "f_trc_delta_evap_", Surface, &["fevpa"], Isotope, FLUX_DELTA,
@@ -457,7 +469,8 @@ pub const TRACER_HISTORY_VARIABLES: [TracerHistoryVariable; 28] = [
         Plain("bulk leaf-water NSS delta, leaf-water-mole weighted"), PERMIL,
         "R(trc_leaf_delta_b)*trc_leaf_water_moles / trc_leaf_water_moles (state)"),
     var(Id::ConcPrecip, "f_trc_conc_precip_", Surface, PRECIP_KEYS, NonIsotope, Ratio,
-        Plain("precipitation/deposition tracer concentration"), Units::RatioUnits,
+        SoluteNote("precipitation plus dew/frost deposition tracer concentration",
+            ", dew/frost adding water only"), Units::RatioUnits,
         "a_trc_precip / a_water_precip"),
     var(Id::ConcRunoff, "f_trc_conc_runoff_", Surface, &["rnof"], NonIsotope, Ratio,
         Plain("total runoff tracer concentration"), Units::RatioUnits, "a_trc_rnof / a_water_rnof"),

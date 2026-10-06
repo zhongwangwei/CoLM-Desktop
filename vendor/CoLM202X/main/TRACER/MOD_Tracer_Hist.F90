@@ -281,7 +281,9 @@ CONTAINS
 
                   IF (tracer_uses_delta_diagnostics(itrc_loc)) THEN
                      write(trc_varname , '(A,A)') 'f_trc_delta_precip_', trim(tracers(itrc_loc)%name)
-                     write(trc_longname, '(A,A,A)') 'precipitation/deposition tracer delta (', &
+                     ! a_water_precip also books dew/frost deposition (MOD_Tracer_Evapo,
+                     ! MOD_Tracer_SoilWater), so say so in the name.
+                     write(trc_longname, '(A,A,A)') 'precipitation plus dew/frost deposition tracer delta (', &
                         trim(tracers(itrc_loc)%name), ')'
                      CALL write_history_tracer_delta_2d (DEF_hist_vars%xy_prc .or. DEF_hist_vars%xy_prl, &
                         a_trc_precip(itrc_loc, :), a_water_precip(itrc_loc, :), &
@@ -450,8 +452,17 @@ CONTAINS
                   ! water-pool diagnostics just like conservative tracers.
                   IF (.not. tracer_uses_delta_diagnostics(itrc_loc)) THEN
                      write(trc_varname , '(A,A)') 'f_trc_conc_precip_', trim(tracers(itrc_loc)%name)
-                     write(trc_longname, '(A,A,A)') 'precipitation/deposition tracer concentration (', &
-                        trim(tracers(itrc_loc)%name), ')'
+                     ! a_water_precip also books dew/frost deposition, which carries no
+                     ! nonvolatile solute: dew-only periods read 0, not missing.
+                     IF (tracer_is_nonvolatile_solute(itrc_loc)) THEN
+                        write(trc_longname, '(A,A,A)') &
+                           'precipitation plus dew/frost deposition tracer concentration, dew/frost adding water only (', &
+                           trim(tracers(itrc_loc)%name), ')'
+                     ELSE
+                        write(trc_longname, '(A,A,A)') &
+                           'precipitation plus dew/frost deposition tracer concentration (', &
+                           trim(tracers(itrc_loc)%name), ')'
+                     ENDIF
                      CALL write_history_tracer_ratio_2d (DEF_hist_vars%xy_prc .or. DEF_hist_vars%xy_prl, &
                         a_trc_precip(itrc_loc, :), a_water_precip(itrc_loc, :), &
                         file_hist, trim(trc_varname), itime_in_file, filter, &

@@ -195,7 +195,13 @@ fn variable_table_names_units_and_scopes() {
     assert!(!precip.enabled(|key| key == "rnof"));
     assert_eq!(
         precip.long_name(hdo),
-        "precipitation/deposition tracer delta (HDO)"
+        "precipitation plus dew/frost deposition tracer delta (HDO)"
+    );
+    // 露霜不带不挥发溶质：Cl 的名字里写明。
+    let conc = history_variable(TracerHistId::ConcPrecip);
+    assert_eq!(
+        conc.long_name(cl),
+        "precipitation plus dew/frost deposition tracer concentration, dew/frost adding water only (Cl)"
     );
     assert_eq!(
         history_variable(TracerHistId::ConcSoisno).dims,
