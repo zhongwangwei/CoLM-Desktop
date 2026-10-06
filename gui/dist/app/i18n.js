@@ -176,7 +176,7 @@ const ZH_EN = [
   ['本地运行', 'Local run'],
   ['服务器运行', 'Server run'],
   ['进入本地工作台 →', 'Open local workspace →'],
-  ['H₂¹⁸O / HDO 水循环同位素', 'H₂¹⁸O / HDO water-cycle isotopes'],
+  ['H₂¹⁸O / HDO 水循环同位素；可与甲烷同时开', 'H₂¹⁸O / HDO water-cycle isotopes; can run together with methane'],
   ['LULCC 不支持 USGS 次网格', 'LULCC does not support the USGS subgrid'],
   ['LULCC 不能与 BGC 同时开启', 'LULCC cannot be enabled together with BGC'],
   ['纯城市单点不运行 BGC', 'Pure urban SinglePoint does not run BGC'],
@@ -372,7 +372,7 @@ const ZH_EN = [
   ['<站点名>_Met.nc', '<site-name>_Met.nc'],
   ['…/Met/AT-Neu.nc 或 stations.csv', '…/Met/AT-Neu.nc or stations.csv'],
   ['选择示踪剂类型', 'Choose tracer type'],
-  ['目前只开放甲烷 CH₄；其他类型保留入口但不可选。', 'Only methane CH₄ is available now; other tracer families are listed but disabled.'],
+  ['可多选：水同位素与甲烷可以同时开；溶质与泥沙暂未开放。', 'Multiple choice: water isotopes and methane can run together; solutes and sediment are not available yet.'],
   ['同位素 / 溶质 / 气体 / 颗粒示踪；当前仅开放甲烷', 'Isotope / solute / gas / particle tracers; methane is currently the only available option'],
   ['水同位素', 'Water isotopes'],
   ['甲烷 CH₄', 'Methane CH₄'],
@@ -408,6 +408,21 @@ const ZH_EN = [
   ['甲烷需要 PFT 或 PC、BGC、van Genuchten 土壤水力；本页会把运行参数自动写入算例', 'Methane requires PFT or PC, BGC, and van Genuchten soil hydrology; this page writes the run parameters automatically.'],
   ['甲烷示踪需要 PFT 或 PC 次网格', 'Methane tracing requires PFT or PC subgrid'],
   ['甲烷示踪需要同时开启 BGC', 'Methane tracing also requires BGC'],
+  ['开分馏（IsoGSM 驱动）', 'Fractionation (IsoGSM-driven)'],
+  ['同位素降水与水汽读 IsoGSM，主强迫也必须选 IsoGSM；仅空间算例', 'Isotopic precipitation and vapor come from IsoGSM, so the main forcing must be IsoGSM too; spatial cases only'],
+  ['不分馏', 'No fractionation'],
+  ['同位素随水输运但不分馏，降水与水汽取缺省 δ 值；站点与空间都可用。上游每步自检通量比值，土柱强烈向上渗出时会停机', 'Isotopes move with water without fractionation; precipitation and vapor use default δ values; works for sites and spatial cases. Upstream self-checks the flux ratios every step and stops when the soil column exfiltrates strongly'],
+  ['水同位素怎么算？', 'How should water isotopes be simulated?'],
+  ['选择是否分馏，并给出含水层混合水量。', 'Choose whether to fractionate, and give the aquifer mixing water depth.'],
+  ['ⓘ 同位素强迫文件与参数文件建例时自动写入算例目录；含水层混合水量建例后可在「示踪剂」页改', 'ⓘ The isotope forcing and parameter files are written into the case directory on creation; the aquifer mixing water can be changed later on the Tracer page'],
+  ['单点没有示踪物强迫，不能分馏', 'SinglePoint has no tracer forcing, so it cannot fractionate'],
+  ['含水层混合水量（mm）', 'Aquifer mixing water (mm)'],
+  ['预填的 1000 mm 只是测试值，正式模拟请用实测或率定的有效混合水深。它决定地下水同位素的缓冲与记忆，必须大于运行中可能的最大地下水亏缺。', 'The prefilled 1000 mm is only a test value; use a measured or calibrated effective mixing depth for production runs. It sets the buffering and memory of groundwater isotopes and must exceed the largest groundwater deficit the run can reach.'],
+  ['LULCC 不能与水同位素同开（上游停机）', 'LULCC cannot run with water isotopes (upstream stops)'],
+  ['水同位素不能与 LULCC 同开（上游停机）', 'Water isotopes cannot run with LULCC (upstream stops)'],
+  ['向导预填的 1000 mm 是测试值，正式模拟请用实测或率定值。', 'The 1000 mm prefilled by the wizard is a test value; use a measured or calibrated value for production runs.'],
+  ['它是含水层与地下水同位素混合的有效水深，决定地下水同位素的缓冲与记忆；', 'It is the effective depth over which aquifer and groundwater isotopes mix, setting the buffering and memory of groundwater isotopes;'],
+  ['上游没有缺省值，且必须大于运行中可能的最大地下水亏缺。', 'upstream has no default, and it must exceed the largest groundwater deficit the run can reach.'],
   ['混合（hybrid）', 'Hybrid (hybrid)'],
   ['动态地下水位 + 河网洪泛；上游参数文件的推荐方案', 'Dynamic water table + river flooding; recommended by the upstream parameter file'],
   ['河网洪泛（routing）', 'River flooding (routing)'],
@@ -928,7 +943,7 @@ const ZH_EN = [
   ['本次新建或打开的算例；点一行切到该算例，勾选用于批量修改与运行。', 'Cases created or opened in this session; click a row to switch to it, tick rows for batch edits and runs.'],
   ['本次还没有可运行的算例；先在基本设定中创建或打开算例', 'There is no case to run yet; create or open one in Basic setup first'],
   ['勾选的站点没能建出算例，未开始运行', 'None of the ticked sites could be turned into a case; nothing was run'],
-  ['城市模式暂不支持甲烷示踪', 'Methane tracing is not supported with the urban model yet'],
+  ['城市模式暂不支持示踪剂', 'Tracers are not supported with the urban model yet'],
   ['流域网格的侧向流暂不支持这一项', 'Catchment lateral flow does not support this yet'],
   ['打开已有算例…', 'Open existing case…'],
   ['注意：非结构 mesh 的边界与河网的单元流域划分可能不一致，mesh 须包含所关心河流的全部上游子流域；mesh 外的上游与边界处只部分覆盖的单元流域都会少算产流，出口流量会偏小。', 'Note: the unstructured mesh boundary may not match the unit catchments of the river network, and the mesh must contain every upstream sub-catchment of the rivers you care about; upstream areas outside the mesh and catchments only partly covered at its edge lose runoff, so outlet discharge will be too low.'],
@@ -1997,6 +2012,8 @@ export function translateZh(text, target = 'en') {
     .replace(/^第\s*(\d+)\/(\d+)\s*页\s*·\s*/, 'Page $1/$2 · ')
     .replace(/^第\s*(\d+)\s*页选了\s*/, 'Page $1 selected ')
     .replace(/^第\s*(\d+)\s*页没有开启河湖汇流$/, 'River-lake routing is off on page $1')
+    .replace(/^第\s*(\d+)\s*页没有开启 BGC$/, 'BGC is off on page $1')
+    .replace(/^第\s*(\d+)\s*页开启了 LULCC$/, 'LULCC is on on page $1')
     .replace(/^(\d+)\s*个算例正在运行，现在改设定会混进这次运行；请等它跑完或取消后再改$/, '$1 case(s) are running; changing settings now would leak into this run. Wait for it to finish or cancel it first')
     .replace(/^当前安装缺少\s*(.+)\s*内核$/, 'The current installation lacks the $1 kernel')
     .replace(/^已探测\s*(.+)：(\d+)\s*个变量，(\d+)\s*步$/, 'Inspected $1: $2 variables, $3 steps')

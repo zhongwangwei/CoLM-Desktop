@@ -1395,6 +1395,41 @@ fn validate_runtime_contract(
         if methane && (!bgc || !(pft || pc)) {
             return Err("甲烷 TRACER 需要 BGC 且使用 PFT 或 PC 次网格".into());
         }
+        let isotope = character(doc, "DEF_TRACER_TYPES")
+            .split(',')
+            .any(|kind| kind.trim().eq_ignore_ascii_case("isotope"));
+        if isotope {
+            // 变饱和流下的同位素要一份正的含水层参考水量（`MOD_Tracer_Defs.F90:416-420`）。
+            if real(doc, "DEF_TRACER_AQUIFER_MIXING_WATER_MM") <= 0.0 {
+                return Err(
+                    "水同位素需要正的含水层混合水量 DEF_TRACER_AQUIFER_MIXING_WATER_MM（mm）"
+                        .into(),
+                );
+            }
+            // 开了混合，LULCC 新建的土壤/湿地 patch 没有参考水量，上游停机（第 514 轮）。
+            if logical(doc, "DEF_USE_LULCC") {
+                return Err(
+                    "水同位素不能与 LULCC 同开：新建的土壤 patch 没有含水层参考水量，上游会停机"
+                        .into(),
+                );
+            }
+            if logical(doc, "DEF_TRACER_USE_FRACTIONATION") {
+                // 分馏要读同位素水汽强迫（`MOD_Tracer_Forcing.F90:773-779`），示踪物强迫不支持 POINT。
+                if single {
+                    return Err(
+                        "同位素分馏要读同位素水汽强迫，单点没有示踪物强迫；请关掉分馏".into(),
+                    );
+                }
+                // 内置参数文件里的同位素强迫读 IsoGSM 的降水与比湿文件，要求主强迫也是 IsoGSM。
+                if let Some(dataset) = forcing_dataset(doc, case_dir) {
+                    if !dataset.eq_ignore_ascii_case("IsoGSM") {
+                        return Err(format!(
+                            "同位素分馏要用 IsoGSM 驱动（同位素降水与水汽来自 IsoGSM），当前强迫是 {dataset}"
+                        ));
+                    }
+                }
+            }
+        }
         let tracer_num = integer(doc, "DEF_TRACER_NUM");
         if !(0..=1000).contains(&tracer_num) {
             return Err("DEF_TRACER_NUM 必须在 0 到 1000 之间".into());
@@ -1940,6 +1975,14 @@ fn field_runtime_state(
                 disabled(reason)
             };
         }
+    }
+    // 含水层参考水量只有走通用水输运的同位素用（`MOD_Tracer_Defs`）；甲烷、溶质都不用。
+    if name == "DEF_TRACER_AQUIFER_MIXING_WATER_MM" && !c.isotope_tracer {
+        return hidden("只有水同位素使用");
+    }
+    // 分馏由向导按强迫数据决定（要 IsoGSM 同位素降水与水汽）；单点没有示踪物强迫。
+    if name == "DEF_TRACER_USE_FRACTIONATION" && c.single {
+        return hidden("单点没有示踪物强迫，不能分馏");
     }
     // 漫滩入渗上限只在回馈里扣水时用（`debit_flood_feedback`）。
     if name == "DEF_GridRiverLake_FloodInfiltMax"
@@ -3357,6 +3400,26 @@ fn process_entries(path: &std::path::Path, file_id: String) -> Result<ProcessPar
     })
 }
 
+/// 算例强迫 namelist 里的 `DEF_forcing%dataset`；读不到时为 `None`（建例途中还没写出来）。
+fn forcing_dataset(doc: &colm_namelist::Document, case_dir: &std::path::Path) -> Option<String> {
+    let name = character(doc, "DEF_forcing_namelist");
+    let name = name.trim();
+    if name.is_empty() || name.eq_ignore_ascii_case("null") {
+        return None;
+    }
+    let path = std::path::Path::new(name);
+    let path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        case_dir.join(path)
+    };
+    let forcing = colm_namelist::parse(&std::fs::read_to_string(path).ok()?).ok()?;
+    match forcing.get("DEF_forcing%dataset") {
+        Some(colm_namelist::Value::Str(dataset)) => Some(dataset.trim().to_string()),
+        _ => None,
+    }
+}
+
 /// 模拟范围覆盖几个 mksrfdata 分块（`MOD_Block`：经度从 -180°、纬度从 -90° 起，按
 /// `DEF_nx_blocks × DEF_ny_blocks` 等分）。只按范围算，不管块里有没有陆地，所以只会偏多。
 fn spatial_blocks(doc: &colm_namelist::Document) -> usize {
@@ -3971,28 +4034,82 @@ pub(crate) fn apply_fields(dir: &str, fields: &[FieldChange]) -> Result<(), Stri
         let value = typed(&field.path, &field.value).map_err(|e| format!("{dir}: {e}"))?;
         put(&mut doc, &field.path, value).map_err(|e| format!("{dir}: {e}"))?;
     }
-    stage_ch4_parameter(dir, &fields, mode.first().map(|field| field.value.as_str()))?;
+    stage_tracer_parameters(dir, &fields, mode.first().map(|field| field.value.as_str()))?;
     validate_runtime_contract(&doc, std::path::Path::new(dir), None)
         .map_err(|e| format!("{dir}: {e}"))?;
     validate_changed_fields(&doc, &fields).map_err(|e| format!("{dir}: {e}"))?;
     std::fs::write(&path, doc.to_string()).map_err(|e| format!("{}: {e}", path.display()))
 }
 
-/// 复用上游 CH4 参数：淹没方案取向导所选（缺省 `wetwat`），关掉稻田与空间 pH
-/// （分别要 CROP 稻田与预处理生成的 pH 数据）。
-fn stage_ch4_parameter(
+/// 向导写的示踪物参数文件：`DEF_TRACER_PARAM_FILES` 里点名的内置文件（CH4、H₂¹⁸O、HDO）从上游
+/// 模板复制到算例目录。
+fn stage_tracer_parameters(
     dir: &str,
     fields: &[FieldChange],
     mode: Option<&str>,
 ) -> Result<(), String> {
-    let wants_builtin = fields.iter().any(|field| {
-        field.path == "DEF_TRACER_PARAM_FILES"
-            && field.value.trim_matches(['\'', '"']) == "CH4:standard_ch4_parameter.nml"
-    });
-    if !wants_builtin {
+    let Some(files) = fields
+        .iter()
+        .find(|field| field.path == "DEF_TRACER_PARAM_FILES")
+        .map(|field| field.value.trim_matches(['\'', '"']).to_string())
+    else {
         return Ok(());
+    };
+    let wanted = |file: &str| {
+        files
+            .split(',')
+            .any(|item| item.rsplit_once(':').is_some_and(|(_, f)| f.trim() == file))
+    };
+    if wanted("standard_ch4_parameter.nml") {
+        stage_ch4_parameter(dir, mode)?;
     }
+    let fractionation = fields.iter().any(|field| {
+        field.path == "DEF_TRACER_USE_FRACTIONATION"
+            && field.value.trim().eq_ignore_ascii_case(".true.")
+    });
+    for (file, template) in [
+        (
+            "standard_O18_parameter.nml",
+            include_str!("../../../vendor/CoLM202X/run/standard_O18_parameter.nml"),
+        ),
+        (
+            "standard_HDO_parameter.nml",
+            include_str!("../../../vendor/CoLM202X/run/standard_HDO_parameter.nml"),
+        ),
+    ] {
+        if wanted(file) {
+            let text = isotope_parameter_text(template, fractionation)?;
+            let path = std::path::Path::new(dir).join(file);
+            std::fs::write(&path, text).map_err(|e| format!("{}: {e}", path.display()))?;
+        }
+    }
+    Ok(())
+}
 
+/// 同位素参数文件。分馏要读 IsoGSM 的同位素降水与水汽，上游模板里那一组强迫原样保留；不分馏时
+/// 整组删掉——两个引擎遇到没有这一组的文件都按"没有示踪物强迫"处理，降水与水汽取 `init_delta`
+/// 对应的缺省比值。替换进去的说明里不能再出现那一组的组名，否则会被当成这一组还在。
+fn isotope_parameter_text(template: &str, fractionation: bool) -> Result<String, String> {
+    if fractionation {
+        return Ok(template.to_string());
+    }
+    let start = template
+        .find("&nl_colm_tracer_forcing")
+        .ok_or("内置同位素参数模板缺少示踪物强迫组")?;
+    let end = template[start..]
+        .find("\n/")
+        .map(|k| start + k + 2)
+        .ok_or("内置同位素参数模板的示踪物强迫组没有结尾")?;
+    let rest = template[end..].trim_start_matches(['\r', '\n']);
+    Ok(format!(
+        "{}! 不分馏：已去掉示踪物强迫组（IsoGSM 同位素降水与水汽），降水与水汽取缺省比值。\n{}",
+        &template[..start],
+        rest
+    ))
+}
+
+/// CH4 参数文件：淹没方案取向导所选，关掉稻田与空间 pH（分别要 CROP 稻田与预处理生成的 pH 数据）。
+fn stage_ch4_parameter(dir: &str, mode: Option<&str>) -> Result<(), String> {
     let mode = mode
         .unwrap_or("wetwat")
         .trim()

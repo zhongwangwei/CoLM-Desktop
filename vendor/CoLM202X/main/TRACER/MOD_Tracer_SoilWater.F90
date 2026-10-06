@@ -1008,7 +1008,13 @@ CONTAINS
             ENDIF
 
             IF (eff_qseva > trc_tiny .and. qgtop_est < -trc_tiny) THEN
-               top_soil_evap_water = top_boundary_out_water
+               ! FIX upstream-bugs #78: only the qseva deficit leaves layer 1 as
+               ! evaporation. Negative qinfl can be far larger than qseva*deltim
+               ! (a saturated column exfiltrating to the surface); booking all of
+               ! it as evaporation removed up to ~24x the host's evaporated water
+               ! from the tracer pool. The rest is ordinary exfiltration.
+               top_soil_evap_water = min(top_boundary_out_water, eff_qseva * deltim)
+               top_exfil_water = top_boundary_out_water - top_soil_evap_water
                   kinetic_on_soil_surface = .true.
                   trc_soil_evap = atmospheric_loss_tracer(trc_wliq_soisno(itrc, 1, ipatch), &
                      max(water_shadow(1), 0._r8), top_soil_evap_water, layer_temp(1), .false.)
@@ -1019,6 +1025,8 @@ CONTAINS
                water_shadow(1) = water_shadow(1) - top_soil_evap_water
             ELSE
                top_exfil_water = top_boundary_out_water
+            ENDIF
+            IF (top_exfil_water > 0._r8) THEN
                trc_soil_upflow = top_exfil_water * ratio_layer(1)
                trc_soil_upflow = min(trc_soil_upflow, max(trc_wliq_soisno(itrc, 1, ipatch), 0._r8))
                trc_wliq_soisno(itrc, 1, ipatch) = trc_wliq_soisno(itrc, 1, ipatch) - trc_soil_upflow

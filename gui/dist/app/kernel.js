@@ -20,3 +20,10 @@ export function kernelForSubgrid(subgrid = state.subgrid ?? state.wizard?.subgri
 export function urbanEnabled() {
   return !!state.wizard?.physics.urban;
 }
+
+// 示踪剂可多选，`picked.tracer` / `wizard.tracer` 是逗号分隔的名单（如 'methane,isotope'）。
+export const tracerList = value => String(value ?? '').split(',').map(id => id.trim()).filter(Boolean);
+/** 向导配置里有没有选这种示踪剂。 */
+export function hasTracer(wizard, id) {
+  return !!wizard?.physics?.tracer && tracerList(wizard?.tracer).includes(id);
+}

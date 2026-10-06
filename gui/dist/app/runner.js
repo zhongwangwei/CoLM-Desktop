@@ -8,7 +8,7 @@ import { batchTarget, updateCaseBatchButtons } from './batch.js';
 import { invalidateResultCase, refreshVars } from './results.js';
 import { setRunning, renderSteps, setStatus } from './shell.js';
 import { renderFields } from './params.js';
-import { kernelForSubgrid, urbanEnabled } from './kernel.js';
+import { kernelForSubgrid, urbanEnabled, hasTracer } from './kernel.js';
 import { acceptsRunEvent, appendLogText, progressText } from './run-format.js';
 import { modelEngine } from './engine.js';
 import { language, translateZh } from './i18n.js';
@@ -279,7 +279,7 @@ async function applyKernel() {
   // 城市和 BGC 都会读 runtime（BGC 至少读取 ndep）；CH4 又依赖 BGC。
   // rawdata 对任意缺少植被/土壤变量的站点都可能需要，因而始终显示。
   const ud = $('urbandirs');
-  const methane = state.wizard?.physics?.tracer && state.wizard?.tracer === 'methane';
+  const methane = hasTracer(state.wizard, 'methane');
   const crop = state.wizard?.physics?.crop;
   if (ud) ud.hidden = !(urbanEnabled() || state.wizard?.physics?.bgc || methane || crop);
   // 向导变更后站点的 URBAN 匹配也要立即重画。
@@ -292,7 +292,7 @@ async function applyKernel() {
   // 自带的示例有自然站与城市站，按钮跟着向导选择说出本次该用哪个。
   const ex = $('use-example');
   if (ex) {
-    const methane = state.wizard?.physics?.tracer && state.wizard?.tracer === 'methane';
+    const methane = hasTracer(state.wizard, 'methane');
     const crop = state.wizard?.physics?.crop;
     ex.textContent = urbanEnabled()
       ? '用自带的示例站点（城市站 AU-Preston）'

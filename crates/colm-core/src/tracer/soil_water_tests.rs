@@ -714,3 +714,54 @@ fn qcharge_follows_colmmain_formula() {
     let q = qcharge_trc(10.0, 9.0, 0.5, 0.25, 0.0);
     assert_eq!(q, (((10.0_f64 - 9.0) + 0.5) + 0.25) / TRC_TINY);
 }
+
+/// upstream-bugs #78：饱和土柱向上渗出（`qinfl < 0`）远大于土壤蒸发时，只有 `qseva·dt`
+/// 记为蒸发，其余作为渗出进地表池；不分馏时各池与通量都保持同一比值。
+#[test]
+fn exfiltration_beyond_soil_evaporation_is_not_booked_as_evaporation() {
+    let set = TracerSet {
+        tracers: vec![descriptor("HDO", TracerFamily::Isotope)],
+    };
+    let mut scen = Scenario::bare_soil();
+    scen.pg_rain = 0.0;
+    scen.irrig = 0.0;
+    scen.rsur = 0.0;
+    scen.qseva = 1.0e-5;
+    scen.qinfl = -1.0e-3;
+    // 地表池闭合：wdsrf_bef - qseva*dt = wdsrf + qinfl*dt。
+    scen.wdsrf = scen.wdsrf_bef - (scen.qseva + scen.qinfl) * DT;
+    scen.wliq = scen.shadow(4.0e-6);
+    scen.wliq[soisno_slot(3)] -= 0.5;
+    assert!(-scen.qinfl * DT > 10.0 * scen.qseva * DT);
+    let ratios = [R_ISO];
+    let mut state = scen.state(&set, &ratios);
+    tracer_soil_water(
+        &set,
+        &mut state,
+        TracerPhysics::default(),
+        &no_diffusion(),
+        &scen.input(&ratios),
+    )
+    .unwrap();
+    let acc = &state.acc[0];
+    assert!(
+        (acc.water_soilevap - scen.qseva * DT).abs() <= 1.0e-12,
+        "soil evaporation booked {} mm, qseva*dt = {} mm",
+        acc.water_soilevap,
+        scen.qseva * DT
+    );
+    let close = |trc: f64, water: f64, what: &str| {
+        assert!(
+            (trc - R_ISO * water).abs() <= 1.0e-12 * R_ISO * water.abs().max(1.0),
+            "{what}: ratio {} != {R_ISO}",
+            trc / water
+        );
+    };
+    close(acc.soilevap, acc.water_soilevap, "soil evaporation");
+    close(state.pools[0].wdsrf, scen.wdsrf, "wdsrf");
+    close(
+        state.pools[0].wliq_soisno[soisno_slot(1)],
+        scen.wliq[soisno_slot(1)],
+        "wliq1",
+    );
+}

@@ -320,10 +320,11 @@ fn runtime_contracts_are_checked_before_batch_write() {
     let err = set_batch(dirs, "DEF_HIST_FREQ".into(), "MONTHLY".into()).unwrap_err();
     assert!(err.contains("DEF_USE_LCT"), "{err}");
 
-    // 水同位素属于通用 TRACER，不依赖 BGC；只有 CH4 需要 PFT/PC 的碳氮池。
+    // 水同位素属于通用 TRACER，不依赖 BGC；只有 CH4 需要 PFT/PC 的碳氮池。变饱和流下要一份正的
+    // 含水层混合水量。
     let dirs = batch(
         "contract-isotope",
-        &["&nl_colm\n DEF_USE_TRACER=.true.\n DEF_TRACER_NUM=1\n DEF_TRACER_NAMES='H218O'\n DEF_TRACER_TYPES='isotope'\n/\n"],
+        &["&nl_colm\n DEF_USE_TRACER=.true.\n DEF_TRACER_NUM=1\n DEF_TRACER_NAMES='H218O'\n DEF_TRACER_TYPES='isotope'\n DEF_TRACER_AQUIFER_MIXING_WATER_MM=1000.\n/\n"],
     );
     set_batch(dirs, "DEF_HIST_FREQ".into(), "MONTHLY".into()).unwrap();
 
@@ -3535,5 +3536,159 @@ fn subgrid_specific_surface_switches_follow_the_subgrid() {
     assert!(matches!(
         mode(&lct, "DEF_HIST_vars_namelist"),
         FieldMode::Disabled
+    ));
+}
+
+fn isotope_fields(fractionation: bool, mixing: &str) -> Vec<FieldChange> {
+    [
+        ("DEF_USE_TRACER", ".true."),
+        ("DEF_TRACER_NUM", "2"),
+        ("DEF_TRACER_NAMES", "H2_18O,HDO"),
+        ("DEF_TRACER_TYPES", "isotope,isotope"),
+        ("DEF_TRACER_MRAT", "20.0,19.0"),
+        ("DEF_TRACER_REF_RATIO", "2.0052e-3,1.5576e-4"),
+        ("DEF_TRACER_INIT_DELTA", "-10.0,-70.0"),
+        ("DEF_TRACER_REACTIVE_DECAY_RATE", "0.0,0.0"),
+        (
+            "DEF_TRACER_PARAM_FILES",
+            "H2_18O:standard_O18_parameter.nml,HDO:standard_HDO_parameter.nml",
+        ),
+        (
+            "DEF_TRACER_USE_FRACTIONATION",
+            if fractionation { ".true." } else { ".false." },
+        ),
+        ("DEF_TRACER_AQUIFER_MIXING_WATER_MM", mixing),
+    ]
+    .into_iter()
+    .map(|(path, value)| FieldChange {
+        path: path.into(),
+        value: value.into(),
+    })
+    .collect()
+}
+
+#[test]
+fn isotope_wizard_stages_parameter_files_without_the_forcing_group() {
+    let dir = batch("wizard-iso", &[SAMPLE]).remove(0);
+    super::apply_fields(&dir, &isotope_fields(false, "1000.0")).unwrap();
+    for (file, ratio) in [
+        ("standard_O18_parameter.nml", "2.0052e-3"),
+        ("standard_HDO_parameter.nml", "1.5576e-4"),
+    ] {
+        let text = std::fs::read_to_string(std::path::Path::new(&dir).join(file)).unwrap();
+        // 不分馏：强迫组整组去掉（两个引擎都按没有示踪物强迫处理），示踪物元数据组保留。
+        assert!(!text.contains("&nl_colm_tracer_forcing"), "{file}");
+        assert!(!text.contains("prate1sfc"), "{file}");
+        assert!(text.contains("不分馏"), "{file}");
+        assert!(text.contains(ratio), "{file}");
+    }
+    let doc = colm_namelist::parse(
+        &std::fs::read_to_string(std::path::Path::new(&dir).join("case.nml")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        doc.get("DEF_TRACER_AQUIFER_MIXING_WATER_MM")
+            .unwrap()
+            .to_string(),
+        "1000.0"
+    );
+}
+
+#[test]
+fn isotope_fractionation_keeps_the_isogsm_forcing_group() {
+    let text = super::isotope_parameter_text(
+        include_str!("../../../vendor/CoLM202X/run/standard_O18_parameter.nml"),
+        true,
+    )
+    .unwrap();
+    assert!(text.contains("&nl_colm_tracer_forcing"));
+    assert!(text.contains("prate1sfc"));
+    let stripped = super::isotope_parameter_text(&text, false).unwrap();
+    // 去掉的只是强迫组：前后的组都原样留下，且仍能解析。
+    assert_eq!(
+        stripped.matches("\n/").count() + 1,
+        text.matches("\n/").count()
+    );
+}
+
+#[test]
+fn isotope_runtime_contract_rejects_unsafe_combinations() {
+    let dir = batch("iso-contract", &[SAMPLE]).remove(0);
+    let err = super::apply_fields(&dir, &isotope_fields(false, "0.0")).unwrap_err();
+    assert!(err.contains("含水层混合水量"), "{err}");
+    let mut lulcc = isotope_fields(false, "1000.0");
+    lulcc.push(FieldChange {
+        path: "DEF_USE_LULCC".into(),
+        value: ".true.".into(),
+    });
+    let err = super::apply_fields(&dir, &lulcc).unwrap_err();
+    assert!(err.contains("LULCC"), "{err}");
+    // 失败的写入不留下半成品。
+    let text = std::fs::read_to_string(std::path::Path::new(&dir).join("case.nml")).unwrap();
+    assert!(!text.contains("DEF_USE_TRACER"));
+    // 空间算例：分馏的强迫组读 IsoGSM，主强迫换成别的数据集就拒绝。
+    let case = std::path::Path::new(&dir);
+    std::fs::write(
+        case.join("forcing.nml"),
+        "&nl_colm_forcing\n DEF_forcing%dataset = 'GSWP3'\n/\n",
+    )
+    .unwrap();
+    let mut gswp3 = isotope_fields(true, "1000.0");
+    gswp3.push(FieldChange {
+        path: "DEF_forcing_namelist".into(),
+        value: "forcing.nml".into(),
+    });
+    let err = super::apply_fields(&dir, &gswp3).unwrap_err();
+    assert!(err.contains("IsoGSM") && err.contains("GSWP3"), "{err}");
+    std::fs::write(
+        case.join("forcing.nml"),
+        "&nl_colm_forcing\n DEF_forcing%dataset = 'IsoGSM'\n/\n",
+    )
+    .unwrap();
+    super::apply_fields(&dir, &gswp3).unwrap();
+    // 站点算例：示踪物强迫不支持 POINT，分馏没有同位素水汽可读；不分馏可以。
+    let site = SAMPLE.replace("/\n", " SITE_fsitedata = 'site.nc'\n/\n");
+    let dir = batch("iso-contract-site", &[&site]).remove(0);
+    let err = super::apply_fields(&dir, &isotope_fields(true, "1000.0")).unwrap_err();
+    assert!(err.contains("单点"), "{err}");
+    super::apply_fields(&dir, &isotope_fields(false, "1000.0")).unwrap();
+}
+
+#[test]
+fn isotope_fields_follow_the_tracer_types() {
+    let mode = |states: &[FieldState], name: &str| {
+        states
+            .iter()
+            .find(|s| s.name == name)
+            .unwrap_or_else(|| panic!("{name} has no state"))
+            .mode
+    };
+    let methane = "&nl_colm\n DEF_USE_TRACER = .true.\n DEF_TRACER_NUM = 1\n \
+                   DEF_TRACER_NAMES = 'CH4'\n DEF_TRACER_TYPES = 'gas'\n/\n";
+    let isotope = "&nl_colm\n DEF_USE_TRACER = .true.\n DEF_TRACER_NUM = 2\n \
+                   DEF_TRACER_NAMES = 'H2_18O,HDO'\n DEF_TRACER_TYPES = 'isotope,isotope'\n/\n";
+    let point: std::collections::BTreeSet<&str> =
+        ["SinglePoint", "LULC_IGBP"].into_iter().collect();
+    let grid: std::collections::BTreeSet<&str> = ["GRIDBASED", "GridRiverLakeFlow", "LULC_IGBP"]
+        .into_iter()
+        .collect();
+    let states = field_states_for_at(methane, &grid, None).unwrap();
+    assert!(matches!(
+        mode(&states, "DEF_TRACER_AQUIFER_MIXING_WATER_MM"),
+        FieldMode::Hidden
+    ));
+    let states = field_states_for_at(isotope, &grid, None).unwrap();
+    assert!(!matches!(
+        mode(&states, "DEF_TRACER_AQUIFER_MIXING_WATER_MM"),
+        FieldMode::Hidden
+    ));
+    assert!(!matches!(
+        mode(&states, "DEF_TRACER_USE_FRACTIONATION"),
+        FieldMode::Hidden
+    ));
+    let states = field_states_for_at(isotope, &point, None).unwrap();
+    assert!(matches!(
+        mode(&states, "DEF_TRACER_USE_FRACTIONATION"),
+        FieldMode::Hidden
     ));
 }

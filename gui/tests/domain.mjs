@@ -411,20 +411,41 @@ if (kernelForSubgrid('PFT')?.dir !== '/crop-real') throw new Error('selected CRO
 
 showDomainGate();
 choose('站点'); next(); choose('PFT'); next(); choose('van Genuchten–Mualem（Ippisch 2006）'); next();
-if (card('TRACER').getAttribute('aria-disabled') !== 'true') throw new Error('TRACER must require BGC');
-choose('BGC');
-if (card('TRACER').getAttribute('aria-disabled') === 'true') throw new Error('TRACER did not unlock after BGC');
+// 示踪剂本身只要求 van Genuchten、非城市；BGC 与 PFT/PC 是甲烷自己的要求。
+if (card('TRACER').getAttribute('aria-disabled') === 'true') throw new Error('TRACER must not require BGC any more');
 choose('TRACER');
 next();
 if (ids.gatetitle.textContent !== '选择示踪剂类型') throw new Error('tracer type page missing');
 if (cards().map(c => c.children[0].textContent).join('|') !== '水同位素|甲烷 CH₄|溶质|泥沙') {
   throw new Error('tracer page must list isotope, methane, solute, and sediment');
 }
-for (const label of ['水同位素', '溶质', '泥沙']) {
-  if (card(label).getAttribute('aria-disabled') !== 'true') throw new Error(`${label} must be disabled for now`);
+for (const label of ['甲烷 CH₄', '溶质', '泥沙']) {
+  if (card(label).getAttribute('aria-disabled') !== 'true') throw new Error(`${label} must be disabled without BGC`);
 }
+if (card('水同位素').getAttribute('aria-disabled') === 'true') throw new Error('isotope must be open');
 if (!/单点站点不可用/.test(nodeText(card('泥沙')))) throw new Error('sediment must explain SinglePoint is unavailable');
+if (!/BGC/.test(nodeText(card('甲烷 CH₄')))) throw new Error('methane must explain it needs BGC');
+previous();
+choose('BGC');
+next();
 choose('甲烷 CH₄');
+choose('水同位素');
+if (card('甲烷 CH₄').getAttribute('aria-pressed') !== 'true' || card('水同位素').getAttribute('aria-pressed') !== 'true') {
+  throw new Error('tracer page must be multi-select');
+}
+next();
+if (ids.gatetitle.textContent !== '水同位素怎么算？') throw new Error('isotope tracer must ask for its mode');
+if (card('开分馏（IsoGSM 驱动）').getAttribute('aria-disabled') !== 'true') throw new Error('site isotope cannot fractionate');
+if (card('不分馏').getAttribute('aria-selected') !== 'true') throw new Error('site isotope must default to no fractionation');
+const mixingBox = card('含水层混合水量（mm）');
+const mixingInput = mixingBox?.children.find(c => c.id === 'isotope-mixing');
+if (mixingInput?.value !== '1000') throw new Error('aquifer mixing water must be prefilled with 1000 mm');
+if (!/测试值，正式模拟请用实测或率定/.test(nodeText(mixingBox))) throw new Error('prefilled mixing water must be labelled a test value');
+mixingInput.value = '0';
+mixingInput.oninput();
+if (!foot('下一步').disabled) throw new Error('non-positive mixing water must block the isotope page');
+mixingInput.value = '1500';
+mixingInput.oninput();
 next();
 if (ids.gatetitle.textContent !== '甲烷淹水范围怎么算？') throw new Error('methane tracer must ask for the inundation mode');
 // 单点没有河网，也还不知道是不是湿地站点：只留 satellite 与 wetwat，缺省 wetwat。
@@ -432,27 +453,44 @@ for (const label of ['混合（hybrid）', '河网洪泛（routing）', '动态�
   if (card(label).getAttribute('aria-disabled') !== 'true') throw new Error(`${label} must be blocked on a site`);
 }
 if (card('湿地蓄水（wetwat）').getAttribute('aria-selected') !== 'true') throw new Error('site methane must default to wetwat');
+previous(); previous(); previous();
+if (card('LULCC').getAttribute('aria-disabled') !== 'true') throw new Error('LULCC must be blocked while isotopes are selected');
+next(); next(); next();
 next();
 if (ids.gatetitle.textContent !== '要打开调试吗？') throw new Error('methane page did not continue to debug');
 next();
-if (state.wizard.tracer !== 'methane') throw new Error(`wrong tracer state: ${JSON.stringify(state.wizard)}`);
+if (state.wizard.tracer !== 'methane,isotope') throw new Error(`wrong tracer state: ${JSON.stringify(state.wizard)}`);
 const methaneFields = Object.fromEntries(wizardFields().map(x => [x.path, x.value]));
 for (const [path, value] of Object.entries({
   DEF_USE_TRACER: '.true.',
   DEF_USE_BGC: '.true.',
-  DEF_TRACER_NUM: '1',
-  DEF_TRACER_NAMES: 'CH4',
-  DEF_TRACER_TYPES: 'gas',
-  DEF_TRACER_MRAT: '16.04',
-  DEF_TRACER_REF_RATIO: '1.0',
-  DEF_TRACER_INIT_DELTA: '0.0',
-  DEF_TRACER_REACTIVE_DECAY_RATE: '0.0',
-  DEF_TRACER_PARAM_FILES: 'CH4:standard_ch4_parameter.nml',
+  DEF_TRACER_NUM: '3',
+  DEF_TRACER_NAMES: 'CH4,H2_18O,HDO',
+  DEF_TRACER_TYPES: 'gas,isotope,isotope',
+  DEF_TRACER_MRAT: '16.04,20.0,19.0',
+  DEF_TRACER_REF_RATIO: '1.0,2.0052e-3,1.5576e-4',
+  DEF_TRACER_INIT_DELTA: '0.0,-10.0,-70.0',
+  DEF_TRACER_REACTIVE_DECAY_RATE: '0.0,0.0,0.0',
+  DEF_TRACER_PARAM_FILES: 'CH4:standard_ch4_parameter.nml,H2_18O:standard_O18_parameter.nml,HDO:standard_HDO_parameter.nml',
+  DEF_TRACER_USE_FRACTIONATION: '.false.',
+  DEF_TRACER_AQUIFER_MIXING_WATER_MM: '1500.0',
   DEF_USE_Dynamic_Wetland: '.false.',
   'DEF_METHANE%inundation_mode': 'wetwat',
 })) {
   if (methaneFields[path] !== value) throw new Error(`${path}: expected ${value}, got ${methaneFields[path]}`);
 }
+// 空间算例缺省开分馏；只选同位素时不写甲烷，也不强开 BGC。
+const isoOnly = Object.fromEntries(wizardFields({
+  ...state.wizard, domain: 'global', tracer: 'isotope', isotopeMode: 'fractionation', isotopeMixing: 1000,
+  physics: { ...state.wizard.physics, bgc: false },
+}).map(x => [x.path, x.value]));
+for (const [path, value] of Object.entries({
+  DEF_USE_TRACER: '.true.', DEF_USE_BGC: '.false.', DEF_TRACER_NUM: '2', DEF_TRACER_NAMES: 'H2_18O,HDO',
+  DEF_TRACER_USE_FRACTIONATION: '.true.', DEF_TRACER_AQUIFER_MIXING_WATER_MM: '1000.0',
+})) {
+  if (isoOnly[path] !== value) throw new Error(`isotope-only ${path}: expected ${value}, got ${isoOnly[path]}`);
+}
+if ('DEF_METHANE%inundation_mode' in isoOnly) throw new Error('isotope-only must not write methane settings');
 // 动态湿地留在参数页，由后端按淹没方案置灰并说明，不再被向导整个藏起来。
 if (wizardFieldNames().includes('DEF_USE_Dynamic_Wetland')) {
   throw new Error('dynamic wetland must stay visible (read-only) on the parameters page');
@@ -600,7 +638,7 @@ if (!/picked\.grid === 'unstructured' \? 'unstructured' : picked\.domain/.test(
   if (!/picked\.grid === 'catchment' && \['urban', 'lulcc', 'tracer'\]\.includes\(item\.id\)/.test(src)) {
     throw new Error('catchment meshes block urban, LULCC and tracers');
   }
-  if (!/if \(picked\.physics\.urban\) \{\n\s+return \{ need: '城市模式暂不支持甲烷示踪'/.test(src)) {
-    throw new Error('urban blocks methane for every domain, not only sites');
+  if (!/if \(picked\.physics\.urban\) \{\n\s+return \{ need: '城市模式暂不支持示踪剂'/.test(src)) {
+    throw new Error('urban blocks tracers for every domain, not only sites');
   }
 }

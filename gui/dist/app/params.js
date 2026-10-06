@@ -54,6 +54,10 @@ const HINTS = {
   'DEF_simulation_time%spinup_day': '预热截止时刻的日，见 spinup_repeat 的说明。',
   'DEF_simulation_time%spinup_sec': '预热截止时刻的当天秒数，见 spinup_repeat 的说明。',
   DEF_file_GIEMS: '卫星淹水模式必需的 GIEMS-MC 月湿地比例 NetCDF 文件。',
+  DEF_TRACER_AQUIFER_MIXING_WATER_MM:
+    '向导预填的 1000 mm 是测试值，正式模拟请用实测或率定值。\n' +
+    '它是含水层与地下水同位素混合的有效水深，决定地下水同位素的缓冲与记忆；' +
+    '上游没有缺省值，且必须大于运行中可能的最大地下水亏缺。',
 };
 
 // 打开这些父开关时，缺少路径就不是“以后再补”的半成品，而是下一阶段

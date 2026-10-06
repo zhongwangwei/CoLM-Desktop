@@ -69,6 +69,10 @@ pub struct CaseProfile {
     pub bgc: bool,
     pub crop: bool,
     pub methane: bool,
+    /// 水同位素（H₂¹⁸O/HDO）与是否分馏、含水层混合水量。
+    pub isotope: bool,
+    pub fractionation: bool,
+    pub aquifer_mixing_mm: Option<f64>,
     pub river: bool,
     pub rangecheck: bool,
     pub colmdebug: bool,
@@ -311,6 +315,13 @@ pub(crate) fn case_profile(
         bgc: logical(&doc, "DEF_USE_BGC"),
         crop,
         methane,
+        isotope: logical(&doc, "DEF_USE_TRACER")
+            && character(&doc, "DEF_TRACER_TYPES")
+                .split(',')
+                .any(|kind| kind.trim().eq_ignore_ascii_case("isotope")),
+        fractionation: logical(&doc, "DEF_TRACER_USE_FRACTIONATION"),
+        aquifer_mixing_mm: Some(real(&doc, "DEF_TRACER_AQUIFER_MIXING_WATER_MM"))
+            .filter(|value| *value > 0.0),
         river: gridded_routing && logical(&doc, "DEF_USE_GridRiverLakeFlow"),
         rangecheck: logical(&doc, "DEF_USE_RangeCheck"),
         colmdebug: logical(&doc, "DEF_USE_CoLMDEBUG"),

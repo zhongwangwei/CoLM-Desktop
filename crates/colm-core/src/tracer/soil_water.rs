@@ -780,8 +780,11 @@ pub fn tracer_soil_water(
                         + ((late_runoff_water - flood_water) - late_surface_water) / dt_floor
                 }
             };
-            if eff_qseva > TRC_TINY && qgtop_est < -TRC_TINY {
-                top_soil_evap_water = top_boundary_out_water;
+            let top_exfil_water = if eff_qseva > TRC_TINY && qgtop_est < -TRC_TINY {
+                // 只有 `qseva` 的亏缺部分作为蒸发离开第 1 层；负 `qinfl` 可以远大于 `qseva·dt`
+                // （饱和土柱向上渗出时），全记成蒸发会多蒸掉示踪物，余下的是普通的
+                // 向上渗出（upstream-bugs #78，vendor 同步修）。
+                top_soil_evap_water = top_boundary_out_water.min(eff_qseva * dt);
                 let flux = ctx.atmospheric_loss_soil_surface(
                     p.wliq_soisno[s(1)],
                     water_shadow[0].max(0.0),
@@ -791,8 +794,11 @@ pub fn tracer_soil_water(
                 p.wliq_soisno[s(1)] -= flux;
                 state.book_evap_loss(itrc, flux, top_soil_evap_water, EvapKind::SoilEvaporation);
                 water_shadow[0] -= top_soil_evap_water;
+                top_boundary_out_water - top_soil_evap_water
             } else {
-                let top_exfil_water = top_boundary_out_water;
+                top_boundary_out_water
+            };
+            if top_exfil_water > 0.0 {
                 trc_soil_upflow =
                     (ratio_layer[0] * top_exfil_water).min(p.wliq_soisno[s(1)].max(0.0));
                 p.wliq_soisno[s(1)] -= trc_soil_upflow;

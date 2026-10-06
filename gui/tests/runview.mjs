@@ -142,7 +142,7 @@ if (runner.includes('status(state.runCancelled.has')
     || !runner.includes('const terminal = d.cancelled')) {
   throw new Error('terminal cancellation status must come from run://done, not event ordering');
 }
-if (!runner.includes("state.wizard?.tracer === 'methane'")) {
+if (!runner.includes("hasTracer(state.wizard, 'methane')")) {
   throw new Error('restored methane cases must keep the required runtime directory control visible');
 }
 if (!/<div id="loadinggate" class="gate loading-gate"[^>]*>/.test(html)

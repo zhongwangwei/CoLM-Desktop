@@ -3,6 +3,7 @@
 import { invoke } from './ipc.js';
 import { state } from './state.js';
 import { $, joinPath } from './ui.js';
+import { hasTracer } from './kernel.js';
 import { wizardFields } from './domain.js';
 import { renderCases, selectCase } from './sites.js';
 import { renderSteps, setStatus } from './shell.js';
@@ -22,6 +23,13 @@ const spatialContext = () => JSON.stringify({
 const CUSTOM_FORCING = '__custom__';
 let forcingDatasetsLoaded = false;
 
+// 缺省 JRA3Q；同位素分馏的强迫组读 IsoGSM 的同位素降水与水汽，主强迫也只能是 IsoGSM（建例校验会拒绝别的）。
+function defaultForcing(names) {
+  const iso = state.wizard?.isotopeMode === 'fractionation' && hasTracer(state.wizard, 'isotope');
+  const preferred = iso ? 'IsoGSM' : 'JRA3Q';
+  return names.includes(preferred) ? preferred : (names[0] ?? CUSTOM_FORCING);
+}
+
 async function loadForcingDatasets() {
   if (forcingDatasetsLoaded) return;
   const select = $('spatial-forcing-dataset');
@@ -38,7 +46,7 @@ async function loadForcingDatasets() {
   custom.value = CUSTOM_FORCING;
   custom.textContent = '使用已有 forcing namelist…';
   select.appendChild(custom);
-  select.value = names.includes('JRA3Q') ? 'JRA3Q' : (names[0] ?? CUSTOM_FORCING);
+  select.value = defaultForcing(names);
   forcingDatasetsLoaded = true;
   syncForcingMode();
 }
@@ -234,7 +242,7 @@ function resetSpatialForm() {
   if (forcingDatasetsLoaded) {
     const select = $('spatial-forcing-dataset');
     const names = [...select.options].map(o => o.value).filter(v => v !== CUSTOM_FORCING);
-    select.value = names.includes('JRA3Q') ? 'JRA3Q' : (names[0] ?? CUSTOM_FORCING);
+    select.value = defaultForcing(names);
     syncForcingMode();
   }
 }

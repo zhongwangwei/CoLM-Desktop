@@ -6,7 +6,7 @@
 import { state } from './state.js';
 import { $ } from './ui.js';
 import { go } from './shell.js';
-import { kernelForSubgrid } from './kernel.js';
+import { kernelForSubgrid, hasTracer, tracerList } from './kernel.js';
 import { invoke } from './ipc.js';
 
 const DOMAINS = [
@@ -53,7 +53,7 @@ const DEBUG = [
 ];
 
 const TRACERS = [
-  { id: 'isotope', t: '水同位素', d: 'H₂¹⁸O / HDO 水循环同位素', ready: false, need: '暂未开放' },
+  { id: 'isotope', t: '水同位素', d: 'H₂¹⁸O / HDO 水循环同位素；可与甲烷同时开', ready: true },
   { id: 'methane', t: '甲烷 CH₄', d: '湿地、土壤、湖泊甲烷产生/氧化/排放', ready: true },
   { id: 'solute', t: '溶质', d: '水溶性示踪物', ready: false, need: '暂未开放' },
   { id: 'sediment', t: '泥沙', d: '颗粒泥沙输移', ready: false, need: '单点站点不可用；需要河道/流域输移链路' },
@@ -69,11 +69,23 @@ const METHANE_MODES = [
   { id: 'wetwat', t: '湿地蓄水（wetwat）', d: '按湿地 patch 的蓄水判断淹水；任何内核都能跑' },
 ];
 
+
+// 同位素：分馏要读 IsoGSM 的同位素降水与水汽（示踪物强迫不支持站点）；不分馏时同位素随水输运，
+// 降水与水汽取参数文件里的缺省比值。
+const ISOTOPE_MODES = [
+  { id: 'fractionation', t: '开分馏（IsoGSM 驱动）', d: '同位素降水与水汽读 IsoGSM，主强迫也必须选 IsoGSM；仅空间算例' },
+  { id: 'conservative', t: '不分馏', d: '同位素随水输运但不分馏，降水与水汽取缺省 δ 值；站点与空间都可用。上游每步自检通量比值，土柱强烈向上渗出时会停机' },
+];
+// 含水层混合水量：上游没有缺省值，必须是实测或率定的有效混合水深。向导预填一个测试值让算例能跑，
+// 并在旁边与参数页写明它只是测试值。
+const ISOTOPE_TEST_MIXING_MM = 1000;
+
 const pages = () => [
   'domain',
   ...(picked.domain && picked.domain !== 'site' ? ['grid', 'spatial'] : []),
   'subgrid', 'soil', 'physics', ...(picked.physics.tracer ? ['tracer'] : []),
-  ...(picked.physics.tracer && picked.tracer === 'methane' ? ['methane'] : []), 'debug',
+  ...(hasTracer(picked, 'isotope') ? ['isotope'] : []),
+  ...(hasTracer(picked, 'methane') ? ['methane'] : []), 'debug',
 ];
 const pageIndex = page => pages().indexOf(page);
 const pageNumber = page => pageIndex(page) + 1;
@@ -95,6 +107,9 @@ const emptyPicked = () => ({
   tracer: null,
   methaneMode: null,
   methaneModeChosen: false,
+  isotopeMode: null,
+  isotopeModeChosen: false,
+  isotopeMixing: ISOTOPE_TEST_MIXING_MM,
   debug: emptyDebug(),
 });
 
@@ -115,9 +130,12 @@ function dropBlockedPhysics() {
     if (!blocked) break;
     picked.physics[blocked.id] = false;
   }
-  if (!picked.physics.bgc) { picked.physics.crop = false; picked.physics.tracer = false; }
-  if (!picked.physics.tracer) picked.tracer = null;
-  if (picked.tracer !== 'methane') { picked.methaneMode = null; picked.methaneModeChosen = false; }
+  if (!picked.physics.bgc) picked.physics.crop = false;
+  // 示踪剂名单里被约束挡住的（例如关掉 BGC 后的甲烷）去掉，一个不剩就关掉示踪剂。
+  const kept = tracerList(picked.tracer).filter(id => !tracerBlock(TRACERS.find(t => t.id === id) ?? { id }));
+  picked.tracer = picked.physics.tracer && kept.length ? kept.join(',') : null;
+  if (!hasTracer(picked, 'methane')) { picked.methaneMode = null; picked.methaneModeChosen = false; }
+  if (!hasTracer(picked, 'isotope')) { picked.isotopeMode = null; picked.isotopeModeChosen = false; }
 }
 
 function render() {
@@ -132,7 +150,8 @@ function render() {
     subgrid: ['次网格怎么分？', '次网格方案决定 BGC 是否可用，也决定站点数据要求。'],
     soil: ['土壤水力用哪套？', '选择本次模拟使用的土壤水力方案。'],
     physics: ['还要打开哪些过程？', '可多选；被上游约束挡住的项会说明回哪一页修改。'],
-    tracer: ['选择示踪剂类型', '目前只开放甲烷 CH₄；其他类型保留入口但不可选。'],
+    tracer: ['选择示踪剂类型', '可多选：水同位素与甲烷可以同时开；溶质与泥沙暂未开放。'],
+    isotope: ['水同位素怎么算？', '选择是否分馏，并给出含水层混合水量。'],
     methane: ['甲烷淹水范围怎么算？', '决定湿地与土壤的淹水比例从哪来；动态湿地会随方案自动打开或关闭。'],
     debug: ['要打开调试吗？', '可全部不选；这些开关只增加检查与日志，不改变页间约束。'],
   }[page];
@@ -148,7 +167,18 @@ function render() {
   if (page === 'subgrid') renderCards(SUBGRIDS, picked.subgrid, chooseSubgrid, subgridBlock);
   if (page === 'soil') renderCards(SOILS, picked.soil, chooseSoil);
   if (page === 'physics') renderCards(PHYSICS, picked.physics, togglePhysics, physicsBlock, true);
-  if (page === 'tracer') renderCards(TRACERS, picked.tracer, chooseTracer, tracerBlock);
+  if (page === 'tracer') {
+    const chosen = Object.fromEntries(tracerList(picked.tracer).map(id => [id, true]));
+    renderCards(TRACERS, chosen, chooseTracer, tracerBlock, true);
+  }
+  if (page === 'isotope') {
+    if (!picked.isotopeModeChosen || isotopeModeBlock({ id: picked.isotopeMode })) {
+      picked.isotopeMode = isotopeModeBlock({ id: 'fractionation' }) ? 'conservative' : 'fractionation';
+      picked.isotopeModeChosen = false;
+    }
+    renderCards(ISOTOPE_MODES, picked.isotopeMode, chooseIsotopeMode, isotopeModeBlock);
+    renderIsotopeMixing();
+  }
   if (page === 'methane') {
     // 用户没亲手选过时跟着约束走（回去打开河湖汇流后自动换成 hybrid）；亲手选的只在被挡住时才换。
     if (!picked.methaneModeChosen || methaneModeBlock({ id: picked.methaneMode })) {
@@ -175,6 +205,7 @@ function pageInfo(page) {
   if (page === 'physics') return 'ⓘ 灰项仍然列出；带“← 第 N 页”的卡片可直接返回修改';
   if (page === 'tracer') return 'ⓘ 甲烷需要 PFT 或 PC、BGC、van Genuchten 土壤水力；本页会把运行参数自动写入算例';
   if (page === 'methane') return 'ⓘ 建例后仍可在专家模式「示踪剂」页改；改方案时动态湿地会一并改';
+  if (page === 'isotope') return 'ⓘ 同位素强迫文件与参数文件建例时自动写入算例目录；含水层混合水量建例后可在「示踪剂」页改';
   if (page === 'debug') return 'ⓘ 打开调试会让日志明显增多，常规运行可全部关闭';
   return '';
 }
@@ -425,8 +456,6 @@ function chooseSubgrid(id) {
   if (id !== 'PFT' && id !== 'PC') {
     picked.physics.bgc = false;
     picked.physics.crop = false;
-    picked.physics.tracer = false;
-    picked.tracer = null;
   }
   render();
 }
@@ -451,7 +480,7 @@ function togglePhysics(id) {
     picked.tracer = null;
   }
   if (id === 'bgc') {
-    if (!picked.physics.bgc) { picked.physics.crop = false; picked.physics.tracer = false; picked.tracer = null; }
+    if (!picked.physics.bgc) picked.physics.crop = false;
     picked.physics.lulcc = false;
   }
   if (id === 'crop' && picked.physics.crop) picked.physics.lulcc = false;
@@ -460,8 +489,43 @@ function togglePhysics(id) {
 }
 
 function chooseTracer(id) {
-  picked.tracer = id;
+  const list = tracerList(picked.tracer);
+  picked.tracer = (list.includes(id) ? list.filter(x => x !== id) : [...list, id]).join(',') || null;
   render();
+}
+
+function chooseIsotopeMode(id) {
+  picked.isotopeMode = id;
+  picked.isotopeModeChosen = true;
+  render();
+}
+
+function isotopeModeBlock(item) {
+  if (item.id === 'fractionation' && picked.domain === 'site') {
+    return { need: '单点没有示踪物强迫，不能分馏', cause: '第 1 页选择了站点', page: 0 };
+  }
+  return null;
+}
+
+/** 含水层混合水量输入框（`DEF_TRACER_AQUIFER_MIXING_WATER_MM`），预填测试值并写明。 */
+function renderIsotopeMixing() {
+  const box = document.createElement('div');
+  box.className = 'card spatial-config';
+  const label = document.createElement('label');
+  label.textContent = '含水层混合水量（mm）';
+  const input = document.createElement('input');
+  input.className = 'input';
+  input.type = 'number';
+  input.min = '0';
+  input.step = 'any';
+  input.id = 'isotope-mixing';
+  input.value = String(picked.isotopeMixing ?? ISOTOPE_TEST_MIXING_MM);
+  input.oninput = () => { picked.isotopeMixing = Number(input.value); renderFoot(); };
+  const note = document.createElement('p');
+  note.className = 'muted mini';
+  note.textContent = '预填的 1000 mm 只是测试值，正式模拟请用实测或率定的有效混合水深。它决定地下水同位素的缓冲与记忆，必须大于运行中可能的最大地下水亏缺。';
+  box.append(label, input, note);
+  $('gatecards').appendChild(box);
 }
 
 function chooseMethaneMode(id) {
@@ -512,6 +576,9 @@ function physicsBlock(item) {
     };
   }
   if (item.id === 'lulcc') {
+    if (hasTracer(picked, 'isotope')) {
+      return { need: 'LULCC 不能与水同位素同开（上游停机）', cause: `第 ${pageNumber('tracer')} 页选了水同位素`, page: pageIndex('tracer') };
+    }
     if (picked.subgrid === 'USGS') {
       return { need: 'LULCC 不支持 USGS 次网格', cause: `第 ${pageNumber('subgrid')} 页选了 USGS`, page: pageIndex('subgrid') };
     }
@@ -549,21 +616,29 @@ function physicsBlock(item) {
   if (item.id === 'tracer') {
     // 城市斑块没有示踪物账（建例时 `validate_runtime_contract` 与运行时装配都会拒绝），站点与空间都一样。
     if (picked.physics.urban) {
-      return { need: '城市模式暂不支持甲烷示踪', cause: '本页已开启 URBAN' };
-    }
-    if (picked.subgrid !== 'PFT' && picked.subgrid !== 'PC') {
-      return { need: '甲烷示踪需要 PFT 或 PC 次网格', cause: `第 ${pageNumber('subgrid')} 页选了 ${picked.subgrid}`, page: pageIndex('subgrid') };
+      return { need: '城市模式暂不支持示踪剂', cause: '本页已开启 URBAN' };
     }
     if (picked.soil !== 'vg') {
       return { need: '需要 van Genuchten 土壤水力', cause: `第 ${pageNumber('soil')} 页选了 Campbell`, page: pageIndex('soil') };
     }
-    if (!picked.physics.bgc) return { need: '甲烷示踪需要同时开启 BGC' };
   }
   return null;
 }
 
 function tracerBlock(item) {
   if (item.ready === false) return { need: item.need };
+  if (item.id === 'methane') {
+    if (picked.subgrid !== 'PFT' && picked.subgrid !== 'PC') {
+      return { need: '甲烷示踪需要 PFT 或 PC 次网格', cause: `第 ${pageNumber('subgrid')} 页选了 ${picked.subgrid}`, page: pageIndex('subgrid') };
+    }
+    if (!picked.physics.bgc) {
+      return { need: '甲烷示踪需要同时开启 BGC', cause: `第 ${pageNumber('physics')} 页没有开启 BGC`, page: pageIndex('physics') };
+    }
+  }
+  // 同位素开含水层混合后，LULCC 新建的土壤 patch 没有参考水量，上游停机（第 514 轮）。
+  if (item.id === 'isotope' && picked.physics.lulcc) {
+    return { need: '水同位素不能与 LULCC 同开（上游停机）', cause: `第 ${pageNumber('physics')} 页开启了 LULCC`, page: pageIndex('physics') };
+  }
   return null;
 }
 
@@ -603,7 +678,11 @@ function renderFoot() {
 
   const list = pages();
   const page = list[pageIdx];
-  const required = { domain: picked.domain, grid: picked.grid, subgrid: picked.subgrid, soil: picked.soil, tracer: picked.tracer, methane: picked.methaneMode };
+  const required = {
+    domain: picked.domain, grid: picked.grid, subgrid: picked.subgrid, soil: picked.soil,
+    tracer: picked.tracer, methane: picked.methaneMode,
+    isotope: picked.isotopeMode && Number(picked.isotopeMixing) > 0,
+  };
   const next = document.createElement('button');
   next.className = 'btn-next';
   next.textContent = '下一步 →';
@@ -659,6 +738,8 @@ export function startSession(config) {
     physics: { ...emptyPhysics(), ...config.physics },
     tracer: config.tracer,
     methaneMode: config.methaneMode ?? null,
+    isotopeMode: config.isotopeMode ?? null,
+    isotopeMixing: config.isotopeMixing ?? null,
     debug: { ...emptyDebug(), ...config.debug },
   };
   globalThis.dispatchEvent?.(new Event('colm:wizard'));
@@ -667,8 +748,11 @@ export function startSession(config) {
 
 function finish() {
   dropBlockedPhysics();
-  if (picked.tracer === 'methane' && (!picked.methaneMode || methaneModeBlock({ id: picked.methaneMode }))) {
+  if (hasTracer(picked, 'methane') && (!picked.methaneMode || methaneModeBlock({ id: picked.methaneMode }))) {
     picked.methaneMode = defaultMethaneMode();
+  }
+  if (hasTracer(picked, 'isotope') && (!picked.isotopeMode || isotopeModeBlock({ id: picked.isotopeMode }))) {
+    picked.isotopeMode = isotopeModeBlock({ id: 'fractionation' }) ? 'conservative' : 'fractionation';
   }
   const spatial = picked.domain === 'site' ? null : {
     domain: picked.grid === 'unstructured' || picked.grid === 'catchment'
@@ -699,7 +783,8 @@ function finish() {
   };
   startSession({
     domain: picked.domain, grid: picked.grid, spatial, subgrid: picked.subgrid, soil: picked.soil,
-    physics: picked.physics, tracer: picked.tracer, methaneMode: picked.methaneMode, debug: picked.debug,
+    physics: picked.physics, tracer: picked.tracer, methaneMode: picked.methaneMode,
+    isotopeMode: picked.isotopeMode, isotopeMixing: picked.isotopeMixing, debug: picked.debug,
   });
   // 向导已经决定本次模型结构；通常下一步是选现成站点并建算例，不是重新
   // 制作原始数据。前处理仍在左侧作为按需入口，但不再拦住主路径。
@@ -713,7 +798,8 @@ export function wizardFields(wizard = state.wizard) {
   if (!wizard) return [];
   const p = wizard.physics;
   const d = wizard.debug;
-  const methane = p.tracer && wizard.tracer === 'methane';
+  const methane = hasTracer(wizard, 'methane');
+  const isotope = hasTracer(wizard, 'isotope');
   const urban = p.urban;
   const bgc = p.bgc || p.crop || methane;
   const fields = [
@@ -728,7 +814,7 @@ export function wizardFields(wizard = state.wizard) {
     ['DEF_Aerosol_Readin', false, 'logical'],
     ['DEF_URBAN_RUN', urban, 'logical'],
     ['DEF_USE_LULCC', p.lulcc, 'logical'],
-    ['DEF_USE_TRACER', methane, 'logical'],
+    ['DEF_USE_TRACER', methane || isotope, 'logical'],
     ['DEF_USE_RangeCheck', d.rangecheck, 'logical'],
     ['DEF_USE_CoLMDEBUG', d.colmdebug, 'logical'],
     ['DEF_USE_SrfdataDiag', d.srfdatadiag, 'logical'],
@@ -753,15 +839,33 @@ export function wizardFields(wizard = state.wizard) {
   if (methane) fields.push(
     ['DEF_USE_Dynamic_Wetland', methaneMode === 'dynamic_wtd' || methaneMode === 'hybrid', 'logical'],
     ['DEF_METHANE%inundation_mode', methaneMode],
-    ['DEF_TRACER_NUM', '1'],
-    ['DEF_TRACER_NAMES', 'CH4'],
-    ['DEF_TRACER_TYPES', 'gas'],
-    ['DEF_TRACER_MRAT', '16.04'],
-    ['DEF_TRACER_REF_RATIO', '1.0'],
-    ['DEF_TRACER_INIT_DELTA', '0.0'],
-    ['DEF_TRACER_REACTIVE_DECAY_RATE', '0.0'],
-    ['DEF_TRACER_PARAM_FILES', 'CH4:standard_ch4_parameter.nml'],
   );
+  // 示踪物名单：各列表按同一顺序对齐，元数据与上游参数文件一致（参数文件建例时复制进算例目录）。
+  const tracers = [
+    ...(methane ? [['CH4', 'gas', '16.04', '1.0', '0.0', 'CH4:standard_ch4_parameter.nml']] : []),
+    ...(isotope ? [
+      ['H2_18O', 'isotope', '20.0', '2.0052e-3', '-10.0', 'H2_18O:standard_O18_parameter.nml'],
+      ['HDO', 'isotope', '19.0', '1.5576e-4', '-70.0', 'HDO:standard_HDO_parameter.nml'],
+    ] : []),
+  ];
+  const column = k => tracers.map(row => row[k]).join(',');
+  if (tracers.length) fields.push(
+    ['DEF_TRACER_NUM', String(tracers.length)],
+    ['DEF_TRACER_NAMES', column(0)],
+    ['DEF_TRACER_TYPES', column(1)],
+    ['DEF_TRACER_MRAT', column(2)],
+    ['DEF_TRACER_REF_RATIO', column(3)],
+    ['DEF_TRACER_INIT_DELTA', column(4)],
+    ['DEF_TRACER_REACTIVE_DECAY_RATE', tracers.map(() => '0.0').join(',')],
+    ['DEF_TRACER_PARAM_FILES', column(5)],
+  );
+  if (isotope) {
+    const mixing = Number(wizard.isotopeMixing ?? ISOTOPE_TEST_MIXING_MM);
+    fields.push(
+      ['DEF_TRACER_USE_FRACTIONATION', wizard.domain !== 'site' && (wizard.isotopeMode ?? 'fractionation') === 'fractionation', 'logical'],
+      ['DEF_TRACER_AQUIFER_MIXING_WATER_MM', Number.isInteger(mixing) ? `${mixing}.0` : String(mixing)],
+    );
+  }
   return fields.map(([path, value, kind]) => ({ path, value: kind === 'logical' ? logical(value) : String(value) }));
 }
 
@@ -778,7 +882,7 @@ export function wizardFieldNames() {
     'DEF_USE_USGS', 'DEF_USE_IGBP',
     'DEF_TRACER_NUM', 'DEF_TRACER_NAMES', 'DEF_TRACER_TYPES', 'DEF_TRACER_MRAT',
     'DEF_TRACER_REF_RATIO', 'DEF_TRACER_INIT_DELTA', 'DEF_TRACER_REACTIVE_DECAY_RATE',
-    'DEF_TRACER_PARAM_FILES', 'DEF_USE_GridRiverLakeFlow',
+    'DEF_TRACER_PARAM_FILES', 'DEF_TRACER_USE_FRACTIONATION', 'DEF_USE_GridRiverLakeFlow',
   );
   return names;
 }
