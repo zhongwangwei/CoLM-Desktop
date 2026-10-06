@@ -426,3 +426,73 @@ fn large_trees_track_names_and_directories_without_per_file_stat() {
     std::fs::write(d.join("soil/c.nc"), b"new").unwrap();
     assert_ne!(tree_fingerprint(&d, 1).unwrap(), a);
 }
+
+/// 甲烷算例：CH4 参数文件里 `allowlakeprod`/`use_spatial_ph` 决定 mksrfdata 生成什么，
+/// 改了就得重做地表数据；只调其它系数（如 Q10）不重做。
+#[test]
+fn methane_preprocessing_switches_invalidate_the_surface_stage() {
+    let case = CASE.replace(
+        "   DEF_dir_output = '/out/'\n",
+        "   DEF_dir_output = '/out/'\n   DEF_USE_BGC = .true.\n   DEF_USE_TRACER = .true.\n   \
+         DEF_TRACER_NUM = 1\n   DEF_TRACER_NAMES = 'CH4'\n   DEF_TRACER_TYPES = 'gas'\n   \
+         DEF_TRACER_PARAM_FILES = 'CH4:ch4.nml'\n",
+    );
+    let path = write("ch4", &case);
+    let dir = path.parent().unwrap();
+    let params = |lake: &str, q10: &str| {
+        std::fs::write(
+            dir.join("ch4.nml"),
+            format!(
+                "&nl_colm_methane_parameter\n DEF_METHANE%allowlakeprod = {lake}\n \
+                 DEF_METHANE%use_spatial_ph = .false.\n DEF_METHANE%q10ch4 = {q10}\n/\n"
+            ),
+        )
+        .unwrap();
+    };
+    params(".false.", "1.33");
+    let off = compute("mksrfdata", &path, "default@abc").unwrap();
+    // 两个开关都关时不记这一项：与不带甲烷的指纹同一形状，现有算例不会因此重做前处理。
+    assert!(!off
+        .inputs
+        .keys()
+        .any(|key| key.starts_with("CH4 preprocessing")));
+    params(".false.", "2.0");
+    let tuned = compute("mksrfdata", &path, "default@abc").unwrap();
+    assert!(
+        first_difference(&off, &tuned).is_none(),
+        "Q10 must not redo mksrfdata"
+    );
+    params(".true.", "2.0");
+    let lake = compute("mksrfdata", &path, "default@abc").unwrap();
+    let d = first_difference(&off, &lake).expect("allowlakeprod must redo mksrfdata");
+    assert!(d.contains("CH4 preprocessing"), "{d}");
+    // mkinidata 读湖泊土壤碳，也要跟着重做。
+    params(".false.", "2.0");
+    let ini_off = compute("mkinidata", &path, "default@abc").unwrap();
+    params(".true.", "2.0");
+    let ini_lake = compute("mkinidata", &path, "default@abc").unwrap();
+    assert!(
+        first_difference(&ini_off, &ini_lake).is_some(),
+        "allowlakeprod must redo mkinidata"
+    );
+}
+
+/// 参数文件用 `;` 分隔时，colm 阶段也要记到每个文件的内容。
+#[test]
+fn semicolon_separated_parameter_files_are_all_recorded() {
+    let path = write(
+        "semi",
+        &CASE.replace(
+            "   DEF_dir_output = '/out/'\n",
+            "   DEF_dir_output = '/out/'\n   DEF_TRACER_PARAM_FILES = 'a_param.nml; B:b.nml'\n",
+        ),
+    );
+    let dir = path.parent().unwrap();
+    std::fs::write(dir.join("a_param.nml"), "&x\n/\n").unwrap();
+    std::fs::write(dir.join("b.nml"), "&x\n/\n").unwrap();
+    let before = compute("colm", &path, "default@abc").unwrap();
+    std::fs::write(dir.join("b.nml"), "&x\n a = 1\n/\n").unwrap();
+    let after = compute("colm", &path, "default@abc").unwrap();
+    let d = first_difference(&before, &after).expect("b.nml change must be seen");
+    assert!(d.contains("b.nml"), "{d}");
+}

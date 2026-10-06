@@ -3308,17 +3308,31 @@ fn tracer_param_files(doc: &colm_namelist::Document) -> Vec<String> {
     let Some(colm_namelist::Value::Str(raw)) = doc.get("DEF_TRACER_PARAM_FILES") else {
         return Vec::new();
     };
-    raw.split(',')
-        .map(str::trim)
-        .filter(|x| !x.is_empty() && !x.eq_ignore_ascii_case("null"))
-        .map(|x| {
-            x.rsplit_once(':')
-                .map_or(x, |(_, file)| file)
-                .trim()
-                .trim_matches(['\'', '"'])
-                .to_string()
-        })
+    // 与 Fortran 同一套拆法（`,`/`;`、盘符、`null` 占位）；写错时不列文件，引擎启动会报出原因。
+    colm_namelist::tracer_files::param_file_paths(raw)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|file| file.trim_matches(['\'', '"']).to_string())
         .collect()
+}
+
+/// 第一个满足 `pick(名字, 类型)` 的示踪物的参数文件（照 Fortran 的映射规则查）。
+fn tracer_param_file(
+    doc: &colm_namelist::Document,
+    pick: impl Fn(&str, &str) -> bool,
+) -> Option<String> {
+    let names = character(doc, "DEF_TRACER_NAMES");
+    let types = character(doc, "DEF_TRACER_TYPES");
+    let names: Vec<&str> = names.split(',').map(str::trim).collect();
+    let types: Vec<&str> = types.split(',').map(str::trim).collect();
+    let index = (0..names.len()).find(|&i| pick(names[i], types.get(i).copied().unwrap_or("")))?;
+    let files = character(doc, "DEF_TRACER_PARAM_FILES");
+    colm_namelist::tracer_files::param_file_for(&files, index, |key| {
+        key.eq_ignore_ascii_case(names[index])
+    })
+    .ok()
+    .flatten()
+    .map(|file| file.trim_matches(['\'', '"']).to_string())
 }
 
 fn safe_process_file(case_dir: &std::path::Path, file: &str) -> Result<std::path::PathBuf, String> {
@@ -3521,11 +3535,8 @@ pub(crate) fn methane_mode(
     if !is_methane(doc) {
         return None;
     }
-    let files = character(doc, "DEF_TRACER_PARAM_FILES");
-    let file = files.split(',').find_map(|item| {
-        let (name, file) = item.trim().rsplit_once(':')?;
-        matches!(name.trim().to_ascii_uppercase().as_str(), "CH4" | "METHANE")
-            .then(|| file.trim().trim_matches(['\'', '"']).to_string())
+    let file = tracer_param_file(doc, |name, _| {
+        matches!(name.to_ascii_uppercase().as_str(), "CH4" | "METHANE")
     })?;
     let path = std::path::Path::new(&file);
     let path = if path.is_absolute() {
@@ -3551,23 +3562,7 @@ pub(crate) fn solute_concentrations(
     if !logical(doc, "DEF_USE_TRACER") {
         return None;
     }
-    let names = character(doc, "DEF_TRACER_NAMES");
-    let types = character(doc, "DEF_TRACER_TYPES");
-    let name = names
-        .split(',')
-        .zip(types.split(','))
-        .find(|(_, kind)| kind.trim().eq_ignore_ascii_case("solute"))?
-        .0
-        .trim()
-        .to_string();
-    let files = character(doc, "DEF_TRACER_PARAM_FILES");
-    let file = files.split(',').find_map(|item| {
-        let (owner, file) = item.trim().rsplit_once(':')?;
-        owner
-            .trim()
-            .eq_ignore_ascii_case(&name)
-            .then(|| file.trim().trim_matches(['\'', '"']).to_string())
-    })?;
+    let file = tracer_param_file(doc, |_, kind| kind.eq_ignore_ascii_case("solute"))?;
     let path = std::path::Path::new(&file);
     let path = if path.is_absolute() {
         path.to_path_buf()
@@ -4130,11 +4125,9 @@ fn stage_tracer_parameters(
     else {
         return Ok(());
     };
-    let wanted = |file: &str| {
-        files
-            .split(',')
-            .any(|item| item.rsplit_once(':').is_some_and(|(_, f)| f.trim() == file))
-    };
+    let listed = colm_namelist::tracer_files::param_file_paths(&files)
+        .map_err(|e| format!("DEF_TRACER_PARAM_FILES：{e:#}"))?;
+    let wanted = |file: &str| listed.iter().any(|f| f.trim() == file);
     if wanted("standard_ch4_parameter.nml") {
         stage_ch4_parameter(dir, mode)?;
     }

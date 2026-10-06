@@ -4836,7 +4836,7 @@ fn spatial_case_command_with_subgrid(
     let lai_monthly = case_bool(&document, "DEF_LAI_MONTHLY", true)? || lulcc || pft || pc;
 
     let rawdata = PathBuf::from(case_string(&document, "DEF_dir_rawdata")?);
-    let methane = methane_preprocessing_requirements(&document, namelist)?;
+    let methane = colm_srfdata::methane_preprocessing::requirements(&document, namelist)?;
     let case_name = case_string(&document, "DEF_CASE_NAME")?;
     let output = PathBuf::from(case_string(&document, "DEF_dir_output")?);
     let requested_year = case_i32(&document, "DEF_LC_YEAR", 2005)?;
@@ -5520,129 +5520,6 @@ fn compression_level_i32(value: i32, field: &str) -> Result<u8> {
         .ok()
         .filter(|level| *level <= 9)
         .with_context(|| format!("{field} must be in 0..=9, got {value}"))
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct MethanePreprocessing {
-    lake_soil_carbon: bool,
-    spatial_ph: bool,
-}
-
-/// Mirror `methane_preprocessing_requirements` without treating every BGC
-/// case as methane.  The CH4 parameter file is selected through the same
-/// keyed-or-positional `DEF_TRACER_PARAM_FILES` convention as CoLM.
-fn methane_preprocessing_requirements(
-    document: &colm_namelist::Document,
-    namelist: &Path,
-) -> Result<MethanePreprocessing> {
-    if !case_bool(document, "DEF_USE_BGC", false)? || !case_bool(document, "DEF_USE_TRACER", false)?
-    {
-        return Ok(MethanePreprocessing {
-            lake_soil_carbon: false,
-            spatial_ph: false,
-        });
-    }
-    let count = case_i32(document, "DEF_TRACER_NUM", 0)?;
-    ensure!(count >= 0, "DEF_TRACER_NUM must be non-negative");
-    let names = optional_case_string(document, "DEF_TRACER_NAMES", "")?;
-    let names = names.split(',').map(str::trim).collect::<Vec<_>>();
-    let mut methane = None;
-    for index in 0..usize::try_from(count)? {
-        let name = names.get(index).copied().unwrap_or("");
-        if name.eq_ignore_ascii_case("CH4") || name.eq_ignore_ascii_case("METHANE") {
-            ensure!(
-                methane.replace(index).is_none(),
-                "multiple CH4/METHANE tracers are configured"
-            );
-        }
-    }
-    let Some(index) = methane else {
-        return Ok(MethanePreprocessing {
-            lake_soil_carbon: false,
-            spatial_ph: false,
-        });
-    };
-    let types = optional_case_string(document, "DEF_TRACER_TYPES", "isotope,isotope")?;
-    let family = types.split(',').nth(index).map(str::trim).unwrap_or("");
-    ensure!(
-        family.eq_ignore_ascii_case("gas"),
-        "CH4/METHANE preprocessing descriptor must use family=gas"
-    );
-    let mapping = optional_case_string(document, "DEF_TRACER_PARAM_FILES", "null")?;
-    let parameter = tracer_parameter_file(&mapping, index, &names)?
-        .context("CH4 requires DEF_TRACER_PARAM_FILES to include a CH4 parameter file")?;
-    let parameter = PathBuf::from(parameter);
-    let parameter = if parameter.is_absolute() || parameter.is_file() {
-        parameter
-    } else {
-        namelist
-            .parent()
-            .unwrap_or_else(|| Path::new("."))
-            .join(parameter)
-    };
-    let text = std::fs::read_to_string(&parameter)
-        .with_context(|| format!("cannot read CH4 parameter file {}", parameter.display()))?;
-    let parameter_document = parse(&text)
-        .with_context(|| format!("cannot parse CH4 parameter file {}", parameter.display()))?;
-    Ok(MethanePreprocessing {
-        lake_soil_carbon: case_bool(&parameter_document, "DEF_METHANE%allowlakeprod", false)?,
-        spatial_ph: case_bool(&parameter_document, "DEF_METHANE%use_spatial_ph", false)?,
-    })
-}
-
-fn optional_case_string(
-    document: &colm_namelist::Document,
-    field: &str,
-    default: &str,
-) -> Result<String> {
-    match document.get(field) {
-        None => Ok(default.to_owned()),
-        Some(Value::Str(value)) => Ok(value.to_owned()),
-        Some(_) => bail!("{field} must be a character value"),
-    }
-}
-
-fn tracer_parameter_file(
-    mapping: &str,
-    tracer_index: usize,
-    names: &[&str],
-) -> Result<Option<String>> {
-    if mapping.trim().is_empty() || mapping.trim().eq_ignore_ascii_case("null") {
-        return Ok(None);
-    }
-    let tracer_name = names.get(tracer_index).copied().unwrap_or("");
-    let mut positional = 0_usize;
-    let mut matched = false;
-    let mut result = None;
-    for entry in mapping
-        .split([',', ';'])
-        .map(str::trim)
-        .filter(|entry| !entry.is_empty())
-    {
-        if let Some((key, path)) = entry.split_once(':') {
-            let key = key.trim();
-            let path = path.trim();
-            ensure!(
-                !key.is_empty() && !path.is_empty(),
-                "empty tracer parameter file mapping entry: {entry}"
-            );
-            if !matched
-                && (key.eq_ignore_ascii_case(tracer_name)
-                    || key.eq_ignore_ascii_case("CH4")
-                    || key.eq_ignore_ascii_case("METHANE"))
-            {
-                matched = true;
-                result = (!path.eq_ignore_ascii_case("null")).then(|| path.to_owned());
-            }
-        } else {
-            if positional == tracer_index && !matched {
-                matched = true;
-                result = (!entry.eq_ignore_ascii_case("null")).then(|| entry.to_owned());
-            }
-            positional += 1;
-        }
-    }
-    Ok(result)
 }
 
 fn case_f64(document: &colm_namelist::Document, field: &str) -> Result<f64> {
@@ -7884,18 +7761,6 @@ mod tests {
             .iter()
             .any(|argument| argument == "--diagnostics"));
         crate::remove_test_tree(root);
-    }
-
-    #[test]
-    fn methane_parameter_mapping_keeps_the_first_matching_alias() {
-        assert_eq!(
-            tracer_parameter_file("CH4:null; METHANE:later.nml", 0, &["CH4"]).unwrap(),
-            None
-        );
-        assert_eq!(
-            tracer_parameter_file("other.nml, standard_ch4.nml", 1, &["CL", "METHANE"]).unwrap(),
-            Some("standard_ch4.nml".into())
-        );
     }
 
     #[test]

@@ -29,6 +29,7 @@ pub mod derive;
 pub mod diagnostics;
 pub mod grid;
 pub mod mesh;
+pub mod methane_preprocessing;
 mod minpack;
 pub mod pft;
 pub mod raster;

@@ -15,6 +15,7 @@
 
 pub mod document;
 pub mod parse;
+pub mod tracer_files;
 pub mod value;
 
 pub use document::Document;

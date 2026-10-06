@@ -3798,3 +3798,25 @@ fn sediment_needs_a_spatial_case_with_grid_routing() {
         include_str!("../../../vendor/CoLM202X/run/standard_sediment_parameter.nml")
     );
 }
+
+/// `DEF_TRACER_PARAM_FILES` 用 `;` 分隔、按位置写、带 `null` 占位时，GUI 与 Fortran 读出同一份文件。
+#[test]
+fn parameter_file_lists_follow_the_fortran_rules() {
+    let text = "&nl_colm\n DEF_USE_TRACER = .true.\n DEF_TRACER_NUM = 2\n \
+                DEF_TRACER_NAMES = 'H2_18O,CH4'\n DEF_TRACER_TYPES = 'isotope,gas'\n \
+                DEF_TRACER_PARAM_FILES = 'null; my_ch4_parameter.nml'\n/\n";
+    let dir = batch("param-files-semicolon", &[text]).remove(0);
+    let case = std::path::Path::new(&dir);
+    std::fs::write(
+        case.join("my_ch4_parameter.nml"),
+        "&nl_colm_methane_parameter\n DEF_METHANE%inundation_mode = 'wetwat'\n/\n",
+    )
+    .unwrap();
+    let doc =
+        colm_namelist::parse(&std::fs::read_to_string(case.join("case.nml")).unwrap()).unwrap();
+    assert_eq!(super::methane_mode(&doc, case).as_deref(), Some("wetwat"));
+    let files = super::process_parameter_files_at(&dir).unwrap();
+    assert!(files
+        .iter()
+        .any(|file| file.title == "my_ch4_parameter.nml"));
+}

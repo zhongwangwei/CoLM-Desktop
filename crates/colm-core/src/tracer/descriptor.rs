@@ -536,36 +536,9 @@ pub fn param_file_for_index(
     tracers: &[TracerDescriptor],
     index: usize,
 ) -> Result<Option<String>> {
-    let list = raw.trim_end();
-    if list.trim().is_empty() || list.trim().eq_ignore_ascii_case("null") {
-        return Ok(None);
-    }
-    let mut positional = 0usize;
-    for entry in list.split([',', ';']) {
-        let entry = entry.trim();
-        if entry.is_empty() {
-            continue;
-        }
-        // Windows 原生路径的盘符（`C:\`）属于按位置的路径，不是 `key:path` 映射（vendor 同步）。
-        // `X:/...` 仍按映射解释：单字母的示踪物名可以这样写（见测试）。
-        let drive_letter =
-            matches!(entry.as_bytes(), [letter, b':', b'\\', ..] if letter.is_ascii_alphabetic());
-        if let Some((key, value)) = entry.split_once(':').filter(|_| !drive_letter) {
-            let (key, value) = (key.trim(), value.trim());
-            if key.is_empty() || value.is_empty() {
-                bail!("MOD_Tracer_Defs: empty tracer parameter file mapping entry: {entry}");
-            }
-            if param_equal(key, &tracers[index].name) {
-                return Ok((!value.eq_ignore_ascii_case("null")).then(|| value.to_owned()));
-            }
-        } else {
-            positional += 1;
-            if positional == index + 1 {
-                return Ok((!entry.eq_ignore_ascii_case("null")).then(|| entry.to_owned()));
-            }
-        }
-    }
-    Ok(None)
+    colm_namelist::tracer_files::param_file_for(raw, index, |key| {
+        param_equal(key, &tracers[index].name)
+    })
 }
 
 /// `derive_tracer_taxonomy`。

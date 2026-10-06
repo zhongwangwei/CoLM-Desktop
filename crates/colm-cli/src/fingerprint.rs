@@ -112,6 +112,23 @@ pub fn compute(stage: &str, case_nml: &Path, kernel: &str) -> Result<Fingerprint
         record_file(&mut files, forcing.clone(), FileKind::SmallConfig);
         record_forcing_inventory(&mut files, &forcing);
     }
+    // mksrfdata 按 CH4 参数文件里的两个开关决定要不要生成湖泊土壤碳与空间 pH，mkinidata 再读
+    // 湖泊土壤碳（`MOD_Initialize.F90` 的 `lake_soilc_patches.nc`）。参数文件的其它内容不影响这两段，
+    // 所以只记这两个开关的生效值，调 Q10 之类的系数不会让前处理重跑。两个都关（包括没有甲烷）时
+    // 不记：与加这一项之前的指纹相同，现有算例不必为此重做前处理。
+    if stage == "mksrfdata" || stage == "mkinidata" {
+        let value = match colm_srfdata::methane_preprocessing::requirements(&doc, case_nml) {
+            Ok(methane) if !methane.lake_soil_carbon && !methane.spatial_ph => None,
+            Ok(methane) => Some(format!(
+                "allowlakeprod={} use_spatial_ph={}",
+                methane.lake_soil_carbon, methane.spatial_ph
+            )),
+            Err(error) => Some(format!("error: {error:#}")),
+        };
+        if let Some(value) = value {
+            inputs.insert("CH4 preprocessing (DEF_METHANE)".into(), value);
+        }
+    }
     for p in doc.paths() {
         if ignored(stage, &p, greenwich) {
             continue;
@@ -136,20 +153,22 @@ pub fn compute(stage: &str, case_nml: &Path, kernel: &str) -> Result<Fingerprint
             continue;
         }
         if p.eq_ignore_ascii_case("DEF_TRACER_PARAM_FILES") {
-            for entry in raw
-                .split(',')
-                .map(str::trim)
-                .filter(|entry| !entry.is_empty())
-            {
-                let file = entry
-                    .rsplit_once(':')
-                    .map_or(entry, |(_, file)| file)
-                    .trim();
-                if !file.eq_ignore_ascii_case("null") {
-                    record_file(
-                        &mut files,
-                        resolve(case_dir, file.trim_matches(['\'', '"'])),
-                        FileKind::SmallConfig,
+            // 与 Fortran 同一套拆法（`,`/`;`、盘符、`null` 占位）；写错了就让指纹带上错误，
+            // 改对之后自然对不上、会重跑。
+            match colm_namelist::tracer_files::param_file_paths(raw) {
+                Ok(paths) => {
+                    for file in paths {
+                        record_file(
+                            &mut files,
+                            resolve(case_dir, file.trim_matches(['\'', '"'])),
+                            FileKind::SmallConfig,
+                        );
+                    }
+                }
+                Err(error) => {
+                    inputs.insert(
+                        "DEF_TRACER_PARAM_FILES (invalid)".into(),
+                        format!("{error:#}"),
                     );
                 }
             }

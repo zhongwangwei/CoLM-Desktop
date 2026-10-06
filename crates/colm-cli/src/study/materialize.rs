@@ -201,23 +201,11 @@ fn copy_process_parameters(
     destination: &Path,
 ) -> Result<()> {
     let raw = string_path(document, "DEF_TRACER_PARAM_FILES");
-    let mut listed = Vec::new();
     let mut sources = BTreeSet::new();
     if let Some(raw) = &raw {
-        for entry in raw
-            .split(',')
-            .map(str::trim)
-            .filter(|entry| !entry.is_empty())
-        {
-            let (prefix, file) = entry
-                .rsplit_once(':')
-                .map_or(("", entry), |(prefix, file)| (prefix, file));
-            let file = file.trim();
-            if !file.eq_ignore_ascii_case("null") {
-                let path = resolve_path(baseline, file);
-                sources.insert(path.clone());
-                listed.push((prefix.trim().to_string(), path));
-            }
+        // 与 Fortran 同一套拆法：`,`/`;`、`key:path`、盘符、`null` 占位。
+        for file in colm_namelist::tracer_files::param_file_paths(raw)? {
+            sources.insert(resolve_path(baseline, &file));
         }
     }
     for entry in std::fs::read_dir(baseline)? {
@@ -254,20 +242,16 @@ fn copy_process_parameters(
         std::fs::copy(&source, &target)?;
         copied.insert(source, target);
     }
-    if raw.is_some() {
-        let mut rewritten = Vec::new();
-        for (prefix, source) in listed {
-            let source = colm_kernel::manifest::absolute(&source)?;
-            if let Some(target) = copied.get(&source) {
-                let path = target.to_string_lossy();
-                rewritten.push(if prefix.is_empty() {
-                    path.into_owned()
-                } else {
-                    format!("{prefix}:{path}")
-                });
-            }
-        }
-        document.set("DEF_TRACER_PARAM_FILES", Value::Str(rewritten.join(",")))?;
+    if let Some(raw) = &raw {
+        // 只换路径：键、`null` 占位与条目位置原样保留，否则按位置对应的示踪物会错位。
+        let rewritten = colm_namelist::tracer_files::rewrite_param_files(raw, |file| {
+            let source = colm_kernel::manifest::absolute(&resolve_path(baseline, file))?;
+            let target = copied.get(&source).with_context(|| {
+                format!("process parameter file {} was not copied", source.display())
+            })?;
+            Ok(target.to_string_lossy().into_owned())
+        })?;
+        document.set("DEF_TRACER_PARAM_FILES", Value::Str(rewritten))?;
     }
     Ok(())
 }
@@ -507,6 +491,50 @@ mod tests {
         .unwrap();
 
         assert!(member_case(&baseline, &member, "m000001", "AT-Neu", &[]).is_err());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// `null` 占位与 `;` 分隔：复制后位置不变，第 2 个示踪物仍对应 ch4 文件。
+    #[test]
+    fn parameter_file_positions_survive_materialization() {
+        let root = std::env::temp_dir().join(format!(
+            "colm-member-positions-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let baseline = root.join("base");
+        let member = root.join("study/members/m000001/AT-Neu");
+        std::fs::create_dir_all(&baseline).unwrap();
+        std::fs::write(baseline.join("forcing.nml"), "&nl_colm_forcing\n/\n").unwrap();
+        std::fs::write(baseline.join("ch4_parameter.nml"), "&x\n/\n").unwrap();
+        std::fs::write(baseline.join("o18_parameter.nml"), "&x\n/\n").unwrap();
+        std::fs::write(
+            baseline.join("case.nml"),
+            "&nl_colm\n   DEF_CASE_NAME = 'base'\n   DEF_dir_output = 'out'\n   DEF_forcing_namelist = 'forcing.nml'\n   \
+             DEF_TRACER_PARAM_FILES = 'null,ch4_parameter.nml; HDO:o18_parameter.nml'\n/\n",
+        )
+        .unwrap();
+        member_case(&baseline, &member, "m000001", "AT-Neu", &[]).unwrap();
+        let text = std::fs::read_to_string(member.join("case.nml")).unwrap();
+        let doc = colm_namelist::parse(&text).unwrap();
+        let Some(Value::Str(raw)) = doc.get("DEF_TRACER_PARAM_FILES") else {
+            panic!("DEF_TRACER_PARAM_FILES missing: {text}");
+        };
+        let entries = colm_namelist::tracer_files::param_file_entries(raw).unwrap();
+        assert_eq!(entries.len(), 3, "{raw}");
+        assert!(entries[0].is_null(), "{raw}");
+        assert!(entries[1].path().ends_with("ch4_parameter.nml"), "{raw}");
+        assert!(
+            entries[1].path().contains("members/m000001/AT-Neu/"),
+            "{raw}"
+        );
+        assert!(
+            matches!(
+                entries[2],
+                colm_namelist::tracer_files::ParamFileEntry::Keyed { key: "HDO", .. }
+            ),
+            "{raw}"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 }
