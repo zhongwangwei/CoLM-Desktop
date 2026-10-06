@@ -61,7 +61,8 @@ pub fn hist_vars(
 
     // 输出变量开关在 `DEF_HIST_vars_namelist` 指的文件里（`config::set_fields_batch` 写在那里）。
     let overrides = dir
-        .map(|dir| crate::config::history_overrides(&doc, std::path::Path::new(&dir)))
+        .as_ref()
+        .map(|dir| crate::config::history_overrides(&doc, std::path::Path::new(dir)))
         .unwrap_or_default();
     // 开关的最终取值与引擎同一判定（`colm_hist::selection::switch_states`）：声明默认值 →
     // `DEF_HIST_vars_out_default` → 输出变量文件覆盖 → DiagMatrix。
@@ -139,6 +140,42 @@ pub fn hist_vars(
         });
     }
     if truth("DEF_USE_TRACER") {
+        // 没有开关的这些变量都是 CH4 history（`MOD_Tracer_Reactive_Methane_Hist`）：写不写、写哪些由
+        // CH4 参数文件的 `write_ch4_history`/`ch4_history_vars` 决定，规则与引擎共用 `colm_hist::methane`。
+        let methane = dir.as_ref().and_then(|dir| {
+            crate::config::methane_history_settings(&doc, std::path::Path::new(dir))
+        });
+        let methane_state = |name: &str| -> (bool, Option<bool>, Option<String>) {
+            let Some((write, vars)) = &methane else {
+                return (false, Some(false), Some("需要 CH4 甲烷示踪物".into()));
+            };
+            match colm_hist::methane::methane_history_mode(*write, vars) {
+                0 => (
+                    false,
+                    Some(false),
+                    Some(
+                        "CH4 参数文件里关掉了 CH4 history（write_ch4_history / ch4_history_vars）"
+                            .into(),
+                    ),
+                ),
+                1 if colm_hist::methane::METHANE_CORE_HISTORY.contains(&name) => (true, None, None),
+                1 => (
+                    false,
+                    Some(false),
+                    Some(
+                        "ch4_history_vars = 'core' 时不写；要写它请在 CH4 参数文件里改选择".into(),
+                    ),
+                ),
+                _ => (
+                    true,
+                    None,
+                    Some(format!(
+                        "按 ch4_history_vars = '{}' 选择，只有 Fortran 引擎支持",
+                        vars.trim()
+                    )),
+                ),
+            }
+        };
         for v in colm_hist::generated::VARS {
             if seen.contains(v.name) {
                 continue;
@@ -163,11 +200,15 @@ pub fn hist_vars(
                     },
                 }
             };
+            let (on, writable, blocked_by) = match writable {
+                (Some(true), None) => methane_state(v.name),
+                other => (false, other.0, other.1),
+            };
             out.push(HistVar {
                 name: v.name.to_string(),
-                on: true,
-                writable: writable.0,
-                blocked_by: writable.1,
+                on,
+                writable,
+                blocked_by,
                 settable: false,
                 long_name: v.long_name.map(str::to_string),
             });

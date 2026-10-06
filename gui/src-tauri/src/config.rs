@@ -3552,6 +3552,44 @@ pub(crate) fn methane_mode(
     })
 }
 
+/// CH4 示踪物参数文件里的 `(write_ch4_history, ch4_history_vars)`；文件里没写的取上游缺省
+/// `(.true., 'core')`。不是甲烷算例为 `None`；参数文件读不到时也按缺省（引擎启动时会报错）。
+pub(crate) fn methane_history_settings(
+    doc: &colm_namelist::Document,
+    case_dir: &std::path::Path,
+) -> Option<(bool, String)> {
+    if !is_methane(doc) {
+        return None;
+    }
+    let defaults = (true, "core".to_string());
+    let Some(file) = tracer_param_file(doc, |name, _| {
+        matches!(name.to_ascii_uppercase().as_str(), "CH4" | "METHANE")
+    }) else {
+        return Some(defaults);
+    };
+    let path = std::path::Path::new(&file);
+    let path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        case_dir.join(path)
+    };
+    let Some(parameters) = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|text| colm_namelist::parse(&text).ok())
+    else {
+        return Some(defaults);
+    };
+    let write = match parameters.get("DEF_METHANE%write_ch4_history") {
+        Some(colm_namelist::Value::Bool(value)) => *value,
+        _ => defaults.0,
+    };
+    let vars = match parameters.get("DEF_METHANE%ch4_history_vars") {
+        Some(colm_namelist::Value::Str(value)) => value.clone(),
+        _ => defaults.1,
+    };
+    Some((write, vars))
+}
+
 /// 溶质算例参数文件里的初始浓度与降水浓度 `[init_conc, precip_default_conc]`（kg/kg）。
 /// 取 `DEF_TRACER_TYPES` 里第一个 `solute` 的参数文件；没有溶质或文件读不到时为 `None`，
 /// 文件里没写的量按上游缺省 0。
@@ -3873,6 +3911,17 @@ fn write_files_atomic(done: &[(std::path::PathBuf, String)]) -> Result<usize, St
 }
 
 fn write_process_files(done: &[(std::path::PathBuf, String)]) -> Result<usize, String> {
+    // 写之前用引擎同一份校验（`validate_methane_namelist`）检查 CH4 参数文件：负的 Q10、超出范围的
+    // 产率、不支持的开关当场拒绝，不等到启动引擎才报。整批任何一份不合法就一份都不写。
+    for (path, text) in done {
+        if text
+            .to_ascii_lowercase()
+            .contains("&nl_colm_methane_parameter")
+        {
+            colm_core::methane::config::MethaneParameters::from_parameter_text(text)
+                .map_err(|e| format!("{}：甲烷参数不合法，未保存：{e:#}", path.display()))?;
+        }
+    }
     write_files_atomic(done)
 }
 

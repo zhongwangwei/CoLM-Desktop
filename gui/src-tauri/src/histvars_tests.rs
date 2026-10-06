@@ -210,3 +210,54 @@ fn default_configuration_still_matches_the_measured_history_catalog() {
     assert_eq!(runtime_gated_ready, ["qlayer", "lake_deficit", "vegwp"]);
     assert_eq!(ready, 117);
 }
+
+/// CH4 history 变量的开关跟着 CH4 参数文件走：没有 CH4 时全关；`core` 时只有 18 个；
+/// `write_ch4_history = .false.` 时全关。只开同位素的算例也不该显示成开启。
+#[test]
+fn methane_history_variables_follow_the_ch4_parameter_file() {
+    if !have_kernel("default") {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("colm-histvars-ch4-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let isotope = "&nl_colm\n DEF_USE_TRACER = .true.\n DEF_TRACER_NUM = 2\n \
+                   DEF_TRACER_NAMES = 'H2_18O,HDO'\n DEF_TRACER_TYPES = 'isotope,isotope'\n/\n";
+    let methane =
+        "&nl_colm\n DEF_USE_BGC = .true.\n DEF_USE_TRACER = .true.\n DEF_TRACER_NUM = 1\n \
+                   DEF_TRACER_NAMES = 'CH4'\n DEF_TRACER_TYPES = 'gas'\n \
+                   DEF_TRACER_PARAM_FILES = 'CH4:ch4.nml'\n/\n";
+    let run = |text: &str| {
+        hist_vars(
+            text.into(),
+            kernel("default"),
+            Some(dir.to_string_lossy().into_owned()),
+        )
+        .expect("runs")
+    };
+    let on = |vars: &[HistVar], name: &str| vars.iter().find(|v| v.name == name).unwrap().on;
+    let iso = run(isotope);
+    assert!(!on(&iso, "methane_surf_flux_tot"));
+    assert!(!on(&iso, "conc_methane"));
+    std::fs::write(
+        dir.join("ch4.nml"),
+        "&nl_colm_methane_parameter\n DEF_METHANE%ch4_history_vars = 'core'\n/\n",
+    )
+    .unwrap();
+    let core = run(methane);
+    assert!(on(&core, "methane_surf_flux_tot"));
+    assert!(!on(&core, "conc_methane"));
+    let core_count = core
+        .iter()
+        .filter(|v| v.on && colm_hist::methane::METHANE_CORE_HISTORY.contains(&v.name.as_str()))
+        .count();
+    assert_eq!(core_count, 18);
+    std::fs::write(
+        dir.join("ch4.nml"),
+        "&nl_colm_methane_parameter\n DEF_METHANE%write_ch4_history = .false.\n/\n",
+    )
+    .unwrap();
+    let off = run(methane);
+    assert!(!on(&off, "methane_surf_flux_tot"));
+    let _ = std::fs::remove_dir_all(&dir);
+}

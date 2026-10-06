@@ -521,10 +521,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "colm-core"
+version = "0.3.0-beta.3"
+dependencies = [
+ "anyhow",
+ "colm-lapack",
+ "colm-namelist",
+]
+
+[[package]]
 name = "colm-desktop-gui"
 version = "0.3.0-beta.3"
 dependencies = [
  "colm-case",
+ "colm-core",
  "colm-hist",
  "colm-kernel",
  "colm-namelist",
@@ -552,6 +562,13 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+]
+
+[[package]]
+name = "colm-lapack"
+version = "0.3.0-beta.3"
+dependencies = [
+ "anyhow",
 ]
 
 [[package]]

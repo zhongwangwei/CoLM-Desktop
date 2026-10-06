@@ -3820,3 +3820,41 @@ fn parameter_file_lists_follow_the_fortran_rules() {
         .iter()
         .any(|file| file.title == "my_ch4_parameter.nml"));
 }
+
+/// 过程参数保存前走引擎同一份校验：负的 Q10 当场拒绝、文件不动；合法值照常保存。
+#[test]
+fn invalid_methane_parameters_are_refused_before_saving() {
+    let dir = batch("expert-process-validate", &[SAMPLE]).remove(0);
+    super::apply_fields(
+        &dir,
+        &[FieldChange {
+            path: "DEF_TRACER_PARAM_FILES".into(),
+            value: "CH4:standard_ch4_parameter.nml".into(),
+        }],
+    )
+    .unwrap();
+    let file = std::path::Path::new(&dir).join("standard_ch4_parameter.nml");
+    let before = std::fs::read_to_string(&file).unwrap();
+    let err = set_process_parameter_field_batch(
+        vec![dir.clone()],
+        "standard_ch4_parameter.nml".into(),
+        "DEF_METHANE%q10methane".into(),
+        "-2.0".into(),
+    )
+    .unwrap_err();
+    assert!(
+        err.contains("未保存") && err.contains("q10methane"),
+        "{err}"
+    );
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), before);
+    set_process_parameter_field_batch(
+        vec![dir],
+        "standard_ch4_parameter.nml".into(),
+        "DEF_METHANE%q10methane".into(),
+        "2.5".into(),
+    )
+    .unwrap();
+    assert!(std::fs::read_to_string(&file)
+        .unwrap()
+        .contains("DEF_METHANE%q10methane       = 2.5"));
+}

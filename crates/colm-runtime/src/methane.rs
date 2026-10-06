@@ -1,10 +1,10 @@
 //! CH4 provider 的运行时接线：从 CH4 示踪物的参数文件读 `&nl_colm_methane_parameter`，
 //! 组装 patch 的静态量，每步在 BGC 之后调用 [`colm_core::methane::driver::soil_step`]。
 
-use anyhow::{bail, ensure, Context, Result};
-use colm_core::methane::config::{FieldValue, MethaneParameters};
+use anyhow::{ensure, Context, Result};
+use colm_core::methane::config::MethaneParameters;
 use colm_core::methane::driver::{HostInputs, MethaneSite};
-use colm_namelist::{Document, Segment, Value};
+use colm_namelist::Document;
 
 /// 一次运行共享的甲烷配置。
 #[derive(Debug, Clone)]
@@ -39,6 +39,14 @@ pub fn setup_from_document(document: &Document, grid_river: bool) -> Result<Opti
             "the CH4 tracer has no parameter file; methane needs &nl_colm_methane_parameter",
         )?;
     let mut params = read_parameters(&path)?;
+    // CH4 history：Rust 只移植了 `core` 那 18 个量。`diagnostic`/`all`/逐个列名会让上游多写变量，
+    // 这里明确拒绝，免得两个引擎的输出悄悄不同。
+    anyhow::ensure!(
+        params.history_accumulation_mode() != 2,
+        "DEF_METHANE%ch4_history_vars = '{}' is not ported to the Rust engine (only 'core' or \
+         'none', or write_ch4_history = .false.); use the Fortran engine for other selections",
+        params.methane.ch4_history_vars.trim()
+    );
     let dynamic_wetland = crate::physics::logical(document, "DEF_USE_Dynamic_Wetland")?;
     let mode = params.configure_inundation(dynamic_wetland, grid_river)?;
     // 卫星方案（GIEMS）要 `DEF_file_GIEMS`。上游在 `methane_giems` 初始化时才停机，这里提前到解析配置时，
@@ -66,59 +74,8 @@ pub fn setup_from_document(document: &Document, grid_river: bool) -> Result<Opti
 pub fn read_parameters(path: &str) -> Result<MethaneParameters> {
     let source = std::fs::read_to_string(path)
         .with_context(|| format!("methane parameter file does not exist: {path}"))?;
-    let mut lines = source.lines();
-    lines
-        .by_ref()
-        .find(|line| {
-            line.trim_start()
-                .to_ascii_lowercase()
-                .starts_with("&nl_colm_methane_parameter")
-        })
-        .with_context(|| format!("no &nl_colm_methane_parameter in {path}"))?;
-    let mut group = String::from("&nl_colm_methane_parameter\n");
-    for line in lines {
-        let code = line.split('!').next().unwrap_or("").trim();
-        if code == "/" || code.eq_ignore_ascii_case("&end") {
-            break;
-        }
-        group.push_str(line);
-        group.push('\n');
-    }
-    group.push_str("/\n");
-    let document = colm_namelist::parse(&group)
-        .with_context(|| format!("invalid &nl_colm_methane_parameter in {path}"))?;
-    let mut entries = Vec::new();
-    for item in &document.items {
-        let colm_namelist::document::Item::Entry(entry) = item else {
-            continue;
-        };
-        let (owner, field) = match entry.path.segments.as_slice() {
-            [Segment::Field(owner), Segment::Member(field)] => (owner.clone(), field.clone()),
-            _ => bail!(
-                "invalid &nl_colm_methane_parameter entry {} in {path}",
-                entry.path
-            ),
-        };
-        let value = match &entry.value {
-            Value::Bool(b) => FieldValue::Logical(*b),
-            Value::Int(i) => FieldValue::Int(*i),
-            Value::Real { .. } => FieldValue::Real(
-                entry
-                    .value
-                    .as_f64()
-                    .with_context(|| format!("{} in {path} is not a real", entry.path))?,
-            ),
-            Value::Str(s) => FieldValue::Text(s.clone()),
-            Value::List(_) => bail!("{} in {path} must be a scalar", entry.path),
-        };
-        entries.push((owner, field, value));
-    }
-    MethaneParameters::from_entries(
-        entries
-            .iter()
-            .map(|(o, f, v)| (o.as_str(), f.as_str(), v.clone())),
-    )
-    .with_context(|| format!("invalid &nl_colm_methane_parameter in {path}"))
+    MethaneParameters::from_parameter_text(&source)
+        .with_context(|| format!("invalid &nl_colm_methane_parameter in {path}"))
 }
 
 /// 一步的宿主量（`ch4_impl_soil_step` 传给 `methane_driver` 的那些时间变量）。

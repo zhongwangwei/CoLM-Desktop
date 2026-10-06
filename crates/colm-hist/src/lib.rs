@@ -21,6 +21,7 @@
 pub mod generated;
 #[cfg(feature = "io")]
 pub mod history;
+pub mod methane;
 pub mod metric;
 #[cfg(feature = "io")]
 pub mod obs;

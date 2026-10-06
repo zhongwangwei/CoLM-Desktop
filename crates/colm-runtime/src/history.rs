@@ -3026,6 +3026,9 @@ struct TracerHistoryState {
     set: colm_core::tracer::TracerSet,
     /// 各 patch 的 `patchtype`（`filter`）。
     patch_types: Vec<i32>,
+    /// CH4 `core` history 要不要累加、写出（`methane_history_accumulation_mode == 1`）。
+    /// `write_ch4_history = .false.` 或 `ch4_history_vars = 'none'` 时上游既不累加也不写。
+    methane_core: bool,
     cursor: usize,
     /// 上次写出以来的非预热步数（主 history 的 `nac`）。
     steps: usize,
@@ -4183,6 +4186,7 @@ impl HistorySession {
         mut self,
         set: colm_core::tracer::TracerSet,
         patch_types: Vec<i32>,
+        methane_core: bool,
     ) -> Self {
         // 示踪物文件的平均用主 history 的 `nac`：续跑接着累加时（先 `restore` 了窗口）从那里接上。
         let steps = self
@@ -4192,6 +4196,7 @@ impl HistorySession {
         self.tracer_variables = Some(TracerHistoryState {
             set,
             patch_types,
+            methane_core,
             cursor: 0,
             steps,
             open: None,
@@ -4222,8 +4227,10 @@ impl HistorySession {
             return Ok(None);
         }
         tracer.steps += 1;
+        let methane_core = tracer.methane_core;
         // CH4 `core` history：每步累加（`accumulate_methane_fluxes`），与示踪物同在预热期之后。
-        for (patch, state) in states.iter_mut().enumerate() {
+        // 不写 CH4 history 时上游也不累加（`methane_history_accumulation_mode == 0`）。
+        for (patch, state) in states.iter_mut().enumerate().filter(|_| methane_core) {
             if let Some(bgc) = state.bgc.as_deref_mut() {
                 if let Some(methane) = bgc.methane.as_deref() {
                     bgc.methane_acc
@@ -4495,12 +4502,13 @@ impl HistorySession {
             }
         }
         // CH4 `core` 变量（`methane_reactive_history`，排在示踪物变量之后）：单点 patch 维。
-        let has_methane = states.iter().any(|state| {
-            state
-                .bgc
-                .as_deref()
-                .is_some_and(|bgc| bgc.methane.is_some())
-        });
+        let has_methane = methane_core
+            && states.iter().any(|state| {
+                state
+                    .bgc
+                    .as_deref()
+                    .is_some_and(|bgc| bgc.methane.is_some())
+            });
         if has_methane {
             let template = colm_core::methane::driver::CoreAccumulator::default()
                 .core_values(false, false, false);

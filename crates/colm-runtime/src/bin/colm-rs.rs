@@ -289,8 +289,13 @@ fn run() -> Result<()> {
             .iter()
             .map(|template| template.patch_type)
             .collect();
-        session =
-            session.map(|session| session.with_tracer_variables(tracer.set.clone(), patch_types));
+        session = session.map(|session| {
+            session.with_tracer_variables(
+                tracer.set.clone(),
+                patch_types,
+                methane_core_history(&templates),
+            )
+        });
     }
     let sidecar_config = colm_runtime::history_sidecar::SidecarConfig {
         frequency_code: history_frequency_code(config.history_frequency),
@@ -1641,6 +1646,7 @@ fn run_spatial_segment(
                             .iter()
                             .map(|template| template.patch_type)
                             .collect(),
+                        methane_core_history(&templates),
                     ),
                     None => session,
                 }
@@ -1692,6 +1698,7 @@ fn run_spatial_segment(
                                 .iter()
                                 .map(|template| template.patch_type)
                                 .collect(),
+                            methane_core_history(&templates),
                         ),
                         None => session,
                     }
@@ -4415,6 +4422,15 @@ fn attach_land_tracers(
             template.with_tracer(std::sync::Arc::clone(tracer), initial)
         })
         .collect()
+}
+
+/// CH4 `core` history 要不要累加与写出：模板上有 CH4 provider 时看它的
+/// `methane_history_accumulation_mode`（1 = `core`；0 = 不写）。没有 CH4 时这个开关无所谓。
+fn methane_core_history(templates: &[StandardLctRestartTemplate]) -> bool {
+    templates
+        .iter()
+        .find_map(|template| template.bgc.as_ref().and_then(|bgc| bgc.methane.as_ref()))
+        .is_none_or(|(setup, _)| setup.params.history_accumulation_mode() == 1)
 }
 
 fn append_tracer_restart(

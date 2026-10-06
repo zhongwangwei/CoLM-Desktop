@@ -941,7 +941,8 @@ function renderExpertTable(file, dirs) {
     reset.className = 'btn-ghost';
     reset.style.marginLeft = '8px';
     reset.textContent = language() === 'en' ? 'Use code default' : '恢复代码默认值';
-    reset.disabled = entry.unset;
+    // 取值不一致时与输入框一样禁用：否则一点就把这一批站点统一重置，与先切到单个站点的提示矛盾。
+    reset.disabled = entry.unset || !!entry.mixed;
     reset.onclick = async () => {
       try {
         const r = await invoke('reset_process_parameter_field_batch', {

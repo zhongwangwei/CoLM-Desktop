@@ -1,7 +1,7 @@
 //! `MOD_Tracer_Reactive_Methane_Const`：常数、`&nl_colm_methane_parameter` 的读入与校验、
 //! 淹没方案（`configure_methane_inundation_mode`）。字段表见 [`super::config_generated`]。
 
-use anyhow::{bail, ensure, Result};
+use anyhow::{bail, ensure, Context, Result};
 
 pub use super::config_generated::{MethaneConfig, MethaneHydrology};
 
@@ -93,6 +93,60 @@ pub struct InundationMode {
 }
 
 impl MethaneParameters {
+    /// 从参数文件全文解析并校验（`read_methane_namelist` + `validate_methane_namelist`）：只读
+    /// `&nl_colm_methane_parameter` 这一组，别的组（如示踪物元数据）不管。引擎与 GUI 共用。
+    pub fn from_parameter_text(source: &str) -> Result<Self> {
+        use colm_namelist::{Segment, Value};
+        let mut lines = source.lines();
+        lines
+            .by_ref()
+            .find(|line| {
+                line.trim_start()
+                    .to_ascii_lowercase()
+                    .starts_with("&nl_colm_methane_parameter")
+            })
+            .context("no &nl_colm_methane_parameter group")?;
+        let mut group = String::from("&nl_colm_methane_parameter\n");
+        for line in lines {
+            let code = line.split('!').next().unwrap_or("").trim();
+            if code == "/" || code.eq_ignore_ascii_case("&end") {
+                break;
+            }
+            group.push_str(line);
+            group.push('\n');
+        }
+        group.push_str("/\n");
+        let document = colm_namelist::parse(&group)?;
+        let mut entries = Vec::new();
+        for item in &document.items {
+            let colm_namelist::document::Item::Entry(entry) = item else {
+                continue;
+            };
+            let (owner, field) = match entry.path.segments.as_slice() {
+                [Segment::Field(owner), Segment::Member(field)] => (owner.clone(), field.clone()),
+                _ => bail!("invalid &nl_colm_methane_parameter entry {}", entry.path),
+            };
+            let value = match &entry.value {
+                Value::Bool(b) => FieldValue::Logical(*b),
+                Value::Int(i) => FieldValue::Int(*i),
+                Value::Real { .. } => FieldValue::Real(
+                    entry
+                        .value
+                        .as_f64()
+                        .with_context(|| format!("{} is not a real", entry.path))?,
+                ),
+                Value::Str(s) => FieldValue::Text(s.clone()),
+                Value::List(_) => bail!("{} must be a scalar", entry.path),
+            };
+            entries.push((owner, field, value));
+        }
+        Self::from_entries(
+            entries
+                .iter()
+                .map(|(o, f, v)| (o.as_str(), f.as_str(), v.clone())),
+        )
+    }
+
     /// `read_methane_namelist`：先全部取默认，再按出现顺序套用 `&nl_colm_methane_parameter`
     /// 的赋值（`owner` 为 `DEF_METHANE`/`DEF_METHANE_hydrology`，`field` 为成员名），最后校验。
     pub fn from_entries<'a>(

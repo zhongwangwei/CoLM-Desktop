@@ -254,3 +254,43 @@ fn restart_write_checks_the_isotope_aquifer_reference() {
     .to_string();
     assert!(message.ends_with("0 0 0 0 0 1 0"), "{message}");
 }
+
+/// GUI 用 `colm_hist::methane` 判断输出变量页里 CH4 变量的开关，它必须与引擎实际写出的一致。
+#[test]
+fn methane_history_rules_match_the_engine() {
+    let names: Vec<String> = colm_core::methane::driver::CoreAccumulator::default()
+        .core_values(false, false, false)
+        .into_iter()
+        .map(|(name, ..)| name.to_owned())
+        .collect();
+    let shared: Vec<String> = colm_hist::methane::METHANE_CORE_HISTORY
+        .iter()
+        .map(|name| format!("f_{name}"))
+        .collect();
+    assert_eq!(names, shared);
+    for name in colm_hist::methane::METHANE_CORE_HISTORY {
+        assert!(
+            colm_hist::generated::VARS
+                .iter()
+                .any(|var| var.name == name),
+            "{name}"
+        );
+    }
+    let mut params = colm_core::methane::config::MethaneParameters::default();
+    for (write, vars) in [
+        (true, "core"),
+        (true, " NONE "),
+        (false, "core"),
+        (true, "diagnostic"),
+        (true, "f_methane_surf_flux_tot"),
+        (true, "fast"),
+    ] {
+        params.methane.write_ch4_history = write;
+        params.methane.ch4_history_vars = vars.to_owned();
+        assert_eq!(
+            params.history_accumulation_mode(),
+            colm_hist::methane::methane_history_mode(write, vars),
+            "{write} {vars}"
+        );
+    }
+}
