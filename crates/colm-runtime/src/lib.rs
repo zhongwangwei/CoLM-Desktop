@@ -37,7 +37,7 @@ use colm_core::{
     RestartFrequency, RuntimeClock, RuntimeForcing, RuntimeStep, StandardLctSnowSoilOutput,
     StandardLctSnowSoilState, StandardLctSoilInput, StandardLctSoilOutput, StandardLctSoilState,
 };
-use colm_forcing::{load_point_forcing, PointForcingSeries};
+use colm_forcing::PointForcingSeries;
 use colm_namelist::{parse, Document, Value};
 
 /// The POINT subset of the `CoLM.F90` runtime configuration.
@@ -76,6 +76,8 @@ pub struct PointRuntimeConfig {
     pub humidity_height_m: f64,
     /// `DEF_forcing%HEIGHT_mode`（forcing namelist），见 [`physics::observation_height_mode`]。
     pub observation_height_mode: colm_core::ObservationHeightMode,
+    /// `DEF_USE_CBL_HEIGHT`：第 9 个强迫变量的文件（`DEF_forcing%CBL_fprefix`）、变量名与插值方式。
+    pub boundary_layer: Option<colm_forcing::BoundaryLayerSource>,
 }
 
 /// One fully prepared POINT forcing record for a `CoLM.F90` loop pass.
@@ -289,7 +291,10 @@ impl PointRuntime {
                 config.lai_update_schedule,
             )?
             .with_restart_frequency(config.restart_frequency),
-            forcing: load_point_forcing(&config.forcing_file)?,
+            forcing: colm_forcing::load_point_forcing_with_boundary_layer(
+                &config.forcing_file,
+                config.boundary_layer.as_ref(),
+            )?,
             greenwich: config.greenwich,
             longitude_degrees: config.longitude_degrees,
             latitude_degrees: config.latitude_degrees,
@@ -1614,20 +1619,45 @@ pub fn read_point_runtime_config(case_namelist: impl AsRef<Path>) -> Result<Poin
         dataset.eq_ignore_ascii_case("POINT"),
         "Rust PointRuntime requires DEF_forcing%dataset='POINT', got {dataset:?}"
     );
-    // 单点 CBL：上游的第 9 个变量一律从 `DEF_forcing%CBL_fprefix` 指的文件读（POINT 时当完整文件名，
-    // `MOD_UserSpecifiedForcing.F90:694-700`），并按 `CBL_tintalgo/CBL_dtime/CBL_offset` 单独定时间
-    // 上下界。Rust 的站点读取器只在主强迫文件里找 `blh`/`hpbl`，按主变量的权重插值——两样都没移植，
-    // 照跑会在第一步缺量停机或悄悄用错的插值，所以在入口拒绝。
-    ensure!(
-        !physics::logical(&case, "DEF_USE_CBL_HEIGHT")?,
-        "single-point DEF_USE_CBL_HEIGHT is not ported: upstream reads the boundary-layer height from \
-         DEF_forcing%CBL_fprefix with its own CBL_dtime/CBL_offset, which the Rust POINT reader does \
-         not; run this case with --engine fortran"
-    );
     let forcing_directory = required_string(&forcing, "DEF_dir_forcing")?;
     let forcing_name = required_string(&forcing, "DEF_forcing%fprefix(1)")?;
-    // `MOD_UserSpecifiedForcing` concatenates these strings directly.
-    let forcing_file = PathBuf::from(format!("{forcing_directory}{forcing_name}"));
+    // 上游拼的是 `trim(dir_forcing)//'/'//trim(fprefix)`（`metfilename` 自带前导 `/`），所以目录写不写
+    // 结尾斜杠都对。桌面端接 CBL 时会把 `DEF_dir_forcing` 改成不带斜杠的公共目录，直接相接就错了。
+    let point_file = |name: &str| Path::new(&forcing_directory).join(name.trim_start_matches('/'));
+    let forcing_file = point_file(&forcing_name);
+    // 单点 CBL：上游第 9 个变量的文件就是 `CBL_fprefix`（POINT 时当完整文件名，
+    // `MOD_UserSpecifiedForcing.F90:694-700`），时间上下界与主变量一样取主文件的 `forctime`
+    // （`MOD_Forcing.F90` 的 POINT 分支，`CBL_dtime`/`CBL_offset` 不起作用），插值按 `CBL_tintalgo`。
+    let boundary_layer = if physics::logical(&case, "DEF_USE_CBL_HEIGHT")? {
+        let text = |field: &str, default: &str| -> Result<String> {
+            Ok(match forcing.get(field) {
+                Some(Value::Str(value)) => value.trim().to_string(),
+                Some(other) => bail!("{field} must be a string, got {other:?}"),
+                None => default.to_string(),
+            })
+        };
+        // 缺省前缀是上游给 CRUNCEP 用的月文件前缀，POINT 下打不开（上游一样停机）。
+        let prefix = text(
+            "DEF_forcing%CBL_fprefix",
+            "TPHWL6Hrly/clmforc.cruncep.V4.c2011.0.5d.TPQWL.",
+        )?;
+        let algorithm = text("DEF_forcing%CBL_tintalgo", "linear")?.to_ascii_lowercase();
+        let nearest = match algorithm.as_str() {
+            "linear" => false,
+            "nearest" => true,
+            other => bail!(
+                "DEF_forcing%CBL_tintalgo = '{other}' is not supported for the POINT boundary-layer \
+                 height; use 'linear' or 'nearest'"
+            ),
+        };
+        Some(colm_forcing::BoundaryLayerSource {
+            path: point_file(&prefix),
+            vname: text("DEF_forcing%CBL_vname", "blh")?,
+            nearest,
+        })
+    } else {
+        None
+    };
     let (wind_height_m, temperature_height_m, humidity_height_m) =
         observation_heights(&forcing, &forcing_file)?;
     let observation_height_mode = physics::observation_height_mode(&forcing)?;
@@ -1680,6 +1710,7 @@ pub fn read_point_runtime_config(case_namelist: impl AsRef<Path>) -> Result<Poin
         temperature_height_m,
         humidity_height_m,
         observation_height_mode,
+        boundary_layer,
     })
 }
 

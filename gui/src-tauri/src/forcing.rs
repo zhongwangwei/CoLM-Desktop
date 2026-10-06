@@ -626,6 +626,16 @@ fn common_parent(a: &std::path::Path, b: &std::path::Path) -> Option<std::path::
         .map(std::path::Path::to_path_buf)
 }
 
+/// `DEF_dir_forcing` 的写法：一律以 `/` 结尾（见 `configure_cbl_batch` 里的说明）。
+fn forcing_dir_text(dir: &std::path::Path) -> String {
+    let text = dir.display().to_string();
+    if text.ends_with('/') || text.ends_with('\\') {
+        text
+    } else {
+        format!("{text}/")
+    }
+}
+
 /// 为一个 POINT 算例接入独立的边界层高度文件。
 ///
 /// 这不是单改 `DEF_USE_CBL_HEIGHT`：第九个强迫变量的文件名、变量名、时间步长
@@ -737,8 +747,10 @@ pub fn configure_cbl_batch(
     let seconds = seconds as i64;
     for (path, value) in [
         (
+            // 上游有两处直接 `trim(dir_forcing)//trim(fprefix(1))`（`MOD_Forcing.F90:296/1259`），
+            // 目录不以 `/` 结尾就拼出错的路径，Fortran 引擎在读时间轴时停机。
             "DEF_dir_forcing",
-            colm_namelist::Value::Str(root.display().to_string()),
+            colm_namelist::Value::Str(forcing_dir_text(&root)),
         ),
         (
             "DEF_forcing%fprefix(1)",

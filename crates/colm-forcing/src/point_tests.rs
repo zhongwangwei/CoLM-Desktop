@@ -246,3 +246,67 @@ fn point_loader_accepts_the_repository_cn_cng_float32_contract() {
         .iter()
         .all(|value| value.is_finite()));
 }
+
+fn boundary_layer_file(dir: &Path, times: &[f64], heights: &[f64]) -> PathBuf {
+    let path = dir.join("blh.nc");
+    let mut file = netcdf::create(&path).unwrap();
+    file.add_dimension("time", times.len()).unwrap();
+    file.add_dimension("y", 1).unwrap();
+    file.add_dimension("x", 1).unwrap();
+    let mut time = file.add_variable::<f64>("time", &["time"]).unwrap();
+    time.put_values(times, netcdf::Extents::All).unwrap();
+    put(&mut file, "blh", "m", heights);
+    path
+}
+
+/// `DEF_USE_CBL_HEIGHT` 的 POINT 第 9 个变量来自单独文件（`CBL_fprefix`），按主文件的记录下标读，
+/// 再按 `CBL_tintalgo` 插值。
+#[test]
+fn boundary_layer_height_comes_from_its_own_file() {
+    let dir = temp_dir("cbl");
+    let main = point_file(&dir, false);
+    let source = BoundaryLayerSource {
+        path: boundary_layer_file(&dir, &[0.0, 1800.0], &[400.0, 800.0]),
+        vname: "blh".into(),
+        nearest: false,
+    };
+    let series = load_point_forcing_with_boundary_layer(&main, Some(&source)).unwrap();
+    assert_eq!(
+        series.frame(1).unwrap().boundary_layer_height_m,
+        Some(800.0)
+    );
+    // 线性：600 s 处下界权重 2/3。
+    let linear = series.sample_at_seconds(600.0).unwrap();
+    assert!(
+        (linear.boundary_layer_height_m.unwrap() - (400.0 * (2.0 / 3.0) + 800.0 / 3.0)).abs()
+            < 1e-9
+    );
+    // nearest：上游 `dtLB <= dtUB` 取下界。
+    let nearest = BoundaryLayerSource {
+        nearest: true,
+        ..source.clone()
+    };
+    let series = load_point_forcing_with_boundary_layer(&main, Some(&nearest)).unwrap();
+    assert_eq!(
+        series
+            .sample_at_seconds(600.0)
+            .unwrap()
+            .boundary_layer_height_m,
+        Some(400.0)
+    );
+    assert_eq!(
+        series
+            .sample_at_seconds(1200.0)
+            .unwrap()
+            .boundary_layer_height_m,
+        Some(800.0)
+    );
+
+    // 时间轴对不上：报错，不按下标硬配。
+    let shifted = BoundaryLayerSource {
+        path: boundary_layer_file(&dir, &[900.0, 2700.0], &[400.0, 800.0]),
+        ..source
+    };
+    let error = load_point_forcing_with_boundary_layer(&main, Some(&shifted)).unwrap_err();
+    assert!(format!("{error:#}").contains("time axis"), "{error:#}");
+}

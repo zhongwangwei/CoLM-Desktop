@@ -47,6 +47,22 @@ pub struct PointForcingSeries {
     summary: MetSummary,
     frames: Vec<PointForcingFrame>,
     wind_is_vector: bool,
+    /// `CBL_tintalgo = 'nearest'`：边界层高度取较近的一端，而不是线性插值。
+    boundary_layer_nearest: bool,
+}
+
+/// 第 9 个强迫变量（`DEF_USE_CBL_HEIGHT`）的来源。
+///
+/// 上游 POINT 下第 9 个变量的文件名就是 `DEF_dir_forcing` 拼 `DEF_forcing%CBL_fprefix`
+/// （`MOD_UserSpecifiedForcing.F90:694-700`），变量名 `CBL_vname`，读的记录下标与主强迫场相同
+/// （`MOD_Forcing.F90` 的 POINT 分支：时间上下界全部取主文件的 `forctime`，`CBL_dtime`/`CBL_offset`
+/// 不起作用），插值按 `CBL_tintalgo`。
+#[derive(Debug, Clone, PartialEq)]
+pub struct BoundaryLayerSource {
+    pub path: std::path::PathBuf,
+    pub vname: String,
+    /// `CBL_tintalgo`：只接 `linear` 与 `nearest`。
+    pub nearest: bool,
 }
 
 impl PointForcingSeries {
@@ -183,11 +199,18 @@ impl PointForcingSeries {
                 lower_weight,
                 upper_weight,
             ),
-            // 整条序列要么都有 `hpbl`、要么都没有，所以两端一致才插值。
+            // 整条序列要么都有 `hpbl`、要么都没有，所以两端一致才插值。`nearest` 与降水同一判据
+            // （上游 `dtLB <= dtUB` 取下界，即下界权重不小于上界权重）。
             boundary_layer_height_m: match (
                 lower.boundary_layer_height_m,
                 upper.boundary_layer_height_m,
             ) {
+                (Some(lower), Some(_))
+                    if self.boundary_layer_nearest && lower_weight >= upper_weight =>
+                {
+                    Some(lower)
+                }
+                (Some(_), Some(upper)) if self.boundary_layer_nearest => Some(upper),
                 (Some(lower), Some(upper)) => {
                     Some(linear(lower, upper, lower_weight, upper_weight))
                 }
@@ -298,6 +321,14 @@ fn stamp_seconds(stamp: Stamp) -> i64 {
 /// This deliberately rejects spatial fields: a grid reader must select an
 /// explicit patch/block rather than silently taking its first cell.
 pub fn load_point_forcing(path: impl AsRef<Path>) -> Result<PointForcingSeries> {
+    load_point_forcing_with_boundary_layer(path, None)
+}
+
+/// 同 [`load_point_forcing`]，`boundary_layer` 给出时第 9 个变量从那份文件读（`DEF_USE_CBL_HEIGHT`）。
+pub fn load_point_forcing_with_boundary_layer(
+    path: impl AsRef<Path>,
+    boundary_layer: Option<&BoundaryLayerSource>,
+) -> Result<PointForcingSeries> {
     let path = path.as_ref();
     let summary = summarize(path)?;
     let problems = check_series(&summary, None);
@@ -383,9 +414,12 @@ pub fn load_point_forcing(path: impl AsRef<Path>) -> Result<PointForcingSeries> 
         summary.steps,
         summary.step_seconds,
     )?;
-    // `forc_hpbl` 是可选的：上游只在 `DEF_USE_CBL_HEIGHT` 打开时才把它当第 9 个变量读。
-    // 名字取 `DEF_forcing%CBL_vname` 的默认值 `blh`，并接受 CoLM 内部量名 `hpbl`。
-    let boundary_layer_height = optional_values(&file, path, &["blh", "hpbl"], summary.steps)?;
+    // `forc_hpbl`：打开 CBL 时从 `CBL_fprefix` 指的文件读 `CBL_vname`；否则只在主文件里顺带找
+    // `blh`/`hpbl`（不打开 CBL 时没有任何地方用它）。
+    let boundary_layer_height = match boundary_layer {
+        Some(source) => Some(boundary_layer_values(source, &time)?),
+        None => optional_values(&file, path, &["blh", "hpbl"], summary.steps)?,
+    };
     let mut frames = Vec::with_capacity(summary.steps);
     for index in 0..summary.steps {
         let frame = PointForcingFrame {
@@ -411,7 +445,29 @@ pub fn load_point_forcing(path: impl AsRef<Path>) -> Result<PointForcingSeries> 
         summary,
         frames,
         wind_is_vector: resolved.wind_is_vector(),
+        boundary_layer_nearest: boundary_layer.is_some_and(|source| source.nearest),
     })
+}
+
+/// 从单独的 CBL 文件按主文件的记录下标读边界层高度（米，不换算）。上游只按下标读、不核对时间；
+/// 这里要求两份文件的 `time` 逐条相同，时间轴对不上时直接报错，不按下标硬配。
+fn boundary_layer_values(source: &BoundaryLayerSource, time: &[f64]) -> Result<Vec<f64>> {
+    let path = source.path.as_path();
+    let file = netcdf::open(path).with_context(|| {
+        format!(
+            "cannot open the boundary-layer height file {} (DEF_forcing%CBL_fprefix)",
+            path.display()
+        )
+    })?;
+    if file.variable("time").is_some() {
+        let own = values(&file, path, "time", time.len())?;
+        ensure!(
+            own == time,
+            "{} does not share the main POINT forcing time axis",
+            path.display()
+        );
+    }
+    values(&file, path, &source.vname, time.len())
 }
 
 fn slot_values(

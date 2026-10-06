@@ -286,3 +286,17 @@ fn reject_same_dir_rejects_same_directory_and_the_tmp_private_tmp_alias() {
         let _ = std::fs::remove_file(&real_src);
     }
 }
+
+/// 上游有两处 `trim(dir_forcing)//trim(fprefix(1))` 不加斜杠（`MOD_Forcing.F90:296/1259`），
+/// 接 CBL 时写的公共目录必须以 `/` 结尾。
+#[test]
+fn forcing_dir_always_ends_with_a_separator() {
+    assert_eq!(
+        super::forcing_dir_text(std::path::Path::new("/data/forcing")),
+        "/data/forcing/"
+    );
+    assert_eq!(
+        super::forcing_dir_text(std::path::Path::new("/data/forcing/")),
+        "/data/forcing/"
+    );
+}

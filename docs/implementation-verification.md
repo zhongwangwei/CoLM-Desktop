@@ -30211,3 +30211,36 @@ unitcat 文件原来铺在整张全球 15′ 网格上（区域河网文件保�
 - `colm-runtime` 库测试 163 个、`colm-core` 甲烷测试；
 - `gui/tests/*.mjs`、check-gui、workspace 与 GUI 的 clippy `-D warnings`、fmt；
 - 向导矩阵 330 个组合、设定页扫描 14 个算例约 9000 次写入加预检。
+
+## 第 590 轮：单点 CBL 的 Rust 读取补齐；`DEF_dir_forcing` 结尾斜杠
+
+**上游语义**（站点强迫，POINT）：
+- 打开 `DEF_USE_CBL_HEIGHT` 时，第 9 个变量的文件就是 `DEF_dir_forcing` 拼 `DEF_forcing%CBL_fprefix`（`MOD_UserSpecifiedForcing.F90:694-700`，POINT 下当完整文件名），变量名是 `CBL_vname`。
+- 读的记录下标与主文件相同（`MOD_Forcing.F90:1339` 的 read-ahead 逐变量按各自文件名读）。
+- 时间上下界一律取主文件的 `forctime`（`MOD_Forcing.F90:1400-1419`、`:1623-1636`），所以 `CBL_dtime`/`CBL_offset` 对 POINT 不起作用。
+- 插值按 `CBL_tintalgo`（`:461-490`）。
+
+**Rust**：
+- `colm-forcing` 新增 `BoundaryLayerSource` 与 `load_point_forcing_with_boundary_layer`。
+  - 从那份文件按主文件的记录下标读 `CBL_vname`。
+  - 文件里有 `time` 时要求与主文件逐条相同，对不上就报错，不按下标硬配；上游不核对。
+  - 插值支持 `linear` 与 `nearest`（与降水同一判据：下界权重不小于上界权重时取下界）。
+- `read_point_runtime_config` 按 forcing namelist 组装来源：`CBL_vname` 缺省 `blh`，`CBL_tintalgo` 缺省 `linear`，其余取值拒绝。第 589 轮的入口拒绝撤掉，设定页的"仅 Fortran"标注也撤掉。
+- 主强迫文件路径改为 `Path::join`。上游第 9 个变量的 `metfilename` 自带前导 `/`；Rust 原来直接相接，目录不带结尾斜杠时拼错。
+
+**GUI**：
+- `configure_cbl_batch` 原来把 `DEF_dir_forcing` 写成不带结尾斜杠的公共目录。上游有两处直接 `trim(dir_forcing)//trim(fprefix(1))`（`MOD_Forcing.F90:296/1259`），拼出 `…8df5bbexamples/Forcing/…`，Fortran 引擎在读时间轴时停机。
+- 也就是说，原来经 GUI 接上 CBL 的站点算例在 Fortran 引擎下跑不起来。现在一律写成以 `/` 结尾。
+
+**对照**（`cbl`：`st` 的 CN-Cng 草地站点，2008 年 1 月）：
+- 照 `configure_cbl_batch` 的写法改 forcing.nml：公共目录、相对路径、`CBL_tintalgo = 'linear'`、`CBL_offset = 900`。
+- 单独的 `blh` 文件与主文件共用时间轴，取值是合成的日变化：150–1348 m。
+- `--engine fortran --preprocessors fortran` 对 Rust 全链条：`files ok 7`。
+- history 有 `f_xy_hpbl`，范围与合成值一致。与不开 CBL 的 `st` 相比，`f_fsena` 最大差 31.6 W/m²，`f_ustar` 差 0.042 m/s，确认走的是 LES 近地层分支。
+- `CBL_tintalgo = 'nearest'` 只重跑 colm 阶段：`files ok 7`。这个算例的模式步长与强迫步长同为 1800 s，插值权重总是 1/0，所以两种插值结果相同，这一项只证明代码路径走得通。
+
+验证：
+- `colm-forcing` 新增单测 `boundary_layer_height_comes_from_its_own_file`（线性、nearest、时间轴不符报错）；
+- `colm-runtime` 库测试 163 个、GUI 后端测试 191 个（新增 `forcing_dir_always_ends_with_a_separator`）；
+- `gui/tests`、check-gui、clippy、fmt。
+- `colm-forcing` 的 3 个集成测试需要 `PLUMBER2_ROOT`，本次 shell 没设，没跑。

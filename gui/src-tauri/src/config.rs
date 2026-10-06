@@ -2087,14 +2087,6 @@ fn field_runtime_state(
     if name == "DEF_LAI_MONTHLY" && !c.lai_feedback && !(c.single && c.urban) {
         return forced_true(c, name, "Rust 引擎只读月尺度 LAI，8 天 LAI 尚未移植");
     }
-    // 单点 CBL：上游从 `DEF_forcing%CBL_fprefix` 的文件按自己的时间偏移读第 9 个变量，Rust 的站点
-    // 读取器没有这条路径，`colm-rs` 入口拒绝。
-    if name == "DEF_USE_CBL_HEIGHT" && c.single {
-        return rust_unported(
-            logical(c.doc, name),
-            "单点边界层高度（单独的 CBL 文件）Rust 引擎尚未移植，仅 Fortran 引擎生效",
-        );
-    }
     // 单点自然站点关掉 USE_SITE_LAI 要从 landdata 的 LAI 文件读，Rust 还没接（`MonthlyLeafAreaIndex::read`）。
     if name == "USE_SITE_LAI" && c.single && !c.urban {
         return rust_unported(
