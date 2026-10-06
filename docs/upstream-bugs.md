@@ -747,6 +747,19 @@
   不挥发溶质完全保持原来的截断行为（它有真实的浓度梯度，推迟付款付不清会凭空造出溶质）。gas/particle 示踪物不走这段代码。截断不起作用的步，算术与原来逐位相同。
 - **上游**：已推到 `zhongwangwei/CoLM202X` 的 `fix/colm-desktop-audit`（`160dc2cf`，PR #24），与 #78 一起提交。
 
+### 80. 主河道推移质正反两向各算一份满强度、满时长
+
+- **位置**：`main/TRACER/MOD_Tracer_Particle_Sediment.F90` 的 `calc_sediment_advection` 与 `ordinary_sediment_donor_demand`：
+  时段平均流量拆成 `rivout_forward`/`rivout_reverse` 两次调用 `calc_sediment_advection_one_direction`，每次都用完整的 `dt`。
+- **原因**：悬移质乘方向流量（`sedcon*rivout`），没问题。推移质只用 `rivout` 的符号定方向，强度取时段平均的
+  `<v²>` 算出的剪切速度，与方向份额无关。分汊路径乘了 `sed_acc_bif_forward/reverse_time`，主河道没有。
+- **影响**：反向份额从 0 增到 1e-6，毛推移质从一份跳到两份（单测复现 11579 → 23158）。相邻单元流域之间照样守恒，
+  一般的守恒检查看不出来。在广东 2 天的 `sed` 算例里，128 个单元流域中有 22 个结果变了。变化中位数约 3e-5，
+  个别有潮汐回水的单元流域推移质变化 24%–39%。
+- **处理**（第 599 轮，vendor 与 Rust 同步）：每个方向的推移质乘该方向的流量份额 `|rivout|/rivout_abs`。
+  这与悬移质一致；单向流时份额精确为 1，结果逐位不变。没有用分汊那样的时间份额，因为那要新增累加量、
+  改续跑格式，老续跑文件就读不进来了。新增单测 `bedload_scales_with_the_share_of_each_flow_direction`。
+
 ## 二、TRACER 编译开关改变了物理（需要上游确认哪一边是对的）
 
 这一版上游在很多地方给 TRACER 构建和非 TRACER 构建写了**不同的物理**，不只是记账不同。

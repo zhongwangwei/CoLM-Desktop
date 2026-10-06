@@ -1029,6 +1029,7 @@ impl Sediment {
         network: &RiverNetwork,
         dt: f64,
         rivout: &[f64],
+        rivout_abs: &[f64],
         bed_donor: &[f64],
         avail_sto: &[f64],
         avail_bed: &[f64],
@@ -1078,6 +1079,14 @@ impl Sediment {
             if crit.iter().all(|&c| c >= shear) || layer_sum <= 0.0 {
                 continue;
             }
+            // 推移质取决于时段平均的剪切速度而不是流量，每个流向只算它所占的份额
+            // `|rivout|/rivout_abs`（单向流为 1）。原来反向哪怕只占极小份额，也再算一份
+            // 满强度的推移质，毛输运翻倍（upstream-bugs #80，vendor 同步）。
+            let weight = if rivout_abs[i] > 0.0 {
+                q.abs() / rivout_abs[i]
+            } else {
+                0.0
+            };
             for s in 0..ns {
                 if crit[s] >= shear || donor[s] <= 0.0 {
                     continue;
@@ -1087,7 +1096,8 @@ impl Sediment {
                 self.bedout[i * ns + s] =
                     sign * SED_BEDLOAD_COEFF * width * plus * (minus * minus) / rel / GRAV
                         * donor[s]
-                        / layer_sum;
+                        / layer_sum
+                        * weight;
             }
         }
         if let Some((sed_scale, bed_scale)) = scales {
@@ -1139,6 +1149,7 @@ impl Sediment {
             network,
             dt,
             &forward,
+            rivout_abs,
             bed,
             &avail_sto,
             &avail_bed,
@@ -1163,6 +1174,7 @@ impl Sediment {
             network,
             dt,
             &reverse,
+            rivout_abs,
             bed,
             &avail_sto,
             &avail_bed,
@@ -1287,7 +1299,8 @@ impl Sediment {
             })
             .collect::<Vec<_>>();
         self.one_direction(
-            network, dt, &forward, &bed_donor, &avail_sto, &avail_bed, conc, scales, true,
+            network, dt, &forward, rivout_abs, &bed_donor, &avail_sto, &avail_bed, conc, scales,
+            true,
         );
         let sedout_first = self.sedout.clone();
         let bedout_first = self.bedout.clone();
@@ -1301,7 +1314,8 @@ impl Sediment {
                 .max(0.0);
         }
         self.one_direction(
-            network, dt, &reverse, &bed_donor, &avail_sto, &avail_bed, conc, scales, true,
+            network, dt, &reverse, rivout_abs, &bed_donor, &avail_sto, &avail_bed, conc, scales,
+            true,
         );
         for k in 0..self.sedout.len() {
             self.sedout[k] += sedout_first[k];
