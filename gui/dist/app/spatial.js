@@ -6,6 +6,7 @@ import { $, joinPath } from './ui.js';
 import { wizardFields } from './domain.js';
 import { renderCases, selectCase } from './sites.js';
 import { renderSteps, setStatus } from './shell.js';
+import { adoptCaseList } from './batch.js';
 
 const labels = {
   watershed: '流域', region: '区域', global: '全球',
@@ -202,7 +203,7 @@ $('make-spatial-case').onclick = async () => {
       return;
     }
     state.createdCases.add(out);
-    state.cases = cases;
+    adoptCaseList(cases);
     const made = state.cases.find(c => c.dir === out) ?? state.cases.find(c => c.name === name);
     if (!made) throw new Error('算例已生成，但重新扫描时没有找到它');
     state.batch = [made.dir];

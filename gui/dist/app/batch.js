@@ -16,6 +16,14 @@ export function currentCases() {
   return state.cases.filter(c => state.createdCases.has(c.dir));
 }
 
+/** 用一次 `list_cases` 的结果更新算例表。本次会话已建或已打开、但不在这个根目录下的算例
+ *  （中途换了根目录）要留着：否则它们从运行列表消失，而批量编辑仍会写到它们身上。 */
+export function adoptCaseList(listed) {
+  const seen = new Set(listed.map(c => c.dir));
+  const kept = state.cases.filter(c => state.createdCases.has(c.dir) && !seen.has(c.dir));
+  state.cases = [...listed, ...kept];
+}
+
 /** 不覆盖 root 里同名的旧算例；给新算例找一个稳定、可读的新名字。 */
 export function freshCaseName(base, cases = state.cases) {
   // 名字与目录都要避开：算例目录名不一定等于 case.nml 里的算例名。

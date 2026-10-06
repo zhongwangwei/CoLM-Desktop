@@ -1342,7 +1342,12 @@ fn validate_runtime_contract(
     let bgc = logical(doc, "DEF_USE_BGC");
     let tracer = logical(doc, "DEF_USE_TRACER");
     if logical(doc, "DEF_USE_MEDLYNST") && logical(doc, "DEF_USE_WUEST") {
-        return Err("Medlyn 与 WUE 气孔导度方案不能同时开启".into());
+        // `DEF_USE_WUEST` 缺省就是 `.true.`：只写了 `DEF_USE_MEDLYNST = .true.` 也算同开。
+        return Err(
+            "Medlyn 与 WUE 气孔导度方案不能同时开启（WUE 缺省是开的；用 Medlyn 时要把 \
+                    DEF_USE_WUEST 设为 .false.，或在「气孔导度方案」里重选）"
+                .into(),
+        );
     }
     let methane = character(doc, "DEF_TRACER_NAMES")
         .split(',')
@@ -1379,9 +1384,9 @@ fn validate_runtime_contract(
         if urban {
             return Err("城市模式暂不支持 TRACER".into());
         }
-        if logical(doc, "DEF_USE_Campbell_SOIL_MODEL")
-            || !logical(doc, "DEF_USE_VariablySaturatedFlow")
-        {
+        // 上游在 van Genuchten 下先把变饱和流强制打开再检查示踪剂（`MOD_Namelist.F90:1886-1907`），
+        // 所以只有 Campbell 会挡住；字面上的 `.false.` 不算（界面在 van Genuchten 下也不显示它）。
+        if logical(doc, "DEF_USE_Campbell_SOIL_MODEL") {
             return Err("TRACER 需要 van Genuchten/VariablySaturatedFlow 土壤水方案".into());
         }
         if methane && (!bgc || !(pft || pc)) {

@@ -1878,6 +1878,18 @@ export function translateZh(text, target = 'en') {
   if (!out) return value;
   const source = out;
   out = out
+    // 运行日志的阶段小标题（`sidecar.rs` 的 stage_heading）。
+    .replace(/^──── 制作地表数据（(\w+)）────$/, '──── Surface data ($1) ────')
+    .replace(/^──── 制作初始场（(\w+)）────$/, '──── Initial state ($1) ────')
+    .replace(/^──── 模拟（(\w+)）────$/, '──── Simulation ($1) ────')
+    // 状态栏里带字段名、算例名的整句提示。
+    .replace(/^(\S+) 当前配置下不生效$/, '$1 has no effect with the current configuration')
+    .replace(/^(\S+) 已删除显式覆盖$/, '$1: explicit override removed')
+    .replace(/^(\S+) 已继承代码默认值$/, '$1 now uses the code default')
+    .replace(/^(\S+) 已继承内置值$/, '$1 now uses the built-in value')
+    .replace(/^预热：每轮 (\d+) 年，共重复 (\d+) 轮（(\d+) 个算例）$/, 'Spin-up: $1 years per cycle, $2 cycles ($3 cases)')
+    .replace(/^已关闭预热（(\d+) 个算例）$/, 'Spin-up disabled ($1 cases)')
+    .replace(/^空间算例 (.+) 已生成；当前已切换工作流，未加入本次算例列表$/, 'Spatial case $1 was created; the workflow has changed, so it was not added to this session')
     // 运行进度（`run-format.js` 的 progressText）：先整句匹配，免得被下面的逐段规则拆坏。
     .replace(/^预热 (\d+)\/(\d+) 轮 · 第 (\d+)\/(\d+) 步 · (.+)$/, 'Spin-up $1/$2 · step $3/$4 · $5')
     .replace(/^第 (\d+)\/(\d+) 步 · (.+)$/, 'Step $1/$2 · $3')

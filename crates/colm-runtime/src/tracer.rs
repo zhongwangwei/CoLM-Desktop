@@ -12,6 +12,14 @@ use colm_namelist::{Document, Value};
 
 use crate::physics::{integer, logical, real, text};
 
+/// 生效的变饱和流开关：上游 `MOD_Namelist.F90:1886-1891` 在 van Genuchten（不用 Campbell）时先把
+/// `DEF_USE_VariablySaturatedFlow` 强制成 `.true.`，再做示踪剂检查、再进物理。读字面值会让手写
+/// namelist 里残留的 `.false.` 走另一条示踪物分支（与 `physics::resolve` 同一判定）。
+fn effective_variably_saturated_flow(document: &Document) -> Result<bool> {
+    Ok(logical(document, "DEF_USE_VariablySaturatedFlow")?
+        || !logical(document, "DEF_USE_Campbell_SOIL_MODEL")?)
+}
+
 /// `LAND_TRACER_RESTART_SCHEMA_VERSION`。
 const LAND_TRACER_RESTART_SCHEMA: i32 = 5;
 /// `TRC_FORC_CACHE_SCHEMA`。
@@ -32,7 +40,7 @@ pub fn tracer_set_from_document(document: &Document) -> Result<Option<TracerSet>
         reactive_decay_rate: text(document, "DEF_TRACER_REACTIVE_DECAY_RATE")?,
         param_files: text(document, "DEF_TRACER_PARAM_FILES")?,
         use_bgc: logical(document, "DEF_USE_BGC")?,
-        variably_saturated_flow: logical(document, "DEF_USE_VariablySaturatedFlow")?,
+        variably_saturated_flow: effective_variably_saturated_flow(document)?,
         aquifer_mixing_water_mm: real(document, "DEF_TRACER_AQUIFER_MIXING_WATER_MM")?,
     };
     TracerSet::build(&namelist, read_tracer_parameter_file).map(Some)
@@ -214,7 +222,7 @@ impl TracerRuntime {
             runtime_forced,
             debug: logical(document, "DEF_USE_CoLMDEBUG")?,
             vegetation_snow: logical(document, "DEF_VEG_SNOW")?,
-            variably_saturated_flow: logical(document, "DEF_USE_VariablySaturatedFlow")?,
+            variably_saturated_flow: effective_variably_saturated_flow(document)?,
             aquifer_mixing_water_mm: real(document, "DEF_TRACER_AQUIFER_MIXING_WATER_MM")?,
             balance_abort_nbad: i32::try_from(integer(document, "DEF_TRACER_BALANCE_ABORT_NBAD")?)?,
             resid_abort_nbad: i32::try_from(integer(document, "DEF_TRACER_RESID_ABORT_NBAD")?)?,

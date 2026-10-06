@@ -11,6 +11,7 @@ import { renderFields } from './params.js';
 import { kernelForSubgrid, urbanEnabled } from './kernel.js';
 import { acceptsRunEvent, appendLogText, progressText } from './run-format.js';
 import { modelEngine } from './engine.js';
+import { language, translateZh } from './i18n.js';
 
 // 单点内核不启 MPI；空间算例默认最多使用八个 MPI rank。
 // Rust 引擎只跑单进程（`colm-cli` 预检对它要求 `--ranks 1`），在进程内用多线程并行，所以 rank 数只对 Fortran 内核生效。
@@ -416,7 +417,9 @@ export async function watchRun() {
     await listen('run://lines', e => {
       const { case: dir, lines } = e.payload;
       if (ensureRunTarget(dir, e.payload.run_id) === false) return;
-      state.runLogs[dir] = appendLogText(state.runLogs[dir] ?? '', lines);
+      // 日志区不参与界面翻译（原样保留模型输出），只把后端加的阶段小标题按界面语言翻。
+      const shown = lines.map(line => (line.startsWith('──── ') ? translateZh(line, language()) : line));
+      state.runLogs[dir] = appendLogText(state.runLogs[dir] ?? '', shown);
       if ($('log-case').value === dir) renderSelectedLog();
     });
     await listen('run://done', e => {

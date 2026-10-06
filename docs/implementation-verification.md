@@ -30244,3 +30244,16 @@ unitcat 文件原来铺在整张全球 15′ 网格上（区域河网文件保�
 - `colm-runtime` 库测试 163 个、GUI 后端测试 191 个（新增 `forcing_dir_always_ends_with_a_separator`）；
 - `gui/tests`、check-gui、clippy、fmt。
 - `colm-forcing` 的 3 个集成测试需要 `PLUMBER2_ROOT`，本次 shell 没设，没跑。
+
+## 第 591 轮：第 589 轮遗留的几处收尾
+
+- **Medlyn 与 WUE 不能同开**（确认维持 GUI 的拒绝）：`DEF_USE_WUEST` 缺省是 `.true.`，所以只写了 `DEF_USE_MEDLYNST = .true.` 也算同开。报错补上说明：WUE 缺省是开的，用 Medlyn 时要把 `DEF_USE_WUEST` 设为 `.false.`，或在「气孔导度方案」里重选。
+- **示踪剂用的是变饱和流的字面值**：上游先在 van Genuchten 下把 `DEF_USE_VariablySaturatedFlow` 强制成 `.true.`（`MOD_Namelist.F90:1886-1891`），再检查示踪剂、再进物理。
+  - Rust 的 `tracer.rs` 原来两处读字面值，其中一处决定示踪物物理分支。手写 namelist 残留 `.false.` 时，原来在装配时被拒，现在与上游一样按生效值走。之前能跑的算例数值不变。
+  - GUI 的保存校验同样改为只拦 Campbell。
+- **中途换算例根目录**：每次扫描都用新根目录的列表整个替换 `state.cases`，本次会话在旧根目录建的算例就从运行列表消失，批量编辑却仍写到它们身上。现在用 `adoptCaseList` 合并：保留本次会话里不在新列表中的算例。
+- **英文模式**：
+  - 状态栏补上几类整句：字段不生效、删除覆盖、继承缺省、批量预热、空间算例已生成但未加入本次会话。
+  - 运行日志的阶段小标题（`stage_heading`）在追加日志时按界面语言翻；日志正文仍原样保留模型输出。
+
+验证：GUI 后端测试 191 个、`colm-runtime` 库测试 163 个、`gui/tests`、check-gui、clippy、fmt；新加的翻译在 node 里逐条核对过。

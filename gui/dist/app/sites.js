@@ -9,7 +9,7 @@ import { renderFields } from './params.js';
 import { refreshVars } from './results.js';
 import { renderSteps, setStatus } from './shell.js';
 import {
-  currentCases, freshCaseName, updateCaseBatchButtons,
+  adoptCaseList, currentCases, freshCaseName, updateCaseBatchButtons,
 } from './batch.js';
 import { urbanEnabled } from './kernel.js';
 import { wizardFields } from './domain.js';
@@ -57,7 +57,7 @@ $('root').addEventListener('change', checkRootSpace);
 
 $('rescan').onclick = async () => {
   try {
-    state.cases = await invoke('list_cases', { root: $('root').value.trim() });
+    adoptCaseList(await invoke('list_cases', { root: $('root').value.trim() }));
     renderCases();
     renderSteps();
   } catch (e) { $('status').textContent = String(e); }
@@ -517,8 +517,8 @@ export async function ensureCases(sites) {
   const root = $('root').value.trim();
   // 旧算例不展示，但命名时必须看见它们，否则会覆盖同名目录。
   if (root) {
-    try { state.cases = await invoke('list_cases', { root }); }
-    catch { state.cases = []; } // root 还没创建时自然没有重名
+    try { adoptCaseList(await invoke('list_cases', { root })); }
+    catch { adoptCaseList([]); } // root 还没创建时自然没有重名
   }
   for (const [i, s] of sites.entries()) {
     setStatus(`准备算例 ${i + 1}/${sites.length}：${s.name}`);
@@ -528,7 +528,7 @@ export async function ensureCases(sites) {
   // **扫一次，不是每建一个扫一次。** 见 ensureCase 的注释。
   if (root) {
     try {
-      state.cases = await invoke('list_cases', { root });
+      adoptCaseList(await invoke('list_cases', { root }));
       renderCases();
       renderSteps();
     } catch (e) { setStatus(e); }
