@@ -63,6 +63,21 @@ pub struct HistoryDimensions {
 
 impl HistoryDimensions {
     /// `soilsnow` = 雪层 + 土壤层。
+    /// 层维的长度（闸门表 `dims` 里的名字）；本层还不支持的维度为 `None`。
+    pub fn layer_length(&self, dimension: &str) -> Option<usize> {
+        Some(match dimension {
+            "soil" => self.soil,
+            "soilinterface" => self.soilinterface(),
+            "soilsnow" => self.soilsnow(),
+            "lake" => self.lake,
+            "vegnodes" => self.vegnodes,
+            "band" => self.band,
+            "rtyp" => self.radiation_types,
+            "sensor" => self.sensor,
+            _ => return None,
+        })
+    }
+
     pub fn soilsnow(&self) -> usize {
         self.snow_layers + self.soil
     }
@@ -248,22 +263,34 @@ pub fn set_window_chunking(variable: &mut netcdf::VariableMut<'_>) -> Result<()>
 }
 
 /// 内存里累积的一个 history 分组。
+/// 一个已声明变量的缓冲。
+#[derive(Debug, Clone)]
+struct Slot {
+    /// 每个 patch 的层数（1 表示只有 `(time, patch)`）。
+    layers: usize,
+    /// 闸门表里只有一个层维（向量写出时交原始累加，见 [`HistoryBuffers::wants_raw_layers`]）。
+    one_layer_dim: bool,
+    /// `(record, patch, layer)` 行主序的扁平数据。
+    values: Vec<f64>,
+    /// `(record, patch)` 是否计入上游的 `filter`（网格聚合的分母）。
+    included: Vec<bool>,
+}
+
 #[derive(Debug, Clone)]
 pub struct HistoryBuffers {
     dims: HistoryDimensions,
     site: HistorySite,
     records: usize,
     times: Vec<i32>,
-    /// 变量名 → `(record, patch, layer)` 行主序的扁平数据。
-    values: BTreeMap<&'static str, Vec<f64>>,
-    /// 变量名 → 每个 patch 的层数（1 表示只有 `(time, patch)`）。
-    layers: BTreeMap<&'static str, usize>,
+    /// 已声明的变量：名字（闸门表写法）→ [`Self::slots`] 里的下标。按名字排序，文件里变量的
+    /// 顺序跟它走。按名字只查这一次，逐 patch 写入用下标（见 [`PatchWrites`]）。
+    order: BTreeMap<&'static str, usize>,
+    /// 已声明变量的数据；[`Self::undeclare`] 留下 `None`，下标不挪。
+    slots: Vec<Option<Slot>>,
     /// 选中的 patch：写入只落到这一格，值只给一个 patch 的（见 [`Self::select_patch`]）。
     selected: Option<usize>,
     /// 网格写出（空间算例）；`None` 为单点的 `patch` 维写法。
     grid: Option<std::sync::Arc<HistoryGrid>>,
-    /// 变量名 → `(record, patch)` 是否计入上游的 `filter`（网格聚合的分母）。
-    included: BTreeMap<&'static str, Vec<bool>>,
     /// 调用方已经聚合到网格窗口的量（河道量各有自己的过滤、分母与写法）：`(record, cell)`。
     gridded: BTreeMap<&'static str, Vec<f64>>,
     /// `DEF_USE_TRACER`：每条记录的 `(history_window_seconds, history_window_end_minutes)`
@@ -289,11 +316,10 @@ impl HistoryBuffers {
             site,
             records,
             times: vec![0; records],
-            values: BTreeMap::new(),
-            layers: BTreeMap::new(),
+            order: BTreeMap::new(),
+            slots: Vec::new(),
             selected: None,
             grid: None,
-            included: BTreeMap::new(),
             gridded: BTreeMap::new(),
             windows: None,
             vector: None,
@@ -338,10 +364,37 @@ impl HistoryBuffers {
     /// 再 `/sumwt/nac`）；两个层维的量照样交平均（`write_history_variable_4d` 先除 `nac`）。
     pub fn wants_raw_layers(&self, name: &str) -> bool {
         self.vector.is_some()
-            && VARS
-                .iter()
-                .find(|entry| entry.name == name)
-                .is_some_and(|entry| entry.dims.len() == 1)
+            && match self.slot_of(name) {
+                Some(index) => self.slot(index).one_layer_dim,
+                None => VARS
+                    .iter()
+                    .find(|entry| entry.name == name)
+                    .is_some_and(|entry| entry.dims.len() == 1),
+            }
+    }
+
+    /// 已声明变量的下标。
+    fn slot_of(&self, name: &str) -> Option<usize> {
+        self.order.get(name).copied()
+    }
+
+    fn slot(&self, index: usize) -> &Slot {
+        self.slots[index]
+            .as_ref()
+            .expect("order only points at declared slots")
+    }
+
+    fn slot_mut(&mut self, index: usize) -> &mut Slot {
+        self.slots[index]
+            .as_mut()
+            .expect("order only points at declared slots")
+    }
+
+    /// 已声明的变量，按名字排序（文件里的变量顺序）。
+    fn declared(&self) -> impl Iterator<Item = (&'static str, &Slot)> {
+        self.order
+            .iter()
+            .map(|(&name, &index)| (name, self.slot(index)))
     }
 
     /// 空间写出（网格或向量）：单点的 `patch` 维写法之外的两种。
@@ -699,10 +752,10 @@ impl HistoryBuffers {
         );
         let (first, count) = self.patch_span();
         let patches = self.dims.patch;
-        let slots = self
-            .included
-            .get_mut(name)
+        let index = self
+            .slot_of(name)
             .with_context(|| format!("{name} was not declared with declare()"))?;
+        let slots = &mut self.slot_mut(index).included;
         for slot in &mut slots[record * patches + first..record * patches + first + count] {
             *slot = true;
         }
@@ -757,29 +810,28 @@ impl HistoryBuffers {
             };
             let mut layers = 1usize;
             for dimension in entry.dims {
-                let length = match *dimension {
-                    "soil" => self.dims.soil,
-                    "soilinterface" => self.dims.soilinterface(),
-                    "soilsnow" => self.dims.soilsnow(),
-                    "lake" => self.dims.lake,
-                    "vegnodes" => self.dims.vegnodes,
-                    "band" => self.dims.band,
-                    "rtyp" => self.dims.radiation_types,
-                    "sensor" => self.dims.sensor,
-                    other => bail!(
-                        "{name} needs dimension {other:?}, which the history writer does not \
+                let Some(length) = self.dims.layer_length(dimension) else {
+                    bail!(
+                        "{name} needs dimension {dimension:?}, which the history writer does not \
                          size yet; add it to HistoryDimensions before declaring this variable"
-                    ),
+                    );
                 };
                 layers *= length;
             }
-            self.layers.insert(entry.name, layers);
-            self.values.insert(
-                entry.name,
-                vec![MISSING_VALUE; self.records * self.dims.patch * layers],
-            );
-            self.included
-                .insert(entry.name, vec![false; self.records * self.dims.patch]);
+            let slot = Slot {
+                layers,
+                one_layer_dim: entry.dims.len() == 1,
+                values: vec![MISSING_VALUE; self.records * self.dims.patch * layers],
+                included: vec![false; self.records * self.dims.patch],
+            };
+            // 重复声明：换掉原来的缓冲（与原先按名字覆盖同效），下标不变。
+            match self.slot_of(entry.name) {
+                Some(index) => self.slots[index] = Some(slot),
+                None => {
+                    self.order.insert(entry.name, self.slots.len());
+                    self.slots.push(Some(slot));
+                }
+            }
         }
         Ok(())
     }
@@ -787,13 +839,13 @@ impl HistoryBuffers {
     /// 这个变量是否已声明（只累加、不进历史文件的量写出时据此跳过）。
     /// 撤掉一个已声明的变量（上游按运行期开关不写它时）；没声明过就什么也不做。
     pub fn undeclare(&mut self, name: &str) {
-        self.values.remove(name);
-        self.layers.remove(name);
-        self.included.remove(name);
+        if let Some(index) = self.order.remove(name) {
+            self.slots[index] = None;
+        }
     }
 
     pub fn declares(&self, name: &str) -> bool {
-        self.layers.contains_key(name)
+        self.order.contains_key(name)
     }
 
     pub fn set_time(&mut self, record: usize, minutes_since_1900: i32) -> Result<()> {
@@ -838,18 +890,14 @@ impl HistoryBuffers {
             self.records
         );
         let start = (record * self.dims.patch + first) * layers;
-        let target = self
-            .values
-            .get_mut(name)
-            .expect("layers_of checked the name");
-        target[start..start + values.len()].copy_from_slice(values);
+        let index = self.slot_of(name).expect("layers_of checked the name");
+        self.slot_mut(index).values[start..start + values.len()].copy_from_slice(values);
         Ok(())
     }
 
     fn layers_of(&self, name: &str) -> Result<usize> {
-        self.layers
-            .get(name)
-            .copied()
+        self.slot_of(name)
+            .map(|index| self.slot(index).layers)
             .with_context(|| format!("{name} was not declared with declare()"))
     }
 
@@ -880,10 +928,8 @@ impl HistoryBuffers {
         );
         let (first, count) = self.patch_span();
         let start = record * self.dims.patch + first;
-        let target = self
-            .values
-            .get_mut(name)
-            .expect("layers_of checked the name");
+        let index = self.slot_of(name).expect("layers_of checked the name");
+        let target = &mut self.slot_mut(index).values;
         for slot in &mut target[start..start + count] {
             ensure!(
                 *slot != MISSING_VALUE,
@@ -985,7 +1031,7 @@ impl HistoryBuffers {
             time.put_attribute("long_name", "time")?;
             time.put_attribute("units", TIME_UNITS)?;
         }
-        for name in self.values.keys() {
+        for name in self.order.keys() {
             let entry = VARS
                 .iter()
                 .find(|entry| entry.name == *name)
@@ -1023,11 +1069,11 @@ impl HistoryBuffers {
         file.variable_mut("time")
             .context("time disappeared after definition")?
             .put_values(&self.times, netcdf::Extents::All)?;
-        for (name, values) in &self.values {
+        for (name, slot) in self.declared() {
             let file_name = file_variable_name(name);
             file.variable_mut(&file_name)
                 .with_context(|| format!("{file_name} disappeared after definition"))?
-                .put_values(values, netcdf::Extents::All)?;
+                .put_values(&slot.values, netcdf::Extents::All)?;
         }
         file.close()?;
         Ok(())
@@ -1213,7 +1259,7 @@ impl HistoryBuffers {
             variable.put_attribute("units", units.as_str())?;
             variable.put_attribute("missing_value", MISSING_VALUE)?;
         }
-        for name in self.values.keys() {
+        for name in self.order.keys() {
             let entry = VARS
                 .iter()
                 .find(|entry| entry.name == *name)
@@ -1226,6 +1272,12 @@ impl HistoryBuffers {
             let mut variable =
                 file.add_variable::<f64>(&file_variable_name(entry.name), &dimensions)?;
             set_history_compression(&mut variable, grid.compress_level)?;
+            if grid.compress_level > 0 {
+                // 压缩的量走并行直写块（见下面数据段），块形状必须在定义时定下。
+                variable.set_chunking(&colm_h5chunk::chunk_shape(
+                    &self.gridded_shape(entry, grid)?,
+                ))?;
+            }
             if let Some(long_name) = entry.long_name {
                 variable.put_attribute("long_name", long_name)?;
             }
@@ -1266,13 +1318,86 @@ impl HistoryBuffers {
                 .with_context(|| format!("{name} disappeared after definition"))?
                 .put_values(values, [0..1, 0..nlat, 0..nlon])?;
         }
+        // 压缩的量在文件关闭后并行压缩、直写块；不压缩的量照旧 `put_values`（落盘本身很快）。
+        if grid.compress_level == 0 {
+            for (name, slot) in self.declared() {
+                let out = self.aggregate_to_grid(slot, grid);
+                let file_name = file_variable_name(name);
+                file.variable_mut(&file_name)
+                    .with_context(|| format!("{file_name} disappeared after definition"))?
+                    .put_values(&out, netcdf::Extents::All)?;
+            }
+        }
+        // 时间是无限维：要在 `time` 写出之后再写这些量。
+        for (name, values) in &self.gridded {
+            let file_name = file_variable_name(name);
+            file.variable_mut(&file_name)
+                .with_context(|| format!("{file_name} disappeared after definition"))?
+                .put_values(values, netcdf::Extents::All)?;
+        }
+        file.close()?;
+        if grid.compress_level > 0 {
+            use rayon::prelude::*;
+            // 一批几个量同时聚合、压缩（可并行的块数够多，核才用得满），压好的再串行写盘。
+            // 一批同时在内存里的只有这几个量的网格值与压缩结果。
+            const BATCH: usize = 8;
+            let declared: Vec<_> = self.declared().collect();
+            let mut writer = colm_h5chunk::ChunkWriter::open(path)?;
+            for batch in declared.chunks(BATCH) {
+                let packed = batch
+                    .par_iter()
+                    .map(|&(name, slot)| {
+                        let entry = VARS
+                            .iter()
+                            .find(|entry| entry.name == name)
+                            .expect("declare() only stores names found in the gate table");
+                        let shape = self.gridded_shape(entry, grid)?;
+                        colm_h5chunk::pack_f64(
+                            &file_variable_name(name),
+                            &shape,
+                            &colm_h5chunk::chunk_shape(&shape),
+                            &self.aggregate_to_grid(slot, grid),
+                            grid.compress_level,
+                        )
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                for variable in &packed {
+                    writer.write(variable)?;
+                }
+            }
+            writer.close()?;
+        }
+        Ok(())
+    }
+
+    /// 网格文件里一个 history 量的形状：`(time, 层维…, lat, lon)`。
+    fn gridded_shape(&self, entry: &crate::Var, grid: &HistoryGrid) -> Result<Vec<usize>> {
+        let mut shape = vec![self.records];
+        for dimension in entry.dims {
+            shape.push(
+                self.dims
+                    .layer_length(dimension)
+                    .with_context(|| format!("{} has unsized dimension {dimension}", entry.name))?,
+            );
+        }
+        shape.push(grid.lat.len());
+        shape.push(grid.lon.len());
+        Ok(shape)
+    }
+
+    /// 逐 patch 的量聚合到网格窗口：`(record, layer, cell)` 行主序。各条记录互不相干，按记录并行。
+    fn aggregate_to_grid(&self, slot: &Slot, grid: &HistoryGrid) -> Vec<f64> {
+        use rayon::prelude::*;
         let cells = grid.cells();
         let patches = self.dims.patch;
-        for (name, values) in &self.values {
-            let layers = self.layers[name];
-            let included = &self.included[name];
-            let mut out = vec![MISSING_VALUE; self.records * layers * cells];
-            for record in 0..self.records {
+        let (layers, values, included) = (slot.layers, &slot.values, &slot.included);
+        let mut out = vec![MISSING_VALUE; self.records * layers * cells];
+        if cells == 0 || layers == 0 {
+            return out;
+        }
+        out.par_chunks_mut(layers * cells)
+            .enumerate()
+            .for_each(|(record, out)| {
                 // `get_sumarea (sumarea, filter)`：计入的 patch 逐份相加。
                 let mut area = vec![0.0; cells];
                 for patch in 0..patches {
@@ -1303,7 +1428,7 @@ impl HistoryBuffers {
                             };
                         }
                     }
-                    let base = (record * layers + layer) * cells;
+                    let base = layer * cells;
                     for cell in 0..cells {
                         out[base + cell] = if area[cell] > 0.00001 && sum[cell] != MISSING_VALUE {
                             sum[cell] / area[cell]
@@ -1312,21 +1437,8 @@ impl HistoryBuffers {
                         };
                     }
                 }
-            }
-            let file_name = file_variable_name(name);
-            file.variable_mut(&file_name)
-                .with_context(|| format!("{file_name} disappeared after definition"))?
-                .put_values(&out, netcdf::Extents::All)?;
-        }
-        // 时间是无限维：要在 `time` 写出之后再写这些量。
-        for (name, values) in &self.gridded {
-            let file_name = file_variable_name(name);
-            file.variable_mut(&file_name)
-                .with_context(|| format!("{file_name} disappeared after definition"))?
-                .put_values(values, netcdf::Extents::All)?;
-        }
-        file.close()?;
-        Ok(())
+            });
+        out
     }
 }
 
@@ -1360,10 +1472,14 @@ impl HistoryBuffers {
                       dims: &[&str],
                       long: Option<&str>,
                       units: Option<&str>,
-                      level: u8|
+                      level: u8,
+                      chunk: Option<&[usize]>|
          -> Result<()> {
             let mut variable = file.add_variable::<f64>(name, dims)?;
             set_history_compression(&mut variable, level)?;
+            if let Some(chunk) = chunk {
+                variable.set_chunking(chunk)?;
+            }
             if let Some(long) = long {
                 variable.put_attribute("long_name", long)?;
             }
@@ -1382,9 +1498,10 @@ impl HistoryBuffers {
                 Some(long_name),
                 Some(units),
                 0,
+                None,
             )?;
         }
-        for name in self.values.keys().chain(self.patch_fields.keys()) {
+        for name in self.order.keys().chain(self.patch_fields.keys()) {
             let entry = VARS
                 .iter()
                 .find(|entry| entry.name == *name)
@@ -1392,6 +1509,11 @@ impl HistoryBuffers {
             // 上游写的是 Fortran 序的 `acc_vec(dim1[,dim2], element)`：文件里单元维紧跟时间。
             let mut dimensions = vec!["time", "element"];
             dimensions.extend_from_slice(entry.dims);
+            // 压缩的量走并行直写块（见下面数据段），块形状必须在定义时定下。
+            let chunk = (vector.compress_level > 0)
+                .then(|| self.vector_shape(entry, elements))
+                .transpose()?
+                .map(|shape| colm_h5chunk::chunk_shape(&shape));
             define(
                 &mut file,
                 &file_variable_name(entry.name),
@@ -1399,6 +1521,7 @@ impl HistoryBuffers {
                 entry.long_name,
                 entry.units,
                 vector.compress_level,
+                chunk.as_deref(),
             )?;
         }
         file.variable_mut("elmindex")
@@ -1417,13 +1540,100 @@ impl HistoryBuffers {
                 .with_context(|| format!("{name} disappeared after definition"))?
                 .put_values(values, netcdf::Extents::All)?;
         }
+        // 压缩的量在文件关闭后并行压缩、直写块；不压缩的量照旧 `put_values`。
+        if vector.compress_level == 0 {
+            for (name, slot) in self.declared() {
+                let out = self.aggregate_to_vector(slot, vector);
+                let file_name = file_variable_name(name);
+                file.variable_mut(&file_name)
+                    .with_context(|| format!("{file_name} disappeared after definition"))?
+                    .put_values(&out, netcdf::Extents::All)?;
+            }
+            for (name, field) in &self.patch_fields {
+                let out = self.aggregate_field_to_vector(field, vector);
+                let file_name = file_variable_name(name);
+                file.variable_mut(&file_name)
+                    .with_context(|| format!("{file_name} disappeared after definition"))?
+                    .put_values(&out, netcdf::Extents::All)?;
+            }
+        }
+        file.close()?;
+        if vector.compress_level > 0 {
+            use rayon::prelude::*;
+            // 同网格写出：一批几个量同时聚合、压缩，压好的再串行写盘。
+            const BATCH: usize = 8;
+            enum Source<'a> {
+                Declared(&'a Slot),
+                Field(&'a PatchField),
+            }
+            let sources: Vec<(&'static str, Source<'_>)> = self
+                .declared()
+                .map(|(name, slot)| (name, Source::Declared(slot)))
+                .chain(
+                    self.patch_fields
+                        .iter()
+                        .map(|(&name, field)| (name, Source::Field(field))),
+                )
+                .collect();
+            let mut writer = colm_h5chunk::ChunkWriter::open(path)?;
+            for batch in sources.chunks(BATCH) {
+                let packed = batch
+                    .par_iter()
+                    .map(|(name, source)| {
+                        let entry = VARS
+                            .iter()
+                            .find(|entry| entry.name == *name)
+                            .expect("declared names come from the gate table");
+                        let shape = self.vector_shape(entry, elements)?;
+                        let out = match source {
+                            Source::Declared(slot) => self.aggregate_to_vector(slot, vector),
+                            Source::Field(field) => self.aggregate_field_to_vector(field, vector),
+                        };
+                        colm_h5chunk::pack_f64(
+                            &file_variable_name(name),
+                            &shape,
+                            &colm_h5chunk::chunk_shape(&shape),
+                            &out,
+                            vector.compress_level,
+                        )
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                for variable in &packed {
+                    writer.write(variable)?;
+                }
+            }
+            writer.close()?;
+        }
+        Ok(())
+    }
+
+    /// 向量文件里一个 history 量的形状：`(time, element, 层维…)`。
+    fn vector_shape(&self, entry: &crate::Var, elements: usize) -> Result<Vec<usize>> {
+        let mut shape = vec![self.records, elements];
+        for dimension in entry.dims {
+            shape.push(
+                self.dims
+                    .layer_length(dimension)
+                    .with_context(|| format!("{} has unsized dimension {dimension}", entry.name))?,
+            );
+        }
+        Ok(shape)
+    }
+
+    /// 逐 patch 的量聚合到单元：`(record, element, layer)` 行主序。按记录并行。
+    fn aggregate_to_vector(&self, slot: &Slot, vector: &HistoryVector) -> Vec<f64> {
+        use rayon::prelude::*;
+        let elements = vector.elmindex.len();
         let patches = self.dims.patch;
-        for (name, values) in &self.values {
-            let layers = self.layers[name];
-            let included = &self.included[name];
-            let raw = self.wants_raw_layers(name);
-            let mut out = vec![MISSING_VALUE; self.records * layers * elements];
-            for record in 0..self.records {
+        let (layers, values, included) = (slot.layers, &slot.values, &slot.included);
+        let raw = slot.one_layer_dim;
+        let mut out = vec![MISSING_VALUE; self.records * layers * elements];
+        if elements == 0 || layers == 0 {
+            return out;
+        }
+        out.par_chunks_mut(elements * layers)
+            .enumerate()
+            .for_each(|(record, out)| {
                 for layer in 0..layers {
                     let column = vector.aggregate(
                         |p| values[(record * patches + p) * layers + layer],
@@ -1431,38 +1641,37 @@ impl HistoryBuffers {
                         false,
                     );
                     for (e, value) in column.into_iter().enumerate() {
-                        out[(record * elements + e) * layers + layer] =
-                            if raw && value != MISSING_VALUE {
-                                value / self.steps[record]
-                            } else {
-                                value
-                            };
+                        out[e * layers + layer] = if raw && value != MISSING_VALUE {
+                            value / self.steps[record]
+                        } else {
+                            value
+                        };
                     }
                 }
-            }
-            let file_name = file_variable_name(name);
-            file.variable_mut(&file_name)
-                .with_context(|| format!("{file_name} disappeared after definition"))?
-                .put_values(&out, netcdf::Extents::All)?;
-        }
-        for (name, field) in &self.patch_fields {
-            let mut out = Vec::with_capacity(self.records * elements);
-            for record in 0..self.records {
-                out.extend(vector.aggregate(
+            });
+        out
+    }
+
+    /// 逐 patch 给出的量（[`PatchField`]）聚合到单元：`(record, element)`。按记录并行。
+    fn aggregate_field_to_vector(&self, field: &PatchField, vector: &HistoryVector) -> Vec<f64> {
+        use rayon::prelude::*;
+        let patches = self.dims.patch;
+        (0..self.records)
+            .into_par_iter()
+            .flat_map_iter(|record| {
+                vector.aggregate(
                     |p| field.values[record * patches + p],
                     |p| field.included[record * patches + p],
                     field.total,
-                ));
-            }
-            let file_name = file_variable_name(name);
-            file.variable_mut(&file_name)
-                .with_context(|| format!("{file_name} disappeared after definition"))?
-                .put_values(&out, netcdf::Extents::All)?;
-        }
-        file.close()?;
-        Ok(())
+                )
+            })
+            .collect()
     }
 }
+
+#[path = "history_patch.rs"]
+mod patch;
+pub use patch::{PatchOps, PatchWrites};
 
 #[cfg(test)]
 #[path = "history_tests.rs"]

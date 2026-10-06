@@ -1,0 +1,22 @@
+[package]
+name = "colm-h5chunk"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+# 与 netcdf 静态链接的是同一份 HDF5 与 zlib（Cargo.lock 里 netcdf-sys 已经依赖这两个 sys crate），
+# 这里只是拿到它们的符号，不多编一份库。
+netcdf = { workspace = true, features = ["static"] }
+hdf5-sys = { package = "hdf5-metno-sys", version = "0.12.2" }
+libz-sys = "1.1"
+rayon.workspace = true
+anyhow.workspace = true
+
+# 不继承工作区的 `unsafe_code = "forbid"`：netcdf crate 不提供 HDF5 的直写块（`H5Dwrite_chunk`），
+# 本 crate 只放这几个 FFI 调用（`ffi` 模块）；降为 deny，`#[allow(unsafe_code)]` 只在那个模块上。
+[lints.rust]
+unsafe_code = "deny"

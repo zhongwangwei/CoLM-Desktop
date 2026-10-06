@@ -106,11 +106,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "colm-h5chunk"
+version = "0.3.0-beta.3"
+dependencies = [
+ "anyhow",
+ "hdf5-metno-sys",
+ "libz-sys",
+ "netcdf",
+ "rayon",
+]
+
+[[package]]
 name = "colm-hist"
 version = "0.3.0-beta.3"
 dependencies = [
  "anyhow",
+ "colm-h5chunk",
  "netcdf",
+ "rayon",
 ]
 
 [[package]]

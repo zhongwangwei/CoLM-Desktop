@@ -531,3 +531,123 @@ fn vector_history_compresses_time_variables_but_not_element_statics() {
     drop(file);
     let _ = std::fs::remove_file(&path);
 }
+
+/// 压缩的逐时间量走并行直写块（`colm_h5chunk`），不压缩的照旧 `put_values`：同一份缓冲按两种级别写出，
+/// 网格与向量文件里每个变量都逐位相同（多条记录、带层维、缺测与未计入的 patch、逐 patch 量）。
+#[test]
+fn chunked_writes_match_put_values_bitwise() {
+    let dims = HistoryDimensions {
+        patch: 4,
+        soil: 10,
+        lake: 10,
+        snow_layers: 5,
+        vegnodes: 4,
+        band: 2,
+        radiation_types: 2,
+        sensor: 1,
+    };
+    let site = HistorySite {
+        latitude_degrees: 0.0,
+        longitude_degrees: 0.0,
+    };
+    let records = 3;
+    let fill = |mut buffers: HistoryBuffers, vector: bool| {
+        buffers.declare(&["t_grnd", "BD_all", "alb"]).unwrap();
+        if vector {
+            buffers.declare_patch_fields(&[("assim", false)]).unwrap();
+        }
+        for record in 0..records {
+            buffers.set_time(record, 60 * (record as i32 + 1)).unwrap();
+            buffers.set_steps(record, 2.0).unwrap();
+            for patch in 0..dims.patch {
+                buffers.select_patch(Some(patch)).unwrap();
+                let base = (record * 10 + patch) as f64;
+                // patch 3 在第 1 条记录里未计入；patch 1 的 t_grnd 缺测。
+                if !(record == 1 && patch == 3) {
+                    for name in ["t_grnd", "BD_all", "alb"] {
+                        buffers.include(name, record).unwrap();
+                    }
+                }
+                let t_grnd = if patch == 1 {
+                    MISSING_VALUE
+                } else {
+                    270.0 + base.sin()
+                };
+                buffers.set_patch_scalar("t_grnd", record, t_grnd).unwrap();
+                let soil: Vec<f64> = (0..10).map(|l| base * 1.37 + f64::from(l) / 3.0).collect();
+                buffers.set_layered("BD_all", record, &soil).unwrap();
+                let alb: Vec<f64> = (0..4)
+                    .map(|l| 0.1 + base * 1e-3 + f64::from(l) * 0.07)
+                    .collect();
+                buffers.set_layered("alb", record, &alb).unwrap();
+            }
+            buffers.select_patch(None).unwrap();
+            if vector {
+                let values: Vec<f64> = (0..dims.patch).map(|p| (record + p) as f64 / 7.0).collect();
+                buffers
+                    .set_patch_field("assim", record, &values, &[true, true, false, true])
+                    .unwrap();
+            }
+        }
+        buffers
+    };
+    let grid = |level: u8| {
+        std::sync::Arc::new(HistoryGrid {
+            lat: vec![0.25, 0.75],
+            lon: vec![0.25, 0.75, 1.25],
+            lat_s: vec![0.0, 0.5],
+            lat_n: vec![0.5, 1.0],
+            lon_w: vec![0.0, 0.5, 1.0],
+            lon_e: vec![0.5, 1.0, 1.5],
+            parts: vec![
+                vec![(0, 3.0), (1, 1.0)],
+                vec![(1, 1.0)],
+                vec![(4, 2.0), (5, 0.5)],
+                vec![(2, 1.0), (5, 1.5)],
+            ],
+            patch_area: vec![4.0, 1.0, 2.5, 2.5],
+            statics: Vec::new(),
+            first_record_statics: Vec::new(),
+            compress_level: level,
+        })
+    };
+    let vector = |level: u8| {
+        std::sync::Arc::new(HistoryVector {
+            elmindex: vec![10, 20, 30],
+            elements: vec![0..2, 2..3, 3..4],
+            subfrc: vec![0.25, 0.75, 1.0, 1.0],
+            compress_level: level,
+        })
+    };
+    let read_all = |path: &Path| {
+        let file = netcdf::open(path).unwrap();
+        let mut out = BTreeMap::new();
+        for variable in file.variables() {
+            if variable.name().starts_with("f_") {
+                let values: Vec<f64> = variable.get_values(..).unwrap();
+                let bits: Vec<u64> = values.iter().map(|v| v.to_bits()).collect();
+                out.insert(variable.name(), bits);
+            }
+        }
+        out
+    };
+    for vector_form in [false, true] {
+        let mut written = Vec::new();
+        for level in [0u8, 1] {
+            let buffers = HistoryBuffers::new(dims, site, records);
+            let buffers = if vector_form {
+                buffers.with_vector(vector(level)).unwrap()
+            } else {
+                buffers.with_grid(grid(level)).unwrap()
+            };
+            let path = scratch(&format!("chunked-{vector_form}-{level}"));
+            fill(buffers, vector_form).write(&path).unwrap();
+            written.push(read_all(&path));
+            let _ = std::fs::remove_file(&path);
+        }
+        let expected = if vector_form { 4 } else { 3 };
+        assert_eq!(written[0].len(), expected, "{:?}", written[0].keys());
+        assert_eq!(written[0], written[1], "vector form: {vector_form}");
+        assert!(written[0]["f_BD_all"].len() == records * 10 * if vector_form { 3 } else { 6 });
+    }
+}

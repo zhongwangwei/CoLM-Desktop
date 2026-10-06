@@ -4,7 +4,7 @@
 # hdf5-metno-src 0.10.4 requires Rust 1.85.1，故下面的 MSRV 是 1.85.1 而非 1.85。
 resolver = "3"
 members = ["crates/colm-case",
-    "crates/colm-cli", "crates/colm-core", "crates/colm-forcing", "crates/colm-hist", "crates/colm-init", "crates/colm-kernel", "crates/colm-lapack", "crates/colm-namelist", "crates/colm-ncchar", "crates/colm-runtime", "crates/colm-schema", "crates/colm-srfdata", "oracle", "xtask"]
+    "crates/colm-cli", "crates/colm-core", "crates/colm-forcing", "crates/colm-h5chunk", "crates/colm-hist", "crates/colm-init", "crates/colm-kernel", "crates/colm-lapack", "crates/colm-namelist", "crates/colm-ncchar", "crates/colm-runtime", "crates/colm-schema", "crates/colm-srfdata", "oracle", "xtask"]
 
 [workspace.package]
 version = "0.3.0-beta.3"
@@ -26,7 +26,8 @@ repository = "https://github.com/zhongwangwei/CoLM-Desktop"
 publish = false
 
 # 本项目几乎没有需要 unsafe 的地方（netcdf crate 已封装 FFI）。例外各自是一个小 crate、降为 deny、
-# 只在具体那几行放行：colm-lapack（macOS Accelerate 与 libm 的 FFI）、colm-ncchar（NC_CHAR 的类型描述）。
+# 只在具体那几行放行：colm-lapack（macOS Accelerate 与 libm 的 FFI）、colm-ncchar（NC_CHAR 的类型描述）、
+# colm-h5chunk（HDF5 直写块）。
 # 注意 forbid 比 deny 强：局部 #[allow(unsafe_code)] 会被 E0453 拒绝。
 # 将来若某成员确实需要 FFI，出口在 workspace 层面（改 deny，或该成员不 opt-in），
 # 不是局部 allow。

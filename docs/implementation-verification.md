@@ -30621,3 +30621,56 @@ GUI 的"不分馏"卡片去掉了"会被上游自检停机"的提示。
   1. 缓冲区填值：按名字查表改成预先算好的下标；
   2. 写盘：rayon 并行压块，再用 `H5Dwrite_chunk` 直写。
 - zarr 只在需要云端对象存储或 xarray/dask 分块读时，才值得做成可选的附加输出。
+
+## 第 603 轮：history 输出提速——缓冲区填值并行化，压缩改为并行压块后直写
+
+第 602 轮定位的两处串行瓶颈都改了，文件格式不变，仍是单个标准 netCDF-4 文件。
+
+**一、缓冲区填值**（`colm-hist` 的 `HistoryBuffers`，`colm-runtime` 的 `finish_step`）
+- 存储从三张按名字索引的 `BTreeMap`（值、层数、是否计入）合成一个槽位表：`order` 存"名字 → 下标"，`slots` 存每个变量的层数、值与计入标记。文件里变量的顺序仍按名字排，与原来相同。
+- 新增写入清单 `PatchWrites`/`PatchOps`（`history_patch.rs`）。每条记录：
+  1. 各 patch 在只读缓冲上用 rayon 并行生成清单，名字在这一步解析成下标，长度、记录号等检查与直写相同；
+  2. 主线程按 patch 顺序 `apply`，直接按下标拷贝。
+  同一 patch 内按调用顺序、各 patch 按次序落盘，与逐个直写逐位相同。
+- `write_means` 等改成对 `MeansTarget` trait 泛型，直接传 `HistoryBuffers` 的单元测试不用改。
+- zb 实测（384 格、1427 patch、96 步每步写）：history 段 17.1 s → 8.8 s。其中并行生成 2.95 s，串行 apply 0.43 s。
+
+**二、并行压缩加直写块**（新 crate `colm-h5chunk`）
+- `chunk_shape`：时间维取 1，其余维从外往里收缩到一块 ≤ 4 MiB，最内层尽量完整。
+- `pack_f64`：按块切开，用 rayon 并行压缩。用的是 `libz-sys` 的 `compress2`，与 HDF5 deflate 过滤器同一种 zlib 格式。不碰 HDF5，可以几个变量同时压。
+- `ChunkWriter::write`：`H5Dset_extent` 把无限维扩开，再逐块 `H5Dwrite_chunk`。
+- 所有 HDF5 调用都在 `hdf5_sys::LOCK` 下做；这就是 netcdf crate 用的那把全局锁（netcdf-sys 把它重导出为 `libnetcdf_lock`），所以与强迫预读线程的 netCDF 调用串行。
+- `unsafe` 只在 `ffi` 模块里，crate 降为 `unsafe_code = "deny"`，同 `colm-ncchar`、`colm-lapack`。
+- 依赖：`hdf5-metno-sys`、`libz-sys`、`rayon` 都已在 `Cargo.lock` 里，不新增外部库，用户不用另装任何东西。GUI 用不带 `io` 的 `colm-hist`，不受影响（`cargo check --locked` 通过）。
+- `colm-hist` 的网格与向量写出：`DEF_HIST_CompressLevel > 0` 时，定义阶段按 `chunk_shape` 设分块；文件关闭后每批 8 个量同时聚合（按记录并行）、压缩，再串行直写。级别 0 时照旧 `put_values`。
+- 块形状不再是 netCDF 的默认值，压缩字节也不一定与串行 libz 相同，但解压后的值逐位相同。配对与黄金比较的是值。
+
+**验证**：
+- `colm-h5chunk` 单元测试：块形状、块原点、边缘块补满；netcdf 定义 → 直写 → netcdf 读回逐位相同；错误输入报错。默认并行连跑 5 次全过。
+- `colm-hist` 新测试 `chunked_writes_match_put_values_bitwise`：同一份缓冲按级别 0（`put_values`）与级别 1（直写块）写出，网格与向量文件全部变量逐位相同。覆盖 3 条记录、`soil` 与 `rtyp×band` 层维、缺测与未计入的 patch、逐 patch 量。
+- zb：新输出与改动前逐位相同（142 个变量含属性，`tmp/zb/bitcmp.py`）。
+- 高分辨率算例 zh：100–120E、20–36N，0.25° 网格，14130 个 patch，history 网格为默认的 0.5°（32×40），48 步每步写。
+  - 改动前后的 `colm-rs` 交替各跑两次，主文件 142 个变量、unitcat 17 个变量逐位相同。
+  - history 段 86.0/85.6 s → 39.5/35.3 s。
+- 写盘基准（`colm-h5chunk` 的 ignored 测试，0.25° 全球 4 个量 × 24 条记录，796 MB）：
+
+| 方式 | 时间 |
+|---|---|
+| netcdf `put_values`（串行 deflate） | 23.2–25.0 s |
+| 并行直写，1 线程 | 21.0 s |
+| 并行直写，4 线程 | 7.3 s |
+| 并行直写，16 线程 | 6.7–7.2 s |
+
+  文件同为 519 MB，值逐位相同。
+- fmt、workspace clippy、colm-hist/colm-runtime（单线程）、colm-cli 223 个、`PLUMBER2_ROOT` 下 `cargo test -p oracle` 全部通过。
+
+**测不准的地方**：
+- 这几轮实测时机器负载均值在 12–124 之间：其它会话的 OBRef 编译、两个 `obref_to_openbench.py`、远程桌面。16 线程的提速卡在 3.4 倍左右，与 Python 纯压缩 16 线程约 5 倍一致，都是空闲核只剩 4–5 个的表现。
+- 同一个 patches 段（物理代码没动）在旧二进制上测出过 36 s 和 94.5 s，所以墙钟时间只看交替 A/B 的趋势，精确倍数要在空闲机器上重测。
+- 试过把 `libz-sys` 切到 zlib-ng（源码随 crate 一起打包，离线可编）：速度与文件大小都没变，链接进来的 `compress2` 不是它，已撤回。
+
+**附带发现（下一步）**：
+- 同一算例的 mksrfdata 花了 19 分钟在土壤段，LAI 段采样几乎全在 `inflate_fast`，其余线程停在 `__psynch_cvwait`。
+- 原因与写输出同理：HDF5 读数据时的解压发生在全局锁里，多线程读原始栅格实际是一个一个排队。
+- 原始数据全是 deflate（LAI 另开 shuffle）。15″ LAI 的块是 `(1, 1, 86400)`，即一块一整条纬线，读区域时每行每个时次都要解压整条全球纬线。
+- 可以照本轮反过来做：锁里只用 `H5Dread_chunk` 取压缩字节，锁外并行解压。另起一轮。

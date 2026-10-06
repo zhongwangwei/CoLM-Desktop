@@ -808,6 +808,45 @@ impl HistorySink for HistoryBuffers {
     }
 }
 
+/// 区间平均的写出目标：直接写缓冲（单元测试），或按 patch 并行生成的写入清单
+/// （[`colm_hist::history::PatchWrites`]，见 [`HistorySession`] 的 `finish_step`）。两者语义相同。
+trait MeansTarget {
+    fn declares(&self, name: &str) -> bool;
+    fn wants_raw_layers(&self, name: &str) -> bool;
+    fn include(&mut self, name: &str, record: usize) -> Result<()>;
+    fn set_steps(&mut self, record: usize, steps: f64) -> Result<()>;
+    fn set_patch_scalar(&mut self, name: &str, record: usize, value: f64) -> Result<()>;
+    fn set_layered(&mut self, name: &str, record: usize, values: &[f64]) -> Result<()>;
+}
+
+macro_rules! means_target {
+    ($target:ty) => {
+        impl MeansTarget for $target {
+            fn declares(&self, name: &str) -> bool {
+                <$target>::declares(self, name)
+            }
+            fn wants_raw_layers(&self, name: &str) -> bool {
+                <$target>::wants_raw_layers(self, name)
+            }
+            fn include(&mut self, name: &str, record: usize) -> Result<()> {
+                <$target>::include(self, name, record)
+            }
+            fn set_steps(&mut self, record: usize, steps: f64) -> Result<()> {
+                <$target>::set_steps(self, record, steps)
+            }
+            fn set_patch_scalar(&mut self, name: &str, record: usize, value: f64) -> Result<()> {
+                <$target>::set_patch_scalar(self, name, record, value)
+            }
+            fn set_layered(&mut self, name: &str, record: usize, values: &[f64]) -> Result<()> {
+                <$target>::set_layered(self, name, record, values)
+            }
+        }
+    };
+}
+
+means_target!(HistoryBuffers);
+means_target!(colm_hist::history::PatchWrites<'_>);
+
 /// 一个输出区间里逐变量的和与步数（上游的 `a_*` 与 `nac`）。
 #[derive(Debug, Default)]
 pub struct HistoryAccumulator {
@@ -907,7 +946,7 @@ impl HistoryAccumulator {
     /// 逐位实测 `f_solvdln` 在 264 条里 11 条真值、253 条 spval，真值约等于同小时的 `f_solvd`。
     /// **其余变量一律除以全局 `nac`**，即使某些步是 spval 被跳过：DiagMatrix 的 `*Cap` 在年末
     /// 那一小时里前一步还是 spval、后一步才有值，上游写出的是值的一半（第 421 轮）。
-    fn write_means(&self, buffer: &mut HistoryBuffers, record: usize) -> Result<()> {
+    fn write_means(&self, buffer: &mut impl MeansTarget, record: usize) -> Result<()> {
         self.write_plain_means(buffer, record)
     }
 
@@ -915,7 +954,7 @@ impl HistoryAccumulator {
     /// 与 `f_wdsrf` 同一次除法；`a_wetwat` 照常累加进旁车。只在湿地上写（过滤同 `f_wetwat`）。
     fn write_dynamic_wetland_storage(
         &self,
-        buffer: &mut HistoryBuffers,
+        buffer: &mut impl MeansTarget,
         record: usize,
     ) -> Result<()> {
         if !buffer.declares("wetwat") || self.filtered.contains("wetwat") {
@@ -931,14 +970,14 @@ impl HistoryAccumulator {
             .context("cannot write the dynamic wetland storage")
     }
 
-    fn write_plain_means(&self, buffer: &mut HistoryBuffers, record: usize) -> Result<()> {
+    fn write_plain_means(&self, buffer: &mut impl MeansTarget, record: usize) -> Result<()> {
         self.write_plain_means_where(buffer, record, |_| true)
     }
 
     /// 被强迫缺测遮蔽的 patch：上游各 `filter` 都与上了 `forcmask_pch`，唯独 CROP 段按作物类别
     /// 现建的那几个没有（`MOD_Hist.F90:2356-2900` 的 `f_manunitro`、`f_huiswheat`、`f_fertnitro_*`、
     /// `f_irrig_method_*`），被遮蔽的作物 patch 照样进它们的分子分母。
-    fn write_masked_crop_means(&self, buffer: &mut HistoryBuffers, record: usize) -> Result<()> {
+    fn write_masked_crop_means(&self, buffer: &mut impl MeansTarget, record: usize) -> Result<()> {
         self.write_plain_means_where(buffer, record, |name| {
             matches!(name, "manunitro" | "huiswheat")
                 || name.starts_with("fertnitro_")
@@ -948,7 +987,7 @@ impl HistoryAccumulator {
 
     fn write_plain_means_where(
         &self,
-        buffer: &mut HistoryBuffers,
+        buffer: &mut impl MeansTarget,
         record: usize,
         keep: impl Fn(&str) -> bool,
     ) -> Result<()> {
@@ -4849,27 +4888,45 @@ impl HistorySession {
             let end_minutes = minutes as f64 + f64::from(end.seconds % 60) / 60.0;
             buffer.set_window(record.record, steps as f64 * deltim, end_minutes)?;
         }
-        for (patch, means) in means.iter().enumerate() {
-            // 被强迫缺测遮蔽的 patch 不进聚合（值与分母都没有它），只有 CROP 那几个没与上
-            // `forcmask_pch` 的作物历史除外（见 [`PatchMeans::write_masked_crop_means`]）。
-            if forcing_mask
-                .as_ref()
-                .is_some_and(|mask| !mask.get(patch).copied().unwrap_or(true))
-            {
-                if self.bgc.is_some_and(|bgc| bgc.crop) && means.steps > 0 {
-                    if means_are_split(self.accumulators.len()) {
-                        buffer.select_patch(Some(patch))?;
-                    }
-                    means.write_masked_crop_means(buffer, record.record)?;
-                }
-                continue;
-            }
-            if means_are_split(self.accumulators.len()) {
-                buffer.select_patch(Some(patch))?;
-            }
-            means.write_means(buffer, record.record)?;
-            if self.dynamic_wetland {
-                means.write_dynamic_wetland_storage(buffer, record.record)?;
+        // 逐 patch 的写入清单并行生成（只读缓冲、各自查名字），再按 patch 次序落进缓冲：
+        // 与逐个直写逐位相同，见 `colm_hist::history::PatchWrites`。
+        let split = means_are_split(self.accumulators.len());
+        let crop = self.bgc.is_some_and(|bgc| bgc.crop);
+        let dynamic_wetland = self.dynamic_wetland;
+        let writes = {
+            use rayon::prelude::*;
+            let buffer: &HistoryBuffers = buffer;
+            means
+                .par_iter()
+                .enumerate()
+                .map(
+                    |(patch, means)| -> Result<Option<colm_hist::history::PatchOps>> {
+                        // 被强迫缺测遮蔽的 patch 不进聚合（值与分母都没有它），只有 CROP 那几个没与上
+                        // `forcmask_pch` 的作物历史除外（见 [`PatchMeans::write_masked_crop_means`]）。
+                        let masked = forcing_mask
+                            .as_ref()
+                            .is_some_and(|mask| !mask.get(patch).copied().unwrap_or(true));
+                        if masked && !(crop && means.steps > 0) {
+                            return Ok(None);
+                        }
+                        let mut writes =
+                            buffer.patch_writes(record.record, split.then_some(patch))?;
+                        if masked {
+                            means.write_masked_crop_means(&mut writes, record.record)?;
+                        } else {
+                            means.write_means(&mut writes, record.record)?;
+                            if dynamic_wetland {
+                                means.write_dynamic_wetland_storage(&mut writes, record.record)?;
+                            }
+                        }
+                        Ok(Some(writes.finish()))
+                    },
+                )
+                .collect::<Vec<_>>()
+        };
+        for writes in writes {
+            if let Some(writes) = writes? {
+                buffer.apply(writes)?;
             }
         }
         buffer.select_patch(None)?;
