@@ -411,7 +411,7 @@ const ZH_EN = [
   ['开分馏（IsoGSM 驱动）', 'Fractionation (IsoGSM-driven)'],
   ['同位素降水与水汽读 IsoGSM，主强迫也必须选 IsoGSM；仅空间算例', 'Isotopic precipitation and vapor come from IsoGSM, so the main forcing must be IsoGSM too; spatial cases only'],
   ['不分馏', 'No fractionation'],
-  ['同位素随水输运但不分馏，降水与水汽取缺省 δ 值；站点与空间都可用。上游每步自检通量比值，土柱强烈向上渗出时会停机', 'Isotopes move with water without fractionation; precipitation and vapor use default δ values; works for sites and spatial cases. Upstream self-checks the flux ratios every step and stops when the soil column exfiltrates strongly'],
+  ['同位素随水输运但不分馏，降水与水汽取缺省 δ 值；站点与空间都可用', 'Isotopes move with water without fractionation; precipitation and vapor use default δ values; works for sites and spatial cases'],
   ['水同位素怎么算？', 'How should water isotopes be simulated?'],
   ['选择是否分馏，并给出含水层混合水量。', 'Choose whether to fractionate, and give the aquifer mixing water depth.'],
   ['ⓘ 同位素强迫文件与参数文件建例时自动写入算例目录；含水层混合水量建例后可在「示踪剂」页改', 'ⓘ The isotope forcing and parameter files are written into the case directory on creation; the aquifer mixing water can be changed later on the Tracer page'],

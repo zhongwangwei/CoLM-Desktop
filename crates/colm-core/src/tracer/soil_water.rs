@@ -737,6 +737,8 @@ pub fn tracer_soil_water(
 
         // 1. 地表混合池。
         let mut trc_soil_upflow = 0.0;
+        let mut upflow_deferred = 0.0;
+        let mut exfil_water = 0.0;
         let mut top_soil_evap_water = 0.0;
         let imperv_wdsrf_loss = input.imperv_evap_wdsrf.map_or(0.0, |x| x.max(0.0));
         let imperv_soil_loss = input.imperv_evap_soil.map_or(0.0, |x| x.max(0.0));
@@ -798,10 +800,23 @@ pub fn tracer_soil_water(
             } else {
                 top_boundary_out_water
             };
+            exfil_water = top_exfil_water;
             if top_exfil_water > 0.0 {
-                trc_soil_upflow =
-                    (ratio_layer[0] * top_exfil_water).min(p.wliq_soisno[s(1)].max(0.0));
-                p.wliq_soisno[s(1)] -= trc_soil_upflow;
+                // 宿主在同一个 Richards 解里从下层给第 1 层补水，渗出可以超过第 1 层在层间搬运前的
+                // 存量；原来在这里截断，缺的示踪物就留在了土里。改为整份送进地表池，差额等第 2 段
+                // 层间搬运后再由第 1 层付（upstream-bugs #79，vendor 同步修）。
+                trc_soil_upflow = ratio_layer[0] * top_exfil_water;
+                // 不挥发溶质保持原来的截断：它有浓度梯度，第 1 层付不清时会凭空造出溶质。
+                let available = p.wliq_soisno[s(1)].max(0.0);
+                if nonvolatile {
+                    trc_soil_upflow = trc_soil_upflow.min(available);
+                    p.wliq_soisno[s(1)] -= trc_soil_upflow;
+                } else if trc_soil_upflow > available {
+                    upflow_deferred = trc_soil_upflow - available;
+                    p.wliq_soisno[s(1)] -= available;
+                } else {
+                    p.wliq_soisno[s(1)] -= trc_soil_upflow;
+                }
                 water_shadow[0] -= top_exfil_water;
             }
         }
@@ -877,8 +892,15 @@ pub fn tracer_soil_water(
             p.wice_soisno[s(1)] -= flux;
             state.book_evap_loss(itrc, flux, imperv_subl_loss, EvapKind::Sublimation);
         }
+        // 渗出的示踪物在这次蒸发之后才进池（见下），而 `surface_base_water` 由最终的积水与地表径流
+        // 构成、已含渗出的水；蒸发池里也要扣掉它，否则蒸发的示踪物被稀释（upstream-bugs #79）。
+        let evap_base_water = if flood_water <= 0.0 && exfil_water > 0.0 {
+            (surface_base_water - exfil_water).max(0.0)
+        } else {
+            surface_base_water
+        };
         if gwat_evap > TRC_TINY && trc_pool_total > TRC_TINY {
-            let water_pool_total = gwat_evap + surface_base_water;
+            let water_pool_total = gwat_evap + evap_base_water;
             let flux = ctx.atmospheric_loss(
                 trc_pool_total,
                 water_pool_total,
@@ -890,7 +912,7 @@ pub fn tracer_soil_water(
             state.book_evap_loss(itrc, flux, gwat_evap, EvapKind::SoilEvaporation);
         }
         if imperv_wdsrf_loss > TRC_TINY && trc_pool_total > TRC_TINY {
-            let water_pool_total = imperv_wdsrf_loss + surface_base_water;
+            let water_pool_total = imperv_wdsrf_loss + evap_base_water;
             let flux = ctx.atmospheric_loss(
                 trc_pool_total,
                 water_pool_total,
@@ -1022,22 +1044,108 @@ pub fn tracer_soil_water(
             layer_transport_ratio[soil_slot(j)] =
                 current_liq_ratio(&water_shadow, &p.wliq_soisno, &ratio_layer, nonvolatile, j);
         }
-        for j in 1..nl {
-            let (k, kn) = (soil_slot(j), soil_slot(j + 1));
-            let q = input.qlayer[j as usize];
-            if q > TRC_TINY {
-                let flux = (dt * (q * layer_transport_ratio[k])).min(p.wliq_soisno[s(j)].max(0.0));
-                p.wliq_soisno[s(j)] -= flux;
-                p.wliq_soisno[s(j + 1)] += flux;
-                water_shadow[k] = (-dt).mul_add(q, water_shadow[k]);
-                water_shadow[kn] = dt.mul_add(q, water_shadow[kn]);
-            } else if q < -TRC_TINY {
-                let flux = (dt * (q.abs() * layer_transport_ratio[kn]))
-                    .min(p.wliq_soisno[s(j + 1)].max(0.0));
-                p.wliq_soisno[s(j + 1)] -= flux;
-                p.wliq_soisno[s(j)] += flux;
-                water_shadow[kn] = dt.mul_add(q, water_shadow[kn]);
-                water_shadow[k] = (-dt).mul_add(q, water_shadow[k]);
+        // 界面自上而下处理，可向上供水的层在同一个解里还会从下层得到补充。原来每个通量都截在
+        // 供水层的现存量上，水一步穿过几层时示踪物就被留下。先按快照比值不截断地走一遍（没有
+        // 截断起作用时算术与原来相同），只有某层因此变负、且超出流经量的舍入误差时才退回逐层截断
+        // （upstream-bugs #79）。
+        // 一层送出的水多于它在快照时的存量，说明本步里供水层还在给它补水，只用存量算不出送出的
+        // 比值（存量接近零时就是噪声）。改按水流方向把存量与流入混合。原来的逐层截断对这种通量
+        // 必然截断，所以其余的步不受影响。
+        if !nonvolatile {
+            for j in (2..nl).rev() {
+                let (q_in, q_out) = (input.qlayer[j as usize], input.qlayer[(j - 1) as usize]);
+                if q_in < -TRC_TINY
+                    && q_out < -TRC_TINY
+                    && q_out.abs() * dt > water_shadow[soil_slot(j)]
+                {
+                    let in_w = q_in.abs() * dt;
+                    // 分子按 GIMPLE 收缩成 FMA；`in_w` 还被乘法用到，分母不收缩。
+                    layer_transport_ratio[soil_slot(j)] = in_w.mul_add(
+                        layer_transport_ratio[soil_slot(j + 1)],
+                        p.wliq_soisno[s(j)].max(0.0),
+                    ) / (water_shadow[soil_slot(j)].max(0.0)
+                        + in_w);
+                }
+            }
+            for j in 2..nl {
+                let (q_in, q_out) = (input.qlayer[(j - 1) as usize], input.qlayer[j as usize]);
+                if q_in > TRC_TINY && q_out > TRC_TINY && q_out * dt > water_shadow[soil_slot(j)] {
+                    let in_w = q_in * dt;
+                    layer_transport_ratio[soil_slot(j)] = in_w.mul_add(
+                        layer_transport_ratio[soil_slot(j - 1)],
+                        p.wliq_soisno[s(j)].max(0.0),
+                    ) / (water_shadow[soil_slot(j)].max(0.0)
+                        + in_w);
+                }
+            }
+        }
+        let mut trc_before = [0.0; SOIL_LAYERS];
+        for j in 1..=nl {
+            trc_before[soil_slot(j)] = p.wliq_soisno[s(j)];
+        }
+        let shadow_before = water_shadow;
+        // 不挥发溶质直接走原来的逐层截断。
+        for clamp in [nonvolatile, true] {
+            if clamp {
+                for j in 1..=nl {
+                    p.wliq_soisno[s(j)] = trc_before[soil_slot(j)];
+                }
+                water_shadow = shadow_before;
+            }
+            let mut through = [0.0; SOIL_LAYERS];
+            for j in 1..=nl {
+                through[soil_slot(j)] = trc_before[soil_slot(j)].abs();
+            }
+            for j in 1..nl {
+                let (k, kn) = (soil_slot(j), soil_slot(j + 1));
+                let q = input.qlayer[j as usize];
+                if q > TRC_TINY {
+                    let mut flux = dt * (q * layer_transport_ratio[k]);
+                    if clamp {
+                        flux = flux.min(p.wliq_soisno[s(j)].max(0.0));
+                    }
+                    through[k] += flux.abs();
+                    through[kn] += flux.abs();
+                    p.wliq_soisno[s(j)] -= flux;
+                    p.wliq_soisno[s(j + 1)] += flux;
+                    water_shadow[k] = (-dt).mul_add(q, water_shadow[k]);
+                    water_shadow[kn] = dt.mul_add(q, water_shadow[kn]);
+                } else if q < -TRC_TINY {
+                    let mut flux = dt * (q.abs() * layer_transport_ratio[kn]);
+                    if clamp {
+                        flux = flux.min(p.wliq_soisno[s(j + 1)].max(0.0));
+                    }
+                    through[k] += flux.abs();
+                    through[kn] += flux.abs();
+                    p.wliq_soisno[s(j + 1)] -= flux;
+                    p.wliq_soisno[s(j)] += flux;
+                    water_shadow[kn] = dt.mul_add(q, water_shadow[kn]);
+                    water_shadow[k] = (-dt).mul_add(q, water_shadow[k]);
+                }
+            }
+            if clamp {
+                break;
+            }
+            if (1..=nl).all(|j| {
+                let t = p.wliq_soisno[s(j)];
+                t >= -1.0e-12 * through[soil_slot(j)] || t >= trc_before[soil_slot(j)]
+            }) {
+                // 不截断那一遍留下的舍入负值归零，记为显式数值源，不让负存量留下来。
+                for j in 1..=nl {
+                    if p.wliq_soisno[s(j)] < 0.0 && trc_before[soil_slot(j)] >= 0.0 {
+                        state.step[itrc].numerical_residual_step -= p.wliq_soisno[s(j)];
+                        p.wliq_soisno[s(j)] = 0.0;
+                    }
+                }
+                break;
+            }
+        }
+        // 第 1 层收到下层上来的水之后，付清推迟的渗出示踪物；仍不够的部分记为数值源。
+        if upflow_deferred > 0.0 {
+            let flux = upflow_deferred.min(p.wliq_soisno[s(1)].max(0.0));
+            p.wliq_soisno[s(1)] -= flux;
+            if upflow_deferred - flux > 0.0 {
+                state.step[itrc].numerical_residual_step += upflow_deferred - flux;
             }
         }
 

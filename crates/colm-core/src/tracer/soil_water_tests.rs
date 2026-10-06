@@ -765,3 +765,56 @@ fn exfiltration_beyond_soil_evaporation_is_not_booked_as_evaporation() {
         "wliq1",
     );
 }
+
+/// upstream-bugs #79：一步之内水从第 3 层经几乎干的第 2 层、再经第 1 层渗出地表，渗出量超过
+/// 第 1 层原有的水。不分馏时示踪物必须随水一起穿过，各池与通量保持同一比值，不留数值源。
+#[test]
+fn exfiltration_through_several_layers_keeps_uniform_ratio() {
+    let set = TracerSet {
+        tracers: vec![descriptor("HDO", TracerFamily::Isotope)],
+    };
+    let s = soisno_slot;
+    let mut scen = Scenario::bare_soil();
+    scen.pg_rain = 0.0;
+    scen.irrig = 0.0;
+    scen.rsur = 0.0;
+    scen.qsdew = 0.0;
+    scen.qseva = 1.0e-6;
+    scen.etroot_actual[0] = 0.0;
+    scen.etroot_actual[1] = 0.0;
+    scen.wliq_bef[s(1)] = 1.0;
+    scen.wliq_bef[s(2)] = 1.0e-5;
+    scen.qlayer[1] = -4.0 / DT;
+    scen.qlayer[2] = -4.0 / DT;
+    scen.qinfl = -3.5 / DT;
+    scen.wdsrf = scen.wdsrf_bef - (scen.qseva + scen.qinfl) * DT;
+    scen.wliq = scen.shadow(4.0e-6);
+    scen.wliq[s(1)] += scen.qinfl * DT;
+    scen.wliq[s(3)] -= 0.5;
+    assert!(-scen.qinfl * DT > scen.wliq_bef[s(1)]);
+    let ratios = [R_ISO];
+    let mut state = scen.state(&set, &ratios);
+    tracer_soil_water(
+        &set,
+        &mut state,
+        TracerPhysics::default(),
+        &no_diffusion(),
+        &scen.input(&ratios),
+    )
+    .unwrap();
+    let p = &state.pools[0];
+    let close = |trc: f64, water: f64, what: &str| {
+        assert!(
+            (trc - R_ISO * water).abs() <= 1.0e-12 * R_ISO * water.abs().max(1.0),
+            "{what}: ratio {} != {R_ISO}",
+            trc / water
+        );
+    };
+    for j in 1..=NL {
+        close(p.wliq_soisno[s(j)], scen.wliq[s(j)], &format!("wliq{j}"));
+    }
+    close(p.wdsrf, scen.wdsrf, "wdsrf");
+    let acc = &state.acc[0];
+    close(acc.evap, acc.water_evap_gross, "evap");
+    assert!(state.step[0].numerical_residual_step.abs() <= 1.0e-15);
+}

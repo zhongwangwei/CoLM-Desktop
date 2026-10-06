@@ -217,6 +217,12 @@ CONTAINS
          real(r8) :: water_resid, water_shadow_ratio
       real(r8) :: trc_soil_upflow         ! tracer from true soil-to-surface upflow
       real(r8) :: trc_soil_evap           ! tracer removed by top-boundary evaporation deficit
+      real(r8) :: trc_upflow_deferred     ! upflow tracer layer 1 pays after the qlayer transfers
+      real(r8) :: trc_wliq_qlayer_bef(1:nl_soil), water_shadow_qlayer_bef(1:nl_soil)
+      real(r8) :: qlayer_through(1:nl_soil)
+      real(r8) :: evap_base_water         ! surface water excluding this step's exfiltration
+      integer  :: qlayer_pass
+      logical  :: qlayer_clamp
       real(r8) :: qgtop_est
       ! Snow top-layer effective flux selectors
       real(r8) :: eff_qseva_snow, eff_qsdew_snow, eff_qsubl_snow, eff_qfros_snow
@@ -928,6 +934,7 @@ CONTAINS
          ! ============================================================
 
          trc_soil_upflow = 0._r8
+         trc_upflow_deferred = 0._r8
          trc_soil_evap = 0._r8
          top_exfil_water = 0._r8
          top_soil_evap_water = 0._r8
@@ -1028,8 +1035,23 @@ CONTAINS
             ENDIF
             IF (top_exfil_water > 0._r8) THEN
                trc_soil_upflow = top_exfil_water * ratio_layer(1)
-               trc_soil_upflow = min(trc_soil_upflow, max(trc_wliq_soisno(itrc, 1, ipatch), 0._r8))
-               trc_wliq_soisno(itrc, 1, ipatch) = trc_wliq_soisno(itrc, 1, ipatch) - trc_soil_upflow
+               ! FIX upstream-bugs #79: the host refills layer 1 from below within
+               ! the same Richards solve, so exfiltration can exceed what layer 1
+               ! holds before the qlayer transfers. Clamping here left the
+               ! missing upflow tracer in the soil. Send the full upflow to the
+               ! surface and let layer 1 pay the shortfall after section 2.
+               ! Nonvolatile solutes keep the original clamp: they carry real
+               ! gradients, and an unpaid deferral would create solute mass.
+               IF (tracer_is_nonvolatile_solute(itrc)) THEN
+                  trc_soil_upflow = min(trc_soil_upflow, max(trc_wliq_soisno(itrc, 1, ipatch), 0._r8))
+                  trc_wliq_soisno(itrc, 1, ipatch) = trc_wliq_soisno(itrc, 1, ipatch) - trc_soil_upflow
+               ELSEIF (trc_soil_upflow > max(trc_wliq_soisno(itrc, 1, ipatch), 0._r8)) THEN
+                  trc_upflow_deferred = trc_soil_upflow - max(trc_wliq_soisno(itrc, 1, ipatch), 0._r8)
+                  trc_wliq_soisno(itrc, 1, ipatch) = trc_wliq_soisno(itrc, 1, ipatch) &
+                     - max(trc_wliq_soisno(itrc, 1, ipatch), 0._r8)
+               ELSE
+                  trc_wliq_soisno(itrc, 1, ipatch) = trc_wliq_soisno(itrc, 1, ipatch) - trc_soil_upflow
+               ENDIF
                water_shadow(1) = water_shadow(1) - top_exfil_water
             ENDIF
          ENDIF
@@ -1116,9 +1138,16 @@ CONTAINS
                CALL tracer_book_evap_loss(itrc, ipatch, trc_soil_evap, imperv_subl_loss, &
                   TRC_EVAP_KIND_SUBL)
          ENDIF
+         ! FIX upstream-bugs #79: exfiltration joins the pool only after this
+         ! evaporation (see below), but surface_base_water is built from the
+         ! final wdsrf/rsur and already contains it. Leave it out of the
+         ! evaporating pool too, or the evaporated tracer is diluted.
+         evap_base_water = surface_base_water
+         IF (flood_water <= 0._r8 .and. top_exfil_water > 0._r8) &
+            evap_base_water = max(surface_base_water - top_exfil_water, 0._r8)
          IF (gwat_evap > trc_tiny .and. trc_pool_total > trc_tiny) THEN
             ! Reconstruct pre-evap water pool
-            water_pool_total = surface_base_water + gwat_evap
+            water_pool_total = evap_base_water + gwat_evap
                trc_gwat_evap = atmospheric_loss_tracer(trc_pool_total, water_pool_total, &
                   gwat_evap, layer_temp(1), .false.)
                trc_pool_total = trc_pool_total - trc_gwat_evap
@@ -1126,7 +1155,7 @@ CONTAINS
                   TRC_EVAP_KIND_SOILEVAP)
          ENDIF
          IF (imperv_wdsrf_loss > trc_tiny .and. trc_pool_total > trc_tiny) THEN
-            water_pool_total = surface_base_water + imperv_wdsrf_loss
+            water_pool_total = evap_base_water + imperv_wdsrf_loss
                trc_gwat_evap = atmospheric_loss_tracer(trc_pool_total, water_pool_total, &
                   imperv_wdsrf_loss, layer_temp(1), .false.)
                trc_pool_total = trc_pool_total - trc_gwat_evap
@@ -1320,12 +1349,56 @@ CONTAINS
          DO j = 1, nl_soil
             layer_transport_ratio(j) = current_liq_ratio(j)
          ENDDO
+         ! FIX upstream-bugs #79: the faces are applied top-down, but a layer
+         ! that donates upward is refilled from below in the same solve.
+         ! Clamping each flux to the donor's current stock left tracer behind
+         ! whenever water moved through several layers in one step. First try
+         ! the faces unclamped with the snapshot ratios (identical arithmetic
+         ! whenever no clamp binds); fall back to the clamped sweep only if a
+         ! layer would end negative by more than rounding of what passed it.
+         ! A layer that passes on more water than it holds at the snapshot is
+         ! refilled by its supplier within the step; its stock alone cannot
+         ! give the outgoing ratio (with a near-empty stock it is just noise).
+         ! Mix stock and inflow instead, following the flow direction. The old
+         ! clamped sweep always truncated such a flux, so no other step changes.
+         IF (.not. tracer_is_nonvolatile_solute(itrc)) THEN
+            DO j = nl_soil - 1, 2, -1
+               IF (qlayer(j) < -trc_tiny .and. qlayer(j-1) < -trc_tiny) THEN
+                  IF (abs(qlayer(j-1)) * deltim > water_shadow(j)) THEN
+                     layer_transport_ratio(j) = (max(trc_wliq_soisno(itrc, j, ipatch), 0._r8) &
+                        + abs(qlayer(j)) * deltim * layer_transport_ratio(j+1)) &
+                        / (max(water_shadow(j), 0._r8) + abs(qlayer(j)) * deltim)
+                  ENDIF
+               ENDIF
+            ENDDO
+            DO j = 2, nl_soil - 1
+               IF (qlayer(j-1) > trc_tiny .and. qlayer(j) > trc_tiny) THEN
+                  IF (qlayer(j) * deltim > water_shadow(j)) THEN
+                     layer_transport_ratio(j) = (max(trc_wliq_soisno(itrc, j, ipatch), 0._r8) &
+                        + qlayer(j-1) * deltim * layer_transport_ratio(j-1)) &
+                        / (max(water_shadow(j), 0._r8) + qlayer(j-1) * deltim)
+                  ENDIF
+               ENDIF
+            ENDDO
+         ENDIF
+         trc_wliq_qlayer_bef(1:nl_soil) = trc_wliq_soisno(itrc, 1:nl_soil, ipatch)
+         water_shadow_qlayer_bef(1:nl_soil) = water_shadow(1:nl_soil)
+         ! Nonvolatile solutes go straight to the original clamped sweep.
+         DO qlayer_pass = merge(2, 1, tracer_is_nonvolatile_solute(itrc)), 2
+            qlayer_clamp = qlayer_pass == 2
+            IF (qlayer_clamp) THEN
+               trc_wliq_soisno(itrc, 1:nl_soil, ipatch) = trc_wliq_qlayer_bef(1:nl_soil)
+               water_shadow(1:nl_soil) = water_shadow_qlayer_bef(1:nl_soil)
+            ENDIF
+            qlayer_through(1:nl_soil) = abs(trc_wliq_qlayer_bef(1:nl_soil))
          DO j = 1, nl_soil - 1
             IF (qlayer(j) > trc_tiny) THEN
                ! Downward: j → j+1
                ratio_src = layer_transport_ratio(j)
                trc_flux = qlayer(j) * ratio_src * deltim
-                  trc_flux = min(trc_flux, max(trc_wliq_soisno(itrc, j, ipatch), 0._r8))
+                  IF (qlayer_clamp) trc_flux = min(trc_flux, max(trc_wliq_soisno(itrc, j, ipatch), 0._r8))
+                  qlayer_through(j) = qlayer_through(j) + abs(trc_flux)
+                  qlayer_through(j+1) = qlayer_through(j+1) + abs(trc_flux)
                   trc_wliq_soisno(itrc, j,   ipatch) = trc_wliq_soisno(itrc, j,   ipatch) - trc_flux
                   trc_wliq_soisno(itrc, j+1, ipatch) = trc_wliq_soisno(itrc, j+1, ipatch) + trc_flux
                   water_shadow(j)   = water_shadow(j)   - qlayer(j) * deltim
@@ -1334,13 +1407,49 @@ CONTAINS
                   ! Upward: j+1 → j
                   ratio_src = layer_transport_ratio(j+1)
                   trc_flux = abs(qlayer(j)) * ratio_src * deltim
-                  trc_flux = min(trc_flux, max(trc_wliq_soisno(itrc, j+1, ipatch), 0._r8))
+                  IF (qlayer_clamp) trc_flux = min(trc_flux, max(trc_wliq_soisno(itrc, j+1, ipatch), 0._r8))
+                  qlayer_through(j) = qlayer_through(j) + abs(trc_flux)
+                  qlayer_through(j+1) = qlayer_through(j+1) + abs(trc_flux)
                   trc_wliq_soisno(itrc, j+1, ipatch) = trc_wliq_soisno(itrc, j+1, ipatch) - trc_flux
                   trc_wliq_soisno(itrc, j,   ipatch) = trc_wliq_soisno(itrc, j,   ipatch) + trc_flux
                   water_shadow(j+1) = water_shadow(j+1) + qlayer(j) * deltim
                   water_shadow(j)   = water_shadow(j)   - qlayer(j) * deltim
                ENDIF
             ENDDO
+            IF (qlayer_clamp) EXIT
+            IF (all(trc_wliq_soisno(itrc, 1:nl_soil, ipatch) >= -1.e-12_r8 * qlayer_through(1:nl_soil) &
+                    .or. trc_wliq_soisno(itrc, 1:nl_soil, ipatch) >= trc_wliq_qlayer_bef(1:nl_soil))) THEN
+               ! Rounding dust left by the unclamped sweep: zero it as an
+               ! explicit numerical source so no negative stock survives.
+               DO j = 1, nl_soil
+                  IF (trc_wliq_soisno(itrc, j, ipatch) < 0._r8 .and. &
+                      trc_wliq_qlayer_bef(j) >= 0._r8) THEN
+                     IF (allocated(trc_numerical_residual_step)) &
+                        trc_numerical_residual_step(itrc, ipatch) = &
+                           trc_numerical_residual_step(itrc, ipatch) - trc_wliq_soisno(itrc, j, ipatch)
+                     trc_wliq_soisno(itrc, j, ipatch) = 0._r8
+                  ENDIF
+               ENDDO
+               EXIT
+            ENDIF
+         ENDDO
+
+         ! FIX upstream-bugs #79: layer 1 now holds the water that reached it
+         ! from below; it pays the deferred exfiltration tracer. Anything it
+         ! still cannot cover is an explicit numerical source.
+         IF (trc_upflow_deferred > 0._r8) THEN
+            trc_flux = min(trc_upflow_deferred, max(trc_wliq_soisno(itrc, 1, ipatch), 0._r8))
+            trc_wliq_soisno(itrc, 1, ipatch) = trc_wliq_soisno(itrc, 1, ipatch) - trc_flux
+            IF (trc_upflow_deferred - trc_flux > 0._r8) THEN
+               IF (allocated(trc_numerical_residual_step)) THEN
+                  trc_numerical_residual_step(itrc, ipatch) = &
+                     trc_numerical_residual_step(itrc, ipatch) + (trc_upflow_deferred - trc_flux)
+               ELSE
+                  trc_wliq_soisno(itrc, 1, ipatch) = trc_wliq_soisno(itrc, 1, ipatch) &
+                     - (trc_upflow_deferred - trc_flux)
+               ENDIF
+            ENDIF
+         ENDIF
 
          ! --- liquid-phase molecular diffusion between soil layers ---
          ! Internal, equal-and-opposite exchange: it moves no water and no
