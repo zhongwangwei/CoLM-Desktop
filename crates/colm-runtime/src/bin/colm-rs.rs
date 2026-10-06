@@ -141,6 +141,7 @@ fn run() -> Result<()> {
             eprintln!("  - {branch}");
         }
     }
+    check_monthly_lai(&document, true)?;
     if arguments.preflight {
         println!("colm-rs preflight: ok");
         return Ok(());
@@ -560,6 +561,7 @@ fn run_spatial(
     if lulcc {
         check_spatial_lulcc(&document, &config, arguments.land_cover)?;
     }
+    check_monthly_lai(&document, false)?;
     if arguments.preflight {
         println!("colm-rs preflight: ok");
         return Ok(());
@@ -2030,6 +2032,23 @@ fn write_catchment_restarts(
         &block_restarts,
         states,
         compression,
+    )
+}
+
+/// `DEF_LAI_MONTHLY = .false.`（8 天 MODIS LAI）：运行中的 8 天读取器没有移植——时钟会按 8 天到点，
+/// 但 `refresh_monthly_leaf_area_index` 只认月数据，LAI 整个运行停在初值且不报错。PFT/PC 上游会
+/// 强制改成 `.true.`，Rust 不替 namelist 改。单点城市上游整段跳过 `LAI_readin`；LAI 反馈由 BGC
+/// 叶碳给 LAI，不读文件——这两种不受影响。
+fn check_monthly_lai(document: &Document, single: bool) -> Result<()> {
+    if logical_field(document, "DEF_LAI_MONTHLY")?
+        || logical_field(document, "DEF_USE_LAIFEEDBACK")?
+        || (single && logical_field(document, "DEF_URBAN_RUN")?)
+    {
+        return Ok(());
+    }
+    bail!(
+        "DEF_LAI_MONTHLY = .false. (8-day LAI) is not ported to the Rust runtime: the LAI would stay at \
+         its initial value for the whole run; set DEF_LAI_MONTHLY = .true. or run with --engine fortran"
     )
 }
 

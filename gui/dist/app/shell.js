@@ -2,6 +2,7 @@
 
 import { state } from './state.js';
 import { $ } from './ui.js';
+import { language, translateZh } from './i18n.js';
 
 const ready = () => (state.selected ? null : '先在文件与目录建一个算例');
 const available = id => () => state.availableFlows.has(id);
@@ -206,9 +207,10 @@ export function renderSteps() {
        : state.pickedSite?.name)
     : (state.selected?.name ?? state.pickedSite?.name);
   $('estSite').textContent = n > 1 ? `${one ?? '—'} 等 ${n} 个` : (one ?? '—');
-  $('casename').value = state.batch.length > 1
+  // 输入框的 value 不在 i18n 扫描的文本节点里，要自己翻译。
+  $('casename').value = translateZh(state.batch.length > 1
     ? `${state.batch.length} 个算例`
-    : (state.selected ? state.selected.dir : '还没有算例');
+    : (state.selected ? state.selected.dir : '还没有算例'), language());
   // 步骤条与「下一步」按钮是**同一份状态**推出来的，必须一起刷新。
   // 分开刷新的结果是：左栏已经亮了，页底那个按钮还写着「先去扫描」。实测踩过。
   renderNextButtons();

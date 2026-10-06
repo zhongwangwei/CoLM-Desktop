@@ -8,7 +8,7 @@
 import { invoke } from './ipc.js';
 import { state } from './state.js';
 import { markResultsStale } from './results.js';
-import { editTarget } from './batch.js';
+import { editTarget, renderScope } from './batch.js';
 import { $, status } from './ui.js';
 
 let generation = 0;
@@ -21,7 +21,8 @@ export async function renderHistVars(box, stillCurrent = () => true) {
   const kernel = $('kernel').value;
   if (!kernel) { box.innerHTML = '<p class="muted">当前安装缺少与向导配置匹配的运行产物</p>'; return; }
   let vars;
-  try { vars = await invoke('hist_vars', { text: state.text, kernelDir: kernel }); }
+  // 开关存在算例目录下的输出变量文件里，要带上代表算例的目录。
+  try { vars = await invoke('hist_vars', { text: state.text, kernelDir: kernel, dir: state.selected?.dir ?? null }); }
   catch (e) { if (current()) box.textContent = String(e); return; }
   if (!current()) return;
 
@@ -39,6 +40,8 @@ export async function renderHistVars(box, stillCurrent = () => true) {
   sum.style.fontSize = '11px';
   const list = document.createElement('div');
   box.textContent = '';
+  // 勾选状态显示的是代表算例的，勾/取消会写进整批：先写明范围。
+  renderScope(box, editTarget());
   box.append(bar, sum, list);
 
   const summarize = () => {

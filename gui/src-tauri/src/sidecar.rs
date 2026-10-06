@@ -1237,6 +1237,13 @@ pub async fn new_case(
     let recorded_mode = mode.clone();
     let case_dir = out.clone();
     let case_existed = PathBuf::from(&case_dir).exists();
+    // 目录里已经有一个算例（例如名字不同、`list_cases` 里显示成别的名字）：`colm-cli new` 会在它上面
+    // 重写 case.nml，把别人的算例改掉。
+    if PathBuf::from(&case_dir).join("case.nml").is_file() {
+        return Err(format!(
+            "{case_dir} 里已经有一个算例，换一个算例名或根目录再建"
+        ));
+    }
     let mut args = vec![
         "new".to_string(),
         "--site".into(),

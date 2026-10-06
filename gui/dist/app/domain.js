@@ -65,7 +65,7 @@ const METHANE_MODES = [
   { id: 'hybrid', t: '混合（hybrid）', d: '动态地下水位 + 河网洪泛；上游参数文件的推荐方案', dynamic: true, river: true },
   { id: 'routing', t: '河网洪泛（routing）', d: '淹水比例取河湖汇流的洪泛面积', river: true },
   { id: 'dynamic_wtd', t: '动态地下水位（dynamic_wtd）', d: '按动态湿地的地下水位估算淹水比例', dynamic: true },
-  { id: 'satellite', t: '卫星湿地（GIEMS）', d: '读 GIEMS 月均淹水面积（运行时目录需要 GIEMS 文件）' },
+  { id: 'satellite', t: '卫星湿地（GIEMS）', d: '读 GIEMS 月均淹水面积；建例后要在「示踪剂」页选择 GIEMS 文件' },
   { id: 'wetwat', t: '湿地蓄水（wetwat）', d: '按湿地 patch 的蓄水判断淹水；任何内核都能跑' },
 ];
 
@@ -108,7 +108,20 @@ export function showDomainGate() {
   $('domaingate').hidden = false;
 }
 
+/** 前几页改了选择后，过程页里已勾选、现在却被挡住的项清掉；否则会照样写进算例，建例时才失败。 */
+function dropBlockedPhysics() {
+  for (let pass = 0; pass < PHYSICS.length; pass += 1) {
+    const blocked = PHYSICS.find(item => picked.physics[item.id] && physicsBlock(item));
+    if (!blocked) break;
+    picked.physics[blocked.id] = false;
+  }
+  if (!picked.physics.bgc) { picked.physics.crop = false; picked.physics.tracer = false; }
+  if (!picked.physics.tracer) picked.tracer = null;
+  if (picked.tracer !== 'methane') { picked.methaneMode = null; picked.methaneModeChosen = false; }
+}
+
 function render() {
+  dropBlockedPhysics();
   const list = pages();
   if (pageIdx >= list.length) pageIdx = list.length - 1;
   const page = list[pageIdx];
@@ -623,6 +636,11 @@ export function startSession(config) {
   state.resultObsOverrides.clear();
   state.resultMetrics = [];
   state.resultFailures = [];
+  // 评估变量按本次模型的可用变量重新勾选（甲烷会话要有 FCH4），不能沿用上一次会话的勾选。
+  state.evaluationVariables = new Set();
+  state.evaluationSelectionTouched = false;
+  state.resultMetricMissing = [];
+  state.summaryVar = null;
   state.text = '';
   state.prepArtifacts = {
     siteStem: null, siteFile: null, siteDir: null, siteReport: null,
@@ -648,6 +666,10 @@ export function startSession(config) {
 }
 
 function finish() {
+  dropBlockedPhysics();
+  if (picked.tracer === 'methane' && (!picked.methaneMode || methaneModeBlock({ id: picked.methaneMode }))) {
+    picked.methaneMode = defaultMethaneMode();
+  }
   const spatial = picked.domain === 'site' ? null : {
     domain: picked.grid === 'unstructured' || picked.grid === 'catchment'
       ? { kind: picked.domain }

@@ -415,7 +415,7 @@ const ZH_EN = [
   ['动态地下水位（dynamic_wtd）', 'Dynamic water table (dynamic_wtd)'],
   ['按动态湿地的地下水位估算淹水比例', 'Inundated fraction from the dynamic-wetland water table'],
   ['卫星湿地（GIEMS）', 'Satellite wetlands (GIEMS)'],
-  ['读 GIEMS 月均淹水面积（运行时目录需要 GIEMS 文件）', 'Reads GIEMS monthly inundation (needs the GIEMS file in the runtime directory)'],
+  ['读 GIEMS 月均淹水面积；建例后要在「示踪剂」页选择 GIEMS 文件', 'Reads GIEMS monthly inundation; choose the GIEMS file on the Tracer page after creating the case'],
   ['湿地蓄水（wetwat）', 'Wetland storage (wetwat)'],
   ['按湿地 patch 的蓄水判断淹水；任何内核都能跑', 'Inundation from wetland-patch storage; runs on any kernel'],
   ['甲烷淹水范围怎么算？', 'How is the methane inundated area computed?'],
@@ -426,6 +426,8 @@ const ZH_EN = [
   ['由甲烷淹没方案决定：dynamic_wtd / hybrid 时打开，其余关闭', 'Set by the methane inundation mode: on for dynamic_wtd / hybrid, off otherwise'],
   ['由 CH4 参数文件的淹没方案派生，case.nml 里的值不生效', 'Derived from the inundation mode in the CH4 parameter file; the case.nml value is ignored'],
   ['只有甲烷示踪使用', 'Only used by the methane tracer'],
+  ['这一批算例在这个字段上取值不同，显示的是第一个的值。先切到单个站点分别修改。', 'These cases hold different values for this field; the first one is shown. Switch to a single site to edit them separately.'],
+  ['除逐站点数据文件外，下面的改动会写进 ', 'Apart from per-site data files, changes below are written to '],
   ['BGC/甲烷算例需要运行时数据目录；请在“基本设定 / 文件与目录”选择 runtime。', 'BGC/methane cases require a runtime-data directory; select runtime under Basic settings / Files and directories.'],
   ['BGC/甲烷运行时目录缺少氮沉降数据：', 'The BGC/methane runtime directory is missing nitrogen-deposition data: '],
   ['BGC/甲烷运行时目录缺少硝化数据：', 'The BGC/methane runtime directory is missing nitrification data: '],
@@ -1876,6 +1878,9 @@ export function translateZh(text, target = 'en') {
   if (!out) return value;
   const source = out;
   out = out
+    // 运行进度（`run-format.js` 的 progressText）：先整句匹配，免得被下面的逐段规则拆坏。
+    .replace(/^预热 (\d+)\/(\d+) 轮 · 第 (\d+)\/(\d+) 步 · (.+)$/, 'Spin-up $1/$2 · step $3/$4 · $5')
+    .replace(/^第 (\d+)\/(\d+) 步 · (.+)$/, 'Step $1/$2 · $3')
     // 输出变量页：已勾选 N 个 · M 个在当前配置下写不出来 · K 个未知
     .replace(/^已勾选 (\d+) 个((?: · \d+ 个(?:在当前配置下写不出来|未知))*)$/, (_, n, rest) =>
       `${n} selected` + rest
@@ -1980,6 +1985,7 @@ export function translateZh(text, target = 'en') {
     .replace(/^第\s*(\d+)\/(\d+)\s*页\s*·\s*/, 'Page $1/$2 · ')
     .replace(/^第\s*(\d+)\s*页选了\s*/, 'Page $1 selected ')
     .replace(/^第\s*(\d+)\s*页没有开启河湖汇流$/, 'River-lake routing is off on page $1')
+    .replace(/^(\d+)\s*个算例正在运行，现在改设定会混进这次运行；请等它跑完或取消后再改$/, '$1 case(s) are running; changing settings now would leak into this run. Wait for it to finish or cancel it first')
     .replace(/^当前安装缺少\s*(.+)\s*内核$/, 'The current installation lacks the $1 kernel')
     .replace(/^已探测\s*(.+)：(\d+)\s*个变量，(\d+)\s*步$/, 'Inspected $1: $2 variables, $3 steps')
     .replace(/^第\s*(\d+)\s*槽$/, 'Slot $1')

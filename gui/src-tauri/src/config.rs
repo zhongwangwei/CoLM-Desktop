@@ -799,6 +799,8 @@ pub struct FieldState {
 struct VisibilityContext<'a> {
     doc: &'a colm_namelist::Document,
     have: &'a std::collections::BTreeSet<&'a str>,
+    /// 甲烷算例 CH4 参数文件里的淹没方案（读不到算例目录时为 `None`）。
+    methane_mode: Option<String>,
     single: bool,
     usgs: bool,
     lct: bool,
@@ -921,6 +923,7 @@ impl<'a> VisibilityContext<'a> {
         Self {
             doc,
             have,
+            methane_mode: case_dir.and_then(|dir| methane_mode(doc, dir)),
             single: have.contains("SinglePoint"),
             usgs: have.contains("LULC_USGS"),
             lct: logical(doc, "DEF_USE_LCT"),
@@ -1318,8 +1321,15 @@ fn validate_runtime_contract(
         }
     }
     let timestep = real(doc, "DEF_simulation_time%timestep");
-    if !timestep.is_finite() || timestep <= 0.0 || timestep > 3600.0 {
-        return Err("DEF_simulation_time%timestep 必须是大于 0 且不超过 3600 秒的有限数值".into());
+    // Rust 的 history 时间表要求整秒步长（`open_history_session`）。
+    if !timestep.is_finite() || timestep <= 0.0 || timestep > 3600.0 || timestep.fract() != 0.0 {
+        return Err("DEF_simulation_time%timestep 必须是 1 到 3600 之间的整秒数".into());
+    }
+    for name in ["DEF_HIST_lon_res", "DEF_HIST_lat_res"] {
+        let value = real(doc, name);
+        if !(value.is_finite() && value > 0.0) {
+            return Err(format!("{name} 必须是正的有限数值"));
+        }
     }
 
     let lct = logical(doc, "DEF_USE_LCT");
@@ -1376,9 +1386,6 @@ fn validate_runtime_contract(
         }
         if methane && (!bgc || !(pft || pc)) {
             return Err("甲烷 TRACER 需要 BGC 且使用 PFT 或 PC 次网格".into());
-        }
-        if logical(doc, "DEF_USE_BIFURCATION") && integer(doc, "DEF_TRACER_NUM") > 0 {
-            return Err("TRACER 不能与河道分汊 DEF_USE_BIFURCATION 同时开启".into());
         }
         let tracer_num = integer(doc, "DEF_TRACER_NUM");
         if !(0..=1000).contains(&tracer_num) {
@@ -1451,9 +1458,37 @@ fn validate_runtime_contract(
     if single && urban && bgc {
         return Err("纯城市 SinglePoint 当前不运行 BGC，请关闭 BGC 或改用自然/混合区域配置".into());
     }
+    // 漫滩回馈：与 `colm-rs` 入口同一组条件（编辑页只在打开时把关，之后改了前提也要拦）。
+    if logical(doc, "DEF_GridRiverLake_FloodFeedback") {
+        let vsf = logical(doc, "DEF_USE_VariablySaturatedFlow")
+            || !logical(doc, "DEF_USE_Campbell_SOIL_MODEL");
+        let ok = !single
+            && kernel.is_none_or(|facts| facts.grid_river)
+            && logical(doc, "DEF_USE_GridRiverLakeFlow")
+            && logical(doc, "DEF_GridRiverLake_FloodplainStorageFix")
+            && !logical(doc, "DEF_USE_LULCC")
+            && integer(doc, "DEF_Runoff_SCHEME") == 0
+            && lct
+            && !urban
+            && vsf;
+        if !ok {
+            return Err(
+                "漫滩回馈陆面需要：网格河湖汇流打开、FloodplainStorageFix、TOPMODEL 产流（0）、\
+                        LCT 次网格、变饱和流，且不开 LULCC 与城市"
+                    .into(),
+            );
+        }
+    }
     if logical(doc, "DEF_USE_LULCC") {
         if single {
             return Err("SinglePoint 当前不支持 LULCC".into());
+        }
+        // 2000 年以前 mksrfdata 只写 1985、1990、1995 年的土地覆盖，运行期却按起始年读（`colm-rs`）。
+        let start = integer(doc, "DEF_simulation_time%start_year");
+        if start < 2000 && !(start >= 1985 && start % 5 == 0) {
+            return Err(format!(
+                "LULCC 的起始年 {start} 没有对应的土地覆盖：2000 年以前只有 1985、1990、1995 年"
+            ));
         }
         if usgs || bgc {
             return Err("LULCC 当前不支持 USGS 或 BGC".into());
@@ -1686,7 +1721,7 @@ fn expert_tuning_runtime_state(
             return Some(hidden("需要先启用植物水力过程"));
         }
         if name == "DEF_LC_C3C4" {
-            return Some((FieldMode::Editable, None, vec!["0", "1"]));
+            return Some((FieldMode::Editable, None, vec!["-1", "0", "1"]));
         }
     }
     if c.single
@@ -1917,6 +1952,25 @@ fn field_runtime_state(
             Vec::new(),
         );
     }
+    // GIEMS 文件只有甲烷的卫星淹没方案读（`methane_giems`）。
+    if name == "DEF_file_GIEMS"
+        && c.methane_mode
+            .as_deref()
+            .is_some_and(|mode| !matches!(mode, "satellite" | "giems"))
+    {
+        return hidden("只有甲烷的卫星（GIEMS）淹没方案读取");
+    }
+    // 空间基流优化：Rust 只接了单块区域（`ParaOpt` 的分块向量文件还没接，`colm-rs` 在前处理之后才拒绝）。
+    if name == "DEF_Optimize_Baseflow"
+        && !c.single
+        && !c.have.contains("CATCHMENT")
+        && spatial_blocks(c.doc) > 1
+    {
+        return rust_unported(
+            logical(c.doc, name),
+            "模拟范围跨了多个分块，Rust 引擎的基流优化只支持单块区域，仅 Fortran 引擎生效",
+        );
+    }
     // `DEF_SUBGRID_SCHEME` 读进来以后上游再没有任何地方用它；次网格由 DEF_USE_LCT/PFT/PC 决定。
     if name == "DEF_SUBGRID_SCHEME" {
         return hidden("CoLM 读入后不使用此字段；次网格由 LCT/PFT/PC 开关决定");
@@ -2027,6 +2081,27 @@ fn field_runtime_state(
     if name == "DEF_PC_CROP_SPLIT" && (!c.pc || (c.single && !c.biological_land())) {
         return hidden("仅 PC 次网格使用");
     }
+    // Rust 只有月尺度 LAI 读取器：`.false.`（8 天 MODIS LAI）时 `colm-rs` 入口拒绝（运行中没有 8 天
+    // 读取器，LAI 会停在初值）。缺省 `.true.` 时隐藏；被设成 `.false.` 时显示，只允许改回 `.true.`。
+    // 单点城市上游整段不读 LAI，`colm-rs` 也放行，那里保持原样。
+    if name == "DEF_LAI_MONTHLY" && !c.lai_feedback && !(c.single && c.urban) {
+        return forced_true(c, name, "Rust 引擎只读月尺度 LAI，8 天 LAI 尚未移植");
+    }
+    // 单点 CBL：上游从 `DEF_forcing%CBL_fprefix` 的文件按自己的时间偏移读第 9 个变量，Rust 的站点
+    // 读取器没有这条路径，`colm-rs` 入口拒绝。
+    if name == "DEF_USE_CBL_HEIGHT" && c.single {
+        return rust_unported(
+            logical(c.doc, name),
+            "单点边界层高度（单独的 CBL 文件）Rust 引擎尚未移植，仅 Fortran 引擎生效",
+        );
+    }
+    // 单点自然站点关掉 USE_SITE_LAI 要从 landdata 的 LAI 文件读，Rust 还没接（`MonthlyLeafAreaIndex::read`）。
+    if name == "USE_SITE_LAI" && c.single && !c.urban {
+        return rust_unported(
+            !logical(c.doc, name),
+            "Rust 引擎只读站点文件里的 LAI，从 landdata 读取尚未移植，仅 Fortran 引擎生效",
+        );
+    }
     // 单点站点优先读取 site.nc 里的 LAI；这时原始 LAI 数据的年份与时间分辨率
     // 不参与计算。关掉 USE_SITE_LAI 后，才显示对应的回退数据设置。
     if c.single
@@ -2132,7 +2207,7 @@ fn field_runtime_state(
         return if c.have.contains("extend_interception") {
             (
                 FieldMode::Editable,
-                Some("当前内核已编入扩展截留模块，8 种方案均有实际计算路径"),
+                Some("当前内核已编入扩展截留模块，8 种方案在 Fortran 引擎里都有计算路径；Rust 引擎只支持 1 与 8"),
                 vec!["1", "2", "3", "4", "5", "6", "7", "8"],
             )
         } else {
@@ -2160,6 +2235,16 @@ fn field_runtime_state(
         return hidden("CoLM 会从运行时目录派生 VIC 参数文件");
     }
     // 只有单点能按站点地表类型判断；区域里总可能有水体与湿地 patch。
+    // 流域侧向流强制打开动态湖泊（`colm-rs` 的 catchment 分支），改了也不生效。
+    if name == "DEF_USE_Dynamic_Lake" && c.have.contains("CatchLateralFlow") {
+        return hidden("流域侧向流自动打开动态湖泊");
+    }
+    if name == "DEF_USE_Dynamic_Lake" && c.urban {
+        return rust_unported(
+            logical(c.doc, name),
+            "Rust 引擎尚未验证动态湖泊与城市模型同开，仅 Fortran 引擎生效",
+        );
+    }
     if name == "DEF_USE_Dynamic_Lake" && c.single && !c.waterbody() {
         return hidden("仅水体站点使用");
     }
@@ -3238,6 +3323,34 @@ fn process_entries(path: &std::path::Path, file_id: String) -> Result<ProcessPar
     })
 }
 
+/// 模拟范围覆盖几个 mksrfdata 分块（`MOD_Block`：经度从 -180°、纬度从 -90° 起，按
+/// `DEF_nx_blocks × DEF_ny_blocks` 等分）。只按范围算，不管块里有没有陆地，所以只会偏多。
+fn spatial_blocks(doc: &colm_namelist::Document) -> usize {
+    let nx = integer(doc, "DEF_nx_blocks").max(1) as f64;
+    let ny = integer(doc, "DEF_ny_blocks").max(1) as f64;
+    let span = |low: f64, high: f64, origin: f64, width: f64| -> usize {
+        if !(low.is_finite() && high.is_finite() && high > low) {
+            return usize::MAX;
+        }
+        let first = ((low - origin) / width).floor();
+        // 上边界正好落在块边上时不算进下一块。
+        let last = ((high - origin) / width).ceil() - 1.0;
+        (last - first + 1.0).max(1.0) as usize
+    };
+    span(
+        real(doc, "DEF_domain%edgew"),
+        real(doc, "DEF_domain%edgee"),
+        -180.0,
+        360.0 / nx,
+    )
+    .saturating_mul(span(
+        real(doc, "DEF_domain%edges"),
+        real(doc, "DEF_domain%edgen"),
+        -90.0,
+        180.0 / ny,
+    ))
+}
+
 /// CH4 参数文件里的淹没方案字段（不在 case.nml 里）。
 pub(crate) const METHANE_MODE: &str = "DEF_METHANE%inundation_mode";
 
@@ -3933,20 +4046,131 @@ pub fn set_fields_batch(
         return Err("没有要保存的字段".into());
     }
     let kernel = kernel_facts(kernel_dir.as_deref())?;
+    // 输出变量开关不在 case.nml：上游与 `colm-rs` 都只从 `DEF_HIST_vars_namelist` 指的文件里读
+    // `&nl_colm_history`。写到 case.nml 里既插不进去（没有这个组），插进去了也没人读。
+    let (history, fields): (Vec<_>, Vec<_>) = fields
+        .into_iter()
+        .partition(|field| field.path.starts_with("DEF_hist_vars%"));
     let all = read_all(&dirs)?;
     let mut done: Vec<(String, String)> = Vec::with_capacity(all.len());
+    let mut extra: Vec<(std::path::PathBuf, String)> = Vec::new();
     for (d, text) in all {
         let mut doc = colm_namelist::parse(&text).map_err(|e| format!("{d}: {e:#}"))?;
         for field in &fields {
             let value = typed(&field.path, &field.value)?;
             put(&mut doc, &field.path, value).map_err(|e| format!("{d}: {e}"))?;
         }
+        if !history.is_empty() {
+            extra.push(stage_history_file(
+                &mut doc,
+                std::path::Path::new(&d),
+                &history,
+            )?);
+        }
         validate_runtime_contract(&doc, std::path::Path::new(&d), kernel)
             .map_err(|e| format!("{d}: {e}"))?;
         validate_changed_fields(&doc, &fields).map_err(|e| format!("{d}: {e}"))?;
         done.push((d, doc.to_string()));
     }
-    write_all(&done)
+    if extra.is_empty() {
+        return write_all(&done);
+    }
+    // case.nml（指向输出变量文件）与输出变量文件同批原子写入。
+    let mut files = done
+        .iter()
+        .map(|(dir, text)| (std::path::Path::new(dir).join("case.nml"), text.clone()))
+        .collect::<Vec<_>>();
+    files.extend(extra);
+    let changed = write_files_atomic(&files)?;
+    Ok(BatchWrite {
+        written: done.len(),
+        changed,
+        text: done
+            .first()
+            .map(|(_, text)| text.clone())
+            .unwrap_or_default(),
+    })
+}
+
+/// 输出变量文件：`DEF_HIST_vars_namelist` 已经指向一个文件就用它，否则在算例目录建
+/// `history.nml` 并让 case.nml 指过去（相对路径按算例目录解析，两个引擎都在算例目录里跑）。
+pub(crate) const HISTORY_FILE: &str = "history.nml";
+
+fn history_file(
+    doc: &colm_namelist::Document,
+    case_dir: &std::path::Path,
+) -> Option<std::path::PathBuf> {
+    let name = character(doc, "DEF_HIST_vars_namelist");
+    let name = name.trim();
+    if name.is_empty() || name.eq_ignore_ascii_case("null") {
+        return None;
+    }
+    let path = std::path::Path::new(name);
+    Some(if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        case_dir.join(path)
+    })
+}
+
+fn stage_history_file(
+    doc: &mut colm_namelist::Document,
+    case_dir: &std::path::Path,
+    changes: &[FieldChange],
+) -> Result<(std::path::PathBuf, String), String> {
+    let path = match history_file(doc, case_dir) {
+        Some(path) => path,
+        None => {
+            put(
+                doc,
+                "DEF_HIST_vars_namelist",
+                colm_namelist::Value::Str(HISTORY_FILE.into()),
+            )
+            .map_err(|e| format!("{}: {e}", case_dir.display()))?;
+            case_dir.join(HISTORY_FILE)
+        }
+    };
+    // 原子写入要先有目标文件（它先备份再替换）。空组等于没有任何覆盖，与文件不存在时效果相同，
+    // 所以先落一个空组；后面校验失败也只留下这个无害的空文件。
+    if !path.is_file() {
+        std::fs::write(&path, "&nl_colm_history\n/\n")
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+    }
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let mut history =
+        colm_namelist::parse(&text).map_err(|e| format!("{}: {e:#}", path.display()))?;
+    for change in changes {
+        let value = typed(&change.path, &change.value)?;
+        history
+            .insert(&change.path, value, "nl_colm_history")
+            .map_err(|e| format!("{}: {e:#}", path.display()))?;
+    }
+    Ok((path, history.to_string()))
+}
+
+/// 输出变量文件里显式设了的开关（`DEF_hist_vars%X` → 值）。
+pub(crate) fn history_overrides(
+    doc: &colm_namelist::Document,
+    case_dir: &std::path::Path,
+) -> std::collections::BTreeMap<String, bool> {
+    let Some(path) = history_file(doc, case_dir) else {
+        return Default::default();
+    };
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Default::default();
+    };
+    let Ok(history) = colm_namelist::parse(&text) else {
+        return Default::default();
+    };
+    history
+        .paths()
+        .into_iter()
+        .filter(|path| path.starts_with("DEF_hist_vars%"))
+        .filter_map(|path| match history.get(&path) {
+            Some(colm_namelist::Value::Bool(on)) => Some((path, *on)),
+            _ => None,
+        })
+        .collect()
 }
 
 pub(crate) fn write_all(done: &[(String, String)]) -> Result<BatchWrite, String> {

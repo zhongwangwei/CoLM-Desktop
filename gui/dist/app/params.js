@@ -6,7 +6,7 @@ import { $, status, baseName } from './ui.js';
 import { renderHistVars } from './histvars.js';
 import { markResultsStale } from './results.js';
 import { renderTiming } from './timing.js';
-import { editTarget, currentCases } from './batch.js';
+import { editTarget, currentCases, renderScope } from './batch.js';
 import { wizardFieldNames } from './domain.js';
 import { language } from './i18n.js';
 import { go } from './shell.js';
@@ -404,20 +404,6 @@ function control(e, meta, fieldState) {
 }
 
 /** 批量编辑区先说清楚会动几个文件；过程参数改用独立的站点下拉。 */
-function renderScope(box, dirs = editTarget()) {
-  if (dirs.length < 2) return;
-  const bar = document.createElement('div');
-  bar.className = 'expert-note';
-  bar.style.marginBottom = '10px';
-  const names = dirs.map(baseName);
-  bar.append('除逐站点数据文件外，下面的改动会写进 ');
-  const count = document.createElement('b');
-  count.textContent = `${dirs.length} 个算例`;
-  bar.append(count, '：', names.slice(0, 6).join('、'));
-  if (names.length > 6) bar.append(` 等 ${names.length} 个`);
-  box.appendChild(bar);
-}
-
 let renderFieldsGeneration = 0;
 
 export async function renderFields(externalStillCurrent = () => true) {
@@ -906,6 +892,12 @@ function renderExpertTable(file, dirs) {
       + (entry.doc ? `\n${entry.doc}` : '');
     const v = document.createElement('td');
     const inp = processControl(entry);
+    if (entry.mixed) {
+      k.textContent += ' ⚠';
+      k.className = 'warn';
+      k.title += '\n\n这一批算例在这个字段上取值不同，显示的是第一个的值。先切到单个站点分别修改。';
+      inp.disabled = true;
+    }
     inp.title = defaultText == null
       ? '' : `${language() === 'en' ? 'Code default' : '代码默认值'}：${defaultText}`;
     if (entry.unset) {
@@ -995,6 +987,11 @@ function commonProcessFiles(lists) {
       const peer = list.find(other => other.file === file.file);
       return peer?.entries.some(other => other.path === entry.path);
     })).map(entry => {
+      const peers = tail.map(list => list.find(other => other.file === file.file)
+        ?.entries.find(other => other.path === entry.path));
+      // 各算例文件里的值不同：显示的只是第一个的值，改它会把整批抹平（与 case.nml 的 mixed 同一规矩）。
+      const mixed = peers.some(peer => peer && peer.value !== entry.value);
+      if (mixed) entry = { ...entry, mixed: true };
       // 后端按每个算例给出的可选取值：批量编辑时只留所有算例都能跑的。
       if (!entry.options?.length) return entry;
       const options = tail.reduce((kept, list) => {
@@ -1762,6 +1759,7 @@ function table(
                 dirs, file: chosen, kernelDir: $('kernel').value,
               });
               if (syncText) state.text = r.text;
+              await markChanged(r, dirs);
               status('已校验并更换臭氧数据文件');
               await renderFields();
             } catch (err) { status(err); }

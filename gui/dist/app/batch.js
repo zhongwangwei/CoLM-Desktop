@@ -9,7 +9,7 @@
 //! —— 那种故障比编译错误难查得多，前面拆模块时就为此单独立过 `state.js`。
 
 import { state } from './state.js';
-import { $ } from './ui.js';
+import { $, baseName } from './ui.js';
 
 /** root 中可以有很多历史算例；主界面只展示本次向导创建的这一批。 */
 export function currentCases() {
@@ -18,7 +18,8 @@ export function currentCases() {
 
 /** 不覆盖 root 里同名的旧算例；给新算例找一个稳定、可读的新名字。 */
 export function freshCaseName(base, cases = state.cases) {
-  const names = new Set(cases.map(c => c.name));
+  // 名字与目录都要避开：算例目录名不一定等于 case.nml 里的算例名。
+  const names = new Set(cases.flatMap(c => [c.name, String(c.dir ?? '').split(/[\\/]/).pop()]));
   if (!names.has(base)) return base;
   let n = 2;
   while (names.has(`${base}-${n}`)) n += 1;
@@ -60,4 +61,20 @@ export function updateCaseBatchButtons() {
     const run = $(id);
     if (run) run.disabled = !target.length || state.runningCases.size > 0;
   }
+}
+
+/** 批量编辑时在卡片顶上写明这次改动会落到哪些算例；单个算例不写。
+ *  预热、输出变量这些卡片只显示代表算例的值，不写明范围就会在事后才发现整批都被改了。 */
+export function renderScope(box, dirs = editTarget()) {
+  if (dirs.length < 2) return;
+  const bar = document.createElement('div');
+  bar.className = 'expert-note';
+  bar.style.marginBottom = '10px';
+  const names = dirs.map(baseName);
+  bar.append('除逐站点数据文件外，下面的改动会写进 ');
+  const count = document.createElement('b');
+  count.textContent = `${dirs.length} 个算例`;
+  bar.append(count, '：', names.slice(0, 6).join('、'));
+  if (names.length > 6) bar.append(` 等 ${names.length} 个`);
+  box.appendChild(bar);
 }

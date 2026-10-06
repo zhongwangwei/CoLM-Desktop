@@ -406,11 +406,6 @@ fn every_model_fatal_runtime_combination_is_rejected_before_write() {
             "van Genuchten",
         ),
         (
-            "tracer-bifurcation",
-            "&nl_colm\n DEF_USE_LCT=.false.\n DEF_USE_PFT=.true.\n DEF_USE_BGC=.true.\n DEF_USE_TRACER=.true.\n DEF_TRACER_NUM=1\n DEF_USE_BIFURCATION=.true.\n/\n",
-            "河道分汊",
-        ),
-        (
             "tracer-negative",
             "&nl_colm\n DEF_USE_TRACER=.true.\n DEF_TRACER_NUM=1\n DEF_TRACER_BALANCE_ABORT_NBAD=-1\n/\n",
             "非负整数",
@@ -453,12 +448,12 @@ fn every_model_fatal_runtime_combination_is_rejected_before_write() {
         (
             "timestep-zero",
             "&nl_colm\n DEF_simulation_time%timestep=0.0\n/\n",
-            "不超过 3600",
+            "1 到 3600 之间的整秒数",
         ),
         (
             "timestep-too-long",
             "&nl_colm\n DEF_simulation_time%timestep=7200.0\n/\n",
-            "不超过 3600",
+            "1 到 3600 之间的整秒数",
         ),
         (
             "lulcc-site",
@@ -1468,12 +1463,13 @@ fn natural_lct_singlepoint_hides_unreachable_and_overwritten_fields() {
         "DEF_HIST_CompressLevel",
         "DEF_USE_SrfdataDiag",
         "DEF_USE_ClimForcing_for_Spinup",
+        // Rust 不读 landdata 的单点 LAI：保持缺省（读站点文件）时隐藏。
+        "USE_SITE_LAI",
     ] {
         assert_eq!(mode(&states, name), &FieldMode::Hidden, "{name}");
     }
     for name in [
         "USE_SITE_htop",
-        "USE_SITE_LAI",
         "DEF_USE_SoilInit",
         "DEF_USE_SnowInit",
         "DEF_USE_WaterTableInit",
@@ -1672,10 +1668,12 @@ fn singlepoint_surface_fields_follow_the_actual_lai_and_albedo_sources() {
          DEF_SOIL_REFL_SCHEME=1\n/\n",
         &["SinglePoint", "LULC_IGBP"],
     );
-    for name in ["DEF_LC_YEAR", "DEF_LAI_MONTHLY", "DEF_LAI_CHANGE_YEARLY"] {
+    for name in ["DEF_LC_YEAR", "DEF_LAI_CHANGE_YEARLY"] {
         assert_eq!(mode(&static_fallback, name), &FieldMode::Editable, "{name}");
     }
     for name in [
+        // Rust 只读月尺度 LAI：缺省 `.true.` 时不给改。
+        "DEF_LAI_MONTHLY",
         "DEF_LAI_START_YEAR",
         "DEF_LAI_END_YEAR",
         "USE_SITE_soilreflectance",
@@ -1915,7 +1913,7 @@ fn land_cover_expert_defaults_follow_classification_and_site_landtype() {
     assert_eq!(default(&igbp, "DEF_LC_KMAX_SUN"), 2.0e-8);
     assert_eq!(
         runtime_state(&igbp, "DEF_LC_C3C4").allowed_values,
-        ["0", "1"]
+        ["-1", "0", "1"]
     );
 
     let usgs = runtime_states(
@@ -3144,7 +3142,10 @@ fn rust_unported_history_switches_hide_until_changed() {
 
 #[test]
 fn baseflow_optimisation_is_not_tied_to_data_assimilation() {
-    let text = "&nl_colm\n DEF_USE_LCT = .true.\n/\n";
+    // 单块区域（多块区域 Rust 未移植，另有测试）。
+    let text =
+        "&nl_colm\n DEF_USE_LCT = .true.\n DEF_domain%edgew = 110.\n DEF_domain%edgee = 112.\n \
+                DEF_domain%edges = 23.\n DEF_domain%edgen = 25.\n/\n";
     assert!(!matches!(
         mode(
             &runtime_states(text, LATLON_KERNEL),
@@ -3336,4 +3337,150 @@ fn methane_inundation_mode_drives_dynamic_wetland_and_the_derived_scheme() {
     .unwrap();
     let err = super::validate_runtime_contract(&doc, case_dir, grid).unwrap_err();
     assert!(err.contains("DEF_USE_Dynamic_Wetland"), "{err}");
+}
+
+#[test]
+fn eight_day_lai_and_landdata_site_lai_are_flagged_for_the_rust_engine() {
+    let site: &[&str] = &["SinglePoint", "LULC_IGBP"];
+    let text = "&nl_colm\n DEF_USE_LCT = .true.\n SITE_landtype = 10\n/\n";
+    let states = runtime_states(text, site);
+    // 缺省读站点 LAI：USE_SITE_LAI 不给关（Rust 不读 landdata 的单点 LAI）。
+    assert!(matches!(mode(&states, "USE_SITE_LAI"), FieldMode::Hidden));
+    let text =
+        "&nl_colm\n DEF_USE_LCT = .true.\n SITE_landtype = 10\n DEF_LAI_MONTHLY = .false.\n/\n";
+    let state = runtime_state(&runtime_states(text, site), "DEF_LAI_MONTHLY").clone();
+    assert!(matches!(state.mode, FieldMode::Editable));
+    assert_eq!(state.allowed_values, vec![".true."]);
+    let state = runtime_state(&runtime_states(text, LATLON_KERNEL), "DEF_LAI_MONTHLY").clone();
+    assert_eq!(state.allowed_values, vec![".true."]);
+}
+
+#[test]
+fn dynamic_lake_follows_catchment_and_urban_limits() {
+    let text = "&nl_colm\n DEF_USE_LCT = .true.\n/\n";
+    assert!(matches!(
+        mode(
+            &runtime_states(text, CATCHMENT_KERNEL),
+            "DEF_USE_Dynamic_Lake"
+        ),
+        FieldMode::Hidden
+    ));
+    let urban = "&nl_colm\n DEF_USE_LCT = .true.\n DEF_URBAN_RUN = .true.\n/\n";
+    assert!(matches!(
+        mode(
+            &runtime_states(urban, LATLON_KERNEL),
+            "DEF_USE_Dynamic_Lake"
+        ),
+        FieldMode::Hidden
+    ));
+    assert!(!matches!(
+        mode(&runtime_states(text, LATLON_KERNEL), "DEF_USE_Dynamic_Lake"),
+        FieldMode::Hidden
+    ));
+}
+
+#[test]
+fn baseflow_optimisation_needs_a_single_block_domain_for_rust() {
+    let domain = |w: f64, e: f64, s: f64, n: f64| {
+        format!(
+            "&nl_colm\n DEF_USE_LCT = .true.\n DEF_domain%edgew = {w}\n DEF_domain%edgee = {e}\n \
+             DEF_domain%edges = {s}\n DEF_domain%edgen = {n}\n/\n"
+        )
+    };
+    let one = domain(110.0, 112.0, 23.0, 25.0);
+    assert_eq!(
+        super::spatial_blocks(&colm_namelist::parse(&one).unwrap()),
+        1
+    );
+    assert!(!matches!(
+        mode(
+            &runtime_states(&one, LATLON_KERNEL),
+            "DEF_Optimize_Baseflow"
+        ),
+        FieldMode::Hidden
+    ));
+    let many = domain(100.0, 120.0, 20.0, 30.0);
+    assert_eq!(
+        super::spatial_blocks(&colm_namelist::parse(&many).unwrap()),
+        8
+    );
+    assert!(matches!(
+        mode(
+            &runtime_states(&many, LATLON_KERNEL),
+            "DEF_Optimize_Baseflow"
+        ),
+        FieldMode::Hidden
+    ));
+}
+
+#[test]
+fn runtime_contract_mirrors_engine_entry_checks() {
+    let dir = std::env::temp_dir();
+    let grid = Some(super::KernelFacts {
+        single: false,
+        usgs: false,
+        crop: false,
+        catchment: false,
+        grid_river: true,
+    });
+    let check = |extra: &str| {
+        let doc =
+            colm_namelist::parse(&format!("&nl_colm\n DEF_USE_LCT = .true.\n{extra}/\n")).unwrap();
+        super::validate_runtime_contract(&doc, &dir, grid)
+    };
+    let err = check(" DEF_simulation_time%timestep = 1800.5\n").unwrap_err();
+    assert!(err.contains("整秒"), "{err}");
+    let err = check(" DEF_HIST_lon_res = 0.\n").unwrap_err();
+    assert!(err.contains("DEF_HIST_lon_res"), "{err}");
+    let err =
+        check(" DEF_GridRiverLake_FloodFeedback = .true.\n DEF_Runoff_SCHEME = 0\n").unwrap_err();
+    assert!(err.contains("漫滩回馈"), "{err}");
+    check(
+        " DEF_GridRiverLake_FloodFeedback = .true.\n DEF_Runoff_SCHEME = 0\n \
+         DEF_GridRiverLake_FloodplainStorageFix = .true.\n",
+    )
+    .unwrap();
+    let err =
+        check(" DEF_USE_LULCC = .true.\n DEF_simulation_time%start_year = 1997\n").unwrap_err();
+    assert!(err.contains("1997"), "{err}");
+    check(" DEF_USE_LULCC = .true.\n DEF_simulation_time%start_year = 1995\n").unwrap();
+}
+
+/// 输出变量开关写进 `DEF_HIST_vars_namelist` 指的文件（上游与 `colm-rs` 只从那里读），不写 case.nml。
+#[test]
+fn history_variable_toggles_go_to_the_history_namelist() {
+    let dir = batch("history-toggle", &[SAMPLE]).remove(0);
+    let case_dir = std::path::Path::new(&dir);
+    super::set_field_batch(
+        vec![dir.clone()],
+        "DEF_hist_vars%fsena".into(),
+        ".false.".into(),
+        None,
+    )
+    .unwrap();
+    let case = std::fs::read_to_string(case_dir.join("case.nml")).unwrap();
+    assert!(
+        case.contains("DEF_HIST_vars_namelist = 'history.nml'"),
+        "{case}"
+    );
+    assert!(!case.contains("DEF_hist_vars%"), "{case}");
+    let history = std::fs::read_to_string(case_dir.join(super::HISTORY_FILE)).unwrap();
+    assert!(history.contains("&nl_colm_history"), "{history}");
+    assert!(
+        history.contains("DEF_hist_vars%fsena = .false."),
+        "{history}"
+    );
+    // 第二次改另一项：沿用同一个文件。
+    super::set_field_batch(
+        vec![dir.clone()],
+        "DEF_hist_vars%fevpa".into(),
+        ".false.".into(),
+        None,
+    )
+    .unwrap();
+    let doc =
+        colm_namelist::parse(&std::fs::read_to_string(case_dir.join("case.nml")).unwrap()).unwrap();
+    let overrides = super::history_overrides(&doc, case_dir);
+    assert_eq!(overrides.get("DEF_hist_vars%fsena"), Some(&false));
+    assert_eq!(overrides.get("DEF_hist_vars%fevpa"), Some(&false));
 }

@@ -29,15 +29,28 @@ pub struct HistVar {
 }
 
 #[tauri::command]
-pub fn hist_vars(text: String, kernel_dir: String) -> Result<Vec<HistVar>, String> {
+pub fn hist_vars(
+    text: String,
+    kernel_dir: String,
+    dir: Option<String>,
+) -> Result<Vec<HistVar>, String> {
     let k = colm_kernel::Kernel::open(std::path::Path::new(&kernel_dir))
         .map_err(|e| format!("{e:#}"))?;
     let macros: std::collections::BTreeSet<&str> =
         k.manifest.macros.iter().map(String::as_str).collect();
     let doc = colm_namelist::parse(&text).map_err(|e| format!("{e:#}"))?;
 
+    // 输出变量开关在 `DEF_HIST_vars_namelist` 指的文件里（`config::set_fields_batch` 写在那里）。
+    let overrides = dir
+        .map(|dir| crate::config::history_overrides(&doc, std::path::Path::new(&dir)))
+        .unwrap_or_default();
     // 这份配置里某个 logical 的实际取值：文件里设了就用文件的，否则用默认值。
-    let truth = |path: &str| -> bool { truth_value(&doc, path).unwrap_or(false) };
+    let truth = |path: &str| -> bool {
+        overrides
+            .get(path)
+            .copied()
+            .unwrap_or_else(|| truth_value(&doc, path).unwrap_or(false))
+    };
     let gate_truth = |path: &str| -> Option<bool> { truth_value(&doc, path) };
 
     let mut out = Vec::new();

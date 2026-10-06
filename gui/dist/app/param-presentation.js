@@ -516,6 +516,7 @@ const OPTIONS = Object.freeze({
     INVALID: pair('配置冲突：Medlyn 与 WUE 同时开启', 'Invalid: Medlyn and WUE are both enabled'),
   },
   DEF_LC_C3C4: {
+    '-1': pair('按地类缺省（不覆盖）', 'Land-cover default (no override)'),
     0: pair('C4 光合途径', 'C4 photosynthesis'),
     1: pair('C3 光合途径', 'C3 photosynthesis'),
   },

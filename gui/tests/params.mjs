@@ -107,10 +107,10 @@ assert.match(params, /pick\.disabled = inp\.disabled/);
 assert.match(params, /collapseStomatal/);
 assert.match(params, /DEF_USE_MEDLYNST[\s\S]*DEF_USE_WUEST/);
 assert.match(params, /STABLE_IN_PLACE_FIELDS[\s\S]*DEF_precip_phase_discrimination_scheme/);
-const scope = params.slice(
-  params.indexOf('function renderScope'),
-  params.indexOf('export async function renderFields'),
-);
+// 范围提示挪到了 batch.js，预热与输出变量卡片也要用它。
+const batchSource = await import('node:fs').then(fs =>
+  fs.readFileSync(new URL('../dist/app/batch.js', import.meta.url), 'utf8'));
+const scope = batchSource.slice(batchSource.indexOf('export function renderScope'));
 assert.doesNotMatch(scope, /createElement\('button'\)|state\.batch/);
 assert.match(scope, /除逐站点数据文件外/);
 assert.doesNotMatch(scope, /innerHTML/, 'batch case names must be appended as text, not interpolated as HTML');

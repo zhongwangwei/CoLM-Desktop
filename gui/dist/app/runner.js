@@ -22,6 +22,8 @@ let fallbackRunSequence = 0;
 let mpiRanksCustomized = false;
 // 切到 Rust 引擎时输入框锁成 1；记下 Fortran 下的取值，切回来时还原。
 let fortranRanks = null;
+// 上一次同步时是不是 MPI 模式：只有真的离开 MPI 时才记下输入框的值（启动时那个 '1' 不是用户的选择）。
+let mpiActive = false;
 $('cpu-workers').max = String(cpuCapacity);
 $('cpu-workers').value = String(Math.min(cpuCapacity, Number($('cpu-workers').value) || 2));
 $('cpu-capacity').textContent = `检测到 ${cpuCapacity} 个逻辑 CPU；单个站点仍使用 1 核。`;
@@ -45,11 +47,18 @@ function syncParallelMode() {
   $('threads-setting').hidden = !(spatial && !mpi);
   $('threads-capacity').textContent = `最多 ${cpuCapacity} 个线程（本机逻辑 CPU 数）。`;
   // 离开 MPI 模式（换成 Rust 引擎或站点会话）都先记下 Fortran 的进程数，回来时还原。
-  if (!mpi && !$('mpi-ranks').disabled) fortranRanks = $('mpi-ranks').value;
+  // 进入时依次取：上次离开前的值 → 上次启动记住的值（`recent.js` 放在 data-restored）→ 空间缺省。
+  if (!mpi && mpiActive) fortranRanks = $('mpi-ranks').value;
   $('mpi-ranks').disabled = !mpi;
   if (!mpi) $('mpi-ranks').value = '1';
-  else if (fortranRanks !== null) { $('mpi-ranks').value = fortranRanks; fortranRanks = null; }
-  else if (!mpiRanksCustomized) $('mpi-ranks').value = String(spatialDefaultRanks);
+  else if (!mpiActive) {
+    const restored = $('mpi-ranks').dataset.restored;
+    if (fortranRanks !== null) $('mpi-ranks').value = fortranRanks;
+    else if (restored) $('mpi-ranks').value = restored;
+    else if (!mpiRanksCustomized) $('mpi-ranks').value = String(spatialDefaultRanks);
+    fortranRanks = null;
+  }
+  mpiActive = mpi;
   $('mpi-capacity').textContent = mpi
     ? `最多 ${cpuCapacity} 个进程；批量并行数会按每算例 rank 数自动限额。`
     : spatial ? 'Rust 引擎在一个进程内多线程运行；MPI 进程数只对 Fortran 内核生效。' : '站点算例固定使用 1 个进程。';
@@ -319,17 +328,36 @@ $('cancel-run').onclick = async () => {
 
 /** 下方四个按钮共用同一批目标。指定单段是明确的手工重建意图，始终强制
  *  执行该段；“运行全部”才由“强制全部重跑”决定是否忽略阶段指纹。 */
+// 从点「运行」到批次真正登记进 `runningCases` 之间要先建算例；这段时间按钮仍可点，
+// 连点会对同一批站点并发建例、再起第二个批次。
+let runStarting = false;
+
 async function runRequested(stage) {
+  if (runStarting) return;
+  runStarting = true;
+  for (const id of RUN_BUTTONS) { const b = $(id); if (b) b.disabled = true; }
+  try {
+    await startRun(stage);
+  } finally {
+    runStarting = false;
+    updateCaseBatchButtons();
+    syncCancelButton();
+  }
+}
+
+async function startRun(stage) {
   // 勾了站点却还没建算例的，先建 —— **建算例不再是一道要人按的关**。已经建过的不重建，
   // 也不动运行页上的勾选：重建会把用户刚取消勾选的算例重新塞回运行批次。
   const unbuilt = state.sites.filter(s => state.picked.has(s.site_file)
     && !state.createdCases.has(state.createdBySite.get(s.site_file)));
   if (unbuilt.length) {
+    // 运行页一个都没勾表示"全部运行"；这时把新建的算例加进勾选会把批次缩成只有它们。
+    const narrowed = state.pickedCases.size > 0;
     const made = await ensureCases(unbuilt);
     if (!made.length) { status('勾选的站点没能建出算例，未开始运行'); return; }
     for (const c of made) {
       if (!state.batch.includes(c.dir)) state.batch.push(c.dir);
-      state.pickedCases.add(c.dir);
+      if (narrowed) state.pickedCases.add(c.dir);
     }
   }
   const dirs = batchTarget().map(c => c.dir);
@@ -356,9 +384,6 @@ async function runRequested(stage) {
     // run://done 只在子进程真的起来之后才会发。起不来的话这里是唯一的收尾点。
     status(e);
     setRunning('fail', '批次启动失败');
-  } finally {
-    updateCaseBatchButtons();
-    syncCancelButton();
   }
 }
 

@@ -1614,6 +1614,16 @@ pub fn read_point_runtime_config(case_namelist: impl AsRef<Path>) -> Result<Poin
         dataset.eq_ignore_ascii_case("POINT"),
         "Rust PointRuntime requires DEF_forcing%dataset='POINT', got {dataset:?}"
     );
+    // 单点 CBL：上游的第 9 个变量一律从 `DEF_forcing%CBL_fprefix` 指的文件读（POINT 时当完整文件名，
+    // `MOD_UserSpecifiedForcing.F90:694-700`），并按 `CBL_tintalgo/CBL_dtime/CBL_offset` 单独定时间
+    // 上下界。Rust 的站点读取器只在主强迫文件里找 `blh`/`hpbl`，按主变量的权重插值——两样都没移植，
+    // 照跑会在第一步缺量停机或悄悄用错的插值，所以在入口拒绝。
+    ensure!(
+        !physics::logical(&case, "DEF_USE_CBL_HEIGHT")?,
+        "single-point DEF_USE_CBL_HEIGHT is not ported: upstream reads the boundary-layer height from \
+         DEF_forcing%CBL_fprefix with its own CBL_dtime/CBL_offset, which the Rust POINT reader does \
+         not; run this case with --engine fortran"
+    );
     let forcing_directory = required_string(&forcing, "DEF_dir_forcing")?;
     let forcing_name = required_string(&forcing, "DEF_forcing%fprefix(1)")?;
     // `MOD_UserSpecifiedForcing` concatenates these strings directly.

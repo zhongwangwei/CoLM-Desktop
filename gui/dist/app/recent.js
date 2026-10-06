@@ -37,6 +37,8 @@ export async function restoreRecent() {
     if (!el || !all[id]) continue;
     // 运行页在模块加载时就给这两个数填了缺省值；上次的设定要覆盖它，否则永远恢复不了。
     if (!el.value || OVERRIDE_DEFAULTS.has(id)) el.value = all[id];
+    // MPI 进程数在非 Fortran 模式下被锁成 1，记住的值要留到切回 Fortran 时再用（`runner.js`）。
+    if (id === 'mpi-ranks') el.dataset.restored = all[id];
   }
   // 变了就记。用 change 而不是 input：每敲一个字符写一次文件太浪费，
   // 而这份东西丢了也不要紧。

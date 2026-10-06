@@ -12,7 +12,7 @@
 import { invoke } from './ipc.js';
 import { state } from './state.js';
 import { $, status } from './ui.js';
-import { editTarget } from './batch.js';
+import { editTarget, renderScope } from './batch.js';
 import { markResultsStale } from './results.js';
 
 /** 画卡片。`box` 是 `#timing`。 */
@@ -42,6 +42,7 @@ export async function renderTiming(stillCurrent = () => true) {
       <button class="btn-ghost" id="tm-apply" type="button" style="margin-left:auto">应用</button>
     </div>
     <p class="muted mini" id="tm-note" style="margin-top:8px"></p>`;
+  renderScope(box, dirs);
   box.appendChild(card);
 
   note(t);

@@ -18,7 +18,7 @@ fn a_bgc_variable_is_unwritable_under_the_default_kernel() {
     if !have_kernel("default") {
         return;
     }
-    let v = hist_vars("&nl_colm\n/\n".into(), kernel("default")).expect("runs");
+    let v = hist_vars("&nl_colm\n/\n".into(), kernel("default"), None).expect("runs");
     let ar = v.iter().find(|x| x.name == "ar").expect("ar 在 schema 里");
     assert_eq!(ar.writable, Some(false));
     assert!(
@@ -44,6 +44,7 @@ fn the_same_variable_is_writable_under_the_bgc_kernel() {
     let v = hist_vars(
         "&nl_colm\n   DEF_USE_BGC = .true.\n/\n".into(),
         kernel("bgc"),
+        None,
     )
     .expect("runs");
     let ar = v.iter().find(|x| x.name == "ar").expect("ar");
@@ -61,11 +62,13 @@ fn a_runtime_switch_is_evaluated_against_this_case() {
     let with = hist_vars(
         "&nl_colm\n   DEF_USE_SNICAR = .true.\n/\n".into(),
         kernel("default"),
+        None,
     )
     .expect("runs");
     let without = hist_vars(
         "&nl_colm\n   DEF_USE_SNICAR = .false.\n/\n".into(),
         kernel("default"),
+        None,
     )
     .expect("runs");
     let pick = |v: &Vec<HistVar>| {
@@ -91,7 +94,7 @@ fn a_switch_the_gate_table_does_not_know_says_so() {
     if !have_kernel("default") {
         return;
     }
-    let v = hist_vars("&nl_colm\n/\n".into(), kernel("default")).expect("runs");
+    let v = hist_vars("&nl_colm\n/\n".into(), kernel("default"), None).expect("runs");
     let unknown: Vec<&HistVar> = v.iter().filter(|x| x.writable.is_none()).collect();
     assert!(!unknown.is_empty(), "一个未知都没有，判据大概失效了");
     assert!(
@@ -147,7 +150,7 @@ fn wetwat_is_writable_for_static_and_dynamic_wetland_cases() {
             "&nl_colm\n DEF_USE_Dynamic_Wetland = {}\n/\n",
             if enabled { ".true." } else { ".false." }
         );
-        let vars = hist_vars(text, kernel("default")).expect("hist vars");
+        let vars = hist_vars(text, kernel("default"), None).expect("hist vars");
         let wetwat = vars.iter().find(|v| v.name == "wetwat").expect("wetwat");
         assert_eq!(wetwat.writable, Some(true), "enabled={enabled}");
     }
@@ -161,6 +164,7 @@ fn tracer_configuration_lists_methane_history_variables() {
     let vars = hist_vars(
         "&nl_colm\n DEF_USE_TRACER = .true.\n/\n".into(),
         kernel("default"),
+        None,
     )
     .expect("hist vars");
     let methane = vars
@@ -178,7 +182,7 @@ fn default_configuration_still_matches_the_measured_history_catalog() {
     if !have_kernel("default") {
         return;
     }
-    let vars = hist_vars("&nl_colm\n/\n".into(), kernel("default")).expect("hist vars");
+    let vars = hist_vars("&nl_colm\n/\n".into(), kernel("default"), None).expect("hist vars");
     let ready = vars
         .iter()
         .filter(|var| var.on && var.writable == Some(true))

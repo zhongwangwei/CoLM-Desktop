@@ -249,6 +249,7 @@ export function assignCaseNames(sites) {
     // 第一个用原名（绝大多数站点只有一个，路径不该无端变长）；
     // 重名的那个带上能说明它是什么的后缀，而不是一个 -2。
     s.caseName = n === 1 ? s.name : (s.urban ? `${s.name}-urban` : `${s.name}-${n}`);
+    s.baseCaseName = s.caseName;
   }
   return sites;
 }
@@ -300,7 +301,9 @@ async function ensureCase(s) {
   const madeDir = state.createdBySite.get(s.site_file);
   const made = state.cases.find(c => c.dir === madeDir);
   if (made) return made.name;
-  const cname = freshCaseName(s.caseName ?? s.name);
+  // 从扫描时定的名字起算：`s.caseName` 建好后会改成实际用的名字，下一次会话再从它起算就会
+  // 一层层叠后缀（CN-Cng → CN-Cng-2 → CN-Cng-2-2）。
+  const cname = freshCaseName(s.baseCaseName ?? s.caseName ?? s.name);
   if (!s.met_file) { setStatus(`${s.name} 没有强迫场文件，建不了算例`); return null; }
   setStatus(`正在为 ${s.name} 建算例…`);
   try {

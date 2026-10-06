@@ -180,6 +180,18 @@ pub fn open_case(dir: String) -> Result<OpenedCase, String> {
     })
 }
 
+/// 自含的站点算例不需要 RawData/Runtime，`colm-cli new` 填的是算例里的占位目录
+/// （`rawdata_unused/`、`runtime_unused/`）。它们不能回填进表单：会被记住，之后别的算例
+/// 都指到这个算例的空目录里。
+fn real_input_dir(dir: String) -> String {
+    let trimmed = dir.trim_end_matches(['/', '\\']);
+    if trimmed.ends_with("rawdata_unused") || trimmed.ends_with("runtime_unused") {
+        String::new()
+    } else {
+        dir
+    }
+}
+
 /// 反推规则：网格看哪种网格字段写了；次网格看 `DEF_USE_PFT/PC`，LCT 再看上次内核（没跑过就看建例
 /// 时的记录 `mode`）是不是 USGS；作物看上次内核的 CROP 宏或建例写入的播种日字段（`DEF_USE_CROP`
 /// 只是宏的只读反映，建例时不写）；甲烷看示踪物名单；河湖汇流只对经纬度与非结构网格有意义（缺省开）。
@@ -308,8 +320,8 @@ pub(crate) fn case_profile(
         kernel_preset: kernel_field("preset="),
         inputs: CaseInputs {
             name: character(&doc, "DEF_CASE_NAME"),
-            rawdata: character(&doc, "DEF_dir_rawdata"),
-            runtime: character(&doc, "DEF_dir_runtime"),
+            rawdata: real_input_dir(character(&doc, "DEF_dir_rawdata")),
+            runtime: real_input_dir(character(&doc, "DEF_dir_runtime")),
             forcing_namelist: character(&doc, "DEF_forcing_namelist"),
             start: date("start"),
             end: date("end"),

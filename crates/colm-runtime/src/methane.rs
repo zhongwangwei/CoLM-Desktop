@@ -41,6 +41,20 @@ pub fn setup_from_document(document: &Document, grid_river: bool) -> Result<Opti
     let mut params = read_parameters(&path)?;
     let dynamic_wetland = crate::physics::logical(document, "DEF_USE_Dynamic_Wetland")?;
     let mode = params.configure_inundation(dynamic_wetland, grid_river)?;
+    // 卫星方案（GIEMS）要 `DEF_file_GIEMS`。上游在 `methane_giems` 初始化时才停机，这里提前到解析配置时，
+    // 空间算例的 `--preflight` 就能报出来，不必等前处理跑完。
+    if mode.scheme == 5 {
+        let giems = crate::physics::text(document, "DEF_file_GIEMS")?;
+        let giems = giems.trim();
+        ensure!(
+            !giems.is_empty() && !giems.eq_ignore_ascii_case("null"),
+            "the satellite (GIEMS) methane inundation mode requires DEF_file_GIEMS"
+        );
+        ensure!(
+            std::path::Path::new(giems).is_file(),
+            "GIEMS file not found: {giems}"
+        );
+    }
     Ok(Some(MethaneSetup {
         params,
         scheme: mode.scheme,
