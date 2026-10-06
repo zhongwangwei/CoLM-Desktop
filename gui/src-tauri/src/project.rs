@@ -87,6 +87,8 @@ pub struct CaseProfile {
     /// 建例记录里的范围类型与 Shapefile（`case.nml` 里没有）。
     pub domain_kind: Option<String>,
     pub shapefile: Option<String>,
+    /// 甲烷算例 CH4 参数文件里的淹没方案（`DEF_METHANE%inundation_mode`）。
+    pub methane_mode: Option<String>,
 }
 
 #[derive(Debug, Serialize, PartialEq)]
@@ -168,6 +170,9 @@ pub fn open_case(dir: String) -> Result<OpenedCase, String> {
     )?;
     profile.domain_kind = record.domain;
     profile.shapefile = record.shapefile;
+    profile.methane_mode = colm_namelist::parse(&text)
+        .ok()
+        .and_then(|doc| crate::config::methane_mode(&doc, &dir));
     Ok(OpenedCase {
         entry,
         root,
@@ -316,6 +321,7 @@ pub(crate) fn case_profile(
             .then(|| character(&doc, "DEF_CatchmentMesh_data")),
         domain_kind: None,
         shapefile: None,
+        methane_mode: None,
     })
 }
 

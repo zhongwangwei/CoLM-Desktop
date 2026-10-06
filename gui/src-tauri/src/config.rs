@@ -1275,6 +1275,7 @@ struct KernelFacts {
     usgs: bool,
     crop: bool,
     catchment: bool,
+    grid_river: bool,
 }
 
 fn kernel_facts(kernel_dir: Option<&str>) -> Result<Option<KernelFacts>, String> {
@@ -1289,6 +1290,7 @@ fn kernel_facts(kernel_dir: Option<&str>) -> Result<Option<KernelFacts>, String>
         usgs: has("LULC_USGS"),
         crop: has("CROP"),
         catchment: has("CATCHMENT"),
+        grid_river: has("GridRiverLakeFlow"),
     }))
 }
 
@@ -1424,6 +1426,26 @@ fn validate_runtime_contract(
                     "流域网格当前不支持{what}（{field}），请关闭后再运行"
                 ));
             }
+        }
+    }
+    // 甲烷淹没方案与动态湿地、河湖汇流必须一致（`configure_methane_inundation_mode` 不一致就停机）。
+    if let Some(mode) = methane_mode(doc, case_dir) {
+        let (_, dynamic, river) = methane_mode_facts(&mode).ok_or_else(|| {
+            format!(
+                "甲烷淹没方案 {mode} 不认识；可选 wetwat、satellite、routing、dynamic_wtd、hybrid"
+            )
+        })?;
+        if dynamic != logical(doc, "DEF_USE_Dynamic_Wetland") {
+            return Err(format!(
+                "甲烷淹没方案 {mode} 要求 DEF_USE_Dynamic_Wetland = {}",
+                if dynamic { ".true." } else { ".false." }
+            ));
+        }
+        let kernel_river = kernel.map_or(!single, |facts| facts.grid_river);
+        if river && !(kernel_river && logical(doc, "DEF_USE_GridRiverLakeFlow")) {
+            return Err(format!(
+                "甲烷淹没方案 {mode} 需要网格河湖汇流（经纬度或非结构网格内核，并打开河湖汇流）"
+            ));
         }
     }
     if single && urban && bgc {
@@ -2144,6 +2166,14 @@ fn field_runtime_state(
     if name == "DEF_USE_Dynamic_Wetland" && c.single && !c.wetland() {
         return hidden("仅湿地站点使用");
     }
+    // 甲烷算例里动态湿地由淹没方案决定（专家页改方案时一并改它），单独改会让两者打架。
+    if name == "DEF_USE_Dynamic_Wetland" && is_methane(c.doc) {
+        return disabled("由甲烷淹没方案决定：dynamic_wtd / hybrid 时打开，其余关闭");
+    }
+    // 只有甲烷用它，而且运行时按淹没方案覆盖（`configure_methane_inundation_mode`）。
+    if name == "DEF_wetland_finundation_scheme" && !is_methane(c.doc) {
+        return hidden("只有甲烷示踪使用");
+    }
 
     // BGC/CROP 子过程必须跟随真实运行时/编译期能力，不能依赖整个页面的粗粒度
     // 开关。独立的积雪、臭氧和植被物理选项仍可在 BGC 关闭时使用。
@@ -2309,10 +2339,35 @@ fn field_states_for_at(
 ) -> Result<Vec<FieldState>, String> {
     let doc = colm_namelist::parse(text).map_err(|e| format!("{e:#}"))?;
     let context = VisibilityContext::new_at(&doc, have, case_dir);
+    // `DEF_wetland_finundation_scheme` 在甲烷算例里按 CH4 参数文件的淹没方案派生，namelist 值不生效。
+    let finundation = case_dir
+        .and_then(|dir| methane_mode(&doc, dir))
+        .and_then(|mode| methane_mode_facts(&mode).map(|(scheme, ..)| (mode, scheme)));
     colm_schema::all()
         .iter()
         .map(|field| {
             let (mode, reason, allowed_values) = field_runtime_state(field, &context);
+            if let Some((methane, scheme)) = finundation
+                .as_ref()
+                .filter(|_| field.name == "DEF_wetland_finundation_scheme")
+            {
+                return Ok(FieldState {
+                    name: field.name.to_string(),
+                    mode: FieldMode::Disabled,
+                    reason: Some("由 CH4 参数文件的淹没方案派生，case.nml 里的值不生效"),
+                    allowed_values: Vec::new(),
+                    mixed: false,
+                    context_default: None,
+                    default_mixed: false,
+                    scope_label: Some(methane.clone()),
+                    built_in_default: Some(default_literal(field.default)),
+                    override_value: None,
+                    effective_value: Some(scheme.to_string()),
+                    provenance: "standard_ch4_parameter.nml".into(),
+                    override_mixed: false,
+                    effective_mixed: false,
+                });
+            }
             let context_default = if mode != FieldMode::Hidden
                 && context.single
                 && context.lct
@@ -2856,6 +2911,7 @@ pub fn set_pft_parameters_batch(
         usgs: have.contains("LULC_USGS"),
         crop: have.contains("CROP"),
         catchment: have.contains("CATCHMENT"),
+        grid_river: have.contains("GridRiverLakeFlow"),
     };
     let dirs = by_dir.keys().cloned().collect::<Vec<_>>();
     let texts = read_all(&dirs)?
@@ -3182,16 +3238,78 @@ fn process_entries(path: &std::path::Path, file_id: String) -> Result<ProcessPar
     })
 }
 
-/// 甲烷淹没方案在这个算例里能选哪些（`MethaneParameters::configure_inundation`）：动态湿地
-/// 打开时只有 `dynamic_wtd`/`hybrid`，关闭时只有 `wetwat`/`satellite`/`routing`；`routing` 与
-/// `hybrid` 还要内核编进网格河湖且河湖汇流打开。其它取值 `colm-rs` 在入口拒绝。
-fn methane_inundation_options(dynamic_wetland: bool, grid_river: bool) -> Vec<&'static str> {
-    match (dynamic_wetland, grid_river) {
-        (false, false) => vec!["wetwat", "satellite"],
-        (false, true) => vec!["wetwat", "satellite", "routing"],
-        (true, false) => vec!["dynamic_wtd"],
-        (true, true) => vec!["dynamic_wtd", "hybrid"],
+/// CH4 参数文件里的淹没方案字段（不在 case.nml 里）。
+pub(crate) const METHANE_MODE: &str = "DEF_METHANE%inundation_mode";
+
+/// 淹没方案 → （`DEF_wetland_finundation_scheme`，要不要动态湿地，要不要网格河湖）。
+/// 与 `configure_methane_inundation_mode` / `MethaneParameters::configure_inundation` 一一对应。
+fn methane_mode_facts(mode: &str) -> Option<(i64, bool, bool)> {
+    match mode
+        .trim()
+        .trim_matches(['\'', '"'])
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "wetwat" => Some((1, false, false)),
+        "satellite" | "giems" => Some((5, false, false)),
+        "routing" => Some((7, false, true)),
+        "dynamic_wtd" | "dynamic-wtd" => Some((6, true, false)),
+        "hybrid" | "dh_all_thr05" | "dyn_routing_hybrid" => Some((6, true, true)),
+        _ => None,
     }
+}
+
+/// 甲烷算例能选哪些淹没方案。动态湿地跟着方案走（选 `dynamic_wtd`/`hybrid` 时由 GUI 一并打开），
+/// 所以这里只看两件事：能不能开动态湿地（空间算例或湿地站点），以及有没有网格河湖
+/// （内核编进 GridRiverLakeFlow 且河湖汇流打开）。
+fn methane_inundation_options(dynamic_allowed: bool, grid_river: bool) -> Vec<&'static str> {
+    let mut out = vec!["wetwat", "satellite"];
+    if grid_river {
+        out.push("routing");
+    }
+    if dynamic_allowed {
+        out.push("dynamic_wtd");
+        if grid_river {
+            out.push("hybrid");
+        }
+    }
+    out
+}
+
+fn is_methane(doc: &colm_namelist::Document) -> bool {
+    logical(doc, "DEF_USE_TRACER")
+        && character(doc, "DEF_TRACER_NAMES")
+            .split(',')
+            .any(|name| matches!(name.trim().to_ascii_uppercase().as_str(), "CH4" | "METHANE"))
+}
+
+/// 甲烷算例的 CH4 参数文件里选的淹没方案；文件里没写时是代码缺省 `hybrid`。
+/// 不是甲烷算例或文件读不到时为 `None`。
+pub(crate) fn methane_mode(
+    doc: &colm_namelist::Document,
+    case_dir: &std::path::Path,
+) -> Option<String> {
+    if !is_methane(doc) {
+        return None;
+    }
+    let files = character(doc, "DEF_TRACER_PARAM_FILES");
+    let file = files.split(',').find_map(|item| {
+        let (name, file) = item.trim().rsplit_once(':')?;
+        matches!(name.trim().to_ascii_uppercase().as_str(), "CH4" | "METHANE")
+            .then(|| file.trim().trim_matches(['\'', '"']).to_string())
+    })?;
+    let path = std::path::Path::new(&file);
+    let path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        case_dir.join(path)
+    };
+    let text = std::fs::read_to_string(path).ok()?;
+    let parameters = colm_namelist::parse(&text).ok()?;
+    Some(match parameters.get(METHANE_MODE) {
+        Some(colm_namelist::Value::Str(mode)) => mode.trim().to_ascii_lowercase(),
+        _ => "hybrid".into(),
+    })
 }
 
 #[tauri::command]
@@ -3217,9 +3335,18 @@ pub fn process_parameter_files(
     let case_text =
         std::fs::read_to_string(&case_path).map_err(|e| format!("{}: {e}", case_path.display()))?;
     let case_doc = colm_namelist::parse(&case_text).map_err(|e| format!("{dir}: {e:#}"))?;
+    let single = case_doc.get("SITE_fsitedata").is_some();
+    // 单点只有湿地站点才有动态湿地（`DEF_USE_Dynamic_Wetland` 在其它站点隐藏）。
+    let wetland_site = matches!(
+        (
+            case_doc.get("SITE_landtype"),
+            logical(&case_doc, "DEF_USE_USGS")
+        ),
+        (Some(colm_namelist::Value::Int(11)), false) | (Some(colm_namelist::Value::Int(17)), true)
+    );
     let options = methane_inundation_options(
-        logical(&case_doc, "DEF_USE_Dynamic_Wetland"),
-        grid_river && logical(&case_doc, "DEF_USE_GridRiverLakeFlow"),
+        !single || wetland_site,
+        !single && grid_river && logical(&case_doc, "DEF_USE_GridRiverLakeFlow"),
     );
     for entry in files.iter_mut().flat_map(|file| file.entries.iter_mut()) {
         if entry
@@ -3291,6 +3418,9 @@ pub fn set_process_parameter_field_batch(
                 .map_err(|e| format!("{}: {e:#}", path_file.display()))?;
         }
         done.push((path_file, doc.to_string()));
+        if path.eq_ignore_ascii_case(METHANE_MODE) {
+            done.push(dynamic_wetland_for_mode(case_dir, &value)?);
+        }
     }
     let changed = write_process_files(&done)?;
     Ok(BatchWrite {
@@ -3299,6 +3429,36 @@ pub fn set_process_parameter_field_batch(
         text: std::fs::read_to_string(std::path::Path::new(&dirs[0]).join("case.nml"))
             .unwrap_or_default(),
     })
+}
+
+/// 甲烷淹没方案决定动态湿地开不开（上游与 `colm-rs` 都要求两者一致，否则停机）：
+/// 改方案时把 case.nml 的 `DEF_USE_Dynamic_Wetland` 一起改掉，与参数文件同批原子写入。
+fn dynamic_wetland_for_mode(
+    case_dir: &std::path::Path,
+    mode: &str,
+) -> Result<(std::path::PathBuf, String), String> {
+    let (_, dynamic, river) = methane_mode_facts(mode).ok_or_else(|| {
+        format!("未知的甲烷淹没方案 {mode}；可选 wetwat、satellite、routing、dynamic_wtd、hybrid")
+    })?;
+    let path = case_dir.join("case.nml");
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let mut doc = colm_namelist::parse(&text).map_err(|e| format!("{}: {e:#}", path.display()))?;
+    // 这里拿不到内核，只按算例本身判断：单点没有河网，空间算例要打开河湖汇流。
+    let single = doc.get("SITE_fsitedata").is_some();
+    if river && (single || !logical(&doc, "DEF_USE_GridRiverLakeFlow")) {
+        return Err(format!(
+            "{}：甲烷淹没方案 {} 需要网格河湖汇流（单点不可用，空间算例要打开河湖汇流）",
+            case_dir.display(),
+            mode.trim().trim_matches(['\'', '"'])
+        ));
+    }
+    put(
+        &mut doc,
+        "DEF_USE_Dynamic_Wetland",
+        colm_namelist::Value::Bool(dynamic),
+    )
+    .map_err(|e| format!("{}: {e}", path.display()))?;
+    Ok((path, doc.to_string()))
 }
 
 /// 删除 case-local 过程参数显式覆盖，让模型重新使用 Fortran 代码默认值。
@@ -3328,6 +3488,10 @@ pub fn reset_process_parameter_field_batch(
         doc.remove(&path)
             .map_err(|e| format!("{}: {e:#}", parameter_file.display()))?;
         done.push((parameter_file, doc.to_string()));
+        // 删掉后回到代码缺省 `hybrid`，动态湿地随之打开。
+        if path.eq_ignore_ascii_case(METHANE_MODE) {
+            done.push(dynamic_wetland_for_mode(case_dir, "hybrid")?);
+        }
     }
     let changed = write_process_files(&done)?;
     Ok(BatchWrite {
@@ -3640,7 +3804,7 @@ pub struct BatchWrite {
 }
 
 /// 向导在新算例里写入的一项运行时初值。
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct FieldChange {
     pub path: String,
     pub value: String,
@@ -3651,19 +3815,29 @@ pub(crate) fn apply_fields(dir: &str, fields: &[FieldChange]) -> Result<(), Stri
     let path = std::path::Path::new(dir).join("case.nml");
     let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
     let mut doc = colm_namelist::parse(&text).map_err(|e| format!("{dir}: {e:#}"))?;
-    for field in fields {
+    // 甲烷淹没方案写进 CH4 参数文件，不进 case.nml。
+    let (mode, fields): (Vec<_>, Vec<_>) = fields
+        .iter()
+        .cloned()
+        .partition(|field| field.path.eq_ignore_ascii_case(METHANE_MODE));
+    for field in &fields {
         let value = typed(&field.path, &field.value).map_err(|e| format!("{dir}: {e}"))?;
         put(&mut doc, &field.path, value).map_err(|e| format!("{dir}: {e}"))?;
     }
+    stage_ch4_parameter(dir, &fields, mode.first().map(|field| field.value.as_str()))?;
     validate_runtime_contract(&doc, std::path::Path::new(dir), None)
         .map_err(|e| format!("{dir}: {e}"))?;
-    validate_changed_fields(&doc, fields).map_err(|e| format!("{dir}: {e}"))?;
-    stage_ch4_parameter(dir, fields)?;
+    validate_changed_fields(&doc, &fields).map_err(|e| format!("{dir}: {e}"))?;
     std::fs::write(&path, doc.to_string()).map_err(|e| format!("{}: {e}", path.display()))
 }
 
-/// 复用上游 CH4 参数，只关闭单点没有的路由/CROP/空间 pH 输入。
-fn stage_ch4_parameter(dir: &str, fields: &[FieldChange]) -> Result<(), String> {
+/// 复用上游 CH4 参数：淹没方案取向导所选（缺省 `wetwat`），关掉稻田与空间 pH
+/// （分别要 CROP 稻田与预处理生成的 pH 数据）。
+fn stage_ch4_parameter(
+    dir: &str,
+    fields: &[FieldChange],
+    mode: Option<&str>,
+) -> Result<(), String> {
     let wants_builtin = fields.iter().any(|field| {
         field.path == "DEF_TRACER_PARAM_FILES"
             && field.value.trim_matches(['\'', '"']) == "CH4:standard_ch4_parameter.nml"
@@ -3672,12 +3846,21 @@ fn stage_ch4_parameter(dir: &str, fields: &[FieldChange]) -> Result<(), String> 
         return Ok(());
     }
 
+    let mode = mode
+        .unwrap_or("wetwat")
+        .trim()
+        .trim_matches(['\'', '"'])
+        .to_ascii_lowercase();
+    if methane_mode_facts(&mode).is_none() {
+        return Err(format!("未知的甲烷淹没方案 {mode}"));
+    }
+    let mode_line = format!("DEF_METHANE%inundation_mode  = '{mode}'");
     let mut text =
         include_str!("../../../vendor/CoLM202X/run/standard_ch4_parameter.nml").to_string();
     for (from, to) in [
         (
             "DEF_METHANE%inundation_mode  = 'hybrid'",
-            "DEF_METHANE%inundation_mode  = 'wetwat'",
+            mode_line.as_str(),
         ),
         (
             "DEF_METHANE%enable_rice_paddy = .true.",

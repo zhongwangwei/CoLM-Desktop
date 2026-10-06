@@ -500,6 +500,7 @@ fn compile_time_classification_and_crop_constraints_use_kernel_facts() {
             usgs: true,
             crop: false,
             catchment: false,
+            grid_river: false,
         }),
     )
     .unwrap_err();
@@ -514,6 +515,7 @@ fn compile_time_classification_and_crop_constraints_use_kernel_facts() {
             usgs: false,
             crop: true,
             catchment: false,
+            grid_river: false,
         }),
     )
     .unwrap_err();
@@ -533,6 +535,7 @@ fn crop_management_runtime_files_are_checked_before_write() {
         usgs: false,
         crop: true,
         catchment: false,
+        grid_river: false,
     });
     let doc = |fields: &str| {
         colm_namelist::parse(&format!(
@@ -858,8 +861,8 @@ fn expert_process_parameters_are_read_from_case_local_files() {
         .expect("inundation mode");
     assert_eq!(mode.value, "'wetwat'");
     assert_eq!(mode.default.as_deref(), Some("'hybrid'"));
-    // 没给内核时不认为有网格河湖：只给不依赖河湖的选项。
-    assert_eq!(mode.options, ["wetwat", "satellite"]);
+    // 没给内核时不认为有网格河湖：只给不依赖河湖的选项（这份样例不是站点，可以开动态湿地）。
+    assert_eq!(mode.options, ["wetwat", "satellite", "dynamic_wtd"]);
     let biome = ch4
         .entries
         .iter()
@@ -3166,6 +3169,7 @@ fn runtime_contract_rejects_catchment_only_gaps_and_bad_compression() {
         usgs: false,
         crop: false,
         catchment: true,
+        grid_river: false,
     });
     for field in ["DEF_URBAN_RUN", "DEF_USE_LULCC", "DEF_USE_TRACER"] {
         let doc = colm_namelist::parse(&format!(
@@ -3194,11 +3198,11 @@ fn methane_inundation_options_follow_dynamic_wetland_and_river_routing() {
     );
     assert_eq!(
         super::methane_inundation_options(true, false),
-        ["dynamic_wtd"]
+        ["wetwat", "satellite", "dynamic_wtd"]
     );
     assert_eq!(
         super::methane_inundation_options(true, true),
-        ["dynamic_wtd", "hybrid"]
+        ["wetwat", "satellite", "routing", "dynamic_wtd", "hybrid"]
     );
 }
 
@@ -3211,4 +3215,125 @@ fn check_equilibrium_stays_editable_with_an_engine_note() {
     assert!(state
         .reason
         .is_some_and(|reason| reason.contains("Fortran")));
+}
+
+/// 甲烷算例：向导选的淹没方案写进 CH4 文件；专家页改方案时动态湿地跟着改；派生的
+/// `DEF_wetland_finundation_scheme` 显示方案号；方案与河湖、动态湿地不一致时运行前拦下。
+#[test]
+fn methane_inundation_mode_drives_dynamic_wetland_and_the_derived_scheme() {
+    let dir = batch("methane-mode", &[SAMPLE]).remove(0);
+    let fields = |mode: &str| {
+        vec![
+            FieldChange {
+                path: "DEF_USE_PFT".into(),
+                value: ".true.".into(),
+            },
+            FieldChange {
+                path: "DEF_USE_LCT".into(),
+                value: ".false.".into(),
+            },
+            FieldChange {
+                path: "DEF_USE_BGC".into(),
+                value: ".true.".into(),
+            },
+            FieldChange {
+                path: "DEF_USE_NITRIF".into(),
+                value: ".false.".into(),
+            },
+            FieldChange {
+                path: "DEF_USE_TRACER".into(),
+                value: ".true.".into(),
+            },
+            FieldChange {
+                path: "DEF_TRACER_NAMES".into(),
+                value: "CH4".into(),
+            },
+            FieldChange {
+                path: "DEF_USE_Dynamic_Wetland".into(),
+                value: if mode == "hybrid" {
+                    ".true."
+                } else {
+                    ".false."
+                }
+                .into(),
+            },
+            FieldChange {
+                path: "DEF_TRACER_PARAM_FILES".into(),
+                value: "CH4:standard_ch4_parameter.nml".into(),
+            },
+            FieldChange {
+                path: super::METHANE_MODE.into(),
+                value: mode.into(),
+            },
+        ]
+    };
+    let case_dir = std::path::Path::new(&dir);
+    // BGC 的运行前校验要求氮沉降数据在运行时目录里（样例的运行时目录是相对路径）。
+    let ndep =
+        case_dir.join("path/to/runtime/ndep/fndep_colm_hist_simyr1849-2006_1.9x2.5_c100428.nc");
+    std::fs::create_dir_all(ndep.parent().unwrap()).unwrap();
+    std::fs::write(&ndep, []).unwrap();
+    super::apply_fields(&dir, &fields("hybrid")).unwrap();
+    let ch4 = std::fs::read_to_string(case_dir.join("standard_ch4_parameter.nml")).unwrap();
+    assert!(
+        ch4.contains("DEF_METHANE%inundation_mode  = 'hybrid'"),
+        "{ch4}"
+    );
+    let case = std::fs::read_to_string(case_dir.join("case.nml")).unwrap();
+    assert!(!case.contains("inundation_mode"), "{case}");
+
+    let states = field_states_for_at(
+        &case,
+        &LATLON_KERNEL.iter().copied().collect(),
+        Some(case_dir),
+    )
+    .unwrap();
+    let scheme = runtime_state(&states, "DEF_wetland_finundation_scheme");
+    assert_eq!(scheme.effective_value.as_deref(), Some("6"));
+    assert_eq!(scheme.scope_label.as_deref(), Some("hybrid"));
+    assert!(matches!(
+        mode(&states, "DEF_USE_Dynamic_Wetland"),
+        FieldMode::Disabled
+    ));
+
+    let doc = colm_namelist::parse(&case).unwrap();
+    let grid_facts = super::KernelFacts {
+        single: false,
+        usgs: false,
+        crop: false,
+        catchment: false,
+        grid_river: true,
+    };
+    let grid = Some(grid_facts);
+    super::validate_runtime_contract(&doc, case_dir, grid).unwrap();
+    let no_river = Some(super::KernelFacts {
+        grid_river: false,
+        ..grid_facts
+    });
+    let err = super::validate_runtime_contract(&doc, case_dir, no_river).unwrap_err();
+    assert!(err.contains("网格河湖"), "{err}");
+
+    // 专家页改成 routing：动态湿地同批关掉。
+    super::set_process_parameter_field_batch(
+        vec![dir.clone()],
+        "standard_ch4_parameter.nml".into(),
+        super::METHANE_MODE.into(),
+        "'routing'".into(),
+    )
+    .unwrap();
+    let case = std::fs::read_to_string(case_dir.join("case.nml")).unwrap();
+    let doc = colm_namelist::parse(&case).unwrap();
+    assert!(!super::logical(&doc, "DEF_USE_Dynamic_Wetland"));
+    super::validate_runtime_contract(&doc, case_dir, grid).unwrap();
+
+    // 手改 case.nml 让两者打架：运行前拦下。
+    let mut doc = doc;
+    super::put(
+        &mut doc,
+        "DEF_USE_Dynamic_Wetland",
+        colm_namelist::Value::Bool(true),
+    )
+    .unwrap();
+    let err = super::validate_runtime_contract(&doc, case_dir, grid).unwrap_err();
+    assert!(err.contains("DEF_USE_Dynamic_Wetland"), "{err}");
 }

@@ -400,11 +400,11 @@ const OPTIONS = Object.freeze({
     7: pair('河网洪泛比例', 'River-routing flood fraction'),
   },
   'DEF_METHANE%inundation_mode': {
-    wetwat: pair('站点湿地类型 / wetwat（单点安全）', 'Site wetland type / wetwat (single-point safe)'),
+    wetwat: pair('湿地蓄水 / wetwat（任何内核可用）', 'Wetland storage / wetwat (any kernel)'),
     satellite: pair('卫星湿地面积 / GIEMS', 'Satellite wetland area / GIEMS'),
-    routing: pair('河网洪泛比例', 'River-routing flood fraction'),
-    dynamic_wtd: pair('动态地下水位（需要动态湿地）', 'Dynamic water table (requires dynamic wetland)'),
-    hybrid: pair('动态地下水位 + 河网洪泛（需要动态湿地）', 'Dynamic water table + routing (requires dynamic wetland)'),
+    routing: pair('河网洪泛比例（需要河湖汇流）', 'River-routing flood fraction (needs routing)'),
+    dynamic_wtd: pair('动态地下水位（自动打开动态湿地）', 'Dynamic water table (turns dynamic wetland on)'),
+    hybrid: pair('动态地下水位 + 河网洪泛（自动打开动态湿地）', 'Dynamic water table + routing (turns dynamic wetland on)'),
   },
   'DEF_METHANE%ch4_history_vars': {
     core: pair('核心变量', 'Core variables'),

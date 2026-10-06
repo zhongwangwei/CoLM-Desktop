@@ -426,7 +426,14 @@ for (const label of ['水同位素', '溶质', '泥沙']) {
 if (!/单点站点不可用/.test(nodeText(card('泥沙')))) throw new Error('sediment must explain SinglePoint is unavailable');
 choose('甲烷 CH₄');
 next();
-if (ids.gatetitle.textContent !== '要打开调试吗？') throw new Error('tracer page did not continue to debug');
+if (ids.gatetitle.textContent !== '甲烷淹水范围怎么算？') throw new Error('methane tracer must ask for the inundation mode');
+// 单点没有河网，也还不知道是不是湿地站点：只留 satellite 与 wetwat，缺省 wetwat。
+for (const label of ['混合（hybrid）', '河网洪泛（routing）', '动态地下水位（dynamic_wtd）']) {
+  if (card(label).getAttribute('aria-disabled') !== 'true') throw new Error(`${label} must be blocked on a site`);
+}
+if (card('湿地蓄水（wetwat）').getAttribute('aria-selected') !== 'true') throw new Error('site methane must default to wetwat');
+next();
+if (ids.gatetitle.textContent !== '要打开调试吗？') throw new Error('methane page did not continue to debug');
 next();
 if (state.wizard.tracer !== 'methane') throw new Error(`wrong tracer state: ${JSON.stringify(state.wizard)}`);
 const methaneFields = Object.fromEntries(wizardFields().map(x => [x.path, x.value]));
@@ -442,11 +449,13 @@ for (const [path, value] of Object.entries({
   DEF_TRACER_REACTIVE_DECAY_RATE: '0.0',
   DEF_TRACER_PARAM_FILES: 'CH4:standard_ch4_parameter.nml',
   DEF_USE_Dynamic_Wetland: '.false.',
+  'DEF_METHANE%inundation_mode': 'wetwat',
 })) {
   if (methaneFields[path] !== value) throw new Error(`${path}: expected ${value}, got ${methaneFields[path]}`);
 }
-if (!wizardFieldNames().includes('DEF_USE_Dynamic_Wetland')) {
-  throw new Error('methane hydrology constraint was repeated on the main parameters page');
+// 动态湿地留在参数页，由后端按淹没方案置灰并说明，不再被向导整个藏起来。
+if (wizardFieldNames().includes('DEF_USE_Dynamic_Wetland')) {
+  throw new Error('dynamic wetland must stay visible (read-only) on the parameters page');
 }
 
 
@@ -531,6 +540,18 @@ if (state.step === 'result-tuning' || !ids.status.textContent.includes('空间�
   }
   if (!wizardFieldNames().includes('DEF_USE_GridRiverLakeFlow')) {
     throw new Error('the wizard owns the routing switch');
+  }
+}
+// 甲烷淹没方案写进字段表；动态湿地跟着方案走（dynamic_wtd / hybrid 打开）。
+{
+  const fields = methaneMode => Object.fromEntries(wizardFields({
+    ...state.wizard, tracer: 'methane', methaneMode,
+    physics: { ...state.wizard.physics, tracer: true, bgc: true, river: true },
+  }).map(x => [x.path, x.value]));
+  for (const [mode, dynamic] of [['hybrid', '.true.'], ['dynamic_wtd', '.true.'], ['routing', '.false.'], ['satellite', '.false.']]) {
+    const f = fields(mode);
+    if (f['DEF_METHANE%inundation_mode'] !== mode) throw new Error(`${mode} must reach the CH4 file`);
+    if (f.DEF_USE_Dynamic_Wetland !== dynamic) throw new Error(`${mode} needs DEF_USE_Dynamic_Wetland = ${dynamic}`);
   }
 }
 // 河湖汇流卡片按空间类型提醒边界与河网的关系，不再写「不选则……」。

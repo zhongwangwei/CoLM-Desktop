@@ -643,6 +643,15 @@ CONTAINS
 	         IF (p_is_master) write(6,*) &
 	            '***** ERROR: hybrid methane inundation mode requires a GridRiverLakeFlow-enabled kernel.'
 	         CALL CoLM_Stop (' ***** ERROR: methane hybrid mode is unavailable in this kernel')
+#else
+	         ! hybrid feeds the routing flood fraction to the soil column
+	         ! (use_routing_for_soil); with routing switched off at run time
+	         ! that fraction is never produced.  Same check as 'routing'.
+	         IF (.not. DEF_USE_GridRiverLakeFlow) THEN
+	            IF (p_is_master) write(6,*) &
+	               '***** ERROR: hybrid methane inundation mode requires DEF_USE_GridRiverLakeFlow = .true.'
+	            CALL CoLM_Stop (' ***** ERROR: methane hybrid mode needs river-lake routing')
+	         ENDIF
 #endif
 	         ! Site-calibrated hybrid mode; not a globally validated default.
 	         ! Combines routing and dynamic-WTD hydrology.  Biome yield,

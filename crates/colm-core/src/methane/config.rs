@@ -114,7 +114,7 @@ impl MethaneParameters {
     }
 
     /// `configure_methane_inundation_mode`：把用户的五选一解析成内部方案号与配套开关。
-    /// `grid_river` 是内核是否编进 `GridRiverLakeFlow`（单点为假）。
+    /// `grid_river`：内核编进 `GridRiverLakeFlow` 且 `DEF_USE_GridRiverLakeFlow` 打开（单点为假）。
     pub fn configure_inundation(
         &mut self,
         dynamic_wetland: bool,
@@ -144,7 +144,7 @@ impl MethaneParameters {
             "routing" => {
                 ensure!(
                     grid_river,
-                    "routing methane inundation mode requires a GridRiverLakeFlow-enabled kernel."
+                    "routing methane inundation mode requires grid river-lake routing (a GridRiverLakeFlow kernel with DEF_USE_GridRiverLakeFlow = .true.)."
                 );
                 ensure!(
                     !dynamic_wetland,
@@ -162,7 +162,7 @@ impl MethaneParameters {
             "hybrid" | "dh_all_thr05" | "dyn_routing_hybrid" => {
                 ensure!(
                     grid_river,
-                    "hybrid methane inundation mode requires a GridRiverLakeFlow-enabled kernel."
+                    "hybrid methane inundation mode requires grid river-lake routing (a GridRiverLakeFlow kernel with DEF_USE_GridRiverLakeFlow = .true.)."
                 );
                 m.use_routing_for_soil = true;
                 ensure!(

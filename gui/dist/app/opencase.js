@@ -42,6 +42,7 @@ export function sessionFromProfile(p) {
       urban: p.urban, lulcc: p.lulcc, bgc: p.bgc, crop: p.crop, tracer: p.methane, river: p.river,
     },
     tracer: p.methane ? 'methane' : null,
+    methaneMode: p.methane ? (p.methane_mode ?? null) : null,
     debug: { rangecheck: p.rangecheck, colmdebug: p.colmdebug, srfdatadiag: p.srfdatadiag },
   };
 }

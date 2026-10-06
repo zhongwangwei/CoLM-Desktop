@@ -1607,7 +1607,8 @@ function table(
     if (e.derived) {
       // 有声明有默认值，但不在任何 namelist 组里 —— 用户设了也没用。
       // 给一个改了没用的输入框比只读地显示更糟。
-      v.textContent = optionLabel(e.path, e.value, language()) + '（派生值，改不了）';
+      // 后端可能按别的来源派生出有效值（如甲烷淹水范围来源取自 CH4 参数文件），优先显示它。
+      v.textContent = optionLabel(e.path, fieldState?.effective_value ?? e.value, language()) + '（派生值，改不了）';
       v.className = 'muted';
     } else {
       const inp = control(e, meta, fieldState);

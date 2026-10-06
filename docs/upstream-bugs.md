@@ -692,6 +692,18 @@
   输出为 0；换平台或内存复用时可能是任意值。
 - **处理**（第 579 轮）：vendor 在 `allocate` 时置 0（现有输出逐位不变）；Rust 的 `ReservoirFlow::new` 同样从 0 起。
 
+### 77. 甲烷 `hybrid` 淹没方案不检查河湖汇流运行时开关
+
+- **位置**：`main/TRACER/MOD_Tracer_Reactive_Methane_Const.F90:configure_methane_inundation_mode` 的 `CASE ('hybrid', …)`。
+- **原因**：`routing` 分支在 GridRiverLakeFlow 内核里还会检查 `DEF_USE_GridRiverLakeFlow`，关掉就停机；`hybrid` 只用
+  `#ifndef GridRiverLakeFlow` 检查内核，不查运行时开关。`hybrid` 照样打开 `use_routing_for_soil`，土壤柱去取河网洪泛比例，
+  可河湖汇流关着时这个比例从不产生。
+- **影响**：GridRiverLakeFlow 内核里关掉河湖汇流、甲烷用缺省的 `hybrid` 时，不报错，土壤淹水分量悄悄按零洪泛计算。
+  另外，上游缺省 `hybrid` 要求动态湿地，而 `DEF_USE_Dynamic_Wetland` 缺省为关，所以只用缺省值时上游会直接停机。
+- **处理**（第 588 轮）：vendor 的 `hybrid` 分支补上与 `routing` 相同的 `DEF_USE_GridRiverLakeFlow` 检查（只多一条停机，
+  已能跑的配置结果不变）。Rust 的 `configure_inundation` 收到的 `grid_river` 本来就含运行时开关，两侧一致。GUI 的向导
+  按内核与河湖开关给出可选方案，并让动态湿地跟随方案开关。
+
 ## 二、TRACER 编译开关改变了物理（需要上游确认哪一边是对的）
 
 这一版上游在很多地方给 TRACER 构建和非 TRACER 构建写了**不同的物理**，不只是记账不同。

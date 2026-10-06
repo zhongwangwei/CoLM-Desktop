@@ -30099,3 +30099,44 @@ unitcat 文件原来铺在整张全球 15′ 网格上（区域河网文件保�
 - `DEF_wetland_finundation_scheme` 只读显示 namelist 值，不随甲烷参数文件里的淹没方案变化。
 
 验证：GUI 后端测试 184 个全过、`gui/tests/*.mjs`、check-gui、clippy `-D warnings`、fmt、parameter-audit 无变化。
+
+## 第 588 轮：甲烷 `hybrid` 打通——向导选方案、动态湿地随方案、派生显示、上游补检查
+
+**向导**：选甲烷后多一页「甲烷淹水范围怎么算？」，五种方案：
+
+| 方案 | 何时可选 | 动态湿地 |
+|---|---|---|
+| `hybrid` | 空间算例且开了河湖汇流 | 打开 |
+| `routing` | 空间算例且开了河湖汇流 | 关闭 |
+| `dynamic_wtd` | 空间算例（单点建例后可在专家页改） | 打开 |
+| `satellite` | 都可选 | 关闭 |
+| `wetwat` | 都可选 | 关闭 |
+
+- 缺省：有网格河湖时是 `hybrid`（上游参数文件的推荐方案），否则是 `wetwat`。
+- 用户没亲手选过时，缺省跟着约束走，回去打开河湖汇流后自动换成 `hybrid`；亲手选过的只在被挡住时才换。
+- 所选方案作为 `DEF_METHANE%inundation_mode` 传给后端，写进 CH4 参数文件，不进 case.nml。稻田与空间 pH 仍关闭：前者要 CROP 稻田，后者要预处理时生成 pH 数据。
+- 打开已有算例时，从 CH4 文件读回方案。
+
+**设定页**：
+- 动态湿地不再被向导整个藏起来，在甲烷算例里置灰显示，并注明由方案决定。
+- 专家页改淹没方案（或恢复代码缺省 `hybrid`）时，case.nml 的 `DEF_USE_Dynamic_Wetland` 与 CH4 文件同批原子写入。
+- 选 `routing`/`hybrid` 时，后端按算例本身检查：单点不行，空间算例要打开河湖汇流。
+- 下拉选项现在只看两件事：能否开动态湿地（空间算例或湿地站点），以及有没有网格河湖。
+- 「甲烷淹水范围来源」（`DEF_wetland_finundation_scheme`）：
+  - 甲烷算例里按 CH4 文件的方案显示有效方案号（`hybrid`/`dynamic_wtd` 为 6，`routing` 为 7，`satellite` 为 5，`wetwat` 为 1），并带上方案名标签；
+  - 非甲烷算例隐藏；
+  - 前端的派生行改为显示后端给出的有效值。
+
+**运行前校验**：甲烷算例的方案必须与动态湿地一致；`routing`/`hybrid` 要求内核编进 GridRiverLakeFlow 且河湖汇流打开。`KernelFacts` 新增 `grid_river`。
+
+**上游**：`hybrid` 分支补上 `DEF_USE_GridRiverLakeFlow` 检查，与 `routing` 一致，记为 `docs/upstream-bugs.md` 第 77 条。latlon 内核已用改后的 vendor 重编通过。Rust 侧 `grid_river` 本来就含运行时开关，只把报错改清楚：内核编进了、但运行时开关关着时，原报错说"需要编进 GridRiverLakeFlow 的内核"，会误导。
+
+**对照**（`gh`：用 `gr` 的 2°×2° 经纬度、PC、河湖汇流开，加 BGC + 甲烷 `hybrid` + 动态湿地，参数与向导写出的一致，2 天）：
+- `--engine fortran --preprocessors fortran` 对 Rust 全链条：两边都成功，`files ok 293`。
+- 日志确认 `CH4 inundation mode: hybrid -> scheme=6`。
+- 宿主水分最大偏差为孔隙体积的 4.6e-4，远低于 `host_water_tolerance = 0.05`。
+- 同一算例关掉河湖汇流：Fortran 以新加的 `hybrid methane inundation mode requires DEF_USE_GridRiverLakeFlow = .true.` 停机，Rust 在入口拒绝。
+
+**仍需注意**：第 519 轮的 `g1ch4hy` 用缺省拐点 0.30 m 时，两侧都在同一 patch 以 `methane inundation exceeds host soil water` 停机。原因是 S 曲线给的淹水比例超过土壤实际含水，且超出 5% 容差。这次 `gh` 没有触发。若用户的区域触发，可在专家页调高 `host_water_tolerance`，或调整 `wtd_inflection`。该检查两侧行为一致，属上游设计，未改。
+
+验证：GUI 后端测试 185 个（新增方案联动与派生显示）、`gui/tests/*.mjs`（新增向导方案页与字段）、check-gui、workspace 与 GUI 的 clippy `-D warnings`、fmt，`colm-core` 甲烷测试。向导与设定页在浏览器里接真后端实点过；临时桥已删除，不入库。

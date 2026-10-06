@@ -59,10 +59,21 @@ const TRACERS = [
   { id: 'sediment', t: '泥沙', d: '颗粒泥沙输移', ready: false, need: '单点站点不可用；需要河道/流域输移链路' },
 ];
 
+// 甲烷淹没方案（写进 CH4 参数文件的 `DEF_METHANE%inundation_mode`）。动态湿地跟着方案走：
+// dynamic_wtd / hybrid 打开，其余关闭——上游与 `colm-rs` 都要求两者一致，否则停机。
+const METHANE_MODES = [
+  { id: 'hybrid', t: '混合（hybrid）', d: '动态地下水位 + 河网洪泛；上游参数文件的推荐方案', dynamic: true, river: true },
+  { id: 'routing', t: '河网洪泛（routing）', d: '淹水比例取河湖汇流的洪泛面积', river: true },
+  { id: 'dynamic_wtd', t: '动态地下水位（dynamic_wtd）', d: '按动态湿地的地下水位估算淹水比例', dynamic: true },
+  { id: 'satellite', t: '卫星湿地（GIEMS）', d: '读 GIEMS 月均淹水面积（运行时目录需要 GIEMS 文件）' },
+  { id: 'wetwat', t: '湿地蓄水（wetwat）', d: '按湿地 patch 的蓄水判断淹水；任何内核都能跑' },
+];
+
 const pages = () => [
   'domain',
   ...(picked.domain && picked.domain !== 'site' ? ['grid', 'spatial'] : []),
-  'subgrid', 'soil', 'physics', ...(picked.physics.tracer ? ['tracer'] : []), 'debug',
+  'subgrid', 'soil', 'physics', ...(picked.physics.tracer ? ['tracer'] : []),
+  ...(picked.physics.tracer && picked.tracer === 'methane' ? ['methane'] : []), 'debug',
 ];
 const pageIndex = page => pages().indexOf(page);
 const pageNumber = page => pageIndex(page) + 1;
@@ -82,6 +93,8 @@ const emptyPicked = () => ({
   soil: 'vg',
   physics: emptyPhysics(),
   tracer: null,
+  methaneMode: null,
+  methaneModeChosen: false,
   debug: emptyDebug(),
 });
 
@@ -107,6 +120,7 @@ function render() {
     soil: ['土壤水力用哪套？', '选择本次模拟使用的土壤水力方案。'],
     physics: ['还要打开哪些过程？', '可多选；被上游约束挡住的项会说明回哪一页修改。'],
     tracer: ['选择示踪剂类型', '目前只开放甲烷 CH₄；其他类型保留入口但不可选。'],
+    methane: ['甲烷淹水范围怎么算？', '决定湿地与土壤的淹水比例从哪来；动态湿地会随方案自动打开或关闭。'],
     debug: ['要打开调试吗？', '可全部不选；这些开关只增加检查与日志，不改变页间约束。'],
   }[page];
   $('gatetitle').textContent = copy[0];
@@ -122,6 +136,14 @@ function render() {
   if (page === 'soil') renderCards(SOILS, picked.soil, chooseSoil);
   if (page === 'physics') renderCards(PHYSICS, picked.physics, togglePhysics, physicsBlock, true);
   if (page === 'tracer') renderCards(TRACERS, picked.tracer, chooseTracer, tracerBlock);
+  if (page === 'methane') {
+    // 用户没亲手选过时跟着约束走（回去打开河湖汇流后自动换成 hybrid）；亲手选的只在被挡住时才换。
+    if (!picked.methaneModeChosen || methaneModeBlock({ id: picked.methaneMode })) {
+      picked.methaneMode = defaultMethaneMode();
+      picked.methaneModeChosen = false;
+    }
+    renderCards(METHANE_MODES, picked.methaneMode, chooseMethaneMode, methaneModeBlock);
+  }
   if (page === 'debug') renderCards(DEBUG, picked.debug, toggleDebug, null, true);
   renderFoot();
 }
@@ -139,6 +161,7 @@ function pageInfo(page) {
   }
   if (page === 'physics') return 'ⓘ 灰项仍然列出；带“← 第 N 页”的卡片可直接返回修改';
   if (page === 'tracer') return 'ⓘ 甲烷需要 PFT 或 PC、BGC、van Genuchten 土壤水力；本页会把运行参数自动写入算例';
+  if (page === 'methane') return 'ⓘ 建例后仍可在专家模式「示踪剂」页改；改方案时动态湿地会一并改';
   if (page === 'debug') return 'ⓘ 打开调试会让日志明显增多，常规运行可全部关闭';
   return '';
 }
@@ -428,6 +451,30 @@ function chooseTracer(id) {
   render();
 }
 
+function chooseMethaneMode(id) {
+  picked.methaneMode = id;
+  picked.methaneModeChosen = true;
+  render();
+}
+
+/** 有网格河湖时用上游推荐的 hybrid，否则 wetwat。 */
+function defaultMethaneMode() {
+  return methaneModeBlock({ id: 'hybrid' }) ? 'wetwat' : 'hybrid';
+}
+
+function methaneModeBlock(item) {
+  const mode = METHANE_MODES.find(m => m.id === item.id);
+  if (mode?.river) {
+    if (picked.domain === 'site') return { need: '需要河湖汇流；单点没有河网' };
+    if (!picked.physics.river) {
+      return { need: '需要河湖汇流', cause: `第 ${pageNumber('physics')} 页没有开启河湖汇流`, page: pageIndex('physics') };
+    }
+  }
+  // 单点只有湿地站点才有动态湿地，建例前还不知道站点类型；湿地站点可在专家页改。
+  if (mode?.dynamic && picked.domain === 'site') return { need: '单点请先用 wetwat；湿地站点建例后可在专家页改' };
+  return null;
+}
+
 function toggleDebug(id) {
   picked.debug[id] = !picked.debug[id];
   render();
@@ -543,7 +590,7 @@ function renderFoot() {
 
   const list = pages();
   const page = list[pageIdx];
-  const required = { domain: picked.domain, grid: picked.grid, subgrid: picked.subgrid, soil: picked.soil, tracer: picked.tracer };
+  const required = { domain: picked.domain, grid: picked.grid, subgrid: picked.subgrid, soil: picked.soil, tracer: picked.tracer, methane: picked.methaneMode };
   const next = document.createElement('button');
   next.className = 'btn-next';
   next.textContent = '下一步 →';
@@ -593,6 +640,7 @@ export function startSession(config) {
     soil: config.soil,
     physics: { ...emptyPhysics(), ...config.physics },
     tracer: config.tracer,
+    methaneMode: config.methaneMode ?? null,
     debug: { ...emptyDebug(), ...config.debug },
   };
   globalThis.dispatchEvent?.(new Event('colm:wizard'));
@@ -629,7 +677,7 @@ function finish() {
   };
   startSession({
     domain: picked.domain, grid: picked.grid, spatial, subgrid: picked.subgrid, soil: picked.soil,
-    physics: picked.physics, tracer: picked.tracer, debug: picked.debug,
+    physics: picked.physics, tracer: picked.tracer, methaneMode: picked.methaneMode, debug: picked.debug,
   });
   // 向导已经决定本次模型结构；通常下一步是选现成站点并建算例，不是重新
   // 制作原始数据。前处理仍在左侧作为按需入口，但不再拦住主路径。
@@ -679,8 +727,10 @@ export function wizardFields(wizard = state.wizard) {
     // 字段本身保留：`sidecar.rs` 按它的存在识别作物算例。
     ['DEF_TUNING_CROP_PLANTING_DAY', wizard.spatial ? '0' : '120'],
   );
+  const methaneMode = wizard.methaneMode ?? 'wetwat';
   if (methane) fields.push(
-    ['DEF_USE_Dynamic_Wetland', false, 'logical'],
+    ['DEF_USE_Dynamic_Wetland', methaneMode === 'dynamic_wtd' || methaneMode === 'hybrid', 'logical'],
+    ['DEF_METHANE%inundation_mode', methaneMode],
     ['DEF_TRACER_NUM', '1'],
     ['DEF_TRACER_NAMES', 'CH4'],
     ['DEF_TRACER_TYPES', 'gas'],
@@ -694,7 +744,7 @@ export function wizardFields(wizard = state.wizard) {
 }
 
 /** 向导锁定结构字段；CROP 的施肥、灌溉和种植日只是初值，仍可在过程/专家页调。 */
-export function wizardFieldNames(wizard = state.wizard) {
+export function wizardFieldNames() {
   const empty = {
     subgrid: null, soil: null, tracer: null,
     physics: emptyPhysics(), debug: emptyDebug(),
@@ -708,7 +758,6 @@ export function wizardFieldNames(wizard = state.wizard) {
     'DEF_TRACER_REF_RATIO', 'DEF_TRACER_INIT_DELTA', 'DEF_TRACER_REACTIVE_DECAY_RATE',
     'DEF_TRACER_PARAM_FILES', 'DEF_USE_GridRiverLakeFlow',
   );
-  if (wizard?.tracer === 'methane') names.push('DEF_USE_Dynamic_Wetland');
   return names;
 }
 

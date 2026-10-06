@@ -408,6 +408,24 @@ const ZH_EN = [
   ['甲烷需要 PFT 或 PC、BGC、van Genuchten 土壤水力；本页会把运行参数自动写入算例', 'Methane requires PFT or PC, BGC, and van Genuchten soil hydrology; this page writes the run parameters automatically.'],
   ['甲烷示踪需要 PFT 或 PC 次网格', 'Methane tracing requires PFT or PC subgrid'],
   ['甲烷示踪需要同时开启 BGC', 'Methane tracing also requires BGC'],
+  ['混合（hybrid）', 'Hybrid (hybrid)'],
+  ['动态地下水位 + 河网洪泛；上游参数文件的推荐方案', 'Dynamic water table + river flooding; recommended by the upstream parameter file'],
+  ['河网洪泛（routing）', 'River flooding (routing)'],
+  ['淹水比例取河湖汇流的洪泛面积', 'Inundated fraction from the river-lake routing flood area'],
+  ['动态地下水位（dynamic_wtd）', 'Dynamic water table (dynamic_wtd)'],
+  ['按动态湿地的地下水位估算淹水比例', 'Inundated fraction from the dynamic-wetland water table'],
+  ['卫星湿地（GIEMS）', 'Satellite wetlands (GIEMS)'],
+  ['读 GIEMS 月均淹水面积（运行时目录需要 GIEMS 文件）', 'Reads GIEMS monthly inundation (needs the GIEMS file in the runtime directory)'],
+  ['湿地蓄水（wetwat）', 'Wetland storage (wetwat)'],
+  ['按湿地 patch 的蓄水判断淹水；任何内核都能跑', 'Inundation from wetland-patch storage; runs on any kernel'],
+  ['甲烷淹水范围怎么算？', 'How is the methane inundated area computed?'],
+  ['决定湿地与土壤的淹水比例从哪来；动态湿地会随方案自动打开或关闭。', 'Chooses where wetland and soil inundation comes from; dynamic wetland is switched on or off with the mode.'],
+  ['ⓘ 建例后仍可在专家模式「示踪剂」页改；改方案时动态湿地会一并改', 'ⓘ You can change it later on the expert Tracer page; dynamic wetland follows the mode'],
+  ['需要河湖汇流；单点没有河网', 'Needs river-lake routing; single points have no river network'],
+  ['单点请先用 wetwat；湿地站点建例后可在专家页改', 'Use wetwat for single points; wetland sites can switch on the expert page after creation'],
+  ['由甲烷淹没方案决定：dynamic_wtd / hybrid 时打开，其余关闭', 'Set by the methane inundation mode: on for dynamic_wtd / hybrid, off otherwise'],
+  ['由 CH4 参数文件的淹没方案派生，case.nml 里的值不生效', 'Derived from the inundation mode in the CH4 parameter file; the case.nml value is ignored'],
+  ['只有甲烷示踪使用', 'Only used by the methane tracer'],
   ['BGC/甲烷算例需要运行时数据目录；请在“基本设定 / 文件与目录”选择 runtime。', 'BGC/methane cases require a runtime-data directory; select runtime under Basic settings / Files and directories.'],
   ['BGC/甲烷运行时目录缺少氮沉降数据：', 'The BGC/methane runtime directory is missing nitrogen-deposition data: '],
   ['BGC/甲烷运行时目录缺少硝化数据：', 'The BGC/methane runtime directory is missing nitrification data: '],
@@ -1961,6 +1979,7 @@ export function translateZh(text, target = 'en') {
     .replace(/^已复制\s*(\d+)\s*个字符$/, 'Copied $1 characters')
     .replace(/^第\s*(\d+)\/(\d+)\s*页\s*·\s*/, 'Page $1/$2 · ')
     .replace(/^第\s*(\d+)\s*页选了\s*/, 'Page $1 selected ')
+    .replace(/^第\s*(\d+)\s*页没有开启河湖汇流$/, 'River-lake routing is off on page $1')
     .replace(/^当前安装缺少\s*(.+)\s*内核$/, 'The current installation lacks the $1 kernel')
     .replace(/^已探测\s*(.+)：(\d+)\s*个变量，(\d+)\s*步$/, 'Inspected $1: $2 variables, $3 steps')
     .replace(/^第\s*(\d+)\s*槽$/, 'Slot $1')
