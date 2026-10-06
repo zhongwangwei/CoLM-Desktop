@@ -6114,7 +6114,6 @@
       "max": null,
       "allowed_values": [
         "EXPONENT",
-        "MERLIVAT_JOUZEL1979",
         "MJ79"
       ],
       "finite": false

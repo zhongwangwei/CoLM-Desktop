@@ -62,7 +62,7 @@ pub enum OpenWaterKinetic {
 impl OpenWaterKinetic {
     pub fn parse(text: &str) -> Option<Self> {
         match text.trim() {
-            "MJ79" | "mj79" | "MERLIVAT_JOUZEL1979" => Some(Self::Mj79),
+            "MJ79" | "mj79" => Some(Self::Mj79),
             "EXPONENT" | "exponent" => Some(Self::Exponent),
             _ => None,
         }

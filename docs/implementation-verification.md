@@ -30517,3 +30517,14 @@ GUI 的"不分馏"卡片去掉了"会被上游自检停机"的提示。
   - 冬季窗口变化明显：Rnet RMSE 15.05 → 20.45，Qh bias +35.1 → −8.0，Qle R² 0.044 → 0.625。
   - 湿季窗口基本不变。
 - `PLUMBER2_ROOT` 下 `cargo test -p oracle` 全部通过，`tier-check`、`ci_golden_status` 通过。
+
+## 第 601 轮：删掉 `DEF_TRACER_OPEN_WATER_KINETIC` 的超长别名（upstream-bugs #83）
+
+- vendor 与上游 `MOD_Namelist.F90` 的 `SELECT CASE` 删掉 `'MERLIVAT_JOUZEL1979'`。这个别名本来就到不了，删掉不改变任何能跑的配置。
+- Rust 同步：`OpenWaterKinetic::parse` 不再接受它；`xtask gen-schema` 重新生成后可选值为 `["EXPONENT", "MJ79"]`，parameter-audit 目录同步；GUI 去掉它的显示名。
+- GUI 的长度过滤留作防线，测试 `no_schema_option_is_longer_than_its_character_length` 扫全部字符字段，以后上游再加超长别名先在这里报出来。
+- 验证：
+  - `build_kernel.sh default`、`latlon` 都编过；
+  - 上游树按 `GRID LULC_IGBP_PFT … TRACERON` 编出 `colm.x`，0 个 Error；
+  - workspace fmt、clippy、colm-core 测试通过；GUI 204 个测试通过；`gui/tests/*.mjs`、check-gui 通过。
+- 上游提交 `0077d685`（`fix/colm-desktop-audit`）。

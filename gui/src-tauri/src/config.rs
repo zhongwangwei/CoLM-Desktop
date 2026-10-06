@@ -95,9 +95,8 @@ pub fn describe_fields() -> Vec<Field> {
             doc: f.doc,
             group: f.group,
             derived: f.group.is_none(),
-            // 上游 `SELECT CASE` 里可能有比声明长度还长的别名（如 `DEF_TRACER_OPEN_WATER_KINETIC` 的
-            // `MERLIVAT_JOUZEL1979`，19 字符对 `character(len=16)`）：namelist 读入时会被截断，永远到不了
-            // 那个分支，选了只会保存失败或停机。不提供这种选项（upstream-bugs #83）。
+            // 上游 `SELECT CASE` 里比声明长度还长的别名，namelist 读入时会被截断，永远到不了那个分支，
+            // 选了只会保存失败或停机。不提供这种选项（upstream-bugs #83，那个别名已删，这里留作防线）。
             values: f
                 .values
                 .iter()

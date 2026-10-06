@@ -3859,16 +3859,30 @@ fn invalid_methane_parameters_are_refused_before_saving() {
         .contains("DEF_METHANE%q10methane       = 2.5"));
 }
 
-/// 上游 `SELECT CASE` 里比声明长度还长的别名存不进去，不该出现在可选值里（upstream-bugs #83）。
+/// 上游 `SELECT CASE` 里比声明长度还长的别名存不进去（upstream-bugs #83）。上游再加这种别名时
+/// 这里先报出来，GUI 那边的过滤只是防线。
 #[test]
-fn options_longer_than_the_character_length_are_not_offered() {
-    let fields = super::describe_fields();
-    let kinetic = fields
+fn no_schema_option_is_longer_than_its_character_length() {
+    let too_long: Vec<_> = colm_schema::all()
         .iter()
+        .filter_map(|field| match field.kind {
+            colm_schema::FieldKind::Character { len } => Some((field, len)),
+            _ => None,
+        })
+        .flat_map(|(field, len)| {
+            field
+                .values
+                .iter()
+                .filter(move |value| value.len() > len)
+                .map(move |value| format!("{} = {value}", field.name))
+        })
+        .collect();
+    assert!(too_long.is_empty(), "{too_long:?}");
+    let kinetic = super::describe_fields()
+        .into_iter()
         .find(|field| field.name == "DEF_TRACER_OPEN_WATER_KINETIC")
         .unwrap();
-    assert!(!kinetic.values.contains(&"MERLIVAT_JOUZEL1979"));
-    assert!(kinetic.values.contains(&"MJ79") && kinetic.values.contains(&"EXPONENT"));
+    assert_eq!(kinetic.values, ["EXPONENT", "MJ79"]);
 }
 
 /// 城市单点混有其它地类，Rust 引擎拒绝 `DEF_LC_*` 覆盖：没改过时隐藏，改过时显示并说明只对 Fortran 生效。

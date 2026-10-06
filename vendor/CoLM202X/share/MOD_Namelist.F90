@@ -1829,7 +1829,7 @@ CONTAINS
             CALL CoLM_Stop ('Invalid DEF_TRACER_KINETIC_SCHEME.')
          END SELECT
          SELECT CASE (trim(adjustl(DEF_TRACER_OPEN_WATER_KINETIC)))
-         CASE ('MJ79', 'mj79', 'MERLIVAT_JOUZEL1979')
+         CASE ('MJ79', 'mj79')
             DEF_TRACER_OPEN_WATER_KINETIC = 'MJ79'
          CASE ('EXPONENT', 'exponent')
             DEF_TRACER_OPEN_WATER_KINETIC = 'EXPONENT'

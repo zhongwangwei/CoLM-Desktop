@@ -739,7 +739,6 @@ const OPTIONS = Object.freeze({
   },
   DEF_TRACER_OPEN_WATER_KINETIC: {
     EXPONENT: pair('指数形式', 'Exponent form'), MJ79: pair('Merlivat–Jouzel（1979）简写', 'Merlivat–Jouzel (1979), short form'),
-    MERLIVAT_JOUZEL1979: pair('Merlivat–Jouzel（1979）', 'Merlivat–Jouzel (1979)'),
   },
   DEF_TRACER_SOIL_KINETIC: {
     EXPONENT: pair('指数形式', 'Exponent form'), RESISTANCE: pair('阻力形式', 'Resistance form'),
