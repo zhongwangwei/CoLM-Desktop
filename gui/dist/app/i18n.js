@@ -904,6 +904,10 @@ const ZH_EN = [
   ['完成全部预热轮次后才开始正式输出。', 'Production output starts only after all spin-up cycles finish.'],
   ['年', 'years'],
   ['网格与并行', 'Grid & parallelism'],
+  ['← 返回当前任务', '← Back to the current task'],
+  ['本次新建或打开的算例；点一行切到该算例，勾选用于批量修改与运行。', 'Cases created or opened in this session; click a row to switch to it, tick rows for batch edits and runs.'],
+  ['本次还没有可运行的算例；先在基本设定中创建或打开算例', 'There is no case to run yet; create or open one in Basic setup first'],
+  ['勾选的站点没能建出算例，未开始运行', 'None of the ticked sites could be turned into a case; nothing was run'],
   ['城市模式暂不支持甲烷示踪', 'Methane tracing is not supported with the urban model yet'],
   ['流域网格的侧向流暂不支持这一项', 'Catchment lateral flow does not support this yet'],
   ['打开已有算例…', 'Open existing case…'],
@@ -1854,6 +1858,16 @@ export function translateZh(text, target = 'en') {
   if (!out) return value;
   const source = out;
   out = out
+    // 输出变量页：已勾选 N 个 · M 个在当前配置下写不出来 · K 个未知
+    .replace(/^已勾选 (\d+) 个((?: · \d+ 个(?:在当前配置下写不出来|未知))*)$/, (_, n, rest) =>
+      `${n} selected` + rest
+        .replace(/ · (\d+) 个在当前配置下写不出来/g, ' · $1 cannot be written with this configuration')
+        .replace(/ · (\d+) 个未知/g, ' · $1 unknown'))
+    // 站点列表：N 个自然/城市/作物/甲烷站点 · M 个无观测 · K 个读不了
+    .replace(/^(\d+) 个(自然|城市|作物|甲烷)站点((?: · \d+ 个(?:无观测|读不了))*)$/, (_, n, kind, rest) =>
+      `${n} ${{ 自然: 'natural', 城市: 'urban', 作物: 'crop', 甲烷: 'methane' }[kind]} site${n === '1' ? '' : 's'}` + rest
+        .replace(/ · (\d+) 个无观测/g, ' · $1 without observations')
+        .replace(/ · (\d+) 个读不了/g, ' · $1 unreadable'))
     .replace(/^无$/, 'None')
     .replace(/^缺少$/, 'Missing')
     .replace(/^模型$/, 'Model')

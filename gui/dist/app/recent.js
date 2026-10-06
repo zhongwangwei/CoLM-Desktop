@@ -27,13 +27,16 @@ const REMEMBERED = [
   // 换个站点也不会变。
 ];
 
+const OVERRIDE_DEFAULTS = new Set(['cpu-workers', 'mpi-ranks']);
+
 export async function restoreRecent() {
   let all = {};
   try { all = await invoke('load_recent'); } catch { /* 没有就算了，不值得打扰用户 */ }
   for (const id of REMEMBERED) {
     const el = $(id);
     if (!el || !all[id]) continue;
-    if (!el.value) el.value = all[id];
+    // 运行页在模块加载时就给这两个数填了缺省值；上次的设定要覆盖它，否则永远恢复不了。
+    if (!el.value || OVERRIDE_DEFAULTS.has(id)) el.value = all[id];
   }
   // 变了就记。用 change 而不是 input：每敲一个字符写一次文件太浪费，
   // 而这份东西丢了也不要紧。

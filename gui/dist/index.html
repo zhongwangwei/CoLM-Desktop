@@ -303,13 +303,11 @@
               <input class="input" id="root" placeholder="…/colm-cases">
               <button class="btn-ghost pick" data-for="root">选择…</button>
               <button class="btn-ghost" id="rescan">刷新本次算例</button>
-              <button class="btn-ghost" id="open-case">打开已有算例…</button>
             </div>
             <p class="fail mini" id="rootspace" hidden>
               路径含空格：CoLM 的 shell 建目录会拆错路径，请换一个不含空格的位置。
             </p>
           </div>
-          <div id="cases-built" class="listbox" style="margin-top:12px"></div>
         </div>
         </div>
 
@@ -343,6 +341,14 @@
             <p class="fail mini" id="spatial-error" hidden></p>
             <div class="pill-row"><button class="btn-next" id="make-spatial-case">生成网格、预检并建算例</button></div>
           </div>
+        </div>
+
+        <!-- 站点与空间会话共用：本次新建或打开的算例都在这里，点一行切换到它。 -->
+        <div class="card">
+          <h3>本次算例</h3>
+          <div class="ch">本次新建或打开的算例；点一行切到该算例，勾选用于批量修改与运行。</div>
+          <div class="pill-row"><button class="btn-ghost" id="open-case">打开已有算例…</button></div>
+          <div id="cases-built" class="listbox" style="margin-top:12px"></div>
         </div>
       </div>
 

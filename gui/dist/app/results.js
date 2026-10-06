@@ -151,7 +151,8 @@ function caseState(c) {
   const health = historyHealth.get(c.dir);
   if (isStaleResult(c)) return 'stale';
   if (c.has_history && health?.ok === false && !health.pending) return 'invalid';
-  if (hasValidatedHistory(c) || (running === '已完成' && !isStaleResult(c))) return 'done';
+  // 只跑了前处理阶段的「已完成」没有 history，不能算完成。
+  if (hasValidatedHistory(c) || (running === '已完成' && c.has_history && !isStaleResult(c))) return 'done';
   return 'waiting';
 }
 

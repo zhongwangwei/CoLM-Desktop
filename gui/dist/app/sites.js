@@ -9,7 +9,7 @@ import { renderFields } from './params.js';
 import { refreshVars } from './results.js';
 import { renderSteps, setStatus } from './shell.js';
 import {
-  batchTarget, currentCases, freshCaseName, updateCaseBatchButtons,
+  currentCases, freshCaseName, updateCaseBatchButtons,
 } from './batch.js';
 import { urbanEnabled } from './kernel.js';
 import { wizardFields } from './domain.js';
@@ -70,7 +70,8 @@ $('rescan').onclick = async () => {
  *  勾选状态共享 `state.pickedCases`，两边贯通。 */
 function renderCasesInto(box) {
   box.textContent = '';
-  const cases = box.id === 'cases-run' ? batchTarget() : currentCases();
+  // 两个列表都列本次会话的全部算例，勾选只决定作用于哪些；没勾的不能从列表里消失，否则勾不回来。
+  const cases = currentCases();
   if (!cases.length) {
     box.innerHTML = box.id === 'cases-run'
       ? '<p class="muted" style="font-size:11px">本次还没有要运行的算例；先在基本设定中创建算例。</p>'
@@ -565,3 +566,6 @@ $('use-example').onclick = async () => {
   } catch (err) { setStatus(err); }
   finally { $('use-example').disabled = false; }
 };
+
+// 新会话（向导或打开已有算例）清掉了本次算例；两个列表与运行按钮要跟着清，否则旧算例还挂在页上。
+addEventListener('colm:wizard', renderCases);

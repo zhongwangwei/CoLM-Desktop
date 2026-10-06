@@ -81,6 +81,12 @@ pub struct CaseProfile {
     pub kernel_preset: Option<String>,
     /// 「文件与目录」页建算例表单里的那些输入，打开后原样填回。
     pub inputs: CaseInputs,
+    /// 非结构网格的 mesh（`DEF_file_mesh`）与流域网格文件（`DEF_CatchmentMesh_data`）。
+    pub mesh_file: Option<String>,
+    pub catchment_file: Option<String>,
+    /// 建例记录里的范围类型与 Shapefile（`case.nml` 里没有）。
+    pub domain_kind: Option<String>,
+    pub shapefile: Option<String>,
 }
 
 #[derive(Debug, Serialize, PartialEq)]
@@ -104,6 +110,36 @@ pub struct OpenedCase {
     pub profile: CaseProfile,
 }
 
+/// GUI 建例时记下的、`case.nml` 里看不出来的向导选择：次网格模式（USGS 不留痕迹，没跑过的算例只能
+/// 靠它找回 USGS 内核）、空间范围的类型与流域 Shapefile。
+const PROFILE_FILE: &str = ".colm-desktop.json";
+
+#[derive(Debug, Default, Clone, PartialEq, Serialize, serde::Deserialize)]
+pub struct CaseRecord {
+    /// `igbp`/`usgs`/`pft`/`pc`，城市前缀 `urban-`。
+    #[serde(default)]
+    pub mode: Option<String>,
+    /// `watershed`/`region`/`global`。
+    #[serde(default)]
+    pub domain: Option<String>,
+    #[serde(default)]
+    pub shapefile: Option<String>,
+}
+
+/// 建例成功后写下记录。写不出来不影响建例。
+pub(crate) fn record_case(dir: &str, record: &CaseRecord) {
+    if let Ok(text) = serde_json::to_string(record) {
+        let _ = std::fs::write(Path::new(dir).join(PROFILE_FILE), text);
+    }
+}
+
+fn recorded_case(dir: &Path) -> CaseRecord {
+    std::fs::read_to_string(dir.join(PROFILE_FILE))
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default()
+}
+
 /// 「打开已有算例」：`dir` 必须是含 `case.nml` 的算例目录。
 #[tauri::command]
 pub fn open_case(dir: String) -> Result<OpenedCase, String> {
@@ -123,7 +159,15 @@ pub fn open_case(dir: String) -> Result<OpenedCase, String> {
         .into_iter()
         .find(|c| Path::new(&c.dir) == dir)
         .ok_or_else(|| format!("{} 读不出算例", dir.display()))?;
-    let profile = case_profile(&text, entry.spatial, stages.as_deref())?;
+    let record = recorded_case(&dir);
+    let mut profile = case_profile(
+        &text,
+        entry.spatial,
+        stages.as_deref(),
+        record.mode.as_deref(),
+    )?;
+    profile.domain_kind = record.domain;
+    profile.shapefile = record.shapefile;
     Ok(OpenedCase {
         entry,
         root,
@@ -131,12 +175,14 @@ pub fn open_case(dir: String) -> Result<OpenedCase, String> {
     })
 }
 
-/// 反推规则：网格看哪种网格字段写了；次网格看 `DEF_USE_PFT/PC`，LCT 再看上次内核是不是 USGS；
-/// 甲烷看示踪物名单；河湖汇流只对经纬度与非结构网格有意义（缺省开）。
+/// 反推规则：网格看哪种网格字段写了；次网格看 `DEF_USE_PFT/PC`，LCT 再看上次内核（没跑过就看建例
+/// 时的记录 `mode`）是不是 USGS；作物看上次内核的 CROP 宏或建例写入的播种日字段（`DEF_USE_CROP`
+/// 只是宏的只读反映，建例时不写）；甲烷看示踪物名单；河湖汇流只对经纬度与非结构网格有意义（缺省开）。
 pub(crate) fn case_profile(
     text: &str,
     spatial: bool,
     stages: Option<&str>,
+    mode: Option<&str>,
 ) -> Result<CaseProfile, String> {
     use crate::config::{character, integer, logical, real};
     let doc = colm_namelist::parse(text).map_err(|e| format!("case.nml: {e}"))?;
@@ -173,7 +219,18 @@ pub(crate) fn case_profile(
                 .find_map(|part| part.strip_prefix(key).map(str::to_owned))
         })
     };
-    let usgs = kernel_field("macros=").is_some_and(|m| m.split(',').any(|x| x == "LULC_USGS"));
+    let macros = kernel_field("macros=");
+    let has_macro = |name: &str| {
+        macros
+            .as_deref()
+            .is_some_and(|m| m.split(',').any(|x| x == name))
+    };
+    let usgs = if macros.is_some() {
+        has_macro("LULC_USGS")
+    } else {
+        mode.is_some_and(|m| m.ends_with("usgs"))
+    };
+    let crop = has_macro("CROP") || has("DEF_TUNING_CROP_PLANTING_DAY");
     let subgrid = if logical(&doc, "DEF_USE_PFT") {
         "PFT"
     } else if logical(&doc, "DEF_USE_PC") {
@@ -201,7 +258,11 @@ pub(crate) fn case_profile(
         )
     };
     let finite = |v: f64| v.is_finite().then_some(v);
-    let domain = spatial
+    // 只认显式写了的范围：schema 缺省是 ±180/±90，非结构与流域网格常常不写，不能当成全球。
+    let explicit_domain = ["edgew", "edgee", "edges", "edgen"]
+        .iter()
+        .all(|edge| has(&format!("DEF_domain%{edge}")));
+    let domain = (spatial && explicit_domain)
         .then(|| {
             Some([
                 finite(real(&doc, "DEF_domain%edgew"))?,
@@ -231,7 +292,7 @@ pub(crate) fn case_profile(
         urban: logical(&doc, "DEF_URBAN_RUN"),
         lulcc: logical(&doc, "DEF_USE_LULCC"),
         bgc: logical(&doc, "DEF_USE_BGC"),
-        crop: logical(&doc, "DEF_USE_CROP"),
+        crop,
         methane,
         river: gridded_routing && logical(&doc, "DEF_USE_GridRiverLakeFlow"),
         rangecheck: logical(&doc, "DEF_USE_RangeCheck"),
@@ -249,6 +310,12 @@ pub(crate) fn case_profile(
             end: date("end"),
             timestep: real(&doc, "DEF_simulation_time%timestep"),
         },
+        mesh_file: (grid == Some("unstructured") && set("DEF_file_mesh"))
+            .then(|| character(&doc, "DEF_file_mesh")),
+        catchment_file: (grid == Some("catchment") && set("DEF_CatchmentMesh_data"))
+            .then(|| character(&doc, "DEF_CatchmentMesh_data")),
+        domain_kind: None,
+        shapefile: None,
     })
 }
 

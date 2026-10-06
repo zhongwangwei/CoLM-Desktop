@@ -44,3 +44,18 @@ if (sourceSite(state.cases[2])?.obs_file !== '/data/site-obs.nc') {
 }
 
 console.log('batch: only current-created cases are visible and old names are not overwritten');
+
+// 运行目标：勾了就是勾中的；一个没勾就是本次全部算例，没勾的不能从列表里消失。
+{
+  state.cases = [{ name: 'a', dir: '/c/a' }, { name: 'b', dir: '/c/b' }, { name: 'old', dir: '/c/old' }];
+  state.createdCases.clear(); state.createdCases.add('/c/a'); state.createdCases.add('/c/b');
+  state.pickedCases.clear(); state.batch = [];
+  if (batchTarget().map(c => c.name).join('|') !== 'a|b') throw new Error('nothing ticked runs every case of the session');
+  state.pickedCases.add('/c/a');
+  if (batchTarget().map(c => c.name).join('|') !== 'a') throw new Error('an unticked case must not run');
+  if (currentCases().map(c => c.name).join('|') !== 'a|b') throw new Error('the unticked case stays listed');
+  const runner = await import('node:fs').then(fs => fs.readFileSync(new URL('../dist/app/runner.js', import.meta.url), 'utf8'));
+  if (!/!state\.createdCases\.has\(state\.createdBySite\.get\(s\.site_file\)\)/.test(runner)) {
+    throw new Error('running only builds sites that have no case yet');
+  }
+}

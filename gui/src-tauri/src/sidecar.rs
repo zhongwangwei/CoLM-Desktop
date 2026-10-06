@@ -1234,6 +1234,7 @@ pub async fn new_case(
     fields: Vec<crate::config::FieldChange>,
 ) -> Result<String, String> {
     validate_bgc_runtime(runtime.as_deref(), &fields)?;
+    let recorded_mode = mode.clone();
     let case_dir = out.clone();
     let case_existed = PathBuf::from(&case_dir).exists();
     let mut args = vec![
@@ -1281,6 +1282,13 @@ pub async fn new_case(
         }
         return Err(error);
     }
+    crate::project::record_case(
+        &case_dir,
+        &crate::project::CaseRecord {
+            mode: recorded_mode,
+            ..Default::default()
+        },
+    );
     Ok(output)
 }
 
@@ -1506,6 +1514,11 @@ pub async fn new_spatial_case(
                 cleanup("choose a forcing dataset or an existing forcing namelist".into())
             })?,
     };
+    let recorded = crate::project::CaseRecord {
+        mode: Some(request.mode.clone()),
+        domain: Some(request.domain.clone()),
+        shapefile: request.shapefile.clone(),
+    };
     let mut args = vec![
         "spatial-new".into(),
         "--grid-kind".into(),
@@ -1541,6 +1554,7 @@ pub async fn new_spatial_case(
     }
     let output = capture_async(args).await.map_err(cleanup)?;
     crate::config::apply_fields(&request.out, &request.fields).map_err(cleanup)?;
+    crate::project::record_case(&request.out, &recorded);
     Ok(output)
 }
 

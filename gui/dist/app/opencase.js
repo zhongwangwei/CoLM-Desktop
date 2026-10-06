@@ -13,9 +13,14 @@ import { fillSpatialForm } from './spatial.js';
 export function sessionFromProfile(p) {
   const [west, east, south, north] = p.domain ?? [];
   const global = p.domain && west <= -180 && east >= 180 && south <= -90 && north >= 90;
-  const domainKind = !p.spatial ? 'site' : (global ? 'global' : 'region');
+  // 建例记录里的范围类型优先（流域 Shapefile 在 case.nml 里看不出来）；没有记录时按范围推断。
+  const domainKind = !p.spatial ? 'site'
+    : (p.domain_kind ?? (global ? 'global' : 'region'));
+  const domain = { kind: domainKind };
+  if (p.domain) Object.assign(domain, { west, east, south, north });
+  if (domainKind === 'watershed' && p.shapefile) domain.shapefile = p.shapefile;
   const spatial = !p.spatial ? null : {
-    domain: p.domain ? { kind: domainKind, west, east, south, north } : { kind: domainKind },
+    domain,
     grid: p.grid === 'latlon'
       ? {
         kind: 'latlon', meshFile: null,
@@ -23,7 +28,9 @@ export function sessionFromProfile(p) {
         nlon: p.resolution ? Math.round(360 / p.resolution[0]) : null,
         nlat: p.resolution ? Math.round(180 / p.resolution[1]) : null,
       }
-      : { kind: p.grid },
+      : p.grid === 'unstructured'
+        ? { kind: 'unstructured', meshFile: p.mesh_file ?? null }
+        : { kind: p.grid, input: p.catchment_file ?? null },
   };
   return {
     domain: domainKind,
@@ -39,6 +46,12 @@ export function sessionFromProfile(p) {
   };
 }
 
+/** 首页（全屏）还开着时状态栏被它挡住，错误要写在首页上。 */
+function report(message) {
+  setStatus(message);
+  if (!$('domaingate').hidden) $('gateinfo').textContent = message;
+}
+
 export async function openExistingCase() {
   const dir = await invoke('pick_folder', { key: 'open-case' });
   if (!dir) return;
@@ -46,10 +59,16 @@ export async function openExistingCase() {
   try {
     opened = await invoke('open_case', { dir });
   } catch (e) {
-    setStatus(String(e));
+    report(String(e));
     return;
   }
-  startSession(sessionFromProfile(opened.profile));
+  // 打开算例走的也是 startSession；告诉「文件与目录」页这次不是新向导，表单不要重置成新建状态。
+  state.openingCase = true;
+  try {
+    startSession(sessionFromProfile(opened.profile));
+  } finally {
+    state.openingCase = false;
+  }
   // 跑过的算例记着上次的内核；按宏匹配到的若不是它，换回它。
   const last = state.kernels.find(k => k.preset === opened.profile.kernel_preset);
   if (last) $('kernel').value = last.dir;

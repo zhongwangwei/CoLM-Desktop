@@ -524,6 +524,14 @@ function renderFoot() {
     foot.appendChild(prev);
   }
 
+  if (pageIdx === 0 && state.wizard) {
+    // 「返回首页」点错了也能回去：当前任务原样保留。
+    const back = document.createElement('button');
+    back.className = 'btn-ghost';
+    back.textContent = '← 返回当前任务';
+    back.onclick = () => { $('domaingate').hidden = true; };
+    foot.appendChild(back);
+  }
   if (pageIdx === 0) {
     // 不走向导：直接打开磁盘上已有的算例（`opencase.js` 接这个事件）。
     const open = document.createElement('button');

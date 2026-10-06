@@ -37,17 +37,12 @@ export function editTarget() {
   return state.selected ? [state.selected.dir] : [];
 }
 
-/** 批量操作作用于谁：勾了就是勾中的；否则只用这次建/选出来的批次。
- *  不再默认扫整个 root —— 那里面常有上一次残留的自然站/旧算例。 */
+/** 批量操作作用于谁：勾了就是勾中的；一个没勾就是本次会话的全部算例（运行页卡片上就是这么写的）。
+ *  不扫整个 root —— 那里面常有上一次残留的自然站/旧算例。 */
 export function batchTarget() {
   const current = currentCases();
   const picked = current.filter(c => state.pickedCases.has(c.dir));
-  if (picked.length) return picked;
-  if (state.batch.length) {
-    const want = new Set(state.batch);
-    return current.filter(c => want.has(c.dir));
-  }
-  return state.selected && state.createdCases.has(state.selected.dir) ? [state.selected] : [];
+  return picked.length ? picked : current;
 }
 
 /** 找回一个新算例来自哪个站点。算例为避开旧目录可能改名成 `site-2`，

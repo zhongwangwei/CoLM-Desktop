@@ -225,4 +225,17 @@ $('make-spatial-case').onclick = async () => {
   }
 };
 
-addEventListener('colm:wizard', syncSpatialSetup);
+// 新向导是一次新任务：上一个（可能是打开的）算例的名称与强迫场不能带进来；日期保留，常常沿用。
+function resetSpatialForm() {
+  if (state.openingCase) return;
+  $('spatial-name').value = 'spatial-case';
+  $('spatial-forcing').value = '';
+  if (forcingDatasetsLoaded) {
+    const select = $('spatial-forcing-dataset');
+    const names = [...select.options].map(o => o.value).filter(v => v !== CUSTOM_FORCING);
+    select.value = names.includes('JRA3Q') ? 'JRA3Q' : (names[0] ?? CUSTOM_FORCING);
+    syncForcingMode();
+  }
+}
+
+addEventListener('colm:wizard', () => { resetSpatialForm(); syncSpatialSetup(); });

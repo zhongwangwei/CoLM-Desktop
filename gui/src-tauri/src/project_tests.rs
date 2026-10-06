@@ -125,7 +125,7 @@ fn an_opened_spatial_case_recovers_its_wizard_choices() {
                 DEF_GRIDBASED_lon_res = 0.25\n DEF_GRIDBASED_lat_res = 0.25\n DEF_USE_PFT = .true.\n \
                 DEF_USE_GridRiverLakeFlow = .false.\n DEF_USE_BGC = .true.\n/\n";
     let stages = r#"{"colm":{"kernel":"preset=latlon;platform=Darwin-arm64;args=GRID LULC_IGBP;macros=GRIDBASED,GridRiverLakeFlow,LULC_IGBP"}}"#;
-    let p = case_profile(text, true, Some(stages)).expect("profile");
+    let p = case_profile(text, true, Some(stages), None).expect("profile");
     assert_eq!(p.grid, Some("latlon"));
     assert_eq!(p.subgrid, "PFT");
     assert!(p.bgc && !p.river && !p.urban);
@@ -143,7 +143,7 @@ fn an_opened_case_brings_back_its_inputs() {
                 DEF_simulation_time%end_sec = 86400\n DEF_simulation_time%timestep = 1800.\n \
                 DEF_dir_rawdata = '/d/raw/'\n DEF_dir_runtime = '/d/run/'\n \
                 DEF_forcing_namelist = '/c/forcing.nml'\n/\n";
-    let p = case_profile(text, true, None).expect("profile");
+    let p = case_profile(text, true, None, None).expect("profile");
     assert_eq!(
         p.inputs,
         CaseInputs {
@@ -163,11 +163,11 @@ fn an_opened_site_case_reads_usgs_and_methane_from_the_last_run() {
     let text =
         "&nl_colm\n DEF_CASE_NAME = 's'\n DEF_USE_TRACER = .true.\n DEF_TRACER_NAMES = 'CH4'\n/\n";
     let stages = r#"{"mksrfdata":{"kernel":"preset=usgs;macros=SinglePoint,LULC_USGS"}}"#;
-    let p = case_profile(text, false, Some(stages)).expect("profile");
+    let p = case_profile(text, false, Some(stages), None).expect("profile");
     assert_eq!((p.grid, p.subgrid), (None, "USGS"));
     assert!(p.methane && !p.river);
     assert_eq!(p.domain, None);
-    let fresh = case_profile(text, false, None).expect("profile");
+    let fresh = case_profile(text, false, None, None).expect("profile");
     assert_eq!((fresh.subgrid, fresh.kernel_preset), ("IGBP", None));
 }
 
@@ -179,4 +179,68 @@ fn opening_a_directory_without_case_nml_is_refused() {
     let opened = open_case(dir.to_string_lossy().into_owned()).expect("opens");
     assert_eq!(opened.entry.name, "CN-Cng");
     assert_eq!(Path::new(&opened.root), root.as_path());
+}
+
+#[test]
+fn a_never_run_case_recovers_usgs_and_crop_from_creation() {
+    let text = "&nl_colm\n DEF_CASE_NAME = 's'\n DEF_USE_BGC = .true.\n DEF_USE_PFT = .true.\n \
+                DEF_TUNING_CROP_PLANTING_DAY = 120\n/\n";
+    let p = case_profile(text, false, None, Some("pft")).expect("profile");
+    assert!(p.crop, "the planting-day field marks a crop case");
+    let lct = "&nl_colm\n DEF_CASE_NAME = 'u'\n DEF_USE_LCT = .true.\n/\n";
+    assert_eq!(
+        case_profile(lct, false, None, Some("usgs"))
+            .unwrap()
+            .subgrid,
+        "USGS"
+    );
+    assert_eq!(
+        case_profile(lct, false, None, Some("urban-usgs"))
+            .unwrap()
+            .subgrid,
+        "USGS"
+    );
+    assert_eq!(
+        case_profile(lct, false, None, Some("igbp"))
+            .unwrap()
+            .subgrid,
+        "IGBP"
+    );
+    // 跑过的以上次内核为准。
+    let stages = r#"{"colm":{"kernel":"preset=crop;macros=SinglePoint,LULC_IGBP,CROP"}}"#;
+    let ran = case_profile(lct, false, Some(stages), Some("usgs")).unwrap();
+    assert_eq!(ran.subgrid, "IGBP");
+    assert!(ran.crop);
+}
+
+#[test]
+fn the_creation_record_round_trips() {
+    let root = tmp("mode-record");
+    let dir = make_case(&root, "c", "CN-Cng");
+    let record = CaseRecord {
+        mode: Some("usgs".into()),
+        domain: Some("watershed".into()),
+        shapefile: Some("/d/basin.shp".into()),
+    };
+    record_case(&dir.to_string_lossy(), &record);
+    assert_eq!(recorded_case(&dir), record);
+    let opened = open_case(dir.to_string_lossy().into_owned()).expect("opens");
+    assert_eq!(opened.profile.domain_kind.as_deref(), Some("watershed"));
+    assert_eq!(opened.profile.shapefile.as_deref(), Some("/d/basin.shp"));
+    assert_eq!(opened.profile.subgrid, "USGS");
+}
+
+#[test]
+fn opened_meshes_keep_their_files_and_no_implied_global_domain() {
+    let text = "&nl_colm\n DEF_CASE_NAME = 'm'\n DEF_file_mesh = '/d/mesh.nc'\n/\n";
+    let p = case_profile(text, true, None, None).expect("profile");
+    assert_eq!(p.grid, Some("unstructured"));
+    assert_eq!(p.mesh_file.as_deref(), Some("/d/mesh.nc"));
+    assert_eq!(
+        p.domain, None,
+        "schema defaults are not an explicit global domain"
+    );
+    let catch = "&nl_colm\n DEF_CASE_NAME = 'c'\n DEF_CatchmentMesh_data = '/d/basins.nc'\n/\n";
+    let p = case_profile(catch, true, None, None).expect("profile");
+    assert_eq!(p.catchment_file.as_deref(), Some("/d/basins.nc"));
 }

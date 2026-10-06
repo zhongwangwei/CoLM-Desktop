@@ -8,6 +8,8 @@
 export const state = {
   /** 当前在第几步，见 shell.js 的 STEPS。 */
   step: 'basic-files',
+  /** 正在「打开已有算例」：这次 startSession 不是新向导，「文件与目录」页的表单不重置。 */
+  openingCase: false,
   /** 前处理两条支线共同维护的产物。生成/转换后立即交接给基本设定。 */
   prepArtifacts: {
     siteStem: null,

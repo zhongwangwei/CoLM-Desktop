@@ -11,20 +11,19 @@ import { markResultsStale } from './results.js';
 import { editTarget } from './batch.js';
 import { $, status } from './ui.js';
 
+let generation = 0;
+
 export async function renderHistVars(box, stillCurrent = () => true) {
+  // 取一次变量表；搜索与「只看已勾选」只在这份表上过滤、只重画下面的列表 —— 整块重建会让搜索框
+  // 每敲一个字就换成新元素（焦点丢失），重新请求的回复还可能迟到、盖掉更新的结果。
+  const token = ++generation;
+  const current = () => token === generation && stillCurrent();
   const kernel = $('kernel').value;
   if (!kernel) { box.innerHTML = '<p class="muted">当前安装缺少与向导配置匹配的运行产物</p>'; return; }
   let vars;
   try { vars = await invoke('hist_vars', { text: state.text, kernelDir: kernel }); }
-  catch (e) { if (stillCurrent()) box.textContent = String(e); return; }
-  if (!stillCurrent()) return;
-
-  const n = { on: 0, blocked: 0, unknown: 0 };
-  for (const v of vars) {
-    if (v.on) n.on++;
-    if (v.writable === false) n.blocked++;
-    if (v.writable === null) n.unknown++;
-  }
+  catch (e) { if (current()) box.textContent = String(e); return; }
+  if (!current()) return;
 
   const bar = document.createElement('div');
   bar.className = 'row';
@@ -32,33 +31,44 @@ export async function renderHistVars(box, stillCurrent = () => true) {
   f.placeholder = `搜索 ${vars.length} 个输出变量`;
   f.value = state.histFilter ?? '';
   f.style.flex = '1';
-  f.oninput = () => { state.histFilter = f.value; renderHistVars(box); };
   bar.appendChild(f);
   const only = document.createElement('button');
-  only.textContent = state.histOnlyOn ? '只看已勾选' : '全部';
-  only.setAttribute('aria-pressed', String(!!state.histOnlyOn));
-  only.onclick = () => { state.histOnlyOn = !state.histOnlyOn; renderHistVars(box); };
   bar.appendChild(only);
-  box.textContent = '';
-  box.appendChild(bar);
-
   const sum = document.createElement('p');
   sum.className = 'muted';
   sum.style.fontSize = '11px';
-  // 「勾了 N 个」不是用户真正想知道的；「其中 M 个写不出来」才是。
-  sum.textContent =
-    `已勾选 ${n.on} 个` +
-    (n.blocked ? ` · ${n.blocked} 个在当前配置下写不出来` : '') +
-    (n.unknown ? ` · ${n.unknown} 个未知` : '');
-  box.appendChild(sum);
+  const list = document.createElement('div');
+  box.textContent = '';
+  box.append(bar, sum, list);
 
-  const q = (state.histFilter ?? '').trim().toLowerCase();
-  let shown = q ? vars.filter(v => v.name.toLowerCase().includes(q)) : vars;
-  if (state.histOnlyOn) shown = shown.filter(v => v.on);
-  if (!shown.length) { box.insertAdjacentHTML('beforeend', '<p class="muted">没有匹配的变量</p>'); return; }
+  const summarize = () => {
+    const n = { on: 0, blocked: 0, unknown: 0 };
+    for (const v of vars) {
+      if (v.on) n.on++;
+      if (v.writable === false) n.blocked++;
+      if (v.writable === null) n.unknown++;
+    }
+    // 「勾了 N 个」不是用户真正想知道的；「其中 M 个写不出来」才是。
+    sum.textContent =
+      `已勾选 ${n.on} 个` +
+      (n.blocked ? ` · ${n.blocked} 个在当前配置下写不出来` : '') +
+      (n.unknown ? ` · ${n.unknown} 个未知` : '');
+  };
 
-  const tbl = document.createElement('table');
-  for (const v of shown) {
+  const draw = () => {
+    only.textContent = state.histOnlyOn ? '只看已勾选' : '全部';
+    only.setAttribute('aria-pressed', String(!!state.histOnlyOn));
+    list.textContent = '';
+    const q = (state.histFilter ?? '').trim().toLowerCase();
+    let shown = q ? vars.filter(v => v.name.toLowerCase().includes(q)) : vars;
+    if (state.histOnlyOn) shown = shown.filter(v => v.on);
+    if (!shown.length) { list.innerHTML = '<p class="muted">没有匹配的变量</p>'; return; }
+    const tbl = document.createElement('table');
+    for (const v of shown) tbl.appendChild(row(v));
+    list.appendChild(tbl);
+  };
+
+  const row = v => {
     const tr = document.createElement('tr');
     const c = document.createElement('td');
     const cb = document.createElement('input');
@@ -78,6 +88,8 @@ export async function renderHistVars(box, stillCurrent = () => true) {
           kernelDir: kernel,
         });
         state.text = r.text;
+        v.on = cb.checked;
+        summarize();
         await markResultsStale(dirs);
         status(r.written > 1 ? `已写入 ${r.written} 个算例：${v.name}` : `已保存 ${v.name}`);
       } catch (e) { status(e); cb.checked = v.on; }
@@ -99,7 +111,11 @@ export async function renderHistVars(box, stillCurrent = () => true) {
       why.textContent = '由甲烷输出选择器控制';
     }
     tr.appendChild(c); tr.appendChild(nm); tr.appendChild(why);
-    tbl.appendChild(tr);
-  }
-  box.appendChild(tbl);
+    return tr;
+  };
+
+  f.oninput = () => { state.histFilter = f.value; draw(); };
+  only.onclick = () => { state.histOnlyOn = !state.histOnlyOn; draw(); };
+  summarize();
+  draw();
 }

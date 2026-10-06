@@ -44,7 +44,8 @@ function syncParallelMode() {
   $('mpi-setting').hidden = !mpi;
   $('threads-setting').hidden = !(spatial && !mpi);
   $('threads-capacity').textContent = `最多 ${cpuCapacity} 个线程（本机逻辑 CPU 数）。`;
-  if (!mpi && !$('mpi-ranks').disabled && spatial) fortranRanks = $('mpi-ranks').value;
+  // 离开 MPI 模式（换成 Rust 引擎或站点会话）都先记下 Fortran 的进程数，回来时还原。
+  if (!mpi && !$('mpi-ranks').disabled) fortranRanks = $('mpi-ranks').value;
   $('mpi-ranks').disabled = !mpi;
   if (!mpi) $('mpi-ranks').value = '1';
   else if (fortranRanks !== null) { $('mpi-ranks').value = fortranRanks; fortranRanks = null; }
@@ -319,16 +320,20 @@ $('cancel-run').onclick = async () => {
 /** 下方四个按钮共用同一批目标。指定单段是明确的手工重建意图，始终强制
  *  执行该段；“运行全部”才由“强制全部重跑”决定是否忽略阶段指纹。 */
 async function runRequested(stage) {
-  // 勾了站点却还没建算例的，先建 —— **建算例不再是一道要人按的关**。
-  const wanted = state.sites.filter(s => state.picked.has(s.site_file));
-  if (wanted.length) {
-    const made = await ensureCases(wanted);
-    state.batch = [...new Set(made.map(c => c.dir))];
-    state.pickedCases.clear();
-    for (const c of made) state.pickedCases.add(c.dir);
+  // 勾了站点却还没建算例的，先建 —— **建算例不再是一道要人按的关**。已经建过的不重建，
+  // 也不动运行页上的勾选：重建会把用户刚取消勾选的算例重新塞回运行批次。
+  const unbuilt = state.sites.filter(s => state.picked.has(s.site_file)
+    && !state.createdCases.has(state.createdBySite.get(s.site_file)));
+  if (unbuilt.length) {
+    const made = await ensureCases(unbuilt);
+    if (!made.length) { status('勾选的站点没能建出算例，未开始运行'); return; }
+    for (const c of made) {
+      if (!state.batch.includes(c.dir)) state.batch.push(c.dir);
+      state.pickedCases.add(c.dir);
+    }
   }
   const dirs = batchTarget().map(c => c.dir);
-  if (!dirs.length) return;
+  if (!dirs.length) { status('本次还没有可运行的算例；先在基本设定中创建或打开算例'); return; }
   const runId = resetRunView(dirs);
   renderCases();
   const force = stage !== null || $('force').checked;
