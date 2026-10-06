@@ -30427,6 +30427,8 @@ GUI 的"不分馏"卡片去掉了"会被上游自检停机"的提示。
 
 **全链条**（用 GUI 后端的 `apply_fields` 生成算例，`--preprocessors fortran` 对全 Rust）：
 - `sol`（CN-Cng 2008-01，只开 Cl，测试浓度）：`files ok 8`。径流 Cl 浓度 8e-9 到 2.2e-5；土壤最高到 1e-2，是参数文件里溶解浓度的上限，蒸发浓缩后触顶。
+  - `f_trc_conc_precip_Cl` 整月非 0 即缺测：这个站 2008 年 1 月的强迫降水全为 0（雨雪都没有）。上游的"降水"累加器 `a_water_precip` 还收冠层与地表的露、霜沉积（`MOD_Tracer_Evapo.F90:193/213`、`MOD_Tracer_SoilWater.F90:707`），不挥发溶质的 `deposition_ratio_for` 为 0。所以有露霜的 171 小时是 0/正数 = 0，其余 573 小时缺测。主 history 核对：为 0 的小时都有负的 `f_fevpl`/`f_fevpg`，缺测的小时全为正。
+  - 同站 7 月复验（只跑 Rust）：69 个降雨小时、156.7 mm，降水 Cl 浓度中位数 2.0e-6，等于设定值；最小 1.54e-6 出现在同一小时里还有露的时候。这个变量名为"降水浓度"，实际是全部大气输入（降水 + 露霜）的平均浓度。
 - `sed`（第 593 轮的 `iso` 空间算例，示踪剂换成只有 SEDIMENT，2 天）：`files ok 261`。`f_sedcon_1` 最大 0.0064，94 个单元流域非零；`f_layer_1` 128 个非零。
 
 测试：GUI 后端 199 个（新增溶质浓度写入与非法值拒绝、泥沙的站点 / 河湖汇流约束与参数文件复制），`gui/tests/domain.mjs` 新增站点溶质页与空间泥沙的开关联动，check-gui，parameter-audit 产物无变化。
