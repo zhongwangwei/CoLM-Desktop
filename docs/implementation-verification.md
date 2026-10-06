@@ -30451,3 +30451,35 @@ GUI 的"不分馏"卡片去掉了"会被上游自检停机"的提示。
 - 浓度：`precipitation plus dew/frost deposition tracer concentration (<name>)`，不挥发溶质再接 `, dew/frost adding water only`（上游按 `tracer_is_nonvolatile_solute` 分两种写法，Rust 新增 `LongName::SoluteNote`）。
 
 只改名字，数值不变。验收：`sol` 8、`isosite` 8、`iso` 261 份逐位一致，两侧文件里的 long_name 逐字相同；`colm-core` 的 hist 测试补了 Cl 的名字。同一改动推到 CoLM202X 的 `fix/colm-desktop-audit`（`21ea5f7f`），上游单点 TRACER 配置编译通过。
+
+## 第 599 轮：核对一份外部 tracer 审查报告，修其中仍成立的五条
+
+外部审查列了 9 条 tracer 问题。它读的是主检出目录里的旧代码（第 398 轮，比 `origin/main` 落后 243 个提交），所以每条都拿当前代码重新核对了一遍。
+
+**已经不成立的三条**：
+- #1「LCT 算例被 Rust 接受却不算示踪物」：`isosite` 就是 LCT 单点，示踪物 history 与 Fortran 逐位一致（第 594–598 轮）。
+- #4「恢复默认值写出跑不了的甲烷配置」：第 588–590 轮起恢复成 `hybrid` 时同步改动态湿地，单点或没开河湖汇流时直接拒绝。
+- #7「同位素守恒检查重复扣水残差」：09-29 从上游同步的 `booked_host_water` 已把记过账的水残差从 `water_err` 里扣掉。按审查给的情景算，结果为 0。
+
+**修了的五条**：
+- **#3 预处理缓存**：mksrfdata 按 CH4 参数文件的 `allowlakeprod`/`use_spatial_ph` 决定生成什么，mkinidata 读湖泊土壤碳，但两段的指纹都跳过参数文件。
+  - 现在两段都记这两个开关的生效值；判定逻辑挪进 `colm_srfdata::methane_preprocessing`，前处理与指纹共用。
+  - 两个都关时不记，现有算例不必重做前处理。调 Q10 之类的系数也不会触发重做。
+- **#8 参数文件映射**：`DEF_TRACER_PARAM_FILES` 原来有五种拆法。Study 丢掉 `null` 占位，按位置写的文件会错配到别的示踪物；指纹、GUI、Study 不认 `;`。
+  - 现在 `colm_namelist::tracer_files` 按 `MOD_Tracer_Defs` 的规则实现一次：`,`/`;` 分隔、`key:path`、盘符例外、`null` 占位、先匹配者胜。
+  - 引擎、mksrfdata-rs、指纹、GUI、Study 都改用它；引擎语义不变。
+- **#2 泥沙推移质**：见 upstream-bugs #80。
+  - 正反向推移质改为按方向流量份额加权。单测复现了修前的翻倍（11579 → 23158）。
+  - `sed` 配对 261 份逐位一致。与修前相比，128 个单元流域里变了 22 个：中位数约 3e-5，个别有潮汐回水的单元流域推移质变化 24%–39%。
+  - 已推到 CoLM202X（`401efae9`）。
+- **#9(b) CH4 history 的开关**：GUI 原来只要开了示踪剂，就把所有甲烷变量显示成会写。核对时还发现 Rust 不管设置一律写 `core` 那 18 个量。
+  - 现在两边共用 `colm_hist::methane`（核心量清单与模式规则）。有测试钉住它与引擎 `core_values`、`history_accumulation_mode` 一致。
+  - Rust 在 `write_ch4_history = .false.` 或选 `none` 时既不累加也不写。`diagnostic`/`all`/逐个列名没有移植，启动时明确拒绝。
+  - 验证：`gho`（`gh` 关掉 CH4 history，3 天）配对 293 份逐位一致，两侧都没有甲烷变量；`'all'` 被 Rust 拒绝并提示用 Fortran。
+- **#9(c) 过程参数校验**：上游的参数校验（`validate_methane_namelist`）在 Rust 里的移植挪成 `MethaneParameters::from_parameter_text`，引擎与 GUI 共用。
+  - GUI 保存或恢复 CH4 参数文件前先校验，不合法整批不写并说明原因。
+  - 取值不一致时，"恢复代码默认值"按钮与输入框一起禁用。
+
+**记录、未修的两条**：#5 甲烷雪层几何（upstream-bugs #81）、#6 湖泊碳分解无上限（#82）。两条都改物理结果或参数范围，待维护者决定。
+
+验证：colm-namelist、colm-cli 223、colm-core 505、colm-srfdata 273+49（单线程；`raster` 集成测试要 `COLM_RAWDATA`，不算回归）、colm-runtime 168、GUI 后端 202、`gui/tests`、check-gui、parameter-audit（产物无变化）、工作区与 GUI 的 fmt/clippy。
