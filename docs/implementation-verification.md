@@ -30282,3 +30282,29 @@ unitcat 文件原来铺在整张全球 15′ 网格上（区域河网文件保�
 - 输出变量页每个变量旁显示 CoLM 写出时的 `long_name`，723 个变量都有，搜索也匹配它。
 
 验证：GUI 后端测试 193 个（新增城市参数切换、次网格开关、2m WMO、输出变量文件只读）、`colm-hist` 46 个、`colm-case` 71 个、`gui/tests/*.mjs`（含新测试）、check-gui、clippy、fmt。
+
+## 第 593 轮：示踪物全链条——同位素（IsoGSM）与甲烷 hybrid
+
+**同位素的输入数据**：
+- 位置：`/Volumes/Data/CoLM_Forcing/IsoGSM/`（2000–2004 年，6 小时，0.5°，59 GB）。
+- 主强迫用同一套 IsoGSM（`vendor/CoLM202X/run/forcing/IsoGSM.nml`）。
+- 同位素强迫写在 `standard_O18_parameter.nml` / `standard_HDO_parameter.nml` 的 `&nl_colm_tracer_forcing` 里：降水 `IsoGSM_prate` 的 `prate1sfc`（H₂¹⁸O）、`prate2sfc`（HDO），水汽 `IsoGSM_Q` 的 `spfh12m`、`spfh22m`，按 `normalized_over_total` 解码。
+- 上游要求开分馏的同位素必须有水汽强迫，而示踪物强迫不支持 POINT，所以带分馏的同位素只能跑空间算例。
+- 变饱和流下还必须给 `DEF_TRACER_AQUIFER_MIXING_WATER_MM`（正值，无缺省）。
+
+**同位素对照**（`iso`）：
+- 配置：110–112°E、23–25°N，0.5°，IGBP、van Genuchten，河湖汇流开；IsoGSM 驱动，2003-01-01 起 2 天；H₂¹⁸O + HDO 开分馏，参数文件用上游标准文件；含水层混合水量取 1000 mm（测试值）。
+- `--engine fortran --preprocessors fortran` 对全 Rust：`files ok 261`，包括陆面、示踪物、unitcat 的 history 与续跑文件。
+- 日志确认读入了示踪物强迫：第一个时刻降水 δ¹⁸O 为 -11.0 到 1.9‰。
+- history 的日均值：降水 δ¹⁸O -6.7 到 -1.6‰、δD -41 到 -0.7‰；蒸发水汽偏负，土壤蒸发 δ¹⁸O 最低到 -72‰。
+
+**甲烷 hybrid 对照**（`gh`：第 588 轮的算例延长到 10 天）：
+- 配置：PC、BGC、甲烷 `hybrid`、动态湿地、河湖汇流开。
+- `files ok 298`。
+- 产生、氧化逐日都有；地表净通量 -9.7e-12 到 -4.7e-14 mol/m²/s，1 月华南为净吸收。收支残差约 1e-27；宿主水分偏差最大为孔隙体积的 4.6e-4。
+
+**GUI**：向导里同位素仍是"暂未开放"，同位素算例目前只能手写 namelist 建。要在 GUI 里打开，需要：
+- 限定为空间算例；
+- 强迫数据集强制用 IsoGSM；
+- 生成 O18/HDO 参数文件；
+- 让用户给出含水层混合水量。
