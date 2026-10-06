@@ -30528,3 +30528,54 @@ GUI 的"不分馏"卡片去掉了"会被上游自检停机"的提示。
   - 上游树按 `GRID LULC_IGBP_PFT … TRACERON` 编出 `colm.x`，0 个 Error；
   - workspace fmt、clippy、colm-core 测试通过；GUI 204 个测试通过；`gui/tests/*.mjs`、check-gui 通过。
 - 上游提交 `0077d685`（`fix/colm-desktop-audit`）。
+
+## 第 602 轮：输出改 zarr 值不值——实测 history 写入的开销在哪
+
+**问题**：输出改 zarr 会不会更快，能不能顺带避开 netCDF 并发写时的 HDF 错误 -101。
+
+**基准**（`tmp/zb`，不入库）：
+- 由 `gr` 改出：域 104–116E、21–29N，0.5° 网格（384 格），JRA3Q 强迫，latlon 内核带网格河网，跑 2 天 96 步。
+- `DEF_HIST_FREQ = 'TIMESTEP'`，每步一条记录，故意把输出压到最重。
+- 用 `COLM_RS_TIMING=1` 看主循环分段计时，history 段再加临时计时拆开（不提交）。
+
+| 变体 | 主循环 | history 段 | 主 history 文件 |
+|---|---|---|---|
+| 每步写，deflate 1（默认） | 72.8 s | 17.1 s | 35.2 MB |
+| 每步写，`DEF_HIST_CompressLevel = 0` | 63.8 s | 14.8 s | 65.3 MB |
+| `DAILY`（几乎只剩累加） | 54.7 s | 1.8 s | 1.4 MB |
+
+（主循环的差异大半来自 grid river 段的机器负载波动，看 history 那一列。）
+
+拆开 history 段（deflate 1）：
+- 逐 patch 累加 `push_jobs` 的并行段：96 步共 1.68 s。
+- `finish_step` 共 14.2 s，其中：
+  - 整组写盘 `write_gridded` 只有 1.59 s：定义 0.03 s，patch→网格聚合 0.26 s，`put_values` 0.05 s，`close`（deflate 加落盘）1.24 s；
+  - 剩下约 12.6 s 是每条记录把均值填进 `HistoryBuffers`。
+- `sample` 抓到的热点全在 `set_patch_scalar`、`set_layered`、`include`、`layers_of` 里的 `memcmp`：每个 patch 写每个变量都按变量名查表，而且在主线程串行。
+
+**输出本来就不是每步重写**：上游写回模式把一整组攒在内存里，组末一次写盘；河网 unitcat 文件按记录 append，算在 grid river 段。
+
+**同一份数据的纯写盘对比**（Python：netCDF4 1.7.3 / zarr 3.2.1，123 个变量、64 MB，3 次取最好）：
+
+| 格式 | 写入 | 大小 | 文件数 | 读一个变量全时段 |
+|---|---|---|---|---|
+| netCDF4 deflate 1 | 0.77 s | 34.8 MB | 1 | 21 ms |
+| netCDF4 不压缩 | 0.17 s | 65.3 MB | 1 | 20 ms |
+| zarr v3，每步一块，zstd 1 | 7.11 s | 34.2 MB | 11932 | 36 ms |
+| zarr v3，每变量一块，zstd 1 | 0.51 s | 26.1 MB | 247 | 2 ms |
+| zarr v3，每变量一块，lz4 | 0.49 s | 28.0 MB | 247 | 3 ms |
+| zarr v3，每步一块 + 分片，zstd 1 | 3.79 s | 34.4 MB | 247 | 30 ms |
+
+**结论**：
+1. **zarr 省不了多少时间。**
+   - 最好的配置（每变量一块 + zstd）比 netCDF deflate 少 0.26 s/64 MB，换到引擎里是 1.6 s 里的一部分，不到主循环的 1%。
+   - 文件小约 25%，读取快，这是 zarr 真正的好处。
+   - 块切得细（每步一块）反而慢一个数量级，小文件开销压倒一切。
+2. **zarr 也解决不了 -101。**
+   - 生产运行里只有主线程写输出，强迫预读线程的读由 netcdf crate 的全局锁串行。-101 只在 `colm-init`/`colm-srfdata` 的并行单元测试里出现（见第 395 轮）。
+   - 那些测试读写的是地表数据、初始场这些 netCDF 文件，Fortran 内核要读它们，换不了格式。
+   - netcdf crate 已经串行化了所有 C 调用，并行测试仍然 -101，根因另有所在（HDF5 文件锁或临时目录冲突更可疑），要单独查。
+3. **zarr 还有格式代价**：Fortran 只写 netCDF，配对逐位比对、黄金回归、GUI 结果页和下游脚本都按 netCDF 读。zarr 只能做成可选的附加输出，不能替换。
+4. **真正的瓶颈是缓冲区填值**：每步写输出时约占主循环的 17–20%。把按名字查找改成一次性解析好的下标，预计 12.6 s 能降到 1 s 以内，与格式无关，结果逐位不变。
+
+**处理**：本轮不加 zarr，临时计时已撤掉。缓冲区填值的优化跨 `colm-hist` 与 `colm-runtime` 两个 crate，先报方案。
