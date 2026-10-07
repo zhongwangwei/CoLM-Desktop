@@ -1,6 +1,7 @@
 //! PFT-fraction aggregation from `Aggregation_PercentagesPFT.F90`.
 
 use anyhow::{ensure, Context, Result};
+use rayon::prelude::*;
 
 use crate::{
     surface::{CanopyStructure, FlatPatches, SURFACE_MISSING},
@@ -800,65 +801,89 @@ pub fn aggregate_pft_index(
         patch_index: vec![0.0; patches.len()],
         pft_index: vec![0.0; input.pft_classes.len()],
     };
-    for patch in 0..patches.len() {
-        let range = input.pft_offsets[patch]..input.pft_offsets[patch + 1];
-        if range.is_empty() {
-            ensure!(
-                input.patch_kind[patch] == PftPatchKind::Other
-                    && patches.wmo_source_for(patch).is_none(),
-                "PFT/PC patch {patch} has no PFT"
-            );
-            // `Aggregation_LAI` 对每个 patch（湿地、城市、水体也一样）都写面积加权的
-            // `LAI/SAI_patches`，只有 PFT 量按 patch 类型分支。
+    // 非 WMO 的 patch 各自只写自己的 patch 槽和 PFT 区间，互不依赖：按 patch 并行算。WMO patch 要读
+    // 来源 patch 的 PFT 值，原来按 patch 次序走（来源在后面时读到的是初值 0）：放到第二步按次序串行做，
+    // 结果与逐个串行逐位相同。出错时报 patch 次序里的第一个错，与串行一致。
+    let computed = (0..patches.len())
+        .into_par_iter()
+        .map(|patch| -> Result<Option<(f64, Vec<f64>)>> {
+            let range = input.pft_offsets[patch]..input.pft_offsets[patch + 1];
+            if range.is_empty() {
+                ensure!(
+                    input.patch_kind[patch] == PftPatchKind::Other
+                        && patches.wmo_source_for(patch).is_none(),
+                    "PFT/PC patch {patch} has no PFT"
+                );
+                // `Aggregation_LAI` 对每个 patch（湿地、城市、水体也一样）都写面积加权的
+                // `LAI/SAI_patches`，只有 PFT 量按 patch 类型分支。
+                let (patch_index, area_sum) =
+                    aggregate_patch_index(patches.raw_cells(patch), input, patch)?;
+                return Ok(Some((patch_index / area_sum, Vec::new())));
+            }
+            if patches.wmo_source_for(patch).is_some() {
+                return Ok(None);
+            }
             let (patch_index, area_sum) =
                 aggregate_patch_index(patches.raw_cells(patch), input, patch)?;
-            output.patch_index[patch] = patch_index / area_sum;
-            continue;
-        }
-        let first = range
-            .clone()
-            .next()
-            .with_context(|| format!("PFT/PC patch {patch} has no PFT"))?;
-        if let Some(source) = patches.wmo_source_for(patch) {
-            let first = single_wmo_pft(range, patch)?;
-            let class = input.pft_classes[first];
-            if (12..=14).contains(&class) {
-                let source_range = input.pft_offsets[source]..input.pft_offsets[source + 1];
-                if let Some(source_pft) = source_range
-                    .clone()
-                    .find(|&pft| input.pft_classes[pft] == class)
-                {
-                    output.pft_index[first] = output.pft_index[source_pft];
-                }
-            }
-            output.patch_index[patch] = output.pft_index[first];
-            continue;
-        }
-
-        let (patch_index, area_sum) =
-            aggregate_patch_index(patches.raw_cells(patch), input, patch)?;
-        output.patch_index[patch] = patch_index / area_sum;
-        match input.patch_kind[patch] {
-            PftPatchKind::Natural => {
-                for pft in range {
-                    let class = input.pft_classes[pft];
-                    let mut weighted_area = 0.0;
-                    let mut weighted_index = 0.0;
-                    for &cell in patches.raw_cells(patch) {
-                        let percent = percentage_index(input, class, cell, patch)?.max(0.0);
-                        let area = area(input.land_area, cell, patch)?;
-                        weighted_area = percent.mul_add(area, weighted_area);
-                        weighted_index = (index(input, class, cell, patch)? * percent)
-                            .mul_add(area, weighted_index);
-                    }
-                    if weighted_area > 0.0 {
-                        output.pft_index[pft] = weighted_index / weighted_area;
+            let patch_index = patch_index / area_sum;
+            let mut pft_index = vec![0.0; range.len()];
+            match input.patch_kind[patch] {
+                PftPatchKind::Natural => {
+                    for (slot, pft) in pft_index.iter_mut().zip(range) {
+                        let class = input.pft_classes[pft];
+                        let mut weighted_area = 0.0;
+                        let mut weighted_index = 0.0;
+                        for &cell in patches.raw_cells(patch) {
+                            let percent = percentage_index(input, class, cell, patch)?.max(0.0);
+                            let area = area(input.land_area, cell, patch)?;
+                            weighted_area = percent.mul_add(area, weighted_area);
+                            weighted_index = (index(input, class, cell, patch)? * percent)
+                                .mul_add(area, weighted_index);
+                        }
+                        if weighted_area > 0.0 {
+                            *slot = weighted_index / weighted_area;
+                        }
                     }
                 }
+                PftPatchKind::Crop => pft_index[0] = patch_index,
+                PftPatchKind::Other => {}
             }
-            PftPatchKind::Crop => output.pft_index[first] = output.patch_index[patch],
-            PftPatchKind::Other => {}
+            Ok(Some((patch_index, pft_index)))
+        })
+        .collect::<Vec<_>>();
+    let mut wmo = Vec::new();
+    for (patch, result) in computed.into_iter().enumerate() {
+        match result? {
+            Some((patch_index, pft_index)) => {
+                output.patch_index[patch] = patch_index;
+                let start = input.pft_offsets[patch];
+                output.pft_index[start..start + pft_index.len()].copy_from_slice(&pft_index);
+            }
+            None => wmo.push(patch),
         }
+    }
+    for patch in wmo {
+        let range = input.pft_offsets[patch]..input.pft_offsets[patch + 1];
+        let source = patches
+            .wmo_source_for(patch)
+            .expect("only WMO patches were deferred");
+        let first = single_wmo_pft(range, patch)?;
+        let class = input.pft_classes[first];
+        if (12..=14).contains(&class) {
+            let source_range = input.pft_offsets[source]..input.pft_offsets[source + 1];
+            if let Some(source_pft) = source_range
+                .clone()
+                .find(|&pft| input.pft_classes[pft] == class)
+            {
+                // 串行时来源在本 patch 之后就还没算，读到的是初值 0。
+                output.pft_index[first] = if source < patch {
+                    output.pft_index[source_pft]
+                } else {
+                    0.0
+                };
+            }
+        }
+        output.patch_index[patch] = output.pft_index[first];
     }
     Ok(output)
 }

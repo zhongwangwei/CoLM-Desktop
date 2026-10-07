@@ -29,7 +29,7 @@ use colm_srfdata::{
     read_mesh_open_raster_f64, read_mesh_raster_f64, read_mesh_raster_i32,
     read_mesh_raster_layers_f64, read_mesh_raster_time_f64, read_mesh_tiled_raster_f64,
     read_mesh_tiled_raster_i32, read_mesh_tiled_raster_pft_f64,
-    read_mesh_tiled_raster_pft_time_f64, read_mesh_tiled_raster_time_cached_f64,
+    read_mesh_tiled_raster_pft_times_f64, read_mesh_tiled_raster_time_cached_f64,
     read_mesh_tiled_raster_time_f64, read_methane_ph_patch_selection, write_landpatch_3d_vector,
     write_landpatch_layered_vector, write_landpatch_scalar, write_landpatch_vector,
     write_patch_diagnostic, write_patch_diagnostic_dimension, write_patch_diagnostic_time,
@@ -828,54 +828,83 @@ fn materialize_pft_monthly_vegetation(
             )?;
             year_percent.as_slice()
         };
-        for month in 1..=12 {
-            let lai = (!args.stem_area_only)
-                .then(|| -> Result<_> {
-                    aggregate_pft_index(
-                        layout,
-                        PftIndexInput {
-                            pft_offsets: &pfts.patch_offsets,
-                            pft_classes: &pfts.pft_classes,
-                            patch_kind: &pfts.patch_kind,
-                            raw_class_count: MODIS_PFT_CLASSES,
-                            raw_percent,
-                            raw_index: &read_mesh_tiled_raster_pft_time_f64(
-                                &args.plant_tiles,
-                                &suffix,
-                                &lai_name,
-                                MODIS_PFT_CLASSES,
-                                month,
-                                mesh,
-                                &topology.pixel,
-                                COLM_500M,
-                            )?,
-                            land_area: area,
-                        },
-                    )
-                })
+        // `MONTHLY_PFT_LAI`/`SAI` 的块在时间维上是 2 个月：成对读，每块只解压一次（第 604 轮）。
+        // 每个月的值与单独读那个月相同；聚合与写出仍按月份次序。
+        let read_months = |name: &str, first: usize| {
+            read_mesh_tiled_raster_pft_times_f64(
+                &args.plant_tiles,
+                &suffix,
+                name,
+                MODIS_PFT_CLASSES,
+                first,
+                2,
+                mesh,
+                &topology.pixel,
+                COLM_500M,
+            )
+        };
+        for first in (1..=12).step_by(2) {
+            let lai_pair = (!args.stem_area_only)
+                .then(|| read_months(&lai_name, first))
                 .transpose()?;
-            let sai = aggregate_pft_index(
-                layout,
-                PftIndexInput {
-                    pft_offsets: &pfts.patch_offsets,
-                    pft_classes: &pfts.pft_classes,
-                    patch_kind: &pfts.patch_kind,
-                    raw_class_count: MODIS_PFT_CLASSES,
-                    raw_percent,
-                    raw_index: &read_mesh_tiled_raster_pft_time_f64(
-                        &args.plant_tiles,
-                        &suffix,
-                        &sai_name,
-                        MODIS_PFT_CLASSES,
-                        month,
-                        mesh,
-                        &topology.pixel,
-                        COLM_500M,
-                    )?,
-                    land_area: area,
-                },
-            )?;
-            if let Some(lai) = &lai {
+            let sai_pair = read_months(&sai_name, first)?;
+            for (offset, sai_raw) in sai_pair.iter().enumerate() {
+                let month = first + offset;
+                let lai = lai_pair
+                    .as_ref()
+                    .map(|pair| -> Result<_> {
+                        aggregate_pft_index(
+                            layout,
+                            PftIndexInput {
+                                pft_offsets: &pfts.patch_offsets,
+                                pft_classes: &pfts.pft_classes,
+                                patch_kind: &pfts.patch_kind,
+                                raw_class_count: MODIS_PFT_CLASSES,
+                                raw_percent,
+                                raw_index: &pair[offset],
+                                land_area: area,
+                            },
+                        )
+                    })
+                    .transpose()?;
+                let sai = aggregate_pft_index(
+                    layout,
+                    PftIndexInput {
+                        pft_offsets: &pfts.patch_offsets,
+                        pft_classes: &pfts.pft_classes,
+                        patch_kind: &pfts.patch_kind,
+                        raw_class_count: MODIS_PFT_CLASSES,
+                        raw_percent,
+                        raw_index: sai_raw,
+                        land_area: area,
+                    },
+                )?;
+                if let Some(lai) = &lai {
+                    write_landpatch_vector(
+                        &args.landdata,
+                        year,
+                        topology,
+                        patches,
+                        &args.blocks,
+                        args.srfdata_compression,
+                        "LAI",
+                        &format!("LAI_patches{month:02}"),
+                        "LAI_patches",
+                        &lai.patch_index,
+                    )?;
+                    write_landpft_vector(
+                        &args.landdata,
+                        year,
+                        topology,
+                        &pfts.land_pfts,
+                        &args.blocks,
+                        args.srfdata_compression,
+                        "LAI",
+                        &format!("LAI_pfts{month:02}"),
+                        "LAI_pfts",
+                        &lai.pft_index,
+                    )?;
+                }
                 write_landpatch_vector(
                     &args.landdata,
                     year,
@@ -884,9 +913,9 @@ fn materialize_pft_monthly_vegetation(
                     &args.blocks,
                     args.srfdata_compression,
                     "LAI",
-                    &format!("LAI_patches{month:02}"),
-                    "LAI_patches",
-                    &lai.patch_index,
+                    &format!("SAI_patches{month:02}"),
+                    "SAI_patches",
+                    &sai.patch_index,
                 )?;
                 write_landpft_vector(
                     &args.landdata,
@@ -896,42 +925,18 @@ fn materialize_pft_monthly_vegetation(
                     &args.blocks,
                     args.srfdata_compression,
                     "LAI",
-                    &format!("LAI_pfts{month:02}"),
-                    "LAI_pfts",
-                    &lai.pft_index,
+                    &format!("SAI_pfts{month:02}"),
+                    "SAI_pfts",
+                    &sai.pft_index,
                 )?;
-            }
-            write_landpatch_vector(
-                &args.landdata,
-                year,
-                topology,
-                patches,
-                &args.blocks,
-                args.srfdata_compression,
-                "LAI",
-                &format!("SAI_patches{month:02}"),
-                "SAI_patches",
-                &sai.patch_index,
-            )?;
-            write_landpft_vector(
-                &args.landdata,
-                year,
-                topology,
-                &pfts.land_pfts,
-                &args.blocks,
-                args.srfdata_compression,
-                "LAI",
-                &format!("SAI_pfts{month:02}"),
-                "SAI_pfts",
-                &sai.pft_index,
-            )?;
-            if args.diagnostics {
-                if let Some(lai) = lai {
-                    lai_patch_frames.push(lai.patch_index);
-                    lai_pft_frames.push(lai.pft_index);
+                if args.diagnostics {
+                    if let Some(lai) = lai {
+                        lai_patch_frames.push(lai.patch_index);
+                        lai_pft_frames.push(lai.pft_index);
+                    }
+                    sai_patch_frames.push(sai.patch_index);
+                    sai_pft_frames.push(sai.pft_index);
                 }
-                sai_patch_frames.push(sai.patch_index);
-                sai_pft_frames.push(sai.pft_index);
             }
         }
         if args.diagnostics {
@@ -6874,7 +6879,7 @@ mod tests {
             check("htop/2005/htop_pfts_w180_s90.nc", "htop_pfts", &height);
             let mut outputs = vec![bits(&fractions), bits(&height)];
             for kind in ["LAI", "SAI"] {
-                let raw = read_mesh_tiled_raster_pft_time_f64(
+                let raw = colm_srfdata::read_mesh_tiled_raster_pft_time_f64(
                     &root,
                     "MOD2005",
                     &format!("MONTHLY_PFT_{kind}"),

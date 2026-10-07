@@ -1832,9 +1832,10 @@ pub fn read_mesh_tiled_raster_pft_f64(
     pixel: &PixelAxes,
     raw_grid: Grid,
 ) -> Result<Vec<f64>> {
-    read_mesh_tiled_raster_pft_at_time(
+    read_mesh_tiled_raster_pft_at_times(
         directory, suffix, variable, pft_count, None, mesh, pixel, raw_grid,
     )
+    .map(|mut slices| slices.remove(0))
 }
 
 /// Read one one-based time slice of a class-major PFT field from CoLM 5°×5° tiles.
@@ -1853,30 +1854,55 @@ pub fn read_mesh_tiled_raster_pft_time_f64(
     pixel: &PixelAxes,
     raw_grid: Grid,
 ) -> Result<Vec<f64>> {
-    ensure!(time > 0, "5 degree PFT tile time is one-based");
-    read_mesh_tiled_raster_pft_at_time(
+    read_mesh_tiled_raster_pft_times_f64(
+        directory, suffix, variable, pft_count, time, 1, mesh, pixel, raw_grid,
+    )
+    .map(|mut slices| slices.remove(0))
+}
+
+/// [`read_mesh_tiled_raster_pft_time_f64`] for `count` consecutive one-based time slices starting at
+/// `first`, in one pass over the tiles.  `MONTHLY_PFT_LAI`/`SAI` are chunked two months deep, so
+/// reading months in pairs decompresses each chunk once instead of twice.  Each returned slice is
+/// identical to reading that month alone.
+#[allow(clippy::too_many_arguments)]
+pub fn read_mesh_tiled_raster_pft_times_f64(
+    directory: &Path,
+    suffix: &str,
+    variable: &str,
+    pft_count: usize,
+    first: usize,
+    count: usize,
+    mesh: &FlatMesh,
+    pixel: &PixelAxes,
+    raw_grid: Grid,
+) -> Result<Vec<Vec<f64>>> {
+    ensure!(first > 0, "5 degree PFT tile time is one-based");
+    ensure!(count > 0, "at least one PFT tile time slice is needed");
+    read_mesh_tiled_raster_pft_at_times(
         directory,
         suffix,
         variable,
         pft_count,
-        Some(time),
+        Some((first, count)),
         mesh,
         pixel,
         raw_grid,
     )
 }
 
+/// `times` is `(first one-based slice, slice count)`; `None` reads a field without a time axis.
+/// Returns one class-major field per slice.
 #[allow(clippy::too_many_arguments)]
-fn read_mesh_tiled_raster_pft_at_time(
+fn read_mesh_tiled_raster_pft_at_times(
     directory: &Path,
     suffix: &str,
     variable: &str,
     pft_count: usize,
-    time: Option<usize>,
+    times: Option<(usize, usize)>,
     mesh: &FlatMesh,
     pixel: &PixelAxes,
     raw_grid: Grid,
-) -> Result<Vec<f64>> {
+) -> Result<Vec<Vec<f64>>> {
     ensure!(pft_count > 0, "PFT tile needs at least one PFT class");
     ensure!(
         raw_grid.nlon % 72 == 0 && raw_grid.nlat % 36 == 0,
@@ -1889,10 +1915,12 @@ fn read_mesh_tiled_raster_pft_at_time(
     let latitude = raw_latitudes(pixel, raw_grid);
     let x_tiles = tile_axis(&longitude, tile_nlon);
     let y_tiles = tile_axis(&latitude, tile_nlat);
-    let pixel_count = pixel.lon_w.len() * pixel.lat_s.len();
-    let mut pixels = vec![vec![None; pixel_count]; pft_count];
+    let slices = times.map_or(1, |(_, count)| count);
+    // 维度检查按最后一个时次做（每个时次都要在范围内）。
+    let last_time = times.map(|(first, count)| first + count - 1);
     // 先串行读各瓦片的维度（元数据，很快），再按瓦片并行读数据：每个瓦片只读区域用到的包围盒、
-    // 所有 PFT 一次读出（`colm_h5chunk::read_region`，锁外并行解压）。取值与原来逐 PFT 读整片完全相同。
+    // 所有 PFT 与所要的时次一次读出（`colm_h5chunk::read_region`，锁外并行解压）。取值与原来逐 PFT、
+    // 逐时次读整片完全相同。
     let mut files = TiledRasterFiles::default();
     let mut jobs = Vec::new();
     for (&tile_y, rows) in &y_tiles {
@@ -1902,7 +1930,11 @@ fn read_mesh_tiled_raster_pft_at_time(
             let source = file
                 .variable(variable)
                 .with_context(|| format!("{variable} is absent from {}", path.display()))?;
-            let axes = pft_tile_axes(&source, pft_count, time, tile_nlon, tile_nlat, &path)?;
+            let mut axes =
+                pft_tile_axes(&source, pft_count, last_time, tile_nlon, tile_nlat, &path)?;
+            if let (Some((axis, _)), Some((first, _))) = (axes.time, times) {
+                axes.time = Some((axis, first - 1));
+            }
             jobs.push((path, axes, rows, columns));
         }
     }
@@ -1937,6 +1969,7 @@ fn read_mesh_tiled_raster_pft_at_time(
             count[axes.longitude] = x1 - x0;
             if let Some((time_axis, time_index)) = axes.time {
                 start[time_axis] = time_index;
+                count[time_axis] = slices;
             }
             let values = colm_h5chunk::read_region::<f64>(path, variable, &start, &count)
                 .with_context(|| format!("cannot read {variable} from {}", path.display()))?;
@@ -1944,40 +1977,55 @@ fn read_mesh_tiled_raster_pft_at_time(
             for axis in (0..rank - 1).rev() {
                 stride[axis] = stride[axis + 1] * count[axis + 1];
             }
-            // 按 PFT → 行 → 列的次序取值；回填时按同一次序走。
-            let mut out = Vec::with_capacity(pft_count * rows.len() * columns.len());
-            for pft in 0..pft_count {
-                for &(_, source_y) in rows.iter() {
-                    for &(_, source_x) in columns.iter() {
-                        let offset = pft * stride[axes.pft]
-                            + (source_y - y0) * stride[axes.latitude]
-                            + (source_x - x0) * stride[axes.longitude];
-                        out.push(values[offset]);
+            // 按时次 → PFT → 行 → 列的次序取值；回填时按同一次序走。
+            let mut out = Vec::with_capacity(slices * pft_count * rows.len() * columns.len());
+            for slice in 0..slices {
+                let base = axes.time.map_or(0, |(axis, _)| slice * stride[axis]);
+                for pft in 0..pft_count {
+                    for &(_, source_y) in rows.iter() {
+                        for &(_, source_x) in columns.iter() {
+                            let offset = base
+                                + pft * stride[axes.pft]
+                                + (source_y - y0) * stride[axes.latitude]
+                                + (source_x - x0) * stride[axes.longitude];
+                            out.push(values[offset]);
+                        }
                     }
                 }
             }
             Ok(out)
         })
         .collect::<Result<Vec<_>>>()?;
-    for ((_, _, rows, columns), values) in jobs.iter().zip(picked) {
-        let mut values = values.into_iter();
-        for class_pixels in pixels.iter_mut() {
-            for &(local_y, _) in rows.iter() {
-                for &(local_x, _) in columns.iter() {
-                    class_pixels[local_y * width + local_x] = values.next();
+    // 每个（时次, PFT）平面独立回填、重排，并行做。瓦片按行、列划分区域，每个像元恰好被一个瓦片
+    // 填一次，所以"填入的总数等于像元数"就是原来"每个像元都有值"的检查。
+    let pixel_count = pixel.lon_w.len() * pixel.lat_s.len();
+    let planes = (0..slices * pft_count)
+        .into_par_iter()
+        .map(|plane| -> Result<Vec<f64>> {
+            let mut grid = vec![0.0; pixel_count];
+            let mut filled = 0;
+            for ((_, _, rows, columns), values) in jobs.iter().zip(&picked) {
+                let block = rows.len() * columns.len();
+                let mut values = values[plane * block..(plane + 1) * block].iter();
+                for &(local_y, _) in rows.iter() {
+                    for &(local_x, _) in columns.iter() {
+                        grid[local_y * width + local_x] =
+                            *values.next().expect("block holds rows x columns values");
+                    }
                 }
+                filled += block;
             }
-        }
-    }
-    let mut output = Vec::new();
-    for pft in pixels {
-        let pixels = pft
-            .into_iter()
-            .collect::<Option<Vec<_>>>()
-            .context("5 degree PFT tiles did not cover the spatial pixel window")?;
-        output.extend(mesh_order(mesh, pixel.lon_w.len(), &pixels)?);
-    }
-    Ok(output)
+            ensure!(
+                filled == pixel_count,
+                "5 degree PFT tiles did not cover the spatial pixel window"
+            );
+            mesh_order(mesh, width, &grid)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(planes
+        .chunks(pft_count)
+        .map(|classes| classes.concat())
+        .collect())
 }
 
 /// Gather source-grid samples per patch, preserving independent overlapping patches.

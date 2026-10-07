@@ -30797,3 +30797,30 @@ LAI 的块是 `(1, 1, 86400)`，一块一整条全球纬线，读区域时每行
 **剩下的**（zh 采样）：
 - soil 段 CPU 1300–1480%，全是 van Genuchten/Campbell 的 minpack 拟合，已占满核；再快要动拟合算法，会影响逐位，不做。
 - LAI 段：锁里的 `pread`（外接盘，约 7 s/25 s），`MONTHLY_PFT_LAI` 块为 `(2,3,240,240)` 而逐月读，同一块读、解压两遍；读后的 `mesh_order`/`percentage_index`/`aggregate_pft_index` 单线程（约 7 s/25 s）。可做：两个月一起读、聚合并行化。
+
+### 第 604 轮续：PC 模式 LAI 段——成对读月份、聚合与回填并行
+
+第 604 轮之后，zh 的 LAI 段仍有约 90 s，CPU 大多在 100%。
+
+**改动**：
+1. **`aggregate_pft_index` 按 patch 并行。**
+   - 非 WMO patch 只写自己的 patch 槽与 PFT 区间，先用 `into_par_iter` 算。
+   - WMO patch 要读来源 patch 的 PFT 值，原来按次序走（来源在后面时读到初值 0），放到第二步按次序串行，`source > patch` 时取 0。结果与串行逐位相同。
+   - 出错时按 patch 次序报第一个错（非 WMO 的错先于 WMO 的错报）。
+2. **成对读月份。** 新增 `read_mesh_tiled_raster_pft_times_f64(first, count)`：每个瓦片一次读 `count` 个连续时次。`MONTHLY_PFT_LAI`/`SAI` 的块是 `(2, 3, 240, 240)`，逐月读时同一块要读、解压两遍。mksrfdata 的月循环改为每两个月读一次 LAI 与 SAI，聚合与写出仍按月份次序。原来的单时次/无时间维两个入口改为调用它，行为不变。
+3. **回填不再用 `Vec<Option<f64>>`。**
+   - 只做第 2 步时 LAI 段几乎没变（zh 110 s，按冠层高度结束到 LAI 结束计）。主线程采样显示约 30% 在读取函数里的串行部分：往 `Option<f64>` 平面回填、收集 `Option`、打开瓦片读元数据。
+   - 改为每个（时次, PFT）平面用 `f64` 并行回填并做 `mesh_order`。
+   - 覆盖检查改为"填入总数 = 像元数"：瓦片按行、列划分，每个像元恰好填一次，与原检查等价。
+
+**结果**（`tmp/zb/bitdir.py` 逐变量逐字节）：zb 2179 个文件、zh 4355 个文件与改动前逐字节相同。LAI 段按冠层高度结束到 LAI 结束计：
+
+| 算例 | 改动前 | 只成对读 | 现在 |
+|---|---|---|---|
+| zb | 约 97 s | 约 30 s | 约 9 s |
+| zh | 261 s | 110 s | 87 s |
+
+- 峰值内存：zh 21.8 GB（改动前）→ 26.5 GB（只成对读）→ 23.2 GB；zb 10.5 GB。测时负载 27–43。
+- workspace clippy、`COLM_RAWDATA` 下 colm-srfdata 全部测试、colm-cli 223 + 19、GUI `cargo check --locked` 通过。
+
+**CI**：Windows `rust` 作业从 `fb5e29fb` 起一直红，原因是 `parameter_file_positions_survive_materialization` 用 `contains("members/m000001/AT-Neu/")` 比路径，Windows 是反斜杠加盘符。改为 `Path::ends_with` 按分量比较（`31476aa9`），三个平台全绿。
