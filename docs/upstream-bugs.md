@@ -821,6 +821,14 @@
   - LCT 默认设置下光合高 2.2 倍、气孔导度高 3 倍、蒸腾高 2.8 倍，而 LAI、吸收的辐射与水分胁迫都与 PC 相同。
   - 改用 VG 那套 Vcmax 后 GPP 基本回到 PC 水平；再保留土壤阻抗，土壤蒸发降约 8 W/m²。
   - 剩下的 Qle 差距（12–21 W/m²）主要在蒸腾：Vcmax 相同时 LCT 仍比 PC 多约 10 W/m²，应是单层大叶与 PC 三层冠层的结构差别。这一块不算缺陷。
+- **官方原版同样如此**：
+  - 用官方 `CoLM-SYSU/CoLM202X` master（`626347a9`）编 SinglePoint/LULC_IGBP/vanGenu 内核，前处理也用官方的，CA-Qfo 同一算例。
+  - 结果：Qle KGE −1.641、均值 63.6；GPP KGE −2.329、均值 6.39；蒸腾 34.9、土壤蒸发 23.1 W/m²；`f_rss` 为 0。
+  - 与本仓库 vendor（−1.683、64.3、6.39）只差已修上游缺陷带来的零头。这是上游本身的行为，不是本仓库改出来的。
+  - 构建官方内核时遇到三处问题：
+    - 官方缺 `include/Makeoptions.Mac-arm`，从 vendor 拷了一份。
+    - `main/HYDRO/MOD_Hydro_VIC_Variables.F90:59` 的注释 `/**<` 没有收尾，cpp 会吞掉第 60 行的声明，补了 `*/`。
+    - 官方 SinglePoint 开着 `URBAN_MODEL` 时只允许城市站点（`MOD_SingleSrfdata.F90:316-320`），非城市站点要用 `URBANOFF` 编。
 - **处理**：
   - 未修，待维护者决定。可选做法：给 LCT 地类表加一套 VG 下的 `vmax25`（按各地类的主导 PFT 取 VG 值），以及重新评估 LCT 加 VG 时是否该关土壤阻抗。
   - 两者都改变 LCT 默认算例的结果，要重做黄金回归。
