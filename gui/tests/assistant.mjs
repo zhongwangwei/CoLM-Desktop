@@ -53,4 +53,9 @@ for (const [, id] of source.matchAll(/\$\('([\w-]+)'\)/g)) {
   assert.ok(html.includes(`id="${id}"`), `index.html has no #${id}`);
 }
 assert.ok(!/\.(innerHTML|outerHTML)\s*=|insertAdjacentHTML/.test(source), 'assistant.js must not use innerHTML');
+// 助手栏宽度：至少 320，并给主页面留至少 480。
+assert.equal(assistant.clampAssistantWidth(200, 1600, 250), 320);
+assert.equal(assistant.clampAssistantWidth(600, 1600, 250), 600);
+assert.equal(assistant.clampAssistantWidth(1200, 1600, 250), 870);
+assert.equal(assistant.clampAssistantWidth(500, 900, 250), 320);
 console.log('assistant: context, events, answer blocks and page wiring ok');

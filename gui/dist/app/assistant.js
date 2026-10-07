@@ -339,8 +339,57 @@ async function send() {
   scrollDown();
 }
 
+/** 助手栏宽度：至少 320，并给主页面留至少 480。 */
+export function clampAssistantWidth(width, viewport, railWidth) {
+  const max = Math.max(320, viewport - railWidth - 480);
+  return Math.round(Math.min(max, Math.max(320, width)));
+}
+
+const WIDTH_KEY = 'colm.assistant.width';
+const DEFAULT_WIDTH = 440;
+
+function setAssistantWidth(width) {
+  const rail = document.querySelector('.rail')?.getBoundingClientRect().width || 250;
+  const size = clampAssistantWidth(width, innerWidth, rail);
+  document.documentElement.style.setProperty('--assist-w', `${size}px`);
+  return size;
+}
+
+function restoreWidth() {
+  let saved = null;
+  try { saved = Number(localStorage.getItem(WIDTH_KEY)); } catch { /* 存储不可用就用默认 */ }
+  setAssistantWidth(Number.isFinite(saved) && saved > 0 ? saved : DEFAULT_WIDTH);
+}
+
+function saveWidth(width) {
+  try { localStorage.setItem(WIDTH_KEY, String(width)); } catch { /* 记不住也不影响使用 */ }
+}
+
+function beginResize(event) {
+  const panel = $('assistant-panel');
+  if (!panel || panel.hidden) return;
+  event.preventDefault();
+  event.currentTarget?.setPointerCapture?.(event.pointerId);
+  document.body.classList.add('resizing-assistant');
+  const right = panel.getBoundingClientRect().right;
+  let width = panel.getBoundingClientRect().width;
+  const move = ev => { width = setAssistantWidth(right - ev.clientX); };
+  const up = () => {
+    document.body.classList.remove('resizing-assistant');
+    saveWidth(width);
+    window.removeEventListener('pointermove', move);
+    window.removeEventListener('pointerup', up);
+    window.removeEventListener('pointercancel', up);
+  };
+  window.addEventListener('pointermove', move);
+  window.addEventListener('pointerup', up);
+  window.addEventListener('pointercancel', up);
+}
+
 function togglePanel(open = $('assistant-panel').hidden) {
   $('assistant-panel').hidden = !open;
+  document.querySelector('.app')?.classList.toggle('assistant-open', open);
+  if (open) restoreWidth();
   $('assistantToggle')?.setAttribute('aria-pressed', String(open));
   if (open) {
     loadSettings().catch(e => status(e));
@@ -355,6 +404,12 @@ function wire() {
   }
   $('assistantToggle').onclick = () => togglePanel();
   $('assistant-close').onclick = () => togglePanel(false);
+  $('assistant-resizer').addEventListener('pointerdown', beginResize);
+  $('assistant-resizer').addEventListener('dblclick', () => saveWidth(setAssistantWidth(DEFAULT_WIDTH)));
+  // 窗口变窄时把助手栏收回到不挤掉主页面的宽度。
+  addEventListener('resize', () => {
+    if (!$('assistant-panel').hidden) setAssistantWidth($('assistant-panel').getBoundingClientRect().width);
+  });
   $('assistant-settings-btn').onclick = () => { $('assistant-settings').hidden = !$('assistant-settings').hidden; };
   $('assistant-settings-save').onclick = () => saveSettings().catch(e => status(e?.message || e));
   $('assistant-key-save').onclick = async () => {

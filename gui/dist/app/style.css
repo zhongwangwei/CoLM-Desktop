@@ -18,7 +18,7 @@
   --shadow:0 1px 2px rgba(31,35,40,.08), 0 2px 8px rgba(31,35,40,.06);
   --r-sm:6px; --r-md:10px;
   --s-sm:4px; --s-md:8px; --s-lg:16px; --s-xl:24px;
-  --rail-w:250px; --live-w:360px; --live-h:34vh; --top-h:52px; --status-h:34px;
+  --rail-w:250px; --live-w:360px; --assist-w:440px; --live-h:34vh; --top-h:52px; --status-h:34px;
   --mono:"SF Mono",ui-monospace,Menlo,Consolas,monospace;
   --sans:-apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI","PingFang SC","Microsoft YaHei",system-ui,sans-serif;
 }
@@ -424,6 +424,16 @@ body.resizing-live { user-select: none; }
 .app.live-collapsed { grid-template-columns: var(--rail-w) minmax(0, 1fr) 0; }
 .app.live-collapsed .live { display: none; }
 
+/* AI 助手停靠在最右一栏，与页面共享宽度：拉宽助手，主页面（minmax(0, 1fr)）随之变窄。 */
+.app.assistant-open {
+  grid-template:
+    "top  top  top  top"    var(--top-h)
+    "rail work live assist" 1fr
+    "status status status status" var(--status-h)
+    / var(--rail-w) minmax(0, 1fr) var(--live-w) var(--assist-w);
+}
+.app.assistant-open.live-collapsed { grid-template-columns: var(--rail-w) minmax(0, 1fr) 0 var(--assist-w); }
+
 /* ---------------- 状态栏 ---------------- */
 .status { grid-area: status; display: grid; align-items: center; gap: 14px;
           grid-template-columns: minmax(0, 1fr) minmax(320px, 2.8fr) minmax(0, 1fr);
@@ -458,6 +468,17 @@ body.resizing-live { user-select: none; }
     "rail work" 1fr
     "status status" var(--status-h)
     / var(--rail-w) minmax(0, 1fr); }
+  .app.assistant-open { grid-template:
+    "top  top  top"    var(--top-h)
+    "rail work assist" 1fr
+    "rail live assist" minmax(180px, var(--live-h))
+    "status status status" var(--status-h)
+    / var(--rail-w) minmax(0, 1fr) var(--assist-w); }
+  .app.assistant-open.live-collapsed { grid-template:
+    "top  top  top"    var(--top-h)
+    "rail work assist" 1fr
+    "status status status" var(--status-h)
+    / var(--rail-w) minmax(0, 1fr) var(--assist-w); }
 }
 
 @media (max-width: 900px) {
@@ -475,6 +496,19 @@ body.resizing-live { user-select: none; }
   .flow-block:not(:last-child)::after { display: none; }
   .step .d, .est { display: none; }
   .work { padding: var(--s-lg); }
+}
+@media (max-width: 900px) {
+  .app.assistant-open, .app.assistant-open.live-collapsed { grid-template:
+    "top"    var(--top-h)
+    "rail"   auto
+    "work"   1fr
+    "live"   minmax(160px, var(--live-h))
+    "assist" minmax(260px, 45vh)
+    "status" var(--status-h)
+    / minmax(0, 1fr); }
+  .app.assistant-open.live-collapsed .live { display: none; }
+  .assistant { border-left: 0; border-top: 1px solid var(--border); }
+  .assistant-resizer { display: none; }
 }
 
 /* 每一页底部的出口。**让人自己回左栏找下一步，等于把「现在该干嘛」推给用户。** */
@@ -659,13 +693,17 @@ body.resizing-live { user-select: none; }
 .hybrid-form-note { grid-column: 1 / -1; margin: 0; }
 
 /* AI 助手（assistant.js） */
-.assistant { position: fixed; top: 52px; right: 0; bottom: 28px; width: min(460px, 100vw); z-index: 40;
-  display: flex; flex-direction: column; background: var(--bg); border-left: 1px solid var(--border);
-  box-shadow: -8px 0 24px rgba(0,0,0,.10); }
+.assistant { grid-area: assist; position: relative; min-width: 0; min-height: 0;
+  display: flex; flex-direction: column; background: var(--bg); border-left: 1px solid var(--border); }
+.assistant-resizer { position: absolute; z-index: 4; left: -6px; top: 0; bottom: 0; width: 12px; cursor: col-resize; touch-action: none; }
+.assistant-resizer:hover, body.resizing-assistant .assistant-resizer { background: linear-gradient(to right, transparent 5px, var(--accent) 5px, var(--accent) 7px, transparent 7px); }
+body.resizing-assistant { user-select: none; cursor: col-resize; }
 .assistant[hidden] { display: none; }
 .assistant-head { display: flex; align-items: center; gap: 8px; padding: 10px 14px; border-bottom: 1px solid var(--border-soft);
   background: var(--surface); }
-.assistant-head b { font-size: 14px; }
+.assistant-head b { font-size: 14px; white-space: nowrap; }
+.assistant-head button { flex: none; white-space: nowrap; }
+#assistant-model { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .assistant-head .grow { flex: 1; }
 #assistant-model:not(:empty) { padding: 1px 8px; border-radius: 999px; background: var(--surface-2); font-family: ui-monospace, monospace; }
 .assistant-settings { display: grid; grid-template-columns: max-content 1fr; gap: 8px 12px; padding: 12px 14px;
@@ -720,4 +758,5 @@ body.resizing-live { user-select: none; }
 .assistant-input { padding: 10px 14px 12px; border-top: 1px solid var(--border-soft); background: var(--surface); }
 .assistant-input textarea { resize: vertical; min-height: 64px; }
 .assistant-input-row { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
-.assistant-input-row #assistant-usage { margin-right: auto; }
+.assistant-input-row #assistant-usage { margin-right: auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.assistant-input-row button { flex: none; white-space: nowrap; }

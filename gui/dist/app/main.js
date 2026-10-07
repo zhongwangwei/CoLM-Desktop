@@ -29,7 +29,8 @@ function beginLiveResize(e) {
   const apply = ev => {
     const size = stacked
       ? Math.min(innerHeight - 220, Math.max(160, innerHeight - 34 - ev.clientY))
-      : Math.min(720, Math.max(260, innerWidth - ev.clientX));
+      // 从日志栏自己的右缘量：右边可能还停着 AI 助手。
+      : Math.min(720, Math.max(260, live.getBoundingClientRect().right - ev.clientX));
     document.documentElement.style.setProperty(stacked ? '--live-h' : '--live-w', `${size}px`);
   };
   const up = () => {
