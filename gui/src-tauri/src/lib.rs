@@ -9,6 +9,7 @@
 //! 前端是纯静态 HTML/CSS/JS，无 npm、无打包器。`withGlobalTauri: true`，
 //! 所以页面用 `window.__TAURI__.core.invoke(...)` 跟这里说话。
 
+mod assistant;
 mod config;
 mod example;
 mod forcing;
@@ -20,6 +21,7 @@ mod sidecar;
 mod sitedata;
 mod sites;
 
+use assistant::*;
 use config::*;
 use example::*;
 use forcing::*;
@@ -83,9 +85,11 @@ pub fn run() {
                 {
                     eprintln!("failed to stop every run while closing: {error}");
                 }
+                window.app_handle().state::<AssistantProcess>().stop();
             }
         })
         .manage(RunProcesses::default())
+        .manage(AssistantProcess::default())
         // 注意：这里**没有**单份写入的命令（`set_field` / `write_text` /
         // 单份写入）。参数改动一律走 `*_batch` —— 前端只有一条写入路径，
         // 因为"改一个字段"与"改这一批的一个字段"必须是同一件事。
@@ -146,6 +150,16 @@ pub fn run() {
             study_apply_preview,
             study_result,
             hybrid_info,
+            assistant_settings,
+            assistant_save_settings,
+            assistant_set_key,
+            assistant_has_key,
+            assistant_delete_key,
+            assistant_start,
+            assistant_send,
+            assistant_approve,
+            assistant_cancel,
+            assistant_new_session,
             hybrid_check,
             hybrid_climate,
             hybrid_install,

@@ -31368,3 +31368,40 @@ GPP 的均值被 4 个基线 KGE 低于 −0.5 的站拉低（BE-Lon、DE-Geb、
 - 1/3 的站压在下限，说明问题主要在 PC 基线的 GPP 系统性偏高。单独率定 Vcmax 会把结构性偏差吸收进去，产生的目标本身就不可学习。
 - 继续加特征（原计划第 3 步）意义不大：连常数均值都比网络好，瓶颈在目标，不在特征。
 - 应先查清这些站 GPP 偏高的来源，再谈参数化学习。可能的来源：LAI 输入、土壤水分胁迫（PC 下的 VG 与胁迫函数）、PFT 份额。
+
+## 第 618 轮：AI 助手 P0
+
+设计见 docs/design-ai-assistant.md。
+
+**改动**：
+- 新 crate `colm-agent`：
+  - OpenAI 兼容的流式客户端：SSE 解析；工具调用按 index 拼接；保留并回传 DeepSeek 的 `reasoning_content`；`thinking` 开关；可选 `strict`。
+  - 对话循环：单轮最多 24 步，可取消；需要审批的工具经审批接口；工具出错、参数不是合法 JSON、工具不存在、被拒绝，都如实回填给模型。
+  - 12 个 A 级只读工具：`list_cases`、`read_case_config`、`explain_parameter`、`run_status`、`metrics`、`series_stats`、`compare_cases`、`study_summary`、`hybrid_info`、`hybrid_check`、`search_docs`、`environment_doctor`。schema 按严格模式写。
+  - 结果超过 24000 字符时截断，并附说明。
+  - 会话与审计日志写到 `sessions/<会话号>/messages.jsonl` 与 `audit.jsonl`。
+  - Key 存系统钥匙串：macOS、Windows 原生；Linux 只读环境变量 `COLM_AGENT_API_KEY`。
+  - 二进制 `colm-agent`：服务模式走 stdio JSONL；另有 `--set-key`、`--has-key`、`--delete-key`。
+  - 作为 sidecar 打包（`xtask stage-sidecar`、`tauri.bundle.conf.json`）。
+- GUI：
+  - Tauri 侧 `assistant.rs`：启动与配置、转发 `assistant://event`、设置存 `assistant.json`（不含 Key）、Key 经 stdin 交给 `colm-agent`。服务地址只接受 https 或本机回环的 http。
+  - 前端 `assistant.js` 加侧栏：对话、思考过程、工具卡片（状态点）、审批卡片、用量、设置、示例问题。首次向某个服务发送前，确认数据外发。
+  - 回答一律按纯文本建 DOM，不用 `innerHTML`；表格与代码块由 `answerBlocks` 安全地转成元素。
+
+**实测**：
+- 本地模拟的 OpenAI 兼容服务（Python SSE）加真实的 `colm-agent` 二进制：
+  - 模型调用 `list_cases`，真的扫到了 `/private/tmp/h3` 的 12 个算例，回答"There are 12 cases."；
+  - 第二次请求里回传了 `reasoning_content`，用户消息附带了界面上下文，提供了 12 个工具，请求是流式的；
+  - 会话与审计日志各 5 行；Key 没有出现在任何日志里。
+- 修了一个缺陷：stdin 关闭时主线程直接退出，会截断正在进行的那一轮。现在先 join 工作线程再退出。
+- 界面：在内置浏览器里用真实的 `assistant.js` 和样式，模拟后端按真实协议推事件流。检查了空状态（三个示例问题）、对话（思考过程折叠、工具卡片、表格、审批卡片）、设置面板与深色模式。
+  - 修了一处样式冲突：回答气泡原先的 class `assistant` 撞上了面板的 `.assistant` 样式（fixed 定位），改名为 `reply`。
+  - 按"注意页面美观"的要求重排：用量移到输入行、按钮靠右、思考过程改成引用样式、表格加表头底色与分隔线。
+
+**还没做**：用真实 DeepSeek Key 的联调（Key 要用户在设置里填）；P1–P5（见设计文档第 10 节）。
+
+**检查**：
+- 两个 workspace 的 fmt 都干净，clippy 都零警告。
+- workspace 测试 1913 项通过（单线程，含 colm-agent 15 项）；GUI Rust 测试 207 项通过。
+- `check-gui` 通过：90 个命令、7 个事件全部能对上。
+- 14 个前端套件全部通过（新增 `assistant.mjs`，已加入 CI）。

@@ -33,6 +33,7 @@
       <button class="on" data-mode="normal" aria-pressed="true">常规</button>
       <button data-mode="expert" aria-pressed="false">专家</button>
     </div>
+    <button class="btn-ghost" id="assistantToggle" title="打开 / 关闭 AI 助手" aria-pressed="false">AI 助手</button>
     <button class="icon-btn" id="liveToggle" title="显示 / 隐藏运行日志与进度">▥</button>
     <button class="icon-btn" id="themeBtn" title="深色 / 浅色">🌙</button>
   </header>
@@ -1210,5 +1211,57 @@
 })();
 </script>
 <!-- 首页由轻量模块先画；完整工作台在首帧之后动态加载。 -->
+<aside class="assistant" id="assistant-panel" hidden aria-label="AI 助手">
+  <div class="assistant-head">
+    <b>AI 助手</b>
+    <span class="muted mini" id="assistant-model"></span>
+    <div class="grow"></div>
+    <button class="btn-ghost" type="button" id="assistant-new">新对话</button>
+    <button class="btn-ghost" type="button" id="assistant-settings-btn">设置</button>
+    <button class="icon-btn" type="button" id="assistant-close" title="关闭">×</button>
+  </div>
+  <div class="assistant-settings" id="assistant-settings" hidden>
+    <label for="assistant-base">服务地址</label>
+    <input class="input" id="assistant-base" placeholder="https://api.deepseek.com">
+    <label for="assistant-model-name">模型</label>
+    <input class="input" id="assistant-model-name" list="assistant-models" placeholder="deepseek-flash">
+    <datalist id="assistant-models"><option value="deepseek-flash"></option><option value="deepseek-v4-pro"></option></datalist>
+    <label for="assistant-thinking">思考模式</label>
+    <select class="select" id="assistant-thinking">
+      <option value="">服务默认</option>
+      <option value="on">开启</option>
+      <option value="off">不开启</option>
+    </select>
+    <label for="assistant-key">API Key</label>
+    <div class="assistant-key-row">
+      <input class="input" id="assistant-key" type="password" autocomplete="off" placeholder="粘贴后点“保存 Key”">
+      <button class="btn-ghost" type="button" id="assistant-key-save">保存 Key</button>
+      <button class="btn-ghost" type="button" id="assistant-key-delete">删除 Key</button>
+    </div>
+    <p class="muted mini" id="assistant-key-status"></p>
+    <p class="muted mini">Key 存在系统钥匙串里，不写进任何文件。默认用 DeepSeek 官方 API；也可以填任何兼容 OpenAI 格式的服务，例如本机的 Ollama（http://127.0.0.1:11434/v1）。</p>
+    <div class="pill-row"><button class="run-btn" type="button" id="assistant-settings-save">保存设置</button></div>
+  </div>
+  <p class="warn mini assistant-notice" id="assistant-notice" hidden></p>
+  <div class="assistant-log" id="assistant-log">
+    <div class="assistant-empty">
+      <div class="assistant-empty-title">问问你的算例与结果</div>
+      <p class="muted mini">助手读取算例配置、运行日志、指标与 Study 结果来回答，每个结论都会注明出处；它不会改动算例。</p>
+      <div class="assistant-suggestions">
+        <button class="assistant-chip" type="button" data-prompt="当前算例的 GPP 与潜热模拟得怎么样？问题可能出在哪里？">当前算例模拟得怎么样？</button>
+        <button class="assistant-chip" type="button" data-prompt="列出项目里的算例，并比较它们的配置与指标差异。">比较项目里的算例</button>
+        <button class="assistant-chip" type="button" data-prompt="上一次运行有没有报错或异常？请检查运行状态与日志。">检查最近一次运行</button>
+      </div>
+    </div>
+  </div>
+  <div class="assistant-input">
+    <textarea class="input" id="assistant-text" rows="3" placeholder="输入问题，Ctrl/⌘ + Enter 发送"></textarea>
+    <div class="assistant-input-row">
+      <span class="muted mini" id="assistant-usage"></span>
+      <button class="btn-ghost" type="button" id="assistant-stop" disabled>停止</button>
+      <button class="run-btn" type="button" id="assistant-send">发送</button>
+    </div>
+  </div>
+</aside>
 <script type="module" src="app/gate-boot.js"></script>
 </body>

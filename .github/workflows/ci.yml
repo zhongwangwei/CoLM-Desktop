@@ -143,6 +143,7 @@ jobs:
           node gui/tests/results.mjs
           node gui/tests/study-model.mjs
           node gui/tests/hybrid.mjs
+          node gui/tests/assistant.mjs
 
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
