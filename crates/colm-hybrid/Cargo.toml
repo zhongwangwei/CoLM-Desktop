@@ -1,0 +1,27 @@
+[package]
+name = "colm-hybrid"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+sha2.workspace = true
+# 纯 Rust 的 ONNX 推理：静态编进 colm-rs，用户机器不用另装运行库（onnxruntime 要带动态库，
+# 与 sidecar 的分发方式冲突，同 HDF5 那条教训）。见 docs/design-hybrid.md 第 3 节。
+# 0.22 而非 0.23：0.23 要 Rust 1.91，工作区 MSRV 是 1.85.1。
+tract-onnx = { version = "0.22", optional = true }
+
+[features]
+# 推理后端（tract）。colm-cli 只算指纹、不推理，关掉它就不链 tract。
+default = ["inference"]
+inference = ["dep:tract-onnx"]
+
+[lints]
+workspace = true

@@ -78,8 +78,10 @@ fn run() -> Result<()> {
         &arguments.case_directory,
         arguments.crop,
     )?;
+    // 放在预检之前：`--preflight` 也要查出混合配置与模型的问题。
+    let hybrid = HybridMode::from_arguments(&arguments)?;
     if colm_case::is_spatial_case(&case_nml)? {
-        return run_spatial(&arguments, &layout, &name, &case_nml);
+        return run_spatial(&arguments, &layout, &name, &case_nml, hybrid.as_ref());
     }
 
     let config = read_point_runtime_config(&case_nml)?;
@@ -172,15 +174,17 @@ fn run() -> Result<()> {
         Some(patch) => vec![patch],
         None => (0..patch_count).collect(),
     };
+    let patch_physics = hybrid_patch_physics(hybrid.as_ref(), &files.constant, &patches, &physics)?;
     let mut templates = patches
         .iter()
-        .map(|&patch| {
+        .zip(patch_physics)
+        .map(|(&patch, physics)| {
             assemble_patch(
                 &document,
                 &layout,
                 &name,
                 &files,
-                physics.clone(),
+                physics,
                 patch,
                 SINGLE_POINT_BLOCK,
                 false,
@@ -441,6 +445,7 @@ fn run_spatial(
     layout: &colm_case::Layout,
     name: &str,
     case_nml: &Path,
+    hybrid: Option<&HybridMode>,
 ) -> Result<()> {
     use colm_runtime::spatial::runtime::SpatialRuntimeConfig;
     ensure!(
@@ -588,6 +593,7 @@ fn run_spatial(
         out: &out,
         vector_history,
         catchment: arguments.catchment,
+        hybrid,
     };
     let restart_root = out.join("restart");
     let scratch = restart_root.join(LULCC_SCRATCH);
@@ -823,6 +829,8 @@ struct SpatialCase<'a> {
     vector_history: bool,
     /// CATCHMENT 内核：流域侧向流代替网格河湖汇流。
     catchment: bool,
+    /// 混合模型插槽（`--hybrid`）。
+    hybrid: Option<&'a HybridMode>,
 }
 
 /// 空间算例里一个 patch 的块内信息：PFT 区间（`patch_pft_s/e`）与像元
@@ -895,6 +903,7 @@ fn run_spatial_segment(
         out,
         vector_history,
         catchment,
+        hybrid,
     } = *case;
     let config = &segment.config;
     let year = segment.year;
@@ -959,7 +968,9 @@ fn run_spatial_segment(
         } else {
             None
         };
-        for patch in 0..patches.len() {
+        let block_patches: Vec<usize> = (0..patches.len()).collect();
+        let patch_physics = hybrid_patch_physics(hybrid, &files.constant, &block_patches, physics)?;
+        for (patch, physics) in patch_physics.into_iter().enumerate() {
             let global = patches.start + patch;
             let pfts = pft_ranges
                 .as_ref()
@@ -5430,6 +5441,10 @@ struct Arguments {
     unstructured: bool,
     /// 内核带 `CATCHMENT` 宏（`CatchLateralFlow`，没有 `GridRiverLakeFlow`）。
     catchment: bool,
+    /// `--hybrid <hybrid.toml>`：混合模型插槽（docs/design-hybrid.md）。
+    hybrid: Option<PathBuf>,
+    /// `--hybrid-tap <out.csv>`：只抓取插槽的特征与物理值、不改参数（训练前准备数据）。
+    hybrid_tap: Option<PathBuf>,
 }
 
 impl Arguments {
@@ -5447,6 +5462,8 @@ impl Arguments {
         let mut crop = false;
         let mut unstructured = false;
         let mut catchment = false;
+        let mut hybrid = None;
+        let mut hybrid_tap = None;
         while let Some(flag) = values.next() {
             let mut value = |name: &str| -> Result<String> {
                 values
@@ -5479,6 +5496,8 @@ impl Arguments {
                 "--crop" => crop = true,
                 "--unstructured" => unstructured = true,
                 "--catchment" => catchment = true,
+                "--hybrid" => hybrid = Some(PathBuf::from(value("--hybrid")?)),
+                "--hybrid-tap" => hybrid_tap = Some(PathBuf::from(value("--hybrid-tap")?)),
                 other if other.starts_with("--") => {
                     bail!("unknown option {other}; the accepted set is documented in this binary's module docs")
                 }
@@ -5505,6 +5524,10 @@ impl Arguments {
         };
         let land_cover = land_cover
             .context("--land-cover is required: the compiled LULC scheme is not in the namelist")?;
+        ensure!(
+            hybrid_tap.is_none() || hybrid.is_some(),
+            "--hybrid-tap needs --hybrid <hybrid.toml> to know which features to record"
+        );
         // 一个只在有 `--history-dir` 时才生效的 `--history-stem` 是陷阱：
         // 用户以为改了名字，实际什么都没写。
         if history_directory.is_none() {
@@ -5545,7 +5568,52 @@ impl Arguments {
             crop,
             unstructured,
             catchment,
+            hybrid,
+            hybrid_tap,
         })
+    }
+}
+
+/// `--hybrid`/`--hybrid-tap` 的两种用法。
+enum HybridMode {
+    /// 加载模型，插槽改参数。
+    Apply(colm_runtime::hybrid::Hybrid),
+    /// 只把特征与物理值追加写进 CSV，参数不变（训练前还没有模型也能跑）。
+    Tap {
+        config: colm_hybrid::HybridConfig,
+        out: PathBuf,
+    },
+}
+
+impl HybridMode {
+    fn from_arguments(arguments: &Arguments) -> Result<Option<Self>> {
+        let Some(path) = &arguments.hybrid else {
+            return Ok(None);
+        };
+        Ok(Some(match &arguments.hybrid_tap {
+            Some(out) => Self::Tap {
+                config: colm_hybrid::HybridConfig::load_spec(path)?,
+                out: out.clone(),
+            },
+            None => Self::Apply(colm_runtime::hybrid::Hybrid::load(path)?),
+        }))
+    }
+}
+
+/// 各 patch 装配用的物理参数：没有混合设置时都是 `physics`。
+fn hybrid_patch_physics(
+    hybrid: Option<&HybridMode>,
+    constant: &Path,
+    patches: &[usize],
+    physics: &colm_runtime::assembly::LandPhysicsParameters,
+) -> Result<Vec<colm_runtime::assembly::LandPhysicsParameters>> {
+    match hybrid {
+        None => Ok(vec![physics.clone(); patches.len()]),
+        Some(HybridMode::Apply(hybrid)) => hybrid.patch_physics(constant, patches, physics),
+        Some(HybridMode::Tap { config, out }) => {
+            colm_runtime::hybrid::write_land_class_tap(config, constant, patches, physics, out)?;
+            Ok(vec![physics.clone(); patches.len()])
+        }
     }
 }
 

@@ -269,6 +269,46 @@ impl ClassConstants {
         column(self.tables())[self.class - 1]
     }
 
+    /// 地类表里 `DEF_LC_*` 那一列的**原始表值**（不看覆盖、不做单位换算）。
+    ///
+    /// 混合模型的参数插槽要它：把这个值原样作为覆盖写回，结果与不覆盖逐位相同（覆盖替换的正是
+    /// 这个表值，换算在其后统一做，见 [`Self::maximum_carboxylation_25c_mol_m2_s`]）。
+    pub fn table_value(&self, name: &str) -> Result<f64> {
+        let column: fn(&'static LandCoverTables) -> &'static [f64] = match name {
+            "DEF_LC_HTOP0" => |table| table.htop0,
+            "DEF_LC_HBOT0" => |table| table.hbot0,
+            "DEF_LC_FVEG0" => |table| table.fveg0,
+            "DEF_LC_SAI0" => |table| table.sai0,
+            "DEF_LC_Z0MR" => |table| table.z0mr,
+            "DEF_LC_DISPLAR" => |table| table.displar,
+            "DEF_LC_SQRTDI" => |table| table.sqrtdi,
+            "DEF_LC_CHIL" => |table| table.chil,
+            "DEF_LC_RHOL_VIS" => |table| table.rhol_vis,
+            "DEF_LC_RHOL_NIR" => |table| table.rhol_nir,
+            "DEF_LC_RHOS_VIS" => |table| table.rhos_vis,
+            "DEF_LC_RHOS_NIR" => |table| table.rhos_nir,
+            "DEF_LC_TAUL_VIS" => |table| table.taul_vis,
+            "DEF_LC_TAUL_NIR" => |table| table.taul_nir,
+            "DEF_LC_TAUS_VIS" => |table| table.taus_vis,
+            "DEF_LC_TAUS_NIR" => |table| table.taus_nir,
+            "DEF_LC_VMAX25" => |table| table.vmax25,
+            "DEF_LC_EFFCON" => |table| table.effcon,
+            "DEF_LC_RESPCP" => |table| table.respcp,
+            "DEF_LC_SHTI" => |table| table.shti,
+            "DEF_LC_SLTI" => |table| table.slti,
+            "DEF_LC_TRDA" => |table| table.trda,
+            "DEF_LC_TRDM" => |table| table.trdm,
+            "DEF_LC_TROP" => |table| table.trop,
+            "DEF_LC_HHTI" => |table| table.hhti,
+            "DEF_LC_HLTI" => |table| table.hlti,
+            "DEF_LC_EXTKN" => |table| table.extkn,
+            "DEF_LC_D50" => |table| table.d50,
+            "DEF_LC_BETA" => |table| table.beta,
+            other => anyhow::bail!("{other} is not a land-class scalar override"),
+        };
+        Ok(self.value(column))
+    }
+
     /// `patchtypes`：0 土壤、1 城市、2 湿地、3 冰、4 湖。
     pub fn patch_type(&self) -> i32 {
         self.tables().patchtypes[self.class - 1]

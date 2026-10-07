@@ -24,6 +24,8 @@ colm-init = { path = "../colm-init" }
 # history 写出：闸门表 + `HistoryBuffers::write`。它默认不带 netcdf（GUI 那条链
 # 只要闸门表），这里显式开 `io` —— 运行时本来就要链接 netcdf。
 colm-hist = { path = "../colm-hist", features = ["io"] }
+# 混合模型插槽（docs/design-hybrid.md）：配置、tract 推理后端。
+colm-hybrid = { path = "../colm-hybrid" }
 # `DEF_Optimize_Baseflow` 逐年写 `ParaOpt/*_baseflow.nc`（`MOD_Opt_Baseflow.F90`）。
 # 已经经 colm-hist/colm-init 静态链接进来，这里只是直接用它的 API。
 netcdf = { workspace = true, features = ["static"] }

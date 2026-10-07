@@ -30824,3 +30824,33 @@ LAI 的块是 `(1, 1, 86400)`，一块一整条全球纬线，读区域时每行
 - workspace clippy、`COLM_RAWDATA` 下 colm-srfdata 全部测试、colm-cli 223 + 19、GUI `cargo check --locked` 通过。
 
 **CI**：Windows `rust` 作业从 `fb5e29fb` 起一直红，原因是 `parameter_file_positions_survive_materialization` 用 `contains("members/m000001/AT-Neu/")` 比路径，Windows 是反斜杠加盘符。改为 `Path::ends_with` 按分量比较（`31476aa9`），三个平台全绿。
+
+## 第 605 轮：混合模型框架 P0（分支 `colm-hybrid`）
+
+设计见 `docs/design-hybrid.md`，这里只记实测。
+
+**接入方式**：
+- 参数插槽 `land_class` 在装配**之前**完成：
+  1. 从常数重启按名字读特征；
+  2. 整批推理；
+  3. 给每个土壤 patch 一份带 `LandClassOverrides` 的 `physics`，交给 `assemble_patch`。
+- 不重新装配、不改物理代码。装配期第 1446 行 `ClassConstants::new(..).with_overrides(..)` 已经把覆盖用进派生量，所以装配后再改覆盖不起作用，必须在装配前给。
+
+**逐位测试**：
+- colm-core `writing_the_table_value_back_as_an_override_changes_nothing`：IGBP 与 USGS 每个地类、29 个 `DEF_LC_*` 列都用表值覆盖，13 个取值函数与叶片光学参数逐位不变。
+- colm-runtime `a_land_class_slot_that_echoes_the_table_changes_nothing`：合成重启、`examples/Forcing` 的 CN-Cng，跑 2008-01-01 一整天 48 步（含白天光合）。模型原样返回 29 列表值时，每步输出与终态的完整 `Debug` 文本与纯物理相同。
+- `a_land_class_slot_that_changes_vmax25_changes_the_run`：Vcmax 翻倍时终态不同，用来证明上一个测试不是"插槽没接上"。
+
+**ONNX**：
+- 测试模型 `linear.onnx`（`y = 2a − 3b + 0.5`，148 字节，sha256 `cd50301f…`）由 `python/colm_hybrid/make_test_model.py` 生成。
+- tract 0.22.4 在批大小 1、3、17 下结果正确，同一输入两次逐位相同。
+- tract 0.23 要 Rust 1.91，退到 0.22。0.22 的接口与 0.23 不同：`TypedRunnableModel<TypedModel>` 不包 `Arc`，用 `to_array_view`。
+
+**端到端**（cbl 单点，IGBP 第 10 类，2008 年 1 月，`kernels/default`）：
+- 纯物理基线 7.3 s。
+- 加上 `hybrid.toml`（`linear.onnx`，特征 `patchclass`、`patchlatr`，`sigmoid` 映射到 [20, 120] 作为 `DEF_LC_VMAX25`）后不带 `--force` 再跑：mksrfdata、mkinidata 跳过，colm 段"新设了 hybrid (hybrid.toml)"。
+- 128 个变量里 77 个变化；`f_assim` 均值 2.32e-7 → 5.38e-7，`f_fevpa` 1.003e-5 → 1.360e-5。
+- `--engine fortran` 拒绝运行，并给出原因。
+- `colm-rs --hybrid hybrid.toml --hybrid-tap tap.csv --case-outputs`：CSV 为 `0,1e1,7.782999069860056e-1,5.2e1`（类 10、纬度弧度、表值 Vcmax 52），history 与基线 128 个变量逐位相同。
+
+**检查**：fmt、workspace clippy、colm-hybrid（默认与 `--no-default-features`）、colm-core 506、colm-runtime 172（单线程）、colm-cli 224 + 19、`PLUMBER2_ROOT` 下 `cargo test -p oracle`、GUI `cargo check --locked` 全部通过。

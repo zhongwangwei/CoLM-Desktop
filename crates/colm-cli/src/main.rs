@@ -1907,6 +1907,23 @@ fn rust_model_crop_arguments(kernel: &Kernel) -> Vec<String> {
     arguments
 }
 
+/// 算例目录里的 `hybrid.toml`（混合模型插槽，docs/design-hybrid.md）。
+fn hybrid_config(case_nml: &Path) -> Option<PathBuf> {
+    let path = case_nml
+        .parent()
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+        .join("hybrid.toml");
+    path.is_file().then_some(path)
+}
+
+/// 有 `hybrid.toml` 时交给 `colm-rs` 的 `--hybrid`。
+fn rust_model_hybrid_arguments(case_nml: &Path) -> Vec<String> {
+    hybrid_config(case_nml).map_or_else(Vec::new, |path| {
+        vec!["--hybrid".to_owned(), path.display().to_string()]
+    })
+}
+
 fn sidecar_executable(name: &str) -> Result<PathBuf> {
     let name = if cfg!(windows) {
         format!("{name}.exe")
@@ -1963,6 +1980,7 @@ fn preflight_rust_model(case_nml: &Path, kernel: &Kernel, ranks: usize) -> Resul
         .arg(case_nml)
         .args(["--land-cover", land_cover, "--preflight"])
         .args(rust_model_crop_arguments(kernel))
+        .args(rust_model_hybrid_arguments(case_nml))
         .output()
         .with_context(|| format!("cannot start {}", executable.display()))?;
     if !output.status.success() {
@@ -2491,6 +2509,16 @@ fn run_case(
     }
     let layout = Layout::new(case);
     let runs_model = only_stage.is_none_or(|stage| stage == Stage::Colm);
+    // 混合模型只有 Rust 引擎支持；Fortran 引擎静默忽略它会给出纯物理的结果。
+    if let (true, ModelEngine::Fortran, Some(path)) =
+        (runs_model, engine, hybrid_config(&layout.case_nml()))
+    {
+        bail!(
+            "{} configures hybrid model slots, which only the Rust model engine runs; \
+             use --engine rust or remove the file",
+            path.display()
+        );
+    }
     let rust_model_land_cover = if engine == ModelEngine::Rust && runs_model {
         preflight_rust_model(&layout.case_nml(), &kernel, ranks)?;
         Some(rust_model_land_cover(&kernel)?)
@@ -2689,6 +2717,7 @@ fn run_case(
                         "--case-outputs".to_owned(),
                     ],
                     rust_model_crop_arguments(&kernel),
+                    rust_model_hybrid_arguments(&layout.case_nml()),
                 ]
                 .concat(),
                 &mut forward,

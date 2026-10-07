@@ -251,3 +251,55 @@ fn plant_hydraulic_traits_come_from_the_land_cover_table() {
         0.0
     );
 }
+
+/// 混合模型的参数插槽把 [`ClassConstants::table_value`] 原样作为覆盖写回时，结果必须与不覆盖逐位相同：
+/// 每个 `DEF_LC_*` 名字都认得，且覆盖后各个取值函数给出同样的位型。
+#[test]
+fn writing_the_table_value_back_as_an_override_changes_nothing() {
+    for scheme in [LandCoverScheme::Igbp, LandCoverScheme::Usgs] {
+        for class in 1..=land_cover_classes(scheme) {
+            let plain = ClassConstants::new(scheme, class).unwrap();
+            let mut overrides = LandClassOverrides::default();
+            for name in LandClassOverrides::REAL_NAMES {
+                overrides
+                    .set_real(name, plain.table_value(name).unwrap())
+                    .unwrap();
+            }
+            let echoed = ClassConstants::new(scheme, class)
+                .unwrap()
+                .with_overrides(overrides);
+            let fingerprint = |c: &ClassConstants| {
+                [
+                    c.maximum_carboxylation_25c_mol_m2_s(),
+                    c.canopy_top_m(),
+                    c.canopy_bottom_m(),
+                    c.vegetation_fraction(),
+                    c.stem_area_index(),
+                    c.roughness_to_height_ratio(),
+                    c.displacement_to_height_ratio(),
+                    c.inverse_sqrt_leaf_dimension_m_neg_half(),
+                    c.maximum_vegetation_fraction(),
+                    c.leaf_angle_distribution(),
+                    c.extinction_coefficient(),
+                    c.root_d50(),
+                    c.root_beta(),
+                ]
+                .map(f64::to_bits)
+            };
+            assert_eq!(
+                fingerprint(&plain),
+                fingerprint(&echoed),
+                "{scheme:?} class {class}"
+            );
+            assert_eq!(
+                format!("{:?}", plain.leaf_optics()),
+                format!("{:?}", echoed.leaf_optics()),
+                "{scheme:?} class {class}"
+            );
+        }
+    }
+    assert!(ClassConstants::new(LandCoverScheme::Igbp, 1)
+        .unwrap()
+        .table_value("DEF_LC_C3C4")
+        .is_err());
+}

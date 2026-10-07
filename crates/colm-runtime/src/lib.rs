@@ -14,6 +14,7 @@ pub mod catchment;
 pub mod history;
 mod history_manifest;
 pub mod history_sidecar;
+pub mod hybrid;
 pub mod irrigation;
 pub mod methane;
 pub mod multi_patch;
@@ -2813,5 +2814,163 @@ mod tests {
         );
         assert_eq!(state, 1);
         assert!(runtime.next_step().unwrap().is_none());
+    }
+
+    /// 跑一整天（48 步，含白天的光合），收集每步输出与终态的完整 Debug 文本：逐位比较用。
+    fn run_day(
+        case: &Path,
+        fixture: &colm_init::fixtures::SyntheticRestart,
+        physics: crate::assembly::LandPhysicsParameters,
+    ) -> (Vec<String>, String) {
+        let template = crate::assembly::assemble_standard_lct_template(
+            &crate::assembly::RestartStateFiles {
+                constant: fixture.constant.block.clone(),
+                time: fixture.time.block.clone(),
+            },
+            1,
+            physics,
+        )
+        .unwrap();
+        let mut runtime = PointRuntime::open(read_point_runtime_config(case).unwrap()).unwrap();
+        let mut state = template.state();
+        let mut outputs = Vec::new();
+        let steps = runtime
+            .run_restart_standard_lct(&template, &mut state, |step, output| {
+                outputs.push(format!("{} {output:?}", step.clock.index));
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(steps, 48);
+        (outputs, format!("{state:?}"))
+    }
+
+    /// 混合 `land_class` 插槽的配置（不需要模型文件：用 `with_backend` 接后端）。
+    fn land_class_hybrid(
+        root: &Path,
+        outputs: &[&str],
+        backend: std::sync::Arc<dyn colm_hybrid::Surrogate>,
+    ) -> crate::hybrid::Hybrid {
+        let path = root.join("hybrid.toml");
+        let outputs = outputs
+            .iter()
+            .map(|name| format!("{{ name = \"{name}\" }}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        std::fs::write(
+            &path,
+            format!(
+                "[[slot]]\nname = \"land_class\"\nkind = \"param\"\nfeatures = [\"patchclass\"]\noutputs = [{outputs}]\n"
+            ),
+        )
+        .unwrap();
+        let config = colm_hybrid::HybridConfig::load_spec(&path).unwrap();
+        crate::hybrid::Hybrid::with_backend(config, backend).unwrap()
+    }
+
+    /// 地类表各列的"模仿物理"后端：按特征里的 `patchclass` 查表，原样给出 f64。
+    fn table_echo(
+        names: Vec<&'static str>,
+        scale_vmax: f64,
+    ) -> std::sync::Arc<dyn colm_hybrid::Surrogate> {
+        std::sync::Arc::new(colm_hybrid::FnBackend(
+            move |input: &colm_hybrid::Matrix| -> anyhow::Result<colm_hybrid::Matrix> {
+                let mut data = Vec::new();
+                for row in 0..input.rows {
+                    let class = input.row(row)[0] as usize;
+                    let constants =
+                        colm_core::ClassConstants::new(colm_core::LandCoverScheme::Igbp, class)?;
+                    for name in &names {
+                        let value = constants.table_value(name)?;
+                        data.push(if *name == "DEF_LC_VMAX25" {
+                            value * scale_vmax
+                        } else {
+                            value
+                        });
+                    }
+                }
+                colm_hybrid::Matrix::new(input.rows, names.len(), data)
+            },
+        ))
+    }
+
+    /// 设计第 6 节第 2 条：参数插槽接一个原样给出物理表值的模型，结果与不接逐位相同。
+    #[test]
+    fn a_land_class_slot_that_echoes_the_table_changes_nothing() {
+        let root = directory("hybrid-echo");
+        let case = root.join("case.nml");
+        let forcing_namelist = root.join("forcing.nml");
+        let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/Forcing");
+        write_case_span(
+            &case,
+            &forcing_namelist,
+            &format!("{}/", source.display()),
+            "POINT",
+            1,
+            0,
+            1,
+            2,
+            0,
+        );
+        let fixture = colm_init::fixtures::SyntheticRestart::write(root.join("restart")).unwrap();
+        let names = colm_core::LandClassOverrides::REAL_NAMES.to_vec();
+        let hybrid = land_class_hybrid(&root, &names, table_echo(names.clone(), 1.0));
+        let physics = land_physics();
+        let per_patch = hybrid
+            .patch_physics(&fixture.constant.block, &[0, 1], &physics)
+            .unwrap();
+        // 两个 patch 都是土壤 patch，每一列都被覆盖了（覆盖确实走了插槽这条路）。
+        assert!(per_patch
+            .iter()
+            .all(|physics| physics.land_class_overrides.vmax25_umol.is_some()
+                && physics.land_class_overrides.beta.is_some()));
+
+        let plain = run_day(&case, &fixture, physics);
+        let echoed = run_day(&case, &fixture, per_patch[1].clone());
+        assert_eq!(plain.0.len(), echoed.0.len());
+        for (step, (a, b)) in plain.0.iter().zip(&echoed.0).enumerate() {
+            assert_eq!(a, b, "step {step} differs");
+        }
+        assert_eq!(plain.1, echoed.1, "final state differs");
+    }
+
+    /// 插槽确实生效：Vcmax 翻倍时结果与纯物理不同（否则上一个测试说明不了什么）。
+    #[test]
+    fn a_land_class_slot_that_changes_vmax25_changes_the_run() {
+        let root = directory("hybrid-vmax");
+        let case = root.join("case.nml");
+        let forcing_namelist = root.join("forcing.nml");
+        let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/Forcing");
+        write_case_span(
+            &case,
+            &forcing_namelist,
+            &format!("{}/", source.display()),
+            "POINT",
+            1,
+            0,
+            1,
+            2,
+            0,
+        );
+        let fixture = colm_init::fixtures::SyntheticRestart::write(root.join("restart")).unwrap();
+        let hybrid = land_class_hybrid(
+            &root,
+            &["DEF_LC_VMAX25"],
+            table_echo(vec!["DEF_LC_VMAX25"], 2.0),
+        );
+        let physics = land_physics();
+        let per_patch = hybrid
+            .patch_physics(&fixture.constant.block, &[1], &physics)
+            .unwrap();
+        let table = colm_core::ClassConstants::new(colm_core::LandCoverScheme::Igbp, 3)
+            .unwrap()
+            .table_value("DEF_LC_VMAX25")
+            .unwrap();
+        assert_eq!(
+            per_patch[0].land_class_overrides.vmax25_umol,
+            Some(table * 2.0)
+        );
+        let plain = run_day(&case, &fixture, physics);
+        let doubled = run_day(&case, &fixture, per_patch[0].clone());
+        assert_ne!(plain.1, doubled.1, "doubling Vcmax left the day unchanged");
     }
 }

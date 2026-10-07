@@ -152,7 +152,33 @@ colm-hybrid/
 
 P0 不改任何物理代码，GUI 也不动。
 
-## 10. 待定
+## 10. 已定（2026-10-07）
+
+1. 推理库：`tract-onnx` **0.22**（0.23 要 Rust 1.91，工作区 MSRV 是 1.85.1）。放在 `colm-hybrid` 的 `inference` feature 里（默认开）；colm-cli 只解析配置、算指纹，关掉它不链 tract。
+2. 第一个参数插槽是 **`land_class`**，不是土壤水力参数。
+   - 土壤水力参数牵动热参数和 mkinidata 按原参数算出的初始状态，只改一部分会让状态与参数对不上。
+   - 地类表各列走现成的 `LandClassOverrides`：每个模板自带一份 `physics`，按 patch 覆盖、装配照原路径派生，物理代码不改。
+   - 输出名就是 29 个 `DEF_LC_*` 列名，Vcmax（`DEF_LC_VMAX25`）是其中一列，所以这个插槽是通用的。
+3. 训练侧代码放本仓库 `python/`。
+4. 特征按名字从常数重启读（`name` 或 `name[k]`），不在 Rust 里逐个登记；换特征只改配置。
+5. `model`/`sha256` 可以都不给：只能用于特征抓取（`HybridConfig::load_spec`），正式运行要求两者都有。
+
+## 11. P0 落地（第 605 轮）
+
+| 位置 | 内容 |
+|---|---|
+| `crates/colm-hybrid/` | `HybridConfig`（`load`/`load_spec`、sha256 校验、合成指纹）、`Matrix`、`Surrogate`、`TractBackend`、`FnBackend`、归一化与输出变换、`Slot::evaluate` |
+| `crates/colm-core/src/land_cover.rs` | `ClassConstants::table_value(name)`：`DEF_LC_*` 列的原始表值 |
+| `crates/colm-runtime/src/hybrid.rs` | `Hybrid::patch_physics`（`land_class` 插槽，只作用于 `patchtype == 0`，PFT/PC 报错）、`write_land_class_tap` |
+| `crates/colm-runtime/src/bin/colm-rs.rs` | `--hybrid`、`--hybrid-tap`；单点与空间两处装配前按 patch 取物理参数 |
+| `crates/colm-cli/` | 发现 `hybrid.toml` 传 `--hybrid`（预检与正式运行）；`--engine fortran` 拒绝；colm 段指纹记 `hybrid (hybrid.toml)` |
+| `python/colm_hybrid/make_test_model.py` | 生成测试用 `linear.onnx` |
+
+**还没做**（P1 再做）：
+- 续跑文件里记模型哈希；
+- 训练脚本；
+- 过程插槽。
+
 
 1. P1 先做哪个参数插槽：土壤水力参数（结构简单、派生量多）还是 Vcmax（直接影响 ET/GPP）。
 2. `tract` 与 `candle` 二选一：前者直接吃 ONNX，后者便于将来在 Rust 里训练。倾向 `tract`。

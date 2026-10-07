@@ -496,3 +496,44 @@ fn semicolon_separated_parameter_files_are_all_recorded() {
     let d = first_difference(&before, &after).expect("b.nml change must be seen");
     assert!(d.contains("b.nml"), "{d}");
 }
+
+/// 混合模型配置只影响 colm 段：加上 `hybrid.toml` 或换了它引用的模型，colm 指纹变、前处理两段不变。
+#[test]
+fn a_hybrid_config_and_its_model_only_touch_the_colm_stage() {
+    let case = write("hybrid", CASE);
+    let dir = case.parent().unwrap();
+    let before: Vec<_> = ["mksrfdata", "mkinidata", "colm"]
+        .iter()
+        .map(|stage| compute(stage, &case, "k").unwrap())
+        .collect();
+    std::fs::write(dir.join("model.onnx"), b"first").unwrap();
+    let toml = |sha: &str| {
+        format!(
+            "[[slot]]\nname = \"land_class\"\nkind = \"param\"\nmodel = \"model.onnx\"\nsha256 = \"{sha}\"\nfeatures = [\"patchclass\"]\noutputs = [{{ name = \"DEF_LC_VMAX25\" }}]\n"
+        )
+    };
+    std::fs::write(
+        dir.join("hybrid.toml"),
+        toml(&colm_hybrid::sha256_hex(b"first")),
+    )
+    .unwrap();
+    let with_first: Vec<_> = ["mksrfdata", "mkinidata", "colm"]
+        .iter()
+        .map(|stage| compute(stage, &case, "k").unwrap())
+        .collect();
+    assert!(before[0] == with_first[0]);
+    assert!(before[1] == with_first[1]);
+    assert!(before[2] != with_first[2]);
+
+    std::fs::write(dir.join("model.onnx"), b"second").unwrap();
+    std::fs::write(
+        dir.join("hybrid.toml"),
+        toml(&colm_hybrid::sha256_hex(b"second")),
+    )
+    .unwrap();
+    let with_second = compute("colm", &case, "k").unwrap();
+    assert!(with_first[2] != with_second);
+    assert!(first_difference(&with_first[2], &with_second)
+        .unwrap()
+        .contains("hybrid"));
+}

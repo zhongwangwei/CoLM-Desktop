@@ -18,6 +18,8 @@ colm-hist = { path = "../colm-hist", features = ["io"] }
 colm-kernel = { path = "../colm-kernel" }
 colm-schema = { path = "../colm-schema" }
 colm-srfdata = { path = "../colm-srfdata" }
+# 混合模型配置（hybrid.toml）的解析与指纹；不推理，所以不带 tract。
+colm-hybrid = { path = "../colm-hybrid", default-features = false }
 anyhow.workspace = true
 # forcing-probe 要读猜到的槽位变量各自的 `units` 属性——colm-forcing
 # 已经把 static netcdf + HDF5 拉进了这颗二进制（forcing-convert 那条路

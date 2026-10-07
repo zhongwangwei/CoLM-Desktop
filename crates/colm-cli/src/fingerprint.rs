@@ -187,6 +187,18 @@ pub fn compute(stage: &str, case_nml: &Path, kernel: &str) -> Result<Fingerprint
             );
         }
     }
+    // 混合模型（hybrid.toml）：配置文本与它引用的模型、归一化文件的内容合成一个指纹。换了模型或
+    // 配置就重跑 colm 段；前处理两段不受影响。没有这个文件时不记（现有算例的指纹不变）。
+    if stage == "colm" {
+        let hybrid = case_dir.join("hybrid.toml");
+        if hybrid.is_file() {
+            let value = match colm_hybrid::HybridConfig::load_spec(&hybrid) {
+                Ok(config) => config.fingerprint,
+                Err(error) => format!("error: {error:#}"),
+            };
+            inputs.insert("hybrid (hybrid.toml)".into(), value);
+        }
+    }
     // Process parameter files are case-local by contract. Include manually
     // added files even when an older case.nml does not list them yet.
     if stage == "colm" {
