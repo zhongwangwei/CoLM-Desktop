@@ -31592,3 +31592,23 @@ GPP 的均值被 4 个基线 KGE 低于 −0.5 的站拉低（BE-Lon、DE-Geb、
   - 第二个进程续接后，模型收到的请求包含两次提问。
   - 续接一个没存过的会话号不报错，仍留在当前会话。
   - 只开了没说话的会话不落盘。
+
+## 第 627 轮：实测 DeepSeek Responses API 的 web_search
+
+**过程**：用户看到一条推文，说 DeepSeek 的 Responses 接口只要声明 `web_search` 工具就能用服务端联网搜索，问能不能用。推文引用的官方文档（api-docs.deepseek.com/zh-cn/guides/responses_api）当前写的是"web_search / file_search / … 等内置工具：忽略"，另有一句备注说旧模型此前产生的 `web_search_call` 回传时仍会还原。经用户同意，用用户保存的 Key 实测（2026-10-08，`POST https://api.deepseek.com/responses`，非流式；脚本里 Key 只在内存中，不打印）。问题是"今天（2026年10月）DeepSeek 官网最新发布的新闻标题是什么？请给出来源网址。"
+
+**结果**：
+
+| 请求 | 返回的 model | 输出项 | 输入 token |
+|---|---|---|---|
+| `deepseek-flash` + `{"type":"web_search"}` | deepseek-flash | reasoning, message | 55 |
+| `deepseek-flash` + `{"type":"web_search_preview"}` | deepseek-flash | reasoning | 55 |
+| `deepseek-v4-flash` + `{"type":"web_search"}` | deepseek-flash（别名，已映射） | reasoning | 55 |
+| `deepseek-flash`，不带工具 | deepseek-flash | reasoning, message | 55 |
+
+- 带不带工具，输入 token 都是 55，说明工具声明根本没进上下文。
+- 所有返回里都没有 `web_search_call`。
+- 带 `web_search` 时，模型自己回答"我没有实时联网/浏览能力"。不带工具时，模型认为当前日期是 2026 年 5 月 7 日。
+- 前三行与第四行的第一次调用把 600 个输出 token 全用在了思考上，没有正文；第一行和第四行放宽到 3000、思考强度 low 后重跑，才得到正文。
+
+**结论**：DeepSeek 目前的 API 不提供服务端联网搜索，推文描述的是旧模型时期的行为。助手要联网，只能由应用自己执行搜索（`web_search` / `fetch_url` 工具接第三方搜索引擎），或者等 P4 接入自带搜索的 Codex、Claude Code。
