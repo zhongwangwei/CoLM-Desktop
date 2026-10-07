@@ -117,9 +117,10 @@ usage:
                    # 在运行时段内累积强迫，给每个 patch 算气候特征（clim_tair、clim_tair_amplitude、
                    # clim_prec、clim_swdown、clim_vpd），写到 <case>/hybrid_climate/；不模拟
   colm-cli hybrid-fit --studies <dir,dir,...> --network <net.json> --kernel <dir> --out <x.mlp.json>
-                   [--weight pftfrac] [--epochs N] [--learning-rate X] [--ridge X] [--seed N]
+                   [--weight pftfrac] [--epochs N] [--learning-rate X] [--ridge X] [--seed N] [--require-gate 1]
                    # 两步训练的第二步：读各站调优 Study 的最优参数，在基础算例上取逐行特征，拟合网络；
-                   # 两个以上 Study 时做留一站交叉验证。net.json 与 Study 的 hybrid 段同格式
+                   # 两个以上 Study 时做留一站交叉验证，并与“其余站均值”基准比较；不如基准时警告，
+                   # 加 --require-gate 1 时报错且不写模型。net.json 与 Study 的 hybrid 段同格式
   colm-cli hybrid-info <case-dir>
                    # 以 JSON 列出算例的混合模型配置与模型校验结果（没有配置时 installed 为 false）
   colm-cli hybrid-remove <case-dir>

@@ -91,18 +91,45 @@ fn leave_one_study_out_reports_each_held_out_group() {
             }
         })
         .collect();
-    let (_, train, held_out) = fit_rows(&rows, &outputs, &FitOptions::default(), 3).unwrap();
-    assert!(train[0] < 1e-6, "{train:?}");
-    assert_eq!(held_out.len(), 3);
-    for rmse in &held_out {
-        assert!(rmse.as_ref().unwrap()[0] < 1e-6, "{held_out:?}");
+    let outcome = fit_rows(&rows, &outputs, &FitOptions::default(), 3).unwrap();
+    assert!(outcome.train[0] < 1e-6, "{:?}", outcome.train);
+    assert_eq!(outcome.held_out.len(), 3);
+    for rmse in &outcome.held_out {
+        assert!(rmse.as_ref().unwrap()[0] < 1e-6);
     }
+    // 关系是真的：网络远好于均值基准，过门槛。
+    let (network, baseline) = outcome.pooled.clone().unwrap();
+    assert!(network[0] < baseline[0] / 100.0, "{network:?} {baseline:?}");
+    assert_eq!(outcome.passes_gate(), Some(true));
     // 只有一组时不做交叉验证。
     let one: Vec<Row> = rows
         .iter()
         .cloned()
         .map(|row| Row { group: 0, ..row })
         .collect();
-    let (_, _, held_out) = fit_rows(&one, &outputs, &FitOptions::default(), 1).unwrap();
-    assert_eq!(held_out, vec![None]);
+    let outcome = fit_rows(&one, &outputs, &FitOptions::default(), 1).unwrap();
+    assert_eq!(outcome.held_out, vec![None]);
+    assert_eq!(outcome.passes_gate(), None);
+}
+
+#[test]
+fn noise_fails_the_cross_validation_gate() {
+    // 目标与特征无关（确定性的伪随机）：网络留一组时不会比均值好。
+    let net = network("pft", "DEF_PFT_VMAX25");
+    let outputs = output_specs(&net);
+    let rows: Vec<Row> = (0..24)
+        .map(|i| {
+            let noise = ((i * 7919 + 13) % 97) as f64 / 97.0;
+            Row {
+                group: i as usize % 6,
+                features: vec![f64::from(i % 5), 270.0 + f64::from((i * 3) % 11)],
+                targets: vec![30.0 + 40.0 * noise],
+                weight: 1.0,
+            }
+        })
+        .collect();
+    let outcome = fit_rows(&rows, &outputs, &FitOptions::default(), 6).unwrap();
+    let (network, baseline) = outcome.pooled.clone().unwrap();
+    assert!(network[0] >= baseline[0], "{network:?} {baseline:?}");
+    assert_eq!(outcome.passes_gate(), Some(false));
 }

@@ -184,10 +184,44 @@ fn rmse(fitted: &Fitted, outputs: &[OutputSpec], rows: &[&Row]) -> Result<Vec<f6
         .collect())
 }
 
-/// 全部行拟合出的网络、它在训练行上各输出的误差、每个分组留出时的误差（不做交叉验证时为 `None`）。
-pub(crate) type FitOutcome = (Fitted, Vec<f64>, Vec<Option<Vec<f64>>>);
+/// 拟合与交叉验证的结果。
+pub(crate) struct FitOutcome {
+    pub fitted: Fitted,
+    /// 训练行上各输出的均方根误差。
+    pub train: Vec<f64>,
+    /// 每个分组留出时网络的误差（不做交叉验证时为 `None`）。
+    pub held_out: Vec<Option<Vec<f64>>>,
+    /// 同样留出时，“用其余分组目标的加权均值”这个最简单基准的误差。
+    pub baseline: Vec<Option<Vec<f64>>>,
+    /// 全部留出行合起来的均方根误差（网络、基准）；不做交叉验证时为 `None`。
+    pub pooled: Option<(Vec<f64>, Vec<f64>)>,
+}
 
-/// 拟合全部行，并在两个以上分组时做留一组交叉验证。
+impl FitOutcome {
+    /// 交叉验证门槛：每个输出上网络的留一组误差都要低于均值基准。不做交叉验证时无法判断。
+    pub fn passes_gate(&self) -> Option<bool> {
+        self.pooled
+            .as_ref()
+            .map(|(network, baseline)| network.iter().zip(baseline).all(|(n, b)| n < b))
+    }
+}
+
+/// 各行各输出的加权平方误差之和与权重之和（合并各分组时用）。
+fn squared_errors(predicted: &Matrix, rows: &[&Row]) -> (Vec<f64>, f64) {
+    let mut sums = vec![0.0; predicted.cols];
+    for (index, row) in rows.iter().enumerate() {
+        for (out, sum) in sums.iter_mut().enumerate() {
+            *sum += row.weight * (predicted.row(index)[out] - row.targets[out]).powi(2);
+        }
+    }
+    (sums, rows.iter().map(|row| row.weight).sum())
+}
+
+fn rmse_from(sums: &[f64], weight: f64) -> Vec<f64> {
+    sums.iter().map(|sum| (sum / weight).sqrt()).collect()
+}
+
+/// 拟合全部行，并在两个以上分组时做留一组交叉验证（同时算均值基准）。
 pub(crate) fn fit_rows(
     rows: &[Row],
     outputs: &[OutputSpec],
@@ -197,17 +231,47 @@ pub(crate) fn fit_rows(
     let all: Vec<&Row> = rows.iter().collect();
     let fitted = colm_hybrid::fit::fit(&dataset(&all)?, outputs, options)?;
     let train = rmse(&fitted, outputs, &all)?;
-    let mut held_out = Vec::with_capacity(groups);
+    let o = outputs.len();
+    let (mut held_out, mut baseline) = (Vec::new(), Vec::new());
+    let (mut net_sum, mut base_sum, mut weight) = (vec![0.0; o], vec![0.0; o], 0.0);
     for group in 0..groups {
         let (test, rest): (Vec<&Row>, Vec<&Row>) = all.iter().partition(|row| row.group == group);
-        held_out.push(if groups < 2 || test.is_empty() || rest.is_empty() {
-            None
-        } else {
-            let model = colm_hybrid::fit::fit(&dataset(&rest)?, outputs, options)?;
-            Some(rmse(&model, outputs, &test)?)
-        });
+        if groups < 2 || test.is_empty() || rest.is_empty() {
+            held_out.push(None);
+            baseline.push(None);
+            continue;
+        }
+        let model = colm_hybrid::fit::fit(&dataset(&rest)?, outputs, options)?;
+        let predicted = colm_hybrid::fit::predict(&model, outputs, &dataset(&test)?.features)?;
+        let (sums, w) = squared_errors(&predicted, &test);
+        held_out.push(Some(rmse_from(&sums, w)));
+        let rest_weight: f64 = rest.iter().map(|row| row.weight).sum();
+        let mean: Vec<f64> = (0..o)
+            .map(|out| {
+                rest.iter()
+                    .map(|row| row.weight * row.targets[out])
+                    .sum::<f64>()
+                    / rest_weight
+            })
+            .collect();
+        let constant = Matrix::new(test.len(), o, mean.repeat(test.len()))?;
+        let (base, _) = squared_errors(&constant, &test);
+        baseline.push(Some(rmse_from(&base, w)));
+        for out in 0..o {
+            net_sum[out] += sums[out];
+            base_sum[out] += base[out];
+        }
+        weight += w;
     }
-    Ok((fitted, train, held_out))
+    let pooled =
+        (weight > 0.0).then(|| (rmse_from(&net_sum, weight), rmse_from(&base_sum, weight)));
+    Ok(FitOutcome {
+        fitted,
+        train,
+        held_out,
+        baseline,
+        pooled,
+    })
 }
 
 /// 在算例上空跑加 tap，返回 CSV 文本。
@@ -379,7 +443,25 @@ pub(super) fn cmd_hybrid_fit(opts: &Opts) -> Result<()> {
             .join(", ")
     );
 
-    let (fitted, train, held_out) = fit_rows(&rows, &outputs, &options, studies.len())?;
+    let outcome = fit_rows(&rows, &outputs, &options, studies.len())?;
+    let gate = outcome.passes_gate();
+    if gate == Some(false) && opts.get("--require-gate").as_deref() == Some("1") {
+        let (network, baseline) = outcome
+            .pooled
+            .as_ref()
+            .expect("a gate result needs pooled errors");
+        bail!(
+            "the network does not beat the mean predictor in leave-one-study-out validation \
+             (RMSE {network:?} vs {baseline:?}); no model written"
+        );
+    }
+    let FitOutcome {
+        fitted,
+        train,
+        held_out,
+        baseline,
+        pooled,
+    } = outcome;
     let parent = out
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -404,13 +486,25 @@ pub(super) fn cmd_hybrid_fit(opts: &Opts) -> Result<()> {
         "sources": sources,
         "outputs": names,
         "train_rmse": train,
-        "held_out_rmse": studies.iter().zip(&held_out).map(|(study, rmse)| serde_json::json!({
+        "held_out_rmse": studies.iter().zip(&held_out).zip(&baseline).map(|((study, rmse), base)| serde_json::json!({
             "study": study.display().to_string(),
             "rmse": rmse,
+            "mean_predictor_rmse": base,
         })).collect::<Vec<_>>(),
+        "validation": pooled.as_ref().map(|(network, baseline)| serde_json::json!({
+            "network_rmse": network,
+            "mean_predictor_rmse": baseline,
+            "passed": gate,
+        })),
     });
     std::fs::write(&report_path, serde_json::to_string_pretty(&report)?)?;
     println!("{}", serde_json::to_string_pretty(&report)?);
+    if gate == Some(false) {
+        eprintln!(
+            "WARNING: in leave-one-study-out validation the network is no better than predicting \
+             the mean of the other studies; it is not expected to help at new sites"
+        );
+    }
     println!(
         "wrote {}, {}, {}",
         out.display(),
