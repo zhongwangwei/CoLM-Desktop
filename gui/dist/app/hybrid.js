@@ -285,9 +285,16 @@ async function checkCase(c) {
     for (const column of slot.outputs) table.appendChild(statRow('输出参数', column));
     const rows = element('p', 'mini');
     rows.append(element('span', '', '作用行数：'), element('span', '', String(slot.rows)));
+    let outside;
+    if (slot.outside_training == null) {
+      outside = element('p', 'muted mini', '模型没有记录训练范围，无法判断是否外推。');
+    } else {
+      outside = element('p', slot.outside_training > 0 ? 'warn mini' : 'mini');
+      outside.append(element('span', '', '超出训练范围的行：'), element('span', '', String(slot.outside_training)));
+    }
     const wrap = element('div', 'result-table-wrap');
     wrap.appendChild(table);
-    blocks.push(rows, wrap);
+    blocks.push(rows, outside, wrap);
   }
   host.replaceChildren(...blocks);
 }
@@ -339,7 +346,10 @@ async function installModel() {
   const outputs = readOutputs($('hybrid-outputs')).map(output => outputArg(checkOutput(slot, output)));
   if (!outputs.length) throw new Error('至少要一个输出参数');
   const normalize = $('hybrid-normalize-path').value.trim() || null;
-  await invoke('hybrid_install', { dirs, model, slot, features, outputs, normalize, force: $('hybrid-force').checked });
+  await invoke('hybrid_install', {
+    dirs, model, slot, features, outputs, normalize,
+    force: $('hybrid-force').checked, outsidePhysics: $('hybrid-outside').checked,
+  });
   status(dirs.length === 1 ? '已导入模型' : `已为 ${dirs.length} 个算例导入模型`);
   await refreshHybridCard();
 }

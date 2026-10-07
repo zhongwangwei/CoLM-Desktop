@@ -116,8 +116,15 @@ fn feature_statistics_pool_across_sites() {
     let site = |rows, mean, std| DryRunSlot {
         rows,
         features: vec![
-            DryRunColumn { mean, std },
             DryRunColumn {
+                min: mean - std,
+                max: mean + std,
+                mean,
+                std,
+            },
+            DryRunColumn {
+                min: 1.0,
+                max: 1.0,
                 mean: 1.0,
                 std: 0.0,
             },
@@ -129,6 +136,9 @@ fn feature_statistics_pool_across_sites() {
     assert!((stats.std[0] - 0.75f64.sqrt()).abs() < 1e-12);
     // 处处相同的特征不放大噪声：标准差取 1。
     assert_eq!(stats.std[1], 1.0);
+    // 训练范围取各站范围的并。
+    assert_eq!(stats.min.as_deref(), Some(&[2.0, 1.0][..]));
+    assert_eq!(stats.max.as_deref(), Some(&[4.0, 1.0][..]));
     assert!(pooled(&[site(0, 0.0, 0.0)], 2).is_err());
 }
 

@@ -131,3 +131,34 @@ fn weights_pull_the_fit_toward_heavy_rows() {
     data.weights = vec![1.0, 0.0];
     assert!(fit(&data, &spec, &FitOptions::default()).is_err());
 }
+
+#[test]
+fn fitted_normalization_records_the_training_range_for_extrapolation_checks() {
+    let data = dataset(&[(vec![1.0, 5.0], 20.0), (vec![3.0, 5.0], 40.0)]);
+    let spec = [output(Transform::Identity, None)];
+    let fitted = fit(&data, &spec, &FitOptions::default()).unwrap();
+    let n = &fitted.normalization;
+    assert_eq!(n.min.as_deref(), Some(&[1.0, 5.0][..]));
+    assert_eq!(n.max.as_deref(), Some(&[3.0, 5.0][..]));
+    assert!(!n.outside(&[2.0, 5.0]));
+    assert!(!n.outside(&[3.0, 5.0]));
+    assert!(n.outside(&[3.5, 5.0]));
+    // 常数特征只要偏一点就算超出。
+    assert!(n.outside(&[2.0, 5.1]));
+    // 没记录范围时无法判断，一律不算超出。
+    let bare = Normalization {
+        min: None,
+        max: None,
+        ..n.clone()
+    };
+    assert!(!bare.outside(&[100.0, 100.0]));
+    // 写出、读回保留范围；长度不符的范围被拒绝。
+    let dir = std::env::temp_dir().join(format!("colm-hybrid-norm-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("n.json");
+    std::fs::write(&path, serde_json::to_string(n).unwrap()).unwrap();
+    assert_eq!(&Normalization::load(&path, 2).unwrap(), n);
+    std::fs::write(&path, r#"{"mean":[0,0],"std":[1,1],"min":[0],"max":[1,1]}"#).unwrap();
+    assert!(Normalization::load(&path, 2).is_err());
+    let _ = std::fs::remove_dir_all(&dir);
+}

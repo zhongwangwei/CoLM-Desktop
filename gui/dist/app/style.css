@@ -656,3 +656,4 @@ body.resizing-live { user-select: none; }
 #hybrid-cases button { margin-right: 6px; }
 #hybrid-cases th, #hybrid-cases td { white-space: nowrap; }
 @media (max-width: 640px) { .hybrid-form { grid-template-columns: 1fr; } }
+.hybrid-form-note { grid-column: 1 / -1; margin: 0; }

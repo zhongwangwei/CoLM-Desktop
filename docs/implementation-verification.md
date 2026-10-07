@@ -31187,3 +31187,38 @@ LAI 的块是 `(1, 1, 86400)`，一块一整条全球纬线，读区域时每行
   - 三组的留一组交叉验证，以及只有一组时不做交叉验证。
 
 **检查**：两个 workspace 的 fmt 都干净；workspace clippy 零警告；workspace 测试 1895 项通过（单线程）；GUI `cargo check` 通过。
+
+## 第 613 轮：外推检查与退回物理
+
+设计见 docs/design-hybrid.md 第 13 节第 4 步。
+
+**改动**：
+- `Normalization` 增加可选的 `min`/`max`、`outside(row)` 与长度校验。
+- `SlotConfig.outside`：`apply` 或 `physics`。
+- `Slot` 增加 `outside_rows` 与 `has_training_range`。
+- `hybrid.rs` 的 `physics_fallback`：
+  - `land_class` 插槽：超出范围的行不写覆盖；
+  - `pft` 插槽：推入空覆盖，以占住这个 PFT 的位置。
+- `SlotSummary.outside_training`：分块合并时求和；任一块无法判断则整体为空。
+- 写出训练范围：`hybrid-fit` 取训练样本；Study 取基础算例范围的并（`HybridNormalization` 增加可选的 `min`/`max`，旧 spec 序列化不变）。
+- `hybrid-install --outside`；`hybrid-info` 增加 `outside` 与 `training_range`。
+- GUI：检查结果显示超出范围的行数（大于 0 时标黄；没有记录范围时说明无法判断）；导入表单增加勾选项与说明。
+
+**端到端**：在 `tmp/st-rust`（CN-Cng 自带强迫，2008 年 1 月，LCT）的三份副本上：
+- 模型：特征为 `patchclass` 与 `clim_tair`，标准化记录的训练范围是 `clim_tair` ∈ [280, 300] K。站点的 257.7 K 在范围外，`hybrid-check` 报告 1 行超出。
+- 三份运行：
+
+  | 副本 | 设置 | 与不带模型的运行相比 |
+  |---|---|---|
+  | olA | 不带模型 | — |
+  | olP | 带模型，`outside = "physics"` | 历史 127 个变量全部相同，续跑文件 md5 相同 |
+  | olY | 带模型，`apply` | 77 个变量不同 |
+
+  olY 的 Vcmax25 被设为约 11，区域均值 GPP 从 2.3e-7 降到 5e-8。
+- 两份带模型的运行都写了 `.hybrid` 续跑标记。
+
+**检查**：
+- 两个 workspace 的 fmt 都干净；workspace clippy 零警告。
+- workspace 测试 1896 项通过（单线程）；GUI Rust 测试 205 项通过。
+- `check-gui` 通过；13 个前端套件全部通过。
+- 新增测试覆盖：训练范围的记录与判定、常数特征的判定、没有范围时不判、读回、长度校验，以及 Study 合并训练范围。

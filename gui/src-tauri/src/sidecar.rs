@@ -2430,10 +2430,11 @@ pub async fn hybrid_install(
     outputs: Vec<String>,
     normalize: Option<String>,
     force: bool,
+    outside_physics: bool,
 ) -> Result<String, String> {
     let mut log = String::new();
     for dir in dirs {
-        let args = hybrid_install_args(
+        let mut args = hybrid_install_args(
             dir.clone(),
             model.clone(),
             slot.clone(),
@@ -2442,6 +2443,9 @@ pub async fn hybrid_install(
             normalize.clone(),
             force,
         )?;
+        if outside_physics {
+            args.extend(["--outside".to_string(), "physics".to_string()]);
+        }
         log += &capture_async(args)
             .await
             .map_err(|e| format!("{dir}: {e}"))?;

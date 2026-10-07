@@ -38,6 +38,14 @@ pub struct Hybrid {
     case_dir: Option<PathBuf>,
 }
 
+/// `outside = "physics"` 时超出训练范围、要退回纯物理参数的行。
+fn physics_fallback(slot: &Slot, features: &Matrix) -> Vec<bool> {
+    match slot.config.outside {
+        colm_hybrid::Outside::Physics => slot.outside_rows(features),
+        colm_hybrid::Outside::Apply => vec![false; features.rows],
+    }
+}
+
 /// 配置里有没有气候特征。
 fn uses_climate(slots: &[SlotConfig]) -> bool {
     slots
@@ -196,7 +204,11 @@ impl Hybrid {
             let soil_patches: Vec<usize> = soil.iter().map(|&row| patches[row]).collect();
             let matrix = feature_matrix(&features, &slot.config.features, &soil_patches)?;
             let values = slot.evaluate(&matrix)?;
+            let skip = physics_fallback(slot, &matrix);
             for (index, &row) in soil.iter().enumerate() {
+                if skip[index] {
+                    continue;
+                }
                 let overrides = &mut out[row].land_class_overrides;
                 for (output, &value) in slot.config.outputs.iter().zip(values.row(index)) {
                     overrides.set_real(&output.name, value)?;
@@ -220,8 +232,14 @@ impl Hybrid {
             let rows = pft_rows(&soil, patches, pft_ranges);
             let matrix = pft_feature_matrix(&features, &pft_restart, &slot.config.features, &rows)?;
             let values = slot.evaluate(&matrix)?;
+            let skip = physics_fallback(slot, &matrix);
             for (index, &(row, _, _)) in rows.iter().enumerate() {
                 let mut overrides = BTreeMap::new();
+                if skip[index] {
+                    // 空覆盖：这个 PFT 用纯物理参数，但要占住它的位置。
+                    out[row].pft_overrides.push(overrides);
+                    continue;
+                }
                 for (output, &value) in slot.config.outputs.iter().zip(values.row(index)) {
                     colm_case::pft::validate_override(&output.name, value)
                         .with_context(|| format!("slot {PFT_SLOT} row {index}"))?;
@@ -252,11 +270,12 @@ impl Hybrid {
                 pft_ranges,
                 physics,
             )?;
-            out.push(SlotSummary::new(
-                &slot.config,
-                &features,
-                Some(&slot.evaluate(&features)?),
-            ));
+            let mut summary =
+                SlotSummary::new(&slot.config, &features, Some(&slot.evaluate(&features)?));
+            summary.outside_training = slot
+                .has_training_range()
+                .then(|| slot.outside_rows(&features).iter().filter(|&&o| o).count());
+            out.push(summary);
         }
         Ok(out)
     }
@@ -324,6 +343,9 @@ pub struct SlotSummary {
     pub features: Vec<ColumnSummary>,
     /// 只有配置、没有模型时为空。
     pub outputs: Vec<ColumnSummary>,
+    /// 超出训练范围的行数；模型没有记录训练范围时为空。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outside_training: Option<usize>,
 }
 
 /// 一列的范围、均值与标准差（总体标准差）。
@@ -383,6 +405,10 @@ impl SlotSummary {
                 };
                 Ok(SlotSummary {
                     slot: slot.slot.clone(),
+                    outside_training: blocks
+                        .iter()
+                        .map(|block| block.outside_training)
+                        .sum::<Option<usize>>(),
                     rows,
                     features: merge_columns(&|s| &s.features),
                     outputs: merge_columns(&|s| &s.outputs),
@@ -431,6 +457,7 @@ impl SlotSummary {
                     outputs,
                 )
             }),
+            outside_training: None,
         }
     }
 }

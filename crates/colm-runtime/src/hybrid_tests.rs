@@ -17,6 +17,7 @@ fn only_land_class_param_slots_with_def_lc_outputs_are_accepted() {
         sha256: None,
         features: vec!["patchclass".into()],
         normalize: None,
+        outside: colm_hybrid::Outside::Apply,
         outputs: vec![colm_hybrid::OutputSpec {
             name: output.into(),
             range: None,
@@ -62,6 +63,7 @@ fn the_pft_slot_accepts_only_def_pft_parameters() {
         sha256: None,
         features: vec!["pftclass".into()],
         normalize: None,
+        outside: colm_hybrid::Outside::Apply,
         outputs: vec![colm_hybrid::OutputSpec {
             name: output.into(),
             range: None,
@@ -93,6 +95,7 @@ fn summaries_report_range_mean_and_population_std() {
         sha256: None,
         features: vec!["pftclass".into(), "pftfrac".into()],
         normalize: None,
+        outside: colm_hybrid::Outside::Apply,
         outputs: vec![colm_hybrid::OutputSpec {
             name: "DEF_PFT_VMAX25".into(),
             range: None,
@@ -118,6 +121,7 @@ fn block_summaries_merge_like_one_pass_over_all_rows() {
         sha256: None,
         features: vec!["pftclass".into()],
         normalize: None,
+        outside: colm_hybrid::Outside::Apply,
         outputs: vec![],
     };
     let matrix = |values: Vec<f64>| Matrix::new(values.len(), 1, values).unwrap();

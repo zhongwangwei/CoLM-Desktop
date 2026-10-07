@@ -86,6 +86,7 @@ pub fn write_member_files(
             &hybrid.features,
             Some(Path::new(NORMALIZE)),
             &outputs,
+            None,
         ),
     )
     .with_context(|| format!("cannot write {}", config.display()))?;
@@ -121,6 +122,8 @@ struct DryRunSlot {
 
 #[derive(Deserialize)]
 struct DryRunColumn {
+    min: f64,
+    max: f64,
     mean: f64,
     std: f64,
 }
@@ -219,6 +222,8 @@ fn pooled(summaries: &[DryRunSlot], features: usize) -> Result<HybridNormalizati
     );
     let mut mean = vec![0.0; features];
     let mut std = vec![0.0; features];
+    let mut min = vec![f64::INFINITY; features];
+    let mut max = vec![f64::NEG_INFINITY; features];
     for column in 0..features {
         let mut sum = 0.0;
         let mut squares = 0.0;
@@ -228,6 +233,8 @@ fn pooled(summaries: &[DryRunSlot], features: usize) -> Result<HybridNormalizati
                 .get(column)
                 .context("the dry run reported too few features")?;
             let n = summary.rows as f64;
+            min[column] = min[column].min(stats.min);
+            max[column] = max[column].max(stats.max);
             sum += n * stats.mean;
             squares += n * (stats.std * stats.std + stats.mean * stats.mean);
         }
@@ -237,7 +244,12 @@ fn pooled(summaries: &[DryRunSlot], features: usize) -> Result<HybridNormalizati
         mean[column] = m;
         std[column] = if s > 1e-12 * m.abs().max(1.0) { s } else { 1.0 };
     }
-    Ok(HybridNormalization { mean, std })
+    Ok(HybridNormalization {
+        mean,
+        std,
+        min: Some(min),
+        max: Some(max),
+    })
 }
 
 #[cfg(test)]

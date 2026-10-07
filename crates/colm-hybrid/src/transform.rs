@@ -13,6 +13,11 @@ use crate::config::{OutputSpec, Transform};
 pub struct Normalization {
     pub mean: Vec<f64>,
     pub std: Vec<f64>,
+    /// 训练时各特征见过的最小值（可选）：有了它，运行与检查能统计、处理超出训练范围的行。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min: Option<Vec<f64>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max: Option<Vec<f64>>,
 }
 
 impl Normalization {
@@ -34,7 +39,28 @@ impl Normalization {
             "{} has a non-finite mean or a non-positive std",
             path.display()
         );
+        for (name, bound) in [("min", &normalization.min), ("max", &normalization.max)] {
+            if let Some(bound) = bound {
+                ensure!(
+                    bound.len() == features && bound.iter().all(|v| v.is_finite()),
+                    "{} has {} finite {name} values for {features} features",
+                    path.display(),
+                    bound.len()
+                );
+            }
+        }
         Ok(normalization)
+    }
+
+    /// 这一行（原始特征）是否超出训练范围；没有记录范围时总是否。边界留 1e-9 的相对容差。
+    pub fn outside(&self, row: &[f64]) -> bool {
+        let (Some(min), Some(max)) = (&self.min, &self.max) else {
+            return false;
+        };
+        row.iter().zip(min.iter().zip(max)).any(|(&v, (&lo, &hi))| {
+            let slack = 1.0e-9 * lo.abs().max(hi.abs()).max(1.0);
+            v < lo - slack || v > hi + slack
+        })
     }
 
     pub fn apply(&self, row: &mut [f64]) {

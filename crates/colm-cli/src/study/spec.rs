@@ -354,6 +354,11 @@ pub struct HybridOutputSpec {
 pub struct HybridNormalization {
     pub mean: Vec<f64>,
     pub std: Vec<f64>,
+    /// 基础算例上各特征的范围（训练范围），供运行与检查判断外推。旧 Study 没有。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min: Option<Vec<f64>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max: Option<Vec<f64>>,
 }
 
 fn default_hybrid_activation() -> colm_hybrid::Activation {

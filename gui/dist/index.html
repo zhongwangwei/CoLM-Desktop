@@ -483,10 +483,12 @@
             <label>输出参数</label>
             <div><div id="hybrid-outputs"></div><button class="btn-ghost" type="button" id="hybrid-add-output">添加输出</button>
               <p class="muted mini">网络的每个输出对应一个参数；范围是该参数允许的取值区间。</p></div>
+            <p class="muted mini hybrid-form-note">标准化文件里记录了训练范围（min/max）时，“检查”会统计超出范围的行；勾选下方的选项后，这些行在运行中用纯物理参数。用到训练站点以外的区域或全球时建议勾选。</p>
             <label for="hybrid-normalize-path">特征标准化（可选）</label>
             <div class="hybrid-inline"><input class="input" id="hybrid-normalize-path" placeholder="可选：mean/std 的 JSON 文件"><button class="btn-ghost" type="button" id="hybrid-pick-normalize">选择…</button></div>
           </div>
           <div class="pill-row" style="margin-top:10px">
+            <label class="check"><input type="checkbox" id="hybrid-outside"> 超出训练范围的行用纯物理参数</label>
             <label class="check"><input type="checkbox" id="hybrid-force"> 覆盖已有的配置</label>
             <button class="run-btn" type="button" id="hybrid-install">导入</button>
           </div>

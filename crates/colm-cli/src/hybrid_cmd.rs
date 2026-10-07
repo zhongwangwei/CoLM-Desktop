@@ -55,6 +55,7 @@ pub(crate) fn slot_toml(
     features: &[String],
     normalize: Option<&Path>,
     outputs: &[(String, Option<[f64; 2]>, String)],
+    outside: Option<&str>,
 ) -> String {
     let mut text = String::from("[[slot]]\n");
     text += &format!("name = {}\n", toml_string(slot));
@@ -74,6 +75,9 @@ pub(crate) fn slot_toml(
             "normalize = {}\n",
             toml_string(&normalize.display().to_string())
         );
+    }
+    if let Some(outside) = outside {
+        text += &format!("outside = {}\n", toml_string(outside));
     }
     text += "outputs = [\n";
     for (name, range, transform) in outputs {
@@ -112,6 +116,13 @@ pub(super) fn cmd_hybrid_install(opts: &Opts) -> Result<()> {
         .collect::<Result<Vec<_>>>()?;
     ensure!(!features.is_empty(), "--features names no feature");
     ensure!(!outputs.is_empty(), "give at least one --output");
+    let outside = opts.get("--outside");
+    ensure!(
+        outside
+            .as_deref()
+            .is_none_or(|value| ["apply", "physics"].contains(&value)),
+        "--outside must be apply or physics"
+    );
     let config = case.join("hybrid.toml");
     ensure!(
         !config.exists() || opts.get("--force").is_some(),
@@ -134,6 +145,7 @@ pub(super) fn cmd_hybrid_install(opts: &Opts) -> Result<()> {
         &features,
         normalize_rel.as_deref(),
         &outputs,
+        outside.as_deref(),
     );
     std::fs::write(&config, &text).with_context(|| format!("cannot write {}", config.display()))?;
     // 按正式运行的规则读回：sha256、变换与范围；原生 MLP 再核对维度。ONNX 的维度由 hybrid-check 核对。
@@ -295,6 +307,11 @@ pub(crate) fn hybrid_info(case: &Path) -> Result<serde_json::Value> {
                 "trained_by_study": model.and_then(file_name).as_deref() == Some("study.mlp.json"),
                 "features": slot.features,
                 "normalized": slot.normalize.is_some(),
+                "outside": slot.outside,
+                "training_range": slot.normalize.as_deref().is_some_and(|path| {
+                    colm_hybrid::Normalization::load(path, slot.features.len())
+                        .is_ok_and(|n| n.min.is_some() && n.max.is_some())
+                }),
                 "outputs": slot.outputs.iter().map(|output| serde_json::json!({
                     "name": output.name,
                     "range": output.range,

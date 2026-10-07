@@ -17,7 +17,7 @@ use anyhow::{ensure, Context, Result};
 #[cfg(feature = "inference")]
 pub use backend::TractBackend;
 pub use backend::{FnBackend, Surrogate};
-pub use config::{sha256_hex, HybridConfig, OutputSpec, SlotConfig, SlotKind, Transform};
+pub use config::{sha256_hex, HybridConfig, OutputSpec, Outside, SlotConfig, SlotKind, Transform};
 pub use mlp::{Activation, Layer, Mlp, MLP_FORMAT};
 pub use transform::{apply_output, Normalization};
 
@@ -90,6 +90,24 @@ impl Slot {
             normalization,
             backend,
         })
+    }
+
+    /// 各行（原始特征）是否超出训练范围；归一化文件没有记录范围时全为否。
+    pub fn outside_rows(&self, features: &Matrix) -> Vec<bool> {
+        (0..features.rows)
+            .map(|row| {
+                self.normalization
+                    .as_ref()
+                    .is_some_and(|normalization| normalization.outside(features.row(row)))
+            })
+            .collect()
+    }
+
+    /// 记录了训练范围吗（检查时据此区分“0 行超出”与“无法判断”）。
+    pub fn has_training_range(&self) -> bool {
+        self.normalization
+            .as_ref()
+            .is_some_and(|n| n.min.is_some() && n.max.is_some())
     }
 
     /// 一批特征 → 一批物理量（按 `outputs` 的次序）。归一化、推理、变换与范围检查都在这里。

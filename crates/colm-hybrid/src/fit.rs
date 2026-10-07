@@ -95,7 +95,22 @@ fn normalization(features: &Matrix, weights: &[f64]) -> Normalization {
             1.0
         };
     }
-    Normalization { mean, std }
+    // 训练范围：运行与检查据此统计、处理外推的行。
+    let bound = |pick: fn(f64, f64) -> f64, start: f64| {
+        (0..features.cols)
+            .map(|c| {
+                (0..features.rows)
+                    .map(|row| features.row(row)[c])
+                    .fold(start, pick)
+            })
+            .collect()
+    };
+    Normalization {
+        mean,
+        std,
+        min: Some(bound(f64::min, f64::INFINITY)),
+        max: Some(bound(f64::max, f64::NEG_INFINITY)),
+    }
 }
 
 /// 拟合。目标按 `outputs` 反变换；行权重必须为正。

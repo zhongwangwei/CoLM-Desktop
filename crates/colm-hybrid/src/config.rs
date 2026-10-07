@@ -60,6 +60,18 @@ pub struct SlotConfig {
     #[serde(default)]
     pub normalize: Option<PathBuf>,
     pub outputs: Vec<OutputSpec>,
+    /// 超出训练范围（见归一化文件的 `min`/`max`）的行怎么办。
+    #[serde(default)]
+    pub outside: Outside,
+}
+
+/// 超出训练范围的行：照用模型（缺省，与没有这个选项时相同），或退回纯物理参数。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Outside {
+    #[default]
+    Apply,
+    Physics,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
