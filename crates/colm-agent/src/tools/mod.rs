@@ -218,12 +218,16 @@ impl Registry {
     }
 
     /// 全部工具，按需加联网与引导模式（`ui_*`）。
+    ///
+    /// 能驱动窗口时不提供后台的 `create_case`：两条路都在时模型会挑省事的后台那条，建出的算例
+    /// 用户在工作台里看不到（第 631 轮实测）。窗口里也能批量建例（勾选多个站点）。
     pub fn standard_with(web: bool, ui: bool) -> Self {
         let mut registry = Self::standard();
         if web {
             registry.tools.extend(web::tools());
         }
         if ui {
+            registry.tools.retain(|tool| tool.name() != "create_case");
             registry.tools.extend(ui::tools());
         }
         registry

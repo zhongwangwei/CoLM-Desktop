@@ -68,3 +68,22 @@ fn string_nulls_from_the_model_count_as_missing() {
     assert_eq!(opt_str(&args, "missing"), None);
     assert_eq!(opt_str(&args, "mode"), Some("pc"));
 }
+
+#[test]
+fn driving_the_window_replaces_background_case_creation() {
+    let names = |registry: &Registry| -> Vec<&str> { registry.tools().map(|t| t.name()).collect() };
+    let plain = Registry::standard_with(false, false);
+    assert!(names(&plain).contains(&"create_case"));
+    assert!(!names(&plain).contains(&"ui_state"));
+    let window = Registry::standard_with(true, true);
+    assert!(!names(&window).contains(&"create_case"));
+    for tool in [
+        "ui_state",
+        "ui_commit",
+        "web_search",
+        "run_case",
+        "set_case_fields",
+    ] {
+        assert!(names(&window).contains(&tool), "{tool}");
+    }
+}

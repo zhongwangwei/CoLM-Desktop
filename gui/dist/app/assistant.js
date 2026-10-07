@@ -196,6 +196,8 @@ function toolResult(event) {
     actions.appendChild(open);
     card.appendChild(actions);
     card.open = true;
+    // 新建的算例直接在工作台打开（引导模式下窗口已经在它上面，不用再开）。
+    if (event.name === 'create_case' && state.selected?.dir !== dir) open.click();
   }
 }
 
