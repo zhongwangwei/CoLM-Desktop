@@ -89,3 +89,10 @@ for (const value of ['', 'low', 'high', 'max', 'off']) {
   assert.equal(assistant.sessionTime(new Date(2026, 9, 7, 23, 40).getTime(), now), '10-07 23:40');
   assert.equal(assistant.sessionTime(new Date(2025, 0, 3, 8, 0).getTime(), now), '2025-01-03');
 }
+
+// 只自动打开当场建成的算例；回放历史、已经选中、或别的工具都不开。
+assert.equal(assistant.shouldOpenCreatedCase({ name: 'create_case' }, '/c/a', '/c/b'), true);
+assert.equal(assistant.shouldOpenCreatedCase({ name: 'create_case', replay: true }, '/c/a', '/c/b'), false);
+assert.equal(assistant.shouldOpenCreatedCase({ name: 'create_case' }, '/c/a', '/c/a'), false);
+assert.equal(assistant.shouldOpenCreatedCase({ name: 'set_case_fields' }, '/c/a', null), false);
+assert.equal(assistant.shouldOpenCreatedCase({ name: 'create_case' }, null, null), false);

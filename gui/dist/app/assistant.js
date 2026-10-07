@@ -45,6 +45,11 @@ export function caseFromResult(tool, resultText) {
   }
 }
 
+/** 工具结果出来后要不要自动在工作台打开新算例：只对当场建成的，不对回放的历史。 */
+export function shouldOpenCreatedCase(event, dir, selectedDir) {
+  return !event.replay && event.name === 'create_case' && !!dir && dir !== selectedDir;
+}
+
 /** 把回答切成块：段落、代码块、表格（`|` 开头的连续行）。 */
 export function answerBlocks(text) {
   const blocks = [];
@@ -197,8 +202,9 @@ function toolResult(event) {
     actions.appendChild(open);
     card.appendChild(actions);
     card.open = true;
-    // 新建的算例直接在工作台打开（引导模式下窗口已经在它上面，不用再开）。
-    if (event.name === 'create_case' && state.selected?.dir !== dir) open.click();
+    // 当场新建的算例直接在工作台打开（引导模式下窗口已经在它上面，不用再开）。
+    // 回放历史对话时不开：那是以前建的，打开会把用户正在看的页面换掉（第 633 轮）。
+    if (shouldOpenCreatedCase(event, dir, state.selected?.dir)) open.click();
   }
 }
 
@@ -491,7 +497,7 @@ function renderTranscript(items) {
         card.dataset.state = 'failed';
         card.querySelector('.assistant-tool-state').textContent = t('未完成');
       } else {
-        toolResult({ id: item.id, name: item.name, ok: item.ok, result: item.result });
+        toolResult({ id: item.id, name: item.name, ok: item.ok, result: item.result, replay: true });
       }
       card.open = false;
     }
