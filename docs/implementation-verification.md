@@ -31611,4 +31611,30 @@ GPP 的均值被 4 个基线 KGE 低于 −0.5 的站拉低（BE-Lon、DE-Geb、
 - 带 `web_search` 时，模型自己回答"我没有实时联网/浏览能力"。不带工具时，模型认为当前日期是 2026 年 5 月 7 日。
 - 前三行与第四行的第一次调用把 600 个输出 token 全用在了思考上，没有正文；第一行和第四行放宽到 3000、思考强度 low 后重跑，才得到正文。
 
-**结论**：DeepSeek 目前的 API 不提供服务端联网搜索，推文描述的是旧模型时期的行为。助手要联网，只能由应用自己执行搜索（`web_search` / `fetch_url` 工具接第三方搜索引擎），或者等 P4 接入自带搜索的 Codex、Claude Code。
+**结论**：DeepSeek 的 Responses 接口（以及 Chat Completions 接口）目前不执行服务端联网搜索，推文描述的是旧模型时期的行为。（第 628 轮更正：Anthropic 兼容的 Messages 接口可以。）助手要联网，只能由应用自己执行搜索（`web_search` / `fetch_url` 工具接第三方搜索引擎），或者等 P4 接入自带搜索的 Codex、Claude Code。
+
+## 第 628 轮：DeepSeek 原生搜索走 Anthropic 兼容接口（更正第 627 轮）
+
+**过程**：用户问 DeepSeek Harness 是怎么联网的。克隆 deepseek-ai/deepseek-harness（MIT），读它的 `packages/web/web-search-deepseek`：
+
+- 搜索既不走 Chat Completions 也不走 Responses，而是另发一次 Anthropic 兼容的 Messages 请求：
+  - 地址：`POST https://api.deepseek.com/anthropic/v1/messages`
+  - 请求头：`anthropic-version: 2023-06-01`，Key 同时放在 `x-api-key` 与 `Authorization: Bearer`
+  - 模型：`deepseek-v4-flash`
+  - 工具：`{"type":"web_search_20250305","name":"web_search","max_uses":5}`
+  - 用户消息：`Perform a web search for the query: <query>`
+- 它只取响应里结构化的 `web_search_tool_result` 块（url、title、page_age），不取模型正文；没有这种块就报错，不降级。
+- 这次搜索请求独立于会话模型的上下文；README 写明每次搜索都要付一个完整模型轮次的延迟和 token。
+
+**实测**（2026-10-08，经用户同意用其保存的 Key；脚本里 Key 只在内存中，不打印）：
+
+| 查询 | 耗时 | 用量 | 返回块 |
+|---|---|---|---|
+| "DeepSeek news October 2026" | 4.6 s | 输入 6039 + 输出 754 token，`web_search_requests: 1` | `thinking, server_tool_use, web_search_tool_result, thinking, text` |
+| "CoLM2024 Common Land Model paper" | 3.8 s | 输入 6672 + 输出 700 token，`web_search_requests: 1` | 同上 |
+
+- 第一个查询的结果是真实的当月新闻，例如新浪财经 2026-10-05 关于 DeepSeek Harness 的报道。
+- 第二个查询找到了 CoLM2024 相关论文，例如 JGR 上的 "Global Assessment of Atmospheric Forcing Uncertainties in CoLM2024 Simulations"、The Cryosphere 2025。
+- `page_age` 都是空的。
+
+**结论**：用现有的 DeepSeek Key 就能联网搜索，不需要第三方搜索服务和额外的 Key。代价是每次搜索约 7k token、约 4 秒。助手的 `web_search` 工具可以照这个方式实现，默认后端用 DeepSeek 原生搜索，第三方引擎（Firecrawl、Tavily 等）作为备选。
