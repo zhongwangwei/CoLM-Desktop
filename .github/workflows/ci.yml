@@ -142,6 +142,7 @@ jobs:
           node gui/tests/forcing-gapfill.mjs
           node gui/tests/results.mjs
           node gui/tests/study-model.mjs
+          node gui/tests/hybrid.mjs
 
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings

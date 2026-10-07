@@ -17,6 +17,7 @@ const CASE_WRITES = new Set([
   'set_process_parameter_field_batch', 'reset_process_parameter_field_batch',
   'set_pft_parameter_batch', 'set_pft_parameters_batch',
   'apply_import_parameter_overrides', 'configure_ozone_batch', 'configure_cbl_batch',
+  'hybrid_install', 'hybrid_remove',
 ]);
 
 function writeTargets(args) {

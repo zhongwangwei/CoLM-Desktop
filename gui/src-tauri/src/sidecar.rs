@@ -2398,6 +2398,114 @@ pub async fn study_result(study_dir: String, path: String) -> Result<String, Str
     .await
 }
 
+/// 算例的 AI 参数化（混合模型）配置，JSON；没有配置时 `installed` 为 false。
+#[tauri::command]
+pub async fn hybrid_info(case: String) -> Result<String, String> {
+    capture_async(vec!["hybrid-info".to_string(), case]).await
+}
+
+/// 在算例上空跑模型（不模拟），JSON：各插槽的行数与特征、输出的范围。
+#[tauri::command]
+pub async fn hybrid_check(case: String, kernel_dir: String) -> Result<String, String> {
+    capture_async(hybrid_check_args(case, kernel_dir)).await
+}
+
+fn hybrid_check_args(case: String, kernel_dir: String) -> Vec<String> {
+    vec![
+        "hybrid-check".to_string(),
+        case,
+        "--kernel".into(),
+        kernel_dir,
+    ]
+}
+
+/// 把同一个模型装到每个算例上。参数名用 `dirs`：`ipc.js` 据此拦下正在运行的算例。
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn hybrid_install(
+    dirs: Vec<String>,
+    model: String,
+    slot: String,
+    features: Vec<String>,
+    outputs: Vec<String>,
+    normalize: Option<String>,
+    force: bool,
+) -> Result<String, String> {
+    let mut log = String::new();
+    for dir in dirs {
+        let args = hybrid_install_args(
+            dir.clone(),
+            model.clone(),
+            slot.clone(),
+            &features,
+            &outputs,
+            normalize.clone(),
+            force,
+        )?;
+        log += &capture_async(args)
+            .await
+            .map_err(|e| format!("{dir}: {e}"))?;
+    }
+    Ok(log)
+}
+
+fn hybrid_install_args(
+    case: String,
+    model: String,
+    slot: String,
+    features: &[String],
+    outputs: &[String],
+    normalize: Option<String>,
+    force: bool,
+) -> Result<Vec<String>, String> {
+    let features: Vec<&str> = features
+        .iter()
+        .map(|f| f.trim())
+        .filter(|f| !f.is_empty())
+        .collect();
+    if features.is_empty() {
+        return Err("至少要一个输入特征".into());
+    }
+    if outputs.is_empty() {
+        return Err("至少要一个输出参数".into());
+    }
+    let mut args = vec![
+        "hybrid-install".to_string(),
+        case,
+        "--model".into(),
+        model,
+        "--slot".into(),
+        slot,
+        "--features".into(),
+        features.join(","),
+    ];
+    for output in outputs {
+        args.push("--output".into());
+        args.push(output.clone());
+    }
+    if let Some(normalize) = normalize.filter(|n| !n.trim().is_empty()) {
+        args.push("--normalize".into());
+        args.push(normalize);
+    }
+    if force {
+        args.push("--force".into());
+        args.push("1".into());
+    }
+    Ok(args)
+}
+
+/// 删掉每个算例的 `hybrid.toml` 及它引用的模型文件。
+#[tauri::command]
+pub async fn hybrid_remove(dirs: Vec<String>) -> Result<String, String> {
+    let mut log = String::new();
+    for dir in dirs {
+        log += &capture_async(vec!["hybrid-remove".to_string(), dir.clone()])
+            .await
+            .map_err(|e| format!("{dir}: {e}"))?;
+    }
+    Ok(log)
+}
+
 pub(crate) async fn capture_async(args: Vec<String>) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || capture(&args))
         .await

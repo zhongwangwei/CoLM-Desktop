@@ -767,3 +767,61 @@ fn stage_headings_name_the_step_in_plain_words() {
     assert_eq!(super::stage_heading("colm"), "──── 模拟（colm）────");
     assert_eq!(super::stage_heading("other"), "──── other ────");
 }
+
+#[test]
+fn hybrid_commands_forward_case_kernel_and_install_options() {
+    assert_eq!(
+        hybrid_check_args("/case".into(), "/kernel".into()),
+        ["hybrid-check", "/case", "--kernel", "/kernel"]
+    );
+    let args = hybrid_install_args(
+        "/case".into(),
+        "/m.mlp.json".into(),
+        "pft".into(),
+        &[" pftclass".into(), "".into(), "porsl[1] ".into()],
+        &["DEF_PFT_VMAX25:10:80:sigmoid".into()],
+        Some("/norm.json".into()),
+        true,
+    )
+    .unwrap();
+    assert_eq!(
+        args,
+        [
+            "hybrid-install",
+            "/case",
+            "--model",
+            "/m.mlp.json",
+            "--slot",
+            "pft",
+            "--features",
+            "pftclass,porsl[1]",
+            "--output",
+            "DEF_PFT_VMAX25:10:80:sigmoid",
+            "--normalize",
+            "/norm.json",
+            "--force",
+            "1"
+        ]
+    );
+    let bare = hybrid_install_args(
+        "/case".into(),
+        "/m.onnx".into(),
+        "land_class".into(),
+        &["patchclass".into()],
+        &["DEF_LC_VMAX25".into()],
+        Some(" ".into()),
+        false,
+    )
+    .unwrap();
+    assert!(!bare.contains(&"--normalize".to_string()) && !bare.contains(&"--force".to_string()));
+    assert!(hybrid_install_args(
+        "/c".into(),
+        "/m".into(),
+        "pft".into(),
+        &[" ".into()],
+        &["X".into()],
+        None,
+        false
+    )
+    .is_err());
+}

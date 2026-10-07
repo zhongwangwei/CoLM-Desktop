@@ -460,6 +460,39 @@
         <div id="hist-fields"></div>
       </details>
 
+      <div class="card" id="hybrid-card">
+        <h3>AI 参数化</h3>
+        <div class="ch">用训练好的小网络，按每个 patch 的地表特征给出物理参数（例如 Vcmax25），代替查表值。只有 Rust 引擎能运行；没有装模型的算例照常按纯物理运行。下表列出本次运行的算例。</div>
+        <p class="warn mini" id="hybrid-engine-warning" hidden>本次算例里有装了 AI 参数化模型的算例，Fortran 内核运行不了它们。请把“模拟引擎”换成 Rust 引擎，或先移除模型。</p>
+        <div id="hybrid-cases" class="result-table-wrap"></div>
+        <div id="hybrid-check-result"></div>
+        <details class="fold-card hybrid-import">
+          <summary>导入训练好的模型</summary>
+          <div class="ch">装到上表列出的全部算例。支持 ONNX（.onnx）与本软件的原生格式（.mlp.json，参数调优训练出的就是这种）。特征与输出的次序要和训练模型时一致。</div>
+          <div class="hybrid-form">
+            <label for="hybrid-model-path">模型文件</label>
+            <div class="hybrid-inline"><input class="input" id="hybrid-model-path" placeholder="选择 .onnx 或 .mlp.json"><button class="btn-ghost" type="button" id="hybrid-pick-model">选择…</button></div>
+            <label for="hybrid-slot">作用方式</label>
+            <select class="select" id="hybrid-slot">
+              <option value="pft">按植物功能型（PFT/PC 模式）</option>
+              <option value="land_class">按地类（LCT 模式）</option>
+            </select>
+            <label for="hybrid-features">输入特征</label>
+            <div><input class="input" id="hybrid-features" placeholder="pftclass, pftfrac">
+              <p class="muted mini">常数重启里的变量名，用逗号分隔；分层变量写成 名字[层号]，层号从 1 起，例如 porsl[1]。</p></div>
+            <label>输出参数</label>
+            <div><div id="hybrid-outputs"></div><button class="btn-ghost" type="button" id="hybrid-add-output">添加输出</button>
+              <p class="muted mini">网络的每个输出对应一个参数；范围是该参数允许的取值区间。</p></div>
+            <label for="hybrid-normalize-path">特征标准化（可选）</label>
+            <div class="hybrid-inline"><input class="input" id="hybrid-normalize-path" placeholder="可选：mean/std 的 JSON 文件"><button class="btn-ghost" type="button" id="hybrid-pick-normalize">选择…</button></div>
+          </div>
+          <div class="pill-row" style="margin-top:10px">
+            <label class="check"><input type="checkbox" id="hybrid-force"> 覆盖已有的配置</label>
+            <button class="run-btn" type="button" id="hybrid-install">导入</button>
+          </div>
+        </details>
+      </div>
+
       <div class="card">
         <h3>开始运行</h3>
         <div class="ch">单阶段按钮会明确重跑该阶段；“运行全部”仍按输入指纹跳过无需重跑的阶段。</div>
@@ -949,6 +982,32 @@
             <p><strong>快速判断：</strong>下界 ≤ 0 必须选线性；正值范围的上界/下界约 ≥ 10 时通常优先考虑对数，否则默认线性。对数会均匀覆盖倍数变化，线性会均匀覆盖绝对差值。</p>
           </div>
           <div id="tune-params" class="evaluation-variable-grid"><div class="result-empty">读取后显示可调参数。</div></div>
+          <details class="card fold-card tune-hybrid">
+            <summary>同时训练 AI 参数化（可选）</summary>
+            <div class="ch">差分进化在调参数的同时训练一个小网络：网络按每个 patch 的地表特征给出所选参数，网络的权重就是要搜索的变量。可以不选上面的参数、只训练网络。基准成员保持纯物理，用来对比。只能用 Rust 引擎；基础算例要先跑完前处理（mkinidata），用来统计特征的标准化。</div>
+            <label class="check"><input type="checkbox" id="tune-hybrid-on"> 训练 AI 参数化</label>
+            <div id="tune-hybrid-form" class="hybrid-form" hidden>
+              <label for="tune-hybrid-slot">作用方式</label>
+              <select class="select" id="tune-hybrid-slot">
+                <option value="pft">按植物功能型（PFT/PC 模式）</option>
+                <option value="land_class">按地类（LCT 模式）</option>
+              </select>
+              <label for="tune-hybrid-features">输入特征</label>
+              <div><input class="input" id="tune-hybrid-features" placeholder="pftclass, pftfrac">
+                <p class="muted mini">常数重启里的变量名，用逗号分隔；分层变量写成 名字[层号]，层号从 1 起，例如 porsl[1]。</p></div>
+              <label>输出参数</label>
+              <div><div id="tune-hybrid-outputs"></div><button class="btn-ghost" type="button" id="tune-hybrid-add-output">添加输出</button></div>
+              <label for="tune-hybrid-size">网络规模</label>
+              <select class="select" id="tune-hybrid-size">
+                <option value="linear">线性（权重最少，最好搜）</option>
+                <option value="h4">1 个隐藏层，4 个节点</option>
+                <option value="h8">1 个隐藏层，8 个节点</option>
+              </select>
+              <label>要搜索的权重数</label>
+              <div><b id="tune-hybrid-weight-count">0</b>
+                <p class="warn mini" id="tune-hybrid-weight-warning" hidden>权重数超过了种群大小，差分进化可能搜不动；建议换小一点的网络，或加大种群。</p></div>
+            </div>
+          </details>
           <label class="check study-range-confirm"><input id="tune-range-confirm" type="checkbox"> 我已检查并负责这些采样范围</label>
         </div>
         <div class="card study-actions study-wizard-step" data-study-wizard="tuning" data-study-step="4" hidden>

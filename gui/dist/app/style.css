@@ -641,3 +641,17 @@ body.resizing-live { user-select: none; }
 }
 .sample-pre{white-space:pre;overflow:auto;border:1px solid var(--line);border-radius:12px;padding:10px;background:var(--bg-soft);font-size:12px;line-height:1.45}
 .example-box>summary{cursor:pointer;font-weight:650}
+
+/* AI 参数化（hybrid.js） */
+.hybrid-form { display: grid; grid-template-columns: max-content 1fr; gap: 8px 12px; align-items: start; margin-top: 8px; }
+.hybrid-form > label { padding-top: 6px; }
+.hybrid-inline { display: flex; gap: 8px; }
+.hybrid-inline .input { flex: 1; }
+.hybrid-output-row { display: flex; gap: 6px; align-items: center; margin-bottom: 6px; flex-wrap: wrap; }
+.hybrid-output-row > .input, .hybrid-output-row > .select { width: auto; }
+.hybrid-output-row > .hybrid-output-name { flex: 2 1 200px; }
+.hybrid-output-row > .mini-input { flex: 0 0 90px; }
+.hybrid-output-row > .select { flex: 1 1 200px; }
+.hybrid-check-title { display: flex; gap: 8px; align-items: baseline; margin-top: 12px; }
+#hybrid-cases button { margin-right: 6px; }
+@media (max-width: 640px) { .hybrid-form { grid-template-columns: 1fr; } }

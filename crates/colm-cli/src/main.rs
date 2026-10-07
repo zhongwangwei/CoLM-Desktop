@@ -111,7 +111,11 @@ usage:
                    # transform: identity|clamp|sigmoid|softplus；见 docs/design-hybrid.md
   colm-cli hybrid-check <case-dir> --kernel <dir>
                    # 加载模型、取特征并推理，打印各插槽的行数与特征/输出范围（JSON），不模拟。
-                   # 需要算例已做完前处理（mkinidata）；目前只支持单点
+                   # 需要算例已做完前处理（mkinidata）；单点与空间算例都支持
+  colm-cli hybrid-info <case-dir>
+                   # 以 JSON 列出算例的混合模型配置与模型校验结果（没有配置时 installed 为 false）
+  colm-cli hybrid-remove <case-dir>
+                   # 删掉 hybrid.toml 及它引用的 models/ 下的模型与标准化文件
   colm-cli evaluation-catalog <case-dir> --obs <Flux.nc>
                    # 列出全部支持的评估变量及当前算例/观测是否可用
   colm-cli evaluation-plan <case-dir> --obs <Flux.nc> --kernel <dir>
@@ -272,6 +276,8 @@ fn main() -> Result<()> {
         }
         "hybrid-install" => hybrid_cmd::cmd_hybrid_install(&opts)?,
         "hybrid-check" => hybrid_cmd::cmd_hybrid_check(&opts)?,
+        "hybrid-info" => hybrid_cmd::cmd_hybrid_info(&opts)?,
+        "hybrid-remove" => hybrid_cmd::cmd_hybrid_remove(&opts)?,
         "evaluation-catalog" => {
             cmd_evaluation_catalog(&opts.positional_case()?, &opts.need("--obs")?)?;
         }

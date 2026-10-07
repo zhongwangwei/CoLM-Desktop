@@ -12,6 +12,7 @@ import { metricText } from './metric-format.js';
 import { language, translateZh } from './i18n.js';
 import { catalogLabel, fieldLabel } from './param-presentation.js';
 import { modelEngine } from './engine.js';
+import { renderTuneHybridWeights, tuneHybridSection, wireTuneHybrid } from './hybrid.js';
 import { aggregateStudy, aggregateStudyStatuses, bestTuningSummary, MAX_STUDY_CANDIDATES, paginate, percentageWindow, replaceScopedStudyDirs, scopedStudyDirs, studyActionState, studyBudget, studySiteId, studyWarnings } from './study-model.js';
 import {
   LruCache, METRIC_META, boundedMap, envelopeDiagnostics, finite, metricKey, ranking, resultCases,
@@ -2247,6 +2248,7 @@ function renderStudyBudget(kind) {
   const budget = tuning
     ? studyBudget({ method: 'de', paramCount, siteCount, population: Number($('tune-pop')?.value), generations: Number($('tune-gen')?.value), jobs: studyJobCount('tuning') })
     : studyBudget({ method: $('uq-method')?.value, paramCount, siteCount, candidates: $('uq-method')?.value === 'lhs' ? Number($('uq-count')?.value) : null, jobs: studyJobCount('uq') });
+  if (tuning) renderTuneHybridWeights(Number($('tune-pop')?.value));
   host.textContent = `参数 ${paramCount} · 站点 ${siteCount} · 候选 ${budget.candidateCount} · 成员×站点 ${budget.memberSiteTasks} · 阶段运行 ${budget.totalStageRuns} · 并发 ${budget.jobs} · 预计时间未知（暂无基准实测） · 磁盘需求未知（暂无基准产物大小）`;
   renderStudyReadiness(kind);
 }
@@ -2262,6 +2264,10 @@ function renderStudyReadiness(kind) {
   const roots = new Set(cases.map(c => parentDir(c.dir)));
   let parameterCount = 0;
   try { parameterCount = selectedStudyParams(`${prefix}-params`).length; } catch {}
+  let hybridReady = null;
+  if (tuning && $('tune-hybrid-on')?.checked) {
+    try { tuneHybridSection(); hybridReady = { ok: true }; } catch (error) { hybridReady = { ok: false, text: String(error?.message || error) }; }
+  }
   const selections = [...document.querySelectorAll(tuning
     ? '[data-tune-target]:checked:not(:disabled)'
     : '[data-uq-output]:checked:not(:disabled)')];
@@ -2299,7 +2305,8 @@ function renderStudyReadiness(kind) {
       : (en ? `Observation files ${observations}/${cases.length}; every case requires one` : `观测文件 ${observations}/${cases.length}；每个算例都必须有观测`),
   });
   checks.push(
-    { ok: parameterCount > 0, text: parameterCount ? (en ? `${parameterCount} parameter(s) have valid ranges` : `已选择 ${parameterCount} 个参数并填写有效范围`) : (en ? 'Select at least one parameter and enter finite ranges' : '至少选择一个参数并填写有限范围') },
+    { ok: parameterCount > 0 || hybridReady?.ok === true, text: parameterCount ? (en ? `${parameterCount} parameter(s) have valid ranges` : `已选择 ${parameterCount} 个参数并填写有效范围`) : hybridReady?.ok ? (en ? 'Only the AI parameterization is trained' : '只训练 AI 参数化，不调其他参数') : (en ? 'Select at least one parameter and enter finite ranges' : '至少选择一个参数并填写有限范围') },
+    ...(hybridReady && !hybridReady.ok ? [{ ok: false, text: hybridReady.text }] : []),
     { ok: selectionCount > 0 && uncovered.length === 0, text: uncovered.length
       ? (en ? `No selected applicable ${tuning ? 'target' : 'output'} for: ${uncovered.map(caseName).join(', ')}` : `以下算例没有选中的适用${tuning ? '目标' : '输出变量'}：${uncovered.map(caseName).join('、')}`)
       : selectionCount ? (en ? `${selectionCount} ${tuning ? 'target(s)' : 'output variable(s)'} selected` : `已选择 ${selectionCount} 个${tuning ? '目标' : '输出变量'}`) : (en ? `Select at least one ${tuning ? 'evaluable target' : 'output variable'}` : `至少选择一个${tuning ? '可评估目标' : '输出变量'}`) },
@@ -2354,7 +2361,9 @@ function studySpec(kind, cases, independent = false) {
   const observations = Object.fromEntries(cases.map(c => [studySiteId(c), observationFor(c)]).filter(([, obs]) => obs));
   if (tuning && Object.keys(observations).length !== cases.length) throw new Error('参数调优需要每个站点都有观测文件。');
   const parameters = selectedStudyParams(tuning ? 'tune-params' : 'uq-params');
-  if (!parameters.length) throw new Error('请至少勾选一个参数，并填写有限的最小/最大值。');
+  const hybrid = tuning ? tuneHybridSection() : null;
+  if (!parameters.length && !hybrid) throw new Error('请至少勾选一个参数，并填写有限的最小/最大值。');
+  if (hybrid && modelEngine() !== 'rust') throw new Error('训练 AI 参数化只能用 Rust 引擎；请在运行页把“模拟引擎”换成 Rust 引擎。');
   if (!$(tuning ? 'tune-range-confirm' : 'uq-range-confirm')?.checked) throw new Error('请确认采样范围由用户负责。');
   if (tuning) {
     const targets = [...document.querySelectorAll('[data-tune-target]:checked')]
@@ -2379,6 +2388,7 @@ function studySpec(kind, cases, independent = false) {
       base_cases: cases.map(c => c.dir), observations, parameters, site_mode: independent ? 'independent' : 'shared',
       targets,
       budget: { population: design.population, generations: design.generations, jobs: studyJobCount('tuning') },
+      ...(hybrid ? { hybrid } : {}),
     };
   }
   const outputs = [...document.querySelectorAll('[data-uq-output]:checked')]
@@ -2719,6 +2729,15 @@ async function renderBestTuningCard(envelope, dir, metricRows = []) {
     ['站点', '参数', 'baseline', '最优值', '变化量', '搜索范围位置'].forEach(label => head.appendChild(th(label)));
     table.appendChild(head);
     for (const row of previewRows) {
+      if (String(row.field).startsWith('hybrid slot')) {
+        const tr = document.createElement('tr');
+        const weights = String(row.new).match(/\d+/)?.[0] ?? '—';
+        const what = node('td');
+        what.append(node('span', '', '训练出的网络，权重数：'), node('span', '', weights));
+        tr.append(td(row.site), td('AI 参数化'), td('纯物理'), what, td('—'), td('—'));
+        table.appendChild(tr);
+        continue;
+      }
       const oldValue = finite(row.old);
       const value = finite(row.new);
       const tr = document.createElement('tr');
@@ -3132,7 +3151,9 @@ async function applyBestCandidate() {
     ensureStudyMutationCurrent('tuning', isCurrent);
     previews.push(`${dir}\n${rows.map(row => `${row.site}: ${row.field} ${row.old} -> ${row.new}`).join('\n')}`);
   }
-  const previewText = previews.join('\n\n');
+  const hybridNote = previews.some(text => text.includes('hybrid slot'))
+    ? `\n\n${dialogText('训练出的 AI 参数化模型会一起写进新算例（hybrid.toml 与 models/），新算例只能用 Rust 引擎运行。')}` : '';
+  const previewText = previews.join('\n\n') + hybridNote;
   setPreview('tuning', previewText);
   if (!globalThis.confirm?.(`${dialogText('即将应用以下参数改动：')}\n\n${previewText.slice(0, 3000)}`)) return;
   ensureStudyMutationCurrent('tuning', isCurrent);
@@ -3188,6 +3209,10 @@ for (const id of ['uq-method', 'uq-count', 'uq-seed', 'tune-pop', 'tune-gen', 't
 };
 bindStudyJobInputs('uq');
 bindStudyJobInputs('tuning');
+wireTuneHybrid(() => {
+  invalidateActiveStudy('tuning', '调优设计已修改，请重新生成调优任务。');
+  renderStudyBudget('tuning');
+});
 if ($('tune-site-mode')) $('tune-site-mode').onchange = () => { invalidateActiveStudy('tuning', '调优设计已修改，请重新生成调优任务。'); renderTuningTargets().catch(e => status(e.message || e)); };
 if ($('tune-validation')) $('tune-validation').onchange = () => {
   for (const id of ['tune-val-from', 'tune-val-to']) $(id).disabled = !$('tune-validation').checked;

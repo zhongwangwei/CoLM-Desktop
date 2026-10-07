@@ -96,6 +96,25 @@ impl HybridConfig {
         Self::read(path, false)
     }
 
+    /// 只解析配置里声明的插槽（模型与归一化路径按配置所在目录解析），不读、不校验任何文件。
+    /// 用于展示与清理：模型被换掉或丢了也能看到配置写的是什么。
+    pub fn declared(path: &Path) -> Result<Vec<SlotConfig>> {
+        let text = std::fs::read_to_string(path)
+            .with_context(|| format!("cannot read {}", path.display()))?;
+        let contents: FileContents =
+            toml::from_str(&text).with_context(|| format!("cannot parse {}", path.display()))?;
+        let base = path.parent().unwrap_or(Path::new("."));
+        Ok(contents
+            .slots
+            .into_iter()
+            .map(|mut slot| {
+                slot.model = slot.model.map(|model| base.join(model));
+                slot.normalize = slot.normalize.map(|normalize| base.join(normalize));
+                slot
+            })
+            .collect())
+    }
+
     fn read(path: &Path, require_model: bool) -> Result<Self> {
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("cannot read {}", path.display()))?;

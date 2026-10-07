@@ -31067,3 +31067,40 @@ LAI 的块是 `(1, 1, 86400)`，一块一整条全球纬线，读区域时每行
 - 带模型运行的物理响应：Vcmax25 升高，区域均值 GPP 约翻倍，潜热从 27.2 W/m² 升到 30.2 W/m²，感热从 15.6 W/m² 降到 12.9 W/m²。
 - 续跑标记：每个分块都写了 `.hybrid`；不带模型的运行一个都不写。
 - 原算例 `zb/out` 里的历史文件是旧配置（逐日输出）跑的，不能拿来做逐位比较。这一轮的逐位比较都用当前 `case.nml`，在副本上重跑。
+
+## 第 610 轮：GUI——AI 参数化
+
+设计见 docs/design-hybrid.md 第 7 节。
+
+**CLI**：
+- `hybrid-info <case>`：以 JSON 列出配置，包括插槽、模型文件名与格式、是否由参数调优训练、特征、输出、地表模式，以及模型校验错误。没有配置时 `installed` 为 false。
+- `hybrid-remove <case>`：只删 `hybrid.toml` 和它引用的、位于 `models/` 下的文件；用户自己放进去的文件不动。
+- 两者都读声明用的新函数 `HybridConfig::declared`：只解析声明，不读模型。这样模型被换掉、sha256 对不上时，照样能看到配置内容、照样能删。
+
+**sidecar**：
+- `hybrid_info`、`hybrid_check`、`hybrid_install`、`hybrid_remove` 四个命令。
+- install 与 remove 的参数名用 `dirs`，并加入 `ipc.js` 的 `CASE_WRITES`：正在运行的算例不许改。
+
+**前端**：
+- 新模块 `hybrid.js`，只依赖 ipc、state、ui、batch、engine、i18n，没有环。
+- 加载时只挂事件，表单内容第一次用到时才填。`domain.mjs` 的 DOM 桩没有 `replaceChildren`，最初版本加载时就填表，被它查出来。
+- 中文文案全部补了英文，`i18n.mjs` 通过。
+- 新测试 `gui/tests/hybrid.mjs`，已加入 CI。它查出了一个真问题：下限留空时 `Number('')` 得 0，会被当成合法的 0。
+
+**界面实测**：
+- 本会话没有桌面控制工具，看不到原生窗口。改在内置浏览器里开一个测试页：用真实的 `hybrid.js` 和样式，模拟后端返回 CLI 实际输出的 JSON（`tmp/zhB` 区域算例的 info 和 check）。
+- 确认了：
+  - 算例表格；
+  - 检查结果（5736 行，Vcmax25 51.9–73.6）；
+  - 切到 Fortran 时的警告；
+  - 导入表单；
+  - 训练表单（1 层 8 个节点时 33 个权重，超过种群 8，出现提醒）；
+  - spec 段的内容；
+  - 移除流程。
+- 截图发现输出参数一行被挤成竖排（全局 `.input`/`.select` 宽度是 100%），已修。
+
+**检查**：
+- 两个 workspace 的 fmt 都干净，clippy 都零警告。
+- `cargo test --workspace --lib --bins`（单线程）1884 项通过；GUI Rust 205 项通过。
+- `xtask check-gui` 通过：79 个命令全部能对上。
+- 13 个前端 node 套件全部通过。

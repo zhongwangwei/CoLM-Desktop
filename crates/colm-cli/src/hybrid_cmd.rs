@@ -210,6 +210,116 @@ pub(crate) fn dry_run(case: &Path, config: &Path, kernel: &Kernel) -> Result<Str
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
+/// 算例上的混合模型配置（GUI 读这个，不自己解析 TOML）：没有配置时 `installed` 为假；
+/// 配置读得出来但模型校验不过（sha256 不符、文件缺失）时照样列出内容，并在 `error` 里说明。
+pub(crate) fn hybrid_info(case: &Path) -> Result<serde_json::Value> {
+    let land_mode = case_land_mode(case)?;
+    let config = case.join("hybrid.toml");
+    if !config.is_file() {
+        return Ok(serde_json::json!({ "installed": false, "land_mode": land_mode, "slots": [] }));
+    }
+    let slots = colm_hybrid::HybridConfig::declared(&config)?;
+    let error = colm_hybrid::HybridConfig::load(&config)
+        .err()
+        .map(|e| format!("{e:#}"));
+    let file_name = |path: &Path| {
+        path.file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+    };
+    let slots = slots
+        .iter()
+        .map(|slot| {
+            let model = slot.model.as_deref();
+            serde_json::json!({
+                "name": slot.name,
+                "model": model.and_then(file_name),
+                "format": model.map(|m| if colm_hybrid::is_mlp(m) { "mlp" } else { "onnx" }),
+                "trained_by_study": model.and_then(file_name).as_deref() == Some("study.mlp.json"),
+                "features": slot.features,
+                "normalized": slot.normalize.is_some(),
+                "outputs": slot.outputs.iter().map(|output| serde_json::json!({
+                    "name": output.name,
+                    "range": output.range,
+                    "transform": output.transform,
+                })).collect::<Vec<_>>(),
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(serde_json::json!({
+        "installed": true,
+        "land_mode": land_mode,
+        "error": error,
+        "slots": slots,
+    }))
+}
+
+/// 算例的地表模式：`lct`、`pft` 或 `pc`。它决定能用哪个插槽（`land_class` 或 `pft`）。
+fn case_land_mode(case: &Path) -> Result<&'static str> {
+    let nml = case.join("case.nml");
+    let text =
+        std::fs::read_to_string(&nml).with_context(|| format!("cannot read {}", nml.display()))?;
+    let document = colm_namelist::parse(&text)?;
+    let on = |name: &str| match document.get(name) {
+        Some(colm_namelist::Value::Bool(value)) => *value,
+        _ => matches!(
+            colm_schema::find(name).map(|field| field.default),
+            Some(colm_schema::Default::Logical(true))
+        ),
+    };
+    Ok(if on("DEF_USE_PC") {
+        "pc"
+    } else if on("DEF_USE_PFT") {
+        "pft"
+    } else {
+        "lct"
+    })
+}
+
+pub(super) fn cmd_hybrid_info(opts: &Opts) -> Result<()> {
+    let case = opts.positional_case()?;
+    println!("{}", serde_json::to_string(&hybrid_info(&case)?)?);
+    Ok(())
+}
+
+/// 删掉 `hybrid.toml` 与它引用的、放在算例 `models/` 里的模型和标准化文件；`models/` 空了一并删掉。
+pub(crate) fn hybrid_remove(case: &Path) -> Result<Vec<PathBuf>> {
+    let config = case.join("hybrid.toml");
+    ensure!(config.is_file(), "{} has no hybrid.toml", case.display());
+    let models = case.join("models");
+    let mut removed = Vec::new();
+    // 配置坏了也要能删：读不出来就只删配置本身。
+    if let Ok(slots) = colm_hybrid::HybridConfig::declared(&config) {
+        let canonical_models = models.canonicalize().ok();
+        for path in slots
+            .iter()
+            .flat_map(|slot| slot.model.iter().chain(&slot.normalize))
+        {
+            let inside = path
+                .canonicalize()
+                .ok()
+                .zip(canonical_models.as_ref())
+                .is_some_and(|(path, models)| path.starts_with(models));
+            if inside && std::fs::remove_file(path).is_ok() {
+                removed.push(path.clone());
+            }
+        }
+    }
+    std::fs::remove_file(&config).with_context(|| format!("cannot remove {}", config.display()))?;
+    removed.push(config);
+    if std::fs::read_dir(&models).is_ok_and(|mut entries| entries.next().is_none()) {
+        let _ = std::fs::remove_dir(&models);
+    }
+    Ok(removed)
+}
+
+pub(super) fn cmd_hybrid_remove(opts: &Opts) -> Result<()> {
+    let case = opts.positional_case()?;
+    for path in hybrid_remove(&case)? {
+        println!("removed {}", path.display());
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 #[path = "hybrid_cmd_tests.rs"]
 mod hybrid_cmd_tests;
