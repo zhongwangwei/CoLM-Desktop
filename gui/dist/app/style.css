@@ -771,6 +771,7 @@ body.resizing-assistant { user-select: none; cursor: col-resize; }
 .assistant-input-row { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
 .assistant-input-row #assistant-usage { margin-right: auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .assistant-input-row button { flex: none; white-space: nowrap; }
+.assistant-input-row .assistant-think { flex: none; width: auto; height: 30px; padding: 0 26px 0 10px; font-size: 12.5px; }
 
 /* 首页（启动页、配置向导）上也能用助手：首页让出右侧，助手停在那一栏。 */
 body.assistant-open .gate:not(.loading-gate) { right: var(--assist-w); }

@@ -295,17 +295,28 @@ async function loadSettings() {
   const settings = await invoke('assistant_settings');
   $('assistant-base').value = settings.base_url;
   $('assistant-model-name').value = settings.model;
-  $('assistant-thinking').value = settings.thinking === true ? 'on' : settings.thinking === false ? 'off' : '';
-  $('assistant-effort').value = settings.reasoning_effort || '';
+  $('assistant-think').value = thinkValue(settings);
   $('assistant-approval').value = settings.approval || 'ask';
-  syncEffort();
   await refreshKeyStatus(settings.base_url);
   return settings;
 }
 
-// 不开启思考时强度不起作用，灰掉。
-function syncEffort() {
-  $('assistant-effort').disabled = $('assistant-thinking').value === 'off';
+/** 输入框下的“思考”选框：不思考 = 关闭思考模式；其余是思考强度（默认交给服务端，DeepSeek 为 high）。 */
+export function thinkValue(settings) {
+  if (settings.thinking === false) return 'off';
+  return settings.reasoning_effort || '';
+}
+
+export function thinkSettings(value) {
+  return value === 'off'
+    ? { thinking: false, reasoning_effort: null }
+    : { thinking: null, reasoning_effort: value || null };
+}
+
+async function changeThink() {
+  const settings = { ...(await invoke('assistant_settings')), ...thinkSettings($('assistant-think').value) };
+  await invoke('assistant_save_settings', { settings });
+  ui.started = false; // 下一条消息发出前重新配置
 }
 
 async function refreshKeyStatus(baseUrl) {
@@ -320,12 +331,10 @@ async function refreshKeyStatus(baseUrl) {
 }
 
 function formSettings(previous) {
-  const thinking = $('assistant-thinking').value;
   return {
     base_url: $('assistant-base').value.trim(),
     model: $('assistant-model-name').value.trim(),
-    thinking: thinking === 'on' ? true : thinking === 'off' ? false : null,
-    reasoning_effort: $('assistant-effort').value || null,
+    ...thinkSettings($('assistant-think').value),
     approval: $('assistant-approval').value || 'ask',
     egress_acknowledged: previous?.egress_acknowledged ?? null,
   };
@@ -531,7 +540,7 @@ function wire() {
     if (ui.started) invoke('assistant_new_session').catch(e => status(e));
   };
   // 回车发送，Shift + 回车换行；输入法选词时的回车（isComposing / keyCode 229）不发送。
-  $('assistant-thinking').addEventListener('change', syncEffort);
+  $('assistant-think').addEventListener('change', () => changeThink().catch(e => status(e?.message || e)));
   $('assistant-text').addEventListener('keydown', event => {
     if (event.key !== 'Enter' || event.shiftKey || event.isComposing || event.keyCode === 229) return;
     event.preventDefault();

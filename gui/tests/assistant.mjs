@@ -70,3 +70,14 @@ for (const file of await readdir(join(root, 'dist', 'app'))) {
   assert.ok(!/\b(window|globalThis)\.(confirm|prompt|alert)\b|(^|[^.\w])(confirm|prompt|alert)\(/m.test(code), `${file} uses a native dialog`);
 }
 console.log('assistant: context, events, answer blocks and page wiring ok');
+
+// 输入框下的“思考”选框与设置之间的换算：不思考关闭思考模式，其余只设强度。
+assert.equal(assistant.thinkValue({ thinking: false, reasoning_effort: 'max' }), 'off');
+assert.equal(assistant.thinkValue({ thinking: null, reasoning_effort: 'low' }), 'low');
+assert.equal(assistant.thinkValue({ thinking: true, reasoning_effort: null }), '');
+assert.deepEqual(assistant.thinkSettings('off'), { thinking: false, reasoning_effort: null });
+assert.deepEqual(assistant.thinkSettings('max'), { thinking: null, reasoning_effort: 'max' });
+assert.deepEqual(assistant.thinkSettings(''), { thinking: null, reasoning_effort: null });
+for (const value of ['', 'low', 'high', 'max', 'off']) {
+  assert.equal(assistant.thinkValue(assistant.thinkSettings(value)), value);
+}

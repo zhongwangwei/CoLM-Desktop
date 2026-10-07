@@ -1116,19 +1116,6 @@
       <label for="assistant-model-name">模型</label>
       <input class="input" id="assistant-model-name" list="assistant-models" placeholder="deepseek-flash">
       <datalist id="assistant-models"><option value="deepseek-flash"></option><option value="deepseek-v4-pro"></option></datalist>
-      <label for="assistant-thinking">思考模式</label>
-      <select class="select" id="assistant-thinking">
-        <option value="">服务默认</option>
-        <option value="on">开启</option>
-        <option value="off">不开启</option>
-      </select>
-      <label for="assistant-effort">思考强度</label>
-      <select class="select" id="assistant-effort">
-        <option value="">服务默认（high）</option>
-        <option value="low">low（快）</option>
-        <option value="high">high</option>
-        <option value="max">max（最深，最慢）</option>
-      </select>
       <label for="assistant-approval">操作审批</label>
       <select class="select" id="assistant-approval">
         <option value="ask">每次询问</option>
@@ -1160,6 +1147,13 @@
     <div class="assistant-input">
       <textarea class="input" id="assistant-text" rows="3" placeholder="输入问题，回车发送，Shift + 回车换行"></textarea>
       <div class="assistant-input-row">
+        <select class="select assistant-think" id="assistant-think" title="思考强度：随时可改，下一条消息生效" aria-label="思考强度">
+          <option value="">思考：默认</option>
+          <option value="low">思考：low</option>
+          <option value="high">思考：high</option>
+          <option value="max">思考：max</option>
+          <option value="off">不思考</option>
+        </select>
         <span class="muted mini" id="assistant-usage"></span>
         <button class="btn-ghost" type="button" id="assistant-stop" disabled>停止</button>
         <button class="run-btn" type="button" id="assistant-send">发送</button>
