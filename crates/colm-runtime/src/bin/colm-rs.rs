@@ -80,6 +80,10 @@ fn run() -> Result<()> {
     )?;
     // 放在预检之前：`--preflight` 也要查出混合配置与模型的问题。
     let hybrid = HybridMode::from_arguments(&arguments)?;
+    let _ = HYBRID_FINGERPRINT.set(match &hybrid {
+        Some(HybridMode::Apply(hybrid)) => Some(hybrid.config.fingerprint.clone()),
+        _ => None,
+    });
     if colm_case::is_spatial_case(&case_nml)? {
         return run_spatial(&arguments, &layout, &name, &case_nml, hybrid.as_ref());
     }
@@ -174,6 +178,7 @@ fn run() -> Result<()> {
         Some(patch) => vec![patch],
         None => (0..patch_count).collect(),
     };
+    colm_runtime::hybrid::check_restart(&files.time, hybrid_fingerprint())?;
     let patch_physics = hybrid_patch_physics(hybrid.as_ref(), &files.constant, &patches, &physics)?;
     let mut templates = patches
         .iter()
@@ -929,6 +934,7 @@ fn run_spatial_segment(
                     path.display()
                 );
             }
+            colm_runtime::hybrid::check_restart(&files.time, hybrid_fingerprint())?;
             let count = colm_init::RestartFile::open(&files.constant)?.dimension("patch")?;
             ensure!(
                 count == patches.len(),
@@ -4903,6 +4909,7 @@ fn write_evolved_restart(
             .with_context(|| format!("cannot create {}", parent.display()))?;
     }
     write_restart(restart_in, restart_out, overrides.as_slice())?;
+    colm_runtime::hybrid::mark_restart(restart_out, hybrid_fingerprint())?;
 
     // PFT 子网格另有一份时间重启（`<case>_restart_pft_<date>_…nc`），与主重启同目录。
     if let Some(pft_source) = &pft_source {
@@ -5572,6 +5579,16 @@ impl Arguments {
             hybrid_tap,
         })
     }
+}
+
+/// 本次运行的混合模型指纹（只有加载了模型时才有；抓取模式与纯物理是 `None`）。一个进程只跑
+/// 一个算例，在 `run` 里设一次；续跑文件的 `.hybrid` 标记据此写出与检查。
+static HYBRID_FINGERPRINT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+
+fn hybrid_fingerprint() -> Option<&'static str> {
+    HYBRID_FINGERPRINT
+        .get()
+        .and_then(|fingerprint| fingerprint.as_deref())
 }
 
 /// `--hybrid`/`--hybrid-tap` 的两种用法。

@@ -244,6 +244,55 @@ pub fn write_land_class_tap(
     Ok(())
 }
 
+/// 续跑文件旁的混合模型标记：`<重启文件>.hybrid`，内容是 [`HybridConfig::fingerprint`]。
+pub fn restart_marker(restart: &Path) -> std::path::PathBuf {
+    let mut path = restart.as_os_str().to_owned();
+    path.push(".hybrid");
+    std::path::PathBuf::from(path)
+}
+
+/// 写完一份续跑文件后调用：用了混合模型就写标记，没用就删掉可能残留的旧标记（同名文件被纯物理
+/// 运行覆盖时，旧标记会说错话）。没用混合模型、也没有旧标记时什么都不做，现有输出不变。
+pub fn mark_restart(restart: &Path, fingerprint: Option<&str>) -> Result<()> {
+    let marker = restart_marker(restart);
+    match fingerprint {
+        Some(fingerprint) => std::fs::write(&marker, format!("{fingerprint}\n"))
+            .with_context(|| format!("cannot write {}", marker.display())),
+        None if marker.exists() => std::fs::remove_file(&marker)
+            .with_context(|| format!("cannot remove the stale {}", marker.display())),
+        None => Ok(()),
+    }
+}
+
+/// 开跑前检查初始续跑文件：它是混合运行写出的，这次就必须用同一套模型（指纹相同）。
+/// 没有标记（mkinidata 的冷启动、纯物理 spin-up 的结果）时不限制：从纯物理状态接混合模型是正常用法。
+pub fn check_restart(restart: &Path, fingerprint: Option<&str>) -> Result<()> {
+    let marker = restart_marker(restart);
+    if !marker.exists() {
+        return Ok(());
+    }
+    let recorded = std::fs::read_to_string(&marker)
+        .with_context(|| format!("cannot read {}", marker.display()))?;
+    let recorded = recorded.trim();
+    match fingerprint {
+        Some(current) if current == recorded => Ok(()),
+        Some(current) => bail!(
+            "{} was written with hybrid models {recorded}, but this run uses {current}; \
+             continuing would mix two models in one trajectory. Restart from a cold or \
+             physics-only state, or delete {} if the change is deliberate",
+            restart.display(),
+            marker.display()
+        ),
+        None => bail!(
+            "{} was written with hybrid models {recorded}, but this run has no hybrid.toml; \
+             add the same hybrid.toml back, or delete {} if continuing with physics only is \
+             deliberate",
+            restart.display(),
+            marker.display()
+        ),
+    }
+}
+
 #[cfg(test)]
 #[path = "hybrid_tests.rs"]
 mod hybrid_tests;
