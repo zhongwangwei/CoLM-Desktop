@@ -3,7 +3,7 @@ use super::*;
 /// 严格模式的要求：顶层是对象，全部属性列入 `required`，不许额外属性；名字唯一；描述非空。
 #[test]
 fn every_standard_tool_has_a_strict_mode_schema() {
-    let registry = Registry::standard();
+    let registry = Registry::standard_with_web();
     let mut names = std::collections::BTreeSet::new();
     for tool in registry.tools() {
         assert!(names.insert(tool.name()), "duplicate tool {}", tool.name());

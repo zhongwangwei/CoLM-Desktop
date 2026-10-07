@@ -30,6 +30,9 @@ pub enum Inbound {
         docs_root: Option<String>,
         #[serde(default)]
         approval: ApprovalPolicy,
+        /// 联网（`web_search` 走 DeepSeek 原生搜索，用 DeepSeek 的 Key；`fetch_url` 读网页）。
+        #[serde(default)]
+        web_search: bool,
     },
     /// 用户的一条消息；`context` 是界面自动附上的当前页面信息（选中的算例、Study 等）。
     UserMessage {

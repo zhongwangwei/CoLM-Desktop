@@ -302,6 +302,7 @@ async function loadSettings() {
   $('assistant-model-name').value = settings.model;
   $('assistant-think').value = thinkValue(settings);
   $('assistant-approval').value = settings.approval || 'ask';
+  $('assistant-web').value = settings.web_search === false ? 'off' : 'on';
   await refreshKeyStatus(settings.base_url);
   return settings;
 }
@@ -341,6 +342,7 @@ function formSettings(previous) {
     model: $('assistant-model-name').value.trim(),
     ...thinkSettings($('assistant-think').value),
     approval: $('assistant-approval').value || 'ask',
+    web_search: $('assistant-web').value !== 'off',
     egress_acknowledged: previous?.egress_acknowledged ?? null,
   };
 }

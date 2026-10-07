@@ -5,6 +5,7 @@
 
 mod act;
 mod read;
+pub mod web;
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -48,6 +49,8 @@ pub struct ToolContext {
     pub docs_root: Option<PathBuf>,
     /// 这一轮的取消标志：长命令（运行算例、Study）轮询它，被取消时结束整个进程组。
     pub cancel: Option<Arc<AtomicBool>>,
+    /// 联网（搜索与读网页）；设置里关掉联网时为空，联网工具也不注册。
+    pub web: Option<web::WebAccess>,
 }
 
 /// 长命令的结果：是否成功、输出末尾。
@@ -204,6 +207,13 @@ impl Registry {
         let mut tools = read::tools();
         tools.extend(act::tools());
         Self { tools }
+    }
+
+    /// 全部工具加联网（`web_search`、`fetch_url`）。
+    pub fn standard_with_web() -> Self {
+        let mut registry = Self::standard();
+        registry.tools.extend(web::tools());
+        registry
     }
 
     pub fn with(tools: Vec<Box<dyn Tool>>) -> Self {

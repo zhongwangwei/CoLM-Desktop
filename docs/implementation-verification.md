@@ -31638,3 +31638,48 @@ GPP 的均值被 4 个基线 KGE 低于 −0.5 的站拉低（BE-Lon、DE-Geb、
 - `page_age` 都是空的。
 
 **结论**：用现有的 DeepSeek Key 就能联网搜索，不需要第三方搜索服务和额外的 Key。代价是每次搜索约 7k token、约 4 秒。助手的 `web_search` 工具可以照这个方式实现，默认后端用 DeepSeek 原生搜索，第三方引擎（Firecrawl、Tavily 等）作为备选。
+
+## 第 629 轮：AI 助手联网（web_search、fetch_url）
+
+**现状**：
+- `colm-agent` 新增 `tools/web.rs`。两个工具都不需要审批；设置里"联网搜索"开启时才注册，默认开启。
+- `web_search` 照 DeepSeek Harness 的做法实现：
+  - 另发一次 Anthropic 兼容的 Messages 请求，地址 `https://api.deepseek.com/anthropic/v1/messages`，模型 `deepseek-v4-flash`，工具 `web_search_20250305`，`max_uses: 1`。
+  - 关掉思考，`max_tokens: 64`。
+  - 只取结构化的 `web_search_tool_result` 条目（标题、网址、日期），按网址去重，最多 10 条；没有结果块就报错。
+  - 搜索总用 DeepSeek 的 Key，会话模型换成别家时也一样。
+  - 每条用户消息最多搜 5 次。
+- 压低成本的依据（第 628 轮之后的实测）：
+  - 关掉思考后单次约 2 秒、输出约 120 token；开着思考是 4 秒、700 token。
+  - 结果条目的正文是加密的（`encrypted_content`），摘录只能来自模型生成的引用，花费不划算，所以只返回标题和网址。
+- `fetch_url` 读网页正文：
+  - 无新依赖，自写 HTML 转文本：去掉 script、style、head 等，块级标签换行，解实体。
+  - 支持 `offset` 和 `max_chars` 分段读取。
+  - PDF 与非文本类型报错；读出来为空时提示"可能由 JavaScript 渲染"。
+- 安全限制：
+  - 只开本会话搜索结果或用户消息里出现过的网站（按主机放行，另加 doi.org）。
+  - 本机、内网、链路本地、CGNAT 等地址一律拒绝。重定向手动逐跳检查，最多 5 跳。
+  - Key 在 `WebAccess` 的 `Debug` 里隐去。
+- 系统提示新增联网规则：先搜再开、引用网址、不把算例数据放进搜索词或网址。
+- GUI 设置新增"联网搜索：开启（DeepSeek 原生搜索）/ 不联网"，`configure` 带 `web_search`。
+
+**实测**（用户的 Key，deepseek-flash，思考强度 low）：
+
+问题："查一下 CoLM2024 的模型描述论文，打开最相关的一篇，告诉我标题、期刊和第一作者"。
+
+- 第一版：只放行完整网址、搜索次数不设限。
+  - 搜索结果是 HESS 的 PDF，读不了；模型改读同一网站的 HTML 页面，被拦下。
+  - 之后模型换关键词连搜 20 多次，耗尽 24 步也没给出回答。
+- 修正：按主机放行；每条消息最多搜 5 次；空页面给出提示。
+- 修正后：25 秒完成。第 4 秒打开 https://hess.copernicus.org/articles/29/3119/2025/，第 5 次搜索后被上限拦下，模型如实回答：
+  - 打开的那篇是灌溉耦合论文：HESS 29, 3119–3143, 2025，第一作者 Shulei Zhang；
+  - 并说明它不是模型描述论文，"专门的模型描述论文未能确认"；
+  - 每条都附了来源网址。
+- 整轮用量：输入 57301 token，输出 2268 token。
+
+**检查**：
+- colm-agent 32 项测试通过，新增 web 相关 8 项：
+  - 请求体形状、只取结构化结果、按站点放行、拒绝本机与内网地址
+  - 重定向拼接、HTML 转文本、网址提取、搜索次数上限
+- 严格模式 schema 检查覆盖了两个新工具。
+- GUI Rust 208 项通过；两个 workspace 的 clippy 零警告、fmt 干净；`check-gui` 与 14 个前端套件通过。

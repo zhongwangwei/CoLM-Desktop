@@ -23,9 +23,9 @@ use anyhow::{bail, Context, Result};
 use colm_agent::agent::{Agent, Approver, Decision, Limits};
 use colm_agent::message::Message;
 use colm_agent::protocol::{ApprovalPolicy, Inbound, Outbound};
-use colm_agent::provider::{OpenAiCompatible, ProviderConfig};
+use colm_agent::provider::{OpenAiCompatible, ProviderConfig, DEEPSEEK_BASE_URL};
 use colm_agent::session::{self, Session};
-use colm_agent::tools::{Registry, Tier, ToolContext};
+use colm_agent::tools::{web, Registry, Tier, ToolContext};
 
 fn main() {
     if let Err(error) = run() {
@@ -162,6 +162,7 @@ struct Settings {
     provider: ProviderConfig,
     context: ToolContext,
     approval: ApprovalPolicy,
+    web_search: bool,
 }
 
 fn serve(data_dir: Option<PathBuf>, cli: PathBuf, key_file: PathBuf) -> Result<()> {
@@ -178,6 +179,9 @@ fn serve(data_dir: Option<PathBuf>, cli: PathBuf, key_file: PathBuf) -> Result<(
     let (decision_tx, decision_rx): (Sender<(String, Decision)>, _) = mpsc::channel();
     let decision_rx = Arc::new(Mutex::new(decision_rx));
     let registry = Arc::new(Registry::standard());
+    let registry_web = Arc::new(Registry::standard_with_web());
+    // 本会话允许 `fetch_url` 打开的网站（搜索结果与用户消息里的）；换会话时清空。
+    let allowed_hosts: Arc<Mutex<BTreeSet<String>>> = Arc::default();
     let allowed: Arc<Mutex<BTreeSet<String>>> = Arc::default();
     // 读过的 Key 留在内存里，不必每轮都读文件。
     let keys: Arc<Mutex<std::collections::BTreeMap<String, String>>> = Arc::default();
@@ -204,6 +208,7 @@ fn serve(data_dir: Option<PathBuf>, cli: PathBuf, key_file: PathBuf) -> Result<(
                 kernel_dir,
                 docs_root,
                 approval,
+                web_search,
             } => {
                 let model = provider.model.clone();
                 *settings.lock().unwrap() = Some(Settings {
@@ -214,8 +219,10 @@ fn serve(data_dir: Option<PathBuf>, cli: PathBuf, key_file: PathBuf) -> Result<(
                         kernel_dir: kernel_dir.filter(|k| !k.is_empty()).map(PathBuf::from),
                         docs_root: docs_root.filter(|d| !d.is_empty()).map(PathBuf::from),
                         cancel: None,
+                        web: None,
                     },
                     approval,
+                    web_search,
                 });
                 let id = session.lock().unwrap().id.clone();
                 emitter.emit(Outbound::Ready { session: id, model });
@@ -240,6 +247,7 @@ fn serve(data_dir: Option<PathBuf>, cli: PathBuf, key_file: PathBuf) -> Result<(
                         Ok(opened) => {
                             *session.lock().unwrap() = opened;
                             allowed.lock().unwrap().clear();
+                            allowed_hosts.lock().unwrap().clear();
                         }
                         Err(error) => {
                             emitter.emit(Outbound::Error {
@@ -269,6 +277,7 @@ fn serve(data_dir: Option<PathBuf>, cli: PathBuf, key_file: PathBuf) -> Result<(
                 *session.lock().unwrap() =
                     Session::new(data_dir.as_deref(), colm_agent::SYSTEM_PROMPT)?;
                 allowed.lock().unwrap().clear();
+                allowed_hosts.lock().unwrap().clear();
                 let model = settings
                     .lock()
                     .unwrap()
@@ -304,11 +313,15 @@ fn serve(data_dir: Option<PathBuf>, cli: PathBuf, key_file: PathBuf) -> Result<(
                     });
                     continue;
                 }
-                let Some((mut provider, mut tool_context, policy)) = settings
-                    .lock()
-                    .unwrap()
-                    .as_ref()
-                    .map(|s| (s.provider.clone(), s.context.clone(), s.approval))
+                let Some((mut provider, mut tool_context, policy, web_search)) =
+                    settings.lock().unwrap().as_ref().map(|s| {
+                        (
+                            s.provider.clone(),
+                            s.context.clone(),
+                            s.approval,
+                            s.web_search,
+                        )
+                    })
                 else {
                     busy.store(false, Ordering::SeqCst);
                     emitter.emit(Outbound::Error {
@@ -324,12 +337,27 @@ fn serve(data_dir: Option<PathBuf>, cli: PathBuf, key_file: PathBuf) -> Result<(
                 let cancel = Arc::clone(&cancel);
                 let decisions = Arc::clone(&decision_rx);
                 let allowed = Arc::clone(&allowed);
-                let registry = Arc::clone(&registry);
+                let registry = Arc::clone(if web_search { &registry_web } else { &registry });
+                if web_search {
+                    let mut urls = allowed_hosts.lock().unwrap();
+                    urls.extend(web::hosts_in(&text));
+                }
+                let allowed_hosts = Arc::clone(&allowed_hosts);
                 let keys = Arc::clone(&keys);
                 let key_file = key_file.clone();
                 worker = Some(std::thread::spawn(move || {
                     let result = (|| -> Result<()> {
                         provider.api_key = cached_key(&keys, &key_file, &provider.base_url)?;
+                        if web_search {
+                            // 搜索总用 DeepSeek 的 Key（会话模型可以是别家）；没存时搜索工具自己报错。
+                            let search_key =
+                                cached_key(&keys, &key_file, DEEPSEEK_BASE_URL).unwrap_or_default();
+                            let mut access = web::WebAccess::deepseek(search_key, allowed_hosts);
+                            if let Ok(base) = std::env::var("COLM_AGENT_SEARCH_URL") {
+                                access.search_base = base;
+                            }
+                            tool_context.web = Some(access);
+                        }
                         let strict = provider.strict;
                         let client = OpenAiCompatible::new(provider);
                         let agent = Agent {

@@ -45,6 +45,9 @@ pub struct AssistantSettings {
     /// 运行操作的审批：`ask` 每次询问（审批卡可选本会话不再询问），`auto` 直接执行。
     #[serde(default = "default_approval")]
     pub approval: String,
+    /// 联网搜索（DeepSeek 原生搜索，用 DeepSeek 的 Key）与读网页。
+    #[serde(default = "default_web_search")]
+    pub web_search: bool,
     /// 用户已确认过“数据会发给模型服务商”的那个服务地址。
     #[serde(default)]
     pub egress_acknowledged: Option<String>,
@@ -58,6 +61,7 @@ impl Default for AssistantSettings {
             thinking: None,
             reasoning_effort: None,
             approval: default_approval(),
+            web_search: default_web_search(),
             egress_acknowledged: None,
         }
     }
@@ -65,6 +69,10 @@ impl Default for AssistantSettings {
 
 fn default_approval() -> String {
     "ask".into()
+}
+
+fn default_web_search() -> bool {
+    true
 }
 
 fn settings_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
@@ -327,6 +335,7 @@ pub(crate) fn configure_message(
             "reasoning_effort": settings.reasoning_effort,
         },
         "approval": settings.approval,
+        "web_search": settings.web_search,
         "project_root": project_root,
         "kernel_dir": kernel_dir,
         "docs_root": docs_root,

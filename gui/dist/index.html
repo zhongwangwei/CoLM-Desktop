@@ -1124,6 +1124,12 @@
         <option value="auto">自动执行，不再询问</option>
       </select>
       <p class="muted mini">指建算例、改配置、运行算例与 Study 这类操作。选“每次询问”时，审批卡片上也可以点“本会话都允许”，同一类操作在这次会话里就不再询问。</p>
+      <label for="assistant-web">联网搜索</label>
+      <select class="select" id="assistant-web">
+        <option value="on">开启（DeepSeek 原生搜索）</option>
+        <option value="off">不联网</option>
+      </select>
+      <p class="muted mini">开启后助手可以搜索网页、打开搜索结果读正文，用于查文献与资料。搜索词发给 DeepSeek（用上面 DeepSeek 的 Key），每次约 2 秒、几千 token；只能打开搜索结果或你消息里给出的网址。</p>
       <label for="assistant-key">API Key</label>
       <div class="assistant-key-row">
         <input class="input" id="assistant-key" type="password" autocomplete="off" placeholder="粘贴后点“保存 Key”">
