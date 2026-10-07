@@ -30854,3 +30854,43 @@ LAI 的块是 `(1, 1, 86400)`，一块一整条全球纬线，读区域时每行
 - `colm-rs --hybrid hybrid.toml --hybrid-tap tap.csv --case-outputs`：CSV 为 `0,1e1,7.782999069860056e-1,5.2e1`（类 10、纬度弧度、表值 Vcmax 52），history 与基线 128 个变量逐位相同。
 
 **检查**：fmt、workspace clippy、colm-hybrid（默认与 `--no-default-features`）、colm-core 506、colm-runtime 172（单线程）、colm-cli 224 + 19、`PLUMBER2_ROOT` 下 `cargo test -p oracle`、GUI `cargo check --locked` 全部通过。
+
+### 第 605 轮续：P1——续跑标记与 PLUMBER2 试点训练
+
+**续跑标记**：
+- 混合运行写出的主续跑文件旁写 `<重启文件>.hybrid`，内容是模型指纹。
+- 开跑前检查初始重启：有标记就必须用同一指纹；没有标记（mkinidata 冷启动、纯物理 spin-up）不限制。
+- 纯物理写出不留标记，并删掉同名的旧标记。不用混合模型时不产生任何新文件。
+- 指纹放在进程级 `OnceLock`（一个 colm-rs 进程只跑一个算例），在 `write_restart` 之后统一写标记，不用层层传参。
+- cbl 实测：带模型跑出 `cbl_restart_2008-032-00000_lc2005_w180_s90.nc.hybrid`；去掉 `hybrid.toml` 重跑后标记被删除。单元测试覆盖了"不一致时报错"。
+
+**试点训练**（`python/colm_hybrid/pilot.py`，`tmp/hybtrain`，不入库）：
+- 站点：18 个 PLUMBER2 站点，IGBP LCT。
+  - 训练 12 个：CA-Qfo、DE-Tha、CH-Dav（ENF），DE-Hai、US-MMS（DBF），BE-Bra（MF），IT-Noe（CSH），US-Ton、AU-How（WSA），AT-Neu、CH-Cha（GRA），US-ARM（CRO）。
+  - 留出 6 个：DE-Obe、DK-Sor、US-Syv、AU-Cpr、CH-Fru、DE-Geb。
+  - 每站两年：第一年 spin-up，第二年评价。单站完整链条约 18 s。
+- 模型：6 个特征（`patchlatr`、`elvmean`、`htop`、`vf_clay[1]`、`vf_sand[1]`、`OM_density[1]`，按训练站点标准化）→ 线性 → sigmoid → `DEF_LC_VMAX25` ∈ [10, 150]。
+- 训练：CMA-ES（种群 8、10 代、σ₀ = 1），损失为训练站点上 `1 − KGE(Qle)` 的平均。每个候选导出 ONNX、写进 `hybrid.toml`、只重跑 colm 段，12 站并行，一代约 4 分钟。
+- 损失：1.286（纯物理）→ 0.792，最后两代仍在下降，未收敛。
+
+| 变量 | 训练站 KGE | 留出站 KGE | 留出站偏差 |
+|---|---|---|---|
+| Qle（目标） | −0.286 → 0.208 | −0.080 → 0.223 | +24.8 → +15.6 W/m² |
+| GPP | −0.688 → −0.178 | −0.250 → −0.176 | +3.3 → +0.66 |
+| NEE | −4.65 → −1.55 | −4.29 → −1.74 | −7.3 → −4.3 |
+| Qh | −0.066 → 0.326 | −0.051 → 0.043 | −8.4 → +0.2 |
+| Rnet | 0.915 → 0.918 | 0.768 → 0.766 | — |
+
+- 逐站：留出站中 DE-Obe −0.56 → 0.37、DK-Sor 0.29 → 0.56、AU-Cpr 0.14 → 0.58 改善明显；US-Syv −1.54 → −1.19 仍差；CH-Fru 0.78 → 0.77 持平；DE-Geb 0.42 → 0.25 变差。
+
+**解读（要谨慎）**：
+- 18 站中 13 站的 Vcmax 被推到下限 10 µmol/m²/s，森林的实测值一般在 30–80。
+- 纯物理在这些站点上 GPP 与 ET 都系统性偏高，压低 Vcmax 同时修正了两者，所以碳通量没有变差。
+- 但到了下限，留出站的 Qle 仍偏高 15.6 W/m²：有一部分 ET 偏高来自 Vcmax 管不到的过程（土壤蒸发、截留等），模型只能把这个旋钮拧到底。学到的 Vcmax 因此吸收了别处的误差，不能当作 Vcmax 的估计。
+- 规模很小（12 站、一年、线性、未收敛），留出站的提升有一部分来自"整体压低"这个共性偏差。
+
+**下一步**：
+1. 多目标损失（Qle + Qh + GPP/NEE），并把相关参数一起放进插槽（`DEF_LC_*` 里能放的还有 effcon、extkn 等），不让误差都挤进 Vcmax。
+2. 给参数加先验：用合理的物理范围（例如 Vcmax ∈ [20, 120]），或加正则项把它拉向表值。
+3. 先查纯物理 ET 偏高的来源：蒸发与蒸腾分别占多少。这本身就是物理问题，不该交给 AI 去补。
+4. 扩到更多站点与年份；计算量会到小时级，放 T7920。
