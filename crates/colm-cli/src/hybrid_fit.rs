@@ -427,14 +427,15 @@ pub(super) fn cmd_hybrid_fit(opts: &Opts) -> Result<()> {
             .outputs
             .iter()
             .map(|o| format!(
-                "--output {}:{}:{}:{}",
+                "--output {}:{}:{}:{}{}",
                 o.name,
                 o.range[0],
                 o.range[1],
                 serde_json::to_value(o.transform)
                     .ok()
                     .and_then(|v| v.as_str().map(str::to_owned))
-                    .unwrap_or_default()
+                    .unwrap_or_default(),
+                if o.relative { ":relative" } else { "" }
             ))
             .collect::<Vec<_>>()
             .join(" ")
