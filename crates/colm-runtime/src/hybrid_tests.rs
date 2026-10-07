@@ -83,3 +83,28 @@ fn pft_rows_run_patch_by_patch_then_pft_by_pft() {
         [(0, 5, 0), (0, 5, 1), (2, 7, 2), (2, 7, 3), (2, 7, 4)]
     );
 }
+
+#[test]
+fn summaries_report_range_mean_and_population_std() {
+    let slot = SlotConfig {
+        name: PFT_SLOT.into(),
+        kind: SlotKind::Param,
+        model: None,
+        sha256: None,
+        features: vec!["pftclass".into(), "pftfrac".into()],
+        normalize: None,
+        outputs: vec![colm_hybrid::OutputSpec {
+            name: "DEF_PFT_VMAX25".into(),
+            range: None,
+            transform: colm_hybrid::Transform::Identity,
+        }],
+    };
+    let features = Matrix::new(4, 2, vec![1.0, 0.5, 2.0, 0.5, 3.0, 0.5, 4.0, 0.5]).unwrap();
+    let summary = SlotSummary::new(&slot, &features, None);
+    assert_eq!(summary.rows, 4);
+    assert!(summary.outputs.is_empty());
+    let class = &summary.features[0];
+    assert_eq!((class.min, class.max, class.mean), (1.0, 4.0, 2.5));
+    assert!((class.std - 1.25f64.sqrt()).abs() < 1e-15);
+    assert_eq!(summary.features[1].std, 0.0);
+}

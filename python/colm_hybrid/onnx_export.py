@@ -47,3 +47,22 @@ def forward(layers, x):
         if index < len(layers) - 1:
             h = np.tanh(h)
     return h
+
+
+def export_mlp_json(layers, path: str, activation: str = "tanh") -> None:
+    """同样的网络写成 colm-hybrid 的原生格式（`*.mlp.json`，引擎用 f64 计算，不需要 ONNX）。
+
+    隐藏层用 `activation`（tanh/relu/identity），最后一层是 identity。
+    """
+    import json
+
+    out = []
+    for index, (weight, bias) in enumerate(layers):
+        last = index == len(layers) - 1
+        out.append({
+            "weights": np.asarray(weight, dtype=np.float64).tolist(),
+            "bias": np.asarray(bias, dtype=np.float64).reshape(-1).tolist(),
+            "activation": "identity" if last else activation,
+        })
+    with open(path, "w") as f:
+        json.dump({"format": "colm-mlp-1", "layers": out}, f, indent=1)

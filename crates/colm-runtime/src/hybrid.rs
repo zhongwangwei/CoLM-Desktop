@@ -176,61 +176,93 @@ impl Hybrid {
         pft_ranges: &[Range<usize>],
         physics: &LandPhysicsParameters,
     ) -> Result<Vec<SlotSummary>> {
-        let restart = colm_init::RestartFile::open(constant)?;
-        let soil = soil_rows(&restart, patches)?;
         let mut out = Vec::new();
-        if let Some(slot) = &self.land_class {
-            ensure!(
-                !physics.use_pft,
-                "slot {LAND_CLASS_SLOT} only drives LCT cases; this case uses PFT/PC"
-            );
-            let soil_patches: Vec<usize> = soil.iter().map(|&row| patches[row]).collect();
-            let features = feature_matrix(&restart, &slot.config.features, &soil_patches)?;
+        for slot in self.land_class.iter().chain(&self.pft) {
+            let features = slot_features(&slot.config, constant, patches, pft_ranges, physics)?;
             out.push(SlotSummary::new(
-                slot,
+                &slot.config,
                 &features,
-                &slot.evaluate(&features)?,
-            ));
-        }
-        if let Some(slot) = &self.pft {
-            ensure!(
-                physics.use_pft,
-                "slot {PFT_SLOT} needs a PFT/PC case; this one is LCT"
-            );
-            let pft_restart =
-                colm_init::RestartFile::open(crate::pft::pft_restart_path(constant)?)?;
-            let rows = pft_rows(&soil, patches, pft_ranges);
-            let features =
-                pft_feature_matrix(&restart, &pft_restart, &slot.config.features, &rows)?;
-            out.push(SlotSummary::new(
-                slot,
-                &features,
-                &slot.evaluate(&features)?,
+                Some(&slot.evaluate(&features)?),
             ));
         }
         Ok(out)
     }
 }
 
+/// 只有配置、还没有模型时的空跑：各插槽的特征汇总（Study 据此算训练用的归一化）。
+pub fn feature_summary(
+    config: &HybridConfig,
+    constant: &Path,
+    patches: &[usize],
+    pft_ranges: &[Range<usize>],
+    physics: &LandPhysicsParameters,
+) -> Result<Vec<SlotSummary>> {
+    config
+        .slots
+        .iter()
+        .map(|slot| {
+            known_slot(slot)?;
+            let features = slot_features(slot, constant, patches, pft_ranges, physics)?;
+            Ok(SlotSummary::new(slot, &features, None))
+        })
+        .collect()
+}
+
+/// 一个插槽在这些 patch 上的特征矩阵（行次序与 [`Hybrid::patch_physics`] 应用时相同）。
+fn slot_features(
+    slot: &SlotConfig,
+    constant: &Path,
+    patches: &[usize],
+    pft_ranges: &[Range<usize>],
+    physics: &LandPhysicsParameters,
+) -> Result<Matrix> {
+    let restart = colm_init::RestartFile::open(constant)?;
+    let soil = soil_rows(&restart, patches)?;
+    if slot.name == LAND_CLASS_SLOT {
+        ensure!(
+            !physics.use_pft,
+            "slot {LAND_CLASS_SLOT} only drives LCT cases; this case uses PFT/PC"
+        );
+        let soil_patches: Vec<usize> = soil.iter().map(|&row| patches[row]).collect();
+        return feature_matrix(&restart, &slot.features, &soil_patches);
+    }
+    ensure!(
+        physics.use_pft,
+        "slot {PFT_SLOT} needs a PFT/PC case; this one is LCT"
+    );
+    ensure!(
+        pft_ranges.len() == patches.len(),
+        "{} PFT ranges for {} patches",
+        pft_ranges.len(),
+        patches.len()
+    );
+    let pft_restart = colm_init::RestartFile::open(crate::pft::pft_restart_path(constant)?)?;
+    let rows = pft_rows(&soil, patches, pft_ranges);
+    pft_feature_matrix(&restart, &pft_restart, &slot.features, &rows)
+}
+
 /// 一个插槽的空跑汇总。
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SlotSummary {
     pub slot: String,
     pub rows: usize,
     pub features: Vec<ColumnSummary>,
+    /// 只有配置、没有模型时为空。
     pub outputs: Vec<ColumnSummary>,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+/// 一列的范围、均值与标准差（总体标准差）。
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ColumnSummary {
     pub name: String,
     pub min: f64,
     pub max: f64,
     pub mean: f64,
+    pub std: f64,
 }
 
 impl SlotSummary {
-    fn new(slot: &Slot, features: &Matrix, outputs: &Matrix) -> Self {
+    fn new(slot: &SlotConfig, features: &Matrix, outputs: Option<&Matrix>) -> Self {
         let columns = |names: Vec<String>, matrix: &Matrix| {
             names
                 .into_iter()
@@ -244,28 +276,32 @@ impl SlotSummary {
                         .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), &v| {
                             (lo.min(v), hi.max(v))
                         });
-                    let mean = values.iter().sum::<f64>() / values.len().max(1) as f64;
+                    let n = values.len().max(1) as f64;
+                    let mean = values.iter().sum::<f64>() / n;
+                    let std = (values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / n).sqrt();
                     ColumnSummary {
                         name,
                         min,
                         max,
                         mean,
+                        std,
                     }
                 })
                 .collect()
         };
         Self {
-            slot: slot.config.name.clone(),
+            slot: slot.name.clone(),
             rows: features.rows,
-            features: columns(slot.config.features.clone(), features),
-            outputs: columns(
-                slot.config
-                    .outputs
-                    .iter()
-                    .map(|output| output.name.clone())
-                    .collect(),
-                outputs,
-            ),
+            features: columns(slot.features.clone(), features),
+            outputs: outputs.map_or_else(Vec::new, |outputs| {
+                columns(
+                    slot.outputs
+                        .iter()
+                        .map(|output| output.name.clone())
+                        .collect(),
+                    outputs,
+                )
+            }),
         }
     }
 }

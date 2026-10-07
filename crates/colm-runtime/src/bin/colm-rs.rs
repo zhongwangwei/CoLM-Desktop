@@ -179,15 +179,20 @@ fn run() -> Result<()> {
         None => (0..patch_count).collect(),
     };
     if arguments.hybrid_dry_run {
-        let Some(HybridMode::Apply(hybrid)) = &hybrid else {
-            bail!("--hybrid-dry-run needs models to evaluate");
+        let ranges = single_point_pft_ranges(&files.constant, &patches, &physics)?;
+        let summary = match &hybrid {
+            Some(HybridMode::Apply(hybrid)) => {
+                hybrid.summary(&files.constant, &patches, &ranges, &physics)?
+            }
+            Some(HybridMode::Spec(config)) => colm_runtime::hybrid::feature_summary(
+                config,
+                &files.constant,
+                &patches,
+                &ranges,
+                &physics,
+            )?,
+            _ => bail!("--hybrid-dry-run needs --hybrid"),
         };
-        let summary = hybrid.summary(
-            &files.constant,
-            &patches,
-            &single_point_pft_ranges(&files.constant, &patches, &physics)?,
-            &physics,
-        )?;
         println!("{}", serde_json::to_string_pretty(&summary)?);
         return Ok(());
     }
@@ -5641,6 +5646,8 @@ fn hybrid_fingerprint() -> Option<&'static str> {
 enum HybridMode {
     /// 加载模型，插槽改参数。
     Apply(Box<colm_runtime::hybrid::Hybrid>),
+    /// 空跑而配置里有插槽还没有模型：只汇总特征（Study 据此算归一化）。
+    Spec(colm_hybrid::HybridConfig),
     /// 只把特征与物理值追加写进 CSV，参数不变（训练前还没有模型也能跑）。
     Tap {
         config: colm_hybrid::HybridConfig,
@@ -5653,6 +5660,12 @@ impl HybridMode {
         let Some(path) = &arguments.hybrid else {
             return Ok(None);
         };
+        if arguments.hybrid_dry_run {
+            let spec = colm_hybrid::HybridConfig::load_spec(path)?;
+            if spec.slots.iter().any(|slot| slot.model.is_none()) {
+                return Ok(Some(Self::Spec(spec)));
+            }
+        }
         Ok(Some(match &arguments.hybrid_tap {
             Some(out) => Self::Tap {
                 config: colm_hybrid::HybridConfig::load_spec(path)?,
@@ -5690,6 +5703,7 @@ fn hybrid_patch_physics(
             )?;
             Ok(vec![physics.clone(); patches.len()])
         }
+        Some(HybridMode::Spec(_)) => bail!("a hybrid slot without a model only works in a dry run"),
     }
 }
 
