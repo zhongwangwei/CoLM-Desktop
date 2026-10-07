@@ -1129,7 +1129,7 @@
         <button class="btn-ghost" type="button" id="assistant-key-delete">删除 Key</button>
       </div>
       <p class="muted mini" id="assistant-key-status"></p>
-      <p class="muted mini">Key 存在系统钥匙串里，不写进任何文件。默认用 DeepSeek 官方 API；也可以填任何兼容 OpenAI 格式的服务，例如本机的 Ollama（http://127.0.0.1:11434/v1）。</p>
+      <p class="muted mini">Key 以明文保存在本机的应用配置目录（assistant-keys.json，只有当前用户可读），不会写进日志或算例。默认用 DeepSeek 官方 API；也可以填任何兼容 OpenAI 格式的服务，例如本机的 Ollama（http://127.0.0.1:11434/v1）。</p>
       <div class="pill-row"><button class="run-btn" type="button" id="assistant-settings-save">保存设置</button></div>
     </div>
     <p class="warn mini assistant-notice" id="assistant-notice" hidden></p>

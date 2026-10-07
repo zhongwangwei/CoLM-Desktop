@@ -298,7 +298,7 @@ async function loadSettings() {
 async function refreshKeyStatus(baseUrl) {
   const has = await invoke('assistant_has_key', { baseUrl }).catch(() => false);
   const line = $('assistant-key-status');
-  line.textContent = has ? t('✓ 已保存这个服务的 Key（存在系统钥匙串里）') : t('还没有保存这个服务的 Key。');
+  line.textContent = has ? t('✓ 已保存这个服务的 Key') : t('还没有保存这个服务的 Key。');
   line.className = `mini ${has ? 'assistant-key-ok' : 'muted'}`;
   // Key 保存后不回显：输入框空着，用提示文字说明它已经存好了。
   $('assistant-key').placeholder = t(has ? '已保存（为安全起见不显示）；要更换就粘贴新的 Key' : '粘贴后点“保存 Key”');
@@ -457,6 +457,7 @@ function wire() {
     $('assistant-key').value = '';
     try {
       await invoke('assistant_set_key', { baseUrl: $('assistant-base').value.trim(), key });
+      ui.started = false; // 助手进程已结束，下次发送时用新 Key 重启
       await refreshKeyStatus($('assistant-base').value.trim());
       status(t('已保存 API Key'));
     } catch (e) {
@@ -466,6 +467,7 @@ function wire() {
   $('assistant-key-delete').onclick = async () => {
     try {
       await invoke('assistant_delete_key', { baseUrl: $('assistant-base').value.trim() });
+      ui.started = false;
       await refreshKeyStatus($('assistant-base').value.trim());
     } catch (e) {
       status(e?.message || e);

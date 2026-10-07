@@ -16,7 +16,7 @@ use crate::message::{Message, ToolCall, Usage};
 /// DeepSeek 官方服务地址（OpenAI 兼容）。
 pub const DEEPSEEK_BASE_URL: &str = "https://api.deepseek.com";
 
-/// 模型服务的配置。Key 不在这里持久化，由调用方从钥匙串取出后填入。
+/// 模型服务的配置。Key 不在这里持久化，由调用方从本地 Key 文件取出后填入。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProviderConfig {
     pub base_url: String,

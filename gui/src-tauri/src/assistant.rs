@@ -1,7 +1,8 @@
 //! AI 助手（docs/design-ai-assistant.md）：启动 `colm-agent` sidecar，经 stdio JSONL 转发消息与事件。
 //!
-//! 这里只做转发与设置：对话循环、工具、审批规则都在 `colm-agent` 里。API Key 由 `colm-agent`
-//! 自己存进系统钥匙串，窗口进程只在“保存 Key”那一刻经 stdin 把它交过去，不落盘、不回传前端。
+//! 这里只做转发与设置：对话循环、工具、审批规则都在 `colm-agent` 里。API Key 存在应用配置目录的
+//! `assistant-keys.json`（三个平台一样，Unix 上 0600），文件格式由 `colm-agent` 管：窗口进程只在
+//! “保存 Key”那一刻经 stdin 把它交过去，Key 不回传前端。
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
@@ -41,10 +42,6 @@ pub struct AssistantSettings {
     /// 用户已确认过“数据会发给模型服务商”的那个服务地址。
     #[serde(default)]
     pub egress_acknowledged: Option<String>,
-    /// 已经存过 Key 的服务地址（只是标记，不含 Key）。界面据此显示“已保存”，
-    /// 不必为了这一点去读钥匙串——每读一次 macOS 都可能弹授权框。
-    #[serde(default)]
-    pub key_saved_for: Vec<String>,
 }
 
 impl Default for AssistantSettings {
@@ -54,7 +51,6 @@ impl Default for AssistantSettings {
             model: "deepseek-flash".into(),
             thinking: None,
             egress_acknowledged: None,
-            key_saved_for: Vec::new(),
         }
     }
 }
@@ -66,6 +62,11 @@ fn settings_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
         .map_err(|e| format!("找不到配置目录：{e}"))?;
     std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     Ok(dir.join("assistant.json"))
+}
+
+/// 本地 Key 文件。
+fn key_file(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    Ok(settings_path(app)?.with_file_name("assistant-keys.json"))
 }
 
 fn data_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
@@ -119,11 +120,9 @@ pub fn assistant_settings(app: tauri::AppHandle) -> AssistantSettings {
 #[tauri::command]
 pub fn assistant_save_settings(
     app: tauri::AppHandle,
-    mut settings: AssistantSettings,
+    settings: AssistantSettings,
 ) -> Result<(), String> {
     validate_settings(&settings)?;
-    // “存过 Key”的标记只由保存、删除 Key 改，前端保存其他设置时不能把它冲掉。
-    settings.key_saved_for = assistant_settings(app.clone()).key_saved_for;
     let path = settings_path(&app)?;
     std::fs::write(
         &path,
@@ -132,46 +131,35 @@ pub fn assistant_save_settings(
     .map_err(|e| format!("{}: {e}", path.display()))
 }
 
-fn key_command(flag: &str, base_url: &str) -> std::process::Command {
+fn key_command(
+    app: &tauri::AppHandle,
+    flag: &str,
+    base_url: &str,
+) -> Result<std::process::Command, String> {
     let mut command = std::process::Command::new(agent_path());
-    command.args([flag, base_url]);
-    colm_kernel::run::no_console(&mut command);
     command
+        .arg("--key-file")
+        .arg(key_file(app)?)
+        .args([flag, base_url]);
+    colm_kernel::run::no_console(&mut command);
+    Ok(command)
 }
 
-/// 把 Key 交给 `colm-agent` 存进钥匙串（经 stdin，不出现在命令行或日志里）。
-fn normalized(base_url: &str) -> String {
-    base_url.trim().trim_end_matches('/').to_ascii_lowercase()
-}
-
-/// 记下（或去掉）“这个服务存过 Key”的标记。
-fn mark_key(app: &tauri::AppHandle, base_url: &str, saved: bool) -> Result<(), String> {
-    let mut settings = assistant_settings(app.clone());
-    let url = normalized(base_url);
-    settings.key_saved_for.retain(|u| u != &url);
-    if saved {
-        settings.key_saved_for.push(url);
-    }
-    let path = settings_path(app)?;
-    std::fs::write(
-        &path,
-        serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?,
-    )
-    .map_err(|e| format!("{}: {e}", path.display()))
-}
-
+/// 把 Key 交给 `colm-agent` 存进本地 Key 文件（经 stdin，不出现在命令行或日志里）。
+/// 存好后结束正在运行的助手进程：它缓存着旧 Key，下次发送时用新 Key 重启。
 #[tauri::command]
 pub async fn assistant_set_key(
     app: tauri::AppHandle,
+    process: tauri::State<'_, AssistantProcess>,
     base_url: String,
     key: String,
 ) -> Result<(), String> {
     if key.trim().is_empty() {
         return Err("Key 是空的".into());
     }
-    let url = base_url.clone();
+    let mut command = key_command(&app, "--set-key", &base_url)?;
     tauri::async_runtime::spawn_blocking(move || {
-        let mut child = key_command("--set-key", &base_url)
+        let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
@@ -192,24 +180,35 @@ pub async fn assistant_set_key(
     })
     .await
     .map_err(|e| e.to_string())??;
-    mark_key(&app, &url, true)
-}
-
-/// 这个服务存过 Key 吗？只看设置里的标记，不读钥匙串。
-#[tauri::command]
-pub fn assistant_has_key(app: tauri::AppHandle, base_url: String) -> bool {
-    assistant_settings(app)
-        .key_saved_for
-        .contains(&normalized(&base_url))
+    process.stop();
+    Ok(())
 }
 
 #[tauri::command]
-pub async fn assistant_delete_key(app: tauri::AppHandle, base_url: String) -> Result<(), String> {
-    let url = base_url.clone();
+pub async fn assistant_has_key(app: tauri::AppHandle, base_url: String) -> Result<bool, String> {
+    let mut command = key_command(&app, "--has-key", &base_url)?;
     tauri::async_runtime::spawn_blocking(move || {
-        let output = key_command("--delete-key", &base_url)
+        let output = command
             .output()
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| format!("cannot start {}: {e}", agent_path().display()))?;
+        if !output.status.success() {
+            return Err(String::from_utf8_lossy(&output.stderr).trim().to_owned());
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).trim() == "true")
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn assistant_delete_key(
+    app: tauri::AppHandle,
+    process: tauri::State<'_, AssistantProcess>,
+    base_url: String,
+) -> Result<(), String> {
+    let mut command = key_command(&app, "--delete-key", &base_url)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let output = command.output().map_err(|e| e.to_string())?;
         if output.status.success() {
             Ok(())
         } else {
@@ -218,7 +217,8 @@ pub async fn assistant_delete_key(app: tauri::AppHandle, base_url: String) -> Re
     })
     .await
     .map_err(|e| e.to_string())??;
-    mark_key(&app, &url, false)
+    process.stop();
+    Ok(())
 }
 
 /// 发一行给 `colm-agent`。
@@ -271,6 +271,8 @@ pub fn assistant_start(
                 .arg(data_dir(&app)?)
                 .arg("--cli")
                 .arg(crate::sidecar::resolve_cli())
+                .arg("--key-file")
+                .arg(key_file(&app)?)
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped());

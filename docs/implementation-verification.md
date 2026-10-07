@@ -31463,3 +31463,20 @@ GPP 的均值被 4 个基线 KGE 低于 −0.5 的站拉低（BE-Lon、DE-Geb、
 - 两个 workspace 的 fmt 都干净；workspace clippy 零警告。
 - colm-agent 19 项测试通过。新增：字段类型解析、设置字段的原地修改与插入、不合法时不改文件、操作工具都要审批且描述真实动作、运行要求选好内核。
 - `check-gui` 与 14 个前端套件全部通过。
+
+## 第 621 轮：AI 助手的 Key 改为本地文件
+
+**过程**：
+- 用户反馈"保存 Key 后还是空的"。查实 Key 已经存进去了，命令行 `--has-key` 返回 true。问题出在界面：输入框故意清空，而成功提示太不显眼。已改为绿色的"✓ 已保存"，输入框给出提示文字，按钮改叫"更换 Key"。
+- 同时查出：开发环境下 GUI 固定先找 `target/debug`，用的是几小时前编的旧版 `colm-agent`，缺 P1 的工具。改为在 debug 与 release 产物中取最近编译的那个（日志确认解析到 `target/release/colm-cli`）。
+- 用户随后反馈反复弹出"use confidential information stored in…"。原因是 macOS 钥匙串：每个新编译（或换了位置）的程序读钥匙串都要授权，而面板打开、状态检查、每次发送都会读一次。
+- 用户决定："要保证其他平台也能用，Key 保存在本地就好，不要扯到钥匙串"。
+
+**现状**：
+- 去掉 `keyring` 依赖。Key 按服务地址存进应用配置目录的 `assistant-keys.json`。
+  - 写入时先写临时文件、设好 0600 权限再改名，任何时刻都不会出现所有人可读的 Key 文件。
+  - 环境变量 `COLM_AGENT_API_KEY` 优先。
+- `colm-agent` 的服务模式与 `--set-key`、`--has-key`、`--delete-key` 都带 `--key-file`。服务进程每个服务地址只读一次 Key，之后用内存里的。
+- GUI 保存或删除 Key 后结束助手进程，下次发送时用新 Key 重启。设置里写明 Key 以明文保存在哪里。
+
+**检查**：colm-agent 20 项测试通过（新增 Key 文件测试：按服务地址分开存、地址大小写与结尾斜杠归一、权限 0600、删除只删一项、坏文件报错）；GUI Rust 测试 207 项通过；两边 clippy 零警告；`check-gui` 与前端套件全部通过。

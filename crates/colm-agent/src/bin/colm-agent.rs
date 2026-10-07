@@ -1,10 +1,10 @@
 //! `colm-agent`：GUI 经 stdio JSONL 驱动的 AI 助手进程（docs/design-ai-assistant.md 第 2 节）。
 //!
 //! ```text
-//! colm-agent --data-dir <目录> --cli <colm-cli 路径>      # 服务模式：stdin 收 Inbound，stdout 发 Outbound
-//! colm-agent --set-key <服务地址>                         # 从 stdin 读一行 Key，存进系统钥匙串
-//! colm-agent --has-key <服务地址>                         # 打印 true / false
-//! colm-agent --delete-key <服务地址>
+//! colm-agent --data-dir <目录> --cli <colm-cli 路径> --key-file <文件>   # 服务模式：stdin 收 Inbound，stdout 发 Outbound
+//! colm-agent --key-file <文件> --set-key <服务地址>       # 从 stdin 读一行 Key，存进本地 Key 文件
+//! colm-agent --key-file <文件> --has-key <服务地址>       # 打印 true / false
+//! colm-agent --key-file <文件> --delete-key <服务地址>
 //! ```
 //!
 //! stdout 只输出协议消息；诊断写 stderr。stdin 关闭即退出。
@@ -38,26 +38,29 @@ fn run() -> Result<()> {
             .and_then(|i| args.get(i + 1))
             .cloned()
     };
+    let key_file = value("--key-file")
+        .map(PathBuf::from)
+        .context("--key-file <path> is required")?;
     if let Some(base) = value("--set-key") {
         let mut key = String::new();
         std::io::stdin().read_line(&mut key)?;
         if key.trim().is_empty() {
             bail!("no key on stdin");
         }
-        return colm_agent::secrets::set(&base, &key);
+        return colm_agent::secrets::set(&key_file, &base, &key);
     }
     if let Some(base) = value("--has-key") {
-        println!("{}", colm_agent::secrets::get(&base)?.is_some());
+        println!("{}", colm_agent::secrets::has(&key_file, &base)?);
         return Ok(());
     }
     if let Some(base) = value("--delete-key") {
-        return colm_agent::secrets::delete(&base);
+        return colm_agent::secrets::delete(&key_file, &base);
     }
     let data_dir = value("--data-dir").map(PathBuf::from);
     let cli = value("--cli")
         .map(PathBuf::from)
         .context("--cli <colm-cli path> is required")?;
-    serve(data_dir, cli)
+    serve(data_dir, cli, key_file)
 }
 
 /// 发给 GUI 的一行（并写审计）。
@@ -80,9 +83,10 @@ impl Emitter {
     }
 }
 
-/// 这个服务的 Key：本进程第一次用时从钥匙串读，之后用内存里的。
+/// 这个服务的 Key：本进程第一次用时从 Key 文件读，之后用内存里的（设置里换了 Key 会重启进程）。
 fn cached_key(
     keys: &Mutex<std::collections::BTreeMap<String, String>>,
+    key_file: &std::path::Path,
     base_url: &str,
 ) -> Result<String> {
     let mut keys = keys
@@ -91,7 +95,7 @@ fn cached_key(
     if let Some(key) = keys.get(base_url) {
         return Ok(key.clone());
     }
-    let key = colm_agent::secrets::get(base_url)?
+    let key = colm_agent::secrets::get(key_file, base_url)?
         .context("no API key is stored for this service; set it in the assistant settings")?;
     keys.insert(base_url.to_owned(), key.clone());
     Ok(key)
@@ -125,7 +129,7 @@ struct Settings {
     context: ToolContext,
 }
 
-fn serve(data_dir: Option<PathBuf>, cli: PathBuf) -> Result<()> {
+fn serve(data_dir: Option<PathBuf>, cli: PathBuf, key_file: PathBuf) -> Result<()> {
     let session = Arc::new(Mutex::new(Session::new(
         data_dir.as_deref(),
         colm_agent::SYSTEM_PROMPT,
@@ -139,7 +143,7 @@ fn serve(data_dir: Option<PathBuf>, cli: PathBuf) -> Result<()> {
     let (decision_tx, decision_rx): (Sender<(String, Decision)>, _) = mpsc::channel();
     let decision_rx = Arc::new(Mutex::new(decision_rx));
     let registry = Arc::new(Registry::standard());
-    // 读过的 Key 留在内存里：钥匙串每读一次，macOS 可能就弹一次授权框。
+    // 读过的 Key 留在内存里，不必每轮都读文件。
     let keys: Arc<Mutex<std::collections::BTreeMap<String, String>>> = Arc::default();
     let mut worker: Option<std::thread::JoinHandle<()>> = None;
 
@@ -237,9 +241,10 @@ fn serve(data_dir: Option<PathBuf>, cli: PathBuf) -> Result<()> {
                 let decisions = Arc::clone(&decision_rx);
                 let registry = Arc::clone(&registry);
                 let keys = Arc::clone(&keys);
+                let key_file = key_file.clone();
                 worker = Some(std::thread::spawn(move || {
                     let result = (|| -> Result<()> {
-                        provider.api_key = cached_key(&keys, &provider.base_url)?;
+                        provider.api_key = cached_key(&keys, &key_file, &provider.base_url)?;
                         let strict = provider.strict;
                         let client = OpenAiCompatible::new(provider);
                         let agent = Agent {
