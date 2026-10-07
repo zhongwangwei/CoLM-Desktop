@@ -105,10 +105,21 @@ fn agent_path() -> PathBuf {
     }
 }
 
-/// 设置校验：服务地址只接受 https，或本机回环的 http（本地模型）。
 /// DeepSeek 实际生效的三档（medium 会被归到 high，xhigh、ultra 归到 max，列出来没有意义）。
 const REASONING_EFFORTS: [&str; 3] = ["low", "high", "max"];
 
+/// 可供 `search_docs` 检索的项目文档目录：从 `colm-agent` 所在目录与当前目录往上找含
+/// `docs/design-ai-assistant.md` 的仓库（开发环境）。安装包里没有仓库文档时为空。
+pub(crate) fn docs_root(starts: &[PathBuf]) -> Option<PathBuf> {
+    starts.iter().find_map(|start| {
+        start
+            .ancestors()
+            .map(|dir| dir.join("docs"))
+            .find(|docs| docs.join("design-ai-assistant.md").is_file())
+    })
+}
+
+/// 设置校验：服务地址只接受 https，或本机回环的 http（本地模型）。
 pub(crate) fn validate_settings(settings: &AssistantSettings) -> Result<(), String> {
     let url = settings.base_url.trim();
     let local = ["http://127.0.0.1", "http://localhost", "http://[::1]"]
@@ -166,6 +177,54 @@ fn key_command(
         .args([flag, base_url]);
     colm_kernel::run::no_console(&mut command);
     Ok(command)
+}
+
+/// 用 `colm-agent` 的会话子命令读写历史（不需要 Key，助手进程不在也能用）。
+async fn session_command(app: &tauri::AppHandle, args: Vec<String>) -> Result<String, String> {
+    let mut command = std::process::Command::new(agent_path());
+    command.arg("--data-dir").arg(data_dir(app)?).args(args);
+    colm_kernel::run::no_console(&mut command);
+    tauri::async_runtime::spawn_blocking(move || {
+        let output = command
+            .output()
+            .map_err(|e| format!("cannot start {}: {e}", agent_path().display()))?;
+        if !output.status.success() {
+            return Err(String::from_utf8_lossy(&output.stderr).trim().to_owned());
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// 历史会话列表，最近的在前。
+#[tauri::command]
+pub async fn assistant_sessions(app: tauri::AppHandle) -> Result<Value, String> {
+    let text = session_command(&app, vec!["--list-sessions".into()]).await?;
+    serde_json::from_str(&text).map_err(|e| e.to_string())
+}
+
+/// 一个历史会话的对话记录。
+#[tauri::command]
+pub async fn assistant_transcript(app: tauri::AppHandle, id: String) -> Result<Value, String> {
+    let text = session_command(&app, vec!["--transcript".into(), id]).await?;
+    serde_json::from_str(&text).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn assistant_delete_session(app: tauri::AppHandle, id: String) -> Result<(), String> {
+    session_command(&app, vec!["--delete-session".into(), id])
+        .await
+        .map(|_| ())
+}
+
+/// 让正在运行的助手续接一个历史会话。
+#[tauri::command]
+pub fn assistant_resume(
+    process: tauri::State<'_, AssistantProcess>,
+    id: String,
+) -> Result<(), String> {
+    send(&process, &json!({ "type": "resume_session", "id": id }))
 }
 
 /// 把 Key 交给 `colm-agent` 存进本地 Key 文件（经 stdin，不出现在命令行或日志里）。
@@ -281,6 +340,7 @@ pub fn assistant_start(
     process: tauri::State<'_, AssistantProcess>,
     project_root: String,
     kernel_dir: Option<String>,
+    resume: Option<String>,
 ) -> Result<(), String> {
     let settings = assistant_settings(app.clone());
     validate_settings(&settings)?;
@@ -323,10 +383,28 @@ pub fn assistant_start(
             *guard = Some((child, stdin));
         }
     }
+    let starts: Vec<PathBuf> = [
+        agent_path().parent().map(PathBuf::from),
+        std::env::current_dir().ok(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    let docs = docs_root(&starts).map(|d| d.display().to_string());
     send(
         &process,
-        &configure_message(&settings, &project_root, kernel_dir.as_deref(), None),
-    )
+        &configure_message(
+            &settings,
+            &project_root,
+            kernel_dir.as_deref(),
+            docs.as_deref(),
+        ),
+    )?;
+    // 续接界面上正显示的那段历史（重启进程后也接得上）。
+    match resume.filter(|id| !id.is_empty()) {
+        Some(id) => send(&process, &json!({ "type": "resume_session", "id": id })),
+        None => Ok(()),
+    }
 }
 
 #[tauri::command]

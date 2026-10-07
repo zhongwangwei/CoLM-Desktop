@@ -50,6 +50,9 @@ pub enum Inbound {
     Cancel,
     /// 开新会话（清空对话历史，保留配置）。
     NewSession,
+    /// 续接一个存过的会话（读回历史，接着聊）。已经是当前会话或没存过时留在当前会话；
+    /// 都以 `ready`（带当前会话号）回复。
+    ResumeSession { id: String },
 }
 
 /// agent → GUI。

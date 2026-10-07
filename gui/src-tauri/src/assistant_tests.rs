@@ -104,3 +104,18 @@ mod colm_agent_protocol {
         pub reasoning_effort: Option<String>,
     }
 }
+
+#[test]
+fn the_docs_directory_is_found_above_the_agent_binary() {
+    let root = std::env::temp_dir().join(format!("colm-docs-{}", std::process::id()));
+    let bin = root.join("target").join("release");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::create_dir_all(root.join("docs")).unwrap();
+    assert_eq!(docs_root(std::slice::from_ref(&bin)), None);
+    std::fs::write(root.join("docs").join("design-ai-assistant.md"), "x").unwrap();
+    assert_eq!(
+        docs_root(&[PathBuf::from("/nonexistent"), bin]),
+        Some(root.join("docs"))
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}

@@ -5,6 +5,9 @@
 //! colm-agent --key-file <文件> --set-key <服务地址>       # 从 stdin 读一行 Key，存进本地 Key 文件
 //! colm-agent --key-file <文件> --has-key <服务地址>       # 打印 true / false
 //! colm-agent --key-file <文件> --delete-key <服务地址>
+//! colm-agent --data-dir <目录> --list-sessions            # 历史会话列表（JSON）
+//! colm-agent --data-dir <目录> --transcript <会话号>      # 一个会话的对话记录（JSON）
+//! colm-agent --data-dir <目录> --delete-session <会话号>
 //! ```
 //!
 //! stdout 只输出协议消息；诊断写 stderr。stdin 关闭即退出。
@@ -21,7 +24,7 @@ use colm_agent::agent::{Agent, Approver, Decision, Limits};
 use colm_agent::message::Message;
 use colm_agent::protocol::{ApprovalPolicy, Inbound, Outbound};
 use colm_agent::provider::{OpenAiCompatible, ProviderConfig};
-use colm_agent::session::Session;
+use colm_agent::session::{self, Session};
 use colm_agent::tools::{Registry, Tier, ToolContext};
 
 fn main() {
@@ -39,6 +42,23 @@ fn run() -> Result<()> {
             .and_then(|i| args.get(i + 1))
             .cloned()
     };
+    // 历史会话的查看与删除不碰 Key。
+    if let Some(data_dir) = value("--data-dir").map(PathBuf::from) {
+        if args.iter().any(|a| a == "--list-sessions") {
+            println!("{}", serde_json::to_string(&session::list(&data_dir)?)?);
+            return Ok(());
+        }
+        if let Some(id) = value("--transcript") {
+            println!(
+                "{}",
+                serde_json::to_string(&session::transcript(&data_dir, &id)?)?
+            );
+            return Ok(());
+        }
+        if let Some(id) = value("--delete-session") {
+            return session::delete(&data_dir, &id);
+        }
+    }
     let key_file = value("--key-file")
         .map(PathBuf::from)
         .context("--key-file <path> is required")?;
@@ -197,6 +217,44 @@ fn serve(data_dir: Option<PathBuf>, cli: PathBuf, key_file: PathBuf) -> Result<(
                     },
                     approval,
                 });
+                let id = session.lock().unwrap().id.clone();
+                emitter.emit(Outbound::Ready { session: id, model });
+            }
+            Inbound::ResumeSession { id } => {
+                if busy.load(Ordering::SeqCst) {
+                    emitter.emit(Outbound::Error {
+                        message: "stop the current answer before switching conversations".into(),
+                    });
+                    continue;
+                }
+                let current = session.lock().unwrap().id.clone();
+                // 没存过的（开了没说话，进程就重启了）不算错：留在当前会话。
+                let saved = data_dir
+                    .as_deref()
+                    .is_some_and(|root| session::saved(root, &id));
+                if current != id && saved {
+                    let Some(root) = data_dir.as_deref() else {
+                        continue;
+                    };
+                    match Session::open(root, &id, colm_agent::SYSTEM_PROMPT) {
+                        Ok(opened) => {
+                            *session.lock().unwrap() = opened;
+                            allowed.lock().unwrap().clear();
+                        }
+                        Err(error) => {
+                            emitter.emit(Outbound::Error {
+                                message: format!("{error:#}"),
+                            });
+                            continue;
+                        }
+                    }
+                }
+                let model = settings
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .map(|s| s.provider.model.clone())
+                    .unwrap_or_default();
                 let id = session.lock().unwrap().id.clone();
                 emitter.emit(Outbound::Ready { session: id, model });
             }

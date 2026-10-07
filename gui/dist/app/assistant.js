@@ -1,12 +1,13 @@
 //! AI 助手面板（docs/design-ai-assistant.md 第 8 节）。对话循环与工具都在 `colm-agent` 里，
-//! 这里只负责：启动与配置、发消息、渲染事件流（回答、思考过程、工具卡片、审批卡片、用量）。
+//! 这里只负责：启动与配置、发消息、渲染事件流（回答、思考过程、工具卡片、审批卡片、用量），
+//! 以及历史对话（列出、打开后接着聊、删除；打开面板时自动接上最近一次）。
 //!
 //! 只依赖 ipc/state/ui/i18n：shell、runner、results 都可能导入它，反过来导入会成环。
 //! 模型的回答一律按纯文本建 DOM（不用 innerHTML），表格与代码块由 `renderAnswer` 安全地转成元素。
 
 import { invoke, listen, hasBackend } from './ipc.js';
 import { state } from './state.js';
-import { $, status } from './ui.js';
+import { $, status, appConfirm } from './ui.js';
 import { language, translateZh } from './i18n.js';
 
 // ---- 纯函数（tests/assistant.mjs）----------------------------------------------------------
@@ -120,6 +121,10 @@ const ui = {
   answerText: '',
   reasoning: null,
   tools: new Map(),
+  /** 面板上显示的这段对话的会话号；新对话在第一条消息前为 null。 */
+  conversation: null,
+  /** 打开面板时是否已经接上过最近一次对话。 */
+  restored: false,
 };
 
 function log() {
@@ -177,9 +182,8 @@ function toolResult(event) {
   card.dataset.state = event.ok ? 'ok' : 'failed';
   card.classList.remove('awaiting');
   const state = card.querySelector('.assistant-tool-state');
-  state.replaceChildren(...(event.ok
-    ? [element('span', '', '完成'), element('span', '', ` · ${event.elapsed_ms} ms`)]
-    : [element('span', '', '失败')]));
+  const timing = event.elapsed_ms == null ? [] : [element('span', '', ` · ${event.elapsed_ms} ms`)];
+  state.replaceChildren(...(event.ok ? [element('span', '', '完成'), ...timing] : [element('span', '', '失败')]));
   state.className = `mini assistant-tool-state ${event.ok ? 'muted' : 'assistant-fail'}`;
   const preview = event.result.length > 4000 ? `${event.result.slice(0, 4000)}…` : event.result;
   card.querySelector('.assistant-tool-body').append(element('div', 'muted mini', '结果'), element('pre', 'assistant-code', preview));
@@ -234,6 +238,7 @@ function handle(event) {
   switch (event.type) {
     case 'ready':
       $('assistant-model').textContent = event.model || '';
+      ui.conversation = event.session || ui.conversation;
       break;
     case 'reasoning_delta':
       if (!ui.reasoning) {
@@ -408,7 +413,8 @@ async function ensureStarted() {
   }
   if (!ui.started) {
     const view = currentView();
-    await invoke('assistant_start', { projectRoot: projectRoot(view), kernelDir: view.kernel || null });
+    // 接上面板上正显示的那段对话（进程重启后也接得上）。
+    await invoke('assistant_start', { projectRoot: projectRoot(view), kernelDir: view.kernel || null, resume: ui.conversation });
     ui.started = true;
   }
 }
@@ -426,6 +432,122 @@ async function send() {
     throw e;
   });
   scrollDown();
+}
+
+// ---- 历史对话 ------------------------------------------------------------------------
+
+/** 列表里的时间：今天只写时分，否则写月日。 */
+export function sessionTime(ms, now = Date.now()) {
+  const date = new Date(ms);
+  const today = new Date(now);
+  const pad = n => String(n).padStart(2, '0');
+  const clock = `${pad(date.getHours())}:${pad(date.getMinutes())}`;
+  if (date.toDateString() === today.toDateString()) return clock;
+  const day = `${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+  return date.getFullYear() === today.getFullYear() ? `${day} ${clock}` : `${date.getFullYear()}-${day}`;
+}
+
+function clearLog() {
+  const empty = ui.emptyState;
+  log().replaceChildren(...(empty ? [empty] : []));
+  ui.tools.clear();
+  ui.answer = null;
+  ui.answerText = '';
+  ui.reasoning = null;
+  $('assistant-usage').textContent = '';
+}
+
+/** 把历史记录画回面板：文字照常排版，工具卡片收起（结果在卡片里）。 */
+function renderTranscript(items) {
+  clearLog();
+  for (const item of items) {
+    if (item.kind === 'user') {
+      bubble('user').textContent = item.text;
+    } else if (item.kind === 'assistant') {
+      renderAnswer(bubble('reply'), item.text);
+    } else if (item.kind === 'tool') {
+      toolCard({ id: item.id, name: item.name, arguments: item.arguments, tier: 'history' });
+      const card = ui.tools.get(item.id);
+      if (item.result == null) {
+        card.dataset.state = 'failed';
+        card.querySelector('.assistant-tool-state').textContent = t('未完成');
+      } else {
+        toolResult({ id: item.id, name: item.name, ok: item.ok, result: item.result });
+      }
+      card.open = false;
+    }
+  }
+  if (items.length) bubble('note').textContent = t('以上是之前的对话，可以直接接着问。');
+  scrollDown();
+}
+
+async function openConversation(id) {
+  if (ui.running) {
+    notice('请先停止当前回答，再切换对话。');
+    return;
+  }
+  const items = await invoke('assistant_transcript', { id });
+  renderTranscript(items);
+  ui.conversation = id;
+  $('assistant-history').hidden = true;
+  notice('');
+  if (ui.started) await invoke('assistant_resume', { id });
+}
+
+async function showHistory() {
+  const box = $('assistant-history');
+  if (!box.hidden) {
+    box.hidden = true;
+    return;
+  }
+  $('assistant-settings').hidden = true;
+  const sessions = await invoke('assistant_sessions');
+  const list = element('div', 'assistant-history-list');
+  if (!sessions.length) list.appendChild(element('p', 'muted mini', '还没有保存的对话。'));
+  for (const session of sessions) {
+    const row = element('div', `assistant-history-item${session.id === ui.conversation ? ' current' : ''}`);
+    const open = element('button', 'assistant-history-open');
+    open.type = 'button';
+    open.append(
+      element('span', 'assistant-history-title', session.title),
+      element('span', 'muted mini', `${sessionTime(session.updated_ms)} · ${session.turns} ${t('问')}`),
+    );
+    open.onclick = () => openConversation(session.id).catch(e => notice(String(e?.message || e)));
+    const remove = element('button', 'icon-btn', '×');
+    remove.type = 'button';
+    remove.title = t('删除这段对话');
+    remove.onclick = async () => {
+      if (!(await appConfirm(t('删除这段对话？删除后无法恢复。'), { okText: t('删除') }))) return;
+      try {
+        await invoke('assistant_delete_session', { id: session.id });
+        if (session.id === ui.conversation) startNewConversation();
+        box.hidden = true;
+        await showHistory();
+      } catch (e) {
+        notice(String(e?.message || e));
+      }
+    };
+    row.append(open, remove);
+    list.appendChild(row);
+  }
+  box.replaceChildren(element('div', 'assistant-history-head', '历史对话'), list);
+  box.hidden = false;
+}
+
+function startNewConversation() {
+  if (ui.running) return;
+  clearLog();
+  ui.conversation = null;
+  if (ui.started) invoke('assistant_new_session').catch(e => status(e));
+}
+
+/** 第一次打开面板：面板还空着时接上最近一次对话。 */
+async function restoreLatest() {
+  if (ui.restored) return;
+  ui.restored = true;
+  if (ui.conversation || log().querySelector('.assistant-msg')) return;
+  const sessions = await invoke('assistant_sessions');
+  if (sessions.length) await openConversation(sessions[0].id);
 }
 
 /** 助手栏宽度：至少 320，并给主页面留至少 480。 */
@@ -483,6 +605,7 @@ function togglePanel(open = $('assistant-panel').hidden) {
   if (open) restoreWidth();
   if (open) {
     loadSettings().catch(e => status(e));
+    restoreLatest().catch(e => notice(String(e?.message || e)));
     $('assistant-text').focus();
   }
 }
@@ -500,7 +623,10 @@ function wire() {
   addEventListener('resize', () => {
     if (!$('assistant-panel').hidden) setAssistantWidth($('assistant-panel').getBoundingClientRect().width);
   });
-  $('assistant-settings-btn').onclick = () => { $('assistant-settings').hidden = !$('assistant-settings').hidden; };
+  $('assistant-settings-btn').onclick = () => {
+    $('assistant-history').hidden = true;
+    $('assistant-settings').hidden = !$('assistant-settings').hidden;
+  };
   $('assistant-settings-save').onclick = () => saveSettings().catch(e => status(e?.message || e));
   $('assistant-key-save').onclick = async () => {
     const key = $('assistant-key').value;
@@ -531,14 +657,9 @@ function wire() {
       $('assistant-text').focus();
     };
   }
-  const empty = log().querySelector('.assistant-empty');
-  $('assistant-new').onclick = () => {
-    if (ui.running) return;
-    log().replaceChildren(...(empty ? [empty] : []));
-    ui.tools.clear();
-    $('assistant-usage').textContent = '';
-    if (ui.started) invoke('assistant_new_session').catch(e => status(e));
-  };
+  ui.emptyState = log().querySelector('.assistant-empty');
+  $('assistant-new').onclick = () => { $('assistant-history').hidden = true; startNewConversation(); };
+  $('assistant-history-btn').onclick = () => showHistory().catch(e => notice(String(e?.message || e)));
   // 回车发送，Shift + 回车换行；输入法选词时的回车（isComposing / keyCode 229）不发送。
   $('assistant-think').addEventListener('change', () => changeThink().catch(e => status(e?.message || e)));
   $('assistant-text').addEventListener('keydown', event => {

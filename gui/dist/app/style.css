@@ -709,6 +709,17 @@ body.resizing-assistant { user-select: none; cursor: col-resize; }
 .assistant-settings { display: grid; grid-template-columns: max-content 1fr; gap: 8px 12px; padding: 12px 14px;
   border-bottom: 1px solid var(--border-soft); background: var(--surface); }
 .assistant-settings[hidden] { display: none; }
+.assistant-history { padding: 10px 14px 12px; border-bottom: 1px solid var(--border-soft); background: var(--surface); max-height: 45%; overflow-y: auto; }
+.assistant-history[hidden] { display: none; }
+.assistant-history-head { font-size: 12.5px; font-weight: 600; margin-bottom: 6px; }
+.assistant-history-list { display: flex; flex-direction: column; gap: 2px; }
+.assistant-history-item { display: flex; align-items: center; gap: 6px; border-radius: 8px; }
+.assistant-history-item:hover { background: var(--surface-2); }
+.assistant-history-item.current { background: var(--accent-weak); }
+.assistant-history-open { flex: 1; min-width: 0; display: flex; flex-direction: column; align-items: flex-start; gap: 1px; padding: 6px 8px; border: 0; background: none; color: inherit; text-align: left; cursor: pointer; font: inherit; }
+.assistant-history-title { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+.assistant-history-item .icon-btn { flex: none; opacity: .55; }
+.assistant-history-item:hover .icon-btn { opacity: 1; }
 .assistant-settings > label { padding-top: 7px; font-size: 12.5px; }
 .assistant-settings > p, .assistant-settings > .pill-row, .assistant-key-row { grid-column: 2; margin: 0; }
 .assistant-key-row { display: flex; gap: 6px; }

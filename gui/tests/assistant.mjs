@@ -81,3 +81,11 @@ assert.deepEqual(assistant.thinkSettings(''), { thinking: null, reasoning_effort
 for (const value of ['', 'low', 'high', 'max', 'off']) {
   assert.equal(assistant.thinkValue(assistant.thinkSettings(value)), value);
 }
+
+// 历史列表的时间：今天只写时分，今年写月日，往年带年份。
+{
+  const now = new Date(2026, 9, 8, 15, 0).getTime();
+  assert.equal(assistant.sessionTime(new Date(2026, 9, 8, 9, 5).getTime(), now), '09:05');
+  assert.equal(assistant.sessionTime(new Date(2026, 9, 7, 23, 40).getTime(), now), '10-07 23:40');
+  assert.equal(assistant.sessionTime(new Date(2025, 0, 3, 8, 0).getTime(), now), '2025-01-03');
+}
