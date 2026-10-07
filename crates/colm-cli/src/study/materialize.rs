@@ -523,9 +523,10 @@ mod tests {
         let entries = colm_namelist::tracer_files::param_file_entries(raw).unwrap();
         assert_eq!(entries.len(), 3, "{raw}");
         assert!(entries[0].is_null(), "{raw}");
-        assert!(entries[1].path().ends_with("ch4_parameter.nml"), "{raw}");
+        // 按路径分量比较：Windows 上是反斜杠，且带盘符（`C:\…`，按位置条目处理）。
         assert!(
-            entries[1].path().contains("members/m000001/AT-Neu/"),
+            std::path::Path::new(entries[1].path())
+                .ends_with("members/m000001/AT-Neu/ch4_parameter.nml"),
             "{raw}"
         );
         assert!(
