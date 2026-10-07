@@ -31500,3 +31500,14 @@ GPP 的均值被 4 个基线 KGE 低于 −0.5 的站拉低（BE-Lon、DE-Geb、
 - `gui/tests/assistant.mjs` 增加检查：`dist/app/*.js` 里不许再出现原生 `confirm`/`prompt`/`alert`。
 
 **检查**：`check-gui` 通过（90 个命令全部能解析）；14 个前端套件全部通过（`results.mjs` 的桩改为异步的 `appConfirm`/`appPrompt`；`forcing-gapfill.mjs` 改为检查 `appAlert`）。
+
+## 第 623 轮：AI 助手可选思考强度
+
+**过程**：用户问为什么不能像 Codex 那样选 reasoning effort。查 DeepSeek 文档（api-docs.deepseek.com/guides/thinking_mode）：Chat Completions 接受 `reasoning_effort`，实际只有 `low`、`high`、`max` 三档。默认开启思考，强度为 high。medium 会归到 high，xhigh 和 ultra 会归到 max。Codex 菜单里的六档对 DeepSeek 只等于这三档。
+
+**现状**：
+- 设置里新增"思考强度"，可选服务默认、low、high、max。
+- GUI 后端校验只接受这三档。
+- 思考模式选"不开启"时，强度选框灰掉，请求里也不发 `reasoning_effort`。
+
+**检查**：colm-agent 20 项测试通过（请求体在设了强度时带 `reasoning_effort`，关闭思考时不带）；GUI Rust 207 项通过（校验拒绝 medium；`configure` 消息带强度）；两边 clippy 零警告、fmt 干净；`check-gui` 与 14 个前端套件通过。

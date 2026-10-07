@@ -24,18 +24,32 @@ fn settings_default_to_deepseek_and_only_accept_https_or_loopback() {
         ..AssistantSettings::default()
     };
     assert!(validate_settings(&empty_model).is_err());
+    for (effort, ok) in [
+        ("low", true),
+        ("high", true),
+        ("max", true),
+        ("medium", false),
+    ] {
+        let s = AssistantSettings {
+            reasoning_effort: Some(effort.into()),
+            ..AssistantSettings::default()
+        };
+        assert_eq!(validate_settings(&s).is_ok(), ok, "{effort}");
+    }
 }
 
 #[test]
 fn configure_messages_match_the_agent_protocol_and_carry_no_key() {
     let settings = AssistantSettings {
         thinking: Some(false),
+        reasoning_effort: Some("max".into()),
         ..AssistantSettings::default()
     };
     let message = configure_message(&settings, "/p", Some("/k"), None);
     assert_eq!(message["type"], "configure");
     assert_eq!(message["provider"]["model"], "deepseek-flash");
     assert_eq!(message["provider"]["thinking"], false);
+    assert_eq!(message["provider"]["reasoning_effort"], "max");
     assert_eq!(message["project_root"], "/p");
     assert_eq!(message["kernel_dir"], "/k");
     assert!(message["provider"].get("api_key").is_none());
@@ -72,5 +86,7 @@ mod colm_agent_protocol {
         pub model: String,
         #[serde(default)]
         pub thinking: Option<bool>,
+        #[serde(default)]
+        pub reasoning_effort: Option<String>,
     }
 }

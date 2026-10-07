@@ -26,6 +26,10 @@ pub struct ProviderConfig {
     /// DeepSeek 的思考模式：`None` 不发这个参数（服务端默认开启）。
     #[serde(default)]
     pub thinking: Option<bool>,
+    /// 思考强度（`reasoning_effort`）：DeepSeek 只认 low、high、max；`None` 用服务端默认（high）。
+    /// 关闭思考时不发。
+    #[serde(default)]
+    pub reasoning_effort: Option<String>,
     /// 工具 schema 带 `strict: true`（DeepSeek 要配 `/beta` 地址）。
     #[serde(default)]
     pub strict: bool,
@@ -45,6 +49,7 @@ impl ProviderConfig {
             model: model.into(),
             api_key,
             thinking: None,
+            reasoning_effort: None,
             strict: false,
             timeout_seconds: default_timeout(),
         }
@@ -102,6 +107,11 @@ pub fn request_body(config: &ProviderConfig, messages: &[Message], tools: &[Valu
     }
     if let Some(thinking) = config.thinking {
         body["thinking"] = json!({ "type": if thinking { "enabled" } else { "disabled" } });
+    }
+    if config.thinking != Some(false) {
+        if let Some(effort) = config.reasoning_effort.as_deref().filter(|e| !e.is_empty()) {
+            body["reasoning_effort"] = json!(effort);
+        }
     }
     body
 }

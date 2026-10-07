@@ -291,8 +291,15 @@ async function loadSettings() {
   $('assistant-base').value = settings.base_url;
   $('assistant-model-name').value = settings.model;
   $('assistant-thinking').value = settings.thinking === true ? 'on' : settings.thinking === false ? 'off' : '';
+  $('assistant-effort').value = settings.reasoning_effort || '';
+  syncEffort();
   await refreshKeyStatus(settings.base_url);
   return settings;
+}
+
+// 不开启思考时强度不起作用，灰掉。
+function syncEffort() {
+  $('assistant-effort').disabled = $('assistant-thinking').value === 'off';
 }
 
 async function refreshKeyStatus(baseUrl) {
@@ -312,6 +319,7 @@ function formSettings(previous) {
     base_url: $('assistant-base').value.trim(),
     model: $('assistant-model-name').value.trim(),
     thinking: thinking === 'on' ? true : thinking === 'off' ? false : null,
+    reasoning_effort: $('assistant-effort').value || null,
     egress_acknowledged: previous?.egress_acknowledged ?? null,
   };
 }
@@ -515,6 +523,7 @@ function wire() {
     if (ui.started) invoke('assistant_new_session').catch(e => status(e));
   };
   // 回车发送，Shift + 回车换行；输入法选词时的回车（isComposing / keyCode 229）不发送。
+  $('assistant-thinking').addEventListener('change', syncEffort);
   $('assistant-text').addEventListener('keydown', event => {
     if (event.key !== 'Enter' || event.shiftKey || event.isComposing || event.keyCode === 229) return;
     event.preventDefault();

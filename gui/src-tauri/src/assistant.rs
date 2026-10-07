@@ -39,6 +39,9 @@ pub struct AssistantSettings {
     /// DeepSeek 思考模式；`None` 用服务端默认（开启）。
     #[serde(default)]
     pub thinking: Option<bool>,
+    /// 思考强度 low / high / max；`None` 用服务端默认（high）。
+    #[serde(default)]
+    pub reasoning_effort: Option<String>,
     /// 用户已确认过“数据会发给模型服务商”的那个服务地址。
     #[serde(default)]
     pub egress_acknowledged: Option<String>,
@@ -50,6 +53,7 @@ impl Default for AssistantSettings {
             base_url: "https://api.deepseek.com".into(),
             model: "deepseek-flash".into(),
             thinking: None,
+            reasoning_effort: None,
             egress_acknowledged: None,
         }
     }
@@ -94,6 +98,9 @@ fn agent_path() -> PathBuf {
 }
 
 /// 设置校验：服务地址只接受 https，或本机回环的 http（本地模型）。
+/// DeepSeek 实际生效的三档（medium 会被归到 high，xhigh、ultra 归到 max，列出来没有意义）。
+const REASONING_EFFORTS: [&str; 3] = ["low", "high", "max"];
+
 pub(crate) fn validate_settings(settings: &AssistantSettings) -> Result<(), String> {
     let url = settings.base_url.trim();
     let local = ["http://127.0.0.1", "http://localhost", "http://[::1]"]
@@ -104,6 +111,11 @@ pub(crate) fn validate_settings(settings: &AssistantSettings) -> Result<(), Stri
     }
     if settings.model.trim().is_empty() {
         return Err("请填写模型名".into());
+    }
+    if let Some(effort) = &settings.reasoning_effort {
+        if !REASONING_EFFORTS.contains(&effort.as_str()) {
+            return Err(format!("思考强度只能是 {}", REASONING_EFFORTS.join("、")));
+        }
     }
     Ok(())
 }
@@ -242,6 +254,7 @@ pub(crate) fn configure_message(
             "base_url": settings.base_url.trim(),
             "model": settings.model.trim(),
             "thinking": settings.thinking,
+            "reasoning_effort": settings.reasoning_effort,
         },
         "project_root": project_root,
         "kernel_dir": kernel_dir,

@@ -64,10 +64,18 @@ fn request_bodies_stream_with_usage_and_only_send_thinking_when_set() {
     assert_eq!(body["stream_options"]["include_usage"], true);
     assert!(body.get("tools").is_none());
     assert!(body.get("thinking").is_none());
+    assert!(body.get("reasoning_effort").is_none());
+    config.reasoning_effort = Some("max".into());
+    assert_eq!(
+        request_body(&config, &messages, &[])["reasoning_effort"],
+        "max"
+    );
     config.thinking = Some(false);
     let tools = [json!({"type": "function", "function": {"name": "x"}})];
     let body = request_body(&config, &messages, &tools);
     assert_eq!(body["thinking"]["type"], "disabled");
+    // 关了思考就不发强度。
+    assert!(body.get("reasoning_effort").is_none());
     assert_eq!(body["tools"][0]["function"]["name"], "x");
     // Key 不进序列化的配置。
     assert!(!serde_json::to_string(&config).unwrap().contains("\"k\""));
