@@ -197,6 +197,20 @@ pub fn compute(stage: &str, case_nml: &Path, kernel: &str) -> Result<Fingerprint
                 Err(error) => format!("error: {error:#}"),
             };
             inputs.insert("hybrid (hybrid.toml)".into(), value);
+            // 气候特征文件（`clim_*` 特征）重算过也要重跑 colm 段。
+            for file in crate::hybrid_cmd::climate_files(case_dir) {
+                let value = std::fs::read(&file).map_or_else(
+                    |error| format!("error: {error}"),
+                    |bytes| colm_hybrid::sha256_hex(&bytes),
+                );
+                inputs.insert(
+                    format!(
+                        "hybrid climate ({})",
+                        file.file_name().unwrap_or_default().to_string_lossy()
+                    ),
+                    value,
+                );
+            }
         }
     }
     // Process parameter files are case-local by contract. Include manually

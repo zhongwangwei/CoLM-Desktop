@@ -536,4 +536,15 @@ fn a_hybrid_config_and_its_model_only_touch_the_colm_stage() {
     assert!(first_difference(&with_first[2], &with_second)
         .unwrap()
         .contains("hybrid"));
+
+    // 气候特征文件：新算出来或重算过都换 colm 指纹。
+    std::fs::create_dir_all(dir.join("hybrid_climate")).unwrap();
+    std::fs::write(dir.join("hybrid_climate/climate.nc"), b"one").unwrap();
+    let with_climate = compute("colm", &case, "k").unwrap();
+    assert!(first_difference(&with_second, &with_climate)
+        .unwrap()
+        .contains("hybrid climate"));
+    std::fs::write(dir.join("hybrid_climate/climate.nc"), b"two").unwrap();
+    assert!(with_climate != compute("colm", &case, "k").unwrap());
+    assert!(before[1] == compute("mkinidata", &case, "k").unwrap());
 }

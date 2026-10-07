@@ -774,6 +774,10 @@ fn hybrid_commands_forward_case_kernel_and_install_options() {
         hybrid_check_args("/case".into(), "/kernel".into()),
         ["hybrid-check", "/case", "--kernel", "/kernel"]
     );
+    assert_eq!(
+        hybrid_climate_args("/case".into(), "/kernel".into()),
+        ["hybrid-climate", "/case", "--kernel", "/kernel"]
+    );
     let args = hybrid_install_args(
         "/case".into(),
         "/m.mlp.json".into(),

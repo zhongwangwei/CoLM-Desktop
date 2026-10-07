@@ -654,4 +654,5 @@ body.resizing-live { user-select: none; }
 .hybrid-output-row > .select { flex: 1 1 200px; }
 .hybrid-check-title { display: flex; gap: 8px; align-items: baseline; margin-top: 12px; }
 #hybrid-cases button { margin-right: 6px; }
+#hybrid-cases th, #hybrid-cases td { white-space: nowrap; }
 @media (max-width: 640px) { .hybrid-form { grid-template-columns: 1fr; } }

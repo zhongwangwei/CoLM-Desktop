@@ -181,6 +181,59 @@ pub(super) fn cmd_hybrid_check(opts: &Opts) -> Result<()> {
     Ok(())
 }
 
+/// 算例目录下的气候特征文件（`colm-rs --hybrid-climate` 写出，`clim_*` 特征读它）。
+pub(crate) const CLIMATE_DIR: &str = "hybrid_climate";
+
+/// 算例已有的气候文件（按名字排序）。
+pub(crate) fn climate_files(case: &Path) -> Vec<PathBuf> {
+    let mut files: Vec<PathBuf> = std::fs::read_dir(case.join(CLIMATE_DIR))
+        .map(|entries| {
+            entries
+                .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+                .filter(|path| path.extension().is_some_and(|ext| ext == "nc"))
+                .collect()
+        })
+        .unwrap_or_default();
+    files.sort();
+    files
+}
+
+pub(super) fn cmd_hybrid_climate(opts: &Opts) -> Result<()> {
+    let case = opts
+        .positional_case()?
+        .canonicalize()
+        .context("cannot resolve the case directory")?;
+    let kernel = Kernel::open(&opts.need("--kernel")?)?;
+    print!("{}", climate(&case, &kernel)?);
+    Ok(())
+}
+
+/// 用 `colm-rs --hybrid-climate` 给算例算气候特征（运行时段内逐步累积强迫）。`case` 要是绝对路径。
+pub(crate) fn climate(case: &Path, kernel: &Kernel) -> Result<String> {
+    let executable = rust_model_executable()?;
+    let output = std::process::Command::new(&executable)
+        .current_dir(case)
+        .arg(case.join("case.nml"))
+        .args([
+            "--land-cover",
+            rust_model_land_cover(kernel)?,
+            "--case-outputs",
+            "--hybrid-climate",
+        ])
+        .args(rust_model_crop_arguments(kernel))
+        .output()
+        .with_context(|| format!("cannot start {}", executable.display()))?;
+    if !output.status.success() {
+        bail!(
+            "cannot compute the climate features:\n{}\n(this needs the case's restarts and forcing; \
+             if preprocessing has not run yet: colm-cli run {} --kernel <dir> --stage mkinidata)",
+            String::from_utf8_lossy(&output.stderr).trim_end(),
+            case.display()
+        );
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
 /// 在算例上空跑 `colm-rs --hybrid-dry-run`，返回它打印的 JSON 汇总。`case` 要是绝对路径。
 pub(crate) fn dry_run(case: &Path, config: &Path, kernel: &Kernel) -> Result<String> {
     let land_cover = rust_model_land_cover(kernel)?;
@@ -216,7 +269,12 @@ pub(crate) fn hybrid_info(case: &Path) -> Result<serde_json::Value> {
     let land_mode = case_land_mode(case)?;
     let config = case.join("hybrid.toml");
     if !config.is_file() {
-        return Ok(serde_json::json!({ "installed": false, "land_mode": land_mode, "slots": [] }));
+        return Ok(serde_json::json!({
+            "installed": false,
+            "land_mode": land_mode,
+            "climate": !climate_files(case).is_empty(),
+            "slots": [],
+        }));
     }
     let slots = colm_hybrid::HybridConfig::declared(&config)?;
     let error = colm_hybrid::HybridConfig::load(&config)
@@ -248,6 +306,10 @@ pub(crate) fn hybrid_info(case: &Path) -> Result<serde_json::Value> {
     Ok(serde_json::json!({
         "installed": true,
         "land_mode": land_mode,
+        "climate": !climate_files(case).is_empty(),
+        "uses_climate": slots.iter().any(|slot| slot["features"]
+            .as_array()
+            .is_some_and(|features| features.iter().any(|f| f.as_str().is_some_and(|f| f.starts_with("clim_"))))),
         "error": error,
         "slots": slots,
     }))

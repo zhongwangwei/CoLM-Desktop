@@ -15,6 +15,7 @@ pub mod history;
 mod history_manifest;
 pub mod history_sidecar;
 pub mod hybrid;
+pub mod hybrid_climate;
 pub mod irrigation;
 pub mod methane;
 pub mod multi_patch;

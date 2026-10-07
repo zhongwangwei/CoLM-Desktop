@@ -63,6 +63,7 @@ pub fn member_case(
         false,
     )?;
     copy_process_parameters(&mut document, &baseline, &destination)?;
+    copy_hybrid_climate(&baseline, &destination)?;
 
     let mut case_scalars = Vec::new();
     // 混合网络的权重不进 namelist，由 `super::hybrid::write_member_files` 写成模型文件。
@@ -93,6 +94,24 @@ pub fn member_case(
         .with_context(|| format!("cannot write {}", member_nml.display()))?;
     colm_case::tuning::apply_case_values(&member_nml, &case_scalars)?;
     Ok(destination)
+}
+
+/// 基础算例的气候特征文件（`hybrid_climate/`，`clim_*` 特征读它）原样拷给成员：成员与基础算例
+/// 共用强迫、运行时段与地表数据，气候特征相同。
+fn copy_hybrid_climate(baseline: &Path, destination: &Path) -> Result<()> {
+    let files = crate::hybrid_cmd::climate_files(baseline);
+    if files.is_empty() {
+        return Ok(());
+    }
+    let target = destination.join(crate::hybrid_cmd::CLIMATE_DIR);
+    std::fs::create_dir_all(&target)
+        .with_context(|| format!("cannot create {}", target.display()))?;
+    for file in files {
+        let name = file.file_name().context("climate file has no name")?;
+        std::fs::copy(&file, target.join(name))
+            .with_context(|| format!("cannot copy {}", file.display()))?;
+    }
+    Ok(())
 }
 
 fn pft_value(meta: &colm_case::pft::ParameterMeta, value: f64) -> Value {
@@ -467,7 +486,14 @@ mod tests {
         )
         .unwrap();
 
+        std::fs::create_dir_all(baseline.join("hybrid_climate")).unwrap();
+        std::fs::write(baseline.join("hybrid_climate/climate.nc"), b"climate").unwrap();
         let member = member_case(&baseline, &member, "m000001", "AT-Neu", &[]).unwrap();
+        // 成员带上基础算例的气候特征（`clim_*` 特征读它）。
+        assert_eq!(
+            std::fs::read(member.join("hybrid_climate/climate.nc")).unwrap(),
+            b"climate"
+        );
         let text = std::fs::read_to_string(member.join("case.nml")).unwrap();
         let baseline = colm_kernel::manifest::absolute(&baseline).unwrap();
         assert!(text.contains(baseline.join("missing/site.nc").to_string_lossy().as_ref()));

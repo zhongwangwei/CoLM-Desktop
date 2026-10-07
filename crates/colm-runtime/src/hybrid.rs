@@ -8,7 +8,8 @@
 //!   （`LandPhysicsParameters::pft_overrides`，在 `crate::pft` 里走与 namelist `DEF_PFT_*(class)` 相同的查表
 //!   路径）。LCT 下没有 PFT，配置了就报错。
 //!
-//! 特征按名字从常数重启读：`name` 是 `(patch,)` 量（整数变量如 `patchclass` 也行），`name[k]` 是
+//! 以 `clim_` 开头的特征是气候量，从算例目录的 `hybrid_climate/` 读（见 [`crate::hybrid_climate`]）。
+//! 其余特征按名字从常数重启读：`name` 是 `(patch,)` 量（整数变量如 `patchclass` 也行），`name[k]` 是
 //! `(patch, 层)` 量的第 `k` 层（1 起）。`pft` 插槽另外先在 PFT 常数重启里找 `(pft,)` 量（如 `pftclass`、
 //! `pftfrac`、`htop_p`）。只作用于土壤 patch（`patchtype == 0`）。把有效值原样写回与不覆盖逐位相同，所以
 //! "模仿物理"的模型给出与纯物理逐位相同的结果。
@@ -16,7 +17,7 @@
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::ops::Range;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{bail, ensure, Context, Result};
@@ -33,6 +34,53 @@ pub struct Hybrid {
     pub config: HybridConfig,
     land_class: Option<Slot>,
     pft: Option<Slot>,
+    /// 算例目录：`clim_*` 特征从它的 `hybrid_climate/` 读。
+    case_dir: Option<PathBuf>,
+}
+
+/// 配置里有没有气候特征。
+fn uses_climate(slots: &[SlotConfig]) -> bool {
+    slots
+        .iter()
+        .flat_map(|slot| &slot.features)
+        .any(|feature| crate::hybrid_climate::is_climate_feature(feature))
+}
+
+/// 取特征的来源：常数重启，以及用到 `clim_*` 时与它同块的气候文件。
+struct Features {
+    restart: colm_init::RestartFile,
+    climate: Option<colm_init::RestartFile>,
+}
+
+impl Features {
+    fn open(constant: &Path, case_dir: Option<&Path>, features: &[String]) -> Result<Self> {
+        let restart = colm_init::RestartFile::open(constant)?;
+        let climate = if features
+            .iter()
+            .any(|feature| crate::hybrid_climate::is_climate_feature(feature))
+        {
+            let case_dir = case_dir.context("clim_* features need the case directory")?;
+            let path = crate::hybrid_climate::climate_file(case_dir, constant)?;
+            ensure!(
+                path.is_file(),
+                "{} is missing; compute the climate features first: colm-cli hybrid-climate <case> --kernel <dir>",
+                path.display()
+            );
+            Some(colm_init::RestartFile::open(&path)?)
+        } else {
+            None
+        };
+        Ok(Self { restart, climate })
+    }
+
+    fn value(&self, feature: &str, patch: usize) -> Result<f64> {
+        match &self.climate {
+            Some(climate) if crate::hybrid_climate::is_climate_feature(feature) => {
+                feature_value(climate, feature, patch)
+            }
+            _ => feature_value(&self.restart, feature, patch),
+        }
+    }
 }
 
 fn check_param(config: &SlotConfig) -> Result<()> {
@@ -102,7 +150,20 @@ impl Hybrid {
             config,
             land_class,
             pft,
+            case_dir: None,
         })
+    }
+
+    /// 算例目录（`clim_*` 特征从这里读）。
+    #[must_use]
+    pub fn with_case_dir(mut self, case_dir: &Path) -> Self {
+        self.case_dir = Some(case_dir.to_path_buf());
+        self
+    }
+
+    /// 续跑标记与阶段复用用的指纹：配置与模型的指纹，用到气候特征时再并上气候文件的内容。
+    pub fn fingerprint(&self) -> Result<String> {
+        climate_fingerprint(&self.config, self.case_dir.as_deref())
     }
 
     /// 各 patch 装配用的物理参数，次序与 `patches` 相同。`pft_ranges` 是各 patch 在 PFT 常数重启里的
@@ -118,8 +179,14 @@ impl Hybrid {
         if self.land_class.is_none() && self.pft.is_none() {
             return Ok(out);
         }
-        let restart = colm_init::RestartFile::open(constant)?;
-        let soil = soil_rows(&restart, patches)?;
+        let all_features: Vec<String> = self
+            .land_class
+            .iter()
+            .chain(&self.pft)
+            .flat_map(|slot| slot.config.features.clone())
+            .collect();
+        let features = Features::open(constant, self.case_dir.as_deref(), &all_features)?;
+        let soil = soil_rows(&features.restart, patches)?;
         if let Some(slot) = &self.land_class {
             ensure!(
                 !physics.use_pft,
@@ -127,8 +194,8 @@ impl Hybrid {
                  soil patches; this case uses PFT/PC (use the {PFT_SLOT} slot)"
             );
             let soil_patches: Vec<usize> = soil.iter().map(|&row| patches[row]).collect();
-            let features = feature_matrix(&restart, &slot.config.features, &soil_patches)?;
-            let values = slot.evaluate(&features)?;
+            let matrix = feature_matrix(&features, &slot.config.features, &soil_patches)?;
+            let values = slot.evaluate(&matrix)?;
             for (index, &row) in soil.iter().enumerate() {
                 let overrides = &mut out[row].land_class_overrides;
                 for (output, &value) in slot.config.outputs.iter().zip(values.row(index)) {
@@ -151,9 +218,8 @@ impl Hybrid {
             let pft_restart =
                 colm_init::RestartFile::open(crate::pft::pft_restart_path(constant)?)?;
             let rows = pft_rows(&soil, patches, pft_ranges);
-            let features =
-                pft_feature_matrix(&restart, &pft_restart, &slot.config.features, &rows)?;
-            let values = slot.evaluate(&features)?;
+            let matrix = pft_feature_matrix(&features, &pft_restart, &slot.config.features, &rows)?;
+            let values = slot.evaluate(&matrix)?;
             for (index, &(row, _, _)) in rows.iter().enumerate() {
                 let mut overrides = BTreeMap::new();
                 for (output, &value) in slot.config.outputs.iter().zip(values.row(index)) {
@@ -178,7 +244,14 @@ impl Hybrid {
     ) -> Result<Vec<SlotSummary>> {
         let mut out = Vec::new();
         for slot in self.land_class.iter().chain(&self.pft) {
-            let features = slot_features(&slot.config, constant, patches, pft_ranges, physics)?;
+            let features = slot_features(
+                &slot.config,
+                constant,
+                self.case_dir.as_deref(),
+                patches,
+                pft_ranges,
+                physics,
+            )?;
             out.push(SlotSummary::new(
                 &slot.config,
                 &features,
@@ -193,6 +266,7 @@ impl Hybrid {
 pub fn feature_summary(
     config: &HybridConfig,
     constant: &Path,
+    case_dir: Option<&Path>,
     patches: &[usize],
     pft_ranges: &[Range<usize>],
     physics: &LandPhysicsParameters,
@@ -202,7 +276,7 @@ pub fn feature_summary(
         .iter()
         .map(|slot| {
             known_slot(slot)?;
-            let features = slot_features(slot, constant, patches, pft_ranges, physics)?;
+            let features = slot_features(slot, constant, case_dir, patches, pft_ranges, physics)?;
             Ok(SlotSummary::new(slot, &features, None))
         })
         .collect()
@@ -212,12 +286,13 @@ pub fn feature_summary(
 fn slot_features(
     slot: &SlotConfig,
     constant: &Path,
+    case_dir: Option<&Path>,
     patches: &[usize],
     pft_ranges: &[Range<usize>],
     physics: &LandPhysicsParameters,
 ) -> Result<Matrix> {
-    let restart = colm_init::RestartFile::open(constant)?;
-    let soil = soil_rows(&restart, patches)?;
+    let restart = Features::open(constant, case_dir, &slot.features)?;
+    let soil = soil_rows(&restart.restart, patches)?;
     if slot.name == LAND_CLASS_SLOT {
         ensure!(
             !physics.use_pft,
@@ -406,7 +481,7 @@ fn pft_value(restart: &colm_init::RestartFile, name: &str, pft: usize) -> Result
 }
 
 fn pft_feature_matrix(
-    restart: &colm_init::RestartFile,
+    restart: &Features,
     pft_restart: &colm_init::RestartFile,
     features: &[String],
     rows: &[(usize, usize, usize)],
@@ -416,7 +491,7 @@ fn pft_feature_matrix(
         for feature in features {
             data.push(match pft_value(pft_restart, feature, pft)? {
                 Some(value) => value,
-                None => feature_value(restart, feature, patch)?,
+                None => restart.value(feature, patch)?,
             });
         }
     }
@@ -481,15 +556,11 @@ fn feature_value(restart: &colm_init::RestartFile, feature: &str, patch: usize) 
     }
 }
 
-fn feature_matrix(
-    restart: &colm_init::RestartFile,
-    features: &[String],
-    patches: &[usize],
-) -> Result<Matrix> {
+fn feature_matrix(restart: &Features, features: &[String], patches: &[usize]) -> Result<Matrix> {
     let mut data = Vec::with_capacity(patches.len() * features.len());
     for &patch in patches {
         for feature in features {
-            data.push(feature_value(restart, feature, patch)?);
+            data.push(restart.value(feature, patch)?);
         }
     }
     Matrix::new(patches.len(), features.len(), data)
@@ -504,6 +575,7 @@ fn feature_matrix(
 pub fn write_tap(
     config: &HybridConfig,
     constant: &Path,
+    case_dir: Option<&Path>,
     patches: &[usize],
     pft_ranges: &[Range<usize>],
     physics: &LandPhysicsParameters,
@@ -518,8 +590,9 @@ pub fn write_tap(
         );
     };
     known_slot(slot)?;
-    let restart = colm_init::RestartFile::open(constant)?;
-    let soil = soil_rows(&restart, patches)?;
+    let features = Features::open(constant, case_dir, &slot.features)?;
+    let restart = &features.restart;
+    let soil = soil_rows(restart, patches)?;
     let new_file = !out.exists();
     let mut file = std::fs::OpenOptions::new()
         .create(true)
@@ -539,12 +612,12 @@ pub fn write_tap(
     if slot.name == LAND_CLASS_SLOT {
         for &row in &soil {
             let patch = patches[row];
-            let class = usize::try_from(patch_integer(&restart, "patchclass", patch)?)
+            let class = usize::try_from(patch_integer(restart, "patchclass", patch)?)
                 .context("patchclass is negative")?;
             let constants = colm_core::ClassConstants::new(physics.land_cover_scheme, class)?;
             let mut line = vec![patch.to_string(), String::new()];
             for feature in &slot.features {
-                line.push(format!("{:e}", feature_value(&restart, feature, patch)?));
+                line.push(format!("{:e}", features.value(feature, patch)?));
             }
             for output in &slot.outputs {
                 line.push(format!("{:e}", constants.table_value(&output.name)?));
@@ -572,7 +645,7 @@ pub fn write_tap(
         for feature in &slot.features {
             let value = match pft_value(&pft_restart, feature, pft)? {
                 Some(value) => value,
-                None => feature_value(&restart, feature, patch)?,
+                None => features.value(feature, patch)?,
             };
             line.push(format!("{value:e}"));
         }
@@ -584,6 +657,39 @@ pub fn write_tap(
         writeln!(file, "{}", line.join(","))?;
     }
     Ok(())
+}
+
+/// 配置与模型的指纹；用到 `clim_*` 特征时再并上算例 `hybrid_climate/` 里全部文件的内容，
+/// 气候文件重算过就当作换了输入。
+pub fn climate_fingerprint(config: &HybridConfig, case_dir: Option<&Path>) -> Result<String> {
+    if !uses_climate(&config.slots) {
+        return Ok(config.fingerprint.clone());
+    }
+    let dir = case_dir
+        .context("clim_* features need the case directory")?
+        .join(crate::hybrid_climate::CLIMATE_DIR);
+    let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)
+        .with_context(|| {
+            format!(
+                "{} is missing; compute the climate features first: colm-cli hybrid-climate <case> --kernel <dir>",
+                dir.display()
+            )
+        })?
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| path.extension().is_some_and(|ext| ext == "nc"))
+        .collect();
+    files.sort();
+    let mut text = config.fingerprint.clone();
+    for file in files {
+        let bytes =
+            std::fs::read(&file).with_context(|| format!("cannot read {}", file.display()))?;
+        text.push_str(&format!(
+            ";{}={}",
+            file.file_name().unwrap_or_default().to_string_lossy(),
+            colm_hybrid::sha256_hex(&bytes)
+        ));
+    }
+    Ok(colm_hybrid::sha256_hex(text.as_bytes()))
 }
 
 /// 续跑文件旁的混合模型标记：`<重启文件>.hybrid`，内容是 [`HybridConfig::fingerprint`]。

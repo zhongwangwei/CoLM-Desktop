@@ -81,7 +81,7 @@ fn run() -> Result<()> {
     // 放在预检之前：`--preflight` 也要查出混合配置与模型的问题。
     let hybrid = HybridMode::from_arguments(&arguments)?;
     let _ = HYBRID_FINGERPRINT.set(match &hybrid {
-        Some(HybridMode::Apply(hybrid)) => Some(hybrid.config.fingerprint.clone()),
+        Some(HybridMode::Apply(hybrid)) => Some(hybrid.fingerprint()?),
         _ => None,
     });
     if colm_case::is_spatial_case(&case_nml)? {
@@ -178,6 +178,14 @@ fn run() -> Result<()> {
         Some(patch) => vec![patch],
         None => (0..patch_count).collect(),
     };
+    if arguments.hybrid_climate {
+        return point_hybrid_climate(
+            &config,
+            &files.constant,
+            patch_count,
+            &arguments.case_directory,
+        );
+    }
     if arguments.hybrid_dry_run {
         let ranges = single_point_pft_ranges(&files.constant, &patches, &physics)?;
         let summary = match &hybrid {
@@ -187,6 +195,7 @@ fn run() -> Result<()> {
             Some(HybridMode::Spec(config)) => colm_runtime::hybrid::feature_summary(
                 config,
                 &files.constant,
+                Some(&arguments.case_directory),
                 &patches,
                 &ranges,
                 &physics,
@@ -613,8 +622,18 @@ fn run_spatial(
     } else {
         integer_field(&document, "DEF_LC_YEAR")?
     };
+    if arguments.hybrid_climate {
+        return spatial_hybrid_climate(&config, &arguments.case_directory, &out, year, name);
+    }
     if arguments.hybrid_dry_run {
-        let summary = spatial_hybrid_summary(hybrid, &out, year, name, &physics)?;
+        let summary = spatial_hybrid_summary(
+            hybrid,
+            &arguments.case_directory,
+            &out,
+            year,
+            name,
+            &physics,
+        )?;
         println!("{}", serde_json::to_string_pretty(&summary)?);
         return Ok(());
     }
@@ -5496,6 +5515,8 @@ struct Arguments {
     hybrid_tap: Option<PathBuf>,
     /// `--hybrid-dry-run`：加载模型、取特征并推理，打印各插槽的汇总（JSON）后退出，不模拟。
     hybrid_dry_run: bool,
+    /// `--hybrid-climate`：在运行时段内累积强迫，写出各 patch 的气候特征（`hybrid_climate/`）后退出。
+    hybrid_climate: bool,
 }
 
 impl Arguments {
@@ -5516,6 +5537,7 @@ impl Arguments {
         let mut hybrid = None;
         let mut hybrid_tap = None;
         let mut hybrid_dry_run = false;
+        let mut hybrid_climate = false;
         while let Some(flag) = values.next() {
             let mut value = |name: &str| -> Result<String> {
                 values
@@ -5551,6 +5573,7 @@ impl Arguments {
                 "--hybrid" => hybrid = Some(PathBuf::from(value("--hybrid")?)),
                 "--hybrid-tap" => hybrid_tap = Some(PathBuf::from(value("--hybrid-tap")?)),
                 "--hybrid-dry-run" => hybrid_dry_run = true,
+                "--hybrid-climate" => hybrid_climate = true,
                 other if other.starts_with("--") => {
                     bail!("unknown option {other}; the accepted set is documented in this binary's module docs")
                 }
@@ -5628,6 +5651,7 @@ impl Arguments {
             hybrid,
             hybrid_tap,
             hybrid_dry_run,
+            hybrid_climate,
         })
     }
 }
@@ -5652,6 +5676,8 @@ enum HybridMode {
     Tap {
         config: colm_hybrid::HybridConfig,
         out: PathBuf,
+        /// 算例目录（`clim_*` 特征从这里读）。
+        case_dir: PathBuf,
     },
 }
 
@@ -5670,8 +5696,11 @@ impl HybridMode {
             Some(out) => Self::Tap {
                 config: colm_hybrid::HybridConfig::load_spec(path)?,
                 out: out.clone(),
+                case_dir: arguments.case_directory.clone(),
             },
-            None => Self::Apply(Box::new(colm_runtime::hybrid::Hybrid::load(path)?)),
+            None => Self::Apply(Box::new(
+                colm_runtime::hybrid::Hybrid::load(path)?.with_case_dir(&arguments.case_directory),
+            )),
         }))
     }
 }
@@ -5691,10 +5720,15 @@ fn hybrid_patch_physics(
         Some(HybridMode::Apply(hybrid)) => {
             hybrid.patch_physics(constant, patches, &pft_ranges()?, physics)
         }
-        Some(HybridMode::Tap { config, out }) => {
+        Some(HybridMode::Tap {
+            config,
+            out,
+            case_dir,
+        }) => {
             colm_runtime::hybrid::write_tap(
                 config,
                 constant,
+                Some(case_dir),
                 patches,
                 &pft_ranges()?,
                 physics,
@@ -5707,9 +5741,183 @@ fn hybrid_patch_physics(
     }
 }
 
+/// 运行时段（不含预热）的逐步时钟：`--hybrid-climate` 按模型步长取强迫，与正式运行看到的一致。
+fn climate_clock(
+    start: colm_core::CalendarTime,
+    end: colm_core::CalendarTime,
+    timestep_seconds: f64,
+) -> Result<colm_core::RuntimeClock> {
+    colm_core::RuntimeClock::new(start, end, start, timestep_seconds, 0)
+}
+
+fn climate_period(start: colm_core::CalendarTime, end: colm_core::CalendarTime) -> String {
+    format!(
+        "{}-{:03}-{:05} to {}-{:03}-{:05}",
+        start.year, start.julian_day, start.seconds, end.year, end.julian_day, end.seconds
+    )
+}
+
+/// 单点的气候特征：站点强迫（与正式运行同一条 `runtime_at_calendar_time`）逐步累积，各 patch 相同。
+fn point_hybrid_climate(
+    config: &colm_runtime::PointRuntimeConfig,
+    constant: &Path,
+    patch_count: usize,
+    case_dir: &Path,
+) -> Result<()> {
+    use colm_runtime::hybrid_climate::{ClimateAccumulator, ClimateSample};
+    let series = colm_forcing::load_point_forcing_with_boundary_layer(
+        &config.forcing_file,
+        config.boundary_layer.as_ref(),
+    )?;
+    let site_radians = config.site_radians.unwrap_or((
+        colm_core::site_radians(config.longitude_degrees),
+        colm_core::site_radians(config.latitude_degrees),
+    ));
+    let mut clock = climate_clock(config.start, config.end, config.timestep_seconds)?;
+    let mut climate = ClimateAccumulator::default();
+    let mut steps = 0usize;
+    while let Some(step) = clock.next_step() {
+        let forcing = series.runtime_at_calendar_time(
+            step.forcing_time,
+            config.greenwich,
+            config.longitude_degrees,
+            config.latitude_degrees,
+            site_radians,
+        )?;
+        climate.add(ClimateSample {
+            month: colm_core::month_day(step.forcing_time)?.0,
+            temperature_k: forcing.air_temperature_k,
+            specific_humidity: forcing.specific_humidity,
+            pressure_pa: forcing.surface_pressure_pa,
+            precipitation_kg_m2_s: forcing.convective_precipitation_kg_m2_s
+                + forcing.large_scale_precipitation_kg_m2_s,
+            shortwave_w_m2: forcing.solar_in_w_m2,
+        });
+        steps += 1;
+    }
+    let values = vec![climate.finish()?; patch_count];
+    let path = colm_runtime::hybrid_climate::climate_file(case_dir, constant)?;
+    colm_runtime::hybrid_climate::write_climate_file(
+        &path,
+        &values,
+        &climate_period(config.start, config.end),
+    )?;
+    println!(
+        "colm-rs: wrote {} ({patch_count} patch(es), {steps} steps)",
+        path.display()
+    );
+    Ok(())
+}
+
+/// 空间算例的气候特征：网格强迫逐步读入、按正式运行的面积权重映射到 patch 后累积，按分块写出。
+/// 足迹全在缺测格上的 patch（运行时整步跳过）取其余 patch 的平均。
+fn spatial_hybrid_climate(
+    config: &colm_runtime::spatial::runtime::SpatialRuntimeConfig,
+    case_dir: &Path,
+    out: &Path,
+    year: i64,
+    name: &str,
+) -> Result<()> {
+    use colm_runtime::hybrid_climate::{ClimateAccumulator, ClimateSample};
+    use colm_runtime::spatial::{
+        forcing::{map_to_patches, GriddedForcing},
+        mapping::AreaWeightedMapping,
+        topology::SpatialTopology,
+    };
+    ensure!(
+        config.bilinear.is_none(),
+        "--hybrid-climate does not support bilinear forcing interpolation yet"
+    );
+    let topology = SpatialTopology::read(&out.join("landdata"), i32::try_from(year)?)?;
+    let grid = GriddedForcing::open_grid(&config.forcing, config.start)?;
+    let mut mapping = AreaWeightedMapping::build(
+        &grid,
+        &topology.pixel,
+        &topology.cells,
+        &topology.shared_fraction,
+    )?;
+    let cells = mapping
+        .parts
+        .iter()
+        .flatten()
+        .map(|part| (part.ilon, part.ilat))
+        .collect::<Vec<_>>();
+    let mut forcing = GriddedForcing::new(
+        config.forcing.clone(),
+        grid,
+        cells,
+        config.timestep_seconds as i32,
+    )?;
+    let patch_count = topology.patch_count();
+    let active = match forcing.missing_field(config.start)? {
+        Some((missing, field, nlon)) => {
+            mapping.set_missing_value(|ilon, ilat| field[ilat * nlon + ilon], missing)
+        }
+        None => vec![true; patch_count],
+    };
+    let mut climate = vec![ClimateAccumulator::default(); patch_count];
+    let mut clock = climate_clock(config.start, config.end, config.timestep_seconds)?;
+    let mut steps = 0usize;
+    while let Some(step) = clock.next_step() {
+        // 气候特征用不到 CO2；给一个常数。
+        let cell_forcing = forcing.step(step.forcing_time, 4.0e-4)?;
+        let month = colm_core::month_day(step.forcing_time)?.0;
+        for ((acc, patch), &on) in climate
+            .iter_mut()
+            .zip(map_to_patches(&mapping, &forcing, &cell_forcing))
+            .zip(&active)
+        {
+            if on {
+                acc.add(ClimateSample {
+                    month,
+                    temperature_k: patch.t,
+                    specific_humidity: patch.q,
+                    pressure_pa: patch.psrf,
+                    precipitation_kg_m2_s: patch.prc + patch.prl,
+                    shortwave_w_m2: patch.solarin,
+                });
+            }
+        }
+        steps += 1;
+    }
+    let finished: Vec<Option<[f64; 5]>> = climate
+        .iter()
+        .zip(&active)
+        .map(|(acc, &on)| on.then(|| acc.finish()).transpose())
+        .collect::<Result<_>>()?;
+    let live: Vec<&[f64; 5]> = finished.iter().flatten().collect();
+    ensure!(
+        !live.is_empty(),
+        "every patch lies on missing forcing cells"
+    );
+    let mut fill = [0.0; 5];
+    for values in &live {
+        for (sum, value) in fill.iter_mut().zip(values.iter()) {
+            *sum += value / live.len() as f64;
+        }
+    }
+    let values: Vec<[f64; 5]> = finished.iter().map(|v| v.unwrap_or(fill)).collect();
+    let period = climate_period(config.start, config.end);
+    for (block, patches) in &topology.blocks {
+        let constant = out
+            .join("restart/const")
+            .join(format!("{name}_restart_const_lc{year:04}_{block}.nc"));
+        let path = colm_runtime::hybrid_climate::climate_file(case_dir, &constant)?;
+        colm_runtime::hybrid_climate::write_climate_file(&path, &values[patches.clone()], &period)?;
+    }
+    println!(
+        "colm-rs: wrote {} block file(s) under {} ({patch_count} patches, {} on missing forcing, {steps} steps)",
+        topology.blocks.len(),
+        case_dir.join(colm_runtime::hybrid_climate::CLIMATE_DIR).display(),
+        patch_count - live.len()
+    );
+    Ok(())
+}
+
 /// 空间算例的空跑：逐分块按正式运行同样的 patch 与 PFT 区间取特征、推理，合并成一份汇总。
 fn spatial_hybrid_summary(
     hybrid: Option<&HybridMode>,
+    case_dir: &Path,
     out: &Path,
     year: i64,
     name: &str,
@@ -5748,6 +5956,7 @@ fn spatial_hybrid_summary(
             Some(HybridMode::Spec(config)) => colm_runtime::hybrid::feature_summary(
                 config,
                 &constant,
+                Some(case_dir),
                 &block_patches,
                 &ranges,
                 physics,

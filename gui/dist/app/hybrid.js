@@ -164,13 +164,17 @@ function statusCell(info) {
 function renderCaseTable(cases, infos) {
   const table = element('table');
   const head = element('tr');
-  for (const label of ['算例', '地表模式', 'AI 参数化', '作用参数', '模型文件', '']) head.appendChild(element('th', '', label));
+  for (const label of ['算例', '地表模式', 'AI 参数化', '作用参数', '模型文件', '气候特征', '']) head.appendChild(element('th', '', label));
   table.appendChild(head);
   cases.forEach((c, index) => {
     const info = infos[index];
     const row = element('tr');
     const slots = info?.slots ?? [];
     const actions = element('td');
+    const climate = element('button', 'btn-ghost', info?.climate ? '重算气候特征' : '计算气候特征');
+    climate.type = 'button';
+    climate.onclick = () => computeClimate(c, climate).catch(e => status(e));
+    actions.appendChild(climate);
     if (info?.installed) {
       const check = element('button', 'btn-ghost', '检查');
       check.type = 'button';
@@ -186,11 +190,32 @@ function renderCaseTable(cases, infos) {
       statusCell(info),
       element('td', '', slots.flatMap(slot => slot.outputs.map(o => o.name)).join(', ') || '—'),
       element('td', '', slots.map(slot => slot.model).filter(Boolean).join(', ') || '—'),
+      climateCell(info),
       actions,
     );
     table.appendChild(row);
   });
   return table;
+}
+
+function climateCell(info) {
+  if (info?.climate) return element('td', '', '已计算');
+  // 模型用到 clim_* 却还没算：运行会失败，标成警告。
+  return element('td', info?.uses_climate ? 'warn' : 'muted', info?.uses_climate ? '未计算（模型需要）' : '未计算');
+}
+
+async function computeClimate(c, button) {
+  const kernelDir = $('kernel')?.value;
+  if (!kernelDir) throw new Error('先在基本设定里选好内核。');
+  button.disabled = true;
+  status('正在计算气候特征…');
+  try {
+    await invoke('hybrid_climate', { dirs: [c.dir], kernelDir });
+    status('已计算气候特征');
+  } finally {
+    button.disabled = false;
+  }
+  await refreshHybridCard();
 }
 
 /** 有模型的算例碰上 Fortran 内核：提前在卡片里说，运行前再拦一次（见 `fortranBlockedCases`）。 */

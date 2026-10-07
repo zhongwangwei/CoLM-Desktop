@@ -479,7 +479,7 @@
             </select>
             <label for="hybrid-features">输入特征</label>
             <div><input class="input" id="hybrid-features" placeholder="pftclass, pftfrac">
-              <p class="muted mini">常数重启里的变量名，用逗号分隔；分层变量写成 名字[层号]，层号从 1 起，例如 porsl[1]。</p></div>
+              <p class="muted mini">常数重启里的变量名，用逗号分隔；分层变量写成 名字[层号]，层号从 1 起，例如 porsl[1]。气候特征写 clim_tair、clim_tair_amplitude、clim_prec、clim_swdown、clim_vpd，要先在“AI 参数化”卡片里计算。</p></div>
             <label>输出参数</label>
             <div><div id="hybrid-outputs"></div><button class="btn-ghost" type="button" id="hybrid-add-output">添加输出</button>
               <p class="muted mini">网络的每个输出对应一个参数；范围是该参数允许的取值区间。</p></div>
@@ -994,7 +994,7 @@
               </select>
               <label for="tune-hybrid-features">输入特征</label>
               <div><input class="input" id="tune-hybrid-features" placeholder="pftclass, pftfrac">
-                <p class="muted mini">常数重启里的变量名，用逗号分隔；分层变量写成 名字[层号]，层号从 1 起，例如 porsl[1]。</p></div>
+                <p class="muted mini">常数重启里的变量名，用逗号分隔；分层变量写成 名字[层号]，层号从 1 起，例如 porsl[1]。气候特征写 clim_tair、clim_tair_amplitude、clim_prec、clim_swdown、clim_vpd，要先在“AI 参数化”卡片里计算。</p></div>
               <label>输出参数</label>
               <div><div id="tune-hybrid-outputs"></div><button class="btn-ghost" type="button" id="tune-hybrid-add-output">添加输出</button></div>
               <label for="tune-hybrid-size">网络规模</label>

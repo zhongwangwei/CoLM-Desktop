@@ -31104,3 +31104,45 @@ LAI 的块是 `(1, 1, 86400)`，一块一整条全球纬线，读区域时每行
 - `cargo test --workspace --lib --bins`（单线程）1884 项通过；GUI Rust 205 项通过。
 - `xtask check-gui` 通过：79 个命令全部能对上。
 - 13 个前端 node 套件全部通过。
+
+## 第 611 轮：气候派生特征（`clim_*`）
+
+设计见 docs/design-hybrid.md 第 13 节第 2 步。
+
+**改动**：
+- 新模块 `colm-runtime/src/hybrid_climate.rs`，提供逐步累积器、气候文件命名与写出。
+- `colm-rs --hybrid-climate` 有单点与空间两条路径；`colm-cli hybrid-climate`。
+- `hybrid.rs` 用 `Features` 同时读常数重启与气候文件。`Hybrid::with_case_dir` 给出算例目录，`Hybrid::fingerprint` 在用到气候特征时并上气候文件的哈希。
+- colm 段指纹包含气候文件。Study 成员物化时拷贝 `hybrid_climate/`。
+- `hybrid-info` 增加 `climate`（是否已算）和 `uses_climate`（模型是否用到）。
+- GUI 卡片增加"气候特征"列和"计算 / 重算气候特征"按钮；特征说明里列出可用的 `clim_*` 名字。
+
+**实测**（单点，`tmp/st-rust`：CN-Cng 自带强迫，2008 年 1 月，1488 步）：
+- 写出 `hybrid_climate/climate_w180_s90.nc`，用时 0.02 s。单点常数重启的文件名也带 `_w180_s90`，气候文件跟着它命名。
+- 与 Python 直接读原始 Met 文件、按同一时段算的结果对照：
+
+  | 量 | Rust | Python |
+  |---|---|---|
+  | 气温（K） | 257.68135 | 257.68137 |
+  | 短波（W/m²） | 94.63337 | 94.63337 |
+  | 饱和差（kPa） | 0.098747 | 0.098736 |
+
+  降水两边都是 0（该站 1 月无降水）。剩下的差别来自模型步内插值。
+- 只有一个月的数据，气温年较差为 0，符合定义。
+- 空跑配置 `features = ["patchclass", "clim_tair", "clim_vpd", "clim_swdown"]`，读出的值与文件一致。挪走气候文件后，空跑报错并提示先运行 `colm-cli hybrid-climate`。
+
+**空间路径未实测**：
+- 外接数据盘 `/Volumes/Data` 在本轮中途卸载，JRA3Q 网格强迫读不到。本机也没有其他网格强迫。
+- 代码与正式运行共用 `GriddedForcing`、`AreaWeightedMapping::build`、`map_to_patches`，但还要在区域算例上实跑：确认分块文件数、数值合理性，以及缺测格的处理。
+
+**检查**：
+- 两个 workspace 的 fmt 都干净，clippy 都零警告。
+- workspace 测试 1887 项通过（单线程），GUI Rust 测试 205 项通过。
+- `check-gui` 通过：80 个命令全部能对上。
+- 13 个前端套件全部通过。
+- 新增测试：
+  - 气候文件命名（单点、分块、算例名里含 `_lc`）；
+  - 累积量与手算值一致；
+  - 湿空气的饱和差更小，且不会为负；
+  - 气候文件重算后 colm 指纹改变，前处理指纹不变；
+  - 成员物化时拷贝气候文件。

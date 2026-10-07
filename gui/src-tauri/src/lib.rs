@@ -147,6 +147,7 @@ pub fn run() {
             study_result,
             hybrid_info,
             hybrid_check,
+            hybrid_climate,
             hybrid_install,
             hybrid_remove,
             series,

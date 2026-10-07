@@ -2494,6 +2494,27 @@ fn hybrid_install_args(
     Ok(args)
 }
 
+/// 给每个算例算气候特征（`hybrid_climate/`），供 `clim_*` 特征使用。写算例目录，所以参数名用 `dirs`。
+#[tauri::command]
+pub async fn hybrid_climate(dirs: Vec<String>, kernel_dir: String) -> Result<String, String> {
+    let mut log = String::new();
+    for dir in dirs {
+        log += &capture_async(hybrid_climate_args(dir.clone(), kernel_dir.clone()))
+            .await
+            .map_err(|e| format!("{dir}: {e}"))?;
+    }
+    Ok(log)
+}
+
+fn hybrid_climate_args(case: String, kernel_dir: String) -> Vec<String> {
+    vec![
+        "hybrid-climate".to_string(),
+        case,
+        "--kernel".into(),
+        kernel_dir,
+    ]
+}
+
 /// 删掉每个算例的 `hybrid.toml` 及它引用的模型文件。
 #[tauri::command]
 pub async fn hybrid_remove(dirs: Vec<String>) -> Result<String, String> {
