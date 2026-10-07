@@ -30734,3 +30734,66 @@ LAI 的块是 `(1, 1, 86400)`，一块一整条全球纬线，读区域时每行
 3. 再剖析每 patch 的基础内存。
 
 全球规模的验证要放到 T7920。
+
+## 第 604 轮：mksrfdata 读原始栅格改为锁外并行解压
+
+第 603 轮查到：mksrfdata 读原始栅格时，HDF5 在全局锁里逐块解压，多线程读也是排队，大区域上大半时间只用一个核。本轮照写入侧反过来做。
+
+**`colm_h5chunk::read_region`**（新文件 `read.rs`）：
+1. 锁里只做 I/O：`H5Dget_chunk_storage_size` 查块，`H5Dread_chunk1` 读压缩字节；每批 256 块，限住内存。
+2. 锁外 rayon 并行：`uncompress`（inflate），按需 unshuffle，转成目标类型，只截取与区域相交的部分。
+3. 主线程拼成区域。
+
+只在与 netCDF `get_values` 逐位相同时走快路径：
+- 分块存储；过滤器只有 shuffle/deflate，且 shuffle 在前；小端；所有块已分配。
+- 类型转换只接受精确且不会越界的组合，例如 f32/整数 → f64、i16/u8 → i32、整数 → i64；f64 → f32、i64 → f64 这类都回落。
+- 其余情况（连续存储、未分配块、netCDF-3、别的过滤器、越界区域）回落到 `get_values`。
+- HDF5 自动错误打印用 `H5Eset_auto2` 关掉，回落是预期的，不刷 stderr。
+
+**坑**：起初用 `H5Dget_chunk_info_by_coord` 查块。15″ LAI 一个时次（3840×4800，块 `(1,1,86400)`，全变量约 200 万块）读了 22 s，`get_values` 只要 0.92 s：这个 API 每次遍历全部块。换成按 B 树查找的 `H5Dget_chunk_storage_size`（hdf5-sys 没声明，自己 `extern`）后是 0.09 s。
+
+**接入 `colm-srfdata`**：
+- 新增 `RasterWindow`：先按 `projected_raster_row` 算出经度段（跨日界线两段），每段"连续行 × 经度段"一次 `read_region`，`(lon, lat)` 顺序的转置成 `(行, 列)`；行再按原规则取。
+- 改用它的三个入口：
+  - `read_mesh_open_raster`/`read_mesh_raster`：土壤等全球单文件栅格，原来逐行读；
+  - `read_mesh_raster_time_f64`：LCT 8 天 LAI；
+  - `read_mesh_raster_layers_f64` 的非最内层分支。
+  旧的 `read_raster_row`/`read_time_raster_row`/`read_layer_raster_row` 删除。
+- `read_mesh_tiled_raster_pft_at_time`（PC 模式的逐 PFT 月 LAI、PFT 百分比）：
+  - 先串行读各瓦片的维度元数据，再按瓦片 `par_iter`；
+  - 每个瓦片只读区域包围盒、全部 PFT 一次读出，按 PFT → 行 → 列取值回填，偏移与原 `pft_tile_offset` 相同；
+  - `read_pft_tile`/`pft_tile_offset` 与 `PftTileAxes::spatial` 删除，空间轴的歧义检查保留。
+
+**验证**：
+- `colm-h5chunk` 读取测试：
+  - f32（shuffle+deflate）→ f64/f32；f64 只 deflate；分块不压缩；i16 → f64/i32；u8 → i32；i32 → i32/i64。
+  - 5 个区域（整片、跨块、右下角边缘块、单元素、单行），快路径与 `get_values` 逐位相同。
+  - 连续存储、部分未分配（填充值 9.969209968386869e36 由回落读出）、f64 → f32、缺变量、64 位偏移经典格式，都回落且结果一致。
+  - 默认并行连跑多次稳定。
+- 真实数据（ignored 测试）：
+
+| 数据 | `get_values` | 快路径 | 结果 |
+|---|---|---|---|
+| `BD_all_s_l1` 区域 3840×4800 f64 | 1.10 s（冷）/0.24 s | 0.10/0.04 s | 逐位相同 |
+| 15″ LAI 一个时次 ubyte | 0.70 s | 0.09 s | 逐位相同 |
+
+- `COLM_RAWDATA` 下 colm-srfdata 全部测试（273 + 49 + 5 + 6）、colm-cli 223 + 19、workspace clippy、GUI `cargo check --locked` 通过。
+- 端到端（`tmp/zb/bitdir.py` 逐变量逐字节）：
+  - zb（12°×8°，0.5°）：改动前后 2179 个文件、2291 个变量逐字节相同。
+  - zh（20°×16°，0.25°）：改动前后 4355 个文件、4563 个变量逐字节相同。
+
+| 算例 | 阶段 | 改动前 | 改动后 |
+|---|---|---|---|
+| zb | 合计 | 256 s | 92 s |
+| zb | soil | 99 s | 63 s |
+| zb | LAI | 约 97 s | 23 s |
+| zh | 合计 | 548 s（负载约 7） | 345–367 s（负载 15–26） |
+| zh | soil | 265 s | 243 s |
+| zh | LAI | 231 s | 93 s |
+
+  峰值内存：zb 17.4 → 10.5 GB；zh 21.8 → 23.9 GB（并行段每瓦片的取值结果；一度用 `(pft, 下标, 值)` 三元组到 25.2 GB，改为按次序的 `Vec<f64>`）。
+- 注意第 603 轮记的"土壤 19 分钟、LAI 13 分钟"是在负载均值 100+ 时测的；负载约 7 时改动前就是 4.4 分钟与 4 分钟。
+
+**剩下的**（zh 采样）：
+- soil 段 CPU 1300–1480%，全是 van Genuchten/Campbell 的 minpack 拟合，已占满核；再快要动拟合算法，会影响逐位，不做。
+- LAI 段：锁里的 `pread`（外接盘，约 7 s/25 s），`MONTHLY_PFT_LAI` 块为 `(2,3,240,240)` 而逐月读，同一块读、解压两遍；读后的 `mesh_order`/`percentage_index`/`aggregate_pft_index` 单线程（约 7 s/25 s）。可做：两个月一起读、聚合并行化。

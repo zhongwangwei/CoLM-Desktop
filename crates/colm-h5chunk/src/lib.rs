@@ -11,6 +11,8 @@
 //! 读者（Fortran、GUI、xarray、ncview）看到的是普通的 deflate 变量，解压后的值与 `put_values` 写出的
 //! 逐位相同；只有压缩字节不一定与 libz 串行压出来的一样，块形状也不再是 netCDF 的默认值。
 //!
+//! 读取侧（[`read_region`]）反过来做：锁里只取区域涉及的压缩块，锁外并行解压。
+//!
 //! HDF5 不是线程安全构建：所有 HDF5 调用都在 netcdf crate 用的那把全局锁（`hdf5_sys::LOCK`）下做，
 //! 与其它线程（例如强迫预读）的 netCDF 调用串行。压缩不碰 HDF5，在锁外并行。
 
@@ -212,8 +214,8 @@ mod ffi {
 
     /// 一个打开的 HDF5 文件或数据集；`Drop` 时在锁下关闭。
     pub struct Handle {
-        id: hid_t,
-        close: unsafe extern "C" fn(hid_t) -> hdf5_sys::h5::herr_t,
+        pub(crate) id: hid_t,
+        pub(crate) close: unsafe extern "C" fn(hid_t) -> hdf5_sys::h5::herr_t,
     }
 
     impl Drop for Handle {
@@ -320,6 +322,9 @@ mod ffi {
         Ok(packed)
     }
 }
+
+mod read;
+pub use read::{read_region, read_region_fast, Element};
 
 #[cfg(test)]
 #[path = "lib_tests.rs"]

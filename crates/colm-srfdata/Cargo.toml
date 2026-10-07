@@ -26,6 +26,8 @@ colm-namelist = { path = "../colm-namelist" }
 # --all-targets` 一直在做带 static 的全量构建（特性在同一次调用里被
 # colm-cli/colm-init/colm-forcing 等统一打开），三个平台都过。
 netcdf = { workspace = true, features = ["static"] }
+# 原始栅格的并行读取（锁里取压缩块、锁外并行解压，第 604 轮）：同一份静态 HDF5/zlib。
+colm-h5chunk = { path = "../colm-h5chunk" }
 rayon.workspace = true
 
 [lints]

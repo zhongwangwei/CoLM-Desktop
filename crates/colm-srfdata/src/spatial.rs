@@ -14,6 +14,7 @@ use netcdf::{
     types::{IntType, NcVariableType},
     AttributeValue, Extent, NcTypeDescriptor,
 };
+use rayon::prelude::*;
 
 use crate::{
     mesh::inspect_spatial_input,
@@ -933,20 +934,21 @@ pub fn read_mesh_raster_time_f64(
     );
     let longitude = raw_longitudes(pixel, raw_grid);
     let latitude = raw_latitudes(pixel, raw_grid);
-    let mut rows = BTreeMap::new();
+    let nlon = source.dimensions()[axes.longitude].len();
+    let window = RasterWindow::<f64>::read(
+        raster,
+        variable,
+        3,
+        axes.latitude,
+        axes.longitude,
+        &[(axes.time, time - 1)],
+        &latitude,
+        &longitude,
+        nlon,
+    )?;
     let mut pixel_values = Vec::with_capacity(pixel.lon_w.len() * pixel.lat_s.len());
     for global_y in latitude {
-        if let Entry::Vacant(entry) = rows.entry(global_y) {
-            entry.insert(read_time_raster_row(
-                &source,
-                axes,
-                time - 1,
-                global_y,
-                &longitude,
-            )?);
-        }
-        pixel_values
-            .extend_from_slice(rows.get(&global_y).expect("raw time raster row was cached"));
+        pixel_values.extend(window.row(global_y, &longitude, nlon)?);
     }
     mesh_order(mesh, pixel.lon_w.len(), &pixel_values)
 }
@@ -992,16 +994,20 @@ pub fn read_mesh_raster_layers_f64(
         return Ok(output);
     }
     for layer in 0..layers {
+        let window = RasterWindow::<f64>::read(
+            raster,
+            variable,
+            3,
+            axes.latitude,
+            axes.longitude,
+            &[(axes.layer, layer)],
+            &latitude,
+            &longitude,
+            raw_grid.nlon,
+        )?;
         let mut pixels = Vec::with_capacity(pixel.lon_w.len() * pixel.lat_s.len());
         for global_y in &latitude {
-            pixels.extend(read_layer_raster_row(
-                &source,
-                axes,
-                layer,
-                *global_y,
-                &longitude,
-                raw_grid.nlon,
-            )?);
+            pixels.extend(window.row(*global_y, &longitude, raw_grid.nlon)?);
         }
         output.extend(mesh_order(mesh, pixel.lon_w.len(), &pixels)?);
     }
@@ -1885,7 +1891,10 @@ fn read_mesh_tiled_raster_pft_at_time(
     let y_tiles = tile_axis(&latitude, tile_nlat);
     let pixel_count = pixel.lon_w.len() * pixel.lat_s.len();
     let mut pixels = vec![vec![None; pixel_count]; pft_count];
+    // 先串行读各瓦片的维度（元数据，很快），再按瓦片并行读数据：每个瓦片只读区域用到的包围盒、
+    // 所有 PFT 一次读出（`colm_h5chunk::read_region`，锁外并行解压）。取值与原来逐 PFT 读整片完全相同。
     let mut files = TiledRasterFiles::default();
+    let mut jobs = Vec::new();
     for (&tile_y, rows) in &y_tiles {
         for (&tile_x, columns) in &x_tiles {
             let path = directory.join(tile_filename(tile_x, tile_y, suffix));
@@ -1894,18 +1903,68 @@ fn read_mesh_tiled_raster_pft_at_time(
                 .variable(variable)
                 .with_context(|| format!("{variable} is absent from {}", path.display()))?;
             let axes = pft_tile_axes(&source, pft_count, time, tile_nlon, tile_nlat, &path)?;
-            for (pft, class_pixels) in pixels.iter_mut().enumerate() {
-                let values = read_pft_tile(&source, axes, pft, tile_nlon, tile_nlat)?;
-                for &(local_y, source_y) in rows {
-                    for &(local_x, source_x) in columns {
-                        let offset =
-                            pft_tile_offset(axes, source_x, source_y, tile_nlon, tile_nlat);
-                        class_pixels[local_y * pixel.lon_w.len() + local_x] = Some(
-                            *values
-                                .get(offset)
-                                .context("5 degree PFT tile pixel is outside its variable")?,
-                        );
+            jobs.push((path, axes, rows, columns));
+        }
+    }
+    drop(files);
+    let width = pixel.lon_w.len();
+    let picked = jobs
+        .par_iter()
+        .map(|(path, axes, rows, columns)| -> Result<Vec<f64>> {
+            let y0 = rows
+                .iter()
+                .map(|&(_, y)| y)
+                .min()
+                .context("empty tile rows")?;
+            let y1 = rows.iter().map(|&(_, y)| y).max().expect("nonempty") + 1;
+            let x0 = columns
+                .iter()
+                .map(|&(_, x)| x)
+                .min()
+                .context("empty tile columns")?;
+            let x1 = columns.iter().map(|&(_, x)| x).max().expect("nonempty") + 1;
+            ensure!(
+                y1 <= tile_nlat && x1 <= tile_nlon,
+                "5 degree PFT tile pixel is outside its variable"
+            );
+            let rank = if axes.time.is_some() { 4 } else { 3 };
+            let mut start = vec![0; rank];
+            let mut count = vec![1; rank];
+            count[axes.pft] = pft_count;
+            start[axes.latitude] = y0;
+            count[axes.latitude] = y1 - y0;
+            start[axes.longitude] = x0;
+            count[axes.longitude] = x1 - x0;
+            if let Some((time_axis, time_index)) = axes.time {
+                start[time_axis] = time_index;
+            }
+            let values = colm_h5chunk::read_region::<f64>(path, variable, &start, &count)
+                .with_context(|| format!("cannot read {variable} from {}", path.display()))?;
+            let mut stride = vec![1usize; rank];
+            for axis in (0..rank - 1).rev() {
+                stride[axis] = stride[axis + 1] * count[axis + 1];
+            }
+            // 按 PFT → 行 → 列的次序取值；回填时按同一次序走。
+            let mut out = Vec::with_capacity(pft_count * rows.len() * columns.len());
+            for pft in 0..pft_count {
+                for &(_, source_y) in rows.iter() {
+                    for &(_, source_x) in columns.iter() {
+                        let offset = pft * stride[axes.pft]
+                            + (source_y - y0) * stride[axes.latitude]
+                            + (source_x - x0) * stride[axes.longitude];
+                        out.push(values[offset]);
                     }
+                }
+            }
+            Ok(out)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    for ((_, _, rows, columns), values) in jobs.iter().zip(picked) {
+        let mut values = values.into_iter();
+        for class_pixels in pixels.iter_mut() {
+            for &(local_y, _) in rows.iter() {
+                for &(local_x, _) in columns.iter() {
+                    class_pixels[local_y * width + local_x] = values.next();
                 }
             }
         }
@@ -2054,7 +2113,7 @@ pub fn mesh_cell_area_weights(mesh: &FlatMesh, pixel: &PixelAxes) -> Result<Vec<
     Ok(area)
 }
 
-fn read_mesh_raster<T: NcTypeDescriptor + Copy>(
+fn read_mesh_raster<T: colm_h5chunk::Element>(
     raster: &Path,
     variable: &str,
     mesh: &FlatMesh,
@@ -2065,7 +2124,7 @@ fn read_mesh_raster<T: NcTypeDescriptor + Copy>(
     read_mesh_open_raster(&file, variable, mesh, pixel, raw_grid)
 }
 
-fn read_mesh_open_raster<T: NcTypeDescriptor + Copy>(
+fn read_mesh_open_raster<T: colm_h5chunk::Element>(
     file: &netcdf::File,
     variable: &str,
     mesh: &FlatMesh,
@@ -2088,23 +2147,25 @@ fn read_mesh_open_raster<T: NcTypeDescriptor + Copy>(
     );
     let longitude = raw_longitudes(pixel, raw_grid);
     let latitude = raw_latitudes(pixel, raw_grid);
-    let mut rows = BTreeMap::new();
+    let window = RasterWindow::<T>::read(
+        &file.path()?,
+        variable,
+        2,
+        0,
+        1,
+        &[],
+        &latitude,
+        &longitude,
+        raw_grid.nlon,
+    )?;
     let mut pixel_values = Vec::with_capacity(pixel.lon_w.len() * pixel.lat_s.len());
-    for (local_y, global_y) in latitude.into_iter().enumerate() {
-        if let Entry::Vacant(entry) = rows.entry(global_y) {
-            entry.insert(read_raster_row::<T>(
-                &source,
-                global_y,
-                &longitude,
-                raw_grid.nlon,
-            )?);
-        }
-        let row = rows.get(&global_y).expect("raw raster row was cached");
+    for (local_y, &global_y) in latitude.iter().enumerate() {
+        let row = window.row(global_y, &longitude, raw_grid.nlon)?;
         ensure!(
             row.len() == pixel.lon_w.len(),
             "raw raster row {local_y} has an unexpected length"
         );
-        pixel_values.extend_from_slice(row);
+        pixel_values.extend_from_slice(&row);
     }
     mesh_order(mesh, pixel.lon_w.len(), &pixel_values)
 }
@@ -3192,50 +3253,6 @@ fn read_region_layers_innermost(
     Ok(region)
 }
 
-fn read_layer_raster_row(
-    source: &netcdf::Variable<'_>,
-    axes: RasterLayerAxes,
-    layer: usize,
-    global_y: usize,
-    longitude: &[usize],
-    nlon: usize,
-) -> Result<Vec<f64>> {
-    ensure!(global_y > 0, "raw raster latitude indices are one-based");
-    projected_raster_row(longitude, nlon, |start, count| {
-        let mut extents = vec![Extent::Index(0); 3];
-        extents[axes.layer] = Extent::Index(layer);
-        extents[axes.latitude] = Extent::Index(global_y - 1);
-        extents[axes.longitude] = Extent::SliceCount {
-            start,
-            count,
-            stride: 1,
-        };
-        Ok(source.get_values::<f64, _>(extents)?)
-    })
-}
-
-fn read_time_raster_row(
-    source: &netcdf::Variable<'_>,
-    axes: RasterTimeAxes,
-    time: usize,
-    global_y: usize,
-    longitude: &[usize],
-) -> Result<Vec<f64>> {
-    ensure!(global_y > 0, "raw raster latitude indices are one-based");
-    let nlon = source.dimensions()[axes.longitude].len();
-    projected_raster_row(longitude, nlon, |start, count| {
-        let mut extents = vec![Extent::Index(0); 3];
-        extents[axes.time] = Extent::Index(time);
-        extents[axes.latitude] = Extent::Index(global_y - 1);
-        extents[axes.longitude] = Extent::SliceCount {
-            start,
-            count,
-            stride: 1,
-        };
-        Ok(source.get_values::<f64, _>(extents)?)
-    })
-}
-
 fn read_mesh_tiled_raster<T: NcTypeDescriptor + Copy>(
     directory: &Path,
     suffix: &str,
@@ -3402,7 +3419,6 @@ struct PftTileAxes {
     latitude: usize,
     longitude: usize,
     time: Option<(usize, usize)>,
-    spatial: TileAxes,
 }
 
 fn pft_tile_axes(
@@ -3508,67 +3524,20 @@ fn pft_tile_axes(
     let spatial_axes = (0..dimensions.len())
         .filter(|axis| *axis != pft && time.is_none_or(|(time, _)| *axis != time))
         .collect::<Vec<_>>();
-    let spatial = match spatial_axes.as_slice() {
-        [first, second] if *first == latitude && *second == longitude => TileAxes::LatLon,
-        [first, second] if *first == longitude && *second == latitude => TileAxes::LonLat,
-        _ => bail!(
-            "PFT tile {} has ambiguous spatial dimensions",
-            path.display()
-        ),
-    };
+    // 纬度、经度谁在前都行（取值按轴位置算步长），但两个空间轴必须正好是 lat 与 lon。
+    ensure!(
+        matches!(spatial_axes.as_slice(), [first, second]
+            if (*first == latitude && *second == longitude)
+                || (*first == longitude && *second == latitude)),
+        "PFT tile {} has ambiguous spatial dimensions",
+        path.display()
+    );
     Ok(PftTileAxes {
         pft,
         latitude,
         longitude,
         time,
-        spatial,
     })
-}
-
-fn read_pft_tile(
-    source: &netcdf::Variable<'_>,
-    axes: PftTileAxes,
-    pft: usize,
-    tile_nlon: usize,
-    tile_nlat: usize,
-) -> Result<Vec<f64>> {
-    let mut extents = vec![Extent::Index(0); source.dimensions().len()];
-    extents[axes.pft] = Extent::Index(pft);
-    extents[axes.latitude] = Extent::SliceCount {
-        start: 0,
-        count: tile_nlat,
-        stride: 1,
-    };
-    extents[axes.longitude] = Extent::SliceCount {
-        start: 0,
-        count: tile_nlon,
-        stride: 1,
-    };
-    if let Some((time_axis, time_index)) = axes.time {
-        extents[time_axis] = Extent::Index(time_index);
-    }
-    let values = source.get_values::<f64, _>(extents)?;
-    ensure!(
-        values.len() == tile_nlon * tile_nlat,
-        "PFT tile class has {} values; expected {}x{}",
-        values.len(),
-        tile_nlat,
-        tile_nlon
-    );
-    Ok(values)
-}
-
-fn pft_tile_offset(
-    axes: PftTileAxes,
-    longitude: usize,
-    latitude: usize,
-    tile_nlon: usize,
-    tile_nlat: usize,
-) -> usize {
-    match axes.spatial {
-        TileAxes::LatLon => latitude * tile_nlon + longitude,
-        TileAxes::LonLat => longitude * tile_nlat + latitude,
-    }
 }
 
 fn tile_axis(indices: &[usize], tile_len: usize) -> BTreeMap<usize, Vec<(usize, usize)>> {
@@ -3663,16 +3632,96 @@ fn raw_latitudes(pixel: &PixelAxes, raw_grid: Grid) -> Vec<usize> {
         .collect()
 }
 
-fn read_raster_row<T: NcTypeDescriptor + Copy>(
-    source: &netcdf::Variable<'_>,
-    global_y: usize,
-    longitude: &[usize],
-    nlon: usize,
-) -> Result<Vec<T>> {
-    ensure!(global_y > 0, "raw raster latitude indices are one-based");
-    projected_raster_row(longitude, nlon, |start, count| {
-        Ok(source.get_values::<T, _>((global_y - 1..global_y, start..start + count))?)
-    })
+/// 区域要用的原始栅格整片：连续的行 × 一两段经度（跨日界线时两段），一次读出。
+///
+/// 逐行读靠 netCDF 的块缓存避免重复解压，但解压在 HDF5 的全局锁里串行，大区域上 mksrfdata 大半时间
+/// 只用一个核（第 603 轮）。整片读交给 [`colm_h5chunk::read_region`]：锁里取压缩块、锁外并行解压，
+/// 结果与逐行 `get_values` 逐位相同。行再按原来的 [`projected_raster_row`] 规则取出。
+struct RasterWindow<T> {
+    /// 第一行（0 起）。
+    first_row: usize,
+    rows: usize,
+    /// 每段 `(经度起点, 列数, 值)`；值按 `(行, 列)` 存，与文件里纬度、经度的先后无关。
+    segments: Vec<(usize, usize, Vec<T>)>,
+}
+
+impl<T: colm_h5chunk::Element> RasterWindow<T> {
+    /// `latitude`/`longitude` 是一起点的原始网格下标（同 [`raw_latitudes`]/[`raw_longitudes`]）；
+    /// `fixed` 是其余维（时间、层）取的下标 `(轴, 下标)`。
+    #[allow(clippy::too_many_arguments)]
+    fn read(
+        path: &Path,
+        variable: &str,
+        rank: usize,
+        latitude_axis: usize,
+        longitude_axis: usize,
+        fixed: &[(usize, usize)],
+        latitude: &[usize],
+        longitude: &[usize],
+        nlon: usize,
+    ) -> Result<Self> {
+        let first = *latitude
+            .iter()
+            .min()
+            .context("spatial pixel latitude is empty")?;
+        let last = *latitude.iter().max().expect("nonempty latitudes");
+        ensure!(first > 0, "raw raster latitude indices are one-based");
+        let mut spans = Vec::new();
+        projected_raster_row(longitude, nlon, |start, count| {
+            spans.push((start, count));
+            Ok(vec![(); count])
+        })?;
+        let rows = last - first + 1;
+        let mut segments = Vec::with_capacity(spans.len());
+        for (start, count) in spans {
+            let mut origin = vec![0; rank];
+            let mut extent = vec![1; rank];
+            for &(axis, index) in fixed {
+                origin[axis] = index;
+            }
+            origin[latitude_axis] = first - 1;
+            extent[latitude_axis] = rows;
+            origin[longitude_axis] = start;
+            extent[longitude_axis] = count;
+            let values = colm_h5chunk::read_region::<T>(path, variable, &origin, &extent)
+                .with_context(|| format!("cannot read {variable} from {}", path.display()))?;
+            ensure!(
+                values.len() == rows * count,
+                "{variable} window returned an unexpected length"
+            );
+            // 经度在纬度之前（`(lon, lat)`）时转成 `(行, 列)`。
+            let values = if latitude_axis < longitude_axis {
+                values
+            } else {
+                let mut transposed = Vec::with_capacity(values.len());
+                for row in 0..rows {
+                    transposed.extend((0..count).map(|column| values[column * rows + row]));
+                }
+                transposed
+            };
+            segments.push((start, count, values));
+        }
+        Ok(Self {
+            first_row: first - 1,
+            rows,
+            segments,
+        })
+    }
+
+    /// 第 `global_y` 行（一起点），按 [`projected_raster_row`] 取出区域的经度。
+    fn row(&self, global_y: usize, longitude: &[usize], nlon: usize) -> Result<Vec<T>> {
+        ensure!(global_y > 0, "raw raster latitude indices are one-based");
+        let row = global_y - 1 - self.first_row;
+        ensure!(row < self.rows, "raw raster row is outside the window");
+        projected_raster_row(longitude, nlon, |start, count| {
+            let (_, _, values) = self
+                .segments
+                .iter()
+                .find(|(s, c, _)| *s == start && *c == count)
+                .context("raw raster window lacks a longitude span")?;
+            Ok(values[row * count..(row + 1) * count].to_vec())
+        })
+    }
 }
 
 fn projected_raster_row<T: Copy>(
