@@ -175,3 +175,91 @@ fn a_function_backend_passes_physics_values_through_exactly() {
         .unwrap();
     assert_eq!(out.data, [1.0 / 3.0, 7.0 / 3.0]);
 }
+
+/// 原生 MLP：与等价的 ONNX 给出同样的结果（权重都是 f32 精确的数，比较位型），格式错误会被拒绝。
+#[test]
+#[cfg(feature = "inference")]
+fn a_native_mlp_matches_the_equivalent_onnx_model() {
+    let dir = scratch("mlp");
+    // linear.onnx：y = 2a - 3b + 0.5。
+    let mlp = Mlp::new(vec![Layer {
+        weights: vec![vec![2.0], vec![-3.0]],
+        bias: vec![0.5],
+        activation: Activation::Identity,
+    }])
+    .unwrap();
+    mlp.save(&dir.join("linear.mlp.json")).unwrap();
+    let path = dir.join("hybrid.toml");
+    std::fs::write(
+        &path,
+        format!(
+            "[[slot]]\nname = \"land_class\"\nkind = \"param\"\nmodel = \"linear.mlp.json\"\nsha256 = \"{}\"\nfeatures = [\"a\", \"b\"]\noutputs = [{{ name = \"DEF_LC_VMAX25\" }}]\n",
+            sha256_hex(&std::fs::read(dir.join("linear.mlp.json")).unwrap())
+        ),
+    )
+    .unwrap();
+    let native = Slot::load(HybridConfig::load(&path).unwrap().slots[0].clone()).unwrap();
+    let onnx = Slot::load(
+        HybridConfig::load(&write_config(&scratch("mlp-onnx"), ""))
+            .unwrap()
+            .slots[0]
+            .clone(),
+    )
+    .unwrap();
+    let input = Matrix::new(3, 2, vec![0.0, 1.0, 4.0, 2.0, -1.5, 0.25]).unwrap();
+    assert_eq!(
+        native.evaluate(&input).unwrap(),
+        onnx.evaluate(&input).unwrap()
+    );
+}
+
+#[test]
+fn native_mlps_validate_their_shapes_and_run_hidden_layers() {
+    let two_layer = Mlp::new(vec![
+        Layer {
+            weights: vec![vec![1.0, -1.0], vec![0.5, 0.5]],
+            bias: vec![0.0, 0.1],
+            activation: Activation::Tanh,
+        },
+        Layer {
+            weights: vec![vec![2.0], vec![3.0]],
+            bias: vec![-1.0],
+            activation: Activation::Identity,
+        },
+    ])
+    .unwrap();
+    assert_eq!((two_layer.inputs(), two_layer.outputs()), (2, 1));
+    assert_eq!(two_layer.parameter_count(), 6 + 3);
+    let y = two_layer
+        .infer(&Matrix::new(1, 2, vec![0.4, 0.2]).unwrap())
+        .unwrap();
+    let h = [(0.4f64 + 0.1).tanh(), (-0.4f64 + 0.1 + 0.1).tanh()];
+    assert_eq!(y.data, [-1.0 + 2.0 * h[0] + 3.0 * h[1]]);
+    // 层与层对不上、权重行长度不对、格式名不对。
+    assert!(Mlp::new(vec![
+        Layer {
+            weights: vec![vec![1.0, 2.0]],
+            bias: vec![0.0, 0.0],
+            activation: Activation::Relu,
+        },
+        Layer {
+            weights: vec![vec![1.0]],
+            bias: vec![0.0],
+            activation: Activation::Identity,
+        },
+    ])
+    .is_err());
+    assert!(Mlp::new(vec![Layer {
+        weights: vec![vec![1.0], vec![1.0, 2.0]],
+        bias: vec![0.0],
+        activation: Activation::Identity,
+    }])
+    .is_err());
+    let dir = scratch("mlp-format");
+    std::fs::write(
+        dir.join("x.mlp.json"),
+        r#"{"format": "other", "layers": []}"#,
+    )
+    .unwrap();
+    assert!(Mlp::load(&dir.join("x.mlp.json")).is_err());
+}

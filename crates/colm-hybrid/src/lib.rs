@@ -6,6 +6,7 @@
 
 mod backend;
 mod config;
+mod mlp;
 mod transform;
 
 use std::sync::Arc;
@@ -16,6 +17,7 @@ use anyhow::{ensure, Context, Result};
 pub use backend::TractBackend;
 pub use backend::{FnBackend, Surrogate};
 pub use config::{sha256_hex, HybridConfig, OutputSpec, SlotConfig, SlotKind, Transform};
+pub use mlp::{Activation, Layer, Mlp, MLP_FORMAT};
 pub use transform::{apply_output, Normalization};
 
 /// 行主序的二维矩阵：行 = patch，列 = 特征或输出。
@@ -49,16 +51,29 @@ pub struct Slot {
 }
 
 impl Slot {
-    /// 按配置加载 ONNX 模型与归一化文件。
-    #[cfg(feature = "inference")]
+    /// 按配置加载模型与归一化文件：`*.mlp.json` 用原生实现，其它（`*.onnx`）用 tract。
     pub fn load(config: SlotConfig) -> Result<Self> {
         let model = config
             .model
             .as_deref()
             .with_context(|| format!("slot {} has no model", config.name))?;
-        let backend = TractBackend::load(model, config.features.len(), config.outputs.len())
-            .with_context(|| format!("slot {}", config.name))?;
-        Self::with_backend(config, Arc::new(backend))
+        let backend: Arc<dyn Surrogate> = if is_mlp(model) {
+            let mlp = Mlp::load(model).with_context(|| format!("slot {}", config.name))?;
+            ensure!(
+                mlp.inputs() == config.features.len() && mlp.outputs() == config.outputs.len(),
+                "slot {}: {} maps {} inputs to {} outputs, but the slot has {} features and {} outputs",
+                config.name,
+                model.display(),
+                mlp.inputs(),
+                mlp.outputs(),
+                config.features.len(),
+                config.outputs.len()
+            );
+            Arc::new(mlp)
+        } else {
+            onnx_backend(&config, model)?
+        };
+        Self::with_backend(config, backend)
     }
 
     /// 用给定后端（测试或"模仿物理"检查）。归一化文件照配置读。
@@ -127,6 +142,27 @@ impl Slot {
         }
         Matrix::new(raw.rows, raw.cols, data)
     }
+}
+
+/// 原生小网络的文件名约定。
+pub fn is_mlp(path: &std::path::Path) -> bool {
+    path.to_string_lossy().ends_with(".mlp.json")
+}
+
+#[cfg(feature = "inference")]
+fn onnx_backend(config: &SlotConfig, model: &std::path::Path) -> Result<Arc<dyn Surrogate>> {
+    let backend = TractBackend::load(model, config.features.len(), config.outputs.len())
+        .with_context(|| format!("slot {}", config.name))?;
+    Ok(Arc::new(backend))
+}
+
+#[cfg(not(feature = "inference"))]
+fn onnx_backend(config: &SlotConfig, model: &std::path::Path) -> Result<Arc<dyn Surrogate>> {
+    anyhow::bail!(
+        "slot {}: {} is an ONNX model, but this build has no inference backend",
+        config.name,
+        model.display()
+    )
 }
 
 #[cfg(test)]

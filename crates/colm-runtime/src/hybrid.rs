@@ -166,6 +166,108 @@ impl Hybrid {
         }
         Ok(out)
     }
+
+    /// 空跑（`colm-rs --hybrid-dry-run`）：各插槽按 [`Self::patch_physics`] 同样的方式取特征、推理，
+    /// 汇总行数与各特征、各输出的范围，不改任何参数。
+    pub fn summary(
+        &self,
+        constant: &Path,
+        patches: &[usize],
+        pft_ranges: &[Range<usize>],
+        physics: &LandPhysicsParameters,
+    ) -> Result<Vec<SlotSummary>> {
+        let restart = colm_init::RestartFile::open(constant)?;
+        let soil = soil_rows(&restart, patches)?;
+        let mut out = Vec::new();
+        if let Some(slot) = &self.land_class {
+            ensure!(
+                !physics.use_pft,
+                "slot {LAND_CLASS_SLOT} only drives LCT cases; this case uses PFT/PC"
+            );
+            let soil_patches: Vec<usize> = soil.iter().map(|&row| patches[row]).collect();
+            let features = feature_matrix(&restart, &slot.config.features, &soil_patches)?;
+            out.push(SlotSummary::new(
+                slot,
+                &features,
+                &slot.evaluate(&features)?,
+            ));
+        }
+        if let Some(slot) = &self.pft {
+            ensure!(
+                physics.use_pft,
+                "slot {PFT_SLOT} needs a PFT/PC case; this one is LCT"
+            );
+            let pft_restart =
+                colm_init::RestartFile::open(crate::pft::pft_restart_path(constant)?)?;
+            let rows = pft_rows(&soil, patches, pft_ranges);
+            let features =
+                pft_feature_matrix(&restart, &pft_restart, &slot.config.features, &rows)?;
+            out.push(SlotSummary::new(
+                slot,
+                &features,
+                &slot.evaluate(&features)?,
+            ));
+        }
+        Ok(out)
+    }
+}
+
+/// 一个插槽的空跑汇总。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SlotSummary {
+    pub slot: String,
+    pub rows: usize,
+    pub features: Vec<ColumnSummary>,
+    pub outputs: Vec<ColumnSummary>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ColumnSummary {
+    pub name: String,
+    pub min: f64,
+    pub max: f64,
+    pub mean: f64,
+}
+
+impl SlotSummary {
+    fn new(slot: &Slot, features: &Matrix, outputs: &Matrix) -> Self {
+        let columns = |names: Vec<String>, matrix: &Matrix| {
+            names
+                .into_iter()
+                .enumerate()
+                .map(|(column, name)| {
+                    let values: Vec<f64> = (0..matrix.rows)
+                        .map(|row| matrix.row(row)[column])
+                        .collect();
+                    let (min, max) = values
+                        .iter()
+                        .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), &v| {
+                            (lo.min(v), hi.max(v))
+                        });
+                    let mean = values.iter().sum::<f64>() / values.len().max(1) as f64;
+                    ColumnSummary {
+                        name,
+                        min,
+                        max,
+                        mean,
+                    }
+                })
+                .collect()
+        };
+        Self {
+            slot: slot.config.name.clone(),
+            rows: features.rows,
+            features: columns(slot.config.features.clone(), features),
+            outputs: columns(
+                slot.config
+                    .outputs
+                    .iter()
+                    .map(|output| output.name.clone())
+                    .collect(),
+                outputs,
+            ),
+        }
+    }
 }
 
 /// `patches` 里土壤 patch（`patchtype == 0`）的行号。

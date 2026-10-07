@@ -26,6 +26,9 @@ colm-init = { path = "../colm-init" }
 colm-hist = { path = "../colm-hist", features = ["io"] }
 # 混合模型插槽（docs/design-hybrid.md）：配置、tract 推理后端。
 colm-hybrid = { path = "../colm-hybrid" }
+# `--hybrid-dry-run` 的汇总以 JSON 输出（给 colm-cli hybrid-check 与 GUI）。
+serde.workspace = true
+serde_json.workspace = true
 # `DEF_Optimize_Baseflow` 逐年写 `ParaOpt/*_baseflow.nc`（`MOD_Opt_Baseflow.F90`）。
 # 已经经 colm-hist/colm-init 静态链接进来，这里只是直接用它的 API。
 netcdf = { workspace = true, features = ["static"] }

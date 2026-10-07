@@ -30974,3 +30974,37 @@ LAI 的块是 `(1, 1, 86400)`，一块一整条全球纬线，读区域时每行
   - 线性模型权重 0、偏置 26.5（f32 精确，等于 PFT 2 在 VG 下的 Vcmax），12 个月 history、1524 个变量与 PC 纯物理逐字节相同；
   - 偏置 40 时结果改变。
 - workspace fmt、clippy，colm-runtime 177（单线程），colm-cli 通过。
+
+## 第 607 轮：原生小网络、外部模型的安装与检查
+
+**原生小网络 `*.mlp.json`**（`colm_hybrid::Mlp`）：
+- 格式是 `{"format": "colm-mlp-1", "layers": [{"weights": [输入][输出], "bias", "activation": identity|tanh|relu}]}`。
+- 推理用 f64，按固定次序累加，结果确定；不依赖 tract（colm-cli 关掉 `inference` 也能用）。
+- `Slot::load` 按扩展名选后端：`*.mlp.json` 走原生，其它走 tract；加载时核对网络输入输出维度与插槽的特征、输出个数。
+- Study 训练直接写这个格式，不必导出 ONNX。
+- 验证：
+  - 与等价的 `linear.onnx` 在 3 行输入上给出相同的值；
+  - 两层 tanh 网络的前向与手算逐位相同；
+  - 层与层对不上、权重行长度错、格式名错都被拒绝。
+
+**`colm-rs --hybrid-dry-run`**：
+- 单点算例在装配前加载模型、取特征、推理，打印各插槽的行数与特征、输出的最小值、最大值、均值（JSON），然后退出。
+- 空间算例报错并说明。
+- `Hybrid::summary` 与 `patch_physics` 用同一套特征与推理逻辑。
+
+**`colm-cli hybrid-install <case> --model F --slot S --features a,b --output NAME[:lo:hi[:transform]] [--normalize F] [--force 1]`**：
+- 把模型与归一化文件拷进 `models/`，写带 sha256 的 `hybrid.toml`。
+- 已有配置不覆盖，除非 `--force 1`。
+- 写完按正式运行的规则读回；`*.mlp.json` 再核对维度，不符就删掉刚写的配置并报错。
+
+**`colm-cli hybrid-check <case> --kernel K`**：
+- 调 colm-rs 空跑并转发 JSON。
+- 失败时提示前处理是否已做。
+- 修了一处路径问题：colm-rs 在算例目录里启动，传相对路径会被叠两次，改为先取绝对路径。
+
+**端到端**（CA-Qfo PC 算例副本）：
+- `hybrid-install` 装一个 `[[0], [0.5]]`、偏置 −0.2、`sigmoid` [10, 80] 的 MLP。
+- `hybrid-check` 报告 1 行，`pftclass` 2、`pftfrac` 1，`DEF_PFT_VMAX25` = 50.21（= 10 + 70·σ(0.3)）。
+- 正式运行通过。
+
+**检查**：workspace fmt、clippy；colm-hybrid 7（另有 `--no-default-features`）、colm-cli 226 + 19、colm-runtime 177（单线程）；GUI `cargo check --locked` 通过。

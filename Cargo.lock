@@ -263,6 +263,8 @@ dependencies = [
  "colm-schema",
  "netcdf",
  "rayon",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

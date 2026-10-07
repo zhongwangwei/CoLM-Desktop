@@ -178,6 +178,19 @@ fn run() -> Result<()> {
         Some(patch) => vec![patch],
         None => (0..patch_count).collect(),
     };
+    if arguments.hybrid_dry_run {
+        let Some(HybridMode::Apply(hybrid)) = &hybrid else {
+            bail!("--hybrid-dry-run needs models to evaluate");
+        };
+        let summary = hybrid.summary(
+            &files.constant,
+            &patches,
+            &single_point_pft_ranges(&files.constant, &patches, &physics)?,
+            &physics,
+        )?;
+        println!("{}", serde_json::to_string_pretty(&summary)?);
+        return Ok(());
+    }
     colm_runtime::hybrid::check_restart(&files.time, hybrid_fingerprint())?;
     let patch_physics = hybrid_patch_physics(
         hybrid.as_ref(),
@@ -463,6 +476,11 @@ fn run_spatial(
     ensure!(
         arguments.patch.is_none(),
         "--patch selects a patch of a single point; spatial cases run every patch"
+    );
+    ensure!(
+        !arguments.hybrid_dry_run,
+        "--hybrid-dry-run supports single-point cases; for a spatial case, run it (the models are \
+         validated when the run starts)"
     );
     let document = read_document(case_nml)?;
     let config = SpatialRuntimeConfig::read(case_nml)?;
@@ -5471,6 +5489,8 @@ struct Arguments {
     hybrid: Option<PathBuf>,
     /// `--hybrid-tap <out.csv>`：只抓取插槽的特征与物理值、不改参数（训练前准备数据）。
     hybrid_tap: Option<PathBuf>,
+    /// `--hybrid-dry-run`：加载模型、取特征并推理，打印各插槽的汇总（JSON）后退出，不模拟。
+    hybrid_dry_run: bool,
 }
 
 impl Arguments {
@@ -5490,6 +5510,7 @@ impl Arguments {
         let mut catchment = false;
         let mut hybrid = None;
         let mut hybrid_tap = None;
+        let mut hybrid_dry_run = false;
         while let Some(flag) = values.next() {
             let mut value = |name: &str| -> Result<String> {
                 values
@@ -5524,6 +5545,7 @@ impl Arguments {
                 "--catchment" => catchment = true,
                 "--hybrid" => hybrid = Some(PathBuf::from(value("--hybrid")?)),
                 "--hybrid-tap" => hybrid_tap = Some(PathBuf::from(value("--hybrid-tap")?)),
+                "--hybrid-dry-run" => hybrid_dry_run = true,
                 other if other.starts_with("--") => {
                     bail!("unknown option {other}; the accepted set is documented in this binary's module docs")
                 }
@@ -5553,6 +5575,10 @@ impl Arguments {
         ensure!(
             hybrid_tap.is_none() || hybrid.is_some(),
             "--hybrid-tap needs --hybrid <hybrid.toml> to know which features to record"
+        );
+        ensure!(
+            !hybrid_dry_run || (hybrid.is_some() && hybrid_tap.is_none()),
+            "--hybrid-dry-run needs --hybrid <hybrid.toml> and cannot be combined with --hybrid-tap"
         );
         // 一个只在有 `--history-dir` 时才生效的 `--history-stem` 是陷阱：
         // 用户以为改了名字，实际什么都没写。
@@ -5596,6 +5622,7 @@ impl Arguments {
             catchment,
             hybrid,
             hybrid_tap,
+            hybrid_dry_run,
         })
     }
 }

@@ -45,6 +45,7 @@
 //! 文件，时间步长读自强迫场文件 —— 这三样都不问用户。
 
 mod fingerprint;
+mod hybrid_cmd;
 mod observation_table;
 mod study;
 
@@ -103,6 +104,14 @@ usage:
                    --summary-only: 只返回指标，不携带绘图用配对点
                    --pairs-var: 只评估指定观测变量；可重复给出
                    --max-points: 配对点保极值降采样上限（指标仍用完整样本）
+  colm-cli hybrid-install <case-dir> --model <x.onnx|x.mlp.json> --slot pft|land_class
+                   --features a,b,c --output NAME[:lo:hi[:transform]] [--output ...]
+                   [--normalize <norm.json>] [--force 1]
+                   # 把训练好的模型装到算例上：拷进 models/、写 hybrid.toml（含 sha256）。
+                   # transform: identity|clamp|sigmoid|softplus；见 docs/design-hybrid.md
+  colm-cli hybrid-check <case-dir> --kernel <dir>
+                   # 加载模型、取特征并推理，打印各插槽的行数与特征/输出范围（JSON），不模拟。
+                   # 需要算例已做完前处理（mkinidata）；目前只支持单点
   colm-cli evaluation-catalog <case-dir> --obs <Flux.nc>
                    # 列出全部支持的评估变量及当前算例/观测是否可用
   colm-cli evaluation-plan <case-dir> --obs <Flux.nc> --kernel <dir>
@@ -261,6 +270,8 @@ fn main() -> Result<()> {
                 to: opts.get("--to").map(|v| v.parse()).transpose()?,
             })?;
         }
+        "hybrid-install" => hybrid_cmd::cmd_hybrid_install(&opts)?,
+        "hybrid-check" => hybrid_cmd::cmd_hybrid_check(&opts)?,
         "evaluation-catalog" => {
             cmd_evaluation_catalog(&opts.positional_case()?, &opts.need("--obs")?)?;
         }
