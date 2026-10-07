@@ -9,7 +9,8 @@
       "binaries/colm-cli",
       "binaries/mksrfdata-rs",
       "binaries/mkinidata-rs",
-      "binaries/colm-rs"
+      "binaries/colm-rs",
+      "binaries/colm-agent"
     ],
     "resources": {
       "../../kernels": "kernels",

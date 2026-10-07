@@ -1,0 +1,188 @@
+//! 工具注册表（docs/design-ai-assistant.md 第 4 节）。
+//!
+//! 内置后端与 MCP 服务共用这一份注册表，审批、截断与审计都在这一层做，所以无论走哪个后端规则都一样。
+//! D 级（采纳）没有对应的工具：模型想调也调不到，只能在界面上人工操作。
+
+mod read;
+
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+use anyhow::{bail, Context, Result};
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+
+/// 工具级别：决定要不要审批。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Tier {
+    /// A：只读，不审批。
+    Read,
+    /// B：运行操作，逐次审批。
+    Act,
+    /// C：开发工作区里的代码操作。
+    Code,
+}
+
+impl Tier {
+    pub fn needs_approval(self) -> bool {
+        !matches!(self, Self::Read)
+    }
+}
+
+/// 工具运行的环境。
+#[derive(Debug, Clone, Default)]
+pub struct ToolContext {
+    /// 项目目录（算例所在的根）。相对路径按它解析。
+    pub project_root: PathBuf,
+    /// `colm-cli` 可执行文件。
+    pub cli: PathBuf,
+    /// 当前内核目录（`hybrid-check` 等要它）。
+    pub kernel_dir: Option<PathBuf>,
+    /// 可搜索的项目文档目录（开发工作区或源码仓库的 `docs/`）。
+    pub docs_root: Option<PathBuf>,
+}
+
+impl ToolContext {
+    /// 把参数里的路径按项目目录解析。
+    pub fn resolve(&self, path: &str) -> PathBuf {
+        let path = Path::new(path);
+        if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            self.project_root.join(path)
+        }
+    }
+
+    /// 调 `colm-cli`，返回 stdout；失败时把 stderr 原样带出（它比我们能编的更具体）。
+    pub fn cli(&self, args: &[&str]) -> Result<String> {
+        let output = Command::new(&self.cli)
+            .args(args)
+            .output()
+            .with_context(|| format!("cannot start {}", self.cli.display()))?;
+        if !output.status.success() {
+            bail!(
+                "colm-cli {} failed: {}",
+                args.first().copied().unwrap_or_default(),
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    }
+
+    /// 同上，并把输出解析成 JSON。
+    pub fn cli_json(&self, args: &[&str]) -> Result<Value> {
+        let text = self.cli(args)?;
+        serde_json::from_str(&text).with_context(|| {
+            format!(
+                "colm-cli {} did not print JSON",
+                args.first().copied().unwrap_or_default()
+            )
+        })
+    }
+}
+
+/// 一个工具。参数 schema 按 DeepSeek 严格模式的要求写：所有属性都列入 `required`，
+/// 可选参数用 `["string", "null"]` 这类可空类型表达，并设 `additionalProperties: false`。
+pub trait Tool: Send + Sync {
+    fn name(&self) -> &'static str;
+    fn description(&self) -> &'static str;
+    fn parameters(&self) -> Value;
+    fn tier(&self) -> Tier;
+    /// 审批卡片与审计日志里的一句话：这次调用要做什么。
+    fn summary(&self, args: &Value) -> String {
+        format!("{} {}", self.name(), args)
+    }
+    fn call(&self, args: &Value, ctx: &ToolContext) -> Result<Value>;
+}
+
+/// 返回给模型的内容上限（字符）。超出的部分截掉，并告诉模型被截断了。
+pub const MAX_RESULT_CHARS: usize = 24_000;
+
+/// 工具结果的文本：截断时附说明。
+pub fn result_text(value: &Value) -> String {
+    let text = serde_json::to_string(value).unwrap_or_else(|_| "null".into());
+    if text.chars().count() <= MAX_RESULT_CHARS {
+        return text;
+    }
+    let head: String = text.chars().take(MAX_RESULT_CHARS).collect();
+    format!(
+        "{head}… [truncated: the result had {} characters; narrow the request]",
+        text.chars().count()
+    )
+}
+
+pub struct Registry {
+    tools: Vec<Box<dyn Tool>>,
+}
+
+impl Registry {
+    /// P0 的全部工具（A 级只读）。
+    pub fn standard() -> Self {
+        Self {
+            tools: read::tools(),
+        }
+    }
+
+    pub fn with(tools: Vec<Box<dyn Tool>>) -> Self {
+        Self { tools }
+    }
+
+    pub fn find(&self, name: &str) -> Option<&dyn Tool> {
+        self.tools
+            .iter()
+            .find(|tool| tool.name() == name)
+            .map(|tool| tool.as_ref())
+    }
+
+    pub fn tools(&self) -> impl Iterator<Item = &dyn Tool> {
+        self.tools.iter().map(|tool| tool.as_ref())
+    }
+
+    /// OpenAI 的 `tools` 数组。
+    pub fn api_tools(&self, strict: bool) -> Vec<Value> {
+        self.tools
+            .iter()
+            .map(|tool| {
+                let mut function = json!({
+                    "name": tool.name(),
+                    "description": tool.description(),
+                    "parameters": tool.parameters(),
+                });
+                if strict {
+                    function["strict"] = json!(true);
+                }
+                json!({ "type": "function", "function": function })
+            })
+            .collect()
+    }
+}
+
+/// schema 小工具：一个对象，全部属性必填、不许额外属性（严格模式的要求）。
+pub(crate) fn object(properties: Value) -> Value {
+    let required: Vec<String> = properties
+        .as_object()
+        .map(|map| map.keys().cloned().collect())
+        .unwrap_or_default();
+    json!({
+        "type": "object",
+        "properties": properties,
+        "required": required,
+        "additionalProperties": false,
+    })
+}
+
+/// 取字符串参数；`null` 或缺失时为 `None`。
+pub(crate) fn opt_str<'a>(args: &'a Value, name: &str) -> Option<&'a str> {
+    args.get(name)
+        .and_then(Value::as_str)
+        .filter(|s| !s.trim().is_empty())
+}
+
+pub(crate) fn req_str<'a>(args: &'a Value, name: &str) -> Result<&'a str> {
+    opt_str(args, name).with_context(|| format!("argument {name} is required"))
+}
+
+#[cfg(test)]
+#[path = "mod_tests.rs"]
+mod mod_tests;

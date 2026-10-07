@@ -1,0 +1,28 @@
+[package]
+name = "colm-agent"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+colm-namelist = { path = "../colm-namelist" }
+colm-case = { path = "../colm-case" }
+colm-schema = { path = "../colm-schema" }
+# 同步 HTTP 客户端（rustls），流式读 SSE。agent 是独立 sidecar，不需要异步运行时。
+ureq = { version = "3", features = ["json"] }
+
+# API Key 存系统钥匙串。Linux 不开 secret-service（要 dbus 开发库，CI 装不上），第一版改用环境变量。
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3", features = ["apple-native"] }
+[target.'cfg(windows)'.dependencies]
+keyring = { version = "3", features = ["windows-native"] }
+
+[lints]
+workspace = true
