@@ -262,6 +262,60 @@ pub struct ColumnSummary {
 }
 
 impl SlotSummary {
+    /// 把各分块的汇总按插槽合并：范围取并、均值与（总体）标准差按行数加权。
+    pub fn merge(parts: &[Vec<SlotSummary>]) -> Result<Vec<SlotSummary>> {
+        let Some(first) = parts.first() else {
+            return Ok(Vec::new());
+        };
+        first
+            .iter()
+            .enumerate()
+            .map(|(index, slot)| {
+                let blocks: Vec<&SlotSummary> = parts.iter().map(|part| &part[index]).collect();
+                ensure!(
+                    blocks.iter().all(|block| block.slot == slot.slot),
+                    "block summaries list different slots"
+                );
+                let rows: usize = blocks.iter().map(|block| block.rows).sum();
+                let merge_columns = |pick: &dyn Fn(&SlotSummary) -> &Vec<ColumnSummary>| {
+                    (0..pick(slot).len())
+                        .map(|column| {
+                            let mut merged = ColumnSummary {
+                                name: pick(slot)[column].name.clone(),
+                                min: f64::INFINITY,
+                                max: f64::NEG_INFINITY,
+                                mean: 0.0,
+                                std: 0.0,
+                            };
+                            let (mut sum, mut squares) = (0.0, 0.0);
+                            for block in blocks.iter().filter(|block| block.rows > 0) {
+                                let stats = &pick(block)[column];
+                                let n = block.rows as f64;
+                                merged.min = merged.min.min(stats.min);
+                                merged.max = merged.max.max(stats.max);
+                                sum += n * stats.mean;
+                                squares += n * (stats.std * stats.std + stats.mean * stats.mean);
+                            }
+                            if rows > 0 {
+                                merged.mean = sum / rows as f64;
+                                merged.std = (squares / rows as f64 - merged.mean * merged.mean)
+                                    .max(0.0)
+                                    .sqrt();
+                            }
+                            merged
+                        })
+                        .collect()
+                };
+                Ok(SlotSummary {
+                    slot: slot.slot.clone(),
+                    rows,
+                    features: merge_columns(&|s| &s.features),
+                    outputs: merge_columns(&|s| &s.outputs),
+                })
+            })
+            .collect()
+    }
+
     fn new(slot: &SlotConfig, features: &Matrix, outputs: Option<&Matrix>) -> Self {
         let columns = |names: Vec<String>, matrix: &Matrix| {
             names

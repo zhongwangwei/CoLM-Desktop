@@ -108,3 +108,26 @@ fn summaries_report_range_mean_and_population_std() {
     assert!((class.std - 1.25f64.sqrt()).abs() < 1e-15);
     assert_eq!(summary.features[1].std, 0.0);
 }
+
+#[test]
+fn block_summaries_merge_like_one_pass_over_all_rows() {
+    let slot = SlotConfig {
+        name: PFT_SLOT.into(),
+        kind: SlotKind::Param,
+        model: None,
+        sha256: None,
+        features: vec!["pftclass".into()],
+        normalize: None,
+        outputs: vec![],
+    };
+    let matrix = |values: Vec<f64>| Matrix::new(values.len(), 1, values).unwrap();
+    let a = SlotSummary::new(&slot, &matrix(vec![1.0, 2.0]), None);
+    let empty = SlotSummary::new(&slot, &matrix(vec![]), None);
+    let b = SlotSummary::new(&slot, &matrix(vec![3.0, 4.0, 10.0]), None);
+    let whole = SlotSummary::new(&slot, &matrix(vec![1.0, 2.0, 3.0, 4.0, 10.0]), None);
+    let merged = SlotSummary::merge(&[vec![a], vec![empty], vec![b]]).unwrap();
+    assert_eq!(merged[0].rows, 5);
+    let (m, w) = (&merged[0].features[0], &whole.features[0]);
+    assert_eq!((m.min, m.max), (w.min, w.max));
+    assert!((m.mean - w.mean).abs() < 1e-12 && (m.std - w.std).abs() < 1e-12);
+}

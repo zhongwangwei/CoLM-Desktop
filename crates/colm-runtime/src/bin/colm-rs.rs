@@ -482,11 +482,6 @@ fn run_spatial(
         arguments.patch.is_none(),
         "--patch selects a patch of a single point; spatial cases run every patch"
     );
-    ensure!(
-        !arguments.hybrid_dry_run,
-        "--hybrid-dry-run supports single-point cases; for a spatial case, run it (the models are \
-         validated when the run starts)"
-    );
     let document = read_document(case_nml)?;
     let config = SpatialRuntimeConfig::read(case_nml)?;
     let mut physics = land_physics_parameters(
@@ -618,6 +613,11 @@ fn run_spatial(
     } else {
         integer_field(&document, "DEF_LC_YEAR")?
     };
+    if arguments.hybrid_dry_run {
+        let summary = spatial_hybrid_summary(hybrid, &out, year, name, &physics)?;
+        println!("{}", serde_json::to_string_pretty(&summary)?);
+        return Ok(());
+    }
     let vector_history =
         arguments.unstructured && logical_field(&document, "DEF_HISTORY_IN_VECTOR")?;
     let case = SpatialCase {
@@ -5705,6 +5705,57 @@ fn hybrid_patch_physics(
         }
         Some(HybridMode::Spec(_)) => bail!("a hybrid slot without a model only works in a dry run"),
     }
+}
+
+/// 空间算例的空跑：逐分块按正式运行同样的 patch 与 PFT 区间取特征、推理，合并成一份汇总。
+fn spatial_hybrid_summary(
+    hybrid: Option<&HybridMode>,
+    out: &Path,
+    year: i64,
+    name: &str,
+    physics: &colm_runtime::assembly::LandPhysicsParameters,
+) -> Result<Vec<colm_runtime::hybrid::SlotSummary>> {
+    let topology = colm_runtime::spatial::topology::SpatialTopology::read(
+        &out.join("landdata"),
+        i32::try_from(year)?,
+    )?;
+    let mut parts = Vec::with_capacity(topology.blocks.len());
+    for (block, patches) in &topology.blocks {
+        let constant = out
+            .join("restart/const")
+            .join(format!("{name}_restart_const_lc{year:04}_{block}.nc"));
+        ensure!(
+            constant.is_file(),
+            "{} is missing; run mksrfdata and mkinidata for this case first",
+            constant.display()
+        );
+        let block_patches: Vec<usize> = (0..patches.len()).collect();
+        let ranges = if physics.use_pft {
+            colm_runtime::pft::spatial_pft_ranges(
+                &out.join("landdata"),
+                i32::try_from(year)?,
+                block,
+                physics.land_cover_scheme,
+                physics.bgc.is_some_and(|bgc| bgc.crop),
+            )?
+        } else {
+            vec![0..0; block_patches.len()]
+        };
+        parts.push(match hybrid {
+            Some(HybridMode::Apply(hybrid)) => {
+                hybrid.summary(&constant, &block_patches, &ranges, physics)?
+            }
+            Some(HybridMode::Spec(config)) => colm_runtime::hybrid::feature_summary(
+                config,
+                &constant,
+                &block_patches,
+                &ranges,
+                physics,
+            )?,
+            _ => bail!("--hybrid-dry-run needs --hybrid"),
+        });
+    }
+    colm_runtime::hybrid::SlotSummary::merge(&parts)
 }
 
 /// 单点各 patch 在 PFT 常数重启里的 PFT 区间（LCT 没有 PFT，都是空区间）。
