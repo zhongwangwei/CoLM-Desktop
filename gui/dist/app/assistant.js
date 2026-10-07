@@ -192,7 +192,8 @@ function toolResult(event) {
     const actions = element('div', 'assistant-tool-actions');
     const open = element('button', 'btn-ghost', '在工作台打开这个算例');
     open.type = 'button';
-    open.onclick = () => dispatchEvent(new CustomEvent('colm:open-case-dir', { detail: { dir } }));
+    // 建好的算例直接停在“运行”这一步。
+    open.onclick = () => dispatchEvent(new CustomEvent('colm:open-case-dir', { detail: { dir, step: 'run' } }));
     actions.appendChild(open);
     card.appendChild(actions);
     card.open = true;

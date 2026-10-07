@@ -59,8 +59,9 @@ function report(message) {
   if (!$('domaingate').hidden) $('gateinfo').textContent = message;
 }
 
-/** 打开一个算例目录；不给目录时让用户选。助手建好算例后经 `colm:open-case-dir` 直接传目录进来。 */
-export async function openExistingCase(chosen) {
+/** 打开一个算例目录；不给目录时让用户选。助手建好算例后经 `colm:open-case-dir` 直接传目录进来，
+ *  并可指定打开后停在哪一步（建好的算例直接到“运行”）。 */
+export async function openExistingCase(chosen, step = 'basic-files') {
   const dir = typeof chosen === 'string' ? chosen : await invoke('pick_folder', { key: 'open-case' });
   if (!dir) return;
   let opened;
@@ -100,7 +101,8 @@ export async function openExistingCase(chosen) {
   renderCases();
   await selectCase(entry);
   renderSteps();
-  go('basic-files');
+  go(step);
+  if (state.step !== step) go('basic-files');
   setStatus(`已打开算例 ${entry.name}`);
 }
 
@@ -110,6 +112,6 @@ addEventListener('colm:open-case-dir', event => {
   if (!dir) return;
   // 首页（启动页、配置向导）上点的：先收起它们，再打开算例。
   for (const id of ['launchgate', 'domaingate']) if ($(id)) $(id).hidden = true;
-  openExistingCase(dir);
+  return openExistingCase(dir, event.detail?.step);
 });
 $('open-case')?.addEventListener('click', () => openExistingCase());

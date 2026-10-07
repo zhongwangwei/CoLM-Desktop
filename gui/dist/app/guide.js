@@ -258,7 +258,23 @@ async function set(fields) {
   return done;
 }
 
+/** 打开已有算例并停在某一步（默认“运行”）：读算例，不写文件。 */
+async function openCase(dir, step = 'run') {
+  const before = state.selected?.dir ?? null;
+  dispatchEvent(new CustomEvent('colm:open-case-dir', { detail: { dir, step } }));
+  for (let i = 0; i < 150; i += 1) {
+    await sleep(200);
+    if (state.selected?.dir === dir && state.step === step) return;
+    if (state.selected?.dir === dir && i > 10) return;
+  }
+  if ((state.selected?.dir ?? null) === before) throw new Error(text($('status')) || `cannot open ${dir}`);
+}
+
 async function click(target) {
+  if (target.startsWith('open-case:')) {
+    await openCase(target.slice('open-case:'.length).trim());
+    return;
+  }
   const where = screen();
   if (where === 'launch') {
     if (target === 'local-run') { $('localRunCard').click(); await sleep(100); return; }
@@ -304,10 +320,15 @@ async function commit(target) {
   const status = text($('status'));
   el.click();
   if (target === 'create-case' || target === 'make-spatial-case') {
-    // 建算例要读站点、写文件：等到选中的算例换成新的，或状态栏报错，最多两分钟。
+    // 建算例要读站点、写文件：等到选中的算例换成新的，或状态栏报错，最多两分钟。建好就跳到“运行”。
     for (let i = 0; i < 600; i += 1) {
       await sleep(200);
-      if ((state.selected?.dir ?? null) !== before) return { created: state.selected.dir };
+      if ((state.selected?.dir ?? null) !== before) {
+        const created = state.selected.dir;
+        await sleep(300);
+        go('run');
+        return { created, step: state.step };
+      }
       const now = text($('status'));
       if (now !== status && /失败|错误|error|failed|cannot|不能|缺/i.test(now)) throw new Error(now);
     }

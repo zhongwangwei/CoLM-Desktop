@@ -164,7 +164,7 @@ impl Tool for UiClick {
         "ui_click"
     }
     fn description(&self) -> &'static str {
-        "Press a button or choose an item in the application window that does not save or run anything (e.g. scan a directory, select a site in a list, pick a choice card). The application refuses buttons that save or run; use ui_commit for those. Returns the page state afterwards."
+        "Press a button or choose an item in the application window that does not save or run anything (e.g. scan a directory, select a site in a list, pick a choice card, or 'open-case:<case directory>' to open an existing case on its run step). The application refuses buttons that save or run; use ui_commit for those. Returns the page state afterwards."
     }
     fn parameters(&self) -> Value {
         object(json!({
