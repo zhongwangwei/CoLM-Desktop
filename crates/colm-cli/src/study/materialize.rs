@@ -65,7 +65,11 @@ pub fn member_case(
     copy_process_parameters(&mut document, &baseline, &destination)?;
 
     let mut case_scalars = Vec::new();
-    for (name, value) in parameters {
+    // 混合网络的权重不进 namelist，由 `super::hybrid::write_member_files` 写成模型文件。
+    for (name, value) in parameters
+        .iter()
+        .filter(|(name, _)| !super::hybrid::is_weight_key(name))
+    {
         if let Some((base, _)) = colm_case::pft::override_instance(name) {
             colm_case::pft::validate_override(base, *value)?;
             let meta = colm_case::pft::parameter(base).expect("override_instance validated base");

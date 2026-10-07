@@ -314,6 +314,182 @@ pub struct StudySpec {
     pub targets: Vec<TargetSpec>,
     #[serde(default)]
     pub budget: StudyBudget,
+    /// 训练一个混合模型插槽（docs/design-hybrid.md 第 12 节）：网络权重是 DE 的决策变量。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hybrid: Option<HybridStudySpec>,
+}
+
+/// Study 里训练的小网络：`features` → `hidden` 隐藏层 → 每个输出经 `transform` 落到 `range`。
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct HybridStudySpec {
+    /// `land_class`（LCT）或 `pft`（PFT/PC）。
+    pub slot: String,
+    pub features: Vec<String>,
+    pub outputs: Vec<HybridOutputSpec>,
+    /// 各隐藏层宽度；空即线性模型。
+    #[serde(default)]
+    pub hidden: Vec<usize>,
+    #[serde(default = "default_hybrid_activation")]
+    pub activation: colm_hybrid::Activation,
+    /// 每个权重的搜索区间 `[-weight_range, weight_range]`（特征已标准化）。
+    #[serde(default = "default_weight_range")]
+    pub weight_range: f64,
+    /// 特征的标准化；不给时建 Study 由基础算例空跑算出并冻结在这里。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub normalize: Option<HybridNormalization>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct HybridOutputSpec {
+    pub name: String,
+    pub range: [f64; 2],
+    #[serde(default = "default_hybrid_transform")]
+    pub transform: colm_hybrid::Transform,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct HybridNormalization {
+    pub mean: Vec<f64>,
+    pub std: Vec<f64>,
+}
+
+fn default_hybrid_activation() -> colm_hybrid::Activation {
+    colm_hybrid::Activation::Tanh
+}
+
+fn default_weight_range() -> f64 {
+    2.0
+}
+
+fn default_hybrid_transform() -> colm_hybrid::Transform {
+    colm_hybrid::Transform::Sigmoid
+}
+
+/// 一次 Study 最多训练这么多个权重：DE 的种群受 [`MAX_STUDY_CANDIDATES`] 限制，再多也搜不动。
+pub const MAX_HYBRID_WEIGHTS: usize = 400;
+
+impl HybridStudySpec {
+    /// 各层 `(输入, 输出)`。
+    pub fn layer_shapes(&self) -> Vec<(usize, usize)> {
+        let mut widths = vec![self.features.len()];
+        widths.extend(&self.hidden);
+        widths.push(self.outputs.len());
+        widths.windows(2).map(|pair| (pair[0], pair[1])).collect()
+    }
+
+    /// 决策变量个数，与 [`colm_hybrid::Mlp::parameter_count`] 一致。
+    pub fn weight_count(&self) -> usize {
+        self.layer_shapes()
+            .iter()
+            .map(|(inputs, outputs)| inputs * outputs + outputs)
+            .sum()
+    }
+
+    /// 按决策向量的次序（逐层：先 `weights[输入][输出]` 行优先，再 `bias`）拼出网络。
+    pub fn mlp(&self, weights: &[f64]) -> Result<colm_hybrid::Mlp> {
+        if weights.len() != self.weight_count() {
+            bail!(
+                "the hybrid network needs {} weights, got {}",
+                self.weight_count(),
+                weights.len()
+            );
+        }
+        let shapes = self.layer_shapes();
+        let mut rest = weights;
+        let mut layers = Vec::new();
+        for (index, &(inputs, outputs)) in shapes.iter().enumerate() {
+            let (matrix, tail) = rest.split_at(inputs * outputs);
+            let (bias, tail) = tail.split_at(outputs);
+            rest = tail;
+            layers.push(colm_hybrid::Layer {
+                weights: matrix.chunks(outputs).map(<[f64]>::to_vec).collect(),
+                bias: bias.to_vec(),
+                activation: if index + 1 == shapes.len() {
+                    colm_hybrid::Activation::Identity
+                } else {
+                    self.activation
+                },
+            });
+        }
+        colm_hybrid::Mlp::new(layers)
+    }
+
+    fn validate(&self, parameters: &[ParameterSpec]) -> Result<()> {
+        let prefix = match self.slot.as_str() {
+            "land_class" => "DEF_LC_",
+            "pft" => "DEF_PFT_",
+            other => bail!("hybrid slot must be land_class or pft, got {other:?}"),
+        };
+        if self.features.is_empty() || self.features.iter().any(|f| f.trim().is_empty()) {
+            bail!("the hybrid network needs named features");
+        }
+        if self.outputs.is_empty() {
+            bail!("the hybrid network needs at least one output");
+        }
+        let mut names = BTreeSet::new();
+        for output in &self.outputs {
+            if !output.name.starts_with(prefix) {
+                bail!(
+                    "hybrid slot {} only drives {prefix}* parameters, got {}",
+                    self.slot,
+                    output.name
+                );
+            }
+            if !names.insert(output.name.to_ascii_uppercase()) {
+                bail!("duplicate hybrid output {}", output.name);
+            }
+            let [lo, hi] = output.range;
+            if !lo.is_finite() || !hi.is_finite() || lo >= hi {
+                bail!(
+                    "hybrid output {} needs a finite range with lo < hi",
+                    output.name
+                );
+            }
+            if !matches!(
+                output.transform,
+                colm_hybrid::Transform::Sigmoid | colm_hybrid::Transform::Clamp
+            ) {
+                bail!(
+                    "hybrid output {} must use the sigmoid or clamp transform so every weight vector is valid",
+                    output.name
+                );
+            }
+            if parameters
+                .iter()
+                .any(|p| p.name.eq_ignore_ascii_case(&output.name))
+            {
+                bail!(
+                    "{} is both a sampled parameter and a hybrid output",
+                    output.name
+                );
+            }
+        }
+        if self.hidden.contains(&0) {
+            bail!("hybrid hidden layers need a positive width");
+        }
+        if !self.weight_range.is_finite() || self.weight_range <= 0.0 {
+            bail!("hybrid weight_range must be positive and finite");
+        }
+        if self.weight_count() > MAX_HYBRID_WEIGHTS {
+            bail!(
+                "the hybrid network has {} weights; Study trains at most {MAX_HYBRID_WEIGHTS}",
+                self.weight_count()
+            );
+        }
+        if let Some(normalize) = &self.normalize {
+            if normalize.mean.len() != self.features.len()
+                || normalize.std.len() != self.features.len()
+                || !normalize.mean.iter().all(|m| m.is_finite())
+                || !normalize.std.iter().all(|s| s.is_finite() && *s > 0.0)
+            {
+                bail!("hybrid normalize needs one finite mean and positive std per feature");
+            }
+        }
+        Ok(())
+    }
 }
 
 fn default_site_mode() -> SiteMode {
@@ -371,8 +547,17 @@ pub fn validate_spec(spec: &StudySpec) -> Result<()> {
     if spec.base_cases.is_empty() {
         bail!("study needs at least one base case");
     }
-    if spec.parameters.is_empty() {
+    if spec.parameters.is_empty() && spec.hybrid.is_none() {
         bail!("study needs at least one sampled parameter");
+    }
+    if let Some(hybrid) = &spec.hybrid {
+        if !matches!(
+            (&spec.kind, &spec.method),
+            (StudyKind::Tuning, StudyMethod::DifferentialEvolution)
+        ) {
+            bail!("hybrid networks are trained by differential-evolution tuning only");
+        }
+        hybrid.validate(&spec.parameters)?;
     }
     match (&spec.kind, &spec.method) {
         (StudyKind::Uncertainty, StudyMethod::Oat | StudyMethod::Lhs) => {}
@@ -405,7 +590,7 @@ pub fn validate_spec(spec: &StudySpec) -> Result<()> {
             bail!("candidate_count must be at least one");
         }
     }
-    default_candidate_count(&spec.method, spec.parameters.len(), &spec.budget)?;
+    default_candidate_count(&spec.method, dimension_count(spec), &spec.budget)?;
     if matches!(spec.method, StudyMethod::DifferentialEvolution) {
         let population = spec.budget.population.unwrap_or(0);
         let generations = spec.budget.generations.unwrap_or(0);
@@ -578,6 +763,15 @@ pub fn study_id(spec: &StudySpec) -> Result<String> {
     Ok(format!("s-{}", &hash[..12]))
 }
 
+/// 决策向量的长度：采样参数加上混合网络的权重。
+pub fn dimension_count(spec: &StudySpec) -> usize {
+    spec.parameters.len()
+        + spec
+            .hybrid
+            .as_ref()
+            .map_or(0, HybridStudySpec::weight_count)
+}
+
 pub fn default_candidate_count(
     method: &StudyMethod,
     k: usize,
@@ -657,6 +851,7 @@ mod tests {
                 generations: Some(1),
                 ..Default::default()
             },
+            hybrid: None,
         }
     }
 

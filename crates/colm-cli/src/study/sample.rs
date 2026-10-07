@@ -3,13 +3,12 @@ use std::collections::BTreeMap;
 use anyhow::Result;
 use sha2::{Digest, Sha256};
 
-use super::spec::{
-    default_candidate_count, MemberPlan, ParameterSpec, ScaleSpec, StudyMethod, StudySpec,
-};
+use super::spec::{default_candidate_count, MemberPlan, ScaleSpec, StudyMethod, StudySpec};
 
 pub fn design(spec: &StudySpec, baseline: &BTreeMap<String, f64>) -> Result<Vec<MemberPlan>> {
     let design_params = sorted_parameters(spec);
-    let k = design_params.len();
+    let dims = dimensions(spec);
+    let k = dims.len();
     let count = default_candidate_count(&spec.method, k, &spec.budget)?;
     validate_vector(spec, baseline)?;
     let mut out = vec![MemberPlan {
@@ -41,7 +40,7 @@ pub fn design(spec: &StudySpec, baseline: &BTreeMap<String, f64>) -> Result<Vec<
         StudyMethod::Lhs | StudyMethod::DifferentialEvolution => {
             let permutations = lhs_permutations(spec.seed, k, count);
             for i in 0..count {
-                let parameters = lhs_member(spec, &design_params, &permutations, i, count)?;
+                let parameters = lhs_member(spec, &dims, &permutations, i, count)?;
                 out.push(MemberPlan {
                     id: format!("m{:06}", i + 1),
                     generation: if matches!(spec.method, StudyMethod::DifferentialEvolution) {
@@ -61,26 +60,18 @@ pub fn design(spec: &StudySpec, baseline: &BTreeMap<String, f64>) -> Result<Vec<
 
 fn lhs_member(
     spec: &StudySpec,
-    design_params: &[&super::spec::ParameterSpec],
+    dims: &[Dimension],
     permutations: &[Vec<usize>],
     index: usize,
     count: usize,
 ) -> Result<BTreeMap<String, f64>> {
     for attempt in 0..1000 {
         let mut parameters = BTreeMap::new();
-        for (j, p) in design_params.iter().enumerate() {
+        for (j, dim) in dims.iter().enumerate() {
             let jitter_index = index + attempt * count;
             let u =
                 (permutations[j][index] as f64 + jitter(spec.seed, j, jitter_index)) / count as f64;
-            parameters.insert(
-                p.member_key(),
-                map_sample(
-                    p.sample_min,
-                    p.sample_max,
-                    p.scale.unwrap_or(ScaleSpec::Linear),
-                    u,
-                ),
-            );
+            parameters.insert(dim.key.clone(), map_sample(dim.min, dim.max, dim.scale, u));
         }
         if validate_vector(spec, &parameters).is_ok() {
             return Ok(parameters);
@@ -113,11 +104,38 @@ pub(super) fn validate_vector(spec: &StudySpec, values: &BTreeMap<String, f64>) 
     colm_case::tuning::validate_values(&case_scalars)
 }
 
+/// 决策向量的列名，次序与 [`dimensions`] 相同。
 pub fn sorted_parameter_names(spec: &StudySpec) -> Vec<String> {
-    sorted_parameters(spec)
+    dimensions(spec).into_iter().map(|dim| dim.key).collect()
+}
+
+/// 决策向量的一维：采样参数（按名字排序），之后是混合网络的权重（按序号）。
+pub(super) struct Dimension {
+    pub key: String,
+    pub min: f64,
+    pub max: f64,
+    pub scale: ScaleSpec,
+}
+
+pub(super) fn dimensions(spec: &StudySpec) -> Vec<Dimension> {
+    let mut dims = sorted_parameters(spec)
         .into_iter()
-        .map(ParameterSpec::member_key)
-        .collect()
+        .map(|p| Dimension {
+            key: p.member_key(),
+            min: p.sample_min,
+            max: p.sample_max,
+            scale: p.scale.unwrap_or(ScaleSpec::Linear),
+        })
+        .collect::<Vec<_>>();
+    if let Some(hybrid) = &spec.hybrid {
+        dims.extend((0..hybrid.weight_count()).map(|index| Dimension {
+            key: super::hybrid::weight_key(index),
+            min: -hybrid.weight_range,
+            max: hybrid.weight_range,
+            scale: ScaleSpec::Linear,
+        }));
+    }
+    dims
 }
 
 fn sorted_parameters(spec: &StudySpec) -> Vec<&super::spec::ParameterSpec> {
@@ -214,6 +232,7 @@ mod tests {
                 candidate_count: Some(5),
                 ..Default::default()
             },
+            hybrid: None,
         };
         let baseline = BTreeMap::from([("DEF_TUNING_CNFAC".into(), 0.5)]);
         let a = design(&spec, &baseline).unwrap();
@@ -279,6 +298,7 @@ mod tests {
             analysis_to: None,
             targets: vec![],
             budget: StudyBudget::default(),
+            hybrid: None,
         };
         spec.parameters = [1, 2]
             .into_iter()

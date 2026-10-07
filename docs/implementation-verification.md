@@ -31008,3 +31008,41 @@ LAI 的块是 `(1, 1, 86400)`，一块一整条全球纬线，读区域时每行
 - 正式运行通过。
 
 **检查**：workspace fmt、clippy；colm-hybrid 7（另有 `--no-default-features`）、colm-cli 226 + 19、colm-runtime 177（单线程）；GUI `cargo check --locked` 通过。
+
+## 第 608 轮：在 Study 里训练混合网络
+
+设计见 docs/design-hybrid.md 第 12 节。
+
+**改动**：
+- 调优 Study 的 spec 增加可选的 `hybrid` 段：插槽、特征、输出（范围加 sigmoid/clamp 变换）、隐藏层、激活、权重区间、标准化。
+- 网络权重作为 DE 决策向量的维度 `hybrid:w00000`…，排在采样参数之后；决策维度统一由 `sample::dimensions` 给出，`generation::normalized`/`physical` 不再各自排一次序。
+- 物化成员时按权重写 `models/study.mlp.json`、`models/study.norm.json` 和带 sha256 的 `hybrid.toml`。
+- 基线成员没有权重：CSV 里留空格、不写 `hybrid.toml`，是纯物理参照。读样本文件跳过空格。
+- 续跑核对 `hybrid.toml` 可加载、模型 sha256 一致；导出最优成员时带上这三个文件；预览把权重合成一行。
+- `--hybrid-dry-run` 支持没有模型的配置，只汇总特征（新增总体标准差）。
+- `study-create` 用这条空跑在各基础算例上取特征统计，按行数合并后冻结进 spec。常数特征的标准差取 1。
+- 约束：只用于 DE 调优；最多 400 个权重；只能用 Rust 引擎；基础算例不能已有 `hybrid.toml`。
+- 不带 `hybrid` 段的 spec 序列化不变，旧 manifest 的 `spec_sha256` 照旧对得上（有测试）。
+
+**端到端**：
+- 设置：
+  - CA-Qfo 与 CH-Dav 的 PC 算例，各两年，第一年 spin-up，所以历史输出只有第二年。
+  - 线性网络，特征为 `pftclass` 和 `pftfrac`，输出 `DEF_PFT_VMAX25` ∈ [20, 80]，共 3 个权重。
+  - 目标：两站 Qh 的 NRMSE，第二年上半年率定、下半年验证；DE 种群 4，跑 1 代。
+- 冻结的标准化：pftclass 均值 4.5、标准差 3.77；pftfrac 均值 0.5、标准差 0.376。PC 的土壤 patch 含多个 PFT，包括裸土。
+- 结果：9 个成员全部可行，用时 86 s。
+
+  | 成员 | 率定 NRMSE | 验证 NRMSE |
+  |---|---|---|
+  | 基线 m000000 | 0.684 | 0.885 |
+  | 最优 m000008 | 0.671 | 0.818 |
+
+- 最优网络给出的 Vcmax25：CA-Qfo 38.6；CH-Dav 的 3 个 PFT 在 46.6–67.1。
+- `study-apply-preview` 每站一行 `hybrid slot pft`；`study-apply` 导出的算例带有 `hybrid.toml` 与 `models/`。
+- 这只是功能冒烟：只有 3 个权重、跑了 1 代，不说明训练效果。
+
+**踩坑**：
+- worktree 路径太深时，Study 成员的重启文件路径会超过 CoLM 的 256 字节上限，`study-create` 会拒绝。这次实测把算例拷到 `/tmp/hc` 下跑；`study-create` 会解析符号链接，所以用符号链接缩短路径没有用。
+- 目标窗口要落在有历史输出的年份。spin-up 年没有输出，评估会报 “required target … is unavailable”。
+
+**检查**：workspace fmt、clippy；colm-cli 231 + 19（单线程）；colm-runtime hybrid 8 项。

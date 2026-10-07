@@ -172,49 +172,38 @@ pub fn reconcile_tasks(manifest: &Manifest, state: &mut StudyState) -> Result<Ve
 }
 
 pub fn normalized(member: &MemberPlan, manifest: &Manifest) -> Result<Vec<f64>> {
-    let mut parameters = manifest.spec.parameters.iter().collect::<Vec<_>>();
-    parameters.sort_by_key(|parameter| parameter.member_key().to_ascii_lowercase());
-    parameters
+    super::sample::dimensions(&manifest.spec)
         .into_iter()
-        .map(|parameter| {
-            let value = member.parameters[&parameter.member_key()];
-            let u = match parameter.scale.unwrap_or(ScaleSpec::Linear) {
-                ScaleSpec::Linear => {
-                    (value - parameter.sample_min) / (parameter.sample_max - parameter.sample_min)
-                }
-                ScaleSpec::Log => {
-                    (value.ln() - parameter.sample_min.ln())
-                        / (parameter.sample_max.ln() - parameter.sample_min.ln())
-                }
+        .map(|dim| {
+            let value = *member
+                .parameters
+                .get(&dim.key)
+                .with_context(|| format!("{} has no value for {}", member.id, dim.key))?;
+            let u = match dim.scale {
+                ScaleSpec::Linear => (value - dim.min) / (dim.max - dim.min),
+                ScaleSpec::Log => (value.ln() - dim.min.ln()) / (dim.max.ln() - dim.min.ln()),
             };
             if u.is_finite() {
                 Ok(u.clamp(0.0, 1.0))
             } else {
-                bail!("{} cannot be normalized", parameter.name)
+                bail!("{} cannot be normalized", dim.key)
             }
         })
         .collect()
 }
 
 pub fn physical(manifest: &Manifest, vector: &[f64]) -> Result<Vec<f64>> {
-    let mut parameters = manifest.spec.parameters.iter().collect::<Vec<_>>();
-    parameters.sort_by_key(|parameter| parameter.member_key().to_ascii_lowercase());
-    if vector.len() != parameters.len() {
+    let dims = super::sample::dimensions(&manifest.spec);
+    if vector.len() != dims.len() {
         bail!("normalized vector has the wrong dimension");
     }
-    Ok(parameters
+    Ok(dims
         .into_iter()
         .zip(vector)
-        .map(
-            |(parameter, &u)| match parameter.scale.unwrap_or(ScaleSpec::Linear) {
-                ScaleSpec::Linear => {
-                    parameter.sample_min + (parameter.sample_max - parameter.sample_min) * u
-                }
-                ScaleSpec::Log => (parameter.sample_min.ln()
-                    + (parameter.sample_max.ln() - parameter.sample_min.ln()) * u)
-                    .exp(),
-            },
-        )
+        .map(|(dim, &u)| match dim.scale {
+            ScaleSpec::Linear => dim.min + (dim.max - dim.min) * u,
+            ScaleSpec::Log => (dim.min.ln() + (dim.max.ln() - dim.min.ln()) * u).exp(),
+        })
         .collect())
 }
 
@@ -247,9 +236,11 @@ fn read_sample_file(path: &Path) -> Result<Vec<MemberPlan>> {
             baseline: values[1].parse()?,
             generation: values[2].parse()?,
             candidate_index: values[3].parse()?,
+            // 空格子：这个成员没有这一维（基线成员没有混合网络的权重）。
             parameters: parameter_names
                 .iter()
                 .zip(&values[4..])
+                .filter(|(_, value)| !value.is_empty())
                 .map(|(name, value)| Ok(((*name).to_string(), value.parse()?)))
                 .collect::<Result<_>>()?,
         });
@@ -279,6 +270,7 @@ fn materialize_missing(manifest: &Manifest, members: &[MemberPlan]) -> Result<()
                 site,
                 &values,
             )?;
+            super::hybrid::write_member_files(&destination, &manifest.spec, &member.parameters)?;
             super::materialize::write_sample_stamp(&destination, member)?;
         }
     }
@@ -304,7 +296,12 @@ fn verify_materialized_member(destination: &Path, member: &MemberPlan) -> Result
 
     let case_nml = destination.join("case.nml");
     let document = colm_namelist::parse(&fs::read_to_string(&case_nml)?)?;
-    for (name, expected) in &member.parameters {
+    super::hybrid::verify_member_files(destination, &member.parameters)?;
+    for (name, expected) in member
+        .parameters
+        .iter()
+        .filter(|(name, _)| !super::hybrid::is_weight_key(name))
+    {
         let Some(actual) = document.get(name).and_then(colm_namelist::Value::as_f64) else {
             bail!(
                 "incomplete Study member {}: missing sampled parameter {name}",
@@ -395,6 +392,7 @@ mod tests {
                 analysis_to: None,
                 targets: vec![],
                 budget: StudyBudget::default(),
+                hybrid: None,
             },
             members: vec![],
             provenance: ManifestProvenance::default(),
@@ -521,6 +519,7 @@ mod tests {
                 analysis_to: None,
                 targets: vec![],
                 budget: StudyBudget::default(),
+                hybrid: None,
             },
             members: vec![],
             provenance: ManifestProvenance::default(),

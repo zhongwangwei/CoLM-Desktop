@@ -404,6 +404,9 @@ pub fn run(study_dir: &Path, options: RunOptions<'_>) -> Result<StudyState> {
         bail!("Study Rust preprocessing does not yet support HYPERSPECTRAL input fingerprints; use --preprocessors fortran");
     }
     super::engine::ensure_supported_study_manifest(&manifest, Some(&kernel.manifest.macros))?;
+    if manifest.spec.hybrid.is_some() && options.engine != crate::ModelEngine::Rust {
+        bail!("a Study that trains a hybrid network needs --engine rust");
+    }
     let mut rust_identities = if options.preprocessors == crate::PreprocessorMode::Rust {
         crate::RustPreprocessorIdentities {
             surface: Some(crate::rust_preprocessor_stage_identity(
@@ -2314,7 +2317,9 @@ fn write_member_table(
             ));
             for name in &names {
                 csv.push(',');
-                csv.push_str(&member.parameters[name].to_string());
+                if let Some(value) = member.parameters.get(name) {
+                    csv.push_str(&value.to_string());
+                }
             }
             for variable in &manifest.spec.outputs {
                 csv.push(',');
@@ -2619,6 +2624,7 @@ pub fn apply(
                 },
                 &values,
             )?;
+            super::hybrid::write_member_files(staged, &manifest.spec, &member.parameters)?;
             let case_nml = staged.join("case.nml");
             let mut document = colm_namelist::parse(&fs::read_to_string(&case_nml)?)?;
             for field in [
@@ -2679,7 +2685,29 @@ pub fn apply_preview(study_dir: &Path, member_id: &str) -> Result<Vec<ApplyPrevi
     for site in &manifest.spec.base_cases {
         let file = case_root.join(site).join("case.nml");
         let document = colm_namelist::parse(&fs::read_to_string(&file)?)?;
-        for (field, value) in &member.parameters {
+        let weights = member
+            .parameters
+            .keys()
+            .filter(|key| super::hybrid::is_weight_key(key))
+            .count();
+        if let (Some(hybrid), true) = (&manifest.spec.hybrid, weights > 0) {
+            rows.push(ApplyPreviewRow {
+                site: site.clone(),
+                file: case_root
+                    .join(site)
+                    .join("hybrid.toml")
+                    .to_string_lossy()
+                    .into_owned(),
+                field: format!("hybrid slot {}", hybrid.slot),
+                old: "<none>".into(),
+                new: format!("trained network ({weights} weights)"),
+            });
+        }
+        for (field, value) in member
+            .parameters
+            .iter()
+            .filter(|(field, _)| !super::hybrid::is_weight_key(field))
+        {
             rows.push(ApplyPreviewRow {
                 site: site.clone(),
                 file: file.to_string_lossy().into_owned(),
@@ -3123,6 +3151,7 @@ mod tests {
                     min_pairs: 2,
                 }],
                 budget: Default::default(),
+                hybrid: None,
             },
             members: Vec::new(),
             provenance: Default::default(),
@@ -3449,6 +3478,7 @@ mod tests {
                 analysis_to: None,
                 targets: Vec::new(),
                 budget: Default::default(),
+                hybrid: None,
             },
             members: Vec::new(),
             provenance: Default::default(),
@@ -3885,6 +3915,7 @@ mod tests {
                 analysis_to: None,
                 targets: Vec::new(),
                 budget: Default::default(),
+                hybrid: None,
             },
             members: Vec::new(),
             provenance: Default::default(),
@@ -4876,6 +4907,7 @@ mod tests {
                     min_pairs: 2,
                 }],
                 budget: Default::default(),
+                hybrid: None,
             },
             members: Vec::new(),
             provenance: Default::default(),
@@ -5261,6 +5293,7 @@ esac
                 candidate_count: Some(2),
                 ..Default::default()
             },
+            hybrid: None,
         };
         std::fs::write(&spec_path, serde_json::to_string(&spec).unwrap()).unwrap();
         let manifest = super::super::engine::create(&root, &spec_path).unwrap();

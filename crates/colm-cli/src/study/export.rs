@@ -361,6 +361,7 @@ mod tests {
                 analysis_to: None,
                 targets: vec![],
                 budget: StudyBudget::default(),
+                hybrid: None,
             },
             members: Vec::new(),
             provenance: Default::default(),
@@ -847,6 +848,7 @@ mod tests {
                     candidate_count: Some(2),
                     ..Default::default()
                 },
+                hybrid: None,
             })
             .unwrap(),
         )

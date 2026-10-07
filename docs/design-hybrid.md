@@ -180,6 +180,39 @@ P0 不改任何物理代码，GUI 也不动。
 - 过程插槽。
 
 
+## 12. 在 Study 里训练（2026-10-07）
+
+调优 Study 的 spec 可以带一个 `hybrid` 段，用 DE 直接训练一个小网络；训练好的网络与 `hybrid-install` 装上的外部模型走同一条运行路径。
+
+```json
+"hybrid": {
+  "slot": "pft",
+  "features": ["pftclass", "pftfrac"],
+  "outputs": [{"name": "DEF_PFT_VMAX25", "range": [20.0, 80.0], "transform": "sigmoid"}],
+  "hidden": [4],
+  "activation": "tanh",
+  "weight_range": 2.0
+}
+```
+
+- **决策变量**：网络的每个权重是决策向量的一维，名字是 `hybrid:w00000`…，排在采样参数之后。
+  - 次序是逐层先 `weights[输入][输出]`（行优先），再 `bias`。
+  - 搜索区间是 `[-weight_range, weight_range]`。
+  - 采样参数可以为空（只训练网络）；网络输出不能同时是采样参数。
+- **方法限制**：只用于 DE 调优。OAT/LHS 每个权重要 2～10 个成员，搜不动。权重上限是 `MAX_HYBRID_WEIGHTS = 400`，实际能搜好的网络要小得多。
+- **输出变换**：只许 `sigmoid` 和 `clamp`，保证任意权重向量都落在 `range` 内、成员不会因越界失败。
+- **特征标准化**：不给 `normalize` 时，`study-create` 在每个基础算例上用无模型配置空跑 `colm-rs --hybrid-dry-run`，按行数合并成总体均值与标准差，冻结进 spec（进 `spec_sha256`）。
+  - 常数特征的标准差取 1。
+  - 这一步要求基础算例已经跑过 mkinidata。
+- **基线**：基线成员 `m000000` 没有权重。CSV 里它的权重格子为空，也不写 `hybrid.toml`，是纯物理的参照。
+- **成员**：有权重的成员写 `models/study.mlp.json`、`models/study.norm.json` 和 `hybrid.toml`（带 sha256）。
+  - 续跑时核对 `hybrid.toml` 能加载、模型的 sha256 对得上。
+  - 导出最优成员时，这三个文件随算例一起导出；预览里合成一行 `hybrid slot <名>`，不逐个列权重。
+- **约束**：
+  - 只能用 Rust 引擎。
+  - 基础算例不能已有 `hybrid.toml`，否则成员与基线不在同一物理参照上。
+- **旧 Study**：`hybrid` 段为空时不序列化，旧 manifest 的哈希不变。
+
 1. P1 先做哪个参数插槽：土壤水力参数（结构简单、派生量多）还是 Vcmax（直接影响 ET/GPP）。
 2. `tract` 与 `candle` 二选一：前者直接吃 ONNX，后者便于将来在 Rust 里训练。倾向 `tract`。
 3. 训练侧的 Python 代码放在本仓库 `python/` 下，还是单独一个仓库。

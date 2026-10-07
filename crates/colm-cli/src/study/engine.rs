@@ -245,6 +245,7 @@ pub fn create(case_root: &Path, spec_file: &Path) -> Result<Manifest> {
         .unwrap_or_default();
     ensure_supported_study_inputs(&base_cases, &kernel_macros)?;
     let baseline = baseline(&base_cases, &spec, &kernel_macros)?;
+    super::hybrid::freeze_normalization(&mut spec, &base_cases)?;
     let members = sample::design(&spec, &baseline)?;
     let studies_root = case_root.join(".colm/studies");
     fs::create_dir_all(&studies_root)?;
@@ -252,7 +253,7 @@ pub fn create(case_root: &Path, spec_file: &Path) -> Result<Manifest> {
     let result = (|| {
         fs::create_dir_all(root.join("samples"))?;
         let sample_file = write_samples(&root, &spec, &members)?;
-        materialize(&root, &base_cases, &members)?;
+        materialize(&root, &spec, &base_cases, &members)?;
         let tasks = member_tasks_from(&root, &spec, &members).into_iter().map(
             |(member, site, case_dir)| super::state::TaskState {
                 member,
@@ -946,7 +947,9 @@ fn write_samples(root: &Path, spec: &StudySpec, members: &[MemberPlan]) -> Resul
         ));
         for name in &parameter_names {
             csv.push(',');
-            csv.push_str(&member.parameters[name].to_string());
+            if let Some(value) = member.parameters.get(name) {
+                csv.push_str(&value.to_string());
+            }
         }
         csv.push('\n');
     }
@@ -955,7 +958,12 @@ fn write_samples(root: &Path, spec: &StudySpec, members: &[MemberPlan]) -> Resul
     Ok(path)
 }
 
-fn materialize(root: &Path, base_cases: &[PathBuf], members: &[MemberPlan]) -> Result<()> {
+fn materialize(
+    root: &Path,
+    spec: &StudySpec,
+    base_cases: &[PathBuf],
+    members: &[MemberPlan],
+) -> Result<()> {
     for base in base_cases {
         let site = base.file_name().and_then(|s| s.to_str()).unwrap_or("case");
         for member in members {
@@ -966,6 +974,7 @@ fn materialize(root: &Path, base_cases: &[PathBuf], members: &[MemberPlan]) -> R
                 .map(|(field, value)| (field.clone(), *value))
                 .collect::<Vec<_>>();
             super::materialize::member_case(base, &dst, &member.id, site, &values)?;
+            super::hybrid::write_member_files(&dst, spec, &member.parameters)?;
             super::materialize::write_sample_stamp(&dst, member)?;
         }
     }
@@ -1219,6 +1228,7 @@ mod tests {
                 candidate_count: Some(2),
                 ..Default::default()
             },
+            hybrid: None,
         };
         fs::write(&path, serde_json::to_string(&spec).unwrap()).unwrap();
         path

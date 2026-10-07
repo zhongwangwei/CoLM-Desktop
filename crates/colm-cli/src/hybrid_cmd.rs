@@ -43,8 +43,51 @@ fn copy_into(case: &Path, source: &Path) -> Result<PathBuf> {
     Ok(Path::new("models").join(name))
 }
 
-fn toml_string(value: &str) -> String {
+pub(crate) fn toml_string(value: &str) -> String {
     format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+/// 一个参数插槽的 `hybrid.toml` 文本；`outputs` 是 `(名字, 范围, 变换)`。
+pub(crate) fn slot_toml(
+    slot: &str,
+    model: &Path,
+    sha256: &str,
+    features: &[String],
+    normalize: Option<&Path>,
+    outputs: &[(String, Option<[f64; 2]>, String)],
+) -> String {
+    let mut text = String::from("[[slot]]\n");
+    text += &format!("name = {}\n", toml_string(slot));
+    text += "kind = \"param\"\n";
+    text += &format!("model = {}\n", toml_string(&model.display().to_string()));
+    text += &format!("sha256 = \"{sha256}\"\n");
+    text += &format!(
+        "features = [{}]\n",
+        features
+            .iter()
+            .map(|f| toml_string(f))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    if let Some(normalize) = normalize {
+        text += &format!(
+            "normalize = {}\n",
+            toml_string(&normalize.display().to_string())
+        );
+    }
+    text += "outputs = [\n";
+    for (name, range, transform) in outputs {
+        let range = range.map_or(String::new(), |[lo, hi]| {
+            format!(", range = [{lo:?}, {hi:?}]")
+        });
+        text += &format!(
+            "  {{ name = {}{range}, transform = {} }},\n",
+            toml_string(name),
+            toml_string(transform)
+        );
+    }
+    text += "]\n";
+    text
 }
 
 pub(super) fn cmd_hybrid_install(opts: &Opts) -> Result<()> {
@@ -84,40 +127,14 @@ pub(super) fn cmd_hybrid_install(opts: &Opts) -> Result<()> {
         &std::fs::read(case.join(&model_rel))
             .with_context(|| format!("cannot read {}", model.display()))?,
     );
-    let mut text = String::from("[[slot]]\n");
-    text += &format!("name = {}\n", toml_string(&slot));
-    text += "kind = \"param\"\n";
-    text += &format!(
-        "model = {}\n",
-        toml_string(&model_rel.display().to_string())
+    let text = slot_toml(
+        &slot,
+        &model_rel,
+        &sha,
+        &features,
+        normalize_rel.as_deref(),
+        &outputs,
     );
-    text += &format!("sha256 = \"{sha}\"\n");
-    text += &format!(
-        "features = [{}]\n",
-        features
-            .iter()
-            .map(|f| toml_string(f))
-            .collect::<Vec<_>>()
-            .join(", ")
-    );
-    if let Some(normalize) = &normalize_rel {
-        text += &format!(
-            "normalize = {}\n",
-            toml_string(&normalize.display().to_string())
-        );
-    }
-    text += "outputs = [\n";
-    for (name, range, transform) in &outputs {
-        let range = range.map_or(String::new(), |[lo, hi]| {
-            format!(", range = [{lo:?}, {hi:?}]")
-        });
-        text += &format!(
-            "  {{ name = {}{range}, transform = {} }},\n",
-            toml_string(name),
-            toml_string(transform)
-        );
-    }
-    text += "]\n";
     std::fs::write(&config, &text).with_context(|| format!("cannot write {}", config.display()))?;
     // 按正式运行的规则读回：sha256、变换与范围；原生 MLP 再核对维度。ONNX 的维度由 hybrid-check 核对。
     let loaded = colm_hybrid::HybridConfig::load(&config).inspect_err(|_| {
@@ -160,10 +177,16 @@ pub(super) fn cmd_hybrid_check(opts: &Opts) -> Result<()> {
         case.display()
     );
     let kernel = Kernel::open(&opts.need("--kernel")?)?;
-    let land_cover = rust_model_land_cover(&kernel)?;
+    print!("{}", dry_run(&case, &config, &kernel)?);
+    Ok(())
+}
+
+/// 在算例上空跑 `colm-rs --hybrid-dry-run`，返回它打印的 JSON 汇总。`case` 要是绝对路径。
+pub(crate) fn dry_run(case: &Path, config: &Path, kernel: &Kernel) -> Result<String> {
+    let land_cover = rust_model_land_cover(kernel)?;
     let executable = rust_model_executable()?;
     let output = std::process::Command::new(&executable)
-        .current_dir(&case)
+        .current_dir(case)
         .arg(case.join("case.nml"))
         .args([
             "--land-cover",
@@ -172,8 +195,8 @@ pub(super) fn cmd_hybrid_check(opts: &Opts) -> Result<()> {
             "--hybrid-dry-run",
             "--hybrid",
         ])
-        .arg(&config)
-        .args(rust_model_crop_arguments(&kernel))
+        .arg(config)
+        .args(rust_model_crop_arguments(kernel))
         .output()
         .with_context(|| format!("cannot start {}", executable.display()))?;
     if !output.status.success() {
@@ -184,8 +207,7 @@ pub(super) fn cmd_hybrid_check(opts: &Opts) -> Result<()> {
             case.display()
         );
     }
-    print!("{}", String::from_utf8_lossy(&output.stdout));
-    Ok(())
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 #[cfg(test)]

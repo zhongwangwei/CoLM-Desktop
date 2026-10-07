@@ -6,7 +6,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, ensure, Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 /// 插槽的类型（docs/design-hybrid.md 第 1 节）。P0 只接参数插槽。
@@ -19,7 +19,7 @@ pub enum SlotKind {
 }
 
 /// 输出的变换：网络的原始输出 `y` → 物理量。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum Transform {
     /// 原样；给了 `range` 时超出范围是错误。
