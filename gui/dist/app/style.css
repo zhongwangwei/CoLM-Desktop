@@ -712,6 +712,7 @@ body.resizing-assistant { user-select: none; cursor: col-resize; }
 .assistant-settings > label { padding-top: 7px; font-size: 12.5px; }
 .assistant-settings > p, .assistant-settings > .pill-row, .assistant-key-row { grid-column: 2; margin: 0; }
 .assistant-key-row { display: flex; gap: 6px; }
+.assistant-key-ok { color: var(--pass); font-weight: 600; }
 .assistant-key-row .input { flex: 1; }
 .assistant-notice { margin: 10px 14px 0; }
 .assistant-log { flex: 1; min-height: 0; overflow-y: auto; padding: 14px; display: flex; flex-direction: column; gap: 12px; }

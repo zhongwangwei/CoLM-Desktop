@@ -547,6 +547,16 @@ fn cli_candidates(sibling_dir: Option<PathBuf>) -> Vec<PathBuf> {
             .join(exe_name())
     });
     let sibling = sibling_dir.map(|dir| dir.join(exe_name()));
+    // 仓库里的 debug 与 release 产物：先用最近编译的那个。固定先 debug 的话，release 刚编好，
+    // 界面却还在用几小时前的 debug 版（实测助手因此缺了新加的工具）。
+    let mut workspace = workspace.to_vec();
+    workspace.sort_by_key(|path| {
+        std::cmp::Reverse(
+            std::fs::metadata(path)
+                .and_then(|meta| meta.modified())
+                .ok(),
+        )
+    });
     if cfg!(debug_assertions) {
         workspace.into_iter().chain(sibling).collect()
     } else {
