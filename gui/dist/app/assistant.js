@@ -234,6 +234,17 @@ function approvalCard(event) {
   }
 }
 
+/** 引导模式：把 agent 的界面请求交给 guide.js（它能导入 shell/sites，本模块不能），再把结果回给 agent。 */
+function uiRequest(event) {
+  const respond = (ok, result) => {
+    invoke('assistant_ui_result', { id: event.id, ok, result }).catch(e => status(e));
+  };
+  const detail = { action: event.action, args: event.args, respond, handled: false };
+  dispatchEvent(new CustomEvent('colm:ui-request', { detail }));
+  // 没有窗口模块接（例如测试页）时立刻回绝，免得 agent 干等两分钟。
+  if (!detail.handled) respond(false, 'the application window cannot be driven here');
+}
+
 function handle(event) {
   switch (event.type) {
     case 'ready':
@@ -265,6 +276,9 @@ function handle(event) {
     case 'approval_request':
       approvalCard(event);
       break;
+    case 'ui_request':
+      uiRequest(event);
+      return; // 不滚动：窗口在动，面板保持原位
     case 'usage':
       $('assistant-usage').replaceChildren(
         element('span', '', '本轮用量'),

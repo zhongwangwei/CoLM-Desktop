@@ -65,6 +65,7 @@ fn configure_messages_match_the_agent_protocol_and_carry_no_key() {
     assert_eq!(message["provider"]["reasoning_effort"], "max");
     assert_eq!(message["approval"], "auto");
     assert_eq!(message["web_search"], false);
+    assert_eq!(message["ui"], true);
     assert_eq!(message["project_root"], "/p");
     assert_eq!(message["kernel_dir"], "/k");
     assert!(message["provider"].get("api_key").is_none());

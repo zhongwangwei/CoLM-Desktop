@@ -15,9 +15,10 @@
 use std::collections::BTreeSet;
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 use colm_agent::agent::{Agent, Approver, Decision, Limits};
@@ -25,7 +26,9 @@ use colm_agent::message::Message;
 use colm_agent::protocol::{ApprovalPolicy, Inbound, Outbound};
 use colm_agent::provider::{OpenAiCompatible, ProviderConfig, DEEPSEEK_BASE_URL};
 use colm_agent::session::{self, Session};
+use colm_agent::tools::ui::{UiBridge, UiHandle};
 use colm_agent::tools::{web, Registry, Tier, ToolContext};
+use serde_json::Value;
 
 fn main() {
     if let Err(error) = run() {
@@ -163,6 +166,55 @@ struct Settings {
     context: ToolContext,
     approval: ApprovalPolicy,
     web_search: bool,
+    ui: bool,
+}
+
+/// 引导模式的界面桥：发 `ui_request`，等 GUI 的 `ui_result`（取消或两分钟没回话时报错）。
+struct ChannelUi {
+    emitter: Emitter,
+    results: Arc<Mutex<Receiver<(String, bool, Value)>>>,
+    cancel: Arc<AtomicBool>,
+}
+
+static UI_REQUESTS: AtomicU64 = AtomicU64::new(0);
+
+impl UiBridge for ChannelUi {
+    fn request(&self, action: &str, args: Value) -> Result<Value> {
+        let id = format!("ui-{}", UI_REQUESTS.fetch_add(1, Ordering::SeqCst));
+        let results = self
+            .results
+            .lock()
+            .map_err(|_| anyhow::anyhow!("the window channel is poisoned"))?;
+        // 先清掉上一次超时后才到的回话。
+        while results.try_recv().is_ok() {}
+        self.emitter.emit(Outbound::UiRequest {
+            id: id.clone(),
+            action: action.to_owned(),
+            args,
+        });
+        let deadline = Instant::now() + Duration::from_secs(120);
+        loop {
+            if self.cancel.load(Ordering::SeqCst) {
+                bail!("cancelled");
+            }
+            match results.recv_timeout(Duration::from_millis(200)) {
+                Ok((answered, ok, result)) if answered == id => {
+                    if ok {
+                        return Ok(result);
+                    }
+                    let message = result
+                        .as_str()
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| result.to_string());
+                    bail!("{message}");
+                }
+                Ok(_) => continue,
+                Err(RecvTimeoutError::Timeout) if Instant::now() < deadline => continue,
+                Err(RecvTimeoutError::Timeout) => bail!("the application window did not answer"),
+                Err(RecvTimeoutError::Disconnected) => bail!("the application closed"),
+            }
+        }
+    }
 }
 
 fn serve(data_dir: Option<PathBuf>, cli: PathBuf, key_file: PathBuf) -> Result<()> {
@@ -178,8 +230,8 @@ fn serve(data_dir: Option<PathBuf>, cli: PathBuf, key_file: PathBuf) -> Result<(
     let cancel = Arc::new(AtomicBool::new(false));
     let (decision_tx, decision_rx): (Sender<(String, Decision)>, _) = mpsc::channel();
     let decision_rx = Arc::new(Mutex::new(decision_rx));
-    let registry = Arc::new(Registry::standard());
-    let registry_web = Arc::new(Registry::standard_with_web());
+    let (ui_tx, ui_rx): (Sender<(String, bool, Value)>, _) = mpsc::channel();
+    let ui_rx = Arc::new(Mutex::new(ui_rx));
     // 本会话允许 `fetch_url` 打开的网站（搜索结果与用户消息里的）；换会话时清空。
     let allowed_hosts: Arc<Mutex<BTreeSet<String>>> = Arc::default();
     let allowed: Arc<Mutex<BTreeSet<String>>> = Arc::default();
@@ -209,6 +261,7 @@ fn serve(data_dir: Option<PathBuf>, cli: PathBuf, key_file: PathBuf) -> Result<(
                 docs_root,
                 approval,
                 web_search,
+                ui,
             } => {
                 let model = provider.model.clone();
                 *settings.lock().unwrap() = Some(Settings {
@@ -220,9 +273,11 @@ fn serve(data_dir: Option<PathBuf>, cli: PathBuf, key_file: PathBuf) -> Result<(
                         docs_root: docs_root.filter(|d| !d.is_empty()).map(PathBuf::from),
                         cancel: None,
                         web: None,
+                        ui: None,
                     },
                     approval,
                     web_search,
+                    ui,
                 });
                 let id = session.lock().unwrap().id.clone();
                 emitter.emit(Outbound::Ready { session: id, model });
@@ -302,6 +357,9 @@ fn serve(data_dir: Option<PathBuf>, cli: PathBuf, key_file: PathBuf) -> Result<(
                 };
                 let _ = decision_tx.send((id, decision));
             }
+            Inbound::UiResult { id, ok, result } => {
+                let _ = ui_tx.send((id, ok, result));
+            }
             Inbound::Cancel => {
                 cancel.store(true, Ordering::SeqCst);
                 let _ = decision_tx.send(("*".into(), Decision::Deny(Some("cancelled".into()))));
@@ -313,13 +371,14 @@ fn serve(data_dir: Option<PathBuf>, cli: PathBuf, key_file: PathBuf) -> Result<(
                     });
                     continue;
                 }
-                let Some((mut provider, mut tool_context, policy, web_search)) =
+                let Some((mut provider, mut tool_context, policy, web_search, ui)) =
                     settings.lock().unwrap().as_ref().map(|s| {
                         (
                             s.provider.clone(),
                             s.context.clone(),
                             s.approval,
                             s.web_search,
+                            s.ui,
                         )
                     })
                 else {
@@ -337,7 +396,14 @@ fn serve(data_dir: Option<PathBuf>, cli: PathBuf, key_file: PathBuf) -> Result<(
                 let cancel = Arc::clone(&cancel);
                 let decisions = Arc::clone(&decision_rx);
                 let allowed = Arc::clone(&allowed);
-                let registry = Arc::clone(if web_search { &registry_web } else { &registry });
+                let registry = Registry::standard_with(web_search, ui);
+                if ui {
+                    tool_context.ui = Some(UiHandle(Arc::new(ChannelUi {
+                        emitter: emitter.clone(),
+                        results: Arc::clone(&ui_rx),
+                        cancel: Arc::clone(&cancel),
+                    })));
+                }
                 if web_search {
                     let mut urls = allowed_hosts.lock().unwrap();
                     urls.extend(web::hosts_in(&text));

@@ -31683,3 +31683,34 @@ GPP 的均值被 4 个基线 KGE 低于 −0.5 的站拉低（BE-Lon、DE-Geb、
   - 重定向拼接、HTML 转文本、网址提取、搜索次数上限
 - 严格模式 schema 检查覆盖了两个新工具。
 - GUI Rust 208 项通过；两个 workspace 的 clippy 零警告、fmt 干净；`check-gui` 与 14 个前端套件通过。
+
+## 第 630 轮：引导模式（助手在窗口上逐页操作）
+
+**过程**：用户希望说一句"用 /Volumes/Data/Data/PLUMBER2s 里的 CA-Qfo 建一个 PC 算例"，助手就把各页自动填好、跳到对应页面，并按页面问需要做的决定。先用 Explore 子代理梳理建例路径。查到两点：
+
+- 参数表字段"改了就存"：`change` 时就调 `set_field_batch` 写进 case.nml，没有保存按钮。
+- 配置向导的选择存在 `domain.js` 的私有变量里，卡片没有 id，只能按文字匹配，而文字会随界面语言翻译。
+
+**现状**：
+- agent 新增 `tools/ui.rs`，六个工具只做转发：`ui_state`、`ui_go`、`ui_fill`、`ui_set`、`ui_click`、`ui_commit`。
+- 协议新增 `ui_request` / `ui_result`，`configure` 带 `ui`。等待回话时可以被取消，两分钟没回话报错。
+- 按后果分级，由 GUI 把关，越级的请求被拒绝：
+  - `ui_fill` 只填草稿字段（目录、预热年数、运行选项），`ui_click` 只按不落盘的按钮（扫描、选站点、向导选项），都不审批；
+  - `ui_set` 改参数表这类"改了就存"的字段，`ui_commit` 按建算例、应用预热、运行这类按钮，都是 B 级，按审批设置询问。
+- GUI 新增 `guide.js`：走用户操作的路径，即改值后派发 input/change、按按钮、调 `go()`。
+  - 建算例时等到选中的算例换成新的，或状态栏报错为止。
+  - 改参数时逐个等自动保存和表格重画完成。
+  - 助手填过的控件高亮，用户点进去时去掉高亮。
+- assistant.js 把 `ui_request` 转成 `colm:ui-request` 事件。没有模块接手时立即回绝，免得 agent 干等。
+- `domain.js` 只加了标记：卡片 `data-choice`、底部按钮 `data-gate`、`#domaingate[data-page]`。
+- 系统提示新增引导模式的路线：启动页 → 向导 → 文件与目录 → 逐页设置 → 问是否运行。每页只问需要用户拿主意的项。没有窗口或要批量建例时，仍用后台的 `create_case`。
+
+**检查**：
+- colm-agent 33 项测试通过，新增：六个工具的转发与分级；没有窗口时报错。
+- GUI Rust 208 项通过（`configure` 带 `ui: true`）；`check-gui` 通过（95 个命令全部能解析）；14 个前端套件通过；两个 workspace 的 clippy 零警告、fmt 干净。
+- 浏览器静态预览（无后端）里，用 `colm:ui-request` 事件逐项驱动：
+  - 启动页 → 本地运行 → 向导第一页列出 site / watershed / region / global，选 site 后下一步到 subgrid。
+  - 四张 subgrid 卡片都被挡住，原因"正在检查可用内核"（预览里没有内核），如实回给助手。
+  - 开一个 PC 会话后进入"文件与目录"：列出四个草稿字段与 scan / use-example 两个按钮。填写 root 后高亮；填 sitedir 后，GUI 自己把 forcingdir 补成同级的 Forcing。
+  - 越级请求全部被拒，各自给出了该用哪个工具：在向导页填目录、`commit` 扫描、`click` 建算例、在没有参数表的页 `set`、算例未建就跳到预热页。
+- 带真实内核与后端的完整流程（扫描、建例、逐页设置）要在应用里用真实对话验证。

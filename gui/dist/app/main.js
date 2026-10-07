@@ -18,6 +18,7 @@ import './validation.js';
 import './spatial.js';
 import './opencase.js';
 import './assistant.js';
+import './guide.js';
 
 initI18n();
 initShell();

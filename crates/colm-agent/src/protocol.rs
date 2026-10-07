@@ -33,6 +33,9 @@ pub enum Inbound {
         /// 联网（`web_search` 走 DeepSeek 原生搜索，用 DeepSeek 的 Key；`fetch_url` 读网页）。
         #[serde(default)]
         web_search: bool,
+        /// GUI 能被驱动（引导模式的 `ui_*` 工具）。
+        #[serde(default)]
+        ui: bool,
     },
     /// 用户的一条消息；`context` 是界面自动附上的当前页面信息（选中的算例、Study 等）。
     UserMessage {
@@ -48,6 +51,13 @@ pub enum Inbound {
         /// 批准并在本会话里不再询问同名操作。
         #[serde(default)]
         remember: bool,
+    },
+    /// GUI 对一次 `ui_request` 的回话。
+    UiResult {
+        id: String,
+        ok: bool,
+        #[serde(default)]
+        result: serde_json::Value,
     },
     /// 停止当前这一轮（正在生成或在等审批时都可以）。
     Cancel,
@@ -95,6 +105,12 @@ pub enum Outbound {
         tier: Tier,
         summary: String,
         arguments: String,
+    },
+    /// 请 GUI 在窗口上做一件事（引导模式）；GUI 以 `ui_result` 回话。
+    UiRequest {
+        id: String,
+        action: String,
+        args: serde_json::Value,
     },
     Usage {
         prompt_tokens: u64,

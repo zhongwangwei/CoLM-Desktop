@@ -153,6 +153,7 @@ function render() {
   const list = pages();
   if (pageIdx >= list.length) pageIdx = list.length - 1;
   const page = list[pageIdx];
+  $('domaingate').dataset.page = page; // 引导模式读当前是哪一页
   const copy = {
     domain: ['这次要跑什么？', '先选择模拟范围，再为流域、区域或全球选择计算网格。'],
     grid: ['计算网格怎么组织？', '三种空间范围都可选择经纬度、非结构或流域网格。'],
@@ -410,6 +411,7 @@ function card(item, selected, choose, blocked, multi) {
   const b = document.createElement('button');
   b.type = 'button';
   b.className = 'domain-card';
+  b.dataset.choice = item.id; // 引导模式按选项 id 找卡片（文字会随界面语言翻译）
   b.setAttribute(multi ? 'aria-pressed' : 'aria-selected', String(selected));
 
   const title = document.createElement('span');
@@ -695,12 +697,14 @@ function renderFoot() {
   if (pageIdx > 0) {
     const cancel = document.createElement('button');
     cancel.className = 'btn-ghost';
+    cancel.dataset.gate = 'cancel';
     cancel.textContent = '取消';
     cancel.onclick = () => { pageIdx = 0; picked = emptyPicked(); render(); };
     foot.appendChild(cancel);
 
     const prev = document.createElement('button');
     prev.className = 'btn-ghost';
+    prev.dataset.gate = 'back';
     prev.textContent = '← 上一步';
     prev.onclick = () => { pageIdx -= 1; render(); };
     foot.appendChild(prev);
@@ -733,6 +737,7 @@ function renderFoot() {
   };
   const next = document.createElement('button');
   next.className = 'btn-next';
+  next.dataset.gate = pageIdx === list.length - 1 ? 'finish' : 'next';
   next.textContent = '下一步 →';
   next.disabled = (Object.hasOwn(required, page) && !required[page]) || (page === 'spatial' && !!spatialIssue());
   next.onclick = () => {

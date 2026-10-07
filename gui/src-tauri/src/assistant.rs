@@ -226,6 +226,20 @@ pub async fn assistant_delete_session(app: tauri::AppHandle, id: String) -> Resu
         .map(|_| ())
 }
 
+/// 引导模式：把窗口执行界面请求的结果回给助手。
+#[tauri::command]
+pub fn assistant_ui_result(
+    process: tauri::State<'_, AssistantProcess>,
+    id: String,
+    ok: bool,
+    result: Value,
+) -> Result<(), String> {
+    send(
+        &process,
+        &json!({ "type": "ui_result", "id": id, "ok": ok, "result": result }),
+    )
+}
+
 /// 让正在运行的助手续接一个历史会话。
 #[tauri::command]
 pub fn assistant_resume(
@@ -336,6 +350,8 @@ pub(crate) fn configure_message(
         },
         "approval": settings.approval,
         "web_search": settings.web_search,
+        // 窗口能被助手驱动（引导模式）。
+        "ui": true,
         "project_root": project_root,
         "kernel_dir": kernel_dir,
         "docs_root": docs_root,

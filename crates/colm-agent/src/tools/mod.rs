@@ -5,6 +5,7 @@
 
 mod act;
 mod read;
+pub mod ui;
 pub mod web;
 
 use std::io::Read;
@@ -51,6 +52,8 @@ pub struct ToolContext {
     pub cancel: Option<Arc<AtomicBool>>,
     /// 联网（搜索与读网页）；设置里关掉联网时为空，联网工具也不注册。
     pub web: Option<web::WebAccess>,
+    /// 引导模式的界面桥；GUI 没声明能被驱动时为空，`ui_*` 工具也不注册。
+    pub ui: Option<ui::UiHandle>,
 }
 
 /// 长命令的结果：是否成功、输出末尾。
@@ -211,8 +214,18 @@ impl Registry {
 
     /// 全部工具加联网（`web_search`、`fetch_url`）。
     pub fn standard_with_web() -> Self {
+        Self::standard_with(true, false)
+    }
+
+    /// 全部工具，按需加联网与引导模式（`ui_*`）。
+    pub fn standard_with(web: bool, ui: bool) -> Self {
         let mut registry = Self::standard();
-        registry.tools.extend(web::tools());
+        if web {
+            registry.tools.extend(web::tools());
+        }
+        if ui {
+            registry.tools.extend(ui::tools());
+        }
         registry
     }
 
