@@ -46,6 +46,7 @@
 
 mod fingerprint;
 mod hybrid_cmd;
+mod hybrid_fit;
 mod observation_table;
 mod study;
 
@@ -115,6 +116,10 @@ usage:
   colm-cli hybrid-climate <case-dir> --kernel <dir>
                    # 在运行时段内累积强迫，给每个 patch 算气候特征（clim_tair、clim_tair_amplitude、
                    # clim_prec、clim_swdown、clim_vpd），写到 <case>/hybrid_climate/；不模拟
+  colm-cli hybrid-fit --studies <dir,dir,...> --network <net.json> --kernel <dir> --out <x.mlp.json>
+                   [--weight pftfrac] [--epochs N] [--learning-rate X] [--ridge X] [--seed N]
+                   # 两步训练的第二步：读各站调优 Study 的最优参数，在基础算例上取逐行特征，拟合网络；
+                   # 两个以上 Study 时做留一站交叉验证。net.json 与 Study 的 hybrid 段同格式
   colm-cli hybrid-info <case-dir>
                    # 以 JSON 列出算例的混合模型配置与模型校验结果（没有配置时 installed 为 false）
   colm-cli hybrid-remove <case-dir>
@@ -281,6 +286,7 @@ fn main() -> Result<()> {
         "hybrid-check" => hybrid_cmd::cmd_hybrid_check(&opts)?,
         "hybrid-info" => hybrid_cmd::cmd_hybrid_info(&opts)?,
         "hybrid-climate" => hybrid_cmd::cmd_hybrid_climate(&opts)?,
+        "hybrid-fit" => hybrid_fit::cmd_hybrid_fit(&opts)?,
         "hybrid-remove" => hybrid_cmd::cmd_hybrid_remove(&opts)?,
         "evaluation-catalog" => {
             cmd_evaluation_catalog(&opts.positional_case()?, &opts.need("--obs")?)?;

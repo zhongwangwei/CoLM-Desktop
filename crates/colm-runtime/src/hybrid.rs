@@ -569,7 +569,8 @@ fn feature_matrix(restart: &Features, features: &[String], patches: &[usize]) ->
 /// 特征抓取（训练前准备数据）：按配置把每一行（土壤 patch，`pft` 插槽是每个 PFT）的特征与物理值写成
 /// CSV，不改任何参数。一次抓取只对应一个插槽。
 ///
-/// 列：`patch`、`pft`（`land_class` 插槽为空）、各特征、各输出的物理值（`physics:<名字>`；地类表值或
+/// 列：`patch`、`pft`（`land_class` 插槽为空）、`class`（`land_class` 插槽是 `patchclass`，`pft` 插槽是
+/// `pftclass`；两步训练据此对上各站率定出的分类参数）、各特征、各输出的物理值（`physics:<名字>`；地类表值或
 /// PFT 参数的有效值）。追加写，首次写表头。
 #[allow(clippy::too_many_arguments)]
 pub fn write_tap(
@@ -600,7 +601,7 @@ pub fn write_tap(
         .open(out)
         .with_context(|| format!("cannot open {}", out.display()))?;
     if new_file {
-        let mut header = vec!["patch".to_owned(), "pft".to_owned()];
+        let mut header = vec!["patch".to_owned(), "pft".to_owned(), "class".to_owned()];
         header.extend(slot.features.iter().cloned());
         header.extend(
             slot.outputs
@@ -615,7 +616,7 @@ pub fn write_tap(
             let class = usize::try_from(patch_integer(restart, "patchclass", patch)?)
                 .context("patchclass is negative")?;
             let constants = colm_core::ClassConstants::new(physics.land_cover_scheme, class)?;
-            let mut line = vec![patch.to_string(), String::new()];
+            let mut line = vec![patch.to_string(), String::new(), class.to_string()];
             for feature in &slot.features {
                 line.push(format!("{:e}", features.value(feature, patch)?));
             }
@@ -641,7 +642,7 @@ pub fn write_tap(
     for (_, patch, pft) in pft_rows(&soil, patches, pft_ranges) {
         let class = pft_value(&pft_restart, "pftclass", pft)?
             .context("the PFT constant restart has no pftclass")? as i32;
-        let mut line = vec![patch.to_string(), pft.to_string()];
+        let mut line = vec![patch.to_string(), pft.to_string(), class.to_string()];
         for feature in &slot.features {
             let value = match pft_value(&pft_restart, feature, pft)? {
                 Some(value) => value,

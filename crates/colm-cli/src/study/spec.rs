@@ -417,7 +417,7 @@ impl HybridStudySpec {
         colm_hybrid::Mlp::new(layers)
     }
 
-    fn validate(&self, parameters: &[ParameterSpec]) -> Result<()> {
+    pub(crate) fn validate(&self, parameters: &[ParameterSpec]) -> Result<()> {
         let prefix = match self.slot.as_str() {
             "land_class" => "DEF_LC_",
             "pft" => "DEF_PFT_",

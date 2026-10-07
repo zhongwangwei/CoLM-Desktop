@@ -3,12 +3,12 @@
 use std::path::Path;
 
 use anyhow::{bail, ensure, Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::config::{OutputSpec, Transform};
 
 /// `(x - mean) / std`，按特征次序。
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Normalization {
     pub mean: Vec<f64>,

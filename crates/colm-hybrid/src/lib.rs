@@ -6,6 +6,7 @@
 
 mod backend;
 mod config;
+pub mod fit;
 mod mlp;
 mod transform;
 

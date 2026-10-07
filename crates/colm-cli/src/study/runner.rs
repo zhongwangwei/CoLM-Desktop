@@ -2723,7 +2723,7 @@ pub fn apply_preview(study_dir: &Path, member_id: &str) -> Result<Vec<ApplyPrevi
     Ok(rows)
 }
 
-fn resolve_apply_member(
+pub(crate) fn resolve_apply_member(
     study_dir: &Path,
     manifest: &Manifest,
     member_id: &str,
@@ -2786,7 +2786,7 @@ fn resolve_apply_member(
         .with_context(|| format!("unknown Study member {member_id}"))
 }
 
-fn study_case_root(manifest: &Manifest) -> Result<PathBuf> {
+pub(crate) fn study_case_root(manifest: &Manifest) -> Result<PathBuf> {
     Ok(Path::new(&manifest.root)
         .parent()
         .and_then(Path::parent)

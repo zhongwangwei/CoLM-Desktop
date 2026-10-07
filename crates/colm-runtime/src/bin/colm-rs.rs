@@ -192,6 +192,25 @@ fn run() -> Result<()> {
             Some(HybridMode::Apply(hybrid)) => {
                 hybrid.summary(&files.constant, &patches, &ranges, &physics)?
             }
+            Some(HybridMode::Tap {
+                config,
+                out,
+                case_dir,
+            }) => {
+                // 空跑加 tap：只抓特征与物理值，不模拟（两步训练的取样）。
+                colm_runtime::hybrid::write_tap(
+                    config,
+                    &files.constant,
+                    Some(case_dir),
+                    &patches,
+                    &ranges,
+                    &physics,
+                    &document,
+                    out,
+                )?;
+                println!("colm-rs: wrote {}", out.display());
+                return Ok(());
+            }
             Some(HybridMode::Spec(config)) => colm_runtime::hybrid::feature_summary(
                 config,
                 &files.constant,
@@ -626,8 +645,22 @@ fn run_spatial(
         return spatial_hybrid_climate(&config, &arguments.case_directory, &out, year, name);
     }
     if arguments.hybrid_dry_run {
+        if let Some(HybridMode::Tap { out: tap, .. }) = hybrid {
+            spatial_hybrid_summary(
+                hybrid,
+                &document,
+                &arguments.case_directory,
+                &out,
+                year,
+                name,
+                &physics,
+            )?;
+            println!("colm-rs: wrote {}", tap.display());
+            return Ok(());
+        }
         let summary = spatial_hybrid_summary(
             hybrid,
+            &document,
             &arguments.case_directory,
             &out,
             year,
@@ -5605,8 +5638,8 @@ impl Arguments {
             "--hybrid-tap needs --hybrid <hybrid.toml> to know which features to record"
         );
         ensure!(
-            !hybrid_dry_run || (hybrid.is_some() && hybrid_tap.is_none()),
-            "--hybrid-dry-run needs --hybrid <hybrid.toml> and cannot be combined with --hybrid-tap"
+            !hybrid_dry_run || hybrid.is_some(),
+            "--hybrid-dry-run needs --hybrid <hybrid.toml>"
         );
         // 一个只在有 `--history-dir` 时才生效的 `--history-stem` 是陷阱：
         // 用户以为改了名字，实际什么都没写。
@@ -5686,7 +5719,7 @@ impl HybridMode {
         let Some(path) = &arguments.hybrid else {
             return Ok(None);
         };
-        if arguments.hybrid_dry_run {
+        if arguments.hybrid_dry_run && arguments.hybrid_tap.is_none() {
             let spec = colm_hybrid::HybridConfig::load_spec(path)?;
             if spec.slots.iter().any(|slot| slot.model.is_none()) {
                 return Ok(Some(Self::Spec(spec)));
@@ -5917,6 +5950,7 @@ fn spatial_hybrid_climate(
 /// 空间算例的空跑：逐分块按正式运行同样的 patch 与 PFT 区间取特征、推理，合并成一份汇总。
 fn spatial_hybrid_summary(
     hybrid: Option<&HybridMode>,
+    document: &Document,
     case_dir: &Path,
     out: &Path,
     year: i64,
@@ -5949,6 +5983,20 @@ fn spatial_hybrid_summary(
         } else {
             vec![0..0; block_patches.len()]
         };
+        if let Some(HybridMode::Tap { config, out, .. }) = hybrid {
+            // 空跑加 tap：逐块追加到同一个 CSV，不汇总。
+            colm_runtime::hybrid::write_tap(
+                config,
+                &constant,
+                Some(case_dir),
+                &block_patches,
+                &ranges,
+                physics,
+                document,
+                out,
+            )?;
+            continue;
+        }
         parts.push(match hybrid {
             Some(HybridMode::Apply(hybrid)) => {
                 hybrid.summary(&constant, &block_patches, &ranges, physics)?

@@ -31146,3 +31146,44 @@ LAI 的块是 `(1, 1, 86400)`，一块一整条全球纬线，读区域时每行
   - 湿空气的饱和差更小，且不会为负；
   - 气候文件重算后 colm 指纹改变，前处理指纹不变；
   - 成员物化时拷贝气候文件。
+
+## 第 612 轮：两步训练——`colm-cli hybrid-fit`
+
+设计见 docs/design-hybrid.md 第 13 节第 3 步。
+
+**改动**：
+- `colm-hybrid::fit`：
+  - 输出反变换：sigmoid 取 logit；softplus 取反函数；端点收进 1e-6 相对边距，避免发散。
+  - 特征按训练样本加权标准化。
+  - 线性网络：加权岭回归闭式解（部分主元消元，不罚偏置）。
+  - 有隐藏层：全批量 Adam。目标先标准化，最后把尺度折回输出层；splitmix64 固定种子，结果确定。
+  - `predict`：预测物理量。
+- `Normalization` 增加 `Serialize`。
+- `colm-rs`：
+  - `--hybrid-dry-run` 与 `--hybrid-tap` 可以同时用，只取样不模拟；空间算例逐块追加。
+  - tap 增加 `class` 列。
+- `colm-cli hybrid-fit`：
+  - 读每个 Study 的最优成员（复用 `resolve_apply_member`），在基础算例上取 tap。
+  - 按 `DEF_PFT_X(k+1)` 或 `DEF_LC_X`（限所属地类）对上率定值。
+  - 做留一站交叉验证；写出模型、标准化与报告。
+
+**实测**：
+- tap 加空跑：
+  - `tmp/st-rust`（LCT）：1 行，class 10，含 `clim_*` 特征。
+  - `tmp/hybpc/cases/CH-Dav`（PC）：3 行，class 2、3、11，含 pftfrac 与 porsl[1]。
+- 拿 `/tmp/hc` 现成的 Study（只训练网络权重，没有率定 PFT 参数）跑 `hybrid-fit`：读 Study、取 tap 都通，最后如实报"没有任何一行带全部输出的率定值"。
+- 真实的端到端（各站率定 → 拟合 → 留出站点正向检验）要跑新的调优 Study，需要 PLUMBER2 强迫。外接数据盘本轮仍未挂载，待做。
+
+**单元测试**：
+- 拟合：
+  - 反变换的往返；
+  - 线性关系精确还原；
+  - sigmoid 目标在 logit 空间拟合，外推仍在范围内；
+  - 带隐藏层拟合 `40 + 20·sin(x)`：均方根误差 < 1.5，不到线性的 1/3，同种子结果逐位相同；
+  - 权重把拟合拉向权重大的行，零权重报错。
+- `hybrid-fit`：
+  - tap 解析；
+  - 按分类键找目标（PFT 下标、地类限定）；
+  - 三组的留一组交叉验证，以及只有一组时不做交叉验证。
+
+**检查**：两个 workspace 的 fmt 都干净；workspace clippy 零警告；workspace 测试 1895 项通过（单线程）；GUI `cargo check` 通过。
