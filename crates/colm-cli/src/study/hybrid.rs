@@ -73,7 +73,12 @@ pub fn write_member_files(
                 .as_str()
                 .context("transform is not a string")?
                 .to_owned();
-            Ok((output.name.clone(), Some(output.range), transform))
+            Ok((
+                output.name.clone(),
+                Some(output.range),
+                transform,
+                output.relative,
+            ))
         })
         .collect::<Result<Vec<_>>>()?;
     let config = destination.join("hybrid.toml");

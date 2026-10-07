@@ -2895,6 +2895,55 @@ mod tests {
         ))
     }
 
+    /// 相对输出：网络给乘数，参数取有效查表值 × 乘数。乘数恰为 1 时覆盖值就是表值本身（逐位），
+    /// 乘数为 2 时翻倍；本站的 `DEF_LC_*` 覆盖是乘数的基准。
+    #[test]
+    fn relative_outputs_scale_the_effective_table_value() {
+        let root = directory("hybrid-relative");
+        let fixture = colm_init::fixtures::SyntheticRestart::write(root.join("restart")).unwrap();
+        let path = root.join("hybrid.toml");
+        std::fs::write(
+            &path,
+            "[[slot]]\nname = \"land_class\"\nkind = \"param\"\nfeatures = [\"patchclass\"]\n\
+             outputs = [{ name = \"DEF_LC_VMAX25\", range = [0.25, 4.0], transform = \"clamp\", relative = true }]\n",
+        )
+        .unwrap();
+        let factor = |value: f64| -> std::sync::Arc<dyn colm_hybrid::Surrogate> {
+            std::sync::Arc::new(colm_hybrid::FnBackend(
+                move |input: &colm_hybrid::Matrix| {
+                    colm_hybrid::Matrix::new(input.rows, 1, vec![value; input.rows])
+                },
+            ))
+        };
+        let document = colm_namelist::parse("&nl_colm\n/\n").unwrap();
+        let vmax = |backend, physics: &crate::assembly::LandPhysicsParameters| {
+            let config = colm_hybrid::HybridConfig::load_spec(&path).unwrap();
+            crate::hybrid::Hybrid::with_backend(config, backend)
+                .unwrap()
+                .patch_physics(
+                    &fixture.constant.block,
+                    &[1],
+                    &[std::ops::Range::default()],
+                    physics,
+                    &document,
+                )
+                .unwrap()[0]
+                .land_class_overrides
+                .vmax25_umol
+                .unwrap()
+        };
+        let physics = land_physics();
+        let table = colm_core::ClassConstants::new(colm_core::LandCoverScheme::Igbp, 3)
+            .unwrap()
+            .table_value("DEF_LC_VMAX25")
+            .unwrap();
+        assert_eq!(vmax(factor(1.0), &physics).to_bits(), table.to_bits());
+        assert_eq!(vmax(factor(2.0), &physics), table * 2.0);
+        let mut overridden = physics.clone();
+        overridden.land_class_overrides.vmax25_umol = Some(40.0);
+        assert_eq!(vmax(factor(1.5), &overridden), 60.0);
+    }
+
     /// 设计第 6 节第 2 条：参数插槽接一个原样给出物理表值的模型，结果与不接逐位相同。
     #[test]
     fn a_land_class_slot_that_echoes_the_table_changes_nothing() {
@@ -2918,7 +2967,13 @@ mod tests {
         let hybrid = land_class_hybrid(&root, &names, table_echo(names.clone(), 1.0));
         let physics = land_physics();
         let per_patch = hybrid
-            .patch_physics(&fixture.constant.block, &[0, 1], &[0..0, 0..0], &physics)
+            .patch_physics(
+                &fixture.constant.block,
+                &[0, 1],
+                &[0..0, 0..0],
+                &physics,
+                &colm_namelist::parse("&nl_colm\n/\n").unwrap(),
+            )
             .unwrap();
         // 两个 patch 都是土壤 patch，每一列都被覆盖了（覆盖确实走了插槽这条路）。
         assert!(per_patch
@@ -2966,6 +3021,7 @@ mod tests {
                 &[1],
                 &[std::ops::Range::default()],
                 &physics,
+                &colm_namelist::parse("&nl_colm\n/\n").unwrap(),
             )
             .unwrap();
         let table = colm_core::ClassConstants::new(colm_core::LandCoverScheme::Igbp, 3)

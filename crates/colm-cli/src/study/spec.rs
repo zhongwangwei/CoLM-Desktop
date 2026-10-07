@@ -347,6 +347,9 @@ pub struct HybridOutputSpec {
     pub range: [f64; 2],
     #[serde(default = "default_hybrid_transform")]
     pub transform: colm_hybrid::Transform,
+    /// 相对输出：`range` 是乘在算例有效查表值上的乘数范围。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub relative: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]

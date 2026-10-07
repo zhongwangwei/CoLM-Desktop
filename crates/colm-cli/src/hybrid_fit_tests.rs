@@ -32,17 +32,46 @@ fn targets_follow_the_tuned_class_keys() {
     parameters.insert("DEF_PFT_VMAX25(3)".to_owned(), 41.0);
     parameters.insert("DEF_LC_VMAX25".to_owned(), 55.0);
     let none = BTreeMap::new();
+    let row = |class: i64, physics: f64| TapRow {
+        class,
+        values: [
+            ("physics:DEF_PFT_VMAX25".to_owned(), physics),
+            ("physics:DEF_LC_VMAX25".to_owned(), physics),
+        ]
+        .into_iter()
+        .collect(),
+    };
     // PFT 类 2 的键是 (3)；类 11 没有率定，这一行不进样本。
     let pft = network("pft", "DEF_PFT_VMAX25");
-    assert_eq!(row_targets(&pft, &parameters, &none, 2), Some(vec![41.0]));
-    assert_eq!(row_targets(&pft, &parameters, &none, 11), None);
+    assert_eq!(
+        row_targets(&pft, &parameters, &none, &row(2, 20.5)),
+        Some(vec![41.0])
+    );
+    assert_eq!(row_targets(&pft, &parameters, &none, &row(11, 20.5)), None);
+    // 相对输出：率定值 ÷ 有效查表值。
+    let mut relative = pft.clone();
+    relative.outputs[0].relative = true;
+    assert_eq!(
+        row_targets(&relative, &parameters, &none, &row(2, 20.5)),
+        Some(vec![2.0])
+    );
+    assert_eq!(
+        row_targets(&relative, &parameters, &none, &row(2, 0.0)),
+        None
+    );
     // 地类参数只用于 Study 里它所属的地类。
     let lc = network("land_class", "DEF_LC_VMAX25");
     let mut scoped = BTreeMap::new();
     scoped.insert("DEF_LC_VMAX25".to_owned(), 1);
-    assert_eq!(row_targets(&lc, &parameters, &scoped, 1), Some(vec![55.0]));
-    assert_eq!(row_targets(&lc, &parameters, &scoped, 4), None);
-    assert_eq!(row_targets(&lc, &parameters, &none, 4), Some(vec![55.0]));
+    assert_eq!(
+        row_targets(&lc, &parameters, &scoped, &row(1, 1.0)),
+        Some(vec![55.0])
+    );
+    assert_eq!(row_targets(&lc, &parameters, &scoped, &row(4, 1.0)), None);
+    assert_eq!(
+        row_targets(&lc, &parameters, &none, &row(4, 1.0)),
+        Some(vec![55.0])
+    );
 }
 
 #[test]

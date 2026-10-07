@@ -41,6 +41,10 @@ pub struct OutputSpec {
     pub range: Option<[f64; 2]>,
     #[serde(default)]
     pub transform: Transform,
+    /// 相对输出：网络（经变换、在 `range` 内）给出的是乘数，参数取“算例的有效查表值 × 乘数”。
+    /// 网络只需学气候等特征让参数偏高还是偏低，不必学各 PFT/地类之间本来的差别。
+    #[serde(default)]
+    pub relative: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]

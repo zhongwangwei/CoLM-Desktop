@@ -174,7 +174,18 @@ impl LandClassOverrides {
 
     /// 按 [`Self::REAL_NAMES`] 的名字设一列；名字不认识时报错。
     pub fn set_real(&mut self, name: &str, value: f64) -> Result<()> {
-        let slot = match name {
+        *self.slot(name)? = Some(value);
+        Ok(())
+    }
+
+    /// 按名字读一列的覆盖值（没覆盖时为 `None`）；名字不认识时报错。
+    pub fn get(&self, name: &str) -> Result<Option<f64>> {
+        let mut copy = *self;
+        Ok(*copy.slot(name)?)
+    }
+
+    fn slot(&mut self, name: &str) -> Result<&mut Option<f64>> {
+        Ok(match name {
             "DEF_LC_HTOP0" => &mut self.htop0,
             "DEF_LC_HBOT0" => &mut self.hbot0,
             "DEF_LC_FVEG0" => &mut self.fveg0,
@@ -205,9 +216,7 @@ impl LandClassOverrides {
             "DEF_LC_D50" => &mut self.d50,
             "DEF_LC_BETA" => &mut self.beta,
             other => anyhow::bail!("{other} is not a land-class scalar override"),
-        };
-        *slot = Some(value);
-        Ok(())
+        })
     }
 }
 
@@ -307,6 +316,14 @@ impl ClassConstants {
             other => anyhow::bail!("{other} is not a land-class scalar override"),
         };
         Ok(self.value(column))
+    }
+
+    /// `DEF_LC_*` 那一列的**有效值**：有覆盖取覆盖，否则取表值（都是原始单位）。
+    pub fn effective_value(&self, name: &str) -> Result<f64> {
+        match self.overrides.get(name)? {
+            Some(value) => Ok(value),
+            None => self.table_value(name),
+        }
     }
 
     /// `patchtypes`：0 土壤、1 城市、2 湿地、3 冰、4 湖。

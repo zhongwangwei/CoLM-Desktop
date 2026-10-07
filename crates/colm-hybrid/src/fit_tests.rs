@@ -5,6 +5,7 @@ fn output(transform: Transform, range: Option<[f64; 2]>) -> OutputSpec {
         name: "DEF_PFT_VMAX25".into(),
         range,
         transform,
+        relative: false,
     }
 }
 

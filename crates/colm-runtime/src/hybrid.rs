@@ -38,6 +38,94 @@ pub struct Hybrid {
     case_dir: Option<PathBuf>,
 }
 
+/// 一个分类（地类或 PFT 类）下参数的有效值：地类取表值或本站的 `DEF_LC_*` 覆盖，PFT 取与装配相同的
+/// 查表（含 namelist 的 `DEF_PFT_*(class)`）。相对输出与 tap 的 `physics:` 列都用它。
+fn physics_value(
+    slot: &SlotConfig,
+    name: &str,
+    class: i64,
+    physics: &LandPhysicsParameters,
+    document: &colm_namelist::Document,
+) -> Result<f64> {
+    if slot.name == LAND_CLASS_SLOT {
+        let class = usize::try_from(class).context("patchclass is negative")?;
+        colm_core::ClassConstants::new(physics.land_cover_scheme, class)?
+            .with_overrides(physics.land_class_overrides)
+            .effective_value(name)
+    } else {
+        let class = i32::try_from(class).context("pftclass is out of range")?;
+        colm_init::pft_parameter(
+            document,
+            name,
+            class,
+            physics.hydraulic_model == colm_core::HydraulicModel::Campbell,
+            physics.use_pc,
+        )
+    }
+}
+
+/// 相对输出（`relative = true`）：把网络给出的乘数乘上各行分类的有效值；其余输出原样。
+fn relative_values(
+    slot: &SlotConfig,
+    mut values: Matrix,
+    classes: &[i64],
+    physics: &LandPhysicsParameters,
+    document: &colm_namelist::Document,
+) -> Result<Matrix> {
+    if !slot.outputs.iter().any(|output| output.relative) {
+        return Ok(values);
+    }
+    ensure!(
+        classes.len() == values.rows,
+        "{} classes for {} rows",
+        classes.len(),
+        values.rows
+    );
+    let cols = values.cols;
+    for (row, &class) in classes.iter().enumerate() {
+        for (column, output) in slot.outputs.iter().enumerate() {
+            if output.relative {
+                values.data[row * cols + column] *=
+                    physics_value(slot, &output.name, class, physics, document)?;
+            }
+        }
+    }
+    Ok(values)
+}
+
+/// 各 PFT 行的 `pftclass`。
+fn pft_classes(
+    pft_restart: &colm_init::RestartFile,
+    rows: &[(usize, usize, usize)],
+) -> Result<Vec<i64>> {
+    rows.iter()
+        .map(|&(_, _, pft)| {
+            Ok(pft_value(pft_restart, "pftclass", pft)?
+                .context("the PFT constant restart has no pftclass")? as i64)
+        })
+        .collect()
+}
+
+/// 一个插槽各行的分类，行次序与 [`slot_features`] 相同。
+fn slot_classes(
+    slot: &SlotConfig,
+    constant: &Path,
+    case_dir: Option<&Path>,
+    patches: &[usize],
+    pft_ranges: &[Range<usize>],
+) -> Result<Vec<i64>> {
+    let restart = Features::open(constant, case_dir, &[])?;
+    let soil = soil_rows(&restart.restart, patches)?;
+    if slot.name == LAND_CLASS_SLOT {
+        return soil
+            .iter()
+            .map(|&row| patch_integer(&restart.restart, "patchclass", patches[row]))
+            .collect();
+    }
+    let pft_restart = colm_init::RestartFile::open(crate::pft::pft_restart_path(constant)?)?;
+    pft_classes(&pft_restart, &pft_rows(&soil, patches, pft_ranges))
+}
+
 /// `outside = "physics"` 时超出训练范围、要退回纯物理参数的行。
 fn physics_fallback(slot: &Slot, features: &Matrix) -> Vec<bool> {
     match slot.config.outside {
@@ -182,6 +270,7 @@ impl Hybrid {
         patches: &[usize],
         pft_ranges: &[Range<usize>],
         physics: &LandPhysicsParameters,
+        document: &colm_namelist::Document,
     ) -> Result<Vec<LandPhysicsParameters>> {
         let mut out = vec![physics.clone(); patches.len()];
         if self.land_class.is_none() && self.pft.is_none() {
@@ -203,7 +292,17 @@ impl Hybrid {
             );
             let soil_patches: Vec<usize> = soil.iter().map(|&row| patches[row]).collect();
             let matrix = feature_matrix(&features, &slot.config.features, &soil_patches)?;
-            let values = slot.evaluate(&matrix)?;
+            let classes = soil_patches
+                .iter()
+                .map(|&patch| patch_integer(&features.restart, "patchclass", patch))
+                .collect::<Result<Vec<_>>>()?;
+            let values = relative_values(
+                &slot.config,
+                slot.evaluate(&matrix)?,
+                &classes,
+                physics,
+                document,
+            )?;
             let skip = physics_fallback(slot, &matrix);
             for (index, &row) in soil.iter().enumerate() {
                 if skip[index] {
@@ -231,7 +330,14 @@ impl Hybrid {
                 colm_init::RestartFile::open(crate::pft::pft_restart_path(constant)?)?;
             let rows = pft_rows(&soil, patches, pft_ranges);
             let matrix = pft_feature_matrix(&features, &pft_restart, &slot.config.features, &rows)?;
-            let values = slot.evaluate(&matrix)?;
+            let classes = pft_classes(&pft_restart, &rows)?;
+            let values = relative_values(
+                &slot.config,
+                slot.evaluate(&matrix)?,
+                &classes,
+                physics,
+                document,
+            )?;
             let skip = physics_fallback(slot, &matrix);
             for (index, &(row, _, _)) in rows.iter().enumerate() {
                 let mut overrides = BTreeMap::new();
@@ -259,6 +365,7 @@ impl Hybrid {
         patches: &[usize],
         pft_ranges: &[Range<usize>],
         physics: &LandPhysicsParameters,
+        document: &colm_namelist::Document,
     ) -> Result<Vec<SlotSummary>> {
         let mut out = Vec::new();
         for slot in self.land_class.iter().chain(&self.pft) {
@@ -270,8 +377,21 @@ impl Hybrid {
                 pft_ranges,
                 physics,
             )?;
-            let mut summary =
-                SlotSummary::new(&slot.config, &features, Some(&slot.evaluate(&features)?));
+            let classes = slot_classes(
+                &slot.config,
+                constant,
+                self.case_dir.as_deref(),
+                patches,
+                pft_ranges,
+            )?;
+            let outputs = relative_values(
+                &slot.config,
+                slot.evaluate(&features)?,
+                &classes,
+                physics,
+                document,
+            )?;
+            let mut summary = SlotSummary::new(&slot.config, &features, Some(&outputs));
             summary.outside_training = slot
                 .has_training_range()
                 .then(|| slot.outside_rows(&features).iter().filter(|&&o| o).count());
@@ -642,13 +762,15 @@ pub fn write_tap(
             let patch = patches[row];
             let class = usize::try_from(patch_integer(restart, "patchclass", patch)?)
                 .context("patchclass is negative")?;
-            let constants = colm_core::ClassConstants::new(physics.land_cover_scheme, class)?;
             let mut line = vec![patch.to_string(), String::new(), class.to_string()];
             for feature in &slot.features {
                 line.push(format!("{:e}", features.value(feature, patch)?));
             }
             for output in &slot.outputs {
-                line.push(format!("{:e}", constants.table_value(&output.name)?));
+                line.push(format!(
+                    "{:e}",
+                    physics_value(slot, &output.name, class as i64, physics, document)?
+                ));
             }
             writeln!(file, "{}", line.join(","))?;
         }
@@ -665,7 +787,6 @@ pub fn write_tap(
         patches.len()
     );
     let pft_restart = colm_init::RestartFile::open(crate::pft::pft_restart_path(constant)?)?;
-    let campbell = physics.hydraulic_model == colm_core::HydraulicModel::Campbell;
     for (_, patch, pft) in pft_rows(&soil, patches, pft_ranges) {
         let class = pft_value(&pft_restart, "pftclass", pft)?
             .context("the PFT constant restart has no pftclass")? as i32;
@@ -678,8 +799,7 @@ pub fn write_tap(
             line.push(format!("{value:e}"));
         }
         for output in &slot.outputs {
-            let value =
-                colm_init::pft_parameter(document, &output.name, class, campbell, physics.use_pc)?;
+            let value = physics_value(slot, &output.name, i64::from(class), physics, document)?;
             line.push(format!("{value:e}"));
         }
         writeln!(file, "{}", line.join(","))?;

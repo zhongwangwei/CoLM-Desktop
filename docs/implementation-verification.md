@@ -31222,3 +31222,26 @@ LAI 的块是 `(1, 1, 86400)`，一块一整条全球纬线，读区域时每行
 - workspace 测试 1896 项通过（单线程）；GUI Rust 测试 205 项通过。
 - `check-gui` 通过；13 个前端套件全部通过。
 - 新增测试覆盖：训练范围的记录与判定、常数特征的判定、没有范围时不判、读回、长度校验，以及 Study 合并训练范围。
+
+## 第 614 轮：相对输出（乘数）
+
+设计见 docs/design-hybrid.md 第 13 节第 5 步。
+
+**改动**：
+- `OutputSpec.relative`。
+- `LandClassOverrides::get` 与 `ClassConstants::effective_value`。
+- `hybrid.rs` 的 `physics_value`、`relative_values`、`slot_classes`。`patch_physics` 与 `summary` 增加 `document` 参数，用于查 PFT 的有效值。
+- tap 的 `physics:` 列改用有效值（地类以前只取表值，不看本站覆盖）。
+- `hybrid-fit` 的相对目标；`hybrid-install` 的 `:relative`。
+- Study 的 `HybridOutputSpec.relative`：为 false 时不序列化，旧 spec 哈希不变。
+- GUI 的"乘数"勾选与说明。
+
+**测试**：
+- `relative_outputs_scale_the_effective_table_value`：
+  - 乘数 1 时覆盖值与表值逐位相同；
+  - 乘数 2 时翻倍；
+  - 本站覆盖为 40、乘数 1.5 时得 60。
+- 相对目标为"率定值 ÷ 有效值"；有效值为 0 时这一行不进样本。
+- `--output ...:relative` 的解析；GUI 的 `outputArg` 与 `studySection`。
+
+**检查**：两个 workspace 的 fmt 都干净，clippy 都零警告；workspace 测试 1897 项通过（单线程）；GUI Rust 测试 205 项通过；`check-gui` 与 13 个前端套件都通过。

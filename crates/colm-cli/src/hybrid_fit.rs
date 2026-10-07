@@ -69,30 +69,48 @@ pub(crate) fn parse_tap(text: &str) -> Result<Vec<TapRow>> {
 
 /// 一行的目标：每个输出在最优成员里对应的率定值。`pft` 插槽的键是 `DEF_PFT_X(k+1)`（`k` 为 PFT 类，
 /// 见 `ParameterSpec::member_key`）；`land_class` 插槽是不带下标的 `DEF_LC_X`，只用于与它的地类相同
-/// 的行。缺任一个输出就返回 `None`（这一行没有率定值，不进样本）。
+/// 的行。缺任一个输出就返回 `None`（这一行没有率定值，不进样本）。相对输出的目标是率定值除以
+/// tap 里这一行的有效查表值（`physics:<名字>` 列）。
 pub(crate) fn row_targets(
     network: &HybridStudySpec,
     parameters: &BTreeMap<String, f64>,
     land_classes: &BTreeMap<String, i64>,
-    class: i64,
+    row: &TapRow,
 ) -> Option<Vec<f64>> {
+    let class = row.class;
     network
         .outputs
         .iter()
         .map(|output| {
-            if network.slot == "pft" {
-                parameters
-                    .get(&format!("{}({})", output.name, class + 1))
-                    .copied()
+            let value = absolute_target(network, output, parameters, land_classes, class)?;
+            if output.relative {
+                let base = *row.values.get(&format!("physics:{}", output.name))?;
+                (base != 0.0).then(|| value / base)
             } else {
-                let value = parameters.get(&output.name).copied()?;
-                land_classes
-                    .get(&output.name)
-                    .is_none_or(|&scoped| scoped == class)
-                    .then_some(value)
+                Some(value)
             }
         })
         .collect()
+}
+
+/// 率定出的绝对值：`pft` 插槽取 `DEF_PFT_X(k+1)`，`land_class` 插槽取 `DEF_LC_X`（限所属地类）。
+fn absolute_target(
+    network: &HybridStudySpec,
+    output: &crate::study::spec::HybridOutputSpec,
+    parameters: &BTreeMap<String, f64>,
+    land_classes: &BTreeMap<String, i64>,
+    class: i64,
+) -> Option<f64> {
+    if network.slot == "pft" {
+        return parameters
+            .get(&format!("{}({})", output.name, class + 1))
+            .copied();
+    }
+    let value = parameters.get(&output.name).copied()?;
+    land_classes
+        .get(&output.name)
+        .is_none_or(|&scoped| scoped == class)
+        .then_some(value)
 }
 
 fn options(opts: &Opts, network: &HybridStudySpec) -> Result<FitOptions> {
@@ -124,6 +142,7 @@ pub(crate) fn output_specs(network: &HybridStudySpec) -> Vec<OutputSpec> {
             name: output.name.clone(),
             range: Some(output.range),
             transform: output.transform,
+            relative: output.relative,
         })
         .collect()
 }
@@ -303,7 +322,7 @@ pub(super) fn cmd_hybrid_fit(opts: &Opts) -> Result<()> {
                 let (mut kept, mut dropped) = (0usize, 0usize);
                 for row in tapped {
                     let Some(targets) =
-                        row_targets(&network, &member.parameters, &land_classes, row.class)
+                        row_targets(&network, &member.parameters, &land_classes, &row)
                     else {
                         dropped += 1;
                         continue;

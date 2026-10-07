@@ -190,7 +190,7 @@ fn run() -> Result<()> {
         let ranges = single_point_pft_ranges(&files.constant, &patches, &physics)?;
         let summary = match &hybrid {
             Some(HybridMode::Apply(hybrid)) => {
-                hybrid.summary(&files.constant, &patches, &ranges, &physics)?
+                hybrid.summary(&files.constant, &patches, &ranges, &physics, &document)?
             }
             Some(HybridMode::Tap {
                 config,
@@ -5751,7 +5751,7 @@ fn hybrid_patch_physics(
     match hybrid {
         None => Ok(vec![physics.clone(); patches.len()]),
         Some(HybridMode::Apply(hybrid)) => {
-            hybrid.patch_physics(constant, patches, &pft_ranges()?, physics)
+            hybrid.patch_physics(constant, patches, &pft_ranges()?, physics, document)
         }
         Some(HybridMode::Tap {
             config,
@@ -5999,7 +5999,7 @@ fn spatial_hybrid_summary(
         }
         parts.push(match hybrid {
             Some(HybridMode::Apply(hybrid)) => {
-                hybrid.summary(&constant, &block_patches, &ranges, physics)?
+                hybrid.summary(&constant, &block_patches, &ranges, physics, document)?
             }
             Some(HybridMode::Spec(config)) => colm_runtime::hybrid::feature_summary(
                 config,

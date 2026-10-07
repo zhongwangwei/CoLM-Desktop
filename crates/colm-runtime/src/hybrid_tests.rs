@@ -22,6 +22,7 @@ fn only_land_class_param_slots_with_def_lc_outputs_are_accepted() {
             name: output.into(),
             range: None,
             transform: colm_hybrid::Transform::Identity,
+            relative: false,
         }],
     };
     assert!(known_slot(&config(LAND_CLASS_SLOT, SlotKind::Param, "DEF_LC_VMAX25")).is_ok());
@@ -68,6 +69,7 @@ fn the_pft_slot_accepts_only_def_pft_parameters() {
             name: output.into(),
             range: None,
             transform: colm_hybrid::Transform::Identity,
+            relative: false,
         }],
     };
     assert!(known_slot(&config(PFT_SLOT, "DEF_PFT_VMAX25")).is_ok());
@@ -100,6 +102,7 @@ fn summaries_report_range_mean_and_population_std() {
             name: "DEF_PFT_VMAX25".into(),
             range: None,
             transform: colm_hybrid::Transform::Identity,
+            relative: false,
         }],
     };
     let features = Matrix::new(4, 2, vec![1.0, 0.5, 2.0, 0.5, 3.0, 0.5, 4.0, 0.5]).unwrap();

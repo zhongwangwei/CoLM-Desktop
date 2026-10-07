@@ -9,22 +9,35 @@ use super::{
     rust_model_crop_arguments, rust_model_executable, rust_model_land_cover, Kernel, Opts,
 };
 
-/// `--output NAME[:lo:hi[:transform]]`。
-fn parse_output(spec: &str) -> Result<(String, Option<[f64; 2]>, String)> {
+/// 一个输出：名字、范围、变换、是否相对查表值（乘数）。
+pub(crate) type OutputLine = (String, Option<[f64; 2]>, String, bool);
+
+/// `--output NAME[:lo:hi[:transform[:relative]]]`。
+fn parse_output(spec: &str) -> Result<OutputLine> {
     let parts: Vec<&str> = spec.split(':').collect();
     match parts.as_slice() {
-        [name] => Ok((name.to_string(), None, "identity".into())),
+        [name] => Ok((name.to_string(), None, "identity".into(), false)),
         [name, lo, hi] => Ok((
             name.to_string(),
             Some([lo.parse()?, hi.parse()?]),
             "identity".into(),
+            false,
         )),
         [name, lo, hi, transform] => Ok((
             name.to_string(),
             Some([lo.parse()?, hi.parse()?]),
             transform.to_string(),
+            false,
         )),
-        _ => bail!("--output {spec:?} is not NAME, NAME:lo:hi or NAME:lo:hi:transform"),
+        [name, lo, hi, transform, "relative"] => Ok((
+            name.to_string(),
+            Some([lo.parse()?, hi.parse()?]),
+            transform.to_string(),
+            true,
+        )),
+        _ => bail!(
+            "--output {spec:?} is not NAME, NAME:lo:hi, NAME:lo:hi:transform or NAME:lo:hi:transform:relative"
+        ),
     }
 }
 
@@ -47,14 +60,14 @@ pub(crate) fn toml_string(value: &str) -> String {
     format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
-/// 一个参数插槽的 `hybrid.toml` 文本；`outputs` 是 `(名字, 范围, 变换)`。
+/// 一个参数插槽的 `hybrid.toml` 文本。
 pub(crate) fn slot_toml(
     slot: &str,
     model: &Path,
     sha256: &str,
     features: &[String],
     normalize: Option<&Path>,
-    outputs: &[(String, Option<[f64; 2]>, String)],
+    outputs: &[OutputLine],
     outside: Option<&str>,
 ) -> String {
     let mut text = String::from("[[slot]]\n");
@@ -80,12 +93,13 @@ pub(crate) fn slot_toml(
         text += &format!("outside = {}\n", toml_string(outside));
     }
     text += "outputs = [\n";
-    for (name, range, transform) in outputs {
+    for (name, range, transform, relative) in outputs {
         let range = range.map_or(String::new(), |[lo, hi]| {
             format!(", range = [{lo:?}, {hi:?}]")
         });
+        let relative = if *relative { ", relative = true" } else { "" };
         text += &format!(
-            "  {{ name = {}{range}, transform = {} }},\n",
+            "  {{ name = {}{range}, transform = {}{relative} }},\n",
             toml_string(name),
             toml_string(transform)
         );
@@ -316,6 +330,7 @@ pub(crate) fn hybrid_info(case: &Path) -> Result<serde_json::Value> {
                     "name": output.name,
                     "range": output.range,
                     "transform": output.transform,
+                    "relative": output.relative,
                 })).collect::<Vec<_>>(),
             })
         })

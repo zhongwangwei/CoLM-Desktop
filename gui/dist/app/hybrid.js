@@ -35,7 +35,7 @@ export function parseFeatures(text) {
 }
 
 /** 校验一行输出，返回 `{name, lo, hi, transform}`；不合法时抛出说明。 */
-export function checkOutput(slot, { name, lo, hi, transform }) {
+export function checkOutput(slot, { name, lo, hi, transform, relative = false }) {
   const prefix = outputPrefix(slot);
   const field = String(name ?? '').trim().toUpperCase();
   if (!field.startsWith(prefix) || field.length === prefix.length) {
@@ -48,12 +48,12 @@ export function checkOutput(slot, { name, lo, hi, transform }) {
   if (!Number.isFinite(low) || !Number.isFinite(high) || low >= high) {
     throw new Error(`${field} 的范围必须是有限数且下限小于上限`);
   }
-  return { name: field, lo: low, hi: high, transform: transform || 'sigmoid' };
+  return { name: field, lo: low, hi: high, transform: transform || 'sigmoid', relative: !!relative };
 }
 
 /** `colm-cli hybrid-install --output` 的写法。 */
-export function outputArg({ name, lo, hi, transform }) {
-  return `${name}:${lo}:${hi}:${transform}`;
+export function outputArg({ name, lo, hi, transform, relative = false }) {
+  return `${name}:${lo}:${hi}:${transform}${relative ? ':relative' : ''}`;
 }
 
 /** 网络规模选项 → 隐藏层宽度。 */
@@ -80,7 +80,9 @@ export function studySection({ slot, features, outputs, size }) {
   return {
     slot,
     features: names,
-    outputs: checked.map(o => ({ name: o.name, range: [o.lo, o.hi], transform: o.transform })),
+    outputs: checked.map(o => ({
+      name: o.name, range: [o.lo, o.hi], transform: o.transform, ...(o.relative ? { relative: true } : {}),
+    })),
     hidden: NETWORK_SIZES[size] ?? [],
   };
 }
@@ -121,13 +123,22 @@ function outputRow(host, output, transforms, onChange) {
     transform.appendChild(option);
   }
   transform.value = output.transform;
+  const relativeLabel = element('label', 'check mini');
+  const relative = element('input');
+  relative.type = 'checkbox';
+  relative.checked = !!output.relative;
+  relativeLabel.title = '勾选后网络给出乘数，参数取“查表值 × 乘数”，范围是乘数的范围（如 0.5–2）';
+  relativeLabel.append(relative, element('span', '', '乘数'));
   const remove = element('button', 'btn-ghost', '删除');
   remove.type = 'button';
   remove.onclick = () => { row.remove(); onChange?.(); };
   for (const el of [name, lo, hi, transform]) el.addEventListener('input', () => onChange?.());
   transform.addEventListener('change', () => onChange?.());
-  row.append(name, lo, element('span', 'muted', '–'), hi, transform, remove);
-  row.read = () => ({ name: name.value, lo: lo.value, hi: hi.value, transform: transform.value });
+  relative.addEventListener('change', () => onChange?.());
+  row.append(name, lo, element('span', 'muted', '–'), hi, transform, relativeLabel, remove);
+  row.read = () => ({
+    name: name.value, lo: lo.value, hi: hi.value, transform: transform.value, relative: relative.checked,
+  });
   host.appendChild(row);
 }
 

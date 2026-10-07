@@ -88,6 +88,7 @@ fn normalization_and_transforms_apply_in_order() {
         name: "x".into(),
         range,
         transform,
+        relative: false,
     };
     assert_eq!(
         apply_output(&spec(Transform::Sigmoid, Some([10.0, 20.0])), 0.0).unwrap(),

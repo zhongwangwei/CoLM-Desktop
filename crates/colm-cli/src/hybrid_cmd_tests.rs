@@ -4,16 +4,27 @@ use super::*;
 fn outputs_parse_names_ranges_and_transforms() {
     assert_eq!(
         parse_output("DEF_PFT_VMAX25").unwrap(),
-        ("DEF_PFT_VMAX25".into(), None, "identity".into())
+        ("DEF_PFT_VMAX25".into(), None, "identity".into(), false)
     );
     assert_eq!(
         parse_output("DEF_PFT_VMAX25:10:150:sigmoid").unwrap(),
         (
             "DEF_PFT_VMAX25".into(),
             Some([10.0, 150.0]),
-            "sigmoid".into()
+            "sigmoid".into(),
+            false
         )
     );
+    assert_eq!(
+        parse_output("DEF_PFT_VMAX25:0.5:2:sigmoid:relative").unwrap(),
+        (
+            "DEF_PFT_VMAX25".into(),
+            Some([0.5, 2.0]),
+            "sigmoid".into(),
+            true
+        )
+    );
+    assert!(parse_output("DEF_PFT_VMAX25:0.5:2:sigmoid:absolute").is_err());
     assert!(parse_output("DEF_PFT_VMAX25:10").is_err());
     assert!(parse_output("DEF_PFT_VMAX25:a:b").is_err());
 }

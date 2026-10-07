@@ -24,12 +24,14 @@ assert.equal(hybrid.slotDefaults('pft').output.name, 'DEF_PFT_VMAX25');
 assert.deepEqual(hybrid.parseFeatures(' pftclass，pftfrac  porsl[1], '), ['pftclass', 'pftfrac', 'porsl[1]']);
 
 assert.deepEqual(hybrid.checkOutput('pft', { name: 'def_pft_vmax25', lo: '10', hi: '80', transform: 'sigmoid' }),
-  { name: 'DEF_PFT_VMAX25', lo: 10, hi: 80, transform: 'sigmoid' });
+  { name: 'DEF_PFT_VMAX25', lo: 10, hi: 80, transform: 'sigmoid', relative: false });
 assert.throws(() => hybrid.checkOutput('pft', { name: 'DEF_LC_VMAX25', lo: 1, hi: 2 }), /DEF_PFT_/);
 assert.throws(() => hybrid.checkOutput('pft', { name: 'DEF_PFT_', lo: 1, hi: 2 }), /DEF_PFT_/);
 assert.throws(() => hybrid.checkOutput('pft', { name: 'DEF_PFT_VMAX25', lo: 5, hi: 5 }), /下限小于上限/);
 assert.throws(() => hybrid.checkOutput('pft', { name: 'DEF_PFT_VMAX25', lo: '', hi: 5 }), /下限小于上限/);
 assert.equal(hybrid.outputArg({ name: 'DEF_PFT_VMAX25', lo: 10, hi: 80, transform: 'clamp' }), 'DEF_PFT_VMAX25:10:80:clamp');
+assert.equal(hybrid.outputArg({ name: 'DEF_PFT_VMAX25', lo: 0.5, hi: 2, transform: 'sigmoid', relative: true }), 'DEF_PFT_VMAX25:0.5:2:sigmoid:relative');
+assert.deepEqual(hybrid.studySection({ slot: 'pft', features: 'clim_tair', size: 'linear', outputs: [{ name: 'DEF_PFT_VMAX25', lo: 0.5, hi: 2, transform: 'sigmoid', relative: true }] }).outputs, [{ name: 'DEF_PFT_VMAX25', range: [0.5, 2], transform: 'sigmoid', relative: true }]);
 
 // 与 colm-hybrid 的 Mlp::parameter_count、Study 的 weight_count 一致（2→3→1 共 13 个）。
 assert.equal(hybrid.weightCount(2, [], 1), 3);
