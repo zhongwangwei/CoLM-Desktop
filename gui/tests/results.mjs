@@ -972,7 +972,7 @@ console.log('results: scope, Study controls, bounded loading, PDF, and nine pane
     spatialStudyReason: () => spatial ? 'spatial disabled' : '',
     studyScopeKey: () => 'scope', activeStudyDirs: () => ['/studies/a'], currentKernel: () => '/kernel',
     status() {}, renderStudyReadiness() {}, studyRunning: { uq: false }, dialogText: x => x,
-    globalThis: { confirm: () => true }, runStudy: async () => {},
+    appConfirm: async () => true, runStudy: async () => {},
     invoke: async command => {
       if (command === 'study_status') { statusReads++; spatial = true; return JSON.stringify({ state: { tasks: {} } }); }
       if (command === 'study_retry') retries++;
@@ -1001,7 +1001,7 @@ console.log('results: scope, Study controls, bounded loading, PDF, and nine pane
     studyScopeKey: () => 'scope', activeStudyDirs: () => ['/studies/a'], currentKernel: () => '/kernel',
     status() {}, renderStudyReadiness() {}, dialogText: x => x, studySiteId: ({ dir }) => dir.split('/').pop(),
     parentDir: () => '/cases', studyScope: () => [{ dir: '/cases/site' }], setPreview() {},
-    globalThis: { confirm: () => true }, window: { prompt: () => '/cases/tuned' },
+    appConfirm: async () => true, appPrompt: async () => '/cases/tuned',
     bestTuningSummary,
     invoke: async command => {
       if (command === 'study_status') return JSON.stringify({ manifest: { spec: { base_cases: ['/cases/site'] } }, state: { best_member: 'm000001', candidates: { m000001: { feasible: true, calibration: 1 } } } });
@@ -1028,7 +1028,7 @@ console.log('results: scope, Study controls, bounded loading, PDF, and nine pane
     spatialStudyReason: () => '', studyScopeKey: () => 'scope', activeStudyDirs: () => ['/studies/a'], currentKernel: () => '/kernel',
     status() {}, renderStudyReadiness() {}, dialogText: x => x, studySiteId: ({ dir }) => dir.split('/').pop(),
     parentDir: () => '/cases', studyScope: () => [{ dir: '/cases/site' }], setPreview() {},
-    globalThis: { confirm: () => false }, window: { prompt: () => { throw new Error('prompt should not run'); } },
+    appConfirm: async () => false, appPrompt: async () => { throw new Error('prompt should not run'); },
     bestTuningSummary,
     invoke: async (command, args) => {
       if (command === 'study_status') return JSON.stringify({
@@ -1066,7 +1066,7 @@ for (const action of ['retry', 'resume']) {
       spatialStudyReason: () => '', studyScopeKey: () => scope,
       activeStudyDirs: () => [scope === 'old' ? '/old-study' : '/new-study'], currentKernel: () => '/kernel',
       status() {}, renderStudyReadiness() {}, studyRunning: { uq: false }, dialogText: x => x,
-      globalThis: { confirm: () => true }, runStudy: async () => { runs++; }, refreshStudy: async () => {},
+      appConfirm: async () => true, runStudy: async () => { runs++; }, refreshStudy: async () => {},
       invoke: async command => {
         if (command === 'study_status') return JSON.stringify({ state: { tasks: {} } });
         if (command === `study_${action}`) { mutations++; if (switchScope) scope = 'new'; return 'ok'; }

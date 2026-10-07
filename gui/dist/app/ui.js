@@ -10,6 +10,77 @@ export function status(msg) {
   $('status').textContent = String(msg);
 }
 
+/** 应用内的确认 / 输入对话框。
+ *
+ *  **不用 `window.confirm` / `prompt`**：桌面窗口里的 WebView 不弹系统对话框，直接当作“取消”返回，
+ *  用户连按钮都看不到（实测助手的“数据外发确认”与 Study 导出因此一点就“已取消”）。
+ *  文案由调用方给（已按语言处理）；按钮文字交给全局翻译。 */
+function dialog(message, { input = null, okText = '确定', cancelText = '取消' } = {}) {
+  return new Promise(resolve => {
+    const box = document.createElement('dialog');
+    box.className = 'app-dialog';
+    const text = document.createElement('p');
+    text.className = 'app-dialog-text';
+    text.textContent = String(message);
+    box.appendChild(text);
+    let field = null;
+    if (input !== null) {
+      field = document.createElement('input');
+      field.className = 'input';
+      field.value = input;
+      box.appendChild(field);
+    }
+    const row = document.createElement('div');
+    row.className = 'app-dialog-actions';
+    const cancel = document.createElement('button');
+    cancel.type = 'button';
+    cancel.className = 'btn-ghost';
+    cancel.textContent = cancelText;
+    const ok = document.createElement('button');
+    ok.type = 'button';
+    ok.className = 'run-btn';
+    ok.textContent = okText;
+    if (cancelText === null) row.append(ok);
+    else row.append(cancel, ok);
+    box.appendChild(row);
+    let settled = false;
+    const finish = value => {
+      if (settled) return;
+      settled = true;
+      box.close();
+      box.remove();
+      resolve(value);
+    };
+    ok.onclick = () => finish(field ? field.value : true);
+    cancel.onclick = () => finish(field ? null : false);
+    box.addEventListener('cancel', event => { event.preventDefault(); finish(field ? null : false); });
+    box.addEventListener('keydown', event => {
+      if (event.key === 'Enter' && !event.isComposing && event.target === field) {
+        event.preventDefault();
+        finish(field.value);
+      }
+    });
+    document.body.appendChild(box);
+    box.showModal();
+    (field ?? ok).focus();
+  });
+}
+
+/** 确认：返回 true / false。 */
+export function appConfirm(message, options) {
+  return dialog(message, options);
+}
+
+/** 只有“确定”的提示。 */
+export function appAlert(message) {
+  return dialog(message, { cancelText: null }).then(() => undefined);
+}
+
+/** 输入：返回输入的文字，取消时返回 null。 */
+export function appPrompt(message, value = '', options) {
+  return dialog(message, { ...options, input: String(value ?? '') });
+}
+
 
 /** 路径的最后一段。
  *

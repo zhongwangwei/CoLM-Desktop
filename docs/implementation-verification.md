@@ -31480,3 +31480,23 @@ GPP 的均值被 4 个基线 KGE 低于 −0.5 的站拉低（BE-Lon、DE-Geb、
 - GUI 保存或删除 Key 后结束助手进程，下次发送时用新 Key 重启。设置里写明 Key 以明文保存在哪里。
 
 **检查**：colm-agent 20 项测试通过（新增 Key 文件测试：按服务地址分开存、地址大小写与结尾斜杠归一、权限 0600、删除只删一项、坏文件报错）；GUI Rust 测试 207 项通过；两边 clippy 零警告；`check-gui` 与前端套件全部通过。
+
+## 第 622 轮：Tauri 窗口里原生对话框失效，改为应用内对话框
+
+**过程**：
+- 用户反馈：回车不能发送，点"发送"没反应，提示"已取消发送"。
+- 查实：第一次发送前，助手要用 `window.confirm` 确认把数据发往外部服务。但 Tauri 的 WebView（macOS 的 WKWebView）不实现原生 `confirm`/`prompt`/`alert`，`confirm` 直接返回 false，所以每次都被当成"取消"。
+- 全应用排查后发现同样问题还在五处，原来都静默失效：
+  - 结果页：批量建 Study 前的确认、重试、应用参数、导出路径输入、应用输出目录输入
+  - 参数页：应用覆盖值的确认
+  - AI 参数化：移除前的确认
+  - 强迫场：CDS 配置错误的提示
+- 回车不能发送：输入框是 textarea，原来回车只换行。
+
+**现状**：
+- `ui.js` 新增基于 `<dialog>` 的 `appConfirm`、`appPrompt`、`appAlert`，替换上述全部原生对话框。
+- 助手的发送前确认改为面板内卡片，带"同意并发送"和"取消"两个按钮。同意一次后记住，不再询问。
+- 回车发送，Shift + 回车换行。输入法组字时（`isComposing`/keyCode 229）回车不触发发送。
+- `gui/tests/assistant.mjs` 增加检查：`dist/app/*.js` 里不许再出现原生 `confirm`/`prompt`/`alert`。
+
+**检查**：`check-gui` 通过（90 个命令全部能解析）；14 个前端套件全部通过（`results.mjs` 的桩改为异步的 `appConfirm`/`appPrompt`；`forcing-gapfill.mjs` 改为检查 `appAlert`）。

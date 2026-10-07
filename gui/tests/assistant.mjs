@@ -62,4 +62,11 @@ assert.equal(assistant.caseFromResult('create_case', '{"case":"/p/A","created":t
 assert.equal(assistant.caseFromResult('create_case', '{"case":"/p/A","created":false}'), null);
 assert.equal(assistant.caseFromResult('metrics', '{"case":"/p/A"}'), null);
 assert.equal(assistant.caseFromResult('create_case', 'error: x'), null);
+// 桌面窗口里的 WebView 不弹系统对话框（直接当作取消）：前端一律用 ui.js 的 appConfirm / appPrompt。
+import { readdir } from 'node:fs/promises';
+for (const file of await readdir(join(root, 'dist', 'app'))) {
+  if (!file.endsWith('.js')) continue;
+  const code = (await readFile(join(root, 'dist', 'app', file), 'utf8')).replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+  assert.ok(!/\b(window|globalThis)\.(confirm|prompt|alert)\b|(^|[^.\w])(confirm|prompt|alert)\(/m.test(code), `${file} uses a native dialog`);
+}
 console.log('assistant: context, events, answer blocks and page wiring ok');

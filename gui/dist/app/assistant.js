@@ -344,6 +344,32 @@ function projectRoot(view) {
   return dir.includes('/') ? dir.slice(0, dir.lastIndexOf('/')) : dir;
 }
 
+/** 第一次向某个服务发送前，在面板里问一次数据外发（不用 window.confirm：桌面窗口里弹不出来）。 */
+function askConsent(baseUrl) {
+  return new Promise(resolve => {
+    const card = element('div', 'assistant-consent');
+    card.append(
+      element('div', 'assistant-approval-title', '发送前请确认'),
+      element('p', 'mini', '发送后，你的问题、算例配置、指标与日志片段会发给这个模型服务：'),
+      element('p', 'mini assistant-consent-url', baseUrl),
+      element('p', 'muted mini', '换用本机的模型（例如 Ollama）可以避免数据外发。只需确认一次。'),
+    );
+    const ok = element('button', 'run-btn', '同意并发送');
+    const no = element('button', 'btn-ghost', '取消');
+    for (const button of [ok, no]) button.type = 'button';
+    const done = value => { card.remove(); resolve(value); };
+    ok.onclick = () => done(true);
+    no.onclick = () => done(false);
+    const row = element('div', 'assistant-approval-actions');
+    row.append(no, ok);
+    card.appendChild(row);
+    log().querySelector('.assistant-empty')?.remove();
+    log().appendChild(card);
+    scrollDown();
+    ok.focus();
+  });
+}
+
 async function ensureStarted() {
   let settings = await invoke('assistant_settings');
   if (!(await refreshKeyStatus(settings.base_url))) {
@@ -351,8 +377,7 @@ async function ensureStarted() {
     throw new Error(t('请先在设置里保存 API Key。'));
   }
   if (settings.egress_acknowledged !== settings.base_url) {
-    const question = `${t('发送后，你的问题、算例配置、指标与日志片段会发给这个模型服务：')}\n${settings.base_url}\n\n${t('确认继续吗？换用本机的模型（例如 Ollama）可以避免数据外发。')}`;
-    if (!globalThis.confirm(question)) throw new Error(t('已取消发送'));
+    if (!(await askConsent(settings.base_url))) throw new Error(t('已取消发送'));
     settings = { ...settings, egress_acknowledged: settings.base_url };
     await invoke('assistant_save_settings', { settings });
   }
@@ -489,11 +514,11 @@ function wire() {
     $('assistant-usage').textContent = '';
     if (ui.started) invoke('assistant_new_session').catch(e => status(e));
   };
+  // 回车发送，Shift + 回车换行；输入法选词时的回车（isComposing / keyCode 229）不发送。
   $('assistant-text').addEventListener('keydown', event => {
-    if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
-      event.preventDefault();
-      send().catch(e => notice(String(e?.message || e)));
-    }
+    if (event.key !== 'Enter' || event.shiftKey || event.isComposing || event.keyCode === 229) return;
+    event.preventDefault();
+    send().catch(e => notice(String(e?.message || e)));
   });
   listen('assistant://event', event => {
     const parsed = parseEvent(event.payload);

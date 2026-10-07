@@ -16,7 +16,7 @@
 
 import { invoke } from './ipc.js';
 import { state } from './state.js';
-import { $, status, joinPath, baseName, forcingDirectoryForSiteDirectory } from './ui.js';
+import { $, status, joinPath, baseName, forcingDirectoryForSiteDirectory, appAlert } from './ui.js';
 import {
   forcingOutputName, missingForcingHeights, prepMode, siteOutputName,
 } from './prep-state.js';
@@ -980,7 +980,7 @@ async function downloadTableEra5() {
 function showEra5DownloadError(error) {
   const message = String(error);
   status(message);
-  if (message.includes('CDS API 配置')) globalThis.alert?.(message);
+  if (message.includes('CDS API 配置')) appAlert(message);
 }
 
 async function repairTableBatch() {

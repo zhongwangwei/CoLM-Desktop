@@ -2,7 +2,7 @@
 
 import { invoke } from './ipc.js';
 import { state } from './state.js';
-import { $, status, baseName } from './ui.js';
+import { $, status, baseName, appConfirm } from './ui.js';
 import { renderHistVars } from './histvars.js';
 import { markResultsStale } from './results.js';
 import { renderTiming } from './timing.js';
@@ -290,7 +290,7 @@ function wireParameterTransfer() {
           .map(item => `${item.parameter_id}: ${item.reason}`).join('；');
         return status(`导入预检失败：${reasons}`);
       }
-      if (!globalThis.confirm(`将应用 ${applicable} 条显式覆盖并修改 ${preview.files.length} 个文件。继续吗？`)) return;
+      if (!(await appConfirm(`将应用 ${applicable} 条显式覆盖并修改 ${preview.files.length} 个文件。继续吗？`))) return;
       const result = await invoke('apply_import_parameter_overrides', {
         ...args, expectedVersion: preview.version_token,
       });

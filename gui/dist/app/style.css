@@ -754,6 +754,9 @@ body.resizing-assistant { user-select: none; cursor: col-resize; }
 @keyframes assistant-pulse { 50% { opacity: .3; } }
 .assistant-approval { border: 1px solid var(--warn); border-radius: 10px; padding: 10px 12px; background: var(--warn-bg); }
 .assistant-tool > .assistant-approval { margin: 0 8px 8px; }
+.assistant-consent { border: 1px solid var(--accent); border-radius: 10px; padding: 10px 12px; background: var(--accent-weak); }
+.assistant-consent p { margin: 0 0 6px; }
+.assistant-consent-url { font-family: ui-monospace, monospace; }
 .assistant-tool.awaiting { border-color: var(--warn); }
 .assistant-approval.decided { border: 0; background: transparent; padding: 0 2px; }
 .assistant-decided.ok { color: var(--pass); }
@@ -780,3 +783,11 @@ body.assistant-open:has(.gate:not(.loading-gate):not([hidden])) .assistant {
     top: auto; left: 0; width: auto; height: 45vh; }
 }
 .assistant-tool-actions { display: flex; gap: 8px; padding: 0 10px 8px; }
+
+/* 应用内确认 / 输入对话框（ui.js 的 appConfirm / appPrompt） */
+.app-dialog { border: 1px solid var(--border); border-radius: 12px; padding: 18px 20px; width: min(520px, 92vw);
+  background: var(--elevated); color: var(--text); box-shadow: 0 18px 48px rgba(0,0,0,.25); }
+.app-dialog::backdrop { background: rgba(12, 18, 28, .45); backdrop-filter: blur(2px); }
+.app-dialog-text { margin: 0 0 12px; white-space: pre-wrap; line-height: 1.55; max-height: 50vh; overflow: auto; }
+.app-dialog .input { width: 100%; margin-bottom: 12px; }
+.app-dialog-actions { display: flex; justify-content: flex-end; gap: 8px; }

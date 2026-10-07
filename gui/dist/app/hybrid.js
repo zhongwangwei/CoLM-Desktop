@@ -5,7 +5,7 @@
 //! 算例上的配置由 `colm-cli hybrid-info` 读出（JSON），这里不解析 TOML。
 
 import { invoke, hasBackend } from './ipc.js';
-import { $, status, baseName } from './ui.js';
+import { $, appConfirm, status, baseName } from './ui.js';
 import { batchTarget } from './batch.js';
 import { modelEngine } from './engine.js';
 import { language, translateZh } from './i18n.js';
@@ -312,7 +312,7 @@ async function checkCase(c) {
 
 async function removeCase(c) {
   const question = '移除这个算例的 AI 参数化模型？算例回到纯物理参数；之后的运行会按新设定重跑。';
-  if (!globalThis.confirm(language() === 'en' ? translateZh(question) : question)) return;
+  if (!(await appConfirm(language() === 'en' ? translateZh(question) : question))) return;
   await invoke('hybrid_remove', { dirs: [c.dir] });
   status('已移除 AI 参数化模型');
   $('hybrid-check-result')?.replaceChildren();

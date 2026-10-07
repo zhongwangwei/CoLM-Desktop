@@ -5,7 +5,7 @@
 
 import { hasBackend, invoke, listen } from './ipc.js';
 import { state } from './state.js';
-import { $, status } from './ui.js';
+import { $, appConfirm, appPrompt, status } from './ui.js';
 import { sourceSite } from './batch.js';
 import { go, renderSteps } from './shell.js';
 import { metricText } from './metric-format.js';
@@ -2462,7 +2462,7 @@ async function createStudy(kind) {
     if (!Number.isSafeInteger(maxCandidates) || maxCandidates > MAX_STUDY_CANDIDATES) {
       throw new Error(`候选成员数必须不超过 ${MAX_STUDY_CANDIDATES}。`);
     }
-    if (totalCandidates > 200 && !globalThis.confirm?.(`本次共会创建 ${totalCandidates} 个候选成员，可能耗时很长。是否继续？`)) return;
+    if (totalCandidates > 200 && !(await appConfirm(dialogText(`本次共会创建 ${totalCandidates} 个候选成员，可能耗时很长。是否继续？`)))) return;
     for (const plan of plans) {
       await invoke('study_preflight_json', plan);
       ensureCurrent();
@@ -3086,7 +3086,7 @@ async function retryStudy(kind) {
   }
   const needsConfirmation = envelopes.some(envelope => Object.values(envelope.state?.tasks || {})
     .some(task => ['needs_review', 'running', 'evaluating'].includes(task.status)));
-  if (needsConfirmation && !globalThis.confirm?.(dialogText('存在无法确认原进程状态的任务。仅在确认原模型进程已经退出后重试，是否继续？'))) return;
+  if (needsConfirmation && !(await appConfirm(dialogText('存在无法确认原进程状态的任务。仅在确认原模型进程已经退出后重试，是否继续？')))) return;
   ensureStudyMutationCurrent(kind, isCurrent);
   for (const dir of dirs) {
     ensureStudyMutationCurrent(kind, isCurrent);
@@ -3120,7 +3120,7 @@ async function controlStudy(kind, action) {
 async function exportStudy(kind) {
   const dirs = activeStudyDirs(kind);
   if (!dirs.length) return status(kind === 'tuning' ? '请先生成调优任务。' : '请先生成分析任务。');
-  const out = window.prompt(dialogText('导出目录'), `${parentDir(dirs[0])}/exports`);
+  const out = await appPrompt(dialogText('导出目录'), `${parentDir(dirs[0])}/exports`);
   if (!out) return;
   const exported = [];
   for (const dir of dirs) {
@@ -3155,9 +3155,9 @@ async function applyBestCandidate() {
     ? `\n\n${dialogText('训练出的 AI 参数化模型会一起写进新算例（hybrid.toml 与 models/），新算例只能用 Rust 引擎运行。')}` : '';
   const previewText = previews.join('\n\n') + hybridNote;
   setPreview('tuning', previewText);
-  if (!globalThis.confirm?.(`${dialogText('即将应用以下参数改动：')}\n\n${previewText.slice(0, 3000)}`)) return;
+  if (!(await appConfirm(`${dialogText('即将应用以下参数改动：')}\n\n${previewText.slice(0, 3000)}`))) return;
   ensureStudyMutationCurrent('tuning', isCurrent);
-  const out = window.prompt(dialogText('另存为算例目录'), `${parentDir(studyScope()[0]?.dir)}/tuned`);
+  const out = await appPrompt(dialogText('另存为算例目录'), `${parentDir(studyScope()[0]?.dir)}/tuned`);
   if (!out) return;
   ensureStudyMutationCurrent('tuning', isCurrent);
   const created = [];

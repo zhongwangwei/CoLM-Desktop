@@ -40,7 +40,7 @@ assert.match(frontend, /一次下载该站点完整时间段/);
 assert.match(frontend, /CDS 服务器可能排队/);
 assert.match(frontend, /QC 范围/);
 assert.match(frontend, /quality_rejected/);
-assert.match(frontend, /message\.includes\('CDS API 配置'\).*globalThis\.alert/);
+assert.match(frontend, /message\.includes\('CDS API 配置'\).*appAlert/);
 assert.match(frontend, /\*_gapfill_qc/);
 assert.match(frontend, /if \(!gapReport\) reasons\.push\('先完成缺测与时区诊断'\)/);
 assert.match(frontend, /gapReport\.missing > 0 && !repairedSource/);
