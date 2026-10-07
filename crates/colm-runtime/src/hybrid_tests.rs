@@ -78,5 +78,8 @@ fn the_pft_slot_accepts_only_def_pft_parameters() {
 fn pft_rows_run_patch_by_patch_then_pft_by_pft() {
     // 行 0、2 是土壤 patch；行 1 不是（区间也空）。
     let rows = pft_rows(&[0, 2], &[5, 6, 7], &[0..2, 2..2, 2..5]);
-    assert_eq!(rows, [(0, 5, 0), (0, 5, 1), (2, 7, 2), (2, 7, 3), (2, 7, 4)]);
+    assert_eq!(
+        rows,
+        [(0, 5, 0), (0, 5, 1), (2, 7, 2), (2, 7, 3), (2, 7, 4)]
+    );
 }
