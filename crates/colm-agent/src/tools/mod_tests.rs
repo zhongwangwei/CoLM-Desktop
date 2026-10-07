@@ -33,8 +33,12 @@ fn every_standard_tool_has_a_strict_mode_schema() {
                 tool.name()
             );
         }
-        // P0 只有只读工具。
-        assert_eq!(tool.tier(), Tier::Read, "{}", tool.name());
+        assert_ne!(
+            tool.tier(),
+            Tier::Code,
+            "{} (no code tools yet)",
+            tool.name()
+        );
     }
     let api = registry.api_tools(true);
     assert_eq!(api.len(), names.len());

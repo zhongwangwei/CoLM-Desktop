@@ -31,6 +31,19 @@ export function parseEvent(line) {
   }
 }
 
+/** 建算例、运行之后，结果里那个算例的目录（工具卡片上给“在工作台打开”按钮）。 */
+export function caseFromResult(tool, resultText) {
+  if (!['create_case', 'run_case', 'set_case_fields'].includes(tool)) return null;
+  try {
+    const result = JSON.parse(resultText);
+    if (tool === 'create_case') return result.created ? result.case : null;
+    if (tool === 'set_case_fields') return result.case ?? null;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 /** 把回答切成块：段落、代码块、表格（`|` 开头的连续行）。 */
 export function answerBlocks(text) {
   const blocks = [];
@@ -161,6 +174,7 @@ function toolResult(event) {
   const card = ui.tools.get(event.id);
   if (!card) return;
   card.dataset.state = event.ok ? 'ok' : 'failed';
+  card.classList.remove('awaiting');
   const state = card.querySelector('.assistant-tool-state');
   state.replaceChildren(...(event.ok
     ? [element('span', '', '完成'), element('span', '', ` · ${event.elapsed_ms} ms`)]
@@ -168,28 +182,47 @@ function toolResult(event) {
   state.className = `mini assistant-tool-state ${event.ok ? 'muted' : 'assistant-fail'}`;
   const preview = event.result.length > 4000 ? `${event.result.slice(0, 4000)}…` : event.result;
   card.querySelector('.assistant-tool-body').append(element('div', 'muted mini', '结果'), element('pre', 'assistant-code', preview));
+  const dir = event.ok ? caseFromResult(event.name, event.result) : null;
+  if (dir) {
+    const actions = element('div', 'assistant-tool-actions');
+    const open = element('button', 'btn-ghost', '在工作台打开这个算例');
+    open.type = 'button';
+    open.onclick = () => dispatchEvent(new CustomEvent('colm:open-case-dir', { detail: { dir } }));
+    actions.appendChild(open);
+    card.appendChild(actions);
+    card.open = true;
+  }
 }
 
 function approvalCard(event) {
   finishAnswer();
-  const card = element('div', 'assistant-approval');
-  card.append(element('div', 'assistant-approval-title', '需要你的批准'), element('p', 'mini', event.summary));
-  const args = element('details', 'assistant-approval-args');
-  args.append(element('summary', 'muted mini', '查看参数'), element('pre', 'assistant-code', event.arguments));
+  // 审批放进对应的工具卡片：一件事一张卡，批准后收成一行。
+  const card = ui.tools.get(event.id);
+  const box = element('div', 'assistant-approval');
+  box.append(element('div', 'assistant-approval-title', '需要你的批准'), element('p', 'mini', event.summary));
   const approve = element('button', 'run-btn', '批准');
   const deny = element('button', 'btn-ghost', '拒绝');
   for (const button of [approve, deny]) button.type = 'button';
   const decide = ok => {
-    approve.disabled = deny.disabled = true;
-    card.appendChild(element('p', 'muted mini', ok ? '已批准' : '已拒绝'));
+    box.replaceChildren(element('div', `mini assistant-decided ${ok ? 'ok' : 'no'}`, ok ? '已批准' : '已拒绝'));
+    box.className = 'assistant-approval decided';
+    const state = card?.querySelector('.assistant-tool-state');
+    if (state) state.textContent = ok ? '运行中…' : '已拒绝';
     invoke('assistant_approve', { id: event.id, approve: ok, note: null }).catch(e => status(e));
   };
   approve.onclick = () => decide(true);
   deny.onclick = () => decide(false);
   const row = element('div', 'assistant-approval-actions');
   row.append(deny, approve);
-  card.append(args, row);
-  bubble('approval').appendChild(card);
+  box.appendChild(row);
+  if (card) {
+    card.classList.add('awaiting');
+    card.open = true; // 审批前要能看到完整参数
+    card.querySelector('.assistant-tool-state').textContent = '等待批准';
+    card.appendChild(box);
+  } else {
+    bubble('approval').appendChild(box);
+  }
 }
 
 function handle(event) {
@@ -236,7 +269,8 @@ function handle(event) {
       break;
     case 'error':
       finishAnswer();
-      bubble('error').textContent = event.message;
+      if (event.message === 'cancelled') bubble('note').textContent = t('已停止。');
+      else bubble('error').textContent = event.message;
       setRunning(false);
       break;
     case 'exited':
@@ -389,8 +423,9 @@ function beginResize(event) {
 function togglePanel(open = $('assistant-panel').hidden) {
   $('assistant-panel').hidden = !open;
   document.querySelector('.app')?.classList.toggle('assistant-open', open);
+  document.body.classList.toggle('assistant-open', open);
+  for (const button of document.querySelectorAll('[data-assistant-toggle]')) button.setAttribute('aria-pressed', String(open));
   if (open) restoreWidth();
-  $('assistantToggle')?.setAttribute('aria-pressed', String(open));
   if (open) {
     loadSettings().catch(e => status(e));
     $('assistant-text').focus();
@@ -399,10 +434,10 @@ function togglePanel(open = $('assistant-panel').hidden) {
 
 function wire() {
   if (!$('assistant-panel') || !hasBackend) {
-    if ($('assistantToggle')) $('assistantToggle').hidden = !hasBackend;
+    for (const button of document.querySelectorAll('[data-assistant-toggle]')) button.hidden = !hasBackend;
     return;
   }
-  $('assistantToggle').onclick = () => togglePanel();
+  for (const button of document.querySelectorAll('[data-assistant-toggle]')) button.onclick = () => togglePanel();
   $('assistant-close').onclick = () => togglePanel(false);
   $('assistant-resizer').addEventListener('pointerdown', beginResize);
   $('assistant-resizer').addEventListener('dblclick', () => saveWidth(setAssistantWidth(DEFAULT_WIDTH)));

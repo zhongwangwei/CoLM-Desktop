@@ -31431,3 +31431,35 @@ GPP 的均值被 4 个基线 KGE 低于 −0.5 的站拉低（BE-Lon、DE-Geb、
 - 关闭助手：页面恢复到 250–1100。
 
 **检查**：`check-gui` 通过；14 个前端套件全部通过（`assistant.mjs` 新增宽度限制的测试）。
+
+## 第 620 轮：AI 助手 P1——运行操作与首页可用
+
+**动机**：用户希望助手在首页（启动页、配置向导）就能用，让它直接建算例。
+
+**改动**：
+- `colm-agent` 新增工具：
+  - A 级：`scan_sites`，包装 `colm-cli scan`，用来找站点与强迫文件。
+  - B 级，逐次审批：`create_site`（`site-new`）、`create_case`（`new`）、`set_case_fields`、`run_case`、`create_study`（先 `study-preflight` 再 `study-create`）、`run_study`、`study_control`。
+- `set_case_fields`：
+  - 按 `colm_schema` 的字段类型解析值（logical、integer、real 拒绝非有限值、character 校验长度）；`DEF_PFT_X(k)` 按 PFT 覆盖处理；派生字段拒绝。
+  - 先全部校验，最后才写盘，任何一项不合法都不改文件。
+- 长命令（运行、Study）经 `ToolContext::cli_long` 执行：自成进程组，每 200 ms 检查一次这一轮的取消标志，取消时向整个进程组发 TERM，再 kill。
+- 审批卡片里的描述由各工具的 `summary` 生成，写的是真实动作，例如"新建算例 /p/CN-Cng：站点 …，模式 pc，时段 …，强迫 …，预热 1 年 × 1 遍"。
+- 系统提示增加操作规则：缺信息先问；`create_case` 一次填全；用户要求时才运行；说明大致耗时。
+- GUI：
+  - 首页右上角加"AI 助手"按钮；打开后首页的右边让出助手宽度，助手在首页以停靠栏显示（`:has()` 判断首页是否可见）。
+  - 审批区放进对应的工具卡片，等待时卡片自动展开、显示完整参数、状态写"等待批准"；批准或拒绝后收成一行。
+  - `create_case` 成功后，卡片上出现"在工作台打开这个算例"，触发 `colm:open-case-dir` 事件。`openExistingCase` 改为也接受直接给出的目录，并收起首页。
+  - 取消时显示"已停止"，不当作错误。
+
+**实测**：
+- 真实的 `colm-agent` 二进制加模拟模型，经 stdio 走完整流程：
+  - 模型调 `create_case`，agent 发出审批请求，批准后用 `colm-cli new` 真的建出 `/private/tmp/h6/CN-Cng`（case.nml、site.nc、forcing.nml、out 齐全）；
+  - 模型再调 `run_case`，批准后启动了 2 个进程（colm-cli 与前处理子进程）；
+  - 4 s 时取消：工具返回"cancelled by the user; the process was stopped"，结束后残留进程数为 0。
+- 界面在内置浏览器里看过：启动页与助手并排；审批在工具卡片里；批准后有"在工作台打开"按钮与回答。
+
+**检查**：
+- 两个 workspace 的 fmt 都干净；workspace clippy 零警告。
+- colm-agent 19 项测试通过。新增：字段类型解析、设置字段的原地修改与插入、不合法时不改文件、操作工具都要审批且描述真实动作、运行要求选好内核。
+- `check-gui` 与 14 个前端套件全部通过。

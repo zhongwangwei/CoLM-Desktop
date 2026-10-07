@@ -153,6 +153,7 @@ fn serve(data_dir: Option<PathBuf>, cli: PathBuf) -> Result<()> {
                         cli: cli.clone(),
                         kernel_dir: kernel_dir.filter(|k| !k.is_empty()).map(PathBuf::from),
                         docs_root: docs_root.filter(|d| !d.is_empty()).map(PathBuf::from),
+                        cancel: None,
                     },
                 });
                 let id = session.lock().unwrap().id.clone();
@@ -196,7 +197,7 @@ fn serve(data_dir: Option<PathBuf>, cli: PathBuf) -> Result<()> {
                     });
                     continue;
                 }
-                let Some((mut provider, tool_context)) = settings
+                let Some((mut provider, mut tool_context)) = settings
                     .lock()
                     .unwrap()
                     .as_ref()
@@ -209,6 +210,7 @@ fn serve(data_dir: Option<PathBuf>, cli: PathBuf) -> Result<()> {
                     continue;
                 };
                 cancel.store(false, Ordering::SeqCst);
+                tool_context.cancel = Some(Arc::clone(&cancel));
                 let session = Arc::clone(&session);
                 let emitter = emitter.clone();
                 let busy = Arc::clone(&busy);

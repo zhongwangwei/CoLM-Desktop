@@ -33,7 +33,7 @@
       <button class="on" data-mode="normal" aria-pressed="true">常规</button>
       <button data-mode="expert" aria-pressed="false">专家</button>
     </div>
-    <button class="btn-ghost" id="assistantToggle" title="打开 / 关闭 AI 助手" aria-pressed="false">AI 助手</button>
+    <button class="btn-ghost" id="assistantToggle" data-assistant-toggle title="打开 / 关闭 AI 助手" aria-pressed="false">AI 助手</button>
     <button class="icon-btn" id="liveToggle" title="显示 / 隐藏运行日志与进度">▥</button>
     <button class="icon-btn" id="themeBtn" title="深色 / 浅色">🌙</button>
   </header>
@@ -1183,6 +1183,7 @@
 <!-- 完整工作台就绪后才显示运行入口；服务器入口保留但明确不可用。 -->
 <div id="launchgate" class="gate launch-gate" hidden>
   <div class="gate-tools">
+    <button class="btn-ghost" type="button" data-assistant-toggle>AI 助手</button>
     <div class="seg" id="launchLangSeg" aria-label="界面语言">
       <button class="on" data-lang="zh" aria-pressed="true">中文</button>
       <button data-lang="en" aria-pressed="false">EN</button>
@@ -1211,6 +1212,7 @@
 <!-- 本地运行选定后才显示模型约束向导；完成选择时隐藏。 -->
 <div id="domaingate" class="gate" hidden>
   <div class="gate-tools">
+    <button class="btn-ghost" type="button" data-assistant-toggle>AI 助手</button>
     <div class="seg" id="gateLangSeg" aria-label="界面语言">
       <button class="on" data-lang="zh" aria-pressed="true">中文</button>
       <button data-lang="en" aria-pressed="false">EN</button>

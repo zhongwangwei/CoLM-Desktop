@@ -3,10 +3,15 @@
 //! 内置后端与 MCP 服务共用这一份注册表，审批、截断与审计都在这一层做，所以无论走哪个后端规则都一样。
 //! D 级（采纳）没有对应的工具：模型想调也调不到，只能在界面上人工操作。
 
+mod act;
 mod read;
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -41,6 +46,21 @@ pub struct ToolContext {
     pub kernel_dir: Option<PathBuf>,
     /// 可搜索的项目文档目录（开发工作区或源码仓库的 `docs/`）。
     pub docs_root: Option<PathBuf>,
+    /// 这一轮的取消标志：长命令（运行算例、Study）轮询它，被取消时结束整个进程组。
+    pub cancel: Option<Arc<AtomicBool>>,
+}
+
+/// 长命令的结果：是否成功、输出末尾。
+#[derive(Debug, Clone)]
+pub struct Finished {
+    pub success: bool,
+    pub stdout_tail: String,
+    pub stderr_tail: String,
+}
+
+fn tail_lines(text: &str, lines: usize) -> String {
+    let all: Vec<&str> = text.lines().collect();
+    all[all.len().saturating_sub(lines)..].join("\n")
 }
 
 impl ToolContext {
@@ -70,6 +90,57 @@ impl ToolContext {
         Ok(String::from_utf8_lossy(&output.stdout).into_owned())
     }
 
+    /// 长时间运行的 `colm-cli` 子命令：可被这一轮的取消标志中止（连同它启动的内核子进程）。
+    pub fn cli_long(&self, args: &[&str]) -> Result<Finished> {
+        let mut command = Command::new(&self.cli);
+        command
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            // 自成进程组：取消时一并结束 colm-cli 启动的 colm-rs / colm.x。
+            command.process_group(0);
+        }
+        let mut child = command
+            .spawn()
+            .with_context(|| format!("cannot start {}", self.cli.display()))?;
+        let mut stdout = child.stdout.take().context("no stdout")?;
+        let mut stderr = child.stderr.take().context("no stderr")?;
+        let out = std::thread::spawn(move || {
+            let mut text = String::new();
+            let _ = stdout.read_to_string(&mut text);
+            text
+        });
+        let err = std::thread::spawn(move || {
+            let mut text = String::new();
+            let _ = stderr.read_to_string(&mut text);
+            text
+        });
+        let status = loop {
+            if let Some(status) = child.try_wait()? {
+                break status;
+            }
+            if self
+                .cancel
+                .as_ref()
+                .is_some_and(|flag| flag.load(Ordering::SeqCst))
+            {
+                terminate(&mut child);
+                let _ = child.wait();
+                bail!("cancelled by the user; the process was stopped");
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        };
+        Ok(Finished {
+            success: status.success(),
+            stdout_tail: tail_lines(&out.join().unwrap_or_default(), 60),
+            stderr_tail: tail_lines(&err.join().unwrap_or_default(), 40),
+        })
+    }
+
     /// 同上，并把输出解析成 JSON。
     pub fn cli_json(&self, args: &[&str]) -> Result<Value> {
         let text = self.cli(args)?;
@@ -80,6 +151,17 @@ impl ToolContext {
             )
         })
     }
+}
+
+/// 结束子进程（Unix 下连同整个进程组）。
+fn terminate(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    {
+        let group = format!("-{}", child.id());
+        let _ = Command::new("kill").args(["-TERM", "--", &group]).status();
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    let _ = child.kill();
 }
 
 /// 一个工具。参数 schema 按 DeepSeek 严格模式的要求写：所有属性都列入 `required`，
@@ -117,11 +199,11 @@ pub struct Registry {
 }
 
 impl Registry {
-    /// P0 的全部工具（A 级只读）。
+    /// 全部工具：A 级只读与 B 级运行操作。
     pub fn standard() -> Self {
-        Self {
-            tools: read::tools(),
-        }
+        let mut tools = read::tools();
+        tools.extend(act::tools());
+        Self { tools }
     }
 
     pub fn with(tools: Vec<Box<dyn Tool>>) -> Self {

@@ -10,7 +10,7 @@ const temp = await mkdtemp(join(tmpdir(), 'colm-assistant-'));
 await cp(join(root, 'dist', 'app'), join(temp, 'app'), { recursive: true });
 await writeFile(join(temp, 'package.json'), '{"type":"module"}\n');
 globalThis.window = {};
-globalThis.document = { getElementById: () => null, documentElement: { lang: 'zh' } };
+globalThis.document = { getElementById: () => null, querySelectorAll: () => [], documentElement: { lang: 'zh' } };
 globalThis.addEventListener = () => {};
 const assistant = await import(pathToFileURL(join(temp, 'app', 'assistant.js')).href);
 
@@ -58,4 +58,8 @@ assert.equal(assistant.clampAssistantWidth(200, 1600, 250), 320);
 assert.equal(assistant.clampAssistantWidth(600, 1600, 250), 600);
 assert.equal(assistant.clampAssistantWidth(1200, 1600, 250), 870);
 assert.equal(assistant.clampAssistantWidth(500, 900, 250), 320);
+assert.equal(assistant.caseFromResult('create_case', '{"case":"/p/A","created":true}'), '/p/A');
+assert.equal(assistant.caseFromResult('create_case', '{"case":"/p/A","created":false}'), null);
+assert.equal(assistant.caseFromResult('metrics', '{"case":"/p/A"}'), null);
+assert.equal(assistant.caseFromResult('create_case', 'error: x'), null);
 console.log('assistant: context, events, answer blocks and page wiring ok');
