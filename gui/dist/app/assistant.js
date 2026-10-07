@@ -163,6 +163,7 @@ function toolCard(event) {
   card.dataset.state = 'running';
   const summary = element('summary');
   summary.append(element('span', 'assistant-tool-dot'), element('span', 'assistant-tool-name', event.name), element('span', 'muted mini assistant-tool-state', '运行中…'));
+  if (event.preapproved) summary.appendChild(element('span', 'assistant-tool-auto mini', '已自动批准'));
   const body = element('div', 'assistant-tool-body');
   body.append(element('div', 'muted mini', '参数'), element('pre', 'assistant-code', event.arguments));
   card.append(summary, body);
@@ -201,19 +202,23 @@ function approvalCard(event) {
   const box = element('div', 'assistant-approval');
   box.append(element('div', 'assistant-approval-title', '需要你的批准'), element('p', 'mini', event.summary));
   const approve = element('button', 'run-btn', '批准');
+  const always = element('button', 'btn-ghost', '本会话都允许');
+  always.title = t('批准这次，并在本次会话里不再询问同一类操作');
   const deny = element('button', 'btn-ghost', '拒绝');
-  for (const button of [approve, deny]) button.type = 'button';
-  const decide = ok => {
-    box.replaceChildren(element('div', `mini assistant-decided ${ok ? 'ok' : 'no'}`, ok ? '已批准' : '已拒绝'));
+  for (const button of [approve, always, deny]) button.type = 'button';
+  const decide = (ok, remember = false) => {
+    const label = !ok ? '已拒绝' : remember ? '已批准，本会话不再询问这类操作' : '已批准';
+    box.replaceChildren(element('div', `mini assistant-decided ${ok ? 'ok' : 'no'}`, label));
     box.className = 'assistant-approval decided';
     const state = card?.querySelector('.assistant-tool-state');
     if (state) state.textContent = ok ? '运行中…' : '已拒绝';
-    invoke('assistant_approve', { id: event.id, approve: ok, note: null }).catch(e => status(e));
+    invoke('assistant_approve', { id: event.id, approve: ok, note: null, remember }).catch(e => status(e));
   };
   approve.onclick = () => decide(true);
+  always.onclick = () => decide(true, true);
   deny.onclick = () => decide(false);
   const row = element('div', 'assistant-approval-actions');
-  row.append(deny, approve);
+  row.append(deny, always, approve);
   box.appendChild(row);
   if (card) {
     card.classList.add('awaiting');
@@ -292,6 +297,7 @@ async function loadSettings() {
   $('assistant-model-name').value = settings.model;
   $('assistant-thinking').value = settings.thinking === true ? 'on' : settings.thinking === false ? 'off' : '';
   $('assistant-effort').value = settings.reasoning_effort || '';
+  $('assistant-approval').value = settings.approval || 'ask';
   syncEffort();
   await refreshKeyStatus(settings.base_url);
   return settings;
@@ -320,6 +326,7 @@ function formSettings(previous) {
     model: $('assistant-model-name').value.trim(),
     thinking: thinking === 'on' ? true : thinking === 'off' ? false : null,
     reasoning_effort: $('assistant-effort').value || null,
+    approval: $('assistant-approval').value || 'ask',
     egress_acknowledged: previous?.egress_acknowledged ?? null,
   };
 }
@@ -330,6 +337,7 @@ async function saveSettings() {
   await invoke('assistant_save_settings', { settings });
   ui.started = false;
   await refreshKeyStatus(settings.base_url);
+  $('assistant-settings').hidden = true;
   status(t('已保存助手设置'));
 }
 

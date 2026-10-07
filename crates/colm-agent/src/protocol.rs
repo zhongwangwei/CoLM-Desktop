@@ -5,6 +5,17 @@ use serde::{Deserialize, Serialize};
 use crate::provider::ProviderConfig;
 use crate::tools::Tier;
 
+/// 运行操作（B 类工具）怎么审批。代码操作（C 类）不受影响，始终逐次审批。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalPolicy {
+    /// 每次询问；审批卡上可选“本会话不再询问这类操作”。
+    #[default]
+    Ask,
+    /// 不询问，直接执行（工具卡片照常显示，审计日志照常记录）。
+    Auto,
+}
+
 /// GUI → agent。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -17,6 +28,8 @@ pub enum Inbound {
         kernel_dir: Option<String>,
         #[serde(default)]
         docs_root: Option<String>,
+        #[serde(default)]
+        approval: ApprovalPolicy,
     },
     /// 用户的一条消息；`context` 是界面自动附上的当前页面信息（选中的算例、Study 等）。
     UserMessage {
@@ -29,6 +42,9 @@ pub enum Inbound {
         approve: bool,
         #[serde(default)]
         note: Option<String>,
+        /// 批准并在本会话里不再询问同名操作。
+        #[serde(default)]
+        remember: bool,
     },
     /// 停止当前这一轮（正在生成或在等审批时都可以）。
     Cancel,
@@ -56,6 +72,9 @@ pub enum Outbound {
         arguments: String,
         tier: Tier,
         summary: String,
+        /// 按审批策略或本会话的“不再询问”直接放行，没有弹审批。
+        #[serde(default)]
+        preapproved: bool,
     },
     ToolResult {
         id: String,

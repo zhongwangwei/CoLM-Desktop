@@ -9,6 +9,7 @@
 //!
 //! stdout 只输出协议消息；诊断写 stderr。stdin 关闭即退出。
 
+use std::collections::BTreeSet;
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -18,10 +19,10 @@ use std::sync::{Arc, Mutex};
 use anyhow::{bail, Context, Result};
 use colm_agent::agent::{Agent, Approver, Decision, Limits};
 use colm_agent::message::Message;
-use colm_agent::protocol::{Inbound, Outbound};
+use colm_agent::protocol::{ApprovalPolicy, Inbound, Outbound};
 use colm_agent::provider::{OpenAiCompatible, ProviderConfig};
 use colm_agent::session::Session;
-use colm_agent::tools::{Registry, ToolContext};
+use colm_agent::tools::{Registry, Tier, ToolContext};
 
 fn main() {
     if let Err(error) = run() {
@@ -104,9 +105,22 @@ fn cached_key(
 /// 等 GUI 回复审批（取消时也会收到拒绝）。
 struct ChannelApprover {
     decisions: Arc<Mutex<Receiver<(String, Decision)>>>,
+    policy: ApprovalPolicy,
+    /// 本会话选过“不再询问”的操作；开新会话时清空。
+    allowed: Arc<Mutex<BTreeSet<String>>>,
 }
 
 impl Approver for ChannelApprover {
+    /// 只放行运行操作；代码操作始终逐次审批。
+    fn preapproved(&self, name: &str, tier: Tier) -> bool {
+        tier == Tier::Act
+            && (self.policy == ApprovalPolicy::Auto || self.allowed.lock().unwrap().contains(name))
+    }
+
+    fn remember(&mut self, name: &str) {
+        self.allowed.lock().unwrap().insert(name.to_owned());
+    }
+
     fn decide(&mut self, request: &Outbound) -> Decision {
         let Outbound::ApprovalRequest { id, .. } = request else {
             return Decision::Deny(Some("not an approval request".into()));
@@ -127,6 +141,7 @@ impl Approver for ChannelApprover {
 struct Settings {
     provider: ProviderConfig,
     context: ToolContext,
+    approval: ApprovalPolicy,
 }
 
 fn serve(data_dir: Option<PathBuf>, cli: PathBuf, key_file: PathBuf) -> Result<()> {
@@ -143,6 +158,7 @@ fn serve(data_dir: Option<PathBuf>, cli: PathBuf, key_file: PathBuf) -> Result<(
     let (decision_tx, decision_rx): (Sender<(String, Decision)>, _) = mpsc::channel();
     let decision_rx = Arc::new(Mutex::new(decision_rx));
     let registry = Arc::new(Registry::standard());
+    let allowed: Arc<Mutex<BTreeSet<String>>> = Arc::default();
     // 读过的 Key 留在内存里，不必每轮都读文件。
     let keys: Arc<Mutex<std::collections::BTreeMap<String, String>>> = Arc::default();
     let mut worker: Option<std::thread::JoinHandle<()>> = None;
@@ -167,6 +183,7 @@ fn serve(data_dir: Option<PathBuf>, cli: PathBuf, key_file: PathBuf) -> Result<(
                 project_root,
                 kernel_dir,
                 docs_root,
+                approval,
             } => {
                 let model = provider.model.clone();
                 *settings.lock().unwrap() = Some(Settings {
@@ -178,6 +195,7 @@ fn serve(data_dir: Option<PathBuf>, cli: PathBuf, key_file: PathBuf) -> Result<(
                         docs_root: docs_root.filter(|d| !d.is_empty()).map(PathBuf::from),
                         cancel: None,
                     },
+                    approval,
                 });
                 let id = session.lock().unwrap().id.clone();
                 emitter.emit(Outbound::Ready { session: id, model });
@@ -192,6 +210,7 @@ fn serve(data_dir: Option<PathBuf>, cli: PathBuf, key_file: PathBuf) -> Result<(
                 }
                 *session.lock().unwrap() =
                     Session::new(data_dir.as_deref(), colm_agent::SYSTEM_PROMPT)?;
+                allowed.lock().unwrap().clear();
                 let model = settings
                     .lock()
                     .unwrap()
@@ -201,8 +220,15 @@ fn serve(data_dir: Option<PathBuf>, cli: PathBuf, key_file: PathBuf) -> Result<(
                 let id = session.lock().unwrap().id.clone();
                 emitter.emit(Outbound::Ready { session: id, model });
             }
-            Inbound::ApprovalDecision { id, approve, note } => {
-                let decision = if approve {
+            Inbound::ApprovalDecision {
+                id,
+                approve,
+                note,
+                remember,
+            } => {
+                let decision = if approve && remember {
+                    Decision::ApproveForSession
+                } else if approve {
                     Decision::Approve
                 } else {
                     Decision::Deny(note)
@@ -220,11 +246,11 @@ fn serve(data_dir: Option<PathBuf>, cli: PathBuf, key_file: PathBuf) -> Result<(
                     });
                     continue;
                 }
-                let Some((mut provider, mut tool_context)) = settings
+                let Some((mut provider, mut tool_context, policy)) = settings
                     .lock()
                     .unwrap()
                     .as_ref()
-                    .map(|s| (s.provider.clone(), s.context.clone()))
+                    .map(|s| (s.provider.clone(), s.context.clone(), s.approval))
                 else {
                     busy.store(false, Ordering::SeqCst);
                     emitter.emit(Outbound::Error {
@@ -239,6 +265,7 @@ fn serve(data_dir: Option<PathBuf>, cli: PathBuf, key_file: PathBuf) -> Result<(
                 let busy = Arc::clone(&busy);
                 let cancel = Arc::clone(&cancel);
                 let decisions = Arc::clone(&decision_rx);
+                let allowed = Arc::clone(&allowed);
                 let registry = Arc::clone(&registry);
                 let keys = Arc::clone(&keys);
                 let key_file = key_file.clone();
@@ -266,7 +293,11 @@ fn serve(data_dir: Option<PathBuf>, cli: PathBuf, key_file: PathBuf) -> Result<(
                             session.push(Message::User { content })?;
                             (session.history.clone(), session.history.len())
                         };
-                        let mut approver = ChannelApprover { decisions };
+                        let mut approver = ChannelApprover {
+                            decisions,
+                            policy,
+                            allowed,
+                        };
                         let outcome = agent.run_turn(
                             &mut history,
                             &mut |event| emitter.emit(event),

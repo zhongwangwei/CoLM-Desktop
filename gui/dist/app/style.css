@@ -748,6 +748,7 @@ body.resizing-assistant { user-select: none; cursor: col-resize; }
 .assistant-tool[data-state="failed"] .assistant-tool-dot { background: var(--fail); }
 .assistant-tool-name { font-family: ui-monospace, monospace; font-size: 12px; }
 .assistant-tool-state { margin-left: auto; }
+.assistant-tool-auto { order: 3; padding: 1px 7px; border-radius: 999px; background: var(--pass-bg, transparent); color: var(--pass); border: 1px solid currentColor; font-size: 11px; }
 .assistant-fail { color: var(--fail); }
 .assistant-tool-body { padding: 0 10px 8px; }
 .assistant-tool-body > .mini { margin-top: 6px; }
@@ -764,7 +765,7 @@ body.resizing-assistant { user-select: none; cursor: col-resize; }
 .assistant-approval-title { font-weight: 600; margin-bottom: 4px; }
 .assistant-approval p { margin: 0 0 6px; }
 .assistant-approval-args > summary { cursor: pointer; }
-.assistant-approval-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; }
+.assistant-approval-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 8px; }
 .assistant-input { padding: 10px 14px 12px; border-top: 1px solid var(--border-soft); background: var(--surface); }
 .assistant-input textarea { resize: vertical; min-height: 64px; }
 .assistant-input-row { display: flex; align-items: center; gap: 8px; margin-top: 8px; }

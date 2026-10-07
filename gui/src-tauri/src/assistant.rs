@@ -42,6 +42,9 @@ pub struct AssistantSettings {
     /// 思考强度 low / high / max；`None` 用服务端默认（high）。
     #[serde(default)]
     pub reasoning_effort: Option<String>,
+    /// 运行操作的审批：`ask` 每次询问（审批卡可选本会话不再询问），`auto` 直接执行。
+    #[serde(default = "default_approval")]
+    pub approval: String,
     /// 用户已确认过“数据会发给模型服务商”的那个服务地址。
     #[serde(default)]
     pub egress_acknowledged: Option<String>,
@@ -54,9 +57,14 @@ impl Default for AssistantSettings {
             model: "deepseek-flash".into(),
             thinking: None,
             reasoning_effort: None,
+            approval: default_approval(),
             egress_acknowledged: None,
         }
     }
+}
+
+fn default_approval() -> String {
+    "ask".into()
 }
 
 fn settings_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
@@ -111,6 +119,9 @@ pub(crate) fn validate_settings(settings: &AssistantSettings) -> Result<(), Stri
     }
     if settings.model.trim().is_empty() {
         return Err("请填写模型名".into());
+    }
+    if !matches!(settings.approval.as_str(), "ask" | "auto") {
+        return Err("审批方式只能是 ask 或 auto".into());
     }
     if let Some(effort) = &settings.reasoning_effort {
         if !REASONING_EFFORTS.contains(&effort.as_str()) {
@@ -256,6 +267,7 @@ pub(crate) fn configure_message(
             "thinking": settings.thinking,
             "reasoning_effort": settings.reasoning_effort,
         },
+        "approval": settings.approval,
         "project_root": project_root,
         "kernel_dir": kernel_dir,
         "docs_root": docs_root,
@@ -338,10 +350,17 @@ pub fn assistant_approve(
     id: String,
     approve: bool,
     note: Option<String>,
+    remember: Option<bool>,
 ) -> Result<(), String> {
     send(
         &process,
-        &json!({ "type": "approval_decision", "id": id, "approve": approve, "note": note }),
+        &json!({
+            "type": "approval_decision",
+            "id": id,
+            "approve": approve,
+            "note": note,
+            "remember": remember.unwrap_or(false),
+        }),
     )
 }
 

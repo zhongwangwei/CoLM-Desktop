@@ -24,6 +24,16 @@ fn settings_default_to_deepseek_and_only_accept_https_or_loopback() {
         ..AssistantSettings::default()
     };
     assert!(validate_settings(&empty_model).is_err());
+    let odd_approval = AssistantSettings {
+        approval: "never".into(),
+        ..AssistantSettings::default()
+    };
+    assert!(validate_settings(&odd_approval).is_err());
+    // 旧的设置文件没有 approval 字段，读出来是每次询问。
+    let old: AssistantSettings =
+        serde_json::from_str(r#"{"base_url":"https://api.deepseek.com","model":"deepseek-flash"}"#)
+            .unwrap();
+    assert_eq!(old.approval, "ask");
     for (effort, ok) in [
         ("low", true),
         ("high", true),
@@ -43,6 +53,7 @@ fn configure_messages_match_the_agent_protocol_and_carry_no_key() {
     let settings = AssistantSettings {
         thinking: Some(false),
         reasoning_effort: Some("max".into()),
+        approval: "auto".into(),
         ..AssistantSettings::default()
     };
     let message = configure_message(&settings, "/p", Some("/k"), None);
@@ -50,6 +61,7 @@ fn configure_messages_match_the_agent_protocol_and_carry_no_key() {
     assert_eq!(message["provider"]["model"], "deepseek-flash");
     assert_eq!(message["provider"]["thinking"], false);
     assert_eq!(message["provider"]["reasoning_effort"], "max");
+    assert_eq!(message["approval"], "auto");
     assert_eq!(message["project_root"], "/p");
     assert_eq!(message["kernel_dir"], "/k");
     assert!(message["provider"].get("api_key").is_none());
@@ -76,6 +88,8 @@ mod colm_agent_protocol {
             kernel_dir: Option<String>,
             #[serde(default)]
             docs_root: Option<String>,
+            #[serde(default)]
+            approval: Option<String>,
         },
     }
 

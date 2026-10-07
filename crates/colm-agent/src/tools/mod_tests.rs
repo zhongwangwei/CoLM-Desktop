@@ -58,3 +58,13 @@ fn long_results_are_truncated_with_a_note() {
     assert!(text.contains("[truncated"));
     assert!(text.chars().count() < MAX_RESULT_CHARS + 200);
 }
+
+#[test]
+fn string_nulls_from_the_model_count_as_missing() {
+    let args = serde_json::json!({ "name": "null", "start": " ", "end": "None", "mode": "pc" });
+    assert_eq!(opt_str(&args, "name"), None);
+    assert_eq!(opt_str(&args, "start"), None);
+    assert_eq!(opt_str(&args, "end"), None);
+    assert_eq!(opt_str(&args, "missing"), None);
+    assert_eq!(opt_str(&args, "mode"), Some("pc"));
+}

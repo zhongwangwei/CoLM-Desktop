@@ -9,18 +9,26 @@ use serde_json::Value;
 use crate::message::{Message, Usage};
 use crate::protocol::Outbound;
 use crate::provider::{Provider, StreamEvent};
-use crate::tools::{result_text, Registry, ToolContext};
+use crate::tools::{result_text, Registry, Tier, ToolContext};
 
 /// 审批结果。
 #[derive(Debug, Clone, PartialEq)]
 pub enum Decision {
     Approve,
+    /// 批准，并在本会话里不再询问同名操作。
+    ApproveForSession,
     Deny(Option<String>),
 }
 
 /// 审批来源：GUI（经 stdio）或测试里的脚本。
 pub trait Approver {
     fn decide(&mut self, request: &Outbound) -> Decision;
+    /// 这个操作不用问（审批策略为自动，或本会话已选过“不再询问”）。
+    fn preapproved(&self, _name: &str, _tier: Tier) -> bool {
+        false
+    }
+    /// 记下“本会话不再询问”。
+    fn remember(&mut self, _name: &str) {}
 }
 
 /// 每轮的限额。
@@ -111,14 +119,17 @@ impl Agent<'_> {
             Err(error) => return format!("error: the arguments are not valid JSON ({error})"),
         };
         let summary = tool.summary(&args);
+        let preapproved =
+            tool.tier().needs_approval() && approver.preapproved(&call.name, tool.tier());
         emit(Outbound::ToolCall {
             id: call.id.clone(),
             name: call.name.clone(),
             arguments: call.arguments.clone(),
             tier: tool.tier(),
             summary: summary.clone(),
+            preapproved,
         });
-        if tool.tier().needs_approval() {
+        if tool.tier().needs_approval() && !preapproved {
             let request = Outbound::ApprovalRequest {
                 id: call.id.clone(),
                 name: call.name.clone(),
@@ -127,7 +138,11 @@ impl Agent<'_> {
                 arguments: call.arguments.clone(),
             };
             emit(request.clone());
-            if let Decision::Deny(note) = approver.decide(&request) {
+            let decision = approver.decide(&request);
+            if decision == Decision::ApproveForSession {
+                approver.remember(&call.name);
+            }
+            if let Decision::Deny(note) = decision {
                 let text = match note {
                     Some(note) => format!("the user declined this action: {note}"),
                     None => "the user declined this action".to_owned(),

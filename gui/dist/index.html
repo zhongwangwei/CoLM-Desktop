@@ -1129,6 +1129,12 @@
         <option value="high">high</option>
         <option value="max">max（最深，最慢）</option>
       </select>
+      <label for="assistant-approval">操作审批</label>
+      <select class="select" id="assistant-approval">
+        <option value="ask">每次询问</option>
+        <option value="auto">自动执行，不再询问</option>
+      </select>
+      <p class="muted mini">指建算例、改配置、运行算例与 Study 这类操作。选“每次询问”时，审批卡片上也可以点“本会话都允许”，同一类操作在这次会话里就不再询问。</p>
       <label for="assistant-key">API Key</label>
       <div class="assistant-key-row">
         <input class="input" id="assistant-key" type="password" autocomplete="off" placeholder="粘贴后点“保存 Key”">
@@ -1143,7 +1149,7 @@
     <div class="assistant-log" id="assistant-log">
       <div class="assistant-empty">
         <div class="assistant-empty-title">问问你的算例与结果</div>
-        <p class="muted mini">助手读取算例配置、运行日志、指标与 Study 结果来回答，每个结论都会注明出处；它不会改动算例。</p>
+        <p class="muted mini">助手读取算例配置、运行日志、指标与 Study 结果来回答，每个结论都会注明出处；建算例、改配置或运行前按设置里的“操作审批”征得你同意。</p>
         <div class="assistant-suggestions">
           <button class="assistant-chip" type="button" data-prompt="当前算例的 GPP 与潜热模拟得怎么样？问题可能出在哪里？">当前算例模拟得怎么样？</button>
           <button class="assistant-chip" type="button" data-prompt="列出项目里的算例，并比较它们的配置与指标差异。">比较项目里的算例</button>

@@ -201,6 +201,63 @@ fn acting_tools_wait_for_approval_and_a_denial_reaches_the_model() {
     assert_eq!(tool_messages[1], "the user declined this action: too long");
 }
 
+/// 记住“本会话不再询问”的审批者（和 colm-agent 服务里的一样只放行运行操作）。
+struct Remembering(Vec<Decision>, Vec<String>);
+
+impl Approver for Remembering {
+    fn decide(&mut self, _request: &Outbound) -> Decision {
+        self.0.remove(0)
+    }
+    fn preapproved(&self, name: &str, tier: Tier) -> bool {
+        tier == Tier::Act && self.1.iter().any(|n| n == name)
+    }
+    fn remember(&mut self, name: &str) {
+        self.1.push(name.to_owned());
+    }
+}
+
+#[test]
+fn approving_for_the_session_skips_later_requests_for_that_tool() {
+    let provider = Scripted::new(vec![
+        tool_turn(vec![call("a", "act", r#"{"x":1}"#)]),
+        tool_turn(vec![call("b", "act", r#"{"x":2}"#)]),
+        answer("both ran"),
+    ]);
+    let registry = Registry::with(vec![Box::new(Echo(Tier::Act))]);
+    let mut history = vec![Message::User {
+        content: "go".into(),
+    }];
+    let mut events = Vec::new();
+    let mut approver = Remembering(vec![Decision::ApproveForSession], Vec::new());
+    agent(&provider, &registry)
+        .run_turn(
+            &mut history,
+            &mut |e| events.push(e),
+            &mut approver,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+    assert_eq!(approver.1, ["act"]);
+    let requests = events
+        .iter()
+        .filter(|e| matches!(e, Outbound::ApprovalRequest { .. }))
+        .count();
+    assert_eq!(requests, 1);
+    let preapproved: Vec<bool> = events
+        .iter()
+        .filter_map(|e| match e {
+            Outbound::ToolCall { preapproved, .. } => Some(*preapproved),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(preapproved, [false, true]);
+    let ran = history
+        .iter()
+        .filter(|m| matches!(m, Message::Tool { content, .. } if content.contains("doubled")))
+        .count();
+    assert_eq!(ran, 2);
+}
+
 #[test]
 fn cancelling_and_runaway_loops_stop_the_turn() {
     let registry = Registry::with(vec![Box::new(Echo(Tier::Read))]);

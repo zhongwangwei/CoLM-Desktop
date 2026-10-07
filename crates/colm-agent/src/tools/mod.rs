@@ -254,11 +254,12 @@ pub(crate) fn object(properties: Value) -> Value {
     })
 }
 
-/// 取字符串参数；`null` 或缺失时为 `None`。
+/// 取字符串参数；`null`、缺失、空串时为 `None`。模型有时把空值写成字符串 `"null"`
+/// （实测 deepseek-flash 建算例时传了 `"name": "null"`，算例就被命名为 null），也当作没给。
 pub(crate) fn opt_str<'a>(args: &'a Value, name: &str) -> Option<&'a str> {
     args.get(name)
         .and_then(Value::as_str)
-        .filter(|s| !s.trim().is_empty())
+        .filter(|s| !s.trim().is_empty() && !matches!(s.trim(), "null" | "None" | "none"))
 }
 
 pub(crate) fn req_str<'a>(args: &'a Value, name: &str) -> Result<&'a str> {
