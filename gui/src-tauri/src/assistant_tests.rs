@@ -5,6 +5,11 @@ fn settings_default_to_deepseek_and_only_accept_https_or_loopback() {
     let settings = AssistantSettings::default();
     assert_eq!(settings.base_url, "https://api.deepseek.com");
     assert_eq!(settings.model, "deepseek-flash");
+    assert!(settings.key_saved_for.is_empty());
+    assert_eq!(
+        normalized(" https://API.deepseek.com/ "),
+        "https://api.deepseek.com"
+    );
     assert!(validate_settings(&settings).is_ok());
     for (url, ok) in [
         ("https://api.example.com/v1", true),

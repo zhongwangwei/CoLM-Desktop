@@ -41,6 +41,10 @@ pub struct AssistantSettings {
     /// 用户已确认过“数据会发给模型服务商”的那个服务地址。
     #[serde(default)]
     pub egress_acknowledged: Option<String>,
+    /// 已经存过 Key 的服务地址（只是标记，不含 Key）。界面据此显示“已保存”，
+    /// 不必为了这一点去读钥匙串——每读一次 macOS 都可能弹授权框。
+    #[serde(default)]
+    pub key_saved_for: Vec<String>,
 }
 
 impl Default for AssistantSettings {
@@ -50,6 +54,7 @@ impl Default for AssistantSettings {
             model: "deepseek-flash".into(),
             thinking: None,
             egress_acknowledged: None,
+            key_saved_for: Vec::new(),
         }
     }
 }
@@ -114,9 +119,11 @@ pub fn assistant_settings(app: tauri::AppHandle) -> AssistantSettings {
 #[tauri::command]
 pub fn assistant_save_settings(
     app: tauri::AppHandle,
-    settings: AssistantSettings,
+    mut settings: AssistantSettings,
 ) -> Result<(), String> {
     validate_settings(&settings)?;
+    // “存过 Key”的标记只由保存、删除 Key 改，前端保存其他设置时不能把它冲掉。
+    settings.key_saved_for = assistant_settings(app.clone()).key_saved_for;
     let path = settings_path(&app)?;
     std::fs::write(
         &path,
@@ -133,11 +140,36 @@ fn key_command(flag: &str, base_url: &str) -> std::process::Command {
 }
 
 /// 把 Key 交给 `colm-agent` 存进钥匙串（经 stdin，不出现在命令行或日志里）。
+fn normalized(base_url: &str) -> String {
+    base_url.trim().trim_end_matches('/').to_ascii_lowercase()
+}
+
+/// 记下（或去掉）“这个服务存过 Key”的标记。
+fn mark_key(app: &tauri::AppHandle, base_url: &str, saved: bool) -> Result<(), String> {
+    let mut settings = assistant_settings(app.clone());
+    let url = normalized(base_url);
+    settings.key_saved_for.retain(|u| u != &url);
+    if saved {
+        settings.key_saved_for.push(url);
+    }
+    let path = settings_path(app)?;
+    std::fs::write(
+        &path,
+        serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| format!("{}: {e}", path.display()))
+}
+
 #[tauri::command]
-pub async fn assistant_set_key(base_url: String, key: String) -> Result<(), String> {
+pub async fn assistant_set_key(
+    app: tauri::AppHandle,
+    base_url: String,
+    key: String,
+) -> Result<(), String> {
     if key.trim().is_empty() {
         return Err("Key 是空的".into());
     }
+    let url = base_url.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let mut child = key_command("--set-key", &base_url)
             .stdin(Stdio::piped())
@@ -159,26 +191,21 @@ pub async fn assistant_set_key(base_url: String, key: String) -> Result<(), Stri
         }
     })
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())??;
+    mark_key(&app, &url, true)
+}
+
+/// 这个服务存过 Key 吗？只看设置里的标记，不读钥匙串。
+#[tauri::command]
+pub fn assistant_has_key(app: tauri::AppHandle, base_url: String) -> bool {
+    assistant_settings(app)
+        .key_saved_for
+        .contains(&normalized(&base_url))
 }
 
 #[tauri::command]
-pub async fn assistant_has_key(base_url: String) -> Result<bool, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let output = key_command("--has-key", &base_url)
-            .output()
-            .map_err(|e| format!("cannot start {}: {e}", agent_path().display()))?;
-        if !output.status.success() {
-            return Err(String::from_utf8_lossy(&output.stderr).trim().to_owned());
-        }
-        Ok(String::from_utf8_lossy(&output.stdout).trim() == "true")
-    })
-    .await
-    .map_err(|e| e.to_string())?
-}
-
-#[tauri::command]
-pub async fn assistant_delete_key(base_url: String) -> Result<(), String> {
+pub async fn assistant_delete_key(app: tauri::AppHandle, base_url: String) -> Result<(), String> {
+    let url = base_url.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let output = key_command("--delete-key", &base_url)
             .output()
@@ -190,7 +217,8 @@ pub async fn assistant_delete_key(base_url: String) -> Result<(), String> {
         }
     })
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())??;
+    mark_key(&app, &url, false)
 }
 
 /// 发一行给 `colm-agent`。

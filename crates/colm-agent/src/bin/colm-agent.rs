@@ -80,6 +80,23 @@ impl Emitter {
     }
 }
 
+/// 这个服务的 Key：本进程第一次用时从钥匙串读，之后用内存里的。
+fn cached_key(
+    keys: &Mutex<std::collections::BTreeMap<String, String>>,
+    base_url: &str,
+) -> Result<String> {
+    let mut keys = keys
+        .lock()
+        .map_err(|_| anyhow::anyhow!("key cache poisoned"))?;
+    if let Some(key) = keys.get(base_url) {
+        return Ok(key.clone());
+    }
+    let key = colm_agent::secrets::get(base_url)?
+        .context("no API key is stored for this service; set it in the assistant settings")?;
+    keys.insert(base_url.to_owned(), key.clone());
+    Ok(key)
+}
+
 /// 等 GUI 回复审批（取消时也会收到拒绝）。
 struct ChannelApprover {
     decisions: Arc<Mutex<Receiver<(String, Decision)>>>,
@@ -122,6 +139,8 @@ fn serve(data_dir: Option<PathBuf>, cli: PathBuf) -> Result<()> {
     let (decision_tx, decision_rx): (Sender<(String, Decision)>, _) = mpsc::channel();
     let decision_rx = Arc::new(Mutex::new(decision_rx));
     let registry = Arc::new(Registry::standard());
+    // 读过的 Key 留在内存里：钥匙串每读一次，macOS 可能就弹一次授权框。
+    let keys: Arc<Mutex<std::collections::BTreeMap<String, String>>> = Arc::default();
     let mut worker: Option<std::thread::JoinHandle<()>> = None;
 
     for line in std::io::stdin().lock().lines() {
@@ -217,10 +236,10 @@ fn serve(data_dir: Option<PathBuf>, cli: PathBuf) -> Result<()> {
                 let cancel = Arc::clone(&cancel);
                 let decisions = Arc::clone(&decision_rx);
                 let registry = Arc::clone(&registry);
+                let keys = Arc::clone(&keys);
                 worker = Some(std::thread::spawn(move || {
                     let result = (|| -> Result<()> {
-                        provider.api_key = colm_agent::secrets::get(&provider.base_url)?
-                            .context("no API key is stored for this service; set it in the assistant settings")?;
+                        provider.api_key = cached_key(&keys, &provider.base_url)?;
                         let strict = provider.strict;
                         let client = OpenAiCompatible::new(provider);
                         let agent = Agent {
