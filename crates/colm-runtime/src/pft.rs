@@ -279,6 +279,12 @@ impl PftTemplate {
         );
         let campbell = physics.hydraulic_model == HydraulicModel::Campbell;
         let pc = physics.use_pc;
+        // 混合模型 `pft` 插槽：按本 patch 的 PFT 次序给出的 `DEF_PFT_*` 覆盖（见 `crate::hybrid`）。
+        ensure!(
+            physics.pft_overrides.is_empty() || physics.pft_overrides.len() == pfts,
+            "the hybrid pft slot gives {} PFT override sets for a patch with {pfts} PFTs",
+            physics.pft_overrides.len()
+        );
         // `READ_PFTimeInvariants`：`DEF_Interception_scheme == 8` 时读 `ncd_p`/`ncw_p`/`bcw_p`
         // （`MOD_Vars_TimeInvariants.F90:93-97`，没有 `defval`，缺了就停）。
         let crown = if physics.colm2024_interception {
@@ -313,6 +319,7 @@ impl PftTemplate {
                     top[index],
                     bottom[index],
                     interface_depth_m,
+                    physics.pft_overrides.get(index),
                 )
                 .map(|parameters| PftParameters {
                     crown_m: crown
@@ -789,7 +796,8 @@ impl Drop for PftParameterCache {
     }
 }
 
-/// 一个 PFT 的 `MOD_Const_PFT` 参数（默认值 + `DEF_PFT_*` 覆盖）。
+/// 一个 PFT 的 `MOD_Const_PFT` 参数（默认值 + `DEF_PFT_*` 覆盖）。`hybrid` 是混合模型给这个 PFT
+/// 的覆盖：有就不走按类别的缓存，派生量（光学、根系分布、换算）照原路径从覆盖值算。
 #[allow(clippy::too_many_arguments)]
 fn pft_parameters(
     document: &Document,
@@ -800,7 +808,24 @@ fn pft_parameters(
     canopy_top_m: f64,
     canopy_bottom_m: f64,
     interface_depth_m: &[f64],
+    hybrid: Option<&std::collections::BTreeMap<String, f64>>,
 ) -> Result<PftParameters> {
+    if let Some(overrides) = hybrid.filter(|overrides| !overrides.is_empty()) {
+        let parameters = pft_parameters_with(
+            document,
+            class,
+            campbell,
+            pc,
+            interface_depth_m,
+            Some(overrides),
+        )?;
+        return Ok(PftParameters {
+            fraction,
+            canopy_top_m,
+            canopy_bottom_m,
+            ..parameters
+        });
+    }
     let key = (class, campbell, pc);
     let cached = PFT_PARAMETER_CACHE.with(|cache| {
         cache
@@ -836,9 +861,24 @@ fn pft_parameters_uncached(
     pc: bool,
     interface_depth_m: &[f64],
 ) -> Result<PftParameters> {
+    pft_parameters_with(document, class, campbell, pc, interface_depth_m, None)
+}
+
+fn pft_parameters_with(
+    document: &Document,
+    class: i32,
+    campbell: bool,
+    pc: bool,
+    interface_depth_m: &[f64],
+    hybrid: Option<&std::collections::BTreeMap<String, f64>>,
+) -> Result<PftParameters> {
     let (fraction, canopy_top_m, canopy_bottom_m) = (0.0, 0.0, 0.0);
     // PC 用另一组叶片光学（`rhol_*_p_pc`/`taul_*_p_pc`，`MOD_Const_PFT.F90:1833-1843`）。
-    let value = |name: &str| colm_init::pft_parameter(document, name, class, campbell, pc);
+    // 混合模型的覆盖优先，其余照 namelist 的 `DEF_PFT_*(class)` 与默认表。
+    let value = |name: &str| match hybrid.and_then(|overrides| overrides.get(name)) {
+        Some(&value) => Ok(value),
+        None => colm_init::pft_parameter(document, name, class, campbell, pc),
+    };
     Ok(PftParameters {
         class,
         fraction,

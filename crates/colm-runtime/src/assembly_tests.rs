@@ -25,6 +25,7 @@ fn physics(timestep_seconds: f64) -> LandPhysicsParameters {
         bgc: None,
         irrigation: None,
         land_class_overrides: colm_core::LandClassOverrides::default(),
+        pft_overrides: Vec::new(),
         dynamic_wetland: false,
         dynamic_lake: false,
         snicar: false,

@@ -2157,6 +2157,7 @@ mod tests {
             bgc: None,
             irrigation: None,
             land_class_overrides: colm_core::LandClassOverrides::default(),
+            pft_overrides: Vec::new(),
             dynamic_wetland: false,
             dynamic_lake: false,
             snicar: false,
@@ -2916,7 +2917,7 @@ mod tests {
         let hybrid = land_class_hybrid(&root, &names, table_echo(names.clone(), 1.0));
         let physics = land_physics();
         let per_patch = hybrid
-            .patch_physics(&fixture.constant.block, &[0, 1], &physics)
+            .patch_physics(&fixture.constant.block, &[0, 1], &[0..0, 0..0], &physics)
             .unwrap();
         // 两个 patch 都是土壤 patch，每一列都被覆盖了（覆盖确实走了插槽这条路）。
         assert!(per_patch
@@ -2959,7 +2960,12 @@ mod tests {
         );
         let physics = land_physics();
         let per_patch = hybrid
-            .patch_physics(&fixture.constant.block, &[1], &physics)
+            .patch_physics(
+                &fixture.constant.block,
+                &[1],
+                &[std::ops::Range::default()],
+                &physics,
+            )
             .unwrap();
         let table = colm_core::ClassConstants::new(colm_core::LandCoverScheme::Igbp, 3)
             .unwrap()

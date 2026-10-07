@@ -30946,3 +30946,31 @@ LAI 的块是 `(1, 1, 86400)`，一块一整条全球纬线，读区域时每行
 逐项实验（`DEF_LC_VMAX25 = 26.5` 覆盖；本地临时诊断版 colm-rs 保留土壤阻抗）：数据见 upstream-bugs 第 84 条。
 
 **对混合模型的意义**：试点里 AI 把 Vcmax 压到下限，正是在补第 1、2 条。用 LCT 做混合模型基线前，要先决定第 84 条怎么处理。
+
+## 第 606 轮：混合框架接 PC——`pft` 参数插槽
+
+维护者决定混合模型以 PC 模式为基线（LCT + VG 的问题见 upstream-bugs 第 84 条）。PC 下土壤 patch 的参数来自 PFT 表，所以加 `pft` 插槽。
+
+**接法**：
+- `LandPhysicsParameters` 新增 `pft_overrides: Vec<BTreeMap<String, f64>>`，按本 patch 的 PFT 次序存放 `DEF_PFT_*` 覆盖。
+- `crate::pft::pft_parameters` 有覆盖时不走按类别的缓存，调 `pft_parameters_with`：查表闭包先看混合覆盖，再按原样查 namelist 的 `DEF_PFT_*(class)` 与默认表。光学、Vcmax 换算、根系分布等派生量照原路径算，语义与 namelist 覆盖相同，只是按 PFT 而不是按类别。
+- `hybrid::Hybrid::patch_physics` 新增 `pft_ranges` 参数（各 patch 在 PFT 常数重启里的区间）：
+  - 每个土壤 patch 的每个 PFT 一行；
+  - 特征先在 PFT 常数重启里找 `(pft,)` 量（`pftclass`、`pftfrac`、`htop_p`……），没有就按 patch 取；
+  - 每个输出过 `colm_case::pft::validate_override`（与 namelist 覆盖同一套范围检查）。
+  - LCT 配 `pft` 插槽、PFT/PC 配 `land_class` 插槽都会报错。
+- `colm-rs`：单点区间用 `patch_pft_range`，空间区间用已有的 `pft_ranges`；只在有混合设置时才算。
+- 抓取模式改为通用的 `write_tap`：
+  - `pft` 插槽每个 PFT 一行，记录特征与 `pft_parameter` 的有效值；
+  - 一次抓取只对应一个插槽。
+- 顺带修了 `Hybrid::load` 在多个插槽时全都塞进 `land_class` 的问题。
+- `HybridMode::Apply` 装箱（clippy `large_enum_variant`）。
+
+**验证**：
+- `echoing_every_pft_parameter_as_a_hybrid_override_changes_nothing`：16 个 PFT 类别 × Campbell/VG × PC 开关，把所有参数的有效值作为覆盖，组出的 `PftParameters` 的 Debug 文本与不覆盖相同。
+- `a_hybrid_vmax25_override_reaches_the_pft_parameters`：插槽覆盖 Vcmax 40 与 namelist `DEF_PFT_VMAX25(3) = 40` 的结果相同。
+- `pft` 插槽的输出名检查、行次序（先 patch 后 PFT）。
+- 端到端，CA-Qfo PC（单一 PFT 2），走 ONNX + tract：
+  - 线性模型权重 0、偏置 26.5（f32 精确，等于 PFT 2 在 VG 下的 Vcmax），12 个月 history、1524 个变量与 PC 纯物理逐字节相同；
+  - 偏置 40 时结果改变。
+- workspace fmt、clippy，colm-runtime 177（单线程），colm-cli 通过。

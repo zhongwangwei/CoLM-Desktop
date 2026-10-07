@@ -179,7 +179,14 @@ fn run() -> Result<()> {
         None => (0..patch_count).collect(),
     };
     colm_runtime::hybrid::check_restart(&files.time, hybrid_fingerprint())?;
-    let patch_physics = hybrid_patch_physics(hybrid.as_ref(), &files.constant, &patches, &physics)?;
+    let patch_physics = hybrid_patch_physics(
+        hybrid.as_ref(),
+        &files.constant,
+        &patches,
+        || single_point_pft_ranges(&files.constant, &patches, &physics),
+        &physics,
+        &document,
+    )?;
     let mut templates = patches
         .iter()
         .zip(patch_physics)
@@ -975,7 +982,19 @@ fn run_spatial_segment(
             None
         };
         let block_patches: Vec<usize> = (0..patches.len()).collect();
-        let patch_physics = hybrid_patch_physics(hybrid, &files.constant, &block_patches, physics)?;
+        let patch_physics = hybrid_patch_physics(
+            hybrid,
+            &files.constant,
+            &block_patches,
+            || {
+                Ok(match &pft_ranges {
+                    Some(ranges) => ranges.clone(),
+                    None => vec![0..0; block_patches.len()],
+                })
+            },
+            physics,
+            document,
+        )?;
         for (patch, physics) in patch_physics.into_iter().enumerate() {
             let global = patches.start + patch;
             let pfts = pft_ranges
@@ -5594,7 +5613,7 @@ fn hybrid_fingerprint() -> Option<&'static str> {
 /// `--hybrid`/`--hybrid-tap` 的两种用法。
 enum HybridMode {
     /// 加载模型，插槽改参数。
-    Apply(colm_runtime::hybrid::Hybrid),
+    Apply(Box<colm_runtime::hybrid::Hybrid>),
     /// 只把特征与物理值追加写进 CSV，参数不变（训练前还没有模型也能跑）。
     Tap {
         config: colm_hybrid::HybridConfig,
@@ -5612,26 +5631,56 @@ impl HybridMode {
                 config: colm_hybrid::HybridConfig::load_spec(path)?,
                 out: out.clone(),
             },
-            None => Self::Apply(colm_runtime::hybrid::Hybrid::load(path)?),
+            None => Self::Apply(Box::new(colm_runtime::hybrid::Hybrid::load(path)?)),
         }))
     }
 }
 
-/// 各 patch 装配用的物理参数：没有混合设置时都是 `physics`。
+/// 各 patch 装配用的物理参数：没有混合设置时都是 `physics`。`pft_ranges` 只在有混合设置时才算
+/// （各 patch 在 PFT 常数重启里的 PFT 区间，`pft` 插槽要它）。
 fn hybrid_patch_physics(
     hybrid: Option<&HybridMode>,
     constant: &Path,
     patches: &[usize],
+    pft_ranges: impl FnOnce() -> Result<Vec<std::ops::Range<usize>>>,
     physics: &colm_runtime::assembly::LandPhysicsParameters,
+    document: &Document,
 ) -> Result<Vec<colm_runtime::assembly::LandPhysicsParameters>> {
     match hybrid {
         None => Ok(vec![physics.clone(); patches.len()]),
-        Some(HybridMode::Apply(hybrid)) => hybrid.patch_physics(constant, patches, physics),
+        Some(HybridMode::Apply(hybrid)) => {
+            hybrid.patch_physics(constant, patches, &pft_ranges()?, physics)
+        }
         Some(HybridMode::Tap { config, out }) => {
-            colm_runtime::hybrid::write_land_class_tap(config, constant, patches, physics, out)?;
+            colm_runtime::hybrid::write_tap(
+                config,
+                constant,
+                patches,
+                &pft_ranges()?,
+                physics,
+                document,
+                out,
+            )?;
             Ok(vec![physics.clone(); patches.len()])
         }
     }
+}
+
+/// 单点各 patch 在 PFT 常数重启里的 PFT 区间（LCT 没有 PFT，都是空区间）。
+fn single_point_pft_ranges(
+    constant: &Path,
+    patches: &[usize],
+    physics: &colm_runtime::assembly::LandPhysicsParameters,
+) -> Result<Vec<std::ops::Range<usize>>> {
+    if !physics.use_pft {
+        return Ok(vec![0..0; patches.len()]);
+    }
+    let pft = colm_init::RestartFile::open(colm_runtime::pft::pft_restart_path(constant)?)?;
+    let (patch_count, site_pfts) = colm_runtime::pft::patch_and_pft_counts(&pft)?;
+    patches
+        .iter()
+        .map(|&patch| colm_runtime::pft::patch_pft_range(patch_count, site_pfts, patch))
+        .collect()
 }
 
 #[cfg(test)]

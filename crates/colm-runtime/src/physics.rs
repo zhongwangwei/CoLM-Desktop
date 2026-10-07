@@ -310,6 +310,7 @@ pub fn land_physics_parameters(
         bgc,
         irrigation,
         land_class_overrides,
+        pft_overrides: Vec::new(),
         dynamic_wetland,
         dynamic_lake,
         snicar,

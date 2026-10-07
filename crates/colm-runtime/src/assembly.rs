@@ -78,6 +78,9 @@ pub struct LandPhysicsParameters {
     pub irrigation: Option<colm_core::IrrigationSettings>,
     /// 单点 LCT 的 `DEF_LC_*` 地类表逐列覆盖（PHS 九列在 `plant_hydraulic_overrides`）；PFT/PC 下为空。
     pub land_class_overrides: colm_core::LandClassOverrides,
+    /// 混合模型 `pft` 插槽给本 patch 各 PFT 的 `DEF_PFT_*` 覆盖（按 PFT 在本 patch 里的次序；空 = 不覆盖）。
+    /// 语义同 namelist 的 `DEF_PFT_*(class)`，只是按 PFT 而不是按类别；派生量照原路径算（见 `crate::pft`）。
+    pub pft_overrides: Vec<std::collections::BTreeMap<String, f64>>,
     /// `DEF_USE_Dynamic_Wetland`：湿地按土壤地面算地面湿度，VSF 下走土壤水分支。
     pub dynamic_wetland: bool,
     /// `DEF_USE_Dynamic_Lake`（VSF 下才生效）：湖层厚随水量变、`dz_lake` 进时间重启。

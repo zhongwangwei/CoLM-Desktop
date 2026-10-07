@@ -52,3 +52,31 @@ fn restart_markers_follow_the_hybrid_fingerprint() {
     check_restart(&restart, Some("bbb")).unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn the_pft_slot_accepts_only_def_pft_parameters() {
+    let config = |name: &str, output: &str| SlotConfig {
+        name: name.into(),
+        kind: SlotKind::Param,
+        model: None,
+        sha256: None,
+        features: vec!["pftclass".into()],
+        normalize: None,
+        outputs: vec![colm_hybrid::OutputSpec {
+            name: output.into(),
+            range: None,
+            transform: colm_hybrid::Transform::Identity,
+        }],
+    };
+    assert!(known_slot(&config(PFT_SLOT, "DEF_PFT_VMAX25")).is_ok());
+    assert!(known_slot(&config(PFT_SLOT, "DEF_PFT_GRADM")).is_ok());
+    assert!(known_slot(&config(PFT_SLOT, "DEF_LC_VMAX25")).is_err());
+    assert!(known_slot(&config(LAND_CLASS_SLOT, "DEF_PFT_VMAX25")).is_err());
+}
+
+#[test]
+fn pft_rows_run_patch_by_patch_then_pft_by_pft() {
+    // 行 0、2 是土壤 patch；行 1 不是（区间也空）。
+    let rows = pft_rows(&[0, 2], &[5, 6, 7], &[0..2, 2..2, 2..5]);
+    assert_eq!(rows, [(0, 5, 0), (0, 5, 1), (2, 7, 2), (2, 7, 3), (2, 7, 4)]);
+}
