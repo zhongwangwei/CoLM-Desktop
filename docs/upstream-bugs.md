@@ -799,6 +799,33 @@
   测试改为检查 schema 里所有字符字段的可选值都不超过声明长度。
 - **上游**：已推到 `zhongwangwei/CoLM202X` 的 `fix/colm-desktop-audit`（`0077d685`）。
 
+### 84. LCT 模式加 van Genuchten 土壤没有校准：Vcmax 只有 Campbell 那一套，土壤阻抗又被强制关闭——未修
+
+- **位置**：
+  - `main/MOD_Const_PFT.F90:1788-1840`：`vmax25_p` 按 `DEF_USE_Campbell_SOIL_MODEL` 分两套。van Genuchten 那套注释写着 "Temporarily tune Vegetation parameter to match VGM model (soil too wet)"，北方常绿针叶树（PFT 2）54 → 26.5、常绿阔叶 56 → 25.2，等等。
+  - `main/MOD_Const_LC.F90`：LCT 地类表的 `vmax25` 只有一套，IGBP 第 1 类是 54，与 PFT 的 Campbell 值相同，没有为 VG 下调。
+  - `share/MOD_Namelist.F90:1983-1986`：LCT（USGS/IGBP）加 VG 时强制 `DEF_RSS_SCHEME = 0`，土壤蒸发阻抗关闭。PFT/PC 保留默认的 1。
+- **影响**（PLUMBER2，两年窗口第二年，Rust 与 Fortran 引擎结果相同）：
+
+| 站点 | 设置 | Qle KGE | Qle 均值 | GPP KGE | GPP 均值 |
+|---|---|---|---|---|---|
+| CA-Qfo（观测 Qle 21.6，GPP 1.80） | LCT（Vcmax 54、无阻抗） | −1.68 | 64.3 | −2.33 | 6.39 |
+| | LCT，Vcmax 26.5 | −0.99 | 54.8 | −0.32 | 3.72 |
+| | LCT，Vcmax 26.5，保留阻抗（诊断版） | −0.41 | 46.7 | −0.31 | 3.71 |
+| | PC | 0.30 | 34.6 | 0.27 | 2.95 |
+| DE-Obe（观测 Qle 31.9，GPP 4.55） | LCT（Vcmax 54、无阻抗） | −0.56 | 73.1 | −0.15 | 8.94 |
+| | LCT，Vcmax 26.5 | −0.09 | 62.8 | 0.77 | 5.48 |
+| | LCT，Vcmax 26.5，保留阻抗 | 0.24 | 54.2 | 0.77 | 5.49 |
+| | PC | 0.60 | 33.5 | 0.77 | 4.73 |
+
+  - LCT 默认设置下光合高 2.2 倍、气孔导度高 3 倍、蒸腾高 2.8 倍，而 LAI、吸收的辐射与水分胁迫都与 PC 相同。
+  - 改用 VG 那套 Vcmax 后 GPP 基本回到 PC 水平；再保留土壤阻抗，土壤蒸发降约 8 W/m²。
+  - 剩下的 Qle 差距（12–21 W/m²）主要在蒸腾：Vcmax 相同时 LCT 仍比 PC 多约 10 W/m²，应是单层大叶与 PC 三层冠层的结构差别。这一块不算缺陷。
+- **处理**：
+  - 未修，待维护者决定。可选做法：给 LCT 地类表加一套 VG 下的 `vmax25`（按各地类的主导 PFT 取 VG 值），以及重新评估 LCT 加 VG 时是否该关土壤阻抗。
+  - 两者都改变 LCT 默认算例的结果，要重做黄金回归。
+  - "保留阻抗"那一行用的是本地临时诊断版 colm-rs（`COLM_RS_DIAG_KEEP_RSS`，未提交）。
+
 ## 二、TRACER 编译开关改变了物理（需要上游确认哪一边是对的）
 
 这一版上游在很多地方给 TRACER 构建和非 TRACER 构建写了**不同的物理**，不只是记账不同。
