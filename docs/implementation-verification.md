@@ -32100,3 +32100,49 @@ GPP 的均值被 4 个基线 KGE 低于 −0.5 的站拉低（BE-Lon、DE-Geb、
 - 发布流水线的新作业（`engine-linux`、下载产物、macOS 的资源检查）没有在 GitHub Actions 上跑过，只核对了 YAML 能解析、作业依赖对得上。
 - 真正的安装包（`cargo tauri build`）没有打，所以资源目录里的路径查找只用“拷出 `colm-cli`、手工放源码包”的方式模拟过。Linux 的 deb 与 AppImage 的资源目录位置各不相同，靠 `COLM_RESOURCE_DIR` 由 GUI 告知，没有在那两种包上验证。
 - 不能联网的计算节点：预编包省掉了 cargo 与联网，但整条链路没有在这样的机器上跑过。
+
+## 第 645 轮：R4——在服务器上编 Fortran 内核，多进程 MPI 运行
+
+**做法**：
+- `colm-cli remote-kernel --host H --root R --preset P [--env-script …]`：把源码快照传上去，作为作业运行 `oracle/scripts/build_kernel.sh`，产物登记为 `<根>/kernels/<预设>-<标识>/`（`colm.x`、`mkinidata.x`、`mksrfdata.x` 与 `manifest.json`）。标识是源码、环境准备与剖面的哈希，编过的不再重编（`--force 1` 重编）。`remote-kernels` 列出服务器上的内核（只有清单的目录标成不完整，Rust 引擎用它，Fortran 引擎不能用）。
+- `remote-run --engine fortran --ranks N [--nodes M] [--remote-kernel auto|名字|路径] [--preset P] [--launcher auto|srun|mpiexec] [--preprocessors rust|fortran]`：`--kernel` 在 Fortran 引擎下可省（本机不必有这个预设的内核）。`auto` 取同一预设里最新的完整内核。Slurm 里用 `srun` 起进程（内核运行时认 `COLM_MPIEXEC`），其余用 PATH 里的 `mpiexec`；资源申请带 `ranks` 与 `nodes`（Slurm `--ntasks`/`--nodes`，PBS `select=N:ncpus=…:mpiprocs=…`，LSF `-n` 与 `span[ptile=…]`），分不匀的拒绝。
+- `build_kernel.sh` 加了 `COLM_GIT_SHA`：服务器上的源码快照没有 `.git`，`git log` 在 `set -e` 下会让脚本退出，由本机把 Fortran 源的提交号带过去。
+- GUI：服务器对话框里“Fortran 内核”折叠区（查看服务器上的内核、选预设、在服务器上编译这个内核），“节点数”；运行页选了服务器后 Fortran 引擎也可选（进程数随引擎一起提交）。
+
+**环境**：T7920 有 gfortran 15.2 与 netCDF-C，没有 `mpif90`、netCDF-Fortran，也没有调度系统。用户装了 conda：在 `<根>/tools/fenv` 里用 conda-forge 建了一个独立前缀（`openmpi`、`netcdf-fortran 4.6.4`、`gfortran_linux-64`，gcc 16.2.0；包缓存也放在 `tools/conda-pkgs`），没有动用户已有的 conda 环境。Makeoptions 默认 `mpif90`，模块文件必须由同一个 gfortran 读写，所以前缀里补了一个 `gfortran` 链接，环境准备脚本把 `PATH` 与 `LD_LIBRARY_PATH` 指向它。这是对这台机器的“站点环境”，在别的服务器上用 `module load` 之类代替。
+
+**检查**（T7920，空间算例：经纬度网格 4×4 个 0.5° 格点，lon 115–117、lat 38–40，2003-01-01 至 03，步长 1800 s，JRA3Q 强迫，igbp，冷启动）：
+- 作业体没有 `set -e` 的缺陷：第一次带错误标志编内核时 `build_kernel.sh` 静默退出，作业体最后一条命令（`echo`）的状态把失败盖成了成功，退出码 0。已改成作业体一律 `set -e`。同一次还暴露了 `build_kernel.sh` 的一个脆弱点：`mpifort -show | grep '^-I'` 在没有匹配时，`pipefail` 让脚本静默退出（OpenMPI 的 `OMPI_FCFLAGS` 是替换而不是追加，会丢掉包装器默认的 `-I`）；已改成无匹配也继续。
+- `remote-kernel --preset latlon`：约 13 分钟编完，宏含 `GRIDBASED USEMPI FLAT_SPMD GridRiverLakeFlow LULC_IGBP URBAN_MODEL`，三个程序齐全。
+- Fortran 内核 4 个 MPI 进程：日志有 `Flat SPMD: 4 computing ranks`，三段都 ok，退出码 0。
+- 同一内核 1 个进程：**与 4 个进程的 history 150/150 个变量逐位一致**，所以 MPI 流程正确，结果与进程划分无关。
+- 与 Rust 引擎（同一服务器、同一算例、同样的 Rust 前处理）比对：**不是逐位一致**。默认标志的 Fortran 内核 24/150 逐位一致，差异中位数 1.5e-4，个别径流量达 16%；`f_xerr`、`f_zerr` 是 1e-16/1e-10 量级的舍入残差，相对差再大也只是噪声。这不是 R4 引入的：文档里空间算例“逐位一致”是在 Mac arm64 上得到的，那里 gfortran 会做 FMA 融合，Rust 移植是照它的 GIMPLE 逐条对出来的；x86-64 的默认编译没有 FMA。验证：用 `OMPI_FCFLAGS=-mfma` 另编一个内核（`latlon-6f59bbf4`），与 Rust 引擎比 42/150 逐位一致，差异中位数降到 9.7e-8（缩小约 1500 倍），其余非残差变量最大 `f_frcsat` 1.25e-4，大多在 1e-6 量级。所以 FMA 是主因但不是全部，剩下的原因没有查清。已作为后续任务单独提出，不影响 R4 的验收（多进程编译与运行）。
+- 测试：`colm-remote` 25 项（调度指令的 MPI 写法、内核列表解析）、`colm-cli` 新增运行计划与 `srun` 启动器的作业体（4 项远程测试）、GUI Rust 216 项（引擎与进程数透传）。
+
+**还没验证**：
+- **多节点**：T7920 是单节点、没有调度系统，所以只验证了单节点 4 进程。`srun` 启动、`--nodes` 的三家写法只通过生成的脚本与模拟命令检查，没有在真集群上跑过。
+- Windows 与 macOS 服务器不支持（Linux 的 `stat -c`、`flock` 等）。
+
+## 第 646 轮：R5——按变量、按时段取回结果
+
+**动机**：经 Mac Pro 的链路只有约 0.4 MB/s，取回一个站点一年的 history（12 个文件 71 MB）要 3 分 12 秒；而用户通常只看几个变量。
+
+**做法**：
+- `colm-cli history-subset <算例> --out DIR [--vars f_a,f_b] [--from YYYY-MM] [--to YYYY-MM] [--compress N] [--list 1]`：把 history 裁成只含所选变量与月份的压缩小文件。保留所选变量、`time`、坐标变量和不随时间变化的小变量（经纬度、地类，不超过 400 万个值），全局与变量属性、`_FillValue`、无限维原样带上；用 deflate 加 shuffle 压缩（原来的 history 没压缩）。所选变量一个文件里都没有就报错并列出。
+- `colm-cli remote-fetch <算例> [--vars …] [--from …] [--to …]`：在服务器上先裁，再只取裁出来的文件和三段日志；不给这些参数就和以前一样取全部。部分取回在算例里留 `.colm-fetch.json`（取了什么）；同名文件被覆盖，不在所选月份里的旧文件不动。记录里的引擎太旧、没有这个命令时，错误里说明怎么办。
+- GUI：服务器设置里“取回的变量”（留空取全部）；自动取回时用它；作业行上部分取回后出现“取回全部变量”按钮。
+
+**检查**（CA-Qfo、PC 模式、2004 年一年，12 个 history 文件 68.5 MB，T7920 经 Mac Pro）：
+
+| 取回的内容 | 耗时 | 取回量 |
+|---|---|---|
+| 全部（第 642 轮） | 3 分 12 秒 | 71 MB |
+| 1 个变量，整年 | 11 秒 | 0.78 MB |
+| 5 个变量，整年 | 9 秒 | 3.1 MB |
+| 5 个变量，6–8 月 | 8 秒 | 0.78 MB |
+
+- 裁出的文件里 `f_fsena`、`f_t_grnd`、`time` 与原文件逐位相同，单位等属性保留，127 个变量只留 15 个（5 个所选加 `time`、坐标、静态小变量）。
+- 不存在的变量名报错；月份范围与只有年份的文件名按整年处理。
+- 测试：`history_subset` 3 项（变量与属性保留、变量越少文件越小、文件名里的时段与区间），`remote.mjs` 与 `remote_tests.rs` 里取回参数的 4 项；全工作区 1986 项、GUI Rust 216 项、`check-gui` 110 个命令、15 个前端套件通过；两个 workspace 的 clippy 与 fmt 干净。
+
+**限制**：裁剪由记录里那次运行用的引擎完成，所以更早提交的作业要重跑才能用；Fortran 内核跑出来的 history 同样可以裁（文件格式一样），但本轮只在 Rust 引擎的站点结果上测过。

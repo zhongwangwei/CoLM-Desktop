@@ -16,6 +16,7 @@ for (const [name, body] of Object.entries({
   'results.js': 'export const invalidateResultCase = () => {};',
   'shell.js': 'export const setRunning = () => {};',
   'state.js': 'export const state = {};',
+  'engine.js': 'export const modelEngine = () => "rust";',
 })) await writeFile(join(temp, 'app', name), body);
 const remote = await import(pathToFileURL(join(temp, 'app', 'remote.js')).href);
 
@@ -55,11 +56,26 @@ assert.equal(remote.probeLines({ hostname: 'c', os: 'L', arch: 'x86_64', engine:
 assert.equal(remote.probeLines({ hostname: 'c', os: 'L', arch: 'x86_64', engine: 'source' }).at(-1), '引擎: 在服务器上从源码编译');
 assert.equal(withQueues.at(-2), '调度系统: slurm');
 
+// R5：只取了所选变量的作业。
+assert.equal(remote.jobSummary({ state: 'finished', exit_code: 0, fetched: true, partial: true }), '完成，已取回所选变量（可以再取回全部）');
+assert.equal(remote.jobSummary({ state: 'finished', exit_code: 0, fetched: true, partial: false }), '完成，结果已取回');
+
+// Fortran 引擎（R4）：只有它用 MPI 进程数；服务器上的内核摘要。
+assert.deepEqual(remote.engineChoice('rust', '8'), { engine: 'rust', ranks: null });
+assert.deepEqual(remote.engineChoice('fortran', '8'), { engine: 'fortran', ranks: 8 });
+assert.deepEqual(remote.engineChoice('fortran', 'abc'), { engine: 'fortran', ranks: 1 });
+assert.deepEqual(remote.engineChoice('fortran', '0'), { engine: 'fortran', ranks: 1 });
+assert.deepEqual(remote.kernelLines([]), ['服务器上还没有内核']);
+assert.deepEqual(
+  remote.kernelLines([{ name: 'latlon-ab12', preset: 'latlon', full: true }, { name: 'default-cd34', preset: 'default', full: false }]),
+  ['latlon-ab12 · latlon · 完整', 'default-cd34 · default · 只有清单（Rust 引擎用）'],
+);
+
 // 运行页与首页都接上了：运行按钮在选了服务器时交给 remote.js；首页的服务器卡片可点。
 const runner = await readFile(join(root, 'dist', 'app', 'runner.js'), 'utf8');
 assert.match(runner, /if \(runTarget\(\) !== 'local'\) \{\s*await remoteRun\(/);
 const html = await readFile(join(root, 'dist', 'index.html'), 'utf8');
-for (const id of ['run-target', 'manage-servers', 'remote-runs', 'remote-dialog', 'remote-host', 'remote-root', 'remote-maps', 'remote-test', 'remote-save', 'remote-scheduler', 'remote-partition', 'remote-account', 'remote-walltime', 'remote-cpus', 'remote-memory', 'remote-env', 'remote-directives', 'preview-job', 'remote-preview-dialog', 'remote-preview-text']) {
+for (const id of ['run-target', 'manage-servers', 'remote-runs', 'remote-dialog', 'remote-host', 'remote-root', 'remote-maps', 'remote-test', 'remote-save', 'remote-scheduler', 'remote-partition', 'remote-account', 'remote-walltime', 'remote-cpus', 'remote-memory', 'remote-env', 'remote-directives', 'preview-job', 'remote-preview-dialog', 'remote-preview-text', 'remote-nodes', 'remote-kernel-preset', 'remote-list-kernels', 'remote-build-kernel', 'remote-kernels-result', 'remote-fetch-vars']) {
   assert.ok(html.includes(`id="${id}"`), id);
 }
 console.log('remote: maps, probe summary, job states and wiring ok');

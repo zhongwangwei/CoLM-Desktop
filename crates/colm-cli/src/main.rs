@@ -45,6 +45,7 @@
 //! 文件，时间步长读自强迫场文件 —— 这三样都不问用户。
 
 mod fingerprint;
+mod history_subset;
 mod hybrid_cmd;
 mod hybrid_fit;
 mod observation_table;
@@ -132,6 +133,8 @@ usage:
                    # 列出全部支持的评估变量及当前算例/观测是否可用
   colm-cli evaluation-plan <case-dir> --obs <Flux.nc> --kernel <dir>
                    # 不依赖 history，按 case.nml + 内核预览可评估目标
+  colm-cli history-subset <case-dir> --out <dir> [--vars f_a,f_b] [--from YYYY-MM] [--to YYYY-MM] [--compress N] [--list 1]
+                    # 把 history 裁成只含所选变量与月份的压缩小文件（远程取回结果用，R5）
   colm-cli history-catalog <case-dir>
   colm-cli series  <case-dir> --vars f_rnet,f_fsena [--from UNIX] [--to UNIX]
                    [--max-points N] [--out series.json]
@@ -292,7 +295,10 @@ fn main() -> Result<()> {
         "remote-probe" => remote_cmd::cmd_probe(&opts)?,
         "remote-run" => remote_cmd::cmd_run(&opts)?,
         "remote-dist" => remote_cmd::cmd_dist(&opts)?,
+        "remote-kernel" => remote_cmd::cmd_kernel(&opts)?,
+        "remote-kernels" => remote_cmd::cmd_kernels(&opts)?,
         "engine-pack" => remote_cmd::cmd_pack(&opts)?,
+        "history-subset" => history_subset::cmd_history_subset(&opts)?,
         "remote-status" => remote_cmd::cmd_status(&opts)?,
         "remote-cancel" => remote_cmd::cmd_cancel(&opts)?,
         "remote-fetch" => remote_cmd::cmd_fetch(&opts)?,

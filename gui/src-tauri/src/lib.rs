@@ -177,6 +177,8 @@ pub fn run() {
             remote_probe,
             remote_run,
             remote_preview,
+            remote_kernels,
+            remote_build_kernel,
             remote_status,
             remote_cancel,
             remote_fetch,

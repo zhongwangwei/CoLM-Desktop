@@ -38,8 +38,13 @@ impl Scheduler {
 /// 向调度系统申请的资源。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Resources {
-    /// 一个节点上的核数（至少 1）。
+    /// 每个 MPI 进程用的核数（线程数；至少 1）。
     pub cpus: u32,
+    /// MPI 进程数；0 或 1 表示不用 MPI。
+    pub ranks: u32,
+    /// 占几个节点；0 表示不指定（Slurm 自己分配；PBS、LSF 按一个节点算）。进程数要能被它整除。
+    pub nodes: u32,
+    /// 每个节点的内存（GB）。
     pub memory_gb: Option<u32>,
     /// `HH:MM:SS`、`D-HH:MM:SS` 或 `HH:MM`。
     pub walltime: Option<String>,
@@ -98,6 +103,12 @@ fn word(what: &str, text: &str) -> Result<()> {
 impl Resources {
     pub fn validate(&self) -> Result<()> {
         ensure!(self.cpus >= 1, "cpus must be at least 1");
+        ensure!(
+            self.nodes == 0 || self.ranks.max(1) % self.nodes == 0,
+            "the {} MPI ranks cannot be spread evenly over {} nodes",
+            self.ranks.max(1),
+            self.nodes
+        );
         if let Some(seconds) = &self.walltime {
             parse_walltime(seconds)?;
         }
@@ -159,8 +170,12 @@ pub fn directives(
             lines.push(format!("#SBATCH --job-name={name}"));
             lines.push(format!("#SBATCH --output={log}"));
             lines.push(format!("#SBATCH --error={log}"));
-            lines.push("#SBATCH --nodes=1".into());
-            lines.push("#SBATCH --ntasks=1".into());
+            if resources.nodes > 0 {
+                lines.push(format!("#SBATCH --nodes={}", resources.nodes));
+            } else if resources.ranks <= 1 {
+                lines.push("#SBATCH --nodes=1".into());
+            }
+            lines.push(format!("#SBATCH --ntasks={}", resources.ranks.max(1)));
             lines.push(format!("#SBATCH --cpus-per-task={}", resources.cpus));
             if let Some(gb) = resources.memory_gb {
                 lines.push(format!("#SBATCH --mem={gb}G"));
@@ -185,7 +200,12 @@ pub fn directives(
             lines.push(format!("#PBS -N {name}"));
             lines.push("#PBS -j oe".into());
             lines.push(format!("#PBS -o {log}"));
-            let mut select = format!("select=1:ncpus={}", resources.cpus);
+            let nodes = resources.nodes.max(1);
+            let per_node = resources.ranks.max(1) / nodes;
+            let mut select = format!(
+                "select={nodes}:ncpus={}:mpiprocs={per_node}",
+                resources.cpus * per_node
+            );
             if let Some(gb) = resources.memory_gb {
                 select.push_str(&format!(":mem={gb}gb"));
             }
@@ -204,8 +224,16 @@ pub fn directives(
         Scheduler::Lsf => {
             lines.push(format!("#BSUB -J {name}"));
             lines.push(format!("#BSUB -oo {log}"));
-            lines.push(format!("#BSUB -n {}", resources.cpus));
-            lines.push("#BSUB -R \"span[hosts=1]\"".into());
+            lines.push(format!(
+                "#BSUB -n {}",
+                resources.cpus * resources.ranks.max(1)
+            ));
+            if resources.nodes > 1 {
+                let per_node = resources.cpus * resources.ranks.max(1) / resources.nodes;
+                lines.push(format!("#BSUB -R \"span[ptile={per_node}]\""));
+            } else {
+                lines.push("#BSUB -R \"span[hosts=1]\"".into());
+            }
             if let Some(gb) = resources.memory_gb {
                 lines.push(format!("#BSUB -R \"rusage[mem={}]\"", u64::from(gb) * 1024));
             }

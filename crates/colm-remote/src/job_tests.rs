@@ -9,6 +9,8 @@ fn slurm_spec() -> Spec {
         scheduler: Scheduler::Slurm,
         resources: Resources {
             cpus: 8,
+            ranks: 0,
+            nodes: 0,
             memory_gb: Some(32),
             walltime: Some("02:00:00".into()),
             partition: Some("cpu".into()),
@@ -298,7 +300,7 @@ fn pbs_job_states_and_cancel() {
     assert_eq!(out.trim().lines().last(), Some("777.pbsserver"));
     assert!(sb.read("qsub_args").contains("script.sh"));
     let script = std::fs::read_to_string(sb.job_dir("j-5").join("script.sh")).unwrap();
-    assert!(script.contains("#PBS -l select=1:ncpus=8:mem=32gb"));
+    assert!(script.contains("#PBS -l select=1:ncpus=8:mpiprocs=1:mem=32gb"));
 
     sb.set("pbs_state", "Q");
     assert_eq!(sb.status("j-5").state, State::Queued);

@@ -22,6 +22,8 @@ fn server_settings_are_validated() {
         walltime: String::new(),
         cpus: 0,
         memory_gb: 0,
+        nodes: 0,
+        fetch_vars: String::new(),
         env_script: String::new(),
         directives: Vec::new(),
     };
@@ -100,7 +102,15 @@ fn run_arguments_carry_the_scheduler_request_and_the_preview_flag() {
     server.memory_gb = 32;
     server.env_script = "module load rust".into();
     server.directives = vec!["--constraint=ib".into()];
-    let args = run_args(&server, "/c".into(), "/k".into(), None, false, false);
+    let args = run_args(
+        &server,
+        "/c".into(),
+        "/k".into(),
+        None,
+        false,
+        false,
+        &Engine::default(),
+    );
     let after = |flag: &str| {
         let at = args
             .iter()
@@ -123,6 +133,7 @@ fn run_arguments_carry_the_scheduler_request_and_the_preview_flag() {
         Some("colm".into()),
         true,
         true,
+        &Engine::default(),
     );
     assert!(preview.windows(2).any(|w| w == ["--dry-run", "1"]));
     assert!(preview.windows(2).any(|w| w == ["--stage", "colm"]));
@@ -142,4 +153,71 @@ fn remote_logs_are_parsed_like_local_runs() {
         ]
     );
     assert_eq!(progress, Some((121, "2004-01-04-1800".to_owned())));
+}
+
+#[test]
+fn the_fortran_engine_passes_ranks_and_nodes_only_when_it_uses_mpi() {
+    let mut server: Server = serde_json::from_str(r#"{"host":"c1","root":"/data/colm"}"#).unwrap();
+    server.nodes = 2;
+    let go = |engine: Option<&str>, ranks: Option<u32>| {
+        run_args(
+            &server,
+            "/c".into(),
+            "/k".into(),
+            None,
+            false,
+            false,
+            &Engine {
+                engine: engine.map(str::to_owned),
+                ranks,
+            },
+        )
+    };
+    let value = |args: &[String], flag: &str| {
+        args.iter()
+            .position(|a| a == flag)
+            .map(|i| args[i + 1].clone())
+    };
+    let fortran = go(Some("fortran"), Some(8));
+    assert_eq!(value(&fortran, "--engine").as_deref(), Some("fortran"));
+    assert_eq!(value(&fortran, "--ranks").as_deref(), Some("8"));
+    assert_eq!(value(&fortran, "--nodes").as_deref(), Some("2"));
+    // 一个进程不用 MPI，也就不申请节点。
+    let one = go(Some("fortran"), Some(1));
+    assert!(value(&one, "--ranks").is_none() && value(&one, "--nodes").is_none());
+    // Rust 引擎：什么都不加，沿用 colm-cli 的默认。
+    let rust = go(Some("rust"), Some(8));
+    assert!(value(&rust, "--engine").is_none() && value(&rust, "--ranks").is_none());
+    assert!(value(&go(None, None), "--engine").is_none());
+}
+
+#[test]
+fn fetching_only_the_configured_variables_unless_everything_is_asked_for() {
+    let mut server: Server = serde_json::from_str(r#"{"host":"c1","root":"/data/colm"}"#).unwrap();
+    // 没配：取全部。
+    assert_eq!(
+        fetch_args("/c".into(), Some(&server), false),
+        ["remote-fetch", "/c"]
+    );
+    server.fetch_vars = " f_fsena,f_rnet ".into();
+    assert_eq!(
+        fetch_args("/c".into(), Some(&server), false),
+        ["remote-fetch", "/c", "--vars", "f_fsena,f_rnet"]
+    );
+    // 要全部：不加 --vars。找不到服务器配置时也一样。
+    assert_eq!(
+        fetch_args("/c".into(), Some(&server), true),
+        ["remote-fetch", "/c"]
+    );
+    assert_eq!(fetch_args("/c".into(), None, false), ["remote-fetch", "/c"]);
+    for bad in ["f_a;rm", "f a", "f_a -x"] {
+        server.fetch_vars = bad.into();
+        assert!(
+            validate(&RemoteConfig {
+                servers: vec![server.clone()]
+            })
+            .is_err(),
+            "{bad}"
+        );
+    }
 }

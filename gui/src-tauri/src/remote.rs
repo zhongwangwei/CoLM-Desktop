@@ -39,9 +39,15 @@ pub struct Server {
     /// 申请的核数；0 表示和线程数一样。
     #[serde(default)]
     pub cpus: u32,
-    /// 申请的内存（GB）；0 表示不指定。
+    /// 申请的内存（GB，每个节点）；0 表示不指定。
     #[serde(default)]
     pub memory_gb: u32,
+    /// MPI 运行占几个节点；0 表示不指定（Slurm 自己分配，其余按一个节点）。
+    #[serde(default)]
+    pub nodes: u32,
+    /// 自动取回结果时只取这些变量（逗号分隔，例如 `f_fsena,f_rnet`）；空表示取回全部。
+    #[serde(default)]
+    pub fetch_vars: String,
     /// 作业开头先执行的环境准备，例如 `module load rust`。
     #[serde(default)]
     pub env_script: String,
@@ -128,6 +134,19 @@ pub(crate) fn validate(config: &RemoteConfig) -> Result<(), String> {
             return Err(format!(
                 "{host} 的时限要写成 HH:MM:SS 或 D-HH:MM:SS：{wall:?}"
             ));
+        }
+        let vars = server.fetch_vars.trim();
+        if !vars.is_empty()
+            && !vars
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == ',')
+        {
+            return Err(format!(
+                "{host} 取回的变量只能写变量名，用逗号分隔：{vars:?}"
+            ));
+        }
+        if server.nodes > 4096 {
+            return Err(format!("{host} 的节点数不合理"));
         }
         if server.cpus > 1024 || server.memory_gb > 100_000 {
             return Err(format!("{host} 的核数或内存数不合理"));
@@ -252,6 +271,14 @@ pub async fn remote_probe(
 }
 
 /// `remote-run` 的命令行参数。预览（`--dry-run 1`）与真正提交用同一份，所以用户看到的就是要提交的。
+/// 引擎与 MPI 进程数（只有 Fortran 引擎用进程数）。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct Engine {
+    pub engine: Option<String>,
+    pub ranks: Option<u32>,
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn run_args(
     server: &Server,
     case: String,
@@ -259,6 +286,7 @@ pub(crate) fn run_args(
     stage: Option<String>,
     force: bool,
     dry_run: bool,
+    engine: &Engine,
 ) -> Vec<String> {
     let mut args: Vec<String> = vec![
         "remote-run".into(),
@@ -312,6 +340,46 @@ pub(crate) fn run_args(
         args.push("--dry-run".into());
         args.push("1".into());
     }
+    if engine.engine.as_deref() == Some("fortran") {
+        args.push("--engine".into());
+        args.push("fortran".into());
+        if let Some(ranks) = engine.ranks.filter(|r| *r > 1) {
+            args.push("--ranks".into());
+            args.push(ranks.to_string());
+            if server.nodes > 0 {
+                args.push("--nodes".into());
+                args.push(server.nodes.to_string());
+            }
+        }
+    }
+    args
+}
+
+/// 调度与环境的参数（编内核、跑算例共用）。
+fn scheduler_args(server: &Server) -> Vec<String> {
+    let mut args: Vec<String> = vec!["--scheduler".into(), server.scheduler.clone()];
+    let mut optional = |flag: &str, value: &str| {
+        if !value.trim().is_empty() {
+            args.push(flag.into());
+            args.push(value.trim().to_owned());
+        }
+    };
+    optional("--partition", &server.partition);
+    optional("--account", &server.account);
+    optional("--walltime", &server.walltime);
+    optional("--env-script", &server.env_script);
+    if server.cpus > 0 {
+        args.push("--cpus".into());
+        args.push(server.cpus.to_string());
+    }
+    if server.memory_gb > 0 {
+        args.push("--mem-gb".into());
+        args.push(server.memory_gb.to_string());
+    }
+    for line in server.directives.iter().filter(|l| !l.trim().is_empty()) {
+        args.push("--directive".into());
+        args.push(line.trim().to_owned());
+    }
     args
 }
 
@@ -324,6 +392,7 @@ fn server_for(app: tauri::AppHandle, host: &str) -> Result<Server, String> {
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn remote_run(
     app: tauri::AppHandle,
     case: String,
@@ -331,18 +400,62 @@ pub async fn remote_run(
     kernel: String,
     stage: Option<String>,
     force: bool,
+    engine: Option<String>,
+    ranks: Option<u32>,
 ) -> Result<Value, String> {
     let resources = resource_dir(&app);
     let server = server_for(app, &host)?;
+    let engine = Engine { engine, ranks };
     cli_json(
-        run_args(&server, case, kernel, stage, force, false),
+        run_args(&server, case, kernel, stage, force, false, &engine),
         resources,
     )
     .await
 }
 
+/// 服务器上有哪些内核（完整的 Fortran 内核才能给 Fortran 引擎用）。
+#[tauri::command]
+pub async fn remote_kernels(app: tauri::AppHandle, host: String) -> Result<Value, String> {
+    let server = server_for(app, &host)?;
+    cli_json(
+        vec![
+            "remote-kernels".into(),
+            "--host".into(),
+            server.host,
+            "--root".into(),
+            server.root,
+        ],
+        None,
+    )
+    .await
+}
+
+/// 在服务器上编一个 Fortran 内核（要 gfortran、mpif90 与 netCDF-Fortran，用服务器设置里的“环境准备”载入）。
+/// 编一次要十几分钟，命令一直等到编完。
+#[tauri::command]
+pub async fn remote_build_kernel(
+    app: tauri::AppHandle,
+    host: String,
+    preset: String,
+) -> Result<Value, String> {
+    let resources = resource_dir(&app);
+    let server = server_for(app, &host)?;
+    let mut args: Vec<String> = vec![
+        "remote-kernel".into(),
+        "--host".into(),
+        server.host.clone(),
+        "--root".into(),
+        server.root.clone(),
+        "--preset".into(),
+        preset,
+    ];
+    args.extend(scheduler_args(&server));
+    cli_json(args, resources).await
+}
+
 /// 提交前给用户看的作业脚本全文（不上传、不提交任何东西）。
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn remote_preview(
     app: tauri::AppHandle,
     case: String,
@@ -350,11 +463,14 @@ pub async fn remote_preview(
     kernel: String,
     stage: Option<String>,
     force: bool,
+    engine: Option<String>,
+    ranks: Option<u32>,
 ) -> Result<Value, String> {
     let resources = resource_dir(&app);
     let server = server_for(app, &host)?;
+    let engine = Engine { engine, ranks };
     cli_json(
-        run_args(&server, case, kernel, stage, force, true),
+        run_args(&server, case, kernel, stage, force, true, &engine),
         resources,
     )
     .await
@@ -393,9 +509,32 @@ pub async fn remote_cancel(case: String) -> Result<Value, String> {
     cli_json(vec!["remote-cancel".into(), case], None).await
 }
 
+/// `remote-fetch` 的参数：服务器设置里配了“取回的变量”就只取这些，`all` 为真时取全部。
+pub(crate) fn fetch_args(case: String, server: Option<&Server>, all: bool) -> Vec<String> {
+    let mut args = vec!["remote-fetch".to_owned(), case];
+    if let Some(server) = server.filter(|_| !all) {
+        let vars = server.fetch_vars.trim();
+        if !vars.is_empty() {
+            args.push("--vars".into());
+            args.push(vars.to_owned());
+        }
+    }
+    args
+}
+
 #[tauri::command]
-pub async fn remote_fetch(case: String) -> Result<Value, String> {
-    cli_json(vec!["remote-fetch".into(), case], None).await
+pub async fn remote_fetch(
+    app: tauri::AppHandle,
+    case: String,
+    host: Option<String>,
+    all: Option<bool>,
+) -> Result<Value, String> {
+    let server = host.and_then(|h| server_for(app, &h).ok());
+    cli_json(
+        fetch_args(case, server.as_ref(), all.unwrap_or(false)),
+        None,
+    )
+    .await
 }
 
 #[cfg(test)]

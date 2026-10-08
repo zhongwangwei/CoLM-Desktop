@@ -9,6 +9,7 @@
 
 pub mod engine;
 pub mod job;
+pub mod kernel;
 pub mod probe;
 pub mod sched;
 pub mod ssh;

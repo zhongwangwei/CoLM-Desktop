@@ -154,3 +154,88 @@ fn staging_copies_inputs_only_and_rewrites_every_path() {
         .contains(&format!("'{remote}/inputs/extra.nc'")));
     let _ = std::fs::remove_dir_all(&root);
 }
+
+fn opts(args: &[&str]) -> Opts {
+    Opts::parse(&args.iter().map(|a| a.to_string()).collect::<Vec<_>>()).unwrap()
+}
+
+#[test]
+fn the_run_plan_defaults_to_rust_and_only_fortran_may_use_mpi() {
+    let plan = RunPlan::from_opts(&opts(&[])).unwrap();
+    assert_eq!(
+        (plan.engine.as_str(), plan.ranks, plan.nodes),
+        ("rust", 1, 0)
+    );
+    assert_eq!(plan.preprocessors, "rust");
+    let plan = RunPlan::from_opts(&opts(&[
+        "--engine", "fortran", "--ranks", "8", "--nodes", "2",
+    ]))
+    .unwrap();
+    assert_eq!((plan.ranks, plan.nodes), (8, 2));
+    assert!(
+        RunPlan::from_opts(&opts(&["--ranks", "4"])).is_err(),
+        "the Rust engine uses threads"
+    );
+    assert!(RunPlan::from_opts(&opts(&["--engine", "fortran", "--ranks", "0"])).is_err());
+    assert!(RunPlan::from_opts(&opts(&["--engine", "cobol"])).is_err());
+    assert!(RunPlan::from_opts(&opts(&["--launcher", "ssh"])).is_err());
+}
+
+#[test]
+fn the_job_body_launches_mpi_through_srun_only_where_that_fits() {
+    let body = |args: &[&str], scheduler| {
+        let plan = RunPlan::from_opts(&opts(args)).unwrap();
+        job_body(
+            "/r",
+            "eng",
+            "/r/cases/c",
+            "/r/kernels/k",
+            4,
+            &plan,
+            scheduler,
+            &opts(args),
+        )
+        .unwrap()
+    };
+    let slurm = body(&["--engine", "fortran", "--ranks", "8"], Scheduler::Slurm);
+    assert!(slurm.contains("export COLM_MPIEXEC=srun\n"), "{slurm}");
+    assert!(
+        slurm.contains("--engine fortran --preprocessors rust --ranks 8"),
+        "{slurm}"
+    );
+    // 没有调度系统或别的调度系统：用 PATH 里的 mpiexec，不设变量。
+    let bare = body(&["--engine", "fortran", "--ranks", "8"], Scheduler::Bare);
+    assert!(
+        !bare.contains("COLM_MPIEXEC") && bare.contains("--ranks 8"),
+        "{bare}"
+    );
+    // 显式选择优先于调度系统。
+    let forced = body(
+        &[
+            "--engine",
+            "fortran",
+            "--ranks",
+            "8",
+            "--launcher",
+            "mpiexec",
+        ],
+        Scheduler::Slurm,
+    );
+    assert!(!forced.contains("COLM_MPIEXEC"));
+    let srun_bare = body(
+        &["--engine", "fortran", "--ranks", "8", "--launcher", "srun"],
+        Scheduler::Bare,
+    );
+    assert!(srun_bare.contains("COLM_MPIEXEC=srun"));
+    // 一个进程不用 MPI，也就不写启动器和 --ranks。
+    let one = body(&["--engine", "fortran"], Scheduler::Slurm);
+    assert!(
+        !one.contains("COLM_MPIEXEC") && !one.contains("--ranks"),
+        "{one}"
+    );
+    // Rust 引擎的作业体不变。
+    let rust = body(&[], Scheduler::Slurm);
+    assert!(rust.contains("--engine rust --preprocessors rust") && !rust.contains("--ranks"));
+    // 编引擎的并行度至少 8，与运行线程数无关。
+    assert!(rust.contains("-j 8"), "{rust}");
+}

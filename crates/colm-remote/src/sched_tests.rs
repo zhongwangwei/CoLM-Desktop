@@ -3,6 +3,8 @@ use super::*;
 fn resources() -> Resources {
     Resources {
         cpus: 16,
+        ranks: 0,
+        nodes: 0,
         memory_gb: Some(64),
         walltime: Some("1-02:30:00".into()),
         partition: Some("cpu".into()),
@@ -65,7 +67,7 @@ fn pbs_and_lsf_use_their_own_syntax() {
         "#PBS -N colm_x",
         "#PBS -j oe",
         "#PBS -o /r/log",
-        "#PBS -l select=1:ncpus=16:mem=64gb",
+        "#PBS -l select=1:ncpus=16:mpiprocs=1:mem=64gb",
         "#PBS -l walltime=26:30:00",
         "#PBS -q cpu",
         "#PBS -A proj_a",
@@ -123,4 +125,52 @@ fn job_names_are_short_and_safe() {
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || c == '_'));
     assert!(job_name("a-very-long-case-name").len() <= 15);
+}
+
+#[test]
+fn mpi_jobs_ask_for_ranks_and_spread_them_over_nodes() {
+    let mut r = resources();
+    r.cpus = 4;
+    r.ranks = 8;
+    r.nodes = 2;
+    let slurm = directives(Scheduler::Slurm, "n", "/l", &r)
+        .unwrap()
+        .join("\n");
+    assert!(
+        slurm.contains("#SBATCH --nodes=2") && slurm.contains("#SBATCH --ntasks=8"),
+        "{slurm}"
+    );
+    assert!(slurm.contains("#SBATCH --cpus-per-task=4"));
+    let pbs = directives(Scheduler::Pbs, "n", "/l", &r)
+        .unwrap()
+        .join("\n");
+    // 每个节点 4 个进程、每进程 4 核：16 核。
+    assert!(
+        pbs.contains("#PBS -l select=2:ncpus=16:mpiprocs=4:mem=64gb"),
+        "{pbs}"
+    );
+    let lsf = directives(Scheduler::Lsf, "n", "/l", &r)
+        .unwrap()
+        .join("\n");
+    assert!(
+        lsf.contains("#BSUB -n 32") && lsf.contains("span[ptile=16]"),
+        "{lsf}"
+    );
+    // 不指定节点：Slurm 自己分配，不写 --nodes。
+    r.nodes = 0;
+    let free = directives(Scheduler::Slurm, "n", "/l", &r)
+        .unwrap()
+        .join("\n");
+    assert!(
+        !free.contains("--nodes") && free.contains("--ntasks=8"),
+        "{free}"
+    );
+    // 进程数分不匀就拒绝。
+    r.nodes = 3;
+    assert!(r.validate().is_err());
+    // 不用 MPI 时和以前一样。
+    let single = directives(Scheduler::Slurm, "n", "/l", &resources())
+        .unwrap()
+        .join("\n");
+    assert!(single.contains("--nodes=1") && single.contains("--ntasks=1"));
 }

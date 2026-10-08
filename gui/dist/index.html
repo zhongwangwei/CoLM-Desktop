@@ -1301,8 +1301,12 @@
       <input class="input" id="remote-walltime" placeholder="HH:MM:SS 或 D-HH:MM:SS，例如 04:00:00" autocomplete="off">
       <label for="remote-cpus">核数</label>
       <input class="input" id="remote-cpus" type="number" min="0" max="1024" step="1" value="0" title="0 表示与线程数相同">
-      <label for="remote-memory">内存（GB）</label>
+      <label for="remote-nodes">节点数</label>
+      <input class="input" id="remote-nodes" type="number" min="0" max="4096" step="1" value="0" title="MPI 运行占几个节点；0 表示不指定">
+      <label for="remote-memory">内存（GB，每节点）</label>
       <input class="input" id="remote-memory" type="number" min="0" step="1" value="0" title="0 表示不指定">
+      <label for="remote-fetch-vars">取回的变量</label>
+      <input class="input" id="remote-fetch-vars" placeholder="留空取回全部；例如 f_fsena,f_lfevpa,f_rnet" autocomplete="off" title="只取这些变量能把几十 MB 的结果缩到几百 KB">
       <label for="remote-env">环境准备</label>
       <textarea class="input" id="remote-env" rows="2" placeholder="作业开头先执行，例如 module load rust"></textarea>
       <label for="remote-directives">其他指令</label>
@@ -1310,6 +1314,28 @@
     </div>
   </details>
   <div class="remote-probe mini" id="remote-probe-result"></div>
+  <details class="remote-sched" id="remote-kernels-box">
+    <summary>Fortran 内核（多进程 MPI 运行用）</summary>
+    <p class="muted mini">Rust 引擎不需要。选“Fortran 内核”引擎在服务器上跑时，服务器上要有编好的内核；编内核要 gfortran、mpif90 与 netCDF-Fortran，用上面的“环境准备”载入（例如 module load）。编一次要十几分钟。</p>
+    <div class="remote-form">
+      <label for="remote-kernel-preset">预设</label>
+      <select class="select" id="remote-kernel-preset">
+        <option value="default">default（单点，IGBP）</option>
+        <option value="usgs">usgs（单点，USGS）</option>
+        <option value="crop">crop（单点，作物）</option>
+        <option value="latlon">latlon（经纬度网格）</option>
+        <option value="latlon-usgs">latlon-usgs</option>
+        <option value="latlon-crop">latlon-crop</option>
+        <option value="unstructured">unstructured（非结构网格）</option>
+        <option value="catchment">catchment（流域）</option>
+      </select>
+    </div>
+    <div class="assistant-approval-actions">
+      <button class="btn-ghost" type="button" id="remote-list-kernels">查看服务器上的内核</button>
+      <button class="btn-ghost" type="button" id="remote-build-kernel">在服务器上编译这个内核</button>
+    </div>
+    <div class="remote-probe mini" id="remote-kernels-result"></div>
+  </details>
   <div class="assistant-approval-actions">
     <button class="btn-ghost" type="button" id="remote-delete">删除这台</button>
     <button class="btn-ghost" type="button" id="remote-test">测试连接</button>

@@ -10,6 +10,7 @@ import { language, translateZh } from './i18n.js';
 import { renderCases } from './sites.js';
 import { invalidateResultCase } from './results.js';
 import { setRunning } from './shell.js';
+import { modelEngine } from './engine.js';
 
 const t = text => (language() === 'en' ? translateZh(text) : text);
 const POLL_MS = 10_000;
@@ -69,6 +70,7 @@ export function jobSummary(job) {
   }
   if (job.state === 'finished') {
     if (job.exit_code !== 0) return `${t('失败')}（${t('退出码')} ${job.exit_code}）`;
+    if (job.fetched && job.partial) return t('完成，已取回所选变量（可以再取回全部）');
     return job.fetched ? t('完成，结果已取回') : t('完成，正在取回结果…');
   }
   if (job.state === 'lost') {
@@ -104,22 +106,20 @@ function renderTargets() {
   syncTarget();
 }
 
-/** 选了服务器：引擎固定 Rust（第一版只支持它），MPI 不适用。 */
+/** 选了服务器：Rust 引擎（服务器上编或传预编程序）与 Fortran 内核（服务器上要有编好的内核，可多进程 MPI）都能选。 */
 function syncTarget() {
   const remote = runTarget() !== 'local';
   state.runTarget = runTarget();
-  const engine = $('model-engine');
-  if (engine) {
-    if (remote && engine.value !== 'rust') {
-      engine.value = 'rust';
-      engine.dispatchEvent(new Event('change'));
-    }
-    engine.disabled = remote;
-    engine.title = remote ? t('服务器运行只用 Rust 引擎') : '';
-  }
   $('manage-servers').textContent = t(remote ? '修改这台服务器…' : '管理服务器…');
   const preview = $('preview-job');
   if (preview) preview.hidden = !remote;
+}
+
+/** 运行页选的引擎与 MPI 进程数；只有 Fortran 内核用进程数。 */
+export function engineChoice(engine = modelEngine(), ranksText = $('mpi-ranks')?.value) {
+  if (engine !== 'fortran') return { engine: 'rust', ranks: null };
+  const ranks = Math.max(1, Math.trunc(Number(ranksText)) || 1);
+  return { engine: 'fortran', ranks };
 }
 
 /** 把将要提交的作业脚本全文给用户看（不上传、不提交）。 */
@@ -134,7 +134,7 @@ async function previewJob() {
   text.textContent = '';
   $('remote-preview-dialog').showModal();
   try {
-    const answer = await invoke('remote_preview', { case: dir, host: runTarget(), kernel: $('kernel').value, stage: null, force: false });
+    const answer = await invoke('remote_preview', { case: dir, host: runTarget(), kernel: $('kernel').value, stage: null, force: false, ...engineChoice() });
     $('remote-preview-note').textContent = `${baseName(dir)} @ ${runTarget()} · ${t('调度系统')}: ${answer.scheduler}`;
     text.textContent = answer.job_script;
   } catch (error) {
@@ -158,6 +158,8 @@ function fillDialog(host) {
   $('remote-walltime').value = server?.walltime ?? '';
   $('remote-cpus').value = server?.cpus ?? 0;
   $('remote-memory').value = server?.memory_gb ?? 0;
+  $('remote-nodes').value = server?.nodes ?? 0;
+  $('remote-fetch-vars').value = server?.fetch_vars ?? '';
   $('remote-env').value = server?.env_script ?? '';
   $('remote-directives').value = (server?.directives ?? []).join('\n');
   $('remote-delete').hidden = !server;
@@ -191,6 +193,8 @@ function formServer() {
     walltime: $('remote-walltime').value.trim(),
     cpus: count('remote-cpus'),
     memory_gb: count('remote-memory'),
+    nodes: count('remote-nodes'),
+    fetch_vars: $('remote-fetch-vars').value.trim(),
     env_script: $('remote-env').value.trim(),
     directives: parseDirectives($('remote-directives').value),
   };
@@ -290,6 +294,11 @@ function renderJobs() {
       cancel.onclick = () => cancelJob(dir);
       head.appendChild(cancel);
     }
+    if (job.state === 'finished' && job.exit_code === 0 && job.fetched && job.partial) {
+      const all = Object.assign(document.createElement('button'), { className: 'btn-ghost', type: 'button', textContent: t('取回全部变量') });
+      all.onclick = () => { all.disabled = true; fetchJob(dir, true); };
+      head.appendChild(all);
+    }
     row.appendChild(head);
     const failed = job.state === 'finished' && job.exit_code !== 0;
     if (job.log && (failed || job.state === 'lost')) {
@@ -325,19 +334,21 @@ async function refreshJob(dir) {
   }
 }
 
-async function fetchJob(dir) {
+async function fetchJob(dir, all = false) {
   const job = jobs.get(dir);
   try {
-    await invoke('remote_fetch', { case: dir });
+    const answer = await invoke('remote_fetch', { case: dir, host: job.host, all });
     job.fetched = true;
+    job.partial = answer?.partial === true;
     const c = state.cases.find(c => c.dir === dir);
     if (c) c.has_history = true;
     invalidateResultCase(dir);
     renderCases();
-    status(`${baseName(dir)}：${t('服务器上的运行完成，结果已取回')}`);
+    status(`${baseName(dir)}：${t(job.partial ? '服务器上的运行完成，已取回所选变量' : '服务器上的运行完成，结果已取回')}`);
   } catch (error) {
     job.error = `${t('取回结果失败')}：${String(error?.message || error)}`;
   }
+  renderJobs();
 }
 
 async function poll() {
@@ -377,7 +388,7 @@ export async function remoteRun(stage, dirs, force) {
     jobs.set(dir, { host, state: 'submitting', fetched: false });
     renderJobs();
     try {
-      const answer = await invoke('remote_run', { case: dir, host, kernel: $('kernel').value, stage, force });
+      const answer = await invoke('remote_run', { case: dir, host, kernel: $('kernel').value, stage, force, ...engineChoice() });
       Object.assign(jobs.get(dir), { job: answer.job, state: 'running', phase: 'submitted' });
       if (answer.engine_uploaded) status(`${t('已把引擎源码传到')} ${host}${t('，首次会在服务器上编译')}`);
     } catch (error) {
@@ -408,6 +419,50 @@ async function resumeJobs() {
   if ([...jobs.values()].some(j => j.state === 'running' || j.state === 'queued')) schedulePoll();
 }
 
+/** 服务器上内核的几行摘要。 */
+export function kernelLines(kernels) {
+  if (!kernels?.length) return [t('服务器上还没有内核')];
+  return kernels.map(k => `${k.name} · ${k.preset || '?'} · ${k.full ? t('完整') : t('只有清单（Rust 引擎用）')}`);
+}
+
+async function listKernels() {
+  const box = $('remote-kernels-result');
+  box.className = 'remote-probe mini muted';
+  box.textContent = t('正在查看…');
+  try {
+    const server = formServer();
+    // 内核列表按已保存的服务器配置查；没保存过就先提示保存。
+    if (!config.servers.some(s => s.host === server.host)) throw new Error(t('先保存这台服务器'));
+    const kernels = await invoke('remote_kernels', { host: server.host });
+    box.className = 'remote-probe mini';
+    box.replaceChildren(...kernelLines(kernels).map(line => Object.assign(document.createElement('div'), { textContent: line })));
+  } catch (error) {
+    box.className = 'remote-probe mini assistant-fail';
+    box.textContent = String(error?.message || error);
+  }
+}
+
+async function buildKernel() {
+  const box = $('remote-kernels-result');
+  const button = $('remote-build-kernel');
+  const preset = $('remote-kernel-preset').value;
+  try {
+    const server = formServer();
+    if (!config.servers.some(s => s.host === server.host)) throw new Error(t('先保存这台服务器'));
+    button.disabled = true;
+    box.className = 'remote-probe mini muted';
+    box.textContent = `${t('正在服务器上编译')} ${preset}（${t('十几分钟，请不要关闭本窗口')}）…`;
+    const answer = await invoke('remote_build_kernel', { host: server.host, preset });
+    box.className = 'remote-probe mini assistant-key-ok';
+    box.textContent = `✓ ${answer.built ? t('已编好') : t('已经有了，没有重编')}：${answer.name}`;
+  } catch (error) {
+    box.className = 'remote-probe mini assistant-fail';
+    box.textContent = String(error?.message || error);
+  } finally {
+    button.disabled = false;
+  }
+}
+
 function wire() {
   if (!hasBackend || !$('run-target')) return;
   $('serverRunCard').onclick = async () => {
@@ -423,6 +478,8 @@ function wire() {
   $('manage-servers').onclick = () => openServerDialog(runTarget() === 'local' ? null : runTarget());
   $('remote-which').addEventListener('change', () => fillDialog($('remote-which').value || null));
   $('remote-test').onclick = () => testConnection();
+  $('remote-list-kernels').onclick = () => listKernels();
+  $('remote-build-kernel').onclick = () => buildKernel();
   $('remote-save').onclick = () => saveServer();
   $('remote-delete').onclick = () => deleteServer().catch(e => status(e));
   $('remote-close').onclick = () => closeDialog(null);

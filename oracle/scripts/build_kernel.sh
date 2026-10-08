@@ -323,7 +323,8 @@ find_mpi_fortran() {
 MPI_FC=$(find_mpi_fortran || true)
 MPI_INC=""
 if [ -n "$MPI_FC" ]; then
-  MPI_INC=$($MPI_FC -show 2>/dev/null | tr ' ' '\n' | grep '^-I' | sort -u | tr '\n' ' ')
+  # grep 没匹配时返回 1，在 pipefail 下会让脚本静默退出；包装器的 -show 不带 -I 是正常情况（头文件目录由编译器自己找到）。
+  MPI_INC=$($MPI_FC -show 2>/dev/null | tr ' ' '\n' | { grep '^-I' || true; } | sort -u | tr '\n' ' ')
 fi
 
 # SinglePoint 不白链 MPI；空间预设必须由 MPI Fortran wrapper 同时提供头文件和链接参数。
@@ -374,7 +375,8 @@ MACROS=$(printf '%s\n' "$EFFECTIVE" | awk 'NF{print "\""$0"\""}' | paste -sd, -)
 # docs/implementation-verification.md「清单里的 colm_git_sha 记的不是 Fortran 源」）。
 # 「最后一个碰过 vendor/CoLM202X 的提交」同样可复现、同样便宜，且**只随
 # Fortran 源变化**；`--vendor/CoLM202X` 用长路径写法，免得在别的目录名下歧义。
-GIT_SHA=$(git -C "$REPO_ROOT" log -1 --format=%h -- vendor/CoLM202X)
+# 远程构建（R4）：源码是传到服务器上的快照，没有 .git，由调用方把本机算出的值通过 COLM_GIT_SHA 带过来。
+GIT_SHA=${COLM_GIT_SHA:-$(git -C "$REPO_ROOT" log -1 --format=%h -- vendor/CoLM202X)}
 # macOS 有 shasum 没 sha256sum，多数 Linux 反之。两者都不通用，所以先探测。
 if command -v shasum >/dev/null 2>&1; then
   sha() { shasum -a 256 "$1" | cut -d' ' -f1; }
