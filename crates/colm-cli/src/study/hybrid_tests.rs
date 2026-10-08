@@ -82,7 +82,7 @@ fn hybrid_studies_are_validated_before_sampling() {
     );
     rejected(
         &|spec| spec.hybrid.as_mut().unwrap().slot = "stomata".into(),
-        "land_class or pft",
+        "land_class, pft or soil_stress",
     );
     rejected(
         &|spec| {
@@ -185,4 +185,27 @@ fn members_with_weights_get_a_loadable_network_and_the_baseline_stays_physics() 
     gap.remove(&weight_key(3));
     assert!(write_member_files(&dir, &spec, &gap).is_err());
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_soil_stress_process_slot_trains_one_beta_output() {
+    let network = serde_json::json!({
+        "slot": "soil_stress",
+        "features": ["beta_physics", "root_saturation"],
+        "outputs": [{"name": "beta", "range": [0.5, 2.0], "transform": "sigmoid", "relative": true}],
+    });
+    let mut spec = spec(network);
+    validate_spec(&spec).unwrap();
+    // 空跑配置要带 `kind = "process"` 与 `relative`（范围是乘数，不是 β 本身）。
+    let toml = spec_toml(spec.hybrid.as_ref().unwrap());
+    assert!(toml.contains("kind = \"process\""), "{toml}");
+    assert!(
+        toml.contains("range = [0.5, 2.0], relative = true"),
+        "{toml}"
+    );
+    spec.hybrid.as_mut().unwrap().outputs[0].name = "rstfac".into();
+    assert!(validate_spec(&spec)
+        .unwrap_err()
+        .to_string()
+        .contains("exactly one output, beta"));
 }

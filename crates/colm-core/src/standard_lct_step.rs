@@ -472,7 +472,7 @@ fn finish_energy_step(
             &mut state.leaf,
         )
     } else {
-        let root_uptake = root_uptake_input(input, input.root_uptake.root_fraction)?;
+        let root_uptake = root_uptake_input(input, input.root_uptake.root_fraction, None)?;
         let leaf_input = leaf_input(
             input.leaf_temperature,
             input.forcing,
@@ -1720,9 +1720,11 @@ fn ground_humidity_input(input: StandardLctEnergyInput<'_>) -> Result<Option<Gro
     })?))
 }
 
+/// `pft` 是 PFT 路径下这个 PFT 在本 patch 里的次序（插槽按它取静态特征）；LCT 为 `None`。
 pub(crate) fn root_uptake_input(
     input: StandardLctEnergyInput<'_>,
     root_fraction: &[f64],
+    pft: Option<usize>,
 ) -> Result<RootUptakeState> {
     let ground = input.ground_temperature;
     // 取**土层**段 `[snow_layers..snow_layers+nl_soil]`，与 `porsl`/`psi0`/`rootfr` 对齐。
@@ -1741,6 +1743,10 @@ pub(crate) fn root_uptake_input(
         temperature_k: &ground.temperature_k[soil.clone()],
         liquid_water_kg_m2: &ground.liquid_water_kg_m2[soil],
         root_fraction,
+        stress_slot: match (input.root_uptake.stress_slot, pft) {
+            (Some(slot), Some(pft)) => Some(slot.for_pft(pft)),
+            (slot, _) => slot,
+        },
         ..input.root_uptake
     })
 }

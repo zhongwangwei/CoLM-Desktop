@@ -363,7 +363,10 @@ pub use radiation::{
     leaf_optics_from_land_cover_one_based, mix_ground_albedo, ColdStartGroundAlbedo,
     ColdStartRadiation, LeafOptics,
 };
-pub use root_uptake::{root_uptake, RootUptakeInput, RootUptakeState};
+pub use root_uptake::{
+    root_uptake, RootUptakeInput, RootUptakeState, SoilStressFeatures, SoilStressSlot, StressRow,
+    StressSlotRef,
+};
 pub use runoff::{
     simple_vic_runoff, simple_vic_subsurface_runoff, topmodel_subsurface_runoff,
     topmodel_surface_runoff, xinanjiang_runoff, SimpleVicSubsurfaceInput, StorageRunoffInput,

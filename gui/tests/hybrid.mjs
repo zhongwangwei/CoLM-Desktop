@@ -65,7 +65,22 @@ for (const preset of hybrid.PRESETS.filter(p => p.outputs)) {
   const section = hybrid.studySection({ slot: preset.slot, features: preset.features, outputs: preset.outputs, size: preset.size });
   assert.ok(section.outputs.every(o => o.relative), preset.id);
 }
-assert.ok(hybrid.PRESETS.find(p => p.id === 'beta').disabled);
+// β 预设（过程插槽 soil_stress）：PC 模式或开着植物水力时不能用。
+const beta = hybrid.PRESETS.find(p => p.id === 'beta');
+assert.equal(beta.slot, 'soil_stress');
+assert.ok(!beta.disabled);
+assert.equal(hybrid.presetBlocked(beta, { land_mode: 'lct', plant_hydraulics: false }), '');
+assert.match(hybrid.presetBlocked(beta, { land_mode: 'pc', plant_hydraulics: true }), /PC/);
+assert.match(hybrid.presetBlocked(beta, { land_mode: 'pft', plant_hydraulics: true }), /PLANTHYDRAULICS/);
+assert.equal(hybrid.presetBlocked(beta, undefined), '');
+assert.equal(hybrid.presetBlocked(hybrid.PRESETS[0], { land_mode: 'pc', plant_hydraulics: true }), '');
+assert.deepEqual(hybrid.checkOutput('soil_stress', { name: 'BETA', lo: '0.5', hi: '2', transform: 'sigmoid', relative: true }),
+  { name: 'beta', lo: 0.5, hi: 2, transform: 'sigmoid', relative: true });
+assert.throws(() => hybrid.checkOutput('soil_stress', { name: 'DEF_PFT_VMAX25', lo: 0, hi: 1 }), /beta/);
+const stressSection = hybrid.studySection({ slot: 'soil_stress', features: hybrid.STRESS_FEATURES, outputs: beta.outputs, size: 'linear' });
+assert.deepEqual(stressSection.features, ['beta_physics', 'root_saturation', 'root_temperature', 'frozen_root_fraction']);
+assert.deepEqual(stressSection.outputs, [{ name: 'beta', range: [0.5, 2], transform: 'sigmoid', relative: true }]);
+assert.equal(hybrid.slotDefaults('soil_stress').output.name, 'beta');
 assert.equal(hybrid.presetForMode('lct'), 'vcmax-lc');
 assert.equal(hybrid.presetForMode('pc'), 'vcmax-pft');
 

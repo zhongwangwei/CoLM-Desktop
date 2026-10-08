@@ -811,6 +811,7 @@ fn input(forcing: crate::RuntimeForcing) -> StandardLctEnergyInput<'static> {
             temperature_k: &[289.0, 288.0],
             liquid_water_kg_m2: &[20.0, 80.0],
             stress_scheme: 1,
+            stress_slot: None,
         },
         soil_surface_resistance: crate::SoilSurfaceResistanceInput {
             air_density_kg_m3: 1.2,

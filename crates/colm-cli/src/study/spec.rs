@@ -426,11 +426,17 @@ impl HybridStudySpec {
     }
 
     pub(crate) fn validate(&self, parameters: &[ParameterSpec]) -> Result<()> {
+        // `soil_stress` 是过程插槽：唯一的输出 `beta`（β 本身，或 `relative` 时物理 β 的乘数）。
         let prefix = match self.slot.as_str() {
             "land_class" => "DEF_LC_",
             "pft" => "DEF_PFT_",
-            other => bail!("hybrid slot must be land_class or pft, got {other:?}"),
+            "soil_stress" => "beta",
+            other => bail!("hybrid slot must be land_class, pft or soil_stress, got {other:?}"),
         };
+        if self.slot == "soil_stress" && (self.outputs.len() != 1 || self.outputs[0].name != "beta")
+        {
+            bail!("hybrid slot soil_stress has exactly one output, beta");
+        }
         if self.features.is_empty() || self.features.iter().any(|f| f.trim().is_empty()) {
             bail!("the hybrid network needs named features");
         }

@@ -31964,3 +31964,46 @@ GPP 的均值被 4 个基线 KGE 低于 −0.5 的站拉低（BE-Lon、DE-Geb、
 - `colm-agent --codex-models` 用时约 1 s。
 
 **检查**：colm-agent 48 项通过（新增 Codex 的选择落地与模型摘要、Claude 的参数生成）；GUI Rust 212 项通过（设置校验、configure 只带当前后端那一份）；`check-gui` 107 个命令全部对上；15 个前端套件通过（新增模型与强度选项、按后端存取）；两个 workspace 的 clippy 与 fmt 干净。
+
+## 第 641 轮：H2——过程插槽 `soil_stress`（网络替换 eroot 的土壤水分胁迫 β）
+
+**动手前的发现**（改变了 H2 的前提，已与用户确认）：
+- `eroot` 算的 β（`rstfac`）只在关掉植物水力时才进光合与蒸腾。`DEF_USE_PLANTHYDRAULICS` 默认是 `.true.`，PHS 打开时胁迫来自 PHS 的 `gs/gsmax`（`plant_hydraulics.rs` 的脆弱性曲线）。
+- PC 模式关掉 PHS 时，上游的本地修补把 `etrc` 置 0，蒸腾被截成 0（`pft.rs` 的 `pc_records` 注释）。
+- 所以 PLUMBER2 实验用的 PC + PHS 配置里，接在 `eroot` 上的网络不会起作用。
+- 用户的决定：两个都做，先做 eroot 的 β（适用于关 PHS 的 LCT/PFT 算例），再做 PHS 的脆弱性曲线槽位。
+
+**实现**：
+- colm-core：
+  - `RootUptakeInput` 加 `stress_slot: Option<StressSlotRef>`（trait `SoilStressSlot`，行 = patch 加本 patch 里的 PFT 次序）。插槽只换 β 和随它缩放的最大蒸腾 `etrc·β`；分层权重仍按物理归一化，从哪层取水由物理决定。
+  - 没有可吸水的层时（β 只剩 `1e-10` 的下限）不问网络。
+  - 火灾模块的 `btran` 和城市透水面仍用物理 β。
+  - 每步现算四个特征：`beta_physics`、`root_saturation`（根系加权相对饱和度）、`root_temperature`、`frozen_root_fraction`。
+- colm-runtime（`hybrid_stress.rs`）：
+  - 插槽名 `soil_stress`，`kind = "process"`，唯一输出 `beta`。绝对值时范围在 `[0, 1+1e-10]` 内：物理 β 带下限，最大是 1.0000000001，第一次实测时 `[0,1]` 的恒等模型因此报错。
+  - `relative = true` 时输出是物理 β 的乘数。乘数 > 1 时，结果截到 `max(1, 物理 β)`；乘数 ≤ 1 时不截，所以乘数恰为 1 时逐位不变。
+  - 静态特征（常数重启、PFT 常数重启、`clim_*`）按 (patch, PFT) 预先备好，挂在每个 patch 的 `LandPhysicsParameters::soil_stress` 上。
+  - 开着 PHS 或 PC 模式时加载就报错，并给出原因。
+  - dry-run 里随步变化的特征给名义统计（β、饱和度 0–1，根温 240–320 K），Study 据此冻结归一化。
+- colm-cli：
+  - `hybrid.toml` 按插槽写 `kind`；`hybrid-info` 多报 `plant_hydraulics` 和各插槽的 `kind`。
+  - Study 的 `hybrid` 段接受 `soil_stress`（唯一输出 `beta`）。
+  - 修了空跑配置漏写 `relative`：带乘数范围的 β 原先会被当成绝对值拒绝。
+- GUI：β 预设解锁，4 个现算特征，乘数 0.5–2，sigmoid，线性网络。算例是 PC 或开着 PHS 时，卡片置灰并写明原因。两处“作用方式”选框加了这个插槽。顺手修了 `caseMode()` 读错字段（`info.mode` → `info.land_mode`），之前它总是回落到全局子网格设置。
+
+**实测**（AT-Neu，PLUMBER2 强迫，2002-01-01 至 04-01，Rust 引擎与前处理）：
+- “模仿物理”逐位不变：LCT 与 PFT 各跑三次——无插槽；相对乘数恒为 1；绝对值 = `beta_physics`（恒等）。比较全部 history 与重启文件，LCT 13 个文件 763 个变量、PFT 18 个文件 850 个变量，0 处不同。
+- 插槽确实生效：恒给 β = 0.3 时，PFT 的 `f_etr` 均值从 6.59e-7 降到 4.47e-7。LCT 的 `f_etr` 反而升高（6.05e-7 → 6.30e-7），因为 1–3 月土壤多冻结，物理 β 本来更小。
+- 不装插槽时与改动前一致：用 `77aa44ab` 编的 `colm-rs`（gpp-bias 会话的工作区，物理相关 crate 与 HEAD 相同）重跑。LCT、PFT 与默认配置 PC + PHS（18 个文件 877 个变量）都是 0 处不同。
+- 开着 PHS 的算例装了插槽：colm 阶段报“set DEF_USE_PLANTHYDRAULICS = .false.”。
+- Study 差分进化端到端：LCT 基础算例，只训练网络（4 特征 → β 乘数，5 个权重），种群 6 × 2 代。19 个成员全部成功，用时 89 s；基准成员（纯物理）目标函数 0.9233，最优 0.9183，各成员在 0.918–0.954 之间随权重变化。`study-apply` 写出的算例带 `kind = "process"`，`hybrid-info`/`hybrid-check` 正常，运行成功。
+
+**检查**：
+- `cargo test --workspace --lib --bins -- --test-threads=1`：1963 项通过。
+- 新增 colm-core 3 项（模仿物理、替换与缩放、无可吸水层时不问网络）、colm-runtime 3 项、colm-cli 1 项。
+- 两个 workspace 的 clippy、fmt 干净；`check-gui` 107 个命令对上；15 个前端套件通过。
+
+**还没做**：
+- `--hybrid-tap` 对过程插槽还不能抓数（要在实际运行中逐步记录，现在明确报错）。
+- 两步法不适用于 β：它要各站率定出的参数，β 不是参数。
+- 下一步是 PHS 脆弱性曲线槽位，以及基于本插槽的 H3 可微孪生。

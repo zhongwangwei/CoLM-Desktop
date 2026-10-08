@@ -797,7 +797,11 @@ pub(crate) fn pft_canopy_energy(
             records.push(bare_record(&context, layers));
             continue;
         }
-        let root = crate::standard_lct_step::root_uptake_input(input, &parameters.root_fraction)?;
+        let root = crate::standard_lct_step::root_uptake_input(
+            input,
+            &parameters.root_fraction,
+            Some(index),
+        )?;
         let shortwave = context.shortwave[index];
         let interception = context.interception[index];
         let template = crate::LeafTemperatureInput {

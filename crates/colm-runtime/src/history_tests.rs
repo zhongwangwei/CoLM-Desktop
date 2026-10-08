@@ -38,6 +38,7 @@ fn physics() -> LandPhysicsParameters {
         irrigation: None,
         land_class_overrides: colm_core::LandClassOverrides::default(),
         pft_overrides: Vec::new(),
+        soil_stress: None,
         dynamic_wetland: false,
         dynamic_lake: false,
         snicar: false,

@@ -311,6 +311,7 @@ pub fn land_physics_parameters(
         irrigation,
         land_class_overrides,
         pft_overrides: Vec::new(),
+        soil_stress: None,
         dynamic_wetland,
         dynamic_lake,
         snicar,

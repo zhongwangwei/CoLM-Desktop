@@ -279,3 +279,23 @@ P0 不改任何物理代码，GUI 也不动。
 3. **第一个过程槽位是土壤水分胁迫 β**（H2）。实现上不拆步：网络很小，就在算 β 的地方逐 patch 直接求值（每次几十次乘加），不做 4.2 节的"准备—推理—继续"三段拆分；先验证"模仿物理"逐位不变，再考虑批量推理是否值得。
 4. **可微孪生用 PyTorch**（H3）：把 β → 气孔导度 → 光合与蒸腾这一段写成可微的版本，与 Rust 逐项对拍后，用观测 GPP/ET 求梯度训练，训练出的网络回到完整模型里验证。
 5. 计划中的"评估"页（AI 与纯物理并排对比）暂缓，等 H2 有了可对比的结果再做。
+
+### 14.1 H2 落地（第 641 轮）与修正
+
+- **β 只在关掉植物水力时起作用。** `DEF_USE_PLANTHYDRAULICS` 默认开，此时胁迫来自 PHS 的 `gs/gsmax`；PC 模式关 PHS 时上游把蒸腾截成 0。所以 `soil_stress` 只用于关 PHS 的 LCT/PFT 算例，其余情况加载时报错。
+- 接下来补一个 **PHS 脆弱性曲线槽位**（替换 `vulnerability(ψ_leaf)`），默认配置与 PC 模式靠它。难点是牛顿迭代里也用这条曲线：网络要么给导数，要么只在迭代外替换。
+- 配置写法：
+
+```toml
+[[slot]]
+name = "soil_stress"
+kind = "process"
+model = "models/study.mlp.json"
+sha256 = "…"
+features = ["beta_physics", "root_saturation", "root_temperature", "frozen_root_fraction"]
+normalize = "models/study.norm.json"
+outputs = [{ name = "beta", range = [0.5, 2.0], transform = "sigmoid", relative = true }]
+```
+
+- 守恒：插槽只换 β 与 `etrc·β`，分层吸水权重仍按物理归一化；没有可吸水的层时不问网络。
+- 训练：差分进化（Study 的 `hybrid` 段）已可用；两步法不适用（β 不是可率定的参数）；`--hybrid-tap` 的逐步抓取待做。

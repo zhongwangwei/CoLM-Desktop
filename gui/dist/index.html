@@ -468,10 +468,11 @@
               <select class="select" id="tune-hybrid-slot">
                 <option value="pft">按植物功能型（PFT/PC 模式）</option>
                 <option value="land_class">按地类（LCT 模式）</option>
+                <option value="soil_stress">土壤水分胁迫 β（过程槽位，需关闭植物水力）</option>
               </select>
               <label for="tune-hybrid-features">输入特征</label>
               <div><input class="input" id="tune-hybrid-features" placeholder="pftclass, pftfrac">
-                <p class="muted mini">常数重启里的变量名，用逗号分隔；分层变量写成 名字[层号]，层号从 1 起，例如 porsl[1]。气候特征写 clim_tair、clim_tair_amplitude、clim_prec、clim_swdown、clim_vpd，要先在“概览”里计算。</p></div>
+                <p class="muted mini">常数重启里的变量名，用逗号分隔；分层变量写成 名字[层号]，层号从 1 起，例如 porsl[1]。气候特征写 clim_tair、clim_tair_amplitude、clim_prec、clim_swdown、clim_vpd，要先在“概览”里计算。土壤水分胁迫插槽另有每步现算的 beta_physics、root_saturation、root_temperature、frozen_root_fraction。</p></div>
               <label>输出参数</label>
               <div><div id="tune-hybrid-outputs"></div><button class="btn-ghost" type="button" id="tune-hybrid-add-output">添加输出</button></div>
               <label for="tune-hybrid-size">网络规模</label>
@@ -537,6 +538,7 @@
             <select class="select" id="hybrid-slot">
               <option value="pft">按植物功能型（PFT/PC 模式）</option>
               <option value="land_class">按地类（LCT 模式）</option>
+              <option value="soil_stress">土壤水分胁迫 β（过程槽位，需关闭植物水力）</option>
             </select>
             <label for="hybrid-features">输入特征</label>
             <div><input class="input" id="hybrid-features" placeholder="pftclass, pftfrac">

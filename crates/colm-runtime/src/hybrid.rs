@@ -25,6 +25,11 @@ use colm_hybrid::{HybridConfig, Matrix, Slot, SlotConfig, SlotKind, Surrogate};
 
 use crate::assembly::LandPhysicsParameters;
 
+#[path = "hybrid_stress.rs"]
+pub mod stress;
+
+pub use stress::SOIL_STRESS_SLOT;
+
 /// 引擎认得的参数插槽名。
 pub const LAND_CLASS_SLOT: &str = "land_class";
 pub const PFT_SLOT: &str = "pft";
@@ -34,6 +39,8 @@ pub struct Hybrid {
     pub config: HybridConfig,
     land_class: Option<Slot>,
     pft: Option<Slot>,
+    /// 过程插槽：土壤水分胁迫 β。
+    soil_stress: Option<Arc<Slot>>,
     /// 算例目录：`clim_*` 特征从它的 `hybrid_climate/` 读。
     case_dir: Option<PathBuf>,
 }
@@ -213,8 +220,10 @@ fn known_slot(config: &SlotConfig) -> Result<()> {
             }
             Ok(())
         }
+        SOIL_STRESS_SLOT => stress::check(config),
         other => bail!(
-            "slot {other} is not available in this engine (it provides {LAND_CLASS_SLOT} and {PFT_SLOT})"
+            "slot {other} is not available in this engine (it provides {LAND_CLASS_SLOT}, {PFT_SLOT} \
+             and {SOIL_STRESS_SLOT})"
         ),
     }
 }
@@ -234,11 +243,12 @@ impl Hybrid {
     }
 
     fn build(config: HybridConfig, load: impl Fn(&SlotConfig) -> Result<Slot>) -> Result<Self> {
-        let (mut land_class, mut pft) = (None, None);
+        let (mut land_class, mut pft, mut soil_stress) = (None, None, None);
         for slot in &config.slots {
             known_slot(slot)?;
             match slot.name.as_str() {
                 LAND_CLASS_SLOT => land_class = Some(load(slot)?),
+                SOIL_STRESS_SLOT => soil_stress = Some(Arc::new(load(slot)?)),
                 _ => pft = Some(load(slot)?),
             }
         }
@@ -246,6 +256,7 @@ impl Hybrid {
             config,
             land_class,
             pft,
+            soil_stress,
             case_dir: None,
         })
     }
@@ -273,6 +284,17 @@ impl Hybrid {
         document: &colm_namelist::Document,
     ) -> Result<Vec<LandPhysicsParameters>> {
         let mut out = vec![physics.clone(); patches.len()];
+        if let Some(slot) = &self.soil_stress {
+            let network = Arc::new(stress::StressNetwork::new(
+                Arc::clone(slot),
+                constant,
+                self.case_dir.as_deref(),
+                patches,
+                pft_ranges,
+                physics,
+            )?);
+            stress::bind(&network, patches, &mut out);
+        }
         if self.land_class.is_none() && self.pft.is_none() {
             return Ok(out);
         }
@@ -368,6 +390,24 @@ impl Hybrid {
         document: &colm_namelist::Document,
     ) -> Result<Vec<SlotSummary>> {
         let mut out = Vec::new();
+        if let Some(slot) = &self.soil_stress {
+            // 过程插槽的输出随步变化，空跑只汇总特征。
+            let (rows, features) = stress::feature_columns(
+                &slot.config,
+                constant,
+                self.case_dir.as_deref(),
+                patches,
+                pft_ranges,
+                physics,
+            )?;
+            out.push(SlotSummary {
+                slot: slot.config.name.clone(),
+                rows,
+                features,
+                outputs: Vec::new(),
+                outside_training: None,
+            });
+        }
         for slot in self.land_class.iter().chain(&self.pft) {
             let features = slot_features(
                 &slot.config,
@@ -415,6 +455,18 @@ pub fn feature_summary(
         .iter()
         .map(|slot| {
             known_slot(slot)?;
+            if slot.name == SOIL_STRESS_SLOT {
+                let (rows, features) = stress::feature_columns(
+                    slot, constant, case_dir, patches, pft_ranges, physics,
+                )?;
+                return Ok(SlotSummary {
+                    slot: slot.name.clone(),
+                    rows,
+                    features,
+                    outputs: Vec::new(),
+                    outside_training: None,
+                });
+            }
             let features = slot_features(slot, constant, case_dir, patches, pft_ranges, physics)?;
             Ok(SlotSummary::new(slot, &features, None))
         })
@@ -476,6 +528,27 @@ pub struct ColumnSummary {
     pub max: f64,
     pub mean: f64,
     pub std: f64,
+}
+
+impl ColumnSummary {
+    /// 一列值的范围、均值与总体标准差。
+    pub fn of(name: String, values: &[f64]) -> Self {
+        let (min, max) = values
+            .iter()
+            .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), &v| {
+                (lo.min(v), hi.max(v))
+            });
+        let n = values.len().max(1) as f64;
+        let mean = values.iter().sum::<f64>() / n;
+        let std = (values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / n).sqrt();
+        Self {
+            name,
+            min,
+            max,
+            mean,
+            std,
+        }
+    }
 }
 
 impl SlotSummary {
@@ -546,21 +619,7 @@ impl SlotSummary {
                     let values: Vec<f64> = (0..matrix.rows)
                         .map(|row| matrix.row(row)[column])
                         .collect();
-                    let (min, max) = values
-                        .iter()
-                        .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), &v| {
-                            (lo.min(v), hi.max(v))
-                        });
-                    let n = values.len().max(1) as f64;
-                    let mean = values.iter().sum::<f64>() / n;
-                    let std = (values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / n).sqrt();
-                    ColumnSummary {
-                        name,
-                        min,
-                        max,
-                        mean,
-                        std,
-                    }
+                    ColumnSummary::of(name, &values)
                 })
                 .collect()
         };
@@ -738,6 +797,10 @@ pub fn write_tap(
         );
     };
     known_slot(slot)?;
+    ensure!(
+        slot.name != SOIL_STRESS_SLOT,
+        "--hybrid-tap with the {SOIL_STRESS_SLOT} process slot records during a run, not in a dry run"
+    );
     let features = Features::open(constant, case_dir, &slot.features)?;
     let restart = &features.restart;
     let soil = soil_rows(restart, patches)?;

@@ -16,6 +16,7 @@ fn input(stress_scheme: i32) -> RootUptakeInput<'static> {
         temperature_k: &[280.0, 270.0, 280.0],
         liquid_water_kg_m2: &[25.0, 20.0, 90.0],
         stress_scheme,
+        stress_slot: None,
     }
 }
 
@@ -82,4 +83,91 @@ fn van_genuchten_root_stress_uses_the_same_hydraulic_curve() {
         assert!((actual - expected).abs() < 2.0e-11);
     }
     assert!((state.soil_water_stress - 6.985_332_463_350_421e-1).abs() < 2.0e-11);
+}
+
+/// 测试用插槽：按给定函数改 β，并记下看到的行与特征。
+struct Slot<F>(F, std::sync::Mutex<Vec<(StressRow, SoilStressFeatures)>>);
+
+impl<F> SoilStressSlot for Slot<F>
+where
+    F: Fn(&SoilStressFeatures) -> Option<f64> + Send + Sync,
+{
+    fn soil_water_stress(
+        &self,
+        row: StressRow,
+        features: &SoilStressFeatures,
+    ) -> Result<Option<f64>> {
+        self.1.lock().unwrap().push((row, *features));
+        Ok((self.0)(features))
+    }
+}
+
+fn with_slot<'a>(slot: &'a dyn SoilStressSlot, base: RootUptakeInput<'a>) -> RootUptakeInput<'a> {
+    RootUptakeInput {
+        stress_slot: Some(StressSlotRef {
+            slot,
+            row: StressRow {
+                patch: 7,
+                pft: None,
+            },
+        }),
+        ..base
+    }
+}
+
+#[test]
+fn a_slot_that_returns_the_physical_beta_changes_nothing() {
+    for scheme in [1, 2] {
+        let physics = root_uptake(input(scheme)).unwrap();
+        let mimic = Slot(
+            |f: &SoilStressFeatures| Some(f.beta_physics),
+            Default::default(),
+        );
+        let hybrid = root_uptake(with_slot(&mimic, input(scheme))).unwrap();
+        assert_eq!(hybrid, physics, "scheme {scheme}");
+        let keep = Slot(|_: &SoilStressFeatures| None, Default::default());
+        assert_eq!(
+            root_uptake(with_slot(&keep, input(scheme))).unwrap(),
+            physics
+        );
+    }
+}
+
+#[test]
+fn the_slot_replaces_beta_and_scales_transpiration_but_not_the_layer_weights() {
+    let physics = root_uptake(input(1)).unwrap();
+    let slot = Slot(|_: &SoilStressFeatures| Some(0.25), Default::default());
+    let hybrid = root_uptake(with_slot(&slot, input(1))).unwrap();
+    assert_eq!(hybrid.soil_water_stress, 0.25);
+    assert_eq!(hybrid.maximum_transpiration_mm_s, 0.001 * 0.25);
+    assert_eq!(hybrid.layer_fraction, physics.layer_fraction);
+    let seen = slot.1.lock().unwrap();
+    let (row, features) = seen[0];
+    assert_eq!(
+        row,
+        StressRow {
+            patch: 7,
+            pft: None
+        }
+    );
+    assert_eq!(features.beta_physics, physics.soil_water_stress);
+    // 第 2 层 270 K 冻结：根系 0.3。饱和度 25/45、20/88、90/129。
+    assert_eq!(features.frozen_root_fraction, 0.3);
+    let expected = 0.5 * (25.0 / 45.0) + 0.3 * (20.0 / 88.0) + 0.2 * (90.0 / 129.0);
+    assert!((features.root_saturation - expected).abs() < 1e-15);
+    assert!(
+        (features.root_temperature_k - (0.5 * 280.0 + 0.3 * 270.0 + 0.2 * 280.0)).abs() < 1e-12
+    );
+}
+
+#[test]
+fn without_an_active_layer_the_network_is_not_asked() {
+    let frozen = RootUptakeInput {
+        temperature_k: &[260.0, 260.0, 260.0],
+        ..input(1)
+    };
+    let physics = root_uptake(frozen).unwrap();
+    let slot = Slot(|_: &SoilStressFeatures| Some(0.9), Default::default());
+    assert_eq!(root_uptake(with_slot(&slot, frozen)).unwrap(), physics);
+    assert!(slot.1.lock().unwrap().is_empty());
 }

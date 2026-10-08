@@ -195,7 +195,11 @@ pub fn freeze_normalization(spec: &mut StudySpec, base_cases: &[PathBuf]) -> Res
 fn spec_toml(hybrid: &HybridStudySpec) -> String {
     use crate::hybrid_cmd::toml_string;
     let mut text = String::from("[[slot]]\n");
-    text += &format!("name = {}\nkind = \"param\"\n", toml_string(&hybrid.slot));
+    text += &format!(
+        "name = {}\nkind = \"{}\"\n",
+        toml_string(&hybrid.slot),
+        crate::hybrid_cmd::slot_kind(&hybrid.slot)
+    );
     text += &format!(
         "features = [{}]\n",
         hybrid
@@ -207,11 +211,17 @@ fn spec_toml(hybrid: &HybridStudySpec) -> String {
     );
     text += "outputs = [\n";
     for output in &hybrid.outputs {
+        // `relative` 要带上：`soil_stress` 按它决定范围是 β 本身（[0, 1]）还是乘数。
         text += &format!(
-            "  {{ name = {}, range = [{:?}, {:?}] }},\n",
+            "  {{ name = {}, range = [{:?}, {:?}]{} }},\n",
             toml_string(&output.name),
             output.range[0],
-            output.range[1]
+            output.range[1],
+            if output.relative {
+                ", relative = true"
+            } else {
+                ""
+            }
         );
     }
     text += "]\n";

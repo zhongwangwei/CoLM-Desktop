@@ -41,6 +41,8 @@ pub fn eroot_rstfac(p: &BgcPhysics, sw: BgcSwitches, m: usize) -> Result<f64> {
         temperature_k: &p.t_soisno[..nl],
         liquid_water_kg_m2: &p.wliq_soisno[..nl],
         stress_scheme: sw.rstfac,
+        // 火灾模块的 `btran` 用物理 β（插槽只作用于冠层的那一次 `eroot`）。
+        stress_slot: None,
     })?;
     Ok(state.soil_water_stress)
 }

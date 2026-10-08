@@ -26,6 +26,66 @@ pub struct RootUptakeInput<'a> {
     pub liquid_water_kg_m2: &'a [f64],
     /// `DEF_RSTFAC`: 1=matric-potential stress; 2=wilting-to-field-capacity stress.
     pub stress_scheme: i32,
+    /// 混合模型的土壤水分胁迫插槽（`docs/design-hybrid.md` 第 14 节）；`None` 走纯物理。
+    pub stress_slot: Option<StressSlotRef<'a>>,
+}
+
+/// 网络在 `eroot` 里看到的、随步变化的量。静态特征（土壤性质、PFT、气候态）由插槽自己按行备好。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SoilStressFeatures {
+    /// 物理的 β（`eroot` 的 `rstfac`，含 `1e-10` 的下限）。
+    pub beta_physics: f64,
+    /// 根系加权的相对饱和度 `Σ rootfr·clamp(wliq/(ρ·dz·porsl), 0, 1)`。
+    pub root_saturation: f64,
+    /// 根系加权的土温（K）。
+    pub root_temperature_k: f64,
+    /// 冻结层（`t ≤ tfrz`）上的根系比例。
+    pub frozen_root_fraction: f64,
+}
+
+/// 哪个 patch（PFT 路径下再加本 patch 里的第几个 PFT）在问。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StressRow {
+    pub patch: usize,
+    pub pft: Option<usize>,
+}
+
+/// 土壤水分胁迫插槽：给出替换物理 β 的值，`None` 表示这一行用物理值（例如超出训练范围）。
+pub trait SoilStressSlot: Send + Sync {
+    fn soil_water_stress(
+        &self,
+        row: StressRow,
+        features: &SoilStressFeatures,
+    ) -> Result<Option<f64>>;
+}
+
+/// 输入里带的插槽引用。
+#[derive(Clone, Copy)]
+pub struct StressSlotRef<'a> {
+    pub slot: &'a dyn SoilStressSlot,
+    pub row: StressRow,
+}
+
+impl std::fmt::Debug for StressSlotRef<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StressSlotRef")
+            .field("row", &self.row)
+            .finish()
+    }
+}
+
+impl<'a> StressSlotRef<'a> {
+    /// 同一个 patch 的第 `pft` 个 PFT。
+    #[must_use]
+    pub fn for_pft(self, pft: usize) -> Self {
+        Self {
+            row: StressRow {
+                pft: Some(pft),
+                ..self.row
+            },
+            ..self
+        }
+    }
 }
 
 /// Outputs of CoLM's `eroot` routine.
@@ -57,11 +117,44 @@ pub fn root_uptake(input: RootUptakeInput<'_>) -> Result<RootUptakeState> {
     for fraction in &mut layer_fraction {
         *fraction /= root_total;
     }
+    // 插槽只换 β（以及随它缩放的最大蒸腾），分层权重仍按物理归一化：从哪层取水由物理决定，水量守恒不变。
+    // 没有可吸水的层（全冻或孔隙为 0，β 只剩下限）时不问网络，免得凭空给出蒸腾。
+    let stress = match input.stress_slot {
+        Some(slot) if root_total > ROOT_NORMALIZATION_FLOOR => slot
+            .slot
+            .soil_water_stress(slot.row, &stress_features(input, root_total))?
+            .unwrap_or(root_total),
+        _ => root_total,
+    };
     Ok(RootUptakeState {
         layer_fraction,
-        maximum_transpiration_mm_s: input.maximum_transpiration_mm_s * root_total,
-        soil_water_stress: root_total,
+        maximum_transpiration_mm_s: input.maximum_transpiration_mm_s * stress,
+        soil_water_stress: stress,
     })
+}
+
+fn stress_features(input: RootUptakeInput<'_>, beta_physics: f64) -> SoilStressFeatures {
+    let mut features = SoilStressFeatures {
+        beta_physics,
+        root_saturation: 0.0,
+        root_temperature_k: 0.0,
+        frozen_root_fraction: 0.0,
+    };
+    for layer in 0..input.porosity.len() {
+        let root = input.root_fraction[layer];
+        let pore = WATER_DENSITY_KG_M3 * input.layer_thickness_m[layer] * input.porosity[layer];
+        let saturation = if pore > 0.0 {
+            (input.liquid_water_kg_m2[layer] / pore).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        features.root_saturation += root * saturation;
+        features.root_temperature_k += root * input.temperature_k[layer];
+        if input.temperature_k[layer] <= FREEZING_K {
+            features.frozen_root_fraction += root;
+        }
+    }
+    features
 }
 
 fn potential_stress(input: RootUptakeInput<'_>, layer: usize) -> f64 {

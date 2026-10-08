@@ -66,6 +66,22 @@ pub struct RestartStateFiles {
 /// 每个字段都必须由调用方给出：上游在 `MOD_Const_LC` 的编译期表或 namelist 里取
 /// 这些值，而本仓库还没有对应的参数表移植。字段名保持内核里的名字，省得在装配时
 /// 再翻译一遍。
+/// 一个 patch 上的土壤水分胁迫插槽。
+#[derive(Clone)]
+pub struct SoilStressBinding {
+    pub slot: std::sync::Arc<dyn colm_core::SoilStressSlot>,
+    /// 插槽按它（与 PFT 次序）找这一行的静态特征。
+    pub patch: usize,
+}
+
+impl std::fmt::Debug for SoilStressBinding {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SoilStressBinding")
+            .field("patch", &self.patch)
+            .finish_non_exhaustive()
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct LandPhysicsParameters {
     /// `DEF_USE_PFT` 或 `DEF_USE_PC`：土壤 patch 按 PFT 子网格算（见 [`crate::pft`]）；否则是 LCT。
@@ -81,6 +97,8 @@ pub struct LandPhysicsParameters {
     /// 混合模型 `pft` 插槽给本 patch 各 PFT 的 `DEF_PFT_*` 覆盖（按 PFT 在本 patch 里的次序；空 = 不覆盖）。
     /// 语义同 namelist 的 `DEF_PFT_*(class)`，只是按 PFT 而不是按类别；派生量照原路径算（见 `crate::pft`）。
     pub pft_overrides: Vec<std::collections::BTreeMap<String, f64>>,
+    /// 混合模型过程插槽 `soil_stress`（见 `crate::hybrid::stress`）：本 patch 的 `eroot` 用网络给的 β。
+    pub soil_stress: Option<SoilStressBinding>,
     /// `DEF_USE_Dynamic_Wetland`：湿地按土壤地面算地面湿度，VSF 下走土壤水分支。
     pub dynamic_wetland: bool,
     /// `DEF_USE_Dynamic_Lake`（VSF 下才生效）：湖层厚随水量变、`dz_lake` 进时间重启。
@@ -2097,6 +2115,15 @@ impl StandardLctRestartTemplate {
                     temperature_k: &self.temperature_k,
                     liquid_water_kg_m2: &self.water.liquid_water_kg_m2,
                     stress_scheme: physics.stress_scheme,
+                    stress_slot: physics.soil_stress.as_ref().map(|binding| {
+                        colm_core::StressSlotRef {
+                            slot: binding.slot.as_ref(),
+                            row: colm_core::StressRow {
+                                patch: binding.patch,
+                                pft: None,
+                            },
+                        }
+                    }),
                 },
                 soil_surface_resistance: colm_core::SoilSurfaceResistanceInput {
                     air_density_kg_m3: forcing.air_density_kg_m3,

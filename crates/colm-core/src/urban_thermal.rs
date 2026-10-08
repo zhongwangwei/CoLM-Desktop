@@ -600,6 +600,7 @@ pub fn urban_thermal(
             temperature_k: &st.pervious.column.temperature_k[snow..],
             liquid_water_kg_m2: &st.pervious.column.liquid_water_kg_m2[snow..],
             stress_scheme: ctx.root_stress_scheme,
+            stress_slot: None,
         })?;
         out.rootr = roots.layer_fraction.clone();
         out.rstfac = roots.soil_water_stress;

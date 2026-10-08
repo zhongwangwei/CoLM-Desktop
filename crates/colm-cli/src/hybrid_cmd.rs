@@ -60,7 +60,16 @@ pub(crate) fn toml_string(value: &str) -> String {
     format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
-/// 一个参数插槽的 `hybrid.toml` 文本。
+/// 插槽的类型：`soil_stress` 是过程插槽，其余（`land_class`、`pft`）是参数插槽。
+pub(crate) fn slot_kind(slot: &str) -> &'static str {
+    if slot == "soil_stress" {
+        "process"
+    } else {
+        "param"
+    }
+}
+
+/// 一个插槽的 `hybrid.toml` 文本。
 pub(crate) fn slot_toml(
     slot: &str,
     model: &Path,
@@ -72,7 +81,7 @@ pub(crate) fn slot_toml(
 ) -> String {
     let mut text = String::from("[[slot]]\n");
     text += &format!("name = {}\n", toml_string(slot));
-    text += "kind = \"param\"\n";
+    text += &format!("kind = \"{}\"\n", slot_kind(slot));
     text += &format!("model = {}\n", toml_string(&model.display().to_string()));
     text += &format!("sha256 = \"{sha256}\"\n");
     text += &format!(
@@ -293,11 +302,14 @@ pub(crate) fn dry_run(case: &Path, config: &Path, kernel: &Kernel) -> Result<Str
 /// 配置读得出来但模型校验不过（sha256 不符、文件缺失）时照样列出内容，并在 `error` 里说明。
 pub(crate) fn hybrid_info(case: &Path) -> Result<serde_json::Value> {
     let land_mode = case_land_mode(case)?;
+    // `soil_stress` 插槽只在关掉植物水力时起作用。
+    let plant_hydraulics = case_switches(case)?("DEF_USE_PLANTHYDRAULICS");
     let config = case.join("hybrid.toml");
     if !config.is_file() {
         return Ok(serde_json::json!({
             "installed": false,
             "land_mode": land_mode,
+            "plant_hydraulics": plant_hydraulics,
             "climate": !climate_files(case).is_empty(),
             "slots": [],
         }));
@@ -316,6 +328,7 @@ pub(crate) fn hybrid_info(case: &Path) -> Result<serde_json::Value> {
             let model = slot.model.as_deref();
             serde_json::json!({
                 "name": slot.name,
+                "kind": slot_kind(&slot.name),
                 "model": model.and_then(file_name),
                 "format": model.map(|m| if colm_hybrid::is_mlp(m) { "mlp" } else { "onnx" }),
                 "trained_by_study": model.and_then(file_name).as_deref() == Some("study.mlp.json"),
@@ -338,6 +351,7 @@ pub(crate) fn hybrid_info(case: &Path) -> Result<serde_json::Value> {
     Ok(serde_json::json!({
         "installed": true,
         "land_mode": land_mode,
+        "plant_hydraulics": plant_hydraulics,
         "climate": !climate_files(case).is_empty(),
         "uses_climate": slots.iter().any(|slot| slot["features"]
             .as_array()
@@ -349,23 +363,28 @@ pub(crate) fn hybrid_info(case: &Path) -> Result<serde_json::Value> {
 
 /// 算例的地表模式：`lct`、`pft` 或 `pc`。它决定能用哪个插槽（`land_class` 或 `pft`）。
 fn case_land_mode(case: &Path) -> Result<&'static str> {
-    let nml = case.join("case.nml");
-    let text =
-        std::fs::read_to_string(&nml).with_context(|| format!("cannot read {}", nml.display()))?;
-    let document = colm_namelist::parse(&text)?;
-    let on = |name: &str| match document.get(name) {
-        Some(colm_namelist::Value::Bool(value)) => *value,
-        _ => matches!(
-            colm_schema::find(name).map(|field| field.default),
-            Some(colm_schema::Default::Logical(true))
-        ),
-    };
+    let on = case_switches(case)?;
     Ok(if on("DEF_USE_PC") {
         "pc"
     } else if on("DEF_USE_PFT") {
         "pft"
     } else {
         "lct"
+    })
+}
+
+/// 算例 namelist 里的逻辑开关（没写的取默认值）。
+fn case_switches(case: &Path) -> Result<impl Fn(&str) -> bool> {
+    let nml = case.join("case.nml");
+    let text =
+        std::fs::read_to_string(&nml).with_context(|| format!("cannot read {}", nml.display()))?;
+    let document = colm_namelist::parse(&text)?;
+    Ok(move |name: &str| match document.get(name) {
+        Some(colm_namelist::Value::Bool(value)) => *value,
+        _ => matches!(
+            colm_schema::find(name).map(|field| field.default),
+            Some(colm_schema::Default::Logical(true))
+        ),
     })
 }
 

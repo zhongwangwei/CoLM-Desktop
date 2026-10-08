@@ -21,13 +21,23 @@ export function slotForMode(mode) {
   return mode === 'lct' ? 'land_class' : 'pft';
 }
 
-/** 插槽能驱动的参数前缀。 */
+/** 过程插槽：网络替换 `eroot` 的土壤水分胁迫 β（只有一个输出 `beta`）。 */
+export const SOIL_STRESS = 'soil_stress';
+
+/** β 插槽每步现算的特征（colm-core 给出；其余特征与参数插槽同一套取法）。 */
+export const STRESS_FEATURES = 'beta_physics, root_saturation, root_temperature, frozen_root_fraction';
+
+/** 插槽能驱动的参数前缀；β 插槽的输出就叫 `beta`。 */
 export function outputPrefix(slot) {
+  if (slot === SOIL_STRESS) return 'beta';
   return slot === 'land_class' ? 'DEF_LC_' : 'DEF_PFT_';
 }
 
 /** 新插槽的默认特征与输出（Vcmax25，常见取值 10–150 μmol m⁻² s⁻¹）。 */
 export function slotDefaults(slot) {
+  if (slot === SOIL_STRESS) {
+    return { features: STRESS_FEATURES, output: { name: 'beta', lo: 0.5, hi: 2, transform: 'sigmoid', relative: true } };
+  }
   return slot === 'land_class'
     ? { features: 'patchclass', output: { name: 'DEF_LC_VMAX25', lo: 10, hi: 150, transform: 'sigmoid' } }
     : { features: 'pftclass, pftfrac', output: { name: 'DEF_PFT_VMAX25', lo: 10, hi: 150, transform: 'sigmoid' } };
@@ -41,8 +51,10 @@ export function parseFeatures(text) {
 /** 校验一行输出，返回 `{name, lo, hi, transform}`；不合法时抛出说明。 */
 export function checkOutput(slot, { name, lo, hi, transform, relative = false }) {
   const prefix = outputPrefix(slot);
-  const field = String(name ?? '').trim().toUpperCase();
-  if (!field.startsWith(prefix) || field.length === prefix.length) {
+  const stress = slot === SOIL_STRESS;
+  const field = stress ? String(name ?? '').trim().toLowerCase() : String(name ?? '').trim().toUpperCase();
+  if (stress && field !== 'beta') throw new Error('土壤水分胁迫插槽只有一个输出：beta');
+  if (!stress && (!field.startsWith(prefix) || field.length === prefix.length)) {
     throw new Error(`输出参数必须以 ${prefix} 开头`);
   }
   // 空格子不是 0：`Number('')` 会把没填的下限当成 0。
@@ -105,9 +117,21 @@ export const PRESETS = [
     slot: 'land_class', features: 'clim_tair, clim_vpd, clim_prec', size: 'linear',
     outputs: [{ name: 'DEF_LC_VMAX25', lo: 0.5, hi: 2, transform: 'sigmoid', relative: true }],
   },
-  { id: 'beta', title: '土壤水分胁迫 β', note: '过程槽位 · 开发中（H2）', disabled: true },
+  {
+    id: 'beta', title: '土壤水分胁迫 β', note: '过程槽位 · LCT/PFT · 需关闭植物水力 · 乘数 0.5–2',
+    slot: SOIL_STRESS, features: STRESS_FEATURES, size: 'linear',
+    outputs: [{ name: 'beta', lo: 0.5, hi: 2, transform: 'sigmoid', relative: true }],
+  },
   { id: 'custom', title: '自定义', note: '自己选作用方式、特征与输出' },
 ];
+
+/** 预设在这个算例上能不能用；不能用时返回原因。`info` 是 `colm-cli hybrid-info` 的结果。 */
+export function presetBlocked(preset, info) {
+  if (preset.slot !== SOIL_STRESS || !info) return '';
+  if (info.land_mode === 'pc') return 'PC 模式不支持：PC 冠层的水分胁迫来自植物水力';
+  if (info.plant_hydraulics) return '要先关闭植物水力（DEF_USE_PLANTHYDRAULICS）';
+  return '';
+}
 
 /** 地表模式对应的默认预设。 */
 export function presetForMode(mode) {
@@ -506,9 +530,13 @@ wireRunCard();
 let selectedPreset = null;
 let fitResult = null;
 
+function cachedCaseInfo() {
+  return batchTarget().map(c => infoCache.get(c.dir)).find(Boolean);
+}
+
 function caseMode() {
-  const info = batchTarget().map(c => infoCache.get(c.dir)).find(Boolean);
-  return info?.mode ?? (state.subgrid === 'LCT' || ['USGS', 'IGBP'].includes(state.subgrid) ? 'lct' : 'pc');
+  const info = cachedCaseInfo();
+  return info?.land_mode ?? (state.subgrid === 'LCT' || ['USGS', 'IGBP'].includes(state.subgrid) ? 'lct' : 'pc');
 }
 
 function renderPresets() {
@@ -519,8 +547,10 @@ function renderPresets() {
     card.type = 'button';
     card.dataset.preset = preset.id;
     card.setAttribute('aria-selected', String(selectedPreset === preset.id));
+    const blocked = presetBlocked(preset, cachedCaseInfo());
     card.append(element('span', 'dt', preset.title), element('span', 'dd', preset.note));
-    if (preset.disabled) {
+    if (blocked) card.append(element('span', 'dsoon', blocked));
+    if (preset.disabled || blocked) {
       card.disabled = true;
       card.className += ' disabled';
     } else {
@@ -729,7 +759,8 @@ function wireTraining() {
   });
   addEventListener('colm:step', () => {
     if (state.step === 'hybrid-train' && !selectedPreset) applyPreset(presetForMode(caseMode()));
-    else if (state.step === 'hybrid-train' && !$('hybrid-presets').childElementCount) renderPresets();
+    // 每次进来都重画：β 预设能不能用取决于算例（地表模式、植物水力），算例信息是异步读到的。
+    else if (state.step === 'hybrid-train') renderPresets();
     if (state.step === 'hybrid-train' && !$('hybrid-fit-root').value) $('hybrid-fit-root').value = $('root')?.value ?? '';
     renderTuneSummary();
   });
