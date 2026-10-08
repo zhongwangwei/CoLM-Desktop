@@ -16,6 +16,14 @@ fn server_settings_are_validated() {
             remote: "/media/zhwei/data02/zhwei/training2026/PLUMBER2s".into(),
         }],
         threads: 8,
+        scheduler: "auto".into(),
+        partition: String::new(),
+        account: String::new(),
+        walltime: String::new(),
+        cpus: 0,
+        memory_gb: 0,
+        env_script: String::new(),
+        directives: Vec::new(),
     };
     let ok = RemoteConfig {
         servers: vec![server("7920land", "/media/zhwei/data02/zhwei/colm-desktop")],
@@ -49,9 +57,76 @@ fn server_settings_are_validated() {
         servers: vec![no_threads]
     })
     .is_err());
-    // 旧配置没有 threads 字段：默认 8。
+    // 旧配置没有 threads 字段：默认 8；调度系统默认 auto，其余为空。
     let old: Server = serde_json::from_str(r#"{"host":"h","root":"/a"}"#).unwrap();
     assert_eq!(old.threads, 8);
+    assert_eq!(old.scheduler, "auto");
+    assert!(old.partition.is_empty() && old.directives.is_empty() && old.cpus == 0);
+}
+
+#[test]
+fn scheduler_settings_are_validated() {
+    let base: Server = serde_json::from_str(r#"{"host":"h","root":"/a"}"#).unwrap();
+    let check = |edit: &dyn Fn(&mut Server)| {
+        let mut server = base.clone();
+        edit(&mut server);
+        validate(&RemoteConfig {
+            servers: vec![server],
+        })
+    };
+    assert!(check(&|s| {
+        s.scheduler = "slurm".into();
+        s.partition = "cpu_short".into();
+        s.account = "proj-a".into();
+        s.walltime = "1-02:00:00".into();
+        s.directives = vec!["--constraint=ib".into(), String::new()];
+    })
+    .is_ok());
+    assert!(check(&|s| s.scheduler = "condor".into()).is_err());
+    assert!(check(&|s| s.partition = "-evil".into()).is_err());
+    assert!(check(&|s| s.partition = "a b".into()).is_err());
+    assert!(check(&|s| s.account = "x;rm".into()).is_err());
+    assert!(check(&|s| s.walltime = "soon".into()).is_err());
+    assert!(check(&|s| s.directives = vec!["no-dash".into()]).is_err());
+    assert!(check(&|s| s.env_script = "cat <<COLM_JOB_EOF".into()).is_err());
+}
+
+#[test]
+fn run_arguments_carry_the_scheduler_request_and_the_preview_flag() {
+    let mut server: Server = serde_json::from_str(r#"{"host":"c1","root":"/data/colm"}"#).unwrap();
+    server.scheduler = "slurm".into();
+    server.partition = "cpu".into();
+    server.walltime = "04:00:00".into();
+    server.memory_gb = 32;
+    server.env_script = "module load rust".into();
+    server.directives = vec!["--constraint=ib".into()];
+    let args = run_args(&server, "/c".into(), "/k".into(), None, false, false);
+    let after = |flag: &str| {
+        let at = args
+            .iter()
+            .position(|a| a == flag)
+            .unwrap_or_else(|| panic!("{flag} in {args:?}"));
+        args[at + 1].clone()
+    };
+    assert_eq!(after("--scheduler"), "slurm");
+    assert_eq!(after("--partition"), "cpu");
+    assert_eq!(after("--walltime"), "04:00:00");
+    assert_eq!(after("--mem-gb"), "32");
+    assert_eq!(after("--env-script"), "module load rust");
+    assert_eq!(after("--directive"), "--constraint=ib");
+    assert!(!args.contains(&"--account".to_string()) && !args.contains(&"--cpus".to_string()));
+    assert!(!args.contains(&"--dry-run".to_string()));
+    let preview = run_args(
+        &server,
+        "/c".into(),
+        "/k".into(),
+        Some("colm".into()),
+        true,
+        true,
+    );
+    assert!(preview.windows(2).any(|w| w == ["--dry-run", "1"]));
+    assert!(preview.windows(2).any(|w| w == ["--stage", "colm"]));
+    assert!(preview.windows(2).any(|w| w == ["--force", "1"]));
 }
 
 #[test]

@@ -32047,3 +32047,32 @@ GPP 的均值被 4 个基线 KGE 低于 −0.5 的站拉低（BE-Lon、DE-Geb、
 - 在应用里点一遍 GUI 流程（服务器对话框的“测试连接”、运行页提交、自动取回）仍没有人验证过；这一轮走的是同一套后端命令。
 - 经 Mac Pro 的链路慢：取回 66 到 71 MB 要 3 分钟以上。结果文件大时应考虑只取需要的变量，或压缩后传（设计稿第 5.3 节“按变量或时段按需取回”还没做）。
 - Mac Pro 睡眠或 Tailscale 掉线，这条链路就断。
+
+## 第 643 轮：R2——Slurm、PBS、LSF 适配器
+
+**做法**：作业目录的布局不变（`script.sh`、`log`、`phase`、`exit_code`），完成与否仍以作业脚本自己写的 `exit_code` 为准；调度系统只负责提交、查队列、取消三件事。
+- `colm-remote/src/sched.rs`：`Scheduler`（bare、slurm、pbs、lsf）、`Resources`（核数、内存、时限、分区、账户、环境准备、原样指令）；三家的指令头（`#SBATCH`、`#PBS`、`#BSUB`）、提交命令（`sbatch --parsable`、`qsub`、`bsub < script`）、查队列与取消。
+  - 排队（Slurm 的 PENDING 等、PBS 的 Q/H/W/T/S、LSF 的 PEND/PSUSP）是新状态 `queued`；调度器给的状态词放在 `detail`。
+  - 队列里没了又没有 `exit_code`（超时、被杀）报 `lost`，并带上 `sacct`/`qstat -xf`/`bjobs` 给的原因。
+  - 取消交给 `scancel`/`qdel`/`bkill`，并留下退出码 143，免得状态停在“丢失”。
+  - 时限、分区、账户、指令都先校验（不许空白、前导 `-`、换行），再拼进脚本。PBS 用 PBS Pro 的 `select=1:ncpus=N:mem=Ngb`；LSF 的内存单位按 MB 写（取决于站点的 `LSF_UNIT_FOR_LIMITS`，对不上时用“其他指令”改）。
+  - 非交互 ssh 常常没有 `/etc/profile` 里设的 PATH，所以找不到调度命令时先 source 一次它（并还原 `set -e` 状态）。
+- 探测多列出分区或队列（`sinfo`、`qstat -Q`、`bqueues`），给对话框的分区下拉用。
+- `colm-cli remote-run` 新增 `--scheduler auto|bare|slurm|pbs|lsf`、`--partition`、`--account`、`--walltime`、`--cpus`、`--mem-gb`、`--env-script`、`--directive`（可重复）、`--dry-run 1`。`--dry-run 1` 只打印作业脚本全文，不上传、不提交。记录里多了 `scheduler` 与 `scheduler_id`（老记录当作 bare）。
+- GUI：服务器对话框有“调度系统与资源”折叠区；运行页选了服务器时出现“预览作业脚本”；运行页的状态区认得“排队”。
+
+**检查**：
+- `colm-remote` 21 项通过。其中调度相关的是真正执行生成的脚本：用模拟的 `sbatch`/`squeue`/`sacct`/`scancel`、`qsub`/`qstat`/`qdel`、`bsub`/`bjobs`/`bkill`（输出格式照各家文档）放在 PATH 里，经 `bash -s`（和 `Ssh::run` 一样）执行提交、状态、取消：
+  - Slurm 走完 排队 → 运行 → 完成，`sbatch --parsable` 的 `4242;cluster1` 只取 `4242`；作业脚本在作业目录之外也能跑（sbatch 会拷贝脚本）。
+  - 被调度器杀掉（TIMEOUT）报 `lost` 并带原因；取消后状态是 143。
+  - `sbatch` 失败时错误带出原文（例如 `invalid partition`），不吞掉。
+  - PBS 的 Q/R/E、LSF 的 PEND/RUN/EXIT 各走一遍。
+- 这些测试抓到一个真问题：作业还在排队时 `log` 还不存在，状态脚本最后一条 `tail` 失败，整个状态查询就报错。R1 没有排队这一态，所以没碰到。已在脚本末尾加 `true`。
+- T7920（无调度系统）上回归 bare 模式：探测 `schedulers: []`、`queues: []`；`remote-run --stage mksrfdata` 提交、编译新快照、跑完（退出码 0）；再提交完整运行 10 秒后 `remote-cancel`，状态 143，服务器上没有残留进程。
+- `--dry-run 1` 打印的 Slurm 脚本含全部指令（`--time`、`--mem`、`--partition`、`--account`、`--constraint`）、环境准备、作业体。
+- colm-cli 240 项、GUI Rust 214 项（新增调度设置校验、命令行参数）、`check-gui`（108 个命令）、15 个前端套件通过；两个 workspace 的 clippy 零警告、fmt 干净。
+
+**还没验证**：设计稿对 R2 的验收是“在一台对应的机器上跑通”，这一轮没有真正的 Slurm、PBS 或 LSF 机器可用（T7920 没有调度系统；天河要经 `land`，现在连不上）。三家的命令与输出格式是照文档写的，只用模拟命令验证过。第一次上真机时要重点看：
+- Slurm 的 `--parsable` 输出、`squeue -o %T`、`sacct -X -P` 在该站点是否可用（有的站点没开 accounting，`sacct` 会失败，这时 `lost` 的原因为空）；
+- 计算节点上能否访问 cargo 与 crates 源（离线节点要等 R3 的预编二进制）；
+- LSF 的内存单位。

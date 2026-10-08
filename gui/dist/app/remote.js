@@ -49,12 +49,14 @@ export function probeLines(probe) {
     `cargo: ${probe.cargo || t('没有')} · gfortran: ${probe.gfortran ? t('有') : t('没有')} · MPI: ${probe.mpi ? t('有') : t('没有')}`,
     `${t('调度系统')}: ${probe.schedulers?.length ? probe.schedulers.join(', ') : t('无（直接在后台运行）')}`,
   ];
+  if (probe.queues?.length) lines.push(`${t('分区或队列')}: ${probe.queues.join(', ')}`);
   return lines;
 }
 
 /** 远程作业一行状态文字。 */
 export function jobSummary(job) {
   if (job.error) return `${t('出错')}：${job.error}`;
+  if (job.state === 'queued') return job.detail ? `${t('在调度系统里排队')}（${job.detail}）` : t('在调度系统里排队');
   if (job.state === 'running') {
     const p = job.progress;
     if (job.phase === 'building the Rust engine') return t('正在服务器上编译 Rust 引擎（首次约 4 分钟）');
@@ -66,7 +68,11 @@ export function jobSummary(job) {
     if (job.exit_code !== 0) return `${t('失败')}（${t('退出码')} ${job.exit_code}）`;
     return job.fetched ? t('完成，结果已取回') : t('完成，正在取回结果…');
   }
-  if (job.state === 'lost') return t('服务器上的进程不在了（可能被终止或机器重启）');
+  if (job.state === 'lost') {
+    return job.detail
+      ? `${t('作业没有留下退出码，调度系统说')}：${job.detail}`
+      : t('服务器上的进程不在了（可能被终止或机器重启）');
+  }
   if (job.state === 'submitting') return t('正在上传并提交…');
   return t('状态未知');
 }
@@ -109,6 +115,28 @@ function syncTarget() {
     engine.title = remote ? t('服务器运行只用 Rust 引擎') : '';
   }
   $('manage-servers').textContent = t(remote ? '修改这台服务器…' : '管理服务器…');
+  const preview = $('preview-job');
+  if (preview) preview.hidden = !remote;
+}
+
+/** 把将要提交的作业脚本全文给用户看（不上传、不提交）。 */
+async function previewJob() {
+  const dir = (state.batch?.length ? state.batch : state.selected ? [state.selected.dir] : [])[0];
+  if (!dir) {
+    status(t('先选一个算例'));
+    return;
+  }
+  const text = $('remote-preview-text');
+  $('remote-preview-note').textContent = t('正在生成…');
+  text.textContent = '';
+  $('remote-preview-dialog').showModal();
+  try {
+    const answer = await invoke('remote_preview', { case: dir, host: runTarget(), kernel: $('kernel').value, stage: null, force: false });
+    $('remote-preview-note').textContent = `${baseName(dir)} @ ${runTarget()} · ${t('调度系统')}: ${answer.scheduler}`;
+    text.textContent = answer.job_script;
+  } catch (error) {
+    $('remote-preview-note').textContent = String(error?.message || error);
+  }
 }
 
 // ---- 服务器对话框 ----------------------------------------------------------------------------
@@ -121,6 +149,14 @@ function fillDialog(host) {
   $('remote-root').value = server?.root ?? '';
   $('remote-maps').value = formatMaps(server?.maps);
   $('remote-threads').value = server?.threads ?? 8;
+  $('remote-scheduler').value = server?.scheduler ?? 'auto';
+  $('remote-partition').value = server?.partition ?? '';
+  $('remote-account').value = server?.account ?? '';
+  $('remote-walltime').value = server?.walltime ?? '';
+  $('remote-cpus').value = server?.cpus ?? 0;
+  $('remote-memory').value = server?.memory_gb ?? 0;
+  $('remote-env').value = server?.env_script ?? '';
+  $('remote-directives').value = (server?.directives ?? []).join('\n');
   $('remote-delete').hidden = !server;
   $('remote-probe-result').replaceChildren();
 }
@@ -137,7 +173,29 @@ function formServer() {
   if (!host) throw new Error(t('请填写主机（ssh 配置里的别名）'));
   if (!root.startsWith('/')) throw new Error(t('工作目录要是服务器上的绝对路径'));
   const threads = Number($('remote-threads').value);
-  return { host, root, maps: parseMaps($('remote-maps').value), threads: Number.isFinite(threads) && threads > 0 ? Math.round(threads) : 8 };
+  const count = id => {
+    const n = Number($(id).value);
+    return Number.isFinite(n) && n > 0 ? Math.round(n) : 0;
+  };
+  return {
+    host,
+    root,
+    maps: parseMaps($('remote-maps').value),
+    threads: Number.isFinite(threads) && threads > 0 ? Math.round(threads) : 8,
+    scheduler: $('remote-scheduler').value || 'auto',
+    partition: $('remote-partition').value.trim(),
+    account: $('remote-account').value.trim(),
+    walltime: $('remote-walltime').value.trim(),
+    cpus: count('remote-cpus'),
+    memory_gb: count('remote-memory'),
+    env_script: $('remote-env').value.trim(),
+    directives: parseDirectives($('remote-directives').value),
+  };
+}
+
+/** “其他指令”一行一条；空行忽略。 */
+export function parseDirectives(text) {
+  return String(text ?? '').split('\n').map(l => l.trim()).filter(Boolean);
 }
 
 /** 打开服务器设置；保存后返回服务器名，取消返回 null。 */
@@ -166,6 +224,7 @@ async function testConnection() {
   try {
     const server = formServer();
     const probe = await invoke('remote_probe', { host: server.host, root: server.root });
+    $('remote-queue-list').replaceChildren(...(probe.queues ?? []).map(q => new Option(q, q)));
     box.replaceChildren(...probeLines(probe).map(line => Object.assign(document.createElement('div'), { textContent: line })));
     for (const problem of probe.problems ?? []) {
       box.appendChild(Object.assign(document.createElement('div'), { className: 'assistant-fail', textContent: `⚠ ${problem}` }));
@@ -223,7 +282,7 @@ function renderJobs() {
       Object.assign(document.createElement('span'), { className: 'muted mini', textContent: `@ ${job.host}` }),
       Object.assign(document.createElement('span'), { className: 'mini remote-run-state', textContent: jobSummary(job) }),
     );
-    if (job.state === 'running' || job.state === 'submitting') {
+    if (job.state === 'running' || job.state === 'queued' || job.state === 'submitting') {
       const cancel = Object.assign(document.createElement('button'), { className: 'btn-ghost btn-stop', type: 'button', textContent: t('终止') });
       cancel.onclick = () => cancelJob(dir);
       head.appendChild(cancel);
@@ -251,6 +310,7 @@ async function refreshJob(dir) {
       state: answer.status?.state ?? 'unknown',
       exit_code: answer.status?.exit_code,
       phase: answer.status?.phase,
+      detail: answer.status?.detail,
       log: answer.status?.log_tail ?? '',
       stages: answer.stages ?? [],
       progress: answer.progress,
@@ -279,10 +339,10 @@ async function fetchJob(dir) {
 
 async function poll() {
   pollTimer = null;
-  const active = [...jobs].filter(([, j]) => j.state === 'running' || (j.state === 'finished' && j.exit_code === 0 && !j.fetched));
+  const active = [...jobs].filter(([, j]) => j.state === 'running' || j.state === 'queued' || (j.state === 'finished' && j.exit_code === 0 && !j.fetched));
   await Promise.all(active.map(([dir]) => refreshJob(dir)));
   renderJobs();
-  const running = [...jobs.values()].filter(j => j.state === 'running');
+  const running = [...jobs.values()].filter(j => j.state === 'running' || j.state === 'queued');
   if (running.length) {
     setRunning('busy', `${t('服务器运行中')}（${running.length}）`);
     pollTimer = setTimeout(poll, POLL_MS);
@@ -342,7 +402,7 @@ async function resumeJobs() {
     }
   }
   renderJobs();
-  if ([...jobs.values()].some(j => j.state === 'running')) schedulePoll();
+  if ([...jobs.values()].some(j => j.state === 'running' || j.state === 'queued')) schedulePoll();
 }
 
 function wire() {
@@ -355,6 +415,8 @@ function wire() {
     showDomainGate();
   };
   $('run-target').addEventListener('change', syncTarget);
+  $('preview-job').onclick = () => previewJob();
+  $('remote-preview-close').onclick = () => $('remote-preview-dialog').close();
   $('manage-servers').onclick = () => openServerDialog(runTarget() === 'local' ? null : runTarget());
   $('remote-which').addEventListener('change', () => fillDialog($('remote-which').value || null));
   $('remote-test').onclick = () => testConnection();

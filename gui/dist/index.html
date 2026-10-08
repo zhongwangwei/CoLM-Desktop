@@ -595,6 +595,7 @@
           </div>
           <select class="select" id="run-target"><option value="local">本机</option></select>
           <button class="btn-ghost" type="button" id="manage-servers">管理服务器…</button>
+          <button class="btn-ghost" type="button" id="preview-job" hidden>预览作业脚本</button>
         </div>
         <div class="run-parallel-setting" id="workers-setting">
           <div>
@@ -1280,12 +1281,49 @@
     <label for="remote-threads">线程数</label>
     <input class="input" id="remote-threads" type="number" min="1" max="256" step="1" value="8">
   </div>
+  <details class="remote-sched">
+    <summary>调度系统与资源（超算、集群）</summary>
+    <p class="muted mini">服务器有 Slurm、PBS 或 LSF 时，作业交给它排队，而不是直接在登录节点上跑。留空的项不写进作业脚本。提交前可以在运行页“预览作业脚本”看到全文。</p>
+    <div class="remote-form">
+      <label for="remote-scheduler">调度系统</label>
+      <select class="select" id="remote-scheduler">
+        <option value="auto">自动检测</option>
+        <option value="bare">无（直接在后台运行）</option>
+        <option value="slurm">Slurm</option>
+        <option value="pbs">PBS</option>
+        <option value="lsf">LSF</option>
+      </select>
+      <label for="remote-partition">分区或队列</label>
+      <div><input class="input" id="remote-partition" list="remote-queue-list" placeholder="例如 cpu；留空用调度系统的默认" autocomplete="off"><datalist id="remote-queue-list"></datalist></div>
+      <label for="remote-account">账户</label>
+      <input class="input" id="remote-account" placeholder="计费账户或项目；留空不指定" autocomplete="off">
+      <label for="remote-walltime">时限</label>
+      <input class="input" id="remote-walltime" placeholder="HH:MM:SS 或 D-HH:MM:SS，例如 04:00:00" autocomplete="off">
+      <label for="remote-cpus">核数</label>
+      <input class="input" id="remote-cpus" type="number" min="0" max="1024" step="1" value="0" title="0 表示与线程数相同">
+      <label for="remote-memory">内存（GB）</label>
+      <input class="input" id="remote-memory" type="number" min="0" step="1" value="0" title="0 表示不指定">
+      <label for="remote-env">环境准备</label>
+      <textarea class="input" id="remote-env" rows="2" placeholder="作业开头先执行，例如 module load rust"></textarea>
+      <label for="remote-directives">其他指令</label>
+      <textarea class="input" id="remote-directives" rows="2" placeholder="每行一条，例如 --constraint=cpu"></textarea>
+    </div>
+  </details>
   <div class="remote-probe mini" id="remote-probe-result"></div>
   <div class="assistant-approval-actions">
     <button class="btn-ghost" type="button" id="remote-delete">删除这台</button>
     <button class="btn-ghost" type="button" id="remote-test">测试连接</button>
     <button class="btn-ghost" type="button" id="remote-close">取消</button>
     <button class="run-btn" type="button" id="remote-save">保存</button>
+  </div>
+</dialog>
+
+<dialog id="remote-preview-dialog" class="app-dialog remote-dialog" aria-labelledby="remote-preview-title">
+  <h3 id="remote-preview-title">作业脚本</h3>
+  <p class="muted mini" id="remote-preview-note"></p>
+  <pre class="assistant-code" id="remote-preview-text"></pre>
+  <div class="assistant-approval-actions">
+    <button class="run-btn" type="button" id="remote-preview-close">关闭</button>
   </div>
 </dialog>
 

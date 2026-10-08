@@ -4,10 +4,15 @@
 //! colm-cli remote-probe  --host H --root R
 //! colm-cli remote-run    <case> --host H --root R --kernel <本机内核目录> [--map 本机前缀=服务器前缀]…
 //!                        [--stage S] [--force 1] [--threads N] [--upload-unmapped 1]
+//!                        [--scheduler auto|bare|slurm|pbs|lsf] [--partition P] [--account A] [--walltime T]
+//!                        [--cpus N] [--mem-gb N] [--env-script TEXT] [--directive '-x…']… [--dry-run 1]
 //! colm-cli remote-status <case> [--lines N]
 //! colm-cli remote-cancel <case>
 //! colm-cli remote-fetch  <case>
 //! ```
+//!
+//! `--dry-run 1` 只生成作业脚本全文（含调度指令）打印出来，不上传、不提交；`--scheduler auto` 先探测服务器有什么
+//! 调度系统。
 //!
 //! 服务器上的布局（都在工作根目录 R 下）：`engine/<快照>/`（源码与编好的四个程序）、`target/`（cargo 编译目录）、
 //! `kernels/<清单哈希>/manifest.json`（只放清单，Rust 引擎只用它的宏）、`cases/<名字>-<本机路径哈希>/`
@@ -23,7 +28,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, ensure, Context, Result};
 use colm_namelist::Value;
 use colm_remote::engine::{self, Source};
-use colm_remote::job;
+use colm_remote::job::{self, Spec};
+use colm_remote::sched::{self, Resources, Scheduler};
 use colm_remote::ssh::{quote, Ssh};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -295,6 +301,16 @@ pub(crate) struct Record {
     pub case_name: String,
     pub engine: String,
     pub submitted_at: u64,
+    /// bare、slurm、pbs 或 lsf；老记录没有这一项，当作 bare。
+    #[serde(default = "bare")]
+    pub scheduler: String,
+    /// 调度系统给的作业号（bare 没有）。
+    #[serde(default)]
+    pub scheduler_id: Option<String>,
+}
+
+fn bare() -> String {
+    "bare".into()
 }
 
 fn read_record(case: &Path) -> Result<Record> {
@@ -342,6 +358,37 @@ fn engine_source() -> Result<Source> {
     bail!("the engine sources were not found next to colm-cli; this build cannot run remotely")
 }
 
+/// 作业体：先确保引擎编好，再跑三段。
+fn job_body(
+    root: &str,
+    engine_id: &str,
+    remote_case: &str,
+    remote_kernel: &str,
+    threads: u32,
+    opts: &Opts,
+) -> Result<String> {
+    let mut run = format!(
+        "RAYON_NUM_THREADS={threads} {bin}/colm-cli run {case} --kernel {kernel} --stream 1 --engine rust --preprocessors rust",
+        bin = quote(&format!("{}/bin", engine::engine_dir(root, engine_id))),
+        case = quote(remote_case),
+        kernel = quote(remote_kernel),
+    );
+    if let Some(stage) = opts.get("--stage") {
+        ensure!(
+            ["mksrfdata", "mkinidata", "colm"].contains(&stage.as_str()),
+            "--stage must be mksrfdata, mkinidata or colm"
+        );
+        run.push_str(&format!(" --stage {stage}"));
+    }
+    if opts.get("--force").is_some_and(|v| v == "1") {
+        run.push_str(" --force 1");
+    }
+    Ok(format!(
+        "echo \"preparing the engine\" > phase\n{ensure}echo \"running\" >> phase\n{run}\n",
+        ensure = engine::ensure_script(root, engine_id, threads.clamp(1, 64)),
+    ))
+}
+
 pub(super) fn cmd_probe(opts: &Opts) -> Result<()> {
     let ssh = Ssh::new(&opts.need_str("--host")?)?;
     let probe = colm_remote::probe::probe(&ssh, &root_of(opts)?)?;
@@ -366,6 +413,37 @@ pub(super) fn cmd_run(opts: &Opts) -> Result<()> {
         .transpose()?
         .unwrap_or(8);
     let upload_unmapped = opts.get("--upload-unmapped").is_some_and(|v| v == "1");
+    let dry_run = opts.get("--dry-run").is_some_and(|v| v == "1");
+    let scheduler = match opts.get("--scheduler").as_deref() {
+        // auto：问服务器有什么调度系统，取第一个；没有就直接后台运行。
+        Some("auto") => colm_remote::probe::probe(&ssh, &root)?
+            .schedulers
+            .first()
+            .map(|s| Scheduler::parse(s))
+            .transpose()?
+            .unwrap_or(Scheduler::Bare),
+        Some(name) => Scheduler::parse(name)?,
+        None => Scheduler::Bare,
+    };
+    let resources = Resources {
+        cpus: opts
+            .get("--cpus")
+            .map(|v| v.parse())
+            .transpose()
+            .context("--cpus must be a whole number")?
+            .unwrap_or(threads),
+        memory_gb: opts
+            .get("--mem-gb")
+            .map(|v| v.parse())
+            .transpose()
+            .context("--mem-gb must be a whole number")?,
+        walltime: opts.get("--walltime"),
+        partition: opts.get("--partition"),
+        account: opts.get("--account"),
+        env_script: opts.get("--env-script").filter(|t| !t.trim().is_empty()),
+        directives: opts.get_all("--directive"),
+    };
+    resources.validate()?;
 
     let case_name = colm_namelist::parse(&std::fs::read_to_string(case.join("case.nml"))?)?
         .get("DEF_CASE_NAME")
@@ -419,13 +497,41 @@ pub(super) fn cmd_run(opts: &Opts) -> Result<()> {
 
     // 3. 引擎源码、内核清单、算例副本上传。
     let snapshot = engine::snapshot(&engine_source()?)?;
-    let engine_uploaded = engine::upload(&ssh, &root, &snapshot)?;
     let manifest = std::fs::read_to_string(kernel_dir.join("manifest.json"))?;
     let remote_kernel = format!(
         "{root}/kernels/{}-{}",
         kernel.manifest.preset,
         short_hash(&manifest)
     );
+    if dry_run {
+        let _ = std::fs::remove_dir_all(&staging);
+        let body = job_body(
+            &root,
+            &snapshot.id,
+            &remote_case,
+            &remote_kernel,
+            threads,
+            opts,
+        )?;
+        let spec = Spec {
+            scheduler,
+            resources,
+            name: sched::job_name(&case_name),
+        };
+        let script = job::job_script(&root, "JOBID", &body, &spec)?;
+        println!(
+            "{}",
+            json!({
+                "dry_run": true,
+                "scheduler": scheduler.name(),
+                "job_script": script,
+                "remote_case": remote_case,
+                "engine": snapshot.id,
+            })
+        );
+        return Ok(());
+    }
+    let engine_uploaded = engine::upload(&ssh, &root, &snapshot)?;
     ssh.run_ok(&format!(
         "mkdir -p {dir} && cat > {dir}/manifest.json <<'COLM_MANIFEST_EOF'\n{manifest}\nCOLM_MANIFEST_EOF\n",
         dir = quote(&remote_kernel)
@@ -442,27 +548,20 @@ pub(super) fn cmd_run(opts: &Opts) -> Result<()> {
         now(),
         short_hash(&format!("{}{}", case.display(), now()))
     );
-    let mut run = format!(
-        "RAYON_NUM_THREADS={threads} {bin}/colm-cli run {case} --kernel {kernel} --stream 1 --engine rust --preprocessors rust",
-        bin = quote(&format!("{}/bin", engine::engine_dir(&root, &snapshot.id))),
-        case = quote(&remote_case),
-        kernel = quote(&remote_kernel),
-    );
-    if let Some(stage) = opts.get("--stage") {
-        ensure!(
-            ["mksrfdata", "mkinidata", "colm"].contains(&stage.as_str()),
-            "--stage must be mksrfdata, mkinidata or colm"
-        );
-        run.push_str(&format!(" --stage {stage}"));
-    }
-    if opts.get("--force").is_some_and(|v| v == "1") {
-        run.push_str(" --force 1");
-    }
-    let body = format!(
-        "echo \"preparing the engine\" > phase\n{ensure}echo \"running\" >> phase\n{run}\n",
-        ensure = engine::ensure_script(&root, &snapshot.id, threads.clamp(1, 64)),
-    );
-    let pid = job::submit(&ssh, &root, &id, &body)?;
+    let body = job_body(
+        &root,
+        &snapshot.id,
+        &remote_case,
+        &remote_kernel,
+        threads,
+        opts,
+    )?;
+    let spec = Spec {
+        scheduler,
+        resources,
+        name: sched::job_name(&case_name),
+    };
+    let submitted = job::submit(&ssh, &root, &id, &body, &spec)?;
     let record = Record {
         host: ssh.host.clone(),
         root,
@@ -471,13 +570,17 @@ pub(super) fn cmd_run(opts: &Opts) -> Result<()> {
         case_name,
         engine: snapshot.id.clone(),
         submitted_at: now(),
+        scheduler: submitted.scheduler.to_owned(),
+        scheduler_id: submitted.scheduler_id.clone(),
     };
     std::fs::write(case.join(RECORD), serde_json::to_string_pretty(&record)?)?;
     println!(
         "{}",
         json!({
             "job": id,
-            "pid": pid,
+            "pid": submitted.pid,
+            "scheduler": submitted.scheduler,
+            "scheduler_id": submitted.scheduler_id,
             "host": ssh.host,
             "remote_case": remote_case,
             "engine": snapshot.id,

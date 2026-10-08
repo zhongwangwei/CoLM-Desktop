@@ -10,6 +10,7 @@
 pub mod engine;
 pub mod job;
 pub mod probe;
+pub mod sched;
 pub mod ssh;
 
 pub use ssh::Ssh;

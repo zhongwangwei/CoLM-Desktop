@@ -43,11 +43,21 @@ assert.equal(remote.jobSummary({ state: 'finished', exit_code: 101 }), '失败�
 assert.match(remote.jobSummary({ state: 'lost' }), /进程不在了/);
 assert.match(remote.jobSummary({ state: 'running', error: 'ssh broke' }), /出错：ssh broke/);
 
+// 调度系统（R2）：排队、被调度器杀掉的作业、队列列表、其他指令的解析。
+assert.equal(remote.jobSummary({ state: 'queued', detail: 'PENDING' }), '在调度系统里排队（PENDING）');
+assert.equal(remote.jobSummary({ state: 'queued' }), '在调度系统里排队');
+assert.equal(remote.jobSummary({ state: 'lost', detail: 'TIMEOUT|0:0' }), '作业没有留下退出码，调度系统说：TIMEOUT|0:0');
+assert.deepEqual(remote.parseDirectives(' --constraint=ib \n\n--exclusive\n'), ['--constraint=ib', '--exclusive']);
+assert.deepEqual(remote.parseDirectives(''), []);
+const withQueues = remote.probeLines({ hostname: 'c1', os: 'Linux', arch: 'x86_64', schedulers: ['slurm'], queues: ['cpu', 'gpu'] });
+assert.equal(withQueues.at(-1), '分区或队列: cpu, gpu');
+assert.equal(withQueues.at(-2), '调度系统: slurm');
+
 // 运行页与首页都接上了：运行按钮在选了服务器时交给 remote.js；首页的服务器卡片可点。
 const runner = await readFile(join(root, 'dist', 'app', 'runner.js'), 'utf8');
 assert.match(runner, /if \(runTarget\(\) !== 'local'\) \{\s*await remoteRun\(/);
 const html = await readFile(join(root, 'dist', 'index.html'), 'utf8');
-for (const id of ['run-target', 'manage-servers', 'remote-runs', 'remote-dialog', 'remote-host', 'remote-root', 'remote-maps', 'remote-test', 'remote-save']) {
+for (const id of ['run-target', 'manage-servers', 'remote-runs', 'remote-dialog', 'remote-host', 'remote-root', 'remote-maps', 'remote-test', 'remote-save', 'remote-scheduler', 'remote-partition', 'remote-account', 'remote-walltime', 'remote-cpus', 'remote-memory', 'remote-env', 'remote-directives', 'preview-job', 'remote-preview-dialog', 'remote-preview-text']) {
   assert.ok(html.includes(`id="${id}"`), id);
 }
 console.log('remote: maps, probe summary, job states and wiring ok');

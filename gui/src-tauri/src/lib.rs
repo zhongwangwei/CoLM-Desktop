@@ -176,6 +176,7 @@ pub fn run() {
             remote_ssh_hosts,
             remote_probe,
             remote_run,
+            remote_preview,
             remote_status,
             remote_cancel,
             remote_fetch,

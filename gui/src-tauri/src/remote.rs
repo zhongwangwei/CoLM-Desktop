@@ -25,10 +25,37 @@ pub struct Server {
     pub maps: Vec<PathMap>,
     #[serde(default = "default_threads")]
     pub threads: u32,
+    /// auto（问服务器有什么调度系统）、bare（直接后台运行）、slurm、pbs 或 lsf。
+    #[serde(default = "default_scheduler")]
+    pub scheduler: String,
+    /// 分区（Slurm）或队列（PBS、LSF）。
+    #[serde(default)]
+    pub partition: String,
+    #[serde(default)]
+    pub account: String,
+    /// `HH:MM:SS` 或 `D-HH:MM:SS`；空表示不限（用调度系统的默认）。
+    #[serde(default)]
+    pub walltime: String,
+    /// 申请的核数；0 表示和线程数一样。
+    #[serde(default)]
+    pub cpus: u32,
+    /// 申请的内存（GB）；0 表示不指定。
+    #[serde(default)]
+    pub memory_gb: u32,
+    /// 作业开头先执行的环境准备，例如 `module load rust`。
+    #[serde(default)]
+    pub env_script: String,
+    /// 原样追加的调度指令选项，每行一条，例如 `--constraint=cpu`。
+    #[serde(default)]
+    pub directives: Vec<String>,
 }
 
 fn default_threads() -> u32 {
     8
+}
+
+fn default_scheduler() -> String {
+    "auto".into()
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -71,6 +98,49 @@ pub(crate) fn validate(config: &RemoteConfig) -> Result<(), String> {
         }
         if server.threads == 0 || server.threads > 256 {
             return Err(format!("{host} 的线程数要在 1–256 之间"));
+        }
+        if !["auto", "bare", "slurm", "pbs", "lsf"].contains(&server.scheduler.as_str()) {
+            return Err(format!(
+                "{host} 的调度系统只能是 auto、bare、slurm、pbs 或 lsf：{:?}",
+                server.scheduler
+            ));
+        }
+        for (what, value) in [("分区或队列", &server.partition), ("账户", &server.account)] {
+            let v = value.trim();
+            if !v.is_empty()
+                && (v.starts_with('-')
+                    || !v
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || "_.-@:+/".contains(c)))
+            {
+                return Err(format!(
+                    "{host} 的{what}只能含字母、数字和 _ . - @ : + /：{v:?}"
+                ));
+            }
+        }
+        let wall = server.walltime.trim();
+        if !wall.is_empty()
+            && (wall.starts_with('-')
+                || !wall
+                    .chars()
+                    .all(|c| c.is_ascii_digit() || c == ':' || c == '-'))
+        {
+            return Err(format!(
+                "{host} 的时限要写成 HH:MM:SS 或 D-HH:MM:SS：{wall:?}"
+            ));
+        }
+        if server.cpus > 1024 || server.memory_gb > 100_000 {
+            return Err(format!("{host} 的核数或内存数不合理"));
+        }
+        for line in &server.directives {
+            if !line.trim().is_empty()
+                && (!line.trim().starts_with('-') || line.contains(['\n', '\r']))
+            {
+                return Err(format!("{host} 的调度指令每行要以 - 开头：{line:?}"));
+            }
+        }
+        if server.env_script.contains("COLM_JOB_EOF") {
+            return Err(format!("{host} 的环境准备里不能出现 COLM_JOB_EOF"));
         }
     }
     Ok(())
@@ -166,22 +236,16 @@ pub async fn remote_probe(host: String, root: String) -> Result<Value, String> {
     .await
 }
 
-#[tauri::command]
-pub async fn remote_run(
-    app: tauri::AppHandle,
+/// `remote-run` 的命令行参数。预览（`--dry-run 1`）与真正提交用同一份，所以用户看到的就是要提交的。
+pub(crate) fn run_args(
+    server: &Server,
     case: String,
-    host: String,
     kernel: String,
     stage: Option<String>,
     force: bool,
-) -> Result<Value, String> {
-    let config = remote_config(app);
-    let server = config
-        .servers
-        .iter()
-        .find(|s| s.host == host)
-        .ok_or_else(|| format!("没有配置服务器 {host}"))?;
-    let mut args = vec![
+    dry_run: bool,
+) -> Vec<String> {
+    let mut args: Vec<String> = vec![
         "remote-run".into(),
         case,
         "--host".into(),
@@ -192,10 +256,34 @@ pub async fn remote_run(
         kernel,
         "--threads".into(),
         server.threads.to_string(),
+        "--scheduler".into(),
+        server.scheduler.clone(),
     ];
     for map in &server.maps {
         args.push("--map".into());
         args.push(format!("{}={}", map.local.trim(), map.remote.trim()));
+    }
+    let mut optional = |flag: &str, value: &str| {
+        if !value.trim().is_empty() {
+            args.push(flag.into());
+            args.push(value.trim().to_owned());
+        }
+    };
+    optional("--partition", &server.partition);
+    optional("--account", &server.account);
+    optional("--walltime", &server.walltime);
+    optional("--env-script", &server.env_script);
+    if server.cpus > 0 {
+        args.push("--cpus".into());
+        args.push(server.cpus.to_string());
+    }
+    if server.memory_gb > 0 {
+        args.push("--mem-gb".into());
+        args.push(server.memory_gb.to_string());
+    }
+    for line in server.directives.iter().filter(|l| !l.trim().is_empty()) {
+        args.push("--directive".into());
+        args.push(line.trim().to_owned());
     }
     if let Some(stage) = stage {
         args.push("--stage".into());
@@ -205,7 +293,46 @@ pub async fn remote_run(
         args.push("--force".into());
         args.push("1".into());
     }
-    cli_json(args).await
+    if dry_run {
+        args.push("--dry-run".into());
+        args.push("1".into());
+    }
+    args
+}
+
+fn server_for(app: tauri::AppHandle, host: &str) -> Result<Server, String> {
+    remote_config(app)
+        .servers
+        .into_iter()
+        .find(|s| s.host == host)
+        .ok_or_else(|| format!("没有配置服务器 {host}"))
+}
+
+#[tauri::command]
+pub async fn remote_run(
+    app: tauri::AppHandle,
+    case: String,
+    host: String,
+    kernel: String,
+    stage: Option<String>,
+    force: bool,
+) -> Result<Value, String> {
+    let server = server_for(app, &host)?;
+    cli_json(run_args(&server, case, kernel, stage, force, false)).await
+}
+
+/// 提交前给用户看的作业脚本全文（不上传、不提交任何东西）。
+#[tauri::command]
+pub async fn remote_preview(
+    app: tauri::AppHandle,
+    case: String,
+    host: String,
+    kernel: String,
+    stage: Option<String>,
+    force: bool,
+) -> Result<Value, String> {
+    let server = server_for(app, &host)?;
+    cli_json(run_args(&server, case, kernel, stage, force, true)).await
 }
 
 /// 远程作业的状态，加上从日志末尾解析出的阶段与进度（和本机运行同一套解析）。

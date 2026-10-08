@@ -23,6 +23,8 @@ pub struct Probe {
     pub cc: bool,
     /// 找到的调度系统：slurm、pbs、lsf；空表示直接后台运行。
     pub schedulers: Vec<String>,
+    /// 调度系统的分区或队列（`sinfo`、`qstat -Q`、`bqueues`），给“选分区”用；拿不到就空。
+    pub queues: Vec<String>,
     /// 工作根目录：存在吗、可写吗、所在盘的剩余空间。
     pub root: String,
     pub root_exists: bool,
@@ -36,7 +38,7 @@ pub struct Probe {
 pub fn script(root: &str) -> String {
     format!(
         r#"set +e
-R={root}
+{prelude}R={root}
 echo "hostname=$(hostname)"
 echo "os=$(. /etc/os-release 2>/dev/null && echo "$PRETTY_NAME" || uname -s)"
 echo "arch=$(uname -m)"
@@ -51,12 +53,14 @@ echo "cc=$( (command -v cc || command -v gcc) 2>/dev/null | head -1)"
 echo "slurm=$(command -v sbatch)"
 echo "pbs=$(command -v qsub)"
 echo "lsf=$(command -v bsub)"
+echo "queues=$( (sinfo -h -o '%P' 2>/dev/null; qstat -Q 2>/dev/null | awk 'NR>2{{print $1}}'; bqueues -w 2>/dev/null | awk 'NR>1{{print $1}}') | tr -d '*' | tr '\n' ' ')"
 echo "root_exists=$([ -d "$R" ] && echo 1)"
 P="$R"; while [ ! -d "$P" ] && [ "$P" != "/" ]; do P=$(dirname "$P"); done
 echo "root_writable=$([ -w "$P" ] && echo 1)"
 echo "root_free_kb=$(df -Pk "$P" 2>/dev/null | awk 'NR==2{{print $4}}')"
 "#,
-        root = quote(root)
+        root = quote(root),
+        prelude = crate::sched::PATH_PRELUDE,
     )
 }
 
@@ -86,6 +90,9 @@ pub fn parse(root: &str, text: &str) -> Probe {
             .filter(|s| get(s).is_some())
             .map(str::to_owned)
             .collect(),
+        queues: get("queues")
+            .map(|v| v.split_whitespace().map(str::to_owned).collect())
+            .unwrap_or_default(),
         root: root.to_owned(),
         root_exists: get("root_exists").is_some(),
         root_writable: get("root_writable").is_some(),

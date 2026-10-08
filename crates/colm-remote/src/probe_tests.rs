@@ -5,7 +5,7 @@ use super::*;
 fn probe_output_is_parsed_and_gaps_are_named() {
     let text = "hostname=T7920\nos=Ubuntu 26.04.1 LTS\narch=x86_64\ncpus=96\nmemory_kb=790000000\n\
 cargo=cargo 1.95.0 (f2d3ce0bd 2026-03-21)\ngfortran=GNU Fortran 15.2.0\nmpi=\ncmake=/usr/bin/cmake\ncc=/usr/bin/cc\n\
-slurm=\npbs=\nlsf=\nroot_exists=\nroot_writable=1\nroot_free_kb=27917287424\n";
+slurm=\npbs=\nlsf=\nqueues=\nroot_exists=\nroot_writable=1\nroot_free_kb=27917287424\n";
     let probe = parse("/media/zhwei/data02/zhwei/colm-desktop", text);
     assert_eq!(probe.hostname, "T7920");
     assert_eq!(probe.cpus, Some(96));
@@ -26,4 +26,10 @@ slurm=\npbs=\nlsf=\nroot_exists=\nroot_writable=1\nroot_free_kb=27917287424\n";
     assert_eq!(bare.schedulers, ["slurm"]);
     assert_eq!(bare.problems.len(), 3, "{:?}", bare.problems);
     assert!(script("/r").contains("R='/r'"));
+    assert!(probe.queues.is_empty());
+    let queues = parse(
+        "/r",
+        "os=Ubuntu\narch=x86_64\nslurm=/usr/bin/sbatch\nqueues=cpu gpu long \n",
+    );
+    assert_eq!(queues.queues, ["cpu", "gpu", "long"]);
 }
