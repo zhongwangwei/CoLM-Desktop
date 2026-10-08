@@ -440,14 +440,96 @@
       <h1>AI 参数化</h1>
       <p class="sub">用训练好的小网络，按每个 patch 的地表与气候特征给出物理参数（例如 Vcmax25），代替查表值。只有 Rust 引擎能运行；不用这一步的算例照常按纯物理运行。</p>
 
-      <div class="card" id="hybrid-card">
-        <h3>本次算例</h3>
-        <div class="ch">下表列出本次的算例：装了哪个模型、检查结果，以及气候特征是否已计算。没有装模型的算例照常按纯物理运行。</div>
-        <div id="hybrid-cases" class="result-table-wrap"></div>
-        <div id="hybrid-check-result"></div>
-        <details class="fold-card hybrid-import">
-          <summary>导入训练好的模型</summary>
-          <div class="ch">装到上表列出的全部算例。支持 ONNX（.onnx）与本软件的原生格式（.mlp.json，参数调优训练出的就是这种）。特征与输出的次序要和训练模型时一致。</div>
+      <div class="flow-pane" data-flow-pane="hybrid">
+        <div class="card" id="hybrid-card">
+          <h3>本次算例</h3>
+          <div class="ch">下表列出本次的算例：装了哪个模型、检查结果，以及气候特征是否已计算。没有装模型的算例照常按纯物理运行。</div>
+          <div id="hybrid-cases" class="result-table-wrap"></div>
+          <div id="hybrid-check-result"></div>
+        </div>
+        <div class="card">
+          <h3>从哪里开始</h3>
+          <div class="hybrid-start">
+            <button class="domain-card" type="button" data-hybrid-go="hybrid-train"><span class="dt">训练一个模型</span><span class="dd">选要学的参数（有预设），用差分进化或两步法按观测训练，结果直接装到算例。</span></button>
+            <button class="domain-card" type="button" data-hybrid-go="hybrid-import"><span class="dt">导入外部模型</span><span class="dd">已经用 Python 或其他工具训练好的 ONNX 或 .mlp.json 模型。</span></button>
+          </div>
+        </div>
+      </div>
+
+      <div class="flow-pane" data-flow-pane="hybrid-train" hidden>
+        <div class="card">
+          <h3>1 · 要学什么</h3>
+          <div class="ch">选一个预设，或者自定义作用方式、输入特征与输出参数。网络按每个 patch 的特征给出所选参数。</div>
+          <div class="domain-cards hybrid-presets" id="hybrid-presets"></div>
+          <details class="fold-card" id="hybrid-custom">
+            <summary>查看或修改设置</summary>
+            <div id="tune-hybrid-form" class="hybrid-form">
+              <label for="tune-hybrid-slot">作用方式</label>
+              <select class="select" id="tune-hybrid-slot">
+                <option value="pft">按植物功能型（PFT/PC 模式）</option>
+                <option value="land_class">按地类（LCT 模式）</option>
+              </select>
+              <label for="tune-hybrid-features">输入特征</label>
+              <div><input class="input" id="tune-hybrid-features" placeholder="pftclass, pftfrac">
+                <p class="muted mini">常数重启里的变量名，用逗号分隔；分层变量写成 名字[层号]，层号从 1 起，例如 porsl[1]。气候特征写 clim_tair、clim_tair_amplitude、clim_prec、clim_swdown、clim_vpd，要先在“概览”里计算。</p></div>
+              <label>输出参数</label>
+              <div><div id="tune-hybrid-outputs"></div><button class="btn-ghost" type="button" id="tune-hybrid-add-output">添加输出</button></div>
+              <label for="tune-hybrid-size">网络规模</label>
+              <select class="select" id="tune-hybrid-size">
+                <option value="linear">线性（权重最少，最好搜）</option>
+                <option value="h4">1 个隐藏层，4 个节点</option>
+                <option value="h8">1 个隐藏层，8 个节点</option>
+              </select>
+              <label>要搜索的权重数</label>
+              <div><b id="tune-hybrid-weight-count">0</b>
+                <p class="warn mini" id="tune-hybrid-weight-warning" hidden>权重数超过了种群大小，差分进化可能搜不动；建议换小一点的网络，或加大种群。</p></div>
+            </div>
+          </details>
+        </div>
+        <div class="card">
+          <h3>2 · 怎么训练</h3>
+          <div class="seg hybrid-method" id="hybrid-method" role="tablist">
+            <button type="button" data-method="de" class="on" aria-pressed="true">差分进化</button>
+            <button type="button" data-method="two-step" aria-pressed="false">两步法</button>
+            <button type="button" data-method="gradient" aria-pressed="false">可微训练</button>
+          </div>
+          <div class="hybrid-method-pane" data-method-pane="de">
+            <p class="ch">网络的权重当作调优参数，用差分进化按观测（GPP、潜热等）直接训练，可以同时调别的参数。基准成员保持纯物理，用来对比；训练好的网络随新算例一起写出。只能用 Rust 引擎；基础算例要先跑完前处理（mkinidata），用来统计特征的标准化。</p>
+            <div class="pill-row">
+              <label class="check"><input type="checkbox" id="tune-hybrid-on"> 参数调优时同时训练这个网络</label>
+              <button class="run-btn" type="button" id="hybrid-go-tuning">去参数调优，选站点与目标 →</button>
+            </div>
+          </div>
+          <div class="hybrid-method-pane" data-method-pane="two-step" hidden>
+            <p class="ch">第一步：每个站点各建一个参数调优任务，率定上面的输出参数（例如 DEF_PFT_VMAX25）。第二步：在这里读各任务的最优参数，拟合“特征 → 参数”的网络，并做留一站交叉验证：网络要胜过“用其余站的均值”才算通过。</p>
+            <div class="hybrid-fit-scan">
+              <label for="hybrid-fit-root">在这个目录里找调优任务</label>
+              <div class="hybrid-inline"><input class="input" id="hybrid-fit-root" placeholder="项目目录"><button class="btn-ghost" type="button" id="hybrid-fit-refresh">查找</button></div>
+            </div>
+            <div id="hybrid-fit-studies" class="result-table-wrap"></div>
+            <div class="hybrid-form hybrid-fit-options">
+              <label for="hybrid-fit-name">模型名</label>
+              <input class="input" id="hybrid-fit-name" value="ai-model" autocomplete="off">
+              <label for="hybrid-fit-ridge">正则强度</label>
+              <div><input class="input mini-input" id="hybrid-fit-ridge" type="number" min="0" step="0.01" value="0.1">
+                <p class="muted mini">线性网络用岭回归直接求解；越大越保守，样本少时建议 0.1–1。有隐藏层时改用 Adam 训练。</p></div>
+              <label for="hybrid-fit-epochs">训练轮数</label>
+              <div><input class="input mini-input" id="hybrid-fit-epochs" type="number" min="1" step="100" value="2000">
+                <p class="muted mini">只对有隐藏层的网络起作用。</p></div>
+            </div>
+            <div class="pill-row"><button class="run-btn" type="button" id="hybrid-fit-run">拟合并做交叉验证</button></div>
+            <div id="hybrid-fit-result"></div>
+          </div>
+          <div class="hybrid-method-pane" data-method-pane="gradient" hidden>
+            <p class="ch">把网络到观测之间的那一段物理（β → 气孔导度 → 光合与蒸腾）写成可微的版本，用观测的 GPP 与 ET 直接求梯度训练，比差分进化快几个数量级、网络也可以更大。正在开发（计划中的 H3），需要先完成过程槽位（H2）。</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="flow-pane" data-flow-pane="hybrid-import" hidden>
+        <div class="card">
+          <h3>导入训练好的模型</h3>
+          <div class="ch">装到本次的全部算例。支持 ONNX（.onnx）与本软件的原生格式（.mlp.json，参数调优或两步法训练出的就是这种）。特征与输出的次序要和训练模型时一致。</div>
           <div class="hybrid-form">
             <label for="hybrid-model-path">模型文件</label>
             <div class="hybrid-inline"><input class="input" id="hybrid-model-path" placeholder="选择 .onnx 或 .mlp.json"><button class="btn-ghost" type="button" id="hybrid-pick-model">选择…</button></div>
@@ -471,17 +553,7 @@
             <label class="check"><input type="checkbox" id="hybrid-force"> 覆盖已有的配置</label>
             <button class="run-btn" type="button" id="hybrid-install">导入</button>
           </div>
-        </details>
-      </div>
-
-      <div class="card">
-        <h3>训练模型</h3>
-        <div class="ch">两种方式都能得到可以在上面导入的模型。</div>
-        <ul class="hybrid-train-list">
-          <li><b>在参数调优里训练</b>：把网络权重当作调优参数，用差分进化按观测直接训练，可以同时调别的参数。训练好的模型随新算例一起写出。</li>
-          <li><b>两步法</b>（命令行 <code>colm-cli hybrid-fit</code>）：先按站点调出最优参数，再拟合“特征 → 参数”的网络，带留一交叉验证和“必须胜过均值预测”的门槛。界面入口还在做。</li>
-        </ul>
-        <div class="pill-row"><button class="btn-ghost" type="button" id="hybrid-go-tuning">去参数调优训练 →</button></div>
+        </div>
       </div>
     </section>
 
@@ -1013,32 +1085,11 @@
             <p><strong>快速判断：</strong>下界 ≤ 0 必须选线性；正值范围的上界/下界约 ≥ 10 时通常优先考虑对数，否则默认线性。对数会均匀覆盖倍数变化，线性会均匀覆盖绝对差值。</p>
           </div>
           <div id="tune-params" class="evaluation-variable-grid"><div class="result-empty">读取后显示可调参数。</div></div>
-          <details class="card fold-card tune-hybrid">
-            <summary>同时训练 AI 参数化（可选）</summary>
-            <div class="ch">差分进化在调参数的同时训练一个小网络：网络按每个 patch 的地表特征给出所选参数，网络的权重就是要搜索的变量。可以不选上面的参数、只训练网络。基准成员保持纯物理，用来对比。只能用 Rust 引擎；基础算例要先跑完前处理（mkinidata），用来统计特征的标准化。</div>
-            <label class="check"><input type="checkbox" id="tune-hybrid-on"> 训练 AI 参数化</label>
-            <div id="tune-hybrid-form" class="hybrid-form" hidden>
-              <label for="tune-hybrid-slot">作用方式</label>
-              <select class="select" id="tune-hybrid-slot">
-                <option value="pft">按植物功能型（PFT/PC 模式）</option>
-                <option value="land_class">按地类（LCT 模式）</option>
-              </select>
-              <label for="tune-hybrid-features">输入特征</label>
-              <div><input class="input" id="tune-hybrid-features" placeholder="pftclass, pftfrac">
-                <p class="muted mini">常数重启里的变量名，用逗号分隔；分层变量写成 名字[层号]，层号从 1 起，例如 porsl[1]。气候特征写 clim_tair、clim_tair_amplitude、clim_prec、clim_swdown、clim_vpd，要先在“AI 参数化”卡片里计算。</p></div>
-              <label>输出参数</label>
-              <div><div id="tune-hybrid-outputs"></div><button class="btn-ghost" type="button" id="tune-hybrid-add-output">添加输出</button></div>
-              <label for="tune-hybrid-size">网络规模</label>
-              <select class="select" id="tune-hybrid-size">
-                <option value="linear">线性（权重最少，最好搜）</option>
-                <option value="h4">1 个隐藏层，4 个节点</option>
-                <option value="h8">1 个隐藏层，8 个节点</option>
-              </select>
-              <label>要搜索的权重数</label>
-              <div><b id="tune-hybrid-weight-count">0</b>
-                <p class="warn mini" id="tune-hybrid-weight-warning" hidden>权重数超过了种群大小，差分进化可能搜不动；建议换小一点的网络，或加大种群。</p></div>
-            </div>
-          </details>
+          <div class="card tune-hybrid-summary" id="tune-hybrid-summary">
+            <h4>AI 参数化</h4>
+            <p class="mini" id="tune-hybrid-summary-text"></p>
+            <div class="pill-row"><button class="btn-ghost" type="button" id="tune-hybrid-edit">在第 3 步设置 →</button></div>
+          </div>
           <label class="check study-range-confirm"><input id="tune-range-confirm" type="checkbox"> 我已检查并负责这些采样范围</label>
         </div>
         <div class="card study-actions study-wizard-step" data-study-wizard="tuning" data-study-step="4" hidden>

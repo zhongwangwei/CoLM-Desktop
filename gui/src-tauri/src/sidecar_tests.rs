@@ -829,3 +829,53 @@ fn hybrid_commands_forward_case_kernel_and_install_options() {
     )
     .is_err());
 }
+
+#[test]
+fn hybrid_fit_arguments_follow_the_request() {
+    let request = FitRequest {
+        studies: vec!["/p/.colm/studies/s-1".into(), "/p/.colm/studies/s-2".into()],
+        network: serde_json::json!({ "slot": "pft" }),
+        kernel_dir: "/k".into(),
+        out_dir: "/p/ai-models".into(),
+        name: "vcmax-climate".into(),
+        ridge: Some(0.1),
+        epochs: None,
+        learning_rate: None,
+        weight: Some("pftfrac".into()),
+    };
+    let args = hybrid_fit_args(
+        &request,
+        "/p/ai-models/vcmax-climate.network.json",
+        "/p/ai-models/vcmax-climate.mlp.json",
+    )
+    .unwrap();
+    assert_eq!(
+        args,
+        [
+            "hybrid-fit",
+            "--studies",
+            "/p/.colm/studies/s-1,/p/.colm/studies/s-2",
+            "--network",
+            "/p/ai-models/vcmax-climate.network.json",
+            "--kernel",
+            "/k",
+            "--out",
+            "/p/ai-models/vcmax-climate.mlp.json",
+            "--ridge",
+            "0.1",
+            "--weight",
+            "pftfrac",
+        ]
+    );
+    // 不许没有 Study，模型名不许带路径。
+    let empty = FitRequest {
+        studies: vec![],
+        ..request.clone()
+    };
+    assert!(hybrid_fit_args(&empty, "n", "m").is_err());
+    let bad = FitRequest {
+        name: "../x".into(),
+        ..request
+    };
+    assert!(hybrid_fit_args(&bad, "n", "m").is_err());
+}

@@ -328,6 +328,88 @@ fn spec_toml(network: &HybridStudySpec) -> String {
     text + "]\n"
 }
 
+/// 项目里的一个调优 Study（两步法的第一步）。
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub(crate) struct StudyEntry {
+    pub dir: String,
+    pub id: String,
+    pub status: String,
+    pub sites: Vec<String>,
+    /// 率定的参数（同名不同下标的合成一个，例如 `DEF_PFT_VMAX25`）。
+    pub parameters: Vec<String>,
+    pub best_member: Option<String>,
+    /// 这个 Study 本身训练了网络（差分进化路线），不能当两步法的第一步。
+    pub trains_network: bool,
+}
+
+/// 在 `root` 下（最多 `depth` 层）找调优 Study：有 `manifest.json` 且 `kind = tuning` 的目录。
+/// 找到 Study 后不再往它里面找；跳过算例的 `out/` 与 `.colm` 以外的隐藏目录（Study 默认在
+/// `<项目>/.colm/studies/` 下）。
+pub(crate) fn find_studies(root: &Path, depth: usize) -> Vec<StudyEntry> {
+    let mut found = Vec::new();
+    let mut stack = vec![(root.to_path_buf(), 0usize)];
+    while let Some((dir, level)) = stack.pop() {
+        if dir.join("manifest.json").is_file() {
+            if let Ok(manifest) = crate::study::engine::status(&dir) {
+                if manifest.spec.kind == crate::study::spec::StudyKind::Tuning {
+                    let state = crate::study::runner::status_state(&dir).ok().flatten();
+                    let mut parameters: Vec<String> = manifest
+                        .spec
+                        .parameters
+                        .iter()
+                        .map(|p| p.name.clone())
+                        .collect();
+                    parameters.sort();
+                    parameters.dedup();
+                    found.push(StudyEntry {
+                        dir: dir.display().to_string(),
+                        id: manifest.id.clone(),
+                        status: state
+                            .as_ref()
+                            .and_then(|s| serde_json::to_value(s.status).ok())
+                            .and_then(|v| v.as_str().map(str::to_owned))
+                            .unwrap_or_else(|| "not started".into()),
+                        sites: manifest.spec.base_cases.clone(),
+                        parameters,
+                        best_member: state.and_then(|s| s.best_member),
+                        trains_network: manifest.spec.hybrid.is_some(),
+                    });
+                }
+            }
+            continue;
+        }
+        if level >= depth {
+            continue;
+        }
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            // Study 默认建在项目的 `.colm/studies/` 下；其余隐藏目录跳过。
+            if (name.starts_with('.') && name != ".colm") || name == "out" || !entry.path().is_dir()
+            {
+                continue;
+            }
+            stack.push((entry.path(), level + 1));
+        }
+    }
+    found.sort_by(|a, b| a.dir.cmp(&b.dir));
+    found
+}
+
+/// `colm-cli hybrid-studies <dir> [--depth N]`：列出可以做两步法第一步的调优 Study（JSON）。
+pub(super) fn cmd_hybrid_studies(opts: &Opts) -> Result<()> {
+    let root = opts.positional_case()?;
+    let depth = opts
+        .get("--depth")
+        .map(|d| d.parse())
+        .transpose()?
+        .unwrap_or(4);
+    println!("{}", serde_json::to_string(&find_studies(&root, depth))?);
+    Ok(())
+}
+
 pub(super) fn cmd_hybrid_fit(opts: &Opts) -> Result<()> {
     let studies: Vec<PathBuf> = opts
         .need_str("--studies")?

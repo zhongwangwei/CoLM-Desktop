@@ -2562,6 +2562,104 @@ pub async fn hybrid_remove(dirs: Vec<String>) -> Result<String, String> {
     Ok(log)
 }
 
+/// 项目里的调优 Study（两步法的第一步），JSON 数组。
+#[tauri::command]
+pub async fn hybrid_studies(root: String) -> Result<String, String> {
+    capture_async(vec!["hybrid-studies".to_string(), root]).await
+}
+
+/// 两步法的拟合选项：线性网络用岭回归闭式解（`ridge`），有隐藏层时用 Adam（`epochs`、`learning_rate`）。
+#[derive(Debug, Default, Clone, serde::Deserialize)]
+pub struct FitRequest {
+    pub studies: Vec<String>,
+    /// 与 Study 的 `hybrid` 段同格式。
+    pub network: serde_json::Value,
+    pub kernel_dir: String,
+    /// 输出目录与名字：写出 `<名字>.mlp.json`、`.norm.json`、`.fit.json` 与 `.network.json`。
+    pub out_dir: String,
+    pub name: String,
+    #[serde(default)]
+    pub ridge: Option<f64>,
+    #[serde(default)]
+    pub epochs: Option<u32>,
+    #[serde(default)]
+    pub learning_rate: Option<f64>,
+    #[serde(default)]
+    pub weight: Option<String>,
+}
+
+pub(crate) fn hybrid_fit_args(
+    request: &FitRequest,
+    network_file: &str,
+    model: &str,
+) -> Result<Vec<String>, String> {
+    if request.studies.is_empty() {
+        return Err("至少选一个调优 Study".into());
+    }
+    if request.name.is_empty()
+        || !request
+            .name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err("模型名只能用字母、数字、- 和 _".into());
+    }
+    let mut args = vec![
+        "hybrid-fit".to_string(),
+        "--studies".into(),
+        request.studies.join(","),
+        "--network".into(),
+        network_file.to_owned(),
+        "--kernel".into(),
+        request.kernel_dir.clone(),
+        "--out".into(),
+        model.to_owned(),
+    ];
+    if let Some(ridge) = request.ridge {
+        args.extend(["--ridge".into(), ridge.to_string()]);
+    }
+    if let Some(epochs) = request.epochs {
+        args.extend(["--epochs".into(), epochs.to_string()]);
+    }
+    if let Some(rate) = request.learning_rate {
+        args.extend(["--learning-rate".into(), rate.to_string()]);
+    }
+    if let Some(weight) = request.weight.as_ref().filter(|w| !w.is_empty()) {
+        args.extend(["--weight".into(), weight.clone()]);
+    }
+    Ok(args)
+}
+
+/// 两步法：在选中的调优 Study 上拟合“特征 → 参数”网络。返回 `.fit.json` 报告（含留一 Study 交叉验证与
+/// 均值基准）和三个文件的路径；不过门槛也照样写出，由界面决定能不能装到算例。
+#[tauri::command]
+pub async fn hybrid_fit(request: FitRequest) -> Result<serde_json::Value, String> {
+    let dir = std::path::PathBuf::from(&request.out_dir);
+    std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let stem = dir.join(&request.name);
+    let network_file = format!("{}.network.json", stem.display());
+    let model = format!("{}.mlp.json", stem.display());
+    let args = hybrid_fit_args(&request, &network_file, &model)?;
+    std::fs::write(
+        &network_file,
+        serde_json::to_string_pretty(&request.network).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| format!("{network_file}: {e}"))?;
+    capture_async(args).await?;
+    let report_file = format!("{}.fit.json", stem.display());
+    let report: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(&report_file).map_err(|e| format!("{report_file}: {e}"))?,
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({
+        "report": report,
+        "model": model,
+        "normalize": format!("{}.norm.json", stem.display()),
+        "network": network_file,
+        "report_file": report_file,
+    }))
+}
+
 pub(crate) async fn capture_async(args: Vec<String>) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || capture(&args))
         .await

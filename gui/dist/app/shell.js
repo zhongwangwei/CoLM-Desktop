@@ -50,8 +50,11 @@ export const WORKFLOW = [
     { id: 'params-urban', page: 'params', t: '城市过程', d: '城市冠层与人为热', need: ready, show: processAvailable('params-urban') },
   ] },
   // AI 参数化在运行前装模型；可选，“下一步”不强制经过它。
-  { n: 3, t: 'AI 参数化', d: '可选：小网络给出物理参数', steps: [
-    { id: 'hybrid', page: 'hybrid', t: 'AI 参数化', d: '可选：导入、检查与训练', need: ready, optional: true },
+  { n: 3, key: 'hybrid', collapsible: true, t: 'AI 参数化', d: '可选：小网络给出物理参数', steps: [
+    { id: 'hybrid', page: 'hybrid', t: '概览', d: '本次算例装了什么模型', need: ready, optional: true },
+    // 两步法只读项目里的调优任务，不需要先选算例。
+    { id: 'hybrid-train', page: 'hybrid', t: '训练', d: '预设、差分进化、两步法', need: () => null, optional: true },
+    { id: 'hybrid-import', page: 'hybrid', t: '导入外部模型', d: 'ONNX 或 .mlp.json', need: ready, optional: true },
   ] },
   { n: 4, t: '运行', d: '输出与运行', steps: [
     { id: 'run', page: 'run', t: '运行算例', d: '输出、阶段与日志', need: ready },

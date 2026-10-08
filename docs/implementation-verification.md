@@ -31929,3 +31929,20 @@ GPP 的均值被 4 个基线 KGE 低于 −0.5 的站拉低（BE-Lon、DE-Geb、
 - `check-gui`（104 个命令）与 15 个前端套件通过。
 - 中途补英文对照时，两条译文里的英文撇号没有转义，把整个 `i18n.js` 弄成了语法错误，7 个套件失败。已改用 ’ 并重跑全部套件；之后用 `node --check` 先查语法。
 - 浏览器静态预览截图确认：左侧显示"3 AI 参数化"，后续顺延为 4–8，页面布局正常。
+
+## 第 639 轮：AI 参数化整理（H1）——训练页、两步法界面、第 7 步只留摘要
+
+**过程**：用户认为第 3 步和第 7 步都有 AI 的东西、比较乱，`hybrid-fit` 也没有界面。按 `docs/design-hybrid.md` 第 14 节的方案做了 H1。
+
+**改动**：
+- `colm-cli hybrid-studies --root DIR`：在目录里（含 `.colm/studies/`）找调优任务，给出状态、站点、调的参数、最优成员、是否训练网络。跳过其他隐藏目录与 `out/`，不进入任务目录内部。
+- Tauri 命令 `hybrid_studies`、`hybrid_fit`：后者把网络设置写成 `<名>.network.json`，调 `hybrid-fit`，读回 `<名>.fit.json`；模型写到 `<项目>/ai-models/`。
+- 第 3 步分成概览、训练、导入三页；训练页有预设卡片（按算例的地表模式默认选中；β 预设在 H2 之前置灰）、三种训练方式切换、两步法的任务列表与拟合结果。交叉验证没通过时"装到本次算例"按钮不可用。
+- 第 7 步原来的表单换成摘要（"训练 N 个权重的网络 / 不训练"）和跳回第 3 步的按钮。
+
+**检查**：
+- 用 `/private/tmp/h4` 里 6 个真实调优任务，经 GUI 同一条参数路径跑 `hybrid-fit`：0.8 s，验证集网络 0.642、均值 0.566，门槛未通过，与第 617 轮的结论一致；界面据此禁用了安装。
+- `cargo test -p colm-cli --bins -- --test-threads=1`：239 项通过（新增 `hybrid_studies_lists_tuning_studies_under_the_project_colm_dir`；测试里的临时目录要 canonicalize，macOS 上 `/var` 与 `/private/var` 不同）。
+- GUI Rust 212 项通过（新增 `hybrid_fit_arguments_follow_the_request`）；`check-gui` 106 个命令全部对上；15 个前端套件通过；两个 workspace 的 clippy 零警告（修了一处 `to_value(&s.status)` 多余借用）、fmt 干净。
+- 踩坑：`hybrid.js` 在导入时访问 DOM，在 node 测试的桩里没有 `classList`/`querySelectorAll`，导致 `domain`、`params-race` 两个套件失败。改为进入训练页时才渲染、用一个委托的点击监听。
+- 浏览器静态预览（1400×900）里用几何量检查：四张预设卡并排、默认选中第一张、β 卡禁用，方法切换与各面板就位，无横向滚动。预览窗口最小化，没有截到图。

@@ -1202,6 +1202,36 @@ mod tests {
         d
     }
 
+    #[test]
+    fn hybrid_studies_lists_tuning_studies_under_the_project_colm_dir() {
+        let root = temp("hybrid-studies").canonicalize().unwrap();
+        let manifest = create(&root, &spec(&root)).unwrap();
+        let study = PathBuf::from(&manifest.root);
+        assert!(
+            study.starts_with(&root),
+            "{} not under {}",
+            study.display(),
+            root.display()
+        );
+        // 不确定性分析不列。
+        assert!(crate::hybrid_fit::find_studies(&root, 4).is_empty());
+        // 改成调优：列出来，带站点、参数与状态。
+        let path = study.join("manifest.json");
+        let mut json: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        json["spec"]["kind"] = serde_json::json!("tuning");
+        fs::write(&path, json.to_string()).unwrap();
+        let found = crate::hybrid_fit::find_studies(&root, 4);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].dir, study.display().to_string());
+        assert_eq!(found[0].sites, ["caseA"]);
+        assert_eq!(found[0].parameters, ["DEF_TUNING_CNFAC"]);
+        assert!(!found[0].trains_network);
+        // 层数不够时找不到（Study 在 <根>/.colm/studies/<id>，第 3 层）。
+        assert!(crate::hybrid_fit::find_studies(&root, 1).is_empty());
+        let _ = fs::remove_dir_all(&root);
+    }
+
     fn spec(root: &Path) -> PathBuf {
         let path = root.join("spec.json");
         let spec = StudySpec {

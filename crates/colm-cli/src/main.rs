@@ -122,6 +122,8 @@ usage:
                    # 两步训练的第二步：读各站调优 Study 的最优参数，在基础算例上取逐行特征，拟合网络；
                    # 两个以上 Study 时做留一站交叉验证，并与“其余站均值”基准比较；不如基准时警告，
                    # 加 --require-gate 1 时报错且不写模型。net.json 与 Study 的 hybrid 段同格式
+  colm-cli hybrid-studies <dir> [--depth N]
+                   # 列出目录下（默认最多 4 层）的调优 Study：状态、站点、率定的参数，供两步法挑选
   colm-cli hybrid-info <case-dir>
                    # 以 JSON 列出算例的混合模型配置与模型校验结果（没有配置时 installed 为 false）
   colm-cli hybrid-remove <case-dir>
@@ -294,6 +296,7 @@ fn main() -> Result<()> {
         "remote-fetch" => remote_cmd::cmd_fetch(&opts)?,
         "hybrid-climate" => hybrid_cmd::cmd_hybrid_climate(&opts)?,
         "hybrid-fit" => hybrid_fit::cmd_hybrid_fit(&opts)?,
+        "hybrid-studies" => hybrid_fit::cmd_hybrid_studies(&opts)?,
         "hybrid-remove" => hybrid_cmd::cmd_hybrid_remove(&opts)?,
         "evaluation-catalog" => {
             cmd_evaluation_catalog(&opts.positional_case()?, &opts.need("--obs")?)?;

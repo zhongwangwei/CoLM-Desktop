@@ -60,4 +60,35 @@ for (const [, id] of source.matchAll(/\$\('([\w-]+)'\)/g)) {
   if (['kernel', 'cases-run', 'model-engine'].includes(id)) continue;
   assert.ok(html.includes(`id="${id}"`), `index.html has no #${id}`);
 }
-console.log('hybrid: slots, outputs, weight counts, study section and page wiring ok');
+// 预设：填出来的设置本身要能通过 Study 段的校验；β 在 H2 之前不可选。
+for (const preset of hybrid.PRESETS.filter(p => p.outputs)) {
+  const section = hybrid.studySection({ slot: preset.slot, features: preset.features, outputs: preset.outputs, size: preset.size });
+  assert.ok(section.outputs.every(o => o.relative), preset.id);
+}
+assert.ok(hybrid.PRESETS.find(p => p.id === 'beta').disabled);
+assert.equal(hybrid.presetForMode('lct'), 'vcmax-lc');
+assert.equal(hybrid.presetForMode('pc'), 'vcmax-pft');
+
+// 两步法的第一步：哪些调优任务能用。
+const study = { status: 'completed', trains_network: false, parameters: ['DEF_PFT_VMAX25'], best_member: 'm000029', sites: ['CA-SF3'] };
+assert.deepEqual(hybrid.studyUsable(study, ['DEF_PFT_VMAX25']), { usable: true, reason: '' });
+assert.equal(hybrid.studyUsable({ ...study, status: 'running' }, ['DEF_PFT_VMAX25']).usable, false);
+assert.equal(hybrid.studyUsable({ ...study, trains_network: true }, ['DEF_PFT_VMAX25']).usable, false);
+assert.match(hybrid.studyUsable(study, ['DEF_PFT_VMAX25', 'DEF_PFT_SLA']).reason, /DEF_PFT_SLA/);
+assert.equal(hybrid.studyUsable({ ...study, status: 'completed_with_failures' }, ['DEF_PFT_VMAX25']).usable, true);
+
+// 拟合报告的摘要（第 617 轮的真实数值）：网络 0.483 不低于基准 0.443，不通过。
+const failed = hybrid.fitSummary({
+  rows: 4300,
+  held_out_rmse: [{ study: '/s/1', rmse: [0.40], mean_predictor_rmse: [0.45] }, { study: '/s/2', rmse: [0.6], mean_predictor_rmse: [0.5] }],
+  validation: { network_rmse: [0.483], mean_predictor_rmse: [0.443], passed: false },
+});
+assert.equal(failed.passed, false);
+assert.deepEqual(failed.rows.map(r => r.better), [true, false]);
+assert.equal(failed.network, 0.483);
+assert.equal(failed.samples, 4300);
+const single = hybrid.fitSummary({ rows: 10, held_out_rmse: [], validation: null });
+assert.equal(single.passed, null);
+assert.equal(hybrid.fitSummary({ held_out_rmse: [], validation: { network_rmse: [0.3, 0.2], mean_predictor_rmse: [0.4, 0.5], passed: true } }).network, 0.25);
+
+console.log('hybrid: slots, outputs, weight counts, study section, presets, two-step fitting and page wiring ok');

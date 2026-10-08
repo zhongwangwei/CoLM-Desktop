@@ -691,6 +691,21 @@ body.resizing-live { user-select: none; }
 #hybrid-cases th, #hybrid-cases td { white-space: nowrap; }
 @media (max-width: 640px) { .hybrid-form { grid-template-columns: 1fr; } }
 .hybrid-form-note { grid-column: 1 / -1; margin: 0; }
+/* 第 3 步：概览的起点卡片、训练页的预设与方法切换、第 7 步的摘要。 */
+.hybrid-start { display: flex; flex-wrap: wrap; gap: var(--s-lg); margin-top: var(--s-md); }
+.hybrid-start .domain-card { width: 260px; }
+.hybrid-presets { justify-content: flex-start; margin-top: var(--s-md); }
+.hybrid-presets .domain-card { width: 200px; }
+#hybrid-custom { margin-top: var(--s-lg); }
+.hybrid-method { margin: var(--s-sm) 0 var(--s-md); }
+.hybrid-method-pane > .ch:first-child { margin-top: 0; }
+.hybrid-fit-scan { display: grid; grid-template-columns: max-content 1fr; gap: 8px 12px; align-items: center; margin: var(--s-md) 0; }
+.hybrid-fit-scan .hybrid-inline { max-width: 640px; }
+#hybrid-fit-studies:empty { display: none; }
+#hybrid-fit-result:not(:empty) { margin-top: var(--s-md); }
+.tune-hybrid-summary { margin-top: var(--s-md); }
+.tune-hybrid-summary h4 { margin: 0 0 4px; }
+@media (max-width: 640px) { .hybrid-fit-scan { grid-template-columns: 1fr; } }
 
 /* AI 助手（assistant.js） */
 .assistant { grid-area: assist; position: relative; min-width: 0; min-height: 0;

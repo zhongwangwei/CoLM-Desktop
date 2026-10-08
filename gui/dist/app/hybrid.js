@@ -1,15 +1,18 @@
 //! AI 参数化（混合模型，docs/design-hybrid.md）：运行页的算例卡片、导入表单，以及参数调优里
 //! “同时训练 AI 参数化”的表单。
 //!
-//! 只依赖 ipc/state/ui/batch/engine：runner.js 与 results.js 都导入它，反过来导入会成环。
+//! 只依赖 ipc/state/ui/batch/shell/engine/i18n：runner.js 与 results.js 都导入它，反过来导入会成环。
 //! 算例上的配置由 `colm-cli hybrid-info` 读出（JSON），这里不解析 TOML。
 
 import { invoke, hasBackend } from './ipc.js';
 import { $, appConfirm, status, baseName } from './ui.js';
+import { state } from './state.js';
 import { batchTarget } from './batch.js';
 import { go } from './shell.js';
 import { modelEngine } from './engine.js';
 import { language, translateZh } from './i18n.js';
+
+const t = text => (language() === 'en' ? translateZh(text) : text);
 
 // ---- 纯函数（tests/hybrid.mjs）----------------------------------------------------------
 
@@ -85,6 +88,58 @@ export function studySection({ slot, features, outputs, size }) {
       name: o.name, range: [o.lo, o.hi], transform: o.transform, ...(o.relative ? { relative: true } : {}),
     })),
     hidden: NETWORK_SIZES[size] ?? [],
+  };
+}
+
+// ---- 训练：预设、两步法 ----------------------------------------------------------------
+
+/** “要学什么”的预设：点一下就把作用方式、特征、输出和网络规模填好。 */
+export const PRESETS = [
+  {
+    id: 'vcmax-pft', title: 'Vcmax25 随气候变化', note: 'PFT/PC 模式 · 按植物功能型 · 乘数 0.5–2',
+    slot: 'pft', features: 'clim_tair, clim_vpd, clim_prec', size: 'linear',
+    outputs: [{ name: 'DEF_PFT_VMAX25', lo: 0.5, hi: 2, transform: 'sigmoid', relative: true }],
+  },
+  {
+    id: 'vcmax-lc', title: '地类 Vcmax25 随气候变化', note: 'LCT 模式 · 按地类 · 乘数 0.5–2',
+    slot: 'land_class', features: 'clim_tair, clim_vpd, clim_prec', size: 'linear',
+    outputs: [{ name: 'DEF_LC_VMAX25', lo: 0.5, hi: 2, transform: 'sigmoid', relative: true }],
+  },
+  { id: 'beta', title: '土壤水分胁迫 β', note: '过程槽位 · 开发中（H2）', disabled: true },
+  { id: 'custom', title: '自定义', note: '自己选作用方式、特征与输出' },
+];
+
+/** 地表模式对应的默认预设。 */
+export function presetForMode(mode) {
+  return mode === 'lct' ? 'vcmax-lc' : 'vcmax-pft';
+}
+
+/** 调优任务能不能用作两步法的第一步：已完成、本身没训练网络、率定了网络的全部输出。 */
+export function studyUsable(study, outputNames) {
+  if (!['completed', 'completed_with_failures'].includes(study.status)) return { usable: false, reason: '还没跑完' };
+  if (study.trains_network) return { usable: false, reason: '这个任务本身在训练网络' };
+  const missing = outputNames.filter(name => !study.parameters.includes(name));
+  if (missing.length) return { usable: false, reason: `没有率定 ${missing.join('、')}` };
+  if (!study.best_member) return { usable: false, reason: '没有最优成员' };
+  return { usable: true, reason: '' };
+}
+
+/** 两步法报告的摘要：每个留出任务一行（网络与均值基准的误差），以及合起来的门槛结论。 */
+export function fitSummary(report) {
+  const mean = values => (Array.isArray(values) && values.length ? values.reduce((a, b) => a + b, 0) / values.length : null);
+  const rows = (report.held_out_rmse ?? []).map(entry => {
+    const network = mean(entry.rmse);
+    const baseline = mean(entry.mean_predictor_rmse);
+    return { study: entry.study, network, baseline, better: network != null && baseline != null && network < baseline };
+  });
+  const validation = report.validation;
+  return {
+    rows,
+    samples: report.rows,
+    network: mean(validation?.network_rmse),
+    baseline: mean(validation?.mean_predictor_rmse),
+    // 只有一个任务时没有交叉验证（null）：能装，但要提醒没有经过检验。
+    passed: validation ? validation.passed === true : null,
   };
 }
 
@@ -407,7 +462,6 @@ export function renderTuneHybridWeights(population) {
   const count = $('tune-hybrid-weight-count');
   if (!count) return;
   const on = $('tune-hybrid-on').checked;
-  $('tune-hybrid-form').hidden = !on;
   const n = weightCount(parseFeatures($('tune-hybrid-features').value).length,
     NETWORK_SIZES[$('tune-hybrid-size').value] ?? [], readOutputs($('tune-hybrid-outputs')).length);
   count.textContent = String(n);
@@ -417,7 +471,13 @@ export function renderTuneHybridWeights(population) {
 /** `onChange` 在表单任何改动后调用（results.js 用它作废已生成的任务并刷新预算）。 */
 export function wireTuneHybrid(onChange) {
   if (!$('tune-hybrid-on')) return;
-  const changed = () => onChange?.();
+  // 表单在第 3 步，摘要在第 7 步：任何改动都要同时作废已生成的调优任务、刷新摘要与两步法的任务列表。
+  const changed = () => {
+    onChange?.();
+    renderTuneSummary();
+    if (studies.length) renderStudies();
+  };
+  tuneChanged = changed;
   const resetOutputs = () => {
     const defaults = slotDefaults($('tune-hybrid-slot').value);
     $('tune-hybrid-features').value = defaults.features;
@@ -440,3 +500,239 @@ export function wireTuneHybrid(onChange) {
 }
 
 wireRunCard();
+
+// ---- 第 3 步 · 训练 ------------------------------------------------------------------------
+
+let selectedPreset = null;
+let fitResult = null;
+
+function caseMode() {
+  const info = batchTarget().map(c => infoCache.get(c.dir)).find(Boolean);
+  return info?.mode ?? (state.subgrid === 'LCT' || ['USGS', 'IGBP'].includes(state.subgrid) ? 'lct' : 'pc');
+}
+
+function renderPresets() {
+  const host = $('hybrid-presets');
+  if (!host) return;
+  host.replaceChildren(...PRESETS.map(preset => {
+    const card = element('button', 'domain-card');
+    card.type = 'button';
+    card.dataset.preset = preset.id;
+    card.setAttribute('aria-selected', String(selectedPreset === preset.id));
+    card.append(element('span', 'dt', preset.title), element('span', 'dd', preset.note));
+    if (preset.disabled) {
+      card.disabled = true;
+      card.className += ' disabled';
+    } else {
+      card.onclick = () => applyPreset(preset.id);
+    }
+    return card;
+  }));
+}
+
+/** 套用预设：填好“查看或修改设置”里的表单；“自定义”只展开表单。 */
+function applyPreset(id) {
+  selectedPreset = id;
+  const preset = PRESETS.find(p => p.id === id);
+  if (preset?.outputs) {
+    $('tune-hybrid-slot').value = preset.slot;
+    $('tune-hybrid-features').value = preset.features;
+    $('tune-hybrid-size').value = preset.size;
+    const host = $('tune-hybrid-outputs');
+    host.replaceChildren();
+    for (const output of preset.outputs) outputRow(host, output, ['sigmoid', 'clamp'], tuneChanged);
+  }
+  $('hybrid-custom').open = id === 'custom';
+  renderPresets();
+  tuneChanged();
+}
+
+function presetTitle() {
+  return PRESETS.find(p => p.id === selectedPreset)?.title ?? '自定义';
+}
+
+function setMethod(method) {
+  for (const b of $('hybrid-method').querySelectorAll('button')) {
+    const on = b.dataset.method === method;
+    b.classList.toggle('on', on);
+    b.setAttribute('aria-pressed', String(on));
+  }
+  for (const pane of document.querySelectorAll('[data-method-pane]')) pane.hidden = pane.dataset.methodPane !== method;
+  if (method === 'two-step' && !$('hybrid-fit-studies').childElementCount) refreshStudies().catch(e => status(e?.message || e));
+}
+
+/** 当前“要学什么”的网络设置（与 Study 的 hybrid 段同格式）；不合法时抛出说明。 */
+function currentNetwork() {
+  return studySection({
+    slot: $('tune-hybrid-slot').value,
+    features: $('tune-hybrid-features').value,
+    outputs: readOutputs($('tune-hybrid-outputs')),
+    size: $('tune-hybrid-size').value,
+  });
+}
+
+let studies = [];
+
+async function refreshStudies() {
+  const root = $('hybrid-fit-root').value.trim() || $('root')?.value?.trim();
+  if (!root) {
+    $('hybrid-fit-studies').replaceChildren(element('div', 'result-empty', '先填项目目录'));
+    return;
+  }
+  $('hybrid-fit-root').value = root;
+  $('hybrid-fit-studies').replaceChildren(element('div', 'result-empty', '正在查找…'));
+  studies = JSON.parse(await invoke('hybrid_studies', { root }));
+  renderStudies();
+}
+
+function renderStudies() {
+  const host = $('hybrid-fit-studies');
+  let names = [];
+  try { names = currentNetwork().outputs.map(o => o.name); } catch { /* 表单还没填好：只列出任务 */ }
+  if (!studies.length) {
+    host.replaceChildren(element('div', 'result-empty', '这个目录里没有参数调优任务。先在第 7 步为每个站点建一个，率定上面的输出参数。'));
+    return;
+  }
+  const table = element('table', 'result-table');
+  const head = element('tr');
+  for (const title of ['', '站点', '率定的参数', '状态', '']) head.appendChild(element('th', '', title));
+  table.appendChild(head);
+  for (const study of studies) {
+    const check = studyUsable(study, names);
+    const row = element('tr');
+    const box = element('input');
+    box.type = 'checkbox';
+    box.dataset.study = study.dir;
+    box.checked = check.usable;
+    box.disabled = !check.usable;
+    const cell = element('td');
+    cell.appendChild(box);
+    row.append(cell, element('td', '', study.sites.join(', ')), element('td', 'mini', study.parameters.join(', ')),
+      element('td', 'mini', study.status), element('td', 'muted mini', check.reason));
+    table.appendChild(row);
+  }
+  const usable = studies.filter(s => studyUsable(s, names).usable).length;
+  host.replaceChildren(element('p', 'mini muted', `找到 ${studies.length} 个调优任务，可用 ${usable} 个。`), table);
+}
+
+function selectedStudies() {
+  return [...$('hybrid-fit-studies').querySelectorAll('input[data-study]:checked')].map(b => b.dataset.study);
+}
+
+async function runFit() {
+  const network = currentNetwork();
+  const chosen = selectedStudies();
+  if (!chosen.length) throw new Error('至少勾选一个可用的调优任务');
+  const root = $('hybrid-fit-root').value.trim();
+  const linear = !network.hidden.length;
+  const request = {
+    studies: chosen,
+    network,
+    kernel_dir: $('kernel').value,
+    out_dir: `${root.replace(/\/+$/, '')}/ai-models`,
+    name: $('hybrid-fit-name').value.trim() || 'ai-model',
+    ridge: linear ? Number($('hybrid-fit-ridge').value) : null,
+    epochs: linear ? null : Number($('hybrid-fit-epochs').value),
+  };
+  const box = $('hybrid-fit-result');
+  box.replaceChildren(element('p', 'mini muted', `正在拟合（${chosen.length} 个任务，每个都要在基础算例上取特征，可能要几分钟）…`));
+  $('hybrid-fit-run').disabled = true;
+  try {
+    fitResult = { ...(await invoke('hybrid_fit', { request })), network };
+    renderFitResult();
+  } finally {
+    $('hybrid-fit-run').disabled = false;
+  }
+}
+
+function fmt(value) {
+  return value == null ? '—' : Number(value).toPrecision(3);
+}
+
+function renderFitResult() {
+  const box = $('hybrid-fit-result');
+  const summary = fitSummary(fitResult.report);
+  const verdict = summary.passed === true
+    ? element('p', 'assistant-key-ok', `✓ 通过：留一站交叉验证误差 ${fmt(summary.network)}，低于均值基准 ${fmt(summary.baseline)}。`)
+    : summary.passed === false
+      ? element('p', 'assistant-fail', `✗ 没通过：网络的留一站误差 ${fmt(summary.network)} 不低于均值基准 ${fmt(summary.baseline)}，到新站点上大概率不如直接用均值。不建议装到算例。`)
+      : element('p', 'warn mini', '只有一个任务，做不了交叉验证；装之前请自己确认效果。');
+  const parts = [verdict, element('p', 'mini muted', `样本 ${summary.samples} 行；模型写在 ${fitResult.model}`)];
+  if (summary.rows.length) {
+    const table = element('table', 'result-table');
+    const head = element('tr');
+    for (const title of ['留出的任务', '网络误差', '均值基准', '']) head.appendChild(element('th', '', title));
+    table.appendChild(head);
+    for (const row of summary.rows) {
+      const tr = element('tr');
+      const study = studies.find(s => s.dir === row.study);
+      tr.append(element('td', '', study ? study.sites.join(', ') : baseName(row.study)), element('td', '', fmt(row.network)),
+        element('td', '', fmt(row.baseline)), element('td', row.better ? 'assistant-key-ok' : 'muted', row.better ? '更好' : '不如'));
+      table.appendChild(tr);
+    }
+    parts.push(table);
+  }
+  const install = element('button', 'run-btn', '装到本次算例');
+  install.type = 'button';
+  install.disabled = summary.passed === false;
+  install.onclick = () => installFitted().catch(e => status(e?.message || e));
+  parts.push(element('div', 'pill-row'));
+  parts.at(-1).appendChild(install);
+  box.replaceChildren(...parts);
+}
+
+async function installFitted() {
+  const dirs = batchTarget().map(c => c.dir);
+  if (!dirs.length) throw new Error('本次还没有算例；先在基本设定里建算例');
+  const { network, model, normalize } = fitResult;
+  const outputs = network.outputs.map(o => outputArg({ name: o.name, lo: o.range[0], hi: o.range[1], transform: o.transform, relative: o.relative }));
+  await invoke('hybrid_install', {
+    dirs, model, slot: network.slot, features: network.features, outputs, normalize, force: true, outsidePhysics: true,
+  });
+  status(dirs.length === 1 ? '已把拟合的模型装到算例' : `已把拟合的模型装到 ${dirs.length} 个算例`);
+  await refreshHybridCard();
+  go('hybrid');
+}
+
+/** 第 7 步只显示一行摘要，设置都在第 3 步。 */
+function renderTuneSummary() {
+  const text = $('tune-hybrid-summary-text');
+  if (!text) return;
+  if (!$('tune-hybrid-on').checked) {
+    text.textContent = t('本次调优不训练 AI 参数化。要训练，请到第 3 步“AI 参数化 → 训练”。');
+    return;
+  }
+  let detail = '';
+  try {
+    const network = currentNetwork();
+    detail = ` · ${t('特征')} ${network.features.join(', ')} · ${t('输出')} ${network.outputs.map(o => o.name).join(', ')}`;
+  } catch (error) {
+    detail = ` · ${String(error?.message || error)}`;
+  }
+  text.textContent = `${t('本次调优同时训练 AI 参数化')}：${t(presetTitle())}${detail}`;
+}
+
+let tuneChanged = () => {};
+
+// 模块加载时不碰 DOM（测试的 DOM 替身很简陋，见第 610 轮）：按钮用窗口上的一个委托点击监听，
+// 预设卡片第一次进训练页时才画。
+function wireTraining() {
+  addEventListener('click', event => {
+    const target = event.target?.closest?.('#hybrid-method [data-method], [data-hybrid-go], #hybrid-fit-refresh, #hybrid-fit-run, #tune-hybrid-edit');
+    if (!target) return;
+    if (target.dataset.method) setMethod(target.dataset.method);
+    else if (target.dataset.hybridGo) go(target.dataset.hybridGo);
+    else if (target.id === 'hybrid-fit-refresh') refreshStudies().catch(e => status(e?.message || e));
+    else if (target.id === 'hybrid-fit-run') {
+      runFit().catch(e => $('hybrid-fit-result').replaceChildren(element('p', 'assistant-fail', String(e?.message || e))));
+    } else if (target.id === 'tune-hybrid-edit') { go('hybrid-train'); setMethod('de'); }
+  });
+  addEventListener('colm:step', () => {
+    if (state.step === 'hybrid-train' && !selectedPreset) applyPreset(presetForMode(caseMode()));
+    else if (state.step === 'hybrid-train' && !$('hybrid-presets').childElementCount) renderPresets();
+    if (state.step === 'hybrid-train' && !$('hybrid-fit-root').value) $('hybrid-fit-root').value = $('root')?.value ?? '';
+    renderTuneSummary();
+  });
+}
+
+wireTraining();

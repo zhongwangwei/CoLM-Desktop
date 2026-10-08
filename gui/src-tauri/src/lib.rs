@@ -168,6 +168,8 @@ pub fn run() {
             assistant_resume,
             assistant_ui_result,
             assistant_backend_status,
+            hybrid_studies,
+            hybrid_fit,
             remote_config,
             remote_save_config,
             remote_ssh_hosts,
