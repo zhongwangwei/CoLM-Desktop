@@ -32192,7 +32192,7 @@ GPP 的均值被 4 个基线 KGE 低于 −0.5 的站拉低（BE-Lon、DE-Geb、
 
 **真正由助手驱动的一次**（同一轮，补做）：用应用里已配置的 DeepSeek（`deepseek-flash`，数据外发已确认过），我充当界面一侧——用 `colm-agent` 的 stdio 协议发一条任务，看每一张工具卡片和审批卡片，逐条批准（每个都是“批准一次”，没有选“本会话都允许”）。任务：新建工作区 `emis2`，把无雪地表发射率 `emg` 从 0.96 改成 0.95（Fortran 与 Rust 两边一起改），编译、跑 `colm-core` 测试（失败就找原因修好再跑）、对 `/tmp/hc/refcase` 做对齐检查与回归，最后汇报。第一轮 24 步，第二轮（补一步回归）2 步。
 - 助手**自己**找到了与手工演示完全相同的三处代码（`MOD_Thermal.F90`、扩展截留路径 `MOD_Thermal_CanopyPhase_Extended.F90`、Rust 的 `ground_emissivity`），还指出“`default` 预设实际编译的是扩展截留那条路径”，并顺手修正了 `ground_temperature.rs` 注释里的行号。
-- `apply_patch` 先后被拒绝 3 次（补丁的 hunk 行号写错：“the patch does not apply to the current files”），每次都没有改任何文件，助手读了报错后重发；第 4 次起成功。`run_tests` 第一次**不通过**（与手工演示同一个原因：`standard_lct_step_tests.rs` 里写死的 0.96），助手读了失败的测试和 `standard_lct_step.rs` 里的一致性检查，补了第二个补丁（`ground_temperature_tests.rs` 加两处夹具），测试通过。
+- `apply_patch` 先后被拒绝 3 次（补丁的 hunk 行号写错：“the patch does not apply to the current files”），每次都没有改任何文件；助手读了报错后重发，第一个补丁被拒 1 次后成功，第二个补丁被拒 2 次后成功。`run_tests` 第一次**不通过**（与手工演示同一个原因：`standard_lct_step_tests.rs` 里写死的 0.96），助手读了失败的测试和 `standard_lct_step.rs` 里的一致性检查，补了第二个补丁（`ground_temperature_tests.rs` 加两处夹具），测试通过。
 - `parity_check`：254 个“变量×文件”逐位一致，与手工结果相同。
 - `regression_check` 第一次失败：我给助手配的基线 `target/debug/colm-cli` 旁边没有 `colm-rs`（只编过 `colm-cli`），工具如实报了清楚的错误（“Rust model engine is missing beside colm-cli”）；助手换了几种办法后用满了单轮 24 步的上限。补齐基线的同伴程序后新开一轮，助手 2 步完成：**通过，166 个变量变了、88 个相同，第一个差异 `f_emis @ step 0`，闭合 4.4677e-16→4.6479e-16 与 3.0672e-10→3.0804e-10，无 NaN**——与手工结果逐项相同。
 - 助手把 `f_xerr`/`f_zerr` 的含义说反了（说成能量/水量；上游 `MOD_Hist.F90:656-664` 是 `f_xerr` 水量 mm/s、`f_zerr` 能量 W/m²）。回归结果里现在每个闭合检查都带 `meaning` 字段，工具描述也写明。
