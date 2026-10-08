@@ -1,6 +1,6 @@
 # AI 助手设计
 
-> 状态：P0、P1 与联网已完成并合入 main（2026-10-08）；引导模式、远程计算与 P2 按第 1 节 2026-10-08 的决定重新排期。设计稿（2026-10-07）。外部接口的事实于 2026-10-07 按官方文档核对，标 **待核实** 的要在装好的版本上实测后再定。
+> 状态：P0、P1、联网、引导模式与外部后端（Codex、Claude Code，第 634 轮）已完成（2026-10-08）；引导模式、远程计算与 P2 按第 1 节 2026-10-08 的决定重新排期。设计稿（2026-10-07）。外部接口的事实于 2026-10-07 按官方文档核对，标 **待核实** 的要在装好的版本上实测后再定。
 
 ## 0. 目标与原则
 
@@ -78,27 +78,24 @@ GUI 助手面板 ──(Tauri 事件)── sidecar.rs ──stdio JSONL── c
 - 默认分工：分析与操作用 `deepseek-flash`；读写代码用 `deepseek-v4-pro`。可在设置里改。
 - 实现上不绑死 DeepSeek：只要是 OpenAI 兼容的服务都能接，填地址、模型和 Key 即可，包括 Qwen、本地的 Ollama 或 vLLM。
 
-### 3.2 Codex
+### 3.2 Codex（第 634 轮已实现并实测，codex-cli 0.160.1，ChatGPT 登录）
 
-- 用 `codex app-server`（stdio 上的 JSON-RPC，消息里省略 `"jsonrpc"` 字段）：
-  - 流程：`initialize`、`initialized`、`thread/start`（带 `cwd`、`approvalPolicy`、`sandbox`），然后 `turn/start`。
-  - 输出：通知 `item/*` 与 `turn/completed` 转成 GUI 事件。
-  - 审批：`item/commandExecution/requestApproval`、`item/fileChange/requestApproval`、`item/permissions/requestApproval` 转到审批中心，按你的决定回复。
-- 挂载 MCP：`-c 'mcp_servers.colm.command="<colm-mcp 路径>"'`，`default_tools_approval_mode = "prompt"`。
-- 沙箱：`workspace-write`，`cwd` 设为开发工作区。
-- 接 DeepSeek：`[model_providers.deepseek]`，`base_url = "https://api.deepseek.com/"`，`wire_api = "responses"`（Codex 现在只支持 Responses API），Key 用 `env_key` 传，不用 `experimental_bearer_token`。
-- 不用 `codex mcp-server`，它已经取消。
-- **待核实**：审批回复的格式。用装好的版本运行 `codex app-server generate-json-schema` 生成后固定下来，并锁定 Codex 版本。
+- 一个 CoLM 会话常驻一个 `codex app-server`（stdio 上的 JSON-RPC，消息不带 `jsonrpc`）：`initialize`、`initialized`、`thread/start`（或续接时 `thread/resume`），每轮 `turn/start`，取消用 `turn/interrupt`。
+- 线程设置：`cwd` 为项目目录，`sandbox = "read-only"`，`approvalPolicy = "on-request"`，CoLM 的领域规则放在 `developerInstructions`。Codex 想写文件或跑越权命令都要申请。
+- 事件：`item/agentMessage/delta` 是回答；`item/reasoning/*Delta` 是思考；`commandExecution`、`fileChange`、`webSearch` 等条目出工具卡片；`turn/completed` 结束一轮。`thread/tokenUsage/updated` 是线程累计值，每轮用差值。
+- 审批：`item/commandExecution/requestApproval`、`item/fileChange/requestApproval`、`item/permissions/requestApproval` 转成面板审批卡片，回答 `accept` / `acceptForSession` / `decline`。调 MCP 工具前 Codex 会发 `mcpServer/elicitation/request`（`_meta.codex_approval_kind = "mcp_tool_call"`）：来自 colm 的自动同意（转发层已按我们的规则把关），其他的拒绝。
+- 挂载 `colm-mcp`：`-c mcp_servers.colm.command=…`，转发地址与令牌经 app-server 的环境变量和 `mcp_servers.colm.env_vars` 交给它，不出现在命令行上。
+- 没用实验性的客户端工具（`dynamicTools`）：要开实验开关，版本一变就可能失效。
+- 条款：OpenAI 的说法是本地或开源应用沿用 app-server 认证可以继续，但商业或托管服务从来不允许；推荐的正规路线是 Sign in with ChatGPT（要先申请客户端 ID），留待以后。
 
-### 3.3 Claude Code
+### 3.3 Claude Code（第 634 轮已实现并实测，2.1.293，Max 订阅）
 
-- 启动命令：`claude --bare -p --output-format stream-json --verbose --include-partial-messages --input-format stream-json --mcp-config <json> --strict-mcp-config --permission-prompt-tool mcp__colm__approve`。
-  - 进程的工作目录设为开发工作区（Claude Code 没有 `--cwd` 参数）。
-- 审批：权限提示转到 `colm-mcp` 的 `approve` 工具。这个工具阻塞等待，直到你在应用里点了批准或拒绝，再返回 allow 或 deny。
-- 健康检查：看流开头 `system/init` 里的 `mcp_servers` 状态；会话号从末尾的 `result` 消息取。
-- 接 DeepSeek：设 `ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic` 和 `ANTHROPIC_AUTH_TOKEN`，DeepSeek 文档有配置说明。注意 Anthropic 官方**不支持**让 Claude Code 跑非 Claude 模型，界面上要说明。
-- 不用 `bypassPermissions` 或 `dontAsk`。
-- **待核实**：`--permission-prompt-tool` 交给工具的参数（推测是 `tool_name` 与 `input`），以及返回值的格式。
+- 每轮启动一次 `claude -p --output-format stream-json --verbose --include-partial-messages`，消息经 stdin 交过去；第一轮 `--session-id <uuid>`，之后 `--resume <uuid>`。进程的工作目录是项目目录。
+- 用订阅登录：不加 `--bare`（它不读订阅登录），并从子进程环境里去掉 `ANTHROPIC_API_KEY`、`ANTHROPIC_AUTH_TOKEN`、`ANTHROPIC_BASE_URL` 等（它们优先于订阅登录）。实测 `apiKeySource: none`。
+- 审批：用户的全局设置可能开了 `auto` 模式或放行规则（实测就是），所以显式 `--permission-mode manual --permission-prompts host --setting-sources project`，并 `--permission-prompt-tool mcp__colm__approve`。审批工具收到 `{tool_name, input, tool_use_id}`，回答 `{"behavior":"allow","updatedInput":…}` 或 `{"behavior":"deny","message":…}`。`mcp__colm__*` 直接放行（转发层已把关）。
+- MCP 配置（含转发令牌）写进只有当前用户可读的临时文件，这一轮结束就删。
+- 事件：`stream_event` 里的 `text_delta`/`thinking_delta` 是回答与思考；`assistant` 里的 `tool_use` 出工具卡片（`mcp__colm__*` 与 `ToolSearch` 不出）；`user` 里的 `tool_result` 是结果；`result` 结束一轮并带用量。
+- 条款：Anthropic 不允许第三方应用提供 Claude.ai 登录、代用户借订阅凭据发请求，或收集、转手凭据；但不妨碍用户用自己的订阅登录未经修改的官方 Claude Code。我们只启动用户自己装的官方程序，不碰凭据，不做登录按钮。把带这个功能的版本发给其他用户算不算“第三方提供”，文档没说清，正式发版前要向 Anthropic 确认。
 
 ### 3.4 OpenCode
 
@@ -267,17 +264,15 @@ GUI 助手面板 ──(Tauri 事件)── sidecar.rs ──stdio JSONL── c
 - 这些工具由 GUI 执行：agent 发出界面请求，GUI 照用户操作的路径改值、派发事件、等结果，再把结果回给 agent。填写与校验用的都是 GUI 自己的逻辑，所以助手建的算例与手动建的完全一样，用户也能随时接手。
 - 后台的 `create_case` 等工具保留，供批量或没有界面时使用。
 
-## 9. MCP 服务 `colm-mcp`
+## 9. MCP 服务 `colm-mcp`（第 634 轮已实现）
 
-- 自行实现精简的 stdio 服务，不引入 `rmcp`。`rmcp` 3.x 要求 Rust 1.88，而本仓库最低支持版本是 1.85.1；何况协议本身很小。
-- 同时支持两代协议：
-  - 新规范（2026-07-28）：实现 `server/discover`，从每个请求的 `_meta` 读协议版本；
-  - 旧规范（2025-11-25 及之前）：回应 `initialize`。
-  - 两代都实现 `tools/list` 与 `tools/call`。
-  - 外部 CLI 用的是哪一代**待核实**，所以两代都要支持。
+- 自行实现精简的 stdio 服务，不引入 `rmcp`（它要求更高的 Rust 版本，而协议本身很小）。
+- 两代协议都支持（规范里的 dual-era）：
+  - 新一代（2026-07-28）：无握手，每个请求在 `_meta` 里带版本；`server/discover` 回 `supportedVersions`、`capabilities`；所有结果带 `resultType: "complete"`，列表结果带 `ttlMs` 与 `cacheScope`，`_meta` 里报出服务端身份；不支持的版本回 `-32022`。Claude Code 2.1.293 用的是这一代，**缺 `resultType`/`ttlMs`/`cacheScope` 时它拿到工具列表也不注册**（实测）。
+  - 旧一代：回应 `initialize`。
+- 从应用里启动时（外部后端挂载），`colm-mcp` 只做转发：经本机回环 TCP、带一次性令牌交回 `colm-agent`，用和内置后端同一处 `execute_tool` 执行，所以审批、审计、联网、操作窗口都一样。
+- 单独启动（`colm-mcp --cli <colm-cli>`，例如在终端的 Claude Code 里挂上）时只提供只读工具，就地执行。
 - stdout 只输出 MCP 消息，日志写 stderr，stdin 关闭即退出。
-- 提供与注册表相同的工具。另有 `approve`，专供 Claude Code 的 `--permission-prompt-tool` 使用。
-- 审批的去向：从应用里启动时，经 agent 转到 GUI；被外部单独启动时（例如你在终端用 Claude Code 连它），B 到 C 级工具在终端里询问，或者直接拒绝，可配置。
 
 ## 10. 分阶段计划与验收
 

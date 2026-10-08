@@ -35,6 +35,12 @@ fn settings_default_to_deepseek_and_only_accept_https_or_loopback() {
             .unwrap();
     assert_eq!(old.approval, "ask");
     assert!(old.web_search);
+    assert_eq!(old.backend, "builtin");
+    let odd_backend = AssistantSettings {
+        backend: "gemini".into(),
+        ..AssistantSettings::default()
+    };
+    assert!(validate_settings(&odd_backend).is_err());
     for (effort, ok) in [
         ("low", true),
         ("high", true),
@@ -56,6 +62,7 @@ fn configure_messages_match_the_agent_protocol_and_carry_no_key() {
         reasoning_effort: Some("max".into()),
         approval: "auto".into(),
         web_search: false,
+        backend: "claude_code".into(),
         ..AssistantSettings::default()
     };
     let message = configure_message(&settings, "/p", Some("/k"), None);
@@ -66,6 +73,7 @@ fn configure_messages_match_the_agent_protocol_and_carry_no_key() {
     assert_eq!(message["approval"], "auto");
     assert_eq!(message["web_search"], false);
     assert_eq!(message["ui"], true);
+    assert_eq!(message["backend"], "claude_code");
     assert_eq!(message["project_root"], "/p");
     assert_eq!(message["kernel_dir"], "/k");
     assert!(message["provider"].get("api_key").is_none());
@@ -96,6 +104,8 @@ mod colm_agent_protocol {
             approval: Option<String>,
             #[serde(default)]
             web_search: bool,
+            #[serde(default)]
+            backend: Option<String>,
         },
     }
 

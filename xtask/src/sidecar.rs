@@ -1,4 +1,4 @@
-//! 把 `colm-cli`、Rust 预处理器、Rust 主循环（`colm-rs`）与 AI 助手（`colm-agent`）暂存到 Tauri 打包要找的位置。
+//! 把 `colm-cli`、Rust 预处理器、Rust 主循环（`colm-rs`）与 AI 助手（`colm-agent` 及外部后端用的 `colm-mcp`）暂存到 Tauri 打包要找的位置。
 //!
 //! Tauri 的 `bundle.externalBin` 要求文件名带**目标三元组**后缀
 //! （`colm-cli-aarch64-apple-darwin`），打包时它按当前目标去找。
@@ -27,6 +27,7 @@ pub fn stage(root: &Path) -> Result<()> {
         ("colm-init", "mkinidata-rs"),
         ("colm-runtime", "colm-rs"),
         ("colm-agent", "colm-agent"),
+        ("colm-agent", "colm-mcp"),
     ] {
         let status = Command::new("cargo")
             .args(["build", "--release", "-p", package, "--bin", binary])
@@ -47,6 +48,7 @@ pub fn stage(root: &Path) -> Result<()> {
         "mkinidata-rs",
         "colm-rs",
         "colm-agent",
+        "colm-mcp",
     ] {
         let src = root.join("target/release").join(format!("{name}{ext}"));
         if !src.is_file() {

@@ -165,6 +165,7 @@ pub fn run() {
             assistant_delete_session,
             assistant_resume,
             assistant_ui_result,
+            assistant_backend_status,
             hybrid_check,
             hybrid_climate,
             hybrid_install,

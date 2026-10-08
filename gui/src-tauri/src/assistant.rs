@@ -48,6 +48,9 @@ pub struct AssistantSettings {
     /// 联网搜索（DeepSeek 原生搜索，用 DeepSeek 的 Key）与读网页。
     #[serde(default = "default_web_search")]
     pub web_search: bool,
+    /// 后端：`builtin`（上面的 API 服务）、`codex`、`claude_code`（用户本机已登录的 CLI）。
+    #[serde(default = "default_backend")]
+    pub backend: String,
     /// 用户已确认过“数据会发给模型服务商”的那个服务地址。
     #[serde(default)]
     pub egress_acknowledged: Option<String>,
@@ -62,6 +65,7 @@ impl Default for AssistantSettings {
             reasoning_effort: None,
             approval: default_approval(),
             web_search: default_web_search(),
+            backend: default_backend(),
             egress_acknowledged: None,
         }
     }
@@ -74,6 +78,12 @@ fn default_approval() -> String {
 fn default_web_search() -> bool {
     true
 }
+
+fn default_backend() -> String {
+    "builtin".into()
+}
+
+const BACKENDS: [&str; 3] = ["builtin", "codex", "claude_code"];
 
 fn settings_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     let dir = app
@@ -139,6 +149,9 @@ pub(crate) fn validate_settings(settings: &AssistantSettings) -> Result<(), Stri
     if settings.model.trim().is_empty() {
         return Err("请填写模型名".into());
     }
+    if !BACKENDS.contains(&settings.backend.as_str()) {
+        return Err(format!("后端只能是 {}", BACKENDS.join("、")));
+    }
     if !matches!(settings.approval.as_str(), "ask" | "auto") {
         return Err("审批方式只能是 ask 或 auto".into());
     }
@@ -200,6 +213,25 @@ async fn session_command(app: &tauri::AppHandle, args: Vec<String>) -> Result<St
             return Err(String::from_utf8_lossy(&output.stderr).trim().to_owned());
         }
         Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// 本机 Codex 与 Claude Code 的安装与登录状态（由 `colm-agent --backend-status` 问 CLI 自己，不读凭据）。
+#[tauri::command]
+pub async fn assistant_backend_status() -> Result<Value, String> {
+    let mut command = std::process::Command::new(agent_path());
+    command.arg("--backend-status");
+    colm_kernel::run::no_console(&mut command);
+    tauri::async_runtime::spawn_blocking(move || {
+        let output = command
+            .output()
+            .map_err(|e| format!("cannot start {}: {e}", agent_path().display()))?;
+        if !output.status.success() {
+            return Err(String::from_utf8_lossy(&output.stderr).trim().to_owned());
+        }
+        serde_json::from_slice(&output.stdout).map_err(|e| e.to_string())
     })
     .await
     .map_err(|e| e.to_string())?
@@ -350,6 +382,7 @@ pub(crate) fn configure_message(
         },
         "approval": settings.approval,
         "web_search": settings.web_search,
+        "backend": settings.backend,
         // 窗口能被助手驱动（引导模式）。
         "ui": true,
         "project_root": project_root,

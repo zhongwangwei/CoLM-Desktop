@@ -88,6 +88,20 @@ impl Session {
         Ok(())
     }
 
+    /// 记下外部后端的会话号（续接历史对话时接着用它）。会话已落盘时才写。
+    pub fn save_backend(&self, kind: crate::backend::BackendKind, id: &str) -> Result<()> {
+        let Some(dir) = self
+            .dir
+            .as_ref()
+            .filter(|d| d.join("messages.jsonl").exists())
+        else {
+            return Ok(());
+        };
+        let path = dir.join("backend.json");
+        std::fs::write(&path, json!({ "kind": kind, "id": id }).to_string())
+            .with_context(|| format!("cannot write {}", path.display()))
+    }
+
     pub fn audit(&self, event: &Outbound) -> Result<()> {
         // 流式增量太碎，审计里不记；其余事件都记。
         if matches!(
@@ -280,6 +294,17 @@ pub fn transcript(data_dir: &Path, id: &str) -> Result<Vec<TranscriptItem>> {
         }
     }
     Ok(items)
+}
+
+/// 一个历史会话用过的外部后端及其会话号。
+pub fn backend_of(data_dir: &Path, id: &str) -> Option<(crate::backend::BackendKind, String)> {
+    let dir = session_dir(data_dir, id).ok()?;
+    let saved: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("backend.json")).ok()?).ok()?;
+    Some((
+        serde_json::from_value(saved["kind"].clone()).ok()?,
+        saved["id"].as_str()?.to_owned(),
+    ))
 }
 
 /// 这个会话存过吗（开了还没说话的会话没有存）。

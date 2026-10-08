@@ -31753,3 +31753,60 @@ GPP 的均值被 4 个基线 KGE 低于 −0.5 的站拉低（BE-Lon、DE-Geb、
 - 卡片上的"在工作台打开这个算例"按钮照旧可用。
 
 **检查**：`assistant.mjs` 新增五条判断；`check-gui` 与 14 个前端套件通过。
+
+## 第 634 轮：外部后端——用订阅版的 Codex 与 Claude Code
+
+**过程**：用户要求两个都接，并且放在远程 R1 之前。先核实条款：
+
+- Anthropic 的法律与合规页：不允许第三方应用提供 Claude.ai 登录、代用户借订阅凭据发请求，或收集、转手凭据；但"不妨碍用户用自己的订阅登录未经修改的 Claude Code"。
+- OpenAI 关于 app-server 的说法（出自搜索结果）：本地或开源应用沿用 app-server 认证可以继续，但商业或托管服务从来不允许；推荐改用 Sign in with ChatGPT。
+
+两个 CLI 本机都已登录：
+- `claude auth status`：`authMethod: claude.ai`，`subscriptionType: max`；
+- `codex login status`：Logged in using ChatGPT。
+
+**实测要点**（有些与原设计的推测不同）：
+
+1. Claude Code 2.1.293 用的是新一代 MCP：先发 `server/discover`，请求带 `_meta` 版本 2026-07-28。第一版 `colm-mcp` 的结果缺新规范必需的 `resultType`、`ttlMs`、`cacheScope`。Claude Code 照样调了 4 次 `tools/list`，但一个工具也不注册，模型报"找不到 colm 的工具"。按规范补齐后，13 个工具全部注册，`list_cases` 调用成功。
+2. Claude Code 的审批：用户的全局设置是 `auto` 模式，实测写文件直接放行、审批工具一次都没调用。改为显式 `--permission-mode manual --permission-prompts host --setting-sources project` 后，审批工具收到 `{"tool_name":"Write","input":{…},"tool_use_id":"toolu_…"}`；回答 `{"behavior":"allow","updatedInput":…}` 后文件写成。
+3. Claude Code 用的是订阅登录：init 事件里 `apiKeySource: none`。不能加 `--bare`。
+4. Codex 0.160.1：
+   - `app-server` 加 `-c mcp_servers.colm.*` 挂上 `colm-mcp`；
+   - 调 MCP 工具前发 `mcpServer/elicitation/request`（`codex_approval_kind: mcp_tool_call`）；
+   - 在 `workspace-write` 沙箱里写工作目录不需要审批，所以应用里改用 `read-only` 沙箱；
+   - 用量通知是线程累计值。
+5. Codex 的"客户端自带工具"（`dynamicTools`）只出现在 `--experimental` schema 里，不用。
+
+**现状**：
+- `colm-agent` 新增四块：
+  - `mcp.rs`：两代都支持的 MCP 服务端；
+  - `bridge.rs`：127.0.0.1 随机端口，一次性 128 位令牌，令牌不对就断开；
+  - `bin/colm-mcp`：从应用启动时只做转发，单独启动时只提供只读工具；
+  - `backend/`：`claude.rs`、`codex.rs`，以及找 CLI（补上 Finder 启动时缺的 PATH）和查询状态（`--backend-status`）。
+- 工具执行抽成 `agent::execute_tool`，内置后端和转发层共用。
+- 外部后端的每一轮：
+  - CoLM 工具经转发层执行；CLI 自己的动作（命令、改文件）走面板审批，可选"本会话都允许"，代码类动作不受"自动执行"影响；
+  - 会话照常保存，外部会话号存在会话目录的 `backend.json`，续接历史对话时用它；
+  - 面板头部显示 "Codex" / "Claude Code"。
+- GUI：
+  - 设置新增"后端"选项，下方显示安装与登录状态（例如"✓ 已登录 · max 订阅 · 2.1.293"）；
+  - 外部后端不要求 API Key，但发送前检查是否已装、已登录；
+  - 外发确认按"发给谁"分别记录；
+  - 外部后端下，输入框下方的思考强度灰掉。
+- 打包：`colm-mcp` 加入 sidecar 暂存与 `externalBin`。
+
+**检查**：
+- 按 GUI 的协议直接驱动 release 版 `colm-agent`，同一组两轮对话：先调 `list_cases` 再写 `note.txt`，第二轮问"我上一句问了什么"。
+
+| 后端 | 第一轮 | 第二轮 |
+|---|---|---|
+| Claude Code | `list_cases` 出卡片并返回 4 个算例；`Write` 出卡片和审批，批准后写成；11.0 秒 | 准确复述上一句，`--resume` 生效 |
+| Codex | `list_cases` 出卡片；`printf hi > note.txt` 在只读沙箱下申请审批，批准后执行；`cat note.txt` 不问；22.8 秒 | 准确复述上一句 |
+
+  第一次跑 Claude Code 时，`mcp__colm__list_cases` 也被要求审批，已改为 `mcp__colm__*` 直接放行。
+- colm-agent 45 项测试通过，新增：
+  - MCP 两代协议，包括新一代必需字段与 `-32022`；
+  - 转发口的令牌校验；
+  - 两个后端的事件转换（用实测录下的消息）、审批答复、UUID 格式；
+  - 每轮用量差值、临时文件权限 0600、外部会话号的保存与读回。
+- GUI Rust 208 项、xtask 测试通过；`check-gui`（96 个命令全部能解析）与 14 个前端套件通过；两个 workspace 的 clippy 零警告、fmt 干净。

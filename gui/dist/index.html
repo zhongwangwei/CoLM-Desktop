@@ -1113,6 +1113,13 @@
     </div>
     <div class="assistant-history" id="assistant-history" hidden></div>
     <div class="assistant-settings" id="assistant-settings" hidden>
+      <label for="assistant-backend">后端</label>
+      <select class="select" id="assistant-backend">
+        <option value="builtin">内置（DeepSeek 或其他 API 服务）</option>
+        <option value="codex">Codex（用你的 ChatGPT 订阅）</option>
+        <option value="claude_code">Claude Code（用你的 Claude 订阅）</option>
+      </select>
+      <p class="mini muted" id="assistant-backend-status"></p>
       <label for="assistant-base">服务地址</label>
       <input class="input" id="assistant-base" placeholder="https://api.deepseek.com">
       <label for="assistant-model-name">模型</label>

@@ -95,6 +95,19 @@ fn sessions_are_written_on_the_first_message_and_can_be_resumed() {
     assert_eq!(again.history.len(), session.history.len() + 1);
     assert_eq!(list(&root).unwrap()[0].turns, 2);
 
+    // 外部后端的会话号随会话保存，续接时读回。
+    assert!(backend_of(&root, &session.id).is_none());
+    again
+        .save_backend(crate::backend::BackendKind::ClaudeCode, "4844562a-80d3")
+        .unwrap();
+    assert_eq!(
+        backend_of(&root, &session.id),
+        Some((
+            crate::backend::BackendKind::ClaudeCode,
+            "4844562a-80d3".to_owned()
+        ))
+    );
+
     delete(&root, &session.id).unwrap();
     assert!(list(&root).unwrap().is_empty());
     let _ = std::fs::remove_dir_all(&root);

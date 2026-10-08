@@ -326,6 +326,8 @@ async function loadSettings() {
   $('assistant-think').value = thinkValue(settings);
   $('assistant-approval').value = settings.approval || 'ask';
   $('assistant-web').value = settings.web_search === false ? 'off' : 'on';
+  $('assistant-backend').value = settings.backend || 'builtin';
+  refreshBackendStatus().catch(e => status(e));
   await refreshKeyStatus(settings.base_url);
   return settings;
 }
@@ -348,6 +350,41 @@ async function changeThink() {
   ui.started = false; // 下一条消息发出前重新配置
 }
 
+/** 外部后端缺了什么（没装、没登录）；齐了返回 null。 */
+export function backendProblem(backend, info) {
+  const external = EXTERNAL[backend];
+  if (!external) return null;
+  if (!info?.installed) return t(external.missing);
+  if (!info.logged_in) return t(external.loggedOut);
+  return null;
+}
+
+/** 设置里“后端”下面的一行状态；返回那个后端的状态（内置后端返回 null）。 */
+async function refreshBackendStatus(backend = $('assistant-backend').value) {
+  const line = $('assistant-backend-status');
+  // 输入框下的思考强度只对内置后端起作用；外部后端由它自己决定。
+  $('assistant-think').disabled = backend !== 'builtin';
+  $('assistant-think').title = t(backend === 'builtin' ? '思考强度：随时可改，下一条消息生效' : '思考强度由 Codex / Claude Code 自己决定');
+  if (backend === 'builtin') {
+    line.textContent = t('使用下面的服务地址、模型与 API Key。');
+    line.className = 'mini muted';
+    return null;
+  }
+  line.textContent = t('正在检查…');
+  const status = await invoke('assistant_backend_status').catch(e => ({ error: String(e?.message || e) }));
+  const info = status?.[backend];
+  const problem = status?.error ?? backendProblem(backend, info);
+  if (problem) {
+    line.textContent = problem;
+    line.className = 'mini assistant-fail';
+  } else {
+    const plan = info.subscription ? `${info.subscription} ${t('订阅')}` : (info.auth_method || '');
+    line.textContent = `✓ ${t('已登录')}${plan ? ` · ${plan}` : ''} · ${info.version || ''}`;
+    line.className = 'mini assistant-key-ok';
+  }
+  return info;
+}
+
 async function refreshKeyStatus(baseUrl) {
   const has = await invoke('assistant_has_key', { baseUrl }).catch(() => false);
   const line = $('assistant-key-status');
@@ -366,6 +403,7 @@ function formSettings(previous) {
     ...thinkSettings($('assistant-think').value),
     approval: $('assistant-approval').value || 'ask',
     web_search: $('assistant-web').value !== 'off',
+    backend: $('assistant-backend').value || 'builtin',
     egress_acknowledged: previous?.egress_acknowledged ?? null,
   };
 }
@@ -400,13 +438,32 @@ function projectRoot(view) {
 }
 
 /** 第一次向某个服务发送前，在面板里问一次数据外发（不用 window.confirm：桌面窗口里弹不出来）。 */
-function askConsent(baseUrl) {
+/** 外部后端的说明：数据发给谁、用量算在哪。 */
+const EXTERNAL = {
+  codex: {
+    consent: '发送后，你的问题、算例配置、指标与日志片段会经你本机的 Codex 发给 OpenAI，用量计入你的 ChatGPT 订阅。',
+    missing: '本机没有找到 Codex：请先安装它，然后在终端运行 codex login 登录。',
+    loggedOut: 'Codex 还没有登录：请在终端运行 codex login 登录。',
+  },
+  claude_code: {
+    consent: '发送后，你的问题、算例配置、指标与日志片段会经你本机的 Claude Code 发给 Anthropic，用量计入你的 Claude 订阅。',
+    missing: '本机没有找到 Claude Code：请先安装它，然后在终端运行 claude 并登录。',
+    loggedOut: 'Claude Code 还没有登录：请在终端运行 claude 并登录。',
+  },
+};
+
+function askConsent(target) {
   return new Promise(resolve => {
     const card = element('div', 'assistant-consent');
+    const external = EXTERNAL[target];
     card.append(
       element('div', 'assistant-approval-title', '发送前请确认'),
-      element('p', 'mini', '发送后，你的问题、算例配置、指标与日志片段会发给这个模型服务：'),
-      element('p', 'mini assistant-consent-url', baseUrl),
+      ...(external
+        ? [element('p', 'mini', external.consent)]
+        : [
+          element('p', 'mini', '发送后，你的问题、算例配置、指标与日志片段会发给这个模型服务：'),
+          element('p', 'mini assistant-consent-url', target),
+        ]),
       element('p', 'muted mini', '换用本机的模型（例如 Ollama）可以避免数据外发。只需确认一次。'),
     );
     const ok = element('button', 'run-btn', '同意并发送');
@@ -427,13 +484,25 @@ function askConsent(baseUrl) {
 
 async function ensureStarted() {
   let settings = await invoke('assistant_settings');
-  if (!(await refreshKeyStatus(settings.base_url))) {
-    $('assistant-settings').hidden = false;
-    throw new Error(t('请先在设置里保存 API Key。'));
+  const backend = settings.backend || 'builtin';
+  if (backend === 'builtin') {
+    if (!(await refreshKeyStatus(settings.base_url))) {
+      $('assistant-settings').hidden = false;
+      throw new Error(t('请先在设置里保存 API Key。'));
+    }
+  } else {
+    const info = await refreshBackendStatus(backend);
+    const problem = backendProblem(backend, info);
+    if (problem) {
+      $('assistant-settings').hidden = false;
+      throw new Error(problem);
+    }
   }
-  if (settings.egress_acknowledged !== settings.base_url) {
-    if (!(await askConsent(settings.base_url))) throw new Error(t('已取消发送'));
-    settings = { ...settings, egress_acknowledged: settings.base_url };
+  // 外发确认按“发给谁”记：API 服务按地址，外部后端按后端名。
+  const target = backend === 'builtin' ? settings.base_url : backend;
+  if (settings.egress_acknowledged !== target) {
+    if (!(await askConsent(target))) throw new Error(t('已取消发送'));
+    settings = { ...settings, egress_acknowledged: target };
     await invoke('assistant_save_settings', { settings });
   }
   if (!ui.started) {
@@ -687,6 +756,7 @@ function wire() {
   $('assistant-history-btn').onclick = () => showHistory().catch(e => notice(String(e?.message || e)));
   // 回车发送，Shift + 回车换行；输入法选词时的回车（isComposing / keyCode 229）不发送。
   $('assistant-think').addEventListener('change', () => changeThink().catch(e => status(e?.message || e)));
+  $('assistant-backend').addEventListener('change', () => refreshBackendStatus().catch(e => status(e)));
   $('assistant-text').addEventListener('keydown', event => {
     if (event.key !== 'Enter' || event.shiftKey || event.isComposing || event.keyCode === 229) return;
     event.preventDefault();

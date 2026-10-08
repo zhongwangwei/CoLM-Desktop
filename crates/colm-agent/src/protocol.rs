@@ -36,6 +36,9 @@ pub enum Inbound {
         /// GUI 能被驱动（引导模式的 `ui_*` 工具）。
         #[serde(default)]
         ui: bool,
+        /// 用哪个后端回答：内置（默认）、用户本机的 Codex 或 Claude Code。
+        #[serde(default)]
+        backend: crate::backend::BackendKind,
     },
     /// 用户的一条消息；`context` 是界面自动附上的当前页面信息（选中的算例、Study 等）。
     UserMessage {

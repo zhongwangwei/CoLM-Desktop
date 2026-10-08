@@ -96,3 +96,9 @@ assert.equal(assistant.shouldOpenCreatedCase({ name: 'create_case', replay: true
 assert.equal(assistant.shouldOpenCreatedCase({ name: 'create_case' }, '/c/a', '/c/a'), false);
 assert.equal(assistant.shouldOpenCreatedCase({ name: 'set_case_fields' }, '/c/a', null), false);
 assert.equal(assistant.shouldOpenCreatedCase({ name: 'create_case' }, null, null), false);
+
+// 外部后端缺什么：没装、没登录、齐了。
+assert.match(assistant.backendProblem('codex', { installed: false }), /没有找到 Codex/);
+assert.match(assistant.backendProblem('claude_code', { installed: true, logged_in: false }), /Claude Code 还没有登录/);
+assert.equal(assistant.backendProblem('claude_code', { installed: true, logged_in: true }), null);
+assert.equal(assistant.backendProblem('builtin', null), null);

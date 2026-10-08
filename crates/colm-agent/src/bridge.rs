@@ -33,17 +33,23 @@ pub struct BridgeServer {
     pub token: String,
 }
 
-/// 128 位随机令牌（标准库的 `RandomState` 每次用系统随机数播种）。
+/// `len` 个十六进制字符的随机串（标准库的 `RandomState` 每次用系统随机数播种）。
+pub fn random_hex(len: usize) -> String {
+    let mut out = String::new();
+    let mut i = 0u32;
+    while out.len() < len {
+        let mut hasher = RandomState::new().build_hasher();
+        hasher.write_u32(i);
+        out.push_str(&format!("{:016x}", hasher.finish()));
+        i += 1;
+    }
+    out.truncate(len);
+    out
+}
+
+/// 128 位随机令牌。
 fn random_token() -> String {
-    (0..4)
-        .map(|i| {
-            let mut hasher = RandomState::new().build_hasher();
-            hasher.write_u32(i);
-            format!("{:016x}", hasher.finish())
-        })
-        .collect::<Vec<_>>()
-        .join("")[..32]
-        .to_owned()
+    random_hex(32)
 }
 
 /// 在 127.0.0.1 的随机端口上开始监听；每个连接一个线程，按行处理请求。
