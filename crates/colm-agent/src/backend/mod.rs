@@ -32,6 +32,33 @@ pub enum BackendKind {
     ClaudeCode,
 }
 
+/// 外部后端的模型与思考强度；`None` 用它自己的默认。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExternalChoice {
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub effort: Option<String>,
+}
+
+impl ExternalChoice {
+    /// 去掉空值与可能被 CLI 当成选项的值（以 `-` 开头或含空白）。
+    pub fn cleaned(&self) -> Self {
+        let keep = |v: &Option<String>| {
+            v.as_deref()
+                .map(str::trim)
+                .filter(|v| {
+                    !v.is_empty() && !v.starts_with('-') && !v.contains(char::is_whitespace)
+                })
+                .map(str::to_owned)
+        };
+        Self {
+            model: keep(&self.model),
+            effort: keep(&self.effort),
+        }
+    }
+}
+
 /// 一轮里外部后端要用到的回调：发事件给界面、请用户审批。
 pub trait TurnSink {
     fn emit(&mut self, event: Outbound);
@@ -69,6 +96,8 @@ pub trait ExternalSession: Send {
         sink: &mut dyn TurnSink,
         cancel: &AtomicBool,
     ) -> Result<ExternalOutcome>;
+    /// 换模型或思考强度，从下一轮起生效。
+    fn set_choice(&mut self, choice: ExternalChoice);
     /// 续接用的会话号（Codex 的 thread id、Claude Code 的 session id）。
     fn resume_id(&self) -> Option<String>;
 }

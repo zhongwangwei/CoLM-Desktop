@@ -168,6 +168,7 @@ pub fn run() {
             assistant_resume,
             assistant_ui_result,
             assistant_backend_status,
+            assistant::assistant_codex_models,
             hybrid_studies,
             hybrid_fit,
             remote_config,

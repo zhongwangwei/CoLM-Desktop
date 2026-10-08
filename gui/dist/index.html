@@ -1199,6 +1199,9 @@
         <option value="claude_code">Claude Code（用你的 Claude 订阅）</option>
       </select>
       <p class="mini muted" id="assistant-backend-status"></p>
+      <label data-backend-only="codex claude_code" for="assistant-ext-model">模型</label>
+      <select data-backend-only="codex claude_code" class="select" id="assistant-ext-model"></select>
+      <p data-backend-only="codex claude_code" class="muted mini">思考强度在输入框下面随时可改。选“默认”时用 Codex / Claude Code 自己的设置。</p>
       <label data-backend-only="builtin" for="assistant-base">服务地址</label>
       <input data-backend-only="builtin" class="input" id="assistant-base" placeholder="https://api.deepseek.com">
       <label data-backend-only="builtin" for="assistant-model-name">模型</label>
@@ -1244,10 +1247,6 @@
       <div class="assistant-input-row">
         <select class="select assistant-think" id="assistant-think" title="思考强度：随时可改，下一条消息生效" aria-label="思考强度">
           <option value="">思考：默认</option>
-          <option value="low">思考：low</option>
-          <option value="high">思考：high</option>
-          <option value="max">思考：max</option>
-          <option value="off">不思考</option>
         </select>
         <span class="muted mini" id="assistant-usage"></span>
         <button class="btn-ghost" type="button" id="assistant-stop" disabled>停止</button>

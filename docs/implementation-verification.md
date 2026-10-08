@@ -31946,3 +31946,21 @@ GPP 的均值被 4 个基线 KGE 低于 −0.5 的站拉低（BE-Lon、DE-Geb、
 - GUI Rust 212 项通过（新增 `hybrid_fit_arguments_follow_the_request`）；`check-gui` 106 个命令全部对上；15 个前端套件通过；两个 workspace 的 clippy 零警告（修了一处 `to_value(&s.status)` 多余借用）、fmt 干净。
 - 踩坑：`hybrid.js` 在导入时访问 DOM，在 node 测试的桩里没有 `classList`/`querySelectorAll`，导致 `domain`、`params-race` 两个套件失败。改为进入训练页时才渲染、用一个委托的点击监听。
 - 浏览器静态预览（1400×900）里用几何量检查：四张预设卡并排、默认选中第一张、β 卡禁用，方法切换与各面板就位，无横向滚动。预览窗口最小化，没有截到图。
+
+## 第 640 轮：Codex 与 Claude Code 可以选模型与思考强度
+
+**过程**：用户指出选了 Codex 或 Claude Code 后，模型和思考强度都没法选（输入框下的思考选框对外部后端是禁用的）。
+
+**做法**：
+- Claude Code 每轮启动 `claude -p`，按选择加 `--model`、`--effort`。2.1.293 的 `--effort` 可选 low / medium / high / xhigh / max；模型给别名 fable / opus / sonnet / haiku。
+- Codex 的模型清单由 app-server 的 `model/list` 实时给出，每个模型带自己支持的强度与默认强度（本机 codex-cli 0.160.1 返回 gpt-6.1-sol、gpt-6-astra 等）。新加 `colm-agent --codex-models`，GUI 用它填模型选框。
+- Codex 的 `turn/start` 带 `model`、`effort`，且这一覆盖会沿用到后面的轮次。所以每轮都给具体值：选“默认”时落到清单里的默认模型和它的默认强度，否则从“选过 astra”换回“默认”不会生效。所选强度那个模型不支持时，用它的默认强度。
+- 协议的 `configure` 加了 `external {model, effort}`；设置文件按后端各存一份（`external.codex`、`external.claude_code`），互不覆盖。以 `-` 开头或含空白的值在 GUI 校验和 agent 两边都挡掉，免得被 CLI 当成选项。
+- 设置面板里外部后端显示“模型”选框；输入框下的思考选框对三种后端都可用，选项随后端（Codex 还随所选模型）变。面板头部显示“Codex · gpt-6-astra”这类名字。
+
+**实测**（直接驱动 `colm-agent`，用户本机的订阅登录）：
+- Claude Code：选 haiku/low 时回答自称 `claude-haiku-5-5`；选默认时为 `claude-opus-5-5`；选 sonnet/xhigh 时，`ps` 里看到的子进程参数含 `--model sonnet --effort xhigh`，回答自称 `claude-sonnet-5-5`。
+- Codex：模型自报分辨不出型号，改查 Codex 自己的会话记录（`~/.codex/sessions/…jsonl` 的 `turn_context`）。选 gpt-6-astra/medium 时记为 `gpt-6-astra medium`；选默认时记为 `gpt-6.1-sol low`。
+- `colm-agent --codex-models` 用时约 1 s。
+
+**检查**：colm-agent 48 项通过（新增 Codex 的选择落地与模型摘要、Claude 的参数生成）；GUI Rust 212 项通过（设置校验、configure 只带当前后端那一份）；`check-gui` 107 个命令全部对上；15 个前端套件通过（新增模型与强度选项、按后端存取）；两个 workspace 的 clippy 与 fmt 干净。

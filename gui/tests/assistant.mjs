@@ -78,6 +78,33 @@ assert.equal(assistant.thinkValue({ thinking: true, reasoning_effort: null }), '
 assert.deepEqual(assistant.thinkSettings('off'), { thinking: false, reasoning_effort: null });
 assert.deepEqual(assistant.thinkSettings('max'), { thinking: null, reasoning_effort: 'max' });
 assert.deepEqual(assistant.thinkSettings(''), { thinking: null, reasoning_effort: null });
+
+// 外部后端的模型与思考强度（Codex 的清单来自 model/list，形状同 colm-agent --codex-models）。
+const codex = [
+  { id: 'gpt-6.1-sol', name: 'GPT-6.1-Sol', efforts: ['low', 'high', 'max'], default_effort: 'low', default: true },
+  { id: 'gpt-6-astra', name: 'GPT-6-Astra', efforts: ['medium', 'xhigh'], default_effort: 'medium', default: false },
+];
+assert.deepEqual(assistant.modelOptions('codex', codex).map(o => o[0]), ['', 'gpt-6.1-sol', 'gpt-6-astra']);
+assert.equal(assistant.modelOptions('codex', codex)[0][1], '默认（GPT-6.1-Sol）');
+assert.deepEqual(assistant.modelOptions('codex', []), [['', '默认']]);
+assert.deepEqual(assistant.modelOptions('claude_code').map(o => o[0]), ['', 'fable', 'opus', 'sonnet', 'haiku']);
+const values = options => options.map(o => o[0]);
+assert.deepEqual(values(assistant.thinkOptions('builtin')), ['', 'low', 'high', 'max', 'off']);
+assert.deepEqual(values(assistant.thinkOptions('claude_code', 'opus')), ['', 'low', 'medium', 'high', 'xhigh', 'max']);
+// Codex：强度随模型；没选模型用默认模型的；取不到清单给四档。
+assert.deepEqual(values(assistant.thinkOptions('codex', '', codex)), ['', 'low', 'high', 'max']);
+assert.equal(assistant.thinkOptions('codex', '', codex)[0][1], '思考：默认（low）');
+assert.deepEqual(values(assistant.thinkOptions('codex', 'gpt-6-astra', codex)), ['', 'medium', 'xhigh']);
+assert.deepEqual(values(assistant.thinkOptions('codex', '', [])), ['', 'low', 'medium', 'high', 'xhigh']);
+const saved = { thinking: null, reasoning_effort: 'max', external: { codex: { model: 'gpt-6-astra', effort: 'xhigh' } } };
+assert.equal(assistant.currentThink(saved, 'builtin'), 'max');
+assert.equal(assistant.currentThink(saved, 'codex'), 'xhigh');
+assert.equal(assistant.currentThink(saved, 'claude_code'), '');
+const changed = assistant.withChoice(saved, 'claude_code', { effort: 'high' });
+assert.deepEqual(changed.external.claude_code, { model: null, effort: 'high' });
+assert.deepEqual(changed.external.codex, saved.external.codex);
+assert.equal(changed.reasoning_effort, 'max');
+assert.deepEqual(assistant.withChoice(saved, 'codex', { effort: '' }).external.codex, { model: 'gpt-6-astra', effort: null });
 for (const value of ['', 'low', 'high', 'max', 'off']) {
   assert.equal(assistant.thinkValue(assistant.thinkSettings(value)), value);
 }

@@ -17,7 +17,9 @@ use std::time::Duration;
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
 
-use super::{child_path, find_cli, ExternalOutcome, ExternalSession, Launch, TurnSink};
+use super::{
+    child_path, find_cli, ExternalChoice, ExternalOutcome, ExternalSession, Launch, TurnSink,
+};
 use crate::protocol::Outbound;
 use crate::tools::Tier;
 
@@ -174,6 +176,19 @@ pub fn permission_answer(allow: bool, input: &Value, message: Option<&str>) -> S
     }
 }
 
+/// 模型与思考强度的命令行参数（`--model`、`--effort`）；没选的不加，用 Claude Code 自己的默认。
+pub fn choice_args(choice: &ExternalChoice) -> Vec<String> {
+    let choice = choice.cleaned();
+    let mut args = Vec::new();
+    if let Some(model) = choice.model {
+        args.extend(["--model".to_owned(), model]);
+    }
+    if let Some(effort) = choice.effort {
+        args.extend(["--effort".to_owned(), effort]);
+    }
+    args
+}
+
 /// 标准格式的 UUID v4（Claude Code 的 `--session-id` 要求）。
 pub fn new_session_id() -> String {
     let hex = crate::bridge::random_hex(32);
@@ -195,6 +210,7 @@ pub struct ClaudeSession {
     session_id: String,
     /// 这个 session id 已经在 Claude Code 里建过（之后的轮次用 `--resume`）。
     started: bool,
+    choice: ExternalChoice,
 }
 
 impl ClaudeSession {
@@ -205,6 +221,7 @@ impl ClaudeSession {
             launch,
             session_id: resume.unwrap_or_else(new_session_id),
             started,
+            choice: ExternalChoice::default(),
         }
     }
 
@@ -236,6 +253,10 @@ impl ExternalSession for ClaudeSession {
         let result = self.run(exe, &config, text, sink, cancel);
         let _ = std::fs::remove_file(&config);
         result
+    }
+
+    fn set_choice(&mut self, choice: ExternalChoice) {
+        self.choice = choice.cleaned();
     }
 
     fn resume_id(&self) -> Option<String> {
@@ -287,6 +308,7 @@ impl ClaudeSession {
             .args(WEB_TOOLS)
             .arg("--append-system-prompt")
             .arg(&self.launch.instructions)
+            .args(choice_args(&self.choice))
             .arg(if self.started {
                 "--resume"
             } else {

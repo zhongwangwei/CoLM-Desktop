@@ -19,7 +19,8 @@ use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
 
 use super::{
-    child_path, decision_word, find_cli, ExternalOutcome, ExternalSession, Launch, TurnSink,
+    child_path, decision_word, find_cli, ExternalChoice, ExternalOutcome, ExternalSession, Launch,
+    TurnSink,
 };
 use crate::agent::Decision;
 use crate::message::Usage;
@@ -266,6 +267,72 @@ pub fn automatic_answer(method: &str, params: &Value) -> Value {
     }
 }
 
+/// 把选择落到具体的模型与思考强度：没选模型用清单里的默认模型；没选强度、或所选强度那个模型不支持，
+/// 用那个模型的默认强度。清单为空（取不到）时原样交给 Codex。
+pub fn resolve_choice(
+    models: &[Value],
+    choice: &ExternalChoice,
+) -> (Option<String>, Option<String>) {
+    let choice = choice.cleaned();
+    let entry = match &choice.model {
+        Some(id) => models.iter().find(|m| m["id"] == id.as_str()),
+        None => models.iter().find(|m| m["isDefault"] == true),
+    };
+    let Some(entry) = entry else {
+        return (choice.model, choice.effort);
+    };
+    let supported: Vec<&str> = entry["supportedReasoningEfforts"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|e| e["reasoningEffort"].as_str())
+        .collect();
+    let effort = choice
+        .effort
+        .filter(|e| supported.contains(&e.as_str()))
+        .or_else(|| entry["defaultReasoningEffort"].as_str().map(str::to_owned));
+    (entry["id"].as_str().map(str::to_owned), effort)
+}
+
+/// 精简的模型清单给设置界面：id、显示名、说明、支持的思考强度、默认强度、是否默认模型。
+pub fn model_summary(models: &[Value]) -> Value {
+    Value::Array(
+        models
+            .iter()
+            .filter(|m| m["hidden"] != true)
+            .map(|m| {
+                json!({
+                    "id": m["id"],
+                    "name": m["displayName"],
+                    "description": m["description"],
+                    "efforts": m["supportedReasoningEfforts"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|e| e["reasoningEffort"].as_str())
+                        .collect::<Vec<_>>(),
+                    "default_effort": m["defaultReasoningEffort"],
+                    "default": m["isDefault"] == true,
+                })
+            })
+            .collect(),
+    )
+}
+
+/// 问本机的 Codex 有哪些模型（启动一个不带工具的 app-server，问完就关）。
+pub fn list_models() -> Result<Value> {
+    let exe = find_cli("codex").context("Codex is not installed")?;
+    let mut command = Command::new(exe);
+    command.env("PATH", child_path()).arg("app-server");
+    let mut server = Server::connect(command)?;
+    let id = server.request("model/list", json!({}))?;
+    let result = server.wait_for(id, Duration::from_secs(60));
+    let _ = server.child.kill();
+    let _ = server.child.wait();
+    let models = result?["data"].as_array().cloned().unwrap_or_default();
+    Ok(model_summary(&models))
+}
+
 /// 常驻的 app-server。
 struct Server {
     child: Child,
@@ -275,6 +342,39 @@ struct Server {
 }
 
 impl Server {
+    /// 启动 app-server 并完成握手。
+    fn connect(mut command: Command) -> Result<Self> {
+        let mut child = command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .context("cannot start Codex")?;
+        let stdin = child.stdin.take().context("no stdin")?;
+        let stdout = child.stdout.take().context("no stdout")?;
+        let (tx, lines) = mpsc::channel();
+        std::thread::spawn(move || {
+            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                if tx.send(line).is_err() {
+                    break;
+                }
+            }
+        });
+        let mut server = Server {
+            child,
+            stdin,
+            lines,
+            next_id: 0,
+        };
+        let id = server.request(
+            "initialize",
+            json!({ "clientInfo": { "name": "colm_desktop", "title": "CoLM-Desktop", "version": env!("CARGO_PKG_VERSION") } }),
+        )?;
+        server.wait_for(id, Duration::from_secs(60))?;
+        server.send(&json!({ "method": "initialized" }))?;
+        Ok(server)
+    }
+
     fn send(&mut self, message: &Value) -> Result<()> {
         writeln!(self.stdin, "{message}")?;
         self.stdin.flush()?;
@@ -324,6 +424,9 @@ pub struct CodexSession {
     server: Option<Server>,
     /// 线程到上一轮结束时的累计用量：Codex 报的是整个线程的累计值，每轮要减掉它。
     used: Usage,
+    choice: ExternalChoice,
+    /// `model/list` 的结果。
+    models: Vec<Value>,
 }
 
 impl CodexSession {
@@ -333,6 +436,8 @@ impl CodexSession {
             thread_id: resume,
             server: None,
             used: Usage::default(),
+            choice: ExternalChoice::default(),
+            models: Vec::new(),
         }
     }
 
@@ -354,7 +459,8 @@ impl CodexSession {
             .to_string()
             .replace('\\', "\\\\")
             .replace('"', "\\\"");
-        let mut child = Command::new(exe)
+        let mut command = Command::new(exe);
+        command
             .current_dir(&self.launch.cwd)
             .env("PATH", child_path())
             .env(crate::bridge::ENV_ADDR, &self.launch.bridge_addr)
@@ -372,34 +478,14 @@ impl CodexSession {
                 "mcp_servers.colm.env_vars=[\"{}\",\"{}\"]",
                 crate::bridge::ENV_ADDR,
                 crate::bridge::ENV_TOKEN
-            ))
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .context("cannot start Codex")?;
-        let stdin = child.stdin.take().context("no stdin")?;
-        let stdout = child.stdout.take().context("no stdout")?;
-        let (tx, lines) = mpsc::channel();
-        std::thread::spawn(move || {
-            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-                if tx.send(line).is_err() {
-                    break;
-                }
-            }
-        });
-        let mut server = Server {
-            child,
-            stdin,
-            lines,
-            next_id: 0,
-        };
-        let id = server.request(
-            "initialize",
-            json!({ "clientInfo": { "name": "colm_desktop", "title": "CoLM-Desktop", "version": env!("CARGO_PKG_VERSION") } }),
-        )?;
-        server.wait_for(id, Duration::from_secs(60))?;
-        server.send(&json!({ "method": "initialized" }))?;
+            ));
+        let mut server = Server::connect(command)?;
+        // 模型清单（各自支持的思考强度与默认值），用来把“默认”落到具体的模型与强度上。
+        let id = server.request("model/list", json!({}))?;
+        self.models = server
+            .wait_for(id, Duration::from_secs(60))
+            .map(|r| r["data"].as_array().cloned().unwrap_or_default())
+            .unwrap_or_default();
         let settings = json!({
             "cwd": self.launch.cwd,
             "approvalPolicy": "on-request",
@@ -441,11 +527,18 @@ impl ExternalSession for CodexSession {
             .thread_id
             .clone()
             .context("Codex did not open a thread")?;
+        let (model, effort) = resolve_choice(&self.models, &self.choice);
         let server = self.server.as_mut().context("Codex is not running")?;
-        let start = server.request(
-            "turn/start",
-            json!({ "threadId": thread_id, "input": [{ "type": "text", "text": text }] }),
-        )?;
+        let mut params =
+            json!({ "threadId": thread_id, "input": [{ "type": "text", "text": text }] });
+        // turn/start 的 model / effort 会一直沿用到后面的轮次，所以每轮都给出具体值（“默认”也落到具体值）。
+        if let Some(model) = model {
+            params["model"] = json!(model);
+        }
+        if let Some(effort) = effort {
+            params["effort"] = json!(effort);
+        }
+        let start = server.request("turn/start", params)?;
         let mut turn_id: Option<String> = None;
         let mut interrupted = false;
         let mut state = CodexState::default();
@@ -523,6 +616,10 @@ impl ExternalSession for CodexSession {
                 (None, true) => {}
             }
         }
+    }
+
+    fn set_choice(&mut self, choice: ExternalChoice) {
+        self.choice = choice.cleaned();
     }
 
     fn resume_id(&self) -> Option<String> {

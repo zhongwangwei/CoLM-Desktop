@@ -39,6 +39,9 @@ pub enum Inbound {
         /// 用哪个后端回答：内置（默认）、用户本机的 Codex 或 Claude Code。
         #[serde(default)]
         backend: crate::backend::BackendKind,
+        /// 外部后端的模型与思考强度（内置后端用 `provider` 里的）。
+        #[serde(default)]
+        external: crate::backend::ExternalChoice,
     },
     /// 用户的一条消息；`context` 是界面自动附上的当前页面信息（选中的算例、Study 等）。
     UserMessage {

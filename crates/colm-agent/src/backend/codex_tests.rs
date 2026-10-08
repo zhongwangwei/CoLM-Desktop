@@ -171,3 +171,64 @@ fn web_search_cards_show_the_query_and_count_as_success_without_a_status() {
     assert!(matches!(&map_notification(&empty, &mut state)[0],
         Outbound::ToolCall { summary, .. } if summary == "联网搜索"));
 }
+
+fn choice(model: Option<&str>, effort: Option<&str>) -> ExternalChoice {
+    ExternalChoice {
+        model: model.map(str::to_owned),
+        effort: effort.map(str::to_owned),
+    }
+}
+
+/// `model/list` 的两条（codex-cli 0.160.1，略去无关字段）。
+fn models() -> Vec<Value> {
+    vec![
+        line(
+            r#"{"id":"gpt-6.1-sol","displayName":"GPT-6.1-Sol","description":"workhorse","hidden":false,"isDefault":true,"defaultReasoningEffort":"low","supportedReasoningEfforts":[{"reasoningEffort":"low"},{"reasoningEffort":"high"},{"reasoningEffort":"max"}]}"#,
+        ),
+        line(
+            r#"{"id":"gpt-6-astra","displayName":"GPT-6-Astra","description":"frontier","hidden":false,"isDefault":false,"defaultReasoningEffort":"medium","supportedReasoningEfforts":[{"reasoningEffort":"medium"},{"reasoningEffort":"xhigh"}]}"#,
+        ),
+    ]
+}
+
+#[test]
+fn choices_resolve_to_a_concrete_model_and_a_supported_effort() {
+    let m = models();
+    let pair = |a: &str, b: &str| (Some(a.to_owned()), Some(b.to_owned()));
+    // “默认”落到默认模型与它的默认强度：turn/start 的覆盖会沿用，必须能换回来。
+    assert_eq!(
+        resolve_choice(&m, &choice(None, None)),
+        pair("gpt-6.1-sol", "low")
+    );
+    assert_eq!(
+        resolve_choice(&m, &choice(None, Some("max"))),
+        pair("gpt-6.1-sol", "max")
+    );
+    assert_eq!(
+        resolve_choice(&m, &choice(Some("gpt-6-astra"), Some("xhigh"))),
+        pair("gpt-6-astra", "xhigh")
+    );
+    // 那个模型不支持的强度换成它的默认强度。
+    assert_eq!(
+        resolve_choice(&m, &choice(Some("gpt-6-astra"), Some("max"))),
+        pair("gpt-6-astra", "medium")
+    );
+    // 清单里没有的模型、或取不到清单时，原样交给 Codex。
+    assert_eq!(
+        resolve_choice(&m, &choice(Some("o9"), Some("high"))),
+        pair("o9", "high")
+    );
+    assert_eq!(resolve_choice(&[], &choice(None, None)), (None, None));
+    // 像选项的值丢掉。
+    assert_eq!(
+        resolve_choice(&[], &choice(Some("--yolo"), Some(" "))),
+        (None, None)
+    );
+    let summary = model_summary(&m);
+    assert_eq!(
+        summary[0]["efforts"],
+        serde_json::json!(["low", "high", "max"])
+    );
+    assert_eq!(summary[0]["default"], true);
+    assert_eq!(summary[1]["default_effort"], "medium");
+}

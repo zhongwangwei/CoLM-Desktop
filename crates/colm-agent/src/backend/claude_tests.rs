@@ -92,3 +92,21 @@ fn permission_answers_and_session_ids_have_the_expected_shape() {
     assert_ne!(new_session_id(), id);
     assert_eq!(summary("Bash", &json!({ "command": "ls" })), "执行命令：ls");
 }
+
+#[test]
+fn model_and_effort_become_command_line_flags_only_when_chosen() {
+    assert!(choice_args(&ExternalChoice::default()).is_empty());
+    let chosen = ExternalChoice {
+        model: Some("opus".into()),
+        effort: Some("xhigh".into()),
+    };
+    assert_eq!(
+        choice_args(&chosen),
+        ["--model", "opus", "--effort", "xhigh"]
+    );
+    let odd = ExternalChoice {
+        model: Some("-p".into()),
+        effort: Some("very high".into()),
+    };
+    assert!(choice_args(&odd).is_empty());
+}

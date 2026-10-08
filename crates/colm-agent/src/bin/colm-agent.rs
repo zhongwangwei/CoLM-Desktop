@@ -9,6 +9,7 @@
 //! colm-agent --data-dir <目录> --transcript <会话号>      # 一个会话的对话记录（JSON）
 //! colm-agent --data-dir <目录> --delete-session <会话号>
 //! colm-agent --backend-status                              # 本机 Codex / Claude Code 的安装与登录状态（JSON）
+//! colm-agent --codex-models                                # 本机 Codex 可用的模型与各自的思考强度（JSON）
 //! ```
 //!
 //! stdout 只输出协议消息；诊断写 stderr。stdin 关闭即退出。
@@ -23,7 +24,9 @@ use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 use colm_agent::agent::{execute_tool, Agent, Approver, Decision, Limits};
-use colm_agent::backend::{self, claude, codex, BackendKind, ExternalSession, Launch, TurnSink};
+use colm_agent::backend::{
+    self, claude, codex, BackendKind, ExternalChoice, ExternalSession, Launch, TurnSink,
+};
 use colm_agent::bridge::{random_hex, BridgeHandler, BridgeServer};
 use colm_agent::mcp::tool_entry;
 use colm_agent::message::Message;
@@ -52,6 +55,10 @@ fn run() -> Result<()> {
     };
     if args.iter().any(|a| a == "--backend-status") {
         println!("{}", backend::status());
+        return Ok(());
+    }
+    if args.iter().any(|a| a == "--codex-models") {
+        println!("{}", codex::list_models()?);
         return Ok(());
     }
     // 历史会话的查看与删除不碰 Key。
@@ -182,16 +189,25 @@ struct Settings {
     web_search: bool,
     ui: bool,
     backend: BackendKind,
+    external: ExternalChoice,
 }
 
 impl Settings {
-    /// 面板头部显示的模型名：外部后端显示后端名（模型由它自己选）。
     fn display_model(&self) -> String {
-        match self.backend {
-            BackendKind::Builtin => self.provider.model.clone(),
-            BackendKind::Codex => "Codex".into(),
-            BackendKind::ClaudeCode => "Claude Code".into(),
-        }
+        display_model(self.backend, &self.provider.model, &self.external)
+    }
+}
+
+/// 面板头部显示的模型名：外部后端显示后端名，选了模型时再加上模型名。
+fn display_model(backend: BackendKind, builtin: &str, external: &ExternalChoice) -> String {
+    let name = match backend {
+        BackendKind::Builtin => return builtin.to_owned(),
+        BackendKind::Codex => "Codex",
+        BackendKind::ClaudeCode => "Claude Code",
+    };
+    match external.cleaned().model {
+        Some(model) => format!("{name} · {model}"),
+        None => name.to_owned(),
     }
 }
 
@@ -423,12 +439,9 @@ fn serve(data_dir: Option<PathBuf>, cli: PathBuf, key_file: PathBuf) -> Result<(
                 web_search,
                 ui,
                 backend,
+                external: choice,
             } => {
-                let model = match backend {
-                    BackendKind::Builtin => provider.model.clone(),
-                    BackendKind::Codex => "Codex".into(),
-                    BackendKind::ClaudeCode => "Claude Code".into(),
-                };
+                let model = display_model(backend, &provider.model, &choice);
                 *settings.lock().unwrap() = Some(Settings {
                     provider,
                     context: ToolContext {
@@ -444,6 +457,7 @@ fn serve(data_dir: Option<PathBuf>, cli: PathBuf, key_file: PathBuf) -> Result<(
                     web_search,
                     ui,
                     backend,
+                    external: choice,
                 });
                 // 换了后端就丢掉旧的外部会话（Codex 的进程随之结束）。
                 if external
@@ -548,7 +562,7 @@ fn serve(data_dir: Option<PathBuf>, cli: PathBuf, key_file: PathBuf) -> Result<(
                     });
                     continue;
                 }
-                let Some((mut provider, mut tool_context, policy, web_search, ui, backend)) =
+                let Some((mut provider, mut tool_context, policy, web_search, ui, backend, choice)) =
                     settings.lock().unwrap().as_ref().map(|s| {
                         (
                             s.provider.clone(),
@@ -557,6 +571,7 @@ fn serve(data_dir: Option<PathBuf>, cli: PathBuf, key_file: PathBuf) -> Result<(
                             s.web_search,
                             s.ui,
                             s.backend,
+                            s.external.clone(),
                         )
                     })
                 else {
@@ -594,6 +609,7 @@ fn serve(data_dir: Option<PathBuf>, cli: PathBuf, key_file: PathBuf) -> Result<(
                 if backend != BackendKind::Builtin {
                     let turn = ExternalTurn {
                         backend,
+                        choice,
                         text,
                         context,
                         registry,
@@ -721,6 +737,7 @@ struct External {
 /// 外部后端的一轮（在工作线程里跑）。
 struct ExternalTurn {
     backend: BackendKind,
+    choice: ExternalChoice,
     text: String,
     context: Option<String>,
     registry: Registry,
@@ -825,6 +842,7 @@ impl ExternalTurn {
             emitter: self.emitter.clone(),
             approver,
         };
+        current.inner.set_choice(self.choice.clone());
         let outcome = current.inner.turn(&content, &mut sink, &self.cancel);
         *handler.active.lock().unwrap() = None;
         let resume = current.inner.resume_id();

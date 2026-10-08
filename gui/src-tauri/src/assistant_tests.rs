@@ -41,6 +41,24 @@ fn settings_default_to_deepseek_and_only_accept_https_or_loopback() {
         ..AssistantSettings::default()
     };
     assert!(validate_settings(&odd_backend).is_err());
+    let external = |backend: &str, model: Option<&str>, effort: Option<&str>| AssistantSettings {
+        external: [(
+            backend.to_owned(),
+            ExternalChoice {
+                model: model.map(str::to_owned),
+                effort: effort.map(str::to_owned),
+            },
+        )]
+        .into(),
+        ..AssistantSettings::default()
+    };
+    assert!(validate_settings(&external("claude_code", Some("opus"), Some("xhigh"))).is_ok());
+    assert!(validate_settings(&external("claude_code", None, Some("ultra"))).is_err());
+    // Codex 的强度随模型而定，这里只挡像选项的值。
+    assert!(validate_settings(&external("codex", Some("gpt-6-astra"), Some("ultra"))).is_ok());
+    assert!(validate_settings(&external("codex", Some("--yolo"), None)).is_err());
+    assert!(validate_settings(&external("codex", Some("a b"), None)).is_err());
+    assert!(validate_settings(&external("gemini", None, None)).is_err());
     for (effort, ok) in [
         ("low", true),
         ("high", true),
@@ -63,6 +81,23 @@ fn configure_messages_match_the_agent_protocol_and_carry_no_key() {
         approval: "auto".into(),
         web_search: false,
         backend: "claude_code".into(),
+        external: [
+            (
+                "claude_code".to_owned(),
+                ExternalChoice {
+                    model: Some("opus".into()),
+                    effort: Some("high".into()),
+                },
+            ),
+            (
+                "codex".to_owned(),
+                ExternalChoice {
+                    model: Some("gpt-6-astra".into()),
+                    effort: None,
+                },
+            ),
+        ]
+        .into(),
         ..AssistantSettings::default()
     };
     let message = configure_message(&settings, "/p", Some("/k"), None);
@@ -74,6 +109,9 @@ fn configure_messages_match_the_agent_protocol_and_carry_no_key() {
     assert_eq!(message["web_search"], false);
     assert_eq!(message["ui"], true);
     assert_eq!(message["backend"], "claude_code");
+    // 只带当前后端的那一份。
+    assert_eq!(message["external"]["model"], "opus");
+    assert_eq!(message["external"]["effort"], "high");
     assert_eq!(message["project_root"], "/p");
     assert_eq!(message["kernel_dir"], "/k");
     assert!(message["provider"].get("api_key").is_none());
@@ -106,7 +144,18 @@ mod colm_agent_protocol {
             web_search: bool,
             #[serde(default)]
             backend: Option<String>,
+            #[serde(default)]
+            external: Choice,
         },
+    }
+
+    #[derive(Deserialize, Default)]
+    #[allow(dead_code)]
+    pub struct Choice {
+        #[serde(default)]
+        pub model: Option<String>,
+        #[serde(default)]
+        pub effort: Option<String>,
     }
 
     #[derive(Deserialize)]

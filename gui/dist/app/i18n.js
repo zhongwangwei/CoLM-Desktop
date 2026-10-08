@@ -2152,6 +2152,8 @@ const ZH_EN = [
   ['思考：high', 'Think: high'],
   ['思考：max', 'Think: max'],
   ['不思考', 'No thinking'],
+  ['思考强度：随时可改，下一条消息生效（Codex / Claude Code）', 'Reasoning effort: change any time; applies from the next message (Codex / Claude Code)'],
+  ['思考强度在输入框下面随时可改。选“默认”时用 Codex / Claude Code 自己的设置。', 'Reasoning effort can be changed any time below the input box. “Default” uses Codex / Claude Code’s own setting.'],
   ['每次询问', 'Ask every time'],
   ['自动执行，不再询问', 'Run automatically, never ask'],
   ['指建算例、改配置、运行算例与 Study 这类操作。选“每次询问”时，审批卡片上也可以点“本会话都允许”，同一类操作在这次会话里就不再询问。', 'Covers creating cases, changing configuration and running cases or Studies. With “Ask every time” you can also click “Allow for this session” on an approval card, and the same kind of action is not asked again in this session.'],
@@ -2231,6 +2233,9 @@ export function translateZh(text, target = 'en') {
     .replace(/^✗ 没通过：网络的留一站误差 (\S+) 不低于均值基准 (\S+)，到新站点上大概率不如直接用均值。不建议装到算例。$/, '✗ Failed: the network’s leave-one-site-out error $1 is not below the mean baseline $2, so at new sites it is likely worse than using the mean. Installing it is not recommended.')
     .replace(/^样本 (\S+) 行；模型写在 (.+)$/, '$1 sample rows; model written to $2')
     .replace(/^已把拟合的模型装到 (\d+) 个算例$/, 'Installed the fitted model into $1 cases')
+    .replace(/^思考：默认（(\S+)）$/, 'Think: default ($1)')
+    .replace(/^思考：([A-Za-z0-9_-]+)$/, 'Think: $1')
+    .replace(/^默认（(.+)）$/, 'Default ($1)')
     .replace(/^空间算例 (.+) 已生成；当前已切换工作流，未加入本次算例列表$/, 'Spatial case $1 was created; the workflow has changed, so it was not added to this session')
     // 运行进度（`run-format.js` 的 progressText）：先整句匹配，免得被下面的逐段规则拆坏。
     .replace(/^预热 (\d+)\/(\d+) 轮 · 第 (\d+)\/(\d+) 步 · (.+)$/, 'Spin-up $1/$2 · step $3/$4 · $5')

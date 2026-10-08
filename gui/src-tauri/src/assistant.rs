@@ -54,6 +54,18 @@ pub struct AssistantSettings {
     /// 用户已确认过“数据会发给模型服务商”的那个服务地址。
     #[serde(default)]
     pub egress_acknowledged: Option<String>,
+    /// 外部后端各自的模型与思考强度（键是 `codex`、`claude_code`）；没选的用它自己的默认。
+    #[serde(default)]
+    pub external: std::collections::BTreeMap<String, ExternalChoice>,
+}
+
+/// 外部后端的模型与思考强度。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExternalChoice {
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub effort: Option<String>,
 }
 
 impl Default for AssistantSettings {
@@ -67,6 +79,7 @@ impl Default for AssistantSettings {
             web_search: default_web_search(),
             backend: default_backend(),
             egress_acknowledged: None,
+            external: Default::default(),
         }
     }
 }
@@ -126,6 +139,9 @@ fn agent_path() -> PathBuf {
 /// DeepSeek 实际生效的三档（medium 会被归到 high，xhigh、ultra 归到 max，列出来没有意义）。
 const REASONING_EFFORTS: [&str; 3] = ["low", "high", "max"];
 
+/// Claude Code 的 `--effort` 可选值（Claude Code 2.1.293）；Codex 的可选值随模型而定，由 `model/list` 给出。
+const CLAUDE_EFFORTS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
+
 /// 可供 `search_docs` 检索的项目文档目录：从 `colm-agent` 所在目录与当前目录往上找含
 /// `docs/design-ai-assistant.md` 的仓库（开发环境）。安装包里没有仓库文档时为空。
 pub(crate) fn docs_root(starts: &[PathBuf]) -> Option<PathBuf> {
@@ -158,6 +174,27 @@ pub(crate) fn validate_settings(settings: &AssistantSettings) -> Result<(), Stri
     if let Some(effort) = &settings.reasoning_effort {
         if !REASONING_EFFORTS.contains(&effort.as_str()) {
             return Err(format!("思考强度只能是 {}", REASONING_EFFORTS.join("、")));
+        }
+    }
+    for (backend, choice) in &settings.external {
+        if !matches!(backend.as_str(), "codex" | "claude_code") {
+            return Err(format!("没有这个外部后端：{backend}"));
+        }
+        // 这两个值会成为 CLI 的参数，不能像选项、不能含空白。
+        for value in [&choice.model, &choice.effort].into_iter().flatten() {
+            if value.is_empty() || value.starts_with('-') || value.contains(char::is_whitespace) {
+                return Err(format!("模型名或思考强度不合法：{value:?}"));
+            }
+        }
+        if backend == "claude_code" {
+            if let Some(effort) = &choice.effort {
+                if !CLAUDE_EFFORTS.contains(&effort.as_str()) {
+                    return Err(format!(
+                        "Claude Code 的思考强度只能是 {}",
+                        CLAUDE_EFFORTS.join("、")
+                    ));
+                }
+            }
         }
     }
     Ok(())
@@ -223,6 +260,25 @@ async fn session_command(app: &tauri::AppHandle, args: Vec<String>) -> Result<St
 pub async fn assistant_backend_status() -> Result<Value, String> {
     let mut command = std::process::Command::new(agent_path());
     command.arg("--backend-status");
+    colm_kernel::run::no_console(&mut command);
+    tauri::async_runtime::spawn_blocking(move || {
+        let output = command
+            .output()
+            .map_err(|e| format!("cannot start {}: {e}", agent_path().display()))?;
+        if !output.status.success() {
+            return Err(String::from_utf8_lossy(&output.stderr).trim().to_owned());
+        }
+        serde_json::from_slice(&output.stdout).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// 本机 Codex 可用的模型与各自支持的思考强度（`colm-agent --codex-models` 问 Codex 自己）。
+#[tauri::command]
+pub async fn assistant_codex_models() -> Result<Value, String> {
+    let mut command = std::process::Command::new(agent_path());
+    command.arg("--codex-models");
     colm_kernel::run::no_console(&mut command);
     tauri::async_runtime::spawn_blocking(move || {
         let output = command
@@ -383,6 +439,7 @@ pub(crate) fn configure_message(
         "approval": settings.approval,
         "web_search": settings.web_search,
         "backend": settings.backend,
+        "external": settings.external.get(&settings.backend).cloned().unwrap_or_default(),
         // 窗口能被助手驱动（引导模式）。
         "ui": true,
         "project_root": project_root,

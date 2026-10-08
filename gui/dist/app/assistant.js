@@ -130,6 +130,8 @@ const ui = {
   conversation: null,
   /** 打开面板时是否已经接上过最近一次对话。 */
   restored: false,
+  /** 本机 Codex 的模型清单（`model/list`），第一次用到时取。 */
+  codexModels: null,
 };
 
 function log() {
@@ -323,10 +325,10 @@ async function loadSettings() {
   const settings = await invoke('assistant_settings');
   $('assistant-base').value = settings.base_url;
   $('assistant-model-name').value = settings.model;
-  $('assistant-think').value = thinkValue(settings);
   $('assistant-approval').value = settings.approval || 'ask';
   $('assistant-web').value = settings.web_search === false ? 'off' : 'on';
   $('assistant-backend').value = settings.backend || 'builtin';
+  await renderChoices(settings, settings.backend || 'builtin');
   refreshBackendStatus().catch(e => status(e));
   await refreshKeyStatus(settings.base_url);
   return settings;
@@ -344,10 +346,103 @@ export function thinkSettings(value) {
     : { thinking: null, reasoning_effort: value || null };
 }
 
+/** 外部后端的模型选项：[值, 显示名]；第一项是“默认”。 */
+export function modelOptions(backend, codexModels) {
+  if (backend === 'claude_code') {
+    return [['', '默认'], ['fable', 'Fable'], ['opus', 'Opus'], ['sonnet', 'Sonnet'], ['haiku', 'Haiku']];
+  }
+  const models = codexModels || [];
+  const fallback = models.find(m => m.default);
+  return [
+    ['', fallback ? `默认（${fallback.name || fallback.id}）` : '默认'],
+    ...models.map(m => [m.id, m.name || m.id]),
+  ];
+}
+
+/** 输入框下“思考”选框的选项：内置后端是 DeepSeek 的强度；Claude Code 是 --effort 的五档；
+ *  Codex 随所选模型（没选用默认模型）而定，取不到清单时给常见的四档。 */
+export function thinkOptions(backend, model, codexModels) {
+  if (backend === 'builtin') {
+    return [['', '思考：默认'], ['low', '思考：low'], ['high', '思考：high'], ['max', '思考：max'], ['off', '不思考']];
+  }
+  let efforts = ['low', 'medium', 'high', 'xhigh', 'max'];
+  let fallback = '';
+  if (backend === 'codex') {
+    const models = codexModels || [];
+    const entry = models.find(m => m.id === model) || models.find(m => m.default);
+    efforts = entry?.efforts?.length ? entry.efforts : ['low', 'medium', 'high', 'xhigh'];
+    fallback = entry?.default_effort ? `（${entry.default_effort}）` : '';
+  }
+  return [['', `思考：默认${fallback}`], ...efforts.map(e => [e, `思考：${e}`])];
+}
+
+/** 当前后端在设置里存的思考强度。 */
+export function currentThink(settings, backend) {
+  if (backend === 'builtin') return thinkValue(settings);
+  return settings.external?.[backend]?.effort || '';
+}
+
+/** 把一个外部后端的模型或强度改进设置（空值表示用默认）。 */
+export function withChoice(settings, backend, patch) {
+  const previous = settings.external?.[backend] || {};
+  const choice = { model: previous.model ?? null, effort: previous.effort ?? null, ...patch };
+  for (const key of ['model', 'effort']) if (!choice[key]) choice[key] = null;
+  return { ...settings, external: { ...(settings.external || {}), [backend]: choice } };
+}
+
+function fillSelect(select, options, value) {
+  select.replaceChildren(...options.map(([v, label]) => {
+    const option = document.createElement('option');
+    option.value = v;
+    option.textContent = t(label);
+    return option;
+  }));
+  // 存的值不在清单里（例如 Codex 下线了那个模型）时也留着，免得悄悄改掉用户的选择。
+  if (value && !options.some(([v]) => v === value)) {
+    const option = document.createElement('option');
+    option.value = value;
+    option.textContent = value;
+    select.appendChild(option);
+  }
+  select.value = value || '';
+}
+
+async function codexModels() {
+  if (!ui.codexModels) ui.codexModels = await invoke('assistant_codex_models').catch(() => []);
+  return ui.codexModels;
+}
+
+/** 按后端填设置里的模型选框与输入框下的思考选框。 */
+async function renderChoices(settings, backend) {
+  const models = backend === 'codex' ? await codexModels() : null;
+  const model = settings.external?.[backend]?.model || '';
+  if (backend !== 'builtin') fillSelect($('assistant-ext-model'), modelOptions(backend, models), model);
+  fillSelect($('assistant-think'), thinkOptions(backend, model, models), currentThink(settings, backend));
+  $('assistant-think').title = t(backend === 'builtin'
+    ? '思考强度：随时可改，下一条消息生效'
+    : '思考强度：随时可改，下一条消息生效（Codex / Claude Code）');
+}
+
 async function changeThink() {
-  const settings = { ...(await invoke('assistant_settings')), ...thinkSettings($('assistant-think').value) };
+  const saved = await invoke('assistant_settings');
+  const backend = saved.backend || 'builtin';
+  const value = $('assistant-think').value;
+  const settings = backend === 'builtin'
+    ? { ...saved, ...thinkSettings(value) }
+    : withChoice(saved, backend, { effort: value });
   await invoke('assistant_save_settings', { settings });
   ui.started = false; // 下一条消息发出前重新配置
+}
+
+/** 设置里换了模型：Codex 的强度选项随模型变。 */
+async function changeExternalModel() {
+  const backend = $('assistant-backend').value;
+  const models = backend === 'codex' ? await codexModels() : null;
+  const model = $('assistant-ext-model').value;
+  const think = $('assistant-think');
+  const keep = think.value;
+  const options = thinkOptions(backend, model, models);
+  fillSelect(think, options, options.some(([v]) => v === keep) ? keep : '');
 }
 
 /** 外部后端缺了什么（没装、没登录）；齐了返回 null。 */
@@ -366,9 +461,6 @@ async function refreshBackendStatus(backend = $('assistant-backend').value) {
   for (const el of document.querySelectorAll('#assistant-settings [data-backend-only]')) {
     el.hidden = !el.dataset.backendOnly.split(' ').includes(backend);
   }
-  // 输入框下的思考强度只对内置后端起作用；外部后端由它自己决定。
-  $('assistant-think').disabled = backend !== 'builtin';
-  $('assistant-think').title = t(backend === 'builtin' ? '思考强度：随时可改，下一条消息生效' : '思考强度由 Codex / Claude Code 自己决定');
   if (backend === 'builtin') {
     line.textContent = t('使用下面的服务地址、模型与 API Key。');
     line.className = 'mini muted';
@@ -401,15 +493,21 @@ async function refreshKeyStatus(baseUrl) {
 }
 
 function formSettings(previous) {
-  return {
+  const backend = $('assistant-backend').value || 'builtin';
+  const think = $('assistant-think').value;
+  const base = {
+    ...previous,
     base_url: $('assistant-base').value.trim(),
     model: $('assistant-model-name').value.trim(),
-    ...thinkSettings($('assistant-think').value),
     approval: $('assistant-approval').value || 'ask',
     web_search: $('assistant-web').value !== 'off',
-    backend: $('assistant-backend').value || 'builtin',
+    backend,
     egress_acknowledged: previous?.egress_acknowledged ?? null,
   };
+  // 思考选框显示的是当前后端的强度：内置后端存进 DeepSeek 的设置，外部后端存进它自己的那一份。
+  return backend === 'builtin'
+    ? { ...base, ...thinkSettings(think) }
+    : withChoice(base, backend, { model: $('assistant-ext-model').value, effort: think });
 }
 
 async function saveSettings() {
@@ -760,7 +858,12 @@ function wire() {
   $('assistant-history-btn').onclick = () => showHistory().catch(e => notice(String(e?.message || e)));
   // 回车发送，Shift + 回车换行；输入法选词时的回车（isComposing / keyCode 229）不发送。
   $('assistant-think').addEventListener('change', () => changeThink().catch(e => status(e?.message || e)));
-  $('assistant-backend').addEventListener('change', () => refreshBackendStatus().catch(e => status(e)));
+  $('assistant-backend').addEventListener('change', async () => {
+    const backend = $('assistant-backend').value;
+    await renderChoices(await invoke('assistant_settings'), backend).catch(e => status(e?.message || e));
+    refreshBackendStatus().catch(e => status(e));
+  });
+  $('assistant-ext-model').addEventListener('change', () => changeExternalModel().catch(e => status(e?.message || e)));
   $('assistant-text').addEventListener('keydown', event => {
     if (event.key !== 'Enter' || event.shiftKey || event.isComposing || event.keyCode === 229) return;
     event.preventDefault();
