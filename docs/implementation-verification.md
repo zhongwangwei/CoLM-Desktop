@@ -32007,3 +32007,43 @@ GPP 的均值被 4 个基线 KGE 低于 −0.5 的站拉低（BE-Lon、DE-Geb、
 - `--hybrid-tap` 对过程插槽还不能抓数（要在实际运行中逐步记录，现在明确报错）。
 - 两步法不适用于 β：它要各站率定出的参数，β 不是参数。
 - 下一步是 PHS 脆弱性曲线槽位，以及基于本插槽的 H3 可微孪生。
+
+## 第 642 轮：经 Tailscale 与 Mac Pro 走通 7920；R1 命令行流程在新通路上复测
+
+**过程**：这台 Mac 不在家里局域网，也够不到校园网的跳板机（`macpro`、`7920l` 在握手时被断开；`7920land`、`7920t` 报 `Connection closed by UNKNOWN port 65535`，即跳板 `land`、`bd` 不可达）。网卡里有 `198.18.0.1`，像是代理软件的 TUN 地址；这一点是推断，没有验证。ToDesk 只能操作 Mac Pro 的桌面与简陋终端，不转发端口，应用用不上，只拿来做一次性安装。
+
+**做法**：
+- 在 Mac Pro 与这台 Mac 上装 Tailscale、同一账号登录。两台互 ping 通（Mac Pro 的 Tailscale 地址 `100.112.36.93`，往返约 360 ms，大概是中继，不是直连）。
+- 这台 Mac 的公钥原来就在 Mac Pro 的 `authorized_keys` 里，`wei@100.112.36.93` 免口令登录。登录时用了 `StrictHostKeyChecking=accept-new`，Mac Pro 的主机密钥是第一次连接时记下的，没有核对指纹。
+- 经 Mac Pro 连 7920（`zhwei@192.168.50.29`）成功，7920 上 `cargo` 在 `/home/zhwei/.cargo/bin/cargo`，`/media/zhwei/data02` 剩 26 TB。
+- `~/.ssh/config` 追加两个别名（备份 `config.bak-20261009`）：`macpro-ts`（Mac Pro 的 Tailscale 地址）、`7920mp`（`ProxyJump macpro-ts` 到 192.168.50.29）。
+- 先前把 R1 当成没做，是只查了当前分支：`colm-guide` 上有 6 个提交没合进 `main`（R1 后端与 GUI、AI 参数化 H1/H2、Codex 与 Claude Code 选模型）。它是从 `main` 的 `77aa44ab` 直接往前长的，在本 worktree 里 `git merge --ff-only colm-guide` 快进到 `701c66b9`，没有冲突。
+
+**检查**：
+- 合并后的验证（本机，`--test-threads=1`）：
+  - 引擎：`cargo test --workspace --lib --bins` 1963 项通过；clippy `-D warnings` 零警告；`cargo fmt --all --check` 干净。
+  - GUI Rust：212 项通过；clippy、fmt 同样干净。
+  - `check-gui` 通过；`gui/tests/` 15 个套件全部退出码 0（含 `remote.mjs`）。
+- R1 命令行流程经 `7920mp` 复测，CA-Qfo、PC 模式、2004 年一年、无预热：
+  - `remote-probe`：`problems` 为空，T7920、Ubuntu 26.04.1、96 核、750 GB、cargo 1.95.0。
+  - `remote-run`：新快照（`db71665c0509bced`）上传加提交约 51 秒；其中几乎全是经中继上传的等待，本地 CPU 只用了 2.5 秒。
+  - 服务器上增量编译后三段跑完，`state: finished`、`exit_code: 0`。
+  - `remote-fetch`：12 个 history 文件和三段日志共 71 MB，用了 3 分 12 秒（约 0.37 MB/s）。
+  - 本机同参数算例（Rust 引擎与前处理，release）用时 18 秒。
+- 本机与服务器比对（history 共 1428 个“变量×文件”，逐位一致 431 个，其余是平台数学库的末位差异）：
+
+| 变量 | 年均值（本机 / 服务器） | 逐时差异均方根 | 均方根 / 标准差 | 相关系数 |
+|---|---|---|---|---|
+| 感热 f_fsena | 31.3395 / 31.3375 W/m² | 0.15 | 1.57e-3 | 0.999999 |
+| 潜热 f_lfevpa | 32.1046 / 32.1074 W/m² | 0.137 | 2.63e-3 | 0.999997 |
+| 净辐射 f_rnet | 62.2438 / 62.2443 W/m² | 0.0549 | 3.51e-4 | 1.000000 |
+| GPP f_assim | 2.89422e-6 / 2.89421e-6 | 5.5e-10 | 1.13e-4 | 1.000000 |
+| 地表温度 f_t_grnd | 271.633 / 271.633 K | 0.00769 | 5.89e-4 | 1.000000 |
+| 植被水势 f_vegwp | -14576.8 / -14584.2 mm | 495 | 6.21e-2 | 0.998075 |
+
+  与第 637 轮同参数的比对一致（那一轮是 1651 个“变量×文件”，576 个逐位一致；这一轮的内核清单与算例是重新生成的，总数不同）。
+
+**限制**：
+- 在应用里点一遍 GUI 流程（服务器对话框的“测试连接”、运行页提交、自动取回）仍没有人验证过；这一轮走的是同一套后端命令。
+- 经 Mac Pro 的链路慢：取回 66 到 71 MB 要 3 分钟以上。结果文件大时应考虑只取需要的变量，或压缩后传（设计稿第 5.3 节“按变量或时段按需取回”还没做）。
+- Mac Pro 睡眠或 Tailscale 掉线，这条链路就断。
