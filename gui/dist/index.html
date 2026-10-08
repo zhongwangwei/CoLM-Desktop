@@ -1120,11 +1120,19 @@
         <option value="claude_code">Claude Code（用你的 Claude 订阅）</option>
       </select>
       <p class="mini muted" id="assistant-backend-status"></p>
-      <label for="assistant-base">服务地址</label>
-      <input class="input" id="assistant-base" placeholder="https://api.deepseek.com">
-      <label for="assistant-model-name">模型</label>
-      <input class="input" id="assistant-model-name" list="assistant-models" placeholder="deepseek-flash">
-      <datalist id="assistant-models"><option value="deepseek-flash"></option><option value="deepseek-v4-pro"></option></datalist>
+      <label data-backend-only="builtin" for="assistant-base">服务地址</label>
+      <input data-backend-only="builtin" class="input" id="assistant-base" placeholder="https://api.deepseek.com">
+      <label data-backend-only="builtin" for="assistant-model-name">模型</label>
+      <input data-backend-only="builtin" class="input" id="assistant-model-name" list="assistant-models" placeholder="deepseek-flash">
+      <datalist data-backend-only="builtin" id="assistant-models"><option value="deepseek-flash"></option><option value="deepseek-v4-pro"></option></datalist>
+      <label data-backend-only="builtin" for="assistant-key">API Key</label>
+      <div data-backend-only="builtin" class="assistant-key-row">
+        <input class="input" id="assistant-key" type="password" autocomplete="off" placeholder="粘贴后点“保存 Key”">
+        <button class="btn-ghost" type="button" id="assistant-key-save">保存 Key</button>
+        <button class="btn-ghost" type="button" id="assistant-key-delete">删除 Key</button>
+      </div>
+      <p data-backend-only="builtin" class="muted mini" id="assistant-key-status"></p>
+      <p data-backend-only="builtin" class="muted mini">Key 以明文保存在本机的应用配置目录（assistant-keys.json，只有当前用户可读），不会写进日志或算例。默认用 DeepSeek 官方 API；也可以填任何兼容 OpenAI 格式的服务，例如本机的 Ollama（http://127.0.0.1:11434/v1）。</p>
       <label for="assistant-approval">操作审批</label>
       <select class="select" id="assistant-approval">
         <option value="ask">每次询问</option>
@@ -1136,15 +1144,8 @@
         <option value="on">开启</option>
         <option value="off">不联网</option>
       </select>
-      <p class="muted mini">开启后助手可以搜索网页、打开搜索结果读正文，用于查文献与资料。内置后端用 DeepSeek 原生搜索（用 DeepSeek 的 Key，每次约 2 秒、几千 token，只能打开搜索结果或你消息里给出的网址）；Codex 与 Claude Code 用它们自带的搜索，计入各自的订阅。</p>
-      <label for="assistant-key">API Key</label>
-      <div class="assistant-key-row">
-        <input class="input" id="assistant-key" type="password" autocomplete="off" placeholder="粘贴后点“保存 Key”">
-        <button class="btn-ghost" type="button" id="assistant-key-save">保存 Key</button>
-        <button class="btn-ghost" type="button" id="assistant-key-delete">删除 Key</button>
-      </div>
-      <p class="muted mini" id="assistant-key-status"></p>
-      <p class="muted mini">Key 以明文保存在本机的应用配置目录（assistant-keys.json，只有当前用户可读），不会写进日志或算例。默认用 DeepSeek 官方 API；也可以填任何兼容 OpenAI 格式的服务，例如本机的 Ollama（http://127.0.0.1:11434/v1）。</p>
+      <p data-backend-only="builtin" class="muted mini">开启后助手可以搜索网页、打开搜索结果读正文，用于查文献与资料。用 DeepSeek 原生搜索（用上面的 DeepSeek Key，每次约 2 秒、几千 token），只能打开搜索结果或你消息里给出的网址。</p>
+      <p data-backend-only="codex claude_code" class="muted mini">开启后助手用 Codex / Claude Code 自带的联网搜索查文献与资料，计入你的订阅，不需要 DeepSeek Key。</p>
       <div class="pill-row"><button class="run-btn" type="button" id="assistant-settings-save">保存设置</button></div>
     </div>
     <p class="warn mini assistant-notice" id="assistant-notice" hidden></p>

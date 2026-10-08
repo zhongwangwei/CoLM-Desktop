@@ -31832,3 +31832,19 @@ GPP 的均值被 4 个基线 KGE 低于 −0.5 的站拉低（BE-Lon、DE-Geb、
 
 - 联网关时（Claude Code）：问今日头条新闻，答"联网已在 CoLM-Desktop 里关闭"，既不搜也不编。
 - colm-agent 46 项测试通过（新增 Codex 搜索卡片的查询词与成功判定）；`check-gui` 与 14 个前端套件通过；clippy 零警告、fmt 干净。
+
+## 第 636 轮：选外部后端时不显示 API Key 等内置后端的设置
+
+**过程**：用户要求选 Codex 或 Claude Code 时去掉 API Key 那一块。
+
+**现状**：
+- 服务地址、模型、API Key（输入框、保存与删除按钮、保存状态、明文存放说明）只属于内置后端。它们在设置面板里集中到"后端"下方，标 `data-backend-only="builtin"`。
+- 切换后端时按标记显示或隐藏；CSS 让隐藏压过各自的 grid / flex 显示方式。
+- 联网搜索的说明也按后端拆成两段：内置后端写 DeepSeek 原生搜索与 Key；Codex / Claude Code 写"用自带的联网搜索，计入你的订阅，不需要 DeepSeek Key"。
+
+**检查**：
+- 浏览器静态预览里逐项读可见元素：
+  - 选内置：后端、登录状态、服务地址、模型、API Key、Key 状态与说明、操作审批、联网搜索（DeepSeek 说明）；
+  - 选 Codex / Claude Code：只剩后端、登录状态、操作审批、联网搜索（自带搜索说明）。
+- 截图确认布局正常。
+- `check-gui` 与 14 个前端套件通过。

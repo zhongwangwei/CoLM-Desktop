@@ -362,6 +362,10 @@ export function backendProblem(backend, info) {
 /** 设置里“后端”下面的一行状态；返回那个后端的状态（内置后端返回 null）。 */
 async function refreshBackendStatus(backend = $('assistant-backend').value) {
   const line = $('assistant-backend-status');
+  // 服务地址、模型、API Key 只属于内置后端；Codex / Claude Code 用各自的登录，不显示这些。
+  for (const el of document.querySelectorAll('#assistant-settings [data-backend-only]')) {
+    el.hidden = !el.dataset.backendOnly.split(' ').includes(backend);
+  }
   // 输入框下的思考强度只对内置后端起作用；外部后端由它自己决定。
   $('assistant-think').disabled = backend !== 'builtin';
   $('assistant-think').title = t(backend === 'builtin' ? '思考强度：随时可改，下一条消息生效' : '思考强度由 Codex / Claude Code 自己决定');

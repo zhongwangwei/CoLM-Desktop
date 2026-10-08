@@ -709,6 +709,8 @@ body.resizing-assistant { user-select: none; cursor: col-resize; }
 .assistant-settings { display: grid; grid-template-columns: max-content 1fr; gap: 8px 12px; padding: 12px 14px;
   border-bottom: 1px solid var(--border-soft); background: var(--surface); }
 .assistant-settings[hidden] { display: none; }
+/* 只属于某个后端的设置项：隐藏时压过各自的 grid/flex 显示方式。 */
+.assistant-settings [data-backend-only][hidden] { display: none !important; }
 /* 引导模式：助手填过的控件。获得焦点（用户接手）时去掉。 */
 .ai-filled { outline: 2px solid var(--accent); outline-offset: 1px; background-color: var(--accent-weak) !important; transition: outline-color .3s; }
 .assistant-history { padding: 10px 14px 12px; border-bottom: 1px solid var(--border-soft); background: var(--surface); max-height: 45%; overflow-y: auto; }
