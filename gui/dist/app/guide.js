@@ -278,7 +278,8 @@ async function click(target) {
   const where = screen();
   if (where === 'launch') {
     if (target === 'local-run') { $('localRunCard').click(); await sleep(100); return; }
-    if (target === 'server-run') throw new Error('server runs are not available yet');
+    // 服务器设置要用户自己填（主机、目录、路径对应）：打开对话框，交给用户。
+    if (target === 'server-run') { $('serverRunCard').click(); await sleep(300); return; }
   }
   if (where === 'setup-wizard') {
     const gate = $('domaingate');

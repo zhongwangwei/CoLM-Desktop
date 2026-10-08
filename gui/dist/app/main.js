@@ -19,6 +19,7 @@ import './spatial.js';
 import './opencase.js';
 import './assistant.js';
 import './guide.js';
+import './remote.js';
 
 initI18n();
 initShell();

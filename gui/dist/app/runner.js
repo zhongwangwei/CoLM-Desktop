@@ -13,6 +13,7 @@ import { acceptsRunEvent, appendLogText, progressText } from './run-format.js';
 import { modelEngine } from './engine.js';
 import { fortranBlockedCases } from './hybrid.js';
 import { language, translateZh } from './i18n.js';
+import { runTarget, remoteRun } from './remote.js';
 
 // 单点内核不启 MPI；空间算例默认最多使用八个 MPI rank。
 // Rust 引擎只跑单进程（`colm-cli` 预检对它要求 `--ranks 1`），在进程内用多线程并行，所以 rank 数只对 Fortran 内核生效。
@@ -366,6 +367,11 @@ async function startRun(stage) {
   if (!dirs.length) { status('本次还没有可运行的算例；先在基本设定中创建或打开算例'); return; }
   if (stage !== 'mksrfdata' && stage !== 'mkinidata' && (await fortranBlockedCases(dirs)).length) {
     status('有算例装了 AI 参数化模型，Fortran 内核运行不了；请把模拟引擎换成 Rust 引擎，或在“AI 参数化”里移除模型');
+    return;
+  }
+  // 运行位置选了服务器：交给 remote.js 提交，之后由它查状态、取回结果。
+  if (runTarget() !== 'local') {
+    await remoteRun(stage, dirs, stage !== null || $('force').checked);
     return;
   }
   const runId = resetRunView(dirs);

@@ -808,3 +808,22 @@ body.assistant-open:has(.gate:not(.loading-gate):not([hidden])) .assistant {
 .app-dialog-text { margin: 0 0 12px; white-space: pre-wrap; line-height: 1.55; max-height: 50vh; overflow: auto; }
 .app-dialog .input { width: 100%; margin-bottom: 12px; }
 .app-dialog-actions { display: flex; justify-content: flex-end; gap: 8px; }
+
+/* 服务器运行（remote.js） */
+.remote-dialog { width: min(640px, 92vw); }
+.remote-form { display: grid; grid-template-columns: max-content 1fr; gap: 8px 12px; margin: 12px 0; align-items: start; }
+.remote-form > label { padding-top: 7px; font-size: 12.5px; }
+.remote-form textarea { width: 100%; resize: vertical; font-family: var(--mono); font-size: 12px; }
+.remote-form .muted.mini { margin: 4px 0 0; }
+.remote-probe { min-height: 1.2em; margin-bottom: 8px; line-height: 1.6; }
+/* 运行位置的选框要放下“服务器：别名”，中间一列放宽。 */
+#run-target-setting { grid-template-columns: minmax(240px, 1fr) minmax(170px, auto) minmax(140px, auto); }
+#run-target-setting #manage-servers { justify-self: start; }
+.remote-runs { margin-top: 14px; border-top: 1px solid var(--border-soft); padding-top: 10px; }
+.remote-runs h4 { margin: 0 0 6px; font-size: 13px; }
+.remote-run { padding: 6px 0; border-bottom: 1px dashed var(--border-soft); }
+.remote-run:last-child { border-bottom: 0; }
+.remote-run-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.remote-run-state { margin-left: auto; }
+.remote-run.failed .remote-run-state { color: var(--fail); }
+.remote-run.finished:not(.failed) .remote-run-state { color: var(--pass); }

@@ -499,6 +499,14 @@
       <div class="card">
         <h3>开始运行</h3>
         <div class="ch">单阶段按钮会明确重跑该阶段；“运行全部”仍按输入指纹跳过无需重跑的阶段。</div>
+        <div class="run-parallel-setting" id="run-target-setting">
+          <div>
+            <label for="run-target">运行位置</label>
+            <span>本机，或一台已配置的服务器：经你自己的 ssh 连接，在服务器上编译并用 Rust 引擎运行，跑完自动把结果取回本机。</span>
+          </div>
+          <select class="select" id="run-target"><option value="local">本机</option></select>
+          <button class="btn-ghost" type="button" id="manage-servers">管理服务器…</button>
+        </div>
         <div class="run-parallel-setting" id="workers-setting">
           <div>
             <label for="cpu-workers">批量并行算例数</label>
@@ -543,6 +551,10 @@
         </div>
         <p class="muted mini run-stop-note">终止运行会结束当前批次及其子进程；退出软件也会自动终止由本次软件启动的任务。</p>
         <div class="stages" id="stages"></div>
+        <div class="remote-runs" id="remote-runs" hidden>
+          <h4>服务器上的运行</h4>
+          <div id="remote-run-list"></div>
+        </div>
       </div>
     </section>
 
@@ -1184,6 +1196,31 @@
   </footer>
 </div>
 
+<dialog id="remote-dialog" class="app-dialog remote-dialog" aria-labelledby="remote-title">
+  <h3 id="remote-title">服务器</h3>
+  <p class="muted mini">经你自己的 ssh 连接（~/.ssh/config 里的别名、跳板机、密钥都可以用），应用不保存任何密码或私钥。需要动态口令或 VPN 的机器，请先在终端登录一次。</p>
+  <div class="remote-form">
+    <label for="remote-which">配置</label>
+    <select class="select" id="remote-which"></select>
+    <label for="remote-host">主机</label>
+    <div><input class="input" id="remote-host" list="remote-host-list" placeholder="ssh 配置里的别名，例如 7920land" autocomplete="off"><datalist id="remote-host-list"></datalist></div>
+    <label for="remote-root">工作目录</label>
+    <input class="input" id="remote-root" placeholder="服务器上的绝对路径，例如 /data/你的用户名/colm-desktop" autocomplete="off">
+    <label for="remote-maps">路径对应</label>
+    <div><textarea class="input" id="remote-maps" rows="3" placeholder="每行一条：本机前缀 = 服务器前缀"></textarea>
+      <p class="muted mini">算例引用的数据（强迫场、原始数据等）在服务器上的位置。例如 /Volumes/Data/Data/PLUMBER2s = /data/PLUMBER2s。对应不上的数据不会悄悄上传，提交时会列出来。</p></div>
+    <label for="remote-threads">线程数</label>
+    <input class="input" id="remote-threads" type="number" min="1" max="256" step="1" value="8">
+  </div>
+  <div class="remote-probe mini" id="remote-probe-result"></div>
+  <div class="assistant-approval-actions">
+    <button class="btn-ghost" type="button" id="remote-delete">删除这台</button>
+    <button class="btn-ghost" type="button" id="remote-test">测试连接</button>
+    <button class="btn-ghost" type="button" id="remote-close">取消</button>
+    <button class="run-btn" type="button" id="remote-save">保存</button>
+  </div>
+</dialog>
+
 <dialog id="aboutDialog" class="about-dialog" aria-labelledby="about-title">
   <form method="dialog" class="about-card">
     <button class="about-close" aria-label="关闭" title="关闭">×</button>
@@ -1215,7 +1252,7 @@
   <div class="gate-panel launch-panel">
     <div class="launch-brand"><img src="assets/colm-icon.png" alt=""><span>CoLM Desktop</span></div>
     <h1>选择运行方式</h1>
-    <p class="muted">先选择计算资源；本地运行已可用，服务器运行将在后续版本开放。</p>
+    <p class="muted">先选择计算资源：在本机运行，或经你自己的 ssh 放到服务器上运行。</p>
     <p class="beta-note">测试版（Beta）：功能仍在快速迭代，当前可能存在较多已知或未知缺陷。请保留原始数据与算例备份，正式科研使用前务必独立核验结果。</p>
     <div class="domain-cards launch-mode-cards" aria-label="运行方式">
       <button class="domain-card launch-mode-card" id="localRunCard" type="button">
@@ -1223,10 +1260,10 @@
         <span class="dd">在本机创建算例、运行 CoLM 内核并查看结果。</span>
         <span class="launch-action">进入本地工作台 →</span>
       </button>
-      <button class="domain-card launch-mode-card" id="serverRunCard" type="button" disabled aria-disabled="true">
+      <button class="domain-card launch-mode-card" id="serverRunCard" type="button">
         <span class="dt">服务器运行</span>
-        <span class="dd">用于未来接入远程队列、HPC 和服务器端批量任务。</span>
-        <span class="dsoon">暂未开放</span>
+        <span class="dd">在本机建算例，放到你的服务器上用 Rust 引擎运行，跑完自动取回结果。</span>
+        <span class="launch-action">设置服务器 →</span>
       </button>
     </div>
   </div>

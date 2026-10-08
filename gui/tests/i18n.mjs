@@ -194,9 +194,9 @@ if ((html.match(/data-lang="zh"/g) ?? []).length !== 3
   throw new Error('language switch must exist in the header, launch page, and model wizard');
 }
 const serverCard = html.match(/<button class="domain-card launch-mode-card" id="serverRunCard"[\s\S]*?<\/button>/)?.[0] ?? '';
-if (!serverCard.includes('disabled') || !serverCard.includes('aria-disabled="true"')
-    || !serverCard.includes('暂未开放')) {
-  throw new Error('server run must stay visible, disabled, and marked unavailable');
+// 服务器运行（R1）已开放：卡片可点，入口是“设置服务器”。
+if (serverCard.includes('disabled') || !serverCard.includes('设置服务器 →')) {
+  throw new Error('server run must be enabled and lead to the server setup');
 }
 if (!html.includes('assets/colm-icon.png') || !html.includes('id="modeSeg"')) {
   throw new Error('project icon or expert-mode entry is missing');
