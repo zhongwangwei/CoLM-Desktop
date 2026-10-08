@@ -22,6 +22,8 @@ colm-srfdata = { path = "../colm-srfdata" }
 colm-hybrid = { path = "../colm-hybrid", default-features = false }
 # 远程运行（remote-*）：经用户自己的 ssh 在服务器上编 Rust 引擎、跑算例、取回结果。
 colm-remote = { path = "../colm-remote" }
+# 开发工作区（ws-*）：助手改源码、编译、测试、对照、登记实验内核。
+colm-workspace = { path = "../colm-workspace" }
 anyhow.workspace = true
 # forcing-probe 要读猜到的槽位变量各自的 `units` 属性——colm-forcing
 # 已经把 static netcdf + HDF5 拉进了这颗二进制（forcing-convert 那条路

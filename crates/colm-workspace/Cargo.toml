@@ -1,0 +1,19 @@
+[package]
+name = "colm-workspace"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish.workspace = true
+description = "Development workspaces for the AI assistant (docs/design-ai-assistant.md, sections 4-6)"
+
+[dependencies]
+anyhow.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+# 对比两份 history 要读 NetCDF；与 colm-cli 一样静态链接。
+netcdf = { workspace = true, features = ["static"] }
+
+[lints]
+workspace = true

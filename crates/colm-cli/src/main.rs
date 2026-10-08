@@ -50,6 +50,7 @@ mod hybrid_cmd;
 mod hybrid_fit;
 mod observation_table;
 mod remote_cmd;
+mod ws_cmd;
 mod study;
 
 use std::path::{Path, PathBuf};
@@ -133,6 +134,9 @@ usage:
                    # 列出全部支持的评估变量及当前算例/观测是否可用
   colm-cli evaluation-plan <case-dir> --obs <Flux.nc> --kernel <dir>
                    # 不依赖 history，按 case.nml + 内核预览可评估目标
+  colm-cli ws-create|ws-list|ws-status|ws-search|ws-read|ws-symbols|ws-patch|ws-revert|ws-build-engine|ws-build-kernel|
+                    ws-test|ws-run|ws-compare|ws-parity|ws-regress|ws-kernels|ws-export|ws-delete ...
+                    # 开发工作区：助手改源码、编译、测试、对照、登记实验内核（用法见 ws_cmd.rs 头部）
   colm-cli history-subset <case-dir> --out <dir> [--vars f_a,f_b] [--from YYYY-MM] [--to YYYY-MM] [--compress N] [--list 1]
                     # 把 history 裁成只含所选变量与月份的压缩小文件（远程取回结果用，R5）
   colm-cli history-catalog <case-dir>
@@ -299,6 +303,7 @@ fn main() -> Result<()> {
         "remote-kernels" => remote_cmd::cmd_kernels(&opts)?,
         "engine-pack" => remote_cmd::cmd_pack(&opts)?,
         "history-subset" => history_subset::cmd_history_subset(&opts)?,
+        command if command.starts_with("ws-") => ws_cmd::dispatch(command, &opts)?,
         "remote-status" => remote_cmd::cmd_status(&opts)?,
         "remote-cancel" => remote_cmd::cmd_cancel(&opts)?,
         "remote-fetch" => remote_cmd::cmd_fetch(&opts)?,

@@ -165,6 +165,7 @@ dependencies = [
  "colm-remote",
  "colm-schema",
  "colm-srfdata",
+ "colm-workspace",
  "netcdf",
  "serde",
  "serde_json",
@@ -311,6 +312,16 @@ dependencies = [
  "colm-namelist",
  "netcdf",
  "rayon",
+]
+
+[[package]]
+name = "colm-workspace"
+version = "0.3.0-beta.3"
+dependencies = [
+ "anyhow",
+ "netcdf",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
