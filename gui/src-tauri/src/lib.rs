@@ -17,6 +17,7 @@ mod histvars;
 mod observation;
 mod project;
 mod recent;
+mod remote;
 mod sidecar;
 mod sitedata;
 mod sites;
@@ -29,6 +30,7 @@ use histvars::*;
 use observation::*;
 use project::*;
 use recent::*;
+use remote::*;
 use sidecar::*;
 use sitedata::*;
 use sites::*;
@@ -166,6 +168,14 @@ pub fn run() {
             assistant_resume,
             assistant_ui_result,
             assistant_backend_status,
+            remote_config,
+            remote_save_config,
+            remote_ssh_hosts,
+            remote_probe,
+            remote_run,
+            remote_status,
+            remote_cancel,
+            remote_fetch,
             hybrid_check,
             hybrid_climate,
             hybrid_install,

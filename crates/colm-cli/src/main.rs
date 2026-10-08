@@ -48,6 +48,7 @@ mod fingerprint;
 mod hybrid_cmd;
 mod hybrid_fit;
 mod observation_table;
+mod remote_cmd;
 mod study;
 
 use std::path::{Path, PathBuf};
@@ -286,6 +287,11 @@ fn main() -> Result<()> {
         "hybrid-install" => hybrid_cmd::cmd_hybrid_install(&opts)?,
         "hybrid-check" => hybrid_cmd::cmd_hybrid_check(&opts)?,
         "hybrid-info" => hybrid_cmd::cmd_hybrid_info(&opts)?,
+        "remote-probe" => remote_cmd::cmd_probe(&opts)?,
+        "remote-run" => remote_cmd::cmd_run(&opts)?,
+        "remote-status" => remote_cmd::cmd_status(&opts)?,
+        "remote-cancel" => remote_cmd::cmd_cancel(&opts)?,
+        "remote-fetch" => remote_cmd::cmd_fetch(&opts)?,
         "hybrid-climate" => hybrid_cmd::cmd_hybrid_climate(&opts)?,
         "hybrid-fit" => hybrid_fit::cmd_hybrid_fit(&opts)?,
         "hybrid-remove" => hybrid_cmd::cmd_hybrid_remove(&opts)?,
@@ -2520,7 +2526,13 @@ fn run_case(
     // 而工作目录与 namelist 路径都要交给子进程 —— 那种形式两边都不认。
     let case = &colm_kernel::manifest::absolute(case)
         .with_context(|| format!("cannot resolve {}", case.display()))?;
-    let kernel = Kernel::open(kernel_dir)?;
+    // 引擎与前处理都用 Rust 时三个 Fortran 二进制不会被执行，只要清单（宏与身份）：远程服务器上
+    // 只放清单就能跑（第 637 轮）。
+    let kernel = if engine == ModelEngine::Rust && preprocessors == PreprocessorMode::Rust {
+        Kernel::open_manifest(kernel_dir)?
+    } else {
+        Kernel::open(kernel_dir)?
+    };
     if ranks == 0 {
         bail!("--ranks must be at least 1");
     }
@@ -3491,7 +3503,8 @@ fn planned_history_variables(
     case_nml: &Path,
     kernel_dir: &Path,
 ) -> Result<std::collections::BTreeSet<String>> {
-    let kernel = Kernel::open(kernel_dir)?;
+    // 只用到清单里的宏。
+    let kernel = Kernel::open_manifest(kernel_dir)?;
     let macros = kernel
         .manifest
         .macros

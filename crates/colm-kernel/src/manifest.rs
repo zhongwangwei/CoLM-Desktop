@@ -128,6 +128,16 @@ pub struct Kernel {
 impl Kernel {
     /// 读清单并校验三个二进制。任一不符即失败。
     pub fn open(dir: &Path) -> Result<Kernel> {
+        Self::read(dir, true)
+    }
+
+    /// 只读清单，不要求三个 Fortran 二进制在场：引擎与前处理都用 Rust 时它们不会被执行，只用到清单里的
+    /// 宏与身份。远程服务器上只放一份清单（第 637 轮），不必为它编一个 Fortran 内核。
+    pub fn open_manifest(dir: &Path) -> Result<Kernel> {
+        Self::read(dir, false)
+    }
+
+    fn read(dir: &Path, check_programs: bool) -> Result<Kernel> {
         let mpath = dir.join("manifest.json");
         let text = std::fs::read_to_string(&mpath)
             .with_context(|| format!("cannot read the kernel manifest at {}", mpath.display()))?;
@@ -143,7 +153,7 @@ impl Kernel {
             );
         }
 
-        for prog in PROGRAMS {
+        for prog in PROGRAMS.into_iter().filter(|_| check_programs) {
             let exe = dir.join(program_file(prog));
             if !exe.exists() {
                 bail!(

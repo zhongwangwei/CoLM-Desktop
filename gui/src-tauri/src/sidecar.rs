@@ -490,6 +490,27 @@ fn stage_heading(stage: &str) -> String {
 ///
 /// 标记由 `colm-cli run --stream` 自己打。实测 CoLM 的 34180 行输出里
 /// 没有一行以 `===` 开头，也没有一处出现 `colm-stage`，所以不会撞。
+/// 日志里最后一个模拟步：（步号，日期）。
+pub(crate) type LastStep = (u64, String);
+
+/// 把一段日志（例如远程作业的日志末尾）解析成各阶段的最新状态与最后一个模拟步：
+/// 与本机运行用同一套 `parse_stage` / `parse_progress`。
+pub(crate) fn parse_log(log: &str) -> (Vec<(String, String)>, Option<LastStep>) {
+    let mut stages: Vec<(String, String)> = Vec::new();
+    let mut progress = None;
+    for line in log.lines() {
+        if let Some((name, state)) = parse_stage(line) {
+            match stages.iter_mut().find(|(n, _)| *n == name) {
+                Some(entry) => entry.1 = state,
+                None => stages.push((name, state)),
+            }
+        } else if let Some(step) = parse_progress(line) {
+            progress = Some((step.step, step.date));
+        }
+    }
+    (stages, progress)
+}
+
 fn parse_stage(line: &str) -> Option<(String, String)> {
     let s = line
         .trim()

@@ -162,6 +162,7 @@ dependencies = [
  "colm-hybrid",
  "colm-kernel",
  "colm-namelist",
+ "colm-remote",
  "colm-schema",
  "colm-srfdata",
  "netcdf",
@@ -266,6 +267,16 @@ name = "colm-ncchar"
 version = "0.3.0-beta.3"
 dependencies = [
  "netcdf",
+]
+
+[[package]]
+name = "colm-remote"
+version = "0.3.0-beta.3"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "sha2",
 ]
 
 [[package]]
