@@ -291,6 +291,8 @@ fn main() -> Result<()> {
         "hybrid-info" => hybrid_cmd::cmd_hybrid_info(&opts)?,
         "remote-probe" => remote_cmd::cmd_probe(&opts)?,
         "remote-run" => remote_cmd::cmd_run(&opts)?,
+        "remote-dist" => remote_cmd::cmd_dist(&opts)?,
+        "engine-pack" => remote_cmd::cmd_pack(&opts)?,
         "remote-status" => remote_cmd::cmd_status(&opts)?,
         "remote-cancel" => remote_cmd::cmd_cancel(&opts)?,
         "remote-fetch" => remote_cmd::cmd_fetch(&opts)?,

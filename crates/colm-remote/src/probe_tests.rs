@@ -24,7 +24,10 @@ slurm=\npbs=\nlsf=\nqueues=\nroot_exists=\nroot_writable=1\nroot_free_kb=2791728
         "os=Ubuntu\narch=x86_64\nslurm=/usr/bin/sbatch\nroot_writable=\n",
     );
     assert_eq!(bare.schedulers, ["slurm"]);
-    assert_eq!(bare.problems.len(), 3, "{:?}", bare.problems);
+    // 缺 cargo、cmake 与编译器不再算“问题”（有预编包就能用），记在 build_problems 里。
+    assert_eq!(bare.problems.len(), 1, "{:?}", bare.problems);
+    assert_eq!(bare.build_problems.len(), 2, "{:?}", bare.build_problems);
+    assert!(probe.build_problems.is_empty());
     assert!(script("/r").contains("R='/r'"));
     assert!(probe.queues.is_empty());
     let queues = parse(

@@ -15,7 +15,8 @@
     ],
     "resources": {
       "../../kernels": "kernels",
-      "../../examples": "examples"
+      "../../examples": "examples",
+      "engine": "engine"
     }
   }
 }

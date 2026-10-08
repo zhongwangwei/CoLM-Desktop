@@ -23,13 +23,14 @@ pub const BINARIES: [(&str, &str); 4] = [
 ];
 
 /// 快照包含的仓库路径（整个 workspace 加编译期读入的 `vendor`）。
-pub const SNAPSHOT_PATHS: [&str; 6] = [
+pub const SNAPSHOT_PATHS: [&str; 7] = [
     "Cargo.toml",
     "Cargo.lock",
     "crates",
     "oracle",
     "xtask",
     "vendor",
+    "scripts",
 ];
 
 /// 引擎源码从哪来。
@@ -189,6 +190,145 @@ fi
         packages = packages.join(" "),
         copies = copies.join(" "),
     )
+}
+
+// ---- 预编的引擎（R3）：没有 cargo 或不能联网的服务器直接用，不必在那里编译 ---------------------------------------
+
+/// 预编包的文件名：`colm-engine-linux-<arch>.tar.gz`（`arch` 是 `uname -m`：x86_64 或 aarch64）。
+pub fn prebuilt_name(arch: &str) -> String {
+    format!("colm-engine-linux-{arch}.tar.gz")
+}
+
+/// 本机放预编包的缓存目录（`remote-dist` 把服务器上编好的取回到这里）。
+pub fn cache_dir() -> PathBuf {
+    if let Some(dir) = std::env::var_os("COLM_ENGINE_CACHE") {
+        return PathBuf::from(dir);
+    }
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+        .unwrap_or_default();
+    let base = if cfg!(target_os = "macos") {
+        home.join("Library/Caches")
+    } else if cfg!(windows) {
+        std::env::var_os("LOCALAPPDATA")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join("AppData/Local"))
+    } else {
+        std::env::var_os("XDG_CACHE_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join(".cache"))
+    };
+    base.join("edu.sysu.colm.desktop").join("engines")
+}
+
+/// 缓存里与某份源码快照对应的预编包文件名。带快照标识，免得源码改了还在用旧程序。
+pub fn cached_name(arch: &str, snapshot_id: &str) -> String {
+    format!("colm-engine-linux-{arch}-{snapshot_id}.tar.gz")
+}
+
+/// 一个预编包：标识按包内容算，与源码无关。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Prebuilt {
+    pub id: String,
+    pub tarball: PathBuf,
+}
+
+impl Prebuilt {
+    pub fn open(tarball: &Path) -> Result<Self> {
+        let bytes =
+            std::fs::read(tarball).with_context(|| format!("cannot read {}", tarball.display()))?;
+        Ok(Self {
+            id: format!("pre-{}", &format!("{:x}", Sha256::digest(&bytes))[..16]),
+            tarball: tarball.to_path_buf(),
+        })
+    }
+}
+
+/// 安装包里放引擎材料（源码包、预编包）的目录，按优先级：GUI 告诉的资源目录（环境变量
+/// `COLM_RESOURCE_DIR`）、`colm-cli` 旁边、macOS 的 `../Resources`；每处都找 `engine/` 子目录与目录本身。
+pub fn resource_dirs(exe_dir: &Path) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    if let Some(dir) = std::env::var_os("COLM_RESOURCE_DIR") {
+        roots.push(PathBuf::from(dir));
+    }
+    roots.push(exe_dir.to_path_buf());
+    roots.push(exe_dir.join("../Resources"));
+    roots
+        .into_iter()
+        .flat_map(|root| [root.join("engine"), root])
+        .collect()
+}
+
+/// 安装包随附的源码包 `colm-src.tar.gz`（`engine-pack` 在打包时生成）。
+pub fn bundled_source(dirs: &[PathBuf]) -> Option<PathBuf> {
+    dirs.iter()
+        .map(|d| d.join("colm-src.tar.gz"))
+        .find(|p| p.is_file())
+}
+
+/// 找一个适合 `arch` 的预编包。顺序：
+/// 1. 应用安装包里随附的（与随附的源码同一版本，不核对快照）；
+/// 2. 缓存里与当前源码快照一致的那份（开发时：源码一改，旧包就不再匹配）。
+pub fn find_prebuilt(arch: &str, snapshot_id: Option<&str>, dirs: &[PathBuf]) -> Option<Prebuilt> {
+    let mut candidates: Vec<PathBuf> = dirs.iter().map(|d| d.join(prebuilt_name(arch))).collect();
+    if let Some(id) = snapshot_id {
+        candidates.push(cache_dir().join(cached_name(arch, id)));
+    }
+    candidates
+        .into_iter()
+        .find(|p| p.is_file())
+        .and_then(|p| Prebuilt::open(&p).ok())
+}
+
+/// 把源码快照打成 `colm-src.tar.gz`（根目录就是仓库根），随安装包附带：没有仓库的机器也能把源码传到服务器上编。
+pub fn pack_source(snapshot: &Snapshot, out: &Path) -> Result<()> {
+    let Source::Checkout(repo) = &snapshot.source else {
+        bail!("only a checkout can be packed");
+    };
+    if let Some(parent) = out.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let list = std::env::temp_dir().join(format!("colm-pack-{}.txt", std::process::id()));
+    std::fs::write(&list, snapshot.files.join("\n") + "\n")?;
+    let status = Command::new("tar")
+        .env("COPYFILE_DISABLE", "1")
+        .arg("-czf")
+        .arg(out)
+        .arg("-C")
+        .arg(repo)
+        .arg("-T")
+        .arg(&list)
+        .status()
+        .context("cannot run tar")?;
+    let _ = std::fs::remove_file(&list);
+    if !status.success() {
+        bail!("tar failed while packing the engine sources");
+    }
+    Ok(())
+}
+
+/// 服务器上这个预编包已经在不在。
+pub fn prebuilt_present(ssh: &Ssh, root: &str, id: &str) -> Result<bool> {
+    let exe = quote(&format!("{}/bin/colm-rs", engine_dir(root, id)));
+    Ok(ssh
+        .run_ok(&format!("test -x {exe} && echo yes || echo no"))?
+        .trim()
+        == "yes")
+}
+
+/// 把预编包传上去解开（已经在就跳过）。
+pub fn upload_prebuilt(ssh: &Ssh, root: &str, prebuilt: &Prebuilt) -> Result<bool> {
+    if prebuilt_present(ssh, root, &prebuilt.id)? {
+        return Ok(false);
+    }
+    ssh.upload_tarball(&prebuilt.tarball, &engine_dir(root, &prebuilt.id))?;
+    if !prebuilt_present(ssh, root, &prebuilt.id)? {
+        bail!(
+            "the prebuilt engine was uploaded but bin/colm-rs is not there; the package is damaged"
+        );
+    }
+    Ok(true)
 }
 
 #[cfg(test)]

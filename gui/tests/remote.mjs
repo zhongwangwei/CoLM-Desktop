@@ -51,6 +51,8 @@ assert.deepEqual(remote.parseDirectives(' --constraint=ib \n\n--exclusive\n'), [
 assert.deepEqual(remote.parseDirectives(''), []);
 const withQueues = remote.probeLines({ hostname: 'c1', os: 'Linux', arch: 'x86_64', schedulers: ['slurm'], queues: ['cpu', 'gpu'] });
 assert.equal(withQueues.at(-1), '分区或队列: cpu, gpu');
+assert.equal(remote.probeLines({ hostname: 'c', os: 'L', arch: 'x86_64', engine: 'prebuilt' }).at(-1), '引擎: 传预编的程序（这台服务器不用编译）');
+assert.equal(remote.probeLines({ hostname: 'c', os: 'L', arch: 'x86_64', engine: 'source' }).at(-1), '引擎: 在服务器上从源码编译');
 assert.equal(withQueues.at(-2), '调度系统: slurm');
 
 // 运行页与首页都接上了：运行按钮在选了服务器时交给 remote.js；首页的服务器卡片可点。

@@ -20,6 +20,7 @@ on:
       - crates/**
       - gui/**
       - oracle/scripts/**
+      - scripts/**
       - vendor/CoLM202X/**
       - .github/workflows/release.yml
   workflow_dispatch:
@@ -90,8 +91,28 @@ jobs:
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
-  bundle:
+  # 预编的 Rust 引擎（glibc 2.17，x86_64 与 aarch64）：没有 cargo 或不能联网的服务器与超算直接用，
+  # 不必在那里编译。与平台无关，所以只在一个 Linux 作业里编一次，各平台的安装包都附带。
+  engine-linux:
     needs: prepare
+    if: needs.prepare.outputs.build == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the prebuilt engines
+        shell: bash
+        run: |
+          set -euo pipefail
+          scripts/build-engine-linux.sh "$PWD" "$RUNNER_TEMP/engine-out" "$RUNNER_TEMP/engine-tools" x86_64 aarch64
+          ls -la "$RUNNER_TEMP/engine-out"/*.tar.gz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: colm-engine-linux
+          path: ${{ runner.temp }}/engine-out/colm-engine-linux-*.tar.gz
+          if-no-files-found: error
+
+  bundle:
+    needs: [prepare, engine-linux]
     if: needs.prepare.outputs.build == 'true'
     strategy:
       fail-fast: false
@@ -231,6 +252,12 @@ jobs:
           COLM_KERNEL_RANKS: 2
         run: cargo test -p colm-kernel a_real_kernel_can_actually_be_spawned -- --nocapture
 
+      - name: Prebuilt engines for remote runs
+        uses: actions/download-artifact@v4
+        with:
+          name: colm-engine-linux
+          path: gui/src-tauri/engine
+
       - name: Bundle
         shell: bash
         working-directory: gui/src-tauri
@@ -287,6 +314,10 @@ jobs:
           done
           test -x "$app/Contents/Resources/kernels/_runtime/bin/mpiexec"
           test -x "$app/Contents/MacOS/colm-cli"
+          # 远程运行要用的：随附的引擎源码（没有仓库也能在服务器上编），以及两种架构的预编引擎。
+          test -f "$app/Contents/Resources/engine/colm-src.tar.gz"
+          test -f "$app/Contents/Resources/engine/colm-engine-linux-x86_64.tar.gz"
+          test -f "$app/Contents/Resources/engine/colm-engine-linux-aarch64.tar.gz"
           # 示例站点也必须在里面：少了它，一个刚装好程序的人手上没有任何
           # 数据，连「这程序能不能用」都判断不了。三件套缺一不可 ——
           # 少了 Forcing 界面会说「这个站点没有强迫场，跑不了」，

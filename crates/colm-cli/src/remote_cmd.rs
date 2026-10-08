@@ -6,6 +6,7 @@
 //!                        [--stage S] [--force 1] [--threads N] [--upload-unmapped 1]
 //!                        [--scheduler auto|bare|slurm|pbs|lsf] [--partition P] [--account A] [--walltime T]
 //!                        [--cpus N] [--mem-gb N] [--env-script TEXT] [--directive '-x…']… [--dry-run 1]
+//! colm-cli remote-dist  --host H --root R [--targets x86_64,aarch64] [--out 目录]
 //! colm-cli remote-status <case> [--lines N]
 //! colm-cli remote-cancel <case>
 //! colm-cli remote-fetch  <case>
@@ -27,7 +28,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, ensure, Context, Result};
 use colm_namelist::Value;
-use colm_remote::engine::{self, Source};
+use colm_remote::engine::{self, Prebuilt, Snapshot, Source};
 use colm_remote::job::{self, Spec};
 use colm_remote::sched::{self, Resources, Scheduler};
 use colm_remote::ssh::{quote, Ssh};
@@ -342,20 +343,90 @@ fn root_of(opts: &Opts) -> Result<String> {
 
 /// 引擎源码：开发环境里是这个仓库，安装包里是随应用附带的 `colm-src.tar.gz`。
 fn engine_source() -> Result<Source> {
-    let exe = std::env::current_exe()?;
-    let dir = exe.parent().context("colm-cli has no directory")?;
-    if let Some(source) = Source::find_checkout(dir) {
+    let dir = exe_dir()?;
+    if let Some(source) = Source::find_checkout(&dir) {
         return Ok(source);
     }
-    for candidate in [
-        dir.join("colm-src.tar.gz"),
-        dir.join("../Resources/colm-src.tar.gz"),
-    ] {
-        if candidate.is_file() {
-            return Ok(Source::Tarball(candidate));
-        }
+    if let Some(tarball) = engine::bundled_source(&engine::resource_dirs(&dir)) {
+        return Ok(Source::Tarball(tarball));
     }
     bail!("the engine sources were not found next to colm-cli; this build cannot run remotely")
+}
+
+/// 这次用哪个引擎：服务器上从源码编，或者传一个预编包。
+enum Engine {
+    Source(Snapshot),
+    Prebuilt(Prebuilt),
+}
+
+impl Engine {
+    fn id(&self) -> &str {
+        match self {
+            Self::Source(snapshot) => &snapshot.id,
+            Self::Prebuilt(prebuilt) => &prebuilt.id,
+        }
+    }
+
+    fn kind(&self) -> &'static str {
+        match self {
+            Self::Source(_) => "source",
+            Self::Prebuilt(_) => "prebuilt",
+        }
+    }
+
+    /// 传上去（已经在就跳过）；返回这次是不是真的传了。
+    fn upload(&self, ssh: &Ssh, root: &str) -> Result<bool> {
+        match self {
+            Self::Source(snapshot) => engine::upload(ssh, root, snapshot),
+            Self::Prebuilt(prebuilt) => engine::upload_prebuilt(ssh, root, prebuilt),
+        }
+    }
+}
+
+fn exe_dir() -> Result<PathBuf> {
+    Ok(std::env::current_exe()?
+        .parent()
+        .context("colm-cli has no directory")?
+        .to_path_buf())
+}
+
+/// 选引擎。`--engine-mode`：
+/// - `source`：把源码传上去，在服务器上编（要 cargo、cmake 与 C 编译器）；
+/// - `prebuilt`：传预编包（`--prebuilt 路径`，或应用随附的、缓存里与当前源码一致的那份）；
+/// - `auto`（默认）：服务器能编就从源码编，不能（没有 cargo 等）就用预编包，两样都没有就说明怎么办。
+fn choose_engine(opts: &Opts, ssh: &Ssh, root: &str) -> Result<Engine> {
+    let mode = opts.get("--engine-mode").unwrap_or_else(|| "auto".into());
+    ensure!(
+        ["auto", "source", "prebuilt"].contains(&mode.as_str()),
+        "--engine-mode must be auto, source or prebuilt"
+    );
+    let source = engine_source().and_then(|s| engine::snapshot(&s));
+    if mode == "source" {
+        return Ok(Engine::Source(source?));
+    }
+    let probe = colm_remote::probe::probe(ssh, root)?;
+    let can_build = probe.cargo.is_some() && probe.cmake && probe.cc;
+    if mode == "auto" && can_build {
+        return Ok(Engine::Source(source?));
+    }
+    let prebuilt = match opts.get("--prebuilt") {
+        Some(path) => Some(Prebuilt::open(Path::new(&path))?),
+        None => engine::find_prebuilt(
+            &probe.arch,
+            source.as_ref().ok().map(|s| s.id.as_str()),
+            &engine::resource_dirs(&exe_dir()?),
+        ),
+    };
+    match prebuilt {
+        Some(prebuilt) => Ok(Engine::Prebuilt(prebuilt)),
+        None => bail!(
+            "{} cannot build the engine (cargo, cmake or a C compiler is missing) and no prebuilt engine for {} was found; \
+             build one with `colm-cli remote-dist --host <a machine with internet> --root <dir>` or pass --prebuilt <colm-engine-linux-{}.tar.gz>",
+            ssh.host,
+            probe.arch,
+            probe.arch
+        ),
+    }
 }
 
 /// 作业体：先确保引擎编好，再跑三段。
@@ -389,9 +460,122 @@ fn job_body(
     ))
 }
 
+/// 在一台联网的 Linux 机器上为 `--targets` 预编引擎（glibc 2.17，见 `scripts/build-engine-linux.sh`），取回到本机的
+/// 缓存目录（或 `--out`）。之后没有 cargo 或不能联网的服务器用 `remote-run` 的预编包路径就不必再编。
+pub(super) fn cmd_dist(opts: &Opts) -> Result<()> {
+    let ssh = Ssh::new(&opts.need_str("--host")?)?;
+    let root = root_of(opts)?;
+    let targets: Vec<String> = opts
+        .get("--targets")
+        .unwrap_or_else(|| "x86_64".into())
+        .split(',')
+        .map(|t| t.trim().to_owned())
+        .filter(|t| !t.is_empty())
+        .collect();
+    ensure!(!targets.is_empty(), "--targets needs x86_64 and/or aarch64");
+    for target in &targets {
+        ensure!(
+            ["x86_64", "aarch64"].contains(&target.as_str()),
+            "unknown target {target}; use x86_64 or aarch64"
+        );
+    }
+    let out = opts
+        .get("--out")
+        .map(PathBuf::from)
+        .unwrap_or_else(engine::cache_dir);
+    let snapshot = engine::snapshot(&engine_source()?)?;
+    let uploaded = engine::upload(&ssh, &root, &snapshot)?;
+    let src = quote(&format!("{}/src", engine::engine_dir(&root, &snapshot.id)));
+    let dist_dir = format!("{}/dist", engine::engine_dir(&root, &snapshot.id));
+    let id = format!("dist-{}", now());
+    let body = format!(
+        "echo {sid} > {src}/.colm-snapshot-id\necho \"building prebuilt engines\" > phase\nbash {src}/scripts/build-engine-linux.sh {src} {dist} {tools} {targets}\n",
+        sid = snapshot.id,
+        dist = quote(&dist_dir),
+        tools = quote(&format!("{root}/tools")),
+        targets = targets.join(" "),
+    );
+    job::submit(&ssh, &root, &id, &body, &Spec::bare())?;
+    eprintln!(
+        "building prebuilt engines ({}) on {} as job {id}; source snapshot {}{}",
+        targets.join(", "),
+        ssh.host,
+        snapshot.id,
+        if uploaded { " (uploaded)" } else { "" }
+    );
+    loop {
+        std::thread::sleep(std::time::Duration::from_secs(20));
+        let status = job::status(&ssh, &root, &id, 3)?;
+        let last = status.log_tail.lines().last().unwrap_or("").trim();
+        eprintln!("  {:?} {}", status.state, last);
+        match status.state {
+            job::State::Finished { exit_code: 0 } => break,
+            job::State::Finished { exit_code } => {
+                let tail = job::status(&ssh, &root, &id, 40)?.log_tail;
+                bail!(
+                    "the build failed (exit code {exit_code}); job {id} on {}:\n{tail}",
+                    ssh.host
+                )
+            }
+            job::State::Lost | job::State::Unknown => {
+                bail!("the build job {id} disappeared on {}", ssh.host)
+            }
+            _ => {}
+        }
+    }
+    let mut files = Vec::new();
+    for target in &targets {
+        let name = engine::prebuilt_name(target);
+        ssh.download(&dist_dir, std::slice::from_ref(&name), &out)?;
+        let cached = out.join(engine::cached_name(target, &snapshot.id));
+        std::fs::rename(out.join(&name), &cached)
+            .with_context(|| format!("cannot move {name} into {}", out.display()))?;
+        files.push(cached.display().to_string());
+    }
+    println!("{}", json!({ "snapshot": snapshot.id, "files": files }));
+    Ok(())
+}
+
+/// `colm-cli engine-pack --out FILE`：把引擎源码快照打成 `colm-src.tar.gz`，打包安装包时调用。
+pub(super) fn cmd_pack(opts: &Opts) -> Result<()> {
+    let out = opts.need("--out")?;
+    let Some(source) = Source::find_checkout(&exe_dir()?) else {
+        bail!("engine-pack must run from a build inside the repository");
+    };
+    let snapshot = engine::snapshot(&source)?;
+    engine::pack_source(&snapshot, &out)?;
+    println!(
+        "{}",
+        json!({ "out": out, "files": snapshot.files.len(), "snapshot": snapshot.id })
+    );
+    Ok(())
+}
+
 pub(super) fn cmd_probe(opts: &Opts) -> Result<()> {
     let ssh = Ssh::new(&opts.need_str("--host")?)?;
-    let probe = colm_remote::probe::probe(&ssh, &root_of(opts)?)?;
+    let mut probe = colm_remote::probe::probe(&ssh, &root_of(opts)?)?;
+    // 服务器编不了引擎时，有预编包也能用；两样都没有才算问题。
+    if probe.build_problems.is_empty() {
+        probe.engine = Some("source".into());
+    } else {
+        let source = engine_source().and_then(|s| engine::snapshot(&s)).ok();
+        let prebuilt = engine::find_prebuilt(
+            &probe.arch,
+            source.as_ref().map(|s| s.id.as_str()),
+            &engine::resource_dirs(&exe_dir()?),
+        );
+        if prebuilt.is_some() {
+            probe.engine = Some("prebuilt".into());
+        } else {
+            let hint = format!(
+                "no prebuilt engine for {} was found; build one with `colm-cli remote-dist` on a machine with internet",
+                probe.arch
+            );
+            let reasons = probe.build_problems.clone();
+            probe.problems.extend(reasons);
+            probe.problems.push(hint);
+        }
+    }
     println!("{}", serde_json::to_string(&probe)?);
     Ok(())
 }
@@ -496,7 +680,7 @@ pub(super) fn cmd_run(opts: &Opts) -> Result<()> {
     }
 
     // 3. 引擎源码、内核清单、算例副本上传。
-    let snapshot = engine::snapshot(&engine_source()?)?;
+    let engine = choose_engine(opts, &ssh, &root)?;
     let manifest = std::fs::read_to_string(kernel_dir.join("manifest.json"))?;
     let remote_kernel = format!(
         "{root}/kernels/{}-{}",
@@ -507,7 +691,7 @@ pub(super) fn cmd_run(opts: &Opts) -> Result<()> {
         let _ = std::fs::remove_dir_all(&staging);
         let body = job_body(
             &root,
-            &snapshot.id,
+            engine.id(),
             &remote_case,
             &remote_kernel,
             threads,
@@ -526,12 +710,13 @@ pub(super) fn cmd_run(opts: &Opts) -> Result<()> {
                 "scheduler": scheduler.name(),
                 "job_script": script,
                 "remote_case": remote_case,
-                "engine": snapshot.id,
+                "engine": engine.id(),
+                "engine_kind": engine.kind(),
             })
         );
         return Ok(());
     }
-    let engine_uploaded = engine::upload(&ssh, &root, &snapshot)?;
+    let engine_uploaded = engine.upload(&ssh, &root)?;
     ssh.run_ok(&format!(
         "mkdir -p {dir} && cat > {dir}/manifest.json <<'COLM_MANIFEST_EOF'\n{manifest}\nCOLM_MANIFEST_EOF\n",
         dir = quote(&remote_kernel)
@@ -550,7 +735,7 @@ pub(super) fn cmd_run(opts: &Opts) -> Result<()> {
     );
     let body = job_body(
         &root,
-        &snapshot.id,
+        engine.id(),
         &remote_case,
         &remote_kernel,
         threads,
@@ -568,7 +753,7 @@ pub(super) fn cmd_run(opts: &Opts) -> Result<()> {
         job: id.clone(),
         remote_case: remote_case.clone(),
         case_name,
-        engine: snapshot.id.clone(),
+        engine: engine.id().to_owned(),
         submitted_at: now(),
         scheduler: submitted.scheduler.to_owned(),
         scheduler_id: submitted.scheduler_id.clone(),
@@ -583,7 +768,8 @@ pub(super) fn cmd_run(opts: &Opts) -> Result<()> {
             "scheduler_id": submitted.scheduler_id,
             "host": ssh.host,
             "remote_case": remote_case,
-            "engine": snapshot.id,
+            "engine": engine.id(),
+            "engine_kind": engine.kind(),
             "engine_uploaded": engine_uploaded,
             "case_bytes": staged.bytes,
             "remote_inputs": staged.remote_inputs,

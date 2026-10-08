@@ -48,3 +48,80 @@ fn the_checkout_is_found_and_the_build_script_is_locked_and_complete() {
     }
     assert_eq!(engine_dir("/data/colm/", "abc"), "/data/colm/engine/abc");
 }
+
+#[test]
+fn the_snapshot_carries_the_linux_build_script() {
+    let here = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let Some(Source::Checkout(repo)) = Source::find_checkout(here) else {
+        panic!("no checkout above {}", here.display());
+    };
+    let snapshot = snapshot(&Source::Checkout(repo)).unwrap();
+    assert!(snapshot
+        .files
+        .iter()
+        .any(|f| f == "scripts/build-engine-linux.sh"));
+}
+
+#[test]
+fn prebuilt_packages_are_found_by_arch_and_identified_by_content() {
+    let dir = std::env::temp_dir().join(format!("colm-remote-pre-{}", std::process::id()));
+    let cache = dir.join("cache");
+    let exe = dir.join("app");
+    std::fs::create_dir_all(&cache).unwrap();
+    std::fs::create_dir_all(exe.join("engine")).unwrap();
+    std::env::remove_var("COLM_RESOURCE_DIR");
+    let dirs = resource_dirs(&exe);
+    std::env::set_var("COLM_ENGINE_CACHE", &cache);
+    assert_eq!(prebuilt_name("aarch64"), "colm-engine-linux-aarch64.tar.gz");
+    assert_eq!(cache_dir(), cache);
+
+    // 什么都没有。
+    assert!(find_prebuilt("x86_64", Some("abc"), &dirs).is_none());
+
+    // 缓存里的包带快照标识：标识对得上才用，源码改了就不匹配。
+    std::fs::write(cache.join(cached_name("x86_64", "abc")), b"engine one").unwrap();
+    let cached = find_prebuilt("x86_64", Some("abc"), &dirs).unwrap();
+    assert!(cached.id.starts_with("pre-") && cached.id.len() == 20);
+    assert!(find_prebuilt("x86_64", Some("def"), &dirs).is_none());
+    assert!(find_prebuilt("aarch64", Some("abc"), &dirs).is_none());
+    assert!(find_prebuilt("x86_64", None, &dirs).is_none());
+
+    // 应用随附的包不核对快照，并且优先于缓存。
+    std::fs::write(
+        exe.join("engine").join(prebuilt_name("x86_64")),
+        b"engine shipped",
+    )
+    .unwrap();
+    let shipped = find_prebuilt("x86_64", Some("abc"), &dirs).unwrap();
+    assert_ne!(shipped.id, cached.id);
+    assert_eq!(
+        shipped.tarball,
+        exe.join("engine").join(prebuilt_name("x86_64"))
+    );
+    assert_eq!(bundled_source(&dirs), None);
+    std::fs::write(exe.join("colm-src.tar.gz"), b"src").unwrap();
+    assert_eq!(bundled_source(&dirs), Some(exe.join("colm-src.tar.gz")));
+    // GUI 告诉的资源目录排在最前面。
+    let res = dir.join("res");
+    std::fs::create_dir_all(res.join("engine")).unwrap();
+    std::fs::write(
+        res.join("engine").join(prebuilt_name("x86_64")),
+        b"engine from the gui dir",
+    )
+    .unwrap();
+    std::env::set_var("COLM_RESOURCE_DIR", &res);
+    let from_gui = find_prebuilt("x86_64", None, &resource_dirs(&exe)).unwrap();
+    assert_eq!(
+        from_gui.tarball,
+        res.join("engine").join(prebuilt_name("x86_64"))
+    );
+    std::env::remove_var("COLM_RESOURCE_DIR");
+    assert_eq!(find_prebuilt("x86_64", None, &dirs).unwrap().id, shipped.id);
+
+    // 标识只看内容，不看文件名与时间。
+    let copy = dir.join("copy.tar.gz");
+    std::fs::write(&copy, b"engine shipped").unwrap();
+    assert_eq!(Prebuilt::open(&copy).unwrap().id, shipped.id);
+    std::env::remove_var("COLM_ENGINE_CACHE");
+    let _ = std::fs::remove_dir_all(&dir);
+}

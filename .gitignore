@@ -17,6 +17,8 @@ target/
 /gui/src-tauri/gen/
 # 打包时暂存进去的 sidecar 副本（由 `xtask stage-sidecar` 生成）
 /gui/src-tauri/binaries/
+# 随安装包附带的引擎源码包与预编引擎（`xtask stage-sidecar` 与发布流水线生成）
+/gui/src-tauri/engine/
 /.playwright-mcp/
 
 # Claude Code 的个人偏好文件，不共享

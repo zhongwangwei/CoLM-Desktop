@@ -32076,3 +32076,27 @@ GPP 的均值被 4 个基线 KGE 低于 −0.5 的站拉低（BE-Lon、DE-Geb、
 - Slurm 的 `--parsable` 输出、`squeue -o %T`、`sacct -X -P` 在该站点是否可用（有的站点没开 accounting，`sacct` 会失败，这时 `lost` 的原因为空）；
 - 计算节点上能否访问 cargo 与 crates 源（离线节点要等 R3 的预编二进制）；
 - LSF 的内存单位。
+
+## 第 644 轮：R3——预编的 Linux 引擎，以及安装版的源码包
+
+**动机**：没有 cargo、或计算节点不能联网的服务器，R1 的“传源码、在服务器上编”走不通。另外查到一个遗留缺口：`engine_source()` 在安装版里找 `colm-src.tar.gz`，但仓库里没有任何一步生成它，所以**R1 在安装版里根本跑不了**（开发版靠仓库工作区才能用）。
+
+**可移植性**：T7920 上直接编出来的程序要求 glibc 2.39（`colm-cli`）到 2.43（`colm-rs`），多数集群跑不了。做法是用 zig 作 C 编译器与链接器，把目标钉在 glibc 2.17：
+- `scripts/build-engine-linux.sh <源码> <输出> <工具目录> x86_64|aarch64…`：工具链（rustup、cargo-zigbuild、zig）全部装在 `<根>/tools` 下，不碰 `~/.cargo`、`~/.rustup`。zig 从 PyPI 的官方接口取 `ziglang` 轮子、核对 sha256、用 Python 标准库解开——T7920 没有 pip 与 venv（`python3 -m venv` 缺 ensurepip），所以不依赖它们。发布时去掉调试信息与符号表（只影响文件大小）。netCDF 与 HDF5 本来就静态编进程序，运行时依赖只剩 libc、libm、libpthread、libdl。
+- `colm-cli remote-dist --host H --root R [--targets x86_64,aarch64]`：把源码快照传到一台联网的 Linux 机器，作为作业运行上面的脚本，取回 `colm-engine-linux-<arch>-<快照>.tar.gz` 到本机缓存目录（macOS 是 `~/Library/Caches/edu.sysu.colm.desktop/engines`，可用 `COLM_ENGINE_CACHE` 改）。
+- `colm-cli remote-run --engine-mode auto|source|prebuilt [--prebuilt 包]`：`auto`（默认）在服务器能编（有 cargo、cmake、C 编译器）时从源码编，否则用预编包，两样都没有就说明怎么办；预编包按包内容算标识（`pre-…`），放在 `engine/<标识>/bin`，作业里的“确保引擎编好”那一段见到 `bin/colm-rs` 就不再编。缓存里的包带快照标识，源码一改就不再匹配，所以不会悄悄用旧程序；安装包随附的包不核对快照。
+- `remote-probe`：缺 cargo 等不再一概算“问题”（新增 `build_problems`），有可用的预编包就能用，探测结果的 `engine` 写 `source` 或 `prebuilt`。
+- 安装版：`colm-cli engine-pack --out FILE` 把源码快照打成 `colm-src.tar.gz`，`xtask stage-sidecar` 调它，输出在 `gui/src-tauri/engine/`，`tauri.bundle.conf.json` 把这个目录装进资源。GUI 起 `colm-cli` 时带环境变量 `COLM_RESOURCE_DIR`，`colm-cli` 在那里的 `engine/` 找源码包与预编包。
+- 发布流水线：新增 `engine-linux` 作业（一个 Ubuntu 作业为所有平台编 x86_64 与 aarch64 各一份），`bundle` 作业下载它的产物放进 `gui/src-tauri/engine/`，macOS 的“安装包自带”检查里核对三个文件在。
+
+**检查**（T7920 上，CA-Qfo、PC 模式、2004 年一年）：
+- `remote-dist --targets x86_64`：在服务器上装好工具链（zig 0.17.0、rustc 1.99.0，都在 `colm-desktop/tools` 里）并编完，包 20 MB。四个程序要求的最高 glibc 都是 2.17，依赖只有 libm、libc、libpthread、libdl。
+- 用这个包跑算例（`--engine-mode prebuilt`）：作业日志里没有任何编译行，三段都 ok，退出码 0。与前面用服务器上 rustc 1.95 从源码编出的那次比对：**history 1428 个“变量×文件”全部逐位一致**（最大相对差 0）。
+- 模拟安装版：把 `colm-cli` 拷到仓库之外，只带 `colm-src.tar.gz`（1332 个文件，11.7 MB），`--engine-mode source`：快照按包的哈希标识，在服务器上编完并跑完，退出码 0。
+- `remote-dist --targets aarch64`：交叉编出的包里是合法的 ARM aarch64 ELF，最高 glibc 同样是 2.17。**没有 aarch64 机器，所以没有执行过**。
+- colm-remote 23 项、全工作区 1979 项（`--test-threads=1`）、GUI Rust 214 项通过；`check-gui` 108 个命令；15 个前端套件通过；两个 workspace 的 clippy 零警告、fmt 干净。
+
+**还没验证**：
+- 发布流水线的新作业（`engine-linux`、下载产物、macOS 的资源检查）没有在 GitHub Actions 上跑过，只核对了 YAML 能解析、作业依赖对得上。
+- 真正的安装包（`cargo tauri build`）没有打，所以资源目录里的路径查找只用“拷出 `colm-cli`、手工放源码包”的方式模拟过。Linux 的 deb 与 AppImage 的资源目录位置各不相同，靠 `COLM_RESOURCE_DIR` 由 GUI 告知，没有在那两种包上验证。
+- 不能联网的计算节点：预编包省掉了 cargo 与联网，但整条链路没有在这样的机器上跑过。

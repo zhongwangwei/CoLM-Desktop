@@ -198,10 +198,18 @@ pub fn remote_ssh_hosts() -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// 安装包的资源目录；`colm-cli` 在里面找随附的源码包与预编引擎（`COLM_RESOURCE_DIR`）。
+fn resource_dir(app: &tauri::AppHandle) -> Option<PathBuf> {
+    app.path().resource_dir().ok()
+}
+
 /// 调 `colm-cli`，取最后一行 JSON；失败时把 stderr 的末尾作为错误。
-async fn cli_json(args: Vec<String>) -> Result<Value, String> {
+async fn cli_json(args: Vec<String>, resources: Option<PathBuf>) -> Result<Value, String> {
     let mut command = std::process::Command::new(crate::sidecar::resolve_cli());
     command.args(&args);
+    if let Some(dir) = resources {
+        command.env("COLM_RESOURCE_DIR", dir);
+    }
     colm_kernel::run::no_console(&mut command);
     tauri::async_runtime::spawn_blocking(move || {
         let output = command
@@ -225,14 +233,21 @@ async fn cli_json(args: Vec<String>) -> Result<Value, String> {
 }
 
 #[tauri::command]
-pub async fn remote_probe(host: String, root: String) -> Result<Value, String> {
-    cli_json(vec![
-        "remote-probe".into(),
-        "--host".into(),
-        host,
-        "--root".into(),
-        root,
-    ])
+pub async fn remote_probe(
+    app: tauri::AppHandle,
+    host: String,
+    root: String,
+) -> Result<Value, String> {
+    cli_json(
+        vec![
+            "remote-probe".into(),
+            "--host".into(),
+            host,
+            "--root".into(),
+            root,
+        ],
+        resource_dir(&app),
+    )
     .await
 }
 
@@ -317,8 +332,13 @@ pub async fn remote_run(
     stage: Option<String>,
     force: bool,
 ) -> Result<Value, String> {
+    let resources = resource_dir(&app);
     let server = server_for(app, &host)?;
-    cli_json(run_args(&server, case, kernel, stage, force, false)).await
+    cli_json(
+        run_args(&server, case, kernel, stage, force, false),
+        resources,
+    )
+    .await
 }
 
 /// 提交前给用户看的作业脚本全文（不上传、不提交任何东西）。
@@ -331,19 +351,27 @@ pub async fn remote_preview(
     stage: Option<String>,
     force: bool,
 ) -> Result<Value, String> {
+    let resources = resource_dir(&app);
     let server = server_for(app, &host)?;
-    cli_json(run_args(&server, case, kernel, stage, force, true)).await
+    cli_json(
+        run_args(&server, case, kernel, stage, force, true),
+        resources,
+    )
+    .await
 }
 
 /// 远程作业的状态，加上从日志末尾解析出的阶段与进度（和本机运行同一套解析）。
 #[tauri::command]
 pub async fn remote_status(case: String) -> Result<Value, String> {
-    let mut answer = cli_json(vec![
-        "remote-status".into(),
-        case.clone(),
-        "--lines".into(),
-        "200".into(),
-    ])
+    let mut answer = cli_json(
+        vec![
+            "remote-status".into(),
+            case.clone(),
+            "--lines".into(),
+            "200".into(),
+        ],
+        None,
+    )
     .await?;
     let log = answer["status"]["log_tail"]
         .as_str()
@@ -362,12 +390,12 @@ pub async fn remote_status(case: String) -> Result<Value, String> {
 
 #[tauri::command]
 pub async fn remote_cancel(case: String) -> Result<Value, String> {
-    cli_json(vec!["remote-cancel".into(), case]).await
+    cli_json(vec!["remote-cancel".into(), case], None).await
 }
 
 #[tauri::command]
 pub async fn remote_fetch(case: String) -> Result<Value, String> {
-    cli_json(vec!["remote-fetch".into(), case]).await
+    cli_json(vec!["remote-fetch".into(), case], None).await
 }
 
 #[cfg(test)]

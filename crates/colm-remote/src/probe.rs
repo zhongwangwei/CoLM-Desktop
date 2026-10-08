@@ -30,8 +30,12 @@ pub struct Probe {
     pub root_exists: bool,
     pub root_writable: bool,
     pub root_free_gb: Option<u64>,
-    /// 第一版能不能在这台机器上跑（缺什么）。
+    /// 这台机器跑不了的原因（连不上的系统、工作目录不可写）。
     pub problems: Vec<String>,
+    /// 在这台机器上从源码编引擎缺什么（cargo、cmake、C 编译器）。空表示能编；非空时要有预编包才能用。
+    pub build_problems: Vec<String>,
+    /// 这次要用的引擎：source（在服务器上编）、prebuilt（传预编包）；调用方判断后填，探测本身不填。
+    pub engine: Option<String>,
 }
 
 /// 探测脚本：每行 `key=value`，缺的工具输出空值。
@@ -100,6 +104,8 @@ pub fn parse(root: &str, text: &str) -> Probe {
             .and_then(|v| v.parse::<u64>().ok())
             .map(|kb| kb / 1024 / 1024),
         problems: Vec::new(),
+        build_problems: Vec::new(),
+        engine: None,
     };
     if probe.os.is_empty()
         || !probe.os.to_ascii_lowercase().contains("linux") && probe.arch.is_empty()
@@ -109,11 +115,13 @@ pub fn parse(root: &str, text: &str) -> Probe {
             .push("the host did not answer like a Linux system".into());
     }
     if probe.cargo.is_none() {
-        probe.problems.push("cargo (Rust) is not installed; the first version builds the Rust engine on the server — install it with rustup".into());
+        probe.build_problems.push(
+            "cargo (Rust) is not installed, so the engine cannot be built on this server".into(),
+        );
     }
     if !probe.cmake || !probe.cc {
         probe
-            .problems
+            .build_problems
             .push("cmake and a C compiler are needed to build netCDF/HDF5 into the engine".into());
     }
     if !probe.root_writable {

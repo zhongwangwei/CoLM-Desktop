@@ -49,6 +49,9 @@ export function probeLines(probe) {
     `cargo: ${probe.cargo || t('没有')} · gfortran: ${probe.gfortran ? t('有') : t('没有')} · MPI: ${probe.mpi ? t('有') : t('没有')}`,
     `${t('调度系统')}: ${probe.schedulers?.length ? probe.schedulers.join(', ') : t('无（直接在后台运行）')}`,
   ];
+  if (probe.engine) {
+    lines.push(`${t('引擎')}: ${probe.engine === 'prebuilt' ? t('传预编的程序（这台服务器不用编译）') : t('在服务器上从源码编译')}`);
+  }
   if (probe.queues?.length) lines.push(`${t('分区或队列')}: ${probe.queues.join(', ')}`);
   return lines;
 }

@@ -59,6 +59,24 @@ pub fn stage(root: &Path) -> Result<()> {
         let size = std::fs::metadata(&dst)?.len();
         println!("staged {} ({:.1} MB)", dst.display(), size as f64 / 1e6);
     }
+    pack_engine_source(root, ext)
+}
+
+/// 远程运行要把引擎源码传到服务器上编：安装包里没有仓库，所以把源码快照打成 `colm-src.tar.gz` 随包附带
+///（`colm-cli` 在资源目录的 `engine/` 里找它）。预编的 Linux 引擎由发布流水线另放进同一个目录。
+fn pack_engine_source(root: &Path, ext: &str) -> Result<()> {
+    let out = root.join("gui/src-tauri/engine/colm-src.tar.gz");
+    let status = Command::new(root.join("target/release").join(format!("colm-cli{ext}")))
+        .arg("engine-pack")
+        .arg("--out")
+        .arg(&out)
+        .status()
+        .context("cannot run colm-cli engine-pack")?;
+    if !status.success() {
+        bail!("colm-cli engine-pack failed");
+    }
+    let size = std::fs::metadata(&out)?.len();
+    println!("packed {} ({:.1} MB)", out.display(), size as f64 / 1e6);
     Ok(())
 }
 
