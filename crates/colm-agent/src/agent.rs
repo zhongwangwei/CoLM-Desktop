@@ -103,7 +103,6 @@ impl Agent<'_> {
         )
     }
 
-    /// 执行一个工具调用，返回回填给模型的文本。出错、被拒都作为结果告诉模型，不中断这一轮。
     fn call_tool(
         &self,
         call: &crate::message::ToolCall,
@@ -111,69 +110,81 @@ impl Agent<'_> {
         approver: &mut dyn Approver,
         cancel: &AtomicBool,
     ) -> String {
-        let Some(tool) = self.registry.find(&call.name) else {
-            return format!("error: there is no tool named {}", call.name);
-        };
-        let args: Value = match serde_json::from_str(&call.arguments) {
-            Ok(args) => args,
-            Err(error) => return format!("error: the arguments are not valid JSON ({error})"),
-        };
-        let summary = tool.summary(&args);
-        let preapproved =
-            tool.tier().needs_approval() && approver.preapproved(&call.name, tool.tier());
-        emit(Outbound::ToolCall {
+        execute_tool(self.registry, &self.context, call, emit, approver, cancel)
+    }
+}
+
+/// 执行一个工具调用（含审批与审计事件），返回回填给模型的文本。出错、被拒都作为结果返回，不中断这一轮。
+/// 内置后端的对话循环与外部后端（经 `colm-mcp` 转发）共用这一处，所以规则一样。
+pub fn execute_tool(
+    registry: &Registry,
+    context: &ToolContext,
+    call: &crate::message::ToolCall,
+    emit: &mut dyn FnMut(Outbound),
+    approver: &mut dyn Approver,
+    cancel: &AtomicBool,
+) -> String {
+    let Some(tool) = registry.find(&call.name) else {
+        return format!("error: there is no tool named {}", call.name);
+    };
+    let args: Value = match serde_json::from_str(&call.arguments) {
+        Ok(args) => args,
+        Err(error) => return format!("error: the arguments are not valid JSON ({error})"),
+    };
+    let summary = tool.summary(&args);
+    let preapproved = tool.tier().needs_approval() && approver.preapproved(&call.name, tool.tier());
+    emit(Outbound::ToolCall {
+        id: call.id.clone(),
+        name: call.name.clone(),
+        arguments: call.arguments.clone(),
+        tier: tool.tier(),
+        summary: summary.clone(),
+        preapproved,
+    });
+    if tool.tier().needs_approval() && !preapproved {
+        let request = Outbound::ApprovalRequest {
             id: call.id.clone(),
             name: call.name.clone(),
-            arguments: call.arguments.clone(),
             tier: tool.tier(),
-            summary: summary.clone(),
-            preapproved,
-        });
-        if tool.tier().needs_approval() && !preapproved {
-            let request = Outbound::ApprovalRequest {
+            summary,
+            arguments: call.arguments.clone(),
+        };
+        emit(request.clone());
+        let decision = approver.decide(&request);
+        if decision == Decision::ApproveForSession {
+            approver.remember(&call.name);
+        }
+        if let Decision::Deny(note) = decision {
+            let text = match note {
+                Some(note) => format!("the user declined this action: {note}"),
+                None => "the user declined this action".to_owned(),
+            };
+            emit(Outbound::ToolResult {
                 id: call.id.clone(),
                 name: call.name.clone(),
-                tier: tool.tier(),
-                summary,
-                arguments: call.arguments.clone(),
-            };
-            emit(request.clone());
-            let decision = approver.decide(&request);
-            if decision == Decision::ApproveForSession {
-                approver.remember(&call.name);
-            }
-            if let Decision::Deny(note) = decision {
-                let text = match note {
-                    Some(note) => format!("the user declined this action: {note}"),
-                    None => "the user declined this action".to_owned(),
-                };
-                emit(Outbound::ToolResult {
-                    id: call.id.clone(),
-                    name: call.name.clone(),
-                    ok: false,
-                    result: text.clone(),
-                    elapsed_ms: 0,
-                });
-                return text;
-            }
+                ok: false,
+                result: text.clone(),
+                elapsed_ms: 0,
+            });
+            return text;
         }
-        if cancel.load(Ordering::SeqCst) {
-            return "error: cancelled".to_owned();
-        }
-        let started = Instant::now();
-        let (ok, text) = match tool.call(&args, &self.context) {
-            Ok(value) => (true, result_text(&value)),
-            Err(error) => (false, format!("error: {error:#}")),
-        };
-        emit(Outbound::ToolResult {
-            id: call.id.clone(),
-            name: call.name.clone(),
-            ok,
-            result: text.clone(),
-            elapsed_ms: started.elapsed().as_millis() as u64,
-        });
-        text
     }
+    if cancel.load(Ordering::SeqCst) {
+        return "error: cancelled".to_owned();
+    }
+    let started = Instant::now();
+    let (ok, text) = match tool.call(&args, context) {
+        Ok(value) => (true, result_text(&value)),
+        Err(error) => (false, format!("error: {error:#}")),
+    };
+    emit(Outbound::ToolResult {
+        id: call.id.clone(),
+        name: call.name.clone(),
+        ok,
+        result: text.clone(),
+        elapsed_ms: started.elapsed().as_millis() as u64,
+    });
+    text
 }
 
 #[cfg(test)]
