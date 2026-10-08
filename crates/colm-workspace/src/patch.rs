@@ -70,7 +70,10 @@ pub fn check_path(path: &str) -> Result<()> {
         "the patch must use relative paths inside the repository: {path:?}"
     );
     for part in path.split('/') {
-        ensure!(part != "..", "the patch may not leave the repository: {path:?}");
+        ensure!(
+            part != "..",
+            "the patch may not leave the repository: {path:?}"
+        );
         ensure!(part != ".git", "the patch may not touch .git: {path:?}");
     }
     for prefix in FORBIDDEN_PREFIXES {
@@ -112,8 +115,12 @@ pub fn apply(workspace: &Workspace, diff: &str, message: &str) -> Result<Applied
     } else {
         format!("{diff}\n").into_bytes()
     };
-    git::run_with_input(&src, &["apply", "--check", "--whitespace=nowarn", "-"], &bytes)
-        .context("the patch does not apply to the current files")?;
+    git::run_with_input(
+        &src,
+        &["apply", "--check", "--whitespace=nowarn", "-"],
+        &bytes,
+    )
+    .context("the patch does not apply to the current files")?;
     git::run_with_input(&src, &["apply", "--whitespace=nowarn", "-"], &bytes)?;
     // 只加补丁碰过的路径：不顺手带进别的东西。
     let mut add = vec!["add", "--"];
@@ -136,12 +143,15 @@ pub fn revert_to(workspace: &Workspace, commit: &str) -> Result<String> {
         "give a commit id (hex), got {commit:?}"
     );
     let src = workspace.src();
-    let full = git::run(&src, &["rev-parse", "--verify", &format!("{commit}^{{commit}}")])
-        .with_context(|| format!("no such commit {commit}"))?;
+    let full = git::run(
+        &src,
+        &["rev-parse", "--verify", &format!("{commit}^{{commit}}")],
+    )
+    .with_context(|| format!("no such commit {commit}"))?;
     let base = &workspace.info.base_commit;
     // 目标要在 基线..HEAD 之间（含基线）：基线是它的祖先或它就是基线，并且它是 HEAD 的祖先。
-    let on_branch = full == *base
-        || (is_ancestor(&src, base, &full)? && is_ancestor(&src, &full, "HEAD")?);
+    let on_branch =
+        full == *base || (is_ancestor(&src, base, &full)? && is_ancestor(&src, &full, "HEAD")?);
     ensure!(
         on_branch,
         "{commit} is not one of this workspace's own commits"

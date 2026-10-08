@@ -58,14 +58,17 @@ pub fn detect() -> SandboxInfo {
         return SandboxInfo {
             kind: "seatbelt".into(),
             network_blocked: true,
-            note: "macOS sandbox-exec: no network, writes only to the workspace and temporary folders".into(),
+            note:
+                "macOS sandbox-exec: no network, writes only to the workspace and temporary folders"
+                    .into(),
         };
     }
     if cfg!(target_os = "linux") && find_in_path("bwrap").is_some() {
         return SandboxInfo {
             kind: "bubblewrap".into(),
             network_blocked: true,
-            note: "bubblewrap: read-only system, no network, writes only to the workspace and /tmp".into(),
+            note: "bubblewrap: read-only system, no network, writes only to the workspace and /tmp"
+                .into(),
         };
     }
     SandboxInfo {
@@ -74,7 +77,8 @@ pub fn detect() -> SandboxInfo {
         note: if cfg!(windows) {
             "Windows has no sandbox here: commands run with your normal permissions".into()
         } else {
-            "no sandbox tool found (install bubblewrap): commands run with your normal permissions".into()
+            "no sandbox tool found (install bubblewrap): commands run with your normal permissions"
+                .into()
         },
     }
 }
@@ -122,7 +126,16 @@ pub fn wrap(program: &Path, args: &[String], policy: &Policy) -> (Command, Sandb
         }
         "bubblewrap" => {
             let mut c = Command::new("bwrap");
-            c.args(["--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--die-with-parent"]);
+            c.args([
+                "--ro-bind",
+                "/",
+                "/",
+                "--dev",
+                "/dev",
+                "--proc",
+                "/proc",
+                "--die-with-parent",
+            ]);
             if !policy.allow_network {
                 c.arg("--unshare-net");
             }

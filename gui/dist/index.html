@@ -1190,6 +1190,7 @@
       <div class="grow"></div>
       <button class="btn-ghost" type="button" id="assistant-new">新对话</button>
       <button class="btn-ghost" type="button" id="assistant-history-btn">历史</button>
+      <button class="btn-ghost" type="button" id="assistant-workspaces-btn" title="助手改源码、编译、对照的地方">工作区</button>
       <button class="btn-ghost" type="button" id="assistant-settings-btn">设置</button>
       <button class="icon-btn" type="button" id="assistant-close" title="关闭">×</button>
     </div>
@@ -1341,6 +1342,16 @@
     <button class="btn-ghost" type="button" id="remote-test">测试连接</button>
     <button class="btn-ghost" type="button" id="remote-close">取消</button>
     <button class="run-btn" type="button" id="remote-save">保存</button>
+  </div>
+</dialog>
+
+<dialog id="workspace-dialog" class="app-dialog workspace-dialog" aria-labelledby="workspace-title">
+  <h3 id="workspace-title">开发工作区</h3>
+  <p class="muted mini">助手在这里改 CoLM 源码（Fortran 上游和 Rust 引擎）、编译、测试和对照。正式内核和应用本体不会被改动；改动都在各自的 git 分支里，每个补丁是一次提交。采纳、导出补丁、回滚、删除只能在这里由你来做，助手没有对应的工具。编译和测试在沙箱里跑（断网，只能写工作区），但这只能防误写，不是运行恶意代码的完整安全边界。</p>
+  <div id="workspace-list"></div>
+  <div class="assistant-approval-actions">
+    <button class="btn-ghost" type="button" id="workspace-refresh">刷新</button>
+    <button class="run-btn" type="button" id="workspace-close">关闭</button>
   </div>
 </dialog>
 

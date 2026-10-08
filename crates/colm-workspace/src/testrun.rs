@@ -132,20 +132,20 @@ pub fn run(
         }
     }
     let outcome = last.expect("at least one test command");
-    workspace.info.gates.tests.insert(
-        kind.label(),
-        GateRun {
-            ok: outcome.ok,
-            at: now(),
-            commit: workspace.head()?,
-            detail: if outcome.ok {
-                format!("{:.0} s", outcome.seconds)
-            } else {
-                outcome.tail.lines().last().unwrap_or("failed").to_owned()
-            },
+    let run = GateRun {
+        ok: outcome.ok,
+        at: now(),
+        commit: workspace.head()?,
+        detail: if outcome.ok {
+            format!("{:.0} s", outcome.seconds)
+        } else {
+            outcome.tail.lines().last().unwrap_or("failed").to_owned()
         },
-    );
-    workspace.save()?;
+    };
+    let label = kind.label();
+    workspace.update(|info| {
+        info.gates.tests.insert(label, run);
+    })?;
     Ok(outcome)
 }
 

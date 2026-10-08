@@ -132,7 +132,9 @@ pub fn execute_tool(
         Err(error) => return format!("error: the arguments are not valid JSON ({error})"),
     };
     let summary = tool.summary(&args);
-    let preapproved = tool.tier().needs_approval() && approver.preapproved(&call.name, tool.tier());
+    let preapproved = tool.tier().needs_approval()
+        && tool.session_allowance()
+        && approver.preapproved(&call.name, tool.tier());
     emit(Outbound::ToolCall {
         id: call.id.clone(),
         name: call.name.clone(),
@@ -151,7 +153,7 @@ pub fn execute_tool(
         };
         emit(request.clone());
         let decision = approver.decide(&request);
-        if decision == Decision::ApproveForSession {
+        if decision == Decision::ApproveForSession && tool.session_allowance() {
             approver.remember(&call.name);
         }
         if let Decision::Deny(note) = decision {

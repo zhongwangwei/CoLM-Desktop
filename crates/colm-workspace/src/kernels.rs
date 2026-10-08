@@ -20,6 +20,33 @@ pub struct Experimental {
     /// 回归有没有做过（界面上提示“未回归”）。
     pub regression_done: bool,
     pub reviewed: bool,
+    /// 清单里的身份：界面按编译宏匹配内核，所以要带上。
+    pub generator_args: String,
+    pub macros: Vec<String>,
+    pub colm_git_sha: String,
+    pub platform: String,
+}
+
+/// 读内核清单里界面要用的几项。
+fn manifest_fields(dir: &Path) -> (String, Vec<String>, String, String) {
+    let manifest: serde_json::Value = std::fs::read_to_string(dir.join("manifest.json"))
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default();
+    let text = |key: &str| manifest[key].as_str().unwrap_or_default().to_owned();
+    (
+        text("generator_args"),
+        manifest["macros"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|m| m.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        text("colm_git_sha"),
+        text("platform"),
+    )
 }
 
 /// 工作区里已编出的内核目录（有完整的三个程序与清单）。
@@ -31,9 +58,9 @@ pub fn built_presets(workspace: &Workspace) -> Vec<String> {
                 .filter(|e| {
                     let dir = e.path();
                     dir.join("manifest.json").is_file()
-                        && ["colm.x", "mkinidata.x", "mksrfdata.x"]
-                            .iter()
-                            .all(|p| dir.join(p).is_file() || dir.join(p.replace(".x", ".exe")).is_file())
+                        && ["colm.x", "mkinidata.x", "mksrfdata.x"].iter().all(|p| {
+                            dir.join(p).is_file() || dir.join(p.replace(".x", ".exe")).is_file()
+                        })
                 })
                 .map(|e| e.file_name().to_string_lossy().into_owned())
                 .collect()
@@ -69,10 +96,16 @@ pub fn experimental(root: &Path) -> Result<Vec<Experimental>> {
             if !compiled {
                 continue;
             }
+            let dir = workspace.kernels().join(&preset);
+            let (generator_args, macros, colm_git_sha, platform) = manifest_fields(&dir);
             out.push(Experimental {
                 label: format!("实验内核：{}（未审阅）· {preset}", workspace.info.name),
                 workspace: workspace.info.name.clone(),
-                dir: workspace.kernels().join(&preset),
+                dir,
+                generator_args,
+                macros,
+                colm_git_sha,
+                platform,
                 head: head.clone(),
                 preset,
                 regression_done,

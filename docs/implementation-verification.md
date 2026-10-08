@@ -32146,3 +32146,47 @@ GPP 的均值被 4 个基线 KGE 低于 −0.5 的站拉低（BE-Lon、DE-Geb、
 - 测试：`history_subset` 3 项（变量与属性保留、变量越少文件越小、文件名里的时段与区间），`remote.mjs` 与 `remote_tests.rs` 里取回参数的 4 项；全工作区 1986 项、GUI Rust 216 项、`check-gui` 110 个命令、15 个前端套件通过；两个 workspace 的 clippy 与 fmt 干净。
 
 **限制**：裁剪由记录里那次运行用的引擎完成，所以更早提交的作业要重跑才能用；Fortran 内核跑出来的 history 同样可以裁（文件格式一样），但本轮只在 Rust 引擎的站点结果上测过。
+
+## 第 647 轮：P2——开发工作区（改源码、编译、测试、对齐、回归、登记实验内核）
+
+**做了什么**（设计见 `docs/design-ai-assistant.md` 第 5.6 节）：
+- 新 crate `colm-workspace`（32 项测试）：工作区的建立、补丁与撤回、搜索与读文件与列符号、沙箱化的编译与测试、逐变量对比、对齐检查、回归、四道门、实验内核登记。
+- `colm-cli ws-create / ws-list / ws-status / ws-search / ws-read / ws-symbols / ws-patch / ws-revert / ws-build-engine / ws-build-kernel / ws-test / ws-run / ws-compare / ws-parity / ws-regress / ws-kernels / ws-adopt / ws-export / ws-delete`。
+- `colm-agent` 的 C 级工具 15 个（读 6、改与建与跑 9），`Tool::session_allowance`：补丁、撤回、建工作区每次都问。
+- GUI：助手面板头的“工作区”按钮 → 工作区面板（四盏灯、详情、采纳、导出补丁、回滚、删除）；`workspace_*` Tauri 命令；`kernel.js` 在采纳之后才让实验内核参与匹配。
+
+**演示**（这台 Mac、arm64；参考算例 AT-Neu 2010-01-01 至 02-28，单点，仓库自带的数据）。改动：无雪地表发射率 `emg` 由 0.96 改成 0.95，Fortran 两处（`MOD_Thermal.F90:513`、扩展截留路径 `MOD_Thermal_CanopyPhase_Extended.F90:545`）加 Rust 一处（`ground_emissivity`）。
+1. `ws-create --name emis --from <仓库>`：本地克隆，分支 `ws/emis`。`ws-search "emg = 0.96"` 找到 Fortran 两处和 Rust 一处；`ws-symbols`、`ws-read` 定位到行。
+2. 在**未打补丁**的工作区里先编基线（沙箱里，`--offline`）：Rust 引擎和 Fortran `default` 内核（138 秒），拷到工作区外存为基线。
+3. `ws-patch`：第一个补丁（4 个文件，6 行）成为一次提交 `21c7b163`；打补丁前后四盏灯：编译“通过”→“过期”。
+4. 补丁后重编引擎（沙箱，断网）与内核（约 125 秒）；`ws-test cargo colm-core` **不通过**：`standard_lct_soil_step_carries_one_rust_column_between_energy_and_water` 报 “supports one no-snow regular-soil state”——补丁没改全，`standard_lct_step_tests.rs` 里有两处把 `ground_emissivity: 0.96` 写死，而步进代码会核对它与 `ground_emissivity(...)` 一致。第二个补丁 `48dc8318` 改对（2 行）。**这是测试门槛该起的作用，不是演示脚本**。
+5. 第二个补丁之后四盏灯全部“过期”，在新提交上整套重跑：
+   - 编译：引擎、`default` 内核通过。
+   - 测试：`cargo:colm-core`（509 项）、`cargo:colm-runtime` 通过。
+   - **`parity_check`**：Rust 引擎与 Fortran 内核各跑一遍，**254 个“变量×文件”全部逐位一致**，无新的 NaN；两次运行共 6.8 秒。
+   - **回归**（基线 vs 工作区，Rust 引擎）：按物理修改，**通过**——166 个变量变了、88 个相同；第一个差异是 `f_emis @ step 0`，正是改动的那个量；水量闭合 `f_xerr` 4.47e-16→4.65e-16、能量闭合 `f_zerr` 3.07e-10→3.08e-10，没有变差，无 NaN。按重构，**不通过**：“a refactor must be bitwise identical, but 166 variables changed (first: f_emis @ step 0)”。
+6. `ws-kernels` 列出“实验内核：emis（未审阅）· default”（宏 `LULC_IGBP SinglePoint URBAN_MODEL`，回归已做，未审阅）。
+7. 人工采纳（D 级）：`ws-adopt` 成功并记一笔采纳记录；`ws-export` 导出 4091 字节的补丁（8 处增删，全是预期的）；没有登记的 `latlon` 内核采纳被拒绝并说明原因。
+8. **对照实验**（证明对齐检查抓得住错误）：新建工作区 `emis-neg`，只把 Rust 一侧改成 0.94、Fortran 内核保持 0.95，重编引擎后 `parity_check` **不通过**，准确报出 `f_emis @ step 0 (REF_hist_2010-01.nc)`，166 个变量有差异、88 个相同，两次运行都成功（所以差异不是崩溃）。`ws-delete` 删掉它（4.7 GB），来源工作区原样不动；`ws-delete --name ../etc` 在名字校验处被拒。
+
+**沙箱实测**（macOS `sandbox-exec`）：同一条命令里，往工作区写成功、往 `$HOME` 下写被拒（`Operation not permitted`）、联网被拒（连不上代理端口）。cargo 的锁文件在 `CARGO_HOME` 里，所以那里可写——这只能防误写，不是完整的安全边界。
+
+**途中发现并修好的问题**：
+- **`workspace.json` 的丢失更新**：引擎与内核两个构建同时结束时，各自读入整份文件、改一项、整份写回，后写的把先写的盖掉（演示里引擎那道门的记录就这样丢了）。现在每次改动都持锁文件、重新读盘、应用、原子写回（临时文件加改名）；旧锁文件超过一分钟当作崩溃残留清掉。测试：12 个线程各记一项，全部保留。
+- **“并行跑撞 HDF error -101”的根因**：并行测试里别的线程恰好在 `fork` 子进程（`git`、`sh`、`sandbox-exec`），HDF5 刚打开的文件的描述符（HDF5 打开文件不带 `CLOEXEC`）被子进程继承，子进程活着期间 HDF5 的文件锁一直不放，随后的打开就报 -101。`colm-workspace` 的测试在第一次用 HDF5 之前设 `HDF5_USE_FILE_LOCKING=FALSE` 并串行化碰 NetCDF 的测试之后，连续 6 次并行全过（之前 5 次里 4 次失败）。`colm-init` 测试要 `--test-threads=1` 大概是同一个原因，没有在这一轮改。
+- 复制 `target/` 来加速编译会把 CMake 缓存里的绝对路径一起带过去，HDF5 与 netCDF 的源码构建报 “CMakeCache.txt directory is different”。编译门如实报了失败（所以那次对照实验的第一次尝试是失败的，清掉这两类构建目录后重来）。
+- `list_symbols` 把参数表里行尾注释里的 “function for” 当成了符号；改为先去掉 `!` 之后的注释。
+- 变化最大的变量排名被 `f_xerr`、`f_zerr`（舍入残差）占满；排名里排除它们（仍计入变化个数，闭合另有判定）。
+
+**验证**：
+- `colm-workspace` 32 项、`colm-agent` 55 项（新增：15 个工具的严格模式 schema 与级别、读不审批改要审批且 D 级操作不存在为工具、补丁卡片显示真实 diff、工具参数与工作区根目录的传递、补丁即使选了“本会话都允许”也每次都问）、`cargo test --workspace --lib --bins -- --test-threads=1` 共 2023 项通过。
+- GUI Rust 218 项；`check-gui` 117 个命令全部对上；16 个前端套件通过（新增 `workspace.mjs`：灯的文字、可采纳的内核、采纳过的内核在匹配表里的样子、门槛作废后不再算数、`kernel.js` 只在采纳后才让实验内核参与匹配、助手面板代码里碰不到 `workspace_adopt/delete/export/revert`）。
+- 两个 workspace 的 clippy `-D warnings` 与 `fmt --check` 干净。
+
+**没有做 / 没有验证**：
+- **没有让模型真的走一遍**：上面的链路是用 `colm-cli ws-*`（也就是 15 个工具背后的命令）亲手驱动的，工具层用假的 `colm-cli` 做了单元测试；没有用 DeepSeek、Codex 或 Claude Code 跑一轮“助手改一处 Fortran 加对应的 Rust”。
+- **没有在应用里点工作区面板**：只有逻辑测试与静态检查。
+- 只验证了 macOS 的沙箱；Linux 的 `bwrap` 与 Windows（不套沙箱）的路径没有跑过。
+- 演示里没有跑 `oracle` 与 `check-gui` 两类测试（只跑了 `cargo` 两个 crate）。
+- P3（开发工作区的远程版：在任一计算资源上编译、测试、运行、对比）没做。
+- x86_64 Linux 上 Fortran 与 Rust 本来就不逐位一致（第 645 轮），所以在那里 `parity_check` 会先报这个已知差距，已作为后续任务提出。

@@ -32,7 +32,11 @@ fn paths_are_extracted_and_the_forbidden_ones_refused() {
     ] {
         assert!(check_path(bad).is_err(), "{bad:?}");
     }
-    for ok in ["crates/colm-core/src/demo.rs", "vendor/CoLM202X/main/MOD_Demo.F90", "oracle/scripts/x.sh"] {
+    for ok in [
+        "crates/colm-core/src/demo.rs",
+        "vendor/CoLM202X/main/MOD_Demo.F90",
+        "oracle/scripts/x.sh",
+    ] {
         assert!(check_path(ok).is_ok(), "{ok}");
     }
 }
@@ -52,13 +56,20 @@ fn a_patch_becomes_a_commit_and_can_be_reverted() {
     // 再打同一个补丁：已经改过了，应用不上，文件不动。
     let err = apply(&ws, FORTRAN_DIFF, "again").unwrap_err();
     assert!(format!("{err:#}").contains("does not apply"), "{err:#}");
-    assert_eq!(git::commits_since(&ws.src(), &ws.info.base_commit).unwrap().len(), 1);
+    assert_eq!(
+        git::commits_since(&ws.src(), &ws.info.base_commit)
+            .unwrap()
+            .len(),
+        1
+    );
 
     // 撤回到基线：文件回到原样，提交被丢弃。
     revert_to(&ws, &ws.info.base_commit).unwrap();
     let text = std::fs::read_to_string(ws.src().join("vendor/CoLM202X/main/MOD_Demo.F90")).unwrap();
     assert!(text.contains("k = 2.0"));
-    assert!(git::commits_since(&ws.src(), &ws.info.base_commit).unwrap().is_empty());
+    assert!(git::commits_since(&ws.src(), &ws.info.base_commit)
+        .unwrap()
+        .is_empty());
     // 只能撤回到工作区自己的提交；乱写的提交号也拒绝。
     assert!(revert_to(&ws, "zzzz").is_err());
     assert!(revert_to(&ws, "").is_err());

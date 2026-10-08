@@ -22,7 +22,10 @@ pub struct Hit {
 
 /// 在工作区里搜索（`git grep -E`，只看受管理的文件）。`glob` 可以限定路径，例如 `*.F90`。
 pub fn search(workspace: &Workspace, pattern: &str, glob: Option<&str>) -> Result<Vec<Hit>> {
-    ensure!(!pattern.is_empty() && pattern.len() <= 200, "the pattern must be 1-200 characters");
+    ensure!(
+        !pattern.is_empty() && pattern.len() <= 200,
+        "the pattern must be 1-200 characters"
+    );
     ensure!(!pattern.contains('\0'), "bad pattern");
     let mut args = vec!["grep", "-n", "-I", "-E", "--no-color", "-e", pattern];
     if let Some(glob) = glob {
@@ -95,7 +98,10 @@ pub struct Excerpt {
 
 /// 读 `[from, to]`（从 1 起，含）行，最多 [`MAX_READ_LINES`] 行；每行前带行号。
 pub fn read_lines(workspace: &Workspace, path: &str, from: usize, to: usize) -> Result<Excerpt> {
-    ensure!(from >= 1 && to >= from, "give a line range with 1 <= from <= to");
+    ensure!(
+        from >= 1 && to >= from,
+        "give a line range with 1 <= from <= to"
+    );
     let full = resolve(workspace, path)?;
     let bytes = std::fs::read(&full)?;
     ensure!(
@@ -105,7 +111,11 @@ pub fn read_lines(workspace: &Workspace, path: &str, from: usize, to: usize) -> 
     let text = String::from_utf8_lossy(&bytes);
     let lines: Vec<&str> = text.lines().collect();
     let to = to.min(from + MAX_READ_LINES - 1).min(lines.len());
-    ensure!(from <= lines.len().max(1), "{path} has only {} lines", lines.len());
+    ensure!(
+        from <= lines.len().max(1),
+        "{path} has only {} lines",
+        lines.len()
+    );
     let body = lines
         .get(from - 1..to)
         .unwrap_or_default()
@@ -140,7 +150,10 @@ pub fn symbols(workspace: &Workspace, path: &str) -> Result<Vec<Symbol>> {
         .iter()
         .any(|e| lower.ends_with(e));
     let rust = lower.ends_with(".rs");
-    ensure!(fortran || rust, "list_symbols supports Fortran (.F90) and Rust (.rs) files");
+    ensure!(
+        fortran || rust,
+        "list_symbols supports Fortran (.F90) and Rust (.rs) files"
+    );
     let mut out = Vec::new();
     for (index, raw) in text.lines().enumerate() {
         let line = raw.trim();
@@ -170,8 +183,10 @@ fn identifier(text: &str) -> Option<String> {
 }
 
 fn fortran_symbol(line: &str) -> Option<(&'static str, String)> {
+    // 行尾注释（`! … function for …`）里的关键字不算。
+    let line = line.split('!').next().unwrap_or_default().trim();
     let lowered = line.to_ascii_lowercase();
-    if lowered.starts_with('!') || lowered.starts_with("end ") || lowered == "end" {
+    if lowered.is_empty() || lowered.starts_with("end ") || lowered == "end" {
         return None;
     }
     // 去掉前缀修饰词（recursive、pure、elemental、类型说明）。
@@ -216,7 +231,7 @@ fn fortran_symbol(line: &str) -> Option<(&'static str, String)> {
     }
     if let Some(after) = rest.strip_prefix("type ") {
         if !after.starts_with('(') {
-            let after = after.trim_start_matches(|c: char| c == ',' || c == ':' || c == ' ');
+            let after = after.trim_start_matches([',', ':', ' ']);
             let after = after.strip_prefix(':').unwrap_or(after);
             let offset = line.len() - after.len();
             return identifier(&line[offset..]).map(|name| ("type", name));
@@ -229,7 +244,15 @@ fn rust_symbol(line: &str) -> Option<(&'static str, String)> {
     let mut rest = line;
     loop {
         let before = rest;
-        for prefix in ["pub(crate) ", "pub(super) ", "pub ", "async ", "unsafe ", "const fn", "extern "] {
+        for prefix in [
+            "pub(crate) ",
+            "pub(super) ",
+            "pub ",
+            "async ",
+            "unsafe ",
+            "const fn",
+            "extern ",
+        ] {
             if prefix == "const fn" {
                 if let Some(after) = rest.strip_prefix("const fn ") {
                     return identifier(after).map(|n| ("fn", n));

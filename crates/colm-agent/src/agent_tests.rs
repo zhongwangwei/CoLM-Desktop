@@ -258,6 +258,78 @@ fn approving_for_the_session_skips_later_requests_for_that_tool() {
     assert_eq!(ran, 2);
 }
 
+/// 改源码的操作：和 Echo 一样，但不许“本会话都允许”。
+struct Patch;
+
+impl Tool for Patch {
+    fn name(&self) -> &'static str {
+        "patch"
+    }
+    fn description(&self) -> &'static str {
+        "test patch tool"
+    }
+    fn parameters(&self) -> Value {
+        object(serde_json::json!({ "x": { "type": "integer" } }))
+    }
+    fn tier(&self) -> Tier {
+        Tier::Code
+    }
+    fn session_allowance(&self) -> bool {
+        false
+    }
+    fn call(&self, args: &Value, _ctx: &ToolContext) -> Result<Value> {
+        Ok(serde_json::json!({ "patched": args["x"] }))
+    }
+}
+
+/// 即使审批者对“补丁”这类工具按会话放行也不生效：每个补丁都要单独问（设计稿第 4 节）。
+struct EagerRemembering(Vec<Decision>, Vec<String>);
+
+impl Approver for EagerRemembering {
+    fn decide(&mut self, _request: &Outbound) -> Decision {
+        self.0.remove(0)
+    }
+    fn preapproved(&self, name: &str, tier: Tier) -> bool {
+        tier == Tier::Code && self.1.iter().any(|n| n == name)
+    }
+    fn remember(&mut self, name: &str) {
+        self.1.push(name.to_owned());
+    }
+}
+
+#[test]
+fn a_patch_is_asked_about_every_time_even_if_the_user_chose_always_allow() {
+    let provider = Scripted::new(vec![
+        tool_turn(vec![call("a", "patch", r#"{"x":1}"#)]),
+        tool_turn(vec![call("b", "patch", r#"{"x":2}"#)]),
+        answer("both patched"),
+    ]);
+    let registry = Registry::with(vec![Box::new(Patch)]);
+    let mut history = vec![Message::User {
+        content: "go".into(),
+    }];
+    let mut events = Vec::new();
+    // 第一次点“本会话都允许”，第二次仍然要问（这里批准一次）。
+    let mut approver = EagerRemembering(
+        vec![Decision::ApproveForSession, Decision::Approve],
+        Vec::new(),
+    );
+    agent(&provider, &registry)
+        .run_turn(
+            &mut history,
+            &mut |e| events.push(e),
+            &mut approver,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+    assert!(approver.1.is_empty(), "nothing was remembered for a patch");
+    let requests = events
+        .iter()
+        .filter(|e| matches!(e, Outbound::ApprovalRequest { .. }))
+        .count();
+    assert_eq!(requests, 2, "the second patch was asked about again");
+}
+
 #[test]
 fn cancelling_and_runaway_loops_stop_the_turn() {
     let registry = Registry::with(vec![Box::new(Echo(Tier::Read))]);

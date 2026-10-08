@@ -7,6 +7,23 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context, Result};
 use serde::Serialize;
 
+/// 闭合诊断的舍入残差（水量 `f_xerr`、能量 `f_zerr`）：量级 1e-16 到 1e-10，相对差再大也只是噪声，
+/// 不放进“变化最大的变量”里（仍计入变化个数，闭合检查另有专门的判定）。
+pub const RESIDUAL_VARIABLES: [&str; 2] = ["f_xerr", "f_zerr"];
+
+impl Report {
+    /// 变化最大的几个变量（去掉舍入残差，同名的只留文件里最大的一条）。
+    pub fn largest_changes(&self, count: usize) -> Vec<&VarReport> {
+        let mut seen = std::collections::BTreeSet::new();
+        self.changed
+            .iter()
+            .filter(|c| !RESIDUAL_VARIABLES.contains(&c.name.as_str()))
+            .filter(|c| seen.insert(c.name.clone()))
+            .take(count)
+            .collect()
+    }
+}
+
 /// 容差：`|a-b| <= atol + rtol * max(|a|,|b|)` 算在容差内。默认都是 0，也就是只认逐位相同。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Tolerance {
@@ -16,7 +33,10 @@ pub struct Tolerance {
 
 impl Default for Tolerance {
     fn default() -> Self {
-        Self { rtol: 0.0, atol: 0.0 }
+        Self {
+            rtol: 0.0,
+            atol: 0.0,
+        }
     }
 }
 
@@ -124,7 +144,8 @@ fn compare_variable(
     tolerance: Tolerance,
 ) -> Result<VarReport> {
     let (x, y) = (read_f64(a)?, read_f64(b)?);
-    let shape = |v: &netcdf::Variable| -> Vec<usize> { v.dimensions().iter().map(|d| d.len()).collect() };
+    let shape =
+        |v: &netcdf::Variable| -> Vec<usize> { v.dimensions().iter().map(|d| d.len()).collect() };
     if x.len() != y.len() || shape(a) != shape(b) {
         return Ok(VarReport {
             file: file.to_owned(),
@@ -166,7 +187,8 @@ fn compare_variable(
             max_abs = f64::INFINITY;
             max_rel = f64::INFINITY;
         }
-        if !(diff <= tolerance.atol + tolerance.rtol * scale) {
+        // NaN 的差也算在容差之外，所以不写成 `!(diff <= …)`。
+        if diff.is_nan() || diff > tolerance.atol + tolerance.rtol * scale {
             outside = true;
             first_outside.get_or_insert(i);
         }
@@ -198,14 +220,24 @@ pub fn compare(a: &Path, b: &Path, tolerance: Tolerance) -> Result<Report> {
         bail!("no NetCDF files in {} or {}", a.display(), b.display());
     }
     let mut report = Report {
-        only_in_a: files_a.keys().filter(|k| !files_b.contains_key(*k)).cloned().collect(),
-        only_in_b: files_b.keys().filter(|k| !files_a.contains_key(*k)).cloned().collect(),
+        only_in_a: files_a
+            .keys()
+            .filter(|k| !files_b.contains_key(*k))
+            .cloned()
+            .collect(),
+        only_in_b: files_b
+            .keys()
+            .filter(|k| !files_a.contains_key(*k))
+            .cloned()
+            .collect(),
         ..Report::default()
     };
     // 第一个差异：按文件名（月份补零，字典序就是时间序）、再按时间步取最早的。
     let mut earliest: Option<First> = None;
     for (name, path_a) in &files_a {
-        let Some(path_b) = files_b.get(name) else { continue };
+        let Some(path_b) = files_b.get(name) else {
+            continue;
+        };
         report.files += 1;
         let (fa, fb) = (
             netcdf::open(path_a).with_context(|| format!("cannot open {}", path_a.display()))?,
@@ -231,7 +263,14 @@ pub fn compare(a: &Path, b: &Path, tolerance: Tolerance) -> Result<Report> {
                 });
                 continue;
             };
-            let item = compare_variable(name, &var_name, &variable, &other, times.as_deref(), tolerance)?;
+            let item = compare_variable(
+                name,
+                &var_name,
+                &variable,
+                &other,
+                times.as_deref(),
+                tolerance,
+            )?;
             report.new_nonfinite += item.new_nonfinite;
             match item.status {
                 Status::Identical => report.identical += 1,

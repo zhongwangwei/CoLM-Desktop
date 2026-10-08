@@ -452,6 +452,7 @@ fn serve(data_dir: Option<PathBuf>, cli: PathBuf, key_file: PathBuf) -> Result<(
                         cancel: None,
                         web: None,
                         ui: None,
+                        workspace_root: None,
                     },
                     approval,
                     web_search,

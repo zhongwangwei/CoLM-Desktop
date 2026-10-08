@@ -1,3 +1,4 @@
+#![allow(clippy::field_reassign_with_default)]
 use super::*;
 use crate::compare::Status;
 use crate::layout::layout_tests::{nc_lock, source_repo, temp};
@@ -9,7 +10,8 @@ fn history(path: &Path, vars: &[(&str, Vec<f64>)]) {
     file.add_dimension("patch", 3).unwrap();
     {
         let mut time = file.add_variable::<f64>("time", &["time"]).unwrap();
-        time.put_values(&[0.0, 30.0, 60.0, 90.0], netcdf::Extents::All).unwrap();
+        time.put_values(&[0.0, 30.0, 60.0, 90.0], netcdf::Extents::All)
+            .unwrap();
     }
     for (name, data) in vars {
         let mut v = file.add_variable::<f64>(name, &["time", "patch"]).unwrap();
@@ -74,14 +76,23 @@ fn a_case_copy_writes_its_output_into_itself() {
     let copy = root.join("copy");
     copy_case(&case, &copy).unwrap();
     assert!(copy.join("input.txt").is_file());
-    assert!(!copy.join("out").exists() && !copy.join("stages.json").exists(), "outputs and fingerprints are not copied");
+    assert!(
+        !copy.join("out").exists() && !copy.join("stages.json").exists(),
+        "outputs and fingerprints are not copied"
+    );
     let nml = std::fs::read_to_string(copy.join("case.nml")).unwrap();
     let new = copy.canonicalize().unwrap().to_string_lossy().into_owned();
-    assert!(nml.contains(&format!("{new}/out/")) && nml.contains(&format!("{new}/input.txt")), "{nml}");
+    assert!(
+        nml.contains(&format!("{new}/out/")) && nml.contains(&format!("{new}/input.txt")),
+        "{nml}"
+    );
     assert!(!nml.contains("refcase"));
     assert_eq!(case_name(&copy).unwrap(), "REF");
     assert!(copy_case(&root.join("nothing"), &root.join("x")).is_err());
-    assert_eq!(case_name(&root).unwrap_err().to_string().contains("case.nml"), true);
+    assert!(case_name(&root)
+        .unwrap_err()
+        .to_string()
+        .contains("case.nml"));
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -94,8 +105,14 @@ fn parity_is_bitwise_when_both_engines_agree_and_names_the_first_difference_when
     fake_kernel(&ws.kernels().join("default"));
     let (a, b) = (root.join("fx-a"), root.join("fx-b"));
     let good = series(|i| 1.0 + i as f64);
-    history(&a.join("REF_hist_2004-01.nc"), &[("f_t", good.clone()), ("f_q", good.clone())]);
-    history(&b.join("REF_hist_2004-01.nc"), &[("f_t", good.clone()), ("f_q", good.clone())]);
+    history(
+        &a.join("REF_hist_2004-01.nc"),
+        &[("f_t", good.clone()), ("f_q", good.clone())],
+    );
+    history(
+        &b.join("REF_hist_2004-01.nc"),
+        &[("f_t", good.clone()), ("f_q", good.clone())],
+    );
     fake_cli(&ws.bin().join("colm-cli"), &a, &b, 0);
     let ok = parity_check(&mut ws, &case, "default", None).unwrap();
     assert!(ok.ok, "{:?}", ok.first_difference);
@@ -103,15 +120,28 @@ fn parity_is_bitwise_when_both_engines_agree_and_names_the_first_difference_when
     assert!(ws.info.gates.parity.as_ref().unwrap().ok);
     assert!(ok.report.is_file());
     // 两边的算例副本互相独立，输出各写各的。
-    assert!(ok.rust.history.is_dir() && ok.fortran.history.is_dir() && ok.rust.history != ok.fortran.history);
+    assert!(
+        ok.rust.history.is_dir()
+            && ok.fortran.history.is_dir()
+            && ok.rust.history != ok.fortran.history
+    );
 
     // Fortran 那边在第 2 步（元素 7）之后偏了：报出变量与时间步。
     let mut off = good.clone();
     off[7] += 1e-12;
-    history(&b.join("REF_hist_2004-01.nc"), &[("f_t", good.clone()), ("f_q", off)]);
+    history(
+        &b.join("REF_hist_2004-01.nc"),
+        &[("f_t", good.clone()), ("f_q", off)],
+    );
     let bad = parity_check(&mut ws, &case, "default", None).unwrap();
     assert!(!bad.ok);
-    let first = bad.compare.as_ref().unwrap().first_difference.clone().unwrap();
+    let first = bad
+        .compare
+        .as_ref()
+        .unwrap()
+        .first_difference
+        .clone()
+        .unwrap();
     assert_eq!((first.variable.as_str(), first.step), ("f_q", Some(2)));
     assert_eq!(first.time, Some(60.0));
     assert!(bad.first_difference.unwrap().contains("f_q @ step 2"));
@@ -136,45 +166,136 @@ fn a_refactor_must_be_bitwise_but_a_physics_change_only_has_to_stay_sane() {
     let (base, cand) = (root.join("fx-base"), root.join("fx-cand"));
     let t = series(|i| 280.0 + i as f64);
     let closure = series(|_| 1e-12);
-    history(&base.join("REF_hist_2004-01.nc"), &[("f_t", t.clone()), ("f_xerr", closure.clone())]);
+    history(
+        &base.join("REF_hist_2004-01.nc"),
+        &[("f_t", t.clone()), ("f_xerr", closure.clone())],
+    );
     let baseline_cli = root.join("baseline/colm-cli");
     fake_cli(&baseline_cli, &base, &base, 0);
-    let baseline = Baseline { cli: baseline_cli, kernel };
+    let baseline = Baseline {
+        cli: baseline_cli,
+        kernel,
+    };
 
     // 候选和基线一样：重构通过。
-    history(&cand.join("REF_hist_2004-01.nc"), &[("f_t", t.clone()), ("f_xerr", closure.clone())]);
+    history(
+        &cand.join("REF_hist_2004-01.nc"),
+        &[("f_t", t.clone()), ("f_xerr", closure.clone())],
+    );
     fake_cli(&ws.bin().join("colm-cli"), &cand, &cand, 0);
-    let same = regress(&mut ws, &case, "default", "rust", &baseline, ChangeKind::Refactor, None).unwrap();
+    let same = regress(
+        &mut ws,
+        &case,
+        "default",
+        "rust",
+        &baseline,
+        ChangeKind::Refactor,
+        None,
+    )
+    .unwrap();
     assert!(same.ok, "{}", same.verdict);
     assert!(same.verdict.starts_with("bitwise identical"));
 
     // 温度变了：按重构不通过，按物理修改通过并列出变了什么。
     let warmer = series(|i| 280.5 + i as f64);
-    history(&cand.join("REF_hist_2004-01.nc"), &[("f_t", warmer), ("f_xerr", closure.clone())]);
-    let refactor = regress(&mut ws, &case, "default", "rust", &baseline, ChangeKind::Refactor, None).unwrap();
-    assert!(!refactor.ok && refactor.verdict.contains("must be bitwise identical"), "{}", refactor.verdict);
+    history(
+        &cand.join("REF_hist_2004-01.nc"),
+        &[("f_t", warmer), ("f_xerr", closure.clone())],
+    );
+    let refactor = regress(
+        &mut ws,
+        &case,
+        "default",
+        "rust",
+        &baseline,
+        ChangeKind::Refactor,
+        None,
+    )
+    .unwrap();
+    assert!(
+        !refactor.ok && refactor.verdict.contains("must be bitwise identical"),
+        "{}",
+        refactor.verdict
+    );
     assert!(refactor.verdict.contains("f_t @ step 0"));
-    let physics = regress(&mut ws, &case, "default", "rust", &baseline, ChangeKind::Physics, None).unwrap();
-    assert!(physics.ok && physics.verdict.contains("f_t"), "{}", physics.verdict);
+    let physics = regress(
+        &mut ws,
+        &case,
+        "default",
+        "rust",
+        &baseline,
+        ChangeKind::Physics,
+        None,
+    )
+    .unwrap();
+    assert!(
+        physics.ok && physics.verdict.contains("f_t"),
+        "{}",
+        physics.verdict
+    );
     let record = ws.info.gates.regression.clone().unwrap();
-    assert_eq!((record.kind, record.ok, record.changed, record.identical), (ChangeKind::Physics, true, 1, 2));
+    assert_eq!(
+        (record.kind, record.ok, record.changed, record.identical),
+        (ChangeKind::Physics, true, 1, 2)
+    );
 
     // 闭合变差（水量不平衡从 1e-12 涨到 1e-3）：物理修改也不通过。
     let leaky = series(|_| 1e-3);
-    history(&cand.join("REF_hist_2004-01.nc"), &[("f_t", series(|i| 280.5 + i as f64)), ("f_xerr", leaky)]);
-    let worse = regress(&mut ws, &case, "default", "rust", &baseline, ChangeKind::Physics, None).unwrap();
-    assert!(!worse.ok && worse.verdict.contains("closure"), "{}", worse.verdict);
+    history(
+        &cand.join("REF_hist_2004-01.nc"),
+        &[("f_t", series(|i| 280.5 + i as f64)), ("f_xerr", leaky)],
+    );
+    let worse = regress(
+        &mut ws,
+        &case,
+        "default",
+        "rust",
+        &baseline,
+        ChangeKind::Physics,
+        None,
+    )
+    .unwrap();
+    assert!(
+        !worse.ok && worse.verdict.contains("closure"),
+        "{}",
+        worse.verdict
+    );
     assert!(!worse.closure.iter().all(|c| c.ok));
 
     // 出现 NaN：直接不通过。
     let mut nan = series(|i| 280.0 + i as f64);
     nan[3] = f64::NAN;
-    history(&cand.join("REF_hist_2004-01.nc"), &[("f_t", nan), ("f_xerr", closure)]);
-    let broken = regress(&mut ws, &case, "default", "rust", &baseline, ChangeKind::Physics, None).unwrap();
-    assert!(!broken.ok && broken.verdict.contains("NaN"), "{}", broken.verdict);
+    history(
+        &cand.join("REF_hist_2004-01.nc"),
+        &[("f_t", nan), ("f_xerr", closure)],
+    );
+    let broken = regress(
+        &mut ws,
+        &case,
+        "default",
+        "rust",
+        &baseline,
+        ChangeKind::Physics,
+        None,
+    )
+    .unwrap();
+    assert!(
+        !broken.ok && broken.verdict.contains("NaN"),
+        "{}",
+        broken.verdict
+    );
 
     // Fortran 引擎的回归必须有工作区自己编的内核。
-    assert!(regress(&mut ws, &case, "default", "fortran", &baseline, ChangeKind::Physics, None).is_err());
+    assert!(regress(
+        &mut ws,
+        &case,
+        "default",
+        "fortran",
+        &baseline,
+        ChangeKind::Physics,
+        None
+    )
+    .is_err());
     let _ = std::fs::remove_dir_all(&root);
 }
 

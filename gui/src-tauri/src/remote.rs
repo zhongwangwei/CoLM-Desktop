@@ -223,7 +223,10 @@ fn resource_dir(app: &tauri::AppHandle) -> Option<PathBuf> {
 }
 
 /// 调 `colm-cli`，取最后一行 JSON；失败时把 stderr 的末尾作为错误。
-async fn cli_json(args: Vec<String>, resources: Option<PathBuf>) -> Result<Value, String> {
+pub(crate) async fn cli_json(
+    args: Vec<String>,
+    resources: Option<PathBuf>,
+) -> Result<Value, String> {
     let mut command = std::process::Command::new(crate::sidecar::resolve_cli());
     command.args(&args);
     if let Some(dir) = resources {

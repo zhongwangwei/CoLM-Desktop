@@ -38,7 +38,10 @@ pub fn default_root() -> PathBuf {
 pub fn validate_name(name: &str) -> Result<()> {
     let ok = !name.is_empty()
         && name.len() <= 40
-        && name.chars().next().is_some_and(|c| c.is_ascii_alphanumeric())
+        && name
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphanumeric())
         && name
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
@@ -123,9 +126,20 @@ impl Workspace {
     }
 
     pub fn save(&self) -> Result<()> {
-        let path = self.dir.join(INFO_FILE);
-        std::fs::write(&path, serde_json::to_string_pretty(&self.info)?)
-            .with_context(|| format!("cannot write {}", path.display()))
+        write_info(&self.dir, &self.info)
+    }
+
+    /// 改 `workspace.json`：持锁、**重新读盘**、应用改动、原子写回。几条命令同时结束（编引擎与编内核常常
+    /// 同时跑）时，各自只改自己那一项，谁也不会把别人刚写的记录覆盖掉。
+    pub fn update(&mut self, change: impl FnOnce(&mut Info)) -> Result<()> {
+        let _lock = InfoLock::acquire(&self.dir)?;
+        let text = std::fs::read_to_string(self.dir.join(INFO_FILE))
+            .with_context(|| format!("cannot read {INFO_FILE} of {}", self.dir.display()))?;
+        let mut info: Info = serde_json::from_str(&text)?;
+        change(&mut info);
+        write_info(&self.dir, &info)?;
+        self.info = info;
+        Ok(())
     }
 
     pub fn open(root: &Path, name: &str) -> Result<Self> {
@@ -168,9 +182,8 @@ impl Workspace {
     fn populate(dir: &Path, name: &str, from: &str, rev: Option<&str>) -> Result<Self> {
         let src = dir.join("src");
         let is_tarball = from.ends_with(".tar.gz") || from.ends_with(".tgz");
-        let is_url = from.starts_with("https://")
-            || from.starts_with("ssh://")
-            || from.starts_with("git@");
+        let is_url =
+            from.starts_with("https://") || from.starts_with("ssh://") || from.starts_with("git@");
         if is_tarball {
             ensure!(Path::new(from).is_file(), "{from} is not a file");
             std::fs::create_dir_all(&src)?;
@@ -281,18 +294,73 @@ impl Workspace {
 
     /// 记一次采纳类操作。
     pub fn record_adoption(&mut self, action: &str, detail: &str) -> Result<()> {
-        self.info.adopted.push(Adoption {
+        let adoption = Adoption {
             at: now(),
             action: action.to_owned(),
             detail: detail.to_owned(),
-        });
-        self.save()
+        };
+        self.update(|info| info.adopted.push(adoption))
+    }
+}
+
+/// 先写临时文件再改名：别的进程读到的要么是旧的、要么是新的完整文件。
+fn write_info(dir: &Path, info: &Info) -> Result<()> {
+    let path = dir.join(INFO_FILE);
+    let tmp = dir.join(format!("{INFO_FILE}.{}.tmp", std::process::id()));
+    std::fs::write(&tmp, serde_json::to_string_pretty(info)?)
+        .with_context(|| format!("cannot write {}", tmp.display()))?;
+    std::fs::rename(&tmp, &path).with_context(|| format!("cannot replace {}", path.display()))
+}
+
+/// `workspace.json` 的锁文件：独占创建，用完删除；超过一分钟的当作崩溃留下的残余清掉。
+struct InfoLock(PathBuf);
+
+impl InfoLock {
+    fn acquire(dir: &Path) -> Result<Self> {
+        let path = dir.join("workspace.lock");
+        let started = std::time::Instant::now();
+        loop {
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+            {
+                Ok(_) => return Ok(Self(path)),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    let stale = std::fs::metadata(&path)
+                        .and_then(|m| m.modified())
+                        .ok()
+                        .and_then(|t| t.elapsed().ok())
+                        .is_some_and(|age| age > std::time::Duration::from_secs(60));
+                    if stale {
+                        let _ = std::fs::remove_file(&path);
+                        continue;
+                    }
+                    ensure!(
+                        started.elapsed() < std::time::Duration::from_secs(15),
+                        "{} is locked by another command",
+                        dir.display()
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(25));
+                }
+                Err(error) => return Err(error).context("cannot lock the workspace"),
+            }
+        }
+    }
+}
+
+impl Drop for InfoLock {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
     }
 }
 
 fn clone(from: &str, src: &Path, local: bool) -> Result<()> {
     let mut command = Command::new("git");
-    command.env("GIT_TERMINAL_PROMPT", "0").arg("clone").arg("-q");
+    command
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .arg("clone")
+        .arg("-q");
     if local {
         command.arg("--local");
     }

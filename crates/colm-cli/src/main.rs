@@ -50,8 +50,8 @@ mod hybrid_cmd;
 mod hybrid_fit;
 mod observation_table;
 mod remote_cmd;
-mod ws_cmd;
 mod study;
+mod ws_cmd;
 
 use std::path::{Path, PathBuf};
 

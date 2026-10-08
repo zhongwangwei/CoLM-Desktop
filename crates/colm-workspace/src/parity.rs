@@ -13,8 +13,10 @@ use crate::layout::{now, Workspace};
 
 /// 复制算例时不带的东西：上次的输出、阶段指纹、远程运行的记录。
 fn skipped(name: &str) -> bool {
-    matches!(name, "out" | "stages.json" | ".colm-remote.json" | ".colm-fetch.json")
-        || name.starts_with(".colm-")
+    matches!(
+        name,
+        "out" | "stages.json" | ".colm-remote.json" | ".colm-fetch.json"
+    ) || name.starts_with(".colm-")
 }
 
 fn copy_tree(from: &Path, to: &Path) -> Result<()> {
@@ -32,7 +34,11 @@ fn copy_tree(from: &Path, to: &Path) -> Result<()> {
 
 /// 复制算例（不带输出），并把 namelist 里的旧算例路径换成新路径，这样副本的输出写到副本里。
 pub fn copy_case(src: &Path, dst: &Path) -> Result<()> {
-    ensure!(src.join("case.nml").is_file(), "{} has no case.nml", src.display());
+    ensure!(
+        src.join("case.nml").is_file(),
+        "{} has no case.nml",
+        src.display()
+    );
     std::fs::create_dir_all(dst)?;
     for entry in std::fs::read_dir(src)? {
         let entry = entry?;
@@ -110,8 +116,15 @@ pub fn run_copy(
     engine: &str,
     cancel: Option<&std::sync::atomic::AtomicBool>,
 ) -> Result<RunResult> {
-    ensure!(["rust", "fortran"].contains(&engine), "engine must be rust or fortran");
-    ensure!(cli.is_file(), "{} does not exist; build the engine first", cli.display());
+    ensure!(
+        ["rust", "fortran"].contains(&engine),
+        "engine must be rust or fortran"
+    );
+    ensure!(
+        cli.is_file(),
+        "{} does not exist; build the engine first",
+        cli.display()
+    );
     ensure!(
         kernel.join("manifest.json").is_file(),
         "{} has no manifest.json; build or choose a kernel first",
@@ -131,7 +144,16 @@ pub fn run_copy(
         "--force".into(),
         "1".into(),
     ];
-    let outcome = run_logged(workspace, &format!("run-{label}"), cli, &args, &copy, &[], false, cancel)?;
+    let outcome = run_logged(
+        workspace,
+        &format!("run-{label}"),
+        cli,
+        &args,
+        &copy,
+        &[],
+        false,
+        cancel,
+    )?;
     let history = copy.join("out").join(case_name(&copy)?).join("history");
     Ok(RunResult {
         label: label.to_owned(),
@@ -197,11 +219,18 @@ pub fn parity_check(
     let kernel = workspace.kernels().join(preset);
     let cli = workspace.bin().join("colm-cli");
     let run_dir = new_run_dir(workspace)?;
-    let rust = run_copy(workspace, case, &run_dir, "rust", &cli, &kernel, "rust", cancel)?;
-    let fortran = run_copy(workspace, case, &run_dir, "fortran", &cli, &kernel, "fortran", cancel)?;
+    let rust = run_copy(
+        workspace, case, &run_dir, "rust", &cli, &kernel, "rust", cancel,
+    )?;
+    let fortran = run_copy(
+        workspace, case, &run_dir, "fortran", &cli, &kernel, "fortran", cancel,
+    )?;
     let (comparison, first, ok) = if rust.outcome.ok && fortran.outcome.ok {
         let report = compare::compare(&rust.history, &fortran.history, Tolerance::default())?;
-        let first = report.first_difference.as_ref().map(compare::First::describe);
+        let first = report
+            .first_difference
+            .as_ref()
+            .map(compare::First::describe);
         let ok = report.bitwise_identical();
         (Some(report), first, ok)
     } else {
@@ -226,15 +255,15 @@ pub fn parity_check(
         report: PathBuf::new(),
     };
     report.report = write_report(workspace, "parity", &report)?;
-    workspace.info.gates.parity = Some(ParityRecord {
+    let record = ParityRecord {
         ok,
         at: now(),
         commit: workspace.head()?,
         preset: preset.to_owned(),
         case: case.display().to_string(),
         first_difference: first,
-    });
-    workspace.save()?;
+    };
+    workspace.update(|info| info.gates.parity = Some(record))?;
     Ok(report)
 }
 
@@ -286,7 +315,16 @@ pub fn regress(
 ) -> Result<RegressionReport> {
     crate::build::check_preset(preset)?;
     let run_dir = new_run_dir(workspace)?;
-    let base = run_copy(workspace, case, &run_dir, "baseline", &baseline.cli, &baseline.kernel, engine, cancel)?;
+    let base = run_copy(
+        workspace,
+        case,
+        &run_dir,
+        "baseline",
+        &baseline.cli,
+        &baseline.kernel,
+        engine,
+        cancel,
+    )?;
     // 工作区没编这个预设的内核时，Rust 引擎只需要清单，借基线的内核目录。
     let ws_kernel = workspace.kernels().join(preset);
     let kernel = if ws_kernel.join("manifest.json").is_file() {
@@ -330,7 +368,11 @@ pub fn regress(
             None,
             format!(
                 "the {} run failed; see its log",
-                if base.outcome.ok { "candidate" } else { "baseline" }
+                if base.outcome.ok {
+                    "candidate"
+                } else {
+                    "baseline"
+                }
             ),
             false,
         )
@@ -347,7 +389,7 @@ pub fn regress(
         report: PathBuf::new(),
     };
     result.report = write_report(workspace, "regression", &result)?;
-    workspace.info.gates.regression = Some(Regression {
+    let record = Regression {
         kind,
         ok,
         at: now(),
@@ -358,24 +400,33 @@ pub fn regress(
             .as_ref()
             .map_or(0, |c| c.differs + c.within_tolerance),
         verdict,
-    });
-    workspace.save()?;
+    };
+    workspace.update(|info| info.gates.regression = Some(record))?;
     Ok(result)
 }
 
 /// 判定：重构要逐位一致；物理修改只要求没有 NaN/无穷大、闭合没变差。
 pub fn judge(kind: ChangeKind, report: &Report, closure_ok: bool) -> (bool, String) {
     if report.new_nonfinite > 0 {
-        return (false, format!("{} values became NaN or infinite", report.new_nonfinite));
+        return (
+            false,
+            format!("{} values became NaN or infinite", report.new_nonfinite),
+        );
     }
     if !closure_ok {
-        return (false, "water or energy closure got worse (f_xerr / f_zerr)".into());
+        return (
+            false,
+            "water or energy closure got worse (f_xerr / f_zerr)".into(),
+        );
     }
     let changed = report.differs + report.within_tolerance;
     match kind {
         ChangeKind::Refactor => {
             if report.bitwise_identical() {
-                (true, format!("bitwise identical in all {} variables", report.identical))
+                (
+                    true,
+                    format!("bitwise identical in all {} variables", report.identical),
+                )
             } else {
                 let first = report
                     .first_difference
@@ -387,9 +438,8 @@ pub fn judge(kind: ChangeKind, report: &Report, closure_ok: bool) -> (bool, Stri
         }
         ChangeKind::Physics => {
             let top: Vec<String> = report
-                .changed
-                .iter()
-                .take(5)
+                .largest_changes(5)
+                .into_iter()
                 .map(|c| format!("{} (max rel {:.2e})", c.name, c.max_rel))
                 .collect();
             (
@@ -397,7 +447,11 @@ pub fn judge(kind: ChangeKind, report: &Report, closure_ok: bool) -> (bool, Stri
                 format!(
                     "{changed} variables changed, {} identical; largest: {}",
                     report.identical,
-                    if top.is_empty() { "none".into() } else { top.join(", ") }
+                    if top.is_empty() {
+                        "none".into()
+                    } else {
+                        top.join(", ")
+                    }
                 ),
             )
         }

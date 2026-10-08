@@ -1,3 +1,4 @@
+#![allow(clippy::field_reassign_with_default)]
 use super::*;
 
 /// HDF5 不能在多个线程里同时用：所有读写 NetCDF 的测试先拿这把锁。
@@ -62,7 +63,10 @@ fn a_workspace_is_cloned_listed_and_deleted() {
     for sub in ["kernels", "bin", "runs", "reports"] {
         assert!(ws.dir.join(sub).is_dir(), "{sub}");
     }
-    assert_eq!(git::run(&ws.src(), &["branch", "--show-current"]).unwrap(), "ws/demo");
+    assert_eq!(
+        git::run(&ws.src(), &["branch", "--show-current"]).unwrap(),
+        "ws/demo"
+    );
     assert_eq!(ws.info.base_commit, ws.head().unwrap());
 
     // 重名拒绝，半成品不留下；来源不是仓库也拒绝。
@@ -72,7 +76,10 @@ fn a_workspace_is_cloned_listed_and_deleted() {
 
     let list = Workspace::list(&ws_root).unwrap();
     assert_eq!(list.len(), 1);
-    assert_eq!((list[0].name.as_str(), list[0].commits, list[0].dirty), ("demo", 0, false));
+    assert_eq!(
+        (list[0].name.as_str(), list[0].commits, list[0].dirty),
+        ("demo", 0, false)
+    );
 
     // 读回来的信息与保存的一致。
     let again = Workspace::open(&ws_root, "demo").unwrap();
@@ -84,7 +91,10 @@ fn a_workspace_is_cloned_listed_and_deleted() {
     assert!(ws_root.join("other").is_dir());
     Workspace::delete(&ws_root, "demo").unwrap();
     assert!(!ws_root.join("demo").exists());
-    assert!(repo.join(".git").is_dir(), "the source repository is untouched");
+    assert!(
+        repo.join(".git").is_dir(),
+        "the source repository is untouched"
+    );
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -103,9 +113,73 @@ fn a_source_package_becomes_a_repository_with_a_base_commit() {
         .status()
         .unwrap();
     assert!(status.success());
-    let ws = Workspace::create(&root.join("ws"), "fromtar", tarball.to_str().unwrap(), None).unwrap();
+    let ws =
+        Workspace::create(&root.join("ws"), "fromtar", tarball.to_str().unwrap(), None).unwrap();
     assert!(ws.src().join("crates/colm-core/src/demo.rs").is_file());
-    assert_eq!(git::commits_since(&ws.src(), &ws.info.base_commit).unwrap().len(), 0);
+    assert_eq!(
+        git::commits_since(&ws.src(), &ws.info.base_commit)
+            .unwrap()
+            .len(),
+        0
+    );
     assert!(!git::is_dirty(&ws.src()).unwrap());
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// 几条命令同时结束、各记各的门槛：谁也不能把别人的记录覆盖掉。
+#[test]
+fn concurrent_gate_updates_do_not_lose_each_other() {
+    use crate::gates::GateRun;
+    let root = temp("lock");
+    let repo = root.join("source");
+    source_repo(&repo);
+    let ws_root = root.join("ws");
+    let ws = Workspace::create(&ws_root, "demo", repo.to_str().unwrap(), None).unwrap();
+    let dir = ws.dir.clone();
+    let threads: Vec<_> = (0..12)
+        .map(|i| {
+            let ws_root = ws_root.clone();
+            std::thread::spawn(move || {
+                // 每个线程各自“读入”一份旧的工作区信息，再各改自己那一项。
+                let mut ws = Workspace::open(&ws_root, "demo").unwrap();
+                let run = GateRun {
+                    ok: true,
+                    at: i,
+                    commit: "c".into(),
+                    detail: String::new(),
+                };
+                ws.update(|info| {
+                    info.gates.kernels.insert(format!("preset{i}"), run);
+                })
+                .unwrap();
+            })
+        })
+        .collect();
+    for t in threads {
+        t.join().unwrap();
+    }
+    let after = Workspace::open(&ws_root, "demo").unwrap();
+    assert_eq!(
+        after.info.gates.kernels.len(),
+        12,
+        "{:?}",
+        after.info.gates.kernels.keys().collect::<Vec<_>>()
+    );
+    assert!(!dir.join("workspace.lock").exists(), "the lock is released");
+    assert!(std::fs::read_dir(&dir)
+        .unwrap()
+        .flatten()
+        .all(|e| !e.file_name().to_string_lossy().ends_with(".tmp")));
+    // 崩溃留下的旧锁文件：超过一分钟的会被清掉，不会卡死。
+    std::fs::write(dir.join("workspace.lock"), "").unwrap();
+    let old = std::time::SystemTime::now() - std::time::Duration::from_secs(120);
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(dir.join("workspace.lock"))
+        .unwrap();
+    file.set_modified(old).unwrap();
+    drop(file);
+    let mut ws = Workspace::open(&ws_root, "demo").unwrap();
+    ws.update(|info| info.adopted.clear()).unwrap();
     let _ = std::fs::remove_dir_all(&root);
 }

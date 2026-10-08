@@ -20,6 +20,7 @@ import './opencase.js';
 import './assistant.js';
 import './guide.js';
 import './remote.js';
+import './workspace.js';
 
 initI18n();
 initShell();

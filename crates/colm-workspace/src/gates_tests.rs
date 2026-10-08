@@ -1,3 +1,4 @@
+#![allow(clippy::field_reassign_with_default)]
 use super::*;
 
 fn run(ok: bool, commit: &str) -> GateRun {
@@ -26,7 +27,9 @@ fn registration_needs_compile_and_tests_on_the_current_commit() {
     let mut gates = Gates::default();
     gates.engine = Some(run(true, "c1"));
     assert!(!gates.may_register("c1"), "no tests yet");
-    gates.tests.insert("cargo:colm-core".into(), run(true, "c1"));
+    gates
+        .tests
+        .insert("cargo:colm-core".into(), run(true, "c1"));
     assert!(gates.may_register("c1"));
     assert!(!gates.may_register("c2"), "a new commit invalidates both");
     gates.regression = Some(Regression {
@@ -66,12 +69,18 @@ fn gates_round_trip_through_json() {
 fn every_recorded_test_kind_must_pass_on_the_current_commit() {
     let mut gates = Gates::default();
     gates.engine = Some(run(true, "c1"));
-    gates.tests.insert("cargo:colm-core".into(), run(true, "c1"));
+    gates
+        .tests
+        .insert("cargo:colm-core".into(), run(true, "c1"));
     gates.tests.insert("oracle".into(), run(false, "c1"));
     assert_eq!(gates.lights("c1").tests, Light::Fail);
     assert!(!gates.may_register("c1"));
     gates.tests.insert("oracle".into(), run(true, "c0"));
-    assert_eq!(gates.lights("c1").tests, Light::Stale, "an old oracle run does not count");
+    assert_eq!(
+        gates.lights("c1").tests,
+        Light::Stale,
+        "an old oracle run does not count"
+    );
     gates.tests.insert("oracle".into(), run(true, "c1"));
     assert!(gates.may_register("c1"));
 }

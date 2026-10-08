@@ -844,3 +844,16 @@ body.assistant-open:has(.gate:not(.loading-gate):not([hidden])) .assistant {
 .remote-run.finished:not(.failed) .remote-run-state { color: var(--pass); }
 .hybrid-train-list { margin: 8px 0 10px; padding-left: 20px; line-height: 1.7; font-size: 13px; }
 .hybrid-train-list li + li { margin-top: 4px; }
+
+/* 开发工作区面板 */
+.workspace-dialog { width: min(760px, 94vw); }
+.ws-card { border: 1px solid var(--line, #d0d4da); border-radius: 8px; padding: 10px 12px; margin: 8px 0; }
+.ws-head { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; }
+.ws-lights { display: flex; gap: 14px; flex-wrap: wrap; margin: 6px 0; }
+.ws-light-dot { font-size: 14px; }
+.ws-pass .ws-light-dot { color: #2e9e5b; }
+.ws-fail .ws-light-dot { color: #d64545; }
+.ws-stale .ws-light-dot { color: #d9a21b; }
+.ws-unknown .ws-light-dot { color: #9aa0a8; }
+.ws-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.ws-detail { margin-top: 8px; padding-top: 6px; border-top: 1px dashed var(--line, #d0d4da); }

@@ -48,7 +48,10 @@ fn a_logged_command_records_its_output_and_a_gate_on_the_current_commit() {
     let run = gate(&ws, &bad).unwrap();
     assert!(!run.ok && run.detail.contains("broken") && run.commit == ws.head().unwrap());
     ws.info.gates.engine = Some(run);
-    assert_eq!(ws.info.gates.lights(&ws.head().unwrap()).compile, crate::gates::Light::Fail);
+    assert_eq!(
+        ws.info.gates.lights(&ws.head().unwrap()).compile,
+        crate::gates::Light::Fail
+    );
 
     // 取消标志：长命令被中止。
     let flag = std::sync::atomic::AtomicBool::new(true);

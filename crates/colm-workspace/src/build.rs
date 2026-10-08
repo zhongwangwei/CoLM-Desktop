@@ -71,6 +71,7 @@ fn tail(text: &str, lines: usize) -> String {
 }
 
 /// 在沙箱里跑一条命令，输出全部写进 `reports/<label>-<时间>.log`，返回结果。
+#[allow(clippy::too_many_arguments)]
 pub fn run_logged(
     workspace: &Workspace,
     label: &str,
@@ -82,9 +83,7 @@ pub fn run_logged(
     cancel: Option<&std::sync::atomic::AtomicBool>,
 ) -> Result<Outcome> {
     std::fs::create_dir_all(workspace.reports())?;
-    let log = workspace
-        .reports()
-        .join(format!("{label}-{}.log", now()));
+    let log = workspace.reports().join(format!("{label}-{}.log", now()));
     let policy = Policy {
         writable: vec![workspace.dir.clone()],
         allow_network,
@@ -138,7 +137,11 @@ pub fn run_logged(
     };
     let stdout = out.join().unwrap_or_default();
     let stderr = err.join().unwrap_or_default();
-    let combined = format!("$ {} {}\n{stdout}\n--- stderr ---\n{stderr}", program.display(), args.join(" "));
+    let combined = format!(
+        "$ {} {}\n{stdout}\n--- stderr ---\n{stderr}",
+        program.display(),
+        args.join(" ")
+    );
     std::fs::write(&log, &combined)?;
     Ok(Outcome {
         ok: status.success(),
@@ -203,8 +206,8 @@ pub fn build_engine(
                 .with_context(|| format!("cannot copy {} into bin/", binary))?;
         }
     }
-    workspace.info.gates.engine = Some(gate(workspace, &outcome)?);
-    workspace.save()?;
+    let run = gate(workspace, &outcome)?;
+    workspace.update(|info| info.gates.engine = Some(run))?;
     Ok(outcome)
 }
 
@@ -240,14 +243,17 @@ pub fn build_kernel(
     )?;
     if outcome.ok {
         let manifest = outdir.join(preset).join("manifest.json");
-        ensure!(manifest.is_file(), "built, but {} is missing", manifest.display());
+        ensure!(
+            manifest.is_file(),
+            "built, but {} is missing",
+            manifest.display()
+        );
     }
-    workspace
-        .info
-        .gates
-        .kernels
-        .insert(preset.to_owned(), gate(workspace, &outcome)?);
-    workspace.save()?;
+    let run = gate(workspace, &outcome)?;
+    let preset = preset.to_owned();
+    workspace.update(|info| {
+        info.gates.kernels.insert(preset, run);
+    })?;
     Ok(outcome)
 }
 

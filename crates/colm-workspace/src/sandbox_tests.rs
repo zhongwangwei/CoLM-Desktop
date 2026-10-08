@@ -32,7 +32,9 @@ fn a_sandboxed_command_cannot_write_outside_the_workspace() {
     let inside = root.join("ws");
     std::fs::create_dir_all(&inside).unwrap();
     // 在 $HOME 下找一个沙箱应该拒绝写的位置（不是临时目录，也不是工作区）。
-    let forbidden = home().unwrap().join(format!(".colm-sbx-probe-{}", std::process::id()));
+    let forbidden = home()
+        .unwrap()
+        .join(format!(".colm-sbx-probe-{}", std::process::id()));
     let script = format!(
         "echo ok > {inside}/a && echo inside=ok; (echo no > {forbidden} 2>/dev/null && echo outside=WRITTEN) || echo outside=denied",
         inside = inside.display(),
@@ -49,7 +51,11 @@ fn a_sandboxed_command_cannot_write_outside_the_workspace() {
     assert!(info.network_blocked);
     let output = command.output().unwrap();
     let text = String::from_utf8_lossy(&output.stdout);
-    assert!(text.contains("inside=ok"), "{text} {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        text.contains("inside=ok"),
+        "{text} {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert!(text.contains("outside=denied"), "{text}");
     assert!(!forbidden.exists());
     assert!(inside.join("a").is_file());

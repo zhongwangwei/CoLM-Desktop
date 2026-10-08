@@ -4,6 +4,7 @@
 //! D 级（采纳）没有对应的工具：模型想调也调不到，只能在界面上人工操作。
 
 mod act;
+mod code;
 mod read;
 pub mod ui;
 pub mod web;
@@ -54,6 +55,8 @@ pub struct ToolContext {
     pub web: Option<web::WebAccess>,
     /// 引导模式的界面桥；GUI 没声明能被驱动时为空，`ui_*` 工具也不注册。
     pub ui: Option<ui::UiHandle>,
+    /// 开发工作区的根目录；空表示用 `colm-cli` 的默认（`COLM_WORKSPACES` 或 `~/CoLM-Workspaces`）。
+    pub workspace_root: Option<PathBuf>,
 }
 
 /// 长命令的结果：是否成功、输出末尾。
@@ -177,6 +180,10 @@ pub trait Tool: Send + Sync {
     fn description(&self) -> &'static str;
     fn parameters(&self) -> Value;
     fn tier(&self) -> Tier;
+    /// 能不能让用户选“本会话都允许”。补丁、撤回、建工作区这类改动源码的操作必须每次都问，返回 false。
+    fn session_allowance(&self) -> bool {
+        true
+    }
     /// 审批卡片与审计日志里的一句话：这次调用要做什么。
     fn summary(&self, args: &Value) -> String {
         format!("{} {}", self.name(), args)
@@ -209,6 +216,7 @@ impl Registry {
     pub fn standard() -> Self {
         let mut tools = read::tools();
         tools.extend(act::tools());
+        tools.extend(code::tools());
         Self { tools }
     }
 

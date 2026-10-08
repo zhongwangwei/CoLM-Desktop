@@ -21,6 +21,7 @@ mod remote;
 mod sidecar;
 mod sitedata;
 mod sites;
+mod workspace;
 
 use assistant::*;
 use config::*;
@@ -178,6 +179,13 @@ pub fn run() {
             remote_run,
             remote_preview,
             remote_kernels,
+            workspace::workspace_list,
+            workspace::workspace_status,
+            workspace::workspace_kernels,
+            workspace::workspace_export,
+            workspace::workspace_revert,
+            workspace::workspace_delete,
+            workspace::workspace_adopt,
             remote_build_kernel,
             remote_status,
             remote_cancel,

@@ -10,7 +10,9 @@ export function kernelForSubgrid(subgrid = state.subgrid ?? state.wizard?.subgri
   const grid = opts && Object.hasOwn(opts, 'grid') ? opts.grid : (state.wizard?.grid ?? state.grid);
   const wantGrid = GRID_MACROS[grid] ?? 'SinglePoint';
   const wantCrop = !!(opts?.crop ?? opts?.physics?.crop);
-  const matches = state.kernels.filter(k => k.macros?.includes(wantGrid)
+  // 采纳过的实验内核排在前面（“设为默认”）；没采纳过就只有正式内核，行为不变。
+  const pool = [...(state.adoptedKernels ?? []), ...state.kernels];
+  const matches = pool.filter(k => k.macros?.includes(wantGrid)
     && k.macros?.includes(want) && !!k.macros?.includes('CROP') === wantCrop);
   const preferred = wantCrop ? 'crop' : (subgrid === 'USGS' ? 'usgs' : 'default');
   return matches.find(k => k.preset === preferred) ?? matches[0] ?? null;

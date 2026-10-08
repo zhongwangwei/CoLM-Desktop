@@ -33,12 +33,25 @@ fn every_standard_tool_has_a_strict_mode_schema() {
                 tool.name()
             );
         }
-        assert_ne!(
-            tool.tier(),
-            Tier::Code,
-            "{} (no code tools yet)",
-            tool.name()
-        );
+        // C 级只有开发工作区里的这几个（第 4 节）：别的工具不该悄悄变成代码操作。
+        if tool.tier() == Tier::Code {
+            assert!(
+                [
+                    "workspace_create",
+                    "apply_patch",
+                    "revert",
+                    "build_engine",
+                    "build_kernel",
+                    "run_tests",
+                    "run_case_with",
+                    "parity_check",
+                    "regression_check",
+                ]
+                .contains(&tool.name()),
+                "{} is a code-tier tool but not a workspace tool",
+                tool.name()
+            );
+        }
     }
     let api = registry.api_tools(true);
     assert_eq!(api.len(), names.len());

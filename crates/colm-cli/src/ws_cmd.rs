@@ -19,6 +19,7 @@
 //!                      --baseline-cli F --baseline-kernel DIR [--engine rust|fortran]
 //! colm-cli ws-kernels  [--root DIR]
 //! colm-cli ws-export   --name N [--out FILE]            # D 级
+//! colm-cli ws-adopt    --name N --preset P                # D 级：把实验内核设为默认（只记一笔采纳）
 //! colm-cli ws-delete   --name N                          # D 级
 //! ```
 //!
@@ -56,8 +57,39 @@ fn flag(opts: &Opts, name: &str) -> bool {
 
 fn number(opts: &Opts, name: &str) -> Result<Option<usize>> {
     opts.get(name)
-        .map(|v| v.parse().with_context(|| format!("{name} must be a whole number")))
+        .map(|v| {
+            v.parse()
+                .with_context(|| format!("{name} must be a whole number"))
+        })
         .transpose()
+}
+
+/// 对比报告的摘要：计数、第一个差异、差得最多的十个变量。完整报告写在 `reports/` 里，路径随结果给出。
+fn compact(report: &colm_workspace::compare::Report) -> serde_json::Value {
+    json!({
+        "files": report.files,
+        "identical": report.identical,
+        "within_tolerance": report.within_tolerance,
+        "differs": report.differs,
+        "new_nonfinite": report.new_nonfinite,
+        "only_in_a": report.only_in_a,
+        "only_in_b": report.only_in_b,
+        "first_difference": report.first_difference,
+        "largest_changes": report.largest_changes(10),
+    })
+}
+
+/// 一次运行的摘要：成败、日志路径、耗时；失败时带输出末尾。
+fn run_summary(run: &colm_workspace::parity::RunResult) -> serde_json::Value {
+    json!({
+        "engine": run.engine,
+        "ok": run.outcome.ok,
+        "seconds": run.outcome.seconds,
+        "log": run.outcome.log,
+        "case_copy": run.case_copy,
+        "history": run.history,
+        "tail": if run.outcome.ok { None } else { Some(&run.outcome.tail) },
+    })
 }
 
 pub(super) fn dispatch(command: &str, opts: &Opts) -> Result<()> {
@@ -98,7 +130,12 @@ pub(super) fn dispatch(command: &str, opts: &Opts) -> Result<()> {
         "ws-read" => {
             let from = number(opts, "--from")?.unwrap_or(1);
             let to = number(opts, "--to")?.unwrap_or(from + code::MAX_READ_LINES - 1);
-            print(json!(code::read_lines(&open(opts)?, &opts.need_str("--path")?, from, to)?));
+            print(json!(code::read_lines(
+                &open(opts)?,
+                &opts.need_str("--path")?,
+                from,
+                to
+            )?));
         }
         "ws-symbols" => print(json!({
             "symbols": code::symbols(&open(opts)?, &opts.need_str("--path")?)?
@@ -106,12 +143,17 @@ pub(super) fn dispatch(command: &str, opts: &Opts) -> Result<()> {
         "ws-patch" => {
             let workspace = open(opts)?;
             let diff = match (opts.get("--diff-file"), opts.get("--diff")) {
-                (Some(file), _) => std::fs::read_to_string(&file)
-                    .with_context(|| format!("cannot read {file}"))?,
+                (Some(file), _) => {
+                    std::fs::read_to_string(&file).with_context(|| format!("cannot read {file}"))?
+                }
                 (None, Some(text)) => text,
                 (None, None) => bail!("give the patch with --diff-file FILE or --diff TEXT"),
             };
-            print(json!(patch::apply(&workspace, &diff, &opts.need_str("--message")?)?));
+            print(json!(patch::apply(
+                &workspace,
+                &diff,
+                &opts.need_str("--message")?
+            )?));
         }
         "ws-revert" => {
             let workspace = open(opts)?;
@@ -120,11 +162,19 @@ pub(super) fn dispatch(command: &str, opts: &Opts) -> Result<()> {
         }
         "ws-build-engine" => {
             let mut workspace = open(opts)?;
-            print(json!(build::build_engine(&mut workspace, flag(opts, "--network"), None)?));
+            print(json!(build::build_engine(
+                &mut workspace,
+                flag(opts, "--network"),
+                None
+            )?));
         }
         "ws-build-kernel" => {
             let mut workspace = open(opts)?;
-            print(json!(build::build_kernel(&mut workspace, &opts.need_str("--preset")?, None)?));
+            print(json!(build::build_kernel(
+                &mut workspace,
+                &opts.need_str("--preset")?,
+                None
+            )?));
         }
         "ws-test" => {
             let mut workspace = open(opts)?;
@@ -143,24 +193,43 @@ pub(super) fn dispatch(command: &str, opts: &Opts) -> Result<()> {
         }
         "ws-compare" => {
             let tolerance = Tolerance {
-                rtol: opts.get("--rtol").map(|v| v.parse()).transpose()?.unwrap_or(0.0),
-                atol: opts.get("--atol").map(|v| v.parse()).transpose()?.unwrap_or(0.0),
+                rtol: opts
+                    .get("--rtol")
+                    .map(|v| v.parse())
+                    .transpose()?
+                    .unwrap_or(0.0),
+                atol: opts
+                    .get("--atol")
+                    .map(|v| v.parse())
+                    .transpose()?
+                    .unwrap_or(0.0),
             };
             let report = compare::compare(
                 &PathBuf::from(opts.need_str("--a")?),
                 &PathBuf::from(opts.need_str("--b")?),
                 tolerance,
             )?;
-            print(json!({ "bitwise_identical": report.bitwise_identical(), "report": report }));
+            print(
+                json!({ "bitwise_identical": report.bitwise_identical(), "compare": compact(&report) }),
+            );
         }
         "ws-parity" => {
             let mut workspace = open(opts)?;
-            print(json!(parity::parity_check(
+            let report = parity::parity_check(
                 &mut workspace,
                 &PathBuf::from(opts.need_str("--case")?),
                 &opts.need_str("--preset")?,
                 None,
-            )?));
+            )?;
+            print(json!({
+                "ok": report.ok,
+                "first_difference": report.first_difference,
+                "preset": report.preset,
+                "case": report.case,
+                "report": report.report,
+                "compare": report.compare.as_ref().map(compact),
+                "runs": { "rust": run_summary(&report.rust), "fortran": run_summary(&report.fortran) },
+            }));
         }
         "ws-regress" => {
             let mut workspace = open(opts)?;
@@ -173,7 +242,7 @@ pub(super) fn dispatch(command: &str, opts: &Opts) -> Result<()> {
                 cli: PathBuf::from(opts.need_str("--baseline-cli")?),
                 kernel: PathBuf::from(opts.need_str("--baseline-kernel")?),
             };
-            print(json!(parity::regress(
+            let report = parity::regress(
                 &mut workspace,
                 &PathBuf::from(opts.need_str("--case")?),
                 &opts.need_str("--preset")?,
@@ -181,7 +250,17 @@ pub(super) fn dispatch(command: &str, opts: &Opts) -> Result<()> {
                 &baseline,
                 kind,
                 None,
-            )?));
+            )?;
+            print(json!({
+                "ok": report.ok,
+                "verdict": report.verdict,
+                "kind": report.kind,
+                "engine": report.engine,
+                "report": report.report,
+                "closure": report.closure,
+                "compare": report.compare.as_ref().map(compact),
+                "runs": { "baseline": run_summary(&report.baseline), "candidate": run_summary(&report.candidate) },
+            }));
         }
         "ws-kernels" => print(json!({ "kernels": kernels::experimental(&root(opts))? })),
         "ws-export" => {
@@ -194,9 +273,28 @@ pub(super) fn dispatch(command: &str, opts: &Opts) -> Result<()> {
             }
             workspace.record_adoption(
                 "export",
-                &out.as_ref().map_or_else(|| "stdout".into(), |p| p.display().to_string()),
+                &out.as_ref()
+                    .map_or_else(|| "stdout".into(), |p| p.display().to_string()),
             )?;
-            print(json!({ "bytes": diff.len(), "out": out, "patch": if out.is_none() { Some(diff) } else { None } }));
+            print(
+                json!({ "bytes": diff.len(), "out": out, "patch": if out.is_none() { Some(diff) } else { None } }),
+            );
+        }
+        "ws-adopt" => {
+            let mut workspace = open(opts)?;
+            let preset = opts.need_str("--preset")?;
+            // 只有登记过的实验内核（编译与测试在当前提交上通过、回归没有判不通过）才能采纳。
+            let entry = kernels::experimental(&root(opts))?
+                .into_iter()
+                .find(|k| k.workspace == workspace.info.name && k.preset == preset)
+                .with_context(|| {
+                    format!(
+                        "the {preset} kernel of workspace {} is not registered: the compile and test gates must pass on the current commit and the regression must not have failed",
+                        workspace.info.name
+                    )
+                })?;
+            workspace.record_adoption("adopt-kernel", &format!("{preset} @ {}", entry.head))?;
+            print(json!({ "adopted": entry }));
         }
         "ws-delete" => {
             let name = opts.need_str("--name")?;
