@@ -57,6 +57,8 @@ pub struct Launch {
     pub bridge_token: String,
     /// 附加给外部后端的系统说明（CoLM 的领域规则）。
     pub instructions: String,
+    /// 联网：开着时用后端自带的联网搜索（计入它的订阅），关着时禁用它。
+    pub web: bool,
 }
 
 /// 一个外部后端的会话：每轮把用户消息交给它，把它的事件转成界面事件。
@@ -201,10 +203,15 @@ pub fn status() -> Value {
     })
 }
 
-/// 外部后端的说明：CoLM 的领域规则加上“工具来自 colm MCP 服务”。
-pub fn instructions(system_prompt: &str) -> String {
+/// 外部后端的说明：CoLM 的领域规则加上“工具来自 colm MCP 服务”与联网规则。
+pub fn instructions(system_prompt: &str, web: bool) -> String {
+    let web = if web {
+        "For web search and reading web pages, use your own built-in web tools; the colm server does not provide web_search or fetch_url here."
+    } else {
+        "Web access is turned off in the application; do not try to search the web or fetch pages."
+    };
     format!(
-        "{system_prompt}\n\nYou are running inside CoLM-Desktop. The CoLM tools named above are provided by the MCP server `colm` (for example mcp__colm__list_cases or colm/list_cases). Prefer them over shell commands for anything about cases, runs, metrics, Studies and the application window. Any change to files or any command that is not read-only needs the user's approval in the application."
+        "{system_prompt}\n\nYou are running inside CoLM-Desktop. The CoLM tools named above are provided by the MCP server `colm` (for example mcp__colm__list_cases or colm/list_cases). Prefer them over shell commands for anything about cases, runs, metrics, Studies and the application window. Any change to files or any command that is not read-only needs the user's approval in the application. {web}"
     )
 }
 

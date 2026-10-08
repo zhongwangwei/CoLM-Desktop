@@ -48,11 +48,7 @@ fn item_card(item: &Value) -> Option<(String, Tier, String)> {
                 format!("修改文件：{}", files.join("、")),
             ))
         }
-        "webSearch" => Some((
-            "codex_web_search".into(),
-            Tier::Read,
-            format!("联网搜索：{}", field("query")),
-        )),
+        "webSearch" => Some(("codex_web_search".into(), Tier::Read, search_summary(item))),
         // colm 的工具由转发层出卡片；别的 MCP 服务的工具照常显示。
         "mcpToolCall" if item["server"] != "colm" => Some((
             format!("{}/{}", field("server"), field("tool")),
@@ -60,6 +56,31 @@ fn item_card(item: &Value) -> Option<(String, Tier, String)> {
             format!("{} {}", field("tool"), item["arguments"]),
         )),
         _ => None,
+    }
+}
+
+/// 搜索卡片上的一句话：查询词可能在 `query`、`action.query` 或 `action.queries` 里，开始时也可能还没有。
+fn search_summary(item: &Value) -> String {
+    let action = &item["action"];
+    let query = [
+        &item["query"],
+        &action["query"],
+        &action["queries"][0],
+        &action["url"],
+    ]
+    .into_iter()
+    .find_map(|v| v.as_str().filter(|s| !s.is_empty()));
+    match query {
+        Some(query) => format!("联网搜索：{query}"),
+        None => "联网搜索".to_owned(),
+    }
+}
+
+/// 条目是否成功：搜索条目没有 `status` 字段，没失败就算成功。
+fn item_ok(item: &Value) -> bool {
+    match item["status"].as_str() {
+        Some(status) => status == "completed",
+        None => item["type"] == "webSearch",
     }
 }
 
@@ -140,7 +161,7 @@ pub fn map_notification(message: &Value, state: &mut CodexState) -> Vec<Outbound
                 out.push(Outbound::ToolResult {
                     id: id.to_owned(),
                     name,
-                    ok: item["status"] == "completed",
+                    ok: item_ok(item),
                     result: item_result(item),
                     elapsed_ms: item["durationMs"].as_u64().unwrap_or(0),
                 });
@@ -340,6 +361,12 @@ impl CodexSession {
             .env(crate::bridge::ENV_TOKEN, &self.launch.bridge_token)
             .args(["app-server", "-c"])
             .arg(format!("mcp_servers.colm.command=\"{mcp}\""))
+            // 联网用 Codex 自带的搜索（计入 ChatGPT 订阅）：开着用实时搜索，关着禁用。
+            .arg("-c")
+            .arg(format!(
+                "web_search=\"{}\"",
+                if self.launch.web { "live" } else { "disabled" }
+            ))
             .arg("-c")
             .arg(format!(
                 "mcp_servers.colm.env_vars=[\"{}\",\"{}\"]",

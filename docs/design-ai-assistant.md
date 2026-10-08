@@ -85,6 +85,7 @@ GUI 助手面板 ──(Tauri 事件)── sidecar.rs ──stdio JSONL── c
 - 事件：`item/agentMessage/delta` 是回答；`item/reasoning/*Delta` 是思考；`commandExecution`、`fileChange`、`webSearch` 等条目出工具卡片；`turn/completed` 结束一轮。`thread/tokenUsage/updated` 是线程累计值，每轮用差值。
 - 审批：`item/commandExecution/requestApproval`、`item/fileChange/requestApproval`、`item/permissions/requestApproval` 转成面板审批卡片，回答 `accept` / `acceptForSession` / `decline`。调 MCP 工具前 Codex 会发 `mcpServer/elicitation/request`（`_meta.codex_approval_kind = "mcp_tool_call"`）：来自 colm 的自动同意（转发层已按我们的规则把关），其他的拒绝。
 - 挂载 `colm-mcp`：`-c mcp_servers.colm.command=…`，转发地址与令牌经 app-server 的环境变量和 `mcp_servers.colm.env_vars` 交给它，不出现在命令行上。
+- 联网（第 635 轮）：用 Codex 自带的搜索，计入 ChatGPT 订阅；设置里开着就 `-c web_search="live"`，关着就 `"disabled"`。不再挂 DeepSeek 的 `web_search` / `fetch_url`。
 - 没用实验性的客户端工具（`dynamicTools`）：要开实验开关，版本一变就可能失效。
 - 条款：OpenAI 的说法是本地或开源应用沿用 app-server 认证可以继续，但商业或托管服务从来不允许；推荐的正规路线是 Sign in with ChatGPT（要先申请客户端 ID），留待以后。
 
@@ -93,6 +94,7 @@ GUI 助手面板 ──(Tauri 事件)── sidecar.rs ──stdio JSONL── c
 - 每轮启动一次 `claude -p --output-format stream-json --verbose --include-partial-messages`，消息经 stdin 交过去；第一轮 `--session-id <uuid>`，之后 `--resume <uuid>`。进程的工作目录是项目目录。
 - 用订阅登录：不加 `--bare`（它不读订阅登录），并从子进程环境里去掉 `ANTHROPIC_API_KEY`、`ANTHROPIC_AUTH_TOKEN`、`ANTHROPIC_BASE_URL` 等（它们优先于订阅登录）。实测 `apiKeySource: none`。
 - 审批：用户的全局设置可能开了 `auto` 模式或放行规则（实测就是），所以显式 `--permission-mode manual --permission-prompts host --setting-sources project`，并 `--permission-prompt-tool mcp__colm__approve`。审批工具收到 `{tool_name, input, tool_use_id}`，回答 `{"behavior":"allow","updatedInput":…}` 或 `{"behavior":"deny","message":…}`。`mcp__colm__*` 直接放行（转发层已把关）。
+- 联网（第 635 轮）：用 Claude Code 自带的 WebSearch / WebFetch，计入 Claude 订阅；设置里开着就 `--allowedTools WebSearch WebFetch`（不逐次审批），关着就 `--disallowedTools`。不再挂 DeepSeek 的 `web_search` / `fetch_url`。
 - MCP 配置（含转发令牌）写进只有当前用户可读的临时文件，这一轮结束就删。
 - 事件：`stream_event` 里的 `text_delta`/`thinking_delta` 是回答与思考；`assistant` 里的 `tool_use` 出工具卡片（`mcp__colm__*` 与 `ToolSearch` 不出）；`user` 里的 `tool_result` 是结果；`result` 结束一轮并带用量。
 - 条款：Anthropic 不允许第三方应用提供 Claude.ai 登录、代用户借订阅凭据发请求，或收集、转手凭据；但不妨碍用户用自己的订阅登录未经修改的官方 Claude Code。我们只启动用户自己装的官方程序，不碰凭据，不做登录按钮。把带这个功能的版本发给其他用户算不算“第三方提供”，文档没说清，正式发版前要向 Anthropic 确认。

@@ -31,6 +31,17 @@ const KEY_VARS: [&str; 6] = [
     "CLAUDE_CODE_USE_VERTEX",
 ];
 
+/// Claude Code 自带的联网工具。
+const WEB_TOOLS: [&str; 2] = ["WebSearch", "WebFetch"];
+
+/// 只读的自带工具（卡片按只读显示）。
+fn tier_of(name: &str) -> Tier {
+    match name {
+        "WebSearch" | "WebFetch" | "Read" | "Grep" | "Glob" | "LS" => Tier::Read,
+        _ => Tier::Code,
+    }
+}
+
 /// CoLM 自己的工具由转发层出卡片，这里不重复；`ToolSearch` 只是 Claude Code 查找延迟加载工具的内部步骤。
 fn shown(name: &str) -> bool {
     !name.starts_with("mcp__colm__") && name != "ToolSearch"
@@ -103,7 +114,7 @@ pub fn map_event(event: &Value, state: &mut ClaudeState) -> Vec<Outbound> {
                         id,
                         name: name.to_owned(),
                         arguments: block["input"].to_string(),
-                        tier: Tier::Code,
+                        tier: tier_of(name),
                         summary: summary(name, &block["input"]),
                         preapproved: false,
                     });
@@ -267,6 +278,13 @@ impl ClaudeSession {
                 "--setting-sources",
                 "project",
             ])
+            // 联网用 Claude Code 自带的 WebSearch / WebFetch（计入订阅）：开着就预先放行，关着就禁用。
+            .arg(if self.launch.web {
+                "--allowedTools"
+            } else {
+                "--disallowedTools"
+            })
+            .args(WEB_TOOLS)
             .arg("--append-system-prompt")
             .arg(&self.launch.instructions)
             .arg(if self.started {

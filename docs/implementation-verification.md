@@ -31810,3 +31810,25 @@ GPP 的均值被 4 个基线 KGE 低于 −0.5 的站拉低（BE-Lon、DE-Geb、
   - 两个后端的事件转换（用实测录下的消息）、审批答复、UUID 格式；
   - 每轮用量差值、临时文件权限 0600、外部会话号的保存与读回。
 - GUI Rust 208 项、xtask 测试通过；`check-gui`（96 个命令全部能解析）与 14 个前端套件通过；两个 workspace 的 clippy 零警告、fmt 干净。
+
+## 第 635 轮：外部后端改用自带的联网搜索
+
+**过程**：用户问选了 Codex 或 Claude Code 后联网是不是还走 DeepSeek。当时确实如此：DeepSeek 的 `web_search` / `fetch_url` 经 `colm-mcp` 提供给它们，用的是 DeepSeek 的 Key；而它们自带的搜索也在，两套并存。Claude Code 用自带搜索时还会弹审批。
+
+**现状**：
+- 外部后端不再注册 DeepSeek 的 `web_search` / `fetch_url`。设置里的"联网搜索"开关对应它们自带的搜索，计入各自的订阅，不需要 DeepSeek Key：
+  - Claude Code：开着就 `--allowedTools WebSearch WebFetch`（不逐次审批），关着就 `--disallowedTools WebSearch WebFetch`；
+  - Codex：开着就 `-c web_search="live"`，关着就 `"disabled"`。
+- 给外部后端的说明里写明用自带的联网工具，或"联网已关闭，不要尝试"。
+- Claude Code 的只读工具（WebSearch、WebFetch、Read、Grep、Glob、LS）卡片按只读显示。
+- Codex 的搜索条目没有 `status` 字段，查询词在 `action` 里：卡片原来显示"联网搜索："（空）和"失败"，现在从 `query`、`action.query`、`action.queries` 取查询词，没有 `status` 就算成功。
+
+**检查**（用户两个订阅，联网开）：问"HESS 29 卷 3119 页那篇 Common Land Model 论文的标题和网址"。
+
+| 后端 | 过程 | 结果 |
+|---|---|---|
+| Claude Code | WebSearch → WebFetch 打开 hess.copernicus.org 原文页 | 24.5 秒；标题、网址、作者都对；不弹审批，不用 DeepSeek |
+| Codex | 自带搜索两次 | 21.8 秒；给出同样的标题和网址 |
+
+- 联网关时（Claude Code）：问今日头条新闻，答"联网已在 CoLM-Desktop 里关闭"，既不搜也不编。
+- colm-agent 46 项测试通过（新增 Codex 搜索卡片的查询词与成功判定）；`check-gui` 与 14 个前端套件通过；clippy 零警告、fmt 干净。

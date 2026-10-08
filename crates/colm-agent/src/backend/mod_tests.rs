@@ -11,8 +11,10 @@ fn decisions_map_to_codex_words_and_the_child_path_has_install_dirs() {
     let path: Vec<PathBuf> = std::env::split_paths(&child_path()).collect();
     assert!(path.iter().any(|p| p.ends_with(".local/bin")));
     assert!(path.iter().any(|p| p == Path::new("/opt/homebrew/bin")));
-    assert!(instructions("RULES").starts_with("RULES"));
-    assert!(instructions("RULES").contains("mcp__colm__"));
+    assert!(instructions("RULES", true).starts_with("RULES"));
+    assert!(instructions("RULES", true).contains("mcp__colm__"));
+    assert!(instructions("RULES", true).contains("built-in web tools"));
+    assert!(instructions("RULES", false).contains("Web access is turned off"));
 }
 
 #[cfg(unix)]

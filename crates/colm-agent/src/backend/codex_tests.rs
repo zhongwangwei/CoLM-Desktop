@@ -150,3 +150,24 @@ fn usage_is_reported_per_turn_not_per_thread() {
     );
     assert_eq!(per_turn(Usage::default(), first), Usage::default());
 }
+
+#[test]
+fn web_search_cards_show_the_query_and_count_as_success_without_a_status() {
+    let mut state = CodexState::default();
+    let started = line(
+        r#"{"method":"item/started","params":{"item":{"type":"webSearch","id":"ws_1","query":"","action":{"type":"search","query":"HESS 29 3119"}}}}"#,
+    );
+    assert!(matches!(&map_notification(&started, &mut state)[0],
+        Outbound::ToolCall { summary, tier: Tier::Read, .. } if summary == "联网搜索：HESS 29 3119"));
+    let done = line(
+        r#"{"method":"item/completed","params":{"item":{"type":"webSearch","id":"ws_1","results":[{"domain":"hess.copernicus.org"}]}}}"#,
+    );
+    assert!(matches!(
+        &map_notification(&done, &mut state)[0],
+        Outbound::ToolResult { ok: true, .. }
+    ));
+    let empty =
+        line(r#"{"method":"item/started","params":{"item":{"type":"webSearch","id":"ws_2"}}}"#);
+    assert!(matches!(&map_notification(&empty, &mut state)[0],
+        Outbound::ToolCall { summary, .. } if summary == "联网搜索"));
+}

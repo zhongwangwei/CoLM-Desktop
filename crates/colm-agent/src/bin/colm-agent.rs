@@ -574,7 +574,9 @@ fn serve(data_dir: Option<PathBuf>, cli: PathBuf, key_file: PathBuf) -> Result<(
                 let cancel = Arc::clone(&cancel);
                 let decisions = Arc::clone(&decision_rx);
                 let allowed = Arc::clone(&allowed);
-                let registry = Registry::standard_with(web_search, ui);
+                // 外部后端用自带的联网搜索，不提供 DeepSeek 的 web_search / fetch_url。
+                let registry =
+                    Registry::standard_with(web_search && backend == BackendKind::Builtin, ui);
                 if ui {
                     tool_context.ui = Some(UiHandle(Arc::new(ChannelUi {
                         emitter: emitter.clone(),
@@ -602,9 +604,6 @@ fn serve(data_dir: Option<PathBuf>, cli: PathBuf, key_file: PathBuf) -> Result<(
                             allowed,
                         },
                         web_search,
-                        allowed_hosts,
-                        keys,
-                        key_file,
                         data_dir: data_dir.clone(),
                         session,
                         emitter,
@@ -728,9 +727,6 @@ struct ExternalTurn {
     tool_context: ToolContext,
     approver: ChannelApprover,
     web_search: bool,
-    allowed_hosts: Arc<Mutex<BTreeSet<String>>>,
-    keys: Arc<Mutex<std::collections::BTreeMap<String, String>>>,
-    key_file: PathBuf,
     data_dir: Option<PathBuf>,
     session: Arc<Mutex<Session>>,
     emitter: Emitter,
@@ -741,12 +737,8 @@ struct ExternalTurn {
 
 impl ExternalTurn {
     fn run(self) -> Result<()> {
+        // 联网交给外部后端自带的搜索（计入它的订阅），这里不挂 DeepSeek 的 web_search / fetch_url。
         let mut tool_context = self.tool_context;
-        if self.web_search {
-            // 联网搜索仍用 DeepSeek 的 Key（没存时搜索工具自己报错）。
-            let key = cached_key(&self.keys, &self.key_file, DEEPSEEK_BASE_URL).unwrap_or_default();
-            tool_context.web = Some(web::WebAccess::deepseek(key, self.allowed_hosts));
-        }
         if !tool_context.project_root.is_dir() {
             tool_context.project_root = std::env::var_os("HOME")
                 .or_else(|| std::env::var_os("USERPROFILE"))
@@ -808,7 +800,8 @@ impl ExternalTurn {
                     .with_file_name(format!("colm-mcp{}", std::env::consts::EXE_SUFFIX)),
                 bridge_addr: addr,
                 bridge_token: token,
-                instructions: backend::instructions(colm_agent::SYSTEM_PROMPT),
+                instructions: backend::instructions(colm_agent::SYSTEM_PROMPT, self.web_search),
+                web: self.web_search,
             };
             // 续接历史对话时接着用当时的外部会话号。
             let resume = self
