@@ -291,9 +291,20 @@ pub struct RegressionReport {
 #[derive(Debug, Clone, Serialize)]
 pub struct ClosureCheck {
     pub variable: String,
+    /// 这个诊断量是什么（带单位）：模型读结果时不必猜 `f_xerr`、`f_zerr` 哪个是水哪个是能量。
+    pub meaning: &'static str,
     pub baseline: f64,
     pub candidate: f64,
     pub ok: bool,
+}
+
+/// `f_xerr` 是水量平衡误差，`f_zerr` 是能量平衡误差（`MOD_Hist.F90:656-664`）。
+fn closure_meaning(name: &str) -> &'static str {
+    match name {
+        "f_xerr" => "water balance error [mm/s]",
+        "f_zerr" => "energy balance error [W/m2]",
+        _ => "closure diagnostic",
+    }
 }
 
 /// 闭合允许的上限：基线的十倍，但不低于 1e-6（基线本身常常就是舍入误差量级）。
@@ -354,6 +365,7 @@ pub fn regress(
             if let (Some(&b), Some(&c)) = (before.get(name), after.get(name)) {
                 closure.push(ClosureCheck {
                     variable: name.to_owned(),
+                    meaning: closure_meaning(name),
                     baseline: b,
                     candidate: c,
                     ok: c <= closure_limit(b),
@@ -416,7 +428,7 @@ pub fn judge(kind: ChangeKind, report: &Report, closure_ok: bool) -> (bool, Stri
     if !closure_ok {
         return (
             false,
-            "water or energy closure got worse (f_xerr / f_zerr)".into(),
+            "water balance (f_xerr) or energy balance (f_zerr) got worse".into(),
         );
     }
     let changed = report.differs + report.within_tolerance;

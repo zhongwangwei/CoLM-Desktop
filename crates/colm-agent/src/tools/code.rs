@@ -625,7 +625,7 @@ impl Tool for RegressionCheck {
         "regression_check"
     }
     fn description(&self) -> &'static str {
-        "The regression gate: run a reference case with the baseline (the application's own colm-cli and the currently selected kernel) and with the workspace build, then compare. kind=refactor demands bitwise identical output; kind=physics lists which variables changed and by how much, and fails on NaN/Inf or when water/energy closure (f_xerr, f_zerr) gets worse. Records the regression gate. Approval can be given once per session."
+        "The regression gate: run a reference case with the baseline (the application's own colm-cli and the currently selected kernel) and with the workspace build, then compare. kind=refactor demands bitwise identical output; kind=physics lists which variables changed and by how much, and fails on NaN/Inf or when the water balance error (f_xerr, mm/s) or the energy balance error (f_zerr, W/m2) gets worse. Records the regression gate. Approval can be given once per session."
     }
     fn parameters(&self) -> Value {
         object(json!({

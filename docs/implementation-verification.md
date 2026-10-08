@@ -32184,9 +32184,18 @@ GPP 的均值被 4 个基线 KGE 低于 −0.5 的站拉低（BE-Lon、DE-Geb、
 - 两个 workspace 的 clippy `-D warnings` 与 `fmt --check` 干净。
 
 **没有做 / 没有验证**：
-- **没有让模型真的走一遍**：上面的链路是用 `colm-cli ws-*`（也就是 15 个工具背后的命令）亲手驱动的，工具层用假的 `colm-cli` 做了单元测试；没有用 DeepSeek、Codex 或 Claude Code 跑一轮“助手改一处 Fortran 加对应的 Rust”。
 - **没有在应用里点工作区面板**：只有逻辑测试与静态检查。
 - 只验证了 macOS 的沙箱；Linux 的 `bwrap` 与 Windows（不套沙箱）的路径没有跑过。
 - 演示里没有跑 `oracle` 与 `check-gui` 两类测试（只跑了 `cargo` 两个 crate）。
 - P3（开发工作区的远程版：在任一计算资源上编译、测试、运行、对比）没做。
 - x86_64 Linux 上 Fortran 与 Rust 本来就不逐位一致（第 645 轮），所以在那里 `parity_check` 会先报这个已知差距，已作为后续任务提出。
+
+**真正由助手驱动的一次**（同一轮，补做）：用应用里已配置的 DeepSeek（`deepseek-flash`，数据外发已确认过），我充当界面一侧——用 `colm-agent` 的 stdio 协议发一条任务，看每一张工具卡片和审批卡片，逐条批准（每个都是“批准一次”，没有选“本会话都允许”）。任务：新建工作区 `emis2`，把无雪地表发射率 `emg` 从 0.96 改成 0.95（Fortran 与 Rust 两边一起改），编译、跑 `colm-core` 测试（失败就找原因修好再跑）、对 `/tmp/hc/refcase` 做对齐检查与回归，最后汇报。第一轮 24 步，第二轮（补一步回归）2 步。
+- 助手**自己**找到了与手工演示完全相同的三处代码（`MOD_Thermal.F90`、扩展截留路径 `MOD_Thermal_CanopyPhase_Extended.F90`、Rust 的 `ground_emissivity`），还指出“`default` 预设实际编译的是扩展截留那条路径”，并顺手修正了 `ground_temperature.rs` 注释里的行号。
+- `apply_patch` 先后被拒绝 3 次（补丁的 hunk 行号写错：“the patch does not apply to the current files”），每次都没有改任何文件，助手读了报错后重发；第 4 次起成功。`run_tests` 第一次**不通过**（与手工演示同一个原因：`standard_lct_step_tests.rs` 里写死的 0.96），助手读了失败的测试和 `standard_lct_step.rs` 里的一致性检查，补了第二个补丁（`ground_temperature_tests.rs` 加两处夹具），测试通过。
+- `parity_check`：254 个“变量×文件”逐位一致，与手工结果相同。
+- `regression_check` 第一次失败：我给助手配的基线 `target/debug/colm-cli` 旁边没有 `colm-rs`（只编过 `colm-cli`），工具如实报了清楚的错误（“Rust model engine is missing beside colm-cli”）；助手换了几种办法后用满了单轮 24 步的上限。补齐基线的同伴程序后新开一轮，助手 2 步完成：**通过，166 个变量变了、88 个相同，第一个差异 `f_emis @ step 0`，闭合 4.4677e-16→4.6479e-16 与 3.0672e-10→3.0804e-10，无 NaN**——与手工结果逐项相同。
+- 助手把 `f_xerr`/`f_zerr` 的含义说反了（说成能量/水量；上游 `MOD_Hist.F90:656-664` 是 `f_xerr` 水量 mm/s、`f_zerr` 能量 W/m²）。回归结果里现在每个闭合检查都带 `meaning` 字段，工具描述也写明。
+- 它还主动指出：编译门因为新提交而“过期”，要在新提交上重跑一次 `build_engine`——这正是门槛按提交记录的设计。
+
+**仍没有做**：没有用 Codex 或 Claude Code 后端跑一遍；没有在应用的窗口里点工作区面板（只有逻辑测试与静态检查）。

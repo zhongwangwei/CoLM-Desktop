@@ -256,10 +256,15 @@ fn a_refactor_must_be_bitwise_but_a_physics_change_only_has_to_stay_sane() {
     )
     .unwrap();
     assert!(
-        !worse.ok && worse.verdict.contains("closure"),
+        !worse.ok && worse.verdict.contains("water balance"),
         "{}",
         worse.verdict
     );
+    assert!(worse
+        .closure
+        .iter()
+        .any(|c| c.variable == "f_xerr" && c.meaning == "water balance error [mm/s]"));
+    assert_eq!(closure_meaning("f_zerr"), "energy balance error [W/m2]");
     assert!(!worse.closure.iter().all(|c| c.ok));
 
     // 出现 NaN：直接不通过。
