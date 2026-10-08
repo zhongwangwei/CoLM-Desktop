@@ -49,10 +49,14 @@ export const WORKFLOW = [
     { id: 'params-tracer', page: 'params', t: '示踪剂', d: '示踪过程设置', need: ready, show: processAvailable('params-tracer') },
     { id: 'params-urban', page: 'params', t: '城市过程', d: '城市冠层与人为热', need: ready, show: processAvailable('params-urban') },
   ] },
-  { n: 3, t: '运行', d: '输出与运行', steps: [
+  // AI 参数化在运行前装模型；可选，“下一步”不强制经过它。
+  { n: 3, t: 'AI 参数化', d: '可选：小网络给出物理参数', steps: [
+    { id: 'hybrid', page: 'hybrid', t: 'AI 参数化', d: '可选：导入、检查与训练', need: ready, optional: true },
+  ] },
+  { n: 4, t: '运行', d: '输出与运行', steps: [
     { id: 'run', page: 'run', t: '运行算例', d: '输出、阶段与日志', need: ready },
   ] },
-  { n: 4, key: 'results', collapsible: true, t: '结果分析', d: '浏览、评估与诊断', steps: [
+  { n: 5, key: 'results', collapsible: true, t: '结果分析', d: '浏览、评估与诊断', steps: [
     { id: 'result-overview', page: 'result', t: '分析总览', d: '本次站点与产物状态', need: ready },
     { id: 'result-data', page: 'result', t: '数据浏览', d: '变量、单位与维度', need: ready, show: hasResults },
     { id: 'result-series', page: 'result', t: '时间序列', d: '按站点和变量绘图', need: ready, show: hasResults },
@@ -60,13 +64,13 @@ export const WORKFLOW = [
     { id: 'result-comparison', page: 'result', t: '多站点比较', d: '排名与批量指标', need: ready, show: hasMultipleResults },
     { id: 'result-diagnostics', page: 'result', t: '过程诊断', d: '质量与物理检查', need: ready, show: hasResults },
   ] },
-  { n: 5, t: '不确定性分析', d: 'OAT / LHS 参数扰动', steps: [
+  { n: 6, t: '不确定性分析', d: 'OAT / LHS 参数扰动', steps: [
     { id: 'result-uncertainty', page: 'result', t: '不确定性分析', d: '可选：OAT / LHS 参数扰动', need: studyReady, optional: true },
   ] },
-  { n: 6, t: '参数调优', d: '差分进化与目标函数', steps: [
+  { n: 7, t: '参数调优', d: '差分进化与目标函数', steps: [
     { id: 'result-tuning', page: 'result', t: '参数调优', d: '可选：差分进化与目标函数', need: studyReady, optional: true },
   ] },
-  { n: 7, t: '报告与导出', d: '保存分析结果', steps: [
+  { n: 8, t: '报告与导出', d: '保存分析结果', steps: [
     { id: 'result-export', page: 'result', t: '报告与导出', d: '保存分析结果', need: resultsReady },
   ] },
 ];

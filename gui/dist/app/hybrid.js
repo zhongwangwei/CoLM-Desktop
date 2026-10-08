@@ -7,6 +7,7 @@
 import { invoke, hasBackend } from './ipc.js';
 import { $, appConfirm, status, baseName } from './ui.js';
 import { batchTarget } from './batch.js';
+import { go } from './shell.js';
 import { modelEngine } from './engine.js';
 import { language, translateZh } from './i18n.js';
 
@@ -374,6 +375,12 @@ function wireRunCard() {
   $('hybrid-pick-model').onclick = () => pickInto('hybrid-model-path', 'hybrid-model', 'onnx,json').catch(e => status(e));
   $('hybrid-pick-normalize').onclick = () => pickInto('hybrid-normalize-path', 'hybrid-normalize', 'json').catch(e => status(e));
   $('hybrid-install').onclick = () => installModel().catch(e => status(e?.message || e));
+  // 训练在参数调优里：跳过去并打开“同时训练 AI 参数化”。
+  $('hybrid-go-tuning').onclick = () => {
+    go('result-tuning');
+    const toggle = $('tune-hybrid-on');
+    if (toggle && !toggle.checked) toggle.click();
+  };
   addEventListener('colm:step', () => refreshHybridCard().catch(e => status(e)));
   // 算例勾选与引擎下拉框的 change 冒泡到窗口；在这里统一接，不依赖那两个元素何时建好。
   addEventListener('change', event => {

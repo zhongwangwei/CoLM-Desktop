@@ -827,3 +827,5 @@ body.assistant-open:has(.gate:not(.loading-gate):not([hidden])) .assistant {
 .remote-run-state { margin-left: auto; }
 .remote-run.failed .remote-run-state { color: var(--fail); }
 .remote-run.finished:not(.failed) .remote-run-state { color: var(--pass); }
+.hybrid-train-list { margin: 8px 0 10px; padding-left: 20px; line-height: 1.7; font-size: 13px; }
+.hybrid-train-list li + li { margin-top: 4px; }

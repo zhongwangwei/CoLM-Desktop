@@ -435,36 +435,14 @@
     </section>
 
     <!-- ④ 运行 -->
-    <section class="page" data-step="run" hidden>
-      <div class="work-head"><span class="kicker">第 3 步</span></div>
-      <h1>运行</h1>
-      <p class="sub">设置输出，然后依次运行 <code>mksrfdata</code>、<code>mkinidata</code>、
-        <code>colm</code>。<b>输入没变的阶段会按输入指纹跳过</b>。
-        预热在第 1 步“基本设定”。</p>
-
-      <div class="card">
-        <h3>跑哪些</h3>
-        <div class="ch">勾选决定下方四个运行按钮作用于谁；一个没勾就是本次全部算例。
-          没建过的算例会在运行前自动建。</div>
-        <div id="cases-run" class="listbox"></div>
-      </div>
-
-      <div class="card">
-        <h3>输出</h3>
-        <div class="ch">设置输出频率、目录与重启。先运行时不必翻完几百个输出变量。</div>
-        <div id="output-fields"></div>
-      </div>
-
-      <details class="card fold-card">
-        <summary>输出变量（按需展开）</summary>
-        <div class="ch">选择需要写入 history 的变量；默认收起，避免一次展示过多选项。</div>
-        <div id="hist-fields"></div>
-      </details>
+    <section class="page" data-step="hybrid" hidden>
+      <div class="work-head"><span class="kicker">第 3 步 · AI 参数化（可选）</span></div>
+      <h1>AI 参数化</h1>
+      <p class="sub">用训练好的小网络，按每个 patch 的地表与气候特征给出物理参数（例如 Vcmax25），代替查表值。只有 Rust 引擎能运行；不用这一步的算例照常按纯物理运行。</p>
 
       <div class="card" id="hybrid-card">
-        <h3>AI 参数化</h3>
-        <div class="ch">用训练好的小网络，按每个 patch 的地表特征给出物理参数（例如 Vcmax25），代替查表值。只有 Rust 引擎能运行；没有装模型的算例照常按纯物理运行。下表列出本次运行的算例。</div>
-        <p class="warn mini" id="hybrid-engine-warning" hidden>本次算例里有装了 AI 参数化模型的算例，Fortran 内核运行不了它们。请把“模拟引擎”换成 Rust 引擎，或先移除模型。</p>
+        <h3>本次算例</h3>
+        <div class="ch">下表列出本次的算例：装了哪个模型、检查结果，以及气候特征是否已计算。没有装模型的算例照常按纯物理运行。</div>
         <div id="hybrid-cases" class="result-table-wrap"></div>
         <div id="hybrid-check-result"></div>
         <details class="fold-card hybrid-import">
@@ -497,6 +475,43 @@
       </div>
 
       <div class="card">
+        <h3>训练模型</h3>
+        <div class="ch">两种方式都能得到可以在上面导入的模型。</div>
+        <ul class="hybrid-train-list">
+          <li><b>在参数调优里训练</b>：把网络权重当作调优参数，用差分进化按观测直接训练，可以同时调别的参数。训练好的模型随新算例一起写出。</li>
+          <li><b>两步法</b>（命令行 <code>colm-cli hybrid-fit</code>）：先按站点调出最优参数，再拟合“特征 → 参数”的网络，带留一交叉验证和“必须胜过均值预测”的门槛。界面入口还在做。</li>
+        </ul>
+        <div class="pill-row"><button class="btn-ghost" type="button" id="hybrid-go-tuning">去参数调优训练 →</button></div>
+      </div>
+    </section>
+
+    <section class="page" data-step="run" hidden>
+      <div class="work-head"><span class="kicker">第 4 步</span></div>
+      <h1>运行</h1>
+      <p class="sub">设置输出，然后依次运行 <code>mksrfdata</code>、<code>mkinidata</code>、
+        <code>colm</code>。<b>输入没变的阶段会按输入指纹跳过</b>。
+        预热在第 1 步“基本设定”。</p>
+
+      <div class="card">
+        <h3>跑哪些</h3>
+        <div class="ch">勾选决定下方四个运行按钮作用于谁；一个没勾就是本次全部算例。
+          没建过的算例会在运行前自动建。</div>
+        <div id="cases-run" class="listbox"></div>
+      </div>
+
+      <div class="card">
+        <h3>输出</h3>
+        <div class="ch">设置输出频率、目录与重启。先运行时不必翻完几百个输出变量。</div>
+        <div id="output-fields"></div>
+      </div>
+
+      <details class="card fold-card">
+        <summary>输出变量（按需展开）</summary>
+        <div class="ch">选择需要写入 history 的变量；默认收起，避免一次展示过多选项。</div>
+        <div id="hist-fields"></div>
+      </details>
+
+      <div class="card">
         <h3>开始运行</h3>
         <div class="ch">单阶段按钮会明确重跑该阶段；“运行全部”仍按输入指纹跳过无需重跑的阶段。</div>
         <div class="run-parallel-setting" id="run-target-setting">
@@ -525,6 +540,7 @@
             <option value="fortran">Fortran 内核</option>
           </select>
         </div>
+        <p class="warn mini" id="hybrid-engine-warning" hidden>本次算例里有装了 AI 参数化模型的算例，Fortran 内核运行不了它们。请把“模拟引擎”换成 Rust 引擎，或在第 3 步“AI 参数化”里移除模型。</p>
         <div class="run-parallel-setting" id="mpi-setting">
           <div>
             <label for="mpi-ranks">每个算例的 MPI 进程数</label>
@@ -561,7 +577,7 @@
     <!-- ⑤ 结果 -->
     <section class="page" data-step="result" hidden>
       <div class="flow-pane" data-flow-pane="result-overview">
-        <div class="work-head"><span class="kicker">第 4 步 · 结果分析</span></div>
+        <div class="work-head"><span class="kicker">第 5 步 · 结果分析</span></div>
         <h1>分析总览</h1>
         <p class="sub">本次创建的所有算例集中在这里。旧目录算例和运行页残留勾选不会改变结果范围。</p>
         <div class="result-kpis" id="result-kpis"></div>
@@ -586,7 +602,7 @@
       </div>
 
       <div class="flow-pane" data-flow-pane="result-data" hidden>
-        <div class="work-head"><span class="kicker">第 4 步 · 结果分析</span></div>
+        <div class="work-head"><span class="kicker">第 5 步 · 结果分析</span></div>
         <h1>数据浏览</h1>
         <p class="sub">查看 history 中实际存在的变量、单位、维度与可视化类型，不再局限于固定变量清单。</p>
         <div class="result-context">
@@ -609,7 +625,7 @@
       </div>
 
       <div class="flow-pane" data-flow-pane="result-series" hidden>
-        <div class="work-head"><span class="kicker">第 4 步 · 结果分析</span></div>
+        <div class="work-head"><span class="kicker">第 5 步 · 结果分析</span></div>
         <h1>时间序列</h1>
         <p class="sub">按需读取当前站点和变量；长序列在 sidecar 中保极值降采样，导出仍可使用完整数据。</p>
         <div class="card result-sticky-tools">
@@ -632,7 +648,7 @@
       </div>
 
       <div class="flow-pane" data-flow-pane="result-evaluation" hidden>
-        <div class="work-head"><span class="kicker">第 4 步 · 结果分析</span></div>
+        <div class="work-head"><span class="kicker">第 5 步 · 结果分析</span></div>
         <h1>模型评估</h1>
         <p class="sub">逐站点匹配观测，查看指标、时间序列、散点和残差。缺少观测只影响当前站点。</p>
         <div class="card result-sticky-tools">
@@ -664,7 +680,7 @@
       </div>
 
       <div class="flow-pane" data-flow-pane="result-comparison" hidden>
-        <div class="work-head"><span class="kicker">第 4 步 · 结果分析</span></div>
+        <div class="work-head"><span class="kicker">第 5 步 · 结果分析</span></div>
         <h1>多站点比较</h1>
         <p class="sub">评估本次所有已完成算例。单站点失败不会终止批次，缺失原因会完整保留。</p>
         <div class="card">
@@ -699,7 +715,7 @@
       </div>
 
       <div class="flow-pane" data-flow-pane="result-diagnostics" hidden>
-        <div class="work-head"><span class="kicker">第 4 步 · 结果分析</span></div>
+        <div class="work-head"><span class="kicker">第 5 步 · 结果分析</span></div>
         <h1>过程诊断</h1>
         <p class="sub">检查时间覆盖、缺测、物理范围和能量平衡。缺少所需变量时明确列出缺项，不生成伪结论。</p>
         <div class="result-context">
@@ -710,7 +726,7 @@
       </div>
 
       <div class="flow-pane" data-flow-pane="result-uncertainty" hidden>
-        <div class="work-head"><span class="kicker">第 5 步 · 不确定性分析</span></div>
+        <div class="work-head"><span class="kicker">第 6 步 · 不确定性分析</span></div>
         <h1>不确定性分析</h1>
         <p class="sub">这是基本设定完成后的可选研究流程。生成和运行分析任务不会修改原算例；只有点击“应用到当前算例”才会同步基本设定里的预热。</p>
         <div class="card study-purpose" id="uq-purpose">
@@ -853,7 +869,7 @@
       </div>
 
       <div class="flow-pane" data-flow-pane="result-tuning" hidden>
-        <div class="work-head"><span class="kicker">第 6 步 · 参数调优</span></div>
+        <div class="work-head"><span class="kicker">第 7 步 · 参数调优</span></div>
         <h1>参数调优</h1>
         <p class="sub">这是基本设定完成后的可选研究流程。差分进化会在独立调优任务中搜索参数，不覆盖原算例。</p>
         <div class="card study-purpose" id="tune-purpose">
@@ -1066,7 +1082,7 @@
       </div>
 
       <div class="flow-pane" data-flow-pane="result-export" hidden>
-        <div class="work-head"><span class="kicker">第 7 步 · 报告与导出</span></div>
+        <div class="work-head"><span class="kicker">第 8 步 · 报告与导出</span></div>
         <h1>报告与导出</h1>
         <p class="sub">导出当前分析范围、指标、失败原因和软件署名；不会把未完成站点伪装成零值。</p>
         <div class="card">
