@@ -110,6 +110,46 @@ fn vulnerability_curve_keeps_the_upstream_floor() {
     assert!(vulnerability_derivative(-25_000.0, -100_000.0, 3.0).is_finite());
 }
 
+/// USGS 的城市、水体、裸地三类 `kmax_*0_usgs = 0`、`ck0_usgs = 0`：上游照算（行列式为 0 走 `dx = 0`，
+/// `plc = 2**(-1)`），不是非法输入。这里先前被校验拒绝，USGS 空间算例第 0 步就报错。
+#[test]
+fn zero_hydraulic_conductance_and_shape_follow_the_singular_branch() {
+    let mut input = sample_input();
+    input.maximum_sunlit_leaf_hydraulic_conductance = 0.0;
+    input.maximum_shaded_leaf_hydraulic_conductance = 0.0;
+    input.maximum_xylem_hydraulic_conductance = 0.0;
+    input.maximum_root_hydraulic_conductance = 0.0;
+    input.vulnerability_shape = 0.0;
+    let start = [-25_000.0; VEGETATION_SEGMENTS];
+    let mut state = PlantHydraulicState {
+        vegetation_water_potential_mm: start,
+    };
+    let output = plant_hydraulic_stress(input, &mut state).unwrap();
+    // 叶与木质部：牛顿步为 0；根：由 `getrootqflx_qe2x` 重算。
+    assert_eq!(state.vegetation_water_potential_mm[..3], start[..3]);
+    assert!(state.vegetation_water_potential_mm[3].is_finite());
+    assert_eq!(vulnerability(-25_000.0, -150_000.0, 0.0), 0.5);
+    assert_eq!(vulnerability_derivative(-25_000.0, -150_000.0, 0.0), 0.0);
+    assert!(
+        output.sunlit_transpiration_kg_m2_s.is_finite()
+            && output.sunlit_transpiration_kg_m2_s > 0.0
+    );
+    assert!(output
+        .root_flux_kg_m2_s
+        .iter()
+        .all(|value| value.is_finite()));
+    // 负数仍然拒绝。
+    let mut negative = sample_input();
+    negative.maximum_xylem_hydraulic_conductance = -1.0e-8;
+    assert!(plant_hydraulic_stress(
+        negative,
+        &mut PlantHydraulicState {
+            vegetation_water_potential_mm: start
+        }
+    )
+    .is_err());
+}
+
 fn sample_input() -> PlantHydraulicInput<'static> {
     PlantHydraulicInput {
         node_depth_m: &[0.05, 0.25, 0.7],

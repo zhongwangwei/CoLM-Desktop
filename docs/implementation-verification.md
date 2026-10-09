@@ -32282,8 +32282,19 @@ GPP 的均值被 4 个基线 KGE 低于 −0.5 的站拉低（BE-Lon、DE-Geb、
 
 **城市算例的第二个根因：LAPACK 实现**。第 1 步的城市重启里，短波吸收 `swsun/swsha/sgimp/sgper` 有十几个元素不同，而温度、水分只差两三个——短波计算本身给了不同的位。城市辐射的 `MatrixInverse` 是 `DGETRF + DGETRI`；`colm-lapack` 在 macOS 上 FFI 调 Accelerate，在其它平台上是 **netlib 参考 LAPACK 的逐句移植**（Windows 内核由 MSYS2 构建，链的就是参考实现）。而 T7920 的 conda 环境里 `-llapack -lblas` 解析到 OpenBLAS（`libblas 3.11.0=*_openblas`，内核的 `NEEDED` 直接写成 `libopenblas.so.0`，运行期换不掉）。在 `tools/fenv` 里换成 `libblas=*=*netlib liblapack=*=*netlib`（只改这两个包，3 MB；`libopenblas` 保留，旧内核照旧能跑）重新链接后，城市算例 **178 个变量逐位一致**。`build_kernel.sh` 在 Linux 上编完内核后用 `ldd` 检查：链到 OpenBLAS/MKL/BLIS/ATLAS/FlexiBLAS 时给出警告与换法（只警告不报错，非城市算例不受影响）；对旧内核与新内核各试一次，检测正确。换成 netlib 的内核重跑基础算例，仍是 159 个变量逐位一致。
 
+**第二批**（新编 `latlon`、`latlon-crop`、`latlon-usgs`、`unstructured` 四个内核，都链 netlib、关向量化；编译日志里没有 BLAS 警告）：
+
+| 算例 | 改动 | 变量 | 结果 |
+|---|---|---|---|
+| `ch4` | 珠三角 113–115°E、22–24°N，PFT + BGC + CH4 示踪物（`inundation_mode = 'wetwat'`、`allowlakeprod = .false.`），2 天 | 316 | 逐位一致 |
+| `unstr` | `unstructured` 内核，`mesh-new` 默认非结构网格 | 159 | 逐位一致 |
+| `usgs` | `latlon-usgs` 内核 | 159 | **Rust 起初拒绝运行** → 修后逐位一致 |
+| `crop`、`irrig`、`lulcc`、`month` | 见下 | | 见下 |
+
+**USGS：Rust 的输入校验比上游严。**`colm-rs: patch 0: plant-hydraulic inputs are physically invalid`。逐项打印失败的条件：四个 `kmax` 与 `vulnerability_shape` 都是 0。USGS 地类表（`MOD_Const_LC.F90:296-318`）里城市、水体、裸地三类的 `kmax_*0_usgs` 是 0，`ck0_usgs` 在这三类与冰雪两类是 0；这些斑块仍有一点叶面积，所以会进植物水力。上游照算：`spacAF_twoleaf` 的行列式为 0 走 `dx = 0`，`ck = 0` 时 `plc = 2**(-1)`、`d1plc = 0`，Fortran 跑完、输出没有 NaN。Rust 的求解本来就有同样的分支，只是 `validate` 要求 `> 0`。改为 `>= 0`（负数仍拒绝），加了单元测试 `zero_hydraulic_conductance_and_shape_follow_the_singular_branch`。这不是 x86 特有的问题：以前 Mac 上从没跑过 USGS 空间算例（USGS 只验证过站点 `uoz`）。修后 USGS 空间算例 159 个变量逐位一致；Mac 上 `colm-core` 510 项、`colm-runtime` 186 项通过。
+
 **没做 / 局限**：
-- 以上 9 个算例都是 4×4 网格、最长 5 天；没有跑更长时间（季节、年）、CROP、灌溉、甲烷、LULCC、非结构网格与流域网格。
+- 都是 4×4 网格；没有跑季节、年尺度的长时间积分。流域网格（`catchment`）没测：服务器上没有 `DEF_CatchmentMesh_data`。
 - aarch64 Linux、Windows、Intel Mac 没验证。逐位一致是**每个平台对自己平台的 Fortran**，不保证 Rust 在各平台上结果相同——aarch64 融合、x86 不融合，所以同一算例两个平台差几个 ULP，物理过程会放大它。
 - `colm-runtime` 与 `colm-forcing` 的测试在服务器上缺示例数据（`examples/Forcing/…`），本来就失败，所以 x86 上这两个 crate 的夹具测试是否需要跳过没有验证；`colm-agent` 的测试在服务器上缺离线依赖没能运行。
 - 向量化的 libm 只验证了 x86_64 Linux（glibc libmvec）。用户自己用向量化内核跑 Fortran 是合法的，只是不能再与 Rust 逐位对拍。

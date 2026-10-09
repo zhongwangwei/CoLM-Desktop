@@ -1001,15 +1001,18 @@ fn validate(input: PlantHydraulicInput<'_>, state: PlantHydraulicState) -> Resul
             && input.canopy_top_height_m > 0.0
             && input.maximum_sunlit_leaf_conductance_umol_m2_s > 0.0
             && input.maximum_shaded_leaf_conductance_umol_m2_s > 0.0
-            && input.maximum_sunlit_leaf_hydraulic_conductance > 0.0
-            && input.maximum_shaded_leaf_hydraulic_conductance > 0.0
-            && input.maximum_xylem_hydraulic_conductance > 0.0
-            && input.maximum_root_hydraulic_conductance > 0.0
+            // USGS 地类表（`MOD_Const_LC.F90:296-318`）里城市、水体、裸地三类的 `kmax_*0_usgs`
+            // 是 0，`ck0_usgs` 在这三类与冰雪类是 0。上游照算：`spacAF_twoleaf` 的行列式为 0，
+            // 走 `dx = 0`；`ck = 0` 时 `plc = 2**(-1)`、导数为 0。所以 0 是合法值，只拒绝负数。
+            && input.maximum_sunlit_leaf_hydraulic_conductance >= 0.0
+            && input.maximum_shaded_leaf_hydraulic_conductance >= 0.0
+            && input.maximum_xylem_hydraulic_conductance >= 0.0
+            && input.maximum_root_hydraulic_conductance >= 0.0
             && input.sunlit_leaf_psi50_mm < 0.0
             && input.shaded_leaf_psi50_mm < 0.0
             && input.xylem_psi50_mm < 0.0
             && input.root_psi50_mm < 0.0
-            && input.vulnerability_shape > 0.0
+            && input.vulnerability_shape >= 0.0
             && input.parameters.coarse_root_lateral_length_m > 0.0
             && input.parameters.axial_root_conductivity > 0.0
             && input.parameters.fine_root_carbon_g_c_m2 > 0.0
